@@ -1,3 +1,8 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import styles from './WorldEditor.module.css';
 import { Layers, MapPin, Cpu, Box, FileText, Wrench, ArrowRight, BookOpen, Upload, ChevronLeft, ChevronRight } from 'lucide-react';
@@ -25,6 +30,7 @@ interface City {
     API_PORT: number;
     START_IN_ONLINE_MODE: boolean;
     TIMEZONE: string;
+    LANGUAGE?: string;
     MAP_BACKGROUND_IMAGE?: string | null;
 }
 
@@ -110,10 +116,10 @@ interface ModelChoice {
  * Returns the parsed JSON body on success (true when the body is not JSON), false on error. */
 async function apiCall(url: string, options?: RequestInit): Promise<any> {
     try {
-        const res = await fetch(url, options);
+        const res = await apiFetch(url, options);
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: res.statusText }));
-            let msg = '不明なエラー';
+            let msg = uiText("components.settings.WorldEditor.text001");
             if (Array.isArray(err.detail)) {
                 msg = err.detail.map((e: any) => {
                     const loc = e.loc?.slice(1).join('.') || '?';
@@ -124,14 +130,19 @@ async function apiCall(url: string, options?: RequestInit): Promise<any> {
             } else if (err.detail) {
                 msg = JSON.stringify(err.detail);
             }
-            alert(`エラー:\n${msg}`);
+            alert(uiText("components.settings.WorldEditor.text002", { p1: msg }));
             return false;
         }
-        const data = await res.json().catch(() => null);
-        return data ?? true;
+        const text = await res.text();
+        if (!text) return true;
+        try {
+            return JSON.parse(text);
+        } catch {
+            return true;
+        }
     } catch (e) {
         console.error('API call failed:', url, e);
-        alert('エラー: ネットワークエラー');
+        alert(uiText("components.settings.WorldEditor.text003"));
         return false;
     }
 }
@@ -205,6 +216,7 @@ function useTableList<T>(table: string): TableList<T> {
 
 /** 一覧の下に出すページ送り。1 ページに収まっていても件数は見せる */
 const Pagination = ({ list, onNavigate }: { list: TableList<any>; onNavigate: () => void }) => {
+    useLocale();
     // 総件数が読めた上でゼロ、または件数不明で先頭ページが空 = 見せるものが無い
     if (list.total === 0) return null;
     if (list.total === null && list.offset === 0 && list.rows.length === 0) return null;
@@ -221,28 +233,29 @@ const Pagination = ({ list, onNavigate }: { list: TableList<any>; onNavigate: ()
     };
     return (
         <div className={styles.pager}>
-            <button
+            <button data-i18n="components.settings.WorldEditor.text004 components.settings.WorldEditor.text005"
                 type="button"
                 className={styles.pagerBtn}
                 disabled={!hasPrev || list.loading}
                 onClick={() => go(Math.max(0, list.offset - DB_TABLE_PAGE_SIZE))}
-                aria-label="前のページ"
-            ><ChevronLeft size={14} /> 前へ</button>
-            <span className={styles.pagerStatus}>
-                {first}〜{last} 件目{list.total === null ? '' : ` / 全 ${list.total} 件`}
+                aria-label={uiText("components.settings.WorldEditor.text004")}
+            ><ChevronLeft size={14} />{uiText("components.settings.WorldEditor.text005")}</button>
+            <span data-i18n="components.settings.WorldEditor.text006 components.settings.WorldEditor.text007" className={styles.pagerStatus}>
+                {first}〜{last}{uiText("components.settings.WorldEditor.text006")}{list.total === null ? '' : uiText("components.settings.WorldEditor.text007", { p1: list.total })}
             </span>
-            <button
+            <button data-i18n="components.settings.WorldEditor.text008 components.settings.WorldEditor.text009"
                 type="button"
                 className={styles.pagerBtn}
                 disabled={!hasNext || list.loading}
                 onClick={() => go(list.offset + DB_TABLE_PAGE_SIZE)}
-                aria-label="次のページ"
-            >次へ <ChevronRight size={14} /></button>
+                aria-label={uiText("components.settings.WorldEditor.text008")}
+            >{uiText("components.settings.WorldEditor.text009")}<ChevronRight size={14} /></button>
         </div>
     );
 };
 
 export default function WorldEditor() {
+    useLocale();
     const [subTab, setSubTab] = useState('city');
 
     // Data State — 各タブの一覧はページ送りで読む
@@ -285,21 +298,21 @@ export default function WorldEditor() {
     const handlePlaybookImport = useCallback(async (file: File) => {
         try {
             const text = await file.text();
-            const res = await fetch('/api/world/playbooks/import', {
+            const res = await apiFetch('/api/world/playbooks/import', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ playbook_json: text })
             });
             const data = await res.json();
             if (res.ok) {
-                const actionText = data.action === 'created' ? '新規作成' : '更新';
-                alert(`${actionText}しました: ${data.name}`);
+                const actionText = data.action === 'created' ? uiText("components.settings.WorldEditor.text010") : uiText("components.settings.WorldEditor.text011");
+                alert(uiText("components.settings.WorldEditor.text012", { p1: actionText, p2: data.name }));
                 loadPlaybooks();
             } else {
-                alert(`エラー: ${data.detail || 'インポートに失敗しました'}`);
+                alert(uiText("components.settings.WorldEditor.text013", { p1: data.detail || uiText("common.extra015") }));
             }
         } catch (err) {
-            alert(`エラー: ${err}`);
+            alert(uiText("components.settings.WorldEditor.text014", { p1: err }));
         }
         if (playbookFileInputRef.current) playbookFileInputRef.current.value = '';
     }, []);
@@ -343,18 +356,18 @@ export default function WorldEditor() {
     // Bag は「アイテムの入れ物になっているアイテム」なので、選択肢を作るには
     // 一覧の 1 ページではなく全アイテムから拾う必要がある
     const loadBagOptions = async () => { try { const rows = await fetchAllTableRows<Item>('item'); setBagOptions(rows.filter(i => i.TYPE === 'bag')); } catch (e) { console.error('loadBagOptions failed:', e); } };
-    const loadModels = async () => { try { const res = await fetch('/api/info/models'); if (res.ok) setModelChoices(await res.json()); } catch (e) { console.error('loadModels failed:', e); } };
-    const loadPlaybooks = async () => { try { const res = await fetch('/api/world/playbooks'); if (res.ok) setPlaybooks(await res.json()); } catch (e) { console.error('loadPlaybooks failed:', e); } };
-    const loadAvailablePrompts = async () => { try { const res = await fetch('/api/world/prompts/available'); if (res.ok) setAvailablePrompts(await res.json()); } catch (e) { console.error('loadAvailablePrompts failed:', e); } };
+    const loadModels = async () => { try { const res = await apiFetch('/api/info/models'); if (res.ok) setModelChoices(await res.json()); } catch (e) { console.error('loadModels failed:', e); } };
+    const loadPlaybooks = async () => { try { const res = await apiFetch('/api/world/playbooks'); if (res.ok) setPlaybooks(await res.json()); } catch (e) { console.error('loadPlaybooks failed:', e); } };
+    const loadAvailablePrompts = async () => { try { const res = await apiFetch('/api/world/prompts/available'); if (res.ok) setAvailablePrompts(await res.json()); } catch (e) { console.error('loadAvailablePrompts failed:', e); } };
 
     // --- City Handlers ---
     const handleCitySelect = (city: City) => {
         setSelectedCity(city);
-        setFormData({ name: city.CITYNAME, slug: city.CITY_SLUG, description: city.DESCRIPTION, ui_port: city.UI_PORT, api_port: city.API_PORT, timezone: city.TIMEZONE, online_mode: city.START_IN_ONLINE_MODE, map_background_image: city.MAP_BACKGROUND_IMAGE || '' });
+        setFormData({ name: city.CITYNAME, slug: city.CITY_SLUG, description: city.DESCRIPTION, ui_port: city.UI_PORT, api_port: city.API_PORT, timezone: city.TIMEZONE, language: city.LANGUAGE || 'ja', online_mode: city.START_IN_ONLINE_MODE, map_background_image: city.MAP_BACKGROUND_IMAGE || '' });
     };
     const handleCreateCity = async () => { if (await apiCall('/api/world/cities', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { cityList.load(); setFormData({}); } };
     const handleUpdateCity = async () => { if (await apiCall(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { cityList.load(); } };
-    const handleDeleteCity = async () => { if (confirm("この City を削除しますか？") && await apiCall(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'DELETE' })) { setSelectedCity(null); setFormData({}); cityList.load(); } };
+    const handleDeleteCity = async () => { if (confirm(uiText("components.settings.WorldEditor.text015")) && await apiCall(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'DELETE' })) { setSelectedCity(null); setFormData({}); cityList.load(); } };
 
     // --- Building Handlers ---
     // いま選ばれている Building の ID。紐付け表を読み切る前に別の Building を
@@ -389,7 +402,7 @@ export default function WorldEditor() {
     const handleUpdateBuilding = async () => { if (await apiCall(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...formData, tool_ids: formData.tool_ids || [] }) })) { buildingList.load(); } };
     const handleDeleteBuilding = async () => {
         const deletedId = selectedBuilding!.BUILDINGID;
-        if (confirm("この Building を削除しますか？") && await apiCall(`/api/world/buildings/${deletedId}`, { method: 'DELETE' })) {
+        if (confirm(uiText("components.settings.WorldEditor.text016")) && await apiCall(`/api/world/buildings/${deletedId}`, { method: 'DELETE' })) {
             setSelectedBuilding(null);
             selectedBuildingIdRef.current = null;
             setFormData({});
@@ -415,15 +428,15 @@ export default function WorldEditor() {
         if (!result) return;
         // 保存しなかったモデル設定や、新しい設定に切り替えられなかったことの知らせ (ペルソナ設定の画面と同じ文面)
         if (typeof result === 'object' && typeof result.warning === 'string' && result.warning) {
-            alert(`設定は保存されましたが、警告があります:\n${result.warning}`);
+            alert(uiText("components.settings.WorldEditor.text147", { p1: result.warning }));
         }
         aiList.load();
     };
-    const handleDeleteAI = async () => { if (confirm("このペルソナを削除しますか？") && await apiCall(`/api/world/ais/${selectedAI!.AIID}`, { method: 'DELETE' })) { setSelectedAI(null); setFormData({}); aiList.load(); } };
+    const handleDeleteAI = async () => { if (confirm(uiText("components.settings.WorldEditor.text017")) && await apiCall(`/api/world/ais/${selectedAI!.AIID}`, { method: 'DELETE' })) { setSelectedAI(null); setFormData({}); aiList.load(); } };
     const handleMoveAI = async () => {
         if (!selectedAI || !formData.target_building_name) return;
         if (await apiCall(`/api/world/ais/${selectedAI.AIID}/move`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target_building_name: formData.target_building_name }) })) {
-            alert("移動リクエストを送信しました");
+            alert(uiText("components.settings.WorldEditor.text018"));
         }
     };
 
@@ -434,20 +447,20 @@ export default function WorldEditor() {
     };
     const handleCreateBlueprint = async () => { if (await apiCall('/api/world/blueprints', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { blueprintList.load(); setFormData({}); } };
     const handleUpdateBlueprint = async () => { if (await apiCall(`/api/world/blueprints/${selectedBlueprint!.BLUEPRINT_ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { blueprintList.load(); } };
-    const handleDeleteBlueprint = async () => { if (confirm("この Blueprint を削除しますか？") && await apiCall(`/api/world/blueprints/${selectedBlueprint!.BLUEPRINT_ID}`, { method: 'DELETE' })) { setSelectedBlueprint(null); setFormData({}); blueprintList.load(); } };
+    const handleDeleteBlueprint = async () => { if (confirm(uiText("components.settings.WorldEditor.text019")) && await apiCall(`/api/world/blueprints/${selectedBlueprint!.BLUEPRINT_ID}`, { method: 'DELETE' })) { setSelectedBlueprint(null); setFormData({}); blueprintList.load(); } };
     const handleSpawnBlueprint = async () => {
         if (!selectedBlueprint || !formData.spawn_entity_name || !formData.spawn_building_name) return;
         if (await apiCall(`/api/world/blueprints/${selectedBlueprint.BLUEPRINT_ID}/spawn`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ entity_name: formData.spawn_entity_name, building_name: formData.spawn_building_name })
-        })) { alert("生成しました！"); }
+        })) { alert(uiText("components.settings.WorldEditor.text020")); }
     };
 
     // --- Tool Handlers ---
     const handleToolSelect = (t: Tool) => { setSelectedTool(t); setFormData({ name: t.TOOLNAME, description: t.DESCRIPTION, module_path: t.MODULE_PATH, function_name: t.FUNCTION_NAME }); };
     const handleCreateTool = async () => { if (await apiCall('/api/world/tools', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { toolList.load(); setFormData({}); } };
     const handleUpdateTool = async () => { if (await apiCall(`/api/world/tools/${selectedTool!.TOOLID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { toolList.load(); } };
-    const handleDeleteTool = async () => { if (confirm("このツールを削除しますか？") && await apiCall(`/api/world/tools/${selectedTool!.TOOLID}`, { method: 'DELETE' })) { setSelectedTool(null); setFormData({}); toolList.load(); } };
+    const handleDeleteTool = async () => { if (confirm(uiText("components.settings.WorldEditor.text021")) && await apiCall(`/api/world/tools/${selectedTool!.TOOLID}`, { method: 'DELETE' })) { setSelectedTool(null); setFormData({}); toolList.load(); } };
 
     // --- Item Handlers ---
     const handleItemSelect = async (i: Item) => {
@@ -455,7 +468,7 @@ export default function WorldEditor() {
         selectedItemIdRef.current = i.ITEM_ID;
         // Fetch item details to get owner info
         try {
-            const res = await fetch(`/api/world/items/${i.ITEM_ID}`);
+            const res = await apiFetch(`/api/world/items/${i.ITEM_ID}`);
             if (selectedItemIdRef.current !== i.ITEM_ID) return; // 選び直し済み — 古い応答を捨てる
             if (res.ok) {
                 const details = await res.json();
@@ -480,14 +493,14 @@ export default function WorldEditor() {
     };
     const handleCreateItem = async () => { if (await apiCall('/api/world/items', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { itemList.load(); loadBagOptions(); setFormData({}); } };
     const handleUpdateItem = async () => { if (await apiCall(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })) { itemList.load(); loadBagOptions(); } };
-    const handleDeleteItem = async () => { if (confirm("このアイテムを削除しますか？") && await apiCall(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'DELETE' })) { setSelectedItem(null); setFormData({}); itemList.load(); loadBagOptions(); } };
+    const handleDeleteItem = async () => { if (confirm(uiText("components.settings.WorldEditor.text022")) && await apiCall(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'DELETE' })) { setSelectedItem(null); setFormData({}); itemList.load(); loadBagOptions(); } };
 
     // --- Playbook Handlers ---
     const handlePlaybookSelect = async (pb: Playbook) => {
         selectedPlaybookIdRef.current = pb.id;
         // Fetch full details
         try {
-            const res = await fetch(`/api/world/playbooks/${pb.id}`);
+            const res = await apiFetch(`/api/world/playbooks/${pb.id}`);
             if (selectedPlaybookIdRef.current !== pb.id) return; // 選び直し済み — 古い応答を捨てる
             if (res.ok) {
                 const detail = await res.json();
@@ -515,65 +528,71 @@ export default function WorldEditor() {
             loadPlaybooks();
         }
     };
-    const handleDeletePlaybook = async () => { if (confirm("この Playbook を削除しますか？") && await apiCall(`/api/world/playbooks/${selectedPlaybook!.id}`, { method: 'DELETE' })) { setSelectedPlaybook(null); setFormData({}); loadPlaybooks(); } };
+    const handleDeletePlaybook = async () => { if (confirm(uiText("components.settings.WorldEditor.text023")) && await apiCall(`/api/world/playbooks/${selectedPlaybook!.id}`, { method: 'DELETE' })) { setSelectedPlaybook(null); setFormData({}); loadPlaybooks(); } };
 
 
 
 
     const renderFormActions = (selected: any, create: any, update: any, remove: any) => (
         <div className={styles.actions}>
-            {selected ? <><button className={styles.primaryBtn} onClick={update}>更新</button><button className={styles.dangerBtn} onClick={remove}>削除</button></>
-                : <button className={styles.primaryBtn} onClick={create}>作成</button>}
+            {selected ? <><button data-i18n="components.settings.WorldEditor.text024" className={styles.primaryBtn} onClick={update}>{uiText("components.settings.WorldEditor.text024")}</button><button data-i18n="components.settings.WorldEditor.text025" className={styles.dangerBtn} onClick={remove}>{uiText("components.settings.WorldEditor.text025")}</button></>
+                : <button data-i18n="components.settings.WorldEditor.text026" className={styles.primaryBtn} onClick={create}>{uiText("components.settings.WorldEditor.text026")}</button>}
         </div>
     );
 
     return (
         <div className={styles.container}>
             <div className={styles.tabs}>
-                <button className={`${styles.tab} ${subTab === 'city' ? styles.active : ''}`} onClick={() => { setSubTab('city'); setSelectedCity(null); setFormData({}); }}><MapPin size={16} /> City</button>
-                <button className={`${styles.tab} ${subTab === 'building' ? styles.active : ''}`} onClick={() => { setSubTab('building'); setSelectedBuilding(null); selectedBuildingIdRef.current = null; setFormData({}); }}><Layers size={16} /> Building</button>
-                <button className={`${styles.tab} ${subTab === 'ai' ? styles.active : ''}`} onClick={() => { setSubTab('ai'); setSelectedAI(null); setFormData({}); }}><Cpu size={16} /> ペルソナ</button>
-                <button className={`${styles.tab} ${subTab === 'blueprint' ? styles.active : ''}`} onClick={() => { setSubTab('blueprint'); setSelectedBlueprint(null); setFormData({ entity_type: 'ai' }); }}><FileText size={16} /> Blueprint</button>
-                <button className={`${styles.tab} ${subTab === 'tool' ? styles.active : ''}`} onClick={() => { setSubTab('tool'); setSelectedTool(null); setFormData({}); }}><Wrench size={16} /> ツール</button>
-                <button className={`${styles.tab} ${subTab === 'item' ? styles.active : ''}`} onClick={() => { setSubTab('item'); setSelectedItem(null); setFormData({ item_type: 'object', owner_kind: 'world' }); }}><Box size={16} /> アイテム</button>
-                <button className={`${styles.tab} ${subTab === 'playbook' ? styles.active : ''}`} onClick={() => { setSubTab('playbook'); setSelectedPlaybook(null); setFormData({}); }}><BookOpen size={16} /> Playbook</button>
+                <button className={`${styles.tab} ${subTab === 'city' ? styles.active : ''}`} onClick={() => { setSubTab('city'); setSelectedCity(null); setFormData({}); }}><MapPin size={16} /> {uiText("components.settings.WorldEditor.label001")}</button>
+                <button className={`${styles.tab} ${subTab === 'building' ? styles.active : ''}`} onClick={() => { setSubTab('building'); setSelectedBuilding(null); selectedBuildingIdRef.current = null; setFormData({}); }}><Layers size={16} /> {uiText("components.settings.WorldEditor.label002")}</button>
+                <button data-i18n="components.settings.WorldEditor.text027" className={`${styles.tab} ${subTab === 'ai' ? styles.active : ''}`} onClick={() => { setSubTab('ai'); setSelectedAI(null); setFormData({}); }}><Cpu size={16} /> {uiText("components.settings.WorldEditor.text027")}</button>
+                <button className={`${styles.tab} ${subTab === 'blueprint' ? styles.active : ''}`} onClick={() => { setSubTab('blueprint'); setSelectedBlueprint(null); setFormData({ entity_type: 'ai' }); }}><FileText size={16} /> {uiText("components.settings.WorldEditor.label003")}</button>
+                <button data-i18n="components.settings.WorldEditor.text028" className={`${styles.tab} ${subTab === 'tool' ? styles.active : ''}`} onClick={() => { setSubTab('tool'); setSelectedTool(null); setFormData({}); }}><Wrench size={16} /> {uiText("components.settings.WorldEditor.text028")}</button>
+                <button data-i18n="components.settings.WorldEditor.text029" className={`${styles.tab} ${subTab === 'item' ? styles.active : ''}`} onClick={() => { setSubTab('item'); setSelectedItem(null); setFormData({ item_type: 'object', owner_kind: 'world' }); }}><Box size={16} /> {uiText("components.settings.WorldEditor.text029")}</button>
+                <button className={`${styles.tab} ${subTab === 'playbook' ? styles.active : ''}`} onClick={() => { setSubTab('playbook'); setSelectedPlaybook(null); setFormData({}); }}><BookOpen size={16} /> {uiText("components.settings.WorldEditor.label004")}</button>
             </div>
 
             <div className={styles.content}>
                 {subTab === 'city' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>City 一覧</h3>
+                            <h3 data-i18n="components.settings.WorldEditor.text030">{uiText("components.settings.WorldEditor.text030")}</h3>
                             {cityList.rows.map(c => <div key={c.CITYID} className={`${styles.item} ${selectedCity?.CITYID === c.CITYID ? styles.selected : ''}`} onClick={() => handleCitySelect(c)}>{c.CITYNAME || c.CITY_SLUG}</div>)}
                             <Pagination list={cityList} onNavigate={() => { setSelectedCity(null); setFormData({}); }} />
-                            <button className={styles.newBtn} onClick={() => { setSelectedCity(null); setFormData({}); }}>+ 新規作成</button>
+                            <button data-i18n="components.settings.WorldEditor.text031" className={styles.newBtn} onClick={() => { setSelectedCity(null); setFormData({}); }}>{uiText("components.settings.WorldEditor.text031")}</button>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedCity ? `City を編集` : '新しい City'}</h3>
-                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <h3 data-i18n="components.settings.WorldEditor.text032 components.settings.WorldEditor.text033">{selectedCity ? uiText("components.settings.WorldEditor.text032") : uiText("components.settings.WorldEditor.text033")}</h3>
+                            <Field label={uiText("components.settings.WorldEditor.text034")}><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
                             {/* 内部の識別子は作成時にしか決められない。起動引数・部屋の
                                 BUILDINGID・ペルソナ ID・ログの保存先がこの文字列から
                                 作られるため、後から変えると食い違う
                                 (docs/intent/city_identity.md §4 不変条件 2)。 */}
                             {selectedCity
-                                ? <Field label="内部ID（変更不可）"><Input value={selectedCity.CITY_SLUG} disabled style={{ opacity: 0.7, cursor: 'not-allowed' }} /></Field>
-                                : <Field label="内部ID（英数字・アンダースコアのみ）"><Input value={formData.slug || ''} onChange={(e: any) => setFormData({ ...formData, slug: e.target.value.replace(/[^a-zA-Z0-9_]/g, '') })} /></Field>
+                                ? <Field label={uiText("components.settings.WorldEditor.text035")}><Input value={selectedCity.CITY_SLUG} disabled style={{ opacity: 0.7, cursor: 'not-allowed' }} /></Field>
+                                : <Field label={uiText("components.settings.WorldEditor.text036")}><Input value={formData.slug || ''} onChange={(e: any) => setFormData({ ...formData, slug: e.target.value.replace(/[^a-zA-Z0-9_]/g, '') })} /></Field>
                             }
-                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text037")}><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             <div className={styles.row}>
-                                <Field label="UI ポート"><NumInput value={formData.ui_port || ''} onChange={(e: any) => setFormData({ ...formData, ui_port: parseInt(e.target.value) })} /></Field>
-                                <Field label="API ポート"><NumInput value={formData.api_port || ''} onChange={(e: any) => setFormData({ ...formData, api_port: parseInt(e.target.value) })} /></Field>
+                                <Field label={uiText("components.settings.WorldEditor.text038")}><NumInput value={formData.ui_port || ''} onChange={(e: any) => setFormData({ ...formData, ui_port: parseInt(e.target.value) })} /></Field>
+                                <Field label={uiText("components.settings.WorldEditor.text039")}><NumInput value={formData.api_port || ''} onChange={(e: any) => setFormData({ ...formData, api_port: parseInt(e.target.value) })} /></Field>
                             </div>
-                            <Field label="タイムゾーン"><Input value={formData.timezone || ''} onChange={(e: any) => setFormData({ ...formData, timezone: e.target.value })} /></Field>
-                            {selectedCity && <Field label="街マップの背景画像">
+                            <Field label={uiText("components.settings.WorldEditor.text040")}><Input value={formData.timezone || ''} onChange={(e: any) => setFormData({ ...formData, timezone: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.language")}>
+                                <Select value={formData.language || 'ja'} onChange={(e: any) => setFormData({ ...formData, language: e.target.value })}>
+                                    <option data-i18n="components.settings.WorldEditor.text148" value="ja">{uiText("components.settings.WorldEditor.text148")}</option>
+                                    <option value="en">English</option>
+                                </Select>
+                            </Field>
+                            {selectedCity && <Field label={uiText("components.settings.WorldEditor.text041")}>
                                 <ImageUpload
                                     value={formData.map_background_image || ''}
                                     onChange={(url: string) => setFormData({ ...formData, map_background_image: url })}
                                     uploadEndpoint="hires"
                                 />
-                                <small style={{ color: '#666', fontSize: '0.8rem' }}>City Map モーダルで全Buildingの背景に敷かれる1枚絵（解像度はそのまま、WebPに変換のみ）</small>
+                                <small data-i18n="components.settings.WorldEditor.text042" style={{ color: '#666', fontSize: '0.8rem' }}>{uiText("components.settings.WorldEditor.text042")}</small>
                             </Field>}
-                            {selectedCity && <label><input type="checkbox" checked={formData.online_mode || false} onChange={(e: any) => setFormData({ ...formData, online_mode: e.target.checked })} /> オンラインモードで起動</label>}
+                            {selectedCity && <label data-i18n="components.settings.WorldEditor.text043"><input type="checkbox" checked={formData.online_mode || false} onChange={(e: any) => setFormData({ ...formData, online_mode: e.target.checked })} />{uiText("components.settings.WorldEditor.text043")}</label>}
                             {renderFormActions(selectedCity, handleCreateCity, handleUpdateCity, handleDeleteCity)}
                         </div>
                     </div>
@@ -582,28 +601,28 @@ export default function WorldEditor() {
                 {subTab === 'building' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>Building 一覧</h3>
+                            <h3 data-i18n="components.settings.WorldEditor.text044">{uiText("components.settings.WorldEditor.text044")}</h3>
                             {buildingList.rows.map(b => <div key={b.BUILDINGID} className={`${styles.item} ${selectedBuilding?.BUILDINGID === b.BUILDINGID ? styles.selected : ''}`} onClick={() => handleBuildingSelect(b)}>{b.BUILDINGNAME}</div>)}
                             <Pagination list={buildingList} onNavigate={() => { setSelectedBuilding(null); selectedBuildingIdRef.current = null; setFormData({}); }} />
-                            <button className={styles.newBtn} onClick={() => { setSelectedBuilding(null); selectedBuildingIdRef.current = null; setFormData({}); }}>+ 新規作成</button>
+                            <button data-i18n="components.settings.WorldEditor.text045" className={styles.newBtn} onClick={() => { setSelectedBuilding(null); selectedBuildingIdRef.current = null; setFormData({}); }}>{uiText("components.settings.WorldEditor.text045")}</button>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedBuilding ? `Building を編集` : '新しい Building'}</h3>
-                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <h3 data-i18n="components.settings.WorldEditor.text046 components.settings.WorldEditor.text047">{selectedBuilding ? uiText("components.settings.WorldEditor.text046") : uiText("components.settings.WorldEditor.text047")}</h3>
+                            <Field label={uiText("components.settings.WorldEditor.text048")}><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
                             {selectedBuilding
-                                ? <Field label="ID"><Input value={selectedBuilding.BUILDINGID} disabled style={{ opacity: 0.7, cursor: 'not-allowed' }} /></Field>
-                                : <Field label="ID（任意）"><Input value={formData.building_id || ''} placeholder="空欄で自動生成" onChange={(e: any) => setFormData({ ...formData, building_id: e.target.value })} /></Field>
+                                ? <Field label={uiText("components.settings.WorldEditor.label005")}><Input value={selectedBuilding.BUILDINGID} disabled style={{ opacity: 0.7, cursor: 'not-allowed' }} /></Field>
+                                : <Field label={uiText("components.settings.WorldEditor.text049")}><Input value={formData.building_id || ''} placeholder={uiText("components.settings.WorldEditor.text050")} onChange={(e: any) => setFormData({ ...formData, building_id: e.target.value })} /></Field>
                             }
                             {/* 既存 Building の City 変更は不可 (W7 柱5: 参照 scope を跨ぐため
                                 サーバ側でも拒否する)。編集時は表示のみ。 */}
-                            <Field label="都市"><Select value={formData.city_id || ''} disabled={!!selectedBuilding} style={selectedBuilding ? { opacity: 0.7, cursor: 'not-allowed' } : undefined} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cityOptions.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
+                            <Field label={uiText("components.settings.WorldEditor.text051")}><Select value={formData.city_id || ''} disabled={!!selectedBuilding} style={selectedBuilding ? { opacity: 0.7, cursor: 'not-allowed' } : undefined} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
+                                <option data-i18n="components.settings.WorldEditor.text052" value="">{uiText("components.settings.WorldEditor.text052")}</option>{cityOptions.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
                             <div className={styles.row}>
-                                <Field label="定員"><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
-                                <Field label="インターバル（秒）"><NumInput value={formData.auto_interval || 10} onChange={(e: any) => setFormData({ ...formData, auto_interval: parseInt(e.target.value) })} /></Field>
+                                <Field label={uiText("components.settings.WorldEditor.text053")}><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
+                                <Field label={uiText("components.settings.WorldEditor.text054")}><NumInput value={formData.auto_interval || 10} onChange={(e: any) => setFormData({ ...formData, auto_interval: parseInt(e.target.value) })} /></Field>
                             </div>
-                            {selectedBuilding && <Field label="部屋の様子に表示するアイテム数（空欄で既定の 10 個）">
+                            {selectedBuilding && <Field label={uiText("components.settings.WorldEditor.itemDisplayLimit")}>
                                 <NumInput
                                     min={0}
                                     placeholder="10"
@@ -614,19 +633,19 @@ export default function WorldEditor() {
                                         setFormData({ ...formData, item_display_limit: raw === '' || Number.isNaN(parsed) ? null : parsed });
                                     }}
                                 />
-                                <small className={styles.hint}>この数を超えたアイテムは、最近触られていないものから部屋の様子に出なくなります（物は消えません）。0 にするとアイテムを出しません。</small>
+                                <small data-i18n="components.settings.WorldEditor.itemDisplayLimitHint" className={styles.hint}>{uiText("components.settings.WorldEditor.itemDisplayLimitHint")}</small>
                             </Field>}
-                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
-                            <Field label="システムプロンプト"><TextArea style={{ minHeight: 150 }} value={formData.system_instruction || ''} onChange={(e: any) => setFormData({ ...formData, system_instruction: e.target.value })} /></Field>
-                            {selectedBuilding && <Field label="インテリア画像（ビジュアルコンテキスト）">
+                            <Field label={uiText("components.settings.WorldEditor.text055")}><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text056")}><TextArea style={{ minHeight: 150 }} value={formData.system_instruction || ''} onChange={(e: any) => setFormData({ ...formData, system_instruction: e.target.value })} /></Field>
+                            {selectedBuilding && <Field label={uiText("components.settings.WorldEditor.text057")}>
                                 <ImageUpload
                                     value={formData.image_path || ''}
                                     onChange={(url: string) => setFormData({ ...formData, image_path: url })}
                                 />
-                                <small style={{ color: '#666', fontSize: '0.8rem' }}>LLM のビジュアルコンテキスト用インテリア画像</small>
+                                <small data-i18n="components.settings.WorldEditor.text058" style={{ color: '#666', fontSize: '0.8rem' }}>{uiText("components.settings.WorldEditor.text058")}</small>
                             </Field>}
                             {selectedBuilding && <div className={styles.field}>
-                                <label>追加プロンプトファイル</label>
+                                <label data-i18n="components.settings.WorldEditor.text059">{uiText("components.settings.WorldEditor.text059")}</label>
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                                     {(formData.extra_prompt_files || []).map((file: string, idx: number) => (
                                         <div key={idx} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
@@ -639,7 +658,7 @@ export default function WorldEditor() {
                                                 }}
                                                 style={{ flex: 1 }}
                                             >
-                                                <option value="">プロンプトファイルを選択...</option>
+                                                <option data-i18n="components.settings.WorldEditor.text060" value="">{uiText("components.settings.WorldEditor.text060")}</option>
                                                 {availablePrompts.map(p => <option key={p} value={p}>{p}</option>)}
                                             </Select>
                                             <button
@@ -654,17 +673,15 @@ export default function WorldEditor() {
                                             </button>
                                         </div>
                                     ))}
-                                    <button
+                                    <button data-i18n="components.settings.WorldEditor.text061"
                                         type="button"
                                         onClick={() => setFormData({ ...formData, extra_prompt_files: [...(formData.extra_prompt_files || []), ''] })}
                                         style={{ padding: '0.5rem', background: '#e2e8f0', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-                                    >
-                                        + プロンプトファイルを追加
-                                    </button>
+                                    >{uiText("components.settings.WorldEditor.text061")}</button>
                                 </div>
-                                <small style={{ color: '#666', fontSize: '0.8rem' }}>この Building 内のペルソナ用の追加システムプロンプト</small>
+                                <small data-i18n="components.settings.WorldEditor.text062" style={{ color: '#666', fontSize: '0.8rem' }}>{uiText("components.settings.WorldEditor.text062")}</small>
                             </div>}
-                            {selectedBuilding && <div className={styles.field}><label>ツール</label><div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>{toolOptions.map(t => (<label key={t.TOOLID} style={{ background: '#f1f5f9', padding: '0.25rem' }}><input type="checkbox" checked={(formData.tool_ids || []).includes(t.TOOLID)} onChange={e => { const c = formData.tool_ids || []; if (e.target.checked) setFormData({ ...formData, tool_ids: [...c, t.TOOLID] }); else setFormData({ ...formData, tool_ids: c.filter((id: any) => id !== t.TOOLID) }); }} /> {t.TOOLNAME}</label>))}</div></div>}
+                            {selectedBuilding && <div className={styles.field}><label data-i18n="components.settings.WorldEditor.text063">{uiText("components.settings.WorldEditor.text063")}</label><div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>{toolOptions.map(t => (<label key={t.TOOLID} style={{ background: '#f1f5f9', padding: '0.25rem' }}><input type="checkbox" checked={(formData.tool_ids || []).includes(t.TOOLID)} onChange={e => { const c = formData.tool_ids || []; if (e.target.checked) setFormData({ ...formData, tool_ids: [...c, t.TOOLID] }); else setFormData({ ...formData, tool_ids: c.filter((id: any) => id !== t.TOOLID) }); }} /> {t.TOOLNAME}</label>))}</div></div>}
                             {renderFormActions(selectedBuilding, handleCreateBuilding, handleUpdateBuilding, handleDeleteBuilding)}
                         </div>
                     </div>
@@ -673,67 +690,67 @@ export default function WorldEditor() {
                 {subTab === 'ai' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>ペルソナ一覧</h3>
+                            <h3 data-i18n="components.settings.WorldEditor.text064">{uiText("components.settings.WorldEditor.text064")}</h3>
                             {aiList.rows.map(a => <div key={a.AIID} className={`${styles.item} ${selectedAI?.AIID === a.AIID ? styles.selected : ''}`} onClick={() => handleAISelect(a)}>{a.AINAME}</div>)}
                             <Pagination list={aiList} onNavigate={() => { setSelectedAI(null); setFormData({}); }} />
-                            <button className={styles.newBtn} onClick={() => { setSelectedAI(null); setFormData({ autonomy_enabled: true }); }}>+ 新規作成</button>
+                            <button data-i18n="components.settings.WorldEditor.text065" className={styles.newBtn} onClick={() => { setSelectedAI(null); setFormData({ autonomy_enabled: true }); }}>{uiText("components.settings.WorldEditor.text065")}</button>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedAI ? `ペルソナを編集` : '新しいペルソナ'}</h3>
-                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
-                            <Field label="ホーム都市"><Select value={formData.home_city_id || ''} onChange={(e: any) => setFormData({ ...formData, home_city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cityOptions.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
+                            <h3 data-i18n="components.settings.WorldEditor.text066 components.settings.WorldEditor.text067">{selectedAI ? uiText("components.settings.WorldEditor.text066") : uiText("components.settings.WorldEditor.text067")}</h3>
+                            <Field label={uiText("components.settings.WorldEditor.text068")}><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text069")}><Select value={formData.home_city_id || ''} onChange={(e: any) => setFormData({ ...formData, home_city_id: parseInt(e.target.value) })}>
+                                <option data-i18n="components.settings.WorldEditor.text070" value="">{uiText("components.settings.WorldEditor.text070")}</option>{cityOptions.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
                             {selectedAI && <>
-                                <Field label="デフォルトモデル"><Select value={formData.default_model || ''} onChange={(e: any) => setFormData({ ...formData, default_model: e.target.value })}>
-                                    <option value="">システムデフォルトを使用</option>
+                                <Field label={uiText("components.settings.WorldEditor.text071")}><Select value={formData.default_model || ''} onChange={(e: any) => setFormData({ ...formData, default_model: e.target.value })}>
+                                    <option data-i18n="components.settings.WorldEditor.text072" value="">{uiText("components.settings.WorldEditor.text072")}</option>
                                     {formData.default_model && !modelChoices.some(m => m.id === formData.default_model) && (
-                                        <option value={formData.default_model}>⚠️ 不明: {formData.default_model}</option>
+                                        <option data-i18n="components.settings.WorldEditor.text073" value={formData.default_model}>{uiText("components.settings.WorldEditor.text073")}{formData.default_model}</option>
                                     )}
                                     {modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                 </Select></Field>
-                                <Field label="軽量モデル"><Select value={formData.lightweight_model || ''} onChange={(e: any) => setFormData({ ...formData, lightweight_model: e.target.value })}>
-                                    <option value="">システムデフォルトを使用</option>
+                                <Field label={uiText("components.settings.WorldEditor.text074")}><Select value={formData.lightweight_model || ''} onChange={(e: any) => setFormData({ ...formData, lightweight_model: e.target.value })}>
+                                    <option data-i18n="components.settings.WorldEditor.text075" value="">{uiText("components.settings.WorldEditor.text075")}</option>
                                     {formData.lightweight_model && !modelChoices.some(m => m.id === formData.lightweight_model) && (
-                                        <option value={formData.lightweight_model}>⚠️ 不明: {formData.lightweight_model}</option>
+                                        <option data-i18n="components.settings.WorldEditor.text076" value={formData.lightweight_model}>{uiText("components.settings.WorldEditor.text076")}{formData.lightweight_model}</option>
                                     )}
                                     {modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                 </Select></Field>
-                                <Field label="自律行動">
-                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <Field label={uiText("components.settings.WorldEditor.text077")}>
+                                    <label data-i18n="components.settings.WorldEditor.text078 components.settings.WorldEditor.text079" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                                         <input
                                             type="checkbox"
                                             checked={formData.autonomy_enabled ?? true}
                                             onChange={(e: any) => setFormData({ ...formData, autonomy_enabled: e.target.checked })}
                                         />
-                                        {(formData.autonomy_enabled ?? true) ? '有効（自分から考えて動く）' : '無効（話しかけられるまで待機）'}
+                                        {(formData.autonomy_enabled ?? true) ? uiText("components.settings.WorldEditor.text078") : uiText("components.settings.WorldEditor.text079")}
                                     </label>
                                 </Field>
-                                <Field label="アバター">
+                                <Field label={uiText("components.settings.WorldEditor.text080")}>
                                     <ImageUpload
                                         value={formData.avatar_path || ''}
                                         onChange={(url: string) => setFormData({ ...formData, avatar_path: url })}
                                         circle={true}
                                     />
                                 </Field>
-                                <Field label="外見画像（ビジュアルコンテキスト）">
+                                <Field label={uiText("components.settings.WorldEditor.text081")}>
                                     <ImageUpload
                                         value={formData.appearance_image_path || ''}
                                         onChange={(url: string) => setFormData({ ...formData, appearance_image_path: url })}
                                     />
-                                    <small style={{ color: '#666', fontSize: '0.8rem' }}>LLM のビジュアルコンテキスト用外見画像（アバターとは別）</small>
+                                    <small data-i18n="components.settings.WorldEditor.text082" style={{ color: '#666', fontSize: '0.8rem' }}>{uiText("components.settings.WorldEditor.text082")}</small>
                                 </Field>
                             </>}
-                            <Field label="システムプロンプト"><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
-                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text083")}><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text084")}><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             {renderFormActions(selectedAI, handleCreateAI, handleUpdateAI, handleDeleteAI)}
                             {selectedAI && <div style={{ marginTop: '2rem', borderTop: '1px solid #eee', paddingTop: '1rem' }}>
-                                <h4>ペルソナを移動</h4>
+                                <h4 data-i18n="components.settings.WorldEditor.text085">{uiText("components.settings.WorldEditor.text085")}</h4>
                                 <div className={styles.row}>
                                     <Select value={formData.target_building_name || ''} onChange={(e: any) => setFormData({ ...formData, target_building_name: e.target.value })}>
-                                        <option value="">移動先を選択...</option>{buildingOptions.map(b => <option key={b.BUILDINGID} value={b.BUILDINGNAME}>{b.BUILDINGNAME}</option>)}
+                                        <option data-i18n="components.settings.WorldEditor.text086" value="">{uiText("components.settings.WorldEditor.text086")}</option>{buildingOptions.map(b => <option key={b.BUILDINGID} value={b.BUILDINGNAME}>{b.BUILDINGNAME}</option>)}
                                     </Select>
-                                    <button className={styles.primaryBtn} onClick={handleMoveAI}>移動</button>
+                                    <button data-i18n="components.settings.WorldEditor.text087" className={styles.primaryBtn} onClick={handleMoveAI}>{uiText("components.settings.WorldEditor.text087")}</button>
                                 </div>
                             </div>}
                         </div>
@@ -743,29 +760,29 @@ export default function WorldEditor() {
                 {subTab === 'blueprint' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>Blueprint 一覧</h3>
+                            <h3 data-i18n="components.settings.WorldEditor.text088">{uiText("components.settings.WorldEditor.text088")}</h3>
                             {blueprintList.rows.map(b => <div key={b.BLUEPRINT_ID} className={`${styles.item} ${selectedBlueprint?.BLUEPRINT_ID === b.BLUEPRINT_ID ? styles.selected : ''}`} onClick={() => handleBlueprintSelect(b)}>{b.NAME}</div>)}
                             <Pagination list={blueprintList} onNavigate={() => { setSelectedBlueprint(null); setFormData({ entity_type: 'ai' }); }} />
-                            <button className={styles.newBtn} onClick={() => { setSelectedBlueprint(null); setFormData({ entity_type: 'ai' }); }}>+ 新規作成</button>
+                            <button data-i18n="components.settings.WorldEditor.text089" className={styles.newBtn} onClick={() => { setSelectedBlueprint(null); setFormData({ entity_type: 'ai' }); }}>{uiText("components.settings.WorldEditor.text089")}</button>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedBlueprint ? `Blueprint を編集` : '新しい Blueprint'}</h3>
-                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
-                            <Field label="タイプ"><Input value={formData.entity_type || 'ai'} onChange={(e: any) => setFormData({ ...formData, entity_type: e.target.value })} /></Field>
-                            <Field label="都市"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cityOptions.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
+                            <h3 data-i18n="components.settings.WorldEditor.text090 components.settings.WorldEditor.text091">{selectedBlueprint ? uiText("components.settings.WorldEditor.text090") : uiText("components.settings.WorldEditor.text091")}</h3>
+                            <Field label={uiText("components.settings.WorldEditor.text092")}><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text093")}><Input value={formData.entity_type || 'ai'} onChange={(e: any) => setFormData({ ...formData, entity_type: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text094")}><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
+                                <option data-i18n="components.settings.WorldEditor.text095" value="">{uiText("components.settings.WorldEditor.text095")}</option>{cityOptions.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
-                            <Field label="システムプロンプト"><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
-                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text096")}><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text097")}><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             {renderFormActions(selectedBlueprint, handleCreateBlueprint, handleUpdateBlueprint, handleDeleteBlueprint)}
                             {selectedBlueprint && <div style={{ marginTop: '2rem', borderTop: '1px solid #eee', paddingTop: '1rem' }}>
-                                <h4>エンティティを生成</h4>
-                                <Field label="新しいエンティティ名"><Input value={formData.spawn_entity_name || ''} onChange={(e: any) => setFormData({ ...formData, spawn_entity_name: e.target.value })} /></Field>
+                                <h4 data-i18n="components.settings.WorldEditor.text098">{uiText("components.settings.WorldEditor.text098")}</h4>
+                                <Field label={uiText("components.settings.WorldEditor.text099")}><Input value={formData.spawn_entity_name || ''} onChange={(e: any) => setFormData({ ...formData, spawn_entity_name: e.target.value })} /></Field>
                                 <div className={styles.row}>
                                     <Select value={formData.spawn_building_name || ''} onChange={(e: any) => setFormData({ ...formData, spawn_building_name: e.target.value })}>
-                                        <option value="">Building を選択...</option>{buildingOptions.map(b => <option key={b.BUILDINGID} value={b.BUILDINGNAME}>{b.BUILDINGNAME}</option>)}
+                                        <option data-i18n="components.settings.WorldEditor.text100" value="">{uiText("components.settings.WorldEditor.text100")}</option>{buildingOptions.map(b => <option key={b.BUILDINGID} value={b.BUILDINGNAME}>{b.BUILDINGNAME}</option>)}
                                     </Select>
-                                    <button className={styles.primaryBtn} onClick={handleSpawnBlueprint}>生成</button>
+                                    <button data-i18n="components.settings.WorldEditor.text101" className={styles.primaryBtn} onClick={handleSpawnBlueprint}>{uiText("components.settings.WorldEditor.text101")}</button>
                                 </div>
                             </div>}
                         </div>
@@ -775,17 +792,17 @@ export default function WorldEditor() {
                 {subTab === 'tool' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>ツール一覧</h3>
+                            <h3 data-i18n="components.settings.WorldEditor.text102">{uiText("components.settings.WorldEditor.text102")}</h3>
                             {toolList.rows.map(t => <div key={t.TOOLID} className={`${styles.item} ${selectedTool?.TOOLID === t.TOOLID ? styles.selected : ''}`} onClick={() => handleToolSelect(t)}>{t.TOOLNAME}</div>)}
                             <Pagination list={toolList} onNavigate={() => { setSelectedTool(null); setFormData({}); }} />
-                            <button className={styles.newBtn} onClick={() => { setSelectedTool(null); setFormData({}); }}>+ 新規作成</button>
+                            <button data-i18n="components.settings.WorldEditor.text103" className={styles.newBtn} onClick={() => { setSelectedTool(null); setFormData({}); }}>{uiText("components.settings.WorldEditor.text103")}</button>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedTool ? `ツールを編集` : '新しいツール'}</h3>
-                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
-                            <Field label="モジュールパス"><Input value={formData.module_path || ''} onChange={(e: any) => setFormData({ ...formData, module_path: e.target.value })} /></Field>
-                            <Field label="関数名"><Input value={formData.function_name || ''} onChange={(e: any) => setFormData({ ...formData, function_name: e.target.value })} /></Field>
-                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <h3 data-i18n="components.settings.WorldEditor.text104 components.settings.WorldEditor.text105">{selectedTool ? uiText("components.settings.WorldEditor.text104") : uiText("components.settings.WorldEditor.text105")}</h3>
+                            <Field label={uiText("components.settings.WorldEditor.text106")}><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text107")}><Input value={formData.module_path || ''} onChange={(e: any) => setFormData({ ...formData, module_path: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text108")}><Input value={formData.function_name || ''} onChange={(e: any) => setFormData({ ...formData, function_name: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text109")}><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             {renderFormActions(selectedTool, handleCreateTool, handleUpdateTool, handleDeleteTool)}
                         </div>
                     </div>
@@ -794,49 +811,49 @@ export default function WorldEditor() {
                 {subTab === 'item' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>アイテム一覧</h3>
+                            <h3 data-i18n="components.settings.WorldEditor.text110">{uiText("components.settings.WorldEditor.text110")}</h3>
                             {itemList.rows.map(i => <div key={i.ITEM_ID} className={`${styles.item} ${selectedItem?.ITEM_ID === i.ITEM_ID ? styles.selected : ''}`} onClick={() => handleItemSelect(i)}>{i.NAME}</div>)}
                             <Pagination list={itemList} onNavigate={() => { setSelectedItem(null); setFormData({ item_type: 'picture', owner_kind: 'world' }); }} />
-                            <button className={styles.newBtn} onClick={() => { setSelectedItem(null); setFormData({ item_type: 'picture', owner_kind: 'world' }); }}>+ 新規作成</button>
+                            <button data-i18n="components.settings.WorldEditor.text111" className={styles.newBtn} onClick={() => { setSelectedItem(null); setFormData({ item_type: 'picture', owner_kind: 'world' }); }}>{uiText("components.settings.WorldEditor.text111")}</button>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedItem ? `アイテムを編集` : '新しいアイテム'}</h3>
-                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
-                            <Field label="種別"><Select value={formData.item_type || 'object'} onChange={(e: any) => setFormData({ ...formData, item_type: e.target.value })}>
-                                <option value="picture">画像</option>
-                                <option value="document">ドキュメント</option>
-                                <option value="object">オブジェクト（ファイルなし）</option>
-                                <option value="bag">バッグ（アイテム格納用）</option>
+                            <h3 data-i18n="components.settings.WorldEditor.text112 components.settings.WorldEditor.text113">{selectedItem ? uiText("components.settings.WorldEditor.text112") : uiText("components.settings.WorldEditor.text113")}</h3>
+                            <Field label={uiText("components.settings.WorldEditor.text114")}><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text115")}><Select value={formData.item_type || 'object'} onChange={(e: any) => setFormData({ ...formData, item_type: e.target.value })}>
+                                <option data-i18n="components.settings.WorldEditor.text116" value="picture">{uiText("components.settings.WorldEditor.text116")}</option>
+                                <option data-i18n="components.settings.WorldEditor.text117" value="document">{uiText("components.settings.WorldEditor.text117")}</option>
+                                <option data-i18n="components.settings.WorldEditor.text118" value="object">{uiText("components.settings.WorldEditor.text118")}</option>
+                                <option data-i18n="components.settings.WorldEditor.text119" value="bag">{uiText("components.settings.WorldEditor.text119")}</option>
                             </Select></Field>
                             <div className={styles.row}>
-                                <Field label="所有者">
+                                <Field label={uiText("components.settings.WorldEditor.text120")}>
                                     <Select value={formData.owner_kind || 'world'} onChange={(e: any) => setFormData({ ...formData, owner_kind: e.target.value, owner_id: '' })}>
-                                        <option value="world">ワールド（グローバル）</option>
-                                        <option value="building">Building</option>
-                                        <option value="persona">ペルソナ</option>
-                                        <option value="bag">Bag（バッグ内）</option>
+                                        <option data-i18n="components.settings.WorldEditor.text121" value="world">{uiText("components.settings.WorldEditor.text121")}</option>
+                                        <option value="building">{uiText("components.settings.WorldEditor.label006")}</option>
+                                        <option data-i18n="components.settings.WorldEditor.text122" value="persona">{uiText("components.settings.WorldEditor.text122")}</option>
+                                        <option data-i18n="components.settings.WorldEditor.text123" value="bag">{uiText("components.settings.WorldEditor.text123")}</option>
                                     </Select>
                                 </Field>
                                 {formData.owner_kind === 'building' && (
-                                    <Field label="Building">
+                                    <Field label={uiText("components.settings.WorldEditor.label007")}>
                                         <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
-                                            <option value="">Building を選択...</option>
+                                            <option data-i18n="components.settings.WorldEditor.text124" value="">{uiText("components.settings.WorldEditor.text124")}</option>
                                             {buildingOptions.map(b => <option key={b.BUILDINGID} value={b.BUILDINGID}>{b.BUILDINGNAME}</option>)}
                                         </Select>
                                     </Field>
                                 )}
                                 {formData.owner_kind === 'persona' && (
-                                    <Field label="ペルソナ">
+                                    <Field label={uiText("components.settings.WorldEditor.text125")}>
                                         <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
-                                            <option value="">ペルソナを選択...</option>
+                                            <option data-i18n="components.settings.WorldEditor.text126" value="">{uiText("components.settings.WorldEditor.text126")}</option>
                                             {aiOptions.map(a => <option key={a.AIID} value={a.AIID}>{a.AINAME}</option>)}
                                         </Select>
                                     </Field>
                                 )}
                                 {formData.owner_kind === 'bag' && (
-                                    <Field label="Bag">
+                                    <Field label={uiText("components.settings.WorldEditor.label008")}>
                                         <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
-                                            <option value="">Bagを選択...</option>
+                                            <option data-i18n="components.settings.WorldEditor.text127" value="">{uiText("components.settings.WorldEditor.text127")}</option>
                                             {bagOptions.filter(i => i.ITEM_ID !== selectedItem?.ITEM_ID).map(i => (
                                                 <option key={i.ITEM_ID} value={i.ITEM_ID}>{i.NAME}</option>
                                             ))}
@@ -845,7 +862,7 @@ export default function WorldEditor() {
                                 )}
                             </div>
                             {(formData.item_type === 'picture' || formData.item_type === 'document') && (
-                                <Field label="ファイル">
+                                <Field label={uiText("components.settings.WorldEditor.text128")}>
                                     <FileUpload
                                         value={formData.file_path || null}
                                         onChange={(path, type) => {
@@ -854,18 +871,18 @@ export default function WorldEditor() {
                                         onClear={() => setFormData({ ...formData, file_path: '' })}
                                         acceptImages={formData.item_type === 'picture'}
                                         acceptDocuments={formData.item_type === 'document'}
-                                        placeholder={formData.item_type === 'picture' ? '画像を選択' : 'テキストファイルを選択'}
+                                        placeholder={formData.item_type === 'picture' ? uiText("components.settings.WorldEditor.text129") : uiText("components.settings.WorldEditor.text130")}
                                     />
                                 </Field>
                             )}
-                            <Field label="Description (AI要約)">
+                            <Field label={uiText("components.settings.WorldEditor.text131")}>
                                 <TextArea
                                     value={formData.description || ''}
                                     onChange={(e: any) => setFormData({ ...formData, description: e.target.value })}
-                                    placeholder="空のままでOKファイルから自動生成"
+                                    placeholder={uiText("components.settings.WorldEditor.text132")}
                                 />
                             </Field>
-                            <Field label="State JSON"><TextArea value={formData.state_json || ''} onChange={(e: any) => setFormData({ ...formData, state_json: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.label009")}><TextArea value={formData.state_json || ''} onChange={(e: any) => setFormData({ ...formData, state_json: e.target.value })} /></Field>
                             {renderFormActions(selectedItem, handleCreateItem, handleUpdateItem, handleDeleteItem)}
                         </div>
                     </div>
@@ -874,9 +891,9 @@ export default function WorldEditor() {
                 {subTab === 'playbook' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>Playbook 一覧</h3>
+                            <h3 data-i18n="components.settings.WorldEditor.text133">{uiText("components.settings.WorldEditor.text133")}</h3>
                             {playbooks.map(pb => <div key={pb.id} className={`${styles.item} ${selectedPlaybook?.id === pb.id ? styles.selected : ''}`} onClick={() => handlePlaybookSelect(pb)}>{pb.name}</div>)}
-                            <button className={styles.newBtn} onClick={() => { setSelectedPlaybook(null); setFormData({ scope: 'public', router_callable: false, user_selectable: false, nodes_json: '[]', schema_json: '{"input_schema": [], "start_node": "start"}' }); }}>+ 新規作成</button>
+                            <button data-i18n="components.settings.WorldEditor.text134" className={styles.newBtn} onClick={() => { setSelectedPlaybook(null); setFormData({ scope: 'public', router_callable: false, user_selectable: false, nodes_json: '[]', schema_json: '{"input_schema": [], "start_node": "start"}' }); }}>{uiText("components.settings.WorldEditor.text134")}</button>
                             <div
                                 style={{
                                     marginTop: '1rem',
@@ -884,7 +901,7 @@ export default function WorldEditor() {
                                     paddingTop: '1rem',
                                 }}
                             >
-                                <h4 style={{ marginBottom: '0.5rem', fontSize: '0.9rem' }}>JSONからインポート</h4>
+                                <h4 data-i18n="components.settings.WorldEditor.text135" style={{ marginBottom: '0.5rem', fontSize: '0.9rem' }}>{uiText("components.settings.WorldEditor.text135")}</h4>
                                 <div
                                     style={{
                                         border: `2px dashed ${isPlaybookDragOver ? '#06b6d4' : '#4b5563'}`,
@@ -905,8 +922,8 @@ export default function WorldEditor() {
                                     onDrop={handlePlaybookDrop}
                                 >
                                     <Upload size={20} style={{ opacity: 0.6 }} />
-                                    <span style={{ fontSize: '0.8rem', opacity: 0.7 }}>
-                                        {isPlaybookDragOver ? 'ドロップしてインポート' : 'クリックまたはドロップ'}
+                                    <span data-i18n="components.settings.WorldEditor.text136 components.settings.WorldEditor.text137" style={{ fontSize: '0.8rem', opacity: 0.7 }}>
+                                        {isPlaybookDragOver ? uiText("components.settings.WorldEditor.text136") : uiText("components.settings.WorldEditor.text137")}
                                     </span>
                                     <input
                                         type="file"
@@ -922,20 +939,20 @@ export default function WorldEditor() {
                             </div>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedPlaybook ? `Playbook を編集` : '新しい Playbook'}</h3>
-                            <Field label="名前（小文字、アンダースコア）"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
-                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <h3 data-i18n="components.settings.WorldEditor.text138 components.settings.WorldEditor.text139">{selectedPlaybook ? uiText("components.settings.WorldEditor.text138") : uiText("components.settings.WorldEditor.text139")}</h3>
+                            <Field label={uiText("components.settings.WorldEditor.text140")}><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text141")}><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             <div className={styles.row}>
-                                <Field label="スコープ"><Select value={formData.scope || 'public'} onChange={(e: any) => setFormData({ ...formData, scope: e.target.value })}>
-                                    <option value="public">Public</option><option value="personal">Personal</option><option value="building">Building</option>
+                                <Field label={uiText("components.settings.WorldEditor.text142")}><Select value={formData.scope || 'public'} onChange={(e: any) => setFormData({ ...formData, scope: e.target.value })}>
+                                    <option value="public">{uiText("components.settings.WorldEditor.label010")}</option><option value="personal">{uiText("components.settings.WorldEditor.label011")}</option><option value="building">{uiText("components.settings.WorldEditor.label012")}</option>
                                 </Select></Field>
                             </div>
                             <div className={styles.row}>
-                                <label><input type="checkbox" checked={formData.router_callable || false} onChange={(e: any) => setFormData({ ...formData, router_callable: e.target.checked })} /> ルーターから呼び出し可能</label>
-                                <label style={{ marginLeft: '1rem' }}><input type="checkbox" checked={formData.user_selectable || false} onChange={(e: any) => setFormData({ ...formData, user_selectable: e.target.checked })} /> ユーザー選択可能</label>
+                                <label data-i18n="components.settings.WorldEditor.text143"><input type="checkbox" checked={formData.router_callable || false} onChange={(e: any) => setFormData({ ...formData, router_callable: e.target.checked })} />{uiText("components.settings.WorldEditor.text143")}</label>
+                                <label data-i18n="components.settings.WorldEditor.text144" style={{ marginLeft: '1rem' }}><input type="checkbox" checked={formData.user_selectable || false} onChange={(e: any) => setFormData({ ...formData, user_selectable: e.target.checked })} />{uiText("components.settings.WorldEditor.text144")}</label>
                             </div>
-                            <Field label="スキーマ JSON (input_schema, start_node など)"><TextArea style={{ minHeight: 120, fontFamily: 'monospace' }} value={formData.schema_json || ''} onChange={(e: any) => setFormData({ ...formData, schema_json: e.target.value })} /></Field>
-                            <Field label="ノード JSON"><TextArea style={{ minHeight: 200, fontFamily: 'monospace' }} value={formData.nodes_json || ''} onChange={(e: any) => setFormData({ ...formData, nodes_json: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text145")}><TextArea style={{ minHeight: 120, fontFamily: 'monospace' }} value={formData.schema_json || ''} onChange={(e: any) => setFormData({ ...formData, schema_json: e.target.value })} /></Field>
+                            <Field label={uiText("components.settings.WorldEditor.text146")}><TextArea style={{ minHeight: 200, fontFamily: 'monospace' }} value={formData.nodes_json || ''} onChange={(e: any) => setFormData({ ...formData, nodes_json: e.target.value })} /></Field>
                             {renderFormActions(selectedPlaybook, handleCreatePlaybook, handleUpdatePlaybook, handleDeletePlaybook)}
                         </div>
                     </div>

@@ -37,6 +37,7 @@ class CityCreate(BaseModel):
     ui_port: int
     api_port: int
     timezone: str
+    language: str = "ja"
 
 class CityUpdate(BaseModel):
     # 識別子 (slug) は受け取らない — City 作成後は変更できない (同 §4 不変条件 2)
@@ -48,6 +49,7 @@ class CityUpdate(BaseModel):
     timezone: str
     host_avatar_path: Optional[str] = None
     map_background_image: Optional[str] = None
+    language: Optional[str] = None
 
 class BuildingCreate(BaseModel):
     name: str
@@ -133,6 +135,7 @@ class AICreate(BaseModel):
     system_prompt: str
     home_city_id: int
     ai_id: Optional[str] = None  # Custom ID (optional, auto-generated if not provided)
+    language: Optional[str] = None
 
 class AIUpdate(BaseModel):
     name: str
@@ -149,6 +152,7 @@ class AIUpdate(BaseModel):
     auto_recall_enabled: Optional[bool] = None
     memopedia_index_enabled: Optional[bool] = None
     spell_enabled: Optional[bool] = None
+    language: Optional[str] = None
 
 class AIMove(BaseModel):
     target_building_name: str
@@ -195,11 +199,11 @@ class ItemUpdate(BaseModel):
 # City
 @router.post("/cities")
 def create_city(city: CityCreate, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.create_city(city.slug, city.name, city.description, city.ui_port, city.api_port, city.timezone))
+    return _check_result(manager.create_city(city.slug, city.name, city.description, city.ui_port, city.api_port, city.timezone, language=city.language))
 
 @router.put("/cities/{city_id}")
 def update_city(city_id: int, city: CityUpdate, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.update_city(city_id, city.name, city.description, city.online_mode, city.ui_port, city.api_port, city.timezone, city.host_avatar_path, None, city.map_background_image))
+    return _check_result(manager.update_city(city_id, city.name, city.description, city.online_mode, city.ui_port, city.api_port, city.timezone, city.host_avatar_path, None, city.map_background_image, language=city.language))
 
 @router.patch("/cities/{city_id}/name")
 def update_city_display_name(city_id: int, req: CityDisplayNameUpdate, manager: SAIVerseManager = Depends(get_manager)):
@@ -473,7 +477,7 @@ def get_available_prompts():
 # AI
 @router.post("/ais")
 def create_ai(ai: AICreate, manager: SAIVerseManager = Depends(get_manager)):
-    success, msg, ai_id, room_id = manager.create_ai(ai.name, ai.system_prompt, ai.home_city_id, ai.ai_id)
+    success, msg, ai_id, room_id = manager.create_ai(ai.name, ai.system_prompt, ai.home_city_id, ai.ai_id, language=ai.language)
     if not success:
         raise HTTPException(status_code=400, detail=msg)
     return {"message": msg, "ai_id": ai_id, "room_id": room_id}
@@ -486,7 +490,7 @@ def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_m
     ``warning`` で返す (ペルソナ設定の画面の PUT と同じ形。
     docs/intent/persona_model_selection.md 決まったこと 2・6)。
     """
-    response = _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.autonomy_enabled, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled, autonomous_chronicle_enabled=ai.autonomous_chronicle_enabled, auto_recall_enabled=ai.auto_recall_enabled, memopedia_index_enabled=ai.memopedia_index_enabled, spell_enabled=ai.spell_enabled))
+    response = _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.autonomy_enabled, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled, autonomous_chronicle_enabled=ai.autonomous_chronicle_enabled, auto_recall_enabled=ai.auto_recall_enabled, memopedia_index_enabled=ai.memopedia_index_enabled, spell_enabled=ai.spell_enabled, language=ai.language))
     message = response["message"]
     if "[WARNING:LLM]" in message:
         base, warning = message.split("[WARNING:LLM]", 1)

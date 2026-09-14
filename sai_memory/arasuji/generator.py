@@ -114,6 +114,8 @@ def generate_text_with_empty_retry(
     ``max_attempts`` 未指定時は env ``SAIVERSE_CHRONICLE_EMPTY_RESPONSE_RETRIES``
     (既定 3) を呼び出し時に読む。
     """
+    from saiverse.persona_language import memory_language_messages
+    messages = memory_language_messages(messages, persona_id)
     attempts = max_attempts if max_attempts is not None else empty_response_attempts()
     attempts = max(1, int(attempts))
     last_error: Optional[EmptyResponseError] = None

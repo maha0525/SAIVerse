@@ -441,7 +441,7 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | メソッド | パス | 説明 |
 |---|---|---|
 | POST | `/api/world/ais` |  |
-| PUT | `/api/world/ais/{ai_id}` |  |
+| PUT | `/api/world/ais/{ai_id}` | ペルソナの設定を保存する。 |
 | DELETE | `/api/world/ais/{ai_id}` |  |
 | POST | `/api/world/ais/{ai_id}/move` |  |
 | POST | `/api/world/blueprints` |  |

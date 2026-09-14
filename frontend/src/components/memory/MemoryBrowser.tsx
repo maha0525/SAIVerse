@@ -1,3 +1,10 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Upload, ChevronDown, ChevronUp, Sparkles } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
@@ -74,12 +81,12 @@ function renderContentWithClips(content: string, clips: ClipItem[] | undefined):
     for (const r of ranges) {
         if (r.start > cursor) parts.push(content.slice(cursor, r.start));
         parts.push(
-            <mark
+            <mark data-i18n="components.memory.MemoryBrowser.text001 components.memory.MemoryBrowser.text002"
                 key={r.clip.clip_id}
                 className={styles.markHighlight}
                 title={r.clip.purpose_ref
-                    ? `ペルソナが気に留めた言葉 (${r.clip.purpose_ref})`
-                    : 'ペルソナが気に留めた言葉'}
+                    ? uiText("components.memory.MemoryBrowser.text001", { p1: r.clip.purpose_ref })
+                    : uiText("components.memory.MemoryBrowser.text002")}
             >
                 {content.slice(r.start, r.end)}
             </mark>
@@ -91,6 +98,7 @@ function renderContentWithClips(content: string, clips: ClipItem[] | undefined):
 }
 
 export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
+    useLocale();
     const [threads, setThreads] = useState<ThreadSummary[]>([]);
     const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
     const [messages, setMessages] = useState<MessageItem[]>([]);
@@ -178,7 +186,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
             for (let i = 0; i < ids.length; i += CLIPS_BATCH_LIMIT) {
                 const chunk = ids.slice(i, i + CLIPS_BATCH_LIMIT);
                 try {
-                    const res = await fetch(
+                    const res = await apiFetch(
                         `/api/people/${personaId}/clips?message_ids=${encodeURIComponent(chunk.join(','))}`
                     );
                     if (!res.ok) continue;
@@ -207,7 +215,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     const loadThreads = async () => {
         setIsLoadingThreads(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/threads`);
+            const res = await apiFetch(`/api/people/${personaId}/threads`);
             if (res.ok) {
                 const data = await res.json();
                 setThreads(data);
@@ -228,7 +236,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     const loadMessages = async (threadId: string, pageNum: number) => {
         setIsLoadingMessages(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/threads/${encodeURIComponent(threadId)}/messages?page=${pageNum}&page_size=${pageSize}`);
+            const res = await apiFetch(`/api/people/${personaId}/threads/${encodeURIComponent(threadId)}/messages?page=${pageNum}&page_size=${pageSize}`);
             if (res.ok) {
                 const data = await res.json();
                 setMessages(data.items);
@@ -249,12 +257,12 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
 
     const handleDeleteThread = async (threadId: string, e: React.MouseEvent) => {
         e.stopPropagation();
-        if (!confirm("このスレッドを削除しますか？この操作は取り消せません。")) {
+        if (!confirm(uiText("components.memory.MemoryBrowser.text003"))) {
             return;
         }
 
         try {
-            const res = await fetch(`/api/people/${personaId}/threads/${encodeURIComponent(threadId)}`, {
+            const res = await apiFetch(`/api/people/${personaId}/threads/${encodeURIComponent(threadId)}`, {
                 method: 'DELETE'
             });
             if (res.ok) {
@@ -266,11 +274,11 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     setMessages([]);
                 }
             } else {
-                alert("スレッドの削除に失敗しました");
+                alert(uiText("components.memory.MemoryBrowser.text004"));
             }
         } catch (error) {
             console.error(error);
-            alert("エラーが発生しました");
+            alert(uiText("components.memory.MemoryBrowser.text005"));
         }
     };
 
@@ -278,18 +286,18 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         e.stopPropagation();
 
         try {
-            const res = await fetch(`/api/people/${personaId}/threads/${encodeURIComponent(threadId)}/activate`, {
+            const res = await apiFetch(`/api/people/${personaId}/threads/${encodeURIComponent(threadId)}/activate`, {
                 method: 'PUT'
             });
             if (res.ok) {
                 // Refresh threads to update active status
                 await loadThreads();
             } else {
-                alert("アクティブスレッドの設定に失敗しました");
+                alert(uiText("components.memory.MemoryBrowser.text006"));
             }
         } catch (error) {
             console.error(error);
-            alert("エラーが発生しました");
+            alert(uiText("components.memory.MemoryBrowser.text007"));
         }
     };
 
@@ -303,7 +311,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
 
     const formatTime = (ts: number) => {
         if (!ts) return "";
-        return new Date(ts * 1000).toLocaleString();
+        return new Date(ts * 1000).toLocaleString(getFormatLocale());
     };
 
     const formatDateRange = (first: number | null, last: number | null) => {
@@ -359,7 +367,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 const ts = new Date(editTimestamp).getTime() / 1000;
                 body.created_at = ts;
             }
-            const res = await fetch(`/api/people/${personaId}/messages/${msgId}`, {
+            const res = await apiFetch(`/api/people/${personaId}/messages/${msgId}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
@@ -371,17 +379,17 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 // Refresh current page
                 if (selectedThreadId) loadMessages(selectedThreadId, page);
             } else {
-                alert("メッセージの更新に失敗しました");
+                alert(uiText("components.memory.MemoryBrowser.text008"));
             }
         } catch (e) {
-            alert("エラーが発生しました");
+            alert(uiText("components.memory.MemoryBrowser.text009"));
         }
     };
 
     const handleDeleteMessage = async (msgId: string) => {
-        if (!confirm("このメッセージを削除しますか？")) return;
+        if (!confirm(uiText("components.memory.MemoryBrowser.text010"))) return;
         try {
-            const res = await fetch(`/api/people/${personaId}/messages/${msgId}`, {
+            const res = await apiFetch(`/api/people/${personaId}/messages/${msgId}`, {
                 method: 'DELETE'
             });
             if (res.ok) {
@@ -394,10 +402,10 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     return next;
                 });
             } else {
-                alert("メッセージの削除に失敗しました");
+                alert(uiText("components.memory.MemoryBrowser.text011"));
             }
         } catch (e) {
-            alert("エラーが発生しました");
+            alert(uiText("components.memory.MemoryBrowser.text012"));
         }
     };
 
@@ -415,14 +423,14 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
 
     const handleDeleteSelected = async () => {
         if (selectedIds.size === 0) return;
-        if (!confirm(`${selectedIds.size}件のメッセージを削除しますか？`)) return;
+        if (!confirm(uiText("components.memory.MemoryBrowser.text013", { p1: selectedIds.size }))) return;
 
         const idsToDelete = Array.from(selectedIds);
         let deletedCount = 0;
 
         for (const msgId of idsToDelete) {
             try {
-                const res = await fetch(`/api/people/${personaId}/messages/${msgId}`, {
+                const res = await apiFetch(`/api/people/${personaId}/messages/${msgId}`, {
                     method: 'DELETE'
                 });
                 if (res.ok) {
@@ -480,7 +488,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 body.created_at = new Date(newMsgTimestamp).getTime() / 1000;
             }
 
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/people/${personaId}/threads/${encodeURIComponent(selectedThreadId)}/messages`,
                 {
                     method: 'POST',
@@ -496,11 +504,11 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 if (selectedThreadId) loadMessages(selectedThreadId, -1);
             } else {
                 const err = await res.json().catch(() => ({}));
-                alert(`メッセージの追加に失敗しました: ${err.detail || ''}`)
+                alert(uiText("components.memory.MemoryBrowser.text014", { p1: err.detail || '' }))
             }
         } catch (e) {
             console.error(e);
-            alert("エラーが発生しました");
+            alert(uiText("components.memory.MemoryBrowser.text015"));
         } finally {
             setIsAddingMessage(false);
         }
@@ -510,9 +518,9 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     const handleExportThread = async () => {
         if (!selectedThreadId) return;
         try {
-            const res = await fetch(`/api/people/${personaId}/threads/${encodeURIComponent(selectedThreadId)}/export-native`);
+            const res = await apiFetch(`/api/people/${personaId}/threads/${encodeURIComponent(selectedThreadId)}/export-native`);
             if (!res.ok) {
-                alert("エクスポートに失敗しました");
+                alert(uiText("components.memory.MemoryBrowser.text016"));
                 return;
             }
             const blob = await res.blob();
@@ -539,7 +547,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
             URL.revokeObjectURL(url);
         } catch (error) {
             console.error("Export failed", error);
-            alert("エラーが発生しました");
+            alert(uiText("components.memory.MemoryBrowser.text017"));
         }
     };
 
@@ -571,10 +579,10 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     {thread.suffix}
                 </span>
                 <div className={styles.threadActions}>
-                    <button
+                    <button data-i18n="components.memory.MemoryBrowser.text018"
                         className={styles.deleteThreadBtn}
                         onClick={(e) => handleDeleteThread(thread.thread_id, e)}
-                        title="スレッドを削除"
+                        title={uiText("components.memory.MemoryBrowser.text018")}
                     >
                         <Trash2 size={14} />
                     </button>
@@ -585,11 +593,11 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     {thread.stelis_label || 'Stelis'}
                 </div>
             )}
-            <div className={styles.threadStats}>
-                {[`${thread.message_count ?? 0} 件`, formatThreadDateRange(thread.first_created_at, thread.last_created_at)].filter(Boolean).join(' · ')}
+            <div data-i18n="components.memory.MemoryBrowser.text019" className={styles.threadStats}>
+                {[uiText("components.memory.MemoryBrowser.text019", { p1: thread.message_count ?? 0 }), formatThreadDateRange(thread.first_created_at, thread.last_created_at)].filter(Boolean).join(' · ')}
             </div>
-            <div className={styles.threadPreview}>
-                {thread.preview || "プレビューなし"}
+            <div data-i18n="components.memory.MemoryBrowser.text020" className={styles.threadPreview}>
+                {thread.preview || uiText("components.memory.MemoryBrowser.text020")}
             </div>
         </div>
     );
@@ -598,9 +606,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         <div className={styles.container}>
             {/* Sidebar: Thread List */}
             <div className={`${styles.sidebar} ${!showList ? styles.mobileHidden : ''}`}>
-                <div className={styles.sidebarHeader}>
-                    スレッド一覧
-                </div>
+                <div data-i18n="components.memory.MemoryBrowser.text021" className={styles.sidebarHeader}>{uiText("components.memory.MemoryBrowser.text021")}</div>
                 <div className={styles.threadList}>
                     {isLoadingThreads ? (
                         <div className={styles.emptyState}>
@@ -610,18 +616,18 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                         <>
                             {/* Active Thread Section */}
                             <div className={styles.threadSection}>
-                                <div className={styles.threadSectionHeader}>アクティブスレッド</div>
+                                <div data-i18n="components.memory.MemoryBrowser.text022" className={styles.threadSectionHeader}>{uiText("components.memory.MemoryBrowser.text022")}</div>
                                 {activeThread ? (
                                     renderThreadItem(activeThread)
                                 ) : (
-                                    <div className={styles.noActiveThread}>なし</div>
+                                    <div data-i18n="components.memory.MemoryBrowser.text023" className={styles.noActiveThread}>{uiText("components.memory.MemoryBrowser.text023")}</div>
                                 )}
                             </div>
 
                             {/* Inactive Threads Section */}
                             {inactiveThreads.length > 0 && (
                                 <div className={styles.threadSection}>
-                                    <div className={styles.threadSectionHeader}>その他のスレッド</div>
+                                    <div data-i18n="components.memory.MemoryBrowser.text024" className={styles.threadSectionHeader}>{uiText("components.memory.MemoryBrowser.text024")}</div>
                                     {inactiveThreads.map(renderThreadItem)}
                                 </div>
                             )}
@@ -639,8 +645,8 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     >
                         <ChevronLeft size={20} />
                     </button>
-                    <span className={styles.headerTitle}>
-                        {selectedThreadId || "スレッドを選択"}
+                    <span data-i18n="components.memory.MemoryBrowser.text025" className={styles.headerTitle}>
+                        {selectedThreadId || uiText("components.memory.MemoryBrowser.text025")}
                     </span>
                     {selectedThreadId && firstCreatedAt && lastCreatedAt && (
                         <span className={styles.dateRange}>
@@ -650,19 +656,19 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     <div className={styles.headerActions}>
                         {selectionMode ? (
                             <>
-                                <span className={styles.selectedCount}>{selectedIds.size}件選択中</span>
-                                <button
+                                <span data-i18n="components.memory.MemoryBrowser.text026" className={styles.selectedCount}>{selectedIds.size}{uiText("components.memory.MemoryBrowser.text026")}</span>
+                                <button data-i18n="components.memory.MemoryBrowser.text027"
                                     className={styles.deleteSelectedBtn}
                                     onClick={handleDeleteSelected}
                                     disabled={selectedIds.size === 0}
-                                    title="選択を削除"
+                                    title={uiText("components.memory.MemoryBrowser.text027")}
                                 >
                                     <Trash size={16} />
                                 </button>
-                                <button
+                                <button data-i18n="components.memory.MemoryBrowser.text028"
                                     className={styles.exitSelectBtn}
                                     onClick={handleExitSelectionMode}
-                                    title="選択モードを終了"
+                                    title={uiText("components.memory.MemoryBrowser.text028")}
                                 >
                                     <X size={16} />
                                 </button>
@@ -670,40 +676,38 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                         ) : (
                             <>
                                 {canSetActive && (
-                                    <button
+                                    <button data-i18n="components.memory.MemoryBrowser.text029 components.memory.MemoryBrowser.text030"
                                         className={styles.setActiveHeaderBtn}
                                         onClick={(e) => handleSetActiveThread(selectedThreadId!, e)}
-                                        title="このスレッドをアクティブに設定"
-                                    >
-                                        アクティブに設定
-                                    </button>
+                                        title={uiText("components.memory.MemoryBrowser.text029")}
+                                    >{uiText("components.memory.MemoryBrowser.text030")}</button>
                                 )}
-                                <button
+                                <button data-i18n="components.memory.MemoryBrowser.text031"
                                     className={styles.exportBtn}
                                     onClick={handleExportThread}
-                                    title="スレッドをエクスポート (Native JSON)"
+                                    title={uiText("components.memory.MemoryBrowser.text031")}
                                     disabled={!selectedThreadId}
                                 >
                                     <Upload size={16} />
                                 </button>
-                                <button
+                                <button data-i18n="components.memory.MemoryBrowser.text032"
                                     className={styles.addMsgBtn}
                                     onClick={handleShowAddForm}
-                                    title="メッセージを追加"
+                                    title={uiText("components.memory.MemoryBrowser.text032")}
                                     disabled={!selectedThreadId}
                                 >
                                     <Plus size={16} />
                                 </button>
-                                <button
+                                <button data-i18n="components.memory.MemoryBrowser.text033"
                                     className={styles.selectModeBtn}
                                     onClick={() => setSelectionMode(true)}
-                                    title="メッセージを選択"
+                                    title={uiText("components.memory.MemoryBrowser.text033")}
                                 >
                                     <CheckSquare size={16} />
                                 </button>
                             </>
                         )}
-                        <span className={styles.msgCount}>{totalMessages}件</span>
+                        <span data-i18n="components.memory.MemoryBrowser.text034" className={styles.msgCount}>{totalMessages}{uiText("components.memory.MemoryBrowser.text034")}</span>
                     </div>
                 </div>
 
@@ -711,25 +715,25 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 {showAddForm && (
                     <div className={styles.addMessageForm}>
                         <div className={styles.addFormHeader}>
-                            <span>新しいメッセージを追加</span>
+                            <span data-i18n="components.memory.MemoryBrowser.text035">{uiText("components.memory.MemoryBrowser.text035")}</span>
                             <button onClick={handleCancelAdd} className={styles.cancelAddBtn}>
                                 <X size={16} />
                             </button>
                         </div>
                         <div className={styles.addFormRow}>
-                            <label>ロール:</label>
+                            <label data-i18n="components.memory.MemoryBrowser.text036">{uiText("components.memory.MemoryBrowser.text036")}</label>
                             <select
                                 value={newMsgRole}
                                 onChange={(e) => setNewMsgRole(e.target.value)}
                                 className={styles.roleSelect}
                             >
-                                <option value="user">user</option>
-                                <option value="assistant">assistant</option>
-                                <option value="system">system</option>
+                                <option value="user">{uiText("components.memory.MemoryBrowser.label001")}</option>
+                                <option value="assistant">{uiText("components.memory.MemoryBrowser.label002")}</option>
+                                <option value="system">{uiText("components.memory.MemoryBrowser.label003")}</option>
                             </select>
                         </div>
                         <div className={styles.addFormRow}>
-                            <label>日時:</label>
+                            <label data-i18n="components.memory.MemoryBrowser.text037">{uiText("components.memory.MemoryBrowser.text037")}</label>
                             <input
                                 type="datetime-local"
                                 step="1"
@@ -738,22 +742,20 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                 className={styles.timestampInput}
                             />
                         </div>
-                        <textarea
+                        <textarea data-i18n="components.memory.MemoryBrowser.text038"
                             className={styles.addTextarea}
-                            placeholder="メッセージ内容..."
+                            placeholder={uiText("components.memory.MemoryBrowser.text038")}
                             value={newMsgContent}
                             onChange={(e) => setNewMsgContent(e.target.value)}
                             rows={4}
                         />
                         <div className={styles.addFormActions}>
-                            <button
+                            <button data-i18n="components.memory.MemoryBrowser.text039"
                                 onClick={handleAddMessage}
                                 disabled={!newMsgContent.trim() || isAddingMessage}
                                 className={styles.submitAddBtn}
                             >
-                                {isAddingMessage ? <Loader2 className={styles.loader} size={14} /> : <Plus size={14} />}
-                                追加
-                            </button>
+                                {isAddingMessage ? <Loader2 className={styles.loader} size={14} /> : <Plus size={14} />}{uiText("components.memory.MemoryBrowser.text039")}</button>
                         </div>
                     </div>
                 )}
@@ -766,7 +768,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     ) : messages.length === 0 ? (
                         <div className={styles.emptyState}>
                             <MessageSquare size={48} />
-                            <p>このスレッドにメッセージはありません</p>
+                            <p data-i18n="components.memory.MemoryBrowser.text040">{uiText("components.memory.MemoryBrowser.text040")}</p>
                         </div>
                     ) : (
                         messages.map((msg) => (
@@ -784,11 +786,11 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                         {msg.role}
                                     </span>
                                     {msg.has_thought_signature && (
-                                        <span
+                                        <span data-i18n="components.memory.MemoryBrowser.text041 components.memory.MemoryBrowser.text042"
                                             className={styles.thoughtSignatureIcon}
-                                            title="Thought signature あり"
+                                            title={uiText("components.memory.MemoryBrowser.text041")}
                                             role="img"
-                                            aria-label="Thought signature あり"
+                                            aria-label={uiText("components.memory.MemoryBrowser.text042")}
                                         >
                                             <Sparkles size={12} />
                                         </span>
@@ -805,10 +807,10 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                         <span className={styles.timestamp}>{formatTime(msg.created_at)}</span>
                                         {!editingMsgId && (
                                             <div className={styles.msgActions}>
-                                                <button onClick={() => handleEditStart(msg)} title="編集">
+                                                <button data-i18n="components.memory.MemoryBrowser.text043" onClick={() => handleEditStart(msg)} title={uiText("components.memory.MemoryBrowser.text043")}>
                                                     <Edit2 size={14} />
                                                 </button>
-                                                <button onClick={() => handleDeleteMessage(msg.id)} title="削除" className={styles.deleteBtn}>
+                                                <button data-i18n="components.memory.MemoryBrowser.text044" onClick={() => handleDeleteMessage(msg.id)} title={uiText("components.memory.MemoryBrowser.text044")} className={styles.deleteBtn}>
                                                     <Trash2 size={14} />
                                                 </button>
                                             </div>
@@ -819,7 +821,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                     <details className={styles.thinkingBlock}>
                                         <summary className={styles.thinkingSummary}>
                                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                                            <span>Thought process</span>
+                                            <span>{uiText("components.memory.MemoryBrowser.label004")}</span>
                                         </summary>
                                         <div className={styles.thinkingContent}>
                                             {msg.metadata.reasoning}
@@ -833,7 +835,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                     {editingMsgId === msg.id ? (
                                         <div className={styles.editInterface}>
                                             <div className={styles.editTimestampRow}>
-                                                <label>日時:</label>
+                                                <label data-i18n="components.memory.MemoryBrowser.text045">{uiText("components.memory.MemoryBrowser.text045")}</label>
                                                 <input
                                                     type="datetime-local"
                                                     step="1"
@@ -848,12 +850,10 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                                 onChange={(e) => setEditContent(e.target.value)}
                                             />
                                             <div className={styles.editButtons}>
-                                                <button onClick={() => handleEditSave(msg.id)} className={styles.saveBtn}>
-                                                    <Save size={14} /> 保存
-                                                </button>
-                                                <button onClick={handleEditCancel} className={styles.cancelBtn}>
-                                                    <X size={14} /> キャンセル
-                                                </button>
+                                                <button data-i18n="components.memory.MemoryBrowser.text046" onClick={() => handleEditSave(msg.id)} className={styles.saveBtn}>
+                                                    <Save size={14} />{uiText("components.memory.MemoryBrowser.text046")}</button>
+                                                <button data-i18n="components.memory.MemoryBrowser.text047" onClick={handleEditCancel} className={styles.cancelBtn}>
+                                                    <X size={14} />{uiText("components.memory.MemoryBrowser.text047")}</button>
                                             </div>
                                         </div>
                                     ) : (
@@ -866,14 +866,14 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                     )}
                                 </div>
                                 {overflowingMsgs.has(msg.id) && editingMsgId !== msg.id && (
-                                    <button
+                                    <button data-i18n="components.memory.MemoryBrowser.text048 components.memory.MemoryBrowser.text049"
                                         className={styles.expandBtn}
                                         onClick={() => toggleExpand(msg.id)}
                                     >
                                         {expandedMsgs.has(msg.id) ? (
-                                            <><ChevronUp size={14} /> 折りたたむ</>
+                                            <><ChevronUp size={14} />{uiText("components.memory.MemoryBrowser.text048")}</>
                                         ) : (
-                                            <><ChevronDown size={14} /> もっと見る</>
+                                            <><ChevronDown size={14} />{uiText("components.memory.MemoryBrowser.text049")}</>
                                         )}
                                     </button>
                                 )}
@@ -885,40 +885,39 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 {/* Pagination */}
                 {selectedThreadId && totalMessages > 0 && (
                     <div className={styles.pagination}>
-                        <button
+                        <button data-i18n="components.memory.MemoryBrowser.text050"
                             className={styles.pageButton}
                             disabled={page === 1 || isLoadingMessages}
                             onClick={() => setPage(1)}
-                            title="最初のページ"
+                            title={uiText("components.memory.MemoryBrowser.text050")}
                         >
                             <ChevronsLeft size={16} />
                         </button>
-                        <button
+                        <button data-i18n="components.memory.MemoryBrowser.text051"
                             className={styles.pageButton}
                             disabled={page === 1 || isLoadingMessages}
                             onClick={() => setPage(p => Math.max(1, p - 1))}
-                            title="前のページ"
+                            title={uiText("components.memory.MemoryBrowser.text051")}
                         >
                             <ChevronLeft size={16} />
                         </button>
 
-                        <span className={styles.pageInfo}>
-                            {page} / {totalPages} ページ
-                        </span>
+                        <span data-i18n="components.memory.MemoryBrowser.text052" className={styles.pageInfo}>
+                            {page} / {totalPages}{uiText("components.memory.MemoryBrowser.text052")}</span>
 
-                        <button
+                        <button data-i18n="components.memory.MemoryBrowser.text053"
                             className={styles.pageButton}
                             disabled={page >= totalPages || isLoadingMessages}
                             onClick={() => setPage(p => p + 1)}
-                            title="次のページ"
+                            title={uiText("components.memory.MemoryBrowser.text053")}
                         >
                             <ChevronRight size={16} />
                         </button>
-                        <button
+                        <button data-i18n="components.memory.MemoryBrowser.text054"
                             className={styles.pageButton}
                             disabled={page >= totalPages || isLoadingMessages}
                             onClick={() => setPage(-1)} // Request last page
-                            title="最後のページ"
+                            title={uiText("components.memory.MemoryBrowser.text054")}
                         >
                             <ChevronsRight size={16} />
                         </button>

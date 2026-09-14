@@ -1,4 +1,9 @@
 'use client';
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { X, Copy, CheckCircle, XCircle, Loader, ExternalLink } from 'lucide-react';
@@ -36,6 +41,7 @@ const POLL_INTERVAL_MS = 2000;
  * 「コードを見せる」「進行状態を映す」だけを行う。トークンはブラウザに来ない。
  */
 export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
+    useLocale();
     const [status, setStatus] = useState<LoginStatus>({ state: 'idle' });
     const [startError, setStartError] = useState<string | null>(null);
     const [copied, setCopied] = useState(false);
@@ -61,7 +67,7 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
     }, []);
 
     const sendCancel = useCallback((lease: LoginLease) => {
-        fetch('/api/codex-auth/login/cancel', {
+        apiFetch('/api/codex-auth/login/cancel', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(lease),
@@ -90,11 +96,11 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
         const mySeq = openSeqRef.current;
         (async () => {
             try {
-                const res = await fetch('/api/codex-auth/login/start', { method: 'POST' });
+                const res = await apiFetch('/api/codex-auth/login/start', { method: 'POST' });
                 if (!res.ok) {
                     const body = await res.json().catch(() => null);
                     if (mySeq === openSeqRef.current) {
-                        setStartError(body?.detail || `ログイン開始に失敗しました (HTTP ${res.status})`);
+                        setStartError(body?.detail || uiText("components.settings.CodexLoginModal.text001", { p1: res.status }));
                     }
                     return;
                 }
@@ -113,7 +119,7 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
                 setStatus(data);
             } catch (e) {
                 if (mySeq === openSeqRef.current) {
-                    setStartError(`ログイン開始に失敗しました: ${e}`);
+                    setStartError(uiText("components.settings.CodexLoginModal.text002", { p1: e }));
                 }
             }
         })();
@@ -152,7 +158,7 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
         const myAttempt = status.attempt_id;
         timerRef.current = setInterval(async () => {
             try {
-                const res = await fetch('/api/codex-auth/login/status');
+                const res = await apiFetch('/api/codex-auth/login/status');
                 if (mySeq !== openSeqRef.current) return;
                 if (!res.ok) return;
                 const next: LoginStatus = await res.json();
@@ -197,8 +203,8 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
         <ModalOverlay onClose={handleClose}>
             <div className={styles.modal}>
                 <div className={styles.header}>
-                    <h3>ChatGPT アカウントでログイン</h3>
-                    <button className={styles.closeBtn} onClick={handleClose} aria-label="閉じる">
+                    <h3 data-i18n="components.settings.CodexLoginModal.text003">{uiText("components.settings.CodexLoginModal.text003")}</h3>
+                    <button data-i18n="components.settings.CodexLoginModal.text004" className={styles.closeBtn} onClick={handleClose} aria-label={uiText("components.settings.CodexLoginModal.text004")}>
                         <X size={18} />
                     </button>
                 </div>
@@ -206,29 +212,25 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
                     {startError ? (
                         <div className={styles.errorBox}>
                             <XCircle size={16} /> {startError}
-                            <button className={styles.retryBtn} onClick={startLogin}>やり直す</button>
+                            <button data-i18n="components.settings.CodexLoginModal.text005" className={styles.retryBtn} onClick={startLogin}>{uiText("components.settings.CodexLoginModal.text005")}</button>
                         </div>
                     ) : status.state === 'success' ? (
                         <div className={styles.successBox}>
                             <CheckCircle size={20} />
                             <div>
-                                <div className={styles.successTitle}>ログインしました</div>
-                                <div className={styles.hint}>
-                                    Codex サブスク経由のモデルがこのまま使えます。
-                                </div>
+                                <div data-i18n="components.settings.CodexLoginModal.text006" className={styles.successTitle}>{uiText("components.settings.CodexLoginModal.text006")}</div>
+                                <div data-i18n="components.settings.CodexLoginModal.text007" className={styles.hint}>{uiText("components.settings.CodexLoginModal.text007")}</div>
                             </div>
                         </div>
                     ) : status.state === 'error' ? (
-                        <div className={styles.errorBox}>
-                            <XCircle size={16} /> {status.error || 'ログインに失敗しました。'}
-                            <button className={styles.retryBtn} onClick={startLogin}>やり直す</button>
+                        <div data-i18n="components.settings.CodexLoginModal.text008" className={styles.errorBox}>
+                            <XCircle size={16} /> {status.error || uiText("components.settings.CodexLoginModal.text008")}
+                            <button data-i18n="components.settings.CodexLoginModal.text009" className={styles.retryBtn} onClick={startLogin}>{uiText("components.settings.CodexLoginModal.text009")}</button>
                         </div>
                     ) : status.state === 'waiting' ? (
                         <>
                             <ol className={styles.steps}>
-                                <li>
-                                    下のリンクをブラウザで開く（スマホでも可）
-                                    <div>
+                                <li data-i18n="components.settings.CodexLoginModal.text010">{uiText("components.settings.CodexLoginModal.text010")}<div>
                                         <a
                                             className={styles.verifyLink}
                                             href={status.verification_url}
@@ -239,27 +241,22 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
                                         </a>
                                     </div>
                                 </li>
-                                <li>
-                                    このコードを入力する
-                                    <div className={styles.codeRow}>
+                                <li data-i18n="components.settings.CodexLoginModal.text011">{uiText("components.settings.CodexLoginModal.text011")}<div className={styles.codeRow}>
                                         <span className={styles.userCode}>{status.user_code}</span>
-                                        <button className={styles.copyBtn} onClick={copyCode}>
+                                        <button data-i18n="components.settings.CodexLoginModal.text012 components.settings.CodexLoginModal.text013" className={styles.copyBtn} onClick={copyCode}>
                                             {copied ? <CheckCircle size={14} /> : <Copy size={14} />}
-                                            {copied ? 'コピーしました' : 'コピー'}
+                                            {copied ? uiText("components.settings.CodexLoginModal.text012") : uiText("components.settings.CodexLoginModal.text013")}
                                         </button>
                                     </div>
                                 </li>
-                                <li>ChatGPT アカウントでログインを済ませる</li>
+                                <li data-i18n="components.settings.CodexLoginModal.text014">{uiText("components.settings.CodexLoginModal.text014")}</li>
                             </ol>
-                            <div className={styles.waitingRow}>
-                                <Loader size={14} className={styles.spinner} />
-                                ログインの完了を待っています…（この画面は開いたままで大丈夫です）
-                            </div>
+                            <div data-i18n="components.settings.CodexLoginModal.text015" className={styles.waitingRow}>
+                                <Loader size={14} className={styles.spinner} />{uiText("components.settings.CodexLoginModal.text015")}</div>
                         </>
                     ) : (
-                        <div className={styles.waitingRow}>
-                            <Loader size={14} className={styles.spinner} /> 準備中…
-                        </div>
+                        <div data-i18n="components.settings.CodexLoginModal.text016" className={styles.waitingRow}>
+                            <Loader size={14} className={styles.spinner} />{uiText("components.settings.CodexLoginModal.text016")}</div>
                     )}
                 </div>
             </div>

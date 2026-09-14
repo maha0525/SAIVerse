@@ -1,4 +1,9 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { Home as HomeIcon, X, Edit3, Save, Image as ImageIcon, Loader2, Trash2, ArrowUp, DoorOpen, Pencil, Check } from 'lucide-react';
@@ -99,6 +104,7 @@ function pseudoBuildingPosition(id: string, idx: number, total: number): { x: nu
 }
 
 export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTrigger, onClose }: CityMapProps) {
+    useLocale();
     const [data, setData] = useState<CityMapResponse | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [selectedPersona, setSelectedPersona] = useState<Occupant | null>(null);
@@ -188,7 +194,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             const url = scope
                 ? `/api/info/city-map?region_id=${encodeURIComponent(scope)}`
                 : '/api/info/city-map';
-            const res = await fetch(url);
+            const res = await apiFetch(url);
             if (!res.ok) {
                 setError(`Failed to load city map (${res.status})`);
                 return;
@@ -201,7 +207,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             setError(null);
         } catch (e) {
             console.error('CityMap fetch error', e);
-            setError('街マップの取得に失敗しました');
+            setError(uiText("components.CityMap.text001"));
         }
     };
 
@@ -537,7 +543,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
         if (!file) return;
         const patchUrl = bgPatchUrl();
         if (!patchUrl) {
-            alert('City ID が未取得です');
+            alert(uiText("components.CityMap.text002"));
             return;
         }
         setIsBgUploading(true);
@@ -545,26 +551,26 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             // 1) WebP変換のみの hires エンドポイントへアップロード
             const fd = new FormData();
             fd.append('file', file);
-            const upRes = await fetch('/api/media/upload-hires', { method: 'POST', body: fd });
+            const upRes = await apiFetch('/api/media/upload-hires', { method: 'POST', body: fd });
             if (!upRes.ok) {
-                alert('画像のアップロードに失敗しました');
+                alert(uiText("components.CityMap.text003"));
                 return;
             }
             const upJson = await upRes.json();
             // 2) 背景画像だけ PATCH で即時更新
-            const patchRes = await fetch(patchUrl, {
+            const patchRes = await apiFetch(patchUrl, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ map_background_image: upJson.url }),
             });
             if (!patchRes.ok) {
-                alert(`背景の保存に失敗しました (${patchRes.status})`);
+                alert(uiText("components.CityMap.text004", { p1: patchRes.status }));
                 return;
             }
             await fetchData();
         } catch (err) {
             console.error('Background change error', err);
-            alert('背景の更新に失敗しました');
+            alert(uiText("components.CityMap.text005"));
         } finally {
             setIsBgUploading(false);
             if (bgFileInputRef.current) bgFileInputRef.current.value = '';
@@ -574,15 +580,15 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
     const handleBgClear = async () => {
         const patchUrl = bgPatchUrl();
         if (!patchUrl) return;
-        if (!confirm('マップの背景画像を削除しますか？')) return;
+        if (!confirm(uiText("components.CityMap.text006"))) return;
         try {
-            const patchRes = await fetch(patchUrl, {
+            const patchRes = await apiFetch(patchUrl, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ map_background_image: null }),
             });
             if (!patchRes.ok) {
-                alert(`背景の削除に失敗しました (${patchRes.status})`);
+                alert(uiText("components.CityMap.text007", { p1: patchRes.status }));
                 return;
             }
             await fetchData();
@@ -601,7 +607,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
         if (cityIdRef == null) return;
         const next = cityNameDraft.trim();
         if (!next) {
-            alert('街の名前を入力してください');
+            alert(uiText("components.CityMap.text008"));
             return;
         }
         if (next === (data?.city_name ?? '')) {
@@ -610,20 +616,20 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
         }
         setIsSavingCityName(true);
         try {
-            const res = await fetch(`/api/world/cities/${cityIdRef}/name`, {
+            const res = await apiFetch(`/api/world/cities/${cityIdRef}/name`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name: next }),
             });
             if (!res.ok) {
-                alert(`街の名前の保存に失敗しました (${res.status})`);
+                alert(uiText("components.CityMap.text009", { p1: res.status }));
                 return;
             }
             setIsEditingCityName(false);
             await fetchData();
         } catch (err) {
             console.error('City name update error', err);
-            alert('街の名前の更新に失敗しました');
+            alert(uiText("components.CityMap.text010"));
         } finally {
             setIsSavingCityName(false);
         }
@@ -641,13 +647,13 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
         }
         setIsSaving(true);
         try {
-            const res = await fetch('/api/world/buildings/positions', {
+            const res = await apiFetch('/api/world/buildings/positions', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ positions }),
             });
             if (!res.ok) {
-                alert(`保存に失敗しました (${res.status})`);
+                alert(uiText("components.CityMap.text011", { p1: res.status }));
                 return;
             }
             setEditedPositions({});
@@ -655,7 +661,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             await fetchData();
         } catch (e) {
             console.error('Save positions error', e);
-            alert('保存に失敗しました');
+            alert(uiText("components.CityMap.text012"));
         } finally {
             setIsSaving(false);
         }
@@ -705,20 +711,20 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             {(onClose || !isEditMode) && (
                 <div className={styles.headerControls}>
                     {onClose && (
-                        <button
+                        <button data-i18n="components.CityMap.text013 components.CityMap.text014"
                             className={styles.closeBtn}
                             onClick={onClose}
-                            aria-label="街マップを閉じる"
-                            title="閉じる (Esc)"
+                            aria-label={uiText("components.CityMap.text013")}
+                            title={uiText("components.CityMap.text014")}
                         >
                             <X size={18} />
                         </button>
                     )}
                     {!isEditMode && (
-                        <button
+                        <button data-i18n="components.CityMap.text015"
                             className={styles.editToggleBtn}
                             onClick={() => setIsEditMode(true)}
-                            title="配置を編集する"
+                            title={uiText("components.CityMap.text015")}
                         >
                             <Edit3 size={16} />
                         </button>
@@ -727,8 +733,8 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             )}
             {isEditMode ? (
                 <div className={`${styles.titleBar} ${styles.editBar}`}>
-                    <div className={styles.editLabel}>
-                        <Edit3 size={14} /> 配置編集中{editedCount > 0 && ` · ${editedCount}件変更`}
+                    <div data-i18n="components.CityMap.text016 components.CityMap.text017" className={styles.editLabel}>
+                        <Edit3 size={14} />{uiText("components.CityMap.text016")}{editedCount > 0 && uiText("components.CityMap.text017", { p1: editedCount })}
                     </div>
                     <div className={styles.editActions}>
                         <input
@@ -739,52 +745,50 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                             onChange={handleBgFileChange}
                         />
                         {data?.map_background_image && (
-                            <div className={styles.bgThumbWrap} title="現在の背景画像">
+                            <div data-i18n="components.CityMap.text018" className={styles.bgThumbWrap} title={uiText("components.CityMap.text018")}>
                                 <img src={data.map_background_image} alt="" className={styles.bgThumb} />
-                                <button
+                                <button data-i18n="components.CityMap.text019"
                                     className={styles.bgThumbClear}
                                     onClick={handleBgClear}
-                                    title="背景画像を削除"
+                                    title={uiText("components.CityMap.text019")}
                                     disabled={isBgUploading}
                                 >
                                     <Trash2 size={11} />
                                 </button>
                             </div>
                         )}
-                        <button
+                        <button data-i18n="components.CityMap.text020 components.CityMap.text021 components.CityMap.text022 components.CityMap.text023"
                             className={styles.editBgBtn}
                             onClick={handleBgUploadClick}
                             disabled={isBgUploading}
-                            title={data?.map_background_image ? '背景画像を変更' : '背景画像を設定'}
+                            title={data?.map_background_image ? uiText("components.CityMap.text020") : uiText("components.CityMap.text021")}
                         >
                             {isBgUploading
                                 ? <Loader2 size={14} className={styles.spin} />
                                 : <ImageIcon size={14} />
                             }
-                            {' '}{data?.map_background_image ? '背景を変更' : '背景を設定'}
+                            {' '}{data?.map_background_image ? uiText("components.CityMap.text022") : uiText("components.CityMap.text023")}
                         </button>
-                        <button
+                        <button data-i18n="components.CityMap.text024"
                             className={styles.editCancelBtn}
                             onClick={cancelEdit}
                             disabled={isSaving}
-                        >
-                            キャンセル
-                        </button>
-                        <button
+                        >{uiText("components.CityMap.text024")}</button>
+                        <button data-i18n="components.CityMap.text025 components.CityMap.text026"
                             className={styles.editSaveBtn}
                             onClick={savePositions}
                             disabled={isSaving}
                         >
-                            <Save size={14} /> {isSaving ? '保存中...' : '保存'}
+                            <Save size={14} /> {isSaving ? uiText("components.CityMap.text025") : uiText("components.CityMap.text026")}
                         </button>
                     </div>
                 </div>
             ) : (
                 <div className={styles.titleBar}>
                     {scopeRegionId && (
-                        <button
+                        <button data-i18n="components.CityMap.text027 components.CityMap.text028"
                             onClick={() => navigateScope(data?.parent_scope_region_id ?? null)}
-                            title="上の階層へ戻る"
+                            title={uiText("components.CityMap.text027")}
                             style={{
                                 background: 'rgba(255,255,255,0.08)',
                                 border: '1px solid rgba(255,255,255,0.25)',
@@ -793,8 +797,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                                 alignItems: 'center', gap: 4, marginBottom: 4,
                             }}
                         >
-                            <ArrowUp size={14} /> 上の階層へ
-                        </button>
+                            <ArrowUp size={14} />{uiText("components.CityMap.text028")}</button>
                     )}
                     {scopeRegionId ? (
                         <h2 className={styles.title}>
@@ -802,7 +805,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                         </h2>
                     ) : isEditingCityName ? (
                         <div className={styles.titleRow}>
-                            <input
+                            <input data-i18n="components.CityMap.text029"
                                 className={styles.titleInput}
                                 value={cityNameDraft}
                                 onChange={(e) => setCityNameDraft(e.target.value)}
@@ -812,22 +815,22 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                                 }}
                                 disabled={isSavingCityName}
                                 maxLength={64}
-                                aria-label="街の名前"
+                                aria-label={uiText("components.CityMap.text029")}
                                 autoFocus
                             />
-                            <button
+                            <button data-i18n="components.CityMap.text030"
                                 className={styles.titleIconBtn}
                                 onClick={saveCityName}
                                 disabled={isSavingCityName}
-                                title="保存"
+                                title={uiText("components.CityMap.text030")}
                             >
                                 {isSavingCityName ? <Loader2 size={15} className={styles.spin} /> : <Check size={15} />}
                             </button>
-                            <button
+                            <button data-i18n="components.CityMap.text031"
                                 className={styles.titleIconBtn}
                                 onClick={() => setIsEditingCityName(false)}
                                 disabled={isSavingCityName}
-                                title="キャンセル"
+                                title={uiText("components.CityMap.text031")}
                             >
                                 <X size={15} />
                             </button>
@@ -837,11 +840,11 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                             <h2 className={styles.title}>
                                 {data?.city_name ?? 'SAIVerse City'}
                             </h2>
-                            <button
+                            <button data-i18n="components.CityMap.text032"
                                 className={styles.titleIconBtn}
                                 onClick={startCityNameEdit}
                                 disabled={data?.city_id == null}
-                                title="街の名前を変更"
+                                title={uiText("components.CityMap.text032")}
                             >
                                 <Pencil size={14} />
                             </button>
@@ -854,7 +857,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
             )}
 
             {error && <div className={styles.errorMsg}>{error}</div>}
-            {!data && !error && <div className={styles.loading}>読み込み中...</div>}
+            {!data && !error && <div data-i18n="components.CityMap.text033" className={styles.loading}>{uiText("components.CityMap.text033")}</div>}
 
             <div
                 ref={viewportRef}
@@ -939,14 +942,14 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                                 )}
                                 <div className={styles.buildingName}>{b.name}</div>
                                 {b.entrance_of && !isEditMode && (
-                                    <button
+                                    <button data-i18n="components.CityMap.text034 components.CityMap.text035"
                                         onClick={(e) => {
                                             e.stopPropagation();
                                             if (dragRef.current.dragged) return;
                                             if (cellDragRef.current.dragged) return;
                                             navigateScope(b.entrance_of!);
                                         }}
-                                        title={`『${b.entrance_of_name ?? b.entrance_of}』の中のマップを見る`}
+                                        title={uiText("components.CityMap.text034", { p1: b.entrance_of_name ?? b.entrance_of })}
                                         style={{
                                             background: 'rgba(120,180,255,0.15)',
                                             border: '1px solid rgba(120,180,255,0.5)',
@@ -957,15 +960,14 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                                             marginTop: 2,
                                         }}
                                     >
-                                        <DoorOpen size={Math.round(12 * inverseScale)} /> 中へ
-                                    </button>
+                                        <DoorOpen size={Math.round(12 * inverseScale)} />{uiText("components.CityMap.text035")}</button>
                                 )}
                                 {isRichMode && b.description && (
                                     <div className={styles.buildingDescription}>{b.description}</div>
                                 )}
 
                                 {b.occupants.length === 0 ? (
-                                    isRichMode && <div className={styles.empty}>無人</div>
+                                    isRichMode && <div data-i18n="components.CityMap.text036" className={styles.empty}>{uiText("components.CityMap.text036")}</div>
                                 ) : (
                                     <div className={styles.occupantStrip}>
                                         {visible.map(occ => (
@@ -1003,7 +1005,7 @@ export default function CityMap({ currentBuildingId, onSelectBuilding, refreshTr
                                             </div>
                                         ))}
                                         {overflow > 0 && (
-                                            <div className={styles.occupantOverflow} title={`他 ${overflow} 人`}>
+                                            <div data-i18n="components.CityMap.text037" className={styles.occupantOverflow} title={uiText("components.CityMap.text037", { p1: overflow })}>
                                                 +{overflow}
                                             </div>
                                         )}

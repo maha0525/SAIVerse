@@ -1,3 +1,10 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import { useState, useEffect, useCallback } from 'react';
 
 // Pulse タイムライン: SAIMemory messages を pulse_id でグルーピングして
@@ -76,7 +83,7 @@ const headerStyle: React.CSSProperties = {
 
 function fmtTime(epoch: number | null): string {
     if (!epoch) return '—';
-    return new Date(epoch * 1000).toLocaleString();
+    return new Date(epoch * 1000).toLocaleString(getFormatLocale());
 }
 
 function roleColor(lr: string | null): string {
@@ -100,6 +107,7 @@ const selectStyle: React.CSSProperties = {
 };
 
 export default function PulseTimelineViewer({ personaId }: Props) {
+    useLocale();
     const [items, setItems] = useState<PulseItem[]>([]);
     const [loading, setLoading] = useState(false);
     const [expanded, setExpanded] = useState<string | null>(null);
@@ -110,7 +118,7 @@ export default function PulseTimelineViewer({ personaId }: Props) {
     const load = useCallback(async () => {
         setLoading(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/pulse-timeline?limit=200`);
+            const res = await apiFetch(`/api/people/${personaId}/pulse-timeline?limit=200`);
             if (res.ok) {
                 const data = await res.json();
                 setItems(data.items || []);
@@ -151,7 +159,7 @@ export default function PulseTimelineViewer({ personaId }: Props) {
         setSaving(true);
         try {
             const updates = entries.map(([entry_id, changes]) => ({ entry_id, ...changes }));
-            const res = await fetch(`/api/people/${personaId}/messages`, {
+            const res = await apiFetch(`/api/people/${personaId}/messages`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ updates }),
@@ -176,7 +184,7 @@ export default function PulseTimelineViewer({ personaId }: Props) {
         setExpanded(pulseId);
         if (!detail[pulseId]) {
             try {
-                const res = await fetch(`/api/people/${personaId}/pulse-timeline/${pulseId}`);
+                const res = await apiFetch(`/api/people/${personaId}/pulse-timeline/${pulseId}`);
                 if (res.ok) {
                     const data = await res.json();
                     setDetail((prev) => ({
@@ -208,17 +216,16 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                 padding: '0.5rem',
                 margin: '-0.5rem -0.5rem 0.5rem -0.5rem',
             }}>
-                <span style={{ fontSize: '0.85rem', color: '#888' }}>
-                    {items.length} Pulse (新しい順、最大 200)
-                </span>
+                <span data-i18n="components.memory.PulseTimelineViewer.text001" style={{ fontSize: '0.85rem', color: '#888' }}>
+                    {items.length}{uiText("components.memory.PulseTimelineViewer.text001")}</span>
                 <div style={{ display: 'flex', gap: '0.3rem' }}>
                     {Object.keys(edits).length > 0 && (
-                        <button onClick={saveEdits} disabled={saving} style={{ ...btnStyle, background: 'rgba(105,219,124,0.2)', borderColor: '#69db7c' }}>
-                            {saving ? '保存中…' : `保存 (${Object.keys(edits).length}件)`}
+                        <button data-i18n="components.memory.PulseTimelineViewer.text002 components.memory.PulseTimelineViewer.text003" onClick={saveEdits} disabled={saving} style={{ ...btnStyle, background: 'rgba(105,219,124,0.2)', borderColor: '#69db7c' }}>
+                            {saving ? uiText("components.memory.PulseTimelineViewer.text002") : uiText("components.memory.PulseTimelineViewer.text003", { p1: Object.keys(edits).length })}
                         </button>
                     )}
-                    <button onClick={load} disabled={loading} style={btnStyle}>
-                        {loading ? '読込中…' : '再読込'}
+                    <button data-i18n="components.memory.PulseTimelineViewer.text004 components.memory.PulseTimelineViewer.text005" onClick={load} disabled={loading} style={btnStyle}>
+                        {loading ? uiText("components.memory.PulseTimelineViewer.text004") : uiText("components.memory.PulseTimelineViewer.text005")}
                     </button>
                 </div>
             </div>
@@ -236,7 +243,7 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                             </span>
                         ))}
                         <span style={{ marginLeft: 'auto', fontSize: '0.72rem', color: '#777' }}>
-                            {p.message_count} msg · {p.pulse_id.slice(0, 8)} · {expanded === p.pulse_id ? '▲' : '▼'}
+                            {p.message_count} {uiText("components.memory.PulseTimelineViewer.label001")}{p.pulse_id.slice(0, 8)} · {expanded === p.pulse_id ? '▲' : '▼'}
                         </span>
                     </div>
 
@@ -262,13 +269,12 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                                 }
 
                                 if (timeline.length === 0) {
-                                    return <span style={{ fontSize: '0.75rem', color: '#888' }}>(no messages)</span>;
+                                    return <span style={{ fontSize: '0.75rem', color: '#888' }}>{uiText("components.memory.PulseTimelineViewer.label002")}</span>;
                                 }
 
                                 const renderPrompt = (pr: PulsePrompt, key: string) => (
                                     <details key={key} style={{ marginBottom: '0.3rem' }}>
-                                        <summary style={{ fontSize: '0.72rem', color: '#9ad', cursor: 'pointer' }}>
-                                            入力プロンプト · {fmtTime(pr.created_at)}
+                                        <summary data-i18n="components.memory.PulseTimelineViewer.text006" style={{ fontSize: '0.72rem', color: '#9ad', cursor: 'pointer' }}>{uiText("components.memory.PulseTimelineViewer.text006")}{fmtTime(pr.created_at)}
                                         </summary>
                                         <pre style={{
                                             fontSize: '0.7rem',
@@ -306,7 +312,7 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                                             </select>
                                             {m.spell_seq != null && (
                                                 <span style={{ color: '#c4a7e7', fontSize: '0.68rem' }}>
-                                                    spell round {m.spell_seq}
+                                                    {uiText("components.memory.PulseTimelineViewer.label003")}{m.spell_seq}
                                                 </span>
                                             )}
                                             {edits[m.entry_id] && (
@@ -333,13 +339,11 @@ export default function PulseTimelineViewer({ personaId }: Props) {
 
                                 if (gapMsgs.length > 0) {
                                     elements.push(
-                                        <div key="gap-header" style={{
+                                        <div data-i18n="components.memory.PulseTimelineViewer.text007 components.memory.PulseTimelineViewer.text008" key="gap-header" style={{
                                             fontSize: '0.68rem', color: '#e0a060',
                                             borderBottom: '1px dashed rgba(224,160,96,0.3)',
                                             paddingBottom: '0.2rem', marginBottom: '0.3rem',
-                                        }}>
-                                            Pulse 前のメッセージ ({gapMsgs.length}件)
-                                        </div>
+                                        }}>{uiText("components.memory.PulseTimelineViewer.text007")}{gapMsgs.length}{uiText("components.memory.PulseTimelineViewer.text008")}</div>
                                     );
                                     gapMsgs.forEach((g, gi) => {
                                         elements.push(
@@ -383,7 +387,7 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                                                 borderTop: '1px dashed rgba(196,167,231,0.3)',
                                                 paddingTop: '0.3rem', marginTop: '0.2rem', marginBottom: '0.15rem',
                                             }}>
-                                                spell loop ▸ {spellId.slice(0, 8)}
+                                                {uiText("components.memory.PulseTimelineViewer.label004")}{spellId.slice(0, 8)}
                                             </div>
                                         );
                                     } else if (!spellId && inSpellGroup) {
@@ -412,9 +416,7 @@ export default function PulseTimelineViewer({ personaId }: Props) {
             ))}
 
             {items.length === 0 && !loading && (
-                <div style={{ color: '#888', fontSize: '0.85rem', padding: '1rem' }}>
-                    pulse_id 付きの messages がまだありません。
-                </div>
+                <div data-i18n="components.memory.PulseTimelineViewer.text009" style={{ color: '#888', fontSize: '0.85rem', padding: '1rem' }}>{uiText("components.memory.PulseTimelineViewer.text009")}</div>
             )}
         </div>
     );

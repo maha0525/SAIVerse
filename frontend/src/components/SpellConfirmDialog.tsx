@@ -1,4 +1,7 @@
 'use client';
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { ShieldCheck } from 'lucide-react';
@@ -24,6 +27,7 @@ interface SpellConfirmDialogProps {
 const TIMEOUT_SEC = 120;
 
 export default function SpellConfirmDialog({ request, onRespond }: SpellConfirmDialogProps) {
+    useLocale();
     const editable = !!request.editable;
     const initialText = request.text ?? '';
     const [remaining, setRemaining] = useState(TIMEOUT_SEC);
@@ -52,7 +56,7 @@ export default function SpellConfirmDialog({ request, onRespond }: SpellConfirmD
         onRespond(request.requestId, decision, editedText);
     }, [request.requestId, onRespond]);
 
-    const confirmLabel = request.confirmText ?? (isEdited ? '編集して実行' : '実行する');
+    const confirmLabel = request.confirmText ?? (isEdited ? uiText("components.SpellConfirmDialog.text001") : uiText("components.SpellConfirmDialog.text002"));
 
     return (
         <ModalOverlay onClose={() => respond('reject')}>
@@ -86,8 +90,8 @@ export default function SpellConfirmDialog({ request, onRespond }: SpellConfirmD
                             )}
                         </>
                     )}
-                    <div className={`${styles.timer} ${remaining <= 15 ? styles.timerWarn : ''}`}>
-                        {remaining > 0 ? `${remaining}秒後に自動キャンセル` : 'タイムアウト...'}
+                    <div data-i18n="components.SpellConfirmDialog.text003 components.SpellConfirmDialog.text004" className={`${styles.timer} ${remaining <= 15 ? styles.timerWarn : ''}`}>
+                        {remaining > 0 ? uiText("components.SpellConfirmDialog.text003", { p1: remaining }) : uiText("components.SpellConfirmDialog.text004")}
                     </div>
                 </div>
 
@@ -99,9 +103,7 @@ export default function SpellConfirmDialog({ request, onRespond }: SpellConfirmD
                     >
                         {confirmLabel}
                     </button>
-                    <button className={styles.cancelBtn} onClick={() => respond('reject')}>
-                        キャンセル
-                    </button>
+                    <button data-i18n="components.SpellConfirmDialog.text005" className={styles.cancelBtn} onClick={() => respond('reject')}>{uiText("components.SpellConfirmDialog.text005")}</button>
                 </div>
             </div>
         </ModalOverlay>

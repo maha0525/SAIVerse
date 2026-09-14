@@ -1,4 +1,9 @@
 'use client';
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw, Download, ArrowUpCircle, CheckCircle2, Trash2 } from 'lucide-react';
@@ -107,6 +112,7 @@ function deriveRowState(
 export default function AddonCatalogPanel({
     onInstalledChanged,
 }: AddonCatalogPanelProps) {
+    useLocale();
     const [registry, setRegistry] = useState<RegistryResponse | null>(null);
     const [installedInfo, setInstalledInfo] = useState<Map<string, { version: string }>>(new Map());
     const [loading, setLoading] = useState(false);
@@ -129,8 +135,8 @@ export default function AddonCatalogPanel({
         setError(null);
         try {
             const [regRes, instRes] = await Promise.all([
-                fetch(`/api/addon-catalog/registry${force ? '?force=true' : ''}`),
-                fetch('/api/addon-catalog/installed'),
+                apiFetch(`/api/addon-catalog/registry${force ? '?force=true' : ''}`),
+                apiFetch('/api/addon-catalog/installed'),
             ]);
             if (!regRes.ok) {
                 const text = await regRes.text();
@@ -199,33 +205,32 @@ export default function AddonCatalogPanel({
         <div className={styles.container}>
             <div className={styles.header}>
                 <div className={styles.headerLeft}>
-                    <h3>カタログ</h3>
+                    <h3 data-i18n="components.AddonCatalogPanel.text001">{uiText("components.AddonCatalogPanel.text001")}</h3>
                     {registry?.registry.updated_at && (
                         <span className={styles.updatedAt}>
-                            updated: {registry.registry.updated_at}
+                            {uiText("components.AddonCatalogPanel.label001")}{registry.registry.updated_at}
                         </span>
                     )}
                 </div>
                 <div className={styles.actions}>
-                    <button
+                    <button data-i18n="components.AddonCatalogPanel.text002"
                         className={styles.btnSecondary}
                         onClick={() => loadAll(true)}
                         disabled={loading}
                     >
-                        <RefreshCw size={14} /> 再読み込み
-                    </button>
+                        <RefreshCw size={14} />{uiText("components.AddonCatalogPanel.text002")}</button>
                 </div>
             </div>
 
-            {loading && !registry && <div className={styles.empty}>読み込み中...</div>}
+            {loading && !registry && <div data-i18n="components.AddonCatalogPanel.text003" className={styles.empty}>{uiText("components.AddonCatalogPanel.text003")}</div>}
             {error && (
                 <div className={styles.errorBox}>
-                    <p>カタログ取得に失敗しました</p>
+                    <p data-i18n="components.AddonCatalogPanel.text004">{uiText("components.AddonCatalogPanel.text004")}</p>
                     <p className={styles.errorDetail}>{error}</p>
                 </div>
             )}
             {!loading && registry && rows.length === 0 && (
-                <div className={styles.empty}>カタログにアドオンが登録されていません</div>
+                <div data-i18n="components.AddonCatalogPanel.text005" className={styles.empty}>{uiText("components.AddonCatalogPanel.text005")}</div>
             )}
 
             {rows.length > 0 && (
@@ -236,64 +241,59 @@ export default function AddonCatalogPanel({
                                 <div className={styles.rowName}>
                                     {entry.display_name}
                                     {state.kind === 'installed_latest' && (
-                                        <span className={`${styles.badge} ${styles.badgeInstalled}`}>
-                                            <CheckCircle2 size={11} /> 導入済み v{state.current_version}
+                                        <span data-i18n="components.AddonCatalogPanel.text006" className={`${styles.badge} ${styles.badgeInstalled}`}>
+                                            <CheckCircle2 size={11} />{uiText("components.AddonCatalogPanel.text006")}{state.current_version}
                                         </span>
                                     )}
                                     {state.kind === 'update_available' && (
-                                        <span className={`${styles.badge} ${styles.badgeUpdate}`}>
-                                            <ArrowUpCircle size={11} /> 更新あり v{state.current_version} → v{state.new_version}
+                                        <span data-i18n="components.AddonCatalogPanel.text007" className={`${styles.badge} ${styles.badgeUpdate}`}>
+                                            <ArrowUpCircle size={11} />{uiText("components.AddonCatalogPanel.text007")}{state.current_version} → v{state.new_version}
                                         </span>
                                     )}
                                     {entry.category && (
                                         <span className={styles.badge}>{entry.category}</span>
                                     )}
                                     {entry.requires.gpu === 'required' && (
-                                        <span className={`${styles.badge} ${styles.badgeRequire}`}>GPU 必須</span>
+                                        <span data-i18n="components.AddonCatalogPanel.text008" className={`${styles.badge} ${styles.badgeRequire}`}>{uiText("components.AddonCatalogPanel.text008")}</span>
                                     )}
                                     {entry.requires.disk_gb && entry.requires.disk_gb >= 1 && (
                                         <span className={styles.badge}>
-                                            {entry.requires.disk_gb} GB
-                                        </span>
+                                            {entry.requires.disk_gb} {uiText("components.AddonCatalogPanel.label002")}</span>
                                     )}
                                 </div>
                                 <div className={styles.rowDesc}>{entry.description}</div>
-                                <div className={styles.rowSub}>
-                                    {entry.id} ・ latest v{entry.latest}
+                                <div data-i18n="components.AddonCatalogPanel.text009" className={styles.rowSub}>
+                                    {entry.id}{uiText("components.AddonCatalogPanel.text009")}{entry.latest}
                                 </div>
                             </div>
                             <div className={styles.rowActions}>
                                 {state.kind === 'not_installed' && (
-                                    <button
+                                    <button data-i18n="components.AddonCatalogPanel.text010"
                                         className={styles.btnPrimary}
                                         onClick={() => handleAction(entry, state)}
                                     >
-                                        <Download size={12} /> 導入
-                                    </button>
+                                        <Download size={12} />{uiText("components.AddonCatalogPanel.text010")}</button>
                                 )}
                                 {state.kind === 'update_available' && (
                                     <>
-                                        <button
+                                        <button data-i18n="components.AddonCatalogPanel.text011"
                                             className={styles.btnPrimary}
                                             onClick={() => handleAction(entry, state)}
                                         >
-                                            <ArrowUpCircle size={12} /> 更新
-                                        </button>
-                                        <button
+                                            <ArrowUpCircle size={12} />{uiText("components.AddonCatalogPanel.text011")}</button>
+                                        <button data-i18n="components.AddonCatalogPanel.text012"
                                             className={`${styles.iconBtn} ${styles.deleteBtn}`}
                                             onClick={() => handleUninstall(entry, state)}
                                         >
-                                            <Trash2 size={12} /> 削除
-                                        </button>
+                                            <Trash2 size={12} />{uiText("components.AddonCatalogPanel.text012")}</button>
                                     </>
                                 )}
                                 {state.kind === 'installed_latest' && (
-                                    <button
+                                    <button data-i18n="components.AddonCatalogPanel.text013"
                                         className={`${styles.iconBtn} ${styles.deleteBtn}`}
                                         onClick={() => handleUninstall(entry, state)}
                                     >
-                                        <Trash2 size={12} /> 削除
-                                    </button>
+                                        <Trash2 size={12} />{uiText("components.AddonCatalogPanel.text013")}</button>
                                 )}
                             </div>
                         </div>

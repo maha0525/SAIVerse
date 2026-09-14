@@ -1,3 +1,6 @@
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import { Loader2, RefreshCw } from 'lucide-react';
 
 import styles from './MemoryImport.module.css';
@@ -8,6 +11,7 @@ import { MemoryImportProps } from './types';
 import { useMemoryImport } from './useMemoryImport';
 
 export default function MemoryImport({ personaId, onImportComplete }: MemoryImportProps) {
+    useLocale();
   const memoryImport = useMemoryImport(personaId, onImportComplete);
 
   const toggleSelection = (idx: number) => {
@@ -30,7 +34,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
 
   return (
     <div className={styles.container}>
-      <h2 className={styles.title}>チャットログをインポート</h2>
+      <h2 data-i18n="components.memory.MemoryImport.text001" className={styles.title}>{uiText("components.memory.MemoryImport.text001")}</h2>
       {memoryImport.step === 'importing' ? <MemoryImportProgress message={memoryImport.importProgress} /> : (
         <MemoryImportForm
           personaId={personaId}
@@ -69,15 +73,13 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
       <MemoryImportResult result={memoryImport.result} />
 
       <div className={styles.reembedSection}>
-        <h3>エンベディング管理</h3>
-        <p>未作成メッセージに対して処理を実行します。</p>
+        <h3 data-i18n="components.memory.MemoryImport.text002">{uiText("components.memory.MemoryImport.text002")}</h3>
+        <p data-i18n="components.memory.MemoryImport.text003">{uiText("components.memory.MemoryImport.text003")}</p>
         <div className={styles.reembedActions}>
-          <button className={styles.reembedButton} onClick={() => void memoryImport.handleReembed(false)} disabled={memoryImport.isReembedding}>
-            {memoryImport.isReembedding ? <Loader2 size={16} className={styles.loader} /> : <RefreshCw size={16} />}未処理を埋める
-          </button>
-          <button className={styles.reembedButtonSecondary} onClick={() => void memoryImport.handleReembed(true)} disabled={memoryImport.isReembedding}>
-            {memoryImport.isReembedding ? <Loader2 size={16} className={styles.loader} /> : <RefreshCw size={16} />}全て再作成
-          </button>
+          <button data-i18n="components.memory.MemoryImport.text004" className={styles.reembedButton} onClick={() => void memoryImport.handleReembed(false)} disabled={memoryImport.isReembedding}>
+            {memoryImport.isReembedding ? <Loader2 size={16} className={styles.loader} /> : <RefreshCw size={16} />}{uiText("components.memory.MemoryImport.text004")}</button>
+          <button data-i18n="components.memory.MemoryImport.text005" className={styles.reembedButtonSecondary} onClick={() => void memoryImport.handleReembed(true)} disabled={memoryImport.isReembedding}>
+            {memoryImport.isReembedding ? <Loader2 size={16} className={styles.loader} /> : <RefreshCw size={16} />}{uiText("components.memory.MemoryImport.text005")}</button>
         </div>
         {memoryImport.reembedProgress && <div className={styles.reembedProgress}><Loader2 size={14} className={styles.loader} /><span>{memoryImport.reembedProgress}</span></div>}
       </div>

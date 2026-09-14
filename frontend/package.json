@@ -8,6 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
+    "test": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs",
+    "test:i18n": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs",
     "predev": "node scripts/sync-addon-panels.mjs",
     "prebuild": "node scripts/sync-addon-panels.mjs",
     "sync:addon-panels": "node scripts/sync-addon-panels.mjs"

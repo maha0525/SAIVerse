@@ -1,3 +1,7 @@
+import { apiFetch } from '@/i18n/api';
+import { getFormatLocale, t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+import LocaleControls from '@/i18n/LocaleControls';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
@@ -60,6 +64,7 @@ type TabId = 'env' | 'world' | 'feeds' | 'models' | 'modelMgmt' | 'playbooks' | 
 type ModelMgmtSubTab = 'providers' | 'models';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
+    useLocale();
     const [activeTab, setActiveTab] = useState<TabId>('env');
     const [envVars, setEnvVars] = useState<EnvVar[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -150,8 +155,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const loadBackfillOptions = useCallback(async () => {
         if (bfBuildings.length > 0) return;
         const [bRes, pRes] = await Promise.all([
-            fetch('/api/user/buildings'),
-            fetch('/api/usage/personas'),
+            apiFetch('/api/user/buildings'),
+            apiFetch('/api/usage/personas'),
         ]);
         if (bRes.ok) { const d = await bRes.json(); setBfBuildings(d.buildings || []); }
         if (pRes.ok) { const d = await pRes.json(); setBfPersonas(d); }
@@ -161,7 +166,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         setBfRunning(true);
         setBfResults(null);
         try {
-            const res = await fetch('/api/admin/backfill-item-descriptions', {
+            const res = await apiFetch('/api/admin/backfill-item-descriptions', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
@@ -216,7 +221,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const loadPlaybookPerms = async () => {
         setPlaybookPermsLoading(true);
         try {
-            const res = await fetch('/api/config/playbook-permissions');
+            const res = await apiFetch('/api/config/playbook-permissions');
             if (res.ok) {
                 const data = await res.json();
                 setPlaybookPerms(data);
@@ -234,7 +239,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             prev.map(p => p.playbook_name === playbookName ? { ...p, permission_level: level } : p)
         );
         try {
-            const res = await fetch('/api/config/playbook-permissions', {
+            const res = await apiFetch('/api/config/playbook-permissions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ playbook_name: playbookName, permission_level: level }),
@@ -257,7 +262,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     const loadImageDefaultQuality = async () => {
         try {
-            const res = await fetch('/api/config/image-default-quality');
+            const res = await apiFetch('/api/config/image-default-quality');
             if (res.ok) {
                 const data = await res.json();
                 setImageDefaultQuality(data.quality);
@@ -269,7 +274,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     const changeImageDefaultQuality = async (q: 'low' | 'medium' | 'high') => {
         try {
-            const res = await fetch('/api/config/image-default-quality', {
+            const res = await apiFetch('/api/config/image-default-quality', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ quality: q })
@@ -284,7 +289,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     const loadMediaRecallState = async () => {
         try {
-            const res = await fetch('/api/config/media-recall');
+            const res = await apiFetch('/api/config/media-recall');
             if (res.ok) {
                 const data = await res.json();
                 setMediaRecallEnabled(data.enabled);
@@ -297,7 +302,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const toggleMediaRecall = async () => {
         const newState = !mediaRecallEnabled;
         try {
-            const res = await fetch('/api/config/media-recall', {
+            const res = await apiFetch('/api/config/media-recall', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ enabled: newState })
@@ -312,7 +317,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     const loadGeminiAutoCacheState = async () => {
         try {
-            const res = await fetch('/api/config/gemini-auto-cache');
+            const res = await apiFetch('/api/config/gemini-auto-cache');
             if (res.ok) {
                 const data = await res.json();
                 setGeminiAutoCacheEnabled(!!data.enabled);
@@ -330,7 +335,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     const saveGeminiAutoCache = async (enabled: boolean, keepSeconds: number) => {
         try {
-            const res = await fetch('/api/config/gemini-auto-cache', {
+            const res = await apiFetch('/api/config/gemini-auto-cache', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ enabled, keep_seconds: keepSeconds })
@@ -396,7 +401,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     const loadMetabolismDefaults = async () => {
         try {
-            const res = await fetch('/api/config/metabolism-defaults');
+            const res = await apiFetch('/api/config/metabolism-defaults');
             if (res.ok) {
                 applyMetabolismDefaults(await res.json());
                 setWmError(null);
@@ -472,13 +477,13 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             if (!res.ok) {
                 let detail = `HTTP ${res.status}`;
                 try { const j = await res.json(); if (j?.detail) detail = String(j.detail); } catch { /* 本文なし */ }
-                setWmError(`保存できませんでした: ${detail}`);
+                setWmError(uiText("components.GlobalSettingsModal.text001", { p1: detail }));
                 return;
             }
             applyMetabolismDefaults(await res.json());
             setWmSavedAt(Date.now());
         } catch (e) {
-            setWmError(`保存できませんでした: ${e}`);
+            setWmError(uiText("components.GlobalSettingsModal.text002", { p1: e }));
         } finally {
             setWmSaving(false);
         }
@@ -486,7 +491,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     const loadDeveloperModeState = async () => {
         try {
-            const res = await fetch('/api/config/developer-mode');
+            const res = await apiFetch('/api/config/developer-mode');
             if (res.ok) {
                 const data = await res.json();
                 setDeveloperMode(data.enabled);
@@ -499,13 +504,14 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const toggleDeveloperMode = async () => {
         const newState = !developerMode;
         try {
-            const res = await fetch('/api/config/developer-mode', {
+            const res = await apiFetch('/api/config/developer-mode', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ enabled: newState })
             });
             if (res.ok) {
                 setDeveloperMode(newState);
+                window.dispatchEvent(new CustomEvent('saiverse-developer-mode', { detail: newState }));
             }
         } catch (e) {
             console.error("Failed to toggle developer mode", e);
@@ -514,7 +520,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     const loadUpdateCheckState = async () => {
         try {
-            const res = await fetch('/api/config/update-check');
+            const res = await apiFetch('/api/config/update-check');
             if (res.ok) {
                 const data = await res.json();
                 setUpdateCheckEnabled(data.enabled);
@@ -527,7 +533,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const toggleUpdateCheck = async () => {
         const newState = !updateCheckEnabled;
         try {
-            const res = await fetch('/api/config/update-check', {
+            const res = await apiFetch('/api/config/update-check', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ enabled: newState })
@@ -542,7 +548,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     const loadAnnouncementsState = async () => {
         try {
-            const res = await fetch('/api/config/announcements-monitor');
+            const res = await apiFetch('/api/config/announcements-monitor');
             if (res.ok) {
                 const data = await res.json();
                 setAnnouncementsEnabled(data.enabled);
@@ -555,7 +561,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const toggleAnnouncements = async () => {
         const newState = !announcementsEnabled;
         try {
-            const res = await fetch('/api/config/announcements-monitor', {
+            const res = await apiFetch('/api/config/announcements-monitor', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ enabled: newState })
@@ -571,7 +577,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const loadEnvVars = async () => {
         setIsLoading(true);
         try {
-            const res = await fetch('/api/admin/env');
+            const res = await apiFetch('/api/admin/env');
             if (res.ok) {
                 const data = await res.json();
                 setEnvVars(data);
@@ -595,7 +601,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const saveEnv = async () => {
         setIsSaving(true);
         try {
-            const res = await fetch('/api/admin/env', {
+            const res = await apiFetch('/api/admin/env', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ updates: editedEnv })
@@ -605,11 +611,11 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                 const data = await res.json().catch(() => null);
                 const notices: string[] = Array.isArray(data?.notices) ? data.notices : [];
                 alert(notices.length > 0
-                    ? `環境変数を保存しました。\n\n${notices.join('\n\n')}`
-                    : "環境変数を保存しました。");
+                    ? `${uiText("components.GlobalSettingsModal.text003")}\n\n${notices.join('\n\n')}`
+                    : uiText("components.GlobalSettingsModal.text003"));
                 loadEnvVars(); // Reload to confirm
             } else {
-                alert("保存に失敗しました。");
+                alert(uiText("components.GlobalSettingsModal.text004"));
             }
         } catch (e) {
             console.error("Save error", e);
@@ -619,10 +625,10 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     };
 
     const restartServer = async () => {
-        if (!confirm("サーバーを再起動しますか？UIが一時的に切断されます。")) return;
+        if (!confirm(uiText("components.GlobalSettingsModal.text005"))) return;
         try {
-            await fetch('/api/admin/restart', { method: 'POST' });
-            alert("サーバーを再起動中です。数秒後にページを再読み込みしてください。");
+            await apiFetch('/api/admin/restart', { method: 'POST' });
+            alert(uiText("components.GlobalSettingsModal.text006"));
         } catch (e) {
             console.error(e);
         }
@@ -631,7 +637,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // --- About ---
     const loadVersionInfo = async () => {
         try {
-            const res = await fetch('/api/system/version');
+            const res = await apiFetch('/api/system/version');
             if (res.ok) {
                 setVersionInfo(await res.json());
             }
@@ -645,8 +651,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         setModelRolesLoading(true);
         try {
             const [rolesRes, modelsRes] = await Promise.all([
-                fetch('/api/tutorial/model-roles'),
-                fetch('/api/tutorial/available-models'),
+                apiFetch('/api/tutorial/model-roles'),
+                apiFetch('/api/tutorial/available-models'),
             ]);
             if (rolesRes.ok) {
                 const data = await rolesRes.json();
@@ -666,7 +672,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     const handlePresetApply = async (provider: string) => {
         try {
-            const res = await fetch('/api/tutorial/auto-configure-models', {
+            const res = await apiFetch('/api/tutorial/auto-configure-models', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ provider }),
@@ -686,7 +692,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     const handleModelRoleChange = async (envKey: string, modelId: string) => {
         try {
-            const res = await fetch('/api/admin/env', {
+            const res = await apiFetch('/api/admin/env', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ updates: { [envKey]: modelId } }),
@@ -719,61 +725,53 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                 onTouchMove={(e) => e.stopPropagation()}
             >
                 <div className={styles.header}>
-                    <h2><Settings /> グローバル設定</h2>
+                    <h2 data-i18n="components.GlobalSettingsModal.text007"><Settings />{uiText("components.GlobalSettingsModal.text007")}</h2>
                     <button className={styles.closeBtn} onClick={onClose}><X size={24} /></button>
                 </div>
 
                 <div className={styles.content}>
                     {/* Sidebar Navigation */}
                     <div className={styles.sidebar}>
-                        <div
+                        <div data-i18n="components.GlobalSettingsModal.text008"
                             className={`${styles.navItem} ${activeTab === 'env' ? styles.active : ''}`}
                             onClick={() => setActiveTab('env')}
                         >
-                            <Settings size={18} /> 環境
-                        </div>
-                        <div
+                            <Settings size={18} />{uiText("components.GlobalSettingsModal.text008")}</div>
+                        <div data-i18n="components.GlobalSettingsModal.text009"
                             className={`${styles.navItem} ${activeTab === 'world' ? styles.active : ''}`}
                             onClick={() => setActiveTab('world')}
                         >
-                            <Globe size={18} /> ワールドエディタ
-                        </div>
-                        <div
+                            <Globe size={18} />{uiText("components.GlobalSettingsModal.text009")}</div>
+                        <div data-i18n="components.GlobalSettingsModal.text010"
                             className={`${styles.navItem} ${activeTab === 'feeds' ? styles.active : ''}`}
                             onClick={() => setActiveTab('feeds')}
                         >
-                            <Rss size={18} /> フィード
-                        </div>
-                        <div
+                            <Rss size={18} />{uiText("components.GlobalSettingsModal.text010")}</div>
+                        <div data-i18n="components.GlobalSettingsModal.text011"
                             className={`${styles.navItem} ${activeTab === 'models' ? styles.active : ''}`}
                             onClick={() => setActiveTab('models')}
                         >
-                            <Cpu size={18} /> モデルロール
-                        </div>
-                        <div
+                            <Cpu size={18} />{uiText("components.GlobalSettingsModal.text011")}</div>
+                        <div data-i18n="components.GlobalSettingsModal.text012"
                             className={`${styles.navItem} ${activeTab === 'modelMgmt' ? styles.active : ''}`}
                             onClick={() => setActiveTab('modelMgmt')}
                         >
-                            <Boxes size={18} /> モデル管理
-                        </div>
-                        <div
+                            <Boxes size={18} />{uiText("components.GlobalSettingsModal.text012")}</div>
+                        <div data-i18n="components.GlobalSettingsModal.text013"
                             className={`${styles.navItem} ${activeTab === 'playbooks' ? styles.active : ''}`}
                             onClick={() => setActiveTab('playbooks')}
                         >
-                            <Layers size={18} /> Playbook権限
-                        </div>
-                        <div
+                            <Layers size={18} />{uiText("components.GlobalSettingsModal.text013")}</div>
+                        <div data-i18n="components.GlobalSettingsModal.text014"
                             className={`${styles.navItem} ${activeTab === 'about' ? styles.active : ''}`}
                             onClick={() => setActiveTab('about')}
                         >
-                            <Info size={18} /> 情報
-                        </div>
-                        <div
+                            <Info size={18} />{uiText("components.GlobalSettingsModal.text014")}</div>
+                        <div data-i18n="components.GlobalSettingsModal.text015"
                             className={`${styles.navItem} ${activeTab === 'utilities' ? styles.active : ''}`}
                             onClick={() => setActiveTab('utilities')}
                         >
-                            <Wrench size={18} /> 便利機能
-                        </div>
+                            <Wrench size={18} />{uiText("components.GlobalSettingsModal.text015")}</div>
                     </div>
 
                     {/* Main Content Panel */}
@@ -781,68 +779,55 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                         {activeTab === 'env' && (
                             <div className={styles.envContainer}>
                                 {/* Theme Selector */}
+                                <LocaleControls />
                                 <div className={styles.themeContainer}>
                                     <div>
-                                        <div className={styles.themeLabel}>
-                                            {theme === 'dark' ? <Moon size={18} /> : theme === 'light' ? <Sun size={18} /> : <Monitor size={18} />}
-                                            テーマ
-                                        </div>
-                                        <div className={styles.themeDescription}>
-                                            UIの表示モードを切り替えます
-                                        </div>
+                                        <div data-i18n="components.GlobalSettingsModal.text016" className={styles.themeLabel}>
+                                            {theme === 'dark' ? <Moon size={18} /> : theme === 'light' ? <Sun size={18} /> : <Monitor size={18} />}{uiText("components.GlobalSettingsModal.text016")}</div>
+                                        <div data-i18n="components.GlobalSettingsModal.text017" className={styles.themeDescription}>{uiText("components.GlobalSettingsModal.text017")}</div>
                                     </div>
                                     <div className={styles.themeSelector}>
                                         <button
                                             className={`${styles.themeOption} ${theme === 'system' ? styles.active : ''}`}
                                             onClick={() => changeTheme('system')}
                                         >
-                                            <Monitor size={14} /> System
-                                        </button>
+                                            <Monitor size={14} /> {uiText("components.GlobalSettingsModal.label001")}</button>
                                         <button
                                             className={`${styles.themeOption} ${theme === 'light' ? styles.active : ''}`}
                                             onClick={() => changeTheme('light')}
                                         >
-                                            <Sun size={14} /> Light
-                                        </button>
+                                            <Sun size={14} /> {uiText("components.GlobalSettingsModal.label002")}</button>
                                         <button
                                             className={`${styles.themeOption} ${theme === 'dark' ? styles.active : ''}`}
                                             onClick={() => changeTheme('dark')}
                                         >
-                                            <Moon size={14} /> Dark
-                                        </button>
+                                            <Moon size={14} /> {uiText("components.GlobalSettingsModal.label003")}</button>
                                     </div>
                                 </div>
 
                                 {/* Image Default Quality Selector */}
                                 <div className={styles.themeContainer}>
                                     <div>
-                                        <div className={styles.themeLabel}>
-                                            <Layers size={18} />
-                                            画像生成デフォルト品質
-                                        </div>
-                                        <div className={styles.themeDescription}>
-                                            画像生成ツールでquality未指定時のデフォルト品質を設定します
-                                        </div>
+                                        <div data-i18n="components.GlobalSettingsModal.text018" className={styles.themeLabel}>
+                                            <Layers size={18} />{uiText("components.GlobalSettingsModal.text018")}</div>
+                                        <div data-i18n="components.GlobalSettingsModal.text019" className={styles.themeDescription}>{uiText("components.GlobalSettingsModal.text019")}</div>
                                     </div>
                                     <div className={styles.themeSelector}>
                                         <button
                                             className={`${styles.themeOption} ${imageDefaultQuality === 'low' ? styles.active : ''}`}
                                             onClick={() => changeImageDefaultQuality('low')}
                                         >
-                                            Low
-                                        </button>
+                                            {uiText("components.GlobalSettingsModal.label004")}</button>
                                         <button
                                             className={`${styles.themeOption} ${imageDefaultQuality === 'medium' ? styles.active : ''}`}
                                             onClick={() => changeImageDefaultQuality('medium')}
                                         >
-                                            Medium
-                                        </button>
+                                            {uiText("components.GlobalSettingsModal.label005")}</button>
                                         <button
                                             className={`${styles.themeOption} ${imageDefaultQuality === 'high' ? styles.active : ''}`}
                                             onClick={() => changeImageDefaultQuality('high')}
                                         >
-                                            High
-                                        </button>
+                                            {uiText("components.GlobalSettingsModal.label006")}</button>
                                     </div>
                                 </div>
 
@@ -851,41 +836,37 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     style={{ cursor: 'pointer', userSelect: 'none' }}
                                     onClick={() => setEnvSectionOpen(!envSectionOpen)}
                                 >
-                                    <h3>
-                                        {envSectionOpen ? <ChevronDown size={16} style={{ verticalAlign: 'middle', marginRight: 4 }} /> : <ChevronRight size={16} style={{ verticalAlign: 'middle', marginRight: 4 }} />}
-                                        サーバー環境変数 (.env)
-                                    </h3>
-                                    <button className={styles.restartBtn} onClick={(e) => { e.stopPropagation(); restartServer(); }}>
-                                        <Power size={16} /> サーバー再起動
-                                    </button>
+                                    <h3 data-i18n="components.GlobalSettingsModal.text020">
+                                        {envSectionOpen ? <ChevronDown size={16} style={{ verticalAlign: 'middle', marginRight: 4 }} /> : <ChevronRight size={16} style={{ verticalAlign: 'middle', marginRight: 4 }} />}{uiText("components.GlobalSettingsModal.text020")}</h3>
+                                    <button data-i18n="components.GlobalSettingsModal.text021" className={styles.restartBtn} onClick={(e) => { e.stopPropagation(); restartServer(); }}>
+                                        <Power size={16} />{uiText("components.GlobalSettingsModal.text021")}</button>
                                 </div>
 
                                 {envSectionOpen && (isLoading ? (
-                                    <div>読み込み中...</div>
+                                    <div data-i18n="components.GlobalSettingsModal.text022">{uiText("components.GlobalSettingsModal.text022")}</div>
                                 ) : (
                                     <>
                                         <div className={styles.envList}>
                                             {envVars.map(item => (
                                                 <div key={item.key} className={styles.envItem}>
                                                     <div className={styles.envKey}>{item.key}</div>
-                                                    <input
+                                                    <input data-i18n="components.GlobalSettingsModal.text023"
                                                         className={styles.envInput}
                                                         type={item.is_sensitive ? "password" : "text"}
                                                         defaultValue={item.is_sensitive ? "" : item.value}
-                                                        placeholder={item.is_sensitive ? "（非表示/変更なし）" : ""}
+                                                        placeholder={item.is_sensitive ? uiText("components.GlobalSettingsModal.text023") : ""}
                                                         onChange={(e) => handleEnvChange(item.key, e.target.value)}
                                                     />
                                                 </div>
                                             ))}
                                         </div>
                                         <div className={styles.actionFooter}>
-                                            <button
+                                            <button data-i18n="components.GlobalSettingsModal.text024"
                                                 className={styles.saveBtn}
                                                 onClick={saveEnv}
                                                 disabled={isSaving || Object.keys(editedEnv).length === 0}
                                             >
-                                                {isSaving ? <RefreshCw className="spin" /> : <Save />} 保存
-                                            </button>
+                                                {isSaving ? <RefreshCw className="spin" /> : <Save />}{uiText("components.GlobalSettingsModal.text024")}</button>
                                         </div>
                                     </>
                                 ))}
@@ -893,12 +874,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 {/* Update Check Toggle */}
                                 <div className={styles.toggleContainer} style={{ marginTop: '1.5rem' }}>
                                     <div>
-                                        <div className={styles.toggleLabel}>
-                                            アップデート通知
-                                        </div>
-                                        <div className={styles.toggleDescription}>
-                                            新しいバージョンの有無を定期的にチェックします
-                                        </div>
+                                        <div data-i18n="components.GlobalSettingsModal.text025" className={styles.toggleLabel}>{uiText("components.GlobalSettingsModal.text025")}</div>
+                                        <div data-i18n="components.GlobalSettingsModal.text026" className={styles.toggleDescription}>{uiText("components.GlobalSettingsModal.text026")}</div>
                                     </div>
                                     <div
                                         className={`${styles.toggle} ${updateCheckEnabled ? styles.active : ''}`}
@@ -909,12 +886,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 {/* Announcements Monitor Toggle */}
                                 <div className={styles.toggleContainer}>
                                     <div>
-                                        <div className={styles.toggleLabel}>
-                                            お知らせ通知
-                                        </div>
-                                        <div className={styles.toggleDescription}>
-                                            開発者からのお知らせを定期的に取得します
-                                        </div>
+                                        <div data-i18n="components.GlobalSettingsModal.text027" className={styles.toggleLabel}>{uiText("components.GlobalSettingsModal.text027")}</div>
+                                        <div data-i18n="components.GlobalSettingsModal.text028" className={styles.toggleDescription}>{uiText("components.GlobalSettingsModal.text028")}</div>
                                     </div>
                                     <div
                                         className={`${styles.toggle} ${announcementsEnabled ? styles.active : ''}`}
@@ -925,12 +898,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 {/* Media Recall Toggle */}
                                 <div className={styles.toggleContainer}>
                                     <div>
-                                        <div className={styles.toggleLabel}>
-                                            添付したメディアの内容を自動想起に使う
-                                        </div>
-                                        <div className={styles.toggleDescription}>
-                                            オンにすると、画像・音声・動画を添付したときに内容を読み取ってから思い出しに使います。読み取りの分だけ返信が数秒遅くなります。
-                                        </div>
+                                        <div data-i18n="components.GlobalSettingsModal.text029" className={styles.toggleLabel}>{uiText("components.GlobalSettingsModal.text029")}</div>
+                                        <div data-i18n="components.GlobalSettingsModal.text030" className={styles.toggleDescription}>{uiText("components.GlobalSettingsModal.text030")}</div>
                                     </div>
                                     <div
                                         className={`${styles.toggle} ${mediaRecallEnabled ? styles.active : ''}`}
@@ -942,12 +911,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 <div className={`${styles.toggleContainer} ${styles.toggleContainerStacked}`}>
                                     <div className={styles.toggleRow}>
                                         <div>
-                                            <div className={styles.toggleLabel}>
-                                                Gemini 自動キャッシュ（実験的）
-                                            </div>
-                                            <div className={styles.toggleDescription}>
-                                                全ての Gemini 呼び出しでキャッシュを自動作成し、入力トークンをキャッシュ価格にします。保持秒数が 0 のときは応答後すぐ削除します。
-                                            </div>
+                                            <div data-i18n="components.GlobalSettingsModal.text031" className={styles.toggleLabel}>{uiText("components.GlobalSettingsModal.text031")}</div>
+                                            <div data-i18n="components.GlobalSettingsModal.text032" className={styles.toggleDescription}>{uiText("components.GlobalSettingsModal.text032")}</div>
                                         </div>
                                         <div
                                             className={`${styles.toggle} ${geminiAutoCacheEnabled ? styles.active : ''}`}
@@ -956,9 +921,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     </div>
                                     {geminiAutoCacheEnabled && (
                                         <div className={styles.subSetting}>
-                                            <label className={styles.subSettingLabel} htmlFor="gemini-auto-cache-keep">
-                                                応答後の保持秒数
-                                            </label>
+                                            <label data-i18n="components.GlobalSettingsModal.text033" className={styles.subSettingLabel} htmlFor="gemini-auto-cache-keep">{uiText("components.GlobalSettingsModal.text033")}</label>
                                             <input
                                                 id="gemini-auto-cache-keep"
                                                 type="number"
@@ -971,9 +934,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                 onBlur={commitGeminiAutoCacheKeepSeconds}
                                                 onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
                                             />
-                                            <div className={styles.subSettingHint}>
-                                                1 以上にすると、その秒数のあいだ Gemini 側にキャッシュを残します（最大 {geminiAutoCacheKeepMax} 秒）。機能が不完全な部分があります。自己責任でご利用ください。
-                                            </div>
+                                            <div data-i18n="components.GlobalSettingsModal.text034 components.GlobalSettingsModal.text035" className={styles.subSettingHint}>{uiText("components.GlobalSettingsModal.text034")}{geminiAutoCacheKeepMax}{uiText("components.GlobalSettingsModal.text035")}</div>
                                         </div>
                                     )}
                                 </div>
@@ -981,13 +942,9 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 {/* Developer Mode Toggle */}
                                 <div className={styles.toggleContainer}>
                                     <div>
-                                        <div className={styles.toggleLabel}>
-                                            <Cpu size={18} />
-                                            開発者モード
-                                        </div>
-                                        <div className={styles.toggleDescription}>
-                                            ONにすると開発中の機能が表示されます（不安定なため推奨しません）
-                                        </div>
+                                        <div data-i18n="components.GlobalSettingsModal.text036" className={styles.toggleLabel}>
+                                            <Cpu size={18} />{uiText("components.GlobalSettingsModal.text036")}</div>
+                                        <div data-i18n="components.GlobalSettingsModal.text037" className={styles.toggleDescription}>{uiText("components.GlobalSettingsModal.text037")}</div>
                                     </div>
                                     <div
                                         className={`${styles.toggle} ${developerMode ? styles.active : ''}`}
@@ -998,12 +955,12 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 {/* ペルソナに送る量 (全体既定) */}
                                 <div className={`${styles.toggleContainer} ${styles.toggleContainerStacked}`}>
                                     <div>
-                                        <div className={styles.toggleLabel}>
+                                        <div data-i18n="components.GlobalSettingsModal.text104" className={styles.toggleLabel}>
                                             <Layers size={18} />
-                                            ペルソナに送る量
+                                            {uiText("components.GlobalSettingsModal.text104")}
                                         </div>
-                                        <div className={styles.toggleDescription}>
-                                            ペルソナに毎回送る会話がどれだけ溜まったら、古い部分をあらすじへ畳んで整理するかを決めます。ここは全モデル共通の既定値です。
+                                        <div data-i18n="components.GlobalSettingsModal.text105" className={styles.toggleDescription}>
+                                            {uiText("components.GlobalSettingsModal.text105")}
                                         </div>
                                     </div>
 
@@ -1019,8 +976,11 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                         onClick={() => applyWatermarkPreset(preset)}
                                                     >
                                                         <span className={styles.wmPresetLabel}>{preset.label}</span>
-                                                        <span className={styles.wmPresetNums}>
-                                                            {preset.high.toLocaleString()} 字で整理し、{preset.target.toLocaleString()} 字残す
+                                                        <span data-i18n="components.GlobalSettingsModal.text106" className={styles.wmPresetNums}>
+                                                            {uiText("components.GlobalSettingsModal.text106", {
+                                                                p1: preset.high.toLocaleString(getFormatLocale()),
+                                                                p2: preset.target.toLocaleString(getFormatLocale())
+                                                            })}
                                                         </span>
                                                     </button>
                                                 ))}
@@ -1030,14 +990,14 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                     aria-pressed={wmActivePreset == null}
                                                     onClick={() => wmTargetInputRef.current?.focus()}
                                                 >
-                                                    <span className={styles.wmPresetLabel}>カスタム</span>
-                                                    <span className={styles.wmPresetNums}>下の欄で自分で決める</span>
+                                                    <span data-i18n="components.GlobalSettingsModal.text107" className={styles.wmPresetLabel}>{uiText("components.GlobalSettingsModal.text107")}</span>
+                                                    <span data-i18n="components.GlobalSettingsModal.text108" className={styles.wmPresetNums}>{uiText("components.GlobalSettingsModal.text108")}</span>
                                                 </button>
                                             </div>
                                             <div className={styles.wmPresetNote}>
                                                 <Info size={14} />
-                                                <span>
-                                                    大きい設定ほど、一回に送る量は増えますが、会話の整理はあまり走りません。小さい設定にすると一回に送る量は減りますが、そのぶん整理が何度も走り、そのたびに AI への問い合わせが増えて、それまで送っていた内容をもう一度送り直すことになります。料金や待ち時間がかえって増えることがあるので、迷ったときは「デフォルト」に戻してください。
+                                                <span data-i18n="components.GlobalSettingsModal.text109">
+                                                    {uiText("components.GlobalSettingsModal.text109")}
                                                 </span>
                                             </div>
                                         </div>
@@ -1062,10 +1022,10 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                     <div key={k} className={styles.wmField}>
                                                         <label className={styles.subSettingLabel} htmlFor={inputId}>
                                                             {WATERMARK_LABELS[k]}
-                                                            <span className={`${styles.wmBadge} ${isUser ? styles.wmBadgeUser : ''}`}>
+                                                            <span data-i18n="components.GlobalSettingsModal.text044 components.GlobalSettingsModal.text045 components.GlobalSettingsModal.text110" className={`${styles.wmBadge} ${isUser ? styles.wmBadgeUser : ''}`}>
                                                                 {isUser
-                                                                    ? '設定した値'
-                                                                    : builtin != null ? `既定 ${builtin.toLocaleString()} 字` : '既定'}
+                                                                    ? uiText("components.GlobalSettingsModal.text044")
+                                                                    : builtin != null ? uiText("components.GlobalSettingsModal.text045", { p1: builtin.toLocaleString(getFormatLocale()) }) : uiText("components.GlobalSettingsModal.text110")}
                                                             </span>
                                                         </label>
                                                         <div className={styles.wmInputRow}>
@@ -1076,51 +1036,49 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                                 inputMode="numeric"
                                                                 className={`${styles.subSettingInput} ${bad ? styles.wmInputBad : ''}`}
                                                                 value={wmInputs[k]}
-                                                                placeholder={builtin != null ? builtin.toLocaleString() : ''}
+                                                                placeholder={builtin != null ? builtin.toLocaleString(getFormatLocale()) : ''}
                                                                 onChange={e => {
                                                                     const v = e.target.value;
                                                                     setWmInputs(prev => ({ ...prev, [k]: v }));
                                                                 }}
                                                                 onKeyDown={e => { if (e.key === 'Enter') saveMetabolismDefaults(); }}
                                                             />
-                                                            <span className={styles.wmUnit}>字</span>
-                                                            <button
+                                                            <span data-i18n="components.GlobalSettingsModal.text046" className={styles.wmUnit}>{uiText("components.GlobalSettingsModal.text046")}</span>
+                                                            <button data-i18n="components.GlobalSettingsModal.text047"
                                                                 type="button"
                                                                 className={styles.wmResetBtn}
                                                                 disabled={wmInputs[k] === ''}
                                                                 onClick={() => setWmInputs(prev => ({ ...prev, [k]: '' }))}
-                                                            >
-                                                                既定に戻す
-                                                            </button>
+                                                            >{uiText("components.GlobalSettingsModal.text047")}</button>
                                                         </div>
                                                     </div>
                                                 );
                                             })}
                                         </div>
                                         {wmViolations.size > 0 && (
-                                            <div className={styles.wmMessageBad}>
-                                                {WATERMARK_LABELS.target} ≤ {WATERMARK_LABELS.high} の順にしてください
+                                            <div data-i18n="components.GlobalSettingsModal.text048" className={styles.wmMessageBad}>
+                                                {WATERMARK_LABELS.target} ≤ {WATERMARK_LABELS.high} {uiText("components.GlobalSettingsModal.text048")}
                                             </div>
                                         )}
                                     </div>
 
                                     {(wmHasNaN || wmHasZero) && (
-                                        <div className={styles.wmMessageBad}>
-                                            1 以上の整数を入力してください（空欄 = 既定に戻す）
+                                        <div data-i18n="components.GlobalSettingsModal.text054" className={styles.wmMessageBad}>
+                                            {uiText("components.GlobalSettingsModal.text054")}
                                         </div>
                                     )}
                                     {wmError && <div className={styles.wmMessageBad}>{wmError}</div>}
                                     <div className={styles.wmFooter}>
-                                        <span className={styles.subSettingHint}>
-                                            モデル設定で数値を入れたモデルはそちらが優先されます。空欄のモデルはこの値に従います。
+                                        <span data-i18n="components.GlobalSettingsModal.text055" className={styles.subSettingHint}>
+                                            {uiText("components.GlobalSettingsModal.text055")}
                                         </span>
-                                        <button
+                                        <button data-i18n="components.GlobalSettingsModal.text056 components.GlobalSettingsModal.text057 components.GlobalSettingsModal.text058"
                                             type="button"
                                             className={styles.saveBtn}
                                             disabled={!wmCanSave}
                                             onClick={saveMetabolismDefaults}
                                         >
-                                            <Save size={16} /> {wmSaving ? '保存中...' : wmSavedAt && !wmDirty ? '保存しました' : '保存'}
+                                            <Save size={16} /> {wmSaving ? uiText("components.GlobalSettingsModal.text056") : wmSavedAt && !wmDirty ? uiText("components.GlobalSettingsModal.text057") : uiText("components.GlobalSettingsModal.text058")}
                                         </button>
                                     </div>
                                 </div>
@@ -1135,19 +1093,17 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                         {activeTab === 'models' && (
                             <div className={styles.modelsContainer}>
                                 <div className={styles.sectionHeader}>
-                                    <h3>モデルロール設定</h3>
+                                    <h3 data-i18n="components.GlobalSettingsModal.text059">{uiText("components.GlobalSettingsModal.text059")}</h3>
                                 </div>
 
                                 {modelRolesLoading ? (
-                                    <div>読み込み中...</div>
+                                    <div data-i18n="components.GlobalSettingsModal.text060">{uiText("components.GlobalSettingsModal.text060")}</div>
                                 ) : (
                                     <>
                                         {modelPresets.length > 0 && (
                                             <div className={styles.presetContainer}>
-                                                <div className={styles.presetHeader}>プリセット切替</div>
-                                                <div className={styles.presetDescription}>
-                                                    プロバイダを選択すると、全ロールのモデルを一括変更します
-                                                </div>
+                                                <div data-i18n="components.GlobalSettingsModal.text061" className={styles.presetHeader}>{uiText("components.GlobalSettingsModal.text061")}</div>
+                                                <div data-i18n="components.GlobalSettingsModal.text062" className={styles.presetDescription}>{uiText("components.GlobalSettingsModal.text062")}</div>
                                                 <div className={styles.presetList}>
                                                     {modelPresets.filter(p => p.is_available).map((preset) => (
                                                         <button
@@ -1171,8 +1127,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                             <span className={styles.roleDescription}>{info.description}</span>
                                                         </div>
                                                         <div className={styles.roleValue}>
-                                                            <span className={styles.roleModelName}>
-                                                                {info.display_name || info.value || '(未設定)'}
+                                                            <span data-i18n="components.GlobalSettingsModal.text063" className={styles.roleModelName}>
+                                                                {info.display_name || info.value || uiText("components.GlobalSettingsModal.text063")}
                                                             </span>
                                                             <button
                                                                 className={styles.roleChangeBtn}
@@ -1181,7 +1137,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                                 )}
                                                             >
                                                                 <ChevronDown size={14} />
-                                                                <span>変更</span>
+                                                                <span data-i18n="components.GlobalSettingsModal.text064">{uiText("components.GlobalSettingsModal.text064")}</span>
                                                             </button>
                                                         </div>
                                                     </div>
@@ -1213,18 +1169,14 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                         {activeTab === 'modelMgmt' && (
                             <div>
                                 <div className={styles.subTabRow}>
-                                    <button
+                                    <button data-i18n="components.GlobalSettingsModal.text065"
                                         className={`${styles.subTab} ${modelMgmtSubTab === 'providers' ? styles.subTabActive : ''}`}
                                         onClick={() => setModelMgmtSubTab('providers')}
-                                    >
-                                        プロバイダ
-                                    </button>
-                                    <button
+                                    >{uiText("components.GlobalSettingsModal.text065")}</button>
+                                    <button data-i18n="components.GlobalSettingsModal.text066"
                                         className={`${styles.subTab} ${modelMgmtSubTab === 'models' ? styles.subTabActive : ''}`}
                                         onClick={() => setModelMgmtSubTab('models')}
-                                    >
-                                        モデル
-                                    </button>
+                                    >{uiText("components.GlobalSettingsModal.text066")}</button>
                                 </div>
                                 {modelMgmtSubTab === 'providers' && <ProviderManagementPanel />}
                                 {modelMgmtSubTab === 'models' && <ModelManagementPanel />}
@@ -1237,21 +1189,16 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             <div className={styles.envContainer}>
                                 <div className={styles.sectionHeader}>
                                     <div>
-                                        <h3>Playbook実行権限</h3>
-                                        <p className={styles.pbSubtitle}>
-                                            ペルソナが各Playbookを自動実行する際の権限レベルを設定します
-                                        </p>
+                                        <h3 data-i18n="components.GlobalSettingsModal.text067">{uiText("components.GlobalSettingsModal.text067")}</h3>
+                                        <p data-i18n="components.GlobalSettingsModal.text068" className={styles.pbSubtitle}>{uiText("components.GlobalSettingsModal.text068")}</p>
                                     </div>
                                 </div>
 
                                 {playbookPermsLoading ? (
-                                    <div className={styles.pbEmpty}>
-                                        <RefreshCw size={20} style={{ animation: 'spin 1s linear infinite' }} /> 読み込み中...
-                                    </div>
+                                    <div data-i18n="components.GlobalSettingsModal.text069" className={styles.pbEmpty}>
+                                        <RefreshCw size={20} style={{ animation: 'spin 1s linear infinite' }} />{uiText("components.GlobalSettingsModal.text069")}</div>
                                 ) : playbookPerms.length === 0 ? (
-                                    <p className={styles.pbEmpty}>
-                                        Router呼び出し可能なPlaybookがありません
-                                    </p>
+                                    <p data-i18n="components.GlobalSettingsModal.text070" className={styles.pbEmpty}>{uiText("components.GlobalSettingsModal.text070")}</p>
                                 ) : (
                                     <div className={styles.pbList}>
                                         {playbookPerms.map(p => (
@@ -1271,11 +1218,11 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                     value={p.permission_level}
                                                     onChange={e => updatePlaybookPerm(p.playbook_name, e.target.value)}
                                                 >
-                                                    <option value="auto_allow">自動実行OK</option>
-                                                    <option value="ask_every_time">毎回許可が必要</option>
-                                                    <option value="user_only">ユーザー指定時のみ</option>
+                                                    <option data-i18n="components.GlobalSettingsModal.text071" value="auto_allow">{uiText("components.GlobalSettingsModal.text071")}</option>
+                                                    <option data-i18n="components.GlobalSettingsModal.text072" value="ask_every_time">{uiText("components.GlobalSettingsModal.text072")}</option>
+                                                    <option data-i18n="components.GlobalSettingsModal.text073" value="user_only">{uiText("components.GlobalSettingsModal.text073")}</option>
                                                     {p.permission_level === 'blocked' && (
-                                                        <option value="blocked" disabled>使用禁止</option>
+                                                        <option data-i18n="components.GlobalSettingsModal.text074" value="blocked" disabled>{uiText("components.GlobalSettingsModal.text074")}</option>
                                                     )}
                                                 </select>
                                             </div>
@@ -1288,7 +1235,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                         {activeTab === 'about' && (
                             <div className={styles.aboutContainer}>
                                 <div className={styles.sectionHeader}>
-                                    <h3>SAIVerseについて</h3>
+                                    <h3 data-i18n="components.GlobalSettingsModal.text075">{uiText("components.GlobalSettingsModal.text075")}</h3>
                                 </div>
 
                                 {/* Version */}
@@ -1298,57 +1245,54 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                             v{versionInfo.version}
                                         </div>
                                         {versionInfo.update_available && (
-                                            <div className={styles.aboutUpdateNotice}>
-                                                新しいバージョン v{versionInfo.latest_version} が利用可能です
-                                            </div>
+                                            <div data-i18n="components.GlobalSettingsModal.text076 components.GlobalSettingsModal.text077" className={styles.aboutUpdateNotice}>{uiText("components.GlobalSettingsModal.text076")}{versionInfo.latest_version}{uiText("components.GlobalSettingsModal.text077")}</div>
                                         )}
                                     </div>
                                 )}
 
                                 {/* Developer */}
                                 <div className={styles.aboutCard}>
-                                    <div className={styles.aboutCardTitle}>開発者</div>
+                                    <div data-i18n="components.GlobalSettingsModal.text078" className={styles.aboutCardTitle}>{uiText("components.GlobalSettingsModal.text078")}</div>
                                     <div className={styles.aboutDeveloper}>
-                                        <span>まはー</span>
+                                        <span data-i18n="components.GlobalSettingsModal.text079">{uiText("components.GlobalSettingsModal.text079")}</span>
                                         <a href="https://x.com/Lize_san_suki" target="_blank" rel="noopener noreferrer" className={styles.aboutLink}>
-                                            <ExternalLink size={14} /> @Lize_san_suki
-                                        </a>
+                                            <ExternalLink size={14} /> {uiText("components.GlobalSettingsModal.label007")}</a>
                                     </div>
                                 </div>
 
                                 {/* Links */}
                                 <div className={styles.aboutCard}>
-                                    <div className={styles.aboutCardTitle}>リンク</div>
+                                    <div data-i18n="components.GlobalSettingsModal.text080" className={styles.aboutCardTitle}>{uiText("components.GlobalSettingsModal.text080")}</div>
                                     <div className={styles.aboutLinks}>
                                         <a href="https://saiverse.net/" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
                                             <span className={styles.aboutLinkIcon}>🌐</span>
                                             <div>
-                                                <div className={styles.aboutLinkName}>公式サイト</div>
-                                                <div className={styles.aboutLinkDesc}>saiverse.net</div>
+                                                <div data-i18n="components.GlobalSettingsModal.text081" className={styles.aboutLinkName}>{uiText("components.GlobalSettingsModal.text081")}</div>
+                                                <div className={styles.aboutLinkDesc}>{uiText("components.GlobalSettingsModal.label008")}</div>
                                             </div>
                                             <ExternalLink size={14} className={styles.aboutLinkArrow} />
                                         </a>
                                         <a href="https://discord.gg/qMcgEk83Ag" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
                                             <span className={styles.aboutLinkIcon}>💬</span>
                                             <div>
-                                                <div className={styles.aboutLinkName}>Discord コミュニティ</div>
-                                                <div className={styles.aboutLinkDesc}>質問・雑談・バグ報告など</div>
+                                                <div data-i18n="components.GlobalSettingsModal.text082" className={styles.aboutLinkName}>{uiText("components.GlobalSettingsModal.text082")}</div>
+                                                <div data-i18n="components.GlobalSettingsModal.text083" className={styles.aboutLinkDesc}>{uiText("components.GlobalSettingsModal.text083")}</div>
                                             </div>
                                             <ExternalLink size={14} className={styles.aboutLinkArrow} />
                                         </a>
                                         <a href="https://github.com/maha0525/SAIVerse" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
                                             <span className={styles.aboutLinkIcon}>📦</span>
                                             <div>
-                                                <div className={styles.aboutLinkName}>GitHub</div>
-                                                <div className={styles.aboutLinkDesc}>ソースコード・Issues</div>
+                                                <div className={styles.aboutLinkName}>{uiText("components.GlobalSettingsModal.label009")}</div>
+                                                <div data-i18n="components.GlobalSettingsModal.text084" className={styles.aboutLinkDesc}>{uiText("components.GlobalSettingsModal.text084")}</div>
                                             </div>
                                             <ExternalLink size={14} className={styles.aboutLinkArrow} />
                                         </a>
                                         <a href="https://note.com/maha0525/n/n5a63f572be8f" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
                                             <span className={styles.aboutLinkIcon}>📝</span>
                                             <div>
-                                                <div className={styles.aboutLinkName}>Note</div>
-                                                <div className={styles.aboutLinkDesc}>開発記録・サポート（チップ）</div>
+                                                <div className={styles.aboutLinkName}>{uiText("components.GlobalSettingsModal.label010")}</div>
+                                                <div data-i18n="components.GlobalSettingsModal.text085" className={styles.aboutLinkDesc}>{uiText("components.GlobalSettingsModal.text085")}</div>
                                             </div>
                                             <ExternalLink size={14} className={styles.aboutLinkArrow} />
                                         </a>
@@ -1357,20 +1301,15 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
                                 {/* Support */}
                                 <div className={styles.aboutCard}>
-                                    <div className={styles.aboutCardTitle}>支援について</div>
-                                    <div className={styles.aboutSupportText}>
-                                        SAIVerseはフリーソフトウェアとして開発を続けています。
-                                    </div>
+                                    <div data-i18n="components.GlobalSettingsModal.text086" className={styles.aboutCardTitle}>{uiText("components.GlobalSettingsModal.text086")}</div>
+                                    <div data-i18n="components.GlobalSettingsModal.text087" className={styles.aboutSupportText}>{uiText("components.GlobalSettingsModal.text087")}</div>
                                     <div className={styles.aboutSupportItems}>
                                         <a href="https://github.com/sponsors/maha0525" target="_blank" rel="noopener noreferrer" className={styles.aboutSupportItem} style={{ cursor: 'pointer' }}>
-                                            <span className={`${styles.aboutSupportBadge} ${styles.active}`}>受付中</span>
-                                            GitHub Sponsors
-                                            <ExternalLink size={14} className={styles.aboutLinkArrow} />
+                                            <span data-i18n="components.GlobalSettingsModal.text088" className={`${styles.aboutSupportBadge} ${styles.active}`}>{uiText("components.GlobalSettingsModal.text088")}</span>
+                                            {uiText("components.GlobalSettingsModal.label011")}<ExternalLink size={14} className={styles.aboutLinkArrow} />
                                         </a>
-                                        <a href="https://note.com/maha0525/n/n5a63f572be8f" target="_blank" rel="noopener noreferrer" className={styles.aboutSupportItem} style={{ cursor: 'pointer' }}>
-                                            <span className={`${styles.aboutSupportBadge} ${styles.active}`}>受付中</span>
-                                            Noteからチップを送る
-                                            <ExternalLink size={14} className={styles.aboutLinkArrow} />
+                                        <a data-i18n="components.GlobalSettingsModal.text090" href="https://note.com/maha0525/n/n5a63f572be8f" target="_blank" rel="noopener noreferrer" className={styles.aboutSupportItem} style={{ cursor: 'pointer' }}>
+                                            <span data-i18n="components.GlobalSettingsModal.text089" className={`${styles.aboutSupportBadge} ${styles.active}`}>{uiText("components.GlobalSettingsModal.text089")}</span>{uiText("components.GlobalSettingsModal.text090")}<ExternalLink size={14} className={styles.aboutLinkArrow} />
                                         </a>
                                     </div>
                                 </div>
@@ -1380,21 +1319,19 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                         {activeTab === 'utilities' && (
                             <div className={styles.utilitiesContainer}>
                                 <div className={styles.sectionHeader}>
-                                    <h3>便利機能</h3>
+                                    <h3 data-i18n="components.GlobalSettingsModal.text091">{uiText("components.GlobalSettingsModal.text091")}</h3>
                                 </div>
 
                                 {/* アイテム概要の一括生成 */}
                                 <div className={styles.utilityCard}>
-                                    <h4 className={styles.utilityTitle}>アイテム概要の一括生成</h4>
-                                    <p className={styles.utilityDesc}>
-                                        概要が未設定（またはデフォルト）の画像アイテムに対して、作成当時の会話履歴を参照しながら概要を自動生成します。
-                                    </p>
+                                    <h4 data-i18n="components.GlobalSettingsModal.text092" className={styles.utilityTitle}>{uiText("components.GlobalSettingsModal.text092")}</h4>
+                                    <p data-i18n="components.GlobalSettingsModal.text093" className={styles.utilityDesc}>{uiText("components.GlobalSettingsModal.text093")}</p>
 
                                     <div className={styles.utilityForm}>
                                         <div className={styles.utilityRow}>
-                                            <label>対象Building</label>
+                                            <label data-i18n="components.GlobalSettingsModal.text094">{uiText("components.GlobalSettingsModal.text094")}</label>
                                             <select value={bfBuildingId} onChange={e => { setBfBuildingId(e.target.value); setBfPersonaId(''); }}>
-                                                <option value="">すべて（City全体）</option>
+                                                <option data-i18n="components.GlobalSettingsModal.text095" value="">{uiText("components.GlobalSettingsModal.text095")}</option>
                                                 {bfBuildings.map(b => (
                                                     <option key={b.id} value={b.id}>{b.name}</option>
                                                 ))}
@@ -1403,9 +1340,9 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
                                         {bfBuildingId && (
                                             <div className={styles.utilityRow}>
-                                                <label>参照ペルソナ</label>
+                                                <label data-i18n="components.GlobalSettingsModal.text096">{uiText("components.GlobalSettingsModal.text096")}</label>
                                                 <select value={bfPersonaId} onChange={e => setBfPersonaId(e.target.value)}>
-                                                    <option value="">自動（全ペルソナから最近傍を選択）</option>
+                                                    <option data-i18n="components.GlobalSettingsModal.text097" value="">{uiText("components.GlobalSettingsModal.text097")}</option>
                                                     {bfPersonas.map(p => (
                                                         <option key={p.persona_id} value={p.persona_id}>{p.persona_name}</option>
                                                     ))}
@@ -1414,28 +1351,26 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                         )}
 
                                         <div className={styles.utilityRow}>
-                                            <label className={styles.checkboxLabel}>
-                                                <input type="checkbox" checked={bfDryRun} onChange={e => setBfDryRun(e.target.checked)} />
-                                                ドライラン（確認のみ・DBに書き込まない）
-                                            </label>
+                                            <label data-i18n="components.GlobalSettingsModal.text098" className={styles.checkboxLabel}>
+                                                <input type="checkbox" checked={bfDryRun} onChange={e => setBfDryRun(e.target.checked)} />{uiText("components.GlobalSettingsModal.text098")}</label>
                                         </div>
 
-                                        <button
+                                        <button data-i18n="components.GlobalSettingsModal.text099 components.GlobalSettingsModal.text100"
                                             className={styles.utilityRunBtn}
                                             onClick={runBackfill}
                                             disabled={bfRunning}
                                         >
-                                            {bfRunning ? <><Loader size={14} className={styles.spin} /> 処理中...</> : '実行'}
+                                            {bfRunning ? <><Loader size={14} className={styles.spin} />{uiText("components.GlobalSettingsModal.text099")}</> : uiText("components.GlobalSettingsModal.text100")}
                                         </button>
                                     </div>
 
                                     {bfResults && (
                                         <div className={styles.utilityResults}>
                                             <div className={styles.utilityStats}>
-                                                <span className={styles.statUpdated}>更新: {bfResults.processed}</span>
-                                                <span className={styles.statSkipped}>スキップ: {bfResults.skipped}</span>
-                                                <span className={styles.statFailed}>失敗: {bfResults.failed}</span>
-                                                {bfDryRun && <span className={styles.dryRunBadge}>DRY RUN</span>}
+                                                <span data-i18n="components.GlobalSettingsModal.text101" className={styles.statUpdated}>{uiText("components.GlobalSettingsModal.text101")}{bfResults.processed}</span>
+                                                <span data-i18n="components.GlobalSettingsModal.text102" className={styles.statSkipped}>{uiText("components.GlobalSettingsModal.text102")}{bfResults.skipped}</span>
+                                                <span data-i18n="components.GlobalSettingsModal.text103" className={styles.statFailed}>{uiText("components.GlobalSettingsModal.text103")}{bfResults.failed}</span>
+                                                {bfDryRun && <span className={styles.dryRunBadge}>{uiText("components.GlobalSettingsModal.label012")}</span>}
                                             </div>
                                             <div className={styles.utilityResultList}>
                                                 {bfResults.results.map(r => (

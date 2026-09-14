@@ -1,4 +1,9 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
@@ -62,19 +67,19 @@ interface MCPSectionProps {
 // ---------------------------------------------------------------------------
 
 const CATEGORY_LABELS: Record<string, string> = {
-    runtime_missing: '必要なランタイムが見つからない',
-    missing_config: '必須の設定値が未設定',
-    auth_failed: '認証失敗',
-    command_error: '起動コマンドエラー',
-    network: 'ネットワークエラー',
-    process_crash: 'プロセス異常終了',
-    busy: '起動・停止処理が進行中',
-    service_unavailable: '接続先のサービスが応答できない状態 (一時的)',
-    unknown: '不明なエラー',
+    get runtime_missing() { return uiText("components.MCPSection.text001"); },
+    get missing_config() { return uiText("components.MCPSection.text002"); },
+    get auth_failed() { return uiText("components.MCPSection.text003"); },
+    get command_error() { return uiText("components.MCPSection.text004"); },
+    get network() { return uiText("components.MCPSection.text005"); },
+    get process_crash() { return uiText("components.MCPSection.text006"); },
+    get busy() { return uiText("components.MCPSection.text007"); },
+    get service_unavailable() { return uiText("components.MCPSection.text008"); },
+    get unknown() { return uiText("components.MCPSection.text009"); },
 };
 
 function formatCategory(category: string | null): string {
-    if (!category) return '不明';
+    if (!category) return uiText("components.MCPSection.text010");
     return CATEGORY_LABELS[category] ?? category;
 }
 
@@ -98,6 +103,7 @@ export default function MCPSection({
     defaultCollapsed = true,
     refreshKey = 0,
 }: MCPSectionProps) {
+    useLocale();
     const [expanded, setExpanded] = useState(!defaultCollapsed);
     const [servers, setServers] = useState<MCPServerStatus[]>([]);
     const [failures, setFailures] = useState<MCPFailure[]>([]);
@@ -128,8 +134,8 @@ export default function MCPSection({
         if (clearError) setError(null);
         try {
             const [serversResp, failuresResp] = await Promise.all([
-                fetch('/api/mcp/servers'),
-                fetch('/api/mcp/failures'),
+                apiFetch('/api/mcp/servers'),
+                apiFetch('/api/mcp/failures'),
             ]);
             if (!serversResp.ok) {
                 throw new Error(`/api/mcp/servers ${serversResp.status}`);
@@ -169,7 +175,7 @@ export default function MCPSection({
             if (!resp.ok) {
                 const text = await resp.text();
                 console.error('[MCPSection] action failed:', actionKey, resp.status, text);
-                setError(`操作に失敗しました (${resp.status}): ${text}`);
+                setError(uiText("components.MCPSection.text011", { p1: resp.status, p2: text }));
                 return;
             }
             // ここが 2026-08-25 の「押しても無反応」の直接原因だった箇所。
@@ -183,7 +189,7 @@ export default function MCPSection({
                     setNotice(String(body.message));
                     setError(null);
                 } else {
-                    setError(String(body.error || '操作は完了しませんでした'));
+                    setError(String(body.error || uiText("components.MCPSection.text012")));
                 }
                 return;
             }
@@ -200,16 +206,16 @@ export default function MCPSection({
 
     const handleReconnect = (serverName: string) =>
         runAction(`reconnect:${serverName}`, () =>
-            fetch(
+            apiFetch(
                 `/api/mcp/servers/${encodeURIComponent(serverName)}/reconnect`,
                 { method: 'POST' },
             ),
         );
 
     const handleStop = async (instanceKey: string) => {
-        if (!confirm(`インスタンス "${instanceKey}" を停止しますか？`)) return;
+        if (!confirm(uiText("components.MCPSection.text013", { p1: instanceKey }))) return;
         await runAction(`stop:${instanceKey}`, () =>
-            fetch(
+            apiFetch(
                 `/api/mcp/instances/stop?instance_key=${encodeURIComponent(instanceKey)}`,
                 { method: 'POST' },
             ),
@@ -218,7 +224,7 @@ export default function MCPSection({
 
     const handleRetry = (instanceKey: string) =>
         runAction(`retry:${instanceKey}`, () =>
-            fetch(
+            apiFetch(
                 `/api/mcp/instances/retry?instance_key=${encodeURIComponent(instanceKey)}`,
                 { method: 'POST' },
             ),
@@ -251,8 +257,8 @@ export default function MCPSection({
     }
 
     const headerLabel = addonName
-        ? 'このアドオンの MCP サーバー'
-        : 'MCP サーバー管理';
+        ? uiText("components.MCPSection.text014")
+        : uiText("components.MCPSection.text015");
 
     return (
         <div className={styles.section}>
@@ -274,9 +280,9 @@ export default function MCPSection({
 
             {expanded && (
                 <div className={styles.sectionBody}>
-                    {loading && <p className={styles.loadingText}>読み込み中...</p>}
+                    {loading && <p data-i18n="components.MCPSection.text016" className={styles.loadingText}>{uiText("components.MCPSection.text016")}</p>}
                     {error && (
-                        <p className={styles.errorText}>エラー: {error}</p>
+                        <p data-i18n="components.MCPSection.text017" className={styles.errorText}>{uiText("components.MCPSection.text017")}{error}</p>
                     )}
                     {notice && (
                         <p className={styles.noticeText}>{notice}</p>
@@ -286,14 +292,12 @@ export default function MCPSection({
                         !error &&
                         visibleServers.length === 0 &&
                         visibleFailures.length === 0 && (
-                            <p className={styles.emptyText}>
-                                MCP サーバーは設定されていません。
-                            </p>
+                            <p data-i18n="components.MCPSection.text018" className={styles.emptyText}>{uiText("components.MCPSection.text018")}</p>
                         )}
 
                     {visibleFailures.length > 0 && (
                         <div className={styles.failureList}>
-                            <h4 className={styles.subHeader}>起動失敗中</h4>
+                            <h4 data-i18n="components.MCPSection.text019" className={styles.subHeader}>{uiText("components.MCPSection.text019")}</h4>
                             {visibleFailures.map((failure) => (
                                 <div
                                     key={failure.instance_key}
@@ -314,14 +318,12 @@ export default function MCPSection({
                                         </p>
                                     )}
                                     <div className={styles.failureFooter}>
-                                        <span>
-                                            試行 {failure.attempts} 回
-                                            {failure.in_backoff &&
-                                                ` ・再試行まで ${Math.ceil(
+                                        <span data-i18n="components.MCPSection.text020 components.MCPSection.text021 components.MCPSection.text022">{uiText("components.MCPSection.text020")}{failure.attempts}{uiText("components.MCPSection.text021")}{failure.in_backoff &&
+                                                uiText("components.MCPSection.text022", { p1: Math.ceil(
                                                     failure.seconds_until_retry,
-                                                )} 秒`}
+                                                ) })}
                                         </span>
-                                        <button
+                                        <button data-i18n="components.MCPSection.text023"
                                             type="button"
                                             className={styles.actionButton}
                                             onClick={() =>
@@ -332,8 +334,7 @@ export default function MCPSection({
                                                 `retry:${failure.instance_key}`
                                             }
                                         >
-                                            <PlayCircle size={14} /> 即時リトライ
-                                        </button>
+                                            <PlayCircle size={14} />{uiText("components.MCPSection.text023")}</button>
                                     </div>
                                 </div>
                             ))}
@@ -351,7 +352,7 @@ export default function MCPSection({
                                         className={styles.serverCard}
                                     >
                                         <div className={styles.serverHeader}>
-                                            <span
+                                            <span data-i18n="components.MCPSection.text024 components.MCPSection.text025"
                                                 className={`${styles.statusDot} ${
                                                     server.connected
                                                         ? styles.connected
@@ -359,8 +360,8 @@ export default function MCPSection({
                                                 }`}
                                                 title={
                                                     server.connected
-                                                        ? '接続中'
-                                                        : '未接続'
+                                                        ? uiText("components.MCPSection.text024")
+                                                        : uiText("components.MCPSection.text025")
                                                 }
                                             />
                                             <span className={styles.serverName}>
@@ -379,18 +380,18 @@ export default function MCPSection({
                                         <div className={styles.serverMeta}>
                                             {server.instance_key && (
                                                 <span>
-                                                    instance:{' '}
+                                                    {uiText("components.MCPSection.label001")}{' '}
                                                     <code>
                                                         {server.instance_key}
                                                     </code>
                                                 </span>
                                             )}
                                             <span>
-                                                transport: {server.transport ?? '-'}
+                                                {uiText("components.MCPSection.label002")}{server.transport ?? '-'}
                                             </span>
-                                            <span>tools: {server.tool_count}</span>
+                                            <span>{uiText("components.MCPSection.label003")}{server.tool_count}</span>
                                             <span>
-                                                refcount: {server.refcount}
+                                                {uiText("components.MCPSection.label004")}{server.refcount}
                                             </span>
                                         </div>
 
@@ -416,7 +417,7 @@ export default function MCPSection({
                                         )}
 
                                         <div className={styles.serverActions}>
-                                            <button
+                                            <button data-i18n="components.MCPSection.text026"
                                                 type="button"
                                                 className={styles.actionButton}
                                                 onClick={() =>
@@ -429,10 +430,9 @@ export default function MCPSection({
                                                     `reconnect:${server.qualified_server_name}`
                                                 }
                                             >
-                                                <RefreshCw size={14} /> 再接続
-                                            </button>
+                                                <RefreshCw size={14} />{uiText("components.MCPSection.text026")}</button>
                                             {server.instance_key && (
-                                                <button
+                                                <button data-i18n="components.MCPSection.text027"
                                                     type="button"
                                                     className={styles.actionButton}
                                                     onClick={() =>
@@ -445,8 +445,7 @@ export default function MCPSection({
                                                         `stop:${server.instance_key}`
                                                     }
                                                 >
-                                                    <Square size={14} /> 停止
-                                                </button>
+                                                    <Square size={14} />{uiText("components.MCPSection.text027")}</button>
                                             )}
                                         </div>
                                     </div>

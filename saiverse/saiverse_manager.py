@@ -1733,6 +1733,7 @@ class SAIVerseManager(
         host_avatar_path: Optional[str] = None,
         host_avatar_upload: Optional[str] = None,
         map_background_image: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> str:
         """ワールドエディタから City の設定を更新する。``name`` は表示名 (CITYNAME)。
 
@@ -1750,6 +1751,7 @@ class SAIVerseManager(
             host_avatar_path,
             host_avatar_upload,
             map_background_image,
+            language=language,
         )
 
     def get_user_profile(self) -> Tuple[str, str]:
@@ -1767,9 +1769,9 @@ class SAIVerseManager(
 
     # --- World Editor: Create/Delete Methods ---
 
-    def create_city(self, slug: str, name: str, description: str, ui_port: int, api_port: int, timezone_name: str) -> str:
+    def create_city(self, slug: str, name: str, description: str, ui_port: int, api_port: int, timezone_name: str, language: str = "ja") -> str:
         """Creates a new city. ``slug`` = 内部の識別子、``name`` = 表示名。"""
-        return self.admin.create_city(slug, name, description, ui_port, api_port, timezone_name)
+        return self.admin.create_city(slug, name, description, ui_port, api_port, timezone_name, language=language)
 
     def delete_city(self, city_id: int) -> str:
         """Deletes a city after checking dependencies."""
@@ -1997,10 +1999,10 @@ class SAIVerseManager(
         return self.admin.get_ai_details(ai_id)
 
     def create_ai(
-        self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None
+        self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None, language: Optional[str] = None
     ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         """Creates a new AI and their private room."""
-        result = self.admin.create_ai(name, system_prompt, home_city_id, custom_ai_id)
+        result = self.admin.create_ai(name, system_prompt, home_city_id, custom_ai_id, language=language)
         success = result[0]
         if success:
             # Reload buildings from DB to ensure in-memory list is consistent.
@@ -2037,6 +2039,7 @@ class SAIVerseManager(
         realtime_info_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
         user_conv_timeout_minutes: Optional[int] = None,
+        language: Optional[str] = None,
     ) -> str:
         """ワールドエディタからAIの設定を更新する"""
         return self.admin.update_ai(
@@ -2066,6 +2069,7 @@ class SAIVerseManager(
             realtime_info_enabled=realtime_info_enabled,
             meta_judgment_config=meta_judgment_config,
             user_conv_timeout_minutes=user_conv_timeout_minutes,
+            language=language,
         )
 
     def delete_ai(self, ai_id: str) -> str:

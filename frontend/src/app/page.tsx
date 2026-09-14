@@ -1,4 +1,11 @@
 "use client";
+import { apiFetch, parseUIEvent } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent, useCallback, useMemo, ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform, Components } from 'react-markdown';
@@ -246,6 +253,7 @@ function CacheHitDot({ usage, total }: {
     usage?: MessageLLMUsage;
     total?: MessageLLMUsageTotal;
 }) {
+    useLocale();
     // 複数コールの Pulse は合算を、単発は単発の実数を見せる (足元の使用量
     // チップと同じ選び方)。ライブの say イベントは合算しか運ばないので、
     // 単発が無いときも合算へ落とす。
@@ -254,20 +262,21 @@ function CacheHitDot({ usage, total }: {
     if (!cached) return null;
     const input = useTotal ? (total?.total_input_tokens ?? 0) : (usage?.input_tokens ?? 0);
     const output = useTotal ? (total?.total_output_tokens ?? 0) : (usage?.output_tokens ?? 0);
-    const label = `キャッシュヒット: 入力 ${input.toLocaleString()} トークンのうち ${cached.toLocaleString()} をキャッシュから読み込み / 出力 ${output.toLocaleString()} トークン`;
+    const label = uiText("app.page.text001", { p1: input.toLocaleString(getFormatLocale()), p2: cached.toLocaleString(getFormatLocale()), p3: output.toLocaleString(getFormatLocale()) });
     return (
         <span className={styles.cacheDotWrap} tabIndex={0} role="img" aria-label={label}>
             <span className={styles.cacheDot} />
             <div className={styles.cacheDotTooltip}>
-                <div>入力 {input.toLocaleString()} tokens</div>
-                <div>うちキャッシュ読み {cached.toLocaleString()} tokens</div>
-                <div>出力 {output.toLocaleString()} tokens</div>
+                <div data-i18n="app.page.text002">{uiText("app.page.text002")}{input.toLocaleString(getFormatLocale())} {uiText("app.page.label001")}</div>
+                <div data-i18n="app.page.text003">{uiText("app.page.text003")}{cached.toLocaleString(getFormatLocale())} {uiText("app.page.label002")}</div>
+                <div data-i18n="app.page.text004">{uiText("app.page.text004")}{output.toLocaleString(getFormatLocale())} {uiText("app.page.label003")}</div>
             </div>
         </span>
     );
 }
 
 export default function Home() {
+    useLocale();
     // Enable user presence tracking (heartbeat + visibility)
     useActivityTracker();
 
@@ -356,7 +365,7 @@ export default function Home() {
     const [linkItemModalItem, setLinkItemModalItem] = useState<{ id: string; name: string; description?: string; type: string } | null>(null);
     const handleOpenItemFromLink = useCallback(async (itemId: string) => {
         try {
-            const res = await fetch(`/api/info/details?building_id=${currentBuildingIdRef.current}`);
+            const res = await apiFetch(`/api/info/details?building_id=${currentBuildingIdRef.current}`);
             if (!res.ok) return;
             const data = await res.json();
             const found = data.items?.find((it: { id: string }) => it.id === itemId);
@@ -431,7 +440,7 @@ export default function Home() {
 
     // アドオン一覧を取得してバブルボタン定義を構築する
     useEffect(() => {
-        fetch('/api/addon/')
+        apiFetch('/api/addon/')
             .then((r) => r.ok ? r.json() : [])
             .then((addons: Array<{
                 addon_name: string;
@@ -560,7 +569,7 @@ export default function Home() {
 
         const checkTutorial = async () => {
             try {
-                const res = await fetch('/api/tutorial/status');
+                const res = await apiFetch('/api/tutorial/status');
                 if (res.ok) {
                     const data = await res.json();
                     // Show tutorial if not completed or if initial setup is needed
@@ -774,7 +783,7 @@ export default function Home() {
 
             console.log(`[DEBUG] Fetching history: before=${beforeId}, building_id=${bid}, gameView=${gameView ? game.region_id : 'none'}`);
 
-            const res = await fetch(url);
+            const res = await apiFetch(url);
             if (res.ok) {
                 setBackendConnected(true);
                 const data: HistoryResponse = await res.json();
@@ -810,7 +819,7 @@ export default function Home() {
                     void Promise.all(
                         assistantIds.map(async (mid) => {
                             try {
-                                const r = await fetch(
+                                const r = await apiFetch(
                                     `/api/addon/messages/${encodeURIComponent(mid)}/metadata`,
                                 );
                                 if (!r.ok) return;
@@ -877,7 +886,7 @@ export default function Home() {
         const game = activeGameRef.current;
         if (!game) return;
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/world/regions/${encodeURIComponent(game.region_id)}/game/rejoin`,
                 { method: 'POST' },
             );
@@ -886,7 +895,7 @@ export default function Home() {
                 return;
             }
             updateSessionLogPeek(false);
-            const statusRes = await fetch('/api/user/status');
+            const statusRes = await apiFetch('/api/user/status');
             if (statusRes.ok) {
                 const data = await statusRes.json();
                 const serverBid: string | null = data.current_building_id ?? null;
@@ -918,7 +927,7 @@ export default function Home() {
             params.append('limit', '10');
             if (bid) params.append('building_id', bid);
 
-            const res = await fetch(`/api/chat/history?${params.toString()}`);
+            const res = await apiFetch(`/api/chat/history?${params.toString()}`);
             if (!res.ok) return;
             const data = await res.json();
             const serverMessages: Message[] = data.history || [];
@@ -1014,7 +1023,7 @@ export default function Home() {
                 // 汚染されうる (エリス上書き事故の遠因)。
                 return;
             }
-            const res = await fetch(`/api/info/details?building_id=${encodeURIComponent(bid)}`);
+            const res = await apiFetch(`/api/info/details?building_id=${encodeURIComponent(bid)}`);
             if (res.ok) {
                 const data = await res.json();
                 setCurrentBuildingName(data.name || 'SAIVerse');
@@ -1085,7 +1094,7 @@ export default function Home() {
 
     useEffect(() => {
         // Fetch current building_id for multi-device safety
-        fetch('/api/user/status')
+        apiFetch('/api/user/status')
             .then(res => {
                 if (!res.ok) {
                     setBackendConnected(false);
@@ -1119,7 +1128,7 @@ export default function Home() {
         // meta_simple_speak, and the old track_user_conversation explicit
         // selection) are collapsed to "auto" because the new 2-mode UI only
         // recognises null and the TOOL_MODE_SELECTED sentinel.
-        fetch('/api/config/playbook')
+        apiFetch('/api/config/playbook')
             .then(res => res.ok ? res.json() : null)
             .then(data => {
                 if (data) {
@@ -1137,8 +1146,8 @@ export default function Home() {
 
         // Fetch current model setting
         Promise.all([
-            fetch('/api/config/config').then(res => res.ok ? res.json() : null),
-            fetch('/api/config/models').then(res => res.ok ? res.json() : null)
+            apiFetch('/api/config/config').then(res => res.ok ? res.json() : null),
+            apiFetch('/api/config/models').then(res => res.ok ? res.json() : null)
         ]).then(([config, models]) => {
             if (config?.current_model && models) {
                 const modelId = config.current_model;
@@ -1150,7 +1159,7 @@ export default function Home() {
         }).catch(err => console.error('Failed to load model setting', err));
 
         // Fetch startup warnings
-        fetch('/api/config/startup-warnings')
+        apiFetch('/api/config/startup-warnings')
             .then(res => res.ok ? res.json() : null)
             .then(data => {
                 if (data?.warnings?.length > 0) {
@@ -1161,7 +1170,7 @@ export default function Home() {
             .catch(err => console.error('Failed to fetch startup warnings', err));
 
         // Check timezone mismatch
-        fetch('/api/db/tables/city')
+        apiFetch('/api/db/tables/city')
             .then(res => res.ok ? res.json() : null)
             .then(cities => {
                 if (!cities || cities.length === 0) return;
@@ -1178,7 +1187,7 @@ export default function Home() {
             .catch(err => console.error('Timezone check failed:', err));
 
         // Check if embedding model changed and reembed is needed
-        fetch('/api/config/reembed-check')
+        apiFetch('/api/config/reembed-check')
             .then(res => res.ok ? res.json() : null)
             .then(data => {
                 if (data?.needed) {
@@ -1188,11 +1197,11 @@ export default function Home() {
             .catch(err => console.error('Failed to check reembed', err));
 
         // Check for updates (respects update-check toggle)
-        fetch('/api/config/update-check')
+        apiFetch('/api/config/update-check')
             .then(res => res.ok ? res.json() : null)
             .then(cfg => {
                 if (cfg && !cfg.enabled) return;  // Skip if disabled
-                return fetch('/api/system/version')
+                return apiFetch('/api/system/version')
                     .then(res => res.ok ? res.json() : null)
                     .then(data => {
                         if (data?.version) {
@@ -1211,11 +1220,11 @@ export default function Home() {
         // Check for unread announcements (and poll every 30 minutes)
         const checkAnnouncements = () => {
             // Check if announcements monitoring is enabled before fetching
-            fetch('/api/config/announcements-monitor')
+            apiFetch('/api/config/announcements-monitor')
                 .then(res => res.ok ? res.json() : null)
                 .then(cfg => {
                     if (cfg && !cfg.enabled) return;  // Skip if disabled
-                    return fetch('/api/system/announcements')
+                    return apiFetch('/api/system/announcements')
                         .then(res => res.ok ? res.json() : null)
                         .then(data => {
                             if (data?.announcements?.length > 0) {
@@ -1255,7 +1264,7 @@ export default function Home() {
         }
 
         const fetchRpd = () => {
-            fetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
+            apiFetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
                 .then(res => res.ok ? res.json() : null)
                 .then((data: { model_id: string; used: number; limit: number }[] | null) => {
                     if (data && data.length > 0) {
@@ -1282,13 +1291,13 @@ export default function Home() {
             if (currentBuildingIdRef.current === deletedId) {
                 // Current building was deleted — move to the first available building
                 try {
-                    const res = await fetch('/api/user/buildings');
+                    const res = await apiFetch('/api/user/buildings');
                     if (res.ok) {
                         const data = await res.json();
                         const buildings = data.buildings || [];
                         if (buildings.length > 0) {
                             const target = buildings[0];
-                            const moveRes = await fetch('/api/user/move', {
+                            const moveRes = await apiFetch('/api/user/move', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ target_building_id: target.id }),
@@ -1347,7 +1356,7 @@ export default function Home() {
                 const pollUrl = gameView
                     ? `/api/world/regions/${encodeURIComponent(game.region_id)}/game/log?after=${encodeURIComponent(newestId)}&limit=50`
                     : `/api/chat/history?after=${newestId}&limit=50${bidParam}`;
-                const res = await fetch(pollUrl);
+                const res = await apiFetch(pollUrl);
                 if (res.ok) {
                     const data = await res.json();
                     const newMessages: Message[] = data.history || [];
@@ -1382,7 +1391,7 @@ export default function Home() {
         const syncInterval = setInterval(async () => {
             if (isProcessingRef.current) return; // ストリーミング中は画面を奪わない
             try {
-                const res = await fetch('/api/user/status');
+                const res = await apiFetch('/api/user/status');
                 if (!res.ok) return;
                 const data = await res.json();
                 const serverBid: string | null = data.current_building_id ?? null;
@@ -1443,7 +1452,7 @@ export default function Home() {
 
         const reconnectInterval = setInterval(async () => {
             try {
-                const res = await fetch('/api/user/status');
+                const res = await apiFetch('/api/user/status');
                 if (res.ok) {
                     if (!backendConnected) {
                         setBackendConnected(true);
@@ -1482,7 +1491,7 @@ export default function Home() {
         for (const personaId of reembedNeeded.persona_ids) {
             try {
                 setReembedBannerProgress(`Re-embedding ${personaId}...`);
-                const res = await fetch(`/api/people/${personaId}/reembed`, {
+                const res = await apiFetch(`/api/people/${personaId}/reembed`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ force: true }),
@@ -1493,7 +1502,7 @@ export default function Home() {
                 let done = false;
                 while (!done) {
                     await new Promise(r => setTimeout(r, 1500));
-                    const statusRes = await fetch(`/api/people/${personaId}/reembed/status`);
+                    const statusRes = await apiFetch(`/api/people/${personaId}/reembed/status`);
                     if (!statusRes.ok) break;
                     const status = await statusRes.json();
                     if (status.running) {
@@ -1515,7 +1524,7 @@ export default function Home() {
     const handleReembedLater = () => {
         setReembedNeeded(null);
         const toastId = `reembed-later-${Date.now()}`;
-        setToasts(prev => [...prev, { id: toastId, content: '設定 > メモリ管理 > エンベディング管理から再実行できます。' }]);
+        setToasts(prev => [...prev, { id: toastId, content: uiText("app.page.text005") }]);
         setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 8000);
     };
 
@@ -1527,7 +1536,7 @@ export default function Home() {
         if (!confirmed) return;
 
         try {
-            const res = await fetch('/api/system/update', { method: 'POST' });
+            const res = await apiFetch('/api/system/update', { method: 'POST' });
             if (res.ok) {
                 updatingTargetVersion.current = updateAvailable.version;
                 setIsUpdating(true);
@@ -1564,7 +1573,7 @@ export default function Home() {
             const city = cities.find((c: any) => c.CITYID === tzMismatch.cityId);
             if (!city) throw new Error('City not found');
 
-            const res = await fetch(`/api/world/cities/${city.CITYID}`, {
+            const res = await apiFetch(`/api/world/cities/${city.CITYID}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -1579,13 +1588,13 @@ export default function Home() {
             if (!res.ok) throw new Error('Failed to update timezone');
 
             const toastId = `tz-update-${Date.now()}`;
-            setToasts(prev => [...prev, { id: toastId, content: `タイムゾーンを ${tzMismatch.browserTz} に更新しました` }]);
+            setToasts(prev => [...prev, { id: toastId, content: uiText("app.page.text006", { p1: tzMismatch.browserTz }) }]);
             setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
             setTzMismatch(null);
         } catch (err) {
             console.error('Failed to update timezone:', err);
             const toastId = `tz-error-${Date.now()}`;
-            setToasts(prev => [...prev, { id: toastId, content: 'タイムゾーンの更新に失敗しました' }]);
+            setToasts(prev => [...prev, { id: toastId, content: uiText("app.page.text007") }]);
             setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
         } finally {
             setTzUpdating(false);
@@ -1603,7 +1612,7 @@ export default function Home() {
     const handlePermissionResponse = useCallback(async (requestId: string, decision: string) => {
         setPermissionRequest(null);
         try {
-            await fetch('/api/chat/permission-response', {
+            await apiFetch('/api/chat/permission-response', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ request_id: requestId, decision }),
@@ -1616,7 +1625,7 @@ export default function Home() {
     const handleSpellConfirmResponse = useCallback(async (requestId: string, decision: string, editedText?: string) => {
         setSpellConfirm(null);
         try {
-            await fetch('/api/chat/spell-confirmation-response', {
+            await apiFetch('/api/chat/spell-confirmation-response', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ request_id: requestId, decision, edited_text: editedText }),
@@ -1629,7 +1638,7 @@ export default function Home() {
     const handleChronicleConfirmResponse = useCallback(async (requestId: string, decision: string) => {
         setChronicleConfirm(null);
         try {
-            await fetch('/api/chat/permission-response', {
+            await apiFetch('/api/chat/permission-response', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ request_id: requestId, decision }),
@@ -1766,7 +1775,7 @@ export default function Home() {
             setMoveTrigger(prev => prev + 1);
             // Refresh RPD usage after message sent
             if (selectedModelRateLimit && selectedModel) {
-                fetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
+                apiFetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
                     .then(res => res.ok ? res.json() : null)
                     .then((data: { used: number; limit: number }[] | null) => {
                         if (data && data.length > 0) setRpdUsage({ used: data[0].used, limit: data[0].limit });
@@ -1882,7 +1891,7 @@ export default function Home() {
                 for (const line of lines) {
                     if (!line.trim()) continue;
                     try {
-                        const event = JSON.parse(line);
+                        const event = parseUIEvent(line);
                         if (event.type !== 'ping') {
                             console.log('[SSE][diag]', event.type, 'persona=', event.persona_id, 'pulse=', event.pulse_id);
                         }
@@ -2298,7 +2307,7 @@ export default function Home() {
                                 }
                             } else {
                                 // started, running, etc. — show content as loading status
-                                setLoadingStatus(event.content || '記憶を整理しています...');
+                                setLoadingStatus(event.content || uiText("app.page.text008"));
                             }
                         } else if (event.type === 'user_message_id') {
                             // Update the optimistic user message (temp id) with server-assigned id
@@ -2329,7 +2338,7 @@ export default function Home() {
                         } else if (event.type === 'spell_confirmation') {
                             setSpellConfirm({
                                 requestId: event.request_id,
-                                title: event.title || '確認',
+                                title: event.title || uiText("app.page.text009"),
                                 body: event.body || '',
                                 editable: !!event.editable,
                                 text: event.text,
@@ -2458,7 +2467,7 @@ export default function Home() {
                 let resolved = false;
                 if (sendContext) {
                     try {
-                        const q = await fetch(
+                        const q = await apiFetch(
                             `/api/chat/message-outcome?client_message_id=${encodeURIComponent(sendContext.clientMessageId)}`,
                         );
                         if (q.ok) {
@@ -2481,7 +2490,7 @@ export default function Home() {
                                     await fetchHistory();
                                     setMessages(prev => [...prev, {
                                         role: 'system',
-                                        content: '通信は途中で切れましたが、発言は届いていて、応答も付いています。最新の履歴を読み込みました。',
+                                        content: uiText("app.page.text010"),
                                         isInfo: true,
                                         timestamp: new Date().toISOString(),
                                     }]);
@@ -2491,7 +2500,7 @@ export default function Home() {
                                     markRetryable(serverId);
                                     setMessages(prev => [...prev, {
                                         role: 'system',
-                                        content: '通信は途中で切れましたが、発言は届いています。返事はまだ生まれていません。',
+                                        content: uiText("app.page.text011"),
                                         isError: true,
                                         errorCode: 'no_response',
                                         timestamp: new Date().toISOString(),
@@ -2520,7 +2529,7 @@ export default function Home() {
                                 requestAnimationFrame(() => adjustTextareaHeight());
                                 setMessages(prev => [...prev, {
                                     role: 'system',
-                                    content: 'この発言はサーバーに残っていません。本文は入力欄に戻したので、もう一度送ってください。',
+                                    content: uiText("app.page.text012"),
                                     isError: true,
                                     errorCode: 'message_not_found',
                                     timestamp: new Date().toISOString(),
@@ -2540,7 +2549,7 @@ export default function Home() {
                     // 分かった顔をせず、そのまま伝える。
                     setMessages(prev => [...prev, {
                         role: 'system',
-                        content: '通信が途中で切れました。発言が届いたかどうかは分かりません。履歴を確認してください。',
+                        content: uiText("app.page.text013"),
                         isError: true,
                         errorCode: 'unknown_outcome',
                         timestamp: new Date().toISOString(),
@@ -2550,8 +2559,8 @@ export default function Home() {
                 setMessages(prev => [...prev, {
                     role: 'system',
                     content: source === 'continue'
-                        ? '続きの生成が途中で切れました。'
-                        : '通信が途中で切れました。',
+                        ? uiText("app.page.text014")
+                        : uiText("app.page.text015"),
                     isError: true,
                     errorCode: 'stream_broken',
                     timestamp: new Date().toISOString(),
@@ -2570,12 +2579,12 @@ export default function Home() {
         // Block send while a video is still uploading, or if any attachment errored.
         const pendingUpload = attachments.find(a => a.uploading);
         if (pendingUpload) {
-            alert(`動画「${pendingUpload.name}」のアップロード中です。完了まで少し待って。`);
+            alert(uiText("app.page.text016", { p1: pendingUpload.name }));
             return;
         }
         const errored = attachments.find(a => a.error);
         if (errored) {
-            alert(`添付「${errored.name}」のアップロードに失敗してる: ${errored.error}\n削除してから送って。`);
+            alert(uiText("app.page.text017", { p1: errored.name, p2: errored.error }));
             return;
         }
         isProcessingRef.current = true;
@@ -2659,7 +2668,7 @@ export default function Home() {
             // C-2: /chat/utter は発言契機入室。 target_building_id (= UI 上で
             // 表示中の建物) がサーバの真の現在地と異なれば、 backend が atomic
             // に move を実行してから発言処理に入る。 同建物発言なら move skip。
-            const res = await fetch('/api/chat/utter', {
+            const res = await apiFetch('/api/chat/utter', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -2685,7 +2694,7 @@ export default function Home() {
                 // CAS conflict (= B-1): 他クライアントが先に動いていた。
                 // ユーザーに通知し、 status を再取得して serverCurrentBuildingId
                 // を真の現在地に同期する。 メッセージ自体は再送が必要。
-                let conflictMsg = '他のクライアントが先に移動したため、 発言は受け付けられませんでした。 最新状態に同期します。';
+                let conflictMsg = uiText("app.page.text018");
                 try {
                     const data = await res.json();
                     if (data?.detail?.message) conflictMsg = data.detail.message;
@@ -2721,7 +2730,7 @@ export default function Home() {
                 }]);
                 // status を再取得して UI と整合させる
                 try {
-                    const statusRes = await fetch('/api/user/status');
+                    const statusRes = await apiFetch('/api/user/status');
                     if (statusRes.ok) {
                         const statusData = await statusRes.json();
                         if (statusData?.current_building_id) {
@@ -2766,7 +2775,7 @@ export default function Home() {
             console.error(error);
             setMessages(prev => [...prev, {
                 role: 'system',
-                content: '送信できませんでした。接続を確認してもう一度お試しください。',
+                content: uiText("app.page.text019"),
                 isError: true,
                 errorCode: 'send_failed',
                 timestamp: new Date().toISOString(),
@@ -2809,7 +2818,7 @@ export default function Home() {
             )));
         };
         try {
-            const res = await fetch(`/api/chat/${endpoint}`, {
+            const res = await apiFetch(`/api/chat/${endpoint}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ message_id: messageId }),
@@ -2835,7 +2844,7 @@ export default function Home() {
                     await fetchHistory();
                     setMessages(prev => [...prev, {
                         role: 'system',
-                        content: detailMessage || 'この発言には既にペルソナの応答があります。最新の履歴を読み込みました。',
+                        content: detailMessage || uiText("app.page.text020"),
                         isInfo: true,
                         timestamp: new Date().toISOString(),
                     }]);
@@ -2846,8 +2855,8 @@ export default function Home() {
                 setMessages(prev => [...prev, {
                     role: 'system',
                     content: detailMessage || (endpoint === 'continue'
-                        ? '続きを起こせませんでした。'
-                        : 'やり直せませんでした。'),
+                        ? uiText("app.page.text021")
+                        : uiText("app.page.text022")),
                     isError: true,
                     errorCode: detailCode || 'action_failed',
                     timestamp: new Date().toISOString(),
@@ -2867,8 +2876,8 @@ export default function Home() {
             setMessages(prev => [...prev, {
                 role: 'system',
                 content: endpoint === 'continue'
-                    ? '続きを起こせませんでした。'
-                    : 'やり直せませんでした。',
+                    ? uiText("app.page.text023")
+                    : uiText("app.page.text024"),
                 isError: true,
                 errorCode: 'action_failed',
                 timestamp: new Date().toISOString(),
@@ -2890,7 +2899,7 @@ export default function Home() {
         setWithdrawingId(messageId);
         clearTransientNotices();
         try {
-            const res = await fetch('/api/chat/withdraw', {
+            const res = await apiFetch('/api/chat/withdraw', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ message_id: messageId }),
@@ -2913,7 +2922,7 @@ export default function Home() {
                 )));
                 setMessages(prev => [...prev, {
                     role: 'system',
-                    content: data.message || '取り消せませんでした。',
+                    content: data.message || uiText("app.page.text025"),
                     isInfo: true,
                     timestamp: new Date().toISOString(),
                 }]);
@@ -2922,7 +2931,7 @@ export default function Home() {
             console.error(error);
             setMessages(prev => [...prev, {
                 role: 'system',
-                content: '取り消しをサーバーに届けられませんでした。',
+                content: uiText("app.page.text026"),
                 isError: true,
                 errorCode: 'action_failed',
                 timestamp: new Date().toISOString(),
@@ -2938,7 +2947,7 @@ export default function Home() {
         // Don't abort() the fetch — let the backend's cancellation flow
         // send streaming_complete and cancelled events naturally.
         try {
-            await fetch('/api/chat/stop', { method: 'POST' });
+            await apiFetch('/api/chat/stop', { method: 'POST' });
         } catch (e) {
             console.error('Failed to send stop request:', e);
         }
@@ -2962,7 +2971,7 @@ export default function Home() {
     const uploadVideoToServer = async (file: File): Promise<{ uri: string }> => {
         const fd = new FormData();
         fd.append('file', file);
-        const res = await fetch('/api/media/upload-video', { method: 'POST', body: fd });
+        const res = await apiFetch('/api/media/upload-video', { method: 'POST', body: fd });
         if (!res.ok) {
             let detail = `HTTP ${res.status}`;
             try {
@@ -3077,7 +3086,7 @@ export default function Home() {
             const previewMetaPlaybook = selectedPlaybook === TOOL_MODE_SELECTED
                 ? undefined
                 : (selectedPlaybook || undefined);
-            const res = await fetch('/api/chat/preview', {
+            const res = await apiFetch('/api/chat/preview', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -3167,40 +3176,39 @@ export default function Home() {
                         <button
                             className={styles.mobileMenuBtn}
                             onClick={() => setIsLeftOpen(true)}
-                            title="Open Menu"
+                            title={uiText("app.page.label004")}
                         >
                             <Menu size={20} />
                         </button>
                         <h1>{currentBuildingName}</h1>
                         {activeGame && (activeGame.inside ? (
                             currentBuildingId === serverBuildingId ? (
-                                <span
-                                    title={`セッションログ表示中 (${activeGame.region_name ?? activeGame.region_id})${activeGame.scene ? ` / scene: ${activeGame.scene}` : ''}`}
+                                <span data-i18n="app.page.text027 app.page.text028 app.page.text029"
+                                    title={uiText("app.page.text027", { p1: activeGame.region_name ?? activeGame.region_id, p2: activeGame.scene ? ` / scene: ${activeGame.scene}` : '' })}
                                     style={{ fontSize: '0.8rem', opacity: 0.75, whiteSpace: 'nowrap' }}
                                 >
-                                    🎲 {activeGame.region_name ?? 'ゲーム'}{activeGame.phase === 'paused' ? ' (中断中)' : ''}
+                                    🎲 {activeGame.region_name ?? uiText("app.page.text028")}{activeGame.phase === 'paused' ? uiText("app.page.text029") : ''}
                                 </span>
                             ) : (
-                                <span
-                                    title={`${activeGame.region_name ?? activeGame.region_id} でゲーム進行中。この画面は閲覧中の建物のログです (実在地に戻るとセッションログ表示)`}
+                                <span data-i18n="app.page.text030 app.page.text031 app.page.text032"
+                                    title={uiText("app.page.text030", { p1: activeGame.region_name ?? activeGame.region_id })}
                                     style={{ fontSize: '0.8rem', opacity: 0.45, whiteSpace: 'nowrap' }}
                                 >
-                                    🎲 {activeGame.region_name ?? 'ゲーム'}で進行中
-                                </span>
+                                    🎲 {activeGame.region_name ?? uiText("app.page.text031")}{uiText("app.page.text032")}</span>
                             )
                         ) : (
                             // ゲーム外 (入口含む): どこに居てもログ閲覧 + 復帰を出す。
                             // 復帰の認可は参加者資格 (場所要件なし、docs/intent/region.md §7)
                             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', whiteSpace: 'nowrap' }}>
-                                <span
-                                    title={`『${activeGame.region_name ?? activeGame.region_id}』${activeGame.at_entrance ? 'の入口に居ます' : 'から離脱中です'}${activeGame.phase === 'paused' ? ' (ゲームは中断中)' : ''}`}
+                                <span data-i18n="app.page.text033 app.page.text034 app.page.text035"
+                                    title={uiText("app.page.text033", { p1: activeGame.region_name ?? activeGame.region_id, p2: activeGame.at_entrance ? uiText("common.extra001") : uiText("common.extra002"), p3: activeGame.phase === 'paused' ? uiText("common.extra003") : '' })}
                                     style={{ opacity: 0.75 }}
                                 >
-                                    🎲 {activeGame.region_name ?? 'ゲーム'}{activeGame.phase === 'paused' ? ' (中断中)' : ''}
+                                    🎲 {activeGame.region_name ?? uiText("app.page.text034")}{activeGame.phase === 'paused' ? uiText("app.page.text035") : ''}
                                 </span>
-                                <button
+                                <button data-i18n="app.page.text036 app.page.text037 app.page.text038 app.page.text039"
                                     onClick={toggleSessionLogPeek}
-                                    title={sessionLogPeek ? '通常のチャットに戻る' : 'セッションログを閲覧する (発言はできません)'}
+                                    title={sessionLogPeek ? uiText("app.page.text036") : uiText("app.page.text037")}
                                     style={{
                                         background: 'rgba(120,180,255,0.12)',
                                         border: '1px solid rgba(120,180,255,0.4)',
@@ -3208,30 +3216,28 @@ export default function Home() {
                                         padding: '2px 8px', fontSize: '0.75rem', whiteSpace: 'nowrap',
                                     }}
                                 >
-                                    {sessionLogPeek ? '💬 チャットに戻る' : '📜 セッションログ'}
+                                    {sessionLogPeek ? uiText("app.page.text038") : uiText("app.page.text039")}
                                 </button>
-                                <button
+                                <button data-i18n="app.page.text040 app.page.text041"
                                     onClick={handleRejoinGame}
-                                    title="パーティーの現在地へ移動してゲームに戻る"
+                                    title={uiText("app.page.text040")}
                                     style={{
                                         background: 'rgba(130,220,160,0.15)',
                                         border: '1px solid rgba(130,220,160,0.5)',
                                         borderRadius: 6, color: 'inherit', cursor: 'pointer',
                                         padding: '2px 8px', fontSize: '0.75rem', whiteSpace: 'nowrap',
                                     }}
-                                >
-                                    ▶ 復帰
-                                </button>
+                                >{uiText("app.page.text041")}</button>
                             </span>
                         ))}
                     </div>
                     <div className={styles.headerRight}>
                         <ActiveClientIndicator isActive={isActiveClientTab} />
                         {hasUnreadAnnouncements && (
-                            <button
+                            <button data-i18n="app.page.text042"
                                 className={styles.iconBtn}
                                 onClick={() => { window.location.href = '/announcements'; }}
-                                title="お知らせ（未読あり）"
+                                title={uiText("app.page.text042")}
                             >
                                 <span className={styles.bellWrapper}>
                                     <Bell size={20} />
@@ -3239,24 +3245,24 @@ export default function Home() {
                                 </span>
                             </button>
                         )}
-                        <button
+                        <button data-i18n="app.page.text043 app.page.text044"
                             className={`${styles.iconBtn} ${isMapModalOpen ? styles.active : ''}`}
                             onClick={() => setIsMapModalOpen(v => !v)}
-                            title={isMapModalOpen ? '街マップを閉じる' : '街マップを開く'}
+                            title={isMapModalOpen ? uiText("app.page.text043") : uiText("app.page.text044")}
                         >
                             <MapIcon size={20} />
                         </button>
                         <button
                             className={styles.iconBtn}
                             onClick={() => setIsPeopleModalOpen(true)}
-                            title="Manage People"
+                            title={uiText("app.page.label005")}
                         >
                             <Users size={20} />
                         </button>
                         <button
                             className={`${styles.iconBtn} ${isInfoOpen ? styles.active : ''}`}
                             onClick={() => setIsInfoOpen(!isInfoOpen)}
-                            title="Toggle Info Sidebar"
+                            title={uiText("app.page.label006")}
                         >
                             <Info size={20} />
                         </button>
@@ -3267,8 +3273,8 @@ export default function Home() {
                     <div className={styles.updatingBanner}>
                         <Loader size={16} className={styles.spinIcon} />
                         <div className={styles.updatingContent}>
-                            <div>Updating{updatingTargetVersion.current ? ` to v${updatingTargetVersion.current}` : ''}... Please wait.</div>
-                            <div>The application will restart automatically.</div>
+                            <div>{uiText("app.page.label007")}{updatingTargetVersion.current ? ` to v${updatingTargetVersion.current}` : ''}{uiText("app.page.label008")}</div>
+                            <div>{uiText("app.page.label009")}</div>
                         </div>
                     </div>
                 )}
@@ -3277,8 +3283,8 @@ export default function Home() {
                     <div className={styles.backendErrorBanner}>
                         <AlertTriangle size={16} />
                         <div className={styles.backendErrorContent}>
-                            <div>Backend server is not running.</div>
-                            <div>Please make sure the &quot;SAIVerse Backend&quot; window is open. This page will reconnect automatically.</div>
+                            <div>{uiText("app.page.label010")}</div>
+                            <div>{uiText("app.page.label011")}</div>
                         </div>
                     </div>
                 )}
@@ -3287,14 +3293,13 @@ export default function Home() {
                     <div className={styles.updateAvailableBanner}>
                         <ArrowUpCircle size={16} />
                         <div className={styles.updateAvailableContent}>
-                            <div>New version available: v{updateAvailable.version} (current: v{app_state_version})</div>
+                            <div>{uiText("app.page.label012")}{updateAvailable.version} {uiText("app.page.label013")}{app_state_version})</div>
                         </div>
                         <button
                             className={styles.updateButton}
                             onClick={handleTriggerUpdate}
                         >
-                            Update
-                        </button>
+                            {uiText("app.page.label014")}</button>
                     </div>
                 )}
 
@@ -3309,7 +3314,7 @@ export default function Home() {
                         <button
                             className={styles.startupWarningClose}
                             onClick={() => setShowStartupWarnings(false)}
-                            title="Dismiss"
+                            title={uiText("app.page.label015")}
                         >
                             <X size={14} />
                         </button>
@@ -3323,20 +3328,18 @@ export default function Home() {
                             <div>{reembedNeeded.message}</div>
                             {reembedBannerProgress && <div>{reembedBannerProgress}</div>}
                         </div>
-                        <button
+                        <button data-i18n="app.page.text045"
                             className={styles.reembedRunButton}
                             onClick={handleReembedAll}
                             disabled={isReembeddingAll}
                         >
-                            {isReembeddingAll ? 'Processing...' : '再計算する'}
+                            {isReembeddingAll ? 'Processing...' : uiText("app.page.text045")}
                         </button>
                         {!isReembeddingAll && (
-                            <button
+                            <button data-i18n="app.page.text046"
                                 className={styles.reembedLaterButton}
                                 onClick={handleReembedLater}
-                            >
-                                後で
-                            </button>
+                            >{uiText("app.page.text046")}</button>
                         )}
                     </div>
                 )}
@@ -3346,7 +3349,7 @@ export default function Home() {
                     ref={chatAreaRef}
                     onScroll={handleScroll}
                 >
-                    {isLoadingMore && <div style={{ textAlign: 'center', padding: '10px', color: '#666' }}>Loading history...</div>}
+                    {isLoadingMore && <div style={{ textAlign: 'center', padding: '10px', color: '#666' }}>{uiText("app.page.label016")}</div>}
                     {messages.map((msg, idx) => {
                         // System notices (world events / warnings / info) are NOT AI utterances:
                         // render them author-less and compact, distinct from user/assistant bubbles.
@@ -3376,7 +3379,7 @@ export default function Home() {
                                         </div>
                                     )}
                                     {msg.timestamp && (
-                                        <span className={styles.systemNoticeTime}>{new Date(msg.timestamp).toLocaleString()}</span>
+                                        <span className={styles.systemNoticeTime}>{new Date(msg.timestamp).toLocaleString(getFormatLocale())}</span>
                                     )}
                                 </div>
                             );
@@ -3398,7 +3401,7 @@ export default function Home() {
                                     <div className={styles.cardHeader}>
                                         <img
                                             src={msg.avatar || (msg.role === 'user' ? '/api/static/builtin_icons/user.png' : '/api/static/builtin_icons/host.png')}
-                                            alt="avatar"
+                                        alt={uiText("app.page.label017")}
                                             className={styles.avatar}
                                         />
                                         <span className={styles.sender}>{msg.sender || (msg.role === 'user' ? 'You' : 'Assistant')}</span>
@@ -3421,30 +3424,26 @@ export default function Home() {
                                     {msg.audios && msg.audios.length > 0 && (
                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', margin: '0.4rem 0' }}>
                                             {msg.audios.map((a, idx) => (
-                                                <audio
+                                                <audio data-i18n="app.page.text047"
                                                     key={`a-${idx}`}
                                                     controls
                                                     preload="metadata"
                                                     src={a.url}
                                                     style={{ width: '100%', maxWidth: '420px' }}
-                                                >
-                                                    お使いのブラウザは audio タグをサポートしていません。
-                                                </audio>
+                                                >{uiText("app.page.text047")}</audio>
                                             ))}
                                         </div>
                                     )}
                                     {msg.videos && msg.videos.length > 0 && (
                                         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', margin: '0.4rem 0' }}>
                                             {msg.videos.map((v, idx) => (
-                                                <video
+                                                <video data-i18n="app.page.text048"
                                                     key={`v-${idx}`}
                                                     controls
                                                     preload="metadata"
                                                     src={v.url}
                                                     style={{ width: '100%', maxWidth: '480px', borderRadius: '6px' }}
-                                                >
-                                                    お使いのブラウザは video タグをサポートしていません。
-                                                </video>
+                                                >{uiText("app.page.text048")}</video>
                                             ))}
                                         </div>
                                     )}
@@ -3456,44 +3455,44 @@ export default function Home() {
                                                 </span>
                                                 <span className={styles.errorMessage}>{msg.content}</span>
                                             </div>
-                                            <div style={{ fontSize: '0.85em', opacity: 0.75, lineHeight: 1.4, marginTop: '4px' }}>
+                                            <div data-i18n="app.page.text049 app.page.text050 app.page.text051 app.page.text052 app.page.text053 app.page.text054 app.page.text055 app.page.text056 app.page.text057 app.page.text058 app.page.text059 app.page.text060 app.page.text061 app.page.text062 app.page.modelUnavailable app.page.text063 app.page.text064 app.page.text065 app.page.text066" style={{ fontSize: '0.85em', opacity: 0.75, lineHeight: 1.4, marginTop: '4px' }}>
                                                 {({
-                                                    empty_response: 'しばらく時間を置いてから再送信してください。繰り返し発生する場合は、サーバーの障害情報を確認してください。',
-                                                    safety_filter: '送信した内容が安全性フィルターに該当した可能性があります。内容を変更して再送信してください。',
-                                                    timeout: 'サーバーが混雑している可能性があります。しばらく時間を置いてから再送信してください。',
-                                                    rate_limit: 'API利用制限に達しています。しばらく時間を置いてから再送信してください。',
-                                                    payment: 'APIキーの残高や支払い設定を確認してください。',
-                                                    authentication: 'APIキーの設定を確認してください。',
-                                                    server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再送信してください。',
+                                                    empty_response: uiText("app.page.text049"),
+                                                    safety_filter: uiText("app.page.text050"),
+                                                    timeout: uiText("app.page.text051"),
+                                                    rate_limit: uiText("app.page.text052"),
+                                                    payment: uiText("app.page.text053"),
+                                                    authentication: uiText("app.page.text054"),
+                                                    server_error: uiText("app.page.text055"),
                                                     // 発言は届いている。だから送り直しではなく、
                                                     // その発言の「再送」ボタンで応答だけを求める。
-                                                    no_response: 'あなたの発言は記録に残っています。返事だけが生まれなかったので、発言の「再送」から応答をもう一度求められます。',
+                                                    no_response: uiText("app.page.text056"),
                                                     // 応答できる相手がいない回。ここで「再送」を勧めると、
                                                     // 何度押しても結果の変わらない操作を勧めることになる。
                                                     // できるのは場所を変えるか、誰かが来るのを待つこと。
-                                                    no_responder: 'あなたの発言は記録に残っています。ただし、この場所には応答できる相手がいないので、やり直しても結果は変わりません。別の場所へ移るか、誰かが来るのを待ってください。',
+                                                    no_responder: uiText("app.page.text057"),
                                                     // 出口 7: こちら側からは届いたかどうか分からない。
                                                     // 分かった顔をせず、確認の手立てだけを示す。
-                                                    unknown_outcome: '発言が届いたかどうかは、この画面からは判断できません。同じ内容を送り直す前に、履歴に残っているかを確認してください。',
-                                                    stream_broken: '接続が途中で切れました。ここまでの内容は残っています。',
-                                                    send_failed: 'サーバーに接続できませんでした。SAIVerse が起動しているかを確認してください。',
-                                                    message_not_found: 'この発言は記録に残っていません。入力欄からもう一度送ってください。',
+                                                    unknown_outcome: uiText("app.page.text058"),
+                                                    stream_broken: uiText("app.page.text059"),
+                                                    send_failed: uiText("app.page.text060"),
+                                                    message_not_found: uiText("app.page.text061"),
                                                     // 他の画面が先に移動していた回。発言はサーバーに
                                                     // 届いていないので、本文は入力欄へ返してある。
-                                                    location_conflict: '発言は保存されていません。本文は入力欄に戻したので、いまいる場所を確かめてから送り直してください。',
+                                                    location_conflict: uiText("app.page.text062"),
                                                     // 使うモデルが無い・繋げない回。待っても直らないので「少し待って」は
                                                     // 出さない。上の文面が選び直す場所を言うので、ここは発言が残って
                                                     // いることと、選び直した後の手立てだけを足す
                                                     // (docs/intent/persona_model_selection.md 決まったこと 8)。
-                                                    model_unavailable: 'あなたの発言は記録に残っています。モデルを選び直したあと、発言の「再送」から応答をもう一度求められます。',
-                                                    empty_message: '空のまま送信されました。内容を入れてから送ってください。',
-                                                    no_current_building: 'いまいる場所が確定していません。画面を再読み込みするか、建物を選び直してください。',
-                                                    action_failed: '操作をサーバーに届けられませんでした。接続を確認してもう一度お試しください。',
-                                                } as Record<string, string>)[msg.errorCode || ''] || '処理が完了しませんでした。少し待ってからもう一度お試しください。解決しない場合は、ログの内容とあわせて開発者へ報告してください。'}
+                                                    model_unavailable: uiText("app.page.modelUnavailable"),
+                                                    empty_message: uiText("app.page.text063"),
+                                                    no_current_building: uiText("app.page.text064"),
+                                                    action_failed: uiText("app.page.text065"),
+                                                } as Record<string, string>)[msg.errorCode || ''] || uiText("app.page.text066")}
                                             </div>
                                             {msg.errorDetail && (
                                                 <details className={styles.errorDetails}>
-                                                    <summary>Technical Details</summary>
+                                                    <summary>{uiText("app.page.label018")}</summary>
                                                     <pre>{msg.errorDetail}</pre>
                                                 </details>
                                             )}
@@ -3542,7 +3541,7 @@ export default function Home() {
                                                         <span className={styles.recallIcon}>
                                                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg>
                                                         </span>
-                                                        <span>ふと浮かんだ記憶</span>
+                                                        <span data-i18n="app.page.text067">{uiText("app.page.text067")}</span>
                                                     </summary>
                                                     <div className={styles.recallContent}>
                                                         {msg.auto_recall}
@@ -3577,21 +3576,21 @@ export default function Home() {
                                 </div>
                                 {(msg.timestamp || msg.llm_usage || msg.llm_usage_total) && (
                                     <div className={styles.cardFooter}>
-                                        {msg.timestamp && <span>{new Date(msg.timestamp).toLocaleString()}</span>}
+                                        {msg.timestamp && <span>{new Date(msg.timestamp).toLocaleString(getFormatLocale())}</span>}
                                         <CacheHitDot usage={msg.llm_usage} total={msg.llm_usage_total} />
                                         {msg.llm_usage_total && msg.llm_usage_total.call_count > 1 ? (
                                             // Show total usage when multiple LLM calls were made
                                             <span className={styles.llmUsageWrap}>
                                                 <span className={styles.llmUsage} onClick={(e) => { e.stopPropagation(); setUsageTooltipId(prev => prev === (msg.id || `msg-${idx}`) ? null : (msg.id || `msg-${idx}`)); }}>
-                                                    {msg.llm_usage_total.call_count} calls · {(msg.llm_usage_total.total_input_tokens + msg.llm_usage_total.total_output_tokens).toLocaleString()} tokens · {formatCost(msg.llm_usage_total.total_cost_usd, msg.llm_usage_total.currency)}
+                                                    {msg.llm_usage_total.call_count} {uiText("app.page.label019")}{(msg.llm_usage_total.total_input_tokens + msg.llm_usage_total.total_output_tokens).toLocaleString(getFormatLocale())} {uiText("app.page.label020")}{formatCost(msg.llm_usage_total.total_cost_usd, msg.llm_usage_total.currency)}
                                                 </span>
                                                 {usageTooltipId === (msg.id || `msg-${idx}`) && (
                                                     <div className={styles.usageTooltip}>
-                                                        <div>Models: {msg.llm_usage_total.models_used.join(', ')}</div>
-                                                        <div>LLM Calls: {msg.llm_usage_total.call_count}</div>
-                                                        <div>Total Input: {msg.llm_usage_total.total_input_tokens.toLocaleString()} tokens{msg.llm_usage_total.total_cached_tokens ? ` (${msg.llm_usage_total.total_cached_tokens.toLocaleString()} cached)` : ''}</div>
-                                                        <div>Total Output: {msg.llm_usage_total.total_output_tokens.toLocaleString()} tokens</div>
-                                                        <div>Total Cost: {formatCost(msg.llm_usage_total.total_cost_usd, msg.llm_usage_total.currency)}</div>
+                                                        <div>{uiText("app.page.label021")}{msg.llm_usage_total.models_used.join(', ')}</div>
+                                                        <div>{uiText("app.page.label022")}{msg.llm_usage_total.call_count}</div>
+                                                        <div>{uiText("app.page.label023")}{msg.llm_usage_total.total_input_tokens.toLocaleString(getFormatLocale())} {uiText("app.page.label024")}{msg.llm_usage_total.total_cached_tokens ? ` (${msg.llm_usage_total.total_cached_tokens.toLocaleString(getFormatLocale())} cached)` : ''}</div>
+                                                        <div>{uiText("app.page.label025")}{msg.llm_usage_total.total_output_tokens.toLocaleString(getFormatLocale())} {uiText("app.page.label026")}</div>
+                                                        <div>{uiText("app.page.label027")}{formatCost(msg.llm_usage_total.total_cost_usd, msg.llm_usage_total.currency)}</div>
                                                     </div>
                                                 )}
                                             </span>
@@ -3599,14 +3598,13 @@ export default function Home() {
                                             // Show single call usage
                                             <span className={styles.llmUsageWrap}>
                                                 <span className={styles.llmUsage} onClick={(e) => { e.stopPropagation(); setUsageTooltipId(prev => prev === (msg.id || `msg-${idx}`) ? null : (msg.id || `msg-${idx}`)); }}>
-                                                    {msg.llm_usage.model_display_name || msg.llm_usage.model} · {(msg.llm_usage.input_tokens + msg.llm_usage.output_tokens).toLocaleString()} tokens
-                                                </span>
+                                                    {msg.llm_usage.model_display_name || msg.llm_usage.model} · {(msg.llm_usage.input_tokens + msg.llm_usage.output_tokens).toLocaleString(getFormatLocale())} {uiText("app.page.label028")}</span>
                                                 {usageTooltipId === (msg.id || `msg-${idx}`) && (
                                                     <div className={styles.usageTooltip}>
-                                                        <div>Model: {msg.llm_usage.model}</div>
-                                                        <div>Input: {msg.llm_usage.input_tokens.toLocaleString()} tokens{msg.llm_usage.cached_tokens ? ` (${msg.llm_usage.cached_tokens.toLocaleString()} cached)` : ''}</div>
-                                                        <div>Output: {msg.llm_usage.output_tokens.toLocaleString()} tokens</div>
-                                                        <div>Cost: {formatCost(msg.llm_usage.cost_usd || 0, msg.llm_usage.currency)}</div>
+                                                        <div>{uiText("app.page.label029")}{msg.llm_usage.model}</div>
+                                                        <div>{uiText("app.page.label030")}{msg.llm_usage.input_tokens.toLocaleString(getFormatLocale())} {uiText("app.page.label031")}{msg.llm_usage.cached_tokens ? ` (${msg.llm_usage.cached_tokens.toLocaleString(getFormatLocale())} cached)` : ''}</div>
+                                                        <div>{uiText("app.page.label032")}{msg.llm_usage.output_tokens.toLocaleString(getFormatLocale())} {uiText("app.page.label033")}</div>
+                                                        <div>{uiText("app.page.label034")}{formatCost(msg.llm_usage.cost_usd || 0, msg.llm_usage.currency)}</div>
                                                     </div>
                                                 )}
                                             </span>
@@ -3617,49 +3615,49 @@ export default function Home() {
                                     <button
                                         className={`${styles.actionBtn} ${copiedMessageId === (msg.id || `msg-${idx}`) ? styles.copied : ''}`}
                                         onClick={() => handleCopyMessage(msg.id || `msg-${idx}`, msg.content)}
-                                        title="Copy message"
+                                        title={uiText("app.page.label035")}
                                     >
                                         {copiedMessageId === (msg.id || `msg-${idx}`) ? <Check size={14} /> : <Copy size={14} />}
                                     </button>
                                     {/* 途中で終わった発言にだけ「続きの生成」を出す。
                                         追加の推論はユーザーの一押しの後ろに置く。 */}
                                     {msg.role === 'assistant' && msg.interrupted && msg.id && (
-                                        <button
+                                        <button data-i18n="app.page.text068"
                                             className={`${styles.actionBtn} ${styles.continueBtn}`}
                                             onClick={() => runMessageAction('continue', msg.id as string)}
                                             disabled={!!loadingStatus}
-                                            title="この発言は途中で終わっています。続きを話してもらう"
+                                            title={uiText("app.page.text068")}
                                         >
                                             <CornerDownRight size={14} />
-                                            <span className={styles.actionBtnLabel}>続きの生成</span>
+                                            <span data-i18n="app.page.text069" className={styles.actionBtnLabel}>{uiText("app.page.text069")}</span>
                                         </button>
                                     )}
                                     {/* 返事が来なかった発言にだけ「再送」を出す。発言は
                                         残っているので、押しても送り直しにはならない。 */}
                                     {msg.role === 'user' && msg.needsRetry
                                         && !msg.retryUseless && msg.id && (
-                                        <button
+                                        <button data-i18n="app.page.text070"
                                             className={`${styles.actionBtn} ${styles.retryBtn}`}
                                             onClick={() => runMessageAction('retry', msg.id as string)}
                                             disabled={!!loadingStatus}
-                                            title="この発言に返事が来ていません。もう一度応答を求める"
+                                            title={uiText("app.page.text070")}
                                         >
                                             <RotateCcw size={14} />
-                                            <span className={styles.actionBtnLabel}>再送</span>
+                                            <span data-i18n="app.page.text071" className={styles.actionBtnLabel}>{uiText("app.page.text071")}</span>
                                         </button>
                                     )}
                                     {/* 返事が来なかった発言は、なかったことにもできる。
                                         ただしペルソナがもう読んでいたら断られる。 */}
                                     {msg.role === 'user' && msg.needsRetry
                                         && !msg.withdrawBlocked && msg.id && (
-                                        <button
+                                        <button data-i18n="app.page.text072"
                                             className={`${styles.actionBtn} ${styles.withdrawBtn}`}
                                             onClick={() => handleWithdrawMessage(msg.id as string)}
                                             disabled={!!loadingStatus || withdrawingId === msg.id}
-                                            title="この発言を取り消して、入力欄に戻す（まだ誰も読んでいない場合のみ）"
+                                            title={uiText("app.page.text072")}
                                         >
                                             <Undo2 size={14} />
-                                            <span className={styles.actionBtnLabel}>取り消す</span>
+                                            <span data-i18n="app.page.text073" className={styles.actionBtnLabel}>{uiText("app.page.text073")}</span>
                                         </button>
                                     )}
                                     {/* アドオンバブルボタン（assistantメッセージにのみ表示） */}
@@ -3697,10 +3695,10 @@ export default function Home() {
                 >
                     {/* Options bar: Model display + settings button + tool mode */}
                     <div className={styles.optionsBar}>
-                        <button
+                        <button data-i18n="app.page.text074"
                             className={styles.optionsBtn}
                             onClick={() => setIsOptionsOpen(true)}
-                            title="チャット設定"
+                            title={uiText("app.page.text074")}
                         >
                             <SlidersHorizontal size={16} />
                             {selectedModelDisplayName ? (
@@ -3709,9 +3707,9 @@ export default function Home() {
                             <ChevronDown size={14} className={styles.chevron} />
                         </button>
                         {rpdUsage && (
-                            <span
+                            <span data-i18n="app.page.text075"
                                 className={`${styles.rpdBadge} ${rpdUsage.used >= rpdUsage.limit ? styles.rpdExhausted : rpdUsage.used >= rpdUsage.limit * 0.8 ? styles.rpdWarning : ''}`}
-                                title={`RPD: ${rpdUsage.used}/${rpdUsage.limit} (リセット: 太平洋時間 0:00)`}
+                                title={uiText("app.page.text075", { p1: rpdUsage.used, p2: rpdUsage.limit })}
                             >
                                 {rpdUsage.used}/{rpdUsage.limit}
                             </span>
@@ -3743,21 +3741,21 @@ export default function Home() {
                                     gap: '0.5rem',
                                     color: att.error ? '#b91c1c' : '#333'
                                 }}>
-                                    <span>{
+                                    <span data-i18n="app.page.text076 app.page.text077">{
                                         att.type === 'image' ? '🖼'
                                         : att.type === 'audio' ? '🎵'
                                         : att.type === 'video' ? '🎬'
                                         : '📄'
                                     } {att.name}{
-                                        att.uploading ? ' (アップロード中…)'
-                                        : att.error ? ` (失敗: ${att.error})`
+                                        att.uploading ? uiText("app.page.text076")
+                                        : att.error ? uiText("app.page.text077", { p1: att.error })
                                         : ''
                                     }</span>
                                     <button onClick={() => removeAttachment(idx)} style={{ border: 'none', background: 'none', cursor: 'pointer', padding: '0 4px' }}><X size={14} /></button>
                                 </div>
                             ))}
                             {attachments.length > 1 && (
-                                <button onClick={clearAllAttachments} style={{
+                                <button data-i18n="app.page.text078" onClick={clearAllAttachments} style={{
                                     fontSize: '0.75rem',
                                     padding: '0.25rem 0.5rem',
                                     background: '#ddd',
@@ -3765,22 +3763,20 @@ export default function Home() {
                                     borderRadius: '4px',
                                     cursor: 'pointer',
                                     color: '#666'
-                                }}>すべて削除</button>
+                                }}>{uiText("app.page.text078")}</button>
                             )}
                         </div>
                     )}
                     <div className={`${styles.inputWrapper} ${isDragOver ? styles.inputWrapperDragOver : ''}`}>
                         {/* Drag & drop indicator */}
                         {isDragOver && (
-                            <div className={styles.dropIndicator}>
-                                ここにファイルをドロップして添付
-                            </div>
+                            <div data-i18n="app.page.text079" className={styles.dropIndicator}>{uiText("app.page.text079")}</div>
                         )}
                         <div className={styles.plusMenuContainer} ref={plusMenuRef}>
-                            <button
+                            <button data-i18n="app.page.text080"
                                 className={`${styles.attachBtn} ${showPlusMenu ? styles.plusBtnActive : ''}`}
                                 onClick={() => setShowPlusMenu(prev => !prev)}
-                                title="その他の操作"
+                                title={uiText("app.page.text080")}
                             >
                                 <Plus size={20} />
                             </button>
@@ -3794,14 +3790,14 @@ export default function Home() {
                                         }}
                                     >
                                         <Paperclip size={16} />
-                                        <span>ファイルを添付</span>
+                                        <span data-i18n="app.page.text081">{uiText("app.page.text081")}</span>
                                     </button>
                                     <button
                                         className={styles.plusMenuItem}
                                         onClick={handleContextPreview}
                                     >
                                         <Eye size={16} />
-                                        <span>コンテキストプレビュー</span>
+                                        <span data-i18n="app.page.text082">{uiText("app.page.text082")}</span>
                                     </button>
                                 </div>
                             )}
@@ -3814,7 +3810,7 @@ export default function Home() {
                             multiple
                             accept="image/*,audio/*,video/*,.txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.xml,.log,.sh,.bat,.sql,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.swift,.kt,.scala,.r,.lua,.pl,.pdf"
                         />
-                        <textarea
+                        <textarea data-i18n="app.page.text083 app.page.text084"
                             ref={textareaRef}
                             value={inputValue}
                             onChange={(e) => setInputValue(e.target.value)}
@@ -3823,15 +3819,15 @@ export default function Home() {
                             // チャットか、復帰してゲーム内で行う)
                             disabled={sessionLogReadOnly}
                             placeholder={sessionLogReadOnly
-                                ? 'セッションログは閲覧専用です。発言するには「復帰」するかチャットに戻ってください。'
-                                : 'メッセージを入力...'}
+                                ? uiText("app.page.text083")
+                                : uiText("app.page.text084")}
                             rows={1}
                         />
                         {loadingStatus ? (
-                            <button
+                            <button data-i18n="app.page.text085"
                                 className={styles.stopBtn}
                                 onClick={handleStopGeneration}
-                                title="生成を停止"
+                                title={uiText("app.page.text085")}
                             >
                                 <Square size={16} />
                             </button>
@@ -3948,27 +3944,20 @@ export default function Home() {
             {tzMismatch && !showTutorial && (
                 <ModalOverlay onClose={handleTzDismiss}>
                     <div className={styles.tzPopup} onClick={(e) => e.stopPropagation()}>
-                        <h3 className={styles.tzPopupTitle}>タイムゾーンの不一致</h3>
-                        <p className={styles.tzPopupText}>
-                            City のタイムゾーンは <strong>{tzMismatch.cityTz}</strong> に設定されていますが、
-                            システムのタイムゾーンは <strong>{tzMismatch.browserTz}</strong> です。
-                        </p>
-                        <p className={styles.tzPopupText}>
-                            タイムゾーンを更新しますか？
-                        </p>
+                        <h3 data-i18n="app.page.text086" className={styles.tzPopupTitle}>{uiText("app.page.text086")}</h3>
+                        <p data-i18n="app.page.text087 app.page.text088 app.page.text089" className={styles.tzPopupText}>{uiText("app.page.text087")}<strong>{tzMismatch.cityTz}</strong>{uiText("app.page.text088")}<strong>{tzMismatch.browserTz}</strong>{uiText("app.page.text089")}</p>
+                        <p data-i18n="app.page.text090" className={styles.tzPopupText}>{uiText("app.page.text090")}</p>
                         <div className={styles.tzPopupActions}>
-                            <button
+                            <button data-i18n="app.page.text091"
                                 className={styles.tzPopupDismiss}
                                 onClick={handleTzDismiss}
-                            >
-                                閉じる
-                            </button>
-                            <button
+                            >{uiText("app.page.text091")}</button>
+                            <button data-i18n="app.page.text092 app.page.text093"
                                 className={styles.tzPopupUpdate}
                                 onClick={handleTzUpdate}
                                 disabled={tzUpdating}
                             >
-                                {tzUpdating ? '更新中...' : `${tzMismatch.browserTz} に更新`}
+                                {tzUpdating ? uiText("app.page.text092") : uiText("app.page.text093", { p1: tzMismatch.browserTz })}
                             </button>
                         </div>
                     </div>

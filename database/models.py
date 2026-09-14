@@ -64,6 +64,7 @@ class AI(Base):
     AINAME = Column(String(32), nullable=False)
     SYSTEMPROMPT = Column(String(4096), default="", nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
+    LANGUAGE = Column(String(16), default=None, nullable=True)  # Persona language (None falls back to City.LANGUAGE)
     AVATAR_IMAGE = Column(String(255))  # UI icon
     APPEARANCE_IMAGE_PATH = Column(String(512), nullable=True)  # Persona appearance image for LLM visual context
     EMOTION = Column(String(1024))  # JSON形式で保存
@@ -281,6 +282,7 @@ class City(Base):
     CITYNAME = Column(String(64), default="", nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
     TIMEZONE = Column(String(64), default="UTC", nullable=False)
+    LANGUAGE = Column(String(16), default="ja", nullable=False)
     UI_PORT = Column(Integer, nullable=False)
     API_PORT = Column(Integer, nullable=False)
     START_IN_ONLINE_MODE = Column(Boolean, default=False, nullable=False)

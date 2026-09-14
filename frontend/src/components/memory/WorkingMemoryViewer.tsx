@@ -1,4 +1,11 @@
 'use client';
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 import React, { useState, useEffect } from 'react';
 import { Loader2, Trash2, Brain, RefreshCw, XCircle } from 'lucide-react';
 import styles from './WorkingMemoryViewer.module.css';
@@ -16,13 +23,14 @@ interface WorkingMemoryViewerProps {
 }
 
 function formatTimestamp(ts: number): string {
-    return new Date(ts * 1000).toLocaleString('ja-JP', {
+    return new Date(ts * 1000).toLocaleString(getFormatLocale(), {
         month: 'short', day: 'numeric',
         hour: '2-digit', minute: '2-digit',
     });
 }
 
 export default function WorkingMemoryViewer({ personaId }: WorkingMemoryViewerProps) {
+    useLocale();
     const [items, setItems] = useState<RecalledIdItem[]>([]);
     const [maxCapacity, setMaxCapacity] = useState(10);
     const [isLoading, setIsLoading] = useState(false);
@@ -32,7 +40,7 @@ export default function WorkingMemoryViewer({ personaId }: WorkingMemoryViewerPr
     const fetchItems = async () => {
         setIsLoading(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/working-memory`);
+            const res = await apiFetch(`/api/people/${personaId}/working-memory`);
             if (res.ok) {
                 const data = await res.json();
                 setItems(data.recalled_ids);
@@ -52,7 +60,7 @@ export default function WorkingMemoryViewer({ personaId }: WorkingMemoryViewerPr
     const removeItem = async (sourceId: string) => {
         setRemovingId(sourceId);
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/people/${personaId}/working-memory/recall/${encodeURIComponent(sourceId)}`,
                 { method: 'DELETE' },
             );
@@ -70,7 +78,7 @@ export default function WorkingMemoryViewer({ personaId }: WorkingMemoryViewerPr
         if (items.length === 0) return;
         setIsClearing(true);
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/people/${personaId}/working-memory/recall`,
                 { method: 'DELETE' },
             );
@@ -88,7 +96,7 @@ export default function WorkingMemoryViewer({ personaId }: WorkingMemoryViewerPr
         return (
             <div className={styles.loadingContainer}>
                 <Loader2 className={styles.spinner} size={24} />
-                <span>読み込み中...</span>
+                <span data-i18n="components.memory.WorkingMemoryViewer.text001">{uiText("components.memory.WorkingMemoryViewer.text001")}</span>
             </div>
         );
     }
@@ -100,12 +108,12 @@ export default function WorkingMemoryViewer({ personaId }: WorkingMemoryViewerPr
                     <span className={styles.countBadge}>
                         {items.length} / {maxCapacity}
                     </span>
-                    <button className={styles.refreshButton} onClick={fetchItems} title="更新">
+                    <button data-i18n="components.memory.WorkingMemoryViewer.text002" className={styles.refreshButton} onClick={fetchItems} title={uiText("components.memory.WorkingMemoryViewer.text002")}>
                         <RefreshCw size={14} />
                     </button>
                 </div>
                 <div className={styles.toolbarRight}>
-                    <button
+                    <button data-i18n="components.memory.WorkingMemoryViewer.text003"
                         className={styles.clearButton}
                         onClick={clearAll}
                         disabled={items.length === 0 || isClearing}
@@ -114,19 +122,15 @@ export default function WorkingMemoryViewer({ personaId }: WorkingMemoryViewerPr
                             <Loader2 className={styles.spinner} size={14} />
                         ) : (
                             <Trash2 size={14} />
-                        )}
-                        全クリア
-                    </button>
+                        )}{uiText("components.memory.WorkingMemoryViewer.text003")}</button>
                 </div>
             </div>
 
             {items.length === 0 ? (
                 <div className={styles.emptyContainer}>
                     <Brain size={48} className={styles.emptyIcon} />
-                    <p>ワーキングメモリは空です</p>
-                    <p className={styles.emptyHint}>
-                        recall_entryツールの実行、またはデバッグタブのUnified Recall検索結果から追加できます
-                    </p>
+                    <p data-i18n="components.memory.WorkingMemoryViewer.text004">{uiText("components.memory.WorkingMemoryViewer.text004")}</p>
+                    <p data-i18n="components.memory.WorkingMemoryViewer.text005" className={styles.emptyHint}>{uiText("components.memory.WorkingMemoryViewer.text005")}</p>
                 </div>
             ) : (
                 <div className={styles.itemsList}>
@@ -150,11 +154,11 @@ export default function WorkingMemoryViewer({ personaId }: WorkingMemoryViewerPr
                                     )}
                                 </div>
                             </div>
-                            <button
+                            <button data-i18n="components.memory.WorkingMemoryViewer.text006"
                                 className={styles.removeButton}
                                 onClick={() => removeItem(item.id)}
                                 disabled={removingId === item.id}
-                                title="削除"
+                                title={uiText("components.memory.WorkingMemoryViewer.text006")}
                             >
                                 {removingId === item.id ? (
                                     <Loader2 className={styles.spinner} size={14} />
@@ -167,10 +171,7 @@ export default function WorkingMemoryViewer({ personaId }: WorkingMemoryViewerPr
                 </div>
             )}
 
-            <div className={styles.infoBar}>
-                想起された記憶は次のパルス開始時にLLMコンテキストに展開されます。
-                古い順に上限{maxCapacity}件まで保持されます。
-            </div>
+            <div data-i18n="components.memory.WorkingMemoryViewer.text007 components.memory.WorkingMemoryViewer.text008" className={styles.infoBar}>{uiText("components.memory.WorkingMemoryViewer.text007")}{maxCapacity}{uiText("components.memory.WorkingMemoryViewer.text008")}</div>
         </div>
     );
 }

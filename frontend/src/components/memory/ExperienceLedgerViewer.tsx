@@ -1,3 +1,8 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 // 経験の台帳ビュー (experience_ledger.md §3)。
 // 索引 (カテゴリ見出し + 統計バッジ付きの行) と、行クリックで開く動的合成
 // ページ (記録リスト / 経験の履歴 / 関連ページ) の 2 画面。読み取り専用。
@@ -88,7 +93,7 @@ interface ExperienceLedgerViewerProps {
 }
 
 const PURPOSE_KIND_LABEL: Record<PurposeRow['kind'], string> = {
-    task: 'タスク',
+    get task() { return uiText("components.memory.ExperienceLedgerViewer.text001"); },
 };
 
 // "2026-08-03" → "08/03"。想定外の形はそのまま出す。
@@ -108,15 +113,16 @@ function epochToShortDate(epoch: number | null): string | null {
 
 // 統計バッジの文言: 「記録N件・MM/DD〜MM/DD」(1日だけなら日付1つ)。
 function statsBadgeText(count: number, first: string | null, last: string | null): string {
-    const countText = `記録${count}件`;
+    const countText = uiText("components.memory.ExperienceLedgerViewer.text002", { p1: count });
     const f = shortDate(first);
     const l = shortDate(last);
     if (!f) return countText;
-    if (f === l || !l) return `${countText}・${f}`;
-    return `${countText}・${f}〜${l}`;
+    if (f === l || !l) return uiText("components.memory.ExperienceLedgerViewer.text003", { p1: countText, p2: f });
+    return uiText("components.memory.ExperienceLedgerViewer.text004", { p1: countText, p2: f, p3: l });
 }
 
 export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerViewerProps) {
+    useLocale();
     const [categories, setCategories] = useState<LedgerCategory[]>([]);
     const [purposes, setPurposes] = useState<PurposeRow[]>([]);
     const [isLoadingIndex, setIsLoadingIndex] = useState(false);
@@ -147,14 +153,14 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
             setIsLoadingIndex(true);
             setIndexError(null);
             try {
-                const res = await fetch(`/api/people/${personaId}/experience-ledger`);
+                const res = await apiFetch(`/api/people/${personaId}/experience-ledger`);
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 if (cancelled) return;
                 setCategories(data.categories || []);
                 setPurposes(data.purposes || []);
             } catch (e) {
-                if (!cancelled) setIndexError(`台帳を読み込めませんでした (${e})`);
+                if (!cancelled) setIndexError(uiText("components.memory.ExperienceLedgerViewer.text005", { p1: e }));
             } finally {
                 if (!cancelled) setIsLoadingIndex(false);
             }
@@ -171,7 +177,7 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
         setPageError(null);
         setPageData(null);
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/people/${personaId}/experience-ledger/${encodeURIComponent(pageId)}`
             );
             if (isStale()) return;
@@ -180,7 +186,7 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
             if (isStale()) return;
             setPageData(data);
         } catch (e) {
-            if (!isStale()) setPageError(`ページを読み込めませんでした (${e})`);
+            if (!isStale()) setPageError(uiText("components.memory.ExperienceLedgerViewer.text006", { p1: e }));
         } finally {
             if (!isStale()) setIsLoadingPage(false);
         }
@@ -201,12 +207,10 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
         return (
             <div className={styles.container}>
                 <div className={styles.pageHeader}>
-                    <button className={styles.backButton} onClick={backToIndex}>
-                        <ChevronLeft size={16} />
-                        一覧へ戻る
-                    </button>
+                    <button data-i18n="components.memory.ExperienceLedgerViewer.text007" className={styles.backButton} onClick={backToIndex}>
+                        <ChevronLeft size={16} />{uiText("components.memory.ExperienceLedgerViewer.text007")}</button>
                 </div>
-                {isLoadingPage && <div className={styles.notice}>読み込み中...</div>}
+                {isLoadingPage && <div data-i18n="components.memory.ExperienceLedgerViewer.text008" className={styles.notice}>{uiText("components.memory.ExperienceLedgerViewer.text008")}</div>}
                 {pageError && <div className={styles.error}>{pageError}</div>}
                 {pageData && (
                     <div className={styles.pageBody}>
@@ -223,12 +227,10 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
                         </div>
 
                         <section className={styles.section}>
-                            <h4 className={styles.sectionTitle}>
-                                <Footprints size={14} />
-                                経験の記録（新しい順）
-                            </h4>
+                            <h4 data-i18n="components.memory.ExperienceLedgerViewer.text009" className={styles.sectionTitle}>
+                                <Footprints size={14} />{uiText("components.memory.ExperienceLedgerViewer.text009")}</h4>
                             {pageData.fragments.length === 0 ? (
-                                <div className={styles.emptyNote}>まだ記録がありません。</div>
+                                <div data-i18n="components.memory.ExperienceLedgerViewer.text010" className={styles.emptyNote}>{uiText("components.memory.ExperienceLedgerViewer.text010")}</div>
                             ) : (
                                 <ul className={styles.fragmentList}>
                                     {pageData.fragments.map((f) => (
@@ -244,14 +246,10 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
                         </section>
 
                         <section className={styles.section}>
-                            <h4 className={styles.sectionTitle}>
-                                <Layers size={14} />
-                                経験の履歴（関わった出来事のまとめ）
-                            </h4>
+                            <h4 data-i18n="components.memory.ExperienceLedgerViewer.text011" className={styles.sectionTitle}>
+                                <Layers size={14} />{uiText("components.memory.ExperienceLedgerViewer.text011")}</h4>
                             {pageData.involvement.entries.length === 0 ? (
-                                <div className={styles.emptyNote}>
-                                    たどれる履歴がありません。
-                                </div>
+                                <div data-i18n="components.memory.ExperienceLedgerViewer.text012" className={styles.emptyNote}>{uiText("components.memory.ExperienceLedgerViewer.text012")}</div>
                             ) : (
                                 <ul className={styles.involvementList}>
                                     {pageData.involvement.entries.map((e) => (
@@ -265,20 +263,15 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
                                 </ul>
                             )}
                             {pageData.involvement.unresolved_count > 0 && (
-                                <div className={styles.emptyNote}>
-                                    ほかに {pageData.involvement.unresolved_count} 件、
-                                    元のまとめが残っていない記録があります。
-                                </div>
+                                <div data-i18n="components.memory.ExperienceLedgerViewer.text013 components.memory.ExperienceLedgerViewer.text014" className={styles.emptyNote}>{uiText("components.memory.ExperienceLedgerViewer.text013")}{pageData.involvement.unresolved_count}{uiText("components.memory.ExperienceLedgerViewer.text014")}</div>
                             )}
                         </section>
 
                         <section className={styles.section}>
-                            <h4 className={styles.sectionTitle}>
-                                <Link2 size={14} />
-                                一緒に出てきたページ
-                            </h4>
+                            <h4 data-i18n="components.memory.ExperienceLedgerViewer.text015" className={styles.sectionTitle}>
+                                <Link2 size={14} />{uiText("components.memory.ExperienceLedgerViewer.text015")}</h4>
                             {pageData.related.length === 0 ? (
-                                <div className={styles.emptyNote}>ありません。</div>
+                                <div data-i18n="components.memory.ExperienceLedgerViewer.text016" className={styles.emptyNote}>{uiText("components.memory.ExperienceLedgerViewer.text016")}</div>
                             ) : (
                                 <ul className={styles.relatedList}>
                                     {pageData.related.map((r) => (
@@ -291,9 +284,7 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
                                                 {r.summary && (
                                                     <span className={styles.relatedSummary}>{r.summary}</span>
                                                 )}
-                                                <span className={styles.relatedShared}>
-                                                    同じ出来事 {r.shared_count} 件
-                                                </span>
+                                                <span data-i18n="components.memory.ExperienceLedgerViewer.text017 components.memory.ExperienceLedgerViewer.text018" className={styles.relatedShared}>{uiText("components.memory.ExperienceLedgerViewer.text017")}{r.shared_count}{uiText("components.memory.ExperienceLedgerViewer.text018")}</span>
                                             </button>
                                         </li>
                                     ))}
@@ -311,12 +302,12 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
         <div className={styles.container}>
             <div className={styles.indexHeader}>
                 <Footprints size={16} />
-                <span>これまでの経験の一覧です。行を選ぶと、そのことについての記録が読めます。</span>
+                <span data-i18n="components.memory.ExperienceLedgerViewer.text019">{uiText("components.memory.ExperienceLedgerViewer.text019")}</span>
             </div>
-            {isLoadingIndex && <div className={styles.notice}>読み込み中...</div>}
+            {isLoadingIndex && <div data-i18n="components.memory.ExperienceLedgerViewer.text020" className={styles.notice}>{uiText("components.memory.ExperienceLedgerViewer.text020")}</div>}
             {indexError && <div className={styles.error}>{indexError}</div>}
             {!isLoadingIndex && !indexError && categories.length === 0 && purposes.length === 0 && (
-                <div className={styles.notice}>まだ経験の記録がありません。</div>
+                <div data-i18n="components.memory.ExperienceLedgerViewer.text021" className={styles.notice}>{uiText("components.memory.ExperienceLedgerViewer.text021")}</div>
             )}
 
             {categories.map((cat) => (
@@ -356,7 +347,7 @@ export default function ExperienceLedgerViewer({ personaId }: ExperienceLedgerVi
 
             {purposes.length > 0 && (
                 <section className={styles.categorySection}>
-                    <h4 className={styles.categoryTitle}>いま取り組んでいること</h4>
+                    <h4 data-i18n="components.memory.ExperienceLedgerViewer.text022" className={styles.categoryTitle}>{uiText("components.memory.ExperienceLedgerViewer.text022")}</h4>
                     <ul className={styles.rowList}>
                         {purposes.map((p) => (
                             // 目的ノード (タスク / 関心) は記録ページを持たないため、

@@ -1,4 +1,7 @@
 "use client";
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React from "react";
 import { Radio } from "lucide-react";
@@ -16,12 +19,13 @@ import styles from "./ActiveClientIndicator.module.css";
  * 前提のため、アイコン・文言は音声依存にしていない。
  */
 export function ActiveClientIndicator({ isActive }: { isActive: boolean }) {
+    useLocale();
     if (!isActive) return null;
     return (
-        <span
+        <span data-i18n="components.ActiveClientIndicator.text001 components.ActiveClientIndicator.text002"
             className={styles.indicator}
-            title="このタブはアクティブクライアントです"
-            aria-label="アクティブクライアントタブ"
+            title={uiText("components.ActiveClientIndicator.text001")}
+            aria-label={uiText("components.ActiveClientIndicator.text002")}
         >
             <Radio size={18} />
         </span>

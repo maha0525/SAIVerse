@@ -1,3 +1,8 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect } from 'react';
 import { X, Loader, CheckCircle, XCircle } from 'lucide-react';
 import styles from './ProviderEditorModal.module.css';
@@ -33,11 +38,12 @@ interface Props {
 }
 
 const PROTOCOL_OPTIONS = [
-    { value: 'openai_compat', label: 'OpenAI 互換 (LM Studio / llama.cpp サーバー / Kimi など)' },
-    { value: 'ollama_compat', label: 'Ollama 互換' },
+    { value: 'openai_compat', get label() { return uiText("components.settings.ProviderEditorModal.text001"); } },
+    { value: 'ollama_compat', get label() { return uiText("components.settings.ProviderEditorModal.text002"); } },
 ];
 
 export default function ProviderEditorModal({ isOpen, mode, providerId, onClose, onSaved }: Props) {
+    useLocale();
     const [id, setId] = useState('');
     const [displayName, setDisplayName] = useState('');
     const [protocol, setProtocol] = useState('openai_compat');
@@ -72,7 +78,7 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
     const loadProvider = async (pid: string) => {
         setLoading(true);
         try {
-            const res = await fetch(`/api/providers/${pid}`);
+            const res = await apiFetch(`/api/providers/${pid}`);
             if (!res.ok) {
                 setError(`Failed to load provider: HTTP ${res.status}`);
                 return;
@@ -96,13 +102,13 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
         // Tests the current form values against the inline test endpoint.
         // Works for both create and edit modes — no save required.
         if (!baseUrl) {
-            setTestResult({ success: false, error: 'base_url を入力してください' });
+            setTestResult({ success: false, error: uiText("components.settings.ProviderEditorModal.text003") });
             return;
         }
         setTesting(true);
         setTestResult(null);
         try {
-            const res = await fetch('/api/providers/test', {
+            const res = await apiFetch('/api/providers/test', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -124,11 +130,11 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
     const handleSave = async () => {
         setError(null);
         if (!id || !id.match(/^[a-zA-Z0-9_.\-]+$/)) {
-            setError('id は英数字、ハイフン、アンダースコア、ドットのみ使用可能です');
+            setError(uiText("components.settings.ProviderEditorModal.text004"));
             return;
         }
         if (!displayName.trim()) {
-            setError('表示名を入力してください');
+            setError(uiText("components.settings.ProviderEditorModal.text005"));
             return;
         }
 
@@ -146,13 +152,13 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
         try {
             let res: Response;
             if (mode === 'create') {
-                res = await fetch('/api/providers', {
+                res = await apiFetch('/api/providers', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ id, ...payload }),
                 });
             } else {
-                res = await fetch(`/api/providers/${id}`, {
+                res = await apiFetch(`/api/providers/${id}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
@@ -161,7 +167,7 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
 
             if (!res.ok) {
                 const text = await res.text();
-                setError(`保存に失敗しました: HTTP ${res.status} ${text}`);
+                setError(uiText("components.settings.ProviderEditorModal.text006", { p1: res.status, p2: text }));
                 return;
             }
 
@@ -174,7 +180,7 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
             onSaved();
             onClose();
         } catch (e) {
-            setError(`保存に失敗しました: ${e}`);
+            setError(uiText("components.settings.ProviderEditorModal.text007", { p1: e }));
         } finally {
             setSaving(false);
         }
@@ -186,49 +192,47 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
         <ModalOverlay onClose={onClose}>
             <div className={styles.modal}>
                 <div className={styles.header}>
-                    <h3>{mode === 'create' ? 'プロバイダを新規作成' : `プロバイダを編集: ${id}`}</h3>
+                    <h3 data-i18n="components.settings.ProviderEditorModal.text008 components.settings.ProviderEditorModal.text009">{mode === 'create' ? uiText("components.settings.ProviderEditorModal.text008") : uiText("components.settings.ProviderEditorModal.text009", { p1: id })}</h3>
                     <button className={styles.closeBtn} onClick={onClose}><X size={20} /></button>
                 </div>
 
                 <div className={styles.content}>
                     {loading ? (
-                        <div>読み込み中...</div>
+                        <div data-i18n="components.settings.ProviderEditorModal.text010">{uiText("components.settings.ProviderEditorModal.text010")}</div>
                     ) : (
                         <>
                             {isBuiltin && (
-                                <div className={styles.hint} style={{ marginBottom: '0.75rem' }}>
-                                    builtin プロバイダを編集中です。保存すると user_data に上書きが作成され、次回ロード時に builtin より優先されます。
-                                </div>
+                                <div data-i18n="components.settings.ProviderEditorModal.text011" className={styles.hint} style={{ marginBottom: '0.75rem' }}>{uiText("components.settings.ProviderEditorModal.text011")}</div>
                             )}
 
                             <div className={styles.field}>
-                                <label>ID（ファイル名になります）</label>
-                                <input
+                                <label data-i18n="components.settings.ProviderEditorModal.text012">{uiText("components.settings.ProviderEditorModal.text012")}</label>
+                                <input data-i18n="components.settings.ProviderEditorModal.text013"
                                     className={styles.input}
                                     type="text"
                                     value={id}
                                     onChange={e => setId(e.target.value)}
-                                    placeholder="例: lmstudio"
+                                    placeholder={uiText("components.settings.ProviderEditorModal.text013")}
                                     disabled={mode === 'edit'}
                                 />
                                 {mode === 'create' && (
-                                    <span className={styles.hint}>英数字・ハイフン・アンダースコア・ドットのみ</span>
+                                    <span data-i18n="components.settings.ProviderEditorModal.text014" className={styles.hint}>{uiText("components.settings.ProviderEditorModal.text014")}</span>
                                 )}
                             </div>
 
                             <div className={styles.field}>
-                                <label>表示名</label>
-                                <input
+                                <label data-i18n="components.settings.ProviderEditorModal.text015">{uiText("components.settings.ProviderEditorModal.text015")}</label>
+                                <input data-i18n="components.settings.ProviderEditorModal.text016"
                                     className={styles.input}
                                     type="text"
                                     value={displayName}
                                     onChange={e => setDisplayName(e.target.value)}
-                                    placeholder="例: LM Studio (local)"
+                                    placeholder={uiText("components.settings.ProviderEditorModal.text016")}
                                 />
                             </div>
 
                             <div className={styles.field}>
-                                <label>プロトコル</label>
+                                <label data-i18n="components.settings.ProviderEditorModal.text017">{uiText("components.settings.ProviderEditorModal.text017")}</label>
                                 <select
                                     className={styles.select}
                                     value={protocol}
@@ -239,69 +243,61 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
                                         <option key={opt.value} value={opt.value}>{opt.label}</option>
                                     ))}
                                     {isBuiltin && !PROTOCOL_OPTIONS.some(o => o.value === protocol) && (
-                                        <option value={protocol}>{protocol} (builtin only)</option>
+                                        <option value={protocol}>{protocol} {uiText("components.settings.ProviderEditorModal.label001")}</option>
                                     )}
                                 </select>
                             </div>
 
                             <div className={styles.field}>
-                                <label>Base URL</label>
-                                <input
+                                <label>{uiText("components.settings.ProviderEditorModal.label002")}</label>
+                                <input data-i18n="components.settings.ProviderEditorModal.text018"
                                     className={styles.input}
                                     type="text"
                                     value={baseUrl}
                                     onChange={e => setBaseUrl(e.target.value)}
-                                    placeholder="例: http://localhost:1234/v1"
+                                    placeholder={uiText("components.settings.ProviderEditorModal.text018")}
                                 />
                                 {protocol === 'openai_compat' && (
-                                    <span className={styles.hint}>末尾に /v1 を含める形式（OpenAI 互換）</span>
+                                    <span data-i18n="components.settings.ProviderEditorModal.text019" className={styles.hint}>{uiText("components.settings.ProviderEditorModal.text019")}</span>
                                 )}
                                 {protocol === 'ollama_compat' && (
-                                    <span className={styles.hint}>例: http://127.0.0.1:11434（/v1 不要）</span>
+                                    <span data-i18n="components.settings.ProviderEditorModal.text020" className={styles.hint}>{uiText("components.settings.ProviderEditorModal.text020")}</span>
                                 )}
                             </div>
 
                             <div className={styles.field}>
-                                <label className={styles.checkboxLabel}>
+                                <label data-i18n="components.settings.ProviderEditorModal.text021" className={styles.checkboxLabel}>
                                     <input
                                         type="checkbox"
                                         checked={keylessServer}
                                         onChange={e => setKeylessServer(e.target.checked)}
-                                    />
-                                    API キーなしで接続できるサーバー
-                                </label>
-                                <span className={styles.hint}>
-                                    LM Studio や llama.cpp サーバーなど、認証のないローカルサーバー向け。オンにすると、API キーを設定していなくてもモデル一覧に表示されます。
-                                </span>
+                                    />{uiText("components.settings.ProviderEditorModal.text021")}</label>
+                                <span data-i18n="components.settings.ProviderEditorModal.text022" className={styles.hint}>{uiText("components.settings.ProviderEditorModal.text022")}</span>
                             </div>
 
                             <div className={styles.field}>
-                                <label>API キー環境変数名（任意）</label>
-                                <input
+                                <label data-i18n="components.settings.ProviderEditorModal.text023">{uiText("components.settings.ProviderEditorModal.text023")}</label>
+                                <input data-i18n="components.settings.ProviderEditorModal.text024 components.settings.ProviderEditorModal.text025"
                                     className={styles.input}
                                     type="text"
                                     value={apiKeyEnv}
                                     onChange={e => setApiKeyEnv(e.target.value)}
-                                    placeholder={keylessServer ? '認証なしなら空欄のまま' : '例: KIMI_API_KEY'}
+                                    placeholder={keylessServer ? uiText("components.settings.ProviderEditorModal.text024") : uiText("components.settings.ProviderEditorModal.text025")}
                                 />
-                                <span className={styles.hint}>
-                                    キーの値そのものではなく、環境変数の名前を入力します。値はグローバル設定の「環境変数」タブで管理してください。
-                                    {keylessServer && 'ローカルサーバーに認証を掛けている場合だけ入力してください。'}
+                                <span data-i18n="components.settings.ProviderEditorModal.text026 components.settings.ProviderEditorModal.text027" className={styles.hint}>{uiText("components.settings.ProviderEditorModal.text026")}{keylessServer && uiText("components.settings.ProviderEditorModal.text027")}
                                 </span>
                             </div>
 
                             <div className={styles.testSection}>
-                                <button className={styles.testBtn} onClick={handleTest} disabled={testing}>
-                                    {testing ? <><Loader size={14} /> テスト中...</> : '接続テスト'}
+                                <button data-i18n="components.settings.ProviderEditorModal.text028 components.settings.ProviderEditorModal.text029" className={styles.testBtn} onClick={handleTest} disabled={testing}>
+                                    {testing ? <><Loader size={14} />{uiText("components.settings.ProviderEditorModal.text028")}</> : uiText("components.settings.ProviderEditorModal.text029")}
                                 </button>
                                 {testResult && testResult.success && (
-                                    <div className={styles.testSuccess}>
-                                        <CheckCircle size={14} style={{ verticalAlign: 'middle' }} /> 接続成功
-                                        {testResult.elapsed_ms != null && ` (${testResult.elapsed_ms}ms)`}
+                                    <div data-i18n="components.settings.ProviderEditorModal.text030" className={styles.testSuccess}>
+                                        <CheckCircle size={14} style={{ verticalAlign: 'middle' }} />{uiText("components.settings.ProviderEditorModal.text030")}{testResult.elapsed_ms != null && ` (${testResult.elapsed_ms}ms)`}
                                         {testResult.models && testResult.models.length > 0 && (
                                             <>
-                                                <div style={{ marginTop: 4 }}>
-                                                    利用可能なモデル ({testResult.models.length}):
+                                                <div data-i18n="components.settings.ProviderEditorModal.text031" style={{ marginTop: 4 }}>{uiText("components.settings.ProviderEditorModal.text031")}{testResult.models.length}):
                                                 </div>
                                                 <div className={styles.modelList}>
                                                     {testResult.models.map(m => <div key={m}>{m}</div>)}
@@ -311,8 +307,8 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
                                     </div>
                                 )}
                                 {testResult && !testResult.success && (
-                                    <div className={styles.testFail}>
-                                        <XCircle size={14} style={{ verticalAlign: 'middle' }} /> 失敗: {testResult.error}
+                                    <div data-i18n="components.settings.ProviderEditorModal.text032" className={styles.testFail}>
+                                        <XCircle size={14} style={{ verticalAlign: 'middle' }} />{uiText("components.settings.ProviderEditorModal.text032")}{testResult.error}
                                     </div>
                                 )}
                             </div>
@@ -324,9 +320,9 @@ export default function ProviderEditorModal({ isOpen, mode, providerId, onClose,
                 </div>
 
                 <div className={styles.footer}>
-                    <button className={styles.cancelBtn} onClick={onClose}>キャンセル</button>
-                    <button className={styles.saveBtn} onClick={handleSave} disabled={saving || loading}>
-                        {saving ? '保存中...' : '保存'}
+                    <button data-i18n="components.settings.ProviderEditorModal.text033" className={styles.cancelBtn} onClick={onClose}>{uiText("components.settings.ProviderEditorModal.text033")}</button>
+                    <button data-i18n="components.settings.ProviderEditorModal.text034 components.settings.ProviderEditorModal.text035" className={styles.saveBtn} onClick={handleSave} disabled={saving || loading}>
+                        {saving ? uiText("components.settings.ProviderEditorModal.text034") : uiText("components.settings.ProviderEditorModal.text035")}
                     </button>
                 </div>
             </div>

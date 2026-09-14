@@ -1,4 +1,6 @@
 "use client";
+import { parseUIEvent } from '@/i18n/api';
+
 
 import { useEffect, useRef, useCallback } from 'react';
 
@@ -37,7 +39,7 @@ export function useAddonEvents(onEvent: AddonEventHandler): void {
 
         es.onmessage = (e) => {
             try {
-                const data = JSON.parse(e.data) as AddonEvent;
+                const data = parseUIEvent(e.data) as AddonEvent;
                 if (data.type === 'addon_event') {
                     onEventRef.current(data);
                 }

@@ -1,4 +1,7 @@
 'use client';
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useState } from 'react';
 import { AlertTriangle, ExternalLink } from 'lucide-react';
@@ -41,9 +44,9 @@ interface Props {
 
 function getOperationLabel(op: CatalogOperation): string {
     switch (op) {
-        case 'install': return '導入';
-        case 'update': return '更新';
-        case 'uninstall': return '削除';
+        case 'install': return uiText("components.AddonActionConfirmDialog.text001");
+        case 'update': return uiText("components.AddonActionConfirmDialog.text002");
+        case 'uninstall': return uiText("components.AddonActionConfirmDialog.text003");
     }
 }
 
@@ -54,6 +57,7 @@ export default function AddonActionConfirmDialog({
     onCancel,
     onProceed,
 }: Props) {
+    useLocale();
     const [deleteData, setDeleteData] = useState(false);
     const latestVer = entry.versions.find((v) => v.version === entry.latest);
     const opLabel = getOperationLabel(operation);
@@ -62,7 +66,7 @@ export default function AddonActionConfirmDialog({
         <ModalOverlay onClose={onCancel}>
             <div className={styles.dialog} onClick={(e) => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h3>{entry.display_name} を{opLabel}</h3>
+                    <h3 data-i18n="components.AddonActionConfirmDialog.text004">{entry.display_name}{uiText("components.AddonActionConfirmDialog.text004")}{opLabel}</h3>
                 </div>
 
                 <div className={styles.body}>
@@ -71,34 +75,31 @@ export default function AddonActionConfirmDialog({
                     {operation === 'install' && latestVer && (
                         <>
                             <div className={styles.section}>
-                                <div className={styles.label}>導入バージョン</div>
+                                <div data-i18n="components.AddonActionConfirmDialog.text005" className={styles.label}>{uiText("components.AddonActionConfirmDialog.text005")}</div>
                                 <div className={styles.value}>
                                     v{latestVer.version}
-                                    <span className={styles.commit}>commit {latestVer.commit.slice(0, 7)}</span>
+                                    <span className={styles.commit}>{uiText("components.AddonActionConfirmDialog.label001")}{latestVer.commit.slice(0, 7)}</span>
                                 </div>
                             </div>
                             {(entry.requires.gpu || entry.requires.disk_gb) && (
                                 <div className={styles.section}>
-                                    <div className={styles.label}>システム要件</div>
+                                    <div data-i18n="components.AddonActionConfirmDialog.text006" className={styles.label}>{uiText("components.AddonActionConfirmDialog.text006")}</div>
                                     <ul className={styles.list}>
                                         {entry.requires.gpu && entry.requires.gpu !== 'none' && (
-                                            <li>GPU: {entry.requires.gpu === 'required' ? '必須' : 'あれば加速'}</li>
+                                            <li data-i18n="components.AddonActionConfirmDialog.text007 components.AddonActionConfirmDialog.text008">{uiText("components.AddonActionConfirmDialog.label002")}{entry.requires.gpu === 'required' ? uiText("components.AddonActionConfirmDialog.text007") : uiText("components.AddonActionConfirmDialog.text008")}</li>
                                         )}
                                         {entry.requires.disk_gb != null && (
-                                            <li>ディスク: 約 {entry.requires.disk_gb} GB</li>
+                                            <li data-i18n="components.AddonActionConfirmDialog.text009">{uiText("components.AddonActionConfirmDialog.text009")}{entry.requires.disk_gb} {uiText("components.AddonActionConfirmDialog.label003")}</li>
                                         )}
                                         {entry.requires.os && entry.requires.os.length > 0 && (
-                                            <li>対応 OS: {entry.requires.os.join(', ')}</li>
+                                            <li data-i18n="components.AddonActionConfirmDialog.text010">{uiText("components.AddonActionConfirmDialog.text010")}{entry.requires.os.join(', ')}</li>
                                         )}
                                     </ul>
                                 </div>
                             )}
                             <div className={styles.note}>
                                 <AlertTriangle size={14} />
-                                <span>
-                                    アドオンの setup スクリプト (依存パッケージのインストール / 外部リソースの取得等) が
-                                    自動実行されます。完了まで数分かかる場合があります。
-                                </span>
+                                <span data-i18n="components.AddonActionConfirmDialog.text011">{uiText("components.AddonActionConfirmDialog.text011")}</span>
                             </div>
                         </>
                     )}
@@ -106,30 +107,27 @@ export default function AddonActionConfirmDialog({
                     {operation === 'update' && state.kind === 'update_available' && latestVer && (
                         <>
                             <div className={styles.section}>
-                                <div className={styles.label}>バージョン変更</div>
+                                <div data-i18n="components.AddonActionConfirmDialog.text012" className={styles.label}>{uiText("components.AddonActionConfirmDialog.text012")}</div>
                                 <div className={styles.value}>
                                     v{state.current_version} → v{state.new_version}
-                                    <span className={styles.commit}>commit {latestVer.commit.slice(0, 7)}</span>
+                                    <span className={styles.commit}>{uiText("components.AddonActionConfirmDialog.label004")}{latestVer.commit.slice(0, 7)}</span>
                                 </div>
                             </div>
                             {latestVer.changelog_url && (
                                 <div className={styles.section}>
-                                    <div className={styles.label}>変更内容</div>
-                                    <a
+                                    <div data-i18n="components.AddonActionConfirmDialog.text013" className={styles.label}>{uiText("components.AddonActionConfirmDialog.text013")}</div>
+                                    <a data-i18n="components.AddonActionConfirmDialog.text014"
                                         className={styles.link}
                                         href={latestVer.changelog_url}
                                         target="_blank"
                                         rel="noopener noreferrer"
-                                    >
-                                        changelog を見る <ExternalLink size={11} />
+                                    >{uiText("components.AddonActionConfirmDialog.text014")}<ExternalLink size={11} />
                                     </a>
                                 </div>
                             )}
                             <div className={styles.note}>
                                 <AlertTriangle size={14} />
-                                <span>
-                                    setup_version の差分次第では setup スクリプトが再実行されます。
-                                </span>
+                                <span data-i18n="components.AddonActionConfirmDialog.text015">{uiText("components.AddonActionConfirmDialog.text015")}</span>
                             </div>
                         </>
                     )}
@@ -137,16 +135,11 @@ export default function AddonActionConfirmDialog({
                     {operation === 'uninstall' && (
                         <>
                             <div className={styles.section}>
-                                <div className={styles.label}>削除対象</div>
+                                <div data-i18n="components.AddonActionConfirmDialog.text016" className={styles.label}>{uiText("components.AddonActionConfirmDialog.text016")}</div>
                                 <ul className={styles.list}>
-                                    <li>
-                                        アドオン本体ディレクトリ (<code>expansion_data/{entry.id}/</code>)
+                                    <li data-i18n="components.AddonActionConfirmDialog.text017">{uiText("components.AddonActionConfirmDialog.text017")}<code>{uiText("components.AddonActionConfirmDialog.label005")}{entry.id}/</code>)
                                     </li>
-                                    <li>
-                                        永続データディレクトリ
-                                        (<code>~/.saiverse/user_data/addon_data/{entry.id}/</code>)
-                                        — 下のチェックで指定
-                                    </li>
+                                    <li data-i18n="components.AddonActionConfirmDialog.text018 components.AddonActionConfirmDialog.text019">{uiText("components.AddonActionConfirmDialog.text018")}<code>{uiText("components.AddonActionConfirmDialog.label006")}{entry.id}/</code>{uiText("components.AddonActionConfirmDialog.text019")}</li>
                                 </ul>
                             </div>
                             <label className={styles.checkboxRow}>
@@ -155,26 +148,23 @@ export default function AddonActionConfirmDialog({
                                     checked={deleteData}
                                     onChange={(e) => setDeleteData(e.target.checked)}
                                 />
-                                <span>永続データも削除する (保存された参照音声・OAuth トークン等が消えます)</span>
+                                <span data-i18n="components.AddonActionConfirmDialog.text020">{uiText("components.AddonActionConfirmDialog.text020")}</span>
                             </label>
                             <div className={styles.note}>
                                 <AlertTriangle size={14} />
-                                <span>削除後はカタログから再導入できます。</span>
+                                <span data-i18n="components.AddonActionConfirmDialog.text021">{uiText("components.AddonActionConfirmDialog.text021")}</span>
                             </div>
                         </>
                     )}
                 </div>
 
                 <div className={styles.footer}>
-                    <button className={styles.btnSecondary} onClick={onCancel}>
-                        キャンセル
-                    </button>
-                    <button
+                    <button data-i18n="components.AddonActionConfirmDialog.text022" className={styles.btnSecondary} onClick={onCancel}>{uiText("components.AddonActionConfirmDialog.text022")}</button>
+                    <button data-i18n="components.AddonActionConfirmDialog.text023"
                         className={operation === 'uninstall' ? styles.btnDanger : styles.btnPrimary}
                         onClick={() => onProceed(operation === 'uninstall' ? deleteData : undefined)}
                     >
-                        {opLabel}する
-                    </button>
+                        {opLabel}{uiText("components.AddonActionConfirmDialog.text023")}</button>
                 </div>
             </div>
         </ModalOverlay>

@@ -1,4 +1,7 @@
 'use client';
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useEffect, useRef, useState } from 'react';
 import styles from './TermHint.module.css';
@@ -13,8 +16,8 @@ import styles from './TermHint.module.css';
  */
 
 export const TERM_HINTS = {
-    track: 'ペルソナの暮らしを目的ごとに分けた単位です。会話も作業も、どれかの Track に属します。',
-    task: 'Track の中の具体的なやることです。ペルソナが自分で立てたり、あなたに頼まれて作ったりします。',
+    get track() { return uiText("components.common.TermHint.text001"); },
+    get task() { return uiText("components.common.TermHint.text002"); },
 } as const;
 
 export type TermHintKey = keyof typeof TERM_HINTS;
@@ -29,6 +32,7 @@ interface TermHintProps {
 }
 
 export default function TermHint({ term }: TermHintProps) {
+    useLocale();
     const [open, setOpen] = useState(false);
     const rootRef = useRef<HTMLSpanElement>(null);
 
@@ -57,10 +61,10 @@ export default function TermHint({ term }: TermHintProps) {
             onPointerEnter={e => { if (e.pointerType === 'mouse') setOpen(true); }}
             onPointerLeave={e => { if (e.pointerType === 'mouse') setOpen(false); }}
         >
-            <button
+            <button data-i18n="components.common.TermHint.text003"
                 type="button"
                 className={styles.icon}
-                aria-label={`${TERM_LABELS[term]} の説明`}
+                aria-label={uiText("components.common.TermHint.text003", { p1: TERM_LABELS[term] })}
                 aria-expanded={open}
                 onClick={e => { e.stopPropagation(); setOpen(v => !v); }}
             >

@@ -1,3 +1,10 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Loader2, ChevronLeft, BookOpen, Layers, Trash2, Play, Settings, Square, Edit2, Save, X } from 'lucide-react';
 import styles from './ArasujiViewer.module.css';
@@ -72,6 +79,7 @@ interface ArasujiViewerProps {
 const dismissedJobIds = new Set<string>();
 
 export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
+    useLocale();
     const [stats, setStats] = useState<ArasujiStats | null>(null);
     const [entries, setEntries] = useState<ArasujiEntry[]>([]);
     const [entryCache, setEntryCache] = useState<Record<string, ArasujiEntry>>({});
@@ -123,7 +131,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     // 読めなかったときも出さない (誤った件数で実行へ誘導しない)。
     const loadRepairEstimate = useCallback(async () => {
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/cost-estimate`);
+            const res = await apiFetch(`/api/people/${personaId}/arasuji/cost-estimate`);
             if (res.ok) {
                 setRepairEstimate(await res.json());
             } else {
@@ -139,7 +147,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         loadStats();
         loadEntries(null);
         loadRepairEstimate();
-        fetch('/api/config/developer-mode')
+        apiFetch('/api/config/developer-mode')
             .then(res => res.ok ? res.json() : null)
             .then(data => { if (data) setDeveloperMode(data.enabled); })
             .catch(() => {});
@@ -167,7 +175,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const fetchEntryById = async (entryId: string): Promise<ArasujiEntry | null> => {
         if (entryCache[entryId]) return entryCache[entryId];
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/${entryId}`);
+            const res = await apiFetch(`/api/people/${personaId}/arasuji/${entryId}`);
             if (res.ok) {
                 const entry = await res.json();
                 setEntryCache(prev => ({ ...prev, [entryId]: entry }));
@@ -183,7 +191,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const fetchSourceMessages = async (entryId: string) => {
         setIsLoadingMessages(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/${entryId}/messages`);
+            const res = await apiFetch(`/api/people/${personaId}/arasuji/${entryId}/messages`);
             if (res.ok) {
                 const data = await res.json();
                 setSourceMessages(data);
@@ -199,7 +207,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const fetchErrorBatchMessages = async (messageIds: string[]) => {
         setIsLoadingErrorBatch(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/messages-by-ids`, {
+            const res = await apiFetch(`/api/people/${personaId}/arasuji/messages-by-ids`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ids: messageIds }),
@@ -217,27 +225,27 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
 
     // Delete a message from the error batch (for removing problematic messages)
     const deleteErrorBatchMessage = async (messageId: string) => {
-        if (!confirm("このメッセージを削除しますか？この操作は元に戻せません。")) return;
+        if (!confirm(uiText("components.memory.ArasujiViewer.text001"))) return;
         try {
-            const res = await fetch(`/api/people/${personaId}/messages/${messageId}`, {
+            const res = await apiFetch(`/api/people/${personaId}/messages/${messageId}`, {
                 method: 'DELETE',
             });
             if (res.ok) {
                 setErrorBatchMessages(prev => prev.filter(m => m.id !== messageId));
             } else {
                 const err = await res.json().catch(() => ({}));
-                alert(`削除に失敗しました: ${err.detail || 'Unknown error'}`);
+                alert(uiText("components.memory.ArasujiViewer.text002", { p1: err.detail || 'Unknown error' }));
             }
         } catch (e) {
             console.error("Failed to delete message", e);
-            alert('メッセージの削除中にエラーが発生しました');
+            alert(uiText("components.memory.ArasujiViewer.text003"));
         }
     };
 
     const fetchLinkedFragments = async (entryId: string) => {
         setIsLoadingFragments(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/${entryId}/fragments`);
+            const res = await apiFetch(`/api/people/${personaId}/arasuji/${entryId}/fragments`);
             if (res.ok) {
                 const data = await res.json();
                 setLinkedFragments(data.fragments || []);
@@ -273,7 +281,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const handleEditSave = async () => {
         if (!editingEntryId) return;
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/${editingEntryId}`, {
+            const res = await apiFetch(`/api/people/${personaId}/arasuji/${editingEntryId}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ content: editContent }),
@@ -289,20 +297,20 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 setEditingEntryId(null);
                 setEditContent("");
             } else {
-                alert("保存に失敗しました");
+                alert(uiText("components.memory.ArasujiViewer.text004"));
             }
         } catch (error) {
             console.error("Failed to update arasuji", error);
-            alert("保存中にエラーが発生しました");
+            alert(uiText("components.memory.ArasujiViewer.text005"));
         }
     };
 
     const handleDelete = async (entryId: string, e: React.MouseEvent) => {
         e.stopPropagation();
-        if (!confirm("この Chronicle を削除しますか？")) return;
+        if (!confirm(uiText("components.memory.ArasujiViewer.text006"))) return;
 
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/${entryId}`, {
+            const res = await apiFetch(`/api/people/${personaId}/arasuji/${entryId}`, {
                 method: 'DELETE'
             });
             if (res.ok) {
@@ -317,20 +325,20 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 // 消して再編纂の運用) — 件数を数え直す。
                 loadRepairEstimate();
             } else {
-                alert("削除に失敗しました");
+                alert(uiText("components.memory.ArasujiViewer.text007"));
             }
         } catch (error) {
             console.error("Failed to delete arasuji", error);
-            alert("削除中にエラーが発生しました");
+            alert(uiText("components.memory.ArasujiViewer.text008"));
         }
     };
 
     const handleRegenerate = async (entryId: string, e: React.MouseEvent) => {
         e.stopPropagation();
-        if (!confirm("この Chronicle を再生成しますか？")) return;
+        if (!confirm(uiText("components.memory.ArasujiViewer.text009"))) return;
 
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/${entryId}/regenerate`, {
+            const res = await apiFetch(`/api/people/${personaId}/arasuji/${entryId}/regenerate`, {
                 method: 'POST'
             });
             if (res.ok) {
@@ -338,27 +346,27 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 // Reload stats and entries
                 loadStats();
                 // Refresh entries list
-                const entriesRes = await fetch(`/api/people/${personaId}/arasuji?level=${levelFilter}`);
+                const entriesRes = await apiFetch(`/api/people/${personaId}/arasuji?level=${levelFilter}`);
                 if (entriesRes.ok) {
                     const data = await entriesRes.json();
                     setEntries(data.entries || []);
                 }
                 if (selectedEntry?.id === entryId) {
                     // Update selectedEntry with new entry
-                    const newEntryRes = await fetch(`/api/people/${personaId}/arasuji/${result.new_entry_id}`);
+                    const newEntryRes = await apiFetch(`/api/people/${personaId}/arasuji/${result.new_entry_id}`);
                     if (newEntryRes.ok) {
                         const newEntry = await newEntryRes.json();
                         setSelectedEntry(newEntry);
                     }
                 }
-                alert("再生成が完了しました");
+                alert(uiText("components.memory.ArasujiViewer.text010"));
             } else {
                 const error = await res.json();
-                alert(`再生成に失敗しました: ${error.detail || 'Unknown error'}`);
+                alert(uiText("components.memory.ArasujiViewer.text011", { p1: error.detail || 'Unknown error' }));
             }
         } catch (error) {
             console.error("Failed to regenerate arasuji", error);
-            alert("再生成中にエラーが発生しました");
+            alert(uiText("components.memory.ArasujiViewer.text012"));
         }
     };
 
@@ -379,7 +387,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         let cancelled = false;
         (async () => {
             try {
-                const res = await fetch(`/api/people/${encodeURIComponent(personaId)}/context-status`);
+                const res = await apiFetch(`/api/people/${encodeURIComponent(personaId)}/context-status`);
                 if (cancelled) return;
                 if (!res.ok) {
                     setContextStatusError(true);
@@ -426,70 +434,68 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     // ここは同じ理由を短く言い直したものにする。
     const generateDisabledReason = (): string | undefined => {
         if (canFold) return undefined;
-        if (contextStatusError) return '送信量を読めませんでした';
-        if (!contextStatus) return '送信量を確認しています';
-        if (!contextStatus.metabolism) return 'このモデルは水位を持たない設定です';
-        if (contextStatus.measurement_failed) return 'いまの送信量を測定できませんでした';
-        if (contextStatus.presented_chars == null) return 'まだ会話の起点がありません';
+        if (contextStatusError) return uiText("components.memory.ArasujiViewer.text013");
+        if (!contextStatus) return uiText("components.memory.ArasujiViewer.text014");
+        if (!contextStatus.metabolism) return uiText("components.memory.ArasujiViewer.text015");
+        if (contextStatus.measurement_failed) return uiText("components.memory.ArasujiViewer.text016");
+        if (contextStatus.presented_chars == null) return uiText("components.memory.ArasujiViewer.text017");
         if (foldReady === false && overflowChars != null && overflowChars > 0) {
             return foldShortfallChars != null && foldShortfallChars > 0
-                ? `あと約 ${foldShortfallChars.toLocaleString()} 文字の会話がたまれば畳めます`
-                : 'まだ畳める範囲がたまっていません';
+                ? uiText("components.memory.ArasujiViewer.text018", { p1: foldShortfallChars.toLocaleString(getFormatLocale()) })
+                : uiText("components.memory.ArasujiViewer.text019");
         }
         if (foldReady == null && overflowChars != null && overflowChars > 0) {
             // 古い backend (fold_ready なし): 生超過が U に達するまで押せない。
             return foldUnitChars != null && foldUnitChars > 0
-                ? 'まだ畳める範囲がたまっていません'
-                : '畳めるかどうか判定できません';
+                ? uiText("components.memory.ArasujiViewer.text020")
+                : uiText("components.memory.ArasujiViewer.text021");
         }
-        return '畳むものがありません';
+        return uiText("components.memory.ArasujiViewer.text022");
     };
 
     // 確認窓の判断材料 (横棒 + いまの状況の一文)。文言は ChatOptions の
     // 「データ送信量の管理」と揃える。
     const renderGenerateContextBody = () => {
         if (contextStatusError) {
-            return <p className={styles.generateStatusText}>送信量を読めませんでした。畳めるかどうか判断できないため、実行できません。</p>;
+            return <p data-i18n="components.memory.ArasujiViewer.text023" className={styles.generateStatusText}>{uiText("components.memory.ArasujiViewer.text023")}</p>;
         }
         if (!contextStatus) {
-            return <p className={styles.generateStatusText}>送信量を確認しています...</p>;
+            return <p data-i18n="components.memory.ArasujiViewer.text024" className={styles.generateStatusText}>{uiText("components.memory.ArasujiViewer.text024")}</p>;
         }
         if (!contextStatus.metabolism) {
             return (
-                <p className={styles.generateStatusText}>
-                    このモデル（{contextStatus.model || '未設定'}）は水位を持たない設定のため、履歴の自動整理は行われません。
-                </p>
+                <p data-i18n="components.memory.ArasujiViewer.text025 components.memory.ArasujiViewer.text026 components.memory.ArasujiViewer.text027" className={styles.generateStatusText}>{uiText("components.memory.ArasujiViewer.text025")}{contextStatus.model || uiText("components.memory.ArasujiViewer.text026")}{uiText("components.memory.ArasujiViewer.text027")}</p>
             );
         }
         const presented = contextStatus.presented_chars;
         const target = contextStatus.target_chars;
         if (presented == null || target == null) {
             return contextStatus.measurement_failed ? (
-                <p className={styles.generateStatusText}>いまの送信量を測定できませんでした。畳めるかどうか判断できないため、実行できません。</p>
+                <p data-i18n="components.memory.ArasujiViewer.text028" className={styles.generateStatusText}>{uiText("components.memory.ArasujiViewer.text028")}</p>
             ) : (
-                <p className={styles.generateStatusText}>まだ会話の起点がありません。最初の会話で確立されます。</p>
+                <p data-i18n="components.memory.ArasujiViewer.text029" className={styles.generateStatusText}>{uiText("components.memory.ArasujiViewer.text029")}</p>
             );
         }
         const overflow = presented - target;
         let statusText: string;
         if (overflow <= 0) {
-            statusText = 'いまの会話は残す量以下なので、畳むものがありません。';
+            statusText = uiText("components.memory.ArasujiViewer.text030");
         } else if (foldReady == null) {
             // 古い backend (fold_ready を返さない) — 8/24 の生比較 (超過が U に
             // 達しているか) に落とす。U も無ければ判定できない = 実行できない。
             if (foldUnitChars == null || foldUnitChars <= 0) {
-                statusText = '畳めるかどうかを判定できないため、実行できません。';
+                statusText = uiText("components.memory.ArasujiViewer.text031");
             } else if (overflow >= foldUnitChars) {
-                statusText = `いまの会話は ${presented.toLocaleString()} 文字で、残す量 ${target.toLocaleString()} 文字を超えているぶんが畳まれます。`;
+                statusText = uiText("components.memory.ArasujiViewer.text032", { p1: presented.toLocaleString(getFormatLocale()), p2: target.toLocaleString(getFormatLocale()) });
             } else {
-                statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていますが、まだ畳める範囲がたまっていません。あと約 ${(foldUnitChars - overflow).toLocaleString()} 文字の会話がたまれば畳めます。`;
+                statusText = uiText("components.memory.ArasujiViewer.text033", { p1: overflow.toLocaleString(getFormatLocale()), p2: (foldUnitChars - overflow).toLocaleString(getFormatLocale()) });
             }
         } else if (foldReady) {
-            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていて、古い側からあらすじへ畳めます。`;
+            statusText = uiText("components.memory.ArasujiViewer.text034", { p1: overflow.toLocaleString(getFormatLocale()) });
         } else if (foldShortfallChars != null && foldShortfallChars > 0) {
-            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていますが、まだ畳める範囲がたまっていません。あと約 ${foldShortfallChars.toLocaleString()} 文字の会話がたまれば畳めます。`;
+            statusText = uiText("components.memory.ArasujiViewer.text035", { p1: overflow.toLocaleString(getFormatLocale()), p2: foldShortfallChars.toLocaleString(getFormatLocale()) });
         } else {
-            statusText = `いまの会話は残す量を ${overflow.toLocaleString()} 文字超えていますが、まだ畳める範囲がたまっていません。`;
+            statusText = uiText("components.memory.ArasujiViewer.text036", { p1: overflow.toLocaleString(getFormatLocale()) });
         }
         return (
             <>
@@ -511,7 +517,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
 
     const postGenerateJob = async (body: Record<string, unknown>) => {
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/generate`, {
+            const res = await apiFetch(`/api/people/${personaId}/arasuji/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -527,7 +533,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     status: 'started',
                     progress: null,
                     total: null,
-                    message: '開始中...',
+                    message: uiText("components.memory.ArasujiViewer.text037"),
                     entriesCreated: null,
                     warning: null,
                     error: null,
@@ -539,11 +545,11 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 startPolling(data.job_id);
             } else {
                 const err = await res.json();
-                alert(`生成開始に失敗: ${err.detail || 'Unknown error'}`);
+                alert(uiText("components.memory.ArasujiViewer.text038", { p1: err.detail || 'Unknown error' }));
             }
         } catch (e) {
             console.error('Failed to start generation', e);
-            alert('生成開始中にエラー');
+            alert(uiText("components.memory.ArasujiViewer.text039"));
         }
     };
 
@@ -568,7 +574,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         if (pollingRef.current) clearInterval(pollingRef.current);
         pollingRef.current = setInterval(async () => {
             try {
-                const res = await fetch(`/api/people/${personaId}/arasuji/generate/${jobId}`);
+                const res = await apiFetch(`/api/people/${personaId}/arasuji/generate/${jobId}`);
                 if (res.ok) {
                     const data = await res.json();
                     setGenerationJob({
@@ -601,7 +607,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const cancelGeneration = async () => {
         if (!generationJob?.jobId) return;
         try {
-            await fetch(`/api/people/${personaId}/arasuji/generate/${generationJob.jobId}/cancel`, {
+            await apiFetch(`/api/people/${personaId}/arasuji/generate/${generationJob.jobId}/cancel`, {
                 method: 'POST',
             });
         } catch (e) {
@@ -633,7 +639,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         let cancelled = false;
         (async () => {
             try {
-                const res = await fetch(`/api/people/${encodeURIComponent(personaId)}/arasuji/generate/latest`);
+                const res = await apiFetch(`/api/people/${encodeURIComponent(personaId)}/arasuji/generate/latest`);
                 if (!res.ok || cancelled) return;
                 const data = await res.json();
                 // ジョブが 1 件も無ければ null (エラーではない)。
@@ -682,7 +688,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const loadStats = async () => {
         setIsLoadingStats(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/stats`);
+            const res = await apiFetch(`/api/people/${personaId}/arasuji/stats`);
             if (res.ok) {
                 const data = await res.json();
                 setStats(data);
@@ -700,7 +706,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
             const url = level !== null
                 ? `/api/people/${personaId}/arasuji?level=${level}`
                 : `/api/people/${personaId}/arasuji`;
-            const res = await fetch(url);
+            const res = await apiFetch(url);
             if (res.ok) {
                 const data = await res.json();
                 setEntries(data.entries);
@@ -714,13 +720,13 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
 
     const formatTime = (ts: number | null) => {
         if (!ts) return "";
-        return new Date(ts * 1000).toLocaleString();
+        return new Date(ts * 1000).toLocaleString(getFormatLocale());
     };
 
     const formatTimeRange = (start: number | null, end: number | null) => {
         if (!start && !end) return "-";
-        const startStr = start ? new Date(start * 1000).toLocaleDateString() : "?";
-        const endStr = end ? new Date(end * 1000).toLocaleDateString() : "?";
+        const startStr = start ? new Date(start * 1000).toLocaleDateString(getFormatLocale()) : "?";
+        const endStr = end ? new Date(end * 1000).toLocaleDateString(getFormatLocale()) : "?";
         return `${startStr} ~ ${endStr}`;
     };
 
@@ -737,26 +743,22 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     return (
         <div className={styles.container}>
             {/* Sidebar: Entry List */}
-            <div className={`${styles.sidebar} ${!showList ? styles.mobileHidden : ''}`}>
+            <div data-i18n="components.memory.ArasujiViewer.text048 components.memory.ArasujiViewer.text049 components.memory.ArasujiViewer.text050 components.memory.ArasujiViewer.text051 components.memory.ArasujiViewer.text052 components.memory.ArasujiViewer.text053 components.memory.ArasujiViewer.text054 components.memory.ArasujiViewer.text055 components.memory.ArasujiViewer.text056 components.memory.ArasujiViewer.text057 components.memory.ArasujiViewer.text058 components.memory.ArasujiViewer.text059 components.memory.ArasujiViewer.text060" className={`${styles.sidebar} ${!showList ? styles.mobileHidden : ''}`}>
                 <div className={styles.sidebarHeader}>
                     <div className={styles.headerContent}>
                         <Layers size={18} />
-                        <span>Chronicle 一覧 (Memory Weave)</span>
+                        <span data-i18n="components.memory.ArasujiViewer.text040">{uiText("components.memory.ArasujiViewer.text040")}</span>
                     </div>
                     <div className={styles.headerActions}>
-                        <button
+                        <button data-i18n="components.memory.ArasujiViewer.text041 components.memory.ArasujiViewer.text042"
                             className={styles.generateBtn}
                             onClick={openGenerateModal}
                             disabled={generationJob?.status === 'running'}
-                            title="溜まった会話をあらすじにまとめる"
+                            title={uiText("components.memory.ArasujiViewer.text041")}
                         >
-                            <Play size={14} />
-                            生成
-                        </button>
+                            <Play size={14} />{uiText("components.memory.ArasujiViewer.text042")}</button>
                         {stats && (
-                            <span className={styles.statsInfo}>
-                                計 {stats.total_count} 件
-                            </span>
+                            <span data-i18n="components.memory.ArasujiViewer.text043 components.memory.ArasujiViewer.text044" className={styles.statsInfo}>{uiText("components.memory.ArasujiViewer.text043")}{stats.total_count}{uiText("components.memory.ArasujiViewer.text044")}</span>
                         )}
                     </div>
                 </div>
@@ -766,11 +768,11 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     <div className={styles.progressBar}>
                         <div className={styles.progressInfo}>
                             <Loader2 className={styles.loader} size={14} />
-                            <span>{generationJob.message || '処理中...'}</span>
-                            <button
+                            <span data-i18n="components.memory.ArasujiViewer.text045">{generationJob.message || uiText("components.memory.ArasujiViewer.text045")}</span>
+                            <button data-i18n="components.memory.ArasujiViewer.text046"
                                 className={styles.stopGenerationBtn}
                                 onClick={cancelGeneration}
-                                title="生成を中止"
+                                title={uiText("components.memory.ArasujiViewer.text046")}
                             >
                                 <Square size={12} />
                             </button>
@@ -805,7 +807,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 )}
                 {generationJob && generationJob.status === 'cancelled' && (
                     <div className={styles.generationResult}>
-                        <span>{generationJob.message || '生成が中止されました'}</span>
+                        <span data-i18n="components.memory.ArasujiViewer.text047">{generationJob.message || uiText("components.memory.ArasujiViewer.text047")}</span>
                         <button onClick={dismissGenerationJob}>×</button>
                     </div>
                 )}
@@ -829,31 +831,31 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     const guidanceMap: Record<string, string> = {
                         // 使うモデルが無い・繋げない。待っても直らないので、選び直しを案内する
                         // (docs/intent/persona_model_selection.md 決まったこと 8)。
-                        model_unavailable: 'ペルソナが使うモデルが SAIVerse に無いか、繋げないため止まりました。モデルを選び直すと、再起動しなくても再実行できます。',
-                        empty_response: 'しばらく時間を置いてから再実行してください。繰り返し発生する場合は、サーバーの障害情報を確認してください。',
-                        safety_filter: '該当メッセージに不適切と判定された内容が含まれている可能性があります。特に画像生成プロンプト（少年・少女関連など）が含まれる場合、健全な内容でもブロックされることがあります。下の「該当メッセージを表示」で内容を確認し、必要に応じて修正・削除してから再実行してください。',
-                        timeout: 'サーバーが混雑している可能性があります。しばらく時間を置いてから再実行してください。',
-                        rate_limit: 'API利用制限に達しています。しばらく時間を置いてから再実行してください。',
-                        payment: 'APIキーの残高や支払い設定を確認してください。',
-                        authentication: 'APIキーの設定を確認してください。',
-                        server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再実行してください。',
+                        model_unavailable: uiText("components.memory.ArasujiViewer.text124"),
+                        empty_response: uiText("components.memory.ArasujiViewer.text048"),
+                        safety_filter: uiText("components.memory.ArasujiViewer.text049"),
+                        timeout: uiText("components.memory.ArasujiViewer.text050"),
+                        rate_limit: uiText("components.memory.ArasujiViewer.text051"),
+                        payment: uiText("components.memory.ArasujiViewer.text052"),
+                        authentication: uiText("components.memory.ArasujiViewer.text053"),
+                        server_error: uiText("components.memory.ArasujiViewer.text054"),
                         // 2026-09-01 に env の門 (ENABLE_MEMORY_WEAVE_CONTEXT) を撤去した
                         // ので、無効の原因はペルソナ設定だけ = この案内が常に正しい。
-                        chronicle_disabled: 'ペルソナ設定で「Chronicle 自動生成」が無効になっています。有効にすると実行できます。',
-                        window_claimed: '別のあらすじ処理が同じ範囲を処理中または処理済みです。しばらく待ってから再実行してください。',
-                        sluice_unseen: '今回の採取（スルース）で読めていない範囲があったため、畳みを見送りました。採取の結果は保存されており、畳みは次回のまとめで続きから進みます。',
-                        estimate_stale: 'あらすじにする対象が見積もり時より増えています。件数を確認し直してから、もう一度実行してください。',
-                        ceiling_unresolved: '会話中の窓の境界を確認できなかったため、何も編纂せずに止まりました。しばらくしてから再実行してください。',
+                        chronicle_disabled: uiText("components.memory.ArasujiViewer.text055"),
+                        window_claimed: uiText("components.memory.ArasujiViewer.text056"),
+                        sluice_unseen: uiText("components.memory.ArasujiViewer.text057"),
+                        estimate_stale: uiText("components.memory.ArasujiViewer.text058"),
+                        ceiling_unresolved: uiText("components.memory.ArasujiViewer.text059"),
                     };
                     const icon = (code && iconMap[code]) || '❌';
-                    const guidance = (code && guidanceMap[code]) || '処理が完了しませんでした。少し待ってからもう一度お試しください。解決しない場合は、ログの内容とあわせて開発者へ報告してください。';
+                    const guidance = (code && guidanceMap[code]) || uiText("components.memory.ArasujiViewer.text060");
                     const meta = generationJob.error_meta;
                     return (
                         <div className={styles.generationError}>
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
-                                <span>
+                                <span data-i18n="components.memory.ArasujiViewer.text061">
                                     {icon}{' '}
-                                    {generationJob.error || '生成に失敗しました'}
+                                    {generationJob.error || uiText("components.memory.ArasujiViewer.text061")}
                                 </span>
                                 <span style={{ fontSize: '0.85em', opacity: 0.75, lineHeight: 1.4 }}>
                                     {guidance}
@@ -866,11 +868,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                             }
                                         }}
                                     >
-                                        <summary style={{ cursor: 'pointer', opacity: 0.8, fontWeight: 500 }}>
-                                            該当メッセージを表示
-                                            {meta.start_time && meta.end_time && (
+                                        <summary data-i18n="components.memory.ArasujiViewer.text062" style={{ cursor: 'pointer', opacity: 0.8, fontWeight: 500 }}>{uiText("components.memory.ArasujiViewer.text062")}{meta.start_time && meta.end_time && (
                                                 <span style={{ fontWeight: 400, opacity: 0.7, marginLeft: '8px' }}>
-                                                    ({new Date(meta.start_time * 1000).toLocaleDateString()} ~ {new Date(meta.end_time * 1000).toLocaleDateString()})
+                                                    ({new Date(meta.start_time * 1000).toLocaleDateString(getFormatLocale())} ~ {new Date(meta.end_time * 1000).toLocaleDateString(getFormatLocale())})
                                                 </span>
                                             )}
                                         </summary>
@@ -878,7 +878,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                             {isLoadingErrorBatch ? (
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 0' }}>
                                                     <Loader2 className={styles.loader} size={14} />
-                                                    <span>メッセージを読み込み中...</span>
+                                                    <span data-i18n="components.memory.ArasujiViewer.text063">{uiText("components.memory.ArasujiViewer.text063")}</span>
                                                 </div>
                                             ) : errorBatchMessages.length > 0 ? (
                                                 errorBatchMessages.map(msg => (
@@ -888,11 +888,11 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                                                 {msg.role === 'model' ? 'assistant' : msg.role}
                                                             </span>
                                                             <span className={styles.sourceMessageTime}>
-                                                                {new Date(msg.created_at * 1000).toLocaleString()}
+                                                                {new Date(msg.created_at * 1000).toLocaleString(getFormatLocale())}
                                                             </span>
-                                                            <button
+                                                            <button data-i18n="components.memory.ArasujiViewer.text064"
                                                                 onClick={() => deleteErrorBatchMessage(msg.id)}
-                                                                title="このメッセージを削除"
+                                                                title={uiText("components.memory.ArasujiViewer.text064")}
                                                                 style={{
                                                                     background: 'none', border: 'none', cursor: 'pointer',
                                                                     opacity: 0.5, padding: '2px', marginLeft: 'auto',
@@ -910,14 +910,14 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                                     </div>
                                                 ))
                                             ) : (
-                                                <span style={{ opacity: 0.6 }}>メッセージが見つかりませんでした</span>
+                                                <span data-i18n="components.memory.ArasujiViewer.text065" style={{ opacity: 0.6 }}>{uiText("components.memory.ArasujiViewer.text065")}</span>
                                             )}
                                         </div>
                                     </details>
                                 )}
                                 {generationJob.error_detail && (
                                     <details style={{ fontSize: '0.85em', marginTop: '2px' }}>
-                                        <summary style={{ cursor: 'pointer', opacity: 0.7 }}>Technical Details</summary>
+                                        <summary style={{ cursor: 'pointer', opacity: 0.7 }}>{uiText("components.memory.ArasujiViewer.label001")}</summary>
                                         <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: '4px 0', fontSize: '0.9em', opacity: 0.8 }}>{generationJob.error_detail}</pre>
                                     </details>
                                 )}
@@ -935,12 +935,14 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     <div className={styles.repairBanner}>
                         <span className={styles.repairBannerText}>
                             {repairEstimate.unprocessed_messages >= 1 && (
-                                <>あらすじになっていない過去の会話が {repairEstimate.unprocessed_messages.toLocaleString()} 件あります</>
+                                <>{uiText("components.memory.ArasujiViewer.text066")}{repairEstimate.unprocessed_messages.toLocaleString(getFormatLocale())}{uiText("components.memory.ArasujiViewer.text067")}</>
                             )}
                             {(repairEstimate.consolidation_calls ?? 0) >= 1 && (
                                 <>
                                     {repairEstimate.unprocessed_messages >= 1 && <br />}
-                                    あらすじを大きな流れにまとめる作業が {(repairEstimate.consolidation_calls ?? 0).toLocaleString()} 回分残っています
+                                    <span data-i18n="components.memory.ArasujiViewer.text125">
+                                        {uiText("components.memory.ArasujiViewer.text125", { p1: (repairEstimate.consolidation_calls ?? 0).toLocaleString(getFormatLocale()) })}
+                                    </span>
                                 </>
                             )}
                             {repairEstimate.repair_incomplete && (
@@ -950,22 +952,20 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                         走行中は「放置された未完了」ではない — 再実行を
                                         促すのは止まっているときだけ (2026-09-01 実機指摘)。 */}
                                     {['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '')
-                                        ? '処理を実行中です。'
-                                        : '前回の処理が完了していません。再実行してください。'}
+                                        ? uiText("components.memory.ArasujiViewer.text068")
+                                        : uiText("components.memory.ArasujiViewer.text069")}
                                 </>
                             )}
                         </span>
-                        <button
+                        <button data-i18n="components.memory.ArasujiViewer.text070 components.memory.ArasujiViewer.text071"
                             className={styles.repairBannerBtn}
                             onClick={() => setShowRepairModal(true)}
                             // pending (ポーリングが backend 状態を写す最大 2 秒) と
                             // cancelling も塞ぐ — claim なしジョブの並走防御は
                             // この無効化だけなので、進行中の状態を全部覆う。
                             disabled={['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '')}
-                            title="内容と費用を確認してからあらすじにできます"
-                        >
-                            確認する
-                        </button>
+                            title={uiText("components.memory.ArasujiViewer.text070")}
+                        >{uiText("components.memory.ArasujiViewer.text071")}</button>
                     </div>
                 )}
 
@@ -977,11 +977,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             value={levelFilter === null ? "all" : levelFilter.toString()}
                             onChange={(e) => setLevelFilter(e.target.value === "all" ? null : parseInt(e.target.value))}
                         >
-                            <option value="all">すべてのレベル</option>
+                            <option data-i18n="components.memory.ArasujiViewer.text072" value="all">{uiText("components.memory.ArasujiViewer.text072")}</option>
                             {Array.from({ length: stats.max_level }, (_, i) => i + 1).map(level => (
-                                <option key={level} value={level}>
-                                    レベル{level} ({getLevelName(level)}) - {stats.counts_by_level[level.toString()] || 0}件
-                                </option>
+                                <option data-i18n="components.memory.ArasujiViewer.text073 components.memory.ArasujiViewer.text074" key={level} value={level}>{uiText("components.memory.ArasujiViewer.text073")}{level} ({getLevelName(level)}) - {stats.counts_by_level[level.toString()] || 0}{uiText("components.memory.ArasujiViewer.text074")}</option>
                             ))}
                         </select>
                     </div>
@@ -995,14 +993,12 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     ) : entries.length === 0 ? (
                         <div className={styles.emptyState}>
                             <BookOpen size={48} />
-                            <p>Chronicle がまだ生成されていません</p>
-                            <button
+                            <p data-i18n="components.memory.ArasujiViewer.text075">{uiText("components.memory.ArasujiViewer.text075")}</p>
+                            <button data-i18n="components.memory.ArasujiViewer.text076"
                                 className={styles.generateBtnLarge}
                                 onClick={openGenerateModal}
                             >
-                                <Play size={16} />
-                                溜まった会話をあらすじにまとめる
-                            </button>
+                                <Play size={16} />{uiText("components.memory.ArasujiViewer.text076")}</button>
                         </div>
                     ) : (
                         entries.map((entry) => (
@@ -1013,7 +1009,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             >
                                 <div className={styles.entryMeta}>
                                     <span className={styles.levelBadge} data-level={entry.level}>
-                                        Lv.{entry.level}
+                                        {uiText("components.memory.ArasujiViewer.label002")}{entry.level}
                                     </span>
                                     {formatMessageRange(entry) && (
                                         <span className={styles.messageRange}>
@@ -1023,10 +1019,10 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                     <span className={styles.timeRange}>
                                         {formatTimeRange(entry.start_time, entry.end_time)}
                                     </span>
-                                    <button
+                                    <button data-i18n="components.memory.ArasujiViewer.text077"
                                         className={styles.deleteBtn}
                                         onClick={(e) => handleDelete(entry.id, e)}
-                                        title="削除"
+                                        title={uiText("components.memory.ArasujiViewer.text077")}
                                     >
                                         <Trash2 size={14} />
                                     </button>
@@ -1036,8 +1032,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                     {entry.content.length > 100 ? '...' : ''}
                                 </div>
                                 <div className={styles.entryStats}>
-                                    <span>{entry.message_count} メッセージ</span>
-                                    {entry.is_consolidated && <span className={styles.consolidatedBadge}>統合済 (Memory Weave)</span>}
+                                    <span data-i18n="components.memory.ArasujiViewer.text078">{entry.message_count}{uiText("components.memory.ArasujiViewer.text078")}</span>
+                                    {entry.is_consolidated && <span data-i18n="components.memory.ArasujiViewer.text079" className={styles.consolidatedBadge}>{uiText("components.memory.ArasujiViewer.text079")}</span>}
                                 </div>
                             </div>
                         ))
@@ -1054,36 +1050,30 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     >
                         <ChevronLeft size={20} />
                     </button>
-                    <span className={styles.headerTitle}>
-                        {selectedEntry ? getLevelName(selectedEntry.level) : "あらすじを選択してください"}
+                    <span data-i18n="components.memory.ArasujiViewer.text080" className={styles.headerTitle}>
+                        {selectedEntry ? getLevelName(selectedEntry.level) : uiText("components.memory.ArasujiViewer.text080")}
                     </span>
                     {selectedEntry && (
                         <>
-                            <button
+                            <button data-i18n="components.memory.ArasujiViewer.text081 components.memory.ArasujiViewer.text082"
                                 className={styles.detailRegenerateBtn}
                                 onClick={() => handleEditStart(selectedEntry)}
-                                title="編集"
+                                title={uiText("components.memory.ArasujiViewer.text081")}
                             >
-                                <Edit2 size={16} />
-                                編集
-                            </button>
+                                <Edit2 size={16} />{uiText("components.memory.ArasujiViewer.text082")}</button>
                             {selectedEntry.level === 1 && (
-                                <button
+                                <button data-i18n="components.memory.ArasujiViewer.text083 components.memory.ArasujiViewer.text084"
                                     className={styles.detailRegenerateBtn}
                                     onClick={(e) => handleRegenerate(selectedEntry.id, e)}
-                                    title="再生成"
-                                >
-                                    🔄 再生成
-                                </button>
+                                    title={uiText("components.memory.ArasujiViewer.text083")}
+                                >{uiText("components.memory.ArasujiViewer.text084")}</button>
                             )}
-                            <button
+                            <button data-i18n="components.memory.ArasujiViewer.text085 components.memory.ArasujiViewer.text086"
                                 className={styles.detailDeleteBtn}
                                 onClick={(e) => handleDelete(selectedEntry.id, e)}
-                                title="削除"
+                                title={uiText("components.memory.ArasujiViewer.text085")}
                             >
-                                <Trash2 size={16} />
-                                削除
-                            </button>
+                                <Trash2 size={16} />{uiText("components.memory.ArasujiViewer.text086")}</button>
                         </>
                     )}
                 </div>
@@ -1093,33 +1083,33 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         <div className={styles.entryDetail}>
                             <div className={styles.detailMeta}>
                                 <div className={styles.metaItem}>
-                                    <span className={styles.metaLabel}>レベル</span>
+                                    <span data-i18n="components.memory.ArasujiViewer.text087" className={styles.metaLabel}>{uiText("components.memory.ArasujiViewer.text087")}</span>
                                     <span className={styles.levelBadge} data-level={selectedEntry.level}>
                                         {selectedEntry.level} - {getLevelName(selectedEntry.level)}
                                     </span>
                                 </div>
                                 {selectedEntry.level === 1 && selectedEntry.source_start_num !== null && (
                                     <div className={styles.metaItem}>
-                                        <span className={styles.metaLabel}>メッセージ番号</span>
+                                        <span data-i18n="components.memory.ArasujiViewer.text088" className={styles.metaLabel}>{uiText("components.memory.ArasujiViewer.text088")}</span>
                                         <span className={styles.messageRangeDetail}>
                                             #{selectedEntry.source_start_num} ~ #{selectedEntry.source_end_num}
                                             <span className={styles.offsetHint}>
-                                                (--offset {selectedEntry.source_start_num - 1} --limit {(selectedEntry.source_end_num || 0) - (selectedEntry.source_start_num || 0) + 1})
+                                                {uiText("components.memory.ArasujiViewer.label003")}{selectedEntry.source_start_num - 1} {uiText("components.memory.ArasujiViewer.label004")}{(selectedEntry.source_end_num || 0) - (selectedEntry.source_start_num || 0) + 1})
                                             </span>
                                         </span>
                                     </div>
                                 )}
                                 <div className={styles.metaItem}>
-                                    <span className={styles.metaLabel}>期間</span>
+                                    <span data-i18n="components.memory.ArasujiViewer.text089" className={styles.metaLabel}>{uiText("components.memory.ArasujiViewer.text089")}</span>
                                     <span>{formatTimeRange(selectedEntry.start_time, selectedEntry.end_time)}</span>
                                 </div>
                                 <div className={styles.metaItem}>
-                                    <span className={styles.metaLabel}>メッセージ数</span>
-                                    <span>{selectedEntry.message_count} 件</span>
+                                    <span data-i18n="components.memory.ArasujiViewer.text090" className={styles.metaLabel}>{uiText("components.memory.ArasujiViewer.text090")}</span>
+                                    <span data-i18n="components.memory.ArasujiViewer.text091">{selectedEntry.message_count}{uiText("components.memory.ArasujiViewer.text091")}</span>
                                 </div>
                                 <div className={styles.metaItem}>
-                                    <span className={styles.metaLabel}>統合済み</span>
-                                    <span>{selectedEntry.is_consolidated ? 'はい' : 'いいえ'}</span>
+                                    <span data-i18n="components.memory.ArasujiViewer.text092" className={styles.metaLabel}>{uiText("components.memory.ArasujiViewer.text092")}</span>
+                                    <span data-i18n="components.memory.ArasujiViewer.text093 components.memory.ArasujiViewer.text094">{selectedEntry.is_consolidated ? uiText("components.memory.ArasujiViewer.text093") : uiText("components.memory.ArasujiViewer.text094")}</span>
                                 </div>
                             </div>
                             <div className={styles.contentSection}>
@@ -1132,12 +1122,10 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                             rows={8}
                                         />
                                         <div className={styles.editButtons}>
-                                            <button onClick={handleEditSave} className={styles.editSaveBtn}>
-                                                <Save size={14} /> 保存
-                                            </button>
-                                            <button onClick={handleEditCancel} className={styles.editCancelBtn}>
-                                                <X size={14} /> キャンセル
-                                            </button>
+                                            <button data-i18n="components.memory.ArasujiViewer.text095" onClick={handleEditSave} className={styles.editSaveBtn}>
+                                                <Save size={14} />{uiText("components.memory.ArasujiViewer.text095")}</button>
+                                            <button data-i18n="components.memory.ArasujiViewer.text096" onClick={handleEditCancel} className={styles.editCancelBtn}>
+                                                <X size={14} />{uiText("components.memory.ArasujiViewer.text096")}</button>
                                         </div>
                                     </div>
                                 ) : (
@@ -1150,8 +1138,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             {/* Source Items Section */}
                             {selectedEntry.source_ids.length > 0 && (
                                 <div className={styles.sourceSection}>
-                                    <h3 className={styles.sourceSectionTitle}>
-                                        {selectedEntry.level === 1 ? '統合元メッセージ' : '統合元 Chronicle'}
+                                    <h3 data-i18n="components.memory.ArasujiViewer.text097 components.memory.ArasujiViewer.text098" className={styles.sourceSectionTitle}>
+                                        {selectedEntry.level === 1 ? uiText("components.memory.ArasujiViewer.text097") : uiText("components.memory.ArasujiViewer.text098")}
                                     </h3>
                                     {selectedEntry.level === 1 ? (
                                         // Level 1: Show source messages
@@ -1159,7 +1147,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                             {isLoadingMessages ? (
                                                 <div className={styles.loadingMessages}>
                                                     <Loader2 className={styles.loader} size={16} />
-                                                    <span>メッセージを読み込み中...</span>
+                                                    <span data-i18n="components.memory.ArasujiViewer.text099">{uiText("components.memory.ArasujiViewer.text099")}</span>
                                                 </div>
                                             ) : sourceMessages.length > 0 ? (
                                                 sourceMessages.map(msg => (
@@ -1169,7 +1157,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                                                 {msg.role === 'model' ? 'assistant' : msg.role}
                                                             </span>
                                                             <span className={styles.sourceMessageTime}>
-                                                                {new Date(msg.created_at * 1000).toLocaleString()}
+                                                                {new Date(msg.created_at * 1000).toLocaleString(getFormatLocale())}
                                                             </span>
                                                         </div>
                                                         <div className={styles.sourceMessageContent}>
@@ -1178,9 +1166,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                                     </div>
                                                 ))
                                             ) : (
-                                                <span className={styles.sourceMessageCount}>
-                                                    {selectedEntry.source_ids.length} 件のメッセージ
-                                                </span>
+                                                <span data-i18n="components.memory.ArasujiViewer.text100" className={styles.sourceMessageCount}>
+                                                    {selectedEntry.source_ids.length}{uiText("components.memory.ArasujiViewer.text100")}</span>
                                             )}
                                         </div>
                                     ) : (
@@ -1200,7 +1187,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                                             }}
                                                         >
                                                             <span className={styles.sourceArasujiId}>{sourceId.slice(0, 8)}...</span>
-                                                            <span className={styles.sourceArasujiMissing}>(クリックして読み込む)</span>
+                                                            <span data-i18n="components.memory.ArasujiViewer.text101" className={styles.sourceArasujiMissing}>{uiText("components.memory.ArasujiViewer.text101")}</span>
                                                         </div>
                                                     );
                                                 }
@@ -1212,7 +1199,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                                     >
                                                         <div className={styles.sourceArasujiHeader}>
                                                             <span className={styles.levelBadge} data-level={sourceEntry.level}>
-                                                                Lv.{sourceEntry.level}
+                                                                {uiText("components.memory.ArasujiViewer.label005")}{sourceEntry.level}
                                                             </span>
                                                             <span className={styles.sourceArasujiTime}>
                                                                 {formatTimeRange(sourceEntry.start_time, sourceEntry.end_time)}
@@ -1233,14 +1220,12 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             {/* Linked Fragments Section */}
                             {selectedEntry.level === 1 && (
                                 <div className={styles.sourceSection}>
-                                    <h3 className={styles.sourceSectionTitle}>
-                                        抽出された知識 (Fragments)
-                                        {linkedFragments.length > 0 && ` — ${linkedFragments.length}件`}
+                                    <h3 data-i18n="components.memory.ArasujiViewer.text102 components.memory.ArasujiViewer.text103" className={styles.sourceSectionTitle}>{uiText("components.memory.ArasujiViewer.text102")}{linkedFragments.length > 0 && uiText("components.memory.ArasujiViewer.text103", { p1: linkedFragments.length })}
                                     </h3>
                                     {isLoadingFragments ? (
                                         <div className={styles.loadingMessages}>
                                             <Loader2 className={styles.loader} size={16} />
-                                            <span>Fragment を読み込み中...</span>
+                                            <span data-i18n="components.memory.ArasujiViewer.text104">{uiText("components.memory.ArasujiViewer.text104")}</span>
                                         </div>
                                     ) : linkedFragments.length > 0 ? (
                                         <div className={styles.fragmentsByPage}>
@@ -1263,9 +1248,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                             })()}
                                         </div>
                                     ) : (
-                                        <span style={{ opacity: 0.5, fontSize: '0.9em' }}>
-                                            この Chronicle から抽出された Fragment はありません
-                                        </span>
+                                        <span data-i18n="components.memory.ArasujiViewer.text105" style={{ opacity: 0.5, fontSize: '0.9em' }}>{uiText("components.memory.ArasujiViewer.text105")}</span>
                                     )}
                                 </div>
                             )}
@@ -1273,7 +1256,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     ) : (
                         <div className={styles.emptyState}>
                             <BookOpen size={48} />
-                            <p>左のリストから Chronicle を選択してください</p>
+                            <p data-i18n="components.memory.ArasujiViewer.text106">{uiText("components.memory.ArasujiViewer.text106")}</p>
                         </div>
                     )}
                 </div>
@@ -1288,61 +1271,62 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             する」は嘘になる)。 */}
                         <h3>
                             {repairEstimate.unprocessed_messages < 1 && (repairEstimate.consolidation_calls ?? 0) >= 1
-                                ? 'あらすじを大きな流れにまとめる'
-                                : '過去の会話をあらすじにする'}
+                                ? uiText("components.memory.ArasujiViewer.text126")
+                                : uiText("components.memory.ArasujiViewer.text107")}
                         </h3>
                         {repairEstimate.unprocessed_messages >= 1 && (
-                            <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
-                                あらすじになっていない過去の会話が残っています。実行すると、その会話をまとめたあらすじが作られ、
-                                本人が古い出来事を思い出せるようになります。いま進行中の会話には触りません。
+                            <p data-i18n="components.memory.ArasujiViewer.text108" className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
+                                {uiText("components.memory.ArasujiViewer.text108")}
                             </p>
                         )}
                         {repairEstimate.unprocessed_messages < 1 && (repairEstimate.consolidation_calls ?? 0) >= 1 && (
-                            <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
-                                細かなあらすじが溜まっています。実行すると、それらを大きな流れにまとめたあらすじが作られ、
-                                本人が長い期間の出来事を見通せるようになります。いま進行中の会話には触りません。
+                            <p data-i18n="components.memory.ArasujiViewer.text127" className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
+                                {uiText("components.memory.ArasujiViewer.text127")}
                             </p>
                         )}
                         {repairEstimate.repair_incomplete && (
-                            <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
-                                前回の処理が完了していません。再実行すると、処理済みの部分は飛ばして続きから進みます。
+                            <p data-i18n="components.memory.ArasujiViewer.text109" className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
+                                {uiText("components.memory.ArasujiViewer.text109")}
                             </p>
                         )}
                         <div className={styles.generateContextBox}>
                             <div className={styles.repairEstimateRow}>
-                                <span className={styles.repairEstimateLabel}>対象の会話</span>
+                                <span data-i18n="components.memory.ArasujiViewer.text110" className={styles.repairEstimateLabel}>{uiText("components.memory.ArasujiViewer.text110")}</span>
                                 <span className={styles.repairEstimateValue}>
-                                    {repairEstimate.unprocessed_messages.toLocaleString()} 件
+                                    {repairEstimate.unprocessed_messages.toLocaleString(getFormatLocale())}{uiText("components.memory.ArasujiViewer.text111")}
                                 </span>
                             </div>
                             {(repairEstimate.consolidation_calls ?? 0) >= 1 && (
                                 <div className={styles.repairEstimateRow}>
-                                    <span className={styles.repairEstimateLabel}>まとめる作業</span>
-                                    <span className={styles.repairEstimateValue}>
-                                        {(repairEstimate.consolidation_calls ?? 0).toLocaleString()} 回分
+                                    <span data-i18n="components.memory.ArasujiViewer.text128" className={styles.repairEstimateLabel}>{uiText("components.memory.ArasujiViewer.text128")}</span>
+                                    <span data-i18n="components.memory.ArasujiViewer.text129" className={styles.repairEstimateValue}>
+                                        {uiText("components.memory.ArasujiViewer.text129", { p1: (repairEstimate.consolidation_calls ?? 0).toLocaleString(getFormatLocale()) })}
                                     </span>
                                 </div>
                             )}
                             <div className={styles.repairEstimateRow}>
-                                <span className={styles.repairEstimateLabel}>AI の呼び出し</span>
+                                <span data-i18n="components.memory.ArasujiViewer.text112" className={styles.repairEstimateLabel}>{uiText("components.memory.ArasujiViewer.text112")}</span>
                                 <span className={styles.repairEstimateValue}>
-                                    約 {repairEstimate.estimated_llm_calls.toLocaleString()} 回（{repairEstimate.model_name}）
+                                    {uiText("components.memory.ArasujiViewer.text113")}{repairEstimate.estimated_llm_calls.toLocaleString(getFormatLocale())}{uiText("components.memory.ArasujiViewer.text114")}{repairEstimate.model_name}）
                                 </span>
                             </div>
                             <div className={styles.repairEstimateRow}>
-                                <span className={styles.repairEstimateLabel}>概算費用</span>
+                                <span data-i18n="components.memory.ArasujiViewer.text115" className={styles.repairEstimateLabel}>{uiText("components.memory.ArasujiViewer.text115")}</span>
                                 <span className={styles.repairEstimateValue}>
                                     {repairEstimate.is_free_tier
-                                        ? '無料（このモデルには料金設定がありません）'
-                                        : `約 $${repairEstimate.estimated_cost_usd > 0 && repairEstimate.estimated_cost_usd < 0.01
-                                            ? repairEstimate.estimated_cost_usd.toFixed(4)
-                                            : repairEstimate.estimated_cost_usd.toFixed(2)} ${repairEstimate.currency}`}
+                                        ? uiText("components.memory.ArasujiViewer.text116")
+                                        : uiText("components.memory.ArasujiViewer.text117", {
+                                            p1: repairEstimate.estimated_cost_usd > 0 && repairEstimate.estimated_cost_usd < 0.01
+                                                ? repairEstimate.estimated_cost_usd.toFixed(4)
+                                                : repairEstimate.estimated_cost_usd.toFixed(2),
+                                            p2: repairEstimate.currency
+                                        })}
                                 </span>
                             </div>
                         </div>
                         <div className={styles.modalActions}>
-                            <button className={styles.cancelBtn} onClick={() => setShowRepairModal(false)}>
-                                キャンセル
+                            <button data-i18n="components.memory.ArasujiViewer.text118" className={styles.cancelBtn} onClick={() => setShowRepairModal(false)}>
+                                {uiText("components.memory.ArasujiViewer.text118")}
                             </button>
                             <button
                                 className={styles.startBtn}
@@ -1354,9 +1338,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                     || ['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '')
                                 }
                             >
-                                <Play size={14} />
-                                実行
-                            </button>
+                                <Play size={14} />{uiText("components.memory.ArasujiViewer.text119")}</button>
                         </div>
                     </div>
                 </ModalOverlay>
@@ -1366,27 +1348,20 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
             {showGenerateModal && (
                 <ModalOverlay onClose={() => setShowGenerateModal(false)} className={styles.modalOverlay}>
                     <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
-                        <h3>溜まった会話をあらすじにまとめる</h3>
-                        <p className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>
-                            古い側の会話をあらすじ（Chronicle）に畳み、長期記憶にします。直近の会話はそのまま残ります。
-                            畳む量に応じて軽量モデルの LLM 呼び出しが数回発生します。
-                        </p>
+                        <h3 data-i18n="components.memory.ArasujiViewer.text120">{uiText("components.memory.ArasujiViewer.text120")}</h3>
+                        <p data-i18n="components.memory.ArasujiViewer.text121" className={styles.hint} style={{ display: 'block', margin: '0 0 1rem', lineHeight: 1.7 }}>{uiText("components.memory.ArasujiViewer.text121")}</p>
                         <div className={styles.generateContextBox}>
                             {renderGenerateContextBody()}
                         </div>
                         <div className={styles.modalActions}>
-                            <button className={styles.cancelBtn} onClick={() => setShowGenerateModal(false)}>
-                                キャンセル
-                            </button>
-                            <button
+                            <button data-i18n="components.memory.ArasujiViewer.text122" className={styles.cancelBtn} onClick={() => setShowGenerateModal(false)}>{uiText("components.memory.ArasujiViewer.text122")}</button>
+                            <button data-i18n="components.memory.ArasujiViewer.text123"
                                 className={styles.startBtn}
                                 onClick={startGeneration}
                                 disabled={!canFold}
                                 title={generateDisabledReason()}
                             >
-                                <Play size={14} />
-                                実行
-                            </button>
+                                <Play size={14} />{uiText("components.memory.ArasujiViewer.text123")}</button>
                         </div>
                     </div>
                 </ModalOverlay>

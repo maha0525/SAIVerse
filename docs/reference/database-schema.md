@@ -39,6 +39,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `CITYNAME` | VARCHAR(64) | NOT NULL, default='' |  |
 | `DESCRIPTION` | VARCHAR(1024) | NOT NULL, default='' |  |
 | `TIMEZONE` | VARCHAR(64) | NOT NULL, default='UTC' |  |
+| `LANGUAGE` | VARCHAR(16) | NOT NULL, default='ja' |  |
 | `UI_PORT` | INTEGER | NOT NULL |  |
 | `API_PORT` | INTEGER | NOT NULL |  |
 | `START_IN_ONLINE_MODE` | BOOLEAN | NOT NULL, default=False |  |
@@ -255,6 +256,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `AINAME` | VARCHAR(32) | NOT NULL |  |
 | `SYSTEMPROMPT` | VARCHAR(4096) | NOT NULL, default='' |  |
 | `DESCRIPTION` | VARCHAR(1024) | NOT NULL, default='' |  |
+| `LANGUAGE` | VARCHAR(16) | — |  |
 | `AVATAR_IMAGE` | VARCHAR(255) | — |  |
 | `APPEARANCE_IMAGE_PATH` | VARCHAR(512) | — |  |
 | `EMOTION` | VARCHAR(1024) | — |  |

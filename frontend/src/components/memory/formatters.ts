@@ -1,3 +1,7 @@
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
 import { CheckCircle, AlertCircle } from 'lucide-react';
 import { MemoryImportUiResult } from './types';
 
@@ -13,7 +17,7 @@ export function formatImportDate(value: string | null | undefined): string {
   if (!value) return '-';
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleDateString();
+  return d.toLocaleDateString(getFormatLocale());
 }
 
 /**
@@ -23,7 +27,7 @@ export function formatImportDate(value: string | null | undefined): string {
 export function formatThreadDateRange(first?: number | null, last?: number | null): string {
   const toDate = (v?: number | null) => {
     if (typeof v !== 'number' || !Number.isFinite(v)) return '';
-    return new Date(v * 1000).toLocaleDateString();
+    return new Date(v * 1000).toLocaleDateString(getFormatLocale());
   };
   const a = toDate(first);
   const b = toDate(last);
@@ -36,5 +40,5 @@ export function formatProgress(message?: string, progress?: number, total?: numb
   if (typeof progress === 'number' && typeof total === 'number') {
     return `Processing ${progress}/${total}...`;
   }
-  return '処理中...';
+  return uiText("components.memory.formatters.text001");
 }
