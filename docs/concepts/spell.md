@@ -31,6 +31,16 @@ Tool を平文応答の中で `/spell <スペル名> key='value'` 構文で呼�
 
 > ⚠️ **不足**: ペルソナが**今どの Spell を使えるか**を一覧する専用 UI が無く、コンテキストプレビューでシステムプロンプトを覗くしかない（→ [issue: Spell の管理・可視化 UI](../issues/spell_management_ui.md)）。
 
+## スペル不使用モード（ペルソナ単位の全停止）
+
+ペルソナ設定の「スペル」を**使用しない**にすると（DB は `AI.SPELL_ENABLED=false`）、そのペルソナは会話専用の軽量運用になる（2026-09-14 導入）:
+
+- **実行**: LLM 発話由来・pre_spells（ツール指定/スケジュール）・realtime spell の全経路が止まる
+- **システムプロンプト**: スペル一覧（スキーマ）に加えて、スペル前提の説明（能力/URI/記憶操作/アイテム/Playbook 一覧/モード解説）が全て外れる。common.txt は `{if_spell_enabled}` 行マーカーの条件ブロックで出し分ける（マーカー無しのユーザー上書きテンプレートは全文が載る）
+- **反映**: 保存した時点で即時（切り替え時はそのペルソナのプロンプトキャッシュが積み直しになる。スペル有効のペルソナのプロンプトは 1 バイトも変わらない）
+
+詳細・不変条件: [intent: spell_disabled_mode.md](../intent/spell_disabled_mode.md)。判定の実装は `sea/head_pipeline/spell_gate.py` に一本化されている。
+
 ## 増やし方（新しい Spell の追加）
 
 1. `builtin_data/tools/`（または `~/.saiverse/user_data/tools/`）に Tool を定義する

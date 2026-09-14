@@ -121,7 +121,13 @@ class SpellListSection:
 
     name = "spell_list"
     order = 600
-    refresh_on_events = frozenset({EventType.ADDON_LOADED, EventType.ADDON_UNLOADED})
+    # SPELL_TOGGLED: スペル不使用モードの切り替えはその場で反映する
+    # (docs/intent/spell_disabled_mode.md §4-2)。
+    refresh_on_events = frozenset({
+        EventType.ADDON_LOADED,
+        EventType.ADDON_UNLOADED,
+        EventType.SPELL_TOGGLED,
+    })
 
     # ---- capture ----
 
@@ -447,27 +453,15 @@ class SpellListSection:
     # ---- 内部ヘルパー ----
 
     def _resolve_enabled(self, ctx: LineHeadInput) -> bool:
-        """AI.SPELL_ENABLED の解決。manager 経由で DB を引く。"""
-        manager = ctx.manager
-        persona_id = ctx.persona_id
-        if not manager or not persona_id:
-            return False
-        session_factory = getattr(manager, "SessionLocal", None)
-        if not session_factory:
-            return False
-        db = session_factory()
-        try:
-            from database.models import AI as AIModel
-            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
-            return bool(ai.SPELL_ENABLED) if ai else False
-        except Exception:
-            LOGGER.warning(
-                "spell_list: failed to resolve SPELL_ENABLED for persona=%s",
-                persona_id, exc_info=True,
-            )
-            return False
-        finally:
-            db.close()
+        """AI.SPELL_ENABLED の解決。
+
+        実装は :mod:`sea.head_pipeline.spell_gate` の共有ヘルパーに集約した
+        (2026-09-14)。gate を持つ section が増えたので、判定を節ごとに書き写すと
+        片方だけ直した日に食い違う (docs/intent/spell_disabled_mode.md §4-3)。
+        """
+        from sea.head_pipeline.spell_gate import resolve_spell_enabled
+
+        return resolve_spell_enabled(ctx)
 
     def _collect_manifests(self, addon_keys: set[str]) -> list[AddonManifest]:
         """expansion_data/<addon_key>/addon.json から display_name / description を集める。"""
