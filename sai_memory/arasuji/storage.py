@@ -16,7 +16,7 @@ parent=root_chronicle。parent_id=X (Lv2+ に統合済み) → ページの pare
 【互換 VIEW】このコードベースには sea/auto_recall.py・
 sea/head_pipeline/sections/chronicle_index.py・sea/session_lifecycle.py・
 sai_memory/unified_recall.py・sai_memory/arasuji/estimate.py・
-api/routes/people/arasuji.py・tools/utilities/memory_settings_ui.py・
+api/routes/people/arasuji.py・
 builtin_data/tools/get_memory_weave_context.py 等、本モジュールを経由せず
 生 SQL で ``arasuji_entries`` テーブルを直接読む消費者が多数ある (一部は
 sea/head_pipeline/ など変更禁止領域)。物理格納を変えつつこれらを無傷で通すため、

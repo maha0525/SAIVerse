@@ -57,7 +57,6 @@ City は「名前」を入れる欄を 2 つ持っているが、**どちらが�
 | World Editor の City 一覧・各種セレクト | `DESCRIPTION \|\| CITYNAME` |
 | BuildingSettingsModal / PersonaWizard のセレクト | `DESCRIPTION \|\| CITYNAME` |
 | チュートリアルの「City名」(入力・プリフィル) | `DESCRIPTION` に書き込み / `DESCRIPTION \|\| CITYNAME` から復元 |
-| DB 閲覧 UI の行ラベル候補 | `CITYNAME` (`database/db_manager.py:146`) |
 
 つまり**チュートリアルと World Editor は既に「DESCRIPTION = 表示名」で動いており、マップ画面だけが移行から取り残されている**。
 
@@ -170,3 +169,4 @@ SQLite の `ALTER TABLE RENAME COLUMN` は制約が参照する列名を書き�
 - **2026-08-15 実機検証 (まはー) — 完了**: §7 の 4 項目すべて通過。見出しの表示名・その場編集・World Editor 側への反映・内部 ID が編集不可であること・**再起動後もユーザーの部屋と建物ログに異常なし**・新規ペルソナ ID が `<名前>_city_a` の形を保つこと、を確認。
   - 同時にまはーが観測: 新規ペルソナ「テラ」の ID が `テラ_city_a` になる。**本件の範囲外** (City の識別子は ASCII が保証されており、日本語が入るのはペルソナ名側) というまはーの切り分けにより、[`issues/building_id_no_charset_constraint.md`](../issues/building_id_no_charset_constraint.md) の論点 3 (ペルソナ ID の文字種) へ実測として記録した。
   - 未検証のまま残った境界: **画面の見た目を私 (Claude) 側で確認していない**。まはーの世界が稼働中で、フロント開発サーバーの `/api` 転送先が本番バックエンドに固定のため、本番への書き込みが発生する経路を避けて見送った。結果としてまはーの実機確認がその役を果たしたが、次に同種の UI を出すときは同じ迂回が起きる (フロントの API 転送先を環境で切り替えられないことが根)。
+- **2026-09-15 追記**: §2-3 にあった「DB 閲覧 UI の行ラベル候補」の行を落とした。参照先だった `database/db_manager.py` は旧 Gradio 期の DB 閲覧画面で、外部キーの行に出す見出しを `USERNAME` / `AINAME` / `CITYNAME` / `BUILDINGNAME` の順で選んでいた。gradio は 2026-01-30 (コミット 267a4e4f) に本体の依存から外れていて、gradio を別途持っていない環境ではこのファイルを import した時点で落ちる状態だった。呼び出し元はどこにも残っていなかったので、2026-09-15 にファイルごと削除した (landscape §9)。後継にあたる `/api/db/tables/{table}` は行をそのまま返すだけで、外部キーを表示名に置き換える仕組みを持たない。どの欄を見出しに使うかは、いまは画面ごとの判断 (World Editor などは `DESCRIPTION || CITYNAME`) になっている。

@@ -262,7 +262,6 @@ tools/
 database/
 ├── models.py         # SQLAlchemy モデル
 ├── api_server.py     # DB API サーバー（inter-city / persona-proxy ルートは凍結封鎖: 503）
-├── db_manager.py     # DB マネージャ
 ├── migrate.py        # マイグレーション（自動バックアップ付き）
 ├── seed.py           # 初期データ（⚠️ 全データ削除）
 ├── backup.py         # 起動時バックアップ
