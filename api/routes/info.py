@@ -523,17 +523,9 @@ def get_item_content(item_id: str, thumb: int = 0, manager = Depends(get_manager
             raise HTTPException(status_code=500, detail=str(e))
             
     elif item_type == "picture":
-        # For pictures, we can serve the file directly OR return the path for a static mount
-        # If we return FileResponse, the frontend can display it.
-        # But wait, frontend <img src> needs a URL.
-        # If we return the file content here, it might be heavy.
-        # Better: return a URL that the frontend can use.
-        # But we don't have a dynamic route for arbitrary file paths unless we mount them.
-        # Previous app used /gradio_api/file=... which Gradio handled.
-
-        # SOLUTION: We can verify the path is within valid areas (assets?) or serve it via a stream endpoint.
-        # For now, let's return the content as FileResponse so the browser displays it if visited?
-        # NO, frontend needs to Embed it.
+        # 画像はパスではなく中身を返す。フロントの <img src> は URL を要求するが、
+        # 任意のパスを静的に配ると置き場の外まで配れてしまうので、検査を通した
+        # このエンドポイント自身がバイト列を返す形にしてある。
         # API: GET /api/info/item/{id}/image -> returns image bytes
         # thumb=1: 一覧表示用の軽量 webp サムネイルを返す (未生成ならその場で
         # 生成してキャッシュ)。生成に失敗したらオリジナルへフォールバック。
