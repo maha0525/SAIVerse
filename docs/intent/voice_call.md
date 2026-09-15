@@ -1,6 +1,6 @@
 # Intent: 通話モード (Voice Call, Gemini Live API)
 
-> **ステータス: 実装中 (2026-09-16 起草) — プロトタイプ第一巡**。まはーの GO は「まず作って体感し、フィードバックで磨く」。本書はその第一巡の設計判断を記録する。体感後に改訂される前提の draft。
+> **ステータス: 検証待ち (2026-09-16 起草・同日実装) — プロトタイプ第一巡**。まはーの GO は「まず作って体感し、フィードバックで磨く」。本書はその第一巡の設計判断を記録する。体感後に改訂される前提の draft。
 
 ## これは何か
 
@@ -16,8 +16,8 @@
 
 ## 端から端への旅
 
-1. ユーザーが通話ボタンを押す → フロントがマイク許可を取り、バックエンドの WebSocket `/api/voice/call` に接続
-2. バックエンドがペルソナの文脈を組み立て (人格プロンプト + Memory Weave + 直近の建物履歴)、Gemini Live API へセッションを張って積み込む
+1. ユーザーが通話ボタンを押す → フロントが音声の再生・録音の準備をしてからマイク許可を取り、バックエンドの WebSocket `/api/voice/call` に接続
+2. バックエンドが接続を検査し (認証・Origin)、通話の舞台 (= ペルソナの現在地) と記憶のスレッドをこの時点で確定させ、ペルソナの文脈を組み立て (人格プロンプト + Memory Weave + 直近の建物履歴)、Gemini Live API へセッションを張って積み込む
 3. 双方向中継: マイク PCM (16kHz) → Live API、Live API の音声 (24kHz) → ブラウザ再生。文字起こし (入力・出力) を随時フロントに表示し、バックエンドに蓄積
 4. 通話終了 (切断含む) → 蓄積した文字起こしを **SAIMemory (append_persona_message、実会話と同じ経路・形式) と建物履歴 (insert_building_message)** へ書き戻す
 5. 次のテキスト会話・Pulse は、書き戻された通話ログを通常の履歴として読む
@@ -28,26 +28,59 @@
 2. **通話開始時にペルソナの文脈 (人格 + 記憶) を積む。素のモデルで喋らせない。**
 3. **書き戻しは追記のみ。** 既存メッセージの改変・挿入をしない (提示列キャッシュの保護)。ユーザー行は入力文字起こし (user 名義、transcript 由来である旨を metadata に明記)、ペルソナ行は出力文字起こし (本人名義。モデルが実際に発話した内容の転写なので捏造にあたらない)。
 4. **通話中に Pulse を起こさない・止めない。** 既存の自律機構には手を入れない。衝突 (通話中に自律発話が起きる等) はプロトタイプでは未対処とし、体感後に設計する。
-5. **課金の透明性**: 使用モデル・API キーは既存の Gemini 設定 (`GEMINI_API_KEY` / `GEMINI_FREE_API_KEY`) に従う。
+5. **課金の透明性**: 使用モデル・API キーは既存の Gemini 設定 (`GEMINI_API_KEY` / `GEMINI_FREE_API_KEY`) に従う。使えるモデルは許可リスト (`ALLOWED_MODELS`) に限り、クライアントが名前を自由に指定して別のモデルへ課金させられないようにする。通話中に積み上がったトークン数は終了時にログへ出し、`call_ended` にも載せる。
+6. **記憶に入らなかった行に「取り込み済み」の印を打たない。** 建物履歴の行に付く `ingested_by` は「このペルソナの記憶へもう入っている」の意味で、建物履歴からペルソナ記憶への自動転記 (`builtin_data/tools/get_building_messages.py`) はこの印のある行を飛ばす。SAIMemory への書き込みが失敗した行にまで印を打つと、その発話はどちらの経路でもペルソナに届かなくなる。ゆえに書き込みは **1 発話ずつ「SAIMemory へ書く → 成否で建物行の `ingested_by` を決める」** の順で行う。
+7. **通話の舞台と記憶のスレッドは通話開始時に確定させる。** 部屋はクライアントの申告ではなくサーバーが持つペルソナの現在地。記憶のスレッドは通話開始時点の現行スレッド。どちらも終了時に読み直すと、通話中の移動やサブスレッドへの切り替えで、記録がペルソナの本線から外れる。
 
 ## 設計判断 (プロトタイプ第一巡の妥協を含む)
 
 | 論点 | 判断 | 理由/妥協 |
 |---|---|---|
 | 接続形態 | ブラウザ ⇔ バックエンド WS 直結 (`ws://<backend>:8000/api/voice/call`)。Next.js rewrite は経由しない | rewrite は WS upgrade 非対応の可能性。localhost 前提のプロトタイプ |
-| 文脈の積み込み | system_instruction = `get_system_prompt()` 出力。履歴 = Memory Weave + 建物履歴の直近 40 件をテキストターンで `send_client_content` | 128k 上限に対し十分小さい。フル提示列 (Cached Head) の再現は第二巡以降 |
-| 声 | 通話画面でプリセット名を選択/自由入力。ペルソナ別の既定値は localStorage (フロント) | DB カラム追加 (migrate) はプロトタイプでは避ける。声=人格の恒久設定化は体感後 |
-| モデル | 既定 `gemini-3.8-live`、UI で `-extended-thinking` に切替可 | |
-| セッション寿命 | context window compression (sliding window) を有効化 | 15分制限の回避。session resumption は第一巡では未実装 |
-| 書き戻しタイミング | 通話終了時に一括 (異常切断時も finally で書く) | 途中クラッシュで transcript を失うリスクは許容。逐次書き込みは第二巡 |
-| 割り込み (barge-in) | Live API の interrupted 通知をフロントへ中継し、再生キューを破棄 | |
+| 文脈の積み込み | system_instruction = `get_system_prompt()` 出力。履歴 = Memory Weave + 建物履歴の直近 40 件を、`history_config.initial_history_in_client_content` を立てたうえで `send_client_content(turns, turn_complete=True)` で一度に渡す | この設定のとき `turn_complete=True` は「返事をしろ」ではなく「初期履歴はここまで」の合図で、モデルの呼び出しを起こさない。これを送るまで `send_realtime_input` は処理されない (SDK `HistoryConfig` docstring)。積む履歴が無い通話では立てない |
+| 履歴に入れてよい行 | 建物履歴からペルソナ記憶への自動転記 (`get_building_messages.py`) と**同じ採否規則**: heard_by に本人がいない行 (キーの無い古い行も含む) を積まない / 発言者不明の assistant 行を積まない / 出入りの legacy な通知を積まない | 通話の文脈だけが違う規則で読むと、ペルソナが「聞いていないはずの話」を知っている状態になる。発言者不明の行を `model` で渡すと、本人が言っていない文が本人の発話に化ける |
+| 声 | 通話画面でプリセット名を選択/自由入力。ペルソナ別の既定値は localStorage (フロント)。サーバー側で長さ 64 文字・英数記号のみを検査 | DB カラム追加 (migrate) はプロトタイプでは避ける。声=人格の恒久設定化は体感後 |
+| モデル | 既定 `gemini-3.8-live`、UI で `-extended-thinking` に切替可。サーバー側は許可リスト外を拒否 | 課金されるモデルをクライアントが自由に選べる状態にしない |
+| 通話の舞台 (部屋) | サーバーがペルソナの `current_building_id` から決める。クライアントの `building_id` は互換のため受け取るが使わない | 申告どおりに書くと、メニューを開いてから通話開始までに移動したペルソナが「いない部屋で喋った」ことになる |
+| セッション寿命 | context window compression (sliding window) を有効化。trigger 100,000 / target 64,000 トークン (セッション上限 128,000 に対する値) | 人格と記憶だけで数万トークンあるので、水位が低すぎると通話の序盤で人格ごと畳まれる。session resumption は第一巡では未実装 |
+| 書き戻しタイミング | 通話終了時に一括 (異常切断時も finally で書く)。文字起こしが 1 件も取れなかった通話には、通話があった事実だけを system 通告の一行として残す | 途中クラッシュで transcript を失うリスクは許容。逐次書き込みは第二巡 |
+| 同時通話 | 同じペルソナへの 2 本目は `already_in_call` で拒否 | 同じ記憶へ二つの声が同時に書き、どちらの文脈も相手の発話を知らないまま進む |
+| 割り込み (barge-in) | Live API の interrupted 通知をフロントへ中継し、再生キューを破棄。画面はユーザー側の行も閉じる | バックエンドは interrupted で両側の発話を確定する (`flush_turn`) ので、画面の区切りを記憶と揃える |
+| 認証 | HTTP 側で `OwnerAuthMiddleware` が働く構成 (= LAN 公開) のときだけ、WS のルートが同じ検証を明示的に呼ぶ。運搬手段も HTTP と同じ (Bearer ヘッダ / `saiverse_owner_session` cookie) | WebSocket は `BaseHTTPMiddleware` を素通りする (`scope["type"] == "websocket"`) ため、ミドルウェア任せではこの経路だけ素通しになる。localhost 運用では HTTP 側も素通しなので、WS も揃えて素通しにする |
+| Origin 検査 | ブラウザが送る `Origin` を HTTP の CORS が許す集合 (`api.owner_auth.allowed_browser_origins`) と突き合わせ、不一致は拒否。`Origin` の無い接続 (ブラウザ以外) は認証が通っていれば許す | 許可集合の定義は一箇所 (owner_auth) に置き、CORS と WS が同じ源を見る |
+| エラーの伝え方 | `{"type":"error","code":"<識別子>","message":"<ログ用の文>"}`。画面の文言はフロントが `code` から自分の言語で引く (`components.VoiceCallModal.error_<code>`) | サーバーは画面の言語を知らない。内部例外の文字列をそのままクライアントへ返さない |
 | 文字起こし精度 | 入力側の精度は Live API 任せ。不足なら「音声そのものの保存」「文脈付き再転写」を検討 (まはー案) | 第一巡では計測が目的 |
+
+### エラーコード
+
+`code` はフロントの文言キーと 1 対 1 に対応する安定した識別子。
+
+| code | 意味 |
+|---|---|
+| `bad_start` | 最初のフレームが `{"type":"start"}` の JSON でない |
+| `missing_persona_id` | start に `persona_id` が無い |
+| `persona_not_found` | その `persona_id` のペルソナがいない |
+| `persona_location_unknown` | ペルソナの現在地が分からない (通話の舞台を決められない) |
+| `no_api_key` | Gemini の API キーが未設定 |
+| `manager_not_ready` | SAIVerseManager がまだ起動していない |
+| `unauthorized` | LAN 公開の構成で owner の鍵が無い / 合わない |
+| `bad_origin` | 許可されていない Origin からの接続 |
+| `invalid_voice` | 声の名前が長すぎる / 使えない文字を含む |
+| `invalid_model` | 許可リストに無いモデル |
+| `already_in_call` | そのペルソナは既に別の通話中 |
+| `session_ending` | Gemini が `go_away` を送ってきた (まもなくセッション終了、通話はまだ生きている) |
+| `call_failed` | 上記以外で通話が続けられなくなった (詳細はサーバーのログ) |
 
 ## 検証の旅 (第一巡)
 
-- バックエンド: Live セッションを偽物に差し替えた単体テストで、文脈組み立て・プロトコル・書き戻し形式を検証
+- バックエンド: Live セッションを偽物に差し替えた単体テスト (`tests/test_voice_call.py`) で、文脈組み立て・採否規則・プロトコル・書き戻し形式・認証と Origin・同時通話の拒否を検証
 - 実 API: 隔離環境 (`test_data/.saiverse` + 合成ペルソナ) からテキストターンのみの短い実セッションで疎通確認 (音声はブラウザが要るため、まはーの実機体感が本検証)
-- 未検証で残る境界: 実マイク→実音声の全経路、長時間セッション、Tailscale/スマホ (マイクは Secure Context 限定で HTTP 越しでは取れない)
+- 未検証で残る境界:
+  - 実マイク→実音声の全経路、長時間セッション、Tailscale/スマホ (マイクは Secure Context 限定で HTTP 越しでは取れない)
+  - **`history_config.initial_history_in_client_content` の実挙動**。SDK の docstring に従って組んだが、実 API でこの形が「返事を誘発せずに履歴だけ積む」ことは未確認
+  - **`go_away` の実挙動** (どのタイミングで来るか、来たあと何秒使えるか)
+  - **usage_metadata の意味** (サーバーターンごとの値を足し上げた総和を通話の使用量として扱っているが、実 API で累積値が来る可能性を確認していない)
+  - **LAN 公開構成の通し確認**。画面は cookie を WebSocket のハンドシェイクに任せており (通常の fetch には Authorization も credentials も付けていない)、LAN 公開での実接続は未検証
 
 ## 関連
 

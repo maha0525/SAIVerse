@@ -11130,5 +11130,169 @@
   "components.SettingsModal.spellDisabledNotice": {
     "ja": "⚠️ スペル不使用モードのため、事前実行スペルは実行されません。",
     "en": "⚠️ Because spell-free mode is enabled, pre-execution spells will not run."
+  },
+  "components.PersonaMenu.label006": {
+    "ja": "通話する",
+    "en": "Voice call"
+  },
+  "components.PersonaMenu.text012": {
+    "ja": "声で直接話しかける",
+    "en": "Talk to them out loud"
+  },
+  "components.VoiceCallModal.text001": {
+    "ja": "通話モード",
+    "en": "Voice call"
+  },
+  "components.VoiceCallModal.text002": {
+    "ja": "接続中",
+    "en": "Connecting"
+  },
+  "components.VoiceCallModal.text003": {
+    "ja": "通話中",
+    "en": "In call"
+  },
+  "components.VoiceCallModal.text004": {
+    "ja": "通話を終了しました",
+    "en": "Call ended"
+  },
+  "components.VoiceCallModal.text005": {
+    "ja": "エラー",
+    "en": "Error"
+  },
+  "components.VoiceCallModal.text006": {
+    "ja": "待機中",
+    "en": "Ready"
+  },
+  "components.VoiceCallModal.text007": {
+    "ja": "声",
+    "en": "Voice"
+  },
+  "components.VoiceCallModal.text008": {
+    "ja": "モデル",
+    "en": "Model"
+  },
+  "components.VoiceCallModal.text009": {
+    "ja": "通話を開始",
+    "en": "Start call"
+  },
+  "components.VoiceCallModal.text010": {
+    "ja": "通話を切る",
+    "en": "Hang up"
+  },
+  "components.VoiceCallModal.text011": {
+    "ja": "ミュート",
+    "en": "Mute"
+  },
+  "components.VoiceCallModal.text012": {
+    "ja": "ミュート解除",
+    "en": "Unmute"
+  },
+  "components.VoiceCallModal.text013": {
+    "ja": "話した内容がここに文字で流れます。",
+    "en": "What is said during the call appears here as text."
+  },
+  "components.VoiceCallModal.text014": {
+    "ja": "このページではマイクを使えません。HTTPS か localhost で開き直すと使えるようになります。",
+    "en": "The microphone cannot be used on this page. Reopen it over HTTPS or on localhost to enable it."
+  },
+  "components.VoiceCallModal.text015": {
+    "ja": "マイクの使用が許可されませんでした。ブラウザの許可設定を確認してください。",
+    "en": "Microphone access was not granted. Check your browser's permission settings."
+  },
+  "components.VoiceCallModal.text016": {
+    "ja": "サーバーに接続できませんでした。バックエンドが動いているか確認してください。",
+    "en": "Could not connect to the server. Check that the backend is running."
+  },
+  "components.VoiceCallModal.text017": {
+    "ja": "通話が切断されました。",
+    "en": "The call was disconnected."
+  },
+  "components.VoiceCallModal.text018": {
+    "ja": "あなた",
+    "en": "You"
+  },
+  "components.VoiceCallModal.text019": {
+    "ja": "終了処理中",
+    "en": "Ending"
+  },
+  "components.VoiceCallModal.text020": {
+    "ja": "閉じる",
+    "en": "Close"
+  },
+  "components.VoiceCallModal.text021": {
+    "ja": "候補から選ぶほか、名前を直接入力することもできます。",
+    "en": "Pick one of the suggestions, or type a voice name directly."
+  },
+  "components.VoiceCallModal.text022": {
+    "ja": "経過",
+    "en": "Elapsed"
+  },
+  "components.VoiceCallModal.text023": {
+    "ja": "音声の準備に失敗しました。",
+    "en": "Audio setup failed."
+  },
+  "components.VoiceCallModal.text024": {
+    "ja": "どの部屋にいるかが分からないため、通話を始められません。",
+    "en": "Cannot start the call because the current room is unknown."
+  },
+  "components.VoiceCallModal.text025": {
+    "ja": "もう一度かける",
+    "en": "Call again"
+  },
+  "components.VoiceCallModal.error_bad_start": {
+    "ja": "通話の開始を伝えられませんでした。画面を開き直してもう一度かけてください。",
+    "en": "The call request could not be sent. Reload the page and try calling again."
+  },
+  "components.VoiceCallModal.error_missing_persona_id": {
+    "ja": "誰にかけるのかが伝わりませんでした。画面を開き直してもう一度かけてください。",
+    "en": "Who to call was not received. Reload the page and try calling again."
+  },
+  "components.VoiceCallModal.error_persona_not_found": {
+    "ja": "この相手が見つかりませんでした。すでに世界からいなくなっているかもしれません。",
+    "en": "This persona could not be found. They may no longer be in the world."
+  },
+  "components.VoiceCallModal.error_persona_location_unknown": {
+    "ja": "相手がいまどの部屋にいるのかが分からないため、通話を始められません。",
+    "en": "Cannot start the call because it is unknown which room they are in right now."
+  },
+  "components.VoiceCallModal.error_no_api_key": {
+    "ja": "Gemini の API キーが設定されていないため、通話を始められません。",
+    "en": "The call cannot start because no Gemini API key is configured."
+  },
+  "components.VoiceCallModal.error_manager_not_ready": {
+    "ja": "世界がまだ起動し終えていません。少し待ってからもう一度かけてください。",
+    "en": "The world has not finished starting up. Wait a moment and call again."
+  },
+  "components.VoiceCallModal.error_unauthorized": {
+    "ja": "この接続は許可されていません。ログインし直してからもう一度かけてください。",
+    "en": "This connection is not authorized. Sign in again and try calling again."
+  },
+  "components.VoiceCallModal.error_bad_origin": {
+    "ja": "この画面のアドレスからの通話は許可されていません。",
+    "en": "Calls from this page's address are not allowed."
+  },
+  "components.VoiceCallModal.error_invalid_voice": {
+    "ja": "声の名前が正しくありません。候補から選び直してください。",
+    "en": "That voice name is not valid. Pick one of the suggestions instead."
+  },
+  "components.VoiceCallModal.error_invalid_model": {
+    "ja": "そのモデルは通話に使えません。一覧から選び直してください。",
+    "en": "That model cannot be used for calls. Pick one from the list instead."
+  },
+  "components.VoiceCallModal.error_already_in_call": {
+    "ja": "この相手は別の通話中です。そちらが終わってからかけ直してください。",
+    "en": "They are already on another call. Try again once that call has ended."
+  },
+  "components.VoiceCallModal.error_session_ending": {
+    "ja": "通話がまもなく終了します。続けて話すには、切ってからかけ直してください。",
+    "en": "The call is about to end. Hang up and call again to keep talking."
+  },
+  "components.VoiceCallModal.error_call_failed": {
+    "ja": "通話中に問題が起きたため、通話を終了しました。",
+    "en": "The call ended because something went wrong during it."
+  },
+  "components.VoiceCallModal.error_unknown": {
+    "ja": "通話中に想定外の問題が起きました。",
+    "en": "An unexpected problem occurred during the call."
   }
 }

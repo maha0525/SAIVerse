@@ -30,6 +30,7 @@ import TutorialWizard from '@/components/tutorial/TutorialWizard';
 import SaiverseLink from '@/components/SaiverseLink';
 import ItemModal from '@/components/ItemModal';
 import ContextPreviewModal, { ContextPreviewData } from '@/components/ContextPreviewModal';
+import VoiceCallModal from '@/components/VoiceCallModal';
 import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/PlaybookPermissionDialog';
 import SpellConfirmDialog, { SpellConfirmData } from '@/components/SpellConfirmDialog';
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
@@ -535,6 +536,9 @@ export default function Home() {
     const [showContextPreview, setShowContextPreview] = useState(false);
     const [contextPreviewData, setContextPreviewData] = useState<ContextPreviewData | null>(null);
     const [contextPreviewLoading, setContextPreviewLoading] = useState(false);
+    // 通話モード (docs/intent/voice_call.md)。 相手のペルソナと部屋は、 通話を
+    // 始めた瞬間の組み合わせで固定する (通話中に別の部屋を見て回っても切れない)。
+    const [voiceCallTarget, setVoiceCallTarget] = useState<{ personaId: string; personaName: string; buildingId: string } | null>(null);
     const plusMenuRef = useRef<HTMLDivElement>(null);
     const [isMobile, setIsMobile] = useState(false);
     const [currentBuildingName, setCurrentBuildingName] = useState<string>('SAIVerse');
@@ -3868,7 +3872,19 @@ export default function Home() {
                 refreshTrigger={moveTrigger}
                 currentBuildingId={currentBuildingId}
                 onPersonaChanged={() => setMoveTrigger(prev => prev + 1)}
+                onStartVoiceCall={(personaId, personaName, buildingId) =>
+                    setVoiceCallTarget({ personaId, personaName, buildingId })}
             />
+
+            {voiceCallTarget && (
+                <VoiceCallModal
+                    isOpen={true}
+                    onClose={() => setVoiceCallTarget(null)}
+                    personaId={voiceCallTarget.personaId}
+                    personaName={voiceCallTarget.personaName}
+                    buildingId={voiceCallTarget.buildingId}
+                />
+            )}
 
             <ChatOptions
                 isOpen={isOptionsOpen}
