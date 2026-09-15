@@ -21,6 +21,17 @@ import pytest
 from saiverse import runtime_marker
 
 
+def _spawn_child(args: list[str]) -> subprocess.Popen:
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    return subprocess.Popen(
+        [sys.executable, *args],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+    )
+
+
 def _write_marker(home: Path, name: str, payload: dict) -> Path:
     marker_dir = home / ".runtime"
     marker_dir.mkdir(parents=True, exist_ok=True)
@@ -36,7 +47,7 @@ def test_unknown_marker_with_matching_db_refuses_without_psutil(monkeypatch, tmp
     monkeypatch.setitem(sys.modules, "psutil", None)  # makes `import psutil` fail
 
     db_path = tmp_path / "saiverse.db"
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    child = _spawn_child(["-c", "import time; time.sleep(30)"])
     try:
         _write_marker(
             tmp_path,
@@ -79,7 +90,7 @@ def test_stale_marker_for_dead_pid_still_passes(monkeypatch, tmp_path):  # type:
     monkeypatch.setitem(sys.modules, "psutil", None)
 
     db_path = tmp_path / "saiverse.db"
-    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child = _spawn_child(["-c", "pass"])
     child.wait(timeout=30)  # dead, pid very unlikely to be reused immediately
     if hasattr(child, "_handle"):
         # Windows: Popen が握るハンドルがカーネルのプロセスオブジェクトを
@@ -114,7 +125,7 @@ def test_live_pid_without_identity_record_refuses_with_psutil(monkeypatch, tmp_p
     monkeypatch.setenv("SAIVERSE_HOME", str(tmp_path))
 
     db_path = tmp_path / "saiverse.db"
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    child = _spawn_child(["-c", "import time; time.sleep(30)"])
     try:
         _write_marker(
             tmp_path,
@@ -143,7 +154,7 @@ def test_unknown_marker_without_db_path_refuses(monkeypatch, tmp_path):  # type:
     monkeypatch.setenv("SAIVERSE_HOME", str(tmp_path))
     monkeypatch.setitem(sys.modules, "psutil", None)  # 照合できず unknown になる
 
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    child = _spawn_child(["-c", "import time; time.sleep(30)"])
     try:
         _write_marker(
             tmp_path,
@@ -180,7 +191,7 @@ def test_live_pid_with_corrupt_identity_record_refuses(monkeypatch, tmp_path, co
     monkeypatch.setenv("SAIVERSE_HOME", str(tmp_path))
 
     db_path = tmp_path / "saiverse.db"
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    child = _spawn_child(["-c", "import time; time.sleep(30)"])
     try:
         _write_marker(
             tmp_path,
@@ -209,7 +220,7 @@ def test_acquire_refuses_to_start_over_marker_without_identity_record(monkeypatc
     pytest.importorskip("psutil")
     monkeypatch.setenv("SAIVERSE_HOME", str(tmp_path))
 
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    child = _spawn_child(["-c", "import time; time.sleep(30)"])
     try:
         _write_marker(
             tmp_path,
@@ -243,7 +254,7 @@ def test_live_pid_with_mismatched_identity_is_still_stopped(monkeypatch, tmp_pat
     monkeypatch.setenv("SAIVERSE_HOME", str(tmp_path))
 
     db_path = tmp_path / "saiverse.db"
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    child = _spawn_child(["-c", "import time; time.sleep(30)"])
     try:
         _write_marker(
             tmp_path,
