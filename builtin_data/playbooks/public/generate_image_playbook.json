@@ -1,7 +1,13 @@
 {
   "name": "generate_image",
-  "display_name": "画像生成",
-  "description": "Generate an image using AI image generation models (Gemini, GPT Image, or Grok Imagine)",
+  "display_name": {
+    "ja": "画像生成",
+    "en": "Generate Image"
+  },
+  "description": {
+    "ja": "AI画像生成モデル（Gemini、GPT Image、Grok Imagine）を使用して画像を生成します。",
+    "en": "Generate an image using AI image generation models (Gemini, GPT Image, or Grok Imagine)."
+  },
   "input_schema": [
     {
       "name": "input",

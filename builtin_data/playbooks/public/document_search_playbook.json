@@ -1,7 +1,13 @@
 {
   "name": "document_search",
-  "display_name": "ドキュメント内検索",
-  "description": "Search within a document item for specific content using pattern matching or line navigation",
+  "display_name": {
+    "ja": "ドキュメント内検索",
+    "en": "Search Document"
+  },
+  "description": {
+    "ja": "パターンマッチや行ナビゲーションを使ってドキュメントアイテム内を検索します。",
+    "en": "Search within a document item for specific content using pattern matching or line navigation."
+  },
   "input_schema": [
     {
       "name": "input",

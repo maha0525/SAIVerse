@@ -1,7 +1,13 @@
 {
   "name": "building_move",
-  "display_name": "Building間の移動",
-  "description": "List buildings in the city, choose a destination, and move there.",
+  "display_name": {
+    "ja": "Building間の移動",
+    "en": "Move Between Buildings"
+  },
+  "description": {
+    "ja": "街の建物を一覧し、目的地を選んで移動します。",
+    "en": "List buildings in the city, choose a destination, and move there."
+  },
   "input_schema": [
     {
       "name": "input",

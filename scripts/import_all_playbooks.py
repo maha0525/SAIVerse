@@ -34,6 +34,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from database.paths import default_db_path
 from database.models import Base, Playbook, PlaybookPermission
+from database.schema_sync import ensure_table_columns_indexes
+from saiverse.i18n_utils import normalize_i18n_dict
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,6 +74,7 @@ def import_playbooks_from_directory(
         return (0, 0, 0)
 
     engine = create_engine(f"sqlite:///{db_path}")
+    ensure_table_columns_indexes(engine, Playbook.__table__, logger=logging.getLogger("import_all_playbooks"))
     Session = sessionmaker(bind=engine)
 
     imported_count = 0
@@ -96,8 +99,15 @@ def import_playbooks_from_directory(
                     skipped_count += 1
                     continue
 
-                description = data.get("description", "")
-                display_name = data.get("display_name")
+                desc_norm = normalize_i18n_dict(data.get("description"), alt_en=data.get("description_en"))
+                disp_norm = normalize_i18n_dict(data.get("display_name"), alt_en=data.get("display_name_en"))
+
+                description = desc_norm.get("ja") or (data.get("description") if isinstance(data.get("description"), str) else "")
+                description_en = desc_norm.get("en") or data.get("description_en")
+
+                display_name = disp_norm.get("ja") or (data.get("display_name") if isinstance(data.get("display_name"), str) else None)
+                display_name_en = disp_norm.get("en") or data.get("display_name_en")
+
                 router_callable = data.get("router_callable", False)
                 user_selectable = data.get("user_selectable", False)
                 dev_only = data.get("dev_only", False)
@@ -128,7 +138,9 @@ def import_playbooks_from_directory(
                                 "start_node": data.get("start_node"),
                             }
                             existing.description = description
+                            existing.description_en = description_en
                             existing.display_name = display_name
+                            existing.display_name_en = display_name_en
                             existing.schema_json = json.dumps(schema_payload, ensure_ascii=False)
                             existing.nodes_json = json.dumps(data, ensure_ascii=False)
                             existing.router_callable = router_callable
@@ -184,7 +196,9 @@ def import_playbooks_from_directory(
                     record = Playbook(
                         name=name,
                         description=description,
+                        description_en=description_en,
                         display_name=display_name,
+                        display_name_en=display_name_en,
                         scope="public",
                         created_by_persona_id=None,
                         building_id=None,

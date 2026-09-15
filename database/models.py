@@ -360,7 +360,9 @@ class Playbook(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), unique=True, nullable=False)
     display_name = Column(String(255), nullable=True)  # Human-readable display name for UI
+    display_name_en = Column(String(255), nullable=True)  # Optional English display name
     description = Column(String(1024), default="", nullable=False)
+    description_en = Column(String(1024), nullable=True)  # Optional English description
     scope = Column(String(32), nullable=False, default="public")  # public/personal/building
     created_by_persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=True)
     building_id = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
