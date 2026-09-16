@@ -1,7 +1,7 @@
 # 続きの生成の指示文 (CONTINUE_INSTRUCTION) は一度も LLM に届いていない
 
 **発見**: 2026-09-13 (続きの生成が Gemini 3.5 系で「末尾がモデル発話」と拒否される件の調査中)
-**状態**: 未解決 (方向は撤去 — 2026-09-13 まはー裁定「直すっていうか撤去する流れ」)
+**状態**: ✅ 解決済み (2026-09-16 撤去完了 — 方向は撤去 — 2026-09-13 まはー裁定「直すっていうか撤去する流れ」)
 **深刻度**: P3 — 挙動の実害は無い (届いていないものを消すだけ)。無意味なコードが「届いている」顔で残っていることが害
 
 ## 事実
@@ -32,3 +32,8 @@
 
 - [continue_has_toctou_between_check_and_generation.md](continue_has_toctou_between_check_and_generation.md) (同じ続きの生成の別の未解決)
 - `docs/issues/archive/user_utterance_path_failure_inventory.md` (続きの生成の親設計)
+
+## ログ
+
+- 2026-09-13: issue 起票 (Gemini 3.5 系で続きの生成が拒否される件の調査中に発見)。同日、まはーの撤去裁定。
+- 2026-09-16: 撤去完了。`CONTINUE_INSTRUCTION` 定数と由来のコメント塊、`continue_persona_message_stream` からの参照を撤去し、`_stream_persona_pulse` へは空の入力を渡す形にした。監査文書の CHAT-05 は書き換えていない (本 issue が訂正の記録)。`tests/test_user_utterance_durability.py` 34 件緑、`ruff check` 通過。
