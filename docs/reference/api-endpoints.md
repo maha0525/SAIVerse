@@ -3,9 +3,9 @@
 
 # API エンドポイント
 
-REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
+API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 357（tag グループ: 25）
+**エンドポイント数**: 358（tag グループ: 26）
 
 ## addon
 
@@ -435,6 +435,12 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | POST | `/api/user/move` |  |
 | GET | `/api/user/status` |  |
 | POST | `/api/user/visibility` | Update presence based on browser visibility (tab focus/blur). |
+
+## voice-call
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| WS | `/api/voice/call` | ペルソナとの音声通話 (Gemini Live API への双方向中継)。実験的機能。 |
 
 ## world
 

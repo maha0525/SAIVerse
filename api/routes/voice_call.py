@@ -105,6 +105,7 @@ async def _refuse(websocket: WebSocket, code: str, message: str) -> None:
 
 @router.websocket("/call")
 async def voice_call(websocket: WebSocket) -> None:
+    """ペルソナとの音声通話 (Gemini Live API への双方向中継)。実験的機能。"""
     # 認証と Origin は accept の前に判定する。拒否は accept 後に code つきの
     # error フレームで返す — 握手ごと落とすとブラウザには「繋がらなかった」と
     # しか見えず、鍵の問題なのか通話の問題なのかが画面から分からない。

@@ -110,7 +110,7 @@ def generate_tool_catalog() -> str:
 def generate_api_endpoints() -> str:
     from api.main import api_router
     from fastapi.routing import iter_route_contexts
-    from starlette.routing import Route
+    from starlette.routing import Route, WebSocketRoute
 
     # FastAPI 0.137 以降、`router.routes` は include_router した子ルーターを
     # 中間オブジェクトのまま持つ木構造で、直接たどっても葉のルートは出てこない。
@@ -131,12 +131,40 @@ def generate_api_endpoints() -> str:
         doc = doc.replace("|", "\\|")
         grouped.setdefault(tag, []).append((method_str, path, doc))
 
+    # WebSocket の口 (通話モード等)。iter_route_contexts() は WebSocket の葉に
+    # path / tags / endpoint を載せてこない (FastAPI 0.137 で実測) ので、
+    # include_router の木を prefix を積みながら自前で歩く。メソッド欄は WS。
+    from fastapi.routing import APIWebSocketRoute
+
+    def walk_websockets(router: object, prefix: str) -> None:
+        for r in getattr(router, "routes", []):
+            if type(r).__name__ == "_IncludedRouter":
+                ctx = r.include_context
+                child_prefix = prefix + (getattr(ctx, "prefix", "") or "")
+                walk_websockets(r.original_router, child_prefix)
+                # include_router の tags は葉に伝播しないのでここで拾って覚える
+                child_tags = getattr(ctx, "tags", None)
+                if child_tags:
+                    for leaf in getattr(r.original_router, "routes", []):
+                        if isinstance(leaf, APIWebSocketRoute):
+                            _ws_tags[child_prefix + leaf.path] = str(child_tags[0])
+            elif isinstance(r, APIWebSocketRoute):
+                doc = (r.endpoint.__doc__ or "").strip().split("\n")[0]
+                _ws_leaves.append((prefix + r.path, doc.replace("|", "\\|")))
+
+    _ws_leaves: list[tuple[str, str]] = []
+    _ws_tags: dict[str, str] = {}
+    walk_websockets(api_router, "")
+    for ws_path, doc in _ws_leaves:
+        tag = _ws_tags.get(ws_path, "(untagged)")
+        grouped.setdefault(tag, []).append(("WS", "/api" + ws_path, doc))
+
     total = sum(len(v) for v in grouped.values())
     lines = [
         _banner("api.main.api_router (api/routes/*.py)"),
         "# API エンドポイント",
         "",
-        "REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。",
+        "API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。",
         "",
         f"**エンドポイント数**: {total}（tag グループ: {len(grouped)}）",
         "",
