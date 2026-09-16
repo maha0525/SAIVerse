@@ -102,10 +102,17 @@ class FakeAdapter:
 
 
 class FakeLiveSession:
-    """``client.aio.live.connect`` が返すセッションの偽物。"""
+    """``client.aio.live.connect`` が返すセッションの偽物。
+
+    ``receive()`` は**実物と同じく「モデルの発話一巡で終わる」** async iterator
+    (SDK の ``AsyncSession.receive`` は turn_complete の message を yield した
+    直後に break する — live.py:456)。ここを実物より寛容 (無限に生きる形) に
+    すると、一巡で通話を畳んでしまう欠陥がテストを素通りする
+    (2026-09-16 の初通話で実際に素通りした)。
+    """
 
     def __init__(self, script: List[types.LiveServerMessage]) -> None:
-        self.script = script
+        self.script = list(script)
         self.audio_in: List[Dict[str, Any]] = []
         self.primed_turns: List[Any] = []
         self.primed_turn_complete: List[bool] = []
@@ -119,11 +126,14 @@ class FakeLiveSession:
             self.audio_in.append(audio)
 
     async def receive(self):
-        for message in self.script:
+        while self.script:
+            message = self.script.pop(0)
             yield message
-        # 台本を出し切ったあとも「モデルは黙って待っている」状態を保つ。
-        # ここで終わると downlink が先に完了し、クライアントが end を送る前に
-        # 通話が畳まれてしまう。
+            content = getattr(message, "server_content", None)
+            if content is not None and content.turn_complete:
+                return  # 実物と同じ: 一巡で iterator を終える
+        # 台本を出し切ったあとは「モデルは黙って繋がったまま」を保つ。
+        # ここで即終了すると、クライアントが end を送る前に通話が畳まれる。
         await asyncio.Event().wait()
 
 
@@ -443,6 +453,37 @@ def test_audio_is_relayed_in_both_directions(monkeypatch, api_client, written_ro
 # ---------------------------------------------------------------------------
 # 5. 割り込み / サーバー都合の終了 / 使用量
 # ---------------------------------------------------------------------------
+
+
+def test_call_survives_multiple_model_turns(monkeypatch, api_client, written_rows):
+    """一巡目の turn_complete で通話が畳まれない (2026-09-16 初通話の回帰)。
+
+    SDK の receive() は一巡ごとに終わる async iterator なので、受信側が
+    張り直さないと「ペルソナが一言喋った時点で call_ended」になる。
+    """
+    adapter = FakeAdapter()
+    install_manager(monkeypatch, make_manager(adapter))
+    install_live(monkeypatch, [
+        transcript_message(model="一言目だよ。"),
+        turn_complete_message(),
+        transcript_message(model="まだ切れてないよ。"),
+        turn_complete_message(),
+    ])
+
+    with api_client.websocket_connect("/api/voice/call") as ws:
+        ws.send_json({"type": "start", "persona_id": PERSONA_ID})
+        assert ws.receive_json() == {"type": "ready"}
+        assert ws.receive_json() == {"type": "output_transcript", "text": "一言目だよ。"}
+        assert ws.receive_json() == {"type": "turn_complete"}
+        # 一巡目が終わっても通話は生きていて、二巡目がそのまま届く。
+        assert ws.receive_json() == {"type": "output_transcript", "text": "まだ切れてないよ。"}
+        assert ws.receive_json() == {"type": "turn_complete"}
+        ws.send_json({"type": "end"})
+        payload = ws.receive_json()
+        assert payload["type"] == "call_ended"
+
+    # 発話も二巡ぶん別々に記憶へ残る。
+    assert [m["content"] for m, _ in adapter.appended] == ["一言目だよ。", "まだ切れてないよ。"]
 
 
 def test_interrupted_is_relayed_to_the_client(monkeypatch, api_client, written_rows):

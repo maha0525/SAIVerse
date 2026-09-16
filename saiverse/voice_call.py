@@ -75,15 +75,19 @@ NO_TRANSCRIPT_NOTICE = "(音声通話が行われたが、文字起こしは得�
 _CALL_MODE_INSTRUCTION = {
     "ja": (
         "## いまの状況\n"
-        "あなたはいま、ユーザーと音声で通話している。文字ではなく声で届くので、"
-        "話し言葉で、短く、間を取りながら応じること。箇条書き・見出し・記号による"
-        "装飾は読み上げに乗らないので使わない。"
+        "あなたはいま、ユーザーと音声で通話している。文字ではなくあなたの声そのもの"
+        "が届くので、話し言葉で、短く、間を取りながら応じること。箇条書き・見出し・"
+        "記号による装飾は読み上げに乗らないので使わない。身体表現やツールの記法 "
+        '({"body_emote": ...} のような JSON) も、声に出すと記号がそのまま読み上げ'
+        "られてしまう。通話中はそれらを一切出力せず、言葉だけで話すこと。"
     ),
     "en": (
         "## Right now\n"
         "You are on a live voice call with the user. Your words are heard, not read, "
         "so speak conversationally and keep each turn short. Do not use bullet lists, "
-        "headings, or markup — they do not survive being spoken aloud."
+        "headings, or markup — they do not survive being spoken aloud. Do not emit "
+        'body-expression or tool syntax (JSON like {"body_emote": ...}) either: on a '
+        "call it would be read out loud verbatim. Speak in words only."
     ),
 }
 
@@ -801,53 +805,72 @@ class VoiceCallSession:
                 return
 
     async def _pump_live_to_client(self, websocket: Any, live: Any) -> None:
-        """Gemini → ブラウザ。音声はバイナリ、文字起こしと状態は JSON。"""
-        async for message in live.receive():
-            usage = getattr(message, "usage_metadata", None)
-            if usage is not None:
-                self._accumulate_usage(usage)
+        """Gemini → ブラウザ。音声はバイナリ、文字起こしと状態は JSON。
 
-            go_away = getattr(message, "go_away", None)
-            if go_away is not None:
-                time_left = getattr(go_away, "time_left", None)
-                LOGGER.warning(
-                    "[voice_call] server is ending the session persona=%s time_left=%s",
-                    self.persona_id, time_left,
+        SDK の ``session.receive()`` は**モデルの発話一巡 (turn_complete) で
+        終わる** async iterator (live.py の実装が turn_complete で break する)。
+        一巡ごとに受信を張り直さないと、ペルソナが一言喋った時点で通話が
+        「終わった」ことになる (2026-09-16 の初通話で実際に起きた)。
+        接続そのものが閉じたときは、一巡が 0 件で終わるのでそこで抜ける。
+        """
+        while True:
+            received_any = False
+            async for message in live.receive():
+                received_any = True
+                await self._handle_live_message(websocket, message)
+            if not received_any:
+                LOGGER.info(
+                    "[voice_call] live session closed by the server persona=%s",
+                    self.persona_id,
                 )
-                await websocket.send_json({
-                    "type": "error",
-                    "code": "session_ending",
-                    "message": f"Gemini Live session is about to end (time_left={time_left})",
-                })
+                return
 
-            server_content = getattr(message, "server_content", None)
-            if server_content is None:
-                continue
+    async def _handle_live_message(self, websocket: Any, message: Any) -> None:
+        usage = getattr(message, "usage_metadata", None)
+        if usage is not None:
+            self._accumulate_usage(usage)
 
-            input_tr = server_content.input_transcription
-            if input_tr is not None and input_tr.text:
-                self.transcript.add_input(input_tr.text)
-                await websocket.send_json({"type": "input_transcript", "text": input_tr.text})
+        go_away = getattr(message, "go_away", None)
+        if go_away is not None:
+            time_left = getattr(go_away, "time_left", None)
+            LOGGER.warning(
+                "[voice_call] server is ending the session persona=%s time_left=%s",
+                self.persona_id, time_left,
+            )
+            await websocket.send_json({
+                "type": "error",
+                "code": "session_ending",
+                "message": f"Gemini Live session is about to end (time_left={time_left})",
+            })
 
-            output_tr = server_content.output_transcription
-            if output_tr is not None and output_tr.text:
-                self.transcript.add_output(output_tr.text)
-                await websocket.send_json({"type": "output_transcript", "text": output_tr.text})
+        server_content = getattr(message, "server_content", None)
+        if server_content is None:
+            return
 
-            model_turn = server_content.model_turn
-            if model_turn is not None and model_turn.parts:
-                for part in model_turn.parts:
-                    inline = getattr(part, "inline_data", None)
-                    if inline is not None and inline.data:
-                        await websocket.send_bytes(inline.data)
+        input_tr = server_content.input_transcription
+        if input_tr is not None and input_tr.text:
+            self.transcript.add_input(input_tr.text)
+            await websocket.send_json({"type": "input_transcript", "text": input_tr.text})
 
-            if server_content.interrupted:
-                self.transcript.flush_turn()
-                await websocket.send_json({"type": "interrupted"})
+        output_tr = server_content.output_transcription
+        if output_tr is not None and output_tr.text:
+            self.transcript.add_output(output_tr.text)
+            await websocket.send_json({"type": "output_transcript", "text": output_tr.text})
 
-            if server_content.turn_complete:
-                self.transcript.flush_turn()
-                await websocket.send_json({"type": "turn_complete"})
+        model_turn = server_content.model_turn
+        if model_turn is not None and model_turn.parts:
+            for part in model_turn.parts:
+                inline = getattr(part, "inline_data", None)
+                if inline is not None and inline.data:
+                    await websocket.send_bytes(inline.data)
+
+        if server_content.interrupted:
+            self.transcript.flush_turn()
+            await websocket.send_json({"type": "interrupted"})
+
+        if server_content.turn_complete:
+            self.transcript.flush_turn()
+            await websocket.send_json({"type": "turn_complete"})
 
     def _accumulate_usage(self, usage: Any) -> None:
         """Live のサーバーターンごとに届く使用量を通話単位で足し込む。"""
