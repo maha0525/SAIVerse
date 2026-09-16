@@ -110,21 +110,23 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                 </div>
 
                 <div className={styles.actions}>
-                    <button
-                        className={`${styles.actionBtn} ${!onStartCall ? styles.disabled : ''}`}
-                        onClick={() => {
-                            if (onStartCall) {
+                    {/* 通話モードは実験的機能: 開発者モードのときだけ入口ごと見せる
+                        (onStartCall が渡ってくる = 開発者モード ON かつ部屋が確定)。 */}
+                    {onStartCall && (
+                        <button
+                            className={styles.actionBtn}
+                            onClick={() => {
                                 onStartCall();
                                 onClose();
-                            }
-                        }}
-                    >
-                        <Phone size={20} />
-                        <div className={styles.label}>
-                            <span>{uiText("components.PersonaMenu.label006")}</span>
-                            <span data-i18n="components.PersonaMenu.text012" className={styles.subtext}>{uiText("components.PersonaMenu.text012")}</span>
-                        </div>
-                    </button>
+                            }}
+                        >
+                            <Phone size={20} />
+                            <div className={styles.label}>
+                                <span>{uiText("components.PersonaMenu.label006")}</span>
+                                <span data-i18n="components.PersonaMenu.text012" className={styles.subtext}>{uiText("components.PersonaMenu.text012")}</span>
+                            </div>
+                        </button>
+                    )}
 
                     <button className={styles.actionBtn} onClick={handleDismiss} disabled={loading}>
                         {loading ? <RefreshCw className={styles.spin} size={20} /> : <Home size={20} />}
