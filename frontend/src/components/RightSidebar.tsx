@@ -46,6 +46,10 @@ interface RightSidebarProps {
     /** PersonaMenu からの dismiss 等で滞在状況が変わったときに親 (ChatPage) へ通知し、
      * moveTrigger 等を bump して Sidebar 側も同期させるための callback。 */
     onPersonaChanged?: () => void;
+    /** 通話モードの開始要求を親 (ChatPage) へ渡す。 通話モーダルを ChatPage が
+     * 持つのは、 建物を見て回っても通話が切れないようにするため (この
+     * サイドバーは building が変わると開いているものを全部閉じる)。 */
+    onStartVoiceCall?: (personaId: string, personaName: string, buildingId: string) => void;
 }
 
 interface Occupant {
@@ -87,7 +91,7 @@ interface BuildingDetails {
     fixtures?: Fixture[];
 }
 
-export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentBuildingId, onPersonaChanged }: RightSidebarProps) {
+export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentBuildingId, onPersonaChanged, onStartVoiceCall }: RightSidebarProps) {
     useLocale();
     const [details, setDetails] = useState<BuildingDetails | null>(null);
     const [selectedItem, setSelectedItem] = useState<Item | null>(null);
@@ -529,6 +533,14 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         onOpenSchedule={() => openModal('schedule')}
                         onOpenSettings={() => openModal('settings')}
                         onOpenInventory={() => openModal('inventory')}
+                        onStartCall={(() => {
+                            // 部屋が確定していないときは通話の入口を出さない
+                            // (VoiceCallModal 側でも building 無しは弾く)。
+                            const callBuildingId = details?.id ?? currentBuildingId ?? null;
+                            if (!onStartVoiceCall || !callBuildingId) return undefined;
+                            const target = selectedPersona;
+                            return () => onStartVoiceCall(target.id, target.name, callBuildingId);
+                        })()}
                         onDismissed={() => {
                             // dismiss 成功 → details を即時 refetch して滞在ペルソナ表示を更新。
                             // 親にも通知して Sidebar / 召喚可能リストなどを同期させる。
