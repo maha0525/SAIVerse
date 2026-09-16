@@ -27,6 +27,11 @@
 ペルソナフォルダからの相対パスを刻む。文字起こしが取れずに記憶の行にならなかった
 区切りの音声も、ファイルとしては保存する (紐だけ付かない) — 声は記憶の素材なので、
 文字にならなかった分を捨てない。
+
+この紐は**通話したペルソナ自身の記憶の行にだけ**刻み、建物履歴の行には載せない。
+建物履歴の行は同席していた他のペルソナの記憶へ metadata ごと自動転記されるので、
+載せると他人のフォルダ基準のパスが他のペルソナの記憶に永久に残る
+(:func:`_building_entry`)。
 """
 from __future__ import annotations
 
@@ -55,6 +60,14 @@ AUDIO_CHANNELS = 1
 AUDIO_SAMPLE_WIDTH = 2
 #: ペルソナフォルダの下で通話の音声を置く場所。
 VOICE_AUDIO_DIRNAME = "voice_calls"
+
+#: 主語は **一通話でメモリに溜める音声の総量** (入力 + 出力の合計バイト数)。
+#: 通話中の音声は終了時まで丸ごとメモリに持つので、上限が無いと長電話が
+#: そのままバックエンドのメモリになる (両方向で毎秒 80KB 前後、1 時間で 280MB)。
+#: 200MB はおよそ 1.5 時間ぶん。これを超えたら**以降の音声を録らない**だけで、
+#: 通話も文字起こしも止めずに続ける — 声が残らないことと通話が切れることでは、
+#: 後者の方がはるかに困る。
+MAX_CALL_AUDIO_BYTES = 200 * 1024 * 1024
 
 #: 通話に使ってよいモデル。UI の選択肢 (frontend/src/components/VoiceCallModal.tsx
 #: の MODEL_OPTIONS) と同じ並び。ここに無い名前は start の時点で拒否する
@@ -180,13 +193,18 @@ def build_live_config(
     system_instruction: str,
     voice: str,
     *,
+    model: str,
     prime_history: bool = False,
-    model: str = DEFAULT_MODEL,
 ) -> Dict[str, Any]:
     """``LiveConnectConfig`` に渡す dict を組む。
 
     dict のまま渡す (SDK が ``types.LiveConnectConfig(**config)`` で検証する)。
     フィールド名は google-genai 2.21.0 の ``types.LiveConnectConfig`` に一致。
+
+    ``model`` に既定値を持たせない (キーワード必須) のは、渡し忘れたときに
+    黙って既定モデルの設定が組まれるのを防ぐため。extended-thinking は
+    ``thinking_config`` が無いと**接続ごと拒否される**ので、渡し忘れは
+    「通話がまったく始まらない」という形で跳ね返ってくる。
 
     ``prime_history=True`` のときは ``history_config.initial_history_in_client_content``
     を立てる。SDK の ``HistoryConfig`` docstring は「setup_complete のあと、
@@ -408,6 +426,9 @@ class CallTranscript:
     文字起こしが取れなかった区切りは :attr:`entries` を増やさないが、音声が
     あれば区切りとしては残り、連番も消費する — 声は記憶の素材なので、文字に
     ならなかった分も捨てない (intent の設計判断表「音声の保存」)。
+
+    溜める音声には上限 (:data:`MAX_CALL_AUDIO_BYTES`) がある。超えたあとは
+    音声だけを捨て、文字起こしと通話はそのまま続ける。
     """
 
     def __init__(self) -> None:
@@ -420,6 +441,9 @@ class CallTranscript:
         self._output_started_at: Optional[str] = None
         self._input_audio: List[bytes] = []
         self._output_audio: List[bytes] = []
+        #: これまでにメモリへ溜めた音声の合計バイト数 (入力 + 出力)。
+        self._audio_bytes = 0
+        self._audio_limit_logged = False
 
     def add_input(self, text: str) -> None:
         if not text:
@@ -435,14 +459,34 @@ class CallTranscript:
             self._output_started_at = _now_iso()
         self._output_parts.append(text)
 
+    def _accept_audio(self, data: bytes) -> bool:
+        """上限まで音声を受け取る。超えたら False を返して以降は録らない。
+
+        上限に達したことは**一度だけ** WARNING に出す。フレームごとに出すと、
+        長電話のログがこの一行で埋まって他が読めなくなる。
+        """
+        if not data:
+            return False
+        if self._audio_bytes + len(data) > MAX_CALL_AUDIO_BYTES:
+            if not self._audio_limit_logged:
+                self._audio_limit_logged = True
+                LOGGER.warning(
+                    "[voice_call] this call has buffered %d bytes of audio (limit %d) — "
+                    "the rest of it will not be recorded. The call and its transcript continue.",
+                    self._audio_bytes, MAX_CALL_AUDIO_BYTES,
+                )
+            return False
+        self._audio_bytes += len(data)
+        return True
+
     def add_input_audio(self, data: bytes) -> None:
         """ユーザーのマイク音声 (16kHz PCM16 LE mono) の 1 フレームを溜める。"""
-        if data:
+        if self._accept_audio(data):
             self._input_audio.append(data)
 
     def add_output_audio(self, data: bytes) -> None:
         """ペルソナの音声 (24kHz PCM16 LE mono) の 1 フレームを溜める。"""
-        if data:
+        if self._accept_audio(data):
             self._output_audio.append(data)
 
     def flush_turn(self) -> None:
@@ -509,25 +553,61 @@ def audio_file_name(index: int, side: str) -> str:
 
 
 def _write_wav(path: str, pcm: bytes, sample_rate: int) -> None:
-    """生の PCM16 LE mono に wav のヘッダを被せて書き出す。"""
-    with wave.open(path, "wb") as wav_file:
+    """生の PCM16 LE mono に wav のヘッダを被せて書き出す。
+
+    一時名 (``<name>.part``) に書き切ってから正規名へ置き換える。正規名へ直接
+    書くと、途中で失敗したときに「正規の名前をした壊れた wav」が残り、記憶の
+    行の紐がそれを指す。失敗したら ``.part`` のまま残す — 正規名を汚さない方が
+    大事で、書きかけの残骸は名前から一目で分かる。
+    """
+    temp_path = f"{path}.part"
+    with wave.open(temp_path, "wb") as wav_file:
         wav_file.setnchannels(AUDIO_CHANNELS)
         wav_file.setsampwidth(AUDIO_SAMPLE_WIDTH)
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(pcm)
+    os.replace(temp_path, path)
+
+
+#: 同じ名前の通話フォルダがあったときに試す枝番の数。
+MAX_CALL_DIR_ATTEMPTS = 100
+
+
+def _reserve_call_dir(base_dir: str, call_dir_name: str) -> str:
+    """通話のフォルダを**新規に**作り、実際に使った名前を返す。
+
+    ``exist_ok=False`` で作るのが要点。フォルダ名は通話開始時刻の秒までなので、
+    通話を切って同じ秒に同じペルソナへ掛け直すと名前がぶつかる。上書きすると、
+    **前の通話の記憶の行が別の通話の声を指す** — 記憶は追記のみなので、すり
+    替わった紐は後から直せない。ぶつかったら ``_2``、``_3`` と枝番を足す。
+    """
+    for attempt in range(1, MAX_CALL_DIR_ATTEMPTS + 1):
+        candidate = call_dir_name if attempt == 1 else f"{call_dir_name}_{attempt}"
+        try:
+            os.makedirs(os.path.join(base_dir, candidate), exist_ok=False)
+        except FileExistsError:
+            continue
+        return candidate
+    raise FileExistsError(
+        f"could not find a free call folder next to {call_dir_name!r} in {base_dir!r}",
+    )
 
 
 def save_call_audio(
     persona: Any,
     call_dir_name: str,
     segments: Sequence[Dict[str, Any]],
-) -> Set[str]:
+) -> Tuple[str, Set[str]]:
     """通話の音声を ``<persona_dir>/voice_calls/<call_dir_name>/`` へ書き出す。
 
-    戻り値は**実際に書けたファイル名の集合**。呼び出し側はこれを使って、
-    書けなかったファイルへの紐 (``metadata["voice_audio"]``) を記録に残さない
-    ようにする — 存在しないファイルを指す紐は、後から聞き返そうとした人に
-    「あるはずのものが無い」と言わせる嘘になる。
+    戻り値は ``(実際に使ったフォルダ名, 実際に書けたファイル名の集合)``。
+    フォルダ名を返すのは、名前がぶつかって枝番になった場合 (:func:`_reserve_call_dir`)
+    に、呼び出し側が**書いた先と同じパス**で紐を組み立てられるようにするため。
+
+    ファイル名の集合の方は、書けなかったファイルへの紐
+    (``metadata["voice_audio"]``) を記録に残さないために使う — 存在しない
+    ファイルを指す紐は、後から聞き返そうとした人に「あるはずのものが無い」と
+    言わせる嘘になる。
 
     ペルソナフォルダが取れないとき (SAIMemory が無い等) は音声の保存だけ
     諦める。文字起こしの書き戻しはこの関数の外なので、従来どおり進む。
@@ -539,14 +619,18 @@ def save_call_audio(
             "but dropping %d recorded audio segment(s)",
             getattr(persona, "persona_id", None), len(segments),
         )
-        return set()
+        return call_dir_name, set()
 
-    target_dir = os.path.join(persona_dir, VOICE_AUDIO_DIRNAME, call_dir_name)
+    base_dir = os.path.join(persona_dir, VOICE_AUDIO_DIRNAME)
     try:
-        os.makedirs(target_dir, exist_ok=True)
+        dir_name = _reserve_call_dir(base_dir, call_dir_name)
     except OSError:
-        LOGGER.warning("[voice_call] could not create %s", target_dir, exc_info=True)
-        return set()
+        LOGGER.warning(
+            "[voice_call] could not create a call folder for %s under %s",
+            call_dir_name, base_dir, exc_info=True,
+        )
+        return call_dir_name, set()
+    target_dir = os.path.join(base_dir, dir_name)
 
     saved: Set[str] = set()
     for segment in segments:
@@ -573,7 +657,7 @@ def save_call_audio(
         len(saved), sum(bool(s.get("user")) + bool(s.get("persona")) for s in segments),
         target_dir,
     )
-    return saved
+    return dir_name, saved
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +770,12 @@ def _building_entry(
     防げる。逆に、記憶へ入らなかった行にまで印を打つと、その行は自動転記から
     **永久に**外れ、通話の内容がペルソナの記憶に一度も届かない。
     同席していた他のペルソナは、どちらの場合も通常どおり転記される。
+
+    音声への紐 (``metadata["voice_audio"]``) は**ここには載せない**。この行は
+    同席していた他のペルソナの記憶へ metadata ごと自動転記される
+    (``get_building_messages.py``) ので、載せると他のペルソナの記憶に
+    「自分のフォルダ基準では存在しないパス」が書き込まれる。記憶は追記のみ
+    なので、その嘘は永久に残る。紐は通話したペルソナ自身の記憶の行だけに刻む。
     """
     persona_id = getattr(persona, "persona_id", None)
     occupants = list((getattr(manager, "occupants", None) or {}).get(building_id, []))
@@ -697,11 +787,13 @@ def _building_entry(
         heard.add(str(user_id))
 
     message = _memory_message(entry, persona, manager, building_id)
+    metadata = dict(message["metadata"])
+    metadata.pop("voice_audio", None)  # 上の docstring 参照 (他人の記憶へ写る行)
     row: Dict[str, Any] = {
         "role": message["role"],
         "content": message["content"],
         "timestamp": message["timestamp"],
-        "metadata": dict(message["metadata"]),
+        "metadata": metadata,
         "heard_by": sorted(heard),
         "ingested_by": [str(persona_id)] if (ingested and persona_id) else [],
     }
@@ -794,15 +886,21 @@ def persist_call(
 
     ``entry["audio_file"]`` は、そのファイルが実際に書けた場合にだけ
     ``entry["voice_audio"]`` (ペルソナフォルダからの相対パス) へ組み替える。
+    パスに使うのは :func:`save_call_audio` が**実際に使ったフォルダ名**で、
+    こちらが渡した希望の名前ではない — 名前がぶつかって枝番になったとき、
+    希望の名前で紐を書くと前の通話の音声を指してしまう。
     """
-    saved = save_call_audio(persona, call_dir_name, segments) if segments else set()
+    dir_name = call_dir_name
+    saved: Set[str] = set()
+    if segments:
+        dir_name, saved = save_call_audio(persona, call_dir_name, segments)
 
     rows: List[Dict[str, Any]] = []
     for entry in entries:
         row = dict(entry)
         name = row.pop("audio_file", None)
         if name and name in saved:
-            row["voice_audio"] = f"{VOICE_AUDIO_DIRNAME}/{call_dir_name}/{name}"
+            row["voice_audio"] = f"{VOICE_AUDIO_DIRNAME}/{dir_name}/{name}"
         rows.append(row)
 
     return write_back_transcript(
@@ -813,6 +911,23 @@ def persist_call(
 # ---------------------------------------------------------------------------
 # セッション
 # ---------------------------------------------------------------------------
+
+
+def _describe_session_close(exc: BaseException) -> str:
+    """セッションの閉じられ方をログ 1 行にする (クローズコードと理由)。
+
+    ``google.genai.errors.APIError`` は websocket のクローズコードを ``code``
+    に、閉じた理由の文字列を ``details`` に載せてくる (``errors.py`` の
+    ``APIError.__init__``)。理由が文字列のときは ``message`` が None になるので
+    両方を見る。``websockets`` の ``ConnectionClosed`` の方はコードを
+    ``rcvd`` / ``sent`` のフレームが持っている。
+    """
+    code = getattr(exc, "code", None)
+    if code is None:
+        frame = getattr(exc, "rcvd", None) or getattr(exc, "sent", None)
+        code = getattr(frame, "code", None)
+    reason = getattr(exc, "message", None) or getattr(exc, "details", None) or str(exc)
+    return f"close_code={code} reason={reason!r}"
 
 
 class VoiceCallSession:
@@ -917,7 +1032,7 @@ class VoiceCallSession:
             )
             config = build_live_config(
                 system_instruction, self.voice,
-                prime_history=bool(turns), model=self.model,
+                model=self.model, prime_history=bool(turns),
             )
 
             LOGGER.info(
@@ -1017,19 +1132,45 @@ class VoiceCallSession:
         終わる** async iterator (live.py の実装が turn_complete で break する)。
         一巡ごとに受信を張り直さないと、ペルソナが一言喋った時点で通話が
         「終わった」ことになる (2026-09-16 の初通話で実際に起きた)。
-        接続そのものが閉じたときは、一巡が 0 件で終わるのでそこで抜ける。
+
+        Gemini 側がセッションを閉じたときは**例外で知らされる**。SDK の
+        ``AsyncSession._receive`` は websocket の ``ConnectionClosed`` を捕まえて
+        ``errors.APIError.raise_error(close_code, reason, None)`` に載せ替えるので、
+        正常クローズ (1000) でも例外が飛ぶ (``live.py`` の ``_receive``)。これを
+        通話の失敗として扱うと、Gemini がセッションを閉じるたびに画面へ
+        「通話に失敗した」が出て、トークン数を載せた ``call_ended`` も届かない。
+        **サーバー側の終了は通話の正常な終わり**として、ここで静かに返る
+        (呼び出し元の既存の流れがそのまま書き戻しと ``call_ended`` へ進む)。
+
+        ただし「終わり」とみなすのは **websocket のクローズ (コード 1000〜4999)**
+        だけ。同じ ``_receive`` は、接続は生きたままエラー応答の JSON が届いた
+        場合も ``raise_error(response['code'], ...)`` に通すので (429 の
+        クォータ超過等、HTTP 型のコードを持つ)、区別せずに全部を正常終了に
+        すると本物の失敗まで ``call_ended`` の顔をする。HTTP 型のコードは
+        そのまま投げ直し、既存の失敗経路 (``call_failed``) に乗せる。
         """
-        while True:
-            received_any = False
-            async for message in live.receive():
-                received_any = True
-                await self._handle_live_message(websocket, message)
-            if not received_any:
+        from google.genai import errors as genai_errors
+        from websockets.exceptions import ConnectionClosed
+
+        try:
+            while True:
+                async for message in live.receive():
+                    await self._handle_live_message(websocket, message)
+        except ConnectionClosed as closed:
+            LOGGER.info(
+                "[voice_call] live session closed by the server persona=%s (%s)",
+                self.persona_id, _describe_session_close(closed),
+            )
+            return
+        except genai_errors.APIError as err:
+            code = getattr(err, "code", None)
+            if isinstance(code, int) and 1000 <= code <= 4999:
                 LOGGER.info(
-                    "[voice_call] live session closed by the server persona=%s",
-                    self.persona_id,
+                    "[voice_call] live session closed by the server persona=%s (%s)",
+                    self.persona_id, _describe_session_close(err),
                 )
                 return
+            raise
 
     async def _handle_live_message(self, websocket: Any, message: Any) -> None:
         usage = getattr(message, "usage_metadata", None)
@@ -1211,6 +1352,7 @@ __all__ = [
     "INPUT_MIME_TYPE",
     "INPUT_SAMPLE_RATE",
     "LIVE_SESSION_TOKEN_LIMIT",
+    "MAX_CALL_AUDIO_BYTES",
     "MODEL_THINKING_LEVELS",
     "NO_TRANSCRIPT_NOTICE",
     "OUTPUT_SAMPLE_RATE",

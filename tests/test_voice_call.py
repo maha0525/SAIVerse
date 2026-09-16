@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from google.genai import types
+from google.genai import errors, types
 
 from saiverse import app_state, voice_call
 from saiverse.voice_call import (
@@ -118,13 +118,31 @@ class FakeLiveSession:
     直後に break する — live.py:456)。ここを実物より寛容 (無限に生きる形) に
     すると、一巡で通話を畳んでしまう欠陥がテストを素通りする
     (2026-09-16 の初通話で実際に素通りした)。
+
+    台本を出し切ったあとの振る舞いは二通り:
+
+    - 既定 (``close_code=None``): 「モデルは黙って繋がったまま」。クライアントが
+      end を送るまで通話が続く状況。
+    - ``close_code`` を渡したとき: **サーバーがセッションを閉じる**。実物と同じ
+      経路 (``errors.APIError.raise_error(close_code, reason, None)``) で例外を
+      投げる — SDK の ``AsyncSession._receive`` は websocket の
+      ``ConnectionClosed`` をこの形に載せ替えるので、正常クローズ (1000) でも
+      例外が飛ぶ (live.py の ``_receive``)。
     """
 
-    def __init__(self, script: List[types.LiveServerMessage]) -> None:
+    def __init__(
+        self,
+        script: List[types.LiveServerMessage],
+        *,
+        close_code: Optional[int] = None,
+        close_reason: str = "OK",
+    ) -> None:
         self.script = list(script)
         self.audio_in: List[Dict[str, Any]] = []
         self.primed_turns: List[Any] = []
         self.primed_turn_complete: List[bool] = []
+        self._close_code = close_code
+        self._close_reason = close_reason
 
     async def send_client_content(self, *, turns=None, turn_complete: bool = True) -> None:
         self.primed_turns.append(turns)
@@ -141,6 +159,9 @@ class FakeLiveSession:
             content = getattr(message, "server_content", None)
             if content is not None and content.turn_complete:
                 return  # 実物と同じ: 一巡で iterator を終える
+        if self._close_code is not None:
+            # サーバーがセッションを閉じた。実物と同じ載せ替えをここで行う。
+            errors.APIError.raise_error(self._close_code, self._close_reason, None)
         # 台本を出し切ったあとは「モデルは黙って繋がったまま」を保つ。
         # ここで即終了すると、クライアントが end を送る前に通話が畳まれる。
         await asyncio.Event().wait()
@@ -313,8 +334,10 @@ def api_client(monkeypatch, stub_context):
     return TestClient(app)
 
 
-def install_live(monkeypatch, script: List[types.LiveServerMessage]) -> FakeLiveSession:
-    live = FakeLiveSession(script)
+def install_live(
+    monkeypatch, script: List[types.LiveServerMessage], **kwargs: Any,
+) -> FakeLiveSession:
+    live = FakeLiveSession(script, **kwargs)
     monkeypatch.setattr(
         voice_call, "open_live_session",
         lambda model, config, *, api_key: _FakeLiveConnect(live),
@@ -519,6 +542,77 @@ def test_go_away_is_reported_as_a_session_ending_error(monkeypatch, api_client, 
     assert payload["type"] == "error"
     assert payload["code"] == "session_ending"
     assert "12s" in payload["message"]
+
+
+@pytest.mark.parametrize("close_code", [1000, 1011])
+def test_a_session_closed_by_the_server_ends_the_call_normally(
+    monkeypatch, api_client, written_rows, close_code,
+):
+    """Gemini がセッションを閉じるのは通話の**正常な終わり**。
+
+    SDK は websocket のクローズを ``errors.APIError`` に載せ替えて投げるので
+    (正常クローズ 1000 でも例外)、これを失敗として扱うと、セッションが閉じる
+    たびに画面へ call_failed が出てトークン数つきの call_ended が届かない。
+    そして書き戻しも走らないと、その通話はペルソナの記憶から丸ごと消える。
+    """
+    adapter = FakeAdapter()
+    install_manager(monkeypatch, make_manager(adapter))
+    install_live(
+        monkeypatch,
+        [
+            usage_message(90, 10, 100),
+            transcript_message(model="じゃあ、またね。"),
+            turn_complete_message(),
+        ],
+        close_code=close_code,
+        close_reason="session closed",
+    )
+
+    with api_client.websocket_connect("/api/voice/call") as ws:
+        ws.send_json({"type": "start", "persona_id": PERSONA_ID})
+        assert ws.receive_json() == {"type": "ready"}
+        assert ws.receive_json() == {"type": "output_transcript", "text": "じゃあ、またね。"}
+        assert ws.receive_json() == {"type": "turn_complete"}
+        # クライアントは end を送っていない。サーバー側の終了だけで畳まれる。
+        payload = ws.receive_json()
+
+    assert payload["type"] == "call_ended"
+    assert payload["usage"] == {"prompt_tokens": 90, "response_tokens": 10, "total_tokens": 100}
+    # 書き戻しも通常どおり走る。
+    assert [m["content"] for m, _ in adapter.appended] == ["じゃあ、またね。"]
+    assert len(written_rows) == 1
+
+
+def test_a_real_api_error_still_fails_the_call(monkeypatch, api_client, written_rows):
+    """接続が生きたまま届く API エラー (429 等) は従来どおり**失敗**。
+
+    SDK は websocket のクローズもエラー応答も同じ例外型に載せるが、正常終了に
+    してよいのはクローズ (コード 1000〜4999) だけ。HTTP 型のコードまで
+    call_ended の顔をすると、クォータ超過で切れた通話が「普通に終わった」
+    ように見えて、まはーが失敗に気づけない。書き戻しは失敗でも走る
+    (finally 経由) — 通話がそこまでに拾った文字起こしは記憶に残す。
+    """
+    adapter = FakeAdapter()
+    install_manager(monkeypatch, make_manager(adapter))
+    install_live(
+        monkeypatch,
+        [transcript_message(model="えっと、"), turn_complete_message()],
+        close_code=429,
+        close_reason="quota exceeded",
+    )
+
+    with api_client.websocket_connect("/api/voice/call") as ws:
+        ws.send_json({"type": "start", "persona_id": PERSONA_ID})
+        assert ws.receive_json() == {"type": "ready"}
+        assert ws.receive_json() == {"type": "output_transcript", "text": "えっと、"}
+        assert ws.receive_json() == {"type": "turn_complete"}
+        payload = ws.receive_json()
+
+    assert payload["type"] == "error"
+    assert payload["code"] == "call_failed"
+    # 失敗しても、そこまでの文字起こしは記憶に残る。
+    assert [m["content"] for m, _ in adapter.appended] == ["えっと、"]
+    assert len(written_rows) == 1
 
 
 def test_token_usage_is_accumulated_and_returned_with_call_ended(monkeypatch, api_client, written_rows):
@@ -835,11 +929,14 @@ def test_a_second_call_to_the_same_persona_is_refused(monkeypatch, written_rows)
         held = HoldingWebSocket(release)
         first = VoiceCallSession(manager, PERSONA_ID)
         running = asyncio.create_task(first.run(held))
-        # ready が出る = 1 本目が「通話中」になっている
+        # ready が出る = 1 本目が「通話中」になっている。文脈の組み立ては
+        # 別スレッド (asyncio.to_thread) なので、sleep(0) の空回りでは実時間が
+        # 進まず、機械が忙しいと間に合わない (並走負荷で実際に落ちた)。
+        # 実時間で最大 2 秒待つ。
         for _ in range(200):
             if held.sent_json:
                 break
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
         assert held.sent_json == [{"type": "ready"}]
 
         second = VoiceCallSession(manager, PERSONA_ID)
@@ -1103,7 +1200,10 @@ def test_live_config_uses_real_sdk_field_names():
     「文字起こしが来ない」という形で後から露見する。ここで型に通しておく。
     """
     config = types.LiveConnectConfig(
-        **build_live_config("あなたはテスト子である。", "Kore", prime_history=True)
+        **build_live_config(
+            "あなたはテスト子である。", "Kore",
+            model=voice_call.DEFAULT_MODEL, prime_history=True,
+        )
     )
 
     assert config.response_modalities == [types.Modality.AUDIO]
@@ -1121,14 +1221,22 @@ def test_thinking_level_is_set_only_for_models_that_require_it():
     2026-09-16 の実機で "Thinking level must be specified for this model." を
     踏んだ回帰。逆に、指定不要のモデルに付けるとそちらでエラーになりうるので、
     既定モデルには付かないことも同時に確かめる。
+
+    ``model`` はキーワード必須。既定値があると、渡し忘れたときに黙って既定
+    モデルの設定が組まれ、extended-thinking の接続拒否が同じ形で再発する。
     """
     thinking = types.LiveConnectConfig(**build_live_config(
         "s", "Kore", model="gemini-3.8-live-extended-thinking",
     ))
     assert thinking.thinking_config.thinking_level == types.ThinkingLevel.LOW
 
-    plain = types.LiveConnectConfig(**build_live_config("s", "Kore"))
+    plain = types.LiveConnectConfig(
+        **build_live_config("s", "Kore", model=voice_call.DEFAULT_MODEL)
+    )
     assert plain.thinking_config is None
+
+    with pytest.raises(TypeError):
+        build_live_config("s", "Kore")  # type: ignore[call-arg]
 
 
 def test_compression_watermarks_fit_under_the_session_limit():
@@ -1212,7 +1320,7 @@ def test_transcript_numbers_audio_segments_even_without_a_transcript():
 def test_call_audio_is_saved_per_utterance_and_linked_from_the_records(
     monkeypatch, written_rows, tmp_path,
 ):
-    """通話の音声が wav になり、記憶と建物履歴の行がその実体を指す。"""
+    """通話の音声が wav になり、**ペルソナ自身の記憶の行**がその実体を指す。"""
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setattr(voice_call, "build_system_instruction", lambda *a, **k: "s")
     monkeypatch.setattr(voice_call, "build_history_turns", lambda *a, **k: [])
@@ -1246,10 +1354,16 @@ def test_call_audio_is_saved_per_utterance_and_linked_from_the_records(
     assert (tmp_path / user_msg["metadata"]["voice_audio"]).is_file()
     assert (tmp_path / persona_msg["metadata"]["voice_audio"]).is_file()
 
-    # 建物履歴の行にも同じ紐が乗る。
+    # 建物履歴の行には紐を**載せない**。この行は同席していた他のペルソナの記憶へ
+    # metadata ごと自動転記される (get_building_messages.py) ので、載せると
+    # 他のペルソナの記憶に「自分のフォルダ基準では存在しないパス」が書き込まれ、
+    # 記憶は追記のみなので永久に残る。声を辿れるのは本人の記憶の行から。
     building_user, building_persona = (row[2] for row in written_rows)
-    assert building_user["metadata"]["voice_audio"] == user_msg["metadata"]["voice_audio"]
-    assert building_persona["metadata"]["voice_audio"] == persona_msg["metadata"]["voice_audio"]
+    assert "voice_audio" not in building_user["metadata"]
+    assert "voice_audio" not in building_persona["metadata"]
+    # 紐を落とすのは建物履歴の行だけ。他の metadata は通常どおり乗っている。
+    assert building_user["metadata"]["voice_call"] is True
+    assert building_persona["metadata"]["voice_call"] is True
 
 
 def test_audio_without_a_transcript_is_saved_but_adds_no_memory_row(
@@ -1277,6 +1391,103 @@ def test_audio_without_a_transcript_is_saved_but_adds_no_memory_row(
     assert not (call_dir / "001_user.wav").exists()
     assert adapter.appended == []
     assert written_rows == []
+
+
+def test_audio_stops_being_recorded_at_the_limit_but_the_call_goes_on(
+    monkeypatch, written_rows, tmp_path,
+):
+    """メモリに溜める音声には上限がある。超えたら録るのをやめ、通話は続ける。
+
+    上限が無いと、長電話がそのままバックエンドのメモリになる。止めるべきは
+    録音であって通話ではないので、超過後の区切りは wav への紐が付かないだけで
+    文字起こしも記憶の行も通常どおり立つ。
+    """
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(voice_call, "build_system_instruction", lambda *a, **k: "s")
+    monkeypatch.setattr(voice_call, "build_history_turns", lambda *a, **k: [])
+    # 1 フレーム (32 バイト) は入るが 2 フレーム目は入らない上限。
+    monkeypatch.setattr(voice_call, "MAX_CALL_AUDIO_BYTES", 40)
+    adapter = FakeAdapter(persona_dir=str(tmp_path))
+    install_live(monkeypatch, [
+        transcript_message(user="一つ目"),
+        turn_complete_message(),
+        transcript_message(user="二つ目"),
+        turn_complete_message(),
+    ])
+
+    frame = b"\x01\x02" * 16  # 32 バイト
+    session = run_session(make_manager(adapter), FakeWebSocket([
+        {"type": "websocket.receive", "bytes": frame},
+        {"type": "websocket.receive", "bytes": frame},
+        {"type": "websocket.disconnect", "code": 1006},
+    ]))
+
+    # 通話も文字起こしも止まっていない。
+    assert [m["content"] for m, _ in adapter.appended] == ["一つ目", "二つ目"]
+
+    # 上限を超えたぶんの声は残らない = 紐も付かない。
+    linked = [m["metadata"].get("voice_audio") for m, _ in adapter.appended]
+    assert linked[0] == f"voice_calls/{session.call_dir_name}/001_user.wav"
+    assert linked[1] is None
+
+    call_dir = tmp_path / "voice_calls" / session.call_dir_name
+    assert read_wav(call_dir / "001_user.wav") == (1, 2, 16000, frame)
+    assert not (call_dir / "002_user.wav").exists()
+
+
+def test_a_second_call_in_the_same_second_does_not_overwrite_the_first(
+    monkeypatch, written_rows, tmp_path,
+):
+    """同じ秒に掛け直した通話は、枝番のフォルダへ書く。
+
+    フォルダ名は通話開始時刻の秒まで。上書きを許すと、**前の通話の記憶の行が
+    別の通話の声を指す**。記憶は追記のみなので、すり替わった紐は直せない。
+    """
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(voice_call, "build_system_instruction", lambda *a, **k: "s")
+    monkeypatch.setattr(voice_call, "build_history_turns", lambda *a, **k: [])
+    adapter = FakeAdapter(persona_dir=str(tmp_path))
+    mic = b"\x07\x08" * 16
+    install_live(monkeypatch, [transcript_message(user="二本目だよ"), turn_complete_message()])
+
+    session = VoiceCallSession(make_manager(adapter), PERSONA_ID)
+    # 一本目が同じ名前のフォルダを既に使っている状況を作る。
+    first_dir = tmp_path / "voice_calls" / session.call_dir_name
+    first_dir.mkdir(parents=True)
+    (first_dir / "001_user.wav").write_bytes(b"first call")
+
+    asyncio.run(session.run(FakeWebSocket([
+        {"type": "websocket.receive", "bytes": mic},
+        {"type": "websocket.disconnect", "code": 1006},
+    ])))
+
+    # 一本目の音声はそのまま。
+    assert (first_dir / "001_user.wav").read_bytes() == b"first call"
+    # 二本目は枝番のフォルダへ書かれ、記憶の紐もそちらを指す。
+    branch = f"{session.call_dir_name}_2"
+    assert read_wav(tmp_path / "voice_calls" / branch / "001_user.wav") == (1, 2, 16000, mic)
+    audio_link = adapter.appended[0][0]["metadata"]["voice_audio"]
+    assert audio_link == f"voice_calls/{branch}/001_user.wav"
+    assert (tmp_path / audio_link).is_file()
+
+
+def test_a_half_written_wav_never_takes_the_real_name(monkeypatch, tmp_path):
+    """書き込みが途中で失敗しても、正規の名前をした壊れた wav は残さない。
+
+    正規名へ直接書くと、記憶の行の紐が壊れたファイルを指す。
+    """
+    target = tmp_path / "001_user.wav"
+
+    def _explode(self, data):  # noqa: ANN001 - wave.Wave_write.writeframes の差し替え
+        raise OSError("disk full")
+
+    monkeypatch.setattr(wave.Wave_write, "writeframes", _explode)
+
+    with pytest.raises(OSError):
+        voice_call._write_wav(str(target), b"\x01\x02" * 8, 16000)
+
+    assert not target.exists()
+    assert (tmp_path / "001_user.wav.part").exists()
 
 
 def test_the_transcript_still_lands_when_the_persona_has_no_folder(
