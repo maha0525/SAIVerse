@@ -62,6 +62,14 @@ VOICE_AUDIO_DIRNAME = "voice_calls"
 #: 側が自由に選べてしまう。
 ALLOWED_MODELS = ("gemini-3.8-live", "gemini-3.8-live-extended-thinking")
 
+#: 考える深さの指定が**必須**のモデルと、通話で使う深さ。extended-thinking は
+#: この指定なしに接続すると "Thinking level must be specified for this model."
+#: で接続ごと拒否される (2026-09-16 実機で確認)。通話は返事までの間が体感を
+#: 決めるので、深さは最小限に寄せる (MINIMAL/LOW/MEDIUM/HIGH のうち LOW)。
+MODEL_THINKING_LEVELS: Dict[str, str] = {
+    "gemini-3.8-live-extended-thinking": "LOW",
+}
+
 #: 声の名前として受け付ける形 (英数と ``.`` ``_`` ``-`` と空白、64 文字まで)。
 VOICE_NAME_PATTERN = re.compile(r"[A-Za-z0-9._\- ]{1,64}")
 #: 名前の長さの上限 (voice / model 共通)。
@@ -173,6 +181,7 @@ def build_live_config(
     voice: str,
     *,
     prime_history: bool = False,
+    model: str = DEFAULT_MODEL,
 ) -> Dict[str, Any]:
     """``LiveConnectConfig`` に渡す dict を組む。
 
@@ -202,6 +211,11 @@ def build_live_config(
             "sliding_window": {"target_tokens": COMPRESSION_TARGET_TOKENS},
         },
     }
+    thinking_level = MODEL_THINKING_LEVELS.get(model)
+    if thinking_level:
+        # 指定が必須のモデル (MODEL_THINKING_LEVELS のコメント参照)。指定不要の
+        # モデルに付けると逆にエラーになりうるので、必要なモデルにだけ付ける。
+        config["thinking_config"] = {"thinking_level": thinking_level}
     if prime_history:
         config["history_config"] = {"initial_history_in_client_content": True}
     return config
@@ -901,7 +915,10 @@ class VoiceCallSession:
             turns = await asyncio.to_thread(
                 build_history_turns, self.manager, self.persona, self.building_id,
             )
-            config = build_live_config(system_instruction, self.voice, prime_history=bool(turns))
+            config = build_live_config(
+                system_instruction, self.voice,
+                prime_history=bool(turns), model=self.model,
+            )
 
             LOGGER.info(
                 "[voice_call] starting persona=%s building=%s model=%s voice=%s history_turns=%d thread=%s",
@@ -1194,6 +1211,7 @@ __all__ = [
     "INPUT_MIME_TYPE",
     "INPUT_SAMPLE_RATE",
     "LIVE_SESSION_TOKEN_LIMIT",
+    "MODEL_THINKING_LEVELS",
     "NO_TRANSCRIPT_NOTICE",
     "OUTPUT_SAMPLE_RATE",
     "VOICE_AUDIO_DIRNAME",

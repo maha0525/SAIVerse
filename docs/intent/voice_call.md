@@ -40,7 +40,7 @@
 | 文脈の積み込み | system_instruction = `get_system_prompt()` 出力。履歴 = Memory Weave + 建物履歴の直近 40 件を、`history_config.initial_history_in_client_content` を立てたうえで `send_client_content(turns, turn_complete=True)` で一度に渡す | この設定のとき `turn_complete=True` は「返事をしろ」ではなく「初期履歴はここまで」の合図で、モデルの呼び出しを起こさない。これを送るまで `send_realtime_input` は処理されない (SDK `HistoryConfig` docstring)。積む履歴が無い通話では立てない |
 | 履歴に入れてよい行 | 建物履歴からペルソナ記憶への自動転記 (`get_building_messages.py`) と**同じ採否規則**: heard_by に本人がいない行 (キーの無い古い行も含む) を積まない / 発言者不明の assistant 行を積まない / 出入りの legacy な通知を積まない | 通話の文脈だけが違う規則で読むと、ペルソナが「聞いていないはずの話」を知っている状態になる。発言者不明の行を `model` で渡すと、本人が言っていない文が本人の発話に化ける |
 | 声 | 通話画面でプリセット名を選択/自由入力。ペルソナ別の既定値は localStorage (フロント)。サーバー側で長さ 64 文字・英数記号のみを検査 | DB カラム追加 (migrate) はプロトタイプでは避ける。声=人格の恒久設定化は体感後 |
-| モデル | 既定 `gemini-3.8-live`、UI で `-extended-thinking` に切替可。サーバー側は許可リスト外を拒否 | 課金されるモデルをクライアントが自由に選べる状態にしない |
+| モデル | 既定 `gemini-3.8-live`、UI で `-extended-thinking` に切替可。サーバー側は許可リスト外を拒否。extended-thinking は考える深さ (thinking_level) の指定が必須で、無指定は接続ごと拒否される (2026-09-16 実機で確認) — 通話では返事までの間を優先して LOW 固定 | 課金されるモデルをクライアントが自由に選べる状態にしない。深さを UI で選ばせるのは、extended-thinking を実際に使う体感が出てから |
 | 通話の舞台 (部屋) | サーバーがペルソナの `current_building_id` から決める。クライアントの `building_id` は互換のため受け取るが使わない | 申告どおりに書くと、メニューを開いてから通話開始までに移動したペルソナが「いない部屋で喋った」ことになる |
 | セッション寿命 | context window compression (sliding window) を有効化。trigger 100,000 / target 64,000 トークン (セッション上限 128,000 に対する値) | 人格と記憶だけで数万トークンあるので、水位が低すぎると通話の序盤で人格ごと畳まれる。session resumption は第一巡では未実装 |
 | 書き戻しタイミング | 通話終了時に一括 (異常切断時も finally で書く)。文字起こしが 1 件も取れなかった通話には、通話があった事実だけを system 通告の一行として残す | 途中クラッシュで transcript を失うリスクは許容。逐次書き込みは第二巡 |

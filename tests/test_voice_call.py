@@ -1115,6 +1115,22 @@ def test_live_config_uses_real_sdk_field_names():
     assert config.history_config.initial_history_in_client_content is True
 
 
+def test_thinking_level_is_set_only_for_models_that_require_it():
+    """extended-thinking は考える深さの指定が必須 (無指定は接続ごと拒否される)。
+
+    2026-09-16 の実機で "Thinking level must be specified for this model." を
+    踏んだ回帰。逆に、指定不要のモデルに付けるとそちらでエラーになりうるので、
+    既定モデルには付かないことも同時に確かめる。
+    """
+    thinking = types.LiveConnectConfig(**build_live_config(
+        "s", "Kore", model="gemini-3.8-live-extended-thinking",
+    ))
+    assert thinking.thinking_config.thinking_level == types.ThinkingLevel.LOW
+
+    plain = types.LiveConnectConfig(**build_live_config("s", "Kore"))
+    assert plain.thinking_config is None
+
+
 def test_compression_watermarks_fit_under_the_session_limit():
     """畳む水位の主語は「このセッションが保持できるトークンの総量」。
 
