@@ -20,11 +20,14 @@ Gemini Live API への接続は :class:`FakeLiveSession` へ差し替え、ネ�
 8. 通話の舞台はサーバー側 (ペルソナの現在地) が決める
 9. 同じペルソナへの 2 本目は拒否される
 10. 認証・Origin の検査がルートで効く
+11. 発話単位の音声が wav で保存され、記憶と建物履歴の行から辿れる
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import wave
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -71,7 +74,13 @@ class FakeAdapter:
         thread_sequence: Optional[List[Optional[str]]] = None,
         append_result: Any = "ok",
         append_raises: bool = False,
+        persona_dir: Optional[str] = None,
     ) -> None:
+        # 実物の SAIMemoryAdapter は persona_dir を持つ (voice_call._persona_dir
+        # がここから通話の音声の保存先を決める)。持たない構成も実在するので、
+        # 既定は None のまま = 「フォルダが取れない」。
+        if persona_dir is not None:
+            self.persona_dir = persona_dir
         self.appended: List[tuple] = []
         self._thread = current_thread
         self._thread_sequence = list(thread_sequence) if thread_sequence else None
@@ -1133,3 +1142,152 @@ def test_transcript_groups_fragments_per_turn():
         ("assistant", "はい、どうぞ"),
         ("user", "またね"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# 11. 音声の保存
+# ---------------------------------------------------------------------------
+
+
+def read_wav(path: Path) -> tuple:
+    """``(channels, sampwidth, framerate, frames)`` を返す。"""
+    with wave.open(str(path), "rb") as wav_file:
+        return (
+            wav_file.getnchannels(),
+            wav_file.getsampwidth(),
+            wav_file.getframerate(),
+            wav_file.readframes(wav_file.getnframes()),
+        )
+
+
+def run_session(manager, websocket) -> VoiceCallSession:
+    """``VoiceCallSession`` を 1 本回して返す (経路の前後を直接見たいとき用)。"""
+    session = VoiceCallSession(manager, PERSONA_ID)
+    asyncio.run(session.run(websocket))
+    return session
+
+
+def test_transcript_numbers_audio_segments_even_without_a_transcript():
+    """文字起こしが取れなかった区切りも連番を消費する (並びが詰まらない)。
+
+    ここが詰まると、保存した wav の並びと書き戻した発話の並びがずれて、
+    「この行の声」を後から辿れなくなる。
+    """
+    transcript = CallTranscript()
+    transcript.add_input_audio(b"\x01\x02")
+    transcript.add_input("ひとこと")
+    transcript.flush_turn()
+
+    # 声は流れたが一文字も起こせなかった区切り。
+    transcript.add_output_audio(b"\x03\x04")
+    transcript.flush_turn()
+
+    transcript.add_output_audio(b"\x05\x06")
+    transcript.add_output("三つ目だよ")
+    transcript.flush_turn()
+
+    assert [s["index"] for s in transcript.audio_segments] == [1, 2, 3]
+    assert [(e["role"], e.get("audio_file")) for e in transcript.entries] == [
+        ("user", "001_user.wav"),
+        ("assistant", "003_persona.wav"),
+    ]
+
+
+def test_call_audio_is_saved_per_utterance_and_linked_from_the_records(
+    monkeypatch, written_rows, tmp_path,
+):
+    """通話の音声が wav になり、記憶と建物履歴の行がその実体を指す。"""
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(voice_call, "build_system_instruction", lambda *a, **k: "s")
+    monkeypatch.setattr(voice_call, "build_history_turns", lambda *a, **k: [])
+    adapter = FakeAdapter(persona_dir=str(tmp_path))
+    mic = b"\x01\x02" * 16
+    voice = b"\x11\x22" * 8
+    install_live(monkeypatch, [
+        transcript_message(user="おはよう"),
+        audio_message(voice),
+        transcript_message(model="おはよう。"),
+        turn_complete_message(),
+    ])
+
+    websocket = FakeWebSocket([
+        {"type": "websocket.receive", "bytes": mic},
+        {"type": "websocket.disconnect", "code": 1006},
+    ])
+    session = run_session(make_manager(adapter), websocket)
+
+    # 音声はブラウザへもそのまま流れている (保存は中継の写しであって横取りではない)。
+    assert websocket.sent_bytes == [voice]
+
+    call_dir = tmp_path / "voice_calls" / session.call_dir_name
+    assert read_wav(call_dir / "001_user.wav") == (1, 2, 16000, mic)
+    assert read_wav(call_dir / "001_persona.wav") == (1, 2, 24000, voice)
+
+    # 記憶の行: ペルソナフォルダからの相対パスで、実体を指している。
+    user_msg, persona_msg = (m for m, _suffix in adapter.appended)
+    assert user_msg["metadata"]["voice_audio"] == f"voice_calls/{session.call_dir_name}/001_user.wav"
+    assert persona_msg["metadata"]["voice_audio"] == f"voice_calls/{session.call_dir_name}/001_persona.wav"
+    assert (tmp_path / user_msg["metadata"]["voice_audio"]).is_file()
+    assert (tmp_path / persona_msg["metadata"]["voice_audio"]).is_file()
+
+    # 建物履歴の行にも同じ紐が乗る。
+    building_user, building_persona = (row[2] for row in written_rows)
+    assert building_user["metadata"]["voice_audio"] == user_msg["metadata"]["voice_audio"]
+    assert building_persona["metadata"]["voice_audio"] == persona_msg["metadata"]["voice_audio"]
+
+
+def test_audio_without_a_transcript_is_saved_but_adds_no_memory_row(
+    monkeypatch, written_rows, tmp_path,
+):
+    """一文字も起こせなかった区切りの声も残す。記憶の行は増やさない。
+
+    声は記憶の素材なので捨てない。だが文字起こしの無い行を記憶へ立てると、
+    中身の無い発話がペルソナの履歴に並ぶ。
+    """
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(voice_call, "build_system_instruction", lambda *a, **k: "s")
+    monkeypatch.setattr(voice_call, "build_history_turns", lambda *a, **k: [])
+    adapter = FakeAdapter(persona_dir=str(tmp_path))
+    voice = b"\x33\x44" * 4
+    install_live(monkeypatch, [audio_message(voice), turn_complete_message()])
+
+    session = run_session(
+        make_manager(adapter),
+        FakeWebSocket([{"type": "websocket.disconnect", "code": 1006}]),
+    )
+
+    call_dir = tmp_path / "voice_calls" / session.call_dir_name
+    assert read_wav(call_dir / "001_persona.wav") == (1, 2, 24000, voice)
+    assert not (call_dir / "001_user.wav").exists()
+    assert adapter.appended == []
+    assert written_rows == []
+
+
+def test_the_transcript_still_lands_when_the_persona_has_no_folder(
+    monkeypatch, written_rows,
+):
+    """ペルソナフォルダが取れなくても、音声の保存だけを諦めて書き戻しは通す。
+
+    そして**書けなかったファイルへの紐は残さない** — 存在しない wav を指す
+    metadata は、後から聞き返そうとした人に「あるはずのものが無い」と言わせる。
+    """
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(voice_call, "build_system_instruction", lambda *a, **k: "s")
+    monkeypatch.setattr(voice_call, "build_history_turns", lambda *a, **k: [])
+    adapter = FakeAdapter()  # persona_dir を持たない = SAIMemory のフォルダ不明
+    assert not hasattr(adapter, "persona_dir")
+    install_live(monkeypatch, [transcript_message(user="聞こえてる？"), turn_complete_message()])
+
+    run_session(
+        make_manager(adapter),
+        FakeWebSocket([
+            {"type": "websocket.receive", "bytes": b"\x00\x01" * 8},
+            {"type": "websocket.disconnect", "code": 1006},
+        ]),
+    )
+
+    assert [m["content"] for m, _suffix in adapter.appended] == ["聞こえてる？"]
+    assert "voice_audio" not in adapter.appended[0][0]["metadata"]
+    assert "audio_file" not in adapter.appended[0][0]
+    assert len(written_rows) == 1
+    assert "voice_audio" not in written_rows[0][2]["metadata"]

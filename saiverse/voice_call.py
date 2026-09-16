@@ -19,6 +19,14 @@
 先に打つと、建物履歴からペルソナ記憶への自動転記
 (``builtin_data/tools/get_building_messages.py``) がその行を永久に飛ばし、
 通話の内容がペルソナの記憶から丸ごと落ちる。
+
+声そのものも残す。発話の区切り (turn_complete / interrupted) ごとに、その区切りの
+マイク音声とペルソナの音声を wav にして
+``<persona_dir>/voice_calls/<通話開始時刻>/NNN_user.wav`` /
+``NNN_persona.wav`` へ保存し、対応する行の ``metadata["voice_audio"]`` に
+ペルソナフォルダからの相対パスを刻む。文字起こしが取れずに記憶の行にならなかった
+区切りの音声も、ファイルとしては保存する (紐だけ付かない) — 声は記憶の素材なので、
+文字にならなかった分を捨てない。
 """
 from __future__ import annotations
 
@@ -27,6 +35,7 @@ import json
 import logging
 import os
 import re
+import wave
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -39,6 +48,13 @@ DEFAULT_VOICE = "Kore"
 INPUT_SAMPLE_RATE = 16000
 OUTPUT_SAMPLE_RATE = 24000
 INPUT_MIME_TYPE = f"audio/pcm;rate={INPUT_SAMPLE_RATE}"
+
+#: 保存する音声の形。Live API の両方向とも mono / 16bit PCM (リトルエンディアン)
+#: なので、wav のヘッダを被せるだけで再生できる。
+AUDIO_CHANNELS = 1
+AUDIO_SAMPLE_WIDTH = 2
+#: ペルソナフォルダの下で通話の音声を置く場所。
+VOICE_AUDIO_DIRNAME = "voice_calls"
 
 #: 通話に使ってよいモデル。UI の選択肢 (frontend/src/components/VoiceCallModal.tsx
 #: の MODEL_OPTIONS) と同じ並び。ここに無い名前は start の時点で拒否する
@@ -368,18 +384,28 @@ def _now_iso() -> str:
 
 
 class CallTranscript:
-    """入力 (ユーザー) と出力 (ペルソナ) の文字起こしを発話単位に束ねる。
+    """入力 (ユーザー) と出力 (ペルソナ) の文字起こしと音声を発話単位に束ねる。
 
-    Live API の文字起こしは細切れで届くので、turn の境界
-    (``turn_complete`` / ``interrupted``) で 1 件に確定させる。
+    Live API の文字起こしも音声も細切れで届くので、turn の境界
+    (``turn_complete`` / ``interrupted``) で 1 件に確定させる。文字起こしと
+    音声の区切りは**同じ**で、一つの区切りが :attr:`audio_segments` の 1 要素
+    (``{"index": 連番, "user": bytes, "persona": bytes}``) になる。
+
+    文字起こしが取れなかった区切りは :attr:`entries` を増やさないが、音声が
+    あれば区切りとしては残り、連番も消費する — 声は記憶の素材なので、文字に
+    ならなかった分も捨てない (intent の設計判断表「音声の保存」)。
     """
 
     def __init__(self) -> None:
         self.entries: List[Dict[str, Any]] = []
+        #: 音声のある区切り。``index`` は 1 から始まる連番で、ファイル名の NNN。
+        self.audio_segments: List[Dict[str, Any]] = []
         self._input_parts: List[str] = []
         self._output_parts: List[str] = []
         self._input_started_at: Optional[str] = None
         self._output_started_at: Optional[str] = None
+        self._input_audio: List[bytes] = []
+        self._output_audio: List[bytes] = []
 
     def add_input(self, text: str) -> None:
         if not text:
@@ -395,29 +421,145 @@ class CallTranscript:
             self._output_started_at = _now_iso()
         self._output_parts.append(text)
 
+    def add_input_audio(self, data: bytes) -> None:
+        """ユーザーのマイク音声 (16kHz PCM16 LE mono) の 1 フレームを溜める。"""
+        if data:
+            self._input_audio.append(data)
+
+    def add_output_audio(self, data: bytes) -> None:
+        """ペルソナの音声 (24kHz PCM16 LE mono) の 1 フレームを溜める。"""
+        if data:
+            self._output_audio.append(data)
+
     def flush_turn(self) -> None:
-        """溜まっている断片を発話 1 件ずつに確定する (ユーザー → ペルソナの順)。"""
+        """溜まっている断片を発話 1 件ずつに確定する (ユーザー → ペルソナの順)。
+
+        音声が片方でもあれば、この区切りに連番を一つ与えて
+        :attr:`audio_segments` に積む。その区切りから起きた行には、対応する
+        wav のファイル名を ``entry["audio_file"]`` として持たせる
+        (ペルソナフォルダからの相対パスに組み立てるのは
+        :meth:`VoiceCallSession._pending_entries` 側)。
+        """
         user_text = "".join(self._input_parts).strip()
+        assistant_text = "".join(self._output_parts).strip()
+        user_audio = b"".join(self._input_audio)
+        persona_audio = b"".join(self._output_audio)
+
+        index: Optional[int] = None
+        if user_audio or persona_audio:
+            index = len(self.audio_segments) + 1
+            self.audio_segments.append({
+                "index": index,
+                "user": user_audio,
+                "persona": persona_audio,
+            })
+
         if user_text:
-            self.entries.append({
+            entry: Dict[str, Any] = {
                 "role": "user",
                 "content": user_text,
                 "timestamp": self._input_started_at or _now_iso(),
-            })
-        assistant_text = "".join(self._output_parts).strip()
+            }
+            if index is not None and user_audio:
+                entry["audio_file"] = audio_file_name(index, "user")
+            self.entries.append(entry)
         if assistant_text:
-            self.entries.append({
+            entry = {
                 "role": "assistant",
                 "content": assistant_text,
                 "timestamp": self._output_started_at or _now_iso(),
-            })
+            }
+            if index is not None and persona_audio:
+                entry["audio_file"] = audio_file_name(index, "persona")
+            self.entries.append(entry)
+
         self._input_parts = []
         self._output_parts = []
         self._input_started_at = None
         self._output_started_at = None
+        self._input_audio = []
+        self._output_audio = []
 
     def __len__(self) -> int:
         return len(self.entries)
+
+
+# ---------------------------------------------------------------------------
+# 音声の保存
+# ---------------------------------------------------------------------------
+
+
+def audio_file_name(index: int, side: str) -> str:
+    """区切りの連番と向き (``user`` / ``persona``) から wav のファイル名を作る。"""
+    return f"{index:03d}_{side}.wav"
+
+
+def _write_wav(path: str, pcm: bytes, sample_rate: int) -> None:
+    """生の PCM16 LE mono に wav のヘッダを被せて書き出す。"""
+    with wave.open(path, "wb") as wav_file:
+        wav_file.setnchannels(AUDIO_CHANNELS)
+        wav_file.setsampwidth(AUDIO_SAMPLE_WIDTH)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm)
+
+
+def save_call_audio(
+    persona: Any,
+    call_dir_name: str,
+    segments: Sequence[Dict[str, Any]],
+) -> Set[str]:
+    """通話の音声を ``<persona_dir>/voice_calls/<call_dir_name>/`` へ書き出す。
+
+    戻り値は**実際に書けたファイル名の集合**。呼び出し側はこれを使って、
+    書けなかったファイルへの紐 (``metadata["voice_audio"]``) を記録に残さない
+    ようにする — 存在しないファイルを指す紐は、後から聞き返そうとした人に
+    「あるはずのものが無い」と言わせる嘘になる。
+
+    ペルソナフォルダが取れないとき (SAIMemory が無い等) は音声の保存だけ
+    諦める。文字起こしの書き戻しはこの関数の外なので、従来どおり進む。
+    """
+    persona_dir = _persona_dir(persona)
+    if not persona_dir:
+        LOGGER.warning(
+            "[voice_call] no persona directory for persona=%s — keeping the transcript "
+            "but dropping %d recorded audio segment(s)",
+            getattr(persona, "persona_id", None), len(segments),
+        )
+        return set()
+
+    target_dir = os.path.join(persona_dir, VOICE_AUDIO_DIRNAME, call_dir_name)
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+    except OSError:
+        LOGGER.warning("[voice_call] could not create %s", target_dir, exc_info=True)
+        return set()
+
+    saved: Set[str] = set()
+    for segment in segments:
+        index = segment["index"]
+        for side, sample_rate in (
+            ("user", INPUT_SAMPLE_RATE),
+            ("persona", OUTPUT_SAMPLE_RATE),
+        ):
+            pcm = segment.get(side)
+            if not pcm:
+                continue
+            name = audio_file_name(index, side)
+            try:
+                _write_wav(os.path.join(target_dir, name), pcm, sample_rate)
+            except (OSError, wave.Error):
+                LOGGER.warning(
+                    "[voice_call] failed to save %s in %s", name, target_dir, exc_info=True,
+                )
+                continue
+            saved.add(name)
+
+    LOGGER.info(
+        "[voice_call] saved %d of %d audio file(s) under %s",
+        len(saved), sum(bool(s.get("user")) + bool(s.get("persona")) for s in segments),
+        target_dir,
+    )
+    return saved
 
 
 # ---------------------------------------------------------------------------
@@ -481,12 +623,17 @@ def _memory_message(
     (``saiverse_memory.adapter._append_message`` がそこから読む)。転記経路の
     ``_stamp_layer0`` と同じ値 — NULL の救済を持たない完全一致 SQL に構造的に
     落とされないため。
+
+    ``entry["voice_audio"]`` (ペルソナフォルダからの相対パス) があれば、その
+    まま ``metadata["voice_audio"]`` に刻む。音声の無い発話には付けない。
     """
     role = entry["role"]
     metadata: Dict[str, Any] = {
         "tags": ["conversation"],
         "voice_call": True,
     }
+    if entry.get("voice_audio"):
+        metadata["voice_audio"] = entry["voice_audio"]
     message: Dict[str, Any] = {
         "role": role,
         "content": entry["content"],
@@ -615,6 +762,40 @@ def write_back_transcript(
     return written
 
 
+def persist_call(
+    manager: Any,
+    persona: Any,
+    building_id: str,
+    entries: Sequence[Dict[str, Any]],
+    *,
+    thread_suffix: Optional[str] = None,
+    call_dir_name: str,
+    segments: Sequence[Dict[str, Any]] = (),
+) -> Dict[str, int]:
+    """通話の音声を保存してから、文字起こしを書き戻す (ワーカースレッドの仕事)。
+
+    音声を**先に**書くのは、SAIMemory への書き込みが失敗しても声そのものは
+    手元に残るようにするため。逆順にすると、書き戻しが例外で落ちたときに
+    その通話の音声ごと消える。
+
+    ``entry["audio_file"]`` は、そのファイルが実際に書けた場合にだけ
+    ``entry["voice_audio"]`` (ペルソナフォルダからの相対パス) へ組み替える。
+    """
+    saved = save_call_audio(persona, call_dir_name, segments) if segments else set()
+
+    rows: List[Dict[str, Any]] = []
+    for entry in entries:
+        row = dict(entry)
+        name = row.pop("audio_file", None)
+        if name and name in saved:
+            row["voice_audio"] = f"{VOICE_AUDIO_DIRNAME}/{call_dir_name}/{name}"
+        rows.append(row)
+
+    return write_back_transcript(
+        manager, persona, building_id, rows, thread_suffix=thread_suffix,
+    )
+
+
 # ---------------------------------------------------------------------------
 # セッション
 # ---------------------------------------------------------------------------
@@ -646,6 +827,11 @@ class VoiceCallSession:
         self.voice = _validate_voice(voice)
         self.model = _validate_model(model)
         self.transcript = CallTranscript()
+        self.started_at = datetime.now()
+        #: 音声を置くフォルダ名。通話の**開始時刻**でここで確定させる
+        #: (終了時に取り直すと、フォルダ名が通話の終わった時刻になる)。
+        #: ログのセッションフォルダと同じくローカル時刻。
+        self.call_dir_name = self.started_at.strftime("%Y%m%d_%H%M%S")
         self.usage: Dict[str, int] = {"prompt_tokens": 0, "response_tokens": 0, "total_tokens": 0}
         self._written_back = False
         self._holds_slot = False
@@ -790,6 +976,9 @@ class VoiceCallSession:
                 await live.send_realtime_input(
                     audio={"data": data, "mime_type": INPUT_MIME_TYPE},
                 )
+                # Gemini へ送ったのと同じバイトを手元にも溜める (通話終了時に
+                # wav にする)。ここで溜めたものがユーザーの声の原本になる。
+                self.transcript.add_input_audio(data)
                 self._relayed_audio_frames += 1
                 continue
             text = event.get("text")
@@ -863,6 +1052,8 @@ class VoiceCallSession:
                 inline = getattr(part, "inline_data", None)
                 if inline is not None and inline.data:
                     await websocket.send_bytes(inline.data)
+                    # ブラウザで鳴るのと同じバイトを手元にも溜める。
+                    self.transcript.add_output_audio(inline.data)
 
         if server_content.interrupted:
             self.transcript.flush_turn()
@@ -886,7 +1077,13 @@ class VoiceCallSession:
     # -- 後始末 ------------------------------------------------------------
 
     def _pending_entries(self) -> List[Dict[str, Any]]:
-        """書き戻す行を確定する (文字起こしゼロの通話には痕跡の一行を立てる)。"""
+        """書き戻す行を確定する (文字起こしゼロの通話には痕跡の一行を立てる)。
+
+        最後の :meth:`CallTranscript.flush_turn` でもある通り、turn_complete を
+        受け取らないまま切れた区切りの文字起こしと音声もここで確定する。
+        痕跡の一行には音声への紐を付けない — その一行は特定の発話ではなく
+        「通話があった」という事実なので、通話中のどの区切りとも対応しない。
+        """
         self.transcript.flush_turn()
         entries = list(self.transcript.entries)
         if entries:
@@ -919,7 +1116,8 @@ class VoiceCallSession:
             self.usage["response_tokens"], self.usage["total_tokens"],
         )
         entries = self._pending_entries()
-        if not entries:
+        segments = self.transcript.audio_segments
+        if not entries and not segments:
             LOGGER.info(
                 "[voice_call] nothing to write back persona=%s building=%s",
                 self.persona_id, self.building_id,
@@ -927,16 +1125,22 @@ class VoiceCallSession:
             self._release_slot()
             return {"memory": 0, "building": 0}
 
+        # 書き戻す行が 1 件も無くても、音声の区切りがあれば保存はする
+        # (文字起こしが一度も取れなかった通話の声を捨てない)。
         args = (self.manager, self.persona, self.building_id, entries)
-        kwargs = {"thread_suffix": self._thread_suffix}
+        kwargs = {
+            "thread_suffix": self._thread_suffix,
+            "call_dir_name": self.call_dir_name,
+            "segments": segments,
+        }
         try:
             try:
-                future = _write_back_pool().submit(write_back_transcript, *args, **kwargs)
+                future = _write_back_pool().submit(persist_call, *args, **kwargs)
             except RuntimeError:
                 # インタプリタ終了中などでワーカーを起こせない場合でも、
-                # 文字起こしを落とすよりはこのスレッドで書き切る。
+                # 文字起こしと音声を落とすよりはこのスレッドで書き切る。
                 LOGGER.warning("[voice_call] falling back to a synchronous write-back", exc_info=True)
-                return write_back_transcript(*args, **kwargs)
+                return persist_call(*args, **kwargs)
             try:
                 return await asyncio.shield(asyncio.wrap_future(future))
             except asyncio.CancelledError:
@@ -948,7 +1152,7 @@ class VoiceCallSession:
                         "[voice_call] write-back was cancelled before it started — "
                         "writing synchronously instead",
                     )
-                    write_back_transcript(*args, **kwargs)
+                    persist_call(*args, **kwargs)
                 else:
                     LOGGER.warning(
                         "[voice_call] write-back is already running in the worker — "
@@ -981,6 +1185,8 @@ def _validate_model(model: Optional[str]) -> str:
 
 __all__ = [
     "ALLOWED_MODELS",
+    "AUDIO_CHANNELS",
+    "AUDIO_SAMPLE_WIDTH",
     "CallTranscript",
     "DEFAULT_MODEL",
     "DEFAULT_VOICE",
@@ -990,13 +1196,17 @@ __all__ = [
     "LIVE_SESSION_TOKEN_LIMIT",
     "NO_TRANSCRIPT_NOTICE",
     "OUTPUT_SAMPLE_RATE",
+    "VOICE_AUDIO_DIRNAME",
     "VoiceCallError",
     "VoiceCallSession",
+    "audio_file_name",
     "build_history_turns",
     "build_live_config",
     "build_system_instruction",
     "open_live_session",
+    "persist_call",
     "resolve_api_key",
     "resolve_thread_suffix",
+    "save_call_audio",
     "write_back_transcript",
 ]
