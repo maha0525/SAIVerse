@@ -38,7 +38,12 @@ world clone は `setup_test_env.py` を前提にしない (dest 構造を自分�
 1. **source (本番) は読み取り専用**。SQLite は `mode=ro` で開き、スナップショットは
    sqlite の backup API で取る (本番稼働中でも WAL ごと整合スナップショットになる。
    ファイル copy だと WAL 未反映分が欠ける)。
-2. **dest が本番と同一パスなら拒否する** (resolve 後のパス比較)。
+2. **dest が本番と同一パスなら拒否する** (resolve 後のパス比較)。加えて、**dest
+   (DB / home) が本番 (`~/.saiverse` 配下) を指すなら拒否する**。複製は dest の DB と
+   フォルダを丸ごと置き換える (既存ファイルの削除を含む) ので、source と別のパスでも
+   本番の中なら本番を壊す。本番の場所は SAIVERSE_HOME からは導かず `~/.saiverse` で
+   固定する (判定は `scripts/_shared/production_guard.py`、会話ランナー・一日シム・
+   ペルソナ複製と共有。経緯は §7)。
 3. **外部への作用を持ち込まない**。複製した世界は起動しただけで外に触れてはならない:
    - `addon_config.is_enabled` を全行 0 にする (stackchan / X / SwitchBot 等の
      アドオンが本物のデバイス・外部サービスへ繋がる事故の防止)。`--keep-addons` で
@@ -118,3 +123,11 @@ python scripts/inspect_world.py day-plan quon_city_a --env test
 - 差分同期 (二回目以降も全消し全コピー。写し世界は使い捨てが原則)
 - 本番への書き戻し (一方通行。書き戻しツールは作らない)
 - expansion_data のコピー (リポジトリ共有なので両環境から同じものが見える)
+
+## 7. 経緯
+
+- **2026-09-17**: 会話ランナーの番人が SAIVERSE_HOME を本番の基準にしていた穴
+  (`docs/intent/conversation_runner.md` §5) の同族を探したところ、world clone と
+  ペルソナ複製は「dest が source と同じか」しか見ておらず、source と別のパスで本番の
+  中を指す dest (例: `--dest-home ~/.saiverse`) を通す作りだった。§3-2 に本番の中の
+  dest の拒否を加えた。

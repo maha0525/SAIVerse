@@ -342,9 +342,9 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                 <>
                     <div className={styles.summary}>
                         <div className={styles.summaryRow}>
-                            <span data-i18n="components.memory.MemopediaConversion.text017 components.memory.MemopediaConversion.text018 components.memory.MemopediaConversion.text019 components.memory.MemopediaConversion.text020 components.memory.MemopediaConversion.text021" className={styles.summaryLabel}>{uiText("components.memory.MemopediaConversion.text017")}{preview.total_page_count}{uiText("components.memory.MemopediaConversion.text018")}{preview.page_count}{uiText("components.memory.MemopediaConversion.text019")}{preview.kept_body_count > 0 && (
+                            <span data-i18n="components.memory.MemopediaConversion.text017 components.memory.MemopediaConversion.text018 components.memory.MemopediaConversion.text019 components.memory.MemopediaConversion.text020 components.memory.MemopediaConversion.text021 components.memory.MemopediaConversion.period" className={styles.summaryLabel}>{uiText("components.memory.MemopediaConversion.text017")}{preview.total_page_count}{uiText("components.memory.MemopediaConversion.text018")}{preview.page_count}{uiText("components.memory.MemopediaConversion.text019")}{preview.kept_body_count > 0 && (
                                     <>{uiText("components.memory.MemopediaConversion.text020")}{preview.kept_body_count}{uiText("components.memory.MemopediaConversion.text021")}</>
-                                )}。
+                                )}{uiText("components.memory.MemopediaConversion.period")}
                                 {restating && (
                                     <span data-i18n="components.memory.MemopediaConversion.text022" className={styles.subtle}>{uiText("components.memory.MemopediaConversion.text022")}</span>
                                 )}
@@ -356,7 +356,7 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                         <div className={styles.error}>
                             <AlertTriangle size={16} />
                             <span data-i18n="components.memory.MemopediaConversion.text023 components.memory.MemopediaConversion.text024 components.memory.MemopediaConversion.text025">{uiText("components.memory.MemopediaConversion.text023")}{preview.verbatim_breaches.length > 0 && (
-                                    <>{uiText("components.memory.MemopediaConversion.text024")}{preview.verbatim_breaches.length}{uiText("components.memory.MemopediaConversion.text025")}{preview.verbatim_breaches[0].title} — {preview.verbatim_breaches[0].detail}）</>
+                                    <>{uiText("components.memory.MemopediaConversion.text024")}{preview.verbatim_breaches.length}{uiText("components.memory.MemopediaConversion.text025", { p1: preview.verbatim_breaches[0].title, p2: preview.verbatim_breaches[0].detail })}</>
                                 )}
                             </span>
                         </div>
@@ -479,7 +479,7 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                         <div key={run.run_id} className={styles.runRow}>
                             <span className={styles.runId}>{run.run_id}</span>
                             <span data-i18n="components.memory.MemopediaConversion.text047 components.memory.MemopediaConversion.text048" className={styles.runInfo}>
-                                {new Date(run.converted_at * 1000).toLocaleString(getFormatLocale())} ／
+                                {new Date(run.converted_at * 1000).toLocaleString(getFormatLocale())} /
                                 {run.page_count}{uiText("components.memory.MemopediaConversion.text047")}{run.fragment_count + run.dedup_count}{uiText("components.memory.MemopediaConversion.text048")}</span>
                             <button data-i18n="components.memory.MemopediaConversion.text049 components.memory.MemopediaConversion.text050"
                                 className={styles.revertButton}

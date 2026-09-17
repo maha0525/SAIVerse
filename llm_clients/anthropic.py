@@ -206,6 +206,17 @@ class AnthropicClient(LLMClient):
             else:
                 self._extra_params[key] = value
 
+    def response_token_limit(self) -> Optional[int]:
+        """送る ``max_tokens`` (build_request_params へ渡す ``self._max_tokens``)。
+
+        per-call の ``max_output_tokens`` は受け取らず (generate の ``**_`` が
+        落とす)、この値が毎回送られる。既定 4,096、adaptive thinking で 16,000、
+        モデル設定の ``max_output_tokens`` / ``ANTHROPIC_MAX_OUTPUT_TOKENS`` で
+        上書きされ、思考の予算がそれ以上なら予算 + 4,096 に引き上がる
+        (__init__ と configure_parameters)。
+        """
+        return int(self._max_tokens)
+
     def _store_usage_from_response(self, usage: Any, cache_ttl: str = "") -> None:
         """Extract and store usage information from Anthropic response."""
         if not usage:

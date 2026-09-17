@@ -966,7 +966,11 @@ def check_reembed_needed(manager=Depends(get_manager)):
 class PlaybookPermissionInfo(BaseModel):
     playbook_name: str
     display_name: str
+    display_name_en: Optional[str] = None
+    display_name_i18n: Optional[dict[str, str]] = None
     description: str
+    description_en: Optional[str] = None
+    description_i18n: Optional[dict[str, str]] = None
     permission_level: str  # blocked | user_only | ask_every_time | auto_allow
 
 
@@ -979,6 +983,7 @@ class SetPlaybookPermissionRequest(BaseModel):
 def get_playbook_permissions(manager=Depends(get_manager)):
     """Return all router_callable playbooks with their current permission level for this city."""
     from database.models import Playbook as PlaybookModel, PlaybookPermission
+    from saiverse.i18n_utils import normalize_i18n_dict
 
     city_id = getattr(manager, "city_id", None)
     if city_id is None:
@@ -998,10 +1003,19 @@ def get_playbook_permissions(manager=Depends(get_manager)):
 
         result = []
         for pb in playbooks:
+            display_name_en = getattr(pb, "display_name_en", None)
+            description_en = getattr(pb, "description_en", None)
+            disp_i18n = normalize_i18n_dict(pb.display_name, alt_en=display_name_en)
+            desc_i18n = normalize_i18n_dict(pb.description, alt_en=description_en)
+
             result.append(PlaybookPermissionInfo(
                 playbook_name=pb.name,
                 display_name=pb.display_name or pb.name,
+                display_name_en=display_name_en,
+                display_name_i18n=disp_i18n if disp_i18n else None,
                 description=pb.description or "",
+                description_en=description_en,
+                description_i18n=desc_i18n if desc_i18n else None,
                 permission_level=permissions.get(pb.name, "ask_every_time"),
             ))
 

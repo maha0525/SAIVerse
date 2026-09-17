@@ -348,3 +348,85 @@ def test_frontend_i18n_messages_and_literal_hygiene():
     )
     assert res_test.returncode == 0, f"test-i18n.cjs failed:\nSTDOUT:\n{res_test.stdout}\nSTDERR:\n{res_test.stderr}"
 
+
+def test_playbook_schema_i18n():
+    from sea.playbook_models import PlaybookSchema
+
+    data = {
+        "name": "test_playbook",
+        "display_name": {"ja": "テスト", "en": "Test"},
+        "description": {"ja": "説明文", "en": "Description"},
+        "input_schema": [],
+        "start_node": "node1",
+        "nodes": [
+            {
+                "id": "node1",
+                "type": "pass",
+            }
+        ],
+    }
+    pb = PlaybookSchema(**data)
+    assert pb.get_display_name("ja") == "テスト"
+    assert pb.get_display_name("en") == "Test"
+    assert pb.get_display_name("zh") == "Test"  # fallback to en (lingua franca)
+    assert pb.get_description("ja") == "説明文"
+    assert pb.get_description("en") == "Description"
+    assert pb.get_description("zh") == "Description"
+
+
+def test_addon_manifest_i18n():
+    from saiverse.addon_manifest import AddonManifest
+
+    data = {
+        "name": "test-addon",
+        "display_name": {"ja": "テストアドオン", "en": "Test Addon"},
+        "description": {"ja": "アドオン説明", "en": "Addon Description"},
+        "version": "1.0.0",
+    }
+    manifest = AddonManifest(**data)
+    assert manifest.get_display_name("ja") == "テストアドオン"
+    assert manifest.get_display_name("en") == "Test Addon"
+    assert manifest.get_display_name("zh") == "Test Addon"  # fallback to en
+    assert manifest.get_description("ja") == "アドオン説明"
+    assert manifest.get_description("en") == "Addon Description"
+
+
+def test_available_playbooks_section_zero_diff_for_japanese():
+    from sea.head_pipeline.sections.available_playbooks import (
+        AvailablePlaybooksSection,
+        AvailablePlaybooksSnapshot,
+        PlaybookEntry,
+    )
+
+    section = AvailablePlaybooksSection()
+    snapshot_ja = AvailablePlaybooksSnapshot(
+        entries=(
+            PlaybookEntry(name="building_move", description="街の建物を一覧し、目的地を選んで移動します。"),
+        ),
+        language="ja",
+    )
+    rendered_ja = section.render(snapshot_ja)
+    assert rendered_ja is not None
+    # Verify exact Japanese header and phrasing (Zero Prompt Diff invariant)
+    assert rendered_ja.text == (
+        "## 利用可能なPlaybook\n\n"
+        "`run_playbook` スペルの `playbook` 引数に以下の名前を渡すと実行できる:\n\n"
+        "- **building_move**: 街の建物を一覧し、目的地を選んで移動します。"
+    )
+
+    # Verify English header and phrasing for en language
+    snapshot_en = AvailablePlaybooksSnapshot(
+        entries=(
+            PlaybookEntry(name="building_move", description="List buildings in the city, choose a destination, and move there."),
+        ),
+        language="en",
+    )
+    rendered_en = section.render(snapshot_en)
+    assert rendered_en is not None
+    assert rendered_en.text == (
+        "## Available Playbooks\n\n"
+        "Pass the name to the `playbook` argument of the `run_playbook` spell to execute:\n\n"
+        "- **building_move**: List buildings in the city, choose a destination, and move there."
+    )
+
+

@@ -32,8 +32,9 @@ import os
 import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
 LOGGER = logging.getLogger(__name__)
 
@@ -302,6 +303,511 @@ _RESPONSE_SCHEMA: Dict[str, Any] = {
 #: 4,096 は正常な応答を切らない。目的は暴走したときの被害の頭打ち — 旧型の
 #: 本番失敗は 1 回あたり 79 秒・数万トークンを焼いていた。
 _MAX_OUTPUT_TOKENS = 4096
+
+
+# ---------------------------------------------------------------------------
+# 送る中身がモデルに入るかの見積もり
+# ---------------------------------------------------------------------------
+#
+# docs/issues/sluice_skip_ignores_model_context.md: 固定の字数の上限
+# (:func:`get_max_span_chars`) は 429 (送信量の制限) を避ける役で、パンマーカー
+# から末尾までの字数しか見ていない。スルースが実際に送るのは、そのモデルに
+# 普段送っている会話の範囲まるごと (先頭の自己定義や部屋の様子を含む) と
+# 指示文なので、モデルを切り替えると「字数の判定は入る、送る中身はモデルに
+# 入らない」が起きる。LLM を呼ぶ直前に、組み立て終わった実物を測って比べる。
+#
+# 換算は文字 1 字 = 1 トークン (:func:`_estimate_input_tokens`)。うるさんの実測
+# (GPT-4o で、送った 290,404 字に先頭の自己定義を足して約 311,900 トークン) が
+# 1 字 ≒ 1 トークンだった。:func:`saiverse.token_estimator.estimate_messages_tokens`
+# (日本語 1 字 = 1.5 トークン) を使わないのは、1.5 で数えると普段の大きさの範囲
+# (上限 60,000 字の水位 + 先頭の自己定義) でも、128,000 トークンのモデルで
+# スルースが飛ばされうるから。
+#
+# 画像・音声・動画は、LLM クライアントが実際に送る形で数える (:func:`_media_rules`)。
+# クライアントは画像を全部は埋め込まない — 直近の数枚だけを埋め込み、古い画像は
+# ``[画像: URI] 要約`` の注記に置き換える (llm_clients/utils.py の
+# compute_allowed_attachment_keys と image_summary_note)。埋め込む画像を全部数えると、
+# 画像の多いペルソナでは普段の大きさの会話でもスルースが飛ばされ、「上限内の送信
+# では従来どおりスルースが走る」が崩れる。逆に注記を数えないと、実物より小さく
+# 数えて、判定を通ったスルースがプロバイダに拒まれる。
+#
+# 見積もりが実物より小さい向きの差は、判定を通ったスルースの失敗 → 畳みの停止
+# (本件の症状) に戻る。だから実物より小さく数える系統的な原因 — 応答の枠
+# (:func:`_response_token_reserve`)、答えの形の指定 (``response_schema``)、送らない
+# メディアの注記 — は見積もりに入れる。境界付近の小さな揺れは 1 割の余白で受ける
+# (docs/issues/sluice_skip_ignores_model_context.md「レビューの裁定」第一巡)。
+
+#: メッセージ 1 通ごとに足す分 (役割や区切りの書式)。
+_TOKENS_PER_MESSAGE = 4
+
+#: コンテキスト長のうち入力に使ってよい割合。残りの 1 割は見積もりの誤差の枠。
+_CONTEXT_USABLE_RATIO = 0.9
+
+#: 後から通す採取の会話以外の部分に足す余白。指示文は「N 通」の件数を文面に
+#: 含むので、空のチャンクで組んだ見積もりより件数の桁数ぶん長くなる。
+_CAPTURE_COUNT_DIGITS_SLACK = 10
+
+#: 送らないメディア 1 件の注記に載る要約を、保存済みの要約が無いときに数える
+#: 字数。保存済みの要約があればその実際の字数で数える (:func:`_media_note_tokens`)
+#: — 「300文字以内」は要約を作るときの指示で、保存済みの要約は切り詰めずに
+#: 注記に載るので、300 字を超えることがある (レビュー第二巡の 2)。保存済みの
+#: 要約が無ければクライアントはその場で作る (saiverse/media_summary.py が画像・
+#: 音声・動画とも「300文字以内」と指示して作る)。見積もりでは要約を生成しない
+#: ので、その指示の上限で数える。
+_UNSAVED_MEDIA_SUMMARY_CHARS = 300
+
+#: 注記の書式の固定部分の字数。いちばん長いのは gemini.py の画像の注記
+#: ``[画像参照のみ: `` (9 字) + ``] `` (2 字) で、本文との区切りの改行 (1 字) を
+#: 足すと 12 字。OpenAI 互換の画像対応モデルは注記を別の部品として足すので、
+#: 部品の区切りの分を見て 16 字にする。要約が取れないときの代わりの文言
+#: (``(要約を取得できませんでした)``、15 字) は 300 字に収まる。
+_MEDIA_NOTE_FORMAT_CHARS = 16
+
+
+class SluiceInputTooLargeError(RuntimeError):
+    """送る中身の見積もりが、使うモデルに一度に送れる量を超えている。
+
+    LLM を呼ぶ前に送出する (呼べばプロバイダがコンテキスト長の超過で拒む)。
+    定常のスルースでは run_metabolism がこれを量による飛ばし (``skipped_cold``)
+    と同じ扱いにし、後から通す採取ではジョブの失敗 (``input_too_large``) になる。
+    ``response_reserve_tokens`` は上限を出すときにコンテキスト長から引いた応答の
+    枠 (:func:`_response_token_reserve`)。
+    """
+
+    def __init__(
+        self,
+        model: str,
+        estimated_tokens: int,
+        limit_tokens: int,
+        response_reserve_tokens: int = _MAX_OUTPUT_TOKENS,
+    ) -> None:
+        self.model = model
+        self.estimated_tokens = estimated_tokens
+        self.limit_tokens = limit_tokens
+        self.response_reserve_tokens = response_reserve_tokens
+        super().__init__(
+            f"sluice input does not fit the model context (model={model}, "
+            f"estimated={estimated_tokens} tokens > limit={limit_tokens} tokens, "
+            f"response_reserve={response_reserve_tokens} tokens)"
+        )
+
+
+#: メッセージの役割の分類 (:func:`_role_class`)。クライアントのメディアの扱いは
+#: system / user / それ以外 の三つで分かれる。
+_ROLE_SYSTEM = "system"
+_ROLE_USER = "user"
+_ROLE_OTHER = "other"
+_ALL_ROLES: FrozenSet[str] = frozenset({_ROLE_SYSTEM, _ROLE_USER, _ROLE_OTHER})
+_NON_SYSTEM_ROLES: FrozenSet[str] = frozenset({_ROLE_USER, _ROLE_OTHER})
+_USER_ROLE_ONLY: FrozenSet[str] = frozenset({_ROLE_USER})
+_NO_ROLES: FrozenSet[str] = frozenset()
+
+
+class _MediaRules(NamedTuple):
+    """そのモデルの LLM クライアントが、``metadata`` のメディアをどう送るか。
+
+    役割は :func:`_role_class` の三分類で持つ。画像 1 枚の行き先は次の順で決まる:
+    枠の内側で、埋め込む役割なら埋め込み (画像 1 枚の見積もり)。そうでなく、注記に
+    する役割なら注記 (:func:`_media_note_tokens`)。どちらでもなければ送られない。
+    """
+
+    #: 直近の画像を何枚まで埋め込むか (None = 無制限)。枠は新しいメッセージから
+    #: 順に埋まる。``__visual_context__`` のメッセージの画像は枠を使わず、常に
+    #: 枠の内側 (llm_clients/utils.py の compute_allowed_attachment_keys と、同じ
+    #: 規則を持つ gemini.py の _convert_messages)。
+    image_limit: Optional[int]
+    #: 画像が枠を使う役割。
+    image_limit_roles: FrozenSet[str]
+    #: 枠の内側の画像を埋め込む役割。
+    image_embed_roles: FrozenSet[str]
+    #: 埋め込まない画像を注記に置き換える役割。
+    image_note_roles: FrozenSet[str]
+    #: 音声を注記に置き換える役割 (空 = 注記にしない)。
+    audio_note_roles: FrozenSet[str]
+    #: 動画を注記に置き換える役割 (空 = 注記にしない)。
+    video_note_roles: FrozenSet[str]
+
+
+def _role_class(role: Any) -> str:
+    """メッセージの役割を system / user / other に分ける。
+
+    ``host`` (OpenAI 互換・Anthropic・xAI は system として扱い、Gemini は model
+    として扱う) と ``tool`` は other にする。どのクライアントでも、other として
+    数えた結果は実物と同じか、実物より多い — 表 (:func:`_media_rules`) で other の
+    画像を送らない xAI は host と tool の画像も送らず、other の画像を送る
+    クライアントでは、host と tool の画像は同じ扱いか、送られない。
+    """
+    if role == "system":
+        return _ROLE_SYSTEM
+    if role == "user":
+        return _ROLE_USER
+    return _ROLE_OTHER
+
+
+def _media_rules(model: str) -> _MediaRules:
+    """そのモデルの LLM クライアントのメディアの扱い (:class:`_MediaRules`)。
+
+    クライアントは llm_clients/factory.py の get_llm_client が、モデル設定の
+    ``protocol`` (無ければ ``provider`` からの読み替え) で選ぶ。その選び方と、
+    画像に対応するかの判定 (設定の ``supports_images``、無ければ provider が
+    gemini のときだけ対応) は factory の関数をそのまま使う — 見積もりが
+    クライアントと別の規則を持たないため。
+
+    枚数の上限は ``SAIVERSE_<名前>_ATTACHMENT_LIMIT`` →
+    ``SAIVERSE_ATTACHMENT_LIMIT`` → 既定 4 (llm_clients/utils.py の
+    parse_attachment_limit)。各クライアントのコードで確かめた対応
+    (2026-09-17。「注記」は ``[画像: URI] 要約`` などの文字に置き換えること、
+    「送らない」は画像も注記も載らないこと):
+
+    - ``openai_compat`` (OpenAIClient → openai_message_preparer.py): 上限は
+      OPENAI。factory が設定の ``max_image_embeds`` を正の整数のときだけ渡し、
+      それが環境変数より優先される。全役割の画像が枠を使う。埋め込むのは画像
+      対応のモデルの user の画像だけで、それ以外 (枠の外・user 以外・画像非対応
+      のモデル) は全役割で注記。
+    - ``openai_codex`` (OpenAICodexClient → openai_message_preparer.py): 上限は
+      OPENAI (factory が ``max_image_embeds`` を渡さないので設定は効かない)。
+      役割の扱いは openai_compat と同じ。
+    - ``nvidia_nim`` (NvidiaNIMClient → openai_message_preparer.py): 上限と
+      役割の扱いは openai_compat と同じ (factory が設定の ``max_image_embeds``
+      を正の整数のときだけ渡し、それが環境変数より優先される)。構造化出力の
+      生 HTTP の経路も、会話と同じ組み立て (OpenAIClient._prepare_messages)
+      を通る。
+    - ``anthropic_native`` (AnthropicClient → anthropic_request_builder.py):
+      上限は ANTHROPIC。設定の ``max_image_embeds`` が整数ならそのまま使う (0 なら
+      埋め込まない)。system のメッセージは先に抜かれるので、その画像は枠を使わず
+      送らない。埋め込むのは画像対応のモデルの user の画像だけで、それ以外の
+      system 以外は注記。
+    - ``gemini_native`` (gemini.py の _convert_messages): 上限は GEMINI (設定の
+      ``max_image_embeds`` は読まない)。画像非対応のモデルは画像を集めないので、
+      画像も注記も送らない。画像対応のモデルでは全役割の画像が枠を使い、system
+      の画像は送らず、それ以外は役割によらず枠の内側を埋め込み、枠の外を注記。
+      音声・動画は設定の ``supports_audio`` / ``supports_video`` が真なら埋め込み
+      (その量はここでは数えない)、偽なら system 以外で注記。
+    - ``xai_native`` (xai.py の _build_xai_messages): 上限は XAI (設定の
+      ``max_image_embeds`` は読まない)。全役割の画像が枠を使う。画像対応のモデル
+      の user の画像だけを、枠の内側なら埋め込み、枠の外なら注記。user 以外の
+      画像と、画像非対応のモデルの画像は送らない。
+    - ``ollama_compat`` (OllamaClient): 画像は送らない (メタデータの画像を読む
+      コードが無い)。
+    - それ以外の protocol は factory がクライアントを作れない (ValueError)。
+      送られない組み合わせなので、ここでは openai_compat と同じ扱いにしておく。
+
+    音声・動画は、Gemini 以外のクライアントでは基底の
+    ``LLMClient._inject_unsupported_media_summaries`` が全役割で注記にする
+    (Gemini 以外は音声・動画に対応しない)。
+    """
+    from llm_clients.factory import _resolve_protocol, _supports_images
+    from llm_clients.utils import parse_attachment_limit
+    from saiverse.model_configs import get_model_config
+
+    config = get_model_config(model)
+    # factory の呼び出し元 (persona/core.py・saiverse/persona_model_selection.py)
+    # が渡す provider と同じ読み方 (saiverse.model_configs.get_model_provider の既定)。
+    provider = str(config.get("provider", "ollama"))
+    protocol = _resolve_protocol(provider, config)
+    supports_images = _supports_images(provider, config)
+    configured = config.get("max_image_embeds")
+
+    if protocol == "anthropic_native":
+        return _MediaRules(
+            image_limit=(
+                max(configured, 0) if isinstance(configured, int)
+                else parse_attachment_limit("ANTHROPIC")
+            ),
+            image_limit_roles=_NON_SYSTEM_ROLES,
+            image_embed_roles=_USER_ROLE_ONLY if supports_images else _NO_ROLES,
+            image_note_roles=_NON_SYSTEM_ROLES,
+            audio_note_roles=_ALL_ROLES,
+            video_note_roles=_ALL_ROLES,
+        )
+    if protocol == "gemini_native":
+        image_roles = _NON_SYSTEM_ROLES if supports_images else _NO_ROLES
+        return _MediaRules(
+            image_limit=parse_attachment_limit("GEMINI"),
+            image_limit_roles=_ALL_ROLES,
+            image_embed_roles=image_roles,
+            image_note_roles=image_roles,
+            audio_note_roles=(
+                _NO_ROLES if config.get("supports_audio") else _NON_SYSTEM_ROLES
+            ),
+            video_note_roles=(
+                _NO_ROLES if config.get("supports_video") else _NON_SYSTEM_ROLES
+            ),
+        )
+    if protocol == "xai_native":
+        image_roles = _USER_ROLE_ONLY if supports_images else _NO_ROLES
+        return _MediaRules(
+            image_limit=parse_attachment_limit("XAI"),
+            image_limit_roles=_ALL_ROLES,
+            image_embed_roles=image_roles,
+            image_note_roles=image_roles,
+            audio_note_roles=_ALL_ROLES,
+            video_note_roles=_ALL_ROLES,
+        )
+    if protocol == "ollama_compat":
+        return _MediaRules(
+            image_limit=0,
+            image_limit_roles=_ALL_ROLES,
+            image_embed_roles=_NO_ROLES,
+            image_note_roles=_NO_ROLES,
+            audio_note_roles=_ALL_ROLES,
+            video_note_roles=_ALL_ROLES,
+        )
+    return _MediaRules(
+        image_limit=(
+            configured
+            if protocol in ("openai_compat", "nvidia_nim")
+            and isinstance(configured, int) and configured > 0
+            else parse_attachment_limit("OPENAI")
+        ),
+        image_limit_roles=_ALL_ROLES,
+        image_embed_roles=_USER_ROLE_ONLY if supports_images else _NO_ROLES,
+        image_note_roles=_ALL_ROLES,
+        audio_note_roles=_ALL_ROLES,
+        video_note_roles=_ALL_ROLES,
+    )
+
+
+def _metadata_media_items(metadata: Any, kind: str) -> List[Dict[str, Any]]:
+    """メッセージの ``metadata`` に付いたメディアのうち、クライアントが扱う種類
+    ``kind`` (``image`` / ``audio`` / ``video``) の項目。
+
+    クライアントがメディアを集める関数 (saiverse/media_utils.py の
+    iter_image_media / iter_audio_media / iter_video_media) をそのまま使う。
+    返る項目は ``uri`` (注記に載る URI — 元の ``uri``、無ければファイルの場所)・
+    ``path`` (ファイルの場所)・``mime_type`` を持つ。
+
+    これらの関数はファイルが実在しない項目を落とす。どのクライアントも同じ
+    関数の結果から、埋め込みの枠を数え、埋め込みか注記を作る (openai_message_preparer.py
+    の scan_message_metadata、anthropic_request_builder.py の
+    _collect_attachment_state、gemini.py の _convert_messages、xai.py の
+    _build_xai_messages、基底の LLMClient._inject_unsupported_media_summaries)
+    ので、落ちた項目は実物でも埋め込みにも注記にもならず、枠も使わない —
+    見積もりと実物で一致する。副作用は、``saiverse://`` の URI の置き場のフォルダ
+    を無ければ作ること (resolve_media_uri) で、クライアントが直後に同じことをする。
+    """
+    from saiverse.media_utils import (
+        iter_audio_media,
+        iter_image_media,
+        iter_video_media,
+    )
+
+    if kind == "image":
+        return iter_image_media(metadata)
+    if kind == "audio":
+        return iter_audio_media(metadata)
+    return iter_video_media(metadata)
+
+
+def _media_note_tokens(item: Dict[str, Any]) -> int:
+    """送らないメディア 1 件の代わりにクライアントが足す注記の見積もり。
+
+    ``item`` は :func:`_metadata_media_items` の項目。注記は ``[画像: URI] 要約``
+    の形 (llm_clients/utils.py の image_summary_note・audio_summary_note・
+    video_summary_note と、gemini.py の同じ形の注記)。
+    見積もり = 書式の固定部分 (:data:`_MEDIA_NOTE_FORMAT_CHARS`) + URI の字数 +
+    要約の字数。URI はクライアントと同じく項目の ``uri``。要約は、クライアントが
+    読むのと同じ保存済みの要約 (saiverse/media_utils.py の get_media_summary —
+    ensure_*_summary が最初に読むもの) があればその字数、無ければ
+    :data:`_UNSAVED_MEDIA_SUMMARY_CHARS`。要約は生成しない。
+    """
+    from saiverse.media_utils import get_media_summary
+
+    uri = item.get("uri") or item.get("path") or ""
+    summary_chars = _UNSAVED_MEDIA_SUMMARY_CHARS
+    path = item.get("path")
+    if path is not None:
+        try:
+            summary = get_media_summary(Path(path))
+        except (OSError, ValueError):
+            summary = None
+        if summary:
+            summary_chars = len(summary)
+    return _MEDIA_NOTE_FORMAT_CHARS + len(str(uri)) + summary_chars
+
+
+def _response_schema_tokens(response_schema: Optional[Dict[str, Any]]) -> int:
+    """答えの形の指定 (``response_schema``) が入力として消費する量の見積もり。
+
+    指定はどのクライアントでも入力として送られる (OpenAI 互換の json_object
+    モードは指定の全文を system メッセージとして足し、Anthropic の思考なしは
+    ツールの定義として、ほかは構造化出力の指定として送る)。
+    ``json.dumps(指定, ensure_ascii=False)`` の字数を 1 字 1 トークンで数える —
+    キーや記号の英字は実際には 1 字あたり 1 トークンより少ないので、その差が
+    json_object モードの字下げと前置きの文の分を上回り、多めの側に倒れる。
+    """
+    if response_schema is None:
+        return 0
+    return len(json.dumps(response_schema, ensure_ascii=False))
+
+
+def _estimate_input_tokens(
+    messages: List[Dict[str, Any]],
+    model: str,
+    *,
+    response_schema: Optional[Dict[str, Any]] = None,
+) -> int:
+    """モデル ``model`` へ送るメッセージ列 (と答えの形の指定) の入力トークンの見積もり。
+
+    文字 1 字 = 1 トークン (換算の根拠はこの節の冒頭のコメント)。
+    文字は ``content`` が文字列ならその長さ、部品の列ならテキスト部品の長さ。
+    メッセージ 1 通ごとに 4 トークンを足す。``response_schema`` を渡すと、その
+    字数も足す (:func:`_response_schema_tokens`)。
+
+    ``metadata`` のメディアは、クライアントが実際に送る形で数える
+    (:func:`_media_rules`)。項目はクライアントと同じ関数で集める
+    (:func:`_metadata_media_items` — ファイルが実在しない項目は実物と同じく
+    枠も使わず、数えない)。
+
+    - 画像: 埋め込む画像は 1 枚を :func:`saiverse.token_estimator.estimate_image_tokens`
+      (モデルの provider ごとの値) で数える。埋め込む枚数は、直近の上限枚数
+      (枠は新しいメッセージから順に埋まる) と、枠を使わない ``__visual_context__``
+      の画像。埋め込まない画像 (枠の外・画像非対応のモデル・クライアントによっては
+      user 以外のメッセージ) は、クライアントが注記に置き換えるなら注記 1 件
+      (:func:`_media_note_tokens`) で数え、送らないなら数えない。
+    - 音声・動画: 注記に置き換えるクライアントでは 1 件ごとに注記で数える。
+      埋め込むクライアント (Gemini で設定が対応のとき) の音声・動画の量は数えない。
+    - ``content`` の部品の列にすでに入っている画像部品: 全部数える。これは
+      組み立て済みの部品で、OpenAI 互換のクライアントは上限にも画像対応の設定
+      にも関係なくそのまま送る (openai_message_preparer.py は ``metadata`` に
+      画像の無いメッセージの ``content`` を触らない)。保存された会話から組む
+      メッセージはこの形を作らないので、多めの側に倒しておく。
+    """
+    from saiverse.model_configs import get_model_config
+    from saiverse.token_estimator import estimate_image_tokens
+
+    model = str(model)
+    image_tokens = estimate_image_tokens(
+        str(get_model_config(model).get("provider", "ollama")),
+    )
+    rules = _media_rules(model)
+    remaining_slots = rules.image_limit  # 枠の残り (None = 無制限)
+    # 画像を埋め込みにも注記にもしないクライアント (Ollama・画像非対応の Gemini と
+    # xAI) では、画像の項目を集めない — 枠がどう埋まっても数える量は 0。
+    counts_images = bool(rules.image_embed_roles or rules.image_note_roles)
+    total = _response_schema_tokens(response_schema)
+    # 枠は新しいメッセージから順に埋まるので、末尾から数える。
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        total += _TOKENS_PER_MESSAGE
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    part_type = part.get("type")
+                    if part_type == "text":
+                        total += len(str(part.get("text") or ""))
+                    elif part_type in ("image_url", "image"):
+                        total += image_tokens
+                elif isinstance(part, str):
+                    total += len(part)
+        metadata = msg.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        role = _role_class(msg.get("role"))
+        uses_slots = (
+            role in rules.image_limit_roles
+            and not metadata.get("__visual_context__")
+        )
+        images = _metadata_media_items(metadata, "image") if counts_images else []
+        for item in images:
+            within_limit = True
+            if uses_slots and remaining_slots is not None:
+                within_limit = remaining_slots > 0
+                remaining_slots = max(remaining_slots - 1, 0)
+            if within_limit and role in rules.image_embed_roles:
+                total += image_tokens
+            elif role in rules.image_note_roles:
+                total += _media_note_tokens(item)
+        if role in rules.audio_note_roles:
+            for item in _metadata_media_items(metadata, "audio"):
+                total += _media_note_tokens(item)
+        if role in rules.video_note_roles:
+            for item in _metadata_media_items(metadata, "video"):
+                total += _media_note_tokens(item)
+    return total
+
+
+def _response_token_reserve(llm_client: Any = None) -> int:
+    """上限を出すときにコンテキスト長から引く応答の枠 (トークン)。
+
+    = スルースの出力の上限 (:data:`_MAX_OUTPUT_TOKENS`) と、実際に使うクライアントが
+    リクエストに載せる応答の上限 (``LLMClient.response_token_limit``) の大きい方。
+    プロバイダは入力と応答の上限の合計をコンテキスト長と比べ、per-call の
+    ``max_output_tokens`` を守らないクライアント (Anthropic・OpenAI 互換など) は
+    自分の持つ上限を送るので、4,096 を引くだけでは実物より入る量を多く見積もる。
+    クライアントが無い (None) か、答えを持たない (上限を送らない・per-call を守る)
+    ときは :data:`_MAX_OUTPUT_TOKENS`。
+    """
+    limit_of = getattr(llm_client, "response_token_limit", None)
+    client_limit = limit_of() if callable(limit_of) else None
+    if (
+        isinstance(client_limit, int) and not isinstance(client_limit, bool)
+        and client_limit > _MAX_OUTPUT_TOKENS
+    ):
+        return client_limit
+    return _MAX_OUTPUT_TOKENS
+
+
+def _input_token_budget(
+    model: Optional[str],
+    *,
+    persona_id: Optional[str] = None,
+    llm_client: Any = None,
+) -> Optional[int]:
+    """そのモデルに一度に送ってよい入力の上限 (トークン)。
+
+    上限 = コンテキスト長の 9 割 − 応答の枠 (:func:`_response_token_reserve` —
+    ``llm_client`` は LLM を呼ぶのに使うクライアント)。モデルの設定が見つからず
+    コンテキスト長が引けないときは None — 判定をせずに従来どおり走らせ、
+    WARNING を残す。
+    """
+    from saiverse.model_configs import get_context_length
+
+    try:
+        context_length = get_context_length(str(model))
+    except (ValueError, TypeError):
+        LOGGER.warning(
+            "[sluice] model config for %r is unavailable; the input size check "
+            "against the model context is skipped (persona=%s)",
+            model, persona_id,
+        )
+        return None
+    return (
+        int(context_length * _CONTEXT_USABLE_RATIO)
+        - _response_token_reserve(llm_client)
+    )
+
+
+def _ensure_input_fits(
+    messages: List[Dict[str, Any]],
+    model: Optional[str],
+    *,
+    persona_id: Optional[str] = None,
+    llm_client: Any = None,
+    response_schema: Optional[Dict[str, Any]] = None,
+) -> None:
+    """送る中身の見積もりが上限を超えていたら :class:`SluiceInputTooLargeError`。
+
+    LLM を呼ぶ直前 (実際に使うモデルとクライアントが決まった後) に呼び、
+    ``llm_client`` にそのクライアント、``response_schema`` に generate へ渡す
+    答えの形の指定を渡す。モデル設定が引けないときは判定しない
+    (:func:`_input_token_budget`)。
+    """
+    limit = _input_token_budget(model, persona_id=persona_id, llm_client=llm_client)
+    if limit is None:
+        return
+    estimated = _estimate_input_tokens(
+        messages, str(model), response_schema=response_schema,
+    )
+    if estimated > limit:
+        raise SluiceInputTooLargeError(
+            str(model), estimated, limit,
+            response_reserve_tokens=_response_token_reserve(llm_client),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2044,7 +2550,9 @@ def _call_sluice_llm(
         "prompt": 注入プロンプト}``
 
     例外 (LLM エラー・出力不適合) はそのまま送出する — 呼び出し元が台帳の
-    mark_failed とゲート失敗 (退場停止) に写像する。
+    mark_failed とゲート失敗 (退場停止) に写像する。送る中身が実際に使う
+    モデルに入らないときは LLM を呼ばずに :class:`SluiceInputTooLargeError` を
+    送出する (run_metabolism はこれを量による飛ばしと同じ扱いにする)。
     """
     runtime = lifecycle.runtime
     persona_id = getattr(persona, "persona_id", None)
@@ -2135,6 +2643,15 @@ def _call_sluice_llm(
     # 走らせない。本物のコンテキスト超過を含むあらゆる失敗は送出し、呼び出し元の
     # 退場停止 → 次回再試行に乗る。
     messages = context_messages + [{"role": "user", "content": prompt}]
+    # 送る中身がそのモデルに入るか (docs/issues/sluice_skip_ignores_model_context.md)。
+    # 比べるのは実際に使うモデル (構造化出力の都合で差し替わった後) の上限で、
+    # 応答の枠はそのクライアントが送る上限、答えの形の指定も入力に数える。
+    # 入らなければ LLM を呼ばずに送出する — run_metabolism は量による飛ばしと
+    # 同じ扱いにする (範囲を記録して畳みを進める)。
+    _ensure_input_fits(
+        messages, execution_context.model_key, persona_id=persona_id,
+        llm_client=llm_client, response_schema=_RESPONSE_SCHEMA,
+    )
     result = llm_client.generate(
         messages,
         tools=[],
@@ -2279,6 +2796,9 @@ def run_sluice(
         :class:`SluiceStorageUnavailableError` を送出する (fail-closed)。
         1 通も見ないまま終わった回は :class:`SluiceEmptySeenSetError` を送出する
         (Codex 第八巡 修正 2 — 「最低 1 通は本人の目を通った」が完了の条件)。
+        送る中身が使うモデルに入らない回は LLM を呼ばずに
+        :class:`SluiceInputTooLargeError` を送出する (台帳は failed。呼び出し元の
+        run_metabolism は量による飛ばしと同じ扱いにする)。
     """
     def _skipped(reason: str) -> Dict[str, Any]:
         return {
@@ -2730,29 +3250,193 @@ def _capture_period_label(chunk_messages: List[Any]) -> Optional[str]:
 
 
 def _plan_capture_chunks(
-    messages: List[Any], max_chars: int,
+    messages: List[Any],
+    max_chars: int,
+    fit: Optional[Tuple[int, Callable[[Any, int], int]]] = None,
 ) -> List[List[Any]]:
     """メッセージ列を、A と同じ閾値以下のチャンク列に刻む (各チャンク最低 1 通)。
 
     貪欲法: 先頭から字数を積み、超える直前で切る。**1 通だけで閾値を超える
     メッセージは、その 1 通だけのチャンクにする** — メッセージより細かい単位は
     無く、飛ばすと範囲の縮めが進まなくなる (採取は冪等なので過大な 1 チャンクを
-    許す方が安全)。
+    許す方が安全)。1 通だけでモデルに入らないチャンクは、LLM を呼ぶ直前の比較
+    (:func:`_ensure_input_fits`) が止める。
+
+    ``fit`` は :func:`_capture_input_fit` の ``(会話に使える量, 1 通の数え方)``。
+    渡されると、会話の字数の閾値 (``max_chars``、429 を避ける固定の上限) とは
+    別に、写しの書式を含めた量がそのモデルに入る量を超える直前でも切る。
+    数え方はチャンク内の位置 (1 始まり) を受け取る — 機構モードの行番号
+    ``msg:N`` の桁が位置で変わるため。
     """
+    fit_limit = fit[0] if fit is not None else None
+    cost_of = fit[1] if fit is not None else None
     chunks: List[List[Any]] = []
     current: List[Any] = []
     current_chars = 0
+    current_cost = 0
     for msg in messages:
         chars = len(getattr(msg, "content", None) or "")
-        if current and current_chars + chars > max_chars:
+        cost = cost_of(msg, len(current) + 1) if cost_of is not None else 0
+        over_chars = current_chars + chars > max_chars
+        over_fit = fit_limit is not None and current_cost + cost > fit_limit
+        if current and (over_chars or over_fit):
             chunks.append(current)
             current = []
             current_chars = 0
+            current_cost = 0
+            cost = cost_of(msg, 1) if cost_of is not None else 0
         current.append(msg)
         current_chars += chars
+        current_cost += cost
     if current:
         chunks.append(current)
     return chunks
+
+
+def _capture_execution_context(persona: Any, model_key: Optional[str]) -> Any:
+    """後から通す採取で使う実行の身分証 (構造化出力の都合で差し替わる前)。
+
+    使用モデルの既定は本人のモデル。明示指定 (第二段 UI の選択肢) が来たとき
+    だけ差し替える (intent 決定 3 — 後から通す操作は明示の操作なので、モデルが
+    通常の会話と違ってよい)。実際に使うモデルは :func:`_select_capture_llm` が
+    ここから決める。
+    """
+    from sea.pulse_context import resolve_execution_context
+
+    execution_context = resolve_execution_context(persona, None)
+    if model_key and execution_context.model_key != model_key:
+        execution_context = execution_context.with_model(model_key)
+    return execution_context
+
+
+def _select_capture_llm(
+    lifecycle: Any, persona: Any, model_key: Optional[str],
+) -> Tuple[Any, Any]:
+    """後から通す採取で実際に使うクライアントと実行の身分証 (決め方の一本化)。
+
+    LLM 呼び出し (:func:`_call_capture_llm` / :func:`_call_mechanism_llm`) と
+    刻みの見積もり (:func:`_capture_input_fit`) が同じモデルとクライアントを見る
+    ために、決め方をここに揃える: 呼び出しと同じ ``runtime.select_llm_client``
+    (``needs_structured_output=True``) を通し、構造化出力に対応しないモデルが
+    軽量モデルへ差し替わったら、身分証も差し替わった後のモデルにする
+    (docs/issues/sluice_skip_ignores_model_context.md「レビューの裁定」第一巡の 4)。
+
+    接続を作る (``select_llm_client`` は接続を作り、llama.cpp のサーバーを必要なら
+    起動する) ので、LLM を呼ぶ実行の側だけが使う。見積もり (dry) は接続を作らない
+    :func:`_resolve_capture_model` を使う。
+
+    Returns:
+        ``(llm_client, execution_context)``。``lifecycle`` か runtime が無い呼び出し
+        は ``(None, 差し替え前の身分証)``。
+    """
+    execution_context = _capture_execution_context(persona, model_key)
+    runtime = getattr(lifecycle, "runtime", None)
+    if runtime is None:
+        return None, execution_context
+    node_def = SimpleNamespace(id="sluice_capture", memorize=None, speak=False)
+    llm_client, actual_model = runtime.select_llm_client(
+        node_def, persona, execution_context=execution_context,
+        needs_structured_output=True,
+    )
+    if actual_model != execution_context.model_key:
+        execution_context = execution_context.with_model(actual_model)
+    return llm_client, execution_context
+
+
+def _resolve_capture_model(
+    lifecycle: Any, persona: Any, model_key: Optional[str],
+) -> str:
+    """後から通す採取で実際に使うモデルを、接続を作らずに決める (見積もり用)。
+
+    規則は :func:`_select_capture_llm` と同じ — runtime の
+    ``resolve_llm_model`` (``select_llm_client`` と同じ規則で、構造化出力に対応
+    しないモデルを軽量モデルへ差し替える) を ``needs_structured_output=True`` で
+    通す。接続の作成・サーバーの起動・疎通の確認はしない (dry の「LLM ゼロ・
+    書き込みゼロ」— docs/issues/sluice_skip_ignores_model_context.md
+    「レビューの裁定」第二巡の 1)。``lifecycle`` か runtime が無い呼び出しは
+    差し替え前のモデル。
+    """
+    execution_context = _capture_execution_context(persona, model_key)
+    runtime = getattr(lifecycle, "runtime", None)
+    if runtime is None:
+        return str(execution_context.model_key)
+    return str(runtime.resolve_llm_model(
+        persona, execution_context=execution_context,
+        needs_structured_output=True,
+    ))
+
+
+def _capture_input_fit(
+    lifecycle: Any,
+    persona: Any,
+    *,
+    mode: str,
+    model_key: Optional[str],
+    dry: bool = False,
+) -> Optional[Tuple[int, Callable[[Any, int], int]]]:
+    """後から通す採取で、会話の写しに使える量 (トークン) と 1 通の数え方。
+
+    実行 (``dry=False``) では、モデルとクライアントを呼び出しと同じ決め方
+    (:func:`_select_capture_llm` — 接続を作る) で決める。そのチャンクの LLM
+    呼び出しが直後に同じ接続を使う。見積もり (``dry=True``) では、同じ規則で
+    モデルだけを接続を作らずに決め (:func:`_resolve_capture_model`)、接続が無い
+    ので応答の枠は :data:`_MAX_OUTPUT_TOKENS` で数える — 応答の枠が大きい
+    クライアントでは、実行の刻みが見積もりより細かくなりうる。
+    会話に使える量 = そのモデルの上限 (:func:`_input_token_budget` — 応答の
+    枠はそのクライアントが送る上限) − 会話以外の部分の見積もり。会話以外の部分は、
+    本人モードなら前置き (:func:`_build_capture_preamble`) と指示文と答えの形の
+    指定 (:data:`_RESPONSE_SCHEMA`)、機構モードなら空のチャンクで組んだ指示文
+    (:func:`_build_mechanism_prompt`) と候補の形の指定 (:data:`_CANDIDATE_SCHEMA`)。
+    どちらも件数の桁の余白 (:data:`_CAPTURE_COUNT_DIGITS_SLACK`) を足す。
+    ``lifecycle`` が無いときは、差し替え前のモデルと既定の応答の枠で見積もる。
+
+    1 通の数え方は、LLM を呼ぶ直前の見積もり (:func:`_estimate_input_tokens`) が
+    その 1 通に数える量以上になるようにする — 刻んだチャンク (2 通以上) が
+    呼び出し直前の比較を必ず通るため。本人モードは本文の字数 + 1 通ごとの 4、
+    機構モードは写しの一行 (``[msg:N] 日付 名前: 本文``) と改行の字数。
+
+    モデル設定が引けないときは None (刻みは固定の字数の上限だけで決まる)。
+    """
+    if dry:
+        llm_client = None
+        model = _resolve_capture_model(lifecycle, persona, model_key)
+    else:
+        llm_client, execution_context = _select_capture_llm(
+            lifecycle, persona, model_key,
+        )
+        model = str(execution_context.model_key)
+    persona_id = getattr(persona, "persona_id", None)
+    limit = _input_token_budget(
+        model, persona_id=persona_id, llm_client=llm_client,
+    )
+    if limit is None:
+        return None
+
+    if mode == "persona":
+        instruction = _build_capture_instruction(lifecycle, persona, 0)
+        fixed = _estimate_input_tokens(
+            [
+                {"role": "system", "content": _build_capture_preamble(persona)},
+                {"role": "user", "content": instruction["prompt"]},
+            ],
+            model,
+            response_schema=_RESPONSE_SCHEMA,
+        )
+
+        def cost_of(msg: Any, index: int) -> int:
+            return len(getattr(msg, "content", None) or "") + _TOKENS_PER_MESSAGE
+    else:
+        persona_name = _mechanism_persona_name(persona)
+        fixed = _estimate_input_tokens(
+            [{"role": "user", "content": _build_mechanism_prompt(persona_name, [])}],
+            model,
+            response_schema=_CANDIDATE_SCHEMA,
+        )
+
+        def cost_of(msg: Any, index: int) -> int:
+            return len(_mechanism_transcript_line(persona_name, msg, index)) + 1
+
+    return limit - fixed - _CAPTURE_COUNT_DIGITS_SLACK, cost_of
 
 
 def _read_span_messages(persona: Any, span: Dict[str, Any]) -> Optional[List[Any]]:
@@ -2779,8 +3463,27 @@ def _read_span_messages(persona: Any, span: Dict[str, Any]) -> Optional[List[Any
         )
 
 
-def plan_sluice_capture(persona: Any) -> Dict[str, Any]:
+def plan_sluice_capture(
+    persona: Any,
+    *,
+    mode: str = "mechanism",
+    model_key: Optional[str] = None,
+    lifecycle: Any = None,
+) -> Dict[str, Any]:
     """後から通す採取の見積もり (dry)。LLM ゼロ・書き込みゼロ。
+
+    接続を作らない: LLM の接続の作成・llama.cpp のサーバーの起動・疎通の確認・
+    ファイルやディレクトリの作成をしない (docs/issues/sluice_skip_ignores_model_context.md
+    「レビューの裁定」第二巡の 1)。
+
+    ``mode`` と ``model_key`` は実行 (:func:`run_sluice_capture`) に渡すのと同じ
+    値を渡す — 刻みの大きさは使うモデルと判断の主体で変わる
+    (:func:`_capture_input_fit`)。既定は実行の既定 (機構モード・本人のモデル)。
+    ``lifecycle`` は、実行の ``runtime.select_llm_client`` と同じ規則で実際に使う
+    モデル (構造化出力の都合で軽量モデルへ差し替わった後) を接続を作らずに決める
+    のと (runtime の ``resolve_llm_model``)、本人モードの指示文に載る約束の一覧を
+    読むのに使う。None (runtime の無い呼び出し) なら、差し替え前のモデルで、
+    約束の一覧なしで見積もる — 差し替わるモデルでは実行側の刻みと違う数になりうる。
 
     Returns:
         ``{"spans": [{id, start_message_id, end_message_id, created_at,
@@ -2788,16 +3491,31 @@ def plan_sluice_capture(persona: Any) -> Dict[str, Any]:
         "estimated_chunks": int, "unreadable_spans": int,
         "max_span_chars": int}``。件数・チャンク数は実行部と同じ読み
         (:func:`_read_span_messages`) と同じ刻み (:func:`_plan_capture_chunks`)
-        から数える — 表示と実走が違う数を言わない。
+        から数える。チャンク数は**見積もった時点の状態での数**で、実行の刻みの方が
+        細かくなりうる理由が二つある。一つは、本人モードでは採取でコア記憶や手帳が
+        増えると指示文が伸び、実行はチャンクごとにその時点の状態で刻み直すこと
+        (状態が変わらなければ一致する)。もう一つは、見積もりは接続を作らないので
+        応答の枠を 4,096 (:data:`_MAX_OUTPUT_TOKENS`) で数え、実行はそのクライアントが
+        送る応答の上限で数えること — 応答の枠が大きいクライアント (Anthropic、
+        ``max_tokens`` を送る OpenAI 互換) では実行の刻みが見積もりより細かくなりうる。
+        ``max_span_chars`` は見積もりで使った刻みの大きさ (固定の字数の上限と、
+        そのモデルに入る量の小さい方)。
     """
     from sai_memory.memory.storage import list_sluice_skipped_spans
 
+    if mode not in CAPTURE_MODES:
+        raise ValueError(
+            f"unknown capture mode: {mode!r} (expected one of {CAPTURE_MODES})"
+        )
     adapter = getattr(persona, "sai_memory", None)
     if adapter is None or not getattr(adapter, "is_ready", lambda: False)():
         raise SluiceStorageUnavailableError(
             "persona memory storage is not ready; cannot plan the capture"
         )
     max_chars = get_max_span_chars()
+    fit = _capture_input_fit(
+        lifecycle, persona, mode=mode, model_key=model_key, dry=True,
+    )
     with adapter._db_lock:
         spans = list_sluice_skipped_spans(adapter.conn)
 
@@ -2814,7 +3532,7 @@ def plan_sluice_capture(persona: Any) -> Dict[str, Any]:
                 "readable": False,
             })
             continue
-        chunks = _plan_capture_chunks(messages, max_chars)
+        chunks = _plan_capture_chunks(messages, max_chars, fit)
         target_messages += len(messages)
         estimated_chunks += len(chunks)
         spans_out.append({
@@ -2826,7 +3544,44 @@ def plan_sluice_capture(persona: Any) -> Dict[str, Any]:
         "target_messages": target_messages,
         "estimated_chunks": estimated_chunks,
         "unreadable_spans": unreadable,
-        "max_span_chars": max_chars,
+        "max_span_chars": (
+            max_chars if fit is None else max(0, min(max_chars, fit[0]))
+        ),
+    }
+
+
+def _build_capture_instruction(
+    lifecycle: Any, persona: Any, message_count: int,
+) -> Dict[str, Any]:
+    """本人モードの指示文 (末尾の注入プロンプト) と、その時点の照合値を組む。
+
+    LLM 呼び出し (:func:`_call_capture_llm`) と刻みの見積もり
+    (:func:`_capture_input_fit`) が同じ組み方を使う — 別々に組むと、見積もりが
+    実物より短くなって刻んだチャンクが呼び出し直前の比較で止まる。
+
+    Returns:
+        ``{"prompt": str, "offered_activities": {id: name},
+        "offered_tasks": {task_id: revision}, "core_snapshot": {core_id: hash}}``
+    """
+    activities = _list_open_activities(persona)
+    open_tasks = _list_open_tasks(lifecycle, persona)
+    core_memories, core_total_chars = _read_core_state(persona)
+    today_memos = _list_today_memos(persona, activities)
+    prompt = _build_sluice_prompt(
+        persona, activities, open_tasks, core_memories, core_total_chars,
+        span_new_count=None, today_memos=today_memos,
+        scope_sentence=_capture_scope_sentence(message_count),
+    )
+    return {
+        "prompt": prompt,
+        "offered_activities": dict(activities),
+        "offered_tasks": {
+            str(t.get("task_id")): t.get("revision")
+            for t in open_tasks if t.get("task_id")
+        },
+        "core_snapshot": {
+            str(mem.id): _core_content_hash(mem.content) for mem in core_memories
+        },
     }
 
 
@@ -2842,36 +3597,26 @@ def _call_capture_llm(
     定常の :func:`_call_sluice_llm` と違い、文脈は提示窓ではなくチャンクの
     メッセージから直接組む。anchor には触らない — この呼び出しは会話の
     Session prefix を温めるものではないので、touch すると温かさの偽装になる。
-    例外 (LLM エラー・出力不適合) はそのまま送出する。
+    例外 (LLM エラー・出力不適合) はそのまま送出する。送る中身が実際に使う
+    モデルに入らないときは LLM を呼ばずに :class:`SluiceInputTooLargeError` を
+    送出する (刻みは :func:`_capture_input_fit` で入る量に合わせてあるので、
+    ここで止まるのは 1 通だけで入らないメッセージを含むチャンク)。
     """
     runtime = lifecycle.runtime
     persona_id = getattr(persona, "persona_id", None)
 
-    from sea.pulse_context import resolve_execution_context
-    execution_context = resolve_execution_context(persona, None)
-    if model_key and execution_context.model_key != model_key:
-        # 使用モデルの既定は本人のモデル。明示指定 (第二段 UI の選択肢) が
-        # 来たときだけ差し替える (intent 決定 3 — 後から通す操作は明示の
-        # 操作なので、モデルが通常の会話と違ってよい)。
-        execution_context = execution_context.with_model(model_key)
-
-    activities = _list_open_activities(persona)
-    offered_activities = dict(activities)
-    open_tasks = _list_open_tasks(lifecycle, persona)
-    offered_tasks: Dict[str, Optional[int]] = {
-        str(t.get("task_id")): t.get("revision")
-        for t in open_tasks if t.get("task_id")
-    }
-    core_memories, core_total_chars = _read_core_state(persona)
-    core_snapshot: Dict[str, str] = {
-        str(mem.id): _core_content_hash(mem.content) for mem in core_memories
-    }
-    today_memos = _list_today_memos(persona, activities)
-    prompt = _build_sluice_prompt(
-        persona, activities, open_tasks, core_memories, core_total_chars,
-        span_new_count=None, today_memos=today_memos,
-        scope_sentence=_capture_scope_sentence(len(chunk_messages)),
+    # 刻みの見積もり (_capture_input_fit) と同じ決め方でモデルとクライアントを決める。
+    llm_client, execution_context = _select_capture_llm(
+        lifecycle, persona, model_key,
     )
+
+    instruction = _build_capture_instruction(
+        lifecycle, persona, len(chunk_messages),
+    )
+    prompt = instruction["prompt"]
+    offered_activities = instruction["offered_activities"]
+    offered_tasks = instruction["offered_tasks"]
+    core_snapshot = instruction["core_snapshot"]
 
     # 会話の写し。役割は保存値のまま ('model' だけ通称 'assistant' へ —
     # saiverse_memory/adapter.py の提示時と同じ写像)。実会話フィルタ
@@ -2892,14 +3637,10 @@ def _call_capture_llm(
         + [{"role": "user", "content": prompt}]
     )
 
-    node_def = SimpleNamespace(id="sluice_capture", memorize=None, speak=False)
-    llm_client, actual_model = runtime.select_llm_client(
-        node_def, persona, execution_context=execution_context,
-        needs_structured_output=True,
+    _ensure_input_fits(
+        messages, execution_context.model_key, persona_id=persona_id,
+        llm_client=llm_client, response_schema=_RESPONSE_SCHEMA,
     )
-    if actual_model != execution_context.model_key:
-        execution_context = execution_context.with_model(actual_model)
-
     result = llm_client.generate(
         messages,
         tools=[],
@@ -3244,6 +3985,34 @@ _CANDIDATE_SCHEMA: Dict[str, Any] = {
 _CANDIDATE_LIST_FIELDS = ("want_memos", "did_memos")
 
 
+def _mechanism_persona_name(persona: Any) -> str:
+    """機構モードの写しと指示文に出すペルソナの名前。"""
+    return (
+        getattr(persona, "persona_name", None)
+        or getattr(persona, "persona_id", None)
+        or "ペルソナ"
+    )
+
+
+def _mechanism_transcript_line(persona_name: str, msg: Any, index: int) -> str:
+    """機構モードの会話の写しの一行 (``[msg:N] YYYY-MM-DD 名前: 本文``)。
+
+    指示文の組み立て (:func:`_build_mechanism_prompt`) と刻みの見積もり
+    (:func:`_capture_input_fit`) が同じ一行を使う。
+    """
+    role = getattr(msg, "role", None)
+    speaker = persona_name if role in ("model", "assistant") else "ユーザー"
+    date_label = ""
+    try:
+        ts = int(getattr(msg, "created_at", 0) or 0)
+        if ts > 0:
+            date_label = datetime.fromtimestamp(ts).strftime("%Y-%m-%d") + " "
+    except (TypeError, ValueError, OverflowError, OSError):
+        date_label = ""
+    content = (getattr(msg, "content", None) or "").strip()
+    return f"[msg:{index}] {date_label}{speaker}: {content}"
+
+
 def _build_mechanism_prompt(
     persona_name: str, chunk_messages: List[Any],
 ) -> str:
@@ -3254,20 +4023,10 @@ def _build_mechanism_prompt(
     (event_date) は根拠のメッセージの保存時刻から**機械が刻印**するので、
     日付を LLM に申告させる欄は無い。
     """
-    lines: List[str] = []
-    for index, msg in enumerate(chunk_messages, start=1):
-        role = getattr(msg, "role", None)
-        speaker = persona_name if role in ("model", "assistant") else "ユーザー"
-        date_label = ""
-        try:
-            ts = int(getattr(msg, "created_at", 0) or 0)
-            if ts > 0:
-                date_label = datetime.fromtimestamp(ts).strftime("%Y-%m-%d") + " "
-        except (TypeError, ValueError, OverflowError, OSError):
-            date_label = ""
-        content = (getattr(msg, "content", None) or "").strip()
-        lines.append(f"[msg:{index}] {date_label}{speaker}: {content}")
-    transcript = "\n".join(lines)
+    transcript = "\n".join(
+        _mechanism_transcript_line(persona_name, msg, index)
+        for index, msg in enumerate(chunk_messages, start=1)
+    )
     return (
         "これは、過去の会話の記録から、手帳のメモの候補を拾う整理の作業です。\n"
         "あなたはこの会話の当事者ではありません。拾った候補はそのまま記録には"
@@ -3388,30 +4147,26 @@ def _call_mechanism_llm(
 
     Chronicle 生成と同じ型: 本人のシステムプロンプトも現在のコア記憶・手帳の
     一覧も載せない — 判断の主体は機構で、現在の本人の知識を混ぜない。例外
-    (LLM エラー・出力不適合) はそのまま送出する。
+    (LLM エラー・出力不適合) はそのまま送出する。送る中身が実際に使うモデルに
+    入らないときは LLM を呼ばずに :class:`SluiceInputTooLargeError` を送出する。
     """
     runtime = lifecycle.runtime
     persona_id = getattr(persona, "persona_id", None)
-    persona_name = (
-        getattr(persona, "persona_name", None) or persona_id or "ペルソナ"
-    )
+    persona_name = _mechanism_persona_name(persona)
 
-    from sea.pulse_context import resolve_execution_context
-    execution_context = resolve_execution_context(persona, None)
-    if model_key and execution_context.model_key != model_key:
-        execution_context = execution_context.with_model(model_key)
+    # 刻みの見積もり (_capture_input_fit) と同じ決め方でモデルとクライアントを決める。
+    llm_client, execution_context = _select_capture_llm(
+        lifecycle, persona, model_key,
+    )
 
     prompt = _build_mechanism_prompt(persona_name, chunk_messages)
-    node_def = SimpleNamespace(id="sluice_capture", memorize=None, speak=False)
-    llm_client, actual_model = runtime.select_llm_client(
-        node_def, persona, execution_context=execution_context,
-        needs_structured_output=True,
+    messages = [{"role": "user", "content": prompt}]
+    _ensure_input_fits(
+        messages, execution_context.model_key, persona_id=persona_id,
+        llm_client=llm_client, response_schema=_CANDIDATE_SCHEMA,
     )
-    if actual_model != execution_context.model_key:
-        execution_context = execution_context.with_model(actual_model)
-
     result = llm_client.generate(
-        [{"role": "user", "content": prompt}],
+        messages,
         tools=[],
         response_schema=_CANDIDATE_SCHEMA,
         temperature=runtime._default_temperature(persona),
@@ -3701,8 +4456,11 @@ def run_sluice_capture(
     """記録された「通っていない範囲」を、チャンクごとに順に通す。
 
     docs/intent/sluice_coverage_gaps.md 第一段 B の実行部。範囲の行を古い順に
-    取り、A と同じ閾値 (:func:`get_max_span_chars`) 以下のチャンクへ刻んで
-    処理する。チャンクを終えるたびに範囲の行を縮める (行の start_message_id を
+    取り、A と同じ閾値 (:func:`get_max_span_chars`) 以下で、かつ使うモデルに
+    入る量 (:func:`_capture_input_fit` — docs/issues/sluice_skip_ignores_model_context.md)
+    以下のチャンクへ刻んで処理する。1 通だけでモデルに入らないメッセージが
+    あれば、LLM を呼ぶ直前に :class:`SluiceInputTooLargeError` で止まる。
+    チャンクを終えるたびに範囲の行を縮める (行の start_message_id を
     前進、全部済んだら行を削除) — 中断しても続きから。パンマーカーは動かさない。
 
     判断の主体 (``mode`` — B 節の再設計):
@@ -3833,10 +4591,16 @@ def run_sluice_capture(
             )
             processed_any = True
             continue
-        chunk = _plan_capture_chunks(span_messages, max_chars)[0]
         with hold_beat(
             manager, persona_id, purpose="sluice_capture", check_gate=False,
         ):
+            # 刻みはチャンクごとに、ロックの内側で見積もり直す — 本人モードでは
+            # 採取でコア記憶や手帳が増えると指示文が伸びるので、走行の頭の
+            # 見積もりのままだと後半のチャンクがモデルに入らなくなりうる。
+            fit = _capture_input_fit(
+                lifecycle, persona, mode=mode, model_key=model_key,
+            )
+            chunk = _plan_capture_chunks(span_messages, max_chars, fit)[0]
             if mode == "persona":
                 chunk_summary = _run_capture_chunk(
                     lifecycle, persona, chunk, model_key=model_key,

@@ -20,6 +20,8 @@ Usage:
     - source (本番) は読み取り専用。DB スナップショットは sqlite backup API で
       取得する (本番稼働中でも WAL ごと整合する)
     - dest が source と同一パスなら拒否
+    - dest (DB / home) が本番 (~/.saiverse 配下) を指すなら拒否。本番の場所は
+      SAIVERSE_HOME の値に依らない (複製は dest の既存ファイルを消して置き換えるため)
     - 複製世界は起動しても外に触れない: アドオン全無効化 / オンラインモード解除 /
       他 City トランザクション消去 / ポート書き換え (本番と同時起動可能)
 """
@@ -35,6 +37,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+from scripts._shared.production_guard import refuse_production_paths  # noqa: E402
 
 LOGGER = logging.getLogger("scripts.clone_world_to_test_env")
 
@@ -264,7 +268,7 @@ def clone_world(
     Returns:
         サマリ情報の dict。
     Raises:
-        CloneError: 前提未達 (source 不在 / dest==source / ペルソナ不在 / 中断)。
+        CloneError: 前提未達 (source 不在 / dest==source / dest が本番 / ペルソナ不在 / 中断)。
     """
     source_db = Path(source_db).resolve()
     dest_db = Path(dest_db).resolve()
@@ -276,6 +280,11 @@ def clone_world(
     LOGGER.info("複製先 DB   : %s", dest_db)
     LOGGER.info("複製先 home : %s", dest_home)
 
+    refuse_production_paths(
+        {"--dest-db": dest_db, "--dest-home": dest_home},
+        reason="複製は複製先の DB とフォルダを丸ごと置き換える (既存ファイルの削除を含む) ため、本番には向けられません。",
+        error_cls=CloneError,
+    )
     if source_db == dest_db or source_home == dest_home:
         raise CloneError("source と dest が同一です。本番を破壊するため拒否します。")
     if not source_db.is_file():

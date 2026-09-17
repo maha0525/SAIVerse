@@ -1,7 +1,5 @@
 
-import { getFormatLocale } from '@/i18n/core';
-
-import { t as uiText } from '@/i18n/core';
+import { getFormatLocale, getLocale, t as uiText } from '@/i18n/core';
 import { CheckCircle, AlertCircle } from 'lucide-react';
 import { MemoryImportUiResult } from './types';
 
@@ -31,7 +29,7 @@ export function formatThreadDateRange(first?: number | null, last?: number | nul
   };
   const a = toDate(first);
   const b = toDate(last);
-  if (a && b) return a === b ? a : `${a}〜${b}`;
+  if (a && b) return a === b ? a : (getLocale() === 'ja' ? `${a}\u301C${b}` : `${a} – ${b}`);
   return a || b;
 }
 

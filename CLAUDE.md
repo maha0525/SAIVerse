@@ -57,6 +57,23 @@ Only `city_a` is seeded by default (`builtin_data/cities.json`). The CLI argumen
 
 **After writing or modifying Python, always run `ruff check` on the changed files** before considering the task complete. It catches undefined names (e.g. `LOGGER` where `logging` was meant) that would otherwise fail at runtime.
 
+### Localization (i18n)
+
+UI messages are canonicalized in `frontend/src/i18n/messages.json` and can be bulk edited via CSV:
+
+```bash
+# Export wording table to CSV (UTF-8 BOM, Excel-safe)
+python frontend/scripts/i18n-table.py export wording.csv
+
+# Import modified CSV back (strictly validates keys, variables, emptiness)
+python frontend/scripts/i18n-table.py import wording.csv
+
+# Verify frontend i18n integrity (missing keys, syntax, un-translated CJK)
+cd frontend && npm test
+```
+
+Full workflow, parameter rules, and dev tooltip usage: `docs/developer-guide/localization.md`.
+
 ### Other setups
 
 - **GPU / embeddings** (`SAIMEMORY_EMBED_CUDA=1|0`, unset = auto-detect): `docs/getting-started/gpu-setup.md`

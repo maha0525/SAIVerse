@@ -1,7 +1,13 @@
 {
   "name": "document_create",
-  "display_name": "ドキュメント作成",
-  "description": "Create a new document item with text content",
+  "display_name": {
+    "ja": "ドキュメント作成",
+    "en": "Create Document"
+  },
+  "description": {
+    "ja": "テキスト内容を含む新しいドキュメントアイテムを作成します。",
+    "en": "Create a new document item with text content."
+  },
   "input_schema": [
     {
       "name": "input",

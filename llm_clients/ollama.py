@@ -12,6 +12,7 @@ import requests
 
 from .base import LLMClient
 from .exceptions import EmptyResponseError
+from .utils import positive_token_count
 
 
 # Retry configuration
@@ -909,6 +910,17 @@ class OllamaClient(LLMClient):
                 self._request_kwargs.pop(key, None)
             else:
                 self._request_kwargs[key] = value
+
+    def response_token_limit(self) -> Optional[int]:
+        """送る ``options.num_predict`` (正の値のときだけ。無ければ None)。
+
+        generate / generate_stream は ``self._request_kwargs`` の ``num_predict``
+        (モデル設定の ``request_kwargs``、configure_parameters が ``max_tokens``
+        から読み替えた値) を options に載せ、per-call の ``max_output_tokens`` は
+        受け取らない (``**_`` が落とす)。-1 (無制限) などの 0 以下は上限を
+        決めないので None。
+        """
+        return positive_token_count(self._request_kwargs.get("num_predict"))
 
 
 __all__ = ["OllamaClient"]

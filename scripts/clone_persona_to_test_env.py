@@ -25,6 +25,8 @@ Usage:
 安全性:
     - **source (本番) 側は読み取り専用**。source DB は SQLite の mode=ro URI で
       開き、ファイルは copy2 で読むだけ。書き込みは dest (テスト環境) のみ。
+    - dest (DB / home) が本番 (~/.saiverse 配下) を指すなら拒否する。本番の場所は
+      SAIVERSE_HOME の値に依らない。
     - dest に同じペルソナの複製が既にある場合、--force が無ければ上書き前に
       確認プロンプトを出す。
 """
@@ -47,6 +49,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database.models import AI, Building, BuildingOccupancyLog, City, SessionAnchor
+from scripts._shared.production_guard import refuse_production_paths
 
 LOGGER = logging.getLogger("scripts.clone_persona_to_test_env")
 
@@ -609,7 +612,7 @@ def clone_persona(
     Returns:
         サマリ情報の dict (再マップ結果・複製ファイル数・モデル依存解決)。
     Raises:
-        CloneError: 前提未達 (source に無い / dest 未セットアップ / ユーザー中断)。
+        CloneError: 前提未達 (source に無い / dest 未セットアップ / dest が本番 / ユーザー中断)。
     """
     _verify_column_classification()
 
@@ -623,6 +626,11 @@ def clone_persona(
     LOGGER.info("複製先 DB   : %s", dest_db)
     LOGGER.info("複製先 home : %s", dest_home)
 
+    refuse_production_paths(
+        {"--dest-db": dest_db, "--dest-home": dest_home},
+        reason="複製は複製先の AI 行とペルソナフォルダを置き換える (既存フォルダの削除を含む) ため、本番には向けられません。",
+        error_cls=CloneError,
+    )
     if source_db == dest_db:
         raise CloneError("source と dest の DB が同一です。複製になりません。")
     if not source_db.is_file():

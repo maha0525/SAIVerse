@@ -163,13 +163,19 @@ def build_message_content_with_attachments(
 
 def prepare_openai_messages(
     messages: List[Any],
+    *,
     supports_images: bool,
     max_image_bytes: Optional[int] = None,
     max_image_embeds: Optional[int] = None,
     convert_system_to_user: bool = False,
     reasoning_passback_field: Optional[str] = None,
 ) -> List[Any]:
-    """Prepare messages for OpenAI-compatible APIs by removing internal-only fields."""
+    """Prepare messages for OpenAI-compatible APIs by removing internal-only fields.
+
+    Options are keyword-only: several neighbours accept None/bool, so a positional
+    call that skips one shifts the rest without any error (NIM once passed
+    convert_system_to_user into max_image_embeds, which embedded zero images).
+    """
     attachment_cache, skip_summary_indices, _, allowed_attachment_keys = scan_message_metadata(
         messages, max_image_embeds_override=max_image_embeds,
     )

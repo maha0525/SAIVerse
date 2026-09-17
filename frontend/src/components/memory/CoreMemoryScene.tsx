@@ -377,7 +377,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                             onChange={(e) => setDateFrom(e.target.value)}
                         />
                     </label>
-                    <span>〜</span>
+                    <span data-i18n="components.memory.CoreMemoryScene.text015Separator">{uiText("components.memory.CoreMemoryScene.text015Separator")}</span>
                     <input
                         type="date"
                         className={styles.dateInput}
@@ -641,7 +641,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                         aria-expanded={trashOpen}
                     >
                         {trashOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                        <Trash2 size={14} />{uiText("components.memory.CoreMemoryScene.text051")}{trash.length}）
+                        <Trash2 size={14} />{uiText("components.memory.CoreMemoryScene.text051", { p1: trash.length })}
                     </button>
                     {trashOpen &&
                         trash.map((it) => (
