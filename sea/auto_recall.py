@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -519,6 +520,94 @@ def _context_message_ids(messages: List[Dict[str, Any]]) -> set:
         if mid:
             ids.add(str(mid))
     return ids
+
+
+# ---------------------------------------------------------------------------
+# 拾い上げの拡張 (Jev 選別層が ON のときだけ通る経路)
+#
+# 実測で分かった狭さ: unified_recall の既定では message 枠が 1 席しかなく、その席を
+# 「ユーザーが今言った発話そのもの」(直前に memory.db へ永続化済み、クエリと同一なので
+# 類似度が最上位) が毎ターン占領し、後段で「既にコンテキストにある」として捨てられる。
+# 過去の会話が浮かぶ経路が実質毎ターン死んでいた。加えてキーワード検索は
+# ``query.split()`` 由来で、空白の無い日本語文では全文が 1 語になり何にもマッチしない。
+# 設計と実測値は docs/intent/auto_recall_jev_rerank.md。
+# ---------------------------------------------------------------------------
+
+# クエリから内容語らしい連なりを抜く正規表現 (カタカナ連 / 漢字連 / 英数連)。
+# 先頭の 1 文字だけ長音符「ー」と踊り字「々」を許さない — 「ねーエリス」の「ー」は
+# 直前のひらがなに属するので、許すと語が「ーエリス」になって本文に一致しなくなる。
+_KEYWORD_PATTERN = re.compile(r"[ァ-ヶ][ァ-ヶー]+|[一-龥][一-龥々]+|[A-Za-z0-9]{2,}")
+
+# messages にこの件数を超えて出現する語は「ありふれた語」として捨てる。実験値
+# (env にはしない — Jev 実験の一部として調整する数字で、利用者向けの設定ではない)。
+_KEYWORD_COMMON_LIMIT = 50
+
+# 1 クエリから使うキーワードの上限 (出現件数の少ない順に選ぶ)。同上、実験値。
+_KEYWORD_MAX_COUNT = 4
+
+# Jev ON のときのソース枠の上書き。message を 1 → 3 に広げる。合計 9 になるが
+# topk=8 の天井はそのまま (枠は「上限」であって「確保」ではない)。
+_JEV_SOURCE_ALLOCATIONS = {"fragment": 5, "memopedia": 1, "message": 3}
+
+
+def _extract_recall_keywords(conn, query: str) -> List[str]:
+    """クエリから「珍しい内容語」を最大 ``_KEYWORD_MAX_COUNT`` 個抜き出す。
+
+    ありふれた語を落とすのは、エンティティトリガーの ambient ガードと同じ思想 —
+    「珍しい名前ほど連想が走る」。unified_recall ではキーワード一致数が第一ソート
+    キーなので、常連の語 (ペルソナ名など) を残すと毎ターン同じ大量のヒットが
+    上位を占め、枠を食い潰してしまう。
+
+    失敗しても会話は止めない。空リストを返すと呼び出し側は ``keywords`` を渡さず、
+    unified_recall の従来どおりの ``query.split()`` 経路に戻る。
+    """
+    if not query or not query.strip():
+        return []
+
+    try:
+        from sai_memory.unified_recall import _escape_like
+
+        words: List[str] = []
+        seen: set = set()
+        for match in _KEYWORD_PATTERN.finditer(query):
+            word = match.group(0)
+            if word in seen:
+                continue
+            seen.add(word)
+            words.append(word)
+        if not words:
+            return []
+
+        kept: List[Tuple[str, int]] = []
+        dropped: List[Tuple[str, int]] = []
+        for word in words:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE content LIKE ? ESCAPE '\\'",
+                (f"%{_escape_like(word)}%",),
+            )
+            row = cur.fetchone()
+            count = int(row[0]) if row else 0
+            if 1 <= count <= _KEYWORD_COMMON_LIMIT:
+                kept.append((word, count))
+            else:
+                dropped.append((word, count))
+
+        # 出現件数の少ない順 (= 珍しい順)。同数は出現順のまま (sort は安定)。
+        kept.sort(key=lambda wc: wc[1])
+        selected = kept[:_KEYWORD_MAX_COUNT]
+        LOGGER.debug(
+            "[auto_recall][jev] keywords: %s (dropped: %s)",
+            " ".join(f"{w}={c}" for w, c in selected) or "(none)",
+            " ".join(f"{w}={c}" for w, c in dropped) or "(none)",
+        )
+        return [w for w, _ in selected]
+    except Exception:
+        LOGGER.warning(
+            "[auto_recall][jev] keyword extraction failed; "
+            "falling back to the default whitespace split",
+            exc_info=True,
+        )
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -1129,6 +1218,11 @@ def run_auto_recall(
     context_ids = _context_message_ids(messages)
     ledger = _get_ledger(persona_id, thread_id)
 
+    # Jev 選別層の ON/OFF は「どこまで拾い上げるか」にも効く (ON のときだけ広げる)。
+    # OFF のときは unified_recall へ渡す引数が従来と 1 ビットも変わらないよう、
+    # 追加引数そのものを渡さない。
+    jev_enabled = is_jev_rerank_enabled()
+
     # --- エンティティトリガー経路 (決定論・埋め込み検索と並行) ---
     accepted_keys: set = set()
     accepted_count = 0
@@ -1172,6 +1266,18 @@ def run_auto_recall(
             # なる)。かつ要約ゆえ具体シーンが無く、会話に連想として繋げにくい
             # (fragment / message は「そのときの会話」があるので連想として振る舞える)。
             # 将来はソース種別ごとの「思い出しやすさ」に一般化する予定 (§4 参照)。
+            recall_kwargs: Dict[str, Any] = {}
+            if jev_enabled:
+                keywords = _extract_recall_keywords(conn, query)
+                recall_kwargs = {
+                    # 抽出できなかったターンは None = 従来の split 挙動に戻す。
+                    "keywords": keywords or None,
+                    # ユーザーが今言った発話そのものは message 枠を毎ターン占領する
+                    # だけで、後段で「既にコンテキストにある」として捨てられる。
+                    # 収集段階で外して枠を空ける。
+                    "exclude_message_ids": context_ids,
+                    "source_allocations": _JEV_SOURCE_ALLOCATIONS,
+                }
             hits = unified_recall(
                 conn, embedder, query,
                 topk=topk,
@@ -1179,6 +1285,7 @@ def run_auto_recall(
                 search_memopedia=True,
                 search_fragments=True,
                 search_messages=True,
+                **recall_kwargs,
             )
         except Exception:
             LOGGER.warning("[auto_recall] unified_recall raised (persona=%s)", persona_id, exc_info=True)
@@ -1188,7 +1295,7 @@ def run_auto_recall(
     # None = Jev を使わない/使えない (既存の cosine しきい値方式で判定する)。
     # dict = Jev の判定結果 (key -> noul 確率)。候補ゼロなら空 dict。
     jev_decisions: Optional[Dict[Tuple[str, str], float]] = None
-    if is_jev_rerank_enabled():
+    if jev_enabled:
         jev_decisions = _run_jev_rerank(
             hits, messages,
             accepted_keys=accepted_keys, context_ids=context_ids, persona_id=persona_id,

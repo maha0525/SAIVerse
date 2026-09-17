@@ -17,11 +17,14 @@ tests/test_auto_recall.py と同じ流儀でフェイクにする)。
 """
 
 import logging
+import re
+import sqlite3
 import sys
 from unittest.mock import patch
 
 import pytest
 
+from sai_memory.memory.storage import add_message, init_db
 from sai_memory.unified_recall import RecallHit
 from sea import auto_recall
 from saiverse.typesafe_client import TypeSafeUnavailable
@@ -658,6 +661,155 @@ def test_media_recall_off_keeps_state_shape_unchanged(jev_on):
 
     state = fake.calls[0]["state"]
     assert set(state) == {"conversation", "memories"}
+
+
+# ---------------------------------------------------------------------------
+# 拾い上げの拡張 (ON のときだけ) — キーワード抽出
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def memory_conn():
+    """messages テーブルだけを持つ空の memory.db (キーワード件数の検算用)。"""
+    conn = init_db(":memory:")
+    yield conn
+    conn.close()
+
+
+def _fill(conn, content, times=1):
+    for _ in range(times):
+        add_message(conn, thread_id="t1", role="user", content=content)
+
+
+def test_rare_word_is_kept_and_common_word_is_dropped(memory_conn):
+    """ありふれた語は捨て、珍しい語だけ残す。
+
+    unified_recall ではキーワード一致数が第一ソートキーなので、常連の語を残すと
+    毎ターン同じ大量のヒットが上位を占めて枠を食い潰す。
+    """
+    _fill(memory_conn, "エリスとの何気ない会話", times=60)   # ありふれた語
+    _fill(memory_conn, "十条の商店街を歩いた", times=3)       # 珍しい語
+
+    words = auto_recall._extract_recall_keywords(
+        memory_conn, "ねーエリス、十条まで歩いてみた日のこと覚えてる？",
+    )
+    assert words == ["十条"]
+
+
+def test_words_are_ordered_by_rarity_and_capped(memory_conn, monkeypatch):
+    monkeypatch.setattr(auto_recall, "_KEYWORD_MAX_COUNT", 2)
+    _fill(memory_conn, "アイフィの話", times=9)
+    _fill(memory_conn, "十条の話", times=5)
+    _fill(memory_conn, "散歩の話", times=1)
+
+    words = auto_recall._extract_recall_keywords(memory_conn, "アイフィと十条を散歩した")
+    assert words == ["散歩", "十条"]
+
+
+def test_katakana_kanji_and_alnum_runs_are_extracted(memory_conn):
+    _fill(memory_conn, "エリスと PostgreSQL の設定を直した")
+    _fill(memory_conn, "十条へ行った")
+
+    words = auto_recall._extract_recall_keywords(
+        memory_conn, "エリス、PostgreSQL の話と十条の話をしたよね",
+    )
+    assert set(words) == {"エリス", "PostgreSQL", "十条"}
+
+
+def test_word_absent_from_messages_is_dropped(memory_conn):
+    # 0 件の語はキーワードに入れない (LIKE を 1 本無駄に撃つだけになる)。
+    _fill(memory_conn, "十条へ行った")
+    words = auto_recall._extract_recall_keywords(memory_conn, "十条と赤羽へ行った")
+    assert words == ["十条"]
+
+
+def test_like_metacharacters_in_a_keyword_are_escaped(memory_conn, monkeypatch):
+    """件数の検算に使う LIKE で ``_`` がワイルドカードにならない。
+
+    既定の抽出正規表現は英数・カタカナ・漢字しか拾わないのでメタ文字は出ないが、
+    ここを緩めたときに「ありふれた語の判定が黙って壊れる」ことがないよう、
+    エスケープ側を固定する (``a_b`` が ``axb`` まで数えると 61 件になり、
+    珍しい語のはずが ``_KEYWORD_COMMON_LIMIT`` 超過で捨てられてしまう)。
+    """
+    monkeypatch.setattr(auto_recall, "_KEYWORD_PATTERN", re.compile(r"[A-Za-z0-9_]{2,}"))
+    _fill(memory_conn, "識別子 axb を使った", times=60)
+    _fill(memory_conn, "識別子 a_b を使った", times=1)
+
+    words = auto_recall._extract_recall_keywords(memory_conn, "a_b の話")
+    assert words == ["a_b"]
+
+
+def test_extraction_failure_returns_empty_list(caplog):
+    """DB 障害でも会話は止めない (呼び出し側は従来の split 経路へ戻る)。"""
+    caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
+
+    class _BrokenConn:
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("no such table: messages")
+
+    assert auto_recall._extract_recall_keywords(_BrokenConn(), "十条まで歩いた") == []
+    assert [r for r in caplog.records if "keyword extraction failed" in r.getMessage()]
+
+
+def test_extraction_on_empty_query_returns_empty_list(memory_conn):
+    assert auto_recall._extract_recall_keywords(memory_conn, "") == []
+    assert auto_recall._extract_recall_keywords(memory_conn, "   ") == []
+
+
+# ---------------------------------------------------------------------------
+# 拾い上げの拡張 (ON のときだけ) — unified_recall へ渡す引数
+# ---------------------------------------------------------------------------
+
+def _capture_recall_call(conn, messages, fake_jev, hits=None):
+    """run_auto_recall を 1 ターン回し、unified_recall に渡った kwargs を返す。"""
+    captured = {}
+    hits = hits if hits is not None else [_hit("fragment", "f1", embed_score=0.90, title="記憶")]
+
+    def _fake_recall(_conn, _embedder, _query, **kwargs):
+        captured.update(kwargs)
+        return hits
+
+    with patch("sai_memory.unified_recall.unified_recall", _fake_recall), \
+         patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]), \
+         patch("saiverse.typesafe_client.evaluate_nouls", fake_jev):
+        auto_recall.run_auto_recall(
+            conn=conn, embedder=object(), messages=messages,
+            persona_id=PERSONA, thread_id=THREAD,
+        )
+    return captured
+
+
+def test_off_does_not_pass_the_sweep_arguments(memory_conn):
+    """OFF (既定) では拾い上げの引数を 1 つも渡さない (挙動が 1 ビットも変わらない)。"""
+    _fill(memory_conn, "十条の商店街を歩いた")
+    captured = _capture_recall_call(
+        memory_conn, _msgs(("user", "十条まで歩いた日のこと", "m1")), _FakeJev({"記憶": 0.9}),
+    )
+    assert set(captured) == {"topk", "search_chronicle", "search_memopedia",
+                             "search_fragments", "search_messages"}
+
+
+def test_on_passes_keywords_exclusions_and_allocations(jev_on, memory_conn):
+    _fill(memory_conn, "十条の商店街を歩いた", times=3)
+    captured = _capture_recall_call(
+        memory_conn, _msgs(("user", "十条まで歩いた日のこと", "m1")), _FakeJev({"記憶": 0.9}),
+    )
+    assert captured["keywords"] == ["十条"]
+    assert captured["exclude_message_ids"] == {"m1"}
+    assert captured["source_allocations"] == {"fragment": 5, "memopedia": 1, "message": 3}
+    # 既存の引数はそのまま。
+    assert captured["topk"] == 8
+    assert captured["search_chronicle"] is False
+
+
+def test_on_with_no_extractable_keyword_falls_back_to_default_split(jev_on, memory_conn):
+    """語が 1 つも残らないターンは ``keywords=None`` (= 従来の split 挙動)。"""
+    captured = _capture_recall_call(
+        memory_conn, _msgs(("user", "うん", "m1")), _FakeJev({"記憶": 0.9}),
+    )
+    assert captured["keywords"] is None
+    # 残り 2 つは語が無くても渡る (発話の自席占領の除外と message 枠の拡張)。
+    assert captured["exclude_message_ids"] == {"m1"}
+    assert captured["source_allocations"]["message"] == 3
 
 
 def test_non_conversational_messages_excluded_from_state(jev_on):
