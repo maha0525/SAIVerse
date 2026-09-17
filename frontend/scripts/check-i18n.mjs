@@ -16,7 +16,7 @@ for (const [key, row] of Object.entries(table)) {
     }
 }
 
-const cjkRegex = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/;
+const cjkRegex = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\u3001-\u303f\uff01-\uff5e]/;
 function stripComments(code) {
     let clean = code.replace(/\{\/\*[\s\S]*?\*\/\}/g, match => ' '.repeat(match.length));
     clean = clean.replace(/\/\*[\s\S]*?\*\//g, match => match.split('\n').map(l => ' '.repeat(l.length)).join('\n'));

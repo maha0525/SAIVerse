@@ -41,6 +41,7 @@ class AvailablePlaybooksSnapshot:
     # ペルソナには一覧そのものを出さない (docs/intent/spell_disabled_mode.md §4-5)。
     # 既定 True = この欄を持たない旧 payload は「有効」として読む。
     spell_enabled: bool = True
+    language: str = "ja"
 
 
 class AvailablePlaybooksSection:
@@ -56,16 +57,20 @@ class AvailablePlaybooksSection:
 
     def capture(self, ctx: LineHeadInput) -> AvailablePlaybooksSnapshot:
         from sea.head_pipeline.spell_gate import resolve_spell_enabled
+        from saiverse.persona_language import get_persona_language
+        from saiverse.i18n_utils import resolve_i18n_text
+
+        persona_lang = get_persona_language(ctx.persona_id)
 
         if not resolve_spell_enabled(ctx):
             # 一覧の取得ごと省く (使えないものを数えても捨てるだけ)。
-            return AvailablePlaybooksSnapshot(entries=(), spell_enabled=False)
+            return AvailablePlaybooksSnapshot(entries=(), spell_enabled=False, language=persona_lang)
 
         from tools import TOOL_REGISTRY
 
         list_func = TOOL_REGISTRY.get("list_available_playbooks")
         if list_func is None:
-            return AvailablePlaybooksSnapshot(entries=())
+            return AvailablePlaybooksSnapshot(entries=(), language=persona_lang)
         try:
             raw = list_func(
                 persona_id=ctx.persona_id,
@@ -76,11 +81,11 @@ class AvailablePlaybooksSection:
                 "available_playbooks: list_available_playbooks raised",
                 exc_info=True,
             )
-            return AvailablePlaybooksSnapshot(entries=())
+            return AvailablePlaybooksSnapshot(entries=(), language=persona_lang)
 
         payload = raw[0] if isinstance(raw, tuple) else raw
         if not payload:
-            return AvailablePlaybooksSnapshot(entries=())
+            return AvailablePlaybooksSnapshot(entries=(), language=persona_lang)
         try:
             parsed = json.loads(payload) if isinstance(payload, str) else payload
         except json.JSONDecodeError:
@@ -88,7 +93,7 @@ class AvailablePlaybooksSection:
                 "available_playbooks: failed to parse list_available_playbooks output",
                 exc_info=True,
             )
-            return AvailablePlaybooksSnapshot(entries=())
+            return AvailablePlaybooksSnapshot(entries=(), language=persona_lang)
 
         entries: list[PlaybookEntry] = []
         if isinstance(parsed, list):
@@ -98,20 +103,36 @@ class AvailablePlaybooksSection:
                 name = (item.get("name") or "").strip()
                 if not name:
                     continue
-                description = (item.get("description") or "").strip()
+                if persona_lang == "ja" or not persona_lang:
+                    description = (item.get("description") or "").strip()
+                else:
+                    description = resolve_i18n_text(
+                        None,
+                        target_lang=persona_lang,
+                        alt_en=item.get("description_en"),
+                        alt_ja=item.get("description"),
+                    ).strip()
                 entries.append(PlaybookEntry(name=name, description=description))
         entries.sort(key=lambda e: e.name)
-        return AvailablePlaybooksSnapshot(entries=tuple(entries))
+        return AvailablePlaybooksSnapshot(entries=tuple(entries), language=persona_lang)
 
     def render(self, snapshot: AvailablePlaybooksSnapshot) -> Optional[RenderedSection]:
         if snapshot is None or not snapshot.entries:
             return None
-        lines = [
-            "## 利用可能なPlaybook",
-            "",
-            "`run_playbook` スペルの `playbook` 引数に以下の名前を渡すと実行できる:",
-            "",
-        ]
+        if snapshot.language == "en":
+            lines = [
+                "## Available Playbooks",
+                "",
+                "Pass the name to the `playbook` argument of the `run_playbook` spell to execute:",
+                "",
+            ]
+        else:
+            lines = [
+                "## 利用可能なPlaybook",
+                "",
+                "`run_playbook` スペルの `playbook` 引数に以下の名前を渡すと実行できる:",
+                "",
+            ]
         for entry in snapshot.entries:
             if entry.description:
                 lines.append(f"- **{entry.name}**: {entry.description}")
@@ -160,6 +181,7 @@ class AvailablePlaybooksSection:
             {
                 "entries": [asdict(e) for e in snapshot.entries],
                 "spell_enabled": snapshot.spell_enabled,
+                "language": snapshot.language,
             },
             ensure_ascii=False,
         )
@@ -171,4 +193,5 @@ class AvailablePlaybooksSection:
         return AvailablePlaybooksSnapshot(
             entries=entries,
             spell_enabled=bool(payload.get("spell_enabled", True)),
+            language=str(payload.get("language", "ja")),
         )

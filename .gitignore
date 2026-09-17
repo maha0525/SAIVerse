@@ -59,6 +59,7 @@ temp/
 !temp/.gitkeep
 %temp%/
 nul
+wording.csv
 
 # PyPI build artifacts
 dist/

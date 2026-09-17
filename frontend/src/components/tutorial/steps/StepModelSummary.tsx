@@ -3,6 +3,7 @@ import { apiFetch } from '@/i18n/api';
 
 import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
+import { getModelRoleLabel, getModelRoleDescription, getProviderPresetDisplayName } from '@/i18n/modelRoles';
 
 
 import React, { useState, useEffect } from 'react';
@@ -145,7 +146,7 @@ export default function StepModelSummary({
                                 className={styles.presetButton}
                                 onClick={() => handlePresetChange(preset.provider)}
                             >
-                                {preset.display_name}
+                                {getProviderPresetDisplayName(preset.provider, preset.display_name)}
                             </button>
                         ))}
                     </div>
@@ -157,8 +158,8 @@ export default function StepModelSummary({
                     <div key={assignment.role} className={styles.roleItem}>
                         <div className={styles.roleHeader}>
                             <div className={styles.roleInfo}>
-                                <span className={styles.roleLabel}>{assignment.label}</span>
-                                <span className={styles.roleDescription}>{assignment.description}</span>
+                                <span className={styles.roleLabel}>{getModelRoleLabel(assignment.role, assignment.label)}</span>
+                                <span className={styles.roleDescription}>{getModelRoleDescription(assignment.role, assignment.description)}</span>
                             </div>
                             <div className={styles.roleModel}>
                                 <span className={styles.roleModelName}>{assignment.display_name}</span>

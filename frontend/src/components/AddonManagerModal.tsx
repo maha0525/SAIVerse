@@ -3,7 +3,7 @@ import { apiFetch } from '@/i18n/api';
 
 import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
-
+import { resolveI18nText } from '@/i18n/resolve';
 
 import React, { useState, useEffect, useCallback, useRef, Suspense } from 'react';
 import { X, Package, ChevronDown, ChevronRight, Trash2, Plus, Store } from 'lucide-react';
@@ -50,7 +50,11 @@ interface AddonParamSchema {
 interface AddonInfo {
     addon_name: string;
     display_name: string;
+    display_name_en?: string;
+    display_name_i18n?: Record<string, string>;
     description: string;
+    description_en?: string;
+    description_i18n?: Record<string, string>;
     version: string;
     is_enabled: boolean;
     params_schema: AddonParamSchema[];
@@ -209,7 +213,7 @@ function ParamControl({
             );
 
         default:
-            return <span data-i18n="components.AddonManagerModal.text001" className={styles.unsupported}>{uiText("components.AddonManagerModal.text001")}{schema.type}）</span>;
+            return <span data-i18n="components.AddonManagerModal.text001" className={styles.unsupported}>{uiText("components.AddonManagerModal.text001", { p1: schema.type })}</span>;
     }
 }
 
@@ -987,7 +991,7 @@ function AddonCard({
     onToggleEnabled: (addonName: string, enabled: boolean, mcpSettled?: boolean | null) => void;
     onConfigChanged?: () => void | Promise<void>;
 }) {
-    useLocale();
+    const currentLocale = useLocale();
     const [expanded, setExpanded] = useState(false);
 
     const handleToggle = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1009,6 +1013,9 @@ function AddonCard({
         }
     };
 
+    const dispName = resolveI18nText(addon.display_name_i18n, currentLocale, addon.display_name_en, addon.display_name || addon.addon_name);
+    const descText = resolveI18nText(addon.description_i18n, currentLocale, addon.description_en, addon.description);
+
     return (
         <div className={`${styles.addonCard} ${!addon.is_enabled ? styles.disabled : ''}`}>
             <div className={styles.addonCardHeader}>
@@ -1021,13 +1028,13 @@ function AddonCard({
                 </button>
                 <div className={styles.addonMeta} onClick={() => setExpanded((v) => !v)}>
                     <div className={styles.addonMetaRow}>
-                        <span className={styles.addonName}>{addon.display_name || addon.addon_name}</span>
+                        <span className={styles.addonName}>{dispName}</span>
                         {addon.version && (
                             <span className={styles.addonVersion}>v{addon.version}</span>
                         )}
                     </div>
-                    {addon.description && (
-                        <span className={styles.addonDesc}>{addon.description}</span>
+                    {descText && (
+                        <span className={styles.addonDesc}>{descText}</span>
                     )}
                 </div>
                 <label className={styles.enabledToggle} onClick={(e) => e.stopPropagation()}>

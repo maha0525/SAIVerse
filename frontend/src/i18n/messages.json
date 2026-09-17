@@ -36,7 +36,7 @@
     "en": "Input "
   },
   "app.page.text003": {
-    "ja": "うちキャッシュ読み ",
+    "ja": "うちキャッシュヒット",
     "en": "Cached input "
   },
   "app.page.text004": {
@@ -88,16 +88,16 @@
     "en": "The connection was interrupted."
   },
   "app.page.text016": {
-    "ja": "動画「{p1}」のアップロード中です。完了まで少し待って。",
+    "ja": "動画「{p1}」のアップロード中です。しばらくお待ちください。",
     "en": "Video \"{p1}\" is uploading. Please wait for it to finish."
   },
   "app.page.text017": {
-    "ja": "添付「{p1}」のアップロードに失敗してる: {p2}\n削除してから送って。",
-    "en": "Attachment \"{p1}\" failed to upload: {p2}\nRemove it before sending."
+    "ja": "添付「{p1}」のアップロードに失敗しました: {p2}\nファイルが壊れている可能性があります。",
+    "en": "Attachment \"{p1}\" failed to upload: {p2}\nThe file may be corrupted."
   },
   "app.page.text018": {
-    "ja": "他のクライアントが先に移動したため、 発言は受け付けられませんでした。 最新状態に同期します。",
-    "en": "Another client moved first, so the message was not accepted. Syncing the latest state."
+    "ja": "他のクライアントでBuildingを移動したため、 発言が失敗しました。 最新状態に同期します。",
+    "en": "Another client moved to a different building, so sending the message failed. Syncing the latest state."
   },
   "app.page.text019": {
     "ja": "送信できませんでした。接続を確認してもう一度お試しください。",
@@ -108,28 +108,28 @@
     "en": "This message already has a persona reply. The latest history has been loaded."
   },
   "app.page.text021": {
-    "ja": "続きを起こせませんでした。",
-    "en": "Could not generate a continuation."
+    "ja": "発言の続きの生成に失敗しました。",
+    "en": "Failed to generate a continuation for the message."
   },
   "app.page.text022": {
-    "ja": "やり直せませんでした。",
-    "en": "Could not retry."
+    "ja": "発言の再送に失敗しました。",
+    "en": "Failed to resend the message."
   },
   "app.page.text023": {
-    "ja": "続きを起こせませんでした。",
-    "en": "Could not generate a continuation."
+    "ja": "発言の続きの生成に失敗しました。",
+    "en": "Failed to generate a continuation for the message."
   },
   "app.page.text024": {
-    "ja": "やり直せませんでした。",
-    "en": "Could not retry."
+    "ja": "発言の再送に失敗しました。",
+    "en": "Failed to resend the message."
   },
   "app.page.text025": {
-    "ja": "取り消せませんでした。",
-    "en": "Could not withdraw the message."
+    "ja": "発言の取り消しに失敗しました。",
+    "en": "Failed to withdraw the message."
   },
   "app.page.text026": {
-    "ja": "取り消しをサーバーに届けられませんでした。",
-    "en": "Could not deliver the withdrawal request to the server."
+    "ja": "発言の取り消しがサーバーに届きませんでした。",
+    "en": "The message withdrawal request did not reach the server."
   },
   "app.page.text027": {
     "ja": "セッションログ表示中 ({p1}){p2}",
@@ -244,52 +244,52 @@
     "en": "Check your API key settings."
   },
   "app.page.text055": {
-    "ja": "LLMサーバーで障害が発生しています。しばらく時間を置いてから再送信してください。",
-    "en": "The LLM server is experiencing an error. Wait a while and try again."
+    "ja": "LLMサーバーで障害が発生している可能性があります。しばらく時間を置いてから再送信してください。",
+    "en": "The LLM server may be experiencing an issue. Please wait a while and try again."
   },
   "app.page.text056": {
-    "ja": "あなたの発言は記録に残っています。返事だけが生まれなかったので、発言の「再送」から応答をもう一度求められます。",
-    "en": "Your message was saved, but no reply was generated. Use Retry on the message to request a reply again."
+    "ja": "ペルソナが応答に失敗しました。あなたの発言に表示されている「再送」ボタンから、応答をもう一度求めることができます。",
+    "en": "The persona failed to reply. You can request a reply again using the \"Retry\" button on your message."
   },
   "app.page.text057": {
-    "ja": "あなたの発言は記録に残っています。ただし、この場所には応答できる相手がいないので、やり直しても結果は変わりません。別の場所へ移るか、誰かが来るのを待ってください。",
-    "en": "Your message was saved, but nobody here can reply. Retrying will not change that. Move somewhere else or wait for someone to arrive."
+    "ja": "この場所には応答できる相手がいません。別のBuildingへ移動するか、ペルソナを呼び出してからお試しください。",
+    "en": "There is nobody in this building who can reply. Please move to another building or summon a persona and try again."
   },
   "app.page.text058": {
-    "ja": "発言が届いたかどうかは、この画面からは判断できません。同じ内容を送り直す前に、履歴に残っているかを確認してください。",
-    "en": "This screen cannot tell whether the message arrived. Check the history before sending the same text again."
+    "ja": "不明な問題により接続が切断されました。発言結果についてはチャット履歴およびペルソナの記憶の状態を確認してください。",
+    "en": "Connection was lost due to an unknown issue. Please check the chat history and persona's memory to confirm whether the message was received."
   },
   "app.page.text059": {
-    "ja": "接続が途中で切れました。ここまでの内容は残っています。",
-    "en": "The connection was interrupted. Content received so far has been kept."
+    "ja": "接続が切断されました。ここまでの発言内容は保存されています。",
+    "en": "Connection was disconnected. The message content received so far has been saved."
   },
   "app.page.text060": {
-    "ja": "サーバーに接続できませんでした。SAIVerse が起動しているかを確認してください。",
+    "ja": "サーバーに接続できませんでした。SAIVerseが起動しているか確認してください。",
     "en": "Could not connect to the server. Check that SAIVerse is running."
   },
   "app.page.text061": {
-    "ja": "この発言は記録に残っていません。入力欄からもう一度送ってください。",
-    "en": "This message was not saved. Please send it again from the input box."
+    "ja": "この発言は記録に残っていません。もう一度送り直してください。",
+    "en": "This message was not saved. Please send it again."
   },
   "app.page.text062": {
-    "ja": "発言は保存されていません。本文は入力欄に戻したので、いまいる場所を確かめてから送り直してください。",
-    "en": "The message was not saved. Its text has been restored to the input box. Check your location before sending it again."
+    "ja": "発言は保存されていません。現在地を確認のうえ送り直してください。",
+    "en": "The message was not saved. Please check your current location and send it again."
   },
   "app.page.text063": {
-    "ja": "空のまま送信されました。内容を入れてから送ってください。",
-    "en": "An empty message was sent. Enter some content and try again."
+    "ja": "内容を入力してから送信してください。",
+    "en": "Please enter some content before sending."
   },
   "app.page.text064": {
-    "ja": "いまいる場所が確定していません。画面を再読み込みするか、建物を選び直してください。",
+    "ja": "現在地が確定していません。画面を再読み込みするか、Buildingを選び直してください。",
     "en": "Your current location is unknown. Reload the page or select a building again."
   },
   "app.page.text065": {
-    "ja": "操作をサーバーに届けられませんでした。接続を確認してもう一度お試しください。",
+    "ja": "操作がサーバーに届きませんでした。接続を確認してもう一度お試しください。",
     "en": "Could not deliver the operation to the server. Check your connection and try again."
   },
   "app.page.text066": {
-    "ja": "処理が完了しませんでした。少し待ってからもう一度お試しください。解決しない場合は、ログの内容とあわせて開発者へ報告してください。",
-    "en": "The operation did not finish. Wait a little and try again. If the problem persists, report it to the developer with the logs."
+    "ja": "処理が完了しませんでした。少し待ってからもう一度お試しください。解決しない場合は開発者へ報告してください。",
+    "en": "The operation did not complete. Wait a little and try again. If the problem persists, please report it to the developer."
   },
   "app.page.modelUnavailable": {
     "ja": "あなたの発言は記録に残っています。モデルを選び直したあと、発言の「再送」から応答をもう一度求められます。",
@@ -300,24 +300,24 @@
     "en": "A memory that came to mind"
   },
   "app.page.text068": {
-    "ja": "この発言は途中で終わっています。続きを話してもらう",
-    "en": "This reply ended early. Ask for the rest"
+    "ja": "中断された発言の続きを話してもらえます",
+    "en": "Request a continuation for this interrupted reply"
   },
   "app.page.text069": {
     "ja": "続きの生成",
     "en": "Continue reply"
   },
   "app.page.text070": {
-    "ja": "この発言に返事が来ていません。もう一度応答を求める",
-    "en": "No reply to this message yet. Request a reply again"
+    "ja": "返事が無かった発言にもう一度応答を求められます",
+    "en": "Request a reply again for this unanswered message"
   },
   "app.page.text071": {
     "ja": "再送",
     "en": "Retry"
   },
   "app.page.text072": {
-    "ja": "この発言を取り消して、入力欄に戻す（まだ誰も読んでいない場合のみ）",
-    "en": "Withdraw this message and restore it to the input box (only if nobody has read it yet)"
+    "ja": "この発言を取り消し、内容を入力欄に戻します",
+    "en": "Withdraw this message and restore its content to the input box"
   },
   "app.page.text073": {
     "ja": "取り消す",
@@ -404,7 +404,7 @@
     "en": "Update to {p1}"
   },
   "app.phenomena.page.text001": {
-    "ja": "編集内容が保存されていません。閉じますか？",
+    "ja": "編集内容が保存されていません。閉じてよろしいですか？",
     "en": "You have unsaved changes. Close anyway?"
   },
   "app.usage.page.text001": {
@@ -592,7 +592,7 @@
     "en": "${name}*1000"
   },
   "components.ActionsPanel.text022": {
-    "ja": " のような式（四則・累乗・括弧）も使えます。",
+    "ja": "のような式（四則演算・累乗・カッコ）も使えます。",
     "en": " and similar expressions support arithmetic, powers and parentheses."
   },
   "components.ActionsPanel.text023": {
@@ -624,8 +624,8 @@
     "en": "Maximum value"
   },
   "components.ActionsPanel.text030": {
-    "ja": "説明（ペルソナへの引数の意味）",
-    "en": "Description (explains the argument to the persona)"
+    "ja": "説明（引数の意味をペルソナに伝える文章）",
+    "en": "Description (text explaining the meaning of the argument to the persona)"
   },
   "components.ActionsPanel.text031": {
     "ja": "+ 引数を追加",
@@ -672,8 +672,8 @@
     "en": " / expression)"
   },
   "components.ActionsPanel.text042": {
-    "ja": "待機時間に引数 {p1} を使う",
-    "en": "Use argument {p1} for wait time"
+    "ja": "待機時間として引数 {p1} を使う",
+    "en": "Use argument {p1} as the wait time"
   },
   "components.ActionsPanel.text043": {
     "ja": "+ ツール実行ステップ",
@@ -712,8 +712,8 @@
     "en": "Number / ${argument} / expression"
   },
   "components.ActionsPanel.text052": {
-    "ja": "{p1} に引数 {p2} を使う",
-    "en": "Use argument {p2} for {p1}"
+    "ja": "{p1} として引数 {p2} を使う",
+    "en": "Use argument {p2} as {p1}"
   },
   "components.ActionsPanel.text053": {
     "ja": "フォーム編集に戻す",
@@ -836,7 +836,7 @@
     "en": "Failed"
   },
   "components.AddonBubbleButtons.text004": {
-    "ja": "{p1} (実行中)",
+    "ja": "{p1}（実行中）",
     "en": "{p1} (running)"
   },
   "components.AddonBubbleButtons.text005": {
@@ -908,8 +908,8 @@
     "en": "Delete"
   },
   "components.AddonInstallProgressDialog.text004": {
-    "ja": "レスポンスボディがありません",
-    "en": "Response body is missing"
+    "ja": "サーバーからの応答データが空です",
+    "en": "Server response data is empty"
   },
   "components.AddonInstallProgressDialog.text005": {
     "ja": " を",
@@ -932,8 +932,8 @@
     "en": "Failed"
   },
   "components.AddonInstallProgressDialog.text010": {
-    "ja": "このアドオンは API ルートを持つため、完全に反映するには SAIVerse の再起動が必要です。",
-    "en": "This addon provides API routes. Restart SAIVerse to apply all changes."
+    "ja": "このアドオンの反映には SAIVerse の再起動が必要です。",
+    "en": "Restart SAIVerse to apply this addon."
   },
   "components.AddonInstallProgressDialog.text011": {
     "ja": "通信エラー",
@@ -948,8 +948,8 @@
     "en": "Close"
   },
   "components.AddonManagerModal.text001": {
-    "ja": "（未対応の型: ",
-    "en": "(unsupported type: "
+    "ja": "（未対応の型: {p1}）",
+    "en": "(unsupported type: {p1})"
   },
   "components.AddonManagerModal.text002": {
     "ja": "保存されている「{p1}」を削除します。\n\n",
@@ -1052,7 +1052,7 @@
     "en": "Expand"
   },
   "components.AddonManagerModal.text027": {
-    "ja": "アドオンが無効です。有効にすると設定を変更できます。",
+    "ja": "アドオンが無効です。設定を変更するには有効にしてください。",
     "en": "This addon is disabled. Enable it to change its settings."
   },
   "components.AddonManagerModal.text028": {
@@ -1152,8 +1152,8 @@
     "en": "Interior image"
   },
   "components.BuildingSettingsModal.text018": {
-    "ja": "LLMのビジュアルコンテキスト用の Building インテリア画像",
-    "en": "Building interior image for the LLM's visual context"
+    "ja": "Buildingの内装の画像。滞在しているペルソナにも視認されます",
+    "en": "Interior image of the Building. Personas staying here will also perceive it."
   },
   "components.BuildingSettingsModal.text019": {
     "ja": "追加プロンプトファイル",
@@ -1180,8 +1180,8 @@
     "en": "Spells to run in advance"
   },
   "components.BuildingSettingsModal.text025": {
-    "ja": "この Building にいるペルソナの会話時に自動実行するスペル。スペルが無効のペルソナには実行されません。",
-    "en": "Spells run automatically during conversations with personas in this building. Not run for personas with spells disabled."
+    "ja": "この Building にいるペルソナが発言前に自動実行するスペル。スペル不使用モードのペルソナでは実行されません。",
+    "en": "Spells run automatically before personas in this building speak. Not run for personas in spell-free mode."
   },
   "components.BuildingSettingsModal.text026": {
     "ja": "削除",
@@ -1208,8 +1208,8 @@
     "en": "Not fully loaded"
   },
   "components.BuildingSettingsModal.text032": {
-    "ja": "表示中 ({p1}) と保存先 ({p2}) が不一致のため無効",
-    "en": "Disabled: displayed building ({p1}) and save target ({p2}) do not match"
+    "ja": "操作対象のBuildingが変更されたため、保存が失敗しました。（表示中: {p1}、保存先: {p2}）",
+    "en": "Save failed because the target building has changed. (Displayed: {p1}, Save target: {p2})"
   },
   "components.BuildingSettingsModal.text033": {
     "ja": "保存中...",
@@ -1220,12 +1220,12 @@
     "en": "Save"
   },
   "components.BuildingSettingsModal.text035": {
-    "ja": "部屋の様子に表示するアイテム数（空欄で既定の 10 個）",
-    "en": "Item display limit for room appearance (blank for default 10)"
+    "ja": "部屋の様子に表示するアイテム数（デフォルト10個）",
+    "en": "Item display limit for room appearance (default 10)"
   },
   "components.BuildingSettingsModal.text036": {
-    "ja": "この数を超えたアイテムは、最近触られていないものから部屋の様子に出なくなります（物は消えません）。0 にするとアイテムを出しません。",
-    "en": "Items exceeding this limit are omitted from the room appearance starting from least recently used (items are not deleted). Set to 0 to show no items."
+    "ja": "この数を超えたアイテムは、最近触られていないものから順に埋もれていきペルソナから見えなくなります（アイテム自体が消えるわけではありません）。埋もれたアイテムは特定のスペルで視認可能です。",
+    "en": "Items exceeding this limit become hidden from personas, starting from the least recently touched (items are not deleted). Hidden items can be viewed using specific spells."
   },
   "components.ChatOptions.text001": {
     "ja": "バックエンドサーバーに接続できません。サーバーが起動しているか確認してください。",
@@ -1292,15 +1292,15 @@
     "en": "Loading..."
   },
   "components.ChatOptions.text017": {
-    "ja": "このモデルは明示的キャッシュに非対応です（タイマー対象外）。",
-    "en": "This model does not support explicit caching (no timer)."
+    "ja": "このモデルは明示的キャッシュ非対応です。",
+    "en": "This model does not support explicit caching."
   },
   "components.ChatOptions.text018": {
     "ja": "このペルソナはキャッシュ無効です。",
     "en": "Caching is disabled for this persona."
   },
   "components.ChatOptions.text019": {
-    "ja": "キャッシュは現在効いていません（次の発話で作成されます）。",
+    "ja": "キャッシュは現在効いていません。次の発話で作成されます。",
     "en": "No active cache. It will be created on the next reply."
   },
   "components.ChatOptions.text020": {
@@ -1308,16 +1308,16 @@
     "en": "Remaining "
   },
   "components.ChatOptions.text021": {
-    "ja": "キャッシュ有効中。残り時間内に発話すると cache hit（格安）になります。",
-    "en": "Cache is active. A reply within the remaining time uses the cheaper cached input rate."
+    "ja": "キャッシュが有効です。残り時間内の発話はキャッシュヒット時の価格（格安）になります。",
+    "en": "Cache is active. Messages within the remaining time use the cheaper cache hit rate."
   },
   "components.ChatOptions.text022": {
     "ja": "ペルソナのいる建物で開くと、会話コンテキストの状態が表示されます。",
     "en": "Open this in the persona's building to see the conversation context."
   },
   "components.ChatOptions.text023": {
-    "ja": "状態を取得できませんでした。開き直すか、ペルソナを切り替えると再試行します。",
-    "en": "Could not load the status. Reopen this panel or switch personas to retry."
+    "ja": "コンテキスト使用量を取得できませんでした。開き直すか、ペルソナを切り替えると再試行します。",
+    "en": "Could not load the context usage. Reopen this panel or switch personas to retry."
   },
   "components.ChatOptions.text024": {
     "ja": "読み込み中...",
@@ -1332,11 +1332,11 @@
     "en": "not set"
   },
   "components.ChatOptions.text027": {
-    "ja": "）は水位を持たない設定のため、履歴の自動整理は行われません。",
+    "ja": "）は閾値を持たない設定のため、履歴の自動整理は行われません。",
     "en": ") has no thresholds configured, so history will not be organized automatically."
   },
   "components.ChatOptions.text028": {
-    "ja": "現在量を測定できませんでした（水位のみ表示しています）。",
+    "ja": "現在量を測定できませんでした（閾値のみ表示しています）。",
     "en": "Could not measure the current amount (showing thresholds only)."
   },
   "components.ChatOptions.text029": {
@@ -1344,8 +1344,8 @@
     "en": "No conversation starting point yet. The first conversation will establish one."
   },
   "components.ChatOptions.text030": {
-    "ja": "会話履歴は始点を固定したまま送られ、送る合計（会話・スペル結果・部屋の様子のすべて）が上限を超えると、古い出来事から順にあらすじへ畳んで整理します。 「残す量」は畳んだ後に残す会話の量で、会話だけを数えます — スペル結果や部屋の様子がどれだけ大きくても、そのぶん会話が削られることはありません。",
-    "en": "Conversation history is sent from a fixed starting point. When the total amount (conversation, spell results and room observations) exceeds the limit, older events are summarized first. The amount to keep counts only conversation, so large spell results and observations do not reduce the conversation retained."
+    "ja": "会話履歴は起点を固定したまま送られ、送る合計（会話・スペル結果・部屋の様子のすべて）が上限を超えると、古い出来事から順にあらすじへ畳んだうえで送る範囲から押し出します。「残す量」は畳んだ後も必ず残す会話メッセージの量です。スペル結果や部屋の様子がどれだけ大きくても、そのぶん会話が削られることはありません。",
+    "en": "Conversation history is sent from a fixed starting point. When the total amount (conversation, spell results and room observations) exceeds the limit, older events are summarized and pushed out of the send range. The \"amount to keep\" is the minimum conversation retained after summarizing. No matter how large spell results or room observations are, they never reduce the conversation kept."
   },
   "components.ChatOptions.text031": {
     "ja": "整理は古い側から約 {p1} 文字ぶんずつまとめて畳みます（一度に畳む量は、スペルの結果などの長い記録を圧縮した後の字数で数えます）。",
@@ -1412,8 +1412,8 @@
     "en": "Off"
   },
   "components.ChatOptions.text047": {
-    "ja": "5分",
-    "en": "5 minutes"
+    "ja": "5分（ツール利用向け）",
+    "en": "5 minutes (for tool use)"
   },
   "components.ChatOptions.text048": {
     "ja": "1時間（連続対話向け）",
@@ -1432,8 +1432,8 @@
     "en": "Image embedding limit"
   },
   "components.ChatOptions.text052": {
-    "ja": " （モデルデフォルト: ",
-    "en": " (model default: "
+    "ja": " （モデルデフォルト: {p1}）",
+    "en": " (model default: {p1})"
   },
   "components.ChatOptions.text053": {
     "ja": "（自動: {p1}）",
@@ -1704,7 +1704,7 @@
     "en": "(including {p1})"
   },
   "components.common.ContextVolumeBar.text008": {
-    "ja": "残す量 ",
+    "ja": "キープ量",
     "en": "Keep "
   },
   "components.common.ContextVolumeBar.text009": {
@@ -1724,7 +1724,7 @@
     "en": "None"
   },
   "components.common.ContextVolumeBar.text013": {
-    "ja": "会話は残す量以下ですが、スペル結果や部屋の様子を足した合計が上限を超えています。整理しても畳めるものはありません。",
+    "ja": "会話はキープ量以下ですが、スペル結果や部屋の様子を足した合計が上限を超えています。整理しても畳めるものはありません。",
     "en": "Conversation is at or below the amount to keep, but adding spell results and room observations exceeds the limit. There is nothing eligible to summarize."
   },
   "components.common.ContextVolumeBar.text014": {
@@ -1744,8 +1744,8 @@
     "en": "About {p1}"
   },
   "components.common.WatermarkBar.text001": {
-    "ja": "整理後に残す量",
-    "en": "Amount to keep after summarizing"
+    "ja": "整理後にも残す会話量",
+    "en": "Conversation amount to keep after summarizing"
   },
   "components.common.WatermarkBar.text002": {
     "ja": "整理をはじめる量",
@@ -1824,7 +1824,7 @@
     "en": "Loading context..."
   },
   "components.ContextPreviewModal.text015": {
-    "ja": "このビルディングに応答可能なペルソナがいません。",
+    "ja": "応答可能なペルソナがこのBuildingにいません。",
     "en": "No persona in this building can reply."
   },
   "components.DebugPanel.text001": {
@@ -2000,7 +2000,7 @@
     "en": "Configured value"
   },
   "components.GlobalSettingsModal.text045": {
-    "ja": "既定 {p1} 字",
+    "ja": "デフォルト {p1} 字",
     "en": "Default: {p1} characters"
   },
   "components.GlobalSettingsModal.text046": {
@@ -3052,8 +3052,8 @@
     "en": "Approx. "
   },
   "components.memory.ArasujiViewer.text114": {
-    "ja": " 回（",
-    "en": " calls ("
+    "ja": " 回（{p1}）",
+    "en": " calls ({p1})"
   },
   "components.memory.ArasujiViewer.text115": {
     "ja": "概算費用",
@@ -3316,8 +3316,8 @@
     "en": "No core memories yet."
   },
   "components.memory.CoreMemoryScene.text051": {
-    "ja": "ごみ箱（",
-    "en": "Trash ("
+    "ja": "ごみ箱（{p1}）",
+    "en": "Trash ({p1})"
   },
   "components.memory.CoreMemoryScene.text052": {
     "ja": "字",
@@ -3520,8 +3520,8 @@
     "en": " Mismatched pages: "
   },
   "components.memory.MemopediaConversion.text025": {
-    "ja": " 枚 （例: ",
-    "en": " (examples: "
+    "ja": " 枚 （例: {p1} — {p2}）",
+    "en": " (examples: {p1} — {p2})"
   },
   "components.memory.MemopediaConversion.text026": {
     "ja": "気づいた点",
@@ -11294,5 +11294,129 @@
   "components.VoiceCallModal.error_unknown": {
     "ja": "通話中に想定外の問題が起きました。",
     "en": "An unexpected problem occurred during the call."
+  },
+  "components.memory.MemoryRecall.leftoversFormat": {
+    "ja": " ／ {p1}。",
+    "en": " / {p1}."
+  },
+  "components.memory.MemoryRecall.leftoverJoiner": {
+    "ja": "。",
+    "en": ". "
+  },
+  "modelRole.default_model.label": {
+    "ja": "標準モデル",
+    "en": "Standard model"
+  },
+  "modelRole.default_model.desc": {
+    "ja": "会話や複雑な推論に使用するメインモデル",
+    "en": "Main model used for conversation and complex reasoning"
+  },
+  "modelRole.lightweight_model.label": {
+    "ja": "軽量モデル",
+    "en": "Lightweight model"
+  },
+  "modelRole.lightweight_model.desc": {
+    "ja": "ルーティングやツール判断に使用する高速・安価なモデル",
+    "en": "Fast, cost-effective model used for routing and tool decisions"
+  },
+  "modelRole.memory_weave_model.label": {
+    "ja": "Memory Weaveモデル",
+    "en": "Memory Weave model"
+  },
+  "modelRole.memory_weave_model.desc": {
+    "ja": "クロニクル・メモペディアの生成に使用するモデル",
+    "en": "Model used for generating Chronicles and Memopedia"
+  },
+  "modelRole.image_summary_model.label": {
+    "ja": "画像要約モデル",
+    "en": "Image summary model"
+  },
+  "modelRole.image_summary_model.desc": {
+    "ja": "画像・ドキュメント要約生成用モデル（Vision対応モデル推奨）",
+    "en": "Model for summarizing images and documents (Vision model recommended)"
+  },
+  "modelRole.audio_summary_model.label": {
+    "ja": "音声要約モデル",
+    "en": "Audio summary model"
+  },
+  "modelRole.audio_summary_model.desc": {
+    "ja": "ユーザー添付音声の要約生成用モデル（Gemini系のみ対応）",
+    "en": "Model for summarizing user audio attachments (Gemini models only)"
+  },
+  "modelRole.video_summary_model.label": {
+    "ja": "動画要約モデル",
+    "en": "Video summary model"
+  },
+  "modelRole.video_summary_model.desc": {
+    "ja": "ユーザー添付動画の要約生成用モデル（Gemini系のみ対応）",
+    "en": "Model for summarizing user video attachments (Gemini models only)"
+  },
+  "modelPreset.openai": {
+    "ja": "OpenAI",
+    "en": "OpenAI"
+  },
+  "modelPreset.gemini_free": {
+    "ja": "Gemini (無料)",
+    "en": "Gemini (Free)"
+  },
+  "modelPreset.gemini": {
+    "ja": "Gemini (有料)",
+    "en": "Gemini (Paid)"
+  },
+  "modelPreset.anthropic": {
+    "ja": "Anthropic",
+    "en": "Anthropic"
+  },
+  "modelPreset.grok": {
+    "ja": "Grok (xAI)",
+    "en": "Grok (xAI)"
+  },
+  "modelPreset.openrouter": {
+    "ja": "OpenRouter",
+    "en": "OpenRouter"
+  },
+  "modelPreset.openrouter_free": {
+    "ja": "OpenRouter (無料)",
+    "en": "OpenRouter (Free)"
+  },
+  "modelPreset.nvidia": {
+    "ja": "Nvidia NIM",
+    "en": "Nvidia NIM"
+  },
+  "modelPreset.ollama": {
+    "ja": "Ollama (ローカル)",
+    "en": "Ollama (Local)"
+  },
+  "modelPreset.llama_cpp": {
+    "ja": "llama.cpp (ローカル)",
+    "en": "llama.cpp (Local)"
+  },
+  "components.GlobalSettingsModal.presetLarge": {
+    "ja": "多い",
+    "en": "High"
+  },
+  "components.GlobalSettingsModal.presetDefault": {
+    "ja": "デフォルト",
+    "en": "Default"
+  },
+  "components.GlobalSettingsModal.presetSmall": {
+    "ja": "少ない",
+    "en": "Low"
+  },
+  "components.tutorial.steps.StepWelcome.text002Suffix": {
+    "ja": "。",
+    "en": "."
+  },
+  "components.memory.CoreMemoryScene.text015Separator": {
+    "ja": "〜",
+    "en": " – "
+  },
+  "components.settings.WorldEditor.rangeSeparator": {
+    "ja": "〜",
+    "en": " – "
+  },
+  "components.memory.MemopediaConversion.period": {
+    "ja": "。",
+    "en": "."
   }
 }

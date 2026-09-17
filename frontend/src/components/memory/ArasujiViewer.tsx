@@ -1307,7 +1307,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             <div className={styles.repairEstimateRow}>
                                 <span data-i18n="components.memory.ArasujiViewer.text112" className={styles.repairEstimateLabel}>{uiText("components.memory.ArasujiViewer.text112")}</span>
                                 <span className={styles.repairEstimateValue}>
-                                    {uiText("components.memory.ArasujiViewer.text113")}{repairEstimate.estimated_llm_calls.toLocaleString(getFormatLocale())}{uiText("components.memory.ArasujiViewer.text114")}{repairEstimate.model_name}）
+                                    {uiText("components.memory.ArasujiViewer.text113")}{repairEstimate.estimated_llm_calls.toLocaleString(getFormatLocale())}{uiText("components.memory.ArasujiViewer.text114", { p1: repairEstimate.model_name })}
                                 </span>
                             </div>
                             <div className={styles.repairEstimateRow}>

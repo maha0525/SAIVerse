@@ -240,8 +240,8 @@ const Pagination = ({ list, onNavigate }: { list: TableList<any>; onNavigate: ()
                 onClick={() => go(Math.max(0, list.offset - DB_TABLE_PAGE_SIZE))}
                 aria-label={uiText("components.settings.WorldEditor.text004")}
             ><ChevronLeft size={14} />{uiText("components.settings.WorldEditor.text005")}</button>
-            <span data-i18n="components.settings.WorldEditor.text006 components.settings.WorldEditor.text007" className={styles.pagerStatus}>
-                {first}〜{last}{uiText("components.settings.WorldEditor.text006")}{list.total === null ? '' : uiText("components.settings.WorldEditor.text007", { p1: list.total })}
+            <span data-i18n="components.settings.WorldEditor.rangeSeparator components.settings.WorldEditor.text006 components.settings.WorldEditor.text007" className={styles.pagerStatus}>
+                {first}{uiText("components.settings.WorldEditor.rangeSeparator")}{last}{uiText("components.settings.WorldEditor.text006")}{list.total === null ? '' : uiText("components.settings.WorldEditor.text007", { p1: list.total })}
             </span>
             <button data-i18n="components.settings.WorldEditor.text008 components.settings.WorldEditor.text009"
                 type="button"

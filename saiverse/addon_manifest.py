@@ -233,8 +233,10 @@ class AddonManifest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str = Field(..., description="アドオン ID (expansion_data/ 下のディレクトリ名と一致)")
-    display_name: str = Field(..., description="UI 表示名")
-    description: str = Field("", description="UI 表示用の説明")
+    display_name: Union[str, dict[str, str]] = Field(..., description="UI 表示名")
+    display_name_en: Optional[str] = Field(None, description="UI 表示名 (英語)")
+    description: Union[str, dict[str, str]] = Field("", description="UI 表示用の説明")
+    description_en: Optional[str] = Field(None, description="UI 表示用の説明 (英語)")
     version: str = Field(..., description="アドオンのセマンティックバージョン")
 
     manifest_version: int = Field(
@@ -262,6 +264,24 @@ class AddonManifest(BaseModel):
             "アンインストール確認 UI で 'inputs: 参照音声' 等を見せる用途のみ。"
         ),
     )
+
+    def get_display_name(self, lang: str = "ja") -> str:
+        from saiverse.i18n_utils import resolve_i18n_text
+        return resolve_i18n_text(
+            self.display_name,
+            target_lang=lang,
+            alt_en=self.display_name_en,
+            default=self.name,
+        )
+
+    def get_description(self, lang: str = "ja") -> str:
+        from saiverse.i18n_utils import resolve_i18n_text
+        return resolve_i18n_text(
+            self.description,
+            target_lang=lang,
+            alt_en=self.description_en,
+            default="",
+        )
 
     @field_validator("name")
     @classmethod

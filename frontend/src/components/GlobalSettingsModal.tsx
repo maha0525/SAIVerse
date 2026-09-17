@@ -1,7 +1,9 @@
 import { apiFetch } from '@/i18n/api';
 import { getFormatLocale, t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
+import { resolveI18nText } from '@/i18n/resolve';
 import LocaleControls from '@/i18n/LocaleControls';
+import { getModelRoleLabel, getModelRoleDescription, getProviderPresetDisplayName, getWatermarkPresetLabel } from '@/i18n/modelRoles';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
@@ -56,7 +58,11 @@ interface WatermarkPreset {
 interface PlaybookPermEntry {
     playbook_name: string;
     display_name: string;
+    display_name_en?: string;
+    display_name_i18n?: Record<string, string>;
     description: string;
+    description_en?: string;
+    description_i18n?: Record<string, string>;
     permission_level: string;
 }
 
@@ -64,7 +70,7 @@ type TabId = 'env' | 'world' | 'feeds' | 'models' | 'modelMgmt' | 'playbooks' | 
 type ModelMgmtSubTab = 'providers' | 'models';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
-    useLocale();
+    const currentLocale = useLocale();
     const [activeTab, setActiveTab] = useState<TabId>('env');
     const [envVars, setEnvVars] = useState<EnvVar[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -975,7 +981,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                         aria-pressed={wmActivePreset?.id === preset.id}
                                                         onClick={() => applyWatermarkPreset(preset)}
                                                     >
-                                                        <span className={styles.wmPresetLabel}>{preset.label}</span>
+                                                        <span className={styles.wmPresetLabel}>{getWatermarkPresetLabel(preset.id, preset.label)}</span>
                                                         <span data-i18n="components.GlobalSettingsModal.text106" className={styles.wmPresetNums}>
                                                             {uiText("components.GlobalSettingsModal.text106", {
                                                                 p1: preset.high.toLocaleString(getFormatLocale()),
@@ -1111,7 +1117,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                             className={styles.presetBtn}
                                                             onClick={() => handlePresetApply(preset.provider)}
                                                         >
-                                                            {preset.display_name}
+                                                            {getProviderPresetDisplayName(preset.provider, preset.display_name)}
                                                         </button>
                                                     ))}
                                                 </div>
@@ -1123,8 +1129,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                 <div key={role} className={styles.roleItem}>
                                                     <div className={styles.roleHeader}>
                                                         <div className={styles.roleInfo}>
-                                                            <span className={styles.roleLabel}>{info.label}</span>
-                                                            <span className={styles.roleDescription}>{info.description}</span>
+                                                            <span className={styles.roleLabel}>{getModelRoleLabel(role, info.label)}</span>
+                                                            <span className={styles.roleDescription}>{getModelRoleDescription(role, info.description)}</span>
                                                         </div>
                                                         <div className={styles.roleValue}>
                                                             <span data-i18n="components.GlobalSettingsModal.text063" className={styles.roleModelName}>
@@ -1201,23 +1207,26 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     <p data-i18n="components.GlobalSettingsModal.text070" className={styles.pbEmpty}>{uiText("components.GlobalSettingsModal.text070")}</p>
                                 ) : (
                                     <div className={styles.pbList}>
-                                        {playbookPerms.map(p => (
-                                            <div key={p.playbook_name} className={styles.pbItem}>
-                                                <div className={styles.pbItemInfo}>
-                                                    <div className={styles.pbItemName}>
-                                                        {p.display_name}
-                                                    </div>
-                                                    {p.description && (
-                                                        <div className={styles.pbItemDesc}>
-                                                            {p.description}
+                                        {playbookPerms.map(p => {
+                                            const dispName = resolveI18nText(p.display_name_i18n, currentLocale, p.display_name_en, p.display_name);
+                                            const descText = resolveI18nText(p.description_i18n, currentLocale, p.description_en, p.description);
+                                            return (
+                                                <div key={p.playbook_name} className={styles.pbItem}>
+                                                    <div className={styles.pbItemInfo}>
+                                                        <div className={styles.pbItemName}>
+                                                            {dispName}
                                                         </div>
-                                                    )}
-                                                </div>
-                                                <select
-                                                    className={styles.pbSelect}
-                                                    value={p.permission_level}
-                                                    onChange={e => updatePlaybookPerm(p.playbook_name, e.target.value)}
-                                                >
+                                                        {descText && (
+                                                            <div className={styles.pbItemDesc}>
+                                                                {descText}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    <select
+                                                        className={styles.pbSelect}
+                                                        value={p.permission_level}
+                                                        onChange={e => updatePlaybookPerm(p.playbook_name, e.target.value)}
+                                                    >
                                                     <option data-i18n="components.GlobalSettingsModal.text071" value="auto_allow">{uiText("components.GlobalSettingsModal.text071")}</option>
                                                     <option data-i18n="components.GlobalSettingsModal.text072" value="ask_every_time">{uiText("components.GlobalSettingsModal.text072")}</option>
                                                     <option data-i18n="components.GlobalSettingsModal.text073" value="user_only">{uiText("components.GlobalSettingsModal.text073")}</option>
@@ -1226,7 +1235,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                     )}
                                                 </select>
                                             </div>
-                                        ))}
+                                        );
+                                    })}
                                     </div>
                                 )}
                             </div>

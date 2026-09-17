@@ -26,7 +26,7 @@ export default function StepWelcome() {
             <h2 data-i18n="components.tutorial.steps.StepWelcome.text001" className={styles.welcomeTitle}>{uiText("components.tutorial.steps.StepWelcome.text001")}</h2>
 
             <div className={styles.descriptionBox}>
-                <p data-i18n="components.tutorial.steps.StepWelcome.text002">{uiText("components.tutorial.steps.StepWelcome.text002")}<strong>{uiText("components.tutorial.steps.StepWelcome.label002")}</strong>。</p>
+                <p data-i18n="components.tutorial.steps.StepWelcome.text002 components.tutorial.steps.StepWelcome.text002Suffix">{uiText("components.tutorial.steps.StepWelcome.text002")}<strong>{uiText("components.tutorial.steps.StepWelcome.label002")}</strong>{uiText("components.tutorial.steps.StepWelcome.text002Suffix")}</p>
                 <p data-i18n="components.tutorial.steps.StepWelcome.text003">{uiText("components.tutorial.steps.StepWelcome.text003")}</p>
                 <br />
                 <p data-i18n="components.tutorial.steps.StepWelcome.text004 components.tutorial.steps.StepWelcome.text006">{uiText("components.tutorial.steps.StepWelcome.text004")}<strong data-i18n="components.tutorial.steps.StepWelcome.text005">{uiText("components.tutorial.steps.StepWelcome.text005")}</strong>{uiText("components.tutorial.steps.StepWelcome.text006")}</p>

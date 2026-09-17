@@ -149,10 +149,14 @@ def list_available_playbooks(persona_id: Optional[str] = None, building_id: Opti
                     include = False  # No user present to confirm in auto mode
 
             if include:
-                available.append({
+                entry = {
                     "name": pb.name,
-                    "description": pb.description or ""
-                })
+                    "description": pb.description or "",
+                }
+                desc_en = getattr(pb, "description_en", None)
+                if desc_en:
+                    entry["description_en"] = desc_en
+                available.append(entry)
 
         # Sort by name
         available.sort(key=lambda x: x["name"])
