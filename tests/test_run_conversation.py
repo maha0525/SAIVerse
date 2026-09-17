@@ -6,15 +6,19 @@
 実証済みのため、ここでは対象にしない。
 """
 import os
+import shutil
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from scripts.run_conversation import (
     ConversationError,
     _guard_not_production,
     format_transcript,
+    main,
     normalize_script,
     run_conversation,
 )
@@ -120,14 +124,90 @@ class RunConversationTest(unittest.TestCase):
         with self.assertRaises(ConversationError):
             normalize_script({"persona_id": "a", "messages": ["ok", ""]})  # 空文字列混入
 
-    def test_production_guard(self):
-        # ガードは SAIVERSE_HOME (未設定時は ~/.saiverse) を本番ルートと見なすため、
-        # テスト側も同じ導出で本番 DB パスを組み立てる (env が設定された環境でも整合)。
-        production_root = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse")
-        production_db = production_root / "user_data" / "database" / "saiverse.db"
+
+class ProductionGuardTest(unittest.TestCase):
+    """本番の場所は SAIVERSE_HOME ではなく ~/.saiverse で判定する (intent doc §2-1)。
+
+    Path.home() を一時ディレクトリへ差し替えるので、本物の ~/.saiverse には触れない。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="run_conversation_guard_"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        user_home = self.tmp / "user_home"
+        self.prod_home = user_home / ".saiverse"
+        self.prod_db = self.prod_home / "user_data" / "database" / "saiverse.db"
+        self.sandbox_home = self.tmp / "sandbox" / ".saiverse"
+        self.sandbox_user_data = self.tmp / "sandbox" / "user_data"
+        self.sandbox_db = self.sandbox_user_data / "database" / "saiverse.db"
+        home_patcher = patch("pathlib.Path.home", return_value=user_home)
+        home_patcher.start()
+        self.addCleanup(home_patcher.stop)
+
+    def _sandbox_env(self):
+        return patch.dict(os.environ, {
+            "SAIVERSE_HOME": str(self.sandbox_home),
+            "SAIVERSE_USER_DATA_DIR": str(self.sandbox_user_data),
+        })
+
+    def test_db_in_production_refused_while_home_points_to_sandbox(self):
+        # 2026-09-17 の穴: SAIVERSE_HOME をテスト環境へ向けた状態で本番の DB を渡すと通っていた。
+        # 拒否の理由が DB であることまで確かめる (env を本番とみなす実装だと別の理由で落ちる)
+        with self._sandbox_env(), self.assertRaises(ConversationError) as ctx:
+            _guard_not_production(self.prod_db, self.sandbox_home, self.sandbox_user_data)
+        self.assertIn("--db-file=", str(ctx.exception))
+        self.assertNotIn("SAIVERSE_HOME=", str(ctx.exception))
+
+    def test_env_dirs_in_production_refused(self):
+        # DB がテスト環境でも、ペルソナの memory.db や建物ログの書き先が本番なら拒否する
         with self.assertRaises(ConversationError):
-            _guard_not_production(production_db)
-        _guard_not_production(Path("test_data/user_data/database/saiverse.db"))  # OK
+            _guard_not_production(self.sandbox_db, self.prod_home, self.sandbox_user_data)
+        with self.assertRaises(ConversationError):
+            _guard_not_production(
+                self.sandbox_db, self.sandbox_home, self.prod_home / "user_data")
+
+    def test_out_in_production_refused(self):
+        with self.assertRaises(ConversationError):
+            _guard_not_production(
+                self.sandbox_db, self.sandbox_home, self.sandbox_user_data,
+                self.prod_home / "personas" / "alice" / "transcript.md",
+            )
+
+    def test_sandbox_passes(self):
+        with self._sandbox_env():
+            _guard_not_production(
+                self.sandbox_db, self.sandbox_home, self.sandbox_user_data,
+                self.tmp / "out" / "transcript.md",
+            )
+
+    def _run_main(self, env, db_path):
+        with patch.dict(os.environ, env):
+            with self.assertLogs("scripts.run_conversation", level="ERROR") as logs:
+                code = main(["--persona", "alice", "--message", "hi",
+                             "--db-file", str(db_path)])
+        return code, "\n".join(logs.output)
+
+    def test_main_refuses_production_db_without_touching_it(self):
+        self.prod_db.parent.mkdir(parents=True)
+        self.prod_db.write_bytes(b"PRODUCTION_DB")
+        code, log = self._run_main(
+            {"SAIVERSE_HOME": str(self.sandbox_home),
+             "SAIVERSE_USER_DATA_DIR": str(self.sandbox_user_data)},
+            self.prod_db,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("--db-file=", log)
+        self.assertNotIn("SAIVERSE_HOME=", log)
+        self.assertEqual(self.prod_db.read_bytes(), b"PRODUCTION_DB")
+
+    def test_main_treats_empty_saiverse_home_as_production(self):
+        # 空文字の SAIVERSE_HOME は setdefault で埋まらず、data_paths は ~/.saiverse を使う
+        code, log = self._run_main(
+            {"SAIVERSE_HOME": "", "SAIVERSE_USER_DATA_DIR": str(self.sandbox_user_data)},
+            self.sandbox_db,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("SAIVERSE_HOME=", log)
 
 
 if __name__ == "__main__":
