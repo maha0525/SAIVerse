@@ -13,9 +13,12 @@ NIM の構造化出力は SDK を通らない生 HTTP 経路で送られる
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("SAIVERSE_SKIP_TOOL_IMPORTS", "1")
@@ -62,6 +65,19 @@ def _tool_names(body: dict) -> list:
     return [tool["function"]["name"] for tool in body["tools"]]
 
 
+# 1x1 PNG
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+
+def _image_parts(message: dict) -> list:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [part for part in content if part.get("type") == "image_url"]
+
+
 class TestNimStructuredOutputRequest(unittest.TestCase):
 
     def setUp(self):
@@ -97,7 +113,7 @@ class TestNimStructuredOutputRequest(unittest.TestCase):
                 with patch("llm_clients.openai.OpenAI", side_effect=sdk_with_mock_transport):
                     return get_llm_client(key, resolved["provider"], 8192)
 
-    def _send_structured(self, client, **generate_kwargs):
+    def _send_structured(self, client, *, messages=None, **generate_kwargs):
         """構造化出力を一回走らせ、生 HTTP 経路が送ったリクエストを返す。"""
         sent = []
         real_client = httpx.Client
@@ -111,7 +127,8 @@ class TestNimStructuredOutputRequest(unittest.TestCase):
 
         with patch("httpx.Client", side_effect=client_with_mock_transport):
             result = client.generate(
-                list(_MESSAGES), tools=[], response_schema=_SCHEMA, **generate_kwargs,
+                list(messages if messages is not None else _MESSAGES),
+                tools=[], response_schema=_SCHEMA, **generate_kwargs,
             )
         self.assertEqual(result, '{"ok": true}')
         self.assertEqual(len(sent), 1)
@@ -326,6 +343,119 @@ class TestNimStructuredOutputRequest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 client.generate(list(_MESSAGES), tools=[], response_schema=_SCHEMA)
         http_client.assert_not_called()
+
+    # --- 構造化出力でも、会話と同じ設定で画像と役割が組み立てられること ---
+    #
+    # この経路は以前、組み立て関数を位置引数で呼んでいて、convert_system_to_user が
+    # max_image_embeds の位置に入っていた (False = 画像を一枚も埋め込まない)。さらに
+    # factory はモデル定義の max_image_embeds を渡すのに NIM クライアントに受け口が
+    # 無く、その定義ではクライアントを作る時点で TypeError になっていた。
+
+    def _prepare_images(self):
+        # 画像の埋め込み上限は環境変数でも変わる。テストを走らせる機械の設定を持ち込まない。
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("SAIVERSE_OPENAI_ATTACHMENT_LIMIT", None)
+        os.environ.pop("SAIVERSE_ATTACHMENT_LIMIT", None)
+        # 埋め込まれなかった画像は文字の注記になり、要約ファイルが無いと LLM で要約を
+        # 作りに行く。テストで実 API を呼ばないよう、要約を先に置き、生成が呼ばれたら落とす。
+        summarize = patch("saiverse.media_summary._generate_image_summary")
+        self.summarize = summarize.start()
+        self.addCleanup(summarize.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.image_dir = Path(tmp.name)
+        # 後始末は登録の逆順に走るので、これは要約の差し替えを外す前に確かめられる。
+        self.addCleanup(self.summarize.assert_not_called)
+
+    def _image(self, name):
+        path = self.image_dir / f"{name}.png"
+        path.write_bytes(_PNG)
+        path.with_suffix(".png.summary.txt").write_text(f"summary of {name}", encoding="utf-8")
+        return {"media": [{"type": "image", "path": str(path), "mime_type": "image/png"}]}
+
+    def _conversation(self):
+        return [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "first", "metadata": self._image("a")},
+            {"role": "assistant", "content": "reply", "metadata": {
+                "reasoning_details": [{"type": "reasoning.text", "text": "thought"}],
+            }},
+            {"role": "system", "content": "later notice"},
+            {"role": "user", "content": "second", "metadata": self._image("b")},
+            {"role": "user", "content": "third", "metadata": self._image("c")},
+        ]
+
+    def test_structured_output_embeds_images_under_the_default_limit(self):
+        """モデル定義に上限が無ければ既定の上限 (4 枚) で埋め込む。3 枚なら全部。"""
+        self._prepare_images()
+        client = self._client("nim-image-probe", {
+            "model": "vendor/image-probe",
+            "provider_ref": "nvidia_nim",
+            "supports_images": True,
+        })
+
+        body = json.loads(self._send_structured(client, messages=self._conversation()).content)
+
+        self.assertEqual([len(_image_parts(m)) for m in body["messages"]], [0, 1, 0, 0, 1, 1])
+
+    def test_max_image_embeds_in_model_definition_limits_structured_output_images(self):
+        """定義の max_image_embeds でクライアントが作れ、新しい方から数えてその枚数だけ埋め込む。"""
+        self._prepare_images()
+        client = self._client("nim-image-probe", {
+            "model": "vendor/image-probe",
+            "provider_ref": "nvidia_nim",
+            "supports_images": True,
+            "max_image_embeds": 2,
+        })
+        self.assertEqual(client.max_image_embeds, 2)
+
+        body = json.loads(self._send_structured(client, messages=self._conversation()).content)
+
+        self.assertEqual([len(_image_parts(m)) for m in body["messages"]], [0, 0, 0, 0, 1, 1])
+        # 上限から外れた画像は、消えずに要約の注記として残る。
+        self.assertIn("summary of a", json.dumps(body["messages"][1], ensure_ascii=False))
+
+        # チャット画面の上限変更は、動いているクライアントの属性を書き換える
+        # (api/routes/config.py の set_max_image_embeds)。構造化出力もそれに従う。
+        client.max_image_embeds = 1
+        body = json.loads(self._send_structured(client, messages=self._conversation()).content)
+        self.assertEqual([len(_image_parts(m)) for m in body["messages"]], [0, 0, 0, 0, 0, 1])
+
+    def test_structured_output_prepares_messages_like_the_sdk_path(self):
+        """同じモデル設定・同じ会話なら、生 HTTP 経路は SDK 経路と同じ messages を送る。"""
+        self._prepare_images()
+        model_json = {
+            "model": "vendor/messages-parity-probe",
+            "provider_ref": "nvidia_nim",
+            "supports_images": True,
+            "max_image_embeds": 2,
+            "convert_system_to_user": True,
+            "reasoning_passback_field": "reasoning_details",
+        }
+        sdk_sent = []
+
+        def sdk_handler(request):
+            sdk_sent.append(request)
+            return httpx2.Response(200, json=_SDK_RESPONSE)
+
+        client = self._client("nim-messages-parity-probe", model_json, sdk_handler=sdk_handler)
+        client.generate(self._conversation(), tools=[_PROBE_TOOL])
+        raw = json.loads(self._send_structured(client, messages=self._conversation()).content)
+        self.assertEqual(len(sdk_sent), 1)
+        sdk = json.loads(sdk_sent[0].content)
+
+        self.assertEqual(raw["messages"], sdk["messages"])
+        # 両側が同時に変わっても気づけるよう、突き合わせた中身も固定する。
+        roles = [m["role"] for m in raw["messages"]]
+        self.assertEqual(roles, ["system", "user", "assistant", "user", "user", "user"])
+        self.assertEqual(raw["messages"][3]["content"], "<system>\nlater notice\n</system>")
+        self.assertEqual(
+            raw["messages"][2]["reasoning_details"],
+            [{"type": "reasoning.text", "text": "thought"}],
+        )
+        self.assertEqual([len(_image_parts(m)) for m in raw["messages"]], [0, 0, 0, 0, 1, 1])
 
 
 if __name__ == "__main__":

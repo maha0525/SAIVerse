@@ -467,14 +467,11 @@ def _media_rules(model: str) -> _MediaRules:
     - ``openai_codex`` (OpenAICodexClient → openai_message_preparer.py): 上限は
       OPENAI (factory が ``max_image_embeds`` を渡さないので設定は効かない)。
       役割の扱いは openai_compat と同じ。
-    - ``nvidia_nim`` (NvidiaNIMClient): 上限は OPENAI (factory は設定の
-      ``max_image_embeds`` を渡そうとするが、NvidiaNIMClient はその引数を受け
-      取らず、渡るとクライアントが作れない)。役割の扱いは openai_compat と同じ。
-      構造化出力の経路は prepare_openai_messages へ引数を位置でずらして渡して
-      おり、実際の上限は設定の ``convert_system_to_user`` が偽なら 0 枚 (真なら
-      1 枚) になって、部屋の様子以外の画像はほぼ注記になる。画像 1 枚の見積もり
-      (provider が nvidia_nim なら 500) は、``saiverse://`` の URI の注記 1 件
-      (400 字足らず) より大きいので、ここは OPENAI の上限のまま置く。
+    - ``nvidia_nim`` (NvidiaNIMClient → openai_message_preparer.py): 上限と
+      役割の扱いは openai_compat と同じ (factory が設定の ``max_image_embeds``
+      を正の整数のときだけ渡し、それが環境変数より優先される)。構造化出力の
+      生 HTTP の経路も、会話と同じ組み立て (OpenAIClient._prepare_messages)
+      を通る。
     - ``anthropic_native`` (AnthropicClient → anthropic_request_builder.py):
       上限は ANTHROPIC。設定の ``max_image_embeds`` が整数ならそのまま使う (0 なら
       埋め込まない)。system のメッセージは先に抜かれるので、その画像は枠を使わず
@@ -559,7 +556,7 @@ def _media_rules(model: str) -> _MediaRules:
     return _MediaRules(
         image_limit=(
             configured
-            if protocol == "openai_compat"
+            if protocol in ("openai_compat", "nvidia_nim")
             and isinstance(configured, int) and configured > 0
             else parse_attachment_limit("OPENAI")
         ),

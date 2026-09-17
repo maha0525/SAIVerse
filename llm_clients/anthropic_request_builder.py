@@ -166,6 +166,7 @@ def _apply_anthropic_cache_breakpoint(
 
 def _prepare_anthropic_messages(
     messages: List[Dict[str, Any]],
+    *,  # keyword-only: see prepare_openai_messages for the shifted-argument failure
     supports_images: bool = False,
     max_image_bytes: Optional[int] = None,
     max_image_embeds: Optional[int] = None,
