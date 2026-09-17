@@ -38,7 +38,7 @@ from .openai_reasoning import (
     merge_streaming_reasoning_details,
     process_openai_stream_content,
 )
-from .utils import merge_reasoning_strings
+from .utils import merge_reasoning_strings, positive_token_count
 
 
 # Retry configuration
@@ -1111,6 +1111,31 @@ class OpenAIClient(LLMClient):
                 self._request_kwargs.pop(key, None)
             else:
                 self._request_kwargs[key] = value
+
+    def response_token_limit(self) -> Optional[int]:
+        """送る ``max_tokens`` / ``max_completion_tokens`` (無ければ None)。
+
+        リクエストは ``self._request_kwargs`` から組む (_build_request_kwargs →
+        openai_runtime.build_request_kwargs)。中身はモデル設定の
+        ``request_kwargs`` と、factory が適用するモデル設定の ``parameters`` の
+        既定値 (たとえば OpenRouter の GPT-4o は ``max_tokens`` 8,000) と、
+        ペルソナの上書き (configure_parameters)。per-call の
+        ``max_output_tokens`` は受け取らない (generate の ``**_`` が落とす)。
+        ``extra_body`` の同名の値は SDK が本体へ上書きで合流させるので、そちらも
+        見る。複数あれば大きい方 (安全側)。NvidiaNIMClient の構造化出力の経路も
+        同じ組み立てを使う。
+        """
+        sources: List[Any] = [self._request_kwargs]
+        extra_body = self._request_kwargs.get("extra_body")
+        if isinstance(extra_body, dict):
+            sources.append(extra_body)
+        counts = [
+            count
+            for source in sources
+            for key in ("max_tokens", "max_completion_tokens")
+            if (count := positive_token_count(source.get(key))) is not None
+        ]
+        return max(counts) if counts else None
 
     def generate_with_tool_detection(
         self,

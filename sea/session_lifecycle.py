@@ -5091,7 +5091,15 @@ class SessionLifecycle:
         # そのまま進め (退役ゲートで "ok"/"disabled" と同格)、窓から出て行く
         # 未見の範囲を memory.db (sluice_skipped_spans) に記録する — 後から
         # 通す仕組み (第二段) がこの記録を読む。
+        #
+        # 飛ばす条件はもう一つある (docs/issues/sluice_skip_ignores_model_context.md):
+        # スルースが実際に送る中身 (そのモデルの会話の範囲まるごと + 指示文) が
+        # そのモデルに入らないとき。字数の判定はマーカーから末尾までしか測らない
+        # ので、モデルを切り替えると素通りする。こちらは LLM を呼ぶ直前に
+        # run_sluice が SluiceInputTooLargeError で知らせ、下の except で同じ
+        # 飛ばしの扱い (範囲の記録 → 畳みの適用) に合流する。
         sluice_skipped_range: Optional[Tuple[str, str]] = None
+        sluice_unseen_msgs: Optional[List[Dict[str, Any]]] = None
         if chronicle_status in ("ok", "disabled"):
             from sea.sluice import SluiceStorageUnavailableError, get_max_span_chars
             from sea.sluice import is_enabled as sluice_is_enabled
@@ -5106,31 +5114,21 @@ class SessionLifecycle:
                     unseen_msgs = self._sluice_unseen_window_messages(
                         persona, current_messages,
                     )
+                    sluice_unseen_msgs = unseen_msgs
                     span_chars = message_chars(unseen_msgs)
                     max_span_chars = get_max_span_chars()
                     if span_chars > max_span_chars:
                         sluice_status = "skipped_cold"
-                        evicted_ids = {
-                            str(mid) for f in plan.folds for mid in f.message_ids
-                        }
-                        unseen_evicted = [
-                            str(m.get("id")) for m in unseen_msgs
-                            if isinstance(m, dict) and m.get("id")
-                            and str(m.get("id")) in evicted_ids
-                        ]
-                        if unseen_evicted:
-                            sluice_skipped_range = (
-                                unseen_evicted[0], unseen_evicted[-1],
-                            )
+                        sluice_skipped_range = _sluice_skipped_range(
+                            plan, unseen_msgs,
+                        )
                         LOGGER.warning(
                             "[sluice] skipped cold (persona=%s): unseen span is "
                             "%d chars / %d messages > max=%d; eviction proceeds "
-                            "without capture and the departing unseen range "
-                            "(%s..%s) is recorded for later manual capture",
+                            "without capture and %s",
                             persona_id, span_chars, len(unseen_msgs),
                             max_span_chars,
-                            sluice_skipped_range[0] if sluice_skipped_range else None,
-                            sluice_skipped_range[1] if sluice_skipped_range else None,
+                            _describe_sluice_skipped_range(sluice_skipped_range),
                         )
                 except SluiceStorageUnavailableError:
                     LOGGER.warning(
@@ -5141,6 +5139,7 @@ class SessionLifecycle:
                     sluice_status = "failed"
                     sluice_skipped_range = None
         if chronicle_status in ("ok", "disabled") and sluice_status == "ok":
+            from sea.sluice import SluiceInputTooLargeError
             try:
                 from sea.sluice import run_sluice
                 # window_anchor_id: 実行頭に撮った窓の起点をスルースへ渡し、
@@ -5157,6 +5156,33 @@ class SessionLifecycle:
                 sluice_seen_ids = (sluice_summary or {}).get("seen_ids")
                 sluice_seen_end = (sluice_summary or {}).get("seen_span_end")
                 sluice_finalize = (sluice_summary or {}).get("finalize")
+            except SluiceInputTooLargeError as exc:
+                # 送る中身がそのモデルに入らない (LLM は呼ばれていない)。量に
+                # よる飛ばしと同じ扱い: 範囲を記録して畳みを進める。レート制限
+                # ではないので小休止は置かない。
+                if sluice_unseen_msgs is None:
+                    # 担当範囲が撮れていない (スルースの有効判定がこの間に
+                    # 反転した等) — 記録なしで範囲を出さない (fail-closed)。
+                    LOGGER.warning(
+                        "[sluice] input does not fit the model context but the "
+                        "unseen span was not taken; eviction is blocked "
+                        "(persona=%s): %s", persona_id, exc,
+                    )
+                    sluice_status = "failed"
+                else:
+                    sluice_status = "skipped_cold"
+                    sluice_skipped_range = _sluice_skipped_range(
+                        plan, sluice_unseen_msgs,
+                    )
+                    LOGGER.warning(
+                        "[sluice] skipped: the input does not fit the model "
+                        "context (persona=%s model=%s estimated=%d tokens > "
+                        "limit=%d, response_reserve=%d); eviction proceeds "
+                        "without capture and %s",
+                        persona_id, exc.model, exc.estimated_tokens,
+                        exc.limit_tokens, exc.response_reserve_tokens,
+                        _describe_sluice_skipped_range(sluice_skipped_range),
+                    )
             except Exception as exc:
                 LOGGER.exception(
                     "[sluice] failed; eviction blocked, will retry on next metabolism",
@@ -5232,7 +5258,8 @@ class SessionLifecycle:
 
         # 3. Update anchor to new window start — S2 ガード: 編纂が済んだ
         # ("ok") か編纂を持たない設計 ("disabled")、かつスルースが通った
-        # ("ok") か量の条件で飛ばした ("skipped_cold" — 未見の範囲は記録済み)
+        # ("ok") か、量の条件または送る中身がモデルに入らないことで飛ばした
+        # ("skipped_cold" — 未見の範囲は記録済み)
         # ときだけ退役する。failed / deferred は据え置き — watermark 超過が
         # 残るので、次の maybe_run_metabolism が自然に再試行する
         # (beat_execution_context.md §3.2 / autonomous_behavior_v3.md §13.3、
@@ -7105,6 +7132,46 @@ def _marker_advance_is_safe(
     if end_pos is None:
         return False
     return all(message_id in seen for message_id in ids[: end_pos + 1])
+
+
+def _sluice_skipped_range(
+    plan, unseen_msgs: Sequence[Dict[str, Any]],
+) -> Optional[Tuple[str, str]]:
+    """スルースを飛ばした回に記録する範囲 (読めていないまま畳まれるメッセージ)。
+
+    印より後ろ (``unseen_msgs`` — :meth:`SessionLifecycle._sluice_unseen_window_messages`
+    の結果) のうち、今回の畳みの対象 (``plan.folds`` の message_ids) に入って
+    いるものの先頭と末尾。該当が無い (畳まれる古い側を、すでに別のモデルの
+    スルースが読み終えている) なら None — 記録は書かずに畳みを進める。
+    量による飛ばしと、送る中身がモデルに入らないことによる飛ばしが同じ規則を
+    使う (docs/issues/sluice_skip_ignores_model_context.md)。
+    """
+    evicted_ids = {str(mid) for fold in plan.folds for mid in fold.message_ids}
+    unseen_evicted = [
+        str(m.get("id")) for m in unseen_msgs
+        if isinstance(m, dict) and m.get("id")
+        and str(m.get("id")) in evicted_ids
+    ]
+    if not unseen_evicted:
+        return None
+    return unseen_evicted[0], unseen_evicted[-1]
+
+
+def _describe_sluice_skipped_range(skipped_range: Optional[Tuple[str, str]]) -> str:
+    """飛ばしのログに添える、記録する範囲の一文 (範囲が空なら記録しないことを書く)。
+
+    範囲が空 (畳まれるメッセージが全部パンマーカーより前) のときに「記録する」と
+    書くと、実際には何も記録していないのにログだけが記録したと読める。
+    """
+    if skipped_range is None:
+        return (
+            "no departing message is past the pan marker, "
+            "so there is no unseen range to record"
+        )
+    return (
+        f"the departing unseen range ({skipped_range[0]}..{skipped_range[1]}) "
+        "is recorded for later manual capture"
+    )
 
 
 def _eviction_within_seen(plan, seen_ids: List[str]) -> bool:

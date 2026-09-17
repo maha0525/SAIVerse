@@ -28,6 +28,10 @@ intent の「出自」節) の形そのもの:
    一発で走行を閉じ、ペルソナ単位の小休止が次の入口を止めること。
 4. :class:`ColdCaptureTest` — 1 で記録された範囲を後から通す採取が、機構
    モードと本人モードの両方で閾値を守って完走すること。
+5. :class:`ModelSwitchInputFitTest` — モデルを切り替えたペルソナで、スルースが
+   実際に送る中身がそのモデルに入らない回は、字数の判定が「入る」と答えても
+   スルースを走らせずに畳みを進めること (うるさんの実機の形、2026-09-17 —
+   docs/issues/sluice_skip_ignores_model_context.md)。
 
 LLM はモック (tests/test_sluice.py の :class:`FakeLLMClient` /
 :class:`FakeRuntime` を再利用)。SAIMemory と中央 DB は temp ディレクトリの
@@ -735,6 +739,229 @@ class ColdCaptureTest(_ColdWorldBase):
             expected_messages - (shrunk_start - self._index_of(span["start_message_id"])),
         )
         self.assertEqual(self._skipped_spans(), [])
+
+
+class _WindowComposingRuntime(FakeRuntime):
+    """スルースの組み立てに、そのモデルの送る範囲まるごとを載せるフェイク。
+
+    実物の ``_prepare_context`` と同じ形 — 先頭の自己定義と、そのモデルの起点
+    (凍結された起点が渡ればそれ) から末尾までの提示中の会話。項目 5 は「送る中身が
+    モデルの範囲まるごとになる」ことが欠陥の芯なので、既定のフェイク (固定の小さな
+    組み立て) では再現できない。
+    """
+
+    def __init__(self, client):
+        super().__init__(client)
+        self.lifecycle = None
+
+    def _prepare_context(self, persona, building_id, user_input, *args,
+                         context_meta=None, pinned_anchor_id=None, **kwargs):
+        model_key = kwargs.get("model_key")
+        self.prepare_calls.append({
+            "pinned_anchor_id": pinned_anchor_id, "model_key": model_key,
+        })
+        window = self.lifecycle.get_presented_window(
+            persona, model_key, pinned_anchor_id,
+        )
+        history = [
+            {
+                "role": "assistant" if m.get("role") == "model" else m.get("role"),
+                "content": m.get("content") or "",
+                "id": str(m.get("id")),
+            }
+            for m in window.presented
+        ]
+        if context_meta is not None:
+            context_meta["presented_message_ids"] = [m["id"] for m in history]
+        return (
+            [{"role": "system", "content": persona.persona_system_instruction}]
+            + history
+        )
+
+
+class ModelSwitchInputFitTest(_ColdWorldBase):
+    """項目 5: モデルを切り替えると、上限の小さいモデルが記憶の整理から抜け出せない
+    (うるさんの実機、2026-09-17 — docs/issues/sluice_skip_ignores_model_context.md)。
+
+    実機の形 (縮尺): ペルソナは普段使いのモデル A (コンテキスト長が大きい) と、
+    たまに使うモデル B (小さい) を持つ。パンマーカーはペルソナに一つで、普段の
+    A のスルースが読み終えた最近の位置にある。送る範囲の起点はモデルごとで、A は
+    最近、B は古い位置のまま — B の送る範囲は大きい。
+
+    B で話しかけると、字数の判定 (マーカーから末尾まで) は固定の上限に収まるので
+    「入る」と答えるが、スルースが実際に送るのは B の範囲まるごとで、B に入らない。
+    修正前はここでスルースが 400 で失敗し、失敗した回は畳まないので B は同じ失敗を
+    繰り返した。修正後は LLM を呼ばずに飛ばし、畳みを進める。
+    """
+
+    MODEL_A = "switch-model-a"
+    MODEL_B = "switch-model-b"
+
+    #: A のコンテキスト長 (普段使い — 十分に大きい)。
+    A_CONTEXT = 1_000_000
+    #: B のコンテキスト長。上限は 150,000 × 0.9 − 4,096 = 130,904 トークンで、
+    #: B の範囲まるごと (220 通 × 1,000 字 ≒ 22 万トークン) は入らない。
+    B_SMALL_CONTEXT = 150_000
+    #: 対照の B のコンテキスト長 (範囲まるごとが入る)。
+    B_LARGE_CONTEXT = 1_000_000
+
+    #: A の起点 (最近) — A の送る範囲は 50 通 = 5 万字で上限以下。
+    A_ANCHOR_INDEX = 190
+    #: パンマーカー (A のスルースが読み終えた位置)。マーカーから末尾までは
+    #: 14 通 = 1.4 万字で、固定の字数の上限 (10 万字) を超えない。
+    MARKER_INDEX = 225
+    #: B の起点 (古い位置のまま)。編纂の最前線と同じ位置なので、冷えていても
+    #: 機構1 の前進は起きない — B の送る範囲は 220 通 = 22 万字。
+    B_ANCHOR_INDEX = COMPILED_MESSAGES
+
+    def _build_switched_world(self, b_context):
+        """二つのモデルの定義・起点とパンマーカーを置き、B のライフサイクルを返す。"""
+        from saiverse import model_configs
+        from sea.session_lifecycle import SessionLifecycle
+
+        common = {
+            "provider": "openai",
+            "metabolism_target_chars": TARGET_CHARS,
+            "metabolism_high_chars": HIGH_CHARS,
+        }
+        models = patch.dict(model_configs.MODEL_CONFIGS, {
+            self.MODEL_A: {
+                "model": self.MODEL_A, "context_length": self.A_CONTEXT, **common,
+            },
+            self.MODEL_B: {
+                "model": self.MODEL_B, "context_length": b_context, **common,
+            },
+        })
+        models.start()
+        self.addCleanup(models.stop)
+
+        self.persona.model = self.MODEL_B
+        runtime = _WindowComposingRuntime(self.client)
+        lifecycle = SessionLifecycle(runtime, self.manager)
+        runtime.lifecycle = lifecycle
+        lifecycle.ensure_recall_embeddings = lambda p: None
+
+        # A は普段使い (温かい)、B はたまに使う (冷えている)。
+        lifecycle.upsert_anchor_entry(PERSONA_ID, self.MODEL_A, {
+            "anchor_id": self.message_ids[self.A_ANCHOR_INDEX],
+            "updated_at": datetime.now().isoformat(),
+        })
+        lifecycle.upsert_anchor_entry(PERSONA_ID, self.MODEL_B, {
+            "anchor_id": self.message_ids[self.B_ANCHOR_INDEX],
+            "updated_at": (datetime.now() - timedelta(days=3650)).isoformat(),
+        })
+        sluice._save_pan_marker(self.persona, self.message_ids[self.MARKER_INDEX])
+        return lifecycle
+
+    def _anchor_for(self, lifecycle, model):
+        entry = lifecycle.load_anchor_entry(PERSONA_ID, model)
+        return entry.get("anchor_id") if entry else None
+
+    def _rows_chars_for(self, lifecycle, model):
+        from sea.eviction_plan import stored_message_chars
+        window = lifecycle.get_presented_window(self.persona, model)
+        return stored_message_chars(window.presented)
+
+    def _run_b(self, lifecycle):
+        """B で話しかけた瞬間の非常畳み (うるさんの実機の入口)。"""
+        return lifecycle.maybe_run_emergency_precompaction(
+            self.persona, "b", None, model_key=self.MODEL_B,
+        )
+
+    def _assert_the_switched_shape(self, lifecycle):
+        """前提の形: 字数の判定は入ると答え、B の範囲まるごとは B に入らない大きさ。"""
+        from sea.eviction_plan import stored_message_chars
+
+        window_b = lifecycle.get_presented_window(self.persona, self.MODEL_B)
+        unseen = lifecycle._sluice_unseen_window_messages(
+            self.persona, window_b.presented,
+        )
+        self.assertEqual(
+            len(unseen), TOTAL_MESSAGES - 1 - self.MARKER_INDEX,
+        )
+        self.assertLessEqual(stored_message_chars(unseen), MAX_SPAN_CHARS)
+        b_rows = stored_message_chars(window_b.presented)
+        self.assertEqual(
+            b_rows, (TOTAL_MESSAGES - self.B_ANCHOR_INDEX) * MESSAGE_CHARS,
+        )
+        self.assertGreater(b_rows, HIGH_CHARS)  # 非常畳みが発火する
+        self.assertLessEqual(
+            self._rows_chars_for(lifecycle, self.MODEL_A), HIGH_CHARS,
+        )
+
+    def test_small_model_skips_the_sluice_and_escapes_by_folding(self):
+        self.client = FakeLLMClient(RuntimeError("no LLM call is expected here"))
+        lifecycle = self._build_switched_world(self.B_SMALL_CONTEXT)
+        self._assert_the_switched_shape(lifecycle)
+        b_limit = sluice._input_token_budget(self.MODEL_B)
+        self.assertGreater(
+            (TOTAL_MESSAGES - self.B_ANCHOR_INDEX) * MESSAGE_CHARS, b_limit,
+        )
+        a_anchor_before = self._anchor_for(lifecycle, self.MODEL_A)
+
+        with self.assertLogs("sea.session_lifecycle", level="WARNING") as logs:
+            ret = self._run_b(lifecycle)
+
+        # (a) スルースの LLM は一度も呼ばれず、整理は成功で閉じる。
+        self.assertEqual(ret, "ok")
+        self.assertEqual(self.client.calls, [])
+        joined = "\n".join(logs.output)
+        self.assertIn("does not fit the model context", joined)
+        self.assertIn(f"model={self.MODEL_B}", joined)
+        self.assertNotIn("skipped cold (persona=", joined)  # 字数の判定ではない
+
+        # (b) B の畳み (起点の前進) が適用され、送る範囲が残す量まで縮む。
+        new_b_anchor = self._anchor_for(lifecycle, self.MODEL_B)
+        self.assertGreater(
+            self._index_of(new_b_anchor), self.B_ANCHOR_INDEX + 100,
+        )
+        b_rows_after = self._rows_chars_for(lifecycle, self.MODEL_B)
+        self.assertGreaterEqual(b_rows_after, TARGET_CHARS)
+        self.assertLess(b_rows_after, TARGET_CHARS + 2 * MESSAGE_CHARS)
+        self.assertLessEqual(b_rows_after, b_limit)  # 次のスルースは B に入る
+
+        # (c) 畳まれた古い側 (新しい起点の手前まで) はマーカー以前 (A のスルースが
+        # 読み終えている) なので、読めていない範囲の記録は増えない。
+        self.assertLessEqual(self._index_of(new_b_anchor), self.MARKER_INDEX + 1)
+        self.assertEqual(self._skipped_spans(), [])
+
+        # (d) レート制限ではないので小休止は置かれない。A の起点は動かない。
+        self.assertFalse(lifecycle._metabolism_rate_limit_active(PERSONA_ID))
+        self.assertEqual(self._anchor_for(lifecycle, self.MODEL_A), a_anchor_before)
+        # マーカーも動かない (スルースは走っていない)。
+        self.assertEqual(
+            sluice._load_pan_marker(self.persona),
+            self.message_ids[self.MARKER_INDEX],
+        )
+
+        # (e) 二回目の入口は畳むものが無く、LLM を呼ばずに引き返す。
+        self.assertEqual(self._run_b(lifecycle), "skip")
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual(self._anchor_for(lifecycle, self.MODEL_B), new_b_anchor)
+        self.assertEqual(self._skipped_spans(), [])
+
+    def test_large_enough_model_runs_the_sluice_as_usual(self):
+        """対照: 同じ形でも B のコンテキスト長が十分に大きければ、スルースは普段
+        どおり一回走る (送る中身は B の範囲まるごと)。"""
+        self.client = FakeLLMClient(_sluice_result())
+        lifecycle = self._build_switched_world(self.B_LARGE_CONTEXT)
+        self._assert_the_switched_shape(lifecycle)
+
+        ret = self._run_b(lifecycle)
+
+        self.assertEqual(ret, "ok")
+        self.assertEqual(len(self.client.calls), 1)
+        sent = self.client.calls[0]["messages"]
+        # 先頭の自己定義 + B の範囲まるごと + 指示文。
+        self.assertEqual(
+            len(sent), 1 + (TOTAL_MESSAGES - self.B_ANCHOR_INDEX) + 1,
+        )
+        self.assertGreater(
+            self._index_of(self._anchor_for(lifecycle, self.MODEL_B)),
+            self.B_ANCHOR_INDEX + 100,
+        )
+        self.assertEqual(self._skipped_spans(), [])
+        self.assertFalse(lifecycle._metabolism_rate_limit_active(PERSONA_ID))
 
 
 class EmbedMetadataStrictReadTest(unittest.TestCase):
