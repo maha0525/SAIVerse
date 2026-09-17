@@ -469,8 +469,11 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(post_kwargs["headers"].get("Authorization"), "Bearer test_nim_key")
 
     @patch('llm_clients.openai.OpenAI')
-    @patch('llm_clients.openai_message_preparer.prepare_openai_messages')
+    @patch('llm_clients.openai.prepare_openai_messages')
     def test_nvidia_nim_generate_uses_openai_message_preparer_contract(self, mock_prepare, mock_openai):
+        # This test used to pin a positional call that put convert_system_to_user
+        # into max_image_embeds; a mock accepts any order, so the options are
+        # checked by name (the preparer's options are keyword-only now).
         mock_prepare.return_value = [{"role": "user", "content": "prepared"}]
         mock_openai.return_value = MagicMock()
 
@@ -480,6 +483,7 @@ class TestLLMClients(unittest.TestCase):
             "nvidia/model",
             supports_images=True,
             max_image_bytes=2048,
+            max_image_embeds=3,
             convert_system_to_user=True,
             reasoning_passback_field="reasoning_details",
         )
@@ -492,12 +496,29 @@ class TestLLMClients(unittest.TestCase):
 
         self.assertEqual(result, '{"ok": true}')
         mock_prepare.assert_called_once_with(
-            messages,
-            True,
-            2048,
-            True,
-            "reasoning_details",
+            messages=messages,
+            supports_images=True,
+            max_image_bytes=2048,
+            max_image_embeds=3,
+            convert_system_to_user=True,
+            reasoning_passback_field="reasoning_details",
         )
+        client._create_nim_structured_output_via_tool.assert_called_once()
+        self.assertEqual(
+            client._create_nim_structured_output_via_tool.call_args.kwargs["messages"],
+            [{"role": "user", "content": "prepared"}],
+        )
+
+    def test_message_preparers_refuse_positional_options(self):
+        """Options after messages must be named, so a skipped one cannot shift the rest."""
+        from llm_clients.anthropic_request_builder import _prepare_anthropic_messages
+        from llm_clients.openai_message_preparer import prepare_openai_messages
+
+        messages = [{"role": "user", "content": "hello"}]
+        for prepare in (prepare_openai_messages, _prepare_openai_messages, _prepare_anthropic_messages):
+            with self.subTest(prepare=prepare.__name__):
+                with self.assertRaises(TypeError):
+                    prepare(messages, True, None, False)
 
     @patch('llm_clients.openai.OpenAI')
     def test_nvidia_nim_structured_output_empty_raises_empty_response_error(self, mock_openai):

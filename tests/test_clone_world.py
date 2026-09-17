@@ -5,15 +5,17 @@ world clone の中核性質を検証する:
 - 実行時状態のリセット (ポート / オンラインモード / addon / visiting_ai /
   thinking_request / 非対象ペルソナの自律行動 OFF) が intent doc §4 の表どおり
 - source (本番) は一切変更されない (バイト列比較)
-- 前提未達 (dest==source / 不在ペルソナ) は CloneError
+- 前提未達 (dest==source / dest が本番 / 不在ペルソナ) は CloneError
 """
 import json
+import os
 import shutil
 import sqlite3
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.clone_world_to_test_env import CloneError, clone_world
 
@@ -217,6 +219,35 @@ class CloneWorldTest(unittest.TestCase):
                 source_db=self.source_db, source_home=self.source_home,
                 dest_db=self.source_db, dest_home=self.dest_home, force=True,
             )
+
+    def test_dest_in_production_rejected(self):
+        # 本番の場所は SAIVERSE_HOME ではなく ~/.saiverse で判定する。SAIVERSE_HOME を
+        # テスト環境へ向けていても、dest が本番の中なら何も書かずに拒否する。
+        # Path.home() は一時ディレクトリへ差し替えるので、本物の ~/.saiverse には触れない。
+        user_home = self.tmp / "user_home"
+        prod_home = user_home / ".saiverse"
+        prod_memory = prod_home / "personas" / "quon" / "memory.db"
+        prod_memory.parent.mkdir(parents=True)
+        prod_memory.write_bytes(b"PRODUCTION_MEMORY")
+        cases = [
+            (self.dest_db, prod_home),  # home だけ本番
+            (prod_home / "user_data" / "database" / "saiverse.db", self.dest_home),  # DB だけ本番
+        ]
+        with patch("pathlib.Path.home", return_value=user_home), \
+                patch.dict(os.environ, {"SAIVERSE_HOME": str(self.dest_home)}):
+            for dest_db, dest_home in cases:
+                with self.subTest(dest_db=dest_db, dest_home=dest_home):
+                    with self.assertRaises(CloneError) as ctx:
+                        clone_world(
+                            ["quon"],
+                            source_db=self.source_db, source_home=self.source_home,
+                            dest_db=dest_db, dest_home=dest_home, force=True,
+                        )
+                    self.assertIn("本番", str(ctx.exception))
+        self.assertEqual(prod_memory.read_bytes(), b"PRODUCTION_MEMORY")
+        self.assertFalse((prod_home / "user_data").exists())
+        self.assertFalse(self.dest_db.exists())
+        self.assertFalse(self.dest_home.exists())
 
     def test_missing_persona_rejected(self):
         with self.assertRaises(CloneError):

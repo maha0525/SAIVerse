@@ -9,6 +9,7 @@
 - `configure_parameters`
 - `consume_usage`
 - `config_key` (`742ba25` で追加)
+- `response_token_limit` (2026-09-17 追加 — スルースが上限から引く応答の枠。[sluice_skip_ignores_model_context](sluice_skip_ignores_model_context.md))
 - `generate` / `generate_stream`
 
 一方で `LLMClient` は他にも呼び出し側が消費する state を持つ。これらは委譲されていないため、**wrapper 自身の空の state** が返る:

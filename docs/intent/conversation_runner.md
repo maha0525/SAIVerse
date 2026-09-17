@@ -19,9 +19,14 @@
 ## 2. 不変条件 (INVARIANTS)
 
 1. **本番に向けない (ハード拒否)**。会話テストは偽の記憶をペルソナの memory.db に
-   committed する = 記憶汚染。解決した DB パスが本番 (`~/.saiverse` 配下) を指す
-   場合は起動を拒否する。上書きフラグは意図的に用意しない (向けたいユースケースが
-   存在しない)。
+   committed する = 記憶汚染。この実行が書く場所 — DB パス・SAIVERSE_HOME
+   (memory.db と建物ログの置き場)・SAIVERSE_USER_DATA_DIR・transcript の出力先 —
+   のどれかが本番 (`~/.saiverse` 配下) を指す場合は起動を拒否する。
+   **本番の場所は `Path.home() / ".saiverse"` で固定し、SAIVERSE_HOME からは導かない**。
+   SAIVERSE_HOME はテスト環境を指すために書き換える変数なので、それを本番の基準に
+   すると、テスト環境を指した瞬間に番人が本番を見張らなくなる (§5)。
+   上書きフラグは意図的に用意しない (向けたいユースケースが存在しない)。
+   判定は一日シム・世界複製・ペルソナ複製と共有の `scripts/_shared/production_guard.py`。
 2. **実チャット経路を通す**。building_messages 記録 → user_conversation Track
    activate → main_line Pulse (auto_ingest 含む) という
    `RealConversationUserEventDriver` の正規経路をそのまま使う。ショートカット
@@ -59,3 +64,13 @@ CLI から `--message` の繰り返しでも台本なしで実行できる。
 - 応答品質の自動採点 (transcript を出すまで。評価はエージェント/まはーが読む)
 - HTTP (API サーバー) 経由の実行 — API 層のテストは `test_fixtures/test_api.py` の
   領分。本ランナーは in-process で回す (サーバー起動不要・同期・低摩擦)
+
+## 5. 経緯
+
+- **2026-09-17**: 隔離環境での E2E 実行中に、§2-1 の番人が SAIVERSE_HOME を本番の
+  基準にしていたと分かった。SAIVERSE_HOME をテスト環境へ向けた状態 (テスト環境を
+  使うときの普通の形) で `--db-file` に `~/.saiverse` 配下の DB を渡すと、拒否されずに
+  通る作りだった。本番の場所を `~/.saiverse` に固定し、SAIVERSE_HOME /
+  SAIVERSE_USER_DATA_DIR / 出力先も検査対象に加えた。同じ判定を、番人を持って
+  いなかった一日シム (`scripts/run_day_sim.py`) と、複製先が本番の中かを見ていなかった
+  世界複製・ペルソナ複製にも入れた。

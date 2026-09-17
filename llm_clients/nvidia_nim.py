@@ -76,6 +76,7 @@ class NvidiaNIMClient(OpenAIClient):
         api_key_env: Optional[str] = None,
         request_kwargs: Optional[Dict[str, Any]] = None,
         max_image_bytes: Optional[int] = None,
+        max_image_embeds: Optional[int] = None,
         convert_system_to_user: bool = False,
         reasoning_passback_field: Optional[str] = None,
         default_headers: Optional[Dict[str, str]] = None,
@@ -89,6 +90,7 @@ class NvidiaNIMClient(OpenAIClient):
             api_key_env=api_key_env,
             request_kwargs=request_kwargs,
             max_image_bytes=max_image_bytes,
+            max_image_embeds=max_image_embeds,
             convert_system_to_user=convert_system_to_user,
             structured_output_backend=None,  # Not used for NIM
             reasoning_passback_field=reasoning_passback_field,
@@ -295,7 +297,6 @@ class NvidiaNIMClient(OpenAIClient):
         messages = self._inject_unsupported_media_summaries(messages)
         from tools import OPENAI_TOOLS_SPEC, TOOL_REGISTRY
         from tools.core import parse_tool_result
-        from .openai_message_preparer import prepare_openai_messages
 
         default_tools = OPENAI_TOOLS_SPEC if tools is None else tools
         if response_schema is not None and tools is None:
@@ -316,9 +317,9 @@ class NvidiaNIMClient(OpenAIClient):
         # to get structured output (workaround for Mistral models on Nvidia NIM)
         if not use_tools and response_schema:
             try:
-                prepared_messages = prepare_openai_messages(
-                    messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field
-                )
+                # Same preparation as the SDK path, so images and roles do not
+                # depend on whether structured output was requested.
+                prepared_messages = self._prepare_messages(messages)
                 # Use forced function calling to get structured output
                 text_body = self._create_nim_structured_output_via_tool(
                     messages=prepared_messages,

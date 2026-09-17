@@ -613,20 +613,14 @@ def main():
         strict_content_type=False,
     )
 
-    allowed_origins = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ]
-    allowed_origins.extend(
-        origin.strip().rstrip("/")
-        for origin in os.getenv("SAIVERSE_ALLOWED_ORIGINS", "").split(",")
-        if origin.strip().startswith(("http://", "https://"))
-    )
+    # 許可する origin の集合は api/owner_auth.py に一本化してある。
+    # WebSocket の Origin 検査 (api/routes/voice_call.py) が同じ集合を見る。
+    from api.owner_auth import allowed_browser_origins
 
     # CORS settings (Allow the configured frontend origins only)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=sorted(set(allowed_origins)),
+        allow_origins=sorted(allowed_browser_origins()),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

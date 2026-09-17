@@ -17,7 +17,13 @@ docs/intent/sluice_coverage_gaps.md 第一段 B (判断の主体の再設計後)
 - 完了: 範囲を通し終えたら記録の行が消える
 - 小休止 (C-1): レート制限の小休止中は走行を閉じる / RateLimitError で
   小休止が置かれる
-- API: 一覧 (skipped-spans / candidate-memos) と dry 見積もり
+- モデルに入る量 (docs/issues/sluice_skip_ignores_model_context.md 設計 3):
+  コンテキスト長の小さいモデルで刻んだチャンクが呼び出し直前の比較 (答えの
+  形の指定を含む) を通る / 状態が変わらない走行では見積もりと実行の刻み数が
+  一致する / 構造化出力の都合でモデルが差し替わると、見積もりと実行の刻みが
+  差し替わった後のモデルとクライアントの応答の上限に合う / 1 通だけで入らない
+  とき API ジョブが input_too_large で失敗する
+- API: 一覧 (skipped-spans / candidate-memos) と dry 見積もり (model と mode を使う)
 
 LLM はモック。SAIMemory は temp DB (test_sluice と同じハーネスを再利用)。
 """
@@ -36,6 +42,7 @@ from sea import sluice
 from test_sluice import (  # tests/ 直下は sys.path に載る (schema_scan と同じ)
     FakeLLMClient,
     FakeRuntime,
+    ResponseLimitedFakeLLMClient,
     _AdapterTestBase,
     _sluice_result,
 )
@@ -87,6 +94,48 @@ class _CaptureTestBase(_AdapterTestBase):
         """generate 1 回ぶんの messages から会話の写し部分 (先頭 system と
         末尾の注入プロンプトを除く) を返す。"""
         return call["messages"][1:-1]
+
+
+#: コンテキスト長の小さいモデル (docs/issues/sluice_skip_ignores_model_context.md 設計 3)。
+SMALL_CAPTURE_MODEL = "capture-small-model"
+
+
+def _configure_small_model(test, lifecycle, mode, *, fit_tokens, dry=False):
+    """会話の写しに使える量が約 ``fit_tokens`` になるコンテキスト長を、
+    :data:`SMALL_CAPTURE_MODEL` に設定する。
+
+    会話以外の部分 (前置き・指示文) の見積もりはコンテキスト長に依らないので、
+    一度大きな値で測ってから、目標の量が残る長さに設定し直す。``dry`` は
+    :func:`sea.sluice._capture_input_fit` にそのまま渡す (見積もりの側の量で合わせる
+    — 接続を作らず、応答の枠は 4,096)。戻り値は上限 (トークン)。
+    """
+    import math
+
+    from saiverse import model_configs
+
+    patcher = patch.dict(model_configs.MODEL_CONFIGS, {
+        SMALL_CAPTURE_MODEL: {
+            "model": SMALL_CAPTURE_MODEL, "context_length": 1_000_000,
+            "provider": "openai",
+        },
+    })
+    patcher.start()
+    test.addCleanup(patcher.stop)
+    persona = test._persona()
+    limit0 = sluice._input_token_budget(SMALL_CAPTURE_MODEL)
+    fit0, _ = sluice._capture_input_fit(
+        lifecycle, persona, mode=mode, model_key=SMALL_CAPTURE_MODEL, dry=dry,
+    )
+    non_conversation = limit0 - fit0
+    model_configs.MODEL_CONFIGS[SMALL_CAPTURE_MODEL]["context_length"] = math.ceil(
+        (fit_tokens + non_conversation + sluice._MAX_OUTPUT_TOKENS)
+        / sluice._CONTEXT_USABLE_RATIO
+    )
+    fit, _ = sluice._capture_input_fit(
+        lifecycle, persona, mode=mode, model_key=SMALL_CAPTURE_MODEL, dry=dry,
+    )
+    test.assertTrue(fit_tokens - 1 <= fit <= fit_tokens + 1, fit)
+    return sluice._input_token_budget(SMALL_CAPTURE_MODEL)
 
 
 class CapturePlanTest(_CaptureTestBase):
@@ -901,6 +950,382 @@ class MechanismModeTest(_CaptureTestBase):
             )
 
 
+class CaptureModelFitTest(_CaptureTestBase):
+    """刻みがモデルに入る量に合う (docs/issues/sluice_skip_ignores_model_context.md 設計 3)。
+
+    100 字 × 12 通を、会話に使える量が約 410 トークンのモデルで刻む。本文の
+    字数だけなら 4 通 (400) 入るが、写しの書式 (本人モードは 1 通 +4、機構モードは
+    ``[msg:N] 日付 名前: `` と改行) を足すと 3 通までしか入らない — 4 チャンクに
+    刻まれることが、書式の分を数えていることの検証になる。
+    """
+
+    def _run_mode(self, mode, client_result):
+        ids = self._append_conversation(12, chars=100)
+        self._record_span(ids[0], ids[-1])
+        client = FakeLLMClient(client_result)
+        lifecycle = self._lifecycle(client)
+        limit = _configure_small_model(self, lifecycle, mode, fit_tokens=410)
+        plan = sluice.plan_sluice_capture(
+            self._persona(), mode=mode, model_key=SMALL_CAPTURE_MODEL,
+            lifecycle=lifecycle,
+        )
+        summary = sluice.run_sluice_capture(
+            lifecycle, self._persona(), mode=mode, model_key=SMALL_CAPTURE_MODEL,
+        )
+        return plan, summary, client, limit
+
+    def _assert_chunks_fit(self, plan, summary, client, limit):
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["messages_processed"], 12)
+        self.assertEqual(summary["chunks_processed"], 4)
+        # 状態が変わらない走行では、見積もりと実行の刻み数が一致する。
+        self.assertEqual(plan["estimated_chunks"], summary["chunks_processed"])
+        self.assertEqual(plan["target_messages"], 12)
+        # 返り値の刻みの大きさは、実際に使う大きさ (固定の 100,000 字ではない)。
+        self.assertLessEqual(plan["max_span_chars"], 411)
+        # どのチャンクも呼び出し直前の比較 (答えの形の指定を含む) を通って
+        # LLM に届いている。
+        self.assertEqual(len(client.calls), 4)
+        for call in client.calls:
+            self.assertIsNotNone(call["response_schema"])
+            self.assertLessEqual(
+                sluice._estimate_input_tokens(
+                    call["messages"], SMALL_CAPTURE_MODEL,
+                    response_schema=call["response_schema"],
+                ),
+                limit,
+            )
+
+    def test_persona_mode_chunks_pass_the_pre_call_check(self):
+        plan, summary, client, limit = self._run_mode("persona", _sluice_result())
+        self._assert_chunks_fit(plan, summary, client, limit)
+        for call in client.calls:
+            self.assertEqual(len(self._history_of_call(call)), 3)
+            self.assertIs(call["response_schema"], sluice._RESPONSE_SCHEMA)
+
+    def test_mechanism_mode_chunks_pass_the_pre_call_check(self):
+        plan, summary, client, limit = self._run_mode(
+            "mechanism", {"want_memos": [], "did_memos": []},
+        )
+        self._assert_chunks_fit(plan, summary, client, limit)
+        for call in client.calls:
+            self.assertIn("（3 通。", call["messages"][0]["content"])
+            self.assertIs(call["response_schema"], sluice._CANDIDATE_SCHEMA)
+
+    def _assert_pre_call_check_arguments(self, mode, result, schema):
+        """呼び出し直前の比較に、答えの形の指定と、呼び出しに使うクライアントが渡る。"""
+        ids = self._append_conversation(2, chars=10)
+        self._record_span(ids[0], ids[-1])
+        client = FakeLLMClient(result)
+        lifecycle = self._lifecycle(client)
+        with patch.object(
+            sluice, "_ensure_input_fits", wraps=sluice._ensure_input_fits,
+        ) as spy:
+            summary = sluice.run_sluice_capture(lifecycle, self._persona(), mode=mode)
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(spy.call_count, 1)
+        self.assertIs(spy.call_args.kwargs["response_schema"], schema)
+        self.assertIs(spy.call_args.kwargs["llm_client"], client)
+
+    def test_persona_mode_pre_call_check_counts_the_schema_and_the_client(self):
+        self._assert_pre_call_check_arguments(
+            "persona", _sluice_result(), sluice._RESPONSE_SCHEMA,
+        )
+
+    def test_mechanism_mode_pre_call_check_counts_the_schema_and_the_client(self):
+        self._assert_pre_call_check_arguments(
+            "mechanism", {"want_memos": [], "did_memos": []},
+            sluice._CANDIDATE_SCHEMA,
+        )
+
+    def test_job_fails_with_input_too_large_when_one_message_does_not_fit(self):
+        """1 通だけで入らないメッセージは 1 通のチャンクになり、呼び出し直前の
+        比較で止まる。ジョブは input_too_large で失敗し、LLM は呼ばれない。"""
+        from api.routes.people.sluice import _create_job, _run_capture_job
+
+        ids = []
+        for i, chars in enumerate((2_000, 100, 100)):
+            mid = self.adapter.append_persona_message({
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": "う" * chars,
+                "timestamp": _ts(i),
+            })
+            ids.append(str(mid))
+        self._record_span(ids[0], ids[-1])
+        client = FakeLLMClient(RuntimeError("must not be called"))
+        lifecycle = self._lifecycle(client)
+        _configure_small_model(self, lifecycle, "mechanism", fit_tokens=410)
+
+        job_id = _create_job("tester")
+        _run_capture_job(
+            job_id, self._persona(), lifecycle, SMALL_CAPTURE_MODEL,
+            mode="mechanism",
+        )
+        self._assert_job_failed_input_too_large(job_id, client, ids[0])
+
+    def test_job_fails_with_input_too_large_when_the_instruction_alone_does_not_fit(self):
+        """会話ではなく会話以外の部分 (前置きと指示文) だけで入る量を使い切る
+        モデルでも、同じ失敗になる — 文面は「会話が長い」と言わない。"""
+        from api.routes.people.sluice import _create_job, _run_capture_job
+
+        ids = self._append_conversation(3, chars=100)
+        self._record_span(ids[0], ids[-1])
+        client = FakeLLMClient(RuntimeError("must not be called"))
+        lifecycle = self._lifecycle(client)
+        # 会話に使える量が負 = 指示文だけで上限を越えている。
+        _configure_small_model(self, lifecycle, "persona", fit_tokens=-50)
+
+        job_id = _create_job("tester")
+        _run_capture_job(
+            job_id, self._persona(), lifecycle, SMALL_CAPTURE_MODEL,
+            mode="persona",
+        )
+        self._assert_job_failed_input_too_large(job_id, client, ids[0])
+
+    def _assert_job_failed_input_too_large(self, job_id, client, span_start_id):
+        from api.routes.people.sluice import _get_job
+
+        job = _get_job(job_id)
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["error_code"], "input_too_large")
+        self.assertEqual(
+            job["error"],
+            "選んだモデルでは、一度に送れる量に収まりませんでした。"
+            "コンテキスト長の大きいモデルを選んで再実行してください。",
+        )
+        self.assertIn(SMALL_CAPTURE_MODEL, job["error_detail"])
+        self.assertEqual(client.calls, [])
+        # 記録は縮んでいない (次に大きいモデルで再実行できる)。
+        spans = self._spans()
+        self.assertEqual(len(spans), 1)
+        self.assertEqual(spans[0]["start_message_id"], span_start_id)
+
+
+class CaptureStructuredOutputSwitchTest(_CaptureTestBase):
+    """構造化出力の都合でモデルが差し替わるとき、刻みは差し替わった後のモデルで
+    見積もる (docs/issues/sluice_skip_ignores_model_context.md「レビューの裁定」
+    第一巡の 4・第二巡の 1)。
+
+    指定は大きいモデル (コンテキスト長 1,000,000) だが、runtime は構造化出力の
+    ために小さいモデルへ差し替える。差し替わった後のクライアントは 4,306 の応答の
+    上限を送る。小さいモデルで会話に使える量は、実行 (そのクライアントの応答の
+    上限を引く) で約 410 トークン、接続を作らない見積もり (応答の枠 4,096) で
+    約 620 トークンにしてある。100 字 × 12 通は、実行では 3 通ずつ 4 チャンク、
+    見積もりでは 3 チャンク (本人モードは 5 通ずつ、機構モードは 4 通ずつ)、
+    runtime の無い見積もり (差し替え前の大きいモデル) では 1 チャンクに刻まれる。
+    """
+
+    LARGE = "capture-large-model"
+    CLIENT_RESPONSE_LIMIT = 4_306
+
+    def setUp(self):
+        super().setUp()
+        from saiverse import model_configs
+
+        patcher = patch.dict(model_configs.MODEL_CONFIGS, {
+            self.LARGE: {
+                "model": self.LARGE, "context_length": 1_000_000,
+                "provider": "openai",
+            },
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _switching_lifecycle(self, client):
+        class _SwitchingRuntime(FakeRuntime):
+            def __init__(inner, llm_client):
+                super().__init__(llm_client)
+                inner.selections = []
+                inner.resolutions = []
+
+            def select_llm_client(inner, node_def, persona, execution_context=None,
+                                  needs_structured_output=False, state=None):
+                inner.selections.append(
+                    (execution_context.model_key, needs_structured_output),
+                )
+                if needs_structured_output:
+                    return inner.client, SMALL_CAPTURE_MODEL
+                return inner.client, execution_context.model_key
+
+            def resolve_llm_model(inner, persona, execution_context=None,
+                                  needs_structured_output=False, state=None):
+                inner.resolutions.append(
+                    (execution_context.model_key, needs_structured_output),
+                )
+                if needs_structured_output:
+                    return SMALL_CAPTURE_MODEL
+                return execution_context.model_key
+
+        return SimpleNamespace(runtime=_SwitchingRuntime(client), manager=None)
+
+    def _run_mode(self, mode, result):
+        ids = self._append_conversation(12, chars=100)
+        self._record_span(ids[0], ids[-1])
+        client = ResponseLimitedFakeLLMClient(result, self.CLIENT_RESPONSE_LIMIT)
+        lifecycle = self._switching_lifecycle(client)
+        _configure_small_model(self, lifecycle, mode, fit_tokens=410)
+        # 設定の手順が小さいモデルを直接指定して選んだ分は、記録から外す。
+        lifecycle.runtime.selections.clear()
+        lifecycle.runtime.resolutions.clear()
+        limit = sluice._input_token_budget(SMALL_CAPTURE_MODEL, llm_client=client)
+        self.assertEqual(
+            limit,
+            sluice._input_token_budget(SMALL_CAPTURE_MODEL)
+            - (self.CLIENT_RESPONSE_LIMIT - sluice._MAX_OUTPUT_TOKENS),
+        )
+        dry_fit, _ = sluice._capture_input_fit(
+            lifecycle, self._persona(), mode=mode, model_key=self.LARGE, dry=True,
+        )
+        run_fit, _ = sluice._capture_input_fit(
+            lifecycle, self._persona(), mode=mode, model_key=self.LARGE,
+        )
+        # 見積もりは応答の枠を 4,096 で数えるので、クライアントの上限との差だけ広い。
+        self.assertEqual(
+            dry_fit - run_fit, self.CLIENT_RESPONSE_LIMIT - sluice._MAX_OUTPUT_TOKENS,
+        )
+        lifecycle.runtime.selections.clear()
+        lifecycle.runtime.resolutions.clear()
+
+        # runtime の無い見積もりは、差し替え前の大きいモデルで刻む (1 チャンク)。
+        plan_without_runtime = sluice.plan_sluice_capture(
+            self._persona(), mode=mode, model_key=self.LARGE,
+        )
+        self.assertEqual(plan_without_runtime["estimated_chunks"], 1)
+
+        # runtime のある見積もり (API の dry と同じ) は、接続を作らずに差し替わった
+        # 後のモデルを決め、応答の枠 4,096 で刻む (3 チャンク)。
+        plan = sluice.plan_sluice_capture(
+            self._persona(), mode=mode, model_key=self.LARGE, lifecycle=lifecycle,
+        )
+        self.assertEqual(plan["estimated_chunks"], 3)
+        self.assertEqual(lifecycle.runtime.selections, [])
+        self.assertEqual(lifecycle.runtime.resolutions, [(self.LARGE, True)])
+
+        # 実行は、差し替わった後のモデルとそのクライアントの応答の上限で刻む
+        # (4 チャンク — 見積もりより細かい)。
+        summary = sluice.run_sluice_capture(
+            lifecycle, self._persona(), mode=mode, model_key=self.LARGE,
+        )
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["chunks_processed"], 4)
+        self.assertEqual(len(client.calls), 4)
+        for call in client.calls:
+            self.assertLessEqual(
+                sluice._estimate_input_tokens(
+                    call["messages"], SMALL_CAPTURE_MODEL,
+                    response_schema=call["response_schema"],
+                ),
+                limit,
+            )
+        # 実行は、指定のモデルから構造化出力の選び方 (接続を作る口) を通っている。
+        self.assertTrue(lifecycle.runtime.selections)
+        self.assertEqual(
+            set(lifecycle.runtime.selections), {(self.LARGE, True)},
+        )
+
+    def test_persona_mode_chunks_follow_the_switched_model(self):
+        self._run_mode("persona", _sluice_result())
+
+    def test_mechanism_mode_chunks_follow_the_switched_model(self):
+        self._run_mode("mechanism", {"want_memos": [], "did_memos": []})
+
+
+class CaptureDryDoesNotConnectTest(_CaptureTestBase):
+    """見積もり (dry) は接続を作らない (docs/issues/sluice_skip_ignores_model_context.md
+    「レビューの裁定」第二巡の 1)。本物の SEARuntime で確かめる。
+
+    本人の標準モデル (コンテキスト長 1,000,000) は構造化出力に対応せず、runtime の
+    規則で軽量モデル (:data:`SMALL_CAPTURE_MODEL`、会話に使える量は応答の枠 4,096 で
+    約 410 トークン) へ差し替わる。見積もりは select_llm_client を呼ばず、接続を作る
+    口 (ReplyModelBinding の client_for / client_for_model / structured_output_client /
+    _create_private、factory の get_llm_client)、llama.cpp のサーバーの起動
+    (_ensure_llama_server)、メディアの置き場のフォルダを作る resolve_media_uri に
+    触れずに、軽量モデルのコンテキスト長で刻む (100 字 × 12 通 → 4 チャンク)。
+    """
+
+    LARGE = "capture-large-without-structured-output"
+
+    def setUp(self):
+        super().setUp()
+        from saiverse import model_configs
+
+        patcher = patch.dict(model_configs.MODEL_CONFIGS, {
+            self.LARGE: {
+                "model": self.LARGE, "context_length": 1_000_000,
+                "provider": "openai", "supports_structured_output": False,
+            },
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _persona(self):
+        persona = super()._persona()
+        persona.model = self.LARGE
+        persona.lightweight_model = SMALL_CAPTURE_MODEL
+        return persona
+
+    def _forbid_connections(self, runtime):
+        """接続・サーバー起動・フォルダ作成の口を、呼ばれたら失敗する Mock にする。"""
+        from saiverse.persona_model_selection import ReplyModelBinding
+        from sea.runtime import SEARuntime
+
+        forbidden = AssertionError("the dry estimate must not connect")
+        mocks = {}
+        for owner, name in (
+            (runtime, "select_llm_client"),
+            (SEARuntime, "_ensure_llama_server"),
+            (ReplyModelBinding, "client_for"),
+            (ReplyModelBinding, "client_for_model"),
+            (ReplyModelBinding, "structured_output_client"),
+            (ReplyModelBinding, "_create_private"),
+        ):
+            patcher = patch.object(owner, name, side_effect=forbidden)
+            mocks[name] = patcher.start()
+            self.addCleanup(patcher.stop)
+        for target in (
+            "llm_clients.get_llm_client",
+            "llm_clients.factory.get_llm_client",
+            "saiverse.media_utils.resolve_media_uri",
+        ):
+            patcher = patch(target, side_effect=forbidden)
+            mocks[target] = patcher.start()
+            self.addCleanup(patcher.stop)
+        return mocks
+
+    def _plan_mode(self, mode):
+        from sea.runtime import SEARuntime
+
+        ids = self._append_conversation(12, chars=100)
+        self._record_span(ids[0], ids[-1])
+        runtime = SEARuntime(SimpleNamespace(building_histories={}))
+        lifecycle = SimpleNamespace(runtime=runtime, manager=None)
+        mocks = self._forbid_connections(runtime)
+        _configure_small_model(self, lifecycle, mode, fit_tokens=410, dry=True)
+
+        # runtime の無い見積もりは、差し替え前の大きいモデルで刻む。
+        plan_without_runtime = sluice.plan_sluice_capture(self._persona(), mode=mode)
+        self.assertEqual(plan_without_runtime["estimated_chunks"], 1)
+
+        # runtime のある見積もりは、接続を作らずに軽量モデルへ差し替え、その
+        # コンテキスト長で刻む。
+        plan = sluice.plan_sluice_capture(
+            self._persona(), mode=mode, lifecycle=lifecycle,
+        )
+        self.assertEqual(plan["target_messages"], 12)
+        self.assertEqual(plan["estimated_chunks"], 4)
+        self.assertLessEqual(plan["max_span_chars"], 411)
+        for name, mock in mocks.items():
+            with self.subTest(forbidden=name):
+                mock.assert_not_called()
+
+    def test_persona_mode_dry_plan_does_not_connect(self):
+        self._plan_mode("persona")
+
+    def test_mechanism_mode_dry_plan_does_not_connect(self):
+        self._plan_mode("mechanism")
+
+
 class CaptureApiTest(_CaptureTestBase):
     """API の読み口 (skipped-spans 一覧) と dry 見積もり。"""
 
@@ -963,6 +1388,36 @@ class CaptureApiTest(_CaptureTestBase):
             ))
         self.assertEqual(out["target_messages"], 4)
         self.assertEqual(out["estimated_chunks"], 2)
+
+    def test_capture_dry_uses_the_requested_model_and_mode(self):
+        """dry の見積もりはリクエストの model と mode で刻む — 実行と同じ数を言う。"""
+        from fastapi import BackgroundTasks
+
+        from api.routes.people.sluice import (
+            SluiceCaptureRequest,
+            start_sluice_capture,
+        )
+
+        ids = self._append_conversation(12, chars=100)
+        self._record_span(ids[0], ids[-1])
+        lifecycle = self._lifecycle(FakeLLMClient(_sluice_result()))
+        _configure_small_model(self, lifecycle, "persona", fit_tokens=410)
+        manager = self._manager(lifecycle)
+
+        # 本人のモデル (claude-x、設定なし) は固定の字数の上限だけで刻む。
+        out_default = asyncio.run(start_sluice_capture(
+            "tester", SluiceCaptureRequest(dry=True), BackgroundTasks(),
+            manager=manager,
+        ))
+        self.assertEqual(out_default["estimated_chunks"], 1)
+        # 小さいモデルを選ぶと、そのモデルに入る量で刻む。
+        out_small = asyncio.run(start_sluice_capture(
+            "tester",
+            SluiceCaptureRequest(dry=True, mode="persona", model=SMALL_CAPTURE_MODEL),
+            BackgroundTasks(), manager=manager,
+        ))
+        self.assertEqual(out_small["estimated_chunks"], 4)
+        self.assertLess(out_small["max_span_chars"], 100_000)
 
     def test_capture_unknown_persona_404(self):
         from fastapi import BackgroundTasks, HTTPException

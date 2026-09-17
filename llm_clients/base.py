@@ -218,6 +218,25 @@ class LLMClient:
         """Apply model-specific request parameters (subclasses may override)."""
         _ = parameters
 
+    def response_token_limit(self) -> Optional[int]:
+        """このクライアントがリクエストに載せる応答の上限 (トークン)。
+
+        プロバイダは入力と応答の上限の合計をコンテキスト長と比べるので、呼び出し
+        側が「入力にどれだけ使えるか」を決めるのに使う
+        (docs/issues/sluice_skip_ignores_model_context.md)。
+
+        既定は None。None を返すのは次の二種類のクライアント:
+
+        - generate の per-call ``max_output_tokens`` を守る (呼び出し側が渡した
+          値がそのまま送られる — Gemini)。
+        - 応答の上限をリクエストに載せない (xAI は ``max_tokens`` を受け取っても
+          送らない)。
+
+        per-call の値を無視して自分の持つ上限を送るクライアントだけが上書きする。
+        ラッパーは包んだクライアントに委ねる。
+        """
+        return None
+
     def _store_attachment(self, metadata: Dict[str, Any]) -> None:
         if metadata:
             self._latest_attachments.append(metadata)

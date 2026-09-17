@@ -5,7 +5,7 @@ import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 import React, { useState } from 'react';
 import styles from './PersonaMenu.module.css';
-import { Home, Brain, AlarmClock, Settings, X, RefreshCw, Package, Sparkles } from 'lucide-react';
+import { Home, Brain, AlarmClock, Settings, X, RefreshCw, Package, Sparkles, Phone } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 
 interface PersonaMenuProps {
@@ -23,13 +23,16 @@ interface PersonaMenuProps {
     onOpenSchedule?: () => void;
     onOpenSettings?: () => void;
     onOpenInventory?: () => void;
+    /** 通話モード (docs/intent/voice_call.md) を開く。 通話は必ずユーザーの
+     * 明示操作から始まる (不変条件 1) ので、 入口はこのメニューだけにする。 */
+    onStartCall?: () => void;
     /** dismiss 成功直後に呼ばれる。 親 (RightSidebar → ChatPage) が
      * 滞在ペルソナ表示を即時更新するための callback。 省略すると
      * 10 秒ポーリングか building 切替まで古い表示のままになる。 */
     onDismissed?: () => void;
 }
 
-export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, buildingId, onOpenMemory, onOpenSchedule, onOpenSettings, onOpenInventory, onDismissed }: PersonaMenuProps) {
+export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, buildingId, onOpenMemory, onOpenSchedule, onOpenSettings, onOpenInventory, onStartCall, onDismissed }: PersonaMenuProps) {
     useLocale();
     const [loading, setLoading] = useState(false);
     const [organizing, setOrganizing] = useState(false);
@@ -107,6 +110,24 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                 </div>
 
                 <div className={styles.actions}>
+                    {/* 通話モードは実験的機能: 開発者モードのときだけ入口ごと見せる
+                        (onStartCall が渡ってくる = 開発者モード ON かつ部屋が確定)。 */}
+                    {onStartCall && (
+                        <button
+                            className={styles.actionBtn}
+                            onClick={() => {
+                                onStartCall();
+                                onClose();
+                            }}
+                        >
+                            <Phone size={20} />
+                            <div className={styles.label}>
+                                <span>{uiText("components.PersonaMenu.label006")}</span>
+                                <span data-i18n="components.PersonaMenu.text012" className={styles.subtext}>{uiText("components.PersonaMenu.text012")}</span>
+                            </div>
+                        </button>
+                    )}
+
                     <button className={styles.actionBtn} onClick={handleDismiss} disabled={loading}>
                         {loading ? <RefreshCw className={styles.spin} size={20} /> : <Home size={20} />}
                         <div className={styles.label}>

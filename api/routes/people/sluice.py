@@ -201,7 +201,8 @@ class SluiceCaptureRequest(BaseModel):
     """後から通す採取の開始リクエスト。
 
     ``dry=True`` はジョブを開始せず、見積もり (対象メッセージ件数と予測
-    チャンク数) だけを返す。``model`` は使用モデルの明示指定 (省略 = 本人の
+    チャンク数) だけを返す。見積もりも ``model`` と ``mode`` を使う — チャンクの
+    大きさはモデルに入る量で変わる。``model`` は使用モデルの明示指定 (省略 = 本人の
     モデル。第二段 UI の軽量モデル選択がここに乗る)。``mode`` は判断の主体
     (docs/intent/sluice_coverage_gaps.md B 節): 'mechanism' (既定 — 機構が
     候補を拾って置くだけ。本人の器には書かない) / 'persona' (現在の本人が
@@ -221,6 +222,7 @@ def _run_capture_job(
     from sea.sluice import (
         SluiceCaptureSpanUnreadableError,
         SluiceExecutionBlockedError,
+        SluiceInputTooLargeError,
         plan_sluice_capture,
         run_sluice_capture,
     )
@@ -245,9 +247,13 @@ def _run_capture_job(
     _update_job(job_id, status="running", message=running_message)
     try:
         # 進み具合の分母 (対象メッセージ件数)。見積もりが失敗しても走行は
-        # 止めない — 分母なしの進み表示になるだけ。
+        # 止めない — 分母なしの進み表示になるだけ。見積もりは実行と同じ
+        # モードとモデルで刻む (刻みの大きさはモデルに入る量で変わる)。
         try:
-            total = int(plan_sluice_capture(persona).get("target_messages") or 0)
+            plan = plan_sluice_capture(
+                persona, mode=mode, model_key=model_name, lifecycle=lifecycle,
+            )
+            total = int(plan.get("target_messages") or 0)
             _update_job(job_id, total=total)
         except Exception:
             LOGGER.warning(
@@ -354,6 +360,22 @@ def _run_capture_job(
             error_code="span_unreadable",
             error_detail=str(exc),
         )
+    except SluiceInputTooLargeError as exc:
+        # 刻みはモデルに入る量に合わせてあるので、ここに来るのは 1 通だけで
+        # 入らないメッセージを含む範囲か、会話以外の部分 (本人モードの前置きと
+        # 指示文に載るコア記憶・手帳の一覧) だけで入る量を使い切っているとき
+        # (docs/issues/sluice_skip_ignores_model_context.md)。文面はどちらにも
+        # 当てはまる言い方にする。そのチャンクの LLM は呼ばれていない。処理済みの
+        # チャンクは確定している。
+        _update_job(
+            job_id, status="failed",
+            error=(
+                "選んだモデルでは、一度に送れる量に収まりませんでした。"
+                "コンテキスト長の大きいモデルを選んで再実行してください。"
+            ),
+            error_code="input_too_large",
+            error_detail=str(exc),
+        )
     except Exception as exc:
         LOGGER.exception("[sluice-capture] job failed: %s", exc)
         _update_job(
@@ -389,7 +411,15 @@ async def start_sluice_capture(
 
     if request.dry:
         from sea.sluice import plan_sluice_capture
-        return plan_sluice_capture(persona)
+        # 実行と同じモードとモデルで刻み、lifecycle を渡して実行と同じ規則で構造化
+        # 出力の都合で差し替わった後のモデルで見積もる (接続は作らない)。数は
+        # 見積もった時点の状態での数 — 本人モードでは採取で指示文が伸びると、また
+        # 応答の枠を 4,096 で数える見積もりより大きい応答の上限を送るクライアント
+        # では、実行側の刻みが細かくなりうる。
+        return plan_sluice_capture(
+            persona, mode=request.mode, model_key=request.model,
+            lifecycle=lifecycle,
+        )
 
     if lifecycle is None:
         raise HTTPException(

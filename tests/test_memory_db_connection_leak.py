@@ -9,7 +9,9 @@
 memory.db を触る後続の処理が待たされる** — 2026-09-02 の「Chronicle を開いた
 後に Memopedia の読み込みが終わらない」という報告の調査で、同じ形の欠陥が
 3 箇所見つかった (この 2 つと、tools/utilities/memory_settings_ui.py の
-``_get_arasuji_connection``)。
+``_get_arasuji_connection``)。3 つ目は旧 Gradio 期の記憶設定画面で、誰からも
+呼ばれていない死んだコードだったため 2026-09-15 にファイルごと削除した
+(landscape §9)。いま塞ぐ対象はこの 2 つ。
 """
 from __future__ import annotations
 

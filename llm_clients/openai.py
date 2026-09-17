@@ -38,7 +38,7 @@ from .openai_reasoning import (
     merge_streaming_reasoning_details,
     process_openai_stream_content,
 )
-from .utils import merge_reasoning_strings
+from .utils import merge_reasoning_strings, positive_token_count
 
 
 # Retry configuration
@@ -87,7 +87,7 @@ def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError
     return openai_errors.convert_to_llm_error(err, context)
 
 
-def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None, max_image_embeds: Optional[int] = None, convert_system_to_user: bool = False, reasoning_passback_field: Optional[str] = None) -> List[Any]:
+def _prepare_openai_messages(messages: List[Any], *, supports_images: bool, max_image_bytes: Optional[int] = None, max_image_embeds: Optional[int] = None, convert_system_to_user: bool = False, reasoning_passback_field: Optional[str] = None) -> List[Any]:
     """Backward-compatible wrapper for OpenAI message preparation."""
     return prepare_openai_messages(
         messages=messages,
@@ -327,6 +327,21 @@ class OpenAIClient(LLMClient):
         self._llama_server_base: Optional[str] = None
         self._llama_server_config: Optional[Dict[str, Any]] = None
 
+    def _prepare_messages(self, messages: List[Any]) -> List[Any]:
+        """Prepare messages with this client's image/role settings.
+
+        Every request path (including NIM's raw-HTTP structured output) goes
+        through here, so one path cannot quietly apply different settings.
+        """
+        return _prepare_openai_messages(
+            messages,
+            supports_images=self.supports_images,
+            max_image_bytes=self.max_image_bytes,
+            max_image_embeds=self.max_image_embeds,
+            convert_system_to_user=self.convert_system_to_user,
+            reasoning_passback_field=self.reasoning_passback_field,
+        )
+
     def bind_llama_server(self, server_base: str, config: Dict[str, Any]) -> None:
         """llama-server 管理下のモデルとして紐付ける。
 
@@ -471,14 +486,7 @@ class OpenAIClient(LLMClient):
             resp = openai_runtime.call_with_retry(
                 lambda: self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(
-                        effective_messages,
-                        self.supports_images,
-                        self.max_image_bytes,
-                        self.max_image_embeds,
-                        self.convert_system_to_user,
-                        self.reasoning_passback_field,
-                    ),
+                    messages=self._prepare_messages(effective_messages),
                     n=1,
                     **self._build_request_kwargs(response_schema=response_schema, temperature=temperature),
                 ),
@@ -570,14 +578,7 @@ class OpenAIClient(LLMClient):
             resp = openai_runtime.call_with_retry(
                 lambda: self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(
-                        messages,
-                        self.supports_images,
-                        self.max_image_bytes,
-                        self.max_image_embeds,
-                        self.convert_system_to_user,
-                        self.reasoning_passback_field,
-                    ),
+                    messages=self._prepare_messages(messages),
                     tools=tools_spec,
                     tool_choice="auto",
                     n=1,
@@ -1040,7 +1041,7 @@ class OpenAIClient(LLMClient):
                 resp = openai_runtime.call_with_retry(
                     lambda: self._create_completion(
                         model=self.model,
-                        messages=_prepare_openai_messages(effective_messages, self.supports_images, self.max_image_bytes, self.max_image_embeds, self.convert_system_to_user, self.reasoning_passback_field),
+                        messages=self._prepare_messages(effective_messages),
                         n=1,
                         **req_kwargs,
                     ),
@@ -1075,7 +1076,7 @@ class OpenAIClient(LLMClient):
             resp = openai_runtime.call_with_retry(
                 lambda: self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.max_image_embeds, self.convert_system_to_user, self.reasoning_passback_field),
+                    messages=self._prepare_messages(messages),
                     tools=tools_spec,
                     tool_choice=force_tool_choice,
                     stream=True,
@@ -1111,6 +1112,31 @@ class OpenAIClient(LLMClient):
                 self._request_kwargs.pop(key, None)
             else:
                 self._request_kwargs[key] = value
+
+    def response_token_limit(self) -> Optional[int]:
+        """送る ``max_tokens`` / ``max_completion_tokens`` (無ければ None)。
+
+        リクエストは ``self._request_kwargs`` から組む (_build_request_kwargs →
+        openai_runtime.build_request_kwargs)。中身はモデル設定の
+        ``request_kwargs`` と、factory が適用するモデル設定の ``parameters`` の
+        既定値 (たとえば OpenRouter の GPT-4o は ``max_tokens`` 8,000) と、
+        ペルソナの上書き (configure_parameters)。per-call の
+        ``max_output_tokens`` は受け取らない (generate の ``**_`` が落とす)。
+        ``extra_body`` の同名の値は SDK が本体へ上書きで合流させるので、そちらも
+        見る。複数あれば大きい方 (安全側)。NvidiaNIMClient の構造化出力の経路も
+        同じ組み立てを使う。
+        """
+        sources: List[Any] = [self._request_kwargs]
+        extra_body = self._request_kwargs.get("extra_body")
+        if isinstance(extra_body, dict):
+            sources.append(extra_body)
+        counts = [
+            count
+            for source in sources
+            for key in ("max_tokens", "max_completion_tokens")
+            if (count := positive_token_count(source.get(key))) is not None
+        ]
+        return max(counts) if counts else None
 
     def generate_with_tool_detection(
         self,

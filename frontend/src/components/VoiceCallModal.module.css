@@ -1,0 +1,365 @@
+/* 通話モーダル。 色は globals.css のテーマ変数に寄せて、 直値が要るところだけ
+   :global([data-theme="dark"]) で暗色を上書きする。 */
+
+.modal {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    width: 92%;
+    max-width: 520px;
+    max-height: 88vh;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+:global([data-theme="dark"]) .modal {
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.9rem 1.1rem;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+}
+
+.headerInfo {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    min-width: 0;
+}
+
+.headerIcon {
+    color: var(--accent-primary);
+    flex-shrink: 0;
+}
+
+.title {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+    line-height: 1.3;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.subtitle {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.closeBtn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    display: inline-flex;
+}
+
+.closeBtn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+/* ---- 状態表示 ---- */
+
+.statusRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.7rem 1.1rem 0;
+}
+
+.statusBadge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 0.25rem 0.65rem;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+}
+
+.status_connecting,
+.status_ending {
+    color: #b45309;
+    border-color: rgba(180, 83, 9, 0.4);
+    background: rgba(245, 158, 11, 0.12);
+}
+
+:global([data-theme="dark"]) .status_connecting,
+:global([data-theme="dark"]) .status_ending {
+    color: #fbbf24;
+}
+
+.status_active {
+    color: #047857;
+    border-color: rgba(4, 120, 87, 0.4);
+    background: rgba(16, 185, 129, 0.12);
+}
+
+:global([data-theme="dark"]) .status_active {
+    color: #34d399;
+}
+
+.status_error {
+    color: #b91c1c;
+    border-color: rgba(185, 28, 28, 0.4);
+    background: rgba(239, 68, 68, 0.12);
+}
+
+:global([data-theme="dark"]) .status_error {
+    color: #fca5a5;
+}
+
+.elapsed {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+.spin {
+    animation: voiceCallSpin 1s linear infinite;
+}
+
+@keyframes voiceCallSpin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* ---- 注意書き・エラー ---- */
+
+.warning,
+.error {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin: 0.7rem 1.1rem 0;
+    padding: 0.6rem 0.75rem;
+    border-radius: 8px;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.warning {
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(180, 83, 9, 0.35);
+    color: #92400e;
+}
+
+:global([data-theme="dark"]) .warning {
+    color: #fcd34d;
+}
+
+.error {
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(185, 28, 28, 0.35);
+    color: #991b1b;
+}
+
+:global([data-theme="dark"]) .error {
+    color: #fca5a5;
+}
+
+/* ---- 開始前の設定 ---- */
+
+.settings {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.8rem;
+    padding: 0.9rem 1.1rem 0;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    flex: 1 1 180px;
+    min-width: 0;
+}
+
+.fieldLabel {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.fieldInput {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 0.45rem 0.6rem;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--background);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+}
+
+.fieldInput:focus {
+    outline: none;
+    border-color: var(--accent-primary);
+}
+
+.fieldHint {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+/* ---- 文字起こし ---- */
+
+.transcript {
+    flex: 1;
+    min-height: 160px;
+    max-height: 40vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    margin: 0.9rem 1.1rem;
+    padding: 0.75rem;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.transcriptEmpty {
+    margin: auto;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1.6;
+}
+
+.line {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: 0.87rem;
+    line-height: 1.6;
+    max-width: 100%;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.speaker {
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+}
+
+.lineUser .speaker {
+    color: var(--accent-primary);
+}
+
+.lineText {
+    white-space: pre-wrap;
+}
+
+.linePersona .lineText {
+    color: var(--text-primary);
+}
+
+.lineUser .lineText {
+    color: var(--text-primary);
+    opacity: 0.85;
+}
+
+/* ---- 操作 ---- */
+
+.controls {
+    display: flex;
+    gap: 0.6rem;
+    padding: 0 1.1rem 1.1rem;
+}
+
+.startBtn,
+.muteBtn,
+.hangUpBtn {
+    flex: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    padding: 0.6rem 0.9rem;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.startBtn {
+    background: var(--accent-primary);
+    color: #ffffff;
+}
+
+.startBtn:hover:not(:disabled) {
+    opacity: 0.88;
+}
+
+.muteBtn {
+    background: var(--bg-tertiary);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+}
+
+.muteBtn:hover:not(:disabled) {
+    background: var(--bg-hover);
+}
+
+.muteActive {
+    background: rgba(245, 158, 11, 0.18);
+    border-color: rgba(180, 83, 9, 0.45);
+    color: #92400e;
+}
+
+:global([data-theme="dark"]) .muteActive {
+    color: #fcd34d;
+}
+
+.hangUpBtn {
+    background: #dc2626;
+    color: #ffffff;
+}
+
+.hangUpBtn:hover:not(:disabled) {
+    background: #b91c1c;
+}
+
+.startBtn:disabled,
+.muteBtn:disabled,
+.hangUpBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+@media (max-width: 480px) {
+    .modal {
+        width: 96%;
+        max-height: 92vh;
+    }
+
+    .controls {
+        flex-wrap: wrap;
+    }
+}

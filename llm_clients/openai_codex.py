@@ -45,6 +45,7 @@ from .openai_codex_auth import (
 )
 from .openai_message_preparer import prepare_openai_messages
 from .schema_utils import normalize_schema_for_strict_json_output
+from .utils import positive_token_count
 
 LOG = logging.getLogger("saiverse.llm_clients.openai_codex")
 
@@ -131,6 +132,15 @@ class OpenAICodexClient(LLMClient):
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         if parameters:
             self._params.update(parameters)
+
+    def response_token_limit(self) -> Optional[int]:
+        """送る ``max_output_tokens`` (パラメータに無ければ送らないので None)。
+
+        _build_body は ``self._params["max_output_tokens"]`` (モデル設定の
+        ``parameters`` の既定値とペルソナの上書き) だけを載せ、per-call の
+        ``max_output_tokens`` は受け取らない (generate の ``**_`` が落とす)。
+        """
+        return positive_token_count(self._params.get("max_output_tokens"))
 
     def _ensure_session(self) -> Any:
         if self._session is None:

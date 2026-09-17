@@ -68,6 +68,9 @@ dist/
 # Local Claude Code preferences
 CLAUDE.local.md
 
+# Local Codex preferences
+Codex.local.md
+
 # User-uploaded assets (legacy, migrated to user_data/icons)
 assets/avatars/
 
