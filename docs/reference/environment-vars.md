@@ -47,6 +47,21 @@
 | （旧 `SAIVERSE_GOLD_PANNING_*`） | — | **非推奨**（2026-08-19 の sluice 改名で置換）。上 2 つと同名対応（`ENABLED` / `PENDING_CAP`）の旧キーは、新キー未設定のときだけフォールバックとして読まれ、使用時に WARNING が出る（旧 `ENABLED=0` の環境が更新後に黙って採取を再開しないための設定移行）。優先順は 新キー > 旧キー > 既定。`SAIVERSE_SLUICE_*` へ移行すること |
 | `SAIVERSE_MEDIA_RECALL_ENABLED` | `false` | 添付メディア（画像/音声/動画）の概要を自動想起の検索クエリに使うか。ON 時は添付があると概要生成を同期実行するため数秒待ちが発生する。UI（グローバル設定 > 環境）からも切替可 |
 
+## 自動想起の Jev 選別層（実験、既定 OFF）
+
+詳細: [`docs/intent/auto_recall_jev_rerank.md`](../intent/auto_recall_jev_rerank.md)
+
+浮かんだ記憶の採否を、埋め込み類似度のしきい値だけでなく TypeSafe の判断専用モデル Jev の関連度判定でも絞る実験層。OFF（既定）のときは一切呼ばれず、従来どおりの挙動になる。ON のときは会話ターンごとに TypeSafe API 呼び出しが 1 回発生し、直近の会話本文 (1 件あたり 500 字まで) と候補記憶の本文抜粋 (1 件あたり 200 字。過去の会話メッセージの逐語抜粋と、その発話者ロール・時刻を含む) が外部へ送られる。API が使えなかったターンは WARNING を 1 行出して従来のしきい値方式へ静かに戻る。
+
+| 変数 | 既定 | 説明 |
+|---|---|---|
+| `TYPESAFE_API_KEY` | 未設定 | TypeSafe API キー。Jev 選別層を使うときだけ必要（他の機能は読まない） |
+| `SAIVERSE_AUTO_RECALL_JEV` | 未設定（OFF） | `1` / `true` / `yes` で Jev 選別層を有効化。`TYPESAFE_API_KEY` が空なら設定しても OFF のまま |
+| `SAIVERSE_AUTO_RECALL_JEV_FLOOR` | `0.78` | Jev に判定させる候補の埋め込みスコア下限。採用しきい値（`SAIVERSE_AUTO_RECALL_THRESHOLD`、既定 `0.86`）より広く取り、拾えていなかった帯を Jev の判定に回す。0〜1 の外を指定すると警告を出して既定に戻る |
+| `SAIVERSE_AUTO_RECALL_JEV_THRESHOLD` | `0.5` | 採用に必要な Noul 確率（0〜1）。0〜1 の外を指定すると警告を出して既定 `0.5` に戻る。ON のときは message ソースの底上げ（`SAIVERSE_AUTO_RECALL_MSG_THRESHOLD_OFFSET`）は使われない |
+| `SAIVERSE_AUTO_RECALL_JEV_TIMEOUT` | `2.5` | TypeSafe API のタイムアウト（秒）。自動想起は会話の同期経路にあるので短く保つ。0 以下や非数値を指定すると警告を出して既定に戻る |
+| `SAIVERSE_AUTO_RECALL_JEV_CONTEXT_MESSAGES` | `6` | 判定材料として渡す直近の会話本文メッセージ数。1 未満を指定すると警告を出して既定に戻る（全件送りにはならない） |
+
 ## バックアップ
 
 | 変数 | 既定 | 説明 |

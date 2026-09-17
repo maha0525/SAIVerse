@@ -7,6 +7,10 @@
 
 不変条件 (§10):
 - **LLM は絶対に呼ばない** (§10-1)。埋め込み検索 + 決定論フィルタのみ。
+  §10-1 が認める唯一の例外が「明示的なオプション層としての選別」で、その実装が
+  Jev 選別層 (``is_jev_rerank_enabled``、既定 OFF。
+  docs/intent/auto_recall_jev_rerank.md)。文章生成は行わず、判断専用モデルに
+  候補の関連度だけを問う。OFF では一切呼ばない。
 - 注入は履歴末尾のみ、head 非混入 (§10-2、cached_head_architecture C5 と同じ面)。
 - SAIMemory には**永続化しない** (§10-7)。LLM に渡す message 列にだけ足す。
 
@@ -21,8 +25,10 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -124,6 +130,111 @@ def get_entity_ambient_count() -> int:
 # する) なので、これは vivid サブ行そのものの上限にすぎない。
 def get_vivid_char_budget() -> int:
     return _env_int("SAIVERSE_AUTO_RECALL_VIVID_CHARS", 400)
+
+
+# ---------------------------------------------------------------------------
+# Jev 選別層 (オプション、既定 OFF)
+#
+# 埋め込み類似度のしきい値だけでは「意味が近い」しか測れず、「今この場面で浮かぶ
+# べきか」を測れない。TypeSafe の判断専用モデル Jev に候補ごとの関連度 (Noul 確率)
+# を 1 リクエストで問い、その判定を採否に使う。設計と実験の合否判定は
+# docs/intent/auto_recall_jev_rerank.md。
+# ---------------------------------------------------------------------------
+
+def is_jev_rerank_enabled() -> bool:
+    """Jev 選別層を使うか。env トグルと API キーの両方が揃ったときだけ True。"""
+    if os.getenv("SAIVERSE_AUTO_RECALL_JEV", "").strip().lower() not in ("1", "true", "yes"):
+        return False
+    return bool((os.getenv("TYPESAFE_API_KEY") or "").strip())
+
+
+# Jev に渡す候補の embed_score 下限。cosine 単独の採用しきい値 (0.86) より広く取り、
+# 0.78〜0.86 帯の「拾えなかった正解」を Jev の判定に回す。
+_JEV_FLOOR_DEFAULT = 0.78
+
+
+def get_jev_floor() -> float:
+    """Jev に渡す候補の embed_score 下限を返す。0〜1 の外や非有限の指定は既定に戻す。
+
+    ガードの理由は get_jev_threshold と同じ型 — nan や負値をそのまま使うと下限比較が
+    常に不成立になり、floor 未満のはずの候補まで全部外部 API へ送られる (プライバシー
+    記述と費用見積もりの前提が警告なしに外れる)。
+    """
+    value = _env_float("SAIVERSE_AUTO_RECALL_JEV_FLOOR", _JEV_FLOOR_DEFAULT)
+    if not math.isfinite(value) or not (0.0 <= value <= 1.0):
+        LOGGER.warning(
+            "[auto_recall][jev] SAIVERSE_AUTO_RECALL_JEV_FLOOR=%s is outside the "
+            "valid range 0.0-1.0; using default %s",
+            value, _JEV_FLOOR_DEFAULT,
+        )
+        return _JEV_FLOOR_DEFAULT
+    return value
+
+
+# 採用に必要な Noul 確率 (0〜1)。
+_JEV_THRESHOLD_DEFAULT = 0.5
+
+
+def get_jev_threshold() -> float:
+    """採用に必要な Noul 確率を返す。0〜1 の外や非有限の指定は既定に戻す。
+
+    クランプではなく既定へ戻すのは ``_env_float`` の不正値処理と同じ流儀。範囲外の
+    指定をそのまま使うと、0 未満なら全候補採用・1 超なら全候補却下となり、設定の
+    打ち間違いが「Jev が効いていない」状態へ静かに化ける。
+    """
+    value = _env_float("SAIVERSE_AUTO_RECALL_JEV_THRESHOLD", _JEV_THRESHOLD_DEFAULT)
+    if not math.isfinite(value) or not (0.0 <= value <= 1.0):
+        LOGGER.warning(
+            "[auto_recall][jev] SAIVERSE_AUTO_RECALL_JEV_THRESHOLD=%s is outside the "
+            "valid range 0.0-1.0; using default %s",
+            value, _JEV_THRESHOLD_DEFAULT,
+        )
+        return _JEV_THRESHOLD_DEFAULT
+    return value
+
+
+# TypeSafe API のタイムアウト (秒)。自動想起は会話の同期経路にあるので短く保つ。
+_JEV_TIMEOUT_DEFAULT = 2.5
+
+
+def get_jev_timeout() -> float:
+    """TypeSafe API のタイムアウト (秒) を返す。0 以下や非有限の指定は既定に戻す。
+
+    ガードの理由は get_jev_threshold と同じ型 — 0 以下をそのまま使うと全呼び出しが
+    即座に締切超過になり、フォールバックで会話は続くが、置き去りワーカーが毎ターン
+    生まれて「Jev が効かないのに課金だけ発生する」状態へ静かに化ける。
+    """
+    value = _env_float("SAIVERSE_AUTO_RECALL_JEV_TIMEOUT", _JEV_TIMEOUT_DEFAULT)
+    if not math.isfinite(value) or value <= 0.0:
+        LOGGER.warning(
+            "[auto_recall][jev] SAIVERSE_AUTO_RECALL_JEV_TIMEOUT=%s is not a positive "
+            "number of seconds; using default %s",
+            value, _JEV_TIMEOUT_DEFAULT,
+        )
+        return _JEV_TIMEOUT_DEFAULT
+    return value
+
+
+# Jev に渡す state の会話本文メッセージ数 (直近から)。
+_JEV_CONTEXT_MESSAGES_DEFAULT = 6
+
+
+def get_jev_context_messages() -> int:
+    """Jev の判断材料に入れる直近会話メッセージ数を返す。1 未満は既定に戻す。
+
+    クエリ側 (get_query_message_count) の「0 以下 = 全件」の慣習はここでは踏襲しない —
+    そちらはデータがローカルに留まるが、こちらは外部 API への送信件数で、全件送りは
+    「会話本文は 1 件 500 字まで」という有界性の根拠を件数側から崩すため。
+    """
+    value = _env_int("SAIVERSE_AUTO_RECALL_JEV_CONTEXT_MESSAGES", _JEV_CONTEXT_MESSAGES_DEFAULT)
+    if value < 1:
+        LOGGER.warning(
+            "[auto_recall][jev] SAIVERSE_AUTO_RECALL_JEV_CONTEXT_MESSAGES=%s is below 1; "
+            "using default %s (0 or negative would send the whole history to the external API)",
+            value, _JEV_CONTEXT_MESSAGES_DEFAULT,
+        )
+        return _JEV_CONTEXT_MESSAGES_DEFAULT
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -765,6 +876,201 @@ def _format_footer(items: List[_LedgerItem]) -> str:
     return f"（深掘り用スペル: {' / '.join(handles)}）"
 
 
+# ---------------------------------------------------------------------------
+# Jev 選別層の実行 (ON のときだけ通る経路)
+# ---------------------------------------------------------------------------
+
+_JEV_CRITERION_TRUE = (
+    "記憶の内容が現在の話題・登場人物・状況と具体的に結びついており、"
+    "いま思い出すことが会話の理解や応答に寄与する。"
+)
+_JEV_CRITERION_FALSE = (
+    "話題が違う、または表面的な語の類似だけで、"
+    "いまの会話に持ち込むと不自然・無関係になる。"
+)
+
+# Jev へ送る会話本文 1 件あたりの文字数上限。
+#
+# 上限が無いと 1 ターンのペイロードが発話の長さに引きずられて青天井になる: 費用の
+# 見積もり (1 ターン 0.01 円未満) が崩れ、長話のターンほど送受信が伸びて絶対締切に
+# 掛かりやすくなる — つまり「長く話したターンほど Jev が効かない」という、狙いと
+# 逆の挙動になる。候補記憶の側は unified_recall が既に 200 字抜粋にしているので、
+# ここで切るのは会話本文だけ。
+_JEV_CONVERSATION_TEXT_LIMIT = 500
+
+
+def _clip(text: str, limit: int) -> str:
+    """``limit`` 字を超えるテキストを先頭 ``limit`` 字 + 省略記号に詰める。"""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
+def _jev_candidates(
+    hits,
+    *,
+    accepted_keys: set,
+    context_ids: set,
+    floor: float,
+) -> List[Tuple[Tuple[str, str], Any]]:
+    """Jev に判定させる候補 (key, hit) を選ぶ。
+
+    既存の選別ループが無条件に捨てるもの (エンティティトリガーで採用済み / 既に
+    コンテキスト窓にある message / embed_score なし) はここでも外す。残りのうち
+    ``embed_score >= floor`` のものが候補。
+    """
+    candidates: List[Tuple[Tuple[str, str], Any]] = []
+    for hit in hits:
+        key = (hit.source_type, str(hit.source_id))
+        if key in accepted_keys:
+            continue
+        if hit.source_type == "message" and str(hit.source_id) in context_ids:
+            continue
+        if hit.embed_score is None:
+            continue
+        if hit.embed_score < floor:
+            continue
+        candidates.append((key, hit))
+    return candidates
+
+
+def _build_jev_request(
+    messages: List[Dict[str, Any]],
+    candidates: List[Tuple[Tuple[str, str], Any]],
+    *,
+    context_messages: int,
+) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]], Dict[str, Tuple[str, str]]]:
+    """Jev に渡す state / questions と、qid → 台帳キーの対応表を組み立てる。
+
+    会話本文は 1 件あたり ``_JEV_CONVERSATION_TEXT_LIMIT`` 字で切る (理由は同定数の
+    コメント)。候補記憶の本文は unified_recall が既に 200 字抜粋にしているので
+    ここでは触らない。
+
+    メディア想起 (``SAIVERSE_MEDIA_RECALL_ENABLED``) が ON のときは、検索クエリ
+    (``build_query``) に足すのと同じ「最新添付の概要」を state にも入れる。検索が
+    写真をきっかけに拾ってきた候補を、写真を知らない Jev が落としてしまう非対称を
+    避けるため。OFF のときと概要が無いときは ``attachments`` キー自体を入れない
+    (state の形は従来のまま)。
+    """
+    convo = [m for m in messages if _is_conversational_message(m)]
+    # 呼び出し側 (get_jev_context_messages) が >= 1 を保証する。クエリ側の
+    # 「0 以下 = 全件」の慣習をここで実装すると、将来別の呼び出し元が付いたときに
+    # 会話履歴の全件が外部 API へ出る経路が黙って復活するので、持ち込まない。
+    tail = convo[-max(1, context_messages):]
+    conversation = [
+        {
+            "role": str(m.get("role") or ""),
+            "text": _clip(str(m.get("content", "")).strip(), _JEV_CONVERSATION_TEXT_LIMIT),
+        }
+        for m in tail
+    ]
+
+    memories: Dict[str, Dict[str, str]] = {}
+    questions: Dict[str, Dict[str, Any]] = {}
+    key_by_qid: Dict[str, Tuple[str, str]] = {}
+    for idx, (key, hit) in enumerate(candidates):
+        qid = f"m{idx}"
+        key_by_qid[qid] = key
+        memories[qid] = {"title": hit.title or "", "content": hit.content or ""}
+        questions[qid] = {
+            "instructions": (
+                f"`memories.{qid}` の記憶は、`conversation` の現在の話の流れの中で、"
+                "会話の当事者の頭に自然に浮かぶ関連記憶か。"
+            ),
+            "criteria": {"true": _JEV_CRITERION_TRUE, "false": _JEV_CRITERION_FALSE},
+        }
+
+    state: Dict[str, Any] = {"conversation": conversation, "memories": memories}
+    if is_media_recall_enabled():
+        attachment_summaries = _current_attachment_summaries(messages)
+        if attachment_summaries:
+            state["attachments"] = attachment_summaries
+    return state, questions, key_by_qid
+
+
+def _run_jev_rerank(
+    hits,
+    messages: List[Dict[str, Any]],
+    *,
+    accepted_keys: set,
+    context_ids: set,
+    persona_id: str,
+) -> Optional[Dict[Tuple[str, str], float]]:
+    """Jev に候補を一括判定させる。
+
+    Returns:
+        - ``{key: noul}``: 判定できた (候補ゼロなら空 dict。API は呼んでいない)。
+        - ``None``: TypeSafe API が使えなかった。呼び出し側はこのターンだけ既存の
+          cosine しきい値方式へ静かに戻る (外部 API の障害でペルソナの返事を
+          止めないため)。
+    """
+    # 準備段階 (設定の読み取り・候補の絞り込み・リクエスト組み立て・遅延 import) は
+    # まるごと try の中に置く。docstring が約束する「失敗は None の 1 種類」を関数
+    # 全体で成立させるため (隣人の unified_recall / _find_entity_triggers も同じ姿勢で
+    # 丸ごと包んでいる)。遅延 import は OFF 経路で typesafe_client (httpx) を一切
+    # 読み込ませないためのもので、その失敗もここで畳む。
+    try:
+        floor = get_jev_floor()
+        accept_threshold = get_similarity_threshold()
+        candidates = _jev_candidates(
+            hits, accepted_keys=accepted_keys, context_ids=context_ids, floor=floor,
+        )
+
+        # 設定ミスの警告は「実際に記憶が落ちうるターン」でだけ出す。ヒットが 1 件も
+        # 無いターンにも出すと、何も起きていないのに毎ターン警告が並び、警告の意味
+        # (この設定で記憶が落ちている) と実際に起きたことがずれる。
+        if hits and floor > accept_threshold:
+            LOGGER.warning(
+                "[auto_recall][jev] JEV_FLOOR=%.3f is above the cosine acceptance threshold %.3f: "
+                "memories that the conventional path would have injected (embed_score between "
+                "%.3f and %.3f) never reach Jev and are silently dropped (persona=%s)",
+                floor, accept_threshold, accept_threshold, floor, persona_id,
+            )
+
+        if not candidates:
+            LOGGER.debug(
+                "[auto_recall][jev] no candidate above floor; API not called (persona=%s)",
+                persona_id,
+            )
+            return {}
+
+        state, questions, key_by_qid = _build_jev_request(
+            messages, candidates, context_messages=get_jev_context_messages(),
+        )
+        from saiverse.typesafe_client import TypeSafeUnavailable, evaluate_nouls
+    except Exception:
+        LOGGER.warning(
+            "[auto_recall][jev] could not prepare the request (import or build failed); "
+            "falling back to cosine threshold for this turn (persona=%s)",
+            persona_id, exc_info=True,
+        )
+        return None
+
+    started = time.monotonic()
+    try:
+        nouls, usage = evaluate_nouls(state, questions, timeout=get_jev_timeout())
+    except TypeSafeUnavailable as exc:
+        LOGGER.warning(
+            "[auto_recall][jev] unavailable (%s); falling back to cosine threshold "
+            "for this turn (persona=%s)", exc, persona_id,
+        )
+        return None
+    except Exception:
+        LOGGER.warning(
+            "[auto_recall][jev] rerank raised; falling back to cosine threshold "
+            "for this turn (persona=%s)", persona_id, exc_info=True,
+        )
+        return None
+
+    latency_ms = (time.monotonic() - started) * 1000.0
+    decisions = {key_by_qid[qid]: noul for qid, noul in nouls.items() if qid in key_by_qid}
+    LOGGER.info(
+        "[auto_recall][jev] judged %d/%d candidate(s) in %.0f ms (persona=%s, usage=%s)",
+        len(decisions), len(candidates), latency_ms, persona_id, usage,
+    )
+    return decisions
+
+
 @dataclass
 class AutoRecallResult:
     """auto_recall の実行結果。"""
@@ -791,8 +1097,10 @@ def run_auto_recall(
 ) -> AutoRecallResult:
     """自動想起を 1 ターン分実行し、注入ブロック (あれば) を返す。
 
-    LLM は呼ばない。呼び出し側はスコープ (CONVERSATION アスペクト) を確認済みで
-    あること。``conn`` / ``embedder`` が None の場合は no-op (注入なし)。
+    LLM は呼ばない (唯一の外部呼び出しは、既定 OFF の Jev 選別層が ON のときの
+    TypeSafe API 1 往復。文章生成はしない)。呼び出し側はスコープ (CONVERSATION
+    アスペクト) を確認済みであること。``conn`` / ``embedder`` が None の場合は
+    no-op (注入なし)。
 
     Args:
         conn: persona の memory.db 接続 (adapter.conn)。
@@ -876,6 +1184,17 @@ def run_auto_recall(
             LOGGER.warning("[auto_recall] unified_recall raised (persona=%s)", persona_id, exc_info=True)
             hits = []
 
+    # --- Jev 選別層 (オプション、既定 OFF) ---
+    # None = Jev を使わない/使えない (既存の cosine しきい値方式で判定する)。
+    # dict = Jev の判定結果 (key -> noul 確率)。候補ゼロなら空 dict。
+    jev_decisions: Optional[Dict[Tuple[str, str], float]] = None
+    if is_jev_rerank_enabled():
+        jev_decisions = _run_jev_rerank(
+            hits, messages,
+            accepted_keys=accepted_keys, context_ids=context_ids, persona_id=persona_id,
+        )
+    jev_threshold = get_jev_threshold() if jev_decisions is not None else 0.0
+
     # --- 選別: しきい値を満たすヒットを台帳に反映 ---
     for hit in hits:
         key = (hit.source_type, str(hit.source_id))
@@ -902,15 +1221,30 @@ def run_auto_recall(
             )
             continue
 
-        # message ソースだけしきい値を底上げする (長文類似度インフレ対策。上の
-        # get_message_threshold_offset() docstring 参照)。
-        effective_threshold = threshold + msg_threshold_offset if hit.source_type == "message" else threshold
-        passes = embed_score >= effective_threshold
-        LOGGER.debug(
-            "[auto_recall] hit %s/%s embed=%.3f threshold=%.3f -> %s title=%r",
-            hit.source_type, hit.source_id, embed_score, effective_threshold,
-            "ACCEPT" if passes else "below", (hit.title or "")[:40],
-        )
+        if jev_decisions is not None:
+            # Jev 経路: 採否は Noul 確率だけで決める。message ソースの底上げ
+            # (長文類似度インフレへの対症療法) は Jev の直接判定が置き換えるので
+            # 適用しない。判定が無いのは floor 未満で Jev に渡していない候補だけ
+            # (クライアントは全 qid が揃った応答しか成功にしないので、floor 以上の
+            # 候補は必ず判定を持つ)。念のため dict.get の防御は残す。
+            noul = jev_decisions.get(key)
+            passes = noul is not None and noul >= jev_threshold
+            LOGGER.debug(
+                "[auto_recall][jev] %s/%s embed=%.3f noul=%s -> %s title=%r",
+                hit.source_type, hit.source_id, embed_score,
+                f"{noul:.3f}" if noul is not None else "(below floor; not sent to Jev)",
+                "ACCEPT" if passes else "reject", (hit.title or "")[:40],
+            )
+        else:
+            # message ソースだけしきい値を底上げする (長文類似度インフレ対策。上の
+            # get_message_threshold_offset() docstring 参照)。
+            effective_threshold = threshold + msg_threshold_offset if hit.source_type == "message" else threshold
+            passes = embed_score >= effective_threshold
+            LOGGER.debug(
+                "[auto_recall] hit %s/%s embed=%.3f threshold=%.3f -> %s title=%r",
+                hit.source_type, hit.source_id, embed_score, effective_threshold,
+                "ACCEPT" if passes else "below", (hit.title or "")[:40],
+            )
         if not passes:
             continue
 

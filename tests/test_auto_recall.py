@@ -12,6 +12,33 @@ from unittest.mock import patch
 from sai_memory.unified_recall import RecallHit
 from sea import auto_recall
 
+# Jev 選別層の env を消してから走らせる (このファイルは cosine 方式の担当)。
+#
+# 開発機に `SAIVERSE_AUTO_RECALL_JEV=1` と `TYPESAFE_API_KEY` が入っていると、
+# run_auto_recall が Jev 経路に入り、ユニットテストが実 API を呼んでしまう
+# (しかも採否の判定基準が変わってテストの意味自体が変わる)。Jev 経路の検証は
+# tests/test_auto_recall_jev.py の担当。
+#
+# pytest の autouse fixture ではなく setUpModule/tearDownModule なのは、この
+# ファイルが `python -m unittest` でも回る入口 (末尾の unittest.main() と
+# docs/developer-guide/testing.md) を持つため — fixture は unittest ランナーでは
+# 実行されず、実キー環境の unittest 実行が実 API へ送信してしまう (Codex 4 巡目)。
+# setUpModule は pytest からも呼ばれるので、両ランナーで同じ隔離が効く。
+_JEV_ENV_KEYS = ("SAIVERSE_AUTO_RECALL_JEV", "TYPESAFE_API_KEY")
+_saved_jev_env: dict = {}
+
+
+def setUpModule():
+    for key in _JEV_ENV_KEYS:
+        _saved_jev_env[key] = os.environ.pop(key, None)
+
+
+def tearDownModule():
+    for key, value in _saved_jev_env.items():
+        if value is not None:
+            os.environ[key] = value
+    _saved_jev_env.clear()
+
 
 def _hit(source_type, source_id, *, embed_score, title="タイトル", content="内容テキスト",
          chronicle_entry_id=None):

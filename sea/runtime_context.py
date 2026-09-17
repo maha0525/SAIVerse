@@ -682,7 +682,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # ---- 自動想起 第0層 (ゾーン C) — 「浮かんだ記憶」の末尾注入 ----
     # 記憶アーキv2 §4。CONVERSATION アスペクト (user/schedule Pulse) のときのみ、
     # ローカル埋め込み検索で現在の話題に関連する記憶を末尾に一時注入する。
-    # head 非混入・SAIMemory 非永続 (§10-2/§10-7)。LLM は呼ばない (§10-1)。
+    # head 非混入・SAIMemory 非永続 (§10-2/§10-7)。LLM は呼ばない (§10-1。唯一の
+    # 例外は既定 OFF の Jev 選別層 — ON のときだけ判定専用の外部 API へ 1 往復する。
+    # docs/intent/auto_recall_jev_rerank.md)。
     # サブライン (line='sub') はそもそも _prepare_context を通らないので自然に除外。
     if not preview_only:
         try:
