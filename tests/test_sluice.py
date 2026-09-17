@@ -3192,6 +3192,15 @@ class SluiceInputEstimateTest(unittest.TestCase):
                 "model": "est-openai-zero", "provider": "openai",
                 "supports_images": True, "max_image_embeds": 0,
             },
+            # NIM: openai 互換と同じ (正の整数の設定は環境変数より優先、0 は渡さない)。
+            "est-nim": {
+                "model": "est-nim", "provider": "nvidia_nim",
+                "supports_images": True, "max_image_embeds": 1,
+            },
+            "est-nim-zero": {
+                "model": "est-nim-zero", "provider": "nvidia_nim",
+                "supports_images": True, "max_image_embeds": 0,
+            },
             # Codex: factory が max_image_embeds を渡さない。
             "est-codex": {
                 "model": "est-codex", "provider": "openai_codex",
@@ -3225,6 +3234,8 @@ class SluiceInputEstimateTest(unittest.TestCase):
             "est-anthropic-0": (0, "anthropic", True),
             "est-anthropic-env": (5, "anthropic", True),
             "est-openai-zero": (4, "openai", True),
+            "est-nim": (1, "nvidia_nim", True),
+            "est-nim-zero": (4, "nvidia_nim", True),
             "est-codex": (4, "openai_codex", True),
             "est-xai": (2, "xai", True),
             "est-ollama": (0, "ollama", False),
@@ -3241,6 +3252,63 @@ class SluiceInputEstimateTest(unittest.TestCase):
                         sluice._estimate_input_tokens(messages, model),
                         estimate_image_tokens(provider) * images + noted + 4 * 10,
                     )
+
+    def test_openai_compatible_and_nim_clients_embed_what_the_estimate_counts(self):
+        """OpenAI 互換と NIM のクライアントは、見積もりが数える枚数だけ実際に埋め込む。
+
+        上の表 (:func:`sluice._media_rules`) はクライアントのコードを読んで書き写した
+        もので、クライアントの側が変わっても表のテストは落ちない。NIM が設定の
+        ``max_image_embeds`` を受け取れるようになったとき、表は「受け取れない」
+        前提のまま残りかけた。ここでは factory が作る本物のクライアントに組み立て
+        させ、埋め込まれた枚数を見積もりの上限と突き合わせる。
+        """
+        from llm_clients.factory import get_llm_client
+
+        configs = {
+            "match-openai-configured": ("openai", 2),
+            "match-openai-zero": ("openai", 0),
+            "match-openai-env": ("openai", None),
+            "match-nim-configured": ("nvidia_nim", 2),
+            "match-nim-zero": ("nvidia_nim", 0),
+            "match-nim-env": ("nvidia_nim", None),
+        }
+        models = {}
+        for key, (provider, limit) in configs.items():
+            config = {
+                "model": key, "provider": provider,
+                "context_length": 128_000, "supports_images": True,
+            }
+            if limit is not None:
+                config["max_image_embeds"] = limit
+            models[key] = config
+        self._patch_models(models)
+        os.environ["OPENAI_API_KEY"] = "test-openai-key"
+        # 設定の 2 と区別できるよう、環境変数の上限は 3 にする。
+        os.environ["SAIVERSE_OPENAI_ATTACHMENT_LIMIT"] = "3"
+        # 本文の無い user のメッセージはクライアントが丸ごと落とすので、本文を付ける。
+        messages = [
+            {
+                "role": "user", "content": f"message {i}",
+                "metadata": {"media": [{"type": "image", "path": self._uri(i)}]},
+            }
+            for i in range(10)
+        ]
+
+        # 埋め込まれない画像の注記で、要約の LLM を呼ばない。
+        with patch("saiverse.media_summary._generate_image_summary", return_value=None):
+            for key, (provider, _) in configs.items():
+                with self.subTest(model=key):
+                    client = get_llm_client(key, provider, 128_000)
+                    embedded = sum(
+                        1
+                        for message in client._prepare_messages(messages)
+                        if isinstance(message["content"], list)
+                        for part in message["content"]
+                        if part["type"] == "image_url"
+                    )
+                    expected = sluice._media_rules(key).image_limit
+                    self.assertEqual(embedded, expected)
+                    self.assertEqual(expected, 2 if key.endswith("-configured") else 3)
 
     def _role_models(self):
         """役割の扱いを比べるためのクライアントごとのモデル (上限は十分に大きい)。"""
