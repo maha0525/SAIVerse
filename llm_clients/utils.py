@@ -51,6 +51,21 @@ def is_truthy_flag(value: Any) -> bool:
     return False
 
 
+def positive_token_count(value: Any) -> Optional[int]:
+    """設定やパラメータに書かれたトークン数を、正の整数として読む。
+
+    読めない値 (None・真偽値・数字でない文字列) と 0 以下は None。応答の上限を
+    答える ``LLMClient.response_token_limit`` の実装が使う。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return count if count > 0 else None
+
+
 def merge_reasoning_strings(chunks: List[str]) -> List[Dict[str, str]]:
     if not chunks:
         return []

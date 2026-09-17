@@ -149,6 +149,10 @@ class LlamaCachedClient(LLMClient):
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         self._inner.configure_parameters(parameters)
 
+    def response_token_limit(self) -> Optional[int]:
+        """送る応答の上限は inner のもの (リクエストを組むのは inner)。"""
+        return self._inner.response_token_limit()
+
     def consume_usage(self):
         return self._inner.consume_usage()
 

@@ -47,7 +47,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from database.models import AI as AIModel, Base, City as CityModel, User as UserModel
-from llm_clients.exceptions import ModelUnavailableError
+from llm_clients.exceptions import LLMError, ModelUnavailableError
 from saiverse import data_paths, model_configs, model_defaults
 from saiverse.persona_model_selection import (
     SOURCE_BUILTIN,
@@ -985,6 +985,66 @@ def test_the_structured_output_route_does_not_fall_back_to_the_standard_model(mo
         runtime.select_llm_client(_node(), persona, needs_structured_output=True)
 
     assert (exc_info.value.role, exc_info.value.reason) == ("lightweight_model", "unreachable")
+
+
+@pytest.mark.parametrize("with_execution_context", [False, True])
+@pytest.mark.parametrize("standard_supports,lightweight_supports,expected", [
+    (True, True, MODEL_A),     # 標準モデルが構造化出力に対応 → そのまま
+    (False, True, LITE),       # 非対応 → 軽量モデルへ差し替え
+    (False, False, None),      # どちらも非対応 → LLMError
+])
+def test_the_model_decided_without_connecting_matches_select_llm_client(
+    monkeypatch, standard_supports, lightweight_supports, expected, with_execution_context,
+):
+    """接続を作らないモデルの決定 (resolve_llm_model) は select_llm_client と同じ
+    モデルを返し、同じ失敗をする。決定の側は接続も llama.cpp のサーバーの起動も
+    しない (docs/issues/sluice_skip_ignores_model_context.md「レビューの裁定」
+    第二巡の 1)。"""
+    from sea.pulse_context import resolve_execution_context
+    from sea.runtime import SEARuntime
+
+    connected = []
+
+    def _fake_client(model, provider, context_length, *rest):
+        connected.append(model)
+        return SimpleNamespace(model=model)
+
+    monkeypatch.setattr("persona.core.get_llm_client", _fake_client)
+    monkeypatch.setattr("llm_clients.get_llm_client", _fake_client)
+    ensure_server = Mock()
+    monkeypatch.setattr(SEARuntime, "_ensure_llama_server", ensure_server)
+    model_configs.MODEL_CONFIGS[MODEL_A]["supports_structured_output"] = standard_supports
+    model_configs.MODEL_CONFIGS[LITE]["supports_structured_output"] = lightweight_supports
+    persona = _persona(model=MODEL_A, lightweight_model=LITE)
+    runtime = SEARuntime(SimpleNamespace(building_histories={}))
+    ec = resolve_execution_context(persona, None) if with_execution_context else None
+
+    if expected is None:
+        with pytest.raises(LLMError) as resolved:
+            runtime.resolve_llm_model(persona, execution_context=ec, needs_structured_output=True)
+        assert connected == []
+        ensure_server.assert_not_called()
+        with pytest.raises(LLMError) as selected:
+            runtime.select_llm_client(
+                _node(), persona, execution_context=ec, needs_structured_output=True,
+            )
+        assert str(resolved.value) == str(selected.value)
+        assert resolved.value.user_message == selected.value.user_message
+        return
+
+    resolved_model = runtime.resolve_llm_model(
+        persona, execution_context=ec, needs_structured_output=True,
+    )
+    assert connected == []
+    ensure_server.assert_not_called()
+
+    client, selected_model = runtime.select_llm_client(
+        _node(), persona, execution_context=ec, needs_structured_output=True,
+    )
+    assert resolved_model == selected_model == expected
+    assert client.model == expected
+    assert connected  # 接続を作るのは select_llm_client の側だけ
+    ensure_server.assert_called()
 
 
 def test_the_error_reaches_the_chat_exit_through_the_dispatcher():
