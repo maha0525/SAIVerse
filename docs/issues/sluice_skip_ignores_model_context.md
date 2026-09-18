@@ -1,7 +1,7 @@
 # モデルを切り替えると、上限の小さいモデルが記憶の整理から抜け出せなくなる (スルースを飛ばす判定が、実際に送る量を見ていない)
 
 **起票**: 2026-09-17 (うるさんの報告「普段は Gemma 4、たまに Qwen や 4o。4o に切り替えたら弾かれて会話できない」、まはー経由)
-**状態**: 検証待ち — 修正方針はまはーの GO 済み (2026-09-17)。レビュー三巡を経て、まはーの判断でレビューを終えた。隔離環境の実経路の確認は合格。残るのは PR のまはー確認と、うるさんの環境での確認
+**状態**: 検証待ち — 修正方針はまはーの GO 済み (2026-09-17)。レビュー三巡を経て、まはーの判断でレビューを終えた。隔離環境の実経路の確認は合格。修正は PR #304 で develop にマージ済み。残るのは、うるさんの環境での確認
 **関連**: [sluice_coverage_gaps.md](../intent/sluice_coverage_gaps.md) (第一段 A「冷たいときはスルースを飛ばす」— 本件はその判定の穴)、`sea/sluice.py` (`_call_sluice_llm` / `get_max_span_chars` / 後から通す採取)、`sea/session_lifecycle.py` (`_run_metabolism_locked` のスルースの節)、`api/routes/people/sluice.py`、`saiverse/token_estimator.py`
 
 ## 症状

@@ -1,6 +1,6 @@
 # NIM のモデルで構造化出力を使うと、画像がモデルに届かない
 
-**状態**: 検証待ち。修正は develop 向けの PR #306 に出してある。
+**状態**: 検証待ち。修正は PR #306 で develop にマージ済み。残るのはまはーの実機確認。
 
 関連: [`docs/issues/archive/nim_structured_output_drops_request_kwargs.md`](archive/nim_structured_output_drops_request_kwargs.md) (同じ経路で、モデル設定の一部が落ちていた前の件)
 
