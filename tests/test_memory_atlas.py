@@ -1791,6 +1791,63 @@ class ChronicleLegacyMigrationTest(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(count, 4)  # root_chronicle (trunk) は数えない
 
+class CompatViewReinitTests(unittest.TestCase):
+    """互換 VIEW ``arasuji_entries`` の再 init が DROP を発行しないことの恒久検査。
+
+    API はリクエストごとに init_arasuji_tables を通る。無条件の DROP→CREATE は
+    DDL が文ごとに即コミットされるため名前の不在の瞬間を作り、並行リクエストの
+    読み手が "no such table: arasuji_entries" を踏む (2026-09-18、cost-estimate で
+    本番 500)。定義が同じなら VIEW に触らないこと自体を検査する。"""
+
+    class _DropSpy:
+        """DROP VIEW の発行を記録する conn ラッパー (他は素通し)。"""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.drops = []
+
+        def execute(self, sql, *args):
+            if "DROP VIEW" in sql:
+                self.drops.append(sql)
+            return self._inner.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    def test_reinit_does_not_drop_the_view_when_definition_is_unchanged(self):
+        import sqlite3 as _sqlite3
+
+        from sai_memory.arasuji.storage import init_arasuji_tables
+
+        conn = _sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_arasuji_tables(conn)
+
+        spy = self._DropSpy(conn)
+        init_arasuji_tables(spy)
+        self.assertEqual(spy.drops, [])
+        # 見積もりと同じ生 SQL が通る (VIEW は生きている)。
+        conn.execute("SELECT SUM(message_count) FROM arasuji_entries WHERE level = 1")
+
+    def test_reinit_recreates_the_view_when_definition_changed(self):
+        import sqlite3 as _sqlite3
+
+        from sai_memory.arasuji.storage import init_arasuji_tables
+
+        conn = _sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        init_arasuji_tables(conn)
+
+        # 旧デプロイの定義を再現: 列が足りない VIEW に差し替える。
+        conn.execute("DROP VIEW arasuji_entries")
+        conn.execute("CREATE VIEW arasuji_entries AS SELECT id FROM memopedia_pages")
+
+        init_arasuji_tables(conn)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(arasuji_entries)")}
+        self.assertIn("level", cols)
+        self.assertIn("message_count", cols)
+
+
 class RefGrammarAcceptanceTests(_AtlasTestBase):
     """A1「入口は広く、出口は一本」の恒久検査 (2026-07-15)。
 

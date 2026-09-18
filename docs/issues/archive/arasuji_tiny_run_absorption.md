@@ -80,7 +80,7 @@ Codex 敵対レビュー 1 巡 (6 件) + ローカル LLM レビュー 1 巡 (13
 
 ## 副産物 (別修正)
 
-- `_get_arasuji_db` の per-request 初期化で互換 VIEW の DROP→CREATE が並行リクエストと競合し、本番 500 (`view arasuji_entries already exists`、2026-08-31 の fragments GET で実発生)。→ "already exists" を受容する形で同日修正済み (`sai_memory/arasuji/storage.py`)。
+- `_get_arasuji_db` の per-request 初期化で互換 VIEW の DROP→CREATE が並行リクエストと競合し、本番 500 (`view arasuji_entries already exists`、2026-08-31 の fragments GET で実発生)。→ "already exists" を受容する形で同日修正済み (`sai_memory/arasuji/storage.py`)。**続報 (2026-09-18)**: この修正は競合の CREATE 側だけを塞いでいた。DROP と CREATE の間の「名前が存在しない瞬間」を読み手が踏む側 (`no such table: arasuji_entries`、cost-estimate で本番 500) が残っており、「定義が変わったときだけ作り直す」形で塞いだ (恒久検査: `tests/test_memory_atlas.py` の `CompatViewReinitTests`)。
 
 ## 関連
 
