@@ -13,9 +13,17 @@ asks (``current_model_setting_warnings`` in manager/initialization.py).
 SAIVerse does not substitute another model when a configured one has no
 definition (docs/intent/persona_model_selection.md, decision 7): the work that
 needs that model stops until it is reselected, and the warnings say so.
+
+The same table also owns which destinations a role can actually talk to
+(``role_model_save_rejection``). A model on a ``jev_compat`` provider answers
+typed questions with probabilities only; the ordinary conversation clients
+(``llm_clients/factory.py``) cannot speak to it at all. Assigning one to a
+conversation role would stop the persona the moment it tried to reply, so those
+saves are refused, and values that arrived through some other path (a hand-edited
+.env) are reported as screen warnings.
 """
 import logging
-from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +45,10 @@ MODEL_ROLES: Dict[str, str] = {
     "image_summary_model": "SAIVERSE_IMAGE_SUMMARY_MODEL",
     "audio_summary_model": "SAIVERSE_AUDIO_SUMMARY_MODEL",
     "video_summary_model": "SAIVERSE_VIDEO_SUMMARY_MODEL",
+    # 反射判断 (docs/intent/reflex_judgment.md)。組み込みの既定は空 = 役割は
+    # 未割り当てで、反射判断を使う機能はどれも動かない。黙って費用が発生する
+    # 経路を作らないため、チュートリアルのプリセットもここには値を配らない。
+    "reflex_judgment_model": "SAIVERSE_REFLEX_JUDGMENT_MODEL",
 }
 
 #: 役割の表示ラベルと説明。全体設定のモデルロール画面に出る文言で、ラベルは
@@ -66,31 +78,38 @@ MODEL_ROLE_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "label": "動画要約モデル",
         "description": "ユーザー添付動画の要約生成用モデル（Gemini系のみ対応）",
     },
+    "reflex_judgment_model": {
+        "label": "反射判断",
+        "description": (
+            "自動想起の選別などの、型付きの質問に確率だけで答える判断に使うモデル。"
+            "未設定なら反射判断は動きません"
+        ),
+    },
 }
 
 
-def _defined_by_config_key(value: str) -> bool:
+def _config_by_config_key(value: str) -> Optional[Mapping[str, Any]]:
     """設定キー (定義ファイル名) の完全一致だけで引く。"""
-    from saiverse.model_configs import get_model_provider
+    from saiverse import model_configs
 
-    try:
-        get_model_provider(value)
-    except ValueError:
-        return False
-    return True
+    return model_configs.MODEL_CONFIGS.get(value)
 
 
-def _defined_by_find_model_config(value: str) -> bool:
+def _config_by_find_model_config(value: str) -> Optional[Mapping[str, Any]]:
     """find_model_config (設定キー / API モデル名 / ファイル名 / 接尾辞) で引く。"""
     from saiverse.model_configs import find_model_config
 
     _config_key, config = find_model_config(value)
-    return bool(config)
+    return config or None
 
 
-#: 役割ごとの「定義があるか」の引き方。その値を実際に使う側と
+#: 役割ごとの「その値のモデル設定をどう引くか」。その値を実際に使う側と
 #: 同じ引き方にする — 違う引き方だと「動いているのに警告が出る」「動いていない
 #: のに出ない」になる。
+#:
+#: 「定義があるか」(:func:`role_model_is_defined`) も「その役割の宛先として
+#: 噛み合っているか」(``_ROLE_DESTINATION_CHECKS``) も、この一枚から引いた設定で
+#: 判定する。引き方を二枚に分けると、保存を断った値と警告に出る値がずれる。
 #:
 #: - default_model: 設定キーの完全一致。話す標準モデルを決める
 #:   saiverse/persona_model_selection.py の resolve_speaking_model が引き、
@@ -104,14 +123,126 @@ def _defined_by_find_model_config(value: str) -> bool:
 #:   saiverse/media_summary.py が引く。ペルソナ単位の VISION_MODEL / AUDIO_MODEL /
 #:   VIDEO_MODEL は読む箇所が無い (保存されるだけ) ので、ペルソナ単位の検査
 #:   (manager/initialization.py の current_model_setting_warnings) には入れていない。
-_ROLE_LOOKUPS: Dict[str, Callable[[str], bool]] = {
-    "default_model": _defined_by_config_key,
-    "lightweight_model": _defined_by_config_key,
-    "memory_weave_model": _defined_by_find_model_config,
-    "image_summary_model": _defined_by_find_model_config,
-    "audio_summary_model": _defined_by_find_model_config,
-    "video_summary_model": _defined_by_find_model_config,
+#: - reflex_judgment_model: 設定キーの完全一致。saiverse/reflex_judgment.py の
+#:   resolve_backend が MODEL_CONFIGS を設定キーで引く。
+_ROLE_CONFIG_LOOKUPS: Dict[str, Callable[[str], Optional[Mapping[str, Any]]]] = {
+    "default_model": _config_by_config_key,
+    "lightweight_model": _config_by_config_key,
+    "memory_weave_model": _config_by_find_model_config,
+    "image_summary_model": _config_by_find_model_config,
+    "audio_summary_model": _config_by_find_model_config,
+    "video_summary_model": _config_by_find_model_config,
+    "reflex_judgment_model": _config_by_config_key,
 }
+
+
+def _protocol_of(config: Mapping[str, Any]) -> Optional[str]:
+    """モデル設定が話す protocol (provider_ref から受け継いだものも含む)。
+
+    ``MODEL_CONFIGS`` に載っている設定は読み込みの時点で provider_ref を解決済み
+    なので ``protocol`` / ``provider`` を見れば足りる。``find_model_config`` は
+    ``MODEL_CONFIGS`` に入らなかったファイルを直接読んで返すことがあり、その設定は
+    provider_ref が未解決のままなので、そのときだけ provider を辿る。
+    """
+    protocol = config.get("protocol") or config.get("provider")
+    if protocol:
+        return str(protocol)
+    provider_ref = config.get("provider_ref")
+    if not provider_ref:
+        return None
+    from saiverse.provider_configs import get_provider
+
+    provider = get_provider(str(provider_ref))
+    if not isinstance(provider, Mapping):
+        return None
+    value = provider.get("protocol")
+    return str(value) if value else None
+
+
+def _reflex_destination_mismatch(_role: str, value: str) -> bool:
+    """反射判断の役割に、反射判断が使えない宛先が割り当たっているか。
+
+    定義はあるので「SAIVerse にありません」の検査は素通りするが、反射判断の第 1 段は
+    型付きの質問をそのまま送れる宛先 (protocol が ``jev_compat`` で、宛先の URL と
+    答えられる質問の型が宣言されているもの) としか話せない
+    (docs/intent/reflex_judgment.md §6-4)。割り当てても実行時に WARNING が出て想起が
+    従来方式へ戻るだけで、画面には何も出ない — それでは設定ミスが見えないので、ここで
+    画面の警告に載せる。**保存は弾かない** (第 2 段で通常の LLM も合法になる)。
+
+    判定は実行側とまったく同じ関数 (saiverse/reflex_judgment.py の
+    ``resolve_backend``) を呼んで行う。protocol だけを自前で見直すと、protocol は
+    合っているのに宛先の URL が空・答えられる型が空といった不備が画面に出ない。
+    同じ関数に寄せてあれば、将来 resolve_backend に検査が増えても画面が追従する。
+
+    答えられる質問の型も ``FIRST_STAGE_QUESTION_TYPE`` (noul) まで含めて見る。第 1 段で
+    この層に仕事を頼むのは自動想起の選別だけで、その仕事は noul しか投げない。noul に
+    答えない宛先を画面が「噛み合っている」と言うと、自動想起は候補の集め方だけを広げた
+    まま毎ターン判定に失敗し、その設定ミスはどこにも出ないままになる。
+
+    キーの有無は判定に含めない (resolve_backend はキーを見ない)。キー欠落は構造の
+    不備ではなく、実行時に WARNING で知らせる別の話。
+    """
+    from saiverse import model_configs
+    from saiverse.reflex_judgment import (
+        FIRST_STAGE_QUESTION_TYPE,
+        ReflexJudgmentUnavailable,
+        resolve_backend,
+    )
+
+    if not model_configs.MODEL_CONFIGS.get(value):
+        # 定義が無い件は「SAIVerse にありません」の警告が拾う。
+        return False
+    try:
+        resolve_backend(model_key=value, required_type=FIRST_STAGE_QUESTION_TYPE)
+    except ReflexJudgmentUnavailable:
+        return True
+    return False
+
+
+def _jev_only_destination(role: str, value: str) -> bool:
+    """反射判断以外の役割に、反射判断専用の宛先 (jev 互換) が割り当たっているか。
+
+    jev 互換の宛先は型付きの質問に確率で答えるだけの相手で、文章を書かせることが
+    できない。通常の会話クライアント (llm_clients/factory.py) はこの protocol を
+    知らないので、割り当てられたペルソナは話そうとした時点で失敗する
+    (docs/intent/reflex_judgment.md §6-4)。保存の時点で断り、env の直書きなどで
+    既に入っている値は画面の警告で知らせる。
+
+    定義が無い値は False を返す (「SAIVerse にありません」の検査が拾う — 同じ件で
+    二つの警告を出さない)。
+    """
+    from saiverse.reflex_judgment import JEV_COMPAT_PROTOCOL
+
+    config = _ROLE_CONFIG_LOOKUPS[role](value)
+    if config is None:
+        return False
+    return _protocol_of(config) == JEV_COMPAT_PROTOCOL
+
+
+#: 「定義はあるが、その役割の宛先として噛み合っていない」を見る役割ごとの検査。
+#: 引数は ``(役割, 値)``。
+#:
+#: 反射判断の役割は「その宛先で反射判断ができるか」(実行側と同じ関数を通す)、
+#: それ以外の全役割は「反射判断専用の宛先が紛れ込んでいないか」。表を役割ごとに
+#: 手で並べず ``MODEL_ROLES`` から組むのは、役割を増やしたときに検査の無い役割が
+#: 黙って生まれないようにするため。
+_ROLE_DESTINATION_CHECKS: Dict[str, Callable[[str, str], bool]] = {
+    role: (
+        _reflex_destination_mismatch
+        if role == "reflex_judgment_model"
+        else _jev_only_destination
+    )
+    for role in MODEL_ROLES
+}
+
+#: 保存を断る理由 (:func:`role_model_save_rejection` の返り値)。
+SAVE_REJECT_UNDEFINED = "undefined"      # その名前の定義が SAIVerse に無い
+SAVE_REJECT_DESTINATION = "destination"  # 定義はあるが、その役割では使えない宛先
+
+#: 噛み合わない値を**保存の時点で**断る役割。反射判断の役割は入れない — 第 2 段で
+#: 通常の LLM も反射判断の合法な宛先になるので、いま断ると将来の正しい設定まで拒む
+#: ことになる (docs/intent/reflex_judgment.md §6-4)。そちらは画面の警告だけで知らせる。
+_SAVE_BLOCKED_ROLES = frozenset(MODEL_ROLES) - {"reflex_judgment_model"}
 
 _PERSONA_RESELECT = "ペルソナ設定で選び直すと"
 _GLOBAL_RESELECT = "グローバル設定の「モデルロール」で選び直すと"
@@ -125,7 +256,31 @@ def role_model_is_defined(role: str, value: str) -> bool:
     同じ判定を使うためにある。判定が割れると、保存を断ったのに警告が出ない、あるいは
     話せているのに止まっていると言う。
     """
-    return _ROLE_LOOKUPS[role](value)
+    return _ROLE_CONFIG_LOOKUPS[role](value) is not None
+
+
+def role_model_save_rejection(role: str, value: str) -> Optional[str]:
+    """その役割にその値を保存してよいかを調べ、断る理由を返す (保存してよければ None)。
+
+    見るのは二つ — 定義がその名前で引けるか (:func:`role_model_is_defined`) と、
+    その役割で使える宛先か (``_ROLE_DESTINATION_CHECKS``)。後者を保存で断るのは
+    ``_SAVE_BLOCKED_ROLES`` の役割だけ。
+
+    ペルソナ設定の保存・グローバル設定のモデルロールの保存・チャット画面のモデル
+    一時上書きが、同じ判定をここから引く (入口ごとに書くと、ある画面からだけ
+    会話の止まる設定を作れる穴が残る)。
+
+    Raises:
+        Exception: 定義の引き方そのものが失敗したとき。呼び出し側はこれを捕まえて
+            「保存しない」に倒す (確かめられない名前を保存したあとで「無かった」と
+            分かっても遅い)。
+    """
+    if not role_model_is_defined(role, value):
+        return SAVE_REJECT_UNDEFINED
+    check = _ROLE_DESTINATION_CHECKS.get(role)
+    if role in _SAVE_BLOCKED_ROLES and check is not None and check(role, value):
+        return SAVE_REJECT_DESTINATION
+    return None
 
 
 def _names(names: Optional[Sequence[str]]) -> str:
@@ -202,11 +357,106 @@ def _global_message(
             f"{label}を個別に設定していないペルソナ{_names(names)}の記憶の整理は止まっています。"
             f"{_GLOBAL_RESELECT}、再起動しなくても整理が再開します。"
         )
+    if role == "reflex_judgment_model":
+        return (
+            f"グローバル設定の{label}のモデル '{value}' は SAIVerse にないため、"
+            "型付きの質問に確率で答える判断 (自動想起の強化など) は動いていません。"
+            f"{_GLOBAL_RESELECT}、再起動しなくても動くようになります。"
+        )
     # 画像・音声・動画の要約は、代わりのモデルで要約しない (saiverse/media_summary.py)。
     return (
         f"グローバル設定の{label} '{value}' は SAIVerse にないため、要約は止まっています。"
         f"{_GLOBAL_RESELECT}、再起動しなくても要約されるようになります。"
     )
+
+
+#: 反射判断専用の宛先が会話の役割に入っているときの、理由の一文。
+_JEV_ONLY = "は反射判断だけに使える宛先のため、"
+
+
+def _jev_only_persona_message(role: str, name: str, value: str) -> str:
+    """反射判断専用の宛先がペルソナの役割に入っているときの文面。
+
+    いま止まっているとは言い切らず「この設定のままでは〜できません」と書く —
+    チャット画面のモデル一時上書きが効いている間、そのペルソナは上書きのモデルで
+    話せているので、「止まっています」は事実にならないことがある。
+    """
+    label = MODEL_ROLE_DESCRIPTIONS[role]["label"]
+    if role == "default_model":
+        return (
+            f"{name}の標準モデル '{value}'{_JEV_ONLY}会話には使えません。"
+            f"この設定のままでは{name}は話せません。"
+            f"{_PERSONA_RESELECT}、再起動しなくても話せるようになります。"
+        )
+    if role == "lightweight_model":
+        return (
+            f"{name}の軽量モデル '{value}'{_JEV_ONLY}会話には使えません。"
+            f"この設定のままでは{name}は軽量モデルを使う作業"
+            "（返事の途中の作業や、自分から動く判断）ができません。"
+            f"{_PERSONA_RESELECT}、再起動しなくても続けられるようになります。"
+        )
+    if role == "memory_weave_model":
+        return (
+            f"{name}の{label} '{value}'{_JEV_ONLY}会話には使えません。"
+            f"この設定のままでは{name}の記憶の整理は動きません。"
+            f"{_PERSONA_RESELECT}、再起動しなくても整理が再開します。"
+        )
+    return (
+        f"{name}の{label} '{value}'{_JEV_ONLY}{label}には使えません。"
+        "この設定のままでは、このモデルを使う仕事は動きません。"
+        f"{_PERSONA_RESELECT}、再起動しなくても再開します。"
+    )
+
+
+def _jev_only_global_message(role: str, value: str, names: Optional[Sequence[str]]) -> str:
+    """反射判断専用の宛先がグローバル設定の役割に入っているときの文面。"""
+    label = MODEL_ROLE_DESCRIPTIONS[role]["label"]
+    if role == "default_model":
+        return (
+            f"グローバル設定の標準モデル '{value}'{_JEV_ONLY}会話には使えません。"
+            f"この設定のままでは、個別の標準モデルを持たないペルソナ{_names(names)}は話せません。"
+            f"{_GLOBAL_RESELECT}、再起動しなくても話せるようになります。"
+        )
+    if role == "lightweight_model":
+        return (
+            f"グローバル設定の軽量モデル '{value}'{_JEV_ONLY}会話には使えません。"
+            f"この設定のままでは、個別の軽量モデルを持たないペルソナ{_names(names)}は"
+            "軽量モデルを使う作業（返事の途中の作業や、自分から動く判断）ができません。"
+            f"{_GLOBAL_RESELECT}、再起動しなくても続けられるようになります。"
+        )
+    if role == "memory_weave_model":
+        return (
+            f"グローバル設定の{label} '{value}'{_JEV_ONLY}会話には使えません。"
+            f"この設定のままでは、{label}を個別に設定していないペルソナ{_names(names)}の"
+            "記憶の整理は動きません。"
+            f"{_GLOBAL_RESELECT}、再起動しなくても整理が再開します。"
+        )
+    # 画像・音声・動画の要約。
+    return (
+        f"グローバル設定の{label} '{value}'{_JEV_ONLY}要約には使えません。"
+        "この設定のままでは要約は動きません。"
+        f"{_GLOBAL_RESELECT}、再起動しなくても要約されるようになります。"
+    )
+
+
+def _mismatch_message(
+    role: str,
+    value: str,
+    persona_name: Optional[str],
+    names: Optional[Sequence[str]],
+) -> str:
+    """定義はあるのに、その役割の宛先として噛み合っていない値の文面。"""
+    label = MODEL_ROLE_DESCRIPTIONS[role]["label"]
+    if role == "reflex_judgment_model":
+        # 反射判断はペルソナ単位の値を読む箇所が無いので、全体設定の文面だけ。
+        return (
+            f"グローバル設定の{label}のモデル '{value}' は反射判断の宛先として使えないため、"
+            "型付きの質問に確率で答える判断 (自動想起の強化など) は動いていません。"
+            f"{_GLOBAL_RESELECT}、再起動しなくても動くようになります。"
+        )
+    if persona_name is not None:
+        return _jev_only_persona_message(role, persona_name, value)
+    return _jev_only_global_message(role, value, names)
 
 
 def missing_model_warnings(
@@ -216,10 +466,14 @@ def missing_model_warnings(
     override_model: Optional[str] = None,
     affected_persona_names: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> List[Dict[str, str]]:
-    """設定されたモデル名のうち、定義が見つからないものを画面の警告にして返す。
+    """設定されたモデル名のうち、そのままでは役割が働かないものを画面の警告にして返す。
+
+    見るのは二通り — 定義が見つからない値と、定義はあるのにその役割の宛先として
+    噛み合っていない値 (反射判断の役割に反射判断ができない宛先、または会話や要約の
+    役割に反射判断専用の宛先)。
 
     Args:
-        entries: ``(役割, 設定値)`` の並び。役割は ``_ROLE_LOOKUPS`` のキー。
+        entries: ``(役割, 設定値)`` の並び。役割は ``_ROLE_CONFIG_LOOKUPS`` のキー。
             設定値が None / 空文字の役割は未設定として検査しない。
         persona_name: 渡すとペルソナ単位の文面 (その名前で呼ぶ)、省略すると
             グローバル設定単位の文面になる。
@@ -228,31 +482,54 @@ def missing_model_warnings(
         affected_persona_names: グローバル設定単位の文面で、役割ごとに「その値を
             使っているペルソナ (個別の値を持たないペルソナ)」の名前。分からないときは省略する。
 
-    一つの役割の検査が例外を出しても、ログに残して残りの役割の検査を続ける。
+    一つの役割の検査が例外を出しても、残りの役割の検査は続ける。例外を出した値は
+    「確かめられなかった = 定義なし」として、その役割の警告に出す。
     """
     warnings: List[Dict[str, str]] = []
     for role, value in entries:
         if not value or not str(value).strip():
             continue
         try:
-            if _ROLE_LOOKUPS[role](value):
-                continue
+            defined = role_model_is_defined(role, value)
+            # 定義があっても、その役割の宛先として噛み合っていないことがある
+            # (反射判断に通常の LLM や宛先の宣言が欠けたモデル、逆に会話の役割に
+            # 反射判断専用の宛先)。env の直書きなど保存の関所を通らない経路で
+            # 入った値もここで拾う。
+            check = _ROLE_DESTINATION_CHECKS.get(role)
+            mismatched = bool(defined and check is not None and check(role, value))
         except Exception:
+            # 確かめられなかった値は「定義なし」と同じ扱いにして画面に出す。黙って
+            # 飛ばすと、検査そのものが壊れている間だけ警告が消え、設定が正しいのと
+            # 見分けがつかない。保存と一時上書きの関所も「確かめられない値は断って
+            # 知らせる」側に倒してあるので、警告だけ逆に倒さない。
             LOGGER.warning(
-                "Model config check failed (role=%s value=%r persona=%s); skipping.",
+                "Model config check failed (role=%s value=%r persona=%s); "
+                "warning about it as if it were undefined.",
                 role, value, persona_name, exc_info=True,
             )
+            defined = False
+            mismatched = False
+        if defined and not mismatched:
             continue
 
-        if persona_name is not None:
-            message = _persona_message(role, persona_name, value, override_model)
+        if mismatched:
+            message = _mismatch_message(
+                role, value, persona_name, (affected_persona_names or {}).get(role),
+            )
+            LOGGER.warning(
+                "Model config is not a usable destination for this role "
+                "(role=%s value=%r persona=%s).",
+                role, value, persona_name,
+            )
         else:
-            names = (affected_persona_names or {}).get(role)
-            message = _global_message(role, value, override_model, names)
-
-        LOGGER.warning(
-            "Model config not found (role=%s value=%r persona=%s).",
-            role, value, persona_name,
-        )
+            if persona_name is not None:
+                message = _persona_message(role, persona_name, value, override_model)
+            else:
+                names = (affected_persona_names or {}).get(role)
+                message = _global_message(role, value, override_model, names)
+            LOGGER.warning(
+                "Model config not found (role=%s value=%r persona=%s).",
+                role, value, persona_name,
+            )
         warnings.append({"source": "model_config", "message": message})
     return warnings

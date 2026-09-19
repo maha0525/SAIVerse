@@ -34,6 +34,10 @@ VALID_UI_PROTOCOLS = {"openai_compat", "ollama_compat"}
 ALL_PROTOCOLS = {
     "openai_compat", "ollama_compat", "anthropic_native", "gemini_native",
     "xai_native", "nvidia_nim", "openai_codex",
+    # 反射判断 (docs/intent/reflex_judgment.md) が話す System One 形式の宛先。
+    # llm_clients/ ではなく saiverse/reflex_judgment.py がコード実装を持つので、
+    # 他の native 系と同じく UI からは作れない (VALID_UI_PROTOCOLS に入れない)。
+    "jev_compat",
 }
 
 CONNECTION_TEST_TIMEOUT = 5.0

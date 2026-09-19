@@ -1180,10 +1180,24 @@ def _maybe_inject_auto_recall(
         )
         return
 
+    # ペルソナ単位の「自動想起を強化する」スイッチ (AUTO_RECALL_ENHANCED)。
+    # run_auto_recall は persona_id 文字列しか受けないので、persona オブジェクトを
+    # 持っているここで読んで旗として渡す (docs/intent/reflex_judgment.md §4)。
+    # 読めなかった回は OFF に倒す — 費用の出る側を既定にしない。
+    try:
+        enhanced = bool(runtime._is_auto_recall_enhanced_for_persona(persona))
+    except Exception:
+        LOGGER.warning(
+            "[sea][auto_recall] failed to read AUTO_RECALL_ENHANCED (persona=%s); "
+            "treating it as off", persona_id, exc_info=True,
+        )
+        enhanced = False
+
     from sea.auto_recall import run_auto_recall
 
     result = run_auto_recall(
-        conn, embedder, messages, persona_id=persona_id, thread_id=thread_id,
+        conn, embedder, messages,
+        persona_id=persona_id, thread_id=thread_id, enhanced=enhanced,
     )
     if not result.injected or not result.block:
         return

@@ -14,6 +14,8 @@ export function getModelRoleLabel(role: string, fallback?: string): string {
             return t('modelRole.audio_summary_model.label');
         case 'video_summary_model':
             return t('modelRole.video_summary_model.label');
+        case 'reflex_judgment_model':
+            return t('modelRole.reflex_judgment_model.label');
         default:
             return fallback || role;
     }
@@ -33,6 +35,8 @@ export function getModelRoleDescription(role: string, fallback?: string): string
             return t('modelRole.audio_summary_model.desc');
         case 'video_summary_model':
             return t('modelRole.video_summary_model.desc');
+        case 'reflex_judgment_model':
+            return t('modelRole.reflex_judgment_model.desc');
         default:
             return fallback || '';
     }

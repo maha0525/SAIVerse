@@ -1,0 +1,22 @@
+{
+  "id": "localjev",
+  "display_name": "localjev (local)",
+  "protocol": "jev_compat",
+  "base_url": "http://127.0.0.1:8080",
+  "api_key_required": false,
+  "reflex_judgment": {
+    "path": "/v1/systemone",
+    "answers_key": "answers",
+    "usage_key": "usage",
+    "answer_fields": {
+      "noul": "noul",
+      "choice": "choice",
+      "score": "score"
+    },
+    "usage_fields": {
+      "input_tokens": "input_tokens",
+      "output_tokens": "output_tokens"
+    },
+    "supported_types": ["noul", "choice", "score"]
+  }
+}

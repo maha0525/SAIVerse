@@ -13,11 +13,13 @@ from sai_memory.unified_recall import RecallHit
 from sea import auto_recall
 from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
 
-# Jev 選別層の env を消してから走らせる (このファイルは cosine 方式の担当)。
+# 反射判断の役割の env を消してから走らせる (このファイルは cosine 方式の担当)。
 #
-# 開発機に `SAIVERSE_AUTO_RECALL_JEV=1` と `TYPESAFE_API_KEY` が入っていると、
-# run_auto_recall が Jev 経路に入り、ユニットテストが実 API を呼んでしまう
-# (しかも採否の判定基準が変わってテストの意味自体が変わる)。Jev 経路の検証は
+# 強化の経路に入るには「ペルソナのスイッチ ON」と「役割にモデル割り当てあり」の
+# 両方が要る。このファイルは run_auto_recall を enhanced 引数なし (= False) で
+# 呼ぶので、役割が埋まっていても経路には入らない — それでも開発機の
+# `SAIVERSE_REFLEX_JUDGMENT_MODEL` を消しておく。スイッチの既定が将来変わったときに
+# ユニットテストが実 API を呼ぶ事故を、ここで止めておきたいため。強化経路の検証は
 # tests/test_auto_recall_jev.py の担当。
 #
 # pytest の autouse fixture ではなく setUpModule/tearDownModule なのは、この
@@ -25,20 +27,20 @@ from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
 # docs/developer-guide/testing.md) を持つため — fixture は unittest ランナーでは
 # 実行されず、実キー環境の unittest 実行が実 API へ送信してしまう (Codex 4 巡目)。
 # setUpModule は pytest からも呼ばれるので、両ランナーで同じ隔離が効く。
-_JEV_ENV_KEYS = ("SAIVERSE_AUTO_RECALL_JEV", "TYPESAFE_API_KEY")
-_saved_jev_env: dict = {}
+_REFLEX_ENV_KEYS = ("SAIVERSE_REFLEX_JUDGMENT_MODEL", "TYPESAFE_API_KEY")
+_saved_reflex_env: dict = {}
 
 
 def setUpModule():
-    for key in _JEV_ENV_KEYS:
-        _saved_jev_env[key] = os.environ.pop(key, None)
+    for key in _REFLEX_ENV_KEYS:
+        _saved_reflex_env[key] = os.environ.pop(key, None)
 
 
 def tearDownModule():
-    for key, value in _saved_jev_env.items():
+    for key, value in _saved_reflex_env.items():
         if value is not None:
             os.environ[key] = value
-    _saved_jev_env.clear()
+    _saved_reflex_env.clear()
 
 
 def _hit(source_type, source_id, *, embed_score, title="タイトル", content="内容テキスト",
@@ -1108,6 +1110,7 @@ class TestPersonaToggleGate(unittest.TestCase):
         runtime = SimpleNamespace(
             manager=None,
             _is_auto_recall_enabled_for_persona=lambda persona: True,
+            _is_auto_recall_enhanced_for_persona=lambda persona: False,
         )
         messages = _msgs(("user", "こんにちは"))
         empty_result = AutoRecallResult(
@@ -1123,6 +1126,62 @@ class TestPersonaToggleGate(unittest.TestCase):
                 pulse_type="user",
             )
         mock_run.assert_called_once()
+        self.assertIs(mock_run.call_args.kwargs["enhanced"], False)
+
+    def test_enhanced_switch_is_passed_through_to_run_auto_recall(self):
+        """「自動想起を強化する」は呼び出し側が読んで旗として渡す。
+
+        run_auto_recall は persona_id 文字列しか受けないので、persona オブジェクトを
+        持つ _maybe_inject_auto_recall が DB から読んで渡す配線を固定する。
+        """
+        from sea.runtime_context import _maybe_inject_auto_recall
+        from sea.auto_recall import AutoRecallResult
+
+        runtime = SimpleNamespace(
+            manager=None,
+            _is_auto_recall_enabled_for_persona=lambda persona: True,
+            _is_auto_recall_enhanced_for_persona=lambda persona: True,
+        )
+        empty_result = AutoRecallResult(
+            injected=False, block=None, query="", hit_count=0,
+            accepted_count=0, ledger_size=0, char_count=0, plain_text=None,
+        )
+        with patch(
+            "sea.auto_recall.run_auto_recall",
+            return_value=empty_result,
+        ) as mock_run:
+            _maybe_inject_auto_recall(
+                runtime, self._persona(), _msgs(("user", "こんにちは")),
+                pulse_type="user",
+            )
+        self.assertIs(mock_run.call_args.kwargs["enhanced"], True)
+
+    def test_unreadable_enhanced_switch_falls_back_to_off(self):
+        """スイッチを読めなかった回は OFF に倒す (費用の出る側を既定にしない)。"""
+        from sea.runtime_context import _maybe_inject_auto_recall
+        from sea.auto_recall import AutoRecallResult
+
+        def _explode(persona):
+            raise RuntimeError("DB is unavailable")
+
+        runtime = SimpleNamespace(
+            manager=None,
+            _is_auto_recall_enabled_for_persona=lambda persona: True,
+            _is_auto_recall_enhanced_for_persona=_explode,
+        )
+        empty_result = AutoRecallResult(
+            injected=False, block=None, query="", hit_count=0,
+            accepted_count=0, ledger_size=0, char_count=0, plain_text=None,
+        )
+        with patch(
+            "sea.auto_recall.run_auto_recall",
+            return_value=empty_result,
+        ) as mock_run:
+            _maybe_inject_auto_recall(
+                runtime, self._persona(), _msgs(("user", "こんにちは")),
+                pulse_type="user",
+            )
+        self.assertIs(mock_run.call_args.kwargs["enhanced"], False)
 
 
 if __name__ == "__main__":

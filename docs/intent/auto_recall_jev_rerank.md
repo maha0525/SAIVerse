@@ -161,8 +161,8 @@ user、本文は `<system>` で包まれ、目印を metadata に持つ) とし�
   その発言を種に検索するようになる。OFF では判定経路に入らず、拾い上げの 3 つの引数
   (`keywords` / `exclude_message_ids` / `source_allocations`) も `unified_recall` へ
   渡さないので、検索は従来とまったく同じ引数で走る。外部 API 用モジュール
-  (`saiverse/typesafe_client.py`、httpx) も import されない (`run_auto_recall` の
-  `is_jev_rerank_enabled()` 分岐で、採否判定は旧コードの else 側をそのまま通る)。
+  (`saiverse/reflex_judgment.py`、httpx) も import されない (`run_auto_recall` の
+  強化の分岐で、採否判定は旧コードの else 側をそのまま通る)。
   既存テスト (`tests/test_auto_recall.py`) は OFF 時の挙動を件数・内容の表明で
   固定しているが、注入文面のバイト単位の完全一致までは検査していない。
 - `embed_score` の全件補完も、拾い上げの 3 引数を渡さない既定呼び出し (= OFF の
@@ -176,14 +176,26 @@ user、本文は `<system>` で包まれ、目印を metadata に持つ) とし�
 その場で消えるのではなく粘着ウィンドウの分だけ薄れてから消える (従来方式で
 cosine しきい値を割ったときとまったく同じ経路)。記憶が急に消えず数ターンかけて
 薄れるのは §4.3 の設計意図そのものなので、Jev 層はここに触らない。
-回帰テストは `tests/test_auto_recall_jev.py::test_jev_rejection_does_not_evict_sticky_item`。
+回帰テストは `tests/test_auto_recall_jev.py::test_rejection_does_not_evict_sticky_item`。
 
 ### 失敗時の振る舞い
 
 TypeSafe API の失敗 (キー無し・タイムアウト・非 200・不正応答) は **そのターンだけ
 既存の cosine しきい値方式に静かに戻る** (WARNING ログ 1 行)。自動想起は会話の
 同期経路にあり、外部 API の障害がペルソナの返事を止めてはならない。タイムアウトは
-既定 2.5 秒 (env 調整可)。
+2.5 秒。
+
+「戻る」は採否の判定だけでなく**候補集めからやり直す**ことを指す (2026-09-20、
+敵対レビュー 6 巡目)。強化が効いているターンは拾い上げの 3 引数で候補の母集団を
+広げているので、判定だけ落ちて広げたまま cosine で選別すると、従来経路なら母集団に
+すら入らない記憶が注入されたり、枠の違いで拾えたはずの記憶が落ちたりする。判定が
+使えなかったターンは `unified_recall` を既定の引数でもう一度呼び、その結果に従来の
+選別を掛ける — 注入されるものは「最初からスイッチ OFF だったターン」と一致する
+(回帰テストは
+`tests/test_auto_recall_jev.py::test_the_failed_turn_injects_exactly_what_the_switch_off_turn_would`)。
+そもそも毎ターン落ちる設定 (noul に答えられない宛先など) に入り込まないよう、
+「いま使えるか」の判定には noul に答えられることまで含める (`is_available` →
+`resolve_backend(required_type=...)`、docs/intent/reflex_judgment.md)。
 
 エラー時の規範は「止めるのではなく、記録し、明示し、選択してもらう」— ここでは
 フォールバックが「止めない」、WARNING ログが「記録・明示」にあたる。
@@ -204,16 +216,23 @@ TypeSafe API の失敗 (キー無し・タイムアウト・非 200・不正応�
 ための設計)、下の効果測定はこの条件込みで読むこと — 「Jev が効いていないターンが
 混ざる」のは、同時実行が混んだ結果でありうる。
 
-### 設定 (すべて env、読み取りは毎ターン)
+### 設定
 
-| env | 既定 | 意味 |
+ON/OFF は **ペルソナ設定の「自動想起を強化する」トグル** (DB の
+`AI.AUTO_RECALL_ENHANCED`、既定 OFF) と、**モデルの役割「反射判断」へのモデル割り当て**
+(env `SAIVERSE_REFLEX_JUDGMENT_MODEL` / グローバル設定の「モデルロール」) の両方が
+揃ったときだけ効く ([reflex_judgment.md](reflex_judgment.md))。答える側の宛先とキーは、
+割り当てたモデル設定ファイルの宣言から決まる。
+
+判定のつまみは実験で決めた値のまま `sea/auto_recall.py` のモジュール定数に置く
+(利用者向けの設定ではないので env の口は持たない):
+
+| 定数 | 値 | 意味 |
 |---|---|---|
-| `SAIVERSE_AUTO_RECALL_JEV` | (空) = OFF | `1/true/yes` かつ `TYPESAFE_API_KEY` があるときだけ ON |
-| `TYPESAFE_API_KEY` | (空) | TypeSafe API キー |
-| `SAIVERSE_AUTO_RECALL_JEV_FLOOR` | 0.78 | Jev に渡す候補の embed_score 下限 |
-| `SAIVERSE_AUTO_RECALL_JEV_THRESHOLD` | 0.5 | 採用に必要な Noul 確率 |
-| `SAIVERSE_AUTO_RECALL_JEV_TIMEOUT` | 2.5 | API タイムアウト (秒) |
-| `SAIVERSE_AUTO_RECALL_JEV_CONTEXT_MESSAGES` | 6 | state に入れる直近会話メッセージ数 |
+| `_REFLEX_FLOOR` | 0.78 | 判断に渡す候補の embed_score 下限 |
+| `_REFLEX_THRESHOLD` | 0.5 | 採用に必要な Noul 確率 |
+| `_REFLEX_TIMEOUT` | 2.5 | 判断のタイムアウト (秒) |
+| `_REFLEX_CONTEXT_MESSAGES` | 6 | state に入れる直近会話メッセージ数 |
 
 既定 OFF は「旧経路を flag で残す」判定 (feedback_no_dead_code_via_flags) には
 該当しない — §10-1 が「明示的なオプション層」を要求しており、cosine 方式は
@@ -221,9 +240,11 @@ TypeSafe API の失敗 (キー無し・タイムアウト・非 200・不正応�
 
 ### 置き場所
 
-- `saiverse/typesafe_client.py` — 薄い HTTP クライアント (httpx 使用、依存追加なし)。
-  Jev の判定口は今後ツール選択・自律判断の実験でも使う想定があるため、
-  auto_recall 内へ埋め込まず独立モジュールにする。
+- `saiverse/reflex_judgment.py` — 反射判断の共通層 (httpx 使用、依存追加なし)。
+  判定口は今後ツール選択・自律判断でも使う想定があるため、auto_recall 内へ
+  埋め込まず独立モジュールにしてある。2026-09-20 までは Jev 専用の
+  `saiverse/typesafe_client.py` だったが、答える側を差し替えられる形
+  ([reflex_judgment.md](reflex_judgment.md)) へ載せ替えて廃止した。
 - `sea/auto_recall.py` — 候補の絞り込みと採否判定の差し込みのみ。
 
 ## 効果測定 (実験の合否判定)
@@ -234,7 +255,8 @@ DEBUG ログに候補ごとの `embed_score` / `noul` / 採否を出す。まは
 2. 無関係な記憶の注入 (ノイズ) が減ったか
 3. 会話の体感遅延が許容範囲か (追加レイテンシは API 1 往復ぶん)
 
-ダメなら env を OFF に戻すだけで完全に元の挙動へ戻る。
+ダメならペルソナ設定の「自動想起を強化する」を OFF に戻すだけで完全に元の挙動へ戻る
+(2026-09-20 までは env `SAIVERSE_AUTO_RECALL_JEV` がこの役をしていた)。
 
 ## 経緯
 
@@ -251,3 +273,12 @@ DEBUG ログに候補ごとの `embed_score` / `noul` / 採否を出す。まは
   なく部屋の様子になっているターンがあると判明 (21:28 のターン)。知覚ブロックを
   会話文から外し、種の優先順位を 3 段にした (上の 4 点目)。あわせて「いま見えた
   もの」を字面検索のキーワードと Jev の判断材料へ脇道から参加させた。
+- 2026-09-20: ON/OFF の持ち方が env から移った。**この選別を使うかは、env
+  `SAIVERSE_AUTO_RECALL_JEV` ではなく、ペルソナ設定の「自動想起を強化する」トグル
+  (DB の `AI.AUTO_RECALL_ENHANCED`、既定 OFF) と、モデルの役割「反射判断」への
+  モデル割り当ての両方が揃ったときだけ効く形になった** ([reflex_judgment.md](reflex_judgment.md)
+  第 1 段)。答える側も Jev 固定ではなく、役割に割り当てたモデル設定で決まる。
+  実験のつまみだった env 4 本 (`_FLOOR` / `_THRESHOLD` / `_TIMEOUT` /
+  `_CONTEXT_MESSAGES`) は、調整済みの値のままモジュール定数へ畳んで廃止した。
+  選別の中身 (floor 0.78・採用 0.5・ソース枠・state の組み立て・observations) は
+  この載せ替えで変えていない。

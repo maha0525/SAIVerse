@@ -574,14 +574,17 @@ class InitializationMixin:
         画面 (GET /api/config/startup-warnings) が取りに来るたびに呼ばれる。保存せず、
         読むたびにいまの状態から作る — どの入口から設定が変わっても古い警告は残らない。
 
-        - チャット画面のモデル一時上書きのモデルが SAIVerse に無ければ、そのこと。
-        - グローバル設定: ``MODEL_ROLES`` の 6 役割を環境変数から読む。定義の無い値は
+        - チャット画面のモデル一時上書きのモデルが SAIVerse に無いか、会話には
+          使えない宛先 (反射判断専用のモデル) なら、そのこと。判定は保存・上書きの
+          入口と同じ一本 (saiverse/persona_model_selection.py の
+          save_rejection_reason) から引く。
+        - グローバル設定: ``MODEL_ROLES`` の 7 役割を環境変数から読む。定義の無い値は
           「止まっています」。標準・軽量・Memory Weave モデルは、その値を使っている
           (個別の値を持たない) ペルソナの名前を並べる。一時上書き中の標準モデルは
           「上書きを解除すると止まる」。
         - ペルソナ: この City のペルソナの DB 行から、標準・軽量・Memory Weave
-          モデルを読み、表示名 (AINAME) で呼ぶ。画像/音声/動画要約モデルは、
-          ペルソナ単位の値を読む箇所が無いので対象にしない。
+          モデルを読み、表示名 (AINAME) で呼ぶ。画像/音声/動画要約モデルと反射判断の
+          モデルは、ペルソナ単位の値を読む箇所が無いので対象にしない。
         - 切り替えられなかったペルソナ: 読み込んでいるペルソナのうち、決め方
           (saiverse/persona_model_selection.py) が指すモデルと、実際に使っている
           モデルが食い違う人だけ、その名前つきで知らせる。失敗を記録しておかず、
@@ -592,16 +595,13 @@ class InitializationMixin:
         """
         import os
 
-        from saiverse.model_defaults import (
-            MODEL_ROLES,
-            missing_model_warnings,
-            role_model_is_defined,
-        )
+        from saiverse.model_defaults import MODEL_ROLES, missing_model_warnings
         from saiverse.persona_model_selection import (
             live_model_override,
-            override_missing_message,
+            override_unusable_message,
             read_persona_model_rows,
             resolve_speaking_model,
+            save_rejection_reason,
             unswitched_persona_message,
         )
 
@@ -610,17 +610,18 @@ class InitializationMixin:
         override, _overrides = live_model_override(self)
         warnings: List[Dict[str, str]] = []
         if override is not None:
-            try:
-                if not role_model_is_defined("default_model", override):
-                    warnings.append({
-                        "source": "model_config",
-                        "message": override_missing_message(override),
-                    })
-            except Exception:
-                LOGGER.warning(
-                    "Model config check failed for the chat model override %r; skipping.",
-                    override, exc_info=True,
-                )
+            # 定義の有無だけでなく「会話に使える宛先か」まで見る。定義済みの反射判断
+            # 専用のモデルが上書きに残っていると (入口の関所ができる前に入った値や、
+            # 前のプロセスからの引き継ぎ) 会話は失敗するのに、定義はあるので
+            # 「SAIVerse にありません」の検査は素通りしてしまう。
+            # 検査そのものが失敗したときは save_rejection_reason が「断る」側に倒し、
+            # ログを残す (確かめられない名前を問題なしとは言わない)。
+            reason = save_rejection_reason("default_model", override)
+            if reason is not None:
+                warnings.append({
+                    "source": "model_config",
+                    "message": override_unusable_message(override, reason),
+                })
 
         # DB の読み出しだけを独立に扱う。ここで例外を外へ出すと、ルートの外側の
         # 例外処理がグローバル設定の警告まで一緒に捨て、保存済みの警告が無ければ

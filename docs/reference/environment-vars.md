@@ -47,20 +47,18 @@
 | （旧 `SAIVERSE_GOLD_PANNING_*`） | — | **非推奨**（2026-08-19 の sluice 改名で置換）。上 2 つと同名対応（`ENABLED` / `PENDING_CAP`）の旧キーは、新キー未設定のときだけフォールバックとして読まれ、使用時に WARNING が出る（旧 `ENABLED=0` の環境が更新後に黙って採取を再開しないための設定移行）。優先順は 新キー > 旧キー > 既定。`SAIVERSE_SLUICE_*` へ移行すること |
 | `SAIVERSE_MEDIA_RECALL_ENABLED` | `false` | 添付メディア（画像/音声/動画）の概要を自動想起の検索クエリに使うか。ON 時は添付があると概要生成を同期実行するため数秒待ちが発生する。UI（グローバル設定 > 環境）からも切替可 |
 
-## 自動想起の Jev 選別層（実験、既定 OFF）
+## 反射判断（型付きの質問に確率だけで答える判断層）
 
-詳細: [`docs/intent/auto_recall_jev_rerank.md`](../intent/auto_recall_jev_rerank.md)
+詳細: [`docs/intent/reflex_judgment.md`](../intent/reflex_judgment.md)、最初の利用者は [`docs/intent/auto_recall_jev_rerank.md`](../intent/auto_recall_jev_rerank.md)
 
-浮かんだ記憶の採否を、埋め込み類似度のしきい値だけでなく TypeSafe の判断専用モデル Jev の関連度判定でも絞る実験層。OFF（既定）のときは一切呼ばれず、従来どおりの挙動になる。ON のときは会話ターンごとに TypeSafe API 呼び出しが 1 回発生し、直近の会話本文 (1 件あたり 500 字まで) と候補記憶の本文抜粋 (1 件あたり 200 字。過去の会話メッセージの逐語抜粋と、その発話者ロール・時刻を含む) が外部へ送られる。API が使えなかったターンは WARNING を 1 行出して従来のしきい値方式へ静かに戻る。
+自由記述の要らない判断（自動想起の選別など）を、文章を組み立てるモデルではなく「状況と型付きの質問を渡すと確率だけが返る」宛先に任せる層。**env でこの層を切り替える設定は無い** — 答える側はグローバル設定の「モデルロール」で反射判断の役割にどのモデルを割り当てるかで決まる（2026-09-20 に env ベースの実験設定をこの形へ載せ替えた）。
 
 | 変数 | 既定 | 説明 |
 |---|---|---|
-| `TYPESAFE_API_KEY` | 未設定 | TypeSafe API キー。Jev 選別層を使うときだけ必要（他の機能は読まない） |
-| `SAIVERSE_AUTO_RECALL_JEV` | 未設定（OFF） | `1` / `true` / `yes` で Jev 選別層を有効化。`TYPESAFE_API_KEY` が空なら設定しても OFF のまま |
-| `SAIVERSE_AUTO_RECALL_JEV_FLOOR` | `0.78` | Jev に判定させる候補の埋め込みスコア下限。採用しきい値（`SAIVERSE_AUTO_RECALL_THRESHOLD`、既定 `0.86`）より広く取り、拾えていなかった帯を Jev の判定に回す。0〜1 の外を指定すると警告を出して既定に戻る |
-| `SAIVERSE_AUTO_RECALL_JEV_THRESHOLD` | `0.5` | 採用に必要な Noul 確率（0〜1）。0〜1 の外を指定すると警告を出して既定 `0.5` に戻る。ON のときは message ソースの底上げ（`SAIVERSE_AUTO_RECALL_MSG_THRESHOLD_OFFSET`）は使われない |
-| `SAIVERSE_AUTO_RECALL_JEV_TIMEOUT` | `2.5` | TypeSafe API のタイムアウト（秒）。自動想起は会話の同期経路にあるので短く保つ。0 以下や非数値を指定すると警告を出して既定に戻る |
-| `SAIVERSE_AUTO_RECALL_JEV_CONTEXT_MESSAGES` | `6` | 判定材料として渡す直近の会話本文メッセージ数。1 未満を指定すると警告を出して既定に戻る（全件送りにはならない） |
+| `SAIVERSE_REFLEX_JUDGMENT_MODEL` | 未設定（役割なし） | 反射判断の役割に割り当てるモデル設定キー。未設定のあいだ反射判断は動かない（黙って費用が発生する経路を作らないため）。UI（グローバル設定 > モデルロール > 反射判断）からも設定でき、設定ファイルの無い名前は保存されない |
+| `TYPESAFE_API_KEY` | 未設定 | 同梱の `typesafe` プロバイダ（TypeSafe 公式の System One）の API キー。反射判断にそのプロバイダのモデルを割り当てたときだけ読まれる |
+
+自動想起でこの層を使うかは、**ペルソナ設定の「自動想起を強化する」トグル**（DB の `AI.AUTO_RECALL_ENHANCED`、既定 OFF）で決まる。トグルが ON で、かつ反射判断の役割にモデルが割り当たっているときだけ、会話ターンごとに判断の呼び出しが 1 回発生し、直近の会話本文 (1 件あたり 500 字まで) と候補記憶の本文抜粋 (1 件あたり 200 字。過去の会話メッセージの逐語抜粋と、その発話者ロール・時刻を含む) が宛先へ送られる。呼び出しが使えなかったターンは WARNING を 1 行出して従来のしきい値方式へ静かに戻る。判定の細かいつまみ（候補の下限 0.78 / 採用に必要な確率 0.5 / タイムアウト 2.5 秒 / 判断材料に入れる会話 6 件）は実験で決めた定数で、`sea/auto_recall.py` に書いてある（env の口は持たない）。
 
 ## バックアップ
 
@@ -92,6 +90,7 @@
 |---|---|
 | `SAIVERSE_DEFAULT_MODEL` | グローバル設定の標準モデル。ペルソナが話す標準モデルは「チャット画面の一時上書き → ペルソナ個別の標準モデル → この値 → 組み込みの既定モデル」の順に、空でない最初のものになる。選ばれたモデルの設定ファイルが無ければ代わりのモデルでは動かず、そのペルソナは選び直すまで止まる。UI（グローバル設定の「モデルロール」）で変えると再起動しなくても効き、設定ファイルの無いモデル名は保存されない（[persona_model_selection.md](../intent/persona_model_selection.md)） |
 | `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` | グローバル設定の軽量モデル（個別の軽量モデルを持たないペルソナが使う。空なら組み込みの既定モデル）。設定ファイルが無い・繋げないときは標準モデルへ代わりに回さず、軽量モデルを使う作業が止まる |
+| `SAIVERSE_REFLEX_JUDGMENT_MODEL` | グローバル設定の反射判断のモデル（未設定なら反射判断は動かない）。詳細は上の「反射判断」節 |
 | `GEMINI_TIMEOUT_SECONDS` | Gemini タイムアウト（既定 180） |
 | `SAIVERSE_ATTACHMENT_LIMIT` | 添付上限（既定 4） |
 | `SAIVERSE_DISABLE_GEMINI_STREAMING` / `SAIVERSE_DISABLE_GEMINI_SSE_PATCH` | Gemini ストリーミング関連のフォールバック制御（`llm_clients/gemini.py`） |

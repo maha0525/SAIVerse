@@ -1,19 +1,23 @@
-"""自動想起の Jev 選別層 (sea/auto_recall.py) のユニットテスト。
+"""自動想起の「強化」経路 (sea/auto_recall.py) のユニットテスト。
 
-設計: docs/intent/auto_recall_jev_rerank.md
+設計: docs/intent/auto_recall_jev_rerank.md (選別の中身) と
+docs/intent/reflex_judgment.md (答える側の決め方)。
 
-実 API は絶対に呼ばない。``saiverse.typesafe_client.evaluate_nouls`` を差し替えて、
+実 API は絶対に呼ばない。``saiverse.reflex_judgment.evaluate`` を差し替えて、
 採否の分岐と質問の組み立てだけを検証する (unified_recall と DB は
-tests/test_auto_recall.py と同じ流儀でフェイクにする)。
+tests/test_auto_recall.py と同じ流儀でフェイクにする)。答える側の解決は本物を
+通すので、役割に割り当てる偽モデル設定を MODEL_CONFIGS に差し込む。
 
 固定する不変条件:
-- OFF (既定) では evaluate_nouls が一度も呼ばれず、従来のしきい値判定のまま。
-- ON では採否が Noul 確率だけで決まる (cosine しきい値 0.86 と message ソースの
-  底上げ +0.02 はどちらも使われない)。
-- floor 未満の候補は API に渡らない。
-- API が使えなかったターン (応答の欠落・モジュール読み込み失敗を含む) は従来の
+- ペルソナのスイッチ (AUTO_RECALL_ENHANCED) が OFF なら判定は一度も呼ばれない。
+- スイッチが ON でも、モデルの役割「反射判断」にモデルが割り当てられていなければ
+  従来のしきい値判定のまま (黙って費用が発生する経路を作らない)。
+- 効いているときは採否が Noul 確率だけで決まる (cosine しきい値 0.86 と message
+  ソースの底上げ +0.02 はどちらも使われない)。
+- floor 未満の候補は判断に渡らない。
+- 判断が使えなかったターン (応答の欠落・モジュール読み込み失敗を含む) は従来の
   しきい値判定へ静かに戻る。
-- Jev は入場の門であって退場の門ではない (台帳に入った記憶の退場は粘着仕様が握る)。
+- 反射判断は入場の門であって退場の門ではない (台帳に入った記憶の退場は粘着仕様が握る)。
 """
 
 import logging
@@ -28,10 +32,19 @@ from sai_memory.memory.storage import add_message, init_db
 from sai_memory.unified_recall import RecallHit
 from sea import auto_recall
 from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
-from saiverse.typesafe_client import TypeSafeUnavailable
+from saiverse.reflex_judgment import ReflexJudgmentUnavailable
 
 PERSONA = "jev_test_persona"
 THREAD = "jev_test_persona:__persona__"
+
+#: 役割に割り当てる偽モデルの設定キーと、その宛先のキーの env 名。env 名はこのモデル
+#: 自身の名前空間のもの (saiverse/provider_security.py の ``model_credential_env``)。
+#: 答える側の解決はキーと宛先の組を通常の会話クライアントと同じ照合へ通すので、
+#: 偽の設定もその照合に通る正常形にしておく。
+REFLEX_MODEL_KEY = "test-reflex-jev"
+REFLEX_KEY_ENV = "SAIVERSE_MODEL_TEST_REFLEX_JEV_API_KEY"
+#: 偽の宛先。照合は名前解決まで行うので、実在しないホスト名ではなくループバック。
+REFLEX_BASE_URL = "http://127.0.0.1:8088"
 
 # env をまっさらにして既定値で走らせる対象 (test_auto_recall.py と同じ流儀)。
 _ENV_KEYS = [
@@ -41,14 +54,29 @@ _ENV_KEYS = [
     "SAIVERSE_AUTO_RECALL_TOPK",
     "SAIVERSE_AUTO_RECALL_MSG_THRESHOLD_OFFSET",
     "SAIVERSE_AUTO_RECALL_ENTITY_AMBIENT_COUNT",
-    "SAIVERSE_AUTO_RECALL_JEV",
-    "SAIVERSE_AUTO_RECALL_JEV_FLOOR",
-    "SAIVERSE_AUTO_RECALL_JEV_THRESHOLD",
-    "SAIVERSE_AUTO_RECALL_JEV_TIMEOUT",
-    "SAIVERSE_AUTO_RECALL_JEV_CONTEXT_MESSAGES",
     "SAIVERSE_MEDIA_RECALL_ENABLED",
-    "TYPESAFE_API_KEY",
+    "SAIVERSE_REFLEX_JUDGMENT_MODEL",
+    REFLEX_KEY_ENV,
 ]
+
+
+def _reflex_model_config():
+    """同梱の TypeSafe 公式と同じ形の偽モデル定義 (provider の欄を畳み込んだ後の姿)。"""
+    return {
+        "model": "jev-latest",
+        "protocol": "jev_compat",
+        "provider": "jev_compat",
+        "base_url": REFLEX_BASE_URL,
+        "api_key_env": REFLEX_KEY_ENV,
+        "reflex_judgment": {
+            "path": "/v1/systemone",
+            "answers_key": "answers",
+            "usage_key": "usage",
+            "answer_fields": {"noul": "noul", "choice": "choice", "score": "score"},
+            "usage_fields": {"input_tokens": "input_tokens", "output_tokens": "output_tokens"},
+            "supported_types": ["noul", "choice", "score"],
+        },
+    }
 
 
 def _hit(source_type, source_id, *, embed_score, title="タイトル", content="内容テキスト"):
@@ -92,10 +120,10 @@ def _perception(text):
 
 
 class _FakeJev:
-    """evaluate_nouls の差し替え。呼び出しを記録し、タイトルから Noul を引いて返す。
+    """reflex_judgment.evaluate の差し替え。呼び出しを記録し、タイトルから Noul を引く。
 
-    本物のクライアントと同じ契約を守る: ``noul_by_title`` に無いタイトル (= 応答に
-    answer が無かった候補) があれば部分回答なので ``TypeSafeUnavailable`` を投げる。
+    本物の判断層と同じ契約を守る: ``noul_by_title`` に無いタイトル (= 応答に
+    answer が無かった候補) があれば部分回答なので ``ReflexJudgmentUnavailable``。
     """
 
     def __init__(self, noul_by_title=None, *, raises=None):
@@ -103,8 +131,11 @@ class _FakeJev:
         self.raises = raises
         self.calls = []
 
-    def __call__(self, state, questions, *, timeout, model="jev-latest"):
-        self.calls.append({"state": state, "questions": questions, "timeout": timeout, "model": model})
+    def __call__(self, state, questions, *, timeout, backend=None, persona_id=None, transport=None):
+        self.calls.append({
+            "state": state, "questions": questions, "timeout": timeout,
+            "backend": backend, "persona_id": persona_id,
+        })
         if self.raises is not None:
             raise self.raises
         memories = state["memories"]
@@ -112,7 +143,7 @@ class _FakeJev:
         for qid in questions:
             title = memories[qid]["title"]
             if title not in self.noul_by_title:
-                raise TypeSafeUnavailable(f"no answer for question {qid!r}")
+                raise ReflexJudgmentUnavailable(f"no answer for question {qid!r}")
             nouls[qid] = self.noul_by_title[title]
         return nouls, {"input_tokens": 100, "output_tokens": 0}
 
@@ -127,53 +158,83 @@ def _clean_env(monkeypatch):
 
 
 @pytest.fixture
-def jev_on(monkeypatch):
-    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_JEV", "1")
-    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key-not-real")
+def reflex_on(monkeypatch):
+    """モデルの役割「反射判断」に jev 互換の偽モデルを割り当てる。
+
+    これがあって初めて、ペルソナのスイッチ ON が実際の判定に化ける。
+    """
+    from saiverse import model_configs
+
+    monkeypatch.setenv("SAIVERSE_REFLEX_JUDGMENT_MODEL", REFLEX_MODEL_KEY)
+    monkeypatch.setenv(REFLEX_KEY_ENV, "test-key-not-real")
+    monkeypatch.setattr(
+        model_configs, "MODEL_CONFIGS", {REFLEX_MODEL_KEY: _reflex_model_config()},
+    )
 
 
-def _run(hits, messages, fake_jev):
+@pytest.fixture
+def reflex_role_without_key(monkeypatch):
+    """役割と設定は揃っているが、その宛先のキーの env が空のまま。"""
+    from saiverse import model_configs
+
+    monkeypatch.setenv("SAIVERSE_REFLEX_JUDGMENT_MODEL", REFLEX_MODEL_KEY)
+    monkeypatch.delenv(REFLEX_KEY_ENV, raising=False)
+    monkeypatch.setattr(
+        model_configs, "MODEL_CONFIGS", {REFLEX_MODEL_KEY: _reflex_model_config()},
+    )
+
+
+def _run(hits, messages, fake_jev, *, enhanced=True):
+    """1 ターン回す。
+
+    ``enhanced`` はペルソナのスイッチ (呼び出し側 sea/runtime_context.py が DB から
+    読んで渡す旗)。既定を True にしてあるのは、このファイルの大半が「スイッチは
+    入っている」前提で、役割の割り当ての有無 (``reflex_on`` fixture) だけを切り替えて
+    確かめるため。スイッチ自体の OFF は専用のテストで確かめる。
+    """
     with patch("sai_memory.unified_recall.unified_recall", return_value=hits), \
          patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]), \
-         patch("saiverse.typesafe_client.evaluate_nouls", fake_jev):
+         patch("saiverse.reflex_judgment.evaluate", fake_jev):
         return auto_recall.run_auto_recall(
             conn=object(), embedder=object(), messages=messages,
-            persona_id=PERSONA, thread_id=THREAD,
+            persona_id=PERSONA, thread_id=THREAD, enhanced=enhanced,
         )
 
 
 # ---------------------------------------------------------------------------
-# OFF (既定)
+# ON/OFF の条件 (スイッチ × 役割の割り当て)
 # ---------------------------------------------------------------------------
 
-def test_off_never_calls_jev_and_keeps_threshold_behavior():
+def test_switch_off_never_calls_the_judgment(reflex_on):
+    """役割にモデルが割り当たっていても、ペルソナのスイッチが OFF なら呼ばない。"""
     fake = _FakeJev({"低スコア記憶": 0.99})
     res = _run(
         [_hit("fragment", "f1", embed_score=0.80, title="低スコア記憶")],
         _msgs(("user", "話題")),
         fake,
+        enhanced=False,
     )
     assert fake.calls == []
     # 0.80 < 0.86 (既定しきい値) なので従来どおり落ちる。
     assert res.injected is False
 
 
-def test_off_keeps_accepting_above_threshold():
+def test_switch_off_keeps_accepting_above_threshold(reflex_on):
     fake = _FakeJev({"高スコア記憶": 0.0})
     res = _run(
         [_hit("fragment", "f1", embed_score=0.90, title="高スコア記憶")],
         _msgs(("user", "話題")),
         fake,
+        enhanced=False,
     )
     assert fake.calls == []
     assert res.injected is True
     assert "高スコア記憶" in res.block
 
 
-def test_toggle_without_api_key_stays_off(monkeypatch):
-    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_JEV", "1")
-    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
-    assert auto_recall.is_jev_rerank_enabled() is False
+def test_switch_on_without_a_role_model_stays_off():
+    """スイッチを入れただけでは走らない (役割への割り当てという明示の行為が要る)。"""
+    assert auto_recall.is_enhanced_recall_available() is False
 
     fake = _FakeJev({"記憶": 0.99})
     res = _run([_hit("fragment", "f1", embed_score=0.80, title="記憶")], _msgs(("user", "話題")), fake)
@@ -181,16 +242,35 @@ def test_toggle_without_api_key_stays_off(monkeypatch):
     assert res.injected is False
 
 
-def test_enabled_when_toggle_and_key_present(jev_on):
-    assert auto_recall.is_jev_rerank_enabled() is True
+def test_switch_on_with_a_non_jev_role_model_stays_off(monkeypatch, caplog):
+    """通常の LLM を割り当てても第 1 段では使えない。理由は判断層が WARNING に出す。"""
+    from saiverse import model_configs
+
+    caplog.set_level(logging.WARNING, logger="saiverse.reflex_judgment")
+    monkeypatch.setenv("SAIVERSE_REFLEX_JUDGMENT_MODEL", "some-llm")
+    monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
+        "some-llm": {"model": "gemini-x", "protocol": "gemini_native", "provider": "gemini"},
+    })
+
+    assert auto_recall.is_enhanced_recall_available() is False
+    assert "gemini_native" in caplog.text
+
+    fake = _FakeJev({"記憶": 0.99})
+    res = _run([_hit("fragment", "f1", embed_score=0.80, title="記憶")], _msgs(("user", "話題")), fake)
+    assert fake.calls == []
+    assert res.injected is False
+
+
+def test_available_when_a_jev_model_is_assigned(reflex_on):
+    assert auto_recall.is_enhanced_recall_available() is True
 
 
 # ---------------------------------------------------------------------------
 # ON: 採否は Noul 確率で決まる
 # ---------------------------------------------------------------------------
 
-def test_low_embed_high_noul_is_accepted(jev_on):
-    # 0.80 は旧しきい値 0.86 未満だが、Jev が「浮かぶ」と判断したので採用される。
+def test_low_embed_high_noul_is_accepted(reflex_on):
+    # 0.80 は旧しきい値 0.86 未満だが、判断が「浮かぶ」と答えたので採用される。
     fake = _FakeJev({"拾い直された記憶": 0.9})
     res = _run(
         [_hit("fragment", "f1", embed_score=0.80, title="拾い直された記憶")],
@@ -203,8 +283,8 @@ def test_low_embed_high_noul_is_accepted(jev_on):
     assert res.accepted_count == 1
 
 
-def test_high_embed_low_noul_is_rejected(jev_on):
-    # 0.90 は旧しきい値を超えるが、Jev が「無関係」と判断したので落ちる。
+def test_high_embed_low_noul_is_rejected(reflex_on):
+    # 0.90 は旧しきい値を超えるが、判断が「無関係」と答えたので落ちる。
     fake = _FakeJev({"ノイズ記憶": 0.1})
     res = _run(
         [_hit("fragment", "f1", embed_score=0.90, title="ノイズ記憶")],
@@ -216,8 +296,10 @@ def test_high_embed_low_noul_is_rejected(jev_on):
     assert res.accepted_count == 0
 
 
-def test_noul_threshold_env_is_honored(jev_on, monkeypatch):
-    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_JEV_THRESHOLD", "0.8")
+def test_acceptance_threshold_is_the_module_constant(reflex_on, monkeypatch):
+    """採用に要る Noul 確率は実験で決めた定数 (既定 0.5)。env の口は持たない。"""
+    assert auto_recall._REFLEX_THRESHOLD == 0.5
+    monkeypatch.setattr(auto_recall, "_REFLEX_THRESHOLD", 0.8)
     fake = _FakeJev({"境界の記憶": 0.6})
     res = _run(
         [_hit("fragment", "f1", embed_score=0.90, title="境界の記憶")],
@@ -227,100 +309,8 @@ def test_noul_threshold_env_is_honored(jev_on, monkeypatch):
     assert res.injected is False
 
 
-@pytest.mark.parametrize("bad_value", ["1.5", "-0.1"], ids=["above_one", "negative"])
-def test_out_of_range_noul_threshold_falls_back_to_default(jev_on, monkeypatch, caplog, bad_value):
-    """0〜1 の外の指定はクランプせず既定 0.5 に戻し、WARNING を残す。
-
-    そのまま使うと 1 超で全候補却下・0 未満で全候補採用となり、設定の打ち間違いが
-    「Jev が効いていない」状態へ静かに化ける。
-    """
-    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_JEV_THRESHOLD", bad_value)
-    caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
-
-    fake = _FakeJev({"採用される記憶": 0.6, "落とされる記憶": 0.3})
-    res = _run(
-        [
-            _hit("fragment", "f1", embed_score=0.87, title="採用される記憶"),
-            _hit("fragment", "f2", embed_score=0.87, title="落とされる記憶"),
-        ],
-        _msgs(("user", "話題")),
-        fake,
-    )
-
-    # 既定 0.5 で動いている (1.5 のままなら両方落ち、-0.1 のままなら両方通る)。
-    assert res.injected is True
-    assert "採用される記憶" in res.block
-    assert "落とされる記憶" not in res.block
-
-    warnings = [
-        r for r in caplog.records
-        if r.levelno == logging.WARNING and "JEV_THRESHOLD" in r.getMessage()
-    ]
-    assert len(warnings) == 1
-
-
-def test_valid_noul_threshold_does_not_warn(jev_on, monkeypatch, caplog):
-    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_JEV_THRESHOLD", "0.8")
-    caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
-    fake = _FakeJev({"記憶": 0.9})
-    _run([_hit("fragment", "f1", embed_score=0.90, title="記憶")], _msgs(("user", "話題")), fake)
-    assert not [r for r in caplog.records if "JEV_THRESHOLD" in r.getMessage()]
-
-
-@pytest.mark.parametrize("bad_value", ["nan", "-0.1", "1.5"], ids=["nan", "negative", "above_one"])
-def test_out_of_range_floor_falls_back_to_default(monkeypatch, caplog, bad_value):
-    """0〜1 の外・非有限の floor は既定 0.78 に戻し、WARNING を残す。
-
-    nan や負値をそのまま使うと下限比較が常に不成立になり、floor 未満のはずの候補まで
-    全部外部 API へ送られる (プライバシー記述と費用見積もりの前提が警告なしに外れる)。
-    """
-    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_JEV_FLOOR", bad_value)
-    caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
-    assert auto_recall.get_jev_floor() == 0.78
-    warnings = [
-        r for r in caplog.records
-        if r.levelno == logging.WARNING and "JEV_FLOOR" in r.getMessage()
-    ]
-    assert len(warnings) == 1
-
-
-@pytest.mark.parametrize("bad_value", ["0", "-2", "nan"], ids=["zero", "negative", "nan"])
-def test_non_positive_timeout_falls_back_to_default(monkeypatch, caplog, bad_value):
-    """0 以下・非有限のタイムアウトは既定 2.5 秒に戻し、WARNING を残す。
-
-    そのまま使うと全呼び出しが即座に締切超過になり、フォールバックで会話は続くが、
-    置き去りワーカーが毎ターン生まれて「Jev が効かないのに課金だけ発生する」状態へ
-    静かに化ける (しきい値の範囲ガードと同じ型の設定ミス)。
-    """
-    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_JEV_TIMEOUT", bad_value)
-    caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
-    assert auto_recall.get_jev_timeout() == 2.5
-    warnings = [
-        r for r in caplog.records
-        if r.levelno == logging.WARNING and "JEV_TIMEOUT" in r.getMessage()
-    ]
-    assert len(warnings) == 1
-
-
-@pytest.mark.parametrize("bad_value", ["0", "-3"], ids=["zero", "negative"])
-def test_context_messages_below_one_falls_back_to_default(monkeypatch, caplog, bad_value):
-    """1 未満の会話件数は既定 6 に戻し、WARNING を残す。
-
-    クエリ側の「0 以下 = 全件」の慣習をここで踏襲すると、会話履歴の全件が外部 API へ
-    送られ、「会話本文は 1 件 500 字まで」という有界性の根拠が件数側から崩れる。
-    """
-    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_JEV_CONTEXT_MESSAGES", bad_value)
-    caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
-    assert auto_recall.get_jev_context_messages() == 6
-    warnings = [
-        r for r in caplog.records
-        if r.levelno == logging.WARNING and "JEV_CONTEXT_MESSAGES" in r.getMessage()
-    ]
-    assert len(warnings) == 1
-
-
-def test_message_offset_not_applied_in_jev_path(jev_on):
-    # message ソースの底上げ (実効 0.88) は Jev 経路では使われない。
+def test_message_offset_not_applied_in_the_judged_path(reflex_on):
+    # message ソースの底上げ (実効 0.88) は判断の経路では使われない。
     fake = _FakeJev({"過去の会話": 0.9})
     res = _run(
         [_hit("message", "m999", embed_score=0.87, title="過去の会話")],
@@ -331,8 +321,8 @@ def test_message_offset_not_applied_in_jev_path(jev_on):
     assert len(fake.calls) == 1
 
 
-def test_partial_answer_falls_back_to_cosine_threshold(jev_on):
-    # 一部の候補にしか answer が返らない応答はクライアントが TypeSafeUnavailable に
+def test_partial_answer_falls_back_to_cosine_threshold(reflex_on):
+    # 一部の候補にしか answer が返らない応答は判断層が ReflexJudgmentUnavailable に
     # するので、そのターン全体が従来のしきい値判定へ戻る (答えの無い候補だけを
     # 静かに不採用にはしない)。
     fake = _FakeJev({})
@@ -351,10 +341,10 @@ def test_partial_answer_falls_back_to_cosine_threshold(jev_on):
 
 
 # ---------------------------------------------------------------------------
-# floor (Jev に渡す候補の下限)
+# floor (判断に渡す候補の下限)
 # ---------------------------------------------------------------------------
 
-def test_below_floor_candidate_is_not_sent_to_jev(jev_on):
+def test_below_floor_candidate_is_not_judged(reflex_on):
     fake = _FakeJev({"床の上": 0.9, "床の下": 0.9})
     res = _run(
         [
@@ -372,7 +362,7 @@ def test_below_floor_candidate_is_not_sent_to_jev(jev_on):
     assert "床の下" not in res.block
 
 
-def test_no_candidate_above_floor_skips_api_call(jev_on):
+def test_no_candidate_above_floor_skips_the_call(reflex_on):
     fake = _FakeJev({"床の下": 0.9})
     res = _run(
         [_hit("fragment", "f1", embed_score=0.70, title="床の下")],
@@ -383,8 +373,9 @@ def test_no_candidate_above_floor_skips_api_call(jev_on):
     assert res.injected is False
 
 
-def test_floor_env_is_honored(jev_on, monkeypatch):
-    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_JEV_FLOOR", "0.60")
+def test_floor_is_the_module_constant(reflex_on, monkeypatch):
+    assert auto_recall._REFLEX_FLOOR == 0.78
+    monkeypatch.setattr(auto_recall, "_REFLEX_FLOOR", 0.60)
     fake = _FakeJev({"低いが床の上": 0.9})
     res = _run(
         [_hit("fragment", "f1", embed_score=0.65, title="低いが床の上")],
@@ -395,8 +386,8 @@ def test_floor_env_is_honored(jev_on, monkeypatch):
     assert res.injected is True
 
 
-def test_keyword_only_hit_never_reaches_jev(jev_on):
-    # embed_score なし (キーワードのみ) は Jev 経路でも採用しない。
+def test_keyword_only_hit_is_never_judged(reflex_on):
+    # embed_score なし (キーワードのみ) は判断の経路でも採用しない。
     fake = _FakeJev({"キーワードのみ": 0.99})
     res = _run(
         [_hit("fragment", "f1", embed_score=None, title="キーワードのみ")],
@@ -407,7 +398,7 @@ def test_keyword_only_hit_never_reaches_jev(jev_on):
     assert res.injected is False
 
 
-def test_message_already_in_context_never_reaches_jev(jev_on):
+def test_message_already_in_context_is_never_judged(reflex_on):
     fake = _FakeJev({"コンテキスト内": 0.99})
     res = _run(
         [_hit("message", "m123", embed_score=0.95, title="コンテキスト内")],
@@ -422,8 +413,8 @@ def test_message_already_in_context_never_reaches_jev(jev_on):
 # 失敗時のフォールバック
 # ---------------------------------------------------------------------------
 
-def test_unavailable_falls_back_to_cosine_threshold(jev_on):
-    fake = _FakeJev(raises=TypeSafeUnavailable("HTTP 500"))
+def test_unavailable_falls_back_to_cosine_threshold(reflex_on):
+    fake = _FakeJev(raises=ReflexJudgmentUnavailable("HTTP 500"))
     res = _run(
         [
             _hit("fragment", "f1", embed_score=0.90, title="しきい値超え"),
@@ -439,7 +430,7 @@ def test_unavailable_falls_back_to_cosine_threshold(jev_on):
     assert "しきい値未満" not in res.block
 
 
-def test_unexpected_exception_also_falls_back(jev_on):
+def test_unexpected_exception_also_falls_back(reflex_on):
     fake = _FakeJev(raises=RuntimeError("boom"))
     res = _run(
         [_hit("fragment", "f1", embed_score=0.90, title="しきい値超え")],
@@ -450,8 +441,8 @@ def test_unexpected_exception_also_falls_back(jev_on):
     assert "しきい値超え" in res.block
 
 
-def test_client_module_import_failure_falls_back(jev_on, caplog):
-    """typesafe_client の読み込み自体が失敗しても、会話の同期経路は落ちない。"""
+def test_judgment_module_import_failure_falls_back(reflex_on, caplog):
+    """反射判断の読み込み自体が失敗しても、会話の同期経路は落ちない。"""
     caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
     hits = [
         _hit("fragment", "f1", embed_score=0.87, title="しきい値超え"),
@@ -459,14 +450,15 @@ def test_client_module_import_failure_falls_back(jev_on, caplog):
     ]
     with patch("sai_memory.unified_recall.unified_recall", return_value=hits), \
          patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]), \
-         patch.dict(sys.modules, {"saiverse.typesafe_client": None}):
+         patch.dict(sys.modules, {"saiverse.reflex_judgment": None}):
         res = auto_recall.run_auto_recall(
             conn=object(), embedder=object(), messages=_msgs(("user", "話題")),
-            persona_id=PERSONA, thread_id=THREAD,
+            persona_id=PERSONA, thread_id=THREAD, enhanced=True,
         )
 
     # import が本当に失敗した経路を通っていること (通らなければ実 API を叩いてしまう)。
-    assert [r for r in caplog.records if "could not prepare the request" in r.getMessage()]
+    assert [r for r in caplog.records if "could not prepare the request" in r.getMessage()
+            or "could not load the reflex judgment layer" in r.getMessage()]
 
     # 従来の 0.86 判定に戻る。
     assert res.injected is True
@@ -478,12 +470,12 @@ def test_client_module_import_failure_falls_back(jev_on, caplog):
 # 設定ミスの警告
 # ---------------------------------------------------------------------------
 
-def test_floor_above_acceptance_threshold_warns(jev_on, monkeypatch, caplog):
-    """floor が採用しきい値より高いと、従来なら浮かぶ記憶が Jev に渡らず落ちる。
+def test_floor_above_acceptance_threshold_warns(reflex_on, monkeypatch, caplog):
+    """floor が採用しきい値より高いと、従来なら浮かぶ記憶が判断に渡らず落ちる。
 
     警告が出るのは候補検索にヒットがあったターン (= 実際に記憶が落ちうるターン)。
     """
-    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_JEV_FLOOR", "0.95")
+    monkeypatch.setattr(auto_recall, "_REFLEX_FLOOR", 0.95)
     caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
 
     fake = _FakeJev({"記憶": 0.9})
@@ -491,25 +483,25 @@ def test_floor_above_acceptance_threshold_warns(jev_on, monkeypatch, caplog):
 
     warnings = [
         r for r in caplog.records
-        if r.levelno == logging.WARNING and "JEV_FLOOR" in r.getMessage()
+        if r.levelno == logging.WARNING and "candidate floor" in r.getMessage()
     ]
     assert len(warnings) == 1
 
 
-def test_no_warning_when_floor_below_threshold(jev_on, caplog):
+def test_no_warning_when_floor_below_threshold(reflex_on, caplog):
     caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
     fake = _FakeJev({"記憶": 0.9})
     _run([_hit("fragment", "f1", embed_score=0.90, title="記憶")], _msgs(("user", "話題")), fake)
-    assert not [r for r in caplog.records if "JEV_FLOOR" in r.getMessage()]
+    assert not [r for r in caplog.records if "candidate floor" in r.getMessage()]
 
 
-def test_floor_warning_is_silent_on_turns_without_hits(jev_on, monkeypatch, caplog):
+def test_floor_warning_is_silent_on_turns_without_hits(reflex_on, monkeypatch, caplog):
     """ヒットが 1 件も無いターンでは設定ミスの警告を出さない。
 
     警告の意味は「この設定で記憶が落ちている」なので、落ちる記憶が存在しえない
     ターンにも出すと、実際に起きたことと警告がずれて毎ターンのノイズになる。
     """
-    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_JEV_FLOOR", "0.95")
+    monkeypatch.setattr(auto_recall, "_REFLEX_FLOOR", 0.95)
     caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
 
     fake = _FakeJev({})
@@ -517,15 +509,15 @@ def test_floor_warning_is_silent_on_turns_without_hits(jev_on, monkeypatch, capl
 
     assert fake.calls == []
     assert res.injected is False
-    assert not [r for r in caplog.records if "JEV_FLOOR" in r.getMessage()]
+    assert not [r for r in caplog.records if "candidate floor" in r.getMessage()]
 
 
 # ---------------------------------------------------------------------------
-# 粘着台帳との関係 (Jev は入場の門であって退場の門ではない)
+# 粘着台帳との関係 (判断は入場の門であって退場の門ではない)
 # ---------------------------------------------------------------------------
 
-def test_jev_rejection_does_not_evict_sticky_item(jev_on, monkeypatch):
-    """一度台帳に入った記憶は、Jev が拒否しても sticky_turns の間は注入され続ける。
+def test_rejection_does_not_evict_sticky_item(reflex_on, monkeypatch):
+    """一度台帳に入った記憶は、判断が拒否しても sticky_turns の間は注入され続ける。
 
     急に消えるのではなく数ターンかけて薄れるのが §4.3 の設計意図 (従来方式で
     cosine しきい値を割ったときとまったく同じ扱い)。
@@ -533,13 +525,13 @@ def test_jev_rejection_does_not_evict_sticky_item(jev_on, monkeypatch):
     monkeypatch.setenv("SAIVERSE_AUTO_RECALL_STICKY_TURNS", "2")
     hits = [_hit("fragment", "f1", embed_score=0.90, title="粘着する記憶", content="記憶の本文")]
 
-    # ターン1: Jev が採用 → 台帳に入る (stale=0)。
+    # ターン1: 判断が採用 → 台帳に入る (stale=0)。
     fake = _FakeJev({"粘着する記憶": 0.9})
     r1 = _run(hits, _msgs(("user", "その話")), fake)
     assert r1.injected is True
     assert "粘着する記憶" in r1.block
 
-    # ターン2以降: 同じ候補を Jev が拒否 (noul 低) しても、粘着ウィンドウの間は残る。
+    # ターン2以降: 同じ候補を判断が拒否 (noul 低) しても、粘着ウィンドウの間は残る。
     reject = _FakeJev({"粘着する記憶": 0.1})
     r2 = _run(hits, _msgs(("user", "別の話")), reject)          # stale=1
     assert r2.injected is True
@@ -559,7 +551,7 @@ def test_jev_rejection_does_not_evict_sticky_item(jev_on, monkeypatch):
 # 質問と state の組み立て
 # ---------------------------------------------------------------------------
 
-def test_question_construction(jev_on):
+def test_question_construction(reflex_on):
     fake = _FakeJev({"記憶ひとつめ": 0.9, "記憶ふたつめ": 0.9})
     _run(
         [
@@ -578,15 +570,19 @@ def test_question_construction(jev_on):
     assert memories["m0"] == {"title": "記憶ひとつめ", "content": "本文1"}
     assert memories["m1"] == {"title": "記憶ふたつめ", "content": "本文2"}
 
-    # 各質問は自分の qid を参照し、true/false の基準を持つ。
+    # 各質問は型を名乗り、自分の qid を参照し、true/false の基準を持つ。
+    assert questions["m0"]["type"] == "noul"
     assert "`memories.m0`" in questions["m0"]["instructions"]
     assert "`memories.m1`" in questions["m1"]["instructions"]
     assert set(questions["m0"]["criteria"]) == {"true", "false"}
 
     assert call["timeout"] == pytest.approx(2.5)
+    # どのモデル設定が答えたかを判定ログに載せられるよう、答える側を解決して渡す。
+    assert call["backend"].model_key == REFLEX_MODEL_KEY
+    assert call["persona_id"] == PERSONA
 
 
-def test_state_carries_recent_conversation(jev_on):
+def test_state_carries_recent_conversation(reflex_on):
     fake = _FakeJev({"記憶": 0.9})
     _run(
         [_hit("fragment", "f1", embed_score=0.90, title="記憶")],
@@ -601,8 +597,9 @@ def test_state_carries_recent_conversation(jev_on):
     ]
 
 
-def test_conversation_is_limited_to_recent_messages(jev_on, monkeypatch):
-    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_JEV_CONTEXT_MESSAGES", "2")
+def test_conversation_is_limited_to_recent_messages(reflex_on, monkeypatch):
+    assert auto_recall._REFLEX_CONTEXT_MESSAGES == 6
+    monkeypatch.setattr(auto_recall, "_REFLEX_CONTEXT_MESSAGES", 2)
     fake = _FakeJev({"記憶": 0.9})
     _run(
         [_hit("fragment", "f1", embed_score=0.90, title="記憶")],
@@ -613,11 +610,11 @@ def test_conversation_is_limited_to_recent_messages(jev_on, monkeypatch):
     assert [c["text"] for c in conversation] == ["中くらいの応答", "新しい発話"]
 
 
-def test_long_conversation_message_is_clipped(jev_on):
+def test_long_conversation_message_is_clipped(reflex_on):
     """会話本文は 1 件あたり 500 字で切る (超過分は省略記号 1 字)。
 
     上限が無いと 1 ターンのペイロードが発話の長さに引きずられ、費用の見積もりが
-    崩れるうえ、長話のターンほど絶対締切に掛かって Jev が効かなくなる。
+    崩れるうえ、長話のターンほど絶対締切に掛かって判定が効かなくなる。
     """
     fake = _FakeJev({"記憶": 0.9})
     _run(
@@ -630,13 +627,13 @@ def test_long_conversation_message_is_clipped(jev_on):
     assert all(len(t) <= 501 for t in texts)
     # 上限以下の発話はそのまま、超過分だけが切られる。
     assert texts[0] == "短い発話"
-    assert texts[1] == "あ" * auto_recall._JEV_CONVERSATION_TEXT_LIMIT + "…"
+    assert texts[1] == "あ" * auto_recall._REFLEX_CONVERSATION_TEXT_LIMIT + "…"
 
 
-def test_attachment_summaries_reach_jev_when_media_recall_is_on(jev_on, monkeypatch):
-    """検索クエリに入る添付の概要は、Jev の判断材料にも入る。
+def test_attachment_summaries_are_judged_when_media_recall_is_on(reflex_on, monkeypatch):
+    """検索クエリに入る添付の概要は、判断の材料にも入る。
 
-    写真をきっかけに検索が拾ってきた候補を、写真を知らない Jev が落としてしまう
+    写真をきっかけに検索が拾ってきた候補を、写真を知らない判断が落としてしまう
     非対称を避けるため (docs/intent/auto_recall_jev_rerank.md 判定の流れ 2)。
     """
     monkeypatch.setenv("SAIVERSE_MEDIA_RECALL_ENABLED", "1")
@@ -653,8 +650,8 @@ def test_attachment_summaries_reach_jev_when_media_recall_is_on(jev_on, monkeypa
     assert [c["text"] for c in state["conversation"]] == ["これ見て"]
 
 
-def test_attachment_only_message_still_reaches_jev(jev_on, monkeypatch):
-    """本文が空で添付だけのメッセージでも、概要は Jev に渡る。"""
+def test_attachment_only_message_is_still_judged(reflex_on, monkeypatch):
+    """本文が空で添付だけのメッセージでも、概要は判断に渡る。"""
     monkeypatch.setenv("SAIVERSE_MEDIA_RECALL_ENABLED", "1")
     fake = _FakeJev({"記憶": 0.9})
     messages = [
@@ -668,7 +665,7 @@ def test_attachment_only_message_still_reaches_jev(jev_on, monkeypatch):
     assert state["conversation"] == []
 
 
-def test_media_recall_off_keeps_state_shape_unchanged(jev_on):
+def test_media_recall_off_keeps_state_shape_unchanged(reflex_on):
     """メディア想起 OFF (既定) では attachments キー自体を入れない。"""
     fake = _FakeJev({"記憶": 0.9})
     messages = [
@@ -682,7 +679,7 @@ def test_media_recall_off_keeps_state_shape_unchanged(jev_on):
 
 
 # ---------------------------------------------------------------------------
-# 拾い上げの拡張 (ON のときだけ) — キーワード抽出
+# 拾い上げの拡張 (効いているときだけ) — キーワード抽出
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -774,10 +771,10 @@ def test_extraction_on_empty_query_returns_empty_list(memory_conn):
 
 
 # ---------------------------------------------------------------------------
-# 拾い上げの拡張 (ON のときだけ) — unified_recall へ渡す引数
+# 拾い上げの拡張 (効いているときだけ) — unified_recall へ渡す引数
 # ---------------------------------------------------------------------------
 
-def _capture_recall_call(conn, messages, fake_jev, hits=None):
+def _capture_recall_call(conn, messages, fake_jev, hits=None, *, enhanced=True):
     """run_auto_recall を 1 ターン回し、unified_recall に渡った kwargs を返す。"""
     captured = {}
     hits = hits if hits is not None else [_hit("fragment", "f1", embed_score=0.90, title="記憶")]
@@ -788,25 +785,26 @@ def _capture_recall_call(conn, messages, fake_jev, hits=None):
 
     with patch("sai_memory.unified_recall.unified_recall", _fake_recall), \
          patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]), \
-         patch("saiverse.typesafe_client.evaluate_nouls", fake_jev):
+         patch("saiverse.reflex_judgment.evaluate", fake_jev):
         auto_recall.run_auto_recall(
             conn=conn, embedder=object(), messages=messages,
-            persona_id=PERSONA, thread_id=THREAD,
+            persona_id=PERSONA, thread_id=THREAD, enhanced=enhanced,
         )
     return captured
 
 
 def test_off_does_not_pass_the_sweep_arguments(memory_conn):
-    """OFF (既定) では拾い上げの引数を 1 つも渡さない (挙動が 1 ビットも変わらない)。"""
+    """効いていないときは拾い上げの引数を 1 つも渡さない (挙動が 1 ビットも変わらない)。"""
     _fill(memory_conn, "十条の商店街を歩いた")
     captured = _capture_recall_call(
         memory_conn, _msgs(("user", "十条まで歩いた日のこと", "m1")), _FakeJev({"記憶": 0.9}),
+        enhanced=False,
     )
     assert set(captured) == {"topk", "search_chronicle", "search_memopedia",
                              "search_fragments", "search_messages"}
 
 
-def test_on_passes_keywords_exclusions_and_allocations(jev_on, memory_conn):
+def test_on_passes_keywords_exclusions_and_allocations(reflex_on, memory_conn):
     _fill(memory_conn, "十条の商店街を歩いた", times=3)
     captured = _capture_recall_call(
         memory_conn, _msgs(("user", "十条まで歩いた日のこと", "m1")), _FakeJev({"記憶": 0.9}),
@@ -819,7 +817,23 @@ def test_on_passes_keywords_exclusions_and_allocations(jev_on, memory_conn):
     assert captured["search_chronicle"] is False
 
 
-def test_on_with_no_extractable_keyword_falls_back_to_default_split(jev_on, memory_conn):
+def test_missing_api_key_does_not_widen_the_sweep(reflex_role_without_key, memory_conn):
+    """キーが無い宛先では、候補の集め方も従来のままにする。
+
+    拾い上げだけ広げて判定だけ落ちると、「従来方式へ戻った」というログと実際の挙動
+    (候補の母集団が違う) が食い違う。
+    """
+    assert auto_recall.is_enhanced_recall_available() is False
+
+    _fill(memory_conn, "十条の商店街を歩いた", times=3)
+    captured = _capture_recall_call(
+        memory_conn, _msgs(("user", "十条まで歩いた日のこと", "m1")), _FakeJev({"記憶": 0.9}),
+    )
+    assert set(captured) == {"topk", "search_chronicle", "search_memopedia",
+                             "search_fragments", "search_messages"}
+
+
+def test_on_with_no_extractable_keyword_falls_back_to_default_split(reflex_on, memory_conn):
     """語が 1 つも残らないターンは ``keywords=None`` (= 従来の split 挙動)。"""
     captured = _capture_recall_call(
         memory_conn, _msgs(("user", "うん", "m1")), _FakeJev({"記憶": 0.9}),
@@ -830,10 +844,142 @@ def test_on_with_no_extractable_keyword_falls_back_to_default_split(jev_on, memo
     assert captured["source_allocations"]["message"] == 3
 
 
-def test_observations_reach_jev_when_the_user_spoke(jev_on):
-    """発言の後ろに挟まった「いま見えたもの」は、別枠で Jev の判断材料に入る。
+# ---------------------------------------------------------------------------
+# 判断が使えなかったターンは、候補集めからやり直して従来の形へ戻す
+# ---------------------------------------------------------------------------
 
-    クエリの種はユーザーの発言のままなので、見えたものを知らない Jev が、
+#: 従来の集め方で返るヒット (cosine 0.86 を超えるので従来経路でも採用される)。
+_CONVENTIONAL_HIT = _hit("fragment", "f1", embed_score=0.90, title="しきい値超え")
+#: 広げた集め方でだけ増えるヒット。message 枠の拡張と発話の除外で初めて浮上する
+#: もので、従来の集め方では母集団に入らない (cosine では通ってしまう 0.95)。
+_WIDENED_HIT = _hit("message", "m9", embed_score=0.95, title="広げて拾った過去の会話")
+
+_CONVENTIONAL_KWARGS = {"topk", "search_chronicle", "search_memopedia",
+                        "search_fragments", "search_messages"}
+
+
+def _recall_calls(messages, fake_jev, *, enhanced=True):
+    """1 ターン回し、unified_recall の各呼び出しの kwargs と結果を返す。
+
+    広げた引数で呼ばれたときだけ母集団が増える偽の候補集め — 「広げた母集団のまま
+    cosine で選別した」のか「集め直してから選別した」のかを、注入結果で見分けられる。
+    """
+    calls = []
+
+    def _fake_recall(_conn, _embedder, _query, **kwargs):
+        calls.append(kwargs)
+        if "source_allocations" in kwargs:
+            return [_CONVENTIONAL_HIT, _WIDENED_HIT]
+        return [_CONVENTIONAL_HIT]
+
+    auto_recall.reset_ledger(PERSONA)
+    with patch("sai_memory.unified_recall.unified_recall", _fake_recall), \
+         patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]), \
+         patch("saiverse.reflex_judgment.evaluate", fake_jev):
+        result = auto_recall.run_auto_recall(
+            conn=object(), embedder=object(), messages=messages,
+            persona_id=PERSONA, thread_id=THREAD, enhanced=enhanced,
+        )
+    return calls, result
+
+
+def test_failed_judgment_re_collects_candidates_the_conventional_way(reflex_on, caplog):
+    """判定が落ちたターンは、広げた母集団を捨てて集め直す。
+
+    広げたまま cosine で選別すると、従来経路なら母集団にすら入らない記憶が
+    注入されてしまう — 「従来方式へ戻った」というログと実際の挙動が食い違う。
+    """
+    caplog.set_level(logging.INFO, logger="saiverse.auto_recall")
+
+    calls, res = _recall_calls(
+        _msgs(("user", "話題", "m1")), _FakeJev(raises=ReflexJudgmentUnavailable("HTTP 500")),
+    )
+
+    assert len(calls) == 2
+    assert "source_allocations" in calls[0]          # 1 回目は広げた集め方
+    assert set(calls[1]) == _CONVENTIONAL_KWARGS      # 2 回目は従来の引数だけ
+    assert [r for r in caplog.records if "re-collecting candidates" in r.getMessage()]
+
+    assert res.injected is True
+    assert "しきい値超え" in res.block
+    assert "広げて拾った過去の会話" not in res.block
+
+
+def test_the_failed_turn_injects_exactly_what_the_switch_off_turn_would(reflex_on):
+    """判定が落ちたターンの注入は、最初からスイッチ OFF だった場合と一致する。"""
+    _calls, failed = _recall_calls(
+        _msgs(("user", "話題", "m1")), _FakeJev(raises=ReflexJudgmentUnavailable("HTTP 500")),
+    )
+    off_calls, off = _recall_calls(
+        _msgs(("user", "話題", "m1")), _FakeJev({}), enhanced=False,
+    )
+
+    assert len(off_calls) == 1
+    assert failed.block == off.block
+    assert failed.accepted_count == off.accepted_count
+    assert failed.hit_count == off.hit_count
+
+
+def test_a_failed_re_collection_keeps_the_enhanced_candidates(reflex_on, caplog):
+    """集め直し自体が失敗した回は、成功済みの広い候補を空で上書きしない。
+
+    障害の空を「候補の無かったターン」として扱うと、粘着台帳が古びて、障害が
+    続いただけで粘着記憶が消える。このターンだけは広げた候補のまま cosine 選別
+    (集め直し導入前の受容済みの形) に戻る。
+    """
+    caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
+    calls = []
+
+    def _fake_recall(_conn, _embedder, _query, **kwargs):
+        calls.append(kwargs)
+        if "source_allocations" in kwargs:
+            return [_CONVENTIONAL_HIT, _WIDENED_HIT]
+        raise RuntimeError("database is locked")
+
+    auto_recall.reset_ledger(PERSONA)
+    with patch("sai_memory.unified_recall.unified_recall", _fake_recall), \
+         patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]), \
+         patch("saiverse.reflex_judgment.evaluate",
+               _FakeJev(raises=ReflexJudgmentUnavailable("HTTP 500"))):
+        res = auto_recall.run_auto_recall(
+            conn=object(), embedder=object(), messages=_msgs(("user", "話題", "m1")),
+            persona_id=PERSONA, thread_id=THREAD, enhanced=True,
+        )
+
+    assert len(calls) == 2
+    assert res.injected is True
+    assert "しきい値超え" in res.block
+    assert "広げて拾った過去の会話" in res.block
+    assert [r for r in caplog.records if "re-collection failed" in r.getMessage()]
+
+
+def test_a_successful_judgment_collects_candidates_only_once(reflex_on):
+    """判定が成立したターンの経路は変えない (集め直しは起きない)。"""
+    calls, res = _recall_calls(
+        _msgs(("user", "話題", "m1")),
+        _FakeJev({"しきい値超え": 0.9, "広げて拾った過去の会話": 0.9}),
+    )
+
+    assert len(calls) == 1
+    assert "source_allocations" in calls[0]
+    assert res.injected is True
+    # 広げて拾った候補も判定を通って注入される (強化が効いているターンの姿)。
+    assert "広げて拾った過去の会話" in res.block
+
+
+def test_the_switch_off_turn_still_collects_candidates_only_once():
+    """強化が効いていないターンの経路も変えない。"""
+    calls, res = _recall_calls(_msgs(("user", "話題", "m1")), _FakeJev({}), enhanced=False)
+
+    assert len(calls) == 1
+    assert set(calls[0]) == _CONVENTIONAL_KWARGS
+    assert res.injected is True
+
+
+def test_observations_are_judged_when_the_user_spoke(reflex_on):
+    """発言の後ろに挟まった「いま見えたもの」は、別枠で判断の材料に入る。
+
+    クエリの種はユーザーの発言のままなので、見えたものを知らない判断が、
     見えたものに紐づく候補を落とす非対称が残ってしまう。
     """
     fake = _FakeJev({"記憶": 0.9})
@@ -849,7 +995,7 @@ def test_observations_reach_jev_when_the_user_spoke(jev_on):
     assert [c["text"] for c in state["conversation"]] == ["エリスは来てる？"]
 
 
-def test_observations_key_is_absent_without_perception_blocks(jev_on):
+def test_observations_key_is_absent_without_perception_blocks(reflex_on):
     fake = _FakeJev({"記憶": 0.9})
     _run(
         [_hit("fragment", "f1", embed_score=0.90, title="記憶")],
@@ -859,7 +1005,7 @@ def test_observations_key_is_absent_without_perception_blocks(jev_on):
     assert "observations" not in fake.calls[0]["state"]
 
 
-def test_observations_are_clipped_and_capped(jev_on):
+def test_observations_are_clipped_and_capped(reflex_on):
     """1 件 500 字で切り、最新側から最大 3 件。
 
     目に入ったものの量で 1 ターンのペイロードが青天井にならないようにする
@@ -876,10 +1022,10 @@ def test_observations_are_clipped_and_capped(jev_on):
     # 最新側の 3 件 (古い「0番目の記録」「1番目の記録」は落ちる)。
     assert observations[0] == "2番目の記録"
     assert observations[1] == "3番目の記録"
-    assert observations[2] == "あ" * auto_recall._JEV_CONVERSATION_TEXT_LIMIT + "…"
+    assert observations[2] == "あ" * auto_recall._REFLEX_CONVERSATION_TEXT_LIMIT + "…"
 
 
-def test_observations_are_not_collected_on_an_autonomous_turn(jev_on):
+def test_observations_are_not_collected_on_an_autonomous_turn(reflex_on):
     """発言が無いターンは知覚ブロック自体がクエリの種なので、脇道では渡さない。"""
     fake = _FakeJev({"記憶": 0.9})
     messages = [
@@ -891,7 +1037,7 @@ def test_observations_are_not_collected_on_an_autonomous_turn(jev_on):
     assert "observations" not in fake.calls[0]["state"]
 
 
-def test_rare_word_in_a_fresh_observation_becomes_a_keyword(jev_on, memory_conn):
+def test_rare_word_in_a_fresh_observation_becomes_a_keyword(reflex_on, memory_conn):
     """発言の後ろの知覚ブロックの珍しい語も、字面検索の脇道から参加する。"""
     _fill(memory_conn, "十条の商店街を歩いた", times=3)
     messages = [
@@ -902,7 +1048,7 @@ def test_rare_word_in_a_fresh_observation_becomes_a_keyword(jev_on, memory_conn)
     assert captured["keywords"] == ["十条"]
 
 
-def test_observation_keywords_share_the_cap_with_the_query(jev_on, memory_conn, monkeypatch):
+def test_observation_keywords_share_the_cap_with_the_query(reflex_on, memory_conn, monkeypatch):
     """上限 4 個の枠はクエリ本文と共通で、同数ならクエリ本文の語が先に並ぶ。"""
     monkeypatch.setattr(auto_recall, "_KEYWORD_MAX_COUNT", 1)
     _fill(memory_conn, "十条の話", times=3)
@@ -916,18 +1062,20 @@ def test_observation_keywords_share_the_cap_with_the_query(jev_on, memory_conn, 
 
 
 def test_off_ignores_observations_entirely(memory_conn):
-    """OFF (既定) では観察テキストの経路に一切入らない。"""
+    """効いていないときは観察テキストの経路に一切入らない。"""
     _fill(memory_conn, "十条の商店街を歩いた", times=3)
     messages = [
         {"role": "user", "content": "何が見える？", "id": "m1"},
         _perception("部屋の様子: 十条の写真が壁に飾られている"),
     ]
-    captured = _capture_recall_call(memory_conn, messages, _FakeJev({"記憶": 0.9}))
+    captured = _capture_recall_call(
+        memory_conn, messages, _FakeJev({"記憶": 0.9}), enhanced=False,
+    )
     assert set(captured) == {"topk", "search_chronicle", "search_memopedia",
                              "search_fragments", "search_messages"}
 
 
-def test_non_conversational_messages_excluded_from_state(jev_on):
+def test_non_conversational_messages_excluded_from_state(reflex_on):
     fake = _FakeJev({"記憶": 0.9})
     messages = [
         {"role": "user", "content": "head 由来の合成メッセージ",

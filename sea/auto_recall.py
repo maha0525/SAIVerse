@@ -8,9 +8,9 @@
 不変条件 (§10):
 - **LLM は絶対に呼ばない** (§10-1)。埋め込み検索 + 決定論フィルタのみ。
   §10-1 が認める唯一の例外が「明示的なオプション層としての選別」で、その実装が
-  Jev 選別層 (``is_jev_rerank_enabled``、既定 OFF。
-  docs/intent/auto_recall_jev_rerank.md)。文章生成は行わず、判断専用モデルに
-  候補の関連度だけを問う。OFF では一切呼ばない。
+  反射判断による選別 (ペルソナごとの「自動想起を強化する」スイッチ、既定 OFF。
+  docs/intent/auto_recall_jev_rerank.md と docs/intent/reflex_judgment.md)。
+  文章生成は行わず、判断専用モデルに候補の関連度だけを問う。OFF では一切呼ばない。
 - 注入は履歴末尾のみ、head 非混入 (§10-2、cached_head_architecture C5 と同じ面)。
 - SAIMemory には**永続化しない** (§10-7)。LLM に渡す message 列にだけ足す。
 
@@ -25,7 +25,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import os
 import re
 import threading
@@ -135,108 +134,64 @@ def get_vivid_char_budget() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Jev 選別層 (オプション、既定 OFF)
+# 反射判断による選別 (ペルソナごとの「自動想起を強化する」スイッチが ON のときだけ)
 #
 # 埋め込み類似度のしきい値だけでは「意味が近い」しか測れず、「今この場面で浮かぶ
-# べきか」を測れない。TypeSafe の判断専用モデル Jev に候補ごとの関連度 (Noul 確率)
-# を 1 リクエストで問い、その判定を採否に使う。設計と実験の合否判定は
-# docs/intent/auto_recall_jev_rerank.md。
+# べきか」を測れない。反射判断 (saiverse/reflex_judgment.py) に候補ごとの関連度
+# (Noul 確率) を 1 リクエストで問い、その判定を採否に使う。
+# 設計と実験の合否判定は docs/intent/auto_recall_jev_rerank.md、判断層そのものは
+# docs/intent/reflex_judgment.md。
+#
+# 下の 4 つの数字は Jev の実験 (2026-09) で調整して決めた値。かつては env で
+# 動かせたが、利用者向けの設定ではなく実験のつまみだったので、載せ替え
+# (2026-09-20) でモジュール定数に畳んだ。
 # ---------------------------------------------------------------------------
 
-def is_jev_rerank_enabled() -> bool:
-    """Jev 選別層を使うか。env トグルと API キーの両方が揃ったときだけ True。"""
-    if os.getenv("SAIVERSE_AUTO_RECALL_JEV", "").strip().lower() not in ("1", "true", "yes"):
-        return False
-    return bool((os.getenv("TYPESAFE_API_KEY") or "").strip())
+def is_enhanced_recall_available() -> bool:
+    """いま反射判断に選別を頼めるか (役割にモデルがあり、jev 互換の宛先で、キーも揃っているか)。
 
+    ペルソナごとのスイッチ (AUTO_RECALL_ENHANCED) との **積** で ON/OFF が決まる。
+    スイッチを入れただけでは判定は走らない — モデルの役割「反射判断」への割り当てと
+    いう明示の行為が要る (黙って費用が発生する経路を作らないため。
+    docs/intent/reflex_judgment.md §4)。
 
-# Jev に渡す候補の embed_score 下限。cosine 単独の採用しきい値 (0.86) より広く取り、
-# 0.78〜0.86 帯の「拾えなかった正解」を Jev の判定に回す。
-_JEV_FLOOR_DEFAULT = 0.78
+    ここの答えは判定の有無だけでなく **候補の集め方** にも効く (下の
+    ``run_auto_recall`` が拾い上げを広げるかどうか)。だから判断層の側でも、キーが
+    要る宛先のキー欠落まで含めて「使えない」と答える — 広げてから判定だけ落ちると、
+    「従来方式へ戻った」というログと実際の挙動が食い違う。
 
+    同じ理由で、**選別が投げる型 (noul) に答えられること**まで条件に入れる。choice に
+    しか答えない宛先を「使える」と受け取ると、候補の集め方だけが広がったまま毎ターン
+    判定が落ちる (= 上の食い違いが恒常化する)。
 
-def get_jev_floor() -> float:
-    """Jev に渡す候補の embed_score 下限を返す。0〜1 の外や非有限の指定は既定に戻す。
-
-    ガードの理由は get_jev_threshold と同じ型 — nan や負値をそのまま使うと下限比較が
-    常に不成立になり、floor 未満のはずの候補まで全部外部 API へ送られる (プライバシー
-    記述と費用見積もりの前提が警告なしに外れる)。
+    使えない理由 (未割り当て / 設定が無い / jev 互換でない / キーと宛先の組が照合に
+    通らない / noul に答えられない / キーが空) は判断層が WARNING に出す。判断層の
+    読み込み自体に失敗しても会話は止めない (False を返すだけ)。
     """
-    value = _env_float("SAIVERSE_AUTO_RECALL_JEV_FLOOR", _JEV_FLOOR_DEFAULT)
-    if not math.isfinite(value) or not (0.0 <= value <= 1.0):
+    try:
+        from saiverse.reflex_judgment import FIRST_STAGE_QUESTION_TYPE, is_available
+    except Exception:
         LOGGER.warning(
-            "[auto_recall][jev] SAIVERSE_AUTO_RECALL_JEV_FLOOR=%s is outside the "
-            "valid range 0.0-1.0; using default %s",
-            value, _JEV_FLOOR_DEFAULT,
+            "[auto_recall][reflex] could not load the reflex judgment layer; "
+            "staying on the embedding threshold", exc_info=True,
         )
-        return _JEV_FLOOR_DEFAULT
-    return value
+        return False
+    return is_available(required_type=FIRST_STAGE_QUESTION_TYPE)
 
+
+# 反射判断に渡す候補の embed_score 下限。cosine 単独の採用しきい値 (0.86) より広く
+# 取り、0.78〜0.86 帯の「拾えなかった正解」を判定に回す。
+_REFLEX_FLOOR = 0.78
 
 # 採用に必要な Noul 確率 (0〜1)。
-_JEV_THRESHOLD_DEFAULT = 0.5
+_REFLEX_THRESHOLD = 0.5
 
+# 反射判断のタイムアウト (秒)。自動想起は会話の同期経路にあるので短く保つ。
+_REFLEX_TIMEOUT = 2.5
 
-def get_jev_threshold() -> float:
-    """採用に必要な Noul 確率を返す。0〜1 の外や非有限の指定は既定に戻す。
-
-    クランプではなく既定へ戻すのは ``_env_float`` の不正値処理と同じ流儀。範囲外の
-    指定をそのまま使うと、0 未満なら全候補採用・1 超なら全候補却下となり、設定の
-    打ち間違いが「Jev が効いていない」状態へ静かに化ける。
-    """
-    value = _env_float("SAIVERSE_AUTO_RECALL_JEV_THRESHOLD", _JEV_THRESHOLD_DEFAULT)
-    if not math.isfinite(value) or not (0.0 <= value <= 1.0):
-        LOGGER.warning(
-            "[auto_recall][jev] SAIVERSE_AUTO_RECALL_JEV_THRESHOLD=%s is outside the "
-            "valid range 0.0-1.0; using default %s",
-            value, _JEV_THRESHOLD_DEFAULT,
-        )
-        return _JEV_THRESHOLD_DEFAULT
-    return value
-
-
-# TypeSafe API のタイムアウト (秒)。自動想起は会話の同期経路にあるので短く保つ。
-_JEV_TIMEOUT_DEFAULT = 2.5
-
-
-def get_jev_timeout() -> float:
-    """TypeSafe API のタイムアウト (秒) を返す。0 以下や非有限の指定は既定に戻す。
-
-    ガードの理由は get_jev_threshold と同じ型 — 0 以下をそのまま使うと全呼び出しが
-    即座に締切超過になり、フォールバックで会話は続くが、置き去りワーカーが毎ターン
-    生まれて「Jev が効かないのに課金だけ発生する」状態へ静かに化ける。
-    """
-    value = _env_float("SAIVERSE_AUTO_RECALL_JEV_TIMEOUT", _JEV_TIMEOUT_DEFAULT)
-    if not math.isfinite(value) or value <= 0.0:
-        LOGGER.warning(
-            "[auto_recall][jev] SAIVERSE_AUTO_RECALL_JEV_TIMEOUT=%s is not a positive "
-            "number of seconds; using default %s",
-            value, _JEV_TIMEOUT_DEFAULT,
-        )
-        return _JEV_TIMEOUT_DEFAULT
-    return value
-
-
-# Jev に渡す state の会話本文メッセージ数 (直近から)。
-_JEV_CONTEXT_MESSAGES_DEFAULT = 6
-
-
-def get_jev_context_messages() -> int:
-    """Jev の判断材料に入れる直近会話メッセージ数を返す。1 未満は既定に戻す。
-
-    クエリ側 (get_query_message_count) の「0 以下 = 全件」の慣習はここでは踏襲しない —
-    そちらはデータがローカルに留まるが、こちらは外部 API への送信件数で、全件送りは
-    「会話本文は 1 件 500 字まで」という有界性の根拠を件数側から崩すため。
-    """
-    value = _env_int("SAIVERSE_AUTO_RECALL_JEV_CONTEXT_MESSAGES", _JEV_CONTEXT_MESSAGES_DEFAULT)
-    if value < 1:
-        LOGGER.warning(
-            "[auto_recall][jev] SAIVERSE_AUTO_RECALL_JEV_CONTEXT_MESSAGES=%s is below 1; "
-            "using default %s (0 or negative would send the whole history to the external API)",
-            value, _JEV_CONTEXT_MESSAGES_DEFAULT,
-        )
-        return _JEV_CONTEXT_MESSAGES_DEFAULT
-    return value
+# 反射判断へ渡す state の会話本文メッセージ数 (直近から)。全件送りにしないのは、
+# 「会話本文は 1 件 500 字まで」という有界性の根拠を件数側から崩さないため。
+_REFLEX_CONTEXT_MESSAGES = 6
 
 
 # ---------------------------------------------------------------------------
@@ -594,7 +549,7 @@ def _context_message_ids(messages: List[Dict[str, Any]]) -> set:
 
 
 # ---------------------------------------------------------------------------
-# 拾い上げの拡張 (Jev 選別層が ON のときだけ通る経路)
+# 拾い上げの拡張 (「自動想起を強化する」が効いているときだけ通る経路)
 #
 # 実測で分かった狭さ: unified_recall の既定では message 枠が 1 席しかなく、その席を
 # 「ユーザーが今言った発話そのもの」(直前に memory.db へ永続化済み、クエリと同一なので
@@ -610,15 +565,15 @@ def _context_message_ids(messages: List[Dict[str, Any]]) -> set:
 _KEYWORD_PATTERN = re.compile(r"[ァ-ヶ][ァ-ヶー]+|[一-龥][一-龥々]+|[A-Za-z0-9]{2,}")
 
 # messages にこの件数を超えて出現する語は「ありふれた語」として捨てる。実験値
-# (env にはしない — Jev 実験の一部として調整する数字で、利用者向けの設定ではない)。
+# (env にはしない — 実験の一部として調整する数字で、利用者向けの設定ではない)。
 _KEYWORD_COMMON_LIMIT = 50
 
 # 1 クエリから使うキーワードの上限 (出現件数の少ない順に選ぶ)。同上、実験値。
 _KEYWORD_MAX_COUNT = 4
 
-# Jev ON のときのソース枠の上書き。message を 1 → 3 に広げる。合計 9 になるが
+# 強化が効いているときのソース枠の上書き。message を 1 → 3 に広げる。合計 9 になるが
 # topk=8 の天井はそのまま (枠は「上限」であって「確保」ではない)。
-_JEV_SOURCE_ALLOCATIONS = {"fragment": 5, "memopedia": 1, "message": 3}
+_ENHANCED_SOURCE_ALLOCATIONS = {"fragment": 5, "memopedia": 1, "message": 3}
 
 
 def _extract_recall_keywords(
@@ -677,14 +632,14 @@ def _extract_recall_keywords(
         kept.sort(key=lambda wc: wc[1])
         selected = kept[:_KEYWORD_MAX_COUNT]
         LOGGER.debug(
-            "[auto_recall][jev] keywords: %s (dropped: %s)",
+            "[auto_recall][reflex] keywords: %s (dropped: %s)",
             " ".join(f"{w}={c}" for w, c in selected) or "(none)",
             " ".join(f"{w}={c}" for w, c in dropped) or "(none)",
         )
         return [w for w, _ in selected]
     except Exception:
         LOGGER.warning(
-            "[auto_recall][jev] keyword extraction failed; "
+            "[auto_recall][reflex] keyword extraction failed; "
             "falling back to the default whitespace split",
             exc_info=True,
         )
@@ -1047,31 +1002,31 @@ def _format_footer(items: List[_LedgerItem]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Jev 選別層の実行 (ON のときだけ通る経路)
+# 反射判断による選別の実行 (効いているときだけ通る経路)
 # ---------------------------------------------------------------------------
 
-_JEV_CRITERION_TRUE = (
+_REFLEX_CRITERION_TRUE = (
     "記憶の内容が現在の話題・登場人物・状況と具体的に結びついており、"
     "いま思い出すことが会話の理解や応答に寄与する。"
 )
-_JEV_CRITERION_FALSE = (
+_REFLEX_CRITERION_FALSE = (
     "話題が違う、または表面的な語の類似だけで、"
     "いまの会話に持ち込むと不自然・無関係になる。"
 )
 
-# Jev へ送る会話本文 1 件あたりの文字数上限。
+# 判断へ送る会話本文 1 件あたりの文字数上限。
 #
 # 上限が無いと 1 ターンのペイロードが発話の長さに引きずられて青天井になる: 費用の
 # 見積もり (1 ターン 0.01 円未満) が崩れ、長話のターンほど送受信が伸びて絶対締切に
-# 掛かりやすくなる — つまり「長く話したターンほど Jev が効かない」という、狙いと
+# 掛かりやすくなる — つまり「長く話したターンほど判定が効かない」という、狙いと
 # 逆の挙動になる。候補記憶の側は unified_recall が既に 200 字抜粋にしているので、
 # ここで切るのは会話本文だけ。
-_JEV_CONVERSATION_TEXT_LIMIT = 500
+_REFLEX_CONVERSATION_TEXT_LIMIT = 500
 
-# Jev の state に入れる「いま見えたもの」(部屋の様子・通知) の最大件数 (最新側から)。
+# state に入れる「いま見えたもの」(部屋の様子・通知) の最大件数 (最新側から)。
 # 会話本文と同じく、1 ターンのペイロードが目に入ったものの量で青天井にならない
 # ようにするための有界化。
-_JEV_MAX_OBSERVATIONS = 3
+_REFLEX_MAX_OBSERVATIONS = 3
 
 
 def _clip(text: str, limit: int) -> str:
@@ -1081,14 +1036,14 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit] + "…"
 
 
-def _jev_candidates(
+def _reflex_candidates(
     hits,
     *,
     accepted_keys: set,
     context_ids: set,
     floor: float,
 ) -> List[Tuple[Tuple[str, str], Any]]:
-    """Jev に判定させる候補 (key, hit) を選ぶ。
+    """反射判断に判定させる候補 (key, hit) を選ぶ。
 
     既存の選別ループが無条件に捨てるもの (エンティティトリガーで採用済み / 既に
     コンテキスト窓にある message / embed_score なし) はここでも外す。残りのうち
@@ -1109,41 +1064,41 @@ def _jev_candidates(
     return candidates
 
 
-def _build_jev_request(
+def _build_reflex_request(
     messages: List[Dict[str, Any]],
     candidates: List[Tuple[Tuple[str, str], Any]],
     *,
     context_messages: int,
     observations: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]], Dict[str, Tuple[str, str]]]:
-    """Jev に渡す state / questions と、qid → 台帳キーの対応表を組み立てる。
+    """反射判断に渡す state / questions と、qid → 台帳キーの対応表を組み立てる。
 
-    会話本文は 1 件あたり ``_JEV_CONVERSATION_TEXT_LIMIT`` 字で切る (理由は同定数の
+    会話本文は 1 件あたり ``_REFLEX_CONVERSATION_TEXT_LIMIT`` 字で切る (理由は同定数の
     コメント)。候補記憶の本文は unified_recall が既に 200 字抜粋にしているので
     ここでは触らない。
 
     メディア想起 (``SAIVERSE_MEDIA_RECALL_ENABLED``) が ON のときは、検索クエリ
     (``build_query``) に足すのと同じ「最新添付の概要」を state にも入れる。検索が
-    写真をきっかけに拾ってきた候補を、写真を知らない Jev が落としてしまう非対称を
+    写真をきっかけに拾ってきた候補を、写真を知らない判断が落としてしまう非対称を
     避けるため。OFF のときと概要が無いときは ``attachments`` キー自体を入れない
     (state の形は従来のまま)。
 
     ``observations`` は「このターンで新しく目に入ったもの」(部屋の様子・通知) の
     本文。ユーザーの発言が種になったターンでは知覚ブロックが ``conversation`` に
-    入らないので、ここから別枠で渡す — 見えたものを知らない Jev が、見えたものに
+    入らないので、ここから別枠で渡す — 見えたものを知らない判断が、見えたものに
     紐づく候補を落とす非対称を避けるため。会話本文と同じく 1 件
-    ``_JEV_CONVERSATION_TEXT_LIMIT`` 字で切り、最新側から最大
-    ``_JEV_MAX_OBSERVATIONS`` 件。無いときは ``observations`` キー自体を入れない。
+    ``_REFLEX_CONVERSATION_TEXT_LIMIT`` 字で切り、最新側から最大
+    ``_REFLEX_MAX_OBSERVATIONS`` 件。無いときは ``observations`` キー自体を入れない。
     """
     convo = [m for m in messages if _is_conversational_message(m)]
-    # 呼び出し側 (get_jev_context_messages) が >= 1 を保証する。クエリ側の
+    # 呼び出し側が >= 1 を保証する (_REFLEX_CONTEXT_MESSAGES)。クエリ側の
     # 「0 以下 = 全件」の慣習をここで実装すると、将来別の呼び出し元が付いたときに
     # 会話履歴の全件が外部 API へ出る経路が黙って復活するので、持ち込まない。
     tail = convo[-max(1, context_messages):]
     conversation = [
         {
             "role": str(m.get("role") or ""),
-            "text": _clip(str(m.get("content", "")).strip(), _JEV_CONVERSATION_TEXT_LIMIT),
+            "text": _clip(str(m.get("content", "")).strip(), _REFLEX_CONVERSATION_TEXT_LIMIT),
         }
         for m in tail
     ]
@@ -1156,11 +1111,12 @@ def _build_jev_request(
         key_by_qid[qid] = key
         memories[qid] = {"title": hit.title or "", "content": hit.content or ""}
         questions[qid] = {
+            "type": "noul",
             "instructions": (
                 f"`memories.{qid}` の記憶は、`conversation` の現在の話の流れの中で、"
                 "会話の当事者の頭に自然に浮かぶ関連記憶か。"
             ),
-            "criteria": {"true": _JEV_CRITERION_TRUE, "false": _JEV_CRITERION_FALSE},
+            "criteria": {"true": _REFLEX_CRITERION_TRUE, "false": _REFLEX_CRITERION_FALSE},
         }
 
     state: Dict[str, Any] = {"conversation": conversation, "memories": memories}
@@ -1170,13 +1126,13 @@ def _build_jev_request(
             state["attachments"] = attachment_summaries
     if observations:
         state["observations"] = [
-            _clip(text, _JEV_CONVERSATION_TEXT_LIMIT)
-            for text in observations[-_JEV_MAX_OBSERVATIONS:]
+            _clip(text, _REFLEX_CONVERSATION_TEXT_LIMIT)
+            for text in observations[-_REFLEX_MAX_OBSERVATIONS:]
         ]
     return state, questions, key_by_qid
 
 
-def _run_jev_rerank(
+def _run_reflex_rerank(
     hits,
     messages: List[Dict[str, Any]],
     *,
@@ -1185,79 +1141,95 @@ def _run_jev_rerank(
     persona_id: str,
     observations: Optional[List[str]] = None,
 ) -> Optional[Dict[Tuple[str, str], float]]:
-    """Jev に候補を一括判定させる。
+    """反射判断に候補を一括判定させる。
 
     Returns:
-        - ``{key: noul}``: 判定できた (候補ゼロなら空 dict。API は呼んでいない)。
-        - ``None``: TypeSafe API が使えなかった。呼び出し側はこのターンだけ既存の
+        - ``{key: noul}``: 判定できた (候補ゼロなら空 dict。判断は呼んでいない)。
+        - ``None``: 反射判断が使えなかった。呼び出し側はこのターンだけ既存の
           cosine しきい値方式へ静かに戻る (外部 API の障害でペルソナの返事を
           止めないため)。
     """
-    # 準備段階 (設定の読み取り・候補の絞り込み・リクエスト組み立て・遅延 import) は
+    # 準備段階 (答える側の解決・候補の絞り込み・リクエスト組み立て・遅延 import) は
     # まるごと try の中に置く。docstring が約束する「失敗は None の 1 種類」を関数
     # 全体で成立させるため (隣人の unified_recall / _find_entity_triggers も同じ姿勢で
-    # 丸ごと包んでいる)。遅延 import は OFF 経路で typesafe_client (httpx) を一切
+    # 丸ごと包んでいる)。遅延 import は OFF 経路で reflex_judgment (httpx) を一切
     # 読み込ませないためのもので、その失敗もここで畳む。
     try:
-        floor = get_jev_floor()
+        from saiverse.reflex_judgment import (
+            FIRST_STAGE_QUESTION_TYPE,
+            ReflexJudgmentUnavailable,
+            evaluate,
+            resolve_backend,
+        )
+
         accept_threshold = get_similarity_threshold()
-        candidates = _jev_candidates(
-            hits, accepted_keys=accepted_keys, context_ids=context_ids, floor=floor,
+        candidates = _reflex_candidates(
+            hits, accepted_keys=accepted_keys, context_ids=context_ids, floor=_REFLEX_FLOOR,
         )
 
         # 設定ミスの警告は「実際に記憶が落ちうるターン」でだけ出す。ヒットが 1 件も
         # 無いターンにも出すと、何も起きていないのに毎ターン警告が並び、警告の意味
         # (この設定で記憶が落ちている) と実際に起きたことがずれる。
-        if hits and floor > accept_threshold:
+        if hits and _REFLEX_FLOOR > accept_threshold:
             LOGGER.warning(
-                "[auto_recall][jev] JEV_FLOOR=%.3f is above the cosine acceptance threshold %.3f: "
-                "memories that the conventional path would have injected (embed_score between "
-                "%.3f and %.3f) never reach Jev and are silently dropped (persona=%s)",
-                floor, accept_threshold, accept_threshold, floor, persona_id,
+                "[auto_recall][reflex] the candidate floor %.3f is above the cosine "
+                "acceptance threshold %.3f: memories that the conventional path would "
+                "have injected (embed_score between %.3f and %.3f) never reach the "
+                "judgment and are silently dropped (persona=%s)",
+                _REFLEX_FLOOR, accept_threshold, accept_threshold, _REFLEX_FLOOR, persona_id,
             )
 
         if not candidates:
             LOGGER.debug(
-                "[auto_recall][jev] no candidate above floor; API not called (persona=%s)",
+                "[auto_recall][reflex] no candidate above floor; judgment not called (persona=%s)",
                 persona_id,
             )
             return {}
 
-        state, questions, key_by_qid = _build_jev_request(
+        # 答える側は呼ぶ直前に解決する (判定ログにどのモデル設定が答えたかを載せる —
+        # docs/intent/reflex_judgment.md §5)。要求する型は「使えるか」の判定
+        # (is_enhanced_recall_available) と同じにする — 判定と実呼び出しの間に設定が
+        # 読み直された場合でも、この解決が照合ごと全部やり直すので、検査を通らない
+        # 宛先へ飛ぶことはない (型が合わなければここで不成立 → 従来方式へ)。
+        backend = resolve_backend(required_type=FIRST_STAGE_QUESTION_TYPE)
+        state, questions, key_by_qid = _build_reflex_request(
             messages, candidates,
-            context_messages=get_jev_context_messages(),
+            context_messages=_REFLEX_CONTEXT_MESSAGES,
             observations=observations,
         )
-        from saiverse.typesafe_client import TypeSafeUnavailable, evaluate_nouls
     except Exception:
         LOGGER.warning(
-            "[auto_recall][jev] could not prepare the request (import or build failed); "
-            "falling back to cosine threshold for this turn (persona=%s)",
+            "[auto_recall][reflex] could not prepare the request (import, backend or "
+            "build failed); falling back to cosine threshold for this turn (persona=%s)",
             persona_id, exc_info=True,
         )
         return None
 
     started = time.monotonic()
     try:
-        nouls, usage = evaluate_nouls(state, questions, timeout=get_jev_timeout())
-    except TypeSafeUnavailable as exc:
+        nouls, usage = evaluate(
+            state, questions,
+            timeout=_REFLEX_TIMEOUT, backend=backend, persona_id=persona_id,
+        )
+    except ReflexJudgmentUnavailable as exc:
         LOGGER.warning(
-            "[auto_recall][jev] unavailable (%s); falling back to cosine threshold "
-            "for this turn (persona=%s)", exc, persona_id,
+            "[auto_recall][reflex] unavailable (%s); falling back to cosine threshold "
+            "for this turn (persona=%s, model=%s)", exc, persona_id, backend.model_key,
         )
         return None
     except Exception:
         LOGGER.warning(
-            "[auto_recall][jev] rerank raised; falling back to cosine threshold "
-            "for this turn (persona=%s)", persona_id, exc_info=True,
+            "[auto_recall][reflex] rerank raised; falling back to cosine threshold "
+            "for this turn (persona=%s, model=%s)", persona_id, backend.model_key, exc_info=True,
         )
         return None
 
     latency_ms = (time.monotonic() - started) * 1000.0
     decisions = {key_by_qid[qid]: noul for qid, noul in nouls.items() if qid in key_by_qid}
     LOGGER.info(
-        "[auto_recall][jev] judged %d/%d candidate(s) in %.0f ms (persona=%s, usage=%s)",
-        len(decisions), len(candidates), latency_ms, persona_id, usage,
+        "[auto_recall][reflex] judged %d/%d candidate(s) in %.0f ms "
+        "(persona=%s, model=%s, usage=%s)",
+        len(decisions), len(candidates), latency_ms, persona_id, backend.model_key, usage,
     )
     return decisions
 
@@ -1285,13 +1257,13 @@ def run_auto_recall(
     *,
     persona_id: str,
     thread_id: str,
+    enhanced: bool = False,
 ) -> AutoRecallResult:
     """自動想起を 1 ターン分実行し、注入ブロック (あれば) を返す。
 
-    LLM は呼ばない (唯一の外部呼び出しは、既定 OFF の Jev 選別層が ON のときの
-    TypeSafe API 1 往復。文章生成はしない)。呼び出し側はスコープ (CONVERSATION
-    アスペクト) を確認済みであること。``conn`` / ``embedder`` が None の場合は
-    no-op (注入なし)。
+    LLM は呼ばない (唯一の外部呼び出しは、強化が効いているときの反射判断 1 往復。
+    文章生成はしない)。呼び出し側はスコープ (CONVERSATION アスペクト) を確認済みで
+    あること。``conn`` / ``embedder`` が None の場合は no-op (注入なし)。
 
     Args:
         conn: persona の memory.db 接続 (adapter.conn)。
@@ -1302,6 +1274,10 @@ def run_auto_recall(
         thread_id: 台帳キーの第2要素。呼び出し側が adapter から取得した canonical
             thread_id (メインライン履歴の読み書きと同じ解決) を明示的に渡す。
             thread を跨いで粘着記憶が持ち込まれない境界 (2026-07-12 監査 P1)。
+        enhanced: ペルソナごとの「自動想起を強化する」スイッチ (DB の
+            ``AI.AUTO_RECALL_ENHANCED``)。この関数は persona_id 文字列しか持たないので、
+            persona オブジェクトを持つ呼び出し側 (sea/runtime_context.py) が読んで渡す。
+            既定 False = 従来どおりの埋め込みしきい値判定 (挙動は 1 ビットも変わらない)。
 
     Returns:
         AutoRecallResult。``injected`` が True のとき ``block`` を末尾注入する。
@@ -1320,18 +1296,20 @@ def run_auto_recall(
     context_ids = _context_message_ids(messages)
     ledger = _get_ledger(persona_id, thread_id)
 
-    # Jev 選別層の ON/OFF は「どこまで拾い上げるか」にも効く (ON のときだけ広げる)。
-    # OFF のときは unified_recall へ渡す引数が従来と 1 ビットも変わらないよう、
+    # 強化が効くのは「ペルソナのスイッチ ON」かつ「反射判断が使える」ときだけ。
+    # スイッチだけでは走らない (役割にモデルを割り当てるという明示の行為が要る)。
+    # 効いているかどうかは「どこまで拾い上げるか」にも効く (効くときだけ広げる)。
+    # 効いていないときは unified_recall へ渡す引数が従来と 1 ビットも変わらないよう、
     # 追加引数そのものを渡さない。
-    jev_enabled = is_jev_rerank_enabled()
+    reflex_enabled = bool(enhanced) and is_enhanced_recall_available()
 
     # 「このターンで新しく目に入ったもの」(部屋の様子・通知)。ユーザーの発言が種に
     # なったターンでだけ集める — 発言が無いターンでは build_query がこれ自体を種に
-    # しているので、脇道から重ねて渡す意味がない。使うのは Jev ON の経路だけ
-    # (字面検索のキーワードと、Jev の判断材料)。
+    # しているので、脇道から重ねて渡す意味がない。使うのは強化の経路だけ
+    # (字面検索のキーワードと、反射判断の判断材料)。
     observations: List[str] = (
         _fresh_observation_texts(messages)
-        if jev_enabled and _seed_is_user_utterance(messages)
+        if reflex_enabled and _seed_is_user_utterance(messages)
         else []
     )
 
@@ -1366,10 +1344,16 @@ def run_auto_recall(
                 stale_turns=0,
             )
 
-    if not query:
-        LOGGER.debug("[auto_recall] empty query; entity-trigger-only pass (persona=%s)", persona_id)
-        hits = []
-    else:
+    def _collect(extra_kwargs: Dict[str, Any]):
+        """候補を集める。失敗しても会話は止めない (None を返し、呼び出し側が畳む)。
+
+        ``extra_kwargs`` が空のときが従来の集め方で、強化が効いているターンだけ
+        キーワード・除外・枠の上書きが乗る。戻り値の None は「集め損ねた」の印 —
+        「候補ゼロ」([]) と区別する。初回の収集では両者とも空のヒットとして続けるが、
+        判定失敗後の集め直しでは、集め損ねたときに最初の収集結果を捨てない
+        (成功済みの候補を障害の空で上書きすると、粘着台帳が「候補の無かったターン」
+        として古び、障害が続いただけで粘着記憶が消える)。
+        """
         try:
             from sai_memory.unified_recall import unified_recall
             # Chronicle は自動想起の対象から外す。Chronicle は人生の背骨を要約した
@@ -1378,44 +1362,69 @@ def run_auto_recall(
             # なる)。かつ要約ゆえ具体シーンが無く、会話に連想として繋げにくい
             # (fragment / message は「そのときの会話」があるので連想として振る舞える)。
             # 将来はソース種別ごとの「思い出しやすさ」に一般化する予定 (§4 参照)。
-            recall_kwargs: Dict[str, Any] = {}
-            if jev_enabled:
-                keywords = _extract_recall_keywords(
-                    conn, query, observations=observations,
-                )
-                recall_kwargs = {
-                    # 抽出できなかったターンは None = 従来の split 挙動に戻す。
-                    "keywords": keywords or None,
-                    # ユーザーが今言った発話そのものは message 枠を毎ターン占領する
-                    # だけで、後段で「既にコンテキストにある」として捨てられる。
-                    # 収集段階で外して枠を空ける。
-                    "exclude_message_ids": context_ids,
-                    "source_allocations": _JEV_SOURCE_ALLOCATIONS,
-                }
-            hits = unified_recall(
+            return unified_recall(
                 conn, embedder, query,
                 topk=topk,
                 search_chronicle=False,
                 search_memopedia=True,
                 search_fragments=True,
                 search_messages=True,
-                **recall_kwargs,
+                **extra_kwargs,
             )
         except Exception:
             LOGGER.warning("[auto_recall] unified_recall raised (persona=%s)", persona_id, exc_info=True)
-            hits = []
+            return None
 
-    # --- Jev 選別層 (オプション、既定 OFF) ---
-    # None = Jev を使わない/使えない (既存の cosine しきい値方式で判定する)。
-    # dict = Jev の判定結果 (key -> noul 確率)。候補ゼロなら空 dict。
-    jev_decisions: Optional[Dict[Tuple[str, str], float]] = None
-    if jev_enabled:
-        jev_decisions = _run_jev_rerank(
+    # 強化が効いているターンだけ乗せる追加引数。空のままなら従来の集め方そのもの。
+    enhanced_kwargs: Dict[str, Any] = {}
+    if not query:
+        LOGGER.debug("[auto_recall] empty query; entity-trigger-only pass (persona=%s)", persona_id)
+        hits = []
+    else:
+        if reflex_enabled:
+            keywords = _extract_recall_keywords(conn, query, observations=observations)
+            enhanced_kwargs = {
+                # 抽出できなかったターンは None = 従来の split 挙動に戻す。
+                "keywords": keywords or None,
+                # ユーザーが今言った発話そのものは message 枠を毎ターン占領する
+                # だけで、後段で「既にコンテキストにある」として捨てられる。
+                # 収集段階で外して枠を空ける。
+                "exclude_message_ids": context_ids,
+                "source_allocations": _ENHANCED_SOURCE_ALLOCATIONS,
+            }
+        collected = _collect(enhanced_kwargs)
+        hits = collected if collected is not None else []
+
+    # --- 反射判断による選別 (オプション、既定 OFF) ---
+    # None = 反射判断を使わない/使えない (既存の cosine しきい値方式で判定する)。
+    # dict = 判定結果 (key -> noul 確率)。候補ゼロなら空 dict。
+    reflex_decisions: Optional[Dict[Tuple[str, str], float]] = None
+    if reflex_enabled:
+        reflex_decisions = _run_reflex_rerank(
             hits, messages,
             accepted_keys=accepted_keys, context_ids=context_ids, persona_id=persona_id,
             observations=observations,
         )
-    jev_threshold = get_jev_threshold() if jev_decisions is not None else 0.0
+        if reflex_decisions is None and enhanced_kwargs:
+            # 判定が使えなかったターンは、候補集めからやり直して従来の形に戻す。
+            # 広げた母集団のまま cosine の選別に掛けると、従来経路では拾わない記憶が
+            # 注入されたり、枠の違いで拾えたはずの記憶が落ちたりする — 「従来方式へ
+            # 戻った」というログと実際の挙動が食い違う。
+            LOGGER.info(
+                "[auto_recall][reflex] the judgment was unavailable this turn; "
+                "re-collecting candidates the conventional way (persona=%s)", persona_id,
+            )
+            recollected = _collect({})
+            if recollected is not None:
+                hits = recollected
+            else:
+                # 集め直し自体が失敗した回は、成功済みの広い候補のまま cosine 選別へ
+                # (このターンだけ 6 巡目以前の受容済みの形に戻る)。空で上書きして
+                # 粘着台帳を古びさせるより、実在の候補で選別する方が従来に近い。
+                LOGGER.warning(
+                    "[auto_recall][reflex] re-collection failed; keeping the enhanced "
+                    "candidates for this turn's cosine selection (persona=%s)", persona_id,
+                )
 
     # --- 選別: しきい値を満たすヒットを台帳に反映 ---
     for hit in hits:
@@ -1443,18 +1452,18 @@ def run_auto_recall(
             )
             continue
 
-        if jev_decisions is not None:
-            # Jev 経路: 採否は Noul 確率だけで決める。message ソースの底上げ
-            # (長文類似度インフレへの対症療法) は Jev の直接判定が置き換えるので
-            # 適用しない。判定が無いのは floor 未満で Jev に渡していない候補だけ
-            # (クライアントは全 qid が揃った応答しか成功にしないので、floor 以上の
-            # 候補は必ず判定を持つ)。念のため dict.get の防御は残す。
-            noul = jev_decisions.get(key)
-            passes = noul is not None and noul >= jev_threshold
+        if reflex_decisions is not None:
+            # 反射判断の経路: 採否は Noul 確率だけで決める。message ソースの底上げ
+            # (長文類似度インフレへの対症療法) は直接判定が置き換えるので適用しない。
+            # 判定が無いのは floor 未満で判断に渡していない候補だけ (判断層は全 qid が
+            # 揃った応答しか成功にしないので、floor 以上の候補は必ず判定を持つ)。
+            # 念のため dict.get の防御は残す。
+            noul = reflex_decisions.get(key)
+            passes = noul is not None and noul >= _REFLEX_THRESHOLD
             LOGGER.debug(
-                "[auto_recall][jev] %s/%s embed=%.3f noul=%s -> %s title=%r",
+                "[auto_recall][reflex] %s/%s embed=%.3f noul=%s -> %s title=%r",
                 hit.source_type, hit.source_id, embed_score,
-                f"{noul:.3f}" if noul is not None else "(below floor; not sent to Jev)",
+                f"{noul:.3f}" if noul is not None else "(below floor; not judged)",
                 "ACCEPT" if passes else "reject", (hit.title or "")[:40],
             )
         else:

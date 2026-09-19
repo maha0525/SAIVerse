@@ -112,11 +112,14 @@ def write_env_updates(updates: Dict[str, str]) -> EnvWriteResult:
     from .env, and the speaking models they decide cannot end up reversed
     (docs/intent/persona_model_selection.md, decision 5).
 
-    A model role variable (``MODEL_ROLES``) whose non-empty value has no model
-    definition is not written; the other variables in the same request are
-    (decision 6). After a model role variable is written, every persona's
-    speaking model is decided again (decision 1).
+    A model role variable (``MODEL_ROLES``) whose non-empty value cannot be used
+    for that role is not written; the other variables in the same request are
+    (decision 6). That covers both a name with no model definition and a model
+    that role cannot talk to (a reflex-judgment-only destination on a
+    conversation or summary role). After a model role variable is written, every
+    persona's speaking model is decided again (decision 1).
     """
+    from saiverse.model_defaults import SAVE_REJECT_UNDEFINED
     from saiverse.persona_model_selection import (
         MODEL_SETTINGS_LOCK,
         model_role_env_keys,
@@ -133,7 +136,10 @@ def write_env_updates(updates: Dict[str, str]) -> EnvWriteResult:
         accepted, rejected = split_undefined_model_updates(updates)
         for item in rejected:
             LOGGER.warning(
-                "Not saving %s=%r: no model definition with that name", item.env_key, item.value,
+                "Not saving %s=%r: %s", item.env_key, item.value,
+                "no model definition with that name"
+                if item.reason == SAVE_REJECT_UNDEFINED
+                else f"that model cannot be used for the {item.role} role",
             )
             result.rejected_keys.append(item.env_key)
             result.notices.append(rejected_global_model_message(item, manager))

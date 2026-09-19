@@ -18,6 +18,9 @@
 | `lmstudio` | LM Studio (local) | `openai_compat` | `http://127.0.0.1:1234/v1` | —（不要） |
 | `ollama` | Ollama (local) | `ollama_compat` | —（未設定＝自動探索） | — |
 | `llama_cpp_server` | llama.cpp Server (local) | `openai_compat` | `http://127.0.0.1:8080/v1` | —（不要） |
+| `typesafe` | TypeSafe System One | `jev_compat` | `https://api.typesafe.ai` | `TYPESAFE_API_KEY` |
+| `openrouter_systemone` | OpenRouter (System One) | `jev_compat` | `https://openrouter.ai` | `OPENROUTER_API_KEY` |
+| `localjev` | localjev (local) | `jev_compat` | `http://127.0.0.1:8080` | —（不要） |
 
 `gemini` だけは `api_key_env_alternates: ["GEMINI_FREE_API_KEY"]` を併せ持つ。**`GEMINI_API_KEY` と `GEMINI_FREE_API_KEY` のどちらか一方が設定されていればモデル一覧に出る**（無料枠だけの利用を想定）。判定は `saiverse/model_configs.py` の `_get_required_env_vars()`。
 
@@ -82,8 +85,28 @@
 | `xai_native` | xAI ネイティブ | ✗（builtin のみ） |
 | `nvidia_nim` | NVIDIA NIM | ✗（builtin のみ） |
 | `openai_codex` | OpenAI Codex（ChatGPT OAuth） | ✗（builtin のみ） |
+| `jev_compat` | 反射判断の宛先（System One 形式） | ✗（builtin のみ） |
 
 `*_native` / `nvidia_nim` / `openai_codex` は `llm_clients/` にコード実装が必要なため builtin のみ。UI（モデル管理 > プロバイダ）から作れるのは `openai_compat` / `ollama_compat` の2種。
+
+### `jev_compat` — 反射判断が話す宛先
+
+会話には使わない（`llm_clients/factory.py` は扱わないので、標準モデルや軽量モデルに割り当てるとクライアント生成で失敗する）。話し相手は [`saiverse/reflex_judgment.py`](../intent/reflex_judgment.md) だけで、「状況 + 型付きの質問」を送って確率・選択・数値を受け取る。
+
+「Jev 互換」を名乗る提供元は宛先の path・応答の欄の名前・対応する質問の型が揃っていないので、**その差は provider 設定の `reflex_judgment` 欄で宣言する**（コードに提供元ごとの分岐を置かない）。宣言できる項目:
+
+| 項目 | 既定 | 意味 |
+|---|---|---|
+| `path` | `/v1/systemone` | `base_url` の後ろに付ける宛先のパス |
+| `answers_key` | `answers` | 応答のどの欄に答えの辞書が載るか |
+| `usage_key` | `usage` | 応答のどの欄に使用量が載るか |
+| `answer_fields` | `{"noul": "noul", "choice": "choice", "score": "score"}` | 質問の型ごとに、答えの値が載る欄の名前 |
+| `usage_fields` | `{"input_tokens": "input_tokens", "output_tokens": "output_tokens"}` | 記帳する使用量の名前 → 応答の欄の名前 |
+| `supported_types` | 3 型すべて | この宛先が答えられる質問の型。対応しない型が混ざった質問は、ひとまとまりごと「使えなかった」になる |
+
+モデル側は `provider_ref` でこれを受け継ぐので、同梱の 3 つのモデル定義（`jev-latest` / `openrouter-jev-latest` / `localjev`）は宣言を持たない。使用量と費用はモデル設定キー名義で既存の記帳に載るので、単価は普通のモデルと同じく `pricing` に書く。
+
+`localjev` の既定の宛先は `http://127.0.0.1:8080` (localjev 本体の既定 `LOCALJEV_HOST` / `LOCALJEV_PORT` に合わせた値。llama.cpp Server の既定ポートと同じなので、両方をローカルで動かすならどちらかのポートをずらす)。別のポートで動かしているなら、`~/.saiverse/user_data/providers/localjev.json` に同じ id で `base_url` を書いた上書きを置く。
 
 ## 追加のしかた
 

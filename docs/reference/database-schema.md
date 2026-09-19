@@ -274,6 +274,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `CHRONICLE_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `AUTONOMOUS_CHRONICLE_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `AUTO_RECALL_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
+| `AUTO_RECALL_ENHANCED` | BOOLEAN | NOT NULL, default=False |  |
 | `MEMORY_WEAVE_CONTEXT` | BOOLEAN | NOT NULL, default=True |  |
 | `MEMOPEDIA_INDEX_LIMIT` | INTEGER | — |  |
 | `MEMOPEDIA_INDEX_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
@@ -576,7 +577,9 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `id` | INTEGER | PK, NOT NULL |  |
 | `name` | VARCHAR(255) | NOT NULL |  |
 | `display_name` | VARCHAR(255) | — |  |
+| `display_name_en` | VARCHAR(255) | — |  |
 | `description` | VARCHAR(1024) | NOT NULL, default='' |  |
+| `description_en` | VARCHAR(1024) | — |  |
 | `scope` | VARCHAR(32) | NOT NULL, default='public' |  |
 | `created_by_persona_id` | VARCHAR(255) | FK→ai.AIID |  |
 | `building_id` | VARCHAR(255) | FK→building.BUILDINGID |  |

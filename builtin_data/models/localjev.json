@@ -1,0 +1,8 @@
+{
+  "model": "jev-latest",
+  "display_name": "Jev (localjev)",
+  "provider_ref": "localjev",
+  "group": "local",
+  "context_length": 128000,
+  "supports_structured_output": false
+}
