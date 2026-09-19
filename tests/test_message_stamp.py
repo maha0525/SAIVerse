@@ -557,6 +557,13 @@ class TestSpellLoopPredecessor:
             def consume_usage(self):
                 return None
 
+            # スペルループは周ごとに思考も回収する (破壊的読み取り)。
+            def consume_reasoning(self):
+                return []
+
+            def consume_reasoning_details(self):
+                return None
+
         async def _fake_spell(tool_name, tool_args, persona, state, playbook_name,
                               event_callback, messages=None):
             return ("記録しました", None, True)

@@ -164,12 +164,30 @@ class ConsumeReasoningTest(unittest.TestCase):
         self.assertEqual(state["_reasoning_text"], "a")
         self.assertEqual(state["_reasoning_details"], [{"d": 1}])
 
-    def test_store_skips_empty_text_and_none_details(self):
+    def test_store_writes_nothing_when_state_is_empty(self):
         state = {}
         _store_reasoning_in_state(state, "", None)
         self.assertEqual(state, {})
         _store_reasoning_in_state(state, "x", [])
         self.assertEqual(state, {"_reasoning_text": "x", "_reasoning_details": []})
+
+    def test_store_clears_previous_call_reasoning(self):
+        """空の思考の格納は、前の呼び出しの思考を **消す**。
+
+        残すと、思考を返さなかった呼び出しの Beat に前の呼び出しの思考が
+        付く (2026-09-19 敵対レビュー 2 巡目)。
+        """
+        state = {"_reasoning_text": "前の呼び出しの思考", "_reasoning_details": [{"d": 1}]}
+        _store_reasoning_in_state(state, "", None)
+        self.assertNotIn("_reasoning_text", state)
+        self.assertNotIn("_reasoning_details", state)
+
+    def test_consume_with_state_clears_previous_call_reasoning(self):
+        """回収と同時の格納 (tool モードの 2 経路) も置き換えになる。"""
+        state = {"_reasoning_text": "前の呼び出しの思考", "_reasoning_details": [{"d": 1}]}
+        _consume_reasoning(self._client([], details=None), state)
+        self.assertNotIn("_reasoning_text", state)
+        self.assertNotIn("_reasoning_details", state)
 
 
 class RecordLlmUsageTest(unittest.TestCase):

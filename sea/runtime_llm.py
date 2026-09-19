@@ -394,11 +394,24 @@ def _record_llm_usage(
 
 
 def _store_reasoning_in_state(state: dict, reasoning_text: str, reasoning_details: Any) -> None:
-    """reasoning を後段の speak/say/memorize ノード向けに state へ残す。"""
+    """reasoning を後段の speak/say/memorize ノード向けに state へ残す。
+
+    各 LLM 呼び出しの結果で **必ず置き換える** — 思考があれば書き、空なら
+    ``_reasoning_text`` / ``_reasoning_details`` を消す。空を空として確定しないと、
+    思考を返さなかった呼び出しの Beat に**前の呼び出しの思考**が付く (同じ Pulse
+    内で別ノードが続く回、スペルループの締めが思考なしで返った回) — 他人の
+    コールの産物を自分の事実として記憶に書くことになる
+    (docs/issues/spell_pulse_beats_missing_reasoning.md、2026-09-19 敵対レビュー
+    2 巡目でスペル無しの経路にもガードが無いと判明)。
+    """
     if reasoning_text:
         state["_reasoning_text"] = reasoning_text
+    else:
+        state.pop("_reasoning_text", None)
     if reasoning_details is not None:
         state["_reasoning_details"] = reasoning_details
+    else:
+        state.pop("_reasoning_details", None)
 
 
 def _consume_reasoning(llm_client, state: Optional[dict] = None) -> Tuple[str, Any]:
@@ -528,7 +541,7 @@ def _emit_beat_segments(
     *,
     pulse_id: Optional[str],
     event_callback: Optional[Callable[[Dict[str, Any]], None]],
-    final_metadata_factory: Callable[[Optional[Dict[str, Any]]], Dict[str, Any]],
+    final_metadata_factory: Callable[[Optional["BeatSegment"]], Dict[str, Any]],
     final_say_extra: Optional[Dict[str, Any]] = None,
     strip_prefix: str = "",
 ) -> bool:
@@ -539,11 +552,12 @@ def _emit_beat_segments(
     emit する。1 件にまとめると、周の途中で移動したペルソナの発言が全部どちらか
     片方の部屋に落ちる (docs/issues/pulse_beats_merge_into_single_record.md)。
 
-    メタデータの帰属 (契約 4): 中間 Beat はその周の使用量、締めの Beat が
-    ``final_metadata_factory`` の全部入り (activity_trace・reasoning)。
-    ``final_metadata_factory`` は締めの Beat の使用量を受け取って metadata を
-    組む — ``_build_say_metadata`` は ``_auto_recall_text`` を pop するので、
-    締めの 1 回だけ呼ぶ。
+    メタデータの帰属 (契約 4): 中間 Beat はその周の使用量と思考、締めの Beat が
+    ``final_metadata_factory`` の全部入り (activity_trace も含む)。
+    ``final_metadata_factory`` は締めの Beat のセグメント (書くものが 1 件も
+    無い回は ``None``) を受け取って metadata を組む — その Beat の使用量と思考は
+    セグメントが持っている。``_build_say_metadata`` は ``_auto_recall_text`` を
+    pop するので、締めの 1 回だけ呼ぶ。
 
     例外が二つ。想起 (auto_recall) は **最初に書かれる Beat** へ回す
     (起きたのは Beat 1 の生成前なので、締めに付けると時系列が逆になる)。
@@ -586,11 +600,16 @@ def _emit_beat_segments(
     for idx, (seg_text, segment) in enumerate(prepared):
         is_final = idx == len(prepared) - 1
         if is_final:
-            metadata = final_metadata_factory(segment.llm_usage)
+            metadata = final_metadata_factory(segment)
         else:
             metadata = {"tags": ["conversation"]}
             if segment.llm_usage:
                 metadata["llm_usage"] = segment.llm_usage
+            # この Beat を生んだ呼び出しの思考。空の周はキー自体を入れない。
+            if segment.reasoning_text:
+                metadata["reasoning"] = segment.reasoning_text
+            if segment.reasoning_details is not None:
+                metadata["reasoning_details"] = segment.reasoning_details
             # 想起は Beat 1 の生成前に起きた出来事なので、最初に書かれる Beat の
             # 記録に載せる (実機 4)。pop なので 2 件目以降と締めの
             # ``_build_say_metadata`` は空振りする。締めしか無い回 (= 単一 Beat)
@@ -619,8 +638,16 @@ def _emit_beat_segments(
                 say_event["message_id"] = str(bmsg["message_id"])
             if metadata:
                 say_event["metadata"] = metadata
-            if is_final and final_say_extra:
-                say_event.update(final_say_extra)
+            if is_final:
+                if final_say_extra:
+                    say_event.update(final_say_extra)
+            elif segment.reasoning_text:
+                # 画面は say イベントの**トップレベル**の reasoning しか読まない
+                # (frontend/src/app/page.tsx の say 処理)。metadata だけに入れると
+                # 途中の Beat の思考が記憶には残るのに画面には出ない — 締めの
+                # Beat は ``final_say_extra`` でトップレベルに載るので、そちらと
+                # 揃える (2026-09-19 敵対レビュー 2 巡目)。
+                say_event["reasoning"] = segment.reasoning_text
             event_callback(say_event)
     return wrote
 
@@ -933,17 +960,26 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
             content_to_save = text
             if schema_consumed and isinstance(text, dict):
                 content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
+            # memorize (_store_beat_memory) と同じ本文を書く双子の経路なので、
+            # metadata も同じ形で組む — 思考 (この Beat の本文を作った呼び出しの
+            # 分。スペルが走った回は state が最終周の分に揃っている) と
+            # 「言い切っていない」印。片方だけだと important ノードの発言だけが
+            # 思考・印なしで記憶に残る (2026-09-19 敵対レビュー high)。
+            _important_metadata: Dict[str, Any] = {}
+            _imp_reasoning = state.get("_reasoning_text")
+            if _imp_reasoning:
+                _important_metadata["reasoning"] = _imp_reasoning
+            _imp_details = state.get("_reasoning_details")
+            if _imp_details is not None:
+                _important_metadata["reasoning_details"] = _imp_details
+            if interrupted:
+                _important_metadata[INTERRUPTED_METADATA_KEY] = True
             _important_stored = runtime._store_memory(
                 persona, content_to_save,
                 role="assistant",
                 tags=["conversation"],
                 pulse_id=pulse_id,
-                # memorize と同じ本文を書く経路なので、「言い切っていない」印も
-                # 同じように載せる — 片方だけだと important ノードの発言だけが
-                # 印無しで記憶に残る。
-                metadata=(
-                    {INTERRUPTED_METADATA_KEY: True} if interrupted else None
-                ),
+                metadata=_important_metadata or None,
                 playbook_name=playbook.name,
                 # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
                 thought_signature=state.get("_last_thought_signature"),
@@ -1973,6 +2009,8 @@ def _emit_bubble1_early(
     event_callback: Optional[Callable],
     node_id: str,
     send_streaming_discard: bool,
+    reasoning_text: str = "",
+    reasoning_details: Any = None,
 ) -> str:
     """Spell loop 開始前に bubble1 を早期 emit して、 voice-tts の TTS 合成を
     Spell 実行と並行で走らせる (Phase 1)。
@@ -1987,6 +2025,10 @@ def _emit_bubble1_early(
     streaming chunk を破棄させて bubble1 を綺麗に再描画させるため)。 tool mode
     と non-streaming mode は streaming chunk を出さないので False。
 
+    ``reasoning_text`` / ``reasoning_details``: この本文を作った LLM 呼び出しの
+    思考。早期 emit した部分は後段の Beat 1 の本文から切り落とされる (= この
+    記録が本文の持ち主になる) ので、思考もここに添える。空なら添えない。
+
     Why: ``<spell>`` を含む LLM 応答では、 bubble1 (= spell 前のテキスト)
     の内容は LLM 出力時点で確定している。 これを ``_run_spell_loop`` の完了
     後 (= spell 実行 数分後の可能性) まで待ってから emit していた旧設計だと、
@@ -2000,6 +2042,11 @@ def _emit_bubble1_early(
     if not text_before.strip():
         return ""
     eff_bid = runtime._effective_building_id(persona, building_id)
+    early_metadata: Dict[str, Any] = {}
+    if reasoning_text:
+        early_metadata["reasoning"] = reasoning_text
+    if reasoning_details is not None:
+        early_metadata["reasoning_details"] = reasoning_details
     if event_callback:
         if send_streaming_discard:
             event_callback({
@@ -2009,15 +2056,23 @@ def _emit_bubble1_early(
                 "pulse_id": pulse_id,
                 "building_id": eff_bid,
             })
-        event_callback({
+        _early_say: Dict[str, Any] = {
             "type": "say",
             "content": text_before,
             "persona_id": getattr(persona, "persona_id", None),
             "pulse_id": pulse_id,
             "building_id": eff_bid,
-        })
+        }
+        if early_metadata:
+            _early_say["metadata"] = early_metadata
+        if reasoning_text:
+            # 画面は say イベントのトップレベルの reasoning しか読まないので、
+            # metadata と同じ内容をここにも載せる (2026-09-19 敵対レビュー 2 巡目)。
+            _early_say["reasoning"] = reasoning_text
+        event_callback(_early_say)
     runtime._emit_say(
         persona, eff_bid, text_before, pulse_id=pulse_id,
+        metadata=early_metadata or None,
         event_callback=event_callback,
     )
     LOGGER.info(
@@ -2494,6 +2549,13 @@ class BeatSegment:
     書くので、書くときに在室表を引くと Beat 1 の「聞いた人」にまでループが
     終わった時点の在室者が載る。引けなかったときだけ None で、その回は
     従来どおり書き込み時の在室表から導く。
+
+    ``reasoning_text`` / ``reasoning_details`` は **この Beat の本文を作った
+    LLM 呼び出しの思考**。使用量 (``llm_usage``) とまったく同じ寿命で運ぶ —
+    どちらも「その周の呼び出しが返した、その周の本文に帰属する値」で、次の周の
+    呼び出しが返したものは次の Beat のもの (契約 4)。思考を回収しないと、
+    クライアント側のバッファは次の呼び出しの頭で上書きされて消える
+    (docs/issues/spell_pulse_beats_missing_reasoning.md)。
     """
 
     text: str
@@ -2501,6 +2563,8 @@ class BeatSegment:
     llm_usage: Optional[Dict[str, Any]] = None
     emitted: bool = False
     occupants: Optional[List[str]] = None
+    reasoning_text: str = ""
+    reasoning_details: Any = None
 
 
 @dataclass
@@ -2515,11 +2579,18 @@ class SpellLoopResult:
       保存する値) に入れる。/quick_spell 終端では空文字。
     - ``loop_count``: 実行されたラウンド数。0 ならスペルは 1 つも無く、
       ``segments`` は空で ``final_continuation`` は入力の text そのまま。
+    - ``closing_reasoning_text`` / ``closing_reasoning_details``: **最後に打った
+      LLM 呼び出しの思考**。締めの Beat の本文を作ったのがその呼び出しなので、
+      締めの記録 (建物・記憶の両方) に添えるのはこの値。呼び出し元は後段の
+      memorize が読む state の思考もこれに揃える — 揃えないと、周 1 の思考が
+      締めの発言の思考として記憶に残る。
     """
 
     segments: List[BeatSegment]
     final_continuation: str
     loop_count: int
+    closing_reasoning_text: str = ""
+    closing_reasoning_details: Any = None
 
 
 async def _run_spell_loop(
@@ -2539,6 +2610,8 @@ async def _run_spell_loop(
     max_rounds: Optional[int] = None,
     initial_building_id: Optional[str] = None,
     initial_llm_usage: Optional[Dict[str, Any]] = None,
+    initial_reasoning_text: str = "",
+    initial_reasoning_details: Any = None,
 ) -> SpellLoopResult:
     """Execute the spell loop, running each round's spells sequentially.
 
@@ -2575,11 +2648,21 @@ async def _run_spell_loop(
 
     ``initial_llm_usage``: ラウンド 1 の本文を生成したコール (= 呼び出し元が
     ループの前に済ませた LLM 呼び出し) の使用量。Beat 1 の記録に載る。
+
+    ``initial_reasoning_text`` / ``initial_reasoning_details``: 同じコールの
+    思考。使用量と同じく Beat 1 の記録に載る。周 2 以降の思考はこのループが
+    周ごとに回収する — 回収しないとクライアント側のバッファが次の周の呼び出しの
+    頭で上書きされ、思考が届いているのに記録のどこにも残らない
+    (docs/issues/spell_pulse_beats_missing_reasoning.md)。
     """
     from sea.pulse_context import PulseLogEntry
 
     if not spell_enabled or not text:
-        return SpellLoopResult(segments=[], final_continuation=text, loop_count=0)
+        return SpellLoopResult(
+            segments=[], final_continuation=text, loop_count=0,
+            closing_reasoning_text=initial_reasoning_text,
+            closing_reasoning_details=initial_reasoning_details,
+        )
 
     _effective_max_rounds = (
         max_rounds if isinstance(max_rounds, int) and max_rounds > 0 else _MAX_SPELL_LOOPS
@@ -2598,6 +2681,10 @@ async def _run_spell_loop(
     # 取り直す — 記録を書くのがループ完了後になる経路のために要る。
     current_occupants = _occupants_snapshot(runtime, current_building_id)
     pending_llm_usage: Optional[Dict[str, Any]] = initial_llm_usage
+    # この Beat の本文を作ったコールの思考。使用量と同じ器・同じ寿命で運ぶ
+    # (周の頭で参照し、周の終わりの再呼び出しの直後に次の周の分へ入れ替える)。
+    pending_reasoning_text: str = initial_reasoning_text or ""
+    pending_reasoning_details: Any = initial_reasoning_details
     # この周の本文が記憶へ入ったか。入らなかった周に限り、下書き行が無いときの
     # 退避書き込み (下の `_close_streaming_beat`) が「建物には本文があるのに
     # 記憶には無い」形を作るので、Beat の出口の補填へ渡す印を state に立てる。
@@ -2624,6 +2711,12 @@ async def _run_spell_loop(
         extra: Dict[str, Any] = {"tags": ["conversation"]}
         if segment.llm_usage:
             extra["llm_usage"] = segment.llm_usage
+        # この Beat を生んだ呼び出しの思考。空の周はキー自体を入れない
+        # (``_build_say_metadata`` と同じ流儀 — 空を空として落とす)。
+        if segment.reasoning_text:
+            extra["reasoning"] = segment.reasoning_text
+        if segment.reasoning_details is not None:
+            extra["reasoning_details"] = segment.reasoning_details
         # 「ふと浮かんだ記憶」(自動想起) が起きるのは Pulse の文脈を組む時点、
         # つまり **Beat 1 の生成が始まる前**。締めの Beat の
         # ``_build_say_metadata`` に任せると、時系列では序盤の出来事なのに
@@ -2665,14 +2758,19 @@ async def _run_spell_loop(
                 # 記憶に入った回は置かない — 置くと同じ本文が二重になる。
                 state[BEAT_BODY_UNMEMORIZED_KEY] = memory_text
             if announce and event_callback:
-                event_callback({
+                _fallback_say: Dict[str, Any] = {
                     "type": "say",
                     "content": segment.text,
                     "persona_id": getattr(persona, "persona_id", None),
                     "pulse_id": state.get("_pulse_id"),
                     "building_id": segment.building_id,
                     "metadata": extra,
-                })
+                }
+                # 画面の say 処理はトップレベルの reasoning しか読まない
+                # (下の確定 say と同じ理由)。
+                if extra.get("reasoning"):
+                    _fallback_say["reasoning"] = extra["reasoning"]
+                event_callback(_fallback_say)
             return True
 
         if not msg_id or st.get("finalized"):
@@ -2702,7 +2800,7 @@ async def _run_spell_loop(
             # そのまま反映させるため。想起 (auto_recall) は Beat の切れ目の
             # ``streaming_discard`` が生成中の吹き出しごと捨ててしまうので、
             # 確定のこのイベントで渡さないと画面から消える (実機 4)。
-            event_callback({
+            _beat_say: Dict[str, Any] = {
                 "type": "say",
                 "content": segment.text,
                 "persona_id": getattr(persona, "persona_id", None),
@@ -2710,7 +2808,14 @@ async def _run_spell_loop(
                 "message_id": str(msg_id),
                 "building_id": segment.building_id,
                 "metadata": extra,
-            })
+            }
+            # 思考も同じ理由でトップレベルに載せる — 画面の say 処理は
+            # ``event.reasoning`` しか読まず、``streaming_discard`` が実況の
+            # 思考ごと吹き出しを捨てるので、ここで渡さないと確定後の吹き出しから
+            # 思考が消える (敵対レビュー 2 巡目と同型の 3 例目)。
+            if extra.get("reasoning"):
+                _beat_say["reasoning"] = extra["reasoning"]
+            event_callback(_beat_say)
         _sf = _finalize_speak_with_signal(
             runtime, persona, segment.building_id, msg_id, segment.text,
             pulse_id=state.get("_pulse_id"),
@@ -2896,9 +3001,18 @@ async def _run_spell_loop(
             _round_memorized = False
             if assistant_content:
                 _is_first_round = (loop_count == 1)
+                # この周の本文を作った呼び出しの思考を、記憶の側にも添える。
+                # 建物の記録 (`_close_streaming_beat` / `_emit_beat_segments`) と
+                # 同じ値で、空の周はキー自体を入れない。
+                _round_memory_metadata: Dict[str, Any] = {}
+                if pending_reasoning_text:
+                    _round_memory_metadata["reasoning"] = pending_reasoning_text
+                if pending_reasoning_details is not None:
+                    _round_memory_metadata["reasoning_details"] = pending_reasoning_details
                 _stored_id = runtime._store_memory(
                     persona, assistant_content, role="assistant",
                     tags=assistant_tags, pulse_id=pulse_id, playbook_name=playbook.name,
+                    metadata=_round_memory_metadata or None,
                     pulse_context=pulse_context,
                     paired_action_text=action_text if _is_first_round else None,
                     spell_origin_id=_spell_origin_id,
@@ -3142,6 +3256,8 @@ async def _run_spell_loop(
                 building_id=current_building_id,
                 llm_usage=pending_llm_usage,
                 occupants=current_occupants,
+                reasoning_text=pending_reasoning_text,
+                reasoning_details=pending_reasoning_details,
             )
             segments.append(_segment)
 
@@ -3340,6 +3456,13 @@ async def _run_spell_loop(
                 )
 
             retry_usage = llm_client.consume_usage()
+            # 使用量と同じ位置で思考も回収する。クライアント側のバッファは破壊的
+            # 読み取りで、次の周の呼び出しの頭で上書きされる — ここで取らないと
+            # 周 2 以降の思考はどの記録にも残らない
+            # (docs/issues/spell_pulse_beats_missing_reasoning.md)。
+            pending_reasoning_text, pending_reasoning_details = _consume_reasoning(
+                llm_client,
+            )
             # このラウンドの生成を作ったコールの三つ組 (sea/message_stamp.py)。
             # 直後の _store_memory がラウンドの発言を刻むので、ここで更新する。
             record_call_tokens(state, retry_usage)
@@ -3427,6 +3550,8 @@ async def _run_spell_loop(
             # caller's normal (non-spell) emit path stays correct.
             return SpellLoopResult(
                 segments=[], final_continuation=text, loop_count=0,
+                closing_reasoning_text=pending_reasoning_text,
+                closing_reasoning_details=pending_reasoning_details,
             )
         # 締めの Beat (= 最後の retry が返した、スペルを含まない発言)。
         if final_continuation:
@@ -3435,11 +3560,15 @@ async def _run_spell_loop(
                 building_id=current_building_id,
                 llm_usage=pending_llm_usage,
                 occupants=current_occupants,
+                reasoning_text=pending_reasoning_text,
+                reasoning_details=pending_reasoning_details,
             ))
         return SpellLoopResult(
             segments=segments,
             final_continuation=final_continuation,
             loop_count=loop_count,
+            closing_reasoning_text=pending_reasoning_text,
+            closing_reasoning_details=pending_reasoning_details,
         )
     except (ExecutionCancelledException, BeatGateClosedError, ModelUnavailableError):
         # Beat 境界の中断 / 関所 fail-closed は「spell 系の内部エラー」ではなく
@@ -3470,6 +3599,8 @@ async def _run_spell_loop(
         if loop_count == 0:
             return SpellLoopResult(
                 segments=[], final_continuation=text, loop_count=0,
+                closing_reasoning_text=pending_reasoning_text,
+                closing_reasoning_details=pending_reasoning_details,
             )
         # 確定済みの Beat はそのまま残す — 途中で落ちても、ここまでに組んだ
         # セグメントは呼び出し元が (ストリーミング経路では既に建物へ) 記録する。
@@ -3479,10 +3610,14 @@ async def _run_spell_loop(
                 building_id=current_building_id,
                 llm_usage=pending_llm_usage,
                 occupants=current_occupants,
+                reasoning_text=pending_reasoning_text,
+                reasoning_details=pending_reasoning_details,
             ))
         return SpellLoopResult(
             segments=segments,
             final_continuation=final_continuation,
+            closing_reasoning_text=pending_reasoning_text,
+            closing_reasoning_details=pending_reasoning_details,
             loop_count=loop_count,
         )
 
@@ -4702,6 +4837,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     event_callback=event_callback,
                     node_id=getattr(node_def, "id", "llm"),
                     send_streaming_discard=False,
+                    reasoning_text=_tool_reasoning_text,
+                    reasoning_details=_tool_reasoning_details,
                 )
                 _spell_result = await _run_spell_loop(
                     text=_pre_spell_text,
@@ -4716,10 +4853,20 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     event_callback=event_callback,
                     node_def=node_def,
                     action_text=prompt,
+                    initial_reasoning_text=_tool_reasoning_text,
+                    initial_reasoning_details=_tool_reasoning_details,
                 )
                 _spell_continuation = _spell_result.final_continuation
                 _spell_loop_count = _spell_result.loop_count
                 if _spell_loop_count > 0:
+                    # 後段の memorize (`_finalize_beat`) が読む state の思考を、
+                    # 締めの発言を作った最終周の分に揃える。揃えないと周 1 の
+                    # 思考が締めの発言の思考として記憶に残る。
+                    _tool_reasoning_text = _spell_result.closing_reasoning_text
+                    _tool_reasoning_details = _spell_result.closing_reasoning_details
+                    _store_reasoning_in_state(
+                        state, _tool_reasoning_text, _tool_reasoning_details,
+                    )
                     # result.content は後段で state[text_key]/text に入り
                     # SAIMemory に保存される。建物と画面へ出すのは下の
                     # _emit_beat_segments が Beat ごとに持つ本文 (<user_only>
@@ -4752,23 +4899,35 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         # Phase 1 path entirely (sub-speak handles the warm-up).
                         pulse_id = state.get("_pulse_id")
 
-                        # 締めの Beat の使用量はループが持ち帰るので載せる。
+                        # 締めの Beat の使用量と思考はループが持ち帰るので載せる。
                         # Beat 1 (= このノードが最初に呼んだ生成) の使用量は
                         # この経路では取れない — A-sync 経由でもここへ来るため
                         # llm_usage_metadata が無く、ループへ initial_llm_usage を
-                        # 渡せない。reasoning も従来から載せていない (既存挙動)。
+                        # 渡せない。思考の方は両分岐で手元にあるので渡してある。
                         _spell_at = state.get("_activity_trace")
+                        _spell_say_extra: Dict[str, Any] = {}
+                        if _spell_at:
+                            _spell_say_extra["activity_trace"] = list(_spell_at)
+                        if _tool_reasoning_text:
+                            _spell_say_extra["reasoning"] = _tool_reasoning_text
                         _spell_said = _emit_beat_segments(
                             runtime, persona, state, _spell_result.segments,
                             pulse_id=pulse_id,
                             event_callback=event_callback,
-                            final_metadata_factory=lambda _usage: _build_say_metadata(
-                                state, llm_usage_metadata=_usage,
+                            final_metadata_factory=lambda _seg: _build_say_metadata(
+                                state,
+                                llm_usage_metadata=(
+                                    _seg.llm_usage if _seg is not None else None
+                                ),
+                                reasoning_text=(
+                                    _seg.reasoning_text if _seg is not None else ""
+                                ),
+                                reasoning_details=(
+                                    _seg.reasoning_details if _seg is not None else None
+                                ),
                                 include_total=False,
                             ),
-                            final_say_extra=(
-                                {"activity_trace": list(_spell_at)} if _spell_at else None
-                            ),
+                            final_say_extra=_spell_say_extra or None,
                             strip_prefix=_bubble1_emitted_early,
                         )
                         if _spell_said:
@@ -5124,9 +5283,17 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         action_text=prompt,
                         initial_building_id=pipeline_eff_bid,
                         initial_llm_usage=llm_usage_metadata,
+                        initial_reasoning_text=reasoning_text,
+                        initial_reasoning_details=reasoning_details,
                     )
                     _continuation_ns = _spell_result_ns.final_continuation
                     _spell_loop_count_ns = _spell_result_ns.loop_count
+                    if _spell_loop_count_ns > 0:
+                        # 締めの発言を作ったのは最終周の呼び出し。以後この
+                        # ノードが使う思考 (締めの記録・完了イベント・後段の
+                        # memorize が読む state) をその分へ揃える。
+                        reasoning_text = _spell_result_ns.closing_reasoning_text
+                        reasoning_details = _spell_result_ns.closing_reasoning_details
 
                     # 下書き行の追跡を、ループが切り替えた最新の値に合わせる。
                     # 漏らすと、この後の確定と Beat 死亡時の後始末が最初の行
@@ -5203,21 +5370,36 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             )
                             _final_has_body_ns = bool(_final_text_ns.strip())
 
-                            # spell 経路は従来から reasoning を載せていない
-                            # （＝ 既存挙動を維持）。
                             _spell_at_ns = state.get("_activity_trace")
                             # Pulse 合計の札は出さない (2026-09-13 まはー裁定)。
                             # 吹き出しが Beat ごとに割れた今、締めに合計を付けると
                             # 前の吹き出しの分を含む数字が並んで二重に読める。
                             # 正確な集計は使用量の記帳 (usage tracker) が別に持つ。
+                            # 思考は締めの Beat を作った最終周の分 (中間 Beat は
+                            # ループの中で自分の周の分を載せて確定済み)。
                             _spell_msg_meta_ns = _build_say_metadata(
                                 state,
                                 llm_usage_metadata=(
                                     _final_seg_ns.llm_usage
                                     if _final_seg_ns is not None else None
                                 ),
+                                reasoning_text=(
+                                    _final_seg_ns.reasoning_text
+                                    if _final_seg_ns is not None else ""
+                                ),
+                                reasoning_details=(
+                                    _final_seg_ns.reasoning_details
+                                    if _final_seg_ns is not None else None
+                                ),
                                 include_total=False,
                             )
+                            # 画面の吹き出しへ渡す付録。思考は記録と同じ値
+                            # (最終周の分) を載せる — 記録と表示で食い違わせない。
+                            _spell_say_extra_ns: Dict[str, Any] = {}
+                            if _spell_at_ns:
+                                _spell_say_extra_ns["activity_trace"] = list(_spell_at_ns)
+                            if _spell_msg_meta_ns.get("reasoning"):
+                                _spell_say_extra_ns["reasoning"] = _spell_msg_meta_ns["reasoning"]
 
                             # Pipeline Streaming finalize: 締めの Beat の下書き行を
                             # その本文で確定する。 voice-tts は sub-speak 経由で
@@ -5245,12 +5427,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                         pulse_id=pulse_id,
                                         event_callback=event_callback,
                                         final_metadata_factory=(
-                                            lambda _usage: _spell_msg_meta_ns
+                                            lambda _seg: _spell_msg_meta_ns
                                         ),
-                                        final_say_extra=(
-                                            {"activity_trace": list(_spell_at_ns)}
-                                            if _spell_at_ns else None
-                                        ),
+                                        final_say_extra=_spell_say_extra_ns or None,
                                     )
                                     if _fb_said_ns:
                                         beat_said = True
@@ -5356,8 +5535,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     "building_id": _final_bid_ns,
                                     "message_id": str(pipeline_msg_id),
                                 }
-                                if _spell_at_ns:
-                                    _say_event_ns["activity_trace"] = list(_spell_at_ns)
+                                _say_event_ns.update(_spell_say_extra_ns)
                                 if _spell_msg_meta_ns:
                                     _say_event_ns["metadata"] = _spell_msg_meta_ns
                                 event_callback(_say_event_ns)
@@ -5544,6 +5722,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 )
 
                     # Store reasoning in state for downstream speak/say nodes
+                    # (スペルが走った回は reasoning_text が最終周の分に差し替わって
+                    #  いる。格納は置き換え意味論なので、スペルの有無で同じ扱い)
                     _store_reasoning_in_state(state, reasoning_text, reasoning_details)
                 else:
                     # Non-streaming mode
@@ -5582,6 +5762,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             event_callback=event_callback,
                             node_id=getattr(node_def, "id", "llm"),
                             send_streaming_discard=False,
+                            reasoning_text=reasoning_text,
+                            reasoning_details=reasoning_details,
                         )
                         _spell_result_sync = await _run_spell_loop(
                             text=text,
@@ -5597,10 +5779,18 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             node_def=node_def,
                             action_text=prompt,
                             initial_llm_usage=llm_usage_metadata,
+                            initial_reasoning_text=reasoning_text,
+                            initial_reasoning_details=reasoning_details,
                         )
                         _continuation_sync = _spell_result_sync.final_continuation
                         _spell_loop_count_sync = _spell_result_sync.loop_count
                         _spell_segments_sync = _spell_result_sync.segments
+                        if _spell_loop_count_sync > 0:
+                            # 締めの発言を作ったのは最終周の呼び出し。以後この
+                            # ノードが使う思考をその分へ揃える (ストリーミング
+                            # 経路と対称)。
+                            reasoning_text = _spell_result_sync.closing_reasoning_text
+                            reasoning_details = _spell_result_sync.closing_reasoning_details
                     else:
                         # text is dict (from structured output) - skip spell processing
                         LOGGER.debug("[sea][llm] text is dict (structured output), skipping spell processing")
@@ -5633,12 +5823,21 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 # Pulse 合計の札は出さない (2026-09-13 まはー裁定。
                                 # ストリーミング経路の締めと同じ理由 — 各吹き出しが
                                 # 自分の Beat の分を持つので、合計は重複に見える)。
-                                final_metadata_factory=lambda usage: _build_say_metadata(
+                                # 思考はセグメントが持つ「その Beat を作った
+                                # 呼び出しの分」を使う (締めのセグメントの分 =
+                                # 最終周の分)。
+                                final_metadata_factory=lambda seg: _build_say_metadata(
                                     state,
                                     base_metadata=_speak_base_metadata2,
-                                    llm_usage_metadata=usage,
-                                    reasoning_text=reasoning_text,
-                                    reasoning_details=reasoning_details,
+                                    llm_usage_metadata=(
+                                        seg.llm_usage if seg is not None else None
+                                    ),
+                                    reasoning_text=(
+                                        seg.reasoning_text if seg is not None else ""
+                                    ),
+                                    reasoning_details=(
+                                        seg.reasoning_details if seg is not None else None
+                                    ),
                                     include_total=False,
                                 ),
                                 final_say_extra=_sync_say_extra or None,
@@ -5689,6 +5888,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         text = _continuation_sync
 
                     # Store remaining reasoning for say/speak node (non-speak path)
+                    # (スペルが走った回は reasoning_text が最終周の分に差し替わって
+                    #  いる。格納は置き換え意味論なので、スペルの有無で同じ扱い)
                     _store_reasoning_in_state(state, reasoning_text, reasoning_details)
 
                 runtime._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)

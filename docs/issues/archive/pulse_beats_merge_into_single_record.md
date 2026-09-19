@@ -73,7 +73,9 @@ LLM 生成 = 1 件の記録 = 1 音声ストリーム。
 3. **聞いた人 (heard_by) / 同席者 (with)**: 各 Beat の記録の作成時に、その部屋の
    その時点の在室者から計算する (既存の作成時計算をそのまま使う)。
 4. **メタデータの帰属**: 各 Beat の記録は自分のラウンドの LLM 使用量とスペルの
-   activity_trace を持つ。~~Pulse 合計 (llm_usage_total = その Pulse の全 LLM 呼び出しの
+   activity_trace を持つ。**2026-09-19 追記**: 思考 (reasoning) も同じ帰属で運ぶ —
+   各 Beat の建物の記録と記憶には、その Beat を生んだ呼び出しの思考が載る
+   (経緯は [`spell_pulse_beats_missing_reasoning.md`](../spell_pulse_beats_missing_reasoning.md))。~~Pulse 合計 (llm_usage_total = その Pulse の全 LLM 呼び出しの
    合計) は最終 Beat の記録にだけ載せる。~~ ← **2026-09-13 の実機確認で撤回**。
    スペルが走った Pulse では合計の札を出さない (下の「実機確認で出た 4 件」の 2)。
    使用量の数字は吹き出しに出す**表示専用の札**で、課金・使用量の集計は別の記帳

@@ -366,6 +366,13 @@ class ScriptedClient:
     def consume_usage(self):
         return None
 
+    # スペルループは周ごとに思考も回収する (破壊的読み取り)。
+    def consume_reasoning(self):
+        return []
+
+    def consume_reasoning_details(self):
+        return None
+
 
 def _run_spell_loop_sync(runtime, client, token=None):
     from sea import runtime_llm
