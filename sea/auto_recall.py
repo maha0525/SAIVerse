@@ -33,6 +33,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from sea.eviction_plan import CONSUMED_PERCEPTION_KEY, is_injected_perception
 from saiverse.references import to_uri
 
 LOGGER = logging.getLogger("saiverse.auto_recall")
@@ -329,6 +330,13 @@ def _is_conversational_message(msg: Dict[str, Any]) -> bool:
         return False
     if metadata.get("__auto_recall__"):
         return False
+    # 送信直前に差し込まれる知覚ブロック (部屋の様子・通知) は role="user" で
+    # 履歴へ時刻順マージされるが、ユーザーが言った言葉ではない。会話文として
+    # 数えると、発話の後ろに挟まったブロックがクエリの種の座を奪う
+    # (2026-09-06 に部屋の描画が head の __visual_context__ からこのブロックへ
+    # 引っ越したとき、この除外リストが追従しなかったのが根因)。
+    if metadata.get(CONSUMED_PERCEPTION_KEY):
+        return False
     content = msg.get("content")
     return isinstance(content, str) and bool(content.strip())
 
@@ -338,7 +346,9 @@ def _latest_user_message(messages: List[Dict[str, Any]]) -> Optional[Dict[str, A
 
     添付だけで本文が空のメッセージも拾えるよう、``_is_conversational_message``
     (content 非空必須) より緩い判定にする。head 由来の合成メッセージ
-    (``__visual_context__`` 等) は除外する。
+    (``__visual_context__`` 等) と知覚ブロックは除外する — 知覚ブロックは
+    metadata に ``media`` を持ちうるので、除外しないと添付概要の取得元まで
+    「部屋の様子」に乗っ取られる。
     """
     for m in reversed(messages):
         if m.get("role") != "user":
@@ -349,6 +359,7 @@ def _latest_user_message(messages: List[Dict[str, Any]]) -> Optional[Dict[str, A
             or metadata.get("__visual_context__")
             or metadata.get("__realtime_context__")
             or metadata.get("__auto_recall__")
+            or metadata.get(CONSUMED_PERCEPTION_KEY)
         ):
             continue
         return m
@@ -382,11 +393,63 @@ def _current_attachment_summaries(messages: List[Dict[str, Any]]) -> List[str]:
     return summaries
 
 
+# 知覚ブロックの content は ``<system>…</system>`` で包まれている。クエリや Jev の
+# 判断材料に使うときは、この包みを外した本文だけを渡す。
+_SYSTEM_WRAPPER_PATTERN = re.compile(r"\A\s*<system>\s*(.*?)\s*</system>\s*\Z", re.DOTALL)
+
+
+def _strip_system_wrapper(text: str) -> str:
+    """``<system>…</system>`` の包みを外す (包まれていなければそのまま返す)。"""
+    match = _SYSTEM_WRAPPER_PATTERN.match(text)
+    return match.group(1) if match else text
+
+
+def _trailing_perception_blocks(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """末尾から遡り、最初の会話本文に当たるまでに現れた知覚ブロックを時刻順に返す。
+
+    = 「このターンで新しく目に入ったもの」。会話本文でもブロックでもない行
+    (head の system 行など) は素通りするだけで、遡りを止めない。
+    """
+    found: List[Dict[str, Any]] = []
+    for m in reversed(messages):
+        if is_injected_perception(m):
+            found.append(m)
+            continue
+        if _is_conversational_message(m):
+            break
+    return list(reversed(found))
+
+
+def _fresh_observation_texts(messages: List[Dict[str, Any]]) -> List[str]:
+    """このターンで新しく目に入った知覚ブロックの本文を時刻順に返す。"""
+    texts: List[str] = []
+    for m in _trailing_perception_blocks(messages):
+        body = _strip_system_wrapper(str(m.get("content") or "")).strip()
+        if body:
+            texts.append(body)
+    return texts
+
+
+def _seed_is_user_utterance(messages: List[Dict[str, Any]]) -> bool:
+    """会話本文の末尾が user か = このターンに新しいユーザー発言があるか。"""
+    for m in reversed(messages):
+        if _is_conversational_message(m):
+            return m.get("role") == "user"
+    return False
+
+
 def build_query(messages: List[Dict[str, Any]], *, n: Optional[int] = None) -> str:
     """直近 n 件の会話本文を連結してクエリ文字列にする。
 
     埋め込みの ``query:`` プレフィックス付与は unified_recall/embedder 側 (is_query=True)
     が行うので、ここでは生テキストの連結だけを返す。
+
+    クエリの種の優先順位は 3 段 — **このターンのユーザー発言 > (発言が無ければ)
+    直近の通知・部屋の様子 > (それも無ければ) 直近の assistant 発言**。知覚ブロック
+    (部屋の様子・通知) は ``_is_conversational_message`` が会話文から外すので、
+    ユーザーの発言より後ろに挟まっても種の座を奪わない。一方、このターンに新しい
+    ユーザー発言が無い自律ターンでは、末尾の知覚ブロックが種になる (「見たものに
+    対して想起が走る」経路は残す)。
 
     ``SAIVERSE_MEDIA_RECALL_ENABLED`` (グローバル設定) が ON のときは、最新
     user メッセージに添付された画像/音声/動画の概要 (chat.py が同期生成済み)
@@ -395,7 +458,15 @@ def build_query(messages: List[Dict[str, Any]], *, n: Optional[int] = None) -> s
     if n is None:
         n = get_query_message_count()
     convo = [m for m in messages if _is_conversational_message(m)]
-    tail = convo[-n:] if n > 0 else convo
+    seed = convo
+    if not _seed_is_user_utterance(messages):
+        # このターンに新しいユーザー発言が無い (自律ターン / 冒頭)。末尾の知覚
+        # ブロックがあればそれを種にする — 従来 (ブロックが会話文に数えられて
+        # いた頃) と同じ「見たものに対して想起が走る」挙動。
+        fresh = _fresh_observation_texts(messages)
+        if fresh:
+            seed = convo + [{"role": "user", "content": text} for text in fresh]
+    tail = seed[-n:] if n > 0 else seed
     text_query = "\n".join(str(m.get("content", "")).strip() for m in tail).strip()
 
     if not is_media_recall_enabled():
@@ -550,7 +621,9 @@ _KEYWORD_MAX_COUNT = 4
 _JEV_SOURCE_ALLOCATIONS = {"fragment": 5, "memopedia": 1, "message": 3}
 
 
-def _extract_recall_keywords(conn, query: str) -> List[str]:
+def _extract_recall_keywords(
+    conn, query: str, *, observations: Optional[List[str]] = None,
+) -> List[str]:
     """クエリから「珍しい内容語」を最大 ``_KEYWORD_MAX_COUNT`` 個抜き出す。
 
     ありふれた語を落とすのは、エンティティトリガーの ambient ガードと同じ思想 —
@@ -558,10 +631,17 @@ def _extract_recall_keywords(conn, query: str) -> List[str]:
     キーなので、常連の語 (ペルソナ名など) を残すと毎ターン同じ大量のヒットが
     上位を占め、枠を食い潰してしまう。
 
+    ``observations`` は「このターンで新しく目に入ったもの」(部屋の様子・通知) の
+    本文。クエリの種はユーザーの発言のままにしつつ、見えたものの中の珍しい語も
+    字面検索の脇道から参加させる。珍しさの判定も上限 ``_KEYWORD_MAX_COUNT`` の枠も
+    クエリ本文と共通 — 見えたものが枠を独り占めしないよう、クエリ本文の語を先に
+    並べて同数のときの安定ソートで前に来るようにする。
+
     失敗しても会話は止めない。空リストを返すと呼び出し側は ``keywords`` を渡さず、
     unified_recall の従来どおりの ``query.split()`` 経路に戻る。
     """
-    if not query or not query.strip():
+    sources = [query or ""] + [text for text in (observations or []) if text]
+    if not any(s.strip() for s in sources):
         return []
 
     try:
@@ -569,12 +649,13 @@ def _extract_recall_keywords(conn, query: str) -> List[str]:
 
         words: List[str] = []
         seen: set = set()
-        for match in _KEYWORD_PATTERN.finditer(query):
-            word = match.group(0)
-            if word in seen:
-                continue
-            seen.add(word)
-            words.append(word)
+        for source in sources:
+            for match in _KEYWORD_PATTERN.finditer(source):
+                word = match.group(0)
+                if word in seen:
+                    continue
+                seen.add(word)
+                words.append(word)
         if not words:
             return []
 
@@ -987,6 +1068,11 @@ _JEV_CRITERION_FALSE = (
 # ここで切るのは会話本文だけ。
 _JEV_CONVERSATION_TEXT_LIMIT = 500
 
+# Jev の state に入れる「いま見えたもの」(部屋の様子・通知) の最大件数 (最新側から)。
+# 会話本文と同じく、1 ターンのペイロードが目に入ったものの量で青天井にならない
+# ようにするための有界化。
+_JEV_MAX_OBSERVATIONS = 3
+
 
 def _clip(text: str, limit: int) -> str:
     """``limit`` 字を超えるテキストを先頭 ``limit`` 字 + 省略記号に詰める。"""
@@ -1028,6 +1114,7 @@ def _build_jev_request(
     candidates: List[Tuple[Tuple[str, str], Any]],
     *,
     context_messages: int,
+    observations: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]], Dict[str, Tuple[str, str]]]:
     """Jev に渡す state / questions と、qid → 台帳キーの対応表を組み立てる。
 
@@ -1040,6 +1127,13 @@ def _build_jev_request(
     写真をきっかけに拾ってきた候補を、写真を知らない Jev が落としてしまう非対称を
     避けるため。OFF のときと概要が無いときは ``attachments`` キー自体を入れない
     (state の形は従来のまま)。
+
+    ``observations`` は「このターンで新しく目に入ったもの」(部屋の様子・通知) の
+    本文。ユーザーの発言が種になったターンでは知覚ブロックが ``conversation`` に
+    入らないので、ここから別枠で渡す — 見えたものを知らない Jev が、見えたものに
+    紐づく候補を落とす非対称を避けるため。会話本文と同じく 1 件
+    ``_JEV_CONVERSATION_TEXT_LIMIT`` 字で切り、最新側から最大
+    ``_JEV_MAX_OBSERVATIONS`` 件。無いときは ``observations`` キー自体を入れない。
     """
     convo = [m for m in messages if _is_conversational_message(m)]
     # 呼び出し側 (get_jev_context_messages) が >= 1 を保証する。クエリ側の
@@ -1074,6 +1168,11 @@ def _build_jev_request(
         attachment_summaries = _current_attachment_summaries(messages)
         if attachment_summaries:
             state["attachments"] = attachment_summaries
+    if observations:
+        state["observations"] = [
+            _clip(text, _JEV_CONVERSATION_TEXT_LIMIT)
+            for text in observations[-_JEV_MAX_OBSERVATIONS:]
+        ]
     return state, questions, key_by_qid
 
 
@@ -1084,6 +1183,7 @@ def _run_jev_rerank(
     accepted_keys: set,
     context_ids: set,
     persona_id: str,
+    observations: Optional[List[str]] = None,
 ) -> Optional[Dict[Tuple[str, str], float]]:
     """Jev に候補を一括判定させる。
 
@@ -1124,7 +1224,9 @@ def _run_jev_rerank(
             return {}
 
         state, questions, key_by_qid = _build_jev_request(
-            messages, candidates, context_messages=get_jev_context_messages(),
+            messages, candidates,
+            context_messages=get_jev_context_messages(),
+            observations=observations,
         )
         from saiverse.typesafe_client import TypeSafeUnavailable, evaluate_nouls
     except Exception:
@@ -1223,6 +1325,16 @@ def run_auto_recall(
     # 追加引数そのものを渡さない。
     jev_enabled = is_jev_rerank_enabled()
 
+    # 「このターンで新しく目に入ったもの」(部屋の様子・通知)。ユーザーの発言が種に
+    # なったターンでだけ集める — 発言が無いターンでは build_query がこれ自体を種に
+    # しているので、脇道から重ねて渡す意味がない。使うのは Jev ON の経路だけ
+    # (字面検索のキーワードと、Jev の判断材料)。
+    observations: List[str] = (
+        _fresh_observation_texts(messages)
+        if jev_enabled and _seed_is_user_utterance(messages)
+        else []
+    )
+
     # --- エンティティトリガー経路 (決定論・埋め込み検索と並行) ---
     accepted_keys: set = set()
     accepted_count = 0
@@ -1268,7 +1380,9 @@ def run_auto_recall(
             # 将来はソース種別ごとの「思い出しやすさ」に一般化する予定 (§4 参照)。
             recall_kwargs: Dict[str, Any] = {}
             if jev_enabled:
-                keywords = _extract_recall_keywords(conn, query)
+                keywords = _extract_recall_keywords(
+                    conn, query, observations=observations,
+                )
                 recall_kwargs = {
                     # 抽出できなかったターンは None = 従来の split 挙動に戻す。
                     "keywords": keywords or None,
@@ -1299,6 +1413,7 @@ def run_auto_recall(
         jev_decisions = _run_jev_rerank(
             hits, messages,
             accepted_keys=accepted_keys, context_ids=context_ids, persona_id=persona_id,
+            observations=observations,
         )
     jev_threshold = get_jev_threshold() if jev_decisions is not None else 0.0
 

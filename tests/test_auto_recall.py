@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from sai_memory.unified_recall import RecallHit
 from sea import auto_recall
+from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
 
 # Jev 選別層の env を消してから走らせる (このファイルは cosine 方式の担当)。
 #
@@ -759,6 +760,133 @@ class TestQueryDefaults(AutoRecallBase):
     def test_build_query_uses_last_message_only(self):
         messages = _msgs(("user", "1つ目"), ("assistant", "2つ目"), ("user", "3つ目"))
         self.assertEqual(auto_recall.build_query(messages), "3つ目")
+
+
+def _perception(text, **metadata):
+    """送信直前に差し込まれる知覚ブロック (部屋の様子・通知) を 1 枚作る。
+
+    実物 (sea/runtime_context.py::list_presented_perception_blocks) と同じ形 —
+    role="user" / content は ``<system>`` 包み / metadata に
+    ``CONSUMED_PERCEPTION_KEY``。
+    """
+    meta = {"tags": ["internal", "event_message", "perception"],
+            CONSUMED_PERCEPTION_KEY: True}
+    meta.update(metadata)
+    return {"role": "user", "content": f"<system>{text}</system>", "metadata": meta}
+
+
+class TestPerceptionBlockDoesNotHijackQuery(AutoRecallBase):
+    """知覚ブロック (部屋の様子・通知) がクエリの種を乗っ取らない。
+
+    2026-09-06 に部屋の描画が head の ``__visual_context__`` から知覚ブロックへ
+    引っ越したとき、``_is_conversational_message`` の除外リストが追従せず、
+    ユーザーの発言の後ろに挟まったブロックがクエリの種になっていた
+    (本番実測: 2026-09-18 21:28 のターン)。これは Jev の ON/OFF を問わない
+    挙動修正なので、cosine 方式担当のこのファイルで固定する。
+
+    種の優先順位は 3 段 — このターンのユーザー発言 > (発言が無ければ) 直近の
+    通知・部屋の様子 > (それも無ければ) 直近の assistant 発言。
+    """
+
+    def test_user_utterance_wins_over_trailing_perception_block(self):
+        messages = [
+            {"role": "user", "content": "十条まで歩いた日のこと覚えてる？"},
+            _perception("部屋の様子: エリスが部屋に入ってきた"),
+        ]
+        self.assertEqual(
+            auto_recall.build_query(messages), "十条まで歩いた日のこと覚えてる？",
+        )
+
+    def test_multiple_trailing_blocks_do_not_displace_the_utterance(self):
+        messages = [
+            {"role": "user", "content": "十条の話"},
+            _perception("部屋の様子: 誰かが入ってきた"),
+            _perception("通知: スペルの結果が届きました"),
+        ]
+        self.assertEqual(auto_recall.build_query(messages), "十条の話")
+
+    def test_autonomous_turn_falls_back_to_the_perception_block(self):
+        """会話文の末尾が assistant のターンは、従来どおり知覚ブロックが種になる。
+
+        「見たものに対して想起が走る」経路は残す (直したのは、ユーザーの発言が
+        種の座から押し出されることだけ)。
+        """
+        messages = [
+            {"role": "user", "content": "おはよう"},
+            {"role": "assistant", "content": "おはよう、まはー"},
+            _perception("部屋の様子: 窓の外で雨が降り始めた"),
+        ]
+        self.assertEqual(
+            auto_recall.build_query(messages), "部屋の様子: 窓の外で雨が降り始めた",
+        )
+
+    def test_perception_only_history_still_seeds_the_query(self):
+        messages = [_perception("通知: 予定の時刻になりました")]
+        self.assertEqual(
+            auto_recall.build_query(messages), "通知: 予定の時刻になりました",
+        )
+
+    def test_no_perception_block_keeps_the_previous_query(self):
+        messages = _msgs(("user", "1つ目"), ("assistant", "2つ目"))
+        self.assertEqual(auto_recall.build_query(messages), "2つ目")
+        self.assertEqual(auto_recall.build_query(_msgs(("user", "発言だけ"))), "発言だけ")
+        self.assertEqual(auto_recall.build_query([]), "")
+
+    def test_plain_system_notice_is_still_a_conversational_message(self):
+        """metadata に目印の無い ``<system>`` 通知 (スケジュール等) は従来どおり種になる。
+
+        知覚ブロックではなく普通の user メッセージとして履歴に入るので、この修正の
+        影響を受けない。
+        """
+        messages = [
+            {"role": "user", "content": "十条の話"},
+            {"role": "user", "content": "<system>スケジュールの実行時刻です</system>"},
+        ]
+        self.assertEqual(
+            auto_recall.build_query(messages),
+            "<system>スケジュールの実行時刻です</system>",
+        )
+
+    def test_entity_trigger_reads_the_utterance_not_the_block(self):
+        """エンティティトリガーの「最新ユーザー発話」も乗っ取られない。"""
+        rows = [("page_aifi", 12, "アイフィ", "アイフィの要約テキスト")]
+        messages = [
+            {"role": "user", "content": "アイフィの話をしていたよね"},
+            _perception("部屋の様子: エリスが部屋に入ってきた"),
+        ]
+        with patch("sea.auto_recall._fetch_memopedia_titles", return_value=rows), \
+             patch("sai_memory.unified_recall.unified_recall", return_value=[]):
+            res = auto_recall.run_auto_recall(
+                conn=object(), embedder=object(), messages=messages,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
+            )
+        self.assertTrue(res.injected)
+        self.assertIn("アイフィ", res.block)
+
+    def test_perception_block_is_not_counted_as_context_message(self):
+        """``_context_message_ids`` にも知覚ブロックは入らない (id を持たないが念のため)。"""
+        block = _perception("部屋の様子")
+        block["id"] = "perception-1"
+        ids = auto_recall._context_message_ids(
+            [{"role": "user", "content": "発話", "id": "m1"}, block],
+        )
+        self.assertEqual(ids, {"m1"})
+
+    def test_latest_user_message_skips_the_perception_block(self):
+        """添付概要の取得元も乗っ取られない (知覚ブロックは media を持ちうる)。"""
+        os.environ["SAIVERSE_MEDIA_RECALL_ENABLED"] = "true"
+        try:
+            messages = [
+                {"role": "user", "content": "これ覚えてる？",
+                 "metadata": {"images": [{"summary": "猫の写真です。"}]}},
+                _perception("部屋の様子", media=[{"summary": "部屋に貼られたポスター"}]),
+            ]
+            query = auto_recall.build_query(messages)
+            self.assertIn("これ覚えてる？", query)
+            self.assertIn("猫の写真です。", query)
+            self.assertNotIn("部屋に貼られたポスター", query)
+        finally:
+            os.environ.pop("SAIVERSE_MEDIA_RECALL_ENABLED", None)
 
 
 class TestThreadLedgerIsolation(AutoRecallBase):

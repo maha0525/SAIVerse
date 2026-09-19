@@ -27,6 +27,7 @@ import pytest
 from sai_memory.memory.storage import add_message, init_db
 from sai_memory.unified_recall import RecallHit
 from sea import auto_recall
+from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
 from saiverse.typesafe_client import TypeSafeUnavailable
 
 PERSONA = "jev_test_persona"
@@ -71,6 +72,23 @@ def _msgs(*pairs):
             m["id"] = p[2]
         out.append(m)
     return out
+
+
+def _perception(text):
+    """送信直前に差し込まれる知覚ブロック (部屋の様子・通知) を 1 枚作る。
+
+    実物 (sea/runtime_context.py::list_presented_perception_blocks) と同じ形 —
+    role="user" / content は ``<system>`` 包み / metadata に
+    ``CONSUMED_PERCEPTION_KEY``。
+    """
+    return {
+        "role": "user",
+        "content": f"<system>{text}</system>",
+        "metadata": {
+            "tags": ["internal", "event_message", "perception"],
+            CONSUMED_PERCEPTION_KEY: True,
+        },
+    }
 
 
 class _FakeJev:
@@ -810,6 +828,103 @@ def test_on_with_no_extractable_keyword_falls_back_to_default_split(jev_on, memo
     # 残り 2 つは語が無くても渡る (発話の自席占領の除外と message 枠の拡張)。
     assert captured["exclude_message_ids"] == {"m1"}
     assert captured["source_allocations"]["message"] == 3
+
+
+def test_observations_reach_jev_when_the_user_spoke(jev_on):
+    """発言の後ろに挟まった「いま見えたもの」は、別枠で Jev の判断材料に入る。
+
+    クエリの種はユーザーの発言のままなので、見えたものを知らない Jev が、
+    見えたものに紐づく候補を落とす非対称が残ってしまう。
+    """
+    fake = _FakeJev({"記憶": 0.9})
+    messages = [
+        {"role": "user", "content": "エリスは来てる？"},
+        _perception("部屋の様子: エリスが窓際の椅子に座っている"),
+    ]
+    _run([_hit("fragment", "f1", embed_score=0.90, title="記憶")], messages, fake)
+
+    state = fake.calls[0]["state"]
+    assert state["observations"] == ["部屋の様子: エリスが窓際の椅子に座っている"]
+    # 会話本文はユーザーの発言だけ (知覚ブロックは conversation に入らない)。
+    assert [c["text"] for c in state["conversation"]] == ["エリスは来てる？"]
+
+
+def test_observations_key_is_absent_without_perception_blocks(jev_on):
+    fake = _FakeJev({"記憶": 0.9})
+    _run(
+        [_hit("fragment", "f1", embed_score=0.90, title="記憶")],
+        _msgs(("user", "話題")),
+        fake,
+    )
+    assert "observations" not in fake.calls[0]["state"]
+
+
+def test_observations_are_clipped_and_capped(jev_on):
+    """1 件 500 字で切り、最新側から最大 3 件。
+
+    目に入ったものの量で 1 ターンのペイロードが青天井にならないようにする
+    (会話本文と同じ有界化)。
+    """
+    fake = _FakeJev({"記憶": 0.9})
+    messages = [{"role": "user", "content": "何が見える？"}]
+    messages += [_perception(f"{i}番目の記録") for i in range(4)]
+    messages.append(_perception("あ" * 2000))
+    _run([_hit("fragment", "f1", embed_score=0.90, title="記憶")], messages, fake)
+
+    observations = fake.calls[0]["state"]["observations"]
+    assert len(observations) == 3
+    # 最新側の 3 件 (古い「0番目の記録」「1番目の記録」は落ちる)。
+    assert observations[0] == "2番目の記録"
+    assert observations[1] == "3番目の記録"
+    assert observations[2] == "あ" * auto_recall._JEV_CONVERSATION_TEXT_LIMIT + "…"
+
+
+def test_observations_are_not_collected_on_an_autonomous_turn(jev_on):
+    """発言が無いターンは知覚ブロック自体がクエリの種なので、脇道では渡さない。"""
+    fake = _FakeJev({"記憶": 0.9})
+    messages = [
+        {"role": "user", "content": "おはよう"},
+        {"role": "assistant", "content": "おはよう、まはー"},
+        _perception("部屋の様子: 窓の外で雨が降り始めた"),
+    ]
+    _run([_hit("fragment", "f1", embed_score=0.90, title="記憶")], messages, fake)
+    assert "observations" not in fake.calls[0]["state"]
+
+
+def test_rare_word_in_a_fresh_observation_becomes_a_keyword(jev_on, memory_conn):
+    """発言の後ろの知覚ブロックの珍しい語も、字面検索の脇道から参加する。"""
+    _fill(memory_conn, "十条の商店街を歩いた", times=3)
+    messages = [
+        {"role": "user", "content": "何が見える？"},
+        _perception("部屋の様子: 十条の写真が壁に飾られている"),
+    ]
+    captured = _capture_recall_call(memory_conn, messages, _FakeJev({"記憶": 0.9}))
+    assert captured["keywords"] == ["十条"]
+
+
+def test_observation_keywords_share_the_cap_with_the_query(jev_on, memory_conn, monkeypatch):
+    """上限 4 個の枠はクエリ本文と共通で、同数ならクエリ本文の語が先に並ぶ。"""
+    monkeypatch.setattr(auto_recall, "_KEYWORD_MAX_COUNT", 1)
+    _fill(memory_conn, "十条の話", times=3)
+    _fill(memory_conn, "赤羽の話", times=3)
+    messages = [
+        {"role": "user", "content": "十条の話をしていたよね"},
+        _perception("部屋の様子: 赤羽の写真が壁に飾られている"),
+    ]
+    captured = _capture_recall_call(memory_conn, messages, _FakeJev({"記憶": 0.9}))
+    assert captured["keywords"] == ["十条"]
+
+
+def test_off_ignores_observations_entirely(memory_conn):
+    """OFF (既定) では観察テキストの経路に一切入らない。"""
+    _fill(memory_conn, "十条の商店街を歩いた", times=3)
+    messages = [
+        {"role": "user", "content": "何が見える？", "id": "m1"},
+        _perception("部屋の様子: 十条の写真が壁に飾られている"),
+    ]
+    captured = _capture_recall_call(memory_conn, messages, _FakeJev({"記憶": 0.9}))
+    assert set(captured) == {"topk", "search_chronicle", "search_memopedia",
+                             "search_fragments", "search_messages"}
 
 
 def test_non_conversational_messages_excluded_from_state(jev_on):
