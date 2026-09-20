@@ -113,6 +113,18 @@ def usage_calls(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _clear_outcome_history():
+    """直近の呼び出しの記録 (プロセス内) をテスト間で持ち越さない。
+
+    設定画面の警告はこの記録から作られるので、ここで積んだ結果がそのまま他の
+    テストファイルの「警告は空のはず」を壊す (同じワーカーで走ると実際に起きる)。
+    """
+    reflex_judgment.reset_recent_outcomes()
+    yield
+    reflex_judgment.reset_recent_outcomes()
+
+
+@pytest.fixture(autouse=True)
 def _drain_workers():
     """テストが置き去りにしたワーカーを次のテストへ持ち越さない。
 
@@ -972,6 +984,129 @@ def test_deadline_exceeded_raises_unavailable():
     assert "deadline exceeded" in str(exc.value)
     # ワーカーの完了 (1.0 秒) を待たずに戻る。
     assert elapsed < 0.95
+
+
+# ---------------------------------------------------------------------------
+# 使えなかった理由の種別 (例外の型は 1 つのまま、印は属性で運ぶ)
+# ---------------------------------------------------------------------------
+
+
+def test_only_the_deadline_raise_is_marked_as_a_deadline():
+    """締切超過だけが "deadline"。呼び出し側はこの印で注記を出すかを決める。"""
+    def handler(request):
+        time.sleep(1.0)
+        return httpx.Response(200, json=_all_answered("m0", "m1"))
+
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(STATE, QUESTIONS, timeout=0.1, transport=_transport(handler))
+
+    assert exc.value.kind == reflex_judgment.UNAVAILABLE_DEADLINE
+
+
+@pytest.mark.parametrize("make_failure", [
+    pytest.param(lambda: httpx.Response(500, text="boom"), id="non-200"),
+    pytest.param(
+        lambda: httpx.Response(200, json={"answers": {"m0": {"type": "noul", "noul": 0.5}}}),
+        id="partial-answer",
+    ),
+    pytest.param(
+        lambda: httpx.Response(200, text="not json", headers={"Content-Type": "application/json"}),
+        id="invalid-json",
+    ),
+])
+def test_other_failures_are_not_marked_as_a_deadline(make_failure):
+    """待ち時間を延ばしても直らない失敗には印を立てない (直し方を誤って案内しない)。"""
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(STATE, QUESTIONS, timeout=2.5,
+                 transport=_transport(lambda request: make_failure()))
+
+    assert exc.value.kind == reflex_judgment.UNAVAILABLE_OTHER
+
+
+def test_a_missing_api_key_is_not_marked_as_a_deadline(monkeypatch):
+    """キー欠落も「その他の失敗」。宛先が固まっているのとは別の話。"""
+    monkeypatch.delenv(KEY_ENV, raising=False)
+
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(STATE, QUESTIONS, timeout=2.5, transport=_transport(
+            lambda request: httpx.Response(200, json=_all_answered("m0", "m1")),
+        ))
+
+    assert exc.value.kind == reflex_judgment.UNAVAILABLE_OTHER
+
+
+def test_the_recent_outcomes_count_each_call_once():
+    """成立 / 締切超過 / その他の失敗が、直近の記録に 1 件ずつ積まれる。"""
+    assert reflex_judgment.recent_outcomes() == (0, 0, 0)
+
+    evaluate(STATE, QUESTIONS, timeout=2.5, transport=_transport(
+        lambda request: httpx.Response(200, json=_all_answered("m0", "m1")),
+    ))
+    assert reflex_judgment.recent_outcomes() == (1, 0, 0)
+
+    with pytest.raises(ReflexJudgmentUnavailable):
+        evaluate(STATE, QUESTIONS, timeout=2.5, transport=_transport(
+            lambda request: httpx.Response(500, text="boom"),
+        ))
+    assert reflex_judgment.recent_outcomes() == (2, 0, 1)
+
+    def _slow(request):
+        time.sleep(1.0)
+        return httpx.Response(200, json=_all_answered("m0", "m1"))
+
+    with pytest.raises(ReflexJudgmentUnavailable):
+        evaluate(STATE, QUESTIONS, timeout=0.1, transport=_transport(_slow))
+    assert reflex_judgment.recent_outcomes() == (3, 1, 1)
+
+
+def test_an_empty_question_set_is_not_counted_as_a_call():
+    """質問ゼロの呼び出しは外部へ何も送っていないので数えない。"""
+    assert evaluate(STATE, {}, timeout=2.5) == ({}, {})
+    assert reflex_judgment.recent_outcomes() == (0, 0, 0)
+
+
+def test_the_history_only_keeps_the_most_recent_calls():
+    """記録は直近 OUTCOME_HISTORY_SIZE 件で頭打ちになる。"""
+    for _ in range(reflex_judgment.OUTCOME_HISTORY_SIZE + 5):
+        evaluate(STATE, QUESTIONS, timeout=2.5, transport=_transport(
+            lambda request: httpx.Response(200, json=_all_answered("m0", "m1")),
+        ))
+
+    assert reflex_judgment.recent_outcomes() == (reflex_judgment.OUTCOME_HISTORY_SIZE, 0, 0)
+
+
+def test_records_older_than_the_window_are_not_counted(monkeypatch):
+    """窓 (OUTCOME_WINDOW_SECONDS) の外まで古くなった記録は数えない。
+
+    モデルを速いものへ替えて直した人が、そのペルソナとしばらく喋らないだけで
+    「最近◯回中◯回…」の警告を見続けることがないようにするための窓。
+    """
+    clock = {"now": 1000.0}
+
+    class _FakeTime:
+        """反射判断のモジュールだけに差し込む時計 (本物の time を書き換えない)。"""
+
+        @staticmethod
+        def monotonic() -> float:
+            return clock["now"]
+
+    monkeypatch.setattr(reflex_judgment, "time", _FakeTime)
+
+    reflex_judgment._record_outcome(reflex_judgment.OUTCOME_DEADLINE)
+    reflex_judgment._record_outcome(reflex_judgment.OUTCOME_FAILED)
+    assert reflex_judgment.recent_outcomes() == (2, 1, 1)
+
+    # 窓のちょうど端はまだ数える
+    clock["now"] += reflex_judgment.OUTCOME_WINDOW_SECONDS
+    assert reflex_judgment.recent_outcomes() == (2, 1, 1)
+
+    # 端を越えた記録は落ちる
+    clock["now"] += 1.0
+    assert reflex_judgment.recent_outcomes() == (0, 0, 0)
+
+    # 新しい記録だけがまた数え上げられる (古いのは戻ってこない)
+    reflex_judgment._record_outcome(reflex_judgment.OUTCOME_OK)
+    assert reflex_judgment.recent_outcomes() == (1, 0, 0)
 
 
 def test_abandoned_call_still_records_its_usage(usage_calls):

@@ -403,6 +403,10 @@
     "ja": "{p1} に更新",
     "en": "Update to {p1}"
   },
+  "app.page.text094": {
+    "ja": "記憶の想起の判定が時間内に終わらず、今回は従来の方式で想起しました（判定の費用は発生しています）。グローバル設定で待ち時間を延ばすか、より速いモデルを割り当てると直ります。",
+    "en": "The memory-recall judgment did not finish in time, so this turn fell back to the previous recall method (the judgment was still billed). Increase the wait time in Global Settings, or assign a faster model."
+  },
   "app.phenomena.page.text001": {
     "ja": "編集内容が保存されていません。閉じてよろしいですか？",
     "en": "You have unsaved changes. Close anyway?"
@@ -2242,6 +2246,22 @@
   "components.GlobalSettingsModal.text110": {
     "ja": "既定",
     "en": "Default"
+  },
+  "components.GlobalSettingsModal.text111": {
+    "ja": "反射判断を待つ時間",
+    "en": "Reflex judgment wait time"
+  },
+  "components.GlobalSettingsModal.text112": {
+    "ja": "この時間内に判定が返らなかったターンは、従来の想起方式に戻ります（その回の判定の費用は発生します）。モデルごとではなく全体で一つの設定です。",
+    "en": "A turn whose judgment does not come back within this time falls back to the previous recall method (that judgment is still billed). This is one setting for everything, not per model."
+  },
+  "components.GlobalSettingsModal.text113": {
+    "ja": "待つ時間 (秒)",
+    "en": "Wait time (seconds)"
+  },
+  "components.GlobalSettingsModal.text114": {
+    "ja": "{p1}〜{p2} 秒。既定は 5 秒。保存すると次のターンから効きます。",
+    "en": "{p1}-{p2} seconds. The default is 5. It takes effect from the next turn."
   },
   "components.InventoryModal.text001": {
     "ja": "インベントリ: ",

@@ -36,7 +36,7 @@ from api.routes import config as config_route
 from database.models import AI as AIModel, Base, City as CityModel
 from manager.initialization import InitializationMixin
 from manager.persona import PersonaMixin
-from saiverse import data_paths, model_configs, model_defaults
+from saiverse import data_paths, model_configs, model_defaults, reflex_judgment
 from saiverse.persona_model_selection import (
     SOURCE_GLOBAL,
     SpeakingModelChoice,
@@ -279,6 +279,11 @@ def fake_model_definitions(monkeypatch, tmp_path):
     monkeypatch.setattr(data_paths, "EXPANSION_DATA_DIR", tmp_path / "no_expansion")
     for key in ROLE_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+    # 反射判断の直近の呼び出しの記録はプロセス内に残る。他のテストが積んだ分を
+    # 持ち越すと、ここの「警告はこれだけのはず」がその回数で壊れる。
+    reflex_judgment.reset_recent_outcomes()
+    yield
+    reflex_judgment.reset_recent_outcomes()
 
 
 def _raise(*_args, **_kwargs):
@@ -1051,3 +1056,98 @@ def test_route_returns_recorded_warnings_when_computation_fails(world, monkeypat
 
     assert config_route.get_startup_warnings(manager=svc) == {"warnings": [RECORDED]}
     assert svc.startup_warnings == [RECORDED]
+
+
+# --- 反射判断が時間内に答えていない -----------------------------------------------
+#
+# チャットの注記は起きたターンにしか出ない。「最近ときどき起きている」状態を見る
+# ための集計で、数え方の記録は saiverse/reflex_judgment.py のプロセス内 (直近 20 回)。
+
+
+def _reflex_deadline_message(total: int, deadline: int, failed: int = 0) -> str:
+    message = (
+        f"反射判断が最近{total}回中{deadline}回、時間内に答えず従来方式に戻っています。"
+        "その間の判定の費用は発生しています。"
+        "グローバル設定で待ち時間を延ばすか、より速いモデルを割り当てると直ります。"
+    )
+    if failed:
+        message += (
+            f"（ほかに{failed}回は別の理由で失敗しています — "
+            "設定の警告や WARNING ログを確認してください）"
+        )
+    return message
+
+
+def _record(**counts) -> None:
+    """直近の呼び出しの記録を、指定した内訳で積む。"""
+    for outcome, times in counts.items():
+        for _ in range(times):
+            reflex_judgment._record_outcome(getattr(reflex_judgment, f"OUTCOME_{outcome.upper()}"))
+
+
+def test_no_warning_before_the_judgment_has_ever_been_called(world):
+    world.add_persona()
+    svc = world.start()
+
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_no_warning_below_the_threshold(world):
+    world.add_persona()
+    svc = world.start()
+    _record(ok=18, deadline=2)
+
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_the_warning_appears_at_the_threshold(world):
+    world.add_persona()
+    svc = world.start()
+    _record(ok=17, deadline=3)
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _reflex_deadline_message(20, 3),
+    ]
+
+
+def test_the_warning_counts_only_the_most_recent_calls(world):
+    """記録は直近 20 件で頭打ち — 古い時間切れは数からこぼれ、やがて警告は消える。"""
+    world.add_persona()
+    svc = world.start()
+    _record(deadline=3)
+    _record(ok=reflex_judgment.OUTCOME_HISTORY_SIZE)
+
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_other_failures_are_not_counted_as_deadlines(world):
+    """キー欠落や接続失敗は、待ち時間を延ばしても直らないのでこの警告では数えない。"""
+    world.add_persona()
+    svc = world.start()
+    _record(failed=10)
+
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_the_warning_says_how_many_failed_for_another_reason(world):
+    """分母には他の理由の失敗も入るので、その回数も文面に書く。
+
+    書かないと、キーが無くて毎ターン落ちている家にまで「待ち時間を延ばせ」と
+    読める文面だけが出る。
+    """
+    world.add_persona()
+    svc = world.start()
+    _record(ok=2, deadline=3, failed=5)
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _reflex_deadline_message(10, 3, failed=5),
+    ]
+
+
+def test_an_unreadable_history_does_not_add_a_warning(world, monkeypatch):
+    """観測そのものが読めなかった回は黙る (会話は止まっていない)。"""
+    world.add_persona()
+    svc = world.start()
+    monkeypatch.setattr(reflex_judgment, "recent_outcomes", _raise)
+
+    assert svc.current_model_setting_warnings() == []

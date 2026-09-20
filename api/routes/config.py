@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import json
 import threading
@@ -829,6 +830,60 @@ def set_media_recall(req: MediaRecallRequest, manager=Depends(get_manager)):
     from api.routes.admin import write_env_updates
     write_env_updates({"SAIVERSE_MEDIA_RECALL_ENABLED": "true" if req.enabled else "false"})
     return {"success": True, "enabled": req.enabled}
+
+
+class ReflexTimeoutRequest(BaseModel):
+    seconds: float
+
+
+@router.get("/reflex-timeout")
+def get_reflex_timeout_setting():
+    """反射判断を何秒まで待つか (グローバル設定、既定 5 秒)。"""
+    from sea.auto_recall import (
+        REFLEX_TIMEOUT_DEFAULT,
+        REFLEX_TIMEOUT_MAX,
+        REFLEX_TIMEOUT_MIN,
+        get_reflex_timeout,
+    )
+
+    return {
+        "seconds": get_reflex_timeout(),
+        "default": REFLEX_TIMEOUT_DEFAULT,
+        "min": REFLEX_TIMEOUT_MIN,
+        "max": REFLEX_TIMEOUT_MAX,
+    }
+
+
+@router.post("/reflex-timeout")
+def set_reflex_timeout_setting(req: ReflexTimeoutRequest):
+    """反射判断を何秒まで待つかを保存する (.env)。
+
+    読む側 (``sea/auto_recall.py`` の ``get_reflex_timeout``) は呼び出しのたびに
+    env を読むので、保存した次のターンから効く (再起動は要らない)。モデルごとの
+    設定は置かない — これは「どのくらい待ったらフォールバックを発動させるか」の
+    パラメータで、モデル依存の需要はほぼ無い (2026-09-21 まはー裁定)。
+
+    範囲外・数値として成り立たない値は範囲に丸めてから保存する。断らずに丸めるのは、
+    ここで弾いても利用者にできることが無いため (直し方は「範囲の中の値を入れる」
+    しかなく、丸めた結果は画面に返している)。
+    """
+    from sea.auto_recall import (
+        REFLEX_TIMEOUT_DEFAULT,
+        REFLEX_TIMEOUT_MAX,
+        REFLEX_TIMEOUT_MIN,
+    )
+
+    value = req.seconds
+    if not math.isfinite(value):
+        value = REFLEX_TIMEOUT_DEFAULT
+    value = min(REFLEX_TIMEOUT_MAX, max(REFLEX_TIMEOUT_MIN, float(value)))
+    # 小数第 1 位まで (0.05 秒の違いを保存させても、待ち時間としての意味が無い)。
+    value = round(value, 1)
+
+    from api.routes.admin import write_env_updates
+    write_env_updates({"SAIVERSE_REFLEX_TIMEOUT_SECONDS": str(value)})
+    _log.info("Reflex judgment wait time: %s seconds", value)
+    return {"success": True, "seconds": value}
 
 
 class GeminiAutoCacheRequest(BaseModel):

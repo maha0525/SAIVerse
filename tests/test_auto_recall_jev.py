@@ -60,6 +60,7 @@ _ENV_KEYS = [
     "SAIVERSE_AUTO_RECALL_ENTITY_AMBIENT_COUNT",
     "SAIVERSE_MEDIA_RECALL_ENABLED",
     "SAIVERSE_REFLEX_JUDGMENT_MODEL",
+    "SAIVERSE_REFLEX_TIMEOUT_SECONDS",
     REFLEX_KEY_ENV,
     PERSONA_KEY_ENV,
 ]
@@ -157,11 +158,17 @@ class _FakeJev:
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
+    from saiverse.reflex_judgment import reset_recent_outcomes
+
     for key in _ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
     auto_recall.reset_ledger(PERSONA)
+    # 直近の呼び出しの記録はプロセス内に残る (設定画面の警告が読む)。テスト間で
+    # 持ち越すと、他のファイルの「警告は空のはず」を壊す。
+    reset_recent_outcomes()
     yield
     auto_recall.reset_ledger(PERSONA)
+    reset_recent_outcomes()
 
 
 @pytest.fixture
@@ -563,6 +570,125 @@ def test_judgment_module_import_failure_falls_back(reflex_on, caplog):
 
 
 # ---------------------------------------------------------------------------
+# 「時間内に答えなかった」ターンの印 (画面の注記の材料)
+#
+# 画面に注記を出すのは「待ち時間を延ばすか速いモデルに替えれば直る」ターンだけ。
+# 他の失敗で出すと、直し方の違う問題へ誤った案内をすることになる。
+# ---------------------------------------------------------------------------
+
+def _deadline_error():
+    """判断層が締切超過のときに投げる例外そのままの形 (種別の印つき)。"""
+    from saiverse.reflex_judgment import UNAVAILABLE_DEADLINE
+
+    return ReflexJudgmentUnavailable("deadline exceeded after 5.5s", kind=UNAVAILABLE_DEADLINE)
+
+
+def test_deadline_sets_the_fallback_flag(reflex_on):
+    res = _run(
+        [_hit("fragment", "f1", embed_score=0.90, title="しきい値超え")],
+        _msgs(("user", "話題")),
+        _FakeJev(raises=_deadline_error()),
+    )
+    assert res.reflex_deadline_fallback is True
+    # 注入そのものは従来どおり (旗は表示のためだけで、採否には効かない)。
+    assert res.injected is True
+    assert "しきい値超え" in res.block
+
+
+def test_deadline_on_a_turn_without_injection_still_sets_the_flag(reflex_on):
+    """記憶が一つも浮かばなかったターンでも、判定が時間切れになった事実は持ち帰る。"""
+    res = _run(
+        [_hit("fragment", "f1", embed_score=0.80, title="しきい値未満")],
+        _msgs(("user", "話題")),
+        _FakeJev(raises=_deadline_error()),
+    )
+    assert res.injected is False
+    assert res.reflex_deadline_fallback is True
+
+
+def test_other_failures_do_not_set_the_fallback_flag(reflex_on):
+    res = _run(
+        [_hit("fragment", "f1", embed_score=0.90, title="しきい値超え")],
+        _msgs(("user", "話題")),
+        _FakeJev(raises=ReflexJudgmentUnavailable("HTTP 500")),
+    )
+    assert res.reflex_deadline_fallback is False
+
+
+def test_an_unexpected_exception_does_not_set_the_fallback_flag(reflex_on):
+    res = _run(
+        [_hit("fragment", "f1", embed_score=0.90, title="しきい値超え")],
+        _msgs(("user", "話題")),
+        _FakeJev(raises=RuntimeError("boom")),
+    )
+    assert res.reflex_deadline_fallback is False
+
+
+def test_a_successful_judgment_does_not_set_the_fallback_flag(reflex_on):
+    res = _run(
+        [_hit("fragment", "f1", embed_score=0.80, title="判定で採用")],
+        _msgs(("user", "話題")),
+        _FakeJev({"判定で採用": 0.9}),
+    )
+    assert res.injected is True
+    assert res.reflex_deadline_fallback is False
+
+
+def test_the_switch_off_turn_never_sets_the_fallback_flag(reflex_on):
+    """スイッチ OFF のペルソナの挙動は 1 ビットも変わらない (旗も立たない)。"""
+    res = _run(
+        [_hit("fragment", "f1", embed_score=0.90, title="しきい値超え")],
+        _msgs(("user", "話題")),
+        _FakeJev(raises=_deadline_error()),
+        enhanced=False,
+    )
+    assert res.reflex_deadline_fallback is False
+
+
+# ---------------------------------------------------------------------------
+# 反射判断を何秒まで待つか (グローバル設定、既定 5 秒)
+# ---------------------------------------------------------------------------
+
+def test_the_wait_time_defaults_to_five_seconds():
+    assert auto_recall.get_reflex_timeout() == 5.0
+    assert auto_recall.REFLEX_TIMEOUT_DEFAULT == 5.0
+
+
+def test_a_configured_wait_time_is_used(monkeypatch):
+    monkeypatch.setenv(auto_recall.REFLEX_TIMEOUT_ENV, "12.5")
+    assert auto_recall.get_reflex_timeout() == 12.5
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "abc", "0", "-3", "nan"])
+def test_a_broken_wait_time_falls_back_to_five_seconds(monkeypatch, caplog, raw):
+    """設定が壊れていても会話は止めない (既定で動き続ける)。空欄だけは平常なので黙る。"""
+    caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
+    monkeypatch.setenv(auto_recall.REFLEX_TIMEOUT_ENV, raw)
+
+    assert auto_recall.get_reflex_timeout() == 5.0
+
+    warned = [r for r in caplog.records if auto_recall.REFLEX_TIMEOUT_ENV in r.getMessage()]
+    if raw.strip():
+        assert warned, "壊れた値は黙って既定に倒さない"
+    else:
+        assert not warned, "未設定は平常なので警告しない"
+
+
+def test_the_judgment_is_called_with_the_configured_wait_time(reflex_on, monkeypatch):
+    """設定は毎ターン読む (保存した次のターンから効く — 再起動は要らない)。"""
+    monkeypatch.setenv(auto_recall.REFLEX_TIMEOUT_ENV, "9")
+    fake = _FakeJev({"判定で採用": 0.9})
+    _run(
+        [_hit("fragment", "f1", embed_score=0.80, title="判定で採用")],
+        _msgs(("user", "話題")),
+        fake,
+    )
+    # 設定 9 秒 − 判断層の内部の余裕 0.5 秒。見切りの時刻 (timeout + 余裕) が
+    # 設定値そのものになる (2026-09-21 の敵対レビュー)。
+    assert fake.calls[0]["timeout"] == pytest.approx(8.5)
+
+
+# ---------------------------------------------------------------------------
 # 設定ミスの警告
 # ---------------------------------------------------------------------------
 
@@ -672,9 +798,10 @@ def test_question_construction(reflex_on):
     assert "`memories.m1`" in questions["m1"]["instructions"]
     assert set(questions["m0"]["criteria"]) == {"true", "false"}
 
-    # 5.0 秒 — 2.5 は Jev の実験値で、通常の LLM (クラウドの軽量モデルは 1 往復
-    # 3.5〜4 秒) が毎ターン締切に届かない実測 (2026-09-21) を受けて広げた。
-    assert call["timeout"] == pytest.approx(5.0)
+    # 設定の既定 5.0 秒から、判断層の内部の余裕 (DEADLINE_MARGIN=0.5) を引いた値。
+    # 利用者の設定値は「この秒数を過ぎたら見切る」の約束なので、見切りの時刻
+    # (timeout + 余裕) が設定値そのものになるように渡す (2026-09-21 の敵対レビュー)。
+    assert call["timeout"] == pytest.approx(4.5)
     # どのモデル設定が答えたかを判定ログに載せられるよう、答える側を解決して渡す。
     assert call["backend"].model_key == REFLEX_MODEL_KEY
     assert call["persona_id"] == PERSONA

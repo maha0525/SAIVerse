@@ -41,7 +41,14 @@ LLM 呼び出し) より速く・安く・形が保証される代わりに、�
 非 200・不正応答・部分回答・通信中に出た予期しない例外) はすべて
 ``ReflexJudgmentUnavailable`` に正規化する。呼び出し側はこれ 1 つを捕まえて、
 外部 API が落ちていてもペルソナの返事が止まらない経路へフォールバックすること
-(そのターンをどう凌ぐかは各機能の設計が持つ — intent §4)。
+(そのターンをどう凌ぐかは各機能の設計が持つ — intent §4)。例外の型は 1 つのまま
+だが、「時間内に答えなかった」だけは ``kind`` 属性 (``UNAVAILABLE_DEADLINE``) で
+見分けられる — 待ち時間や割り当てたモデルを変えれば直る失敗で、しかも課金は発生
+しているので、呼び出し側が利用者へ知らせられるようにしてある。呼び出し 1 回ごとの
+結果 (成立 / 締切超過 / その他の失敗) は直近 ``OUTCOME_HISTORY_SIZE`` 件だけ
+プロセス内に積み (:func:`recent_outcomes`)、設定画面の警告がそこから読む。数えるのは
+``OUTCOME_WINDOW_SECONDS`` 秒以内の記録だけ — 設定を直した人が、そのペルソナと
+しばらく喋らないだけで古い警告を見続けることがないようにするため。
 
 ``saiverse/typesafe_client.py`` を置き換えたモジュール (2026-09-20)。会話の返事を
 待たせる場所で使う前提の器 — 同時本数の上限 (プロセス全体で 4 本)・実際の経過時間で
@@ -56,8 +63,10 @@ import logging
 import math
 import os
 import threading
+import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Deque, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import httpx
 
@@ -102,8 +111,10 @@ _ERROR_BODY_PREVIEW = 200
 
 # 壁時計の絶対締切に足す余裕 (秒)。httpx の timeout は接続・書き込み・読み取りの
 # 各 I/O 単位なので、少量ずつ断続的に返す応答では合計が timeout を超えうる。
-# 呼び出し全体を timeout + この余裕で打ち切る。
-_DEADLINE_MARGIN = 0.5
+# 呼び出し全体を timeout + この余裕で打ち切る。公開しているのは、呼び出し側が
+# 「利用者の設定値 = 見切りの時刻そのもの」にしたいとき、設定値からこの余裕を
+# 引いた値を timeout に渡せるようにするため (sea/auto_recall.py)。
+DEADLINE_MARGIN = 0.5
 
 # 締切超過で置き去りにしたワーカーが積み上がらないための同時実行の上限。
 # 締切を超えた呼び出しはメインスレッドから通信を切るのでワーカーは速やかに終わるが、
@@ -123,13 +134,33 @@ _WORKER_THREAD_NAME = "reflex-judgment-post"
 USAGE_CATEGORY = "reflex_judgment"
 
 
+#: 使えなかった理由の種別 (:class:`ReflexJudgmentUnavailable` の ``kind``)。
+#:
+#: **例外の型は 1 つのまま**にする (呼び出し側が 1 種類を捕まえて畳めるという契約を
+#: 壊さないため)。種別は属性で運ぶ。区別が要るのは「時間内に答えなかった」だけ —
+#: それは設定 (待ち時間・割り当てたモデルの速さ) で直せる失敗で、しかも**課金は
+#: 発生している**ので、利用者に知らせる価値がある。キー欠落や接続失敗は別の話。
+UNAVAILABLE_DEADLINE = "deadline"
+UNAVAILABLE_OTHER = "other"
+
+
 class ReflexJudgmentUnavailable(Exception):
     """反射判断が使えなかった。
 
     役割の未割り当て・モデル設定の欠落・キーと宛先の組の照合失敗・API キー欠落・
     接続失敗・タイムアウト・非 200・不正応答のすべてをこれに正規化する
     (呼び出し側が「今回は判定なし」として同じ扱いで畳めるようにするため)。
+
+    Attributes:
+        kind: 理由の種別。締切超過の raise だけが :data:`UNAVAILABLE_DEADLINE` で、
+            それ以外はすべて :data:`UNAVAILABLE_OTHER`。呼び出し側が「待てば済んだ
+            失敗」だけを利用者へ知らせられるようにするための印で、捕まえ方は
+            従来どおり 1 種類のまま。
     """
+
+    def __init__(self, *args: Any, kind: str = UNAVAILABLE_OTHER) -> None:
+        super().__init__(*args)
+        self.kind = kind
 
 
 @dataclass(frozen=True)
@@ -1052,11 +1083,111 @@ class _LLMCall:
 
 
 # ---------------------------------------------------------------------------
+# 直近の呼び出しの結果 (画面の設定の警告が読む、プロセス内の小さな記録)
+#
+# チャットの注記は「いま起きたターン」しか知らせない。設定画面で「最近どのくらい
+# 起きているか」を見せるために、呼び出し 1 回ごとの結果をここに積む。プロセス内
+# だけの記録で、再起動で消えて構わない (これは効果の観測であって、世界の状態では
+# ないため — 永続化すると「どのペルソナの・いつの」まで背負うことになる)。
+# ---------------------------------------------------------------------------
+
+#: 呼び出し 1 回の結果。
+OUTCOME_OK = "ok"              # 判定が成立した
+OUTCOME_DEADLINE = "deadline"  # 時間内に答えなかった (課金は発生している)
+OUTCOME_FAILED = "failed"      # それ以外の失敗 (キー欠落・接続失敗・不正応答など)
+
+#: 何回分さかのぼって数えるか。
+OUTCOME_HISTORY_SIZE = 20
+
+#: どのくらい昔までの記録を数えるか (秒)。窓の外の記録は数から落とす。
+#: これは**効果の観測**なので、古い証拠で警告を出し続けない — モデルを速いものへ
+#: 替えて直したあと、そのペルソナとしばらく喋らなければ、件数だけを頼りにした
+#: 警告は永遠に「最近 3 回中 3 回…」と言い続ける。時間の窓を付けると、直した人が
+#: 何もしなくても警告は消える。
+OUTCOME_WINDOW_SECONDS = 1800.0
+
+#: ``(結果, 記録した時刻)``。時刻は単調時計 (システム時計の調整で過去へ飛ばない)。
+_OUTCOMES: Deque[Tuple[str, float]] = deque(maxlen=OUTCOME_HISTORY_SIZE)
+_OUTCOMES_LOCK = threading.Lock()
+
+
+def _record_outcome(outcome: str) -> None:
+    """呼び出し 1 回分の結果を記録する (複数のペルソナが同時に呼ぶのでロックする)。"""
+    with _OUTCOMES_LOCK:
+        _OUTCOMES.append((outcome, time.monotonic()))
+
+
+def recent_outcomes() -> Tuple[int, int, int]:
+    """``(直近の呼び出し回数, 締切超過だった回数, それ以外の失敗の回数)``。
+
+    数えるのは直近 :data:`OUTCOME_HISTORY_SIZE` 件のうち、記録から
+    :data:`OUTCOME_WINDOW_SECONDS` 秒以内のものだけ。まだ 1 回も呼んでいない
+    プロセスと、窓の中に記録が無いプロセスでは ``(0, 0, 0)``。
+
+    締切超過と「それ以外の失敗」を分けて返すのは、警告の文面が対処を書き分けられる
+    ようにするため — 分母に他の理由の失敗が混ざっていると、キー欠落で落ち続けている
+    家にも「待ち時間を延ばせ」と読める文面が出る。
+    """
+    cutoff = time.monotonic() - OUTCOME_WINDOW_SECONDS
+    with _OUTCOMES_LOCK:
+        snapshot = [item for item, at in _OUTCOMES if at >= cutoff]
+    return (
+        len(snapshot),
+        sum(1 for item in snapshot if item == OUTCOME_DEADLINE),
+        sum(1 for item in snapshot if item == OUTCOME_FAILED),
+    )
+
+
+def reset_recent_outcomes() -> None:
+    """記録を捨てる (テストの相互汚染を断つための口)。"""
+    with _OUTCOMES_LOCK:
+        _OUTCOMES.clear()
+
+
+# ---------------------------------------------------------------------------
 # 呼び出し
 # ---------------------------------------------------------------------------
 
 
 def evaluate(
+    state: Any,
+    questions: Mapping[str, Mapping[str, Any]],
+    *,
+    timeout: float,
+    backend: Optional[ReflexBackend] = None,
+    persona_id: Optional[str] = None,
+    transport: Optional[Any] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """:func:`_evaluate` の入口。結果を直近の記録へ 1 件積んでから返す / 投げ直す。
+
+    引数・戻り値・例外は :func:`_evaluate` のまま (記録以外は何もしない)。記録を
+    ここに集めるのは、``_evaluate`` の中に散らばる出口ごとに書き足すと必ずどれかを
+    書き忘れるため — 入口は 1 つしかないので、ここで包めば数え漏れが起きない。
+
+    質問が空の呼び出しは「呼んでいない」ので数えない (外部へは何も送っていない)。
+
+    ``ValueError`` (呼び出し側の契約違反) は記録しない — それは反射判断の成否では
+    なく呼び出し側のバグで、混ぜると「宛先が不調」の顔をしてしまう。
+    """
+    try:
+        result = _evaluate(
+            state, questions,
+            timeout=timeout, backend=backend, persona_id=persona_id, transport=transport,
+        )
+    except ReflexJudgmentUnavailable as exc:
+        if questions:
+            _record_outcome(
+                OUTCOME_DEADLINE
+                if getattr(exc, "kind", UNAVAILABLE_OTHER) == UNAVAILABLE_DEADLINE
+                else OUTCOME_FAILED
+            )
+        raise
+    if questions:
+        _record_outcome(OUTCOME_OK)
+    return result
+
+
+def _evaluate(
     state: Any,
     questions: Mapping[str, Mapping[str, Any]],
     *,
@@ -1236,7 +1367,7 @@ def evaluate(
 
     # 絶対締切 (壁時計)。httpx の timeout は I/O 単位なので、少量ずつ返し続ける
     # 応答は合計時間が青天井になりうる。会話の同期経路にいるので全体を打ち切る。
-    deadline = timeout + _DEADLINE_MARGIN
+    deadline = timeout + DEADLINE_MARGIN
     if not done.wait(deadline):
         # 見切る前に「見切った」印を立てる。後から応答を得たワーカーは、この印を見て
         # 使用量だけを記帳する (答えは読まない — メインはもう会話を先へ進めている)。
@@ -1263,7 +1394,12 @@ def evaluate(
         except Exception:
             pass
         LOGGER.warning("[reflex] deadline exceeded after %.1fs; abandoning the call", deadline)
-        raise ReflexJudgmentUnavailable(f"deadline exceeded after {deadline:.1f}s")
+        # 種別を立てるのはここだけ。「時間内に答えなかった」は待ち時間を延ばすか
+        # 速い宛先へ替えれば直る失敗で、しかも課金は発生しているので、呼び出し側が
+        # 利用者へ知らせられるように他の失敗と区別する。
+        raise ReflexJudgmentUnavailable(
+            f"deadline exceeded after {deadline:.1f}s", kind=UNAVAILABLE_DEADLINE,
+        )
 
     error = holder.get("error")
     if error is not None:
@@ -1288,17 +1424,27 @@ def evaluate(
 
 
 __all__ = [
+    "DEADLINE_MARGIN",
     "DIALECT_FIELD",
     "FIRST_STAGE_QUESTION_TYPE",
     "JEV_COMPAT_PROTOCOL",
+    "OUTCOME_DEADLINE",
+    "OUTCOME_FAILED",
+    "OUTCOME_HISTORY_SIZE",
+    "OUTCOME_OK",
+    "OUTCOME_WINDOW_SECONDS",
     "QUESTION_TYPES",
     "REFLEX_KIND_JEV",
     "REFLEX_KIND_LLM",
+    "UNAVAILABLE_DEADLINE",
+    "UNAVAILABLE_OTHER",
     "USAGE_CATEGORY",
     "ReflexBackend",
     "ReflexJudgmentUnavailable",
     "evaluate",
     "is_available",
+    "recent_outcomes",
     "reflex_model_setting",
+    "reset_recent_outcomes",
     "resolve_backend",
 ]

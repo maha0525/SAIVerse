@@ -141,6 +141,23 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // About
     const [versionInfo, setVersionInfo] = useState<{ version: string; latest_version?: string; update_available?: boolean } | null>(null);
 
+    // 反射判断を何秒まで待つか (GET/POST /api/config/reflex-timeout)。
+    // 待ちきれなかったターンは従来の想起方式に戻り、その回の判定の費用だけが残る。
+    // 範囲と既定はサーバーが持つ (sea/auto_recall.py) ので、届くまでは仮の値で表示する。
+    const [reflexTimeout, setReflexTimeout] = useState(5);
+    const [reflexTimeoutInput, setReflexTimeoutInput] = useState('5');
+    const [reflexTimeoutMin, setReflexTimeoutMin] = useState(1);
+    const [reflexTimeoutMax, setReflexTimeoutMax] = useState(60);
+    // この欄を利用者が実際に触ったか。保存するかどうかはこの旗で決める。
+    // 値の一致で決めると二方向に壊れる: .env に壊れた値 (abc) が入っていると
+    // 読み込みは実効値 5 を返すので、5 と打ち直して確定しても「同じだから保存
+    // しない」で壊れた値が残り続ける。逆に、触っていない欄でも blur だけで
+    // 保存すると、読み込んだ値の丸め直しが黙って .env を書き換える。
+    const reflexTimeoutEditedRef = useRef(false);
+    // 編集のたびに進む世代番号。保存の応答が返ったとき、この番号が進んでいたら
+    // 「保存中に打ち直された」ので、応答の値で入力欄を上書きしない。
+    const reflexTimeoutEditGenRef = useRef(0);
+
     // Model Roles
     const [modelRoles, setModelRoles] = useState<Record<string, ModelRoleInfo>>({});
     const [modelPresets, setModelPresets] = useState<PresetInfo[]>([]);
@@ -212,6 +229,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         }
         if (isOpen && activeTab === 'models') {
             loadModelRoles();
+            loadReflexTimeout();
         }
         if (isOpen && activeTab === 'about') {
             loadVersionInfo();
@@ -325,6 +343,68 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             }
         } catch (e) {
             console.error("Failed to toggle media recall", e);
+        }
+    };
+
+    const loadReflexTimeout = async () => {
+        // 読み込みの応答が返るまでの間に利用者が打ち始めていたら、その入力を
+        // サーバー値で上書きしない (保存の応答と同じ世代の柵)。上書きすると
+        // 入力が消えるうえ、編集の旗まで倒れて次の確定が保存を飛ばす。
+        const generation = reflexTimeoutEditGenRef.current;
+        try {
+            const res = await apiFetch('/api/config/reflex-timeout');
+            if (res.ok) {
+                const data = await res.json();
+                if (typeof data.seconds === 'number') {
+                    setReflexTimeout(data.seconds);
+                    if (reflexTimeoutEditGenRef.current === generation) {
+                        setReflexTimeoutInput(String(data.seconds));
+                        // 読み込んだだけの値は「利用者が入れた値」ではない。
+                        reflexTimeoutEditedRef.current = false;
+                    }
+                }
+                if (typeof data.min === 'number') setReflexTimeoutMin(data.min);
+                if (typeof data.max === 'number') setReflexTimeoutMax(data.max);
+            }
+        } catch (e) {
+            console.error("Failed to load the reflex judgment wait time", e);
+        }
+    };
+
+    // 数値欄は入力中に勝手に丸めると打ちにくいので、確定 (フォーカスが外れる / Enter) のときだけ保存する。
+    // 触っていない欄は確定でも何もしない (旗が立っていない)。
+    const commitReflexTimeout = async () => {
+        if (!reflexTimeoutEditedRef.current) return;
+        reflexTimeoutEditedRef.current = false;
+        // 保存中にもう一度打ち直されたら、この保存の応答で入力欄を上書きしない
+        // (上書きすると、新しく打った値が黙って古い保存値に戻る)。編集のたびに
+        // 進む世代番号を控えて、応答時に変わっていたら表示へは触らない。
+        const generation = reflexTimeoutEditGenRef.current;
+        const parsed = Number.parseFloat(reflexTimeoutInput);
+        const next = Number.isFinite(parsed)
+            ? Math.round(Math.min(Math.max(parsed, reflexTimeoutMin), reflexTimeoutMax) * 10) / 10
+            : reflexTimeout;
+        try {
+            const res = await apiFetch('/api/config/reflex-timeout', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ seconds: next })
+            });
+            if (res.ok) {
+                const data = await res.json();
+                const saved = typeof data.seconds === 'number' ? data.seconds : next;
+                setReflexTimeout(saved);
+                if (reflexTimeoutEditGenRef.current === generation) {
+                    setReflexTimeoutInput(String(saved));
+                }
+            } else if (reflexTimeoutEditGenRef.current === generation) {
+                setReflexTimeoutInput(String(reflexTimeout));
+            }
+        } catch (e) {
+            console.error("Failed to save the reflex judgment wait time", e);
+            if (reflexTimeoutEditGenRef.current === generation) {
+                setReflexTimeoutInput(String(reflexTimeout));
+            }
         }
     };
 
@@ -1174,6 +1254,35 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                     )}
                                                 </div>
                                             ))}
+                                        </div>
+
+                                        {/* 反射判断を何秒まで待つか (モデルごとには置かない) */}
+                                        <div className={`${styles.toggleContainer} ${styles.toggleContainerStacked}`}>
+                                            <div>
+                                                <div data-i18n="components.GlobalSettingsModal.text111" className={styles.toggleLabel}>{uiText("components.GlobalSettingsModal.text111")}</div>
+                                                <div data-i18n="components.GlobalSettingsModal.text112" className={styles.toggleDescription}>{uiText("components.GlobalSettingsModal.text112")}</div>
+                                            </div>
+                                            <div className={styles.subSetting}>
+                                                <label data-i18n="components.GlobalSettingsModal.text113" className={styles.subSettingLabel} htmlFor="reflex-timeout-seconds">{uiText("components.GlobalSettingsModal.text113")}</label>
+                                                <input
+                                                    id="reflex-timeout-seconds"
+                                                    type="number"
+                                                    min={reflexTimeoutMin}
+                                                    max={reflexTimeoutMax}
+                                                    step={0.5}
+                                                    className={styles.subSettingInput}
+                                                    value={reflexTimeoutInput}
+                                                    onChange={e => { reflexTimeoutEditedRef.current = true; reflexTimeoutEditGenRef.current += 1; setReflexTimeoutInput(e.target.value); }}
+                                                    onBlur={commitReflexTimeout}
+                                                    onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                                />
+                                                <div data-i18n="components.GlobalSettingsModal.text114" className={styles.subSettingHint}>
+                                                    {uiText("components.GlobalSettingsModal.text114", {
+                                                        p1: String(reflexTimeoutMin),
+                                                        p2: String(reflexTimeoutMax),
+                                                    })}
+                                                </div>
+                                            </div>
                                         </div>
                                     </>
                                 )}

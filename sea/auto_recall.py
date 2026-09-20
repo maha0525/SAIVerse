@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import threading
@@ -144,7 +145,8 @@ def get_vivid_char_budget() -> int:
 #
 # 下の 4 つの数字は Jev の実験 (2026-09) で調整して決めた値。かつては env で
 # 動かせたが、利用者向けの設定ではなく実験のつまみだったので、載せ替え
-# (2026-09-20) でモジュール定数に畳んだ。
+# (2026-09-20) でモジュール定数に畳んだ。例外は「何秒まで待つか」だけで、そこは
+# 使う人が実際に踏む問題なので 2026-09-21 にグローバル設定の口を戻した。
 # ---------------------------------------------------------------------------
 
 def is_enhanced_recall_available(model_key: Optional[str] = None) -> bool:
@@ -190,14 +192,57 @@ _REFLEX_FLOOR = 0.78
 # 採用に必要な Noul 確率 (0〜1)。
 _REFLEX_THRESHOLD = 0.5
 
-# 反射判断のタイムアウト (秒)。自動想起は会話の同期経路にあるので有界に保つ。
+# 反射判断を何秒まで待つか。自動想起は会話の同期経路にあるので有界に保つ。
+#
 # 2.5 は Jev の実験で決めた値だが、第 2 段で通常の LLM も答える側になり、クラウドの
 # 軽量モデルは 1 往復 3.5〜4 秒かかることが実測で分かった (2026-09-21、Gemini 3.5
 # Flash-Lite が毎ターン締切に届かず、判定が一度も成立しないのに課金だけ発生した)。
 # 締切は「遅いときに見切る上限」なので、伸ばしても速い宛先 (Jev は 1 秒未満) の
 # ターンは何も遅くならない — 遅くなるのは宛先が本当に固まっているターンの、
 # 諦めるまでの待ちだけ。
-_REFLEX_TIMEOUT = 5.0
+#
+# 上の 3 つと違ってこれだけ env の口を持つ (グローバル設定の画面から変えられる) のは、
+# 使う人が実際に踏む問題だから — 割り当てたモデルが遅くて毎ターン従来方式へ戻る家では、
+# ここを伸ばすのが直し方の一つになる。**モデルごとには置かない** (2026-09-21 まはー
+# 裁定: これは「どのくらい待ったらフォールバックを発動させるか」のパラメータで、
+# モデル依存の需要はほぼ無い)。値は毎回の呼び出し時に読むので、保存した次のターンから
+# 効く (再起動は要らない)。
+REFLEX_TIMEOUT_ENV = "SAIVERSE_REFLEX_TIMEOUT_SECONDS"
+REFLEX_TIMEOUT_DEFAULT = 5.0
+#: 画面から保存できる範囲。下は「速い宛先でも往復が入る最低限」、上は「会話を
+#: 待たせてよい上限」。範囲外の値は画面側で丸める (ここは読むだけ)。
+REFLEX_TIMEOUT_MIN = 1.0
+REFLEX_TIMEOUT_MAX = 60.0
+
+
+def get_reflex_timeout() -> float:
+    """反射判断を何秒まで待つか (この秒数を過ぎたら見切って従来方式へ)。
+
+    設定が無い / 数値として読めない / 0 以下や非有限の値のときは既定の 5 秒に倒す
+    (会話の経路にいるので、設定の壊れで判定の待ちが 0 秒や無限になると、直し方の
+    分からない形で会話が変わる)。壊れた値は WARNING に出す。
+
+    範囲 (1〜60 秒) は**ここでも**効かせる — 画面からの保存は丸めてから書くが、
+    .env を手で書けば範囲の外の値が入る。読む側が素通しすると、画面が約束している
+    範囲 (GET /api/config/reflex-timeout の min/max) と実際の挙動がずれ、3600 の
+    ような値が毎ターン会話を長時間止められる (2026-09-21 の敵対レビュー)。
+    """
+    value = _env_float(REFLEX_TIMEOUT_ENV, REFLEX_TIMEOUT_DEFAULT)
+    if not math.isfinite(value) or value <= 0:
+        LOGGER.warning(
+            "[auto_recall] %s=%r is not a usable number of seconds; using the default %s",
+            REFLEX_TIMEOUT_ENV, os.getenv(REFLEX_TIMEOUT_ENV), REFLEX_TIMEOUT_DEFAULT,
+        )
+        return REFLEX_TIMEOUT_DEFAULT
+    if value < REFLEX_TIMEOUT_MIN or value > REFLEX_TIMEOUT_MAX:
+        clamped = min(REFLEX_TIMEOUT_MAX, max(REFLEX_TIMEOUT_MIN, value))
+        LOGGER.warning(
+            "[auto_recall] %s=%r is outside the allowed range (%s-%s seconds); using %s",
+            REFLEX_TIMEOUT_ENV, os.getenv(REFLEX_TIMEOUT_ENV),
+            REFLEX_TIMEOUT_MIN, REFLEX_TIMEOUT_MAX, clamped,
+        )
+        return clamped
+    return value
 
 # 反射判断へ渡す state の会話本文メッセージ数 (直近から)。全件送りにしないのは、
 # 「会話本文は 1 件 500 字まで」という有界性の根拠を件数側から崩さないため。
@@ -1151,14 +1196,21 @@ def _run_reflex_rerank(
     persona_id: str,
     observations: Optional[List[str]] = None,
     reflex_model_key: Optional[str] = None,
-) -> Optional[Dict[Tuple[str, str], float]]:
+) -> Tuple[Optional[Dict[Tuple[str, str], float]], bool]:
     """反射判断に候補を一括判定させる。
 
     Returns:
-        - ``{key: noul}``: 判定できた (候補ゼロなら空 dict。判断は呼んでいない)。
-        - ``None``: 反射判断が使えなかった。呼び出し側はこのターンだけ既存の
-          cosine しきい値方式へ静かに戻る (外部 API の障害でペルソナの返事を
+        ``(判定結果, 締切超過だったか)`` の組。
+
+        - 判定結果が ``{key: noul}``: 判定できた (候補ゼロなら空 dict。判断は
+          呼んでいない)。
+        - 判定結果が ``None``: 反射判断が使えなかった。呼び出し側はこのターンだけ
+          既存の cosine しきい値方式へ静かに戻る (外部 API の障害でペルソナの返事を
           止めないため)。
+
+        第 2 要素は「時間内に答えなかったせいで戻った」ターンだけ True。他の失敗
+        (キー欠落・接続失敗・不正応答・準備の失敗) では False — 待ち時間を延ばしても
+        速い宛先に替えても直らない失敗を、直し方の書いてある注記で案内しないため。
     """
     # 準備段階 (答える側の解決・候補の絞り込み・リクエスト組み立て・遅延 import) は
     # まるごと try の中に置く。docstring が約束する「失敗は None の 1 種類」を関数
@@ -1167,7 +1219,9 @@ def _run_reflex_rerank(
     # 読み込ませないためのもので、その失敗もここで畳む。
     try:
         from saiverse.reflex_judgment import (
+            DEADLINE_MARGIN,
             FIRST_STAGE_QUESTION_TYPE,
+            UNAVAILABLE_DEADLINE,
             ReflexJudgmentUnavailable,
             evaluate,
             resolve_backend,
@@ -1195,7 +1249,7 @@ def _run_reflex_rerank(
                 "[auto_recall][reflex] no candidate above floor; judgment not called (persona=%s)",
                 persona_id,
             )
-            return {}
+            return {}, False
 
         # 答える側は呼ぶ直前に解決する (判定ログにどのモデル設定が答えたかを載せる —
         # docs/intent/reflex_judgment.md §5)。宛先 (ペルソナ個別の上書きを含む) と
@@ -1217,26 +1271,32 @@ def _run_reflex_rerank(
             "build failed); falling back to cosine threshold for this turn (persona=%s)",
             persona_id, exc_info=True,
         )
-        return None
+        return None, False
 
     started = time.monotonic()
+    # 利用者の設定値 (get_reflex_timeout) は「この秒数を過ぎたら見切る」の約束。
+    # 判断層の見切りは timeout + 内部の余裕 (DEADLINE_MARGIN) で行われるので、
+    # 設定値をそのまま渡すと実際の見切りが約束より 0.5 秒遅くなる — 余裕ぶんを
+    # 引いて渡し、見切りの時刻を設定値そのものに合わせる (2026-09-21 の敵対レビュー)。
+    wait_seconds = max(0.5, get_reflex_timeout() - DEADLINE_MARGIN)
     try:
         nouls, usage = evaluate(
             state, questions,
-            timeout=_REFLEX_TIMEOUT, backend=backend, persona_id=persona_id,
+            timeout=wait_seconds, backend=backend, persona_id=persona_id,
         )
     except ReflexJudgmentUnavailable as exc:
+        deadline = getattr(exc, "kind", None) == UNAVAILABLE_DEADLINE
         LOGGER.warning(
             "[auto_recall][reflex] unavailable (%s); falling back to cosine threshold "
             "for this turn (persona=%s, model=%s)", exc, persona_id, backend.model_key,
         )
-        return None
+        return None, deadline
     except Exception:
         LOGGER.warning(
             "[auto_recall][reflex] rerank raised; falling back to cosine threshold "
             "for this turn (persona=%s, model=%s)", persona_id, backend.model_key, exc_info=True,
         )
-        return None
+        return None, False
 
     latency_ms = (time.monotonic() - started) * 1000.0
     decisions = {key_by_qid[qid]: noul for qid, noul in nouls.items() if qid in key_by_qid}
@@ -1245,7 +1305,7 @@ def _run_reflex_rerank(
         "(persona=%s, model=%s, usage=%s)",
         len(decisions), len(candidates), latency_ms, persona_id, backend.model_key, usage,
     )
-    return decisions
+    return decisions, False
 
 
 @dataclass
@@ -1262,6 +1322,11 @@ class AutoRecallResult:
     # への永続化用 (sea/runtime_context.py の persona._pending_auto_recall_text 経由)。
     # LLM コンテキストには一切使わない — block (タグ付き) だけが履歴末尾に注入される。
     plain_text: Optional[str] = None
+    # このターンは反射判断が**時間内に答えなかった**ので従来方式へ戻った。呼び出し側
+    # (sea/runtime_context.py) が画面の注記として知らせるためだけの旗で、注入の中身には
+    # 一切影響しない。他の失敗 (キー欠落・接続失敗・不正応答) では立たない — 待ち時間や
+    # モデルの割り当てを変えれば直る失敗だけを、直し方つきで知らせるため。
+    reflex_deadline_fallback: bool = False
 
 
 def run_auto_recall(
@@ -1300,6 +1365,8 @@ def run_auto_recall(
 
     Returns:
         AutoRecallResult。``injected`` が True のとき ``block`` を末尾注入する。
+        ``reflex_deadline_fallback`` が True のターンは、反射判断が時間内に答えず
+        従来方式へ戻った (呼び出し側が画面の注記として知らせる)。
     """
     if conn is None or embedder is None:
         LOGGER.debug("[auto_recall] conn/embedder unavailable; skip (persona=%s)", persona_id)
@@ -1418,8 +1485,10 @@ def run_auto_recall(
     # None = 反射判断を使わない/使えない (既存の cosine しきい値方式で判定する)。
     # dict = 判定結果 (key -> noul 確率)。候補ゼロなら空 dict。
     reflex_decisions: Optional[Dict[Tuple[str, str], float]] = None
+    # 「時間内に答えなかったせいで従来方式へ戻った」ターンの印 (画面の注記用)。
+    reflex_deadline_fallback = False
     if reflex_enabled:
-        reflex_decisions = _run_reflex_rerank(
+        reflex_decisions, reflex_deadline_fallback = _run_reflex_rerank(
             hits, messages,
             accepted_keys=accepted_keys, context_ids=context_ids, persona_id=persona_id,
             observations=observations, reflex_model_key=reflex_model_key,
@@ -1536,7 +1605,12 @@ def run_auto_recall(
 
     if not ledger.items:
         LOGGER.debug("[auto_recall] ledger empty after update; no injection (persona=%s)", persona_id)
-        return AutoRecallResult(False, None, query, len(hits), accepted_count, 0, 0)
+        # 注入が無いターンでも旗は持ち帰る — 判定が時間切れになった事実は、記憶が
+        # 一つも浮かばなかったかどうかとは関係が無い (費用は同じく発生している)。
+        return AutoRecallResult(
+            False, None, query, len(hits), accepted_count, 0, 0,
+            reflex_deadline_fallback=reflex_deadline_fallback,
+        )
 
     # --- 注入ブロック組み立て: 台帳に残っているアイテムを全件注入する ---
     # 台帳に残っている = まだ sticky_turns 以内 (= 粘着中) なので、intent doc §4.3 の
@@ -1621,4 +1695,5 @@ def run_auto_recall(
         ledger_size=len(ledger.items),
         char_count=len(block),
         plain_text=body,
+        reflex_deadline_fallback=reflex_deadline_fallback,
     )
