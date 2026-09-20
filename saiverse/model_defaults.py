@@ -20,7 +20,10 @@ typed questions with probabilities only; the ordinary conversation clients
 (``llm_clients/factory.py``) cannot speak to it at all. Assigning one to a
 conversation role would stop the persona the moment it tried to reply, so those
 saves are refused, and values that arrived through some other path (a hand-edited
-.env) are reported as screen warnings.
+.env) are reported as screen warnings. The same judgment is published as
+``is_reflex_only_model`` so the model-list APIs can mark those models and the
+conversation dropdowns can leave them out — being refused after picking one is a
+worse screen than never seeing it.
 
 The reverse direction is checked but never refused at save time: the reflex
 judgment role takes either a ``jev_compat`` destination or an ordinary LLM (the
@@ -214,6 +217,29 @@ def _reflex_destination_mismatch(_role: str, value: str) -> bool:
     return False
 
 
+def is_reflex_only_model(value: str) -> bool:
+    """その名前のモデルが反射判断専用の宛先 (jev 互換) かどうか。
+
+    jev 互換の宛先は型付きの質問に確率で答えるだけの相手で、文章を書かせることが
+    できない (docs/intent/reflex_judgment.md §6-4)。モデルの一覧を返す API
+    (api/routes/info.py・config.py・tutorial.py) が各モデルにこの印を載せ、会話系の
+    モデル選択欄が印の付いたものを選択肢に出さないために使う。一覧そのものからは
+    落とさない — モデル管理画面と反射判断の選択欄には出し続ける必要がある。
+
+    判定は保存の関所 (:func:`role_model_save_rejection` が通す
+    ``_jev_only_destination``) と同じ一枚。だから「選べるのに保存だけ断られる」
+    「選択肢に出ないのに保存は通る」のずれは生まれない。
+
+    定義が引けない名前は False を返す (「SAIVerse にありません」は別の検査が拾う)。
+    """
+    from saiverse.reflex_judgment import JEV_COMPAT_PROTOCOL
+
+    config = _config_by_find_model_config(value)
+    if config is None:
+        return False
+    return _protocol_of(config) == JEV_COMPAT_PROTOCOL
+
+
 def _jev_only_destination(role: str, value: str) -> bool:
     """反射判断以外の役割に、反射判断専用の宛先 (jev 互換) が割り当たっているか。
 
@@ -223,15 +249,14 @@ def _jev_only_destination(role: str, value: str) -> bool:
     (docs/intent/reflex_judgment.md §6-4)。保存の時点で断り、env の直書きなどで
     既に入っている値は画面の警告で知らせる。
 
-    定義が無い値は False を返す (「SAIVerse にありません」の検査が拾う — 同じ件で
-    二つの警告を出さない)。
+    宛先の種類そのものの判定は :func:`is_reflex_only_model` に持たせてある (画面が
+    選択肢から外す判定と同じ一枚にするため)。ここが足すのは「その役割の引き方で
+    定義が引けるか」だけ — 引けない値は False を返す (「SAIVerse にありません」の
+    検査が拾う。同じ件で二つの警告を出さない)。
     """
-    from saiverse.reflex_judgment import JEV_COMPAT_PROTOCOL
-
-    config = _ROLE_CONFIG_LOOKUPS[role](value)
-    if config is None:
+    if _ROLE_CONFIG_LOOKUPS[role](value) is None:
         return False
-    return _protocol_of(config) == JEV_COMPAT_PROTOCOL
+    return is_reflex_only_model(value)
 
 
 #: 「定義はあるが、その役割の宛先として噛み合っていない」を見る役割ごとの検査。

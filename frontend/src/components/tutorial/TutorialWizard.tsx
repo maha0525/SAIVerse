@@ -44,6 +44,9 @@ interface ModelInfo {
     display_name: string;
     provider: string;
     is_available: boolean;
+    /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
+     *  役割ごとの選択肢を出す StepModelSummary が、反射判断の役割にだけ出す。 */
+    reflex_only?: boolean;
 }
 
 interface ModelRoleAssignment {

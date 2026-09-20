@@ -45,7 +45,14 @@ interface ModelInfo {
     provider: string;
     is_available: boolean;
     supports_structured_output?: boolean;
+    /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
+     *  反射判断の役割の選択肢にだけ出す。 */
+    reflex_only?: boolean;
 }
+
+/** 反射判断の役割のキー (saiverse/model_defaults.py の MODEL_ROLES と同じ名前)。
+ *  この役割だけが、文章を書けない反射判断専用の宛先を選べる。 */
+const REFLEX_JUDGMENT_ROLE = 'reflex_judgment_model';
 
 /** 送る量のプリセット一つ (GET /api/config/metabolism-defaults の presets)。 */
 interface WatermarkPreset {
@@ -1151,6 +1158,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                         <div className={styles.roleDropdown}>
                                                             {modelsAvailable
                                                                 .filter(m => m.is_available)
+                                                                .filter(m => !m.reflex_only || role === REFLEX_JUDGMENT_ROLE)
                                                                 .map(model => (
                                                                     <div
                                                                         key={model.id}

@@ -110,6 +110,9 @@ interface Playbook {
 interface ModelChoice {
     id: string;
     name: string;
+    /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
+     *  この画面が出すのは会話に使う欄だけなので、印の付いたものは選択肢に出さない。 */
+    reflex_only?: boolean;
 }
 
 /** Wrapper around fetch that checks res.ok and shows alert on error.
@@ -275,6 +278,9 @@ export default function WorldEditor() {
     const [bagOptions, setBagOptions] = useState<Item[]>([]);
 
     const [modelChoices, setModelChoices] = useState<ModelChoice[]>([]);
+    // 標準モデル・軽量モデルの選択肢。どちらも会話に使う役割なので、文章を書けない
+    // 反射判断専用の宛先は出さない (選んでも保存の時点で断られる)。
+    const conversationModelChoices = modelChoices.filter(m => !m.reflex_only);
     const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
     const [availablePrompts, setAvailablePrompts] = useState<string[]>([]);
 
@@ -704,17 +710,17 @@ export default function WorldEditor() {
                             {selectedAI && <>
                                 <Field label={uiText("components.settings.WorldEditor.text071")}><Select value={formData.default_model || ''} onChange={(e: any) => setFormData({ ...formData, default_model: e.target.value })}>
                                     <option data-i18n="components.settings.WorldEditor.text072" value="">{uiText("components.settings.WorldEditor.text072")}</option>
-                                    {formData.default_model && !modelChoices.some(m => m.id === formData.default_model) && (
+                                    {formData.default_model && !conversationModelChoices.some(m => m.id === formData.default_model) && (
                                         <option data-i18n="components.settings.WorldEditor.text073" value={formData.default_model}>{uiText("components.settings.WorldEditor.text073")}{formData.default_model}</option>
                                     )}
-                                    {modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                    {conversationModelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                 </Select></Field>
                                 <Field label={uiText("components.settings.WorldEditor.text074")}><Select value={formData.lightweight_model || ''} onChange={(e: any) => setFormData({ ...formData, lightweight_model: e.target.value })}>
                                     <option data-i18n="components.settings.WorldEditor.text075" value="">{uiText("components.settings.WorldEditor.text075")}</option>
-                                    {formData.lightweight_model && !modelChoices.some(m => m.id === formData.lightweight_model) && (
+                                    {formData.lightweight_model && !conversationModelChoices.some(m => m.id === formData.lightweight_model) && (
                                         <option data-i18n="components.settings.WorldEditor.text076" value={formData.lightweight_model}>{uiText("components.settings.WorldEditor.text076")}{formData.lightweight_model}</option>
                                     )}
-                                    {modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                    {conversationModelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                 </Select></Field>
                                 <Field label={uiText("components.settings.WorldEditor.text077")}>
                                     <label data-i18n="components.settings.WorldEditor.text078 components.settings.WorldEditor.text079" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>

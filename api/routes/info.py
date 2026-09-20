@@ -556,10 +556,19 @@ def get_item_content(item_id: str, thumb: int = 0, manager = Depends(get_manager
 
 @router.get("/models")
 def list_available_models():
-    """Get list of available models for persona configuration."""
+    """Get list of available models for persona configuration.
+
+    ``reflex_only`` が真のモデルは反射判断専用の宛先 (型付きの質問に確率で答える
+    だけで、文章を書けない) で、会話系の選択欄はこの印の付いたものを出さない。
+    一覧からは落とさない — モデル管理画面と反射判断の選択欄には出す必要がある。
+    """
     from saiverse.model_configs import get_model_choices_with_display_names
+    from saiverse.model_defaults import is_reflex_only_model
     choices = get_model_choices_with_display_names()
-    return [{"id": mid, "name": name} for mid, name in choices]
+    return [
+        {"id": mid, "name": name, "reflex_only": is_reflex_only_model(mid)}
+        for mid, name in choices
+    ]
 
 
 @router.post("/item/{item_id}/toggle-open")

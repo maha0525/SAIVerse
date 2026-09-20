@@ -90,6 +90,9 @@ interface UserChoice {
 interface ModelChoice {
     id: string;
     name: string;
+    /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
+     *  会話に使う欄では選択肢に出さない — 反射判断の欄だけが選べる。 */
+    reflex_only?: boolean;
 }
 
 export default function SettingsModal({ isOpen, onClose, personaId }: SettingsModalProps) {
@@ -466,6 +469,11 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
     if (!isOpen) return null;
 
+    // 会話・要約に使う欄の選択肢。反射判断専用の宛先 (文章を書けないモデル) は
+    // 選んでも保存が断られるので、そもそも出さない。反射判断の欄だけは
+    // availableModels をそのまま使う。
+    const conversationModels = availableModels.filter(m => !m.reflex_only);
+
     return (
         <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
@@ -497,10 +505,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={(e) => setDefaultModel(e.target.value)}
                                 >
                                     <option data-i18n="components.SettingsModal.text013" value="">{uiText("components.SettingsModal.text013")}</option>
-                                    {defaultModel && !availableModels.some(m => m.id === defaultModel) && (
+                                    {defaultModel && !conversationModels.some(m => m.id === defaultModel) && (
                                         <option data-i18n="components.SettingsModal.text014" value={defaultModel}>{uiText("components.SettingsModal.text014")}{defaultModel}</option>
                                     )}
-                                    {availableModels.map(m => (
+                                    {conversationModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>
@@ -514,10 +522,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={(e) => setLightweightModel(e.target.value)}
                                 >
                                     <option data-i18n="components.SettingsModal.text016" value="">{uiText("components.SettingsModal.text016")}</option>
-                                    {lightweightModel && !availableModels.some(m => m.id === lightweightModel) && (
+                                    {lightweightModel && !conversationModels.some(m => m.id === lightweightModel) && (
                                         <option data-i18n="components.SettingsModal.text017" value={lightweightModel}>{uiText("components.SettingsModal.text017")}{lightweightModel}</option>
                                     )}
-                                    {availableModels.map(m => (
+                                    {conversationModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>
@@ -532,10 +540,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={(e) => setMemoryWeaveModel(e.target.value)}
                                 >
                                     <option data-i18n="components.SettingsModal.text020" value="">{uiText("components.SettingsModal.text020")}</option>
-                                    {memoryWeaveModel && !availableModels.some(m => m.id === memoryWeaveModel) && (
+                                    {memoryWeaveModel && !conversationModels.some(m => m.id === memoryWeaveModel) && (
                                         <option data-i18n="components.SettingsModal.text021" value={memoryWeaveModel}>{uiText("components.SettingsModal.text021")}{memoryWeaveModel}</option>
                                     )}
-                                    {availableModels.map(m => (
+                                    {conversationModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>
@@ -550,10 +558,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={(e) => setVisionModel(e.target.value)}
                                 >
                                     <option data-i18n="components.SettingsModal.text024" value="">{uiText("components.SettingsModal.text024")}</option>
-                                    {visionModel && !availableModels.some(m => m.id === visionModel) && (
+                                    {visionModel && !conversationModels.some(m => m.id === visionModel) && (
                                         <option data-i18n="components.SettingsModal.text025" value={visionModel}>{uiText("components.SettingsModal.text025")}{visionModel}</option>
                                     )}
-                                    {availableModels.map(m => (
+                                    {conversationModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>
@@ -568,10 +576,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={(e) => setAudioModel(e.target.value)}
                                 >
                                     <option data-i18n="components.SettingsModal.text028" value="">{uiText("components.SettingsModal.text028")}</option>
-                                    {audioModel && !availableModels.some(m => m.id === audioModel) && (
+                                    {audioModel && !conversationModels.some(m => m.id === audioModel) && (
                                         <option data-i18n="components.SettingsModal.text029" value={audioModel}>{uiText("components.SettingsModal.text029")}{audioModel}</option>
                                     )}
-                                    {availableModels.map(m => (
+                                    {conversationModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>
@@ -586,10 +594,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={(e) => setVideoModel(e.target.value)}
                                 >
                                     <option data-i18n="components.SettingsModal.text032" value="">{uiText("components.SettingsModal.text032")}</option>
-                                    {videoModel && !availableModels.some(m => m.id === videoModel) && (
+                                    {videoModel && !conversationModels.some(m => m.id === videoModel) && (
                                         <option data-i18n="components.SettingsModal.text033" value={videoModel}>{uiText("components.SettingsModal.text033")}{videoModel}</option>
                                     )}
-                                    {availableModels.map(m => (
+                                    {conversationModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>

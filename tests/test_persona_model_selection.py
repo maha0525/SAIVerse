@@ -18,6 +18,9 @@ manager/admin.py (update_ai)、saiverse/saiverse_manager.py (set_model)、sea/ru
   答えない反射判断専用のモデル) を、同じ三つの入口のどれからも保存しないこと。
   反射判断の役割だけは噛み合わない値も保存を通すこと (第 2 段で通常の LLM も
   合法になるため。画面の警告で知らせる)
+- その宛先に「会話では使えない」の印が付き (is_reflex_only_model)、モデルの一覧 API は
+  印を載せるだけで一覧からは落とさないこと (会話の選択欄が印で絞り、モデル管理画面と
+  反射判断の選択欄には出し続けるため)
 - モデル/プロバイダの設定の読み直しで決め直し、接続を捨てること
 - 変更したその場の応答に、切り替えられなかった人の知らせ (notices) が載ること
   (一時上書きの設定、モデルの削除、プロバイダの保存。プロバイダの保存は二度決め直すので、
@@ -585,6 +588,32 @@ def test_env_save_accepts_an_ordinary_model_for_the_reflex_role(env_file, monkey
 
     assert (result.rejected_keys, result.notices) == ([], [])
     assert os.environ["SAIVERSE_REFLEX_JUDGMENT_MODEL"] == MODEL_A
+
+
+def test_reflex_only_models_are_marked_and_ordinary_ones_are_not():
+    """会話の選択欄が出さないモデルの印 (is_reflex_only_model)。
+
+    保存を断る判定と同じ一枚を使うので、「選べるのに保存だけ断られる」ことも
+    「選択肢に出ないのに保存は通る」こともない。定義の無い名前は印を付けない
+    (「SAIVerse にありません」は別の検査の仕事)。
+    """
+    assert model_defaults.is_reflex_only_model(JEV_KEY) is True
+    assert model_defaults.is_reflex_only_model(MODEL_A) is False
+    assert model_defaults.is_reflex_only_model("gone-model") is False
+
+
+def test_the_model_list_marks_the_reflex_only_destination_without_dropping_it():
+    """一覧 API は反射判断専用の宛先も返し、印だけを載せる。
+
+    一覧から落とすと、モデル管理画面 (編集・削除) と反射判断の選択欄からも消える。
+    出すか出さないかを決めるのは画面の側 (会話の欄が印で絞る)。
+    """
+    from api.routes import info as info_route
+
+    listed = {m["id"]: m for m in info_route.list_available_models()}
+
+    assert listed[JEV_KEY]["reflex_only"] is True
+    assert listed[MODEL_A]["reflex_only"] is False
 
 
 def test_env_save_accepts_empty_values_and_switches_personas_right_away(world, env_file, monkeypatch):

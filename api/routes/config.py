@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from api.deps import get_manager
+from saiverse.model_defaults import is_reflex_only_model
 from saiverse.model_configs import (
     get_model_choices_with_display_names,
     get_model_config,
@@ -34,6 +35,9 @@ class ModelInfo(BaseModel):
     output_price: Optional[float] = None
     currency: str = "USD"
     rate_limit: Optional[RateLimitInfo] = None
+    # 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない) の印。
+    # 会話に使う選択欄はこの印の付いたモデルを出さない (一覧からは落とさない)。
+    reflex_only: bool = False
 
 class PlaybookParamInfo(BaseModel):
     """Parameter info for playbook input_schema."""
@@ -120,6 +124,7 @@ def get_models():
             "output_price": pricing.get("output_per_1m_tokens"),
             "currency": pricing.get("currency", "USD"),
             "rate_limit": rate_limit,
+            "reflex_only": is_reflex_only_model(mid),
         })
     return result
 

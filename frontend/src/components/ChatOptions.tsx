@@ -26,6 +26,9 @@ interface ModelInfo {
     output_price?: number | null;
     currency?: string;
     rate_limit?: RateLimitInfo | null;
+    /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
+     *  チャットのモデル一時上書きは会話に使うので、選択肢には出さない。 */
+    reflex_only?: boolean;
 }
 
 interface ParamSpec {
@@ -336,11 +339,15 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         }
     };
 
-    // Group models by group field, with favorites at top
+    // Group models by group field, with favorites at top.
+    // 選択肢に出すのは文章を書けるモデルだけ — 反射判断専用の宛先 (reflex_only) は
+    // ここでの選択が会話の一時上書きなので外す。表示名の解決に使う models 自体は
+    // 絞らない (すでに選ばれている値の名前を出せなくなるため)。
     const groupedModels = useMemo(() => {
-        const favorites = models.filter(m => favoriteModels.includes(m.id));
+        const selectable = models.filter(m => !m.reflex_only);
+        const favorites = selectable.filter(m => favoriteModels.includes(m.id));
         const byGroup: Record<string, ModelInfo[]> = {};
-        for (const m of models) {
+        for (const m of selectable) {
             const group = m.group || m.provider || 'other';
             if (!byGroup[group]) byGroup[group] = [];
             byGroup[group].push(m);
