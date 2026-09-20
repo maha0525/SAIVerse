@@ -672,7 +672,9 @@ def test_question_construction(reflex_on):
     assert "`memories.m1`" in questions["m1"]["instructions"]
     assert set(questions["m0"]["criteria"]) == {"true", "false"}
 
-    assert call["timeout"] == pytest.approx(2.5)
+    # 5.0 秒 — 2.5 は Jev の実験値で、通常の LLM (クラウドの軽量モデルは 1 往復
+    # 3.5〜4 秒) が毎ターン締切に届かない実測 (2026-09-21) を受けて広げた。
+    assert call["timeout"] == pytest.approx(5.0)
     # どのモデル設定が答えたかを判定ログに載せられるよう、答える側を解決して渡す。
     assert call["backend"].model_key == REFLEX_MODEL_KEY
     assert call["persona_id"] == PERSONA
