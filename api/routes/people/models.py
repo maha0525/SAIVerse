@@ -154,6 +154,8 @@ class AIConfigResponse(BaseModel):
     audio_model: Optional[str] = None
     video_model: Optional[str] = None
     memory_weave_model: Optional[str] = None
+    # 反射判断のモデルのペルソナ個別の上書き (None = 世界の既定に従う)
+    reflex_judgment_model: Optional[str] = None
     autonomy_enabled: bool = True
     chronicle_enabled: bool = True
     autonomous_chronicle_enabled: bool = True
@@ -184,6 +186,7 @@ class UpdateAIConfigRequest(BaseModel):
     audio_model: Optional[str] = None
     video_model: Optional[str] = None
     memory_weave_model: Optional[str] = None
+    reflex_judgment_model: Optional[str] = None
     autonomy_enabled: Optional[bool] = None
     chronicle_enabled: Optional[bool] = None
     autonomous_chronicle_enabled: Optional[bool] = None

@@ -83,6 +83,7 @@ PERSISTENT_COLUMNS = [
     "AUDIO_MODEL",
     "VIDEO_MODEL",
     "MEMORY_WEAVE_MODEL",
+    "REFLEX_JUDGMENT_MODEL",
     "CHRONICLE_ENABLED",
     "AUTONOMOUS_CHRONICLE_ENABLED",
     "AUTO_RECALL_ENABLED",
@@ -134,6 +135,9 @@ MODEL_COLUMNS = [
     "AUDIO_MODEL",
     "VIDEO_MODEL",
     "MEMORY_WEAVE_MODEL",
+    # ペルソナ個別の反射判断モデル。ここに入れておかないと、複製先で
+    # そのモデル JSON が無いまま列だけ残る (docs/intent/reflex_judgment.md §1)。
+    "REFLEX_JUDGMENT_MODEL",
 ]
 
 

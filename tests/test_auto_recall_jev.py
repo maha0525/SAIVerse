@@ -43,6 +43,10 @@ THREAD = "jev_test_persona:__persona__"
 #: 偽の設定もその照合に通る正常形にしておく。
 REFLEX_MODEL_KEY = "test-reflex-jev"
 REFLEX_KEY_ENV = "SAIVERSE_MODEL_TEST_REFLEX_JEV_API_KEY"
+#: ペルソナ個別の上書き (DB の ``AI.REFLEX_JUDGMENT_MODEL``) に使う、世界の既定とは
+#: 別のモデル設定。キーの env 名もこのモデル自身の名前空間のものにする。
+PERSONA_MODEL_KEY = "test-reflex-persona"
+PERSONA_KEY_ENV = "SAIVERSE_MODEL_TEST_REFLEX_PERSONA_API_KEY"
 #: 偽の宛先。照合は名前解決まで行うので、実在しないホスト名ではなくループバック。
 REFLEX_BASE_URL = "http://127.0.0.1:8088"
 
@@ -57,12 +61,13 @@ _ENV_KEYS = [
     "SAIVERSE_MEDIA_RECALL_ENABLED",
     "SAIVERSE_REFLEX_JUDGMENT_MODEL",
     REFLEX_KEY_ENV,
+    PERSONA_KEY_ENV,
 ]
 
 
-def _reflex_model_config():
+def _reflex_model_config(**overrides):
     """同梱の TypeSafe 公式と同じ形の偽モデル定義 (provider の欄を畳み込んだ後の姿)。"""
-    return {
+    config = {
         "model": "jev-latest",
         "protocol": "jev_compat",
         "provider": "jev_compat",
@@ -77,6 +82,8 @@ def _reflex_model_config():
             "supported_types": ["noul", "choice", "score"],
         },
     }
+    config.update(overrides)
+    return config
 
 
 def _hit(source_type, source_id, *, embed_score, title="タイトル", content="内容テキスト"):
@@ -173,6 +180,20 @@ def reflex_on(monkeypatch):
 
 
 @pytest.fixture
+def reflex_on_with_persona_model(monkeypatch):
+    """世界の既定に加えて、ペルソナ個別の上書きに使える別のモデル設定も用意する。"""
+    from saiverse import model_configs
+
+    monkeypatch.setenv("SAIVERSE_REFLEX_JUDGMENT_MODEL", REFLEX_MODEL_KEY)
+    monkeypatch.setenv(REFLEX_KEY_ENV, "test-key-not-real")
+    monkeypatch.setenv(PERSONA_KEY_ENV, "test-key-not-real")
+    monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
+        REFLEX_MODEL_KEY: _reflex_model_config(),
+        PERSONA_MODEL_KEY: _reflex_model_config(api_key_env=PERSONA_KEY_ENV),
+    })
+
+
+@pytest.fixture
 def reflex_role_without_key(monkeypatch):
     """役割と設定は揃っているが、その宛先のキーの env が空のまま。"""
     from saiverse import model_configs
@@ -184,13 +205,16 @@ def reflex_role_without_key(monkeypatch):
     )
 
 
-def _run(hits, messages, fake_jev, *, enhanced=True):
+def _run(hits, messages, fake_jev, *, enhanced=True, reflex_model_key=None):
     """1 ターン回す。
 
     ``enhanced`` はペルソナのスイッチ (呼び出し側 sea/runtime_context.py が DB から
     読んで渡す旗)。既定を True にしてあるのは、このファイルの大半が「スイッチは
     入っている」前提で、役割の割り当ての有無 (``reflex_on`` fixture) だけを切り替えて
     確かめるため。スイッチ自体の OFF は専用のテストで確かめる。
+
+    ``reflex_model_key`` はペルソナ個別のモデル上書き (同じく呼び出し側が DB から
+    読んで渡す)。None なら世界の既定 (役割の env) に落ちる。
     """
     with patch("sai_memory.unified_recall.unified_recall", return_value=hits), \
          patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]), \
@@ -198,6 +222,7 @@ def _run(hits, messages, fake_jev, *, enhanced=True):
         return auto_recall.run_auto_recall(
             conn=object(), embedder=object(), messages=messages,
             persona_id=PERSONA, thread_id=THREAD, enhanced=enhanced,
+            reflex_model_key=reflex_model_key,
         )
 
 
@@ -242,27 +267,98 @@ def test_switch_on_without_a_role_model_stays_off():
     assert res.injected is False
 
 
-def test_switch_on_with_a_non_jev_role_model_stays_off(monkeypatch, caplog):
-    """通常の LLM を割り当てても第 1 段では使えない。理由は判断層が WARNING に出す。"""
+def test_switch_on_with_an_ordinary_llm_role_model_works(monkeypatch):
+    """通常の LLM を割り当てても選別は走る (判断層が質問をプロンプトへ変換する)。
+
+    第 2 段で合法になった経路。自動想起の側は答える側の種別を知らない。
+    """
     from saiverse import model_configs
 
-    caplog.set_level(logging.WARNING, logger="saiverse.reflex_judgment")
     monkeypatch.setenv("SAIVERSE_REFLEX_JUDGMENT_MODEL", "some-llm")
     monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
         "some-llm": {"model": "gemini-x", "protocol": "gemini_native", "provider": "gemini"},
     })
 
-    assert auto_recall.is_enhanced_recall_available() is False
-    assert "gemini_native" in caplog.text
+    assert auto_recall.is_enhanced_recall_available() is True
 
     fake = _FakeJev({"記憶": 0.99})
     res = _run([_hit("fragment", "f1", embed_score=0.80, title="記憶")], _msgs(("user", "話題")), fake)
-    assert fake.calls == []
-    assert res.injected is False
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["backend"].model_key == "some-llm"
+    # 0.80 は cosine しきい値 0.86 未満だが、判断が「浮かぶ」と答えたので採用される。
+    assert res.injected is True
 
 
 def test_available_when_a_jev_model_is_assigned(reflex_on):
     assert auto_recall.is_enhanced_recall_available() is True
+
+
+# ---------------------------------------------------------------------------
+# ペルソナ個別のモデル上書き (DB の AI.REFLEX_JUDGMENT_MODEL)
+# ---------------------------------------------------------------------------
+
+def test_the_persona_override_decides_the_answering_side(reflex_on_with_persona_model):
+    """上書きが渡っていれば、実際に答えるのはそちらのモデル設定。"""
+    fake = _FakeJev({"記憶": 0.9})
+    _run(
+        [_hit("fragment", "f1", embed_score=0.90, title="記憶")],
+        _msgs(("user", "話題")),
+        fake,
+        reflex_model_key=PERSONA_MODEL_KEY,
+    )
+    assert fake.calls[0]["backend"].model_key == PERSONA_MODEL_KEY
+
+
+def test_without_an_override_the_world_default_answers(reflex_on_with_persona_model):
+    fake = _FakeJev({"記憶": 0.9})
+    _run(
+        [_hit("fragment", "f1", embed_score=0.90, title="記憶")],
+        _msgs(("user", "話題")),
+        fake,
+    )
+    assert fake.calls[0]["backend"].model_key == REFLEX_MODEL_KEY
+
+
+def test_the_override_works_without_a_world_default(monkeypatch):
+    """役割の env が未設定でも、ペルソナ個別の指定だけで判定は走る。"""
+    from saiverse import model_configs
+
+    monkeypatch.setenv(PERSONA_KEY_ENV, "test-key-not-real")
+    monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
+        PERSONA_MODEL_KEY: _reflex_model_config(api_key_env=PERSONA_KEY_ENV),
+    })
+
+    assert auto_recall.is_enhanced_recall_available() is False
+    assert auto_recall.is_enhanced_recall_available(PERSONA_MODEL_KEY) is True
+
+    fake = _FakeJev({"拾い直された記憶": 0.9})
+    res = _run(
+        [_hit("fragment", "f1", embed_score=0.80, title="拾い直された記憶")],
+        _msgs(("user", "話題")),
+        fake,
+        reflex_model_key=PERSONA_MODEL_KEY,
+    )
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["backend"].model_key == PERSONA_MODEL_KEY
+    assert res.injected is True
+
+
+def test_a_broken_override_does_not_fall_back_to_the_world_default(reflex_on_with_persona_model):
+    """上書きが解決できないときに、黙って世界の既定で答えさせない。
+
+    落ちるのは「このペルソナの指定した宛先」であって、代わりに別のモデルへ課金する
+    経路を作らない。そのターンは従来のしきい値判定へ戻る。
+    """
+    fake = _FakeJev({"記憶": 0.99})
+    res = _run(
+        [_hit("fragment", "f1", embed_score=0.80, title="記憶")],
+        _msgs(("user", "話題")),
+        fake,
+        reflex_model_key="gone-model",
+    )
+    assert fake.calls == []
+    # 0.80 < 0.86 (既定しきい値) なので従来どおり落ちる。
+    assert res.injected is False
 
 
 # ---------------------------------------------------------------------------

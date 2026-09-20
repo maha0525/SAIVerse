@@ -65,6 +65,7 @@ from saiverse.persona_model_selection import (
     UnswitchedPersona,
     apply_speaking_model,
     live_model_override,
+    read_persona_model_rows,
     reapply_speaking_models,
     resolve_speaking_model,
 )
@@ -163,7 +164,10 @@ class _World:
             personas={}, SessionLocal=self.SessionLocal, model=None, model_parameter_overrides={},
         )
 
-    def add(self, pid, name, *, persona, default_model=None, lightweight_model=None, memory_weave_model=None):
+    def add(
+        self, pid, name, *, persona, default_model=None, lightweight_model=None,
+        memory_weave_model=None, reflex_judgment_model=None,
+    ):
         db = self.SessionLocal()
         try:
             db.add(AIModel(
@@ -171,6 +175,7 @@ class _World:
                 DEFAULT_MODEL=default_model,
                 LIGHTWEIGHT_MODEL=lightweight_model,
                 MEMORY_WEAVE_MODEL=memory_weave_model,
+                REFLEX_JUDGMENT_MODEL=reflex_judgment_model,
             ))
             db.commit()
         finally:
@@ -341,6 +346,40 @@ def test_reapply_syncs_lightweight_and_memory_weave_and_resets_the_cold_sweep(wo
     assert aoi.memory_weave_model == MODEL_B
     assert aoi._lightweight_llm_client is None
     invalidate.assert_called()
+
+
+def test_the_persona_row_carries_every_model_column_a_runtime_reads(world):
+    """DB 行から読む欄は「実行時にその列を読む箇所がある」ものだけ。
+
+    反射判断のモデル (AI.REFLEX_JUDGMENT_MODEL) は sea/runtime.py の
+    _get_reflex_model_for_persona が読むので、この行にも載せる — 起動後の画面の警告
+    (manager/initialization.py の current_model_setting_warnings) が同じ行から
+    ペルソナ単位の値を見るため。
+    """
+    world.add(
+        "aoi", "アオイ", persona=_persona(),
+        default_model=MODEL_A, lightweight_model=LITE,
+        memory_weave_model=MODEL_B, reflex_judgment_model=JEV_KEY,
+    )
+
+    row = read_persona_model_rows(world.SessionLocal)["aoi"]
+
+    assert (row.persona_id, row.name) == ("aoi", "アオイ")
+    assert row.default_model == MODEL_A
+    assert row.lightweight_model == LITE
+    assert row.memory_weave_model == MODEL_B
+    assert row.reflex_judgment_model == JEV_KEY
+
+
+def test_a_persona_row_without_model_columns_reads_as_empty(world):
+    world.add("aoi", "アオイ", persona=_persona())
+
+    row = read_persona_model_rows(world.SessionLocal)["aoi"]
+
+    assert row.default_model is None
+    assert row.lightweight_model is None
+    assert row.memory_weave_model is None
+    assert row.reflex_judgment_model is None
 
 
 # ---------------------------------------------------------------------------
@@ -534,11 +573,11 @@ def test_env_save_accepts_a_reflex_only_destination_for_the_reflex_role(env_file
     assert os.environ["SAIVERSE_REFLEX_JUDGMENT_MODEL"] == JEV_KEY
 
 
-def test_env_save_still_accepts_an_ordinary_model_for_the_reflex_role(env_file, monkeypatch):
-    """反射判断の役割では噛み合わない値も保存は通す (画面の警告で知らせる)。
+def test_env_save_accepts_an_ordinary_model_for_the_reflex_role(env_file, monkeypatch):
+    """反射判断の役割には通常の LLM も保存できる (どちらも合法な答える側)。
 
-    第 2 段で通常の LLM も反射判断の合法な宛先になるので、いま保存を断つと
-    将来の正しい設定まで拒むことになる (docs/intent/reflex_judgment.md §6-4)。
+    判断層が質問をプロンプトへ変換するので、jev 互換の宛先と通常の LLM のどちらでも
+    答えられる。断る理由が無いので警告も出さない (docs/intent/reflex_judgment.md §2)。
     """
     from api.routes import admin
 

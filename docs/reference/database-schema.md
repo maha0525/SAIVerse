@@ -270,6 +270,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `AUDIO_MODEL` | VARCHAR(255) | — |  |
 | `VIDEO_MODEL` | VARCHAR(255) | — |  |
 | `MEMORY_WEAVE_MODEL` | VARCHAR(255) | — |  |
+| `REFLEX_JUDGMENT_MODEL` | VARCHAR(255) | — |  |
 | `PRIVATE_ROOM_ID` | VARCHAR(255) | FK→building.BUILDINGID |  |
 | `CHRONICLE_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `AUTONOMOUS_CHRONICLE_ENABLED` | BOOLEAN | NOT NULL, default=True |  |

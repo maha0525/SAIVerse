@@ -7547,6 +7547,22 @@
     "ja": "動画ファイルの要約生成に使用するモデル（Gemini系推奨）。",
     "en": "Model used to summarize video files (Gemini recommended)."
   },
+  "components.SettingsModal.reflexJudgmentModelLabel": {
+    "ja": "反射判断モデル（任意）",
+    "en": "Reflex judgment model (optional)"
+  },
+  "components.SettingsModal.reflexJudgmentModelGlobal": {
+    "ja": "グローバル設定を使用",
+    "en": "Use global settings"
+  },
+  "components.SettingsModal.reflexJudgmentModelUnknown": {
+    "ja": "⚠️ 不明: ",
+    "en": "⚠️ Unknown: "
+  },
+  "components.SettingsModal.reflexJudgmentModelDescription": {
+    "ja": "「自動想起を強化する」などで使う、型付きの質問に確率だけで答える判断に、このペルソナだけ別のモデルを使わせたいときに選びます。選ばなければ、グローバル設定の「モデルロール」の反射判断のモデルを使います。",
+    "en": "Choose a different model for this persona's typed, probability-only judgments, such as the ones behind \"Strengthen automatic recall\". Leave it unset to use the reflex-judgment model from Model Roles in the global settings."
+  },
   "components.SettingsModal.text035": {
     "ja": "キャッシュ維持の設定",
     "en": "Cache maintenance settings"

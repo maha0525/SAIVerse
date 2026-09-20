@@ -147,13 +147,17 @@ def get_vivid_char_budget() -> int:
 # (2026-09-20) でモジュール定数に畳んだ。
 # ---------------------------------------------------------------------------
 
-def is_enhanced_recall_available() -> bool:
-    """いま反射判断に選別を頼めるか (役割にモデルがあり、jev 互換の宛先で、キーも揃っているか)。
+def is_enhanced_recall_available(model_key: Optional[str] = None) -> bool:
+    """いま反射判断に選別を頼めるか (割り当てがあり、宛先が解決でき、キーも揃っているか)。
 
     ペルソナごとのスイッチ (AUTO_RECALL_ENHANCED) との **積** で ON/OFF が決まる。
     スイッチを入れただけでは判定は走らない — モデルの役割「反射判断」への割り当てと
     いう明示の行為が要る (黙って費用が発生する経路を作らないため。
     docs/intent/reflex_judgment.md §4)。
+
+    Args:
+        model_key: ペルソナ個別の上書き (``AI.REFLEX_JUDGMENT_MODEL``)。None なら
+            世界の既定 (役割の env) を見る。
 
     ここの答えは判定の有無だけでなく **候補の集め方** にも効く (下の
     ``run_auto_recall`` が拾い上げを広げるかどうか)。だから判断層の側でも、キーが
@@ -164,8 +168,8 @@ def is_enhanced_recall_available() -> bool:
     しか答えない宛先を「使える」と受け取ると、候補の集め方だけが広がったまま毎ターン
     判定が落ちる (= 上の食い違いが恒常化する)。
 
-    使えない理由 (未割り当て / 設定が無い / jev 互換でない / キーと宛先の組が照合に
-    通らない / noul に答えられない / キーが空) は判断層が WARNING に出す。判断層の
+    使えない理由 (未割り当て / 設定が無い / キーと宛先の組が照合に通らない /
+    noul に答えられない / キーが空) は判断層が WARNING に出す。判断層の
     読み込み自体に失敗しても会話は止めない (False を返すだけ)。
     """
     try:
@@ -176,7 +180,7 @@ def is_enhanced_recall_available() -> bool:
             "staying on the embedding threshold", exc_info=True,
         )
         return False
-    return is_available(required_type=FIRST_STAGE_QUESTION_TYPE)
+    return is_available(model_key=model_key, required_type=FIRST_STAGE_QUESTION_TYPE)
 
 
 # 反射判断に渡す候補の embed_score 下限。cosine 単独の採用しきい値 (0.86) より広く
@@ -1140,6 +1144,7 @@ def _run_reflex_rerank(
     context_ids: set,
     persona_id: str,
     observations: Optional[List[str]] = None,
+    reflex_model_key: Optional[str] = None,
 ) -> Optional[Dict[Tuple[str, str], float]]:
     """反射判断に候補を一括判定させる。
 
@@ -1187,11 +1192,14 @@ def _run_reflex_rerank(
             return {}
 
         # 答える側は呼ぶ直前に解決する (判定ログにどのモデル設定が答えたかを載せる —
-        # docs/intent/reflex_judgment.md §5)。要求する型は「使えるか」の判定
-        # (is_enhanced_recall_available) と同じにする — 判定と実呼び出しの間に設定が
+        # docs/intent/reflex_judgment.md §5)。宛先 (ペルソナ個別の上書きを含む) と
+        # 要求する型は「使えるか」の判定 (is_enhanced_recall_available) と揃える —
+        # 判定と実呼び出しの間に設定が
         # 読み直された場合でも、この解決が照合ごと全部やり直すので、検査を通らない
         # 宛先へ飛ぶことはない (型が合わなければここで不成立 → 従来方式へ)。
-        backend = resolve_backend(required_type=FIRST_STAGE_QUESTION_TYPE)
+        backend = resolve_backend(
+            model_key=reflex_model_key, required_type=FIRST_STAGE_QUESTION_TYPE,
+        )
         state, questions, key_by_qid = _build_reflex_request(
             messages, candidates,
             context_messages=_REFLEX_CONTEXT_MESSAGES,
@@ -1258,6 +1266,7 @@ def run_auto_recall(
     persona_id: str,
     thread_id: str,
     enhanced: bool = False,
+    reflex_model_key: Optional[str] = None,
 ) -> AutoRecallResult:
     """自動想起を 1 ターン分実行し、注入ブロック (あれば) を返す。
 
@@ -1278,6 +1287,10 @@ def run_auto_recall(
             ``AI.AUTO_RECALL_ENHANCED``)。この関数は persona_id 文字列しか持たないので、
             persona オブジェクトを持つ呼び出し側 (sea/runtime_context.py) が読んで渡す。
             既定 False = 従来どおりの埋め込みしきい値判定 (挙動は 1 ビットも変わらない)。
+        reflex_model_key: ペルソナ個別の反射判断モデル (DB の
+            ``AI.REFLEX_JUDGMENT_MODEL``)。``enhanced`` と同じく、persona オブジェクトを
+            持つ呼び出し側が読んで渡す。None なら世界の既定 (モデルの役割「反射判断」の
+            env) に落ちる。
 
     Returns:
         AutoRecallResult。``injected`` が True のとき ``block`` を末尾注入する。
@@ -1301,7 +1314,7 @@ def run_auto_recall(
     # 効いているかどうかは「どこまで拾い上げるか」にも効く (効くときだけ広げる)。
     # 効いていないときは unified_recall へ渡す引数が従来と 1 ビットも変わらないよう、
     # 追加引数そのものを渡さない。
-    reflex_enabled = bool(enhanced) and is_enhanced_recall_available()
+    reflex_enabled = bool(enhanced) and is_enhanced_recall_available(reflex_model_key)
 
     # 「このターンで新しく目に入ったもの」(部屋の様子・通知)。ユーザーの発言が種に
     # なったターンでだけ集める — 発言が無いターンでは build_query がこれ自体を種に
@@ -1403,7 +1416,7 @@ def run_auto_recall(
         reflex_decisions = _run_reflex_rerank(
             hits, messages,
             accepted_keys=accepted_keys, context_ids=context_ids, persona_id=persona_id,
-            observations=observations,
+            observations=observations, reflex_model_key=reflex_model_key,
         )
         if reflex_decisions is None and enhanced_kwargs:
             # 判定が使えなかったターンは、候補集めからやり直して従来の形に戻す。

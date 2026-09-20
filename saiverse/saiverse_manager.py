@@ -2029,10 +2029,14 @@ class SAIVerseManager(
         avatar_path: Optional[str] = None,
         avatar_upload: Optional[str] = None,
         appearance_image_path: Optional[str] = None,
-        vision_model: Optional[str] = None,
-        audio_model: Optional[str] = None,
-        video_model: Optional[str] = None,
-        memory_weave_model: Optional[str] = None,
+        # モデル欄の既定は「送られてこなかった = 触らない」の印 (manager/admin.py の
+        # UNSET)。None を既定にすると、これらの欄を知らない入口の保存が個別モデルを
+        # 黙って NULL へ戻す。委譲なので admin 側と同じ既定を持つ。
+        vision_model: Any = UNSET,
+        audio_model: Any = UNSET,
+        video_model: Any = UNSET,
+        memory_weave_model: Any = UNSET,
+        reflex_judgment_model: Any = UNSET,
         chronicle_enabled: Optional[bool] = None,
         autonomous_chronicle_enabled: Optional[bool] = None,
         auto_recall_enabled: Optional[bool] = None,
@@ -2064,6 +2068,7 @@ class SAIVerseManager(
             audio_model=audio_model,
             video_model=video_model,
             memory_weave_model=memory_weave_model,
+            reflex_judgment_model=reflex_judgment_model,
             chronicle_enabled=chronicle_enabled,
             autonomous_chronicle_enabled=autonomous_chronicle_enabled,
             auto_recall_enabled=auto_recall_enabled,

@@ -277,6 +277,7 @@ class PersonaModelRow:
     default_model: Optional[str]
     lightweight_model: Optional[str]
     memory_weave_model: Optional[str]
+    reflex_judgment_model: Optional[str]
 
 
 def read_persona_model_rows(
@@ -296,6 +297,7 @@ def read_persona_model_rows(
             AIModel.DEFAULT_MODEL,
             AIModel.LIGHTWEIGHT_MODEL,
             AIModel.MEMORY_WEAVE_MODEL,
+            AIModel.REFLEX_JUDGMENT_MODEL,
         )
         if persona_ids is not None:
             query = query.filter(AIModel.AIID.in_(list(persona_ids)))

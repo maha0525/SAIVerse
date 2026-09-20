@@ -579,12 +579,16 @@ class InitializationMixin:
           入口と同じ一本 (saiverse/persona_model_selection.py の
           save_rejection_reason) から引く。
         - グローバル設定: ``MODEL_ROLES`` の 7 役割を環境変数から読む。定義の無い値は
-          「止まっています」。標準・軽量・Memory Weave モデルは、その値を使っている
-          (個別の値を持たない) ペルソナの名前を並べる。一時上書き中の標準モデルは
-          「上書きを解除すると止まる」。
-        - ペルソナ: この City のペルソナの DB 行から、標準・軽量・Memory Weave
-          モデルを読み、表示名 (AINAME) で呼ぶ。画像/音声/動画要約モデルと反射判断の
-          モデルは、ペルソナ単位の値を読む箇所が無いので対象にしない。
+          「止まっています」。標準・軽量・Memory Weave・反射判断のモデルは、その値を
+          使っている (個別の値を持たない) ペルソナの名前を並べる。一時上書き中の
+          標準モデルは「上書きを解除すると止まる」。
+        - ペルソナ: この City のペルソナの DB 行から、標準・軽量・Memory Weave・
+          反射判断のモデルを読み、表示名 (AINAME) で呼ぶ。実行時にその列を読む箇所が
+          あるものだけを対象にする — 反射判断は sea/runtime.py の
+          ``_get_reflex_model_for_persona`` が ``AI.REFLEX_JUDGMENT_MODEL`` を読む。
+          画像/音声/動画要約モデルは、ペルソナ単位の値を読む箇所が無いので対象にしない。
+          定義の無い名前はペルソナ設定の保存の関所 (manager/admin.py) が断るが、保存の
+          あとで設定ファイルを消せば列の値だけが残る — この警告はそのための網。
         - 切り替えられなかったペルソナ: 読み込んでいるペルソナのうち、決め方
           (saiverse/persona_model_selection.py) が指すモデルと、実際に使っている
           モデルが食い違う人だけ、その名前つきで知らせる。失敗を記録しておかず、
@@ -654,6 +658,9 @@ class InitializationMixin:
             "memory_weave_model": [
                 _name(r) for r in rows.values() if not (r.memory_weave_model or "").strip()
             ],
+            "reflex_judgment_model": [
+                _name(r) for r in rows.values() if not (r.reflex_judgment_model or "").strip()
+            ],
         }
         warnings.extend(missing_model_warnings(
             global_settings.items(),
@@ -667,6 +674,7 @@ class InitializationMixin:
                     ("default_model", row.default_model),
                     ("lightweight_model", row.lightweight_model),
                     ("memory_weave_model", row.memory_weave_model),
+                    ("reflex_judgment_model", row.reflex_judgment_model),
                 ],
                 persona_name=_name(row),
                 override_model=override,

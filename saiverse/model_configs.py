@@ -847,17 +847,29 @@ def _get_required_env_vars(model: str) -> list[str]:
             )
         return names
 
-    # Provider defaults
-    if provider == "anthropic":
+    # Provider / protocol defaults. A hand-written user_data config may declare
+    # only an explicit protocol (no provider, no api_key_env); the factory's
+    # clients then read their own default env names (e.g. the OpenAI client
+    # falls back to OPENAI_API_KEY). Availability — and the secret masking in
+    # saiverse/reflex_judgment.py, which asks this same table which values to
+    # mask — must see those names too, so match on the explicit protocol first
+    # and fall back to the legacy provider name.
+    protocol = config.get("protocol")
+    kind = protocol if isinstance(protocol, str) and protocol else provider
+    if kind in ("anthropic", "anthropic_native"):
         return ["CLAUDE_API_KEY"]
-    if provider == "gemini":
+    if kind in ("gemini", "gemini_native"):
         return ["GEMINI_API_KEY", "GEMINI_FREE_API_KEY"]
-    if provider in ("openai",):
+    if kind in ("openai", "openai_compat"):
         return ["OPENAI_API_KEY"]
-    if provider == "xai":
+    if kind in ("xai", "xai_native"):
         return ["XAI_API_KEY"]
+    if kind == "ollama_compat":
+        # Local protocol: no key by default (mirrors the provider check above).
+        return []
 
-    # Unknown provider — assume available (don't hide by mistake)
+    # Unknown provider/protocol, or one that authenticates outside env keys
+    # (openai_codex = OAuth) — assume available (don't hide by mistake).
     return []
 
 
@@ -873,6 +885,18 @@ def is_model_available(model: str) -> bool:
     if not env_vars:
         return True
     return any(os.environ.get(var) for var in env_vars)
+
+
+def required_api_key_env_names(model: str) -> list[str]:
+    """このモデルの認証に使われうる環境変数名の一覧 (空 = キー不要)。
+
+    :func:`is_model_available` と同じ表 (``_get_required_env_vars``) を公開する薄い口。
+    宣言された ``api_key_env`` だけでなく、代替キー名 (``api_key_env_alternates``) と
+    宣言の無い旧形式の provider 既定キー名も含む。反射判断
+    (saiverse/reflex_judgment.py) が「実際に認証に使われたかもしれないキーの値」を
+    ログ・例外メッセージから漏れなく伏せるために使う。
+    """
+    return list(_get_required_env_vars(model))
 
 
 def is_local_model(model: str) -> bool:

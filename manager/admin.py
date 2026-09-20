@@ -1215,6 +1215,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "AUDIO_MODEL": ai.AUDIO_MODEL,
                 "VIDEO_MODEL": ai.VIDEO_MODEL,
                 "MEMORY_WEAVE_MODEL": ai.MEMORY_WEAVE_MODEL,
+                "REFLEX_JUDGMENT_MODEL": ai.REFLEX_JUDGMENT_MODEL,
                 "AUTONOMY_ENABLED": ai.AUTONOMY_ENABLED,
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
                 "AUTONOMOUS_CHRONICLE_ENABLED": ai.AUTONOMOUS_CHRONICLE_ENABLED,
@@ -1286,10 +1287,17 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         appearance_image_path: Optional[str] = None,
-        vision_model: Optional[str] = None,
-        audio_model: Optional[str] = None,
-        video_model: Optional[str] = None,
-        memory_weave_model: Optional[str] = None,
+        # モデル欄の既定は UNSET (= 送られてこなかった欄は触らない)。None を既定に
+        # すると「知らない画面が項目ごと送らない」と「空欄にして外す」が潰れて、
+        # ワールドエディタの保存が設定モーダルの個別モデルを黙って消す (経緯:
+        # docs/issues/archive/world_editor_save_wipes_persona_model_overrides.md)。
+        # 入口が現在値を読んで詰め直す形は、読みと書きの間の並行保存を古い値で
+        # 巻き戻すので採らない — 印の解決は下の錠と refresh の後で行う。
+        vision_model: Any = UNSET,
+        audio_model: Any = UNSET,
+        video_model: Any = UNSET,
+        memory_weave_model: Any = UNSET,
+        reflex_judgment_model: Any = UNSET,
         chronicle_enabled: Optional[bool] = None,
         autonomous_chronicle_enabled: Optional[bool] = None,
         auto_recall_enabled: Optional[bool] = None,
@@ -1379,12 +1387,40 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     ))
                     return stored
 
+                # 「送られてこなかった」印 (UNSET) のモデル欄は、いまの値に置き換える
+                # (= 触らない)。錠と refresh の後で解決するので、別の画面の並行保存を
+                # 古い値で巻き戻さない。UNSET は falsy なので、この解決より先に
+                # 下の `or None` へ流してはいけない (流すと NULL 上書きに化ける)。
+                # 標準・軽量は必須引数だが、印を値として渡してくる入口 (ペルソナ設定の
+                # PATCH で欄が省かれた回) があるので同じに扱う。
+                if default_model is UNSET:
+                    default_model = ai.DEFAULT_MODEL
+                if lightweight_model is UNSET:
+                    lightweight_model = ai.LIGHTWEIGHT_MODEL
+                if vision_model is UNSET:
+                    vision_model = ai.VISION_MODEL
+                if audio_model is UNSET:
+                    audio_model = ai.AUDIO_MODEL
+                if video_model is UNSET:
+                    video_model = ai.VIDEO_MODEL
+                if memory_weave_model is UNSET:
+                    memory_weave_model = ai.MEMORY_WEAVE_MODEL
+                if reflex_judgment_model is UNSET:
+                    reflex_judgment_model = ai.REFLEX_JUDGMENT_MODEL
+
                 default_model = _checked("default_model", default_model, ai.DEFAULT_MODEL)
                 lightweight_model = _checked(
                     "lightweight_model", lightweight_model, ai.LIGHTWEIGHT_MODEL,
                 )
                 memory_weave_model = _checked(
                     "memory_weave_model", memory_weave_model, ai.MEMORY_WEAVE_MODEL,
+                )
+                # 反射判断のモデルの個別の上書き (docs/intent/reflex_judgment.md §1)。
+                # 断るのは設定ファイルの無い名前だけ — この役割は宛先を理由には断らない。
+                # jev 互換の宛先も通常の LLM も合法な答える側だからで、どちらとしても
+                # 解決できない壊れた宛先は画面の警告が知らせる (§2)。
+                reflex_judgment_model = _checked(
+                    "reflex_judgment_model", reflex_judgment_model, ai.REFLEX_JUDGMENT_MODEL,
                 )
 
                 original_autonomy = ai.AUTONOMY_ENABLED
@@ -1403,6 +1439,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 ai.AUDIO_MODEL = audio_model or None
                 ai.VIDEO_MODEL = video_model or None
                 ai.MEMORY_WEAVE_MODEL = memory_weave_model or None
+                ai.REFLEX_JUDGMENT_MODEL = reflex_judgment_model or None
                 ai.AVATAR_IMAGE = avatar_value
                 # Update appearance image path if provided
                 if appearance_image_path is not None:

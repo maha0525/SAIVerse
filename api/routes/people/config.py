@@ -3,6 +3,7 @@ from typing import List, Optional
 import json
 import logging
 from api.deps import get_manager, avatar_path_to_url
+from manager.admin import UNSET
 from database.models import UserAiLink
 from saiverse.persona_language import get_city_language
 from .models import AIConfigResponse, MetaJudgmentConfig, UpdateAIConfigRequest
@@ -50,6 +51,7 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         audio_model=details.get("AUDIO_MODEL"),
         video_model=details.get("VIDEO_MODEL"),
         memory_weave_model=details.get("MEMORY_WEAVE_MODEL"),
+        reflex_judgment_model=details.get("REFLEX_JUDGMENT_MODEL"),
         autonomy_enabled=bool(details["AUTONOMY_ENABLED"]),
         chronicle_enabled=details.get("CHRONICLE_ENABLED", True),
         autonomous_chronicle_enabled=details.get("AUTONOMOUS_CHRONICLE_ENABLED", True),
@@ -86,14 +88,17 @@ def update_persona_config(
     # Merge updates
     new_desc = req.description if req.description is not None else current["DESCRIPTION"]
     new_prompt = req.system_prompt if req.system_prompt is not None else current["SYSTEMPROMPT"]
-    # For model fields: empty string means "clear to None", None means "no change"
-    new_model = (req.default_model or None) if req.default_model is not None else current["DEFAULT_MODEL"]
-    
-    new_lightweight_model = (req.lightweight_model or None) if req.lightweight_model is not None else current.get("LIGHTWEIGHT_MODEL")
-    new_vision_model = (req.vision_model or None) if req.vision_model is not None else current.get("VISION_MODEL")
-    new_audio_model = (req.audio_model or None) if req.audio_model is not None else current.get("AUDIO_MODEL")
-    new_video_model = (req.video_model or None) if req.video_model is not None else current.get("VIDEO_MODEL")
-    new_memory_weave_model = (req.memory_weave_model or None) if req.memory_weave_model is not None else current.get("MEMORY_WEAVE_MODEL")
+    # For model fields: empty string means "clear to None"; an absent field is
+    # passed through as UNSET (= その欄は触らない)。以前はここで現在値を読んで
+    # 詰め直していたが、読みと書きの間に別の保存が挟まると、その保存を古い値で
+    # 巻き戻す (docs/issues/archive/world_editor_save_wipes_persona_model_overrides.md)。
+    new_model = req.default_model if req.default_model is not None else UNSET
+    new_lightweight_model = req.lightweight_model if req.lightweight_model is not None else UNSET
+    new_vision_model = req.vision_model if req.vision_model is not None else UNSET
+    new_audio_model = req.audio_model if req.audio_model is not None else UNSET
+    new_video_model = req.video_model if req.video_model is not None else UNSET
+    new_memory_weave_model = req.memory_weave_model if req.memory_weave_model is not None else UNSET
+    new_reflex_judgment_model = req.reflex_judgment_model if req.reflex_judgment_model is not None else UNSET
     new_autonomy_enabled = req.autonomy_enabled if req.autonomy_enabled is not None else current["AUTONOMY_ENABLED"]
     new_avatar = req.avatar_path if req.avatar_path is not None else current.get("AVATAR_IMAGE")
     new_appearance = req.appearance_image_path if req.appearance_image_path is not None else current.get("APPEARANCE_IMAGE_PATH")
@@ -128,6 +133,7 @@ def update_persona_config(
         audio_model=new_audio_model,
         video_model=new_video_model,
         memory_weave_model=new_memory_weave_model,
+        reflex_judgment_model=new_reflex_judgment_model,
         autonomy_enabled=new_autonomy_enabled,
         avatar_path=new_avatar,
         avatar_upload=None,

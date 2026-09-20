@@ -21,6 +21,16 @@ typed questions with probabilities only; the ordinary conversation clients
 conversation role would stop the persona the moment it tried to reply, so those
 saves are refused, and values that arrived through some other path (a hand-edited
 .env) are reported as screen warnings.
+
+The reverse direction is checked but never refused at save time: the reflex
+judgment role takes either a ``jev_compat`` destination or an ordinary LLM (the
+judgment layer turns the typed questions into a prompt for the latter), so an
+ordinary model passes the check on its own. What the check still catches is a
+value the judgment layer cannot resolve at all — a ``jev_compat`` model that
+declares no destination, one that does not answer the question type the caller
+asks, or a credential/destination pair the provider check refuses. Those reach
+the screen as warnings while the save goes through.
+See ``docs/intent/reflex_judgment.md`` §2.
 """
 import logging
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -160,21 +170,26 @@ def _protocol_of(config: Mapping[str, Any]) -> Optional[str]:
 
 
 def _reflex_destination_mismatch(_role: str, value: str) -> bool:
-    """反射判断の役割に、反射判断が使えない宛先が割り当たっているか。
+    """反射判断の役割に、反射判断の宛先として解決できない値が割り当たっているか。
 
-    定義はあるので「SAIVerse にありません」の検査は素通りするが、反射判断の第 1 段は
-    型付きの質問をそのまま送れる宛先 (protocol が ``jev_compat`` で、宛先の URL と
-    答えられる質問の型が宣言されているもの) としか話せない
-    (docs/intent/reflex_judgment.md §6-4)。割り当てても実行時に WARNING が出て想起が
-    従来方式へ戻るだけで、画面には何も出ない — それでは設定ミスが見えないので、ここで
-    画面の警告に載せる。**保存は弾かない** (第 2 段で通常の LLM も合法になる)。
+    定義はあるので「SAIVerse にありません」の検査は素通りするが、その値では反射判断が
+    動かないことがある。**第 2 段で通常の LLM も答える側になった**ので、ここに残るのは
+    「どちらの答える側としても解決できない設定」だけ — jev 互換なのに宛先の URL が
+    宣言されていない、答えられる質問の型が呼び出し側の投げる型を含まない、キーと宛先の
+    組が照合に通らない、といった構造の不備 (docs/intent/reflex_judgment.md §2)。
+    通常の LLM の割り当ては自然に通る (下記のとおり実行側と同じ関数を呼ぶので、変換層が
+    入った時点でこの検査は自動的に緩んだ)。
+
+    割り当てても実行時に WARNING が出て想起が従来方式へ戻るだけで、画面には何も出ない —
+    それでは設定ミスが見えないので、ここで画面の警告に載せる。**保存は弾かない**
+    (この役割は ``_SAVE_BLOCKED_ROLES`` に入れていない)。
 
     判定は実行側とまったく同じ関数 (saiverse/reflex_judgment.py の
     ``resolve_backend``) を呼んで行う。protocol だけを自前で見直すと、protocol は
     合っているのに宛先の URL が空・答えられる型が空といった不備が画面に出ない。
     同じ関数に寄せてあれば、将来 resolve_backend に検査が増えても画面が追従する。
 
-    答えられる質問の型も ``FIRST_STAGE_QUESTION_TYPE`` (noul) まで含めて見る。第 1 段で
+    答えられる質問の型も ``FIRST_STAGE_QUESTION_TYPE`` (noul) まで含めて見る。いま
     この層に仕事を頼むのは自動想起の選別だけで、その仕事は noul しか投げない。noul に
     答えない宛先を画面が「噛み合っている」と言うと、自動想起は候補の集め方だけを広げた
     まま毎ターン判定に失敗し、その設定ミスはどこにも出ないままになる。
@@ -239,9 +254,10 @@ _ROLE_DESTINATION_CHECKS: Dict[str, Callable[[str, str], bool]] = {
 SAVE_REJECT_UNDEFINED = "undefined"      # その名前の定義が SAIVerse に無い
 SAVE_REJECT_DESTINATION = "destination"  # 定義はあるが、その役割では使えない宛先
 
-#: 噛み合わない値を**保存の時点で**断る役割。反射判断の役割は入れない — 第 2 段で
-#: 通常の LLM も反射判断の合法な宛先になるので、いま断ると将来の正しい設定まで拒む
-#: ことになる (docs/intent/reflex_judgment.md §6-4)。そちらは画面の警告だけで知らせる。
+#: 噛み合わない値を**保存の時点で**断る役割。反射判断の役割は入れない — 反射判断は
+#: jev 互換の宛先も通常の LLM も答える側にできるので、宛先の種類を理由に断るものが
+#: 無い。解決できない設定も保存は通し、画面の警告だけで知らせる
+#: (docs/intent/reflex_judgment.md §2)。この非対称は仕様。
 _SAVE_BLOCKED_ROLES = frozenset(MODEL_ROLES) - {"reflex_judgment_model"}
 
 _PERSONA_RESELECT = "ペルソナ設定で選び直すと"
@@ -285,6 +301,10 @@ def role_model_save_rejection(role: str, value: str) -> Optional[str]:
 
 def _names(names: Optional[Sequence[str]]) -> str:
     return f" ({'、'.join(names)})" if names else ""
+
+
+#: 反射判断の役割の文面で共通の「何ができなくなっているか」の一文。
+_REFLEX_STOPPED = "型付きの質問に確率で答える判断 (自動想起の強化など) は動いていません。"
 
 
 def _persona_message(role: str, name: str, value: str, override_model: Optional[str]) -> str:
@@ -360,7 +380,8 @@ def _global_message(
     if role == "reflex_judgment_model":
         return (
             f"グローバル設定の{label}のモデル '{value}' は SAIVerse にないため、"
-            "型付きの質問に確率で答える判断 (自動想起の強化など) は動いていません。"
+            f"{label}のモデルを個別に設定していないペルソナ{_names(names)}の"
+            f"{_REFLEX_STOPPED}"
             f"{_GLOBAL_RESELECT}、再起動しなくても動くようになります。"
         )
     # 画像・音声・動画の要約は、代わりのモデルで要約しない (saiverse/media_summary.py)。
@@ -439,21 +460,50 @@ def _jev_only_global_message(role: str, value: str, names: Optional[Sequence[str
     )
 
 
+#: 反射判断の役割に、反射判断の宛先として解決できない値が入っているときの、理由の一文。
+#: 通常の LLM は解決できるので、ここに来るのは設定そのものが壊れている値だけ。
+#: 「SAIVerse にありません」の文面と同じく、モデル名の引用符との間に空白を置く
+#: (``_JEV_ONLY`` は「'名前'は反射判断だけに〜」と続ける別の形)。
+_REFLEX_UNRESOLVABLE = "は反射判断の宛先として解決できないため、"
+
+
+def _reflex_mismatch_message(
+    value: str, persona_name: Optional[str], names: Optional[Sequence[str]],
+) -> str:
+    """反射判断の役割に、反射判断の宛先として解決できない値が入っているときの文面。
+
+    第 2 段で通常の LLM も答える側になったので、ここに来るのは「jev 互換なのに宛先が
+    宣言されていない」「投げる型に答えない」「キーと宛先の組が照合に通らない」といった、
+    どちらの答える側としても解決できない設定 (:func:`_reflex_destination_mismatch`)。
+    """
+    label = MODEL_ROLE_DESCRIPTIONS["reflex_judgment_model"]["label"]
+    if persona_name is not None:
+        return (
+            f"{persona_name}の{label}のモデル '{value}' {_REFLEX_UNRESOLVABLE}"
+            f"{persona_name}の{_REFLEX_STOPPED}"
+            f"{_PERSONA_RESELECT}、再起動しなくても動くようになります。"
+        )
+    return (
+        f"グローバル設定の{label}のモデル '{value}' {_REFLEX_UNRESOLVABLE}"
+        f"{label}のモデルを個別に設定していないペルソナ{_names(names)}の"
+        f"{_REFLEX_STOPPED}"
+        f"{_GLOBAL_RESELECT}、再起動しなくても動くようになります。"
+    )
+
+
 def _mismatch_message(
     role: str,
     value: str,
     persona_name: Optional[str],
     names: Optional[Sequence[str]],
 ) -> str:
-    """定義はあるのに、その役割の宛先として噛み合っていない値の文面。"""
-    label = MODEL_ROLE_DESCRIPTIONS[role]["label"]
+    """定義はあるのに、その役割の宛先として噛み合っていない値の文面。
+
+    二方向ある — 反射判断の役割に、反射判断ができない宛先。会話や要約の役割に、
+    反射判断専用の宛先 (``_ROLE_DESTINATION_CHECKS``)。
+    """
     if role == "reflex_judgment_model":
-        # 反射判断はペルソナ単位の値を読む箇所が無いので、全体設定の文面だけ。
-        return (
-            f"グローバル設定の{label}のモデル '{value}' は反射判断の宛先として使えないため、"
-            "型付きの質問に確率で答える判断 (自動想起の強化など) は動いていません。"
-            f"{_GLOBAL_RESELECT}、再起動しなくても動くようになります。"
-        )
+        return _reflex_mismatch_message(value, persona_name, names)
     if persona_name is not None:
         return _jev_only_persona_message(role, persona_name, value)
     return _jev_only_global_message(role, value, names)

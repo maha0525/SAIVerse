@@ -43,6 +43,8 @@ interface AIConfig {
     audio_model: string | null;
     video_model: string | null;
     memory_weave_model: string | null;
+    // 反射判断に答えるモデルの、このペルソナだけの上書き (null = 世界の既定に従う)
+    reflex_judgment_model: string | null;
     autonomy_enabled: boolean;  // 自律行動 (自分から考えて動くこと) の ON/OFF
     chronicle_enabled: boolean;
     autonomous_chronicle_enabled: boolean;
@@ -108,6 +110,12 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [audioModel, setAudioModel] = useState<string>('');
     const [videoModel, setVideoModel] = useState<string>('');
     const [memoryWeaveModel, setMemoryWeaveModel] = useState<string>('');
+    const [reflexJudgmentModel, setReflexJudgmentModel] = useState<string>('');
+    // 開いたときのモデル欄の値の控え。保存は「開いてから変えた欄」だけを送る —
+    // 変わっていない欄まで送ると、モーダルを開いている間に別の画面で変えた
+    // モデル設定を、ここに残った古い値で巻き戻してしまう。受け側 (PATCH) は
+    // 「送られてこなかった欄は触らない」を保証している (manager/admin.py の UNSET)。
+    const loadedModelsRef = useRef<Record<string, string>>({});
     // ⚠ 自律行動の ON/OFF は v0.3 で UI から隠した (autonomous_behavior_v3.md
     // §11「運転 UI は隠す」)。state だけ残すのは、ロードした値をそのまま保存へ
     // 往復させるため — 送らないと PATCH が既存の設定を既定値で塗り潰す。
@@ -153,6 +161,11 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [loadedPersonaId, setLoadedPersonaId] = useState<string | null>(null);
     const personaIdRef = useRef<string>(personaId);
     personaIdRef.current = personaId;
+    // loadConfig の世代番号。同じペルソナでも読み込みは二度走る (開いたときと、
+    // モデル一覧が届いて再実行されるとき)。遅れて返った古い世代の応答がフォームと
+    // モデル欄の控え (loadedModelsRef) を上書きすると、その間の編集が消える —
+    // 最後に始めた読み込みだけがフォームへ反映してよい。
+    const loadGenRef = useRef(0);
 
     useEffect(() => {
         if (isOpen) {
@@ -200,7 +213,11 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
         // 非同期 fetch 中に personaId が切り替わった場合、stale な結果で setter
         // を呼ばないようにする (フォーム state が新旧混在するのを防ぐ)。
         const targetPersonaId = personaIdRef.current;
-        const isStale = () => targetPersonaId !== personaIdRef.current;
+        // 古い応答の判定は二軸 — ペルソナが切り替わった、または同じペルソナで
+        // より新しい読み込みが始まった (世代番号)。
+        const generation = ++loadGenRef.current;
+        const isStale = () =>
+            targetPersonaId !== personaIdRef.current || generation !== loadGenRef.current;
 
         try {
             const res = await apiFetch(`/api/people/${targetPersonaId}/config`);
@@ -228,6 +245,16 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setAudioModel(data.audio_model || '');
                 setVideoModel(data.video_model || '');
                 setMemoryWeaveModel(data.memory_weave_model || '');
+                setReflexJudgmentModel(data.reflex_judgment_model || '');
+                loadedModelsRef.current = {
+                    default_model: data.default_model || '',
+                    lightweight_model: data.lightweight_model || '',
+                    vision_model: data.vision_model || '',
+                    audio_model: data.audio_model || '',
+                    video_model: data.video_model || '',
+                    memory_weave_model: data.memory_weave_model || '',
+                    reflex_judgment_model: data.reflex_judgment_model || '',
+                };
                 setAutonomyEnabled(data.autonomy_enabled ?? true);
                 setChronicleEnabled(data.chronicle_enabled ?? true);
                 setAutonomousChronicleEnabled(data.autonomous_chronicle_enabled ?? true);
@@ -247,15 +274,25 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 );
                 setSpellEnabled(data.spell_enabled ?? false);
                 setRealtimeInfoEnabled(data.realtime_info_enabled ?? true);
-                // Load realtime spell bindings + catalog
+                // Load realtime spell bindings + catalog。反映は下の世代ガードの
+                // 後でまとめて行う (取得と反映を分ける)。
+                let spellData: typeof realtimeSpells | null = null;
+                let catalogData: typeof spellCatalog | null = null;
                 try {
                     const [spellRes, catalogRes] = await Promise.all([
-                        apiFetch(`/api/people/${personaId}/realtime-spell`),
+                        apiFetch(`/api/people/${targetPersonaId}/realtime-spell`),
                         apiFetch('/api/people/realtime-spell-catalog'),
                     ]);
-                    if (spellRes.ok) setRealtimeSpells(await spellRes.json());
-                    if (catalogRes.ok) setSpellCatalog(await catalogRes.json());
+                    if (spellRes.ok) spellData = await spellRes.json();
+                    if (catalogRes.ok) catalogData = await catalogRes.json();
                 } catch (e) { /* ignore */ }
+                // ここまでの await の間に、ペルソナが切り替わったか、より新しい
+                // 読み込みが始まっているかもしれない。古い世代がこの先の setter
+                // (ロード成功の印 setLoadedPersonaId を含む) を実行すると、編集中の
+                // フォームや切り替え先のペルソナの状態を古い値で上書きする。
+                if (isStale()) return;
+                if (spellData !== null) setRealtimeSpells(spellData);
+                if (catalogData !== null) setSpellCatalog(catalogData);
                 // Phase 4-e: NULL → empty string で「既定値を使う」を表現
                 const mjc: MetaJudgmentConfig | null = data.meta_judgment_config ?? null;
                 setLoadedMetaConfig(mjc ? { ...mjc } : null);
@@ -327,6 +364,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
             return;
         }
 
+        // 開いてから変わっていないモデル欄は undefined (= 送らない)。
+        const modelFieldIfChanged = (field: string, value: string): string | undefined =>
+            loadedModelsRef.current[field] === value ? undefined : value;
+
         setIsSaving(true);
         try {
             const res = await apiFetch(`/api/people/${personaId}/config`, {
@@ -336,12 +377,17 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     description: description,
                     system_prompt: systemPrompt,
                     language,
-                    default_model: defaultModel,
-                    lightweight_model: lightweightModel,
-                    vision_model: visionModel,
-                    audio_model: audioModel,
-                    video_model: videoModel,
-                    memory_weave_model: memoryWeaveModel,
+                    // モデル欄は「開いてから変えた欄」だけ送る。undefined の欄は
+                    // JSON.stringify で落ち、受け側は触らない (= モーダルを開いている
+                    // 間に別の画面で変わった値を、ここの古い値で巻き戻さない)。
+                    // 空文字は「個別設定を外す」としてそのまま送る。
+                    default_model: modelFieldIfChanged('default_model', defaultModel),
+                    lightweight_model: modelFieldIfChanged('lightweight_model', lightweightModel),
+                    vision_model: modelFieldIfChanged('vision_model', visionModel),
+                    audio_model: modelFieldIfChanged('audio_model', audioModel),
+                    video_model: modelFieldIfChanged('video_model', videoModel),
+                    memory_weave_model: modelFieldIfChanged('memory_weave_model', memoryWeaveModel),
+                    reflex_judgment_model: modelFieldIfChanged('reflex_judgment_model', reflexJudgmentModel),
                     autonomy_enabled: autonomyEnabled,
                     chronicle_enabled: chronicleEnabled,
                     autonomous_chronicle_enabled: autonomousChronicleEnabled,
@@ -548,6 +594,24 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     ))}
                                 </select>
                                 <div data-i18n="components.SettingsModal.text034" className={styles.description}>{uiText("components.SettingsModal.text034")}</div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label data-i18n="components.SettingsModal.reflexJudgmentModelLabel" className={styles.label}>{uiText("components.SettingsModal.reflexJudgmentModelLabel")}</label>
+                                <select
+                                    className={styles.select}
+                                    value={reflexJudgmentModel}
+                                    onChange={(e) => setReflexJudgmentModel(e.target.value)}
+                                >
+                                    <option data-i18n="components.SettingsModal.reflexJudgmentModelGlobal" value="">{uiText("components.SettingsModal.reflexJudgmentModelGlobal")}</option>
+                                    {reflexJudgmentModel && !availableModels.some(m => m.id === reflexJudgmentModel) && (
+                                        <option data-i18n="components.SettingsModal.reflexJudgmentModelUnknown" value={reflexJudgmentModel}>{uiText("components.SettingsModal.reflexJudgmentModelUnknown")}{reflexJudgmentModel}</option>
+                                    )}
+                                    {availableModels.map(m => (
+                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                    ))}
+                                </select>
+                                <div data-i18n="components.SettingsModal.reflexJudgmentModelDescription" className={styles.description}>{uiText("components.SettingsModal.reflexJudgmentModelDescription")}</div>
                             </div>
 
                             <DebugPanel personaId={personaId} />

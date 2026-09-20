@@ -1193,11 +1193,28 @@ def _maybe_inject_auto_recall(
         )
         enhanced = False
 
+    # ペルソナ個別の反射判断モデル (AI.REFLEX_JUDGMENT_MODEL)。ここも persona
+    # オブジェクトを持っているこの場所で読んで渡す (docs/intent/reflex_judgment.md §1)。
+    # None = 上書きなし = 世界の既定 (モデルの役割の割り当て) に従う。
+    # 読むのはスイッチが ON のペルソナだけ — OFF では値がどこでも使われないので、
+    # 全ペルソナの毎ターンに DB 読みを 1 回足さない (2026-09-20 のローカルレビューの指摘)。
+    reflex_model_key = None
+    if enhanced:
+        try:
+            reflex_model_key = runtime._get_reflex_model_for_persona(persona)
+        except Exception:
+            LOGGER.warning(
+                "[sea][auto_recall] failed to read REFLEX_JUDGMENT_MODEL (persona=%s); "
+                "falling back to the world default", persona_id, exc_info=True,
+            )
+            reflex_model_key = None
+
     from sea.auto_recall import run_auto_recall
 
     result = run_auto_recall(
         conn, embedder, messages,
         persona_id=persona_id, thread_id=thread_id, enhanced=enhanced,
+        reflex_model_key=reflex_model_key,
     )
     if not result.injected or not result.block:
         return
