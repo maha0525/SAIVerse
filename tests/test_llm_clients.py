@@ -888,6 +888,45 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(detection["tool_args"], {"query": "tokyo"})
 
     @patch('llm_clients.openai.OpenAI')
+    def test_openai_stream_tool_mode_survives_the_usage_only_chunk(self, mock_openai):
+        """tool モードのストリームは、最後の usage だけの chunk で落ちないこと。
+
+        stream_options={"include_usage": True} を付けているので、最後に choices が
+        空で usage だけを載せた chunk が来る。テキスト経路は弾いていたが tool 経路は
+        弾いておらず、llama.cpp 相手の実測で IndexError になった (2026-09-21)。
+        docs/issues/llama_cached_client_state_delegation_missing.md
+        """
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+
+        chunk = MagicMock()
+        delta = MagicMock()
+        delta.content = None
+        call = MagicMock()
+        call.id = "call_1"
+        call.function.name = "search"
+        call.function.arguments = '{"query": "tokyo"}'
+        delta.tool_calls = [call]
+        chunk.choices = [MagicMock(delta=delta)]
+
+        usage_only = MagicMock()
+        usage_only.choices = []
+
+        mock_client_instance.chat.completions.create.return_value = [chunk, usage_only]
+
+        client = OpenAIClient("gpt-4.1-nano")
+        list(client.generate_stream(
+            [{"role": "user", "content": "find"}],
+            tools=[{"type": "function",
+                    "function": {"name": "search",
+                                 "parameters": {"type": "object", "properties": {}}}}],
+        ))
+
+        detection = client.consume_tool_detection()
+        self.assertEqual(detection["type"], "tool_call")
+        self.assertEqual(detection["tool_name"], "search")
+
+    @patch('llm_clients.openai.OpenAI')
     def test_openai_stream_emits_thinking_event(self, mock_openai):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
@@ -1824,6 +1863,182 @@ class TestLlamaCachedClientUsageAttribution(unittest.TestCase):
             wrapper = LlamaCachedClient(inner, cache)
             self.assertEqual(inner.config_key, "preset-config-key")
             self.assertEqual(wrapper.config_key, "preset-config-key")
+
+
+class TestLlamaCachedClientIsACompleteFacade(unittest.TestCase):
+    """wrapper 越しでも、包まれていない client と同じ state が見えること。
+
+    SEA runtime は factory が返したオブジェクト (= wrapper) に対して consume_* を
+    呼ぶので、委譲していない state は呼び出し側にとって「無かったこと」になる。
+    実測 (2026-09-21、NEBULA の artemis-31b) では、包むと発言の記録から reasoning が
+    丸ごと落ちていた。
+    docs/issues/llama_cached_client_state_delegation_missing.md
+    """
+
+    class _FakeInner(LLMClient):
+        """応答の解析で state を積む client の代役 (ネットワーク無し)。"""
+
+        TOOL_DETECTION = {
+            "type": "tool_call",
+            "tool_name": "get_current_weather",
+            "tool_args": {"location": "Tokyo"},
+        }
+        REASONING = [{"text": "inner reasoning"}]
+        REASONING_DETAILS = [{"encrypted": "xyz"}]
+        THOUGHT_SIGNATURE = "SIG-abc"
+        ATTACHMENT = {"kind": "image", "path": "generated.png"}
+
+        def __init__(self):
+            super().__init__(supports_images=True, supports_audio=True,
+                             supports_video=True)
+            self.model = "inner-api-name"
+
+        def _store_everything(self):
+            self._store_tool_detection(dict(self.TOOL_DETECTION))
+            self._store_reasoning(list(self.REASONING))
+            self._store_reasoning_details(list(self.REASONING_DETAILS))
+            self._store_thought_signature(self.THOUGHT_SIGNATURE)
+            self._store_attachment(dict(self.ATTACHMENT))
+            self._store_usage(input_tokens=11, output_tokens=22)
+
+        def generate(self, messages, tools=None, response_schema=None, *,
+                     temperature=None, **kwargs):
+            self._store_everything()
+            return ""
+
+        def generate_stream(self, messages, tools=None, response_schema=None, *,
+                            temperature=None, **kwargs):
+            self._store_everything()
+            return iter(("chunk",))
+
+        def generate_with_tool_detection(self, messages, tools=None, *,
+                                         temperature=None, **kwargs):
+            return dict(self.TOOL_DETECTION)
+
+    class _NoopCache:
+        def acquire_slot(self, timeout=300.0):
+            return 0
+
+        def release_slot(self, slot):
+            pass
+
+        def restore(self, slot, persona_id):
+            pass
+
+        def save(self, slot, persona_id):
+            pass
+
+    def _wrapped(self):
+        from llm_clients.llama_cache import LlamaCachedClient
+
+        inner = self._FakeInner()
+        return LlamaCachedClient(inner, self._NoopCache()), inner
+
+    def test_streaming_tool_detection_reaches_the_caller(self):
+        wrapper, inner = self._wrapped()
+        list(wrapper.generate_stream([], tools=[{"type": "function"}]))
+        self.assertEqual(wrapper.consume_tool_detection(), inner.TOOL_DETECTION)
+
+    def test_tool_detection_putback_reaches_the_inner(self):
+        """runtime は「覗いて戻す」を行う (sea/runtime_llm.py の tool streaming)。
+
+        consume だけ委譲して _store を委譲しないと、戻した値が wrapper に埋もれて
+        直後の consume が None を返す。
+        """
+        wrapper, _inner = self._wrapped()
+        list(wrapper.generate_stream([], tools=[{"type": "function"}]))
+        peeked = wrapper.consume_tool_detection()
+        wrapper._store_tool_detection(peeked)
+        self.assertEqual(wrapper.consume_tool_detection(), peeked)
+
+    def test_reasoning_reaches_the_caller(self):
+        wrapper, inner = self._wrapped()
+        list(wrapper.generate_stream([]))
+        self.assertEqual(wrapper.consume_reasoning(), inner.REASONING)
+        self.assertEqual(wrapper.consume_reasoning_details(), inner.REASONING_DETAILS)
+
+    def test_thought_signature_reaches_the_caller(self):
+        wrapper, inner = self._wrapped()
+        list(wrapper.generate_stream([]))
+        self.assertEqual(wrapper.consume_thought_signature(), inner.THOUGHT_SIGNATURE)
+
+    def test_attachments_reach_the_caller(self):
+        wrapper, inner = self._wrapped()
+        wrapper.generate([])
+        self.assertEqual(wrapper.consume_attachments(), [inner.ATTACHMENT])
+
+    def test_usage_reaches_the_caller(self):
+        wrapper, _inner = self._wrapped()
+        wrapper.generate([])
+        usage = wrapper.consume_usage()
+        self.assertEqual((usage.input_tokens, usage.output_tokens), (11, 22))
+
+    def test_model_and_media_support_are_the_inner_s(self):
+        wrapper, inner = self._wrapped()
+        self.assertEqual(wrapper.model, inner.model)
+        self.assertTrue(wrapper.supports_images)
+        self.assertTrue(wrapper.supports_audio)
+        self.assertTrue(wrapper.supports_video)
+
+    def test_generate_with_tool_detection_is_delegated(self):
+        wrapper, inner = self._wrapped()
+        self.assertEqual(wrapper.generate_with_tool_detection([]), inner.TOOL_DETECTION)
+
+    def test_every_state_method_of_the_base_is_delegated(self):
+        """新しい consume_* / _store_* を基底に足したら、ここが落ちて漏れを知らせる。"""
+        from llm_clients.llama_cache import LlamaCachedClient
+
+        base_methods = {
+            name for name in dir(LLMClient)
+            if name.startswith("consume_") or name.startswith("_store_")
+        }
+        missing = {
+            name for name in base_methods
+            if name not in LlamaCachedClient.__dict__
+        }
+        self.assertEqual(missing, set(), f"未委譲の state メソッド: {sorted(missing)}")
+
+    def test_wrapping_does_not_change_the_inner(self):
+        """包むこと自体が inner の値を変えないこと。
+
+        委譲属性は inner を書き換える property なので、基底 __init__ が配る
+        既定値 (model="" 等) を素通しさせないと、設定済みの client を包んだ
+        瞬間に値が潰れる。
+        """
+        from llm_clients.llama_cache import LlamaCachedClient
+
+        inner = self._FakeInner()
+        inner.config_key = "preset-config-key"
+        before = {name: getattr(inner, name) for name in
+                  ("config_key", "model", "supports_images",
+                   "supports_audio", "supports_video")}
+
+        wrapper = LlamaCachedClient(inner, self._NoopCache())
+
+        after = {name: getattr(inner, name) for name in before}
+        self.assertEqual(after, before)
+        self.assertEqual(wrapper.config_key, "preset-config-key")
+        self.assertEqual(wrapper.model, "inner-api-name")
+
+    def test_wrapping_does_not_add_attributes_to_a_duck_typed_inner(self):
+        """属性を持たない inner を包んでも、既定値が生えないこと。"""
+        from llm_clients.llama_cache import LlamaCachedClient
+
+        class _Duck:
+            pass
+
+        duck = _Duck()
+        wrapper = LlamaCachedClient(duck, self._NoopCache())
+        self.assertFalse(hasattr(duck, "model"))
+        self.assertFalse(hasattr(duck, "config_key"))
+        self.assertEqual(wrapper.model, "")
+        self.assertFalse(wrapper.supports_images)
+
+    def test_assignment_after_wrapping_still_reaches_the_inner(self):
+        """factory は包んだ後に config_key を代入する (使用量の帰属)。"""
+        wrapper, inner = self._wrapped()
+        wrapper.config_key = "assigned-after-wrapping"
+        self.assertEqual(inner.config_key, "assigned-after-wrapping")
 
 
 class TestStructuredOutputRecordsUsage(unittest.TestCase):

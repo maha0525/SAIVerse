@@ -59,7 +59,7 @@
 - **予約ヘッダーは書いても捨てられる** — `Authorization` / `Proxy-Authorization` / `OpenAI-Organization` / `OpenAI-Project` / `Host` / `Content-Length` / `Content-Type` / `Transfer-Encoding`。資格情報・課金の帰属先・経路・本文の枠はクライアントが所有する。特に `Authorization` は、SDK が `api_key_env` から組んだ資格情報より**後に**マージされるため、素通しすると設定ファイルから送信キーを差し替えられてしまう。判定はクライアント境界の一箇所 (`llm_clients/openai.py: _strip_reserved_headers`) にあり、モデル側の `request_kwargs.extra_headers` も同じ関所を通る
 - **値に書けるのは ASCII だけ** — HTTP ヘッダーは ASCII でエンコードされるため、日本語などを入れるとリクエストを組み立てる時点で失敗する。関所が送信前に捨てるので会話は止まらず、その項目の申告が消えるだけになる（改行を含む値も同様に捨てる）
 - **申告そのものは利用者が上書きできる（意図してそうしている）** — `request_kwargs.extra_headers` はリクエスト単位で `default_headers` に勝つため、モデル側に `HTTP-Referer` などを書けば、そのモデルの利用は SAIVerse ではなく別アプリとして集計される。**SAIVerse をフォークして自分のアプリ名で名乗る道を塞がないための設計**で、名乗りを予約ヘッダー扱いにはしない。同梱の OpenRouter モデルはどれも書いておらず、テストで見張っている
-- **クライアント外の補助 HTTP には乗らない** — llama.cpp の slot cache 制御 (`llm_clients/llama_cache.py`) は認証ヘッダーも含めて何も付けずに飛ぶ。認証を要求する remote サーバーで `llama_slot_save_path` を使うと、会話は通るのに cache の保存・復元だけが失敗して黙って無効化される（[未解決 issue](../issues/llama_cache_control_requests_unauthenticated.md)）
+- **クライアント外の補助 HTTP には乗らない** — llama.cpp の slot cache 制御 (`llm_clients/llama_cache.py`) は認証ヘッダーも含めて何も付けずに飛ぶ。認証を要求する remote サーバーで `llama_slot_save_path` を使うと、会話は通るのに cache の保存・復元だけが失敗して黙って無効化される（[未解決 issue](../issues/llama_cache_control_requests_unauthenticated.md)）。**サーバーの手前にプロキシが居る場合も同じ形で黙って無効化される** — llama-swap は `/slots` を中継しないため save が毎回 404 になる（[未解決 issue](../issues/llama_slot_cache_inert_behind_llama_swap.md)）
 
 カテゴリ名を綴り間違えても**エラーにならず無視される**（ランキングに出ないだけ）。出荷値は `tests/test_provider_configs.py: TestOpenRouterAppAttribution` で固定している。設計の経緯は `docs/intent/model_provider_management.md` §10、利用者向けの説明は `docs/api-keys/openrouter.md`。
 

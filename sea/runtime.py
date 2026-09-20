@@ -906,8 +906,14 @@ class SEARuntime:
 
         LOGGER.info("[sea] _build_tools_spec called with tool_names: %s", tool_names)
 
-        # Determine provider from llm_client class name
-        client_class_name = type(llm_client).__name__
+        # Determine provider from llm_client class name.
+        # 送る形式を決めるのは実際に HTTP を叩く client なので、facade
+        # (LlamaCachedClient) で包まれていたら中身の class 名で判定する。
+        # 包みの名前で判定すると、どの分岐にも当たらず Gemini 形式へ落ちて、
+        # OpenAI 互換のサーバーへ google.genai の Tool を送ることになる
+        # (docs/issues/llama_cached_client_state_delegation_missing.md)。
+        target_client = getattr(llm_client, "_inner", llm_client)
+        client_class_name = type(target_client).__name__
         LOGGER.info("[sea] LLM client class: %s", client_class_name)
 
         if client_class_name in ("OpenAIClient", "AnthropicClient", "OllamaClient", "NvidiaNIMClient"):

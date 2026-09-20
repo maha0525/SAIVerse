@@ -2,7 +2,7 @@
 
 **状態**: 未解決 (2026-08-07 起票)。**道を決める前の調査段階** — 有力そうな案はあるが、採否を決めるだけの材料がまだ無い。
 
-関連: [`llm_clients/llama_cache.py`](../../llm_clients/llama_cache.py) / fork = `temp/llama-fork` (branch `saiverse/main`) / 同ファイルの別欠陥 = [`llama_cache_control_requests_unauthenticated.md`](llama_cache_control_requests_unauthenticated.md), [`llama_cached_client_state_delegation_missing.md`](llama_cached_client_state_delegation_missing.md)
+関連: [`llm_clients/llama_cache.py`](../../llm_clients/llama_cache.py) / fork = `temp/llama-fork` (branch `saiverse/main`) / 同ファイルの別欠陥 = [`llama_cache_control_requests_unauthenticated.md`](llama_cache_control_requests_unauthenticated.md), [`llama_cached_client_state_delegation_missing.md`](archive/llama_cached_client_state_delegation_missing.md)
 
 ## 現象
 

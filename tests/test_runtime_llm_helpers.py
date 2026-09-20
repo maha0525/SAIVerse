@@ -322,5 +322,42 @@ class EmitSayAndCaptureTest(unittest.TestCase):
                 self.assertNotIn("_last_message_id", state)
 
 
+class BuildToolsSpecSeesThroughTheCacheWrapperTest(unittest.TestCase):
+    """送る tools の形式は、実際に HTTP を叩く client で決めること。
+
+    _build_tools_spec は client の class 名で分岐する。LlamaCachedClient は
+    facade なので、包みの名前で判定するとどの分岐にも当たらず Gemini 形式へ
+    落ち、OpenAI 互換のサーバーへ google.genai の Tool が送られる。
+    docs/issues/llama_cached_client_state_delegation_missing.md
+    """
+
+    def _tool_name(self):
+        import tools as saiverse_tools
+
+        if not saiverse_tools.OPENAI_TOOLS_SPEC:
+            saiverse_tools._autodiscover_tools()
+        first = saiverse_tools.OPENAI_TOOLS_SPEC[0]
+        return first["function"]["name"]
+
+    def test_wrapped_openai_client_still_gets_openai_format(self):
+        from llm_clients.base import LLMClient
+        from llm_clients.llama_cache import LlamaCachedClient
+        from sea.runtime import SEARuntime
+
+        class OpenAIClient(LLMClient):  # 名前だけを借りた代役
+            pass
+
+        name = self._tool_name()
+        inner = OpenAIClient()
+        wrapper = LlamaCachedClient(inner, cache=None)
+
+        bare = SEARuntime._build_tools_spec(None, [name], inner)
+        wrapped = SEARuntime._build_tools_spec(None, [name], wrapper)
+
+        self.assertTrue(bare, "代役の client で OpenAI 形式が組めていない")
+        self.assertEqual(wrapped, bare)
+        self.assertIsInstance(wrapped[0], dict)
+
+
 if __name__ == "__main__":
     unittest.main()

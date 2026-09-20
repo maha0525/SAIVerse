@@ -903,6 +903,12 @@ class OpenAIClient(LLMClient):
                     )
             if finish_reason_time is not None:
                 post_finish_chunk_count += 1
+            # stream_options={"include_usage": True} を付けているので、最後に
+            # choices が空で usage だけを載せた chunk が来る。テキスト経路
+            # (_stream_text_mode) は同じ形を弾いているが、ここは弾いていなかった
+            # ため、llama.cpp 相手の実測で IndexError になった (2026-09-21)。
+            if not chunk.choices or not chunk.choices[0].delta:
+                continue
             delta = chunk.choices[0].delta
 
             if delta.tool_calls:
