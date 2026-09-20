@@ -5,7 +5,7 @@ import { getFormatLocale } from '@/i18n/core';
 
 import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
-import { useRef, useState, useEffect } from 'react';
+import { useCallback, useRef, useState, useEffect } from 'react';
 import styles from './RightSidebar.module.css';
 import {
     Users,
@@ -93,7 +93,15 @@ interface BuildingDetails {
 
 export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentBuildingId, onPersonaChanged, onStartVoiceCall }: RightSidebarProps) {
     useLocale();
-    const [details, setDetails] = useState<BuildingDetails | null>(null);
+    // 応答は「どの部屋を要求して得たものか」を添えて保持する。閲覧中の部屋と
+    // 一致するときだけ details として使い、一致しない間 (部屋を切り替えてから
+    // 新しい応答が届くまで) は「まだ無い」扱いにする。こうしないと前の部屋の
+    // 名前・画像・滞在ペルソナ・アイテムが残ったまま描かれ、そこから開く
+    // モーダルの宛先も前の部屋になる (2026-04-30 エリス上書き事故と同型)。
+    const [loadedDetails, setLoadedDetails] = useState<{ buildingId: string; data: BuildingDetails } | null>(null);
+    const details = loadedDetails && loadedDetails.buildingId === currentBuildingId
+        ? loadedDetails.data
+        : null;
     const [selectedItem, setSelectedItem] = useState<Item | null>(null);
     const [selectedFixture, setSelectedFixture] = useState<Fixture | null>(null);
     const [selectedPersona, setSelectedPersona] = useState<Occupant | null>(null);
@@ -121,29 +129,43 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     // で操作が走ってしまうため、building 変更を検知したらすべて閉じる。
     const previousBuildingIdRef = useRef<string | null>(null);
 
+    // 閲覧中の部屋の最新値。fetch の応答が届いた時点でまだ同じ部屋を見ているかを
+    // 判定するために使う (応答の追い越し対策)。同期する useEffect は下の fetch 用
+    // useEffect より前に置くこと (React は宣言順に effect を走らせるので、
+    // fetch が始まる前にこの ref が新しい部屋になっている必要がある)。
+    const viewingBuildingIdRef = useRef<string | null>(null);
+
     const startX = useRef<number | null>(null);
     const startY = useRef<number | null>(null);
     const startTime = useRef<number | null>(null);
 
 
 
-    const fetchDetails = async () => {
+    // ⚠ この関数は setInterval からも呼ぶので、必ず useCallback で
+    // currentBuildingId に紐付けたままにすること。依存から外すと、ポーリングが
+    // パネルを開いた時点の building_id を掴み続け、部屋を移動しても 10 秒後に
+    // 前の部屋の内容へ戻され続ける (v0.3.13 のユーザー報告)。
+    const fetchDetails = useCallback(async () => {
         // currentBuildingId 未指定だと server-global の user_current_building_id に
         // 汚染される (エリス上書き事故の遠因)。明示指定がない間は fetch しない。
-        if (!currentBuildingId) {
+        const targetId = currentBuildingId;
+        if (!targetId) {
             console.warn('[RightSidebar] fetchDetails skipped: currentBuildingId not provided yet');
             return;
         }
         try {
-            const res = await apiFetch(`/api/info/details?building_id=${encodeURIComponent(currentBuildingId)}`);
+            const res = await apiFetch(`/api/info/details?building_id=${encodeURIComponent(targetId)}`);
             if (res.ok) {
                 const data = await res.json();
-                setDetails(data);
+                // 応答が届くまでに別の部屋へ移っていたら捨てる。先に投げた古い部屋の
+                // 応答が後から届いて新しい部屋の内容を上書きするのを防ぐ。
+                if (viewingBuildingIdRef.current !== targetId) return;
+                setLoadedDetails({ buildingId: targetId, data });
             }
         } catch (err) {
             console.error("Failed to fetch building details", err);
         }
-    };
+    }, [currentBuildingId]);
 
     const handleToggleOpen = async (e: React.MouseEvent, item: Item) => {
         e.stopPropagation(); // Don't open the item modal
@@ -160,11 +182,17 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
         }
     };
 
+    // ⚠ この effect は下の fetch 用 effect より前に置くこと (宣言順の理由は
+    // viewingBuildingIdRef の宣言箇所のコメント参照)。
     useEffect(() => {
+        viewingBuildingIdRef.current = currentBuildingId ?? null;
+    }, [currentBuildingId]);
+
+    useEffect(() => {
+        // fetchDetails は currentBuildingId が変わったときだけ作り直されるので、
+        // これを deps に置くことが「部屋が変わったら再 fetch」を兼ねる。
         fetchDetails();
-        // currentBuildingId が変われば自動で再 fetch (deps に含める)
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [refreshTrigger, isOpen, currentBuildingId]);
+    }, [refreshTrigger, isOpen, fetchDetails]);
 
     // Building 変化検知: 開いているモーダル / メニューを強制クローズする。
     // - selectedPersona (PersonaMenu の表示元): 旧 building の occupant への参照
@@ -195,7 +223,9 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
         }, 10000); // Poll every 10 seconds
 
         return () => clearInterval(pollInterval);
-    }, [isOpen]);
+        // fetchDetails を deps に含めること。外すとポーリングが古い部屋を
+        // 掴み続ける (上の fetchDetails のコメント参照)。
+    }, [isOpen, fetchDetails]);
 
     const handleTouchStart = (e: React.TouchEvent) => {
         e.stopPropagation();
@@ -505,7 +535,10 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                     isOpen={!!selectedItem}
                     onClose={() => setSelectedItem(null)}
                     item={selectedItem}
-                    currentBuildingId={details?.id ?? currentBuildingId ?? null}
+                    // 操作の宛先は常に「いま閲覧している部屋」= 親から渡る
+                    // currentBuildingId。details.id は応答の写しにすぎないので
+                    // 宛先には使わない。
+                    currentBuildingId={currentBuildingId ?? null}
                     onItemUpdated={() => {
                         fetchDetails();
                         setSelectedItem(null);
@@ -528,7 +561,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         personaId={selectedPersona.id}
                         personaName={selectedPersona.name}
                         avatarUrl={selectedPersona.avatar || "/api/static/icons/host.png"}
-                        buildingId={details?.id ?? currentBuildingId ?? null}
+                        buildingId={currentBuildingId ?? null}
                         onOpenMemory={() => openModal('memory')}
                         onOpenSchedule={() => openModal('schedule')}
                         onOpenSettings={() => openModal('settings')}
@@ -536,7 +569,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         onStartCall={(() => {
                             // 部屋が確定していないときは通話の入口を出さない
                             // (VoiceCallModal 側でも building 無しは弾く)。
-                            const callBuildingId = details?.id ?? currentBuildingId ?? null;
+                            const callBuildingId = currentBuildingId ?? null;
                             if (!onStartVoiceCall || !callBuildingId) return undefined;
                             const target = selectedPersona;
                             return () => onStartVoiceCall(target.id, target.name, callBuildingId);
@@ -577,23 +610,24 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                     </>
                 )}
 
-                {/* アイテム作成 (この部屋へ置く) */}
-                {details && (
+                {/* アイテム作成 (この部屋へ置く)。宛先は details.id ではなく
+                    閲覧中の部屋 (currentBuildingId)。表示名だけ details から取る。 */}
+                {details && currentBuildingId && (
                     <ItemCreateModal
                         isOpen={showItemCreate}
                         onClose={() => setShowItemCreate(false)}
-                        buildingId={details.id}
+                        buildingId={currentBuildingId}
                         buildingName={details.name}
                         onCreated={() => fetchDetails()}
                     />
                 )}
 
                 {/* Building Settings Modal */}
-                {details && (
+                {details && currentBuildingId && (
                     <BuildingSettingsModal
                         isOpen={showBuildingSettings}
                         onClose={() => setShowBuildingSettings(false)}
-                        buildingId={details.id}
+                        buildingId={currentBuildingId}
                         onSaved={() => fetchDetails()}
                     />
                 )}
