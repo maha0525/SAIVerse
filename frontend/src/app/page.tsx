@@ -276,6 +276,9 @@ function CacheHitDot({ usage, total }: {
     );
 }
 
+/** アドオンがメッセージに紐付けるメタデータ: { message_id: { addon_name: { key: value } } } */
+type AddonMetadataMap = Record<string, Record<string, Record<string, unknown>>>;
+
 export default function Home() {
     useLocale();
     // Enable user presence tracking (heartbeat + visibility)
@@ -284,14 +287,28 @@ export default function Home() {
     // アクティブクライアントタブ (最後にユーザー操作があったタブ) 判定
     const { isActive: isActiveClientTab } = useActiveClientTab();
 
+    // アドオン: メッセージごとのメタデータ { message_id: { addon_name: { key: value } } }
+    // ref が読み出しの本体で、state は描画用のミラー。client action の executor は
+    // SSE ハンドラから同期的に呼ばれるため、再描画を待つ state からは最新値を読めない
+    // (useCallback に閉じ込めると初回レンダーの {} を掴んだままになる)。
+    // 更新は必ず updateAddonMetadata() 経由で ref と同時に行うこと。
+    const addonMetadataRef = useRef<AddonMetadataMap>({});
+    const [addonMetadata, setAddonMetadata] = useState<AddonMetadataMap>({});
+    const updateAddonMetadata = useCallback(
+        (updater: (prev: AddonMetadataMap) => AddonMetadataMap) => {
+            const next = updater(addonMetadataRef.current);
+            addonMetadataRef.current = next;
+            setAddonMetadata(next);
+        },
+        [],
+    );
+
     // addon metadata lookup (client action executor に渡すため useClientActions から使われる)
     const getAddonMetadata = useCallback(
         (messageId: string | undefined, addonName: string) => {
             if (!messageId) return {};
-            return addonMetadata[messageId]?.[addonName] ?? {};
+            return addonMetadataRef.current[messageId]?.[addonName] ?? {};
         },
-        // addonMetadata は下で useState 宣言されるため TDZ 回避用に closure 参照とする
-        // eslint-disable-next-line react-hooks/exhaustive-deps
         [],
     );
 
@@ -304,7 +321,7 @@ export default function Home() {
     // アドオンSSEイベント購読：audio_ready など非同期完了イベントを受信してメタデータを更新
     useAddonEvents(useCallback((event) => {
         if (event.message_id && event.data) {
-            setAddonMetadata((prev) => ({
+            updateAddonMetadata((prev) => ({
                 ...prev,
                 [event.message_id!]: {
                     ...(prev[event.message_id!] ?? {}),
@@ -317,7 +334,7 @@ export default function Home() {
         }
         // 同時に client_actions をディスパッチ (event.data 経由で URL 等を解決)
         dispatchClientActions(event);
-    }, [dispatchClientActions]));
+    }, [dispatchClientActions, updateAddonMetadata]));
 
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputValue, setInputValue] = useState('');
@@ -359,8 +376,6 @@ export default function Home() {
     const withdrawingRef = useRef<string | null>(null);
     // アドオン: 有効なバブルボタン定義
     const [addonBubbleButtons, setAddonBubbleButtons] = useState<BubbleButtonDef[]>([]);
-    // アドオン: メッセージごとのメタデータ { message_id: { addon_name: { key: value } } }
-    const [addonMetadata, setAddonMetadata] = useState<Record<string, Record<string, Record<string, unknown>>>>({});
 
     // ItemModal for saiverse:// item links
     const [linkItemModalItem, setLinkItemModalItem] = useState<{ id: string; name: string; description?: string; type: string } | null>(null);
@@ -847,7 +862,7 @@ export default function Home() {
                                 };
                                 const meta = body.metadata;
                                 if (meta && Object.keys(meta).length > 0) {
-                                    setAddonMetadata(prev => ({
+                                    updateAddonMetadata(prev => ({
                                         ...prev,
                                         [mid]: { ...(prev[mid] ?? {}), ...meta },
                                     }));
