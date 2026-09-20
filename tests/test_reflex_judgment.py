@@ -1238,8 +1238,16 @@ class _FakeLLMClient:
         self.raises = raises
         self.delay = delay
         self.calls = []
+        # 思考を最小にしてくれという申し入れが、何回・どの順で届いたか。
+        # ("minimal_reasoning" と "generate" を 1 本の並びに記録して、
+        #  申し入れが generate より前に来たことを順序で確かめる)
+        self.events = []
+
+    def prefer_minimal_reasoning(self):
+        self.events.append("minimal_reasoning")
 
     def generate(self, messages, tools=None, response_schema=None, **kwargs):
+        self.events.append("generate")
         self.calls.append({
             "messages": messages, "response_schema": response_schema, "kwargs": kwargs,
         })
@@ -1301,6 +1309,22 @@ def test_llm_backend_answers_all_three_types(llm_role, monkeypatch):
     assert usage == {}  # このクライアントは使用量を持っていない
     # 設定キー・provider・context_length は既存の呼び出し元と同じ引き方で渡す。
     assert created == [(LLM_MODEL_KEY, "openai", 32000)]
+
+
+def test_llm_call_asks_for_minimal_reasoning_before_generating(llm_role, monkeypatch):
+    """一撃の判定なので、送る前に「思考は最小でよい」を伝える。
+
+    伝える先はクライアント (つまみの実名は各クライアントが持つ)。ここで見るのは
+    「generate より前に 1 回だけ届いた」ことだけ — 実際に何を最小にするかは
+    モデル次第で、明示の設定があればクライアント側が何もしない。
+    """
+    client = _FakeLLMClient({"answers": [{"qid": "m0", "noul": 0.25},
+                                         {"qid": "m1", "noul": 0.75}]})
+    _install_llm_client(monkeypatch, client)
+
+    evaluate(STATE, QUESTIONS, timeout=2.5)
+
+    assert client.events == ["minimal_reasoning", "generate"]
 
 
 def test_llm_answer_may_arrive_as_a_json_string(llm_role, monkeypatch):

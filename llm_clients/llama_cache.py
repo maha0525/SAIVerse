@@ -149,6 +149,10 @@ class LlamaCachedClient(LLMClient):
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         self._inner.configure_parameters(parameters)
 
+    def prefer_minimal_reasoning(self) -> None:
+        """リクエストを組むのは inner なので、思考の指定も inner へ渡す。"""
+        self._inner.prefer_minimal_reasoning()
+
     def response_token_limit(self) -> Optional[int]:
         """送る応答の上限は inner のもの (リクエストを組むのは inner)。"""
         return self._inner.response_token_limit()

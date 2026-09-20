@@ -218,6 +218,30 @@ class LLMClient:
         """Apply model-specific request parameters (subclasses may override)."""
         _ = parameters
 
+    def prefer_minimal_reasoning(self) -> None:
+        """この用途は一撃の判定なので思考・推論は最小でよい、と伝える (既定は no-op)。
+
+        反射判断 (``saiverse/reflex_judgment.py``) のように「状況 + 型付きの質問 →
+        値」だけを取り出す呼び出しが、``generate`` の前に呼ぶ。長考しても答えの質は
+        上がらず、待ち時間と費用だけが増えるため。
+
+        契約:
+
+        - **明示された思考の設定があるときは何もしない。** モデル設定ファイルの
+          ``parameters`` (factory がクライアント生成直後に
+          :meth:`configure_parameters` で適用する) や画面からの上書きで思考の深さが
+          決まっているなら、そちらが勝つ。このフックが動かすのは「誰も決めて
+          いないときの既定」だけ。
+        - **最小にできると確信が持てないモデルでは何もしない。** 思考を切れない
+          世代に「切る」を送ると、呼び出し自体が失敗する。遅いまま動く方が、速く
+          壊れるより良い。
+        - つまみの実名 (``thinking_level`` / ``thinking_budget`` /
+          ``reasoning_effort``) は各クライアントの中に置く。呼び出し側に提供元別の
+          分岐を作らないためのフック。
+
+        ラッパー (LlamaCachedClient 等) は包んだクライアントへ委譲すること。
+        """
+
     def response_token_limit(self) -> Optional[int]:
         """このクライアントがリクエストに載せる応答の上限 (トークン)。
 

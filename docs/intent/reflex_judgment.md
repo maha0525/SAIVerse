@@ -315,3 +315,23 @@ ID) に `{type, instructions, criteria}` を添える形。
   の制約)。3〜5 巡目の画面の直し 3 件は、この変更以前からのペルソナ設定モーダルの
   性質 (全欄送信・二重読み込みの上書き) に対するもので、レビューが実害の形を具体化した
   のを受けてこの束で閉じた。
+- 2026-09-21: 変換層が、クライアントへ**「この用途は一撃の判定なので思考は最小でよい」**
+  と伝えるようにした (`llm_clients/base.py` の `prefer_minimal_reasoning`、既定は
+  no-op。`_LLMCall.perform` がクライアント生成の直後、`generate` の前に呼ぶ)。発端は
+  締切を 2.5 秒から 5 秒へ延ばしたのと同じ実測 — Gemini 3.5 Flash-Lite が判定 1 回に
+  3.5〜4 秒かかり、`llm_io.log` に思考の痕跡が出ていた。一撃の分類に長考は要らず、
+  待ち時間と費用だけが増える。つまみの実名 (thinking_level / thinking_budget /
+  reasoning_effort) は各クライアントの中に置き、呼び出し側には提供元別の分岐を作らない。
+  契約は 2 つ: **明示された思考の設定 (モデル設定ファイルの `parameters` の既定も含む)
+  があれば尊重して何もしない**、**最小にできると確信が持てないモデルでは何もしない**
+  (思考を切れない世代に「切る」を送ると呼び出しごと失敗する — 遅いまま動く方が、速く
+  壊れるより良い)。実装は Gemini 3 系が `thinking_level="low"` (`"minimal"` は 3.7 以降で
+  廃止され、送るとエラーになる)、Gemini 2.5 の Flash / Flash-Lite が `thinking_budget=0`
+  (それぞれのモデル設定が "off" として宣言している値)、2.5 Pro とそれ以外の世代・
+  openai 互換・anthropic・ollama・xai・codex は no-op。
+  **効果測定の前提**: 現在役割に割り当てられている `gemini-3.5-flash-lite-paid` は、
+  モデル設定が `thinking_level` の既定に `"minimal"` を宣言していて、factory が生成直後に
+  それを適用している (実機の `llm_io.log` でも
+  `ThinkingConfig(include_thoughts=True, thinking_level=MINIMAL)` を送っていることを確認
+  済み)。つまりこのモデルは既に思考の下限におり、この変更では 3.5〜4 秒は縮まない。
+  効くのは、思考の既定を宣言していないモデル設定を反射判断に割り当てたときだけ。

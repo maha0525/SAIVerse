@@ -977,6 +977,10 @@ class _LLMCall:
 
         key = self.backend.model_key
         client = get_llm_client(key, get_model_provider(key), get_context_length(key))
+        # 一撃の判定に長考は要らない (待ち時間と費用だけが増える)。モデル設定や画面で
+        # 思考の深さが決まっているときは、クライアント側がそれを尊重して何もしない
+        # (llm_clients/base.py の prefer_minimal_reasoning の契約)。
+        client.prefer_minimal_reasoning()
         # temperature は指定しない (モデル設定の既定に従う)。
         raw = client.generate(self.messages, response_schema=self.schema)
         # クライアントは自分では記帳しない (記帳は呼び出し側の仕事) ので、ここで
