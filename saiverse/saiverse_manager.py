@@ -1417,23 +1417,28 @@ class SAIVerseManager(
         書き換え、話す標準モデルの決め方 (一時上書き → 個別 → グローバル → 組み込み)
         で全員を決め直す。解除すると各ペルソナはそのとき決め方が指すモデルになる。
 
-        設定ファイルの無いモデルは一時上書きに使わない (ValueError、ルートは 400)。
+        標準モデルとして使えないモデルは一時上書きに使わない (ValueError、ルートは
+        400) — 設定ファイルの無い名前と、型付きの質問にしか答えない反射判断専用の
+        宛先。一時上書きは全ペルソナの標準モデルを一度に置き換えるので、ここを通すと
+        全員がその場で話せなくなる。判定は保存の関所と同じ一本
+        (saiverse/persona_model_selection.py の save_rejection_reason)。
 
         Returns:
             ReapplyResult — 切り替えられなかったペルソナの名前と、いま使っているモデル。
         """
-        from saiverse.model_defaults import role_model_is_defined
         from saiverse.persona_model_selection import (
             MODEL_SETTINGS_LOCK,
             reapply_speaking_models,
-            undefined_override_message,
+            rejected_override_message,
+            save_rejection_reason,
         )
 
         requested = (model or "").strip()
         with MODEL_SETTINGS_LOCK:
             if requested:
-                if not role_model_is_defined("default_model", requested):
-                    raise ValueError(undefined_override_message(requested))
+                reason = save_rejection_reason("default_model", requested)
+                if reason is not None:
+                    raise ValueError(rejected_override_message(requested, reason))
                 logging.info("Temporarily setting model to '%s' for all active personas.", requested)
                 self.model_parameter_overrides = dict(parameters or {})
                 self.model = requested
@@ -2031,6 +2036,7 @@ class SAIVerseManager(
         chronicle_enabled: Optional[bool] = None,
         autonomous_chronicle_enabled: Optional[bool] = None,
         auto_recall_enabled: Optional[bool] = None,
+        auto_recall_enhanced: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
         memopedia_index_enabled: Optional[bool] = None,
         core_memory_char_budget: Optional[int] = None,
@@ -2061,6 +2067,7 @@ class SAIVerseManager(
             chronicle_enabled=chronicle_enabled,
             autonomous_chronicle_enabled=autonomous_chronicle_enabled,
             auto_recall_enabled=auto_recall_enabled,
+            auto_recall_enhanced=auto_recall_enhanced,
             memory_weave_context=memory_weave_context,
             memopedia_index_enabled=memopedia_index_enabled,
             core_memory_char_budget=core_memory_char_budget,

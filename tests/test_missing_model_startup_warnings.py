@@ -52,6 +52,12 @@ DEFINED_KEY = "test-defined-model"
 #: DEFINED_KEY の定義が持つ API モデル名。設定キーとしては存在しない。
 DEFINED_API_NAME = "vendor/test-defined-api-name"
 OTHER_KEY = "test-other-model"
+#: 反射判断が話せる宛先 (protocol が jev_compat) の定義。
+JEV_KEY = "test-jev-model"
+#: protocol は jev_compat だが宛先の URL が宣言されていない定義 (実行側は拒否する)。
+JEV_NO_URL_KEY = "test-jev-model-without-url"
+#: jev 互換だが choice にしか答えない宛先 (第 1 段の仕事 = noul には答えられない)。
+JEV_CHOICE_ONLY_KEY = "test-jev-model-choice-only"
 
 ROLE_ENV_KEYS = tuple(model_defaults.MODEL_ROLES.values())
 
@@ -122,6 +128,76 @@ def _global_summary(label: str, value: str) -> str:
     )
 
 
+def _global_reflex(value: str) -> str:
+    return (
+        f"グローバル設定の反射判断のモデル '{value}' は SAIVerse にないため、"
+        "型付きの質問に確率で答える判断 (自動想起の強化など) は動いていません。"
+        f"{GLOBAL_RESELECT}、再起動しなくても動くようになります。"
+    )
+
+
+def _global_reflex_mismatch(value: str) -> str:
+    return (
+        f"グローバル設定の反射判断のモデル '{value}' は反射判断の宛先として使えないため、"
+        "型付きの質問に確率で答える判断 (自動想起の強化など) は動いていません。"
+        f"{GLOBAL_RESELECT}、再起動しなくても動くようになります。"
+    )
+
+
+#: 反射判断専用の宛先が反射判断以外の役割に入っているときの、理由の一文。
+JEV_ONLY = "は反射判断だけに使える宛先のため、"
+
+
+def _persona_jev_only_default(name: str, value: str) -> str:
+    return (
+        f"{name}の標準モデル '{value}'{JEV_ONLY}会話には使えません。"
+        f"この設定のままでは{name}は話せません。"
+        f"{PERSONA_RESELECT}、再起動しなくても話せるようになります。"
+    )
+
+
+def _persona_jev_only_lite(name: str, value: str) -> str:
+    return (
+        f"{name}の軽量モデル '{value}'{JEV_ONLY}会話には使えません。"
+        f"この設定のままでは{name}は軽量モデルを使う作業"
+        "（返事の途中の作業や、自分から動く判断）ができません。"
+        f"{PERSONA_RESELECT}、再起動しなくても続けられるようになります。"
+    )
+
+
+def _persona_jev_only_weave(name: str, value: str) -> str:
+    return (
+        f"{name}のMemory Weaveモデル '{value}'{JEV_ONLY}会話には使えません。"
+        f"この設定のままでは{name}の記憶の整理は動きません。"
+        f"{PERSONA_RESELECT}、再起動しなくても整理が再開します。"
+    )
+
+
+def _global_jev_only_default(value: str, names=()) -> str:
+    return (
+        f"グローバル設定の標準モデル '{value}'{JEV_ONLY}会話には使えません。"
+        f"この設定のままでは、個別の標準モデルを持たないペルソナ{_names(names)}は話せません。"
+        f"{GLOBAL_RESELECT}、再起動しなくても話せるようになります。"
+    )
+
+
+def _global_jev_only_lite(value: str, names=()) -> str:
+    return (
+        f"グローバル設定の軽量モデル '{value}'{JEV_ONLY}会話には使えません。"
+        f"この設定のままでは、個別の軽量モデルを持たないペルソナ{_names(names)}は"
+        "軽量モデルを使う作業（返事の途中の作業や、自分から動く判断）ができません。"
+        f"{GLOBAL_RESELECT}、再起動しなくても続けられるようになります。"
+    )
+
+
+def _global_jev_only_summary(label: str, value: str) -> str:
+    return (
+        f"グローバル設定の{label} '{value}'{JEV_ONLY}要約には使えません。"
+        "この設定のままでは要約は動きません。"
+        f"{GLOBAL_RESELECT}、再起動しなくても要約されるようになります。"
+    )
+
+
 def _unswitched(name: str, model: str) -> str:
     return (
         f"{name}は新しい標準モデルに切り替えられなかったため、いまも '{model}' で話しています。"
@@ -139,6 +215,29 @@ def fake_model_definitions(monkeypatch, tmp_path):
         FALLBACK_KEY: _definition("test-fallback-api-name"),
         DEFINED_KEY: _definition(DEFINED_API_NAME),
         OTHER_KEY: _definition("vendor/test-other"),
+        # 宛先は認証しないループバック (localjev と同じ形)。答える側の解決は
+        # キーと宛先の組を通常の会話クライアントと同じ照合へ通すので、偽の定義も
+        # その照合に通る正常形にしておく。
+        JEV_KEY: {
+            "model": "jev-latest",
+            "protocol": "jev_compat",
+            "provider": "jev_compat",
+            "base_url": "http://127.0.0.1:8088",
+            "api_key_required": False,
+        },
+        JEV_NO_URL_KEY: {
+            "model": "jev-latest",
+            "protocol": "jev_compat",
+            "provider": "jev_compat",
+        },
+        JEV_CHOICE_ONLY_KEY: {
+            "model": "jev-latest",
+            "protocol": "jev_compat",
+            "provider": "jev_compat",
+            "base_url": "http://127.0.0.1:8088",
+            "api_key_required": False,
+            "reflex_judgment": {"supported_types": ["choice"]},
+        },
     })
     monkeypatch.setattr(data_paths, "USER_DATA_DIR", tmp_path / "user_data")
     monkeypatch.setattr(data_paths, "EXPANSION_DATA_DIR", tmp_path / "no_expansion")
@@ -346,14 +445,19 @@ def test_a_persona_that_could_not_be_loaded_still_gets_the_setting_warning(world
     ]
 
 
-def test_failing_lookup_skips_only_that_role(world, monkeypatch):
+def test_a_failing_lookup_warns_about_that_role_and_the_rest_continue(world, monkeypatch):
+    """引けなかった役割は「確かめられなかった = 定義なし」として警告に出す。
+
+    黙って飛ばすと、検査が壊れている間だけ警告が消えて、設定が正しいのと見分けが
+    つかない。残りの役割の検査は続く。
+    """
     world.add_persona(LIGHTWEIGHT_MODEL="gone-lite", MEMORY_WEAVE_MODEL="gone-weave")
     svc = world.start()
     monkeypatch.setattr(model_configs, "find_model_config", _raise)
 
-    # 引けなかった役割 (Memory Weave) は飛ばし、残りの役割の検査は続く
     assert _messages(svc.current_model_setting_warnings()) == [
         _persona_lite(NAME, "gone-lite"),
+        _persona_weave(NAME, "gone-weave"),
     ]
 
 
@@ -414,15 +518,132 @@ def test_global_defined_unset_and_empty_values_do_not_warn(world, monkeypatch):
     assert svc.current_model_setting_warnings() == []
 
 
+def test_global_reflex_model_that_cannot_answer_warns(world, monkeypatch):
+    """反射判断に通常の LLM を割り当てたら、定義があっても画面で知らせる。
+
+    保存は通り、実行時は WARNING を出して想起が従来方式へ戻るだけなので、画面に
+    出さないと設定ミスが誰にも見えない (docs/intent/reflex_judgment.md §2)。
+    """
+    _set_env(monkeypatch, SAIVERSE_REFLEX_JUDGMENT_MODEL=DEFINED_KEY)
+    svc = world.start()
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _global_reflex_mismatch(DEFINED_KEY),
+    ]
+
+
+def test_global_reflex_model_without_a_destination_url_warns(world, monkeypatch):
+    """protocol が合っていても、実行側が拒否する構造の不備は画面に出る。
+
+    画面の検査は実行側とまったく同じ関数 (saiverse/reflex_judgment.py の
+    resolve_backend) を呼ぶので、protocol だけ合っていて宛先の URL が無い定義も
+    「使えない」として知らせる。
+    """
+    _set_env(monkeypatch, SAIVERSE_REFLEX_JUDGMENT_MODEL=JEV_NO_URL_KEY)
+    svc = world.start()
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _global_reflex_mismatch(JEV_NO_URL_KEY),
+    ]
+
+
+def test_global_reflex_model_on_a_jev_destination_does_not_warn(world, monkeypatch):
+    _set_env(monkeypatch, SAIVERSE_REFLEX_JUDGMENT_MODEL=JEV_KEY)
+    svc = world.start()
+
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_global_reflex_model_that_cannot_answer_the_first_stage_type_warns(world, monkeypatch):
+    """choice にしか答えない宛先も画面で知らせる。
+
+    第 1 段でこの層に仕事を頼むのは自動想起の選別だけで、その仕事は noul しか投げない。
+    「噛み合っている」と答えると、自動想起は候補の集め方だけを広げたまま毎ターン判定に
+    失敗し、設定ミスがどこにも出ない。
+    """
+    _set_env(monkeypatch, SAIVERSE_REFLEX_JUDGMENT_MODEL=JEV_CHOICE_ONLY_KEY)
+    svc = world.start()
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _global_reflex_mismatch(JEV_CHOICE_ONLY_KEY),
+    ]
+
+
+def test_a_check_that_raises_is_warned_about_instead_of_being_dropped(monkeypatch, caplog):
+    """検査そのものが失敗した値は「確かめられなかった」として画面に出す。
+
+    黙って飛ばすと、検査が壊れている間だけ警告が消え、設定が正しいのと見分けが
+    つかない。保存と一時上書きの関所も「確かめられない値は断って知らせる」側に
+    倒してあるので、警告だけ逆に倒さない。
+    """
+    broken_key = "test-broken-lookup"
+
+    class _BrokenLookup(dict):
+        def get(self, key, default=None):
+            if key == broken_key:
+                raise RuntimeError("model config lookup is broken")
+            return super().get(key, default)
+
+    monkeypatch.setattr(
+        model_configs, "MODEL_CONFIGS", _BrokenLookup(model_configs.MODEL_CONFIGS),
+    )
+    caplog.set_level("WARNING", logger=model_defaults.LOGGER.name)
+
+    warnings = model_defaults.missing_model_warnings(
+        [("default_model", broken_key), ("lightweight_model", DEFINED_KEY)],
+        persona_name=NAME,
+    )
+
+    assert _messages(warnings) == [_persona_default(NAME, broken_key)]
+    assert "Model config check failed" in caplog.text
+
+
+def test_global_conversation_roles_warn_about_a_reflex_only_destination(world, monkeypatch):
+    """反射判断専用の宛先が会話や要約の役割に入っていたら画面で知らせる。
+
+    保存の関所 (saiverse/persona_model_selection.py) はこれを断るが、.env を手で
+    書けば入ってしまう。定義はあるので「SAIVerse にありません」の検査は素通りし、
+    割り当てられたペルソナは話そうとした時点で失敗する。
+    """
+    _set_env(
+        monkeypatch,
+        SAIVERSE_DEFAULT_MODEL=JEV_KEY,
+        SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL=JEV_KEY,
+        SAIVERSE_IMAGE_SUMMARY_MODEL=JEV_KEY,
+    )
+    world.add_persona()
+    svc = world.start()
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _global_jev_only_default(JEV_KEY, [NAME]),
+        _global_jev_only_lite(JEV_KEY, [NAME]),
+        _global_jev_only_summary("画像要約モデル", JEV_KEY),
+    ]
+
+
+def test_persona_conversation_roles_warn_about_a_reflex_only_destination(world):
+    world.add_persona(
+        DEFAULT_MODEL=JEV_KEY, LIGHTWEIGHT_MODEL=JEV_KEY, MEMORY_WEAVE_MODEL=JEV_KEY,
+    )
+    svc = world.start()
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _persona_jev_only_default(NAME, JEV_KEY),
+        _persona_jev_only_lite(NAME, JEV_KEY),
+        _persona_jev_only_weave(NAME, JEV_KEY),
+    ]
+
+
 def test_global_lookup_follows_each_consumer(world, monkeypatch):
     """API モデル名は、Memory Weave・画像/音声/動画要約 (find_model_config) なら
-    引けるが、標準・軽量モデル (設定キーの完全一致) では引けない。"""
+    引けるが、標準・軽量・反射判断のモデル (設定キーの完全一致) では引けない。"""
     _set_env(monkeypatch, **{key: DEFINED_API_NAME for key in ROLE_ENV_KEYS})
     svc = world.start()
 
     assert _messages(svc.current_model_setting_warnings()) == [
         _global_default(DEFINED_API_NAME, []),
         _global_lite(DEFINED_API_NAME),
+        _global_reflex(DEFINED_API_NAME),
     ]
 
 
@@ -461,6 +682,25 @@ def test_an_override_model_without_a_definition_is_warned(world):
     ]
 
 
+def test_an_override_on_a_reflex_only_destination_is_warned(world):
+    """定義はあっても会話に使えない宛先が上書きに残っていたら、画面で知らせる。
+
+    上書きの入口 (api/routes/config.py) は反射判断専用の宛先を断るが、入口を通らずに
+    入った値 (前のプロセスからの引き継ぎなど) はそのまま残る。定義はあるので
+    「SAIVerse にありません」の検査では見つからず、会話だけが失敗する。
+    """
+    world.add_persona()
+    svc = world.start()
+    svc.model = JEV_KEY
+    reapply_speaking_models(svc)
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        f"チャット画面のモデル一時上書き '{JEV_KEY}'{JEV_ONLY}会話には使えず、"
+        "ペルソナは止まっています。"
+        "チャット画面でモデルを選び直すか一時上書きを解除すると、再起動しなくても話せるようになります。",
+    ]
+
+
 # --- 起動時 ---------------------------------------------------------------------
 
 
@@ -482,8 +722,8 @@ def test_startup_records_no_model_setting_warnings_and_does_not_substitute(world
     assert persona.provider == ""
     assert persona.lightweight_model == "gone-lite"
     assert persona.memory_weave_model == "gone-weave"
-    # 積まなかった分は、取りに来たときに作られる (グローバル 6 件 + ペルソナ 3 件)
-    assert len(svc.current_model_setting_warnings()) == 9
+    # 積まなかった分は、取りに来たときに作られる (グローバル 7 件 + ペルソナ 3 件)
+    assert len(svc.current_model_setting_warnings()) == 10
 
 
 # --- 切り替えられなかったペルソナ -------------------------------------------------

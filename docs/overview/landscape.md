@@ -161,6 +161,14 @@ PulseController は「起こされた Pulse を捌く」層だが、**いつ Pul
 
 > **⚠️ v0.3 では判断点は一つも発火しない**（2026-08-23）。自律の駆動（判断点・watchdog・コマの再予約・実イベントの判断経由）は v0.4 の管轄で、v0.3 は `saiverse/autonomy_wiring.py` の定数 `AUTONOMOUS_DRIVING_SHIPPED=False` が全体の止め具になっている（自律ゲートの唯一の判定関数 `is_autonomy_on` が常に False を返す）。ペルソナごとの `AUTONOMY_ENABLED` の値は DB に残り、v0.4 で定数ごと削除すれば元の姿に戻る。実イベントと仲裁は判断を経ない直接応答（v0.2 と同じ）。→ [`autonomous_behavior_v3.md`](../intent/autonomous_behavior_v3.md) §11.1
 
+### 反射判断（型付きの質問に確率だけで答える判断）
+
+**自由記述が要らない判断を、文章を組み立てるモデルではなく「状況と、基準付きの型付きの質問を渡すと、確率・選択・数値だけが返る」宛先に任せる層**（`saiverse/reflex_judgment.py`）。速く・安く・形が保証される代わりに文章は書けない。質問の型は 3 つ——はい/いいえの確率（noul）・選択肢と各確率（choice）・数値（score）。
+
+**答える側はモデルの役割「反射判断」への割り当てで決まる**（世界の既定は env `SAIVERSE_REFLEX_JUDGMENT_MODEL`）。宛先の path・応答の欄の名前・対応する型は provider 設定の `reflex_judgment` 欄で宣言するので、TypeSafe 公式・OpenRouter・セルフホストのどれを割り当てても同じコードが話す（protocol は `jev_compat`、組み込み限定）。使用量と費用はモデル設定キー名義で普通のモデルと同じ記帳に載る。**役割が未割り当てのあいだは動かない**——黙って費用が発生する経路を作らないための約束。
+
+最初の利用者は自動想起の選別（§5、ペルソナ設定の「自動想起を強化する」が ON のときだけ）。使えなかったターンは WARNING 一行を出して、呼んだ機能がそれぞれのフォールバック（想起なら従来のしきい値方式）へ静かに戻る。→ [`reflex_judgment.md`](../intent/reflex_judgment.md)
+
 ### line（ラインの3軸）
 
 Track 内の処理は複数の **line** に分かれ、3つの独立した軸で規定される:

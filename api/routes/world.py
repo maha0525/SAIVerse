@@ -150,6 +150,7 @@ class AIUpdate(BaseModel):
     chronicle_enabled: Optional[bool] = None
     autonomous_chronicle_enabled: Optional[bool] = None
     auto_recall_enabled: Optional[bool] = None
+    auto_recall_enhanced: Optional[bool] = None
     memopedia_index_enabled: Optional[bool] = None
     spell_enabled: Optional[bool] = None
     language: Optional[str] = None
@@ -490,7 +491,7 @@ def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_m
     ``warning`` で返す (ペルソナ設定の画面の PUT と同じ形。
     docs/intent/persona_model_selection.md 決まったこと 2・6)。
     """
-    response = _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.autonomy_enabled, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled, autonomous_chronicle_enabled=ai.autonomous_chronicle_enabled, auto_recall_enabled=ai.auto_recall_enabled, memopedia_index_enabled=ai.memopedia_index_enabled, spell_enabled=ai.spell_enabled, language=ai.language))
+    response = _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.autonomy_enabled, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled, autonomous_chronicle_enabled=ai.autonomous_chronicle_enabled, auto_recall_enabled=ai.auto_recall_enabled, auto_recall_enhanced=ai.auto_recall_enhanced, memopedia_index_enabled=ai.memopedia_index_enabled, spell_enabled=ai.spell_enabled, language=ai.language))
     message = response["message"]
     if "[WARNING:LLM]" in message:
         base, warning = message.split("[WARNING:LLM]", 1)

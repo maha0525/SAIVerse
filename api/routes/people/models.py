@@ -158,6 +158,7 @@ class AIConfigResponse(BaseModel):
     chronicle_enabled: bool = True
     autonomous_chronicle_enabled: bool = True
     auto_recall_enabled: bool = True
+    auto_recall_enhanced: bool = False
     memory_weave_context: bool = True
     memopedia_index_enabled: bool = False
     core_memory_char_budget: Optional[int] = None  # 記憶アーキv2 ゾーンA 容量目安 (NULL → 既定 2000)
@@ -187,6 +188,7 @@ class UpdateAIConfigRequest(BaseModel):
     chronicle_enabled: Optional[bool] = None
     autonomous_chronicle_enabled: Optional[bool] = None
     auto_recall_enabled: Optional[bool] = None
+    auto_recall_enhanced: Optional[bool] = None
     memory_weave_context: Optional[bool] = None
     memopedia_index_enabled: Optional[bool] = None
     # 記憶アーキv2 ゾーンA 容量目安 (文字数)。

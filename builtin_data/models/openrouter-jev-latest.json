@@ -1,0 +1,13 @@
+{
+  "model": "typesafe/jev-latest",
+  "display_name": "Jev (OpenRouter)",
+  "provider_ref": "openrouter_systemone",
+  "group": "openrouter",
+  "context_length": 128000,
+  "supports_structured_output": false,
+  "pricing": {
+    "input_per_1m_tokens": 0.042,
+    "output_per_1m_tokens": 0.0,
+    "currency": "USD"
+  }
+}

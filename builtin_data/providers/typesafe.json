@@ -1,0 +1,22 @@
+{
+  "id": "typesafe",
+  "display_name": "TypeSafe System One",
+  "protocol": "jev_compat",
+  "base_url": "https://api.typesafe.ai",
+  "api_key_env": "TYPESAFE_API_KEY",
+  "reflex_judgment": {
+    "path": "/v1/systemone",
+    "answers_key": "answers",
+    "usage_key": "usage",
+    "answer_fields": {
+      "noul": "noul",
+      "choice": "choice",
+      "score": "score"
+    },
+    "usage_fields": {
+      "input_tokens": "input_tokens",
+      "output_tokens": "output_tokens"
+    },
+    "supported_types": ["noul", "choice", "score"]
+  }
+}

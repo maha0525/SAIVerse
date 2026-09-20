@@ -47,6 +47,7 @@ interface AIConfig {
     chronicle_enabled: boolean;
     autonomous_chronicle_enabled: boolean;
     auto_recall_enabled: boolean;
+    auto_recall_enhanced: boolean;
     memory_weave_context: boolean;
     memopedia_index_enabled: boolean;
     core_memory_char_budget: number | null;  // 記憶アーキv2 ゾーンA 容量目安 (NULL → 既定 2000)
@@ -114,6 +115,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [chronicleEnabled, setChronicleEnabled] = useState(true);
     const [autonomousChronicleEnabled, setAutonomousChronicleEnabled] = useState(true);
     const [autoRecallEnabled, setAutoRecallEnabled] = useState(true);
+    const [autoRecallEnhanced, setAutoRecallEnhanced] = useState(false);
     const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
     const [memopediaIndexEnabled, setMemopediaIndexEnabled] = useState(true);
     const [coreMemoryCharBudget, setCoreMemoryCharBudget] = useState<string>('');
@@ -230,6 +232,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setChronicleEnabled(data.chronicle_enabled ?? true);
                 setAutonomousChronicleEnabled(data.autonomous_chronicle_enabled ?? true);
                 setAutoRecallEnabled(data.auto_recall_enabled ?? true);
+                setAutoRecallEnhanced(data.auto_recall_enhanced ?? false);
                 setMemoryWeaveContext(data.memory_weave_context ?? true);
                 setMemopediaIndexEnabled(data.memopedia_index_enabled ?? false);
                 setChronicleCharBudget(
@@ -343,6 +346,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     chronicle_enabled: chronicleEnabled,
                     autonomous_chronicle_enabled: autonomousChronicleEnabled,
                     auto_recall_enabled: autoRecallEnabled,
+                    auto_recall_enhanced: autoRecallEnhanced,
                     memory_weave_context: memoryWeaveContext,
                     memopedia_index_enabled: memopediaIndexEnabled,
                     // 記憶アーキv2 ゾーンA 容量目安: 空文字列 = 既定値 (0 を送って NULL に倒す)、
@@ -696,6 +700,21 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     </label>
                                 </div>
                                 <div data-i18n="components.SettingsModal.text068" className={styles.description}>{uiText("components.SettingsModal.text068")}</div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label data-i18n="components.SettingsModal.autoRecallEnhancedLabel" className={styles.label}>{uiText("components.SettingsModal.autoRecallEnhancedLabel")}</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={autoRecallEnhanced}
+                                            onChange={(e) => setAutoRecallEnhanced(e.target.checked)}
+                                        />
+                                        <span data-i18n="components.SettingsModal.text066 components.SettingsModal.text067">{autoRecallEnhanced ? uiText("components.SettingsModal.text066") : uiText("components.SettingsModal.text067")}</span>
+                                    </label>
+                                </div>
+                                <div data-i18n="components.SettingsModal.autoRecallEnhancedDescription" className={styles.description}>{uiText("components.SettingsModal.autoRecallEnhancedDescription")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>

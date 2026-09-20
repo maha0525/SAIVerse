@@ -7683,6 +7683,14 @@
     "ja": "会話の内容に関連する記憶を自動的に思い出し、応答に反映します。無効にすると、記憶の想起はスペルによる手動想起のみになります。",
     "en": "Automatically recall memories related to the conversation and use them in replies. If disabled, memories can only be recalled manually through spells."
   },
+  "components.SettingsModal.autoRecallEnhancedLabel": {
+    "ja": "自動想起を強化する",
+    "en": "Strengthen automatic recall"
+  },
+  "components.SettingsModal.autoRecallEnhancedDescription": {
+    "ja": "思い出す候補を広めに集めたうえで、いまの話に本当に関わるものだけを反射判断のモデルに選ばせます。グローバル設定の「モデルロール」で反射判断のモデルが設定されているときだけ効きます（設定していなければ、有効にしても従来どおりの自動想起のままで、費用も増えません）。",
+    "en": "Gathers a wider set of candidate memories, then lets the reflex-judgment model keep only the ones that truly belong in the current conversation. It only takes effect while a reflex-judgment model is assigned under Model Roles in the global settings; without one, turning this on changes nothing and costs nothing."
+  },
   "components.SettingsModal.text069": {
     "ja": "Memory Weave コンテキスト",
     "en": "Memory Weave context"
@@ -11350,6 +11358,14 @@
   "modelRole.video_summary_model.desc": {
     "ja": "ユーザー添付動画の要約生成用モデル（Gemini系のみ対応）",
     "en": "Model for summarizing user video attachments (Gemini models only)"
+  },
+  "modelRole.reflex_judgment_model.label": {
+    "ja": "反射判断",
+    "en": "Reflex judgment"
+  },
+  "modelRole.reflex_judgment_model.desc": {
+    "ja": "自動想起の選別などの、型付きの質問に確率だけで答える判断に使うモデル。未設定なら反射判断は動きません",
+    "en": "Model for judgments that answer typed questions with probabilities alone, such as filtering automatic recall. Reflex judgment does not run while this is unset"
   },
   "modelPreset.openai": {
     "ja": "OpenAI",

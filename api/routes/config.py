@@ -411,7 +411,8 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
     既に新しい世代が適用済みなら 409 (呼び出し側は現在状態を取り直す)。省略時は
     従来どおり無条件適用 (他の呼び出し元との互換)。適用自体はロックで直列化する。
 
-    設定ファイルの無いモデルの名前は 400 で断り、理由を返す
+    その役割に使えないモデルの名前 (設定ファイルが無い名前と、反射判断専用の宛先) は
+    400 で断り、理由を返す
     (docs/intent/persona_model_selection.md 決まったこと 6)。適用
     (manager.set_model) は、この世代ガードのロックの内側で、設定のロック
     (MODEL_SETTINGS_LOCK) を取って行う。応答の ``notices`` は、新しいモデルに
@@ -419,11 +420,16 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
     """
     requested = (req.model or "").strip()
     if requested:
-        from saiverse.model_defaults import role_model_is_defined
-        from saiverse.persona_model_selection import undefined_override_message
+        from saiverse.persona_model_selection import (
+            rejected_override_message,
+            save_rejection_reason,
+        )
 
-        if not role_model_is_defined("default_model", requested):
-            raise HTTPException(status_code=400, detail=undefined_override_message(requested))
+        reason = save_rejection_reason("default_model", requested)
+        if reason is not None:
+            raise HTTPException(
+                status_code=400, detail=rejected_override_message(requested, reason),
+            )
 
     with _MODEL_CHANGE_LOCK:
         if req.seq is not None and req.client_id:

@@ -2353,6 +2353,25 @@ class SEARuntime:
         finally:
             db.close()
 
+    def _is_auto_recall_enhanced_for_persona(self, persona) -> bool:
+        """Check per-persona「自動想起を強化する」トグルを DB から確認する。
+
+        True の場合、sea/auto_recall.py は候補の拾い上げを広げ、採否を反射判断
+        (docs/intent/reflex_judgment.md) に問う。ON でも、モデルの役割「反射判断」に
+        モデルが割り当てられていなければ従来どおりの埋め込みしきい値判定のまま
+        (黙って費用が発生する経路を作らない)。デフォルト False。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return False  # fallback: disabled (費用が出る側へ倒さない)
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return bool(ai.AUTO_RECALL_ENHANCED) if ai else False
+        finally:
+            db.close()
+
     def _is_spell_enabled_for_persona(self, persona) -> bool:
         """Check per-persona spell system toggle from DB."""
         persona_id = getattr(persona, "persona_id", None)

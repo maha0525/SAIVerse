@@ -1,0 +1,22 @@
+{
+  "id": "openrouter_systemone",
+  "display_name": "OpenRouter (System One)",
+  "protocol": "jev_compat",
+  "base_url": "https://openrouter.ai",
+  "api_key_env": "OPENROUTER_API_KEY",
+  "reflex_judgment": {
+    "path": "/api/alpha/decisions",
+    "answers_key": "answers",
+    "usage_key": "usage",
+    "answer_fields": {
+      "noul": "noul",
+      "choice": "choice",
+      "score": "score"
+    },
+    "usage_fields": {
+      "input_tokens": "input_tokens",
+      "output_tokens": "output_tokens"
+    },
+    "supported_types": ["noul", "choice", "score"]
+  }
+}

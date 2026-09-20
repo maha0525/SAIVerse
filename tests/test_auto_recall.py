@@ -11,6 +11,36 @@ from unittest.mock import patch
 
 from sai_memory.unified_recall import RecallHit
 from sea import auto_recall
+from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
+
+# 反射判断の役割の env を消してから走らせる (このファイルは cosine 方式の担当)。
+#
+# 強化の経路に入るには「ペルソナのスイッチ ON」と「役割にモデル割り当てあり」の
+# 両方が要る。このファイルは run_auto_recall を enhanced 引数なし (= False) で
+# 呼ぶので、役割が埋まっていても経路には入らない — それでも開発機の
+# `SAIVERSE_REFLEX_JUDGMENT_MODEL` を消しておく。スイッチの既定が将来変わったときに
+# ユニットテストが実 API を呼ぶ事故を、ここで止めておきたいため。強化経路の検証は
+# tests/test_auto_recall_jev.py の担当。
+#
+# pytest の autouse fixture ではなく setUpModule/tearDownModule なのは、この
+# ファイルが `python -m unittest` でも回る入口 (末尾の unittest.main() と
+# docs/developer-guide/testing.md) を持つため — fixture は unittest ランナーでは
+# 実行されず、実キー環境の unittest 実行が実 API へ送信してしまう (Codex 4 巡目)。
+# setUpModule は pytest からも呼ばれるので、両ランナーで同じ隔離が効く。
+_REFLEX_ENV_KEYS = ("SAIVERSE_REFLEX_JUDGMENT_MODEL", "TYPESAFE_API_KEY")
+_saved_reflex_env: dict = {}
+
+
+def setUpModule():
+    for key in _REFLEX_ENV_KEYS:
+        _saved_reflex_env[key] = os.environ.pop(key, None)
+
+
+def tearDownModule():
+    for key, value in _saved_reflex_env.items():
+        if value is not None:
+            os.environ[key] = value
+    _saved_reflex_env.clear()
 
 
 def _hit(source_type, source_id, *, embed_score, title="タイトル", content="内容テキスト",
@@ -734,6 +764,133 @@ class TestQueryDefaults(AutoRecallBase):
         self.assertEqual(auto_recall.build_query(messages), "3つ目")
 
 
+def _perception(text, **metadata):
+    """送信直前に差し込まれる知覚ブロック (部屋の様子・通知) を 1 枚作る。
+
+    実物 (sea/runtime_context.py::list_presented_perception_blocks) と同じ形 —
+    role="user" / content は ``<system>`` 包み / metadata に
+    ``CONSUMED_PERCEPTION_KEY``。
+    """
+    meta = {"tags": ["internal", "event_message", "perception"],
+            CONSUMED_PERCEPTION_KEY: True}
+    meta.update(metadata)
+    return {"role": "user", "content": f"<system>{text}</system>", "metadata": meta}
+
+
+class TestPerceptionBlockDoesNotHijackQuery(AutoRecallBase):
+    """知覚ブロック (部屋の様子・通知) がクエリの種を乗っ取らない。
+
+    2026-09-06 に部屋の描画が head の ``__visual_context__`` から知覚ブロックへ
+    引っ越したとき、``_is_conversational_message`` の除外リストが追従せず、
+    ユーザーの発言の後ろに挟まったブロックがクエリの種になっていた
+    (本番実測: 2026-09-18 21:28 のターン)。これは Jev の ON/OFF を問わない
+    挙動修正なので、cosine 方式担当のこのファイルで固定する。
+
+    種の優先順位は 3 段 — このターンのユーザー発言 > (発言が無ければ) 直近の
+    通知・部屋の様子 > (それも無ければ) 直近の assistant 発言。
+    """
+
+    def test_user_utterance_wins_over_trailing_perception_block(self):
+        messages = [
+            {"role": "user", "content": "十条まで歩いた日のこと覚えてる？"},
+            _perception("部屋の様子: エリスが部屋に入ってきた"),
+        ]
+        self.assertEqual(
+            auto_recall.build_query(messages), "十条まで歩いた日のこと覚えてる？",
+        )
+
+    def test_multiple_trailing_blocks_do_not_displace_the_utterance(self):
+        messages = [
+            {"role": "user", "content": "十条の話"},
+            _perception("部屋の様子: 誰かが入ってきた"),
+            _perception("通知: スペルの結果が届きました"),
+        ]
+        self.assertEqual(auto_recall.build_query(messages), "十条の話")
+
+    def test_autonomous_turn_falls_back_to_the_perception_block(self):
+        """会話文の末尾が assistant のターンは、従来どおり知覚ブロックが種になる。
+
+        「見たものに対して想起が走る」経路は残す (直したのは、ユーザーの発言が
+        種の座から押し出されることだけ)。
+        """
+        messages = [
+            {"role": "user", "content": "おはよう"},
+            {"role": "assistant", "content": "おはよう、まはー"},
+            _perception("部屋の様子: 窓の外で雨が降り始めた"),
+        ]
+        self.assertEqual(
+            auto_recall.build_query(messages), "部屋の様子: 窓の外で雨が降り始めた",
+        )
+
+    def test_perception_only_history_still_seeds_the_query(self):
+        messages = [_perception("通知: 予定の時刻になりました")]
+        self.assertEqual(
+            auto_recall.build_query(messages), "通知: 予定の時刻になりました",
+        )
+
+    def test_no_perception_block_keeps_the_previous_query(self):
+        messages = _msgs(("user", "1つ目"), ("assistant", "2つ目"))
+        self.assertEqual(auto_recall.build_query(messages), "2つ目")
+        self.assertEqual(auto_recall.build_query(_msgs(("user", "発言だけ"))), "発言だけ")
+        self.assertEqual(auto_recall.build_query([]), "")
+
+    def test_plain_system_notice_is_still_a_conversational_message(self):
+        """metadata に目印の無い ``<system>`` 通知 (スケジュール等) は従来どおり種になる。
+
+        知覚ブロックではなく普通の user メッセージとして履歴に入るので、この修正の
+        影響を受けない。
+        """
+        messages = [
+            {"role": "user", "content": "十条の話"},
+            {"role": "user", "content": "<system>スケジュールの実行時刻です</system>"},
+        ]
+        self.assertEqual(
+            auto_recall.build_query(messages),
+            "<system>スケジュールの実行時刻です</system>",
+        )
+
+    def test_entity_trigger_reads_the_utterance_not_the_block(self):
+        """エンティティトリガーの「最新ユーザー発話」も乗っ取られない。"""
+        rows = [("page_aifi", 12, "アイフィ", "アイフィの要約テキスト")]
+        messages = [
+            {"role": "user", "content": "アイフィの話をしていたよね"},
+            _perception("部屋の様子: エリスが部屋に入ってきた"),
+        ]
+        with patch("sea.auto_recall._fetch_memopedia_titles", return_value=rows), \
+             patch("sai_memory.unified_recall.unified_recall", return_value=[]):
+            res = auto_recall.run_auto_recall(
+                conn=object(), embedder=object(), messages=messages,
+                persona_id=self.PERSONA, thread_id=self.THREAD,
+            )
+        self.assertTrue(res.injected)
+        self.assertIn("アイフィ", res.block)
+
+    def test_perception_block_is_not_counted_as_context_message(self):
+        """``_context_message_ids`` にも知覚ブロックは入らない (id を持たないが念のため)。"""
+        block = _perception("部屋の様子")
+        block["id"] = "perception-1"
+        ids = auto_recall._context_message_ids(
+            [{"role": "user", "content": "発話", "id": "m1"}, block],
+        )
+        self.assertEqual(ids, {"m1"})
+
+    def test_latest_user_message_skips_the_perception_block(self):
+        """添付概要の取得元も乗っ取られない (知覚ブロックは media を持ちうる)。"""
+        os.environ["SAIVERSE_MEDIA_RECALL_ENABLED"] = "true"
+        try:
+            messages = [
+                {"role": "user", "content": "これ覚えてる？",
+                 "metadata": {"images": [{"summary": "猫の写真です。"}]}},
+                _perception("部屋の様子", media=[{"summary": "部屋に貼られたポスター"}]),
+            ]
+            query = auto_recall.build_query(messages)
+            self.assertIn("これ覚えてる？", query)
+            self.assertIn("猫の写真です。", query)
+            self.assertNotIn("部屋に貼られたポスター", query)
+        finally:
+            os.environ.pop("SAIVERSE_MEDIA_RECALL_ENABLED", None)
+
+
 class TestThreadLedgerIsolation(AutoRecallBase):
     """sticky 台帳の thread 分離 (2026-07-12 監査 P1)。
 
@@ -953,6 +1110,7 @@ class TestPersonaToggleGate(unittest.TestCase):
         runtime = SimpleNamespace(
             manager=None,
             _is_auto_recall_enabled_for_persona=lambda persona: True,
+            _is_auto_recall_enhanced_for_persona=lambda persona: False,
         )
         messages = _msgs(("user", "こんにちは"))
         empty_result = AutoRecallResult(
@@ -968,6 +1126,62 @@ class TestPersonaToggleGate(unittest.TestCase):
                 pulse_type="user",
             )
         mock_run.assert_called_once()
+        self.assertIs(mock_run.call_args.kwargs["enhanced"], False)
+
+    def test_enhanced_switch_is_passed_through_to_run_auto_recall(self):
+        """「自動想起を強化する」は呼び出し側が読んで旗として渡す。
+
+        run_auto_recall は persona_id 文字列しか受けないので、persona オブジェクトを
+        持つ _maybe_inject_auto_recall が DB から読んで渡す配線を固定する。
+        """
+        from sea.runtime_context import _maybe_inject_auto_recall
+        from sea.auto_recall import AutoRecallResult
+
+        runtime = SimpleNamespace(
+            manager=None,
+            _is_auto_recall_enabled_for_persona=lambda persona: True,
+            _is_auto_recall_enhanced_for_persona=lambda persona: True,
+        )
+        empty_result = AutoRecallResult(
+            injected=False, block=None, query="", hit_count=0,
+            accepted_count=0, ledger_size=0, char_count=0, plain_text=None,
+        )
+        with patch(
+            "sea.auto_recall.run_auto_recall",
+            return_value=empty_result,
+        ) as mock_run:
+            _maybe_inject_auto_recall(
+                runtime, self._persona(), _msgs(("user", "こんにちは")),
+                pulse_type="user",
+            )
+        self.assertIs(mock_run.call_args.kwargs["enhanced"], True)
+
+    def test_unreadable_enhanced_switch_falls_back_to_off(self):
+        """スイッチを読めなかった回は OFF に倒す (費用の出る側を既定にしない)。"""
+        from sea.runtime_context import _maybe_inject_auto_recall
+        from sea.auto_recall import AutoRecallResult
+
+        def _explode(persona):
+            raise RuntimeError("DB is unavailable")
+
+        runtime = SimpleNamespace(
+            manager=None,
+            _is_auto_recall_enabled_for_persona=lambda persona: True,
+            _is_auto_recall_enhanced_for_persona=_explode,
+        )
+        empty_result = AutoRecallResult(
+            injected=False, block=None, query="", hit_count=0,
+            accepted_count=0, ledger_size=0, char_count=0, plain_text=None,
+        )
+        with patch(
+            "sea.auto_recall.run_auto_recall",
+            return_value=empty_result,
+        ) as mock_run:
+            _maybe_inject_auto_recall(
+                runtime, self._persona(), _msgs(("user", "こんにちは")),
+                pulse_type="user",
+            )
+        self.assertIs(mock_run.call_args.kwargs["enhanced"], False)
 
 
 if __name__ == "__main__":

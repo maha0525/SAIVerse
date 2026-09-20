@@ -682,7 +682,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # ---- 自動想起 第0層 (ゾーン C) — 「浮かんだ記憶」の末尾注入 ----
     # 記憶アーキv2 §4。CONVERSATION アスペクト (user/schedule Pulse) のときのみ、
     # ローカル埋め込み検索で現在の話題に関連する記憶を末尾に一時注入する。
-    # head 非混入・SAIMemory 非永続 (§10-2/§10-7)。LLM は呼ばない (§10-1)。
+    # head 非混入・SAIMemory 非永続 (§10-2/§10-7)。LLM は呼ばない (§10-1。唯一の
+    # 例外は既定 OFF の Jev 選別層 — ON のときだけ判定専用の外部 API へ 1 往復する。
+    # docs/intent/auto_recall_jev_rerank.md)。
     # サブライン (line='sub') はそもそも _prepare_context を通らないので自然に除外。
     if not preview_only:
         try:
@@ -1178,10 +1180,24 @@ def _maybe_inject_auto_recall(
         )
         return
 
+    # ペルソナ単位の「自動想起を強化する」スイッチ (AUTO_RECALL_ENHANCED)。
+    # run_auto_recall は persona_id 文字列しか受けないので、persona オブジェクトを
+    # 持っているここで読んで旗として渡す (docs/intent/reflex_judgment.md §4)。
+    # 読めなかった回は OFF に倒す — 費用の出る側を既定にしない。
+    try:
+        enhanced = bool(runtime._is_auto_recall_enhanced_for_persona(persona))
+    except Exception:
+        LOGGER.warning(
+            "[sea][auto_recall] failed to read AUTO_RECALL_ENHANCED (persona=%s); "
+            "treating it as off", persona_id, exc_info=True,
+        )
+        enhanced = False
+
     from sea.auto_recall import run_auto_recall
 
     result = run_auto_recall(
-        conn, embedder, messages, persona_id=persona_id, thread_id=thread_id,
+        conn, embedder, messages,
+        persona_id=persona_id, thread_id=thread_id, enhanced=enhanced,
     )
     if not result.injected or not result.block:
         return

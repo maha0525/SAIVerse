@@ -1219,6 +1219,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
                 "AUTONOMOUS_CHRONICLE_ENABLED": ai.AUTONOMOUS_CHRONICLE_ENABLED,
                 "AUTO_RECALL_ENABLED": ai.AUTO_RECALL_ENABLED,
+                "AUTO_RECALL_ENHANCED": ai.AUTO_RECALL_ENHANCED,
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
                 "MEMOPEDIA_INDEX_ENABLED": ai.MEMOPEDIA_INDEX_ENABLED,
                 "CORE_MEMORY_CHAR_BUDGET": ai.CORE_MEMORY_CHAR_BUDGET,
@@ -1292,6 +1293,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         chronicle_enabled: Optional[bool] = None,
         autonomous_chronicle_enabled: Optional[bool] = None,
         auto_recall_enabled: Optional[bool] = None,
+        auto_recall_enhanced: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
         memopedia_index_enabled: Optional[bool] = None,
         core_memory_char_budget: Optional[int] = None,
@@ -1339,11 +1341,11 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     )
                     return f"Error: Failed to process avatar upload: {exc}"
 
-            from saiverse.model_defaults import role_model_is_defined
             from saiverse.persona_model_selection import (
                 MODEL_SETTINGS_LOCK,
                 reapply_speaking_models,
                 rejected_persona_model_message,
+                save_rejection_reason,
             )
 
             llm_warnings: List[str] = []
@@ -1355,7 +1357,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 db.refresh(ai)
 
                 def _checked(role: str, requested: Optional[str], stored: Optional[str]) -> Optional[str]:
-                    """設定ファイルの無いモデルの名前は保存せず、いまの値を返す (決まったこと 6)。
+                    """その役割に使えないモデルの名前は保存せず、いまの値を返す (決まったこと 6)。
+
+                    断るのは二通り — 設定ファイルがその名前で見つからない値と、定義は
+                    あるがその役割では使えない宛先 (会話の欄に、型付きの質問にしか
+                    答えない反射判断専用のモデル)。判定はグローバル設定の保存と同じ
+                    一本 (saiverse/persona_model_selection.py の save_rejection_reason)。
 
                     空の値 (個別の設定を外す) は受け付ける。いまと同じ名前は新しい
                     保存ではないので断らない — ほかの欄だけ保存したときに、前から
@@ -1364,18 +1371,11 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     value = requested or None
                     if value is None or value == stored:
                         return value
-                    try:
-                        defined = role_model_is_defined(role, value)
-                    except Exception:
-                        logging.warning(
-                            "Model config check failed (role=%s value=%r persona=%s); not saving it",
-                            role, value, ai_id, exc_info=True,
-                        )
-                        defined = False
-                    if defined:
+                    reason = save_rejection_reason(role, value)
+                    if reason is None:
                         return value
                     llm_warnings.append(rejected_persona_model_message(
-                        name, role, value, stored=stored, persona=persona,
+                        name, role, value, stored=stored, persona=persona, reason=reason,
                     ))
                     return stored
 
@@ -1416,6 +1416,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 # Update auto-recall (記憶アーキv2 ゾーン C) per-persona toggle
                 if auto_recall_enabled is not None:
                     ai.AUTO_RECALL_ENABLED = auto_recall_enabled
+                # Update 自動想起の強化 (反射判断に選別を任せる) per-persona toggle
+                if auto_recall_enhanced is not None:
+                    ai.AUTO_RECALL_ENHANCED = auto_recall_enhanced
                 # Update Memory Weave context injection toggle
                 if memory_weave_context is not None:
                     ai.MEMORY_WEAVE_CONTEXT = memory_weave_context

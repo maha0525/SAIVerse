@@ -300,6 +300,11 @@ _GEMINI_FALLBACK_ROLES = {
 # Provider presets: values are config keys (filename stems).
 # image_summary_model is also a config key (resolved via find_model_config at runtime).
 # None means "not applicable for this provider" — will fall back to Gemini default if available.
+#
+# 反射判断 (reflex_judgment_model) はどのプリセットにも意図的に載せない。役割への
+# 割り当てはユーザーの明示の行為に限り、プリセットを当てただけで黙って費用の発生する
+# 経路を作らない (docs/intent/reflex_judgment.md §4 の裁定)。役割を持たないプリセットは
+# 下の適用ループが model_id is None で素通りする。
 PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
     "gemini_paid": {
         "default_model": "gemini-3-flash-preview-paid",

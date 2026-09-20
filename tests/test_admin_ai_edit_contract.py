@@ -124,6 +124,7 @@ class AdminAiEditContractTest(unittest.TestCase):
             chronicle_enabled=False,
             autonomous_chronicle_enabled=False,
             auto_recall_enabled=False,
+            auto_recall_enhanced=True,
             memory_weave_context=False,
             memopedia_index_enabled=True,
             core_memory_char_budget=1234,
@@ -151,6 +152,7 @@ class AdminAiEditContractTest(unittest.TestCase):
         self.assertFalse(details["CHRONICLE_ENABLED"])
         self.assertFalse(details["AUTONOMOUS_CHRONICLE_ENABLED"])
         self.assertFalse(details["AUTO_RECALL_ENABLED"])
+        self.assertTrue(details["AUTO_RECALL_ENHANCED"])
         self.assertFalse(details["MEMORY_WEAVE_CONTEXT"])
         self.assertTrue(details["MEMOPEDIA_INDEX_ENABLED"])
         self.assertEqual(details["CORE_MEMORY_CHAR_BUDGET"], 1234)
@@ -191,6 +193,7 @@ class AdminAiEditContractTest(unittest.TestCase):
             chronicle_enabled=False,
             autonomous_chronicle_enabled=False,
             auto_recall_enabled=False,
+            auto_recall_enhanced=True,
             memory_weave_context=False,
             memopedia_index_enabled=True,
             spell_enabled=False,
@@ -206,6 +209,7 @@ class AdminAiEditContractTest(unittest.TestCase):
         self.assertFalse(row.CHRONICLE_ENABLED)
         self.assertFalse(row.AUTONOMOUS_CHRONICLE_ENABLED)
         self.assertFalse(row.AUTO_RECALL_ENABLED)
+        self.assertTrue(row.AUTO_RECALL_ENHANCED)
         self.assertFalse(row.MEMORY_WEAVE_CONTEXT)
         self.assertTrue(row.MEMOPEDIA_INDEX_ENABLED)
         self.assertFalse(row.SPELL_ENABLED)

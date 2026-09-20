@@ -86,6 +86,10 @@ saiverse/
 ├── judgment_points.py      # 判断点コーディネータ（起床/セッション終了/イベント到着/就寝の動的スキーマ +
 │                           #   起動、judgment_points.md）
 ├── llm_router.py           # ツール呼び出し判定
+├── reflex_judgment.py      # 反射判断 — 状況と型付きの質問 (noul / choice / score) を渡すと確率・選択・数値だけが返る層。
+│                           #   答える側はモデルの役割「反射判断」への割り当てで決まり、宛先の path・応答の欄の方言・
+│                           #   対応する型は provider 設定の reflex_judgment 欄で宣言する（reflex_judgment.md）。
+│                           #   最初の利用者は自動想起の選別（auto_recall_jev_rerank.md）
 ├── gemini_clients.py       # Router/LLM client共通のGemini SDK client構築
 ├── model_configs.py        # モデル設定管理
 ├── model_defaults.py       # 組み込みデフォルトモデル / モデル役割と環境変数の表 / 定義の無いモデル設定を警告の文面にする判定

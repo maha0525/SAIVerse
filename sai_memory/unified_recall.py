@@ -12,7 +12,7 @@ import logging
 import sqlite3
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -648,6 +648,26 @@ SOURCE_ALLOCATIONS = {
 FOCUS_MULTIPLIER = 4
 
 
+# LIKE パターンのエスケープ文字。``keywords`` を明示指定された経路でだけ使う
+# (既定の ``query.split()`` 経路は SQL を 1 文字も変えない)。
+_LIKE_ESCAPE_CHAR = "\\"
+_LIKE_ESCAPE_CLAUSE = " ESCAPE '\\'"
+
+
+def _escape_like(text: str) -> str:
+    """LIKE の部分一致パターンに埋める文字列から ``%`` / ``_`` / ``\\`` を無害化する。
+
+    呼び出し側が渡すキーワードは「本文にその文字列が出るか」の問いであって
+    ワイルドカードではない。エスケープなしだと ``100%`` のような語が全件一致に
+    化け、``_`` 混じりの識別子が任意の 1 文字にマッチしてしまう。
+    """
+    return (
+        text.replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR * 2)
+        .replace("%", _LIKE_ESCAPE_CHAR + "%")
+        .replace("_", _LIKE_ESCAPE_CHAR + "_")
+    )
+
+
 def _format_timestamp(ts: Optional[int]) -> str:
     if not ts:
         return "?"
@@ -679,6 +699,9 @@ def unified_recall(
     search_perceptions: bool = False,
     chronicle_level: int = 1,
     persona_id: Optional[str] = None,
+    keywords: Optional[List[str]] = None,
+    exclude_message_ids: Optional[set] = None,
+    source_allocations: Optional[Dict[str, int]] = None,
 ) -> List[RecallHit]:
     """Search across Chronicle, Memopedia, Fragments, and Messages using hybrid search.
 
@@ -704,29 +727,62 @@ def unified_recall(
             ヒットした場合は Chronicle 側へ寄せる (二重表示しない)。
         chronicle_level: Chronicle level to search (default: 1).
         persona_id: Persona ID for URI generation.
+        keywords: キーワード検索に使う語のリスト。``None`` (既定) なら従来どおり
+            ``query.split()``。空白で語を切れない日本語クエリでは、split がクエリ
+            全文を 1 個の巨大キーワードにしてしまい何にもマッチしないため、
+            呼び出し側が抽出した語を渡せるようにしてある。空リストは
+            「キーワード検索をしない」(埋め込みだけで探す)。渡された語は
+            LIKE の部分一致として扱い、``%`` / ``_`` はエスケープする
+            (ワイルドカードにはならない)。
+        exclude_message_ids: message ソースの**収集段階**で除外する message_id の
+            集合。``None`` (既定) なら何も除外しない。選抜前に外すので、除外した
+            分だけ message 枠が空き、別のメッセージで埋まる (後段で捨てると枠を
+            食い潰したまま件数だけ減る)。
+        source_allocations: ソース種別ごとの枠の上書き。``None`` (既定) なら
+            ``SOURCE_ALLOCATIONS``。キーが無いソースはグローバルへフォールバック
+            する。``focus`` の倍率はこの値に対して掛かる。
 
     Returns:
         List of RecallHit sorted by fused score descending.
     """
     # --- Compute per-source allocations ---
+    def _alloc(name: str, default: int) -> int:
+        if source_allocations is not None and name in source_allocations:
+            return int(source_allocations[name])
+        return SOURCE_ALLOCATIONS.get(name, default)
+
     source_caps: dict[str, int] = {}
     if search_chronicle:
-        base = SOURCE_ALLOCATIONS.get("chronicle", 3)
+        base = _alloc("chronicle", 3)
         source_caps["chronicle"] = base * (FOCUS_MULTIPLIER if focus == "chronicle" else 1)
     if search_memopedia:
-        base = SOURCE_ALLOCATIONS.get("memopedia", 1)
+        base = _alloc("memopedia", 1)
         source_caps["memopedia"] = base * (FOCUS_MULTIPLIER if focus == "memopedia" else 1)
     if search_fragments:
-        base = SOURCE_ALLOCATIONS.get("fragment", 5)
+        base = _alloc("fragment", 5)
         source_caps["fragment"] = base * (FOCUS_MULTIPLIER if focus == "fragment" else 1)
     if search_messages:
-        base = SOURCE_ALLOCATIONS.get("message", 1)
+        base = _alloc("message", 1)
         source_caps["message"] = base * (FOCUS_MULTIPLIER if focus == "message" else 1)
     if search_perceptions:
-        base = SOURCE_ALLOCATIONS.get("perception", 1)
+        base = _alloc("perception", 1)
         source_caps["perception"] = base * (FOCUS_MULTIPLIER if focus == "perception" else 1)
 
     total_cap = topk if topk is not None else sum(source_caps.values())
+
+    excluded_msg_ids: set = (
+        {str(m) for m in exclude_message_ids} if exclude_message_ids else set()
+    )
+
+    # 拡張引数がひとつでも渡された呼び出しか。embed_score の全件補完はこの経路で
+    # だけ効かせる — 従来の呼び出し (全引数が既定) では返り値も 1 ビット変えない
+    # (auto_recall の OFF 不変条件が「既定呼び出しの挙動は変わらない」を前提に
+    # している。補完自体は意味的にはどの経路でも正しいが、約束を優先する)。
+    extended_call = (
+        keywords is not None
+        or bool(excluded_msg_ids)
+        or source_allocations is not None
+    )
 
     # --- Keyword search ---
     # Search per-keyword and count matches per entry, avoiding OR+limit issues.
@@ -736,15 +792,24 @@ def unified_recall(
     keyword_hits: dict[tuple, RecallHit] = {}  # (source_type, source_id) → hit
     keyword_match_count: dict[tuple, int] = {}  # 同キー → number of keywords matched
 
-    query_keywords = query.split()
+    # ``keywords`` 未指定 (既定) のときは SQL も引数も従来と 1 文字も変えない。
+    # 指定されたときだけ ``%`` / ``_`` をエスケープし、ESCAPE 句を足す。
+    if keywords is None:
+        query_keywords = query.split()
+        like_patterns = [f"%{kw}%" for kw in query_keywords]
+        like_escape = ""
+    else:
+        query_keywords = [str(kw) for kw in keywords if str(kw).strip()]
+        like_patterns = [f"%{_escape_like(kw)}%" for kw in query_keywords]
+        like_escape = _LIKE_ESCAPE_CLAUSE
 
     if search_chronicle:
         # For each keyword, find matching Chronicle entry IDs
         kw_id_sets: list[set[str]] = []
-        for kw in query_keywords:
+        for pattern in like_patterns:
             cur = conn.execute(
-                "SELECT id FROM arasuji_entries WHERE content LIKE ? AND level = ?",
-                (f"%{kw}%", chronicle_level),
+                f"SELECT id FROM arasuji_entries WHERE content LIKE ?{like_escape} AND level = ?",
+                (pattern, chronicle_level),
             )
             kw_id_sets.append({row[0] for row in cur.fetchall()})
 
@@ -784,14 +849,15 @@ def unified_recall(
         # Chronicle エントリ (同居ページ) は除外 — 専用ソースが持つ
         # (get_memopedia_embeddings の docstring)。
         kw_id_sets = []
-        for kw in query_keywords:
+        for pattern in like_patterns:
             cur = conn.execute(
                 "SELECT id FROM memopedia_pages WHERE "
-                "(title LIKE ? OR summary LIKE ? OR content LIKE ?) "
+                f"(title LIKE ?{like_escape} OR summary LIKE ?{like_escape} "
+                f"OR content LIKE ?{like_escape}) "
                 "AND id NOT LIKE 'root_%' "
                 "AND (is_deleted = 0 OR is_deleted IS NULL) "
                 "AND (category IS NULL OR category != 'chronicle')",
-                (f"%{kw}%", f"%{kw}%", f"%{kw}%"),
+                (pattern, pattern, pattern),
             )
             kw_id_sets.append({row[0] for row in cur.fetchall()})
 
@@ -820,14 +886,14 @@ def unified_recall(
 
     if search_fragments:
         kw_id_sets = []
-        for kw in query_keywords:
+        for pattern in like_patterns:
             # 可視性は embedding 経路 (get_fragment_embeddings) と共通:
             # 親ページがごみ箱 (is_deleted=1) / 孤児の Fragment は検索に出さない。
             cur = conn.execute(
                 f"SELECT f.id FROM memopedia_fragments f "
                 f"{_FRAGMENT_VISIBILITY_JOIN} "
-                f"WHERE f.content LIKE ? AND {_FRAGMENT_VISIBILITY_WHERE}",
-                (f"%{kw}%",),
+                f"WHERE f.content LIKE ?{like_escape} AND {_FRAGMENT_VISIBILITY_WHERE}",
+                (pattern,),
             )
             kw_id_sets.append({row[0] for row in cur.fetchall()})
 
@@ -872,12 +938,16 @@ def unified_recall(
 
         msg_clause, msg_params = real_conversation_filter()
         kw_id_sets = []
-        for kw in query_keywords:
+        for pattern in like_patterns:
             cur = conn.execute(
-                f"SELECT id FROM messages WHERE content LIKE ? AND {msg_clause}",
-                (f"%{kw}%", *msg_params),
+                f"SELECT id FROM messages WHERE content LIKE ?{like_escape} AND {msg_clause}",
+                (pattern, *msg_params),
             )
-            kw_id_sets.append({row[0] for row in cur.fetchall()})
+            ids = {row[0] for row in cur.fetchall()}
+            # 収集段階で除外する (選抜前に外さないと message 枠を食い潰す)。
+            if excluded_msg_ids:
+                ids = {i for i in ids if str(i) not in excluded_msg_ids}
+            kw_id_sets.append(ids)
 
         all_message_ids: set[str] = set()
         for ids in kw_id_sets:
@@ -921,10 +991,11 @@ def unified_recall(
         # (source_type, source_id) の名前空間化が防ぐ。
         kw_id_sets = []
         try:
-            for kw in query_keywords:
+            for pattern in like_patterns:
                 cur = conn.execute(
-                    "SELECT id FROM perception_batches WHERE rendered_text LIKE ?",
-                    (f"%{kw}%",),
+                    "SELECT id FROM perception_batches WHERE rendered_text LIKE ?"
+                    f"{like_escape}",
+                    (pattern,),
                 )
                 kw_id_sets.append({f"perception:{row[0]}" for row in cur.fetchall()})
         except sqlite3.OperationalError:
@@ -969,6 +1040,13 @@ def unified_recall(
     # キーは keyword_hits と同じ (source_type, source_id) の名前空間。
     embedding_hits: dict[tuple, RecallHit] = {}
 
+    # 埋め込みスキャンで計算した cosine を**全件**保持する (上位 total_cap*2 に
+    # 絞る前の値)。キーワードだけで拾われたヒットは embedding_hits に双子が居ない
+    # ことがあり、それだと embed_score が None のまま返る — cosine でしきい値
+    # 判定をする呼び出し側 (sea/auto_recall.py) から見ると「類似度が測れなかった」
+    # と区別が付かない。値は 1 行あたり float 1 個。
+    embed_all_scores: dict[tuple, float] = {}
+
     vectors = embedder.embed([query], is_query=True)
     q = np.array(vectors[0], dtype=np.float32)
     vector_dim = q.shape[0]
@@ -981,6 +1059,7 @@ def unified_recall(
                 continue
             v = np.array(vec, dtype=np.float32)
             score = _cosine_sim(q, v)
+            embed_all_scores[("chronicle", entry_id)] = score
             time_range = _format_time_range(start_time, end_time)
             scored.append((entry_id, score, RecallHit(
                 source_type="chronicle",
@@ -1007,6 +1086,7 @@ def unified_recall(
                 continue
             v = np.array(vec, dtype=np.float32)
             score = _cosine_sim(q, v)
+            embed_all_scores[("memopedia", page_id)] = score
             scored.append((page_id, score, RecallHit(
                 source_type="memopedia",
                 source_id=page_id,
@@ -1030,6 +1110,7 @@ def unified_recall(
                 continue
             v = np.array(vec, dtype=np.float32)
             score = _cosine_sim(q, v)
+            embed_all_scores[("fragment", frag_id)] = score
             scored.append((frag_id, score, RecallHit(
                 source_type="fragment",
                 source_id=frag_id,
@@ -1056,11 +1137,19 @@ def unified_recall(
         for msg_id, vec, chunk_index, content, role, created_at in corpus:
             if len(vec) != vector_dim:
                 continue
+            # 収集段階で除外する (キーワード経路と同じ境界)。
+            if excluded_msg_ids and str(msg_id) in excluded_msg_ids:
+                continue
             v = np.array(vec, dtype=np.float32)
             score = _cosine_sim(q, v)
             prev = best_by_message.get(msg_id)
             if prev is None or score > prev[0]:
                 best_by_message[msg_id] = (score, chunk_index, content, role, created_at)
+
+        for msg_id, best in best_by_message.items():
+            # message は chunk 単位で走査するので、全件マップには message ごとの
+            # ベストチャンク値を載せる (embedding_hits と同じ粒度)。
+            embed_all_scores[("message", msg_id)] = best[0]
 
         scored_list = sorted(best_by_message.items(), key=lambda kv: kv[1][0], reverse=True)
         for msg_id, (score, chunk_index, content, role, created_at) in scored_list[:total_cap * 2]:
@@ -1149,6 +1238,12 @@ def unified_recall(
                 embed_twin = embedding_hits.get(sid)
                 if embed_twin is not None:
                     hit.embed_score = embed_twin.embed_score
+                elif extended_call:
+                    # 双子が居ない = 埋め込み上位 total_cap*2 の外だっただけで、
+                    # cosine 自体は全件スキャンで計算済み。キーワードで拾われた
+                    # ヒットにも正しい cosine を付ける。既定呼び出しでは付けない
+                    # (上の extended_call のコメント参照)。
+                    hit.embed_score = embed_all_scores.get(sid)
             selected.append(hit)
             source_counts[st] = source_counts.get(st, 0) + 1
         return selected

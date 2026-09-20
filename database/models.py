@@ -90,6 +90,11 @@ class AI(Base):
     # 一切行わず粘着台帳もリセットする。手動想起 (recall_entry/recall_navigate スペル)
     # には影響しない。デフォルト ON (2026-07-04 決定)。
     AUTO_RECALL_ENABLED = Column(Boolean, default=True, nullable=False)
+    # 自動想起の選別を反射判断 (docs/intent/reflex_judgment.md) に任せる per-persona
+    # スイッチ。ON にしても、モデルの役割「反射判断」にモデルが割り当てられていなければ
+    # 判定は走らない (黙って費用が発生する経路を作らないため)。AUTO_RECALL_ENABLED が
+    # OFF なら、こちらが ON でも自動想起そのものが動かない。デフォルト OFF。
+    AUTO_RECALL_ENHANCED = Column(Boolean, default=False, nullable=False)
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
     # 2026-07-14: MEMOPEDIA_INDEX_LIMIT を読むコードは存在しない (get_memory_weave_context
     # の memopedia_index_limit 引数は死にコードだったため、MEMOPEDIA_INDEX_ENABLED の

@@ -25,6 +25,9 @@ _PROTOCOL_TO_LEGACY_PROVIDER = {
     "xai_native": "xai",
     "nvidia_nim": "nvidia_nim",
     "openai_codex": "openai_codex",
+    # 反射判断の宛先には legacy 名が無い (llm_clients/factory.py は扱わない)。
+    # protocol と同じ名前をそのまま置いて、legacy 側の既定 "ollama" に落ちないようにする。
+    "jev_compat": "jev_compat",
 }
 
 # Fields on the model config that can be inherited from the provider when
@@ -40,7 +43,41 @@ _INHERITABLE_FIELDS = [
     ("request_kwargs", "default_request_kwargs"),
     ("default_headers", "default_headers"),
     ("llama_server_binary", "llama_server_binary"),
+    # 反射判断 (docs/intent/reflex_judgment.md) の方言の宣言 — 宛先の path・
+    # 応答の欄の名前・対応する質問の型。宛先ごとに違うので provider 側に置き、
+    # モデルが自分で書いていなければそのまま受け継ぐ。
+    # この欄だけは「丸ごと置き換え」ではなく辞書の合成 (_merge_reflex_judgment)。
+    ("reflex_judgment", "reflex_judgment"),
 ]
+
+# 丸ごとの置き換えではなく、辞書のキー単位で合成する欄。
+_DICT_MERGED_FIELDS = {"reflex_judgment"}
+
+
+def _merge_reflex_judgment(resolved: Dict, provider: Mapping[str, Any]) -> None:
+    """反射判断の方言を provider の宣言の上にモデルの宣言を重ねて解決する。
+
+    他の継承フィールドと違い、この欄は「モデルが何か書いたら provider の宣言は全部
+    無効」にしてはいけない。モデル側に ``"reflex_judgment": {}`` や ``{"path": ...}``
+    のような部分的な宣言が書かれただけで provider の path・応答の欄の名前が消え、
+    ``saiverse/reflex_judgment.py`` が未宣言として TypeSafe 正典の既定へ落ちる —
+    OpenRouter 系の宛先では、誰も気づかないまま間違った URL を呼ぶことになる。
+
+    合成はキー単位 (浅い合成)。モデルが書いたキーだけがそのキーを上書きし、書かれて
+    いないキーは provider の宣言が生き残る。
+    """
+    provider_dialect = provider.get("reflex_judgment")
+    if not isinstance(provider_dialect, dict):
+        return
+    model_dialect = resolved.get("reflex_judgment")
+    if model_dialect is None:
+        resolved["reflex_judgment"] = dict(provider_dialect)
+        return
+    if not isinstance(model_dialect, dict):
+        # 辞書でない宣言はモデル側の書き間違い。既存の挙動どおりそのまま残す
+        # (反射判断側が「宣言なし」として扱い、設定ミスがそこで表に出る)。
+        return
+    resolved["reflex_judgment"] = {**provider_dialect, **model_dialect}
 
 
 def _resolve_provider_ref(config: Dict) -> Dict:
@@ -85,8 +122,12 @@ def _resolve_provider_ref(config: Dict) -> Dict:
 
     # Inherit provider defaults for fields not set on the model
     for model_field, provider_field in _INHERITABLE_FIELDS:
+        if model_field in _DICT_MERGED_FIELDS:
+            continue  # handled below (key-by-key merge, not all-or-nothing)
         if resolved.get(model_field) is None and provider_field in provider:
             resolved[model_field] = provider[provider_field]
+
+    _merge_reflex_judgment(resolved, provider)
 
     return resolved
 
