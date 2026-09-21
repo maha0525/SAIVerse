@@ -419,6 +419,9 @@
     position: relative;
     width: 56px;
     height: 28px;
+    /* flex 子として長い説明文 (特に英語) に押し潰されると、絶対配置のノブが
+       トラックからはみ出す。トグルは固定幅を死守する */
+    flex-shrink: 0;
     background: #475569;
     border-radius: 14px;
     cursor: pointer;
