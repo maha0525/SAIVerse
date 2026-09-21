@@ -2240,7 +2240,13 @@ export default function Home() {
                                         reasoning,
                                         ...((_activities && _activities.length > 0) && { activity_trace: _activities }),
                                         ...(streamCompleteImages && { images: streamCompleteImages }),
-                                        ...(scReflexFallback && { _reflexFallback: true }),
+                                        // 注記は同じ話者の吹き出しにだけ貼る。同室で二人が
+                                        // 同時に生成中だと、末尾の吹き出しが隣のペルソナの
+                                        // ものでありうる — その稀なターンは貼らずに諦める
+                                        // (集計と設定画面の警告には残る。本文側の流入は
+                                        // docs/issues/chat_stream_event_correlation_by_last_bubble.md
+                                        // の土台の限界)。
+                                        ...(scReflexFallback && isSameSpeaker(last) && { _reflexFallback: true }),
                                         // 途中で切れた発言。再読込を待たずに印を立て、
                                         // その場で「続きの生成」を出せるようにする。
                                         ...(event.interrupted && { interrupted: true }),
