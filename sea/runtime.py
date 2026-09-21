@@ -2378,6 +2378,37 @@ class SEARuntime:
         finally:
             db.close()
 
+    def _get_reflex_model_for_persona(self, persona) -> Optional[str]:
+        """ペルソナ個別の反射判断モデル (AI.REFLEX_JUDGMENT_MODEL) を DB から読む。
+
+        反射判断 (docs/intent/reflex_judgment.md §1) に答えるモデルは、通常はモデルの
+        役割 reflex_judgment_model の世界の既定が決める。この列に名前が入っている
+        ペルソナだけ、その名前で上書きする (「この子だけ Jev」の使い分け)。
+
+        空・未設定・読めなかったときは None を返す = 世界の既定へ倒す。読めなかった
+        回に警告を出すのは、上書きを設定したつもりの人が黙って既定で動いている状態に
+        気づけるようにするため。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return None  # fallback: 世界の既定 (役割の割り当て) に従う
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            value = ai.REFLEX_JUDGMENT_MODEL if ai else None
+            if not isinstance(value, str):
+                return None
+            return value.strip() or None
+        except Exception:
+            LOGGER.warning(
+                "[sea] failed to read REFLEX_JUDGMENT_MODEL (persona=%s); "
+                "falling back to the world default", persona_id, exc_info=True,
+            )
+            return None
+        finally:
+            db.close()
+
     def _is_spell_enabled_for_persona(self, persona) -> bool:
         """Check per-persona spell system toggle from DB."""
         persona_id = getattr(persona, "persona_id", None)

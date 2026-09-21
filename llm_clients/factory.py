@@ -37,6 +37,20 @@ _LEGACY_PROVIDER_TO_PROTOCOL = {
 }
 
 
+#: Protocols this factory can actually build a client for. The elif chain in
+#: get_llm_client dispatches on exactly this set, and its unknown-protocol
+#: error message is built from it — keep the two together when adding a client.
+SUPPORTED_PROTOCOLS = frozenset({
+    "openai_compat",
+    "openai_codex",
+    "nvidia_nim",
+    "anthropic_native",
+    "gemini_native",
+    "xai_native",
+    "ollama_compat",
+})
+
+
 def _resolve_protocol(provider: str, config: Dict | None) -> str:
     """Pick the protocol to dispatch on.
 
@@ -50,6 +64,17 @@ def _resolve_protocol(provider: str, config: Dict | None) -> str:
         if isinstance(explicit, str) and explicit:
             return explicit
     return _LEGACY_PROVIDER_TO_PROTOCOL.get(provider, provider)
+
+
+def resolve_protocol(provider: str, config: Dict | None) -> str:
+    """Public window onto the protocol resolution get_llm_client dispatches on.
+
+    Callers that need to know *in advance* whether this factory can speak a
+    config (e.g. saiverse/reflex_judgment.py resolving an ordinary-LLM backend)
+    must use this together with SUPPORTED_PROTOCOLS instead of re-deriving the
+    rule — a second copy would drift away from the dispatch below.
+    """
+    return _resolve_protocol(provider, config)
 
 
 def _supports_images(provider: str, config: Dict | None) -> bool:
@@ -376,8 +401,7 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
     else:
         raise ValueError(
             f"Unknown protocol '{protocol}' (resolved from provider='{provider}') for model '{model}'. "
-            f"Valid protocols: openai_compat, openai_codex, nvidia_nim, anthropic_native, "
-            f"gemini_native, xai_native, ollama_compat"
+            f"Valid protocols: {', '.join(sorted(SUPPORTED_PROTOCOLS))}"
         )
 
     # default_headers is inherited by any model regardless of protocol, but only

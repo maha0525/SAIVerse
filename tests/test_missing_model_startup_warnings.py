@@ -36,7 +36,7 @@ from api.routes import config as config_route
 from database.models import AI as AIModel, Base, City as CityModel
 from manager.initialization import InitializationMixin
 from manager.persona import PersonaMixin
-from saiverse import data_paths, model_configs, model_defaults
+from saiverse import data_paths, model_configs, model_defaults, reflex_judgment
 from saiverse.persona_model_selection import (
     SOURCE_GLOBAL,
     SpeakingModelChoice,
@@ -58,6 +58,8 @@ JEV_KEY = "test-jev-model"
 JEV_NO_URL_KEY = "test-jev-model-without-url"
 #: jev 互換だが choice にしか答えない宛先 (第 1 段の仕事 = noul には答えられない)。
 JEV_CHOICE_ONLY_KEY = "test-jev-model-choice-only"
+#: LLM クライアントの工場が話せない protocol の定義 (どちらの答える側にもなれない)。
+UNKNOWN_PROTOCOL_KEY = "test-unknown-protocol-model"
 
 ROLE_ENV_KEYS = tuple(model_defaults.MODEL_ROLES.values())
 
@@ -128,19 +130,39 @@ def _global_summary(label: str, value: str) -> str:
     )
 
 
-def _global_reflex(value: str) -> str:
+REFLEX_STOPPED = "型付きの質問に確率で答える判断 (自動想起の強化など) は動いていません。"
+REFLEX_NOT_INDIVIDUAL = "反射判断のモデルを個別に設定していないペルソナ"
+
+
+def _global_reflex(value: str, names=()) -> str:
     return (
         f"グローバル設定の反射判断のモデル '{value}' は SAIVerse にないため、"
-        "型付きの質問に確率で答える判断 (自動想起の強化など) は動いていません。"
+        f"{REFLEX_NOT_INDIVIDUAL}{_names(names)}の{REFLEX_STOPPED}"
         f"{GLOBAL_RESELECT}、再起動しなくても動くようになります。"
     )
 
 
-def _global_reflex_mismatch(value: str) -> str:
+def _global_reflex_mismatch(value: str, names=()) -> str:
     return (
-        f"グローバル設定の反射判断のモデル '{value}' は反射判断の宛先として使えないため、"
-        "型付きの質問に確率で答える判断 (自動想起の強化など) は動いていません。"
+        f"グローバル設定の反射判断のモデル '{value}' は反射判断の宛先として解決できないため、"
+        f"{REFLEX_NOT_INDIVIDUAL}{_names(names)}の{REFLEX_STOPPED}"
         f"{GLOBAL_RESELECT}、再起動しなくても動くようになります。"
+    )
+
+
+def _persona_reflex(name: str, value: str) -> str:
+    """ペルソナ個別の反射判断のモデルの定義が無いときの文面 (役割共通の文面)。"""
+    return (
+        f"{name}の反射判断 '{value}' は SAIVerse にないため、このモデルを使う仕事は止まっています。"
+        f"{PERSONA_RESELECT}、再起動しなくても再開します。"
+    )
+
+
+def _persona_reflex_mismatch(name: str, value: str) -> str:
+    return (
+        f"{name}の反射判断のモデル '{value}' は反射判断の宛先として解決できないため、"
+        f"{name}の{REFLEX_STOPPED}"
+        f"{PERSONA_RESELECT}、再起動しなくても動くようになります。"
     )
 
 
@@ -206,7 +228,15 @@ def _unswitched(name: str, model: str) -> str:
 
 
 def _definition(api_name: str) -> dict:
-    return {"model": api_name, "provider": "stub", "context_length": 1000}
+    # protocol は LLM クライアントの工場が話せるもの (openai_compat) にしておく。
+    # 反射判断の役割の宛先検査は「工場が話せる protocol か」まで見るので、工場の
+    # 知らない protocol の偽定義は「通常の LLM として解決できる」側のテストに使えない。
+    return {
+        "model": api_name,
+        "provider": "stub",
+        "protocol": "openai_compat",
+        "context_length": 1000,
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -238,11 +268,22 @@ def fake_model_definitions(monkeypatch, tmp_path):
             "api_key_required": False,
             "reflex_judgment": {"supported_types": ["choice"]},
         },
+        UNKNOWN_PROTOCOL_KEY: {
+            "model": "vendor/unknown",
+            "protocol": "banana_compat",
+            "provider": "banana",
+            "context_length": 1000,
+        },
     })
     monkeypatch.setattr(data_paths, "USER_DATA_DIR", tmp_path / "user_data")
     monkeypatch.setattr(data_paths, "EXPANSION_DATA_DIR", tmp_path / "no_expansion")
     for key in ROLE_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+    # 反射判断の直近の呼び出しの記録はプロセス内に残る。他のテストが積んだ分を
+    # 持ち越すと、ここの「警告はこれだけのはず」がその回数で壊れる。
+    reflex_judgment.reset_recent_outcomes()
+    yield
+    reflex_judgment.reset_recent_outcomes()
 
 
 def _raise(*_args, **_kwargs):
@@ -518,54 +559,124 @@ def test_global_defined_unset_and_empty_values_do_not_warn(world, monkeypatch):
     assert svc.current_model_setting_warnings() == []
 
 
-def test_global_reflex_model_that_cannot_answer_warns(world, monkeypatch):
-    """反射判断に通常の LLM を割り当てたら、定義があっても画面で知らせる。
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(DEFINED_KEY, id="ordinary_llm"),
+        pytest.param(JEV_KEY, id="jev_destination"),
+    ],
+)
+def test_a_reflex_destination_that_resolves_does_not_warn(world, monkeypatch, value):
+    """答える側として解決できる割り当ては、画面に何も出さない。
 
-    保存は通り、実行時は WARNING を出して想起が従来方式へ戻るだけなので、画面に
-    出さないと設定ミスが誰にも見えない (docs/intent/reflex_judgment.md §2)。
+    第 2 段で通常の LLM も答える側になれる (この層が質問をプロンプトへ変換する) ので、
+    jev 互換の宛先と通常の LLM のどちらも合法 (docs/intent/reflex_judgment.md §2)。
+    画面の検査は実行側と同じ関数を呼ぶ作りなので、変換層が入った時点で通常の LLM は
+    自然に通るようになった。
     """
-    _set_env(monkeypatch, SAIVERSE_REFLEX_JUDGMENT_MODEL=DEFINED_KEY)
-    svc = world.start()
-
-    assert _messages(svc.current_model_setting_warnings()) == [
-        _global_reflex_mismatch(DEFINED_KEY),
-    ]
-
-
-def test_global_reflex_model_without_a_destination_url_warns(world, monkeypatch):
-    """protocol が合っていても、実行側が拒否する構造の不備は画面に出る。
-
-    画面の検査は実行側とまったく同じ関数 (saiverse/reflex_judgment.py の
-    resolve_backend) を呼ぶので、protocol だけ合っていて宛先の URL が無い定義も
-    「使えない」として知らせる。
-    """
-    _set_env(monkeypatch, SAIVERSE_REFLEX_JUDGMENT_MODEL=JEV_NO_URL_KEY)
-    svc = world.start()
-
-    assert _messages(svc.current_model_setting_warnings()) == [
-        _global_reflex_mismatch(JEV_NO_URL_KEY),
-    ]
-
-
-def test_global_reflex_model_on_a_jev_destination_does_not_warn(world, monkeypatch):
-    _set_env(monkeypatch, SAIVERSE_REFLEX_JUDGMENT_MODEL=JEV_KEY)
+    _set_env(monkeypatch, SAIVERSE_REFLEX_JUDGMENT_MODEL=value)
+    world.add_persona()
     svc = world.start()
 
     assert svc.current_model_setting_warnings() == []
 
 
-def test_global_reflex_model_that_cannot_answer_the_first_stage_type_warns(world, monkeypatch):
-    """choice にしか答えない宛先も画面で知らせる。
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(JEV_NO_URL_KEY, id="jev_without_url"),
+        pytest.param(JEV_CHOICE_ONLY_KEY, id="jev_choice_only"),
+        pytest.param(UNKNOWN_PROTOCOL_KEY, id="unknown_protocol"),
+    ],
+)
+def test_a_reflex_destination_that_cannot_be_resolved_warns(world, monkeypatch, value):
+    """どちらの答える側としても解決できない設定は、定義があっても画面で知らせる。
 
-    第 1 段でこの層に仕事を頼むのは自動想起の選別だけで、その仕事は noul しか投げない。
-    「噛み合っている」と答えると、自動想起は候補の集め方だけを広げたまま毎ターン判定に
-    失敗し、設定ミスがどこにも出ない。
+    protocol は jev 互換なのに宛先の URL が無い / この層が投げる型 (noul) に答えない、
+    といった構造の不備。保存は通り、実行時は WARNING を出して想起が従来方式へ戻るだけ
+    なので、画面に出さないと設定ミスが誰にも見えない。判定は実行側とまったく同じ関数
+    (saiverse/reflex_judgment.py の resolve_backend) を通す。
     """
-    _set_env(monkeypatch, SAIVERSE_REFLEX_JUDGMENT_MODEL=JEV_CHOICE_ONLY_KEY)
+    _set_env(monkeypatch, SAIVERSE_REFLEX_JUDGMENT_MODEL=value)
+    world.add_persona()
     svc = world.start()
 
     assert _messages(svc.current_model_setting_warnings()) == [
-        _global_reflex_mismatch(JEV_CHOICE_ONLY_KEY),
+        _global_reflex_mismatch(value, [NAME]),
+    ]
+
+
+def test_an_undefined_reflex_model_still_warns(world, monkeypatch):
+    """定義そのものが無い名前は、これまでどおり「SAIVerse にありません」で知らせる。"""
+    _set_env(monkeypatch, SAIVERSE_REFLEX_JUDGMENT_MODEL="gone-reflex-model")
+    world.add_persona()
+    svc = world.start()
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _global_reflex("gone-reflex-model", [NAME]),
+    ]
+
+
+# --- ペルソナ単位の反射判断のモデル ------------------------------------------------
+
+
+def test_a_persona_reflex_model_without_a_definition_warns_by_name(world):
+    """ペルソナ個別の反射判断のモデル (AI.REFLEX_JUDGMENT_MODEL) も画面の対象。
+
+    保存の関所 (manager/admin.py) は定義の無い名前を断るが、保存のあとで設定ファイルを
+    消せば列の値だけが残る。実行時にこの列を読む箇所がある (sea/runtime.py の
+    _get_reflex_model_for_persona) 以上、壊れた値は画面で知らせる。
+    """
+    world.add_persona(REFLEX_JUDGMENT_MODEL="gone-reflex-model")
+    svc = world.start()
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _persona_reflex(NAME, "gone-reflex-model"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(DEFINED_KEY, id="ordinary_llm"),
+        pytest.param(JEV_KEY, id="jev_destination"),
+    ],
+)
+def test_a_persona_reflex_destination_that_resolves_does_not_warn(world, value):
+    world.add_persona(REFLEX_JUDGMENT_MODEL=value)
+    svc = world.start()
+
+    assert svc.current_model_setting_warnings() == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(JEV_NO_URL_KEY, id="jev_without_url"),
+        pytest.param(JEV_CHOICE_ONLY_KEY, id="jev_choice_only"),
+        pytest.param(UNKNOWN_PROTOCOL_KEY, id="unknown_protocol"),
+    ],
+)
+def test_a_persona_reflex_destination_that_cannot_be_resolved_warns(world, value):
+    world.add_persona(REFLEX_JUDGMENT_MODEL=value)
+    svc = world.start()
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _persona_reflex_mismatch(NAME, value),
+    ]
+
+
+def test_a_persona_with_its_own_reflex_model_is_not_named_by_the_global_warning(
+    world, monkeypatch,
+):
+    """グローバルの反射判断の警告が名前を並べるのは、個別の値を持たないペルソナだけ。"""
+    _set_env(monkeypatch, SAIVERSE_REFLEX_JUDGMENT_MODEL="gone-reflex-model")
+    world.add_persona(REFLEX_JUDGMENT_MODEL=DEFINED_KEY)
+    world.add_persona(SECOND_ID, SECOND_NAME)
+    svc = world.start()
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _global_reflex("gone-reflex-model", [SECOND_NAME]),
     ]
 
 
@@ -945,3 +1056,98 @@ def test_route_returns_recorded_warnings_when_computation_fails(world, monkeypat
 
     assert config_route.get_startup_warnings(manager=svc) == {"warnings": [RECORDED]}
     assert svc.startup_warnings == [RECORDED]
+
+
+# --- 反射判断が時間内に答えていない -----------------------------------------------
+#
+# チャットの注記は起きたターンにしか出ない。「最近ときどき起きている」状態を見る
+# ための集計で、数え方の記録は saiverse/reflex_judgment.py のプロセス内 (直近 20 回)。
+
+
+def _reflex_deadline_message(total: int, deadline: int, failed: int = 0) -> str:
+    message = (
+        f"反射判断が最近{total}回中{deadline}回、時間内に答えず従来方式に戻っています。"
+        "その間の判定の費用は発生しています。"
+        "グローバル設定で待ち時間を延ばすか、より速いモデルを割り当てると直ります。"
+    )
+    if failed:
+        message += (
+            f"（ほかに{failed}回は別の理由で失敗しています — "
+            "設定の警告や WARNING ログを確認してください）"
+        )
+    return message
+
+
+def _record(**counts) -> None:
+    """直近の呼び出しの記録を、指定した内訳で積む。"""
+    for outcome, times in counts.items():
+        for _ in range(times):
+            reflex_judgment._record_outcome(getattr(reflex_judgment, f"OUTCOME_{outcome.upper()}"))
+
+
+def test_no_warning_before_the_judgment_has_ever_been_called(world):
+    world.add_persona()
+    svc = world.start()
+
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_no_warning_below_the_threshold(world):
+    world.add_persona()
+    svc = world.start()
+    _record(ok=18, deadline=2)
+
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_the_warning_appears_at_the_threshold(world):
+    world.add_persona()
+    svc = world.start()
+    _record(ok=17, deadline=3)
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _reflex_deadline_message(20, 3),
+    ]
+
+
+def test_the_warning_counts_only_the_most_recent_calls(world):
+    """記録は直近 20 件で頭打ち — 古い時間切れは数からこぼれ、やがて警告は消える。"""
+    world.add_persona()
+    svc = world.start()
+    _record(deadline=3)
+    _record(ok=reflex_judgment.OUTCOME_HISTORY_SIZE)
+
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_other_failures_are_not_counted_as_deadlines(world):
+    """キー欠落や接続失敗は、待ち時間を延ばしても直らないのでこの警告では数えない。"""
+    world.add_persona()
+    svc = world.start()
+    _record(failed=10)
+
+    assert svc.current_model_setting_warnings() == []
+
+
+def test_the_warning_says_how_many_failed_for_another_reason(world):
+    """分母には他の理由の失敗も入るので、その回数も文面に書く。
+
+    書かないと、キーが無くて毎ターン落ちている家にまで「待ち時間を延ばせ」と
+    読める文面だけが出る。
+    """
+    world.add_persona()
+    svc = world.start()
+    _record(ok=2, deadline=3, failed=5)
+
+    assert _messages(svc.current_model_setting_warnings()) == [
+        _reflex_deadline_message(10, 3, failed=5),
+    ]
+
+
+def test_an_unreadable_history_does_not_add_a_warning(world, monkeypatch):
+    """観測そのものが読めなかった回は黙る (会話は止まっていない)。"""
+    world.add_persona()
+    svc = world.start()
+    monkeypatch.setattr(reflex_judgment, "recent_outcomes", _raise)
+
+    assert svc.current_model_setting_warnings() == []

@@ -2305,5 +2305,111 @@ class TestFactoryFlagsApiModelName(unittest.TestCase):
             )
 
 
+class TestPreferMinimalReasoning(unittest.TestCase):
+    """一撃の判定用に「思考は最小でよい」と伝えるフック (llm_clients/base.py)。
+
+    契約は 2 つ: 誰も決めていないときだけ最小にすること、明示の設定 (モデル設定
+    ファイルの既定も含む) があるときは何もしないこと。
+    """
+
+    def setUp(self):
+        os.environ['OPENAI_API_KEY'] = 'test_openai_key'
+        os.environ['GEMINI_API_KEY'] = 'test_gemini_key'
+        os.environ['GEMINI_FREE_API_KEY'] = 'test_free_key'
+
+    @staticmethod
+    def _gemini(model, config=None):
+        with patch(
+            "llm_clients.gemini.build_gemini_clients",
+            return_value=(MagicMock(), MagicMock(), MagicMock()),
+        ):
+            return GeminiClient(model, config=config)
+
+    def test_gemini_3x_gets_the_shallowest_level_every_generation_accepts(self):
+        """3 系は thinking_level の世代。"minimal" は 3.7 以降で廃止されているので
+        世代を跨いで安全な "low" を送る。"""
+        client = self._gemini("gemini-3.5-flash-lite")
+        client.prefer_minimal_reasoning()
+
+        self.assertEqual(client._thinking_level, "low")
+        self.assertIsNone(client._thinking_budget)
+        # SDK が受け取れる語彙であること (受け取れない値は enum へ落ちない)。
+        thinking = client._build_thinking_config()
+        self.assertEqual(thinking.thinking_level, genai_types.ThinkingLevel.LOW)
+
+    def test_gemini_explicit_thinking_level_is_left_alone(self):
+        """モデル設定や画面で深さが決まっていれば、そちらが勝つ。
+
+        factory はクライアント生成直後にモデル設定の parameters の既定を
+        configure_parameters で流し込むので、ここが「明示済み」の実際の経路。
+        """
+        client = self._gemini("gemini-3.5-flash-lite")
+        client.configure_parameters({"thinking_level": "high"})
+        client.prefer_minimal_reasoning()
+
+        self.assertEqual(client._thinking_level, "high")
+
+    def test_gemini_25_flash_turns_thinking_off_by_budget(self):
+        """2.5 の Flash 系は予算の世代。"off" (= 0) はモデル設定が持つ語彙。"""
+        client = self._gemini("gemini-2.5-flash-lite")
+        client.prefer_minimal_reasoning()
+
+        self.assertEqual(client._thinking_budget, 0)
+        self.assertIsNone(client._thinking_level)
+
+    def test_gemini_25_explicit_budget_is_left_alone(self):
+        client = self._gemini("gemini-2.5-flash-lite")
+        client.configure_parameters({"thinking_budget": "4096"})
+        client.prefer_minimal_reasoning()
+
+        self.assertEqual(client._thinking_budget, 4096)
+
+    def test_gemini_25_pro_is_left_alone_because_thinking_cannot_be_turned_off(self):
+        """2.5 Pro は思考を切れない (予算の下限は 128)。壊すくらいなら遅いまま。"""
+        client = self._gemini("gemini-2.5-pro")
+        client.prefer_minimal_reasoning()
+
+        self.assertIsNone(client._thinking_budget)
+        self.assertIsNone(client._thinking_level)
+
+    def test_gemini_without_a_thinking_control_is_left_alone(self):
+        client = self._gemini("gemini-1.5-flash")
+        client.prefer_minimal_reasoning()
+
+        self.assertIsNone(client._thinking_budget)
+        self.assertIsNone(client._thinking_level)
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_openai_explicit_reasoning_effort_is_left_alone(self, _mock_openai):
+        client = OpenAIClient("gpt-5-nano")
+        client.configure_parameters({"reasoning_effort": "high"})
+        client.prefer_minimal_reasoning()
+
+        self.assertEqual(client._request_kwargs["reasoning_effort"], "high")
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_openai_does_not_invent_a_reasoning_effort(self, _mock_openai):
+        """宣言の無いモデルには送らない (openai 互換サーバーは 400 で落ちる)。
+
+        組み込みの推論モデルはどれもモデル設定ファイルで reasoning_effort の既定を
+        宣言していて、factory がそれを流し込む。宣言が無いモデルは、そのつまみを
+        受け付けるという根拠がどこにも無い。
+        """
+        client = OpenAIClient("gpt-4.1-nano")
+        client.prefer_minimal_reasoning()
+
+        self.assertNotIn("reasoning_effort", client._request_kwargs)
+
+    def test_anthropic_thinking_stays_off_when_the_config_does_not_enable_it(self):
+        """Anthropic は思考が既定で無効 (thinking_type / thinking_budget の宣言が
+        無ければ _thinking_config は None) なので、基底の no-op のままでよい。"""
+        os.environ['CLAUDE_API_KEY'] = 'test_anthropic_key'
+        client = AnthropicClient("claude-haiku-4-5", config={})
+
+        self.assertIsNone(client._thinking_config)
+        client.prefer_minimal_reasoning()
+        self.assertIsNone(client._thinking_config)
+
+
 if __name__ == '__main__':
     unittest.main()

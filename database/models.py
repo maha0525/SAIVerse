@@ -78,6 +78,11 @@ class AI(Base):
     AUDIO_MODEL = Column(String(255), nullable=True)
     VIDEO_MODEL = Column(String(255), nullable=True)
     MEMORY_WEAVE_MODEL = Column(String(255), nullable=True)
+    # 反射判断 (docs/intent/reflex_judgment.md) に答えるモデルの、ペルソナ個別の
+    # 上書き。NULL = 世界の既定 (モデルの役割 reflex_judgment_model、env
+    # SAIVERSE_REFLEX_JUDGMENT_MODEL) に従う。DEFAULT_MODEL / LIGHTWEIGHT_MODEL と
+    # 同じ形の列で、「この子だけ Jev、ほかは軽量モデル」の使い分けを可能にする。
+    REFLEX_JUDGMENT_MODEL = Column(String(255), nullable=True)
     PRIVATE_ROOM_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
     CHRONICLE_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona Chronicle auto-generation toggle
     # 自律/schedule Pulse でも確認ダイアログなしで General Chronicle 生成を実行するかの

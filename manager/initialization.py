@@ -568,6 +568,46 @@ class InitializationMixin:
         # 一本で解決する (sea/session_lifecycle.py get_metabolism_watermarks)。
         self.max_image_embeds_override: Optional[int] = None
 
+    #: 直近の呼び出しのうち、この回数以上が時間切れなら画面に知らせる。
+    #: 1〜2 回は通信のゆらぎで起こりうるので、続いていることが分かる数から出す。
+    REFLEX_DEADLINE_WARNING_THRESHOLD = 3
+
+    def _reflex_deadline_warnings(self) -> List[Dict[str, str]]:
+        """反射判断が最近どのくらい時間切れで従来方式へ戻っているかの知らせ。
+
+        数え方の記録は saiverse/reflex_judgment.py のプロセス内の記録 (直近 20 回、
+        30 分以内)。再起動で消えるのは仕様 — これは設定を直すための観測であって、
+        世界の状態ではない。記録が読めなかったときは何も出さない (会話は止まって
+        いないので、観測の失敗で画面に別の心配を足さない)。
+
+        分母 (直近◯回) には時間切れ以外の失敗も入る。だから時間切れ以外の失敗が
+        あるターンでは、その回数も文面に書く — 書かないと、キーが無くて毎ターン
+        落ちている家にまで「待ち時間を延ばせ」と読める文面だけが出る。
+        """
+        try:
+            from saiverse.reflex_judgment import recent_outcomes
+
+            total, deadline, failed = recent_outcomes()
+        except Exception:
+            LOGGER.warning(
+                "Could not read the reflex judgment call history for the warning.",
+                exc_info=True,
+            )
+            return []
+        if deadline < self.REFLEX_DEADLINE_WARNING_THRESHOLD:
+            return []
+        message = (
+            f"反射判断が最近{total}回中{deadline}回、時間内に答えず従来方式に戻っています。"
+            "その間の判定の費用は発生しています。"
+            "グローバル設定で待ち時間を延ばすか、より速いモデルを割り当てると直ります。"
+        )
+        if failed > 0:
+            message += (
+                f"（ほかに{failed}回は別の理由で失敗しています — "
+                "設定の警告や WARNING ログを確認してください）"
+            )
+        return [{"source": "model_config", "message": message}]
+
     def current_model_setting_warnings(self) -> List[Dict[str, str]]:
         """いまの設定と各ペルソナの状態から、モデル設定の警告を作って返す。
 
@@ -579,12 +619,18 @@ class InitializationMixin:
           入口と同じ一本 (saiverse/persona_model_selection.py の
           save_rejection_reason) から引く。
         - グローバル設定: ``MODEL_ROLES`` の 7 役割を環境変数から読む。定義の無い値は
-          「止まっています」。標準・軽量・Memory Weave モデルは、その値を使っている
-          (個別の値を持たない) ペルソナの名前を並べる。一時上書き中の標準モデルは
-          「上書きを解除すると止まる」。
-        - ペルソナ: この City のペルソナの DB 行から、標準・軽量・Memory Weave
-          モデルを読み、表示名 (AINAME) で呼ぶ。画像/音声/動画要約モデルと反射判断の
-          モデルは、ペルソナ単位の値を読む箇所が無いので対象にしない。
+          「止まっています」。標準・軽量・Memory Weave・反射判断のモデルは、その値を
+          使っている (個別の値を持たない) ペルソナの名前を並べる。一時上書き中の
+          標準モデルは「上書きを解除すると止まる」。
+        - 反射判断が最近しきい値以上の回数だけ時間切れで従来方式へ戻っているなら、
+          そのこと (``_reflex_deadline_warnings``)。
+        - ペルソナ: この City のペルソナの DB 行から、標準・軽量・Memory Weave・
+          反射判断のモデルを読み、表示名 (AINAME) で呼ぶ。実行時にその列を読む箇所が
+          あるものだけを対象にする — 反射判断は sea/runtime.py の
+          ``_get_reflex_model_for_persona`` が ``AI.REFLEX_JUDGMENT_MODEL`` を読む。
+          画像/音声/動画要約モデルは、ペルソナ単位の値を読む箇所が無いので対象にしない。
+          定義の無い名前はペルソナ設定の保存の関所 (manager/admin.py) が断るが、保存の
+          あとで設定ファイルを消せば列の値だけが残る — この警告はそのための網。
         - 切り替えられなかったペルソナ: 読み込んでいるペルソナのうち、決め方
           (saiverse/persona_model_selection.py) が指すモデルと、実際に使っている
           モデルが食い違う人だけ、その名前つきで知らせる。失敗を記録しておかず、
@@ -623,6 +669,11 @@ class InitializationMixin:
                     "message": override_unusable_message(override, reason),
                 })
 
+        # 反射判断が最近どのくらい時間切れで従来方式へ戻っているか。チャットの注記は
+        # 起きたターンにしか出ないので、「ときどき起きている」状態を見るにはここが要る。
+        # DB を読む前に積む — 下の読み出しが失敗する回 (早期 return) でも落とさない。
+        warnings.extend(self._reflex_deadline_warnings())
+
         # DB の読み出しだけを独立に扱う。ここで例外を外へ出すと、ルートの外側の
         # 例外処理がグローバル設定の警告まで一緒に捨て、保存済みの警告が無ければ
         # 画面は正常に見えてしまう。
@@ -654,6 +705,9 @@ class InitializationMixin:
             "memory_weave_model": [
                 _name(r) for r in rows.values() if not (r.memory_weave_model or "").strip()
             ],
+            "reflex_judgment_model": [
+                _name(r) for r in rows.values() if not (r.reflex_judgment_model or "").strip()
+            ],
         }
         warnings.extend(missing_model_warnings(
             global_settings.items(),
@@ -667,6 +721,7 @@ class InitializationMixin:
                     ("default_model", row.default_model),
                     ("lightweight_model", row.lightweight_model),
                     ("memory_weave_model", row.memory_weave_model),
+                    ("reflex_judgment_model", row.reflex_judgment_model),
                 ],
                 persona_name=_name(row),
                 override_model=override,

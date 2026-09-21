@@ -159,6 +159,11 @@ interface Message {
     // 自動想起 (記憶アーキv2 §4.5): この Pulse で末尾注入された「ふと浮かんだ記憶」ブロック。
     // <system>...</system> を剥がした本文を保持し、スペル結果と同じ折りたたみで表示する。
     auto_recall?: string;
+    // このターンは記憶の想起の判定が時間内に終わらず、従来の方式で想起した。
+    // サーバーの reflex_fallback イベント由来の**表示専用**の印で、会話履歴にも
+    // 建物の記録にもペルソナの記憶にも残らない (docs/intent/reflex_judgment.md)。
+    // 画面を開き直すと消えるのは仕様 — 続いているかどうかはグローバル設定の警告で分かる。
+    _reflexFallback?: boolean;
     // Activity trace (exec/tool steps before final response)
     activity_trace?: ActivityEntry[];
     // Streaming state
@@ -574,6 +579,15 @@ export default function Home() {
     const [currentBuildingName, setCurrentBuildingName] = useState<string>('SAIVerse');
     const [currentBuildingId, setCurrentBuildingId] = useState<string | null>(null);
     const currentBuildingIdRef = useRef<string | null>(null);
+    // フォールバックの注記の帳簿 (持ち主のペルソナ ID の集合)。注記のイベントが
+    // 届いたらここに付け、**そのペルソナの確定の発言 (say) が届いたときにだけ**貼る。
+    // 生成中の吹き出しには貼らない — 貼り先の寿命 (Beat の切れ目で捨てられる・
+    // 流し込みを使わない設定では来ない・確定が別便で届く) に付き合うと、退避や
+    // 空の吹き出しの例外処理が際限なく要る (2026-09-21 の敵対レビュー 4〜6 巡)。
+    // ⚠ 出し入れは**イベントを読んだその場で同期的に**行う (画面の更新の中で
+    // 書くと、同じ束で届いた say が先に読んで空振りする)。部屋の判定
+    // (isOtherBuildingEvent) を通ったイベントだけが読み書きする。
+    const pendingReflexNoticeRef = useRef<Set<string>>(new Set());
     // C-1 閲覧モード: currentBuildingId は 「UI 上で閲覧中の building」 になり、
     // 「サーバ上の真の現在地」 とは乖離しうる (= サイドバークリックで viewing を
     // 切り替えても、 サーバの CURRENT_BUILDINGID は発言時の /chat/utter まで
@@ -1979,6 +1993,13 @@ export default function Home() {
                         const evtPersonaId: string | undefined =
                             typeof event.persona_id === 'string' && event.persona_id
                                 ? event.persona_id : undefined;
+                        // その吹き出しが、このイベントを出したペルソナのものか。
+                        // 同じ部屋で二人が同時に喋っているとき、生成中の吹き出しが
+                        // 相手のものだと、A の注記や想起が B の吹き出しに貼られる。
+                        // 持ち主の記録が両方にあって食い違うときだけ「違う」と答え、
+                        // どちらかが無いときは従来どおり貼る (既存の挙動を壊さない)。
+                        const isSameSpeaker = (m: Message | undefined): boolean =>
+                            !m?._persona_id || !evtPersonaId || m._persona_id === evtPersonaId;
 
                         if (event.type === 'status') {
                             setLoadingStatus(event.content === 'processing' ? 'Processing...' : event.content);
@@ -2054,6 +2075,15 @@ export default function Home() {
                                     if (isOtherBuildingEvent) return prev;
                                     const last = prev[prev.length - 1];
                                     if (last && last.role === 'assistant' && last._streaming) {
+                                        if (!isSameSpeaker(last)) {
+                                            // 別ペルソナの吹き出しが開いている最中。貼ると持ち主が
+                                            // 食い違い、新しい吹き出しを作ると本文の流し込み
+                                            // (streaming_chunk は「最後の生成中」しか見ない) が
+                                            // そちらへ吸い込まれる — この稀な同時進行のターンだけ
+                                            // 表示を諦める (集計と設定画面の警告には残っている)。
+                                            console.debug('[auto_recall] dropped: another persona is streaming');
+                                            return prev;
+                                        }
                                         return [...prev.slice(0, -1), {
                                             ...last,
                                             auto_recall: recallBody,
@@ -2068,6 +2098,21 @@ export default function Home() {
                                         ...(evtPersonaId && { _persona_id: evtPersonaId }),
                                     }];
                                 });
+                            }
+                        } else if (event.type === 'reflex_fallback') {
+                            // 記憶の想起の判定が時間内に終わらず、従来の方式で想起した
+                            // ターンの注記。auto_recall と同じ面 (生成中の吹き出し) に
+                            // 貼るだけで、発言の metadata にも履歴にも載せない。
+                            // 帳簿に付けるだけ (同期)。表示は、このペルソナの確定の
+                            // 発言 (say) が届いたときにそこへ貼る。吹き出しをここで
+                            // 作ったり生成中の吹き出しに貼ったりしない — 貼り先の
+                            // 寿命に付き合う例外処理 (退避・空の吹き出しの孤児) を
+                            // 根ごと消すため。鍵は部屋 + ペルソナ — 部屋を見ないと、
+                            // 部屋 A の注記が (閲覧の切り替えを挟んで) 同じペルソナの
+                            // 部屋 B の発言に貼られる持ち越しが理屈上作れる。
+                            if (!isOtherBuildingEvent) {
+                                pendingReflexNoticeRef.current.add(
+                                    `${eventBuildingId || ''}/${evtPersonaId || ''}`);
                             }
                         } else if (event.type === 'streaming_thinking') {
                             // Streaming thinking: accumulate into _streamingThinking
@@ -2151,6 +2196,10 @@ export default function Home() {
                                     && evtPersonaId !== last._persona_id) return prev;
                                 if (evtPulseId && last._pulse_id
                                     && evtPulseId !== last._pulse_id) return prev;
+                                // フォールバックの注記は帳簿にあり、確定の発言 (say) で
+                                // 貼られるので、ここで捨てる下書きには乗っていない。
+                                // 想起の折りたたみは確定の発言が自分の記録 (metadata) で
+                                // 持ってくるので、これも道連れにならない。
                                 return prev.slice(0, -1);
                             });
                             setLoadingStatus('Thinking...');
@@ -2257,6 +2306,16 @@ export default function Home() {
                             const sayAutoRecall: string | undefined =
                                 typeof sayMeta?.auto_recall === 'string' && sayMeta.auto_recall.trim()
                                     ? sayMeta.auto_recall : undefined;
+                            // 帳簿にあるフォールバックの注記を、この確定の発言に貼って
+                            // 消費する。**部屋の判定を通ったイベントだけが帳簿に触る** —
+                            // 別の部屋の確定の発言が控えを先に食べると、この部屋には
+                            // 二度と届かない。鍵は部屋 + ペルソナ (付けた側と同じ組)。
+                            const rfPendingKey = `${eventBuildingId || ''}/${evtPersonaId || ''}`;
+                            let sayReflexFallback = false;
+                            if (!isOtherBuildingEvent && pendingReflexNoticeRef.current.has(rfPendingKey)) {
+                                pendingReflexNoticeRef.current.delete(rfPendingKey);
+                                sayReflexFallback = true;
+                            }
                             setMessages(prev => {
                                 // 別の部屋の Beat の発言は、この部屋には出さない
                                 // (replied の簿記は上で済ませてある)
@@ -2275,6 +2334,7 @@ export default function Home() {
                                         ...(sayReasoning && { reasoning: sayReasoning }),
                                         ...(sayActivityTrace && { activity_trace: sayActivityTrace }),
                                         ...(sayAutoRecall && { auto_recall: sayAutoRecall }),
+                                        ...(sayReflexFallback && { _reflexFallback: true }),
                                         ...(sayPulseId && { _pulse_id: sayPulseId }),
                                         ...(evtPersonaId && { persona_id: evtPersonaId }),
                                     }];
@@ -2291,6 +2351,7 @@ export default function Home() {
                                     ...(sayReasoning && { reasoning: sayReasoning }),
                                     ...(sayActivityTrace && { activity_trace: sayActivityTrace }),
                                     ...(sayAutoRecall && { auto_recall: sayAutoRecall }),
+                                    ...(sayReflexFallback && { _reflexFallback: true }),
                                     ...(sayPulseId && { _pulse_id: sayPulseId }),
                                     // 誰の発言かを吹き出し自身に持たせる。連続する
                                     // Beat の吹き出しで顔と名前を省く判定 (下の
@@ -2622,6 +2683,9 @@ export default function Home() {
             return;
         }
         isProcessingRef.current = true;
+        // 前のターンで退避したまま届け先が来なかったフォールバックの注記は、
+        // ここで捨てる (次のターンの発言に貼ると、起きていないターンの注記になる)。
+        pendingReflexNoticeRef.current.clear();
 
         // Optimistic update
         // Temporary ID for key prop until refreshed
@@ -2827,6 +2891,10 @@ export default function Home() {
         if (loadingStatus) return;
         clearTransientNotices();
         isProcessingRef.current = true;
+        // 前のターンで届け先が来なかったフォールバックの注記の控えを捨てる —
+        // 送信と同じく、ここも新しい応答ターンの入口 (続き・やり直し)。捨てないと、
+        // 起きていないターンの発言に古い注記が貼られる。
+        pendingReflexNoticeRef.current.clear();
         setLoadingStatus('Thinking...');
         // 押した瞬間にボタンを下ろす。二度押しで二重に走らせない。
         setMessages(prev => prev.map(m => (
@@ -3569,6 +3637,14 @@ export default function Home() {
                                                     </details>
                                                 );
                                             })()}
+                                            {msg._reflexFallback && (
+                                                <div className={styles.reflexNotice}>
+                                                    <span className={styles.reflexNoticeIcon}>
+                                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                                                    </span>
+                                                    <span data-i18n="app.page.text094">{uiText("app.page.text094")}</span>
+                                                </div>
+                                            )}
                                             {msg.auto_recall && (
                                                 <details className={styles.recallBlock}>
                                                     <summary className={styles.recallSummary}>

@@ -67,6 +67,11 @@ class CloneTestBase(unittest.TestCase):
             '{"model": "my-local-model", "display_name": "Local", "provider_ref": "my_provider"}',
             encoding="utf-8",
         )
+        # 反射判断のペルソナ個別の上書きが指すモデル (source user_data にだけある)
+        (models_dir / "my-local-jev.json").write_text(
+            '{"model": "my-local-jev", "display_name": "Local Jev", "provider_ref": "my_provider"}',
+            encoding="utf-8",
+        )
         providers_dir = self.source_user_data / "providers"
         providers_dir.mkdir(parents=True)
         (providers_dir / "my_provider.json").write_text(
@@ -106,6 +111,7 @@ class CloneTestBase(unittest.TestCase):
                 IS_DISPATCHED=True,
                 DEFAULT_MODEL="my-local-model",
                 LIGHTWEIGHT_MODEL="claude-haiku-4-5",
+                REFLEX_JUDGMENT_MODEL="my-local-jev",
                 PRIVATE_ROOM_ID="prod_private_room",
                 AUTONOMY_ENABLED=True,
                 LIFE_PURPOSE='{"purpose": "live"}',
@@ -163,6 +169,7 @@ class TestCloneBasics(CloneTestBase):
             self.assertEqual(row.SYSTEMPROMPT, "you are air")
             self.assertEqual(row.EMOTION, '{"joy": 0.5}')
             self.assertEqual(row.DEFAULT_MODEL, "my-local-model")
+            self.assertEqual(row.REFLEX_JUDGMENT_MODEL, "my-local-jev")
             self.assertEqual(row.AUTONOMY_ENABLED, True)
             self.assertEqual(row.LIFE_PURPOSE, '{"purpose": "live"}')
             # HOME_CITYID は dest の City に再マップ
@@ -205,6 +212,9 @@ class TestCloneBasics(CloneTestBase):
         self.assertTrue(copied_provider.is_file())
         self.assertIn("my-local-model", summary["models"]["copied_models"])
         self.assertIn("my_provider", summary["models"]["copied_providers"])
+        # 反射判断の個別の上書きが指すモデルも、モデル欄として解決されてコピーされる
+        self.assertTrue((self.dest_user_data / "models" / "my-local-jev.json").is_file())
+        self.assertIn("my-local-jev", summary["models"]["copied_models"])
         # claude-haiku-4-5 は builtin にある → コピーしない
         self.assertIn("claude-haiku-4-5", summary["models"]["builtin"])
         self.assertFalse((self.dest_user_data / "models" / "claude-haiku-4-5.json").exists())

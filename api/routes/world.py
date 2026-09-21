@@ -491,6 +491,11 @@ def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_m
     ``warning`` で返す (ペルソナ設定の画面の PUT と同じ形。
     docs/intent/persona_model_selection.md 決まったこと 2・6)。
     """
+    # この画面が扱わないモデル欄 (画像/音声/動画の要約・Memory Weave・反射判断) は
+    # 渡さない — 受け側 (manager/admin.py の update_ai) が「送られてこなかった欄は
+    # 触らない」(UNSET の印) を保証する。ここで現在値を読んで詰め直す形にすると、
+    # 読みと書きの間に挟まった別の画面の保存を古い値で巻き戻す (経緯:
+    # docs/issues/archive/world_editor_save_wipes_persona_model_overrides.md)。
     response = _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.autonomy_enabled, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled, autonomous_chronicle_enabled=ai.autonomous_chronicle_enabled, auto_recall_enabled=ai.auto_recall_enabled, auto_recall_enhanced=ai.auto_recall_enhanced, memopedia_index_enabled=ai.memopedia_index_enabled, spell_enabled=ai.spell_enabled, language=ai.language))
     message = response["message"]
     if "[WARNING:LLM]" in message:

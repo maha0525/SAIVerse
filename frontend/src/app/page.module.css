@@ -1533,6 +1533,39 @@
     color: rgba(180, 180, 200, 0.8);
 }
 
+/* Reflex judgment fallback notice — 「判定が時間内に終わらなかった」表示専用の注記。
+   折りたたまず 1 行で出す (読み落とすと、費用だけ出て効果が出ていない状態が続く)。 */
+.reflexNotice {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin-bottom: 8px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.2);
+    color: rgba(146, 92, 8, 0.95);
+    font-size: 0.78rem;
+    line-height: 1.5;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+
+:global([data-theme="dark"]) .reflexNotice {
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.3);
+    color: rgba(252, 211, 77, 0.9);
+}
+
+.reflexNoticeIcon {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+    opacity: 0.8;
+}
+
 /* Activity Block */
 .activityBlock {
     margin-bottom: 8px;

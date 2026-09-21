@@ -1184,5 +1184,90 @@ class TestPersonaToggleGate(unittest.TestCase):
         self.assertIs(mock_run.call_args.kwargs["enhanced"], False)
 
 
+class TestReflexFallbackNotice(unittest.TestCase):
+    """反射判断が時間内に答えなかったターンの注記 (sea/runtime_context.py)。
+
+    **表示専用**: 画面イベントとして 1 回流すだけで、会話履歴にも建物の記録にも
+    ペルソナの記憶にも書かない (docs/intent/reflex_judgment.md 経緯 2026-09-21)。
+    注入が起きたかどうかとは無関係に出る。
+    """
+
+    PERSONA = "reflex_notice_persona"
+
+    def setUp(self):
+        auto_recall.reset_ledger(self.PERSONA)
+
+    def tearDown(self):
+        auto_recall.reset_ledger(self.PERSONA)
+
+    def _persona(self):
+        return SimpleNamespace(
+            persona_id=self.PERSONA,
+            persona_name="注記テスト",
+            sai_memory=SimpleNamespace(
+                conn=object(), embedder=object(),
+                _thread_id=lambda building_id=None: f"{self.PERSONA}:__persona__",
+            ),
+        )
+
+    def _runtime(self):
+        return SimpleNamespace(
+            manager=None,
+            _is_auto_recall_enabled_for_persona=lambda persona: True,
+            _is_auto_recall_enhanced_for_persona=lambda persona: True,
+            _get_reflex_model_for_persona=lambda persona: None,
+        )
+
+    def _result(self, *, deadline):
+        from sea.auto_recall import AutoRecallResult
+
+        return AutoRecallResult(
+            injected=False, block=None, query="", hit_count=0,
+            accepted_count=0, ledger_size=0, char_count=0, plain_text=None,
+            reflex_deadline_fallback=deadline,
+        )
+
+    def _run(self, result, event_callback):
+        from sea.runtime_context import _maybe_inject_auto_recall
+
+        persona = self._persona()
+        messages = _msgs(("user", "こんにちは"))
+        with patch("sea.auto_recall.run_auto_recall", return_value=result):
+            _maybe_inject_auto_recall(
+                self._runtime(), persona, messages,
+                pulse_type="user", event_callback=event_callback,
+            )
+        return persona, messages
+
+    def test_the_flag_emits_exactly_one_event(self):
+        events = []
+        persona, messages = self._run(self._result(deadline=True), events.append)
+
+        notices = [e for e in events if e.get("type") == "reflex_fallback"]
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(notices[0]["reason"], "deadline")
+        self.assertEqual(notices[0]["persona_id"], self.PERSONA)
+
+        # 表示専用: 送る message 列にも、永続化の受け渡し口にも何も置かない。
+        self.assertEqual(len(messages), 1)
+        self.assertIsNone(getattr(persona, "_pending_auto_recall_text", None))
+
+    def test_no_event_without_the_flag(self):
+        events = []
+        self._run(self._result(deadline=False), events.append)
+
+        self.assertEqual([e for e in events if e.get("type") == "reflex_fallback"], [])
+
+    def test_an_autonomous_turn_without_a_callback_stays_silent(self):
+        """出す先が無いターン (event_callback なし) は静かに何もしない。"""
+        self._run(self._result(deadline=True), None)  # 例外が出ないことが検査
+
+    def test_a_failing_callback_does_not_break_the_turn(self):
+        def _explode(event):
+            raise RuntimeError("the screen is gone")
+
+        self._run(self._result(deadline=True), _explode)  # 例外が出ないことが検査
+
+
 if __name__ == "__main__":
     unittest.main()

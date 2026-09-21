@@ -1124,6 +1124,10 @@ def _maybe_inject_auto_recall(
 
     記憶アーキv2 §4。スコープは CONVERSATION アスペクトのみ (§4.6)。注入発生時は
     event_callback で ``auto_recall`` イベントを流し、フロントで折りたたみ表示する (§4.5)。
+
+    反射判断が時間内に答えず従来方式へ戻ったターンでは、同じ event_callback へ
+    ``reflex_fallback`` イベントを 1 回流す。こちらは**画面に出すだけ**で、どこにも
+    保存しない (docs/intent/reflex_judgment.md 経緯 2026-09-21)。
     """
     from sea.pulse_context import Aspect, aspect_from_pulse_type
 
@@ -1193,12 +1197,48 @@ def _maybe_inject_auto_recall(
         )
         enhanced = False
 
+    # ペルソナ個別の反射判断モデル (AI.REFLEX_JUDGMENT_MODEL)。ここも persona
+    # オブジェクトを持っているこの場所で読んで渡す (docs/intent/reflex_judgment.md §1)。
+    # None = 上書きなし = 世界の既定 (モデルの役割の割り当て) に従う。
+    # 読むのはスイッチが ON のペルソナだけ — OFF では値がどこでも使われないので、
+    # 全ペルソナの毎ターンに DB 読みを 1 回足さない (2026-09-20 のローカルレビューの指摘)。
+    reflex_model_key = None
+    if enhanced:
+        try:
+            reflex_model_key = runtime._get_reflex_model_for_persona(persona)
+        except Exception:
+            LOGGER.warning(
+                "[sea][auto_recall] failed to read REFLEX_JUDGMENT_MODEL (persona=%s); "
+                "falling back to the world default", persona_id, exc_info=True,
+            )
+            reflex_model_key = None
+
     from sea.auto_recall import run_auto_recall
 
     result = run_auto_recall(
         conn, embedder, messages,
         persona_id=persona_id, thread_id=thread_id, enhanced=enhanced,
+        reflex_model_key=reflex_model_key,
     )
+
+    # 反射判断が時間内に答えず従来方式へ戻ったターンは、そのことを画面に出す。
+    # **表示専用**: 会話履歴にも建物の記録にもペルソナの記憶にも書かない (下の
+    # auto_recall と違って、発言の metadata へ載せる経路も持たない)。注入が起きた
+    # かどうかとは無関係に起こりうるので、下の早期 return より前に出す。
+    # 出す先が無いターン (event_callback を持たない自律 Pulse) は静かに何もしない —
+    # 集計 (saiverse/reflex_judgment.py の直近の記録) には既に数えられている。
+    if result.reflex_deadline_fallback and event_callback:
+        try:
+            event_callback({
+                "type": "reflex_fallback",
+                "reason": "deadline",
+                "persona_id": persona_id,
+                "persona_name": getattr(persona, "persona_name", None),
+                "building_id": event_building_id(runtime, persona),
+            })
+        except Exception:
+            LOGGER.debug("[sea][auto_recall] reflex_fallback event_callback failed", exc_info=True)
+
     if not result.injected or not result.block:
         return
 

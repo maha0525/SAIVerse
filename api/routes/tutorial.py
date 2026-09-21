@@ -43,6 +43,9 @@ class ModelAvailability(BaseModel):
     provider: str
     is_available: bool
     supports_structured_output: bool = True
+    # 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない) の印。
+    # 会話に使う役割の選択欄はこの印の付いたモデルを出さない (一覧からは落とさない)。
+    reflex_only: bool = False
 
 
 class AvailableModelsResponse(BaseModel):
@@ -247,6 +250,7 @@ def get_available_models():
         get_model_provider,
         supports_structured_output,
     )
+    from saiverse.model_defaults import is_reflex_only_model
 
     models = []
 
@@ -264,6 +268,7 @@ def get_available_models():
             provider=provider,
             is_available=is_available,
             supports_structured_output=supports_structured_output(model_id),
+            reflex_only=is_reflex_only_model(model_id),
         ))
 
     return AvailableModelsResponse(models=models)

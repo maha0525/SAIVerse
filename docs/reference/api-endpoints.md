@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 358（tag グループ: 26）
+**エンドポイント数**: 360（tag グループ: 26）
 
 ## addon
 
@@ -141,6 +141,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/config/playbooks` | List available user-selectable playbooks with input_schema. |
 | GET | `/api/config/playbooks/{name}/params` | Get playbook parameters with resolved enum options. |
 | GET | `/api/config/reembed-check` | Return list of personas that need re-embedding due to model changes. |
+| GET | `/api/config/reflex-timeout` | 反射判断を何秒まで待つか (グローバル設定、既定 5 秒)。 |
+| POST | `/api/config/reflex-timeout` | 反射判断を何秒まで待つかを保存する (.env)。 |
 | POST | `/api/config/reload-models` | Reload model configurations from disk without restarting the server. |
 | GET | `/api/config/slot-kinds` | コマ種別カタログの一覧 (timetable_redesign.md §5.5)。 |
 | GET | `/api/config/startup-warnings` | Return startup warnings plus model-setting warnings built from the current settings. |

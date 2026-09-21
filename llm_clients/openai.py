@@ -1108,6 +1108,37 @@ class OpenAIClient(LLMClient):
         except Exception as e:
             logging.exception("OpenAI stream call failed")
             raise _convert_to_llm_error(e, "streaming call")
+    def prefer_minimal_reasoning(self) -> None:
+        """一撃の判定として使われることを伝える (契約は LLMClient 側)。
+
+        この経路の相手は OpenAI 本家だけではない — OpenRouter・LM Studio・
+        llama.cpp・その他の openai 互換サーバーが同じクライアントを使う。推論の
+        深さを指す ``reasoning_effort`` は、受け付けないサーバーへ送ると
+        リクエストごと 400 で落ちる。そのため動くのは次の 2 通りだけ:
+
+        - ``reasoning_effort`` が既に決まっている (モデル設定ファイルの
+          ``parameters`` の既定・``request_kwargs``・画面からの上書き) →
+          明示の設定が勝つので何もしない。
+        - 決まっていない → このモデルがそのつまみを受け付けるという根拠が
+          どこにも無いので何もしない。モデル名から推論系かどうかを当てに行く
+          ことはしない (推論系でないモデルや素の互換サーバーを壊すため)。
+
+        つまり組み込みの推論モデル (gpt-5 系は全て ``reasoning_effort`` の既定を
+        宣言している) では前者、それ以外では後者になる。深さを下げたい判定用の
+        モデルは、モデル設定ファイルの既定をそう書くのが正しい入口。
+        """
+        current = self._request_kwargs.get("reasoning_effort")
+        if current is not None:
+            logging.debug(
+                "[openai] prefer_minimal_reasoning: model=%s already has "
+                "reasoning_effort=%r; leaving it alone", self.model, current,
+            )
+            return
+        logging.debug(
+            "[openai] prefer_minimal_reasoning: model=%s does not declare "
+            "reasoning_effort; leaving the request as it is", self.model,
+        )
+
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         if not isinstance(parameters, dict):
             return

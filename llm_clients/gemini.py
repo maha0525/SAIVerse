@@ -319,6 +319,14 @@ SAFETY_PARAM_TO_CATEGORY = {
 
 GROUNDING_TOOL = types.Tool(google_search=types.GoogleSearch())
 
+# 思考の深さ (thinking_level) の語彙のうち、Gemini 3 系のどの世代でも受け付ける
+# 最も浅い値。"minimal" は 3.5 Flash-Lite までの語彙で、3.7 以降では廃止されて
+# おり、送ると API エラーになる (builtin_data/models/gemini-3.*.json の
+# thinking_level.options と tests/test_gemini_latest_contract.py
+# test_thinking_levels_match_each_model_contract)。3.1 Pro のように
+# ["low", "high"] しか持たない世代もあるので、世代を跨いで安全なのは "low" だけ。
+MINIMAL_THINKING_LEVEL = "low"
+
 
 def _uses_latest_generate_content_contract(model: str) -> bool:
     """Return whether *model* uses the July 2026 GenerateContent restrictions.
@@ -709,6 +717,53 @@ class GeminiClient(LLMClient):
             if category and threshold:
                 result.append(types.SafetySetting(category=category, threshold=threshold))
         return result
+
+    def prefer_minimal_reasoning(self) -> None:
+        """一撃の判定として使われるので、思考を最小にする (契約は LLMClient 側)。
+
+        世代ごとに「最小にする」の形が違うので、ここで分ける:
+
+        - **Gemini 3 系** (thinking_level の世代): :data:`MINIMAL_THINKING_LEVEL`
+          を指定する。"minimal" は 3.7 以降で廃止されていて送るとエラーになるため、
+          世代を跨いで安全な "low" を使う。
+        - **Gemini 2.5 の Flash / Flash-Lite** (thinking_budget の世代): 予算 0 =
+          思考なし。この形はモデル設定の "off" (configure_parameters が 0 に直す)
+          と同じもので、それぞれのモデル設定ファイルが選択肢として宣言している。
+        - **Gemini 2.5 Pro**: 思考を切れない (モデル設定の選択肢に "off" が無く、
+          予算の下限は 128)。何もしない。
+        - **それ以外の世代**: 思考のつまみ自体が無いので何もしない。
+
+        既に thinking_level / thinking_budget が決まっている場合は、それが
+        モデル設定の既定であれ画面からの上書きであれ尊重して何もしない。
+        """
+        if self._thinking_level or self._thinking_budget is not None:
+            logging.debug(
+                "[gemini] prefer_minimal_reasoning: model=%s already has an explicit "
+                "thinking setting (level=%s budget=%s); leaving it alone",
+                self.model, self._thinking_level, self._thinking_budget,
+            )
+            return
+
+        if self._is_gemini_3x:
+            self._thinking_level = MINIMAL_THINKING_LEVEL
+            logging.debug(
+                "[gemini] prefer_minimal_reasoning: model=%s thinking_level=%s",
+                self.model, self._thinking_level,
+            )
+            return
+
+        model_lower = (self.model or "").lower()
+        if "2.5" in model_lower and "pro" not in model_lower:
+            self._thinking_budget = 0
+            logging.debug(
+                "[gemini] prefer_minimal_reasoning: model=%s thinking_budget=0", self.model,
+            )
+            return
+
+        logging.debug(
+            "[gemini] prefer_minimal_reasoning: model=%s has no thinking control that "
+            "is safe to minimise; leaving the request as it is", self.model,
+        )
 
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         """Configure model parameters from UI settings."""
