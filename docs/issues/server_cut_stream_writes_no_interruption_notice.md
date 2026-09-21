@@ -28,3 +28,8 @@
 - [continue_instruction_is_dead_code.md](continue_instruction_is_dead_code.md) (この調査で見つかった隣の欠陥 — 続きの生成の指示文は LLM に届いていない。撤去方向、別件)
 - `docs/issues/archive/user_utterance_path_failure_inventory.md` (続きの生成の親設計)
 - `docs/issues/archive/stop_path_and_lost_utterances` 系: 通告の文面と配り方の裁定は 2026-08-26/27 (`_settle_interrupted_utterance` docstring)
+
+## 経緯
+
+- 2026-09-14: 修正実装 (PR #298)。隔離テスト + 代行レビュー二巡で収束。残る検証はまはーの実機確認とした。
+- 2026-09-22: v0.3.14 のリリース検証で「サーバー切断は狙って起こせない」ため、実機確認を実地の発生待ちに切り替え (まはー「チェックできない」)。次に普段使いで生成が途中で切れた回に、発言の後ろに通告が入ること・続きの生成が Gemini でも通ることを見る。通告の書き込みの印は backend.log に出るので、掃くのはメティス。
