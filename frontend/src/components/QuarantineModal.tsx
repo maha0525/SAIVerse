@@ -1,4 +1,9 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import { useEffect, useState } from "react";
 import { X, AlertTriangle, RotateCcw, Trash2, FileWarning } from "lucide-react";
@@ -31,6 +36,7 @@ interface Props {
 }
 
 export default function QuarantineModal({ isOpen, onClose, onResolved }: Props) {
+    useLocale();
     const [entries, setEntries] = useState<QuarantineEntry[]>([]);
     const [loading, setLoading] = useState(false);
     const [selectedBackups, setSelectedBackups] = useState<Record<string, string>>({});
@@ -40,7 +46,7 @@ export default function QuarantineModal({ isOpen, onClose, onResolved }: Props) 
     const fetchEntries = async () => {
         setLoading(true);
         try {
-            const res = await fetch("/api/system/quarantine");
+            const res = await apiFetch("/api/system/quarantine");
             if (!res.ok) return;
             const data: QuarantineListResponse = await res.json();
             setEntries(data.quarantined || []);
@@ -59,22 +65,22 @@ export default function QuarantineModal({ isOpen, onClose, onResolved }: Props) 
     const handleRestore = async (buildingId: string) => {
         const backupFilename = selectedBackups[buildingId];
         if (!backupFilename) {
-            alert("バックアップを選択してください。");
+            alert(uiText("components.QuarantineModal.text001"));
             return;
         }
-        if (!confirm(`「${buildingId}」を以下のバックアップから復元します。よろしいですか？\n\n${getBaseName(backupFilename)}`)) {
+        if (!confirm(uiText("components.QuarantineModal.text002", { p1: buildingId, p2: getBaseName(backupFilename) }))) {
             return;
         }
         setActionInProgress(buildingId);
         try {
-            const res = await fetch(`/api/system/quarantine/${encodeURIComponent(buildingId)}/restore`, {
+            const res = await apiFetch(`/api/system/quarantine/${encodeURIComponent(buildingId)}/restore`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ backup_filename: backupFilename }),
             });
             const data = await res.json();
             if (!res.ok) {
-                setActionResult({ buildingId, result: { success: false, message: data.detail || "復元失敗" } });
+                setActionResult({ buildingId, result: { success: false, message: data.detail || uiText("components.QuarantineModal.text003") } });
                 return;
             }
             setActionResult({ buildingId, result: data });
@@ -90,19 +96,19 @@ export default function QuarantineModal({ isOpen, onClose, onResolved }: Props) 
 
     const handleReset = async (buildingId: string) => {
         if (!confirm(
-            `「${buildingId}」を空履歴で再開します。\n\n破損ファイルは退避済みなので無事ですが、` +
-            `この操作後は新規会話のみ表示されます。本当に進めますか？`
+            uiText("components.QuarantineModal.text004", { p1: buildingId }) +
+            uiText("components.QuarantineModal.text005")
         )) {
             return;
         }
         setActionInProgress(buildingId);
         try {
-            const res = await fetch(`/api/system/quarantine/${encodeURIComponent(buildingId)}/reset`, {
+            const res = await apiFetch(`/api/system/quarantine/${encodeURIComponent(buildingId)}/reset`, {
                 method: "POST",
             });
             const data = await res.json();
             if (!res.ok) {
-                setActionResult({ buildingId, result: { success: false, message: data.detail || "リセット失敗" } });
+                setActionResult({ buildingId, result: { success: false, message: data.detail || uiText("components.QuarantineModal.text006") } });
                 return;
             }
             setActionResult({ buildingId, result: data });
@@ -124,19 +130,17 @@ export default function QuarantineModal({ isOpen, onClose, onResolved }: Props) 
                 <div className={styles.modalHeader}>
                     <div className={styles.modalTitle}>
                         <AlertTriangle size={22} className={styles.warningIcon} />
-                        <span>破損ビルディングの管理</span>
+                        <span data-i18n="components.QuarantineModal.text007">{uiText("components.QuarantineModal.text007")}</span>
                     </div>
-                    <button className={styles.closeButton} onClick={onClose} aria-label="Close">
+                    <button className={styles.closeButton} onClick={onClose} aria-label={uiText("components.QuarantineModal.label001")}>
                         <X size={20} />
                     </button>
                 </div>
 
                 <div className={styles.modalBody}>
-                    {loading && <p className={styles.message}>読み込み中...</p>}
+                    {loading && <p data-i18n="components.QuarantineModal.text008" className={styles.message}>{uiText("components.QuarantineModal.text008")}</p>}
                     {!loading && entries.length === 0 && (
-                        <p className={styles.successMessage}>
-                            ✓ 隔離中のビルディングはありません。すべて正常です。
-                        </p>
+                        <p data-i18n="components.QuarantineModal.text009" className={styles.successMessage}>{uiText("components.QuarantineModal.text009")}</p>
                     )}
                     {entries.map((entry) => (
                         <div key={entry.building_id} className={styles.entry}>
@@ -148,29 +152,28 @@ export default function QuarantineModal({ isOpen, onClose, onResolved }: Props) 
 
                             <dl className={styles.metaList}>
                                 <div className={styles.metaRow}>
-                                    <dt>異常理由:</dt>
+                                    <dt data-i18n="components.QuarantineModal.text010">{uiText("components.QuarantineModal.text010")}</dt>
                                     <dd>{translateReason(entry.reason)}</dd>
                                 </div>
                                 <div className={styles.metaRow}>
-                                    <dt>退避先:</dt>
-                                    <dd className={styles.path}>
-                                        {entry.corrupted_path || "（退避失敗）"}
+                                    <dt data-i18n="components.QuarantineModal.text011">{uiText("components.QuarantineModal.text011")}</dt>
+                                    <dd data-i18n="components.QuarantineModal.text012" className={styles.path}>
+                                        {entry.corrupted_path || uiText("components.QuarantineModal.text012")}
                                     </dd>
                                 </div>
                                 {entry.rescue_error && (
                                     <div className={styles.metaRow}>
-                                        <dt>退避エラー:</dt>
+                                        <dt data-i18n="components.QuarantineModal.text013">{uiText("components.QuarantineModal.text013")}</dt>
                                         <dd className={styles.errorText}>{entry.rescue_error}</dd>
                                     </div>
                                 )}
                             </dl>
 
                             <div className={styles.actionsSection}>
-                                <h4 className={styles.actionsTitle}>
-                                    <RotateCcw size={16} /> バックアップから復元
-                                </h4>
+                                <h4 data-i18n="components.QuarantineModal.text014" className={styles.actionsTitle}>
+                                    <RotateCcw size={16} />{uiText("components.QuarantineModal.text014")}</h4>
                                 {entry.available_backups.length === 0 ? (
-                                    <p className={styles.subtleMessage}>利用可能なバックアップがありません。</p>
+                                    <p data-i18n="components.QuarantineModal.text015" className={styles.subtleMessage}>{uiText("components.QuarantineModal.text015")}</p>
                                 ) : (
                                     <>
                                         <ul className={styles.backupList}>
@@ -194,34 +197,26 @@ export default function QuarantineModal({ isOpen, onClose, onResolved }: Props) 
                                                 </li>
                                             ))}
                                         </ul>
-                                        <button
+                                        <button data-i18n="components.QuarantineModal.text016"
                                             className={styles.primaryButton}
                                             onClick={() => handleRestore(entry.building_id)}
                                             disabled={actionInProgress === entry.building_id || !selectedBackups[entry.building_id]}
-                                        >
-                                            選択したバックアップで復元
-                                        </button>
+                                        >{uiText("components.QuarantineModal.text016")}</button>
                                     </>
                                 )}
                             </div>
 
-                            <div className={styles.divider}>または</div>
+                            <div data-i18n="components.QuarantineModal.text017" className={styles.divider}>{uiText("components.QuarantineModal.text017")}</div>
 
                             <div className={styles.actionsSection}>
-                                <h4 className={styles.actionsTitle}>
-                                    <Trash2 size={16} /> リセット（空履歴で再開）
-                                </h4>
-                                <p className={styles.subtleMessage}>
-                                    破損ファイルは退避先に保持されたまま、新規空履歴で再開します。
-                                    後から手動で復旧することも可能です。
-                                </p>
-                                <button
+                                <h4 data-i18n="components.QuarantineModal.text018" className={styles.actionsTitle}>
+                                    <Trash2 size={16} />{uiText("components.QuarantineModal.text018")}</h4>
+                                <p data-i18n="components.QuarantineModal.text019" className={styles.subtleMessage}>{uiText("components.QuarantineModal.text019")}</p>
+                                <button data-i18n="components.QuarantineModal.text020"
                                     className={styles.dangerButton}
                                     onClick={() => handleReset(entry.building_id)}
                                     disabled={actionInProgress === entry.building_id}
-                                >
-                                    リセット
-                                </button>
+                                >{uiText("components.QuarantineModal.text020")}</button>
                             </div>
 
                             {actionResult?.buildingId === entry.building_id && (
@@ -233,12 +228,8 @@ export default function QuarantineModal({ isOpen, onClose, onResolved }: Props) 
                     ))}
 
                     <div className={styles.helperBox}>
-                        <h4>手動対応する場合</h4>
-                        <p>
-                            上記の操作を使わず手動で対応したい場合は、SAIVerseを停止してから
-                            <code> .corrupted_*</code> ファイルを修復し、元の<code> log.json </code>
-                            にリネームしてSAIVerseを再起動してください。
-                        </p>
+                        <h4 data-i18n="components.QuarantineModal.text021">{uiText("components.QuarantineModal.text021")}</h4>
+                        <p data-i18n="components.QuarantineModal.text022 components.QuarantineModal.text023 components.QuarantineModal.text024">{uiText("components.QuarantineModal.text022")}<code> {uiText("components.QuarantineModal.label002")}</code>{uiText("components.QuarantineModal.text023")}<code> {uiText("components.QuarantineModal.label003")}</code>{uiText("components.QuarantineModal.text024")}</p>
                     </div>
                 </div>
             </div>
@@ -248,9 +239,9 @@ export default function QuarantineModal({ isOpen, onClose, onResolved }: Props) 
 
 function translateReason(reason: string): string {
     const map: Record<string, string> = {
-        corrupted: "JSONパース失敗（破損）",
-        zero_byte: "0バイトファイル（書き込み中断の痕跡）",
-        invalid_structure: "構造異常（配列ではない）",
+        corrupted: uiText("components.QuarantineModal.text025"),
+        zero_byte: uiText("components.QuarantineModal.text026"),
+        invalid_structure: uiText("components.QuarantineModal.text027"),
     };
     return map[reason] || reason;
 }

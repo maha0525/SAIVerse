@@ -1,3 +1,8 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useEffect, useState, useCallback } from 'react';
 import { Plus, Edit2, Trash2, Copy, RefreshCw } from 'lucide-react';
 import styles from './ModelManagementPanel.module.css';
@@ -11,6 +16,7 @@ interface ModelInfo {
 }
 
 export default function ModelManagementPanel() {
+    useLocale();
     const [models, setModels] = useState<ModelInfo[]>([]);
     const [filter, setFilter] = useState('');
     const [loading, setLoading] = useState(false);
@@ -22,7 +28,7 @@ export default function ModelManagementPanel() {
     const loadModels = useCallback(async () => {
         setLoading(true);
         try {
-            const res = await fetch('/api/config/models');
+            const res = await apiFetch('/api/config/models');
             if (res.ok) {
                 const data = await res.json();
                 setModels(data);
@@ -53,9 +59,9 @@ export default function ModelManagementPanel() {
 
     const handleClone = async (m: ModelInfo) => {
         try {
-            const res = await fetch(`/api/config/models/${m.id}`);
+            const res = await apiFetch(`/api/config/models/${m.id}`);
             if (!res.ok) {
-                alert(`モデル情報の取得に失敗しました: HTTP ${res.status}`);
+                alert(uiText("components.settings.ModelManagementPanel.text001", { p1: res.status }));
                 return;
             }
             const data = await res.json();
@@ -64,17 +70,17 @@ export default function ModelManagementPanel() {
             setCloneSource({ key: m.id, config: data.config ?? {} });
             setEditorOpen(true);
         } catch (e) {
-            alert(`複製に失敗しました: ${e}`);
+            alert(uiText("components.settings.ModelManagementPanel.text002", { p1: e }));
         }
     };
 
     const handleDelete = async (m: ModelInfo) => {
-        if (!confirm(`「${m.name}」(${m.id}) を削除しますか？\n\n※ user_data 配下のみ削除可能。builtin/expansion は削除できません（その場合は API がエラーを返します）。`)) return;
+        if (!confirm(uiText("components.settings.ModelManagementPanel.text003", { p1: m.name, p2: m.id }))) return;
         try {
-            const res = await fetch(`/api/config/models/${m.id}`, { method: 'DELETE' });
+            const res = await apiFetch(`/api/config/models/${m.id}`, { method: 'DELETE' });
             if (!res.ok) {
                 const text = await res.text();
-                alert(`削除に失敗しました: ${text}`);
+                alert(uiText("components.settings.ModelManagementPanel.text004", { p1: text }));
                 return;
             }
             // 削除で決め直したときに、新しい設定に切り替えられなかったペルソナの知らせ
@@ -85,7 +91,7 @@ export default function ModelManagementPanel() {
             }
             loadModels();
         } catch (e) {
-            alert(`削除に失敗しました: ${e}`);
+            alert(uiText("components.settings.ModelManagementPanel.text005", { p1: e }));
         }
     };
 
@@ -100,31 +106,29 @@ export default function ModelManagementPanel() {
     return (
         <div className={styles.container}>
             <div className={styles.header}>
-                <h3>モデル ({models.length})</h3>
+                <h3 data-i18n="components.settings.ModelManagementPanel.text006">{uiText("components.settings.ModelManagementPanel.text006")}{models.length})</h3>
                 <div className={styles.actions}>
-                    <input
+                    <input data-i18n="components.settings.ModelManagementPanel.text007"
                         className={styles.filterInput}
                         type="text"
                         value={filter}
                         onChange={e => setFilter(e.target.value)}
-                        placeholder="名前/ID/プロバイダで絞り込み..."
+                        placeholder={uiText("components.settings.ModelManagementPanel.text007")}
                     />
-                    <button className={styles.btnSecondary} onClick={loadModels}>
-                        <RefreshCw size={14} /> 再読み込み
-                    </button>
-                    <button className={styles.btnPrimary} onClick={openCreate}>
-                        <Plus size={14} /> 新規追加
-                    </button>
+                    <button data-i18n="components.settings.ModelManagementPanel.text008" className={styles.btnSecondary} onClick={loadModels}>
+                        <RefreshCw size={14} />{uiText("components.settings.ModelManagementPanel.text008")}</button>
+                    <button data-i18n="components.settings.ModelManagementPanel.text009" className={styles.btnPrimary} onClick={openCreate}>
+                        <Plus size={14} />{uiText("components.settings.ModelManagementPanel.text009")}</button>
                 </div>
             </div>
 
             {loading ? (
-                <div className={styles.empty}>読み込み中...</div>
+                <div data-i18n="components.settings.ModelManagementPanel.text010" className={styles.empty}>{uiText("components.settings.ModelManagementPanel.text010")}</div>
             ) : filtered.length === 0 ? (
-                <div className={styles.empty}>
+                <div data-i18n="components.settings.ModelManagementPanel.text011 components.settings.ModelManagementPanel.text012" className={styles.empty}>
                     {models.length === 0
-                        ? '利用可能なモデルがありません（API キー未設定の可能性）'
-                        : 'フィルタに一致するモデルがありません'}
+                        ? uiText("components.settings.ModelManagementPanel.text011")
+                        : uiText("components.settings.ModelManagementPanel.text012")}
                 </div>
             ) : (
                 <div className={styles.list}>
@@ -132,18 +136,15 @@ export default function ModelManagementPanel() {
                         <div key={m.id} className={styles.row}>
                             <div className={styles.rowLeft}>
                                 <div className={styles.rowName}>{m.name}</div>
-                                <div className={styles.rowSub}>{m.id} ・ {m.provider || '?'}</div>
+                                <div data-i18n="components.settings.ModelManagementPanel.text013" className={styles.rowSub}>{m.id}{uiText("components.settings.ModelManagementPanel.text013")}{m.provider || '?'}</div>
                             </div>
                             <div className={styles.rowActions}>
-                                <button className={styles.iconBtn} onClick={() => openEdit(m.id)}>
-                                    <Edit2 size={12} /> 編集
-                                </button>
-                                <button className={styles.iconBtn} onClick={() => handleClone(m)}>
-                                    <Copy size={12} /> 複製
-                                </button>
-                                <button className={`${styles.iconBtn} ${styles.deleteBtn}`} onClick={() => handleDelete(m)}>
-                                    <Trash2 size={12} /> 削除
-                                </button>
+                                <button data-i18n="components.settings.ModelManagementPanel.text014" className={styles.iconBtn} onClick={() => openEdit(m.id)}>
+                                    <Edit2 size={12} />{uiText("components.settings.ModelManagementPanel.text014")}</button>
+                                <button data-i18n="components.settings.ModelManagementPanel.text015" className={styles.iconBtn} onClick={() => handleClone(m)}>
+                                    <Copy size={12} />{uiText("components.settings.ModelManagementPanel.text015")}</button>
+                                <button data-i18n="components.settings.ModelManagementPanel.text016" className={`${styles.iconBtn} ${styles.deleteBtn}`} onClick={() => handleDelete(m)}>
+                                    <Trash2 size={12} />{uiText("components.settings.ModelManagementPanel.text016")}</button>
                             </div>
                         </div>
                     ))}

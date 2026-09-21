@@ -1,4 +1,9 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, ReactNode, CSSProperties } from 'react';
 import { ChevronDown, Wrench, Hammer } from 'lucide-react';
@@ -59,15 +64,15 @@ interface ToolMode {
 const TOOL_MODES: ToolMode[] = [
     {
         id: null,
-        shortLabel: '自動',
+        get shortLabel() { return uiText("components.ToolModeSelector.text001"); },
         icon: <Wrench size={ICON_SIZE} />,
-        description: 'ペルソナがツール利用を自分で判断します',
+        get description() { return uiText("components.ToolModeSelector.text002"); },
     },
     {
         id: TOOL_MODE_SELECTED,
-        shortLabel: 'ツール指定',
+        get shortLabel() { return uiText("components.ToolModeSelector.text003"); },
         icon: <Hammer size={ICON_SIZE} />,
-        description: '応答前に指定したツールを必ず実行します',
+        get description() { return uiText("components.ToolModeSelector.text004"); },
     },
 ];
 
@@ -95,6 +100,7 @@ export default function ToolModeSelector({
     playbookArgs,
     onPlaybookArgsChange,
 }: ToolModeSelectorProps) {
+    useLocale();
     const [isOpen, setIsOpen] = useState(false);
     const [isSubOpen, setIsSubOpen] = useState(false);
     const [subPlaybooks, setSubPlaybooks] = useState<SubPlaybookOption[]>([]);
@@ -147,7 +153,7 @@ export default function ToolModeSelector({
     const fetchSubPlaybooks = useCallback(async () => {
         if (subPlaybooksLoaded) return;
         try {
-            const res = await fetch('/api/config/playbooks?router_callable=true');
+            const res = await apiFetch('/api/config/playbooks?router_callable=true');
             if (res.ok) {
                 const data = await res.json();
                 if (Array.isArray(data)) {
@@ -174,7 +180,7 @@ export default function ToolModeSelector({
     const fetchSpells = useCallback(async () => {
         if (spellsLoaded) return;
         try {
-            const res = await fetch('/api/people/spells');
+            const res = await apiFetch('/api/people/spells');
             if (res.ok) {
                 const data = await res.json();
                 if (Array.isArray(data)) {
@@ -208,7 +214,7 @@ export default function ToolModeSelector({
 
     const syncToServer = async (playbookId: string | null, params: Record<string, any>) => {
         try {
-            await fetch('/api/config/playbook', {
+            await apiFetch('/api/config/playbook', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ playbook: playbookId, args: params }),
@@ -260,10 +266,10 @@ export default function ToolModeSelector({
     return (
         <div className={styles.container}>
             <div ref={containerRef} style={{ position: 'relative' }}>
-                <button
+                <button data-i18n="components.ToolModeSelector.text005"
                     className={`${styles.toolModeBtn} ${isOpen ? styles.toolModeBtnActive : ''}`}
                     onClick={() => setIsOpen(!isOpen)}
-                    title="ツール利用形式"
+                    title={uiText("components.ToolModeSelector.text005")}
                 >
                     {currentMode.icon}
                     <span className={styles.modeLabel}>{currentMode.shortLabel}</span>
@@ -272,9 +278,7 @@ export default function ToolModeSelector({
 
                 {isOpen && (
                     <div className={styles.popover} ref={modePopover.ref} style={modePopover.style}>
-                        <div className={styles.popoverHeader}>
-                            ツールの利用形式を選べます
-                        </div>
+                        <div data-i18n="components.ToolModeSelector.text006" className={styles.popoverHeader}>{uiText("components.ToolModeSelector.text006")}</div>
                         {TOOL_MODES.map(mode => (
                             <button
                                 key={mode.id ?? 'auto'}
@@ -299,23 +303,21 @@ export default function ToolModeSelector({
 
             {normalizedMode === TOOL_MODE_SELECTED && (
                 <div ref={subContainerRef} style={{ position: 'relative' }}>
-                    <button
+                    <button data-i18n="components.ToolModeSelector.text007"
                         className={styles.subPlaybookBtn}
                         onClick={() => setIsSubOpen(!isSubOpen)}
-                        title="使用するツールを選択"
+                        title={uiText("components.ToolModeSelector.text007")}
                     >
-                        <span>{selectedSubLabel || 'ツール未選択'}</span>
+                        <span data-i18n="components.ToolModeSelector.text008">{selectedSubLabel || uiText("components.ToolModeSelector.text008")}</span>
                         <ChevronDown size={12} style={{ opacity: 0.5 }} />
                     </button>
 
                     {isSubOpen && (
                         <div className={styles.subPopover} ref={subPopover.ref} style={subPopover.style}>
-                            <button
+                            <button data-i18n="components.ToolModeSelector.text009"
                                 className={`${styles.subOption} ${styles.subNone} ${!selectedSubPlaybook ? styles.subOptionSelected : ''}`}
                                 onClick={() => handleSubPlaybookChange(null)}
-                            >
-                                （未選択）
-                            </button>
+                            >{uiText("components.ToolModeSelector.text009")}</button>
                             {subPlaybooks.map(opt => (
                                 <button
                                     key={opt.value}
@@ -332,15 +334,15 @@ export default function ToolModeSelector({
 
             {normalizedMode === TOOL_MODE_SELECTED && (
                 <div ref={spellsContainerRef} style={{ position: 'relative' }}>
-                    <button
+                    <button data-i18n="components.ToolModeSelector.text010"
                         className={styles.subPlaybookBtn}
                         onClick={() => setIsSpellsOpen(!isSpellsOpen)}
-                        title="併用するスペルを選択（複数可）"
+                        title={uiText("components.ToolModeSelector.text010")}
                     >
-                        <span>
+                        <span data-i18n="components.ToolModeSelector.text011 components.ToolModeSelector.text012">
                             {selectedSpellNames.length === 0
-                                ? 'スペル併用なし'
-                                : `スペル: ${selectedSpellNames.length} 個`}
+                                ? uiText("components.ToolModeSelector.text011")
+                                : uiText("components.ToolModeSelector.text012", { p1: selectedSpellNames.length })}
                         </span>
                         <ChevronDown size={12} style={{ opacity: 0.5 }} />
                     </button>
@@ -348,9 +350,7 @@ export default function ToolModeSelector({
                     {isSpellsOpen && (
                         <div className={styles.subPopover} ref={spellsPopover.ref} style={spellsPopover.style}>
                             {availableSpells.length === 0 ? (
-                                <div className={styles.subOption} style={{ color: '#888', cursor: 'default' }}>
-                                    （利用可能なスペルがありません）
-                                </div>
+                                <div data-i18n="components.ToolModeSelector.text013" className={styles.subOption} style={{ color: '#888', cursor: 'default' }}>{uiText("components.ToolModeSelector.text013")}</div>
                             ) : (
                                 availableSpells.map(spell => {
                                     const checked = selectedSpellNames.includes(spell.name);
@@ -361,7 +361,7 @@ export default function ToolModeSelector({
                                             onClick={() => toggleSpell(spell.name)}
                                             title={spell.description}
                                         >
-                                            <span style={{ marginRight: '6px' }}>{checked ? '✓' : '　'}</span>
+                                            <span style={{ marginRight: '6px' }}>{checked ? '✓' : '\u00A0'}</span>
                                             {spell.display_name || spell.name}
                                             <span style={{ color: '#888', marginLeft: '4px', fontSize: '0.85em' }}>
                                                 ({spell.name})

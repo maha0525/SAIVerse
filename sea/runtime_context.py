@@ -682,7 +682,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # ---- 自動想起 第0層 (ゾーン C) — 「浮かんだ記憶」の末尾注入 ----
     # 記憶アーキv2 §4。CONVERSATION アスペクト (user/schedule Pulse) のときのみ、
     # ローカル埋め込み検索で現在の話題に関連する記憶を末尾に一時注入する。
-    # head 非混入・SAIMemory 非永続 (§10-2/§10-7)。LLM は呼ばない (§10-1)。
+    # head 非混入・SAIMemory 非永続 (§10-2/§10-7)。LLM は呼ばない (§10-1。唯一の
+    # 例外は既定 OFF の Jev 選別層 — ON のときだけ判定専用の外部 API へ 1 往復する。
+    # docs/intent/auto_recall_jev_rerank.md)。
     # サブライン (line='sub') はそもそも _prepare_context を通らないので自然に除外。
     if not preview_only:
         try:
@@ -1122,6 +1124,10 @@ def _maybe_inject_auto_recall(
 
     記憶アーキv2 §4。スコープは CONVERSATION アスペクトのみ (§4.6)。注入発生時は
     event_callback で ``auto_recall`` イベントを流し、フロントで折りたたみ表示する (§4.5)。
+
+    反射判断が時間内に答えず従来方式へ戻ったターンでは、同じ event_callback へ
+    ``reflex_fallback`` イベントを 1 回流す。こちらは**画面に出すだけ**で、どこにも
+    保存しない (docs/intent/reflex_judgment.md 経緯 2026-09-21)。
     """
     from sea.pulse_context import Aspect, aspect_from_pulse_type
 
@@ -1178,11 +1184,61 @@ def _maybe_inject_auto_recall(
         )
         return
 
+    # ペルソナ単位の「自動想起を強化する」スイッチ (AUTO_RECALL_ENHANCED)。
+    # run_auto_recall は persona_id 文字列しか受けないので、persona オブジェクトを
+    # 持っているここで読んで旗として渡す (docs/intent/reflex_judgment.md §4)。
+    # 読めなかった回は OFF に倒す — 費用の出る側を既定にしない。
+    try:
+        enhanced = bool(runtime._is_auto_recall_enhanced_for_persona(persona))
+    except Exception:
+        LOGGER.warning(
+            "[sea][auto_recall] failed to read AUTO_RECALL_ENHANCED (persona=%s); "
+            "treating it as off", persona_id, exc_info=True,
+        )
+        enhanced = False
+
+    # ペルソナ個別の反射判断モデル (AI.REFLEX_JUDGMENT_MODEL)。ここも persona
+    # オブジェクトを持っているこの場所で読んで渡す (docs/intent/reflex_judgment.md §1)。
+    # None = 上書きなし = 世界の既定 (モデルの役割の割り当て) に従う。
+    # 読むのはスイッチが ON のペルソナだけ — OFF では値がどこでも使われないので、
+    # 全ペルソナの毎ターンに DB 読みを 1 回足さない (2026-09-20 のローカルレビューの指摘)。
+    reflex_model_key = None
+    if enhanced:
+        try:
+            reflex_model_key = runtime._get_reflex_model_for_persona(persona)
+        except Exception:
+            LOGGER.warning(
+                "[sea][auto_recall] failed to read REFLEX_JUDGMENT_MODEL (persona=%s); "
+                "falling back to the world default", persona_id, exc_info=True,
+            )
+            reflex_model_key = None
+
     from sea.auto_recall import run_auto_recall
 
     result = run_auto_recall(
-        conn, embedder, messages, persona_id=persona_id, thread_id=thread_id,
+        conn, embedder, messages,
+        persona_id=persona_id, thread_id=thread_id, enhanced=enhanced,
+        reflex_model_key=reflex_model_key,
     )
+
+    # 反射判断が時間内に答えず従来方式へ戻ったターンは、そのことを画面に出す。
+    # **表示専用**: 会話履歴にも建物の記録にもペルソナの記憶にも書かない (下の
+    # auto_recall と違って、発言の metadata へ載せる経路も持たない)。注入が起きた
+    # かどうかとは無関係に起こりうるので、下の早期 return より前に出す。
+    # 出す先が無いターン (event_callback を持たない自律 Pulse) は静かに何もしない —
+    # 集計 (saiverse/reflex_judgment.py の直近の記録) には既に数えられている。
+    if result.reflex_deadline_fallback and event_callback:
+        try:
+            event_callback({
+                "type": "reflex_fallback",
+                "reason": "deadline",
+                "persona_id": persona_id,
+                "persona_name": getattr(persona, "persona_name", None),
+                "building_id": event_building_id(runtime, persona),
+            })
+        except Exception:
+            LOGGER.debug("[sea][auto_recall] reflex_fallback event_callback failed", exc_info=True)
+
     if not result.injected or not result.block:
         return
 

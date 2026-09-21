@@ -1,3 +1,10 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useCallback, useEffect, useState } from 'react';
 import { Search, Loader2, AlertCircle, Anchor, Minus, Plus, CheckCircle2, ChevronRight, ChevronDown, Check, Pencil, Trash2, RotateCcw, X, Save } from 'lucide-react';
 import styles from './CoreMemoryScene.module.css';
@@ -79,6 +86,7 @@ function formatDate(ts: number): string {
 }
 
 export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
+    useLocale();
     // Existing core memory list
     const [coreList, setCoreList] = useState<CoreMemoryListResponse | null>(null);
     const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set());
@@ -97,7 +105,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
 
     const loadCoreList = useCallback(async () => {
         try {
-            const res = await fetch(`/api/people/${personaId}/core-memory`);
+            const res = await apiFetch(`/api/people/${personaId}/core-memory`);
             if (!res.ok) return;
             const data = await res.json();
             setCoreList(data);
@@ -122,7 +130,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
 
     const loadTrash = useCallback(async () => {
         try {
-            const res = await fetch(`/api/people/${personaId}/core-memory/trash`);
+            const res = await apiFetch(`/api/people/${personaId}/core-memory/trash`);
             if (!res.ok) return;
             const data: CoreMemoryListResponse = await res.json();
             setTrash(data.items);
@@ -152,7 +160,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
             await refreshAfterMutation();
             return true;
         } catch (e: any) {
-            setRowError(e.message || '操作に失敗しました');
+            setRowError(e.message || uiText("components.memory.CoreMemoryScene.text001"));
             return false;
         } finally {
             setRowBusy(null);
@@ -161,17 +169,17 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
 
     const handleConfirm = (id: number) =>
         runRowAction(id, () =>
-            fetch(`/api/people/${personaId}/core-memory/${id}/confirm`, { method: 'POST' })
+            apiFetch(`/api/people/${personaId}/core-memory/${id}/confirm`, { method: 'POST' })
         );
 
     const handleDelete = (id: number) =>
         runRowAction(id, () =>
-            fetch(`/api/people/${personaId}/core-memory/${id}`, { method: 'DELETE' })
+            apiFetch(`/api/people/${personaId}/core-memory/${id}`, { method: 'DELETE' })
         );
 
     const handleRestore = (id: number) =>
         runRowAction(id, () =>
-            fetch(`/api/people/${personaId}/core-memory/${id}/restore`, { method: 'POST' })
+            apiFetch(`/api/people/${personaId}/core-memory/${id}/restore`, { method: 'POST' })
         );
 
     const startEdit = (it: CoreMemoryItem) => {
@@ -188,11 +196,11 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
     const handleSaveEdit = async (id: number) => {
         const content = editContent.trim();
         if (!content) {
-            setRowError('本文が空です。');
+            setRowError(uiText("components.memory.CoreMemoryScene.text002"));
             return;
         }
         const ok = await runRowAction(id, () =>
-            fetch(`/api/people/${personaId}/core-memory/${id}`, {
+            apiFetch(`/api/people/${personaId}/core-memory/${id}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ content }),
@@ -212,7 +220,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
     const handleSearch = async () => {
         const q = keyword.trim();
         if (!q) {
-            setSearchError('キーワードを入力してね');
+            setSearchError(uiText("components.memory.CoreMemoryScene.text003"));
             return;
         }
         setSearching(true);
@@ -224,7 +232,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
             const params = new URLSearchParams({ keyword: q, limit: '20' });
             if (dateFrom) params.set('date_from', dateFrom);
             if (dateTo) params.set('date_to', dateTo);
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/people/${personaId}/memory/messages/search?${params.toString()}`
             );
             if (!res.ok) {
@@ -234,7 +242,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
             const data = await res.json();
             setSearchResult(data);
         } catch (e: any) {
-            setSearchError(e.message || '検索に失敗しました');
+            setSearchError(e.message || uiText("components.memory.CoreMemoryScene.text004"));
         } finally {
             setSearching(false);
         }
@@ -251,7 +259,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
         setWindowLoading(true);
         setWindowError(null);
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/people/${personaId}/memory/messages/${encodeURIComponent(anchorId)}/window?rounds=${r}`
             );
             if (!res.ok) {
@@ -261,7 +269,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
             const data = await res.json();
             setWindowData(data);
         } catch (e: any) {
-            setWindowError(e.message || '会話窓の取得に失敗しました');
+            setWindowError(e.message || uiText("components.memory.CoreMemoryScene.text005"));
             setWindowData(null);
         } finally {
             setWindowLoading(false);
@@ -294,7 +302,7 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
         setCarveError(null);
         setCarveToast(null);
         try {
-            const res = await fetch(`/api/people/${personaId}/core-memory/scene`, {
+            const res = await apiFetch(`/api/people/${personaId}/core-memory/scene`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ anchor_id: selectedAnchor, rounds }),
@@ -304,14 +312,14 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                 throw new Error((data as any).detail || `HTTP ${res.status}`);
             }
             setCarveToast(
-                `コア記憶 ${data.ref} を刻みました（${data.message_count} 発言・${data.char_count.toLocaleString()} 字）。` +
-                `head への反映は次の記憶整理から。`
+                uiText("components.memory.CoreMemoryScene.text006", { p1: data.ref, p2: data.message_count, p3: data.char_count.toLocaleString(getFormatLocale()) }) +
+                uiText("components.memory.CoreMemoryScene.text007")
             );
             setSelectedAnchor(null);
             setWindowData(null);
             loadCoreList();
         } catch (e: any) {
-            setCarveError(e.message || 'コア記憶への追加に失敗しました');
+            setCarveError(e.message || uiText("components.memory.CoreMemoryScene.text008"));
         } finally {
             setCarving(false);
         }
@@ -329,48 +337,39 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
             {/* タブ全体の説明。下の検索フォームはコア記憶を刻むための一機能で
                 あって、コア記憶そのものの説明ではない (2026-09-01 まはー指摘)。 */}
             <div className={styles.tabIntro}>
-                <h3 className={styles.tabIntroTitle}>コア記憶</h3>
-                <p className={styles.tabIntroText}>
-                    コア記憶は、ペルソナが常に頭に置いている記憶です。会話のたびに毎回読み込まれ、
-                    口調や自己認識の土台になります。いま刻まれているコア記憶は、このタブで確認・編集・削除ができます。
-                </p>
+                <h3 data-i18n="components.memory.CoreMemoryScene.text009" className={styles.tabIntroTitle}>{uiText("components.memory.CoreMemoryScene.text009")}</h3>
+                <p data-i18n="components.memory.CoreMemoryScene.text010" className={styles.tabIntroText}>{uiText("components.memory.CoreMemoryScene.text010")}</p>
             </div>
 
             <div className={styles.header}>
                 <Anchor size={24} className={styles.icon} />
                 <div>
-                    <h3 className={styles.title}>会話を探して刻む</h3>
-                    <p className={styles.description}>
-                        過去の会話から「そのペルソナらしさが出た場面」を探して、原文のままコア記憶に刻む道具です。
-                        口調が安定しないとき、言葉で説明するより実際の会話例のほうが強く効きます。
-                    </p>
+                    <h3 data-i18n="components.memory.CoreMemoryScene.text011" className={styles.title}>{uiText("components.memory.CoreMemoryScene.text011")}</h3>
+                    <p data-i18n="components.memory.CoreMemoryScene.text012" className={styles.description}>{uiText("components.memory.CoreMemoryScene.text012")}</p>
                 </div>
             </div>
 
             {/* Search form */}
             <div className={styles.searchForm}>
                 <div className={styles.searchRow}>
-                    <input
+                    <input data-i18n="components.memory.CoreMemoryScene.text013"
                         className={styles.keywordInput}
                         value={keyword}
                         onChange={(e) => setKeyword(e.target.value)}
                         onKeyDown={(e) => {
                             if (e.key === 'Enter') handleSearch();
                         }}
-                        placeholder="キーワード（空白区切りで AND 検索）"
+                        placeholder={uiText("components.memory.CoreMemoryScene.text013")}
                     />
-                    <button
+                    <button data-i18n="components.memory.CoreMemoryScene.text014"
                         className={styles.searchButton}
                         onClick={handleSearch}
                         disabled={searching || !keyword.trim()}
                     >
-                        {searching ? <Loader2 size={16} className={styles.loader} /> : <Search size={16} />}
-                        検索
-                    </button>
+                        {searching ? <Loader2 size={16} className={styles.loader} /> : <Search size={16} />}{uiText("components.memory.CoreMemoryScene.text014")}</button>
                 </div>
                 <div className={styles.dateRow}>
-                    <label>
-                        期間{' '}
+                    <label data-i18n="components.memory.CoreMemoryScene.text015">{uiText("components.memory.CoreMemoryScene.text015")}{' '}
                         <input
                             type="date"
                             className={styles.dateInput}
@@ -378,14 +377,14 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                             onChange={(e) => setDateFrom(e.target.value)}
                         />
                     </label>
-                    <span>〜</span>
+                    <span data-i18n="components.memory.CoreMemoryScene.text015Separator">{uiText("components.memory.CoreMemoryScene.text015Separator")}</span>
                     <input
                         type="date"
                         className={styles.dateInput}
                         value={dateTo}
                         onChange={(e) => setDateTo(e.target.value)}
                     />
-                    <span>（任意）</span>
+                    <span data-i18n="components.memory.CoreMemoryScene.text016">{uiText("components.memory.CoreMemoryScene.text016")}</span>
                 </div>
             </div>
 
@@ -407,13 +406,11 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
             {searchResult && (
                 <>
                     {searchResult.mode === 'semantic' && (
-                        <div className={styles.semanticNote}>
-                            キーワード一致がなかったため、意味の近さで検索しました（セマンティック検索）。
-                        </div>
+                        <div data-i18n="components.memory.CoreMemoryScene.text017" className={styles.semanticNote}>{uiText("components.memory.CoreMemoryScene.text017")}</div>
                     )}
                     <div className={styles.results}>
                         {searchResult.hits.length === 0 ? (
-                            <div className={styles.emptyResults}>該当する会話が見つかりませんでした。</div>
+                            <div data-i18n="components.memory.CoreMemoryScene.text018" className={styles.emptyResults}>{uiText("components.memory.CoreMemoryScene.text018")}</div>
                         ) : (
                             searchResult.hits.map((hit) => (
                                 <div
@@ -437,23 +434,21 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
             {selectedAnchor && (
                 <div className={styles.windowPanel}>
                     <div className={styles.windowHeader}>
-                        <span className={styles.windowTitle}>この会話を刻む（前後の往復を確認）</span>
-                        <div className={styles.roundsControl}>
-                            往復数
-                            <button
+                        <span data-i18n="components.memory.CoreMemoryScene.text019" className={styles.windowTitle}>{uiText("components.memory.CoreMemoryScene.text019")}</span>
+                        <div data-i18n="components.memory.CoreMemoryScene.text020" className={styles.roundsControl}>{uiText("components.memory.CoreMemoryScene.text020")}<button data-i18n="components.memory.CoreMemoryScene.text021"
                                 className={styles.roundsButton}
                                 onClick={() => changeRounds(-1)}
                                 disabled={windowLoading || rounds <= 1}
-                                aria-label="往復を減らす"
+                                aria-label={uiText("components.memory.CoreMemoryScene.text021")}
                             >
                                 <Minus size={14} />
                             </button>
                             <span className={styles.roundsValue}>{rounds}</span>
-                            <button
+                            <button data-i18n="components.memory.CoreMemoryScene.text022"
                                 className={styles.roundsButton}
                                 onClick={() => changeRounds(1)}
                                 disabled={windowLoading || rounds >= 20}
-                                aria-label="往復を増やす"
+                                aria-label={uiText("components.memory.CoreMemoryScene.text022")}
                             >
                                 <Plus size={14} />
                             </button>
@@ -468,9 +463,8 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                     )}
 
                     {windowLoading && !windowData && (
-                        <div className={styles.emptyResults}>
-                            <Loader2 size={14} className={styles.loader} /> 読み込み中...
-                        </div>
+                        <div data-i18n="components.memory.CoreMemoryScene.text023" className={styles.emptyResults}>
+                            <Loader2 size={14} className={styles.loader} />{uiText("components.memory.CoreMemoryScene.text023")}</div>
                     )}
 
                     {windowData && (
@@ -492,21 +486,14 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                                 })}
                             </div>
 
-                            <div className={`${styles.charPreview} ${willBeOver ? styles.charPreviewOver : ''}`}>
-                                この切り抜き: <span className={styles.charNum}>{cutChars.toLocaleString()}</span> 字
-                                {' / '}現在のコア記憶合計 <span className={styles.charNum}>{currentTotal.toLocaleString()}</span> 字
-                                {' → '}刻むと{' '}
+                            <div data-i18n="components.memory.CoreMemoryScene.text024 components.memory.CoreMemoryScene.text025 components.memory.CoreMemoryScene.text026 components.memory.CoreMemoryScene.text027 components.memory.CoreMemoryScene.text028 components.memory.CoreMemoryScene.text029 components.memory.CoreMemoryScene.text030 components.memory.CoreMemoryScene.text031" className={`${styles.charPreview} ${willBeOver ? styles.charPreviewOver : ''}`}>{uiText("components.memory.CoreMemoryScene.text024")}<span className={styles.charNum}>{cutChars.toLocaleString(getFormatLocale())}</span>{uiText("components.memory.CoreMemoryScene.text025")}{' / '}{uiText("components.memory.CoreMemoryScene.text026")}<span className={styles.charNum}>{currentTotal.toLocaleString(getFormatLocale())}</span>{uiText("components.memory.CoreMemoryScene.text027")}{' → '}{uiText("components.memory.CoreMemoryScene.text028")}{' '}
                                 <span className={willBeOver ? styles.charNumOver : styles.charNum}>
-                                    {newTotal.toLocaleString()}
-                                </span>{' '}
-                                字（目安 {budget.toLocaleString()} 字）
-                                {willBeOver && '　※ 目安を超えます'}
+                                    {newTotal.toLocaleString(getFormatLocale())}
+                                </span>{' '}{uiText("components.memory.CoreMemoryScene.text029")}{budget.toLocaleString(getFormatLocale())}{uiText("components.memory.CoreMemoryScene.text030")}{willBeOver && uiText("components.memory.CoreMemoryScene.text031")}
                             </div>
 
-                            <button className={styles.carveButton} onClick={handleCarve} disabled={carving}>
-                                {carving ? <Loader2 size={16} className={styles.loader} /> : <Anchor size={16} />}
-                                コア記憶に刻む
-                            </button>
+                            <button data-i18n="components.memory.CoreMemoryScene.text032" className={styles.carveButton} onClick={handleCarve} disabled={carving}>
+                                {carving ? <Loader2 size={16} className={styles.loader} /> : <Anchor size={16} />}{uiText("components.memory.CoreMemoryScene.text032")}</button>
 
                             {carveError && (
                                 <div className={styles.error} style={{ marginTop: '0.75rem' }}>
@@ -523,18 +510,13 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                 search → carve flow comes first). 確認・訂正・削除ができる。 */}
             <div className={styles.coreList}>
                 <div className={styles.coreListHeader}>
-                    <span>
-                        コア記憶（確認・訂正・削除ができます）
-                        {coreList && coreList.unconfirmed_count > 0 && (
-                            <span className={styles.unconfirmedBadge}>
-                                未確認 {coreList.unconfirmed_count}
+                    <span data-i18n="components.memory.CoreMemoryScene.text033">{uiText("components.memory.CoreMemoryScene.text033")}{coreList && coreList.unconfirmed_count > 0 && (
+                            <span data-i18n="components.memory.CoreMemoryScene.text034" className={styles.unconfirmedBadge}>{uiText("components.memory.CoreMemoryScene.text034")}{coreList.unconfirmed_count}
                             </span>
                         )}
                     </span>
                     {coreList && (
-                        <span className={`${styles.budgetInfo} ${coreList.over_budget ? styles.budgetOver : ''}`}>
-                            合計 {coreList.total_chars.toLocaleString()} 字 / 目安 {coreList.budget.toLocaleString()} 字
-                        </span>
+                        <span data-i18n="components.memory.CoreMemoryScene.text035 components.memory.CoreMemoryScene.text036 components.memory.CoreMemoryScene.text037" className={`${styles.budgetInfo} ${coreList.over_budget ? styles.budgetOver : ''}`}>{uiText("components.memory.CoreMemoryScene.text035")}{coreList.total_chars.toLocaleString(getFormatLocale())}{uiText("components.memory.CoreMemoryScene.text036")}{coreList.budget.toLocaleString(getFormatLocale())}{uiText("components.memory.CoreMemoryScene.text037")}</span>
                     )}
                 </div>
 
@@ -557,12 +539,12 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                                 className={`${styles.coreItem} ${unconfirmed ? styles.coreItemUnconfirmed : ''}`}
                             >
                                 <div className={styles.coreItemRow}>
-                                    <button
+                                    <button data-i18n="components.memory.CoreMemoryScene.text038 components.memory.CoreMemoryScene.text039"
                                         type="button"
                                         className={styles.coreToggle}
                                         onClick={() => toggleExpanded(it.id)}
                                         aria-expanded={expanded}
-                                        title={expanded ? '折りたたむ' : '全文を表示'}
+                                        title={expanded ? uiText("components.memory.CoreMemoryScene.text038") : uiText("components.memory.CoreMemoryScene.text039")}
                                         disabled={editing}
                                     >
                                         {expanded ? (
@@ -574,47 +556,41 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                                             {it.kind}
                                         </span>
                                         {unconfirmed && (
-                                            <span className={styles.unconfirmedDot} title="自動採取・未確認">●</span>
+                                            <span data-i18n="components.memory.CoreMemoryScene.text040" className={styles.unconfirmedDot} title={uiText("components.memory.CoreMemoryScene.text040")}>●</span>
                                         )}
                                         <span className={styles.corePreview}>
                                             <strong>{it.ref}</strong> {it.preview}
                                         </span>
                                     </button>
-                                    <span className={styles.coreChars}>{it.char_count.toLocaleString()}字</span>
+                                    <span data-i18n="components.memory.CoreMemoryScene.text041" className={styles.coreChars}>{it.char_count.toLocaleString(getFormatLocale())}{uiText("components.memory.CoreMemoryScene.text041")}</span>
                                     {!editing && (
                                         <div className={styles.coreActions}>
                                             {unconfirmed && (
-                                                <button
+                                                <button data-i18n="components.memory.CoreMemoryScene.text042 components.memory.CoreMemoryScene.text043"
                                                     type="button"
                                                     className={styles.rowActionBtn}
                                                     onClick={() => handleConfirm(it.id)}
                                                     disabled={busy}
-                                                    title="この採取内容を確認済みにする"
+                                                    title={uiText("components.memory.CoreMemoryScene.text042")}
                                                 >
-                                                    {busy ? <Loader2 size={13} className={styles.loader} /> : <Check size={13} />}
-                                                    確認
-                                                </button>
+                                                    {busy ? <Loader2 size={13} className={styles.loader} /> : <Check size={13} />}{uiText("components.memory.CoreMemoryScene.text043")}</button>
                                             )}
-                                            <button
+                                            <button data-i18n="components.memory.CoreMemoryScene.text044 components.memory.CoreMemoryScene.text045"
                                                 type="button"
                                                 className={styles.rowActionBtn}
                                                 onClick={() => startEdit(it)}
                                                 disabled={busy}
-                                                title="本文を訂正する"
+                                                title={uiText("components.memory.CoreMemoryScene.text044")}
                                             >
-                                                <Pencil size={13} />
-                                                編集
-                                            </button>
-                                            <button
+                                                <Pencil size={13} />{uiText("components.memory.CoreMemoryScene.text045")}</button>
+                                            <button data-i18n="components.memory.CoreMemoryScene.text046 components.memory.CoreMemoryScene.text047"
                                                 type="button"
                                                 className={`${styles.rowActionBtn} ${styles.rowActionBtnDanger}`}
                                                 onClick={() => handleDelete(it.id)}
                                                 disabled={busy}
-                                                title="ごみ箱へ移す（復元できます）"
+                                                title={uiText("components.memory.CoreMemoryScene.text046")}
                                             >
-                                                {busy ? <Loader2 size={13} className={styles.loader} /> : <Trash2 size={13} />}
-                                                削除
-                                            </button>
+                                                {busy ? <Loader2 size={13} className={styles.loader} /> : <Trash2 size={13} />}{uiText("components.memory.CoreMemoryScene.text047")}</button>
                                         </div>
                                     )}
                                 </div>
@@ -628,24 +604,20 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                                             rows={Math.min(12, Math.max(3, editContent.split('\n').length + 1))}
                                         />
                                         <div className={styles.editButtons}>
-                                            <button
+                                            <button data-i18n="components.memory.CoreMemoryScene.text048"
                                                 type="button"
                                                 className={styles.rowActionBtn}
                                                 onClick={() => handleSaveEdit(it.id)}
                                                 disabled={busy}
                                             >
-                                                {busy ? <Loader2 size={13} className={styles.loader} /> : <Save size={13} />}
-                                                保存
-                                            </button>
-                                            <button
+                                                {busy ? <Loader2 size={13} className={styles.loader} /> : <Save size={13} />}{uiText("components.memory.CoreMemoryScene.text048")}</button>
+                                            <button data-i18n="components.memory.CoreMemoryScene.text049"
                                                 type="button"
                                                 className={styles.rowActionBtn}
                                                 onClick={cancelEdit}
                                                 disabled={busy}
                                             >
-                                                <X size={13} />
-                                                キャンセル
-                                            </button>
+                                                <X size={13} />{uiText("components.memory.CoreMemoryScene.text049")}</button>
                                         </div>
                                     </div>
                                 ) : (
@@ -655,22 +627,21 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                         );
                     })
                 ) : (
-                    <div className={styles.emptyCore}>まだコア記憶はありません。</div>
+                    <div data-i18n="components.memory.CoreMemoryScene.text050" className={styles.emptyCore}>{uiText("components.memory.CoreMemoryScene.text050")}</div>
                 )}
             </div>
 
             {/* ごみ箱（soft-delete 済み・復元できる） */}
             {trash.length > 0 && (
                 <div className={styles.coreList}>
-                    <button
+                    <button data-i18n="components.memory.CoreMemoryScene.text051"
                         type="button"
                         className={styles.trashToggle}
                         onClick={() => setTrashOpen((v) => !v)}
                         aria-expanded={trashOpen}
                     >
                         {trashOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                        <Trash2 size={14} />
-                        ごみ箱（{trash.length}）
+                        <Trash2 size={14} />{uiText("components.memory.CoreMemoryScene.text051", { p1: trash.length })}
                     </button>
                     {trashOpen &&
                         trash.map((it) => (
@@ -682,18 +653,16 @@ export default function CoreMemoryScene({ personaId }: CoreMemorySceneProps) {
                                     <span className={styles.corePreview}>
                                         <strong>{it.ref}</strong> {it.preview}
                                     </span>
-                                    <span className={styles.coreChars}>{it.char_count.toLocaleString()}字</span>
+                                    <span data-i18n="components.memory.CoreMemoryScene.text052" className={styles.coreChars}>{it.char_count.toLocaleString(getFormatLocale())}{uiText("components.memory.CoreMemoryScene.text052")}</span>
                                     <div className={styles.coreActions}>
-                                        <button
+                                        <button data-i18n="components.memory.CoreMemoryScene.text053 components.memory.CoreMemoryScene.text054"
                                             type="button"
                                             className={styles.rowActionBtn}
                                             onClick={() => handleRestore(it.id)}
                                             disabled={rowBusy === it.id}
-                                            title="ごみ箱から戻す"
+                                            title={uiText("components.memory.CoreMemoryScene.text053")}
                                         >
-                                            {rowBusy === it.id ? <Loader2 size={13} className={styles.loader} /> : <RotateCcw size={13} />}
-                                            復元
-                                        </button>
+                                            {rowBusy === it.id ? <Loader2 size={13} className={styles.loader} /> : <RotateCcw size={13} />}{uiText("components.memory.CoreMemoryScene.text054")}</button>
                                     </div>
                                 </div>
                             </div>

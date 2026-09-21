@@ -11,7 +11,7 @@ import mimetypes
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
@@ -157,8 +157,10 @@ class AddonOAuthFlow(BaseModel):
 
 class AddonManifest(BaseModel):
     name: str
-    display_name: str = ""
-    description: str = ""
+    display_name: Union[str, Dict[str, str]] = ""
+    display_name_en: Optional[str] = None
+    description: Union[str, Dict[str, str]] = ""
+    description_en: Optional[str] = None
     version: str = ""
     params_schema: List[AddonParamSchema] = []
     ui_extensions: AddonUiExtensions = AddonUiExtensions()
@@ -168,7 +170,11 @@ class AddonManifest(BaseModel):
 class AddonInfo(BaseModel):
     addon_name: str
     display_name: str
+    display_name_en: Optional[str] = None
+    display_name_i18n: Optional[Dict[str, str]] = None
     description: str
+    description_en: Optional[str] = None
+    description_i18n: Optional[Dict[str, str]] = None
     version: str
     is_enabled: bool
     params_schema: List[AddonParamSchema]
@@ -313,6 +319,35 @@ def _get_session():
 # Endpoints
 # ---------------------------------------------------------------------------
 
+def _build_addon_info(addon_name: str, manifest: AddonManifest, config, params: dict, secret_is_set: dict) -> AddonInfo:
+    from saiverse.i18n_utils import normalize_i18n_dict
+
+    disp_norm = normalize_i18n_dict(manifest.display_name, alt_en=manifest.display_name_en)
+    desc_norm = normalize_i18n_dict(manifest.description, alt_en=manifest.description_en)
+
+    display_name = disp_norm.get("ja") or (manifest.display_name if isinstance(manifest.display_name, str) and manifest.display_name else addon_name)
+    display_name_en = disp_norm.get("en") or manifest.display_name_en
+    description = desc_norm.get("ja") or (manifest.description if isinstance(manifest.description, str) else "")
+    description_en = desc_norm.get("en") or manifest.description_en
+
+    return AddonInfo(
+        addon_name=addon_name,
+        display_name=display_name,
+        display_name_en=display_name_en,
+        display_name_i18n=disp_norm if disp_norm else None,
+        description=description,
+        description_en=description_en,
+        description_i18n=desc_norm if desc_norm else None,
+        version=manifest.version,
+        is_enabled=config.is_enabled,
+        params_schema=manifest.params_schema,
+        params=params,
+        secret_is_set=secret_is_set,
+        ui_extensions=manifest.ui_extensions,
+        oauth_flows=manifest.oauth_flows,
+    )
+
+
 def _resolve_effective_params(
     manifest: "AddonManifest",
     params_json: Optional[str],
@@ -357,7 +392,7 @@ def list_addons(_manager=Depends(get_manager)):
 
     db = _get_session()
     try:
-        results: List[AddonInfo] = []
+        results = []
         for addon_dir in sorted(exp_dir.iterdir()):
             if not addon_dir.is_dir():
                 continue
@@ -372,18 +407,7 @@ def list_addons(_manager=Depends(get_manager)):
             params = _resolve_effective_params(manifest, config.params_json)
             params, secret_is_set = _redact_params(manifest, params)
 
-            results.append(AddonInfo(
-                addon_name=addon_name,
-                display_name=manifest.display_name or addon_name,
-                description=manifest.description,
-                version=manifest.version,
-                is_enabled=config.is_enabled,
-                params_schema=manifest.params_schema,
-                params=params,
-                secret_is_set=secret_is_set,
-                ui_extensions=manifest.ui_extensions,
-                oauth_flows=manifest.oauth_flows,
-            ))
+            results.append(_build_addon_info(addon_name, manifest, config, params, secret_is_set))
         return results
     finally:
         db.close()
@@ -408,18 +432,7 @@ def get_addon(addon_name: str, _manager=Depends(get_manager)):
         params = _resolve_effective_params(manifest, config.params_json)
         params, secret_is_set = _redact_params(manifest, params)
 
-        return AddonInfo(
-            addon_name=addon_name,
-            display_name=manifest.display_name or addon_name,
-            description=manifest.description,
-            version=manifest.version,
-            is_enabled=config.is_enabled,
-            params_schema=manifest.params_schema,
-            params=params,
-            secret_is_set=secret_is_set,
-            ui_extensions=manifest.ui_extensions,
-            oauth_flows=manifest.oauth_flows,
-        )
+        return _build_addon_info(addon_name, manifest, config, params, secret_is_set)
     finally:
         db.close()
 

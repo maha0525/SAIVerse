@@ -1,3 +1,8 @@
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React from 'react';
 import styles from './WatermarkBar.module.css';
 
@@ -26,8 +31,8 @@ interface WatermarkBarProps {
 }
 
 export const WATERMARK_LABELS: Record<keyof WatermarkBarValues, string> = {
-    target: '整理後に残す量',
-    high: '整理をはじめる量',
+    get target() { return uiText("components.common.WatermarkBar.text001"); },
+    get high() { return uiText("components.common.WatermarkBar.text002"); },
 };
 
 /** 目標 ≤ 高 を破っている目印を返す (null は比較しない)。 */
@@ -47,6 +52,7 @@ export function watermarkScaleMax(values: WatermarkBarValues, extraMax?: number 
 }
 
 export default function WatermarkBar({ values, extraMax, invalidKeys, labels }: WatermarkBarProps) {
+    useLocale();
     const scaleMax = watermarkScaleMax(values, extraMax);
     if (scaleMax == null) return null;
     const bad = invalidKeys ?? findWatermarkOrderViolations(values);
@@ -64,11 +70,11 @@ export default function WatermarkBar({ values, extraMax, invalidKeys, labels }: 
                     const v = values[key];
                     if (v == null) return null;
                     return (
-                        <div
+                        <div data-i18n="components.common.WatermarkBar.text005"
                             key={key}
                             className={`${styles.marker} ${bad.has(key) ? styles.markerBad : ''}`}
                             style={{ left: `${Math.min(100, (v / scaleMax) * 100)}%` }}
-                            title={`${names[key]} ${v.toLocaleString()} 字`}
+                            title={uiText("components.common.WatermarkBar.text005", { p1: names[key], p2: v.toLocaleString(getFormatLocale()) })}
                         />
                     );
                 })}
@@ -77,14 +83,14 @@ export default function WatermarkBar({ values, extraMax, invalidKeys, labels }: 
                 {keys.map(key => {
                     const v = values[key];
                     return (
-                        <span key={key} className={`${styles.legendItem} ${bad.has(key) ? styles.legendBad : ''}`}>
+                        <span data-i18n="components.common.WatermarkBar.text006" key={key} className={`${styles.legendItem} ${bad.has(key) ? styles.legendBad : ''}`}>
                             <span className={styles.legendDot} />
-                            {names[key]} {v != null ? `${v.toLocaleString()} 字` : '—'}
+                            {names[key]} {v != null ? uiText("components.common.WatermarkBar.text006", { p1: v.toLocaleString(getFormatLocale()) }) : '—'}
                         </span>
                     );
                 })}
                 {extraMax != null && extraMax > 0 && (
-                    <span className={styles.legendItem}>現在 {extraMax.toLocaleString()} 字</span>
+                    <span data-i18n="components.common.WatermarkBar.text007 components.common.WatermarkBar.text008" className={styles.legendItem}>{uiText("components.common.WatermarkBar.text007")}{extraMax.toLocaleString(getFormatLocale())}{uiText("components.common.WatermarkBar.text008")}</span>
                 )}
             </div>
         </div>

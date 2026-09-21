@@ -1,4 +1,11 @@
-import { useRef, useState, useEffect } from 'react';
+
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+import { useCallback, useRef, useState, useEffect } from 'react';
 import styles from './RightSidebar.module.css';
 import {
     Users,
@@ -39,6 +46,10 @@ interface RightSidebarProps {
     /** PersonaMenu からの dismiss 等で滞在状況が変わったときに親 (ChatPage) へ通知し、
      * moveTrigger 等を bump して Sidebar 側も同期させるための callback。 */
     onPersonaChanged?: () => void;
+    /** 通話モードの開始要求を親 (ChatPage) へ渡す。 通話モーダルを ChatPage が
+     * 持つのは、 建物を見て回っても通話が切れないようにするため (この
+     * サイドバーは building が変わると開いているものを全部閉じる)。 */
+    onStartVoiceCall?: (personaId: string, personaName: string, buildingId: string) => void;
 }
 
 interface Occupant {
@@ -80,8 +91,17 @@ interface BuildingDetails {
     fixtures?: Fixture[];
 }
 
-export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentBuildingId, onPersonaChanged }: RightSidebarProps) {
-    const [details, setDetails] = useState<BuildingDetails | null>(null);
+export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentBuildingId, onPersonaChanged, onStartVoiceCall }: RightSidebarProps) {
+    useLocale();
+    // 応答は「どの部屋を要求して得たものか」を添えて保持する。閲覧中の部屋と
+    // 一致するときだけ details として使い、一致しない間 (部屋を切り替えてから
+    // 新しい応答が届くまで) は「まだ無い」扱いにする。こうしないと前の部屋の
+    // 名前・画像・滞在ペルソナ・アイテムが残ったまま描かれ、そこから開く
+    // モーダルの宛先も前の部屋になる (2026-04-30 エリス上書き事故と同型)。
+    const [loadedDetails, setLoadedDetails] = useState<{ buildingId: string; data: BuildingDetails } | null>(null);
+    const details = loadedDetails && loadedDetails.buildingId === currentBuildingId
+        ? loadedDetails.data
+        : null;
     const [selectedItem, setSelectedItem] = useState<Item | null>(null);
     const [selectedFixture, setSelectedFixture] = useState<Fixture | null>(null);
     const [selectedPersona, setSelectedPersona] = useState<Occupant | null>(null);
@@ -109,34 +129,48 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
     // で操作が走ってしまうため、building 変更を検知したらすべて閉じる。
     const previousBuildingIdRef = useRef<string | null>(null);
 
+    // 閲覧中の部屋の最新値。fetch の応答が届いた時点でまだ同じ部屋を見ているかを
+    // 判定するために使う (応答の追い越し対策)。同期する useEffect は下の fetch 用
+    // useEffect より前に置くこと (React は宣言順に effect を走らせるので、
+    // fetch が始まる前にこの ref が新しい部屋になっている必要がある)。
+    const viewingBuildingIdRef = useRef<string | null>(null);
+
     const startX = useRef<number | null>(null);
     const startY = useRef<number | null>(null);
     const startTime = useRef<number | null>(null);
 
 
 
-    const fetchDetails = async () => {
+    // ⚠ この関数は setInterval からも呼ぶので、必ず useCallback で
+    // currentBuildingId に紐付けたままにすること。依存から外すと、ポーリングが
+    // パネルを開いた時点の building_id を掴み続け、部屋を移動しても 10 秒後に
+    // 前の部屋の内容へ戻され続ける (v0.3.13 のユーザー報告)。
+    const fetchDetails = useCallback(async () => {
         // currentBuildingId 未指定だと server-global の user_current_building_id に
         // 汚染される (エリス上書き事故の遠因)。明示指定がない間は fetch しない。
-        if (!currentBuildingId) {
+        const targetId = currentBuildingId;
+        if (!targetId) {
             console.warn('[RightSidebar] fetchDetails skipped: currentBuildingId not provided yet');
             return;
         }
         try {
-            const res = await fetch(`/api/info/details?building_id=${encodeURIComponent(currentBuildingId)}`);
+            const res = await apiFetch(`/api/info/details?building_id=${encodeURIComponent(targetId)}`);
             if (res.ok) {
                 const data = await res.json();
-                setDetails(data);
+                // 応答が届くまでに別の部屋へ移っていたら捨てる。先に投げた古い部屋の
+                // 応答が後から届いて新しい部屋の内容を上書きするのを防ぐ。
+                if (viewingBuildingIdRef.current !== targetId) return;
+                setLoadedDetails({ buildingId: targetId, data });
             }
         } catch (err) {
             console.error("Failed to fetch building details", err);
         }
-    };
+    }, [currentBuildingId]);
 
     const handleToggleOpen = async (e: React.MouseEvent, item: Item) => {
         e.stopPropagation(); // Don't open the item modal
         try {
-            const res = await fetch(`/api/info/item/${item.id}/toggle-open`, {
+            const res = await apiFetch(`/api/info/item/${item.id}/toggle-open`, {
                 method: 'POST'
             });
             if (res.ok) {
@@ -148,11 +182,17 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
         }
     };
 
+    // ⚠ この effect は下の fetch 用 effect より前に置くこと (宣言順の理由は
+    // viewingBuildingIdRef の宣言箇所のコメント参照)。
     useEffect(() => {
+        viewingBuildingIdRef.current = currentBuildingId ?? null;
+    }, [currentBuildingId]);
+
+    useEffect(() => {
+        // fetchDetails は currentBuildingId が変わったときだけ作り直されるので、
+        // これを deps に置くことが「部屋が変わったら再 fetch」を兼ねる。
         fetchDetails();
-        // currentBuildingId が変われば自動で再 fetch (deps に含める)
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [refreshTrigger, isOpen, currentBuildingId]);
+    }, [refreshTrigger, isOpen, fetchDetails]);
 
     // Building 変化検知: 開いているモーダル / メニューを強制クローズする。
     // - selectedPersona (PersonaMenu の表示元): 旧 building の occupant への参照
@@ -183,7 +223,9 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
         }, 10000); // Poll every 10 seconds
 
         return () => clearInterval(pollInterval);
-    }, [isOpen]);
+        // fetchDetails を deps に含めること。外すとポーリングが古い部屋を
+        // 掴み続ける (上の fetchDetails のコメント参照)。
+    }, [isOpen, fetchDetails]);
 
     const handleTouchStart = (e: React.TouchEvent) => {
         e.stopPropagation();
@@ -284,20 +326,20 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                 {details ? (
                     <>
                         <div className={styles.section}>
-                            <h3 className={styles.heading}>現在地</h3>
+                            <h3 data-i18n="components.RightSidebar.text001" className={styles.heading}>{uiText("components.RightSidebar.text001")}</h3>
                             <div className={styles.content}>
                                 <div className={styles.buildingHeader}>
                                     <div className={styles.buildingName}>{details.name}</div>
-                                    <button
+                                    <button data-i18n="components.RightSidebar.text002"
                                         className={styles.settingsBtn}
                                         onClick={() => setShowBuildingSettings(true)}
-                                        title="Building設定"
+                                        title={uiText("components.RightSidebar.text002")}
                                     >
                                         <Settings size={16} />
                                     </button>
                                 </div>
-                                <div className={styles.description}>
-                                    {details.description || "説明がありません"}
+                                <div data-i18n="components.RightSidebar.text003" className={styles.description}>
+                                    {details.description || uiText("components.RightSidebar.text003")}
                                 </div>
                             </div>
                         </div>
@@ -305,9 +347,8 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         {/* Building Interior Image */}
                         {details.image_path && (
                             <div className={styles.section}>
-                                <h3 className={styles.heading}>
-                                    <ImageIcon size={16} /> インテリア
-                                </h3>
+                                <h3 data-i18n="components.RightSidebar.text004" className={styles.heading}>
+                                    <ImageIcon size={16} />{uiText("components.RightSidebar.text004")}</h3>
                                 <div className={styles.buildingImage}>
                                     <img
                                         src={details.image_path}
@@ -325,8 +366,8 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                             ユーザーは modal なし (= プロフィール変更等は別経路)。 */}
                         {details.users && details.users.length > 0 && (
                             <div className={styles.section}>
-                                <h3 className={styles.heading}>
-                                    <Users size={16} /> 滞在ユーザー ({details.users.length})
+                                <h3 data-i18n="components.RightSidebar.text005" className={styles.heading}>
+                                    <Users size={16} />{uiText("components.RightSidebar.text005")}{details.users.length})
                                 </h3>
                                 <div className={styles.occupantList}>
                                     {details.users.map(u => (
@@ -349,8 +390,8 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         )}
 
                         <div className={styles.section}>
-                            <h3 className={styles.heading}>
-                                <Users size={16} /> 滞在ペルソナ ({details.occupants.length})
+                            <h3 data-i18n="components.RightSidebar.text006" className={styles.heading}>
+                                <Users size={16} />{uiText("components.RightSidebar.text006")}{details.occupants.length})
                             </h3>
                             <div className={styles.occupantList}>
                                 {details.occupants.length > 0 ? (
@@ -373,14 +414,14 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                         </div>
                                     ))
                                 ) : (
-                                    <div className={styles.empty}>ここには誰もいません</div>
+                                    <div data-i18n="components.RightSidebar.text007" className={styles.empty}>{uiText("components.RightSidebar.text007")}</div>
                                 )}
                             </div>
                         </div>
 
                         <div className={styles.section}>
-                            <h3 className={styles.heading}>
-                                <FileText size={16} /> アイテム ({details.items.length})
+                            <h3 data-i18n="components.RightSidebar.text008" className={styles.heading}>
+                                <FileText size={16} />{uiText("components.RightSidebar.text008")}{details.items.length})
                                 {/* この部屋にアイテムを作る一般経路。ワールドエディタを開かずに
                                     今いる部屋へ置ける (docs/issues/bag_item_has_no_creation_path.md)。
                                     id が "unknown" のときは Building を特定できていない
@@ -389,8 +430,8 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                     <button
                                         className={styles.addItemBtn}
                                         onClick={() => setShowItemCreate(true)}
-                                        title="この部屋にアイテムを作る"
-                                        aria-label="この部屋にアイテムを作る"
+                                        title={uiText("components.RightSidebar.text019")}
+                                        aria-label={uiText("components.RightSidebar.text019")}
                                     >
                                         <Plus size={16} />
                                     </button>
@@ -438,10 +479,10 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                                 )}
                                             </div>
                                             {(item.type === 'picture' || item.type === 'document' || item.type === 'bag' || item.type === 'audio' || item.type === 'video') && (
-                                                <button
+                                                <button data-i18n="components.RightSidebar.text009 components.RightSidebar.text010"
                                                     className={`${styles.toggleOpenBtn} ${item.is_open ? styles.isOpen : ''}`}
                                                     onClick={(e) => handleToggleOpen(e, item)}
-                                                    title={item.is_open ? 'AIコンテキストから除外' : 'AIコンテキストに含める'}
+                                                    title={item.is_open ? uiText("components.RightSidebar.text009") : uiText("components.RightSidebar.text010")}
                                                 >
                                                     {item.is_open ? <Eye size={16} /> : <EyeOff size={16} />}
                                                 </button>
@@ -449,15 +490,15 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                                         </div>
                                     ))
                                 ) : (
-                                    <div className={styles.empty}>アイテムはありません</div>
+                                    <div data-i18n="components.RightSidebar.text011" className={styles.empty}>{uiText("components.RightSidebar.text011")}</div>
                                 )}
                             </div>
                         </div>
 
                         {details.fixtures && details.fixtures.length > 0 && (
                             <div className={styles.section}>
-                                <h3 className={styles.heading}>
-                                    <Anchor size={16} /> 設置物 ({details.fixtures.length})
+                                <h3 data-i18n="components.RightSidebar.text012" className={styles.heading}>
+                                    <Anchor size={16} />{uiText("components.RightSidebar.text012")}{details.fixtures.length})
                                 </h3>
                                 <div className={styles.grid}>
                                     {details.fixtures.map(fixture => (
@@ -483,7 +524,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         )}
                     </>
                 ) : (
-                    <div style={{ padding: '1rem', color: '#6b7280' }}>読み込み中...</div>
+                    <div data-i18n="components.RightSidebar.text013" style={{ padding: '1rem', color: '#6b7280' }}>{uiText("components.RightSidebar.text013")}</div>
                 )}
             </aside>
 
@@ -494,7 +535,10 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                     isOpen={!!selectedItem}
                     onClose={() => setSelectedItem(null)}
                     item={selectedItem}
-                    currentBuildingId={details?.id ?? currentBuildingId ?? null}
+                    // 操作の宛先は常に「いま閲覧している部屋」= 親から渡る
+                    // currentBuildingId。details.id は応答の写しにすぎないので
+                    // 宛先には使わない。
+                    currentBuildingId={currentBuildingId ?? null}
                     onItemUpdated={() => {
                         fetchDetails();
                         setSelectedItem(null);
@@ -517,11 +561,19 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                         personaId={selectedPersona.id}
                         personaName={selectedPersona.name}
                         avatarUrl={selectedPersona.avatar || "/api/static/icons/host.png"}
-                        buildingId={details?.id ?? currentBuildingId ?? null}
+                        buildingId={currentBuildingId ?? null}
                         onOpenMemory={() => openModal('memory')}
                         onOpenSchedule={() => openModal('schedule')}
                         onOpenSettings={() => openModal('settings')}
                         onOpenInventory={() => openModal('inventory')}
+                        onStartCall={(() => {
+                            // 部屋が確定していないときは通話の入口を出さない
+                            // (VoiceCallModal 側でも building 無しは弾く)。
+                            const callBuildingId = currentBuildingId ?? null;
+                            if (!onStartVoiceCall || !callBuildingId) return undefined;
+                            const target = selectedPersona;
+                            return () => onStartVoiceCall(target.id, target.name, callBuildingId);
+                        })()}
                         onDismissed={() => {
                             // dismiss 成功 → details を即時 refetch して滞在ペルソナ表示を更新。
                             // 親にも通知して Sidebar / 召喚可能リストなどを同期させる。
@@ -558,23 +610,24 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
                     </>
                 )}
 
-                {/* アイテム作成 (この部屋へ置く) */}
-                {details && (
+                {/* アイテム作成 (この部屋へ置く)。宛先は details.id ではなく
+                    閲覧中の部屋 (currentBuildingId)。表示名だけ details から取る。 */}
+                {details && currentBuildingId && (
                     <ItemCreateModal
                         isOpen={showItemCreate}
                         onClose={() => setShowItemCreate(false)}
-                        buildingId={details.id}
+                        buildingId={currentBuildingId}
                         buildingName={details.name}
                         onCreated={() => fetchDetails()}
                     />
                 )}
 
                 {/* Building Settings Modal */}
-                {details && (
+                {details && currentBuildingId && (
                     <BuildingSettingsModal
                         isOpen={showBuildingSettings}
                         onClose={() => setShowBuildingSettings(false)}
-                        buildingId={details.id}
+                        buildingId={currentBuildingId}
                         onSaved={() => fetchDetails()}
                     />
                 )}
@@ -585,6 +638,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
 
 
 function FixtureModal({ fixture, onClose }: { fixture: Fixture; onClose: () => void }) {
+    useLocale();
     const state = fixture.state_json ? JSON.parse(fixture.state_json) : null;
 
     return (
@@ -600,16 +654,16 @@ function FixtureModal({ fixture, onClose }: { fixture: Fixture; onClose: () => v
                     {fixture.description && (
                         <p className={fixtureStyles.description}>{fixture.description}</p>
                     )}
-                    <div className={fixtureStyles.fixtureId}>ID: {fixture.id}</div>
+                    <div className={fixtureStyles.fixtureId}>{uiText("components.RightSidebar.label001")}{fixture.id}</div>
                     {state && Object.keys(state).length > 0 ? (
                         <div>
-                            <h4 className={fixtureStyles.metricsTitle}>観測値</h4>
+                            <h4 data-i18n="components.RightSidebar.text014" className={fixtureStyles.metricsTitle}>{uiText("components.RightSidebar.text014")}</h4>
                             <table className={fixtureStyles.table}>
                                 <thead>
                                     <tr>
-                                        <th>名前</th>
-                                        <th>値</th>
-                                        <th>記録時刻</th>
+                                        <th data-i18n="components.RightSidebar.text015">{uiText("components.RightSidebar.text015")}</th>
+                                        <th data-i18n="components.RightSidebar.text016">{uiText("components.RightSidebar.text016")}</th>
+                                        <th data-i18n="components.RightSidebar.text017">{uiText("components.RightSidebar.text017")}</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -620,7 +674,7 @@ function FixtureModal({ fixture, onClose }: { fixture: Fixture; onClose: () => v
                                                 {entry?.value_num != null ? entry.value_num : entry?.value_text || '—'}
                                             </td>
                                             <td className={fixtureStyles.timeCell}>
-                                                {entry?.recorded_at ? new Date(entry.recorded_at).toLocaleString('ja-JP') : '—'}
+                                                {entry?.recorded_at ? new Date(entry.recorded_at).toLocaleString(getFormatLocale()) : '—'}
                                             </td>
                                         </tr>
                                     ))}
@@ -628,7 +682,7 @@ function FixtureModal({ fixture, onClose }: { fixture: Fixture; onClose: () => v
                             </table>
                         </div>
                     ) : (
-                        <div className={fixtureStyles.emptyState}>観測データなし</div>
+                        <div data-i18n="components.RightSidebar.text018" className={fixtureStyles.emptyState}>{uiText("components.RightSidebar.text018")}</div>
                     )}
                 </div>
             </div>

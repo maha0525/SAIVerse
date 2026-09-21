@@ -1,4 +1,9 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+import { resolveI18nText } from '@/i18n/resolve';
 
 import React, { useState, useEffect, useCallback, useRef, Suspense } from 'react';
 import { X, Package, ChevronDown, ChevronRight, Trash2, Plus, Store } from 'lucide-react';
@@ -45,7 +50,11 @@ interface AddonParamSchema {
 interface AddonInfo {
     addon_name: string;
     display_name: string;
+    display_name_en?: string;
+    display_name_i18n?: Record<string, string>;
     description: string;
+    description_en?: string;
+    description_i18n?: Record<string, string>;
     version: string;
     is_enabled: boolean;
     params_schema: AddonParamSchema[];
@@ -96,6 +105,7 @@ function ParamControl({
     secretIsSet?: boolean;
     onDeleteSecret?: () => void;
 }) {
+    useLocale();
     const current = value !== undefined ? value : schema.default;
 
     switch (schema.type) {
@@ -203,7 +213,7 @@ function ParamControl({
             );
 
         default:
-            return <span className={styles.unsupported}>（未対応の型: {schema.type}）</span>;
+            return <span data-i18n="components.AddonManagerModal.text001" className={styles.unsupported}>{uiText("components.AddonManagerModal.text001", { p1: schema.type })}</span>;
     }
 }
 
@@ -231,6 +241,7 @@ function TextParamControl({
     secretIsSet?: boolean;
     onDeleteSecret?: () => void;
 }) {
+    useLocale();
     const input = (
         <input
             type={masked ? 'password' : 'text'}
@@ -247,9 +258,9 @@ function TextParamControl({
 
     const handleDelete = () => {
         const ok = window.confirm(
-            `保存されている「${schema.label}」を削除します。\n\n`
-            + '画面には伏せ字でしか表示されないため、ここから元の値を取り戻すことはできません。\n'
-            + '発行元から取得し直すことになります。よろしいですか？'
+            uiText("components.AddonManagerModal.text002", { p1: schema.label })
+            + uiText("components.AddonManagerModal.text003")
+            + uiText("components.AddonManagerModal.text004")
         );
         if (ok) onDeleteSecret();
     };
@@ -257,12 +268,12 @@ function TextParamControl({
     return (
         <div className={styles.secretInputRow}>
             {input}
-            <button
+            <button data-i18n="components.AddonManagerModal.text005 components.AddonManagerModal.text006"
                 type="button"
                 className={styles.secretDeleteBtn}
                 onClick={handleDelete}
-                title="保存されている値を削除する"
-                aria-label={`${schema.label} を削除`}
+                title={uiText("components.AddonManagerModal.text005")}
+                aria-label={uiText("components.AddonManagerModal.text006", { p1: schema.label })}
             >
                 <Trash2 size={13} />
             </button>
@@ -285,6 +296,7 @@ function DropdownParamControl({
     onChange: (key: string, val: unknown) => void;
     addonName?: string;
 }) {
+    useLocale();
     const [dynamicOptions, setDynamicOptions] = useState<string[] | null>(null);
     const [loading, setLoading] = useState(false);
 
@@ -293,7 +305,7 @@ function DropdownParamControl({
         const ep = schema.options_endpoint;
         const url = ep.startsWith('/') ? ep : `/api/addon/${addonName}/${ep}`;
         setLoading(true);
-        fetch(url)
+        apiFetch(url)
             .then((r) => r.json())
             .then((data) => {
                 // 想定レスポンス: {"options": [...]} または [...]（プレーン配列）
@@ -316,8 +328,8 @@ function DropdownParamControl({
             onChange={(e) => onChange(schema.key, e.target.value)}
             disabled={loading}
         >
-            {loading && <option value="">読み込み中...</option>}
-            {!loading && options.length === 0 && <option value="">（選択肢なし）</option>}
+            {loading && <option data-i18n="components.AddonManagerModal.text007" value="">{uiText("components.AddonManagerModal.text007")}</option>}
+            {!loading && options.length === 0 && <option data-i18n="components.AddonManagerModal.text008" value="">{uiText("components.AddonManagerModal.text008")}</option>}
             {!loading && options.map((opt) => (
                 <option key={opt} value={opt}>{opt}</option>
             ))}
@@ -342,6 +354,7 @@ function DictParamControl({
     value: unknown;
     onChange: (key: string, val: unknown) => void;
 }) {
+    useLocale();
     type Row = { id: number; k: string; v: string };
 
     const nextIdRef = React.useRef<number>(0);
@@ -392,13 +405,13 @@ function DictParamControl({
         <div className={styles.dictControl}>
             {rows.length > 0 && (
                 <div className={styles.dictHeader}>
-                    <span className={styles.dictHeaderCell}>キー（誤読される語）</span>
-                    <span className={styles.dictHeaderCell}>値（読ませたい表記）</span>
+                    <span data-i18n="components.AddonManagerModal.text009" className={styles.dictHeaderCell}>{uiText("components.AddonManagerModal.text009")}</span>
+                    <span data-i18n="components.AddonManagerModal.text010" className={styles.dictHeaderCell}>{uiText("components.AddonManagerModal.text010")}</span>
                     <span className={styles.dictHeaderSpacer} />
                 </div>
             )}
             {rows.length === 0 && (
-                <span className={styles.dictEmpty}>(エントリなし)</span>
+                <span data-i18n="components.AddonManagerModal.text011" className={styles.dictEmpty}>{uiText("components.AddonManagerModal.text011")}</span>
             )}
             {rows.map((row) => (
                 <div key={row.id} className={styles.dictRow}>
@@ -406,33 +419,32 @@ function DictParamControl({
                         type="text"
                         className={styles.dictKeyInput}
                         value={row.k}
-                        placeholder="key"
+                        placeholder={uiText("components.AddonManagerModal.label001")}
                         onChange={(e) => updateRow(row.id, { k: e.target.value })}
                     />
                     <input
                         type="text"
                         className={styles.dictValueInput}
                         value={row.v}
-                        placeholder="value"
+                        placeholder={uiText("components.AddonManagerModal.label002")}
                         onChange={(e) => updateRow(row.id, { v: e.target.value })}
                     />
-                    <button
+                    <button data-i18n="components.AddonManagerModal.text012"
                         className={styles.dictDeleteBtn}
                         onClick={() => deleteRow(row.id)}
-                        title="この行を削除"
+                        title={uiText("components.AddonManagerModal.text012")}
                         type="button"
                     >
                         <Trash2 size={13} />
                     </button>
                 </div>
             ))}
-            <button
+            <button data-i18n="components.AddonManagerModal.text013"
                 className={styles.dictAddBtn}
                 onClick={addRow}
                 type="button"
             >
-                <Plus size={13} /> 追加
-            </button>
+                <Plus size={13} />{uiText("components.AddonManagerModal.text013")}</button>
         </div>
     );
 }
@@ -454,6 +466,7 @@ function FileParamControl({
     addonName?: string;
     personaId?: string;
 }) {
+    useLocale();
     const [uploading, setUploading] = React.useState(false);
     const [error, setError] = React.useState<string | null>(null);
     const [previewUrl, setPreviewUrl] = React.useState<string | null>(null);
@@ -483,7 +496,7 @@ function FileParamControl({
         try {
             const formData = new FormData();
             formData.append('file', file);
-            const res = await fetch(fileApiBase, {
+            const res = await apiFetch(fileApiBase, {
                 method: 'POST',
                 body: formData,
             });
@@ -504,7 +517,7 @@ function FileParamControl({
         if (!fileApiBase) return;
         setError(null);
         try {
-            const res = await fetch(fileApiBase, { method: 'DELETE' });
+            const res = await apiFetch(fileApiBase, { method: 'DELETE' });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({ detail: res.statusText }));
                 throw new Error(body.detail || `Delete failed: ${res.status}`);
@@ -546,10 +559,10 @@ function FileParamControl({
                             {String(value).split(/[\\/]/).pop()}
                         </span>
                     )}
-                    <button
+                    <button data-i18n="components.AddonManagerModal.text014"
                         className={styles.fileDeleteBtn}
                         onClick={handleDelete}
-                        title="削除（デフォルトに戻す）"
+                        title={uiText("components.AddonManagerModal.text014")}
                     >
                         <Trash2 size={13} />
                     </button>
@@ -563,12 +576,12 @@ function FileParamControl({
                 onDrop={handleDrop}
                 onClick={() => fileInputRef.current?.click()}
             >
-                <span className={styles.fileDropText}>
+                <span data-i18n="components.AddonManagerModal.text015 components.AddonManagerModal.text016 components.AddonManagerModal.text017" className={styles.fileDropText}>
                     {uploading
-                        ? 'アップロード中...'
+                        ? uiText("components.AddonManagerModal.text015")
                         : hasFile
-                            ? 'ファイルを差し替え'
-                            : 'ファイルをドロップ or クリック'}
+                            ? uiText("components.AddonManagerModal.text016")
+                            : uiText("components.AddonManagerModal.text017")}
                 </span>
                 {schema.description && !hasFile && (
                     <span className={styles.fileHint}>{schema.description}</span>
@@ -587,8 +600,7 @@ function FileParamControl({
 
             {/* Size limit hint */}
             {!hasFile && schema.max_size_mb && (
-                <span className={styles.fileHint}>
-                    最大 {schema.max_size_mb >= 1024 ? `${(schema.max_size_mb / 1024).toFixed(1)} GB` : `${schema.max_size_mb} MB`}
+                <span data-i18n="components.AddonManagerModal.text018" className={styles.fileHint}>{uiText("components.AddonManagerModal.text018")}{schema.max_size_mb >= 1024 ? `${(schema.max_size_mb / 1024).toFixed(1)} GB` : `${schema.max_size_mb} MB`}
                     {schema.accept && ` / ${schema.accept.split(',').map(t => t.split('/')[1]).join(', ')}`}
                 </span>
             )}
@@ -608,6 +620,7 @@ function ParamRow({
     schema: AddonParamSchema;
     children: React.ReactNode;
 }) {
+    useLocale();
     const isCollapsible = !!schema.collapsible;
     const [collapsed, setCollapsed] = useState<boolean>(
         isCollapsible ? (schema.default_collapsed ?? true) : false
@@ -653,6 +666,7 @@ function ParamsSection({
     addon: AddonInfo;
     personas: { id: string; name: string }[];
 }) {
+    useLocale();
     const [globalParams, setGlobalParams] = useState<Record<string, unknown>>(addon.params ?? {});
 
     // 外部から AddonConfig が更新された場合 (= addon panel 内で内部的に
@@ -703,7 +717,7 @@ function ParamsSection({
     const saveGlobal = useCallback(async (params: Record<string, unknown>): Promise<boolean> => {
         setSaving(true);
         try {
-            const res = await fetch(`/api/addon/${addon.addon_name}/config`, {
+            const res = await apiFetch(`/api/addon/${addon.addon_name}/config`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ params }),
@@ -754,7 +768,7 @@ function ParamsSection({
         if (personaConfigurableSchemas.length === 0) return;
         Promise.all(
             personas.map((p) =>
-                fetch(`/api/addon/${addon.addon_name}/config/persona/${p.id}`)
+                apiFetch(`/api/addon/${addon.addon_name}/config/persona/${p.id}`)
                     .then((r) => r.json())
                     .then((data) => ({
                         persona_id: p.id,
@@ -775,7 +789,7 @@ function ParamsSection({
      */
     const savePersona = async (personaId: string, partial: Record<string, unknown>): Promise<boolean> => {
         try {
-            const res = await fetch(`/api/addon/${addon.addon_name}/config/persona/${personaId}`, {
+            const res = await apiFetch(`/api/addon/${addon.addon_name}/config/persona/${personaId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ params: partial }),
@@ -847,7 +861,7 @@ function ParamsSection({
     };
 
     if (configurableSchemas.length === 0 && !hasPersonaSection) {
-        return <p className={styles.noParams}>設定項目はありません</p>;
+        return <p data-i18n="components.AddonManagerModal.text019" className={styles.noParams}>{uiText("components.AddonManagerModal.text019")}</p>;
     }
 
     // 選択中ペルソナの params。未保存ペルソナでは空 dict を使い、各 ParamControl が default にフォールバックする
@@ -860,7 +874,7 @@ function ParamsSection({
             {/* Global params: 通常設定 + 詳細設定 (折りたたみ) */}
             {configurableSchemas.length > 0 && (
                 <div className={styles.paramsGroup}>
-                    <div className={styles.paramsGroupLabel}>デフォルト（全ペルソナ共通）</div>
+                    <div data-i18n="components.AddonManagerModal.text020" className={styles.paramsGroupLabel}>{uiText("components.AddonManagerModal.text020")}</div>
                     {basicSchemas.map((schema) => (
                         <ParamRow key={schema.key} schema={schema}>
                             <ParamControl
@@ -875,13 +889,13 @@ function ParamsSection({
                     ))}
                     {advancedSchemas.length > 0 && (
                         <div className={styles.advancedSection}>
-                            <button
+                            <button data-i18n="components.AddonManagerModal.text021"
                                 type="button"
                                 className={styles.advancedToggle}
                                 onClick={() => setShowAdvanced((v) => !v)}
                                 aria-expanded={showAdvanced}
                             >
-                                {showAdvanced ? '▼' : '▶'} 詳細設定 ({advancedSchemas.length})
+                                {showAdvanced ? '▼' : '▶'}{uiText("components.AddonManagerModal.text021")}{advancedSchemas.length})
                             </button>
                             {showAdvanced && (
                                 <div className={styles.advancedBody}>
@@ -901,7 +915,7 @@ function ParamsSection({
                             )}
                         </div>
                     )}
-                    {saving && <span className={styles.savingHint}>保存中...</span>}
+                    {saving && <span data-i18n="components.AddonManagerModal.text022" className={styles.savingHint}>{uiText("components.AddonManagerModal.text022")}</span>}
                 </div>
             )}
 
@@ -909,7 +923,7 @@ function ParamsSection({
             {hasPersonaSection && (
                 <div className={styles.personaSection}>
                     <div className={styles.personaSectionHeader}>
-                        <span className={styles.paramsGroupLabel}>ペルソナ別設定</span>
+                        <span data-i18n="components.AddonManagerModal.text023" className={styles.paramsGroupLabel}>{uiText("components.AddonManagerModal.text023")}</span>
                     </div>
 
                     <select
@@ -917,7 +931,7 @@ function ParamsSection({
                         value={selectedPersonaId}
                         onChange={(e) => setSelectedPersonaId(e.target.value)}
                     >
-                        <option value="">-- ペルソナを選択 --</option>
+                        <option data-i18n="components.AddonManagerModal.text024" value="">{uiText("components.AddonManagerModal.text024")}</option>
                         {personas.map((p) => (
                             <option key={p.id} value={p.id}>{p.name}</option>
                         ))}
@@ -977,12 +991,13 @@ function AddonCard({
     onToggleEnabled: (addonName: string, enabled: boolean, mcpSettled?: boolean | null) => void;
     onConfigChanged?: () => void | Promise<void>;
 }) {
+    const currentLocale = useLocale();
     const [expanded, setExpanded] = useState(false);
 
     const handleToggle = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const enabled = e.target.checked;
         try {
-            const res = await fetch(`/api/addon/${addon.addon_name}/enabled`, {
+            const res = await apiFetch(`/api/addon/${addon.addon_name}/enabled`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ is_enabled: enabled }),
@@ -998,25 +1013,28 @@ function AddonCard({
         }
     };
 
+    const dispName = resolveI18nText(addon.display_name_i18n, currentLocale, addon.display_name_en, addon.display_name || addon.addon_name);
+    const descText = resolveI18nText(addon.description_i18n, currentLocale, addon.description_en, addon.description);
+
     return (
         <div className={`${styles.addonCard} ${!addon.is_enabled ? styles.disabled : ''}`}>
             <div className={styles.addonCardHeader}>
-                <button
+                <button data-i18n="components.AddonManagerModal.text025 components.AddonManagerModal.text026"
                     className={styles.expandBtn}
                     onClick={() => setExpanded((v) => !v)}
-                    aria-label={expanded ? '折りたたむ' : '展開する'}
+                    aria-label={expanded ? uiText("components.AddonManagerModal.text025") : uiText("components.AddonManagerModal.text026")}
                 >
                     {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                 </button>
                 <div className={styles.addonMeta} onClick={() => setExpanded((v) => !v)}>
                     <div className={styles.addonMetaRow}>
-                        <span className={styles.addonName}>{addon.display_name || addon.addon_name}</span>
+                        <span className={styles.addonName}>{dispName}</span>
                         {addon.version && (
                             <span className={styles.addonVersion}>v{addon.version}</span>
                         )}
                     </div>
-                    {addon.description && (
-                        <span className={styles.addonDesc}>{addon.description}</span>
+                    {descText && (
+                        <span className={styles.addonDesc}>{descText}</span>
                     )}
                 </div>
                 <label className={styles.enabledToggle} onClick={(e) => e.stopPropagation()}>
@@ -1038,7 +1056,7 @@ function AddonCard({
                         const AddonPanel = ADDON_PANELS[addon.addon_name];
                         if (!AddonPanel) return null;
                         return (
-                            <Suspense fallback={<p className={styles.loadingText}>Loading panel...</p>}>
+                            <Suspense fallback={<p className={styles.loadingText}>{uiText("components.AddonManagerModal.label003")}</p>}>
                                 <AddonPanel
                                     addon={{
                                         addon_name: addon.addon_name,
@@ -1057,7 +1075,7 @@ function AddonCard({
             )}
             {expanded && !addon.is_enabled && (
                 <div className={styles.addonCardBody}>
-                    <p className={styles.disabledNote}>アドオンが無効です。有効にすると設定を変更できます。</p>
+                    <p data-i18n="components.AddonManagerModal.text027" className={styles.disabledNote}>{uiText("components.AddonManagerModal.text027")}</p>
                 </div>
             )}
         </div>
@@ -1071,6 +1089,7 @@ function AddonCard({
 type AddonManagerTab = 'installed' | 'catalog';
 
 export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModalProps) {
+    useLocale();
     const [activeTab, setActiveTab] = useState<AddonManagerTab>('installed');
     const [addons, setAddons] = useState<AddonInfo[]>([]);
     const [personas, setPersonas] = useState<{ id: string; name: string }[]>([]);
@@ -1092,7 +1111,7 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
     // 時に呼んで、 ParamsSection の表示を最新値に追従させる。
     const refetchAddons = useCallback(async (): Promise<void> => {
         try {
-            const r = await fetch('/api/addon/');
+            const r = await apiFetch('/api/addon/');
             if (!r.ok) throw new Error(`/api/addon/ ${r.status} ${r.statusText}`);
             const addonData = await r.json();
             setAddons(Array.isArray(addonData) ? addonData : []);
@@ -1107,11 +1126,11 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
         setLoading(true);
         setFetchError(null);
         Promise.all([
-            fetch('/api/addon/').then((r) => {
+            apiFetch('/api/addon/').then((r) => {
                 if (!r.ok) throw new Error(`/api/addon/ ${r.status} ${r.statusText}`);
                 return r.json();
             }),
-            fetch('/api/people/').then((r) => {
+            apiFetch('/api/people/').then((r) => {
                 if (!r.ok) throw new Error(`/api/people/ ${r.status} ${r.statusText}`);
                 return r.json();
             }),
@@ -1168,7 +1187,7 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
                 <div className={styles.header}>
                     <div className={styles.headerTitle}>
                         <Package size={22} />
-                        <h2>アドオン管理</h2>
+                        <h2 data-i18n="components.AddonManagerModal.text028">{uiText("components.AddonManagerModal.text028")}</h2>
                     </div>
                     <button className={styles.closeButton} onClick={onClose}>
                         <X size={20} />
@@ -1176,18 +1195,16 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
                 </div>
 
                 <div className={styles.tabRow}>
-                    <button
+                    <button data-i18n="components.AddonManagerModal.text029"
                         className={`${styles.tab} ${activeTab === 'installed' ? styles.tabActive : ''}`}
                         onClick={() => setActiveTab('installed')}
                     >
-                        <Package size={14} /> 導入済み
-                    </button>
-                    <button
+                        <Package size={14} />{uiText("components.AddonManagerModal.text029")}</button>
+                    <button data-i18n="components.AddonManagerModal.text030"
                         className={`${styles.tab} ${activeTab === 'catalog' ? styles.tabActive : ''}`}
                         onClick={() => setActiveTab('catalog')}
                     >
-                        <Store size={14} /> カタログ
-                    </button>
+                        <Store size={14} />{uiText("components.AddonManagerModal.text030")}</button>
                 </div>
 
                 <div className={styles.content}>
@@ -1196,20 +1213,18 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
                             {!loading && !fetchError && (
                                 <MCPSection defaultCollapsed={true} refreshKey={mcpRefreshKey} />
                             )}
-                            {loading && <p className={styles.loadingText}>読み込み中...</p>}
+                            {loading && <p data-i18n="components.AddonManagerModal.text031" className={styles.loadingText}>{uiText("components.AddonManagerModal.text031")}</p>}
                             {!loading && fetchError && (
                                 <div className={styles.errorState}>
-                                    <p>読み込みに失敗しました</p>
+                                    <p data-i18n="components.AddonManagerModal.text032">{uiText("components.AddonManagerModal.text032")}</p>
                                     <p className={styles.errorDetail}>{fetchError}</p>
                                 </div>
                             )}
                             {!loading && !fetchError && addons.length === 0 && (
                                 <div className={styles.emptyState}>
                                     <Package size={40} className={styles.emptyIcon} />
-                                    <p>インストール済みのアドオンはありません</p>
-                                    <p className={styles.emptyHint}>
-                                        「カタログ」タブから導入できます
-                                    </p>
+                                    <p data-i18n="components.AddonManagerModal.text033">{uiText("components.AddonManagerModal.text033")}</p>
+                                    <p data-i18n="components.AddonManagerModal.text034" className={styles.emptyHint}>{uiText("components.AddonManagerModal.text034")}</p>
                                 </div>
                             )}
                             {!loading && addons.map((addon) => (

@@ -1,4 +1,11 @@
 'use client';
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 import React, { useState, useEffect } from 'react';
 import { Loader2, Check, StickyNote, RefreshCw } from 'lucide-react';
 import styles from './MemoryNotesViewer.module.css';
@@ -18,13 +25,14 @@ interface MemoryNotesViewerProps {
 }
 
 function formatTimestamp(ts: number): string {
-    return new Date(ts * 1000).toLocaleString('ja-JP', {
+    return new Date(ts * 1000).toLocaleString(getFormatLocale(), {
         month: 'short', day: 'numeric',
         hour: '2-digit', minute: '2-digit',
     });
 }
 
 export default function MemoryNotesViewer({ personaId }: MemoryNotesViewerProps) {
+    useLocale();
     const [notes, setNotes] = useState<MemoryNoteItem[]>([]);
     const [totalUnresolved, setTotalUnresolved] = useState(0);
     const [isLoading, setIsLoading] = useState(false);
@@ -34,7 +42,7 @@ export default function MemoryNotesViewer({ personaId }: MemoryNotesViewerProps)
     const fetchNotes = async () => {
         setIsLoading(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/memory-notes?limit=200`);
+            const res = await apiFetch(`/api/people/${personaId}/memory-notes?limit=200`);
             if (res.ok) {
                 const data = await res.json();
                 setNotes(data.items);
@@ -72,7 +80,7 @@ export default function MemoryNotesViewer({ personaId }: MemoryNotesViewerProps)
         if (selectedIds.size === 0) return;
         setIsResolving(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/memory-notes/resolve`, {
+            const res = await apiFetch(`/api/people/${personaId}/memory-notes/resolve`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ note_ids: Array.from(selectedIds) }),
@@ -92,7 +100,7 @@ export default function MemoryNotesViewer({ personaId }: MemoryNotesViewerProps)
         return (
             <div className={styles.loadingContainer}>
                 <Loader2 className={styles.spinner} size={24} />
-                <span>読み込み中...</span>
+                <span data-i18n="components.memory.MemoryNotesViewer.text001">{uiText("components.memory.MemoryNotesViewer.text001")}</span>
             </div>
         );
     }
@@ -101,10 +109,8 @@ export default function MemoryNotesViewer({ personaId }: MemoryNotesViewerProps)
         return (
             <div className={styles.emptyContainer}>
                 <StickyNote size={48} className={styles.emptyIcon} />
-                <p>メモリーノートはまだありません</p>
-                <p className={styles.emptyHint}>
-                    Chronicle生成時に会話から自動抽出されます
-                </p>
+                <p data-i18n="components.memory.MemoryNotesViewer.text002">{uiText("components.memory.MemoryNotesViewer.text002")}</p>
+                <p data-i18n="components.memory.MemoryNotesViewer.text003" className={styles.emptyHint}>{uiText("components.memory.MemoryNotesViewer.text003")}</p>
             </div>
         );
     }
@@ -113,21 +119,20 @@ export default function MemoryNotesViewer({ personaId }: MemoryNotesViewerProps)
         <div className={styles.container}>
             <div className={styles.toolbar}>
                 <div className={styles.toolbarLeft}>
-                    <span className={styles.countBadge}>
-                        {totalUnresolved}件 未整理
-                    </span>
-                    <button className={styles.refreshButton} onClick={fetchNotes} title="更新">
+                    <span data-i18n="components.memory.MemoryNotesViewer.text004" className={styles.countBadge}>
+                        {totalUnresolved}{uiText("components.memory.MemoryNotesViewer.text004")}</span>
+                    <button data-i18n="components.memory.MemoryNotesViewer.text005" className={styles.refreshButton} onClick={fetchNotes} title={uiText("components.memory.MemoryNotesViewer.text005")}>
                         <RefreshCw size={14} />
                     </button>
                 </div>
                 <div className={styles.toolbarRight}>
-                    <button
+                    <button data-i18n="components.memory.MemoryNotesViewer.text006 components.memory.MemoryNotesViewer.text007"
                         className={styles.selectAllButton}
                         onClick={selectAll}
                     >
-                        {selectedIds.size === notes.length ? '選択解除' : '全選択'}
+                        {selectedIds.size === notes.length ? uiText("components.memory.MemoryNotesViewer.text006") : uiText("components.memory.MemoryNotesViewer.text007")}
                     </button>
-                    <button
+                    <button data-i18n="components.memory.MemoryNotesViewer.text008 components.memory.MemoryNotesViewer.text009"
                         className={styles.resolveButton}
                         onClick={resolveSelected}
                         disabled={selectedIds.size === 0 || isResolving}
@@ -137,7 +142,7 @@ export default function MemoryNotesViewer({ personaId }: MemoryNotesViewerProps)
                         ) : (
                             <Check size={14} />
                         )}
-                        {selectedIds.size > 0 ? `${selectedIds.size}件を整理済みにする` : '整理済みにする'}
+                        {selectedIds.size > 0 ? uiText("components.memory.MemoryNotesViewer.text008", { p1: selectedIds.size }) : uiText("components.memory.MemoryNotesViewer.text009")}
                     </button>
                 </div>
             </div>
@@ -165,7 +170,7 @@ export default function MemoryNotesViewer({ personaId }: MemoryNotesViewerProps)
                                 </span>
                                 {note.source_pulse_id && (
                                     <span className={styles.notePulse}>
-                                        pulse: {note.source_pulse_id.slice(0, 8)}
+                                        {uiText("components.memory.MemoryNotesViewer.label001")}{note.source_pulse_id.slice(0, 8)}
                                     </span>
                                 )}
                             </div>

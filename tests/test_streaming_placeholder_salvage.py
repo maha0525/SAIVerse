@@ -206,7 +206,7 @@ def _node_def():
     )
 
 
-def _build_node(monkeypatch, *, client, spell_loop, node_def=None):
+def _build_node(monkeypatch, *, client, spell_loop, node_def=None, persona_id=None):
     runtime = MagicMock()
     runtime.manager.occupants = {"b1": ["1"]}
     runtime._effective_building_id.return_value = "b1"
@@ -236,9 +236,10 @@ def _build_node(monkeypatch, *, client, spell_loop, node_def=None):
 
     # persona_id=None で node_with_persona_context の wrap を素通しし、
     # persona_context 依存なしで node 本体だけを走らせる
-    # (tests/test_spell_auto_mode_w10.py と同じ手)。
+    # (tests/test_spell_auto_mode_w10.py と同じ手)。通告の heard_by に
+    # 発話者本人が載ることまで見たい回だけ persona_id を渡す。
     persona = SimpleNamespace(
-        persona_id=None, persona_name="p", history_manager=MagicMock(),
+        persona_id=persona_id, persona_name="p", history_manager=MagicMock(),
     )
     events: list = []
     node = runtime_llm.lg_llm_node(
@@ -1445,3 +1446,229 @@ def test_an_important_only_backfill_writes_the_same_shape_as_the_dual_write(monk
         assert absent not in call.kwargs, absent
     # 書けた回は「もう記憶に書かれた」の印が立つ
     assert state["_beat_memorized"] is True
+
+
+# ---------------------------------------------------------------------------
+# サーバーがストリームを途中で切った回 — 停止ボタン・Beat 死亡と同じ通告を書く
+# (docs/issues/server_cut_stream_writes_no_interruption_notice.md、2026-09-13)。
+#
+# この経路だけ通告が無いと、会話の末尾がペルソナ本人の途中発言のままになる。
+# 続きの生成のプロンプト末尾がモデル発話になり、プリフィルを受け付けない
+# Gemini 3.x はそこで生成ごと拒否する。
+# ---------------------------------------------------------------------------
+
+class _CutStreamClient(_FakeStreamClient):
+    """chunk を流し切った後に「サーバーが切った」を 1 度だけ申告する。
+
+    ``consume_stream_error`` は消費型 — 2 度目からは None を返す (実物の
+    llm_clients と同じ契約)。
+    """
+
+    def __init__(self, chunks, error):
+        super().__init__(chunks=chunks)
+        self._error = error
+
+    def consume_stream_error(self):
+        err, self._error = self._error, None
+        return err
+
+
+def _server_cut_node(monkeypatch, *, chunks=("言いかけた本文",)):
+    client = _CutStreamClient(
+        chunks=list(chunks),
+        error={"code": 500, "message": "internal error", "status": "INTERNAL"},
+    )
+
+    async def _no_spells(**kwargs):
+        return runtime_llm.SpellLoopResult(
+            segments=[], final_continuation=kwargs["text"], loop_count=0,
+        )
+
+    return _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells, persona_id="p1",
+    )
+
+
+def test_a_server_cut_stream_writes_the_same_interruption_notice(monkeypatch):
+    """サーバー切断の回も、停止経路と同じ一枚の通告を建物の記録へ置く。
+
+    文面は原因を書かない一文 (中断させたのはユーザーではない)、役は host、
+    ``heard_by`` は在室者 + 本人 — 在室者を渡さないと取り込みが配らず、
+    通告は誰の記憶にも届かない。
+    """
+    runtime, persona, node, events = _server_cut_node(monkeypatch)
+    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    call = persona.history_manager.add_to_building_only.call_args
+    assert call is not None, "サーバー切断の回に中断の通告が書かれていない"
+    building_id, message = call.args
+    assert building_id == "b1"
+    assert message["role"] == "host"
+    assert message["content"] == "(ここで発言が中断されました)"
+    assert call.kwargs["heard_by"] == ["1", "p1"]
+
+
+def test_a_server_cut_stream_settles_the_partial_text_before_the_notice(
+    monkeypatch,
+):
+    """建物の記録の並びは「途中の発言 → 通告」。通告を先に置くと、他の
+    ペルソナの記憶に「何が中断されたのか分からない一行」だけが残る。"""
+    runtime, persona, node, events = _server_cut_node(monkeypatch)
+
+    order: list = []
+    _saved = runtime._emit_speak_finalize.return_value
+
+    def _finalize(*args, **kwargs):
+        order.append("finalize")
+        return _saved
+
+    runtime._emit_speak_finalize.side_effect = _finalize
+    persona.history_manager.add_to_building_only.side_effect = (
+        lambda *a, **k: order.append("notice")
+    )
+
+    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    assert order == ["finalize", "notice"]
+    # 確定は部分文つきで、通告と同じ部屋へ
+    assert runtime._emit_speak_finalize.call_args.args[1] == "b1"
+    assert runtime._emit_speak_finalize.call_args.args[3] == "言いかけた本文"
+
+
+def test_a_server_cut_stream_notice_does_not_draw_its_own_icon(monkeypatch):
+    """画面向けの通知の文面にアイコンを書かない — 画面側が info 種別に
+    自前で ℹ️ を描くので、書くと二つ並ぶ (2026-09-13 まはー実機報告)。"""
+    runtime, persona, node, events = _server_cut_node(monkeypatch)
+    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    infos = [e for e in events if e.get("type") == "info"]
+    assert len(infos) == 1
+    content = infos[0]["content"]
+    assert not content.startswith("ℹ️")
+    assert "ℹ️" not in content
+    assert content.startswith("メッセージの生成が途中で終了しました。")
+
+
+def test_a_server_cut_stream_marks_the_utterance_as_unfinished(monkeypatch):
+    """通告を足しても、既にあった「言い切っていない」印は落ちない。"""
+    runtime, persona, node, events = _server_cut_node(monkeypatch)
+    state = {"_messages": [], "_pulse_id": "pl-1"}
+    asyncio.run(node(state))
+
+    extra = runtime._emit_speak_finalize.call_args.kwargs.get("extra_metadata") or {}
+    assert extra[INTERRUPTED_METADATA_KEY] is True
+    assert [e for e in events if e.get("interrupted")]
+
+
+def test_a_clean_stream_writes_no_interruption_notice(monkeypatch):
+    """切られなかった回に通告は出ない (新しい書き込みの入口の裏側)。"""
+    client = _FakeStreamClient(chunks=["こんにちは。"])
+
+    async def _no_spells(**kwargs):
+        return runtime_llm.SpellLoopResult(
+            segments=[], final_continuation=kwargs["text"], loop_count=0,
+        )
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells, persona_id="p1",
+    )
+    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    persona.history_manager.add_to_building_only.assert_not_called()
+    assert [e for e in events if e.get("type") == "info"] == []
+
+
+def test_a_server_cut_stream_with_a_failed_finalize_writes_no_notice(monkeypatch):
+    """部分文の確定が保存に失敗した回は、通告を書かない。
+
+    通告は「途中で終わった発言」の後ろに置く注記なので、その発言が建物の
+    記録に載らなかった回に書くと、見えない行の後ろに通告だけが浮く。
+    このシナリオ (確定が失敗しても例外は出ない回) では、未確定の下書き行が
+    残って通告も書かれないまま Beat が閉じる。この下書き行を後から掃く機構は
+    現状無い (docs/issues/unfinalized_placeholder_on_clean_exit.md) が、
+    本文の載っていない場所に通告を足しても読み手には「何が中断されたのか
+    分からない一行」にしかならないので、通告を書かないのが正しい。画面への
+    知らせ (info) は保存の成否と無関係に事実なので、こちらは出る。
+    """
+    from sea.runtime_emitters import SpeakFinalizeResult
+
+    runtime, persona, node, events = _server_cut_node(monkeypatch)
+    runtime._emit_speak_finalize.return_value = SpeakFinalizeResult(
+        status="failed", building_msg=None,
+    )
+    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    persona.history_manager.add_to_building_only.assert_not_called()
+    assert [e for e in events if e.get("type") == "info"], (
+        "画面への知らせまで消してはいけない"
+    )
+
+
+def test_a_server_cut_fallback_emit_writes_the_notice_where_it_landed(monkeypatch):
+    """下書き行を作れなかった救済経路でも、本文が建物へ載れたなら通告を書く。
+
+    宛先は本文を載せたのと同じ部屋 (eff_bid) — 載った部屋と通告の部屋を
+    食い違わせない。
+    """
+    runtime, persona, node, events = _server_cut_node(monkeypatch)
+    runtime._emit_speak_start.return_value = None  # 下書き行を作れなかった回
+    runtime._emit_say.return_value = {"message_id": "say-1", "content": "言いかけた本文"}
+    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    call = persona.history_manager.add_to_building_only.call_args
+    assert call is not None
+    building_id, message = call.args
+    assert building_id == "b1"
+    assert message["content"] == "(ここで発言が中断されました)"
+
+
+def test_a_server_cut_fallback_emit_that_did_not_persist_writes_no_notice(monkeypatch):
+    """救済の書き込みが DB に載らなかった回 (message_id なし) は、通告を書かない。
+
+    「書けた」の判定は message_id の有無 — DB 採番なので insert が通った
+    ときにしか付かない (builtin_data/tools/tell.py の裁定と同じ)。dict が
+    返っただけで通告を書くと、見えない行の後ろに通告だけが浮く。
+    """
+    runtime, persona, node, events = _server_cut_node(monkeypatch)
+    runtime._emit_speak_start.return_value = None
+    runtime._emit_say.return_value = {"content": "言いかけた本文"}  # 採番なし
+    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    persona.history_manager.add_to_building_only.assert_not_called()
+    assert [e for e in events if e.get("type") == "info"], (
+        "画面への知らせまで消してはいけない"
+    )
+
+
+def test_a_stale_stream_error_from_an_earlier_beat_does_not_leak(monkeypatch):
+    """前の Beat が残した「サーバーが切った」の申告は、次の Beat に乗らない。
+
+    申告はストリーム消費の直後に立つが、pop は no-spell の完了パスにしか
+    無い — 切られた部分文がスペル行を含んでいた回はスペル分岐へ進んで残留
+    する。残留したまま次の Beat が言い切って完了すると、その発言に「中断
+    された」の印と偽の通告が乗る (通告は在室ペルソナ全員の記憶へ配られる
+    ので、被害は画面表示に留まらない)。Beat の入り口で倒す。
+    """
+    client = _FakeStreamClient(chunks=["言い切った発言。"])
+
+    async def _no_spells(**kwargs):
+        return runtime_llm.SpellLoopResult(
+            segments=[], final_continuation=kwargs["text"], loop_count=0,
+        )
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells, persona_id="p1",
+    )
+    state = {
+        "_messages": [],
+        "_pulse_id": "pl-1",
+        # 前の Beat (スペル分岐で終わった回) が残した申告
+        "_stream_error": {"code": 500, "message": "internal error"},
+    }
+    asyncio.run(node(state))
+
+    persona.history_manager.add_to_building_only.assert_not_called()
+    assert [e for e in events if e.get("type") == "info"] == []
+    extra = runtime._emit_speak_finalize.call_args.kwargs.get("extra_metadata") or {}
+    assert INTERRUPTED_METADATA_KEY not in extra
+    assert not [e for e in events if e.get("interrupted")]

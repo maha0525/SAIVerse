@@ -1,3 +1,10 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useEffect, useState, useCallback } from 'react';
 import { Plus, Trash2, RefreshCw, DownloadCloud, Rss, Newspaper, AlertTriangle, ExternalLink, X } from 'lucide-react';
 import styles from './FeedManagementPanel.module.css';
@@ -54,13 +61,14 @@ function formatDateTime(iso?: string | null): string {
     if (!iso) return '';
     const d = new Date(iso);
     if (isNaN(d.getTime())) return '';
-    return d.toLocaleString('ja-JP', {
+    return d.toLocaleString(getFormatLocale(), {
         year: 'numeric', month: 'numeric', day: 'numeric',
         hour: '2-digit', minute: '2-digit',
     });
 }
 
 export default function FeedManagementPanel() {
+    useLocale();
     const [fixtures, setFixtures] = useState<FeedFixtureInfo[]>([]);
     const [presets, setPresets] = useState<FeedPresetInfo[]>([]);
     const [buildings, setBuildings] = useState<BuildingOption[]>([]);
@@ -90,7 +98,7 @@ export default function FeedManagementPanel() {
     const loadFixtures = useCallback(async () => {
         setLoading(true);
         try {
-            const res = await fetch('/api/feeds/fixtures');
+            const res = await apiFetch('/api/feeds/fixtures');
             if (res.ok) setFixtures(await res.json());
         } catch (e) {
             console.error('Failed to load feed fixtures', e);
@@ -102,8 +110,8 @@ export default function FeedManagementPanel() {
     const loadPresetsAndBuildings = useCallback(async () => {
         try {
             const [pRes, bRes] = await Promise.all([
-                fetch('/api/feeds/presets'),
-                fetch('/api/user/buildings'),
+                apiFetch('/api/feeds/presets'),
+                apiFetch('/api/user/buildings'),
             ]);
             if (pRes.ok) setPresets(await pRes.json());
             if (bRes.ok) {
@@ -123,11 +131,11 @@ export default function FeedManagementPanel() {
     const handleCreateFixture = async () => {
         setCreateError(null);
         if (!createBuildingId) {
-            setCreateError('設置先の Building を選んでください。');
+            setCreateError(uiText("components.settings.FeedManagementPanel.text001"));
             return;
         }
         if (!createPresetId && !createName.trim()) {
-            setCreateError('プリセットを選ぶか、施設の名前を入力してください。');
+            setCreateError(uiText("components.settings.FeedManagementPanel.text002"));
             return;
         }
         setCreating(true);
@@ -135,14 +143,14 @@ export default function FeedManagementPanel() {
             const body = createPresetId
                 ? { building_id: createBuildingId, preset_id: createPresetId }
                 : { building_id: createBuildingId, name: createName.trim(), description: createDesc.trim() };
-            const res = await fetch('/api/feeds/fixtures', {
+            const res = await apiFetch('/api/feeds/fixtures', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
             });
             if (!res.ok) {
                 const data = await res.json().catch(() => null);
-                setCreateError(data?.detail || `作成に失敗しました (HTTP ${res.status})`);
+                setCreateError(data?.detail || uiText("components.settings.FeedManagementPanel.text003", { p1: res.status }));
                 return;
             }
             setShowCreate(false);
@@ -151,7 +159,7 @@ export default function FeedManagementPanel() {
             setCreateDesc('');
             await loadFixtures();
         } catch (e) {
-            setCreateError(`作成に失敗しました: ${e}`);
+            setCreateError(uiText("components.settings.FeedManagementPanel.text004", { p1: e }));
         } finally {
             setCreating(false);
         }
@@ -161,14 +169,14 @@ export default function FeedManagementPanel() {
         setSubErrors(prev => ({ ...prev, [fixtureId]: '' }));
         setAddingFixtureId(fixtureId);
         try {
-            const res = await fetch('/api/feeds/subscriptions', {
+            const res = await apiFetch('/api/feeds/subscriptions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ fixture_id: fixtureId, url }),
             });
             const data = await res.json().catch(() => null);
             if (!res.ok) {
-                setSubErrors(prev => ({ ...prev, [fixtureId]: data?.detail || `追加に失敗しました (HTTP ${res.status})` }));
+                setSubErrors(prev => ({ ...prev, [fixtureId]: data?.detail || uiText("components.settings.FeedManagementPanel.text005", { p1: res.status }) }));
                 return;
             }
             if (data?.status === 'candidates') {
@@ -181,7 +189,7 @@ export default function FeedManagementPanel() {
             setCandidates(prev => ({ ...prev, [fixtureId]: [] }));
             await loadFixtures();
         } catch (e) {
-            setSubErrors(prev => ({ ...prev, [fixtureId]: `追加に失敗しました: ${e}` }));
+            setSubErrors(prev => ({ ...prev, [fixtureId]: uiText("components.settings.FeedManagementPanel.text006", { p1: e }) }));
         } finally {
             setAddingFixtureId(null);
         }
@@ -190,7 +198,7 @@ export default function FeedManagementPanel() {
     const handleAddSubscription = (fixtureId: string) => {
         const url = (urlInputs[fixtureId] || '').trim();
         if (!url) {
-            setSubErrors(prev => ({ ...prev, [fixtureId]: 'URL を入力してください。' }));
+            setSubErrors(prev => ({ ...prev, [fixtureId]: uiText("components.settings.FeedManagementPanel.text007") }));
             return;
         }
         setCandidates(prev => ({ ...prev, [fixtureId]: [] }));
@@ -199,40 +207,40 @@ export default function FeedManagementPanel() {
 
     const handleDeleteSubscription = async (sub: FeedSubscriptionInfo) => {
         const label = sub.title || sub.feed_url;
-        if (!confirm(`購読「${label}」を削除しますか？\n取得済みの記事も一緒に消えます。`)) return;
+        if (!confirm(uiText("components.settings.FeedManagementPanel.text008", { p1: label }))) return;
         try {
-            const res = await fetch(`/api/feeds/subscriptions/${sub.subscription_id}`, { method: 'DELETE' });
+            const res = await apiFetch(`/api/feeds/subscriptions/${sub.subscription_id}`, { method: 'DELETE' });
             if (!res.ok) {
                 const data = await res.json().catch(() => null);
-                alert(`削除に失敗しました: ${data?.detail || res.status}`);
+                alert(uiText("components.settings.FeedManagementPanel.text009", { p1: data?.detail || res.status }));
                 return;
             }
             await loadFixtures();
         } catch (e) {
-            alert(`削除に失敗しました: ${e}`);
+            alert(uiText("components.settings.FeedManagementPanel.text010", { p1: e }));
         }
     };
 
     const handleFetchNow = async () => {
         setNotice(null);
         try {
-            const res = await fetch('/api/feeds/fetch', { method: 'POST' });
+            const res = await apiFetch('/api/feeds/fetch', { method: 'POST' });
             if (res.ok) {
-                setNotice('取得を開始しました。少し待ってから「再読み込み」を押すと結果が反映されます。');
+                setNotice(uiText("components.settings.FeedManagementPanel.text011"));
             } else {
                 // 409 (取得処理が既に実行中です) 等はサーバーの detail をそのまま見せる
                 const data = await res.json().catch(() => null);
-                setNotice(data?.detail || `取得の開始に失敗しました (HTTP ${res.status})`);
+                setNotice(data?.detail || uiText("components.settings.FeedManagementPanel.text012", { p1: res.status }));
             }
         } catch (e) {
-            setNotice(`取得の開始に失敗しました: ${e}`);
+            setNotice(uiText("components.settings.FeedManagementPanel.text013", { p1: e }));
         }
     };
 
     const loadItems = useCallback(async (fixtureId: string) => {
         setItemsLoading(true);
         try {
-            const res = await fetch(`/api/feeds/items?fixture_id=${encodeURIComponent(fixtureId)}&limit=50`);
+            const res = await apiFetch(`/api/feeds/items?fixture_id=${encodeURIComponent(fixtureId)}&limit=50`);
             if (res.ok) {
                 const data = await res.json();
                 setItems(data.items || []);
@@ -260,45 +268,38 @@ export default function FeedManagementPanel() {
     return (
         <div className={styles.container}>
             <div className={styles.header}>
-                <h3><Rss size={18} /> フィード</h3>
+                <h3 data-i18n="components.settings.FeedManagementPanel.text014"><Rss size={18} />{uiText("components.settings.FeedManagementPanel.text014")}</h3>
                 <div className={styles.actions}>
-                    <button className={styles.btnSecondary} onClick={handleFetchNow}>
-                        <DownloadCloud size={14} /> 今すぐ取得
-                    </button>
-                    <button className={styles.btnSecondary} onClick={loadFixtures}>
-                        <RefreshCw size={14} /> 再読み込み
-                    </button>
-                    <button className={styles.btnPrimary} onClick={() => setShowCreate(v => !v)}>
-                        <Plus size={14} /> 施設を追加
-                    </button>
+                    <button data-i18n="components.settings.FeedManagementPanel.text015" className={styles.btnSecondary} onClick={handleFetchNow}>
+                        <DownloadCloud size={14} />{uiText("components.settings.FeedManagementPanel.text015")}</button>
+                    <button data-i18n="components.settings.FeedManagementPanel.text016" className={styles.btnSecondary} onClick={loadFixtures}>
+                        <RefreshCw size={14} />{uiText("components.settings.FeedManagementPanel.text016")}</button>
+                    <button data-i18n="components.settings.FeedManagementPanel.text017" className={styles.btnPrimary} onClick={() => setShowCreate(v => !v)}>
+                        <Plus size={14} />{uiText("components.settings.FeedManagementPanel.text017")}</button>
                 </div>
             </div>
 
-            <p className={styles.intro}>
-                フィードは、ニュースサイトやブログが公開している「新着記事の一覧」です。
-                Building にフィード施設を置くと、そこにいるペルソナが新着記事に出会えるようになります。
-                ここではユーザーもペルソナと同じ記事を読めます。
-            </p>
+            <p data-i18n="components.settings.FeedManagementPanel.text018" className={styles.intro}>{uiText("components.settings.FeedManagementPanel.text018")}</p>
 
             {notice && <div className={styles.notice}>{notice}</div>}
 
             {showCreate && (
                 <div className={styles.createForm}>
                     <div className={styles.formRow}>
-                        <label>設置先の Building</label>
+                        <label data-i18n="components.settings.FeedManagementPanel.text019">{uiText("components.settings.FeedManagementPanel.text019")}</label>
                         <select value={createBuildingId} onChange={e => setCreateBuildingId(e.target.value)}>
-                            <option value="">選択してください</option>
+                            <option data-i18n="components.settings.FeedManagementPanel.text020" value="">{uiText("components.settings.FeedManagementPanel.text020")}</option>
                             {buildings.map(b => (
                                 <option key={b.id} value={b.id}>{b.name}</option>
                             ))}
                         </select>
                     </div>
                     <div className={styles.formRow}>
-                        <label>プリセット</label>
+                        <label data-i18n="components.settings.FeedManagementPanel.text021">{uiText("components.settings.FeedManagementPanel.text021")}</label>
                         <select value={createPresetId} onChange={e => setCreatePresetId(e.target.value)}>
-                            <option value="">使わない (空の施設を作る)</option>
+                            <option data-i18n="components.settings.FeedManagementPanel.text022" value="">{uiText("components.settings.FeedManagementPanel.text022")}</option>
                             {presets.map(p => (
-                                <option key={p.id} value={p.id}>{p.name}（フィード{p.feed_count}本）</option>
+                                <option data-i18n="components.settings.FeedManagementPanel.text023 components.settings.FeedManagementPanel.text024" key={p.id} value={p.id}>{p.name}{uiText("components.settings.FeedManagementPanel.text023")}{p.feed_count}{uiText("components.settings.FeedManagementPanel.text024")}</option>
                             ))}
                         </select>
                     </div>
@@ -308,8 +309,7 @@ export default function FeedManagementPanel() {
                             return preset ? (
                                 <div className={styles.presetInfo}>
                                     {preset.description && <div>{preset.description}</div>}
-                                    <div className={styles.presetFeeds}>
-                                        収録フィード: {preset.feed_titles.filter(t => t).join(' / ') || '(なし)'}
+                                    <div data-i18n="components.settings.FeedManagementPanel.text025 components.settings.FeedManagementPanel.text026" className={styles.presetFeeds}>{uiText("components.settings.FeedManagementPanel.text025")}{preset.feed_titles.filter(t => t).join(' / ') || uiText("components.settings.FeedManagementPanel.text026")}
                                     </div>
                                 </div>
                             ) : null;
@@ -317,41 +317,39 @@ export default function FeedManagementPanel() {
                     ) : (
                         <>
                             <div className={styles.formRow}>
-                                <label>施設の名前</label>
-                                <input
+                                <label data-i18n="components.settings.FeedManagementPanel.text027">{uiText("components.settings.FeedManagementPanel.text027")}</label>
+                                <input data-i18n="components.settings.FeedManagementPanel.text028"
                                     type="text"
                                     value={createName}
                                     onChange={e => setCreateName(e.target.value)}
-                                    placeholder="例: 新聞スタンド"
+                                    placeholder={uiText("components.settings.FeedManagementPanel.text028")}
                                 />
                             </div>
                             <div className={styles.formRow}>
-                                <label>説明 (任意)</label>
-                                <input
+                                <label data-i18n="components.settings.FeedManagementPanel.text029">{uiText("components.settings.FeedManagementPanel.text029")}</label>
+                                <input data-i18n="components.settings.FeedManagementPanel.text030"
                                     type="text"
                                     value={createDesc}
                                     onChange={e => setCreateDesc(e.target.value)}
-                                    placeholder="ペルソナに見える施設の説明"
+                                    placeholder={uiText("components.settings.FeedManagementPanel.text030")}
                                 />
                             </div>
                         </>
                     )}
                     {createError && <div className={styles.errorText}>{createError}</div>}
                     <div className={styles.formActions}>
-                        <button className={styles.btnSecondary} onClick={() => setShowCreate(false)}>キャンセル</button>
-                        <button className={styles.btnPrimary} onClick={handleCreateFixture} disabled={creating}>
-                            {creating ? '作成中...' : '作成'}
+                        <button data-i18n="components.settings.FeedManagementPanel.text031" className={styles.btnSecondary} onClick={() => setShowCreate(false)}>{uiText("components.settings.FeedManagementPanel.text031")}</button>
+                        <button data-i18n="components.settings.FeedManagementPanel.text032 components.settings.FeedManagementPanel.text033" className={styles.btnPrimary} onClick={handleCreateFixture} disabled={creating}>
+                            {creating ? uiText("components.settings.FeedManagementPanel.text032") : uiText("components.settings.FeedManagementPanel.text033")}
                         </button>
                     </div>
                 </div>
             )}
 
             {loading ? (
-                <div className={styles.empty}>読み込み中...</div>
+                <div data-i18n="components.settings.FeedManagementPanel.text034" className={styles.empty}>{uiText("components.settings.FeedManagementPanel.text034")}</div>
             ) : fixtures.length === 0 ? (
-                <div className={styles.empty}>
-                    フィード施設はまだありません。「施設を追加」から作成できます。
-                </div>
+                <div data-i18n="components.settings.FeedManagementPanel.text035" className={styles.empty}>{uiText("components.settings.FeedManagementPanel.text035")}</div>
             ) : (
                 <div className={styles.list}>
                     {fixtures.map(fixture => (
@@ -363,12 +361,12 @@ export default function FeedManagementPanel() {
                                         {fixture.building_name || fixture.building_id}
                                     </span>
                                 </div>
-                                <button
+                                <button data-i18n="components.settings.FeedManagementPanel.text036 components.settings.FeedManagementPanel.text037"
                                     className={styles.btnSecondary}
                                     onClick={() => toggleItems(fixture.fixture_id)}
                                 >
                                     <Newspaper size={14} />
-                                    {openItemsFixtureId === fixture.fixture_id ? '記事を閉じる' : '記事を読む'}
+                                    {openItemsFixtureId === fixture.fixture_id ? uiText("components.settings.FeedManagementPanel.text036") : uiText("components.settings.FeedManagementPanel.text037")}
                                 </button>
                             </div>
                             {fixture.description && (
@@ -377,7 +375,7 @@ export default function FeedManagementPanel() {
 
                             {/* 購読一覧 */}
                             {fixture.subscriptions.length === 0 ? (
-                                <div className={styles.noSubs}>購読しているフィードはまだありません。</div>
+                                <div data-i18n="components.settings.FeedManagementPanel.text038" className={styles.noSubs}>{uiText("components.settings.FeedManagementPanel.text038")}</div>
                             ) : (
                                 <div className={styles.subList}>
                                     {fixture.subscriptions.map(sub => {
@@ -388,13 +386,11 @@ export default function FeedManagementPanel() {
                                                 className={`${styles.subRow} ${unhealthy ? styles.subRowWarn : ''}`}
                                             >
                                                 <div className={styles.subInfo}>
-                                                    <div className={styles.subTitle}>
-                                                        {sub.title || '(無題のフィード)'}
+                                                    <div data-i18n="components.settings.FeedManagementPanel.text039" className={styles.subTitle}>
+                                                        {sub.title || uiText("components.settings.FeedManagementPanel.text039")}
                                                         {unhealthy && (
-                                                            <span className={styles.warnBadge}>
-                                                                <AlertTriangle size={12} />
-                                                                取得失敗 {sub.consecutive_failures} 回連続
-                                                            </span>
+                                                            <span data-i18n="components.settings.FeedManagementPanel.text040 components.settings.FeedManagementPanel.text041" className={styles.warnBadge}>
+                                                                <AlertTriangle size={12} />{uiText("components.settings.FeedManagementPanel.text040")}{sub.consecutive_failures}{uiText("components.settings.FeedManagementPanel.text041")}</span>
                                                         )}
                                                     </div>
                                                     <div className={styles.subUrl}>{sub.feed_url}</div>
@@ -402,18 +398,16 @@ export default function FeedManagementPanel() {
                                                         <div className={styles.subError}>{sub.last_error}</div>
                                                     )}
                                                     {sub.last_ok_at && (
-                                                        <div className={styles.subMeta}>
-                                                            最終取得成功: {formatDateTime(sub.last_ok_at)}
+                                                        <div data-i18n="components.settings.FeedManagementPanel.text042" className={styles.subMeta}>{uiText("components.settings.FeedManagementPanel.text042")}{formatDateTime(sub.last_ok_at)}
                                                         </div>
                                                     )}
                                                 </div>
-                                                <button
+                                                <button data-i18n="components.settings.FeedManagementPanel.text043 components.settings.FeedManagementPanel.text044"
                                                     className={`${styles.iconBtn} ${styles.deleteBtn}`}
                                                     onClick={() => handleDeleteSubscription(sub)}
-                                                    title="購読を削除"
+                                                    title={uiText("components.settings.FeedManagementPanel.text043")}
                                                 >
-                                                    <Trash2 size={12} /> 削除
-                                                </button>
+                                                    <Trash2 size={12} />{uiText("components.settings.FeedManagementPanel.text044")}</button>
                                             </div>
                                         );
                                     })}
@@ -422,19 +416,19 @@ export default function FeedManagementPanel() {
 
                             {/* 購読追加 */}
                             <div className={styles.addSubRow}>
-                                <input
+                                <input data-i18n="components.settings.FeedManagementPanel.text045"
                                     type="text"
                                     value={urlInputs[fixture.fixture_id] || ''}
                                     onChange={e => setUrlInputs(prev => ({ ...prev, [fixture.fixture_id]: e.target.value }))}
                                     onKeyDown={e => { if (e.key === 'Enter') handleAddSubscription(fixture.fixture_id); }}
-                                    placeholder="サイトの URL を貼るだけで OK (フィードは自動で探します)"
+                                    placeholder={uiText("components.settings.FeedManagementPanel.text045")}
                                 />
-                                <button
+                                <button data-i18n="components.settings.FeedManagementPanel.text046 components.settings.FeedManagementPanel.text047"
                                     className={styles.btnPrimary}
                                     onClick={() => handleAddSubscription(fixture.fixture_id)}
                                     disabled={addingFixtureId === fixture.fixture_id}
                                 >
-                                    {addingFixtureId === fixture.fixture_id ? '確認中...' : '購読を追加'}
+                                    {addingFixtureId === fixture.fixture_id ? uiText("components.settings.FeedManagementPanel.text046") : uiText("components.settings.FeedManagementPanel.text047")}
                                 </button>
                             </div>
                             {subErrors[fixture.fixture_id] && (
@@ -442,9 +436,7 @@ export default function FeedManagementPanel() {
                             )}
                             {(candidates[fixture.fixture_id] || []).length > 0 && (
                                 <div className={styles.candidateBox}>
-                                    <div className={styles.candidateHeader}>
-                                        複数のフィードが見つかりました。購読するものを選んでください:
-                                        <button
+                                    <div data-i18n="components.settings.FeedManagementPanel.text048" className={styles.candidateHeader}>{uiText("components.settings.FeedManagementPanel.text048")}<button
                                             className={styles.iconBtn}
                                             onClick={() => setCandidates(prev => ({ ...prev, [fixture.fixture_id]: [] }))}
                                         >
@@ -458,7 +450,7 @@ export default function FeedManagementPanel() {
                                             onClick={() => postSubscription(fixture.fixture_id, c.url)}
                                             disabled={addingFixtureId === fixture.fixture_id}
                                         >
-                                            <span className={styles.candidateTitle}>{c.title || '(無題)'}</span>
+                                            <span data-i18n="components.settings.FeedManagementPanel.text049" className={styles.candidateTitle}>{c.title || uiText("components.settings.FeedManagementPanel.text049")}</span>
                                             <span className={styles.candidateUrl}>{c.url}</span>
                                         </button>
                                     ))}
@@ -469,31 +461,29 @@ export default function FeedManagementPanel() {
                             {openItemsFixtureId === fixture.fixture_id && (
                                 <div className={styles.itemsBox}>
                                     {itemsLoading ? (
-                                        <div className={styles.empty}>読み込み中...</div>
+                                        <div data-i18n="components.settings.FeedManagementPanel.text050" className={styles.empty}>{uiText("components.settings.FeedManagementPanel.text050")}</div>
                                     ) : items.length === 0 ? (
-                                        <div className={styles.empty}>
-                                            記事はまだ届いていません。「今すぐ取得」を押すと取得できます。
-                                        </div>
+                                        <div data-i18n="components.settings.FeedManagementPanel.text051" className={styles.empty}>{uiText("components.settings.FeedManagementPanel.text051")}</div>
                                     ) : (
                                         items.map((item, idx) => (
                                             <div key={idx} className={styles.itemRow}>
                                                 <div className={styles.itemHeader}>
                                                     {item.link ? (
-                                                        <a
+                                                        <a data-i18n="components.settings.FeedManagementPanel.text052"
                                                             href={item.link}
                                                             target="_blank"
                                                             rel="noopener noreferrer"
                                                             className={styles.itemTitle}
                                                         >
-                                                            {item.title || '(無題の記事)'} <ExternalLink size={12} />
+                                                            {item.title || uiText("components.settings.FeedManagementPanel.text052")} <ExternalLink size={12} />
                                                         </a>
                                                     ) : (
-                                                        <span className={styles.itemTitle}>{item.title || '(無題の記事)'}</span>
+                                                        <span data-i18n="components.settings.FeedManagementPanel.text053" className={styles.itemTitle}>{item.title || uiText("components.settings.FeedManagementPanel.text053")}</span>
                                                     )}
                                                 </div>
-                                                <div className={styles.itemMeta}>
-                                                    {item.subscription_title || '(提供元不明)'}
-                                                    {item.published_at && ` ・ ${formatDateTime(item.published_at)}`}
+                                                <div data-i18n="components.settings.FeedManagementPanel.text054 components.settings.FeedManagementPanel.text055" className={styles.itemMeta}>
+                                                    {item.subscription_title || uiText("components.settings.FeedManagementPanel.text054")}
+                                                    {item.published_at && uiText("components.settings.FeedManagementPanel.text055", { p1: formatDateTime(item.published_at) })}
                                                 </div>
                                                 {item.summary && (
                                                     <div className={styles.itemSummary}>{item.summary}</div>

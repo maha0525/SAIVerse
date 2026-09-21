@@ -1,3 +1,10 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect } from 'react';
 import { X, Calendar, Play, Clock, Repeat, Trash2, Power, Plus, Edit2 } from 'lucide-react';
 import styles from './ScheduleModal.module.css';
@@ -55,6 +62,7 @@ interface ScheduleModalProps {
 }
 
 export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleModalProps) {
+    useLocale();
     const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
     const [loading, setLoading] = useState(false);
 
@@ -115,7 +123,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
     const loadSchedules = async () => {
         setLoading(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/schedules`);
+            const res = await apiFetch(`/api/people/${personaId}/schedules`);
             if (res.ok) {
                 setSchedules(await res.json());
             }
@@ -128,7 +136,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
     const loadSpells = async () => {
         try {
-            const res = await fetch(`/api/people/spells?persona_id=${encodeURIComponent(personaId)}`);
+            const res = await apiFetch(`/api/people/spells?persona_id=${encodeURIComponent(personaId)}`);
             if (res.ok) {
                 const data = await res.json();
                 // run_playbook は「実行する Playbook」ドロップダウンの専用経路で扱うので
@@ -145,7 +153,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
     const loadRouterCallablePlaybooks = async () => {
         try {
-            const res = await fetch('/api/config/playbooks?router_callable=true');
+            const res = await apiFetch('/api/config/playbooks?router_callable=true');
             if (res.ok) {
                 const data = await res.json();
                 if (Array.isArray(data)) {
@@ -162,7 +170,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
     const fetchPlaybookParams = async (playbookName: string) => {
         try {
-            const res = await fetch(`/api/config/playbooks/${encodeURIComponent(playbookName)}/params`);
+            const res = await apiFetch(`/api/config/playbooks/${encodeURIComponent(playbookName)}/params`);
             if (res.ok) {
                 const data = await res.json();
                 setPlaybookParamSpecs(data.params || []);
@@ -283,7 +291,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                 : `/api/people/${personaId}/schedules`;
             const method = isEdit ? 'PUT' : 'POST';
 
-            const res = await fetch(url, {
+            const res = await apiFetch(url, {
                 method,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -302,7 +310,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
     const handleToggle = async (id: number) => {
         try {
-            const res = await fetch(`/api/people/${personaId}/schedules/${id}/toggle`, { method: 'POST' });
+            const res = await apiFetch(`/api/people/${personaId}/schedules/${id}/toggle`, { method: 'POST' });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
                 throw new Error(body.detail || `Toggle failed: ${res.status}`);
@@ -314,9 +322,9 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
     };
 
     const handleDelete = async (id: number) => {
-        if (!confirm('このアラームを削除しますか？')) return;
+        if (!confirm(uiText("components.ScheduleModal.text001"))) return;
         try {
-            const res = await fetch(`/api/people/${personaId}/schedules/${id}`, { method: 'DELETE' });
+            const res = await apiFetch(`/api/people/${personaId}/schedules/${id}`, { method: 'DELETE' });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
                 throw new Error(body.detail || `Delete failed: ${res.status}`);
@@ -329,15 +337,15 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
     const formatDetail = (s: ScheduleItem) => {
         if (s.schedule_type === 'periodic') {
-            const days = ["月", "火", "水", "木", "金", "土", "日"];
-            const ds = s.days_of_week ? s.days_of_week.map(d => days[d]).join(', ') : '毎日';
+            const days = [uiText("components.ScheduleModal.text002"), uiText("components.ScheduleModal.text003"), uiText("components.ScheduleModal.text004"), uiText("components.ScheduleModal.text005"), uiText("components.ScheduleModal.text006"), uiText("components.ScheduleModal.text007"), uiText("components.ScheduleModal.text008")];
+            const ds = s.days_of_week ? s.days_of_week.map(d => days[d]).join(', ') : uiText("components.ScheduleModal.text009");
             return `${ds} @ ${s.time_of_day}`;
         }
         if (s.schedule_type === 'oneshot') {
-            return `${new Date(s.scheduled_datetime || '').toLocaleString()} ${s.completed ? '(完了)' : ''}`;
+            return uiText("components.ScheduleModal.text010", { p1: new Date(s.scheduled_datetime || '').toLocaleString(getFormatLocale()), p2: s.completed ? uiText("common.extra014") : '' });
         }
         if (s.schedule_type === 'interval') {
-            return `${s.interval_seconds}秒ごと`;
+            return uiText("components.ScheduleModal.text011", { p1: s.interval_seconds });
         }
         return '?';
     };
@@ -372,7 +380,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
         <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2 className={styles.title}>アラーム管理: {personaId}</h2>
+                    <h2 data-i18n="components.ScheduleModal.text012" className={styles.title}>{uiText("components.ScheduleModal.text012")}{personaId}</h2>
                     <button className={styles.closeButton} onClick={onClose}><X size={20} /></button>
                 </div>
 
@@ -380,23 +388,23 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                     {/* List Section */}
                     <div className={styles.listSection}>
                         <div className={styles.sectionTitle}>
-                            <span>登録済みアラーム</span>
-                            <button onClick={loadSchedules} style={{ background: 'none', border: 'none', color: '#4dabf7', cursor: 'pointer' }}>更新</button>
+                            <span data-i18n="components.ScheduleModal.text013">{uiText("components.ScheduleModal.text013")}</span>
+                            <button data-i18n="components.ScheduleModal.text014" onClick={loadSchedules} style={{ background: 'none', border: 'none', color: '#4dabf7', cursor: 'pointer' }}>{uiText("components.ScheduleModal.text014")}</button>
                         </div>
                         <div className={styles.tableContainer}>
                             {schedules.length === 0 ? (
-                                <div className={styles.emptyState}>アラームがありません</div>
+                                <div data-i18n="components.ScheduleModal.text015" className={styles.emptyState}>{uiText("components.ScheduleModal.text015")}</div>
                             ) : (
                                 <table className={styles.table}>
                                     <thead>
                                         <tr>
-                                            <th>種別</th>
-                                            <th>Playbook</th>
-                                            <th>説明</th>
-                                            <th>詳細</th>
-                                            <th>パラメータ</th>
-                                            <th>状態</th>
-                                            <th>操作</th>
+                                            <th data-i18n="components.ScheduleModal.text016">{uiText("components.ScheduleModal.text016")}</th>
+                                            <th>{uiText("components.ScheduleModal.label001")}</th>
+                                            <th data-i18n="components.ScheduleModal.text017">{uiText("components.ScheduleModal.text017")}</th>
+                                            <th data-i18n="components.ScheduleModal.text018">{uiText("components.ScheduleModal.text018")}</th>
+                                            <th data-i18n="components.ScheduleModal.text019">{uiText("components.ScheduleModal.text019")}</th>
+                                            <th data-i18n="components.ScheduleModal.text020">{uiText("components.ScheduleModal.text020")}</th>
+                                            <th data-i18n="components.ScheduleModal.text021">{uiText("components.ScheduleModal.text021")}</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -410,19 +418,19 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                                     {formatPlaybookArgs(s.args)}
                                                 </td>
                                                 <td>
-                                                    <span className={s.enabled ? styles.enabled : styles.disabled}>
-                                                        {s.enabled ? '有効' : '無効'}
+                                                    <span data-i18n="components.ScheduleModal.text022 components.ScheduleModal.text023" className={s.enabled ? styles.enabled : styles.disabled}>
+                                                        {s.enabled ? uiText("components.ScheduleModal.text022") : uiText("components.ScheduleModal.text023")}
                                                     </span>
                                                 </td>
                                                 <td>
                                                     <div className={styles.actions}>
-                                                        <button className={`${styles.actionBtn} ${styles.editBtn}`} onClick={() => handleEdit(s)} title="編集">
+                                                        <button data-i18n="components.ScheduleModal.text024" className={`${styles.actionBtn} ${styles.editBtn}`} onClick={() => handleEdit(s)} title={uiText("components.ScheduleModal.text024")}>
                                                             <Edit2 size={14} />
                                                         </button>
-                                                        <button className={`${styles.actionBtn} ${styles.toggleBtn}`} onClick={() => handleToggle(s.schedule_id)} title="切替">
+                                                        <button data-i18n="components.ScheduleModal.text025" className={`${styles.actionBtn} ${styles.toggleBtn}`} onClick={() => handleToggle(s.schedule_id)} title={uiText("components.ScheduleModal.text025")}>
                                                             <Power size={14} />
                                                         </button>
-                                                        <button className={`${styles.actionBtn} ${styles.deleteBtn}`} onClick={() => handleDelete(s.schedule_id)} title="削除">
+                                                        <button data-i18n="components.ScheduleModal.text026" className={`${styles.actionBtn} ${styles.deleteBtn}`} onClick={() => handleDelete(s.schedule_id)} title={uiText("components.ScheduleModal.text026")}>
                                                             <Trash2 size={14} />
                                                         </button>
                                                     </div>
@@ -437,51 +445,49 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
                     {/* Form Section */}
                     <div className={styles.formSection}>
-                        <div className={styles.sectionTitle}>
-                            {editingId !== null ? 'アラームを編集' : '新規アラーム追加'}
+                        <div data-i18n="components.ScheduleModal.text027 components.ScheduleModal.text028" className={styles.sectionTitle}>
+                            {editingId !== null ? uiText("components.ScheduleModal.text027") : uiText("components.ScheduleModal.text028")}
                             {editingId !== null && (
-                                <button
+                                <button data-i18n="components.ScheduleModal.text029"
                                     onClick={resetForm}
                                     style={{ marginLeft: '10px', background: 'none', border: 'none', color: '#868e96', cursor: 'pointer', fontSize: '0.9em' }}
-                                >
-                                    (キャンセル)
-                                </button>
+                                >{uiText("components.ScheduleModal.text029")}</button>
                             )}
                         </div>
                         <div className={styles.formGrid}>
                             <div className={styles.formGroup}>
-                                <label className={styles.label}>アラーム種別</label>
+                                <label data-i18n="components.ScheduleModal.text030" className={styles.label}>{uiText("components.ScheduleModal.text030")}</label>
                                 <select
                                     className={styles.select}
                                     value={formType}
                                     onChange={e => setFormType(e.target.value as any)}
                                 >
-                                    <option value="periodic">定期（週次）</option>
-                                    <option value="oneshot">単発（1回のみ）</option>
-                                    <option value="interval">インターバル（繰り返し）</option>
+                                    <option data-i18n="components.ScheduleModal.text031" value="periodic">{uiText("components.ScheduleModal.text031")}</option>
+                                    <option data-i18n="components.ScheduleModal.text032" value="oneshot">{uiText("components.ScheduleModal.text032")}</option>
+                                    <option data-i18n="components.ScheduleModal.text033" value="interval">{uiText("components.ScheduleModal.text033")}</option>
                                 </select>
                             </div>
 
                             <div className={styles.formGroup} style={{ gridColumn: '1 / -1' }}>
-                                <label className={styles.label}>説明</label>
-                                <input
+                                <label data-i18n="components.ScheduleModal.text034" className={styles.label}>{uiText("components.ScheduleModal.text034")}</label>
+                                <input data-i18n="components.ScheduleModal.text035"
                                     className={styles.input}
                                     value={formDesc}
                                     onChange={e => setFormDesc(e.target.value)}
-                                    placeholder="タスクの説明..."
+                                    placeholder={uiText("components.ScheduleModal.text035")}
                                 />
                             </div>
 
                             {/* Playbook Parameters Section */}
                             {playbookParamSpecs.length > 0 && (
                                 <div className={styles.formGroup} style={{ gridColumn: '1 / -1' }}>
-                                    <label className={styles.label}>Playbook パラメータ</label>
+                                    <label data-i18n="components.ScheduleModal.text036" className={styles.label}>{uiText("components.ScheduleModal.text036")}</label>
                                     <div className={styles.paramGrid}>
                                         {playbookParamSpecs.map(param => (
                                             <div key={param.name} className={styles.paramItem}>
                                                 <label className={styles.paramLabel}>
                                                     {param.description || param.name}
-                                                    {!param.required && <span style={{ fontSize: '0.8em', color: '#888' }}> （任意）</span>}
+                                                    {!param.required && <span data-i18n="components.ScheduleModal.text037" style={{ fontSize: '0.8em', color: '#888' }}>{uiText("components.ScheduleModal.text037")}</span>}
                                                 </label>
 
                                                 {param.resolved_options && param.resolved_options.length > 0 ? (
@@ -490,7 +496,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                                         value={formPlaybookArgs[param.name] ?? param.default ?? ''}
                                                         onChange={e => handlePlaybookParamChange(param.name, e.target.value || null)}
                                                     >
-                                                        <option value="">{param.required ? '（選択...）' : '（自動）'}</option>
+                                                        <option data-i18n="components.ScheduleModal.text038 components.ScheduleModal.text039" value="">{param.required ? uiText("components.ScheduleModal.text038") : uiText("components.ScheduleModal.text039")}</option>
                                                         {param.resolved_options.map(opt => (
                                                             <option key={opt.value} value={opt.value}>{opt.label}</option>
                                                         ))}
@@ -525,18 +531,14 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
                             {/* Run-playbook (optional) */}
                             <div className={styles.formGroup} style={{ gridColumn: '1 / -1' }}>
-                                <label className={styles.label}>
-                                    実行する Playbook
-                                    <span style={{ fontSize: '0.8em', color: '#888', marginLeft: '8px' }}>
-                                        （指定すると Pulse 開始前に run_playbook で起動。引数はその Playbook 内で決定）
-                                    </span>
+                                <label data-i18n="components.ScheduleModal.text040" className={styles.label}>{uiText("components.ScheduleModal.text040")}<span data-i18n="components.ScheduleModal.text041" style={{ fontSize: '0.8em', color: '#888', marginLeft: '8px' }}>{uiText("components.ScheduleModal.text041")}</span>
                                 </label>
                                 <select
                                     className={styles.select}
                                     value={formSelectedRunPlaybook}
                                     onChange={e => setFormSelectedRunPlaybook(e.target.value)}
                                 >
-                                    <option value="">（指定しない）</option>
+                                    <option data-i18n="components.ScheduleModal.text042" value="">{uiText("components.ScheduleModal.text042")}</option>
                                     {routerCallablePlaybooks.map(p => (
                                         <option key={p.id} value={p.id}>{p.name}</option>
                                     ))}
@@ -545,16 +547,10 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
                             {/* Pre-spells (UI-selectable) */}
                             <div className={styles.formGroup} style={{ gridColumn: '1 / -1' }}>
-                                <label className={styles.label}>
-                                    使用するスペル
-                                    <span style={{ fontSize: '0.8em', color: '#888', marginLeft: '8px' }}>
-                                        （選択すると Pulse 開始前に実行されます。引数はペルソナが状況から決定）
-                                    </span>
+                                <label data-i18n="components.ScheduleModal.text043" className={styles.label}>{uiText("components.ScheduleModal.text043")}<span data-i18n="components.ScheduleModal.text044" style={{ fontSize: '0.8em', color: '#888', marginLeft: '8px' }}>{uiText("components.ScheduleModal.text044")}</span>
                                 </label>
                                 {availableSpells.length === 0 ? (
-                                    <div style={{ fontSize: '0.85em', color: '#888' }}>
-                                        利用可能なスペルがありません
-                                    </div>
+                                    <div data-i18n="components.ScheduleModal.text045" style={{ fontSize: '0.85em', color: '#888' }}>{uiText("components.ScheduleModal.text045")}</div>
                                 ) : (
                                     <div className={styles.checkboxGroup} style={{ flexWrap: 'wrap' }}>
                                         {availableSpells.map(spell => (
@@ -590,9 +586,9 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                             {formType === 'periodic' && (
                                 <>
                                     <div className={styles.formGroup} style={{ gridColumn: '1 / -1' }}>
-                                        <label className={styles.label}>曜日</label>
-                                        <div className={styles.checkboxGroup}>
-                                            {["月", "火", "水", "木", "金", "土", "日"].map((day, idx) => (
+                                        <label data-i18n="components.ScheduleModal.text046" className={styles.label}>{uiText("components.ScheduleModal.text046")}</label>
+                                        <div data-i18n="components.ScheduleModal.text047 components.ScheduleModal.text048 components.ScheduleModal.text049 components.ScheduleModal.text050 components.ScheduleModal.text051 components.ScheduleModal.text052 components.ScheduleModal.text053" className={styles.checkboxGroup}>
+                                            {[uiText("components.ScheduleModal.text047"), uiText("components.ScheduleModal.text048"), uiText("components.ScheduleModal.text049"), uiText("components.ScheduleModal.text050"), uiText("components.ScheduleModal.text051"), uiText("components.ScheduleModal.text052"), uiText("components.ScheduleModal.text053")].map((day, idx) => (
                                                 <label key={day} className={styles.checkboxLabel}>
                                                     <input
                                                         type="checkbox"
@@ -608,7 +604,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                         </div>
                                     </div>
                                     <div className={styles.formGroup}>
-                                        <label className={styles.label}>時刻 (HH:MM)</label>
+                                        <label data-i18n="components.ScheduleModal.text054" className={styles.label}>{uiText("components.ScheduleModal.text054")}</label>
                                         <input
                                             className={styles.input}
                                             value={formTime}
@@ -621,7 +617,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
                             {formType === 'oneshot' && (
                                 <div className={styles.formGroup}>
-                                    <label className={styles.label}>日時 (YYYY-MM-DD HH:MM)</label>
+                                    <label data-i18n="components.ScheduleModal.text055" className={styles.label}>{uiText("components.ScheduleModal.text055")}</label>
                                     <input
                                         className={styles.input}
                                         value={formDateTime}
@@ -633,7 +629,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
                             {formType === 'interval' && (
                                 <div className={styles.formGroup}>
-                                    <label className={styles.label}>インターバル（秒）</label>
+                                    <label data-i18n="components.ScheduleModal.text056" className={styles.label}>{uiText("components.ScheduleModal.text056")}</label>
                                     <input
                                         className={styles.input}
                                         type="number"
@@ -644,7 +640,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                             )}
 
                             <div className={styles.formGroup}>
-                                <label className={styles.label}>優先度</label>
+                                <label data-i18n="components.ScheduleModal.text057" className={styles.label}>{uiText("components.ScheduleModal.text057")}</label>
                                 <input
                                     className={styles.input}
                                     type="number"
@@ -654,8 +650,8 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                             </div>
                         </div>
 
-                        <button className={styles.submitBtn} onClick={handleSave}>
-                            {editingId !== null ? 'アラームを更新' : 'アラームを追加'}
+                        <button data-i18n="components.ScheduleModal.text058 components.ScheduleModal.text059" className={styles.submitBtn} onClick={handleSave}>
+                            {editingId !== null ? uiText("components.ScheduleModal.text058") : uiText("components.ScheduleModal.text059")}
                         </button>
                     </div>
                 </div>

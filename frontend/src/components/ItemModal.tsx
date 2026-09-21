@@ -1,3 +1,6 @@
+import { apiFetch } from '@/i18n/api';
+import { getFormatLocale, t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import { useState, useEffect, useCallback } from 'react';
 import { X, FileText, Code2, Pencil, Save, XCircle, Settings, ArrowRightLeft, Package, PackagePlus, PackageOpen, Check, Square, Image as ImageIcon, File } from 'lucide-react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
@@ -73,6 +76,7 @@ interface ItemModalProps {
 }
 
 export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorldChanged, currentBuildingId }: ItemModalProps) {
+    useLocale();
     const [content, setContent] = useState<string | null>(null);
     const [editContent, setEditContent] = useState<string>('');
     const [isLoading, setIsLoading] = useState(false);
@@ -117,7 +121,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
         if (buildings.length > 0) return; // Already loaded
         setIsLoadingBuildings(true);
         try {
-            const res = await fetch('/api/user/buildings');
+            const res = await apiFetch('/api/user/buildings');
             if (res.ok) {
                 const data = await res.json();
                 setBuildings(data.buildings || []);
@@ -132,7 +136,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
     // Load item details for meta editing
     const loadItemDetails = useCallback(async (itemId: string) => {
         try {
-            const res = await fetch(`/api/world/items/${itemId}`);
+            const res = await apiFetch(`/api/world/items/${itemId}`);
             if (res.ok) {
                 const data: ItemDetails = await res.json();
                 setItemDetails(data);
@@ -150,13 +154,13 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
     const loadBagContents = useCallback(async (itemId: string) => {
         setIsLoadingBagContents(true);
         try {
-            const res = await fetch(`/api/info/item/${itemId}/bag-contents`);
+            const res = await apiFetch(`/api/info/item/${itemId}/bag-contents`);
             if (!res.ok) throw new Error('Failed to load bag contents');
             const data = await res.json();
             setBagContents(data.items || []);
         } catch (err) {
             console.error(err);
-            setError('バッグの中身の読み込みに失敗しました');
+            setError(uiText("components.ItemModal.text002"));
         } finally {
             setIsLoadingBagContents(false);
         }
@@ -168,7 +172,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
             setError(null);
             setIsEditing(false);
             setIsMetaEditing(false);
-            fetch(`/api/info/item/${item.id}`)
+            apiFetch(`/api/info/item/${item.id}`)
                 .then(async res => {
                     if (!res.ok) throw new Error("Failed to load content");
                     const data = await res.json();
@@ -177,7 +181,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                 })
                 .catch(err => {
                     console.error(err);
-                    setError("コンテンツの読み込みに失敗しました");
+                    setError(uiText("components.ItemModal.text001"));
                 })
                 .finally(() => setIsLoading(false));
         } else if (isOpen && item && item.type === 'bag') {
@@ -225,7 +229,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
         setError(null);
 
         try {
-            const res = await fetch(`/api/info/item/${item.id}/content`, {
+            const res = await apiFetch(`/api/info/item/${item.id}/content`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ content: editContent })
@@ -240,7 +244,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
             setIsEditing(false);
         } catch (err) {
             console.error(err);
-            setError(err instanceof Error ? err.message : "保存に失敗しました");
+            setError(err instanceof Error ? err.message : uiText("components.ItemModal.text003"));
         } finally {
             setIsSaving(false);
         }
@@ -255,7 +259,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
             return;
         }
         try {
-            const res = await fetch(`/api/info/details?building_id=${encodeURIComponent(currentBuildingId)}`);
+            const res = await apiFetch(`/api/info/details?building_id=${encodeURIComponent(currentBuildingId)}`);
             if (res.ok) {
                 const data = await res.json();
                 const bags = (data.items || []).filter(
@@ -296,7 +300,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
         setError(null);
 
         try {
-            const res = await fetch(`/api/world/items/${item.id}`, {
+            const res = await apiFetch(`/api/world/items/${item.id}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -331,7 +335,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
             }
         } catch (err) {
             console.error(err);
-            setError(err instanceof Error ? err.message : "保存に失敗しました");
+            setError(err instanceof Error ? err.message : uiText("components.ItemModal.text004"));
         } finally {
             setIsSavingMeta(false);
         }
@@ -354,7 +358,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
         } catch (err) {
             console.error('Failed to load room items:', err);
             setRoomItems([]);
-            setBulkError('部屋のアイテム一覧の取得に失敗しました');
+            setBulkError(uiText("components.ItemModal.text026"));
         } finally {
             setIsLoadingRoomItems(false);
         }
@@ -412,7 +416,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
             try {
                 // 他のフィールドを保つため、いまの値を取ってから置き場所だけ差し替える
                 const getRes = await fetch(`/api/world/items/${id}`);
-                if (!getRes.ok) throw new Error(`アイテム情報を取得できませんでした (HTTP ${getRes.status})`);
+                if (!getRes.ok) throw new Error(uiText("components.ItemModal.text027", { p1: getRes.status }));
                 const current: ItemDetails = await getRes.json();
 
                 const putRes = await fetch(`/api/world/items/${id}`, {
@@ -441,7 +445,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                 moved += 1;
             } catch (err) {
                 const reason = err instanceof Error ? err.message : String(err);
-                failureMessage = `${moved}個まで完了したところで「${nameOf(id)}」の移動に失敗しました: ${reason}`;
+                failureMessage = uiText("components.ItemModal.text028", { p1: moved, p2: nameOf(id), p3: reason });
                 break;
             }
         }
@@ -500,10 +504,10 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                     <h2>{displayName}</h2>
                     <div className={styles.headerActions}>
                         {!isMetaEditing && (
-                            <button
+                            <button data-i18n="components.ItemModal.text005"
                                 className={styles.metaEditBtn}
                                 onClick={handleStartMetaEdit}
-                                title="メタ情報を編集"
+                                title={uiText("components.ItemModal.text005")}
                             >
                                 <Settings size={20} />
                             </button>
@@ -518,7 +522,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                     <div className={styles.metaEditSection}>
                         <div className={styles.metaEditForm}>
                             <div className={styles.formGroup}>
-                                <label htmlFor="itemName">アイテム名</label>
+                                <label data-i18n="components.ItemModal.text006" htmlFor="itemName">{uiText("components.ItemModal.text006")}</label>
                                 <input
                                     id="itemName"
                                     type="text"
@@ -529,7 +533,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                 />
                             </div>
                             <div className={styles.formGroup}>
-                                <label htmlFor="itemDescription">説明</label>
+                                <label data-i18n="components.ItemModal.text007" htmlFor="itemDescription">{uiText("components.ItemModal.text007")}</label>
                                 <textarea
                                     id="itemDescription"
                                     value={editDescription}
@@ -540,10 +544,8 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                 />
                             </div>
                             <div className={styles.formGroup}>
-                                <label htmlFor="itemLocation">
-                                    <ArrowRightLeft size={16} style={{ marginRight: 6, verticalAlign: 'middle' }} />
-                                    配置場所
-                                </label>
+                                <label data-i18n="components.ItemModal.text008" htmlFor="itemLocation">
+                                    <ArrowRightLeft size={16} style={{ marginRight: 6, verticalAlign: 'middle' }} />{uiText("components.ItemModal.text008")}</label>
                                 <select
                                     id="itemLocation"
                                     value={editOwnerKind === 'bag' ? `bag:${editOwnerId}` : editOwnerKind === 'building' ? editOwnerId : 'world'}
@@ -563,14 +565,14 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                     className={styles.select}
                                     disabled={isSavingMeta || isLoadingBuildings}
                                 >
-                                    <option value="world">ワールド（どこにも配置しない）</option>
-                                    <optgroup label="Building">
+                                    <option data-i18n="components.ItemModal.text009" value="world">{uiText("components.ItemModal.text009")}</option>
+                                    <optgroup label={uiText("components.ItemModal.label001")}>
                                         {buildings.map(b => (
                                             <option key={b.id} value={b.id}>{b.name}</option>
                                         ))}
                                     </optgroup>
                                     {bagItems.length > 0 && (
-                                        <optgroup label="Bag">
+                                        <optgroup label={uiText("components.ItemModal.label002")}>
                                             {bagItems.map(b => (
                                                 <option key={b.id} value={`bag:${b.id}`}>📦 {b.name}</option>
                                             ))}
@@ -585,7 +587,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                     disabled={isSavingMeta}
                                 >
                                     <Save size={16} />
-                                    <span>{isSavingMeta ? '保存中...' : '保存'}</span>
+                                    <span data-i18n="components.ItemModal.text010 components.ItemModal.text011">{isSavingMeta ? uiText("components.ItemModal.text010") : uiText("components.ItemModal.text011")}</span>
                                 </button>
                                 <button
                                     className={`${styles.toggleBtn} ${styles.cancelBtn}`}
@@ -593,7 +595,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                     disabled={isSavingMeta}
                                 >
                                     <XCircle size={16} />
-                                    <span>キャンセル</span>
+                                    <span data-i18n="components.ItemModal.text012">{uiText("components.ItemModal.text012")}</span>
                                 </button>
                             </div>
                         </div>
@@ -603,7 +605,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                     <>
                         <div className={styles.meta}>
                             <span className={styles.badge}>{item.type}</span>
-                            <span className={styles.id}>ID: <code>{item.id}</code></span>
+                            <span className={styles.id}>{uiText("components.ItemModal.label003")}<code>{item.id}</code></span>
                             {itemDetails && itemDetails.OWNER_KIND === 'building' && (
                                 <span className={styles.location}>
                                     <ArrowRightLeft size={14} style={{ marginRight: 4 }} />
@@ -612,7 +614,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                             )}
                             {itemDetails?.CREATED_AT && (
                                 <span className={styles.createdAt}>
-                                    {new Date(itemDetails.CREATED_AT).toLocaleString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                                    {new Date(itemDetails.CREATED_AT).toLocaleString(getFormatLocale(), { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
                                 </span>
                             )}
                         </div>
@@ -638,61 +640,61 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                         <div className={styles.documentContainer}>
                             <div className={styles.documentHeader}>
                                 <div className={styles.viewToggle}>
-                                    <button
+                                    <button data-i18n="components.ItemModal.text013"
                                         className={`${styles.toggleBtn} ${isMarkdown && !isEditing ? styles.active : ''}`}
                                         onClick={() => { setIsMarkdown(true); setIsEditing(false); }}
-                                        title="マークダウン表示"
+                                        title={uiText("components.ItemModal.text013")}
                                         disabled={isEditing}
                                     >
                                         <FileText size={16} />
-                                        <span>Markdown</span>
+                                        <span>{uiText("components.ItemModal.label004")}</span>
                                     </button>
-                                    <button
+                                    <button data-i18n="components.ItemModal.text014"
                                         className={`${styles.toggleBtn} ${!isMarkdown && !isEditing ? styles.active : ''}`}
                                         onClick={() => { setIsMarkdown(false); setIsEditing(false); }}
-                                        title="プレーンテキスト表示"
+                                        title={uiText("components.ItemModal.text014")}
                                         disabled={isEditing}
                                     >
                                         <Code2 size={16} />
-                                        <span>Plain</span>
+                                        <span>{uiText("components.ItemModal.label005")}</span>
                                     </button>
                                 </div>
                                 <div className={styles.editActions}>
                                     {!isEditing ? (
-                                        <button
+                                        <button data-i18n="components.ItemModal.text015"
                                             className={`${styles.toggleBtn} ${styles.editBtn}`}
                                             onClick={handleStartEdit}
-                                            title="編集"
+                                            title={uiText("components.ItemModal.text015")}
                                             disabled={!content || isLoading}
                                         >
                                             <Pencil size={16} />
-                                            <span>Edit</span>
+                                            <span>{uiText("components.ItemModal.label006")}</span>
                                         </button>
                                     ) : (
                                         <>
-                                            <button
+                                            <button data-i18n="components.ItemModal.text016"
                                                 className={`${styles.toggleBtn} ${styles.saveBtn}`}
                                                 onClick={handleSave}
-                                                title="保存"
+                                                title={uiText("components.ItemModal.text016")}
                                                 disabled={isSaving}
                                             >
                                                 <Save size={16} />
-                                                <span>{isSaving ? '保存中...' : 'Save'}</span>
+                                                <span data-i18n="components.ItemModal.text017">{isSaving ? uiText("components.ItemModal.text017") : 'Save'}</span>
                                             </button>
-                                            <button
+                                            <button data-i18n="components.ItemModal.text018"
                                                 className={`${styles.toggleBtn} ${styles.cancelBtn}`}
                                                 onClick={handleCancelEdit}
-                                                title="キャンセル"
+                                                title={uiText("components.ItemModal.text018")}
                                                 disabled={isSaving}
                                             >
                                                 <XCircle size={16} />
-                                                <span>Cancel</span>
+                                                <span>{uiText("components.ItemModal.label007")}</span>
                                             </button>
                                         </>
                                     )}
                                 </div>
                             </div>
-                            {isLoading && <div className={styles.loading}>読み込み中...</div>}
+                            {isLoading && <div data-i18n="components.ItemModal.text019" className={styles.loading}>{uiText("components.ItemModal.text019")}</div>}
                             {error && <div className={styles.error}>{error}</div>}
                             {content !== null && !isLoading && (
                                 isEditing ? (
@@ -721,25 +723,21 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                         </div>
                     ) : item.type === 'audio' ? (
                         <div className={styles.imageContainer}>
-                            <audio
+                            <audio data-i18n="components.ItemModal.text020"
                                 controls
                                 preload="metadata"
                                 src={`/api/info/item/${item.id}`}
                                 style={{ width: '100%' }}
-                            >
-                                お使いのブラウザは audio タグをサポートしていません。
-                            </audio>
+                            >{uiText("components.ItemModal.text020")}</audio>
                         </div>
                     ) : item.type === 'video' ? (
                         <div className={styles.imageContainer}>
-                            <video
+                            <video data-i18n="components.ItemModal.text021"
                                 controls
                                 preload="metadata"
                                 src={`/api/info/item/${item.id}`}
                                 style={{ width: '100%', maxHeight: '70vh' }}
-                            >
-                                お使いのブラウザは video タグをサポートしていません。
-                            </video>
+                            >{uiText("components.ItemModal.text021")}</video>
                         </div>
                     ) : item.type === 'bag' ? (
                         <div className={styles.bagContainer}>
@@ -755,7 +753,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                                 disabled={isLoadingBagContents}
                                             >
                                                 <PackagePlus size={16} />
-                                                <span>部屋のアイテムをしまう</span>
+                                                <span data-i18n="components.ItemModal.text029">{uiText("components.ItemModal.text029")}</span>
                                             </button>
                                         )}
                                         {takeoutBuildingId && bagContents.length > 0 && (
@@ -765,7 +763,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                                 disabled={isLoadingBagContents}
                                             >
                                                 <PackageOpen size={16} />
-                                                <span>部屋に出す</span>
+                                                <span data-i18n="components.ItemModal.text030">{uiText("components.ItemModal.text030")}</span>
                                             </button>
                                         )}
                                     </>
@@ -777,12 +775,12 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                             disabled={isBulkRunning || selectedIds.size === 0}
                                         >
                                             {bulkMode === 'stow' ? <PackagePlus size={16} /> : <PackageOpen size={16} />}
-                                            <span>
+                                            <span data-i18n="components.ItemModal.text031 components.ItemModal.text032 components.ItemModal.text033">
                                                 {isBulkRunning
-                                                    ? '実行中...'
+                                                    ? uiText("components.ItemModal.text031")
                                                     : bulkMode === 'stow'
-                                                        ? `しまう (${selectedIds.size}個)`
-                                                        : `部屋に出す (${selectedIds.size}個)`}
+                                                        ? uiText("components.ItemModal.text032", { p1: selectedIds.size })
+                                                        : uiText("components.ItemModal.text033", { p1: selectedIds.size })}
                                             </span>
                                         </button>
                                         <button
@@ -791,7 +789,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                             disabled={isBulkRunning}
                                         >
                                             <XCircle size={16} />
-                                            <span>キャンセル</span>
+                                            <span data-i18n="components.ItemModal.text034">{uiText("components.ItemModal.text034")}</span>
                                         </button>
                                     </>
                                 )}
@@ -799,7 +797,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                             {bulkError && <div className={styles.error}>{bulkError}</div>}
                             {bulkMode === 'stow' ? (
                                 <>
-                                    {isLoadingRoomItems && <div className={styles.loading}>読み込み中...</div>}
+                                    {isLoadingRoomItems && <div data-i18n="components.ItemModal.text035" className={styles.loading}>{uiText("components.ItemModal.text035")}</div>}
                                     {!isLoadingRoomItems && (
                                         roomItems.length > 0 ? (
                                             <div className={styles.bagGrid}>
@@ -852,13 +850,13 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                                 })}
                                             </div>
                                         ) : (
-                                            <div className={styles.bagEmpty}>この部屋にしまえるアイテムはありません</div>
+                                            <div data-i18n="components.ItemModal.text036" className={styles.bagEmpty}>{uiText("components.ItemModal.text036")}</div>
                                         )
                                     )}
                                 </>
                             ) : (
                                 <>
-                                    {isLoadingBagContents && <div className={styles.loading}>読み込み中...</div>}
+                                    {isLoadingBagContents && <div data-i18n="components.ItemModal.text022" className={styles.loading}>{uiText("components.ItemModal.text022")}</div>}
                                     {error && <div className={styles.error}>{error}</div>}
                                     {!isLoadingBagContents && (
                                         bagContents.length > 0 ? (
@@ -912,16 +910,14 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                                 })}
                                             </div>
                                         ) : (
-                                            <div className={styles.bagEmpty}>バッグは空です</div>
+                                            <div data-i18n="components.ItemModal.text023" className={styles.bagEmpty}>{uiText("components.ItemModal.text023")}</div>
                                         )
                                     )}
                                 </>
                             )}
                         </div>
                     ) : (
-                        <div className={styles.unsupported}>
-                            このアイテムタイプ ({item.type}) の表示はサポートされていません。
-                        </div>
+                        <div data-i18n="components.ItemModal.text024 components.ItemModal.text025" className={styles.unsupported}>{uiText("components.ItemModal.text024")}{item.type}{uiText("components.ItemModal.text025")}</div>
                     )}
                 </div>
 

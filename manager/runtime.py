@@ -964,19 +964,6 @@ class RuntimeService(
     # 設計: docs/issues/user_utterance_path_failure_inventory.md
     # ------------------------------------------------------------------
 
-    #: 中断された発言の続きを頼むとき、プロンプトの入力欄に載せる文。
-    #:
-    #: ``<system>`` で包むのは「これは機構の言葉であって、ユーザーの発言では
-    #: ない」という印。ユーザー名義のテキストを機構が作らないことは SAIVerse の
-    #: 一線なので、入力欄の席を借りるときは必ずこの形にする (建物ログの取り込みが
-    #: システム通知に使っている包みと同じ)。この文は永続化されない — ユーザー
-    #: レーンの ``user_input`` はプロンプトへ渡るだけで、記憶には残らない。
-    CONTINUE_INSTRUCTION = (
-        "<system>あなたの直前の発言は、途中で途切れたまま終わっています。"
-        "その続きを、前の発言にそのままつながる形で話してください。"
-        "言い直しや要約はせず、続きだけを述べてください。</system>"
-    )
-
     def _find_building_message(
         self, building_id: str, message_id: str,
     ) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -1213,8 +1200,11 @@ class RuntimeService(
             )
 
         spoke: Dict[str, bool] = {"value": False}
+        # 入力は空で良い。会話用 Playbook の LLM ノードは user_input を読まず、
+        # 中断の文脈は建物ログの通告「(ここで発言が中断されました)」が担う
+        # (docs/issues/archive/continue_instruction_is_dead_code.md)。
         yield from self._stream_persona_pulse(
-            building_id, persona, self.CONTINUE_INSTRUCTION, spoke=spoke,
+            building_id, persona, "", spoke=spoke,
             on_saved=_clear_interrupted_mark,
         )
         # 保存の信号が来なかった回は印が残る (ボタンが出続ける側)。続きが

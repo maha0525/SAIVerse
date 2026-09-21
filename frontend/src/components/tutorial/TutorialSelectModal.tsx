@@ -1,4 +1,7 @@
 "use client";
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useState } from 'react';
 import { X, Play, Key, Cpu, User, HelpCircle } from 'lucide-react';
@@ -22,35 +25,36 @@ interface TutorialOption {
 const TUTORIAL_OPTIONS: TutorialOption[] = [
     {
         id: 'full',
-        title: '最初からセットアップ',
-        description: 'SAIVerseの基本設定を最初から行います',
+        get title() { return uiText("components.tutorial.TutorialSelectModal.text001"); },
+        get description() { return uiText("components.tutorial.TutorialSelectModal.text002"); },
         icon: <Play size={24} />,
         startStep: 1
     },
     {
         id: 'persona',
-        title: 'ペルソナ作成',
-        description: '新しいペルソナを作成します',
+        get title() { return uiText("components.tutorial.TutorialSelectModal.text003"); },
+        get description() { return uiText("components.tutorial.TutorialSelectModal.text004"); },
         icon: <User size={24} />,
         startStep: 4
     },
     {
         id: 'api_keys',
-        title: 'APIキー設定',
-        description: 'LLMプロバイダーのAPIキーを設定します',
+        get title() { return uiText("components.tutorial.TutorialSelectModal.text005"); },
+        get description() { return uiText("components.tutorial.TutorialSelectModal.text006"); },
         icon: <Key size={24} />,
         startStep: 5
     },
     {
         id: 'models',
-        title: 'モデル設定',
-        description: 'モデルロールの確認・変更を行います',
+        get title() { return uiText("components.tutorial.TutorialSelectModal.text007"); },
+        get description() { return uiText("components.tutorial.TutorialSelectModal.text008"); },
         icon: <Cpu size={24} />,
         startStep: 6
     }
 ];
 
 export default function TutorialSelectModal({ isOpen, onClose }: TutorialSelectModalProps) {
+    useLocale();
     const [selectedOption, setSelectedOption] = useState<TutorialOption | null>(null);
     const [isTutorialWizardOpen, setIsTutorialWizardOpen] = useState(false);
 
@@ -75,7 +79,7 @@ export default function TutorialSelectModal({ isOpen, onClose }: TutorialSelectM
                         <div className={styles.header}>
                             <div className={styles.headerTitle}>
                                 <HelpCircle size={24} />
-                                <h2>チュートリアル</h2>
+                                <h2 data-i18n="components.tutorial.TutorialSelectModal.text009">{uiText("components.tutorial.TutorialSelectModal.text009")}</h2>
                             </div>
                             <button className={styles.closeButton} onClick={onClose}>
                                 <X size={20} />
@@ -83,9 +87,7 @@ export default function TutorialSelectModal({ isOpen, onClose }: TutorialSelectM
                         </div>
 
                         <div className={styles.content}>
-                            <p className={styles.description}>
-                                実行したいチュートリアルを選択してください
-                            </p>
+                            <p data-i18n="components.tutorial.TutorialSelectModal.text010" className={styles.description}>{uiText("components.tutorial.TutorialSelectModal.text010")}</p>
 
                             <div className={styles.optionList}>
                                 {TUTORIAL_OPTIONS.map((option) => (

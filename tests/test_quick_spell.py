@@ -64,6 +64,14 @@ class ScriptedClient:
     def consume_usage(self):
         return None
 
+    # スペルループは周ごとに思考も回収する (破壊的読み取り)。思考を返さない
+    # モデルの回を模す。
+    def consume_reasoning(self):
+        return []
+
+    def consume_reasoning_details(self):
+        return None
+
 
 def _run_loop(text: str, client: ScriptedClient, fake_spell, messages: Optional[list] = None):
     runtime = SpellLoopRuntime()

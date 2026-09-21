@@ -16,7 +16,7 @@ parent=root_chronicle。parent_id=X (Lv2+ に統合済み) → ページの pare
 【互換 VIEW】このコードベースには sea/auto_recall.py・
 sea/head_pipeline/sections/chronicle_index.py・sea/session_lifecycle.py・
 sai_memory/unified_recall.py・sai_memory/arasuji/estimate.py・
-api/routes/people/arasuji.py・tools/utilities/memory_settings_ui.py・
+api/routes/people/arasuji.py・
 builtin_data/tools/get_memory_weave_context.py 等、本モジュールを経由せず
 生 SQL で ``arasuji_entries`` テーブルを直接読む消費者が多数ある (一部は
 sea/head_pipeline/ など変更禁止領域)。物理格納を変えつつこれらを無傷で通すため、
@@ -127,6 +127,21 @@ _COMPAT_VIEW_SQL = f"""
     WHERE category = '{CATEGORY_CHRONICLE}' AND is_trunk = 0
       AND (is_deleted = 0 OR is_deleted IS NULL)
 """
+
+
+def _compat_view_is_current(conn: sqlite3.Connection) -> bool:
+    """互換 VIEW ``arasuji_entries`` が現行定義 (_COMPAT_VIEW_SQL) と一致するか。
+
+    sqlite_master.sql は CREATE 文の原文を保持するので、空白を畳んだうえでの
+    文字列一致で「同じ定義か」を判定できる。旧デプロイの定義や VIEW 不在は
+    False (= 作り直しが必要)。
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'arasuji_entries'"
+    ).fetchone()
+    if row is None or row[0] is None:
+        return False
+    return " ".join(row[0].split()) == " ".join(_COMPAT_VIEW_SQL.split())
 
 
 def _ensure_root_chronicle(conn: sqlite3.Connection) -> None:
@@ -310,16 +325,21 @@ def init_arasuji_tables(conn: sqlite3.Connection) -> None:
     _ensure_root_chronicle(conn)
     _migrate_legacy_arasuji_table(conn)
 
-    # DROP→CREATE は 2 接続が並行で通ると片方の CREATE が "already exists" で
-    # 落ちる (API はリクエストごとに init を通る — 2026-08-31 に fragments GET の
-    # 並行取得で本番 500)。VIEW 定義の更新はデプロイ単位でしか変わらないので、
-    # 競合した側は「相手が作った同じ定義」として受容してよい。
-    try:
-        conn.execute("DROP VIEW IF EXISTS arasuji_entries")
-        conn.execute(_COMPAT_VIEW_SQL)
-    except sqlite3.OperationalError as exc:
-        if "already exists" not in str(exc):
-            raise
+    # VIEW の再作成は「定義が変わったとき」だけ行う。無条件の DROP→CREATE は
+    # DDL が文ごとに即コミットされるため、DROP と CREATE の間に名前が存在しない
+    # 瞬間ができ、並行リクエストの読み手が "no such table: arasuji_entries" を
+    # 踏む (API はリクエストごとに init を通る — 2026-09-18 に cost-estimate で
+    # 本番 500)。2026-08-31 の修正は CREATE 衝突側 ("already exists") だけを
+    # 塞いでいた。定義が同じなら触らないことで、通常運転では DROP 自体が
+    # 起きなくなる。定義が変わる一回きり (デプロイ直後) の競合は従来どおり
+    # 「相手が作った同じ定義」として受容する。
+    if not _compat_view_is_current(conn):
+        try:
+            conn.execute("DROP VIEW IF EXISTS arasuji_entries")
+            conn.execute(_COMPAT_VIEW_SQL)
+        except sqlite3.OperationalError as exc:
+            if "already exists" not in str(exc):
+                raise
 
     conn.execute(
         """

@@ -71,6 +71,10 @@ saiverse/
 │                           #   テーブルと既存行は旧データの残置として残る（v3 §7）
 ├── user_conversation.py    # ユーザーとの会話の入口。「いま会話中か」はメモリ内の会話状態、応答は main_line
 │                           #   Pulse、終わりは沈黙タイマー。始まり／終わりはどこにも記録しない（2026-08-23 裁定）
+├── voice_call.py           # 通話モード。ユーザーが押したときだけ Gemini Live API へセッションを張り、
+│                           #   人格プロンプト＋記憶を積んで音声を中継し、終わりに文字起こしを SAIMemory と
+│                           #   建物履歴へ追記する（voice_call.md。入口は api/routes/voice_call.py の
+│                           #   WebSocket /api/voice/call）
 ├── task_book.py            # タスク帳（相手のある一件・期限つきの一件。v3 §4.1）
 ├── v3_shape_migration.py   # v0.3「形の層」への機械写し（LIFE_PURPOSE / 旧 Track の関心 / desire 候補 →
 │                           #   コア記憶・手帳）。ペルソナ登録フックから一回だけ走る（v3 §9-8）
@@ -82,6 +86,10 @@ saiverse/
 ├── judgment_points.py      # 判断点コーディネータ（起床/セッション終了/イベント到着/就寝の動的スキーマ +
 │                           #   起動、judgment_points.md）
 ├── llm_router.py           # ツール呼び出し判定
+├── reflex_judgment.py      # 反射判断 — 状況と型付きの質問 (noul / choice / score) を渡すと確率・選択・数値だけが返る層。
+│                           #   答える側はモデルの役割「反射判断」への割り当てで決まり、宛先の path・応答の欄の方言・
+│                           #   対応する型は provider 設定の reflex_judgment 欄で宣言する（reflex_judgment.md）。
+│                           #   最初の利用者は自動想起の選別（auto_recall_jev_rerank.md）
 ├── gemini_clients.py       # Router/LLM client共通のGemini SDK client構築
 ├── model_configs.py        # モデル設定管理
 ├── model_defaults.py       # 組み込みデフォルトモデル / モデル役割と環境変数の表 / 定義の無いモデル設定を警告の文面にする判定
@@ -262,7 +270,6 @@ tools/
 database/
 ├── models.py         # SQLAlchemy モデル
 ├── api_server.py     # DB API サーバー（inter-city / persona-proxy ルートは凍結封鎖: 503）
-├── db_manager.py     # DB マネージャ
 ├── migrate.py        # マイグレーション（自動バックアップ付き）
 ├── seed.py           # 初期データ（⚠️ 全データ削除）
 ├── backup.py         # 起動時バックアップ

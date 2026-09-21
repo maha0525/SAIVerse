@@ -1,0 +1,63 @@
+{
+  "home": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\claude\\C--Users-shuhe-workspace-SAIVerse\\f1b2319e-4c7c-4bd2-8ce7-6030f2cf8b92\\scratchpad\\exp5_home",
+  "source_create": {
+    "ok": true,
+    "msg": "Persona 'プローブ甲' created successfully.",
+    "ai_id": "probe_a_testcity",
+    "room_id": "probe_a_testcity_room"
+  },
+  "dest_before": {
+    "persona_dir_exists": false
+  },
+  "clone_summary": {
+    "persona_id": "probe_a_testcity",
+    "remap": {
+      "HOME_CITYID": [
+        1,
+        1
+      ],
+      "PRIVATE_ROOM_ID": [
+        "probe_a_testcity_room",
+        null
+      ],
+      "current_building": [
+        "probe_a_testcity_room",
+        null
+      ]
+    },
+    "anchor_rows": 0,
+    "reset_columns": {
+      "IS_DISPATCHED": false,
+      "AUTO_COUNT": 0,
+      "LAST_AUTO_PROMPT_TIMES": null
+    },
+    "persona_dir_files": 2,
+    "persona_dir_bytes": 462936,
+    "models": {
+      "builtin": [],
+      "copied_models": [],
+      "copied_providers": [],
+      "missing": [
+        "test-model"
+      ]
+    },
+    "dest_db": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\claude\\C--Users-shuhe-workspace-SAIVerse\\f1b2319e-4c7c-4bd2-8ce7-6030f2cf8b92\\scratchpad\\exp5_home\\dst_home\\user_data\\database\\saiverse.db",
+    "dest_home": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\claude\\C--Users-shuhe-workspace-SAIVerse\\f1b2319e-4c7c-4bd2-8ce7-6030f2cf8b92\\scratchpad\\exp5_home\\dst_home"
+  },
+  "dest_read": {
+    "db_path": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\claude\\C--Users-shuhe-workspace-SAIVerse\\f1b2319e-4c7c-4bd2-8ce7-6030f2cf8b92\\scratchpad\\exp5_home\\dst_home\\personas\\probe_a_testcity\\memory.db",
+    "recent_persona_messages": [
+      "PROBE-CLONE-1 移す前に書いた記憶"
+    ],
+    "thread_summaries": [
+      {
+        "thread_id": "probe_a_testcity:__persona__",
+        "message_count": 1
+      }
+    ],
+    "core_memories": [
+      "PROBE-CLONE-CORE-1 移す前のコア記憶"
+    ],
+    "current_thread": "probe_a_testcity:__persona__"
+  }
+}

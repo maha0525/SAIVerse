@@ -65,7 +65,9 @@ transcript を得ます（実 LLM・実コスト。設計は `docs/intent/conver
 ```bash
 python scripts/run_conversation.py --persona <id> --message "おはよう" --message "昨日何してた？"
 python scripts/run_conversation.py --script <台本.json>
-# 環境変数未設定なら自動で test_data/ を指す。本番 DB を指すと起動拒否
+# 環境変数未設定なら自動で test_data/ を指す。
+# DB・SAIVERSE_HOME・SAIVERSE_USER_DATA_DIR・--out のどれかが本番 (~/.saiverse) を指すと起動拒否
+# (本番の場所は SAIVERSE_HOME の値に依らず判定する。一日シムと複製スクリプトも同じ)
 ```
 
 Discord ゲートウェイの設定は、起動スクリプトと同じ「ゲートウェイを止める値」で上書きしてから `SAIVerseManager` を作ります（一日シム `scripts/run_day_sim.py --real` も同じです。理由は後述の「外部連携の扱い」）。

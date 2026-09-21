@@ -1,3 +1,10 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import SaiverseLink from '../SaiverseLink';
@@ -66,14 +73,15 @@ function collectExpandableIds(pages: MemopediaPage[]): Set<string> {
 
 // Default categories before API response arrives (matches CATEGORY_DEFS order)
 const DEFAULT_CATEGORIES: CategoryMeta[] = [
-    { key: "people", label: "人物", label_en: "People", hide_when_empty: false, can_generate: true, writable: true },
-    { key: "terms", label: "用語", label_en: "Terms", hide_when_empty: false, can_generate: true, writable: true },
-    { key: "plans", label: "計画", label_en: "Plans", hide_when_empty: false, can_generate: true, writable: true },
-    { key: "events", label: "出来事", label_en: "Events", hide_when_empty: false, can_generate: true, writable: true },
-    { key: "theme", label: "テーマ", label_en: "Themes", hide_when_empty: true, can_generate: false, writable: false },
+    { key: "people", get label() { return uiText("components.memory.MemopediaViewer.text001"); }, label_en: "People", hide_when_empty: false, can_generate: true, writable: true },
+    { key: "terms", get label() { return uiText("components.memory.MemopediaViewer.text002"); }, label_en: "Terms", hide_when_empty: false, can_generate: true, writable: true },
+    { key: "plans", get label() { return uiText("components.memory.MemopediaViewer.text003"); }, label_en: "Plans", hide_when_empty: false, can_generate: true, writable: true },
+    { key: "events", get label() { return uiText("components.memory.MemopediaViewer.text004"); }, label_en: "Events", hide_when_empty: false, can_generate: true, writable: true },
+    { key: "theme", get label() { return uiText("components.memory.MemopediaViewer.text005"); }, label_en: "Themes", hide_when_empty: true, can_generate: false, writable: false },
 ];
 
 export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
+    useLocale();
     const [tree, setTree] = useState<TreeStructure | null>(null);
     const [categories, setCategories] = useState<CategoryMeta[]>(DEFAULT_CATEGORIES);
     const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
@@ -162,7 +170,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
 
     const loadTree = async () => {
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/tree`);
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/tree`);
             if (res.ok) {
                 const data = await res.json();
                 // Extract categories meta if present, else keep defaults
@@ -185,7 +193,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const loadPage = async (pageId: string) => {
         setIsLoadingPage(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${pageId}`);
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/pages/${pageId}`);
             if (res.ok) {
                 const data = await res.json();
                 setPageContent(data.content);
@@ -203,7 +211,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const loadHistory = async (pageId: string) => {
         setIsLoadingHistory(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${pageId}/history`);
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/pages/${pageId}/history`);
             if (res.ok) {
                 const data = await res.json();
                 setEditHistory(data.history);
@@ -293,7 +301,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const handleDeskToggle = async (open: boolean) => {
         if (!selectedPageId) return;
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}/desk`, {
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}/desk`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ open }),
@@ -301,14 +309,14 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
 
             if (res.ok) {
                 const data = await res.json();
-                alert(data.message || (open ? '机に開きました' : '机から閉じました'));
+                alert(data.message || (open ? uiText("components.memory.MemopediaViewer.text006") : uiText("components.memory.MemopediaViewer.text007")));
             } else {
                 const err = await res.json();
-                alert(`操作に失敗しました: ${err.detail || 'Unknown error'}`);
+                alert(uiText("components.memory.MemopediaViewer.text008", { p1: err.detail || 'Unknown error' }));
             }
         } catch (error) {
             console.error('Failed to toggle desk', error);
-            alert('操作に失敗しました');
+            alert(uiText("components.memory.MemopediaViewer.text009"));
         }
     };
 
@@ -321,7 +329,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                 .map(k => k.trim())
                 .filter(k => k.length > 0);
 
-            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}`, {
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -339,11 +347,11 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                 await loadPage(selectedPageId);
             } else {
                 const err = await res.json();
-                alert(`保存に失敗しました: ${err.detail || 'Unknown error'}`);
+                alert(uiText("components.memory.MemopediaViewer.text010", { p1: err.detail || 'Unknown error' }));
             }
         } catch (error) {
             console.error('Failed to save page', error);
-            alert('保存に失敗しました');
+            alert(uiText("components.memory.MemopediaViewer.text011"));
         } finally {
             setIsSaving(false);
         }
@@ -353,7 +361,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         if (!selectedPageId) return;
         setIsDeleting(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}`, {
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}`, {
                 method: 'DELETE',
             });
 
@@ -363,11 +371,11 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                 await loadTree();
             } else {
                 const err = await res.json();
-                alert(`削除に失敗しました: ${err.detail || 'Unknown error'}`);
+                alert(uiText("components.memory.MemopediaViewer.text012", { p1: err.detail || 'Unknown error' }));
             }
         } catch (error) {
             console.error('Failed to delete page', error);
-            alert('削除に失敗しました');
+            alert(uiText("components.memory.MemopediaViewer.text013"));
         } finally {
             setIsDeleting(false);
         }
@@ -388,7 +396,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     // Create new page
     const createPage = async () => {
         if (!createTitle.trim()) {
-            alert("タイトルを入力してください");
+            alert(uiText("components.memory.MemopediaViewer.text014"));
             return;
         }
         setIsCreating(true);
@@ -398,7 +406,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                 .map(k => k.trim())
                 .filter(k => k.length > 0);
 
-            const res = await fetch(`/api/people/${personaId}/memopedia/pages`, {
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/pages`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -421,11 +429,11 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                 setShowList(false);
             } else {
                 const err = await res.json();
-                alert(`作成に失敗しました: ${err.detail || 'Unknown error'}`);
+                alert(uiText("components.memory.MemopediaViewer.text015", { p1: err.detail || 'Unknown error' }));
             }
         } catch (error) {
             console.error('Failed to create page', error);
-            alert('作成に失敗しました');
+            alert(uiText("components.memory.MemopediaViewer.text016"));
         } finally {
             setIsCreating(false);
         }
@@ -434,7 +442,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     // Toggle trunk flag
     const handleTrunkToggle = async (pageId: string, isTrunk: boolean) => {
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${pageId}/trunk`, {
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/pages/${pageId}/trunk`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ is_trunk: isTrunk }),
@@ -444,18 +452,18 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                 await loadTree();
             } else {
                 const err = await res.json();
-                alert(`trunk設定に失敗しました: ${err.detail || 'Unknown error'}`);
+                alert(uiText("components.memory.MemopediaViewer.text017", { p1: err.detail || 'Unknown error' }));
             }
         } catch (error) {
             console.error('Failed to toggle trunk', error);
-            alert('trunk設定に失敗しました');
+            alert(uiText("components.memory.MemopediaViewer.text018"));
         }
     };
 
     // Toggle important flag
     const handleImportantToggle = async (pageId: string, isImportant: boolean) => {
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${pageId}/important`, {
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/pages/${pageId}/important`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ is_important: isImportant }),
@@ -465,11 +473,11 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                 await loadTree();
             } else {
                 const err = await res.json();
-                alert(`重要フラグの設定に失敗しました: ${err.detail || 'Unknown error'}`);
+                alert(uiText("components.memory.MemopediaViewer.text019", { p1: err.detail || 'Unknown error' }));
             }
         } catch (error) {
             console.error('Failed to toggle important', error);
-            alert('重要フラグの設定に失敗しました');
+            alert(uiText("components.memory.MemopediaViewer.text020"));
         }
     };
 
@@ -479,10 +487,10 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
 
         setIsGenerating(true);
         setGenerateError(null);
-        setGenerateStatus("生成開始中...");
+        setGenerateStatus(uiText("components.memory.MemopediaViewer.text021"));
 
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/generate`, {
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -515,13 +523,13 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
 
     const pollGenerationStatus = async (jobId: string) => {
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/generate/${jobId}`);
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/generate/${jobId}`);
             if (!res.ok) {
                 throw new Error('Failed to get job status');
             }
 
             const data = await res.json();
-            setGenerateStatus(data.message || '処理中...');
+            setGenerateStatus(data.message || uiText("components.memory.MemopediaViewer.text022"));
 
             if (data.progress !== undefined && data.total) {
                 setGenerateProgress({ current: data.progress, total: data.total });
@@ -579,7 +587,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     };
 
     const formatDate = (timestamp: number) => {
-        return new Date(timestamp * 1000).toLocaleString('ja-JP', {
+        return new Date(timestamp * 1000).toLocaleString(getFormatLocale(), {
             year: 'numeric',
             month: '2-digit',
             day: '2-digit',
@@ -590,15 +598,16 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
 
     const getEditTypeLabel = (editType: string) => {
         switch (editType) {
-            case 'create': return '🆕 作成';
-            case 'update': return '✏️ 更新';
-            case 'append': return '➕ 追記';
-            case 'delete': return '🗑️ 削除';
+            case 'create': return uiText("components.memory.MemopediaViewer.text023");
+            case 'update': return uiText("components.memory.MemopediaViewer.text024");
+            case 'append': return uiText("components.memory.MemopediaViewer.text025");
+            case 'delete': return uiText("components.memory.MemopediaViewer.text026");
             default: return editType;
         }
     };
 
     const TreeItem = ({ page }: { page: MemopediaPage }) => {
+    useLocale();
         const hasChildren = page.children && page.children.length > 0;
         const isExpanded = expandedIds.has(page.id);
         const isRoot = page.id.startsWith('root_');
@@ -640,10 +649,10 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     {page.is_important && <Star size={12} style={{ color: '#e6a817', flexShrink: 0 }} />}
                     <span className={page.is_trunk ? styles.trunkTitle : ''}>{page.title}</span>
                     {(page.is_trunk || isRoot) && (
-                        <button
+                        <button data-i18n="components.memory.MemopediaViewer.text027"
                             className={styles.addChildBtn}
                             onClick={handleAddClick}
-                            title="子ページを追加"
+                            title={uiText("components.memory.MemopediaViewer.text027")}
                         >
                             <Plus size={12} />
                         </button>
@@ -756,22 +765,22 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         return pages;
     }, [tree, sortMode]);
 
-    if (!tree) return <div className={styles.emptyState}>ナレッジベースを読み込み中...</div>;
+    if (!tree) return <div data-i18n="components.memory.MemopediaViewer.text028" className={styles.emptyState}>{uiText("components.memory.MemopediaViewer.text028")}</div>;
 
     return (
         <div className={styles.container}>
             <div className={`${styles.sidebar} ${!showList ? styles.mobileHidden : ''}`}>
                 <div className={styles.sidebarHeader}>
-                    <span>ナレッジツリー</span>
+                    <span data-i18n="components.memory.MemopediaViewer.text029">{uiText("components.memory.MemopediaViewer.text029")}</span>
                     <div className={styles.sidebarActions}>
-                        <button
+                        <button data-i18n="components.memory.MemopediaViewer.text030 components.memory.MemopediaViewer.text031"
                             className={`${styles.sortButton} ${sortMode === 'updated' ? styles.active : ''}`}
                             onClick={() => setSortMode(sortMode === 'tree' ? 'updated' : 'tree')}
-                            title={sortMode === 'tree' ? '更新日時順に並び替え' : 'ツリー表示に戻す'}
+                            title={sortMode === 'tree' ? uiText("components.memory.MemopediaViewer.text030") : uiText("components.memory.MemopediaViewer.text031")}
                         >
                             <Clock size={14} />
                         </button>
-                        <button
+                        <button data-i18n="components.memory.MemopediaViewer.text032"
                             className={styles.generateButton}
                             onClick={() => {
                                 setShowGenerateModal(true);
@@ -781,10 +790,10 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                 setGenerateError(null);
                                 setGenerateResult(null);
                             }}
-                            title="キーワードからページを生成"
+                            title={uiText("components.memory.MemopediaViewer.text032")}
                         >
                             <Sparkles size={14} />
-                            <span>生成</span>
+                            <span data-i18n="components.memory.MemopediaViewer.text033">{uiText("components.memory.MemopediaViewer.text033")}</span>
                         </button>
                     </div>
                 </div>
@@ -804,7 +813,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                         </>
                     ) : (
                         <>
-                            <div className={styles.categoryTitle}>更新日時順</div>
+                            <div data-i18n="components.memory.MemopediaViewer.text034" className={styles.categoryTitle}>{uiText("components.memory.MemopediaViewer.text034")}</div>
                             {flatPages.map(p => (
                                 <div
                                     key={p.id}
@@ -813,7 +822,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                 >
                                     <div className={styles.flatItemTitle}>{p.title}</div>
                                     <div className={styles.flatItemMeta}>
-                                        {pageFreshness(p) ? new Date(pageFreshness(p) * 1000).toLocaleString('ja-JP', {
+                                        {pageFreshness(p) ? new Date(pageFreshness(p) * 1000).toLocaleString(getFormatLocale(), {
                                             month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
                                         }) : ''}
                                     </div>
@@ -826,36 +835,35 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
 
             <div className={`${styles.contentArea} ${showList ? styles.mobileHidden : ''}`}>
                 <div className={styles.contentHeader}>
-                    <button
+                    <button data-i18n="components.memory.MemopediaViewer.text035"
                         className={styles.backButton}
                         onClick={() => setShowList(true)}
                     >
-                        <ChevronLeft size={20} /> 戻る
-                    </button>
+                        <ChevronLeft size={20} />{uiText("components.memory.MemopediaViewer.text035")}</button>
                     {selectedPageId && !selectedPageId.startsWith('root_') && (
                         <div className={styles.headerButtons}>
                             {!isEditing && (
                                 <>
-                                    <button
+                                    <button data-i18n="components.memory.MemopediaViewer.text036"
                                         className={styles.editButton}
                                         onClick={startEditing}
-                                        title="編集"
+                                        title={uiText("components.memory.MemopediaViewer.text036")}
                                     >
                                         <Edit2 size={16} />
-                                        <span>編集</span>
+                                        <span data-i18n="components.memory.MemopediaViewer.text037">{uiText("components.memory.MemopediaViewer.text037")}</span>
                                     </button>
-                                    <button
+                                    <button data-i18n="components.memory.MemopediaViewer.text038"
                                         className={`${styles.historyButton} ${showHistory ? styles.active : ''}`}
                                         onClick={() => showHistory ? setShowHistory(false) : handleShowHistory()}
-                                        title="編集履歴を表示"
+                                        title={uiText("components.memory.MemopediaViewer.text038")}
                                     >
                                         <History size={16} />
-                                        <span>履歴</span>
+                                        <span data-i18n="components.memory.MemopediaViewer.text039">{uiText("components.memory.MemopediaViewer.text039")}</span>
                                     </button>
-                                    <button
+                                    <button data-i18n="components.memory.MemopediaViewer.text040"
                                         className={styles.deleteButton}
                                         onClick={() => setShowDeleteConfirm(true)}
-                                        title="削除"
+                                        title={uiText("components.memory.MemopediaViewer.text040")}
                                     >
                                         <Trash2 size={16} />
                                     </button>
@@ -868,14 +876,13 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                 {showHistory ? (
                     // History View
                     <div className={styles.historyContainer}>
-                        <h3 className={styles.historyTitle}>
-                            <History size={20} /> 編集履歴
-                        </h3>
+                        <h3 data-i18n="components.memory.MemopediaViewer.text041" className={styles.historyTitle}>
+                            <History size={20} />{uiText("components.memory.MemopediaViewer.text041")}</h3>
                         {isLoadingHistory ? (
-                            <div className={styles.emptyState}>履歴を読み込み中...</div>
+                            <div data-i18n="components.memory.MemopediaViewer.text042" className={styles.emptyState}>{uiText("components.memory.MemopediaViewer.text042")}</div>
                         ) : editHistory.length === 0 ? (
                             <div className={styles.emptyState}>
-                                <p>編集履歴がありません</p>
+                                <p data-i18n="components.memory.MemopediaViewer.text043">{uiText("components.memory.MemopediaViewer.text043")}</p>
                             </div>
                         ) : (
                             <div className={styles.historyList}>
@@ -895,14 +902,13 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         </div>
                                         {entry.edit_source && (
                                             <div className={styles.editSource}>
-                                                via {entry.edit_source}
+                                                {uiText("components.memory.MemopediaViewer.label001")}{entry.edit_source}
                                             </div>
                                         )}
                                         {(entry.ref_start_message_id || entry.ref_end_message_id) && (
                                             <div className={styles.refRange}>
                                                 <GitCommit size={12} />
-                                                <span>
-                                                    参照: {entry.ref_start_message_id?.slice(0, 8) || '?'}
+                                                <span data-i18n="components.memory.MemopediaViewer.text044">{uiText("components.memory.MemopediaViewer.text044")}{entry.ref_start_message_id?.slice(0, 8) || '?'}
                                                     {' → '}
                                                     {entry.ref_end_message_id?.slice(0, 8) || '?'}
                                                 </span>
@@ -911,16 +917,16 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         {selectedHistoryEntry?.id === entry.id && (
                                             <div className={styles.diffView}>
                                                 <div className={styles.diffHeader}>
-                                                    <span>Diff</span>
-                                                    <button
+                                                    <span>{uiText("components.memory.MemopediaViewer.label002")}</span>
+                                                    <button data-i18n="components.memory.MemopediaViewer.text045 components.memory.MemopediaViewer.text046 components.memory.MemopediaViewer.text047 components.memory.MemopediaViewer.text048 components.memory.MemopediaViewer.text049"
                                                         className={styles.rollbackButton}
                                                         onClick={async (e) => {
                                                             e.stopPropagation();
-                                                            if (!confirm(`この編集より前の状態に戻しますか？\n(${getEditTypeLabel(entry.edit_type)} - ${formatDate(entry.edited_at)})`)) return;
+                                                            if (!confirm(uiText("components.memory.MemopediaViewer.text045", { p1: getEditTypeLabel(entry.edit_type), p2: formatDate(entry.edited_at) }))) return;
                                                             try {
                                                                 const url = `/api/people/${personaId}/memopedia/pages/${entry.page_id}/rollback/${entry.id}`;
                                                                 console.log('[rollback] POST', url);
-                                                                const res = await fetch(url, { method: 'POST' });
+                                                                const res = await apiFetch(url, { method: 'POST' });
                                                                 console.log('[rollback] response status:', res.status);
                                                                 if (res.ok) {
                                                                     const data = await res.json();
@@ -931,18 +937,16 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                                                     await loadTree();
                                                                 } else {
                                                                     const err = await res.json();
-                                                                    alert(`ロールバック失敗: ${err.detail || '不明なエラー'}`);
+                                                                    alert(uiText("components.memory.MemopediaViewer.text046", { p1: err.detail || uiText("common.extra007") }));
                                                                 }
                                                             } catch (err) {
-                                                                alert(`ロールバック失敗: ${err}`);
+                                                                alert(uiText("components.memory.MemopediaViewer.text047", { p1: err }));
                                                             }
                                                         }}
-                                                        title="この編集より前の状態に戻す"
-                                                    >
-                                                        ↩ 戻す
-                                                    </button>
+                                                        title={uiText("components.memory.MemopediaViewer.text048")}
+                                                    >{uiText("components.memory.MemopediaViewer.text049")}</button>
                                                 </div>
-                                                <pre className={styles.diffContent}>{entry.diff_text || '(差分なし)'}</pre>
+                                                <pre data-i18n="components.memory.MemopediaViewer.text050" className={styles.diffContent}>{entry.diff_text || uiText("components.memory.MemopediaViewer.text050")}</pre>
                                             </div>
                                         )}
                                     </div>
@@ -954,7 +958,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     // Edit Form
                     <div className={styles.editForm}>
                         <div className={styles.formGroup}>
-                            <label>タイトル</label>
+                            <label data-i18n="components.memory.MemopediaViewer.text051">{uiText("components.memory.MemopediaViewer.text051")}</label>
                             <input
                                 type="text"
                                 value={editTitle}
@@ -963,7 +967,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                             />
                         </div>
                         <div className={styles.formGroup}>
-                            <label>概要</label>
+                            <label data-i18n="components.memory.MemopediaViewer.text052">{uiText("components.memory.MemopediaViewer.text052")}</label>
                             <input
                                 type="text"
                                 value={editSummary}
@@ -972,18 +976,18 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                             />
                         </div>
                         <div className={styles.formGroup}>
-                            <label>キーワード (カンマ区切り)</label>
-                            <input
+                            <label data-i18n="components.memory.MemopediaViewer.text053">{uiText("components.memory.MemopediaViewer.text053")}</label>
+                            <input data-i18n="components.memory.MemopediaViewer.text054"
                                 type="text"
                                 value={editKeywords}
                                 onChange={e => setEditKeywords(e.target.value)}
                                 className={styles.formInput}
-                                placeholder="キーワード1, キーワード2, ..."
+                                placeholder={uiText("components.memory.MemopediaViewer.text054")}
                             />
                         </div>
                         {/* P4-c: 鮮明度 select 廃止 */}
                         <div className={styles.formGroup}>
-                            <label>本文</label>
+                            <label data-i18n="components.memory.MemopediaViewer.text055">{uiText("components.memory.MemopediaViewer.text055")}</label>
                             <textarea
                                 value={editContent}
                                 onChange={e => setEditContent(e.target.value)}
@@ -992,21 +996,19 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                             />
                         </div>
                         <div className={styles.formActions}>
-                            <button
+                            <button data-i18n="components.memory.MemopediaViewer.text056"
                                 className={styles.cancelButton}
                                 onClick={cancelEditing}
                                 disabled={isSaving}
                             >
-                                <X size={16} />
-                                キャンセル
-                            </button>
-                            <button
+                                <X size={16} />{uiText("components.memory.MemopediaViewer.text056")}</button>
+                            <button data-i18n="components.memory.MemopediaViewer.text057 components.memory.MemopediaViewer.text058"
                                 className={styles.saveButton}
                                 onClick={saveEdit}
                                 disabled={isSaving}
                             >
                                 <Save size={16} />
-                                {isSaving ? '保存中...' : '保存'}
+                                {isSaving ? uiText("components.memory.MemopediaViewer.text057") : uiText("components.memory.MemopediaViewer.text058")}
                             </button>
                         </div>
                     </div>
@@ -1014,7 +1016,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     // Content View
                     selectedPageId ? (
                         isLoadingPage ? (
-                            <div className={styles.emptyState}>読み込み中...</div>
+                            <div data-i18n="components.memory.MemopediaViewer.text059" className={styles.emptyState}>{uiText("components.memory.MemopediaViewer.text059")}</div>
                         ) : (
                             <div className={styles.contentBody}>
                                 {selectedKeywords.length > 0 && (
@@ -1030,23 +1032,17 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                 {/* P4-c: 鮮明度 select の代わりに机ボタン */}
                                 {selectedPageId && !selectedPageId.startsWith('root_') && (
                                     <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                        <button
+                                        <button data-i18n="components.memory.MemopediaViewer.text060 components.memory.MemopediaViewer.text061"
                                             className={styles.editButton}
                                             onClick={() => handleDeskToggle(true)}
-                                            title="このページを机に開く（常時ヘッドに表示）"
-                                        >
-                                            机に開く
-                                        </button>
-                                        <button
+                                            title={uiText("components.memory.MemopediaViewer.text060")}
+                                        >{uiText("components.memory.MemopediaViewer.text061")}</button>
+                                        <button data-i18n="components.memory.MemopediaViewer.text062 components.memory.MemopediaViewer.text063"
                                             className={styles.historyButton}
                                             onClick={() => handleDeskToggle(false)}
-                                            title="このページを机から閉じる"
-                                        >
-                                            机から閉じる
-                                        </button>
-                                        <small style={{ color: '#888' }}>
-                                            机に開くとコンテキストの先頭に常時表示されます
-                                        </small>
+                                            title={uiText("components.memory.MemopediaViewer.text062")}
+                                        >{uiText("components.memory.MemopediaViewer.text063")}</button>
+                                        <small data-i18n="components.memory.MemopediaViewer.text064" style={{ color: '#888' }}>{uiText("components.memory.MemopediaViewer.text064")}</small>
                                     </div>
                                 )}
                                 {selectedPageId && !selectedPageId.startsWith('root_') && (
@@ -1060,11 +1056,9 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                                     style={{ cursor: 'pointer' }}
                                                 />
                                                 <Star size={14} />
-                                                <span style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>重要</span>
+                                                <span data-i18n="components.memory.MemopediaViewer.text065" style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>{uiText("components.memory.MemopediaViewer.text065")}</span>
                                             </label>
-                                            <small style={{ color: '#888' }}>
-                                                代謝でページが縮小されにくくなります
-                                            </small>
+                                            <small data-i18n="components.memory.MemopediaViewer.text066" style={{ color: '#888' }}>{uiText("components.memory.MemopediaViewer.text066")}</small>
                                         </div>
                                         <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                                             <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
@@ -1075,11 +1069,9 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                                     style={{ cursor: 'pointer' }}
                                                 />
                                                 <FolderTree size={14} />
-                                                <span style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>Trunkとして設定</span>
+                                                <span data-i18n="components.memory.MemopediaViewer.text067" style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>{uiText("components.memory.MemopediaViewer.text067")}</span>
                                             </label>
-                                            <small style={{ color: '#888' }}>
-                                                子ページをまとめるカテゴリフォルダ
-                                            </small>
+                                            <small data-i18n="components.memory.MemopediaViewer.text068" style={{ color: '#888' }}>{uiText("components.memory.MemopediaViewer.text068")}</small>
                                         </div>
                                     </>
                                 )}
@@ -1093,7 +1085,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                 </div>
                                 {pageFragments.length > 0 && (
                                     <div className={styles.fragmentsSection}>
-                                        <h3 className={styles.fragmentsTitle}>Fragments ({pageFragments.length})</h3>
+                                        <h3 className={styles.fragmentsTitle}>{uiText("components.memory.MemopediaViewer.label003")}{pageFragments.length})</h3>
                                         {(() => {
                                             const grouped: Record<string, MemopediaFragment[]> = {};
                                             for (const f of pageFragments) {
@@ -1122,7 +1114,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                         <div className={styles.emptyState}>
                             <div style={{ textAlign: 'center' }}>
                                 <Book size={48} style={{ marginBottom: '1rem', opacity: 0.5 }} />
-                                <p>ページを選択して内容を表示</p>
+                                <p data-i18n="components.memory.MemopediaViewer.text069">{uiText("components.memory.MemopediaViewer.text069")}</p>
                             </div>
                         </div>
                     )
@@ -1132,22 +1124,20 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                 {showDeleteConfirm && (
                     <div className={styles.overlay}>
                         <div className={styles.confirmDialog}>
-                            <h3>ページを削除しますか？</h3>
-                            <p>この操作は取り消せません。本当に削除しますか？</p>
+                            <h3 data-i18n="components.memory.MemopediaViewer.text070">{uiText("components.memory.MemopediaViewer.text070")}</h3>
+                            <p data-i18n="components.memory.MemopediaViewer.text071">{uiText("components.memory.MemopediaViewer.text071")}</p>
                             <div className={styles.confirmActions}>
-                                <button
+                                <button data-i18n="components.memory.MemopediaViewer.text072"
                                     className={styles.cancelButton}
                                     onClick={() => setShowDeleteConfirm(false)}
                                     disabled={isDeleting}
-                                >
-                                    キャンセル
-                                </button>
-                                <button
+                                >{uiText("components.memory.MemopediaViewer.text072")}</button>
+                                <button data-i18n="components.memory.MemopediaViewer.text073 components.memory.MemopediaViewer.text074"
                                     className={styles.confirmDeleteButton}
                                     onClick={deletePage}
                                     disabled={isDeleting}
                                 >
-                                    {isDeleting ? '削除中...' : '削除する'}
+                                    {isDeleting ? uiText("components.memory.MemopediaViewer.text073") : uiText("components.memory.MemopediaViewer.text074")}
                                 </button>
                             </div>
                         </div>
@@ -1158,35 +1148,35 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                 {showCreateModal && (
                     <div className={styles.overlay}>
                         <div className={styles.createModal}>
-                            <h3>新規ページ作成</h3>
+                            <h3 data-i18n="components.memory.MemopediaViewer.text075">{uiText("components.memory.MemopediaViewer.text075")}</h3>
                             <div className={styles.formGroup}>
-                                <label>タイトル *</label>
-                                <input
+                                <label data-i18n="components.memory.MemopediaViewer.text076">{uiText("components.memory.MemopediaViewer.text076")}</label>
+                                <input data-i18n="components.memory.MemopediaViewer.text077"
                                     type="text"
                                     value={createTitle}
                                     onChange={e => setCreateTitle(e.target.value)}
                                     className={styles.formInput}
-                                    placeholder="ページタイトル"
+                                    placeholder={uiText("components.memory.MemopediaViewer.text077")}
                                 />
                             </div>
                             <div className={styles.formGroup}>
-                                <label>概要</label>
-                                <input
+                                <label data-i18n="components.memory.MemopediaViewer.text078">{uiText("components.memory.MemopediaViewer.text078")}</label>
+                                <input data-i18n="components.memory.MemopediaViewer.text079"
                                     type="text"
                                     value={createSummary}
                                     onChange={e => setCreateSummary(e.target.value)}
                                     className={styles.formInput}
-                                    placeholder="ページの概要"
+                                    placeholder={uiText("components.memory.MemopediaViewer.text079")}
                                 />
                             </div>
                             <div className={styles.formGroup}>
-                                <label>キーワード (カンマ区切り)</label>
-                                <input
+                                <label data-i18n="components.memory.MemopediaViewer.text080">{uiText("components.memory.MemopediaViewer.text080")}</label>
+                                <input data-i18n="components.memory.MemopediaViewer.text081"
                                     type="text"
                                     value={createKeywords}
                                     onChange={e => setCreateKeywords(e.target.value)}
                                     className={styles.formInput}
-                                    placeholder="キーワード1, キーワード2, ..."
+                                    placeholder={uiText("components.memory.MemopediaViewer.text081")}
                                 />
                             </div>
                             {/* P4-c: 鮮明度 select 廃止 */}
@@ -1199,38 +1189,34 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         style={{ cursor: 'pointer' }}
                                     />
                                     <FolderTree size={14} />
-                                    <span>Trunkとして作成</span>
+                                    <span data-i18n="components.memory.MemopediaViewer.text082">{uiText("components.memory.MemopediaViewer.text082")}</span>
                                 </label>
-                                <small style={{ color: '#888', display: 'block', marginTop: '4px' }}>
-                                    子ページをまとめるカテゴリフォルダとして作成
-                                </small>
+                                <small data-i18n="components.memory.MemopediaViewer.text083" style={{ color: '#888', display: 'block', marginTop: '4px' }}>{uiText("components.memory.MemopediaViewer.text083")}</small>
                             </div>
                             <div className={styles.formGroup}>
-                                <label>本文</label>
-                                <textarea
+                                <label data-i18n="components.memory.MemopediaViewer.text084">{uiText("components.memory.MemopediaViewer.text084")}</label>
+                                <textarea data-i18n="components.memory.MemopediaViewer.text085"
                                     value={createContent}
                                     onChange={e => setCreateContent(e.target.value)}
                                     className={styles.formTextarea}
                                     rows={8}
-                                    placeholder="ページの本文..."
+                                    placeholder={uiText("components.memory.MemopediaViewer.text085")}
                                 />
                             </div>
                             <div className={styles.formActions}>
-                                <button
+                                <button data-i18n="components.memory.MemopediaViewer.text086"
                                     className={styles.cancelButton}
                                     onClick={() => setShowCreateModal(false)}
                                     disabled={isCreating}
                                 >
-                                    <X size={16} />
-                                    キャンセル
-                                </button>
-                                <button
+                                    <X size={16} />{uiText("components.memory.MemopediaViewer.text086")}</button>
+                                <button data-i18n="components.memory.MemopediaViewer.text087 components.memory.MemopediaViewer.text088"
                                     className={styles.saveButton}
                                     onClick={createPage}
                                     disabled={isCreating || !createTitle.trim()}
                                 >
                                     <Plus size={16} />
-                                    {isCreating ? '作成中...' : '作成'}
+                                    {isCreating ? uiText("components.memory.MemopediaViewer.text087") : uiText("components.memory.MemopediaViewer.text088")}
                                 </button>
                             </div>
                         </div>
@@ -1241,37 +1227,37 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                 {showGenerateModal && (
                     <div className={styles.overlay}>
                         <div className={styles.createModal}>
-                            <h3><Sparkles size={20} /> キーワードからページ生成</h3>
+                            <h3 data-i18n="components.memory.MemopediaViewer.text089"><Sparkles size={20} />{uiText("components.memory.MemopediaViewer.text089")}</h3>
                             {!isGenerating && !generateResult ? (
                                 <>
                                     <div className={styles.formGroup}>
-                                        <label>キーワード *</label>
-                                        <input
+                                        <label data-i18n="components.memory.MemopediaViewer.text090">{uiText("components.memory.MemopediaViewer.text090")}</label>
+                                        <input data-i18n="components.memory.MemopediaViewer.text091"
                                             type="text"
                                             value={generateKeyword}
                                             onChange={e => setGenerateKeyword(e.target.value)}
                                             className={styles.formInput}
-                                            placeholder="例: Memory Weave"
+                                            placeholder={uiText("components.memory.MemopediaViewer.text091")}
                                         />
                                     </div>
                                     <div className={styles.formGroup}>
-                                        <label>調査の方向性・まとめ方（任意）</label>
-                                        <textarea
+                                        <label data-i18n="components.memory.MemopediaViewer.text092">{uiText("components.memory.MemopediaViewer.text092")}</label>
+                                        <textarea data-i18n="components.memory.MemopediaViewer.text093"
                                             value={generateDirections}
                                             onChange={e => setGenerateDirections(e.target.value)}
                                             className={styles.formTextarea}
                                             rows={3}
-                                            placeholder="例: 技術的な詳細を中心にまとめてほしい / この人物の◯◯に関するエピソードを調べてほしい"
+                                            placeholder={uiText("components.memory.MemopediaViewer.text093")}
                                         />
                                     </div>
                                     <div className={styles.formGroup}>
-                                        <label>カテゴリ (自動判定)</label>
+                                        <label data-i18n="components.memory.MemopediaViewer.text094">{uiText("components.memory.MemopediaViewer.text094")}</label>
                                         <select
                                             value={generateCategory || ""}
                                             onChange={e => setGenerateCategory(e.target.value || null)}
                                             className={styles.formInput}
                                         >
-                                            <option value="">自動判定</option>
+                                            <option data-i18n="components.memory.MemopediaViewer.text095" value="">{uiText("components.memory.MemopediaViewer.text095")}</option>
                                             {categories.filter(c => c.can_generate).map(c => (
                                                 <option key={c.key} value={c.key}>{c.label_en}</option>
                                             ))}
@@ -1281,21 +1267,17 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         <div className={styles.errorText}>{generateError}</div>
                                     )}
                                     <div className={styles.formActions}>
-                                        <button
+                                        <button data-i18n="components.memory.MemopediaViewer.text096"
                                             className={styles.cancelButton}
                                             onClick={() => setShowGenerateModal(false)}
                                         >
-                                            <X size={16} />
-                                            キャンセル
-                                        </button>
-                                        <button
+                                            <X size={16} />{uiText("components.memory.MemopediaViewer.text096")}</button>
+                                        <button data-i18n="components.memory.MemopediaViewer.text097"
                                             className={styles.saveButton}
                                             onClick={startGeneration}
                                             disabled={!generateKeyword.trim()}
                                         >
-                                            <Sparkles size={16} />
-                                            生成開始
-                                        </button>
+                                            <Sparkles size={16} />{uiText("components.memory.MemopediaViewer.text097")}</button>
                                     </div>
                                 </>
                             ) : isGenerating ? (
@@ -1313,10 +1295,10 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                 </div>
                             ) : generateResult ? (
                                 <div className={styles.resultState}>
-                                    <p>✅ ページを{generateResult.action === 'created' ? '作成' : '更新'}しました</p>
+                                    <p data-i18n="components.memory.MemopediaViewer.text098 components.memory.MemopediaViewer.text099 components.memory.MemopediaViewer.text100 components.memory.MemopediaViewer.text101">{uiText("components.memory.MemopediaViewer.text098")}{generateResult.action === 'created' ? uiText("components.memory.MemopediaViewer.text099") : uiText("components.memory.MemopediaViewer.text100")}{uiText("components.memory.MemopediaViewer.text101")}</p>
                                     <p><strong>{generateResult.title}</strong></p>
                                     <div className={styles.formActions}>
-                                        <button
+                                        <button data-i18n="components.memory.MemopediaViewer.text102"
                                             className={styles.saveButton}
                                             onClick={() => {
                                                 setShowGenerateModal(false);
@@ -1326,9 +1308,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                                 }
                                                 loadTree();
                                             }}
-                                        >
-                                            ページを表示
-                                        </button>
+                                        >{uiText("components.memory.MemopediaViewer.text102")}</button>
                                     </div>
                                 </div>
                             ) : null}

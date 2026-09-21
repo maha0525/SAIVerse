@@ -1,3 +1,8 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useEffect, useState } from 'react';
 import styles from './PeopleModal.module.css';
 import { X, UserPlus, RefreshCw, Home } from 'lucide-react';
@@ -31,6 +36,7 @@ interface PeopleModalProps {
 }
 
 export default function PeopleModal({ isOpen, onClose, currentBuildingId, onChanged }: PeopleModalProps) {
+    useLocale();
     const [personas, setPersonas] = useState<Persona[]>([]);
     const [occupants, setOccupants] = useState<Occupant[]>([]);
     const [loading, setLoading] = useState(false);
@@ -55,8 +61,8 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId, onChan
         setLoading(true);
         try {
             const [summonableRes, detailsRes] = await Promise.all([
-                fetch(`/api/people/summonable?building_id=${encodeURIComponent(currentBuildingId)}`),
-                fetch(`/api/info/details?building_id=${encodeURIComponent(currentBuildingId)}`)
+                apiFetch(`/api/people/summonable?building_id=${encodeURIComponent(currentBuildingId)}`),
+                apiFetch(`/api/info/details?building_id=${encodeURIComponent(currentBuildingId)}`)
             ]);
             if (summonableRes.ok) {
                 const data = await summonableRes.json();
@@ -81,7 +87,7 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId, onChan
         }
         setSummoningId(personaId);
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/people/summon/${personaId}?building_id=${encodeURIComponent(currentBuildingId)}`,
                 { method: 'POST' }
             );
@@ -91,11 +97,11 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId, onChan
                 onChanged?.();
             } else {
                 const err = await res.json();
-                alert(`召喚に失敗しました: ${err.detail}`);
+                alert(uiText("components.PeopleModal.text001", { p1: err.detail }));
             }
         } catch (e) {
             console.error("Summon failed", e);
-            alert("召喚中にエラーが発生しました。");
+            alert(uiText("components.PeopleModal.text002"));
         } finally {
             setSummoningId(null);
         }
@@ -106,11 +112,11 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId, onChan
             console.warn('[PeopleModal] handleDismiss skipped: currentBuildingId not provided');
             return;
         }
-        if (!confirm(`${name}を自室に戻しますか？`)) return;
+        if (!confirm(uiText("components.PeopleModal.text003", { p1: name }))) return;
 
         setDismissingId(personaId);
         try {
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/people/dismiss/${personaId}?building_id=${encodeURIComponent(currentBuildingId)}`,
                 { method: 'POST' }
             );
@@ -120,11 +126,11 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId, onChan
                 onChanged?.();
             } else {
                 const err = await res.json();
-                alert(`戻すのに失敗しました: ${err.detail}`);
+                alert(uiText("components.PeopleModal.text004", { p1: err.detail }));
             }
         } catch (e) {
             console.error("Dismiss failed", e);
-            alert("処理中にエラーが発生しました。");
+            alert(uiText("components.PeopleModal.text005"));
         } finally {
             setDismissingId(null);
         }
@@ -140,25 +146,23 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId, onChan
         >
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2><UserPlus className={styles.icon} size={24} /> ペルソナ管理</h2>
+                    <h2 data-i18n="components.PeopleModal.text006"><UserPlus className={styles.icon} size={24} />{uiText("components.PeopleModal.text006")}</h2>
                     <button className={styles.closeBtn} onClick={onClose}><X size={24} /></button>
                 </div>
 
                 {/* Tab Switcher */}
                 <div className={styles.tabs}>
-                    <button
+                    <button data-i18n="components.PeopleModal.text007"
                         className={`${styles.tab} ${activeTab === 'call' ? styles.active : ''}`}
                         onClick={() => setActiveTab('call')}
                     >
-                        <UserPlus size={16} />
-                        呼び出し ({personas.length})
+                        <UserPlus size={16} />{uiText("components.PeopleModal.text007")}{personas.length})
                     </button>
-                    <button
+                    <button data-i18n="components.PeopleModal.text008"
                         className={`${styles.tab} ${activeTab === 'here' ? styles.active : ''}`}
                         onClick={() => setActiveTab('here')}
                     >
-                        <Home size={16} />
-                        帰ってもらう ({occupants.length})
+                        <Home size={16} />{uiText("components.PeopleModal.text008")}{occupants.length})
                     </button>
                 </div>
 
@@ -166,14 +170,14 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId, onChan
                     {loading ? (
                         <div className={styles.loading}>
                             <RefreshCw className={styles.spinner} size={24} />
-                            <span>読み込み中...</span>
+                            <span data-i18n="components.PeopleModal.text009">{uiText("components.PeopleModal.text009")}</span>
                         </div>
                     ) : activeTab === 'call' ? (
                         // Call tab - summonable personas
                         personas.length === 0 ? (
                             <div className={styles.empty}>
-                                <p>呼び出せる住人がいません。</p>
-                                <span className={styles.subtext}>みんな忙しいか、既にここにいます。</span>
+                                <p data-i18n="components.PeopleModal.text010">{uiText("components.PeopleModal.text010")}</p>
+                                <span data-i18n="components.PeopleModal.text011" className={styles.subtext}>{uiText("components.PeopleModal.text011")}</span>
                             </div>
                         ) : (
                             <div className={styles.grid}>
@@ -189,11 +193,9 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId, onChan
                                         </div>
                                         <div className={styles.info}>
                                             <div className={styles.name}>{p.name}</div>
-                                            <div className={styles.status}>呼び出し可能</div>
+                                            <div data-i18n="components.PeopleModal.text012" className={styles.status}>{uiText("components.PeopleModal.text012")}</div>
                                         </div>
-                                        <button className={styles.summonBtn} disabled={!!summoningId}>
-                                            呼ぶ
-                                        </button>
+                                        <button data-i18n="components.PeopleModal.text013" className={styles.summonBtn} disabled={!!summoningId}>{uiText("components.PeopleModal.text013")}</button>
                                     </div>
                                 ))}
                             </div>
@@ -202,8 +204,8 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId, onChan
                         // Here tab - current occupants
                         occupants.length === 0 ? (
                             <div className={styles.empty}>
-                                <p>ここには誰もいません。</p>
-                                <span className={styles.subtext}>「呼び出し」タブからペルソナを呼び出しましょう。</span>
+                                <p data-i18n="components.PeopleModal.text014">{uiText("components.PeopleModal.text014")}</p>
+                                <span data-i18n="components.PeopleModal.text015" className={styles.subtext}>{uiText("components.PeopleModal.text015")}</span>
                             </div>
                         ) : (
                             <div className={styles.grid}>
@@ -223,13 +225,13 @@ export default function PeopleModal({ isOpen, onClose, currentBuildingId, onChan
                                         </div>
                                         <div className={styles.info}>
                                             <div className={styles.name}>{p.name}</div>
-                                            <div className={styles.status}>滞在中</div>
+                                            <div data-i18n="components.PeopleModal.text016" className={styles.status}>{uiText("components.PeopleModal.text016")}</div>
                                         </div>
-                                        <button
+                                        <button data-i18n="components.PeopleModal.text017"
                                             className={styles.dismissBtn}
                                             onClick={() => handleDismiss(p.id, p.name)}
                                             disabled={!!dismissingId}
-                                            title="自室に戻す"
+                                            title={uiText("components.PeopleModal.text017")}
                                         >
                                             <Home size={16} />
                                         </button>

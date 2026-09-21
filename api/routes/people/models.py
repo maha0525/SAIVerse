@@ -154,10 +154,13 @@ class AIConfigResponse(BaseModel):
     audio_model: Optional[str] = None
     video_model: Optional[str] = None
     memory_weave_model: Optional[str] = None
+    # 反射判断のモデルのペルソナ個別の上書き (None = 世界の既定に従う)
+    reflex_judgment_model: Optional[str] = None
     autonomy_enabled: bool = True
     chronicle_enabled: bool = True
     autonomous_chronicle_enabled: bool = True
     auto_recall_enabled: bool = True
+    auto_recall_enhanced: bool = False
     memory_weave_context: bool = True
     memopedia_index_enabled: bool = False
     core_memory_char_budget: Optional[int] = None  # 記憶アーキv2 ゾーンA 容量目安 (NULL → 既定 2000)
@@ -171,6 +174,8 @@ class AIConfigResponse(BaseModel):
     linked_user_id: Optional[int] = None  # First linked user ID
     meta_judgment_config: Optional[MetaJudgmentConfig] = None  # Phase 4-e
     user_conv_timeout_minutes: Optional[int] = None  # 2026-05-09 wait_response auto-pause
+    language: Optional[str] = None
+    home_city_language: Optional[str] = "ja"
 
 class UpdateAIConfigRequest(BaseModel):
     description: Optional[str] = None
@@ -181,10 +186,12 @@ class UpdateAIConfigRequest(BaseModel):
     audio_model: Optional[str] = None
     video_model: Optional[str] = None
     memory_weave_model: Optional[str] = None
+    reflex_judgment_model: Optional[str] = None
     autonomy_enabled: Optional[bool] = None
     chronicle_enabled: Optional[bool] = None
     autonomous_chronicle_enabled: Optional[bool] = None
     auto_recall_enabled: Optional[bool] = None
+    auto_recall_enhanced: Optional[bool] = None
     memory_weave_context: Optional[bool] = None
     memopedia_index_enabled: Optional[bool] = None
     # 記憶アーキv2 ゾーンA 容量目安 (文字数)。
@@ -205,6 +212,7 @@ class UpdateAIConfigRequest(BaseModel):
     #   None = no change, 0 (or any non-positive) = clear to default (= 30 min),
     #   positive int = override.
     user_conv_timeout_minutes: Optional[int] = None
+    language: Optional[str] = None
 
 
 # -----------------------------------------------------------------------------

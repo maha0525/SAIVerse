@@ -1,7 +1,13 @@
 {
   "name": "create_building",
-  "display_name": "Building作成",
-  "description": "Create a new building with customized settings, optionally generating interior image",
+  "display_name": {
+    "ja": "Building作成",
+    "en": "Create Building"
+  },
+  "description": {
+    "ja": "カスタマイズ設定と内装画像付きで新しいBuildingを作成します。",
+    "en": "Create a new building with customized settings, optionally generating interior image."
+  },
   "input_schema": [
     {
       "name": "input",

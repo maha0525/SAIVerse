@@ -1,4 +1,11 @@
 'use client';
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 /**
  * v0.2.x 以前の Memopedia を v0.3.x 用へ変換する（本文 → Fragment）。
@@ -102,6 +109,7 @@ const initialDecisions = (p: Preview): Record<string, Record<number, Choice>> =>
 };
 
 export default function MemopediaConversion({ personaId }: { personaId: string }) {
+    useLocale();
     const [preview, setPreview] = useState<Preview | null>(null);
     const [decisions, setDecisions] = useState<Record<string, Record<number, Choice>>>({});
     const [runs, setRuns] = useState<Run[]>([]);
@@ -127,7 +135,7 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
     };
 
     const call = async (path: string, init?: RequestInit) => {
-        const res = await fetch(`${base}${path}`, init);
+        const res = await apiFetch(`${base}${path}`, init);
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         return data;
@@ -166,7 +174,7 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
             setDecisions(init);
             await loadRuns();
         } catch (e) {
-            setError(e instanceof Error ? e.message : '確認に失敗しました');
+            setError(e instanceof Error ? e.message : uiText("components.memory.MemopediaConversion.text001"));
         } finally {
             setBusy(null);
         }
@@ -181,7 +189,7 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ decisions, fingerprint: preview?.fingerprint }),
             });
-            setResult(data.message || '変換しました');
+            setResult(data.message || uiText("components.memory.MemopediaConversion.text002"));
             setPreview(null);
             setDecisions({});
             syncDecisions('');
@@ -189,7 +197,7 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
             setRestateFailed(false);
             await loadRuns();
         } catch (e) {
-            setError(e instanceof Error ? e.message : '変換に失敗しました');
+            setError(e instanceof Error ? e.message : uiText("components.memory.MemopediaConversion.text003"));
         } finally {
             setBusy(null);
         }
@@ -205,12 +213,12 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ run_id: runId, force }),
             });
-            setResult(data.message || '取り消しました');
+            setResult(data.message || uiText("components.memory.MemopediaConversion.text004"));
             setPreview(null);
             await loadRuns();
         } catch (e) {
             // 変換より後の編集があると既定で拒否される。何を失うかを見せてから選ばせる。
-            setError(e instanceof Error ? e.message : '取り消しに失敗しました');
+            setError(e instanceof Error ? e.message : uiText("components.memory.MemopediaConversion.text005"));
             if (!force) setForceRun(runId);
         } finally {
             setBusy(null);
@@ -290,25 +298,18 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
             <div className={styles.header}>
                 <FileText size={22} className={styles.icon} />
                 <div>
-                    <h3 className={styles.title}>v0.2.x の Memopedia を v0.3.x 用に変換</h3>
-                    <p className={styles.description}>
-                        旧バージョンで自動生成された Memopedia ページを、記憶想起・検索に適した形式に変換します。
-                        費用は掛かりません。
-                        <br />
-                        <strong>変換中は、このペルソナのメモリーを他の画面から編集しないでください。</strong>
-                        書き込みがぶつかると、変換が終わるまで待たされるか失敗します。
-                    </p>
+                    <h3 data-i18n="components.memory.MemopediaConversion.text006" className={styles.title}>{uiText("components.memory.MemopediaConversion.text006")}</h3>
+                    <p data-i18n="components.memory.MemopediaConversion.text007 components.memory.MemopediaConversion.text009" className={styles.description}>{uiText("components.memory.MemopediaConversion.text007")}<br />
+                        <strong data-i18n="components.memory.MemopediaConversion.text008">{uiText("components.memory.MemopediaConversion.text008")}</strong>{uiText("components.memory.MemopediaConversion.text009")}</p>
                 </div>
             </div>
 
-            <button className={styles.primaryButton} onClick={handlePreview} disabled={busy !== null}>
+            <button data-i18n="components.memory.MemopediaConversion.text010 components.memory.MemopediaConversion.text011" className={styles.primaryButton} onClick={handlePreview} disabled={busy !== null}>
                 {busy === 'preview'
-                    ? <><Loader2 size={16} className={styles.loader} /> 確認しています...</>
-                    : '変換対象を確認'}
+                    ? <><Loader2 size={16} className={styles.loader} />{uiText("components.memory.MemopediaConversion.text010")}</>
+                    : uiText("components.memory.MemopediaConversion.text011")}
             </button>
-            <p className={styles.subtle}>
-                確認した後、変換を実行可能になります。確認処理はデータを一切変更しません。
-            </p>
+            <p data-i18n="components.memory.MemopediaConversion.text012" className={styles.subtle}>{uiText("components.memory.MemopediaConversion.text012")}</p>
 
             {error && (
                 <div className={styles.error}>
@@ -321,21 +322,15 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                 <div className={styles.pendingHeader}>
                     <AlertTriangle size={16} className={styles.warnIcon} />
                     <div>
-                        <strong>変換より後の編集ごと変換前へ戻しますか？</strong>
-                        <div className={styles.pendingHint}>
-                            戻すと、その編集で書かれた内容も消えます。
-                        </div>
+                        <strong data-i18n="components.memory.MemopediaConversion.text013">{uiText("components.memory.MemopediaConversion.text013")}</strong>
+                        <div data-i18n="components.memory.MemopediaConversion.text014" className={styles.pendingHint}>{uiText("components.memory.MemopediaConversion.text014")}</div>
                         <div className={styles.confirmRow} style={{ marginTop: '0.5rem' }}>
-                            <button
+                            <button data-i18n="components.memory.MemopediaConversion.text015"
                                 className={styles.confirmYes}
                                 onClick={() => handleRevert(forceRun, true)}
                                 disabled={busy !== null}
-                            >
-                                承知のうえで戻す
-                            </button>
-                            <button className={styles.confirmNo} onClick={() => setForceRun(null)}>
-                                やめる
-                            </button>
+                            >{uiText("components.memory.MemopediaConversion.text015")}</button>
+                            <button data-i18n="components.memory.MemopediaConversion.text016" className={styles.confirmNo} onClick={() => setForceRun(null)}>{uiText("components.memory.MemopediaConversion.text016")}</button>
                         </div>
                     </div>
                 </div>
@@ -347,13 +342,11 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                 <>
                     <div className={styles.summary}>
                         <div className={styles.summaryRow}>
-                            <span className={styles.summaryLabel}>
-                                全 {preview.total_page_count} ページ中 {preview.page_count} ページに対して移行処理を行います
-                                {preview.kept_body_count > 0 && (
-                                    <>（うち {preview.kept_body_count} 件は手動での編集内容を保持します）</>
-                                )}。
+                            <span data-i18n="components.memory.MemopediaConversion.text017 components.memory.MemopediaConversion.text018 components.memory.MemopediaConversion.text019 components.memory.MemopediaConversion.text020 components.memory.MemopediaConversion.text021 components.memory.MemopediaConversion.period" className={styles.summaryLabel}>{uiText("components.memory.MemopediaConversion.text017")}{preview.total_page_count}{uiText("components.memory.MemopediaConversion.text018")}{preview.page_count}{uiText("components.memory.MemopediaConversion.text019")}{preview.kept_body_count > 0 && (
+                                    <>{uiText("components.memory.MemopediaConversion.text020")}{preview.kept_body_count}{uiText("components.memory.MemopediaConversion.text021")}</>
+                                )}{uiText("components.memory.MemopediaConversion.period")}
                                 {restating && (
-                                    <span className={styles.subtle}>選択を反映して数え直しています…</span>
+                                    <span data-i18n="components.memory.MemopediaConversion.text022" className={styles.subtle}>{uiText("components.memory.MemopediaConversion.text022")}</span>
                                 )}
                             </span>
                         </div>
@@ -362,11 +355,8 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                     {!preview.is_safe && (
                         <div className={styles.error}>
                             <AlertTriangle size={16} />
-                            <span>
-                                変換の前後で本文の内容が一致しないため、実行できません（データは変更されていません）。
-                                {preview.verbatim_breaches.length > 0 && (
-                                    <> ずれのあるページ {preview.verbatim_breaches.length} 枚
-                                    （例: {preview.verbatim_breaches[0].title} — {preview.verbatim_breaches[0].detail}）</>
+                            <span data-i18n="components.memory.MemopediaConversion.text023 components.memory.MemopediaConversion.text024 components.memory.MemopediaConversion.text025">{uiText("components.memory.MemopediaConversion.text023")}{preview.verbatim_breaches.length > 0 && (
+                                    <>{uiText("components.memory.MemopediaConversion.text024")}{preview.verbatim_breaches.length}{uiText("components.memory.MemopediaConversion.text025", { p1: preview.verbatim_breaches[0].title, p2: preview.verbatim_breaches[0].detail })}</>
                                 )}
                             </span>
                         </div>
@@ -374,7 +364,7 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
 
                     {preview.marks.length > 0 && (
                         <div className={styles.marks}>
-                            <div className={styles.marksTitle}>気づいた点</div>
+                            <div data-i18n="components.memory.MemopediaConversion.text026" className={styles.marksTitle}>{uiText("components.memory.MemopediaConversion.text026")}</div>
                             {preview.marks.map((m, i) => (
                                 <div key={i} className={styles.markRow}>
                                     <span className={styles.markKind}>{m.kind}</span>
@@ -390,12 +380,8 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                             <div className={styles.pendingHeader}>
                                 <AlertTriangle size={16} className={styles.warnIcon} />
                                 <div>
-                                    <strong>自動生成かどうか確認できなかった行があります。</strong>
-                                    <div className={styles.pendingHint}>
-                                        この {preview.pending_count} 行に、あなたやペルソナが手動で書いた文が混入していないか確認してください。
-                                        移行したくない行はチェックを外してください。外した行は本文に残ります。
-                                        薄い字の行は前後の文脈で、判断は要りません。
-                                    </div>
+                                    <strong data-i18n="components.memory.MemopediaConversion.text027">{uiText("components.memory.MemopediaConversion.text027")}</strong>
+                                    <div data-i18n="components.memory.MemopediaConversion.text028 components.memory.MemopediaConversion.text029" className={styles.pendingHint}>{uiText("components.memory.MemopediaConversion.text028")}{preview.pending_count}{uiText("components.memory.MemopediaConversion.text029")}</div>
                                 </div>
                             </div>
 
@@ -404,12 +390,8 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                                     <div className={styles.pendingPageHead}>
                                         <span className={styles.pageTitle}>{page.title}</span>
                                         <span className={styles.bulkButtons}>
-                                            <button onClick={() => setPageChoice(page, 'fragment')}>
-                                                すべてチェック
-                                            </button>
-                                            <button onClick={() => setPageChoice(page, 'body')}>
-                                                すべて外す
-                                            </button>
+                                            <button data-i18n="components.memory.MemopediaConversion.text030" onClick={() => setPageChoice(page, 'fragment')}>{uiText("components.memory.MemopediaConversion.text030")}</button>
+                                            <button data-i18n="components.memory.MemopediaConversion.text031" onClick={() => setPageChoice(page, 'body')}>{uiText("components.memory.MemopediaConversion.text031")}</button>
                                         </span>
                                     </div>
 
@@ -438,8 +420,8 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                                                     ) : (
                                                         <>
                                                             <span className={styles.lineText}>{line.content}</span>
-                                                            <span className={styles.confirmedTag}>
-                                                                {line.role === 'fragment' ? '移行します' : '本文に残ります'}
+                                                            <span data-i18n="components.memory.MemopediaConversion.text032 components.memory.MemopediaConversion.text033" className={styles.confirmedTag}>
+                                                                {line.role === 'fragment' ? uiText("components.memory.MemopediaConversion.text032") : uiText("components.memory.MemopediaConversion.text033")}
                                                             </span>
                                                         </>
                                                     )}
@@ -453,47 +435,37 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
                     )}
 
                     <div className={styles.applyArea}>
-                        <div className={styles.applyNote}>
-                            移行対象: {preview.confirmed_count + decidedCount} 行　保留: {keptCount} 行
-                            {preview.dedup_count > 0 && (
-                                <span className={styles.subtle}>
-                                    移行対象のうち {preview.dedup_count} 行は同じ内容が記録済みのため、重複させずにまとめます。
-                                </span>
+                        <div data-i18n="components.memory.MemopediaConversion.text034 components.memory.MemopediaConversion.text035 components.memory.MemopediaConversion.text036" className={styles.applyNote}>{uiText("components.memory.MemopediaConversion.text034")}{preview.confirmed_count + decidedCount}{uiText("components.memory.MemopediaConversion.text035")}{keptCount}{uiText("components.memory.MemopediaConversion.text036")}{preview.dedup_count > 0 && (
+                                <span data-i18n="components.memory.MemopediaConversion.text037 components.memory.MemopediaConversion.text038" className={styles.subtle}>{uiText("components.memory.MemopediaConversion.text037")}{preview.dedup_count}{uiText("components.memory.MemopediaConversion.text038")}</span>
                             )}
                         </div>
                         {restateFailed && (
                             <div className={styles.error}>
                                 <AlertCircle size={16} />
-                                <span>
-                                    選択を反映した件数を数え直せませんでした。表示中の数字は
-                                    いまの選択と合っていないため、実行できません。
-                                    「変換対象を確認」からやり直してください。
-                                </span>
+                                <span data-i18n="components.memory.MemopediaConversion.text039">{uiText("components.memory.MemopediaConversion.text039")}</span>
                             </div>
                         )}
                         {!confirming ? (
-                            <button
+                            <button data-i18n="components.memory.MemopediaConversion.text040 components.memory.MemopediaConversion.text041"
                                 className={styles.primaryButton}
                                 onClick={() => setConfirming(true)}
                                 disabled={busy !== null || !canApply}
                             >
-                                {restating ? '数え直しています...' : '変換を実行'}
+                                {restating ? uiText("components.memory.MemopediaConversion.text040") : uiText("components.memory.MemopediaConversion.text041")}
                             </button>
                         ) : (
                             <div className={styles.confirmRow}>
-                                <span>本当に実行しますか？</span>
-                                <button
+                                <span data-i18n="components.memory.MemopediaConversion.text042">{uiText("components.memory.MemopediaConversion.text042")}</span>
+                                <button data-i18n="components.memory.MemopediaConversion.text043 components.memory.MemopediaConversion.text044"
                                     className={styles.confirmYes}
                                     onClick={handleApply}
                                     disabled={busy !== null || !canApply}
                                 >
                                     {busy === 'apply'
-                                        ? <><Loader2 size={14} className={styles.loader} /> 変換中...</>
-                                        : 'はい、実行する'}
+                                        ? <><Loader2 size={14} className={styles.loader} />{uiText("components.memory.MemopediaConversion.text043")}</>
+                                        : uiText("components.memory.MemopediaConversion.text044")}
                                 </button>
-                                <button className={styles.confirmNo} onClick={() => setConfirming(false)} disabled={busy !== null}>
-                                    やめる
-                                </button>
+                                <button data-i18n="components.memory.MemopediaConversion.text045" className={styles.confirmNo} onClick={() => setConfirming(false)} disabled={busy !== null}>{uiText("components.memory.MemopediaConversion.text045")}</button>
                             </div>
                         )}
                     </div>
@@ -502,22 +474,21 @@ export default function MemopediaConversion({ personaId }: { personaId: string }
 
             {runs.length > 0 && (
                 <div className={styles.runs}>
-                    <div className={styles.runsTitle}>実行履歴</div>
+                    <div data-i18n="components.memory.MemopediaConversion.text046" className={styles.runsTitle}>{uiText("components.memory.MemopediaConversion.text046")}</div>
                     {runs.map((run) => (
                         <div key={run.run_id} className={styles.runRow}>
                             <span className={styles.runId}>{run.run_id}</span>
-                            <span className={styles.runInfo}>
-                                {new Date(run.converted_at * 1000).toLocaleString('ja-JP')} ／
-                                {run.page_count} ページ・{run.fragment_count + run.dedup_count} 行を移行
-                            </span>
-                            <button
+                            <span data-i18n="components.memory.MemopediaConversion.text047 components.memory.MemopediaConversion.text048" className={styles.runInfo}>
+                                {new Date(run.converted_at * 1000).toLocaleString(getFormatLocale())} /
+                                {run.page_count}{uiText("components.memory.MemopediaConversion.text047")}{run.fragment_count + run.dedup_count}{uiText("components.memory.MemopediaConversion.text048")}</span>
+                            <button data-i18n="components.memory.MemopediaConversion.text049 components.memory.MemopediaConversion.text050"
                                 className={styles.revertButton}
                                 onClick={() => handleRevert(run.run_id)}
                                 disabled={busy !== null}
                             >
                                 {busy === `revert:${run.run_id}`
-                                    ? <><Loader2 size={14} className={styles.loader} /> 取り消し中...</>
-                                    : <><RotateCcw size={14} /> この変換を取り消す</>}
+                                    ? <><Loader2 size={14} className={styles.loader} />{uiText("components.memory.MemopediaConversion.text049")}</>
+                                    : <><RotateCcw size={14} />{uiText("components.memory.MemopediaConversion.text050")}</>}
                             </button>
                         </div>
                     ))}

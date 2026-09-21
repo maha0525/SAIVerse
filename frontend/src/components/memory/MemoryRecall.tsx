@@ -1,3 +1,8 @@
+
+import { apiFetch, parseUIEvent } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useRef, useEffect } from 'react';
 import { Search, Loader2, AlertCircle, Brain, Trash2, Plus, FileDown, FileUp, Activity, LifeBuoy, Download, Upload } from 'lucide-react';
 import styles from './MemoryRecall.module.css';
@@ -32,6 +37,7 @@ interface UnifiedResult {
 }
 
 export default function MemoryRecall({ personaId }: MemoryRecallProps) {
+    useLocale();
     const [isDeletingChronicle, setIsDeletingChronicle] = useState(false);
     const [isDeletingMemopedia, setIsDeletingMemopedia] = useState(false);
     const [confirmChronicle, setConfirmChronicle] = useState(false);
@@ -52,7 +58,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setExportImportResult(null);
         setExportImportError(null);
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/export`);
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/export`);
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err.detail || `HTTP ${res.status}`);
@@ -68,9 +74,9 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             a.download = `${personaId}_memopedia_${timestamp}.json`;
             a.click();
             URL.revokeObjectURL(url);
-            setExportImportResult(`${pageCount} ページをエクスポートしました`);
+            setExportImportResult(uiText("components.memory.MemoryRecall.text001", { p1: pageCount }));
         } catch (e: any) {
-            setExportImportError(e.message || 'エクスポートに失敗しました');
+            setExportImportError(e.message || uiText("components.memory.MemoryRecall.text002"));
         } finally {
             setIsExporting(false);
         }
@@ -84,10 +90,10 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             const text = await file.text();
             const data = JSON.parse(text);
             if (!data.pages || !Array.isArray(data.pages)) {
-                throw new Error('無効なフォーマット: pages 配列が見つかりません');
+                throw new Error(uiText("components.memory.MemoryRecall.text003"));
             }
             const shouldClear = importClear && confirmImportClear;
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/people/${personaId}/memopedia/import?clear=${shouldClear}`,
                 {
                     method: 'POST',
@@ -101,11 +107,11 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             }
             const result = await res.json();
             setExportImportResult(
-                `${result.imported_count} ページをインポートしました${shouldClear ? '（既存データを削除後）' : '（マージ）'}`
+                uiText("components.memory.MemoryRecall.text004", { p1: result.imported_count, p2: shouldClear ? uiText("common.extra008") : uiText("common.extra009") })
             );
             setConfirmImportClear(false);
         } catch (e: any) {
-            setExportImportError(e.message || 'インポートに失敗しました');
+            setExportImportError(e.message || uiText("components.memory.MemoryRecall.text005"));
         } finally {
             setIsImporting(false);
             if (fileInputRef.current) fileInputRef.current.value = '';
@@ -120,7 +126,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setAddingToWm(hit.source_id);
         setWmAddResult(null);
         try {
-            const res = await fetch(`/api/people/${personaId}/working-memory/recall`, {
+            const res = await apiFetch(`/api/people/${personaId}/working-memory/recall`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -148,7 +154,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setEmbeddingResult(null);
         setEmbeddingError(null);
         try {
-            const res = await fetch(`/api/people/${personaId}/debug/generate-embeddings`, {
+            const res = await apiFetch(`/api/people/${personaId}/debug/generate-embeddings`, {
                 method: 'POST',
             });
             const data = await res.json().catch(() => ({}));
@@ -157,7 +163,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             }
             setEmbeddingResult(data.message || 'OK');
         } catch (e: any) {
-            setEmbeddingError(e.message || 'Embedding生成に失敗しました');
+            setEmbeddingError(e.message || uiText("components.memory.MemoryRecall.text006"));
         } finally {
             setIsGeneratingEmbeddings(false);
         }
@@ -181,14 +187,14 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
     const handleUnifiedRecall = async () => {
         const q = unifiedQuery.trim();
         if (!q) {
-            setUnifiedError('検索クエリを入力してね');
+            setUnifiedError(uiText("components.memory.MemoryRecall.text007"));
             return;
         }
         setUnifiedLoading(true);
         setUnifiedError(null);
         setUnifiedResult(null);
         try {
-            const res = await fetch(`/api/people/${personaId}/unified-recall`, {
+            const res = await apiFetch(`/api/people/${personaId}/unified-recall`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -204,7 +210,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             if (!res.ok) {
                 const text = await res.text();
                 try {
-                    const data = JSON.parse(text);
+                    const data = parseUIEvent(text);
                     throw new Error(data.detail || 'Unified recall failed');
                 } catch {
                     throw new Error(`Server error: ${text.substring(0, 200)}`);
@@ -236,16 +242,16 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setRescueResult(null);
         setRescueError(null);
         try {
-            const res = await fetch(`/api/people/${personaId}/rescue-stelis-thread`, {
+            const res = await apiFetch(`/api/people/${personaId}/rescue-stelis-thread`, {
                 method: 'POST',
             });
             const data = await res.json();
             if (!res.ok) {
-                throw new Error(data.detail || 'Stelis救出に失敗しました');
+                throw new Error(data.detail || uiText("components.memory.MemoryRecall.text008"));
             }
             setRescueResult(data);
         } catch (err: any) {
-            setRescueError(err.message || 'エラーが発生しました');
+            setRescueError(err.message || uiText("components.memory.MemoryRecall.text009"));
         } finally {
             setIsRescuing(false);
         }
@@ -275,7 +281,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setBuildMemopediaError(null);
         const from = resume ? buildMemopediaResume : null;
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/build-from-logs`, {
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/build-from-logs`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -296,20 +302,20 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             if (currentPersonaRef.current !== personaId) return;
             const jobId = data.job_id;
             setBuildMemopediaJobId(jobId);
-            setBuildMemopediaProgress('開始しました...');
+            setBuildMemopediaProgress(uiText("components.memory.MemoryRecall.text010"));
 
             // Poll for status
             buildMemopediaPollRef.current = setInterval(async () => {
                 try {
-                    const statusRes = await fetch(`/api/people/${personaId}/memopedia/generate/${jobId}`);
+                    const statusRes = await apiFetch(`/api/people/${personaId}/memopedia/generate/${jobId}`);
                     if (!statusRes.ok) return;
                     // 応答を待っている間にペルソナが替わっていたら、この結果は
                     // いま見えている画面のものではない
                     if (currentPersonaRef.current !== personaId) return;
                     const status = await statusRes.json();
                     const progressText = status.total > 0
-                        ? `${status.progress}/${status.total} バッチ処理中: ${status.message || ''}`
-                        : (status.message || '処理中...');
+                        ? uiText("components.memory.MemoryRecall.text011", { p1: status.progress, p2: status.total, p3: status.message || '' })
+                        : (status.message || uiText("components.memory.MemoryRecall.text012"));
                     setBuildMemopediaProgress(progressText);
 
                     // partial = 一部のバッチで抽出に失敗したが、残りは終わった状態。
@@ -325,7 +331,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                             // 失敗した回の続き位置は信用できない (どこまで
                             // 反映されたか分からない)。持ち越さない
                             setBuildMemopediaResume(null);
-                            setBuildMemopediaError(status.error || '失敗しました');
+                            setBuildMemopediaError(status.error || uiText("components.memory.MemoryRecall.text013"));
                         } else {
                             const r = status.result;
                             // 途中で終わったときだけ「続きから」を持つ。全部
@@ -341,21 +347,21 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                                 // 出すと、残りがあることが画面から消える
                                 const leftovers: string[] = [];
                                 if (r.failed_batches) {
-                                    leftovers.push(`${r.failed_batches} バッチは失敗しました。「続きから再構築」を押すと、最初の失敗の手前からやり直します`);
+                                    leftovers.push(uiText("components.memory.MemoryRecall.text014", { p1: r.failed_batches }));
                                 }
                                 if (r.messages_skipped) {
-                                    leftovers.push(`${r.messages_skipped} メッセージは今回の分量に満たないため次回に回しました`);
+                                    leftovers.push(uiText("components.memory.MemoryRecall.text015", { p1: r.messages_skipped }));
                                 }
                                 if (r.deduped_notes) {
-                                    leftovers.push(`${r.deduped_notes} 件は同じ内容が記録済みのため新しくは作りませんでした`);
+                                    leftovers.push(uiText("components.memory.MemoryRecall.text016", { p1: r.deduped_notes }));
                                 }
                                 setBuildMemopediaResult(
-                                    `${r.total_entities} エンティティ抽出, ${r.new_pages} 新規, ${r.updated_pages} 更新`
-                                    + ` (${r.messages_fetched ?? r.messages_processed} メッセージ中 ${r.messages_processed} 件を ${r.batches_processed} バッチで処理)`
-                                    + (leftovers.length ? ` ／ ${leftovers.join('。')}。` : '')
+                                    uiText("components.memory.MemoryRecall.text017", { p1: r.total_entities, p2: r.new_pages, p3: r.updated_pages })
+                                    + uiText("components.memory.MemoryRecall.text018", { p1: r.messages_fetched ?? r.messages_processed, p2: r.messages_processed, p3: r.batches_processed })
+                                    + (leftovers.length ? uiText("components.memory.MemoryRecall.leftoversFormat", { p1: leftovers.join(uiText("components.memory.MemoryRecall.leftoverJoiner")) }) : '')
                                 );
                             } else {
-                                setBuildMemopediaResult(status.message || '完了');
+                                setBuildMemopediaResult(status.message || uiText("components.memory.MemoryRecall.text019"));
                             }
                         }
                     }
@@ -365,7 +371,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             }, 2000);
         } catch (e: any) {
             setIsBuildingMemopedia(false);
-            setBuildMemopediaError(e.message || '開始に失敗しました');
+            setBuildMemopediaError(e.message || uiText("components.memory.MemoryRecall.text020"));
         }
     };
 
@@ -401,109 +407,109 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
     const formatDiagnosisReport = (data: any): string => {
         const lines: string[] = [];
         const formatTime = (ts: number | null): string => {
-            if (ts == null) return '(不明)';
+            if (ts == null) return uiText("components.memory.MemoryRecall.text021");
             return new Date(ts * 1000).toISOString().replace('T', ' ').replace('.000Z', '') + ' UTC';
         };
 
-        lines.push('Chronicle 診断レポート');
+        lines.push(uiText("components.memory.MemoryRecall.text022"));
         lines.push('='.repeat(60));
-        lines.push(`生成日時: ${formatTime(data.generated_at)}`);
-        lines.push(`ペルソナ: ${data.persona_id}`);
+        lines.push(uiText("components.memory.MemoryRecall.text023", { p1: formatTime(data.generated_at) }));
+        lines.push(uiText("components.memory.MemoryRecall.text024", { p1: data.persona_id }));
         lines.push('');
 
         // --- 全体サマリー ---
-        lines.push('== 全体サマリー ==');
-        lines.push(`総メッセージ数 (Stelis含む): ${data.total_messages}`);
-        lines.push(`最後の Chronicle 以降のメッセージ数 (Stelis含む): ${data.messages_after_last_chronicle}`);
-        lines.push(`Chronicle の最大レベル: ${data.max_level}`);
+        lines.push(uiText("components.memory.MemoryRecall.text025"));
+        lines.push(uiText("components.memory.MemoryRecall.text026", { p1: data.total_messages }));
+        lines.push(uiText("components.memory.MemoryRecall.text027", { p1: data.messages_after_last_chronicle }));
+        lines.push(uiText("components.memory.MemoryRecall.text028", { p1: data.max_level }));
         if (data.last_chronicle_end_time != null) {
-            lines.push(`最後の Chronicle 終端時刻: ${formatTime(data.last_chronicle_end_time)}`);
+            lines.push(uiText("components.memory.MemoryRecall.text029", { p1: formatTime(data.last_chronicle_end_time) }));
         }
         if (data.last_processed_at != null) {
-            lines.push(`最後の Chronicle 生成日時 (CLI経由): ${formatTime(data.last_processed_at)}`);
+            lines.push(uiText("components.memory.MemoryRecall.text030", { p1: formatTime(data.last_processed_at) }));
         }
         if (data.last_processed_message_id) {
-            lines.push(`最後に処理したメッセージID (CLI経由): ${data.last_processed_message_id}`);
+            lines.push(uiText("components.memory.MemoryRecall.text031", { p1: data.last_processed_message_id }));
         }
         lines.push('');
 
         // --- Stelis 除外後の統計 ---
-        lines.push('== Stelis 除外後の統計 (generate_unprocessed の実行環境に相当) ==');
+        lines.push(uiText("components.memory.MemoryRecall.text032"));
         if (data.stelis_stats_error) {
-            lines.push(`  ※ stelis_threads テーブルが存在しません: ${data.stelis_stats_error}`);
-            lines.push('  ※ generate_unprocessed はこのエラーで全メッセージをスキップする可能性があります');
+            lines.push(uiText("components.memory.MemoryRecall.text033", { p1: data.stelis_stats_error }));
+            lines.push(uiText("components.memory.MemoryRecall.text034"));
         } else {
-            lines.push(`  Stelis 除外メッセージ数: ${data.stelis_excluded_messages ?? '(取得失敗)'}`);
-            lines.push(`  生成対象の総メッセージ数 (Stelis除外): ${data.non_stelis_total_messages ?? '(取得失敗)'}`);
-            lines.push(`  生成対象の未処理メッセージ数 (Stelis除外 & 最後のChronicle以降): ${data.non_stelis_after_last_chronicle ?? '(取得失敗)'}`);
+            lines.push(uiText("components.memory.MemoryRecall.text035", { p1: data.stelis_excluded_messages ?? uiText("common.extra010") }));
+            lines.push(uiText("components.memory.MemoryRecall.text036", { p1: data.non_stelis_total_messages ?? uiText("common.extra010") }));
+            lines.push(uiText("components.memory.MemoryRecall.text037", { p1: data.non_stelis_after_last_chronicle ?? uiText("common.extra010") }));
         }
         lines.push('');
 
         // --- source_ids 実態調査 ---
-        lines.push('== Level 1 source_ids 実態調査 ==');
-        lines.push(`  【実際の source_ids 合計数】: ${data.lv1_actual_source_ids_total}`);
-        lines.push(`  【DB保存の message_count 合計】: ${data.messages_covered_by_lv1_stored}  ← 上と乖離していれば異常`);
-        lines.push(`  generate_unprocessed が「処理済み」とみなす件数 (ユニーク source_ids): ${data.lv1_unique_source_ids}`);
-        lines.push(`  重複 source_ids 数: ${data.lv1_duplicate_source_ids}  ${data.lv1_duplicate_source_ids > 0 ? '⚠️ 異常' : '(正常)'}`);
-        lines.push(`  孤児 source_ids 数 (存在しないメッセージ参照): ${data.lv1_orphan_source_ids}  ${data.lv1_orphan_source_ids > 0 ? '⚠️ 異常' : '(正常)'}`);
-        lines.push(`  source_count と実際の長さが不一致なエントリ数: ${data.lv1_mismatched_entries}  ${data.lv1_mismatched_entries > 0 ? '⚠️ 異常' : '(正常)'}`);
-        lines.push(`  source_ids 長の統計 (実値): 平均 ${data.lv1_actual_source_ids_avg}  最大 ${data.lv1_actual_source_ids_max}  最小 ${data.lv1_actual_source_ids_min}`);
+        lines.push(uiText("components.memory.MemoryRecall.text038"));
+        lines.push(uiText("components.memory.MemoryRecall.text039", { p1: data.lv1_actual_source_ids_total }));
+        lines.push(uiText("components.memory.MemoryRecall.text040", { p1: data.messages_covered_by_lv1_stored }));
+        lines.push(uiText("components.memory.MemoryRecall.text041", { p1: data.lv1_unique_source_ids }));
+        lines.push(uiText("components.memory.MemoryRecall.text042", { p1: data.lv1_duplicate_source_ids, p2: data.lv1_duplicate_source_ids > 0 ? uiText("common.extra011") : uiText("common.extra012") }));
+        lines.push(uiText("components.memory.MemoryRecall.text043", { p1: data.lv1_orphan_source_ids, p2: data.lv1_orphan_source_ids > 0 ? uiText("common.extra011") : uiText("common.extra012") }));
+        lines.push(uiText("components.memory.MemoryRecall.text044", { p1: data.lv1_mismatched_entries, p2: data.lv1_mismatched_entries > 0 ? uiText("common.extra011") : uiText("common.extra012") }));
+        lines.push(uiText("components.memory.MemoryRecall.text045", { p1: data.lv1_actual_source_ids_avg, p2: data.lv1_actual_source_ids_max, p3: data.lv1_actual_source_ids_min }));
         lines.push('');
 
         // --- レベル別統計 ---
-        lines.push('== レベル別統計 ==');
+        lines.push(uiText("components.memory.MemoryRecall.text046"));
         for (let level = 1; level <= data.max_level; level++) {
             const total = data.counts_by_level[level] ?? 0;
             const unconsolidated = data.unconsolidated_by_level[level] ?? 0;
             const consolidated = total - unconsolidated;
             const chars = data.content_chars_by_level?.[level];
             const charsStr = chars
-                ? `  本文: 計 ${chars.total_chars} 字 (平均 ${chars.avg_chars} / 最大 ${chars.max_chars} / 最小 ${chars.min_chars})`
+                ? uiText("components.memory.MemoryRecall.text047", { p1: chars.total_chars, p2: chars.avg_chars, p3: chars.max_chars, p4: chars.min_chars })
                 : '';
-            lines.push(`  Level ${level}: 計 ${total} 件  (統合済み: ${consolidated}  未統合: ${unconsolidated})${charsStr}`);
+            lines.push(uiText("components.memory.MemoryRecall.text048", { p1: level, p2: total, p3: consolidated, p4: unconsolidated, p5: charsStr }));
         }
         lines.push('');
 
         // --- 帯の実寸 ---
         // 帯が予算を超えて膨らむ容疑の切り分け材料。件数が多いのか、一件が長いのかを
         // ここで読み分ける。可視エントリは省略せず全件出す (数百件出ること自体が証拠)。
-        lines.push('== 帯の実寸（現在コンテキストに載る Chronicle） ==');
+        lines.push(uiText("components.memory.MemoryRecall.text049"));
         const band = data.band_simulation;
         if (!band) {
-            lines.push('  (この診断レポートには帯の実寸が含まれていません)');
+            lines.push(uiText("components.memory.MemoryRecall.text050"));
         } else if (band.error) {
-            lines.push(`  ※ 測定に失敗しました: ${band.error}`);
+            lines.push(uiText("components.memory.MemoryRecall.text051", { p1: band.error }));
         } else {
             const sourceLabel: Record<string, string> = {
-                persona_column: 'ペルソナ設定',
-                env: '環境変数 SAIVERSE_CHRONICLE_CHAR_BUDGET',
-                env_budget_disabled: '環境変数 SAIVERSE_CHRONICLE_CHAR_BUDGET（0 以下 = 文字数予算を無効化）',
-                builtin_default: '既定値',
+                persona_column: uiText("components.memory.MemoryRecall.text052"),
+                env: uiText("components.memory.MemoryRecall.text053"),
+                env_budget_disabled: uiText("components.memory.MemoryRecall.text054"),
+                builtin_default: uiText("components.memory.MemoryRecall.text055"),
             };
             const countBased = band.budget_mode === 'count_based';
-            lines.push(`  予算: ${band.budget} 字  (出どころ: ${sourceLabel[band.budget_source] ?? band.budget_source})`);
+            lines.push(uiText("components.memory.MemoryRecall.text056", { p1: band.budget, p2: sourceLabel[band.budget_source] ?? band.budget_source }));
             if (countBased) {
-                lines.push('  ※ 文字数予算が無効なため、件数モード（上限件数で読む）で測定しています。');
+                lines.push(uiText("components.memory.MemoryRecall.text057"));
             }
-            lines.push(`  帯のエントリ数: ${band.total_entries} 件`);
-            const budgetNote = countBased ? '(件数モード)' : (band.over_budget ? '⚠️ 予算超過' : '(予算内)');
-            lines.push(`  本文の合計文字数: ${band.content_chars} 字  ${budgetNote}`);
-            lines.push(`  整形後の文字数 (実際にLLMへ渡る形): ${band.formatted_chars} 字`);
-            lines.push('  ※ 提示ウィンドウ内で digest 表示中のエントリは除外していません。');
-            lines.push('  ※ 実際の帯は、ここから提示中の digest の分だけ減ります。');
-            lines.push('  レベル別の内訳:');
+            lines.push(uiText("components.memory.MemoryRecall.text058", { p1: band.total_entries }));
+            const budgetNote = countBased ? uiText("components.memory.MemoryRecall.text059") : (band.over_budget ? uiText("components.memory.MemoryRecall.text060") : uiText("components.memory.MemoryRecall.text061"));
+            lines.push(uiText("components.memory.MemoryRecall.text062", { p1: band.content_chars, p2: budgetNote }));
+            lines.push(uiText("components.memory.MemoryRecall.text063", { p1: band.formatted_chars }));
+            lines.push(uiText("components.memory.MemoryRecall.text064"));
+            lines.push(uiText("components.memory.MemoryRecall.text065"));
+            lines.push(uiText("components.memory.MemoryRecall.text066"));
             Object.keys(band.by_level ?? {})
                 .map((k) => parseInt(k))
                 .sort((a, b) => a - b)
                 .forEach((level) => {
                     const b = band.by_level[level];
-                    lines.push(`    Level ${level}: ${b.entries} 件  ${b.content_chars} 字`);
+                    lines.push(uiText("components.memory.MemoryRecall.text067", { p1: level, p2: b.entries, p3: b.content_chars }));
                 });
             const visible: any[] = band.visible_entries ?? [];
-            lines.push(`  可視エントリ一覧 (${visible.length} 件):`);
+            lines.push(uiText("components.memory.MemoryRecall.text068", { p1: visible.length }));
             visible.forEach((entry: any, idx: number) => {
-                lines.push(`    [${idx + 1}] Lv${entry.level}  ${entry.content_chars} 字  ID: ${entry.id}`);
-                lines.push(`         期間: ${formatTime(entry.start_time)}  〜  ${formatTime(entry.end_time)}`);
+                lines.push(uiText("components.memory.MemoryRecall.text069", { p1: idx + 1, p2: entry.level, p3: entry.content_chars, p4: entry.id }));
+                lines.push(uiText("components.memory.MemoryRecall.text070", { p1: formatTime(entry.start_time), p2: formatTime(entry.end_time) }));
             });
         }
         lines.push('');
@@ -511,37 +517,37 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         // --- Per-level エントリ詳細 ---
         for (let level = 1; level <= data.max_level; level++) {
             const entries: any[] = data.level_details[level] ?? [];
-            lines.push(`== Level ${level} Chronicle エントリ詳細 (${entries.length} 件) ==`);
+            lines.push(uiText("components.memory.MemoryRecall.text071", { p1: level, p2: entries.length }));
             entries.forEach((entry: any, idx: number) => {
                 lines.push(`  [${idx + 1}] ID: ${entry.id}`);
-                lines.push(`       期間: ${formatTime(entry.start_time)}  〜  ${formatTime(entry.end_time)}`);
+                lines.push(uiText("components.memory.MemoryRecall.text072", { p1: formatTime(entry.start_time), p2: formatTime(entry.end_time) }));
                 if (level === 1) {
                     const mismatch = entry.actual_source_ids_count !== entry.source_count_stored
-                        ? `  ⚠️ DB保存値: ${entry.source_count_stored}` : '';
-                    lines.push(`       source_ids 実数: ${entry.actual_source_ids_count}${mismatch}  message_count: ${entry.message_count}`);
+                        ? uiText("components.memory.MemoryRecall.text073", { p1: entry.source_count_stored }) : '';
+                    lines.push(uiText("components.memory.MemoryRecall.text074", { p1: entry.actual_source_ids_count, p2: mismatch, p3: entry.message_count }));
                 } else {
                     lines.push(`       source_count: ${entry.source_count_stored}  message_count: ${entry.message_count}`);
                 }
                 const consolidatedStr = entry.is_consolidated
-                    ? `はい → 親ID: ${entry.parent_id ?? '(なし)'}`
-                    : 'いいえ';
-                lines.push(`       統合済み: ${consolidatedStr}`);
+                    ? uiText("components.memory.MemoryRecall.text075", { p1: entry.parent_id ?? uiText("common.extra013") })
+                    : uiText("components.memory.MemoryRecall.text076");
+                lines.push(uiText("components.memory.MemoryRecall.text077", { p1: consolidatedStr }));
             });
             lines.push('');
         }
 
         // --- ギャップ分析 ---
-        lines.push('== ギャップ分析 (Chronicle 間の孤立メッセージ) ==');
+        lines.push(uiText("components.memory.MemoryRecall.text078"));
         if (data.gaps.length > 0) {
             data.gaps.forEach((gap: any, idx: number) => {
-                lines.push(`  ギャップ ${idx + 1}:`);
-                lines.push(`    孤立メッセージ数: ${gap.isolated_message_count}`);
-                lines.push(`    期間: ${formatTime(gap.gap_start_time)}  〜  ${formatTime(gap.gap_end_time)}`);
-                lines.push(`    直前の Chronicle ID: ${gap.prev_chronicle_id}`);
-                lines.push(`    直後の Chronicle ID: ${gap.next_chronicle_id}`);
+                lines.push(uiText("components.memory.MemoryRecall.text079", { p1: idx + 1 }));
+                lines.push(uiText("components.memory.MemoryRecall.text080", { p1: gap.isolated_message_count }));
+                lines.push(uiText("components.memory.MemoryRecall.text081", { p1: formatTime(gap.gap_start_time), p2: formatTime(gap.gap_end_time) }));
+                lines.push(uiText("components.memory.MemoryRecall.text082", { p1: gap.prev_chronicle_id }));
+                lines.push(uiText("components.memory.MemoryRecall.text083", { p1: gap.next_chronicle_id }));
             });
         } else {
-            lines.push('  ギャップなし (Level 1 Chronicle 間に孤立メッセージは検出されませんでした)');
+            lines.push(uiText("components.memory.MemoryRecall.text084"));
         }
 
         return lines.join('\n');
@@ -551,12 +557,12 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setIsDiagnosing(true);
         setDiagnosisError(null);
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/diagnosis`);
+            const res = await apiFetch(`/api/people/${personaId}/arasuji/diagnosis`);
             if (!res.ok) {
                 const text = await res.text();
                 try {
-                    const data = JSON.parse(text);
-                    throw new Error(data.detail || 'Chronicle診断の取得に失敗しました');
+                    const data = parseUIEvent(text);
+                    throw new Error(data.detail || uiText("components.memory.MemoryRecall.text085"));
                 } catch {
                     throw new Error(`Server error: ${text.substring(0, 200)}`);
                 }
@@ -574,7 +580,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
         } catch (err: any) {
-            setDiagnosisError(err.message || 'エラーが発生しました');
+            setDiagnosisError(err.message || uiText("components.memory.MemoryRecall.text086"));
         } finally {
             setIsDiagnosing(false);
         }
@@ -592,7 +598,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setIsDeletingChronicle(true);
         setDeleteResult(null);
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji`, {
+            const res = await apiFetch(`/api/people/${personaId}/arasuji`, {
                 method: 'DELETE',
             });
             if (!res.ok) {
@@ -600,9 +606,9 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                 throw new Error(text.substring(0, 200));
             }
             const data = await res.json();
-            setDeleteResult(`Chronicle: ${data.deleted_count}件を削除しました`);
+            setDeleteResult(uiText("components.memory.MemoryRecall.text087", { p1: data.deleted_count }));
         } catch (err: any) {
-            setDeleteResult(`Chronicle削除エラー: ${err.message}`);
+            setDeleteResult(uiText("components.memory.MemoryRecall.text088", { p1: err.message }));
         } finally {
             setIsDeletingChronicle(false);
             setConfirmChronicle(false);
@@ -613,7 +619,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         setIsDeletingMemopedia(true);
         setDeleteResult(null);
         try {
-            const res = await fetch(`/api/people/${personaId}/memopedia/pages`, {
+            const res = await apiFetch(`/api/people/${personaId}/memopedia/pages`, {
                 method: 'DELETE',
             });
             if (!res.ok) {
@@ -621,9 +627,9 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                 throw new Error(text.substring(0, 200));
             }
             const data = await res.json();
-            setDeleteResult(`Memopedia: ${data.deleted_count}件のページを削除しました`);
+            setDeleteResult(uiText("components.memory.MemoryRecall.text089", { p1: data.deleted_count }));
         } catch (err: any) {
-            setDeleteResult(`Memopedia削除エラー: ${err.message}`);
+            setDeleteResult(uiText("components.memory.MemoryRecall.text090", { p1: err.message }));
         } finally {
             setIsDeletingMemopedia(false);
             setConfirmMemopedia(false);
@@ -631,13 +637,13 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
     };
 
     const formatPersonaPreview = (hits: UnifiedHit[]): string => {
-        const lines = [`記憶検索結果: ${hits.length}件\n`];
+        const lines = [uiText("components.memory.MemoryRecall.text091", { p1: hits.length })];
         hits.forEach((hit, i) => {
             const n = i + 1;
             if (hit.source_type === 'chronicle') {
                 const start = hit.start_time ? new Date(hit.start_time * 1000).toISOString().slice(0, 16).replace('T', ' ') : '?';
                 const end = hit.end_time ? new Date(hit.end_time * 1000).toISOString().slice(0, 16).replace('T', ' ') : '?';
-                lines.push(`[${n}] Chronicle Lv${hit.level ?? 1} | ${start} ~ ${end} | ${hit.message_count ?? '?'}件`);
+                lines.push(uiText("components.memory.MemoryRecall.text092", { p1: n, p2: hit.level ?? 1, p3: start, p4: end, p5: hit.message_count ?? '?' }));
                 lines.push(`    URI: ${hit.uri}`);
                 lines.push(`    ${hit.content}`);
             } else if (hit.source_type === 'fragment') {
@@ -650,13 +656,13 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                 lines.push(`    URI: ${hit.uri}`);
                 lines.push(`    ${hit.content}`);
             } else if (hit.source_type === 'perception') {
-                lines.push(`[${n}] 知覚: ${hit.title}`);
+                lines.push(uiText("components.memory.MemoryRecall.text093", { p1: n, p2: hit.title }));
                 lines.push(`    ${hit.content}`);
             } else {
                 lines.push(`[${n}] Memopedia: ${hit.title}`);
-                if (hit.category) lines.push(`    カテゴリ: ${hit.category}`);
+                if (hit.category) lines.push(uiText("components.memory.MemoryRecall.text094", { p1: hit.category }));
                 lines.push(`    URI: ${hit.uri}`);
-                if (hit.content) lines.push(`    概要: ${hit.content}`);
+                if (hit.content) lines.push(uiText("components.memory.MemoryRecall.text095", { p1: hit.content }));
             }
             lines.push('');
         });
@@ -669,24 +675,21 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             <div className={styles.header} style={{ marginTop: '2rem' }}>
                 <Search size={24} className={styles.icon} />
                 <div>
-                    <h3 className={styles.title}>Unified Recall Test</h3>
-                    <p className={styles.description}>
-                        Chronicle（あらすじ）・Memopedia（知識ベース）・Fragment（断片知識）を横断してエンベディング検索します。
-                        未生成の Embedding があれば先に一括生成してください。
-                    </p>
+                    <h3 className={styles.title}>{uiText("components.memory.MemoryRecall.label001")}</h3>
+                    <p data-i18n="components.memory.MemoryRecall.text096" className={styles.description}>{uiText("components.memory.MemoryRecall.text096")}</p>
                 </div>
             </div>
 
-            <button
+            <button data-i18n="components.memory.MemoryRecall.text097 components.memory.MemoryRecall.text098"
                 className={styles.executeButton}
                 onClick={handleGenerateEmbeddings}
                 disabled={isGeneratingEmbeddings}
                 style={{ background: '#495057', marginBottom: '1rem' }}
             >
                 {isGeneratingEmbeddings ? (
-                    <><Loader2 size={16} className={styles.loader} /> 生成中...</>
+                    <><Loader2 size={16} className={styles.loader} />{uiText("components.memory.MemoryRecall.text097")}</>
                 ) : (
-                    'Embedding 一括生成 (Chronicle / Memopedia / Fragment)'
+                    uiText("components.memory.MemoryRecall.text098")
                 )}
             </button>
 
@@ -704,8 +707,8 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             )}
 
             <div className={styles.inputSection}>
-                <label className={styles.label}>検索クエリ</label>
-                <textarea
+                <label data-i18n="components.memory.MemoryRecall.text099" className={styles.label}>{uiText("components.memory.MemoryRecall.text099")}</label>
+                <textarea data-i18n="components.memory.MemoryRecall.text100"
                     className={styles.queryInput}
                     value={unifiedQuery}
                     onChange={(e) => setUnifiedQuery(e.target.value)}
@@ -715,14 +718,14 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                             handleUnifiedRecall();
                         }
                     }}
-                    placeholder="例: ロンドンへの旅行"
+                    placeholder={uiText("components.memory.MemoryRecall.text100")}
                     rows={2}
                 />
             </div>
 
             <div className={styles.paramsRow}>
                 <div className={styles.param}>
-                    <label className={styles.paramLabel}>Focus (4×深掘り)</label>
+                    <label data-i18n="components.memory.MemoryRecall.text101" className={styles.paramLabel}>{uiText("components.memory.MemoryRecall.text101")}</label>
                     <select
                         value={unifiedFocus}
                         onChange={(e) => setUnifiedFocus(e.target.value)}
@@ -734,12 +737,12 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                             color: 'inherit',
                         }}
                     >
-                        <option value="">なし (均等)</option>
-                        <option value="chronicle">Chronicle</option>
-                        <option value="memopedia">Memopedia</option>
-                        <option value="fragment">Fragment</option>
-                        <option value="message">Messages</option>
-                        <option value="perception">知覚 (通知の記録)</option>
+                        <option data-i18n="components.memory.MemoryRecall.text102" value="">{uiText("components.memory.MemoryRecall.text102")}</option>
+                        <option value="chronicle">{uiText("components.memory.MemoryRecall.label002")}</option>
+                        <option value="memopedia">{uiText("components.memory.MemoryRecall.label003")}</option>
+                        <option value="fragment">{uiText("components.memory.MemoryRecall.label004")}</option>
+                        <option value="message">{uiText("components.memory.MemoryRecall.label005")}</option>
+                        <option data-i18n="components.memory.MemoryRecall.text103" value="perception">{uiText("components.memory.MemoryRecall.text103")}</option>
                     </select>
                 </div>
             </div>
@@ -748,39 +751,33 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                 <label className={styles.toggleLabel}>
                     <input type="checkbox" checked={unifiedSearchChronicle}
                            onChange={(e) => setUnifiedSearchChronicle(e.target.checked)} />
-                    Chronicle
-                </label>
+                    {uiText("components.memory.MemoryRecall.label006")}</label>
                 <label className={styles.toggleLabel}>
                     <input type="checkbox" checked={unifiedSearchMemopedia}
                            onChange={(e) => setUnifiedSearchMemopedia(e.target.checked)} />
-                    Memopedia
-                </label>
+                    {uiText("components.memory.MemoryRecall.label007")}</label>
                 <label className={styles.toggleLabel}>
                     <input type="checkbox" checked={unifiedSearchFragments}
                            onChange={(e) => setUnifiedSearchFragments(e.target.checked)} />
-                    Fragment
-                </label>
+                    {uiText("components.memory.MemoryRecall.label008")}</label>
                 <label className={styles.toggleLabel}>
                     <input type="checkbox" checked={unifiedSearchMessages}
                            onChange={(e) => setUnifiedSearchMessages(e.target.checked)} />
-                    Messages
-                </label>
-                <label className={styles.toggleLabel}>
+                    {uiText("components.memory.MemoryRecall.label009")}</label>
+                <label data-i18n="components.memory.MemoryRecall.text104" className={styles.toggleLabel}>
                     <input type="checkbox" checked={unifiedSearchPerceptions}
-                           onChange={(e) => setUnifiedSearchPerceptions(e.target.checked)} />
-                    知覚
-                </label>
+                           onChange={(e) => setUnifiedSearchPerceptions(e.target.checked)} />{uiText("components.memory.MemoryRecall.text104")}</label>
             </div>
 
-            <button
+            <button data-i18n="components.memory.MemoryRecall.text105 components.memory.MemoryRecall.text106"
                 className={styles.executeButton}
                 onClick={handleUnifiedRecall}
                 disabled={unifiedLoading || !unifiedQuery.trim()}
             >
                 {unifiedLoading ? (
-                    <><Loader2 size={16} className={styles.loader} /> 実行中...</>
+                    <><Loader2 size={16} className={styles.loader} />{uiText("components.memory.MemoryRecall.text105")}</>
                 ) : (
-                    <><Search size={16} /> Unified Recall を実行</>
+                    <><Search size={16} />{uiText("components.memory.MemoryRecall.text106")}</>
                 )}
             </button>
 
@@ -794,14 +791,10 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             {unifiedResult && (
                 <div className={styles.resultSection}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '0.5rem' }}>
-                        <label className={styles.label} style={{ margin: 0 }}>
-                            検索結果 ({unifiedResult.total_hits} hits)
-                        </label>
-                        <label className={styles.toggleLabel}>
+                        <label data-i18n="components.memory.MemoryRecall.text107" className={styles.label} style={{ margin: 0 }}>{uiText("components.memory.MemoryRecall.text107")}{unifiedResult.total_hits} {uiText("components.memory.MemoryRecall.label010")}</label>
+                        <label data-i18n="components.memory.MemoryRecall.text108" className={styles.toggleLabel}>
                             <input type="checkbox" checked={showPersonaPreview}
-                                   onChange={(e) => setShowPersonaPreview(e.target.checked)} />
-                            ペルソナプレビュー
-                        </label>
+                                   onChange={(e) => setShowPersonaPreview(e.target.checked)} />{uiText("components.memory.MemoryRecall.text108")}</label>
                     </div>
 
                     {showPersonaPreview ? (
@@ -814,10 +807,10 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                             <thead>
                                 <tr>
                                     <th className={styles.rankCol}>#</th>
-                                    <th className={styles.scoreCol}>Score</th>
-                                    <th className={styles.roleCol}>Source</th>
-                                    <th className={styles.contentCol}>Title / Content</th>
-                                    <th style={{ width: '3rem', textAlign: 'center' }}>WM</th>
+                                    <th className={styles.scoreCol}>{uiText("components.memory.MemoryRecall.label011")}</th>
+                                    <th className={styles.roleCol}>{uiText("components.memory.MemoryRecall.label012")}</th>
+                                    <th className={styles.contentCol}>{uiText("components.memory.MemoryRecall.label013")}</th>
+                                    <th style={{ width: '3rem', textAlign: 'center' }}>{uiText("components.memory.MemoryRecall.label014")}</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -828,11 +821,11 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                                             style={{ color: getScoreColor(hit.score) }}>
                                             {hit.score.toFixed(4)}
                                         </td>
-                                        <td className={styles.roleCol}>
+                                        <td data-i18n="components.memory.MemoryRecall.text109" className={styles.roleCol}>
                                             {hit.source_type === 'chronicle' ? 'Chronicle'
                                                 : hit.source_type === 'fragment' ? 'Fragment'
                                                 : hit.source_type === 'message' ? 'Message'
-                                                : hit.source_type === 'perception' ? '知覚'
+                                                : hit.source_type === 'perception' ? uiText("components.memory.MemoryRecall.text109")
                                                 : 'Memopedia'}
                                             {hit.level != null && ` Lv${hit.level}`}
                                             {hit.category && ` [${hit.category}]`}
@@ -848,11 +841,11 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                                             </div>
                                         </td>
                                         <td style={{ textAlign: 'center' }}>
-                                            <button
+                                            <button data-i18n="components.memory.MemoryRecall.text110 components.memory.MemoryRecall.text111"
                                                 onClick={() => handleAddToWorkingMemory(hit)}
                                                 disabled={addingToWm === hit.source_id || !hit.uri}
-                                                title={hit.uri ? 'ワーキングメモリに追加'
-                                                    : '知覚バッチは URI を持たないため追加できません'}
+                                                title={hit.uri ? uiText("components.memory.MemoryRecall.text110")
+                                                    : uiText("components.memory.MemoryRecall.text111")}
                                                 style={{
                                                     background: wmAddResult?.id === hit.source_id && wmAddResult.ok
                                                         ? 'rgba(43, 138, 62, 0.2)' : 'none',
@@ -888,24 +881,21 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             <div className={styles.header} style={{ marginTop: '2rem' }}>
                 <LifeBuoy size={24} className={styles.icon} />
                 <div>
-                    <h3 className={styles.title}>Stelisスレッド救出</h3>
-                    <p className={styles.description}>
-                        アクティブスレッドがStelisスレッドのままになっている場合、通常スレッドとして再分類します。
-                        Chronicle生成がそのメッセージを処理できるようになります。
-                    </p>
+                    <h3 data-i18n="components.memory.MemoryRecall.text112" className={styles.title}>{uiText("components.memory.MemoryRecall.text112")}</h3>
+                    <p data-i18n="components.memory.MemoryRecall.text113" className={styles.description}>{uiText("components.memory.MemoryRecall.text113")}</p>
                 </div>
             </div>
 
-            <button
+            <button data-i18n="components.memory.MemoryRecall.text114 components.memory.MemoryRecall.text115"
                 className={styles.executeButton}
                 onClick={handleRescueStelisThread}
                 disabled={isRescuing}
                 style={{ background: '#5c4a1e' }}
             >
                 {isRescuing ? (
-                    <><Loader2 size={16} className={styles.loader} /> 処理中...</>
+                    <><Loader2 size={16} className={styles.loader} />{uiText("components.memory.MemoryRecall.text114")}</>
                 ) : (
-                    <><LifeBuoy size={16} /> Stelisスレッドを救出</>
+                    <><LifeBuoy size={16} />{uiText("components.memory.MemoryRecall.text115")}</>
                 )}
             </button>
 
@@ -918,19 +908,17 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
 
             {rescueResult && (
                 <div className={styles.resultSection}>
-                    <label className={styles.label}>救出完了</label>
+                    <label data-i18n="components.memory.MemoryRecall.text116" className={styles.label}>{uiText("components.memory.MemoryRecall.text116")}</label>
                     <div style={{ fontSize: '0.85rem', lineHeight: '1.6', color: '#69db7c' }}>
-                        <div>スレッドID: <code style={{ fontSize: '0.75rem' }}>{rescueResult.rescued_thread_id}</code></div>
-                        <div>救出メッセージ数: {rescueResult.messages_rescued} 件</div>
-                        <div>元のStelis深度: {rescueResult.former_stelis_depth}</div>
-                        {rescueResult.label && <div>ラベル: {rescueResult.label}</div>}
+                        <div data-i18n="components.memory.MemoryRecall.text117">{uiText("components.memory.MemoryRecall.text117")}<code style={{ fontSize: '0.75rem' }}>{rescueResult.rescued_thread_id}</code></div>
+                        <div data-i18n="components.memory.MemoryRecall.text118 components.memory.MemoryRecall.text119">{uiText("components.memory.MemoryRecall.text118")}{rescueResult.messages_rescued}{uiText("components.memory.MemoryRecall.text119")}</div>
+                        <div data-i18n="components.memory.MemoryRecall.text120">{uiText("components.memory.MemoryRecall.text120")}{rescueResult.former_stelis_depth}</div>
+                        {rescueResult.label && <div data-i18n="components.memory.MemoryRecall.text121">{uiText("components.memory.MemoryRecall.text121")}{rescueResult.label}</div>}
                         {rescueResult.parent_thread_id && (
-                            <div>親スレッドID: <code style={{ fontSize: '0.75rem' }}>{rescueResult.parent_thread_id}</code></div>
+                            <div data-i18n="components.memory.MemoryRecall.text122">{uiText("components.memory.MemoryRecall.text122")}<code style={{ fontSize: '0.75rem' }}>{rescueResult.parent_thread_id}</code></div>
                         )}
                     </div>
-                    <p style={{ fontSize: '0.8rem', color: '#adb5bd', marginTop: '0.5rem' }}>
-                        Chronicle生成を再実行すると、このスレッドのメッセージが処理されます。
-                    </p>
+                    <p data-i18n="components.memory.MemoryRecall.text123" style={{ fontSize: '0.8rem', color: '#adb5bd', marginTop: '0.5rem' }}>{uiText("components.memory.MemoryRecall.text123")}</p>
                 </div>
             )}
 
@@ -938,24 +926,21 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             <div className={styles.header} style={{ marginTop: '2rem' }}>
                 <Activity size={24} className={styles.icon} />
                 <div>
-                    <h3 className={styles.title}>Chronicle 診断</h3>
-                    <p className={styles.description}>
-                        Chronicle の構造情報（レベル別統計・各エントリの期間・ギャップ分析）をテキストファイルでダウンロードします。
-                        チャットログや Chronicle の本文は含まれません。
-                    </p>
+                    <h3 data-i18n="components.memory.MemoryRecall.text124" className={styles.title}>{uiText("components.memory.MemoryRecall.text124")}</h3>
+                    <p data-i18n="components.memory.MemoryRecall.text125" className={styles.description}>{uiText("components.memory.MemoryRecall.text125")}</p>
                 </div>
             </div>
 
-            <button
+            <button data-i18n="components.memory.MemoryRecall.text126 components.memory.MemoryRecall.text127"
                 className={styles.executeButton}
                 onClick={handleDownloadDiagnosis}
                 disabled={isDiagnosing}
                 style={{ background: '#495057' }}
             >
                 {isDiagnosing ? (
-                    <><Loader2 size={16} className={styles.loader} /> 取得中...</>
+                    <><Loader2 size={16} className={styles.loader} />{uiText("components.memory.MemoryRecall.text126")}</>
                 ) : (
-                    <><FileDown size={16} /> 診断レポートをダウンロード</>
+                    <><FileDown size={16} />{uiText("components.memory.MemoryRecall.text127")}</>
                 )}
             </button>
 
@@ -970,36 +955,32 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             <div className={styles.header} style={{ marginTop: '2rem' }}>
                 <Brain size={24} className={styles.icon} />
                 <div>
-                    <h3 className={styles.title}>Memopedia ログ構築</h3>
-                    <p className={styles.description}>
-                        チャットログからエンティティ（人物・用語・計画等）を抽出し、Memopediaページを自動生成・更新します。
-                        既存ページには新しい情報が追記されます。
-                    </p>
+                    <h3 data-i18n="components.memory.MemoryRecall.text128" className={styles.title}>{uiText("components.memory.MemoryRecall.text128")}</h3>
+                    <p data-i18n="components.memory.MemoryRecall.text129" className={styles.description}>{uiText("components.memory.MemoryRecall.text129")}</p>
                 </div>
             </div>
 
-            <button
+            <button data-i18n="components.memory.MemoryRecall.text130 components.memory.MemoryRecall.text131"
                 className={styles.executeButton}
                 onClick={() => handleBuildMemopediaFromLogs(false)}
                 disabled={isBuildingMemopedia}
                 style={{ background: '#6b46c1' }}
             >
                 {isBuildingMemopedia ? (
-                    <><Loader2 size={16} className={styles.loader} /> 処理中...</>
+                    <><Loader2 size={16} className={styles.loader} />{uiText("components.memory.MemoryRecall.text130")}</>
                 ) : (
-                    <><Brain size={16} /> ログからMemopediaを構築</>
+                    <><Brain size={16} />{uiText("components.memory.MemoryRecall.text131")}</>
                 )}
             </button>
 
             {/* 前回が途中で終わったときだけ出る。押さなければ先頭から流れる */}
             {buildMemopediaResume && !isBuildingMemopedia && (
-                <button
+                <button data-i18n="components.memory.MemoryRecall.text132"
                     className={styles.executeButton}
                     onClick={() => handleBuildMemopediaFromLogs(true)}
                     style={{ background: '#4c1d95', marginLeft: '0.5rem' }}
                 >
-                    <Brain size={16} /> 続きから再構築
-                </button>
+                    <Brain size={16} />{uiText("components.memory.MemoryRecall.text132")}</button>
             )}
 
             {buildMemopediaProgress && isBuildingMemopedia && (
@@ -1025,24 +1006,22 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             <div className={styles.header} style={{ marginTop: '2rem' }}>
                 <Download size={24} className={styles.icon} />
                 <div>
-                    <h3 className={styles.title}>Memopedia エクスポート / インポート</h3>
-                    <p className={styles.description}>
-                        Memopedia の全ページを JSON ファイルとしてエクスポート、またはインポートします。
-                    </p>
+                    <h3 data-i18n="components.memory.MemoryRecall.text133" className={styles.title}>{uiText("components.memory.MemoryRecall.text133")}</h3>
+                    <p data-i18n="components.memory.MemoryRecall.text134" className={styles.description}>{uiText("components.memory.MemoryRecall.text134")}</p>
                 </div>
             </div>
 
             <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
-                <button
+                <button data-i18n="components.memory.MemoryRecall.text135 components.memory.MemoryRecall.text136"
                     className={styles.executeButton}
                     onClick={handleExportMemopedia}
                     disabled={isExporting}
                     style={{ background: '#2b6cb0', flex: 'none' }}
                 >
                     {isExporting ? (
-                        <><Loader2 size={16} className={styles.loader} /> エクスポート中...</>
+                        <><Loader2 size={16} className={styles.loader} />{uiText("components.memory.MemoryRecall.text135")}</>
                     ) : (
-                        <><FileDown size={16} /> JSON エクスポート</>
+                        <><FileDown size={16} />{uiText("components.memory.MemoryRecall.text136")}</>
                     )}
                 </button>
 
@@ -1056,22 +1035,22 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                         if (file) handleImportMemopedia(file);
                     }}
                 />
-                <button
+                <button data-i18n="components.memory.MemoryRecall.text137 components.memory.MemoryRecall.text138"
                     className={styles.executeButton}
                     onClick={() => fileInputRef.current?.click()}
                     disabled={isImporting}
                     style={{ background: '#2f855a', flex: 'none' }}
                 >
                     {isImporting ? (
-                        <><Loader2 size={16} className={styles.loader} /> インポート中...</>
+                        <><Loader2 size={16} className={styles.loader} />{uiText("components.memory.MemoryRecall.text137")}</>
                     ) : (
-                        <><FileUp size={16} /> JSON インポート</>
+                        <><FileUp size={16} />{uiText("components.memory.MemoryRecall.text138")}</>
                     )}
                 </button>
             </div>
 
             <div style={{ marginTop: '0.5rem' }}>
-                <label className={styles.toggleLabel}>
+                <label data-i18n="components.memory.MemoryRecall.text139" className={styles.toggleLabel}>
                     <input
                         type="checkbox"
                         checked={importClear}
@@ -1079,18 +1058,14 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                             setImportClear(e.target.checked);
                             if (!e.target.checked) setConfirmImportClear(false);
                         }}
-                    />
-                    インポート前に既存ページを削除
-                </label>
+                    />{uiText("components.memory.MemoryRecall.text139")}</label>
                 {importClear && (
-                    <label className={styles.toggleLabel} style={{ marginLeft: '1rem', color: '#e53e3e' }}>
+                    <label data-i18n="components.memory.MemoryRecall.text140" className={styles.toggleLabel} style={{ marginLeft: '1rem', color: '#e53e3e' }}>
                         <input
                             type="checkbox"
                             checked={confirmImportClear}
                             onChange={(e) => setConfirmImportClear(e.target.checked)}
-                        />
-                        削除を確認
-                    </label>
+                        />{uiText("components.memory.MemoryRecall.text140")}</label>
                 )}
             </div>
 
@@ -1112,75 +1087,65 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
 
             {/* Danger Zone: Bulk Delete */}
             <div className={styles.dangerZone}>
-                <h4 className={styles.dangerTitle}>Danger Zone</h4>
-                <p className={styles.dangerDescription}>
-                    データを一括削除します。この操作は取り消せません。
-                </p>
+                <h4 className={styles.dangerTitle}>{uiText("components.memory.MemoryRecall.label015")}</h4>
+                <p data-i18n="components.memory.MemoryRecall.text141" className={styles.dangerDescription}>{uiText("components.memory.MemoryRecall.text141")}</p>
 
                 <div className={styles.dangerButtons}>
                     {!confirmChronicle ? (
-                        <button
+                        <button data-i18n="components.memory.MemoryRecall.text142"
                             className={styles.dangerButton}
                             onClick={() => setConfirmChronicle(true)}
                             disabled={isDeletingChronicle}
                         >
-                            <Trash2 size={14} />
-                            Chronicle 全削除
-                        </button>
+                            <Trash2 size={14} />{uiText("components.memory.MemoryRecall.text142")}</button>
                     ) : (
                         <div className={styles.confirmGroup}>
-                            <span className={styles.confirmText}>本当に削除しますか？</span>
-                            <button
+                            <span data-i18n="components.memory.MemoryRecall.text143" className={styles.confirmText}>{uiText("components.memory.MemoryRecall.text143")}</span>
+                            <button data-i18n="components.memory.MemoryRecall.text144 components.memory.MemoryRecall.text145"
                                 className={styles.confirmYes}
                                 onClick={handleDeleteAllChronicle}
                                 disabled={isDeletingChronicle}
                             >
                                 {isDeletingChronicle ? (
-                                    <><Loader2 size={14} className={styles.loader} /> 削除中...</>
+                                    <><Loader2 size={14} className={styles.loader} />{uiText("components.memory.MemoryRecall.text144")}</>
                                 ) : (
-                                    '削除する'
+                                    uiText("components.memory.MemoryRecall.text145")
                                 )}
                             </button>
-                            <button
+                            <button data-i18n="components.memory.MemoryRecall.text146"
                                 className={styles.confirmNo}
                                 onClick={() => setConfirmChronicle(false)}
                                 disabled={isDeletingChronicle}
-                            >
-                                キャンセル
-                            </button>
+                            >{uiText("components.memory.MemoryRecall.text146")}</button>
                         </div>
                     )}
 
                     {!confirmMemopedia ? (
-                        <button
+                        <button data-i18n="components.memory.MemoryRecall.text147"
                             className={styles.dangerButton}
                             onClick={() => setConfirmMemopedia(true)}
                             disabled={isDeletingMemopedia}
                         >
-                            <Trash2 size={14} />
-                            Memopedia 全削除
-                        </button>
+                            <Trash2 size={14} />{uiText("components.memory.MemoryRecall.text147")}</button>
                     ) : (
                         <div className={styles.confirmGroup}>
-                            <span className={styles.confirmText}>本当に削除しますか？</span>
-                            <button
+                            <span data-i18n="components.memory.MemoryRecall.text148" className={styles.confirmText}>{uiText("components.memory.MemoryRecall.text148")}</span>
+                            <button data-i18n="components.memory.MemoryRecall.text149 components.memory.MemoryRecall.text150"
                                 className={styles.confirmYes}
                                 onClick={handleDeleteAllMemopedia}
                                 disabled={isDeletingMemopedia}
                             >
                                 {isDeletingMemopedia ? (
-                                    <><Loader2 size={14} className={styles.loader} /> 削除中...</>
+                                    <><Loader2 size={14} className={styles.loader} />{uiText("components.memory.MemoryRecall.text149")}</>
                                 ) : (
-                                    '削除する'
+                                    uiText("components.memory.MemoryRecall.text150")
                                 )}
                             </button>
-                            <button
+                            <button data-i18n="components.memory.MemoryRecall.text151"
                                 className={styles.confirmNo}
                                 onClick={() => setConfirmMemopedia(false)}
                                 disabled={isDeletingMemopedia}
-                            >
-                                キャンセル
-                            </button>
+                            >{uiText("components.memory.MemoryRecall.text151")}</button>
                         </div>
                     )}
                 </div>

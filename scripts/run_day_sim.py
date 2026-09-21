@@ -30,6 +30,11 @@ Usage:
 レポートは stdout に出力し、--out (省略時 ~/.saiverse/personas/<id>/day_reports/
 <date>.md) へも書き出す。
 
+安全性: DB・SAIVERSE_HOME・SAIVERSE_USER_DATA_DIR・出力先のうち、その実行で書く
+場所のどれかが本番 (~/.saiverse 配下) を指す場合は起動を拒否する。本番の場所は
+SAIVERSE_HOME の値に依らない。mock で ``--out`` を省略すると新聞を SAIVERSE_HOME に
+書くので、SAIVERSE_HOME をテスト環境に向けるか ``--out`` を指定すること。
+
 シナリオ JSON の形式は saiverse/day_scenario.py のモジュール docstring を参照。
 """
 from __future__ import annotations
@@ -55,6 +60,13 @@ sys.path.insert(0, str(ROOT))
 from dotenv import load_dotenv
 
 load_dotenv(ROOT / ".env")
+
+from scripts._shared.production_guard import (  # noqa: E402
+    ProductionPathError,
+    effective_home,
+    effective_user_data_dir,
+    refuse_production_paths,
+)
 
 LOGGER = logging.getLogger("scripts.run_day_sim")
 
@@ -120,6 +132,14 @@ class MockSessionLLMClient:
         return "結果を確認した。これで一区切りにする。"
 
     def consume_usage(self):
+        return None
+
+    # 作業セッションは呼び出しごとに思考も回収する (破壊的読み取り)。
+    # 思考を返さないモデルの回を模す。
+    def consume_reasoning(self):
+        return []
+
+    def consume_reasoning_details(self):
         return None
 
 
@@ -659,6 +679,32 @@ def generate_raw_log(
 # ---------------------------------------------------------------------------
 
 
+def _guard_not_production(args: argparse.Namespace) -> None:
+    """この実行が書く場所のどれかが本番 (~/.saiverse 配下) なら拒否する。
+
+    検査するのは、この実行で実際に書く場所:
+    - ``--db-file``: mock はスキーマとシナリオのペルソナ行を、``--real`` は会話や記録を書く
+    - SAIVERSE_HOME: ``--real`` の manager がペルソナの memory.db や建物ログを書く。
+      ``--out`` を省略すると、新聞と生成時刻の記録も ``SAIVERSE_HOME/personas/<id>/`` に書く
+    - SAIVERSE_USER_DATA_DIR: ``--real`` で ``--db-file`` を省略すると、ここの DB を使う
+    - ``--out`` / ``--raw-log-out``: 新聞と生データの出力先
+
+    mock で ``--out`` を指定すれば SAIVERSE_HOME には書かないので、env が未設定
+    (= ~/.saiverse) でも通す。本番の場所は SAIVERSE_HOME の値に依らない。
+    """
+    writes_home = args.real or not args.out
+    refuse_production_paths(
+        {
+            "--db-file": args.db_file,
+            "SAIVERSE_HOME": effective_home() if writes_home else None,
+            "SAIVERSE_USER_DATA_DIR": effective_user_data_dir() if args.real else None,
+            "--out": args.out,
+            "--raw-log-out": args.raw_log_out,
+        },
+        reason="一日シムは偽の一日 (会話・記憶・新聞) を書くため、本番には実行できません。",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--scenario", required=True, help="シナリオ JSON ファイル")
@@ -688,6 +734,12 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+    try:
+        _guard_not_production(args)
+    except ProductionPathError as exc:
+        LOGGER.error("%s", exc)
+        return 1
 
     from saiverse import clock
     from saiverse.day_report import generate_day_report, save_day_report

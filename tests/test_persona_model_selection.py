@@ -14,6 +14,13 @@ manager/admin.py (update_ai)、saiverse/saiverse_manager.py (set_model)、sea/ru
   グローバルになること
 - 定義の無い名前を保存しないこと (環境変数・ペルソナ設定・一時上書き)、同じ要求の
   ほかの値は保存されること、知らせが返ること、同時の保存で .env が欠けないこと
+- 定義はあってもその役割では話せない宛先 (会話や要約の役割に、型付きの質問にしか
+  答えない反射判断専用のモデル) を、同じ三つの入口のどれからも保存しないこと。
+  反射判断の役割だけは噛み合わない値も保存を通すこと (第 2 段で通常の LLM も
+  合法になるため。画面の警告で知らせる)
+- その宛先に「会話では使えない」の印が付き (is_reflex_only_model)、モデルの一覧 API は
+  印を載せるだけで一覧からは落とさないこと (会話の選択欄が印で絞り、モデル管理画面と
+  反射判断の選択欄には出し続けるため)
 - モデル/プロバイダの設定の読み直しで決め直し、接続を捨てること
 - 変更したその場の応答に、切り替えられなかった人の知らせ (notices) が載ること
   (一時上書きの設定、モデルの削除、プロバイダの保存。プロバイダの保存は二度決め直すので、
@@ -47,7 +54,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from database.models import AI as AIModel, Base, City as CityModel, User as UserModel
-from llm_clients.exceptions import ModelUnavailableError
+from llm_clients.exceptions import LLMError, ModelUnavailableError
 from saiverse import data_paths, model_configs, model_defaults
 from saiverse.persona_model_selection import (
     SOURCE_BUILTIN,
@@ -61,6 +68,7 @@ from saiverse.persona_model_selection import (
     UnswitchedPersona,
     apply_speaking_model,
     live_model_override,
+    read_persona_model_rows,
     reapply_speaking_models,
     resolve_speaking_model,
 )
@@ -70,6 +78,10 @@ MODEL_A = "test-model-a"
 MODEL_B = "test-model-b"
 OVERRIDE = "test-override-model"
 LITE = "test-lite-model"
+#: 反射判断専用の宛先 (protocol が jev_compat)。型付きの質問に確率で答えるだけで、
+#: 会話の返事は書けない — 会話や要約の役割には保存させない。
+JEV_KEY = "test-jev-model"
+JEV_ONLY = "は反射判断だけに使える宛先のため、"
 ROLE_ENV_KEYS = tuple(model_defaults.MODEL_ROLES.values())
 
 
@@ -96,6 +108,13 @@ def isolated_model_definitions(monkeypatch, tmp_path):
         MODEL_B: _definition("vendor/b"),
         OVERRIDE: _definition("vendor/override"),
         LITE: _definition("vendor/lite"),
+        JEV_KEY: {
+            "model": "jev-latest",
+            "protocol": "jev_compat",
+            "provider": "jev_compat",
+            "base_url": "https://api.example-typesafe.test",
+            "context_length": 1000,
+        },
     })
     # 定義ファイルを名前で探す引き方 (find_model_config) が本番の ~/.saiverse を見ないように
     monkeypatch.setattr(data_paths, "USER_DATA_DIR", tmp_path / "user_data")
@@ -148,7 +167,10 @@ class _World:
             personas={}, SessionLocal=self.SessionLocal, model=None, model_parameter_overrides={},
         )
 
-    def add(self, pid, name, *, persona, default_model=None, lightweight_model=None, memory_weave_model=None):
+    def add(
+        self, pid, name, *, persona, default_model=None, lightweight_model=None,
+        memory_weave_model=None, reflex_judgment_model=None,
+    ):
         db = self.SessionLocal()
         try:
             db.add(AIModel(
@@ -156,6 +178,7 @@ class _World:
                 DEFAULT_MODEL=default_model,
                 LIGHTWEIGHT_MODEL=lightweight_model,
                 MEMORY_WEAVE_MODEL=memory_weave_model,
+                REFLEX_JUDGMENT_MODEL=reflex_judgment_model,
             ))
             db.commit()
         finally:
@@ -328,6 +351,40 @@ def test_reapply_syncs_lightweight_and_memory_weave_and_resets_the_cold_sweep(wo
     invalidate.assert_called()
 
 
+def test_the_persona_row_carries_every_model_column_a_runtime_reads(world):
+    """DB 行から読む欄は「実行時にその列を読む箇所がある」ものだけ。
+
+    反射判断のモデル (AI.REFLEX_JUDGMENT_MODEL) は sea/runtime.py の
+    _get_reflex_model_for_persona が読むので、この行にも載せる — 起動後の画面の警告
+    (manager/initialization.py の current_model_setting_warnings) が同じ行から
+    ペルソナ単位の値を見るため。
+    """
+    world.add(
+        "aoi", "アオイ", persona=_persona(),
+        default_model=MODEL_A, lightweight_model=LITE,
+        memory_weave_model=MODEL_B, reflex_judgment_model=JEV_KEY,
+    )
+
+    row = read_persona_model_rows(world.SessionLocal)["aoi"]
+
+    assert (row.persona_id, row.name) == ("aoi", "アオイ")
+    assert row.default_model == MODEL_A
+    assert row.lightweight_model == LITE
+    assert row.memory_weave_model == MODEL_B
+    assert row.reflex_judgment_model == JEV_KEY
+
+
+def test_a_persona_row_without_model_columns_reads_as_empty(world):
+    world.add("aoi", "アオイ", persona=_persona())
+
+    row = read_persona_model_rows(world.SessionLocal)["aoi"]
+
+    assert row.default_model is None
+    assert row.lightweight_model is None
+    assert row.memory_weave_model is None
+    assert row.reflex_judgment_model is None
+
+
 # ---------------------------------------------------------------------------
 # モデル・プロバイダの設定の読み直し
 # ---------------------------------------------------------------------------
@@ -475,6 +532,88 @@ def test_env_save_refuses_undefined_names_for_every_model_role(env_file, monkeyp
         f"いまも '{MODEL_A}' を使っています。"
     ]
     assert os.environ[env_key] == MODEL_A
+
+
+@pytest.mark.parametrize("env_key,label,tail", [
+    (
+        "SAIVERSE_DEFAULT_MODEL", "標準モデル",
+        f"個別の標準モデルを持たないペルソナは、いまも '{MODEL_A}' で話しています。",
+    ),
+    ("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "軽量モデル", f"いまも '{MODEL_A}' を使っています。"),
+    ("MEMORY_WEAVE_MODEL", "Memory Weaveモデル", f"いまも '{MODEL_A}' を使っています。"),
+    ("SAIVERSE_IMAGE_SUMMARY_MODEL", "画像要約モデル", f"いまも '{MODEL_A}' を使っています。"),
+    ("SAIVERSE_AUDIO_SUMMARY_MODEL", "音声要約モデル", f"いまも '{MODEL_A}' を使っています。"),
+    ("SAIVERSE_VIDEO_SUMMARY_MODEL", "動画要約モデル", f"いまも '{MODEL_A}' を使っています。"),
+])
+def test_env_save_refuses_a_reflex_only_destination_for_every_other_role(
+    env_file, monkeypatch, env_key, label, tail,
+):
+    """反射判断以外の役割に jev 互換の宛先を保存させない。
+
+    定義はあるので「SAIVerse にありません」の検査は素通りするが、割り当てた
+    ペルソナは話そうとした時点で失敗する — 会話の止まる設定を画面から作れない
+    ように、保存の時点で断る。
+    """
+    from api.routes import admin
+
+    monkeypatch.setenv(env_key, MODEL_A)
+
+    result = admin.write_env_updates({env_key: JEV_KEY})
+
+    assert result.rejected_keys == [env_key]
+    assert result.notices == [
+        f"'{JEV_KEY}'{JEV_ONLY}グローバル設定の{label}としては保存しませんでした。{tail}"
+    ]
+    assert os.environ[env_key] == MODEL_A
+
+
+def test_env_save_accepts_a_reflex_only_destination_for_the_reflex_role(env_file, monkeypatch):
+    from api.routes import admin
+
+    result = admin.write_env_updates({"SAIVERSE_REFLEX_JUDGMENT_MODEL": JEV_KEY})
+
+    assert (result.rejected_keys, result.notices) == ([], [])
+    assert os.environ["SAIVERSE_REFLEX_JUDGMENT_MODEL"] == JEV_KEY
+
+
+def test_env_save_accepts_an_ordinary_model_for_the_reflex_role(env_file, monkeypatch):
+    """反射判断の役割には通常の LLM も保存できる (どちらも合法な答える側)。
+
+    判断層が質問をプロンプトへ変換するので、jev 互換の宛先と通常の LLM のどちらでも
+    答えられる。断る理由が無いので警告も出さない (docs/intent/reflex_judgment.md §2)。
+    """
+    from api.routes import admin
+
+    result = admin.write_env_updates({"SAIVERSE_REFLEX_JUDGMENT_MODEL": MODEL_A})
+
+    assert (result.rejected_keys, result.notices) == ([], [])
+    assert os.environ["SAIVERSE_REFLEX_JUDGMENT_MODEL"] == MODEL_A
+
+
+def test_reflex_only_models_are_marked_and_ordinary_ones_are_not():
+    """会話の選択欄が出さないモデルの印 (is_reflex_only_model)。
+
+    保存を断る判定と同じ一枚を使うので、「選べるのに保存だけ断られる」ことも
+    「選択肢に出ないのに保存は通る」こともない。定義の無い名前は印を付けない
+    (「SAIVerse にありません」は別の検査の仕事)。
+    """
+    assert model_defaults.is_reflex_only_model(JEV_KEY) is True
+    assert model_defaults.is_reflex_only_model(MODEL_A) is False
+    assert model_defaults.is_reflex_only_model("gone-model") is False
+
+
+def test_the_model_list_marks_the_reflex_only_destination_without_dropping_it():
+    """一覧 API は反射判断専用の宛先も返し、印だけを載せる。
+
+    一覧から落とすと、モデル管理画面 (編集・削除) と反射判断の選択欄からも消える。
+    出すか出さないかを決めるのは画面の側 (会話の欄が印で絞る)。
+    """
+    from api.routes import info as info_route
+
+    listed = {m["id"]: m for m in info_route.list_available_models()}
+
+    assert listed[JEV_KEY]["reflex_only"] is True
+    assert listed[MODEL_A]["reflex_only"] is False
 
 
 def test_env_save_accepts_empty_values_and_switches_personas_right_away(world, env_file, monkeypatch):
@@ -637,6 +776,29 @@ def test_persona_save_refuses_undefined_model_names_and_saves_the_rest(admin_wor
     invalidate.assert_called()
 
 
+def test_persona_save_refuses_a_reflex_only_destination_and_saves_the_rest(admin_world):
+    """会話の欄に反射判断専用の宛先を保存させない (グローバル設定と同じ判定)。"""
+    result = admin_world.update(
+        default_model=JEV_KEY,
+        lightweight_model=JEV_KEY,
+        memory_weave_model=JEV_KEY,
+        description="新しい説明",
+    )
+
+    assert result.split("[WARNING:LLM]", 1)[1].strip().splitlines() == [
+        f"'{JEV_KEY}'{JEV_ONLY}アオイの標準モデルとしては保存しませんでした。"
+        f"アオイはいまも '{MODEL_A}' で話しています。",
+        f"'{JEV_KEY}'{JEV_ONLY}アオイの軽量モデルとしては保存しませんでした。"
+        f"いまの設定 '{LITE}' のままです。",
+        f"'{JEV_KEY}'{JEV_ONLY}アオイのMemory Weaveモデルとしては保存しませんでした。"
+        f"いまの設定 '{MODEL_B}' のままです。",
+    ]
+    row = admin_world.row()
+    assert (row.DEFAULT_MODEL, row.LIGHTWEIGHT_MODEL, row.MEMORY_WEAVE_MODEL) == (MODEL_A, LITE, MODEL_B)
+    assert row.DESCRIPTION == "新しい説明"
+    assert admin_world.persona.model == MODEL_A
+
+
 def test_persona_save_applies_the_model_right_away_and_empty_means_the_global_default(
     admin_world, monkeypatch,
 ):
@@ -684,6 +846,22 @@ def test_the_override_route_refuses_a_model_without_a_definition():
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == (
         "'gone-model' というモデルは SAIVerse にないため、チャット画面のモデル一時上書きには"
+        "使えません。モデル管理の画面にあるモデルから選び直してください。"
+    )
+    manager.set_model.assert_not_called()
+
+
+def test_the_override_route_refuses_a_reflex_only_destination():
+    """一時上書きは全員の標準モデルを一度に置き換えるので、ここも同じ判定で断る。"""
+    from api.routes import config as config_route
+
+    manager = MagicMock()
+    with pytest.raises(HTTPException) as exc_info:
+        config_route.set_model(config_route.UpdateModelRequest(model=JEV_KEY), manager=manager)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == (
+        f"'{JEV_KEY}'{JEV_ONLY}チャット画面のモデル一時上書きには"
         "使えません。モデル管理の画面にあるモデルから選び直してください。"
     )
     manager.set_model.assert_not_called()
@@ -985,6 +1163,66 @@ def test_the_structured_output_route_does_not_fall_back_to_the_standard_model(mo
         runtime.select_llm_client(_node(), persona, needs_structured_output=True)
 
     assert (exc_info.value.role, exc_info.value.reason) == ("lightweight_model", "unreachable")
+
+
+@pytest.mark.parametrize("with_execution_context", [False, True])
+@pytest.mark.parametrize("standard_supports,lightweight_supports,expected", [
+    (True, True, MODEL_A),     # 標準モデルが構造化出力に対応 → そのまま
+    (False, True, LITE),       # 非対応 → 軽量モデルへ差し替え
+    (False, False, None),      # どちらも非対応 → LLMError
+])
+def test_the_model_decided_without_connecting_matches_select_llm_client(
+    monkeypatch, standard_supports, lightweight_supports, expected, with_execution_context,
+):
+    """接続を作らないモデルの決定 (resolve_llm_model) は select_llm_client と同じ
+    モデルを返し、同じ失敗をする。決定の側は接続も llama.cpp のサーバーの起動も
+    しない (docs/issues/sluice_skip_ignores_model_context.md「レビューの裁定」
+    第二巡の 1)。"""
+    from sea.pulse_context import resolve_execution_context
+    from sea.runtime import SEARuntime
+
+    connected = []
+
+    def _fake_client(model, provider, context_length, *rest):
+        connected.append(model)
+        return SimpleNamespace(model=model)
+
+    monkeypatch.setattr("persona.core.get_llm_client", _fake_client)
+    monkeypatch.setattr("llm_clients.get_llm_client", _fake_client)
+    ensure_server = Mock()
+    monkeypatch.setattr(SEARuntime, "_ensure_llama_server", ensure_server)
+    model_configs.MODEL_CONFIGS[MODEL_A]["supports_structured_output"] = standard_supports
+    model_configs.MODEL_CONFIGS[LITE]["supports_structured_output"] = lightweight_supports
+    persona = _persona(model=MODEL_A, lightweight_model=LITE)
+    runtime = SEARuntime(SimpleNamespace(building_histories={}))
+    ec = resolve_execution_context(persona, None) if with_execution_context else None
+
+    if expected is None:
+        with pytest.raises(LLMError) as resolved:
+            runtime.resolve_llm_model(persona, execution_context=ec, needs_structured_output=True)
+        assert connected == []
+        ensure_server.assert_not_called()
+        with pytest.raises(LLMError) as selected:
+            runtime.select_llm_client(
+                _node(), persona, execution_context=ec, needs_structured_output=True,
+            )
+        assert str(resolved.value) == str(selected.value)
+        assert resolved.value.user_message == selected.value.user_message
+        return
+
+    resolved_model = runtime.resolve_llm_model(
+        persona, execution_context=ec, needs_structured_output=True,
+    )
+    assert connected == []
+    ensure_server.assert_not_called()
+
+    client, selected_model = runtime.select_llm_client(
+        _node(), persona, execution_context=ec, needs_structured_output=True,
+    )
+    assert resolved_model == selected_model == expected
+    assert client.model == expected
+    assert connected  # 接続を作るのは select_llm_client の側だけ
+    ensure_server.assert_called()
 
 
 def test_the_error_reaches_the_chat_exit_through_the_dispatcher():

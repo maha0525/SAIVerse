@@ -18,7 +18,8 @@ Usage:
     - **実 LLM を呼ぶ (実コスト発生)**。API キーは .env から読む
 
 安全性:
-    - DB が本番 (~/.saiverse 配下) を指す場合は起動を拒否する (記憶汚染防止)。
+    - DB / SAIVERSE_HOME / SAIVERSE_USER_DATA_DIR のどれかが本番 (~/.saiverse 配下) を
+      指す場合は起動を拒否する (記憶汚染防止)。本番の場所は SAIVERSE_HOME の値に依らない。
 """
 from __future__ import annotations
 
@@ -33,6 +34,13 @@ from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+# saiverse を import しない純粋なパス判定なので、env を確定する前に読み込んでよい
+from scripts._shared.production_guard import (  # noqa: E402
+    effective_home,
+    effective_user_data_dir,
+    refuse_production_paths,
+)
 
 LOGGER = logging.getLogger("scripts.run_conversation")
 
@@ -182,17 +190,30 @@ def format_transcript(script: Dict[str, Any], transcript: List[Dict[str, Any]]) 
 # ---------------------------------------------------------------------------
 
 
-def _guard_not_production(db_path: Path) -> None:
-    """本番 DB (~/.saiverse 配下) への実行をハード拒否する (intent doc §2-1)。"""
-    production_root = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse")
-    try:
-        db_path.resolve().relative_to(production_root.resolve())
-    except ValueError:
-        return  # 本番の外 — OK
-    raise ConversationError(
-        f"DB が本番 ({production_root}) を指しています。会話テストは偽の記憶を"
-        "committed するため、本番には実行できません。"
-        " clone_world_to_test_env.py でテスト環境を作ってください。"
+def _guard_not_production(
+    db_path: Path,
+    home: Path,
+    user_data_dir: Path,
+    out_path: Optional[Path] = None,
+) -> None:
+    """この実行が書く場所のどれかが本番 (~/.saiverse 配下) ならハード拒否する (intent doc §2-1)。
+
+    DB だけでなく、ペルソナの memory.db や建物ログが書かれる SAIVERSE_HOME、
+    SAIVERSE_USER_DATA_DIR、transcript の出力先も検査する。
+    本番の場所は SAIVERSE_HOME の値に依らない。
+    """
+    refuse_production_paths(
+        {
+            "--db-file": db_path,
+            "SAIVERSE_HOME": home,
+            "SAIVERSE_USER_DATA_DIR": user_data_dir,
+            "--out": out_path,
+        },
+        reason=(
+            "会話テストは偽の記憶を committed するため、本番には実行できません。"
+            " clone_world_to_test_env.py でテスト環境を作ってください。"
+        ),
+        error_cls=ConversationError,
     )
 
 
@@ -242,11 +263,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             script["leave"] = False
 
         db_path = args.db_file.resolve()
+        # env を直接読まず data_paths と同じ導出で解決する (空文字の env は「未設定 = ~/.saiverse」扱い)
+        _guard_not_production(db_path, effective_home(), effective_user_data_dir(), args.out)
         if not db_path.is_file():
             raise ConversationError(
                 f"DB が見つかりません: {db_path}。"
                 " 先に python scripts/clone_world_to_test_env.py を実行してください。")
-        _guard_not_production(db_path)
 
         # ここから saiverse を import (env 確定後)
         from dotenv import load_dotenv

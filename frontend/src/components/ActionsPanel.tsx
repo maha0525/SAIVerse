@@ -1,4 +1,9 @@
 'use client';
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import { useState, useEffect, useCallback } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
@@ -93,6 +98,7 @@ function emptyAction(): ActionDef {
 }
 
 export default function ActionsPanel({ addonName }: ActionsPanelProps) {
+    useLocale();
     const [collapsed, setCollapsed] = useState(true);
     const [actions, setActions] = useState<ActionDef[]>([]);
     const [availableTools, setAvailableTools] = useState<string[]>([]);
@@ -108,14 +114,14 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
 
     const fetchActions = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/${addonName}/actions`);
+            const res = await apiFetch(`${API_BASE}/${addonName}/actions`);
             if (res.ok) setActions(await res.json());
         } catch { /* ignore */ }
     }, [addonName]);
 
     const fetchTools = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/${addonName}/actions/tool-schemas`);
+            const res = await apiFetch(`${API_BASE}/${addonName}/actions/tool-schemas`);
             if (res.ok) {
                 const list: ToolSchema[] = await res.json();
                 setAvailableTools(list.map(t => t.name));
@@ -130,7 +136,7 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
 
     const fetchTestTargets = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/${addonName}/actions/test-targets`);
+            const res = await apiFetch(`${API_BASE}/${addonName}/actions/test-targets`);
             if (res.ok) {
                 const list: TestTarget[] = await res.json();
                 setTestTargets(list);
@@ -152,9 +158,9 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
     }, [collapsed, fetchTools, fetchTestTargets]);
 
     const handleDelete = async (actionId: string) => {
-        if (!confirm(`アクション「${actionId}」を削除しますか？`)) return;
+        if (!confirm(uiText("components.ActionsPanel.text001", { p1: actionId }))) return;
         try {
-            const res = await fetch(`${API_BASE}/${addonName}/actions/${actionId}`, { method: 'DELETE' });
+            const res = await apiFetch(`${API_BASE}/${addonName}/actions/${actionId}`, { method: 'DELETE' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 throw new Error(data.detail || `Delete failed: ${res.status}`);
@@ -168,7 +174,7 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
     const handleTest = async (action: ActionDef) => {
         // 機体候補があるのに未選択ならテストしない (どの機体で撃つか曖昧なため)。
         if (testTargets.length > 0 && !selectedTarget) {
-            setTestResult({ ok: false, text: 'テスト対象の機体を選んでください。' });
+            setTestResult({ ok: false, text: uiText("components.ActionsPanel.text002") });
             return;
         }
         setBusy(true);
@@ -177,7 +183,7 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
             const url = selectedTarget
                 ? `${API_BASE}/${addonName}/actions/test?instance_id=${encodeURIComponent(selectedTarget)}`
                 : `${API_BASE}/${addonName}/actions/test`;
-            const res = await fetch(url, {
+            const res = await apiFetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(action),
@@ -203,7 +209,7 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
                 ? `${API_BASE}/${addonName}/actions`
                 : `${API_BASE}/${addonName}/actions/${editing.id}`;
             const method = isNew ? 'POST' : 'PUT';
-            const res = await fetch(url, {
+            const res = await apiFetch(url, {
                 method,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(editing),
@@ -239,8 +245,7 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
         <div className={styles.container}>
             <button className={styles.sectionHeader} onClick={() => setCollapsed(c => !c)}>
                 {collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
-                <span className={styles.headerLabel}>
-                    複合アクション ({actions.length})
+                <span data-i18n="components.ActionsPanel.text003" className={styles.headerLabel}>{uiText("components.ActionsPanel.text003")}{actions.length})
                 </span>
             </button>
             {!collapsed && (
@@ -251,7 +256,7 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
                         onSelect={setSelectedTarget}
                     />
                     {actions.length === 0 ? (
-                        <p className={styles.emptyMessage}>アクションが定義されていません</p>
+                        <p data-i18n="components.ActionsPanel.text004" className={styles.emptyMessage}>{uiText("components.ActionsPanel.text004")}</p>
                     ) : (
                         <div className={styles.actionList}>
                             {actions.map(a => (
@@ -275,36 +280,33 @@ export default function ActionsPanel({ addonName }: ActionsPanelProps) {
                                         )}
                                     </div>
                                     <div className={styles.actionButtons}>
-                                        <button
+                                        <button data-i18n="components.ActionsPanel.text005"
                                             className={styles.iconBtn}
                                             onClick={() => handleTest(a)}
                                             disabled={busy}
-                                            title="テスト実行"
+                                            title={uiText("components.ActionsPanel.text005")}
                                         >
                                             &#9654;
                                         </button>
-                                        <button
+                                        <button data-i18n="components.ActionsPanel.text006"
                                             className={styles.iconBtn}
                                             onClick={() => openEdit(a)}
-                                            title="編集"
+                                            title={uiText("components.ActionsPanel.text006")}
                                         >
                                             &#9998;
                                         </button>
-                                        <button
+                                        <button data-i18n="components.ActionsPanel.text007"
                                             className={styles.iconBtnDanger}
                                             onClick={() => handleDelete(a.id)}
-                                            title="削除"
+                                            title={uiText("components.ActionsPanel.text007")}
                                         >
-                                            &times;
-                                        </button>
+                                            {uiText("components.ActionsPanel.label001")}</button>
                                     </div>
                                 </div>
                             ))}
                         </div>
                     )}
-                    <button className={styles.addBtn} onClick={openNew}>
-                        + 新しいアクションを作成
-                    </button>
+                    <button data-i18n="components.ActionsPanel.text008" className={styles.addBtn} onClick={openNew}>{uiText("components.ActionsPanel.text008")}</button>
                 </div>
             )}
 
@@ -339,10 +341,11 @@ function TestTargetSelector({
     selected: string;
     onSelect: (value: string) => void;
 }) {
+    useLocale();
     if (targets.length === 0) return null;
     return (
         <div className={styles.testTargetRow}>
-            <span className={styles.testTargetLabel}>テスト対象の機体</span>
+            <span data-i18n="components.ActionsPanel.text009" className={styles.testTargetLabel}>{uiText("components.ActionsPanel.text009")}</span>
             <select
                 className={styles.testTargetSelect}
                 value={selected}
@@ -378,6 +381,7 @@ function ActionEditor({
     testTargets, selectedTarget, onSelectTarget,
     onChange, onSave, onTest, onClose,
 }: ActionEditorProps) {
+    useLocale();
 
     const update = (patch: Partial<ActionDef>) => {
         onChange({ ...action, ...patch });
@@ -467,45 +471,43 @@ function ActionEditor({
         <div className={styles.editorOverlay} onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
             <div className={styles.editor}>
                 <div className={styles.editorHeader}>
-                    <h3>{isNew ? '新しいアクション' : `編集: ${action.display_name}`}</h3>
-                    <button className={styles.iconBtn} onClick={onClose}>&times;</button>
+                    <h3 data-i18n="components.ActionsPanel.text010 components.ActionsPanel.text011">{isNew ? uiText("components.ActionsPanel.text010") : uiText("components.ActionsPanel.text011", { p1: action.display_name })}</h3>
+                    <button className={styles.iconBtn} onClick={onClose}>{uiText("components.ActionsPanel.label002")}</button>
                 </div>
                 <div className={styles.editorBody}>
                     <div className={styles.fieldGroup}>
-                        <label className={styles.fieldLabel}>ID (英小文字・数字・アンダースコア)</label>
+                        <label data-i18n="components.ActionsPanel.text012" className={styles.fieldLabel}>{uiText("components.ActionsPanel.text012")}</label>
                         <input
                             className={styles.fieldInput}
                             value={action.id}
                             onChange={e => update({ id: e.target.value })}
-                            placeholder="nod"
+                            placeholder={uiText("components.ActionsPanel.label003")}
                             disabled={!isNew}
                         />
                     </div>
                     <div className={styles.fieldGroup}>
-                        <label className={styles.fieldLabel}>表示名</label>
-                        <input
+                        <label data-i18n="components.ActionsPanel.text013" className={styles.fieldLabel}>{uiText("components.ActionsPanel.text013")}</label>
+                        <input data-i18n="components.ActionsPanel.text014"
                             className={styles.fieldInput}
                             value={action.display_name}
                             onChange={e => update({ display_name: e.target.value })}
-                            placeholder="うなずき"
+                            placeholder={uiText("components.ActionsPanel.text014")}
                         />
                     </div>
                     <div className={styles.fieldGroup}>
-                        <label className={styles.fieldLabel}>説明</label>
-                        <input
+                        <label data-i18n="components.ActionsPanel.text015" className={styles.fieldLabel}>{uiText("components.ActionsPanel.text015")}</label>
+                        <input data-i18n="components.ActionsPanel.text016"
                             className={styles.fieldInput}
                             value={action.description}
                             onChange={e => update({ description: e.target.value })}
-                            placeholder="首を上下に動かしてうなずく"
+                            placeholder={uiText("components.ActionsPanel.text016")}
                         />
                     </div>
 
                     <div className={styles.stepsHeader}>
-                        <span className={styles.stepsTitle}>引数 ({paramEntries.length})</span>
+                        <span data-i18n="components.ActionsPanel.text017" className={styles.stepsTitle}>{uiText("components.ActionsPanel.text017")}{paramEntries.length})</span>
                     </div>
-                    <p className={styles.paramHint}>
-                        呼び出し時に変えられる値。ステップの値に <code>{'${名前}'}</code> と書くと差し込まれます。<code>{'${名前}*1000'}</code> のような式（四則・累乗・括弧）も使えます。
-                    </p>
+                    <p data-i18n="components.ActionsPanel.text018 components.ActionsPanel.text020 components.ActionsPanel.text022" className={styles.paramHint}>{uiText("components.ActionsPanel.text018")}<code data-i18n="components.ActionsPanel.text019">{uiText("components.ActionsPanel.text019")}</code>{uiText("components.ActionsPanel.text020")}<code data-i18n="components.ActionsPanel.text021">{uiText("components.ActionsPanel.text021")}</code>{uiText("components.ActionsPanel.text022")}</p>
                     {paramEntries.map(([name, spec], pi) => (
                         <div key={pi} className={styles.paramCard}>
                             <div className={styles.paramRow}>
@@ -513,7 +515,7 @@ function ActionEditor({
                                     className={styles.paramNameInput}
                                     value={name}
                                     onChange={e => renameParam(pi, e.target.value)}
-                                    placeholder="duration_ms"
+                                    placeholder={uiText("components.ActionsPanel.label004")}
                                 />
                                 <select
                                     className={styles.paramTypeSelect}
@@ -522,56 +524,54 @@ function ActionEditor({
                                 >
                                     {PARAM_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
                                 </select>
-                                <button
+                                <button data-i18n="components.ActionsPanel.text023"
                                     className={styles.stepSmallBtn}
                                     onClick={() => removeParam(pi)}
-                                    title="この引数を削除"
+                                    title={uiText("components.ActionsPanel.text023")}
                                     style={{ color: '#dc2626' }}
-                                >&times;</button>
+                                >{uiText("components.ActionsPanel.label005")}</button>
                             </div>
                             <div className={styles.paramRow}>
-                                <input
+                                <input data-i18n="components.ActionsPanel.text024 components.ActionsPanel.text025"
                                     className={styles.paramSmallInput}
                                     value={spec.default === undefined ? '' : String(spec.default)}
                                     onChange={e => updateParam(pi, { default: coerceParamValue(spec.type, e.target.value) })}
-                                    placeholder="既定値"
-                                    title="既定値（省略時に使われる値）"
+                                    placeholder={uiText("components.ActionsPanel.text024")}
+                                    title={uiText("components.ActionsPanel.text025")}
                                 />
                                 {(spec.type === 'number' || spec.type === 'integer') && (
                                     <>
-                                        <input
+                                        <input data-i18n="components.ActionsPanel.text026 components.ActionsPanel.text027"
                                             className={styles.paramSmallInput}
                                             type="number"
                                             value={spec.min ?? ''}
                                             onChange={e => updateParam(pi, { min: e.target.value === '' ? undefined : Number(e.target.value) })}
-                                            placeholder="最小"
-                                            title="最小値"
+                                            placeholder={uiText("components.ActionsPanel.text026")}
+                                            title={uiText("components.ActionsPanel.text027")}
                                         />
-                                        <input
+                                        <input data-i18n="components.ActionsPanel.text028 components.ActionsPanel.text029"
                                             className={styles.paramSmallInput}
                                             type="number"
                                             value={spec.max ?? ''}
                                             onChange={e => updateParam(pi, { max: e.target.value === '' ? undefined : Number(e.target.value) })}
-                                            placeholder="最大"
-                                            title="最大値"
+                                            placeholder={uiText("components.ActionsPanel.text028")}
+                                            title={uiText("components.ActionsPanel.text029")}
                                         />
                                     </>
                                 )}
                             </div>
-                            <input
+                            <input data-i18n="components.ActionsPanel.text030"
                                 className={styles.paramDescInput}
                                 value={spec.description ?? ''}
                                 onChange={e => updateParam(pi, { description: e.target.value })}
-                                placeholder="説明（ペルソナへの引数の意味）"
+                                placeholder={uiText("components.ActionsPanel.text030")}
                             />
                         </div>
                     ))}
-                    <button className={styles.addCallBtn} onClick={addParam}>
-                        + 引数を追加
-                    </button>
+                    <button data-i18n="components.ActionsPanel.text031" className={styles.addCallBtn} onClick={addParam}>{uiText("components.ActionsPanel.text031")}</button>
 
                     <div className={styles.stepsHeader}>
-                        <span className={styles.stepsTitle}>ステップ ({action.steps.length})</span>
+                        <span data-i18n="components.ActionsPanel.text032" className={styles.stepsTitle}>{uiText("components.ActionsPanel.text032")}{action.steps.length})</span>
                     </div>
 
                     {action.steps.map((step, si) => (
@@ -581,9 +581,9 @@ function ActionEditor({
                                     {step.type === 'parallel' ? 'PARALLEL' : 'WAIT'}
                                 </span>
                                 <div className={styles.stepActions}>
-                                    <button className={styles.stepSmallBtn} onClick={() => moveStep(si, -1)} disabled={si === 0} title="上へ">&uarr;</button>
-                                    <button className={styles.stepSmallBtn} onClick={() => moveStep(si, 1)} disabled={si === action.steps.length - 1} title="下へ">&darr;</button>
-                                    <button className={styles.stepSmallBtn} onClick={() => removeStep(si)} title="削除" style={{ color: '#dc2626' }}>&times;</button>
+                                    <button data-i18n="components.ActionsPanel.text033" className={styles.stepSmallBtn} onClick={() => moveStep(si, -1)} disabled={si === 0} title={uiText("components.ActionsPanel.text033")}>{uiText("components.ActionsPanel.label006")}</button>
+                                    <button data-i18n="components.ActionsPanel.text034" className={styles.stepSmallBtn} onClick={() => moveStep(si, 1)} disabled={si === action.steps.length - 1} title={uiText("components.ActionsPanel.text034")}>{uiText("components.ActionsPanel.label007")}</button>
+                                    <button data-i18n="components.ActionsPanel.text035" className={styles.stepSmallBtn} onClick={() => removeStep(si)} title={uiText("components.ActionsPanel.text035")} style={{ color: '#dc2626' }}>{uiText("components.ActionsPanel.label008")}</button>
                                 </div>
                             </div>
 
@@ -597,19 +597,18 @@ function ActionEditor({
                                                     value={call.tool}
                                                     onChange={e => updateCall(si, ci, { tool: e.target.value })}
                                                 >
-                                                    <option value="">-- ツール --</option>
+                                                    <option data-i18n="components.ActionsPanel.text036" value="">{uiText("components.ActionsPanel.text036")}</option>
                                                     {availableTools.map(t => (
                                                         <option key={t} value={t}>{t}</option>
                                                     ))}
                                                 </select>
                                                 {(step.calls || []).length > 1 && (
-                                                    <button
+                                                    <button data-i18n="components.ActionsPanel.text037"
                                                         className={styles.removeCallBtn}
                                                         onClick={() => removeCall(si, ci)}
-                                                        title="このツール呼び出しを削除"
+                                                        title={uiText("components.ActionsPanel.text037")}
                                                     >
-                                                        &times;
-                                                    </button>
+                                                        {uiText("components.ActionsPanel.label009")}</button>
                                                 )}
                                             </div>
                                             <ArgsForm
@@ -620,30 +619,28 @@ function ActionEditor({
                                             />
                                         </div>
                                     ))}
-                                    <button className={styles.addCallBtn} onClick={() => addCall(si)}>
-                                        + ツール呼び出し追加
-                                    </button>
+                                    <button data-i18n="components.ActionsPanel.text038" className={styles.addCallBtn} onClick={() => addCall(si)}>{uiText("components.ActionsPanel.text038")}</button>
                                 </>
                             )}
 
                             {step.type === 'wait' && (
                                 <div>
-                                    <label className={styles.fieldLabel}>待機時間 (ms / ${'{'}引数{'}'} / 式)</label>
+                                    <label data-i18n="components.ActionsPanel.text039 components.ActionsPanel.text040 components.ActionsPanel.text041" className={styles.fieldLabel}>{uiText("components.ActionsPanel.text039")}{'{'}{uiText("components.ActionsPanel.text040")}{'}'}{uiText("components.ActionsPanel.text041")}</label>
                                     <input
                                         className={styles.waitInput}
                                         value={step.duration_ms ?? 300}
                                         onChange={e => updateStep(si, { duration_ms: parseDurationInput(e.target.value) })}
-                                        placeholder="300 / ${duration_ms} / ${seconds}*1000"
+                                        placeholder={uiText("components.ActionsPanel.label010")}
                                     />
                                     {paramNames.length > 0 && (
                                         <div className={styles.paramChipRow}>
                                             {paramNames.map(name => (
-                                                <button
+                                                <button data-i18n="components.ActionsPanel.text042"
                                                     key={name}
                                                     type="button"
                                                     className={styles.paramInsertChip}
                                                     onClick={() => updateStep(si, { duration_ms: `\${${name}}` })}
-                                                    title={`待機時間に引数 ${name} を使う`}
+                                                    title={uiText("components.ActionsPanel.text042", { p1: name })}
                                                 >{'${'}{name}{'}'}</button>
                                             ))}
                                         </div>
@@ -654,12 +651,8 @@ function ActionEditor({
                     ))}
 
                     <div className={styles.addStepRow}>
-                        <button className={styles.addStepBtn} onClick={() => addStep('parallel')}>
-                            + ツール実行ステップ
-                        </button>
-                        <button className={styles.addStepBtn} onClick={() => addStep('wait')}>
-                            + 待機ステップ
-                        </button>
+                        <button data-i18n="components.ActionsPanel.text043" className={styles.addStepBtn} onClick={() => addStep('parallel')}>{uiText("components.ActionsPanel.text043")}</button>
+                        <button data-i18n="components.ActionsPanel.text044" className={styles.addStepBtn} onClick={() => addStep('wait')}>{uiText("components.ActionsPanel.text044")}</button>
                     </div>
 
                     <TestTargetSelector
@@ -676,15 +669,11 @@ function ActionEditor({
                 </div>
 
                 <div className={styles.editorFooter}>
-                    <button className={styles.btnSecondary} onClick={onTest} disabled={busy}>
-                        {busy ? '実行中...' : 'テスト実行'}
+                    <button data-i18n="components.ActionsPanel.text045 components.ActionsPanel.text046" className={styles.btnSecondary} onClick={onTest} disabled={busy}>
+                        {busy ? uiText("components.ActionsPanel.text045") : uiText("components.ActionsPanel.text046")}
                     </button>
-                    <button className={styles.btnSecondary} onClick={onClose}>
-                        キャンセル
-                    </button>
-                    <button className={styles.btnPrimary} onClick={onSave} disabled={busy}>
-                        保存
-                    </button>
+                    <button data-i18n="components.ActionsPanel.text047" className={styles.btnSecondary} onClick={onClose}>{uiText("components.ActionsPanel.text047")}</button>
+                    <button data-i18n="components.ActionsPanel.text048" className={styles.btnPrimary} onClick={onSave} disabled={busy}>{uiText("components.ActionsPanel.text048")}</button>
                 </div>
             </div>
         </div>
@@ -712,6 +701,7 @@ function ArgField({
     paramNames: string[];
     onChange: (value: unknown) => void;
 }) {
+    useLocale();
     const type = prop.type;
     const isNum = type === 'number' || type === 'integer';
     const display = value === undefined || value === null ? '' : String(value);
@@ -724,7 +714,7 @@ function ArgField({
                 value={display}
                 onChange={e => onChange(e.target.value === '' ? undefined : e.target.value)}
             >
-                <option value="">（未設定）</option>
+                <option data-i18n="components.ActionsPanel.text049" value="">{uiText("components.ActionsPanel.text049")}</option>
                 {prop.enum.map(v => (
                     <option key={String(v)} value={String(v)}>{String(v)}</option>
                 ))}
@@ -737,18 +727,18 @@ function ArgField({
                 value={value === undefined ? '' : String(value)}
                 onChange={e => onChange(e.target.value === '' ? undefined : e.target.value === 'true')}
             >
-                <option value="">（未設定）</option>
-                <option value="true">true</option>
-                <option value="false">false</option>
+                <option data-i18n="components.ActionsPanel.text050" value="">{uiText("components.ActionsPanel.text050")}</option>
+                <option value="true">{uiText("components.ActionsPanel.label011")}</option>
+                <option value="false">{uiText("components.ActionsPanel.label012")}</option>
             </select>
         );
     } else {
         control = (
-            <input
+            <input data-i18n="components.ActionsPanel.text051"
                 className={styles.argFieldInput}
                 value={display}
                 onChange={e => onChange(isNum ? parseArgNumber(e.target.value) : (e.target.value === '' ? undefined : e.target.value))}
-                placeholder={isNum ? '数値 / ${引数} / 式' : prop.description || ''}
+                placeholder={isNum ? uiText("components.ActionsPanel.text051") : prop.description || ''}
                 title={prop.description || ''}
             />
         );
@@ -764,12 +754,12 @@ function ArgField({
             {isNum && paramNames.length > 0 && (
                 <div className={styles.paramChipRow}>
                     {paramNames.map(p => (
-                        <button
+                        <button data-i18n="components.ActionsPanel.text052"
                             key={p}
                             type="button"
                             className={styles.paramInsertChip}
                             onClick={() => onChange(`\${${p}}`)}
-                            title={`${name} に引数 ${p} を使う`}
+                            title={uiText("components.ActionsPanel.text052", { p1: name, p2: p })}
                         >{'${'}{p}{'}'}</button>
                     ))}
                 </div>
@@ -786,6 +776,7 @@ function ArgsForm({
     paramNames: string[];
     onChange: (args: Record<string, unknown>) => void;
 }) {
+    useLocale();
     const props = schema?.properties;
     const hasSchema = !!props && Object.keys(props).length > 0;
     const [raw, setRaw] = useState(!hasSchema);
@@ -799,9 +790,7 @@ function ArgsForm({
             <div className={styles.argsFormRaw}>
                 <ArgsInput args={args} onChange={onChange} />
                 {hasSchema && (
-                    <button type="button" className={styles.argModeBtn} onClick={() => setRaw(false)}>
-                        フォーム編集に戻す
-                    </button>
+                    <button data-i18n="components.ActionsPanel.text053" type="button" className={styles.argModeBtn} onClick={() => setRaw(false)}>{uiText("components.ActionsPanel.text053")}</button>
                 )}
             </div>
         );
@@ -828,9 +817,7 @@ function ArgsForm({
                     onChange={v => setField(key, v)}
                 />
             ))}
-            <button type="button" className={styles.argModeBtn} onClick={() => setRaw(true)}>
-                JSON で編集
-            </button>
+            <button data-i18n="components.ActionsPanel.text054" type="button" className={styles.argModeBtn} onClick={() => setRaw(true)}>{uiText("components.ActionsPanel.text054")}</button>
         </div>
     );
 }
@@ -842,6 +829,7 @@ function ArgsInput({
     args: Record<string, unknown>;
     onChange: (args: Record<string, unknown>) => void;
 }) {
+    useLocale();
     const [text, setText] = useState(JSON.stringify(args));
     const [valid, setValid] = useState(true);
 
@@ -879,7 +867,7 @@ function ArgsInput({
             value={text}
             onChange={handleChange}
             onBlur={handleBlur}
-            placeholder='{"key": "value"}'
+            placeholder={uiText("components.ActionsPanel.label013")}
         />
     );
 }

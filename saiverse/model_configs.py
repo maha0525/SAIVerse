@@ -25,6 +25,9 @@ _PROTOCOL_TO_LEGACY_PROVIDER = {
     "xai_native": "xai",
     "nvidia_nim": "nvidia_nim",
     "openai_codex": "openai_codex",
+    # 反射判断の宛先には legacy 名が無い (llm_clients/factory.py は扱わない)。
+    # protocol と同じ名前をそのまま置いて、legacy 側の既定 "ollama" に落ちないようにする。
+    "jev_compat": "jev_compat",
 }
 
 # Fields on the model config that can be inherited from the provider when
@@ -40,7 +43,41 @@ _INHERITABLE_FIELDS = [
     ("request_kwargs", "default_request_kwargs"),
     ("default_headers", "default_headers"),
     ("llama_server_binary", "llama_server_binary"),
+    # 反射判断 (docs/intent/reflex_judgment.md) の方言の宣言 — 宛先の path・
+    # 応答の欄の名前・対応する質問の型。宛先ごとに違うので provider 側に置き、
+    # モデルが自分で書いていなければそのまま受け継ぐ。
+    # この欄だけは「丸ごと置き換え」ではなく辞書の合成 (_merge_reflex_judgment)。
+    ("reflex_judgment", "reflex_judgment"),
 ]
+
+# 丸ごとの置き換えではなく、辞書のキー単位で合成する欄。
+_DICT_MERGED_FIELDS = {"reflex_judgment"}
+
+
+def _merge_reflex_judgment(resolved: Dict, provider: Mapping[str, Any]) -> None:
+    """反射判断の方言を provider の宣言の上にモデルの宣言を重ねて解決する。
+
+    他の継承フィールドと違い、この欄は「モデルが何か書いたら provider の宣言は全部
+    無効」にしてはいけない。モデル側に ``"reflex_judgment": {}`` や ``{"path": ...}``
+    のような部分的な宣言が書かれただけで provider の path・応答の欄の名前が消え、
+    ``saiverse/reflex_judgment.py`` が未宣言として TypeSafe 正典の既定へ落ちる —
+    OpenRouter 系の宛先では、誰も気づかないまま間違った URL を呼ぶことになる。
+
+    合成はキー単位 (浅い合成)。モデルが書いたキーだけがそのキーを上書きし、書かれて
+    いないキーは provider の宣言が生き残る。
+    """
+    provider_dialect = provider.get("reflex_judgment")
+    if not isinstance(provider_dialect, dict):
+        return
+    model_dialect = resolved.get("reflex_judgment")
+    if model_dialect is None:
+        resolved["reflex_judgment"] = dict(provider_dialect)
+        return
+    if not isinstance(model_dialect, dict):
+        # 辞書でない宣言はモデル側の書き間違い。既存の挙動どおりそのまま残す
+        # (反射判断側が「宣言なし」として扱い、設定ミスがそこで表に出る)。
+        return
+    resolved["reflex_judgment"] = {**provider_dialect, **model_dialect}
 
 
 def _resolve_provider_ref(config: Dict) -> Dict:
@@ -85,8 +122,12 @@ def _resolve_provider_ref(config: Dict) -> Dict:
 
     # Inherit provider defaults for fields not set on the model
     for model_field, provider_field in _INHERITABLE_FIELDS:
+        if model_field in _DICT_MERGED_FIELDS:
+            continue  # handled below (key-by-key merge, not all-or-nothing)
         if resolved.get(model_field) is None and provider_field in provider:
             resolved[model_field] = provider[provider_field]
+
+    _merge_reflex_judgment(resolved, provider)
 
     return resolved
 
@@ -806,17 +847,29 @@ def _get_required_env_vars(model: str) -> list[str]:
             )
         return names
 
-    # Provider defaults
-    if provider == "anthropic":
+    # Provider / protocol defaults. A hand-written user_data config may declare
+    # only an explicit protocol (no provider, no api_key_env); the factory's
+    # clients then read their own default env names (e.g. the OpenAI client
+    # falls back to OPENAI_API_KEY). Availability — and the secret masking in
+    # saiverse/reflex_judgment.py, which asks this same table which values to
+    # mask — must see those names too, so match on the explicit protocol first
+    # and fall back to the legacy provider name.
+    protocol = config.get("protocol")
+    kind = protocol if isinstance(protocol, str) and protocol else provider
+    if kind in ("anthropic", "anthropic_native"):
         return ["CLAUDE_API_KEY"]
-    if provider == "gemini":
+    if kind in ("gemini", "gemini_native"):
         return ["GEMINI_API_KEY", "GEMINI_FREE_API_KEY"]
-    if provider in ("openai",):
+    if kind in ("openai", "openai_compat"):
         return ["OPENAI_API_KEY"]
-    if provider == "xai":
+    if kind in ("xai", "xai_native"):
         return ["XAI_API_KEY"]
+    if kind == "ollama_compat":
+        # Local protocol: no key by default (mirrors the provider check above).
+        return []
 
-    # Unknown provider — assume available (don't hide by mistake)
+    # Unknown provider/protocol, or one that authenticates outside env keys
+    # (openai_codex = OAuth) — assume available (don't hide by mistake).
     return []
 
 
@@ -832,6 +885,18 @@ def is_model_available(model: str) -> bool:
     if not env_vars:
         return True
     return any(os.environ.get(var) for var in env_vars)
+
+
+def required_api_key_env_names(model: str) -> list[str]:
+    """このモデルの認証に使われうる環境変数名の一覧 (空 = キー不要)。
+
+    :func:`is_model_available` と同じ表 (``_get_required_env_vars``) を公開する薄い口。
+    宣言された ``api_key_env`` だけでなく、代替キー名 (``api_key_env_alternates``) と
+    宣言の無い旧形式の provider 既定キー名も含む。反射判断
+    (saiverse/reflex_judgment.py) が「実際に認証に使われたかもしれないキーの値」を
+    ログ・例外メッセージから漏れなく伏せるために使う。
+    """
+    return list(_get_required_env_vars(model))
 
 
 def is_local_model(model: str) -> bool:

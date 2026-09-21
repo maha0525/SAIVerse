@@ -38,6 +38,7 @@ class SpellLoopRuntime:
 
     def __init__(self, occupants: Optional[Dict[str, List[str]]] = None):
         self.stored: List[str] = []
+        self.stored_calls: List[Dict[str, Any]] = []
         self.said: List[Dict[str, Any]] = []
         self.speak_starts: List[str] = []
         self.finalized: List[Dict[str, Any]] = []
@@ -60,7 +61,12 @@ class SpellLoopRuntime:
     # --- 記録 -------------------------------------------------------------
     def _store_memory(self, persona, text, **kwargs):
         self.stored.append(text)
+        self.stored_calls.append({"text": text, **kwargs})
         return "mem-1" if kwargs.get("return_message_id") else True
+
+    def assistant_memories(self) -> List[Dict[str, Any]]:
+        """記憶へ書かれた本人の発言 (スペル結果の system 行は除く)。"""
+        return [c for c in self.stored_calls if c.get("role") == "assistant"]
 
     def _emit_say(self, persona, building_id, text, pulse_id=None, metadata=None,
                   event_callback=None, occupants_snapshot=None):
@@ -112,11 +118,34 @@ class SpellLoopRuntime:
         return None
 
 
-class ScriptedClient:
+class ScriptedReasoningMixin:
+    """周ごとの思考をスクリプト順に返す口。
+
+    スペルループは使用量と同じ位置で思考も**破壊的に**回収する。``reasonings``
+    を渡さなければ「思考を返さないモデル」を模す (従来の挙動)。
+    """
+
+    reasonings: List[str]
+
+    def _init_reasonings(self, reasonings: Optional[List[str]]) -> None:
+        self.reasonings = list(reasonings or [])
+
+    def consume_reasoning(self):
+        if not self.reasonings:
+            return []
+        nxt = self.reasonings.pop(0)
+        return [{"text": nxt}] if nxt else []
+
+    def consume_reasoning_details(self):
+        return None
+
+
+class ScriptedClient(ScriptedReasoningMixin):
     """retry 応答をスクリプト順に返す mock LLM クライアント (全文一括)。"""
 
-    def __init__(self, responses: List[Any]):
+    def __init__(self, responses: List[Any], reasonings: Optional[List[str]] = None):
         self.responses = list(responses)
+        self._init_reasonings(reasonings)
 
     def generate(self, messages, tools=None, temperature=None, **kwargs):
         if not self.responses:
@@ -130,11 +159,12 @@ class ScriptedClient:
         return None
 
 
-class ScriptedStreamClient:
+class ScriptedStreamClient(ScriptedReasoningMixin):
     """retry 応答をスクリプト順に chunk 列で返す mock (ストリーミング経路)。"""
 
-    def __init__(self, responses: List[str]):
+    def __init__(self, responses: List[str], reasonings: Optional[List[str]] = None):
         self.responses = list(responses)
+        self._init_reasonings(reasonings)
 
     def generate_stream(self, messages, tools=None, temperature=None, **kwargs):
         if not self.responses:
@@ -155,7 +185,8 @@ def _ok_spell(on_call=None, result: str = "やりました"):
 
 
 def _run_loop(runtime, client, text, fake_spell, *, streaming_state=None,
-              initial_building_id=None, event_callback=None, state=None):
+              initial_building_id=None, event_callback=None, state=None,
+              initial_reasoning_text=""):
     persona = SimpleNamespace(persona_id="p1")
     if state is None:
         state = {"_pulse_id": "pulse-1", "_pulse_context": None,
@@ -179,6 +210,7 @@ def _run_loop(runtime, client, text, fake_spell, *, streaming_state=None,
             pipeline_streaming_state=streaming_state,
             initial_building_id=initial_building_id,
             initial_llm_usage={"model": "m", "input_tokens": 1},
+            initial_reasoning_text=initial_reasoning_text,
         )), persona
 
 
@@ -213,7 +245,7 @@ def test_two_spell_rounds_leave_three_records_in_order():
         runtime, persona, {}, result.segments,
         pulse_id="pulse-1",
         event_callback=events.append,
-        final_metadata_factory=lambda usage: {"tags": ["conversation"], "final": True},
+        final_metadata_factory=lambda seg: {"tags": ["conversation"], "final": True},
     )
     assert len(runtime.said) == 3
     assert [row["building_id"] for row in runtime.said] == ["b1", "b1", "b1"]
@@ -258,7 +290,7 @@ def test_a_move_in_round_one_sends_the_later_beats_to_the_new_room():
     runtime_llm._emit_beat_segments(
         runtime, persona, {}, result.segments,
         pulse_id="pulse-1", event_callback=None,
-        final_metadata_factory=lambda usage: {"tags": ["conversation"]},
+        final_metadata_factory=lambda seg: {"tags": ["conversation"]},
     )
     assert [row["building_id"] for row in runtime.said] == ["b1", "b2"]
 
@@ -319,7 +351,7 @@ def test_each_beat_carries_the_occupants_of_the_moment_it_started():
     runtime_llm._emit_beat_segments(
         runtime, persona, {}, result.segments,
         pulse_id="pulse-1", event_callback=None,
-        final_metadata_factory=lambda usage: {"tags": ["conversation"]},
+        final_metadata_factory=lambda seg: {"tags": ["conversation"]},
     )
     assert [row["occupants_snapshot"] for row in runtime.said] == [
         ["p1", "elis"], ["mira", "p1"],
@@ -339,7 +371,7 @@ def test_nothing_to_write_still_consumes_the_closing_metadata():
         runtime, persona, {},
         [runtime_llm.BeatSegment(text="   ", building_id="b1")],
         pulse_id="pulse-1", event_callback=None,
-        final_metadata_factory=lambda usage: calls.append(usage) or {},
+        final_metadata_factory=lambda seg: calls.append(seg) or {},
     )
     assert wrote is False
     assert runtime.said == []
@@ -432,7 +464,7 @@ def test_a_quick_spell_terminal_round_emits_no_empty_message_without_streaming()
     runtime_llm._emit_beat_segments(
         runtime, persona, {}, result.segments,
         pulse_id="pulse-1", event_callback=None,
-        final_metadata_factory=lambda usage: {"tags": ["conversation"]},
+        final_metadata_factory=lambda seg: {"tags": ["conversation"]},
     )
     assert len(runtime.said) == 1
     assert runtime.said[0]["text"].strip()
@@ -461,7 +493,9 @@ def test_a_streaming_failure_mid_loop_keeps_the_confirmed_beat_in_its_room():
     """ストリーミング経路でも、落ちる前の Beat は自分の部屋に確定済みで残る。"""
     runtime = SpellLoopRuntime()
 
-    class _DyingStreamClient:
+    class _DyingStreamClient(ScriptedReasoningMixin):
+        reasonings: List[str] = []
+
         def generate_stream(self, messages, **kwargs):
             raise RuntimeError("api down")
 
@@ -709,7 +743,10 @@ def _build_streaming_node(monkeypatch, *, spell_loop):
     return runtime, node, events
 
 
-def _two_beat_spell_loop(closing_usage: Optional[Dict[str, Any]] = None):
+def _two_beat_spell_loop(
+    closing_usage: Optional[Dict[str, Any]] = None,
+    closing_reasoning: str = "",
+):
     """中間 Beat 1 件 (確定済み) + 締めの Beat 1 件を返すフェイクのスペルループ。"""
 
     async def _loop(**kwargs):
@@ -718,14 +755,17 @@ def _two_beat_spell_loop(closing_usage: Optional[Dict[str, Any]] = None):
                 runtime_llm.BeatSegment(
                     text="一回目だ。", building_id="b1",
                     llm_usage={"model": "m1", "input_tokens": 3}, emitted=True,
+                    reasoning_text="思考1",
                 ),
                 runtime_llm.BeatSegment(
                     text="終わりました。", building_id="b1",
                     llm_usage=closing_usage, emitted=False,
+                    reasoning_text=closing_reasoning,
                 ),
             ],
             final_continuation="終わりました。",
             loop_count=1,
+            closing_reasoning_text=closing_reasoning,
         )
 
     return _loop
@@ -770,6 +810,51 @@ def test_the_closing_beat_of_a_spell_pulse_shows_no_pulse_total(monkeypatch):
     say_events = [e for e in events if e["type"] == "say"]
     assert say_events, "締めの Beat の say イベントが流れていない"
     assert "llm_usage_total" not in say_events[-1]["metadata"]
+
+
+def test_the_closing_beat_of_a_spell_pulse_carries_its_reasoning(monkeypatch):
+    """スペルが走った Pulse でも、締めの Beat の記録に思考が載る。
+
+    ここが実機で欠けていた形 — 2026-09-19 以前、ストリーミングのスペル締めは
+    「従来から載せていない」として思考を省いていて、チャット画面の思考の
+    折りたたみが Pulse まるごと消えていた
+    (docs/issues/spell_pulse_beats_missing_reasoning.md)。
+    """
+    runtime, node, events = _build_streaming_node(
+        monkeypatch,
+        spell_loop=_two_beat_spell_loop(
+            closing_usage={"model": "m2", "input_tokens": 7},
+            closing_reasoning="締めの思考",
+        ),
+    )
+    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    runtime._emit_speak_finalize.assert_called_once()
+    extra = runtime._emit_speak_finalize.call_args.kwargs["extra_metadata"]
+    assert extra["reasoning"] == "締めの思考"
+    # 画面へ渡す吹き出しにも同じ値が届く (記録と表示で食い違わせない)
+    say_events = [e for e in events if e["type"] == "say"]
+    assert say_events, "締めの Beat の say イベントが流れていない"
+    assert say_events[-1]["metadata"]["reasoning"] == "締めの思考"
+    assert say_events[-1]["reasoning"] == "締めの思考"
+
+
+def test_a_closing_beat_without_reasoning_carries_no_reasoning_key(monkeypatch):
+    """締めの周が思考を返さなければ、キー自体を入れない。"""
+    runtime, node, events = _build_streaming_node(
+        monkeypatch,
+        spell_loop=_two_beat_spell_loop(
+            closing_usage={"model": "m2", "input_tokens": 7},
+            closing_reasoning="",
+        ),
+    )
+    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    extra = runtime._emit_speak_finalize.call_args.kwargs["extra_metadata"]
+    assert "reasoning" not in extra
+    say_events = [e for e in events if e["type"] == "say"]
+    assert "reasoning" not in say_events[-1].get("metadata", {})
+    assert "reasoning" not in say_events[-1]
 
 
 def test_an_intermediate_beat_carries_its_own_usage(monkeypatch):
@@ -841,8 +926,10 @@ def test_the_recall_lands_on_the_first_beat_without_streaming():
         runtime, persona, state, segments,
         pulse_id="pulse-1", event_callback=None,
         # 締めのメタデータは本物の組み立てを通す (ここが空振りすることが要点)
-        final_metadata_factory=lambda usage: runtime_llm._build_say_metadata(
-            state, llm_usage_metadata=usage, include_total=False,
+        final_metadata_factory=lambda seg: runtime_llm._build_say_metadata(
+            state,
+            llm_usage_metadata=(seg.llm_usage if seg is not None else None),
+            include_total=False,
         ),
     )
 
@@ -860,13 +947,300 @@ def test_a_single_beat_pulse_still_carries_the_recall_on_its_only_record():
         runtime, persona, state,
         [runtime_llm.BeatSegment(text="ただいま。", building_id="b1")],
         pulse_id="pulse-1", event_callback=None,
-        final_metadata_factory=lambda usage: runtime_llm._build_say_metadata(
-            state, llm_usage_metadata=usage, include_total=False,
+        final_metadata_factory=lambda seg: runtime_llm._build_say_metadata(
+            state,
+            llm_usage_metadata=(seg.llm_usage if seg is not None else None),
+            include_total=False,
         ),
     )
 
     assert len(runtime.said) == 1
     assert runtime.said[0]["metadata"]["auto_recall"] == RECALL
+
+
+# ---------------------------------------------------------------------------
+# 8. 思考 (reasoning) は、その Beat を生んだ呼び出しの分が、その Beat に付く
+# ---------------------------------------------------------------------------
+#
+# 2026-09-19 以前、スペルループは周ごとの LLM 呼び出しの後に使用量だけを回収し、
+# 思考を取り出さなかった。クライアント側のバッファは破壊的読み取りで、次の周の
+# 呼び出しの頭で上書きされる — つまり思考は毎周届いていたのに、周 1 の分以外は
+# どの記録にも残らず、チャット画面から思考の折りたたみが消えていた
+# (docs/issues/spell_pulse_beats_missing_reasoning.md)。
+
+
+def test_each_beat_carries_the_reasoning_of_the_call_that_made_it():
+    """周ごとの思考が、その周の Beat の建物の記録と記憶の両方に付く。
+
+    ここが「どの Beat にどの周の思考が付くか」の対応づけを固定する検査。
+    周 1 の思考は呼び出し元がループの前に回収済みの分 (= 引数で渡る)、
+    周 2 以降はループが自分で回収した分。
+    """
+    runtime = SpellLoopRuntime()
+    client = ScriptedStreamClient(
+        [f"二回目だ。\n{SPELL_LINE}", "終わりました。"],
+        reasonings=["思考2", "思考3"],
+    )
+    st = _streaming_state("draft-0", "b1")
+    result, _persona = _run_loop(
+        runtime, client, f"一回目だ。\n{SPELL_LINE}", _ok_spell(),
+        streaming_state=st, initial_building_id="b1",
+        initial_reasoning_text="思考1",
+    )
+
+    assert result.loop_count == 2
+    assert [seg.reasoning_text for seg in result.segments] == [
+        "思考1", "思考2", "思考3",
+    ]
+    # 中間 Beat の建物の記録 (下書き行の確定) に、その周の思考が載る
+    assert [f["extra_metadata"]["reasoning"] for f in runtime.finalized] == [
+        "思考1", "思考2",
+    ]
+    # 中間 Beat の記憶にも同じ値が載る
+    assert [m["metadata"]["reasoning"] for m in runtime.assistant_memories()] == [
+        "思考1", "思考2",
+    ]
+    # 締めの Beat には最終周の分が回る (呼び出し元が使う値)
+    assert result.closing_reasoning_text == "思考3"
+    assert result.segments[-1].emitted is False
+
+
+def test_streaming_beat_say_events_carry_reasoning_at_top_level():
+    """ストリーミングの中間 Beat の確定 say イベントにも、思考がトップレベルで載る。
+
+    画面の say 処理は ``event.reasoning`` (トップレベル) しか読まず、Beat の
+    切れ目の ``streaming_discard`` が実況の思考ごと生成中の吹き出しを捨てる。
+    metadata にしか無いと、確定後の吹き出しから思考が消える (敵対レビュー
+    2 巡目と同型の 3 例目、ユーザーとの会話の本線経路)。
+    """
+    runtime = SpellLoopRuntime()
+    client = ScriptedStreamClient(
+        [f"二回目だ。\n{SPELL_LINE}", "終わりました。"],
+        reasonings=["思考2", "思考3"],
+    )
+    st = _streaming_state("draft-0", "b1")
+    events: list = []
+    _run_loop(
+        runtime, client, f"一回目だ。\n{SPELL_LINE}", _ok_spell(),
+        streaming_state=st, initial_building_id="b1",
+        initial_reasoning_text="思考1",
+        event_callback=events.append,
+    )
+
+    beat_says = [e for e in events if e.get("type") == "say"]
+    assert [e.get("reasoning") for e in beat_says] == ["思考1", "思考2"]
+    # metadata 側 (記録に入る値) と同じ値であること
+    assert [e["metadata"]["reasoning"] for e in beat_says] == ["思考1", "思考2"]
+
+
+def test_streaming_beat_say_event_without_reasoning_has_no_key():
+    """思考の無い周の確定 say イベントには、トップレベルのキー自体が無い。"""
+    runtime = SpellLoopRuntime()
+    client = ScriptedStreamClient(["終わりました。"])
+    st = _streaming_state("draft-0", "b1")
+    events: list = []
+    _run_loop(
+        runtime, client, f"一回目だ。\n{SPELL_LINE}", _ok_spell(),
+        streaming_state=st, initial_building_id="b1",
+        event_callback=events.append,
+    )
+
+    beat_says = [e for e in events if e.get("type") == "say"]
+    assert beat_says, "中間 Beat の確定 say イベントが出ていない"
+    assert all("reasoning" not in e for e in beat_says)
+
+
+def test_the_closing_beat_of_a_non_streaming_spell_pulse_carries_the_last_round():
+    """非ストリーミング経路でも対称 — 中間はその周、締めは最終周の思考。"""
+    runtime = SpellLoopRuntime()
+    client = ScriptedClient(
+        [f"二回目だ。\n{SPELL_LINE}", "終わりました。"],
+        reasonings=["思考2", "思考3"],
+    )
+    result, persona = _run_loop(
+        runtime, client, f"一回目だ。\n{SPELL_LINE}", _ok_spell(),
+        initial_reasoning_text="思考1",
+    )
+
+    assert [seg.reasoning_text for seg in result.segments] == [
+        "思考1", "思考2", "思考3",
+    ]
+    assert result.closing_reasoning_text == "思考3"
+    # 記憶は中間 Beat の 2 件 (締めは呼び出し元の memorize が書く)
+    assert [m["metadata"]["reasoning"] for m in runtime.assistant_memories()] == [
+        "思考1", "思考2",
+    ]
+
+    # 建物の記録はループ完了後にまとめて出る。中間はセグメントの思考、締めは
+    # 呼び出し元が組む metadata (= 締めのセグメントの思考)。
+    runtime_llm._emit_beat_segments(
+        runtime, persona, {}, result.segments,
+        pulse_id="pulse-1", event_callback=None,
+        final_metadata_factory=lambda seg: runtime_llm._build_say_metadata(
+            {},
+            llm_usage_metadata=(seg.llm_usage if seg is not None else None),
+            reasoning_text=(seg.reasoning_text if seg is not None else ""),
+            reasoning_details=(seg.reasoning_details if seg is not None else None),
+            include_total=False,
+        ),
+    )
+    assert [row["metadata"]["reasoning"] for row in runtime.said] == [
+        "思考1", "思考2", "思考3",
+    ]
+
+
+def test_a_round_without_reasoning_carries_no_reasoning_key():
+    """思考が空の周は、キー自体を入れない (空を空として落とす流儀)。"""
+    runtime = SpellLoopRuntime()
+    client = ScriptedStreamClient(
+        [f"二回目だ。\n{SPELL_LINE}", "終わりました。"],
+        reasonings=["", "思考3"],
+    )
+    st = _streaming_state("draft-0", "b1")
+    result, _persona = _run_loop(
+        runtime, client, f"一回目だ。\n{SPELL_LINE}", _ok_spell(),
+        streaming_state=st, initial_building_id="b1",
+        initial_reasoning_text="",
+    )
+
+    # 周 1・周 2 とも思考なし → 建物にも記憶にもキーが無い
+    assert "reasoning" not in runtime.finalized[0]["extra_metadata"]
+    assert "reasoning" not in runtime.finalized[1]["extra_metadata"]
+    assert runtime.assistant_memories()[0]["metadata"] is None
+    assert runtime.assistant_memories()[1]["metadata"] is None
+    # 締めだけが思考を持つ
+    assert result.closing_reasoning_text == "思考3"
+
+
+def test_the_interrupted_settlement_still_records_no_reasoning():
+    """中断の確定は思考を載せない (対象外のまま固定)。
+
+    止められた回の思考は「その本文を言い切らせた思考」ではないので、記録に
+    付けない — 2026-09-19 の改修でも触らないと決めた境界。
+    """
+    runtime = SpellLoopRuntime()
+    persona = SimpleNamespace(persona_id="p1")
+    state = {
+        "_pulse_id": "pulse-1",
+        # 直前の生成の思考が state に残っている状況を作る (漏れたら検出される)
+        "_reasoning_text": "止められる前に考えていたこと",
+    }
+    runtime_llm._settle_interrupted_utterance(
+        runtime=runtime,
+        persona=persona,
+        state=state,
+        node_def=SimpleNamespace(id="llm"),
+        playbook=SimpleNamespace(name="test_playbook"),
+        event_callback=None,
+        building_id="b1",
+        msg_id="draft-0",
+        sub_seq=0,
+        text="言いかけの",
+        by_user=True,
+    )
+
+    # 建物の確定にも記憶にも、あるのは「言い切っていない」印だけ
+    assert runtime.finalized[0]["extra_metadata"] == {
+        runtime_llm.INTERRUPTED_METADATA_KEY: True,
+    }
+    assert runtime.assistant_memories()[0]["metadata"] == {
+        runtime_llm.INTERRUPTED_METADATA_KEY: True,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 9. 途中の Beat の思考も、画面が読む場所 (say イベントのトップレベル) に載る
+# ---------------------------------------------------------------------------
+#
+# 画面 (frontend/src/app/page.tsx の say 処理) は ``event.reasoning`` しか読まず、
+# ``event.metadata.reasoning`` は見ない。締めの Beat は ``final_say_extra`` で
+# トップレベルに載っていたが、途中の Beat と早期 emit は metadata だけだった —
+# 記憶には残るのに画面には出ない形 (2026-09-19 敵対レビュー 2 巡目)。
+
+
+def _segment(text: str, reasoning: str = "") -> runtime_llm.BeatSegment:
+    return runtime_llm.BeatSegment(
+        text=text, building_id="b1", reasoning_text=reasoning,
+    )
+
+
+def test_an_intermediate_beat_puts_its_reasoning_where_the_screen_reads_it():
+    runtime = SpellLoopRuntime()
+    persona = SimpleNamespace(persona_id="p1")
+    events: List[Dict[str, Any]] = []
+    runtime_llm._emit_beat_segments(
+        runtime, persona, {}, [
+            _segment("一回目だ。", "思考1"),
+            _segment("終わりました。", "締めの思考"),
+        ],
+        pulse_id="pulse-1",
+        event_callback=events.append,
+        final_metadata_factory=lambda seg: {"tags": ["conversation"]},
+        final_say_extra={"reasoning": "締めの思考"},
+    )
+    say_events = [e for e in events if e["type"] == "say"]
+    assert len(say_events) == 2
+    # 途中の Beat: metadata とトップレベルの両方に同じ思考が載る
+    assert say_events[0]["metadata"]["reasoning"] == "思考1"
+    assert say_events[0]["reasoning"] == "思考1"
+    # 締めの Beat は従来どおり final_say_extra が載せる
+    assert say_events[-1]["reasoning"] == "締めの思考"
+
+
+def test_an_intermediate_beat_without_reasoning_carries_no_top_level_key():
+    runtime = SpellLoopRuntime()
+    persona = SimpleNamespace(persona_id="p1")
+    events: List[Dict[str, Any]] = []
+    runtime_llm._emit_beat_segments(
+        runtime, persona, {}, [
+            _segment("一回目だ。", ""),
+            _segment("終わりました。", "締めの思考"),
+        ],
+        pulse_id="pulse-1",
+        event_callback=events.append,
+        final_metadata_factory=lambda seg: {"tags": ["conversation"]},
+    )
+    say_events = [e for e in events if e["type"] == "say"]
+    assert "reasoning" not in say_events[0].get("metadata", {})
+    assert "reasoning" not in say_events[0]
+
+
+def test_the_early_bubble_puts_its_reasoning_where_the_screen_reads_it():
+    """早期 emit (スペル前の bubble1) も同じ — 本文の持ち主はこの記録。"""
+    runtime = SpellLoopRuntime()
+    persona = SimpleNamespace(persona_id="p1")
+    events: List[Dict[str, Any]] = []
+    emitted = runtime_llm._emit_bubble1_early(
+        runtime=runtime, persona=persona, building_id="b1",
+        text=f"一回目だ。\n{SPELL_LINE}",
+        speak_flag=True, pulse_id="pulse-1",
+        event_callback=events.append, node_id="llm",
+        send_streaming_discard=False,
+        reasoning_text="早期の思考",
+    )
+    assert emitted.strip() == "一回目だ。"
+    say_events = [e for e in events if e["type"] == "say"]
+    assert len(say_events) == 1
+    assert say_events[0]["metadata"]["reasoning"] == "早期の思考"
+    assert say_events[0]["reasoning"] == "早期の思考"
+
+
+def test_the_early_bubble_without_reasoning_carries_no_top_level_key():
+    runtime = SpellLoopRuntime()
+    persona = SimpleNamespace(persona_id="p1")
+    events: List[Dict[str, Any]] = []
+    runtime_llm._emit_bubble1_early(
+        runtime=runtime, persona=persona, building_id="b1",
+        text=f"一回目だ。\n{SPELL_LINE}",
+        speak_flag=True, pulse_id="pulse-1",
+        event_callback=events.append, node_id="llm",
+        send_streaming_discard=False,
+        reasoning_text="",
+    )
+    say_events = [e for e in events if e["type"] == "say"]
+    assert len(say_events) == 1
+    assert "metadata" not in say_events[0]
+    assert "reasoning" not in say_events[0]
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -5,14 +5,21 @@
 
 ```bash
 # mock（既定・LLM コストゼロ・配線確認）: DB もペルソナも自動で仮設される
-python scripts/run_day_sim.py --scenario test_fixtures/scenarios/day_standard.json
+python scripts/run_day_sim.py --scenario test_fixtures/scenarios/day_standard.json --out test_data/day_reports/day_standard.md
 
 # 実 LLM（コスト発生）: テスト環境の DB とペルソナを使うこと（本番に向けない）
-python scripts/run_day_sim.py --scenario <file> --real --city city_a --db-file test_data/user_data/database/saiverse.db
+SAIVERSE_HOME=test_data/.saiverse SAIVERSE_USER_DATA_DIR=test_data/user_data \
+  python scripts/run_day_sim.py --scenario <file> --real --city city_a --db-file test_data/user_data/database/saiverse.db
 ```
 
+**本番には書けない**: DB・SAIVERSE_HOME・SAIVERSE_USER_DATA_DIR・`--out`・`--raw-log-out` のうち、
+その実行で書く場所のどれかが本番（`~/.saiverse` 配下）を指すと起動を拒否する。本番の場所は
+SAIVERSE_HOME の値に依らず判定する。`--real` は SAIVERSE_HOME と SAIVERSE_USER_DATA_DIR を
+テスト環境へ向けないと起動しない。mock は `--out` を省略すると新聞を SAIVERSE_HOME に書くので、
+`--out` を指定するか SAIVERSE_HOME をテスト環境へ向ける。
+
 出力は**一日新聞と生データの対**（レビューは必ずセットで見る）:
-- 新聞: `--out` 先（省略時 `~/.saiverse/personas/<id>/day_reports/<date>.md`）
+- 新聞: `--out` 先（省略時 `$SAIVERSE_HOME/personas/<id>/day_reports/<date>.md`）
 - 生データ: 新聞と同じ場所の `<date>_raw.md`（判断点・SAIMemory 全文・建物メッセージ・
   移動・タスク/欲求・時間割・アイテム）。`--raw-log-out` で場所変更、`--no-raw-log` で抑止
 

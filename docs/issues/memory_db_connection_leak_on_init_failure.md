@@ -2,7 +2,7 @@
 
 **状態**: 実装済み・検証待ち (2026-09-03。接続リークは v0.3.3 で修正済み。引っ越しが毎回失敗する根本原因を 2026-09-03 に特定して v0.3.5 で修正 — 報告者の環境での確認待ち)
 **起票**: 2026-09-02 (v0.3.1 利用者からの「ひとりだけ Chronicle が存在しないと出る / Chronicle の後に Memopedia の読み込みが終わらない」報告の調査)
-**関連**: `api/routes/people/arasuji.py` `_get_arasuji_db` / `sai_memory/memory/storage.py` `init_db` / `tools/utilities/memory_settings_ui.py` `_get_arasuji_connection`
+**関連**: `api/routes/people/arasuji.py` `_get_arasuji_db` / `sai_memory/memory/storage.py` `init_db` (3 つ目だった `tools/utilities/memory_settings_ui.py` `_get_arasuji_connection` は、ファイルごと消えた。下記)
 
 ## 報告された症状
 
@@ -46,7 +46,7 @@ Memopedia が終わらない」という順序依存はこれで説明がつく�
 | 場所 | 内容 |
 |---|---|
 | `api/routes/people/arasuji.py` `_get_arasuji_db` | connect → `init_arasuji_tables` → return |
-| `tools/utilities/memory_settings_ui.py` `_get_arasuji_connection` | 同じコード |
+| ~~`tools/utilities/memory_settings_ui.py` `_get_arasuji_connection`~~ | 同じコード。**この箇所は 2026-09-15 に消滅した** — 旧 Gradio 期の記憶設定画面で、誰からも呼ばれていなかったのでファイルごと削除した (landscape §9)。塞ぐ対象は残り 2 箇所 |
 | `sai_memory/memory/storage.py` `init_db` | connect → 200 行超の CREATE / ALTER → return |
 
 いずれも「開く」と「用意する (書き込み)」を 1 つの関数でやり、後者の失敗で前者が

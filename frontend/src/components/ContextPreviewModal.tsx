@@ -1,4 +1,9 @@
 'use client';
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useEffect, useState } from 'react';
 import { X, ChevronDown, ChevronRight } from 'lucide-react';
@@ -56,10 +61,11 @@ interface ContextPreviewModalProps {
 function formatTokens(tokens: number): string {
     if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`;
     if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}K`;
-    return tokens.toLocaleString();
+    return tokens.toLocaleString(getFormatLocale());
 }
 
 function TokenBar({ used, total }: { used: number; total: number }) {
+    useLocale();
     const pct = Math.min((used / total) * 100, 100);
     let color = '#34d399'; // green
     if (pct > 85) color = '#f87171'; // red
@@ -82,6 +88,7 @@ function SectionRow({ section, totalTokens, messages, isExpanded, onToggle }: {
     isExpanded: boolean;
     onToggle: () => void;
 }) {
+    useLocale();
     const pct = totalTokens > 0 ? (section.tokens / totalTokens) * 100 : 0;
     const sectionMessages = messages.filter(m => m.section === section.name);
 
@@ -91,9 +98,9 @@ function SectionRow({ section, totalTokens, messages, isExpanded, onToggle }: {
                 <span className={styles.sectionToggle}>
                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                 </span>
-                <span className={styles.sectionLabel}>
+                <span data-i18n="components.ContextPreviewModal.text001" className={styles.sectionLabel}>
                     {section.label}
-                    {section.name === 'history' && section.message_count > 0 && ` (${section.message_count}件)`}
+                    {section.name === 'history' && section.message_count > 0 && uiText("components.ContextPreviewModal.text001", { p1: section.message_count })}
                 </span>
                 <span className={styles.sectionTokens}>{formatTokens(section.tokens)}</span>
                 <div className={styles.sectionBar}>
@@ -107,12 +114,12 @@ function SectionRow({ section, totalTokens, messages, isExpanded, onToggle }: {
                         <div key={idx} className={`${styles.messageItem} ${styles[`msg_${msg.role}`] || ''}`}>
                             <div className={styles.messageMeta}>
                                 <span className={styles.messageRole}>{msg.role}</span>
-                                <span className={styles.messageTokenCount}>{msg.tokens} トークン</span>
+                                <span data-i18n="components.ContextPreviewModal.text002" className={styles.messageTokenCount}>{msg.tokens}{uiText("components.ContextPreviewModal.text002")}</span>
                                 {msg.perception_batch && (
-                                    <span className={styles.perceptionBadge}>提示済みの知覚</span>
+                                    <span data-i18n="components.ContextPreviewModal.text003" className={styles.perceptionBadge}>{uiText("components.ContextPreviewModal.text003")}</span>
                                 )}
                                 {msg.room_state && (
-                                    <span className={styles.roomStateBadge}>部屋の様子</span>
+                                    <span data-i18n="components.ContextPreviewModal.text004" className={styles.roomStateBadge}>{uiText("components.ContextPreviewModal.text004")}</span>
                                 )}
                             </div>
                             <pre className={styles.messageContent}>
@@ -124,9 +131,7 @@ function SectionRow({ section, totalTokens, messages, isExpanded, onToggle }: {
             )}
             {isExpanded && sectionMessages.length === 0 && section.tokens > 0 && (
                 <div className={styles.sectionMessages}>
-                    <div className={styles.estimateNote}>
-                        推定トークン数（メッセージ内容なし）
-                    </div>
+                    <div data-i18n="components.ContextPreviewModal.text005" className={styles.estimateNote}>{uiText("components.ContextPreviewModal.text005")}</div>
                 </div>
             )}
         </div>
@@ -134,6 +139,7 @@ function SectionRow({ section, totalTokens, messages, isExpanded, onToggle }: {
 }
 
 function PersonaPreviewView({ persona }: { persona: PersonaPreview }) {
+    useLocale();
     const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
 
     const toggleSection = (name: string) => {
@@ -157,14 +163,14 @@ function PersonaPreviewView({ persona }: { persona: PersonaPreview }) {
 
             {/* Token Usage Bar */}
             <div className={styles.usageSummary}>
-                <div className={styles.usageLabel}>推定入力トークン数</div>
+                <div data-i18n="components.ContextPreviewModal.text006" className={styles.usageLabel}>{uiText("components.ContextPreviewModal.text006")}</div>
                 <TokenBar used={persona.total_input_tokens} total={persona.context_length} />
             </div>
 
             {/* Cost Estimate */}
             <div className={styles.costSummary}>
                 <div className={styles.costMain}>
-                    <span className={styles.costLabel}>推定入力コスト</span>
+                    <span data-i18n="components.ContextPreviewModal.text007" className={styles.costLabel}>{uiText("components.ContextPreviewModal.text007")}</span>
                     <span className={styles.costValue}>
                         {persona.cache_enabled && persona.estimated_cost_best_usd !== persona.estimated_cost_worst_usd
                             ? `${formatCost(persona.estimated_cost_best_usd, String(persona.pricing?.currency ?? 'USD'))} ~ ${formatCost(persona.estimated_cost_worst_usd, String(persona.pricing?.currency ?? 'USD'))}`
@@ -172,22 +178,20 @@ function PersonaPreviewView({ persona }: { persona: PersonaPreview }) {
                     </span>
                 </div>
                 {persona.cache_enabled && (
-                    <div className={styles.costNote}>
+                    <div data-i18n="components.ContextPreviewModal.text008 components.ContextPreviewModal.text009" className={styles.costNote}>
                         {persona.cache_type === 'explicit'
-                            ? `キャッシュ${persona.cache_ttl === '1h' ? '(1時間)' : '(5分)'}有効 — 左: 全ヒット時 / 右: 全書き込み時`
-                            : 'キャッシュ(暗黙的)有効 — 左: 全ヒット時 / 右: キャッシュなし時'}
+                            ? uiText("components.ContextPreviewModal.text008", { p1: persona.cache_ttl === '1h' ? uiText("common.extra005") : uiText("common.extra006") })
+                            : uiText("components.ContextPreviewModal.text009")}
                     </div>
                 )}
                 {outputRate != null && outputRate > 0 && (
-                    <div className={styles.costNote}>
-                        出力コストは応答長に依存 ({formatCost(outputRate, String(persona.pricing?.currency ?? 'USD'))}/1Mトークン)
-                    </div>
+                    <div data-i18n="components.ContextPreviewModal.text010 components.ContextPreviewModal.text011" className={styles.costNote}>{uiText("components.ContextPreviewModal.text010")}{formatCost(outputRate, String(persona.pricing?.currency ?? 'USD'))}{uiText("components.ContextPreviewModal.text011")}</div>
                 )}
             </div>
 
             {/* Section Breakdown */}
             <div className={styles.sectionsContainer}>
-                <h3 className={styles.sectionsTitle}>トークン内訳</h3>
+                <h3 data-i18n="components.ContextPreviewModal.text012" className={styles.sectionsTitle}>{uiText("components.ContextPreviewModal.text012")}</h3>
                 {persona.sections.map(section => (
                     <SectionRow
                         key={section.name}
@@ -204,6 +208,7 @@ function PersonaPreviewView({ persona }: { persona: PersonaPreview }) {
 }
 
 export default function ContextPreviewModal({ isOpen, onClose, data, isLoading }: ContextPreviewModalProps) {
+    useLocale();
     const [selectedPersonaIdx, setSelectedPersonaIdx] = useState(0);
 
     // タブ選択は開くたびに先頭へ戻す。コンポーネントは閉じても破棄されないので、
@@ -224,7 +229,7 @@ export default function ContextPreviewModal({ isOpen, onClose, data, isLoading }
             <div className={styles.modal}>
                 <div className={styles.header}>
                     <div className={styles.headerInfo}>
-                        <h2>コンテキストプレビュー</h2>
+                        <h2 data-i18n="components.ContextPreviewModal.text013">{uiText("components.ContextPreviewModal.text013")}</h2>
                     </div>
                     <button className={styles.closeBtn} onClick={onClose}>
                         <X size={18} />
@@ -233,11 +238,11 @@ export default function ContextPreviewModal({ isOpen, onClose, data, isLoading }
 
                 <div className={styles.body}>
                     {isLoading && (
-                        <div className={styles.loading}>コンテキストを読み込み中...</div>
+                        <div data-i18n="components.ContextPreviewModal.text014" className={styles.loading}>{uiText("components.ContextPreviewModal.text014")}</div>
                     )}
 
                     {!isLoading && personas.length === 0 && (
-                        <div className={styles.empty}>このビルディングに応答可能なペルソナがいません。</div>
+                        <div data-i18n="components.ContextPreviewModal.text015" className={styles.empty}>{uiText("components.ContextPreviewModal.text015")}</div>
                     )}
 
                     {!isLoading && personas.length > 0 && (

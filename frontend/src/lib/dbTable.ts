@@ -1,3 +1,5 @@
+
+import { apiFetch } from '@/i18n/api';
 /**
  * 汎用テーブル閲覧 API (`GET /api/db/tables/{table}`) の読み口。
  *
@@ -54,7 +56,7 @@ export async function fetchTablePage<T>(
     offset: number = 0,
     limit: number = DB_TABLE_PAGE_SIZE,
 ): Promise<DbTablePage<T>> {
-    const res = await fetch(`/api/db/tables/${table}?limit=${limit}&offset=${offset}`);
+    const res = await apiFetch(`/api/db/tables/${table}?limit=${limit}&offset=${offset}`);
     if (!res.ok) {
         throw new Error(`GET /api/db/tables/${table} failed: ${res.status}`);
     }
@@ -86,8 +88,8 @@ export async function fetchAllTableRows<T>(table: string): Promise<T[]> {
     }
     // 打ち切りを黙って成功にしない — 呼び出し側は「全件」を前提にしている
     console.error(
-        `fetchAllTableRows(${table}): ${MAX_PAGES_PER_FETCH_ALL} ページ ` +
-        `(${collected.length} 行) で全件取得を打ち切った。以降の行は欠けている`,
+        `fetchAllTableRows(${table}): aborted full fetch at ${MAX_PAGES_PER_FETCH_ALL} pages ` +
+        `(${collected.length} rows). Subsequent rows are missing`,
     );
     return collected;
 }

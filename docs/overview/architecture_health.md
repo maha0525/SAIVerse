@@ -54,7 +54,7 @@
 | 行数 | 場所 | 関数 |
 |---|---|---|
 | 1,616 | `sea/runtime_llm.py:2142` | `lg_llm_node` 内の閉包 `node` |
-| 602 | `tools/utilities/memory_settings_ui.py:1054` | `create_memory_settings_ui` |
+| ~~602~~ | ~~`tools/utilities/memory_settings_ui.py:1054`~~ | ~~`create_memory_settings_ui`~~ — 2026-09-15 解消。旧 Gradio 画面の死んだコードとしてファイルごと削除（landscape §9） |
 | 538 | `llm_clients/gemini.py:1100` | `GeminiClient.generate` |
 | 529 | `sea/runtime_llm.py:1185` | `_run_spell_loop` |
 | 398 | `sea/runtime_context.py:46` | `prepare_context` |

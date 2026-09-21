@@ -59,6 +59,16 @@ def get_system_prompt(
 
     system_sections: List[str] = []
 
+    # スペル機構が使えるか (AI.SPELL_ENABLED) は、この関数の中で一度だけ解決して
+    # 全部の節で使い回す。節ごとに引き直すと、片方だけ直した日に食い違う
+    # (docs/intent/spell_disabled_mode.md)。
+    from sea.head_pipeline.spell_gate import (
+        apply_spell_markers,
+        resolve_spell_enabled_for,
+    )
+
+    spell_enabled = resolve_spell_enabled_for(manager, persona_id)
+
     # 1. Common prompt (world setting, framework explanation)
     common_prompt_template = getattr(persona, "common_prompt", None)
     if common_prompt_template:
@@ -67,7 +77,10 @@ def get_system_prompt(
             building_name = building_obj.name if building_obj else building_id
             city_name = getattr(persona, "current_city_id", "unknown_city")
 
-            common_text = common_prompt_template
+            # common.txt の条件ブロックを解決してから placeholder を差し込む
+            # (CommonPromptSection.capture と同じ順序・同じ関数)。ここを通さないと
+            # {if_spell_enabled} の行がそのまま出力に混ざる。
+            common_text = apply_spell_markers(common_prompt_template, spell_enabled)
             replacements = {
                 "{current_persona_name}": getattr(persona, "persona_name", "Unknown"),
                 "{current_persona_id}": getattr(persona, "persona_id", "unknown_id"),
@@ -151,7 +164,10 @@ def get_system_prompt(
         LOGGER.warning("Failed to build building section for system prompt", exc_info=True)
 
     # 4. "## 利用可能なPlaybook" section (available playbooks)
-    if include_available_playbooks:
+    # スペル不使用モードのペルソナには一覧そのものを取りに行かない。Playbook は
+    # `run_playbook` スペルからしか実行できないので、名前だけ見せても「呼べない
+    # 手札」になる (docs/intent/spell_disabled_mode.md §4-5)。
+    if include_available_playbooks and spell_enabled:
         try:
             from tools import TOOL_REGISTRY
             list_playbooks_func = TOOL_REGISTRY.get("list_available_playbooks")

@@ -1,3 +1,8 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect } from 'react';
 import { X, Package, FileText, Image as ImageIcon, Box, RefreshCw } from 'lucide-react';
 import styles from './InventoryModal.module.css';
@@ -19,6 +24,7 @@ interface InventoryModalProps {
 }
 
 export default function InventoryModal({ isOpen, onClose, personaId }: InventoryModalProps) {
+    useLocale();
     const [items, setItems] = useState<InventoryItem[]>([]);
     const [loading, setLoading] = useState(false);
 
@@ -31,7 +37,7 @@ export default function InventoryModal({ isOpen, onClose, personaId }: Inventory
     const loadItems = async () => {
         setLoading(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/items`);
+            const res = await apiFetch(`/api/people/${personaId}/items`);
             if (res.ok) {
                 setItems(await res.json());
             }
@@ -56,7 +62,7 @@ export default function InventoryModal({ isOpen, onClose, personaId }: Inventory
         <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2 className={styles.title}>インベントリ: {personaId}</h2>
+                    <h2 data-i18n="components.InventoryModal.text001" className={styles.title}>{uiText("components.InventoryModal.text001")}{personaId}</h2>
                     <button className={styles.closeButton} onClick={onClose}>
                         <X size={20} />
                     </button>
@@ -64,16 +70,15 @@ export default function InventoryModal({ isOpen, onClose, personaId }: Inventory
 
                 <div className={styles.content}>
                     <div className={styles.toolbar}>
-                        <span className={styles.count}>{items.length} 件</span>
-                        <button className={styles.refreshBtn} onClick={loadItems}>
-                            <RefreshCw size={14} /> 更新
-                        </button>
+                        <span data-i18n="components.InventoryModal.text002" className={styles.count}>{items.length}{uiText("components.InventoryModal.text002")}</span>
+                        <button data-i18n="components.InventoryModal.text003" className={styles.refreshBtn} onClick={loadItems}>
+                            <RefreshCw size={14} />{uiText("components.InventoryModal.text003")}</button>
                     </div>
 
                     {loading ? (
-                        <div className={styles.loading}>読み込み中...</div>
+                        <div data-i18n="components.InventoryModal.text004" className={styles.loading}>{uiText("components.InventoryModal.text004")}</div>
                     ) : items.length === 0 ? (
-                        <div className={styles.emptyState}>アイテムがありません</div>
+                        <div data-i18n="components.InventoryModal.text005" className={styles.emptyState}>{uiText("components.InventoryModal.text005")}</div>
                     ) : (
                         <div className={styles.grid}>
                             {items.map(item => (

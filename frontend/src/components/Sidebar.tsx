@@ -1,4 +1,9 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import { useEffect, useState, useRef, type ReactNode } from 'react';
 import styles from './Sidebar.module.css';
@@ -52,6 +57,7 @@ interface SidebarProps {
 }
 
 export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigger, viewingBuildingId, serverMoveTrigger }: SidebarProps) {
+    useLocale();
     const [status, setStatus] = useState<UserStatus | null>(null);
     const [buildings, setBuildings] = useState<Building[]>([]);
     const [regions, setRegions] = useState<RegionInfo[]>([]);
@@ -95,7 +101,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
         let cancelled = false;
         async function fetchQuarantine() {
             try {
-                const res = await fetch('/api/system/quarantine');
+                const res = await apiFetch('/api/system/quarantine');
                 if (!res.ok || cancelled) return;
                 const data = await res.json();
                 const ids = new Set<string>(
@@ -125,9 +131,9 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
     const refreshData = async () => {
         try {
             const [statusRes, buildingsRes, devModeRes] = await Promise.all([
-                fetch('/api/user/status'),
-                fetch('/api/user/buildings'),
-                fetch('/api/config/developer-mode')
+                apiFetch('/api/user/status'),
+                apiFetch('/api/user/buildings'),
+                apiFetch('/api/config/developer-mode')
             ]);
             if (statusRes.ok) setStatus(await statusRes.json());
             if (buildingsRes.ok) {
@@ -256,7 +262,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
         if (!newBuildingName.trim() || cityId == null) return;
         setIsCreatingBuilding(true);
         try {
-            const res = await fetch('/api/world/buildings', {
+            const res = await apiFetch('/api/world/buildings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -344,46 +350,44 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                 <div className={styles.brandRow}>
                     <img
                         src="/icon.jpg"
-                        alt="SAIVerse"
+                        alt={uiText("components.Sidebar.label001")}
                         className={styles.brandIcon}
                     />
-                    <button
+                    <button data-i18n="components.Sidebar.text001"
                         onClick={() => setIsWizardOpen(true)}
                         className={styles.createPersonaBtn}
                     >
-                        <UserPlus size={18} />
-                        ペルソナ作成
-                    </button>
+                        <UserPlus size={18} />{uiText("components.Sidebar.text001")}</button>
                 </div>
 
                 {/* Navigation */}
                 <div className={styles.sectionTitleRow}>
-                    <div className={styles.sectionTitle}>場所</div>
-                    <button
+                    <div data-i18n="components.Sidebar.text002" className={styles.sectionTitle}>{uiText("components.Sidebar.text002")}</div>
+                    <button data-i18n="components.Sidebar.text003"
                         className={styles.addBuildingBtn}
                         onClick={() => setIsCreateBuildingOpen(v => !v)}
-                        title="Buildingを作成"
+                        title={uiText("components.Sidebar.text003")}
                     >
                         {isCreateBuildingOpen ? <X size={14} /> : <Plus size={14} />}
                     </button>
                 </div>
                 {isCreateBuildingOpen && (
                     <div className={styles.createBuildingForm}>
-                        <input
+                        <input data-i18n="components.Sidebar.text004"
                             type="text"
                             className={styles.createBuildingInput}
-                            placeholder="Building名..."
+                            placeholder={uiText("components.Sidebar.text004")}
                             value={newBuildingName}
                             onChange={e => setNewBuildingName(e.target.value)}
                             onKeyDown={e => { if (e.key === 'Enter') handleCreateBuilding(); }}
                             autoFocus
                         />
-                        <button
+                        <button data-i18n="components.Sidebar.text005"
                             className={styles.createBuildingSubmit}
                             onClick={handleCreateBuilding}
                             disabled={!newBuildingName.trim() || isCreatingBuilding}
                         >
-                            {isCreatingBuilding ? '...' : '作成'}
+                            {isCreatingBuilding ? '...' : uiText("components.Sidebar.text005")}
                         </button>
                     </div>
                 )}
@@ -407,7 +411,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                                 : [];
                             return (
                                 <div key={b.id}>
-                                    <div
+                                    <div data-i18n="components.Sidebar.text006"
                                         // active hilight は 「閲覧中の building」 (= viewing)。
                                         // 「サーバ上の真の現在地」 は別途 D-1 マーカー (User
                                         // アイコン) で示す。 両者は閲覧モード中に乖離する。
@@ -417,16 +421,16 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                                             ...(depth > 0 ? { marginLeft: `${depth * 14}px` } : {}),
                                             ...(isQuarantined ? { opacity: 0.6, cursor: 'not-allowed' } : {}),
                                         }}
-                                        title={isQuarantined ? 'このビルディングは会話履歴ファイルが破損しているため隔離中です。アラートバナーから対応してください。' : undefined}
+                                        title={isQuarantined ? uiText("components.Sidebar.text006") : undefined}
                                     >
                                         {/* buildingItem は space-between なので子を「左=展開ボタン+名前 /
                                             右=マーク類」の 2 グループに束ねる。バラで並べると入口行
                                             (展開ボタンあり) だけ名前が右端へ押し出される。 */}
                                         <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
                                             {childRegionId && (
-                                                <button
+                                                <button data-i18n="components.Sidebar.text007 components.Sidebar.text008"
                                                     onClick={(e) => { e.stopPropagation(); toggleRegion(childRegionId); }}
-                                                    title={isExpanded ? '折り畳む' : '中を見る'}
+                                                    title={isExpanded ? uiText("components.Sidebar.text007") : uiText("components.Sidebar.text008")}
                                                     style={{
                                                         background: 'none', border: 'none', padding: 0,
                                                         cursor: 'pointer', color: 'inherit',
@@ -463,7 +467,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                 {/* System Section: 常用でない項目群なので既定で畳む (低解像度端末で
                     場所欄を圧迫しないため)。開閉の手つきは場所欄の Region 折り畳みと
                     同じ chevron。開閉状態は localStorage に記憶。 */}
-                <button
+                <button data-i18n="components.Sidebar.text009"
                     className={styles.sectionTitle}
                     onClick={toggleSystemSection}
                     aria-expanded={isSystemOpen}
@@ -477,9 +481,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                         textAlign: 'left', width: '100%',
                     }}
                 >
-                    {isSystemOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    システム
-                </button>
+                    {isSystemOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}{uiText("components.Sidebar.text009")}</button>
                 {isSystemOpen && (
                 <div className={styles.buildingList} style={{ flex: 'none', marginBottom: '1rem' }}>
                     {developerMode && (
@@ -490,9 +492,8 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                                 if (onClose) onClose();
                             }}
                         >
-                            <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                <Zap size={16} /> フェノメノン
-                            </span>
+                            <span data-i18n="components.Sidebar.text010" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <Zap size={16} />{uiText("components.Sidebar.text010")}</span>
                         </div>
                     )}
                     <div
@@ -502,9 +503,8 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                             if (onClose) onClose();
                         }}
                     >
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <Bell size={16} /> お知らせ
-                        </span>
+                        <span data-i18n="components.Sidebar.text011" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Bell size={16} />{uiText("components.Sidebar.text011")}</span>
                     </div>
                     <div
                         className={styles.buildingItem}
@@ -513,25 +513,22 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                             if (onClose) onClose();
                         }}
                     >
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <BarChart2 size={16} /> API使用状況
-                        </span>
+                        <span data-i18n="components.Sidebar.text012" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <BarChart2 size={16} />{uiText("components.Sidebar.text012")}</span>
                     </div>
                     <div
                         className={styles.buildingItem}
                         onClick={() => setIsTutorialSelectOpen(true)}
                     >
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <HelpCircle size={16} /> チュートリアル
-                        </span>
+                        <span data-i18n="components.Sidebar.text013" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <HelpCircle size={16} />{uiText("components.Sidebar.text013")}</span>
                     </div>
                     <div
                         className={styles.buildingItem}
                         onClick={() => setIsAddonManagerOpen(true)}
                     >
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <Package size={16} /> アドオン
-                        </span>
+                        <span data-i18n="components.Sidebar.text014" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Package size={16} />{uiText("components.Sidebar.text014")}</span>
                     </div>
                 </div>
                 )}
@@ -539,10 +536,10 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                 {/* Footer: Settings + Profile */}
                 <div className={styles.settingsFooter}>
                     <div className={styles.footerRow}>
-                        <button
+                        <button data-i18n="components.Sidebar.text015"
                             onClick={() => setIsSettingsOpen(true)}
                             className={styles.settingsBtnIcon}
-                            title="設定"
+                            title={uiText("components.Sidebar.text015")}
                         >
                             <Settings size={20} />
                         </button>
@@ -552,7 +549,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                         >
                             <img
                                 src={status?.avatar || "/api/static/icons/user.png"}
-                                alt="User"
+                                alt={uiText("components.Sidebar.label002")}
                                 className={styles.avatarSmall}
                                 onError={(e) => { e.currentTarget.src = "https://placehold.co/32x32?text=U"; }}
                             />

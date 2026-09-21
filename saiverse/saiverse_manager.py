@@ -1417,23 +1417,28 @@ class SAIVerseManager(
         書き換え、話す標準モデルの決め方 (一時上書き → 個別 → グローバル → 組み込み)
         で全員を決め直す。解除すると各ペルソナはそのとき決め方が指すモデルになる。
 
-        設定ファイルの無いモデルは一時上書きに使わない (ValueError、ルートは 400)。
+        標準モデルとして使えないモデルは一時上書きに使わない (ValueError、ルートは
+        400) — 設定ファイルの無い名前と、型付きの質問にしか答えない反射判断専用の
+        宛先。一時上書きは全ペルソナの標準モデルを一度に置き換えるので、ここを通すと
+        全員がその場で話せなくなる。判定は保存の関所と同じ一本
+        (saiverse/persona_model_selection.py の save_rejection_reason)。
 
         Returns:
             ReapplyResult — 切り替えられなかったペルソナの名前と、いま使っているモデル。
         """
-        from saiverse.model_defaults import role_model_is_defined
         from saiverse.persona_model_selection import (
             MODEL_SETTINGS_LOCK,
             reapply_speaking_models,
-            undefined_override_message,
+            rejected_override_message,
+            save_rejection_reason,
         )
 
         requested = (model or "").strip()
         with MODEL_SETTINGS_LOCK:
             if requested:
-                if not role_model_is_defined("default_model", requested):
-                    raise ValueError(undefined_override_message(requested))
+                reason = save_rejection_reason("default_model", requested)
+                if reason is not None:
+                    raise ValueError(rejected_override_message(requested, reason))
                 logging.info("Temporarily setting model to '%s' for all active personas.", requested)
                 self.model_parameter_overrides = dict(parameters or {})
                 self.model = requested
@@ -1733,6 +1738,7 @@ class SAIVerseManager(
         host_avatar_path: Optional[str] = None,
         host_avatar_upload: Optional[str] = None,
         map_background_image: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> str:
         """ワールドエディタから City の設定を更新する。``name`` は表示名 (CITYNAME)。
 
@@ -1750,6 +1756,7 @@ class SAIVerseManager(
             host_avatar_path,
             host_avatar_upload,
             map_background_image,
+            language=language,
         )
 
     def get_user_profile(self) -> Tuple[str, str]:
@@ -1767,9 +1774,9 @@ class SAIVerseManager(
 
     # --- World Editor: Create/Delete Methods ---
 
-    def create_city(self, slug: str, name: str, description: str, ui_port: int, api_port: int, timezone_name: str) -> str:
+    def create_city(self, slug: str, name: str, description: str, ui_port: int, api_port: int, timezone_name: str, language: str = "ja") -> str:
         """Creates a new city. ``slug`` = 内部の識別子、``name`` = 表示名。"""
-        return self.admin.create_city(slug, name, description, ui_port, api_port, timezone_name)
+        return self.admin.create_city(slug, name, description, ui_port, api_port, timezone_name, language=language)
 
     def delete_city(self, city_id: int) -> str:
         """Deletes a city after checking dependencies."""
@@ -1997,10 +2004,10 @@ class SAIVerseManager(
         return self.admin.get_ai_details(ai_id)
 
     def create_ai(
-        self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None
+        self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None, language: Optional[str] = None
     ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         """Creates a new AI and their private room."""
-        result = self.admin.create_ai(name, system_prompt, home_city_id, custom_ai_id)
+        result = self.admin.create_ai(name, system_prompt, home_city_id, custom_ai_id, language=language)
         success = result[0]
         if success:
             # Reload buildings from DB to ensure in-memory list is consistent.
@@ -2022,13 +2029,18 @@ class SAIVerseManager(
         avatar_path: Optional[str] = None,
         avatar_upload: Optional[str] = None,
         appearance_image_path: Optional[str] = None,
-        vision_model: Optional[str] = None,
-        audio_model: Optional[str] = None,
-        video_model: Optional[str] = None,
-        memory_weave_model: Optional[str] = None,
+        # モデル欄の既定は「送られてこなかった = 触らない」の印 (manager/admin.py の
+        # UNSET)。None を既定にすると、これらの欄を知らない入口の保存が個別モデルを
+        # 黙って NULL へ戻す。委譲なので admin 側と同じ既定を持つ。
+        vision_model: Any = UNSET,
+        audio_model: Any = UNSET,
+        video_model: Any = UNSET,
+        memory_weave_model: Any = UNSET,
+        reflex_judgment_model: Any = UNSET,
         chronicle_enabled: Optional[bool] = None,
         autonomous_chronicle_enabled: Optional[bool] = None,
         auto_recall_enabled: Optional[bool] = None,
+        auto_recall_enhanced: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
         memopedia_index_enabled: Optional[bool] = None,
         core_memory_char_budget: Optional[int] = None,
@@ -2037,6 +2049,7 @@ class SAIVerseManager(
         realtime_info_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
         user_conv_timeout_minutes: Optional[int] = None,
+        language: Optional[str] = None,
     ) -> str:
         """ワールドエディタからAIの設定を更新する"""
         return self.admin.update_ai(
@@ -2055,9 +2068,11 @@ class SAIVerseManager(
             audio_model=audio_model,
             video_model=video_model,
             memory_weave_model=memory_weave_model,
+            reflex_judgment_model=reflex_judgment_model,
             chronicle_enabled=chronicle_enabled,
             autonomous_chronicle_enabled=autonomous_chronicle_enabled,
             auto_recall_enabled=auto_recall_enabled,
+            auto_recall_enhanced=auto_recall_enhanced,
             memory_weave_context=memory_weave_context,
             memopedia_index_enabled=memopedia_index_enabled,
             core_memory_char_budget=core_memory_char_budget,
@@ -2066,6 +2081,7 @@ class SAIVerseManager(
             realtime_info_enabled=realtime_info_enabled,
             meta_judgment_config=meta_judgment_config,
             user_conv_timeout_minutes=user_conv_timeout_minutes,
+            language=language,
         )
 
     def delete_ai(self, ai_id: str) -> str:

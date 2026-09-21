@@ -1,7 +1,13 @@
 {
   "name": "schedule_management",
-  "display_name": "アラーム管理",
-  "description": "自分のアラームを管理（一覧表示、追加、削除）できます",
+  "display_name": {
+    "ja": "アラーム管理",
+    "en": "Alarm Management"
+  },
+  "description": {
+    "ja": "自分のアラームを管理（一覧表示、追加、削除）できます",
+    "en": "Manage your alarms (list, add, and delete)."
+  },
   "input_schema": [
     {
       "name": "input",

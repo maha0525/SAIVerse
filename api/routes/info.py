@@ -523,17 +523,9 @@ def get_item_content(item_id: str, thumb: int = 0, manager = Depends(get_manager
             raise HTTPException(status_code=500, detail=str(e))
             
     elif item_type == "picture":
-        # For pictures, we can serve the file directly OR return the path for a static mount
-        # If we return FileResponse, the frontend can display it.
-        # But wait, frontend <img src> needs a URL.
-        # If we return the file content here, it might be heavy.
-        # Better: return a URL that the frontend can use.
-        # But we don't have a dynamic route for arbitrary file paths unless we mount them.
-        # Previous app used /gradio_api/file=... which Gradio handled.
-
-        # SOLUTION: We can verify the path is within valid areas (assets?) or serve it via a stream endpoint.
-        # For now, let's return the content as FileResponse so the browser displays it if visited?
-        # NO, frontend needs to Embed it.
+        # 画像はパスではなく中身を返す。フロントの <img src> は URL を要求するが、
+        # 任意のパスを静的に配ると置き場の外まで配れてしまうので、検査を通した
+        # このエンドポイント自身がバイト列を返す形にしてある。
         # API: GET /api/info/item/{id}/image -> returns image bytes
         # thumb=1: 一覧表示用の軽量 webp サムネイルを返す (未生成ならその場で
         # 生成してキャッシュ)。生成に失敗したらオリジナルへフォールバック。
@@ -564,10 +556,19 @@ def get_item_content(item_id: str, thumb: int = 0, manager = Depends(get_manager
 
 @router.get("/models")
 def list_available_models():
-    """Get list of available models for persona configuration."""
+    """Get list of available models for persona configuration.
+
+    ``reflex_only`` が真のモデルは反射判断専用の宛先 (型付きの質問に確率で答える
+    だけで、文章を書けない) で、会話系の選択欄はこの印の付いたものを出さない。
+    一覧からは落とさない — モデル管理画面と反射判断の選択欄には出す必要がある。
+    """
     from saiverse.model_configs import get_model_choices_with_display_names
+    from saiverse.model_defaults import is_reflex_only_model
     choices = get_model_choices_with_display_names()
-    return [{"id": mid, "name": name} for mid, name in choices]
+    return [
+        {"id": mid, "name": name, "reflex_only": is_reflex_only_model(mid)}
+        for mid, name in choices
+    ]
 
 
 @router.post("/item/{item_id}/toggle-open")

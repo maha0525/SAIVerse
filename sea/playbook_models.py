@@ -646,8 +646,21 @@ RESERVED_STATE_PREFIX = "_"
 
 class PlaybookSchema(BaseModel):
     name: str = Field(..., pattern=r"^[a-z0-9_]+$")
-    display_name: Optional[str] = Field(default=None, description="Human-readable display name for UI. Falls back to name if not set.")
-    description: str
+    display_name: Optional[Union[str, Dict[str, str]]] = Field(
+        default=None,
+        description="Human-readable display name for UI. Can be a string or a language dict {ja: ..., en: ...}."
+    )
+    display_name_en: Optional[str] = Field(
+        default=None,
+        description="Optional English display name."
+    )
+    description: Union[str, Dict[str, str]] = Field(
+        description="Description of what this playbook does. Can be a string or a language dict {ja: ..., en: ...}."
+    )
+    description_en: Optional[str] = Field(
+        default=None,
+        description="Optional English description."
+    )
     input_schema: List[InputParam]
     output_schema: Optional[List[str]] = Field(
         default=None,
@@ -703,6 +716,24 @@ class PlaybookSchema(BaseModel):
 
     def node_map(self):
         return {n.id: n for n in self.nodes}
+
+    def get_display_name(self, lang: str = "ja") -> str:
+        from saiverse.i18n_utils import resolve_i18n_text
+        return resolve_i18n_text(
+            self.display_name,
+            target_lang=lang,
+            alt_en=self.display_name_en,
+            default=self.name,
+        )
+
+    def get_description(self, lang: str = "ja") -> str:
+        from saiverse.i18n_utils import resolve_i18n_text
+        return resolve_i18n_text(
+            self.description,
+            target_lang=lang,
+            alt_en=self.description_en,
+            default="",
+        )
 
     @model_validator(mode="after")
     def _check_reserved_state_namespace(self) -> "PlaybookSchema":

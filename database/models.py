@@ -64,6 +64,7 @@ class AI(Base):
     AINAME = Column(String(32), nullable=False)
     SYSTEMPROMPT = Column(String(4096), default="", nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
+    LANGUAGE = Column(String(16), default=None, nullable=True)  # Persona language (None falls back to City.LANGUAGE)
     AVATAR_IMAGE = Column(String(255))  # UI icon
     APPEARANCE_IMAGE_PATH = Column(String(512), nullable=True)  # Persona appearance image for LLM visual context
     EMOTION = Column(String(1024))  # JSON形式で保存
@@ -77,6 +78,11 @@ class AI(Base):
     AUDIO_MODEL = Column(String(255), nullable=True)
     VIDEO_MODEL = Column(String(255), nullable=True)
     MEMORY_WEAVE_MODEL = Column(String(255), nullable=True)
+    # 反射判断 (docs/intent/reflex_judgment.md) に答えるモデルの、ペルソナ個別の
+    # 上書き。NULL = 世界の既定 (モデルの役割 reflex_judgment_model、env
+    # SAIVERSE_REFLEX_JUDGMENT_MODEL) に従う。DEFAULT_MODEL / LIGHTWEIGHT_MODEL と
+    # 同じ形の列で、「この子だけ Jev、ほかは軽量モデル」の使い分けを可能にする。
+    REFLEX_JUDGMENT_MODEL = Column(String(255), nullable=True)
     PRIVATE_ROOM_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
     CHRONICLE_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona Chronicle auto-generation toggle
     # 自律/schedule Pulse でも確認ダイアログなしで General Chronicle 生成を実行するかの
@@ -89,6 +95,11 @@ class AI(Base):
     # 一切行わず粘着台帳もリセットする。手動想起 (recall_entry/recall_navigate スペル)
     # には影響しない。デフォルト ON (2026-07-04 決定)。
     AUTO_RECALL_ENABLED = Column(Boolean, default=True, nullable=False)
+    # 自動想起の選別を反射判断 (docs/intent/reflex_judgment.md) に任せる per-persona
+    # スイッチ。ON にしても、モデルの役割「反射判断」にモデルが割り当てられていなければ
+    # 判定は走らない (黙って費用が発生する経路を作らないため)。AUTO_RECALL_ENABLED が
+    # OFF なら、こちらが ON でも自動想起そのものが動かない。デフォルト OFF。
+    AUTO_RECALL_ENHANCED = Column(Boolean, default=False, nullable=False)
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
     # 2026-07-14: MEMOPEDIA_INDEX_LIMIT を読むコードは存在しない (get_memory_weave_context
     # の memopedia_index_limit 引数は死にコードだったため、MEMOPEDIA_INDEX_ENABLED の
@@ -281,6 +292,7 @@ class City(Base):
     CITYNAME = Column(String(64), default="", nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
     TIMEZONE = Column(String(64), default="UTC", nullable=False)
+    LANGUAGE = Column(String(16), default="ja", nullable=False)
     UI_PORT = Column(Integer, nullable=False)
     API_PORT = Column(Integer, nullable=False)
     START_IN_ONLINE_MODE = Column(Boolean, default=False, nullable=False)
@@ -358,7 +370,9 @@ class Playbook(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), unique=True, nullable=False)
     display_name = Column(String(255), nullable=True)  # Human-readable display name for UI
+    display_name_en = Column(String(255), nullable=True)  # Optional English display name
     description = Column(String(1024), default="", nullable=False)
+    description_en = Column(String(1024), nullable=True)  # Optional English description
     scope = Column(String(32), nullable=False, default="public")  # public/personal/building
     created_by_persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=True)
     building_id = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)

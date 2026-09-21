@@ -3,9 +3,9 @@
 
 # API エンドポイント
 
-REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。
+API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 357（tag グループ: 25）
+**エンドポイント数**: 360（tag グループ: 26）
 
 ## addon
 
@@ -141,6 +141,8 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/config/playbooks` | List available user-selectable playbooks with input_schema. |
 | GET | `/api/config/playbooks/{name}/params` | Get playbook parameters with resolved enum options. |
 | GET | `/api/config/reembed-check` | Return list of personas that need re-embedding due to model changes. |
+| GET | `/api/config/reflex-timeout` | 反射判断を何秒まで待つか (グローバル設定、既定 5 秒)。 |
+| POST | `/api/config/reflex-timeout` | 反射判断を何秒まで待つかを保存する (.env)。 |
 | POST | `/api/config/reload-models` | Reload model configurations from disk without restarting the server. |
 | GET | `/api/config/slot-kinds` | コマ種別カタログの一覧 (timetable_redesign.md §5.5)。 |
 | GET | `/api/config/startup-warnings` | Return startup warnings plus model-setting warnings built from the current settings. |
@@ -436,12 +438,18 @@ REST API 全エンドポイントの一覧（自動生成）。すべて `/api` 
 | GET | `/api/user/status` |  |
 | POST | `/api/user/visibility` | Update presence based on browser visibility (tab focus/blur). |
 
+## voice-call
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| WS | `/api/voice/call` | ペルソナとの音声通話 (Gemini Live API への双方向中継)。実験的機能。 |
+
 ## world
 
 | メソッド | パス | 説明 |
 |---|---|---|
 | POST | `/api/world/ais` |  |
-| PUT | `/api/world/ais/{ai_id}` |  |
+| PUT | `/api/world/ais/{ai_id}` | ペルソナの設定を保存する。 |
 | DELETE | `/api/world/ais/{ai_id}` |  |
 | POST | `/api/world/ais/{ai_id}/move` |  |
 | POST | `/api/world/blueprints` |  |

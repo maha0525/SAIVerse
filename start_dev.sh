@@ -9,7 +9,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Start Backend
-echo "Starting Backend (FastAPI + Gradio)..."
+echo "Starting Backend (FastAPI)..."
 python3 main.py &
 BACKEND_PID=$!
 
@@ -26,7 +26,7 @@ else
     npm run dev -- -p 3000 &
 fi
 
-echo "Backend running on port 7860 (Gradio at /gradio)"
+echo "Backend running on port 8000 (API at /api)"
 echo "Frontend running on port 3000"
 
 wait

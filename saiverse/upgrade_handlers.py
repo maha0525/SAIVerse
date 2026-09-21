@@ -1131,4 +1131,24 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.12 -> 0.3.13 (only additive column Building.ITEM_DISPLAY_LIMIT; migrate.py adds it).",
     ),
+    # ---- v0.3.14 ----
+    # この版の DB 変更は追加列のみ (言語設定 CITY.LANGUAGE / AI.LANGUAGE、
+    # 反射判断 AI.REFLEX_JUDGMENT_MODEL ほか)。追加列は migrate.py が既存 DB に
+    # 足すので、更新の鎖に移行は要らない。
+    UpgradeHandler(
+        name="city_noop_v0_3_14",
+        scope="city",
+        from_version="0.3.13",
+        to_version="0.3.14",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.13 -> 0.3.14 (only additive columns; migrate.py adds them).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_14",
+        scope="ai",
+        from_version="0.3.13",
+        to_version="0.3.14",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.13 -> 0.3.14 (only additive columns; migrate.py adds them).",
+    ),
 ]

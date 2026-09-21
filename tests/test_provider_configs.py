@@ -252,6 +252,48 @@ class TestResolveProviderRef(unittest.TestCase):
         )
         self.assertIn("HTTP-Referer", out["default_headers"])
 
+    def test_reflex_judgment_dialect_is_inherited_whole_when_the_model_is_silent(self):
+        out = model_configs._resolve_provider_ref(
+            {"model": "typesafe/jev-latest", "provider_ref": "openrouter_systemone"}
+        )
+        self.assertEqual(out["reflex_judgment"]["path"], "/api/alpha/decisions")
+
+    def test_empty_reflex_judgment_on_the_model_keeps_the_provider_declaration(self):
+        """モデル側の空辞書で provider の宣言が消えてはいけない。
+
+        消えると saiverse/reflex_judgment.py は「宣言なし」として TypeSafe 正典の
+        既定 (path /v1/systemone) へ落ち、OpenRouter の宛先へ間違った URL を投げる。
+        誰も気づかないまま毎回 404 になる形なので、欄ごと落とさず合成する。
+        """
+        out = model_configs._resolve_provider_ref(
+            {
+                "model": "typesafe/jev-latest",
+                "provider_ref": "openrouter_systemone",
+                "reflex_judgment": {},
+            }
+        )
+        self.assertEqual(out["reflex_judgment"]["path"], "/api/alpha/decisions")
+        self.assertEqual(out["reflex_judgment"]["answers_key"], "answers")
+
+    def test_partial_reflex_judgment_overrides_only_the_declared_keys(self):
+        """モデルが書いたキーだけが上書きされ、残りは provider の宣言が生きる。"""
+        out = model_configs._resolve_provider_ref(
+            {
+                "model": "typesafe/jev-latest",
+                "provider_ref": "openrouter_systemone",
+                "reflex_judgment": {"path": "/api/beta/decisions"},
+            }
+        )
+        dialect = out["reflex_judgment"]
+        self.assertEqual(dialect["path"], "/api/beta/decisions")     # モデル側
+        self.assertEqual(dialect["answers_key"], "answers")          # provider 側
+        self.assertEqual(dialect["supported_types"], ["noul", "choice", "score"])
+        # provider 側の宣言そのものは書き換わらない (合成は新しい dict を作る)
+        self.assertEqual(
+            provider_configs.get_provider("openrouter_systemone")["reflex_judgment"]["path"],
+            "/api/alpha/decisions",
+        )
+
 
 class TestOpenRouterAppAttribution(unittest.TestCase):
     """What SAIVerse ships as its identity on the OpenRouter app ranking.
@@ -1177,6 +1219,9 @@ class TestExistingModelsBackwardCompat(unittest.TestCase):
             "openai_compat", "ollama_compat", "anthropic_native",
             "gemini_native", "xai_native",
             "nvidia_nim", "openai_codex",
+            # 反射判断の宛先 (docs/intent/reflex_judgment.md)。llm_clients/factory.py は
+            # 扱わず、saiverse/reflex_judgment.py が話す。
+            "jev_compat",
         }
         unknown = []
         for key, cfg in model_configs.MODEL_CONFIGS.items():

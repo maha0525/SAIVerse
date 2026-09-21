@@ -1,7 +1,13 @@
 {
   "name": "novel_writing",
-  "display_name": "小説執筆",
-  "description": "全4章構成の短編小説を執筆するPlaybook。Stelisスレッド内で複数回のLLM呼び出しを行い、アイデア出し→草案→構成→各章執筆→感想→保存の流れで小説を完成させる。",
+  "display_name": {
+    "ja": "小説執筆",
+    "en": "Novel Writing"
+  },
+  "description": {
+    "ja": "全4章構成の短編小説を執筆するPlaybook。Stelisスレッド内で複数回のLLM呼び出しを行い、アイデア出し→草案→構成→各章執筆→感想→保存の流れで小説を完成させる。",
+    "en": "Write a 4-chapter short novel through brainstorming, drafting, structuring, writing chapters, reflecting, and saving within a Stelis thread."
+  },
   "input_schema": [
     {
       "name": "theme",

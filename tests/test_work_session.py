@@ -68,6 +68,14 @@ class FakeLLMClient:
     def consume_usage(self):
         return None
 
+    # スペルループは周ごとに思考も回収する (破壊的読み取り)。思考を返さない
+    # モデルの回を模す。
+    def consume_reasoning(self):
+        return []
+
+    def consume_reasoning_details(self):
+        return None
+
 
 class FakeRuntime:
     """run_work_session / _run_spell_loop が触る SEARuntime の最小フェイク。
@@ -318,6 +326,50 @@ def test_natural_finish(session_factory, persona):
     # LLM クライアントは WORKER アスペクトのフレームが active な状態で選ばれた
     assert runtime.selected_aspects == [Aspect.WORKER]
     assert result.started_at is not None and result.ended_at is not None
+
+
+def test_first_and_closing_records_carry_their_calls_reasoning(session_factory, persona):
+    """初回 Beat と締めの生ログに、それぞれの呼び出しの思考が付く (敵対レビュー 3 巡目)。
+
+    中間の周はループが自分で添えるので、初回と締めの受け渡しが欠けると
+    「中間だけ思考付き」のちぐはぐな生ログになる。帰属の契約は
+    docs/issues/spell_pulse_beats_missing_reasoning.md と同じ —
+    「その本文を作った呼び出しの思考」。
+    """
+    responses = [
+        _spell_line("草稿"),      # 初回呼び出し (round 1 の本文)
+        "できたよ。",              # retry (締めの本文)
+    ]
+    manager, runtime, client = _make_env(session_factory, persona, responses)
+    reasonings = [[{"text": "思考1"}], [{"text": "思考2"}]]
+    client.consume_reasoning = lambda: reasonings.pop(0) if reasonings else []
+    created_ids: List[str] = []
+    p_names, p_exec = _patched_spell_env(session_factory, created_ids)
+
+    with p_names, p_exec:
+        result = _run(manager, budget=5)
+
+    assert result.ended_reason == ENDED_FINISHED
+    assistant_rows = [r for r in runtime.stored if r["role"] == "assistant"]
+    assert [(r["metadata"] or {}).get("reasoning") for r in assistant_rows] == [
+        "思考1", "思考2",
+    ]
+
+
+def test_records_without_reasoning_carry_no_key(session_factory, persona):
+    """思考を返さないモデルの回は、生ログの metadata にキー自体が入らない。"""
+    responses = [_spell_line("草稿"), "できたよ。"]
+    manager, runtime, client = _make_env(session_factory, persona, responses)
+    created_ids: List[str] = []
+    p_names, p_exec = _patched_spell_env(session_factory, created_ids)
+
+    with p_names, p_exec:
+        _run(manager, budget=5)
+
+    for row in runtime.stored:
+        metadata = row["metadata"] or {}
+        assert "reasoning" not in metadata
+        assert "reasoning_details" not in metadata
 
 
 def test_artifacts_captured(session_factory, persona):

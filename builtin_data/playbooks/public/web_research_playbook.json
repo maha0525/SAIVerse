@@ -1,7 +1,13 @@
 {
   "name": "web_research",
-  "display_name": "Webリサーチ",
-  "description": "Webを検索して目的に関連する重要情報を verbatim 引用で抽出する。1サイクルで最大3 URL × 3セクションを読み込み、findings の取捨選択を経て報告する。最終的に親ラインへは厳選した引用と出典のみを返す（取捨選択は子ラインで完結）",
+  "display_name": {
+    "ja": "Webリサーチ",
+    "en": "Web Research"
+  },
+  "description": {
+    "ja": "Webを検索して目的に関連する重要情報を verbatim 引用で抽出する。1サイクルで最大3 URL × 3セクションを読み込み、findings の取捨選択を経て報告する。最終的に親ラインへは厳選した引用と出典のみを返す（取捨選択は子ラインで完結）",
+    "en": "Search the web and extract key information with verbatim quotes. Reads up to 3 URLs × 3 sections per cycle, filters findings, and returns curated quotes and sources to the parent line."
+  },
   "input_schema": [
     {
       "name": "input",

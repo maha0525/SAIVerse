@@ -1,4 +1,8 @@
 'use client';
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+import { apiFetch } from '@/i18n/api';
+
 
 import React, { useState, useEffect } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
@@ -76,6 +80,7 @@ function parseMessageLog(raw: string): ParsedMessage[] | null {
 }
 
 function MessageLogView({ content, personaId }: { content: string; personaId?: string }) {
+    useLocale();
     const messages = parseMessageLog(content);
     if (!messages) {
         // Fallback to plain markdown
@@ -111,6 +116,7 @@ function MessageLogView({ content, personaId }: { content: string; personaId?: s
 }
 
 export default function ContentViewerModal({ isOpen, onClose, uri, personaId }: ContentViewerModalProps) {
+    useLocale();
     const [content, setContent] = useState<string | null>(null);
     const [contentType, setContentType] = useState<string>('');
     const [metadata, setMetadata] = useState<Record<string, unknown>>({});
@@ -127,7 +133,7 @@ export default function ContentViewerModal({ isOpen, onClose, uri, personaId }: 
         const params = new URLSearchParams({ uri });
         if (personaId) params.set('persona_id', personaId);
 
-        fetch(`/api/uri/resolve?${params.toString()}`)
+        apiFetch(`/api/uri/resolve?${params.toString()}`)
             .then(async (res) => {
                 if (!res.ok) {
                     const detail = await res.json().catch(() => null);
@@ -169,7 +175,7 @@ export default function ContentViewerModal({ isOpen, onClose, uri, personaId }: 
 
                 <div className={styles.body}>
                     {isLoading && (
-                        <div className={styles.loading}>Loading...</div>
+                        <div className={styles.loading}>{uiText("components.ContentViewerModal.label001")}</div>
                     )}
                     {error && (
                         <div className={styles.error}>{error}</div>

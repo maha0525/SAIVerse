@@ -1,4 +1,10 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+import { getModelRoleLabel, getModelRoleDescription, getProviderPresetDisplayName } from '@/i18n/modelRoles';
+
 
 import React, { useState, useEffect } from 'react';
 import { CheckCircle, AlertTriangle, ChevronDown } from 'lucide-react';
@@ -18,7 +24,14 @@ interface ModelInfo {
     display_name: string;
     provider: string;
     is_available: boolean;
+    /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
+     *  反射判断の役割の選択肢にだけ出す。 */
+    reflex_only?: boolean;
 }
+
+/** 反射判断の役割のキー (saiverse/model_defaults.py の MODEL_ROLES と同じ名前)。
+ *  この役割だけが、文章を書けない反射判断専用の宛先を選べる。 */
+const REFLEX_JUDGMENT_ROLE = 'reflex_judgment_model';
 
 interface StepModelSummaryProps {
     provider: string;
@@ -52,6 +65,7 @@ export default function StepModelSummary({
     onOverride,
     editMode = false,
 }: StepModelSummaryProps) {
+    useLocale();
     const [expandedRole, setExpandedRole] = useState<string | null>(null);
     const [currentRoles, setCurrentRoles] = useState<Record<string, ModelRoleInfo> | null>(null);
     const [presets, setPresets] = useState<PresetInfo[]>([]);
@@ -65,7 +79,7 @@ export default function StepModelSummary({
 
     const loadModelRoles = async () => {
         try {
-            const res = await fetch('/api/tutorial/model-roles');
+            const res = await apiFetch('/api/tutorial/model-roles');
             if (res.ok) {
                 const data = await res.json();
                 setCurrentRoles(data.current);
@@ -78,7 +92,7 @@ export default function StepModelSummary({
 
     const handlePresetChange = async (presetProvider: string) => {
         try {
-            const res = await fetch('/api/tutorial/auto-configure-models', {
+            const res = await apiFetch('/api/tutorial/auto-configure-models', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ provider: presetProvider }),
@@ -108,7 +122,7 @@ export default function StepModelSummary({
             description: info.description,
             env_key: info.env_key,
             model_id: info.value,
-            display_name: info.display_name || info.value || '(未設定)',
+            display_name: info.display_name || info.value || uiText("components.tutorial.steps.StepModelSummary.text001"),
         }))
         : assignments;
 
@@ -120,19 +134,18 @@ export default function StepModelSummary({
                 <>
                     <div className={styles.summaryHeader}>
                         <CheckCircle size={24} className={styles.summaryIcon} />
-                        <h3 className={styles.title}>モデルの自動設定が完了しました</h3>
+                        <h3 data-i18n="components.tutorial.steps.StepModelSummary.text002" className={styles.title}>{uiText("components.tutorial.steps.StepModelSummary.text002")}</h3>
                     </div>
                     {displayProvider && (
-                        <p className={styles.summaryProvider}>
-                            <strong>{displayProvider}</strong> のモデルプリセットが適用されました
-                        </p>
+                        <p data-i18n="components.tutorial.steps.StepModelSummary.text003" className={styles.summaryProvider}>
+                            <strong>{displayProvider}</strong>{uiText("components.tutorial.steps.StepModelSummary.text003")}</p>
                     )}
                 </>
             )}
 
             {editMode && presets.length > 0 && (
                 <div className={styles.presetSelector}>
-                    <label className={styles.presetLabel}>プリセット切替:</label>
+                    <label data-i18n="components.tutorial.steps.StepModelSummary.text004" className={styles.presetLabel}>{uiText("components.tutorial.steps.StepModelSummary.text004")}</label>
                     <div className={styles.presetButtons}>
                         {presets.filter(p => p.is_available).map((preset) => (
                             <button
@@ -140,7 +153,7 @@ export default function StepModelSummary({
                                 className={styles.presetButton}
                                 onClick={() => handlePresetChange(preset.provider)}
                             >
-                                {preset.display_name}
+                                {getProviderPresetDisplayName(preset.provider, preset.display_name)}
                             </button>
                         ))}
                     </div>
@@ -152,8 +165,8 @@ export default function StepModelSummary({
                     <div key={assignment.role} className={styles.roleItem}>
                         <div className={styles.roleHeader}>
                             <div className={styles.roleInfo}>
-                                <span className={styles.roleLabel}>{assignment.label}</span>
-                                <span className={styles.roleDescription}>{assignment.description}</span>
+                                <span className={styles.roleLabel}>{getModelRoleLabel(assignment.role, assignment.label)}</span>
+                                <span className={styles.roleDescription}>{getModelRoleDescription(assignment.role, assignment.description)}</span>
                             </div>
                             <div className={styles.roleModel}>
                                 <span className={styles.roleModelName}>{assignment.display_name}</span>
@@ -164,7 +177,7 @@ export default function StepModelSummary({
                                     )}
                                 >
                                     <ChevronDown size={14} />
-                                    <span>変更</span>
+                                    <span data-i18n="components.tutorial.steps.StepModelSummary.text005">{uiText("components.tutorial.steps.StepModelSummary.text005")}</span>
                                 </button>
                             </div>
                         </div>
@@ -172,6 +185,7 @@ export default function StepModelSummary({
                             <div className={styles.roleDropdown}>
                                 {availableModels
                                     .filter(m => m.is_available)
+                                    .filter(m => !m.reflex_only || assignment.role === REFLEX_JUDGMENT_ROLE)
                                     .map(model => (
                                         <div
                                             key={model.id}
@@ -201,9 +215,7 @@ export default function StepModelSummary({
             )}
 
             {!editMode && (
-                <p className={styles.summaryFooter}>
-                    これらの設定は後からサイドバーの設定画面で変更できます。
-                </p>
+                <p data-i18n="components.tutorial.steps.StepModelSummary.text006" className={styles.summaryFooter}>{uiText("components.tutorial.steps.StepModelSummary.text006")}</p>
             )}
         </div>
     );

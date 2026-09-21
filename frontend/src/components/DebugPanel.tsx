@@ -1,3 +1,8 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import { useState } from 'react';
 
 // デバッグコントローラー (設計: docs/intent/persona_cognition/debug_controller.md)
@@ -34,6 +39,7 @@ const btnStyle: React.CSSProperties = {
 };
 
 export default function DebugPanel({ personaId }: DebugPanelProps) {
+    useLocale();
     const [busy, setBusy] = useState(false);
     const [msg, setMsg] = useState<string>('');
 
@@ -41,14 +47,14 @@ export default function DebugPanel({ personaId }: DebugPanelProps) {
         setBusy(true);
         setMsg('');
         try {
-            const res = await fetch(`/api/people/${personaId}/debug/${path}`, {
+            const res = await apiFetch(`/api/people/${personaId}/debug/${path}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
             });
             const data = await res.json().catch(() => ({}));
-            setMsg(data.message || data.detail || (res.ok ? 'OK' : `エラー (${res.status})`));
+            setMsg(data.message || data.detail || (res.ok ? 'OK' : uiText("components.DebugPanel.text001", { p1: res.status })));
         } catch (e) {
-            setMsg(`エラー: ${e}`);
+            setMsg(uiText("components.DebugPanel.text002", { p1: e }));
         } finally {
             setBusy(false);
         }
@@ -63,9 +69,7 @@ export default function DebugPanel({ personaId }: DebugPanelProps) {
 
     return (
         <div style={{ marginBottom: '1rem' }}>
-            <label style={{ display: 'block', fontWeight: 600, marginBottom: '0.35rem' }}>
-                🛠 デバッグコントローラー
-            </label>
+            <label data-i18n="components.DebugPanel.text003" style={{ display: 'block', fontWeight: 600, marginBottom: '0.35rem' }}>{uiText("components.DebugPanel.text003")}</label>
             <div
                 style={{
                     padding: '0.75rem',
@@ -78,12 +82,8 @@ export default function DebugPanel({ personaId }: DebugPanelProps) {
             >
                 {/* Embedding 生成 */}
                 <div style={rowStyle}>
-                    <button style={btnStyle} disabled={busy} onClick={() => post('generate-embeddings')}>
-                        Embedding 一括生成
-                    </button>
-                    <span style={{ fontSize: '0.75rem', color: '#888' }}>
-                        Chronicle / Memopedia / Fragment の未生成分
-                    </span>
+                    <button data-i18n="components.DebugPanel.text004" style={btnStyle} disabled={busy} onClick={() => post('generate-embeddings')}>{uiText("components.DebugPanel.text004")}</button>
+                    <span data-i18n="components.DebugPanel.text005" style={{ fontSize: '0.75rem', color: '#888' }}>{uiText("components.DebugPanel.text005")}</span>
                 </div>
 
                 {msg && (

@@ -42,10 +42,24 @@
 | `SAIVERSE_CHRONICLE_CHAR_BUDGET` | `20000` | weave の General Chronicle 読み込みの文字数予算。超過時は年表を粗いレベルへ畳んで全期間をカバーする（最古を落とさない）。**この 1/4 が束ねの発火閾値 X を兼ねる** ([chronicle_consolidation](../intent/chronicle_consolidation.md) §3 — 発火と提示を同じノブに連動させる)。記憶アーキv2 §6.2 |
 | `SAIVERSE_SLUICE_ENABLED` | `1` | スルース（Metabolism 時のコア記憶・手帳メモ・約束の採取。旧 gold_panning）の全体トグル。`0` で無効（defer-to-hot ごと従来挙動に戻る。無効時は採取なしで退場が進む）。intent `gold_panning.md`（旧名のまま）+ `autonomous_behavior_v3.md` §13 |
 | `SAIVERSE_SLUICE_PENDING_CAP` | `1.5` | defer-to-hot 圧力弁。ウィンドウが high watermark のこの倍率を超えたらキャッシュが冷たくても Metabolism を実行する |
-| `SAIVERSE_SLUICE_MAX_SPAN_CHARS` | `100000` | 一発のスルースの呼び出しに入れてよい担当範囲（パンマーカーから窓の末尾まで）の上限字数。超えていたらスルースを走らせず、退場はそのまま進め、窓から出る未見の範囲を memory.db の `sluice_skipped_spans` に記録する（後から通せる）。[sluice_coverage_gaps](../intent/sluice_coverage_gaps.md) 第一段 A |
+| `SAIVERSE_SLUICE_MAX_SPAN_CHARS` | `100000` | 一発のスルースの呼び出しに入れてよい担当範囲（パンマーカーから窓の末尾まで）の上限字数。超えていたらスルースを走らせず、退場はそのまま進め、窓から出る未見の範囲を memory.db の `sluice_skipped_spans` に記録する（後から通せる）。この値とは別に、スルースが実際に送る中身がそのモデルのコンテキスト長に入らないときも同じように飛ばす（後から通すジョブの刻みもモデルに入る量に合わせる — [issue](../issues/sluice_skip_ignores_model_context.md)）。[sluice_coverage_gaps](../intent/sluice_coverage_gaps.md) 第一段 A |
 | `SAIVERSE_METABOLISM_RATE_LIMIT_COOLDOWN_S` | `600` | Metabolism 系の LLM 呼び出し（スルース・編纂・束ね）がレート制限 (429) で失敗したあと、その persona の Metabolism を見送る秒数。[sluice_coverage_gaps](../intent/sluice_coverage_gaps.md) 第一段 C-1 |
 | （旧 `SAIVERSE_GOLD_PANNING_*`） | — | **非推奨**（2026-08-19 の sluice 改名で置換）。上 2 つと同名対応（`ENABLED` / `PENDING_CAP`）の旧キーは、新キー未設定のときだけフォールバックとして読まれ、使用時に WARNING が出る（旧 `ENABLED=0` の環境が更新後に黙って採取を再開しないための設定移行）。優先順は 新キー > 旧キー > 既定。`SAIVERSE_SLUICE_*` へ移行すること |
 | `SAIVERSE_MEDIA_RECALL_ENABLED` | `false` | 添付メディア（画像/音声/動画）の概要を自動想起の検索クエリに使うか。ON 時は添付があると概要生成を同期実行するため数秒待ちが発生する。UI（グローバル設定 > 環境）からも切替可 |
+
+## 反射判断（型付きの質問に確率だけで答える判断層）
+
+詳細: [`docs/intent/reflex_judgment.md`](../intent/reflex_judgment.md)、最初の利用者は [`docs/intent/auto_recall_jev_rerank.md`](../intent/auto_recall_jev_rerank.md)
+
+自由記述の要らない判断（自動想起の選別など）を、文章を組み立てるモデルではなく「状況と型付きの質問を渡すと確率だけが返る」宛先に任せる層。**env でこの層を切り替える設定は無い** — 答える側はグローバル設定の「モデルロール」で反射判断の役割にどのモデルを割り当てるかで決まる（2026-09-20 に env ベースの実験設定をこの形へ載せ替えた）。
+
+| 変数 | 既定 | 説明 |
+|---|---|---|
+| `SAIVERSE_REFLEX_JUDGMENT_MODEL` | 未設定（役割なし） | 反射判断の役割に割り当てるモデル設定キー。未設定のあいだ反射判断は動かない（黙って費用が発生する経路を作らないため）。UI（グローバル設定 > モデルロール > 反射判断）からも設定でき、設定ファイルの無い名前は保存されない |
+| `SAIVERSE_REFLEX_TIMEOUT_SECONDS` | `5` | 反射判断を何秒まで待つか（1〜60）。この時間内に判定が返らなかったターンは従来の想起方式へ戻り、その回の判定の費用だけが残る。**モデルごとには置かない**（2026-09-21 裁定: これは「どのくらい待ったらフォールバックを発動させるか」のパラメータで、モデル依存の需要はほぼ無い）。UI（グローバル設定 > モデルロール）からも設定でき、呼び出しのたびに読むので次のターンから効く。未設定・数値として読めない値・0 以下は既定の 5 秒で動き続ける（壊れた値は WARNING を 1 行出す） |
+| `TYPESAFE_API_KEY` | 未設定 | 同梱の `typesafe` プロバイダ（TypeSafe 公式の System One）の API キー。反射判断にそのプロバイダのモデルを割り当てたときだけ読まれる |
+
+自動想起でこの層を使うかは、**ペルソナ設定の「自動想起を強化する」トグル**（DB の `AI.AUTO_RECALL_ENHANCED`、既定 OFF）で決まる。トグルが ON で、かつ反射判断の役割にモデルが割り当たっているときだけ、会話ターンごとに判断の呼び出しが 1 回発生し、直近の会話本文 (1 件あたり 500 字まで) と候補記憶の本文抜粋 (1 件あたり 200 字。過去の会話メッセージの逐語抜粋と、その発話者ロール・時刻を含む) が宛先へ送られる。呼び出しが使えなかったターンは WARNING を 1 行出して従来のしきい値方式へ戻る。**時間内に答えなかったせいで戻ったターンだけ**は、そのターンの返事のそばに画面の注記が 1 行出る（表示だけで、会話履歴・建物の記録・ペルソナの記憶のどれにも残らない）。直近 20 回の呼び出しのうち 3 回以上が時間切れなら、モデル設定の警告欄（グローバル設定の画面）にも出る（プロセス内の記録なので再起動で消える）。判定の細かいつまみ（候補の下限 0.78 / 採用に必要な確率 0.5 / 判断材料に入れる会話 6 件）は実験で決めた定数で、`sea/auto_recall.py` に書いてある（env の口は持たない）。待ち時間だけは上の `SAIVERSE_REFLEX_TIMEOUT_SECONDS` で変えられる。
 
 ## バックアップ
 
@@ -77,6 +91,7 @@
 |---|---|
 | `SAIVERSE_DEFAULT_MODEL` | グローバル設定の標準モデル。ペルソナが話す標準モデルは「チャット画面の一時上書き → ペルソナ個別の標準モデル → この値 → 組み込みの既定モデル」の順に、空でない最初のものになる。選ばれたモデルの設定ファイルが無ければ代わりのモデルでは動かず、そのペルソナは選び直すまで止まる。UI（グローバル設定の「モデルロール」）で変えると再起動しなくても効き、設定ファイルの無いモデル名は保存されない（[persona_model_selection.md](../intent/persona_model_selection.md)） |
 | `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` | グローバル設定の軽量モデル（個別の軽量モデルを持たないペルソナが使う。空なら組み込みの既定モデル）。設定ファイルが無い・繋げないときは標準モデルへ代わりに回さず、軽量モデルを使う作業が止まる |
+| `SAIVERSE_REFLEX_JUDGMENT_MODEL` | グローバル設定の反射判断のモデル（未設定なら反射判断は動かない）。詳細は上の「反射判断」節 |
 | `GEMINI_TIMEOUT_SECONDS` | Gemini タイムアウト（既定 180） |
 | `SAIVERSE_ATTACHMENT_LIMIT` | 添付上限（既定 4） |
 | `SAIVERSE_DISABLE_GEMINI_STREAMING` / `SAIVERSE_DISABLE_GEMINI_SSE_PATCH` | Gemini ストリーミング関連のフォールバック制御（`llm_clients/gemini.py`） |

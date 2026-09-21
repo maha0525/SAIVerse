@@ -161,6 +161,14 @@ PulseController は「起こされた Pulse を捌く」層だが、**いつ Pul
 
 > **⚠️ v0.3 では判断点は一つも発火しない**（2026-08-23）。自律の駆動（判断点・watchdog・コマの再予約・実イベントの判断経由）は v0.4 の管轄で、v0.3 は `saiverse/autonomy_wiring.py` の定数 `AUTONOMOUS_DRIVING_SHIPPED=False` が全体の止め具になっている（自律ゲートの唯一の判定関数 `is_autonomy_on` が常に False を返す）。ペルソナごとの `AUTONOMY_ENABLED` の値は DB に残り、v0.4 で定数ごと削除すれば元の姿に戻る。実イベントと仲裁は判断を経ない直接応答（v0.2 と同じ）。→ [`autonomous_behavior_v3.md`](../intent/autonomous_behavior_v3.md) §11.1
 
+### 反射判断（型付きの質問に確率だけで答える判断）
+
+**自由記述が要らない判断を、文章を組み立てるモデルではなく「状況と、基準付きの型付きの質問を渡すと、確率・選択・数値だけが返る」宛先に任せる層**（`saiverse/reflex_judgment.py`）。速く・安く・形が保証される代わりに文章は書けない。質問の型は 3 つ——はい/いいえの確率（noul）・選択肢と各確率（choice）・数値（score）。
+
+**答える側はモデルの役割「反射判断」への割り当てで決まる**（世界の既定は env `SAIVERSE_REFLEX_JUDGMENT_MODEL`、ペルソナ個別の上書きは DB 列 `AI.REFLEX_JUDGMENT_MODEL`）。答える側は 2 種類——**判断専用の宛先**（protocol `jev_compat`、組み込み限定。宛先の path・応答の欄の名前・対応する型は provider 設定の `reflex_judgment` 欄で宣言するので、TypeSafe 公式・OpenRouter・セルフホストのどれでも同じコードが話す）と、**手持ちの普通の LLM**（判断層が質問をプロンプトへ変換し、構造化出力で答えさせる。2026-09-20 の第 2 段から）。使用量と費用はどちらもモデル設定キー名義で普通のモデルと同じ記帳に載る。**役割が未割り当てのあいだは動かない**——黙って費用が発生する経路を作らないための約束。
+
+最初の利用者は自動想起の選別（§5、ペルソナ設定の「自動想起を強化する」が ON のときだけ）。使えなかったターンは WARNING 一行を出して、呼んだ機能がそれぞれのフォールバック（想起なら従来のしきい値方式）へ静かに戻る。→ [`reflex_judgment.md`](../intent/reflex_judgment.md)
+
 ### line（ラインの3軸）
 
 Track 内の処理は複数の **line** に分かれ、3つの独立した軸で規定される:
@@ -464,6 +472,7 @@ graph TD
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
 | **BuildingToolLink** | `BuildingToolLink` テーブルは実在するが数ヶ月触られておらず未使用。ツールがペルソナに届く経路は Spell（`spell=True`）と Playbook の TOOL ノードで、この紐付けテーブルではない（→ `stackchan_vessel.md` v0.5 でも「機能してない可能性」と記録） |
 | **Unity Gateway（`unity_gateway/`）と Unity 向けの身体制御ツール `control_body`** | **撤去**（2026-09-11、[issue](../issues/archive/unity_gateway_removal.md)）。Unity で作った 3D クライアントとつなぐ WebSocket サーバーで、SAIVerse を起動すると既定でポート 8765 が全ネットワークインターフェースに向けて認証なしで開いていた。繋いだ相手には全ペルソナの発言が `<in_heart>` の中身ごと送られ、ペルソナのプロンプトへ好きな「空間情報」を差し込めた。チャット送信のメッセージを受けた処理は存在しないメソッドを呼んでエラーになっており、残っていた本番ログの 129 セッションに接続は一度も無かった。Unity は [仮想身体 Godot](../intent/virtual_embodiment_godot.md) の計画から既に外れていた。サーバー、発言を送る処理、リアルタイム情報の空間情報、`control_body` ツールと会話の playbook 4 本の該当ノード、`body_control.txt` を削除した。3D の仮想身体の計画は Godot vessel アドオンで進めているが、削除した機能をそのまま引き継ぐものではない。旧設計書は [docs/old/unity-gateway.md](../old/unity-gateway.md) |
+| **旧 Gradio 画面の残骸（`database/db_manager.py` / `tools/utilities/memory_settings_ui.py`）** | **ファイルごと削除**（2026-09-15）。Next.js のフロントに移る前に使っていた Gradio 製の管理画面 2 枚で、片方は DB のテーブルを直接編集する画面、もう片方は記憶の設定画面（スレッド一覧・メッセージの編集と削除・チャットログの取り込み）だった。gradio は 2026-01-30（コミット `267a4e4f`）に本体の依存から外れ `requirements.lock` にも入っていないので、**gradio を別途持っていない環境ではこの 2 つを import した時点で落ちる**状態で残っていた。呼び出し元は Python の import にも動的 import にも起動スクリプトにも設定にも無い（ツールの自動探索が見るのは `~/.saiverse/user_data/<project>/tools/` と `builtin_data/tools/` だけで、`tools/utilities/` は探索対象ですらない。legacy `Tool` テーブルの `MODULE_PATH` 経由の動的 import も、`builtin_data/seed_data.json` の `default_tools` が空なので行が作られない）。後継は、DB 側が `/api/db/tables/*` ＋ World Editor、記憶側が記憶設定タブ（`api/routes/people/`）。**`api/routes/db_manager.py` は同名だが現役**（FastAPI ルート、`tests/test_db_manager_api.py` がテストしている）なので混同しないこと。接続リーク issue が数えていた 3 箇所のうち 1 つ（`_get_arasuji_connection`）はこれで消滅した（[issue](../issues/memory_db_connection_leak_on_init_failure.md)）。同じ便で、`start_dev.sh` の「Gradio at /gradio」と `api/routes/info.py` の `/gradio_api/file=` を前提にしたコメントも現況へ直した |
 
 ---
 

@@ -663,5 +663,197 @@ class TestMessageExcerptReconstruction(unittest.TestCase):
         self.assertEqual(message_hits[0].chunk_index, target_idx)
 
 
+class FixedQueryEmbedder:
+    """クエリにも本文にも同じベクトルを返す (cosine=1.0)。
+
+    メッセージ側の埋め込みは ``replace_message_embeddings`` で手書きするテスト用。
+    """
+    model_name = "test"
+
+    def embed(self, texts, *, is_query=False):
+        return [[1.0, 0.0] for _ in texts]
+
+
+class TestRecallSweepOptions(unittest.TestCase):
+    """拾い上げを広げる 3 つのオプション引数と embed_score の全件補完。
+
+    固定する不変条件:
+    - ``keywords`` を渡すとその語でキーワード検索する (既定は ``query.split()``)。
+      渡した語の ``%`` / ``_`` はワイルドカードにならない。
+    - ``exclude_message_ids`` は message を**収集段階**で外す (キーワード経路と
+      埋め込み経路の両方)。選抜後に捨てるのではないので枠が空く。
+    - ``source_allocations`` はソース枠を上書きし、指定の無いソースは
+      グローバルの ``SOURCE_ALLOCATIONS`` へフォールバックする。
+    - キーワードだけで拾われたヒットにも、埋め込み全件スキャンで計算済みの
+      cosine が ``embed_score`` として付く (埋め込み上位圏外でも)。ただし
+      3 つのオプション引数を一つも渡さない既定呼び出しでは補完しない —
+      既存の呼び出し元 (OFF の自動想起・Memory タブ検索・スペル) の返り値を
+      1 ビットも変えないため (intent の 2026-09-18 裁定)。
+
+    設計: docs/intent/auto_recall_jev_rerank.md「拾い上げの拡張」。
+    """
+
+    def setUp(self):
+        self.conn = init_db(":memory:")
+        self.embedder = FixedQueryEmbedder()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _add(self, content, vector=None):
+        mid = add_message(self.conn, thread_id="t1", role="user", content=content)
+        if vector is not None:
+            replace_message_embeddings(self.conn, mid, [vector])
+        return mid
+
+    def _message_hits(self, query, **kwargs):
+        hits = unified_recall(
+            self.conn, self.embedder, query,
+            search_chronicle=False, search_memopedia=False,
+            search_fragments=False, search_messages=True,
+            **kwargs,
+        )
+        return [h for h in hits if h.source_type == "message"]
+
+    # --- keywords ---------------------------------------------------------
+
+    def test_japanese_query_finds_nothing_with_default_split(self):
+        # 空白の無い日本語文はクエリ全文が 1 個のキーワードになり、何にもマッチ
+        # しない (埋め込み行を作っていないので埋め込み経路も空)。
+        self._add("十条まで歩いた日のことを覚えている")
+        self.assertEqual(self._message_hits("ねーエリス、十条まで歩いてみた日のこと覚えてる？"), [])
+
+    def test_explicit_keywords_find_the_message(self):
+        mid = self._add("十条まで歩いた日のことを覚えている")
+        hits = self._message_hits(
+            "ねーエリス、十条まで歩いてみた日のこと覚えてる？", keywords=["十条"],
+        )
+        self.assertEqual([h.source_id for h in hits], [mid])
+
+    def test_empty_keywords_disable_keyword_search(self):
+        self._add("十条まで歩いた日のことを覚えている")
+        self.assertEqual(self._message_hits("十条", keywords=[]), [])
+
+    def test_underscore_in_keyword_is_not_a_wildcard(self):
+        literal = self._add("識別子 a_b を使った")
+        self._add("識別子 axb を使った")
+        hits = self._message_hits("識別子の話", keywords=["a_b"])
+        self.assertEqual([h.source_id for h in hits], [literal])
+
+    def test_percent_in_keyword_is_not_a_wildcard(self):
+        literal = self._add("達成率は100%だった")
+        self._add("1000 円かかった")
+        hits = self._message_hits("率の話", keywords=["100%"])
+        self.assertEqual([h.source_id for h in hits], [literal])
+
+    # --- exclude_message_ids ---------------------------------------------
+
+    def test_excluded_message_is_dropped_from_keyword_collection(self):
+        excluded = self._add("十条の駅前で待ち合わせた")
+        kept = self._add("十条まで歩いた日のこと")
+        hits = self._message_hits(
+            "十条", keywords=["十条"], source_allocations={"message": 5},
+            exclude_message_ids={excluded},
+        )
+        self.assertEqual([h.source_id for h in hits], [kept])
+
+    def test_excluded_message_is_dropped_from_embedding_scan(self):
+        # キーワードでは一致しないクエリ → 埋め込み経路のみ (全行 cosine=1.0)。
+        excluded = self._add("十条の駅前で待ち合わせた", vector=[1.0, 0.0])
+        kept = self._add("十条まで歩いた日のこと", vector=[1.0, 0.0])
+        hits = self._message_hits(
+            "全く別の検索語", keywords=[], source_allocations={"message": 5},
+            exclude_message_ids={excluded},
+        )
+        self.assertEqual([h.source_id for h in hits], [kept])
+
+    def test_excluding_frees_the_slot_for_another_message(self):
+        # 枠 1 席のまま、占領していた 1 件を除外すると別のメッセージが入る
+        # (選抜後に捨てる実装だと件数 0 になる)。
+        occupier = self._add("十条の駅前で待ち合わせた", vector=[1.0, 0.0])  # cosine 1.0
+        other = self._add("十条まで歩いた日のこと", vector=[0.8, 0.6])       # cosine 0.8
+
+        before = self._message_hits("全く別の検索語", keywords=[])
+        self.assertEqual([h.source_id for h in before], [occupier])
+
+        after = self._message_hits(
+            "全く別の検索語", keywords=[], exclude_message_ids={occupier},
+        )
+        self.assertEqual([h.source_id for h in after], [other])
+
+    # --- source_allocations ----------------------------------------------
+
+    def test_source_allocations_override_widens_the_message_slots(self):
+        for i in range(3):
+            self._add(f"十条の話 その{i}", vector=[1.0, 0.0])
+
+        default_hits = self._message_hits("全く別の検索語", keywords=[])
+        self.assertEqual(len(default_hits), 1)  # SOURCE_ALLOCATIONS["message"] == 1
+
+        widened = self._message_hits(
+            "全く別の検索語", keywords=[], source_allocations={"message": 3},
+        )
+        self.assertEqual(len(widened), 3)
+
+    def test_unlisted_source_falls_back_to_global_allocation(self):
+        init_memopedia_tables(self.conn)
+        page = create_page(
+            self.conn, parent_id="root_terms", title="十条",
+            summary="散歩した街", content="", category="terms",
+        )
+        for i in range(7):
+            create_fragment(
+                self.conn, entity_id=page.id,
+                content=f"十条にまつわる断片 {i}", source_date="2026-05-30",
+            )
+        embed_memopedia_fragments(self.conn, self.embedder)
+
+        hits = unified_recall(
+            self.conn, self.embedder, "全く別の検索語",
+            topk=20, keywords=[],
+            search_chronicle=False, search_memopedia=False,
+            search_fragments=True, search_messages=False,
+            # fragment のキーが無いのでグローバル (5) にフォールバックする。
+            source_allocations={"message": 3},
+        )
+        self.assertEqual(len([h for h in hits if h.source_type == "fragment"]), 5)
+
+    # --- embed_score の全件補完 -------------------------------------------
+
+    def test_keyword_hit_outside_embedding_top_still_gets_embed_score(self):
+        # 埋め込み上位 (total_cap*2 = 2 件) の外にいるが、キーワードで拾われた
+        # メッセージにも cosine が付く。付かないと、cosine でしきい値判定をする
+        # 呼び出し側から「類似度を測れなかった」ヒットと区別できない。
+        self._add("上位その1", vector=[1.0, 0.0])          # cosine 1.0
+        self._add("上位その2", vector=[0.8, 0.6])          # cosine 0.8
+        target = self._add("十条まで歩いた", vector=[0.6, 0.8])  # cosine 0.6
+
+        hits = self._message_hits("十条", topk=1, keywords=["十条"])
+        self.assertEqual([h.source_id for h in hits], [target])
+        self.assertIsNotNone(hits[0].embed_score)
+        self.assertAlmostEqual(hits[0].embed_score, 0.6, places=5)
+
+    def test_hit_without_any_embedding_keeps_embed_score_none(self):
+        # 埋め込み行そのものが無ければ cosine は計算されていない。補完で 0 などを
+        # でっちあげない (「測れなかった」は測れなかったまま返す)。
+        self._add("十条まで歩いた")
+        hits = self._message_hits("十条", keywords=["十条"])
+        self.assertEqual(len(hits), 1)
+        self.assertIsNone(hits[0].embed_score)
+
+    def test_default_call_does_not_backfill_embed_score(self):
+        # オプション引数を一つも渡さない既定呼び出し (OFF の自動想起・Memory タブ
+        # 検索・スペルが通る形) では、補完は効かず従来どおり None のまま。
+        # クエリ「十条」は query.split() でもキーワードになるので、既定経路でも
+        # キーワードヒット自体は起きる — 変わらないのは embed_score の側。
+        self._add("上位その1", vector=[1.0, 0.0])          # cosine 1.0
+        self._add("上位その2", vector=[0.8, 0.6])          # cosine 0.8
+        target = self._add("十条まで歩いた", vector=[0.6, 0.8])  # cosine 0.6
+
+        hits = self._message_hits("十条", topk=1)
+        self.assertEqual([h.source_id for h in hits], [target])
+        self.assertIsNone(hits[0].embed_score)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,9 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import styles from './page.module.css';
@@ -30,6 +35,7 @@ interface PhenomenonInfo {
 }
 
 export default function PhenomenaPage() {
+    useLocale();
     const [rules, setRules] = useState<PhenomenonRule[]>([]);
     const [triggers, setTriggers] = useState<TriggerInfo[]>([]);
     const [phenomena, setPhenomena] = useState<PhenomenonInfo[]>([]);
@@ -59,9 +65,9 @@ export default function PhenomenaPage() {
     const fetchData = useCallback(async () => {
         try {
             const [rulesRes, triggersRes, phenomenaRes] = await Promise.all([
-                fetch('/api/phenomena/rules'),
-                fetch('/api/phenomena/triggers'),
-                fetch('/api/phenomena/available')
+                apiFetch('/api/phenomena/rules'),
+                apiFetch('/api/phenomena/triggers'),
+                apiFetch('/api/phenomena/available')
             ]);
 
             if (rulesRes.ok) setRules(await rulesRes.json());
@@ -107,7 +113,7 @@ export default function PhenomenaPage() {
 
     const handleCloseModal = () => {
         if (hasUnsavedChanges) {
-            if (!confirm('編集内容が保存されていません。閉じますか？')) {
+            if (!confirm(uiText("app.phenomena.page.text001"))) {
                 return;
             }
         }
@@ -147,7 +153,7 @@ export default function PhenomenaPage() {
 
             const method = editingRule ? 'PUT' : 'POST';
 
-            const res = await fetch(url, {
+            const res = await apiFetch(url, {
                 method,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(formData)
@@ -172,7 +178,7 @@ export default function PhenomenaPage() {
         if (!confirm('Are you sure you want to delete this rule?')) return;
 
         try {
-            const res = await fetch(`/api/phenomena/rules/${id}`, { method: 'DELETE' });
+            const res = await apiFetch(`/api/phenomena/rules/${id}`, { method: 'DELETE' });
             if (res.ok) {
                 fetchData();
             } else {
@@ -198,37 +204,35 @@ export default function PhenomenaPage() {
             <main className={styles.contentWrapper}>
                 <header className={styles.header}>
                     <div className={styles.headerLeft}>
-                        <h1>Phenomenon Rules</h1>
+                        <h1>{uiText("app.phenomena.page.label001")}</h1>
                     </div>
                 </header>
 
                 <div className={styles.scrollArea}>
                     <div className={styles.card}>
                         <div className={styles.sectionTitle}>
-                            <span>Defined Rules</span>
+                            <span>{uiText("app.phenomena.page.label002")}</span>
                             <button className={styles.createBtn} onClick={() => handleOpenModal()}>
-                                <Plus size={16} /> New Rule
-                            </button>
+                                <Plus size={16} /> {uiText("app.phenomena.page.label003")}</button>
                         </div>
 
                         <table className={styles.table}>
                             <thead>
                                 <tr>
-                                    <th>ID</th>
-                                    <th>Trigger</th>
-                                    <th>Condition</th>
-                                    <th>Phenomenon</th>
-                                    <th>Mapping</th>
-                                    <th>State</th>
-                                    <th>Actions</th>
+                                    <th>{uiText("app.phenomena.page.label004")}</th>
+                                    <th>{uiText("app.phenomena.page.label005")}</th>
+                                    <th>{uiText("app.phenomena.page.label006")}</th>
+                                    <th>{uiText("app.phenomena.page.label007")}</th>
+                                    <th>{uiText("app.phenomena.page.label008")}</th>
+                                    <th>{uiText("app.phenomena.page.label009")}</th>
+                                    <th>{uiText("app.phenomena.page.label010")}</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {rules.length === 0 ? (
                                     <tr>
                                         <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: '#94a3b8' }}>
-                                            No rules defined yet.
-                                        </td>
+                                            {uiText("app.phenomena.page.label011")}</td>
                                     </tr>
                                 ) : (
                                     rules.map(rule => (
@@ -262,11 +266,9 @@ export default function PhenomenaPage() {
                                             </td>
                                             <td>
                                                 <button className={styles.actionBtn} onClick={() => handleOpenModal(rule)}>
-                                                    <Edit2 size={14} /> Edit
-                                                </button>
+                                                    <Edit2 size={14} /> {uiText("app.phenomena.page.label012")}</button>
                                                 <button className={styles.deleteBtn} onClick={() => handleDelete(rule.rule_id)}>
-                                                    <Trash2 size={14} /> Delete
-                                                </button>
+                                                    <Trash2 size={14} /> {uiText("app.phenomena.page.label013")}</button>
                                             </td>
                                         </tr>
                                     ))
@@ -300,24 +302,24 @@ export default function PhenomenaPage() {
                         </h2>
 
                         <div className={styles.formGroup}>
-                            <label>Description</label>
+                            <label>{uiText("app.phenomena.page.label014")}</label>
                             <input
                                 className={styles.formInput}
                                 value={formData.description}
                                 onChange={e => handleFormChange({ description: e.target.value })}
-                                placeholder="e.g. Log when user enters room"
+                                placeholder={uiText("app.phenomena.page.label015")}
                             />
                         </div>
 
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                             <div className={styles.formGroup}>
-                                <label>Trigger Type</label>
+                                <label>{uiText("app.phenomena.page.label016")}</label>
                                 <select
                                     className={styles.formSelect}
                                     value={formData.trigger_type}
                                     onChange={e => handleFormChange({ trigger_type: e.target.value })}
                                 >
-                                    <option value="">Select Trigger...</option>
+                                    <option value="">{uiText("app.phenomena.page.label017")}</option>
                                     {triggers.map(t => (
                                         <option key={t.type} value={t.type}>{t.type}</option>
                                     ))}
@@ -325,13 +327,13 @@ export default function PhenomenaPage() {
                             </div>
 
                             <div className={styles.formGroup}>
-                                <label>Result Phenomenon</label>
+                                <label>{uiText("app.phenomena.page.label018")}</label>
                                 <select
                                     className={styles.formSelect}
                                     value={formData.phenomenon_name}
                                     onChange={e => handleFormChange({ phenomenon_name: e.target.value })}
                                 >
-                                    <option value="">Select Phenomenon...</option>
+                                    <option value="">{uiText("app.phenomena.page.label019")}</option>
                                     {phenomena.map(p => (
                                         <option key={p.name} value={p.name}>{p.name}</option>
                                     ))}
@@ -341,8 +343,7 @@ export default function PhenomenaPage() {
 
                         <div className={styles.formGroup}>
                             <label>
-                                Trigger Condition (JSON)
-                                {jsonErrors.condition && <span className={styles.jsonError}> - {jsonErrors.condition}</span>}
+                                {uiText("app.phenomena.page.label020")}{jsonErrors.condition && <span className={styles.jsonError}> - {jsonErrors.condition}</span>}
                             </label>
                             <textarea
                                 className={styles.formTextarea}
@@ -351,14 +352,13 @@ export default function PhenomenaPage() {
                                 onBlur={(e) => validateJson('condition', e.target.value)}
                             />
                             <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.2rem' }}>
-                                Filter fields: {triggers.find(t => t.type === formData.trigger_type)?.fields ? JSON.stringify(triggers.find(t => t.type === formData.trigger_type)?.fields) : ''}
+                                {uiText("app.phenomena.page.label021")}{triggers.find(t => t.type === formData.trigger_type)?.fields ? JSON.stringify(triggers.find(t => t.type === formData.trigger_type)?.fields) : ''}
                             </div>
                         </div>
 
                         <div className={styles.formGroup}>
                             <label>
-                                Argument Mapping (JSON)
-                                {jsonErrors.mapping && <span className={styles.jsonError}> - {jsonErrors.mapping}</span>}
+                                {uiText("app.phenomena.page.label022")}{jsonErrors.mapping && <span className={styles.jsonError}> - {jsonErrors.mapping}</span>}
                             </label>
                             <textarea
                                 className={styles.formTextarea}
@@ -367,7 +367,7 @@ export default function PhenomenaPage() {
                                 onBlur={(e) => validateJson('mapping', e.target.value)}
                             />
                             <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.2rem' }}>
-                                Use e.g. <code>{"{ \"arg\": \"$trigger.field\" }"}</code>. Available: {triggers.find(t => t.type === formData.trigger_type)?.fields ? Object.keys(triggers.find(t => t.type === formData.trigger_type)!.fields).map(f => `$trigger.${f}`).join(', ') : ''}
+                                {uiText("app.phenomena.page.label023")}<code>{"{ \"arg\": \"$trigger.field\" }"}</code>{uiText("app.phenomena.page.label024")}{triggers.find(t => t.type === formData.trigger_type)?.fields ? Object.keys(triggers.find(t => t.type === formData.trigger_type)!.fields).map(f => `$trigger.${f}`).join(', ') : ''}
                             </div>
                         </div>
 
@@ -379,11 +379,11 @@ export default function PhenomenaPage() {
                                     checked={formData.enabled}
                                     onChange={e => handleFormChange({ enabled: e.target.checked })}
                                 />
-                                <label htmlFor="enabled" style={{ marginBottom: 0 }}>Rule Enabled</label>
+                                <label htmlFor="enabled" style={{ marginBottom: 0 }}>{uiText("app.phenomena.page.label025")}</label>
                             </div>
 
                             <div className={styles.formGroup} style={{ flex: 1 }}>
-                                <label>Priority (Higher runs first)</label>
+                                <label>{uiText("app.phenomena.page.label026")}</label>
                                 <input
                                     type="number"
                                     className={styles.formInput}
@@ -394,7 +394,7 @@ export default function PhenomenaPage() {
                         </div>
 
                         <div className={styles.modalActions}>
-                            <button className={styles.cancelBtn} onClick={handleCloseModal}>Cancel</button>
+                            <button className={styles.cancelBtn} onClick={handleCloseModal}>{uiText("app.phenomena.page.label027")}</button>
                             <button
                                 className={styles.saveBtn}
                                 onClick={handleSave}

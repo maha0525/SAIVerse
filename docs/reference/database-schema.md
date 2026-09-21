@@ -39,6 +39,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `CITYNAME` | VARCHAR(64) | NOT NULL, default='' |  |
 | `DESCRIPTION` | VARCHAR(1024) | NOT NULL, default='' |  |
 | `TIMEZONE` | VARCHAR(64) | NOT NULL, default='UTC' |  |
+| `LANGUAGE` | VARCHAR(16) | NOT NULL, default='ja' |  |
 | `UI_PORT` | INTEGER | NOT NULL |  |
 | `API_PORT` | INTEGER | NOT NULL |  |
 | `START_IN_ONLINE_MODE` | BOOLEAN | NOT NULL, default=False |  |
@@ -255,6 +256,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `AINAME` | VARCHAR(32) | NOT NULL |  |
 | `SYSTEMPROMPT` | VARCHAR(4096) | NOT NULL, default='' |  |
 | `DESCRIPTION` | VARCHAR(1024) | NOT NULL, default='' |  |
+| `LANGUAGE` | VARCHAR(16) | — |  |
 | `AVATAR_IMAGE` | VARCHAR(255) | — |  |
 | `APPEARANCE_IMAGE_PATH` | VARCHAR(512) | — |  |
 | `EMOTION` | VARCHAR(1024) | — |  |
@@ -268,10 +270,12 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `AUDIO_MODEL` | VARCHAR(255) | — |  |
 | `VIDEO_MODEL` | VARCHAR(255) | — |  |
 | `MEMORY_WEAVE_MODEL` | VARCHAR(255) | — |  |
+| `REFLEX_JUDGMENT_MODEL` | VARCHAR(255) | — |  |
 | `PRIVATE_ROOM_ID` | VARCHAR(255) | FK→building.BUILDINGID |  |
 | `CHRONICLE_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `AUTONOMOUS_CHRONICLE_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `AUTO_RECALL_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
+| `AUTO_RECALL_ENHANCED` | BOOLEAN | NOT NULL, default=False |  |
 | `MEMORY_WEAVE_CONTEXT` | BOOLEAN | NOT NULL, default=True |  |
 | `MEMOPEDIA_INDEX_LIMIT` | INTEGER | — |  |
 | `MEMOPEDIA_INDEX_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
@@ -574,7 +578,9 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `id` | INTEGER | PK, NOT NULL |  |
 | `name` | VARCHAR(255) | NOT NULL |  |
 | `display_name` | VARCHAR(255) | — |  |
+| `display_name_en` | VARCHAR(255) | — |  |
 | `description` | VARCHAR(1024) | NOT NULL, default='' |  |
+| `description_en` | VARCHAR(1024) | — |  |
 | `scope` | VARCHAR(32) | NOT NULL, default='public' |  |
 | `created_by_persona_id` | VARCHAR(255) | FK→ai.AIID |  |
 | `building_id` | VARCHAR(255) | FK→building.BUILDINGID |  |

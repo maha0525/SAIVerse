@@ -688,41 +688,22 @@ class SEARuntime:
         except Exception as exc:
             LOGGER.debug("[sea] _ensure_llama_server check failed (non-fatal): %s", exc)
 
-    def select_llm_client(
+    def _decide_base_llm_model(
         self,
-        node_def: Any,
         persona: Any,
-        execution_context: Optional[ExecutionContext] = None,
-        needs_structured_output: bool = False,
-        state: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[Any, str]:
-        """Select the LLM client for one Beat and return ``(client, model_key)``.
+        execution_context: Optional[ExecutionContext],
+        state: Optional[Dict[str, Any]],
+    ) -> Tuple[Any, str, str, bool]:
+        """構造化出力の都合で差し替える前のモデルを決める。接続は作らない。
 
-        ExecutionContext 経由が主経路 (beat_execution_context §2.1): tier は
-        ``execution_context.aspect``、model は Beat 開始時に一度だけ解決した
-        ``execution_context.model_key`` を使い、persona の可変属性を再推測しない。
-        ``execution_context=None`` の legacy 経路では従来どおり state の
-        PulseContext / フラグから導出する (挙動は同一)。
+        :meth:`select_llm_client` と :meth:`resolve_llm_model` が同じ規則で決める
+        ための一本化。読むのはペルソナの属性・state・返事の始まりに決めたもの
+        (``ReplyModelBinding`` — :meth:`ReplyModelBinding.capture` と
+        :meth:`ReplyModelBinding.model_for` は値を控えて返すだけで、接続を作らない)
+        だけ。
 
-        戻り値の model は「実際に使う client の model」。標準モデルが構造化出力に
-        対応していないときの軽量モデルへの使い分けで ``execution_context.model_key``
-        と異なる model になった場合、呼び出し側は ``execution_context.with_model()``
-        で差し替える。
-
-        接続は、書いている途中の返事なら返事の始まりに決めたもの
-        (saiverse/persona_model_selection.py の ReplyModelBinding) を使い、返事の
-        外 (keep-alive など) ならこの呼び出しの時点の設定で決める。どちらでも、
-        返す接続は返す model のもの。使えない (設定ファイルが無い・繋げない)
-        ときは ModelUnavailableError を出し、代わりのモデルへは回さない
-        (docs/intent/persona_model_selection.md 決まったこと 7)。
-
-        Args:
-            node_def: Node definition from playbook
-            persona: Persona object
-            execution_context: Beat 開始点で解決した実行の身分証 (推奨経路)
-            needs_structured_output: Whether this node requires structured output
-            state: Current execution state. legacy 経路の tier 導出
-                   (_force_lightweight_model / _pulse_type=='auto') に使う。
+        Returns:
+            ``(binding, tier, base_model, force_lightweight)``。
         """
         # 軽量モデル判定 (認知モデル v0.2 §10.3):
         # ExecutionContext があればその aspect、無ければ active LineFrame の
@@ -750,9 +731,6 @@ class SEARuntime:
                 state.get("_force_lightweight_model")
                 or state.get("_pulse_type") == "auto"
             ))
-        model_type = "lightweight" if force_lightweight else "normal"
-
-        LOGGER.info("[sea] Node model_type: %s (node_id=%s, force_light=%s)", model_type, getattr(node_def, "id", "unknown"), force_lightweight)
 
         from saiverse.persona_model_selection import (
             TIER_LIGHTWEIGHT,
@@ -766,13 +744,117 @@ class SEARuntime:
         binding = find_reply_binding(state=state, persona=persona)
         if binding is None:
             binding = ReplyModelBinding.capture(persona)
-        tier = TIER_LIGHTWEIGHT if model_type == "lightweight" else TIER_STANDARD
+        tier = TIER_LIGHTWEIGHT if force_lightweight else TIER_STANDARD
         # model 名は ExecutionContext があればその解決値 (resolve_execution_context
         # が同じ規則で導出済み)、無ければ返事の始まりに決めた値。
         base_model = (
             execution_context.model_key if execution_context is not None
             else binding.model_for(tier)
         )
+        return binding, tier, base_model, force_lightweight
+
+    @staticmethod
+    def _structured_output_model(
+        binding: Any, base_model: str, persona: Any,
+    ) -> Optional[str]:
+        """構造化出力が要る呼び出しで、``base_model`` の代わりに使う軽量モデル。
+
+        ``base_model`` が構造化出力に対応していれば None (差し替えない)。対応して
+        いなければ返事の始まりに決めた軽量モデル (``binding.model_for``)。軽量
+        モデルも対応していなければ LLMError。接続は作らない — 読むのはモデル設定
+        (``supports_structured_output``) と ``binding`` の控えだけ。
+        """
+        from saiverse.model_configs import supports_structured_output
+        from saiverse.persona_model_selection import TIER_LIGHTWEIGHT
+
+        if supports_structured_output(base_model):
+            return None
+        lw_model = binding.model_for(TIER_LIGHTWEIGHT)
+        if not supports_structured_output(lw_model):
+            persona_name = getattr(persona, "persona_name", "unknown")
+            raise LLMError(
+                f"Neither DEFAULT_MODEL '{base_model}' nor LIGHTWEIGHT_MODEL '{lw_model}' "
+                f"supports structured output for persona '{persona_name}'",
+                user_message=(
+                    f"現在選択されているモデル（{base_model}）も軽量モデル（{lw_model}）も"
+                    "構造化出力に対応していません。チャットオプションから対応モデルに変更してください。"
+                ),
+            )
+        return lw_model
+
+    def resolve_llm_model(
+        self,
+        persona: Any,
+        execution_context: Optional[ExecutionContext] = None,
+        needs_structured_output: bool = False,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """:meth:`select_llm_client` が返す model を、接続を作らずに決める。
+
+        規則は :meth:`select_llm_client` と同じ (どちらも
+        :meth:`_decide_base_llm_model` と :meth:`_structured_output_model` を通す):
+        標準モデルが構造化出力に対応しなければ軽量モデルへ差し替え、どちらも
+        非対応なら LLMError。接続の作成・llama.cpp のサーバーの起動・疎通の確認は
+        しない — LLM を呼ばない見積もり (例: 後から通す採取の dry、
+        sea/sluice.py の plan_sluice_capture) のための口。
+
+        :meth:`select_llm_client` と違い、接続を作れるか (設定ファイルが無い・
+        繋げない) はここでは確かめない。その失敗は接続を作る側
+        (:meth:`select_llm_client`) で出る。
+        """
+        binding, _tier, base_model, _force_lightweight = self._decide_base_llm_model(
+            persona, execution_context, state,
+        )
+        if needs_structured_output:
+            lw_model = self._structured_output_model(binding, base_model, persona)
+            if lw_model is not None:
+                return lw_model
+        return base_model
+
+    def select_llm_client(
+        self,
+        node_def: Any,
+        persona: Any,
+        execution_context: Optional[ExecutionContext] = None,
+        needs_structured_output: bool = False,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Any, str]:
+        """Select the LLM client for one Beat and return ``(client, model_key)``.
+
+        ExecutionContext 経由が主経路 (beat_execution_context §2.1): tier は
+        ``execution_context.aspect``、model は Beat 開始時に一度だけ解決した
+        ``execution_context.model_key`` を使い、persona の可変属性を再推測しない。
+        ``execution_context=None`` の legacy 経路では従来どおり state の
+        PulseContext / フラグから導出する (挙動は同一)。
+
+        戻り値の model は「実際に使う client の model」。標準モデルが構造化出力に
+        対応していないときの軽量モデルへの使い分けで ``execution_context.model_key``
+        と異なる model になった場合、呼び出し側は ``execution_context.with_model()``
+        で差し替える。model の決め方は接続を作らない :meth:`resolve_llm_model` と
+        同じ規則 (:meth:`_decide_base_llm_model` / :meth:`_structured_output_model`)
+        で、接続の作成と llama.cpp のサーバーの起動はここだけが行う。
+
+        接続は、書いている途中の返事なら返事の始まりに決めたもの
+        (saiverse/persona_model_selection.py の ReplyModelBinding) を使い、返事の
+        外 (keep-alive など) ならこの呼び出しの時点の設定で決める。どちらでも、
+        返す接続は返す model のもの。使えない (設定ファイルが無い・繋げない)
+        ときは ModelUnavailableError を出し、代わりのモデルへは回さない
+        (docs/intent/persona_model_selection.md 決まったこと 7)。
+
+        Args:
+            node_def: Node definition from playbook
+            persona: Persona object
+            execution_context: Beat 開始点で解決した実行の身分証 (推奨経路)
+            needs_structured_output: Whether this node requires structured output
+            state: Current execution state. legacy 経路の tier 導出
+                   (_force_lightweight_model / _pulse_type=='auto') に使う。
+        """
+        binding, tier, base_model, force_lightweight = self._decide_base_llm_model(
+            persona, execution_context, state,
+        )
+        model_type = "lightweight" if force_lightweight else "normal"
+        LOGGER.info("[sea] Node model_type: %s (node_id=%s, force_light=%s)", model_type, getattr(node_def, "id", "unknown"), force_lightweight)
+
         # 使えない (設定ファイルが無い・繋げない) ときは ModelUnavailableError。
         # 標準モデルへ代わりに回さない。
         base_client = binding.client_for_model(tier, base_model)
@@ -794,19 +876,8 @@ class SEARuntime:
 
         # If structured output is needed, check if the selected model supports it
         if needs_structured_output:
-            from saiverse.model_configs import supports_structured_output
-            if not supports_structured_output(base_model):
-                lw_model = binding.model_for(TIER_LIGHTWEIGHT)
-                if not supports_structured_output(lw_model):
-                    persona_name = getattr(persona, "persona_name", "unknown")
-                    raise LLMError(
-                        f"Neither DEFAULT_MODEL '{base_model}' nor LIGHTWEIGHT_MODEL '{lw_model}' "
-                        f"supports structured output for persona '{persona_name}'",
-                        user_message=(
-                            f"現在選択されているモデル（{base_model}）も軽量モデル（{lw_model}）も"
-                            "構造化出力に対応していません。チャットオプションから対応モデルに変更してください。"
-                        ),
-                    )
+            lw_model = self._structured_output_model(binding, base_model, persona)
+            if lw_model is not None:
                 # モデルの能力に合わせた使い分け (失敗の代わりではない)。軽量モデルに
                 # 繋げなければ ModelUnavailableError で止める — 元のモデルへは戻らない。
                 LOGGER.info("[sea] Model '%s' doesn't support structured output, "
@@ -835,8 +906,14 @@ class SEARuntime:
 
         LOGGER.info("[sea] _build_tools_spec called with tool_names: %s", tool_names)
 
-        # Determine provider from llm_client class name
-        client_class_name = type(llm_client).__name__
+        # Determine provider from llm_client class name.
+        # 送る形式を決めるのは実際に HTTP を叩く client なので、facade
+        # (LlamaCachedClient) で包まれていたら中身の class 名で判定する。
+        # 包みの名前で判定すると、どの分岐にも当たらず Gemini 形式へ落ちて、
+        # OpenAI 互換のサーバーへ google.genai の Tool を送ることになる
+        # (docs/issues/llama_cached_client_state_delegation_missing.md)。
+        target_client = getattr(llm_client, "_inner", llm_client)
+        client_class_name = type(target_client).__name__
         LOGGER.info("[sea] LLM client class: %s", client_class_name)
 
         if client_class_name in ("OpenAIClient", "AnthropicClient", "OllamaClient", "NvidiaNIMClient"):
@@ -2279,6 +2356,56 @@ class SEARuntime:
             from database.models import AI as AIModel
             ai = db.query(AIModel).filter_by(AIID=persona_id).first()
             return ai.AUTO_RECALL_ENABLED if ai else True
+        finally:
+            db.close()
+
+    def _is_auto_recall_enhanced_for_persona(self, persona) -> bool:
+        """Check per-persona「自動想起を強化する」トグルを DB から確認する。
+
+        True の場合、sea/auto_recall.py は候補の拾い上げを広げ、採否を反射判断
+        (docs/intent/reflex_judgment.md) に問う。ON でも、モデルの役割「反射判断」に
+        モデルが割り当てられていなければ従来どおりの埋め込みしきい値判定のまま
+        (黙って費用が発生する経路を作らない)。デフォルト False。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return False  # fallback: disabled (費用が出る側へ倒さない)
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return bool(ai.AUTO_RECALL_ENHANCED) if ai else False
+        finally:
+            db.close()
+
+    def _get_reflex_model_for_persona(self, persona) -> Optional[str]:
+        """ペルソナ個別の反射判断モデル (AI.REFLEX_JUDGMENT_MODEL) を DB から読む。
+
+        反射判断 (docs/intent/reflex_judgment.md §1) に答えるモデルは、通常はモデルの
+        役割 reflex_judgment_model の世界の既定が決める。この列に名前が入っている
+        ペルソナだけ、その名前で上書きする (「この子だけ Jev」の使い分け)。
+
+        空・未設定・読めなかったときは None を返す = 世界の既定へ倒す。読めなかった
+        回に警告を出すのは、上書きを設定したつもりの人が黙って既定で動いている状態に
+        気づけるようにするため。
+        """
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return None  # fallback: 世界の既定 (役割の割り当て) に従う
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            value = ai.REFLEX_JUDGMENT_MODEL if ai else None
+            if not isinstance(value, str):
+                return None
+            return value.strip() or None
+        except Exception:
+            LOGGER.warning(
+                "[sea] failed to read REFLEX_JUDGMENT_MODEL (persona=%s); "
+                "falling back to the world default", persona_id, exc_info=True,
+            )
+            return None
         finally:
             db.close()
 

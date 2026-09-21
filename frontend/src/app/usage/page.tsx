@@ -1,4 +1,11 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import { useEffect, useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
@@ -77,6 +84,7 @@ function getModelColor(modelId: string): string {
 }
 
 export default function UsagePage() {
+    useLocale();
     const [summary, setSummary] = useState<UsageSummary | null>(null);
     const [dailyData, setDailyData] = useState<DailyUsage[]>([]);
     const [personas, setPersonas] = useState<Persona[]>([]);
@@ -101,11 +109,11 @@ export default function UsagePage() {
             const startDateStr = startDate.toISOString().split('T')[0];
 
             const [summaryRes, dailyRes, personasRes, categoriesRes, categoryUsageRes] = await Promise.all([
-                fetch(`/api/usage/summary?days=${days}${personaParam}${categoryParam}`),
-                fetch(`/api/usage/daily?start_date=${startDateStr}${personaParam}${categoryParam}`),
-                fetch('/api/usage/personas'),
-                fetch('/api/usage/categories'),
-                fetch(`/api/usage/by-category?days=${days}${personaParam}`),
+                apiFetch(`/api/usage/summary?days=${days}${personaParam}${categoryParam}`),
+                apiFetch(`/api/usage/daily?start_date=${startDateStr}${personaParam}${categoryParam}`),
+                apiFetch('/api/usage/personas'),
+                apiFetch('/api/usage/categories'),
+                apiFetch(`/api/usage/by-category?days=${days}${personaParam}`),
             ]);
 
             if (!summaryRes.ok || !dailyRes.ok) {
@@ -201,14 +209,12 @@ export default function UsagePage() {
     return (
         <div className={styles.container}>
             <header className={styles.header}>
-                <button
+                <button data-i18n="app.usage.page.text001"
                     className={styles.backButton}
                     onClick={() => window.location.href = '/'}
                 >
-                    <ArrowLeft size={20} />
-                    戻る
-                </button>
-                <h1 className={styles.title}>API 使用状況モニター</h1>
+                    <ArrowLeft size={20} />{uiText("app.usage.page.text001")}</button>
+                <h1 data-i18n="app.usage.page.text002" className={styles.title}>{uiText("app.usage.page.text002")}</h1>
                 <button
                     className={styles.refreshButton}
                     onClick={fetchData}
@@ -220,32 +226,32 @@ export default function UsagePage() {
 
             {error && (
                 <div className={styles.error}>
-                    Error: {error}
+                    {uiText("app.usage.page.label001")}{error}
                 </div>
             )}
 
             {/* Filters */}
             <div className={styles.filters}>
                 <div className={styles.filterGroup}>
-                    <label>期間:</label>
+                    <label data-i18n="app.usage.page.text003">{uiText("app.usage.page.text003")}</label>
                     <select
                         value={days}
                         onChange={(e) => setDays(Number(e.target.value))}
                         className={styles.select}
                     >
-                        <option value={7}>過去7日間</option>
-                        <option value={30}>過去30日間</option>
-                        <option value={90}>過去90日間</option>
+                        <option data-i18n="app.usage.page.text004" value={7}>{uiText("app.usage.page.text004")}</option>
+                        <option data-i18n="app.usage.page.text005" value={30}>{uiText("app.usage.page.text005")}</option>
+                        <option data-i18n="app.usage.page.text006" value={90}>{uiText("app.usage.page.text006")}</option>
                     </select>
                 </div>
                 <div className={styles.filterGroup}>
-                    <label>ペルソナ:</label>
+                    <label data-i18n="app.usage.page.text007">{uiText("app.usage.page.text007")}</label>
                     <select
                         value={selectedPersona}
                         onChange={(e) => setSelectedPersona(e.target.value)}
                         className={styles.select}
                     >
-                        <option value="">全ペルソナ</option>
+                        <option data-i18n="app.usage.page.text008" value="">{uiText("app.usage.page.text008")}</option>
                         {personas.map((p) => (
                             <option key={p.persona_id} value={p.persona_id}>
                                 {p.persona_name}
@@ -254,13 +260,13 @@ export default function UsagePage() {
                     </select>
                 </div>
                 <div className={styles.filterGroup}>
-                    <label>カテゴリ:</label>
+                    <label data-i18n="app.usage.page.text009">{uiText("app.usage.page.text009")}</label>
                     <select
                         value={selectedCategory}
                         onChange={(e) => setSelectedCategory(e.target.value)}
                         className={styles.select}
                     >
-                        <option value="">全カテゴリ</option>
+                        <option data-i18n="app.usage.page.text010" value="">{uiText("app.usage.page.text010")}</option>
                         {categories.map((c) => (
                             <option key={c.category_id} value={c.category_id}>
                                 {c.category_name}
@@ -270,7 +276,7 @@ export default function UsagePage() {
                 </div>
                 {availableCurrencies.length > 1 && (
                     <div className={styles.filterGroup}>
-                        <label>表示通貨:</label>
+                        <label data-i18n="app.usage.page.text011">{uiText("app.usage.page.text011")}</label>
                         <select
                             value={effectiveCurrency}
                             onChange={(e) => setSelectedCurrency(e.target.value)}
@@ -290,27 +296,27 @@ export default function UsagePage() {
             {summary && (
                 <div className={styles.summaryCards}>
                     <div className={styles.card}>
-                        <div className={styles.cardLabel}>合計コスト</div>
+                        <div data-i18n="app.usage.page.text012" className={styles.cardLabel}>{uiText("app.usage.page.text012")}</div>
                         <div className={styles.cardValue}>{formatCostsByCurrency(summary.costs_by_currency)}</div>
                     </div>
                     <div className={styles.card}>
-                        <div className={styles.cardLabel}>入力トークン</div>
+                        <div data-i18n="app.usage.page.text013" className={styles.cardLabel}>{uiText("app.usage.page.text013")}</div>
                         <div className={styles.cardValue}>{formatTokens(summary.total_input_tokens)}</div>
                     </div>
                     <div className={styles.card}>
-                        <div className={styles.cardLabel}>出力トークン</div>
+                        <div data-i18n="app.usage.page.text014" className={styles.cardLabel}>{uiText("app.usage.page.text014")}</div>
                         <div className={styles.cardValue}>{formatTokens(summary.total_output_tokens)}</div>
                     </div>
                     <div className={styles.card}>
-                        <div className={styles.cardLabel}>API呼び出し</div>
-                        <div className={styles.cardValue}>{summary.call_count.toLocaleString()}</div>
+                        <div data-i18n="app.usage.page.text015" className={styles.cardLabel}>{uiText("app.usage.page.text015")}</div>
+                        <div className={styles.cardValue}>{summary.call_count.toLocaleString(getFormatLocale())}</div>
                     </div>
                 </div>
             )}
 
             {/* Chart */}
             <div className={styles.chartContainer}>
-                <h2 className={styles.chartTitle}>モデル別日次コスト</h2>
+                <h2 data-i18n="app.usage.page.text016" className={styles.chartTitle}>{uiText("app.usage.page.text016")}</h2>
                 {chartData.data.length > 0 ? (
                     <>
                     <ResponsiveContainer width="100%" height={400}>
@@ -368,13 +374,13 @@ export default function UsagePage() {
                                     ))}
                                 </div>
                                 {needsCollapse && (
-                                    <button
+                                    <button data-i18n="app.usage.page.text017 app.usage.page.text018 app.usage.page.text019"
                                         className={styles.legendToggle}
                                         onClick={() => setLegendExpanded(!legendExpanded)}
                                     >
                                         {legendExpanded
-                                            ? <><ChevronUp size={14} /> 折りたたむ</>
-                                            : <><ChevronDown size={14} /> 他 {chartData.models.length - COLLAPSE_THRESHOLD} モデルを表示</>
+                                            ? <><ChevronUp size={14} />{uiText("app.usage.page.text017")}</>
+                                            : <><ChevronDown size={14} />{uiText("app.usage.page.text018")}{chartData.models.length - COLLAPSE_THRESHOLD}{uiText("app.usage.page.text019")}</>
                                         }
                                     </button>
                                 )}
@@ -383,8 +389,8 @@ export default function UsagePage() {
                     })()}
                     </>
                 ) : (
-                    <div className={styles.noData}>
-                        {loading ? '読み込み中...' : '使用データがありません'}
+                    <div data-i18n="app.usage.page.text020 app.usage.page.text021" className={styles.noData}>
+                        {loading ? uiText("app.usage.page.text020") : uiText("app.usage.page.text021")}
                     </div>
                 )}
             </div>
@@ -392,22 +398,22 @@ export default function UsagePage() {
             {/* Category Breakdown */}
             {categoryUsage.length > 0 && (
                 <div className={styles.categorySection}>
-                    <h2 className={styles.chartTitle}>カテゴリ別使用状況</h2>
+                    <h2 data-i18n="app.usage.page.text022" className={styles.chartTitle}>{uiText("app.usage.page.text022")}</h2>
                     <div className={styles.categoryGrid}>
                         {categoryUsage.map((cat) => (
                             <div key={cat.category} className={styles.categoryCard}>
                                 <div className={styles.categoryName}>{cat.category_name}</div>
                                 <div className={styles.categoryStats}>
                                     <div className={styles.categoryStat}>
-                                        <span className={styles.statLabel}>コスト</span>
+                                        <span data-i18n="app.usage.page.text023" className={styles.statLabel}>{uiText("app.usage.page.text023")}</span>
                                         <span className={styles.statValue}>{formatCostsByCurrency(cat.costs_by_currency)}</span>
                                     </div>
                                     <div className={styles.categoryStat}>
-                                        <span className={styles.statLabel}>呼び出し</span>
-                                        <span className={styles.statValue}>{cat.call_count.toLocaleString()}</span>
+                                        <span data-i18n="app.usage.page.text024" className={styles.statLabel}>{uiText("app.usage.page.text024")}</span>
+                                        <span className={styles.statValue}>{cat.call_count.toLocaleString(getFormatLocale())}</span>
                                     </div>
                                     <div className={styles.categoryStat}>
-                                        <span className={styles.statLabel}>トークン</span>
+                                        <span data-i18n="app.usage.page.text025" className={styles.statLabel}>{uiText("app.usage.page.text025")}</span>
                                         <span className={styles.statValue}>
                                             {formatTokens(cat.total_input_tokens + cat.total_output_tokens)}
                                         </span>

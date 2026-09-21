@@ -21,7 +21,13 @@
   だけで、Beat ロックは待たない。
 - 返事の始まりに決めるモデルと接続 (:class:`ReplyModelBinding`): 書いている途中の
   返事は、始めたときのモデルと接続を最後まで使う。次の返事から新しい設定になる。
-- 設定ファイルの無いモデルの名前を保存しない検査と、画面へ出す知らせの文面。
+- その役割に使えないモデルの名前を保存しない検査 (:func:`save_rejection_reason`)
+  と、画面へ出す知らせの文面。断るのは、設定ファイルがその名前で見つからない値と、
+  定義はあるがその役割では使えない宛先 (会話や要約の役割に、型付きの質問にしか
+  答えない反射判断専用のモデル)。入口はグローバル設定の保存・ペルソナ設定の保存・
+  チャット画面のモデル一時上書きの三つで、判定は全部この一本から引く。既に入って
+  いる一時上書きを画面の警告にするとき (manager/initialization.py の
+  current_model_setting_warnings) も、同じ一本から引く。
 """
 from __future__ import annotations
 
@@ -38,7 +44,10 @@ from saiverse.model_defaults import (
     BUILTIN_DEFAULT_LITE_MODEL,
     MODEL_ROLE_DESCRIPTIONS,
     MODEL_ROLES,
+    SAVE_REJECT_DESTINATION,
+    SAVE_REJECT_UNDEFINED,
     role_model_is_defined,
+    role_model_save_rejection,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -268,6 +277,7 @@ class PersonaModelRow:
     default_model: Optional[str]
     lightweight_model: Optional[str]
     memory_weave_model: Optional[str]
+    reflex_judgment_model: Optional[str]
 
 
 def read_persona_model_rows(
@@ -287,6 +297,7 @@ def read_persona_model_rows(
             AIModel.DEFAULT_MODEL,
             AIModel.LIGHTWEIGHT_MODEL,
             AIModel.MEMORY_WEAVE_MODEL,
+            AIModel.REFLEX_JUDGMENT_MODEL,
         )
         if persona_ids is not None:
             query = query.filter(AIModel.AIID.in_(list(persona_ids)))
@@ -496,7 +507,7 @@ def reapply_after_config_reload() -> ReapplyResult:
 
 
 # ---------------------------------------------------------------------------
-# 設定ファイルの無いモデルの名前を保存しない
+# その役割に使えないモデルの名前を保存しない
 # ---------------------------------------------------------------------------
 
 
@@ -505,27 +516,37 @@ class RejectedModelSetting:
     env_key: str
     role: str
     value: str
+    #: 断った理由 (``SAVE_REJECT_UNDEFINED`` / ``SAVE_REJECT_DESTINATION``)。
+    reason: str = SAVE_REJECT_UNDEFINED
 
 
-def _is_defined_for_saving(role: str, value: str) -> bool:
+def save_rejection_reason(role: str, value: str) -> Optional[str]:
+    """その役割にその値を保存してよいか。断るなら理由、保存してよければ None。
+
+    判定そのものは :func:`saiverse.model_defaults.role_model_save_rejection` が
+    持つ。ここはその周りの例外の扱いだけ — 確かめられない名前は保存しない
+    (保存したあとで「無かった」と分かっても遅い)。
+    """
     try:
-        return role_model_is_defined(role, value)
+        return role_model_save_rejection(role, value)
     except Exception:
-        # 確かめられない名前は保存しない (保存したあとで「無かった」と分かっても遅い)
         LOGGER.warning(
-            "[model-selection] definition lookup failed (role=%s value=%r); not saving it",
+            "[model-selection] model config check failed (role=%s value=%r); not saving it",
             role, value, exc_info=True,
         )
-        return False
+        return SAVE_REJECT_UNDEFINED
 
 
 def split_undefined_model_updates(
     updates: Mapping[str, str],
 ) -> Tuple[Dict[str, str], List[RejectedModelSetting]]:
-    """環境変数の保存要求を、保存するものと、設定ファイルが無いので保存しないものに分ける。
+    """環境変数の保存要求を、保存するものと、その役割に使えないので保存しないものに分ける。
 
     モデルの役割の変数 (``MODEL_ROLES``) だけを検べる。空の値は受け付ける (設定を外す)。
     いまの値と同じ名前はそもそも新しい保存ではないので検べない。
+
+    断る理由は二つ — 設定ファイルがその名前で見つからない値と、定義はあるが
+    その役割では使えない宛先 (会話や要約の役割に反射判断専用のモデル)。
     """
     accepted: Dict[str, str] = {}
     rejected: List[RejectedModelSetting] = []
@@ -535,10 +556,11 @@ def split_undefined_model_updates(
         if role is None or name is None or name == _clean(os.environ.get(key)):
             accepted[key] = value
             continue
-        if _is_defined_for_saving(role, name):
+        reason = save_rejection_reason(role, name)
+        if reason is None:
             accepted[key] = value
         else:
-            rejected.append(RejectedModelSetting(key, role, name))
+            rejected.append(RejectedModelSetting(key, role, name, reason))
     return accepted, rejected
 
 
@@ -558,11 +580,29 @@ def unswitched_persona_message(name: str, model: str) -> str:
     )
 
 
+#: 会話や要約の役割に反射判断専用の宛先 (jev 互換) が来たときの、断る理由の一文。
+_JEV_ONLY = "は反射判断だけに使える宛先のため、"
+
+
 def undefined_override_message(model: str) -> str:
     return (
         f"'{model}' というモデルは SAIVerse にないため、チャット画面のモデル一時上書きには"
         "使えません。モデル管理の画面にあるモデルから選び直してください。"
     )
+
+
+def rejected_override_message(model: str, reason: str) -> str:
+    """チャット画面のモデル一時上書きに使えない名前を断るときの知らせ。
+
+    一時上書きは全ペルソナの標準モデルを一度に置き換えるので、反射判断専用の宛先を
+    受け付けると全員がその場で話せなくなる。保存の関所と同じ判定で断る。
+    """
+    if reason == SAVE_REJECT_DESTINATION:
+        return (
+            f"'{model}'{_JEV_ONLY}チャット画面のモデル一時上書きには使えません。"
+            "モデル管理の画面にあるモデルから選び直してください。"
+        )
+    return undefined_override_message(model)
 
 
 def override_missing_message(model: str) -> str:
@@ -572,11 +612,36 @@ def override_missing_message(model: str) -> str:
     )
 
 
+def override_unusable_message(model: str, reason: str) -> str:
+    """いま入っているチャット画面のモデル一時上書きが使えないときの、画面の警告。
+
+    入口の関所 (:func:`rejected_override_message`) と同じ判定
+    (:func:`save_rejection_reason`) から引く。関所ができる前に入った値や、
+    前のプロセスから引き継いだ値は入口を通っていないので、ここで拾う。
+    """
+    if reason == SAVE_REJECT_DESTINATION:
+        return (
+            f"チャット画面のモデル一時上書き '{model}'{_JEV_ONLY}会話には使えず、"
+            "ペルソナは止まっています。"
+            "チャット画面でモデルを選び直すか一時上書きを解除すると、再起動しなくても話せるようになります。"
+        )
+    return override_missing_message(model)
+
+
+def _rejected_head(reason: str, value: str, whose: str, label: str) -> str:
+    """保存を断ったときの知らせの、理由の部分。
+
+    ``whose`` は「グローバル設定の」またはペルソナの名前に「の」を付けたもの。
+    """
+    if reason == SAVE_REJECT_DESTINATION:
+        return f"'{value}'{_JEV_ONLY}{whose}{label}としては保存しませんでした。"
+    return f"'{value}' というモデルは SAIVerse にないため、{whose}{label}は保存しませんでした。"
+
+
 def rejected_global_model_message(rejected: RejectedModelSetting, manager: Any) -> str:
     """グローバル設定で保存を断ったときの知らせ。どの設定を保存しなかったかと、いま使っているモデル。"""
-    head = (
-        f"'{rejected.value}' というモデルは SAIVerse にないため、"
-        f"グローバル設定の{_label(rejected.role)}は保存しませんでした。"
+    head = _rejected_head(
+        rejected.reason, rejected.value, "グローバル設定の", _label(rejected.role),
     )
     current = _clean(os.environ.get(rejected.env_key))
     if rejected.role == "default_model":
@@ -584,7 +649,15 @@ def rejected_global_model_message(rejected: RejectedModelSetting, manager: Any) 
         if override:
             return head + f"いまはチャット画面のモデル一時上書き '{override}' で話しています。"
         model = current or BUILTIN_DEFAULT_LITE_MODEL
-        if not _is_defined_for_saving("default_model", model):
+        # いま効いている値のほうが使えないことがある (.env を手で直した場合など)。
+        # その回は「いまも '…' で話しています」が嘘になるので、止まっていると言う。
+        stopped = save_rejection_reason("default_model", model)
+        if stopped == SAVE_REJECT_DESTINATION:
+            return head + (
+                f"個別の標準モデルを持たないペルソナは、'{model}'{_JEV_ONLY}"
+                "話せないままです。"
+            )
+        if stopped is not None:
             return head + (
                 f"個別の標準モデルを持たないペルソナは、'{model}' が SAIVerse にないため"
                 "止まったままです。"
@@ -602,12 +675,10 @@ def rejected_persona_model_message(
     *,
     stored: Optional[str],
     persona: Any = None,
+    reason: str = SAVE_REJECT_UNDEFINED,
 ) -> str:
     """ペルソナ設定で保存を断ったときの知らせ。"""
-    head = (
-        f"'{value}' というモデルは SAIVerse にないため、{persona_name}の{_label(role)}は"
-        "保存しませんでした。"
-    )
+    head = _rejected_head(reason, value, f"{persona_name}の", _label(role))
     if role == "default_model" and persona is not None:
         model = str(getattr(persona, "model", "") or "")
         choice = getattr(persona, "speaking_model_choice", None)
@@ -1022,13 +1093,16 @@ __all__ = [
     "reapply_speaking_models",
     "register_new_persona",
     "rejected_global_model_message",
+    "rejected_override_message",
     "rejected_persona_model_message",
     "reply_binding_scope",
     "reply_unavailable_message",
     "resolve_speaking_model",
+    "save_rejection_reason",
     "speaking_model_definition",
     "split_undefined_model_updates",
     "undefined_override_message",
     "override_missing_message",
+    "override_unusable_message",
     "unswitched_persona_message",
 ]

@@ -25,6 +25,8 @@ Usage:
 安全性:
     - **source (本番) 側は読み取り専用**。source DB は SQLite の mode=ro URI で
       開き、ファイルは copy2 で読むだけ。書き込みは dest (テスト環境) のみ。
+    - dest (DB / home) が本番 (~/.saiverse 配下) を指すなら拒否する。本番の場所は
+      SAIVERSE_HOME の値に依らない。
     - dest に同じペルソナの複製が既にある場合、--force が無ければ上書き前に
       確認プロンプトを出す。
 """
@@ -47,6 +49,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database.models import AI, Building, BuildingOccupancyLog, City, SessionAnchor
+from scripts._shared.production_guard import refuse_production_paths
 
 LOGGER = logging.getLogger("scripts.clone_persona_to_test_env")
 
@@ -80,9 +83,11 @@ PERSISTENT_COLUMNS = [
     "AUDIO_MODEL",
     "VIDEO_MODEL",
     "MEMORY_WEAVE_MODEL",
+    "REFLEX_JUDGMENT_MODEL",
     "CHRONICLE_ENABLED",
     "AUTONOMOUS_CHRONICLE_ENABLED",
     "AUTO_RECALL_ENABLED",
+    "AUTO_RECALL_ENHANCED",
     "MEMORY_WEAVE_CONTEXT",
     "MEMOPEDIA_INDEX_LIMIT",
     "MEMOPEDIA_INDEX_ENABLED",
@@ -102,6 +107,7 @@ PERSISTENT_COLUMNS = [
     "META_JUDGMENT_CONFIG",
     "PERSONA_ROLE",
     "USER_CONV_TIMEOUT_MINUTES",
+    "LANGUAGE",
     # 退役済みの列 (読み手も書き手も無い、database/models.py の注記参照)。
     # v0.3 の移行が写し元として読むので、テスト環境でも複製して残す。
     "LIFE_PURPOSE",
@@ -129,6 +135,9 @@ MODEL_COLUMNS = [
     "AUDIO_MODEL",
     "VIDEO_MODEL",
     "MEMORY_WEAVE_MODEL",
+    # ペルソナ個別の反射判断モデル。ここに入れておかないと、複製先で
+    # そのモデル JSON が無いまま列だけ残る (docs/intent/reflex_judgment.md §1)。
+    "REFLEX_JUDGMENT_MODEL",
 ]
 
 
@@ -608,7 +617,7 @@ def clone_persona(
     Returns:
         サマリ情報の dict (再マップ結果・複製ファイル数・モデル依存解決)。
     Raises:
-        CloneError: 前提未達 (source に無い / dest 未セットアップ / ユーザー中断)。
+        CloneError: 前提未達 (source に無い / dest 未セットアップ / dest が本番 / ユーザー中断)。
     """
     _verify_column_classification()
 
@@ -622,6 +631,11 @@ def clone_persona(
     LOGGER.info("複製先 DB   : %s", dest_db)
     LOGGER.info("複製先 home : %s", dest_home)
 
+    refuse_production_paths(
+        {"--dest-db": dest_db, "--dest-home": dest_home},
+        reason="複製は複製先の AI 行とペルソナフォルダを置き換える (既存フォルダの削除を含む) ため、本番には向けられません。",
+        error_cls=CloneError,
+    )
     if source_db == dest_db:
         raise CloneError("source と dest の DB が同一です。複製になりません。")
     if not source_db.is_file():

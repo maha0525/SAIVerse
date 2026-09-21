@@ -244,6 +244,9 @@ class BlueprintMixin:
                 private_room_id,
             )
 
+            from saiverse.persona_language import get_city_language
+            target_lang = get_city_language(blueprint.CITYID, db_path=None)
+
             new_ai_model = AIModel(
                 AIID=new_ai_id,
                 HOME_CITYID=blueprint.CITYID,
@@ -255,6 +258,7 @@ class BlueprintMixin:
                 # docs/intent/persona_model_selection.md 決まったこと 1)。
                 DEFAULT_MODEL=None,
                 PRIVATE_ROOM_ID=private_room_id,
+                LANGUAGE=target_lang,
             )
             db.add(new_ai_model)
 
@@ -342,6 +346,7 @@ class BlueprintMixin:
                     persona_event_fetcher=self.get_persona_pending_events,
                     persona_event_ack=self.archive_persona_events,
                     manager_ref=self,
+                    language=target_lang,
                 )
                 attach_speaking_model_choice(new_persona_core, choice, parameter_overrides)
                 register_new_persona(self, new_ai_id, new_persona_core, choice)

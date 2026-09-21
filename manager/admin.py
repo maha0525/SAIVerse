@@ -164,6 +164,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         host_avatar_path: Optional[str] = None,
         host_avatar_upload: Optional[str] = None,
         map_background_image: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> str:
         """City の設定を更新する。``name`` は**表示名** (CITYNAME)。
 
@@ -192,6 +193,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             city.UI_PORT = ui_port
             city.API_PORT = api_port
             city.TIMEZONE = tz_candidate
+            if language is not None:
+                from saiverse.persona_language import validate_language
+                city.LANGUAGE = validate_language(language)
             avatar_value: Optional[str] = (host_avatar_path or "").strip() or None
             if host_avatar_upload:
                 try:
@@ -256,6 +260,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         ui_port: int,
         api_port: int,
         timezone_name: str,
+        language: str = "ja",
     ) -> str:
         """City を作る。``slug`` は内部の識別子、``name`` は表示名。
 
@@ -295,6 +300,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     "timezone name (e.g., Asia/Tokyo)."
                 )
 
+            from saiverse.persona_language import validate_language
+            lang = validate_language(language) if language else "ja"
+
             new_city = CityModel(
                 USERID=self.state.user_id,
                 CITY_SLUG=slug,
@@ -303,6 +311,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 UI_PORT=ui_port,
                 API_PORT=api_port,
                 TIMEZONE=tz_candidate,
+                LANGUAGE=lang,
             )
             db.add(new_city)
             db.commit()
@@ -1206,14 +1215,17 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "AUDIO_MODEL": ai.AUDIO_MODEL,
                 "VIDEO_MODEL": ai.VIDEO_MODEL,
                 "MEMORY_WEAVE_MODEL": ai.MEMORY_WEAVE_MODEL,
+                "REFLEX_JUDGMENT_MODEL": ai.REFLEX_JUDGMENT_MODEL,
                 "AUTONOMY_ENABLED": ai.AUTONOMY_ENABLED,
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
                 "AUTONOMOUS_CHRONICLE_ENABLED": ai.AUTONOMOUS_CHRONICLE_ENABLED,
                 "AUTO_RECALL_ENABLED": ai.AUTO_RECALL_ENABLED,
+                "AUTO_RECALL_ENHANCED": ai.AUTO_RECALL_ENHANCED,
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
                 "MEMOPEDIA_INDEX_ENABLED": ai.MEMOPEDIA_INDEX_ENABLED,
                 "CORE_MEMORY_CHAR_BUDGET": ai.CORE_MEMORY_CHAR_BUDGET,
                 "CHRONICLE_CHAR_BUDGET": ai.CHRONICLE_CHAR_BUDGET,
+                "LANGUAGE": ai.LANGUAGE,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
                 "REALTIME_INFO_ENABLED": ai.REALTIME_INFO_ENABLED,
                 "META_JUDGMENT_CONFIG": ai.META_JUDGMENT_CONFIG,
@@ -1223,7 +1235,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             db.close()
 
     def create_ai(
-        self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None
+        self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None, language: Optional[str] = None
     ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         if home_city_id != self.state.city_id:
             return (
@@ -1233,7 +1245,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 None,
                 None,
             )
-        success, message, ai_id, room_id = self._create_persona(name, system_prompt, custom_ai_id)
+        success, message, ai_id, room_id = self._create_persona(name, system_prompt, custom_ai_id, language=language)
         if success:
             return (
                 True,
@@ -1243,6 +1255,24 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 room_id,
             )
         return False, message, None, None
+
+    def _deliver_spell_toggle(self, ai_id: str, persona: Any) -> None:
+        """スペル不使用モードの切り替えを head へ届ける。
+
+        gate を持つ Section が一斉に撮り直され、次の発言からプロンプトが新しい
+        モードになる (docs/intent/spell_disabled_mode.md §4-2)。届かなかった回
+        (現在地が無い / pipeline 未初期化 / 例外) は警告だけ出して保存は成功させる
+        — 反映は従来どおり次の記憶整理まで待つことになる。
+        """
+        try:
+            from saiverse.dynamic_state import DynamicStateManager
+
+            DynamicStateManager.on_spell_toggled(persona, self.manager)
+        except Exception:
+            logging.warning(
+                "Failed to notify the head pipeline of the spell "
+                "mode change for '%s'", ai_id, exc_info=True,
+            )
 
     def update_ai(
         self,
@@ -1257,13 +1287,21 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         appearance_image_path: Optional[str] = None,
-        vision_model: Optional[str] = None,
-        audio_model: Optional[str] = None,
-        video_model: Optional[str] = None,
-        memory_weave_model: Optional[str] = None,
+        # モデル欄の既定は UNSET (= 送られてこなかった欄は触らない)。None を既定に
+        # すると「知らない画面が項目ごと送らない」と「空欄にして外す」が潰れて、
+        # ワールドエディタの保存が設定モーダルの個別モデルを黙って消す (経緯:
+        # docs/issues/archive/world_editor_save_wipes_persona_model_overrides.md)。
+        # 入口が現在値を読んで詰め直す形は、読みと書きの間の並行保存を古い値で
+        # 巻き戻すので採らない — 印の解決は下の錠と refresh の後で行う。
+        vision_model: Any = UNSET,
+        audio_model: Any = UNSET,
+        video_model: Any = UNSET,
+        memory_weave_model: Any = UNSET,
+        reflex_judgment_model: Any = UNSET,
         chronicle_enabled: Optional[bool] = None,
         autonomous_chronicle_enabled: Optional[bool] = None,
         auto_recall_enabled: Optional[bool] = None,
+        auto_recall_enhanced: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
         memopedia_index_enabled: Optional[bool] = None,
         core_memory_char_budget: Optional[int] = None,
@@ -1272,7 +1310,19 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         realtime_info_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
         user_conv_timeout_minutes: Optional[int] = None,
+        language: Optional[str] = None,
     ) -> str:
+        # 例外経路 (下の except) でも読む値は try の外で用意しておく — commit より
+        # 前に転んだ回に、まだ代入されていない名前を触って NameError にしないため。
+        persona = self.personas.get(ai_id)
+        # スペル不使用モードは保存した時点で即反映する。実際に値が変わった保存だけを
+        # 対象にするので、旧値との比較の結果をここに残しておく
+        # (docs/intent/spell_disabled_mode.md §4-2)。届けたら False に戻す — 例外経路の
+        # 保険が二重に発火しないように、「まだ届けていない切り替えがあるか」を持つ。
+        spell_toggle_pending = False
+        # DB のモード変更が確定したか。例外経路で「発火してよいか」を決める
+        # (commit 前に転んだ回は DB が巻き戻るので発火してはいけない)。
+        committed = False
         db = self.SessionLocal()
         try:
             ai = db.query(AIModel).filter(AIModel.AIID == ai_id).first()
@@ -1299,15 +1349,14 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     )
                     return f"Error: Failed to process avatar upload: {exc}"
 
-            from saiverse.model_defaults import role_model_is_defined
             from saiverse.persona_model_selection import (
                 MODEL_SETTINGS_LOCK,
                 reapply_speaking_models,
                 rejected_persona_model_message,
+                save_rejection_reason,
             )
 
             llm_warnings: List[str] = []
-            persona = self.personas.get(ai_id)
             # モデルの欄の検査・保存・当てはめは、設定のロックの中で一件ずつ行う
             # (docs/intent/persona_model_selection.md 決まったこと 5)。ロックの中で
             # 行うのは DB の読み書きと値の書き換えだけ — 自律の起動停止とアバターの
@@ -1316,7 +1365,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 db.refresh(ai)
 
                 def _checked(role: str, requested: Optional[str], stored: Optional[str]) -> Optional[str]:
-                    """設定ファイルの無いモデルの名前は保存せず、いまの値を返す (決まったこと 6)。
+                    """その役割に使えないモデルの名前は保存せず、いまの値を返す (決まったこと 6)。
+
+                    断るのは二通り — 設定ファイルがその名前で見つからない値と、定義は
+                    あるがその役割では使えない宛先 (会話の欄に、型付きの質問にしか
+                    答えない反射判断専用のモデル)。判定はグローバル設定の保存と同じ
+                    一本 (saiverse/persona_model_selection.py の save_rejection_reason)。
 
                     空の値 (個別の設定を外す) は受け付ける。いまと同じ名前は新しい
                     保存ではないので断らない — ほかの欄だけ保存したときに、前から
@@ -1325,20 +1379,34 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     value = requested or None
                     if value is None or value == stored:
                         return value
-                    try:
-                        defined = role_model_is_defined(role, value)
-                    except Exception:
-                        logging.warning(
-                            "Model config check failed (role=%s value=%r persona=%s); not saving it",
-                            role, value, ai_id, exc_info=True,
-                        )
-                        defined = False
-                    if defined:
+                    reason = save_rejection_reason(role, value)
+                    if reason is None:
                         return value
                     llm_warnings.append(rejected_persona_model_message(
-                        name, role, value, stored=stored, persona=persona,
+                        name, role, value, stored=stored, persona=persona, reason=reason,
                     ))
                     return stored
+
+                # 「送られてこなかった」印 (UNSET) のモデル欄は、いまの値に置き換える
+                # (= 触らない)。錠と refresh の後で解決するので、別の画面の並行保存を
+                # 古い値で巻き戻さない。UNSET は falsy なので、この解決より先に
+                # 下の `or None` へ流してはいけない (流すと NULL 上書きに化ける)。
+                # 標準・軽量は必須引数だが、印を値として渡してくる入口 (ペルソナ設定の
+                # PATCH で欄が省かれた回) があるので同じに扱う。
+                if default_model is UNSET:
+                    default_model = ai.DEFAULT_MODEL
+                if lightweight_model is UNSET:
+                    lightweight_model = ai.LIGHTWEIGHT_MODEL
+                if vision_model is UNSET:
+                    vision_model = ai.VISION_MODEL
+                if audio_model is UNSET:
+                    audio_model = ai.AUDIO_MODEL
+                if video_model is UNSET:
+                    video_model = ai.VIDEO_MODEL
+                if memory_weave_model is UNSET:
+                    memory_weave_model = ai.MEMORY_WEAVE_MODEL
+                if reflex_judgment_model is UNSET:
+                    reflex_judgment_model = ai.REFLEX_JUDGMENT_MODEL
 
                 default_model = _checked("default_model", default_model, ai.DEFAULT_MODEL)
                 lightweight_model = _checked(
@@ -1346,6 +1414,13 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 )
                 memory_weave_model = _checked(
                     "memory_weave_model", memory_weave_model, ai.MEMORY_WEAVE_MODEL,
+                )
+                # 反射判断のモデルの個別の上書き (docs/intent/reflex_judgment.md §1)。
+                # 断るのは設定ファイルの無い名前だけ — この役割は宛先を理由には断らない。
+                # jev 互換の宛先も通常の LLM も合法な答える側だからで、どちらとしても
+                # 解決できない壊れた宛先は画面の警告が知らせる (§2)。
+                reflex_judgment_model = _checked(
+                    "reflex_judgment_model", reflex_judgment_model, ai.REFLEX_JUDGMENT_MODEL,
                 )
 
                 original_autonomy = ai.AUTONOMY_ENABLED
@@ -1364,6 +1439,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 ai.AUDIO_MODEL = audio_model or None
                 ai.VIDEO_MODEL = video_model or None
                 ai.MEMORY_WEAVE_MODEL = memory_weave_model or None
+                ai.REFLEX_JUDGMENT_MODEL = reflex_judgment_model or None
                 ai.AVATAR_IMAGE = avatar_value
                 # Update appearance image path if provided
                 if appearance_image_path is not None:
@@ -1377,6 +1453,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 # Update auto-recall (記憶アーキv2 ゾーン C) per-persona toggle
                 if auto_recall_enabled is not None:
                     ai.AUTO_RECALL_ENABLED = auto_recall_enabled
+                # Update 自動想起の強化 (反射判断に選別を任せる) per-persona toggle
+                if auto_recall_enhanced is not None:
+                    ai.AUTO_RECALL_ENHANCED = auto_recall_enhanced
                 # Update Memory Weave context injection toggle
                 if memory_weave_context is not None:
                     ai.MEMORY_WEAVE_CONTEXT = memory_weave_context
@@ -1397,8 +1476,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                         ai.CHRONICLE_CHAR_BUDGET = int(chronicle_char_budget)
                     else:
                         ai.CHRONICLE_CHAR_BUDGET = None
-                # Update Spell system toggle
+                # Update Spell system toggle (スペル不使用モード)。旧値との比較は
+                # 代入の前に取る — 値が変わった保存だけが head の作り直しを起こす。
                 if spell_enabled is not None:
+                    spell_toggle_pending = (
+                        bool(ai.SPELL_ENABLED) != bool(spell_enabled)
+                    )
                     ai.SPELL_ENABLED = spell_enabled
                 # Update realtime info injection toggle
                 if realtime_info_enabled is not None:
@@ -1417,16 +1500,27 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                         ai.USER_CONV_TIMEOUT_MINUTES = int(user_conv_timeout_minutes)
                     else:
                         ai.USER_CONV_TIMEOUT_MINUTES = None
+                if language is not None:
+                    clean_lang = language.strip() if isinstance(language, str) else ""
+                    if not clean_lang:
+                        ai.LANGUAGE = None
+                    else:
+                        from saiverse.persona_language import validate_language
+                        ai.LANGUAGE = validate_language(clean_lang)
                 autonomy_now = ai.AUTONOMY_ENABLED
                 db.commit()
+                committed = True
 
                 if persona is not None:
                     persona.persona_name = name
                     persona.persona_system_instruction = system_prompt
                     persona.autonomy_enabled = autonomy_now
+                    if language is not None:
+                        persona.language = ai.LANGUAGE
                     persona.vision_model = vision_model
                     persona.audio_model = audio_model
                     persona.video_model = video_model
+
                     # 話す標準モデル・軽量モデル・Memory Weave モデルは、いま保存した
                     # DB 行から決め方の一か所で決め直して当てはめる (値の書き換えと
                     # 接続の破棄だけ。新しい接続は次の返事で作られる)。個別の標準モデルを
@@ -1434,6 +1528,26 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     result = reapply_speaking_models(self, persona_ids=[ai_id])
                     llm_warnings.extend(result.notices())
                     logging.info("Updated in-memory persona '%s' with new settings.", name)
+
+            # スペル不使用モードの切り替えは、保存した時点で head へ届ける
+            # (docs/intent/spell_disabled_mode.md §4-2)。設定のロックの**外**で、
+            # モデルの当てはめが済んだ**後**に発火する (敵対レビュー 2026-09-14):
+            #  - 同じ保存でモデルも変えた場合、当てはめの前だと発火の宛先が旧モデルに
+            #    なり、新モデルの head に旧モードの説明が残ってしまう。
+            #  - 撮り直しは複数 Section の DB / ファイル読みを同期で行うので、ロックの
+            #    中でやると他のスレッドのモデル設定の操作を待たせる。
+            if spell_toggle_pending:
+                spell_toggle_pending = False
+                if persona is not None:
+                    self._deliver_spell_toggle(ai_id, persona)
+                else:
+                    # 読み込まれていないペルソナには届け先が無い。保存は成功させ、
+                    # 反映は次の記憶整理に任せる。
+                    logging.warning(
+                        "Spell mode changed for '%s', but the persona is not "
+                        "loaded in this process; the head will pick it up at "
+                        "the next metabolism.", ai_id,
+                    )
 
             # Phase C-2: AUTONOMY_ENABLED 変更を AutonomyManager に反映
             # (True なら起動、False なら停止)。
@@ -1451,6 +1565,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                         "Failed to sync AutonomyManager state for '%s'",
                         ai_id, exc_info=True,
                     )
+
             # 記憶の整理の見張りは「前回と同じ状態なら結果も同じ」で素通しする。Memory
             # Weave モデルを選び直しても会話が動くまで整理が再試行されないと
             # 「再起動しなくても」が偽になるので、記録を捨てる (読み込んでいないペルソナの
@@ -1469,11 +1584,29 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 )
             return status_message
         except Exception as exc:
-            db.rollback()
+            # rollback 自体が失敗しても (commit 済みでセッションが崩れた回など)、
+            # 下の発火の保険まで巻き添えにしない。commit 済みなら rollback は
+            # もともと何も戻さない。
+            try:
+                db.rollback()
+            except Exception:
+                logging.warning(
+                    "Rollback failed while handling update_ai error for '%s'",
+                    ai_id, exc_info=True,
+                )
             logging.error("Failed to update AI '%s': %s", ai_id, exc, exc_info=True)
+            # commit の後で転んだ回でも、DB のモード変更はもう確定している。この経路
+            # では当てはめが失敗した = モデルは変わっていないので、いまの
+            # persona.model が正しい宛先。ここで発火を落とすと、同じ値を保存し直しても
+            # 「値が変わっていない」ので再発火せず、次の記憶整理まで旧いプロンプトが
+            # 残り続ける。commit より前の例外では DB が巻き戻るので発火しない。
+            # 通常経路で届け済みなら pending は下りているので、二重には発火しない。
+            if committed and spell_toggle_pending and persona is not None:
+                self._deliver_spell_toggle(ai_id, persona)
             return f"Error: {exc}"
         finally:
             db.close()
+
     def delete_ai(self, ai_id: str) -> str:
         """Deletes an AI after checking its state.
 

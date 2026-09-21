@@ -11,6 +11,11 @@
   こと (旧 §13.5-1 後退方式は 2026-09-08 廃止 — sluice_coverage_gaps 第一段 A)
 - 冷たいときの飛ばし: 担当範囲が量の上限を超えたらスルースを走らせず、退場は
   進み、窓から出る未見の範囲が記録されること
+- 送る中身がモデルに入らないときの飛ばし (docs/issues/sluice_skip_ignores_model_context.md):
+  見積もりの数え方 (埋め込む画像・送らないメディアの注記・答えの形の指定) と
+  上限 (応答の枠はクライアントが送る上限)、実物のクライアントが答える応答の
+  上限、呼び出し直前の比較 (差し替わった後のモデルで比べる)、量による飛ばしと
+  同じ扱いで範囲を記録して畳みが進むこと
 - defer-to-hot: anchor 冷で pending が立ち metabolism がスキップ / 圧力弁で実行
 
 LLM はモック。SAIMemory は temp DB (test_core_memory_section と同じ Embedder patch)。
@@ -123,6 +128,22 @@ class FakeLLMClient:
         return self._usage
 
 
+class ResponseLimitedFakeLLMClient(FakeLLMClient):
+    """送る応答の上限を答えるフェイク (LLMClient.response_token_limit の模擬)。
+
+    Anthropic や OpenAI 互換のように、per-call の max_output_tokens を無視して
+    自分の上限を送るクライアントの形 (docs/issues/sluice_skip_ignores_model_context.md
+    「レビューの裁定」第一巡の 1)。
+    """
+
+    def __init__(self, result, response_limit, usage=None):
+        super().__init__(result, usage=usage)
+        self.response_limit = response_limit
+
+    def response_token_limit(self):
+        return self.response_limit
+
+
 class FakeRuntime:
     """run_sluice が触る SEARuntime の最小フェイク。
 
@@ -206,6 +227,11 @@ class FakeRuntime:
                           needs_structured_output=False, state=None):
         model = execution_context.model_key if execution_context is not None else "fake-model"
         return self.client, model
+
+    def resolve_llm_model(self, persona, execution_context=None,
+                          needs_structured_output=False, state=None):
+        """接続を作らないモデルの決定 (sea/runtime.py の同名メソッドの模擬)。"""
+        return execution_context.model_key if execution_context is not None else "fake-model"
 
     def _default_temperature(self, persona):
         return 0.7
@@ -2720,6 +2746,1197 @@ class MetabolismColdSkipTest(_AdapterTestBase):
             "failed",
         )
         self.assertFalse(lifecycle2._metabolism_rate_limit_active("tester"))
+
+    # -- 送る中身がモデルに入らないときの飛ばし ------------------------------
+    # docs/issues/sluice_skip_ignores_model_context.md: 字数の判定 (マーカーから
+    # 末尾まで) は入ると答えても、スルースが実際に送る中身 (そのモデルの会話の
+    # 範囲まるごと + 指示文) がモデルに入らない回は、量による飛ばしと同じ扱いに
+    # する。
+
+    def _patch_persona_model_context(self, context_length):
+        """ペルソナのモデル (claude-x) にコンテキスト長を持たせる。"""
+        from saiverse import model_configs
+
+        patcher = patch.dict(model_configs.MODEL_CONFIGS, {
+            "claude-x": {
+                "model": "claude-x", "context_length": context_length,
+                "provider": "openai",
+            },
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _full_window_runtime_lifecycle(self, client, base):
+        """スルースの組み立てが窓の会話をまるごと載せる形 (実物の _prepare_context と同じ)。"""
+        from sea.session_lifecycle import SessionLifecycle
+
+        context = [{"role": "system", "content": "HEAD"}] + [
+            {"role": "user", "content": m["content"], "id": m["id"]} for m in base
+        ]
+        runtime = FakeRuntime(client, context_messages=context)
+        lifecycle = SessionLifecycle(runtime, self.manager)
+        lifecycle.ensure_recall_embeddings = lambda p: None
+        lifecycle._attach_chronicle_refs = _stub_chronicle_refs
+        lifecycle.is_chronicle_enabled_for_persona = lambda p: False
+        anchor_updates = []
+        lifecycle.update_anchor_for_model = (
+            lambda p, m, aid, ttl=None: anchor_updates.append((m, aid))
+        )
+        return lifecycle, anchor_updates
+
+    def test_input_over_model_context_skips_sluice_evicts_and_records(self):
+        """字数の判定は通る (5,000 字 < 100,000 字) が、送る中身が 6,000 トークンの
+        モデルに入らない: LLM は呼ばれず、skipped_cold と同じく範囲を記録して
+        畳みが進み、レート制限の小休止は置かれない。"""
+        from unittest.mock import MagicMock
+
+        self._patch_persona_model_context(6_000)
+        base = _metabolism_messages()  # m0..m4 (各 1,000 字) — 退場計画は m0..m2
+        client = FakeLLMClient(RuntimeError("must not be called"))
+        lifecycle, anchors = self._full_window_runtime_lifecycle(client, base)
+        noter = MagicMock()
+        lifecycle._note_metabolism_rate_limit = noter
+        with self.assertLogs("sea.session_lifecycle", level="WARNING") as logs:
+            ret = self._run_metabolism(lifecycle, self._persona(base), base)
+        self.assertEqual(ret, "ok")
+        self.assertEqual(client.calls, [])   # スルースの LLM は呼ばれない
+        self.assertTrue(anchors)             # 畳み (anchor 前進) は進む
+        self.assertEqual(self._skipped_spans(), [("m0", "m2")])
+        noter.assert_not_called()            # レート制限ではない
+        # 既存の量による飛ばしと区別できるログ (モデル名・見積もり・上限)。
+        joined = "\n".join(logs.output)
+        self.assertIn("does not fit the model context", joined)
+        self.assertIn("model=claude-x", joined)
+        self.assertIn("limit=1304", joined)  # 6,000 × 0.9 − 4,096
+        self.assertNotIn("skipped cold (persona=", joined)
+
+    def test_input_over_model_context_with_marker_past_folds_records_nothing(self):
+        """印が畳みの対象より後ろ (畳まれる古い側は読み終えている) なら、記録は
+        書かずに畳みが進む — 既存の飛ばしと同じ規則。"""
+        self._patch_persona_model_context(6_000)
+        base = _metabolism_messages()
+        persona = self._persona(base)
+        sluice._save_pan_marker(persona, "m3")  # 畳みの対象は m0..m2
+        client = FakeLLMClient(RuntimeError("must not be called"))
+        lifecycle, anchors = self._full_window_runtime_lifecycle(client, base)
+        ret = self._run_metabolism(lifecycle, persona, base)
+        self.assertEqual(ret, "ok")
+        self.assertEqual(client.calls, [])
+        self.assertTrue(anchors)
+        self.assertEqual(self._skipped_spans(), [])
+
+    def test_input_within_model_context_runs_sluice_normally(self):
+        """同じ窓でもモデルに入るなら、従来どおりスルースが走る。"""
+        self._patch_persona_model_context(1_000_000)
+        base = _metabolism_messages()
+        client = FakeLLMClient(_sluice_result())
+        lifecycle, anchors = self._full_window_runtime_lifecycle(client, base)
+        ret = self._run_metabolism(lifecycle, self._persona(base), base)
+        self.assertEqual(ret, "ok")
+        self.assertEqual(len(client.calls), 1)
+        self.assertTrue(anchors)
+        self.assertEqual(self._skipped_spans(), [])
+
+
+class SluiceInputEstimateTest(unittest.TestCase):
+    """送る中身の見積もりと上限 (docs/issues/sluice_skip_ignores_model_context.md 設計 1)。
+
+    画像は LLM クライアントが実際に送る形で数える — 埋め込むのは直近の上限枚数
+    (モデル設定 → provider の環境変数 → 既定 4) と、上限に数えない
+    ``__visual_context__`` の画像。埋め込まない画像は、クライアントが注記
+    (``[画像: URI] 要約``) に置き換えるなら注記として数える。音声・動画も、
+    注記に置き換えるクライアントでは注記として数える (レビュー第一巡の 3)。
+
+    メディアの項目はクライアントと同じ saiverse.media_utils の iter_*_media で
+    集める (実在しないファイルの項目は落ちる) ので、テストのメディアは一時
+    フォルダに実在するファイルで作る。注記の要約は、保存済みの要約があれば
+    その字数、無ければ 300 字で数える (レビュー第二巡の 2)。
+    """
+
+    #: 画像に対応する OpenAI 互換のモデル (上限は環境変数 → 既定 4)。
+    VISION = "estimate-openai-vision"
+    #: 画像に対応しない OpenAI 互換のモデル。
+    TEXT_ONLY = "estimate-openai-text"
+    #: モデル設定で埋め込みの上限を 2 枚にした OpenAI 互換のモデル。
+    CONFIGURED = "estimate-openai-configured"
+
+    #: 画像 1 枚の見積もり (saiverse.token_estimator.estimate_image_tokens)。
+    OPENAI_IMAGE = 765
+
+    #: 注記 1 件の見積もりのうち URI 以外の分 (保存済みの要約が無いとき): 書式の
+    #: 固定部分 16 + 要約 300 字 (saiverse/media_summary.py の「300文字以内」)。
+    NOTE_FIXED = 16 + 300
+
+    @classmethod
+    def _notes(cls, uris):
+        """URI の列ぶんの注記の見積もりの合計 (保存済みの要約が無いとき)。"""
+        return sum(cls.NOTE_FIXED + len(uri) for uri in uris)
+
+    def _file(self, name):
+        """一時フォルダに実在するメディアのファイルを作り、その場所 (文字列) を返す。
+
+        項目に ``uri`` を書かず ``path`` だけを書くと、クライアントが注記に載せる
+        URI はこの文字列になる (iter_*_media の ``uri or str(path)``)。
+        """
+        path = self.media_dir / name
+        if not path.exists():
+            path.write_bytes(b"\x89PNG\r\n\x1a\n")
+        return str(path)
+
+    def _uri(self, i):
+        """:meth:`_image_messages` の i 番目の画像の、注記に載る URI。"""
+        return self._file(f"{i}.png")
+
+    def setUp(self):
+        super().setUp()
+        # 実行環境の .env が上限を変えていても、既定 4 から始める。
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for key in list(os.environ):
+            if key.startswith("SAIVERSE_") and key.endswith("ATTACHMENT_LIMIT"):
+                os.environ.pop(key)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.media_dir = Path(tmp.name) / "media"
+        self.media_dir.mkdir()
+        # saiverse:// の URI の置き場 (resolve_media_uri がフォルダを作る) も一時
+        # フォルダに向け、本番の ~/.saiverse に触れない。
+        os.environ["SAIVERSE_HOME"] = str(Path(tmp.name) / "home")
+        self._patch_models({
+            self.VISION: {
+                "model": self.VISION, "context_length": 128_000,
+                "provider": "openai", "supports_images": True,
+            },
+            self.TEXT_ONLY: {
+                "model": self.TEXT_ONLY, "context_length": 128_000,
+                "provider": "openai", "supports_images": False,
+            },
+            self.CONFIGURED: {
+                "model": self.CONFIGURED, "context_length": 128_000,
+                "provider": "openai", "supports_images": True,
+                "max_image_embeds": 2,
+            },
+        })
+
+    def _patch_models(self, configs):
+        from saiverse import model_configs
+
+        patcher = patch.dict(model_configs.MODEL_CONFIGS, configs)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _image_messages(self, count, *, visual_context=False):
+        """画像を 1 枚ずつ付けた、本文の無いメッセージ ``count`` 通。"""
+        messages = []
+        for i in range(count):
+            metadata = {"media": [{"type": "image", "path": self._uri(i)}]}
+            if visual_context:
+                metadata["__visual_context__"] = True
+            messages.append({"role": "user", "content": "", "metadata": metadata})
+        return messages
+
+    def test_string_content_counts_one_token_per_char_plus_four(self):
+        messages = [
+            {"role": "system", "content": "あいう"},
+            {"role": "user", "content": "abcde"},
+        ]
+        self.assertEqual(
+            sluice._estimate_input_tokens(messages, self.VISION), (3 + 4) + (5 + 4),
+        )
+
+    def test_part_list_counts_text_parts_and_image_parts(self):
+        """組み立て済みの画像部品は上限にも画像対応の設定にも関係なく全部数える
+        (OpenAI 互換のクライアントはそのまま送る)。"""
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "こんにちは"},
+                {"type": "image_url", "image_url": {"url": "data:..."}},
+                {"type": "image", "source": {}},
+                "xy",
+            ],
+        }]
+        # テキスト 5 + 文字列部品 2 + 画像 2 枚 × 765 (openai) + 1 通の 4
+        expected = 5 + 2 + self.OPENAI_IMAGE * 2 + 4
+        self.assertEqual(sluice._estimate_input_tokens(messages, self.VISION), expected)
+        self.assertEqual(
+            sluice._estimate_input_tokens(messages, self.TEXT_ONLY), expected,
+        )
+
+    def test_metadata_images_follow_the_client_selection(self):
+        """画像の選び方は saiverse.media_utils.iter_image_media と同じ: media の
+        type が image のもの (type が無ければ mime_type が image/)、media が無ければ
+        旧形式の images。音声 (b / d) は画像に数えず、OpenAI 互換のクライアントが
+        足す音声の注記として数える。"""
+        a, b, c, d, e = (self._file(name) for name in ("a", "b", "c", "d", "e"))
+        messages = [
+            {"role": "user", "content": "見て", "metadata": {"media": [
+                {"type": "image", "path": a},
+                {"type": "audio", "path": b, "mime_type": "image/png"},
+                {"path": c, "mime_type": "image/png"},
+                {"path": d, "mime_type": "audio/wav"},
+            ]}},
+            {"role": "user", "content": "", "metadata": {"images": [{"path": e}]}},
+        ]
+        # 文字 2 + 画像 3 枚 (a / c / e) × 765 + 音声の注記 2 件 + 2 通の 4
+        self.assertEqual(
+            sluice._estimate_input_tokens(messages, self.VISION),
+            2 + self.OPENAI_IMAGE * 3 + self._notes([b, d]) + 4 * 2,
+        )
+
+    def test_images_over_the_embed_limit_are_counted_as_notes(self):
+        """上限 (既定 4) を超える古い画像は、埋め込みではなく注記として数える。
+        1 通に複数付いていても合計で数える (先頭の画像から枠に入る)。"""
+        many = self._image_messages(100)
+        self.assertEqual(
+            sluice._estimate_input_tokens(many, self.VISION),
+            self.OPENAI_IMAGE * 4
+            + self._notes(self._uri(i) for i in range(96))
+            + 4 * 100,
+        )
+        one_message = [{"role": "user", "content": "", "metadata": {"media": [
+            {"type": "image", "path": self._file(f"u{i}")} for i in range(6)
+        ]}}]
+        self.assertEqual(
+            sluice._estimate_input_tokens(one_message, self.VISION),
+            self.OPENAI_IMAGE * 4 + self._notes([self._file("u4"), self._file("u5")]) + 4,
+        )
+        # 上限以下なら全部を埋め込みとして数え、注記は無い。
+        self.assertEqual(
+            sluice._estimate_input_tokens(self._image_messages(3), self.VISION),
+            self.OPENAI_IMAGE * 3 + 4 * 3,
+        )
+
+    def test_visual_context_images_are_counted_regardless_of_the_limit(self):
+        messages = (
+            self._image_messages(10)
+            + self._image_messages(3, visual_context=True)
+        )
+        # 上限に数える側は新しい 4 枚 (6〜9) を埋め込み、古い 6 枚 (0〜5) は注記。
+        # 部屋の様子の 3 枚は枠を使わず全部埋め込み。
+        self.assertEqual(
+            sluice._estimate_input_tokens(messages, self.VISION),
+            self.OPENAI_IMAGE * (4 + 3)
+            + self._notes(self._uri(i) for i in range(6))
+            + 4 * 13,
+        )
+        # 部屋の様子だけなら、上限を超える枚数でも全部。
+        visual_only = self._image_messages(6, visual_context=True)
+        self.assertEqual(
+            sluice._estimate_input_tokens(visual_only, self.VISION),
+            self.OPENAI_IMAGE * 6 + 4 * 6,
+        )
+
+    def test_model_without_image_support_counts_notes_instead_of_images(self):
+        """画像非対応のモデルでは、OpenAI 互換のクライアントは全部の画像
+        (部屋の様子を含む) を注記に置き換える。"""
+        messages = (
+            self._image_messages(10)
+            + self._image_messages(2, visual_context=True)
+        )
+        self.assertEqual(
+            sluice._estimate_input_tokens(messages, self.TEXT_ONLY),
+            self._notes(self._uri(i) for i in range(10))
+            + self._notes(self._uri(i) for i in range(2))
+            + 4 * 12,
+        )
+
+    def test_model_config_max_image_embeds_wins_over_the_env(self):
+        messages = self._image_messages(10)
+        with patch.dict(os.environ, {
+            "SAIVERSE_OPENAI_ATTACHMENT_LIMIT": "6",
+            "SAIVERSE_ATTACHMENT_LIMIT": "8",
+        }):
+            self.assertEqual(
+                sluice._estimate_input_tokens(messages, self.CONFIGURED),
+                self.OPENAI_IMAGE * 2
+                + self._notes(self._uri(i) for i in range(8))
+                + 4 * 10,
+            )
+            # 設定の無いモデルは環境変数に従う (provider の名前つきが優先)。
+            self.assertEqual(
+                sluice._estimate_input_tokens(messages, self.VISION),
+                self.OPENAI_IMAGE * 6
+                + self._notes(self._uri(i) for i in range(4))
+                + 4 * 10,
+            )
+
+    def test_env_limit_changes_the_count(self):
+        messages = self._image_messages(10)
+        with patch.dict(os.environ, {"SAIVERSE_OPENAI_ATTACHMENT_LIMIT": "7"}):
+            self.assertEqual(
+                sluice._estimate_input_tokens(messages, self.VISION),
+                self.OPENAI_IMAGE * 7
+                + self._notes(self._uri(i) for i in range(3))
+                + 4 * 10,
+            )
+        with patch.dict(os.environ, {"SAIVERSE_ATTACHMENT_LIMIT": "1"}):
+            self.assertEqual(
+                sluice._estimate_input_tokens(messages, self.VISION),
+                self.OPENAI_IMAGE * 1
+                + self._notes(self._uri(i) for i in range(9))
+                + 4 * 10,
+            )
+        with patch.dict(os.environ, {"SAIVERSE_OPENAI_ATTACHMENT_LIMIT": "0"}):
+            self.assertEqual(
+                sluice._estimate_input_tokens(messages, self.VISION),
+                self._notes(self._uri(i) for i in range(10)) + 4 * 10,
+            )
+
+    def test_note_uri_and_missing_files_follow_the_client(self):
+        """注記の URI はクライアントが載せるもの (元の uri、無ければファイルの場所)。
+
+        ファイルが実在しない項目は、クライアントと同じく埋め込みにも注記にも
+        ならず、枠も使わない (saiverse.media_utils.iter_image_media が落とす)。
+        """
+        existing = self._file("y.png")
+        uri = "saiverse://image/not-in-the-home.png"
+        messages = [{"role": "user", "content": "", "metadata": {"media": [
+            # uri の置き場に無くても path が実在すれば送られ、注記は元の uri。
+            {"type": "image", "uri": uri, "path": existing},
+            {"type": "image", "path": existing},
+            {"type": "image", "path": str(self.media_dir / "missing.png")},
+            {"type": "image"},
+        ]}}]
+        with patch.dict(os.environ, {"SAIVERSE_OPENAI_ATTACHMENT_LIMIT": "0"}):
+            self.assertEqual(
+                sluice._estimate_input_tokens(messages, self.VISION),
+                self._notes([uri, existing]) + 4,
+            )
+        # 上限 1 枚: 新しい方の画像のファイルが無ければ枠を使わず、古い方が埋め込まれる。
+        slot_messages = [
+            {"role": "user", "content": "", "metadata": {"media": [
+                {"type": "image", "path": existing}]}},
+            {"role": "user", "content": "", "metadata": {"media": [
+                {"type": "image", "path": str(self.media_dir / "missing.png")}]}},
+        ]
+        with patch.dict(os.environ, {"SAIVERSE_OPENAI_ATTACHMENT_LIMIT": "1"}):
+            self.assertEqual(
+                sluice._estimate_input_tokens(slot_messages, self.VISION),
+                self.OPENAI_IMAGE + 4 * 2,
+            )
+
+    def test_note_counts_the_saved_summary_length_and_never_generates_one(self):
+        """注記の要約は、保存済みの要約 (get_media_summary) があればその字数で数える。
+        300 字より長くても短くても実際の字数。無ければ 300 字。要約は生成しない
+        (レビュー第二巡の 2)。"""
+        from saiverse.media_utils import save_media_summary
+
+        long_image = self._file("long.png")
+        short_image = self._file("short.png")
+        unsaved_image = self._file("unsaved.png")
+        voice = self._file("voice.ogg")
+        clip = self._file("clip.mp4")
+        save_media_summary(Path(long_image), "長" * 450)
+        save_media_summary(Path(short_image), "短" * 120)
+        save_media_summary(Path(voice), "声" * 700)
+        save_media_summary(Path(clip), "映" * 310)
+        messages = [{"role": "user", "content": "", "metadata": {"media": [
+            {"type": "image", "path": long_image},
+            {"type": "image", "path": short_image},
+            {"type": "image", "path": unsaved_image},
+            {"type": "audio", "path": voice},
+            {"type": "video", "path": clip},
+        ]}}]
+        must_not_run = AssertionError("the estimate must not generate a summary")
+        with patch.dict(os.environ, {"SAIVERSE_OPENAI_ATTACHMENT_LIMIT": "0"}), \
+                patch("saiverse.media_summary.ensure_image_summary", side_effect=must_not_run) as ensure_image, \
+                patch("saiverse.media_summary.ensure_audio_summary", side_effect=must_not_run) as ensure_audio, \
+                patch("saiverse.media_summary.ensure_video_summary", side_effect=must_not_run) as ensure_video, \
+                patch("saiverse.media_summary._generate_image_summary", side_effect=must_not_run) as gen_image, \
+                patch("saiverse.media_summary._generate_audio_summary", side_effect=must_not_run) as gen_audio, \
+                patch("saiverse.media_summary._generate_video_summary", side_effect=must_not_run) as gen_video:
+            estimate = sluice._estimate_input_tokens(messages, self.VISION)
+        self.assertEqual(
+            estimate,
+            (16 + len(long_image) + 450)
+            + (16 + len(short_image) + 120)
+            + (16 + len(unsaved_image) + 300)
+            + (16 + len(voice) + 700)
+            + (16 + len(clip) + 310)
+            + 4,
+        )
+        for mock in (ensure_image, ensure_audio, ensure_video, gen_image, gen_audio, gen_video):
+            mock.assert_not_called()
+
+    def test_embed_limit_follows_each_client(self):
+        """クライアントごとの違い (llm_clients/ のコードで確かめた対応) を固定する。
+
+        10 通の user の画像を、上限の枚数だけ埋め込みとして数え、残りは注記に
+        置き換えるクライアントでは注記として数える。
+        """
+        from saiverse.token_estimator import estimate_image_tokens
+
+        self._patch_models({
+            # gemini: 設定の supports_images が無くても画像を送る (factory の既定)。
+            # 設定の max_image_embeds は読まず、GEMINI の環境変数に従う。
+            "est-gemini": {
+                "model": "est-gemini", "provider": "gemini", "max_image_embeds": 1,
+            },
+            # anthropic: 設定の max_image_embeds をそのまま使う (0 も含む)。
+            "est-anthropic-1": {
+                "model": "est-anthropic-1", "provider": "anthropic",
+                "supports_images": True, "max_image_embeds": 1,
+            },
+            "est-anthropic-0": {
+                "model": "est-anthropic-0", "provider": "anthropic",
+                "supports_images": True, "max_image_embeds": 0,
+            },
+            "est-anthropic-env": {
+                "model": "est-anthropic-env", "provider": "anthropic",
+                "supports_images": True,
+            },
+            # openai 互換: 設定の 0 は factory が渡さないので環境変数に従う。
+            "est-openai-zero": {
+                "model": "est-openai-zero", "provider": "openai",
+                "supports_images": True, "max_image_embeds": 0,
+            },
+            # NIM: openai 互換と同じ (正の整数の設定は環境変数より優先、0 は渡さない)。
+            "est-nim": {
+                "model": "est-nim", "provider": "nvidia_nim",
+                "supports_images": True, "max_image_embeds": 1,
+            },
+            "est-nim-zero": {
+                "model": "est-nim-zero", "provider": "nvidia_nim",
+                "supports_images": True, "max_image_embeds": 0,
+            },
+            # Codex: factory が max_image_embeds を渡さない。
+            "est-codex": {
+                "model": "est-codex", "provider": "openai_codex",
+                "supports_images": True, "max_image_embeds": 1,
+            },
+            # xAI: 設定の max_image_embeds は読まず、XAI の環境変数に従う。
+            "est-xai": {
+                "model": "est-xai", "provider": "xai",
+                "supports_images": True, "max_image_embeds": 1,
+            },
+            # ollama: 画像を送らない。
+            "est-ollama": {
+                "model": "est-ollama", "provider": "ollama", "supports_images": True,
+            },
+            # protocol が明示されていれば provider より protocol で選ぶ (factory と同じ)。
+            "est-protocol": {
+                "model": "est-protocol", "provider": "openai",
+                "protocol": "ollama_compat", "supports_images": True,
+            },
+        })
+        messages = self._image_messages(10)
+        env = {
+            "SAIVERSE_GEMINI_ATTACHMENT_LIMIT": "3",
+            "SAIVERSE_ANTHROPIC_ATTACHMENT_LIMIT": "5",
+            "SAIVERSE_XAI_ATTACHMENT_LIMIT": "2",
+        }
+        # (埋め込む枚数, 画像 1 枚の provider, 残りを注記にするか)
+        expected = {
+            "est-gemini": (3, "gemini", True),
+            "est-anthropic-1": (1, "anthropic", True),
+            "est-anthropic-0": (0, "anthropic", True),
+            "est-anthropic-env": (5, "anthropic", True),
+            "est-openai-zero": (4, "openai", True),
+            "est-nim": (1, "nvidia_nim", True),
+            "est-nim-zero": (4, "nvidia_nim", True),
+            "est-codex": (4, "openai_codex", True),
+            "est-xai": (2, "xai", True),
+            "est-ollama": (0, "ollama", False),
+            "est-protocol": (0, "openai", False),
+        }
+        with patch.dict(os.environ, env):
+            for model, (images, provider, notes) in expected.items():
+                with self.subTest(model=model):
+                    noted = (
+                        self._notes(self._uri(i) for i in range(10 - images))
+                        if notes else 0
+                    )
+                    self.assertEqual(
+                        sluice._estimate_input_tokens(messages, model),
+                        estimate_image_tokens(provider) * images + noted + 4 * 10,
+                    )
+
+    def test_openai_compatible_and_nim_clients_embed_what_the_estimate_counts(self):
+        """OpenAI 互換と NIM のクライアントは、見積もりが数える枚数だけ実際に埋め込む。
+
+        上の表 (:func:`sluice._media_rules`) はクライアントのコードを読んで書き写した
+        もので、クライアントの側が変わっても表のテストは落ちない。NIM が設定の
+        ``max_image_embeds`` を受け取れるようになったとき、表は「受け取れない」
+        前提のまま残りかけた。ここでは factory が作る本物のクライアントに組み立て
+        させ、埋め込まれた枚数を見積もりの上限と突き合わせる。
+        """
+        from llm_clients.factory import get_llm_client
+
+        configs = {
+            "match-openai-configured": ("openai", 2),
+            "match-openai-zero": ("openai", 0),
+            "match-openai-env": ("openai", None),
+            "match-nim-configured": ("nvidia_nim", 2),
+            "match-nim-zero": ("nvidia_nim", 0),
+            "match-nim-env": ("nvidia_nim", None),
+        }
+        models = {}
+        for key, (provider, limit) in configs.items():
+            config = {
+                "model": key, "provider": provider,
+                "context_length": 128_000, "supports_images": True,
+            }
+            if limit is not None:
+                config["max_image_embeds"] = limit
+            models[key] = config
+        self._patch_models(models)
+        os.environ["OPENAI_API_KEY"] = "test-openai-key"
+        # 設定の 2 と区別できるよう、環境変数の上限は 3 にする。
+        os.environ["SAIVERSE_OPENAI_ATTACHMENT_LIMIT"] = "3"
+        # 本文の無い user のメッセージはクライアントが丸ごと落とすので、本文を付ける。
+        messages = [
+            {
+                "role": "user", "content": f"message {i}",
+                "metadata": {"media": [{"type": "image", "path": self._uri(i)}]},
+            }
+            for i in range(10)
+        ]
+
+        # 埋め込まれない画像の注記で、要約の LLM を呼ばない。
+        with patch("saiverse.media_summary._generate_image_summary", return_value=None):
+            for key, (provider, _) in configs.items():
+                with self.subTest(model=key):
+                    client = get_llm_client(key, provider, 128_000)
+                    embedded = sum(
+                        1
+                        for message in client._prepare_messages(messages)
+                        if isinstance(message["content"], list)
+                        for part in message["content"]
+                        if part["type"] == "image_url"
+                    )
+                    expected = sluice._media_rules(key).image_limit
+                    self.assertEqual(embedded, expected)
+                    self.assertEqual(expected, 2 if key.endswith("-configured") else 3)
+
+    def _role_models(self):
+        """役割の扱いを比べるためのクライアントごとのモデル (上限は十分に大きい)。"""
+        self._patch_models({
+            "role-anthropic": {
+                "model": "role-anthropic", "provider": "anthropic",
+                "supports_images": True,
+            },
+            "role-anthropic-text": {
+                "model": "role-anthropic-text", "provider": "anthropic",
+                "supports_images": False,
+            },
+            "role-gemini": {"model": "role-gemini", "provider": "gemini"},
+            "role-gemini-text": {
+                "model": "role-gemini-text", "provider": "gemini",
+                "supports_images": False,
+            },
+            "role-xai": {
+                "model": "role-xai", "provider": "xai", "supports_images": True,
+            },
+            "role-xai-text": {
+                "model": "role-xai-text", "provider": "xai", "supports_images": False,
+            },
+        })
+
+    def test_which_roles_embed_or_note_images_follows_each_client(self):
+        """user 以外のメッセージの画像の扱い (クライアントのコードで確かめた対応)。
+
+        - OpenAI 互換: user だけを埋め込み、assistant と system は注記。
+        - Anthropic: user だけを埋め込み、assistant は注記、system は送らない。
+          画像非対応なら user も注記。
+        - Gemini: 役割によらず埋め込み、system は送らない。画像非対応なら
+          画像も注記も送らない。
+        - xAI: user だけを埋め込み、ほかは送らない。画像非対応なら何も送らない。
+        """
+        from saiverse.token_estimator import estimate_image_tokens
+
+        self._role_models()
+        sys_, asst, usr = (self._file(name) for name in ("sys", "asst", "usr"))
+        messages = [
+            {"role": "system", "content": "", "metadata": {"media": [
+                {"type": "image", "path": sys_}]}},
+            {"role": "assistant", "content": "", "metadata": {"media": [
+                {"type": "image", "path": asst}]}},
+            {"role": "user", "content": "", "metadata": {"media": [
+                {"type": "image", "path": usr}]}},
+        ]
+        base = 4 * 3
+        cases = {
+            self.VISION: estimate_image_tokens("openai") + self._notes([asst, sys_]),
+            self.TEXT_ONLY: self._notes([usr, asst, sys_]),
+            "role-anthropic": (
+                estimate_image_tokens("anthropic") + self._notes([asst])
+            ),
+            "role-anthropic-text": self._notes([usr, asst]),
+            "role-gemini": estimate_image_tokens("gemini") * 2,
+            "role-gemini-text": 0,
+            "role-xai": estimate_image_tokens("xai"),
+            "role-xai-text": 0,
+        }
+        with patch.dict(os.environ, {"SAIVERSE_ATTACHMENT_LIMIT": "10"}):
+            for model, media in cases.items():
+                with self.subTest(model=model):
+                    self.assertEqual(
+                        sluice._estimate_input_tokens(messages, model), base + media,
+                    )
+
+    def test_which_roles_use_the_embed_limit_follows_each_client(self):
+        """上限の枠を使う役割: Anthropic は system を先に抜くので system の画像は
+        枠を使わない。Gemini と OpenAI 互換は system の画像も枠を使う。
+
+        上限 1 枚、古い user の画像と新しい system の画像。
+        """
+        from saiverse.token_estimator import estimate_image_tokens
+
+        self._role_models()
+        old_user, new_sys = self._file("old-user"), self._file("new-sys")
+        messages = [
+            {"role": "user", "content": "", "metadata": {"media": [
+                {"type": "image", "path": old_user}]}},
+            {"role": "system", "content": "", "metadata": {"media": [
+                {"type": "image", "path": new_sys}]}},
+        ]
+        cases = {
+            # system は枠を使わず送らない → 古い user が枠に入って埋め込み。
+            "role-anthropic": estimate_image_tokens("anthropic"),
+            # system が枠を使って送られない → 古い user は枠の外で注記。
+            "role-gemini": self._notes([old_user]),
+            # system が枠を使って注記 → 古い user も枠の外で注記。
+            self.VISION: self._notes([old_user, new_sys]),
+        }
+        with patch.dict(os.environ, {"SAIVERSE_ATTACHMENT_LIMIT": "1"}):
+            for model, media in cases.items():
+                with self.subTest(model=model):
+                    self.assertEqual(
+                        sluice._estimate_input_tokens(messages, model), 4 * 2 + media,
+                    )
+
+    def test_audio_and_video_notes_follow_each_client(self):
+        """音声・動画は、対応しないクライアントが注記に置き換える。
+
+        Gemini 以外は基底の _inject_unsupported_media_summaries が全役割で注記に
+        する。Gemini は設定の supports_audio / supports_video が偽なら system 以外で
+        注記にし、真なら埋め込む (その量はここでは数えない)。Ollama も音声・動画は
+        注記になる。旧形式の images の列は画像だけで、音声は media の列からだけ拾う。
+        """
+        from saiverse.token_estimator import estimate_image_tokens
+
+        self._patch_models({
+            "media-gemini": {"model": "media-gemini", "provider": "gemini"},
+            "media-gemini-audio": {
+                "model": "media-gemini-audio", "provider": "gemini",
+                "supports_audio": True,
+            },
+            "media-ollama": {"model": "media-ollama", "provider": "ollama"},
+        })
+        sys_a, sys_v, usr_a, usr_v, legacy = (
+            self._file(name) for name in ("sys-a", "sys-v", "usr-a", "usr-v", "legacy")
+        )
+        messages = [
+            {"role": "system", "content": "", "metadata": {"media": [
+                {"type": "audio", "path": sys_a},
+                {"type": "video", "path": sys_v},
+            ]}},
+            {"role": "user", "content": "", "metadata": {"media": [
+                {"type": "audio", "path": usr_a},
+                {"mime_type": "video/mp4", "path": usr_v},
+            ]}},
+            {"role": "user", "content": "", "metadata": {"images": [
+                {"type": "audio", "path": legacy},
+            ]}},
+        ]
+        base = 4 * 3
+        all_notes = self._notes([sys_a, sys_v, usr_a, usr_v])
+        cases = {
+            self.VISION: all_notes,
+            "media-ollama": all_notes,
+            "media-gemini": self._notes([usr_a, usr_v]),
+            "media-gemini-audio": self._notes([usr_v]),
+        }
+        # 旧形式の images の項目は type が audio でも画像として数える。画像を送らない
+        # Ollama では 0、枠に入る Gemini・OpenAI 互換では埋め込み 1 枚。
+        legacy_image = {
+            self.VISION: self.OPENAI_IMAGE,
+            "media-ollama": 0,
+            "media-gemini": estimate_image_tokens("gemini"),
+            "media-gemini-audio": estimate_image_tokens("gemini"),
+        }
+        for model, media in cases.items():
+            with self.subTest(model=model):
+                self.assertEqual(
+                    sluice._estimate_input_tokens(messages, model),
+                    base + media + legacy_image[model],
+                )
+
+    def test_counts_match_what_the_openai_preparer_sends(self):
+        """実物の OpenAI 互換の組み立て (openai_message_preparer と、基底の音声の
+        注記) が送る画像の枚数と注記の件数が、見積もりと一致する (実在するファイルで)。
+
+        assistant の画像は枠を使ったうえで注記になる。注記の要約は保存済みの要約
+        (300 字より長いもの・短いものを混ぜる) を実物もそのまま載せ、見積もりの
+        注記はその字数で数えて、実物の注記より短くない。ファイルが無い画像は
+        実物でも見積もりでも枠を使わず、送られない。
+        """
+        from llm_clients.base import LLMClient
+        from llm_clients.openai_message_preparer import (
+            prepare_openai_messages,
+            scan_message_metadata,
+        )
+        from saiverse.media_utils import save_media_summary
+
+        tmp = self.media_dir
+        summaries = {}
+
+        def media_message(name, *, role="user", kind="image", visual_context=False,
+                          summary_chars=None, missing=False):
+            suffix = "png" if kind == "image" else "ogg"
+            path = Path(tmp) / f"{name}.{suffix}"
+            if not missing:
+                path.write_bytes(b"\x89PNG\r\n\x1a\n" if kind == "image" else b"OggS")
+            if summary_chars is not None:
+                summaries[str(path)] = "要" * summary_chars
+                save_media_summary(path, summaries[str(path)])
+            metadata = {"media": [{"type": kind, "path": str(path)}]}
+            if visual_context:
+                metadata["__visual_context__"] = True
+            return {"role": role, "content": f"本文{name}", "metadata": metadata}
+
+        lengths = [450, 120, 300, 999, 1, 301, 280, 600, 50]
+        messages = [
+            media_message(f"old{i}", summary_chars=lengths[i]) for i in range(9)
+        ]
+        messages.append(media_message("asst", role="assistant", summary_chars=360))
+        messages.append(media_message("room", visual_context=True))
+        messages += [media_message(f"new{i}") for i in range(3)]
+        messages.append(media_message("gone", missing=True))
+        messages.append(media_message("voice", kind="audio", summary_chars=510))
+
+        _, _, _, allowed = scan_message_metadata(messages)
+        self.assertEqual(len(allowed), 4 + 1)  # 新しい 3 枚 + assistant + 部屋
+
+        must_not_run = AssertionError("saved summaries must be used as they are")
+        with patch("saiverse.media_summary._generate_image_summary", side_effect=must_not_run), \
+                patch("saiverse.media_summary._generate_audio_summary", side_effect=must_not_run):
+            injected = LLMClient()._inject_unsupported_media_summaries(messages)
+            prepared = prepare_openai_messages(injected, supports_images=True)
+
+        sent_images = 0
+        note_texts = []
+        for msg in prepared:
+            content = msg.get("content")
+            parts = content if isinstance(content, list) else [
+                {"type": "text", "text": line} for line in str(content).split("\n")
+            ]
+            for part in parts:
+                if part.get("type") == "image_url":
+                    sent_images += 1
+                elif str(part.get("text", "")).startswith(("[画像:", "[音声:")):
+                    note_texts.append(part["text"])
+        self.assertEqual(sent_images, 4)       # 新しい 3 枚 + 部屋
+        self.assertEqual(len(note_texts), 11)  # 古い 9 枚 + assistant + 音声
+        # 実物の注記は保存済みの要約をそのまま載せている (300 字で切り詰めない)。
+        for path, summary in summaries.items():
+            self.assertTrue(
+                any(text.endswith(f"{path}] {summary}") for text in note_texts), path,
+            )
+
+        bare = [{"role": m["role"], "content": m["content"]} for m in messages]
+        media_estimate = (
+            sluice._estimate_input_tokens(messages, self.VISION)
+            - sluice._estimate_input_tokens(bare, self.VISION)
+        )
+        noted_estimate = sum(
+            16 + len(path) + len(summary) for path, summary in summaries.items()
+        )
+        self.assertEqual(media_estimate, self.OPENAI_IMAGE * sent_images + noted_estimate)
+        self.assertGreaterEqual(noted_estimate, sum(len(text) for text in note_texts))
+
+    def test_limit_is_ninety_percent_of_context_minus_output_budget(self):
+        self._patch_models({
+            "budget-model": {
+                "model": "budget-model", "context_length": 128_000,
+                "provider": "openai",
+            },
+        })
+        limit = sluice._input_token_budget("budget-model")
+        self.assertEqual(limit, int(128_000 * 0.9) - sluice._MAX_OUTPUT_TOKENS)
+
+    def test_ensure_input_fits_raises_only_over_the_limit(self):
+        self._patch_models({
+            "budget-model": {
+                "model": "budget-model", "context_length": 10_000,
+                "provider": "openai",
+            },
+        })
+        limit = int(10_000 * 0.9) - sluice._MAX_OUTPUT_TOKENS  # 4,904
+        at_limit = [{"role": "user", "content": "x" * (limit - 4)}]
+        sluice._ensure_input_fits(at_limit, "budget-model")  # ちょうど上限は通す
+        over = [{"role": "user", "content": "x" * (limit - 3)}]
+        with self.assertRaises(sluice.SluiceInputTooLargeError) as ctx:
+            sluice._ensure_input_fits(over, "budget-model")
+        self.assertEqual(ctx.exception.model, "budget-model")
+        self.assertEqual(ctx.exception.estimated_tokens, limit + 1)
+        self.assertEqual(ctx.exception.limit_tokens, limit)
+
+    def test_unknown_model_skips_the_check_with_a_warning(self):
+        huge = [{"role": "user", "content": "x" * 10_000_000}]
+        with self.assertLogs("sea.sluice", level="WARNING") as logs:
+            self.assertIsNone(sluice._input_token_budget("no-such-model-xyz"))
+            sluice._ensure_input_fits(huge, "no-such-model-xyz")  # 送出しない
+        self.assertTrue(any("no-such-model-xyz" in line for line in logs.output))
+
+    # -- 応答の枠 (レビュー第一巡の 1) ------------------------------------------
+
+    def test_response_reserve_is_the_larger_of_4096_and_the_client_limit(self):
+        self._patch_models({
+            "budget-model": {
+                "model": "budget-model", "context_length": 128_000,
+                "provider": "openai",
+            },
+        })
+        base = int(128_000 * 0.9)
+        cases = [
+            (None, sluice._MAX_OUTPUT_TOKENS),                        # クライアントなし
+            (FakeLLMClient("x"), sluice._MAX_OUTPUT_TOKENS),          # 口を持たない
+            (ResponseLimitedFakeLLMClient("x", None), 4096),          # 上限を送らない
+            (ResponseLimitedFakeLLMClient("x", 1_000), 4096),         # 4,096 より小さい
+            (ResponseLimitedFakeLLMClient("x", 16_000), 16_000),      # 大きい
+        ]
+        for client, reserve in cases:
+            with self.subTest(client=client, reserve=reserve):
+                self.assertEqual(sluice._response_token_reserve(client), reserve)
+                self.assertEqual(
+                    sluice._input_token_budget("budget-model", llm_client=client),
+                    base - reserve,
+                )
+
+    def test_a_larger_client_limit_makes_the_same_input_not_fit(self):
+        """同じ中身でも、クライアントが大きい応答の上限を送るなら入らない判定になる。
+        例外は引いた応答の枠を持ち、文面にも出す。"""
+        self._patch_models({
+            "budget-model": {
+                "model": "budget-model", "context_length": 20_000,
+                "provider": "openai",
+            },
+        })
+        messages = [{"role": "user", "content": "x" * 10_000}]   # 10,004
+        # 上限なし: 18,000 − 4,096 = 13,904 → 入る。
+        sluice._ensure_input_fits(
+            messages, "budget-model",
+            llm_client=ResponseLimitedFakeLLMClient("x", None),
+        )
+        # 上限 8,000 (OpenRouter の GPT-4o の既定): 18,000 − 8,000 = 10,000 → 入らない。
+        with self.assertRaises(sluice.SluiceInputTooLargeError) as ctx:
+            sluice._ensure_input_fits(
+                messages, "budget-model",
+                llm_client=ResponseLimitedFakeLLMClient("x", 8_000),
+            )
+        self.assertEqual(ctx.exception.limit_tokens, 10_000)
+        self.assertEqual(ctx.exception.estimated_tokens, 10_004)
+        self.assertEqual(ctx.exception.response_reserve_tokens, 8_000)
+        self.assertIn("response_reserve=8000", str(ctx.exception))
+
+    # -- 答えの形の指定 (レビュー第一巡の 2) -------------------------------------
+
+    def test_response_schema_characters_are_added(self):
+        import json
+
+        messages = [{"role": "user", "content": "abc"}]
+        base = sluice._estimate_input_tokens(messages, self.VISION)
+        for name, schema in (
+            ("_RESPONSE_SCHEMA", sluice._RESPONSE_SCHEMA),
+            ("_CANDIDATE_SCHEMA", sluice._CANDIDATE_SCHEMA),
+        ):
+            with self.subTest(schema=name):
+                self.assertEqual(
+                    sluice._estimate_input_tokens(
+                        messages, self.VISION, response_schema=schema,
+                    ),
+                    base + len(json.dumps(schema, ensure_ascii=False)),
+                )
+        self._patch_models({
+            "budget-model": {
+                "model": "budget-model", "context_length": 20_000,
+                "provider": "openai",
+            },
+        })
+        # 指定の分だけで上限を越える。
+        fits_without = [{"role": "user", "content": "x" * (13_904 - 4 - 100)}]
+        sluice._ensure_input_fits(fits_without, "budget-model")
+        with self.assertRaises(sluice.SluiceInputTooLargeError):
+            sluice._ensure_input_fits(
+                fits_without, "budget-model", response_schema=sluice._RESPONSE_SCHEMA,
+            )
+
+
+class ClientResponseTokenLimitTest(unittest.TestCase):
+    """実物のクライアントが答える「送る応答の上限」(レビュー第一巡の 1)。
+
+    どれもネットワークに触れない形で作る (SDK のクライアントは作るだけでは
+    通信しない)。値は各クライアントがリクエストに載せる上限と同じ出どころを読む。
+    """
+
+    def setUp(self):
+        super().setUp()
+        env = patch.dict(os.environ, {
+            "CLAUDE_API_KEY": "test-anthropic-key",
+            "OPENAI_API_KEY": "test-openai-key",
+        })
+        env.start()
+        self.addCleanup(env.stop)
+        for key in (
+            "ANTHROPIC_THINKING_TYPE", "ANTHROPIC_THINKING_BUDGET",
+            "ANTHROPIC_THINKING_EFFORT", "ANTHROPIC_MAX_OUTPUT_TOKENS",
+        ):
+            os.environ.pop(key, None)
+
+    def test_the_base_client_answers_none(self):
+        from llm_clients.base import LLMClient
+
+        self.assertIsNone(LLMClient().response_token_limit())
+
+    def test_anthropic_default_adaptive_and_configured(self):
+        from llm_clients.anthropic import AnthropicClient
+        from llm_clients.anthropic_request_builder import build_request_params
+
+        cases = [
+            ({}, 4_096),
+            ({"thinking_type": "adaptive"}, 16_000),
+            ({"thinking_type": "adaptive", "max_output_tokens": 64_000}, 64_000),
+            ({"thinking_budget": 10_000}, 14_096),
+        ]
+        for config, expected in cases:
+            with self.subTest(config=config):
+                client = AnthropicClient("claude-test", config=config)
+                self.assertEqual(client.response_token_limit(), expected)
+                # 答えはリクエストに載る max_tokens と同じ値。
+                params = build_request_params(
+                    messages=[{"role": "user", "content": "hi"}], tools=None,
+                    response_schema=None, temperature=None, enable_cache=False,
+                    cache_ttl="5m", model=client.model, max_tokens=client._max_tokens,
+                    extra_params=client._extra_params,
+                    thinking_config=client._thinking_config,
+                    thinking_effort=client._thinking_effort,
+                    supports_images=False, max_image_bytes=None,
+                )["request_params"]
+                self.assertEqual(params["max_tokens"], expected)
+        # ペルソナの思考の予算で引き上がった上限も答える。
+        client = AnthropicClient("claude-test", config={})
+        client.configure_parameters({"thinking_budget": 20_000})
+        self.assertEqual(client.response_token_limit(), 24_096)
+
+    def test_openai_compatible_answers_what_it_sends(self):
+        from llm_clients.openai import OpenAIClient
+
+        self.assertIsNone(OpenAIClient("gpt-test").response_token_limit())
+
+        client = OpenAIClient("gpt-test")
+        client.configure_parameters({"max_tokens": 8_000})
+        self.assertEqual(client.response_token_limit(), 8_000)
+        req = client._build_request_kwargs(response_schema=None, temperature=None)
+        self.assertEqual(req["max_tokens"], 8_000)
+
+        client = OpenAIClient(
+            "gpt-test", request_kwargs={"max_completion_tokens": 12_000},
+        )
+        self.assertEqual(client.response_token_limit(), 12_000)
+
+        client = OpenAIClient(
+            "gpt-test",
+            request_kwargs={"max_tokens": 2_000, "extra_body": {"max_tokens": 20_000}},
+        )
+        self.assertEqual(client.response_token_limit(), 20_000)
+
+    def test_openai_compatible_via_the_factory_applies_parameter_defaults(self):
+        """factory はモデル設定の parameters の既定値を送るので、答えもそれになる
+        (OpenRouter の GPT-4o は max_tokens の既定 8,000)。"""
+        from llm_clients.factory import get_llm_client
+        from saiverse import model_configs
+
+        config = {
+            "model": "fit-openai-api", "provider": "openai",
+            "context_length": 128_000,
+            "parameters": {"max_tokens": {"type": "int", "default": 8_000}},
+        }
+        with patch.dict(model_configs.MODEL_CONFIGS, {"fit-openai": config}):
+            client = get_llm_client("fit-openai", "openai", 128_000, config)
+        self.assertEqual(client.response_token_limit(), 8_000)
+
+    def test_codex_ollama_and_the_llama_cache_wrapper(self):
+        from llm_clients.base import LLMClient
+        from llm_clients.llama_cache import LlamaCachedClient
+        from llm_clients.ollama import OllamaClient
+        from llm_clients.openai_codex import OpenAICodexClient
+
+        codex = OpenAICodexClient("gpt-codex-test")
+        self.assertIsNone(codex.response_token_limit())
+        codex.configure_parameters({"max_output_tokens": 32_000})
+        self.assertEqual(codex.response_token_limit(), 32_000)
+
+        with patch.object(OllamaClient, "_probe_base", return_value="http://127.0.0.1:1"):
+            ollama = OllamaClient("ollama-test", 32_000, base_url="http://127.0.0.1:1")
+        self.assertIsNone(ollama.response_token_limit())
+        ollama.configure_parameters({"max_tokens": 6_000})  # num_predict へ読み替え
+        self.assertEqual(ollama.response_token_limit(), 6_000)
+        ollama.configure_parameters({"max_tokens": -1})     # 無制限は上限を決めない
+        self.assertIsNone(ollama.response_token_limit())
+
+        class _Inner(LLMClient):
+            def response_token_limit(self):
+                return 12_345
+
+        wrapped = LlamaCachedClient(_Inner(), cache=None)
+        self.assertEqual(wrapped.response_token_limit(), 12_345)
+
+
+class SluiceCallInputFitTest(_AdapterTestBase):
+    """_call_sluice_llm の呼び出し直前の比較 (設計 2)。"""
+
+    SMALL = "sluice-fit-small"   # 20,000 → 上限 13,904
+    LARGE = "sluice-fit-large"   # 1,000,000 → 上限 895,904
+
+    def setUp(self):
+        super().setUp()
+        from saiverse import model_configs
+
+        patcher = patch.dict(model_configs.MODEL_CONFIGS, {
+            self.SMALL: {
+                "model": self.SMALL, "context_length": 20_000, "provider": "openai",
+            },
+            self.LARGE: {
+                "model": self.LARGE, "context_length": 1_000_000,
+                "provider": "openai",
+            },
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _persona(self):
+        return SimpleNamespace(
+            persona_id="tester", persona_name="エア", model=self.SMALL,
+            sai_memory=self.adapter,
+        )
+
+    def _big_context(self):
+        return [
+            {"role": "system", "content": "HEAD"},
+            {"role": "user", "content": "う" * 20_000, "id": "ctx0"},
+        ]
+
+    def _call(self, runtime, model_key):
+        lifecycle = SimpleNamespace(
+            runtime=runtime,
+            touch_anchor_after_llm_call=runtime.touch_anchor_after_llm_call,
+        )
+        return sluice._call_sluice_llm(
+            lifecycle, self._persona(), "b", None, None, model_key=model_key,
+        )
+
+    def test_over_the_limit_raises_without_calling_generate(self):
+        client = FakeLLMClient(RuntimeError("must not be called"))
+        runtime = FakeRuntime(client, context_messages=self._big_context())
+        with self.assertRaises(sluice.SluiceInputTooLargeError) as ctx:
+            self._call(runtime, self.SMALL)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(ctx.exception.model, self.SMALL)
+        self.assertEqual(ctx.exception.limit_tokens, 13_904)
+        self.assertGreater(ctx.exception.estimated_tokens, 20_000)
+
+    def test_within_the_limit_calls_generate_as_before(self):
+        client = FakeLLMClient(_sluice_result())
+        runtime = FakeRuntime(client)  # 既定の小さな組み立て
+        out = self._call(runtime, self.SMALL)
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(out["seen_ids"], ["ctx0"])
+
+    def test_the_model_after_the_structured_output_switch_is_compared(self):
+        """構造化出力の都合で実際のモデルが差し替わったら、差し替わった後の
+        モデルの上限で比べる。"""
+
+        class _SwitchingRuntime(FakeRuntime):
+            def __init__(inner, client, actual_model, **kwargs):
+                super().__init__(client, **kwargs)
+                inner.actual_model = actual_model
+
+            def select_llm_client(inner, node_def, persona, execution_context=None,
+                                  needs_structured_output=False, state=None):
+                return inner.client, inner.actual_model
+
+        # 解決は大きいモデル、実際は小さいモデル → 小さい方の上限で止まる。
+        client = FakeLLMClient(RuntimeError("must not be called"))
+        runtime = _SwitchingRuntime(
+            client, self.SMALL, context_messages=self._big_context(),
+        )
+        with self.assertRaises(sluice.SluiceInputTooLargeError) as ctx:
+            self._call(runtime, self.LARGE)
+        self.assertEqual(ctx.exception.model, self.SMALL)
+        self.assertEqual(client.calls, [])
+
+        # 解決は小さいモデル、実際は大きいモデル → 大きい方の上限で通る。
+        client2 = FakeLLMClient(_sluice_result())
+        runtime2 = _SwitchingRuntime(
+            client2, self.LARGE, context_messages=self._big_context(),
+        )
+        self._call(runtime2, self.SMALL)
+        self.assertEqual(len(client2.calls), 1)
+
+    def test_the_schema_and_the_client_response_limit_are_counted(self):
+        """呼び出し直前の比較は、答えの形の指定 (_RESPONSE_SCHEMA) の字数と、
+        そのクライアントが送る応答の上限を数える (レビュー第一巡の 1・2)。"""
+        import json
+        import math
+
+        from saiverse import model_configs
+
+        # 大きいモデルで一度通し、実際に送った中身 (指定なし) の見積もりを測る。
+        client = FakeLLMClient(_sluice_result())
+        runtime = FakeRuntime(client, context_messages=self._big_context())
+        with patch.object(
+            sluice, "_ensure_input_fits", wraps=sluice._ensure_input_fits,
+        ) as spy:
+            self._call(runtime, self.LARGE)
+        self.assertIs(spy.call_args.kwargs["llm_client"], client)
+        self.assertIs(spy.call_args.kwargs["response_schema"], sluice._RESPONSE_SCHEMA)
+        sent = client.calls[0]["messages"]
+        without_schema = sluice._estimate_input_tokens(sent, self.LARGE)
+        schema_chars = len(json.dumps(sluice._RESPONSE_SCHEMA, ensure_ascii=False))
+
+        def context_for(input_tokens, reserve=sluice._MAX_OUTPUT_TOKENS):
+            return math.ceil((input_tokens + reserve) / sluice._CONTEXT_USABLE_RATIO)
+
+        tight = "sluice-fit-tight"
+        patcher = patch.dict(model_configs.MODEL_CONFIGS, {
+            tight: {
+                "model": tight, "provider": "openai",
+                # 指定なしなら入り、指定の字数を足すと入らない長さ。
+                "context_length": context_for(without_schema + 10),
+            },
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        client_tight = FakeLLMClient(RuntimeError("must not be called"))
+        with self.assertRaises(sluice.SluiceInputTooLargeError) as ctx:
+            self._call(
+                FakeRuntime(client_tight, context_messages=self._big_context()), tight,
+            )
+        self.assertEqual(ctx.exception.estimated_tokens, without_schema + schema_chars)
+        self.assertEqual(client_tight.calls, [])
+
+        # 指定込みで入る長さにすると、応答の上限を送らないクライアントは通る。
+        model_configs.MODEL_CONFIGS[tight]["context_length"] = context_for(
+            without_schema + schema_chars + 10,
+        )
+        client_ok = FakeLLMClient(_sluice_result())
+        self._call(FakeRuntime(client_ok, context_messages=self._big_context()), tight)
+        self.assertEqual(len(client_ok.calls), 1)
+
+        # 同じ長さでも、8,000 の応答の上限を送るクライアントでは入らない。
+        client_big = ResponseLimitedFakeLLMClient(
+            RuntimeError("must not be called"), 8_000,
+        )
+        with self.assertRaises(sluice.SluiceInputTooLargeError) as ctx:
+            self._call(
+                FakeRuntime(client_big, context_messages=self._big_context()), tight,
+            )
+        self.assertEqual(ctx.exception.response_reserve_tokens, 8_000)
+        self.assertEqual(client_big.calls, [])
 
 
 class PinnedHistoryCompositionTest(unittest.TestCase):

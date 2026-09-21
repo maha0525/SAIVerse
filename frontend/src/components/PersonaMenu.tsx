@@ -1,6 +1,11 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState } from 'react';
 import styles from './PersonaMenu.module.css';
-import { Home, Brain, AlarmClock, Settings, X, RefreshCw, Package, Sparkles } from 'lucide-react';
+import { Home, Brain, AlarmClock, Settings, X, RefreshCw, Package, Sparkles, Phone } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 
 interface PersonaMenuProps {
@@ -18,27 +23,31 @@ interface PersonaMenuProps {
     onOpenSchedule?: () => void;
     onOpenSettings?: () => void;
     onOpenInventory?: () => void;
+    /** 通話モード (docs/intent/voice_call.md) を開く。 通話は必ずユーザーの
+     * 明示操作から始まる (不変条件 1) ので、 入口はこのメニューだけにする。 */
+    onStartCall?: () => void;
     /** dismiss 成功直後に呼ばれる。 親 (RightSidebar → ChatPage) が
      * 滞在ペルソナ表示を即時更新するための callback。 省略すると
      * 10 秒ポーリングか building 切替まで古い表示のままになる。 */
     onDismissed?: () => void;
 }
 
-export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, buildingId, onOpenMemory, onOpenSchedule, onOpenSettings, onOpenInventory, onDismissed }: PersonaMenuProps) {
+export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, buildingId, onOpenMemory, onOpenSchedule, onOpenSettings, onOpenInventory, onStartCall, onDismissed }: PersonaMenuProps) {
+    useLocale();
     const [loading, setLoading] = useState(false);
     const [organizing, setOrganizing] = useState(false);
 
     if (!isOpen) return null;
 
     const handleDismiss = async () => {
-        if (!confirm(`${personaName}を自室に戻しますか？`)) return;
+        if (!confirm(uiText("components.PersonaMenu.text001", { p1: personaName }))) return;
 
         setLoading(true);
         try {
             const url = buildingId
                 ? `/api/people/dismiss/${personaId}?building_id=${encodeURIComponent(buildingId)}`
                 : `/api/people/dismiss/${personaId}`;
-            const res = await fetch(url, { method: 'POST' });
+            const res = await apiFetch(url, { method: 'POST' });
             if (res.ok) {
                 const data = await res.json();
                 onDismissed?.();
@@ -63,24 +72,24 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
     // 結果はここでは追わない — ジョブの進捗・完了・エラー案内は記憶モーダルの
     // 「あらすじ」タブ (ArasujiViewer) がポーリングして表示する。
     const handleOrganizeMemory = async () => {
-        if (!confirm(`${personaName}の溜まった会話をあらすじにまとめますか？\n古い側の会話があらすじ（Chronicle）に畳まれ、長期記憶になります。直近の会話はそのまま残ります。`)) return;
+        if (!confirm(uiText("components.PersonaMenu.text002", { p1: personaName }))) return;
 
         setOrganizing(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/arasuji/generate`, {
+            const res = await apiFetch(`/api/people/${personaId}/arasuji/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({}),
             });
             if (res.ok) {
-                alert('溜まった会話をあらすじにまとめ始めました。進捗は記憶モーダルの「あらすじ」タブで確認できます。');
+                alert(uiText("components.PersonaMenu.text003"));
             } else {
                 const err = await res.json();
-                alert(`失敗: ${err.detail}`);
+                alert(uiText("components.PersonaMenu.text004", { p1: err.detail }));
             }
         } catch (e) {
             console.error(e);
-            alert("サーバーとの通信に失敗しました。");
+            alert(uiText("components.PersonaMenu.text005"));
         } finally {
             setOrganizing(false);
         }
@@ -101,11 +110,29 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                 </div>
 
                 <div className={styles.actions}>
+                    {/* 通話モードは実験的機能: 開発者モードのときだけ入口ごと見せる
+                        (onStartCall が渡ってくる = 開発者モード ON かつ部屋が確定)。 */}
+                    {onStartCall && (
+                        <button
+                            className={styles.actionBtn}
+                            onClick={() => {
+                                onStartCall();
+                                onClose();
+                            }}
+                        >
+                            <Phone size={20} />
+                            <div className={styles.label}>
+                                <span>{uiText("components.PersonaMenu.label006")}</span>
+                                <span data-i18n="components.PersonaMenu.text012" className={styles.subtext}>{uiText("components.PersonaMenu.text012")}</span>
+                            </div>
+                        </button>
+                    )}
+
                     <button className={styles.actionBtn} onClick={handleDismiss} disabled={loading}>
                         {loading ? <RefreshCw className={styles.spin} size={20} /> : <Home size={20} />}
                         <div className={styles.label}>
-                            <span>Return to Room</span>
-                            <span className={styles.subtext}>自室に戻す</span>
+                            <span>{uiText("components.PersonaMenu.label001")}</span>
+                            <span data-i18n="components.PersonaMenu.text006" className={styles.subtext}>{uiText("components.PersonaMenu.text006")}</span>
                         </div>
                     </button>
 
@@ -120,8 +147,8 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                     >
                         <Brain size={20} />
                         <div className={styles.label}>
-                            <span>Memory</span>
-                            <span className={styles.subtext}>長期記憶 & Memopedia</span>
+                            <span>{uiText("components.PersonaMenu.label002")}</span>
+                            <span data-i18n="components.PersonaMenu.text007" className={styles.subtext}>{uiText("components.PersonaMenu.text007")}</span>
                         </div>
                     </button>
 
@@ -136,8 +163,8 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                     >
                         <Package size={20} />
                         <div className={styles.label}>
-                            <span>Inventory</span>
-                            <span className={styles.subtext}>所持品</span>
+                            <span>{uiText("components.PersonaMenu.label003")}</span>
+                            <span data-i18n="components.PersonaMenu.text008" className={styles.subtext}>{uiText("components.PersonaMenu.text008")}</span>
                         </div>
                     </button>
 
@@ -152,15 +179,15 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                     >
                         <AlarmClock size={20} />
                         <div className={styles.label}>
-                            <span>Alarm</span>
-                            <span className={styles.subtext}>アラーム管理</span>
+                            <span>{uiText("components.PersonaMenu.label004")}</span>
+                            <span data-i18n="components.PersonaMenu.text009" className={styles.subtext}>{uiText("components.PersonaMenu.text009")}</span>
                         </div>
                     </button>
 
                     <button className={styles.actionBtn} onClick={handleOrganizeMemory} disabled={organizing}>
                         {organizing ? <RefreshCw className={styles.spin} size={20} /> : <Sparkles size={20} />}
                         <div className={styles.label}>
-                            <span>溜まった会話をあらすじにまとめる</span>
+                            <span data-i18n="components.PersonaMenu.text010">{uiText("components.PersonaMenu.text010")}</span>
                         </div>
                     </button>
 
@@ -175,8 +202,8 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                     >
                         <Settings size={20} />
                         <div className={styles.label}>
-                            <span>Settings</span>
-                            <span className={styles.subtext}>AI設定</span>
+                            <span>{uiText("components.PersonaMenu.label005")}</span>
+                            <span data-i18n="components.PersonaMenu.text011" className={styles.subtext}>{uiText("components.PersonaMenu.text011")}</span>
                         </div>
                     </button>
                 </div>

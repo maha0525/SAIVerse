@@ -1,0 +1,210 @@
+{
+  "home": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\claude\\C--Users-shuhe-workspace-SAIVerse\\f1b2319e-4c7c-4bd2-8ce7-6030f2cf8b92\\scratchpad\\exp1_home",
+  "aiid_expected": "probe_a_testcity",
+  "create_1": {
+    "ok": true,
+    "msg": "Persona 'プローブ甲' created successfully.",
+    "ai_id": "probe_a_testcity",
+    "room_id": "probe_a_testcity_room"
+  },
+  "memory_write": {
+    "db_path": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\claude\\C--Users-shuhe-workspace-SAIVerse\\f1b2319e-4c7c-4bd2-8ce7-6030f2cf8b92\\scratchpad\\exp1_home\\personas\\probe_a_testcity\\memory.db",
+    "messages": 1
+  },
+  "row_seed": {
+    "seeded_tables": [
+      "action_track",
+      "addon_persona_config",
+      "ai_tool_link",
+      "building_messages",
+      "building_occupancy_log",
+      "episode_inheritance",
+      "episodes",
+      "execution_ledger",
+      "execution_outbox",
+      "feed_read_cursor",
+      "line_head_snapshot",
+      "llm_usage_log",
+      "meta_judgment_log",
+      "persona_building_state",
+      "persona_day_plan",
+      "persona_event_log",
+      "persona_pulse_cursor",
+      "persona_schedule",
+      "persona_task",
+      "persona_timetable_template",
+      "session_anchor",
+      "session_head_snapshot",
+      "task_book",
+      "thinking_request",
+      "user_ai_link",
+      "visiting_ai"
+    ],
+    "failed_tables": {}
+  },
+  "rows_before_delete": {
+    "ai": 1,
+    "session_anchor": 1,
+    "user_ai_link": 1,
+    "ai_tool_link": 1,
+    "building_occupancy_log": 2,
+    "thinking_request": 1,
+    "visiting_ai": 1,
+    "persona_event_log": 1,
+    "persona_schedule": 1,
+    "llm_usage_log": 1,
+    "addon_persona_config": 1,
+    "persona_building_state": 1,
+    "line_head_snapshot": 1,
+    "session_head_snapshot": 1,
+    "action_track": 1,
+    "meta_judgment_log": 1,
+    "persona_pulse_cursor": 1,
+    "building_messages": 1,
+    "feed_read_cursor": 1,
+    "persona_task": 1,
+    "persona_day_plan": 1,
+    "persona_timetable_template": 1,
+    "episodes": 1,
+    "episode_inheritance": 1,
+    "execution_ledger": 1,
+    "execution_outbox": 1,
+    "task_book": 1
+  },
+  "ai_row_before_delete": {
+    "AIID": "probe_a_testcity",
+    "AINAME": "プローブ甲",
+    "SYSTEMPROMPT": "PROBE-SYSTEM-PROMPT-V1",
+    "DEFAULT_MODEL": "test-model",
+    "LIGHTWEIGHT_MODEL": null,
+    "PERSONA_ROLE": null,
+    "AUTONOMY_ENABLED": true,
+    "CHRONICLE_ENABLED": true,
+    "PRIVATE_ROOM_ID": "probe_a_testcity_room",
+    "DESCRIPTION": "A new persona named プローブ甲."
+  },
+  "buildings_before_delete": [
+    [
+      "probe_a_testcity_room",
+      "プローブ甲の部屋"
+    ]
+  ],
+  "delete_result": "AI 'プローブ甲' deleted successfully.",
+  "rows_after_delete": {
+    "session_anchor": 1,
+    "user_ai_link": 1,
+    "ai_tool_link": 1,
+    "building_occupancy_log": 2,
+    "thinking_request": 1,
+    "visiting_ai": 1,
+    "persona_event_log": 1,
+    "persona_schedule": 1,
+    "llm_usage_log": 1,
+    "addon_persona_config": 1,
+    "persona_building_state": 1,
+    "line_head_snapshot": 1,
+    "session_head_snapshot": 1,
+    "action_track": 1,
+    "meta_judgment_log": 1,
+    "persona_pulse_cursor": 1,
+    "building_messages": 1,
+    "feed_read_cursor": 1,
+    "persona_task": 1,
+    "persona_day_plan": 1,
+    "persona_timetable_template": 1,
+    "episodes": 1,
+    "episode_inheritance": 1,
+    "execution_ledger": 1,
+    "execution_outbox": 1
+  },
+  "ai_row_after_delete": null,
+  "buildings_after_delete": [
+    [
+      "probe_a_testcity_room",
+      "プローブ甲の部屋"
+    ]
+  ],
+  "persona_dir_after_delete": {
+    "exists": true,
+    "files": [
+      "memory.db"
+    ]
+  },
+  "create_2_same_id_same_name": {
+    "ok": false,
+    "msg": "An internal error occurred: (raised as a result of Query-invoked autoflush; consider using a session.no_autoflush block if this flush is occurring prematurely)\n(sqlite3.IntegrityError) UNIQUE constraint failed: building.CITYID, building.BUILDINGNAME\n[SQL: INSERT INTO building (\"CITYID\", \"BUILDINGID\", \"BUILDINGNAME\", \"CAPACITY\", \"SYSTEM_INSTRUCTION\", \"ENTRY_PROMPT\", \"AUTO_PROMPT\", \"DESCRIPTION\", \"AUTO_INTERVAL_SEC\", \"IMAGE_PATH\", \"EXTRA_PROMPT_FILES\", \"MAP_X\", \"MAP_Y\", \"PHYSICAL_VESSEL_ID\", \"REGION_ID\", \"FACILITY_ROLES\") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)]\n[parameters: (1, 'persona_1_testcity_room', 'プローブ甲の部屋', 1, 'プローブ甲が待機する個室です。', '', '', 'プローブ甲のプライベートルーム。', 10, None, None, None, None, None, None, None)]\n(Background on this error at: https://sqlalche.me/e/20/gkpj)",
+    "ai_id": null,
+    "room_id": null
+  },
+  "create_3_same_id_new_name": {
+    "ok": true,
+    "msg": "Persona 'プローブ甲・弐' created successfully.",
+    "ai_id": "probe_a_testcity",
+    "room_id": "persona_1_testcity_room"
+  },
+  "rows_after_recreate": {
+    "ai": 1,
+    "session_anchor": 1,
+    "user_ai_link": 1,
+    "ai_tool_link": 1,
+    "building_occupancy_log": 3,
+    "thinking_request": 1,
+    "visiting_ai": 1,
+    "persona_event_log": 1,
+    "persona_schedule": 1,
+    "llm_usage_log": 1,
+    "addon_persona_config": 1,
+    "persona_building_state": 1,
+    "line_head_snapshot": 1,
+    "session_head_snapshot": 1,
+    "action_track": 1,
+    "meta_judgment_log": 1,
+    "persona_pulse_cursor": 1,
+    "building_messages": 1,
+    "feed_read_cursor": 1,
+    "persona_task": 1,
+    "persona_day_plan": 1,
+    "persona_timetable_template": 1,
+    "episodes": 1,
+    "episode_inheritance": 1,
+    "execution_ledger": 1,
+    "execution_outbox": 1
+  },
+  "ai_row_after_recreate": {
+    "AIID": "probe_a_testcity",
+    "AINAME": "プローブ甲・弐",
+    "SYSTEMPROMPT": "PROBE-SYSTEM-PROMPT-V1",
+    "DEFAULT_MODEL": "test-model",
+    "LIGHTWEIGHT_MODEL": null,
+    "PERSONA_ROLE": null,
+    "AUTONOMY_ENABLED": true,
+    "CHRONICLE_ENABLED": true,
+    "PRIVATE_ROOM_ID": "persona_1_testcity_room",
+    "DESCRIPTION": "A new persona named プローブ甲・弐."
+  },
+  "buildings_after_recreate": [
+    [
+      "probe_a_testcity_room",
+      "プローブ甲の部屋"
+    ],
+    [
+      "persona_1_testcity_room",
+      "プローブ甲・弐の部屋"
+    ]
+  ],
+  "memory_read_after_recreate": {
+    "db_path": "C:\\Users\\shuhe\\AppData\\Local\\Temp\\claude\\C--Users-shuhe-workspace-SAIVerse\\f1b2319e-4c7c-4bd2-8ce7-6030f2cf8b92\\scratchpad\\exp1_home\\personas\\probe_a_testcity\\memory.db",
+    "recent_persona_messages": [
+      "PROBE-MEM-1 削除前に書いた記憶"
+    ],
+    "thread_summaries": [
+      {
+        "thread_id": "probe_a_testcity:__persona__",
+        "message_count": 1
+      }
+    ],
+    "core_memories": [
+      "PROBE-CORE-1 削除前に書いたコア記憶"
+    ]
+  }
+}

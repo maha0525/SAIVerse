@@ -1,3 +1,10 @@
+
+import { apiFetch } from '@/i18n/api';
+
+import { getFormatLocale } from '@/i18n/core';
+
+import { t as uiText } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Save, Loader2, Settings } from 'lucide-react';
 import styles from './SettingsModal.module.css';
@@ -28,16 +35,21 @@ interface AIConfig {
     name: string;
     description: string;
     system_prompt: string;
+    language?: "ja" | "en" | null;
+    home_city_language?: string | null;
     default_model: string | null;
     lightweight_model: string | null;
     vision_model: string | null;
     audio_model: string | null;
     video_model: string | null;
     memory_weave_model: string | null;
+    // 反射判断に答えるモデルの、このペルソナだけの上書き (null = 世界の既定に従う)
+    reflex_judgment_model: string | null;
     autonomy_enabled: boolean;  // 自律行動 (自分から考えて動くこと) の ON/OFF
     chronicle_enabled: boolean;
     autonomous_chronicle_enabled: boolean;
     auto_recall_enabled: boolean;
+    auto_recall_enhanced: boolean;
     memory_weave_context: boolean;
     memopedia_index_enabled: boolean;
     core_memory_char_budget: number | null;  // 記憶アーキv2 ゾーンA 容量目安 (NULL → 既定 2000)
@@ -78,9 +90,13 @@ interface UserChoice {
 interface ModelChoice {
     id: string;
     name: string;
+    /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
+     *  会話に使う欄では選択肢に出さない — 反射判断の欄だけが選べる。 */
+    reflex_only?: boolean;
 }
 
 export default function SettingsModal({ isOpen, onClose, personaId }: SettingsModalProps) {
+    useLocale();
     const [config, setConfig] = useState<AIConfig | null>(null);
     const [availableModels, setAvailableModels] = useState<ModelChoice[]>([]);
     const [availableUsers, setAvailableUsers] = useState<UserChoice[]>([]);
@@ -90,12 +106,19 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     // Form state
     const [description, setDescription] = useState('');
     const [systemPrompt, setSystemPrompt] = useState('');
+    const [language, setLanguage] = useState<string>('');
     const [defaultModel, setDefaultModel] = useState<string>('');
     const [lightweightModel, setLightweightModel] = useState<string>('');
     const [visionModel, setVisionModel] = useState<string>('');
     const [audioModel, setAudioModel] = useState<string>('');
     const [videoModel, setVideoModel] = useState<string>('');
     const [memoryWeaveModel, setMemoryWeaveModel] = useState<string>('');
+    const [reflexJudgmentModel, setReflexJudgmentModel] = useState<string>('');
+    // 開いたときのモデル欄の値の控え。保存は「開いてから変えた欄」だけを送る —
+    // 変わっていない欄まで送ると、モーダルを開いている間に別の画面で変えた
+    // モデル設定を、ここに残った古い値で巻き戻してしまう。受け側 (PATCH) は
+    // 「送られてこなかった欄は触らない」を保証している (manager/admin.py の UNSET)。
+    const loadedModelsRef = useRef<Record<string, string>>({});
     // ⚠ 自律行動の ON/OFF は v0.3 で UI から隠した (autonomous_behavior_v3.md
     // §11「運転 UI は隠す」)。state だけ残すのは、ロードした値をそのまま保存へ
     // 往復させるため — 送らないと PATCH が既存の設定を既定値で塗り潰す。
@@ -103,6 +126,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [chronicleEnabled, setChronicleEnabled] = useState(true);
     const [autonomousChronicleEnabled, setAutonomousChronicleEnabled] = useState(true);
     const [autoRecallEnabled, setAutoRecallEnabled] = useState(true);
+    const [autoRecallEnhanced, setAutoRecallEnhanced] = useState(false);
     const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
     const [memopediaIndexEnabled, setMemopediaIndexEnabled] = useState(true);
     const [coreMemoryCharBudget, setCoreMemoryCharBudget] = useState<string>('');
@@ -140,6 +164,11 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [loadedPersonaId, setLoadedPersonaId] = useState<string | null>(null);
     const personaIdRef = useRef<string>(personaId);
     personaIdRef.current = personaId;
+    // loadConfig の世代番号。同じペルソナでも読み込みは二度走る (開いたときと、
+    // モデル一覧が届いて再実行されるとき)。遅れて返った古い世代の応答がフォームと
+    // モデル欄の控え (loadedModelsRef) を上書きすると、その間の編集が消える —
+    // 最後に始めた読み込みだけがフォームへ反映してよい。
+    const loadGenRef = useRef(0);
 
     useEffect(() => {
         if (isOpen) {
@@ -159,7 +188,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
     const loadModels = async () => {
         try {
-            const res = await fetch('/api/info/models');
+            const res = await apiFetch('/api/info/models');
             if (res.ok) {
                 const data = await res.json();
                 setAvailableModels(data);
@@ -171,7 +200,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
     const loadUsers = async () => {
         try {
-            const res = await fetch('/api/user/list');
+            const res = await apiFetch('/api/user/list');
             if (res.ok) {
                 const data = await res.json();
                 setAvailableUsers(data);
@@ -187,10 +216,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
         // 非同期 fetch 中に personaId が切り替わった場合、stale な結果で setter
         // を呼ばないようにする (フォーム state が新旧混在するのを防ぐ)。
         const targetPersonaId = personaIdRef.current;
-        const isStale = () => targetPersonaId !== personaIdRef.current;
+        // 古い応答の判定は二軸 — ペルソナが切り替わった、または同じペルソナで
+        // より新しい読み込みが始まった (世代番号)。
+        const generation = ++loadGenRef.current;
+        const isStale = () =>
+            targetPersonaId !== personaIdRef.current || generation !== loadGenRef.current;
 
         try {
-            const res = await fetch(`/api/people/${targetPersonaId}/config`);
+            const res = await apiFetch(`/api/people/${targetPersonaId}/config`);
             if (isStale()) {
                 console.warn(
                     `[SettingsModal] loadConfig stale (${targetPersonaId} -> ${personaIdRef.current}); discarding /config response`
@@ -208,16 +241,28 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setConfig(data);
                 setDescription(data.description);
                 setSystemPrompt(data.system_prompt);
+                setLanguage(data.language ?? '');
                 setDefaultModel(data.default_model || '');
                 setLightweightModel(data.lightweight_model || '');
                 setVisionModel(data.vision_model || '');
                 setAudioModel(data.audio_model || '');
                 setVideoModel(data.video_model || '');
                 setMemoryWeaveModel(data.memory_weave_model || '');
+                setReflexJudgmentModel(data.reflex_judgment_model || '');
+                loadedModelsRef.current = {
+                    default_model: data.default_model || '',
+                    lightweight_model: data.lightweight_model || '',
+                    vision_model: data.vision_model || '',
+                    audio_model: data.audio_model || '',
+                    video_model: data.video_model || '',
+                    memory_weave_model: data.memory_weave_model || '',
+                    reflex_judgment_model: data.reflex_judgment_model || '',
+                };
                 setAutonomyEnabled(data.autonomy_enabled ?? true);
                 setChronicleEnabled(data.chronicle_enabled ?? true);
                 setAutonomousChronicleEnabled(data.autonomous_chronicle_enabled ?? true);
                 setAutoRecallEnabled(data.auto_recall_enabled ?? true);
+                setAutoRecallEnhanced(data.auto_recall_enhanced ?? false);
                 setMemoryWeaveContext(data.memory_weave_context ?? true);
                 setMemopediaIndexEnabled(data.memopedia_index_enabled ?? false);
                 setChronicleCharBudget(
@@ -232,15 +277,25 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 );
                 setSpellEnabled(data.spell_enabled ?? false);
                 setRealtimeInfoEnabled(data.realtime_info_enabled ?? true);
-                // Load realtime spell bindings + catalog
+                // Load realtime spell bindings + catalog。反映は下の世代ガードの
+                // 後でまとめて行う (取得と反映を分ける)。
+                let spellData: typeof realtimeSpells | null = null;
+                let catalogData: typeof spellCatalog | null = null;
                 try {
                     const [spellRes, catalogRes] = await Promise.all([
-                        fetch(`/api/people/${personaId}/realtime-spell`),
-                        fetch('/api/people/realtime-spell-catalog'),
+                        apiFetch(`/api/people/${targetPersonaId}/realtime-spell`),
+                        apiFetch('/api/people/realtime-spell-catalog'),
                     ]);
-                    if (spellRes.ok) setRealtimeSpells(await spellRes.json());
-                    if (catalogRes.ok) setSpellCatalog(await catalogRes.json());
+                    if (spellRes.ok) spellData = await spellRes.json();
+                    if (catalogRes.ok) catalogData = await catalogRes.json();
                 } catch (e) { /* ignore */ }
+                // ここまでの await の間に、ペルソナが切り替わったか、より新しい
+                // 読み込みが始まっているかもしれない。古い世代がこの先の setter
+                // (ロード成功の印 setLoadedPersonaId を含む) を実行すると、編集中の
+                // フォームや切り替え先のペルソナの状態を古い値で上書きする。
+                if (isStale()) return;
+                if (spellData !== null) setRealtimeSpells(spellData);
+                if (catalogData !== null) setSpellCatalog(catalogData);
                 // Phase 4-e: NULL → empty string で「既定値を使う」を表現
                 const mjc: MetaJudgmentConfig | null = data.meta_judgment_config ?? null;
                 setLoadedMetaConfig(mjc ? { ...mjc } : null);
@@ -268,7 +323,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
             // Load Chronicle cost estimate
             try {
-                const costRes = await fetch(`/api/people/${targetPersonaId}/arasuji/cost-estimate`);
+                const costRes = await apiFetch(`/api/people/${targetPersonaId}/arasuji/cost-estimate`);
                 if (isStale()) return;
                 if (costRes.ok) {
                     const costData = await costRes.json();
@@ -296,15 +351,15 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
         // 別ペルソナのフォーム内容で別レコードを上書きする事故が起きる
         // (2026-04-30 エリス上書き事故の再発防止)。
         if (isLoading) {
-            alert('読み込み中のため保存できません。少し待ってから再度お試しください。');
+            alert(uiText("components.SettingsModal.text001"));
             return;
         }
         if (!loadedPersonaId || loadedPersonaId !== personaId) {
             alert(
-                `安全のため保存を拒否しました。\n` +
-                `表示中のフォームは "${loadedPersonaId ?? '(未読み込み)'}" のもので、\n` +
-                `現在の保存先は "${personaId}" です。\n` +
-                `モーダルを一度閉じてから開き直してください。`
+                uiText("components.SettingsModal.text002") +
+                uiText("components.SettingsModal.text003", { p1: loadedPersonaId ?? uiText("common.extra004") }) +
+                uiText("components.SettingsModal.text004", { p1: personaId }) +
+                uiText("components.SettingsModal.text005")
             );
             console.error(
                 `[SettingsModal] handleSave rejected: loadedPersonaId=${loadedPersonaId} != personaId=${personaId}`
@@ -312,24 +367,35 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
             return;
         }
 
+        // 開いてから変わっていないモデル欄は undefined (= 送らない)。
+        const modelFieldIfChanged = (field: string, value: string): string | undefined =>
+            loadedModelsRef.current[field] === value ? undefined : value;
+
         setIsSaving(true);
         try {
-            const res = await fetch(`/api/people/${personaId}/config`, {
+            const res = await apiFetch(`/api/people/${personaId}/config`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     description: description,
                     system_prompt: systemPrompt,
-                    default_model: defaultModel,
-                    lightweight_model: lightweightModel,
-                    vision_model: visionModel,
-                    audio_model: audioModel,
-                    video_model: videoModel,
-                    memory_weave_model: memoryWeaveModel,
+                    language,
+                    // モデル欄は「開いてから変えた欄」だけ送る。undefined の欄は
+                    // JSON.stringify で落ち、受け側は触らない (= モーダルを開いている
+                    // 間に別の画面で変わった値を、ここの古い値で巻き戻さない)。
+                    // 空文字は「個別設定を外す」としてそのまま送る。
+                    default_model: modelFieldIfChanged('default_model', defaultModel),
+                    lightweight_model: modelFieldIfChanged('lightweight_model', lightweightModel),
+                    vision_model: modelFieldIfChanged('vision_model', visionModel),
+                    audio_model: modelFieldIfChanged('audio_model', audioModel),
+                    video_model: modelFieldIfChanged('video_model', videoModel),
+                    memory_weave_model: modelFieldIfChanged('memory_weave_model', memoryWeaveModel),
+                    reflex_judgment_model: modelFieldIfChanged('reflex_judgment_model', reflexJudgmentModel),
                     autonomy_enabled: autonomyEnabled,
                     chronicle_enabled: chronicleEnabled,
                     autonomous_chronicle_enabled: autonomousChronicleEnabled,
                     auto_recall_enabled: autoRecallEnabled,
+                    auto_recall_enhanced: autoRecallEnhanced,
                     memory_weave_context: memoryWeaveContext,
                     memopedia_index_enabled: memopediaIndexEnabled,
                     // 記憶アーキv2 ゾーンA 容量目安: 空文字列 = 既定値 (0 を送って NULL に倒す)、
@@ -386,16 +452,16 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
             if (res.ok) {
                 const data = await res.json();
                 if (data.warning) {
-                    alert(`設定は保存されましたが、警告があります:\n${data.warning}`);
+                    alert(uiText("components.SettingsModal.text006", { p1: data.warning }));
                 }
                 onClose();
             } else {
                 const err = await res.json();
-                alert(`保存に失敗しました: ${err.detail}`);
+                alert(uiText("components.SettingsModal.text007", { p1: err.detail }));
             }
         } catch (error) {
             console.error(error);
-            alert("設定の保存中にエラーが発生しました");
+            alert(uiText("components.SettingsModal.text008"));
         } finally {
             setIsSaving(false);
         }
@@ -403,11 +469,16 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
     if (!isOpen) return null;
 
+    // 会話・要約に使う欄の選択肢。反射判断専用の宛先 (文章を書けないモデル) は
+    // 選んでも保存が断られるので、そもそも出さない。反射判断の欄だけは
+    // availableModels をそのまま使う。
+    const conversationModels = availableModels.filter(m => !m.reflex_only);
+
     return (
         <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2><Settings size={22} /> ペルソナ設定</h2>
+                    <h2 data-i18n="components.SettingsModal.text009"><Settings size={22} />{uiText("components.SettingsModal.text009")}</h2>
                     <button className={styles.closeBtn} onClick={onClose}><X size={20} /></button>
                 </div>
 
@@ -419,124 +490,142 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     ) : (
                         <>
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>名前</label>
+                                <label data-i18n="components.SettingsModal.text010" className={styles.label}>{uiText("components.SettingsModal.text010")}</label>
                                 <div className={styles.input} style={{ background: 'rgba(0,0,0,0.05)', color: '#888' }}>
                                     {config?.name}
                                 </div>
-                                <div className={styles.description}>名前はここでは変更できません。</div>
+                                <div data-i18n="components.SettingsModal.text011" className={styles.description}>{uiText("components.SettingsModal.text011")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>デフォルトモデル</label>
+                                <label data-i18n="components.SettingsModal.text012" className={styles.label}>{uiText("components.SettingsModal.text012")}</label>
                                 <select
                                     className={styles.select}
                                     value={defaultModel}
                                     onChange={(e) => setDefaultModel(e.target.value)}
                                 >
-                                    <option value="">システムデフォルトを使用</option>
-                                    {defaultModel && !availableModels.some(m => m.id === defaultModel) && (
-                                        <option value={defaultModel}>⚠️ 不明: {defaultModel}</option>
+                                    <option data-i18n="components.SettingsModal.text013" value="">{uiText("components.SettingsModal.text013")}</option>
+                                    {defaultModel && !conversationModels.some(m => m.id === defaultModel) && (
+                                        <option data-i18n="components.SettingsModal.text014" value={defaultModel}>{uiText("components.SettingsModal.text014")}{defaultModel}</option>
                                     )}
-                                    {availableModels.map(m => (
+                                    {conversationModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>軽量モデル（任意）</label>
+                                <label data-i18n="components.SettingsModal.text015" className={styles.label}>{uiText("components.SettingsModal.text015")}</label>
                                 <select
                                     className={styles.select}
                                     value={lightweightModel}
                                     onChange={(e) => setLightweightModel(e.target.value)}
                                 >
-                                    <option value="">なし（デフォルトを使用）</option>
-                                    {lightweightModel && !availableModels.some(m => m.id === lightweightModel) && (
-                                        <option value={lightweightModel}>⚠️ 不明: {lightweightModel}</option>
+                                    <option data-i18n="components.SettingsModal.text016" value="">{uiText("components.SettingsModal.text016")}</option>
+                                    {lightweightModel && !conversationModels.some(m => m.id === lightweightModel) && (
+                                        <option data-i18n="components.SettingsModal.text017" value={lightweightModel}>{uiText("components.SettingsModal.text017")}{lightweightModel}</option>
                                     )}
-                                    {availableModels.map(m => (
+                                    {conversationModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>
-                                <div className={styles.description}>該当する場合、より高速で安価なレスポンスに使用されます。</div>
+                                <div data-i18n="components.SettingsModal.text018" className={styles.description}>{uiText("components.SettingsModal.text018")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Memory Weaveモデル（任意）</label>
+                                <label data-i18n="components.SettingsModal.text019" className={styles.label}>{uiText("components.SettingsModal.text019")}</label>
                                 <select
                                     className={styles.select}
                                     value={memoryWeaveModel}
                                     onChange={(e) => setMemoryWeaveModel(e.target.value)}
                                 >
-                                    <option value="">グローバル設定を使用</option>
-                                    {memoryWeaveModel && !availableModels.some(m => m.id === memoryWeaveModel) && (
-                                        <option value={memoryWeaveModel}>⚠️ 不明: {memoryWeaveModel}</option>
+                                    <option data-i18n="components.SettingsModal.text020" value="">{uiText("components.SettingsModal.text020")}</option>
+                                    {memoryWeaveModel && !conversationModels.some(m => m.id === memoryWeaveModel) && (
+                                        <option data-i18n="components.SettingsModal.text021" value={memoryWeaveModel}>{uiText("components.SettingsModal.text021")}{memoryWeaveModel}</option>
                                     )}
-                                    {availableModels.map(m => (
+                                    {conversationModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>
-                                <div className={styles.description}>クロニクル・メモペディア生成に使用するモデル。</div>
+                                <div data-i18n="components.SettingsModal.text022" className={styles.description}>{uiText("components.SettingsModal.text022")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>画像要約モデル（任意）</label>
+                                <label data-i18n="components.SettingsModal.text023" className={styles.label}>{uiText("components.SettingsModal.text023")}</label>
                                 <select
                                     className={styles.select}
                                     value={visionModel}
                                     onChange={(e) => setVisionModel(e.target.value)}
                                 >
-                                    <option value="">グローバル設定を使用</option>
-                                    {visionModel && !availableModels.some(m => m.id === visionModel) && (
-                                        <option value={visionModel}>⚠️ 不明: {visionModel}</option>
+                                    <option data-i18n="components.SettingsModal.text024" value="">{uiText("components.SettingsModal.text024")}</option>
+                                    {visionModel && !conversationModels.some(m => m.id === visionModel) && (
+                                        <option data-i18n="components.SettingsModal.text025" value={visionModel}>{uiText("components.SettingsModal.text025")}{visionModel}</option>
                                     )}
-                                    {availableModels.map(m => (
+                                    {conversationModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>
-                                <div className={styles.description}>画像・ドキュメントの要約生成に使用するモデル。</div>
+                                <div data-i18n="components.SettingsModal.text026" className={styles.description}>{uiText("components.SettingsModal.text026")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>音声要約モデル（任意）</label>
+                                <label data-i18n="components.SettingsModal.text027" className={styles.label}>{uiText("components.SettingsModal.text027")}</label>
                                 <select
                                     className={styles.select}
                                     value={audioModel}
                                     onChange={(e) => setAudioModel(e.target.value)}
                                 >
-                                    <option value="">グローバル設定を使用</option>
-                                    {audioModel && !availableModels.some(m => m.id === audioModel) && (
-                                        <option value={audioModel}>⚠️ 不明: {audioModel}</option>
+                                    <option data-i18n="components.SettingsModal.text028" value="">{uiText("components.SettingsModal.text028")}</option>
+                                    {audioModel && !conversationModels.some(m => m.id === audioModel) && (
+                                        <option data-i18n="components.SettingsModal.text029" value={audioModel}>{uiText("components.SettingsModal.text029")}{audioModel}</option>
                                     )}
-                                    {availableModels.map(m => (
+                                    {conversationModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>
-                                <div className={styles.description}>音声ファイルの要約生成に使用するモデル（Gemini系推奨）。</div>
+                                <div data-i18n="components.SettingsModal.text030" className={styles.description}>{uiText("components.SettingsModal.text030")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>動画要約モデル（任意）</label>
+                                <label data-i18n="components.SettingsModal.text031" className={styles.label}>{uiText("components.SettingsModal.text031")}</label>
                                 <select
                                     className={styles.select}
                                     value={videoModel}
                                     onChange={(e) => setVideoModel(e.target.value)}
                                 >
-                                    <option value="">グローバル設定を使用</option>
-                                    {videoModel && !availableModels.some(m => m.id === videoModel) && (
-                                        <option value={videoModel}>⚠️ 不明: {videoModel}</option>
+                                    <option data-i18n="components.SettingsModal.text032" value="">{uiText("components.SettingsModal.text032")}</option>
+                                    {videoModel && !conversationModels.some(m => m.id === videoModel) && (
+                                        <option data-i18n="components.SettingsModal.text033" value={videoModel}>{uiText("components.SettingsModal.text033")}{videoModel}</option>
+                                    )}
+                                    {conversationModels.map(m => (
+                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                    ))}
+                                </select>
+                                <div data-i18n="components.SettingsModal.text034" className={styles.description}>{uiText("components.SettingsModal.text034")}</div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label data-i18n="components.SettingsModal.reflexJudgmentModelLabel" className={styles.label}>{uiText("components.SettingsModal.reflexJudgmentModelLabel")}</label>
+                                <select
+                                    className={styles.select}
+                                    value={reflexJudgmentModel}
+                                    onChange={(e) => setReflexJudgmentModel(e.target.value)}
+                                >
+                                    <option data-i18n="components.SettingsModal.reflexJudgmentModelGlobal" value="">{uiText("components.SettingsModal.reflexJudgmentModelGlobal")}</option>
+                                    {reflexJudgmentModel && !availableModels.some(m => m.id === reflexJudgmentModel) && (
+                                        <option data-i18n="components.SettingsModal.reflexJudgmentModelUnknown" value={reflexJudgmentModel}>{uiText("components.SettingsModal.reflexJudgmentModelUnknown")}{reflexJudgmentModel}</option>
                                     )}
                                     {availableModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>
-                                <div className={styles.description}>動画ファイルの要約生成に使用するモデル（Gemini系推奨）。</div>
+                                <div data-i18n="components.SettingsModal.reflexJudgmentModelDescription" className={styles.description}>{uiText("components.SettingsModal.reflexJudgmentModelDescription")}</div>
                             </div>
 
                             <DebugPanel personaId={personaId} />
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>キャッシュ維持の設定</label>
+                                <label data-i18n="components.SettingsModal.text035" className={styles.label}>{uiText("components.SettingsModal.text035")}</label>
                                 {(() => {
                                     // 実効値の解決 (default なら built-in default)
                                     const effectiveKeepCache = metaKeepCacheAlive === 'default'
@@ -546,21 +635,21 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         <>
                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                                                    <span style={{ minWidth: '160px' }}>キャッシュ維持</span>
+                                                    <span data-i18n="components.SettingsModal.text036" style={{ minWidth: '160px' }}>{uiText("components.SettingsModal.text036")}</span>
                                                     <select
                                                         className={styles.select}
                                                         value={metaKeepCacheAlive}
                                                         onChange={(e) => setMetaKeepCacheAlive(e.target.value as TriState)}
                                                         style={{ width: '14rem' }}
                                                     >
-                                                        <option value="default">既定 ({META_JUDGMENT_DEFAULTS.keep_cache_alive ? 'ON' : 'OFF'})</option>
-                                                        <option value="on">ON (TTL 接近で前倒し)</option>
-                                                        <option value="off">OFF (TTL 無視 / 低頻度向け)</option>
+                                                        <option data-i18n="components.SettingsModal.text037" value="default">{uiText("components.SettingsModal.text037")}{META_JUDGMENT_DEFAULTS.keep_cache_alive ? 'ON' : 'OFF'})</option>
+                                                        <option data-i18n="components.SettingsModal.text038" value="on">{uiText("components.SettingsModal.text038")}</option>
+                                                        <option data-i18n="components.SettingsModal.text039" value="off">{uiText("components.SettingsModal.text039")}</option>
                                                     </select>
                                                 </div>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                                                    <span style={{ minWidth: '160px' }}>キャッシュ閾値 (0.0–1.0)</span>
-                                                    <input
+                                                    <span data-i18n="components.SettingsModal.text040" style={{ minWidth: '160px' }}>{uiText("components.SettingsModal.text040")}</span>
+                                                    <input data-i18n="components.SettingsModal.text041"
                                                         type="number"
                                                         step="0.05"
                                                         min="0"
@@ -570,23 +659,20 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                                         onChange={(e) => setMetaCacheThresholdRatio(e.target.value)}
                                                         style={{ width: '7rem' }}
                                                         disabled={!effectiveKeepCache}
-                                                        title={effectiveKeepCache ? '' : 'キャッシュ維持が OFF のため無効'}
+                                                        title={effectiveKeepCache ? '' : uiText("components.SettingsModal.text041")}
                                                     />
-                                                    <span style={{ fontSize: '0.85em', color: '#888' }}>
-                                                        (既定: {META_JUDGMENT_DEFAULTS.cache_threshold_ratio})
+                                                    <span data-i18n="components.SettingsModal.text042" style={{ fontSize: '0.85em', color: '#888' }}>{uiText("components.SettingsModal.text042")}{META_JUDGMENT_DEFAULTS.cache_threshold_ratio})
                                                     </span>
                                                 </div>
                                             </div>
-                                            <div className={styles.description}>
-                                                会話のたびに送り直す前置き（プロンプト）は、モデル側のキャッシュに一定時間だけ残ります。その残り時間が「キャッシュ閾値」の割合を切ると、極小の呼び出しを入れてキャッシュを温め直します（応答を作るわけではありません）。「キャッシュ維持」を OFF にすると温め直しを行いません（低頻度運用向け。キャッシュが切れることを許容します）。空欄の項目は既定値が適用されます。
-                                            </div>
+                                            <div data-i18n="components.SettingsModal.text043" className={styles.description}>{uiText("components.SettingsModal.text043")}</div>
                                         </>
                                     );
                                 })()}
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>応答待ち Track 自動 pause 閾値</label>
+                                <label data-i18n="components.SettingsModal.text044" className={styles.label}>{uiText("components.SettingsModal.text044")}</label>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                     <input
                                         type="number"
@@ -597,18 +683,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         onChange={(e) => setUserConvTimeoutMinutes(e.target.value)}
                                         style={{ width: '7rem' }}
                                     />
-                                    <span>分</span>
-                                    <span style={{ fontSize: '0.85em', color: '#888' }}>
-                                        (既定: 30 分 / 0 で既定に戻す)
-                                    </span>
+                                    <span data-i18n="components.SettingsModal.text045">{uiText("components.SettingsModal.text045")}</span>
+                                    <span data-i18n="components.SettingsModal.text046" style={{ fontSize: '0.85em', color: '#888' }}>{uiText("components.SettingsModal.text046")}</span>
                                 </div>
-                                <div className={styles.description}>
-                                    対ユーザー会話 Track のような応答待ち型 Track が、最終メッセージからこの分数以上 idle になると、会話の区切りとして扱い、ふりかえりの判断を行います（ペルソナの状態は変わりません）。長期 idle で自律稼働が止まる事故の脱出経路として動作します。軽量モデルなら短く (10〜15 分)、重量級モデルや人間の応答間隔が長い運用なら長く (60 分以上) 設定してください。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text047" className={styles.description}>{uiText("components.SettingsModal.text047")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Chronicle 自動生成</label>
+                                <label data-i18n="components.SettingsModal.text048" className={styles.label}>{uiText("components.SettingsModal.text048")}</label>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                         <input
@@ -616,12 +698,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                             checked={chronicleEnabled}
                                             onChange={(e) => setChronicleEnabled(e.target.checked)}
                                         />
-                                        <span>{chronicleEnabled ? '有効' : '無効'}</span>
+                                        <span data-i18n="components.SettingsModal.text049 components.SettingsModal.text050">{chronicleEnabled ? uiText("components.SettingsModal.text049") : uiText("components.SettingsModal.text050")}</span>
                                     </label>
                                 </div>
-                                <div className={styles.description}>
-                                    会話が一定量を超えたとき、古い部分を自動的にあらすじ（Chronicle）へ畳みます。生成の瞬間にLLM APIコストが発生します。無効にすると自動生成は止まり、メモリー画面の「Chronicle」タブからの手動生成もできなくなります。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text051" className={styles.description}>{uiText("components.SettingsModal.text051")}</div>
                                 {costEstimate && costEstimate.unprocessed_messages > 0 && (
                                     <div className={styles.description} style={{
                                         marginTop: '0.5rem',
@@ -632,9 +712,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         borderRadius: '4px',
                                         fontSize: '0.85rem',
                                     }}>
-                                        <div>あらすじになっていない過去メッセージ: <strong>{costEstimate.unprocessed_messages.toLocaleString()}</strong>件（自動ではあらすじ化されません）</div>
-                                        <div>
-                                            まとめてあらすじ化した場合の推定コスト: <strong>
+                                        <div data-i18n="components.SettingsModal.text052 components.SettingsModal.text053">{uiText("components.SettingsModal.text052")}<strong>{costEstimate.unprocessed_messages.toLocaleString(getFormatLocale())}</strong>{uiText("components.SettingsModal.text053")}</div>
+                                        <div data-i18n="components.SettingsModal.text054">{uiText("components.SettingsModal.text054")}<strong>
                                                 {costEstimate.is_free_tier
                                                     ? `${formatCost(0, costEstimate.currency)} (Free tier)`
                                                     : formatCost(costEstimate.estimated_cost_usd, costEstimate.currency)
@@ -642,13 +721,13 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                             </strong>
                                             {' '}({costEstimate.model_name})
                                         </div>
-                                        <div>推定LLM呼び出し: {costEstimate.estimated_llm_calls}回</div>
+                                        <div data-i18n="components.SettingsModal.text055 components.SettingsModal.text056">{uiText("components.SettingsModal.text055")}{costEstimate.estimated_llm_calls}{uiText("components.SettingsModal.text056")}</div>
                                     </div>
                                 )}
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Chronicle（あらすじ）の読み込み文字数</label>
+                                <label data-i18n="components.SettingsModal.text057" className={styles.label}>{uiText("components.SettingsModal.text057")}</label>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                     <input
                                         type="number"
@@ -659,18 +738,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         onChange={(e) => setChronicleCharBudget(e.target.value)}
                                         style={{ width: '7rem' }}
                                     />
-                                    <span>字</span>
-                                    <span style={{ fontSize: '0.85em', color: '#888' }}>
-                                        (既定: 20000 字 / 空で既定に戻す)
-                                    </span>
+                                    <span data-i18n="components.SettingsModal.text058">{uiText("components.SettingsModal.text058")}</span>
+                                    <span data-i18n="components.SettingsModal.text059" style={{ fontSize: '0.85em', color: '#888' }}>{uiText("components.SettingsModal.text059")}</span>
                                 </div>
-                                <div className={styles.description}>
-                                    会話時にコンテキストへ読み込む、過去のあらすじの合計文字数の目安です。増やすと過去の記憶が詳しくなり、減らすとトークン消費を抑えられます。反映は次の記憶の整理からです。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text060" className={styles.description}>{uiText("components.SettingsModal.text060")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>自律行動中も記憶整理（Chronicle生成）を行う</label>
+                                <label data-i18n="components.SettingsModal.text061" className={styles.label}>{uiText("components.SettingsModal.text061")}</label>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                         <input
@@ -678,16 +753,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                             checked={autonomousChronicleEnabled}
                                             onChange={(e) => setAutonomousChronicleEnabled(e.target.checked)}
                                         />
-                                        <span>{autonomousChronicleEnabled ? '有効' : '無効'}</span>
+                                        <span data-i18n="components.SettingsModal.text062 components.SettingsModal.text063">{autonomousChronicleEnabled ? uiText("components.SettingsModal.text062") : uiText("components.SettingsModal.text063")}</span>
                                     </label>
                                 </div>
-                                <div className={styles.description}>
-                                    自律稼働中（ユーザーとの会話以外のタイミング）に記憶の整理が起きた際も、確認なしでChronicleを自動生成します。無効にすると、自律稼働中に溜まった会話はChronicle化されず、次にユーザーと会話するまで長期記憶に残りません。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text064" className={styles.description}>{uiText("components.SettingsModal.text064")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>自動想起（ふと浮かんだ記憶）</label>
+                                <label data-i18n="components.SettingsModal.text065" className={styles.label}>{uiText("components.SettingsModal.text065")}</label>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                         <input
@@ -695,16 +768,29 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                             checked={autoRecallEnabled}
                                             onChange={(e) => setAutoRecallEnabled(e.target.checked)}
                                         />
-                                        <span>{autoRecallEnabled ? '有効' : '無効'}</span>
+                                        <span data-i18n="components.SettingsModal.text066 components.SettingsModal.text067">{autoRecallEnabled ? uiText("components.SettingsModal.text066") : uiText("components.SettingsModal.text067")}</span>
                                     </label>
                                 </div>
-                                <div className={styles.description}>
-                                    会話の内容に関連する記憶を自動的に思い出し、応答に反映します。無効にすると、記憶の想起はスペルによる手動想起のみになります。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text068" className={styles.description}>{uiText("components.SettingsModal.text068")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Memory Weave コンテキスト</label>
+                                <label data-i18n="components.SettingsModal.autoRecallEnhancedLabel" className={styles.label}>{uiText("components.SettingsModal.autoRecallEnhancedLabel")}</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={autoRecallEnhanced}
+                                            onChange={(e) => setAutoRecallEnhanced(e.target.checked)}
+                                        />
+                                        <span data-i18n="components.SettingsModal.text066 components.SettingsModal.text067">{autoRecallEnhanced ? uiText("components.SettingsModal.text066") : uiText("components.SettingsModal.text067")}</span>
+                                    </label>
+                                </div>
+                                <div data-i18n="components.SettingsModal.autoRecallEnhancedDescription" className={styles.description}>{uiText("components.SettingsModal.autoRecallEnhancedDescription")}</div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label data-i18n="components.SettingsModal.text069" className={styles.label}>{uiText("components.SettingsModal.text069")}</label>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                         <input
@@ -712,16 +798,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                             checked={memoryWeaveContext}
                                             onChange={(e) => setMemoryWeaveContext(e.target.checked)}
                                         />
-                                        <span>{memoryWeaveContext ? '有効' : '無効'}</span>
+                                        <span data-i18n="components.SettingsModal.text070 components.SettingsModal.text071">{memoryWeaveContext ? uiText("components.SettingsModal.text070") : uiText("components.SettingsModal.text071")}</span>
                                     </label>
                                 </div>
-                                <div className={styles.description}>
-                                    会話時にChronicle・Memopediaの情報をLLMに提供します。無効にするとコンテキスト量が減りますが、長期記憶を参照できなくなります。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text072" className={styles.description}>{uiText("components.SettingsModal.text072")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Memopedia索引の常時表示</label>
+                                <label data-i18n="components.SettingsModal.text073" className={styles.label}>{uiText("components.SettingsModal.text073")}</label>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                         <input
@@ -729,16 +813,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                             checked={memopediaIndexEnabled}
                                             onChange={(e) => setMemopediaIndexEnabled(e.target.checked)}
                                         />
-                                        <span>{memopediaIndexEnabled ? '有効' : '無効'}</span>
+                                        <span data-i18n="components.SettingsModal.text074 components.SettingsModal.text075">{memopediaIndexEnabled ? uiText("components.SettingsModal.text074") : uiText("components.SettingsModal.text075")}</span>
                                     </label>
                                 </div>
-                                <div className={styles.description}>
-                                    Memopediaの全ページ一覧（タイトルと概要）を、常にペルソナのコンテキストへ読み込みます。ペルソナが自分の記憶の全体像を把握しやすくなる反面、トークン消費が増えます。当面は有効のままをおすすめします。設定の変更は、ペルソナメニューの「溜まった会話をあらすじにまとめる」を押すとすぐに反映されます（押さなくても、次に記憶の整理が起きたときに反映されます）。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text076" className={styles.description}>{uiText("components.SettingsModal.text076")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>コア記憶の文字数目安</label>
+                                <label data-i18n="components.SettingsModal.text077" className={styles.label}>{uiText("components.SettingsModal.text077")}</label>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                     <input
                                         type="number"
@@ -749,35 +831,41 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         onChange={(e) => setCoreMemoryCharBudget(e.target.value)}
                                         style={{ width: '7rem' }}
                                     />
-                                    <span>字</span>
-                                    <span style={{ fontSize: '0.85em', color: '#888' }}>
-                                        (既定: 2000 字 / 空で既定に戻す)
-                                    </span>
+                                    <span data-i18n="components.SettingsModal.text078">{uiText("components.SettingsModal.text078")}</span>
+                                    <span data-i18n="components.SettingsModal.text079" style={{ fontSize: '0.85em', color: '#888' }}>{uiText("components.SettingsModal.text079")}</span>
                                 </div>
-                                <div className={styles.description}>
-                                    ペルソナが自分で刻む「コア記憶」（常に携えておく恒常知識）の合計文字数の目安です。この文字数を超えると、コア記憶を編集するスペルの結果に整理を促す通知が添えられます。目安を超えても内容が切り詰められることはありません（通知のみ）。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text080" className={styles.description}>{uiText("components.SettingsModal.text080")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>スペル</label>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                <label data-i18n="components.SettingsModal.text081" className={styles.label}>{uiText("components.SettingsModal.text081")}</label>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                         <input
-                                            type="checkbox"
+                                            type="radio"
+                                            name={`spell-mode-${personaId}`}
                                             checked={spellEnabled}
-                                            onChange={(e) => setSpellEnabled(e.target.checked)}
+                                            onChange={() => setSpellEnabled(true)}
                                         />
-                                        <span>{spellEnabled ? '有効' : '無効'}</span>
+                                        <span data-i18n="components.SettingsModal.spellModeStandard">{uiText("components.SettingsModal.spellModeStandard")}</span>
+                                    </label>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="radio"
+                                            name={`spell-mode-${personaId}`}
+                                            checked={!spellEnabled}
+                                            onChange={() => setSpellEnabled(false)}
+                                        />
+                                        <span data-i18n="components.SettingsModal.spellModeDisabled">{uiText("components.SettingsModal.spellModeDisabled")}</span>
                                     </label>
                                 </div>
-                                <div className={styles.description}>
-                                    発言中に /spell コマンドを使って、Memopediaやチャットログを直接参照できるようにします。ツール定義を使わないため、キャッシュ効率に影響しません。
+                                <div data-i18n="components.SettingsModal.spellModeDescription" className={styles.description}>
+                                    {uiText("components.SettingsModal.spellModeDescription")}
                                 </div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>リアルタイム情報</label>
+                                <label data-i18n="components.SettingsModal.text085" className={styles.label}>{uiText("components.SettingsModal.text085")}</label>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                         <input
@@ -785,19 +873,22 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                             checked={realtimeInfoEnabled}
                                             onChange={(e) => setRealtimeInfoEnabled(e.target.checked)}
                                         />
-                                        <span>{realtimeInfoEnabled ? '有効' : '無効'}</span>
+                                        <span data-i18n="components.SettingsModal.text086 components.SettingsModal.text087">{realtimeInfoEnabled ? uiText("components.SettingsModal.text086") : uiText("components.SettingsModal.text087")}</span>
                                     </label>
                                 </div>
-                                <div className={styles.description}>
-                                    発言の直前に現在時刻・前回発言時刻などの動的コンテキストを提供します。無効にすると、これらをこのペルソナには一切送りません（時刻を気にして会話が成立しなくなる場合などに）。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text088" className={styles.description}>{uiText("components.SettingsModal.text088")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>事前実行スペル</label>
-                                <div className={styles.description} style={{ marginBottom: '0.5rem' }}>
-                                    会話のたびに自動実行し、結果をリアルタイム情報に追加するスペルを設定します。
+                                <label data-i18n="components.SettingsModal.text089" className={styles.label}>{uiText("components.SettingsModal.text089")}</label>
+                                <div data-i18n="components.SettingsModal.text090" className={styles.description} style={{ marginBottom: '0.5rem' }}>
+                                    {uiText("components.SettingsModal.text090")}
                                 </div>
+                                {!spellEnabled && (
+                                    <div data-i18n="components.SettingsModal.spellDisabledNotice" className={styles.description} style={{ marginBottom: '0.5rem', fontWeight: 600 }}>
+                                        {uiText("components.SettingsModal.spellDisabledNotice")}
+                                    </div>
+                                )}
                                 {realtimeSpells.length > 0 && (
                                     <div style={{ marginBottom: '0.75rem' }}>
                                         {realtimeSpells.map((spell) => (
@@ -806,16 +897,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                                     <strong>{spell.label || spell.spell_name}</strong>
                                                     {spell.spell_args_json && <span style={{ opacity: 0.6, marginLeft: '0.5rem', fontSize: '0.8rem' }}>{spell.spell_args_json}</span>}
                                                 </span>
-                                                <button
+                                                <button data-i18n="components.SettingsModal.text091"
                                                     type="button"
                                                     style={{ padding: '0.15rem 0.4rem', fontSize: '0.75rem', cursor: 'pointer' }}
                                                     onClick={async () => {
-                                                        await fetch(`/api/people/${personaId}/realtime-spell/${spell.binding_id}`, { method: 'DELETE' });
+                                                        await apiFetch(`/api/people/${personaId}/realtime-spell/${spell.binding_id}`, { method: 'DELETE' });
                                                         setRealtimeSpells(prev => prev.filter(s => s.binding_id !== spell.binding_id));
                                                     }}
-                                                >
-                                                    削除
-                                                </button>
+                                                >{uiText("components.SettingsModal.text091")}</button>
                                             </div>
                                         ))}
                                     </div>
@@ -827,7 +916,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                             onChange={(e) => { setNewSpellName(e.target.value); setNewSpellArgs({}); }}
                                             style={{ width: '100%', padding: '0.3rem 0.5rem', fontSize: '0.85rem' }}
                                         >
-                                            <option value="">スペルを選択...</option>
+                                            <option data-i18n="components.SettingsModal.text092" value="">{uiText("components.SettingsModal.text092")}</option>
                                             {spellCatalog.map(s => (
                                                 <option key={s.name} value={s.name}>{s.name} — {s.description.slice(0, 60)}</option>
                                             ))}
@@ -859,14 +948,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         );
                                     })()}
                                     <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                                        <input
+                                        <input data-i18n="components.SettingsModal.text093"
                                             type="text"
-                                            placeholder="ラベル (表示名)"
+                                            placeholder={uiText("components.SettingsModal.text093")}
                                             value={newSpellLabel}
                                             onChange={(e) => setNewSpellLabel(e.target.value)}
                                             style={{ flex: 1, padding: '0.25rem 0.5rem', fontSize: '0.85rem' }}
                                         />
-                                        <button
+                                        <button data-i18n="components.SettingsModal.text094"
                                             type="button"
                                             disabled={!newSpellName}
                                             style={{ padding: '0.3rem 0.75rem', fontSize: '0.85rem', cursor: newSpellName ? 'pointer' : 'not-allowed' }}
@@ -878,7 +967,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                                     try { argsObj[k] = JSON.parse(v.trim()); } catch { argsObj[k] = v.trim(); }
                                                 });
                                                 const argsJson = Object.keys(argsObj).length > 0 ? JSON.stringify(argsObj) : null;
-                                                const res = await fetch(`/api/people/${personaId}/realtime-spell`, {
+                                                const res = await apiFetch(`/api/people/${personaId}/realtime-spell`, {
                                                     method: 'POST',
                                                     headers: { 'Content-Type': 'application/json' },
                                                     body: JSON.stringify({
@@ -902,74 +991,75 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                                     setNewSpellLabel('');
                                                 }
                                             }}
-                                        >
-                                            追加
-                                        </button>
+                                        >{uiText("components.SettingsModal.text094")}</button>
                                     </div>
                                 </div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>リンクユーザー</label>
+                                <label data-i18n="components.SettingsModal.text095" className={styles.label}>{uiText("components.SettingsModal.text095")}</label>
                                 <select
                                     className={styles.select}
                                     value={linkedUserId}
                                     onChange={(e) => setLinkedUserId(e.target.value)}
                                 >
-                                    <option value="">なし（「ユーザー」と表示）</option>
+                                    <option data-i18n="components.SettingsModal.text096" value="">{uiText("components.SettingsModal.text096")}</option>
                                     {availableUsers.map(u => (
                                         <option key={u.id} value={u.id}>{u.name}</option>
                                     ))}
                                 </select>
-                                <div className={styles.description}>
-                                    このペルソナがリンクするユーザー。システムプロンプトに名前が表示されます。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text097" className={styles.description}>{uiText("components.SettingsModal.text097")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>アバター</label>
+                                <label data-i18n="components.SettingsModal.text098" className={styles.label}>{uiText("components.SettingsModal.text098")}</label>
                                 <ImageUpload
                                     value={avatarPath}
                                     onChange={setAvatarPath}
                                     circle={true}
                                 />
-                                <div className={styles.description}>
-                                    新しいアバター画像をアップロードします。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text099" className={styles.description}>{uiText("components.SettingsModal.text099")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>外見画像（ビジュアルコンテキスト）</label>
+                                <label data-i18n="components.SettingsModal.text100" className={styles.label}>{uiText("components.SettingsModal.text100")}</label>
                                 <ImageUpload
                                     value={appearanceImagePath}
                                     onChange={setAppearanceImagePath}
                                 />
-                                <div className={styles.description}>
-                                    LLMのビジュアルコンテキスト用の詳細な外見画像。アバターとは別です。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text101" className={styles.description}>{uiText("components.SettingsModal.text101")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>説明</label>
-                                <input
+                                <label data-i18n="components.SettingsModal.text102" className={styles.label}>{uiText("components.SettingsModal.text102")}</label>
+                                <input data-i18n="components.SettingsModal.text103"
                                     className={styles.input}
                                     value={description}
                                     onChange={(e) => setDescription(e.target.value)}
-                                    placeholder="ペルソナの短い説明"
+                                    placeholder={uiText("components.SettingsModal.text103")}
                                 />
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>システムプロンプト</label>
-                                <textarea
+                                <label data-i18n="components.SettingsModal.text104" className={styles.label}>{uiText("components.SettingsModal.text104")}</label>
+                                <select data-i18n="components.SettingsModal.text105" aria-label={uiText("components.SettingsModal.text105")} value={language} onChange={e => setLanguage(e.target.value)}>
+                                    <option value="">
+                                        {uiText("components.SettingsModal.languageInherit", {
+                                            p1: (config?.home_city_language === "en" ? uiText("components.SettingsModal.label001") : uiText("components.SettingsModal.text106"))
+                                        })}
+                                    </option>
+                                    <option data-i18n="components.SettingsModal.text106" value="ja">{uiText("components.SettingsModal.text106")}</option>
+                                    <option value="en">{uiText("components.SettingsModal.label001")}</option>
+                                </select>
+                                <p data-i18n="components.SettingsModal.text107">{uiText("components.SettingsModal.text107")}</p>
+                                <label data-i18n="components.SettingsModal.text108" className={styles.label}>{uiText("components.SettingsModal.text108")}</label>
+                                <textarea data-i18n="components.SettingsModal.text109"
                                     className={styles.textarea}
                                     value={systemPrompt}
                                     onChange={(e) => setSystemPrompt(e.target.value)}
-                                    placeholder="あなたは..."
+                                    placeholder={uiText("components.SettingsModal.text109")}
                                 />
-                                <div className={styles.description}>
-                                    行動、性格、能力を定義するコアな指示。
-                                </div>
+                                <div data-i18n="components.SettingsModal.text110" className={styles.description}>{uiText("components.SettingsModal.text110")}</div>
                             </div>
 
                         </>
@@ -977,21 +1067,19 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 </div>
 
                 <div className={styles.footer}>
-                    <button className={styles.cancelBtn} onClick={onClose}>キャンセル</button>
-                    <button
+                    <button data-i18n="components.SettingsModal.text111" className={styles.cancelBtn} onClick={onClose}>{uiText("components.SettingsModal.text111")}</button>
+                    <button data-i18n="components.SettingsModal.text112 components.SettingsModal.text113 components.SettingsModal.text114 components.SettingsModal.text115"
                         className={styles.saveBtn}
                         onClick={handleSave}
                         disabled={isLoading || isSaving || !loadedPersonaId || loadedPersonaId !== personaId}
                         title={
-                            isLoading ? '読み込み中…'
-                                : !loadedPersonaId ? '読み込み未完了'
-                                : loadedPersonaId !== personaId ? `表示中 (${loadedPersonaId}) と保存先 (${personaId}) が不一致のため無効`
+                            isLoading ? uiText("components.SettingsModal.text112")
+                                : !loadedPersonaId ? uiText("components.SettingsModal.text113")
+                                : loadedPersonaId !== personaId ? uiText("components.SettingsModal.text114", { p1: loadedPersonaId, p2: personaId })
                                 : undefined
                         }
                     >
-                        {isSaving ? <Loader2 size={16} className="spin" /> : <Save size={16} />}
-                        保存
-                    </button>
+                        {isSaving ? <Loader2 size={16} className="spin" /> : <Save size={16} />}{uiText("components.SettingsModal.text115")}</button>
                 </div>
             </div>
         </ModalOverlay>

@@ -234,9 +234,34 @@
     padding-bottom: 120px; /* Space for floating input area */
     display: flex;
     flex-direction: column;
-    gap: 1rem;
+    gap: 0;
     width: 100%;
     box-sizing: border-box;
+}
+
+/* 行間は「隣り合う二行のあいだ」に正の余白として置く。
+   かつては親に gap: 1rem を敷き、詰めたい行 (システム通知・続きの吹き出し) が
+   負の margin でそこから引き返す作りだった。その形は親の gap が効かない環境で
+   行どうしが重なり、システム通知の時刻が次の箱に黙って覆われる
+   (docs/issues/system_notice_time_hidden_by_next_notice.md)。正の値だけで書けば
+   どこでも重なりようがない。見た目の間隔は従来と同じ:
+   通常どうし 1rem / 通常と通知のあいだ 0.65rem / 通知どうし 0.3rem /
+   同じペルソナの続きの吹き出し 0.3rem。 */
+.chatArea > * + * {
+    margin-top: 1rem;
+}
+
+.chatArea > .systemNotice + *,
+.chatArea > * + .systemNotice {
+    margin-top: 0.65rem;
+}
+
+.chatArea > .systemNotice + .systemNotice {
+    margin-top: 0.3rem;
+}
+
+.chatArea > * + .continuedBubble {
+    margin-top: 0.3rem;
 }
 
 .message {
@@ -255,28 +280,25 @@
 /* 同じペルソナの発言が続く 2 個目以降の吹き出し。顔と名前を出さない分、
    前の吹き出しと地続きに見えるように上の間隔と上の余白だけを詰める
    (docs/issues/pulse_beats_merge_into_single_record.md 実機 1)。
-   chatArea の gap が 1rem なので、負のマージンでそこから引く。
+   上の間隔は chatArea 側の `.chatArea > * + .continuedBubble` が持つ
+   (負のマージンで親から引き返す形はやめた — 理由は chatArea のコメント)。
    色は一切触らないので、ライトとダークの両方でそのまま成立する。 */
-.continuedBubble {
-    margin-top: -0.7rem;
-}
-
 .continuedBubble .card {
     padding-top: 0.9rem;
 }
 
 /* System notices — world events (item/document/move), warnings, info.
    These are NOT AI utterances, so they drop the avatar + author name + heavy
-   card chrome and render author-less, compact and centered. The slight
-   negative margin tightens the chatArea 1rem gap around these slim rows so
-   they don't float in a big empty band. */
+   card chrome and render author-less, compact and centered. These slim rows are
+   tightened by the `.chatArea > ... + .systemNotice` rules above so they don't
+   float in a big empty band; this element must not carry a negative margin of
+   its own (see the chatArea comment — that is what buried the timestamp). */
 .systemNotice {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 0.15rem;
     width: 100%;
-    margin: -0.35rem 0;
 }
 
 .systemNoticeInner {
@@ -1509,6 +1531,39 @@
 
 :global([data-theme="dark"]) .recallContent {
     color: rgba(180, 180, 200, 0.8);
+}
+
+/* Reflex judgment fallback notice — 「判定が時間内に終わらなかった」表示専用の注記。
+   折りたたまず 1 行で出す (読み落とすと、費用だけ出て効果が出ていない状態が続く)。 */
+.reflexNotice {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin-bottom: 8px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.2);
+    color: rgba(146, 92, 8, 0.95);
+    font-size: 0.78rem;
+    line-height: 1.5;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}
+
+:global([data-theme="dark"]) .reflexNotice {
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.3);
+    color: rgba(252, 211, 77, 0.9);
+}
+
+.reflexNoticeIcon {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+    opacity: 0.8;
 }
 
 /* Activity Block */

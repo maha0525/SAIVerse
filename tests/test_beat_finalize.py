@@ -20,6 +20,7 @@ from sea.runtime_llm import (
     INTERRUPTED_METADATA_KEY,
     BeatExecution,
     _finalize_beat,
+    _store_reasoning_in_state,
 )
 
 
@@ -253,6 +254,23 @@ class MemorizeTest(FinalizeTestBase):
             "reasoning": "考えた", "reasoning_details": [{"d": 1}],
         })
 
+    def test_a_call_without_reasoning_drops_the_previous_calls_reasoning(self):
+        """思考を返さなかった呼び出しの Beat に、前の呼び出しの思考が付かない。
+
+        同じ Pulse 内で LLM 呼び出しが続くと、格納が「空を無視」だった頃は
+        前の呼び出しの思考が state に居残り、次の Beat の記憶に誤帰属した
+        (2026-09-19 敵対レビュー 2 巡目)。
+        """
+        state = {"_reasoning_text": "前の呼び出しの思考", "_reasoning_details": [{"d": 1}]}
+        _store_reasoning_in_state(state, "", None)
+        _finalize_beat(self.runtime, _beat(
+            state=state, node_def=_node_def(memorize=True),
+        ))
+        metadata = self.runtime._store_memory.call_args.kwargs.get("metadata")
+        if metadata is not None:
+            self.assertNotIn("reasoning", metadata)
+            self.assertNotIn("reasoning_details", metadata)
+
     def test_structured_output_saved_as_indented_json(self):
         _finalize_beat(self.runtime, _beat(
             state={}, node_def=_node_def(memorize=True),
@@ -312,6 +330,45 @@ class ImportantDualWriteTest(FinalizeTestBase):
             continuation="(error in llm node)",
         ))
         self.runtime._store_memory.assert_not_called()
+
+    def test_carries_the_beats_reasoning(self):
+        """memorize (_store_beat_memory) と同じ本文を書く双子の経路なので、
+        思考も同じ形で載る。スペルが走った回は state が最終周の分に揃って
+        いるため、ここに載るのは締めの発言を作った呼び出しの思考になる
+        (docs/issues/spell_pulse_beats_missing_reasoning.md、敵対レビュー high)。
+        """
+        state = {"_reasoning_text": "締めの思考", "_reasoning_details": [{"t": 1}]}
+        _finalize_beat(self.runtime, _beat(
+            state=state, node_def=_node_def(important=True),
+        ))
+        self.runtime._store_memory.assert_called_once()
+        metadata = self.runtime._store_memory.call_args.kwargs.get("metadata") or {}
+        self.assertEqual(metadata.get("reasoning"), "締めの思考")
+        self.assertEqual(metadata.get("reasoning_details"), [{"t": 1}])
+
+    def test_a_beat_without_reasoning_carries_no_reasoning_key(self):
+        """思考が空の回はキー自体を入れない (空を空として落とす流儀)。"""
+        _finalize_beat(self.runtime, _beat(
+            state={}, node_def=_node_def(important=True),
+        ))
+        self.runtime._store_memory.assert_called_once()
+        metadata = self.runtime._store_memory.call_args.kwargs.get("metadata")
+        if metadata is not None:
+            self.assertNotIn("reasoning", metadata)
+            self.assertNotIn("reasoning_details", metadata)
+
+    def test_a_call_without_reasoning_drops_the_previous_calls_reasoning(self):
+        """双子の経路 (dual-write) にも前の呼び出しの思考が居残らない。"""
+        state = {"_reasoning_text": "前の呼び出しの思考", "_reasoning_details": [{"t": 1}]}
+        _store_reasoning_in_state(state, "", None)
+        _finalize_beat(self.runtime, _beat(
+            state=state, node_def=_node_def(important=True),
+        ))
+        self.runtime._store_memory.assert_called_once()
+        metadata = self.runtime._store_memory.call_args.kwargs.get("metadata")
+        if metadata is not None:
+            self.assertNotIn("reasoning", metadata)
+            self.assertNotIn("reasoning_details", metadata)
 
 
 class AlreadyMemorizedSkipTest(FinalizeTestBase):

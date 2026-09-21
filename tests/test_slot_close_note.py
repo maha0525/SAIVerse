@@ -560,6 +560,14 @@ class _WsFakeLLMClient:
     def consume_usage(self):
         return None
 
+    # 作業セッションは呼び出しごとに思考も回収する (破壊的読み取り)。
+    # 思考を返さないモデルの回を模す。
+    def consume_reasoning(self):
+        return []
+
+    def consume_reasoning_details(self):
+        return None
+
 
 class _WsFakeRuntime:
     """run_work_session が触る SEARuntime の最小フェイク (spell 無効経路)。

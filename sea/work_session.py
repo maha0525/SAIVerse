@@ -300,7 +300,11 @@ def run_work_session(
         # 先に来るので、閉じた関所の陰で課金だけ発生することもない)。manager に
         # beat_gate が無いテスト環境では no-op。
         from sea.beat_gate import hold_beat
-        from sea.runtime_llm import _parse_spell_lines, _run_spell_loop
+        from sea.runtime_llm import (
+            _consume_reasoning,
+            _parse_spell_lines,
+            _run_spell_loop,
+        )
 
         with hold_beat(manager, persona_id, purpose="work_session"):
             # ---- 応答前の読み戻し (arasuji_levels.md §15) ----
@@ -465,6 +469,13 @@ def run_work_session(
             _record_llm_usage(
                 runtime, state, llm_client, persona, building_id, "llm_work_session"
             )
+            # この本文を作った呼び出しの思考。回収しないと次の周の呼び出しの頭で
+            # クライアント側のバッファが上書きされ、初回 Beat の生ログだけ思考が
+            # 欠ける (会話経路と同じ帰属の契約 —
+            # docs/issues/spell_pulse_beats_missing_reasoning.md)。
+            _initial_reasoning_text, _initial_reasoning_details = _consume_reasoning(
+                llm_client,
+            )
             text = _extract_text(initial_result)
             try:
                 runtime._dump_llm_io(
@@ -488,6 +499,8 @@ def run_work_session(
                 node_def=node_def,
                 action_text=instruction_content,
                 max_rounds=budget_rounds,
+                initial_reasoning_text=_initial_reasoning_text,
+                initial_reasoning_details=_initial_reasoning_details,
             ))
             # 作業セッションは speak=false なので、周ごとの本文 (BeatSegment) は
             # 建物へ出さない — 生ログはループが SAIMemory へ記録済み。ここで使うのは
@@ -514,10 +527,22 @@ def run_work_session(
             # volatile に解決される)。ラウンド途中の発話は _run_spell_loop が
             # 同様に保存済み。
             if continuation and continuation.strip():
+                # 締めの本文を作ったのは最終周の呼び出し (周が無ければ初回)。
+                # その思考をこの記録に添える — 中間の周はループが自分で添えて
+                # いるので、ここが欠けると「中間だけ思考付き」のちぐはぐな
+                # 生ログになる (敵対レビュー 3 巡目)。空ならキーを入れない。
+                _closing_metadata: Dict[str, Any] = {}
+                if _spell_result.closing_reasoning_text:
+                    _closing_metadata["reasoning"] = _spell_result.closing_reasoning_text
+                if _spell_result.closing_reasoning_details is not None:
+                    _closing_metadata["reasoning_details"] = (
+                        _spell_result.closing_reasoning_details
+                    )
                 runtime._store_memory(
                     persona, continuation, role="assistant",
                     tags=[RAW_LOG_TAG], pulse_id=pulse_id,
                     playbook_name=WORK_SESSION_PLAYBOOK_NAME,
+                    metadata=_closing_metadata or None,
                     pulse_context=pulse_ctx,
                     beat_state=state,
                 )

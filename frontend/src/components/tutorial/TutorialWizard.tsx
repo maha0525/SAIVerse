@@ -1,4 +1,9 @@
 "use client";
+import { apiFetch } from '@/i18n/api';
+
+import { t as uiText, setLocale, getLocale, type Locale } from '@/i18n/core';
+import { useLocale } from '@/i18n/useLocale';
+
 
 import React, { useState, useEffect } from 'react';
 import { X, Loader2, ArrowRight, ArrowLeft } from 'lucide-react';
@@ -39,6 +44,9 @@ interface ModelInfo {
     display_name: string;
     provider: string;
     is_available: boolean;
+    /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
+     *  役割ごとの選択肢を出す StepModelSummary が、反射判断の役割にだけ出す。 */
+    reflex_only?: boolean;
 }
 
 interface ModelRoleAssignment {
@@ -54,6 +62,7 @@ interface TutorialState {
     userName: string;
     cityName: string;
     timezone: string;
+    language: string;
     personaChoice: 'new' | 'import' | null;
     apiKeys: Record<string, string>;
     createdPersonaId: string | null;
@@ -64,15 +73,15 @@ interface TutorialState {
     chronicleEnabled: boolean;
 }
 
-const STEP_TITLES = [
+const getStepTitles = () => [
     'Welcome',
-    'ユーザー名',
-    'City名',
-    'ペルソナ',
-    'APIキー',
-    'モデル設定',
+    uiText("components.tutorial.TutorialWizard.text001"),
+    uiText("components.tutorial.TutorialWizard.text002"),
+    uiText("components.tutorial.TutorialWizard.text003"),
+    uiText("components.tutorial.TutorialWizard.text004"),
+    uiText("components.tutorial.TutorialWizard.text005"),
     'Chronicle',
-    '完了'
+    uiText("components.tutorial.TutorialWizard.text006")
 ];
 
 // Provider to env key mapping
@@ -92,6 +101,7 @@ export default function TutorialWizard({
     onComplete,
     startAtStep = 1
 }: TutorialWizardProps) {
+    useLocale();
     const [step, setStep] = useState<Step>(startAtStep as Step);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -100,6 +110,7 @@ export default function TutorialWizard({
         userName: '',
         cityName: '',
         timezone: '',
+        language: 'ja',
         personaChoice: null,
         apiKeys: {},
         createdPersonaId: null,
@@ -122,6 +133,7 @@ export default function TutorialWizard({
                 userName: '',
                 cityName: '',
                 timezone: '',
+                language: getLocale() || 'ja',
                 personaChoice: null,
                 apiKeys: {},
                 createdPersonaId: null,
@@ -138,10 +150,10 @@ export default function TutorialWizard({
     const loadInitialData = async () => {
         try {
             const [modelsRes, keysRes, userRes, citiesRes] = await Promise.all([
-                fetch('/api/tutorial/available-models'),
-                fetch('/api/tutorial/api-keys/status'),
-                fetch('/api/user/status'),
-                fetch('/api/db/tables/city'),
+                apiFetch('/api/tutorial/available-models'),
+                apiFetch('/api/tutorial/api-keys/status'),
+                apiFetch('/api/user/status'),
+                apiFetch('/api/db/tables/city'),
             ]);
 
             if (modelsRes.ok) {
@@ -169,6 +181,9 @@ export default function TutorialWizard({
                     const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
                     const cityTz = cities[0].TIMEZONE || 'UTC';
                     updates.timezone = (cityTz === 'UTC') ? browserTz : cityTz;
+                    if (cities[0].LANGUAGE) {
+                        updates.language = cities[0].LANGUAGE;
+                    }
                 }
             }
             if (Object.keys(updates).length > 0) {
@@ -214,7 +229,7 @@ export default function TutorialWizard({
             }
         } catch (e) {
             console.error('Error in step transition', e);
-            setError(e instanceof Error ? e.message : '処理中にエラーが発生しました');
+            setError(e instanceof Error ? e.message : uiText("components.tutorial.TutorialWizard.text007"));
         } finally {
             setIsLoading(false);
         }
@@ -235,7 +250,7 @@ export default function TutorialWizard({
     const handleComplete = async () => {
         setError(null);
         try {
-            const completeRes = await fetch('/api/tutorial/complete', {
+            const completeRes = await apiFetch('/api/tutorial/complete', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ version: 1 })
@@ -246,7 +261,7 @@ export default function TutorialWizard({
 
             // Move to the created persona's room if available
             if (state.createdRoomId) {
-                const moveRes = await fetch('/api/user/move', {
+                const moveRes = await apiFetch('/api/user/move', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ target_building_id: state.createdRoomId })
@@ -260,32 +275,32 @@ export default function TutorialWizard({
             onClose();
         } catch (e) {
             console.error('Failed to complete tutorial', e);
-            setError(e instanceof Error ? e.message : 'チュートリアルの完了処理に失敗しました');
+            setError(e instanceof Error ? e.message : uiText("components.tutorial.TutorialWizard.text008"));
         }
     };
 
     // API call functions
     const saveUserName = async () => {
-        const name = state.userName.trim() || 'ユーザー';
-        const res = await fetch('/api/user/me', {
+        const name = state.userName.trim() || uiText("components.tutorial.TutorialWizard.text009");
+        const res = await apiFetch('/api/user/me', {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ display_name: name })
         });
         if (!res.ok) {
             const detail = await res.json().catch(() => ({}));
-            throw new Error(detail.detail || 'ユーザー名の保存に失敗しました');
+            throw new Error(detail.detail || uiText("components.tutorial.TutorialWizard.text010"));
         }
     };
 
     const saveCityName = async () => {
-        const res = await fetch('/api/db/tables/city');
+        const res = await apiFetch('/api/db/tables/city');
         if (!res.ok) {
-            throw new Error('City情報の取得に失敗しました');
+            throw new Error(uiText("components.tutorial.TutorialWizard.text011"));
         }
         const cities = await res.json();
         if (cities.length === 0) {
-            throw new Error('Cityが見つかりません');
+            throw new Error(uiText("components.tutorial.TutorialWizard.text012"));
         }
 
         const city = cities[0];
@@ -294,7 +309,7 @@ export default function TutorialWizard({
         // (CITY_SLUG) は City 作成後は変更できないので送らない。説明文は
         // チュートリアルでは聞かないため既存値をそのまま返す。
         // タイムゾーンは City 名が空でも必ず送る。
-        const updateRes = await fetch(`/api/world/cities/${city.CITYID}`, {
+        const updateRes = await apiFetch(`/api/world/cities/${city.CITYID}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -304,11 +319,12 @@ export default function TutorialWizard({
                 ui_port: city.UI_PORT ?? 8000,
                 api_port: city.API_PORT ?? 8001,
                 timezone: state.timezone || city.TIMEZONE || 'UTC',
+                language: state.language || city.LANGUAGE || 'ja',
             })
         });
         if (!updateRes.ok) {
             const detail = await updateRes.json().catch(() => ({}));
-            throw new Error(detail.detail || 'City名の保存に失敗しました');
+            throw new Error(detail.detail || uiText("components.tutorial.TutorialWizard.text013"));
         }
     };
 
@@ -325,45 +341,48 @@ export default function TutorialWizard({
         }
 
         if (Object.keys(updates).length > 0) {
-            const res = await fetch('/api/admin/env', {
+            const res = await apiFetch('/api/admin/env', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ updates })
             });
             if (!res.ok) {
                 const detail = await res.json().catch(() => ({}));
-                throw new Error(detail.detail || 'APIキーの保存に失敗しました');
+                throw new Error(detail.detail || uiText("components.tutorial.TutorialWizard.text014"));
             }
         }
     };
 
     const saveChronicleSettings = async () => {
         if (!state.createdPersonaId) return;
-        const res = await fetch(`/api/people/${state.createdPersonaId}/config`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chronicle_enabled: state.chronicleEnabled }),
-        });
-        if (!res.ok) {
-            const detail = await res.json().catch(() => ({}));
-            throw new Error(detail.detail || 'Chronicle設定の保存に失敗しました');
+
+        try {
+            await apiFetch(`/api/people/${state.createdPersonaId}/config`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chronicle_generation_active: state.chronicleEnabled
+                })
+            });
+        } catch (e) {
+            console.error('Failed to save Chronicle setting', e);
         }
     };
 
     const autoConfigureModels = async () => {
         try {
-            const res = await fetch('/api/tutorial/auto-configure-models', {
+            const res = await apiFetch('/api/admin/models/auto-configure', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({})  // Auto-detect provider
+                headers: { 'Content-Type': 'application/json' }
             });
             if (res.ok) {
                 const data = await res.json();
-                updateState({
-                    autoConfiguredProvider: data.provider_display,
-                    autoConfiguredAssignments: data.assignments,
-                    autoConfigureWarnings: data.warnings,
-                });
+                setState(prev => ({
+                    ...prev,
+                    autoConfiguredProvider: data.provider || '',
+                    autoConfiguredAssignments: data.assignments || [],
+                    autoConfigureWarnings: data.warnings || []
+                }));
             }
         } catch (e) {
             console.error('Failed to auto-configure models', e);
@@ -372,7 +391,7 @@ export default function TutorialWizard({
 
     const handleModelOverride = async (role: string, envKey: string, modelId: string) => {
         try {
-            const res = await fetch('/api/admin/env', {
+            const res = await apiFetch('/api/admin/env', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ updates: { [envKey]: modelId } })
@@ -419,6 +438,11 @@ export default function TutorialWizard({
                         onChange={(v) => updateState({ cityName: v })}
                         timezone={state.timezone}
                         onTimezoneChange={(v) => updateState({ timezone: v })}
+                        language={state.language}
+                        onLanguageChange={(v) => {
+                            updateState({ language: v });
+                            setLocale(v as Locale);
+                        }}
                     />
                 );
             case 4:
@@ -474,7 +498,7 @@ export default function TutorialWizard({
             <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
                 {/* Header */}
                 <div className={styles.header}>
-                    <h2 className={styles.title}>SAIVerse セットアップ</h2>
+                    <h2 data-i18n="components.tutorial.TutorialWizard.text016" className={styles.title}>{uiText("components.tutorial.TutorialWizard.text016")}</h2>
                     <button className={styles.closeButton} onClick={onClose}>
                         <X size={20} />
                     </button>
@@ -482,7 +506,7 @@ export default function TutorialWizard({
 
                 {/* Stepper */}
                 <div className={styles.stepper}>
-                    {STEP_TITLES.map((title, idx) => (
+                    {getStepTitles().map((title, idx) => (
                         <div
                             key={idx}
                             className={`${styles.step} ${step >= idx + 1 ? styles.active : ''} ${step > idx + 1 ? styles.completed : ''}`}
@@ -506,24 +530,20 @@ export default function TutorialWizard({
                     <div className={styles.actions}>
                         <div className={styles.actionsLeft}>
                             {step > 1 && (
-                                <button className={styles.backButton} onClick={handleBack}>
-                                    <ArrowLeft size={16} /> 戻る
-                                </button>
+                                <button data-i18n="components.tutorial.TutorialWizard.text017" className={styles.backButton} onClick={handleBack}>
+                                    <ArrowLeft size={16} />{uiText("components.tutorial.TutorialWizard.text017")}</button>
                             )}
                         </div>
                         <div className={styles.actionsRight}>
                             {canSkip && (
-                                <button className={styles.skipButton} onClick={handleSkip}>
-                                    スキップ
-                                </button>
+                                <button data-i18n="components.tutorial.TutorialWizard.text018" className={styles.skipButton} onClick={handleSkip}>{uiText("components.tutorial.TutorialWizard.text018")}</button>
                             )}
-                            <button
+                            <button data-i18n="components.tutorial.TutorialWizard.text019"
                                 className={styles.nextButton}
                                 onClick={handleNext}
                                 disabled={isLoading}
                             >
-                                {isLoading ? <Loader2 size={16} className={styles.loader} /> : null}
-                                次へ <ArrowRight size={16} />
+                                {isLoading ? <Loader2 size={16} className={styles.loader} /> : null}{uiText("components.tutorial.TutorialWizard.text019")}<ArrowRight size={16} />
                             </button>
                         </div>
                     </div>

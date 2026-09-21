@@ -53,6 +53,63 @@ def _bearer_token(request: Request) -> str | None:
     return None
 
 
+#: 画面 (Next.js) が動く既定の origin。main.py の CORSMiddleware と同じ源に
+#: するため、ここを唯一の定義にする。
+DEFAULT_BROWSER_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
+
+
+def allowed_browser_origins() -> set[str]:
+    """ブラウザからの接続を許す origin の集合。
+
+    HTTP の CORS (main.py の ``CORSMiddleware``) と WebSocket の Origin 検査
+    (``api/routes/voice_call.py``) が同じ集合を見るための一箇所。末尾の ``/``
+    は落として比較する。
+    """
+    origins = set(DEFAULT_BROWSER_ORIGINS)
+    origins.update(
+        origin.strip().rstrip("/")
+        for origin in os.getenv("SAIVERSE_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip().startswith(("http://", "https://"))
+    )
+    return origins
+
+
+def owner_auth_active(app: object) -> bool:
+    """この app に :class:`OwnerAuthMiddleware` が入っているか。
+
+    ミドルウェアは LAN 公開のときだけ入る (main.py)。WebSocket は
+    ``BaseHTTPMiddleware`` を素通りする (``scope["type"] == "websocket"``) ので、
+    WS のルートは「HTTP 側が守られているか」をこれで見て、同じ条件のときだけ
+    自前で検証する。localhost だけで動かしているときに WS が拒否されない
+    (= HTTP 側と挙動が一致する) のはこの判定による。
+    """
+    for middleware in getattr(app, "user_middleware", None) or []:
+        if getattr(middleware, "cls", None) is OwnerAuthMiddleware:
+            return True
+    return False
+
+
+def websocket_owner_authorized(websocket: object) -> bool:
+    """WebSocket のハンドシェイクが owner の認証を満たしているか。
+
+    HTTP 側 (:class:`OwnerAuthMiddleware`) と同じ二つの運搬手段を見る:
+    ``Authorization: Bearer <SAIVERSE_OWNER_TOKEN>`` ヘッダか、ログイン後に
+    付く ``saiverse_owner_session`` cookie。WebSocket のハンドシェイクは
+    通常の HTTP リクエストなので、どちらもそのまま届く。
+    """
+    token = _owner_token()
+    if not token:
+        return False
+    headers = getattr(websocket, "headers", {}) or {}
+    authorization = headers.get("authorization", "") if hasattr(headers, "get") else ""
+    scheme, separator, value = authorization.partition(" ")
+    if separator and scheme.lower() == "bearer" and value and hmac.compare_digest(value, token):
+        return True
+    cookies = getattr(websocket, "cookies", {}) or {}
+    cookie = cookies.get(COOKIE_NAME, "") if hasattr(cookies, "get") else ""
+    return bool(cookie and hmac.compare_digest(cookie, _session_value(token)))
+
+
 class OwnerAuthMiddleware(BaseHTTPMiddleware):
     """Protect the API when the backend is explicitly exposed beyond loopback."""
 

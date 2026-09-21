@@ -69,6 +69,10 @@ class EventType(enum.Enum):
     ADDON_UNLOADED = "addon_unloaded"
     MODEL_CHANGED = "model_changed"
     APPEARANCE_CHANGED = "appearance_changed"
+    # スペル不使用モードの切り替え (AI.SPELL_ENABLED の保存で値が実際に変わった
+    # とき)。gate を持つ section を一斉に撮り直して、その場でプロンプトへ反映
+    # する (docs/intent/spell_disabled_mode.md §4-2)。
+    SPELL_TOGGLED = "spell_toggled"
 
 
 @dataclass(frozen=True)

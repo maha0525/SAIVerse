@@ -4,6 +4,11 @@
 ``{current_persona_name}`` / ``{current_building_name}`` 等の placeholder を
 capture 時点の値で焼き込み、render は展開済み文字列をそのまま返す。
 
+テンプレートは ``{if_spell_enabled}`` / ``{end_if_spell_enabled}`` の行単位
+マーカーで「スペルが使えるときだけ載る文章」を囲める。解決するのは capture で、
+スナップショットには展開済みのテキストだけが残る
+(docs/intent/spell_disabled_mode.md §4-4)。
+
 詳細: docs/intent/cached_head_architecture.md §5.3
 """
 from __future__ import annotations
@@ -58,7 +63,13 @@ class CommonPromptSection:
     # NOTE: BUILDING_ENTERED は意図的に含めない (= cache 中変えない原則)。
     # template に {current_building_name} 等の placeholder があると、移動後も
     # 古い名前のまま残る trade-off は許容する (= 末尾通知でペルソナに伝わる)。
-    refresh_on_events = frozenset({EventType.SYSTEM_PROMPT_EDITED})
+    # SPELL_TOGGLED: スペル不使用モードの切り替えはその場で反映する — 条件ブロック
+    # ({if_spell_enabled} …) は capture で解決済みなので、撮り直さないと文章が
+    # 変わらない (docs/intent/spell_disabled_mode.md §4-2)。
+    refresh_on_events = frozenset({
+        EventType.SYSTEM_PROMPT_EDITED,
+        EventType.SPELL_TOGGLED,
+    })
 
     def capture(self, ctx: LineHeadInput) -> CommonPromptSnapshot:
         persona = ctx.persona
@@ -82,6 +93,18 @@ class CommonPromptSection:
             getattr(building_obj, "base_system_instruction", "")
             if building_obj else ""
         ) or ""
+
+        # 条件ブロック ({if_spell_enabled} …) を **placeholder 展開より先に**
+        # 解決する。順序はここで固定する: 先に展開すると、ペルソナや Building の
+        # 説明文にたまたま同じ行が書かれていた場合にそれがマーカーとして働いて
+        # しまう。マーカーはテンプレート本体だけのものにする。
+        # spell_enabled は capture 時に焼き込む (render では触らない — head は
+        # (persona, model) 固定、cached_head_architecture.md §5.3)。
+        from sea.head_pipeline.spell_gate import (
+            apply_spell_markers,
+            resolve_spell_enabled,
+        )
+        template = apply_spell_markers(template, resolve_spell_enabled(ctx))
 
         replacements = {
             "{current_persona_name}": getattr(persona, "persona_name", "Unknown") or "Unknown",
@@ -110,7 +133,14 @@ class CommonPromptSection:
         old: Optional[CommonPromptSnapshot],
         new: Optional[CommonPromptSnapshot],
     ) -> list[NotificationLabel]:
-        if old is None or new is None or old == new:
+        if old is None or new is None:
+            return []
+        # 比べるのは**展開済みテキストだけ** (2026-09-14)。snapshot 全体で比べると
+        # テンプレート指紋の違いも差分になるので、common.txt のファイルは変わった
+        # のに文章は同一バイト、というリリース (マーカー行の挿入がまさにそれ) で
+        # 全ペルソナに「前提情報が更新されました」が飛ぶ
+        # (docs/intent/spell_disabled_mode.md §4-6)。
+        if old.text == new.text:
             return []
         # common_prompt は実質常に展開差分は他 Section が個別通知するため、
         # ここでは fallback の単発通知のみ。

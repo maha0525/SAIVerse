@@ -43,6 +43,9 @@ class ModelAvailability(BaseModel):
     provider: str
     is_available: bool
     supports_structured_output: bool = True
+    # 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない) の印。
+    # 会話に使う役割の選択欄はこの印の付いたモデルを出さない (一覧からは落とさない)。
+    reflex_only: bool = False
 
 
 class AvailableModelsResponse(BaseModel):
@@ -247,6 +250,7 @@ def get_available_models():
         get_model_provider,
         supports_structured_output,
     )
+    from saiverse.model_defaults import is_reflex_only_model
 
     models = []
 
@@ -264,6 +268,7 @@ def get_available_models():
             provider=provider,
             is_available=is_available,
             supports_structured_output=supports_structured_output(model_id),
+            reflex_only=is_reflex_only_model(model_id),
         ))
 
     return AvailableModelsResponse(models=models)
@@ -300,6 +305,11 @@ _GEMINI_FALLBACK_ROLES = {
 # Provider presets: values are config keys (filename stems).
 # image_summary_model is also a config key (resolved via find_model_config at runtime).
 # None means "not applicable for this provider" — will fall back to Gemini default if available.
+#
+# 反射判断 (reflex_judgment_model) はどのプリセットにも意図的に載せない。役割への
+# 割り当てはユーザーの明示の行為に限り、プリセットを当てただけで黙って費用の発生する
+# 経路を作らない (docs/intent/reflex_judgment.md §4 の裁定)。役割を持たないプリセットは
+# 下の適用ループが model_id is None で素通りする。
 PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
     "gemini_paid": {
         "default_model": "gemini-3-flash-preview-paid",
