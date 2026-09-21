@@ -2228,6 +2228,19 @@ export default function Home() {
                                 }
                                 if (streamCompleteImages.length === 0) streamCompleteImages = undefined;
                             }
+                            // 帳簿にあるフォールバックの注記を、この確定に貼って
+                            // 消費する。確定の合図は 2 系統ある — 流し込み (ストリー
+                            // ミング) の発言はここ (streaming_complete) で確定し、
+                            // **say イベントは来ない**。say だけに貼ると、流し込みを
+                            // 使う設定 (既定) では注記が永遠に出ない (2026-09-21 実機)。
+                            // 読み書きの規則は say 側と同じ: 部屋の判定を通った
+                            // イベントだけが、イベントを読んだその場で同期的に触る。
+                            const scRfKey = `${eventBuildingId || ''}/${evtPersonaId || ''}`;
+                            let scReflexFallback = false;
+                            if (!isOtherBuildingEvent && pendingReflexNoticeRef.current.has(scRfKey)) {
+                                pendingReflexNoticeRef.current.delete(scRfKey);
+                                scReflexFallback = true;
+                            }
                             // Mark streaming message as complete, finalize reasoning, activities, and images
                             setMessages(prev => {
                                 // 別の部屋の Beat の確定で、この部屋の下書きの
@@ -2242,6 +2255,13 @@ export default function Home() {
                                         reasoning,
                                         ...((_activities && _activities.length > 0) && { activity_trace: _activities }),
                                         ...(streamCompleteImages && { images: streamCompleteImages }),
+                                        // 注記は同じ話者の吹き出しにだけ貼る。同室で二人が
+                                        // 同時に生成中だと、末尾の吹き出しが隣のペルソナの
+                                        // ものでありうる — その稀なターンは貼らずに諦める
+                                        // (集計と設定画面の警告には残る。本文側の流入は
+                                        // docs/issues/chat_stream_event_correlation_by_last_bubble.md
+                                        // の土台の限界)。
+                                        ...(scReflexFallback && isSameSpeaker(last) && { _reflexFallback: true }),
                                         // 途中で切れた発言。再読込を待たずに印を立て、
                                         // その場で「続きの生成」を出せるようにする。
                                         ...(event.interrupted && { interrupted: true }),
