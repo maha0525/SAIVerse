@@ -1,9 +1,19 @@
 # Intent: Godot / ARDY 仮想身体デモ
 
-> **ステータス: v0.24 (2026-07-23) — 実装中**
+> **ステータス: v0.25 (2026-09-23) — 実装中**
 > 2026-07-12 の「VR/3Dアバターの身体制御」構想を、Godot + OpenXR + VRM + ARDY による公開デモ計画へ昇格した。Unity は正典から外し、既存 `unity_gateway` は再利用可能な知見を回収するための旧実装として扱う。なお、旧 `unity_gateway` は 2026-09-11 にリポジトリから削除したので、知見は旧設計書 (`docs/old/unity-gateway.md`) と git の履歴から回収する。
 
 ## 実装記録
+
+### 2026-09-23: ARDYの別PC生成と、身体Spellを使えるBuildingの指定
+
+- 最終成果は「GPUを持ち出せない場所でも、ペルソナが新しい動きを頼めば家のGPUで作られて身体が動くこと」と「身体Spellが、アバターのいるBuildingにいるペルソナにだけ見えて使えること」。前者の発端は展示会へ3090を持ち込めないこと、後者の発端は`vessel_building_id`が空で全Buildingの全ペルソナに身体Spellが見えていたこと。
+- 別PCへ頼むのは「文章から元モーション (`.npz`) を作る」部分だけにした。GPU機では`sai-vr/tools/ardy_remote_server.py` (標準ライブラリのみ、`saiverse.ardy_remote.v1`) が依頼ごとにARDYの`scripts/generate.py`を子プロセスで走らせ、NPZを返す。モデルを常駐させないので、GPUメモリはジョブが終われば返る。Godot用アセットへの変換・保存、content-addressed asset IDの照合、ペルソナへの終端知覚はすべてSAIVerse側に残し、生成場所が変わっても契約は変えない。生成場所はアセットの`generator.runtime` (`remote`+ホスト:ポート / `local_wsl`) に残す。
+- 合言葉 (Bearer token) は任意。SAIVerseから生成CLIへは環境変数`SAIVERSE_ARDY_REMOTE_TOKEN`で渡し、コマンドライン・アセット・ログに載せない。サーバー側は`asset_id`・model名・長さ・ステップ数・seed・prompt長を検査してから子プロセスを起動する。
+- 身体Spell 5本の可否判定を`vessel_access.py`の一か所へまとめた。旧実装はSpellごとに規則が違い (`body_gesture`は全体設定、`body_move_to`はペルソナ別設定、`body_see`/`body_stop`は実行時の判定なし)、さらに`ToolSchema.building_ids`へ起動時の値を焼き込んでいた。起動時にDBが未準備なら空扱いで全Buildingに見え、設定変更も再起動まで効かない。新実装は`availability_check`で毎回その時点の設定 (ペルソナ別設定を含む) と現在地を照らし、`building_ids`は使わない。Spell一覧の capture はツール実行のcontextの外でも走るため、現在地はcontextのmanager、無ければ`saiverse.app_state.manager`から引く。Buildingが必須なのに現在地が分からない場合は見せない側に倒す。
+- アドオン設定の「仮想身体のBuilding」は、`GET /buildings`が返すBuilding一覧のドロップダウンにした (先頭の空欄 = 全Building)。
+- 検証: 追加・変更したPython単体テスト (判定8件、生成先の受け渡し3件、HTTP往復6件) とアドオン既存テストがすべて緑。実NEBULA (RTX 3090、WSL `ARDY-22.04` はこの機体の7月の検証済み環境をexport/importしたもの、CUDAはUUIDで3090に固定) へTailscale越しに生成を依頼し、お辞儀の動作が約70秒・80フレームで返り、上半身が中盤で約30°前傾して最後に1〜2°へ戻ることを数値で確認した。続けて隔離`SAIVERSE_HOME`・合成`e2e_persona`・実WebSocket・Godot 4.6.3で`gesture_dynamic_real --ardy-remote-url`を完走し、NEBULA側のログとアセットの書き込み時刻、Godotの`motion_generator=ARDY`・`generated_by_ardy=true`・`completed`を突き合わせた。本番ペルソナ・本番記憶・外部LLMには接触していない。
+- 未検証の境界: 本番SAIVerseの設定画面からのドロップダウン表示と保存、本番のSpell一覧 capture での Building 判定 (単体テストでは実際のSpellモジュールと`persona_context`で確認済み)。NEBULAの生成サーバーは常駐させていない — タスクスケジューラ等での常駐は永続設定の追加にあたるため、まはーの判断を待つ。3090を ComfyUI と共有しており、ComfyUI がVRAMを確保している間は生成がGPUメモリ不足で失敗しうる (失敗は理由付きで身体知覚に届く)。
 
 ### 2026-07-23: 立体SkySpark撤去と発光樹冠の復元
 
