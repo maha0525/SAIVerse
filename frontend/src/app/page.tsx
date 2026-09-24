@@ -1770,6 +1770,10 @@ export default function Home() {
     // 応答 (別タブで付いた分など) は降ろせないが、その回は門番が受け止める。
     // 確定前のストリーミング吹き出し (_streaming) は数えない — 保存に失敗すると
     // 空で確定して消える吹き出しで印を降ろすと、再送が要る場面で導線を失う。
+    // 画面側で作った案内 (isError / isWarning / isInfo) も数えない — エラー札は
+    // role: 'assistant' で本文を持つが、サーバーには保存されない画面だけの表示
+    // なので、門番 (保存済みの行だけを見る) はこれを応答と数えない。数えると
+    // エラー札そのものが印を降ろし、「再送」が一度も出なくなる (2026-09-24 修正)。
     useEffect(() => {
         setMessages(prev => {
             let changed = false;
@@ -1777,7 +1781,8 @@ export default function Home() {
             const next = [...prev];
             for (let i = next.length - 1; i >= 0; i--) {
                 const m = next[i];
-                if (m.role === 'assistant' && !m._streaming && m.content) {
+                if (m.role === 'assistant' && !m._streaming && m.content
+                    && !m.isError && !m.isWarning && !m.isInfo) {
                     replyBehind = true;
                 } else if (m.role === 'user' && m.needsRetry && replyBehind) {
                     next[i] = { ...m, needsRetry: false };
