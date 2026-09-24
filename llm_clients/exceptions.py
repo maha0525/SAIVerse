@@ -12,6 +12,17 @@ class LLMError(Exception):
 
     error_code: str = "llm_error"
     user_message: str = "LLMでエラーが発生しました"
+    #: この失敗で止まった返事の、「続きの生成」を出すペルソナの発言の id。
+    #: 埋めるのは返事の実行の一番外側の後始末 (sea/reply_stop_exit.py) だけで、
+    #: 画面はこの id の発言に「続きの生成」を出し、エラー札の案内もそちらを
+    #: 指す。一番外側が埋めてそのまま画面へ出す単方向の属性 — 内側の経路が
+    #: これを読んで何かを引き取ることはしない。
+    interrupted_message_id: str | None = None
+    #: 上の発言が、返事の部屋 (ユーザーが発言を送った部屋) と違う部屋にある回の、
+    #: その部屋の id と表示名。画面は部屋の名前つきで「その部屋へ行って押す」を
+    #: 案内する。
+    interrupted_building_id: str | None = None
+    interrupted_building_name: str | None = None
 
     def __init__(
         self,
@@ -26,12 +37,20 @@ class LLMError(Exception):
 
     def to_dict(self) -> dict:
         """Convert to a dictionary for NDJSON serialization."""
-        return {
+        event = {
             "type": "error",
             "error_code": self.error_code,
             "content": self.user_message,
             "technical_detail": str(self),
         }
+        # 案内の材料は値が立っているときだけ載せる (docs/intent/reply_stop_exit.md)。
+        if self.interrupted_message_id:
+            event["interrupted_message_id"] = str(self.interrupted_message_id)
+        if self.interrupted_building_id:
+            event["interrupted_building_id"] = str(self.interrupted_building_id)
+        if self.interrupted_building_name:
+            event["interrupted_building_name"] = str(self.interrupted_building_name)
+        return event
 
 
 class RateLimitError(LLMError):
