@@ -134,6 +134,17 @@ interface Message {
     isError?: boolean;
     errorCode?: string;
     errorDetail?: string;
+    // エラー札だけが持つ。返事が途中で止まり、ペルソナの発言に「続きの生成」を
+    // 出した回の、その発言の id (サーバーの error イベントの
+    // interrupted_message_id)。この回はユーザーの発言の後ろに返事が並んでいる
+    // ので「再送」は出さず、札の案内も「続きの生成」を指す。
+    // 設計: docs/intent/reply_stop_exit.md
+    interruptedMessageId?: string;
+    // エラー札だけが持つ。上の発言が返事の部屋ではなく、スペルでペルソナが
+    // 移った先の部屋にある回の、その部屋 (interrupted_building_id / _name)。
+    // この部屋では押せないので、札は「その部屋へ行って押す」を案内する。
+    interruptedBuildingId?: string;
+    interruptedBuildingName?: string;
     // Warning information
     isWarning?: boolean;
     warningCode?: string;
@@ -984,22 +995,45 @@ export default function Home() {
             setMessages(prev => {
                 const result = [...prev];
 
-                // Build lookup from server messages: match by role + content prefix
+                // Build lookups from server messages. 吹き出しが既に行の id を
+                // 持っているとき (speak_persisted / say で id が届いた回) は id で
+                // 突き合わせる — 本文の先頭一致は、スペルの結果の折りたたみや
+                // 流し込み中の生テキストとの差で外れることがあり、外れると
+                // 停止した回の「続きの生成」ボタンが出ない。本文の一致は id の
+                // 無い吹き出しの後備。
+                const serverById = new Map<string, { msg: Message; used: boolean }>();
                 const serverMap = new Map<string, { msg: Message; used: boolean }>();
                 for (const sm of serverMessages) {
+                    const entry = { msg: sm, used: false };
+                    if (sm.id) serverById.set(sm.id, entry);
                     const key = `${sm.role}:${(sm.content || '').substring(0, 120)}`;
-                    serverMap.set(key, { msg: sm, used: false });
+                    serverMap.set(key, entry);
                 }
 
                 // Walk backwards through local messages, match with server
                 let matched = 0;
                 for (let i = result.length - 1; i >= 0; i--) {
                     const local = result[i];
+                    // id を持つ吹き出しは id でだけ突き合わせる — 本文の先頭一致に
+                    // 落とすと、同じ書き出しの別の行と取り違えて、印 (続きの生成)
+                    // まで別の吹き出しへ写ることがある。id がサーバーの取得範囲の
+                    // 外なら、その吹き出しは今回の突き合わせの対象外でよい。
+                    const byId = local.id ? serverById.get(local.id) : undefined;
                     const key = `${local.role}:${(local.content || '').substring(0, 120)}`;
-                    const entry = serverMap.get(key);
+                    const entry = local.id ? byId : serverMap.get(key);
                     if (entry && !entry.used) {
+                        // 「言い切っていない」印 (= 「続きの生成」ボタン) はサーバーの
+                        // 行を正とする。返事の後始末が印を付けるのは返事の最後
+                        // (流れてきたイベントより後) なので、流し込みの吹き出しに
+                        // 印が届かなかった回 (停止など) もここで揃う。履歴 API は
+                        // assistant の行に必ず interrupted を載せる (api/routes/chat.py)。
+                        const serverInterrupted = local.role === 'assistant'
+                            && typeof entry.msg.interrupted === 'boolean'
+                            ? { interrupted: entry.msg.interrupted }
+                            : {};
                         result[i] = {
                             ...local,
+                            ...serverInterrupted,
                             id: entry.msg.id,
                             avatar: entry.msg.avatar || local.avatar,
                             sender: entry.msg.sender || local.sender,
@@ -2267,14 +2301,49 @@ export default function Home() {
                                         // docs/issues/chat_stream_event_correlation_by_last_bubble.md
                                         // の土台の限界)。
                                         ...(scReflexFallback && isSameSpeaker(last) && { _reflexFallback: true }),
-                                        // 途中で切れた発言。再読込を待たずに印を立て、
-                                        // その場で「続きの生成」を出せるようにする。
-                                        ...(event.interrupted && { interrupted: true }),
+                                        // 「言い切っていない」印はここでは立てない — サーバーは
+                                        // 完了の合図に印を載せない (印は返事の後始末が最後に
+                                        // 付ける)。ボタンはエラー札 / 知らせの案内と、
+                                        // syncAfterResponse の履歴の突き合わせで出る。
                                     }];
                                 }
                                 return prev;
                             });
                             setLoadingStatus('Thinking...');
+                        } else if (event.type === 'speak_persisted') {
+                            // ペルソナの発言が建物の記録に保存された合図。流し込みの
+                            // 吹き出しは行の id を持たないので、ここで持たせる —
+                            // 返事が途中で止まった回のエラー札・知らせは、この id で
+                            // 「続きの生成」を出す吹き出しを探す。新しいイベントの
+                            // 種類は足さず、保存の証拠として既に流れている信号を使う。
+                            // 設計: docs/intent/reply_stop_exit.md
+                            const rowId: string | undefined =
+                                typeof event.message_id === 'string' && event.message_id
+                                    ? event.message_id : undefined;
+                            if (rowId) {
+                                setMessages(prev => {
+                                    // 別の部屋の行 (tell や移動後の発言) は、この部屋の
+                                    // 吹き出しに付けない
+                                    if (isOtherBuildingEvent) return prev;
+                                    if (prev.some(m => m.id === rowId)) return prev;
+                                    // 保存されたのは、この話し手のいちばん新しい
+                                    // 吹き出し。ユーザーの発言を越えて遡らない
+                                    // (前の返事の吹き出しに付けない)。既に id を
+                                    // 持っていれば (say が id を運んだ回) 触らない。
+                                    for (let i = prev.length - 1; i >= 0; i--) {
+                                        const m = prev[i];
+                                        if (m.role === 'user') return prev;
+                                        if (m.role !== 'assistant' || m.isError
+                                            || m.isWarning || m.isInfo) continue;
+                                        if (!isSameSpeaker(m)) continue;
+                                        if (m.id) return prev;
+                                        const updated = [...prev];
+                                        updated[i] = { ...m, id: rowId };
+                                        return updated;
+                                    }
+                                    return prev;
+                                });
+                            }
                         } else if (event.type === 'say') {
                             if (String(event.content || '').trim()) replied = true;
                             console.log('[DEBUG] Received say event:', event);
@@ -2392,21 +2461,69 @@ export default function Home() {
                             if (event.current_building_id) {
                                 updateServerBuildingId(event.current_building_id);
                             }
-                            setMessages(prev => [...prev, {
-                                role: 'assistant',
-                                content: event.content || 'An error occurred',
-                                isError: true,
-                                errorCode: event.error_code || 'unknown',
-                                errorDetail: event.technical_detail,
-                                timestamp: new Date().toISOString()
-                            }]);
+                            // 返事が途中で止まり、サーバーがペルソナの最後の発言に
+                            // 「言い切っていない」印を付けた回 (error イベントに
+                            // その id が載る)。その発言に「続きの生成」を出し、札の
+                            // 案内もそちらへ向ける。印は建物の記録に立っているので、
+                            // 再読込しても同じボタンが出る。
+                            // 設計: docs/intent/reply_stop_exit.md
+                            const reportedInterruptedId: string | undefined =
+                                typeof event.interrupted_message_id === 'string'
+                                    && event.interrupted_message_id
+                                    ? event.interrupted_message_id : undefined;
+                            // その発言がスペルで移った先の部屋にある回 (サーバーが
+                            // 部屋を添える)。この部屋の画面には無いので、札が
+                            // その部屋へ行くよう案内する。
+                            const reportedInterruptedBuildingId: string | undefined =
+                                reportedInterruptedId
+                                    && typeof event.interrupted_building_id === 'string'
+                                    && event.interrupted_building_id
+                                    ? event.interrupted_building_id : undefined;
+                            const reportedInterruptedBuildingName: string | undefined =
+                                reportedInterruptedBuildingId
+                                    && typeof event.interrupted_building_name === 'string'
+                                    && event.interrupted_building_name
+                                    ? event.interrupted_building_name : undefined;
                             const errorCode: string = event.error_code || 'unknown';
                             lastErrorCode = errorCode;
+                            setMessages(prev => {
+                                // 吹き出しに行の id が付いていれば、その場でボタンを
+                                // 出す。見つからない回も、ストリームが閉じた後の
+                                // 突き合わせ (syncAfterResponse) がサーバーの印を
+                                // 写すので、案内は「続きの生成」のままでよい。
+                                const next = reportedInterruptedId && !reportedInterruptedBuildingId
+                                    ? prev.map(m => (
+                                        m.id === reportedInterruptedId
+                                            && m.role === 'assistant' && !m.isError
+                                            ? { ...m, interrupted: true } : m
+                                    ))
+                                    : prev;
+                                return [...next, {
+                                    role: 'assistant',
+                                    content: event.content || 'An error occurred',
+                                    isError: true,
+                                    errorCode,
+                                    errorDetail: event.technical_detail,
+                                    ...(reportedInterruptedId && {
+                                        interruptedMessageId: reportedInterruptedId,
+                                    }),
+                                    ...(reportedInterruptedBuildingId && {
+                                        interruptedBuildingId: reportedInterruptedBuildingId,
+                                    }),
+                                    ...(reportedInterruptedBuildingName && {
+                                        interruptedBuildingName: reportedInterruptedBuildingName,
+                                    }),
+                                    timestamp: new Date().toISOString()
+                                }];
+                            });
                             // 発言は届いているのに返事が生まれなかった (出口 3)。
                             // 送り直しではなく「もう一度応答を得る」を出す。
                             // 応答できる相手が居ない回は「再送」だけを落とす —
                             // 発言は誰にも読まれていないので「取り消す」は残る。
-                            if (landedMessageId) {
+                            // 返事が途中まで残った回は立てない — 後ろに返事が
+                            // 並んでいるので「再送」はサーバーの門番に断られる。
+                            // 出口は印を付けた発言の「続きの生成」。
+                            if (landedMessageId && !reportedInterruptedId) {
                                 markRetryable(
                                     landedMessageId,
                                     RETRY_CHANGES_NOTHING.has(errorCode),
@@ -2493,12 +2610,50 @@ export default function Home() {
                             }
                         } else if (event.type === 'info') {
                             // Info notification (e.g. 504 stream interruption)
-                            setMessages(prev => [...prev, {
-                                role: 'system',
-                                content: event.content || '',
-                                isInfo: true,
-                                timestamp: new Date().toISOString()
-                            }]);
+                            // サーバーが締めの生成を途中で切った回は、エラー札では
+                            // なくこの知らせのまま、印を付けた発言の id
+                            // (interrupted_message_id) と、別の部屋ならその部屋が
+                            // 載る。その吹き出しに「続きの生成」をその場で出し、
+                            // 別の部屋の発言なら、その部屋へ行くよう案内を添える。
+                            // 設計: docs/intent/reply_stop_exit.md
+                            const infoInterruptedId: string | undefined =
+                                typeof event.interrupted_message_id === 'string'
+                                    && event.interrupted_message_id
+                                    ? event.interrupted_message_id : undefined;
+                            const infoInterruptedBuildingId: string | undefined =
+                                infoInterruptedId
+                                    && typeof event.interrupted_building_id === 'string'
+                                    && event.interrupted_building_id
+                                    ? event.interrupted_building_id : undefined;
+                            const infoInterruptedRoom: string | undefined =
+                                infoInterruptedBuildingId
+                                    && typeof event.interrupted_building_name === 'string'
+                                    && event.interrupted_building_name
+                                    ? event.interrupted_building_name : infoInterruptedBuildingId;
+                            setMessages(prev => {
+                                const target = infoInterruptedId && !infoInterruptedBuildingId
+                                    ? prev.find(m => m.id === infoInterruptedId
+                                        && m.role === 'assistant' && !m.isError)
+                                    : undefined;
+                                const next = target
+                                    ? prev.map(m => (m === target ? { ...m, interrupted: true } : m))
+                                    : prev;
+                                // 吹き出しが見つからない回も出口を必ず示す (印は
+                                // 建物の記録に立っているので、ストリームが閉じた後の
+                                // 突き合わせか再読込でボタンが出る)。
+                                let guidance = '';
+                                if (infoInterruptedBuildingId && infoInterruptedRoom) {
+                                    guidance = `\n${uiText("app.page.movedContinueServerError", { p1: infoInterruptedRoom })}`;
+                                } else if (infoInterruptedId && !target) {
+                                    guidance = `\n${uiText("app.page.continueServerError")}`;
+                                }
+                                return [...next, {
+                                    role: 'system',
+                                    content: (event.content || '') + guidance,
+                                    isInfo: true,
+                                    timestamp: new Date().toISOString()
+                                }];
+                            });
                         } else if (event.type === 'cancelled') {
                             // Server-side cancellation: finalize streaming message
                             setMessages(prev => {
@@ -3582,8 +3737,38 @@ export default function Home() {
                                                 </span>
                                                 <span className={styles.errorMessage}>{msg.content}</span>
                                             </div>
-                                            <div data-i18n="app.page.text049 app.page.text050 app.page.text051 app.page.text052 app.page.text053 app.page.text054 app.page.text055 app.page.text056 app.page.text057 app.page.text058 app.page.text059 app.page.text060 app.page.text061 app.page.text062 app.page.modelUnavailable app.page.text063 app.page.text064 app.page.text065 app.page.text066" style={{ fontSize: '0.85em', opacity: 0.75, lineHeight: 1.4, marginTop: '4px' }}>
-                                                {({
+                                            <div data-i18n="app.page.text049 app.page.text050 app.page.text051 app.page.text052 app.page.text053 app.page.text054 app.page.text055 app.page.text056 app.page.text057 app.page.text058 app.page.text059 app.page.text060 app.page.text061 app.page.text062 app.page.modelUnavailable app.page.text063 app.page.text064 app.page.text065 app.page.text066 app.page.continueSafetyFilter app.page.continueTimeout app.page.continueRateLimit app.page.continueServerError app.page.continueModelUnavailable app.page.continuePayment app.page.continueAuthentication app.page.continueDefault app.page.movedContinueSafetyFilter app.page.movedContinueTimeout app.page.movedContinueRateLimit app.page.movedContinueServerError app.page.movedContinueModelUnavailable app.page.movedContinuePayment app.page.movedContinueAuthentication app.page.movedContinueDefault" style={{ fontSize: '0.85em', opacity: 0.75, lineHeight: 1.4, marginTop: '4px' }}>
+                                                {msg.interruptedBuildingId ? (
+                                                    // 返事が止まった発言が、スペルでペルソナが移った
+                                                    // 先の部屋にある回。この部屋では押せないので、
+                                                    // その部屋へ行って「続きの生成」を押すよう案内する。
+                                                    // 部屋の表示名が届かなかった回は id で代える。
+                                                    ((room: string) => ({
+                                                        safety_filter: uiText("app.page.movedContinueSafetyFilter", { p1: room }),
+                                                        timeout: uiText("app.page.movedContinueTimeout", { p1: room }),
+                                                        rate_limit: uiText("app.page.movedContinueRateLimit", { p1: room }),
+                                                        server_error: uiText("app.page.movedContinueServerError", { p1: room }),
+                                                        model_unavailable: uiText("app.page.movedContinueModelUnavailable", { p1: room }),
+                                                        payment: uiText("app.page.movedContinuePayment", { p1: room }),
+                                                        authentication: uiText("app.page.movedContinueAuthentication", { p1: room }),
+                                                    } as Record<string, string>)[msg.errorCode || '']
+                                                        || uiText("app.page.movedContinueDefault", { p1: room })
+                                                    )(msg.interruptedBuildingName || msg.interruptedBuildingId)
+                                                ) : msg.interruptedMessageId ? (
+                                                    // 返事が途中で止まり、ペルソナの発言に「続きの生成」を
+                                                    // 出した回。「再送」は出ていない (押しても断られる) ので、
+                                                    // その発言の「続きの生成」を案内する。原因ごとの前置きは
+                                                    // 下の通常の案内と同じ。
+                                                    ({
+                                                        safety_filter: uiText("app.page.continueSafetyFilter"),
+                                                        timeout: uiText("app.page.continueTimeout"),
+                                                        rate_limit: uiText("app.page.continueRateLimit"),
+                                                        server_error: uiText("app.page.continueServerError"),
+                                                        model_unavailable: uiText("app.page.continueModelUnavailable"),
+                                                        payment: uiText("app.page.continuePayment"),
+                                                        authentication: uiText("app.page.continueAuthentication"),
+                                                    } as Record<string, string>)[msg.errorCode || ''] || uiText("app.page.continueDefault")
+                                                ) : ({
                                                     empty_response: uiText("app.page.text049"),
                                                     safety_filter: uiText("app.page.text050"),
                                                     timeout: uiText("app.page.text051"),

@@ -295,6 +295,70 @@
     "ja": "あなたの発言は記録に残っています。モデルを選び直したあと、発言の「再送」から応答をもう一度求められます。",
     "en": "Your message was saved. After selecting another model, use Retry on the message to request a reply again."
   },
+  "app.page.continueSafetyFilter": {
+    "ja": "このモデルでは通らない内容でも、別のモデルなら通ることがあります。別のモデルに切り替えてから、ペルソナの発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "Content one model rejects may pass on another. Switch to a different model, then press the \"Continue reply\" button on the persona's message."
+  },
+  "app.page.continueTimeout": {
+    "ja": "サーバーが混雑している可能性があります。しばらく時間を置いてから、ペルソナの発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "The server may be busy. Wait a while, then press the \"Continue reply\" button on the persona's message."
+  },
+  "app.page.continueRateLimit": {
+    "ja": "API利用制限に達しています。しばらく時間を置いてから、ペルソナの発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "The API usage limit has been reached. Wait a while, then press the \"Continue reply\" button on the persona's message."
+  },
+  "app.page.continueServerError": {
+    "ja": "LLMサーバーで障害が発生している可能性があります。しばらく時間を置いてから、ペルソナの発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "The LLM server may be experiencing an issue. Wait a while, then press the \"Continue reply\" button on the persona's message."
+  },
+  "app.page.continueModelUnavailable": {
+    "ja": "ここまでの発言は記録に残っています。モデルを選び直したあと、ペルソナの発言の「続きの生成」から続きを求められます。",
+    "en": "The conversation so far was saved. After selecting another model, use Continue reply on the persona's message to request the rest."
+  },
+  "app.page.continuePayment": {
+    "ja": "APIキーの残高や支払い設定を確認してください。ここまでの発言は記録に残っています。設定を直したあと、ペルソナの発言の「続きの生成」から続きを求められます。",
+    "en": "Check the API key's balance and billing settings. The conversation so far was saved. After fixing the settings, use Continue reply on the persona's message to request the rest."
+  },
+  "app.page.continueAuthentication": {
+    "ja": "APIキーの設定を確認してください。ここまでの発言は記録に残っています。設定を直したあと、ペルソナの発言の「続きの生成」から続きを求められます。",
+    "en": "Check your API key settings. The conversation so far was saved. After fixing the settings, use Continue reply on the persona's message to request the rest."
+  },
+  "app.page.continueDefault": {
+    "ja": "ここまでの発言は記録に残っています。少し待ってから、ペルソナの発言に表示されている「続きの生成」ボタンを押してください。解決しない場合は開発者へ報告してください。",
+    "en": "The conversation so far was saved. Wait a little, then press the \"Continue reply\" button on the persona's message. If the problem persists, please report it to the developer."
+  },
+  "app.page.movedContinueSafetyFilter": {
+    "ja": "このモデルでは通らない内容でも、別のモデルなら通ることがあります。ペルソナは移動先の部屋「{p1}」で、途中まで話しています。別のモデルに切り替えてから「{p1}」へ行き、その発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "Content one model rejects may pass on another. The persona moved to \"{p1}\" and stopped partway through speaking there. Switch to a different model, go to \"{p1}\", and press the \"Continue reply\" button on that message."
+  },
+  "app.page.movedContinueTimeout": {
+    "ja": "サーバーが混雑している可能性があります。ペルソナは移動先の部屋「{p1}」で、途中まで話しています。しばらく時間を置いてから「{p1}」へ行き、その発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "The server may be busy. The persona moved to \"{p1}\" and stopped partway through speaking there. Wait a while, go to \"{p1}\", and press the \"Continue reply\" button on that message."
+  },
+  "app.page.movedContinueRateLimit": {
+    "ja": "API利用制限に達しています。ペルソナは移動先の部屋「{p1}」で、途中まで話しています。しばらく時間を置いてから「{p1}」へ行き、その発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "The API usage limit has been reached. The persona moved to \"{p1}\" and stopped partway through speaking there. Wait a while, go to \"{p1}\", and press the \"Continue reply\" button on that message."
+  },
+  "app.page.movedContinueServerError": {
+    "ja": "LLMサーバーで障害が発生している可能性があります。ペルソナは移動先の部屋「{p1}」で、途中まで話しています。しばらく時間を置いてから「{p1}」へ行き、その発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "The LLM server may be experiencing an issue. The persona moved to \"{p1}\" and stopped partway through speaking there. Wait a while, go to \"{p1}\", and press the \"Continue reply\" button on that message."
+  },
+  "app.page.movedContinueModelUnavailable": {
+    "ja": "ペルソナは移動先の部屋「{p1}」で、途中まで話しています。ここまでの発言は記録に残っています。モデルを選び直したあと「{p1}」へ行くと、その発言の「続きの生成」から続きを求められます。",
+    "en": "The persona moved to \"{p1}\" and stopped partway through speaking there. The conversation so far was saved. After selecting another model, go to \"{p1}\" and use Continue reply on that message to request the rest."
+  },
+  "app.page.movedContinuePayment": {
+    "ja": "APIキーの残高や支払い設定を確認してください。ペルソナは移動先の部屋「{p1}」で、途中まで話しています。設定を直したあと「{p1}」へ行くと、その発言の「続きの生成」から続きを求められます。",
+    "en": "Check the API key's balance and billing settings. The persona moved to \"{p1}\" and stopped partway through speaking there. After fixing the settings, go to \"{p1}\" and use Continue reply on that message to request the rest."
+  },
+  "app.page.movedContinueAuthentication": {
+    "ja": "APIキーの設定を確認してください。ペルソナは移動先の部屋「{p1}」で、途中まで話しています。設定を直したあと「{p1}」へ行くと、その発言の「続きの生成」から続きを求められます。",
+    "en": "Check your API key settings. The persona moved to \"{p1}\" and stopped partway through speaking there. After fixing the settings, go to \"{p1}\" and use Continue reply on that message to request the rest."
+  },
+  "app.page.movedContinueDefault": {
+    "ja": "ペルソナは移動先の部屋「{p1}」で、途中まで話しています。ここまでの発言は記録に残っています。少し待ってから「{p1}」へ行き、その発言に表示されている「続きの生成」ボタンを押してください。解決しない場合は開発者へ報告してください。",
+    "en": "The persona moved to \"{p1}\" and stopped partway through speaking there. The conversation so far was saved. Wait a little, go to \"{p1}\", and press the \"Continue reply\" button on that message. If the problem persists, please report it to the developer."
+  },
   "app.page.text067": {
     "ja": "ふと浮かんだ記憶",
     "en": "A memory that came to mind"
