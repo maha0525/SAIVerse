@@ -507,9 +507,10 @@ def run_work_session(
             # 締めの発言とラウンド数だけ。
             continuation = _spell_result.final_continuation
             rounds_used = _spell_result.loop_count
-            # 続きの生成が安全性フィルターに拒まれて止まった回。周ごとの記録は
+            # 続きの生成 (LLM 呼び出し) が失敗して止まった回。周ごとの記録は
             # ループが済ませているので、ここで投げてエラー終了として閉じる
-            # (黙って「完了」にすると、止まった理由がどこにも残らない)。
+            # (初回の生成が失敗した回と同じ終わり方。黙って「完了」にすると、
+            # 止まった理由がどこにも残らない)。
             if _spell_result.stop_error is not None:
                 raise _spell_result.stop_error
 

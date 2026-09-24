@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
-from llm_clients.exceptions import LLMError, ModelUnavailableError, SafetyFilterError
+from llm_clients.exceptions import EmptyResponseError, LLMError, ModelUnavailableError
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import ExecutionCancelledException
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
@@ -2584,13 +2584,16 @@ class SpellLoopResult:
       締めの記録 (建物・記憶の両方) に添えるのはこの値。呼び出し元は後段の
       memorize が読む state の思考もこれに揃える — 揃えないと、周 1 の思考が
       締めの発言の思考として記憶に残る。
-    - ``stop_error``: スペルの後の続きの生成が安全性フィルターに拒まれて止まった
-      回の例外 (:class:`SafetyFilterError`)。ストリーミングを使わない経路でだけ
-      入る — この経路は ``segments`` を呼び出し元が建物へ書くので、ループの中で
-      投げると、それまでの周の発言が建物に残らない。呼び出し元は ``segments`` を
-      記録し終えてから**必ずこれを投げる** (投げないと、止まった理由が誰にも
-      届かない)。ストリーミング経路は周ごとに確定済みなので、ループがそのまま
-      投げる。
+    - ``stop_error``: スペルの後の続きの生成 (LLM 呼び出しそのもの) が失敗して
+      止まった回の例外 (:class:`LLMError` — 安全性フィルター・利用制限・
+      タイムアウト・サーバーエラー・空の応答など)。普通の返事で同じ失敗が
+      起きた回と同じエラーを画面へ届けるためのもの。ストリーミングを使わない
+      経路でだけ入る — この経路は ``segments`` を呼び出し元が建物へ書くので、
+      ループの中で投げると、それまでの周の発言が建物に残らない。呼び出し元は
+      ``segments`` を記録し終えてから**必ずこれを投げる** (投げないと、止まった
+      理由が誰にも届かない)。ストリーミング経路は周ごとに確定済みなので、
+      ループがそのまま投げる。スペルの**実行中**に起きた失敗はここに入らない
+      (スペルの失敗として従来どおり扱う)。
     """
 
     segments: List[BeatSegment]
@@ -2598,7 +2601,7 @@ class SpellLoopResult:
     loop_count: int
     closing_reasoning_text: str = ""
     closing_reasoning_details: Any = None
-    stop_error: Optional[SafetyFilterError] = None
+    stop_error: Optional[LLMError] = None
 
 
 async def _run_spell_loop(
@@ -2877,7 +2880,7 @@ async def _run_spell_loop(
             )
 
     def _partial_result(
-        stop_error: Optional[SafetyFilterError] = None,
+        stop_error: Optional[LLMError] = None,
     ) -> SpellLoopResult:
         """ループが途中で落ちた回に、ここまでに組んだ分を戻り値にまとめる。"""
         final_continuation = text or ""
@@ -2927,11 +2930,19 @@ async def _run_spell_loop(
             _meta_pulse_ctx.init_meta_judgment_buffer()
             _meta_pulse_ctx.append_meta_judgment_thought(text)
 
-    # Wrap the entire loop so any failure (unknown import state, LLM retry
-    # failure, tool result serialization crash, etc.) is downgraded and the
-    # persona's original utterance ``text`` is preserved. The caller saves
-    # ``text`` to Building/SAIMemory — losing it just because the spell
-    # system hit an internal error is too aggressive.
+    # スペルの後の続きを生成する LLM 呼び出しそのものが投げた例外。下の包括
+    # except はこれと同一のオブジェクトかどうかで「続きの生成の失敗」と
+    # 「スペル系の内部エラー」を見分ける — 型では見分けない。スペルの実行中
+    # (スペルのツールがサブラインで LLM を呼ぶ等) に起きた LLMError は
+    # スペルの失敗であって、ペルソナの返事の失敗ではないため。
+    _continuation_error: Optional[LLMError] = None
+
+    # Wrap the entire loop so any failure (unknown import state, tool result
+    # serialization crash, etc.) is downgraded and the persona's original
+    # utterance ``text`` is preserved. The caller saves ``text`` to
+    # Building/SAIMemory — losing it just because the spell system hit an
+    # internal error is too aggressive. A failure of the continuation LLM call
+    # itself is NOT downgraded (see ``_continuation_error``).
     try:
         while loop_count < _effective_max_rounds:
             # 周間の cancel 評価点 (beat_execution_context.md §3.4): 実行中の
@@ -3453,47 +3464,66 @@ async def _run_spell_loop(
             # 出て ``retry_result`` の代入が走らなくても、except 節が積む
             # ``final_continuation`` は空のままになる。
             LOGGER.info("[sea][spell] Re-invoking LLM after round %d (%d spell(s))", loop_count, len(valid_spells))
-            if pipeline_streaming_state is not None:
-                _retry_stream = llm_client.generate_stream(
-                    messages,
-                    tools=[],
-                    temperature=runtime._default_temperature(persona),
-                    **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
-                )
-                # progress に spell 側の器そのものを渡す — retry ストリームの
-                # 途中で死んでも、発火済みの sub-speak 連番と受信済みの chunk が
-                # 器に残る。この周の下書き行はこの retry のための新しい行なので、
-                # 途中死した回の確定本文はこの器の chunk が正 (Beat 分割前は
-                # round 1 の text が正で、回収してはいけなかった)。
-                _retry_text, _retry_sub_seq, _retry_spell_detected, _retry_cancelled = await _consume_pipeline_stream(
-                    _retry_stream,
-                    runtime=runtime,
-                    persona=persona,
-                    building_id=building_id,
-                    node_def=node_def,
-                    state=state,
-                    pipeline_msg_id=pipeline_streaming_state.get("msg_id"),
-                    sub_seq_start=int(pipeline_streaming_state.get("sub_seq", 0) or 0),
-                    cancellation_token=pipeline_streaming_state.get("cancellation_token"),
-                    event_callback=event_callback,
-                    progress=pipeline_streaming_state,
-                    emit_building_id=pipeline_streaming_state.get("building_id"),
-                )
-                pipeline_streaming_state["sub_seq"] = _retry_sub_seq
-                retry_result = _retry_text
-                if _retry_cancelled:
-                    LOGGER.info(
-                        "[sea][spell] Round %d streaming retry cancelled mid-flight; "
-                        "breaking out of spell loop",
-                        loop_count,
+            try:
+                if pipeline_streaming_state is not None:
+                    _retry_stream = llm_client.generate_stream(
+                        messages,
+                        tools=[],
+                        temperature=runtime._default_temperature(persona),
+                        **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                     )
-            else:
-                retry_result = llm_client.generate(
-                    messages,
-                    tools=[],
-                    temperature=runtime._default_temperature(persona),
-                    **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
-                )
+                    # progress に spell 側の器そのものを渡す — retry ストリームの
+                    # 途中で死んでも、発火済みの sub-speak 連番と受信済みの chunk が
+                    # 器に残る。この周の下書き行はこの retry のための新しい行なので、
+                    # 途中死した回の確定本文はこの器の chunk が正 (Beat 分割前は
+                    # round 1 の text が正で、回収してはいけなかった)。
+                    _retry_text, _retry_sub_seq, _retry_spell_detected, _retry_cancelled = await _consume_pipeline_stream(
+                        _retry_stream,
+                        runtime=runtime,
+                        persona=persona,
+                        building_id=building_id,
+                        node_def=node_def,
+                        state=state,
+                        pipeline_msg_id=pipeline_streaming_state.get("msg_id"),
+                        sub_seq_start=int(pipeline_streaming_state.get("sub_seq", 0) or 0),
+                        cancellation_token=pipeline_streaming_state.get("cancellation_token"),
+                        event_callback=event_callback,
+                        progress=pipeline_streaming_state,
+                        emit_building_id=pipeline_streaming_state.get("building_id"),
+                    )
+                    pipeline_streaming_state["sub_seq"] = _retry_sub_seq
+                    retry_result = _retry_text
+                    if _retry_cancelled:
+                        LOGGER.info(
+                            "[sea][spell] Round %d streaming retry cancelled mid-flight; "
+                            "breaking out of spell loop",
+                            loop_count,
+                        )
+                else:
+                    retry_result = llm_client.generate(
+                        messages,
+                        tools=[],
+                        temperature=runtime._default_temperature(persona),
+                        **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                    )
+            except EmptyResponseError:
+                # スペルの後に何も言わないのは正常な終わり方。ストリーミング経路は
+                # 空の本文を例外なしで受け取って黙って終わるので、全文一括の
+                # クライアントが空の応答を例外にした回も同じく「続きは空」として
+                # 扱う — 受け取り方の違いで、同じ沈黙がエラーの札になったり
+                # ならなかったりしないように。
+                retry_result = ""
+            except ModelUnavailableError:
+                # 使うモデルが無い・繋げない回は、印を付けずに従来どおり下の
+                # 包括 except から投げる (非ストリーミング経路では、それまでの
+                # 周の発言が建物に書かれないまま止まる既知の欠陥がある)。
+                # この 2 行を消すと、ほかの LLMError と同じ stop_error の道に乗る。
+                raise
+            except LLMError as exc:
+                # 続きの生成そのものの失敗。印を付けて投げ、包括 except に
+                # 普通の返事の失敗と同じ扱い (画面のエラー) をさせる。
+                _continuation_error = exc
+                raise
 
             retry_usage = llm_client.consume_usage()
             # 使用量と同じ位置で思考も回収する。クライアント側のバッファは破壊的
@@ -3610,35 +3640,40 @@ async def _run_spell_loop(
             closing_reasoning_text=pending_reasoning_text,
             closing_reasoning_details=pending_reasoning_details,
         )
-    except (ExecutionCancelledException, BeatGateClosedError, ModelUnavailableError):
+    except (ExecutionCancelledException, BeatGateClosedError):
         # Beat 境界の中断 / 関所 fail-closed は「spell 系の内部エラー」ではなく
         # 実行制御の正規イベント。partial 保存へ降格せずそのまま伝播する
         # (caller = PulseController / run_meta_user が型別に処理する)。
-        # 使うモデルが無い・繋げない (ModelUnavailableError) も同じ: エラーの注記を
-        # 次の生成へ差し込まず、チャット画面のエラーとして出す。
         raise
-    except SafetyFilterError as exc:
-        # スペルの後の続きの生成が安全性フィルターに拒まれた回。スペル系の
-        # 内部エラーではないので注記は差し込まず、ModelUnavailableError と
-        # 同じく理由をチャット画面のエラー (error_code=safety_filter) として
-        # 届ける。それまでの周の発言は残す:
-        # - ストリーミング経路: 周ごとに下書き行を確定済み。拒まれた続きのために
-        #   開けた行は、Beat の出口の後始末が「一言も無ければ取り下げ、
-        #   何か流れていれば印つきで確定」する。だからそのまま投げる。
-        # - それ以外: 周の発言は呼び出し元がこの戻り値から建物へ書く。ここで
-        #   投げるとそれが消えるので、例外を戻り値に載せて、書き終えた
-        #   呼び出し元に投げさせる。
-        if pipeline_streaming_state is not None:
-            raise
-        LOGGER.warning(
-            "[sea][spell] continuation after round %d was blocked by a safety "
-            "filter; keeping the earlier beats and handing the error to the caller",
-            loop_count,
-        )
-        return _partial_result(stop_error=exc)
     except Exception as exc:
-        # Any unhandled error in the spell pipeline: log with traceback,
-        # inject a system-visible error note for the next LLM turn, and
+        if exc is _continuation_error:
+            # スペルの後の続きを生成する LLM 呼び出しが失敗した回 (安全性
+            # フィルター・利用制限・タイムアウト・サーバーエラー・空の応答など)。
+            # スペル系の内部エラーではないので注記は差し込まず、普通の返事で
+            # 同じ失敗が起きた回と同じエラー (同じ error_code / 文面) を
+            # チャット画面へ届ける。それまでの周の発言は残す:
+            # - ストリーミング経路: 周ごとに下書き行を確定済み。失敗した続きの
+            #   ために開けた行は、Beat の出口の後始末が「一言も無ければ取り下げ、
+            #   何か流れていれば印つきで確定」する。だからそのまま投げる。
+            # - それ以外: 周の発言は呼び出し元がこの戻り値から建物へ書く。ここで
+            #   投げるとそれが消えるので、例外を戻り値に載せて、書き終えた
+            #   呼び出し元に投げさせる。
+            if pipeline_streaming_state is not None:
+                raise
+            LOGGER.warning(
+                "[sea][spell] continuation after round %d failed (%s: %s); "
+                "keeping the earlier beats and handing the error to the caller",
+                loop_count, type(exc).__name__, exc,
+            )
+            return _partial_result(stop_error=exc)
+        if isinstance(exc, ModelUnavailableError):
+            # 使うモデルが無い・繋げない (スペルの実行中の軽量モデル、および
+            # 現状は続きの生成も)。エラーの注記を次の生成へ差し込まず、
+            # チャット画面のエラーとして出す。
+            raise
+        # Any other unhandled error in the spell pipeline (including an
+        # LLMError that escaped spell EXECUTION rather than the continuation
+        # call): log with traceback, inject a system-visible error note for the next LLM turn, and
         # return what was assembled so far so the caller can still save it.
         LOGGER.exception(
             "[sea][spell] spell loop fatal error after %d round(s); "
@@ -4974,7 +5009,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             len(_spell_result.segments), bool(_bubble1_emitted_early),
                         )
 
-                # 続きの生成が安全性フィルターに拒まれて止まった回。それまでの周の
+                # 続きの生成 (LLM 呼び出し) が失敗して止まった回。それまでの周の
                 # 発言は上で建物へ書き終えたので、ここで理由を投げる
                 # (SpellLoopResult.stop_error の docstring)。
                 if _spell_result.stop_error is not None:
@@ -5791,7 +5826,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # ── Spell loop (parallel execution per round) ──
                     _bubble1_emitted_early_sync = ""
                     _spell_segments_sync: List[BeatSegment] = []
-                    _spell_stop_error_sync: Optional[SafetyFilterError] = None
+                    _spell_stop_error_sync: Optional[LLMError] = None
                     if isinstance(text, str):
                         # Normal text mode - run spell processing
                         _bubble1_emitted_early_sync = _emit_bubble1_early(
@@ -5922,7 +5957,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     say_event["metadata"] = msg_metadata
                                 event_callback(say_event)
 
-                    # 続きの生成が安全性フィルターに拒まれて止まった回。それまでの
+                    # 続きの生成 (LLM 呼び出し) が失敗して止まった回。それまでの
                     # 周の発言は上で建物へ書き終えたので、ここで理由を投げる
                     # (SpellLoopResult.stop_error の docstring)。
                     if _spell_stop_error_sync is not None:

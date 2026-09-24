@@ -1718,11 +1718,14 @@ def test_a_gemini_prompt_block_reaches_the_caller_as_a_safety_filter_error(monke
 
 
 # ---------------------------------------------------------------------------
-# スペルの後の続きの生成が安全性フィルターに拒まれた回 (2026-09-24)
+# スペルの後の続きの生成 (LLM 呼び出し) が失敗した回 (2026-09-24)
 #
-# 以前はスペルループの包括 except が SafetyFilterError を握り潰し、
+# 以前はスペルループの包括 except が LLMError を握り潰し、
 # 「[Spell System Error]」の注記を差し込んで途中までの発言だけを保存していた。
-# 画面には止まった理由が一切届かなかった。
+# 画面には止まった理由が一切届かなかった。安全性フィルターで最初に塞ぎ、
+# 同じ理由が当てはまる LLMError の族 (利用制限・タイムアウト・サーバー
+# エラー・空の応答…) へ広げた。不変条件は「普通の返事で同じ失敗が起きた回と
+# 同じエラーが画面へ届き、それまでの発言は残る」。
 # ---------------------------------------------------------------------------
 
 def _prompt_block() -> Exception:
@@ -1731,6 +1734,28 @@ def _prompt_block() -> Exception:
         "Gemini blocked the prompt (block_reason=PROHIBITED_CONTENT)",
         user_message="Geminiの安全性フィルターにより、応答がブロックされました（PROHIBITED_CONTENT）",
     )
+
+
+def _continuation_errors():
+    """続きの生成で起きうる LLMError の代表。id は pytest の表示用。
+
+    空の応答 (EmptyResponseError) はここに入れない — スペルの後の沈黙は正常な
+    終わり方で、エラーにしない (下の専用テスト)。
+    """
+    from llm_clients.exceptions import (
+        LLMTimeoutError,
+        PaymentError,
+        RateLimitError,
+        ServerError,
+    )
+    return [
+        pytest.param(_prompt_block, id="safety_filter"),
+        pytest.param(lambda: RateLimitError("429 Too Many Requests"), id="rate_limit"),
+        pytest.param(lambda: LLMTimeoutError("read timed out"), id="timeout"),
+        pytest.param(lambda: ServerError("503 Service Unavailable"), id="server_error"),
+        pytest.param(lambda: PaymentError("402 Payment Required"), id="payment"),
+        pytest.param(lambda: LLMError("provider exploded"), id="llm_error"),
+    ]
 
 
 class _RecordingScriptedStreamClient(_ScriptedStreamClient):
@@ -1780,13 +1805,19 @@ def _has_spell_system_error_note(messages) -> bool:
     )
 
 
-def test_a_blocked_continuation_after_a_spell_reports_the_safety_filter(monkeypatch):
+@pytest.mark.parametrize("dies", ["at_call", "mid_stream"])
+@pytest.mark.parametrize("make_error", _continuation_errors())
+def test_a_failed_continuation_after_a_spell_reports_the_error(monkeypatch, make_error, dies):
     """ストリーミング経路 — 前の Beat は確定のまま、続きの空の行は取り下げ、
-    理由は SafetyFilterError のまま node() の外へ届く。"""
-    from llm_clients.exceptions import SafetyFilterError
+    理由は元の LLMError のまま (包み直さずに) node() の外へ届く。
 
+    ``dies``: 続きの呼び出しの瞬間に死ぬ回と、ストリームを読み始めてから
+    一語も来ないうちに死ぬ回。どちらも続きの生成そのものの失敗。
+    """
+    err = make_error()
+    continuation = err if dies == "at_call" else [err]
     client = _RecordingScriptedStreamClient(
-        [[f"やるね。\n{SPELL_LINE}"], _prompt_block()],
+        [[f"やるね。\n{SPELL_LINE}"], continuation],
     )
     runtime, persona, node, events = _build_node(
         monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
@@ -1796,18 +1827,18 @@ def test_a_blocked_continuation_after_a_spell_reports_the_safety_filter(monkeypa
     monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _ok_spell)
     runtime._withdraw_speak_placeholder.return_value = True
 
-    with pytest.raises(SafetyFilterError) as excinfo:
+    with pytest.raises(type(err)) as excinfo:
         asyncio.run(node(_spell_state()))
 
-    # 画面へ流れる error イベントは、主の返事で拒まれた回と同じ形
-    event = excinfo.value.to_dict()
-    assert event["error_code"] == "safety_filter"
-    assert "PROHIBITED_CONTENT" in event["content"]
+    # 画面へ流れる error イベントは、普通の返事で同じ失敗が起きた回と同じ形
+    # (同じオブジェクトがそのまま届く = error_code も文面も同じ)
+    assert excinfo.value is err
+    assert excinfo.value.to_dict()["error_code"] == err.error_code
     # スペルを唱えた Beat は確定のまま残る (確定は 1 回だけ)
     runtime._emit_speak_finalize.assert_called_once()
     assert runtime._emit_speak_finalize.call_args.args[2] == "msg-1"
     assert "やるね。" in runtime._emit_speak_finalize.call_args.args[3]
-    # 拒まれた続きのために開けた行は、空の記録として残さず取り下げる
+    # 失敗した続きのために開けた行は、空の記録として残さず取り下げる
     runtime._withdraw_speak_placeholder.assert_called_once()
     assert runtime._withdraw_speak_placeholder.call_args.args[2] == "msg-2"
     # スペル系の内部エラーではないので、注記も中断の通告も書かない
@@ -1815,12 +1846,31 @@ def test_a_blocked_continuation_after_a_spell_reports_the_safety_filter(monkeypa
     persona.history_manager.add_to_building_only.assert_not_called()
 
 
-def test_a_blocked_continuation_without_streaming_keeps_the_earlier_beats(monkeypatch):
-    """非ストリーミング経路 — 周の発言は呼び出し元が建物へ書き終えてから、
-    SafetyFilterError が投げられる (ループの中で投げると周の発言が消える)。"""
-    from llm_clients.exceptions import SafetyFilterError
+@pytest.mark.parametrize("make_error", _continuation_errors())
+def test_the_same_failure_on_an_ordinary_reply_reaches_the_chat_the_same_way(
+    monkeypatch, make_error,
+):
+    """比較の基準 — スペルの無い普通の返事で同じ失敗が起きた回も、元の例外が
+    そのまま node() の外へ出る。続きの生成の失敗はこれと同じ形に揃える。"""
+    err = make_error()
+    client = _RecordingScriptedStreamClient([err])
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    runtime._withdraw_speak_placeholder.return_value = True
 
-    client = _ScriptedSyncClient([f"やるね。\n{SPELL_LINE}", _prompt_block()])
+    with pytest.raises(type(err)) as excinfo:
+        asyncio.run(node(_spell_state()))
+
+    assert excinfo.value is err
+
+
+@pytest.mark.parametrize("make_error", _continuation_errors())
+def test_a_failed_continuation_without_streaming_keeps_the_earlier_beats(monkeypatch, make_error):
+    """非ストリーミング経路 — 周の発言は呼び出し元が建物へ書き終えてから、
+    元の LLMError が投げられる (ループの中で投げると周の発言が消える)。"""
+    err = make_error()
+    client = _ScriptedSyncClient([f"やるね。\n{SPELL_LINE}", err])
     runtime, persona, node, events = _build_node(
         monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
     )
@@ -1829,16 +1879,124 @@ def test_a_blocked_continuation_without_streaming_keeps_the_earlier_beats(monkey
     monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _ok_spell)
     runtime._emit_say.return_value = {"message_id": "say-1", "content": "x"}
 
-    with pytest.raises(SafetyFilterError) as excinfo:
+    with pytest.raises(type(err)) as excinfo:
         asyncio.run(node(_spell_state()))
 
-    assert excinfo.value.to_dict()["error_code"] == "safety_filter"
-    # スペルの結果を持つ Beat 1 が建物へ書かれている (拒まれる前の発言は残る)
+    assert excinfo.value is err
+    assert excinfo.value.to_dict()["error_code"] == err.error_code
+    # スペルの結果を持つ Beat 1 が建物へ書かれている (失敗の前の発言は残る)
     said_texts = [c.args[2] for c in runtime._emit_say.call_args_list]
     assert any("やりました" in t for t in said_texts), said_texts
-    # 拒まれた続きの分は何も書かない (空の記録を残さない)
+    # 失敗した続きの分は何も書かない (空の記録を残さない)
     assert all(t.strip() for t in said_texts)
     # 下書き行を使わない経路なので、確定も取り下げも起きない
     runtime._emit_speak_finalize.assert_not_called()
     runtime._withdraw_speak_placeholder.assert_not_called()
     assert not _has_spell_system_error_note(client.seen_messages)
+
+
+def test_an_empty_continuation_without_streaming_ends_silently(monkeypatch):
+    """全文一括のクライアントがスペルの後の空の応答を EmptyResponseError に
+    した回も、ストリーミング経路の「空の本文」と同じく黙って終わる。
+    受け取り方の違いで、同じ沈黙がエラーの札になってはいけない。"""
+    from llm_clients.exceptions import EmptyResponseError
+
+    client = _ScriptedSyncClient(
+        [f"やるね。\n{SPELL_LINE}", EmptyResponseError("empty response")],
+    )
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: False)
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _ok_spell)
+    runtime._emit_say.return_value = {"message_id": "say-1", "content": "x"}
+
+    asyncio.run(node(_spell_state()))
+
+    said_texts = [c.args[2] for c in runtime._emit_say.call_args_list]
+    assert any("やりました" in t for t in said_texts), said_texts
+    assert all(t.strip() for t in said_texts)
+    assert not _has_spell_system_error_note(client.seen_messages)
+
+
+# ---------------------------------------------------------------------------
+# スペルの「実行中」に起きた LLMError はスペルの失敗のまま (2026-09-24)
+#
+# 画面のエラーに変えるのは続きを生成する呼び出しの失敗だけ。スペルのツールが
+# 中で LLM を呼んで失敗した回 (サブラインの返事など) はペルソナの返事の失敗では
+# ないので、従来どおりスペルの失敗として扱う。型で見分けると両者が混ざる。
+# ---------------------------------------------------------------------------
+
+def _rate_limit() -> Exception:
+    from llm_clients.exceptions import RateLimitError
+    return RateLimitError("429 Too Many Requests")
+
+
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        pytest.param(_prompt_block, id="safety_filter"),
+        pytest.param(_rate_limit, id="rate_limit"),
+    ],
+)
+def test_an_llm_error_that_escapes_spell_execution_stays_a_spell_system_error(
+    monkeypatch, make_error,
+):
+    """スペルの実行から LLMError が漏れてループの包括 except へ届いた回は、
+    従来どおり注記を差し込んで途中までの発言を返す (投げない)。"""
+    err = make_error()
+
+    async def _spell_raises(*args, **kwargs):
+        raise err
+
+    client = _ScriptedSyncClient([f"やるね。\n{SPELL_LINE}"])
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: False)
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _spell_raises)
+    runtime._emit_say.return_value = {"message_id": "say-1", "content": "x"}
+
+    asyncio.run(node(_spell_state()))
+
+    # 漏れた例外そのものの注記が差し込まれている (投げずに降格した証拠)
+    notes = [
+        str(m.get("content", "")) for m in client.seen_messages
+        if isinstance(m, dict) and "[Spell System Error]" in str(m.get("content", ""))
+    ]
+    assert notes and type(err).__name__ in notes[0], notes
+    # 唱えた発言は途中までの形で建物に残る
+    said_texts = [c.args[2] for c in runtime._emit_say.call_args_list]
+    assert any("やるね。" in t for t in said_texts), said_texts
+
+
+def test_a_spell_tool_whose_inner_llm_call_fails_is_a_spell_error(monkeypatch):
+    """実物の ``_run_spell_tool_async`` — ツールの中の LLM 呼び出しが
+    RateLimitError で落ちても、その周の結果が [Spell Error] になるだけで、
+    ペルソナは続きを生成して返事を終える (画面のエラーにはならない)。"""
+    from llm_clients.exceptions import RateLimitError
+
+    def _tool_with_inner_llm(**kwargs):
+        raise RateLimitError("429 from the sub-line's model")
+
+    client = _ScriptedSyncClient([f"やるね。\n{SPELL_LINE}", "だめだったみたい。"])
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: False)
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setitem(runtime_llm.TOOL_REGISTRY, SPELL_NAME, _tool_with_inner_llm)
+    runtime._emit_say.return_value = {"message_id": "say-1", "content": "x"}
+
+    asyncio.run(node(_spell_state()))
+
+    # スペルの失敗として続きの生成に見せている
+    assert any(
+        "[Spell Error: " in str(m.get("content", "")) and "RateLimitError" in str(m.get("content", ""))
+        for m in client.seen_messages if isinstance(m, dict)
+    )
+    assert not _has_spell_system_error_note(client.seen_messages)
+    said_texts = [c.args[2] for c in runtime._emit_say.call_args_list]
+    assert any("だめだったみたい。" in t for t in said_texts), said_texts
