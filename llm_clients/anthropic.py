@@ -271,7 +271,7 @@ class AnthropicClient(LLMClient):
                     raise SafetyFilterError(
                         f"Anthropic {context} content policy violation: {e}",
                         e,
-                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
+                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。",
                     )
                 raise InvalidRequestError(f"Anthropic {context} error: {e}", e)
             except Exception as e:
@@ -513,7 +513,7 @@ class AnthropicClient(LLMClient):
                     raise SafetyFilterError(
                         f"Anthropic streaming API call content policy violation: {e}",
                         e,
-                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
+                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。",
                     )
                 raise InvalidRequestError(f"Anthropic streaming API call error: {e}", e)
             except Exception as e:

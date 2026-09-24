@@ -224,8 +224,8 @@
     "en": "Wait a while and try sending again. If this keeps happening, check the server's service status."
   },
   "app.page.text050": {
-    "ja": "送信した内容が安全性フィルターに該当した可能性があります。内容を変更して再送信してください。",
-    "en": "The content may have triggered a safety filter. Change the content and try again."
+    "ja": "このモデルでは通らない内容でも、別のモデルなら通ることがあります。別のモデルに切り替えてから、あなたの発言の「再送」ボタンを押してください。",
+    "en": "Content one model rejects may pass on another. Switch to a different model, then press the \"Retry\" button on your message."
   },
   "app.page.text051": {
     "ja": "サーバーが混雑している可能性があります。しばらく時間を置いてから再送信してください。",

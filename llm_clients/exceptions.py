@@ -62,7 +62,7 @@ class SafetyFilterError(LLMError):
     """Raised when content is blocked by safety filters."""
 
     error_code = "safety_filter"
-    user_message = "コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+    user_message = "コンテンツが安全性フィルターによりブロックされました。"
 
 
 class EmptyResponseError(LLMError):

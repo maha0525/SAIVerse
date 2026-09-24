@@ -1146,6 +1146,9 @@ class TestLLMClients(unittest.TestCase):
         ]
         cand1.index = 0
         mock_chunk1.candidates = [cand1]
+        # 実 SDK では、ブロックされていない chunk の prompt_feedback は None。
+        # MagicMock のままだと block_reason が「値あり」に見えてブロック扱いになる。
+        mock_chunk1.prompt_feedback = None
 
         mock_chunk2 = MagicMock()
         cand2 = MagicMock()
@@ -1154,6 +1157,7 @@ class TestLLMClients(unittest.TestCase):
         cand2.index = 0
         cand2.finish_reason = "STOP"
         mock_chunk2.candidates = [cand2]
+        mock_chunk2.prompt_feedback = None
 
         mock_start_stream.return_value = [mock_chunk1, mock_chunk2]
 
@@ -1166,6 +1170,40 @@ class TestLLMClients(unittest.TestCase):
         outputs = list(response_generator)
         mock_start_stream.assert_called_once()
         self.assertEqual(outputs, ["Stream test", "!"])
+
+    @patch('llm_clients.gemini.GeminiClient._start_stream')
+    @patch('llm_clients.gemini.genai')
+    def test_gemini_stream_prompt_block_raises_safety_filter(self, mock_genai, mock_start_stream):
+        """プロンプト段階のブロックは、ストリーム経路でも SafetyFilterError になる。
+
+        Gemini がプロンプトを拒むと、chunk は candidates=None で
+        prompt_feedback.block_reason=PROHIBITED_CONTENT だけを持つ (実機ログで確認)。
+        以前はこの chunk を candidates 無しとして読み飛ばし、空のストリームとして
+        理由なく終わっていた (2026-09-24)。
+        """
+        from types import SimpleNamespace
+        from llm_clients.exceptions import SafetyFilterError
+
+        mock_genai.Client.return_value = MagicMock()
+        block_chunk = SimpleNamespace(
+            candidates=None,
+            prompt_feedback=SimpleNamespace(block_reason="PROHIBITED_CONTENT"),
+            usage_metadata=SimpleNamespace(prompt_token_count=1234),
+        )
+        mock_start_stream.return_value = [block_chunk]
+
+        client = GeminiClient("gemini-1.5-flash")
+        with self.assertRaises(SafetyFilterError) as ctx:
+            list(client.generate_stream([{"role": "user", "content": "Hello"}], tools=[]))
+
+        event = ctx.exception.to_dict()
+        self.assertEqual(event["type"], "error")
+        self.assertEqual(event["error_code"], "safety_filter")
+        self.assertIn("PROHIBITED_CONTENT", event["technical_detail"])
+        self.assertIn("PROHIBITED_CONTENT", event["content"])
+        # 見出しは起きたことだけを書く。「入力内容を変更して」は勧めない —
+        # 発言は保存済みで、別モデルへ切り替えて「再送」する道がある。
+        self.assertNotIn("変更", event["content"])
 
     def test_anthropic_thinking_override(self):
         """Test manual thinking mode (legacy, for Sonnet 4.5 / Opus 4.5)."""

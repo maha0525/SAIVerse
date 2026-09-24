@@ -1672,3 +1672,46 @@ def test_a_stale_stream_error_from_an_earlier_beat_does_not_leak(monkeypatch):
     extra = runtime._emit_speak_finalize.call_args.kwargs.get("extra_metadata") or {}
     assert INTERRUPTED_METADATA_KEY not in extra
     assert not [e for e in events if e.get("interrupted")]
+
+
+def test_a_gemini_prompt_block_reaches_the_caller_as_a_safety_filter_error(monkeypatch):
+    """Gemini がプロンプトを拒んだ回 — 本物の GeminiClient.generate_stream から
+    node() の外まで、SafetyFilterError のまま届く (汎用の LLMError に包まれない)。
+
+    manager/runtime.py の ``except LLMError`` はこの例外の ``to_dict()`` を
+    error イベントとして流すので、画面は error_code=safety_filter の札を出せる。
+    以前はブロックの chunk (candidates=None) を読み飛ばして空のストリームで
+    終わり、理由の無い「返事が生まれませんでした」になっていた (2026-09-24)。
+    """
+    from llm_clients import gemini as gemini_module
+    from llm_clients.exceptions import SafetyFilterError
+
+    monkeypatch.setattr(
+        gemini_module, "build_gemini_clients",
+        lambda prefer_paid=False: (MagicMock(), None, MagicMock()),
+    )
+    client = gemini_module.GeminiClient("gemini-3.8-flash")
+    block_chunk = SimpleNamespace(
+        candidates=None,
+        prompt_feedback=SimpleNamespace(block_reason="PROHIBITED_CONTENT"),
+        usage_metadata=None,
+    )
+    monkeypatch.setattr(client, "_start_stream", lambda *a, **k: iter([block_chunk]))
+
+    async def _unused_spell_loop(**kwargs):  # pragma: no cover - 到達しない
+        raise AssertionError("spell loop must not run")
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_unused_spell_loop,
+    )
+    runtime._withdraw_speak_placeholder.return_value = True
+    with pytest.raises(SafetyFilterError) as excinfo:
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    event = excinfo.value.to_dict()
+    assert event["type"] == "error"
+    assert event["error_code"] == "safety_filter"
+    assert "PROHIBITED_CONTENT" in event["content"]
+    # 本文ゼロなので下書き行は取り下げ、空の記録を残さない
+    runtime._withdraw_speak_placeholder.assert_called_once()
+    runtime._store_memory.assert_not_called()
