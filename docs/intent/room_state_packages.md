@@ -94,7 +94,8 @@
 - `render_room_diff` の文字列分割・見出し照合 (発端の欠陥の本体)
 - `ensure_room_state_base` (消費時の開き直し) — 描画を消費の組成の一回に一本化 (§11-2 規則 2) したことで「土台を失った差分」という状態自体が生まれなくなり退役 (2026-09-06)。提示済みバッチ間の連なりの読み手 (移管 `restore_room_state_bases`・回復 `reopen_lost_bases`・`chain_is_intact`) は生きている — 対象が「未消費の描画」だった機構だけが消えた
 - head の `VisualContextSection` (部屋の描画) と、§10.8.1 の head 照合機構ぜんぶ — head 土台の差分・`current_head_room`・pin の受け渡し・実行 model の照合・`base_source="head"`。「例外処理が本体を覆い始めたら供給源を塞いで機構ごと消す」の適用
-- `BuildingItemsSection` のアイテム差分ラベル (§6-2 に一本化)
+  - **訂正 (2026-09-25)**: このメッセージは部屋の描画に加えて「自分の外見」と「インベントリ」も運んでいて、その二つは部屋の様子 (知覚) に載せない設計だった (部屋の性質ではなく、移動しても一緒に付いてくる持ち物だから)。退役のときに二つの新しい運び手を用意しておらず、9/6 から 9/25 まで、どのペルソナの文脈にも自分の持ち物と外見が載っていなかった。いまは head の `SelfViewSection` (独立した user メッセージ、画像は `metadata.media`) が運び、インベントリの増減 (追加・削除・名前の変更) と外見の画像の変更は末尾通知で届く。部屋の描画は head へ戻していない。経緯: [issues/inventory_and_appearance_dropped_from_context.md](../issues/inventory_and_appearance_dropped_from_context.md)
+- `BuildingItemsSection` のアイテム差分ラベル (§6-2 に一本化)。部屋のアイテムの差分は §6-2 へ移ったが、同じラベルが出していたインベントリの差分は移り先が無かった — 2026-09-25 から `SelfViewSection` の差分通知が引き継ぐ (上の訂正と同じ件)
 - 思い出 (`_fetch_item_memory_recall`) — 後継の約束は recall_tags intent 📌
 - 「差分にメディアを載せない」の簡略化
 
@@ -216,3 +217,4 @@
 - **2026-09-07 (§11 実装とレビュー収束)**: Fable サブエージェントで実装 (回収の一枚・通知の二枚分割と型付け・様子の outbox 配送・flush の配り直し) → Codex (Luna/high) 三巡で収束 (一巡目 3 件全採用 = 配達の冪等化・payload の門・degrade の未 ready / 二巡目 採用 2 却下 2 / 三巡目 approve 指摘ゼロ)。全修正 red 証明つき、フルスイート毎巡二重確認で最終 5,641 緑。同族走査で見つけた隣 4 点は [outbox_delivery_gate_siblings.md](../issues/outbox_delivery_gate_siblings.md) へ。却下の証拠は発端 issue の経緯。
 - **2026-09-07 (読み順の改訂 — 指示の一本化と様子の末尾寄せ)**: 実機でエリスの入室通知より先に部屋の差分が出た件から、まはーが役割・指示の性質を裁定 (識別情報ではない → 重複させない → 出すなら様子に含める)。調査で指示ラベルと束の `building:prompt` が同じフィールドの複製と確定し、ラベルを退役。§11-2 に「様子は組成の末尾へ」を追加、§11-3 の読み順を改訂。
 - **2026-09-07 (完了・発行)**: 出来事の区切り (一出来事一ラベル — format の world_state 合流の退役)、新ペルソナの入室知覚欠落の解消確認まで、実機検証がすべて通過。PR #282 をまはーが確認してマージし、タグ v0.3.9 で発行。アイテム個数上限 (⑤) だけは「片付け機能とセットで新 feature ブランチ」の裁定でスコープ外 ([room_items_uncapped.md](../issues/archive/room_items_uncapped.md))。
+- **2026-09-25 (退役の取りこぼしの修正)**: 9/6 に退役した head のメッセージが一緒に運んでいた「自分の外見」と「インベントリ」、インベントリの差分通知が、どこからも届いていなかったことが判明した (§8 の訂正)。head に `SelfViewSection` を足して戻した — 部屋の描画は戻さず、持ち物と外見だけを独立した user メッセージで運ぶ。経緯: [issues/inventory_and_appearance_dropped_from_context.md](../issues/inventory_and_appearance_dropped_from_context.md)。

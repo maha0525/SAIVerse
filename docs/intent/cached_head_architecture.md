@@ -58,9 +58,11 @@ pipeline は定期的に各 section の `capture(live)` を呼んで「もし今
 `register_default_sections` で registry に登録しただけでは、その Section は **capture と差分通知は走るが、context には一切描画されない**。実際に LLM へ送るには、登録に加えて以下 2 つに名前を通す必要がある:
 
 1. **`runtime_context.prepare_context` の `enabled_sections`** — render 対象の allowlist。`if reqs.system_prompt:` 等の固定セットに入れる ([[feedback_head_fixed_per_persona_model_no_gating]]: 用途で出し分けず固定追加)。
-2. **`integration._compose_messages` の `SYSTEM_PROMPT_SECTION_NAMES`** (または `MEMORY_WEAVE_SECTION_NAME` / `VISUAL_CONTEXT_SECTION_NAME` の役割マッピング) — composition 時にどの message へ畳むかの分類。
+2. **`integration._compose_messages` の `SYSTEM_PROMPT_SECTION_NAMES`** (または `MEMORY_WEAVE_SECTION_NAME` / `SELF_VIEW_SECTION_NAME` の独立メッセージ枠) — composition 時にどの message へ畳むかの分類。画像を添付する Section はシステムプロンプトに畳めない (添付できるのは独立したメッセージだけ) ので、独立メッセージ枠に置く。(旧 `VISUAL_CONTEXT_SECTION_NAME` の枠は 2026-09-06 の部屋の描画の退役で消え、2026-09-25 に自分の外見とインベントリの枠 `SELF_VIEW_SECTION_NAME` として戻った — §5.2。)
 
 どちらか一方でも漏れると「登録済み・capture 済み・差分通知だけ出る・本文は届かない」という静かな欠落になる。実際 `autonomy_modes` / `life_purpose` / `open_notes` がこの 2 つ目を漏らして長く描画されていなかった。新規 Section 追加時は **registry 登録 + 上記 2 関所** をセットで必ず確認する。
+
+**逆向きも同じ (2026-09-25 追記)**: Section を**退役**させるときは、その Section が運んでいた中身を全部数え上げ、それぞれの新しい運び手を確かめる。2026-09-06 の `VisualContextSection` の退役では「部屋の様子は知覚が運ぶから重複」という部屋の観点だけで判断し、同じメッセージが運んでいた自分の外見とインベントリが 19 日間どこからも届かなかった。組み上がった文脈 (LLM に渡るメッセージ列) に「ペルソナが自分について知っているべき事実」が載っていることは `tests/test_head_self_view.py` の境界テストが実際の `prepare_context` を通して確かめる (持ち物・外見に加えて、人格・コア記憶・スペル一覧)。
 
 ### ライン単位で snapshot を持つ
 
@@ -261,7 +263,17 @@ Section の登録は startup 時に集中させる (アドオン由来 Section �
 
 ### 5.2. visual_context cache
 
-既存の `runtime_context.py` の visual_context cache (anchor キー) は、`VisualContextSection` (refresh_on_events: `{building_entered, appearance_changed}`) として本機構に乗せ替えられる。
+> **現状 (2026-09-25)**: 本節の `VisualContextSection` は 2026-09-06 に退役した — 部屋の様子の置き場は知覚 (tail) 一つになった ([room_state_packages.md](room_state_packages.md) §8)。以下の「当初の設計」と「実装後の訂正」は当時の記録で、`room_text` / `head_room_out` / head 土台の差分は機構ごと消えている。
+>
+> 同じメッセージが部屋の描画と一緒に運んでいた**自分の外見とインベントリ**は、退役のときに新しい運び手を用意しておらず、2026-09-06 から 09-25 まで届いていなかった ([issues/inventory_and_appearance_dropped_from_context.md](../issues/inventory_and_appearance_dropped_from_context.md))。いまの運び手は `SelfViewSection` (`sea/head_pipeline/sections/self_view.py`、Section 名 `self_view`):
+>
+> - **置き場**: `_compose_messages` が、システムプロンプトと Memory Weave の後ろに独立した `role: "user"` のメッセージとして置き、画像 (外見と、インベントリの中の開いた写真など) を `metadata.media` で添付する。システムプロンプトには入れない (画像を添付できるのは独立したメッセージだけ)。印は `__self_view__` と、head の視覚メッセージの共通の印 `__visual_context__` (LLM クライアントの画像枠を使わない・自動想起のクエリから外れる、という既存の扱いを受けるため)。
+> - **中身**: `<system>` で包んだ「# あなた自身」の下に「## 外見」(画像が引けないペルソナは節ごと省く) と「## インベントリ」(空なら「インベントリにアイテムはありません。」)。アイテム 1 件の描き方は部屋と同じ `_render_item_entry` で、世界の読みは `builtin_data/tools/get_visual_context.read_self_view` (現在地の部屋には依存しない)。
+> - **撮り直し**: `refresh_on_events` は空 (Metabolism / anchor TTL 切れ / 欠損補完だけ)。移動では撮り直さない — 持ち物は移動で変わらない。
+> - **差分通知**: インベントリへの追加・インベントリからの削除・名前の変更、外見の画像の変更を末尾通知にする。加わったアイテムと変わった外見には描画と同じ画像を `NotificationLabel.media` で添付し、知覚まで運ぶ (`integration._push_section_diffs` / 台帳なしの degrade 経路の両方。それまで `NotificationLabel.media` は配送経路で捨てられていた)。外見の設定が外されたときは「外されました」と文だけで知らせる。DB の読み失敗は capture が例外として上げて前の値を据え置くので、空の外見が届くのは本当に外されたか、画像ファイルが無くなったときに限られる。
+> - **required ではない**: 失敗したら head から欠けるだけ。既存の head には次の Pulse の欠損補完 (`recapture_missing`) で足され、そのとき既読基準 (B) が初期化されるので、初回に全アイテムを「加わりました」と通知しない (C8)。
+
+**当初の設計**: 既存の `runtime_context.py` の visual_context cache (anchor キー) は、`VisualContextSection` (refresh_on_events: `{building_entered, appearance_changed}`) として本機構に乗せ替えられる。
 
 `_visual_context_cache` / `_visual_context_anchor` の persona 属性は廃止、snapshot に統合。
 
@@ -280,7 +292,8 @@ Section の登録は startup 時に集中させる (アドオン由来 Section �
 | 3. ## Building 名 | `BuildingSection` | `{building_entered, system_prompt_edited}` |
 | 4. ## 利用可能なPlaybook | `AvailablePlaybooksSection` | `{addon_loaded, addon_unloaded}` |
 | 6. ## スペル | `SpellListSection` | `{addon_loaded, addon_unloaded}` |
-| (visual_context) | `VisualContextSection` | `{building_entered, appearance_changed}` |
+| (visual_context) | ~~`VisualContextSection`~~ (2026-09-06 退役、§5.2) | — |
+| (自分の外見とインベントリ) | `SelfViewSection` (2026-09-25、独立した user メッセージ、§5.2) | (なし、Metabolism のみ) |
 | (memory_weave) | `MemoryWeaveSection` | (Metabolism のみ) |
 
 **判断プロンプトからの移設 (2026-07-30)**: 判断点の状況テキスト (tail) が毎回貼り直していた静的な一覧も Section 化した — `FacilitiesSection` (## 行ける場所) と `PurposeBacklogSection` (## 進行中のことと、やりたいこと)。どちらも `refresh_on_events` は空 (Metabolism のみ) で、凍結中の増減は `diff_to_notifications` が末尾通知で届ける。**一覧を head に置くことと変動通知は必ずセット** — 通知が無ければ head は「無くなったものを載せ続け、増えたものを隠し続ける」台帳になる。DeskSection とは方針が逆で、**ペルソナ本人が増やしたものも通知する** (head が凍結している以上、本人が知っていることと head の記述が合っているかは別問題)。`PurposeBacklogSection` は旧 `LifePurposeSection` の「第一階層の短いメニュー」を吸収した (同じ Track を head 内で二度並べない。しかも旧メニューは差分通知を持たず、放置すると通知される一覧とされない一覧が同じ head で食い違う)。詳細: docs/issues/judgment_static_lists_to_head.md
@@ -430,3 +443,4 @@ snapshot が「変わるべきでないタイミングで変わってない」�
 ## 改訂履歴
 
 - v0.1 (2026-05-13): 起草。Phase 4' / A-3-c の cache 破壊問題を契機に foundational refactor として整理。Section interface + LineHeadSnapshot + refresh_on_events の 3 点セットで物理的な不変条件強制を狙う。
+- 2026-09-25: `SelfViewSection` を追加 (自分の外見とインベントリ、独立した user メッセージ)。2026-09-06 の `VisualContextSection` 退役で届かなくなっていた二つを戻す。§2 の関所の説明・§5.2・§5.3 の表を現状に合わせ、退役時の「運んでいた中身の数え上げ」と組み上がった文脈の境界テストを §2 に追記。`NotificationLabel.media` が配送経路で捨てられていたのを知覚まで運ぶよう配線した。

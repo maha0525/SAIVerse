@@ -8,10 +8,15 @@ Section 群と message role / metadata の対応はこの層で握る:
 - ``common_prompt`` / ``persona_self`` / ``building`` / ``available_playbooks`` /
   ``spell_list``: text-only、まとめて 1 つの system message にする
 - ``memory_weave``: text-only、独立した user role message にする (旧 get_memory_weave_context 経路と互換)
+- ``self_view``: text + media、Memory Weave の後ろに独立した user role message +
+  ``metadata.media`` (自分の外見とインベントリ。システムプロンプトには入れない —
+  画像を添付できるのは独立したメッセージだけ)
 
 部屋の描画 (旧 ``visual_context`` Section) は 2026-09-06 に head から退役した —
 部屋の様子の置き場は知覚 (tail) 一つ (docs/intent/room_state_packages.md)。
 本層はその供給側の検知 (:func:`inject_diff_notifications` の部屋の照合) も持つ。
+旧 ``visual_context`` が一緒に運んでいた自分の外見とインベントリは ``self_view``
+が引き継いだ (2026-09-25、docs/issues/inventory_and_appearance_dropped_from_context.md)。
 
 詳細: docs/intent/cached_head_architecture.md §3.5 / §5
 """
@@ -33,6 +38,16 @@ from sea.head_pipeline.types import LineHeadInput, RenderedSection
 _MEMORY_WEAVE_CONTEXT_MARKER = "__memory_weave_context__"
 _MEMORY_WEAVE_TYPE_KEY = "__memory_weave_type__"
 
+# self_view メッセージの印。``__self_view__`` はこのメッセージ固有の識別子。
+# ``__visual_context__`` は head の視覚メッセージの共通の印で、読み手が既に居る:
+# LLM クライアントの画像枠 (llm_clients/utils.compute_allowed_attachment_keys ほか
+# — head の画像は枠を使わず常に添付)、sluice の画像見積もり、自動想起のクエリ
+# 除外 (sea/auto_recall.py — head 由来の合成メッセージは「今話している内容」
+# ではない)、コンテキストプレビューの節の分類。この印を付けないと、外見の画像が
+# 直近の画像の枠争いで落ち、自動想起の種がこのメッセージに乗っ取られる。
+_SELF_VIEW_MARKER = "__self_view__"
+_VISUAL_CONTEXT_MARKER = "__visual_context__"
+
 LOGGER = logging.getLogger(__name__)
 
 # 既知 Section の役割マッピング。新規 Section 追加時はここに分類を足す。
@@ -43,7 +58,8 @@ LOGGER = logging.getLogger(__name__)
 # 旧 open_notes(720) は P3c① (concept_consolidation.md「Note → テーマノード移行」)
 # で退役し、後継の desk (机の物理) に置き換わった。
 SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
-    # 注意: Section を新設して head に描画させる場合、ここと
+    # 注意: Section を新設して head に描画させる場合、ここ (または下の
+    # MEMORY_WEAVE_SECTION_NAME / SELF_VIEW_SECTION_NAME の独立メッセージ枠) と
     # sea/runtime_context.py の enabled_sections の**両方**に名前を足すこと。
     # 片方でも漏れると「登録済みなのに一度も描画されない」silent 故障になる
     # (DeskSection P2a〜P3c① / MemopediaIndexSection P4-d で二度起きた実績)。
@@ -63,6 +79,9 @@ SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
     "memopedia_index",
 )
 MEMORY_WEAVE_SECTION_NAME = "memory_weave"
+#: 自分の外見とインベントリ。Memory Weave の後ろに独立した user メッセージ
+#: (画像は metadata.media) として置く (sections/self_view.py)。
+SELF_VIEW_SECTION_NAME = "self_view"
 
 _DEFAULT_LINE_ROLE = "main_line"
 
@@ -317,7 +336,7 @@ def preview_head_perceptions(
             items.append({
                 "kind": "world_state",
                 "content": label.label,
-                "media": None,
+                "media": _label_media_payload(label) or None,
                 "metadata": (
                     json.dumps(label.metadata, ensure_ascii=False)
                     if label.metadata else None
@@ -374,6 +393,26 @@ def preview_head_perceptions(
     return items
 
 
+def _label_media_payload(label: Any) -> list[dict[str, str]]:
+    """ラベルの添付 (:class:`~sea.head_pipeline.types.MediaRef` 列) を知覚の media 形へ。
+
+    知覚バッファの media は ``{"path", "mime_type", "type"}`` の dict 列で、
+    提示時にマージブロックの ``metadata.media`` へそのまま載る (LLM クライアント
+    は ``type`` で画像を選り分ける — saiverse/media_utils.iter_image_media)。
+    """
+    payload: list[dict[str, str]] = []
+    for ref in getattr(label, "media", None) or ():
+        path = getattr(ref, "path", "") or ""
+        if not path:
+            continue
+        payload.append({
+            "path": path,
+            "mime_type": getattr(ref, "mime_type", "") or "",
+            "type": getattr(ref, "role", "") or "image",
+        })
+    return payload
+
+
 def _push_section_diffs(
     persona: Any,
     manager: Any,
@@ -419,7 +458,10 @@ def _push_section_diffs(
                     "content": label.label,
                     "reduce_key": None,
                     "salient": False,
-                    "media": [],
+                    # ラベルが添える画像 (インベントリに加わったアイテム・
+                    # 変わった外見、sections/self_view.py) を知覚エントリへ
+                    # 写す。提示時にマージブロックの metadata.media へ載る。
+                    "media": _label_media_payload(label),
                     # ラベルの型付け (label_kind 等) を知覚エントリへ写す —
                     # 未消費バッファの回収 (room_state_packages.md §11-2) が
                     # 移動通知をこの型で識別する。metadata の無いラベルは従来
@@ -502,15 +544,19 @@ def _inject_diff_notifications_direct(
     push_failed = False
     for label in deliverable:
         try:
-            # 台帳経路と同じく、ラベルの型付け (label_kind 等) を知覚エントリへ
-            # 写す (room_state_packages.md §11-3-2)。
-            sai_mem.push_perception(
-                "world_state", label.label,
-                metadata=(
+            # 台帳経路と同じく、ラベルの型付け (label_kind 等) と添える画像を
+            # 知覚エントリへ写す (room_state_packages.md §11-3-2)。画像の無い
+            # ラベルは従来どおり media を渡さない。
+            push_kwargs: dict[str, Any] = {
+                "metadata": (
                     json.dumps(label.metadata, ensure_ascii=False)
                     if label.metadata else None
                 ),
-            )
+            }
+            label_media = _label_media_payload(label)
+            if label_media:
+                push_kwargs["media"] = label_media
+            sai_mem.push_perception("world_state", label.label, **push_kwargs)
         except Exception:
             push_failed = True
             LOGGER.exception(
@@ -1286,5 +1332,24 @@ def _compose_messages(
 
     # 部屋の描画 (旧 visual_context Section) は head から退役した (2026-09-06)。
     # 部屋の様子は知覚 (tail) が運ぶ — docs/intent/room_state_packages.md §2。
+
+    # 自分の外見とインベントリ: システムプロンプトと Memory Weave の後ろに、
+    # 独立した user メッセージとして置く (旧 visual_context と同じ位置)。
+    # システムプロンプトに畳まないのは、画像を添付できるのが独立した
+    # メッセージだけだから (docs/issues/inventory_and_appearance_dropped_from_context.md)。
+    self_view = rendered_by_name.get(SELF_VIEW_SECTION_NAME)
+    if self_view is not None and (self_view.text or self_view.media):
+        messages.append({
+            "role": "user",
+            "content": self_view.text or "",
+            "metadata": {
+                "media": [
+                    {"path": m.path, "mime_type": m.mime_type, "type": m.role}
+                    for m in self_view.media
+                ],
+                _SELF_VIEW_MARKER: True,
+                _VISUAL_CONTEXT_MARKER: True,
+            },
+        })
 
     return messages
