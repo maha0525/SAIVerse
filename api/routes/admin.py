@@ -13,6 +13,9 @@ LOGGER = logging.getLogger(__name__)
 router = APIRouter()
 
 ENV_FILE_PATH = Path(".env")
+# setup が .env を作るときの雛形。後の版で足された変数は、既存ユーザーの .env
+# には書かれていないので、一覧にはここから補う。
+ENV_EXAMPLE_PATH = Path(".env.example")
 SENSITIVE_KEYWORDS = ["KEY", "TOKEN", "SECRET", "PASSWORD"]
 
 class EnvVar(BaseModel):
@@ -52,6 +55,21 @@ def read_env_file() -> List[tuple[str, str, str]]:
         LOGGER.error(f"Failed to read .env: {e}")
     return result
 
+def read_env_example_keys() -> List[str]:
+    """.env.example で有効な行として書かれている変数名 (コメントアウト行は除く)。"""
+    if not ENV_EXAMPLE_PATH.exists():
+        return []
+    keys: List[str] = []
+    try:
+        with open(ENV_EXAMPLE_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=', line.strip())
+                if match and match.group(1) not in keys:
+                    keys.append(match.group(1))
+    except Exception as e:
+        LOGGER.error(f"Failed to read .env.example: {e}")
+    return keys
+
 @router.get("/env", response_model=List[EnvVar])
 def get_env_vars():
     """Get environment variables from .env file."""
@@ -67,7 +85,15 @@ def get_env_vars():
                 is_sensitive=is_sensitive(key)
             ))
             seen_keys.add(key)
-    
+
+    # .env は setup 時に .env.example を写したもので、アップデートでは書き足さない。
+    # 後の版で増えた変数 (例: TYPESAFE_API_KEY) も入力できるよう、雛形にあって
+    # .env に無い変数を空欄で並べる。保存すると write_env_updates が .env の末尾に足す。
+    for key in read_env_example_keys():
+        if key not in seen_keys:
+            vars_list.append(EnvVar(key=key, value="", is_sensitive=is_sensitive(key)))
+            seen_keys.add(key)
+
     # Sort by key
     vars_list.sort(key=lambda x: x.key)
     return vars_list
