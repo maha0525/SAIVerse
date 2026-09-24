@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
-from llm_clients.exceptions import LLMError, ModelUnavailableError
+from llm_clients.exceptions import LLMError, ModelUnavailableError, SafetyFilterError
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import ExecutionCancelledException
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
@@ -2584,6 +2584,13 @@ class SpellLoopResult:
       締めの記録 (建物・記憶の両方) に添えるのはこの値。呼び出し元は後段の
       memorize が読む state の思考もこれに揃える — 揃えないと、周 1 の思考が
       締めの発言の思考として記憶に残る。
+    - ``stop_error``: スペルの後の続きの生成が安全性フィルターに拒まれて止まった
+      回の例外 (:class:`SafetyFilterError`)。ストリーミングを使わない経路でだけ
+      入る — この経路は ``segments`` を呼び出し元が建物へ書くので、ループの中で
+      投げると、それまでの周の発言が建物に残らない。呼び出し元は ``segments`` を
+      記録し終えてから**必ずこれを投げる** (投げないと、止まった理由が誰にも
+      届かない)。ストリーミング経路は周ごとに確定済みなので、ループがそのまま
+      投げる。
     """
 
     segments: List[BeatSegment]
@@ -2591,6 +2598,7 @@ class SpellLoopResult:
     loop_count: int
     closing_reasoning_text: str = ""
     closing_reasoning_details: Any = None
+    stop_error: Optional[SafetyFilterError] = None
 
 
 async def _run_spell_loop(
@@ -2867,6 +2875,38 @@ async def _run_spell_loop(
                 "(building=%s); the next round will not stream sub-speaks",
                 loop_count + 1, new_building_id,
             )
+
+    def _partial_result(
+        stop_error: Optional[SafetyFilterError] = None,
+    ) -> SpellLoopResult:
+        """ループが途中で落ちた回に、ここまでに組んだ分を戻り値にまとめる。"""
+        final_continuation = text or ""
+        if loop_count == 0:
+            return SpellLoopResult(
+                segments=[], final_continuation=text, loop_count=0,
+                closing_reasoning_text=pending_reasoning_text,
+                closing_reasoning_details=pending_reasoning_details,
+                stop_error=stop_error,
+            )
+        # 確定済みの Beat はそのまま残す — 途中で落ちても、ここまでに組んだ
+        # セグメントは呼び出し元が (ストリーミング経路では既に建物へ) 記録する。
+        if final_continuation:
+            segments.append(BeatSegment(
+                text=final_continuation,
+                building_id=current_building_id,
+                llm_usage=pending_llm_usage,
+                occupants=current_occupants,
+                reasoning_text=pending_reasoning_text,
+                reasoning_details=pending_reasoning_details,
+            ))
+        return SpellLoopResult(
+            segments=segments,
+            final_continuation=final_continuation,
+            closing_reasoning_text=pending_reasoning_text,
+            closing_reasoning_details=pending_reasoning_details,
+            loop_count=loop_count,
+            stop_error=stop_error,
+        )
 
     # Beat 境界の材料 (beat_execution_context.md §2.2/§3.4)。取得 (hold) は
     # 呼び出し元 (run_meta_user / run_work_session 等) で済んでいる前提で、
@@ -3577,6 +3617,25 @@ async def _run_spell_loop(
         # 使うモデルが無い・繋げない (ModelUnavailableError) も同じ: エラーの注記を
         # 次の生成へ差し込まず、チャット画面のエラーとして出す。
         raise
+    except SafetyFilterError as exc:
+        # スペルの後の続きの生成が安全性フィルターに拒まれた回。スペル系の
+        # 内部エラーではないので注記は差し込まず、ModelUnavailableError と
+        # 同じく理由をチャット画面のエラー (error_code=safety_filter) として
+        # 届ける。それまでの周の発言は残す:
+        # - ストリーミング経路: 周ごとに下書き行を確定済み。拒まれた続きのために
+        #   開けた行は、Beat の出口の後始末が「一言も無ければ取り下げ、
+        #   何か流れていれば印つきで確定」する。だからそのまま投げる。
+        # - それ以外: 周の発言は呼び出し元がこの戻り値から建物へ書く。ここで
+        #   投げるとそれが消えるので、例外を戻り値に載せて、書き終えた
+        #   呼び出し元に投げさせる。
+        if pipeline_streaming_state is not None:
+            raise
+        LOGGER.warning(
+            "[sea][spell] continuation after round %d was blocked by a safety "
+            "filter; keeping the earlier beats and handing the error to the caller",
+            loop_count,
+        )
+        return _partial_result(stop_error=exc)
     except Exception as exc:
         # Any unhandled error in the spell pipeline: log with traceback,
         # inject a system-visible error note for the next LLM turn, and
@@ -3595,31 +3654,7 @@ async def _run_spell_loop(
             messages.append({"role": "user", "content": f"<system>{error_note}</system>"})
         except Exception:
             LOGGER.debug("[sea][spell] failed to append error note to messages", exc_info=True)
-        final_continuation = text or ""
-        if loop_count == 0:
-            return SpellLoopResult(
-                segments=[], final_continuation=text, loop_count=0,
-                closing_reasoning_text=pending_reasoning_text,
-                closing_reasoning_details=pending_reasoning_details,
-            )
-        # 確定済みの Beat はそのまま残す — 途中で落ちても、ここまでに組んだ
-        # セグメントは呼び出し元が (ストリーミング経路では既に建物へ) 記録する。
-        if final_continuation:
-            segments.append(BeatSegment(
-                text=final_continuation,
-                building_id=current_building_id,
-                llm_usage=pending_llm_usage,
-                occupants=current_occupants,
-                reasoning_text=pending_reasoning_text,
-                reasoning_details=pending_reasoning_details,
-            ))
-        return SpellLoopResult(
-            segments=segments,
-            final_continuation=final_continuation,
-            closing_reasoning_text=pending_reasoning_text,
-            closing_reasoning_details=pending_reasoning_details,
-            loop_count=loop_count,
-        )
+        return _partial_result()
 
 
 async def _decide_spell_args_via_playbook(
@@ -4939,6 +4974,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             len(_spell_result.segments), bool(_bubble1_emitted_early),
                         )
 
+                # 続きの生成が安全性フィルターに拒まれて止まった回。それまでの周の
+                # 発言は上で建物へ書き終えたので、ここで理由を投げる
+                # (SpellLoopResult.stop_error の docstring)。
+                if _spell_result.stop_error is not None:
+                    raise _spell_result.stop_error
+
                 if result["type"] == "tool_call":
                     LOGGER.info("[DEBUG] Entering tool_call branch")
                     # Only tool call, no text
@@ -5750,6 +5791,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # ── Spell loop (parallel execution per round) ──
                     _bubble1_emitted_early_sync = ""
                     _spell_segments_sync: List[BeatSegment] = []
+                    _spell_stop_error_sync: Optional[SafetyFilterError] = None
                     if isinstance(text, str):
                         # Normal text mode - run spell processing
                         _bubble1_emitted_early_sync = _emit_bubble1_early(
@@ -5785,6 +5827,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         _continuation_sync = _spell_result_sync.final_continuation
                         _spell_loop_count_sync = _spell_result_sync.loop_count
                         _spell_segments_sync = _spell_result_sync.segments
+                        _spell_stop_error_sync = _spell_result_sync.stop_error
                         if _spell_loop_count_sync > 0:
                             # 締めの発言を作ったのは最終周の呼び出し。以後この
                             # ノードが使う思考をその分へ揃える (ストリーミング
@@ -5878,6 +5921,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 if msg_metadata:
                                     say_event["metadata"] = msg_metadata
                                 event_callback(say_event)
+
+                    # 続きの生成が安全性フィルターに拒まれて止まった回。それまでの
+                    # 周の発言は上で建物へ書き終えたので、ここで理由を投げる
+                    # (SpellLoopResult.stop_error の docstring)。
+                    if _spell_stop_error_sync is not None:
+                        raise _spell_stop_error_sync
 
                     # streaming 経路と対称化: spell が走ったら、後段の memorize /
                     # output_key に渡る text を continuation (plain) に置換する。

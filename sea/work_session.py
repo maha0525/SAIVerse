@@ -507,6 +507,11 @@ def run_work_session(
             # 締めの発言とラウンド数だけ。
             continuation = _spell_result.final_continuation
             rounds_used = _spell_result.loop_count
+            # 続きの生成が安全性フィルターに拒まれて止まった回。周ごとの記録は
+            # ループが済ませているので、ここで投げてエラー終了として閉じる
+            # (黙って「完了」にすると、止まった理由がどこにも残らない)。
+            if _spell_result.stop_error is not None:
+                raise _spell_result.stop_error
 
             # 予算切れ判定: ループが予算上限に達し、かつ最終応答にまだ spell が
             # 残っている (= 続きをやりたがっていた) とき budget_exhausted。

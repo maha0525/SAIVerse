@@ -1715,3 +1715,130 @@ def test_a_gemini_prompt_block_reaches_the_caller_as_a_safety_filter_error(monke
     # 本文ゼロなので下書き行は取り下げ、空の記録を残さない
     runtime._withdraw_speak_placeholder.assert_called_once()
     runtime._store_memory.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# スペルの後の続きの生成が安全性フィルターに拒まれた回 (2026-09-24)
+#
+# 以前はスペルループの包括 except が SafetyFilterError を握り潰し、
+# 「[Spell System Error]」の注記を差し込んで途中までの発言だけを保存していた。
+# 画面には止まった理由が一切届かなかった。
+# ---------------------------------------------------------------------------
+
+def _prompt_block() -> Exception:
+    from llm_clients.exceptions import SafetyFilterError
+    return SafetyFilterError(
+        "Gemini blocked the prompt (block_reason=PROHIBITED_CONTENT)",
+        user_message="Geminiの安全性フィルターにより、応答がブロックされました（PROHIBITED_CONTENT）",
+    )
+
+
+class _RecordingScriptedStreamClient(_ScriptedStreamClient):
+    """渡された messages の参照を控える — 後から注記が積まれたかを見るため。"""
+
+    def __init__(self, calls):
+        super().__init__(calls)
+        self.seen_messages: list = []
+
+    def generate_stream(self, messages, tools=(), temperature=None, **kwargs):
+        self.seen_messages = messages
+        return super().generate_stream(messages, tools=tools, temperature=temperature, **kwargs)
+
+
+class _ScriptedSyncClient:
+    """呼び出しごとに別の応答を返す非ストリーミングのクライアント。
+
+    要素は返す本文か、``generate`` の瞬間に投げる例外。
+    """
+
+    config_key = None
+
+    def __init__(self, calls):
+        self._calls = list(calls)
+        self.seen_messages: list = []
+
+    def generate(self, messages, tools=(), temperature=None,
+                 response_schema=None, **kwargs):
+        assert self._calls, "_ScriptedSyncClient: no scripted calls left"
+        self.seen_messages = messages
+        nxt = self._calls.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    def consume_usage(self):
+        return None
+
+    def consume_thought_signature(self):
+        return None
+
+
+def _has_spell_system_error_note(messages) -> bool:
+    return any(
+        "[Spell System Error]" in str(m.get("content", ""))
+        for m in messages if isinstance(m, dict)
+    )
+
+
+def test_a_blocked_continuation_after_a_spell_reports_the_safety_filter(monkeypatch):
+    """ストリーミング経路 — 前の Beat は確定のまま、続きの空の行は取り下げ、
+    理由は SafetyFilterError のまま node() の外へ届く。"""
+    from llm_clients.exceptions import SafetyFilterError
+
+    client = _RecordingScriptedStreamClient(
+        [[f"やるね。\n{SPELL_LINE}"], _prompt_block()],
+    )
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    runtime._emit_speak_start.side_effect = ["msg-1", "msg-2", "msg-3"]
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _ok_spell)
+    runtime._withdraw_speak_placeholder.return_value = True
+
+    with pytest.raises(SafetyFilterError) as excinfo:
+        asyncio.run(node(_spell_state()))
+
+    # 画面へ流れる error イベントは、主の返事で拒まれた回と同じ形
+    event = excinfo.value.to_dict()
+    assert event["error_code"] == "safety_filter"
+    assert "PROHIBITED_CONTENT" in event["content"]
+    # スペルを唱えた Beat は確定のまま残る (確定は 1 回だけ)
+    runtime._emit_speak_finalize.assert_called_once()
+    assert runtime._emit_speak_finalize.call_args.args[2] == "msg-1"
+    assert "やるね。" in runtime._emit_speak_finalize.call_args.args[3]
+    # 拒まれた続きのために開けた行は、空の記録として残さず取り下げる
+    runtime._withdraw_speak_placeholder.assert_called_once()
+    assert runtime._withdraw_speak_placeholder.call_args.args[2] == "msg-2"
+    # スペル系の内部エラーではないので、注記も中断の通告も書かない
+    assert not _has_spell_system_error_note(client.seen_messages)
+    persona.history_manager.add_to_building_only.assert_not_called()
+
+
+def test_a_blocked_continuation_without_streaming_keeps_the_earlier_beats(monkeypatch):
+    """非ストリーミング経路 — 周の発言は呼び出し元が建物へ書き終えてから、
+    SafetyFilterError が投げられる (ループの中で投げると周の発言が消える)。"""
+    from llm_clients.exceptions import SafetyFilterError
+
+    client = _ScriptedSyncClient([f"やるね。\n{SPELL_LINE}", _prompt_block()])
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: False)
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _ok_spell)
+    runtime._emit_say.return_value = {"message_id": "say-1", "content": "x"}
+
+    with pytest.raises(SafetyFilterError) as excinfo:
+        asyncio.run(node(_spell_state()))
+
+    assert excinfo.value.to_dict()["error_code"] == "safety_filter"
+    # スペルの結果を持つ Beat 1 が建物へ書かれている (拒まれる前の発言は残る)
+    said_texts = [c.args[2] for c in runtime._emit_say.call_args_list]
+    assert any("やりました" in t for t in said_texts), said_texts
+    # 拒まれた続きの分は何も書かない (空の記録を残さない)
+    assert all(t.strip() for t in said_texts)
+    # 下書き行を使わない経路なので、確定も取り下げも起きない
+    runtime._emit_speak_finalize.assert_not_called()
+    runtime._withdraw_speak_placeholder.assert_not_called()
+    assert not _has_spell_system_error_note(client.seen_messages)
