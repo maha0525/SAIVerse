@@ -306,7 +306,7 @@ def preview_head_perceptions(
     読み取り専用の中身:
 
     - 基準 (last_notified) を進めない (``flush_diffs(..., advance=False)`` の
-      戻りを使うだけで :meth:`HeadPipeline.advance_last_notified` を呼ばない)。
+      戻りを使うだけで :meth:`HeadPipeline.advance_last_notified_many` を呼ばない)。
     - 知覚バッファに push しない / 実行台帳に行を作らない。
     - 部屋の様子は照合の計算 (:func:`_plan_room_state_change`) までで、置き直し
       (自己回復) は行わない — 置き直しは提示への書き込みで、しかも未消費の
@@ -510,9 +510,9 @@ def _queue_section_diffs_locked(
     if not deliverable:
         # 検知だけのラベル (deliver=False) しか無い回。配送する文が無いので台帳は
         # 通さず、基準だけ新しい状態へ進める — 進めないと以後の差分が古い基準との
-        # 比較になって出なくなる (部屋替え時の同席者がこれ)。
-        for section_name, new_snapshot in detected.items():
-            pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+        # 比較になって出なくなる (部屋替え時の同席者がこれ)。検知した Section を
+        # まとめて一回で進める (Section ごとに DB を往復しない)。
+        pipeline.advance_last_notified_many(ctx.persona_id, detected)
         return False
 
     try:
@@ -566,9 +566,10 @@ def _queue_section_diffs_locked(
     # 同席者) も、もう後段の処理を持たない (再会の想起は Pulse 頭の同席チェックへ
     # 移った、2026-09-07) ので、基準だけ進めて次の差分に備えればよい。
     # 前進も通知ロックの内側 — ロックを離すのは B が進んだ後なので、次に来た
-    # 処理はこの変化を見つけない。
-    for section_name, new_snapshot in detected.items():
-        pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+    # 処理はこの変化を見つけない。検知した Section はまとめて一回で進める —
+    # 入室の配送ハンドラから来た回は台帳の配送ロックを握ったままなので、Section
+    # ごとに DB を往復すると他ペルソナの配送まで待たせる。
+    pipeline.advance_last_notified_many(ctx.persona_id, detected)
 
     LOGGER.info(
         "head_pipeline: queued %d world_state notification(s) via ledger "
@@ -661,8 +662,8 @@ def _inject_diff_notifications_direct_locked(
         # 一部でも失敗したら B を進めない — 次回 flush で全ラベル再検出される。
         return False
 
-    for section_name, new_snapshot in detected.items():
-        pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+    # 検知した Section はまとめて一回で進める (台帳経路と同じ)。
+    pipeline.advance_last_notified_many(ctx.persona_id, detected)
 
     LOGGER.info(
         "head_pipeline: pushed %d world_state perception(s) for persona=%s building=%s",

@@ -449,7 +449,7 @@ class HeadPipeline:
         ``advance=False`` (S3 修正、統合工事 §6-4): **検出だけ行い B を進めない**。
         戻り値は ``(labels, {section_name: new_snapshot})`` のタプルになり、呼び出し側
         (integration.inject_diff_notifications) が配送を durable に確定
-        (outbox mark_applied) した後に :meth:`advance_last_notified` で B を進める。
+        (outbox mark_applied) した後に :meth:`advance_last_notified_many` で B を進める。
         配送前に B を進めると、配送失敗時に差分が永久に失われる (SEA 監査 S3)。
         差分が出た section の dirty マークも据え置く (= 配送失敗時は次回 flush で
         再検出される)。
@@ -546,24 +546,46 @@ class HeadPipeline:
         section_name: str,
         new_section_snapshot: object,
     ) -> None:
+        """1 Section だけの :meth:`advance_last_notified_many` (薄い委譲)。
+
+        規約 (対象の組・通知ロック・失敗の扱い) は :meth:`advance_last_notified_many`
+        を参照。ツール成功時の内容型通知 (notify.py) のように、届けた Section が
+        一つだけの呼び出しが使う。
+        """
+        self.advance_last_notified_many(
+            persona_id, {section_name: new_section_snapshot},
+        )
+
+    def advance_last_notified_many(
+        self,
+        persona_id: str,
+        sections: dict[str, object],
+    ) -> None:
         """該当 persona の**全 (persona, model) の組**の B (last_notified) を、
-        指定 section だけ ``new_section_snapshot`` に前進させる (+ store 永続化)。
+        ``sections`` (Section 名 → 新しい snapshot) の Section だけ前進させる
+        (+ store 永続化)。
 
         「全ての組」は二種類ある:
 
         - **メモリ上の組** (``self._states``): in-memory の B を進め、
           :meth:`_persist_last_notified` で DB の行へ保存する。
         - **DB にだけある組** (再起動後、まだ一度も読み込まれていないモデル):
-          store の :meth:`LineHeadSnapshotStore.save_notified_section_for_other_models`
-          で、その Section の B だけを DB 上で進める。進めないと、後でそのモデルの
+          store の :meth:`LineHeadSnapshotStore.save_notified_sections_for_other_models`
+          で、渡した Section の B だけを DB 上で進める。進めないと、後でそのモデルの
           組が読み込まれたときに古い B から同じ変化を再検出して再配送する
           (docs/issues/head_diff_notification_duplicate_delivery.md ケース 4)。
+
+        一回の配送で複数の Section を届けても、DB 処理は Section 数に比例させない:
+        メモリ上の更新は ``self._lock`` 一回、メモリ上の組の保存は組ごとに一回、
+        DB にだけある組は store の呼び出し一回。入室の配送ハンドラからの呼び出しは
+        台帳のプロセス全体の配送ロックを握っている最中なので、ここが Section ごとに
+        DB を往復すると他ペルソナの配送まで止まる。
 
         head 操作の内容型通知 (§6-4) / outbox 化された diff 通知 (S3) の
         「push 確定後の B 前進」に使う。根拠: 知覚バッファ → SAIMemory は persona
         共有の履歴ストリームで、push は全 Session の窓に届く — 前進させないと
         backstop flush_diffs が同じ変化を model ごとに再通知する。
-        dirty マークも該当 section だけ除去する。
+        dirty マークも渡した Section だけ除去する。``sections`` が空なら何もしない。
 
         呼び出し側はペルソナの通知ロック (:meth:`notify_lock_for`) を握っている
         こと。「メモリ上の組を進めた後・DB の他の行を進める前」に別スレッドが
@@ -571,13 +593,16 @@ class HeadPipeline:
         :meth:`load_from_store` も同じ通知ロックの内側で読み込むので割り込めない。
         DB 側の保存失敗は例外にしない (C8 — B の保存失敗は止めない)。
         """
+        if not sections:
+            return
         persist_targets: list[tuple[str, dict[str, object]]] = []
         with self._lock:
             for (pid, model_key), state in self._states.items():
                 if pid != persona_id:
                     continue
-                state.last_notified_sections[section_name] = new_section_snapshot
-                state.dirty_sections.discard(section_name)
+                for section_name, new_section_snapshot in sections.items():
+                    state.last_notified_sections[section_name] = new_section_snapshot
+                    state.dirty_sections.discard(section_name)
                 persist_targets.append(
                     (model_key, dict(state.last_notified_sections))
                 )
@@ -588,15 +613,15 @@ class HeadPipeline:
             self._persist_last_notified(persona_id, model_key, notified)
         if self._store is not None:
             try:
-                self._store.save_notified_section_for_other_models(
-                    persona_id, section_name, new_section_snapshot,
+                self._store.save_notified_sections_for_other_models(
+                    persona_id, dict(sections),
                     exclude_model_keys=in_memory_models,
                 )
             except Exception:
                 LOGGER.exception(
-                    "head_pipeline: store.save_notified_section_for_other_models "
-                    "failed persona=%s section=%s",
-                    persona_id, section_name,
+                    "head_pipeline: store.save_notified_sections_for_other_models "
+                    "failed persona=%s sections=%s",
+                    persona_id, sorted(sections),
                 )
 
     # ---- render ----
@@ -735,7 +760,7 @@ class HeadPipeline:
 
         **ペルソナの通知ロック (:meth:`notify_lock_for`) の内側で読み込む**
         (docs/issues/head_diff_notification_duplicate_delivery.md ケース 4)。
-        :meth:`advance_last_notified` は「メモリ上の組を進める → DB にだけある組を
+        :meth:`advance_last_notified_many` は「メモリ上の組を進める → DB にだけある組を
         DB 上で進める」の二段で、その間に別スレッドがこの組を DB から読み込むと、
         進める前の B がメモリに入り、以後の配送でもその古い B が基準になって
         同じ変化を再配送する。B を進める処理 (integration の差分検知 / notify の
@@ -844,7 +869,7 @@ class HeadPipeline:
         """ペルソナの通知ロックを取得 (無ければ作る)。
 
         変化の知らせを出す処理 (integration の差分検知 / notify の内容型通知) は、
-        「検出 (または撮影) → 台帳に積む → :meth:`advance_last_notified`」を
+        「検出 (または撮影) → 台帳に積む → :meth:`advance_last_notified_many`」を
         このロックの内側で行う。後から来た処理は前の処理が B を進め終えてから
         比べるので、同じ変化を二度積まない。:meth:`load_from_store` も DB からの
         読み込みをこのロックの内側で行う (B を進める途中の組を読み込まない)。

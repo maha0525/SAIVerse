@@ -3687,6 +3687,7 @@ class EntryDeliveryOrderTest(_EnvTestBase):
         pipeline = SimpleNamespace(
             flush_diffs=lambda ctx, **kw: (labels, {}),
             advance_last_notified=lambda *a, **k: None,
+            advance_last_notified_many=lambda *a, **k: None,
             notify_lock_for=lambda persona_id: notify_lock,
         )
         ctx = SimpleNamespace(persona_id=persona.persona_id)

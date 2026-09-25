@@ -27,6 +27,12 @@ g. load_from_store はペルソナの通知ロックの内側で読み込む (B 
    途中の組を読み込めない)。
 h. 既にメモリにある組を load_from_store が DB の値で上書きしない。
 
+B の前進の DB 処理 (性能の退行の修正):
+
+i. 一回の配送で複数の Section を進めても、DB にだけある組の前進は store の
+   呼び出し一回、メモリ上の組の保存はモデルごとに一回 (Section 数に比例しない)。
+j. 全モデルの組がメモリにあるとき、DB にだけある組の前進は commit しない。
+
 並行テストは StaticPool の in-memory SQLite だと二スレッドが一つの接続を共有して
 台帳の transaction が壊れるので、tmp_path のファイル SQLite を使う。本番の
 ~/.saiverse には触れない。
@@ -379,7 +385,9 @@ def test_delivery_still_runs_when_b_advance_fails_after_queueing(
     def broken_advance(*args, **kwargs):
         raise RuntimeError("advance failed")
 
-    monkeypatch.setattr(pipeline, "advance_last_notified", broken_advance)
+    # 差分検知は advance_last_notified_many を、ツール側の知らせは単数版
+    # (→ many へ委譲) を呼ぶ。many を壊せば両方の前進が落ちる。
+    monkeypatch.setattr(pipeline, "advance_last_notified_many", broken_advance)
 
     # 差分検知: 例外は呼び出し元へ返るが、配送は済んでいる
     section.live_text = "前進に失敗する変化"
@@ -618,25 +626,61 @@ def test_store_advance_for_other_models_reports_failures(section, session_factor
     _set_raw_notified(session_factory, MODEL_B, "[]")  # JSON だが dict でない
 
     value = {"text": "店の値"}
-    assert store.save_notified_section_for_other_models(
-        PERSONA_ID, "core_memory", value, exclude_model_keys={MODEL_A},
+    assert store.save_notified_sections_for_other_models(
+        PERSONA_ID, {"core_memory": value}, exclude_model_keys={MODEL_A},
     ) is False
     # 除外した組 (メモリ上の組) は触らない / 壊れた行は残す / 他は進める
     assert _stored_notified(session_factory, MODEL_A)["core_memory"] == {"text": "初期値"}
     assert _raw_notified(session_factory, MODEL_B) == "[]"
     assert _stored_notified(session_factory, MODEL_C)["core_memory"] == value
 
-    # 未登録の Section は何も書かない
-    assert store.save_notified_section_for_other_models(
-        PERSONA_ID, "no_such_section", value, exclude_model_keys=set(),
+    # 未登録の Section しか無ければ何も書かない
+    raw_c = _raw_notified(session_factory, MODEL_C)
+    assert store.save_notified_sections_for_other_models(
+        PERSONA_ID, {"no_such_section": value}, exclude_model_keys=set(),
     ) is False
+    assert _raw_notified(session_factory, MODEL_C) == raw_c
 
     # 壊れた行が無ければ True
     _set_raw_notified(session_factory, MODEL_B, "{}")
-    assert store.save_notified_section_for_other_models(
-        PERSONA_ID, "core_memory", value, exclude_model_keys=set(),
+    assert store.save_notified_sections_for_other_models(
+        PERSONA_ID, {"core_memory": value}, exclude_model_keys=set(),
     ) is True
     assert _stored_notified(session_factory, MODEL_B) == {"core_memory": value}
+
+    # 未登録の Section が混ざっても、登録済みの Section は書く (戻り値は False)
+    newer = {"text": "もっと新しい値"}
+    assert store.save_notified_sections_for_other_models(
+        PERSONA_ID, {"no_such_section": value, "core_memory": newer},
+        exclude_model_keys=set(),
+    ) is False
+    assert _stored_notified(session_factory, MODEL_B) == {"core_memory": newer}
+    assert "no_such_section" not in _stored_notified(session_factory, MODEL_C)
+
+
+def test_store_advance_for_other_models_skips_unserializable_section(session_factory):
+    """serialize に失敗した Section だけを飛ばし、残りの Section は書く。"""
+
+    class _BrokenSerialize(_MutableSection):
+        def serialize_snapshot(self, snapshot):
+            raise ValueError("serialize failed")
+
+    core = _MutableSection("core_memory", "初期値")
+    broken = _BrokenSerialize("desk", "机の初期値")
+    store, before, _restart = _stored_pipelines(session_factory, core, broken)
+    before.capture_all(_ctx(MODEL_B))
+    # 撮影時の保存でも desk は serialize できずに省かれている (optional Section)
+    assert "desk" not in json.loads(_raw_notified(session_factory, MODEL_B))
+
+    assert store.save_notified_sections_for_other_models(
+        PERSONA_ID,
+        {"core_memory": {"text": "届いた値"}, "desk": {"text": "書けない値"}},
+        exclude_model_keys=set(),
+    ) is False
+    raw_after = json.loads(_raw_notified(session_factory, MODEL_B))
+    assert json.loads(raw_after["core_memory"]) == {"text": "届いた値"}
+    # 書けなかった Section は書かれていない
+    assert "desk" not in raw_after
 
 
 def test_load_from_store_reads_inside_the_notify_lock(section, session_factory, monkeypatch):
@@ -716,3 +760,132 @@ def test_load_from_store_does_not_overwrite_a_loaded_state(
     state = restart._states[(PERSONA_ID, MODEL_A)]
     assert state.last_notified_sections["core_memory"] == {"text": "進めた値"}
     assert restart.get_snapshot(PERSONA_ID, MODEL_A) is loaded_snapshot
+
+
+# ---------------------------------------------------------------------------
+# B の前進の DB 処理は配送一回につき一回 (Section 数に比例しない)
+# ---------------------------------------------------------------------------
+
+
+def _count_b_saves(store: LineHeadSnapshotStore, monkeypatch) -> dict:
+    """store の B 保存 (メモリ上の組 / DB にだけある組) の呼び出しを数える。"""
+    calls: dict = {"last_notified": [], "other_models": []}
+    original_last = store.save_last_notified
+    original_other = store.save_notified_sections_for_other_models
+
+    def save_last_notified(persona_id, model_key, notified):
+        calls["last_notified"].append(model_key)
+        return original_last(persona_id, model_key, notified)
+
+    def save_other(persona_id, notified_values, exclude_model_keys):
+        calls["other_models"].append(
+            (sorted(notified_values), sorted(exclude_model_keys)),
+        )
+        return original_other(
+            persona_id, notified_values, exclude_model_keys=exclude_model_keys,
+        )
+
+    monkeypatch.setattr(store, "save_last_notified", save_last_notified)
+    monkeypatch.setattr(store, "save_notified_sections_for_other_models", save_other)
+    return calls
+
+
+def test_advancing_several_sections_touches_the_db_once(
+    persona, manager, session_factory, monkeypatch,
+):
+    """二つの Section が同時に変わった配送一回で、B の保存はモデルごと・店ごとに一回。
+
+    入室の配送ハンドラからの前進は台帳のプロセス全体の配送ロックを握っている
+    最中なので、Section ごとに DB を往復すると他ペルソナの配送まで止まる。
+    """
+    core = _MutableSection("core_memory", "初期値")
+    desk = _MutableSection("desk", "机の初期値")
+    store, before, restart = _stored_pipelines(session_factory, core, desk)
+    before.capture_all(_ctx(MODEL_A))
+    before.capture_all(_ctx(MODEL_B))
+
+    # 再起動後、MODEL_A の組だけがメモリにある (MODEL_B は DB にだけある)
+    assert restart.load_from_store(PERSONA_ID, MODEL_A) is True
+    assert not restart.has_snapshot(PERSONA_ID, MODEL_B)
+    calls = _count_b_saves(store, monkeypatch)
+
+    core.live_text = "新しいコア記憶"
+    desk.live_text = "新しい机"
+    assert _detect(persona, manager, restart, MODEL_A) is True
+    contents = [
+        json.loads(r.PAYLOAD_JSON)["content"] for r in _outbox_rows(session_factory)
+    ]
+    assert len(contents) == 2, contents
+
+    # DB にだけある組の前進は一回で、両 Section をまとめて渡している
+    assert calls["other_models"] == [(["core_memory", "desk"], [MODEL_A])]
+    # メモリ上の組の保存はモデル一つにつき一回
+    assert calls["last_notified"] == [MODEL_A]
+
+    # 両 Section の新しい B が DB の MODEL_B の行に入っている
+    stored_b = _stored_notified(session_factory, MODEL_B)
+    assert stored_b["core_memory"] == {"text": "新しいコア記憶"}
+    assert stored_b["desk"] == {"text": "新しい机"}
+    stored_a = _stored_notified(session_factory, MODEL_A)
+    assert stored_a["core_memory"] == {"text": "新しいコア記憶"}
+    assert stored_a["desk"] == {"text": "新しい机"}
+
+    # 後で MODEL_B が読み込まれても、どちらの変化も再配送しない
+    assert _detect(persona, manager, restart, MODEL_B) is False
+    assert len(_outbox_rows(session_factory)) == 2
+
+
+def test_no_commit_when_every_model_row_is_in_memory(
+    persona, manager, session_factory, monkeypatch,
+):
+    """全モデルの組がメモリにあるとき、DB にだけある組の前進は commit しない。"""
+    core = _MutableSection("core_memory", "初期値")
+    desk = _MutableSection("desk", "机の初期値")
+    store, before, restart = _stored_pipelines(session_factory, core, desk)
+    before.capture_all(_ctx(MODEL_A))
+    before.capture_all(_ctx(MODEL_B))
+    assert restart.load_from_store(PERSONA_ID, MODEL_A) is True
+    assert restart.load_from_store(PERSONA_ID, MODEL_B) is True
+
+    # store が他モデル行の前進の最中に開いた DB セッションの commit を数える
+    commits: list[str] = []
+    inside_other = {"on": False}
+    original_factory = store._session_factory
+
+    def counting_factory():
+        db = original_factory()
+        if inside_other["on"]:
+            original_commit = db.commit
+
+            def commit():
+                commits.append("commit")
+                return original_commit()
+
+            db.commit = commit
+        return db
+
+    monkeypatch.setattr(store, "_session_factory", counting_factory)
+    original_other = store.save_notified_sections_for_other_models
+    results: list[bool] = []
+
+    def save_other(*args, **kwargs):
+        inside_other["on"] = True
+        try:
+            result = original_other(*args, **kwargs)
+        finally:
+            inside_other["on"] = False
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(store, "save_notified_sections_for_other_models", save_other)
+
+    core.live_text = "新しいコア記憶"
+    desk.live_text = "新しい机"
+    assert _detect(persona, manager, restart, MODEL_A) is True
+
+    # 呼ばれてはいる (除外集合 = 両モデル) が、対象行が 0 件なので commit しない
+    assert results == [True]
+    assert commits == []
+    # メモリ上の組の保存 (save_last_notified) で両モデルの B は DB に入っている
+    for model_key in (MODEL_A, MODEL_B):
+        assert _stored_notified(session_factory, model_key)["desk"] == {"text": "新しい机"}

@@ -238,14 +238,14 @@ class LineHeadSnapshotStore:
             db.close()
         return True
 
-    def save_notified_section_for_other_models(
+    def save_notified_sections_for_other_models(
         self,
         persona_id: str,
-        section_name: str,
-        notified_value: Any,
+        notified_values: dict[str, Any],
         exclude_model_keys: set[str] | frozenset[str],
     ) -> bool:
-        """同じペルソナの**メモリに読み込まれていない**モデルの行の B を 1 Section だけ進める。
+        """同じペルソナの**メモリに読み込まれていない**モデルの行の B を、
+        ``notified_values`` (Section 名 → 新しい B の値) の Section だけ進める。
 
         知らせの配送が確定したとき、pipeline はメモリ上の (persona, model) の組の
         B を進めて :meth:`save_last_notified` で保存する。再起動後はそのとき使う
@@ -256,52 +256,66 @@ class LineHeadSnapshotStore:
 
         対象は ``PERSONA_ID == persona_id`` かつ ``MODEL_KEY`` が
         ``exclude_model_keys`` (= メモリ上の組。そちらは呼び出し側が
-        save_last_notified で保存する) に無い行すべて。各行の
-        ``LAST_NOTIFIED_JSON`` のうち ``section_name`` のキーだけを
-        ``section.serialize_snapshot(notified_value)`` で置き換え、他の Section の
-        値は保つ。``SNAPSHOT_VERSION`` と ``SECTIONS_JSON`` (A) には触らない。
-        全行を一つのトランザクションで commit する。
+        save_last_notified で保存する) に無い行すべて。除外は SQL の条件で行う
+        (除外集合が空なら条件なし)。各行の ``LAST_NOTIFIED_JSON`` のうち渡した
+        Section のキーだけを ``section.serialize_snapshot(value)`` で置き換え、
+        他の Section の値は保つ。``SNAPSHOT_VERSION`` と ``SECTIONS_JSON`` (A) には
+        触らない。全 Section・全行を一つのトランザクションで commit する
+        (一回の配送で Section が幾つあっても DB の往復は一回)。
 
         失敗は例外にせず False + ログ (:meth:`save_last_notified` と同じ —
         B の保存失敗は止めない、cached_head_architecture.md C8)。
 
-        - Section が registry に未登録 / serialize 失敗 → 何も書かずに False。
+        - Section が registry に未登録 / serialize 失敗 → その Section だけ飛ばして
+          ログを残し、残りの Section は書く。戻り値は False。書ける Section が
+          一つも無ければ DB に触らず False。
         - ``LAST_NOTIFIED_JSON`` が壊れている (JSON として読めない / dict でない)
           行は、その行だけ飛ばしてログを残す。他の行は進めて commit し、戻り値は
           False (全行は進められなかった)。
-        - 対象の行が 0 件なら何もせず True。
+        - 対象の行が 0 件なら commit せずに閉じる (書くものが無い)。戻り値は
+          Section の飛ばしが無ければ True。
         """
         from database.models import SessionHeadSnapshot as SessionHeadSnapshotRow
 
-        section = self._registry.by_name(section_name)
-        if section is None:
-            LOGGER.warning(
-                "head_pipeline_store: save_notified_section_for_other_models skipped "
-                "(section %r not registered) persona=%s",
-                section_name, persona_id,
-            )
-            return False
-        try:
-            serialized = section.serialize_snapshot(notified_value)
-        except Exception:
-            LOGGER.exception(
-                "head_pipeline_store: serialize failed (notified, other models) "
-                "section=%s persona=%s",
-                section_name, persona_id,
-            )
+        all_ok = True
+        serialized: dict[str, str] = {}
+        for section_name, notified_value in notified_values.items():
+            section = self._registry.by_name(section_name)
+            if section is None:
+                all_ok = False
+                LOGGER.warning(
+                    "head_pipeline_store: save_notified_sections_for_other_models "
+                    "skipped section %r (not registered) persona=%s",
+                    section_name, persona_id,
+                )
+                continue
+            try:
+                serialized[section_name] = section.serialize_snapshot(notified_value)
+            except Exception:
+                all_ok = False
+                LOGGER.exception(
+                    "head_pipeline_store: serialize failed (notified, other models) "
+                    "section=%s persona=%s",
+                    section_name, persona_id,
+                )
+        if not serialized:
             return False
 
         excluded = set(exclude_model_keys)
-        all_ok = True
         db = self._session_factory()
         try:
-            rows = db.query(SessionHeadSnapshotRow).filter(
+            query = db.query(SessionHeadSnapshotRow).filter(
                 SessionHeadSnapshotRow.PERSONA_ID == persona_id,
-            ).all()
+            )
+            if excluded:
+                query = query.filter(
+                    SessionHeadSnapshotRow.MODEL_KEY.notin_(excluded),
+                )
+            rows = query.all()
+            if not rows:
+                return all_ok
             now = datetime.now()
             for row in rows:
-                if row.MODEL_KEY in excluded:
-                    continue
                 try:
                     notified = json.loads(row.LAST_NOTIFIED_JSON or "{}")
                 except json.JSONDecodeError:
@@ -310,20 +324,20 @@ class LineHeadSnapshotStore:
                     all_ok = False
                     LOGGER.error(
                         "head_pipeline_store: corrupt LAST_NOTIFIED_JSON, row skipped "
-                        "persona=%s model=%s section=%s",
-                        persona_id, row.MODEL_KEY, section_name,
+                        "persona=%s model=%s sections=%s",
+                        persona_id, row.MODEL_KEY, sorted(serialized),
                     )
                     continue
-                notified[section_name] = serialized
+                notified.update(serialized)
                 row.LAST_NOTIFIED_JSON = json.dumps(notified, ensure_ascii=False)
                 row.UPDATED_AT = now
             db.commit()
         except Exception:
             db.rollback()
             LOGGER.exception(
-                "head_pipeline_store: save_notified_section_for_other_models failed "
-                "persona=%s section=%s",
-                persona_id, section_name,
+                "head_pipeline_store: save_notified_sections_for_other_models failed "
+                "persona=%s sections=%s",
+                persona_id, sorted(serialized),
             )
             return False
         finally:
