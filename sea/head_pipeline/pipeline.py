@@ -100,6 +100,11 @@ class HeadPipeline:
         # 全体のロック順序は 台帳の配送ロック (ExecutionLedger._delivery_lock)
         # → 通知ロック → 保存ロック → self._lock の一方向のみ。通知ロックを
         # 握ったまま配送ロックを取ってはならない (配送はロックを離してから)。
+        # load_from_store も通知ロックを取る (B を進める途中で古い組が DB から
+        # 読み込まれるのを防ぐ — 同 issue ケース 4)。通知ロックを握ったまま
+        # load_from_store を呼ぶのは同じスレッドの再入 (RLock) なので可。
+        # pipeline のロック (self._lock) や保存ロックを握ったまま呼んでは
+        # ならない (内側のロックから外側の通知ロックを取る逆順になる)。
         self._notify_locks: dict[str, threading.RLock] = {}
 
     def attach_store(self, store: LineHeadSnapshotStore) -> None:
@@ -541,14 +546,30 @@ class HeadPipeline:
         section_name: str,
         new_section_snapshot: object,
     ) -> None:
-        """該当 persona の**全 (persona, model) 行**の B (last_notified) を、
+        """該当 persona の**全 (persona, model) の組**の B (last_notified) を、
         指定 section だけ ``new_section_snapshot`` に前進させる (+ store 永続化)。
+
+        「全ての組」は二種類ある:
+
+        - **メモリ上の組** (``self._states``): in-memory の B を進め、
+          :meth:`_persist_last_notified` で DB の行へ保存する。
+        - **DB にだけある組** (再起動後、まだ一度も読み込まれていないモデル):
+          store の :meth:`LineHeadSnapshotStore.save_notified_section_for_other_models`
+          で、その Section の B だけを DB 上で進める。進めないと、後でそのモデルの
+          組が読み込まれたときに古い B から同じ変化を再検出して再配送する
+          (docs/issues/head_diff_notification_duplicate_delivery.md ケース 4)。
 
         head 操作の内容型通知 (§6-4) / outbox 化された diff 通知 (S3) の
         「push 確定後の B 前進」に使う。根拠: 知覚バッファ → SAIMemory は persona
         共有の履歴ストリームで、push は全 Session の窓に届く — 前進させないと
         backstop flush_diffs が同じ変化を model ごとに再通知する。
         dirty マークも該当 section だけ除去する。
+
+        呼び出し側はペルソナの通知ロック (:meth:`notify_lock_for`) を握っている
+        こと。「メモリ上の組を進めた後・DB の他の行を進める前」に別スレッドが
+        DB から組を読み込むと進める前の B がメモリに入るが、
+        :meth:`load_from_store` も同じ通知ロックの内側で読み込むので割り込めない。
+        DB 側の保存失敗は例外にしない (C8 — B の保存失敗は止めない)。
         """
         persist_targets: list[tuple[str, dict[str, object]]] = []
         with self._lock:
@@ -560,8 +581,23 @@ class HeadPipeline:
                 persist_targets.append(
                     (model_key, dict(state.last_notified_sections))
                 )
+            # 同じロック区間で「いまメモリにある組」を確定する — この組は上で
+            # 進めて下で保存するので、DB 側の一括前進からは外す。
+            in_memory_models = {model_key for model_key, _ in persist_targets}
         for model_key, notified in persist_targets:
             self._persist_last_notified(persona_id, model_key, notified)
+        if self._store is not None:
+            try:
+                self._store.save_notified_section_for_other_models(
+                    persona_id, section_name, new_section_snapshot,
+                    exclude_model_keys=in_memory_models,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "head_pipeline: store.save_notified_section_for_other_models "
+                    "failed persona=%s section=%s",
+                    persona_id, section_name,
+                )
 
     # ---- render ----
 
@@ -696,27 +732,52 @@ class HeadPipeline:
 
         startup 時 / 再起動後の状態復旧に使う。snapshot 復元後は last_notified も
         DB の値で B = 復元値 とする (= 同じ差分の二重通知を防ぐ)。
+
+        **ペルソナの通知ロック (:meth:`notify_lock_for`) の内側で読み込む**
+        (docs/issues/head_diff_notification_duplicate_delivery.md ケース 4)。
+        :meth:`advance_last_notified` は「メモリ上の組を進める → DB にだけある組を
+        DB 上で進める」の二段で、その間に別スレッドがこの組を DB から読み込むと、
+        進める前の B がメモリに入り、以後の配送でもその古い B が基準になって
+        同じ変化を再配送する。B を進める処理 (integration の差分検知 / notify の
+        内容型通知) は全部通知ロックの内側なので、読み込みも同じロックに入れれば
+        割り込めない。通知ロックは RLock なので、通知ロックを握った同じスレッド
+        からの呼び出しは再入で通る。pipeline のロック (``self._lock``) や保存
+        ロックを握ったまま呼んではならない (``__init__`` のロック順序)。
+
+        通知ロックの内側で、同じ (persona, model) の state が既にメモリにあれば
+        (並行する ensure_snapshot / capture_all が先に作った) 上書きせずに True を
+        返す — 上書きすると、その間に進んだ B が DB の値で巻き戻りうる。
         """
         if self._store is None:
             return False
-        stored = self._store.load(persona_id, model_key)
-        if stored is None:
-            return False
-        with self._lock:
-            self._states[(persona_id, model_key)] = _LineState(
-                snapshot=stored.snapshot,
-                last_notified_sections=dict(stored.last_notified_sections),
-                dirty_sections=set(),
-                last_backstop_check=time.time(),
-                # store から来た snapshot は定義上 durable (= その版は保存確認済み)
-                persisted_version=stored.snapshot.snapshot_version,
-                # 復元は capture ではない — この state の全 Section は「今回撮り
-                # 直したもの」ではないので、撮り直しを要求する側 (提示の縮み) には
-                # 全部 stale として見せる。次の capture_all が撮り直せば解ける。
-                stale_sections=frozenset(
-                    s.name for s in self._registry.all_sections()
-                ),
-            )
+        key = (persona_id, model_key)
+        with self.notify_lock_for(persona_id):
+            with self._lock:
+                if key in self._states:
+                    return True
+            stored = self._store.load(persona_id, model_key)
+            if stored is None:
+                return False
+            with self._lock:
+                if key in self._states:
+                    # store.load の間に capture_all (通知ロックを取らない) が
+                    # 先に組を作った — そちらを残す (上書きすると、その組で既に
+                    # 進んだ B を DB の古い値で巻き戻しうる)。
+                    return True
+                self._states[key] = _LineState(
+                    snapshot=stored.snapshot,
+                    last_notified_sections=dict(stored.last_notified_sections),
+                    dirty_sections=set(),
+                    last_backstop_check=time.time(),
+                    # store から来た snapshot は定義上 durable (= その版は保存確認済み)
+                    persisted_version=stored.snapshot.snapshot_version,
+                    # 復元は capture ではない — この state の全 Section は「今回撮り
+                    # 直したもの」ではないので、撮り直しを要求する側 (提示の縮み) には
+                    # 全部 stale として見せる。次の capture_all が撮り直せば解ける。
+                    stale_sections=frozenset(
+                        s.name for s in self._registry.all_sections()
+                    ),
+                )
         LOGGER.info(
             "head_pipeline: loaded snapshot from store persona=%s model=%s version=%d",
             persona_id, model_key, stored.snapshot.snapshot_version,
@@ -785,7 +846,8 @@ class HeadPipeline:
         変化の知らせを出す処理 (integration の差分検知 / notify の内容型通知) は、
         「検出 (または撮影) → 台帳に積む → :meth:`advance_last_notified`」を
         このロックの内側で行う。後から来た処理は前の処理が B を進め終えてから
-        比べるので、同じ変化を二度積まない。
+        比べるので、同じ変化を二度積まない。:meth:`load_from_store` も DB からの
+        読み込みをこのロックの内側で行う (B を進める途中の組を読み込まない)。
 
         ロック順序 (``__init__`` のコメント): 配送ロック → 通知ロック → 保存ロック
         → ``self._lock``。**このロックを握ったまま台帳の配送

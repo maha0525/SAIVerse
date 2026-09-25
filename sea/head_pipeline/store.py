@@ -238,6 +238,98 @@ class LineHeadSnapshotStore:
             db.close()
         return True
 
+    def save_notified_section_for_other_models(
+        self,
+        persona_id: str,
+        section_name: str,
+        notified_value: Any,
+        exclude_model_keys: set[str] | frozenset[str],
+    ) -> bool:
+        """同じペルソナの**メモリに読み込まれていない**モデルの行の B を 1 Section だけ進める。
+
+        知らせの配送が確定したとき、pipeline はメモリ上の (persona, model) の組の
+        B を進めて :meth:`save_last_notified` で保存する。再起動後はそのとき使う
+        モデルの組しかメモリに無いので、DB にだけある別モデルの行はここで進める
+        — 進めないと、後でそのモデルの組が読み込まれたときに古い B から同じ変化を
+        再検出して再配送する
+        (docs/issues/head_diff_notification_duplicate_delivery.md ケース 4)。
+
+        対象は ``PERSONA_ID == persona_id`` かつ ``MODEL_KEY`` が
+        ``exclude_model_keys`` (= メモリ上の組。そちらは呼び出し側が
+        save_last_notified で保存する) に無い行すべて。各行の
+        ``LAST_NOTIFIED_JSON`` のうち ``section_name`` のキーだけを
+        ``section.serialize_snapshot(notified_value)`` で置き換え、他の Section の
+        値は保つ。``SNAPSHOT_VERSION`` と ``SECTIONS_JSON`` (A) には触らない。
+        全行を一つのトランザクションで commit する。
+
+        失敗は例外にせず False + ログ (:meth:`save_last_notified` と同じ —
+        B の保存失敗は止めない、cached_head_architecture.md C8)。
+
+        - Section が registry に未登録 / serialize 失敗 → 何も書かずに False。
+        - ``LAST_NOTIFIED_JSON`` が壊れている (JSON として読めない / dict でない)
+          行は、その行だけ飛ばしてログを残す。他の行は進めて commit し、戻り値は
+          False (全行は進められなかった)。
+        - 対象の行が 0 件なら何もせず True。
+        """
+        from database.models import SessionHeadSnapshot as SessionHeadSnapshotRow
+
+        section = self._registry.by_name(section_name)
+        if section is None:
+            LOGGER.warning(
+                "head_pipeline_store: save_notified_section_for_other_models skipped "
+                "(section %r not registered) persona=%s",
+                section_name, persona_id,
+            )
+            return False
+        try:
+            serialized = section.serialize_snapshot(notified_value)
+        except Exception:
+            LOGGER.exception(
+                "head_pipeline_store: serialize failed (notified, other models) "
+                "section=%s persona=%s",
+                section_name, persona_id,
+            )
+            return False
+
+        excluded = set(exclude_model_keys)
+        all_ok = True
+        db = self._session_factory()
+        try:
+            rows = db.query(SessionHeadSnapshotRow).filter(
+                SessionHeadSnapshotRow.PERSONA_ID == persona_id,
+            ).all()
+            now = datetime.now()
+            for row in rows:
+                if row.MODEL_KEY in excluded:
+                    continue
+                try:
+                    notified = json.loads(row.LAST_NOTIFIED_JSON or "{}")
+                except json.JSONDecodeError:
+                    notified = None
+                if not isinstance(notified, dict):
+                    all_ok = False
+                    LOGGER.error(
+                        "head_pipeline_store: corrupt LAST_NOTIFIED_JSON, row skipped "
+                        "persona=%s model=%s section=%s",
+                        persona_id, row.MODEL_KEY, section_name,
+                    )
+                    continue
+                notified[section_name] = serialized
+                row.LAST_NOTIFIED_JSON = json.dumps(notified, ensure_ascii=False)
+                row.UPDATED_AT = now
+            db.commit()
+        except Exception:
+            db.rollback()
+            LOGGER.exception(
+                "head_pipeline_store: save_notified_section_for_other_models failed "
+                "persona=%s section=%s",
+                persona_id, section_name,
+            )
+            return False
+        finally:
+            db.close()
+        return all_ok
+
     # ---- load ----
 
     def load_version(self, persona_id: str, model_key: str) -> Optional[int]:
