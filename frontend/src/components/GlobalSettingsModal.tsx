@@ -5,7 +5,8 @@ import { resolveI18nText } from '@/i18n/resolve';
 import LocaleControls from '@/i18n/LocaleControls';
 import { getModelRoleLabel, getModelRoleDescription, getProviderPresetDisplayName, getWatermarkPresetLabel } from '@/i18n/modelRoles';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss } from 'lucide-react';
+import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss, GitBranch } from 'lucide-react';
+import { VersionInfo, announceUpdateStarted, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
 import ProviderManagementPanel from './settings/ProviderManagementPanel';
@@ -139,7 +140,14 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const [theme, setTheme] = useState<'system' | 'light' | 'dark'>('system');
 
     // About
-    const [versionInfo, setVersionInfo] = useState<{ version: string; latest_version?: string; update_available?: boolean } | null>(null);
+    const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
+
+    // 配布チャンネル (安定版 / アーリーアクセス版) の切り替え
+    // (docs/intent/early_access_release.md §3-2, §3-3)。
+    const [channelConsentOpen, setChannelConsentOpen] = useState(false);
+    const [channelConsentChecked, setChannelConsentChecked] = useState(false);
+    const [channelSwitching, setChannelSwitching] = useState(false);
+    const [channelError, setChannelError] = useState<string | null>(null);
 
     // 反射判断を何秒まで待つか (GET/POST /api/config/reflex-timeout)。
     // 待ちきれなかったターンは従来の想起方式に戻り、その回の判定の費用だけが残る。
@@ -223,6 +231,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             loadMediaRecallState();
             loadGeminiAutoCacheState();
             loadMetabolismDefaults();
+            // 配布チャンネルの欄が現在のチャンネルと戻れるかどうかを使う
+            loadVersionInfo();
             // Load theme from localStorage
             const saved = localStorage.getItem('saiverse-theme') as 'system' | 'light' | 'dark' | null;
             setTheme(saved || 'system');
@@ -739,6 +749,43 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         }
     };
 
+    // --- 配布チャンネル ---
+    // 受け付けられるとバックエンドは止まって切り替え → 再起動するので、再起動待ちの
+    // 表示はトップ画面 (更新ボタンと同じ帯) に任せ、設定画面は閉じる。
+    const startChannelSwitch = async (channel: 'stable' | 'early_access', consent: boolean, targetVersion: string) => {
+        setChannelSwitching(true);
+        setChannelError(null);
+        const result = await requestChannelSwitch(channel, consent);
+        if (result.ok) {
+            setChannelConsentOpen(false);
+            setChannelConsentChecked(false);
+            setChannelSwitching(false);
+            announceUpdateStarted(targetVersion);
+            onClose();
+            return;
+        }
+        setChannelSwitching(false);
+        setChannelError(
+            result.detail
+            || (result.unreachable
+                ? uiText("components.GlobalSettingsModal.channelSwitchUnreachable")
+                : uiText("components.GlobalSettingsModal.channelSwitchFailed"))
+        );
+    };
+
+    const joinEarlyAccess = () => {
+        // 同意の操作 (チェック) を経ていなければ送らない。ボタンも無効になっているが、二重に守る。
+        if (!channelConsentChecked || channelSwitching) return;
+        startChannelSwitch('early_access', true, '');
+    };
+
+    const returnToStable = () => {
+        if (channelSwitching || !versionInfo?.stable_latest_version) return;
+        const target = versionInfo.stable_latest_version;
+        if (!confirm(uiText("components.GlobalSettingsModal.channelReturnConfirm", { p1: target }))) return;
+        startChannelSwitch('stable', false, target);
+    };
+
     // --- Model Roles ---
     const loadModelRoles = async () => {
         setModelRolesLoading(true);
@@ -974,6 +1021,125 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                         className={`${styles.toggle} ${updateCheckEnabled ? styles.active : ''}`}
                                         onClick={toggleUpdateCheck}
                                     />
+                                </div>
+
+                                {/* 配布チャンネル (安定版 / アーリーアクセス版) */}
+                                <div className={`${styles.toggleContainer} ${styles.toggleContainerStacked}`}>
+                                    <div className={styles.toggleRow}>
+                                        <div>
+                                            <div data-i18n="components.GlobalSettingsModal.channelTitle" className={styles.toggleLabel}>
+                                                <GitBranch size={18} />{uiText("components.GlobalSettingsModal.channelTitle")}</div>
+                                            <div data-i18n="components.GlobalSettingsModal.channelDescription" className={styles.toggleDescription}>{uiText("components.GlobalSettingsModal.channelDescription")}</div>
+                                        </div>
+                                        {versionInfo && (
+                                            <span
+                                                data-i18n="components.GlobalSettingsModal.channelEarlyAccess components.GlobalSettingsModal.channelStable"
+                                                className={`${styles.channelBadge} ${versionInfo.channel === 'early_access' ? styles.channelBadgeEarly : ''}`}
+                                            >
+                                                {versionInfo.channel === 'early_access'
+                                                    ? uiText("components.GlobalSettingsModal.channelEarlyAccess")
+                                                    : uiText("components.GlobalSettingsModal.channelStable")}
+                                            </span>
+                                        )}
+                                    </div>
+
+                                    <div className={styles.subSetting}>
+                                        {!versionInfo ? (
+                                            <div data-i18n="components.GlobalSettingsModal.channelLoading" className={styles.subSettingHint}>{uiText("components.GlobalSettingsModal.channelLoading")}</div>
+                                        ) : (
+                                            <>
+                                                <div data-i18n="components.GlobalSettingsModal.channelCurrentVersion" className={styles.subSettingHint}>
+                                                    {uiText("components.GlobalSettingsModal.channelCurrentVersion", { p1: versionInfo.version })}
+                                                </div>
+
+                                                {versionInfo.channel !== 'early_access' && !channelConsentOpen && (
+                                                    <div className={styles.channelActions}>
+                                                        <button data-i18n="components.GlobalSettingsModal.channelJoinOpen"
+                                                            type="button"
+                                                            className={styles.channelBtn}
+                                                            onClick={() => { setChannelError(null); setChannelConsentChecked(false); setChannelConsentOpen(true); }}
+                                                        >
+                                                            {uiText("components.GlobalSettingsModal.channelJoinOpen")}</button>
+                                                    </div>
+                                                )}
+
+                                                {versionInfo.channel !== 'early_access' && channelConsentOpen && (
+                                                    <div className={styles.channelConsent}>
+                                                        <div data-i18n="components.GlobalSettingsModal.channelConsentTitle" className={styles.channelConsentTitle}>{uiText("components.GlobalSettingsModal.channelConsentTitle")}</div>
+                                                        <ul className={styles.channelConsentList}>
+                                                            <li data-i18n="components.GlobalSettingsModal.channelConsentTrial">{uiText("components.GlobalSettingsModal.channelConsentTrial")}</li>
+                                                            <li data-i18n="components.GlobalSettingsModal.channelConsentSnapshot">{uiText("components.GlobalSettingsModal.channelConsentSnapshot")}</li>
+                                                            <li data-i18n="components.GlobalSettingsModal.channelConsentNoReturn">{uiText("components.GlobalSettingsModal.channelConsentNoReturn")}</li>
+                                                        </ul>
+                                                        <label className={styles.channelConsentCheck}>
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={channelConsentChecked}
+                                                                disabled={channelSwitching}
+                                                                onChange={e => setChannelConsentChecked(e.target.checked)}
+                                                            />
+                                                            <span data-i18n="components.GlobalSettingsModal.channelConsentAgree">{uiText("components.GlobalSettingsModal.channelConsentAgree")}</span>
+                                                        </label>
+                                                        <div className={styles.channelActions}>
+                                                            <button data-i18n="components.GlobalSettingsModal.channelCancel"
+                                                                type="button"
+                                                                className={styles.channelBtn}
+                                                                disabled={channelSwitching}
+                                                                onClick={() => { setChannelConsentOpen(false); setChannelConsentChecked(false); setChannelError(null); }}
+                                                            >
+                                                                {uiText("components.GlobalSettingsModal.channelCancel")}</button>
+                                                            <button data-i18n="components.GlobalSettingsModal.channelJoinConfirm components.GlobalSettingsModal.channelSwitching"
+                                                                type="button"
+                                                                className={styles.saveBtn}
+                                                                disabled={!channelConsentChecked || channelSwitching}
+                                                                onClick={joinEarlyAccess}
+                                                            >
+                                                                {channelSwitching ? <RefreshCw size={16} className="spin" /> : <GitBranch size={16} />}
+                                                                {channelSwitching
+                                                                    ? uiText("components.GlobalSettingsModal.channelSwitching")
+                                                                    : uiText("components.GlobalSettingsModal.channelJoinConfirm")}
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {versionInfo.channel === 'early_access' && versionInfo.can_return_to_stable === true && versionInfo.stable_latest_version && (
+                                                    <div className={styles.channelReturn}>
+                                                        <div data-i18n="components.GlobalSettingsModal.channelReturnAvailable" className={styles.channelNote}>
+                                                            {uiText("components.GlobalSettingsModal.channelReturnAvailable", { p1: versionInfo.stable_latest_version })}
+                                                        </div>
+                                                        <div className={styles.channelActions}>
+                                                            <button data-i18n="components.GlobalSettingsModal.channelReturnButton components.GlobalSettingsModal.channelSwitching"
+                                                                type="button"
+                                                                className={styles.saveBtn}
+                                                                disabled={channelSwitching}
+                                                                onClick={returnToStable}
+                                                            >
+                                                                {channelSwitching ? <RefreshCw size={16} className="spin" /> : <GitBranch size={16} />}
+                                                                {channelSwitching
+                                                                    ? uiText("components.GlobalSettingsModal.channelSwitching")
+                                                                    : uiText("components.GlobalSettingsModal.channelReturnButton")}
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {versionInfo.channel === 'early_access' && versionInfo.can_return_to_stable === false && (
+                                                    <div data-i18n="components.GlobalSettingsModal.channelReturnNotYet" className={styles.channelNote}>
+                                                        {uiText("components.GlobalSettingsModal.channelReturnNotYet")}
+                                                    </div>
+                                                )}
+
+                                                {versionInfo.channel === 'early_access' && versionInfo.can_return_to_stable == null && (
+                                                    <div data-i18n="components.GlobalSettingsModal.channelReturnUnknown" className={styles.channelNote}>
+                                                        {uiText("components.GlobalSettingsModal.channelReturnUnknown")}
+                                                    </div>
+                                                )}
+
+                                                {channelError && <div className={styles.channelError}>{channelError}</div>}
+                                            </>
+                                        )}
+                                    </div>
                                 </div>
 
                                 {/* Announcements Monitor Toggle */}
@@ -1371,7 +1537,15 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                         <div className={styles.aboutVersion}>
                                             v{versionInfo.version}
                                         </div>
-                                        {versionInfo.update_available && (
+                                        {versionInfo.channel === 'early_access' && (
+                                            <div data-i18n="components.GlobalSettingsModal.channelEarlyAccess" className={styles.aboutChannel}>{uiText("components.GlobalSettingsModal.channelEarlyAccess")}</div>
+                                        )}
+                                        {versionInfo.update_available && isStableCaughtUp(versionInfo) && (
+                                            <div data-i18n="components.GlobalSettingsModal.channelAboutStableCaughtUp" className={styles.aboutUpdateNotice}>
+                                                {uiText("components.GlobalSettingsModal.channelAboutStableCaughtUp", { p1: versionInfo.stable_latest_version || '' })}
+                                            </div>
+                                        )}
+                                        {versionInfo.update_available && !isStableCaughtUp(versionInfo) && (
                                             <div data-i18n="components.GlobalSettingsModal.text076 components.GlobalSettingsModal.text077" className={styles.aboutUpdateNotice}>{uiText("components.GlobalSettingsModal.text076")}{versionInfo.latest_version}{uiText("components.GlobalSettingsModal.text077")}</div>
                                         )}
                                     </div>

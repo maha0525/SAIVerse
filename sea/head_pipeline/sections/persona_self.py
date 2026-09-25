@@ -1,8 +1,9 @@
 """PersonaSelfSection — "## あなたについて" の persona_system_instruction を head に。
 
 `sea/runtime_context.py` 旧 system prompt の 2. ``## あなたについて`` を移植。
-inventory は items の動的差分通知と一体化する Phase 3 で InventorySection に
-分離するため、本 Section では扱わない。
+自分の外見とインベントリ (とその差分通知) は本 Section では扱わない — 運び手は
+``SelfViewSection`` (sections/self_view.py)。画像を添付するので、システム
+プロンプトではなく独立した user メッセージとして置かれる。
 
 詳細: docs/intent/cached_head_architecture.md §5.3
 """

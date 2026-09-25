@@ -359,6 +359,26 @@
     "ja": "ペルソナは移動先の部屋「{p1}」で、途中まで話しています。ここまでの発言は記録に残っています。少し待ってから「{p1}」へ行き、その発言に表示されている「続きの生成」ボタンを押してください。解決しない場合は開発者へ報告してください。",
     "en": "The persona moved to \"{p1}\" and stopped partway through speaking there. The conversation so far was saved. Wait a little, go to \"{p1}\", and press the \"Continue reply\" button on that message. If the problem persists, please report it to the developer."
   },
+  "app.page.returnToStableNotice": {
+    "ja": "安定版 v{p1} が出ました。アーリーアクセス版から安定版に戻れます (現在: v{p2})",
+    "en": "Stable version v{p1} is out. You can return from early access to stable (current: v{p2})"
+  },
+  "app.page.returnToStableButton": {
+    "ja": "安定版に戻る",
+    "en": "Return to stable"
+  },
+  "app.page.returnToStableConfirm": {
+    "ja": "安定版に戻しますか？\n\n安定版の最新 (v{p1}) に切り替わり、SAIVerse は自動で再起動します。数分かかることがあります。",
+    "en": "Return to the stable channel?\n\nSAIVerse will switch to the latest stable version (v{p1}) and restart automatically. This may take a few minutes."
+  },
+  "app.page.channelSwitchFailed": {
+    "ja": "切り替えを始められませんでした。バックエンドのログを確認してください。",
+    "en": "Could not start the switch. Check the backend logs."
+  },
+  "app.page.channelSwitchUnreachable": {
+    "ja": "切り替えを始められませんでした。バックエンドに接続できない可能性があります。",
+    "en": "Could not start the switch. The backend may be unreachable."
+  },
   "app.page.text067": {
     "ja": "ふと浮かんだ記憶",
     "en": "A memory that came to mind"
@@ -11518,6 +11538,98 @@
   "components.GlobalSettingsModal.presetSmall": {
     "ja": "少ない",
     "en": "Low"
+  },
+  "components.GlobalSettingsModal.channelTitle": {
+    "ja": "配布チャンネル",
+    "en": "Release channel"
+  },
+  "components.GlobalSettingsModal.channelDescription": {
+    "ja": "受け取る版の種類です。アーリーアクセス版は、大きな版を正式公開の前に試せる、試験中の版です。",
+    "en": "Which line of releases this SAIVerse receives. Early access lets you try major versions, still under testing, before their official release."
+  },
+  "components.GlobalSettingsModal.channelStable": {
+    "ja": "安定版",
+    "en": "Stable"
+  },
+  "components.GlobalSettingsModal.channelEarlyAccess": {
+    "ja": "アーリーアクセス版",
+    "en": "Early access"
+  },
+  "components.GlobalSettingsModal.channelLoading": {
+    "ja": "現在のチャンネルを確認しています...",
+    "en": "Checking the current channel..."
+  },
+  "components.GlobalSettingsModal.channelCurrentVersion": {
+    "ja": "使用中の版: v{p1}",
+    "en": "Installed version: v{p1}"
+  },
+  "components.GlobalSettingsModal.channelJoinOpen": {
+    "ja": "アーリーアクセス版に参加する...",
+    "en": "Join early access..."
+  },
+  "components.GlobalSettingsModal.channelConsentTitle": {
+    "ja": "参加する前に、次のことを確認してください",
+    "en": "Before joining, please confirm the following"
+  },
+  "components.GlobalSettingsModal.channelConsentTrial": {
+    "ja": "アーリーアクセス版は試験中の版です。不具合を先に踏む役になることがあります。",
+    "en": "Early-access versions are still being tested. You may be the first to run into their bugs."
+  },
+  "components.GlobalSettingsModal.channelConsentSnapshot": {
+    "ja": "参加の直前に、ワールド全体の復元ポイントが自動で保存されます。安定版が追いつく前に戻りたくなったときは、この復元ポイントに戻すことになります。",
+    "en": "Right before joining, a restore point of your whole world is saved automatically. If you want to go back before the stable version catches up, you will return to this restore point."
+  },
+  "components.GlobalSettingsModal.channelConsentNoReturn": {
+    "ja": "ワールドのデータは新しい形に進みます。次の安定版がこの版に追いつくまで、安定版には戻れません。",
+    "en": "Your world data moves forward to a newer format. You cannot return to the stable channel until the next stable version catches up."
+  },
+  "components.GlobalSettingsModal.channelConsentAgree": {
+    "ja": "上の内容を理解したうえで、アーリーアクセス版に参加します",
+    "en": "I understand the above and want to join early access"
+  },
+  "components.GlobalSettingsModal.channelCancel": {
+    "ja": "やめる",
+    "en": "Cancel"
+  },
+  "components.GlobalSettingsModal.channelJoinConfirm": {
+    "ja": "参加して再起動する",
+    "en": "Join and restart"
+  },
+  "components.GlobalSettingsModal.channelSwitching": {
+    "ja": "切り替えを始めています...",
+    "en": "Starting the switch..."
+  },
+  "components.GlobalSettingsModal.channelReturnAvailable": {
+    "ja": "安定版 v{p1} が出ています。安定版に戻れます。",
+    "en": "Stable version v{p1} is out. You can return to the stable channel."
+  },
+  "components.GlobalSettingsModal.channelReturnButton": {
+    "ja": "安定版に戻る",
+    "en": "Return to stable"
+  },
+  "components.GlobalSettingsModal.channelReturnConfirm": {
+    "ja": "安定版に戻しますか？\n\n安定版の最新 (v{p1}) に切り替わり、SAIVerse は自動で再起動します。数分かかることがあります。",
+    "en": "Return to the stable channel?\n\nSAIVerse will switch to the latest stable version (v{p1}) and restart automatically. This may take a few minutes."
+  },
+  "components.GlobalSettingsModal.channelReturnNotYet": {
+    "ja": "安定版に戻れるのは、次の安定版がこの版に追いついてからです。",
+    "en": "You can return to stable once the next stable version catches up with this one."
+  },
+  "components.GlobalSettingsModal.channelReturnUnknown": {
+    "ja": "安定版の最新を確認できなかったため、いま戻れるかどうかは分かりません。",
+    "en": "Could not check the latest stable version, so it is unknown whether you can return now."
+  },
+  "components.GlobalSettingsModal.channelSwitchFailed": {
+    "ja": "切り替えを始められませんでした。バックエンドのログを確認してください。",
+    "en": "Could not start the switch. Check the backend logs."
+  },
+  "components.GlobalSettingsModal.channelSwitchUnreachable": {
+    "ja": "切り替えを始められませんでした。バックエンドに接続できない可能性があります。",
+    "en": "Could not start the switch. The backend may be unreachable."
+  },
+  "components.GlobalSettingsModal.channelAboutStableCaughtUp": {
+    "ja": "安定版 v{p1} が出ています。「環境」の「配布チャンネル」から安定版に戻れます",
+    "en": "Stable version v{p1} is out. You can return to stable from \"Release channel\" under \"Environment\""
   },
   "components.tutorial.steps.StepWelcome.text002Suffix": {
     "ja": "。",

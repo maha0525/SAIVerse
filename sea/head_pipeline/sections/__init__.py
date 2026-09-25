@@ -9,6 +9,12 @@
 - ``BuildingItemsSection`` — アイテム差分ラベル (「追加されました」)。滞在中の
   パッケージ照合 (sea/head_pipeline/integration._detect_room_state_changes) に
   一本化。
+
+復帰 (2026-09-25, docs/issues/inventory_and_appearance_dropped_from_context.md):
+上の退役で、旧 ``VisualContextSection`` だけが運んでいた「自分の外見」と
+「インベントリ」、旧 ``BuildingItemsSection`` が出していたインベントリの差分通知が
+どこからも届かなくなっていた。``SelfViewSection`` がこの二つを運ぶ (部屋の描画は
+戻さない)。
 """
 from sea.head_pipeline.sections.autonomy_modes import AutonomyModesSection
 from sea.head_pipeline.sections.available_playbooks import AvailablePlaybooksSection
@@ -23,6 +29,7 @@ from sea.head_pipeline.sections.memopedia_index import MemopediaIndexSection
 from sea.head_pipeline.sections.memory_weave import MemoryWeaveSection
 from sea.head_pipeline.sections.persona_self import PersonaSelfSection
 from sea.head_pipeline.sections.self_image import SelfImageSection
+from sea.head_pipeline.sections.self_view import SelfViewSection
 from sea.head_pipeline.sections.spell_list import SpellListSection
 
 
@@ -42,6 +49,8 @@ def register_default_sections(registry) -> None:
     registry.register(SpellListSection())
     registry.register(MemoryWeaveSection())
     registry.register(DeskSection())
+    # 自分の外見とインベントリ (独立した user メッセージ、_compose_messages が置く)
+    registry.register(SelfViewSection())
     # dynamic_state Section 群 (head 描画なし、差分通知のみ)
     registry.register(BuildingOccupantsSection())
     registry.register(MemopediaIndexSection())
@@ -62,6 +71,7 @@ __all__ = [
     "MemoryWeaveSection",
     "PersonaSelfSection",
     "SelfImageSection",
+    "SelfViewSection",
     "SpellListSection",
     "register_default_sections",
 ]

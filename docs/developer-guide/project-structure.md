@@ -200,7 +200,8 @@ sea/
 ├── cancellation.py       # キャンセル
 └── head_pipeline/        # head（キャッシュの効く安定領域）の構築
     ├── pipeline.py / registry.py / store.py / types.py / integration.py
-    └── sections/         #   各 Section（common_prompt / persona_self / building 等）
+    └── sections/         #   各 Section（common_prompt / persona_self / building 等。
+                          #   self_view = 自分の外見とインベントリ、独立した user メッセージ）
 ```
 
 ### manager/
