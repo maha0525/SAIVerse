@@ -33,6 +33,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database.models import Base, User, City, AI, Building, BuildingOccupancyLog, Playbook
+from saiverse.i18n_utils import split_i18n_columns
 
 logging.basicConfig(
     level=logging.INFO,
@@ -179,7 +180,15 @@ def import_playbooks(definitions: dict):
 
             try:
                 data = json.loads(json_path.read_text(encoding="utf-8"))
-                description = data.get("description", "")
+                # description / display_name may be a language dict ({ja, en});
+                # the DB columns are strings, so split into base + ``_en``.
+                description, description_en = split_i18n_columns(
+                    data.get("description"), alt_en=data.get("description_en"),
+                )
+                description = description or ""
+                display_name, display_name_en = split_i18n_columns(
+                    data.get("display_name"), alt_en=data.get("display_name_en"),
+                )
                 router_callable = data.get("router_callable", False)
                 user_selectable = data.get("user_selectable", False)
 
@@ -193,6 +202,9 @@ def import_playbooks(definitions: dict):
                 record = Playbook(
                     name=name,
                     description=description,
+                    description_en=description_en,
+                    display_name=display_name,
+                    display_name_en=display_name_en,
                     scope="public",
                     schema_json=json.dumps(schema_payload, ensure_ascii=False),
                     nodes_json=json.dumps(data, ensure_ascii=False),
