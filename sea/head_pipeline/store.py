@@ -194,7 +194,8 @@ class LineHeadSnapshotStore:
         snapshot 本体は据え置きで diff 通知後の B 進行に使う。該当行が無ければ
         no-op (= snapshot 不在の状態で B だけ書くのは不正) で False。
         B の永続化失敗は fail-closed の対象外 (restart 後の再通知重複は
-        自己限定的で、人格の欠損ではない) — 成否は観測用。
+        自己限定的で、人格の欠損ではない) — 成否は観測用。この受け入れは
+        2026-09-26 にまはーが承認し、cached_head_architecture.md C8 に明記した。
         """
         from database.models import SessionHeadSnapshot as SessionHeadSnapshotRow
 

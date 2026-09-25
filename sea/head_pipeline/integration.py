@@ -255,6 +255,12 @@ def inject_diff_notifications(
     の窓に届くため。台帳が無い環境 (旧テスト等) は従来どおり直接 push +
     flush_diffs 内での B 前進に degrade する。
 
+    【ペルソナ単位で並べる (2026-09-26)】「検出 → 積む → B 前進」は
+    ペルソナの通知ロックの内側で一続きに行い、即時配送はロックを離してから
+    行う。理由と順序の規約は :func:`_push_section_diffs` と
+    :meth:`HeadPipeline.notify_lock_for`
+    (docs/issues/head_diff_notification_duplicate_delivery.md ケース 1)。
+
     Returns:
         ラベルが 1 件以上 push された場合 True、差分なしなら False。
     """
@@ -422,13 +428,78 @@ def _push_section_diffs(
     *,
     only_sections: set[str] | None = None,
 ) -> bool:
-    """Section 群の diff ラベルを検知して知覚バッファ (or outbox) へ push する。"""
+    """Section 群の diff ラベルを検知して知覚バッファ (or outbox) へ push する。
+
+    「検出 → 台帳 (outbox) に積む → B 前進」はペルソナの通知ロック
+    (:meth:`HeadPipeline.notify_lock_for`) の内側で一続きに行う。並べないと、
+    Pulse の頭 (Beat ロック保持) と別ペルソナの入室処理 (移動の配送ハンドラ、
+    Beat ロックは取らない — saiverse/dynamic_state.on_building_entered) が同じ
+    古い B から同じ変化を見つけ、outbox に二行積む
+    (docs/issues/head_diff_notification_duplicate_delivery.md ケース 1)。
+
+    即時配送 (``flush_pending_for_persona``) は**ロックを離してから**行う。
+    配送はプロセス全体で一本の非再入ロック (``ExecutionLedger._delivery_lock``)
+    を取り、入室処理はそのロックを握った配送ハンドラの中からこのペルソナの検知に
+    入ってくる。通知ロックを握ったまま配送に入ると「入室側の配送は通知ロックを
+    待ち、こちらは配送ロックを待つ」でデッドロックする。
+    """
     ledger = getattr(manager, "execution_ledger", None)
     if ledger is None:
         return _inject_diff_notifications_direct(
             persona, pipeline, ctx, building_id, only_sections=only_sections,
         )
 
+    try:
+        with pipeline.notify_lock_for(ctx.persona_id):
+            queued = _queue_section_diffs_locked(
+                ledger, pipeline, ctx, building_id, only_sections=only_sections,
+            )
+    except Exception:
+        # 台帳に積んだ後の B 前進で落ちた回も、積んだ分は即時配送してから
+        # 例外を返す — 旧実装 (mark_applied(deliver=True)) は B 前進より先に
+        # 配っていたので、ここで配送を飛ばすと退行になる。何も積んでいない回の
+        # 配送は pending を見て空振りするだけ。
+        _deliver_queued_notifications(ledger, ctx.persona_id)
+        raise
+
+    if queued:
+        _deliver_queued_notifications(ledger, ctx.persona_id)
+    return queued
+
+
+def _deliver_queued_notifications(ledger: Any, persona_id: str) -> None:
+    """通知ロックの外で、台帳に積んだ知らせを即時配送する。
+
+    適用は commit 済みなので、配送の失敗は pending に残って関所 / 回復 tick が
+    引き継ぐ (ExecutionLedger.mark_applied の deliver=True と同じ扱い)。配送
+    ハンドラの内側 (入室処理) から呼ばれた回は、ledger 側の再入検知が控えに
+    回して外側の配達の後に配る。
+    """
+    try:
+        ledger.flush_pending_for_persona(persona_id)
+    except Exception:
+        LOGGER.error(
+            "head_pipeline: immediate delivery of queued notifications "
+            "failed persona=%s; left pending", persona_id, exc_info=True,
+        )
+
+
+def _queue_section_diffs_locked(
+    ledger: Any,
+    pipeline: HeadPipeline,
+    ctx: LineHeadInput,
+    building_id: str,
+    *,
+    only_sections: set[str] | None = None,
+) -> bool:
+    """通知ロックの内側で「検出 → outbox 積み (配送はしない) → B 前進」を行う。
+
+    呼び出し側 (:func:`_push_section_diffs`) が通知ロックを握っていること。
+    配送 (``deliver=True`` / ``flush_pending_for_persona``) はここでは行わない。
+
+    Returns:
+        outbox に 1 行以上積んだら True (呼び出し側が即時配送する)。
+    """
     labels, detected = pipeline.flush_diffs(
         ctx, all_sections=True, advance=False, only=only_sections,
     )
@@ -474,11 +545,13 @@ def _push_section_diffs(
             }
             for label in deliverable
         ]
+        # deliver=False: 積むだけ。配送は呼び出し側が通知ロックを離してから
+        # 行う (_push_section_diffs の docstring — ロックの中で配るとデッドロック)。
         ledger.mark_applied(
             execution_id,
             result={"labels": len(deliverable), "sections": sorted(detected.keys())},
             outbox_items=outbox_items,
-            deliver=True,
+            deliver=False,
         )
     except Exception:
         # 配送予約に失敗 = 通知は届いていない。B は据え置き (次回 flush で再検出)。
@@ -492,6 +565,8 @@ def _push_section_diffs(
     # は一律に進める — deliver=False のラベルしか出さない Section (部屋替え時の
     # 同席者) も、もう後段の処理を持たない (再会の想起は Pulse 頭の同席チェックへ
     # 移った、2026-09-07) ので、基準だけ進めて次の差分に備えればよい。
+    # 前進も通知ロックの内側 — ロックを離すのは B が進んだ後なので、次に来た
+    # 処理はこの変化を見つけない。
     for section_name, new_snapshot in detected.items():
         pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
 
@@ -524,7 +599,27 @@ def _inject_diff_notifications_direct(
     ``deliver=False`` のラベルは push の対象外 (基準の前進にだけ使う)。SAIMemory が
     未 ready の回は、届ける文の有無にかかわらず何も進めない — push 先が無い以上、
     次回の再検出でまとめてやり直す方が落としが無い。
+
+    台帳経路と同じく「検出 → push → B 前進」をペルソナの通知ロック
+    (:meth:`HeadPipeline.notify_lock_for`) の内側で一続きに行う (並行する検知が
+    同じ古い B から同じ変化を二度 push するのを防ぐ)。この経路には配送ロックが
+    無いので、push もロックの内側でよい。
     """
+    with pipeline.notify_lock_for(ctx.persona_id):
+        return _inject_diff_notifications_direct_locked(
+            persona, pipeline, ctx, building_id, only_sections=only_sections,
+        )
+
+
+def _inject_diff_notifications_direct_locked(
+    persona: Any,
+    pipeline: HeadPipeline,
+    ctx: LineHeadInput,
+    building_id: str,
+    *,
+    only_sections: set[str] | None = None,
+) -> bool:
+    """:func:`_inject_diff_notifications_direct` の本体 (通知ロックを握って呼ぶ)。"""
     labels, detected = pipeline.flush_diffs(
         ctx, all_sections=True, advance=False, only=only_sections,
     )

@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -3680,9 +3681,13 @@ class EntryDeliveryOrderTest(_EnvTestBase):
             physical_vessel_id=None,
         )
         labels = BuildingSection().diff_to_notifications(old, new)
+        # notify_lock_for: 本物の pipeline と同じく、検出〜登録を並べるペルソナ
+        # 単位の通知ロックを返す (HeadPipeline.notify_lock_for)。
+        notify_lock = threading.RLock()
         pipeline = SimpleNamespace(
             flush_diffs=lambda ctx, **kw: (labels, {}),
             advance_last_notified=lambda *a, **k: None,
+            notify_lock_for=lambda persona_id: notify_lock,
         )
         ctx = SimpleNamespace(persona_id=persona.persona_id)
         return hp._push_section_diffs(persona, manager, pipeline, ctx, building_id)

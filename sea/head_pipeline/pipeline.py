@@ -91,6 +91,16 @@ class HeadPipeline:
         # 進めた durable B を巻き戻すのを封鎖する (Codex 2026-08-17 medium)。
         # ロック順序は 保存ロック → self._lock の一方向のみ (逆順で取らない)。
         self._persist_locks: dict[tuple[str, str], threading.Lock] = {}
+        # ペルソナごとの通知ロック (:meth:`notify_lock_for`)。「差分を検出 →
+        # 台帳 (outbox) に積む → B を進める」を一続きにし、同じ古い B から
+        # 二つの処理が同じ変化を見つけて二回積むのを防ぐ
+        # (docs/issues/head_diff_notification_duplicate_delivery.md ケース 1)。
+        # 単位がモデルでなくペルソナなのは、advance_last_notified がそのペルソナ
+        # の全モデル行の B を進めるため。
+        # 全体のロック順序は 台帳の配送ロック (ExecutionLedger._delivery_lock)
+        # → 通知ロック → 保存ロック → self._lock の一方向のみ。通知ロックを
+        # 握ったまま配送ロックを取ってはならない (配送はロックを離してから)。
+        self._notify_locks: dict[str, threading.RLock] = {}
 
     def attach_store(self, store: LineHeadSnapshotStore) -> None:
         """startup 後に DB session が用意できた段階で store を後付けする経路。"""
@@ -767,6 +777,29 @@ class HeadPipeline:
             if lock is None:
                 lock = threading.Lock()
                 self._persist_locks[key] = lock
+            return lock
+
+    def notify_lock_for(self, persona_id: str) -> threading.RLock:
+        """ペルソナの通知ロックを取得 (無ければ作る)。
+
+        変化の知らせを出す処理 (integration の差分検知 / notify の内容型通知) は、
+        「検出 (または撮影) → 台帳に積む → :meth:`advance_last_notified`」を
+        このロックの内側で行う。後から来た処理は前の処理が B を進め終えてから
+        比べるので、同じ変化を二度積まない。
+
+        ロック順序 (``__init__`` のコメント): 配送ロック → 通知ロック → 保存ロック
+        → ``self._lock``。**このロックを握ったまま台帳の配送
+        (``flush_pending_for_persona`` / ``mark_applied(deliver=True)``) に
+        入ってはならない** — 配送ロックを握った移動の配送ハンドラが、別ペルソナの
+        検知でこのロックを取りに来るので、逆順で取るとデッドロックする。
+        再入可能 (RLock) なのは、同じスレッドの入れ子の呼び出しで自分と
+        待ち合わせないため。
+        """
+        with self._lock:
+            lock = self._notify_locks.get(persona_id)
+            if lock is None:
+                lock = threading.RLock()
+                self._notify_locks[persona_id] = lock
             return lock
 
     def _latest_notified_copy(
