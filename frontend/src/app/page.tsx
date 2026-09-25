@@ -22,6 +22,7 @@ import { buildPreSpellsFromUI } from '@/lib/preSpells';
 import { formatCost } from '@/lib/formatCost';
 import { prepareMessageMarkdown } from '@/lib/messageMarkdown';
 import { fetchAllTableRows } from '@/lib/dbTable';
+import { UPDATE_STARTED_EVENT, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
 import RightSidebar from '@/components/RightSidebar';
 import CityMap from '@/components/CityMap';
 import cityMapStyles from '@/components/CityMap.module.css';
@@ -650,7 +651,9 @@ export default function Home() {
 
     // Update system
     const [app_state_version, setAppStateVersion] = useState('');
-    const [updateAvailable, setUpdateAvailable] = useState<{version: string; url: string} | null>(null);
+    // returnToStable: アーリーアクセス版の手元で、いちばん新しい版が正式版のとき。
+    // 更新ボタンではなく「安定版に戻る」を出す (docs/intent/early_access_release.md §3-4)。
+    const [updateAvailable, setUpdateAvailable] = useState<{version: string; url: string; returnToStable: boolean} | null>(null);
     const [isUpdating, setIsUpdating] = useState(() => {
         if (typeof window !== 'undefined') {
             return sessionStorage.getItem('saiverse_updating') === 'true';
@@ -1259,6 +1262,7 @@ export default function Home() {
                             setUpdateAvailable({
                                 version: data.latest_version,
                                 url: data.latest_release_url || '',
+                                returnToStable: isStableCaughtUp(data),
                             });
                         }
                     });
@@ -1530,6 +1534,19 @@ export default function Home() {
         return () => clearInterval(reconnectInterval);
     }, [backendConnected, isUpdating]);
 
+    // 設定画面からチャンネルを切り替えたときも、更新ボタンと同じ「再起動待ち」に乗せる。
+    useEffect(() => {
+        const onUpdateStarted = (event: Event) => {
+            const version = (event as CustomEvent<{ version?: string }>).detail?.version || '';
+            updatingTargetVersion.current = version;
+            setIsUpdating(true);
+            sessionStorage.setItem('saiverse_updating', 'true');
+            setUpdateAvailable(null);
+        };
+        window.addEventListener(UPDATE_STARTED_EVENT, onUpdateStarted);
+        return () => window.removeEventListener(UPDATE_STARTED_EVENT, onUpdateStarted);
+    }, []);
+
     // --- Reembed handlers ---
     const handleReembedAll = async () => {
         if (!reembedNeeded || isReembeddingAll) return;
@@ -1611,6 +1628,27 @@ export default function Home() {
             setToasts(prev => [...prev, { id: toastId, content: 'Failed to start update. Backend may be unreachable.' }]);
             setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
         }
+    };
+
+    // アーリーアクセス版の手元で正式版が追いついたとき、通知の帯から安定版へ戻る。
+    // 戻るのに同意は要らないが、安定版の最新に切り替わることだけは確認する。
+    const handleReturnToStable = async () => {
+        if (!updateAvailable) return;
+        const target = updateAvailable.version;
+        if (!window.confirm(uiText("app.page.returnToStableConfirm", { p1: target }))) return;
+        const result = await requestChannelSwitch('stable', false);
+        if (result.ok) {
+            updatingTargetVersion.current = target;
+            setIsUpdating(true);
+            sessionStorage.setItem('saiverse_updating', 'true');
+            setUpdateAvailable(null);
+            return;
+        }
+        const content = result.detail
+            || (result.unreachable ? uiText("app.page.channelSwitchUnreachable") : uiText("app.page.channelSwitchFailed"));
+        const toastId = `update-error-${Date.now()}`;
+        setToasts(prev => [...prev, { id: toastId, content }]);
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), result.detail ? 15000 : 5000);
     };
 
     const handleTzUpdate = async () => {
@@ -3411,7 +3449,21 @@ export default function Home() {
                     </div>
                 )}
 
-                {updateAvailable && !isUpdating && (
+                {updateAvailable && updateAvailable.returnToStable && !isUpdating && (
+                    <div className={styles.updateAvailableBanner}>
+                        <ArrowUpCircle size={16} />
+                        <div className={styles.updateAvailableContent}>
+                            <div data-i18n="app.page.returnToStableNotice">{uiText("app.page.returnToStableNotice", { p1: updateAvailable.version, p2: app_state_version })}</div>
+                        </div>
+                        <button data-i18n="app.page.returnToStableButton"
+                            className={styles.updateButton}
+                            onClick={handleReturnToStable}
+                        >
+                            {uiText("app.page.returnToStableButton")}</button>
+                    </div>
+                )}
+
+                {updateAvailable && !updateAvailable.returnToStable && !isUpdating && (
                     <div className={styles.updateAvailableBanner}>
                         <ArrowUpCircle size={16} />
                         <div className={styles.updateAvailableContent}>
