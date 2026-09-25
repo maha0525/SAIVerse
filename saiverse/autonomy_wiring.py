@@ -34,9 +34,11 @@ Playbook 起動) を持つが、**自動起動の配線は持たない** (中間
 
 時刻はすべて ``saiverse.clock.now()`` を読む (v2 §12 の不変条件)。
 
-⚠️ **v0.3 では上記の駆動は出荷していない** — :data:`AUTONOMOUS_DRIVING_SHIPPED`
-(この下の止め具) が False の間、:func:`is_autonomy_on` は常に False を返す。
-正典は ``docs/intent/autonomous_behavior_v3.md`` §11。
+駆動するかどうかは :func:`is_autonomy_on` 一箇所で、ペルソナごとの
+``AUTONOMY_ENABLED`` だけで決まる。v0.3 (develop) にはこの判定を常に False に
+する全体の止め具 (定数 ``AUTONOMOUS_DRIVING_SHIPPED``) があるが、develop-v0.4
+では 2026-09-25 に定数ごと撤去した (正典は
+``docs/intent/autonomous_behavior_v3.md`` §11.1)。
 """
 from __future__ import annotations
 
@@ -64,35 +66,6 @@ from saiverse.judgment_points import (
 )
 
 LOGGER = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# v0.3 の止め具 (2026-08-23 まはー裁定)
-# ---------------------------------------------------------------------------
-
-#: **自律の駆動を出荷したかどうか。v0.3 では False。**
-#:
-#: v0.3 のリリース範囲は「形の層」— データと記憶の形だけで、運転 (時間割 +
-#: 判断点) は v0.4 の管轄 (正典: ``docs/intent/autonomous_behavior_v3.md`` §11)。
-#: ところが自律の ON/OFF はペルソナごとの ``AI.AUTONOMY_ENABLED`` (既定 True)
-#: しか無く、v0.3 ではその切り替え UI を隠したので、新しいユーザーの世界は
-#: 「既定で自律 ON、OFF にする手段が無い」状態になる。「v0.3 に判断点は一つも
-#: 無い」と言い切れるようにするための、全体の止め具がこの定数。
-#:
-#: この定数が False の間、:func:`is_autonomy_on` は常に False を返し、判断点・
-#: watchdog・起動時のコマ再予約・実イベントの判断経由が発火しない。**止めない
-#: もの**: 会話、Metabolism のスルース、手帳、沈黙タイマー、実イベントと仲裁の
-#: 直接応答 (v0.2 と同じ経路)。ペルソナごとの ``AUTONOMY_ENABLED`` の値は DB に
-#: 残る (書き換えない)。
-#:
-#: ⚠️ **v0.4 で運転 (時間割 + 判断点) を配線するときは、この定数ごと削除する** —
-#: env 変数や設定での切り替えにはしない (旧経路をフラグで残す形になるため)。
-#: 定数を消して :func:`is_autonomy_on` を ``AUTONOMY_ENABLED`` だけの判定に
-#: 戻せば、ペルソナごとの設定値がそのまま効く元の姿になる。
-AUTONOMOUS_DRIVING_SHIPPED = False
-
-#: 止め具の起動時 INFO を 1 プロセス 1 回に抑えるための印
-#: (:func:`log_shipping_gate_once`)。ペルソナごと・イベントごとには出さない。
-_SHIPPING_GATE_LOGGED = False
 
 #: manager に execution_ledger が無い環境 (旧テストスタブ等) への WARN を
 #: persona ごとに一度だけ出すための既知セット (台帳なし degrade は許すが黙らせない)。
@@ -200,46 +173,21 @@ def is_autonomy_on(manager: Any, persona_id: str) -> bool:
     """このペルソナの自律の駆動を回してよいか — **自律ゲートの唯一の判定**。
 
     判断点・watchdog・起動時のコマ再予約・実イベントの判断経由は、すべてこの
-    関数を通ってから駆動する。「駆動するか」の判定をここ 1 箇所に集めてあるので、
-    :data:`AUTONOMOUS_DRIVING_SHIPPED` (v0.3 の止め具) が False の間は全部が
-    止まる。
+    関数を通ってから駆動する。
 
     判定:
 
-    1. :data:`AUTONOMOUS_DRIVING_SHIPPED` が False なら常に False (v0.3)
-    2. ペルソナが manager に居なければ False
-    3. ペルソナの ``AUTONOMY_ENABLED`` (属性欠落は False 扱い)
+    1. ペルソナが manager に居なければ False
+    2. ペルソナの ``AUTONOMY_ENABLED`` (属性欠落は False 扱い)
 
     ⚠️ 設定値を読んで表示・保存するだけの場所 (設定 API・inspect_world・clone
-    スクリプト) はこの関数を通さないこと — 止め具は「駆動するか」の判定にだけ
-    効かせる。
+    スクリプト) はこの関数を通さないこと — ここは「駆動するか」の判定の口で、
+    設定値そのものの読み書きの口ではない。
     """
-    if not AUTONOMOUS_DRIVING_SHIPPED:
-        return False
     persona = _get_persona(manager, persona_id)
     if persona is None:
         return False
     return bool(getattr(persona, "autonomy_enabled", False))
-
-
-def log_shipping_gate_once() -> bool:
-    """止め具が効いていることを起動時に 1 回だけ INFO で残す。
-
-    ``SAIVerseManager.start()`` から呼ばれる。ペルソナごと・イベントごとには
-    出さない (ログ洪水にしない)。:data:`AUTONOMOUS_DRIVING_SHIPPED` が True
-    (= v0.4 で運転を配線した後) なら何も出さない。
-
-    Returns:
-        今回ログを出したか (テスト・観察用)。
-    """
-    global _SHIPPING_GATE_LOGGED
-    if AUTONOMOUS_DRIVING_SHIPPED or _SHIPPING_GATE_LOGGED:
-        return False
-    _SHIPPING_GATE_LOGGED = True
-    LOGGER.info(
-        "v0.3: 自律の駆動は出荷していない (判断点・見張り・コマは発火しない)"
-    )
-    return True
 
 
 def playbook_available(manager: Any, playbook_name: str) -> bool:

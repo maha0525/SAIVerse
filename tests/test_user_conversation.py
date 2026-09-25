@@ -11,7 +11,7 @@ docs/intent/episode.md の不変条件)。
 - 会話が閉じていれば会話開始 (状態を立てる → main_line → タイマー)
 - 会話の開始でも終了でも Building ログに何も書かれない
 - 別の活動中の仲裁経路 (v0.3 では供給源ゼロ。routing だけ回帰で固定する)
-- 沈黙タイマーの対象外判定 (デバッグ完全手動モード / タイムアウト 0 以下)
+- 沈黙タイマーの対象外判定 (ペルソナ未ロード / タイムアウト 0 以下)
 - タイムアウト発火で会話状態が落ち、予約も解除される
 - 再起動 (状態が空) では張り直す待ちが構造上存在しない
 
@@ -86,7 +86,6 @@ def manager(session_factory):
         occupants={"test_building": [PERSONA_ID]},
         id_to_name_map={PERSONA_ID: "Alice"},
         _active_sse_callbacks={},
-        _debug_manual_mode_personas=set(),
         _autonomy_managers={},
         user_id=1,
     )
@@ -302,13 +301,6 @@ def test_main_line_failure_is_reported_instead_of_swallowed(manager):
 # ---------------------------------------------------------------------------
 # 沈黙タイマー
 # ---------------------------------------------------------------------------
-
-
-def test_debug_manual_mode_is_excluded_from_the_timeout(manager):
-    manager._debug_manual_mode_personas.add(PERSONA_ID)
-    assert uc.conversation_timeout_minutes(manager, PERSONA_ID) is None
-    assert uc.arm_conversation_timeout(manager, PERSONA_ID) is False
-    assert _armed(manager) is False
 
 
 def test_zero_timeout_minutes_disables_the_timer(manager):

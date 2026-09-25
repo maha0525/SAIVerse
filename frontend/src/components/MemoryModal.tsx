@@ -28,10 +28,12 @@ type Tab = 'browser' | 'core_memory' | 'pocketbook' | 'arasuji' | 'memopedia' | 
 // あるので、条件が解けたらこの集合から名前を外すだけで戻る。
 //
 // - experience (経験): 台帳に「経験値ノート」を書くのはコマ締め
-//   (saiverse/slot_close.py) で、自律行動の止め具
-//   (saiverse/autonomy_wiring.py の AUTONOMOUS_DRIVING_SHIPPED = False) がある
+//   (saiverse/slot_close.py) で、v0.3 には自律行動の止め具
+//   (saiverse/autonomy_wiring.py の定数 AUTONOMOUS_DRIVING_SHIPPED = False) がある
 //   あいだコマは発火しない。書き手が動かないので、台帳は Memopedia の焼き直し
 //   しか映さない。復帰条件: 自律行動 (時間割のコマ) の出荷時。
+//   止め具は develop-v0.4 で撤去済み (2026-09-25)。このタブの復帰は、v0.4 の
+//   自律行動管理 UI の作業と一緒に行う。
 // - pulse_timeline (Pulse タイムライン): line_role や spell 由来 ID といった
 //   内部構造を並べる開発者向けの診断ビュー (docs/intent/persona_cognition/
 //   debug_controller.md)。ペルソナの記憶を見に来た人が読むものではない。

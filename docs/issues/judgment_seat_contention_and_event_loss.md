@@ -1,7 +1,7 @@
 # 判断点の席の競合制御と、イベントの取りこぼし
 
 **発見**: 2026-07-30（[判断プロンプトの静的一覧を head へ](judgment_static_lists_to_head.md) の Codex レビュー五巡目。移設の範囲外として切り出し）
-**状態**: 💤 **凍結 (2026-08-23)** — v0.3 の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`、正典は [autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §11.1) により判断点が一つも発火しないため、実機検証が成立しない。**実装は入ったまま (撤去していない)**。再開は v0.4 で運転 (時間割 + 判断点) を配線するとき。旧状態 = 実装済・実機検証待ち（2026-07-31。③はまはー裁定で **B** に確定 — 下の「裁定の記録」。④⑤⑥は 2026-08-14 追加・実装済）
+**状態**: 実装済・実機検証待ち（2026-07-31。③はまはー裁定で **B** に確定 — 下の「裁定の記録」。④⑤⑥は 2026-08-14 追加・実装済）。**経緯**: 2026-08-23 凍結 (v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED = False` で判断点が発火せず、実機検証が成立しなかった) → 2026-09-25 develop-v0.4 で封印解除 (止め具を定数ごと撤去、[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §11.1)。実機検証はこれから。
 **関連**: `docs/intent/execution_ledger.md`、`docs/overview/audit_remediation_plan.md`（実行台帳 W1〜）、`saiverse/judgment_points.py` / `saiverse/autonomy_wiring.py` / `saiverse/execution_ledger.py`
 
 ## なぜ切り出したか

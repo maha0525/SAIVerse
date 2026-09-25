@@ -20,9 +20,11 @@ import { useState } from 'react';
 // 2026-08-23 (まはーの実機検証): 残っていた 3 つ —— 「会話を切り上げ」
 // 「Autonomy 切替」「完全手動モード」—— も撤去した。会話終了判断は v3 で
 // 退役し (autonomous_behavior_v3.md §8/§13.3)、会話は沈黙タイマーだけで
-// 閉じる。Autonomy 系は v0.3 の止め具
-// (saiverse/autonomy_wiring.py の AUTONOMOUS_DRIVING_SHIPPED = False) で
+// 閉じる。Autonomy 系は当時 v0.3 の止め具
+// (saiverse/autonomy_wiring.py の定数 AUTONOMOUS_DRIVING_SHIPPED = False) で
 // 判断点・見張り・コマが発火しないため、切り替えても効果が無かった。
+// 止め具は develop-v0.4 で撤去済み (2026-09-25)。自律の ON/OFF の切り替えは
+// ここへは戻さず、v0.4 の自律行動管理 UI の作業で用意する。
 
 interface DebugPanelProps {
     personaId: string;

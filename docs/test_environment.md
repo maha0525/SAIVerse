@@ -138,7 +138,7 @@ test_fixtures\start_test_server.bat
 
 #### 起動スクリプトが止めていないもの
 
-- **LLM の API キー**（`.env`）: そのまま使われます。テストのペルソナに会話を送ると実際の課金になります。ただし**立てて放置しただけでは LLM は動きません** — v0.3 の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`) で自律の駆動 (判断点・見張り・時間割のコマ) は全部止まっています。会話・Metabolism など会話起点の経路は止まっていないので、チャットを送るテストをするなら課金が発生します。課金を完全に封じたいときはキーを無効な値で上書きしてから起動してください。
+- **LLM の API キー**（`.env`）: そのまま使われます。テストのペルソナに会話を送ると実際の課金になります。**develop-v0.4 ブランチでは、立てて放置しただけでも LLM が動き、課金が発生します** — v0.3 (develop) にあった自律の駆動の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`) は develop-v0.4 で撤去済みです。自律 ON (`AUTONOMY_ENABLED`、既定 True) のペルソナは、起床・就寝の予定があれば起床と就寝の判断・見張り (watchdog)・時間割のコマで LLM を呼び、予定が無くても外から出来事が届けば (実イベント) 応じるかどうかの判断 (on_event) で LLM を呼びます。v0.3 (develop) では止め具が残っているので、放置しただけでは自律の駆動は動きません。会話・Metabolism など会話起点の経路はどちらのブランチでも止まっていないので、チャットを送るテストをするなら課金が発生します。課金を完全に封じたいときはキーを無効な値で上書きしてから起動してください。
 - **メール送信**（`.env` の `SMTP_*`）: スペル `send_email_to_user` は実行時に `.env` の SMTP 設定を読むので、SMTP 設定が入っていれば、テストのペルソナが使ったときに実際にメールが送られます。
 - **アドオン**（`expansion_data/`）: 本番と同じフォルダを読み、テスト DB にアドオン設定の行が無いものは有効として扱われます。SwitchBot・X・Elyth・stackchan の資格情報はテスト DB のアドオン設定と `test_data/user_data/addon_data/` 側にあるので、テスト環境で設定しない限り本番のアカウントや機体にはつながりません。本番の世界を丸ごと複製した場合は、`--keep-addons` を付けない限り複製スクリプトがアドオンを無効にします（`docs/intent/sandbox_world_clone.md` §3）。
 - **SDS**（`SDS_URL`）: テスト都市の定義はオフライン起動（`START_IN_ONLINE_MODE: false`）なので、起動時には登録しません。

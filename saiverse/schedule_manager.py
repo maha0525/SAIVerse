@@ -319,8 +319,8 @@ class ScheduleManager:
           確認を飛ばして登録する (発火側の degrade と同じ流儀)。
         - **除去**: 登録 map にあるが DB に無い / disabled の予約は cancel
           (delete / disable 時の unregister 失敗の回復)。
-        - 手動モード persona も特別扱いしない (handoff D6-3): 予約の復元は
-          宣言的正典の同期であって発火ではない。発火時ゲートは W9 の所掌。
+        - 予約の復元は宣言的正典の同期であって発火ではない (handoff D6-3)。
+          発火時ゲートは W9 の所掌。
 
         Returns:
             ``{"registered": int, "cancelled": int}`` (ログ用の集計)。

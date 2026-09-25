@@ -1,10 +1,8 @@
 # 自律 Pulse の器統合 + tell スペル
 
-**ステータス: 💤 凍結 (2026-08-23、まはー裁定)** — v0.3 の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`、正典は [autonomous_behavior_v3.md](autonomous_behavior_v3.md) §11.1) により時間割のコマが発火しないため、器の側の実機検証が成立しない。**実装は入ったまま (撤去していない)**。再開は v0.4 で運転 (時間割 + 判断点) を配線するとき。
+**ステータス: 検証待ち** (2026-08-08 設計裁定 → 同日実装 → レビュー消し込みを同日終了。経緯の親 = [issue](../issues/slot_light_pulse_runs_on_conversation_vehicle.md))
 
-**⚠️ 凍結の範囲は §A (暮らしコマの器) の実機検証だけ**: §B の `tell` スペル (「声をかける」) は v0.3 で現役で、通常の会話の中でペルソナが使う (`builtin_data/tools/tell.py`)。tell の挙動は凍結の対象ではない。
-
-**旧ステータス: 検証待ち** (2026-08-08 設計裁定 → 同日実装 → レビュー消し込みを同日終了。経緯の親 = [issue](../issues/slot_light_pulse_runs_on_conversation_vehicle.md))
+**経緯**: 2026-08-23 凍結 (v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED = False` で時間割のコマが発火せず、実機検証が成立しなかった) → 2026-09-25 develop-v0.4 で封印解除 (止め具を定数ごと撤去、[autonomous_behavior_v3.md](autonomous_behavior_v3.md) §11.1)。実機検証はこれから。
 
 > ⚠️ **2026-08-18 (v3 §9-4 決着による上書き)**: 本書 §B の tell の二段構え (唱える側は要旨だけ、実際の言葉は別建ての標準 1 コール) は、[autonomous_behavior_v3.md](autonomous_behavior_v3.md) §9-4 で**引数式** (発言内容を唱える側が引数に書く。標準文脈限定) へ再設計された。二段構えは「唱える側が軽量かもしれない」前提の産物で、Beat が標準モデル・メインラインになった v3 でその前提が消えたため。コード改修は v3 実装時。暮らしプロファイルの退役 (v3 §8) と合わせ、本書の実装は v3 までの経過形。
 

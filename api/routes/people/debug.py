@@ -15,9 +15,11 @@ scheduler.subline) は 2026-08-14 に削除した。残していた理由は「U
 NOTE: 2026-08-23 (まはーの実機検証) に ``wrap-up-conversation`` と
 ``GET/POST scheduler`` (autonomy 切替 / 完全手動モード) を削除した。会話終了判断は
 v3 で退役し (autonomous_behavior_v3.md §8/§13.3) 会話は沈黙タイマーだけで閉じる。
-Autonomy 系は v0.3 の止め具 (``saiverse/autonomy_wiring.py`` の
+Autonomy 系は当時 v0.3 の止め具 (``saiverse/autonomy_wiring.py`` の定数
 ``AUTONOMOUS_DRIVING_SHIPPED = False``、autonomous_behavior_v3.md §11.1) で
-判断点・見張り・コマが発火しないため、切り替えても効果が無かった。
+判断点・見張り・コマが発火しないため、切り替えても効果が無かった。止め具は
+2026-09-25 に develop-v0.4 で撤去済み。自律の ON/OFF を切り替える口は、v0.4 の
+自律行動管理 UI の作業で用意する。
 """
 import logging
 import sqlite3

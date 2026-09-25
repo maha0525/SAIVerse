@@ -1,7 +1,7 @@
 # Intent: 時間割の抜本改修 — 習慣が駆動し、偶然が満たす一日
 
-**ステータス**: 💤 **凍結 (2026-08-23、まはー裁定)** — v0.3 の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`、正典は [autonomous_behavior_v3.md](autonomous_behavior_v3.md) §11.1) により起床判断も時間割のコマも発火しないため、実機検証が成立しない。**実装は入ったまま (撤去していない)**。再開は v0.4 で運転 (時間割 + 判断点) を配線するとき。凍結の詳細は §13 末尾。
-**旧ステータス**: 検証待ち (2026-08-07。実装 T1〜T4+T2b+経験の台帳 + Codex レビュー八巡の消し込みをメイン系 `feature/autonomous-behavior-v2` へ rebase 統合済み・フルスイート緑。残 = `judgment_day_open` の再取込 → まはーの実機検証。経緯は §13)
+**ステータス**: 検証待ち (2026-08-07。実装 T1〜T4+T2b+経験の台帳 + Codex レビュー八巡の消し込みをメイン系 `feature/autonomous-behavior-v2` へ rebase 統合済み・フルスイート緑。残 = `judgment_day_open` の再取込 → まはーの実機検証。経緯は §13)
+**経緯**: 2026-08-23 凍結 (v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED = False` で起床判断と時間割のコマが発火せず、実機検証が成立しなかった) → 2026-09-25 develop-v0.4 で封印解除 (止め具を定数ごと撤去、[autonomous_behavior_v3.md](autonomous_behavior_v3.md) §11.1)。実機検証はこれから。凍結の詳細は §13 末尾。
 **親 intent**: [`autonomous_behavior_v2.md`](autonomous_behavior_v2.md) — 本書は v2 を置き換えるものではなく、v2 の時間割・コマ体系・帰属の三箇所を改修する。判断点の構造、予算、作業セッション機構、watchdog は v2 のまま残る
 **改修対象の詳細仕様**: [`persona_cognition/judgment_points.md`](persona_cognition/judgment_points.md) §3-4 (時間割スキーマ・起床判断)
 **合流する intent**: [`persona_cognition/recall_tags_and_track_reduction.md`](persona_cognition/recall_tags_and_track_reduction.md) (帰属の事後判定 = 想起用タグの貼付タイミング、§7)

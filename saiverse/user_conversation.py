@@ -344,7 +344,6 @@ def conversation_timeout_minutes(manager: Any, persona_id: str) -> Optional[int]
     """このペルソナの沈黙時間 (分)。タイマー対象外なら None。
 
     対象外になるのは:
-    - デバッグ完全手動モードのペルソナ (debug_controller.md)
     - ペルソナが manager にロードされていない
     - ``AI.USER_CONV_TIMEOUT_MINUTES`` が 0 以下 (= タイマー無効化)
 
@@ -353,9 +352,6 @@ def conversation_timeout_minutes(manager: Any, persona_id: str) -> Optional[int]
     (life_concept_map.md §8)。自律 OFF のまま会話が永遠に「いま」に残る実害を
     まはーが観測した (2026-07-07)。
     """
-    manual = getattr(manager, "_debug_manual_mode_personas", None) or set()
-    if persona_id in manual:
-        return None
     if _lookup_persona(manager, persona_id) is None:
         return None
 

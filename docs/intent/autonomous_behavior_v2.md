@@ -1,6 +1,6 @@
 # Intent: 自律行動 v2 — 身体・意志・世界
 
-**ステータス**: 💤 **凍結 (2026-08-23、まはー裁定)** — v0.3 の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`、正典は [autonomous_behavior_v3.md](autonomous_behavior_v3.md) §11.1) により判断点・見張り・時間割のコマが発火しないため、活性化配線の実機検証が成立しない。**実装は入ったまま (撤去していない)**。再開は v0.4 で運転 (時間割 + 判断点) を配線するとき。旧ステータス = draft v0.1 (2026-07-04)。レビュー待ち。
+**ステータス**: draft v0.1 (2026-07-04)。レビュー待ち。**経緯**: 2026-08-23 凍結 (v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED = False` で判断点・見張り・時間割のコマが発火せず、実機検証が成立しなかった) → 2026-09-25 develop-v0.4 で封印解除 (止め具を定数ごと撤去、[autonomous_behavior_v3.md](autonomous_behavior_v3.md) §11.1)。実機検証はこれから。
 **親 intent**: `autonomous_living.md`（自律生活のビジョン。本書はその実現設計の全面改訂）
 **関連**: `persona_action_tracks.md` / `persona_cognition/meta_judgment_structured.md` / `persona_cognition/autonomous_desire.md`
 **詳細仕様**: 判断点の入出力（見るもの・response_schema）は [`persona_cognition/judgment_points.md`](persona_cognition/judgment_points.md)

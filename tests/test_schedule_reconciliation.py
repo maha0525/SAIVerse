@@ -762,20 +762,6 @@ def test_prepared_schedule_dispatch_removed_schedule_is_failed(env):
     assert env.manager.execution_ledger.get_execution(exec_id)["status"] == "failed"
 
 
-def test_prepared_schedule_dispatch_manual_mode_persona_is_skipped(env):
-    """完全手動モードのペルソナは refire しない (prepared のまま残し、解除後の
-    tick が拾う) — _collect_prepared_judgments と同じ規律。"""
-    sid = _periodic_schedule(env)
-    exec_id = _claim_prepared_occurrence(env, sid)
-    _age_prepared(env, exec_id)
-    env.manager._debug_manual_mode_personas = {PERSONA_ID}
-
-    wiring._collect_prepared_schedule_dispatch(env.manager)
-
-    assert _entry(env, sid) is None
-    assert env.manager.execution_ledger.get_execution(exec_id)["status"] == "prepared"
-
-
 # ---------------------------------------------------------------------------
 # 9. 設定世代がキーの独立成分 (Codex W3 第七陣 high)
 # ---------------------------------------------------------------------------

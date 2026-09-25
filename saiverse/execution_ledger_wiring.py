@@ -15,15 +15,13 @@ SAIVerseManager の構築 / 起動分離の不変条件に従う:
 - :func:`schedule_recovery_tick` — ``start()`` 段。60 秒周期の掃除 tick を
   EventScheduler に予約する (#1/#3/#6)。
 
-回復 tick の基本は「掃除」で行動を生まない (intent §2.4 の二分)。したがって
-完全手動モード (debug_controller) の対象ペルソナに対しても掃除は止めない —
-手動検証中こそ記録は正確であるべきで、掃除は自律行動ではない。
+回復 tick の基本は「掃除」で行動を生まない (intent §2.4 の二分)。掃除は
+自律行動ではない。
 「行動を生む」側のうち **#2 (prepared の回収) は W1 Chunk A で実装済み**
-(:func:`_collect_prepared_judgments` — kind 別規則は D5 の表。refire は行動を
-生むため、手動モード対象ペルソナはスキップする)。**#7 (schedule
+(:func:`_collect_prepared_judgments` — kind 別規則は D5 の表)。**#7 (schedule
 reconciliation) は W3 Chunk C で実装済み** (:func:`_reconcile_schedules` →
 ``ScheduleManager._reconcile_schedules`` — DB 正典と予約の世代照合。登録・
-除去のみで LLM を起動しないため、手動モード対象ペルソナも止めない)。
+除去のみで LLM を起動しない)。
 """
 from __future__ import annotations
 
@@ -108,8 +106,8 @@ PREPARED_REFIRE_KINDS = (
 #: 窓の起点は行齢 (created_at) ではなく「このプロセスで最初に refire を試みた
 #: 時刻」(in-memory) — 行齢で数えると、プロセス停止が窓を消費し、長時間停止後の
 #: 再起動で一度も refire せず失効させてしまう (回収が守るはずの「停止を跨いだ
-#: イベント」を逆に殺す)。手動モード中のスキップも窓を消費しない。プロセス
-#: 再起動で窓はやり直しになるが、恒久条件でも 1 プロセスにつき窓 1 本で有限。
+#: イベント」を逆に殺す)。プロセス再起動で窓はやり直しになるが、恒久条件でも
+#: 1 プロセスにつき窓 1 本で有限。
 PREPARED_REFIRE_EXPIRE_AFTER_SECONDS = 1800.0
 
 #: prepared 回収 (#2): 期限切れで failed に落とす kind と期限秒数。
@@ -305,8 +303,8 @@ def _collect_stale_slot_executions(
     """回復: 精算が転けて running のまま残ったコマ発火を settle-close する (W2 D5)。
 
     slot.fire は「行動を生む」判断点ではなく「実行した記録の締め」(episode close +
-    slot done + 台帳 applied) なので、LLM 再実行を伴わない掃除である — したがって
-    完全手動モードのペルソナに対しても止めない (掃除は自律行動ではない)。
+    slot done + 台帳 applied) なので、LLM 再実行を伴わない掃除である (掃除は
+    自律行動ではない)。
 
     Args:
         older_than_seconds: :meth:`ExecutionLedger.list_running` に渡す deadline。
@@ -430,9 +428,7 @@ def _collect_prepared_judgments(manager: "SAIVerseManager") -> None:
     """回復 #2: 走り出せなかった prepared 判断の回収 (intent §2.4 #2、D5)。
 
     refire 対象は **prepared のみ** — fallback 済みの実行は failed/unknown
-    終端なので refire されない (二重応対なし)。refire は「行動を生む」ため、
-    完全手動モード (``manager._debug_manual_mode_personas``) の対象ペルソナは
-    スキップする。個別の例外は tick を殺さない。
+    終端なので refire されない (二重応対なし)。個別の例外は tick を殺さない。
     """
     ledger = manager.execution_ledger
     try:
@@ -450,10 +446,9 @@ def _collect_prepared_judgments(manager: "SAIVerseManager") -> None:
     from saiverse import clock
 
     now = int(clock.now().timestamp())
-    manual_personas = getattr(manager, "_debug_manual_mode_personas", None) or set()
     for row in rows:
         try:
-            _collect_one_prepared(manager, row, now, manual_personas)
+            _collect_one_prepared(manager, row, now)
         except Exception:
             LOGGER.exception(
                 "[ledger-wiring] prepared collection failed (execution=%s kind=%s)",
@@ -465,7 +460,6 @@ def _collect_one_prepared(
     manager: "SAIVerseManager",
     row: Dict[str, Any],
     now: int,
-    manual_personas: Any,
 ) -> None:
     """prepared 1 行に kind 別回収規則 (D5 の表) を適用する。"""
     ledger = manager.execution_ledger
@@ -480,14 +474,8 @@ def _collect_one_prepared(
     if kind in PREPARED_REFIRE_KINDS:
         if age < PREPARED_REFIRE_AFTER_SECONDS:
             return
-        if persona_id in manual_personas:
-            LOGGER.debug(
-                "[ledger-wiring] prepared %s refire skipped: persona %s is in "
-                "manual mode (execution=%s)", kind, persona_id, execution_id,
-            )
-            return
         # 再試行窓は「このプロセスで最初に refire を試みた時刻」から数える —
-        # 行齢で数えるとプロセス停止・手動モードの時間が窓を消費し、復旧後に
+        # 行齢で数えるとプロセス停止の時間が窓を消費し、復旧後に
         # 一度も refire しないまま失効させてしまう。初回試行前 (first is None)
         # は失効しない = 失効の前に必ず 1 回は refire される。
         attempts = _refire_first_attempts(manager)
@@ -573,8 +561,6 @@ def _collect_prepared_schedule_dispatch(manager: "SAIVerseManager") -> None:
     - 一致 → :meth:`ScheduleManager.refire_occurrence` で同一 occurrence の
       予約を積み直す。発火側の claim が prepared を再利用し、二重実行は
       try_mark_running の席取りが防ぐ
-    - refire は「行動を生む」ため、完全手動モードのペルソナはスキップ
-      (:func:`_collect_prepared_judgments` と同じ規律)
     """
     schedule_manager = getattr(manager, "schedule_manager", None)
     if schedule_manager is None:
@@ -591,7 +577,6 @@ def _collect_prepared_schedule_dispatch(manager: "SAIVerseManager") -> None:
     from saiverse import clock
 
     now = int(clock.now().timestamp())
-    manual_personas = getattr(manager, "_debug_manual_mode_personas", None) or set()
     for row in rows:
         execution_id = row.get("execution_id")
         created_at = row.get("created_at")
@@ -600,13 +585,6 @@ def _collect_prepared_schedule_dispatch(manager: "SAIVerseManager") -> None:
                 or not isinstance(payload, dict):
             continue
         if now - created_at < SCHEDULE_PREPARED_REFIRE_AFTER_SECONDS:
-            continue
-        if row.get("persona_id") in manual_personas:
-            LOGGER.debug(
-                "[ledger-wiring] prepared schedule.dispatch refire skipped: "
-                "persona %s is in manual mode (execution=%s)",
-                row.get("persona_id"), execution_id,
-            )
             continue
         schedule_id = payload.get("schedule_id")
         occurrence = payload.get("occurrence")
@@ -696,7 +674,6 @@ def _collect_failed_periodic_schedule_dispatch(manager: "SAIVerseManager") -> No
       発火させない)
     - 行消滅 / disabled / 世代・行トークン不一致は何もしない (failed は既に
       副作用ゼロの終端)
-    - refire は「行動を生む」ため手動モードのペルソナはスキップ
     """
     schedule_manager = getattr(manager, "schedule_manager", None)
     scheduler = getattr(manager, "event_scheduler", None)
@@ -721,7 +698,6 @@ def _collect_failed_periodic_schedule_dispatch(manager: "SAIVerseManager") -> No
     )
 
     now = int(clock.now().timestamp())
-    manual_personas = getattr(manager, "_debug_manual_mode_personas", None) or set()
     for row in rows:
         payload = row.get("payload")
         key = row.get("idempotency_key") or ""
@@ -757,8 +733,6 @@ def _collect_failed_periodic_schedule_dispatch(manager: "SAIVerseManager") -> No
         except (TypeError, ValueError):
             continue
         if now - occurrence_epoch > SCHEDULE_FAILED_OCCURRENCE_MAX_AGE_SECONDS:
-            continue
-        if row.get("persona_id") in manual_personas:
             continue
         schedule_id = payload.get("schedule_id")
         instance_token = payload.get("instance_token")
@@ -809,10 +783,9 @@ def _reconcile_schedules(manager: "SAIVerseManager") -> None:
     """回復 #7: schedule 予約の世代照合 (W3 Chunk C / handoff D6)。
 
     実体は ``ScheduleManager._reconcile_schedules`` — DB (宣言的正典) と
-    EventScheduler 予約の同期のみで、LLM を直接起動しない (登録・除去だけ)。
-    したがって完全手動モードのペルソナに対しても止めない (掃除は自律行動では
-    ない — 発火時ゲートの一貫化は W9 の所掌)。schedule_manager を持たない
-    manager (テストスタブ等) は no-op。
+    EventScheduler 予約の同期のみで、LLM を直接起動しない (登録・除去だけ。
+    掃除は自律行動ではない — 発火時ゲートの一貫化は W9 の所掌)。
+    schedule_manager を持たない manager (テストスタブ等) は no-op。
     """
     schedule_manager = getattr(manager, "schedule_manager", None)
     if schedule_manager is None:

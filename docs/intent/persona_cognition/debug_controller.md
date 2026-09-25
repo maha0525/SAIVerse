@@ -19,11 +19,11 @@
 | メタ判断を 1 回 (`fire-meta-judgment`) | 2026-08-14 | v1 メタ判断の退役 ([../track_retirement.md](../track_retirement.md) §7.4)。押しても必ず失敗する口になっていた。 |
 | sub_line Pulse を 1 回 (`fire-subline-pulse`) / SubLine タイマートグル | 2026-07-13 → 2026-08-14 | 自律行動 v2 で旧 SubLineScheduler ごと廃止 (life.md v0.5 §9.2-2 改修B)。UI を先に外し、no-op で残っていたバックエンドを後から削除。 |
 | 会話を切り上げ (`wrap-up-conversation`) | **2026-08-23** | 説明文の「会話終了判断を撃つ」の会話終了判断が v3 で退役した ([../autonomous_behavior_v3.md](../autonomous_behavior_v3.md) §8/§13.3)。会話は沈黙タイマーだけで閉じるので、手動で前倒しする意味が無い。 |
-| Autonomy 切替 (`POST .../scheduler` の `autonomy`) | **2026-08-23** | v0.3 の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`、[../autonomous_behavior_v3.md](../autonomous_behavior_v3.md) §11.1) で判断点・見張り・コマが発火しない。切り替えても効果が無い。 |
+| Autonomy 切替 (`POST .../scheduler` の `autonomy`) | **2026-08-23** | 当時は v0.3 の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`、[../autonomous_behavior_v3.md](../autonomous_behavior_v3.md) §11.1) で判断点・見張り・コマが発火せず、切り替えても効果が無かった。止め具は 2026-09-25 に develop-v0.4 で撤去済み。自律の ON/OFF の切り替えはこのパネルへは戻さず、v0.4 の自律行動管理 UI の作業で用意する。 |
 | 完全手動モード (`POST .../scheduler` の `manual_mode`) | **2026-08-23** | 同上。止めるべき自動発火が既にゼロ。 |
 | タイマー状態の表示 (`GET .../scheduler`) | **2026-08-23** | 表示していた `autonomy_state` / `manual_mode` の両方が上の退役で意味を失った。 |
 
-⚠ **`manager._debug_manual_mode_personas` は残っている**。完全手動モードを立てる唯一の口 (`POST .../scheduler`) が消えたので、この集合は常に空になる。読み手 (`saiverse/user_conversation.py`, `saiverse/execution_ledger_wiring.py`, スケジュール照合) の除外分岐は残したまま = 到達しない枝になっている。撤去は自律行動 v0.3 の止め具を外すときの判断とまとめて行う。
+**`manager._debug_manual_mode_personas` は 2026-09-25 に develop-v0.4 で撤去した**。完全手動モードを立てる唯一の口 (`POST .../scheduler`) が 2026-08-23 に消えてから、この集合は常に空で、読み手 (`saiverse/user_conversation.py` の沈黙タイマーの対象外判定、`saiverse/execution_ledger_wiring.py` の prepared 判断の回収・prepared / failed の schedule.dispatch の回収) の除外分岐は到達しない枝として残っていた。v0.3 の止め具の撤去と同じ変更で、属性ごと読み手の分岐と対応するテストを消した。develop (v0.3 系) には残る。
 
 ## 経緯 (以下は歴史的記録)
 
@@ -83,3 +83,4 @@ UC-2「割り込みと復帰」のような往復シナリオを検証すると�
 - 2026-07-13 (v0.2, life.md v0.5 §9.2-2 改修B): 自律行動 v2 で SubLineScheduler ごと廃止されたため、UI の「sub_line Pulse を 1 回」ボタンと「SubLineScheduler on/off」トグルを削除。バックエンドは互換のため no-op で残した。
 - 2026-08-14 (v0.3, Track 撤廃 順序①): v1 メタ判断の退役 ([../track_retirement.md](../track_retirement.md) §7.4) に伴い、`wrap-up-conversation` を「pause + メタ判断」から「沈黙タイマーの即時発火」へ置き換え、**開いている会話があるときだけ**撃つようにした。あわせて no-op で残っていた `fire-meta-judgment` / `fire-subline-pulse` / `scheduler.subline` を削除。
 - 2026-08-23 (v0.4): まはーの実機検証で「退役済みの操作が並んでいる」と指摘。裁定により「会話を切り上げ」「Autonomy 切替」「完全手動モード」の 3 つを UI と API から撤去し、Embedding 一括生成だけを残した。理由と、後に残った `_debug_manual_mode_personas` の扱いは上の §「退役した操作」を参照。
+- 2026-09-25 (develop-v0.4): v0.3 の止め具の撤去と一緒に、到達しない枝として残っていた `_debug_manual_mode_personas` を読み手の分岐ごと撤去した。

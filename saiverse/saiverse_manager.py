@@ -251,10 +251,6 @@ class SAIVerseManager(
         # 自律行動 v2 で廃止 (intent §9.3)。駆動は時間割のコマ発火
         # (saiverse/day_plan.py) + 判断点 (saiverse/autonomy_wiring.py) が担う。
         self.pulse_dispatcher = PulseDispatcher(self)
-        # デバッグコントローラー (debug_controller.md): 完全手動モード対象ペルソナ。
-        # このセットに入った persona は会話の沈黙タイマーを予約しない
-        # (saiverse.user_conversation.conversation_timeout_minutes が None を返す)。
-        self._debug_manual_mode_personas: set = set()
         # NOTE: 旧 InternalAlertPoller (Track パラメータの閾値超過を 60 秒周期で
         # 判定し set_alert を撃つ機構 + Handler.tick() 拡張点) は Track 撤廃計画の
         # 裁定 B②③ で機構ごと撤去 (docs/intent/track_retirement.md §5-B)。alert
@@ -532,14 +528,6 @@ class SAIVerseManager(
         # 2. Active ペルソナの AutonomyManager を起動する。起動前は
         #    ensure_autonomy_for が _started ゲートで no-op にしていたぶんを、
         #    _started=True になった今ここでまとめて立てる。
-        #    v0.3 の止め具 (autonomy_wiring.AUTONOMOUS_DRIVING_SHIPPED) が
-        #    効いている間は 1 本も立たない — その事実をここで一度だけ告げる。
-        try:
-            from saiverse.autonomy_wiring import log_shipping_gate_once
-
-            log_shipping_gate_once()
-        except Exception:
-            logging.exception("[start] Failed to log the v0.3 autonomy gate")
         for persona_id in list(self.personas.keys()):
             try:
                 self.ensure_autonomy_for(persona_id)
@@ -1214,8 +1202,7 @@ class SAIVerseManager(
         #    (同 key 上書きなので二重発火しない。過去時刻は即時扱い —
         #    起床済みの一日を再起動後に続きから駆動する)。自律 OFF のペルソナは
         #    再開 (自律 ON 化) 後の watchdog が拾う。
-        #    判定は autonomy_wiring.is_autonomy_on 一本 — v0.3 の止め具が効いて
-        #    いる間はここも走らない (autonomous_behavior_v3.md §11)。
+        #    判定は autonomy_wiring.is_autonomy_on 一本 (AUTONOMY_ENABLED)。
         try:
             from saiverse.autonomy_wiring import is_autonomy_on
 
@@ -1486,9 +1473,8 @@ class SAIVerseManager(
 
         自律ゲート (``autonomy_wiring.is_autonomy_on``) が True のときだけ
         watchdog tick を起動する。False なら起動せず、既に起動中なら停止する。
-        ゲートは AUTONOMY_ENABLED に v0.3 の止め具を掛けたもの — 止め具が効いて
-        いる間は AutonomyManager が 1 本も立たない
-        (autonomous_behavior_v3.md §11)。
+        ゲートはペルソナごとの AUTONOMY_ENABLED だけで決まる (v0.3 の止め具は
+        develop-v0.4 で撤去済み — autonomous_behavior_v3.md §11.1)。
         """
         from saiverse.autonomy_manager import AutonomyManager
         from saiverse.autonomy_wiring import is_autonomy_on

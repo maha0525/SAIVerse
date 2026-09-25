@@ -15,7 +15,7 @@
 - schedule_recovery_tick: EventScheduler に key=execution_ledger_recovery で予約
 - prepared 回収 (#2、W1 Chunk A / D5): on_event・post_session は 120 秒経過で
   refire (resume_execution_id 経由)、day_open 等は 1800 秒で expired 化。
-  手動モード persona は refire スキップ。gate で止まった refire は一度で終端化
+  gate で止まった refire は一度で終端化
   せず、再試行窓 (1800 秒) のあいだ prepared を保持して毎 tick 再試行する
   (裁定 B、2026-07-31 — judgment_seat_contention_and_event_loss ③)。放棄は
   prepared 限定 CAS で、別 claimant の running 台帳を壊さない
@@ -867,20 +867,6 @@ class TestPreparedCollection:
         assert ledger.get_execution(eid)["status"] == XL.STATUS_FAILED
         assert calls == []
 
-    def test_manual_mode_persona_skips_refire(self, manager, monkeypatch):
-        """refire は「行動を生む」ので手動モード persona はスキップ (prepared 温存)。"""
-        clock.enable_virtual(self.BASE)
-        manager._debug_manual_mode_personas = {PERSONA_ID}
-        ledger = manager.execution_ledger
-        eid = self._claim_prepared(
-            ledger, "judgment.on_event", payload={"event_text": "x"},
-        )
-        calls = self._patch_fire(monkeypatch)
-        clock.advance_to(datetime(2026, 7, 19, 9, 3, 0))
-        wiring._collect_prepared_judgments(manager)
-        assert calls == []
-        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
-
     def test_refire_gate_failure_keeps_seat_until_retry_window(
         self, manager, monkeypatch,
     ):
@@ -971,32 +957,6 @@ class TestPreparedCollection:
         entry = ledger.get_execution(eid)
         assert entry["status"] == XL.STATUS_FAILED
         assert "expired" in entry["error"]
-
-    def test_manual_mode_time_does_not_consume_retry_window(
-        self, manager, monkeypatch,
-    ):
-        """手動モード中のスキップは再試行窓を消費しない — 30 分以上たってから
-        手動モードを解除しても、少なくとも 1 回は refire される。"""
-        clock.enable_virtual(self.BASE)
-        manager._debug_manual_mode_personas = {PERSONA_ID}
-        ledger = manager.execution_ledger
-        eid = self._claim_prepared(
-            ledger, "judgment.on_event", payload={"event_text": "x"},
-        )
-        calls = self._patch_fire(monkeypatch, result={
-            "submitted": False, "reason": "persona autonomy disabled",
-        })
-        # 手動モードのまま 40 分: スキップされ続け、prepared 温存
-        clock.advance_to(datetime(2026, 7, 19, 9, 40, 0))
-        wiring._collect_prepared_judgments(manager)
-        assert calls == []
-        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
-        # 手動モード解除 → 失効せず refire される
-        manager._debug_manual_mode_personas = set()
-        clock.advance_to(datetime(2026, 7, 19, 9, 41, 0))
-        wiring._collect_prepared_judgments(manager)
-        assert len(calls) == 1
-        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
 
     def test_expiry_failure_does_not_grant_a_fresh_retry_window(
         self, manager, monkeypatch,

@@ -1,6 +1,6 @@
 # 自律行動 v2 — 実機初日で浮いた「前提レベル」の設計課題（棚卸し）
 
-**状態**: 💤 **凍結 (2026-08-23)** — v0.3 の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`、正典は [autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §11.1) により判断点も時間割のコマも発火しないため、本書が積み残した項目の実機再検証が成立しない。**実装は入ったまま (撤去していない)**。再開は v0.4 で運転 (時間割 + 判断点) を配線するとき。以下の記述は凍結時点のもの。
+**状態**: 実機再検証待ち (凍結前の台帳の次アクション「次 = 実機再検証 → 暮らし Pulse のプロンプト設計 → episode.md 実装 → B4」は末尾の「凍結」節に移送済み。episode.md は v3 §7 で退役済み)。**経緯**: 2026-08-23 凍結 (v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED = False` で判断点と時間割のコマが発火せず、実機検証が成立しなかった) → 2026-09-25 develop-v0.4 で封印解除 (止め具を定数ごと撤去、[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §11.1)。実機検証はこれから。
 
 > **これは何**: 自律行動 v2 の実装と概念再編（⑥ Memory Atlas）が一通り終わり、**実機初日
 > (2026-07-12) に実際に動かして初めて見えた**、前提そのものを疑う設計課題の集合。
