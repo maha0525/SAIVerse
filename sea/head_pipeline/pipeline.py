@@ -101,10 +101,15 @@ class HeadPipeline:
         # → 通知ロック → 保存ロック → self._lock の一方向のみ。通知ロックを
         # 握ったまま配送ロックを取ってはならない (配送はロックを離してから)。
         # load_from_store も通知ロックを取る (B を進める途中で古い組が DB から
-        # 読み込まれるのを防ぐ — 同 issue ケース 4)。通知ロックを握ったまま
-        # load_from_store を呼ぶのは同じスレッドの再入 (RLock) なので可。
-        # pipeline のロック (self._lock) や保存ロックを握ったまま呼んでは
-        # ならない (内側のロックから外側の通知ロックを取る逆順になる)。
+        # 読み込まれるのを防ぐ — 同 issue ケース 4)。capture_all も撮影から
+        # 保存までを通知ロックの内側で行う (撮り直しと B の前進を並べる +
+        # メモリに組が無いときの DB からの読み込み — 同 issue ケース 5)。
+        # 通知ロックを握ったまま load_from_store / capture_all を呼ぶのは同じ
+        # スレッドの再入 (RLock) なので可。pipeline のロック (self._lock) や
+        # 保存ロックを握ったまま load_from_store / capture_all を呼んでは
+        # ならない (内側のロックから外側の通知ロックを取る逆順になる — 落ちる
+        # 経路 (capture_for_event / recapture_missing) は self._lock を離して
+        # から capture_all を呼ぶ)。
         self._notify_locks: dict[str, threading.RLock] = {}
 
     def attach_store(self, store: LineHeadSnapshotStore) -> None:
@@ -138,7 +143,51 @@ class HeadPipeline:
         つかない。撮り直せなかった名前は state に記帳して
         :meth:`sections_not_freshly_captured` から読めるようにする (提示の縮みが
         「その Section の通知を下ろしてよいか」の判定に使う)。
+
+        **メモリに組が無いときは、撮る前に DB の行を読み込む**
+        (:meth:`load_from_store`、docs/issues/head_diff_notification_duplicate_delivery.md
+        ケース 5)。再起動後、ensure_snapshot の読み込みより先に撮り直しが来る
+        経路 (dispatch_event のスペル切り替え・Metabolism・入室) がある。読まずに
+        「B の無い初回」として B = 新 A で初期化すると、DB に残っていた未配送の
+        変化の B を撮ったばかりの値で上書きし、その変化は以後の差分検知で
+        「変化なし」になって二度と届かない (喪失)。読み込めた組は ``prev`` と
+        して扱うので、上の「既存 B は全て持ち越す」規約がそのまま効く。DB に行が
+        本当に無いときだけ B = 新 A で初期化する。DB の読み込みが例外を投げた
+        ときは、B を初期化して上書きせずに例外をそのまま返す (呼び出し側の
+        dispatch は失敗として扱い、ensure_snapshot は従来から読み込みの例外を
+        そのまま返している)。
+
+        **撮影から state の公開・保存までをペルソナの通知ロック
+        (:meth:`notify_lock_for`) の内側で行う**。理由は二つ:
+
+        - B を進める処理 (integration の差分検知 / notify の内容型通知 —
+          どちらも通知ロックの内側) と撮り直しを並べる。並べないと、
+          :meth:`advance_last_notified_many` が「メモリ上の組」を確定した後・
+          DB の他の行を進める前に、まだどこにも記録の無いモデルの組が撮られて
+          保存され、その新しい行の B が DB 側の前進で撮影より古い値に上書き
+          されうる (同 issue「現在の状態」の受け入れた残り、新しいモデルの初回
+          撮影との隙間)。
+        - 上の読み込みは :meth:`load_from_store` の規約どおり通知ロックの内側で
+          行う (撮影全体を同じロックに入れれば、読み込んでから公開するまでの
+          間にも B の前進が割り込まない)。
+
+        通知ロックは ``self._lock`` と保存ロックより外側 (``__init__`` のロック
+        順序) — **pipeline のロックや保存ロックを握ったまま呼んではならない**。
+        通知ロックを握った同じスレッドからの呼び出しは再入で通る。
         """
+        with self.notify_lock_for(ctx.persona_id):
+            return self._capture_all_locked(ctx)
+
+    def _capture_all_locked(self, ctx: LineHeadInput) -> LineHeadSnapshot:
+        """:meth:`capture_all` の本体 (ペルソナの通知ロックを握って呼ぶ)。"""
+        if not self.has_snapshot(ctx.persona_id, ctx.model_key):
+            # ケース 5: 組がメモリに無い = 再起動後にまだ読み込まれていない
+            # 可能性がある。撮る前に DB の行 (未配送の変化の B を含む) を読み
+            # 込んで prev にする。行が無ければ False で、下の初回扱いへ進む。
+            # 撮る前に読むのは、capture の失敗時に DB の A を据え置き値として
+            # 使えるようにするため (メモリに組がある場合と同じ stale-but-real)。
+            self.load_from_store(ctx.persona_id, ctx.model_key)
+
         sections = self._registry.all_sections()
         sections_dict: dict[str, object] = {}
         capture_failures: dict[str, str] = {}
@@ -164,6 +213,9 @@ class HeadPipeline:
 
         # state 不在時の採番フォールバック (DB 行の版継続) はロック外で先に
         # 引いておく — 版の**割り当て自体**は公開と同じロック区間で行う。
+        # 冒頭の読み込みで組が入っていればここは通らない (prev の版を継ぐ)。
+        # 通るのは DB に行が無いときと、行はあるが load が読めなかったとき
+        # (壊れた JSON 等で None) — 後者も版は継続させる。
         # 採番と公開が別区間だと、並行 capture_all が「同じ版番号の異なる
         # snapshot」を作り、片方の保存成功がもう片方 (未保存) を保存済みに
         # 見せかける (Codex 三巡 P1)。
@@ -187,6 +239,8 @@ class HeadPipeline:
             snapshot.snapshot_version = base + 1
             # B は配送だけが進める (docstring の不変条件): 既存 B は**全て**持ち
             # 越し、B の無い Section (初回 / 新規登録) だけ B = 新 A で初期化。
+            # 再起動後の組は冒頭で DB から読み込んだものが prev になるので、DB に
+            # 残っていた未配送の変化の B もここで持ち越される (ケース 5)。
             # capture 失敗で A の key が省かれた Section の B も落とさない — B は
             # 「どこまで届けたか」の独立した台帳で、A の欠損に巻き込むと復旧後の
             # flush が故障期間中の差分を届けられない (Codex 2026-08-17)。capture
@@ -228,10 +282,14 @@ class HeadPipeline:
         成功した Section が 1 つでもあれば版を進めて永続化する。全滅なら
         既存 snapshot の capture_failures に理由を追記するだけ (版は据え置き =
         cache も B も無傷)。state 不在時は capture_all にフォールバック。
+        フォールバックは ``self._lock`` を離してから行う (capture_all は通知
+        ロックを取る — ``__init__`` のロック順序)。
         """
         with self._lock:
             state = self._states.get((ctx.persona_id, ctx.model_key))
         if state is None:
+            # self._lock の外で落ちる (capture_all は通知ロックを取るので、
+            # 握ったまま呼ぶと逆順になる)。
             return self.capture_all(ctx)
 
         sections_by_name = {s.name: s for s in self._registry.all_sections()}
@@ -315,6 +373,12 @@ class HeadPipeline:
 
         Metabolism 以外の refresh イベントで使う。snapshot の他 section は据え置き。
         該当 Section が 0 件なら何もしない (= None を返す)。
+
+        組がメモリに無いときは :meth:`capture_all` に落ちる (再起動後の未読み
+        込みの組は、capture_all が DB から読み込んで B を持ち越す — ケース 5)。
+        落ちるのは ``self._lock`` を離してから — capture_all は通知ロックを取り、
+        通知ロックは ``self._lock`` より外側 (``__init__`` のロック順序) なので、
+        握ったまま呼ぶと逆順になってデッドロックしうる。
         """
         if event == EventType.METABOLISM:
             return self.capture_all(ctx)
@@ -325,57 +389,17 @@ class HeadPipeline:
 
         with self._lock:
             state = self._states.get((ctx.persona_id, ctx.model_key))
-            if state is None:
-                # snapshot 不在なら丸ごと作り直す方が安全 (event を Metabolism として扱う)
-                LOGGER.debug(
-                    "head_pipeline: capture_for_event without prior snapshot, falling back to capture_all",
+            if state is not None:
+                new_snapshot, notified_snapshot_copy = self._capture_event_sections_locked(
+                    ctx, state, sections, event,
                 )
-                return self.capture_all(ctx)
-
-            new_sections = dict(state.snapshot.sections)
-            capture_failures = dict(state.snapshot.capture_failures)
-            fresh: set[str] = set()
-            stale: set[str] = set()
-            for section in sections:
-                try:
-                    new_sections[section.name] = section.capture(ctx)
-                    capture_failures.pop(section.name, None)
-                    fresh.add(section.name)
-                    # B が無い Section だけ初期化。既存 B は据え置き — event での
-                    # 再 capture は A の最新化であって配送ではない。ここで B を
-                    # 新値に揃えると、未配送の差分 (例: capture_all 後・配送前に
-                    # refresh event が割り込んだ場合) が既読化される (Codex
-                    # 2026-08-17、C8 の不変条件)。
-                    state.last_notified_sections.setdefault(
-                        section.name, new_sections[section.name],
-                    )
-                    state.dirty_sections.discard(section.name)
-                except Exception as exc:
-                    LOGGER.exception(
-                        "head_pipeline: capture failed for section=%s event=%s",
-                        section.name, event.value,
-                    )
-                    stale.add(section.name)
-                    # 既存値があれば据え置き (stale-but-real)。無ければ欠損として
-                    # 理由を記録する (capture_all と同じ fail-closed 規約)。
-                    if new_sections.get(section.name) is None:
-                        new_sections.pop(section.name, None)
-                        capture_failures[section.name] = f"capture failed: {exc!r}"
-
-            new_snapshot = LineHeadSnapshot(
-                persona_id=state.snapshot.persona_id,
-                model_key=state.snapshot.model_key,
-                line_role=state.snapshot.line_role,
-                captured_at=time.time(),
-                snapshot_version=state.snapshot.snapshot_version + 1,
-                sections=new_sections,
-                capture_failures=capture_failures,
+        if state is None:
+            # snapshot 不在なら丸ごと作り直す方が安全 (event を Metabolism として
+            # 扱う)。self._lock の外で落ちる (上の docstring — ロック順序)。
+            LOGGER.debug(
+                "head_pipeline: capture_for_event without prior snapshot, falling back to capture_all",
             )
-            state.snapshot = new_snapshot
-            # 触った Section だけ更新する (他は据え置き) — この経路は一部の
-            # Section の最新化であって、全体を撮り直したわけではない。
-            state.stale_sections = (state.stale_sections - fresh) | stale
-            notified_snapshot_copy = dict(state.last_notified_sections)
+            return self.capture_all(ctx)
 
         LOGGER.info(
             "head_pipeline: captured event=%s sections=%s persona=%s model=%s",
@@ -383,6 +407,64 @@ class HeadPipeline:
         )
         self._persist_snapshot(new_snapshot, notified_snapshot_copy)
         return new_snapshot
+
+    def _capture_event_sections_locked(
+        self,
+        ctx: LineHeadInput,
+        state: _LineState,
+        sections: list,
+        event: EventType,
+    ) -> tuple[LineHeadSnapshot, dict[str, object]]:
+        """:meth:`capture_for_event` の本体 (``self._lock`` を握って呼ぶ)。
+
+        ``sections`` を撮り直して ``state`` に新しい snapshot を公開し、
+        ``(新しい snapshot, 保存用の B のコピー)`` を返す。保存は呼び出し側が
+        ロックを離してから行う。
+        """
+        new_sections = dict(state.snapshot.sections)
+        capture_failures = dict(state.snapshot.capture_failures)
+        fresh: set[str] = set()
+        stale: set[str] = set()
+        for section in sections:
+            try:
+                new_sections[section.name] = section.capture(ctx)
+                capture_failures.pop(section.name, None)
+                fresh.add(section.name)
+                # B が無い Section だけ初期化。既存 B は据え置き — event での
+                # 再 capture は A の最新化であって配送ではない。ここで B を
+                # 新値に揃えると、未配送の差分 (例: capture_all 後・配送前に
+                # refresh event が割り込んだ場合) が既読化される (Codex
+                # 2026-08-17、C8 の不変条件)。
+                state.last_notified_sections.setdefault(
+                    section.name, new_sections[section.name],
+                )
+                state.dirty_sections.discard(section.name)
+            except Exception as exc:
+                LOGGER.exception(
+                    "head_pipeline: capture failed for section=%s event=%s",
+                    section.name, event.value,
+                )
+                stale.add(section.name)
+                # 既存値があれば据え置き (stale-but-real)。無ければ欠損として
+                # 理由を記録する (capture_all と同じ fail-closed 規約)。
+                if new_sections.get(section.name) is None:
+                    new_sections.pop(section.name, None)
+                    capture_failures[section.name] = f"capture failed: {exc!r}"
+
+        new_snapshot = LineHeadSnapshot(
+            persona_id=state.snapshot.persona_id,
+            model_key=state.snapshot.model_key,
+            line_role=state.snapshot.line_role,
+            captured_at=time.time(),
+            snapshot_version=state.snapshot.snapshot_version + 1,
+            sections=new_sections,
+            capture_failures=capture_failures,
+        )
+        state.snapshot = new_snapshot
+        # 触った Section だけ更新する (他は据え置き) — この経路は一部の
+        # Section の最新化であって、全体を撮り直したわけではない。
+        state.stale_sections = (state.stale_sections - fresh) | stale
+        return new_snapshot, dict(state.last_notified_sections)
 
     # ---- イベント dispatch ----
 
@@ -591,6 +673,9 @@ class HeadPipeline:
         こと。「メモリ上の組を進めた後・DB の他の行を進める前」に別スレッドが
         DB から組を読み込むと進める前の B がメモリに入るが、
         :meth:`load_from_store` も同じ通知ロックの内側で読み込むので割り込めない。
+        同じ隙間に「まだどこにも記録の無いモデルの組の初回撮影」が入ると、撮って
+        保存したばかりの行の B が DB 側の前進で撮影より古い値に上書きされうるが、
+        :meth:`capture_all` も同じ通知ロックの内側で撮るので、これも割り込めない。
         DB 側の保存失敗は例外にしない (C8 — B の保存失敗は止めない)。
         """
         if not sections:
@@ -766,12 +851,18 @@ class HeadPipeline:
         同じ変化を再配送する。B を進める処理 (integration の差分検知 / notify の
         内容型通知) は全部通知ロックの内側なので、読み込みも同じロックに入れれば
         割り込めない。通知ロックは RLock なので、通知ロックを握った同じスレッド
-        からの呼び出しは再入で通る。pipeline のロック (``self._lock``) や保存
-        ロックを握ったまま呼んではならない (``__init__`` のロック順序)。
+        からの呼び出しは再入で通る (:meth:`capture_all` はメモリに組が無いとき、
+        通知ロックを握ったままここを呼ぶ — ケース 5)。pipeline のロック
+        (``self._lock``) や保存ロックを握ったまま呼んではならない (``__init__`` の
+        ロック順序)。
 
         通知ロックの内側で、同じ (persona, model) の state が既にメモリにあれば
         (並行する ensure_snapshot / capture_all が先に作った) 上書きせずに True を
         返す — 上書きすると、その間に進んだ B が DB の値で巻き戻りうる。
+
+        読み込んだ組の ``stale_sections`` は全 Section (復元は撮影ではない)。
+        capture_all から呼ばれた回は、直後の撮影が新しい state で置き換えるので
+        (撮り直せなかった Section だけが stale に残る) そのまま使われることは無い。
         """
         if self._store is None:
             return False
@@ -785,9 +876,11 @@ class HeadPipeline:
                 return False
             with self._lock:
                 if key in self._states:
-                    # store.load の間に capture_all (通知ロックを取らない) が
-                    # 先に組を作った — そちらを残す (上書きすると、その組で既に
-                    # 進んだ B を DB の古い値で巻き戻しうる)。
+                    # 組を作る経路 (capture_all / この読み込み) はどちらも通知
+                    # ロックの内側なので、store.load の間に別スレッドが組を作る
+                    # ことは今は無い。念のための防御として残す — もし先に組が
+                    # あれば、そちらを残す (上書きすると、その組で既に進んだ B を
+                    # DB の古い値で巻き戻しうる)。
                     return True
                 self._states[key] = _LineState(
                     snapshot=stored.snapshot,
@@ -873,9 +966,14 @@ class HeadPipeline:
         このロックの内側で行う。後から来た処理は前の処理が B を進め終えてから
         比べるので、同じ変化を二度積まない。:meth:`load_from_store` も DB からの
         読み込みをこのロックの内側で行う (B を進める途中の組を読み込まない)。
+        :meth:`capture_all` も撮影から保存までをこのロックの内側で行う (撮り直しと
+        B の前進を並べ、メモリに組が無いときは DB から読み込んでから撮る —
+        docs/issues/head_diff_notification_duplicate_delivery.md ケース 5)。
 
         ロック順序 (``__init__`` のコメント): 配送ロック → 通知ロック → 保存ロック
-        → ``self._lock``。**このロックを握ったまま台帳の配送
+        → ``self._lock``。**pipeline のロック (``self._lock``) や保存ロックを
+        握ったまま capture_all / load_from_store を呼んではならない** (内側の
+        ロックから外側のこのロックを取る逆順になる)。**このロックを握ったまま台帳の配送
         (``flush_pending_for_persona`` / ``mark_applied(deliver=True)``) に
         入ってはならない** — 配送ロックを握った移動の配送ハンドラが、別ペルソナの
         検知でこのロックを取りに来るので、逆順で取るとデッドロックする。

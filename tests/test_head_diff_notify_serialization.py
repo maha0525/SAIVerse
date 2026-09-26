@@ -33,6 +33,19 @@ i. 一回の配送で複数の Section を進めても、DB にだけある組�
    呼び出し一回、メモリ上の組の保存はモデルごとに一回 (Section 数に比例しない)。
 j. 全モデルの組がメモリにあるとき、DB にだけある組の前進は commit しない。
 
+同 issue ケース 5 (再起動後、DB から読み込まれる前の撮り直しが、未配送の変化の
+B を現在値で上書きして知らせを消す) の固定する仕様:
+
+k. 読み込み前に dispatch_event (Metabolism) が撮り直しても、DB に残っていた
+   未配送の変化は次の差分検知で届く。
+l. capture_for_event がメモリに組の無いまま capture_all へ落ちる経路も同じで、
+   落ちるときに pipeline のロック (self._lock) を握っていない。
+m. DB に行が本当に無いモデルは従来どおり B = 現在値で初期化し、初回に全内容を
+   「変わった」と知らせない。
+n. capture_all は撮影から保存までをペルソナの通知ロックの内側で行い、別スレッドが
+   通知ロックを握っている間 (B を進めている途中) は撮らずに待つ。
+o. 読み込みが例外を投げたら、B を初期化して DB を上書きせずに例外を返す。
+
 並行テストは StaticPool の in-memory SQLite だと二スレッドが一つの接続を共有して
 台帳の transaction が壊れるので、tmp_path のファイル SQLite を使う。本番の
 ~/.saiverse には触れない。
@@ -51,6 +64,7 @@ from sqlalchemy.orm import sessionmaker
 from database.models import Base, ExecutionOutboxItem, SessionHeadSnapshot
 from saiverse.execution_ledger import ExecutionLedger
 from sea.head_pipeline import (
+    EventType,
     HeadPipeline,
     HeadSectionRegistry,
     LineHeadInput,
@@ -889,3 +903,208 @@ def test_no_commit_when_every_model_row_is_in_memory(
     # メモリ上の組の保存 (save_last_notified) で両モデルの B は DB に入っている
     for model_key in (MODEL_A, MODEL_B):
         assert _stored_notified(session_factory, model_key)["desk"] == {"text": "新しい机"}
+
+
+# ---------------------------------------------------------------------------
+# ケース 5: 再起動後、読み込まれる前の撮り直しが未配送の変化を消さない
+# ---------------------------------------------------------------------------
+
+
+class _RefreshSection(_MutableSection):
+    """スペルの切り替えで撮り直される Section (refresh_on_events を持つ)。
+
+    ``on_capture`` を渡すと、capture のたびに呼ぶ (撮影中のロックの観測用)。
+    """
+
+    refresh_on_events = frozenset({EventType.SPELL_TOGGLED})
+
+    def __init__(self, name: str = "core_memory", text: str = "初期値"):
+        super().__init__(name, text)
+        self.on_capture = None
+
+    def capture(self, ctx):
+        if self.on_capture is not None:
+            self.on_capture()
+        return super().capture(ctx)
+
+
+def _assert_undelivered_change_arrives(
+    persona, manager, restart, session_factory, text: str,
+) -> None:
+    """再起動後の差分検知で、再起動前の未配送の変化が一回だけ届く。"""
+    assert _detect(persona, manager, restart, MODEL_A) is True
+    contents = [
+        json.loads(r.PAYLOAD_JSON)["content"] for r in _outbox_rows(session_factory)
+    ]
+    assert len(contents) == 1, contents
+    assert text in contents[0]
+    # 届けた後は B が進んでいるので、もう一度は積まない
+    assert _detect(persona, manager, restart, MODEL_A) is False
+    assert len(_outbox_rows(session_factory)) == 1
+
+
+def test_capture_before_load_keeps_the_undelivered_change(
+    section, persona, manager, session_factory,
+):
+    """k. 読み込み前の Metabolism の撮り直しが、未配送の変化の B を上書きしない。"""
+    _store, before, restart = _stored_pipelines(session_factory, section)
+    before.capture_all(_ctx(MODEL_A))  # DB の B = 初期値
+
+    # 再起動前に変化が起きたが、まだ届けていない (DB の B は古いまま)
+    section.live_text = "再起動前に起きた変化"
+
+    # 再起動後、ensure_snapshot (読み込み) より先に Metabolism の撮り直しが来る
+    assert not restart.has_snapshot(PERSONA_ID, MODEL_A)
+    restart.dispatch_event(_ctx(MODEL_A), EventType.METABOLISM)
+
+    # DB の B は撮り直しで上書きされず、古い値のまま (配送だけが進める)
+    assert _stored_notified(session_factory, MODEL_A)["core_memory"] == {"text": "初期値"}
+    # 撮り直しで A は今の値になっている
+    assert restart.get_snapshot(PERSONA_ID, MODEL_A).sections["core_memory"] == {
+        "text": "再起動前に起きた変化",
+    }
+    _assert_undelivered_change_arrives(
+        persona, manager, restart, session_factory, "再起動前に起きた変化",
+    )
+
+
+def test_capture_for_event_fallback_keeps_the_undelivered_change(
+    persona, manager, session_factory, monkeypatch,
+):
+    """l. capture_for_event が capture_all へ落ちる経路も B を保ち、self._lock を握らない。"""
+    section = _RefreshSection()
+    _store, before, restart = _stored_pipelines(session_factory, section)
+    before.capture_all(_ctx(MODEL_A))
+    section.live_text = "スペルを切り替える前の変化"
+
+    # capture_all に入った瞬間と、撮影中の pipeline のロックの持ち方を記録する
+    entry_lock_owned: list[bool] = []
+    capture_lock_owned: list[bool] = []
+    original_capture_all = restart.capture_all
+
+    def capture_all(ctx):
+        entry_lock_owned.append(restart._lock._is_owned())
+        return original_capture_all(ctx)
+
+    monkeypatch.setattr(restart, "capture_all", capture_all)
+    section.on_capture = lambda: capture_lock_owned.append(restart._lock._is_owned())
+
+    assert not restart.has_snapshot(PERSONA_ID, MODEL_A)
+    snapshot = restart.capture_for_event(_ctx(MODEL_A), EventType.SPELL_TOGGLED)
+    section.on_capture = None
+
+    assert snapshot is not None
+    assert entry_lock_owned == [False]
+    assert capture_lock_owned == [False]
+    assert _stored_notified(session_factory, MODEL_A)["core_memory"] == {"text": "初期値"}
+    _assert_undelivered_change_arrives(
+        persona, manager, restart, session_factory, "スペルを切り替える前の変化",
+    )
+
+
+def test_dispatch_spell_toggle_before_load_keeps_the_undelivered_change(
+    persona, manager, session_factory,
+):
+    """l. 本番の入口 (dispatch_event のスペルの切り替え) からも同じく届く。"""
+    section = _RefreshSection()
+    _store, before, restart = _stored_pipelines(session_factory, section)
+    before.capture_all(_ctx(MODEL_A))
+    section.live_text = "入口から来た撮り直し"
+
+    restart.dispatch_event(_ctx(MODEL_A), EventType.SPELL_TOGGLED)
+
+    assert _stored_notified(session_factory, MODEL_A)["core_memory"] == {"text": "初期値"}
+    _assert_undelivered_change_arrives(
+        persona, manager, restart, session_factory, "入口から来た撮り直し",
+    )
+
+
+def test_model_without_a_row_is_initialised_without_notifications(
+    section, persona, manager, session_factory,
+):
+    """m. DB に行が無いモデルは B = 現在値で初期化し、初回に全内容を知らせない。"""
+    _store, _before, restart = _stored_pipelines(session_factory, section)
+    section.live_text = "初めて撮る内容"
+
+    restart.dispatch_event(_ctx(MODEL_A), EventType.METABOLISM)
+
+    state = restart._states[(PERSONA_ID, MODEL_A)]
+    assert state.last_notified_sections["core_memory"] == {"text": "初めて撮る内容"}
+    assert _stored_notified(session_factory, MODEL_A)["core_memory"] == {
+        "text": "初めて撮る内容",
+    }
+    assert restart.get_snapshot(PERSONA_ID, MODEL_A).snapshot_version == 1
+    assert _detect(persona, manager, restart, MODEL_A) is False
+    assert _outbox_rows(session_factory) == []
+
+
+def test_capture_all_runs_inside_the_notify_lock(session_factory, monkeypatch):
+    """n. 撮影中と保存中、現在のスレッドがペルソナの通知ロックを握っている。"""
+    section = _RefreshSection()
+    store, _before, restart = _stored_pipelines(session_factory, section)
+
+    capture_owned: list[bool] = []
+    save_owned: list[bool] = []
+    section.on_capture = lambda: capture_owned.append(
+        restart.notify_lock_for(PERSONA_ID)._is_owned(),
+    )
+    original_save = store.save
+
+    def save(snapshot, last_notified_sections):
+        save_owned.append(restart.notify_lock_for(PERSONA_ID)._is_owned())
+        return original_save(snapshot, last_notified_sections)
+
+    monkeypatch.setattr(store, "save", save)
+
+    restart.capture_all(_ctx(MODEL_A))
+    assert capture_owned == [True]
+    assert save_owned == [True]
+    assert restart.notify_lock_for(PERSONA_ID)._is_owned() is False
+
+
+def test_capture_all_waits_while_b_is_being_advanced(session_factory, monkeypatch):
+    """n. 別スレッドが通知ロックを握っている間 (B を進めている途中)、撮影は待つ。"""
+    section = _RefreshSection()
+    _store, _before, restart = _stored_pipelines(session_factory, section)
+    captured: list[str] = []
+    section.on_capture = lambda: captured.append("capture")
+
+    held = restart.notify_lock_for(PERSONA_ID)
+    probe = _ContentionProbe(restart, monkeypatch)
+    results: dict = {}
+
+    with held:
+        capturer = _run_in_thread(
+            lambda: restart.capture_all(_ctx(MODEL_C)), results, "capture",
+        )
+        probe.wait_second(capturer)
+        assert probe.contended.is_set()
+        assert capturer.is_alive()
+        assert captured == []
+        assert not restart.has_snapshot(PERSONA_ID, MODEL_C)
+
+    capturer.join(WAIT_TIMEOUT)
+    assert not capturer.is_alive()
+    assert not isinstance(results.get("capture"), BaseException), results
+    assert captured == ["capture"]
+    assert restart.has_snapshot(PERSONA_ID, MODEL_C)
+
+
+def test_capture_all_does_not_overwrite_b_when_the_load_fails(
+    section, session_factory, monkeypatch,
+):
+    """o. 読み込みの例外は返し、DB の B を撮った値で上書きしない。"""
+    store, before, restart = _stored_pipelines(session_factory, section)
+    before.capture_all(_ctx(MODEL_A))
+    section.live_text = "読めなかった間の変化"
+
+    def broken_load(persona_id, model_key):
+        raise RuntimeError("db read failed")
+
+    monkeypatch.setattr(store, "load", broken_load)
+
+    with pytest.raises(RuntimeError):
+        restart.dispatch_event(_ctx(MODEL_A), EventType.METABOLISM)
+    assert not restart.has_snapshot(PERSONA_ID, MODEL_A)
+    assert _stored_notified(session_factory, MODEL_A)["core_memory"] == {"text": "初期値"}
+    assert restart.notify_lock_for(PERSONA_ID)._is_owned() is False
