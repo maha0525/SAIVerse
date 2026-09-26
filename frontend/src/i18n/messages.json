@@ -6911,6 +6911,50 @@
     "ja": "保存しました。SAIVerse を起動してから既にこのプロバイダで喋ったペルソナは、再起動するまで変更前の接続を使い続けます。通常用と軽量用の接続は別々に作られるため、同じペルソナの中で新旧が混ざることもあります。",
     "en": "Saved. Personas that have already used this provider since SAIVerse started keep using the previous connection until restart. Standard and lightweight connections are created separately, so a persona may use a mix of old and new connections."
   },
+  "components.settings.ProviderManagementPanel.text028": {
+    "ja": " キー設定",
+    "en": " Set key"
+  },
+  "components.settings.ProviderManagementPanel.text029": {
+    "ja": "API キー",
+    "en": "API key"
+  },
+  "components.settings.ProviderManagementPanel.text030": {
+    "ja": "{p1} として保存",
+    "en": "Saved as {p1}"
+  },
+  "components.settings.ProviderManagementPanel.text031": {
+    "ja": " 取得方法",
+    "en": " How to get one"
+  },
+  "components.settings.ProviderManagementPanel.text032": {
+    "ja": "API キーの取得方法を見る",
+    "en": "How to get an API key"
+  },
+  "components.settings.ProviderManagementPanel.text033": {
+    "ja": "設定済み - 変更する場合のみ入力",
+    "en": "Already set - enter only to change"
+  },
+  "components.settings.ProviderManagementPanel.text034": {
+    "ja": "API キーを入力",
+    "en": "Enter API key"
+  },
+  "components.settings.ProviderManagementPanel.text035": {
+    "ja": "保存",
+    "en": "Save"
+  },
+  "components.settings.ProviderManagementPanel.text036": {
+    "ja": "API キーを保存しました。このキーを使うペルソナすべてに、次の返答から効きます (再起動は要りません)。書いている途中の返答は、書き始めたときのキーのまま最後まで書きます。",
+    "en": "API key saved. Every persona that uses this key picks it up from its next reply (no restart needed). A reply already being written finishes with the key it started with."
+  },
+  "components.settings.ProviderManagementPanel.text037": {
+    "ja": "API キーの保存に失敗しました: {p1}",
+    "en": "Failed to save the API key: {p1}"
+  },
+  "components.settings.ProviderManagementPanel.text038": {
+    "ja": "保存すると、このキーを使うペルソナすべてに次の返答から効きます。再起動は要りません。",
+    "en": "Once saved, every persona that uses this key picks it up from its next reply. No restart needed."
+  },
   "components.settings.WorldEditor.text001": {
     "ja": "不明なエラー",
     "en": "Unknown error"
