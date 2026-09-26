@@ -186,6 +186,7 @@ sea/
 ├── langgraph_runner.py   # LangGraph 統合
 ├── playbook_models.py    # ノード定義スキーマ（LLMNodeDef / ToolNodeDef 等）
 ├── pulse_controller.py   # PulseController（優先度制御・割り込み）
+├── reply_stop_exit.py    # 返事が途中で止まった回の後始末（最後に保存した発言へ印と中断の通告を一回だけ。reply_stop_exit intent）
 ├── pulse_context.py      # PulseContext（Aspect / line 階層）
 ├── mode_spell_permissions.py # モード別 Spell 許可
 ├── work_session.py       # 予算付き作業セッションランナー（自律行動 v2 §4.3）。**休眠** — v3 §8 で退役予定で、

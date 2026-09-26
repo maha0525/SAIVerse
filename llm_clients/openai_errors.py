@@ -87,6 +87,6 @@ def convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
         return SafetyFilterError(
             f"OpenAI {context} failed: content policy violation",
             err,
-            user_message="入力内容がOpenAIのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
+            user_message="入力内容がOpenAIのコンテンツポリシーによりブロックされました。",
         )
     return LLMError(f"OpenAI {context} failed: {err}", err)

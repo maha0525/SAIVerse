@@ -23,11 +23,18 @@
 1. サーバー切断の経路にも、停止経路と同じ通告 (`by_user=False` の文面「(ここで発言が中断されました)」、host 名義、在室者 + 本人の `heard_by`) を書く。書き込みは `_settle_interrupted_utterance` から共通の関数へ括り出し、両経路で同じ一枚を使う (同じ判断の書き分けを作らない)。
 2. 画面向け通知の文面から「ℹ️ 」を外す (アイコンを描く権威は画面側)。
 
+> **2026-09-25 追記 (現在のコードとの対応)**: 2026-09-25 の作り直しで後始末は
+> `sea/reply_stop_exit.py` の `settle_reply_stop` に一本化した (保存は
+> `_save_cut_utterance` / `_save_draft_on_beat_death`)。この文書に出てくる
+> `_settle_interrupted_utterance` は現存しない。サーバー切断の回は、保存した側が
+> 「この後で話が止まった」を記録に書き足し、返事の後始末が通告を置く
+> (docs/intent/reply_stop_exit.md)。
+
 ## 関連
 
 - [continue_instruction_is_dead_code.md](continue_instruction_is_dead_code.md) (この調査で見つかった隣の欠陥 — 続きの生成の指示文は LLM に届いていない。撤去方向、別件)
 - `docs/issues/archive/user_utterance_path_failure_inventory.md` (続きの生成の親設計)
-- `docs/issues/archive/stop_path_and_lost_utterances` 系: 通告の文面と配り方の裁定は 2026-08-26/27 (`_settle_interrupted_utterance` docstring)
+- `docs/issues/archive/stop_path_and_lost_utterances` 系: 通告の文面と配り方の裁定は 2026-08-26/27 (`_settle_interrupted_utterance` docstring — 2026-09-25 以降は `sea/reply_stop_exit.py` の `settle_reply_stop` と `sea/runtime_llm.py` の `_record_interruption_notice` の docstring)
 
 ## 経緯
 

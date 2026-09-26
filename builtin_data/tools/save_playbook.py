@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 from pydantic import ValidationError
 
+from saiverse.i18n_utils import split_i18n_columns
 from sea.playbook_models import PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 
 from sqlalchemy import create_engine
@@ -18,7 +19,7 @@ from tools.core import ToolSchema
 
 def save_playbook(
     name: str,
-    description: str,
+    description: Union[str, Dict[str, str]],
     scope: str = "public",
     created_by_persona_id: Optional[str] = None,
     building_id: Optional[str] = None,
@@ -64,12 +65,35 @@ def save_playbook(
         raise ValueError(f"playbook validation failed: {exc}")
 
     normalized_nodes = parsed.dict()
+
+    # description / display_name may be a plain string or a language dict
+    # ({ja, en}), but the DB columns are strings: store Japanese in the base
+    # column and English in the ``_en`` column (same contract as
+    # scripts/import_all_playbooks.py). Explicit params win over the JSON;
+    # English falls back to the JSON when the param carries none.
+    json_desc, json_desc_en = split_i18n_columns(
+        normalized_nodes.get("description"), alt_en=normalized_nodes.get("description_en"),
+    )
+    description, description_en = split_i18n_columns(description)
+    description_en = description_en or json_desc_en
+
+    # Determine display_name: explicit param > JSON value > None
+    json_disp, json_disp_en = split_i18n_columns(
+        normalized_nodes.get("display_name"), alt_en=normalized_nodes.get("display_name_en"),
+    )
+    if display_name is None:
+        display_name, display_name_en = json_disp, json_disp_en
+    else:
+        display_name, display_name_en = split_i18n_columns(display_name)
+        display_name_en = display_name_en or json_disp_en
+
     schema_payload = {
         "name": normalized_nodes.get("name", name),
-        "description": normalized_nodes.get("description", description),
+        "description": json_desc or description or "",
         "input_schema": normalized_nodes.get("input_schema", []),
         "start_node": normalized_nodes.get("start_node"),
     }
+    description = description or ""
     nodes_json = json.dumps(normalized_nodes, ensure_ascii=False)
     schema_json = json.dumps(schema_payload, ensure_ascii=False)
 
@@ -81,10 +105,6 @@ def save_playbook(
     if user_selectable is None:
         user_selectable = normalized_nodes.get("user_selectable", False)
 
-    # Determine display_name: explicit param > JSON value > None
-    if display_name is None:
-        display_name = normalized_nodes.get("display_name")
-
     db_path = default_db_path()
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
@@ -94,7 +114,9 @@ def save_playbook(
         existing = session.query(Playbook).filter(Playbook.name == name).first()
         if existing:
             existing.description = description
+            existing.description_en = description_en
             existing.display_name = display_name
+            existing.display_name_en = display_name_en
             existing.scope = scope
             existing.created_by_persona_id = owner
             existing.building_id = building_id
@@ -109,7 +131,9 @@ def save_playbook(
             record = Playbook(
                 name=name,
                 description=description,
+                description_en=description_en,
                 display_name=display_name,
+                display_name_en=display_name_en,
                 scope=scope,
                 created_by_persona_id=owner,
                 building_id=building_id,

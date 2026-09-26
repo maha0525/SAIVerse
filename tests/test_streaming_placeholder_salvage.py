@@ -1,135 +1,504 @@
-"""下書き行 (placeholder) の孤児化防止 — Beat がどう死んでも発言を消さない。
+"""返事が途中で止まった回 — 発言を消さず、最後の発言に「続きの生成」を出す。
 
-docs/issues/orphaned_streaming_placeholder_cleanup.md 候補 1 (2026-08-27)。
+設計: docs/intent/reply_stop_exit.md (2026-09-25 再設計)。
 
-下書き行は本文の器で、確定して初めて中身が入る。Beat が例外で死ぬと確定が走らず、
-ペルソナが実際に喋った内容がどこにも残らない (2026-05-19〜08-26 の 3 ヶ月で 32 件)。
-ここで固定する不変条件は一つ — **lg_llm_node の node() は、未確定の下書き行を
-残して終わらない**。ユーザーの停止・LLM エラー・タスク破棄のどれで死んでも、
-出口の後始末 (`_settle_placeholder_on_beat_death`) が下書き行を確定させる。
+二つの役割を分けて固定する。
+
+1. **止まりかけた生成は保存だけ** (lg_llm_node の出口 `_save_draft_on_beat_death`
+   ほか): 下書き行は本文の器で、確定して初めて中身が入る。Beat が例外で死ぬと
+   確定が走らず、喋った内容がどこにも残らない (2026-05-19〜08-26 の 3 ヶ月で
+   32 件)。**lg_llm_node の node() は、未確定の下書き行を残して終わらない**。
+   ただし「言い切っていない」印と中断の通告はここでは置かない。
+2. **後始末は返事の実行につき一回** (sea/reply_stop_exit.py の
+   ``settle_reply_stop`` — 本物は run_meta_user が呼ぶ): 「このペルソナが最後に
+   保存した発言」の記録を見て、その発言に印を付け、その部屋に通告を一枚置き、
+   エラー札 / 知らせに案内の材料を載せる。
+
+node() を直接回すテストは、返事の一番外側の代わりに ``_settle_reply`` を呼んで
+後始末まで通す。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from llm_clients.exceptions import LLMError
+from llm_clients.exceptions import LLMError, ModelUnavailableError
 from sea import runtime_llm
 from sea.cancellation import ExecutionCancelledException
-from sea.runtime_llm import INTERRUPTED_METADATA_KEY, _settle_interrupted_utterance
+from sea.reply_stop_exit import interruption_notice_text, settle_reply_stop
+from sea.runtime_emitters import (
+    SAVED_FORM_COMPLETE,
+    SAVED_FORM_CUT,
+    SAVED_FORM_SPELL_RESULTS,
+    SAVED_FORM_SPELL_UNFINISHED,
+    forget_saved_utterances,
+    last_saved_utterance,
+    SpeakFinalizeResult,
+    notify_speak_persisted,
+)
+from sea.runtime_llm import INTERRUPTED_METADATA_KEY, _save_cut_utterance
+
+
+@pytest.fixture(autouse=True)
+def _fresh_saved_utterance_record():
+    """「最後に保存した発言」の記録はプロセス内で共有 — テストごとに空にする。"""
+    forget_saved_utterances()
+    yield
+    forget_saved_utterances()
+
+
+def _marking_history_manager() -> MagicMock:
+    """建物の行の印付けが通る history_manager (更新後の行を dict で返す)。"""
+    hm = MagicMock()
+
+    def _update(building_id, message_id, *, content=None, metadata=None):
+        return {"message_id": message_id, "metadata": dict(metadata or {})}
+
+    hm.update_building_message.side_effect = _update
+
+    # 通告の書き込みは DB 採番の message_id つきの行を返す (本物の
+    # add_to_building_only は失敗しても id 無しの dict を返すので、置けたかの
+    # 判定は id の有無で行われる)。
+    _notice_seq = {"n": 0}
+
+    def _add(building_id, msg, *, heard_by=None):
+        _notice_seq["n"] += 1
+        return {**msg, "message_id": f"{building_id}:notice{_notice_seq['n']}"}
+
+    hm.add_to_building_only.side_effect = _add
+    return hm
+
+
+def _settle_reply(runtime, persona, *, events=None, exc=None, token=None,
+                  reply_building_id="b1", started_at=0.0):
+    """返事の一番外側 (run_meta_user) の代わりに、後始末を一回だけ通す。"""
+    return settle_reply_stop(
+        runtime, persona,
+        reply_building_id=reply_building_id,
+        started_at=started_at,
+        exc=exc,
+        cancellation_token=token,
+        event_callback=(events.append if events is not None else None),
+    )
+
+
+def _notices(persona) -> list:
+    """建物の記録へ置かれた中断の通告 (host 名義の行) の (部屋, 本文) の列。"""
+    return [
+        (c.args[0], c.args[1]["content"])
+        for c in persona.history_manager.add_to_building_only.call_args_list
+        if isinstance(c.args[1], dict) and c.args[1].get("role") == "host"
+    ]
+
+
+def _marked(persona) -> list:
+    """「言い切っていない」印を付けた (部屋, 発言 id) の列。"""
+    return [
+        (c.args[0], c.args[1])
+        for c in persona.history_manager.update_building_message.call_args_list
+        if (c.kwargs.get("metadata") or {}).get(INTERRUPTED_METADATA_KEY)
+    ]
 
 
 # ---------------------------------------------------------------------------
-# _settle_interrupted_utterance 単体 — 原因 (by_user) で変わるのは通告の文面だけ
+# 通告の本文 — 4 分類 × 原因 2 通り (2026-09-25 まはー裁定の文面)
 # ---------------------------------------------------------------------------
 
-def _settle(occupants=("1", "p1"), **overrides):
+@pytest.mark.parametrize("form,body", [
+    (SAVED_FORM_CUT, "ここで発言が中断されました"),
+    (SAVED_FORM_SPELL_UNFINISHED,
+     "発言の後に唱えたスペルは、実行が終わる前に中断されました。"
+     "結果は届いておらず、どこまで実行されたかは不明です"),
+    (SAVED_FORM_SPELL_RESULTS,
+     "スペルの結果を受け取った後、続きの発言の前に中断されました"),
+    (SAVED_FORM_COMPLETE, "この発言の後、続きが始まる前に中断されました"),
+])
+def test_the_notice_text_for_each_form_and_cause(form, body):
+    assert interruption_notice_text(form, by_user=False) == f"({body})"
+    assert interruption_notice_text(form, by_user=True) == f"(ユーザーの操作により、{body})"
+
+
+def test_the_existing_user_stop_wording_is_kept():
+    """① のユーザー停止は既存の文字列そのまま (記憶に既に入っている文面と揃える)。"""
+    assert interruption_notice_text(SAVED_FORM_CUT, by_user=True) == (
+        "(ユーザーの操作により、ここで発言が中断されました)"
+    )
+
+
+def test_an_unknown_form_falls_back_to_the_general_notice():
+    """形が分からないときは、証明できる一般の受け皿 (④) に倒す。"""
+    assert interruption_notice_text(None, by_user=False) == (
+        "(この発言の後、続きが始まる前に中断されました)"
+    )
+
+
+def test_the_unfinished_spell_notice_never_claims_it_did_not_run():
+    """② は「実行されていない」と断定しない — 副作用がどこまで効いたかは機構にも
+    分からず、断定するとペルソナが唱え直して二重に効く。"""
+    text = interruption_notice_text(SAVED_FORM_SPELL_UNFINISHED, by_user=False)
+    assert "不明" in text
+    assert "実行されていません" not in text
+    assert "実行されませんでした" not in text
+
+
+# ---------------------------------------------------------------------------
+# _save_cut_utterance 単体 — 止まった生成の保存は、保存だけ
+# ---------------------------------------------------------------------------
+
+def _save(occupants=("1", "p1"), **overrides):
     runtime = MagicMock()
-    # 通告の heard_by は在室者から組む。MagicMock のままだと list() で落ちて
-    # 通告ごと握り潰される (それはそれでテストが赤くなるが、原因が読めない)。
     runtime.manager.occupants = {"b1": list(occupants)}
-    persona = SimpleNamespace(persona_id="p1", history_manager=MagicMock())
+    runtime._emit_speak_finalize.return_value = SpeakFinalizeResult(
+        status="saved",
+        building_msg={"message_id": "m1", "content": overrides.get("text", "言いかけた本文")},
+    )
+    persona = SimpleNamespace(persona_id="p1", history_manager=_marking_history_manager())
     state = {}
     events: list = []
     params = dict(
         runtime=runtime,
         persona=persona,
         state=state,
-        node_def=SimpleNamespace(id="llm"),
         playbook=SimpleNamespace(name="pb"),
         event_callback=events.append,
         building_id="b1",
         msg_id="m1",
         sub_seq=0,
         text="言いかけた本文",
-        by_user=True,
     )
     params.update(overrides)
-    seq = _settle_interrupted_utterance(**params)
+    seq = _save_cut_utterance(**params)
     return runtime, persona, state, events, seq
 
 
-def _notice_content(persona) -> str:
-    call = persona.history_manager.add_to_building_only.call_args
-    assert call is not None, "中断の通告が建物の記録に書かれていない"
-    building_id, message = call.args
-    assert building_id == "b1"
-    assert message["role"] == "host"
-    # heard_by 無しの通告は、取り込み (get_building_messages) が永遠にスキップ
-    # するので誰の記憶にも届かない (2026-08-27 実機検証で発覚)。在室者が必須。
-    assert call.kwargs.get("heard_by"), "通告に heard_by (在室者) が渡っていない"
-    return message["content"]
-
-
-def test_a_user_stop_writes_the_user_notice():
-    runtime, persona, state, events, _ = _settle(by_user=True)
-    assert "ユーザーの操作により" in _notice_content(persona)
+def test_saving_a_cut_utterance_places_no_mark_and_no_notice():
+    """保存は保存だけ — 建物の行の印と通告は、返事の後始末が一回だけ置く。"""
+    runtime, persona, state, events, seq = _save()
+    runtime._emit_speak_finalize.assert_called_once()
+    call = runtime._emit_speak_finalize.call_args
+    assert call.args[3] == "言いかけた本文"
+    assert call.kwargs["extra_metadata"] is None
+    assert seq == 1
+    # 通告・画面への印は置かない
+    persona.history_manager.add_to_building_only.assert_not_called()
+    assert not [e for e in events if e.get("interrupted")]
+    # 記憶には途中で切れた本文として、印つきで書く
+    runtime._store_memory.assert_called_once()
+    assert runtime._store_memory.call_args.kwargs["metadata"] == {
+        INTERRUPTED_METADATA_KEY: True,
+    }
+    assert state["_beat_memorized"] is True
     assert state[INTERRUPTED_METADATA_KEY] is True
 
 
-def test_a_beat_error_writes_a_notice_without_naming_a_cause():
-    """非ユーザー起点の中断 — 通告は原因を書かない一文 (「エラー」と括ると
-    schedule/auto の割り込みの回に嘘になる。2026-08-27 まはー委任で採用)。"""
-    runtime, persona, state, events, _ = _settle(by_user=False)
-    notice = _notice_content(persona)
-    assert notice == "(ここで発言が中断されました)"
-    assert "ユーザーの操作" not in notice
-    # 確定・印・記憶は原因によらず揃う
+def test_saving_records_the_form_and_that_the_talk_stopped():
+    """保存できた発言に、形と「この後で話が止まった」を記録へ書き足す。"""
+    _save()
+    record = last_saved_utterance("p1")
+    assert record is not None
+    assert (record.message_id, record.building_id) == ("m1", "b1")
+    assert record.form == SAVED_FORM_CUT
+    assert record.stopped is True
+
+
+def test_a_complete_utterance_is_memorized_without_the_cut_mark():
+    """言い切ってから止まった本文は、記憶に「言い切っていない」印を付けない。"""
+    runtime, _, state, _, _ = _save(form=SAVED_FORM_COMPLETE)
+    assert runtime._store_memory.call_args.kwargs["metadata"] is None
+    assert INTERRUPTED_METADATA_KEY not in state
+    assert last_saved_utterance("p1").form == SAVED_FORM_COMPLETE
+
+
+def test_an_empty_memory_text_skips_the_memory_write():
+    """周の頭で記憶に書いた本文は重ねない (memory_text="")。"""
+    runtime, _, _, _, _ = _save(form=SAVED_FORM_SPELL_UNFINISHED, memory_text="")
     runtime._emit_speak_finalize.assert_called_once()
-    runtime._store_memory.assert_called_once()
-    assert [e for e in events if e.get("interrupted")]
+    runtime._store_memory.assert_not_called()
 
 
-def test_an_empty_body_settles_quietly():
-    """一言も出ないうちに死んだ回は、空文字で確定するだけで何も語らない。"""
-    runtime, persona, state, events, _ = _settle(text="", by_user=False)
+def test_an_empty_body_saves_quietly():
+    """一言も出ないうちに死んだ回は、空文字で確定するだけで何も記録しない。"""
+    runtime, persona, state, events, _ = _save(text="")
     runtime._emit_speak_finalize.assert_called_once()
     assert runtime._emit_speak_finalize.call_args.args[3] == ""
     runtime._store_memory.assert_not_called()
-    persona.history_manager.add_to_building_only.assert_not_called()
     assert events == []
     assert INTERRUPTED_METADATA_KEY not in state
+    assert "_beat_memorized" not in state
+    assert last_saved_utterance("p1") is None
+
+
+def test_a_failed_save_records_nothing():
+    """保存に失敗した行は、最後の発言として記録しない (見えない行に印を付けない)。"""
+    runtime = MagicMock()
+    runtime._emit_speak_finalize.return_value = SpeakFinalizeResult(
+        status="failed", error="db down",
+    )
+    persona = SimpleNamespace(persona_id="p1", history_manager=_marking_history_manager())
+    _save_cut_utterance(
+        runtime=runtime, persona=persona, state={},
+        playbook=SimpleNamespace(name="pb"), event_callback=None,
+        building_id="b1", msg_id="m1", sub_seq=0, text="言いかけ",
+    )
+    assert last_saved_utterance("p1") is None
+
+
+# ---------------------------------------------------------------------------
+# settle_reply_stop 単体 — 返事につき一回、最後の発言に印と通告を一つずつ
+# ---------------------------------------------------------------------------
+
+def _reply_world(occupants=None, building_names=None):
+    runtime = MagicMock()
+    runtime.manager.occupants = occupants or {"b1": ["1"], "b2": ["2"]}
+    runtime.manager.building_map = {
+        bid: SimpleNamespace(name=name)
+        for bid, name in (building_names or {"b1": "居間", "b2": "書斎"}).items()
+    }
+    persona = SimpleNamespace(persona_id="p1", history_manager=_marking_history_manager())
+    return runtime, persona
+
+
+def _saved(persona, message_id, building_id="b1", content="発言"):
+    notify_speak_persisted(
+        None, {"message_id": message_id, "content": content}, persona, "pl",
+        building_id=building_id,
+    )
+
+
+def test_an_error_marks_the_last_saved_utterance_and_carries_the_guidance():
+    runtime, persona = _reply_world()
+    _saved(persona, "m1")
+    _saved(persona, "m2")
+    exc = LLMError("boom")
+
+    record = _settle_reply(runtime, persona, exc=exc)
+
+    assert record.message_id == "m2"
+    assert _marked(persona) == [("b1", "m2")]
+    assert _notices(persona) == [("b1", "(この発言の後、続きが始まる前に中断されました)")]
+    event = exc.to_dict()
+    assert event["interrupted_message_id"] == "m2"
+    # 返事の部屋と同じ部屋なので、部屋の案内は載らない
+    assert "interrupted_building_id" not in event
+    assert "interrupted_building_name" not in event
+
+
+def test_an_utterance_in_another_room_carries_the_room_guidance():
+    """スペルで移った先の部屋の発言で止まった回 — 部屋の id と表示名を添える。"""
+    runtime, persona = _reply_world()
+    _saved(persona, "m1", building_id="b1")
+    _saved(persona, "m2", building_id="b2")
+    exc = LLMError("boom")
+
+    _settle_reply(runtime, persona, exc=exc, reply_building_id="b1")
+
+    assert _marked(persona) == [("b2", "m2")]
+    assert _notices(persona)[0][0] == "b2"
+    event = exc.to_dict()
+    assert event["interrupted_message_id"] == "m2"
+    assert event["interrupted_building_id"] == "b2"
+    assert event["interrupted_building_name"] == "書斎"
 
 
 def test_the_notice_reaches_every_occupant_including_the_speaker():
-    """通告の heard_by は在室者全員。在室者リストに発話者本人が欠けていても
-    補う (emit_speak_start と同じ規律)。"""
-    _, persona, _, _, _ = _settle()
+    """通告の heard_by は在室者全員。在室者リストに発話者本人が欠けていても補う。"""
+    runtime, persona = _reply_world(occupants={"b1": ["1"]})
+    _saved(persona, "m1")
+    _settle_reply(runtime, persona, exc=LLMError("boom"))
     call = persona.history_manager.add_to_building_only.call_args
     assert call.kwargs["heard_by"] == ["1", "p1"]
 
-    _, persona2, _, _, _ = _settle(occupants=("1",))
-    call2 = persona2.history_manager.add_to_building_only.call_args
-    assert call2.kwargs["heard_by"] == ["1", "p1"]
+
+def test_an_utterance_saved_before_the_reply_started_is_not_marked():
+    """時間窓 — 返事の実行の開始時刻より前に保存された発言 (別の実行の発言) には
+    印も通告も付けない。"""
+    runtime, persona = _reply_world()
+    _saved(persona, "old")
+    started = time.monotonic() + 1.0
+    exc = LLMError("boom")
+
+    assert _settle_reply(runtime, persona, exc=exc, started_at=started) is None
+    assert _marked(persona) == []
+    assert _notices(persona) == []
+    assert "interrupted_message_id" not in exc.to_dict()
 
 
-def test_a_failing_ui_event_does_not_stop_memory_and_notice():
-    """印の配達に失敗しても、記憶と通告の書き込みは進む。"""
-
-    def _raiser(event):
-        raise RuntimeError("ui gone")
-
-    runtime, persona, state, events, _ = _settle(event_callback=_raiser)
-    runtime._store_memory.assert_called_once()
-    persona.history_manager.add_to_building_only.assert_called_once()
+def test_nothing_saved_in_the_reply_means_no_mark_and_no_notice():
+    """一文字も生まれていない回は、印も通告も置かない (エラー札は「再送」のまま)。"""
+    runtime, persona = _reply_world()
+    exc = LLMError("boom")
+    assert _settle_reply(runtime, persona, exc=exc) is None
+    assert _notices(persona) == []
+    assert "interrupted_message_id" not in exc.to_dict()
 
 
-def test_the_settle_marks_the_beat_as_memorized_on_success():
-    """記憶へ書けた回は「この Beat の本文はもう記憶に書かれた」の印が立つ。
-    Beat の出口の補填 (`_backfill_memory_on_beat_death`) がこの印を見て、
-    同じ本文を二重に書かない。"""
-    _, _, state, _, _ = _settle(by_user=False)
-    assert state["_beat_memorized"] is True
+def test_a_clean_finish_is_not_settled():
+    """例外なしで閉じ、話が止まった書き足しも無い回は、何もしない。"""
+    runtime, persona = _reply_world()
+    _saved(persona, "m1")
+    assert _settle_reply(runtime, persona, exc=None) is None
+    assert _marked(persona) == []
+    assert _notices(persona) == []
 
 
-def test_an_empty_body_leaves_no_memorized_mark():
-    """一言も出ないうちに死んだ回は記憶に書かないので、印も立たない。"""
-    _, _, state, _, _ = _settle(text="", by_user=False)
-    assert "_beat_memorized" not in state
+def test_the_settle_runs_once_per_utterance():
+    """印と通告は一回の中断に一つずつ — 二度呼ばれても二枚目を作らない。"""
+    runtime, persona = _reply_world()
+    _saved(persona, "m1")
+    assert _settle_reply(runtime, persona, exc=LLMError("a")) is not None
+    assert _settle_reply(runtime, persona, exc=LLMError("b")) is None
+    assert len(_notices(persona)) == 1
+    assert len(_marked(persona)) == 1
+
+
+def test_a_failed_mark_places_no_notice():
+    """印が付かなかった回は通告も置かない (印と通告は必ず対)。"""
+    runtime, persona = _reply_world()
+    persona.history_manager.update_building_message.side_effect = None
+    persona.history_manager.update_building_message.return_value = None
+    _saved(persona, "m1")
+    exc = LLMError("boom")
+
+    _settle_reply(runtime, persona, exc=exc)
+
+    assert _notices(persona) == []
+    assert "interrupted_message_id" not in exc.to_dict()
+
+
+def test_a_failed_notice_withdraws_the_mark_and_gives_no_guidance():
+    """通告が置けなかった回は印を取り下げ、案内も出さない (印と通告は必ず対)。
+
+    印だけの行は「続きの生成」が押せるのに、会話の末尾に通告が無く、続きの
+    プロンプトがモデル発話で終わって Gemini 系が必ず拒む — 対の片割れだけを
+    残すくらいなら、エラー札だけの世界 (既知の割り切り) に倒す。
+    """
+    runtime, persona = _reply_world()
+    persona.history_manager.add_to_building_only.side_effect = RuntimeError("db busy")
+    _saved(persona, "m1")
+    exc = LLMError("boom")
+
+    _settle_reply(runtime, persona, exc=exc)
+
+    # 印は一度付いた後、取り下げられている (最後の更新が False)
+    updates = [
+        (c.kwargs.get("metadata") or {}).get(INTERRUPTED_METADATA_KEY)
+        for c in persona.history_manager.update_building_message.call_args_list
+    ]
+    assert updates == [True, False]
+    # 案内は出ない — 押せないボタンを案内しない
+    assert "interrupted_message_id" not in exc.to_dict()
+
+
+def test_a_notice_write_that_returns_no_id_withdraws_the_mark_too():
+    """通告の書き込みが例外を出さずに失敗した回 (DB 挿入が再試行の後に失敗し、
+    add_to_building_only が id の無い dict を返した) も、置けなかった扱い。
+
+    例外が出なかったことは置けた証拠にならない — 置けたかは DB 採番の
+    message_id の有無で決める (builtin_data/tools/tell.py と同じ裁定)。
+    """
+    runtime, persona = _reply_world()
+    persona.history_manager.add_to_building_only.side_effect = (
+        lambda building_id, msg, *, heard_by=None: {**msg, "heard_by": heard_by}
+    )
+    _saved(persona, "m1")
+    exc = LLMError("boom")
+
+    assert _settle_reply(runtime, persona, exc=exc) is None
+
+    updates = [
+        (c.kwargs.get("metadata") or {}).get(INTERRUPTED_METADATA_KEY)
+        for c in persona.history_manager.update_building_message.call_args_list
+    ]
+    assert updates == [True, False]
+    assert "interrupted_message_id" not in exc.to_dict()
+
+
+def test_the_notice_write_reports_success_only_with_a_db_numbered_row():
+    """_record_interruption_notice 単体 — 戻り値は message_id の有無で決まる。"""
+    runtime, persona = _reply_world()
+    assert runtime_llm._record_interruption_notice(
+        runtime, persona, "b1", content="(通告)", msg_id="m1",
+    ) is True
+    persona.history_manager.add_to_building_only.side_effect = None
+    persona.history_manager.add_to_building_only.return_value = {"role": "host"}
+    assert runtime_llm._record_interruption_notice(
+        runtime, persona, "b1", content="(通告)", msg_id="m1",
+    ) is False
+    # 隔離中の部屋 (空の dict) も置けなかった扱い
+    persona.history_manager.add_to_building_only.return_value = {}
+    assert runtime_llm._record_interruption_notice(
+        runtime, persona, "b1", content="(通告)", msg_id="m1",
+    ) is False
+
+
+def test_a_user_stop_is_read_from_the_wrapped_cancellation():
+    """LLM ノードは取り消しを LLMError に包み直す — 連鎖をたどって原因を読む。"""
+    runtime, persona = _reply_world()
+    _saved(persona, "m1")
+    cancel = ExecutionCancelledException("stopped", interrupted_by="user")
+    wrapped = LLMError("LLM node failed", original_error=cancel)
+
+    _settle_reply(runtime, persona, exc=wrapped)
+
+    assert _notices(persona)[0][1].startswith("(ユーザーの操作により、")
+
+
+def test_a_schedule_preemption_read_from_the_chain_is_not_a_user_stop():
+    runtime, persona = _reply_world()
+    _saved(persona, "m1")
+    cancel = ExecutionCancelledException("preempted", interrupted_by="schedule")
+
+    _settle_reply(runtime, persona, exc=LLMError("x", original_error=cancel))
+
+    assert "ユーザーの操作" not in _notices(persona)[0][1]
+
+
+def test_a_quiet_stop_reads_the_cause_from_the_token():
+    """例外なしで閉じた停止 (スペル無効のペルソナ) は、取り消しの札から原因を読む。"""
+    runtime, persona = _reply_world()
+    _saved(persona, "m1")
+    runtime_llm.note_saved_utterance("p1", message_id="m1", form=SAVED_FORM_CUT, stopped=True)
+    token = SimpleNamespace(is_cancelled=lambda: True, interrupted_by="user_stop")
+
+    _settle_reply(runtime, persona, exc=None, token=token)
+
+    assert _notices(persona) == [
+        ("b1", "(ユーザーの操作により、ここで発言が中断されました)"),
+    ]
+
+
+def test_a_stream_cut_emits_the_info_notice_with_the_guidance():
+    """サーバーが切った回はエラー札ではなく情報の知らせのまま、案内の材料を載せる。"""
+    runtime, persona = _reply_world()
+    _saved(persona, "m1", building_id="b2")
+    runtime_llm.note_saved_utterance(
+        "p1", message_id="m1", form=SAVED_FORM_CUT, stopped=True,
+        detail={"stream_error": {"code": 500, "message": "internal error"}},
+    )
+    events: list = []
+
+    _settle_reply(runtime, persona, events=events, exc=None, reply_building_id="b1")
+
+    infos = [e for e in events if e.get("type") == "info"]
+    assert len(infos) == 1
+    assert infos[0]["content"].startswith("メッセージの生成が途中で終了しました。")
+    assert "ℹ️" not in infos[0]["content"]
+    assert infos[0]["interrupted_message_id"] == "m1"
+    assert infos[0]["interrupted_building_id"] == "b2"
+    assert infos[0]["interrupted_building_name"] == "書斎"
+    assert _notices(persona) == [("b2", "(ここで発言が中断されました)")]
+
+
+def test_the_error_event_carries_no_guidance_fields_by_default():
+    event = LLMError("boom").to_dict()
+    for key in ("interrupted_message_id", "interrupted_building_id",
+                "interrupted_building_name"):
+        assert key not in event
 
 
 # ---------------------------------------------------------------------------
@@ -206,19 +575,58 @@ def _node_def():
     )
 
 
-def _build_node(monkeypatch, *, client, spell_loop, node_def=None, persona_id=None):
+def _saving_finalize(runtime):
+    """確定の結果を、渡された行 id と本文で返す (実物の SpeakFinalizeResult の形)。
+
+    テストが ``return_value`` に結果を置いた回はそれを返す (保存失敗の再現など)。
+    """
+    def _finalize(persona, building_id, message_id, text, **kwargs):
+        configured = runtime._emit_speak_finalize.return_value
+        if isinstance(configured, SpeakFinalizeResult):
+            return configured
+        return SpeakFinalizeResult(
+            status="saved",
+            building_msg={"message_id": message_id, "content": text},
+        )
+    return _finalize
+
+
+def _recording_emit_say(runtime):
+    """直接の建物書き込み (_emit_say) の偽物。実物と同じく保存完了の共通の口を通す
+    — 通さないと「最後に保存した発言」の記録が書かれない。テストが
+    ``return_value`` に行を置いた回はそれを返す (採番の無い行の再現など)。"""
+    counter = {"n": 0}
+
+    def _emit_say(persona, building_id, text, pulse_id=None, metadata=None,
+                  event_callback=None, occupants_snapshot=None):
+        counter["n"] += 1
+        configured = runtime._emit_say.return_value
+        if isinstance(configured, dict):
+            bmsg = dict(configured)
+        else:
+            bmsg = {"message_id": f"say-{counter['n']}", "content": text}
+        notify_speak_persisted(
+            event_callback, bmsg, persona, pulse_id, building_id=building_id,
+        )
+        return bmsg
+    return _emit_say
+
+
+def _build_node(monkeypatch, *, client, spell_loop, node_def=None, persona_id="p1"):
     runtime = MagicMock()
     runtime.manager.occupants = {"b1": ["1"]}
+    runtime.manager.building_map = {
+        "b1": SimpleNamespace(name="居間"), "b2": SimpleNamespace(name="書斎"),
+    }
     runtime._effective_building_id.return_value = "b1"
     runtime._emit_speak_start.return_value = "msg-1"
     # 確定は三値の結果を返す (sea/runtime_emitters.py の SpeakFinalizeResult)。
     # 素の MagicMock を返すと status が "saved" と一致せず、呼び出し元が
     # 「確定できなかった」側 (= salvage 続行) に倒れてテストの前提が崩れる。
-    from sea.runtime_emitters import SpeakFinalizeResult
-    runtime._emit_speak_finalize.return_value = SpeakFinalizeResult(
-        status="saved",
-        building_msg={"message_id": "msg-1", "content": "こんにちは。"},
-    )
+    # 渡された行 id と本文をそのまま返す — 「最後に保存した発言」の記録が
+    # 実際に確定した行を指すように。
+    runtime._emit_speak_finalize.side_effect = _saving_finalize(runtime)
+    runtime._emit_say.side_effect = _recording_emit_say(runtime)
     runtime._default_temperature.return_value = 0.7
     runtime._get_cache_kwargs.return_value = {}
     runtime._store_memory.return_value = "mem-1"
@@ -234,12 +642,11 @@ def _build_node(monkeypatch, *, client, spell_loop, node_def=None, persona_id=No
     monkeypatch.setattr(runtime_llm, "_finalize_beat", lambda *a, **k: None)
     monkeypatch.setattr(runtime_llm, "_run_spell_loop", spell_loop)
 
-    # persona_id=None で node_with_persona_context の wrap を素通しし、
-    # persona_context 依存なしで node 本体だけを走らせる
-    # (tests/test_spell_auto_mode_w10.py と同じ手)。通告の heard_by に
-    # 発話者本人が載ることまで見たい回だけ persona_id を渡す。
+    # 「最後に保存した発言」の記録はペルソナ単位なので、既定で persona_id を
+    # 持たせる (返事の後始末まで通すため)。
     persona = SimpleNamespace(
-        persona_id=persona_id, persona_name="p", history_manager=MagicMock(),
+        persona_id=persona_id, persona_name="p",
+        history_manager=_marking_history_manager(),
     )
     events: list = []
     node = runtime_llm.lg_llm_node(
@@ -247,6 +654,31 @@ def _build_node(monkeypatch, *, client, spell_loop, node_def=None, persona_id=No
         events.append,
     )
     return runtime, persona, node, events
+
+
+def _run_reply(node, state, runtime, persona, events, *, reply_building_id="b1"):
+    """node() を返事の一番外側 (run_meta_user) と同じ形で回す。
+
+    例外で閉じたら後始末を例外つきで、例外なしで閉じたら例外なしで、一回だけ
+    通す。例外はそのまま投げ直す (エラー札の案内の材料は例外に載っている)。
+    """
+    # 返事の実行の一番外側 (sea/runtime.py) と同じ単調時計。
+    started = time.monotonic()
+    try:
+        result = asyncio.run(node(state))
+    except Exception as exc:
+        _settle_reply(
+            runtime, persona, events=events, exc=exc,
+            token=state.get("_cancellation_token"),
+            reply_building_id=reply_building_id, started_at=started,
+        )
+        raise
+    _settle_reply(
+        runtime, persona, events=events, exc=None,
+        token=state.get("_cancellation_token"),
+        reply_building_id=reply_building_id, started_at=started,
+    )
+    return result
 
 
 async def _spell_loop_raising(exc):
@@ -343,7 +775,11 @@ def test_a_refused_withdrawal_falls_back_to_confirming_the_row(monkeypatch):
 
 
 def test_a_spell_loop_death_confirms_the_draft_row_with_the_spoken_text(monkeypatch):
-    """喋り終えた後に Beat が死んだ回 — 本文つきで確定し、印・記憶・通告が揃う。"""
+    """喋り終えた後に Beat が死んだ回 — 出口は本文つきで保存するだけ。
+
+    ストリームは受け切っているので、本文は言い切った発言 (④)。印と通告は
+    返事の後始末が一回だけ置き、エラー札にその発言の id が載る。
+    """
     client = _FakeStreamClient(chunks=["こんにちは。"])
 
     async def _spell_loop(**kwargs):
@@ -352,20 +788,24 @@ def test_a_spell_loop_death_confirms_the_draft_row_with_the_spoken_text(monkeypa
     runtime, persona, node, events = _build_node(
         monkeypatch, client=client, spell_loop=_spell_loop,
     )
-    with pytest.raises(LLMError):
-        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+    with pytest.raises(LLMError) as excinfo:
+        _run_reply(node, {"_messages": [], "_pulse_id": "pl-1"}, runtime, persona, events)
 
     runtime._emit_speak_finalize.assert_called_once()
     call = runtime._emit_speak_finalize.call_args
     assert call.args[2] == "msg-1"
     assert call.args[3] == "こんにちは。"
-    assert call.kwargs["extra_metadata"] == {INTERRUPTED_METADATA_KEY: True}
+    # 建物の行の印は後始末が付ける (確定の時点では載せない)
+    assert call.kwargs["extra_metadata"] is None
     # sub-speak が 1 番まで出た後なので、final は 2 番 (連番の衝突なし)
     assert call.kwargs["final_sub_seq"] == 2
-
+    # 言い切った本文なので、記憶には「言い切っていない」印を付けない
     runtime._store_memory.assert_called_once()
-    assert persona.history_manager.add_to_building_only.call_args.args[1]["content"] == "(ここで発言が中断されました)"
-    assert [e for e in events if e.get("type") == "streaming_complete" and e.get("interrupted")]
+    assert runtime._store_memory.call_args.kwargs["metadata"] is None
+
+    assert _marked(persona) == [("b1", "msg-1")]
+    assert _notices(persona) == [("b1", "(この発言の後、続きが始まる前に中断されました)")]
+    assert excinfo.value.to_dict()["interrupted_message_id"] == "msg-1"
 
 
 def test_a_late_stop_still_reads_as_a_user_interruption(monkeypatch):
@@ -379,11 +819,13 @@ def test_a_late_stop_still_reads_as_a_user_interruption(monkeypatch):
         monkeypatch, client=client, spell_loop=_spell_loop,
     )
     with pytest.raises(LLMError):
-        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+        _run_reply(node, {"_messages": [], "_pulse_id": "pl-1"}, runtime, persona, events)
 
     runtime._emit_speak_finalize.assert_called_once()
     assert runtime._emit_speak_finalize.call_args.args[3] == "こんにちは。"
-    assert "ユーザーの操作により" in persona.history_manager.add_to_building_only.call_args.args[1]["content"]
+    assert _notices(persona) == [
+        ("b1", "(ユーザーの操作により、この発言の後、続きが始まる前に中断されました)"),
+    ]
 
 
 def test_a_schedule_preemption_is_not_reported_as_a_user_stop(monkeypatch):
@@ -402,10 +844,11 @@ def test_a_schedule_preemption_is_not_reported_as_a_user_stop(monkeypatch):
         monkeypatch, client=client, spell_loop=_spell_loop,
     )
     with pytest.raises(LLMError):
-        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+        _run_reply(node, {"_messages": [], "_pulse_id": "pl-1"}, runtime, persona, events)
 
-    notice = persona.history_manager.add_to_building_only.call_args.args[1]["content"]
-    assert "ユーザーの操作" not in notice
+    notices = _notices(persona)
+    assert len(notices) == 1
+    assert "ユーザーの操作" not in notices[0][1]
 
 
 def test_a_server_shutdown_is_not_reported_as_a_user_stop(monkeypatch):
@@ -421,11 +864,9 @@ def test_a_server_shutdown_is_not_reported_as_a_user_stop(monkeypatch):
         monkeypatch, client=client, spell_loop=_spell_loop,
     )
     with pytest.raises(LLMError):
-        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+        _run_reply(node, {"_messages": [], "_pulse_id": "pl-1"}, runtime, persona, events)
 
-    notice = persona.history_manager.add_to_building_only.call_args.args[1]["content"]
-    assert notice == "(ここで発言が中断されました)"
-    assert "ユーザーの操作" not in notice
+    assert _notices(persona) == [("b1", "(この発言の後、続きが始まる前に中断されました)")]
 
 
 def test_a_keyboard_interrupt_propagates_without_salvage_side_effects(monkeypatch):
@@ -470,6 +911,7 @@ def test_a_mid_stream_death_confirms_the_draft_row_with_the_partial_text(monkeyp
     返り値の tuple は届かないが、途中経過の器 (`_stream_progress`) 経由で
     受信済みの部分文が回収され、下書き行はその本文で確定する。final の連番も
     発火済みの sub-speak (seq=1) と衝突しない (2026-08-27 Codex 指摘の固定)。
+    途中で切れた本文なので、後始末の通告は ① になる。
     """
     client = _FakeStreamClient(chunks=["こんにちは。"], iter_exc=RuntimeError("died mid-stream"))
 
@@ -480,52 +922,32 @@ def test_a_mid_stream_death_confirms_the_draft_row_with_the_partial_text(monkeyp
         monkeypatch, client=client, spell_loop=_unused_spell_loop,
     )
     with pytest.raises(LLMError):
-        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+        _run_reply(node, {"_messages": [], "_pulse_id": "pl-1"}, runtime, persona, events)
 
     runtime._emit_speak_finalize.assert_called_once()
     call = runtime._emit_speak_finalize.call_args
     assert call.args[2] == "msg-1"
     assert call.args[3] == "こんにちは。"
     assert call.kwargs["final_sub_seq"] == 2
-    assert call.kwargs["extra_metadata"] == {INTERRUPTED_METADATA_KEY: True}
-    assert persona.history_manager.add_to_building_only.call_args.args[1]["content"] == "(ここで発言が中断されました)"
+    assert call.kwargs["extra_metadata"] is None
+    assert runtime._store_memory.call_args.kwargs["metadata"] == {
+        INTERRUPTED_METADATA_KEY: True,
+    }
+    assert _marked(persona) == [("b1", "msg-1")]
+    assert _notices(persona) == [("b1", "(ここで発言が中断されました)")]
 
 
 def test_a_stop_during_the_stream_settles_inside_and_not_again_at_the_exit(monkeypatch):
-    """ストリーム途中の停止 — try 塊の中で確定した後、Beat の出口が二重確定しない。
+    """ストリーム途中の停止 — try 塊の中で保存した後、Beat の出口が二重確定しない。
 
-    この経路だけは settle の後もコードが続く (spell round の頭で取り消しが
+    この経路だけは保存の後もコードが続く (spell round の頭で取り消しが
     見つかって例外で抜けるまで)。確定済みの印 (`pipeline_finalized`) が
-    出口の後始末を止めることを、実物の `_run_spell_loop` ごと通して固定する。
+    出口の保存を止めることを、実物の `_run_spell_loop` ごと通して固定する。
+    印と通告は返事の後始末が一回だけ置く。
     """
     client = _FakeStreamClient(chunks=["こんにちは。", "続きの文。"])
-
-    runtime = MagicMock()
-    runtime._effective_building_id.return_value = "b1"
-    runtime._emit_speak_start.return_value = "msg-1"
-    runtime._default_temperature.return_value = 0.7
-    runtime._get_cache_kwargs.return_value = {}
-    runtime._store_memory.return_value = "mem-1"
-    runtime.select_llm_client.return_value = (client, "model-a")
-
-    monkeypatch.setattr(
-        runtime_llm, "resolve_execution_context",
-        lambda persona, pulse_context, state=None: SimpleNamespace(model_key="model-a"),
-    )
-    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: True)
-    monkeypatch.setattr(runtime_llm, "_record_llm_usage", lambda *a, **k: None)
-    monkeypatch.setattr(runtime_llm, "_consume_reasoning", lambda *a, **k: ("", None))
-    monkeypatch.setattr(runtime_llm, "_finalize_beat", lambda *a, **k: None)
-    # _run_spell_loop は実物 — round 頭の取り消し検査で
-    # ExecutionCancelledException を投げる本物の経路を通す。
-
-    persona = SimpleNamespace(
-        persona_id=None, persona_name="p", history_manager=MagicMock(),
-    )
-    events: list = []
-    node = runtime_llm.lg_llm_node(
-        runtime, _node_def(), persona, "b1", SimpleNamespace(name="pb"),
-        events.append,
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
     )
     state = {
         "_messages": [],
@@ -538,17 +960,19 @@ def test_a_stop_during_the_stream_settles_inside_and_not_again_at_the_exit(monke
         "_realtime_spells_executed": True,
     }
     with pytest.raises(LLMError):
-        asyncio.run(node(state))
+        _run_reply(node, state, runtime, persona, events)
 
-    # 確定は 1 回だけ (途中停止の後片付けが行い、出口は印を見て手を出さない)
+    # 確定は 1 回だけ (途中停止の保存が行い、出口は印を見て手を出さない)
     runtime._emit_speak_finalize.assert_called_once()
     call = runtime._emit_speak_finalize.call_args
     assert call.args[3] == "こんにちは。"
-    assert call.kwargs["extra_metadata"] == {INTERRUPTED_METADATA_KEY: True}
-    # 通告も 1 回だけで、文面はユーザーの操作
-    persona.history_manager.add_to_building_only.assert_called_once()
-    assert "ユーザーの操作により" in persona.history_manager.add_to_building_only.call_args.args[1]["content"]
+    assert call.kwargs["extra_metadata"] is None
     runtime._store_memory.assert_called_once()
+    # 印と通告も 1 回だけで、文面はユーザーの操作 (途中で切れた本文 = ①)
+    assert _marked(persona) == [("b1", "msg-1")]
+    assert _notices(persona) == [
+        ("b1", "(ユーザーの操作により、ここで発言が中断されました)"),
+    ]
 
 
 def test_an_exception_after_the_finalize_does_not_settle_twice(monkeypatch):
@@ -671,10 +1095,10 @@ def test_a_failing_cleanup_does_not_replace_the_original_exception(monkeypatch):
         monkeypatch, client=client, spell_loop=_spell_loop,
     )
 
-    def _settle_raises(**kwargs):
+    def _save_raises(**kwargs):
         raise RuntimeError("cleanup itself failed")
 
-    monkeypatch.setattr(runtime_llm, "_settle_interrupted_utterance", _settle_raises)
+    monkeypatch.setattr(runtime_llm, "_save_cut_utterance", _save_raises)
 
     with pytest.raises(LLMError) as excinfo:
         asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
@@ -802,11 +1226,10 @@ def test_a_settled_interruption_is_not_memorized_twice_by_the_backfill(monkeypat
     with pytest.raises(LLMError):
         asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
 
-    # settle が中断の印つきで 1 回書き、補填は印を見て手を出さない
+    # 出口の保存が 1 回書き、補填は印を見て手を出さない。ストリームを受け
+    # 切った本文 (言い切った発言) なので、記憶に「言い切っていない」印は無い。
     runtime._store_memory.assert_called_once()
-    assert runtime._store_memory.call_args.kwargs["metadata"] == {
-        INTERRUPTED_METADATA_KEY: True,
-    }
+    assert runtime._store_memory.call_args.kwargs["metadata"] is None
 
 
 def test_a_death_inside_finalize_beat_still_backfills_the_memory(monkeypatch):
@@ -865,13 +1288,16 @@ def test_a_death_inside_finalize_beat_after_memorize_is_not_written_again(monkey
 
 
 def test_a_stop_with_spells_disabled_memorizes_the_partial_text_only_once(monkeypatch):
-    """ストリーム途中の停止 + スペル無効 — settle が書いた部分文を確定が重ねない。
+    """ストリーム途中の停止 + スペル無効 — 保存した部分文を確定が重ねない。
 
     スペル無効のペルソナでは `_run_spell_loop` が入り口で即 return するので、
     停止された Beat は例外を出さずに完走し、`_finalize_beat` の memorize に
-    到達する (Codex レビュー 2 巡目)。memorize が settle の印 (`_beat_memorized`)
+    到達する (Codex レビュー 2 巡目)。memorize が保存の印 (`_beat_memorized`)
     を見ないと、同じ部分文が同 Beat で二重に記憶へ入る。この 1 本だけは
     `_run_spell_loop` も `_finalize_beat` も実物で通す。
+
+    返事は例外なしで閉じるので、印と通告は「この後で話が止まった」の書き足しを
+    見た後始末が置く (取り消しの札から、ユーザーの停止と読む)。
     """
     client = _FakeStreamClient(chunks=["こんにちは。", "続きの文。"])
 
@@ -886,30 +1312,33 @@ def test_a_stop_with_spells_disabled_memorizes_the_partial_text_only_once(monkey
     # MagicMock の戻り値 (truthy) が structured output 扱いにならないように倒す。
     runtime._process_structured_output.return_value = False
 
+    token = _CancelDuringStream()
     state = {
         "_messages": [],
         "_pulse_id": "pl-1",
-        "_cancellation_token": _CancelDuringStream(),
+        "_cancellation_token": token,
         "_spell_enabled": False,
     }
     # 例外なしで完走する (spell loop はスペル無効の入り口で即 return し、
     # round 頭の取り消し検査に到達しない)
-    result = asyncio.run(node(state))
+    result = _run_reply(node, state, runtime, persona, events)
     assert result is state
 
-    # 確定は settle の 1 回だけ (通常確定は pipeline_finalized を見てスキップ)
+    # 確定は保存の 1 回だけ (通常確定は pipeline_finalized を見てスキップ)
     runtime._emit_speak_finalize.assert_called_once()
     call = runtime._emit_speak_finalize.call_args
     assert call.args[3] == "こんにちは。"
-    assert call.kwargs["extra_metadata"] == {INTERRUPTED_METADATA_KEY: True}
-    # 記憶も settle の 1 回だけ、中断の印つき — ここが二重だった (二重保存の固定)
+    assert call.kwargs["extra_metadata"] is None
+    # 記憶も保存の 1 回だけ、中断の印つき — ここが二重だった (二重保存の固定)
     runtime._store_memory.assert_called_once()
     assert runtime._store_memory.call_args.kwargs["metadata"] == {
         INTERRUPTED_METADATA_KEY: True,
     }
-    # 通告はユーザーの操作の文面で 1 回
-    persona.history_manager.add_to_building_only.assert_called_once()
-    assert "ユーザーの操作により" in persona.history_manager.add_to_building_only.call_args.args[1]["content"]
+    # 印と通告は後始末が 1 回、ユーザーの操作の文面で
+    assert _marked(persona) == [("b1", "msg-1")]
+    assert _notices(persona) == [
+        ("b1", "(ユーザーの操作により、ここで発言が中断されました)"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1034,14 +1463,20 @@ def _discards_after(events, index: int) -> list:
 
 
 def test_a_closing_beat_that_dies_leaves_no_empty_record(monkeypatch):
-    """再呼び出しが例外で落ちた回 — 空の下書き行は確定せず、取り下げる。"""
+    """再呼び出しが例外で落ちた回 — 空の下書き行は確定せず、取り下げる。
+
+    LLMError に包まれていない例外でも、続きの生成の失敗として返事を止める
+    (スペル内部の致命エラーとして黙って閉じない)。取り下げは Beat の出口が行う。
+    """
     runtime, persona, node, events = _build_spell_node(
         monkeypatch,
         calls=[[f"やるね。\n{SPELL_LINE}"], RuntimeError("api down")],
     )
     marks = _withdrawal_marks_the_event_log(runtime, events)
 
-    asyncio.run(node(_spell_state()))
+    with pytest.raises(LLMError) as excinfo:
+        asyncio.run(node(_spell_state()))
+    assert isinstance(excinfo.value.original_error, RuntimeError)
 
     # 確定は Beat 1 の 1 回だけ。空文字での確定は起きない。
     runtime._emit_speak_finalize.assert_called_once()
@@ -1117,10 +1552,13 @@ def test_a_withdrawal_after_a_move_targets_the_room_that_holds_the_row(monkeypat
 
 
 def test_a_closing_beat_that_dies_midway_keeps_what_it_said(monkeypatch):
-    """再呼び出しが途中まで流してから死んだ回 — 部分文を印つきで確定する。
+    """再呼び出しが途中まで流してから死んだ回 — 部分文を途中で切れた本文として保存する。
 
-    画面と音声には既に流れた言葉なので、取り下げでは消えてしまう。既存の
-    「言い切っていない」印つきの確定 (2026-08-25 裁定の型) で救う。
+    画面と音声には既に流れた言葉なので、取り下げでは消えてしまう。LLMError に
+    包まれていない例外でも続きの生成の失敗として返事を止め (スペル内部の致命
+    エラーとして黙って閉じない — スペル無しの同じ切断と同じエラー札になる)、
+    Beat の出口が部分文を途中で切れた本文として保存し、後始末がそれに印と
+    通告を置いてエラー札に案内を載せる。
     """
     runtime, persona, node, events = _build_spell_node(
         monkeypatch,
@@ -1131,7 +1569,10 @@ def test_a_closing_beat_that_dies_midway_keeps_what_it_said(monkeypatch):
     )
     runtime._withdraw_speak_placeholder.return_value = True
 
-    asyncio.run(node(_spell_state()))
+    with pytest.raises(LLMError) as excinfo:
+        _run_reply(node, _spell_state(), runtime, persona, events)
+    assert isinstance(excinfo.value.original_error, RuntimeError)
+    assert excinfo.value.to_dict()["interrupted_message_id"] == "msg-2"
 
     # 行は取り下げない — 本文があるので確定側で救う
     runtime._withdraw_speak_placeholder.assert_not_called()
@@ -1139,11 +1580,10 @@ def test_a_closing_beat_that_dies_midway_keeps_what_it_said(monkeypatch):
     second = runtime._emit_speak_finalize.call_args_list[1]
     assert second.args[2] == "msg-2"
     assert second.args[3] == "途中まで喋った"
-    assert second.kwargs["extra_metadata"] == {INTERRUPTED_METADATA_KEY: True}
-    # 中断の通告も、その部分文が流れた部屋へ書かれる
-    assert persona.history_manager.add_to_building_only.call_args.args[1][
-        "content"
-    ] == "(ここで発言が中断されました)"
+    assert second.kwargs["extra_metadata"] is None
+    # 印と中断の通告は、その部分文が流れた部屋の、その発言に
+    assert _marked(persona) == [("b1", "msg-2")]
+    assert _notices(persona) == [("b1", "(ここで発言が中断されました)")]
 
 
 def test_a_refused_withdrawal_still_confirms_the_row(monkeypatch):
@@ -1182,7 +1622,7 @@ def test_a_death_in_the_second_beat_salvages_from_the_spell_side_progress(monkey
     # 2 周目の器の本文で確定する (1 周目の本文を持ち込まない)
     assert second.args[3] == "二周目の言葉。"
     assert "やるね。" not in second.args[3]
-    assert second.kwargs["extra_metadata"] == {INTERRUPTED_METADATA_KEY: True}
+    assert second.kwargs["extra_metadata"] is None
     # 連番も 2 周目の器の値から進める (0 から積み直した行なので)
     assert second.kwargs["final_sub_seq"] == 2
 
@@ -1473,20 +1913,18 @@ class _CutStreamClient(_FakeStreamClient):
         return err
 
 
+_CUT = {"code": 500, "message": "internal error", "status": "INTERNAL"}
+
+
 def _server_cut_node(monkeypatch, *, chunks=("言いかけた本文",)):
-    client = _CutStreamClient(
-        chunks=list(chunks),
-        error={"code": 500, "message": "internal error", "status": "INTERNAL"},
-    )
+    client = _CutStreamClient(chunks=list(chunks), error=dict(_CUT))
 
     async def _no_spells(**kwargs):
         return runtime_llm.SpellLoopResult(
             segments=[], final_continuation=kwargs["text"], loop_count=0,
         )
 
-    return _build_node(
-        monkeypatch, client=client, spell_loop=_no_spells, persona_id="p1",
-    )
+    return _build_node(monkeypatch, client=client, spell_loop=_no_spells)
 
 
 def test_a_server_cut_stream_writes_the_same_interruption_notice(monkeypatch):
@@ -1494,10 +1932,11 @@ def test_a_server_cut_stream_writes_the_same_interruption_notice(monkeypatch):
 
     文面は原因を書かない一文 (中断させたのはユーザーではない)、役は host、
     ``heard_by`` は在室者 + 本人 — 在室者を渡さないと取り込みが配らず、
-    通告は誰の記憶にも届かない。
+    通告は誰の記憶にも届かない。返事は例外なしで閉じるので、置くのは
+    後始末 (保存した側の「この後で話が止まった」の書き足しを見て)。
     """
     runtime, persona, node, events = _server_cut_node(monkeypatch)
-    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+    _run_reply(node, {"_messages": [], "_pulse_id": "pl-1"}, runtime, persona, events)
 
     call = persona.history_manager.add_to_building_only.call_args
     assert call is not None, "サーバー切断の回に中断の通告が書かれていない"
@@ -1511,25 +1950,34 @@ def test_a_server_cut_stream_writes_the_same_interruption_notice(monkeypatch):
 def test_a_server_cut_stream_settles_the_partial_text_before_the_notice(
     monkeypatch,
 ):
-    """建物の記録の並びは「途中の発言 → 通告」。通告を先に置くと、他の
+    """建物の記録の並びは「途中の発言 → 印 → 通告」。通告を先に置くと、他の
     ペルソナの記憶に「何が中断されたのか分からない一行」だけが残る。"""
     runtime, persona, node, events = _server_cut_node(monkeypatch)
 
     order: list = []
-    _saved = runtime._emit_speak_finalize.return_value
+    _real_finalize = runtime._emit_speak_finalize.side_effect
 
     def _finalize(*args, **kwargs):
         order.append("finalize")
-        return _saved
+        return _real_finalize(*args, **kwargs)
 
     runtime._emit_speak_finalize.side_effect = _finalize
-    persona.history_manager.add_to_building_only.side_effect = (
-        lambda *a, **k: order.append("notice")
-    )
+    _real_update = persona.history_manager.update_building_message.side_effect
 
-    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+    def _update(*args, **kwargs):
+        order.append("mark")
+        return _real_update(*args, **kwargs)
 
-    assert order == ["finalize", "notice"]
+    persona.history_manager.update_building_message.side_effect = _update
+    def _notice(building_id, msg, *, heard_by=None):
+        order.append("notice")
+        return {**msg, "message_id": f"{building_id}:notice"}
+
+    persona.history_manager.add_to_building_only.side_effect = _notice
+
+    _run_reply(node, {"_messages": [], "_pulse_id": "pl-1"}, runtime, persona, events)
+
+    assert order == ["finalize", "mark", "notice"]
     # 確定は部分文つきで、通告と同じ部屋へ
     assert runtime._emit_speak_finalize.call_args.args[1] == "b1"
     assert runtime._emit_speak_finalize.call_args.args[3] == "言いかけた本文"
@@ -1539,7 +1987,7 @@ def test_a_server_cut_stream_notice_does_not_draw_its_own_icon(monkeypatch):
     """画面向けの通知の文面にアイコンを書かない — 画面側が info 種別に
     自前で ℹ️ を描くので、書くと二つ並ぶ (2026-09-13 まはー実機報告)。"""
     runtime, persona, node, events = _server_cut_node(monkeypatch)
-    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+    _run_reply(node, {"_messages": [], "_pulse_id": "pl-1"}, runtime, persona, events)
 
     infos = [e for e in events if e.get("type") == "info"]
     assert len(infos) == 1
@@ -1550,14 +1998,17 @@ def test_a_server_cut_stream_notice_does_not_draw_its_own_icon(monkeypatch):
 
 
 def test_a_server_cut_stream_marks_the_utterance_as_unfinished(monkeypatch):
-    """通告を足しても、既にあった「言い切っていない」印は落ちない。"""
+    """切れた発言の行に「言い切っていない」印が付き、情報の知らせに「続きの生成」を
+    出す発言の id が載る (エラー札ではなく知らせのまま)。"""
     runtime, persona, node, events = _server_cut_node(monkeypatch)
     state = {"_messages": [], "_pulse_id": "pl-1"}
-    asyncio.run(node(state))
+    _run_reply(node, state, runtime, persona, events)
 
-    extra = runtime._emit_speak_finalize.call_args.kwargs.get("extra_metadata") or {}
-    assert extra[INTERRUPTED_METADATA_KEY] is True
-    assert [e for e in events if e.get("interrupted")]
+    assert _marked(persona) == [("b1", "msg-1")]
+    infos = [e for e in events if e.get("type") == "info"]
+    assert infos[0]["interrupted_message_id"] == "msg-1"
+    assert "interrupted_building_id" not in infos[0]
+    assert not [e for e in events if e.get("type") == "error"]
 
 
 def test_a_clean_stream_writes_no_interruption_notice(monkeypatch):
@@ -1570,11 +2021,12 @@ def test_a_clean_stream_writes_no_interruption_notice(monkeypatch):
         )
 
     runtime, persona, node, events = _build_node(
-        monkeypatch, client=client, spell_loop=_no_spells, persona_id="p1",
+        monkeypatch, client=client, spell_loop=_no_spells,
     )
-    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+    _run_reply(node, {"_messages": [], "_pulse_id": "pl-1"}, runtime, persona, events)
 
     persona.history_manager.add_to_building_only.assert_not_called()
+    assert _marked(persona) == []
     assert [e for e in events if e.get("type") == "info"] == []
 
 
@@ -1582,21 +2034,14 @@ def test_a_server_cut_stream_with_a_failed_finalize_writes_no_notice(monkeypatch
     """部分文の確定が保存に失敗した回は、通告を書かない。
 
     通告は「途中で終わった発言」の後ろに置く注記なので、その発言が建物の
-    記録に載らなかった回に書くと、見えない行の後ろに通告だけが浮く。
-    このシナリオ (確定が失敗しても例外は出ない回) では、未確定の下書き行が
-    残って通告も書かれないまま Beat が閉じる。この下書き行を後から掃く機構は
-    現状無い (docs/issues/unfinalized_placeholder_on_clean_exit.md) が、
-    本文の載っていない場所に通告を足しても読み手には「何が中断されたのか
-    分からない一行」にしかならないので、通告を書かないのが正しい。画面への
+    記録に載らなかった回に書くと、見えない行の後ろに通告だけが浮く。画面への
     知らせ (info) は保存の成否と無関係に事実なので、こちらは出る。
     """
-    from sea.runtime_emitters import SpeakFinalizeResult
-
     runtime, persona, node, events = _server_cut_node(monkeypatch)
     runtime._emit_speak_finalize.return_value = SpeakFinalizeResult(
         status="failed", building_msg=None,
     )
-    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+    _run_reply(node, {"_messages": [], "_pulse_id": "pl-1"}, runtime, persona, events)
 
     persona.history_manager.add_to_building_only.assert_not_called()
     assert [e for e in events if e.get("type") == "info"], (
@@ -1613,13 +2058,10 @@ def test_a_server_cut_fallback_emit_writes_the_notice_where_it_landed(monkeypatc
     runtime, persona, node, events = _server_cut_node(monkeypatch)
     runtime._emit_speak_start.return_value = None  # 下書き行を作れなかった回
     runtime._emit_say.return_value = {"message_id": "say-1", "content": "言いかけた本文"}
-    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+    _run_reply(node, {"_messages": [], "_pulse_id": "pl-1"}, runtime, persona, events)
 
-    call = persona.history_manager.add_to_building_only.call_args
-    assert call is not None
-    building_id, message = call.args
-    assert building_id == "b1"
-    assert message["content"] == "(ここで発言が中断されました)"
+    assert _marked(persona) == [("b1", "say-1")]
+    assert _notices(persona) == [("b1", "(ここで発言が中断されました)")]
 
 
 def test_a_server_cut_fallback_emit_that_did_not_persist_writes_no_notice(monkeypatch):
@@ -1632,7 +2074,7 @@ def test_a_server_cut_fallback_emit_that_did_not_persist_writes_no_notice(monkey
     runtime, persona, node, events = _server_cut_node(monkeypatch)
     runtime._emit_speak_start.return_value = None
     runtime._emit_say.return_value = {"content": "言いかけた本文"}  # 採番なし
-    asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+    _run_reply(node, {"_messages": [], "_pulse_id": "pl-1"}, runtime, persona, events)
 
     persona.history_manager.add_to_building_only.assert_not_called()
     assert [e for e in events if e.get("type") == "info"], (
@@ -1640,35 +2082,826 @@ def test_a_server_cut_fallback_emit_that_did_not_persist_writes_no_notice(monkey
     )
 
 
-def test_a_stale_stream_error_from_an_earlier_beat_does_not_leak(monkeypatch):
-    """前の Beat が残した「サーバーが切った」の申告は、次の Beat に乗らない。
+# ---------------------------------------------------------------------------
+# スペルが走った回のストリーム切断 (docs/issues/spell_round_stream_cut_is_not_detected.md)
+#
+# 切断の申告の消費はスペルループへ引き継がれ、スペル行を含む本文の切断 (次の周が
+# 発話を続けるので自己回復する) と、締めの周の切断 (発言が途切れたまま確定する)
+# を見分ける。後者にだけ印と通告を付ける。
+# ---------------------------------------------------------------------------
 
-    申告はストリーム消費の直後に立つが、pop は no-spell の完了パスにしか
-    無い — 切られた部分文がスペル行を含んでいた回はスペル分岐へ進んで残留
-    する。残留したまま次の Beat が言い切って完了すると、その発言に「中断
-    された」の印と偽の通告が乗る (通告は在室ペルソナ全員の記憶へ配られる
-    ので、被害は画面表示に留まらない)。Beat の入り口で倒す。
-    """
-    client = _FakeStreamClient(chunks=["言い切った発言。"])
+class _ScriptedCutStreamClient(_ScriptedStreamClient):
+    """呼び出しごとの切断の申告を返す。申告は消費型 (実物の llm_clients と同じ)。"""
 
-    async def _no_spells(**kwargs):
-        return runtime_llm.SpellLoopResult(
-            segments=[], final_continuation=kwargs["text"], loop_count=0,
+    def __init__(self, calls, cuts):
+        super().__init__(calls)
+        self._cuts = list(cuts)
+        self._pending = None
+
+    def generate_stream(self, messages, tools=(), temperature=None, **kwargs):
+        self._pending = self._cuts.pop(0) if self._cuts else None
+        return super().generate_stream(
+            messages, tools=tools, temperature=temperature, **kwargs,
         )
 
-    runtime, persona, node, events = _build_node(
-        monkeypatch, client=client, spell_loop=_no_spells, persona_id="p1",
-    )
-    state = {
-        "_messages": [],
-        "_pulse_id": "pl-1",
-        # 前の Beat (スペル分岐で終わった回) が残した申告
-        "_stream_error": {"code": 500, "message": "internal error"},
-    }
-    asyncio.run(node(state))
+    def consume_stream_error(self):
+        err, self._pending = self._pending, None
+        return err
 
-    persona.history_manager.add_to_building_only.assert_not_called()
+
+def _build_cut_spell_node(monkeypatch, *, calls, cuts):
+    """呼び出しごとの chunk 列と、呼び出しごとの切断の申告 (None = 切られていない)。"""
+    client = _ScriptedCutStreamClient(calls, cuts)
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    runtime._emit_speak_start.side_effect = ["msg-1", "msg-2", "msg-3"]
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _ok_spell)
+    return runtime, persona, node, events
+
+
+def test_a_cut_on_a_round_with_a_spell_recovers_without_a_mark(monkeypatch):
+    """スペル行を含む本文をサーバーが切った回 — 次の周が発話を続けるので、
+    印も通告も付かない (実際にスペル分岐を通す。残留を手で仕込まない)。
+
+    旧実装では、この回の申告が state に残留し、同じ Pulse の次の Beat の
+    言い切った発言に偽の印と通告が乗った (2026-09-13 検算)。
+    """
+    runtime, persona, node, events = _build_cut_spell_node(
+        monkeypatch,
+        calls=[[f"やるね。\n{SPELL_LINE}"], ["できたよ。"]],
+        cuts=[dict(_CUT), None],
+    )
+    state = _spell_state()
+    _run_reply(node, state, runtime, persona, events)
+
+    assert runtime._emit_speak_finalize.call_count == 2
+    assert runtime._emit_speak_finalize.call_args_list[1].args[3] == "できたよ。"
+    assert _marked(persona) == []
+    assert _notices(persona) == []
     assert [e for e in events if e.get("type") == "info"] == []
-    extra = runtime._emit_speak_finalize.call_args.kwargs.get("extra_metadata") or {}
-    assert INTERRUPTED_METADATA_KEY not in extra
+    # 申告を state に置かない (次の Beat へ残留させない)
+    assert "_stream_error" not in state
+    assert INTERRUPTED_METADATA_KEY not in state
+
+
+def test_a_cut_on_the_closing_round_marks_the_cut_utterance(monkeypatch):
+    """スペルの後の締めの生成がサーバーに切られた回 — 途切れたまま確定した
+    締めの発言に印と通告 (①) が付き、知らせにその発言の id が載る。"""
+    runtime, persona, node, events = _build_cut_spell_node(
+        monkeypatch,
+        calls=[[f"やるね。\n{SPELL_LINE}"], ["できたよ、でも"]],
+        cuts=[None, dict(_CUT)],
+    )
+    _run_reply(node, _spell_state(), runtime, persona, events)
+
+    assert runtime._emit_speak_finalize.call_args_list[1].args[2] == "msg-2"
+    assert runtime._emit_speak_finalize.call_args_list[1].args[3] == "できたよ、でも"
+    assert _marked(persona) == [("b1", "msg-2")]
+    assert _notices(persona) == [("b1", "(ここで発言が中断されました)")]
+    infos = [e for e in events if e.get("type") == "info"]
+    assert len(infos) == 1
+    assert infos[0]["interrupted_message_id"] == "msg-2"
+
+
+def test_a_closing_round_cut_before_any_word_marks_the_spell_utterance(monkeypatch):
+    """締めの生成が一文字も来ないうちに切られた回 — 話はスペルの結果で終わる
+    発言の後で止まった。その発言に印と ③ の通告を付ける (結果は行に残っている)。"""
+    runtime, persona, node, events = _build_cut_spell_node(
+        monkeypatch,
+        calls=[[f"やるね。\n{SPELL_LINE}"], []],
+        cuts=[None, dict(_CUT)],
+    )
+    runtime._withdraw_speak_placeholder.return_value = True
+    _run_reply(node, _spell_state(), runtime, persona, events)
+
+    # 締めのために開けた行は、一文字も無いので取り下げる
+    runtime._withdraw_speak_placeholder.assert_called_once()
+    first = runtime._emit_speak_finalize.call_args_list[0]
+    assert first.args[2] == "msg-1"
+    assert "やりました" in first.args[3]  # 受け取った結果が行にある
+    assert _marked(persona) == [("b1", "msg-1")]
+    assert _notices(persona) == [
+        ("b1", "(スペルの結果を受け取った後、続きの発言の前に中断されました)"),
+    ]
+    infos = [e for e in events if e.get("type") == "info"]
+    assert infos and infos[0]["interrupted_message_id"] == "msg-1"
+
+
+def test_a_gemini_prompt_block_reaches_the_caller_as_a_safety_filter_error(monkeypatch):
+    """Gemini がプロンプトを拒んだ回 — 本物の GeminiClient.generate_stream から
+    node() の外まで、SafetyFilterError のまま届く (汎用の LLMError に包まれない)。
+
+    manager/runtime.py の ``except LLMError`` はこの例外の ``to_dict()`` を
+    error イベントとして流すので、画面は error_code=safety_filter の札を出せる。
+    以前はブロックの chunk (candidates=None) を読み飛ばして空のストリームで
+    終わり、理由の無い「返事が生まれませんでした」になっていた (2026-09-24)。
+    """
+    from llm_clients import gemini as gemini_module
+    from llm_clients.exceptions import SafetyFilterError
+
+    monkeypatch.setattr(
+        gemini_module, "build_gemini_clients",
+        lambda prefer_paid=False: (MagicMock(), None, MagicMock()),
+    )
+    client = gemini_module.GeminiClient("gemini-3.8-flash")
+    block_chunk = SimpleNamespace(
+        candidates=None,
+        prompt_feedback=SimpleNamespace(block_reason="PROHIBITED_CONTENT"),
+        usage_metadata=None,
+    )
+    monkeypatch.setattr(client, "_start_stream", lambda *a, **k: iter([block_chunk]))
+
+    async def _unused_spell_loop(**kwargs):  # pragma: no cover - 到達しない
+        raise AssertionError("spell loop must not run")
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_unused_spell_loop,
+    )
+    runtime._withdraw_speak_placeholder.return_value = True
+    with pytest.raises(SafetyFilterError) as excinfo:
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    event = excinfo.value.to_dict()
+    assert event["type"] == "error"
+    assert event["error_code"] == "safety_filter"
+    assert "PROHIBITED_CONTENT" in event["content"]
+    # 本文ゼロなので下書き行は取り下げ、空の記録を残さない
+    runtime._withdraw_speak_placeholder.assert_called_once()
+    runtime._store_memory.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# スペルの後の続きの生成 (LLM 呼び出し) が失敗した回 (2026-09-24)
+#
+# 以前はスペルループの包括 except が LLMError を握り潰し、
+# 「[Spell System Error]」の注記を差し込んで途中までの発言だけを保存していた。
+# 画面には止まった理由が一切届かなかった。安全性フィルターで最初に塞ぎ、
+# 同じ理由が当てはまる LLMError の族 (利用制限・タイムアウト・サーバー
+# エラー・空の応答…) へ広げた。不変条件は「普通の返事で同じ失敗が起きた回と
+# 同じエラーが画面へ届き、それまでの発言は残る」。
+# ---------------------------------------------------------------------------
+
+def _prompt_block() -> Exception:
+    from llm_clients.exceptions import SafetyFilterError
+    return SafetyFilterError(
+        "Gemini blocked the prompt (block_reason=PROHIBITED_CONTENT)",
+        user_message="Geminiの安全性フィルターにより、応答がブロックされました（PROHIBITED_CONTENT）",
+    )
+
+
+def _continuation_errors():
+    """続きの生成で起きうる LLMError の代表。id は pytest の表示用。
+
+    空の応答 (EmptyResponseError) はここに入れない — スペルの後の沈黙は正常な
+    終わり方で、エラーにしない (下の専用テスト)。
+    """
+    from llm_clients.exceptions import (
+        LLMTimeoutError,
+        PaymentError,
+        RateLimitError,
+        ServerError,
+    )
+    return [
+        pytest.param(_prompt_block, id="safety_filter"),
+        pytest.param(lambda: RateLimitError("429 Too Many Requests"), id="rate_limit"),
+        pytest.param(lambda: LLMTimeoutError("read timed out"), id="timeout"),
+        pytest.param(lambda: ServerError("503 Service Unavailable"), id="server_error"),
+        pytest.param(lambda: PaymentError("402 Payment Required"), id="payment"),
+        pytest.param(lambda: LLMError("provider exploded"), id="llm_error"),
+    ]
+
+
+class _RecordingScriptedStreamClient(_ScriptedStreamClient):
+    """渡された messages の参照を控える — 後から注記が積まれたかを見るため。"""
+
+    def __init__(self, calls):
+        super().__init__(calls)
+        self.seen_messages: list = []
+
+    def generate_stream(self, messages, tools=(), temperature=None, **kwargs):
+        self.seen_messages = messages
+        return super().generate_stream(messages, tools=tools, temperature=temperature, **kwargs)
+
+
+class _ScriptedSyncClient:
+    """呼び出しごとに別の応答を返す非ストリーミングのクライアント。
+
+    要素は返す本文か、``generate`` の瞬間に投げる例外。
+    """
+
+    config_key = None
+
+    def __init__(self, calls):
+        self._calls = list(calls)
+        self.seen_messages: list = []
+
+    def generate(self, messages, tools=(), temperature=None,
+                 response_schema=None, **kwargs):
+        assert self._calls, "_ScriptedSyncClient: no scripted calls left"
+        self.seen_messages = messages
+        nxt = self._calls.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    def consume_usage(self):
+        return None
+
+    def consume_thought_signature(self):
+        return None
+
+
+def _has_spell_system_error_note(messages) -> bool:
+    return any(
+        "[Spell System Error]" in str(m.get("content", ""))
+        for m in messages if isinstance(m, dict)
+    )
+
+
+@pytest.mark.parametrize("dies", ["at_call", "mid_stream"])
+@pytest.mark.parametrize("make_error", _continuation_errors())
+def test_a_failed_continuation_after_a_spell_reports_the_error(monkeypatch, make_error, dies):
+    """ストリーミング経路 — 前の Beat は確定のまま、続きの空の行は取り下げ、
+    理由は元の LLMError のまま (包み直さずに) node() の外へ届く。
+
+    ``dies``: 続きの呼び出しの瞬間に死ぬ回と、ストリームを読み始めてから
+    一語も来ないうちに死ぬ回。どちらも続きの生成そのものの失敗。
+    """
+    err = make_error()
+    continuation = err if dies == "at_call" else [err]
+    client = _RecordingScriptedStreamClient(
+        [[f"やるね。\n{SPELL_LINE}"], continuation],
+    )
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    runtime._emit_speak_start.side_effect = ["msg-1", "msg-2", "msg-3"]
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _ok_spell)
+    runtime._withdraw_speak_placeholder.return_value = True
+
+    with pytest.raises(type(err)) as excinfo:
+        asyncio.run(node(_spell_state()))
+
+    # 画面へ流れる error イベントは、普通の返事で同じ失敗が起きた回と同じ形
+    # (同じオブジェクトがそのまま届く = error_code も文面も同じ)
+    assert excinfo.value is err
+    assert excinfo.value.to_dict()["error_code"] == err.error_code
+    # スペルを唱えた Beat は確定のまま残る (確定は 1 回だけ)
+    runtime._emit_speak_finalize.assert_called_once()
+    assert runtime._emit_speak_finalize.call_args.args[2] == "msg-1"
+    assert "やるね。" in runtime._emit_speak_finalize.call_args.args[3]
+    # 失敗した続きのために開けた行は、空の記録として残さず取り下げる
+    runtime._withdraw_speak_placeholder.assert_called_once()
+    assert runtime._withdraw_speak_placeholder.call_args.args[2] == "msg-2"
+    # スペル系の内部エラーではないので、注記も中断の通告も書かない
+    assert not _has_spell_system_error_note(client.seen_messages)
+    persona.history_manager.add_to_building_only.assert_not_called()
+
+
+@pytest.mark.parametrize("make_error", _continuation_errors())
+def test_the_same_failure_on_an_ordinary_reply_reaches_the_chat_the_same_way(
+    monkeypatch, make_error,
+):
+    """比較の基準 — スペルの無い普通の返事で同じ失敗が起きた回も、元の例外が
+    そのまま node() の外へ出る。続きの生成の失敗はこれと同じ形に揃える。"""
+    err = make_error()
+    client = _RecordingScriptedStreamClient([err])
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    runtime._withdraw_speak_placeholder.return_value = True
+
+    with pytest.raises(type(err)) as excinfo:
+        asyncio.run(node(_spell_state()))
+
+    assert excinfo.value is err
+
+
+@pytest.mark.parametrize("make_error", _continuation_errors())
+def test_a_failed_continuation_without_streaming_keeps_the_earlier_beats(monkeypatch, make_error):
+    """非ストリーミング経路 — 周の発言は呼び出し元が建物へ書き終えてから、
+    元の LLMError が投げられる (ループの中で投げると周の発言が消える)。"""
+    err = make_error()
+    client = _ScriptedSyncClient([f"やるね。\n{SPELL_LINE}", err])
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: False)
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _ok_spell)
+    runtime._emit_say.return_value = {"message_id": "say-1", "content": "x"}
+
+    with pytest.raises(type(err)) as excinfo:
+        asyncio.run(node(_spell_state()))
+
+    assert excinfo.value is err
+    assert excinfo.value.to_dict()["error_code"] == err.error_code
+    # スペルの結果を持つ Beat 1 が建物へ書かれている (失敗の前の発言は残る)
+    said_texts = [c.args[2] for c in runtime._emit_say.call_args_list]
+    assert any("やりました" in t for t in said_texts), said_texts
+    # 失敗した続きの分は何も書かない (空の記録を残さない)
+    assert all(t.strip() for t in said_texts)
+    # 下書き行を使わない経路なので、確定も取り下げも起きない
+    runtime._emit_speak_finalize.assert_not_called()
+    runtime._withdraw_speak_placeholder.assert_not_called()
+    assert not _has_spell_system_error_note(client.seen_messages)
+
+
+def test_an_empty_continuation_without_streaming_ends_silently(monkeypatch):
+    """全文一括のクライアントがスペルの後の空の応答を EmptyResponseError に
+    した回も、ストリーミング経路の「空の本文」と同じく黙って終わる。
+    受け取り方の違いで、同じ沈黙がエラーの札になってはいけない。"""
+    from llm_clients.exceptions import EmptyResponseError
+
+    client = _ScriptedSyncClient(
+        [f"やるね。\n{SPELL_LINE}", EmptyResponseError("empty response")],
+    )
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: False)
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _ok_spell)
+    runtime._emit_say.return_value = {"message_id": "say-1", "content": "x"}
+
+    asyncio.run(node(_spell_state()))
+
+    said_texts = [c.args[2] for c in runtime._emit_say.call_args_list]
+    assert any("やりました" in t for t in said_texts), said_texts
+    assert all(t.strip() for t in said_texts)
+    assert not _has_spell_system_error_note(client.seen_messages)
+
+
+# ---------------------------------------------------------------------------
+# スペルの「実行中」に起きた LLMError はスペルの失敗のまま (2026-09-24)
+#
+# 画面のエラーに変えるのは続きを生成する呼び出しの失敗だけ。スペルのツールが
+# 中で LLM を呼んで失敗した回 (サブラインの返事など) はペルソナの返事の失敗では
+# ないので、従来どおりスペルの失敗として扱う。型で見分けると両者が混ざる。
+# ---------------------------------------------------------------------------
+
+def _rate_limit() -> Exception:
+    from llm_clients.exceptions import RateLimitError
+    return RateLimitError("429 Too Many Requests")
+
+
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        pytest.param(_prompt_block, id="safety_filter"),
+        pytest.param(_rate_limit, id="rate_limit"),
+    ],
+)
+def test_an_llm_error_that_escapes_spell_execution_stays_a_spell_system_error(
+    monkeypatch, make_error,
+):
+    """スペルの実行から LLMError が漏れてループの包括 except へ届いた回は、
+    従来どおり注記を差し込んで途中までの発言を返す (投げない)。"""
+    err = make_error()
+
+    async def _spell_raises(*args, **kwargs):
+        raise err
+
+    client = _ScriptedSyncClient([f"やるね。\n{SPELL_LINE}"])
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: False)
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _spell_raises)
+    runtime._emit_say.return_value = {"message_id": "say-1", "content": "x"}
+
+    asyncio.run(node(_spell_state()))
+
+    # 漏れた例外そのものの注記が差し込まれている (投げずに降格した証拠)
+    notes = [
+        str(m.get("content", "")) for m in client.seen_messages
+        if isinstance(m, dict) and "[Spell System Error]" in str(m.get("content", ""))
+    ]
+    assert notes and type(err).__name__ in notes[0], notes
+    # 唱えた発言は途中までの形で建物に残る
+    said_texts = [c.args[2] for c in runtime._emit_say.call_args_list]
+    assert any("やるね。" in t for t in said_texts), said_texts
+
+
+def test_a_spell_tool_whose_inner_llm_call_fails_is_a_spell_error(monkeypatch):
+    """実物の ``_run_spell_tool_async`` — ツールの中の LLM 呼び出しが
+    RateLimitError で落ちても、その周の結果が [Spell Error] になるだけで、
+    ペルソナは続きを生成して返事を終える (画面のエラーにはならない)。"""
+    from llm_clients.exceptions import RateLimitError
+
+    def _tool_with_inner_llm(**kwargs):
+        raise RateLimitError("429 from the sub-line's model")
+
+    client = _ScriptedSyncClient([f"やるね。\n{SPELL_LINE}", "だめだったみたい。"])
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: False)
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setitem(runtime_llm.TOOL_REGISTRY, SPELL_NAME, _tool_with_inner_llm)
+    runtime._emit_say.return_value = {"message_id": "say-1", "content": "x"}
+
+    asyncio.run(node(_spell_state()))
+
+    # スペルの失敗として続きの生成に見せている
+    assert any(
+        "[Spell Error: " in str(m.get("content", "")) and "RateLimitError" in str(m.get("content", ""))
+        for m in client.seen_messages if isinstance(m, dict)
+    )
+    assert not _has_spell_system_error_note(client.seen_messages)
+    said_texts = [c.args[2] for c in runtime._emit_say.call_args_list]
+    assert any("だめだったみたい。" in t for t in said_texts), said_texts
+
+
+# ---------------------------------------------------------------------------
+# 返事が止まった回の出口 — 止まり方の場面ごとに、行に残るもの・印・通告・案内
+# (docs/intent/reply_stop_exit.md)
+# ---------------------------------------------------------------------------
+
+TWO_SPELLS = (
+    "やるね。\n"
+    f"/spell name='{SPELL_NAME}' args={{\"step\": 1}}\n"
+    f"/spell name='{SPELL_NAME}' args={{\"step\": 2}}"
+)
+
+
+def _model_gone() -> ModelUnavailableError:
+    return ModelUnavailableError(
+        "the lightweight model is gone", role="lightweight_model", reason="missing",
+    )
+
+
+def _first_ok_then_model_gone():
+    calls = {"n": 0}
+
+    async def _spell(tool_name, tool_args, persona, state, playbook_name,
+                     event_callback, messages=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ("一つ目はやりました", None, True)
+        raise _model_gone()
+
+    return _spell
+
+
+def test_a_stop_during_spell_execution_keeps_the_received_result_and_says_unknown(
+    monkeypatch,
+):
+    """スペル群の一つ目の結果が来てから、二つ目の実行中に止まった回 (②)。
+
+    行には受け取った一つ目の結果が残り、結果の来ていない二つ目は唱えた行だけが
+    残る。通告は ② — 「実行されていない」とは断定しない。周の本文は周の頭で
+    記憶に書かれているので重ねず、受け取った結果は記憶にも書く。
+    """
+    client = _ScriptedStreamClient([[TWO_SPELLS]])
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    runtime._emit_speak_start.side_effect = ["msg-1", "msg-2"]
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _first_ok_then_model_gone())
+
+    with pytest.raises(ModelUnavailableError) as excinfo:
+        _run_reply(node, _spell_state(), runtime, persona, events)
+
+    runtime._emit_speak_finalize.assert_called_once()
+    call = runtime._emit_speak_finalize.call_args
+    assert call.args[2] == "msg-1"
+    row = call.args[3]
+    assert row.startswith("やるね。")
+    assert row.count("<user_only") == 2          # 唱えた行は二つとも残る
+    assert row.count("spellResult") == 1         # 結果の折りたたみは一つ目だけ
+    assert "一つ目はやりました" in row
+    assert '"step": 2' in row
+    # 記憶: 周の本文 (assistant) は周の頭の 1 回だけ、受け取った結果は system で
+    assistant_rows = [
+        c for c in runtime._store_memory.call_args_list
+        if c.kwargs.get("role") == "assistant"
+    ]
+    assert len(assistant_rows) == 1
+    system_rows = [
+        c.args[1] for c in runtime._store_memory.call_args_list
+        if c.kwargs.get("role") == "system"
+    ]
+    assert system_rows == [f"[Spell Result: {SPELL_NAME}]\n一つ目はやりました"]
+    # 印と通告 (②) とエラー札の案内
+    assert last_saved_utterance("p1").form == SAVED_FORM_SPELL_UNFINISHED
+    assert _marked(persona) == [("b1", "msg-1")]
+    (notice_room, notice), = _notices(persona)
+    assert notice_room == "b1"
+    assert notice == (
+        "(発言の後に唱えたスペルは、実行が終わる前に中断されました。"
+        "結果は届いておらず、どこまで実行されたかは不明です)"
+    )
+    assert "実行されていません" not in notice
+    assert excinfo.value.to_dict()["interrupted_message_id"] == "msg-1"
+
+
+def test_a_stop_during_spell_execution_without_streaming_writes_the_partial_round(
+    monkeypatch,
+):
+    """ストリーミングを使わない経路の ② — それまでの周と止まった周の途中までを
+    建物へ書いてから止まる (以前は周の発言が建物に書かれないまま止まった)。"""
+    client = _ScriptedSyncClient([TWO_SPELLS])
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: False)
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _first_ok_then_model_gone())
+
+    with pytest.raises(ModelUnavailableError) as excinfo:
+        _run_reply(node, _spell_state(), runtime, persona, events)
+
+    said = [c.args[2] for c in runtime._emit_say.call_args_list]
+    # 早期の吹き出し (唱える前の文) と、止まった周の途中まで
+    assert said[0] == "やるね。"
+    assert "一つ目はやりました" in said[-1]
+    assert said[-1].count("<user_only") == 2
+    assert said[-1].count("spellResult") == 1
+    assert _notices(persona) == [(
+        "b1",
+        "(発言の後に唱えたスペルは、実行が終わる前に中断されました。"
+        "結果は届いておらず、どこまで実行されたかは不明です)",
+    )]
+    assert excinfo.value.to_dict()["interrupted_message_id"] == (
+        last_saved_utterance("p1").message_id
+    )
+
+
+def test_a_failed_continuation_marks_the_spell_utterance_with_the_results_notice(
+    monkeypatch,
+):
+    """スペルの結果を受け取った後、続きの生成が一文字も出ないうちに失敗した回 (③)。
+
+    続きのために開けた行は取り下げ、印と通告はスペルの結果で終わる発言に付く。
+    エラー札にはその発言の id が載る (「再送」ではなく「続きの生成」へ案内する)。
+    """
+    from llm_clients.exceptions import ServerError
+
+    err = ServerError("503 Service Unavailable")
+    runtime, persona, node, events = _build_spell_node(
+        monkeypatch, calls=[[f"やるね。\n{SPELL_LINE}"], err],
+    )
+    runtime._withdraw_speak_placeholder.return_value = True
+
+    with pytest.raises(ServerError) as excinfo:
+        _run_reply(node, _spell_state(), runtime, persona, events)
+
+    assert excinfo.value is err
+    runtime._withdraw_speak_placeholder.assert_called_once()
+    assert "やりました" in runtime._emit_speak_finalize.call_args_list[0].args[3]
+    assert _marked(persona) == [("b1", "msg-1")]
+    assert _notices(persona) == [
+        ("b1", "(スペルの結果を受け取った後、続きの発言の前に中断されました)"),
+    ]
+    event = err.to_dict()
+    assert event["error_code"] == "server_error"
+    assert event["interrupted_message_id"] == "msg-1"
+    assert "interrupted_building_id" not in event
+
+
+def test_a_stop_in_the_room_the_persona_moved_to_names_that_room(monkeypatch):
+    """スペルで部屋を移り、移った先の発言の途中で止まった回 — その部屋の行に印と
+    通告が付き、エラー札には部屋の id と表示名が載る (返事の部屋では押せない)。"""
+    from llm_clients.exceptions import ServerError
+
+    err = ServerError("503 Service Unavailable")
+    runtime, persona, node, events = _build_spell_node(
+        monkeypatch,
+        calls=[[f"移るね。\n{SPELL_LINE}"], ["移った先で話し", err]],
+    )
+    rooms = ["b1"]
+    runtime._effective_building_id.side_effect = lambda _p, _fallback: rooms[-1]
+
+    async def _moving_spell(tool_name, tool_args, persona_, state, playbook_name,
+                            event_callback, messages=None):
+        rooms.append("b2")
+        return ("移動しました", None, True)
+
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _moving_spell)
+
+    with pytest.raises(ServerError):
+        _run_reply(node, _spell_state(), runtime, persona, events, reply_building_id="b1")
+
+    second = runtime._emit_speak_finalize.call_args_list[1]
+    assert (second.args[1], second.args[2], second.args[3]) == ("b2", "msg-2", "移った先で話し")
+    assert _marked(persona) == [("b2", "msg-2")]
+    assert _notices(persona) == [("b2", "(ここで発言が中断されました)")]
+    event = err.to_dict()
+    assert event["interrupted_message_id"] == "msg-2"
+    assert event["interrupted_building_id"] == "b2"
+    assert event["interrupted_building_name"] == "書斎"
+
+
+def test_a_dying_beat_by_itself_places_no_mark_and_no_notice(monkeypatch):
+    """Beat の出口 (サブラインの中の Beat も同じ) は保存だけ — 印と通告は返事の
+    一番外側の後始末が一回だけ置く。内側で置くと、外側が後から書く発言との
+    順序が狂う (前の実装の迷子の原因)。"""
+    client = _FakeStreamClient(chunks=["こんにちは。"], iter_exc=RuntimeError("died mid-stream"))
+
+    async def _unused_spell_loop(**kwargs):  # pragma: no cover - 到達しない
+        raise AssertionError("spell loop must not run")
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_unused_spell_loop,
+    )
+    with pytest.raises(LLMError):
+        asyncio.run(node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    runtime._emit_speak_finalize.assert_called_once()
+    assert _marked(persona) == []
+    assert _notices(persona) == []
     assert not [e for e in events if e.get("interrupted")]
+    # 流し込みの吹き出しは閉じる (印の無い合図で)。保存の合図で行の id も届く。
+    assert [e for e in events if e.get("type") == "streaming_complete"]
+    assert [e for e in events if e.get("type") == "speak_persisted"] == [{
+        "type": "speak_persisted", "message_id": "msg-1", "persona_id": "p1",
+        "pulse_id": "pl-1", "building_id": "b1",
+    }]
+    # 保存した事実 (形と「この後で話が止まった」) だけが記録に残る
+    record = last_saved_utterance("p1")
+    assert (record.message_id, record.form, record.stopped) == ("msg-1", SAVED_FORM_CUT, True)
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-25 レビュー消し込み — 回帰テスト
+# ---------------------------------------------------------------------------
+
+def test_a_stop_without_a_draft_row_is_not_swallowed(monkeypatch):
+    """ストリーミングの口で下書き行が作れなかった回 — ループはストリーミングを
+    使わずに走り、止まった理由を例外ではなく戻り値 (stop_error) で返す。
+
+    呼び出し口がそれを投げ直さないと、返事を止める例外 (ここでは使うモデルが
+    無い回) が握り潰され、返事が「正常に終わった」ことになる。ほかの三つの口
+    (ツールモード・全文一括・作業セッション) と同じく、周の発言を建物へ
+    書き終えてから投げる。
+    """
+    client = _ScriptedStreamClient([[TWO_SPELLS]])
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    runtime._emit_speak_start.return_value = None
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _first_ok_then_model_gone())
+
+    with pytest.raises(ModelUnavailableError) as excinfo:
+        _run_reply(node, _spell_state(), runtime, persona, events)
+
+    # 止まった周の途中まで (受け取った一つ目の結果 + 唱えた二つ目の行) は
+    # 建物へ書かれてから投げられている
+    said = [c.args[2] for c in runtime._emit_say.call_args_list]
+    assert any("一つ目はやりました" in s and s.count("<user_only") == 2 for s in said), said
+    record = last_saved_utterance("p1")
+    assert record.form == SAVED_FORM_SPELL_UNFINISHED
+    assert _notices(persona) == [(
+        "b1",
+        "(発言の後に唱えたスペルは、実行が終わる前に中断されました。"
+        "結果は届いておらず、どこまで実行されたかは不明です)",
+    )]
+    assert excinfo.value.to_dict()["interrupted_message_id"] == record.message_id
+
+
+def test_a_raw_stream_cut_after_a_spell_shows_the_same_error_as_without_spells(
+    monkeypatch,
+):
+    """スペルの後の続きのストリームが、LLMError に包まれない例外で切れた回。
+
+    以前は「スペル内部の致命エラー」に飲まれて注記つきで黙って閉じ、画面に
+    何も出なかった (隔離検証の spell_then_cut_abort)。スペル無しの同じ切断は
+    エラー札が出る — 同じ失敗が場面で違う顔にならないよう、続きの生成の失敗
+    として普通の返事の失敗と同じエラー札に至らせる。
+    """
+    # スペルを一周した後の続きのストリームが、LLMError でない例外で切れた回
+    # (先に組む — _build_node は _run_spell_loop を差し替えるので、後に組むと
+    # 本物のループを掴めない)
+    runtime, persona, node, events = _build_spell_node(
+        monkeypatch,
+        calls=[[f"やるね。\n{SPELL_LINE}"], RuntimeError("connection reset")],
+    )
+    runtime._withdraw_speak_placeholder.return_value = True
+
+    with pytest.raises(LLMError) as spell_exc:
+        _run_reply(node, _spell_state(), runtime, persona, events)
+
+    # スペル無しの返事で、同じ例外でストリームが切れた回のエラー札
+    plain_client = _FakeStreamClient(call_exc=RuntimeError("connection reset"))
+
+    async def _no_spells(**kwargs):  # pragma: no cover - 到達しない
+        raise AssertionError("spell loop must not run")
+
+    _, _, plain_node, _ = _build_node(
+        monkeypatch, client=plain_client, spell_loop=_no_spells,
+    )
+    with pytest.raises(LLMError) as plain_exc:
+        asyncio.run(plain_node({"_messages": [], "_pulse_id": "pl-1"}))
+
+    plain_event = plain_exc.value.to_dict()
+    spell_event = spell_exc.value.to_dict()
+    for key in ("type", "error_code", "content", "technical_detail"):
+        assert spell_event[key] == plain_event[key], key
+    assert isinstance(spell_exc.value.original_error, RuntimeError)
+    # 印と通告 (③) はスペルの結果で終わる発言に、エラー札はそこへ案内する
+    assert _marked(persona) == [("b1", "msg-1")]
+    assert _notices(persona) == [
+        ("b1", "(スペルの結果を受け取った後、続きの発言の前に中断されました)"),
+    ]
+    assert spell_event["interrupted_message_id"] == "msg-1"
+
+
+def test_a_raw_continuation_failure_without_streaming_is_a_continuation_failure(
+    monkeypatch,
+):
+    """ストリーミングを使わない経路でも同じ — 周の発言を建物へ書いてから、
+    包んだ LLMError を投げる (スペル内部の致命エラーの注記で黙って閉じない)。"""
+    client = _ScriptedSyncClient([
+        f"やるね。\n{SPELL_LINE}", RuntimeError("connection reset"),
+    ])
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: False)
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _ok_spell)
+
+    with pytest.raises(LLMError) as excinfo:
+        _run_reply(node, _spell_state(), runtime, persona, events)
+
+    assert isinstance(excinfo.value.original_error, RuntimeError)
+    assert not _has_spell_system_error_note(client.seen_messages)
+    said = [c.args[2] for c in runtime._emit_say.call_args_list]
+    assert any("やりました" in s for s in said), said
+    assert _notices(persona) == [
+        ("b1", "(スペルの結果を受け取った後、続きの発言の前に中断されました)"),
+    ]
+
+
+def test_a_stream_cut_note_never_lands_on_an_utterance_from_before_the_reply():
+    """確定に失敗した回の切断の書き足しは、この返事で最後に保存できた行が記録の
+    最後の発言と一致するときだけ付ける。
+
+    記録の最後の発言がこの返事より前のものだと、返事の後始末は時間窓でそれを
+    読み飛ばす — そこへ書き足すと、知らせがどこにも出ずに消える。付けられない
+    回は画面への知らせをここで直接出す。
+    """
+    _, persona = _reply_world()
+    _saved(persona, "old")      # この返事より前の発言
+    cut = {"code": 500, "message": "internal error"}
+
+    # この返事ではまだ何も保存していない (id が無い)
+    events: list = []
+    runtime_llm._note_stream_cut(
+        persona, cut, message_id=None, reply_last_message_id=None,
+        event_callback=events.append,
+    )
+    assert last_saved_utterance("p1").stopped is False
+    assert [e["type"] for e in events] == ["info"]
+
+    # この返事で保存した行が、記録の最後の発言と一致しない
+    events = []
+    runtime_llm._note_stream_cut(
+        persona, cut, message_id=None, reply_last_message_id="mine",
+        event_callback=events.append,
+    )
+    assert last_saved_utterance("p1").stopped is False
+    assert [e["type"] for e in events] == ["info"]
+
+    # 一致する回だけ書き足す (知らせは後始末が案内つきで出すのでここでは出さない)
+    _saved(persona, "mine")
+    events = []
+    runtime_llm._note_stream_cut(
+        persona, cut, message_id=None, reply_last_message_id="mine",
+        event_callback=events.append,
+    )
+    record = last_saved_utterance("p1")
+    assert (record.message_id, record.stopped) == ("mine", True)
+    assert record.detail == {"stream_error": cut}
+    assert events == []
+
+
+def test_unexecuted_spells_leave_only_the_cast_line_without_a_result_block(
+    monkeypatch,
+):
+    """止まった周で結果の来ていないスペル・未登録のスペル・引数の壊れたスペルは、
+    結果の折りたたみ (<details>) を作らず、唱えた行だけを残す (不変条件 5)。"""
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+    text = (
+        "やるね。\n"
+        f"/spell name='{SPELL_NAME}' args={{\"step\": 1}}\n"
+        "/spell name='unknown_spell' args={}\n"
+        f"/spell name='{SPELL_NAME}' args={{broken"
+    )
+    composed = runtime_llm._compose_stopped_round(text, [])
+
+    assert composed["form"] == SAVED_FORM_SPELL_UNFINISHED
+    row = composed["text"]
+    assert "<details" not in row
+    assert "spellResult" not in row
+    assert row.count("<user_only") == 3
+    assert '"step": 1' in row
+    assert "unknown_spell" in row
+    assert "args={broken" in row

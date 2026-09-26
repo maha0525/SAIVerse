@@ -168,6 +168,7 @@ def test_the_persistence_signal_is_emitted_after_a_successful_save() -> None:
         "message_id": "room:5",
         "persona_id": "p1",
         "pulse_id": "pl",
+        "building_id": "room",
     }]
 
 
@@ -180,6 +181,86 @@ def test_no_signal_when_the_save_failed() -> None:
     _finalize(runtime, "こんにちは", events)
 
     assert events == []
+
+
+# ---------------------------------------------------------------------------
+# 事実の記録 — 「このペルソナが最後に保存した発言」は保存完了の判定と同じ口で書く
+# (docs/intent/reply_stop_exit.md §1)
+# ---------------------------------------------------------------------------
+
+
+def test_a_saved_utterance_is_recorded_even_without_a_screen() -> None:
+    """画面に繋がっていない保存 (event_callback が無い回) でも記録は書く。
+
+    返事が止まった回の後始末は、画面の有無と関係なくこの記録から「続きの
+    生成」を出す発言を決める。
+    """
+    from sea.runtime_emitters import (
+        forget_saved_utterances,
+        last_saved_utterance,
+        notify_speak_persisted,
+    )
+
+    forget_saved_utterances()
+    notify_speak_persisted(
+        None, {"message_id": "room:7", "content": "こんにちは"},
+        SimpleNamespace(persona_id="p-record"), "pl", building_id="room",
+    )
+
+    record = last_saved_utterance("p-record")
+    assert record is not None
+    assert (record.message_id, record.building_id) == ("room:7", "room")
+    assert record.form == "complete"
+    assert record.stopped is False
+
+
+def test_a_row_without_body_does_not_replace_the_record() -> None:
+    """本文が空の行・採番の無い行は発言ではない — 記録を置き換えない。"""
+    from sea.runtime_emitters import (
+        forget_saved_utterances,
+        last_saved_utterance,
+        notify_speak_persisted,
+    )
+
+    forget_saved_utterances()
+    persona = SimpleNamespace(persona_id="p-record")
+    notify_speak_persisted(
+        None, {"message_id": "room:7", "content": "こんにちは"}, persona, "pl",
+        building_id="room",
+    )
+    notify_speak_persisted(
+        None, {"message_id": "room:8", "content": "   "}, persona, "pl",
+        building_id="room",
+    )
+    notify_speak_persisted(
+        None, {"content": "採番なし"}, persona, "pl", building_id="room",
+    )
+
+    assert last_saved_utterance("p-record").message_id == "room:7"
+
+
+def test_the_record_is_per_persona_across_pulse_ids() -> None:
+    """記録はペルソナ単位 — tell のように別の pulse_id で書いた発言も最後の
+    発言として上書きする (pulse_id で切ると取りこぼす)。"""
+    from sea.runtime_emitters import (
+        forget_saved_utterances,
+        last_saved_utterance,
+        notify_speak_persisted,
+    )
+
+    forget_saved_utterances()
+    persona = SimpleNamespace(persona_id="p-record")
+    notify_speak_persisted(
+        None, {"message_id": "room:7", "content": "返事"}, persona, "reply-pulse",
+        building_id="room",
+    )
+    notify_speak_persisted(
+        None, {"message_id": "other:3", "content": "tell の発言"}, persona,
+        "tell-pulse", building_id="other",
+    )
+
+    record = last_saved_utterance("p-record")
+    assert (record.message_id, record.building_id) == ("other:3", "other")
 
 
 def test_no_signal_when_the_placeholder_was_missing() -> None:
@@ -453,6 +534,7 @@ def test_emit_say_fires_the_signal_after_a_successful_insert() -> None:
         "message_id": "room:9",
         "persona_id": "p1",
         "pulse_id": "pl",
+        "building_id": "room",
     }]
 
 
@@ -501,6 +583,7 @@ def test_emit_speak_fires_the_signal_after_a_successful_insert() -> None:
         "message_id": "room:9",
         "persona_id": "p1",
         "pulse_id": "pl",
+        "building_id": "room",
     }]
 
 
@@ -576,6 +659,7 @@ def test_lg_say_node_emits_the_signal_through_the_real_wiring() -> None:
         "message_id": "room:9",
         "persona_id": "p1",
         "pulse_id": "pl",
+        "building_id": "room",
     }]
 
 
@@ -771,3 +855,75 @@ def test_finalize_serializes_on_the_same_pulse_as_the_sub_speaks(monkeypatch) ->
     sub_keys = [c["order_key"] for c in calls if c.get("is_final") is False]
     assert finalize_keys == ["pulse-A"]
     assert sub_keys == ["pulse-A"]
+
+
+# ---------------------------------------------------------------------------
+# K: 返事が止まった回の後始末は、返事の実行の一番外側で一回だけ
+# (docs/intent/reply_stop_exit.md)
+# ---------------------------------------------------------------------------
+
+
+def _reply_runtime(monkeypatch, run_playbook):
+    """run_meta_user の本体 (_run_meta_user_with_models) を、前後の処理を素通しに
+    して回せる SEARuntime。後始末の呼び出しを控える。"""
+    import sea.runtime as sea_runtime
+    from sea.runtime import SEARuntime
+
+    monkeypatch.setattr(
+        sea_runtime, "resolve_execution_context",
+        lambda *a, **k: SimpleNamespace(model_key="model-a"),
+    )
+    monkeypatch.setattr(sea_runtime, "refresh_mcp_tools_at_head", lambda *a, **k: None)
+    settles: list = []
+    monkeypatch.setattr(
+        sea_runtime, "settle_reply_stop",
+        lambda runtime, persona, **kwargs: settles.append(kwargs),
+    )
+    runtime = SEARuntime(SimpleNamespace())
+    runtime.session_lifecycle = MagicMock()
+    runtime.session_lifecycle.ensure_window_floor.return_value = "ok"
+    monkeypatch.setattr(runtime, "_choose_playbook", lambda **k: SimpleNamespace(name="pb"))
+    monkeypatch.setattr(runtime, "_run_playbook", run_playbook)
+    persona = SimpleNamespace(persona_id="p1", sai_memory=None)
+    return runtime, persona, settles
+
+
+def test_run_meta_user_settles_once_with_the_error_before_raising(monkeypatch) -> None:
+    """返事がエラーで閉じたら、元の例外を投げる前に後始末を一回だけ通す。"""
+    from llm_clients.exceptions import LLMError
+
+    err = LLMError("boom")
+
+    def _run_playbook(*args, **kwargs):
+        raise err
+
+    runtime, persona, settles = _reply_runtime(monkeypatch, _run_playbook)
+    events: list = []
+
+    with pytest.raises(LLMError) as excinfo:
+        runtime._run_meta_user_with_models(
+            persona, "こんにちは", "room", MagicMock(),
+            event_callback=events.append, pulse_type="user",
+        )
+
+    assert excinfo.value is err
+    assert len(settles) == 1
+    assert settles[0]["exc"] is err
+    assert settles[0]["reply_building_id"] == "room"
+    assert settles[0]["event_callback"] == events.append
+
+
+def test_run_meta_user_settles_once_without_an_error_on_a_clean_finish(monkeypatch) -> None:
+    """例外なしで閉じた回も一回だけ通す (話が止まった書き足しがあるときだけ働く)。"""
+    runtime, persona, settles = _reply_runtime(
+        monkeypatch, lambda *args, **kwargs: ["ok"],
+    )
+
+    result = runtime._run_meta_user_with_models(
+        persona, "こんにちは", "room", MagicMock(), pulse_type="user",
+    )
+
+    assert result == ["ok"]
+    assert len(settles) == 1
+    assert settles[0]["exc"] is None
+    assert settles[0]["started_at"] > 0

@@ -8,6 +8,12 @@
 
 ## 直した (2026-08-27) — Beat の出口で一括して受け止める
 
+> **2026-09-25 追記 (現在のコードとの対応)**: 2026-09-25 の作り直しで後始末は
+> `sea/reply_stop_exit.py` の `settle_reply_stop` に一本化した (保存は
+> `_save_cut_utterance` / `_save_draft_on_beat_death`)。下の記録に出てくる
+> `_settle_placeholder_on_beat_death` / `_settle_interrupted_utterance` は現存しない
+> (docs/intent/reply_stop_exit.md)。
+
 候補 1 の「300 行を try/finally で囲む」は採らなかった。`lg_llm_node` の node() には
 **すべての死に方が通る except 節 (= Beat の出口) が既にあり**、そこへ後始末
 `_settle_placeholder_on_beat_death` を差した (`sea/runtime_llm.py`)。囲み直しゼロで、

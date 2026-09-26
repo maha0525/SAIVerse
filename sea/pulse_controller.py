@@ -196,8 +196,9 @@ class PulseController:
         終了時はすべて締める。
 
         走行中の request の cancellation_token に "server_shutdown" を刻んで
-        取り消し、Beat の出口の後始末 (途中本文の確定・中断の通告・記憶書き込み。
-        ``sea/runtime_llm.py`` の ``_settle_placeholder_on_beat_death``) が
+        取り消し、Beat の出口の保存 (途中本文の確定・記憶書き込み。
+        ``sea/runtime_llm.py`` の ``_save_draft_on_beat_death``) と、返事の
+        一番外側の後始末 (印と中断の通告。``sea/reply_stop_exit.py``) が
         走り終えるのを待つ。これを呼ばずにプロセスが死ぬと、daemon の生成
         スレッドが凍った瞬間に下書き行 (content="") が未確定のまま残り、
         発言が画面・記録・記憶から丸ごと消える。
@@ -507,9 +508,10 @@ class PulseController:
             # 区別がつかない — そちらには昔から何も書いておらず、中断だけ機構の声を
             # 足すと、そこだけ不揃いになる。
             #
-            # 途中まで喋ってから止められた回は、言いかけた本文と中断の通告を
-            # ``sea/runtime_llm.py`` の停止の後片付けで書いている (そちらは例外に
-            # 包まれる前を通るので確実に届く)。
+            # 途中まで喋ってから止められた回は、言いかけた本文を
+            # ``sea/runtime_llm.py`` の停止の保存が書き、印と中断の通告を返事の
+            # 一番外側の後始末 (``sea/reply_stop_exit.py``、run_meta_user が呼ぶ)
+            # が置いている。どちらもこの except に届く前を通る。
             return []
         except WindowFloorUnmetError as e:
             # 最終防衛ライン未達 (arasuji_levels.md §15-5): Playbook は走って

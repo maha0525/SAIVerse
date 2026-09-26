@@ -27,6 +27,13 @@ try:  # ``packaging`` ships with pip, so every SAIVerse venv has it.
 except Exception:  # pragma: no cover - exercised by the degraded-parser test
     _Requirement = None  # type: ignore[assignment]
 
+try:
+    from packaging.version import InvalidVersion as _InvalidVersion
+    from packaging.version import Version as _Version
+except Exception:  # pragma: no cover - packaging ships with pip
+    _Version = None  # type: ignore[assignment]
+    _InvalidVersion = ValueError  # type: ignore[assignment,misc]
+
 LOGGER = logging.getLogger("saiverse.update")
 
 # Written next to the other self-update state files (``.update_config.json``,
@@ -57,6 +64,28 @@ LEGACY_REQUIREMENTS = "requirements.txt"
 CHECK_READY = 0
 CHECK_NEEDS_FINISH = 10
 CHECK_INCONCLUSIVE = 11
+
+# Release channels (docs/intent/early_access_release.md §3-1). The branch the
+# checkout is on is the *only* place that decides which releases it receives
+# (invariant 4) -- there is no separate setting that could drift from it. Any
+# other branch (a developer's ``develop``, a detached HEAD) counts as stable
+# for update notices, and cannot be switched from.
+CHANNEL_STABLE = "stable"
+CHANNEL_EARLY_ACCESS = "early_access"
+CHANNEL_BRANCHES = {
+    CHANNEL_STABLE: "main",
+    CHANNEL_EARLY_ACCESS: "early-access",
+}
+# The remote every install tracks: ``git clone`` names it origin, and
+# setup.bat / setup.sh add it under that name for ZIP installs.
+UPDATE_REMOTE = "origin"
+# Snapshot name prefix per switch direction, so a restore point taken before
+# joining (or leaving) early access is told apart from a routine
+# ``auto_before_update_*`` one.
+SWITCH_SNAPSHOT_PREFIX = {
+    CHANNEL_EARLY_ACCESS: "ea_optin",
+    CHANNEL_STABLE: "ea_return",
+}
 
 
 class UpdateError(RuntimeError):
@@ -723,9 +752,13 @@ def _discard_command(status: str) -> str:
     return "git checkout -- ."
 
 
-def assert_git_update_ready(project_dir: Path) -> str:
+def assert_git_update_ready(project_dir: Path, *, switching: bool = False) -> str:
     """Refuse to update unless the checkout is a Git repo with no modified
     tracked files, and return the current ``HEAD`` revision.
+
+    ``switching`` words the refusal for a channel switch (the same check guards
+    it, docs/intent/early_access_release.md §3-2-3): the user is told to switch
+    again, not to run an update they never asked for.
 
     Only *tracked* files are inspected (``--untracked-files=no``). Untracked
     files (macOS ``.DS_Store``, a diagnostics script dropped into the folder,
@@ -739,6 +772,10 @@ def assert_git_update_ready(project_dir: Path) -> str:
     docs/issues/archive/update_refuses_on_tracked_local_changes_without_exit.md).
     """
     if not (project_dir / ".git").is_dir() or shutil.which("git") is None:
+        if switching:
+            raise UpdateError(
+                "Switching the release channel requires a Git checkout of SAIVerse."
+            )
         raise UpdateError(
             "Automatic update requires a Git checkout. The former ZIP overlay path is "
             "disabled because it cannot safely remove retired files without deleting "
@@ -752,6 +789,18 @@ def assert_git_update_ready(project_dir: Path) -> str:
         encoding="utf-8",
     ).stdout
     if status.strip("\0 \r\n"):
+        if switching:
+            raise UpdateError(
+                "Working tree has local changes. The channel switch was not started; "
+                "the updater never stashes or resets user work, and switching would "
+                "carry these changes onto the other release line.\n"
+                "Modified files:\n" + _format_local_changes(status) + "\n"
+                "If you do not need these changes, discard them by running this "
+                "command in the SAIVerse folder, then switch the channel again:\n"
+                "  " + _discard_command(status) + "\n"
+                "If you want to keep the changes, commit them first, then switch "
+                "the channel again."
+            )
         raise UpdateError(
             "Working tree has local changes. Update was not started; the updater "
             "never stashes or resets user work.\n"
@@ -812,8 +861,20 @@ def _remove_partial_snapshot_archive(tmp_archive: Path) -> None:
 SNAPSHOT_TIMEOUT_SECONDS = 3600
 
 
-def create_pre_update_snapshot(project_dir: Path, python: str) -> str:
-    name = datetime.now(timezone.utc).strftime("auto_before_update_%Y%m%d_%H%M%S_%f")
+def create_pre_update_snapshot(
+    project_dir: Path,
+    python: str,
+    *,
+    prefix: str = "auto_before_update",
+    note: str = "Automatic restore point before code update",
+) -> str:
+    """Save and validate a whole-world snapshot before any code moves.
+
+    ``prefix`` / ``note`` let a channel switch label its restore point
+    (``ea_optin_*`` / ``ea_return_*``) so it can be told apart from a routine
+    update's later.
+    """
+    name = datetime.now(timezone.utc).strftime(f"{prefix}_%Y%m%d_%H%M%S_%f")
     # snapshot.py は書き上がった ZIP を .zip.tmp から os.replace で publish する。
     # ここでタイムアウトすると _run が子プロセスを kill するので snapshot.py 側の
     # except 節は走らず、書きかけの .zip.tmp が数十 GB のまま残る。子を殺した
@@ -827,7 +888,7 @@ def create_pre_update_snapshot(project_dir: Path, python: str) -> str:
                 "save",
                 name,
                 "--note",
-                "Automatic restore point before code update",
+                note,
             ],
             cwd=project_dir,
             label="create and validate pre-update world snapshot",
@@ -865,6 +926,286 @@ def update_code(project_dir: Path) -> None:
         label="fast-forward code update",
         timeout=300,
     )
+
+
+# --- Release channels -------------------------------------------------------
+
+
+def read_checkout_branch(project_dir: Path) -> str | None:
+    """The branch ``HEAD`` points at, read from the git metadata files.
+
+    For callers that must stay cheap and must not depend on a ``git`` binary
+    (the version endpoint is polled, and a PortableGit-only install may not
+    have git on the server's PATH). Handles a normal ``.git`` directory and the
+    ``gitdir:`` pointer file of a linked worktree. Returns None for a detached
+    HEAD, a checkout that is not a git repo, or anything unreadable -- callers
+    treat that as the stable channel.
+    """
+    git_path = project_dir / ".git"
+    try:
+        if git_path.is_dir():
+            git_dir = git_path
+        elif git_path.is_file():
+            pointer = git_path.read_text(encoding="utf-8").strip()
+            if not pointer.startswith("gitdir:"):
+                return None
+            git_dir = Path(pointer[len("gitdir:"):].strip())
+            if not git_dir.is_absolute():
+                git_dir = project_dir / git_dir
+        else:
+            return None
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    prefix = "ref: refs/heads/"
+    if not head.startswith(prefix):
+        return None  # detached HEAD
+    branch = head[len(prefix):].strip()
+    return branch or None
+
+
+def channel_for_branch(branch: str | None) -> str:
+    """Which release channel a checkout on ``branch`` receives.
+
+    Only the early-access branch is early access; everything else -- main, a
+    development branch, a detached or unreadable HEAD -- keeps the stable
+    behaviour.
+    """
+    if branch == CHANNEL_BRANCHES[CHANNEL_EARLY_ACCESS]:
+        return CHANNEL_EARLY_ACCESS
+    return CHANNEL_STABLE
+
+
+def _current_branch(project_dir: Path) -> str | None:
+    """The checked-out branch according to git itself (None when detached)."""
+    result = _run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        cwd=project_dir,
+        label="record current branch",
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _git_ref_sha(project_dir: Path, ref: str) -> str | None:
+    """The commit ``ref`` names, or None when the ref does not exist."""
+    result = _run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+        cwd=project_dir,
+        label=f"resolve {ref}",
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _parse_version_text(text: str | None, what: str) -> Any:
+    """``packaging`` Version of ``text``; fail closed when it cannot be read.
+
+    The switch refuses rather than guesses: moving a world onto code whose
+    version cannot be compared is exactly the downgrade this check exists to
+    stop.
+    """
+    if _Version is None:
+        raise UpdateError(
+            "The packaging library is unavailable, so the versions of the two release "
+            "lines cannot be compared; the channel switch was not started"
+        )
+    if not text:
+        raise UpdateError(f"The version of {what} could not be read; the channel switch was not started")
+    try:
+        return _Version(text.strip())
+    except _InvalidVersion as exc:
+        raise UpdateError(
+            f"The version of {what} ({text.strip()!r}) is not a valid version; "
+            "the channel switch was not started"
+        ) from exc
+
+
+class SwitchPlan(NamedTuple):
+    """What ``preflight_switch`` verified, for the switch itself to act on."""
+
+    channel: str
+    target_branch: str
+    original_branch: str
+    old_revision: str
+
+
+def preflight_switch(project_dir: Path, channel: str) -> SwitchPlan:
+    """Verify a channel switch can be made, without touching the working tree.
+
+    Run twice: by the API before the backend shuts down (so the usual refusal
+    -- no early-access branch published yet -- costs the user nothing), and by
+    the engine after it, to close the race. Checks, in order:
+
+    1. the same clean-tree check an update uses (reworded for a switch);
+    2. the checkout is on the *other* channel's branch -- joining early access
+       starts from main and leaving it starts from early-access. A development
+       branch or a detached HEAD is refused rather than silently moved;
+    3. ``git fetch`` succeeds and the remote has the target branch. Until the
+       first early-access release there is no ``origin/early-access``, and this
+       is the normal refusal;
+    4. the target line's VERSION is not older than this checkout's. The world
+       only moves forward (startup refuses to open a newer world with older
+       code), so a switch onto an older version would leave SAIVerse unable to
+       start. For the return to stable this *is* the rule of
+       docs/intent/early_access_release.md §3-3; for joining it stops opting
+       into an early-access line the stable release has already overtaken.
+
+    Fetching updates remote-tracking refs only, never the working tree.
+    """
+    if channel not in CHANNEL_BRANCHES:
+        raise UpdateError(f"Unknown release channel {channel!r}")
+    old_revision = assert_git_update_ready(project_dir, switching=True)
+    target_branch = CHANNEL_BRANCHES[channel]
+    source_channel = CHANNEL_STABLE if channel == CHANNEL_EARLY_ACCESS else CHANNEL_EARLY_ACCESS
+    source_branch = CHANNEL_BRANCHES[source_channel]
+
+    original_branch = _current_branch(project_dir)
+    if original_branch == target_branch:
+        raise UpdateError(f"This SAIVerse is already on the {target_branch} branch; nothing to switch")
+    if original_branch != source_branch:
+        raise UpdateError(
+            f"Switching to the {target_branch} branch is only possible from the "
+            f"{source_branch} branch, but this checkout is on "
+            f"{original_branch or 'a detached HEAD'}. The channel switch was not started."
+        )
+
+    _run(
+        ["git", "fetch", UPDATE_REMOTE],
+        cwd=project_dir,
+        label="fetch release branches",
+        timeout=300,
+    )
+    remote_ref = f"refs/remotes/{UPDATE_REMOTE}/{target_branch}"
+    if _git_ref_sha(project_dir, remote_ref) is None:
+        raise UpdateError(
+            f"The {target_branch} branch has not been published on {UPDATE_REMOTE} yet, so "
+            "there is nothing to switch to. The channel switch was not started."
+        )
+
+    target_version_text = _run(
+        ["git", "show", f"{remote_ref}:VERSION"],
+        cwd=project_dir,
+        label=f"read the version of {target_branch}",
+        timeout=60,
+        check=False,
+        encoding="utf-8",
+    )
+    target_version = _parse_version_text(
+        target_version_text.stdout if target_version_text.returncode == 0 else None,
+        f"the {target_branch} branch",
+    )
+    current_version = _parse_version_text(read_version(project_dir), "this SAIVerse")
+    if target_version < current_version:
+        raise UpdateError(
+            f"The {target_branch} branch is at version {target_version}, older than this "
+            f"SAIVerse ({current_version}). The world data only moves forward, so switching "
+            "now would leave SAIVerse unable to start. The channel switch was not started; "
+            f"it becomes possible once {target_branch} reaches {current_version} or later."
+        )
+    return SwitchPlan(channel, target_branch, original_branch, old_revision)
+
+
+def prepare_switch_branch(project_dir: Path, target_branch: str) -> None:
+    """Point the local ``target_branch`` at the fetched remote head, with tracking.
+
+    Only refs change here, never the working tree, so a failure leaves nothing
+    to undo. A local branch that does not exist yet is created tracking the
+    remote one (so later updates fast-forward it through ``@{upstream}``). One
+    that exists -- ``main`` when returning from early access -- is
+    fast-forwarded to the remote head; if it has commits the remote lacks the
+    switch refuses, because moving the ref would drop them (the updater never
+    resets user work).
+    """
+    remote_branch = f"{UPDATE_REMOTE}/{target_branch}"
+    remote_sha = _git_ref_sha(project_dir, f"refs/remotes/{remote_branch}")
+    if remote_sha is None:
+        raise UpdateError(f"{remote_branch} disappeared after fetching; the channel switch was not started")
+    local_ref = f"refs/heads/{target_branch}"
+    local_sha = _git_ref_sha(project_dir, local_ref)
+    if local_sha is None:
+        _run(
+            ["git", "branch", "--track", target_branch, remote_branch],
+            cwd=project_dir,
+            label=f"create local {target_branch} tracking {remote_branch}",
+            timeout=60,
+        )
+        return
+    if local_sha != remote_sha:
+        is_ancestor = _run(
+            ["git", "merge-base", "--is-ancestor", local_sha, remote_sha],
+            cwd=project_dir,
+            label=f"check that {target_branch} can fast-forward",
+            timeout=60,
+            check=False,
+        )
+        if is_ancestor.returncode != 0:
+            raise UpdateError(
+                f"The local {target_branch} branch has commits that {remote_branch} does "
+                "not have, so it cannot be moved forward without dropping them. The "
+                "channel switch was not started."
+            )
+        _run(
+            ["git", "update-ref", local_ref, remote_sha, local_sha],
+            cwd=project_dir,
+            label=f"fast-forward local {target_branch}",
+            timeout=60,
+        )
+    _run(
+        ["git", "branch", f"--set-upstream-to={remote_branch}", target_branch],
+        cwd=project_dir,
+        label=f"track {remote_branch}",
+        timeout=60,
+    )
+
+
+def switch_code(project_dir: Path, target_branch: str) -> None:
+    """Check out ``target_branch`` -- the one step of a switch that moves code.
+
+    ``git switch`` is all-or-nothing: when it refuses, the checkout is left on
+    the original branch untouched. ``--no-overwrite-ignore`` is the same
+    protection ``update_code`` gets from merge: by default git silently
+    overwrites an *ignored* file when the other branch tracks that path, and
+    with the flag it refuses and names the file instead.
+    """
+    _run(
+        ["git", "switch", "--no-overwrite-ignore", target_branch],
+        cwd=project_dir,
+        label=f"switch code to {target_branch}",
+        timeout=300,
+    )
+
+
+def _checkout_untouched(project_dir: Path, original_branch: str, old_revision: str) -> bool:
+    """Whether a failed switch left the checkout exactly as it found it.
+
+    ``git switch`` normally refuses before writing anything, but on Windows a
+    file held open by another program can stop it half-way through writing the
+    tree. Rather than trust the refusal, look: same branch, same commit, no
+    modified tracked files. Anything else -- including not being able to tell
+    -- counts as touched, and the caller rolls back to the recorded branch.
+    """
+    try:
+        if _current_branch(project_dir) != original_branch:
+            return False
+        if _git_ref_sha(project_dir, "HEAD") != old_revision:
+            return False
+        status = _run(
+            ["git", "status", "--porcelain", "-z", "--untracked-files=no"],
+            cwd=project_dir,
+            label="verify the checkout after a failed switch",
+            timeout=60,
+            encoding="utf-8",
+        ).stdout
+    except UpdateError:
+        return False
+    return not status.strip("\0 \r\n")
 
 
 _PIP_CHECK_CLEAN = "No broken requirements found."
@@ -963,8 +1304,25 @@ def _rollback_code_and_dependencies(
     project_dir: Path,
     python: str,
     old_revision: str,
+    *,
+    branch: str | None = None,
 ) -> None:
-    """Best-effort repair used only after the initial clean-tree invariant."""
+    """Best-effort repair used only after the initial clean-tree invariant.
+
+    ``branch`` is set only for a channel switch: the checkout is first put back
+    on the branch recorded before the switch, and only then reset to the old
+    revision. Without it the reset would land on the *new* branch and leave the
+    checkout on the other release line at the old code (intent
+    early_access_release.md §3-2-3).
+    """
+    if branch is not None:
+        LOGGER.error("Switching code back to the %s branch", branch)
+        _run(
+            ["git", "switch", "--discard-changes", branch],
+            cwd=project_dir,
+            label="rollback branch",
+            timeout=120,
+        )
     LOGGER.error("Rolling code back to %s", old_revision)
     _run(
         ["git", "reset", "--hard", old_revision],
@@ -1067,22 +1425,75 @@ def _terminate_spawned(process: subprocess.Popen[Any]) -> None:
         LOGGER.exception("Could not terminate failed restarted process PID %s", process.pid)
 
 
-def run_update(config: dict[str, Any] | None, project_dir: Path) -> None:
+def run_update(
+    config: dict[str, Any] | None,
+    project_dir: Path,
+    *,
+    switch_channel: str | None = None,
+) -> None:
+    """Update the checkout, or -- with ``switch_channel`` -- move it to the
+    other release line.
+
+    A channel switch rides the same sequence as an update (snapshot, code,
+    dependencies, completion marker, restart) so it inherits every safety net
+    the update has (docs/intent/early_access_release.md §3-2). The differences
+    are confined to the code step (check out the other branch instead of
+    fast-forwarding this one), the snapshot label, and the rollback, which puts
+    the checkout back on the branch recorded before the switch.
+    """
     python = str(config.get("venv_python", sys.executable)) if config else sys.executable
     _ensure_portable_git_on_path(project_dir)
-    old_revision = assert_git_update_ready(project_dir)
+    plan: SwitchPlan | None = None
+    if switch_channel is None:
+        old_revision = assert_git_update_ready(project_dir)
 
     if config:
         wait_for_owned_process_exit(
             int(config["main_pid"]),
             config.get("main_process_created_at"),
         )
-    snapshot_name = create_pre_update_snapshot(project_dir, python)
+    if switch_channel is not None:
+        # The engine-side preflight runs *after* the old backend has fully
+        # exited: everything the dying process (or the user, in that window)
+        # still wrote to tracked files is seen by this check, not just by the
+        # API-side preflight that ran before shutdown (adversarial review
+        # 2026-09-25, TOCTOU finding). Nothing has been mutated yet, so a
+        # refusal here still leaves the checkout untouched.
+        plan = preflight_switch(project_dir, switch_channel)
+        old_revision = plan.old_revision
+        LOGGER.info(
+            "Switching release channel to %s: %s -> %s",
+            plan.channel,
+            plan.original_branch,
+            plan.target_branch,
+        )
+    if plan is None:
+        snapshot_name = create_pre_update_snapshot(project_dir, python)
+    else:
+        snapshot_name = create_pre_update_snapshot(
+            project_dir,
+            python,
+            prefix=SWITCH_SNAPSHOT_PREFIX[plan.channel],
+            note=f"Automatic restore point before switching to the {plan.target_branch} branch",
+        )
     LOGGER.info("Pre-update restore point: %s", snapshot_name)
+
+    def rollback() -> None:
+        if plan is None:
+            _rollback_code_and_dependencies(project_dir, python, old_revision)
+        else:
+            _rollback_code_and_dependencies(
+                project_dir, python, old_revision, branch=plan.original_branch
+            )
 
     code_changed = False
     try:
-        update_code(project_dir)
+        if plan is None:
+            update_code(project_dir)
+        else:
+            # Ref-only preparation first: if it fails, nothing needs undoing.
+            prepare_switch_branch(project_dir, plan.target_branch)
+            switch_code(project_dir, plan.target_branch)
         code_changed = True
         # The code moved, so whatever the marker recorded no longer holds. Drop
         # it here -- before the first phase that can leave packages half
@@ -1092,8 +1503,11 @@ def run_update(config: dict[str, Any] | None, project_dir: Path) -> None:
         invalidate_completion_marker(project_dir)
         update_dependencies(project_dir, python)
     except UpdateError:
-        if code_changed:
-            _rollback_code_and_dependencies(project_dir, python, old_revision)
+        if code_changed or (
+            plan is not None
+            and not _checkout_untouched(project_dir, plan.original_branch, old_revision)
+        ):
+            rollback()
         raise
 
     if not config:
@@ -1115,7 +1529,7 @@ def run_update(config: dict[str, Any] | None, project_dir: Path) -> None:
     except UpdateError:
         if process is not None:
             _terminate_spawned(process)
-        _rollback_code_and_dependencies(project_dir, python, old_revision)
+        rollback()
         rollback_process = restart_application(config)
         try:
             wait_for_healthy_restart(rollback_process, config)
@@ -1137,6 +1551,18 @@ def _load_config(config_path: Path) -> dict[str, Any]:
     return config
 
 
+def _config_switch_channel(config: dict[str, Any] | None) -> str | None:
+    """The channel a detached run was asked to switch to, or None for an update."""
+    if not config:
+        return None
+    channel = config.get("switch_channel")
+    if channel is None:
+        return None
+    if channel not in CHANNEL_BRANCHES:
+        raise UpdateError(f"Update config names an unknown release channel: {channel!r}")
+    return str(channel)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Canonical SAIVerse updater")
     parser.add_argument("--manual", action="store_true", help="Update while SAIVerse is stopped")
@@ -1150,6 +1576,16 @@ def main(argv: list[str] | None = None) -> int:
             f"Exit {CHECK_INCONCLUSIVE}: could not tell, start anyway."
         ),
     )
+    parser.add_argument(
+        "--switch-channel",
+        choices=sorted(CHANNEL_BRANCHES),
+        help=(
+            "With --manual: switch this checkout to the other release line "
+            f"({CHANNEL_EARLY_ACCESS} = the {CHANNEL_BRANCHES[CHANNEL_EARLY_ACCESS]} branch, "
+            f"{CHANNEL_STABLE} = {CHANNEL_BRANCHES[CHANNEL_STABLE]}) instead of updating it. "
+            "The UI passes the same request through the detached config."
+        ),
+    )
     args = parser.parse_args(argv)
 
     project_dir = Path(__file__).resolve().parent.parent
@@ -1160,8 +1596,14 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(project_dir)
     config_path = args.config or project_dir / ".update_config.json"
     try:
+        if args.switch_channel is not None and not args.manual:
+            raise UpdateError(
+                "--switch-channel is only accepted with --manual; the UI passes the "
+                "channel through the update config"
+            )
         config = None if args.manual else _load_config(config_path)
-        run_update(config, project_dir)
+        switch_channel = args.switch_channel if args.manual else _config_switch_channel(config)
+        run_update(config, project_dir, switch_channel=switch_channel)
     except UpdateError as exc:
         LOGGER.error("Update aborted: %s", exc)
         return 1

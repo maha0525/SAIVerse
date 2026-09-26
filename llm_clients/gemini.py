@@ -37,6 +37,19 @@ except Exception:  # pragma: no cover - absence is fine
 _sse_error_local: threading.local = threading.local()
 
 
+# 安全性フィルターでブロックされた回の見出し (チャットのエラー札の一行目に出る)。
+# 何が起きたかだけを書き、次の手立て (別モデルへ切り替えて発言の「再送」) は
+# 画面側の説明文 (i18n app.page.text050) に任せる。「入力内容を変更して」とは
+# 書かない — 発言は既に保存されていて、Gemini が拒んだ内容も別モデルなら
+# 通ることがあるから (2026-09-24 修正)。
+_RESPONSE_BLOCK_USER_MESSAGE = "Geminiの安全性フィルターにより、応答がブロックされました。"
+
+
+def _prompt_block_user_message(block_reason: str) -> str:
+    """プロンプト段階のブロック (prompt_feedback.block_reason) の見出し。"""
+    return f"Geminiの安全性フィルターにより、応答がブロックされました（{block_reason}）。"
+
+
 def _sdk_structured_parse_failure(exc: BaseException) -> Tuple[bool, Optional[str]]:
     """Detect a structured-output parse failure raised *inside* the google-genai SDK.
 
@@ -1601,10 +1614,7 @@ class GeminiClient(LLMClient):
                         )
                         raise SafetyFilterError(
                             f"Prompt blocked by Gemini: {block_str}",
-                            user_message=(
-                                f"入力内容がGeminiの安全性フィルターによりブロックされました（{block_str}）。"
-                                "該当メッセージの内容を確認してください。"
-                            ),
+                            user_message=_prompt_block_user_message(block_str),
                         )
 
                     if not all_parts:
@@ -1627,7 +1637,7 @@ class GeminiClient(LLMClient):
                             ]
                             raise SafetyFilterError(
                                 f"Content blocked by safety filter (streaming). Blocked: {blocked}",
-                                user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+                                user_message=_RESPONSE_BLOCK_USER_MESSAGE,
                             )
                         raise EmptyResponseError(
                             f"No parts in stream response (finish_reason={last_finish_reason})"
@@ -1731,10 +1741,7 @@ class GeminiClient(LLMClient):
                         )
                         raise SafetyFilterError(
                             f"Prompt blocked by Gemini: {block_str}",
-                            user_message=(
-                                f"入力内容がGeminiの安全性フィルターによりブロックされました（{block_str}）。"
-                                "該当メッセージの内容を確認してください。"
-                            ),
+                            user_message=_prompt_block_user_message(block_str),
                         )
 
                 if not resp.candidates:
@@ -1758,7 +1765,7 @@ class GeminiClient(LLMClient):
                         logging.warning("[gemini] Response blocked by safety filter: %s", detail)
                         raise SafetyFilterError(
                             f"Content blocked by safety filter. {detail}",
-                            user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+                            user_message=_RESPONSE_BLOCK_USER_MESSAGE,
                         )
 
                 if not candidate.content or not candidate.content.parts:
@@ -2113,6 +2120,23 @@ class GeminiClient(LLMClient):
                 get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
                 if finish_reason_time is not None:
                     post_finish_chunk_count += 1
+                # プロンプト段階のブロック (PROHIBITED_CONTENT 等)。この時 candidates は
+                # None なので、下の candidates 判定より先に見ないと黙って読み飛ばされ、
+                # 空のストリームとして理由なく終わる (2026-09-24 修正)。
+                _pf = getattr(chunk, "prompt_feedback", None)
+                _br = getattr(_pf, "block_reason", None) if _pf else None
+                if _br is not None:
+                    block_str = str(_br)
+                    _block_usage = getattr(chunk, "usage_metadata", None)
+                    logging.warning(
+                        "[gemini_stream] Prompt blocked: block_reason=%s, prompt_tokens=%s",
+                        block_str,
+                        getattr(_block_usage, "prompt_token_count", None) if _block_usage else None,
+                    )
+                    raise SafetyFilterError(
+                        f"Prompt blocked by Gemini: {block_str}",
+                        user_message=_prompt_block_user_message(block_str),
+                    )
                 if not chunk.candidates:
                     continue
                 candidate = chunk.candidates[0]
@@ -2141,7 +2165,7 @@ class GeminiClient(LLMClient):
                         logging.warning("[gemini] Stream blocked by safety filter: %s", detail)
                         raise SafetyFilterError(
                             f"Content blocked by safety filter. {detail}",
-                            user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+                            user_message=_RESPONSE_BLOCK_USER_MESSAGE,
                         )
 
                 if not candidate.content or not candidate.content.parts:
