@@ -1354,6 +1354,52 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         self.assertEqual(updated["content"], "挿絵を金曜までに渡す")
         self.assertIsNotNone(updated["due_at"])
 
+    def test_promise_update_accepts_task_prefixed_ref(self):
+        """一覧の [task:ID] をそのまま写した task_ref (task: 付き) でも update が
+        適用される — 一覧の提示形とペルソナの正しい写しが一致する。"""
+        from saiverse import task_book
+        entry = task_book.add_entry(
+            self.manager, "tester", "挿絵を渡す", origin="user", counterpart="user",
+        )
+        result = {
+            **_sluice_result(),
+            "promises": [{
+                "op": "update", "task_ref": f"task:{entry['task_id']}",
+                "content": "挿絵を金曜までに渡す",
+            }],
+        }
+        summary, _ = self._run(result)
+        self.assertEqual(summary["promises_applied"], 1)
+        self.assertEqual(summary["promises_failed"], 0)
+        updated = task_book.get_entry(self.manager, "tester", entry["task_id"])
+        self.assertEqual(updated["content"], "挿絵を金曜までに渡す")
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertIn(f"タスク帳の約束 {entry['task_id']} を更新", record)
+
+    def test_promise_update_task_ref_with_trailing_garbage_rejected(self):
+        """task:ID の後ろに余計な文字が付いた task_ref は推測で救済せず棄却 —
+        その要素だけ失敗し、対象タスクは変わらない。記録には元の値が残る。"""
+        from saiverse import task_book
+        entry = task_book.add_entry(
+            self.manager, "tester", "挿絵を渡す", origin="user", counterpart="user",
+        )
+        broken_ref = f"task:{entry['task_id']}',content':'挿絵を金曜までに渡す"
+        result = {
+            **_sluice_result(),
+            "promises": [{
+                "op": "update", "task_ref": broken_ref,
+                "content": "挿絵を金曜までに渡す",
+            }],
+        }
+        summary, _ = self._run(result)
+        self.assertEqual(summary["promises_applied"], 0)
+        self.assertEqual(summary["promises_failed"], 1)
+        unchanged = task_book.get_entry(self.manager, "tester", entry["task_id"])
+        self.assertEqual(unchanged["content"], "挿絵を渡す")
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertIn("一覧にありません", record)
+        self.assertIn(repr(broken_ref), record)
+
     def test_promise_clear_due_removes_deadline(self):
         """clear_due=True の update は期限を外す (期限の撤回)。"""
         from saiverse import task_book

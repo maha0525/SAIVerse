@@ -282,7 +282,7 @@ _RESPONSE_SCHEMA: Dict[str, Any] = {
                     },
                     "task_ref": {
                         "type": "string",
-                        "description": "update 対象の task_id。同梱の「開いているタスク帳」一覧から選ぶ。",
+                        "description": "同梱の「手帳の約束の欄」一覧の task:ID をそのまま写す (例: task:74b3bbe2-…)。",
                     },
                 },
                 "required": ["op"],
@@ -1097,8 +1097,8 @@ def _build_sluice_prompt(
         "- ユーザーとの約束や引き受けた依頼が生まれたり変わったりしていましたか?\n"
         "  無ければ空で構いません。期限が明示されていないなら due は書かないで\n"
         "  ください（期限を発明しない）。既に下の「手帳の約束の欄」にあるものを再び\n"
-        "  add する必要はありません — 内容や期限に変化があれば、その task の ID を\n"
-        "  task_ref にして update を使えます。期限が撤回されたときは clear_due で\n"
+        "  add する必要はありません — 内容や期限に変化があれば、その一件の task:ID を\n"
+        "  task_ref にそのまま写して update が使えます。期限が撤回されたときは clear_due で\n"
         "  期限を外せます。\n"
         "\n"
         "姿勢:\n"
@@ -1713,19 +1713,25 @@ def _apply_promises(
                         f"期限『{due_raw}』を解釈できなかったため期限なしで登録しました。"
                     )
             elif op == "update":
-                task_ref = (promise.get("task_ref") or "").strip()
+                raw_task_ref = promise.get("task_ref")
+                task_ref = (raw_task_ref or "").strip()
                 if not task_ref:
                     failed += 1
                     lines.append("約束 update をスキップ: task_ref がありません。")
                     continue
+                # 一覧は [task:ID] の形で提示しているので、ペルソナが書く正しい形は
+                # その写し (task:ID)。接頭辞を外して生 task_id で照合する (生 ID も
+                # 従来どおり受ける)。後ろに余計な文字が付いた写しは一致せず弾かれる。
+                if task_ref.startswith("task:"):
+                    task_ref = task_ref[len("task:"):]
                 if task_ref not in offered_tasks:
                     failed += 1
                     lines.append(
-                        f"約束 update をスキップ: task_ref={task_ref!r} は一覧にありません。"
+                        f"約束 update をスキップ: task_ref={raw_task_ref!r} は一覧にありません。"
                     )
                     LOGGER.warning(
                         "[sluice] promise update rejected: task_ref %r not in "
-                        "offered list (persona=%s)", task_ref, persona_id,
+                        "offered list (persona=%s)", raw_task_ref, persona_id,
                     )
                     continue
                 expected_revision = offered_tasks.get(task_ref)
