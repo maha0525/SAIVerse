@@ -3,11 +3,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-_log = logging.getLogger(__name__)
-
 from saiverse.occupancy_manager import is_redirect_notice
 from tools.context import get_active_manager, get_active_persona_id
 from tools.core import ToolSchema
+
+_log = logging.getLogger(__name__)
 
 
 def move_persona(building_id: str, persona_id: Optional[str] = None) -> str:
