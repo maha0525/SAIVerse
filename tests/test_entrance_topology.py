@@ -119,6 +119,31 @@ class EntranceTopologyTestCase(unittest.TestCase):
         denial = self.check("c1", "t1")
         self.assertIsNotNone(denial)
         self.assertIn("入口が設定されていない", denial)
+        # 入口が無ければ移動させる先が無い — リダイレクト先を運ばない (§2.5)
+        self.assertIsNone(getattr(denial, "redirect_building_id", None))
+
+    # --- 直行の拒否は入口 ID を運ぶ (region.md §2.5 — move_entity が入口まで動かす) ---
+
+    def test_direct_denial_carries_entrance_redirect(self):
+        denial = self.check("c1", "t1")
+        self.assertEqual(denial.code, "not_via_entrance")
+        self.assertEqual(denial.redirect_building_id, "entrance_top")
+        self.assertIn("入口 '霧の谷: 入口' まで移動しました", denial.redirect_message)
+
+    def test_direct_denial_to_subregion_redirects_to_outermost_entrance(self):
+        # 境界が複数のときは一番外側の入口で止まる
+        self.assertEqual(self.check("c1", "s1").redirect_building_id, "entrance_top")
+        self.assertEqual(
+            self.check("c1", "entrance_sub").redirect_building_id, "entrance_top"
+        )
+        # Region 内部から SubRegion 内部への直行は SubRegion の入口
+        self.assertEqual(self.check("t1", "s1").redirect_building_id, "entrance_sub")
+
+    def test_entry_policy_denial_carries_no_redirect(self):
+        # 境界点 (入口→内部) での拒否は、もう入口にいるので移動させない
+        self.regions["top"].config = {"entry_policy": "locked"}
+        denial = self.check("entrance_top", "t1")
+        self.assertIsNone(getattr(denial, "redirect_building_id", None))
 
     # --- entry policy (入口→内部の境界点で執行) ---
 

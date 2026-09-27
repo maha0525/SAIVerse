@@ -27,23 +27,36 @@ class MoveDenialMessage(str):
     ``current_building_id`` は拒否時点の DB 確定現在地 (判明している場合)。
     仲裁負けの直後は in-memory mirror がまだ勝者の移動を映していないことが
     あるため、409 応答はこちらを優先する (Codex 第三巡 P2)。
+
+    ``redirect_building_id`` / ``redirect_message`` は Region 内部への直行
+    (code ``not_via_entrance``) でだけ入る。``move_entity`` はこの拒否を
+    受けると、拒否で終わらずに入口 (redirect_building_id) まで実際に移動し、
+    成功したら redirect_message (入口まで移動した旨の案内文) を返す
+    (docs/intent/region.md §2.5)。
     """
     code: str = "move_failed"
     current_building_id: Optional[str] = None
+    redirect_building_id: Optional[str] = None
+    redirect_message: Optional[str] = None
 
     def __new__(
         cls,
         text: str,
         code: str = "move_failed",
         current_building_id: Optional[str] = None,
+        redirect_building_id: Optional[str] = None,
+        redirect_message: Optional[str] = None,
     ):
         obj = super().__new__(cls, text)
         obj.code = code
         obj.current_building_id = current_building_id
+        obj.redirect_building_id = redirect_building_id
+        obj.redirect_message = redirect_message
         return obj
 
 
 CAS_CONFLICT = "cas_conflict"
+NOT_VIA_ENTRANCE = "not_via_entrance"
 
 
 class OccupancyManager:
@@ -138,7 +151,9 @@ class OccupancyManager:
                 # 入口→内部の正規の通過。境界点で entry policy を執行する
                 return self._check_entry_policy(entity_id, region)
 
-        # 直行は拒否し、最外殻の新規スコープの入口を案内する
+        # 直行。最外殻の新規スコープの入口を案内し、入口が設定されていれば
+        # 入口 ID を運ぶ — move_entity はこれを見て入口まで移動して止める
+        # (region.md §2.5)。境界が複数でも一番外側の入口で止まる。
         outer = get_region(new_scopes[-1])
         dest_name = self.building_map[to_id].name if to_id in self.building_map else to_id
         if outer is None:
@@ -147,9 +162,16 @@ class OccupancyManager:
         if entrance_id:
             entrance = self.building_map.get(entrance_id)
             entrance_name = getattr(entrance, "name", entrance_id) if entrance else entrance_id
-            return (
+            return MoveDenialMessage(
                 f"移動失敗: '{dest_name}' は『{outer.name}』の内部です。"
-                f"入口 '{entrance_name}' (ID: {entrance_id}) から入ってください。"
+                f"入口 '{entrance_name}' (ID: {entrance_id}) から入ってください。",
+                code=NOT_VIA_ENTRANCE,
+                redirect_building_id=entrance_id,
+                redirect_message=(
+                    f"'{dest_name}' は『{outer.name}』の内部です。"
+                    f"入口 '{entrance_name}' まで移動しました。"
+                    "中へ入るには入口からもう一度移動してください。"
+                ),
             )
         return (
             f"移動失敗: '{dest_name}' は『{outer.name}』の内部ですが、"
@@ -206,8 +228,15 @@ class OccupancyManager:
         entity_type: str,  # 'ai' or 'user'
         from_id: str,
         to_id: str,
+        _redirecting: bool = False,
     ) -> Tuple[bool, Optional[str]]:
         """エンティティを建物間で移動させる。移動に関するすべてのロジックをここに集約する。
+
+        **成功 = 依頼した to_id に到着、ではない** (region.md §2.5): 外部から
+        Region 内部への直行は、最外殻の入口まで移動して止まり、``(True, 案内文)``
+        を返す。実際の現在地は canonical location (persona.current_building_id /
+        state.user_current_building_id) を読むこと。入口へのリダイレクトは
+        1 ホップ限り (``_redirecting`` は内部用で、再帰側の再リダイレクトを止める)。
 
         W5/B1 (分離監査「移動 DB を先に commit し、後処理失敗で失敗結果と実世界が
         分裂する」) の構造:
@@ -260,6 +289,38 @@ class OccupancyManager:
 
         topology_denial = self._check_entrance_topology(entity_id, from_id, to_id)
         if topology_denial:
+            # 直行 (region.md §2.5): その場で拒否せず、最外殻の入口まで移動して
+            # 止める。入口が無い / 移動元が既に入口 (= 境界点の拒否) / 入口への
+            # 移動自体が通らない場合は、従来どおり元の拒否文で終わる。
+            redirect_id = getattr(topology_denial, "redirect_building_id", None)
+            if (
+                not _redirecting
+                and redirect_id
+                and redirect_id != from_id
+                and redirect_id != to_id
+            ):
+                logging.info(
+                    "move_entity redirected to entrance: %s (%s -> %s, requested %s)",
+                    entity_id, from_id, redirect_id, to_id,
+                )
+                ok, redirect_result = self.move_entity(
+                    entity_id, entity_type, from_id, redirect_id,
+                    _redirecting=True,
+                )
+                if ok:
+                    return True, (
+                        getattr(topology_denial, "redirect_message", None)
+                        or str(topology_denial)
+                    )
+                logging.info(
+                    "move_entity redirect to entrance failed: %s (%s -> %s): %s",
+                    entity_id, from_id, redirect_id, redirect_result,
+                )
+                # CAS 競合 (現在地が変わっている) は移動元そのものが古いので、
+                # 直行の案内より「再同期せよ」を優先して運ぶ (route 層の 409)。
+                if getattr(redirect_result, "code", None) == CAS_CONFLICT:
+                    return False, redirect_result
+                return False, topology_denial
             logging.info(
                 "move_entity blocked by entrance topology: %s (%s -> %s): %s",
                 entity_id, from_id, to_id, topology_denial,
