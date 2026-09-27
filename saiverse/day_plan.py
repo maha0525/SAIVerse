@@ -320,7 +320,8 @@ _BUDGET_GATED_KINDS: set = set()
 
 #: manager に execution_ledger が無い環境 (旧テストスタブ等) への WARN を
 #: persona ごと一度だけに抑える (autonomy_wiring._LEDGER_MISSING_WARNED と同流儀)。
-#: 台帳が無ければ :func:`_fire_slot` は従来挙動 (:func:`_fire_slot_legacy`) に縮退する。
+#: いま使うのはライフ境界 (:func:`apply_life_boundary`) の縮退経路だけ —
+#: コマ発火 (:func:`_fire_slot`) の縮退経路は 2026-09-26 監査で撤去した。
 _LEDGER_MISSING_WARNED: set = set()
 
 
@@ -2420,7 +2421,7 @@ def _resolve_ttl_clear_delay_seconds(manager: Any, persona_id: str) -> int:
     default = 3600
     persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
     model_key = getattr(persona, "model", None) if persona is not None else None
-    runtime = getattr(manager, "sea_runtime", None) or getattr(manager, "runtime", None)
+    runtime = manager.sea_runtime
     lifecycle = getattr(runtime, "session_lifecycle", None)
     if not model_key or lifecycle is None:
         return default
@@ -3986,19 +3987,10 @@ def _fire_slot(
     slot = _resolve_outing_destination(manager, persona_id, plan_date_str, index, slot)
     slot = _apply_slot_move(manager, persona_id, slot)
 
-    # (d) コマ発火を実行台帳で包む (A5/A6, W2 Chunk B)。台帳の無い環境
-    # (旧テストスタブ) は従来挙動へ縮退する。
-    ledger = getattr(manager, "execution_ledger", None)
-    if ledger is None:
-        if persona_id not in _LEDGER_MISSING_WARNED:
-            _LEDGER_MISSING_WARNED.add(persona_id)
-            LOGGER.warning(
-                "[day_plan] manager has no execution_ledger; slot firing runs "
-                "without ledger tracking / atomic settlement (persona=%s)",
-                persona_id,
-            )
-        _fire_slot_legacy(manager, persona_id, plan_date_str, index, slot, kind, gated, handler)
-        return
+    # (d) コマ発火を実行台帳で包む (A5/A6, W2 Chunk B)。台帳は SAIVerseManager
+    # が無条件に持つ — 台帳なしの縮退経路 (旧実装の並行コピー) は 2026-09-26
+    # 監査で撤去した。
+    ledger = manager.execution_ledger
 
     # 予約する実効ラウンド (ゲート後の clamped slot に対して算出)。非 gated は 0。
     reserved = _effective_budget_rounds(slot) if gated else 0
@@ -4159,79 +4151,6 @@ def _fire_slot(
             persona_id, plan_date_str, index, kind, exec_id,
         )
         return
-
-
-def _fire_slot_legacy(
-    manager: Any,
-    persona_id: str,
-    plan_date_str: str,
-    index: int,
-    slot: Dict[str, Any],
-    kind: Any,
-    gated: bool,
-    handler: SlotHandler,
-) -> None:
-    """台帳の無い環境向けの発火経路 (三区間化前の従来挙動そのまま)。
-
-    :func:`_fire_slot` が ``manager.execution_ledger`` を持たない旧テストスタブ
-    で呼ばれたときの縮退。予約/精算の原子性 (A5/A6) は無いが、台帳を前提に
-    しない既存テストを壊さないための後方互換経路 (WARN は persona 一度だけ)。
-    """
-    # fired を先に永続化することで、ハンドラ実行中のクラッシュ後に watchdog
-    # (reschedule_pending_slots) が同じコマを二重発火させない
-    # (pending/deferred のみ再 push されるため)。
-    updated = _update_slot(
-        manager, persona_id, plan_date_str, index,
-        expected_id=slot.get("id"), status=STATUS_FIRED,
-    )
-    if updated is not None:
-        # 一時キー (_outing_unresolved / _move_failed 等、"_" 始まり) は永続化
-        # されない — ストアからの読み直しで落とさず引き継ぐ (handler が読む)。
-        slot = {**updated, **{k: v for k, v in slot.items() if k.startswith("_")}}
-    LOGGER.info(
-        "[day_plan] slot fired (no-ledger): persona=%s date=%s index=%d kind=%s "
-        "ref=%s facility=%s",
-        persona_id, plan_date_str, index, kind, slot.get("ref"), slot.get("facility"),
-    )
-
-    episode_ref = _open_slot_episode(manager, persona_id, plan_date_str, slot, index)
-
-    try:
-        used_rounds = handler(manager, persona_id, plan_date_str, slot, index)
-    except Exception:
-        LOGGER.exception(
-            "[day_plan] slot handler failed (persona=%s date=%s index=%d kind=%s); "
-            "slot left as 'fired'",
-            persona_id, plan_date_str, index, kind,
-        )
-        _close_slot_episode(manager, persona_id, episode_ref, None)
-        return
-
-    if gated and isinstance(used_rounds, int) and not isinstance(used_rounds, bool) \
-            and used_rounds > 0:
-        try:
-            consume_budget(manager, persona_id, plan_date_str, used_rounds)
-        except Exception:
-            LOGGER.exception(
-                "[day_plan] consume_budget failed (persona=%s date=%s index=%d); "
-                "continuing",
-                persona_id, plan_date_str, index,
-            )
-        try:
-            consume_life_rounds(
-                manager, persona_id, plan_date_str, used_rounds, at_time=slot.get("start"),
-            )
-        except Exception:
-            LOGGER.exception(
-                "[day_plan] consume_life_rounds failed (persona=%s date=%s index=%d); "
-                "continuing",
-                persona_id, plan_date_str, index,
-            )
-    done_slot = _update_slot(
-        manager, persona_id, plan_date_str, index,
-        expected_id=slot.get("id"), status=STATUS_DONE,
-    )
-    _close_slot_episode(manager, persona_id, episode_ref, done_slot)
 
 
 # ---------------------------------------------------------------------------

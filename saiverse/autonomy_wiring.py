@@ -43,7 +43,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-from contextlib import nullcontext
 from datetime import date, timedelta
 from typing import Any, Callable, Dict, Optional
 
@@ -275,20 +274,13 @@ def playbook_available(manager: Any, playbook_name: str) -> bool:
 
 
 def _judgment_lock(manager: Any, persona_id: str):
-    """MetaLayer の per-persona Lock (あれば)。判断 Pulse の直列化を共有する。"""
-    meta_layer = getattr(manager, "meta_layer", None)
-    get_lock = getattr(meta_layer, "_get_lock", None)
-    if callable(get_lock):
-        try:
-            lock = get_lock(persona_id)
-            if hasattr(lock, "__enter__"):
-                return lock
-        except Exception:
-            LOGGER.warning(
-                "[autonomy-wiring] failed to acquire meta-layer lock for %s",
-                persona_id, exc_info=True,
-            )
-    return nullcontext()
+    """MetaLayer の per-persona Lock。判断 Pulse の直列化を共有する。
+
+    Lock が取れない世界で無 Lock (nullcontext) に倒すと、同一ペルソナの判断
+    Pulse の直列化が黙って外れる。``manager.meta_layer`` は SAIVerseManager が
+    無条件に持つので、壊れていれば例外で止まる方が正しい (fail-closed)。
+    """
+    return manager.meta_layer._get_lock(persona_id)
 
 
 # ---------------------------------------------------------------------------

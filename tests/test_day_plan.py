@@ -71,8 +71,11 @@ def manager(session_factory):
     """SAIVerseManager の最小スタブ。
 
     day_plan が触る実属性のみ: SessionLocal / personas / occupancy_manager /
-    event_scheduler。
+    event_scheduler / execution_ledger。本番 manager は実行台帳を無条件に持つ
+    (台帳なしの縮退経路は 2026-09-26 監査で撤去) ので、スタブも本物を積む。
     """
+    from saiverse.execution_ledger import ExecutionLedger
+
     db = session_factory()
     try:
         db.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
@@ -118,6 +121,7 @@ def manager(session_factory):
         personas=personas,
         occupancy_manager=StubOccupancy(personas),
         event_scheduler=EventScheduler(),  # start() しない (シム前提)
+        execution_ledger=ExecutionLedger(session_factory),
     )
 
 
@@ -2089,24 +2093,6 @@ def test_handler_raise_marks_unknown_closes_episode_retains_reservation(manager,
     exec_id = _slot_exec_id(manager)
     assert ledger.get_execution(exec_id)["status"] == "unknown"
     assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 5  # 予約保持
-
-
-def test_no_ledger_manager_falls_back_to_legacy_fire(manager, task_refs):
-    """縮退: execution_ledger を持たない manager では従来経路で done へ到達する。"""
-    assert getattr(manager, "execution_ledger", None) is None
-    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
-    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
-    clock.enable_virtual(BASE + timedelta(hours=9))
-
-    with patch("sea.work_session.run_work_session",
-               return_value=_mock_work_session_result(rounds_used=3)) as mock_ws:
-        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
-
-    assert mock_ws.call_count == 1
-    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert slots[0]["status"] == "done"
-    # 旧経路: consume_budget が実測 3 を積む
-    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3
 
 
 # ---------------------------------------------------------------------------

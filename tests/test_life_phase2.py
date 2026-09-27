@@ -44,6 +44,7 @@ from saiverse import day_plan
 from saiverse import judgment_points as jp
 from saiverse.day_simulator import DaySimulator
 from saiverse.event_scheduler import EventScheduler
+from saiverse.meta_layer import MetaLayer
 from saiverse.persona_task_manager import PersonaTaskManager
 from tool_loader import load_builtin_tool
 
@@ -122,7 +123,7 @@ def manager(session_factory):
         model=None,
     )
     personas = {PERSONA_ID: persona}
-    return SimpleNamespace(
+    mgr = SimpleNamespace(
         SessionLocal=session_factory,
         personas=personas,
         occupancy_manager=StubOccupancy(personas),
@@ -132,6 +133,10 @@ def manager(session_factory):
             SimpleNamespace(building_id="workshop", name="工房"),
         ],
     )
+    # 判断点の直列化 Lock (autonomy_wiring._judgment_lock) は本番 manager が
+    # 無条件に持つ MetaLayer から取る — スタブも本物を積む。
+    mgr.meta_layer = MetaLayer(mgr)
+    return mgr
 
 
 @pytest.fixture
@@ -608,6 +613,7 @@ def test_life_budget_gate_skips_when_exhausted(manager, task_ref):
 
 def test_life_budget_gate_does_not_clamp_rounds(manager, task_ref):
     """旧ゲートと異なり、ライフゲートは残高があればラウンド数をクランプしない。"""
+    _attach_ledger(manager)  # コマ発火は台帳経路一本 (縮退経路は撤去済み)
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("09:00", budget_rounds=20)])
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "08:00", "end": "12:00", "budget_pulses": 1, "mode": "free"},
@@ -643,6 +649,7 @@ def test_life_budget_gate_allows_through_when_slot_outside_any_life(manager, tas
     する — 並び・検証と同じ物差しの帰結。防御 (ゲートは通す + WARN) 自体は
     変わらない。
     """
+    _attach_ledger(manager)  # コマ発火は台帳経路一本 (縮退経路は撤去済み)
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [_slot("09:00", budget_rounds=5)])
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},

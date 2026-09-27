@@ -124,6 +124,7 @@ class SelfViewWorld:
             personas={PERSONA_ID: self.persona},
             get_all_items_for_persona=self._items_for,
             get_bag_contents_recursive=lambda item_id: [],
+            sea_runtime=None,  # 本番 manager は無条件に持つ (未構築なら None)
         )
 
     def _items_for(self, persona_id):

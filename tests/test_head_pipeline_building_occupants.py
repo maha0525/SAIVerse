@@ -111,6 +111,8 @@ class _FakeManager:
         self.occupants = occupants
         self.personas = {"elis": object(), "aifi": object()}
         self.id_to_name_map = {"elis": "エリス", "aifi": "アイフィ"}
+        # 本番 manager は sea_runtime 属性を無条件に持つ (未構築なら None)
+        self.sea_runtime = None
         if ledger is not None:
             self.execution_ledger = ledger
 
