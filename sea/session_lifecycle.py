@@ -688,7 +688,8 @@ class SessionLifecycle:
     ) -> Optional[Set[str]]:
         """モジュール関数 :func:`collect_folded_chronicle_entry_ids` への委譲。
 
-        ``None`` = 照会失敗 (fold の有無が不明)。呼び出し側は束ねを見送ること。
+        ``None`` = 照会失敗 (fold の有無が不明)。呼び出し側は吸収を見送ること
+        (束ねはこの集合を使わない — chronicle_consolidation_veto_removal 機構 A)。
         """
         return collect_folded_chronicle_entry_ids(self.manager, persona_id)
 
@@ -6007,11 +6008,13 @@ class SessionLifecycle:
         # 実行に進む — 「新チャンクが無いと列の束ねが永久に再試行されない」抜けの
         # 閉塞。
         from sai_memory.arasuji.bands import plan_band_overflow
-        # 圧縮区間として提示中の digest は列の勘定・束ね対象から外す
-        # (intent chronicle_consolidation §3 — dry と実行で同じ集合を渡す)。
-        # None = 照会失敗 = fold の有無が不明。「fold なし」と読み替えると
-        # 提示中の digest を上へ束ねて §4-1 が黙って破れるので、その回の
-        # 束ねは dry / 実行とも丸ごと見送る (Codex P1-5 — 待つのは常に安全)。
+        # 束ね (dry / 実行) は提示中の圧縮区間を参照しない — 提示は視点で
+        # あって共有の記録に拒否権を持たない (chronicle_consolidation_veto_
+        # removal 機構 A、2026-09-27)。下の全モデル fold 集約は**吸収専用**
+        # (吸収は隣人の本文を作り直すので、提示中の digest を開けない —
+        # 第二段まで現状維持)。
+        # None = 照会失敗 = fold の有無が不明 → 吸収はその回を見送る
+        # (Codex P1-5 — 待つのは常に安全)。束ねは照会結果に依存しない。
         folded_entry_ids: Optional[Set[str]] = None
         try:
             folded_entry_ids = self.collect_folded_chronicle_entry_ids(
@@ -6021,17 +6024,13 @@ class SessionLifecycle:
             LOGGER.warning(
                 "[metabolism] folded-range collection failed", exc_info=True,
             )
-        if folded_entry_ids is None:
-            LOGGER.warning(
-                "[metabolism] folds unknown; skipping band consolidation this round",
-            )
 
         # 極小 run の隣人吸収 (arasuji_tiny_run_absorption、2026-08-31 裁定 5):
         # 適用は**全量計画 (compile_groups=None = 被覆補修 / 一括生成) のみ**。
         # 通常の Metabolism 畳み (退場範囲の編纂) には入れない。材料 0.5U 未満の
         # run は単独で編纂せず、後ろの隣人 Lv1 を開き直して合体させる。
         # 提示中の digest (folded_entry_ids) は開けないので、fold が不明
-        # (None) の回は吸収ごと見送る (束ねの見送りと同形 — 待つのは常に安全)。
+        # (None) の回は吸収ごと見送る (待つのは常に安全)。
         absorption_plan = None
         pending_stale_count = 0
         _stale_marker = False
@@ -6191,7 +6190,7 @@ class SessionLifecycle:
 
         try:
             from sai_memory.arasuji.bands import EST_PARENT_CHARS
-            band_plan_count = 0 if folded_entry_ids is None else plan_band_overflow(
+            band_plan_count = plan_band_overflow(
                 adapter.conn,
                 extra_leaves=[
                     (
@@ -6202,7 +6201,6 @@ class SessionLifecycle:
                     )
                     for c in plan.chunks
                 ],
-                excluded_entry_ids=folded_entry_ids or None,
             )
         except Exception:
             LOGGER.warning("[metabolism] band overflow dry-plan failed", exc_info=True)
@@ -6734,7 +6732,7 @@ class SessionLifecycle:
             # イベントを出さないので、progress 経由の心拍だけだとプロバイダ障害
             # の間の走行が「観測途絶」に見える。
             try:
-                if folded_entry_ids is None or _consolidated[0] >= band_plan_count:
+                if _consolidated[0] >= band_plan_count:
                     return
                 if _band_disabled[0]:
                     return
@@ -6751,7 +6749,6 @@ class SessionLifecycle:
                         adapter.conn, client,
                         persona_id=persona_id_str,
                         cancel_check=cancel_fn,
-                        excluded_entry_ids=folded_entry_ids or None,
                         batch_callback=note_callback,
                         max_folds=band_plan_count - _consolidated[0],
                         extraction_failures=band_extraction_failures,
@@ -7196,20 +7193,23 @@ def collect_folded_chronicle_entry_ids(
 ) -> Optional[Set[str]]:
     """persona の全 model 行の圧縮区間が提示中の Chronicle entry id 集合。
 
-    束ね (sai_memory/arasuji/bands.py) は提示コンテキストに置き換え表示中の
-    digest を列の勘定・束ね対象から外す (intent chronicle_consolidation §3 —
-    提示中のものを上へ畳まない §4-1 の帰結)。head の除外 (memory_weave
-    section) が単一 model 行で読むのに対し、束ねは persona 単位の処理なので
-    全 model 行を集約する。SessionLifecycle を持たない API 生成ジョブと共有
-    するためモジュール関数 (manager 経由の read-only)。
+    使い手は**吸収** (sai_memory/arasuji/absorption.py の隣人の開き直し) の
+    計画と、その見積もり。吸収は隣人の本文を作り直すので、どこかのモデルの
+    窓が digest 提示中のエントリは開かない (docs/intent/
+    chronicle_consolidation_veto_removal.md 機構 C — 第二段で旧版保持へ
+    置き換えるまで現状維持)。束ね (bands.py) はこの集合を**使わない** — 提示は
+    束ねに拒否権を持たない (同 intent 機構 A、2026-09-27)。head の除外
+    (memory_weave section) が単一 model 行で読むのに対し、吸収は persona
+    単位の処理なので全 model 行を集約する。SessionLifecycle を持たない API
+    生成ジョブと共有するためモジュール関数 (manager 経由の read-only)。
 
     戻り値の意味 (Codex レビュー P1-5 — 失敗を空集合に潰さない):
 
     - ``set(...)`` = 集約に成功した (空集合 = 提示中の fold は無い)
     - ``None`` = **照会に失敗した = fold の有無が分からない**。呼び出し側は
-      「fold なし」と読み替えず、その回の束ねを見送ること — 提示中の digest
-      を知らずに上へ束ねると §4-1 (提示中のものを畳まない) が黙って破れる。
-      待つのは常に安全。
+      「fold なし」と読み替えず、その回の吸収を見送ること — 提示中の digest
+      を知らずに開き直すと、提示中の文面が節目の外で書き換わる。待つのは
+      常に安全。
     - manager / world DB が無い環境 (テスト等) は「fold という概念ごと無い」
       ので正当な空集合。
     """
@@ -7232,8 +7232,8 @@ def collect_folded_chronicle_entry_ids(
                 ids.update(fold.chronicle_entry_ids)
     except Exception as exc:
         LOGGER.warning(
-            "[bands] folded-range collection failed for %s: %s "
-            "(folds unknown — caller must skip consolidation this round)",
+            "[absorption] folded-range collection failed for %s: %s "
+            "(folds unknown — caller must skip absorption this round)",
             persona_id, exc,
         )
         return None

@@ -532,9 +532,17 @@ class ChronicleClaimTest(unittest.TestCase):
         calls = []
         events = []
         failing = set(fail_band_calls or ())
+        # 束ねの dry / 実行に渡った引数 (提示中の除外が渡っていないことの検算用)。
+        self._band_kwargs = []
+        self._plan_kwargs = []
+
+        def fake_plan(*a, **k):
+            self._plan_kwargs.append(dict(k))
+            return band_plan_count
 
         def fake_band(conn, client, **kwargs):
             calls.append(kwargs["max_folds"])
+            self._band_kwargs.append(dict(kwargs))
             if on_band_call:
                 on_band_call(len(calls))
             stats = kwargs.get("stats")
@@ -581,8 +589,7 @@ class ChronicleClaimTest(unittest.TestCase):
                       raise_with=raise_with,
                   )),
             patch("sai_memory.arasuji.bands.backfill_coverage", lambda conn: 0),
-            patch("sai_memory.arasuji.bands.plan_band_overflow",
-                  lambda *a, **k: band_plan_count),
+            patch("sai_memory.arasuji.bands.plan_band_overflow", fake_plan),
             patch("sai_memory.arasuji.bands.run_band_overflow", fake_band),
             patch("sai_memory.memory.entity_extractor.make_batch_callback",
                   side_effect=RuntimeError("skip entity extraction")),
@@ -641,13 +648,28 @@ class ChronicleClaimTest(unittest.TestCase):
         self.assertEqual(status, "ok")
         self.assertEqual(calls, [])
 
-    def test_unknown_folds_never_call_consolidation(self):
-        # folded_entry_ids が None (提示中の圧縮区間が不明) の回は束ねを丸ごと見送る。
+    def test_unknown_folds_do_not_stop_consolidation(self):
+        """fold 照会の失敗 (提示中の圧縮区間が不明) でも束ねは止まらない
+        (chronicle_consolidation_veto_removal 機構 A、2026-09-27)。
+
+        旧仕様は照会失敗の回に束ねを丸ごと見送っていた — 束ねは提示状態に
+        拒否権を与えないので、照会の成否に依存する理由が無い。照会失敗で
+        見送るのは吸収だけ (TestAbsorptionWiring 側で固定)。"""
         status, calls, _ = self._generate_interleaved(
             band_plan_count=5, folds_unknown=True,
         )
         self.assertEqual(status, "ok")
-        self.assertEqual(calls, [])
+        self.assertEqual(calls, [5, 4, 3, 2, 1])
+
+    def test_band_dry_and_execution_receive_no_presented_exclusion(self):
+        """束ねの dry 予測と実行のどちらにも、提示中の digest の除外集合を
+        渡さない — dry と実行が同じ (除外なしの) 並びを数える。"""
+        status, calls, _ = self._generate_interleaved(band_plan_count=2)
+        self.assertEqual(status, "ok")
+        self.assertTrue(self._plan_kwargs, "dry plan was not consulted")
+        self.assertTrue(self._band_kwargs, "consolidation was not called")
+        for kw in self._plan_kwargs + self._band_kwargs:
+            self.assertNotIn("excluded_entry_ids", kw)
 
     def test_band_side_extraction_failures_reach_the_report(self):
         """挟み込んだ束ねの抽出失敗も、従来どおり完了通知に載る。"""

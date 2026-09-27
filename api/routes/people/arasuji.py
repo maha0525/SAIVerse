@@ -162,8 +162,10 @@ def estimate_chronicle_cost(
         model_name = (getattr(persona, "memory_weave_model", None)
                       or resolve_global_memory_weave_model()[0])
 
-        # 生成経路 (ジョブ) と同じ fold 集合で束ねコールを見積もる
-        # (Codex 四巡 P1-b)。None = 照会失敗 → 生成が束ねを見送るのと同形。
+        # 生成経路 (ジョブ) と同じ fold 集合で**吸収**コールを見積もる
+        # (Codex 四巡 P1-b)。None = 照会失敗 → 生成が吸収を見送るのと同形。
+        # 束ねの見積もりはこの集合を使わない — 実行と同じく除外なし
+        # (chronicle_consolidation_veto_removal 機構 A、2026-09-27)。
         from sea.session_lifecycle import collect_folded_chronicle_entry_ids
         try:
             folded_entry_ids = collect_folded_chronicle_entry_ids(manager, persona_id)
@@ -189,7 +191,7 @@ def estimate_chronicle_cost(
         estimate = estimate_chronicle_generation_cost(
             conn,
             model_name=model_name,
-            excluded_entry_ids=(
+            absorption_excluded_entry_ids=(
                 frozenset(folded_entry_ids) if folded_entry_ids is not None else None
             ),
             db_lock=_adapter._db_lock if _adapter is not None else None,

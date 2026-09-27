@@ -6,12 +6,14 @@
 固定する仕様の骨子:
 
 - 並びはレベルごと。予算 = 上限 (BAND_CHAR_LIMIT=5,000) と残す量
-  (BAND_CHAR_KEEP=2,500) の2つの数。合計字数 (excluded を除く) が上限を
-  超えたら、古い側を「残す量」に収まるまで 1 個の親に畳み、1 つ上のレベルへ。
+  (BAND_CHAR_KEEP=2,500) の2つの数。合計字数 (どこかのモデルの窓が提示中の
+  digest も含む) が上限を超えたら、古い側を「残す量」に収まるまで 1 個の親に
+  畳み、1 つ上のレベルへ。
 - レベル分離: 畳んだ結果は自分の並びに戻らない → 再要約回数は log 有限。
 - メンバーの大きさ (被覆) は判定に使わない。被覆は合算で親へ引き継ぐ (保存)。
-- 2 件未満しか取れないときは畳まない。excluded (提示中の圧縮区間) は畳み範囲が
-  跨がない。
+- 2 件未満しか取れないときは畳まない。提示中の圧縮区間は境界にならない
+  (2026-09-27 拒否権撤去 — docs/intent/chronicle_consolidation_veto_removal.md)。
+- 束ね・繋ぎ直しは子の本文を書き換えない (同 intent 不変条件 1)。
 - 原子性: 親 INSERT + 子 mark_consolidated は単一 tx、tx 内で子の未束ねを再検査。
 - Fragment callback は digest_origin='identity' の子 (旧世代データ) でのみ発火。
 
@@ -305,30 +307,178 @@ class TestFoldMaterialCap(BandTestBase):
         self.assertEqual(plan_band_overflow(self.conn), 0)
 
 
-class TestExcluded(BandTestBase):
-    """excluded (提示中の圧縮区間) は字数に数えず、畳み範囲が跨がない。"""
+class TestBoundaryHostage(unittest.TestCase):
+    """境界の手前が 1 件でも、後ろの過予算区間は独立に畳める — 一時的な境界の
+    手前 1 件がその後ろを永久に人質に取らない (Codex レビュー 2026-07-28
+    high3)。境界は gap_before (未統合の下位ノード) の 1 種類だけになった
+    (2026-09-27、旧・提示中の圧縮区間の境界は撤去) ので、純計画で固定する。"""
 
-    def test_excluded_splits_segments_and_rear_segment_still_folds(self):
-        """excluded の手前が 1 件でも、後ろの過予算区間は独立に畳める —
-        一時的な境界の手前 1 件がその後ろを永久に人質に取らない
-        (Codex レビュー 2026-07-28 high3)。"""
+    def test_rear_segment_folds_when_the_front_segment_is_single(self):
+        row = [
+            _RowItem(coverage=10_000, chars=600,
+                     start_time=1000 + i * 100, end_time=1000 + i * 100 + 99)
+            for i in range(11)
+        ]
+        # row[1] の手前に境界 → 先頭区間は row[0] の 1 件だけ。
+        row[1].gap_before = True
+        folds = _plan_folds({2: list(row)})  # _plan_folds は並びを破壊的に更新する
+        self.assertGreaterEqual(len(folds), 1)
+        first = folds[0]
+        self.assertIs(first.items[0], row[1])
+        self.assertNotIn(row[0], first.items)
+
+
+class TestPresentedDigestHasNoVeto(BandTestBase):
+    """束ねの拒否権撤去 (docs/intent/chronicle_consolidation_veto_removal.md
+    機構 A、2026-09-27)。
+
+    どこかのモデルの窓が digest で提示中のエントリも、束ねは区別しない —
+    発火の勘定・残す量の勘定・畳み範囲のどれにも入り、境界にもならない。
+    束ねの側は提示状態を知る口 (excluded_entry_ids) を持たないので、ここでは
+    「旧仕様なら除外されていた id」を名指しして、その id が区別されずに
+    扱われることを固定する。"""
+
+    def test_band_api_has_no_presented_exclusion_parameter(self):
+        """提示状態を束ねへ渡す口そのものが無い (呼び出し元が渡し忘れても
+        渡しても挙動が変わらない形ではなく、渡せない形で固定する)。"""
+        import inspect
+
+        from sai_memory.arasuji.bands import _load_rows
+        for fn in (run_band_overflow, plan_band_overflow, _load_rows,
+                   _any_level_over_limit):
+            self.assertNotIn(
+                "excluded_entry_ids", inspect.signature(fn).parameters,
+                f"{fn.__name__} still accepts a presented-digest exclusion",
+            )
+
+    def test_presented_digest_counts_toward_the_firing_limit(self):
+        """(a) 発火の勘定は提示中の digest も含む — 9 × 600 = 5,400 > 5,000。
+        旧仕様は提示中の 1 件を数えず 4,800 で発火しなかった量。"""
+        ids = [
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000).id
+            for i in range(9)
+        ]
+        presented_id = ids[0]
+        self.assertTrue(_any_level_over_limit(self.conn))
+        self.assertEqual(plan_band_overflow(self.conn), 1)
+        client = _Client()
+        self.assertEqual(run_band_overflow(self.conn, client), 1)
+        parent = _band_parents(self.conn)[0]
+        self.assertIn(presented_id, parent.source_ids)
+
+    def test_presented_digest_is_inside_the_fold_not_a_boundary(self):
+        """(b) 提示中の digest は畳み範囲に入り、境界にならない。旧仕様は
+        [first] [presented] [rear...] と刻まれ、first は 1 件区間として
+        取り残されていた。"""
         first = _entry(self.conn, start=1000, coverage=10_000)
-        excluded_entry = _entry(self.conn, start=2000, coverage=10_000)
+        presented = _entry(self.conn, start=2000, coverage=10_000)
         rear = [
             _entry(self.conn, start=3000 + i * 100, coverage=10_000)
             for i in range(9)
         ]
-        client = _Client()
-        created = run_band_overflow(
-            self.conn, client, excluded_entry_ids={excluded_entry.id},
-        )
-        # 先頭区間は 1 件 (< 2) なので畳めないが、excluded の後ろの区間が
-        # 畳まれる。範囲は excluded を跨がない (first は材料に入らない)。
-        self.assertEqual(created, 1)
+        created = run_band_overflow(self.conn, _Client())
+        self.assertGreaterEqual(created, 1)
+        parent = _band_parents(self.conn)[0]
+        # 最古から連続で畳む — first と presented を跨がずに含む。
+        self.assertEqual(parent.source_ids[:3], [first.id, presented.id, rear[0].id])
+
+    def test_keep_amount_is_consumed_by_the_newest_presented_digest(self):
+        """勘定の主語 (残す量): 「残す量」2,500 字は新しい側から全ノードで
+        数える — 窓が提示中の最新の一次あらすじも枠を使う。旧仕様は提示中を
+        飛ばして数えたので、その手前の 1 件まで残されていた。"""
+        row = [
+            _RowItem(coverage=10_000, chars=600,
+                     start_time=1000 + i * 100, end_time=1000 + i * 100 + 99)
+            for i in range(10)
+        ]
+        # 旧仕様なら row[-1] (最新・提示中) が keep の勘定から外れて、
+        # row[5..8] の 4 件が残り row[0..4] の 5 件が畳まれていた。
+        folds = _plan_folds({1: list(row)})
+        self.assertEqual(len(folds), 1)
+        # 新仕様: 最新 4 件 (row[6..9] = 2,400 字) が残り、row[0..5] が畳まれる。
+        self.assertEqual(folds[0].items, row[:6])
+
+    def test_dry_and_execution_fold_the_same_targets(self):
+        """(c) dry (plan_band_overflow / _plan_folds) と実行が同じ対象を
+        数える — 提示中の digest を含む並びで、dry の最初の畳みの材料と実行の
+        親の子が一致し、回数も一致する。"""
+        from sai_memory.arasuji.bands import _load_rows
+        entries = [
+            _entry(self.conn, start=1000 + i * 100, coverage=10_000, chars=500)
+            for i in range(30)
+        ]
+        presented_ids = {entries[3].id, entries[17].id}  # 旧仕様なら境界
+        planned = _plan_folds(_load_rows(self.conn))
+        approved = plan_band_overflow(self.conn)
+        self.assertEqual(approved, len(planned))
+        first_planned = [i.entry.id for i in planned[0].items]
+        client = _Client(response="ま" * EST_PARENT_CHARS)
+        total = 0
+        while total < approved:
+            created = run_band_overflow(
+                self.conn, client, max_folds=approved - total,
+            )
+            if created == 0:
+                break
+            total += created
+        self.assertEqual(total, approved)
         parents = _band_parents(self.conn)
-        self.assertNotIn(first.id, parents[0].source_ids)
-        self.assertNotIn(excluded_entry.id, parents[0].source_ids)
-        self.assertEqual(parents[0].source_ids[0], rear[0].id)
+        self.assertEqual(parents[0].source_ids, first_planned)
+        folded_children = {cid for p in parents for cid in p.source_ids}
+        self.assertTrue(presented_ids <= folded_children)
+
+
+class TestConsolidationNeverRewritesChildren(BandTestBase):
+    """(d) 不変条件 1 (chronicle_consolidation_veto_removal): 束ねと繋ぎ直しは
+    子の本文を書き換えない — 親の追加と統合済み印だけ。窓が digest を提示中の
+    子を束ねても、提示のバイト列が変わらないことの土台。"""
+
+    def _contents(self, ids):
+        rows = self.conn.execute(
+            f"SELECT id, content FROM memopedia_pages WHERE id IN "
+            f"({','.join('?' for _ in ids)})",
+            tuple(ids),
+        ).fetchall()
+        return {r[0]: (r[1] or "").encode("utf-8") for r in rows}
+
+    def test_band_fold_keeps_child_content_bytes(self):
+        entries = []
+        for i in range(9):
+            e = create_entry(
+                self.conn, level=1,
+                content=f"子{i}の本文。改行\nと記号「」…を含む。" + "あ" * 580,
+                source_ids=[f"src-{i}"],
+                start_time=1000 + i * 100, end_time=1000 + i * 100 + 99,
+                source_count=1, message_count=1,
+                extra_metadata={"digest_origin": "batch", "coverage_chars": 10_000},
+            )
+            entries.append(e)
+        ids = [e.id for e in entries]
+        before = self._contents(ids)
+        self.assertEqual(run_band_overflow(self.conn, _Client()), 1)
+        parent = _band_parents(self.conn)[0]
+        self.assertTrue(set(parent.source_ids) <= set(ids))
+        self.assertEqual(self._contents(ids), before)
+        # arasuji_entries 側の本文も同じ
+        for e in entries:
+            self.assertEqual(get_entry(self.conn, e.id).content, e.content)
+
+    def test_reconnect_keeps_child_content_bytes(self):
+        from sai_memory.arasuji.bands import reconnect_contained_orphans
+        from sai_memory.arasuji.storage import mark_consolidated
+        c1 = _entry(self.conn, start=0, end=2_000, coverage=10_000)
+        lv2 = _entry(self.conn, start=0, end=10_000, coverage=10_000, level=2,
+                     origin="band", source_ids=[c1.id])
+        mark_consolidated(self.conn, [c1.id], lv2.id)
+        late = create_entry(
+            self.conn, level=1, content="後から埋まった穴の本文。\n二行目。",
+            source_ids=["src-late"], start_time=3_000, end_time=4_000,
+            source_count=1, message_count=1,
+            extra_metadata={"digest_origin": "batch", "coverage_chars": 1_000},
+        )
+        before = self._contents([c1.id, late.id])
+        self.assertEqual(reconnect_contained_orphans(self.conn), [late.id])
+        self.assertEqual(self._contents([c1.id, late.id]), before)
 
 
 class TestUncompiledGap(BandTestBase):
@@ -795,15 +945,6 @@ class TestCheapPrecheck(BandTestBase):
             _entry(self.conn, start=1000 + i * 100, coverage=10_000)
         self.assertTrue(_any_level_over_limit(self.conn))
         self.assertEqual(run_band_overflow(self.conn, _Client()), 1)
-
-    def test_excluded_entries_do_not_count(self):
-        ids = [
-            _entry(self.conn, start=1000 + i * 100, coverage=10_000).id
-            for i in range(9)
-        ]
-        # 9 × 600 = 5,400 > 5,000 だが 1 件を提示中 (excluded) にすると 4,800。
-        self.assertTrue(_any_level_over_limit(self.conn))
-        self.assertFalse(_any_level_over_limit(self.conn, {ids[0]}))
 
     def test_precheck_never_says_no_when_plan_would_fold(self):
         """前検査の合計は計画の判定値以上 (孤児を除かない) — 計画が畳むなら

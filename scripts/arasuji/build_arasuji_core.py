@@ -745,8 +745,8 @@ def run_cli() -> None:
 
     # 極小 run の隣人吸収 (arasuji_tiny_run_absorption、2026-08-31 裁定 5):
     # 全量再編纂スクリプトは repair API と同じ吸収を通す。オフライン実行なので
-    # 提示中の fold という概念は無い (既存の run_band_overflow と同じ扱い) —
-    # 除外集合は空で計画する。
+    # 提示中の fold という概念は無い — 除外集合は空で計画する (束ねの
+    # run_band_overflow は、そもそも提示中の fold を参照しない)。
     from sai_memory.arasuji.absorption import (
         AbsorptionPlan,
         plan_absorption,
