@@ -994,6 +994,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             )
             return {
                 "ITEM_ID": item.ITEM_ID,
+                # ペルソナが会話で使う短縮参照 item:N の N (saiverse/references.py)
+                "SHORT_ID": item.SHORT_ID,
                 "NAME": item.NAME,
                 "TYPE": item.TYPE,
                 "DESCRIPTION": item.DESCRIPTION or "",

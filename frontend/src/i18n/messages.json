@@ -2595,6 +2595,10 @@
     "ja": "この部屋にしまえるアイテムはありません",
     "en": "No items in this room to stow"
   },
+  "components.ItemModal.text037": {
+    "ja": "ペルソナが会話の中でこのアイテムを指すときに使う番号です",
+    "en": "The number personas use to refer to this item in conversation"
+  },
   "components.MCPSection.text001": {
     "ja": "必要なランタイムが見つからない",
     "en": "Required runtime not found"
