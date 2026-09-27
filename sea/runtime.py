@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
@@ -27,6 +28,7 @@ from sea.runtime_engine import RuntimeEngine
 from sea.runtime_context import preview_context as preview_context_impl
 from sea.runtime_graph import compile_with_langgraph as compile_with_langgraph_impl
 from sea.runtime_llm import lg_llm_node as lg_llm_node_impl
+from sea.reply_stop_exit import settle_reply_stop
 from sea.runtime_runner import run_playbook
 from sea.runtime_nodes import (
     lg_exec_node as lg_exec_node_impl,
@@ -456,19 +458,52 @@ class SEARuntime:
             )
         except Exception:
             LOGGER.exception("[metabolism] Emergency pre-compaction failed")
-        result = self._run_playbook(
-            playbook, persona, building_id, user_input,
-            # auto_mode = 「応答ループにユーザーが居ない Pulse か」。run_meta_user は
-            # user / schedule / auto の共通入口なので pulse_type から導出する。
-            # None は PulseController を経ない直接呼び出し (レガシー) のみで、
-            # 確認ダイアログを黙って自動承認しない側 (=user 扱い) に倒す。
-            auto_mode=(pulse_type not in (None, "user")),
-            record_history=True, event_callback=event_callback,
-            cancellation_token=cancellation_token, pulse_type=pulse_type,
-            initial_params=effective_args if effective_args else None,
-            pulse_line_aspect=_root_aspect,
-            pre_spells=pre_spells,
-            model_binding=model_binding,
+        # 返事が途中で止まった回の後始末は、返事の実行の一番外側 (ここ) で
+        # 一回だけ行う (docs/intent/reply_stop_exit.md)。対象はこの時刻より後に
+        # 保存された発言だけ — 別の実行の発言を誤って印付けない時間窓。
+        # スペルの周回・サブライン・スペルループの内側は後始末を呼ばず、
+        # 失敗をそのまま上へ投げる。
+        # 時計は単調時計 — 記録の saved_at (sea/runtime_emitters.py) と同じ
+        # 時計で比べる (壁時計が戻ると時間窓が発言を読み飛ばす)。
+        _reply_started_at = time.monotonic()
+        try:
+            result = self._run_playbook(
+                playbook, persona, building_id, user_input,
+                # auto_mode = 「応答ループにユーザーが居ない Pulse か」。run_meta_user は
+                # user / schedule / auto の共通入口なので pulse_type から導出する。
+                # None は PulseController を経ない直接呼び出し (レガシー) のみで、
+                # 確認ダイアログを黙って自動承認しない側 (=user 扱い) に倒す。
+                auto_mode=(pulse_type not in (None, "user")),
+                record_history=True, event_callback=event_callback,
+                cancellation_token=cancellation_token, pulse_type=pulse_type,
+                initial_params=effective_args if effective_args else None,
+                pulse_line_aspect=_root_aspect,
+                pre_spells=pre_spells,
+                model_binding=model_binding,
+            )
+        except Exception as exc:
+            # エラー・取り消しで閉じた回。印と通告を置き、エラー札に案内の材料
+            # (続きの生成を出す発言の id、別の部屋ならその部屋) を載せてから、
+            # 元の例外をそのまま投げる。
+            settle_reply_stop(
+                self, persona,
+                reply_building_id=building_id,
+                started_at=_reply_started_at,
+                exc=exc,
+                cancellation_token=cancellation_token,
+                event_callback=event_callback,
+            )
+            raise
+        # 例外なしで閉じた回。発言の後で話が止まったことを保存した側が記録に
+        # 書き足していたとき (サーバーが締めの生成を切った・スペル無効の
+        # ペルソナが途中で止められた等) だけ働く。
+        settle_reply_stop(
+            self, persona,
+            reply_building_id=building_id,
+            started_at=_reply_started_at,
+            exc=None,
+            cancellation_token=cancellation_token,
+            event_callback=event_callback,
         )
 
         # Post-response metabolism check (DB ベースで件数比較)。

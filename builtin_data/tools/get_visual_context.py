@@ -11,6 +11,12 @@ head の VisualContextSection は退役した (部屋の様子の置き場は知
 として残る。「あの時の思い出」(_fetch_item_memory_recall) は 2026-09-06 に
 機能退役 — 後継の約束は docs/intent/persona_cognition/
 recall_tags_and_track_reduction.md 冒頭の 📌。
+
+2026-09-25: 自分の外見とインベントリ (部屋の性質ではない見る側の持ち物) は
+head の ``SelfViewSection`` が運ぶ。その読みは :func:`read_self_view` で、
+アイテム 1 件の描き方は部屋と同じ :func:`_render_item_entry` を通す
+(同じ物が二つの見え方をしないように。
+docs/issues/inventory_and_appearance_dropped_from_context.md)。
 """
 from __future__ import annotations
 
@@ -423,6 +429,9 @@ class _RenderedItem:
     """アイテム 1 件を描いた結果 (パッケージの材料)。"""
     key: str = ""
     label: str = ""
+    #: アイテムの素の名前 (``[item:N] [Image] …`` の飾りを付けない)。インベントリの
+    #: 差分通知 (「〜が加わりました」) が使う。部屋の束には載せない。
+    name: str = ""
     state: Optional[str] = None   # "open" / "closed" / None (Object と不明型)
     lines: List[str] = field(default_factory=list)
     media: List[Dict[str, str]] = field(default_factory=list)
@@ -543,7 +552,8 @@ def build_room_bundle(building_id: Optional[str] = None) -> Optional[Dict[str, A
     family ごとに決定論の順 (キーの昇順) で並ぶ — 同じ部屋を同じペルソナが
     何度読んでも同じ束になる (差分の照合と指紋の前提)。
 
-    自分の外見とインベントリは含めない (部屋の性質ではなく見る側の持ち物)。
+    自分の外見とインベントリは含めない (部屋の性質ではなく見る側の持ち物 —
+    運び手は head の ``SelfViewSection``、読みは :func:`read_self_view`)。
     アクティブなペルソナ / manager が引けない回は None (従来の縮退と同じ)。
 
     **建物に直接置かれたアイテムは「最近触られた順」の上位だけを載せる**
@@ -715,14 +725,11 @@ def _read_world(
     world.has_others = any(oid != persona_id for oid in occupants)
 
     if include_self:
-        world.self_lines.append(f"[あなた自身（{world.persona_name}）の外見]")
-        world.self_lines.append(f"saiverse://persona/{persona_id}/image")
-        self_image_path = _resolve_image_path(
-            _get_persona_appearance_path(manager, persona_id),
+        self_lines, self_media = _read_self_appearance(
+            manager, persona_id, world.persona_name,
         )
-        if self_image_path and os.path.exists(self_image_path):
-            _add_to_media_list(self_image_path, world.self_media)
-            LOGGER.debug("get_visual_context: Added self image: %s", self_image_path)
+        world.self_lines.extend(self_lines)
+        world.self_media.extend(self_media)
         world.self_lines.append("")
 
     if include_other_personas:
@@ -780,12 +787,8 @@ def _read_world(
     # ========== Section 3: Item ==========
     # インベントリは部屋の性質ではない (持ち物は移動に付いてくる) ので、束には
     # 載せない。誰も要らない回は読みにも行かない。
-    if include_inventory and hasattr(manager, 'get_all_items_for_persona'):
-        world.inventory = [
-            _render_item_entry(item, manager)
-            for item in manager.get_all_items_for_persona(persona_id)
-        ]
-        world.inventory.sort(key=_sort_key_for_item)
+    if include_inventory:
+        world.inventory = _read_inventory(manager, persona_id)
 
     if hasattr(manager, 'get_all_items_in_building'):
         world.building_items = [
@@ -802,6 +805,99 @@ def _read_world(
             world.fixtures.append(_render_fixture(f))
 
     return world
+
+
+def _read_self_appearance(
+    manager: Any, persona_id: str, persona_name: str,
+    *, raise_on_error: bool = False,
+) -> Tuple[List[str], List[Dict[str, str]]]:
+    """自分の外見の二行 (見出し + URI) と、画像があればその添付を返す。
+
+    ツール向けの姿 (:func:`_render_head_view`) と head の ``SelfViewSection``
+    (:func:`read_self_view`) の共通の読み。画像ファイルが引けない回は添付が
+    空になる (見出しの二行は返す — 使うかどうかは呼び出し側が決める)。
+    """
+    lines = [
+        f"[あなた自身（{persona_name}）の外見]",
+        f"saiverse://persona/{persona_id}/image",
+    ]
+    media: List[Dict[str, str]] = []
+    self_image_path = _resolve_image_path(
+        _get_persona_appearance_path(
+            manager, persona_id, raise_on_error=raise_on_error,
+        ),
+    )
+    if self_image_path and os.path.exists(self_image_path):
+        _add_to_media_list(self_image_path, media)
+        LOGGER.debug("get_visual_context: Added self image: %s", self_image_path)
+    return lines, media
+
+
+def _read_inventory(manager: Any, persona_id: str) -> List[_RenderedItem]:
+    """インベントリのアイテムを、部屋と同じ描き方で決定論の順に並べて返す。
+
+    manager がインベントリの読み口を持たない (テスト用の縮退など) 回は空。
+    読みの例外はそのまま上げる — 読めなかったことを「持ち物なし」に化けさせない。
+    """
+    if not hasattr(manager, "get_all_items_for_persona"):
+        return []
+    entries = [
+        _render_item_entry(item, manager)
+        for item in manager.get_all_items_for_persona(persona_id)
+    ]
+    entries.sort(key=_sort_key_for_item)
+    return entries
+
+
+@dataclass
+class SelfView:
+    """ペルソナ自身の外見とインベントリを一度に読んだ結果 (head の材料)。"""
+    persona_id: str
+    persona_name: str
+    #: ``[あなた自身（名前）の外見]`` と ``saiverse://persona/<ID>/image`` の二行。
+    appearance_lines: List[str] = field(default_factory=list)
+    #: 外見の画像の添付 (``{"path", "mime_type", "type"}``)。画像が無ければ空。
+    appearance_media: List[Dict[str, str]] = field(default_factory=list)
+    inventory: List[_RenderedItem] = field(default_factory=list)
+
+
+def read_self_view(
+    manager: Any,
+    persona_id: str,
+    *,
+    persona_name: Optional[str] = None,
+) -> Optional[SelfView]:
+    """``manager`` と ``persona_id`` を直に受けて、自分の外見とインベントリを読む。
+
+    :func:`get_visual_context` はアクティブなペルソナ (contextvar) に依存するが、
+    head の Section の capture は ``LineHeadInput`` の manager / persona_id を
+    持っているので、ここから直接呼ぶ。部屋 (Building) には依存しない —
+    持ち物と外見は移動しても変わらないので、現在地を読まない。
+
+    ``persona_name`` を省略すると ``manager.all_personas`` から引き、引けなければ
+    ID のまま。manager が無い / インベントリの読み口を持たない回は None
+    (構造的な不在)。読みの途中の例外は呼び出し側へ上げる。
+    """
+    if manager is None or not persona_id:
+        return None
+    if not hasattr(manager, "get_all_items_for_persona"):
+        LOGGER.debug("read_self_view: manager has no inventory accessor")
+        return None
+    if not persona_name:
+        persona = (getattr(manager, "all_personas", None) or {}).get(persona_id)
+        persona_name = getattr(persona, "persona_name", None) or persona_id
+    # DB の読み失敗は上げる — head は凍結されるので、失敗を「外見なし」に
+    # 化けさせると次の撮り直しまで外見の節が消える (持ち物側と同じ扱い)。
+    appearance_lines, appearance_media = _read_self_appearance(
+        manager, persona_id, persona_name, raise_on_error=True,
+    )
+    return SelfView(
+        persona_id=persona_id,
+        persona_name=persona_name,
+        appearance_lines=appearance_lines,
+        appearance_media=appearance_media,
+        inventory=_read_inventory(manager, persona_id),
+    )
 
 
 def _render_fixture(f: Any) -> _RenderedFixture:
@@ -857,6 +953,7 @@ def _render_item_entry(item: Dict[str, Any], manager: Any) -> _RenderedItem:
     is_open = isinstance(state, dict) and state.get("is_open", False)
     entry = _RenderedItem(
         key=ref if ref is not None else f"item:{item.get('item_id', '?')}",
+        name=str(item.get("name") or ""),
         state=(
             ("open" if is_open else "closed")
             if item_type in _OPENABLE_ITEM_TYPES else None
@@ -1182,8 +1279,15 @@ def _get_building_image_path(manager, building_id: str) -> Optional[str]:
     return None
 
 
-def _get_persona_appearance_path(manager, persona_id: str) -> Optional[str]:
-    """Get the APPEARANCE_IMAGE_PATH for a persona from the database."""
+def _get_persona_appearance_path(
+    manager, persona_id: str, *, raise_on_error: bool = False,
+) -> Optional[str]:
+    """Get the APPEARANCE_IMAGE_PATH for a persona from the database.
+
+    ``raise_on_error=True`` は DB の読み失敗を呼び出し側へ上げる。head の
+    ``SelfViewSection`` が使う — 凍結される head では、読み失敗を「外見が
+    設定されていない」に化けさせず、前の値を据え置かせるため。
+    """
     try:
         from database.session import SessionLocal
         from database.models import AI
@@ -1195,6 +1299,8 @@ def _get_persona_appearance_path(manager, persona_id: str) -> Optional[str]:
         finally:
             session.close()
     except Exception as exc:
+        if raise_on_error:
+            raise
         LOGGER.debug("Failed to get persona appearance path: %s", exc)
     return None
 

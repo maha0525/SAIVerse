@@ -172,6 +172,102 @@
     color: #fca5a5;
 }
 
+.btnPrimary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.iconBtnActive {
+    background: var(--bg-hover, rgba(0, 0, 0, 0.06));
+}
+
+/* A provider row plus its API key panel (when open) */
+.rowGroup {
+    display: flex;
+    flex-direction: column;
+}
+
+.keyPanel {
+    margin-left: 12px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: var(--bg-tertiary, #f1f5f9);
+    color: inherit;
+    border: 1px solid var(--border-color, #e0e0e0);
+    border-top: none;
+    border-radius: 0 0 6px 6px;
+}
+
+.keyPanelHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.keyLabel {
+    font-size: 0.85rem;
+    font-weight: 500;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.keyEnvName {
+    font-size: 0.75rem;
+    font-weight: normal;
+    color: var(--text-secondary, #777);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    word-break: break-all;
+}
+
+.docLink {
+    background: none;
+    border: none;
+    padding: 2px 4px;
+    cursor: pointer;
+    color: var(--primary, #4a7eb5);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.8rem;
+}
+
+.docLink:hover {
+    text-decoration: underline;
+}
+
+.keyInputRow {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.keyInput {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid var(--border-color, #ccc);
+    border-radius: 4px;
+    background: var(--bg-secondary, #ffffff);
+    color: inherit;
+    font-size: 0.85rem;
+}
+
+.keyInput::placeholder {
+    color: var(--text-secondary, #999);
+}
+
+.keyHint {
+    font-size: 0.75rem;
+    color: var(--text-secondary, #777);
+    line-height: 1.5;
+}
+
 .notice {
     padding: 8px 12px;
     background: var(--bg-secondary, #fafafa);

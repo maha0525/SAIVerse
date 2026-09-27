@@ -186,6 +186,7 @@ sea/
 ├── langgraph_runner.py   # LangGraph 統合
 ├── playbook_models.py    # ノード定義スキーマ（LLMNodeDef / ToolNodeDef 等）
 ├── pulse_controller.py   # PulseController（優先度制御・割り込み）
+├── reply_stop_exit.py    # 返事が途中で止まった回の後始末（最後に保存した発言へ印と中断の通告を一回だけ。reply_stop_exit intent）
 ├── pulse_context.py      # PulseContext（Aspect / line 階層）
 ├── mode_spell_permissions.py # モード別 Spell 許可
 ├── work_session.py       # 予算付き作業セッションランナー（自律行動 v2 §4.3）。**休眠** — v3 §8 で退役予定で、
@@ -199,7 +200,8 @@ sea/
 ├── cancellation.py       # キャンセル
 └── head_pipeline/        # head（キャッシュの効く安定領域）の構築
     ├── pipeline.py / registry.py / store.py / types.py / integration.py
-    └── sections/         #   各 Section（common_prompt / persona_self / building 等）
+    └── sections/         #   各 Section（common_prompt / persona_self / building 等。
+                          #   self_view = 自分の外見とインベントリ、独立した user メッセージ）
 ```
 
 ### manager/

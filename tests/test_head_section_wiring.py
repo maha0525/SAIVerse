@@ -9,7 +9,9 @@ Section を registry に登録しても、head に描画されるには
 DeskSection (P2a〜P3c①) と MemopediaIndexSection (P4-d) で二度起きた実績。
 
 visual_context (部屋の描画) は 2026-09-06 に head から退役した — 部屋の様子の
-置き場は知覚 (tail) 一つ (docs/intent/room_state_packages.md)。
+置き場は知覚 (tail) 一つ (docs/intent/room_state_packages.md)。そのとき一緒に
+消えた自分の外見とインベントリは、2026-09-25 から self_view (独立した user
+メッセージ) が運ぶ。
 
 本テストは実物の定義を import して両点の整合を機械検査する。
 """
@@ -21,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sea.head_pipeline.integration import (
     MEMORY_WEAVE_SECTION_NAME,
+    SELF_VIEW_SECTION_NAME,
     SYSTEM_PROMPT_SECTION_NAMES,
 )
 from sea.runtime_context import PERSONA_HEAD_SECTIONS
@@ -51,6 +54,16 @@ class HeadSectionWiringTests(unittest.TestCase):
         """
         self.assertIn(MEMORY_WEAVE_SECTION_NAME, PERSONA_HEAD_SECTIONS)
 
+    def test_self_view_is_fixed_in_head(self):
+        """self_view (自分の外見とインベントリ) も固定集合に含まれる。
+
+        2026-09-06 に部屋の描画を退役したとき、同じメッセージが運んでいた
+        持ち物と外見がどこからも届かなくなった (登録も関所も無い状態で 19 日間)。
+        """
+        self.assertIn(SELF_VIEW_SECTION_NAME, PERSONA_HEAD_SECTIONS)
+        # システムプロンプトには畳まない (画像を添付できるのは独立メッセージだけ)
+        self.assertNotIn(SELF_VIEW_SECTION_NAME, SYSTEM_PROMPT_SECTION_NAMES)
+
     def test_visual_context_stays_retired(self):
         """visual_context (部屋の描画) が head に復活していない。
 
@@ -64,13 +77,15 @@ class HeadSectionWiringTests(unittest.TestCase):
     def test_rendering_sections_in_registry_are_composed(self):
         """registry 登録済みで render が実文を返しうるセクションが合成経路に居る。
 
-        head に載る経路は SYSTEM_PROMPT_SECTION_NAMES / memory_weave の 2 つ
-        だけ。どれにも属さないのに render を実装しているセクションは silent
-        未描画 (DeskSection/MemopediaIndexSection 事故の型)。
+        head に載る経路は SYSTEM_PROMPT_SECTION_NAMES / memory_weave /
+        self_view の 3 つだけ。どれにも属さないのに render を実装している
+        セクションは silent 未描画 (DeskSection/MemopediaIndexSection 事故の型)。
         """
         from sea.head_pipeline import sections as sections_pkg
 
-        composed = set(SYSTEM_PROMPT_SECTION_NAMES) | {MEMORY_WEAVE_SECTION_NAME}
+        composed = set(SYSTEM_PROMPT_SECTION_NAMES) | {
+            MEMORY_WEAVE_SECTION_NAME, SELF_VIEW_SECTION_NAME,
+        }
         # 描画経路を持たない(=diff 通知等の裏方専用が許される)セクションは
         # ここに明示する。新設時にここへ足す場合は「本当に head に出さないのか」
         # を設計で確認すること。

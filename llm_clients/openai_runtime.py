@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, Optional
 from .exceptions import LLMError, SafetyFilterError
 
 
-_CONTENT_FILTER_USER_MESSAGE = "生成された内容がOpenAIのコンテンツフィルターによりブロックされました。入力内容を変更してお試しください。"
+_CONTENT_FILTER_USER_MESSAGE = "生成された内容がOpenAIのコンテンツフィルターによりブロックされました。"
 
 
 def build_request_kwargs(

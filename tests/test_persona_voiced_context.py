@@ -142,6 +142,9 @@ def test_persona_head_sections_are_fixed():
         # purpose_backlog は 2026-08-21 に節ごと退役した (中身の pickable
         # tracks と欲求候補が供給源ごと消えたため)。
         "facilities",
+        # 2026-09-25: 自分の外見とインベントリ (部屋の描画の退役で一緒に
+        # 消えていた二つ。docs/issues/inventory_and_appearance_dropped_from_context.md)。
+        "self_view",
     }
 
 

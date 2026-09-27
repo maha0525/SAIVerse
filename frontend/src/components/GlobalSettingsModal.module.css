@@ -1753,3 +1753,170 @@
 :global([data-theme="light"]) .wmMessageBad {
     color: #dc2626;
 }
+
+/* ── 配布チャンネル (安定版 / アーリーアクセス版) ── */
+.channelBadge {
+    flex: 0 0 auto;
+    padding: 0.25rem 0.7rem;
+    border-radius: 999px;
+    border: 1px solid #334155;
+    background: #1e293b;
+    color: #cbd5e1;
+    font-size: 0.8rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.channelBadgeEarly {
+    border-color: #92400e;
+    background: rgba(251, 191, 36, 0.12);
+    color: #fbbf24;
+}
+
+.channelActions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-top: 0.75rem;
+}
+
+.channelBtn {
+    padding: 0.6rem 1.2rem;
+    border: 1px solid #475569;
+    border-radius: 6px;
+    background: transparent;
+    color: #e2e8f0;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.channelBtn:hover:not(:disabled) {
+    background: #334155;
+}
+
+.channelBtn:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.channelConsent {
+    margin-top: 0.75rem;
+    padding: 0.9rem 1rem;
+    border: 1px solid #92400e;
+    border-radius: 8px;
+    background: rgba(251, 191, 36, 0.08);
+}
+
+.channelConsentTitle {
+    font-weight: 600;
+    color: #fde68a;
+    margin-bottom: 0.5rem;
+}
+
+.channelConsentList {
+    margin: 0 0 0.75rem 0;
+    padding-left: 1.25rem;
+    color: #e2e8f0;
+    font-size: 0.85rem;
+    line-height: 1.7;
+}
+
+.channelConsentCheck {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #f1f5f9;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+}
+
+.channelConsentCheck input {
+    margin-top: 0.2rem;
+    flex: 0 0 auto;
+}
+
+.channelReturn {
+    margin-top: 0.5rem;
+}
+
+.channelNote {
+    margin-top: 0.6rem;
+    padding: 0.6rem 0.7rem;
+    border-radius: 8px;
+    background: rgba(148, 163, 184, 0.12);
+    font-size: 0.85rem;
+    line-height: 1.6;
+    color: #cbd5e1;
+}
+
+.channelError {
+    margin-top: 0.6rem;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    color: #f87171;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.aboutChannel {
+    margin-top: 0.35rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #fbbf24;
+}
+
+:global([data-theme="light"]) .channelBadge {
+    border-color: #cbd5e1;
+    background: #f1f5f9;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .channelBadgeEarly {
+    border-color: #fcd34d;
+    background: #fffbeb;
+    color: #b45309;
+}
+
+:global([data-theme="light"]) .channelBtn {
+    border-color: #cbd5e1;
+    color: #334155;
+}
+
+:global([data-theme="light"]) .channelBtn:hover:not(:disabled) {
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .channelConsent {
+    border-color: #fcd34d;
+    background: #fffbeb;
+}
+
+:global([data-theme="light"]) .channelConsentTitle {
+    color: #92400e;
+}
+
+:global([data-theme="light"]) .channelConsentList {
+    color: #334155;
+}
+
+:global([data-theme="light"]) .channelConsentCheck {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .channelNote {
+    background: #f1f5f9;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .channelError {
+    color: #dc2626;
+}
+
+:global([data-theme="light"]) .aboutChannel {
+    color: #b45309;
+}

@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from llm_clients.exceptions import LLMError
 from sea import runtime_llm
 from sea.runtime_emitters import SpeakFinalizeResult
 
@@ -490,7 +491,12 @@ def test_a_failure_mid_loop_keeps_the_beats_that_were_already_confirmed():
 
 
 def test_a_streaming_failure_mid_loop_keeps_the_confirmed_beat_in_its_room():
-    """ストリーミング経路でも、落ちる前の Beat は自分の部屋に確定済みで残る。"""
+    """ストリーミング経路でも、落ちる前の Beat は自分の部屋に確定済みで残る。
+
+    続きの生成の失敗は (LLMError に包まれていない例外でも) 続きの失敗として
+    ループから投げられる — ストリーミング経路は周ごとに確定済みなので、投げても
+    落ちる前の Beat は残っている。
+    """
     runtime = SpellLoopRuntime()
 
     class _DyingStreamClient(ScriptedReasoningMixin):
@@ -503,16 +509,16 @@ def test_a_streaming_failure_mid_loop_keeps_the_confirmed_beat_in_its_room():
             return None
 
     st = _streaming_state("draft-0", "b1")
-    result, _persona = _run_loop(
-        runtime, _DyingStreamClient(), f"やるぞ。\n{SPELL_LINE}", _ok_spell(),
-        streaming_state=st, initial_building_id="b1",
-    )
+    with pytest.raises(LLMError) as excinfo:
+        _run_loop(
+            runtime, _DyingStreamClient(), f"やるぞ。\n{SPELL_LINE}", _ok_spell(),
+            streaming_state=st, initial_building_id="b1",
+        )
 
-    assert result.loop_count == 1
+    assert isinstance(excinfo.value.original_error, RuntimeError)
     assert len(runtime.finalized) == 1
     assert runtime.finalized[0]["building_id"] == "b1"
     assert "やるぞ。" in runtime.finalized[0]["text"]
-    assert result.segments[0].emitted is True
 
 
 class _UnsavableDraftRuntime(SpellLoopRuntime):
@@ -1113,10 +1119,12 @@ def test_a_round_without_reasoning_carries_no_reasoning_key():
 
 
 def test_the_interrupted_settlement_still_records_no_reasoning():
-    """中断の確定は思考を載せない (対象外のまま固定)。
+    """止まった生成の保存は思考を載せない (対象外のまま固定)。
 
     止められた回の思考は「その本文を言い切らせた思考」ではないので、記録に
-    付けない — 2026-09-19 の改修でも触らないと決めた境界。
+    付けない — 2026-09-19 の改修でも触らないと決めた境界。建物の行の
+    「言い切っていない」印は、返事の一番外側の後始末が後から付ける
+    (docs/intent/reply_stop_exit.md) ので、この保存の時点では載らない。
     """
     runtime = SpellLoopRuntime()
     persona = SimpleNamespace(persona_id="p1")
@@ -1125,24 +1133,20 @@ def test_the_interrupted_settlement_still_records_no_reasoning():
         # 直前の生成の思考が state に残っている状況を作る (漏れたら検出される)
         "_reasoning_text": "止められる前に考えていたこと",
     }
-    runtime_llm._settle_interrupted_utterance(
+    runtime_llm._save_cut_utterance(
         runtime=runtime,
         persona=persona,
         state=state,
-        node_def=SimpleNamespace(id="llm"),
         playbook=SimpleNamespace(name="test_playbook"),
         event_callback=None,
         building_id="b1",
         msg_id="draft-0",
         sub_seq=0,
         text="言いかけの",
-        by_user=True,
     )
 
-    # 建物の確定にも記憶にも、あるのは「言い切っていない」印だけ
-    assert runtime.finalized[0]["extra_metadata"] == {
-        runtime_llm.INTERRUPTED_METADATA_KEY: True,
-    }
+    # 建物の確定には何も載らず、記憶には「言い切っていない」印だけ
+    assert runtime.finalized[0]["extra_metadata"] is None
     assert runtime.assistant_memories()[0]["metadata"] == {
         runtime_llm.INTERRUPTED_METADATA_KEY: True,
     }

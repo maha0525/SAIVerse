@@ -58,9 +58,11 @@ pipeline は定期的に各 section の `capture(live)` を呼んで「もし今
 `register_default_sections` で registry に登録しただけでは、その Section は **capture と差分通知は走るが、context には一切描画されない**。実際に LLM へ送るには、登録に加えて以下 2 つに名前を通す必要がある:
 
 1. **`runtime_context.prepare_context` の `enabled_sections`** — render 対象の allowlist。`if reqs.system_prompt:` 等の固定セットに入れる ([[feedback_head_fixed_per_persona_model_no_gating]]: 用途で出し分けず固定追加)。
-2. **`integration._compose_messages` の `SYSTEM_PROMPT_SECTION_NAMES`** (または `MEMORY_WEAVE_SECTION_NAME` / `VISUAL_CONTEXT_SECTION_NAME` の役割マッピング) — composition 時にどの message へ畳むかの分類。
+2. **`integration._compose_messages` の `SYSTEM_PROMPT_SECTION_NAMES`** (または `MEMORY_WEAVE_SECTION_NAME` / `SELF_VIEW_SECTION_NAME` の独立メッセージ枠) — composition 時にどの message へ畳むかの分類。画像を添付する Section はシステムプロンプトに畳めない (添付できるのは独立したメッセージだけ) ので、独立メッセージ枠に置く。(旧 `VISUAL_CONTEXT_SECTION_NAME` の枠は 2026-09-06 の部屋の描画の退役で消え、2026-09-25 に自分の外見とインベントリの枠 `SELF_VIEW_SECTION_NAME` として戻った — §5.2。)
 
 どちらか一方でも漏れると「登録済み・capture 済み・差分通知だけ出る・本文は届かない」という静かな欠落になる。実際 `autonomy_modes` / `life_purpose` / `open_notes` がこの 2 つ目を漏らして長く描画されていなかった。新規 Section 追加時は **registry 登録 + 上記 2 関所** をセットで必ず確認する。
+
+**逆向きも同じ (2026-09-25 追記)**: Section を**退役**させるときは、その Section が運んでいた中身を全部数え上げ、それぞれの新しい運び手を確かめる。2026-09-06 の `VisualContextSection` の退役では「部屋の様子は知覚が運ぶから重複」という部屋の観点だけで判断し、同じメッセージが運んでいた自分の外見とインベントリが 19 日間どこからも届かなかった。組み上がった文脈 (LLM に渡るメッセージ列) に「ペルソナが自分について知っているべき事実」が載っていることは `tests/test_head_self_view.py` の境界テストが実際の `prepare_context` を通して確かめる (持ち物・外見に加えて、人格・コア記憶・スペル一覧)。
 
 ### ライン単位で snapshot を持つ
 
@@ -261,7 +263,17 @@ Section の登録は startup 時に集中させる (アドオン由来 Section �
 
 ### 5.2. visual_context cache
 
-既存の `runtime_context.py` の visual_context cache (anchor キー) は、`VisualContextSection` (refresh_on_events: `{building_entered, appearance_changed}`) として本機構に乗せ替えられる。
+> **現状 (2026-09-25)**: 本節の `VisualContextSection` は 2026-09-06 に退役した — 部屋の様子の置き場は知覚 (tail) 一つになった ([room_state_packages.md](room_state_packages.md) §8)。以下の「当初の設計」と「実装後の訂正」は当時の記録で、`room_text` / `head_room_out` / head 土台の差分は機構ごと消えている。
+>
+> 同じメッセージが部屋の描画と一緒に運んでいた**自分の外見とインベントリ**は、退役のときに新しい運び手を用意しておらず、2026-09-06 から 09-25 まで届いていなかった ([issues/inventory_and_appearance_dropped_from_context.md](../issues/inventory_and_appearance_dropped_from_context.md))。いまの運び手は `SelfViewSection` (`sea/head_pipeline/sections/self_view.py`、Section 名 `self_view`):
+>
+> - **置き場**: `_compose_messages` が、システムプロンプトと Memory Weave の後ろに独立した `role: "user"` のメッセージとして置き、画像 (外見と、インベントリの中の開いた写真など) を `metadata.media` で添付する。システムプロンプトには入れない (画像を添付できるのは独立したメッセージだけ)。印は `__self_view__` と、head の視覚メッセージの共通の印 `__visual_context__` (LLM クライアントの画像枠を使わない・自動想起のクエリから外れる、という既存の扱いを受けるため)。
+> - **中身**: `<system>` で包んだ「# あなた自身」の下に「## 外見」(画像が引けないペルソナは節ごと省く) と「## インベントリ」(空なら「インベントリにアイテムはありません。」)。アイテム 1 件の描き方は部屋と同じ `_render_item_entry` で、世界の読みは `builtin_data/tools/get_visual_context.read_self_view` (現在地の部屋には依存しない)。
+> - **撮り直し**: `refresh_on_events` は空 (Metabolism / anchor TTL 切れ / 欠損補完だけ)。移動では撮り直さない — 持ち物は移動で変わらない。
+> - **差分通知**: インベントリへの追加・インベントリからの削除・名前の変更、外見の画像の変更を末尾通知にする。加わったアイテムと変わった外見には描画と同じ画像を `NotificationLabel.media` で添付し、知覚まで運ぶ (`integration._push_section_diffs` / 台帳なしの degrade 経路の両方。それまで `NotificationLabel.media` は配送経路で捨てられていた)。外見の設定が外されたときは「外されました」と文だけで知らせる。DB の読み失敗は capture が例外として上げて前の値を据え置くので、空の外見が届くのは本当に外されたか、画像ファイルが無くなったときに限られる。
+> - **required ではない**: 失敗したら head から欠けるだけ。既存の head には次の Pulse の欠損補完 (`recapture_missing`) で足され、そのとき既読基準 (B) が初期化されるので、初回に全アイテムを「加わりました」と通知しない (C8)。
+
+**当初の設計**: 既存の `runtime_context.py` の visual_context cache (anchor キー) は、`VisualContextSection` (refresh_on_events: `{building_entered, appearance_changed}`) として本機構に乗せ替えられる。
 
 `_visual_context_cache` / `_visual_context_anchor` の persona 属性は廃止、snapshot に統合。
 
@@ -280,7 +292,8 @@ Section の登録は startup 時に集中させる (アドオン由来 Section �
 | 3. ## Building 名 | `BuildingSection` | `{building_entered, system_prompt_edited}` |
 | 4. ## 利用可能なPlaybook | `AvailablePlaybooksSection` | `{addon_loaded, addon_unloaded}` |
 | 6. ## スペル | `SpellListSection` | `{addon_loaded, addon_unloaded}` |
-| (visual_context) | `VisualContextSection` | `{building_entered, appearance_changed}` |
+| (visual_context) | ~~`VisualContextSection`~~ (2026-09-06 退役、§5.2) | — |
+| (自分の外見とインベントリ) | `SelfViewSection` (2026-09-25、独立した user メッセージ、§5.2) | (なし、Metabolism のみ) |
 | (memory_weave) | `MemoryWeaveSection` | (Metabolism のみ) |
 
 **判断プロンプトからの移設 (2026-07-30)**: 判断点の状況テキスト (tail) が毎回貼り直していた静的な一覧も Section 化した — `FacilitiesSection` (## 行ける場所) と `PurposeBacklogSection` (## 進行中のことと、やりたいこと)。どちらも `refresh_on_events` は空 (Metabolism のみ) で、凍結中の増減は `diff_to_notifications` が末尾通知で届ける。**一覧を head に置くことと変動通知は必ずセット** — 通知が無ければ head は「無くなったものを載せ続け、増えたものを隠し続ける」台帳になる。DeskSection とは方針が逆で、**ペルソナ本人が増やしたものも通知する** (head が凍結している以上、本人が知っていることと head の記述が合っているかは別問題)。`PurposeBacklogSection` は旧 `LifePurposeSection` の「第一階層の短いメニュー」を吸収した (同じ Track を head 内で二度並べない。しかも旧メニューは差分通知を持たず、放置すると通知される一覧とされない一覧が同じ head で食い違う)。詳細: docs/issues/judgment_static_lists_to_head.md
@@ -343,9 +356,15 @@ Section の `refresh_on_events` 未指定 = 空 frozenset = Metabolism のみで
 - **B は A から独立した台帳** — capture 失敗で A の key が省かれても、その Section の B は落とさない (落とすと復旧後に故障期間中の差分が届かない)。
 - **event 再 capture (`capture_for_event`)・欠損復帰 (`recapture_missing`) も同じ**: B が無い Section だけ初期化し、既存 B は据え置く。
 - **store への保存は「保存時点の最新 in-memory B」を書く** — 古い B のコピーを抱えた保存が遅れて着地して、並行配送が進めた durable B を巻き戻さないよう、(persona, model) 単位で保存を直列化し、保存直前に B を読み直す。B は単調にしか進まないので「新しい B + 古い A の版」は無害、逆は再起動後の再通知重複になる。
-- **台帳なしの degrade 配送経路も「検出 → push 成功 → B 前進」の順** — push 失敗・SAIMemory 未 ready では B を据え置き、次回 flush の再検出に委ねる (at-least-once)。
+- **台帳なしの degrade 配送経路も「検出 → push 成功 → B 前進」の順** — push 失敗・SAIMemory 未 ready では B を据え置き、次回 flush の再検出に委ねる (at-least-once)。一部のラベルだけ push に失敗した回は、成功した分も次回に再び届く (本番の manager は必ず台帳を持つので、この経路はテスト環境でしか通らない)。
+- **「検出 → 台帳に積む → B 前進」はペルソナ単位で一本に並べる (2026-09-26)** — ペルソナ P の Pulse 頭と、別のペルソナが P の部屋へ入ってきたときの検知 (`saiverse/dynamic_state.on_building_entered`、P の Beat ロックは取らない) が同時に走ると、同じ古い B から同じ差分を見つけて二回積んでいた。ペルソナ単位の通知ロックの中で三つを行い、後から来た側は進んだ B と比べる。ツール成功時の内容型通知 (`notify.py`) も同じロックに入る。**配送 (台帳の即時配送) はロックを離してから行う** — 移動の配送ハンドラは台帳の配送ロックを握ったまま他人の検知に入るので、通知ロックを握ったまま配送ロックを取ると逆順で固まる。ロック順序は「台帳の配送ロック → 通知ロック → 保存ロック → pipeline のロック」の一方向。経緯: [issues/head_diff_notification_duplicate_delivery.md](../issues/head_diff_notification_duplicate_delivery.md)
+- **B の前進は、メモリに読み込まれていないモデルの組にも及ぶ (2026-09-26)** — B はペルソナとモデルの組ごとに保存され、再起動後はそのとき使うモデルの組だけが読み込まれる。読み込まれた組だけを進めると、DB にだけある別モデルの組が古い B のまま残り、後でそのモデルが読み込まれたときに同じ差分を再配送していた。`advance_last_notified_many` (一回の配送で届けた Section をまとめて受け取る。単数版の `advance_last_notified` はその委譲) は、メモリ上の組に加えて DB にだけある同じペルソナの組の B も、届けた Section の分だけ進める。DB の処理は Section の数によらず一回 (入室の配送は台帳の配送ロックを握ったまま走るので、ここで往復を重ねると他のペルソナの配送まで待たせる)。DB からの読み込み (`load_from_store`) も通知ロックの中で行い、進める途中に古い組が読み込まれるのを防ぐ。経緯: 同 issue のケース 4。
+- **撮り直しはメモリに組が無いとき、先に DB の B を読み込む (2026-09-26)** — 再起動後、差分検知の読み込み (`ensure_snapshot`) より先にスペルの切り替え・Metabolism などの撮り直し (`dispatch_event` → `capture_all`) が来ると、`capture_all` はメモリに組が無いのを「B の無い初回」と扱い、DB に残っていた未配送の変化の B を撮ったばかりの値で上書きしていた (その変化は二度と届かない — 上の「capture_all は B に触らない」の違反)。`capture_all` はメモリに組が無ければ撮る前に `load_from_store` で読み込み、DB に行が本当に無いときだけ B を初期化する。撮影から保存までは通知ロックの中で行い、B の前進と並べる (新しいモデルの初回撮影が B の前進に割り込まれて古い値で上書きされる隙間もこれで閉じた)。`capture_all` は通知ロックを取るので、pipeline のロックや保存ロックを握ったまま呼ばない (`capture_for_event` はロックを離してから落ちる)。経緯: 同 issue のケース 5。
+- **B の保存失敗は止めない。保存に失敗した B が DB から読まれると、まれに一回重複する (2026-09-26 まはー承認)** — 台帳への登録が通った直後に B の保存だけが失敗し、B が保存し直される前にその行が DB から読まれると、古い B から同じ差分を再検出してもう一度届ける。読まれる場面は二つ: メモリ上の組の保存 (`save_last_notified`) が失敗した後の再起動と、DB にだけある組の保存 (`save_notified_sections_for_other_models`) が失敗した後にそのモデルへ切り替えたとき (再起動を挟まなくても起きる)。後者は前者と同じ失敗の別の現れとして、2026-09-26 に私 (メティス) の判断でこの受け入れに含め、まはーに報告した。自己回復の範囲は二つで違う: メモリ上の組の B は次の配送や撮り直しのたびに最新値で保存し直されるので、重複が出るのはその間に読まれた場合だけ。DB にだけある組の B は、同じ Section の B が次に進むまで古いまま残る (別の Section の配送や撮り直しでは書き直されない) ので、それまでにそのモデルへ切り替えると一回重複する。台帳と B を一つの書き込みにまとめれば塞げるが、二つの仕組みを結ぶ複雑さに見合わないとして受け入れた (元は 2026-07-21 の W6 引き継ぎに Fable の判断として記録されていたもの)。
 
-回帰: `tests/test_head_pipeline.py` (capture_all / METABOLISM dispatch / capture_for_event / recapture_missing の基準据え置き、保存時の B 読み直し)、`tests/test_head_pipeline_anchor_ttl.py` (TTL 切れ再 capture 後の配送)、`tests/test_head_mutation_notify.py` (degrade 経路の配送確定後前進)。
+- **並べても閉じない残り (2026-09-26 受け入れ)** — ツールが書き込んでから内容型通知を出すまでの間に差分検知が先に同じ変化を見つけた回は、変化の知らせとツール側の知らせの二通りが届く (ツール側は B を見ずに必ず出す)。詳細は同 issue の「現在の状態」。
+
+回帰: `tests/test_head_pipeline.py` (capture_all / METABOLISM dispatch / capture_for_event / recapture_missing の基準据え置き、保存時の B 読み直し)、`tests/test_head_pipeline_anchor_ttl.py` (TTL 切れ再 capture 後の配送)、`tests/test_head_mutation_notify.py` (degrade 経路の配送確定後前進)、`tests/test_head_diff_notify_serialization.py` (同時検知で一回しか積まれない、配送は通知ロックの外)。
 
 ---
 
@@ -430,3 +449,4 @@ snapshot が「変わるべきでないタイミングで変わってない」�
 ## 改訂履歴
 
 - v0.1 (2026-05-13): 起草。Phase 4' / A-3-c の cache 破壊問題を契機に foundational refactor として整理。Section interface + LineHeadSnapshot + refresh_on_events の 3 点セットで物理的な不変条件強制を狙う。
+- 2026-09-25: `SelfViewSection` を追加 (自分の外見とインベントリ、独立した user メッセージ)。2026-09-06 の `VisualContextSection` 退役で届かなくなっていた二つを戻す。§2 の関所の説明・§5.2・§5.3 の表を現状に合わせ、退役時の「運んでいた中身の数え上げ」と組み上がった文脈の境界テストを §2 に追記。`NotificationLabel.media` が配送経路で捨てられていたのを知覚まで運ぶよう配線した。

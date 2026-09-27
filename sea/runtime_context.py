@@ -55,8 +55,8 @@ def _reframe_autonomous_messages(messages: List[Dict[str, Any]]) -> List[Dict[st
 #: work_session だけ 3 章欠けた head で走っていた (= 同じ lightweight Session 内で
 #: head が二種類あった)。フラグを撤去してここに固定した。
 #:
-#: NOTE: 登録済みだがここに載せていない Section が 3 つある
-#: (building_items / building_occupants / chronicle_index)。これらは以前から
+#: NOTE: 登録済みだがここに載せていない Section が 2 つある
+#: (building_occupants / chronicle_index。building_items は 2026-09-06 に退役)。これらは以前から
 #: 一度も render されていない (capture だけされている)。本定数は「今 render されて
 #: いるものを固定する」のが目的なので、有効化は別途判断する
 #: (docs/issues/llm_call_entry_point_standardization.md の確認事項)。
@@ -72,6 +72,11 @@ PERSONA_HEAD_SECTIONS: frozenset[str] = frozenset({
     "facilities",
     # 2026-09-06: visual_context (部屋の描画) は head から退役した — 部屋の様子の
     # 置き場は知覚 (tail) 一つ (docs/intent/room_state_packages.md)。
+    # 2026-09-25: その退役で一緒に消えていた「自分の外見」と「インベントリ」を
+    # 運ぶ章。部屋の描画は戻さない — Memory Weave の後ろに独立した user
+    # メッセージとして置かれる (sea/head_pipeline/sections/self_view.py、
+    # docs/issues/inventory_and_appearance_dropped_from_context.md)。
+    "self_view",
 })
 
 
@@ -261,7 +266,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
 
     messages: List[Dict[str, Any]] = []
 
-    # ---- head: system prompt + Memory Weave + Visual Context ----
+    # ---- head: system prompt + Memory Weave + 自分の外見とインベントリ (self_view) ----
     # Cached Head Architecture (Phase 2-h) で section pipeline 経由に統一済み。
     # 旧 live state 直読み経路 (= section 群を毎回ここで組み立てる) は廃止。
     # snapshot 不在時は ensure_snapshot 経由で初回 capture が自動で走る。

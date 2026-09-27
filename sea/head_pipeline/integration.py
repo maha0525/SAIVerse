@@ -8,10 +8,15 @@ Section 群と message role / metadata の対応はこの層で握る:
 - ``common_prompt`` / ``persona_self`` / ``building`` / ``available_playbooks`` /
   ``spell_list``: text-only、まとめて 1 つの system message にする
 - ``memory_weave``: text-only、独立した user role message にする (旧 get_memory_weave_context 経路と互換)
+- ``self_view``: text + media、Memory Weave の後ろに独立した user role message +
+  ``metadata.media`` (自分の外見とインベントリ。システムプロンプトには入れない —
+  画像を添付できるのは独立したメッセージだけ)
 
 部屋の描画 (旧 ``visual_context`` Section) は 2026-09-06 に head から退役した —
 部屋の様子の置き場は知覚 (tail) 一つ (docs/intent/room_state_packages.md)。
 本層はその供給側の検知 (:func:`inject_diff_notifications` の部屋の照合) も持つ。
+旧 ``visual_context`` が一緒に運んでいた自分の外見とインベントリは ``self_view``
+が引き継いだ (2026-09-25、docs/issues/inventory_and_appearance_dropped_from_context.md)。
 
 詳細: docs/intent/cached_head_architecture.md §3.5 / §5
 """
@@ -33,6 +38,16 @@ from sea.head_pipeline.types import LineHeadInput, RenderedSection
 _MEMORY_WEAVE_CONTEXT_MARKER = "__memory_weave_context__"
 _MEMORY_WEAVE_TYPE_KEY = "__memory_weave_type__"
 
+# self_view メッセージの印。``__self_view__`` はこのメッセージ固有の識別子。
+# ``__visual_context__`` は head の視覚メッセージの共通の印で、読み手が既に居る:
+# LLM クライアントの画像枠 (llm_clients/utils.compute_allowed_attachment_keys ほか
+# — head の画像は枠を使わず常に添付)、sluice の画像見積もり、自動想起のクエリ
+# 除外 (sea/auto_recall.py — head 由来の合成メッセージは「今話している内容」
+# ではない)、コンテキストプレビューの節の分類。この印を付けないと、外見の画像が
+# 直近の画像の枠争いで落ち、自動想起の種がこのメッセージに乗っ取られる。
+_SELF_VIEW_MARKER = "__self_view__"
+_VISUAL_CONTEXT_MARKER = "__visual_context__"
+
 LOGGER = logging.getLogger(__name__)
 
 # 既知 Section の役割マッピング。新規 Section 追加時はここに分類を足す。
@@ -43,7 +58,8 @@ LOGGER = logging.getLogger(__name__)
 # 旧 open_notes(720) は P3c① (concept_consolidation.md「Note → テーマノード移行」)
 # で退役し、後継の desk (机の物理) に置き換わった。
 SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
-    # 注意: Section を新設して head に描画させる場合、ここと
+    # 注意: Section を新設して head に描画させる場合、ここ (または下の
+    # MEMORY_WEAVE_SECTION_NAME / SELF_VIEW_SECTION_NAME の独立メッセージ枠) と
     # sea/runtime_context.py の enabled_sections の**両方**に名前を足すこと。
     # 片方でも漏れると「登録済みなのに一度も描画されない」silent 故障になる
     # (DeskSection P2a〜P3c① / MemopediaIndexSection P4-d で二度起きた実績)。
@@ -63,6 +79,9 @@ SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
     "memopedia_index",
 )
 MEMORY_WEAVE_SECTION_NAME = "memory_weave"
+#: 自分の外見とインベントリ。Memory Weave の後ろに独立した user メッセージ
+#: (画像は metadata.media) として置く (sections/self_view.py)。
+SELF_VIEW_SECTION_NAME = "self_view"
 
 _DEFAULT_LINE_ROLE = "main_line"
 
@@ -236,6 +255,12 @@ def inject_diff_notifications(
     の窓に届くため。台帳が無い環境 (旧テスト等) は従来どおり直接 push +
     flush_diffs 内での B 前進に degrade する。
 
+    【ペルソナ単位で並べる (2026-09-26)】「検出 → 積む → B 前進」は
+    ペルソナの通知ロックの内側で一続きに行い、即時配送はロックを離してから
+    行う。理由と順序の規約は :func:`_push_section_diffs` と
+    :meth:`HeadPipeline.notify_lock_for`
+    (docs/issues/head_diff_notification_duplicate_delivery.md ケース 1)。
+
     Returns:
         ラベルが 1 件以上 push された場合 True、差分なしなら False。
     """
@@ -281,7 +306,7 @@ def preview_head_perceptions(
     読み取り専用の中身:
 
     - 基準 (last_notified) を進めない (``flush_diffs(..., advance=False)`` の
-      戻りを使うだけで :meth:`HeadPipeline.advance_last_notified` を呼ばない)。
+      戻りを使うだけで :meth:`HeadPipeline.advance_last_notified_many` を呼ばない)。
     - 知覚バッファに push しない / 実行台帳に行を作らない。
     - 部屋の様子は照合の計算 (:func:`_plan_room_state_change`) までで、置き直し
       (自己回復) は行わない — 置き直しは提示への書き込みで、しかも未消費の
@@ -317,7 +342,7 @@ def preview_head_perceptions(
             items.append({
                 "kind": "world_state",
                 "content": label.label,
-                "media": None,
+                "media": _label_media_payload(label) or None,
                 "metadata": (
                     json.dumps(label.metadata, ensure_ascii=False)
                     if label.metadata else None
@@ -374,6 +399,26 @@ def preview_head_perceptions(
     return items
 
 
+def _label_media_payload(label: Any) -> list[dict[str, str]]:
+    """ラベルの添付 (:class:`~sea.head_pipeline.types.MediaRef` 列) を知覚の media 形へ。
+
+    知覚バッファの media は ``{"path", "mime_type", "type"}`` の dict 列で、
+    提示時にマージブロックの ``metadata.media`` へそのまま載る (LLM クライアント
+    は ``type`` で画像を選り分ける — saiverse/media_utils.iter_image_media)。
+    """
+    payload: list[dict[str, str]] = []
+    for ref in getattr(label, "media", None) or ():
+        path = getattr(ref, "path", "") or ""
+        if not path:
+            continue
+        payload.append({
+            "path": path,
+            "mime_type": getattr(ref, "mime_type", "") or "",
+            "type": getattr(ref, "role", "") or "image",
+        })
+    return payload
+
+
 def _push_section_diffs(
     persona: Any,
     manager: Any,
@@ -383,13 +428,78 @@ def _push_section_diffs(
     *,
     only_sections: set[str] | None = None,
 ) -> bool:
-    """Section 群の diff ラベルを検知して知覚バッファ (or outbox) へ push する。"""
+    """Section 群の diff ラベルを検知して知覚バッファ (or outbox) へ push する。
+
+    「検出 → 台帳 (outbox) に積む → B 前進」はペルソナの通知ロック
+    (:meth:`HeadPipeline.notify_lock_for`) の内側で一続きに行う。並べないと、
+    Pulse の頭 (Beat ロック保持) と別ペルソナの入室処理 (移動の配送ハンドラ、
+    Beat ロックは取らない — saiverse/dynamic_state.on_building_entered) が同じ
+    古い B から同じ変化を見つけ、outbox に二行積む
+    (docs/issues/head_diff_notification_duplicate_delivery.md ケース 1)。
+
+    即時配送 (``flush_pending_for_persona``) は**ロックを離してから**行う。
+    配送はプロセス全体で一本の非再入ロック (``ExecutionLedger._delivery_lock``)
+    を取り、入室処理はそのロックを握った配送ハンドラの中からこのペルソナの検知に
+    入ってくる。通知ロックを握ったまま配送に入ると「入室側の配送は通知ロックを
+    待ち、こちらは配送ロックを待つ」でデッドロックする。
+    """
     ledger = getattr(manager, "execution_ledger", None)
     if ledger is None:
         return _inject_diff_notifications_direct(
             persona, pipeline, ctx, building_id, only_sections=only_sections,
         )
 
+    try:
+        with pipeline.notify_lock_for(ctx.persona_id):
+            queued = _queue_section_diffs_locked(
+                ledger, pipeline, ctx, building_id, only_sections=only_sections,
+            )
+    except Exception:
+        # 台帳に積んだ後の B 前進で落ちた回も、積んだ分は即時配送してから
+        # 例外を返す — 旧実装 (mark_applied(deliver=True)) は B 前進より先に
+        # 配っていたので、ここで配送を飛ばすと退行になる。何も積んでいない回の
+        # 配送は pending を見て空振りするだけ。
+        _deliver_queued_notifications(ledger, ctx.persona_id)
+        raise
+
+    if queued:
+        _deliver_queued_notifications(ledger, ctx.persona_id)
+    return queued
+
+
+def _deliver_queued_notifications(ledger: Any, persona_id: str) -> None:
+    """通知ロックの外で、台帳に積んだ知らせを即時配送する。
+
+    適用は commit 済みなので、配送の失敗は pending に残って関所 / 回復 tick が
+    引き継ぐ (ExecutionLedger.mark_applied の deliver=True と同じ扱い)。配送
+    ハンドラの内側 (入室処理) から呼ばれた回は、ledger 側の再入検知が控えに
+    回して外側の配達の後に配る。
+    """
+    try:
+        ledger.flush_pending_for_persona(persona_id)
+    except Exception:
+        LOGGER.error(
+            "head_pipeline: immediate delivery of queued notifications "
+            "failed persona=%s; left pending", persona_id, exc_info=True,
+        )
+
+
+def _queue_section_diffs_locked(
+    ledger: Any,
+    pipeline: HeadPipeline,
+    ctx: LineHeadInput,
+    building_id: str,
+    *,
+    only_sections: set[str] | None = None,
+) -> bool:
+    """通知ロックの内側で「検出 → outbox 積み (配送はしない) → B 前進」を行う。
+
+    呼び出し側 (:func:`_push_section_diffs`) が通知ロックを握っていること。
+    配送 (``deliver=True`` / ``flush_pending_for_persona``) はここでは行わない。
+
+    Returns:
+        outbox に 1 行以上積んだら True (呼び出し側が即時配送する)。
+    """
     labels, detected = pipeline.flush_diffs(
         ctx, all_sections=True, advance=False, only=only_sections,
     )
@@ -400,9 +510,9 @@ def _push_section_diffs(
     if not deliverable:
         # 検知だけのラベル (deliver=False) しか無い回。配送する文が無いので台帳は
         # 通さず、基準だけ新しい状態へ進める — 進めないと以後の差分が古い基準との
-        # 比較になって出なくなる (部屋替え時の同席者がこれ)。
-        for section_name, new_snapshot in detected.items():
-            pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+        # 比較になって出なくなる (部屋替え時の同席者がこれ)。検知した Section を
+        # まとめて一回で進める (Section ごとに DB を往復しない)。
+        pipeline.advance_last_notified_many(ctx.persona_id, detected)
         return False
 
     try:
@@ -419,7 +529,10 @@ def _push_section_diffs(
                     "content": label.label,
                     "reduce_key": None,
                     "salient": False,
-                    "media": [],
+                    # ラベルが添える画像 (インベントリに加わったアイテム・
+                    # 変わった外見、sections/self_view.py) を知覚エントリへ
+                    # 写す。提示時にマージブロックの metadata.media へ載る。
+                    "media": _label_media_payload(label),
                     # ラベルの型付け (label_kind 等) を知覚エントリへ写す —
                     # 未消費バッファの回収 (room_state_packages.md §11-2) が
                     # 移動通知をこの型で識別する。metadata の無いラベルは従来
@@ -432,11 +545,13 @@ def _push_section_diffs(
             }
             for label in deliverable
         ]
+        # deliver=False: 積むだけ。配送は呼び出し側が通知ロックを離してから
+        # 行う (_push_section_diffs の docstring — ロックの中で配るとデッドロック)。
         ledger.mark_applied(
             execution_id,
             result={"labels": len(deliverable), "sections": sorted(detected.keys())},
             outbox_items=outbox_items,
-            deliver=True,
+            deliver=False,
         )
     except Exception:
         # 配送予約に失敗 = 通知は届いていない。B は据え置き (次回 flush で再検出)。
@@ -450,8 +565,11 @@ def _push_section_diffs(
     # は一律に進める — deliver=False のラベルしか出さない Section (部屋替え時の
     # 同席者) も、もう後段の処理を持たない (再会の想起は Pulse 頭の同席チェックへ
     # 移った、2026-09-07) ので、基準だけ進めて次の差分に備えればよい。
-    for section_name, new_snapshot in detected.items():
-        pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+    # 前進も通知ロックの内側 — ロックを離すのは B が進んだ後なので、次に来た
+    # 処理はこの変化を見つけない。検知した Section はまとめて一回で進める —
+    # 入室の配送ハンドラから来た回は台帳の配送ロックを握ったままなので、Section
+    # ごとに DB を往復すると他ペルソナの配送まで待たせる。
+    pipeline.advance_last_notified_many(ctx.persona_id, detected)
 
     LOGGER.info(
         "head_pipeline: queued %d world_state notification(s) via ledger "
@@ -482,7 +600,27 @@ def _inject_diff_notifications_direct(
     ``deliver=False`` のラベルは push の対象外 (基準の前進にだけ使う)。SAIMemory が
     未 ready の回は、届ける文の有無にかかわらず何も進めない — push 先が無い以上、
     次回の再検出でまとめてやり直す方が落としが無い。
+
+    台帳経路と同じく「検出 → push → B 前進」をペルソナの通知ロック
+    (:meth:`HeadPipeline.notify_lock_for`) の内側で一続きに行う (並行する検知が
+    同じ古い B から同じ変化を二度 push するのを防ぐ)。この経路には配送ロックが
+    無いので、push もロックの内側でよい。
     """
+    with pipeline.notify_lock_for(ctx.persona_id):
+        return _inject_diff_notifications_direct_locked(
+            persona, pipeline, ctx, building_id, only_sections=only_sections,
+        )
+
+
+def _inject_diff_notifications_direct_locked(
+    persona: Any,
+    pipeline: HeadPipeline,
+    ctx: LineHeadInput,
+    building_id: str,
+    *,
+    only_sections: set[str] | None = None,
+) -> bool:
+    """:func:`_inject_diff_notifications_direct` の本体 (通知ロックを握って呼ぶ)。"""
     labels, detected = pipeline.flush_diffs(
         ctx, all_sections=True, advance=False, only=only_sections,
     )
@@ -502,15 +640,19 @@ def _inject_diff_notifications_direct(
     push_failed = False
     for label in deliverable:
         try:
-            # 台帳経路と同じく、ラベルの型付け (label_kind 等) を知覚エントリへ
-            # 写す (room_state_packages.md §11-3-2)。
-            sai_mem.push_perception(
-                "world_state", label.label,
-                metadata=(
+            # 台帳経路と同じく、ラベルの型付け (label_kind 等) と添える画像を
+            # 知覚エントリへ写す (room_state_packages.md §11-3-2)。画像の無い
+            # ラベルは従来どおり media を渡さない。
+            push_kwargs: dict[str, Any] = {
+                "metadata": (
                     json.dumps(label.metadata, ensure_ascii=False)
                     if label.metadata else None
                 ),
-            )
+            }
+            label_media = _label_media_payload(label)
+            if label_media:
+                push_kwargs["media"] = label_media
+            sai_mem.push_perception("world_state", label.label, **push_kwargs)
         except Exception:
             push_failed = True
             LOGGER.exception(
@@ -520,8 +662,8 @@ def _inject_diff_notifications_direct(
         # 一部でも失敗したら B を進めない — 次回 flush で全ラベル再検出される。
         return False
 
-    for section_name, new_snapshot in detected.items():
-        pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+    # 検知した Section はまとめて一回で進める (台帳経路と同じ)。
+    pipeline.advance_last_notified_many(ctx.persona_id, detected)
 
     LOGGER.info(
         "head_pipeline: pushed %d world_state perception(s) for persona=%s building=%s",
@@ -1286,5 +1428,24 @@ def _compose_messages(
 
     # 部屋の描画 (旧 visual_context Section) は head から退役した (2026-09-06)。
     # 部屋の様子は知覚 (tail) が運ぶ — docs/intent/room_state_packages.md §2。
+
+    # 自分の外見とインベントリ: システムプロンプトと Memory Weave の後ろに、
+    # 独立した user メッセージとして置く (旧 visual_context と同じ位置)。
+    # システムプロンプトに畳まないのは、画像を添付できるのが独立した
+    # メッセージだけだから (docs/issues/inventory_and_appearance_dropped_from_context.md)。
+    self_view = rendered_by_name.get(SELF_VIEW_SECTION_NAME)
+    if self_view is not None and (self_view.text or self_view.media):
+        messages.append({
+            "role": "user",
+            "content": self_view.text or "",
+            "metadata": {
+                "media": [
+                    {"path": m.path, "mime_type": m.mime_type, "type": m.role}
+                    for m in self_view.media
+                ],
+                _SELF_VIEW_MARKER: True,
+                _VISUAL_CONTEXT_MARKER: True,
+            },
+        })
 
     return messages

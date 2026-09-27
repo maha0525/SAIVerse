@@ -15,6 +15,7 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError
 
 from fastapi import APIRouter, HTTPException
+from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel
 
 from saiverse import app_state
@@ -39,22 +40,145 @@ _cached_announcements: Optional[dict] = None
 _cached_announcements_at: float = 0.0
 
 
-def _compare_versions(current: str, latest: str) -> bool:
-    """Return True if latest > current using tuple comparison.
+# Release list for the early-access channel (prereleases included). Cached on
+# the same TTL as ``releases/latest`` but separately, so the stable path's
+# cache and request stay exactly as they were.
+_RELEASE_LIST_PER_PAGE = 50
+_cached_release_list: Optional[list] = None
+_cached_release_list_at: float = 0.0
 
-    Handles versions like '0.1.6' and '0.1.10' correctly.
+
+def _parse_release_version(value: Optional[str]) -> Optional[Version]:
+    """PEP 440 version of a tag / VERSION string (``v`` prefix allowed), or None.
+
+    The same standard the startup upgrade chain (``saiverse/upgrade.py``) uses,
+    so there is one ordering of versions in the whole system: ``0.4.0rc1 <
+    0.4.0rc2 < 0.4.0`` (docs/intent/early_access_release.md §3-4).
     """
-    def _parse(v: str) -> tuple:
-        v = v.lstrip("v")
-        parts = []
-        for p in v.split("."):
-            try:
-                parts.append(int(p))
-            except ValueError:
-                parts.append(0)
-        return tuple(parts)
+    if not value:
+        return None
+    try:
+        return Version(value.strip().lstrip("v"))
+    except InvalidVersion:
+        return None
 
-    return _parse(latest) > _parse(current)
+
+def _compare_versions(current: str, latest: str) -> bool:
+    """Return True if ``latest`` is newer than ``current``.
+
+    Compared as PEP 440 versions. The former dotted-integer comparison turned
+    every non-numeric part into 0 and so ranked ``0.4.0rc1`` *above*
+    ``0.4.0``. When either side cannot be parsed the answer is "no update" with
+    a warning -- an unreadable tag must not break the version endpoint (the
+    updater's health check polls it) nor announce an update that may not be
+    one.
+    """
+    current_v = _parse_release_version(current)
+    latest_v = _parse_release_version(latest)
+    if current_v is None or latest_v is None:
+        LOGGER.warning(
+            "Cannot compare versions %r and %r as PEP 440 versions; reporting no update",
+            current,
+            latest,
+        )
+        return False
+    return latest_v > current_v
+
+
+def _checkout_channel() -> tuple[str, Optional[str], bool]:
+    """(channel, branch, is_early_access) of this install, from its git checkout.
+
+    The branch is the only thing that decides the channel (intent §4-4).
+    Anything unreadable or unrecognised is the stable channel, i.e. the
+    behaviour that existed before channels. Never raises: the version endpoint
+    is the updater's restart health check, and a failure here must not turn a
+    good update into a rollback.
+    """
+    try:
+        from scripts.update_engine import (
+            CHANNEL_EARLY_ACCESS,
+            CHANNEL_STABLE,
+            channel_for_branch,
+            read_checkout_branch,
+        )
+    except Exception:
+        LOGGER.warning("Could not load the release channel helpers; treating the install as stable", exc_info=True)
+        return "stable", None, False
+
+    project_dir = app_state.project_dir
+    if not project_dir:
+        return CHANNEL_STABLE, None, False
+    try:
+        branch = read_checkout_branch(Path(project_dir))
+    except Exception:
+        LOGGER.warning("Could not read the checkout branch; treating it as stable", exc_info=True)
+        return CHANNEL_STABLE, None, False
+    channel = channel_for_branch(branch)
+    return channel, branch, channel == CHANNEL_EARLY_ACCESS
+
+
+def _fetch_release_list() -> Optional[list]:
+    """Fetch the release list (prereleases included) from the GitHub API.
+
+    Returns a list of dicts with tag_name, html_url, name, published_at,
+    prerelease and draft, or None on failure. Cached for _CACHE_TTL seconds.
+    """
+    global _cached_release_list, _cached_release_list_at
+
+    now = time.time()
+    if _cached_release_list is not None and (now - _cached_release_list_at) < _CACHE_TTL:
+        return _cached_release_list
+
+    url = (
+        f"https://api.github.com/repos/{_GITHUB_REPO}/releases"
+        f"?per_page={_RELEASE_LIST_PER_PAGE}"
+    )
+    req = Request(url, headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "SAIVerse"})
+    try:
+        with urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (URLError, OSError, json.JSONDecodeError) as exc:
+        LOGGER.warning("Failed to fetch the release list from GitHub: %s", exc)
+        return None
+    if not isinstance(data, list):
+        LOGGER.warning("GitHub release list has an unexpected shape: %s", type(data).__name__)
+        return None
+    result = [
+        {
+            "tag_name": item.get("tag_name", "") or "",
+            "html_url": item.get("html_url", "") or "",
+            "name": item.get("name", "") or "",
+            "published_at": item.get("published_at", "") or "",
+            "prerelease": bool(item.get("prerelease")),
+            "draft": bool(item.get("draft")),
+        }
+        for item in data
+        if isinstance(item, dict)
+    ]
+    _cached_release_list = result
+    _cached_release_list_at = now
+    return result
+
+
+def _newest_release(releases: list, *, include_prereleases: bool) -> Optional[tuple[Version, dict]]:
+    """The newest non-draft release by PEP 440 order (not by publish date).
+
+    A stable hotfix published after an early-access release must not rank
+    above it just for being later, so the order is the version itself. Tags
+    that are not valid versions are skipped.
+    """
+    best: Optional[tuple[Version, dict]] = None
+    for release in releases:
+        if release.get("draft"):
+            continue
+        if release.get("prerelease") and not include_prereleases:
+            continue
+        version = _parse_release_version(release.get("tag_name"))
+        if version is None:
+            continue
+        if best is None or version > best[0]:
+            best = (version, release)
+    return best
 
 
 def _fetch_latest_release() -> Optional[dict]:
@@ -88,9 +212,60 @@ def _fetch_latest_release() -> Optional[dict]:
         return None
 
 
+def _early_access_version_fields(current: str) -> dict:
+    """Update-check fields for a checkout on the early-access branch.
+
+    ``latest_version`` is the newest release including prereleases, so the
+    next early-access release is announced. ``stable_latest_version`` is the
+    newest *stable* release and ``can_return_to_stable`` says whether it has
+    caught up with this install (stable >= current): the world only moves
+    forward, so returning to an older stable version is impossible
+    (intent §3-3). Both are None when GitHub could not be asked; the switch
+    itself re-checks against the actual branch content before moving anything.
+    """
+    releases = _fetch_release_list()
+    newest = _newest_release(releases, include_prereleases=True) if releases is not None else None
+    if newest is None:
+        return {
+            "latest_version": None,
+            "update_available": None,
+            "latest_release_url": None,
+            "release_name": None,
+            "checked_at": None,
+            "stable_latest_version": None,
+            "can_return_to_stable": None,
+        }
+    _, latest_release = newest
+    latest_tag = latest_release["tag_name"].lstrip("v")
+    stable = _newest_release(releases, include_prereleases=False)
+    stable_tag: Optional[str] = None
+    can_return: Optional[bool] = None
+    if stable is not None:
+        stable_version, stable_release = stable
+        stable_tag = stable_release["tag_name"].lstrip("v")
+        current_v = _parse_release_version(current)
+        if current_v is not None:
+            can_return = stable_version >= current_v
+    return {
+        "latest_version": latest_tag,
+        "update_available": _compare_versions(current, latest_tag),
+        "latest_release_url": latest_release["html_url"],
+        "release_name": latest_release["name"],
+        "checked_at": _cached_release_list_at,
+        "stable_latest_version": stable_tag,
+        "can_return_to_stable": can_return,
+    }
+
+
 @router.get("/version")
 async def get_version():
-    """Return current version and check for updates."""
+    """Return current version and check for updates.
+
+    ``channel`` / ``branch`` say which release line this checkout is on. On the
+    stable channel (main, and any other branch) the check is the unchanged
+    ``releases/latest`` one; on early access it looks at prereleases too and
+    also reports whether returning to stable is possible yet.
+    """
     current = app_state.version
     manager = app_state.manager
     db_identity = None
@@ -98,30 +273,41 @@ async def get_version():
         resolved_db = str(Path(manager.db_path).resolve())
         db_identity = hashlib.sha256(resolved_db.encode("utf-8")).hexdigest()
 
+    channel, branch, early_access = _checkout_channel()
+    base = {
+        "version": current,
+        "city_name": app_state.city_name,
+        "db_identity": db_identity,
+        "channel": channel,
+        "branch": branch,
+    }
+    if early_access:
+        return {**base, **_early_access_version_fields(current)}
+
     release = _fetch_latest_release()
     if release:
         latest_tag = release["tag_name"].lstrip("v")
         update_available = _compare_versions(current, latest_tag)
         return {
-            "version": current,
-            "city_name": app_state.city_name,
-            "db_identity": db_identity,
+            **base,
             "latest_version": latest_tag,
             "update_available": update_available,
             "latest_release_url": release["html_url"],
             "release_name": release["name"],
             "checked_at": _cached_at,
+            "stable_latest_version": None,
+            "can_return_to_stable": None,
         }
 
     return {
-        "version": current,
-        "city_name": app_state.city_name,
-        "db_identity": db_identity,
+        **base,
         "latest_version": None,
         "update_available": None,
         "latest_release_url": None,
         "release_name": None,
         "checked_at": None,
+        "stable_latest_version": None,
+        "can_return_to_stable": None,
     }
 
 
@@ -413,15 +599,13 @@ async def archive_unreadable_legacy_log(building_id: str):
     }
 
 
-@router.post("/update")
-async def trigger_update():
-    """Trigger a self-update: spawn detached updater, then shutdown."""
+def _resolve_updater() -> tuple[Path, Path, str]:
+    """(project path, updater script, venv python) for a detached updater run."""
     project_dir = app_state.project_dir
     if not project_dir:
         raise HTTPException(status_code=500, detail="Project directory not set")
 
     project_path = Path(project_dir)
-    config_path = project_path / ".update_config.json"
     updater_script = project_path / "scripts" / "update_engine.py"
 
     if not updater_script.exists():
@@ -432,7 +616,10 @@ async def trigger_update():
         venv_python = str(project_path / ".venv" / "Scripts" / "python.exe")
     else:
         venv_python = str(project_path / ".venv" / "bin" / "python")
+    return project_path, updater_script, venv_python
 
+
+def _refuse_without_updater_psutil(venv_python: str) -> None:
     # UI 更新で走るアップデータは更新前のチェックアウトのもの。psutil 無しでは
     # アップデータの終了待ちが fail-closed で中止し、バックエンドだけが落ちて
     # 戻らない (docs/issues/self_update_unsafe_without_psutil.md)。断るなら
@@ -463,15 +650,54 @@ async def trigger_update():
             ),
         )
 
-    # Refuse before shutdown if update cannot preserve local work. The engine
-    # repeats this check after shutdown to close the race.
-    try:
-        from scripts.update_engine import UpdateError, assert_git_update_ready
 
-        assert_git_update_ready(project_path)
-    except UpdateError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+# One update or channel switch per backend lifetime. Both routes stop the
+# backend right after spawning their detached updater, so a second request in
+# that window would spawn a second updater racing the first over the same
+# checkout, venv and restart contract (adversarial review 2026-09-25). The
+# flag never resets: the accepted operation ends this process.
+_updater_launch_lock = threading.Lock()
+_updater_launched = False
 
+
+def _claim_updater_launch() -> None:
+    """Reserve the single updater launch, or refuse with 409."""
+    global _updater_launched
+    with _updater_launch_lock:
+        if _updater_launched:
+            raise HTTPException(
+                status_code=409,
+                detail="An update or channel switch is already in progress; the backend is shutting down for it.",
+            )
+        _updater_launched = True
+
+
+def _release_updater_launch() -> None:
+    """Give the claim back after a launch that failed before the updater ran.
+
+    Without this, a failed write of the restart contract or a failed spawn
+    would leave the claim held forever and every retry would 409 until the
+    backend was manually restarted (adversarial review 2026-09-25, round 2).
+    """
+    global _updater_launched
+    with _updater_launch_lock:
+        _updater_launched = False
+
+
+def _launch_detached_updater(
+    project_path: Path,
+    updater_script: Path,
+    venv_python: str,
+    extra_config: Optional[dict] = None,
+) -> None:
+    """Write the restart contract, spawn the detached updater, schedule shutdown.
+
+    ``extra_config`` adds request-specific keys to the contract (a channel
+    switch passes ``switch_channel``); everything else is shared, so an update
+    and a switch stop and restart the backend in exactly the same way.
+    Callers must have claimed the launch via :func:`_claim_updater_launch`.
+    """
+    config_path = project_path / ".update_config.json"
     manager = app_state.manager
     backend_port = manager.ui_port if manager else 8000
 
@@ -516,6 +742,7 @@ async def trigger_update():
         ),
         "child_processes": child_processes,
         "venv_python": venv_python,
+        **(extra_config or {}),
     }
     config_tmp = config_path.with_suffix(config_path.suffix + ".tmp")
     config_tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -588,4 +815,91 @@ async def trigger_update():
     timer.daemon = True
     timer.start()
 
+
+@router.post("/update")
+async def trigger_update():
+    """Trigger a self-update: spawn detached updater, then shutdown."""
+    project_path, updater_script, venv_python = _resolve_updater()
+    _refuse_without_updater_psutil(venv_python)
+
+    # Refuse before shutdown if update cannot preserve local work. The engine
+    # repeats this check after shutdown to close the race.
+    try:
+        from scripts.update_engine import UpdateError, assert_git_update_ready
+
+        assert_git_update_ready(project_path)
+    except UpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # Claimed after every refusal above: a refused request must stay retryable.
+    _claim_updater_launch()
+    try:
+        _launch_detached_updater(project_path, updater_script, venv_python)
+    except Exception:
+        _release_updater_launch()
+        raise
     return {"status": "updating"}
+
+
+class _ChannelSwitchBody(BaseModel):
+    # "early_access" to join the early-access line, "stable" to return to main.
+    channel: str
+    # Joining requires the user to have accepted, in the UI, that the world
+    # moves forward and cannot return to stable until stable catches up
+    # (docs/intent/early_access_release.md §3-2-1, invariant 3).
+    consent: bool = False
+
+
+@router.post("/channel")
+def switch_release_channel(body: _ChannelSwitchBody):
+    """Switch this install to the other release line, through the updater.
+
+    Same shape as ``/update``: every refusal happens while the backend is still
+    running, then the detached updater takes over (snapshot, branch switch,
+    dependencies, restart) and this process shuts down. The pre-checks include
+    a ``git fetch``, so this route is a plain ``def`` (run in the thread pool)
+    rather than blocking the event loop.
+    """
+    from scripts.update_engine import (
+        CHANNEL_BRANCHES,
+        CHANNEL_EARLY_ACCESS,
+        UpdateError,
+        preflight_switch,
+    )
+
+    if body.channel not in CHANNEL_BRANCHES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown release channel {body.channel!r}; expected one of {sorted(CHANNEL_BRANCHES)}",
+        )
+    if body.channel == CHANNEL_EARLY_ACCESS and not body.consent:
+        raise HTTPException(
+            status_code=400,
+            detail="Joining the early-access channel requires the user's consent",
+        )
+
+    project_path, updater_script, venv_python = _resolve_updater()
+    _refuse_without_updater_psutil(venv_python)
+
+    # The same checks the engine repeats after shutdown: clean tree, the right
+    # starting branch, the target branch published, not a downgrade. Before
+    # the first early-access release the target branch does not exist, and
+    # this is where the user hears so -- with SAIVerse still running.
+    try:
+        plan = preflight_switch(project_path, body.channel)
+    except UpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # Claimed after every refusal above: a refused request must stay retryable.
+    _claim_updater_launch()
+    try:
+        _launch_detached_updater(
+            project_path,
+            updater_script,
+            venv_python,
+            extra_config={"switch_channel": plan.channel},
+        )
+    except Exception:
+        _release_updater_launch()
+        raise
+    return {"status": "switching", "channel": plan.channel, "branch": plan.target_branch}

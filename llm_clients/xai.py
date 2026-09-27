@@ -74,7 +74,7 @@ def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError
                 if any(kw in details for kw in ("content", "policy", "guideline", "safety", "violat")):
                     return SafetyFilterError(
                         f"xAI {context}: content policy violation", err,
-                        user_message="入力内容がxAIの利用ガイドラインによりブロックされました。入力内容を変更してお試しください。",
+                        user_message="入力内容がxAIの利用ガイドラインによりブロックされました。",
                     )
                 return AuthenticationError(f"xAI {context}: permission denied", err)
             if code == grpc.StatusCode.RESOURCE_EXHAUSTED:

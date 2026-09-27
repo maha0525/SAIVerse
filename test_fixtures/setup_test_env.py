@@ -33,6 +33,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from database.models import Base, User, City, AI, Building, BuildingOccupancyLog, Playbook
+from saiverse.i18n_utils import split_i18n_columns
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,6 +94,12 @@ def seed_database(definitions: dict):
     # Remove existing DB
     if TEST_DB_PATH.exists():
         TEST_DB_PATH.unlink()
+    # ...and its WAL sidecars. A leftover -wal from the old DB can be replayed
+    # onto the fresh file once the app switches it to WAL mode.
+    for suffix in ("-wal", "-shm"):
+        sidecar = TEST_DB_PATH.with_name(TEST_DB_PATH.name + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
 
     # Create engine and tables
     engine = create_engine(f"sqlite:///{TEST_DB_PATH}")
@@ -173,7 +180,15 @@ def import_playbooks(definitions: dict):
 
             try:
                 data = json.loads(json_path.read_text(encoding="utf-8"))
-                description = data.get("description", "")
+                # description / display_name may be a language dict ({ja, en});
+                # the DB columns are strings, so split into base + ``_en``.
+                description, description_en = split_i18n_columns(
+                    data.get("description"), alt_en=data.get("description_en"),
+                )
+                description = description or ""
+                display_name, display_name_en = split_i18n_columns(
+                    data.get("display_name"), alt_en=data.get("display_name_en"),
+                )
                 router_callable = data.get("router_callable", False)
                 user_selectable = data.get("user_selectable", False)
 
@@ -187,6 +202,9 @@ def import_playbooks(definitions: dict):
                 record = Playbook(
                     name=name,
                     description=description,
+                    description_en=description_en,
+                    display_name=display_name,
+                    display_name_en=display_name_en,
                     scope="public",
                     schema_json=json.dumps(schema_payload, ensure_ascii=False),
                     nodes_json=json.dumps(data, ensure_ascii=False),
@@ -204,11 +222,34 @@ def import_playbooks(definitions: dict):
     LOGGER.info(f"Imported {imported} playbooks.")
 
 
+def write_llm_configs(definitions: dict):
+    """Write the test-only provider/model files (``llm_configs`` in the definitions).
+
+    They go to test_data/user_data/{providers,models}/<name>.json — the
+    user_data layer of the isolated environment — so the repository's
+    builtin_data is never touched. Used by the scripted fake LLM
+    (test_fixtures/scenarios/scripted_llm_server.py).
+    """
+    llm_configs = definitions.get("llm_configs") or {}
+    for kind in ("providers", "models"):
+        entries = llm_configs.get(kind) or {}
+        target_dir = TEST_USER_DATA / kind
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for name, config in entries.items():
+            path = target_dir / f"{name}.json"
+            path.write_text(
+                json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            LOGGER.info(f"Wrote test {kind[:-1]} config: {path}")
+
+
 def reset_database():
     """Reset only the database."""
     definitions = load_definitions()
     seed_database(definitions)
     import_playbooks(definitions)
+    write_llm_configs(definitions)
 
 
 def reset_memory():
@@ -261,6 +302,7 @@ def setup_full():
     create_directory_structure()
     seed_database(definitions)
     import_playbooks(definitions)
+    write_llm_configs(definitions)
 
     LOGGER.info("")
     LOGGER.info("=" * 60)

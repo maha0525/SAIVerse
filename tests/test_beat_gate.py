@@ -409,23 +409,41 @@ def _spell_patches(fake_spell):
     )
 
 
-def test_spell_loop_cancel_between_rounds_raises():
-    """round 1 中に cancel された token は、round 2 に入る前に評価されて raise する。"""
+def test_spell_loop_cancel_between_rounds_stops_before_round2():
+    """round 1 中に cancel された token は、round 2 の生成が始まる前に評価される。
+
+    2026-09-25 の作り直し (docs/intent/reply_stop_exit.md) で、ループは取り消しを
+    自分で投げず、周 1 の本文をセグメントに積んだ戻り値 (``stop_error`` に同じ
+    例外) を返す — 呼び出し元が本文を建物へ書いてから同じ例外を投げ直す
+    (sea/runtime_llm.py の ``raise _spell_stop_error_sync``)。守られるべき性質は
+    3 つ: 取り消し後に次の周の生成が走らないこと、例外が同じ型・同じ原因で
+    上へ届くこと、周 1 の言葉が消えないこと。
+    """
     token = CancellationToken()
+    spell_calls: List[str] = []
 
     async def fake_spell(tool_name, tool_args, persona, state, playbook_name,
                          event_callback, messages=None):
+        spell_calls.append(tool_name)
         token.cancel(interrupted_by="user")  # spell 実行中 (round 1) に割り込み
         return ("done", None, True)
 
-    # retry は spell 入りを返す = ペルソナは round 2 を続けたがっている
+    # retry は spell 入りを返す = ペルソナは round 2 を続けたがっている。
+    # round 1 の締めくくりとしての retry 生成 1 回は cancel 前後を問わず走る
+    # (HEAD からの形)。評価点が守るのは「round 2 のスペル実行と、その先の
+    # 生成に進まない」こと。
     client = ScriptedClient([SPELL_TEXT])
     runtime = SpellLoopRuntime()  # beat_gate 無し → 周頭の cancel 評価点が効く
     p_names, p_exec = _spell_patches(fake_spell)
     with p_names, p_exec:
-        with pytest.raises(ExecutionCancelledException) as ei:
-            _run_spell_loop_sync(runtime, client, token=token)
-    assert ei.value.interrupted_by == "user"
+        result = _run_spell_loop_sync(runtime, client, token=token)
+    # 取り消しは戻り値に載って呼び出し元へ渡る (呼び出し元が投げ直す)
+    assert isinstance(result.stop_error, ExecutionCancelledException)
+    assert result.stop_error.interrupted_by == "user"
+    # round 2 のスペルは実行されていない (round 1 の 1 回だけ)
+    assert spell_calls == [SPELL_NAME]
+    # round 1 の言葉は消えない — 呼び出し元が建物へ書く材料として返る
+    assert result.segments and any("やるぞ" in seg.text for seg in result.segments)
     # round 1 の記録 (judgment + spell 結果) は書かれている (記録済み分は正)
     assert any("/spell" in text for text in runtime.stored)
 
@@ -453,8 +471,15 @@ def test_spell_loop_calls_boundary_between_rounds():
     assert boundary_calls == ["p1"]
 
 
-def test_spell_loop_boundary_gate_closed_propagates():
-    """boundary の BeatGateClosedError は partial 保存へ降格せず伝播する。"""
+def test_spell_loop_boundary_gate_closed_reaches_the_caller():
+    """boundary の BeatGateClosedError は spell 系の内部エラーへ降格しない。
+
+    2026-09-25 の作り直しで、ループは関所の閉鎖を自分で投げず、周 1 の本文を
+    セグメントに積んだ戻り値 (``stop_error`` に同じ例外) を返す — 呼び出し元が
+    本文を建物へ書いてから同じ例外を投げ直す。守られるべき性質は 2 つ: 閉鎖の
+    後に次の周の生成が走らないこと、例外が同じ型のまま上へ届くこと (エラー
+    文字列の結果へ握り潰されないこと)。
+    """
 
     class ClosingGate:
         def boundary(self, persona_id, cancellation_token=None):
@@ -464,9 +489,11 @@ def test_spell_loop_boundary_gate_closed_propagates():
                          event_callback, messages=None):
         return ("done", None, True)
 
-    client = ScriptedClient([])  # 生成に到達しないはず
+    client = ScriptedClient([])  # 生成に到達しないはず (到達すると AssertionError)
     runtime = SpellLoopRuntime(manager=SimpleNamespace(beat_gate=ClosingGate()))
     p_names, p_exec = _spell_patches(fake_spell)
     with p_names, p_exec:
-        with pytest.raises(BeatGateClosedError):
-            _run_spell_loop_sync(runtime, client)
+        result = _run_spell_loop_sync(runtime, client)
+    assert isinstance(result.stop_error, BeatGateClosedError)
+    # 周 1 の言葉は消えない — 呼び出し元が建物へ書く材料として返る
+    assert result.segments and any("やるぞ" in seg.text for seg in result.segments)
