@@ -1151,4 +1151,22 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.13 -> 0.3.14 (only additive columns; migrate.py adds them).",
     ),
+    # ---- v0.3.15 ----
+    # この版に DB 変更はない (models.py / migrate.py とも v0.3.14 から無変更)。
+    UpgradeHandler(
+        name="city_noop_v0_3_15",
+        scope="city",
+        from_version="0.3.14",
+        to_version="0.3.15",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.14 -> 0.3.15 (no DB changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_15",
+        scope="ai",
+        from_version="0.3.14",
+        to_version="0.3.15",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.14 -> 0.3.15 (no DB changes).",
+    ),
 ]
