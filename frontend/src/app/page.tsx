@@ -1389,12 +1389,22 @@ export default function Home() {
                                 body: JSON.stringify({ target_building_id: target.id }),
                             });
                             if (moveRes.ok) {
-                                setCurrentBuildingId(target.id);
-                                currentBuildingIdRef.current = target.id;
+                                // 実際の到着地はサーバーの応答が真実 — Region 内部への
+                                // 直行は入口で止まる (region.md §2.5) し、移動自体が
+                                // 失敗した応答も success=false + 現在地を運ぶ
+                                let arrivedId = target.id;
+                                try {
+                                    const moveData = await moveRes.json();
+                                    if (moveData?.current_building_id) {
+                                        arrivedId = moveData.current_building_id;
+                                    }
+                                } catch { /* ignore JSON parse */ }
+                                setCurrentBuildingId(arrivedId);
+                                currentBuildingIdRef.current = arrivedId;
                                 setMessages([]);
                                 setIsHistoryLoaded(false);
-                                fetchHistory(undefined, target.id);
-                                fetchBuildingInfo(target.id);
+                                fetchHistory(undefined, arrivedId);
+                                fetchBuildingInfo(arrivedId);
                                 setMoveTrigger(prev => prev + 1);
                             }
                         }
