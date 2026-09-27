@@ -41,6 +41,7 @@ from saiverse import autonomy_wiring as wiring
 from saiverse import clock
 from saiverse import day_plan
 from saiverse.event_scheduler import EventScheduler
+from saiverse.meta_layer import MetaLayer
 
 PERSONA_ID = "alice"
 PLAN_DATE = "2026-07-04"
@@ -104,13 +105,17 @@ def manager(session_factory):
         model=None,
     )
     personas = {PERSONA_ID: persona}
-    return SimpleNamespace(
+    mgr = SimpleNamespace(
         SessionLocal=session_factory,
         personas=personas,
         event_scheduler=EventScheduler(),  # start() しない (同期検証)
         buildings=[],
         pulse_controller=SimpleNamespace(submit_meta_judgment=lambda **kwargs: None),
+        sea_runtime=None,  # 本番 manager は無条件に持つ (未構築なら None)
     )
+    # 判断点の直列化 Lock は本番 manager が無条件に持つ MetaLayer から取る。
+    mgr.meta_layer = MetaLayer(mgr)
+    return mgr
 
 
 def _add_day_schedule(session_factory, playbook_name, time_of_day, *, playbook_params=None):

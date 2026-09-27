@@ -167,15 +167,21 @@ class EntranceTopologyTestCase(unittest.TestCase):
             self.assertIsNone(self.check("c1", "s1"))
         self.assertIsNotNone(self.check("c1", "s1"))
 
-    # --- 縮退 ---
+    # --- 検査の部品が壊れた世界 (fail-closed) ---
 
-    def test_manager_without_region_support_allows(self):
+    def test_manager_without_region_support_fails_closed(self):
+        """get_region が無い manager で素通しに倒さず、エラーで止まる。
+
+        検査の部品が壊れた日に「全移動が無検査で通る」のではなく「移動が
+        止まって症状が見える」のが正 (2026-09-26 監査のまはー裁定)。
+        """
         om = OccupancyManager.__new__(OccupancyManager)
         om._manager_ref = object()  # get_region を持たない
         om.building_map = self.buildings
         import threading
         om._topology_bypass = threading.local()
-        self.assertIsNone(om._check_entrance_topology("p1", "c1", "t1"))
+        with self.assertRaises(AttributeError):
+            om._check_entrance_topology("p1", "c1", "t1")
 
     def test_corrupted_self_referencing_region_no_infinite_loop(self):
         self.regions["loop"] = FakeRegion(

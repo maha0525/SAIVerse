@@ -100,6 +100,8 @@ class MoveEntityLedgerTest(unittest.TestCase):
             execution_ledger=self.ledger,
             quarantined_buildings={},
             personas={},
+            get_region=lambda region_id: None,
+            get_top_region_of_building=lambda building_id: None,
         )
         self.occupants = {
             "room_a": [self.MOVER, self.WITNESS],
@@ -264,24 +266,6 @@ class MoveEntityLedgerTest(unittest.TestCase):
         self.assertEqual(self._executions(), [])
         ok, msg = self.om.move_entity(self.MOVER, "bogus_type", "room_a", "room_b")
         self.assertFalse(ok)
-        self.assertEqual(self._executions(), [])
-
-    # -- 縮退 (台帳なし) ------------------------------------------------
-
-    def test_legacy_mode_without_ledger_still_moves(self):
-        events = []
-        self.manager = SimpleNamespace(
-            quarantined_buildings={},
-            personas={},
-            add_building_event=lambda bid, msg, heard_by=None: events.append(
-                (bid, heard_by)
-            ),
-        )
-        self.om._manager_ref = self.manager
-        ok, msg = self.om.move_entity(self.MOVER, "ai", "room_a", "room_b")
-        self.assertTrue(ok, msg)
-        self.assertEqual(self._open_occupancy("room_b"), 1)
-        self.assertEqual([bid for bid, _h in events], ["room_a", "room_b"])
         self.assertEqual(self._executions(), [])
 
 

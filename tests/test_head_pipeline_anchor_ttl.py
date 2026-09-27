@@ -257,7 +257,8 @@ def test_build_line_head_input_no_runtime_returns_none():
     from sea.head_pipeline.integration import build_line_head_input
 
     class _BareManager:
-        pass
+        # 本番 manager は sea_runtime 属性を無条件に持つ (未構築なら None)
+        sea_runtime = None
 
     persona = _FakePersona()
     ctx = build_line_head_input(persona, _BareManager(), "b_lobby")

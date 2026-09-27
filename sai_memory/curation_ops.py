@@ -1150,9 +1150,9 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
 
     # 背景スレッドから走るため、メインスレッドの書き込み (adapter._db_lock 経由)
     # と同じロックを共有することが必須 — 別ロックの Memopedia を作ると
-    # 同一 sqlite conn 上でトランザクションが交錯する。
-    import threading as _threading
-    db_lock = getattr(adapter, "_db_lock", None) or _threading.RLock()
+    # 同一 sqlite conn 上でトランザクションが交錯する。代用ロックへ倒さない
+    # (倒すとその交錯そのものを再現する)。
+    db_lock = adapter._db_lock
 
     plans = list_pending(mem_conn)
     if not plans:

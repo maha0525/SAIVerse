@@ -154,7 +154,7 @@ def _resolve_anchor_ttl_state(
     """
     if not manager or not model_key:
         return (None, None)
-    sea_runtime = getattr(manager, "sea_runtime", None) or getattr(manager, "runtime", None)
+    sea_runtime = manager.sea_runtime
     if sea_runtime is None:
         return (None, None)
 
@@ -1037,7 +1037,7 @@ def _plan_room_state_change(
     from tools.context import persona_context
 
     persona_id = getattr(persona, "persona_id", None)
-    persona_dir = getattr(persona, "persona_dir", None)
+    persona_dir = persona.persona_dir
     if not persona_id:
         return None
     with persona_context(persona_id, persona_dir, manager):
@@ -1142,10 +1142,7 @@ def _presentation_anchor_id(
     (keepalive / preview と同じ口) — 行は触らない。
     """
     try:
-        runtime = (
-            getattr(manager, "sea_runtime", None)
-            or getattr(manager, "runtime", None)
-        )
+        runtime = manager.sea_runtime
         lifecycle = getattr(runtime, "session_lifecycle", None)
         if lifecycle is None:
             return None
@@ -1190,10 +1187,7 @@ def _presentation_floor_chars(
     try:
         from sea.runtime_context import _minimal_load_chars
 
-        runtime = (
-            getattr(manager, "sea_runtime", None)
-            or getattr(manager, "runtime", None)
-        )
+        runtime = manager.sea_runtime
         chars = (
             int(_minimal_load_chars(runtime, persona, model_key))
             if runtime is not None else None

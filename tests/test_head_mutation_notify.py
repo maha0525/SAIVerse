@@ -127,6 +127,7 @@ def manager(session_factory, ledger, persona):
         SessionLocal=session_factory,
         personas={PERSONA_ID: persona},
         execution_ledger=ledger,
+        sea_runtime=None,  # 本番 manager は無条件に持つ (未構築なら None)
     )
     return mgr
 
@@ -225,7 +226,8 @@ def test_notify_degrades_to_direct_push_without_ledger(pipeline, section, person
         is_ready=lambda: True,
         push_perception=lambda kind, content, **kw: pushed.append((kind, content, kw)),
     )
-    manager = SimpleNamespace(personas={PERSONA_ID: persona})  # execution_ledger 無し
+    # execution_ledger 無し。sea_runtime は本番 manager が無条件に持つ (未構築なら None)
+    manager = SimpleNamespace(personas={PERSONA_ID: persona}, sea_runtime=None)
 
     pipeline.capture_all(_ctx(MODEL_A))
     section.live_text = "degrade 経路の中身"
@@ -251,6 +253,7 @@ def test_notify_never_raises_even_when_ledger_broken(pipeline, section, persona)
 
     manager = SimpleNamespace(
         personas={PERSONA_ID: persona}, execution_ledger=_BrokenLedger(),
+        sea_runtime=None,
     )
     pipeline.capture_all(_ctx(MODEL_A))
     section.live_text = "失敗しても壊さない"
@@ -325,6 +328,7 @@ def _tool_manager(session_factory, ledger, persona):
         SessionLocal=session_factory,
         personas={PERSONA_ID: persona},
         execution_ledger=ledger,
+        sea_runtime=None,
     )
 
 
@@ -400,7 +404,7 @@ def test_diff_notify_b_advances_only_after_durable_queue(
     section.live_text = "配送保証のテスト"
 
     # 1) 配送予約に失敗 → False + B 据え置き
-    broken = SimpleNamespace(execution_ledger=_BrokenLedger())
+    broken = SimpleNamespace(execution_ledger=_BrokenLedger(), sea_runtime=None)
     assert inject_diff_notifications(
         persona, broken, BUILDING, pipeline=pipeline, model_key=MODEL_A,
     ) is False
@@ -409,6 +413,7 @@ def test_diff_notify_b_advances_only_after_durable_queue(
     # 2) 台帳が復旧 → 同じ差分が再検出されて outbox に載り、B が前進する
     working = SimpleNamespace(
         execution_ledger=ExecutionLedger(session_factory=session_factory),
+        sea_runtime=None,
     )
     assert inject_diff_notifications(
         persona, working, BUILDING, pipeline=pipeline, model_key=MODEL_A,
@@ -444,7 +449,7 @@ def test_diff_notify_direct_path_defers_labels_until_memory_ready(
         push_perception=lambda kind, content, **kw: pushed.append((kind, content)),
     )
     persona.history_manager = None
-    manager = SimpleNamespace(personas={PERSONA_ID: persona})
+    manager = SimpleNamespace(personas={PERSONA_ID: persona}, sea_runtime=None)
 
     pipeline.capture_all(_ctx(MODEL_A))
     section.live_text = "未readyの変化"
@@ -476,7 +481,7 @@ def test_diff_notify_without_ledger_keeps_legacy_direct_push(pipeline, section, 
         push_perception=lambda kind, content, **kw: pushed.append((kind, content)),
     )
     persona.history_manager = None
-    manager = SimpleNamespace(personas={PERSONA_ID: persona})
+    manager = SimpleNamespace(personas={PERSONA_ID: persona}, sea_runtime=None)
 
     pipeline.capture_all(_ctx(MODEL_A))
     section.live_text = "旧経路の変化"

@@ -100,13 +100,12 @@ class OccupancyManager:
         """
         chain: List[str] = []
         building = self.building_map.get(building_id)
-        get_region = getattr(self._manager_ref, "get_region", None)
         rid = getattr(building, "region_id", None)
-        while rid and get_region:
+        while rid:
             if rid in chain:  # 自己参照の破損データで無限ループしない
                 break
             chain.append(rid)
-            region = get_region(rid)
+            region = self._manager_ref.get_region(rid)
             rid = getattr(region, "parent_region_id", None) if region else None
         return chain
 
@@ -119,12 +118,14 @@ class OccupancyManager:
         境界越え。新規スコープがちょうど 1 つ、かつ移動元がその入口 Building の
         ときだけ通過を許し、その境界点で entry policy を執行する。
         退出方向 (新規スコープなし) は制限しない。
+
+        検査の部品 (``manager.get_region``) が欠けた世界で素通しに倒さない —
+        全移動が無検査で通るより、移動がエラーで止まって症状が見える方が正しい
+        (fail-closed、2026-09-26 監査のまはー裁定)。
         """
         if self._topology_bypassed():
             return None
-        get_region = getattr(self._manager_ref, "get_region", None)
-        if get_region is None:
-            return None
+        get_region = self._manager_ref.get_region
         from_scopes = set(self._scope_chain(from_id))
         to_chain = self._scope_chain(to_id)
         new_scopes = [s for s in to_chain if s not in from_scopes]
@@ -179,11 +180,12 @@ class OccupancyManager:
         ゲーム進行中 (phase が playing / paused) の Region 内 Building は、
         参加者 (state.participants) と Ruler 以外の入場を拒否する。退出方向は
         制限しない (退出はポーズで対応)。設計: temp/region_rpg_intent.md §D (不変条件 4)
+
+        検査の部品 (``manager.get_top_region_of_building``) が欠けた世界で
+        素通しに倒さない — 入口トポロジー検査と同じ fail-closed
+        (2026-09-26 監査のまはー裁定の同族)。
         """
-        get_top_region = getattr(self._manager_ref, "get_top_region_of_building", None)
-        if get_top_region is None:
-            return None
-        region = get_top_region(to_id)
+        region = self._manager_ref.get_top_region_of_building(to_id)
         if region is None or not region.is_game_region:
             return None
         phase = region.state.get("phase")
@@ -290,9 +292,9 @@ class OccupancyManager:
             logging.warning("move_entity aborted: unknown entity type %s", entity_type)
             return False, f"不明なエンティティタイプ: {entity_type}"
 
-        ledger = getattr(self._manager_ref, "execution_ledger", None)
-        if ledger is None:
-            return self._move_entity_legacy(entity_id, entity_type, from_id, to_id)
+        # 台帳は SAIVerseManager が無条件に持つ。台帳なしの縮退経路 (旧実装の
+        # 並行コピー) は 2026-09-26 監査で撤去した — 移動は台帳経路一本。
+        ledger = self._manager_ref.execution_ledger
 
         persona_queue_id = entity_id if entity_type == 'ai' else None
         execution_id, _created = ledger.begin_execution(
@@ -513,7 +515,7 @@ class OccupancyManager:
         到着記録) — in-memory occupants は commit 後まで触らないため、ここでは
         無変異で導出する。
 
-        event_key は移動ごとの採番 ID (台帳 execution_id / legacy は uuid) を含む
+        event_key は移動ごとの採番 ID (台帳 execution_id / 未指定なら uuid) を含む
         (分離監査 P2-1: 秒精度 timestamp では同一秒の同経路移動が衝突していた)。
         移動 tx は原子的でイベントの部分状態が残らないため、再試行時の key 再利用
         は不要。
@@ -640,147 +642,6 @@ class OccupancyManager:
             "payload": payload, "persona_id": persona_queue_id,
         })
         return items
-
-    def _move_entity_legacy(
-        self,
-        entity_id: str,
-        entity_type: str,
-        from_id: str,
-        to_id: str,
-    ) -> Tuple[bool, Optional[str]]:
-        """execution_ledger の無い環境 (旧テストスタブ等) の縮退経路。
-
-        従来実装のまま: DB commit 後の後処理 (イベント・hook) が裸で走る。
-        本番 manager は常に台帳を持つため、この経路は縮退時のみ。
-        CAS (P1-2) と canonical sync (P1-1 残片) は台帳経路と同じ規律で行う。
-        """
-        logging.warning(
-            "move_entity: manager has no execution_ledger; running in legacy "
-            "mode (%s -> %s)", from_id, to_id,
-        )
-        db = self.SessionLocal()
-        try:
-            now = datetime.now()
-            if entity_type == 'ai':
-                active_rows = db.query(BuildingOccupancyLog).filter_by(
-                    AIID=entity_id, EXIT_TIMESTAMP=None,
-                ).order_by(
-                    BuildingOccupancyLog.ENTRY_TIMESTAMP.desc(),
-                    BuildingOccupancyLog.ID.desc(),
-                ).all()
-                if len(active_rows) > 1:
-                    db.rollback()
-                    logging.error(
-                        "move_entity(legacy): duplicate active occupancy rows "
-                        "for %s (%d rows)", entity_id, len(active_rows),
-                    )
-                    return False, (
-                        "移動失敗: 占有記録が破損しています (現在地が複数)。"
-                        "再起動時の自動修復をお試しください。"
-                    )
-                if active_rows and active_rows[0].BUILDINGID != from_id:
-                    current_bid = active_rows[0].BUILDINGID
-                    db.rollback()
-                    return False, self._stale_from_message(current_bid)
-                if active_rows:
-                    if not self._close_active_row_cas(db, active_rows[0].ID, now):
-                        db.rollback()
-                        return False, self._stale_from_message(
-                            self._read_ai_location_db(db, entity_id)
-                        )
-                if not self._insert_active_row_cas(db, entity_id, to_id, now):
-                    db.rollback()
-                    return False, self._stale_from_message(
-                        self._read_ai_location_db(db, entity_id)
-                    )
-                entity_name = self.id_to_name_map.get(entity_id, entity_id)
-            else:
-                user = db.query(UserModel).filter_by(USERID=int(entity_id)).first()
-                if not user:
-                    return False, "移動失敗: ユーザーが見つかりません。"
-                if user.CURRENT_BUILDINGID is not None and user.CURRENT_BUILDINGID != from_id:
-                    current_bid = user.CURRENT_BUILDINGID
-                    db.rollback()
-                    return False, self._stale_from_message(current_bid)
-                if not self._cas_update_user_location(
-                    db, int(entity_id), from_id, to_id
-                ):
-                    db.rollback()
-                    return False, self._stale_from_message(
-                        self._read_user_location_db(db, int(entity_id))
-                    )
-                entity_name = user.USERNAME or "ユーザー"
-
-            db.commit()
-
-            if entity_id in self.occupants.get(from_id, []):
-                self.occupants[from_id].remove(entity_id)
-            self.occupants.setdefault(to_id, []).append(entity_id)
-
-            # 確定位置の公開は後処理より前 (台帳経路と同じ規律 —
-            # 2026-07-21 Codex 第二巡 P1)
-            self._sync_canonical_location(entity_id, entity_type, to_id)
-
-            mgr = self._manager_ref
-            if mgr is not None and hasattr(mgr, "add_building_event"):
-                for event_building_id, event_msg in self._build_occupancy_events(
-                    entity_id, entity_type, entity_name, from_id, to_id, now,
-                ):
-                    heard_by = event_msg.pop("heard_by", [])
-                    event_msg.pop("ingested_by", None)
-                    # 上の occupants 更新後なので heard_by を再算出せずそのまま使う
-                    mgr.add_building_event(event_building_id, event_msg, heard_by=heard_by)
-            else:
-                logging.warning(
-                    "occupancy event ignored: manager_ref unavailable for %s -> %s",
-                    from_id, to_id,
-                )
-
-            logging.info(f"Moved {entity_type} '{entity_id}' from {from_id} to {to_id}.")
-
-            if entity_type == "ai":
-                try:
-                    from saiverse.dynamic_state import DynamicStateManager
-                    manager = self._manager_ref
-                    if manager:
-                        persona = getattr(manager, "personas", {}).get(entity_id)
-                        if persona:
-                            DynamicStateManager.on_building_entered(persona, to_id, manager)
-                except Exception:
-                    logging.exception("[dynamic_state] on_building_entered failed for %s -> %s", entity_id, to_id)
-
-                try:
-                    from saiverse.addon_hooks import dispatch_hook
-                    dispatch_hook(
-                        "persona_exited_building",
-                        persona_id=entity_id,
-                        building_id=from_id,
-                        from_building_id=from_id,
-                        to_building_id=to_id,
-                    )
-                    dispatch_hook(
-                        "persona_entered_building",
-                        persona_id=entity_id,
-                        building_id=to_id,
-                        from_building_id=from_id,
-                    )
-                except Exception:
-                    logging.exception(
-                        "[addon_hooks] persona move hook dispatch failed "
-                        "for %s -> %s", entity_id, to_id,
-                    )
-
-            lifecycle = getattr(self._manager_ref, "game_lifecycle", None)
-            if lifecycle is not None:
-                lifecycle.on_entity_moved(entity_id, from_id, to_id)
-
-            return True, None
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to move {entity_type} '{entity_id}' in DB: {e}", exc_info=True)
-            return False, "データベースの更新中にエラーが発生しました。"
-        finally:
-            db.close()
 
     def _stale_from_message(self, current_bid: Optional[str]) -> "MoveDenialMessage":
         """CAS 競合 (現在地が変わっている) の拒否メッセージを組み立てる。

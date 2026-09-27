@@ -33,6 +33,7 @@ from sqlalchemy.pool import StaticPool
 from database.models import AI, Base, City, User
 from saiverse import clock, day_plan
 from saiverse.event_scheduler import EventScheduler
+from saiverse.execution_ledger import ExecutionLedger
 
 PERSONA_ID = "alice"
 PLAN_DATE = "2026-07-04"
@@ -136,6 +137,9 @@ def manager(session_factory, monkeypatch):
         ],
         occupancy_manager=StubOccupancy(personas),
         event_scheduler=EventScheduler(),  # start() しない
+        # 本番 manager は実行台帳を無条件に持つ (台帳なしの縮退経路は
+        # 2026-09-26 監査で撤去)
+        execution_ledger=ExecutionLedger(session_factory),
         life_session=stub,
     )
 

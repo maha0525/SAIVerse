@@ -83,11 +83,14 @@ class GameRegionGateTestCase(unittest.TestCase):
         om = self._make_om(FakeRegion(is_game_region=False, phase="playing", participants=[]))
         self.assertIsNone(om._check_game_region_gate("outsider", "b1"))
 
-    def test_manager_without_region_support_allows(self):
+    def test_manager_without_region_support_fails_closed(self):
+        # 検査の部品を持たない manager では素通しにせず、例外で止まる
+        # (fail-closed、2026-09-26 監査のまはー裁定の同族)。
         om = OccupancyManager.__new__(OccupancyManager)
         om._manager_ref = object()  # get_top_region_of_building を持たない
         om.building_map = {}
-        self.assertIsNone(om._check_game_region_gate("p1", "b1"))
+        with self.assertRaises(AttributeError):
+            om._check_game_region_gate("p1", "b1")
 
 
 if __name__ == "__main__":

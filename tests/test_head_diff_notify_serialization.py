@@ -163,6 +163,7 @@ def manager(session_factory, ledger, persona):
         SessionLocal=session_factory,
         personas={PERSONA_ID: persona},
         execution_ledger=ledger,
+        sea_runtime=None,  # 本番 manager は無条件に持つ (未構築なら None)
     )
 
 

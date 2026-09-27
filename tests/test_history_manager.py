@@ -298,5 +298,87 @@ class TestEnsurePersonaPage(unittest.TestCase):
         self.assertEqual(other.title, "エリス")
 
 
+class TestAppendToOldLogKeepsUnreadableArchive(unittest.TestCase):
+    """読めない旧ログアーカイブを空リストで上書きして中身を消さない。"""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name)
+        self.hm = HistoryManager(
+            persona_id="p",
+            persona_log_path=self.base / "log.json",
+            building_memory_paths={},
+            initial_persona_history=[],
+        )
+
+    def test_corrupt_archive_is_moved_aside_and_new_archive_started(self):
+        import json
+
+        old_dir = self.base / "old_log"
+        old_dir.mkdir()
+        broken = old_dir / "20260101_000000.json"
+        broken.write_text("[{\"role\": \"user\", \"content\": \"途中で切", encoding="utf-8")
+
+        with self.assertLogs("persona.history_manager", level="WARNING"):
+            self.hm._append_to_old_log(self.base, [{"role": "user", "content": "新しい行"}])
+
+        moved = list(old_dir.glob("20260101_000000.json.corrupt-*"))
+        self.assertEqual(len(moved), 1)
+        # 破損ファイルの中身はそのまま残る
+        self.assertEqual(
+            moved[0].read_text(encoding="utf-8"),
+            "[{\"role\": \"user\", \"content\": \"途中で切",
+        )
+        # 同じ名前で新しいアーカイブが始まり、今回の行だけを持つ
+        self.assertEqual(
+            json.loads(broken.read_text(encoding="utf-8")),
+            [{"role": "user", "content": "新しい行"}],
+        )
+
+    def test_readable_archive_is_appended(self):
+        import json
+
+        old_dir = self.base / "old_log"
+        old_dir.mkdir()
+        archive = old_dir / "20260101_000000.json"
+        archive.write_text(json.dumps([{"content": "a"}]), encoding="utf-8")
+
+        self.hm._append_to_old_log(self.base, [{"content": "b"}])
+
+        self.assertEqual(
+            json.loads(archive.read_text(encoding="utf-8")),
+            [{"content": "a"}, {"content": "b"}],
+        )
+        self.assertEqual(list(old_dir.glob("*.corrupt-*")), [])
+
+    def test_non_array_json_archive_is_treated_as_corrupt(self):
+        # JSON として読めても配列でないアーカイブ (null / オブジェクト / 文字列)
+        # は破損と同じ退避経路に入り、新しい行が失われない。
+        import json
+
+        for i, payload in enumerate(["null", "{\"role\": \"user\"}", "\"字\""]):
+            with self.subTest(payload=payload):
+                old_dir = self.base / f"case{i}" / "old_log"
+                old_dir.mkdir(parents=True)
+                broken = old_dir / "20260101_000000.json"
+                broken.write_text(payload, encoding="utf-8")
+
+                with self.assertLogs("persona.history_manager", level="WARNING"):
+                    self.hm._append_to_old_log(
+                        self.base / f"case{i}", [{"content": "新しい行"}]
+                    )
+
+                moved = list(old_dir.glob("20260101_000000.json.corrupt-*"))
+                self.assertEqual(len(moved), 1)
+                self.assertEqual(moved[0].read_text(encoding="utf-8"), payload)
+                self.assertEqual(
+                    json.loads(broken.read_text(encoding="utf-8")),
+                    [{"content": "新しい行"}],
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

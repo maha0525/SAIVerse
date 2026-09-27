@@ -195,7 +195,7 @@ class DynamicStateManager:
             from builtin_data.tools.get_visual_context import build_room_bundle
             from tools.context import persona_context
             pid = getattr(persona, "persona_id", None)
-            pdir = getattr(persona, "persona_dir", None)
+            pdir = persona.persona_dir
             sai_mem = getattr(persona, "sai_memory", None)
             if pid and sai_mem is not None:
                 with persona_context(pid, pdir, manager):
@@ -406,14 +406,12 @@ def _chronicle_enabled(persona: Any, manager: Any) -> bool:
     ため — 二つが食い違うと、窓で忘れる側なのに差分を積む組み合わせができる。
     """
     try:
-        # runtime のたどり方は兄弟三箇所 (sea/head_pipeline/integration.py /
-        # sections/memory_weave.py / saiverse/day_plan.py) と同じ二段の別名
-        # 引き。sea_runtime だけを見ていると、runtime 側の名前しか持たない
-        # manager で lifecycle が引けず、無効のペルソナにも差分を積んでしまう。
-        runtime = (
-            getattr(manager, "sea_runtime", None)
-            or getattr(manager, "runtime", None)
-        )
+        # runtime のたどり方は兄弟 (sea/head_pipeline/integration.py /
+        # sections/memory_weave.py / saiverse/day_plan.py) と同じ直接参照。
+        # 旧来の第二候補 ``manager.runtime`` (RuntimeService) は
+        # session_lifecycle を持たず、第一候補が欠ける世界では必ず空振りする
+        # 死んだ保険だった (2026-09-26 監査で撤去)。
+        runtime = manager.sea_runtime
         lifecycle = getattr(runtime, "session_lifecycle", None)
         if lifecycle is None:
             return True
