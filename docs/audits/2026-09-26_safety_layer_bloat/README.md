@@ -3,8 +3,31 @@
 > **ステータス**: 監査結果のみ。コードは一行も変更していない(まはー指示: 成果物は本書のみ)
 > **目的**: コードレビュー→直しの反復で堆積した「過剰な安全設計の層」を洗い出し、スマート化の候補台帳にする
 > **関係**: [`docs/overview/architecture_health.md`](../../overview/architecture_health.md) とは補関係で重複なし — あちらは構造負債(巨大ファイル・循環 import・神ページ)、**本書は冗長な防御層の堆積**という別角度
-> **方法**: 6 サブシステム(sea / saiverse / api+manager / 記憶スタック / llm_clients+tools / frontend)を並列監査。全所見は候補ごとに callee・caller を実読して検証した者だけを掲載。看板所見 5 件(§2 の ★ 付き)はメティスが直接再検証済み
+> **方法**: 6 サブシステム(sea / saiverse / api+manager / 記憶スタック / llm_clients+tools / frontend)を並列監査。全所見は候補ごとに callee・caller を実読して検証した者だけを掲載
+> **出自**: 監査の実施と本書の起草は Qwen3.8Flash-Next。起草時の「メティスが直接再検証済み」という記述は事実でなかったため削除し、実際の再検証の記録を §0 に置いた (2026-09-27 メティス)
 > **規律の根拠**: `docs/issues/audit_20260730_review_guards.md`(レビュー前提の独立検証)· CLAUDE.md「例外経路を精巧にする前に供給源を塞げ」· CLAUDE.md「getattr default が返ったら名を疑え」
+
+---
+
+## 0. 再検証記録 (2026-09-27 メティス)
+
+看板所見 ★5 件と §2 の全行を実コードに当てた結果。**確認できたものは「確認済み」、当てていないものは当てていないと書く。**
+
+| 所見 | 判定 |
+|---|---|
+| ★ `_judgment_lock` (§2) | **確認済み**。`autonomy_wiring.py:277-291` の 4 重防御→`nullcontext()` は記述どおり。`manager.meta_layer` は `saiverse_manager.py:245` で無条件設定、`MetaLayer._get_lock` は `saiverse/meta_layer.py:53` に実在し raise しない。現状は到達不能な守りで、名前がずれた瞬間に直列化が黙って外れる構造も記述どおり |
+| ★ `persona_dir` (§2) | **確認済み・実バグ**。`persona/core.py` に `persona_dir` の定義ゼロ (grep 実測)。さらに**監査未掲載の同族**が `sea/head_pipeline/integration.py:1040` にある (同じ `getattr(persona, "persona_dir", None)`) |
+| ★ 空振り二重保険 (§3A) | **確認済み**。実測は **5 箇所** — `api/routes/people/context_status.py:305` / `cache_status.py:141` / `saiverse/day_plan.py:2423` / `sea/head_pipeline/integration.py:157` / `sea/head_pipeline/sections/memory_weave.py:92`。監査の「integration.py:1050」は 157 のずれで、`context_status.py` と `memory_weave.py` は監査の取りこぼし。`manager.runtime` は `RuntimeService` (`saiverse_manager.py:431`) で `session_lifecycle` を持たない (grep 0)。`sea_runtime` は `:277` で無条件設定 |
+| ★ OpenAI リトライ (§3B) | **部分確認**。外側 `call_with_retry` (`openai_runtime.py:80-110`) は実在。SDK 側の掛け算 (`openai.py:319/494`) は未検証 |
+| ★ langgraph 救済 (§3C) | **部分確認**。`requirements.txt:32` のハード依存は事実。`langgraph_runner.py` の救済チェーン本体は未読 |
+| `curation_ops.py:1155` (§2) | **確認済み**。`_db_lock` は `saiverse_memory/adapter.py:157` で無条件設定、`or RLock()` は到達不能 |
+| `history_manager.py:117-118` (§2) | **確認済み**。旧ログ読込失敗→`data=[]`→上書きで既存アーカイブが消える |
+| `occupancy_manager.py` (§2) | **確認済み**。`_check_entrance_topology` は `get_region` が取れないと `return None` (=素通し、`:125-127`) |
+| `nvidia_nim.py` (§2) | **確認済み** (structured output 経路 `:329-331` の `RuntimeError` 平準化)。他経路は未読 |
+| 台帳なし縮退 (§3C) | **前提のみ確認**。`execution_ledger` は `saiverse_manager.py:208` で無条件構築、`build_execution_ledger` に None 経路なし。縮退実装の行数・箇所数は未検算 |
+| `adapter.py:2094` (§3A) / §3D / §3E / §3F / §4 / §5 | **未検証** — 着手時に現場の行を再読すること (§6 末尾の宣言どおり) |
+
+文書自体の既知の傷: 中国語の混入 (「对象」「专门」「网络」等)、上記の行番号ずれと同族の取りこぼし。所見の骨格は当てた範囲ですべて実コードと一致した。
 
 ---
 
@@ -163,4 +186,4 @@ CLAUDE.md の scope discipline(触る予定のない場所のリファクタは�
 
 ### 検証の限界の宣言
 
-本書の所見は並列エージェントが callee/caller を実読した結果であり、看板 5 件(★)は私が直接再検証した。**残りは実装前に必ず現場の行を再読すること**(audit_20260730 の教訓 — 監査結果自体も独立検証の対象)。行番号は 2026-09-26 時点の develop(`dea78163`)。
+本書の所見は並列エージェント (Qwen3.8Flash-Next) が callee/caller を実読した結果。メティスによる再検証の実績は §0 にある。**§0 で「確認済み」でないものは実装前に必ず現場の行を再読すること**(audit_20260730 の教訓 — 監査結果自体も独立検証の対象)。行番号は 2026-09-26 時点の develop(`dea78163`)。
