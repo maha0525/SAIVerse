@@ -27,6 +27,7 @@ from database.models import (
     ThinkingRequest,
     User as UserModel,
 )
+from saiverse.occupancy_manager import arrived_building_id, move_through_entrances
 import tools.core
 
 # Import trigger types for phenomenon system
@@ -308,11 +309,14 @@ class RuntimeService(
         )
         if success:
             # state.user_current_building_id は move_entity が canonical sync
-            # 済み (W7 柱5: 位置属性の更新は移動 service の責務)
-            logging.debug("[runtime] move_user success: now %s", target_building_id)
+            # 済み (W7 柱5: 位置属性の更新は移動 service の責務)。Region 内部への
+            # 直行は入口で止まるので、報せるのは依頼先ではなく実際の到着地
+            # (docs/intent/region.md §2.5)
+            arrived = arrived_building_id(success, message, target_building_id)
+            logging.debug("[runtime] move_user success: now %s", arrived)
             logging.debug("[MANAGER_MOVE] Move success. New state bid: %s", self.state.user_current_building_id)
             # Emit user_move trigger
-            self._emit_user_move_trigger(from_building_id, target_building_id)
+            self._emit_user_move_trigger(from_building_id, arrived)
         else:
             logging.debug("[runtime] move_user failed: %s", message)
             logging.debug("[MANAGER_MOVE] Move failed: %s", message)
@@ -341,11 +345,16 @@ class RuntimeService(
             from_id=from_id,
             to_id=to_id,
         )
-        # Emit persona_move trigger on success
+        # Emit persona_move trigger on success — to_building は依頼先ではなく
+        # 実際の到着地 (入口で止まった直行は入口。region.md §2.5)
         if result[0] and TRIGGERS_AVAILABLE and hasattr(self.manager, "_emit_trigger"):
             self.manager._emit_trigger(
                 TriggerType.PERSONA_MOVE,
-                {"persona_id": persona_id, "from_building": from_id, "to_building": to_id},
+                {
+                    "persona_id": persona_id,
+                    "from_building": from_id,
+                    "to_building": arrived_building_id(result[0], result[1], to_id),
+                },
             )
         return result
 
@@ -415,10 +424,17 @@ class RuntimeService(
         if prev == target_building_id:
             return True, None
 
+        # 召喚は機構がペルソナの意図を代行する移動なので、Region の入口で
+        # 止まったら境界を一段ずつ通過して目的地まで進む。途中の境界で止め
+        # られたら召喚は失敗で、ペルソナはその入口に居る (region.md §2.5)
         allowed, reason = True, None
         if self._move_persona:
-            allowed, reason = self._move_persona(
-                persona.persona_id, prev, target_building_id
+            allowed, reason, _location = move_through_entrances(
+                lambda from_id, to_id: self._move_persona(
+                    persona.persona_id, from_id, to_id
+                ),
+                prev,
+                target_building_id,
             )
         if not allowed:
             persona.history_manager.add_to_building_only(
@@ -461,11 +477,22 @@ class RuntimeService(
         if private_room_id not in self.building_map:
             return "Error: Private room not found for this persona."
 
-        success, reason = self._move_persona(
-            persona_id, current_user_building, private_room_id
+        # 会話終了後の帰宅は機構代行の移動なので、境界を一段ずつ通過して自室
+        # まで進む (region.md §2.5)。途中の境界で止まったら、部屋を出て入口に
+        # 居る状態 — 会話は終わっているので応答は従来のまま、警告だけ残す
+        reached, reason, location = move_through_entrances(
+            lambda from_id, to_id: self._move_persona(persona_id, from_id, to_id),
+            current_user_building,
+            private_room_id,
         )
-        if not success:
-            return f"Error: Failed to move: {reason}"
+        if not reached:
+            if location == current_user_building:
+                return f"Error: Failed to move: {reason}"
+            logging.warning(
+                "[runtime] end_conversation: return home stopped midway "
+                "(persona=%s %s -> %s, now at %s): %s",
+                persona_id, current_user_building, private_room_id, location, reason,
+            )
 
         # 位置属性と cursor 儀式は move_entity が canonical sync 済み (W7 柱5)
         return f"Conversation with '{persona.persona_name}' ended."

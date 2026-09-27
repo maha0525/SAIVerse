@@ -139,6 +139,21 @@ class EntranceTopologyTestCase(unittest.TestCase):
         # Region 内部から SubRegion 内部への直行は SubRegion の入口
         self.assertEqual(self.check("t1", "s1").redirect_building_id, "entrance_sub")
 
+    def test_at_outer_entrance_redirects_to_inner_entrance(self):
+        # 既に最外殻の入口に立っていれば、一つ内側の境界の入口まで進んで
+        # 止まる (region.md §2.5 第 2 項)
+        denial = self.check("entrance_top", "s1")
+        self.assertEqual(denial.code, "not_via_entrance")
+        self.assertEqual(denial.redirect_building_id, "entrance_sub")
+        self.assertIn("'祠' は『霧降りの森』の内部です", denial.redirect_message)
+        self.assertIn("入口 '霧降りの森: 入口' まで移動しました", denial.redirect_message)
+
+    def test_at_outer_entrance_without_inner_entrance_denies(self):
+        self.regions["sub"].entrance_building_id = None
+        denial = self.check("entrance_top", "s1")
+        self.assertIn("入口が設定されていない", denial)
+        self.assertIsNone(getattr(denial, "redirect_building_id", None))
+
     def test_entry_policy_denial_carries_no_redirect(self):
         # 境界点 (入口→内部) での拒否は、もう入口にいるので移動させない
         self.regions["top"].config = {"entry_policy": "locked"}

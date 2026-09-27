@@ -5,6 +5,7 @@ from typing import Optional
 
 _log = logging.getLogger(__name__)
 
+from saiverse.occupancy_manager import is_redirect_notice
 from tools.context import get_active_manager, get_active_persona_id
 from tools.core import ToolSchema
 
@@ -42,6 +43,12 @@ def move_persona(building_id: str, persona_id: Optional[str] = None) -> str:
     success, reason = manager._move_persona(target_persona_id, from_building, building_id)
     if not success:
         raise RuntimeError(f"移動できませんでした: {reason or '理由不明'}")
+
+    # Region 内部への直行は入口まで来て止まる (docs/intent/region.md §2.5)。
+    # 「依頼先に移動しました」と書くと現在地を誤認させるので、入口に着いた
+    # 旨の案内文そのものを返す — 中へ進むかどうかは本人が次の一手で決める。
+    if is_redirect_notice(reason):
+        return str(reason)
 
     # 位置属性と cursor 儀式は move_entity が canonical sync 済み (W7 柱5)
     src_name = getattr(manager.building_map.get(from_building), "name", from_building)

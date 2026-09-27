@@ -73,6 +73,7 @@ from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tu
 from sqlalchemy.orm import Session
 
 from saiverse import clock, slot_kind_catalog
+from saiverse.occupancy_manager import move_through_entrances
 
 LOGGER = logging.getLogger(__name__)
 
@@ -3436,6 +3437,10 @@ def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> bo
     移動失敗 (満員等) は「移動せず現在地で実行」に倒すが、黙って現在地に
     ならないようその事実を WARN + ペルソナへの system 通知で記録する。
 
+    目的地が Region の内部なら、入口で止まった移動を境界ごとに打ち直して
+    目的地まで進む (``move_through_entrances``、region.md §2.5)。途中の境界で
+    止められたら移動失敗で、ペルソナはその入口に居る (通知の現在地も入口)。
+
     Returns:
         True = コマの場所に居る (移動成功 / 既に現地 / 移動の指定なし)。
         False = 移動が必要だったのにできなかった (handler が「出かけた」体の
@@ -3464,21 +3469,29 @@ def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> bo
     if occupancy is None:
         LOGGER.warning("[day_plan] manager has no occupancy_manager; skipping facility move")
         return False
+    # 機構がペルソナの意図を代行する移動なので、Region の入口で止まったら
+    # 境界を一段ずつ通過して目的地まで進む (docs/intent/region.md §2.5)。
+    # 途中で entry policy 等に止められたら、そこ (入口) に居るまま移動失敗。
+    def _one_step(from_id: str, to_id: str):
+        return occupancy.move_entity(persona_id, "ai", from_id, to_id)
+
     try:
-        ok, msg = occupancy.move_entity(persona_id, "ai", current, target)
+        reached, msg, location = move_through_entrances(_one_step, current, target)
     except Exception:
         LOGGER.warning(
             "[day_plan] move_entity raised (persona=%s %s -> %s); continuing",
             persona_id, current, target, exc_info=True,
         )
-        _record_move_failure(manager, persona, slot, current, target, "内部エラー")
+        location = getattr(persona, "current_building_id", None) or current
+        _record_move_failure(manager, persona, slot, location, target, "内部エラー")
         return False
-    if not ok:
+    if not reached:
         LOGGER.warning(
-            "[day_plan] facility move failed (persona=%s %s -> %s): %s — continuing in place",
-            persona_id, current, target, msg,
+            "[day_plan] facility move failed (persona=%s %s -> %s, now at %s): %s"
+            " — continuing in place",
+            persona_id, current, target, location, msg,
         )
-        _record_move_failure(manager, persona, slot, current, target, msg)
+        _record_move_failure(manager, persona, slot, location, target, msg)
         return False
 
     # 位置属性と cursor 儀式 (_mark_entry / _save_session_metadata) は

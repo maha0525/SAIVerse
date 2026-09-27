@@ -30,7 +30,13 @@ from database.models import (
     User,
 )
 from saiverse.execution_ledger import ExecutionLedger
-from saiverse.occupancy_manager import MoveDenialMessage, OccupancyManager
+from saiverse.occupancy_manager import (
+    MoveDenialMessage,
+    MoveRedirectedNotice,
+    OccupancyManager,
+    is_redirect_notice,
+    move_through_entrances,
+)
 
 
 class FakeBuilding:
@@ -272,9 +278,8 @@ class MoveEntityLedgerTest(_MoveLedgerFixture):
         self.assertEqual(self._executions(), [])
 
 
-class EntranceRedirectTest(_MoveLedgerFixture):
-    """region.md §2.5: 外部から Region 内部への直行は、その場で拒否せず
-    最外殻の入口まで実際に移動して止める (実 DB + 実台帳で確認する)。
+class _EntranceWorldFixture(_MoveLedgerFixture):
+    """Region / SubRegion を持つ世界の組み立て。テストは持たない。
 
     スコープ構成 (room_a / room_b は City 直属):
       City 直属: entrance_top (Region 'top' の入口)
@@ -318,12 +323,24 @@ class EntranceRedirectTest(_MoveLedgerFixture):
         finally:
             db.close()
 
+
+class EntranceRedirectTest(_EntranceWorldFixture):
+    """region.md §2.5: 外部から Region 内部への直行は、その場で拒否せず
+    まだ入っていない一番外側の境界の入口まで実際に移動して止める
+    (実 DB + 実台帳で確認する)。"""
+
     # 1. 外部から Region 内部への直行 → 入口に到着して (True, 案内文)
     def test_ai_direct_move_stops_at_entrance(self):
         ok, msg = self.om.move_entity(self.MOVER, "ai", "room_a", "t1")
         self.assertTrue(ok, msg)
         self.assertIn("'宿屋' は『霧の谷』の内部です", msg)
         self.assertIn("入口 '霧の谷: 入口' まで移動しました", msg)
+        # 成功側の案内は型付き: 呼び出し元は code で「入口で止まった」を判別し、
+        # current_building_id で実際の到着地を読む
+        self.assertIsInstance(msg, MoveRedirectedNotice)
+        self.assertEqual(msg.code, "redirected_to_entrance")
+        self.assertTrue(is_redirect_notice(msg))
+        self.assertEqual(msg.current_building_id, "entrance_top")
         # canonical な位置は入口 (依頼した t1 ではない)
         self.assertEqual(self._open_occupancy("entrance_top"), 1)
         self.assertEqual(self._open_occupancy("room_a"), 0)
@@ -358,14 +375,14 @@ class EntranceRedirectTest(_MoveLedgerFixture):
         self.assertEqual(self._open_occupancy("room_a"), 1)
         self.assertEqual(self._executions(), [])
 
-    # 4. 入口が定員オーバー (AI) → (False, 元の直行拒否文)
-    def test_full_entrance_keeps_original_denial(self):
+    # 4. 入口が定員オーバー (AI) → (False, 入口への移動自身の失敗理由)
+    def test_full_entrance_returns_entrance_move_reason(self):
         self.om.capacities["entrance_top"] = 1
         self.occupants["entrance_top"].append("someone_else")
         ok, msg = self.om.move_entity(self.MOVER, "ai", "room_a", "t1")
         self.assertFalse(ok)
-        self.assertIn("入口 '霧の谷: 入口' (ID: entrance_top) から入ってください", msg)
-        self.assertEqual(getattr(msg, "code", None), "not_via_entrance")
+        self.assertEqual(msg, "霧の谷: 入口は定員オーバーです")
+        self.assertNotEqual(getattr(msg, "code", None), "not_via_entrance")
         self.assertEqual(self._open_occupancy("room_a"), 1)
         self.assertEqual(self.persona.current_building_id, "room_a")
         self.assertEqual(self._executions(), [])
@@ -413,7 +430,8 @@ class EntranceRedirectTest(_MoveLedgerFixture):
         ) as check:
             ok, msg = self.om.move_entity(self.MOVER, "ai", "room_a", "t1")
         self.assertFalse(ok)
-        self.assertEqual(str(msg), "first")
+        # 失敗は入口への移動自身の理由 (再帰側の拒否) をそのまま運ぶ
+        self.assertEqual(str(msg), "second")
         self.assertEqual(check.call_count, 2)
         self.assertEqual(self._open_occupancy("room_a"), 1)
         self.assertEqual(self._executions(), [])
@@ -425,6 +443,93 @@ class EntranceRedirectTest(_MoveLedgerFixture):
         self.assertEqual(getattr(msg, "code", None), "cas_conflict")
         self.assertEqual(getattr(msg, "current_building_id", None), "room_a")
         self.assertEqual(self._open_occupancy("room_a"), 1)
+
+    # 9. 最外殻の入口に立って SubRegion 内部へ直行 → 一つ内側の入口まで進む
+    #    (region.md §2.5 第 2 項。この一歩は外側の境界を正規に通過する)
+    def test_from_outer_entrance_steps_to_inner_entrance(self):
+        ok, _msg = self.om.move_entity(self.MOVER, "ai", "room_a", "entrance_top")
+        self.assertTrue(ok)
+        ok, msg = self.om.move_entity(self.MOVER, "ai", "entrance_top", "s1")
+        self.assertTrue(ok, msg)
+        self.assertTrue(is_redirect_notice(msg))
+        self.assertEqual(msg.current_building_id, "entrance_sub")
+        self.assertIn("'祠' は『霧降りの森』の内部です", msg)
+        self.assertIn("入口 '霧降りの森: 入口' まで移動しました", msg)
+        self.assertEqual(self._open_occupancy("entrance_sub"), 1)
+        self.assertEqual(self._open_occupancy("s1"), 0)
+        self.assertEqual(self.persona.current_building_id, "entrance_sub")
+
+    # 10. その一歩は外側の entry policy に掛かる — 鍵なら鍵の文で失敗し、動かない
+    def test_step_to_inner_entrance_is_blocked_by_outer_lock(self):
+        ok, _msg = self.om.move_entity(self.MOVER, "ai", "room_a", "entrance_top")
+        self.assertTrue(ok)
+        self.regions["top"].config = {"entry_policy": "locked"}
+        ok, msg = self.om.move_entity(self.MOVER, "ai", "entrance_top", "s1")
+        self.assertFalse(ok)
+        self.assertEqual(msg, "移動失敗: 『霧の谷』には鍵がかかっています。")
+        self.assertEqual(self._open_occupancy("entrance_top"), 1)
+        self.assertEqual(self._open_occupancy("entrance_sub"), 0)
+        self.assertEqual(self.persona.current_building_id, "entrance_top")
+
+    # 11. 外側の policy が通す (entry_allowed) なら内側の入口まで進める
+    def test_step_to_inner_entrance_passes_outer_whitelist(self):
+        ok, _msg = self.om.move_entity(self.MOVER, "ai", "room_a", "entrance_top")
+        self.assertTrue(ok)
+        self.regions["top"].config = {
+            "entry_policy": "whitelist", "entry_allowed": [self.MOVER],
+        }
+        ok, msg = self.om.move_entity(self.MOVER, "ai", "entrance_top", "s1")
+        self.assertTrue(ok, msg)
+        self.assertEqual(msg.current_building_id, "entrance_sub")
+
+
+class MoveThroughEntrancesTest(_EntranceWorldFixture):
+    """機構代行の移動 (move_through_entrances) は境界を一段ずつ通過して目的地まで
+    進む (region.md §2.5)。"""
+
+    def _move(self, from_id, to_id):
+        return self.om.move_entity(self.MOVER, "ai", from_id, to_id)
+
+    def test_reaches_subregion_interior_in_three_steps(self):
+        reached, msg, location = move_through_entrances(self._move, "room_a", "s1")
+        self.assertTrue(reached, msg)
+        self.assertEqual(location, "s1")
+        self.assertEqual(self._open_occupancy("s1"), 1)
+        self.assertEqual(self.persona.current_building_id, "s1")
+        # 入口 → 内側の入口 → 目的地 の 3 手がそれぞれ台帳に載る
+        self.assertEqual(
+            [s for _e, s in self._executions()], ["completed"] * 3
+        )
+
+    def test_reaches_region_interior_in_two_steps(self):
+        reached, _msg, location = move_through_entrances(self._move, "room_a", "t1")
+        self.assertTrue(reached)
+        self.assertEqual(location, "t1")
+        self.assertEqual(len(self._executions()), 2)
+
+    def test_stops_honestly_at_locked_boundary(self):
+        self.regions["sub"].config = {"entry_policy": "locked"}
+        reached, msg, location = move_through_entrances(self._move, "room_a", "s1")
+        self.assertFalse(reached)
+        self.assertEqual(msg, "移動失敗: 『霧降りの森』には鍵がかかっています。")
+        # 入口までは来ている (内側の入口で止まる)
+        self.assertEqual(location, "entrance_sub")
+        self.assertEqual(self.persona.current_building_id, "entrance_sub")
+        self.assertEqual(self._open_occupancy("s1"), 0)
+
+    def test_plain_move_is_single_step(self):
+        reached, msg, location = move_through_entrances(self._move, "room_a", "room_b")
+        self.assertTrue(reached, msg)
+        self.assertEqual(location, "room_b")
+        self.assertEqual(len(self._executions()), 1)
+
+    def test_step_budget_exhausted_reports_last_notice(self):
+        reached, msg, location = move_through_entrances(
+            self._move, "room_a", "s1", max_steps=1,
+        )
+        self.assertFalse(reached)
+        self.assertTrue(is_redirect_notice(msg))
+        self.assertEqual(location, "entrance_top")
 
 
 class MoveHandlerFactoryTest(unittest.TestCase):

@@ -3010,6 +3010,10 @@ export default function Home() {
                 // CAS conflict (= B-1): 他クライアントが先に動いていた。
                 // ユーザーに通知し、 status を再取得して serverCurrentBuildingId
                 // を真の現在地に同期する。 メッセージ自体は再送が必要。
+                // Region 内部への直行が入口で止まった回 (redirected_to_entrance、
+                // docs/intent/region.md §2.5) も同じ形で届く: サーバーは入口まで
+                // 移動済みで、発言は送っていない。表示中の部屋は変えない — 送り
+                // 直せば入口から中への一歩になり、発言は意図した部屋に載る。
                 let conflictMsg = uiText("app.page.text018");
                 try {
                     const data = await res.json();
@@ -3056,6 +3060,9 @@ export default function Home() {
                 } catch (statusErr) {
                     console.error('Failed to refetch status after CAS conflict', statusErr);
                 }
+                // サイドバーの現在地マーカーをサーバーの現在地 (入口へ移った回を
+                // 含む) に追従させる
+                setMoveTrigger(prev => prev + 1);
                 // 後片付けは必ず通す。読み手を切り出したことで、この早期 return は
                 // もう外側の finally に拾われない (isProcessingRef が立ったままだと
                 // 履歴の追従が止まる)。
