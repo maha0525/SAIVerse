@@ -1405,6 +1405,10 @@ export default function Home() {
                             if (arrivedId) {
                                 setCurrentBuildingId(arrivedId);
                                 currentBuildingIdRef.current = arrivedId;
+                                // 発言の CAS (expected_from_building_id) が読む控えも
+                                // 同じ応答から同期する — ここを残すと復旧直後の発言が
+                                // 古い現在地を期待値に送って一回無駄に弾かれる
+                                updateServerBuildingId(arrivedId);
                                 setMessages([]);
                                 setIsHistoryLoaded(false);
                                 fetchHistory(undefined, arrivedId);
