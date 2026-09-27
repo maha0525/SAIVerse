@@ -5,6 +5,10 @@ rem Without SAIVERSE_BACKEND_ORIGIN the frontend proxies /api to 127.0.0.1:8000,
 rem which is the PRODUCTION backend - never use this script without the env var below.
 setlocal
 set "SAIVERSE_BACKEND_ORIGIN=http://127.0.0.1:18000"
+rem The Next.js route handlers for /api/addon/* and /api/mcp/* read a DIFFERENT
+rem variable (SAIVERSE_BACKEND_URL). Without it those requests leak to the
+rem production backend on 127.0.0.1:8000 (docs/issues/backend_address_env_name_split.md).
+set "SAIVERSE_BACKEND_URL=http://127.0.0.1:18000"
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "PROJECT_ROOT=%%~fI"
 cd /d "%PROJECT_ROOT%"
