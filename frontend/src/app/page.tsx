@@ -1388,17 +1388,21 @@ export default function Home() {
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ target_building_id: target.id }),
                             });
-                            if (moveRes.ok) {
-                                // 実際の到着地はサーバーの応答が真実 — Region 内部への
-                                // 直行は入口で止まる (region.md §2.5) し、移動自体が
-                                // 失敗した応答も success=false + 現在地を運ぶ
-                                let arrivedId = target.id;
-                                try {
-                                    const moveData = await moveRes.json();
-                                    if (moveData?.current_building_id) {
-                                        arrivedId = moveData.current_building_id;
-                                    }
-                                } catch { /* ignore JSON parse */ }
+                            // 実際の到着地はサーバーの応答が真実 — Region 内部への
+                            // 直行は入口で止まる (region.md §2.5) し、CAS 競合の 409 も
+                            // detail.current_building_id で真の現在地を運ぶ (並行する
+                            // 別クライアントの移動が先に通っていた場合の復旧先)
+                            let arrivedId: string | null = null;
+                            try {
+                                const moveData = await moveRes.json();
+                                if (moveRes.ok) {
+                                    arrivedId = moveData?.current_building_id || target.id;
+                                } else if (moveRes.status === 409) {
+                                    arrivedId = moveData?.detail?.current_building_id || null;
+                                }
+                            } catch { /* ignore JSON parse */ }
+                            if (moveRes.ok && !arrivedId) arrivedId = target.id;
+                            if (arrivedId) {
                                 setCurrentBuildingId(arrivedId);
                                 currentBuildingIdRef.current = arrivedId;
                                 setMessages([]);
