@@ -50,6 +50,8 @@ interface Building {
 
 interface ItemDetails {
     ITEM_ID: string;
+    /** ペルソナが会話で使う短縮参照 item:N の N。未採番の古い行では null。 */
+    SHORT_ID?: number | null;
     NAME: string;
     TYPE: string;
     DESCRIPTION: string;
@@ -606,6 +608,14 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                         <div className={styles.meta}>
                             <span className={styles.badge}>{item.type}</span>
                             <span className={styles.id}>{uiText("components.ItemModal.label003")}<code>{item.id}</code></span>
+                            {itemDetails?.SHORT_ID != null && (
+                                <span data-i18n="components.ItemModal.text037"
+                                    className={styles.id}
+                                    title={uiText("components.ItemModal.text037")}
+                                >
+                                    <code>item:{itemDetails.SHORT_ID}</code>
+                                </span>
+                            )}
                             {itemDetails && itemDetails.OWNER_KIND === 'building' && (
                                 <span className={styles.location}>
                                     <ArrowRightLeft size={14} style={{ marginRight: 4 }} />
