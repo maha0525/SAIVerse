@@ -931,6 +931,10 @@
     "ja": "{p1}（準備中）",
     "en": "{p1} (preparing)"
   },
+  "components.AddonBubbleButtons.text006": {
+    "ja": "{p1}（選択中）",
+    "en": "{p1} (selected)"
+  },
   "components.AddonCatalogPanel.text001": {
     "ja": "カタログ",
     "en": "Catalog"

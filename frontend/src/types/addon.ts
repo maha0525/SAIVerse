@@ -23,6 +23,8 @@ export interface AddonBubbleButton {
     tool?: string;
     metadata_key?: string;
     show_when?: string;
+    /** トグル型: ``metadata_key`` の現在値がこの値と一致するとき選択中の見た目になる (未設定は null で配られる) */
+    active_value?: string | null;
 }
 
 export interface AddonInputButton {

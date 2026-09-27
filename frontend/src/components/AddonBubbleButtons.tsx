@@ -36,6 +36,8 @@ import {
     X,
     Plus,
     Minus,
+    ThumbsUp,
+    ThumbsDown,
     type LucideIcon,
 } from 'lucide-react';
 import styles from './AddonBubbleButtons.module.css';
@@ -71,6 +73,8 @@ const ICON_MAP: Record<string, LucideIcon> = {
     'x': X,
     'plus': Plus,
     'minus': Minus,
+    'thumbs-up': ThumbsUp,
+    'thumbs-down': ThumbsDown,
 };
 
 function resolveIcon(name?: string): LucideIcon {
@@ -86,6 +90,9 @@ export interface BubbleButtonDef {
     tool?: string;         // api_routes.py のエンドポイントパス
     metadata_key?: string; // addonMetadata から参照するキー
     show_when?: string;    // "metadata_exists" | "always"
+    /** トグル型: metadata_key の現在値がこの値と一致するとき選択中の見た目になる。
+     *  バックエンドは未設定の欄を null で配るので、null = 「トグル型ではない」。 */
+    active_value?: string | null;
     addon_name: string;    // 所属アドオン名
 }
 
@@ -266,6 +273,122 @@ function ToolBubbleButton({
     );
 }
 
+/** metadata の値を比較用に正規化する。undefined と null は「未選択」として同一視。 */
+function normalizeMetaValue(value: unknown): unknown {
+    return value === undefined || value === null ? null : value;
+}
+
+// トグル型ボタン: metadata_key の現在値が btn.active_value と一致していれば
+// 選択中の見た目になる (例: 評価の 👍 / 👎)。押すと ToolBubbleButton と同じく
+// addon ローカル endpoint に POST し、metadata 値の変化 (未選択⇔値 も含む) で
+// 完了を検知する。選択の付け外しの判断はアドオン側が持ち、画面は値を映すだけ。
+// 選択を外すとき、アドオンは SSE で ``{key: null}`` を送る (画面側のメタデータは
+// 差分の上書きで更新されるので、行を消しただけでは画面に届かない)。
+function ToggleBubbleButton({
+    btn,
+    messageId,
+    messageText,
+    personaId,
+    metaValue,
+}: {
+    btn: BubbleButtonDef;
+    messageId: string;
+    messageText?: string;
+    personaId?: string;
+    metaValue: unknown;
+}) {
+    useLocale();
+    const [pending, setPending] = useState(false);
+    const [error, setError] = useState(false);
+    const current = normalizeMetaValue(metaValue);
+    // クリック時点の値を覚えて、変化を検知できるようにする
+    const lastSeenValue = useRef<unknown>(current);
+
+    // metadata の値は JSON として読み戻されるので文字列とは限らない。
+    // active_value (文字列) とは文字列化して比べる。
+    const isActive = current !== null && String(current) === btn.active_value;
+
+    useEffect(() => {
+        if (current !== lastSeenValue.current) {
+            // 値が届いたら pending もエラー表示も解く (15 秒の時間切れの後に
+            // 遅れて届いた場合、エラーだけ残り続けないように)。
+            setPending(false);
+            setError(false);
+            lastSeenValue.current = current;
+        }
+    }, [current]);
+
+    // タイムアウト保険: 評価の反映は速い操作なので 15 秒で解除してエラー表示。
+    useEffect(() => {
+        if (!pending) return;
+        const timer = setTimeout(() => {
+            setPending(false);
+            setError(true);
+            console.warn(`[AddonBubbleButtons] toggle ${btn.tool} timed out (15s)`);
+        }, 15_000);
+        return () => clearTimeout(timer);
+    }, [pending, btn.tool]);
+
+    const Icon = resolveIcon(btn.icon);
+
+    const handleClick = async () => {
+        if (pending || !btn.tool) return;
+        setError(false);
+        lastSeenValue.current = current;
+        setPending(true);
+        try {
+            const res = await apiFetch(
+                `/api/addon/${btn.addon_name}/${btn.tool}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message_id: messageId,
+                        text: messageText ?? '',
+                        persona_id: personaId ?? null,
+                    }),
+                },
+            );
+            if (!res.ok) {
+                console.error(
+                    `[AddonBubbleButtons] toggle ${btn.tool} returned ${res.status}`,
+                );
+                setPending(false);
+                setError(true);
+            }
+            // 成功時は metadata 変化を待ってスピナー解除
+        } catch (err) {
+            console.error(
+                `[AddonBubbleButtons] toggle ${btn.tool} on ${btn.addon_name} failed:`,
+                err,
+            );
+            setPending(false);
+            setError(true);
+        }
+    };
+
+    let title = btn.label;
+    if (error) {
+        title = uiText("components.AddonBubbleButtons.text003");
+    } else if (pending) {
+        title = uiText("components.AddonBubbleButtons.text004", { p1: btn.label });
+    } else if (isActive) {
+        title = uiText("components.AddonBubbleButtons.text006", { p1: btn.label });
+    }
+
+    return (
+        <button data-i18n="components.AddonBubbleButtons.text003 components.AddonBubbleButtons.text004 components.AddonBubbleButtons.text006"
+            className={`${styles.bubbleBtn} ${isActive ? styles.active : ''} ${pending ? styles.pending : ''} ${error ? styles.error : ''}`}
+            title={title}
+            aria-pressed={isActive}
+            onClick={handleClick}
+            disabled={pending}
+        >
+            {pending ? <Loader size={13} className={styles.spinner} /> : <Icon size={13} />}
+        </button>
+    );
+}
+
 /** メタデータ待ちの仮ボタン (回転表示)。
  *
  * 待ち続けたまま終わる回がある — 声に出す文が無かった吹き出しには音声が
@@ -363,6 +486,25 @@ export default function AddonBubbleButtons({
                             />
                         );
                     }
+                }
+
+                // トグル型 tool ボタン: metadata の現在値が active_value と
+                // 一致すれば選択中の見た目 (ToggleBubbleButton)。
+                // 判定は != null — バックエンドの JSON は未設定の欄も
+                // "active_value": null として配るので、undefined 判定だと
+                // 既存アドオンの普通の tool ボタンまで全部こちらに流れてしまう。
+                if (btn.tool && btn.active_value != null) {
+                    const metaValue = btn.metadata_key ? meta[btn.metadata_key] : undefined;
+                    return (
+                        <ToggleBubbleButton
+                            key={`${btn.addon_name}-${btn.id}`}
+                            btn={btn}
+                            messageId={messageId}
+                            messageText={messageText}
+                            personaId={personaId}
+                            metaValue={metaValue}
+                        />
+                    );
                 }
 
                 // tool ボタン: addon ローカル endpoint に POST。再生成中は

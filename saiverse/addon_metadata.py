@@ -62,6 +62,43 @@ def set_metadata(message_id: str, addon_name: str, key: str, value: Any) -> None
         db.close()
 
 
+def delete_metadata(message_id: str, addon_name: str, key: str) -> bool:
+    """メッセージIDに紐付くアドオンメタデータの特定キーを削除する。
+
+    Returns:
+        行を削除したら True、該当する行が無ければ False。
+    """
+    from database.models import AddonMessageMetadata
+
+    db = _get_session()
+    try:
+        deleted = (
+            db.query(AddonMessageMetadata)
+            .filter(
+                AddonMessageMetadata.message_id == message_id,
+                AddonMessageMetadata.addon_name == addon_name,
+                AddonMessageMetadata.key == key,
+            )
+            .delete(synchronize_session=False)
+        )
+        deleted = int(deleted or 0)
+        db.commit()
+        LOGGER.debug(
+            "addon_metadata: delete message_id=%s addon=%s key=%s deleted=%d",
+            message_id, addon_name, key, deleted,
+        )
+        return deleted > 0
+    except Exception:
+        db.rollback()
+        LOGGER.exception(
+            "addon_metadata: failed to delete message_id=%s addon=%s key=%s",
+            message_id, addon_name, key,
+        )
+        raise
+    finally:
+        db.close()
+
+
 def get_metadata(message_id: str, addon_name: str) -> Dict[str, Any]:
     """指定メッセージの指定アドオンのメタデータを全件取得する。
 

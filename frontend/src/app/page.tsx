@@ -487,6 +487,7 @@ export default function Home() {
                         tool?: string;
                         metadata_key?: string;
                         show_when?: string;
+                        active_value?: string | null;
                     }>;
                 };
             }>) => {

@@ -25,6 +25,15 @@
     color: #ef4444;
 }
 
+/* トグル型ボタンの選択中。色はテーマの CSS 変数から引くので、ライト/ダーク
+   どちらでも背景と枠で「どれが選ばれているか」が見分けられる。 */
+.bubbleBtn.active,
+.bubbleBtn.active:hover:not(:disabled) {
+    color: var(--accent-primary);
+    background: var(--bg-hover);
+    box-shadow: inset 0 0 0 1px var(--accent-primary);
+}
+
 .bubbleBtn.pending {
     cursor: default;
     opacity: 0.5;

@@ -70,6 +70,9 @@ class AddonUiBubbleButton(BaseModel):
     tool: Optional[str] = None
     metadata_key: Optional[str] = None
     show_when: Optional[str] = None  # "metadata_exists" | "always"
+    # トグル型: metadata_key の現在値がこの値と一致するとき、ボタンを
+    # 選択中の見た目で表示する (例: 評価ボタンの "good" / "bad")。
+    active_value: Optional[str] = None
 
 
 class AddonUiInputButton(BaseModel):
