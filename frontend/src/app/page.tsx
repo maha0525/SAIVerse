@@ -1386,7 +1386,13 @@ export default function Home() {
                             const moveRes = await apiFetch('/api/user/move', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ target_building_id: target.id }),
+                                body: JSON.stringify({
+                                    target_building_id: target.id,
+                                    // 発言と同じ CAS — 一覧取得から移動までの間に別の
+                                    // デバイスが移動していたら上書きせず、下の 409 分岐が
+                                    // サーバーの現在地へ同期する
+                                    expected_from_building_id: serverCurrentBuildingIdRef.current,
+                                }),
                             });
                             // 実際の到着地はサーバーの応答が真実 — Region 内部への
                             // 直行は入口で止まる (region.md §2.5) し、CAS 競合の 409 も
