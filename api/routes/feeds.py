@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from api.deps import get_manager
 from database.models import FeedItem, FeedSubscription, Fixture
@@ -27,6 +27,7 @@ from saiverse import feed_fetch
 from saiverse.feed_fetch import FeedFetchError
 from saiverse.feed_manager import (
     FEED_URL_MAX_CHARS,
+    STAND_CONFIG_RANGES,
     FeedSubscriptionLimitError,
     city_feed_fixture_ids,
     feed_url_too_long,
@@ -81,6 +82,26 @@ class AddSubscriptionRequest(BaseModel):
     fixture_id: str
     url: str
     title: Optional[str] = None
+
+
+def _range_field(key: str):
+    low, high = STAND_CONFIG_RANGES[key]
+    return Field(default=None, ge=low, le=high)
+
+
+class StandConfigRequest(BaseModel):
+    """スタンドの配信設定の更新 (PATCH)。
+
+    送った欄だけを書き換える: 数値 = 上書き / null = 既定に戻す。送らない欄は
+    据え置き。範囲は feed_manager.STAND_CONFIG_RANGES (範囲外・整数以外・
+    未知の欄は 422)。
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    fetch_interval_sec: Optional[StrictInt] = _range_field("fetch_interval_sec")
+    summary_max_chars: Optional[StrictInt] = _range_field("summary_max_chars")
+    title_max_chars: Optional[StrictInt] = _range_field("title_max_chars")
+    max_items_per_push: Optional[StrictInt] = _range_field("max_items_per_push")
 
 
 # ------------------------------------------------------------------
@@ -252,14 +273,31 @@ def create_feed_fixture(body: CreateFixtureRequest, manager=Depends(get_manager)
     }
 
 
+def _stand_config_payload(feed_manager, raw, effective) -> dict:
+    """スタンドの配信設定の応答部分。
+
+    - config: スタンドに保存された値 (欄ごとに null = 既定を使う)
+    - effective: 解決後の実効値 (スタンドの設定値 > env > 組み込み既定)
+    - defaults: このスタンドが設定を持たないときの値 (env > 組み込み既定)。
+      UI の「既定値を使う」の表示に使う (env で既定が変わっていても嘘を
+      書かないため)
+    """
+    return {
+        "config": dict(raw),
+        "effective": effective.as_dict(),
+        "defaults": feed_manager.resolve_stand_settings(None).as_dict(),
+    }
+
+
 @router.get("/fixtures")
 def list_feed_fixtures(manager=Depends(get_manager)):
-    """フィード施設の一覧 (購読と健康状態つき)。"""
+    """フィード施設の一覧 (購読と健康状態、配信設定つき)。"""
     feed_manager = _get_feed_manager(manager)
 
     result = []
     for fixture in feed_manager.list_feed_fixtures():
         subs = feed_manager.list_subscriptions(fixture.FIXTURE_ID)
+        raw, effective = feed_manager.get_stand_config(fixture.FIXTURE_ID)
         result.append(
             {
                 "fixture_id": fixture.FIXTURE_ID,
@@ -268,9 +306,38 @@ def list_feed_fixtures(manager=Depends(get_manager)):
                 "name": fixture.NAME,
                 "description": fixture.DESCRIPTION or "",
                 "subscriptions": [_subscription_payload(s) for s in subs],
+                **_stand_config_payload(feed_manager, raw, effective),
             }
         )
     return result
+
+
+@router.patch("/fixtures/{fixture_id}/config")
+def update_stand_config(
+    fixture_id: str, body: StandConfigRequest, manager=Depends(get_manager),
+):
+    """スタンドの配信設定 (取得間隔 / 要約の長さ / 見出しの上限 / 1 回の
+    配送件数) を更新する。送った欄だけを書き換える (数値 = 上書き /
+    null = 既定に戻す)。
+
+    存在しない・フィード施設でない・別 City の Fixture は 404
+    (_fixture_or_404)。書き込みは feed_manager 側で同一 transaction の City
+    条件つき (確認と書き込みの間に所属が変わったら LookupError → 404)。
+    """
+    feed_manager = _get_feed_manager(manager)
+    _fixture_or_404(manager, fixture_id)
+    changes = {key: getattr(body, key) for key in body.model_fields_set}
+    try:
+        raw, effective = feed_manager.update_stand_config(fixture_id, changes)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {
+        "status": "ok",
+        "fixture_id": fixture_id,
+        **_stand_config_payload(feed_manager, raw, effective),
+    }
 
 
 # ------------------------------------------------------------------

@@ -1049,6 +1049,161 @@ class FeedsApiCityIsolationTest(FeedsApiTestBase):
         )
         self.assertEqual(resp.status_code, 404)
 
+    def test_patch_config_of_other_city_fixture_404_and_nothing_written(self):
+        from database.models import FeedFixtureConfig
+        resp = self.client.patch(
+            f"/api/feeds/fixtures/{self.OTHER_FIXTURE}/config",
+            json={"title_max_chars": 50},
+        )
+        self.assertEqual(resp.status_code, 404)
+        db = self.Session()
+        try:
+            self.assertEqual(db.query(FeedFixtureConfig).count(), 0)
+        finally:
+            db.close()
+
+
+_STAND_CONFIG_ENV_KEYS = (
+    "SAIVERSE_FEED_FETCH_INTERVAL_SEC",
+    "SAIVERSE_FEED_MAX_ITEMS_PER_PUSH",
+)
+
+
+class FeedsStandConfigApiTest(FeedsApiTestBase):
+    """スタンドごとの配信設定 (2026-09-29): GET /fixtures への載り方と
+    PATCH /fixtures/{id}/config の更新・null 戻し・検証 (422)・404。"""
+
+    def setUp(self):
+        super().setUp()
+        import os
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for key in _STAND_CONFIG_ENV_KEYS:
+            os.environ.pop(key, None)
+
+    def _fixture_payload(self, fixture_id):
+        fixtures = self.client.get("/api/feeds/fixtures").json()
+        return next(f for f in fixtures if f["fixture_id"] == fixture_id)
+
+    def test_listing_carries_config_effective_and_defaults(self):
+        fixture_id = self._create_custom_fixture()
+        payload = self._fixture_payload(fixture_id)
+        self.assertEqual(payload["config"], {
+            "fetch_interval_sec": None, "summary_max_chars": None,
+            "title_max_chars": None, "max_items_per_push": None,
+        })
+        expected_defaults = {
+            "fetch_interval_sec": 10800, "summary_max_chars": 100,
+            "title_max_chars": 120, "max_items_per_push": 3,
+        }
+        self.assertEqual(payload["effective"], expected_defaults)
+        self.assertEqual(payload["defaults"], expected_defaults)
+
+    def test_patch_overrides_then_null_restores_default(self):
+        fixture_id = self._create_custom_fixture()
+        resp = self.client.patch(
+            f"/api/feeds/fixtures/{fixture_id}/config",
+            json={"fetch_interval_sec": 21600, "summary_max_chars": 50},
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertEqual(body["config"]["fetch_interval_sec"], 21600)
+        self.assertEqual(body["config"]["summary_max_chars"], 50)
+        self.assertIsNone(body["config"]["title_max_chars"])
+        self.assertEqual(body["effective"]["fetch_interval_sec"], 21600)
+        self.assertEqual(body["effective"]["title_max_chars"], 120)
+
+        # GET にも同じ値が載る
+        payload = self._fixture_payload(fixture_id)
+        self.assertEqual(payload["config"]["summary_max_chars"], 50)
+
+        # null = 既定に戻す。送らない欄 (summary) は据え置き
+        resp = self.client.patch(
+            f"/api/feeds/fixtures/{fixture_id}/config",
+            json={"fetch_interval_sec": None},
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertIsNone(body["config"]["fetch_interval_sec"])
+        self.assertEqual(body["effective"]["fetch_interval_sec"], 10800)
+        self.assertEqual(body["config"]["summary_max_chars"], 50)
+
+    def test_patch_env_default_shows_in_defaults(self):
+        import os
+        os.environ["SAIVERSE_FEED_FETCH_INTERVAL_SEC"] = "3600"
+        fixture_id = self._create_custom_fixture()
+        payload = self._fixture_payload(fixture_id)
+        self.assertEqual(payload["defaults"]["fetch_interval_sec"], 3600)
+        resp = self.client.patch(
+            f"/api/feeds/fixtures/{fixture_id}/config",
+            json={"fetch_interval_sec": 43200},
+        )
+        self.assertEqual(resp.json()["effective"]["fetch_interval_sec"], 43200)
+        self.assertEqual(resp.json()["defaults"]["fetch_interval_sec"], 3600)
+
+    def test_patch_out_of_range_or_wrong_type_422(self):
+        fixture_id = self._create_custom_fixture()
+        for body in (
+            {"fetch_interval_sec": 599},
+            {"fetch_interval_sec": 604801},
+            {"summary_max_chars": -1},
+            {"summary_max_chars": 1001},
+            {"title_max_chars": 19},
+            {"title_max_chars": 501},
+            {"max_items_per_push": -1},
+            {"max_items_per_push": 11},
+            {"max_items_per_push": "3"},
+            {"max_items_per_push": 2.5},
+            {"max_items_per_push": True},
+            {"unknown_field": 1},
+        ):
+            with self.subTest(body=body):
+                resp = self.client.patch(
+                    f"/api/feeds/fixtures/{fixture_id}/config", json=body,
+                )
+                self.assertEqual(resp.status_code, 422, resp.text)
+        # 何も書かれていない
+        payload = self._fixture_payload(fixture_id)
+        self.assertTrue(all(v is None for v in payload["config"].values()))
+
+    def test_patch_boundaries_accepted(self):
+        fixture_id = self._create_custom_fixture()
+        resp = self.client.patch(
+            f"/api/feeds/fixtures/{fixture_id}/config",
+            json={
+                "fetch_interval_sec": 600, "summary_max_chars": 0,
+                "title_max_chars": 500, "max_items_per_push": 10,
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["effective"], {
+            "fetch_interval_sec": 600, "summary_max_chars": 0,
+            "title_max_chars": 500, "max_items_per_push": 10,
+        })
+
+    def test_patch_unknown_fixture_404(self):
+        resp = self.client.patch(
+            "/api/feeds/fixtures/no-such-fixture/config",
+            json={"title_max_chars": 50},
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_patch_non_feed_fixture_404(self):
+        db = self.Session()
+        try:
+            db.add(Fixture(
+                FIXTURE_ID="obj-1", BUILDING_ID=BUILDING_ID,
+                NAME="ただの置物", TYPE="object",
+            ))
+            db.commit()
+        finally:
+            db.close()
+        resp = self.client.patch(
+            "/api/feeds/fixtures/obj-1/config", json={"title_max_chars": 50},
+        )
+        self.assertEqual(resp.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

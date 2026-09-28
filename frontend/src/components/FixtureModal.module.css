@@ -132,6 +132,154 @@
     text-align: center;
 }
 
+/* ── Feed stand (TYPE="feed_stand") ── */
+.sectionTitle {
+    margin: 0.9rem 0 0.4rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+}
+
+.sectionTitle:first-of-type {
+    margin-top: 0.25rem;
+}
+
+.feedList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.feedListItem {
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid #374151;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.emptyInline {
+    font-size: 0.85rem;
+    color: #6b7280;
+    padding: 0.2rem 0;
+}
+
+.settingsSection {
+    margin-top: 1.1rem;
+    padding-top: 0.2rem;
+    border-top: 1px solid #374151;
+}
+
+.settingsLead {
+    margin: 0 0 0.75rem;
+    font-size: 0.8rem;
+    color: #9ca3af;
+}
+
+.settingRow {
+    margin-bottom: 0.9rem;
+}
+
+.settingLabel {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: 0.3rem;
+}
+
+.settingControls {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.defaultToggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    color: #d1d5db;
+    cursor: pointer;
+}
+
+.settingSelect,
+.settingInput {
+    background: #111827;
+    color: #f3f4f6;
+    border: 1px solid #4b5563;
+    border-radius: 6px;
+    padding: 0.35rem 0.5rem;
+    font-size: 0.85rem;
+}
+
+.settingSelect {
+    min-width: 10rem;
+}
+
+.settingInput {
+    width: 6rem;
+}
+
+.settingInput:disabled,
+.settingSelect:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.settingHelp {
+    margin-top: 0.3rem;
+    font-size: 0.75rem;
+    color: #9ca3af;
+    line-height: 1.4;
+}
+
+.settingActions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-top: 0.25rem;
+}
+
+.saveButton {
+    background: #2563eb;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 0.45rem 1.1rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.saveButton:hover:not(:disabled) {
+    background: #1d4ed8;
+}
+
+.saveButton:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.saveOk {
+    font-size: 0.8rem;
+    color: #34d399;
+}
+
+.errorText {
+    font-size: 0.8rem;
+    color: #f87171;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
 /* ── Light Mode Overrides ── */
 :global([data-theme="light"]) .modal {
     background: #ffffff;
@@ -183,4 +331,49 @@
 
 :global([data-theme="light"]) .emptyState {
     color: #94a3b8;
+}
+
+:global([data-theme="light"]) .feedListItem {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .emptyInline {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .settingsSection {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .settingsLead,
+:global([data-theme="light"]) .settingHelp {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .defaultToggle {
+    color: #334155;
+}
+
+:global([data-theme="light"]) .settingSelect,
+:global([data-theme="light"]) .settingInput {
+    background: #ffffff;
+    color: #1f2937;
+    border-color: #cbd5e1;
+}
+
+:global([data-theme="light"]) .saveButton {
+    background: #3b82f6;
+}
+
+:global([data-theme="light"]) .saveButton:hover:not(:disabled) {
+    background: #2563eb;
+}
+
+:global([data-theme="light"]) .saveOk {
+    color: #059669;
+}
+
+:global([data-theme="light"]) .errorText {
+    color: #dc2626;
 }

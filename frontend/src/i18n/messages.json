@@ -5919,6 +5919,114 @@
     "ja": "この部屋にアイテムを作る",
     "en": "Create item in this room"
   },
+  "components.RightSidebar.text020": {
+    "ja": "購読中のフィード",
+    "en": "Subscribed feeds"
+  },
+  "components.RightSidebar.text021": {
+    "ja": "購読中のフィードはありません",
+    "en": "No subscribed feeds"
+  },
+  "components.RightSidebar.text022": {
+    "ja": "新着記事",
+    "en": "Latest articles"
+  },
+  "components.RightSidebar.text023": {
+    "ja": "まだ記事が届いていません",
+    "en": "No articles yet"
+  },
+  "components.RightSidebar.text024": {
+    "ja": "配信の設定",
+    "en": "Delivery settings"
+  },
+  "components.RightSidebar.text025": {
+    "ja": "このスタンドからペルソナに届く記事の量を調整できます。",
+    "en": "Adjust how much this stand delivers to personas."
+  },
+  "components.RightSidebar.text026": {
+    "ja": "取得間隔",
+    "en": "Fetch interval"
+  },
+  "components.RightSidebar.text027": {
+    "ja": "フィードを取りに行く間隔です。短いほど多くの記事が届きます。",
+    "en": "How often the feeds are fetched. Shorter intervals deliver more articles."
+  },
+  "components.RightSidebar.text028": {
+    "ja": "既定 ({p1})",
+    "en": "Default ({p1})"
+  },
+  "components.RightSidebar.text029": {
+    "ja": "{p1} 時間",
+    "en": "{p1} h"
+  },
+  "components.RightSidebar.text030": {
+    "ja": "{p1} 分",
+    "en": "{p1} min"
+  },
+  "components.RightSidebar.text031": {
+    "ja": "要約の長さ (字)",
+    "en": "Summary length (characters)"
+  },
+  "components.RightSidebar.text032": {
+    "ja": "記事 1 件につき、ペルソナへ届ける要約の字数です。0 にすると要約を載せません。",
+    "en": "Characters of summary delivered per article. 0 leaves the summary out."
+  },
+  "components.RightSidebar.text033": {
+    "ja": "見出しの上限 (字)",
+    "en": "Headline limit (characters)"
+  },
+  "components.RightSidebar.text034": {
+    "ja": "見出しがこれより長いときは、末尾を「…」にして切り詰めます。",
+    "en": "Longer headlines are shortened and end with \"…\"."
+  },
+  "components.RightSidebar.text035": {
+    "ja": "1 回に届く件数",
+    "en": "Articles per delivery"
+  },
+  "components.RightSidebar.text036": {
+    "ja": "1 回の配送で、購読しているフィード 1 つからペルソナへ届く記事の数です。0 にするとこのスタンドからは届きません。",
+    "en": "Number of articles each subscribed feed delivers to a persona at a time. 0 stops delivery from this stand."
+  },
+  "components.RightSidebar.text037": {
+    "ja": "既定値を使う ({p1})",
+    "en": "Use default ({p1})"
+  },
+  "components.RightSidebar.text038": {
+    "ja": "保存",
+    "en": "Save"
+  },
+  "components.RightSidebar.text039": {
+    "ja": "保存中...",
+    "en": "Saving..."
+  },
+  "components.RightSidebar.text040": {
+    "ja": "保存しました",
+    "en": "Saved"
+  },
+  "components.RightSidebar.text041": {
+    "ja": "保存に失敗しました: {p1}",
+    "en": "Failed to save: {p1}"
+  },
+  "components.RightSidebar.text042": {
+    "ja": "設定を読み込めませんでした: {p1}",
+    "en": "Could not load the settings: {p1}"
+  },
+  "components.RightSidebar.text043": {
+    "ja": "設定を読み込み中...",
+    "en": "Loading settings..."
+  },
+  "components.RightSidebar.text044": {
+    "ja": "「{p1}」は {p2} 以上 {p3} 以下の整数で入力してください",
+    "en": "\"{p1}\" must be a whole number from {p2} to {p3}"
+  },
+  "components.RightSidebar.text045": {
+    "ja": "{p1} 字",
+    "en": "{p1} chars"
+  },
+  "components.RightSidebar.text046": {
+    "ja": "{p1} 件",
+    "en": "{p1} items"
+  },
   "components.ScheduleModal.text001": {
     "ja": "このアラームを削除しますか？",
     "en": "Delete this alarm?"

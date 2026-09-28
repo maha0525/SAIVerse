@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 361（tag グループ: 26）
+**エンドポイント数**: 362（tag グループ: 26）
 
 ## addon
 
@@ -164,7 +164,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 |---|---|---|
 | POST | `/api/feeds/fetch` | 全フィードの手動取得を起動する (完了は待たず 202 を返す)。 |
 | POST | `/api/feeds/fixtures` | フィード施設を作成する。プリセットから、または空の施設として。 |
-| GET | `/api/feeds/fixtures` | フィード施設の一覧 (購読と健康状態つき)。 |
+| GET | `/api/feeds/fixtures` | フィード施設の一覧 (購読と健康状態、配信設定つき)。 |
+| PATCH | `/api/feeds/fixtures/{fixture_id}/config` | スタンドの配信設定 (取得間隔 / 要約の長さ / 見出しの上限 / 1 回の |
 | GET | `/api/feeds/items` | フィード施設の取得済み記事一覧 (新しい順)。 |
 | GET | `/api/feeds/presets` | フィードプリセット (購読束 + 施設の見た目) の一覧。 |
 | POST | `/api/feeds/subscriptions` | 購読を追加する。 |

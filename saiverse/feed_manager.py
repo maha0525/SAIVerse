@@ -3,7 +3,11 @@
 docs/intent/rss_feed_intake.md の配置層 + 提示層。
 
 - 購読 (feed_subscription) は Building 内の Fixture (TYPE="feed_stand") が持つ
-- 定期取得は EventScheduler 経由 (起動時にまず 1 回 → 以後 interval 周期)。
+- 定期取得は EventScheduler 経由 (起動時にまず 1 回 → 以後 FETCH_TICK_SEC の
+  固定の刻み)。刻みごとに、所属スタンドの取得間隔が LAST_ATTEMPT_AT から
+  経過した購読だけを取得する。取得間隔・1 回の配送件数・記事 1 件の要約と
+  見出しの上限はスタンドごとに設定できる (feed_fixture_config — 解決順は
+  スタンドの設定値 > env > 組み込み既定、resolve_stand_settings)。
   取得本体は worker スレッドに逃がし、dispatch スレッドを HTTP で塞がない
 - 記事 (feed_item) は転載のみ保存。取得失敗は CONSECUTIVE_FAILURES / LAST_ERROR
   に正直に記録する (取得できなかったものを取得できたことにしない — 不変条件 2)
@@ -23,8 +27,9 @@ import os
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import urlparse, urlunparse
 
 from sqlalchemy import func
@@ -33,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from database.models import (
     Building,
+    FeedFixtureConfig,
     FeedItem,
     FeedReadCursor,
     FeedSubscription,
@@ -46,7 +52,43 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_FETCH_INTERVAL_SEC = 1800
+# スタンドの既定の取得間隔 (秒)。2026-09-29 に 1800 → 10800 (3 時間)。
+# 多産フィード (1 時間に何本も出すもの) の 1 日あたりの天井を 144 → 24 件へ
+# 下げる (docs/issues/feed_blocks_never_leave_presented_context.md の裁定)。
+# 解決順はスタンドの設定値 > env (SAIVERSE_FEED_FETCH_INTERVAL_SEC) > これ。
+DEFAULT_FETCH_INTERVAL_SEC = 10800
+# 取得ワーカーの刻み (秒、固定)。ワーカーはこの周期で起き、所属スタンドの
+# 取得間隔が LAST_ATTEMPT_AT から経過した購読だけを取得する。取得間隔の
+# 下限もこの値 (これより短い間隔は刻みで丸められて意味を持たない)。
+# 判定が刻みの時点でしか走らないため、実効の間隔は指定値から次の刻みまで
+# 切り上がる (例: 5000 秒と設定しても実際は 5400〜6000 秒周期)。UI の
+# 選択肢は刻みの倍数 (1/3/6/12/24 時間) なのでこの差は出ない。
+FETCH_TICK_SEC = 600
+FETCH_INTERVAL_MIN_SEC = FETCH_TICK_SEC
+FETCH_INTERVAL_MAX_SEC = 604800  # 7 日
+# 配送する記事 1 件の要約・見出しの既定の上限 (字)。2026-09-29 に要約
+# 300 → 100、見出しは上限を新設 (120)。記事 1 件 ≈900 字 → ≈230 字。
+# env は持たない (スタンドの設定値 > これ)。保存時の上限
+# (feed_fetch の _TITLE_MAX_CHARS / _SUMMARY_MAX_CHARS) とは別物で、
+# こちらはペルソナへ届ける時の上限。
+DEFAULT_SUMMARY_MAX_CHARS = 100
+DEFAULT_TITLE_MAX_CHARS = 120
+# スタンドの設定値として受け付ける範囲 (API 層の検証と update_stand_config
+# の検証が共有する)。要約 0 は「要約を載せない」、件数 0 は「このスタンド
+# からは配送しない」の明示指定。
+STAND_CONFIG_RANGES: Dict[str, Tuple[int, int]] = {
+    "fetch_interval_sec": (FETCH_INTERVAL_MIN_SEC, FETCH_INTERVAL_MAX_SEC),
+    "summary_max_chars": (0, 1000),
+    "title_max_chars": (20, 500),
+    "max_items_per_push": (0, 10),
+}
+# 設定欄 (API の名前) → FeedFixtureConfig の列名
+_STAND_CONFIG_COLUMNS: Dict[str, str] = {
+    "fetch_interval_sec": "FETCH_INTERVAL_SEC",
+    "summary_max_chars": "SUMMARY_MAX_CHARS",
+    "title_max_chars": "TITLE_MAX_CHARS",
+    "max_items_per_push": "MAX_ITEMS_PER_PUSH",
+}
 # 取得サイクル全体 (全購読の逐次取得) の壁時計予算 (秒)。応答の遅い購読が
 # 並ぶとサイクルが取得間隔を跨いで伸び続けるため、超過したら残りの購読の
 # 取得を打ち切る (取得済みぶんの表示更新・配送・剪定は行う)。0 以下は
@@ -72,9 +114,6 @@ _SCHEDULER_KEY = "feeds:fetch"
 
 # 知覚バッファ metadata に刻む冪等キー名。値は "feed_item:{subscription_id}:{guid}"
 FEED_DEDUPE_META_KEY = "feed_dedupe_key"
-
-# 配送 content に載せる SUMMARY の上限 (入口は概要まで、深掘りはリンク先 — intent §4-3)
-_SUMMARY_MAX_CHARS = 300
 
 # 購読タイトル (FeedSubscription.TITLE) の入口上限。フィード宣言タイトルも
 # ユーザー指定タイトルも外部/自由入力なので、保存前にここで切り詰める —
@@ -139,6 +178,37 @@ def city_feed_fixture_ids(db: Session, city_id: int):
     )
 
 
+@dataclass(frozen=True)
+class FeedStandSettings:
+    """スタンド 1 つの実効の配信設定 (解決後の値)。
+
+    解決は FeedManager.resolve_stand_settings が行う: スタンドの設定値
+    (feed_fixture_config の非 NULL 欄) > env > 組み込み既定。
+    """
+    fetch_interval_sec: int
+    summary_max_chars: int
+    title_max_chars: int
+    max_items_per_push: int
+
+    def as_dict(self) -> Dict[str, int]:
+        return {
+            "fetch_interval_sec": self.fetch_interval_sec,
+            "summary_max_chars": self.summary_max_chars,
+            "title_max_chars": self.title_max_chars,
+            "max_items_per_push": self.max_items_per_push,
+        }
+
+
+def _clip_text(text: str, limit: int) -> str:
+    """text を limit 字以内へ切り詰める。切ったときは末尾を「…」にする
+    (「…」込みで limit 字)。limit が 0 以下なら空文字。"""
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
 class FeedManager:
     """フィード購読のライフサイクルと定期取得・配送を管理する。"""
 
@@ -146,7 +216,6 @@ class FeedManager:
         # ⚠️ 構築のみ。背景処理 (EventScheduler 登録・スレッド起動) は start() で行う
         # (saiverse_manager.py の構築/起動分離の不変条件)。
         self.manager = manager
-        self.interval_seconds = self._read_interval_env()
         # ライフサイクル状態は "new" → "started" → "stopped" の一方向。
         # FeedManager は SAIVerseManager と同寿命で、stop 後に再 start する
         # 正当な用途は無い — stopped からの start() は no-op (WARNING のみ)。
@@ -184,15 +253,30 @@ class FeedManager:
 
     @staticmethod
     def _read_interval_env() -> int:
+        """スタンドの既定の取得間隔 (秒)。スタンドに設定値が無いときに使う。
+
+        取得ワーカーの刻み (FETCH_TICK_SEC) より短い値は意味を持たない
+        (刻みで丸められる) ので、刻みの値へ引き上げて WARNING を出す
+        (黙って丸めない)。上限は API の受付範囲と同じ 7 日。
+        """
         env_val = os.environ.get("SAIVERSE_FEED_FETCH_INTERVAL_SEC")
         if env_val:
             try:
-                return max(60, int(env_val))
+                value = int(env_val)
             except ValueError:
                 LOGGER.warning(
                     "Invalid SAIVERSE_FEED_FETCH_INTERVAL_SEC=%r; using default",
                     env_val,
                 )
+            else:
+                if value < FETCH_INTERVAL_MIN_SEC:
+                    LOGGER.warning(
+                        "SAIVERSE_FEED_FETCH_INTERVAL_SEC=%r is shorter than "
+                        "the fetch tick (%d sec); using %d",
+                        env_val, FETCH_TICK_SEC, FETCH_INTERVAL_MIN_SEC,
+                    )
+                    return FETCH_INTERVAL_MIN_SEC
+                return min(value, FETCH_INTERVAL_MAX_SEC)
         return DEFAULT_FETCH_INTERVAL_SEC
 
     @staticmethod
@@ -212,9 +296,10 @@ class FeedManager:
 
     @staticmethod
     def _read_max_items_env() -> int:
-        """1 購読 × 1 ペルソナあたりの配送上限 N。
+        """1 購読 × 1 ペルソナあたりの配送上限 N の env 層 (スタンドの設定値が
+        無いときに使う — resolve_stand_settings)。
 
-        0 以下は「配送無効」— deliver_new_items は知覚投入もカーソル前進も
+        0 以下は「配送無効」— そのスタンドの購読は知覚投入もカーソル前進も
         一切しない (取得・保存・STATE_JSON 更新は従来どおり動く)。
         黙って 1 に繰り上げない: 0 は「配送を止めたい」という明示的な指定。
         """
@@ -277,14 +362,174 @@ class FeedManager:
         return DEFAULT_MAX_SUBSCRIPTIONS_PER_FIXTURE
 
     # ------------------------------------------------------------------
+    # スタンドごとの配信設定 (feed_fixture_config)
+    # ------------------------------------------------------------------
+
+    def resolve_stand_settings(
+        self, raw: Optional[Dict[str, Optional[int]]] = None,
+    ) -> FeedStandSettings:
+        """スタンドの設定値 (raw、欄ごとに None = 既定を使う) を実効値へ解決する。
+
+        解決順: スタンドの設定値 (非 None) > env > 組み込み既定。要約・見出し
+        の上限は env を持たないので、スタンドの設定値 > 組み込み既定。
+        raw が None (設定行の無いスタンド) は全欄 None と同じ。
+        """
+        raw = raw or {}
+
+        def pick(key: str, fallback: int) -> int:
+            value = raw.get(key)
+            return fallback if value is None else int(value)
+
+        return FeedStandSettings(
+            fetch_interval_sec=pick(
+                "fetch_interval_sec", self._read_interval_env(),
+            ),
+            summary_max_chars=pick("summary_max_chars", DEFAULT_SUMMARY_MAX_CHARS),
+            title_max_chars=pick("title_max_chars", DEFAULT_TITLE_MAX_CHARS),
+            max_items_per_push=pick(
+                "max_items_per_push", self._read_max_items_env(),
+            ),
+        )
+
+    @staticmethod
+    def _config_row_to_raw(
+        row: Optional[FeedFixtureConfig],
+    ) -> Dict[str, Optional[int]]:
+        """設定行を API 名の辞書へ写す (行が無ければ全欄 None)。"""
+        return {
+            key: (getattr(row, column) if row is not None else None)
+            for key, column in _STAND_CONFIG_COLUMNS.items()
+        }
+
+    def _load_stand_raw_configs(
+        self, db: Session, fixture_ids: Iterable[str],
+    ) -> Dict[str, Dict[str, Optional[int]]]:
+        """fixture_id → 設定値の生の辞書 (欄ごとに None = 既定)。
+
+        渡した全 fixture_id がキーに入る (設定行の無いスタンドは全欄 None)。
+        """
+        ids = list({fid for fid in fixture_ids if fid})
+        rows: Dict[str, FeedFixtureConfig] = {}
+        if ids:
+            rows = {
+                row.FIXTURE_ID: row
+                for row in db.query(FeedFixtureConfig)
+                .filter(FeedFixtureConfig.FIXTURE_ID.in_(ids))
+                .all()
+            }
+        return {fid: self._config_row_to_raw(rows.get(fid)) for fid in ids}
+
+    def _load_stand_settings(
+        self, db: Session, fixture_ids: Iterable[str],
+    ) -> Dict[str, FeedStandSettings]:
+        """fixture_id → 実効の配信設定 (_load_stand_raw_configs を解決したもの)。"""
+        return {
+            fid: self.resolve_stand_settings(raw)
+            for fid, raw in self._load_stand_raw_configs(db, fixture_ids).items()
+        }
+
+    def get_stand_config(
+        self, fixture_id: str,
+    ) -> Tuple[Dict[str, Optional[int]], FeedStandSettings]:
+        """スタンド 1 つの (設定値の生の辞書, 実効値) を返す。
+
+        City 境界の検証は呼び出し側 (API 層の _fixture_or_404) が行う読み取り
+        専用の口。別 City のスタンドを渡しても書き込みは起きない。
+        """
+        db: Session = self.manager.SessionLocal()
+        try:
+            raw = self._load_stand_raw_configs(db, [fixture_id])[fixture_id]
+        finally:
+            db.close()
+        return raw, self.resolve_stand_settings(raw)
+
+    def update_stand_config(
+        self, fixture_id: str, changes: Dict[str, Optional[int]],
+    ) -> Tuple[Dict[str, Optional[int]], FeedStandSettings]:
+        """スタンドの設定を更新する。changes に含めた欄だけを書き換える
+        (数値 = 上書き / None = 既定に戻す。含めない欄は据え置き)。
+
+        検証: 欄名は _STAND_CONFIG_COLUMNS のもの、数値は STAND_CONFIG_RANGES
+        の範囲内 (違反は ValueError — API 層は 422 に写像)。スタンドが現 City
+        のフィード施設でなければ LookupError (API 層は 404)。存在確認と
+        書き込みは同一 transaction (事前確認を認可根拠にしない —
+        city_feed_fixture_ids の docstring 参照)。
+
+        Returns: 更新後の (設定値の生の辞書, 実効値)。
+        """
+        for key, value in changes.items():
+            if key not in _STAND_CONFIG_COLUMNS:
+                raise ValueError(f"未知の設定欄です: {key}")
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{key} は整数で指定してください。")
+            low, high = STAND_CONFIG_RANGES[key]
+            if not low <= value <= high:
+                raise ValueError(
+                    f"{key} は {low} 以上 {high} 以下で指定してください。"
+                )
+        # 同じスタンドへの初回 PATCH が並走すると、両方が「行が無い」を見て
+        # INSERT し、後発が主キー違反 (IntegrityError) になる。その場合は
+        # rollback して 1 回だけやり直す (2 回目は先発の行を UPDATE する)。
+        for attempt in range(2):
+            db: Session = self.manager.SessionLocal()
+            try:
+                owned = (
+                    db.query(Fixture.FIXTURE_ID)
+                    .filter(
+                        Fixture.FIXTURE_ID == fixture_id,
+                        Fixture.FIXTURE_ID.in_(
+                            city_feed_fixture_ids(db, self.manager.city_id)
+                        ),
+                    )
+                    .first()
+                )
+                if owned is None:
+                    raise LookupError(
+                        f"フィード施設が見つかりません: {fixture_id}"
+                    )
+                row = (
+                    db.query(FeedFixtureConfig)
+                    .filter(FeedFixtureConfig.FIXTURE_ID == fixture_id)
+                    .first()
+                )
+                if row is None:
+                    row = FeedFixtureConfig(FIXTURE_ID=fixture_id)
+                    db.add(row)
+                for key, value in changes.items():
+                    setattr(row, _STAND_CONFIG_COLUMNS[key], value)
+                try:
+                    db.commit()
+                except IntegrityError:
+                    db.rollback()
+                    if attempt == 0:
+                        continue
+                    raise
+                raw = self._load_stand_raw_configs(db, [fixture_id])[fixture_id]
+                break
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+        LOGGER.info(
+            "[feed] stand config updated: %s %s", fixture_id, changes,
+        )
+        return raw, self.resolve_stand_settings(raw)
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def start(self) -> None:
         """定期取得を EventScheduler に登録する。
 
-        first_fire_immediate=True で起動直後にまず 1 回取得する — サーバーを
-        常時起動しないユーザーでは「起動時にまず取得」が実質の既定になる
+        登録するのは固定の刻み (FETCH_TICK_SEC) で、刻みごとに「所属
+        スタンドの取得間隔が経過した購読」だけを取得する (_fetch_all の
+        ゲート)。first_fire_immediate=True で起動直後にまず 1 回刻む —
+        サーバーを常時起動しないユーザーでは、前回の取得から間隔が経って
+        いる購読 (まだ一度も試していない購読を含む) が起動時にまず取得される
         (intent §10-6)。
 
         stop() 済みの FeedManager は再 start できない (no-op)。_stop_event は
@@ -306,15 +551,16 @@ class FeedManager:
                 LOGGER.warning("[feed] event_scheduler not available; cannot start")
                 return
             scheduler.schedule_periodic(
-                interval_seconds=self.interval_seconds,
+                interval_seconds=FETCH_TICK_SEC,
                 callback=self._safe_tick,
                 key=_SCHEDULER_KEY,
                 first_fire_immediate=True,
             )
             self._state = "started"
         LOGGER.info(
-            "[feed] Started (interval=%d sec, first fetch immediate)",
-            self.interval_seconds,
+            "[feed] Started (tick=%d sec, default stand interval=%d sec, "
+            "first tick immediate)",
+            FETCH_TICK_SEC, self._read_interval_env(),
         )
 
     def stop(self) -> None:
@@ -382,8 +628,10 @@ class FeedManager:
         except Exception:
             LOGGER.exception("[feed] tick failed to start worker")
 
-    def _start_worker(self) -> Optional[threading.Thread]:
+    def _start_worker(self, force: bool = False) -> Optional[threading.Thread]:
         """取得 worker を 1 本起動する。既に実行中か停止中なら起動せず None。
+
+        force=True (手動取得) は取得間隔のゲートを無視して全購読を取得する。
 
         _lifecycle_lock を握ったまま「停止確認 → 生存 worker の剪定・確認 →
         登録 → start」まで行う (stop() の中断要求と非原子だと、stop 直後に
@@ -397,19 +645,26 @@ class FeedManager:
             if self._workers or self._fetch_lock.locked():
                 return None
             worker = threading.Thread(
-                target=self._fetch_cycle_worker, name="FeedFetchWorker", daemon=True,
+                target=self._fetch_cycle_worker,
+                kwargs={"force": force},
+                name="FeedFetchWorker",
+                daemon=True,
             )
             self._workers.append(worker)
             worker.start()
             return worker
 
-    def _fetch_cycle_worker(self) -> None:
-        """worker スレッド本体: 全購読の取得 → 表示更新 → 配送。"""
+    def _fetch_cycle_worker(self, force: bool = False) -> None:
+        """worker スレッド本体: 取得 (間隔ゲート付き) → 表示更新 → 配送 → 剪定。
+
+        表示更新・配送・剪定は取得した購読が 0 本の刻みでも走る — 既読
+        カーソルと重複抑止があるので、新着が無ければ配送は何も起こさない。
+        """
         if not self._fetch_lock.acquire(blocking=False):
             LOGGER.debug("[feed] previous fetch cycle still running; skipping")
             return
         try:
-            self._fetch_all()
+            self._fetch_all(force=force)
             # 取得と表示更新・配送の間の停止確認: stop() 後に DB (STATE_JSON /
             # カーソル) や知覚バッファへ書き込まない。取得済み記事は保存済み
             # なので、次回サイクルで表示・配送される (欠落しない)。
@@ -430,18 +685,32 @@ class FeedManager:
     def fetch_now(self) -> Optional[threading.Thread]:
         """手動の全取得。定期取得の worker と同じ経路を即時に 1 回走らせる。
 
+        ユーザーの明示操作なので、スタンドの取得間隔のゲートは無視して
+        全購読を取得する (間隔が守るのは相手サーバーへの定期負荷で、
+        ユーザーが押した一回はその対象ではない)。取得を試みた購読の
+        LAST_ATTEMPT_AT は進むので、次の定期取得はそこから間隔を数える。
+
         Returns: 起動した worker スレッド (呼び出し側は join で完了を待てる)。
         既に取得サイクルが実行中、または stop() による停止中は起動せず None
         (API 層は 409 を返す)。
         """
-        return self._start_worker()
+        return self._start_worker(force=True)
 
     # ------------------------------------------------------------------
     # 取得・保存
     # ------------------------------------------------------------------
 
-    def _fetch_all(self) -> None:
-        """ENABLED な全購読を逐次取得する (同時 1 本)。
+    def _fetch_all(self, force: bool = False) -> None:
+        """取得時期が来た ENABLED な購読を逐次取得する (同時 1 本)。
+
+        取得間隔のゲート (2026-09-29): 購読ごとに、所属スタンドの実効の取得
+        間隔 (resolve_stand_settings — スタンドの設定値 > env > 既定 3 時間)
+        が LAST_ATTEMPT_AT から経過していれば取得する。LAST_ATTEMPT_AT が
+        NULL (一度も試していない) なら取得する。LAST_ATTEMPT_AT は成功・失敗
+        どちらでも進む (_fetch_one / _record_fetch_failure) — 失敗した購読も
+        刻みごと (10 分) には叩き直さず、間隔に従う。force=True (手動取得)
+        はゲートを無視する。予算打ち切りで取得されなかった購読は
+        LAST_ATTEMPT_AT が進まないので、次の刻みでまた対象になる。
 
         列挙は現 City のフィード施設 (city_feed_fixture_ids — City 境界 +
         TYPE="feed_stand") に属する購読に限る — 配送クエリ
@@ -461,9 +730,12 @@ class FeedManager:
         """
         db: Session = self.manager.SessionLocal()
         try:
-            sub_ids = [
-                row[0]
-                for row in db.query(FeedSubscription.SUBSCRIPTION_ID)
+            rows = (
+                db.query(
+                    FeedSubscription.SUBSCRIPTION_ID,
+                    FeedSubscription.FIXTURE_ID,
+                    FeedSubscription.LAST_ATTEMPT_AT,
+                )
                 .filter(
                     FeedSubscription.ENABLED == True,  # noqa: E712
                     FeedSubscription.FIXTURE_ID.in_(
@@ -474,9 +746,24 @@ class FeedManager:
                 # 意味はない — 安定していればよい)
                 .order_by(FeedSubscription.SUBSCRIPTION_ID)
                 .all()
-            ]
+            )
+            settings = self._load_stand_settings(db, (r[1] for r in rows))
         finally:
             db.close()
+        now = _utcnow_naive()
+        sub_ids = [
+            sub_id
+            for sub_id, fixture_id, last_attempt in rows
+            if force
+            or last_attempt is None
+            or (now - last_attempt).total_seconds()
+            >= settings[fixture_id].fetch_interval_sec
+        ]
+        if len(sub_ids) < len(rows):
+            LOGGER.debug(
+                "[feed] %d of %d subscription(s) not due yet (stand interval)",
+                len(rows) - len(sub_ids), len(rows),
+            )
         sub_ids = self._rotate_subscription_order(sub_ids)
         budget = self._read_cycle_budget_env()
         cycle_started = time.monotonic()
@@ -611,7 +898,10 @@ class FeedManager:
                 )
                 return 0
 
-            sub.LAST_OK_AT = _utcnow_naive()
+            now = _utcnow_naive()
+            sub.LAST_OK_AT = now
+            # 取得間隔のゲートの基準 (_fetch_all)。成功でも失敗でも進める
+            sub.LAST_ATTEMPT_AT = now
             sub.CONSECUTIVE_FAILURES = 0
             sub.LAST_ERROR = None
 
@@ -701,6 +991,9 @@ class FeedManager:
                 return 0
             sub.CONSECUTIVE_FAILURES = (sub.CONSECUTIVE_FAILURES or 0) + 1
             sub.LAST_ERROR = message[:512]
+            # 失敗も「試みた」に数える — 取得間隔のゲート (_fetch_all) が
+            # 失敗した購読を刻みごとに叩き直さず、間隔に従わせるため
+            sub.LAST_ATTEMPT_AT = _utcnow_naive()
             db.commit()
             return sub.CONSECUTIVE_FAILURES
         finally:
@@ -729,14 +1022,9 @@ class FeedManager:
 
         Returns: 削除した記事数。上限が 0 以下 (剪定無効) なら 0。
         """
-        keep = self._read_item_keep_env()
-        if keep <= 0:
+        base_keep = self._read_item_keep_env()
+        if base_keep <= 0:
             return 0
-        # 上の却下理由が成立するのは KEEP >= 配送 N 件のときだけ。KEEP < N の
-        # 端な設定では「配送されるはずの最新 N 件」の一部が剪定されうるため、
-        # 実効 keep を N まで引き上げて意味論を守る (N <= 0 = 配送無効時は
-        # max() が keep をそのまま返す)。
-        keep = max(keep, self._read_max_items_env())
         db: Session = self.manager.SessionLocal()
         try:
             # 剪定対象は現 City のフィード施設に属する購読に限る — 全 DB を
@@ -744,18 +1032,28 @@ class FeedManager:
             # (city_feed_fixture_ids の docstring 参照)。列挙から外れた孤児
             # 購読 (TYPE 書き換え等) の記事は剪定もされず残るが、_fetch_all
             # と同じく受容する (削除は UI からの明示操作に委ねる)。
-            sub_ids = [
-                row[0]
-                for row in db.query(FeedSubscription.SUBSCRIPTION_ID)
+            sub_rows = (
+                db.query(
+                    FeedSubscription.SUBSCRIPTION_ID, FeedSubscription.FIXTURE_ID,
+                )
                 .filter(
                     FeedSubscription.FIXTURE_ID.in_(
                         city_feed_fixture_ids(db, self.manager.city_id)
                     ),
                 )
                 .all()
-            ]
+            )
+            settings = self._load_stand_settings(db, (r[1] for r in sub_rows))
             deleted_total = 0
-            for sub_id in sub_ids:
+            for sub_id, fixture_id in sub_rows:
+                # 上の却下理由が成立するのは KEEP >= 配送 N 件のときだけ。
+                # KEEP < N の端な設定では「配送されるはずの最新 N 件」の一部が
+                # 剪定されうるため、実効 keep を N まで引き上げて意味論を守る。
+                # N はスタンドごとの設定値で決まる (resolve_stand_settings —
+                # スタンドの設定値 > env > 既定) ので、購読ごとに所属
+                # スタンドの N で引き上げる (N <= 0 = 配送無効時は max() が
+                # KEEP をそのまま返す)。
+                keep = max(base_keep, settings[fixture_id].max_items_per_push)
                 # 配送と同一順位で「残す集合」を選ぶ (配送がこれから選び
                 # うる行は必ず生き残る)。published 順は id 順と一致しない
                 # (newest-first 初回取り込み) ため、境界 id 方式は使えない
@@ -825,18 +1123,13 @@ class FeedManager:
         ペルソナごとの既読カーソルより新しい記事のうち**最も新しい N 件**を
         知覚バッファ (kind="feed") に積み、カーソルは候補全体の末尾へ前進させる
         (古い候補は正直にスキップ — タイムラインは流れるもの、intent §13)。
+        N と記事 1 件の要約・見出しの上限は購読の所属スタンドの実効設定
+        (resolve_stand_settings) で決まる。N=0 (以下) のスタンドの購読は
+        配送対象から外れる (知覚投入もカーソル前進も一切しない — 取得・保存・
+        STATE_JSON 更新は取得サイクルが従来どおり行う)。
 
         Returns: 投入した知覚の総数。
         """
-        max_items = self._read_max_items_env()
-        if max_items <= 0:
-            # N=0 (以下) は配送無効: 知覚投入もカーソル前進も一切しない。
-            # 取得・保存・STATE_JSON 更新は呼び出し元の取得サイクルが従来どおり
-            # 行う (_read_max_items_env の docstring 参照)。
-            LOGGER.debug(
-                "[feed] delivery disabled (SAIVERSE_FEED_MAX_ITEMS_PER_PUSH<=0)",
-            )
-            return 0
         max_pending = self._read_max_pending_env()
 
         # 購読 → Building の対応を先に取り切る (session を長持ちさせない)
@@ -854,14 +1147,15 @@ class FeedManager:
                 )
                 .all()
             )
-            subs_by_building: Dict[str, List[Dict[str, str]]] = {}
+            settings = self._load_stand_settings(
+                db, (fixture.FIXTURE_ID for _sub, fixture in rows),
+            )
+            subs_by_building: Dict[str, List[Dict[str, Any]]] = {}
             for sub, fixture in rows:
-                subs_by_building.setdefault(fixture.BUILDING_ID, []).append(
-                    {
-                        "subscription_id": sub.SUBSCRIPTION_ID,
-                        "title": sub.TITLE or "",
-                    }
-                )
+                entry = self._delivery_entry(sub, settings[fixture.FIXTURE_ID])
+                if entry is None:
+                    continue
+                subs_by_building.setdefault(fixture.BUILDING_ID, []).append(entry)
         finally:
             db.close()
 
@@ -882,10 +1176,28 @@ class FeedManager:
                     persona_id=occupant_id,
                     building_id=building_id,
                     subs=subs,
-                    max_items=max_items,
                     max_pending=max_pending,
                 )
         return delivered_total
+
+    @staticmethod
+    def _delivery_entry(
+        sub: FeedSubscription, settings: FeedStandSettings,
+    ) -> Optional[Dict[str, Any]]:
+        """配送本体へ渡す購読 1 本ぶんの素の値 (session を閉じた後も使える)。
+
+        所属スタンドの配送件数が 0 以下 (このスタンドからは配送しない) なら
+        None — 配送対象から外す (カーソルも動かさない)。
+        """
+        if settings.max_items_per_push <= 0:
+            return None
+        return {
+            "subscription_id": sub.SUBSCRIPTION_ID,
+            "title": sub.TITLE or "",
+            "max_items": settings.max_items_per_push,
+            "summary_max_chars": settings.summary_max_chars,
+            "title_max_chars": settings.title_max_chars,
+        }
 
     def _delivery_lock_for(self, persona_id: str) -> threading.Lock:
         """このペルソナへの配送を直列化するロック (無ければ作る)。"""
@@ -902,11 +1214,13 @@ class FeedManager:
         persona: Any,
         persona_id: str,
         building_id: str,
-        subs: List[Dict[str, str]],
-        max_items: int,
+        subs: List[Dict[str, Any]],
         max_pending: int,
     ) -> int:
         """1 ペルソナへの購読リスト配送 (ガード + 予算 + 購読ループ)。
+
+        subs の各要素は _delivery_entry が作る辞書 (購読 ID・タイトルと、
+        所属スタンドの実効設定から来る 1 回の件数 N・要約/見出しの上限)。
 
         定期サイクル (deliver_new_items) と入室配送 (deliver_unread_on_entry) が
         共有する配送本体。既読カーソルが唯一の台帳なので、両者が重なっても
@@ -923,7 +1237,6 @@ class FeedManager:
                 persona_id=persona_id,
                 building_id=building_id,
                 subs=subs,
-                max_items=max_items,
                 max_pending=max_pending,
             )
 
@@ -933,8 +1246,7 @@ class FeedManager:
         persona: Any,
         persona_id: str,
         building_id: str,
-        subs: List[Dict[str, str]],
-        max_items: int,
+        subs: List[Dict[str, Any]],
         max_pending: int,
     ) -> int:
         """_deliver_subs_to_persona の本体 (配送ロック保持中に呼ばれる)。"""
@@ -987,7 +1299,9 @@ class FeedManager:
                     adapter=adapter,
                     subscription_id=sub["subscription_id"],
                     subscription_title=sub["title"],
-                    max_items=min(max_items, remaining),
+                    max_items=min(sub["max_items"], remaining),
+                    summary_max_chars=sub["summary_max_chars"],
+                    title_max_chars=sub["title_max_chars"],
                 )
             except Exception:
                 # 購読単位の失敗隔離 (_fetch_all の N2 と同じ形):
@@ -1018,9 +1332,6 @@ class FeedManager:
         (入室処理を止めない)。
         """
         try:
-            max_items = self._read_max_items_env()
-            if max_items <= 0:
-                return 0
             persona_id = getattr(persona, "persona_id", None)
             if not persona_id or not building_id:
                 return 0
@@ -1041,9 +1352,18 @@ class FeedManager:
                     )
                     .all()
                 )
+                # 件数・要約/見出しの上限は定期サイクルと同じくスタンドの
+                # 実効設定から (_delivery_entry — 件数 0 のスタンドは外れる)
+                settings = self._load_stand_settings(
+                    db, (s.FIXTURE_ID for s in rows),
+                )
                 subs = [
-                    {"subscription_id": s.SUBSCRIPTION_ID, "title": s.TITLE or ""}
-                    for s in rows
+                    entry
+                    for entry in (
+                        self._delivery_entry(s, settings[s.FIXTURE_ID])
+                        for s in rows
+                    )
+                    if entry is not None
                 ]
             finally:
                 db.close()
@@ -1054,7 +1374,6 @@ class FeedManager:
                 persona_id=persona_id,
                 building_id=building_id,
                 subs=subs,
-                max_items=max_items,
                 max_pending=self._read_max_pending_env(),
             )
         except Exception:
@@ -1074,8 +1393,13 @@ class FeedManager:
         subscription_id: str,
         subscription_title: str,
         max_items: int,
+        summary_max_chars: int = DEFAULT_SUMMARY_MAX_CHARS,
+        title_max_chars: int = DEFAULT_TITLE_MAX_CHARS,
     ) -> int:
         """購読 1 本 × ペルソナ 1 人の配送。投入した知覚の数を返す。
+
+        summary_max_chars / title_max_chars は所属スタンドの実効設定
+        (_format_item_content が記事 1 件の本文を組むときの上限)。
 
         退室者への誤配送の緩和: 現在地 (current_building_id) の再確認は
         カーソル commit の直前で行い、不一致なら commit も知覚投入もせず
@@ -1230,7 +1554,11 @@ class FeedManager:
                     continue
                 adapter.push_perception(
                     kind="feed",
-                    content=self._format_item_content(subscription_title, item),
+                    content=self._format_item_content(
+                        subscription_title, item,
+                        summary_max_chars=summary_max_chars,
+                        title_max_chars=title_max_chars,
+                    ),
                     metadata=json.dumps(
                         {
                             FEED_DEDUPE_META_KEY: dedupe_value,
@@ -1264,15 +1592,28 @@ class FeedManager:
         return pushed
 
     @staticmethod
-    def _format_item_content(subscription_title: str, item: Dict[str, Any]) -> str:
+    def _format_item_content(
+        subscription_title: str,
+        item: Dict[str, Any],
+        *,
+        summary_max_chars: int = DEFAULT_SUMMARY_MAX_CHARS,
+        title_max_chars: int = DEFAULT_TITLE_MAX_CHARS,
+    ) -> str:
         """配送する知覚の本文。実在記事の転載のみで、生成・言い換えはしない
         (intent 不変条件 1)。冒頭の一行で「外部サイトの転載」であることを
-        枠づけする (内容の出所をペルソナに明示する — 生成はしない)。"""
+        枠づけする (内容の出所をペルソナに明示する — 生成はしない)。
+
+        見出しと要約はスタンドの実効設定の上限で切り詰め、切ったときは
+        末尾を「…」にする (_clip_text — 切り詰めたことを読み手に隠さない)。
+        要約の上限 0 は要約を載せない。入口は概要まで、深掘りはリンク先
+        (intent §4-3)。
+        """
         title = subscription_title or "フィード"
-        summary = (item["summary"] or "")[:_SUMMARY_MAX_CHARS]
+        summary = _clip_text(item["summary"] or "", summary_max_chars)
+        headline = _clip_text(item["title"] or "", title_max_chars)
         lines = [
             "(外部サイトの記事の転載)",
-            f"『{title}』の新着記事: {item['title']}",
+            f"『{title}』の新着記事: {headline}",
         ]
         if summary:
             lines.append(summary)

@@ -1651,7 +1651,10 @@ def migrate_deadline_tasks_to_task_book(db_path: str) -> None:
 
 def _ensure_feed_tables(engine) -> None:
     """フィード取り込み 3 テーブル (feed_subscription / feed_item / feed_read_cursor)
-    を軽量パスで現行スキーマへ収束させる。
+    と、スタンドごとの配信設定 feed_fixture_config (2026-09-29) を軽量パスで
+    現行スキーマへ収束させる。重複修復・再構築・一意 index の補修は従来どおり
+    3 テーブルだけが対象 (feed_fixture_config は FIXTURE_ID が主キーで重複が
+    起こりえない)。
 
     docs/intent/rss_feed_intake.md。新規テーブルは needs_migration →
     try_additive_migration の汎用パス (missing_tables → CREATE TABLE) でも作られる
@@ -1686,7 +1689,12 @@ def _ensure_feed_tables(engine) -> None:
     get-or-create) が効かず、重複購読を黙って作る。一時ロック等の一過性の
     失敗も、握り潰すのではなく migration の再実行で解決するのが正しい。
     """
-    from database.models import FeedSubscription, FeedItem, FeedReadCursor
+    from database.models import (
+        FeedFixtureConfig,
+        FeedItem,
+        FeedReadCursor,
+        FeedSubscription,
+    )
     try:
         with engine.begin() as conn:
             # pysqlite (既定の legacy isolation) は BEGIN の発行を最初の DML
@@ -1698,11 +1706,15 @@ def _ensure_feed_tables(engine) -> None:
             if raw is not None and not getattr(raw, "in_transaction", False):
                 conn.exec_driver_sql("BEGIN")
             # FK (feed_item / feed_read_cursor → feed_subscription) があるため
-            # 購読を先に作る
+            # 購読を先に作る。feed_fixture_config (スタンドごとの配信設定、
+            # 2026-09-29) は全欄 nullable の新表で、ここでは CREATE だけが
+            # 起きる。feed_subscription.LAST_ATTEMPT_AT (取得間隔のゲートの
+            # 基準) も nullable 列なので、列補修の ALTER で足りる。
             for table in (
                 FeedSubscription.__table__,
                 FeedItem.__table__,
                 FeedReadCursor.__table__,
+                FeedFixtureConfig.__table__,
             ):
                 _sync_feed_table_schema(conn, table)
             # 列補修の直後・重複修復より前に、既存行の NULL を既定値で埋める
