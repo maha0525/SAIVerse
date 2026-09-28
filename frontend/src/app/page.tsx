@@ -591,6 +591,10 @@ export default function Home() {
     const [currentBuildingName, setCurrentBuildingName] = useState<string>('SAIVerse');
     const [currentBuildingId, setCurrentBuildingId] = useState<string | null>(null);
     const currentBuildingIdRef = useRef<string | null>(null);
+    // 表示中の建物が削除され、引っ越し先が見つからなかった状態。
+    // 'empty' = 世界に建物がひとつも無い / 'error' = 一覧取得か移動に失敗。
+    // 建物を再び表示できたら null に戻す。
+    const [lostBuildingNotice, setLostBuildingNotice] = useState<'empty' | 'error' | null>(null);
     // フォールバックの注記の帳簿 (持ち主のペルソナ ID の集合)。注記のイベントが
     // 届いたらここに付け、**そのペルソナの確定の発言 (say) が届いたときにだけ**貼る。
     // 生成中の吹き出しには貼らない — 貼り先の寿命 (Beat の切れ目で捨てられる・
@@ -966,6 +970,7 @@ export default function Home() {
                     updateServerBuildingId(serverBid);
                     setCurrentBuildingId(serverBid);
                     currentBuildingIdRef.current = serverBid;
+                    setLostBuildingNotice(null);
                     fetchBuildingInfo(serverBid);
                     setMoveTrigger(prev => prev + 1);
                 }
@@ -1131,6 +1136,7 @@ export default function Home() {
         }
         setCurrentBuildingId(buildingId);
         currentBuildingIdRef.current = buildingId;
+        setLostBuildingNotice(null);
         // 建物を選んだ = その建物のログを見たい。セッションログ閲覧は解除
         updateSessionLogPeek(false);
         setMessages([]);
@@ -1151,6 +1157,7 @@ export default function Home() {
         if (!buildingId) return;
         setCurrentBuildingId(buildingId);
         currentBuildingIdRef.current = buildingId;
+        setLostBuildingNotice(null);
         // 建物を選んだ = その建物のログを見たい。セッションログ閲覧は解除
         updateSessionLogPeek(false);
         setMessages([]);
@@ -1192,6 +1199,7 @@ export default function Home() {
                 if (data?.current_building_id) {
                     setCurrentBuildingId(data.current_building_id);
                     currentBuildingIdRef.current = data.current_building_id;
+                    setLostBuildingNotice(null);
                     updateServerBuildingId(data.current_building_id);
                 }
                 if (data?.display_name) userDisplayNameRef.current = data.display_name;
@@ -1375,13 +1383,37 @@ export default function Home() {
             if (!deletedId) return;
 
             if (currentBuildingIdRef.current === deletedId) {
+                // 引っ越し先が見つからなかったとき、削除済みの建物を表示し続けない
+                // (履歴取得も発言先も存在しない ID を使い続けて詰む)。表示先を
+                // 手放して案内を出し、ユーザーに建物を選び直してもらう。
+                // サーバー上の現在地は削除ガードにより有効なままなので
+                // updateServerBuildingId は触らない。
+                const enterLostBuilding = (kind: 'empty' | 'error') => {
+                    // 待っている間にユーザーが別の建物を選んでいたら、その表示を奪わない
+                    if (currentBuildingIdRef.current !== deletedId) return;
+                    setCurrentBuildingId(null);
+                    currentBuildingIdRef.current = null;
+                    setCurrentBuildingName('SAIVerse');
+                    setMessages([]);
+                    // 新着ポーリングは building_id 無しだとサーバーの現在地へ
+                    // 落ちるので、削除済みの建物の最新 ID を控えから外して止める
+                    latestMessageIdRef.current = undefined;
+                    setIsHistoryLoaded(true);
+                    setLostBuildingNotice(kind);
+                    setMoveTrigger(prev => prev + 1);
+                };
                 // Current building was deleted — move to the first available building
                 try {
                     const res = await apiFetch('/api/user/buildings');
-                    if (res.ok) {
+                    if (!res.ok) {
+                        console.error('Failed to fetch buildings after deletion', res.status);
+                        enterLostBuilding('error');
+                    } else {
                         const data = await res.json();
                         const buildings = data.buildings || [];
-                        if (buildings.length > 0) {
+                        if (buildings.length === 0) {
+                            enterLostBuilding('empty');
+                        } else {
                             const target = buildings[0];
                             const moveRes = await apiFetch('/api/user/move', {
                                 method: 'POST',
@@ -1420,11 +1452,17 @@ export default function Home() {
                                 fetchHistory(undefined, arrivedId);
                                 fetchBuildingInfo(arrivedId);
                                 setMoveTrigger(prev => prev + 1);
+                                setLostBuildingNotice(null);
+                            } else {
+                                // 移動に失敗し、サーバーからも真の現在地が返らなかった
+                                console.error('Failed to move after building deletion', moveRes.status);
+                                enterLostBuilding('error');
                             }
                         }
                     }
                 } catch (err) {
                     console.error('Failed to handle building deletion', err);
+                    enterLostBuilding('error');
                 }
             } else {
                 // Another building was deleted — just refresh building info
@@ -1530,6 +1568,7 @@ export default function Home() {
                     console.log(`[LocationSync] Server moved user: ${oldServerBid} -> ${serverBid}`);
                     setCurrentBuildingId(serverBid);
                     currentBuildingIdRef.current = serverBid;
+                    setLostBuildingNotice(null);
                     fetchBuildingInfo(serverBid);
                     setMoveTrigger(prev => prev + 1);
                 }
@@ -1566,9 +1605,37 @@ export default function Home() {
                 if (res.ok) {
                     if (!backendConnected) {
                         setBackendConnected(true);
-                        // Refresh data after reconnection
-                        fetchHistory();
-                        fetchBuildingInfo();
+                        if (!currentBuildingIdRef.current) {
+                            // 表示先が無いまま再接続した (表示中の建物が削除された後の
+                            // 案内表示中や、起動時に一度も繋がらなかったとき)。引数なしの
+                            // fetchHistory は building_id 無しでサーバーの現在地の履歴へ
+                            // 落ちるので、案内の画面に別の建物のログが流れ込む。先に
+                            // サーバーの現在地を採用してから読み込む。
+                            let serverBid: string | null = null;
+                            try {
+                                const data = await res.json();
+                                serverBid = data?.current_building_id ?? null;
+                            } catch (err) {
+                                // 黙って飲むと「再接続したのに何も読み込まれない」の
+                                // 切り分けができなくなる
+                                console.error('Failed to parse status after reconnection', err);
+                            }
+                            if (serverBid) {
+                                setCurrentBuildingId(serverBid);
+                                currentBuildingIdRef.current = serverBid;
+                                updateServerBuildingId(serverBid);
+                                setLostBuildingNotice(null);
+                                setMessages([]);
+                                fetchHistory(undefined, serverBid);
+                                fetchBuildingInfo(serverBid);
+                                setMoveTrigger(prev => prev + 1);
+                            }
+                            // サーバーにも現在地が無いなら読むものが無い — 案内のまま待つ
+                        } else {
+                            // Refresh data after reconnection
+                            fetchHistory();
+                            fetchBuildingInfo();
+                        }
 
                         // If we were updating, show completion toast
                         if (isUpdating) {
@@ -3715,6 +3782,16 @@ export default function Home() {
                     onScroll={handleScroll}
                 >
                     {isLoadingMore && <div style={{ textAlign: 'center', padding: '10px', color: '#666' }}>{uiText("app.page.label016")}</div>}
+                    {lostBuildingNotice !== null && (
+                        <div className={styles.lostBuildingNotice} role="status">
+                            <AlertTriangle size={20} className={styles.lostBuildingNoticeIcon} />
+                            {lostBuildingNotice === 'empty' ? (
+                                <span data-i18n="app.page.text095">{uiText("app.page.text095")}</span>
+                            ) : (
+                                <span data-i18n="app.page.text096">{uiText("app.page.text096")}</span>
+                            )}
+                        </div>
+                    )}
                     {messages.map((msg, idx) => {
                         // System notices (world events / warnings / info) are NOT AI utterances:
                         // render them author-less and compact, distinct from user/assistant bubbles.
@@ -4213,17 +4290,20 @@ export default function Home() {
                             multiple
                             accept="image/*,audio/*,video/*,.txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.xml,.log,.sh,.bat,.sql,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.swift,.kt,.scala,.r,.lua,.pl,.pdf"
                         />
-                        <textarea data-i18n="app.page.text083 app.page.text084"
+                        <textarea data-i18n="app.page.text083 app.page.text084 app.page.text097"
                             ref={textareaRef}
                             value={inputValue}
                             onChange={(e) => setInputValue(e.target.value)}
                             onKeyDown={handleKeyDown}
                             // ゲーム外でのセッションログ閲覧は read-only (発言は通常
-                            // チャットか、復帰してゲーム内で行う)
-                            disabled={sessionLogReadOnly}
-                            placeholder={sessionLogReadOnly
-                                ? uiText("app.page.text083")
-                                : uiText("app.page.text084")}
+                            // チャットか、復帰してゲーム内で行う)。表示中の建物が
+                            // 削除されて表示先を失ったときも、選び直すまで発言先が無い
+                            disabled={sessionLogReadOnly || lostBuildingNotice !== null}
+                            placeholder={lostBuildingNotice !== null
+                                ? uiText("app.page.text097")
+                                : sessionLogReadOnly
+                                    ? uiText("app.page.text083")
+                                    : uiText("app.page.text084")}
                             rows={1}
                         />
                         {loadingStatus ? (
@@ -4238,7 +4318,7 @@ export default function Home() {
                             <button
                                 className={styles.sendBtn}
                                 onClick={handleSendMessage}
-                                disabled={(!inputValue.trim() && attachments.length === 0) || sessionLogReadOnly}
+                                disabled={(!inputValue.trim() && attachments.length === 0) || sessionLogReadOnly || lostBuildingNotice !== null}
                             >
                                 <Send size={20} />
                             </button>
