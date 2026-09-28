@@ -9,6 +9,9 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Upload, ChevronDown, ChevronUp, Sparkles } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
 import { formatThreadDateRange } from './formatters';
+import AddonBubbleButtons from '@/components/AddonBubbleButtons';
+import { useAddonBubbleButtons } from '@/hooks/useAddonBubbleButtons';
+import { useAddonEvents } from '@/hooks/useAddonEvents';
 
 interface ThreadSummary {
     thread_id: string;
@@ -97,6 +100,15 @@ function renderContentWithClips(content: string, clips: ClipItem[] | undefined):
     return parts;
 }
 
+/** アドオンの評価ボタンを出す行か。記憶からの学習データ書き出しが使うのは
+ *  「会話」(tags に conversation) の発言だけなので、それ以外 (内部思考や、
+ *  タグ無しで手で足した行) にはボタンを出さない — 押せても書き出しと
+ *  突き合わせられない評価になる。アドオン側も保存前に同じ規則で弾く。 */
+function isRateableAssistantRow(msg: MessageItem): boolean {
+    return msg.role.toLowerCase() === 'assistant'
+        && (msg.metadata?.tags ?? []).includes('conversation');
+}
+
 export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     useLocale();
     const [threads, setThreads] = useState<ThreadSummary[]>([]);
@@ -160,6 +172,29 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     // ペルソナが気に留めた言葉 = 点クリップ (message_id → clips)。表示中ページの分だけ保持
     const [clipsByMessage, setClipsByMessage] = useState<Record<string, ClipItem[]>>({});
 
+    // アドオンの吹き出しボタン (記憶の画面に出すもの。例: 評価の Good / Bad)
+    const bubbleButtons = useAddonBubbleButtons('memory');
+    // アドオンのメタデータ (message_id → addon_name → key → value)
+    const [addonMeta, setAddonMeta] = useState<Record<string, Record<string, Record<string, unknown>>>>({});
+
+    // アドオンSSEイベント購読: ボタン押下後の値の変化をメタデータへ差分で上書きする。
+    // null 値も「上書き」として届く (トグルの解除はこれで画面に伝わる)。
+    // client_actions のディスパッチは建物のチャット画面 (page.tsx) だけの責務なのでここではしない。
+    useAddonEvents(useCallback((event) => {
+        if (event.message_id && event.data) {
+            setAddonMeta((prev) => ({
+                ...prev,
+                [event.message_id!]: {
+                    ...(prev[event.message_id!] ?? {}),
+                    [event.addon]: {
+                        ...(prev[event.message_id!]?.[event.addon] ?? {}),
+                        ...event.data,
+                    },
+                },
+            }));
+        }
+    }, []));
+
     // Add message state
     const [showAddForm, setShowAddForm] = useState(false);
     const [newMsgRole, setNewMsgRole] = useState<string>("user");
@@ -202,6 +237,41 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         })();
         return () => { cancelled = true; };
     }, [messages, personaId]);
+
+    // 表示中の assistant 発言のアドオンメタデータ (評価の現在値など) を取得する。
+    // SSE は変化の瞬間に 1 回だけ届くので、開き直したときの状態はここで読み直す。
+    // 記憶の画面にボタンを出すアドオンが無ければ取りに行かない。個別失敗は無視。
+    useEffect(() => {
+        if (bubbleButtons.length === 0) return;
+        const ids = messages
+            .filter(m => m.id && isRateableAssistantRow(m))
+            .map(m => m.id);
+        if (ids.length === 0) return;
+        let cancelled = false;
+        void Promise.all(
+            ids.map(async (mid) => {
+                try {
+                    const r = await apiFetch(
+                        `/api/addon/messages/${encodeURIComponent(mid)}/metadata`,
+                    );
+                    if (!r.ok) return;
+                    const body = await r.json() as {
+                        metadata?: Record<string, Record<string, unknown>>;
+                    };
+                    const meta = body.metadata;
+                    if (!cancelled && meta && Object.keys(meta).length > 0) {
+                        setAddonMeta(prev => ({
+                            ...prev,
+                            [mid]: { ...(prev[mid] ?? {}), ...meta },
+                        }));
+                    }
+                } catch {
+                    // 個別失敗は無視 (他メッセージは継続)
+                }
+            }),
+        );
+        return () => { cancelled = true; };
+    }, [messages, bubbleButtons]);
 
     // Load messages when thread or page changes
     useEffect(() => {
@@ -876,6 +946,17 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                             <><ChevronDown size={14} />{uiText("components.memory.MemoryBrowser.text049")}</>
                                         )}
                                     </button>
+                                )}
+                                {bubbleButtons.length > 0 && isRateableAssistantRow(msg) && editingMsgId !== msg.id && (
+                                    <div className={styles.addonButtons}>
+                                        <AddonBubbleButtons
+                                            messageId={msg.id}
+                                            messageText={msg.content}
+                                            personaId={personaId}
+                                            addonMetadata={addonMeta[msg.id] ?? {}}
+                                            buttons={bubbleButtons}
+                                        />
+                                    </div>
                                 )}
                             </div>
                         ))

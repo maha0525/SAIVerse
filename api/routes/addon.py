@@ -73,6 +73,9 @@ class AddonUiBubbleButton(BaseModel):
     # トグル型: metadata_key の現在値がこの値と一致するとき、ボタンを
     # 選択中の見た目で表示する (例: 評価ボタンの "good" / "bad")。
     active_value: Optional[str] = None
+    # どの画面に出すか: "chat" (建物のチャット画面) / "memory" (記憶のチャットログ画面)。
+    # 未指定 (None) は ["chat"] 扱い — 既存アドオンのボタンが記憶画面へ無差別に出ないように。
+    show_in: Optional[List[str]] = None
 
 
 class AddonUiInputButton(BaseModel):

@@ -93,6 +93,9 @@ export interface BubbleButtonDef {
     /** トグル型: metadata_key の現在値がこの値と一致するとき選択中の見た目になる。
      *  バックエンドは未設定の欄を null で配るので、null = 「トグル型ではない」。 */
     active_value?: string | null;
+    /** 出す画面。"chat" (建物のチャット画面) / "memory" (記憶のチャットログ画面)。
+     *  未指定・null は ["chat"] 扱い (useAddonBubbleButtons が絞る)。 */
+    show_in?: string[] | null;
     addon_name: string;    // 所属アドオン名
 }
 

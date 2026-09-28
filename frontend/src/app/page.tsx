@@ -42,7 +42,8 @@ import { useAddonEvents } from '@/hooks/useAddonEvents';
 import { useActiveClientTab } from '@/hooks/useActiveClientTab';
 import { useClientActions } from '@/hooks/useClientActions';
 import { ActiveClientIndicator } from '@/components/ActiveClientIndicator';
-import AddonBubbleButtons, { BubbleButtonDef } from '@/components/AddonBubbleButtons';
+import AddonBubbleButtons from '@/components/AddonBubbleButtons';
+import { useAddonBubbleButtons } from '@/hooks/useAddonBubbleButtons';
 import SystemAlertBanner from '@/components/SystemAlertBanner';
 
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
@@ -391,8 +392,8 @@ export default function Home() {
     // まだ null を見て通り抜け、/withdraw が 2 回飛ぶ。
     const [withdrawingId, setWithdrawingId] = useState<string | null>(null);
     const withdrawingRef = useRef<string | null>(null);
-    // アドオン: 有効なバブルボタン定義
-    const [addonBubbleButtons, setAddonBubbleButtons] = useState<BubbleButtonDef[]>([]);
+    // アドオン: 有効なバブルボタン定義 (建物のチャット画面に出すもの)
+    const addonBubbleButtons = useAddonBubbleButtons('chat');
 
     // ItemModal for saiverse:// item links
     const [linkItemModalItem, setLinkItemModalItem] = useState<{ id: string; name: string; description?: string; type: string } | null>(null);
@@ -469,38 +470,6 @@ export default function Home() {
         } catch (err) {
             console.error('Failed to copy:', err);
         }
-    }, []);
-
-    // アドオン一覧を取得してバブルボタン定義を構築する
-    useEffect(() => {
-        apiFetch('/api/addon/')
-            .then((r) => r.ok ? r.json() : [])
-            .then((addons: Array<{
-                addon_name: string;
-                is_enabled: boolean;
-                ui_extensions?: {
-                    bubble_buttons?: Array<{
-                        id: string;
-                        icon: string;
-                        label: string;
-                        action?: string;
-                        tool?: string;
-                        metadata_key?: string;
-                        show_when?: string;
-                        active_value?: string | null;
-                    }>;
-                };
-            }>) => {
-                const buttons: BubbleButtonDef[] = [];
-                for (const addon of addons) {
-                    if (!addon.is_enabled) continue;
-                    for (const btn of addon.ui_extensions?.bubble_buttons ?? []) {
-                        buttons.push({ ...btn, addon_name: addon.addon_name });
-                    }
-                }
-                setAddonBubbleButtons(buttons);
-            })
-            .catch(() => {/* addon APIが無い環境では無視 */});
     }, []);
 
     useEffect(() => {

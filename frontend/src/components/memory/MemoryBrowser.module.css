@@ -514,6 +514,13 @@
     color: #74c0fc;
 }
 
+/* アドオンの吹き出しボタン (評価など) の並び。ボタン自体の見た目は AddonBubbleButtons.module.css が持つ */
+.addonButtons {
+    display: flex;
+    gap: 4px;
+    margin-top: 6px;
+}
+
 .editInterface {
     display: flex;
     flex-direction: column;

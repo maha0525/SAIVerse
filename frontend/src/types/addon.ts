@@ -25,6 +25,8 @@ export interface AddonBubbleButton {
     show_when?: string;
     /** トグル型: ``metadata_key`` の現在値がこの値と一致するとき選択中の見た目になる (未設定は null で配られる) */
     active_value?: string | null;
+    /** 出す画面。"chat" (建物のチャット画面) / "memory" (記憶のチャットログ画面)。未指定・null は ["chat"] 扱い */
+    show_in?: string[] | null;
 }
 
 export interface AddonInputButton {
