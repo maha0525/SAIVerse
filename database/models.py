@@ -132,11 +132,16 @@ class AI(Base):
     # (manager/admin.py)。
     CHRONICLE_CHAR_BUDGET = Column(Integer, nullable=True)
     SPELL_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona spell system toggle (基幹機能化に伴い v0.3.0.dev3 でデフォルト ON 化)
-    # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻)
-    # injected by sea/runtime.py:_build_realtime_context. OFF にすると、その動的
-    # コンテキストブロックをこのペルソナには一切送らない。夜になると時刻を気にして
-    # 会話が成立しなくなるモデル向けの脱出経路 (docs/issues/realtime_info_current_time_toggle.md)。
-    REALTIME_INFO_ENABLED = Column(Boolean, default=True, nullable=False)
+    # リアルタイム情報 (sea/runtime.py:_build_realtime_context) の項目別トグル
+    # (docs/intent/realtime_info.md)。2026-09-28 に全体トグル REALTIME_INFO_ENABLED を
+    # 廃止して 2 列に分けた — 項目別にすると「全項目 OFF なら送らない」が同じ意味を
+    # 持つので、セクション丸ごとの ON/OFF は置かない。
+    # 「現在時刻」の行を見せるか。夜になると時刻を気にして会話が成立しなくなる
+    # モデル向けの脱出経路 (旧列の値をマイグレーションで引き継ぐ)。
+    REALTIME_CURRENT_TIME_ENABLED = Column(Boolean, default=True, nullable=False)
+    # 「あなたの前回発言」の行を見せるか。既定 OFF — 不具合修正の副作用で
+    # 全ペルソナの見え方が変わらないよう、欲しい人が明示的に ON にする。
+    REALTIME_LAST_UTTERANCE_ENABLED = Column(Boolean, default=False, nullable=False)
     # ⚠️ legacy: anchor 状態は session_anchor テーブルへ行分離済み (beat_execution_context.md §3.1)。
     # この列は backfill_session_anchors (database/migrate.py) の変換元としてのみ残存 (変換後は常に NULL)。
     # 列 DROP は後続の掃除 wave (破壊的 migration になるため)。

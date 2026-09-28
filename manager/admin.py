@@ -1230,7 +1230,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "CHRONICLE_CHAR_BUDGET": ai.CHRONICLE_CHAR_BUDGET,
                 "LANGUAGE": ai.LANGUAGE,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
-                "REALTIME_INFO_ENABLED": ai.REALTIME_INFO_ENABLED,
+                "REALTIME_CURRENT_TIME_ENABLED": ai.REALTIME_CURRENT_TIME_ENABLED,
+                "REALTIME_LAST_UTTERANCE_ENABLED": ai.REALTIME_LAST_UTTERANCE_ENABLED,
                 "META_JUDGMENT_CONFIG": ai.META_JUDGMENT_CONFIG,
                 "USER_CONV_TIMEOUT_MINUTES": ai.USER_CONV_TIMEOUT_MINUTES,
             }
@@ -1310,7 +1311,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         core_memory_char_budget: Optional[int] = None,
         chronicle_char_budget: Optional[int] = None,
         spell_enabled: Optional[bool] = None,
-        realtime_info_enabled: Optional[bool] = None,
+        realtime_current_time_enabled: Optional[bool] = None,
+        realtime_last_utterance_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
         user_conv_timeout_minutes: Optional[int] = None,
         language: Optional[str] = None,
@@ -1486,9 +1488,11 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                         bool(ai.SPELL_ENABLED) != bool(spell_enabled)
                     )
                     ai.SPELL_ENABLED = spell_enabled
-                # Update realtime info injection toggle
-                if realtime_info_enabled is not None:
-                    ai.REALTIME_INFO_ENABLED = realtime_info_enabled
+                # Update realtime info per-item toggles (docs/intent/realtime_info.md)
+                if realtime_current_time_enabled is not None:
+                    ai.REALTIME_CURRENT_TIME_ENABLED = realtime_current_time_enabled
+                if realtime_last_utterance_enabled is not None:
+                    ai.REALTIME_LAST_UTTERANCE_ENABLED = realtime_last_utterance_enabled
                 # Update Meta-Judgment Pulse configuration (Phase 4-e)
                 if meta_judgment_config is not None:
                     if isinstance(meta_judgment_config, dict) and meta_judgment_config:

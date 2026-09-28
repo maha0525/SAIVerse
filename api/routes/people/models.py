@@ -167,7 +167,9 @@ class AIConfigResponse(BaseModel):
     # Chronicle 帯の読み込み文字数 (NULL → env → 既定 20,000)
     chronicle_char_budget: Optional[int] = None
     spell_enabled: bool = False
-    realtime_info_enabled: bool = True
+    # リアルタイム情報の項目別トグル (docs/intent/realtime_info.md)
+    realtime_current_time_enabled: bool = True
+    realtime_last_utterance_enabled: bool = False
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     home_city_id: int
@@ -203,7 +205,8 @@ class UpdateAIConfigRequest(BaseModel):
     #   positive int = override.
     chronicle_char_budget: Optional[int] = None
     spell_enabled: Optional[bool] = None
-    realtime_info_enabled: Optional[bool] = None
+    realtime_current_time_enabled: Optional[bool] = None
+    realtime_last_utterance_enabled: Optional[bool] = None
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     linked_user_id: Optional[int] = None  # Set linked user (None = no change, 0 = clear)
