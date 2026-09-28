@@ -674,8 +674,7 @@ def test_facility_move_into_locked_region_stops_at_entrance(manager):
             )
         ),
     )
-    # 表示名の解決は manager.buildings を引く (day_plan 後段の同名定義が
-    # building_map 版を上書きしているため — 本物の manager は両方を持つ)
+    # 表示名の解決は manager.buildings を引く (_building_display_name)
     manager.buildings = [
         SimpleNamespace(building_id=bid, name=name)
         for bid, name in (
@@ -697,6 +696,36 @@ def test_facility_move_into_locked_region_stops_at_entrance(manager):
     assert "「図書館」へ移動できませんでした" in content
     assert "鍵がかかっています" in content
     assert "現在地「学園: 入口」で行います" in content
+
+
+def test_building_display_name_resolution():
+    """ペルソナに見せる場所名の解決 (移動失敗の知覚・外出/自室コマの文面が共用)。
+
+    一本化前は同名定義が二つあり、後の定義が黙って勝っていた。ここでその
+    実効の意味 (manager.buildings を引く / 空 id は「どこか」/ 不明 id と
+    名前の空は id の文字列) を固定する。
+    """
+    manager = SimpleNamespace(buildings=[
+        SimpleNamespace(building_id="library", name="図書館"),
+        SimpleNamespace(building_id="nameless", name=""),
+    ])
+    resolve = day_plan._building_display_name
+    assert resolve(manager, "library") == "図書館"
+    assert resolve(manager, "nameless") == "nameless"
+    assert resolve(manager, "unknown_room") == "unknown_room"
+    assert resolve(manager, None) == "どこか"
+    assert resolve(manager, "") == "どこか"
+    assert resolve(SimpleNamespace(), "library") == "library"  # buildings 無し
+
+
+def test_building_display_name_reads_buildings_not_building_map():
+    """引く入れ物は manager.buildings。本物の manager では building_map と同じ
+    Building を共有するので食い違わないが、どちらの意味かをここで決めておく。"""
+    manager = SimpleNamespace(
+        buildings=[SimpleNamespace(building_id="library", name="図書館")],
+        building_map={"library": SimpleNamespace(building_id="library", name="別名")},
+    )
+    assert day_plan._building_display_name(manager, "library") == "図書館"
 
 
 # ---------------------------------------------------------------------------
