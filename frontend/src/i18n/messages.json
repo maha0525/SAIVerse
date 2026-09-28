@@ -7927,17 +7927,21 @@
     "ja": "リアルタイム情報",
     "en": "Real-time information"
   },
-  "components.SettingsModal.text086": {
-    "ja": "有効",
-    "en": "Enabled"
+  "components.SettingsModal.realtimeCurrentTimeLabel": {
+    "ja": "現在日時",
+    "en": "Current date and time"
   },
-  "components.SettingsModal.text087": {
-    "ja": "無効",
-    "en": "Disabled"
+  "components.SettingsModal.realtimeCurrentTimeDescription": {
+    "ja": "現在の日時をペルソナに知らせます。",
+    "en": "Tell the persona the current date and time."
   },
-  "components.SettingsModal.text088": {
-    "ja": "発言の直前に現在時刻・前回発言時刻・空間情報などの動的コンテキストを提供します。無効にすると、これらをこのペルソナには一切送りません（時刻を気にして会話が成立しなくなる場合などに）。",
-    "en": "Provide dynamic context such as the current time, previous reply time and spatial information immediately before a reply. Disable it to stop sending this information to this persona, for example if time awareness disrupts conversation."
+  "components.SettingsModal.realtimeLastUtteranceLabel": {
+    "ja": "前回発言日時",
+    "en": "Date and time of previous reply"
+  },
+  "components.SettingsModal.realtimeLastUtteranceDescription": {
+    "ja": "前回の発言からどれだけ時間が経ったか分かるよう、前回発言の日時を知らせます。",
+    "en": "Tell the persona when it last spoke, so it can tell how much time has passed since then."
   },
   "components.SettingsModal.text089": {
     "ja": "事前実行スペル",

@@ -282,7 +282,8 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `CORE_MEMORY_CHAR_BUDGET` | INTEGER | — |  |
 | `CHRONICLE_CHAR_BUDGET` | INTEGER | — |  |
 | `SPELL_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
-| `REALTIME_INFO_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
+| `REALTIME_CURRENT_TIME_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
+| `REALTIME_LAST_UTTERANCE_ENABLED` | BOOLEAN | NOT NULL, default=False |  |
 | `METABOLISM_ANCHORS` | TEXT | — |  |
 | `AUTONOMY_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `LAST_KNOWN_VERSION` | VARCHAR(64) | — |  |

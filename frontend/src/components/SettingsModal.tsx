@@ -53,7 +53,8 @@ interface AIConfig {
     memory_weave_context: boolean;
     memopedia_index_enabled: boolean;
     core_memory_char_budget: number | null;  // 記憶アーキv2 ゾーンA 容量目安 (NULL → 既定 2000)
-    realtime_info_enabled: boolean;
+    realtime_current_time_enabled: boolean;  // リアルタイム情報「現在日時」
+    realtime_last_utterance_enabled: boolean;  // リアルタイム情報「前回発言日時」
     avatar_path: string | null;
     appearance_image_path: string | null;  // Visual context appearance image
     linked_user_id: number | null;  // First linked user ID
@@ -132,7 +133,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [coreMemoryCharBudget, setCoreMemoryCharBudget] = useState<string>('');
     const [chronicleCharBudget, setChronicleCharBudget] = useState<string>('');
     const [spellEnabled, setSpellEnabled] = useState(false);
-    const [realtimeInfoEnabled, setRealtimeInfoEnabled] = useState(true);
+    const [realtimeCurrentTimeEnabled, setRealtimeCurrentTimeEnabled] = useState(true);
+    const [realtimeLastUtteranceEnabled, setRealtimeLastUtteranceEnabled] = useState(false);
     const [realtimeSpells, setRealtimeSpells] = useState<Array<{binding_id: number; spell_name: string; spell_args_json: string | null; label: string | null; enabled: boolean; priority: number}>>([]);
     const [spellCatalog, setSpellCatalog] = useState<Array<{name: string; description: string; parameters: {properties: Record<string, any>; required: string[]}}>>([]);
     const [newSpellName, setNewSpellName] = useState('');
@@ -276,7 +278,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                         : ''
                 );
                 setSpellEnabled(data.spell_enabled ?? false);
-                setRealtimeInfoEnabled(data.realtime_info_enabled ?? true);
+                setRealtimeCurrentTimeEnabled(data.realtime_current_time_enabled ?? true);
+                setRealtimeLastUtteranceEnabled(data.realtime_last_utterance_enabled ?? false);
                 // Load realtime spell bindings + catalog。反映は下の世代ガードの
                 // 後でまとめて行う (取得と反映を分ける)。
                 let spellData: typeof realtimeSpells | null = null;
@@ -415,7 +418,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                         return Number.isNaN(parsed) ? 0 : parsed;
                     })(),
                     spell_enabled: spellEnabled,
-                    realtime_info_enabled: realtimeInfoEnabled,
+                    realtime_current_time_enabled: realtimeCurrentTimeEnabled,
+                    realtime_last_utterance_enabled: realtimeLastUtteranceEnabled,
                     avatar_path: avatarPath || null,
                     appearance_image_path: appearanceImagePath || null,
                     linked_user_id: linkedUserId ? parseInt(linkedUserId) : 0,  // 0 = clear link
@@ -866,17 +870,26 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
                             <div className={styles.fieldGroup}>
                                 <label data-i18n="components.SettingsModal.text085" className={styles.label}>{uiText("components.SettingsModal.text085")}</label>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                                     <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
                                         <input
                                             type="checkbox"
-                                            checked={realtimeInfoEnabled}
-                                            onChange={(e) => setRealtimeInfoEnabled(e.target.checked)}
+                                            checked={realtimeCurrentTimeEnabled}
+                                            onChange={(e) => setRealtimeCurrentTimeEnabled(e.target.checked)}
                                         />
-                                        <span data-i18n="components.SettingsModal.text086 components.SettingsModal.text087">{realtimeInfoEnabled ? uiText("components.SettingsModal.text086") : uiText("components.SettingsModal.text087")}</span>
+                                        <span data-i18n="components.SettingsModal.realtimeCurrentTimeLabel">{uiText("components.SettingsModal.realtimeCurrentTimeLabel")}</span>
                                     </label>
+                                    <div data-i18n="components.SettingsModal.realtimeCurrentTimeDescription" className={styles.description}>{uiText("components.SettingsModal.realtimeCurrentTimeDescription")}</div>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={realtimeLastUtteranceEnabled}
+                                            onChange={(e) => setRealtimeLastUtteranceEnabled(e.target.checked)}
+                                        />
+                                        <span data-i18n="components.SettingsModal.realtimeLastUtteranceLabel">{uiText("components.SettingsModal.realtimeLastUtteranceLabel")}</span>
+                                    </label>
+                                    <div data-i18n="components.SettingsModal.realtimeLastUtteranceDescription" className={styles.description}>{uiText("components.SettingsModal.realtimeLastUtteranceDescription")}</div>
                                 </div>
-                                <div data-i18n="components.SettingsModal.text088" className={styles.description}>{uiText("components.SettingsModal.text088")}</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
