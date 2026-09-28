@@ -246,14 +246,14 @@ def inject_diff_notifications(
     (persona, model) ごとに独立 (beat_execution_context.md §3.1)。
 
     【outbox 経由に変更 (2026-07-17, 統合工事 §6-4 / SEA 監査 S5・S3)】
-    manager が execution_ledger を持つ環境では、ラベル群を実行台帳の outbox
+    ラベル群は実行台帳 (``manager.execution_ledger``) の outbox
     (target='perception.push') で配送する — 知覚バッファの flush 失敗で通知が
     全消失する穴 (S5) を配達保証で塞ぐ。B (last_notified) の前進は outbox 積みの
     durable 確定 (mark_applied) **後** に行う (S3: 配送前に B を進めると配送失敗時に
     差分が永久に失われる)。B は persona の全 (persona, model) 行を前進させる —
     知覚バッファ → SAIMemory は persona 共有の履歴ストリームで、push は全 Session
-    の窓に届くため。台帳が無い環境 (旧テスト等) は従来どおり直接 push +
-    flush_diffs 内での B 前進に degrade する。
+    の窓に届くため。台帳は SAIVerseManager が無条件に構築するので、台帳なしの
+    直接 push 経路は持たない (2026-09-28 監査で撤去)。
 
     【ペルソナ単位で並べる (2026-09-26)】「検出 → 積む → B 前進」は
     ペルソナの通知ロックの内側で一続きに行い、即時配送はロックを離してから
@@ -443,12 +443,7 @@ def _push_section_diffs(
     入ってくる。通知ロックを握ったまま配送に入ると「入室側の配送は通知ロックを
     待ち、こちらは配送ロックを待つ」でデッドロックする。
     """
-    ledger = getattr(manager, "execution_ledger", None)
-    if ledger is None:
-        return _inject_diff_notifications_direct(
-            persona, pipeline, ctx, building_id, only_sections=only_sections,
-        )
-
+    ledger = manager.execution_ledger
     try:
         with pipeline.notify_lock_for(ctx.persona_id):
             queued = _queue_section_diffs_locked(
@@ -577,100 +572,6 @@ def _queue_section_diffs_locked(
     )
 
     return True
-
-
-def _inject_diff_notifications_direct(
-    persona: Any,
-    pipeline: HeadPipeline,
-    ctx: LineHeadInput,
-    building_id: str,
-    *,
-    only_sections: set[str] | None = None,
-) -> bool:
-    """台帳が無い環境の degrade 経路 (配達保証なし)。
-
-    台帳経路と同じく「検出 (advance=False) → push → 成功後に B 前進」の順で行う。
-    旧実装は flush_diffs (advance=True) で先に B を進めてから SAIMemory readiness
-    と push を確認していたため、未 ready / push 失敗で通知を捨てた後も B だけが
-    進み、その差分は永久に再検出されなかった (Codex 2026-08-17 medium — C8 の
-    「配送確定後の前進」違反)。失敗時は B と dirty を据え置き、次回 flush の
-    再検出に委ねる (push 済みラベルの再通知はあり得る = at-least-once。台帳経路
-    の再配送と同じ倒し方)。
-
-    ``deliver=False`` のラベルは push の対象外 (基準の前進にだけ使う)。SAIMemory が
-    未 ready の回は、届ける文の有無にかかわらず何も進めない — push 先が無い以上、
-    次回の再検出でまとめてやり直す方が落としが無い。
-
-    台帳経路と同じく「検出 → push → B 前進」をペルソナの通知ロック
-    (:meth:`HeadPipeline.notify_lock_for`) の内側で一続きに行う (並行する検知が
-    同じ古い B から同じ変化を二度 push するのを防ぐ)。この経路には配送ロックが
-    無いので、push もロックの内側でよい。
-    """
-    with pipeline.notify_lock_for(ctx.persona_id):
-        return _inject_diff_notifications_direct_locked(
-            persona, pipeline, ctx, building_id, only_sections=only_sections,
-        )
-
-
-def _inject_diff_notifications_direct_locked(
-    persona: Any,
-    pipeline: HeadPipeline,
-    ctx: LineHeadInput,
-    building_id: str,
-    *,
-    only_sections: set[str] | None = None,
-) -> bool:
-    """:func:`_inject_diff_notifications_direct` の本体 (通知ロックを握って呼ぶ)。"""
-    labels, detected = pipeline.flush_diffs(
-        ctx, all_sections=True, advance=False, only=only_sections,
-    )
-    if not labels:
-        return False
-
-    sai_mem = getattr(persona, "sai_memory", None)
-    if sai_mem is None or not sai_mem.is_ready():
-        LOGGER.debug(
-            "head_pipeline: SAIMemory not ready, %d notification labels deferred "
-            "(baseline kept for re-detection)",
-            len(labels),
-        )
-        return False
-
-    deliverable = [label for label in labels if label.deliver]
-    push_failed = False
-    for label in deliverable:
-        try:
-            # 台帳経路と同じく、ラベルの型付け (label_kind 等) と添える画像を
-            # 知覚エントリへ写す (room_state_packages.md §11-3-2)。画像の無い
-            # ラベルは従来どおり media を渡さない。
-            push_kwargs: dict[str, Any] = {
-                "metadata": (
-                    json.dumps(label.metadata, ensure_ascii=False)
-                    if label.metadata else None
-                ),
-            }
-            label_media = _label_media_payload(label)
-            if label_media:
-                push_kwargs["media"] = label_media
-            sai_mem.push_perception("world_state", label.label, **push_kwargs)
-        except Exception:
-            push_failed = True
-            LOGGER.exception(
-                "head_pipeline: push_perception failed for world_state label",
-            )
-    if push_failed:
-        # 一部でも失敗したら B を進めない — 次回 flush で全ラベル再検出される。
-        return False
-
-    # 検知した Section はまとめて一回で進める (台帳経路と同じ)。
-    pipeline.advance_last_notified_many(ctx.persona_id, detected)
-
-    LOGGER.info(
-        "head_pipeline: pushed %d world_state perception(s) for persona=%s building=%s",
-        len(deliverable), ctx.persona_id, building_id,
-    )
-
-    return bool(deliverable)
 
 
 # 「不在から同席へ変わった一回だけ想起を試みる」ための、プロセス内の記憶。

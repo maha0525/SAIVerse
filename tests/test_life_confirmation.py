@@ -41,6 +41,11 @@ from saiverse import autonomy_wiring as wiring
 from saiverse import clock
 from saiverse import day_plan
 from saiverse.event_scheduler import EventScheduler
+from saiverse.execution_ledger import ExecutionLedger
+from saiverse.execution_ledger_wiring import (
+    TARGET_SAIMEMORY_APPEND,
+    _make_saimemory_append_handler,
+)
 from saiverse.meta_layer import MetaLayer
 
 PERSONA_ID = "alice"
@@ -73,13 +78,43 @@ def _reset_clock():
 
 
 class FakeAdapter:
-    """SAIMemory adapter の最小スタブ (append_persona_message の記録のみ)。"""
+    """SAIMemory adapter の最小スタブ (追記の記録のみ)。
+
+    ライフ境界の通知は台帳の outbox (saimemory.append) を経て
+    ``append_ledger_message`` で届く。``append_persona_message`` は本物の adapter
+    が持つ口で、境界側はこれの有無で「届け先があるか」を判定する。
+    """
 
     def __init__(self):
         self.messages: List[Dict[str, Any]] = []
 
     def append_persona_message(self, payload):
         self.messages.append(payload)
+
+    def append_ledger_message(
+        self, message, *, execution_id, outbox_id, building_id=None,
+        thread_suffix=None,
+    ):
+        self.messages.append(message)
+        return f"msg-{outbox_id}"
+
+
+class FinalizingPulseController:
+    """finalize 相当 (判断行の mark_applied) まで進めるメタレーンのフェイク。
+
+    台帳のある判断点は「finalize が applied を刻んだ」証跡で成功を判定する
+    (judgment_points.run_judgment_point)。args の judgment_context に同乗した
+    execution_id を finalize と同じように applied へ進める。
+    """
+
+    def __init__(self, ledger):
+        self._ledger = ledger
+
+    def submit_meta_judgment(self, **kwargs):
+        ctx = json.loads((kwargs.get("args") or {}).get("judgment_context") or "{}")
+        eid = ctx.get("execution_id")
+        if eid:
+            self._ledger.mark_applied(eid, result={"finalized": True})
 
 
 @pytest.fixture
@@ -105,13 +140,20 @@ def manager(session_factory):
         model=None,
     )
     personas = {PERSONA_ID: persona}
+    # 本番 manager は実行台帳を無条件に持つ。判断点の席とライフ境界の節目は
+    # 台帳の下で決着し、境界通知は本番と同じ saimemory.append の実ハンドラで届く。
+    ledger = ExecutionLedger(session_factory=session_factory)
     mgr = SimpleNamespace(
         SessionLocal=session_factory,
         personas=personas,
         event_scheduler=EventScheduler(),  # start() しない (同期検証)
         buildings=[],
-        pulse_controller=SimpleNamespace(submit_meta_judgment=lambda **kwargs: None),
+        pulse_controller=FinalizingPulseController(ledger),
         sea_runtime=None,  # 本番 manager は無条件に持つ (未構築なら None)
+        execution_ledger=ledger,
+    )
+    ledger.register_outbox_handler(
+        TARGET_SAIMEMORY_APPEND, _make_saimemory_append_handler(mgr),
     )
     # 判断点の直列化 Lock は本番 manager が無条件に持つ MetaLayer から取る。
     mgr.meta_layer = MetaLayer(mgr)

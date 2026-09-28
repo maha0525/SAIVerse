@@ -73,6 +73,7 @@ from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tu
 from sqlalchemy.orm import Session
 
 from saiverse import clock, slot_kind_catalog
+from saiverse.occupancy_manager import move_through_entrances
 
 LOGGER = logging.getLogger(__name__)
 
@@ -317,12 +318,6 @@ _SLOT_HANDLERS: Dict[str, SlotHandler] = {}
 
 #: 予算ゲート (v2 §4.5) の対象 kind (register_slot_handler の consumes_budget)
 _BUDGET_GATED_KINDS: set = set()
-
-#: manager に execution_ledger が無い環境 (旧テストスタブ等) への WARN を
-#: persona ごと一度だけに抑える (autonomy_wiring._LEDGER_MISSING_WARNED と同流儀)。
-#: いま使うのはライフ境界 (:func:`apply_life_boundary`) の縮退経路だけ —
-#: コマ発火 (:func:`_fire_slot`) の縮退経路は 2026-09-26 監査で撤去した。
-_LEDGER_MISSING_WARNED: set = set()
 
 
 def register_slot_handler(kind: str, fn: SlotHandler, *, consumes_budget: bool = False) -> None:
@@ -1938,8 +1933,16 @@ def _life_mark_mutator(
 ) -> Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """lives[index] に境界マーカー (``started`` / ``ended``) を立てる mutate 閉包。
 
-    :func:`mutate_plan_meta` の CAS 試行の内側で評価される。lives が無い日 /
-    index 外 / 既マークは None (no-op — 書かない)。
+    :func:`mutate_plan_meta` の CAS 試行の内側で評価される (第七陣 P1 の契約 —
+    外で読んだ meta から完成値を作らない)。lives が無い日 / index 外 / 既マークは
+    None (no-op — 書かない)。
+
+    マーカーの意味: ライフ境界の節目処理 (:func:`apply_life_boundary`) は
+    非冪等 (通知を含む) なので、判断 runtime の失敗 → schedule 側 backoff
+    再試行で :func:`saiverse.autonomy_wiring.fire_judgment_point` が再突入しても
+    節目が (persona, 営業日) につき一度で済むよう、済んだことをここに永続する
+    (Codex W3 第二陣 P1 / 第八陣)。「確認 → 適用 → マーク」の順で、マーク
+    先行だと適用されないまま封印される。
     """
     def _mark(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         raw = meta.get(META_LIVES)
@@ -1958,70 +1961,6 @@ def _life_mark_mutator(
     return _mark
 
 
-def mark_life_ended(
-    manager: Any,
-    persona_id: str,
-    plan_date: Any,
-    index: int = 0,
-) -> Optional[Dict[str, Any]]:
-    """ライフ終了の節目処理が済んだことを永続マークする (``lives[index].ended``)。
-
-    day_close の節目処理 (:func:`_handle_life_end` — keep-alive cancel + TTL
-    同期 + 「（活動終了）」通知) は非冪等で、呼ぶたびに副作用が再適用される。
-    判断 runtime の失敗 → schedule 側 backoff 再試行で
-    :func:`saiverse.autonomy_wiring.fire_judgment_point` が再突入すると境界
-    副作用が重複するため (2026-07-20 Codex W3 第二陣 P1)、day_open 側の
-    「当日はじめての確定のときだけ節目処理」と対称に、**ライフ終了の節目は
-    (persona, 営業日) につき一度**を本マーカーで保証する。呼び出し元
-    (:func:`saiverse.autonomy_wiring._apply_life_end_at_day_close`) は
-    「確認 → 適用 → マーク」の順で使う (マーク先行だと適用されないまま
-    封印される)。
-
-    書き込みは :func:`mutate_plan_meta` の CAS 試行の内側で行う (第七陣 P1 の
-    契約 — 外で読んだ meta から完成値を作らない)。lives が無い日 / index 外 /
-    既にマーク済みの場合は何も書かず None (no-op)。
-
-    Returns:
-        マークを書き込んだ場合はそのライフ dict、no-op は None。
-
-    Raises:
-        RuntimeError: CAS 再試行が枯渇した場合 (:func:`mutate_plan_meta` 準拠)。
-    """
-    plan_date_str = _normalize_plan_date(plan_date)
-    return mutate_plan_meta(
-        manager, persona_id, plan_date_str,
-        _life_mark_mutator(index, "ended"),
-        context="mark_life_ended",
-    )
-
-
-def mark_life_started(
-    manager: Any,
-    persona_id: str,
-    plan_date: Any,
-    index: int = 0,
-) -> Optional[Dict[str, Any]]:
-    """ライフ開始の節目処理が済んだことを永続マークする (``lives[index].started``)。
-
-    :func:`mark_life_ended` の鏡像 (Codex W3 第八陣 — day_close に入れた
-    「境界の冪等ガード + 失敗伝播」が day_open に横展開されていなかった)。
-    day_open の節目処理 (:func:`_handle_life_start` — TTL override + 「（活動
-    開始）」通知) は非冪等で、従来の「当日はじめての確定のときだけ」ガードは
-    **確定は済んだが節目が失敗した**場合に節目を永久スキップしてしまう。
-    呼び出し元 (:func:`saiverse.autonomy_wiring._confirm_life_at_day_open`) は
-    「確認 → 適用 → マーク」の順で使う。
-
-    書き込みは :func:`mutate_plan_meta` の CAS 試行の内側 (第七陣契約)。
-    lives が無い日 / index 外 / 既マークは何も書かず None。
-    """
-    plan_date_str = _normalize_plan_date(plan_date)
-    return mutate_plan_meta(
-        manager, persona_id, plan_date_str,
-        _life_mark_mutator(index, "started"),
-        context="mark_life_started",
-    )
-
-
 #: ライフ境界の実行台帳 KIND (W5)。冪等キーは "{persona}:{plan_date}" —
 #: (persona, 営業日, 境界種) につき一つの実行。
 LIFE_BOUNDARY_KIND_START = "life.boundary_start"
@@ -2033,8 +1972,10 @@ def _life_boundary_outbox_items(
 ) -> list:
     """境界通知の outbox item 列を組み立てる (W5)。
 
-    配送先 (ペルソナの adapter) が無ければ空 — 旧 :func:`_notify_life_boundary`
-    の「配送先が無い場合は no-op = True」と同義 (通知なしで決着する)。
+    配送先 (ペルソナの adapter) が無ければ空 — 通知なしで決着する (ペルソナ
+    未ロード等は再試行しても届く見込みが無く、失敗扱いにすると節目が永久に
+    閉じない)。様式は Track 切替通知と同じ (``<system>`` ラップの user
+    メッセージ、event_message タグ、キャッシュ無破壊 — life.md §9.3)。
     本文・時刻は enqueue 時点で凍結する (台帳 不変条件 6) — 配送が遅延しても
     節目の時刻がずれない。時刻は仮想クロック (clock.now) を尊重しつつ
     tz-aware UTC ISO にする (naive だと adapter が UTC と解釈して ±9h ずれる)。
@@ -2084,8 +2025,14 @@ def apply_life_boundary(
     すべて再試行安全) → 「マーカー + applied + 通知 outbox」単一 commit →
     即時配送試行 (失敗しても durable、関所 / 回復 tick が引き継ぐ)。
 
-    ledger の無い環境 (旧テストスタブ等) は従来経路 (:func:`_handle_life_start`
-    / :func:`_handle_life_end` の直接通知 + マーカー) に縮退する (W2 の慣行)。
+    実行台帳 (``manager.execution_ledger``) は SAIVerseManager が無条件に構築
+    するので、台帳なしの縮退経路は持たない (旧 ``_handle_life_start`` /
+    ``_handle_life_end`` の直接通知は 2026-09-28 監査で撤去)。
+
+    冪等段の中身: 開始は TTL override (均等モードの 1h 運転)。終了は keep-alive
+    予約の cancel と TTL override の遅延解除予約だけで、anchor は**触らない**
+    (life.md §6.2 v0.4 — 失効は TTL に任せ、惜しい谷の生きたキャッシュを
+    捨てない、§8.3)。
 
     Returns:
         境界が決着したか。True = 適用済み (今回適用 / 既に決着済み / 通知先
@@ -2104,31 +2051,7 @@ def apply_life_boundary(
     else:
         raise ValueError(f"unknown life boundary: {boundary!r}")
 
-    ledger = getattr(manager, "execution_ledger", None)
-    if ledger is None:
-        warn_key = f"life_boundary:{persona_id}"
-        if warn_key not in _LEDGER_MISSING_WARNED:
-            _LEDGER_MISSING_WARNED.add(warn_key)
-            LOGGER.warning(
-                "[day_plan] manager has no execution_ledger; life boundary "
-                "runs in legacy direct mode (persona=%s)", persona_id,
-            )
-        handler = _handle_life_start if boundary == "start" else _handle_life_end
-        if not handler(manager, persona_id, plan_date_str, index, life):
-            return False
-        marker = (
-            mark_life_started if boundary == "start" else mark_life_ended
-        )
-        try:
-            marker(manager, persona_id, plan_date_str, index=index)
-        except Exception:
-            LOGGER.error(
-                "[day_plan] failed to persist life-%s marker (legacy mode, "
-                "persona=%s date=%s)", boundary, persona_id, plan_date_str,
-                exc_info=True,
-            )
-        return True
-
+    ledger = manager.execution_ledger
     execution_id, runnable, existing = ledger.claim_execution(
         kind, idempotency_key=f"{persona_id}:{plan_date_str}",
         persona_id=persona_id,
@@ -2358,43 +2281,6 @@ def _apply_life_budget_gate(
     return slot
 
 
-def _notify_life_boundary(manager: Any, persona_id: str, text: str) -> bool:
-    """ライフ境界 (活動開始・終了) のシステム通知を tail (末尾イベント) として
-    SAIMemory へ**直接** append する — **W5 以降は縮退経路のみ**。
-
-    本番経路では通知は :func:`apply_life_boundary` が outbox item として
-    マーカーと同一 commit で凍結し、配送器 (append_ledger_message) が冪等に
-    届ける。本関数が呼ばれるのは execution_ledger の無い環境の縮退時
-    (:func:`_handle_life_start` / :func:`_handle_life_end`) だけ。
-    様式は Track 切替通知と同じ (``<system>`` ラップの user メッセージ、
-    event_message タグ、キャッシュ無破壊 — life.md §9.3)。
-
-    Returns:
-        追記に成功したか (Codex W3 第四陣 P2: day_close 側は成否で ended
-        マーカーの可否を決めるため、例外は握ったまま False を返す)。配送先が
-        無い (ペルソナ未ロード等) は従来どおりの no-op = True — 再試行しても
-        届く見込みが無く、失敗扱いにすると節目が永久に closed されない。
-    """
-    persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
-    adapter = getattr(persona, "sai_memory", None) if persona is not None else None
-    if adapter is None or not hasattr(adapter, "append_persona_message"):
-        return True
-    message = {
-        "role": "user",
-        "content": f"<system>[システム通知] {text}</system>",
-        "metadata": {"tags": ["internal", "event_message", "day_plan"]},
-    }
-    try:
-        adapter.append_persona_message(message)
-        return True
-    except Exception:
-        LOGGER.warning(
-            "[day_plan] failed to record life boundary notice (persona=%s)",
-            persona_id, exc_info=True,
-        )
-        return False
-
-
 #: 均等モード中に運転する explicit cache TTL (life.md §5.1)。均等モードの
 #: 最大コマ間隔 (:data:`LIFE_EVEN_MAX_GAP_MINUTES` 既定 50 分) は TTL=1h を
 #: 前提に設計されている — global 既定の "5m" のままだと keep-alive が
@@ -2603,105 +2489,6 @@ def _cancel_keepalive_reservation(manager: Any, persona_id: str) -> bool:
             persona_id, exc_info=True,
         )
         return False
-
-
-def _handle_life_start(
-    manager: Any, persona_id: str, plan_date_str: str, index: int, life: Dict[str, Any]
-) -> bool:
-    """ライフ開始の節目処理 — **W5 以降は縮退経路のみ**。
-
-    本番経路は :func:`apply_life_boundary` (実行台帳の claim + マーカーと通知
-    outbox の単一 commit)。本関数が直接呼ばれるのは manager に
-    execution_ledger が無い環境 (旧テストスタブ等) の縮退時だけで、そのとき
-    通知は従来どおり直接 append (:func:`_notify_life_boundary`) になる。
-
-    v0.4 までは専用のライフ境界イベント (EventScheduler 予約) の発火時に
-    呼ばれていたが、v0.5 でその専用予約は廃止した — 「ライフ開始 = 起床判断
-    (day_open)」そのもの。
-
-    Returns:
-        全段成功したか (:func:`_handle_life_end` の鏡像、Codex W3 第八陣)。
-        順序契約も同じ — 冪等な TTL override を先に、非冪等な通知を最後に。
-        途中失敗は通知の前に False で戻り、再試行しても通知は重複しない。
-    """
-    LOGGER.info(
-        "[day_plan] life started: persona=%s date=%s index=%d %s-%s "
-        "(budget=%dパルス mode=%s)",
-        persona_id, plan_date_str, index, life["start"], life["end"],
-        life["budget_pulses"], life["mode"],
-    )
-    # life.md §6.1 / Phase3 調査 → arasuji_levels.md §13 (2026-07-29) で意味が
-    # 変わった: 「ライフ開始 = 新しい Session 開始」は**温度 (キャッシュ) の話**
-    # としては今も成り立つ — 前のライフの終端で keep-alive が止まっていれば
-    # anchor の TTL は失効しており、次の Pulse は冷えた状態から始まる。ただし
-    # §13 以降、TTL 失効は提示範囲 (ウィンドウ) を変えない — anchor は張り
-    # 直されず、前のライフからの提示コンテキストが地続きで提示される。提示が
-    # 縮むのは予算超過の畳みだけ。谷が TTL より短ければキャッシュヒットで再開
-    # する (惜しい谷、life.md §8.3)。
-    # ここで明示的に head capture 等を行う必要は無い — ログのみ残す。
-    LOGGER.info(
-        "[day_plan] session boundary: next pulse continues or freshly starts "
-        "a session depending on anchor TTL (persona=%s)", persona_id,
-    )
-    if not _sync_cache_ttl_for_life_start(manager, persona_id, life):
-        return False
-    # life.md §9.2-3 (改修B): 実装語 ("ライフ") を排した確定文言。
-    return _notify_life_boundary(
-        manager, persona_id,
-        f"（活動開始）今日は {life['start']}〜{life['end']}。",
-    )
-
-
-def _handle_life_end(
-    manager: Any, persona_id: str, plan_date_str: str, index: int, life: Dict[str, Any]
-) -> bool:
-    """ライフ終了の節目処理 — **W5 以降は縮退経路のみ**。
-
-    本番経路は :func:`apply_life_boundary` (実行台帳の claim + マーカーと通知
-    outbox の単一 commit)。本関数が直接呼ばれるのは manager に
-    execution_ledger が無い環境 (旧テストスタブ等) の縮退時だけ。
-
-    v0.4 までは専用のライフ境界イベント (EventScheduler 予約) の発火時に
-    呼ばれていたが、v0.5 でその専用予約は廃止した — 「ライフ終了 = 就寝判断
-    (day_close)」そのもの。
-
-    Returns:
-        全段成功したか (Codex W3 第四陣 P2)。呼び出し元は True のときだけ
-        ended マーカー (:func:`mark_life_ended`) を立てる — 下請け各段は例外を
-        内部で握るため、bool を返さないと部分失敗が「成功」として封印され、
-        失敗した節目 (例: 活動終了通知) が永久に回復されない。
-
-    順序契約: **冪等な後始末 (keep-alive cancel / TTL 解除予約) を先に、
-    非冪等な通知 (SAIMemory 追記) を最後に**。途中失敗は通知の前に False で
-    戻る — 再試行では冪等段だけが再実行され、通知はまだ一度も出ていないので
-    重複しない。通知自体の失敗も False (追記されていないので再試行安全)。
-    重複しうる窓は「通知の追記は成功したが成功報告の前に crash」だけ
-    (at-least-once、従来の毎回再適用よりはるかに狭い)。
-    """
-    consumed = life_consumed(life)
-    LOGGER.info(
-        "[day_plan] life ended: persona=%s date=%s index=%d %s-%s "
-        "(消費 %.1f/%d パルス, 判断点 %d 回)",
-        persona_id, plan_date_str, index, life["start"], life["end"],
-        consumed, life["budget_pulses"], int(life.get("judgment_pulses") or 0),
-    )
-    # ライフ終端の節目 (life.md §6.2 v0.4、v0.5 でも不変): 終端が能動的に
-    # 行うのは keep-alive の停止 (予約 cancel) と TTL override の遅延解除予約
-    # だけ。anchor は**触らない** — touch が止まれば TTL で自然失効し、
-    # Metabolism 本体 (Chronicle 化・eviction) は失効後の最初の活動の既存経路
-    # (runtime_context.py Case 3) が行う。anchor を即時失効させると、惜しい谷
-    # (終了直後〜TTL 内の再訪、実キャッシュはまだ生きている) の最初の Pulse が
-    # Case 3 で履歴を組み替え、生きたキャッシュを捨ててしまう (§8.3 裁定と
-    # 矛盾。v0.3 の「即時失効」は v0.4 で誤りと訂正済み)。
-    if not _cancel_keepalive_reservation(manager, persona_id):
-        return False
-    if not _sync_cache_ttl_for_life_end(manager, persona_id, life):
-        return False
-    # life.md §9.2-3 (改修B): 実装語 ("ライフ") を排した確定文言。
-    return _notify_life_boundary(
-        manager, persona_id,
-        "（活動終了）今日の活動時間はここまで。",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -3650,6 +3437,10 @@ def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> bo
     移動失敗 (満員等) は「移動せず現在地で実行」に倒すが、黙って現在地に
     ならないようその事実を WARN + ペルソナへの system 通知で記録する。
 
+    目的地が Region の内部なら、入口で止まった移動を境界ごとに打ち直して
+    目的地まで進む (``move_through_entrances``、region.md §2.5)。途中の境界で
+    止められたら移動失敗で、ペルソナはその入口に居る (通知の現在地も入口)。
+
     Returns:
         True = コマの場所に居る (移動成功 / 既に現地 / 移動の指定なし)。
         False = 移動が必要だったのにできなかった (handler が「出かけた」体の
@@ -3678,21 +3469,29 @@ def _move_to_facility(manager: Any, persona_id: str, slot: Dict[str, Any]) -> bo
     if occupancy is None:
         LOGGER.warning("[day_plan] manager has no occupancy_manager; skipping facility move")
         return False
+    # 機構がペルソナの意図を代行する移動なので、Region の入口で止まったら
+    # 境界を一段ずつ通過して目的地まで進む (docs/intent/region.md §2.5)。
+    # 途中で entry policy 等に止められたら、そこ (入口) に居るまま移動失敗。
+    def _one_step(from_id: str, to_id: str):
+        return occupancy.move_entity(persona_id, "ai", from_id, to_id)
+
     try:
-        ok, msg = occupancy.move_entity(persona_id, "ai", current, target)
+        reached, msg, location = move_through_entrances(_one_step, current, target)
     except Exception:
         LOGGER.warning(
             "[day_plan] move_entity raised (persona=%s %s -> %s); continuing",
             persona_id, current, target, exc_info=True,
         )
-        _record_move_failure(manager, persona, slot, current, target, "内部エラー")
+        location = getattr(persona, "current_building_id", None) or current
+        _record_move_failure(manager, persona, slot, location, target, "内部エラー")
         return False
-    if not ok:
+    if not reached:
         LOGGER.warning(
-            "[day_plan] facility move failed (persona=%s %s -> %s): %s — continuing in place",
-            persona_id, current, target, msg,
+            "[day_plan] facility move failed (persona=%s %s -> %s, now at %s): %s"
+            " — continuing in place",
+            persona_id, current, target, location, msg,
         )
-        _record_move_failure(manager, persona, slot, current, target, msg)
+        _record_move_failure(manager, persona, slot, location, target, msg)
         return False
 
     # 位置属性と cursor 儀式 (_mark_entry / _save_session_metadata) は

@@ -523,3 +523,35 @@ def test_utter_auto_moves_then_delegates() -> None:
     assert result is sentinel
     manager.move_user.assert_called_once_with("hall")
     assert send.call_args.args[0].building_id == "hall"
+
+
+def test_utter_stopped_at_entrance_does_not_send_and_409s() -> None:
+    """Region 内部への直行が入口で止まったら、発言は送らずに 409
+    ``redirected_to_entrance`` で案内文と実際の現在地 (入口) を返す
+    (docs/intent/region.md §2.5 — 内部のつもりの発言を入口で言わせない)。"""
+    from saiverse.occupancy_manager import MoveRedirectedNotice
+
+    manager = _utter_manager(current="room")
+    notice = MoveRedirectedNotice(
+        "'宿屋' は『霧の谷』の内部です。入口 '霧の谷: 入口' まで移動しました。"
+        "中へ入るには入口からもう一度移動してください。",
+        current_building_id="entrance_top",
+    )
+
+    def _move(target):
+        manager.state.user_current_building_id = "entrance_top"
+        return True, notice
+
+    manager.move_user = MagicMock(side_effect=_move)
+    req = UtterRequest(
+        message="hi", target_building_id="inn",
+        expected_from_building_id="room",
+    )
+    with patch("api.routes.chat.send_message") as send:
+        with pytest.raises(HTTPException) as excinfo:
+            utter_message(req, manager)
+    send.assert_not_called()
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["code"] == "redirected_to_entrance"
+    assert excinfo.value.detail["message"] == str(notice)
+    assert excinfo.value.detail["current_building_id"] == "entrance_top"

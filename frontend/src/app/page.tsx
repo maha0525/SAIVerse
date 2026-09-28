@@ -1386,15 +1386,39 @@ export default function Home() {
                             const moveRes = await apiFetch('/api/user/move', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ target_building_id: target.id }),
+                                body: JSON.stringify({
+                                    target_building_id: target.id,
+                                    // 発言と同じ CAS — 一覧取得から移動までの間に別の
+                                    // デバイスが移動していたら上書きせず、下の 409 分岐が
+                                    // サーバーの現在地へ同期する
+                                    expected_from_building_id: serverCurrentBuildingIdRef.current,
+                                }),
                             });
-                            if (moveRes.ok) {
-                                setCurrentBuildingId(target.id);
-                                currentBuildingIdRef.current = target.id;
+                            // 実際の到着地はサーバーの応答が真実 — Region 内部への
+                            // 直行は入口で止まる (region.md §2.5) し、CAS 競合の 409 も
+                            // detail.current_building_id で真の現在地を運ぶ (並行する
+                            // 別クライアントの移動が先に通っていた場合の復旧先)
+                            let arrivedId: string | null = null;
+                            try {
+                                const moveData = await moveRes.json();
+                                if (moveRes.ok) {
+                                    arrivedId = moveData?.current_building_id || target.id;
+                                } else if (moveRes.status === 409) {
+                                    arrivedId = moveData?.detail?.current_building_id || null;
+                                }
+                            } catch { /* ignore JSON parse */ }
+                            if (moveRes.ok && !arrivedId) arrivedId = target.id;
+                            if (arrivedId) {
+                                setCurrentBuildingId(arrivedId);
+                                currentBuildingIdRef.current = arrivedId;
+                                // 発言の CAS (expected_from_building_id) が読む控えも
+                                // 同じ応答から同期する — ここを残すと復旧直後の発言が
+                                // 古い現在地を期待値に送って一回無駄に弾かれる
+                                updateServerBuildingId(arrivedId);
                                 setMessages([]);
                                 setIsHistoryLoaded(false);
-                                fetchHistory(undefined, target.id);
-                                fetchBuildingInfo(target.id);
+                                fetchHistory(undefined, arrivedId);
+                                fetchBuildingInfo(arrivedId);
                                 setMoveTrigger(prev => prev + 1);
                             }
                         }
@@ -3010,6 +3034,10 @@ export default function Home() {
                 // CAS conflict (= B-1): 他クライアントが先に動いていた。
                 // ユーザーに通知し、 status を再取得して serverCurrentBuildingId
                 // を真の現在地に同期する。 メッセージ自体は再送が必要。
+                // Region 内部への直行が入口で止まった回 (redirected_to_entrance、
+                // docs/intent/region.md §2.5) も同じ形で届く: サーバーは入口まで
+                // 移動済みで、発言は送っていない。表示中の部屋は変えない — 送り
+                // 直せば入口から中への一歩になり、発言は意図した部屋に載る。
                 let conflictMsg = uiText("app.page.text018");
                 try {
                     const data = await res.json();
@@ -3056,6 +3084,9 @@ export default function Home() {
                 } catch (statusErr) {
                     console.error('Failed to refetch status after CAS conflict', statusErr);
                 }
+                // サイドバーの現在地マーカーをサーバーの現在地 (入口へ移った回を
+                // 含む) に追従させる
+                setMoveTrigger(prev => prev + 1);
                 // 後片付けは必ず通す。読み手を切り出したことで、この早期 return は
                 // もう外側の finally に拾われない (isProcessingRef が立ったままだと
                 // 履歴の追従が止まる)。

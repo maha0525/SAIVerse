@@ -102,7 +102,7 @@ class DynamicStateManager:
             独立した best-effort (1 段の失敗が他段を止めない、従来どおり) だが、
             outbox 配送経路 (move.post_dynamic_state ハンドラ) がこの戻り値を
             見て「1 段でも失敗したら配送失敗として再試行する」ために集約する。
-            直接呼び出し元 (縮退経路・既存テスト) は戻り値を無視してよい。
+            直接呼び出し元 (既存テスト) は戻り値を無視してよい。
         """
         if not getattr(persona, "persona_id", None):
             return True
@@ -182,9 +182,10 @@ class DynamicStateManager:
         # 配送は台帳の outbox (target='perception.room_state'、§11-3-1) — 上の
         # diff 通知 (perception.push) と同じ FIFO に乗せることで、到着順が
         # 構造的に決まる。読み順は「出来事は到着順・様子は組成の末尾」
-        # (§11-3 改訂 — 様子は回収 §11-2 が末尾へ寄せる)。台帳の無い環境は
-        # 従来の直接 push に degrade する (通知の direct 経路と同型)。束は
-        # queue 時に凍結。
+        # (§11-3 改訂 — 様子は回収 §11-2 が末尾へ寄せる)。束は queue 時に凍結。
+        # 台帳は SAIVerseManager が無条件に構築するので、台帳なしの直接 push
+        # 経路は持たない (2026-09-28 監査で撤去)。SAIMemory 未 ready の扱いは
+        # 配送ハンドラ側 (例外で pending に残す) が持つ。
         #
         # ここは滞在中の検知 (_detect_room_state_changes) と違い、組成中に本人が
         # さらに移動していても「配送の荷物の行き先 (building_id)」へ積むのが
@@ -202,45 +203,29 @@ class DynamicStateManager:
                     bundle = build_room_bundle(building_id)
                 if bundle:
                     allow_diff = _chronicle_enabled(persona, manager)
-                    ledger = getattr(manager, "execution_ledger", None)
-                    if ledger is not None:
-                        from saiverse.execution_ledger_wiring import (
-                            TARGET_PERCEPTION_ROOM_STATE,
-                        )
-                        execution_id, _created = ledger.begin_execution(
-                            "room_state.entry_push",
-                            idempotency_key=None, persona_id=pid,
-                        )
-                        ledger.mark_running(execution_id)
-                        ledger.mark_applied(
-                            execution_id,
-                            result={"building_id": building_id},
-                            outbox_items=[{
-                                "target": TARGET_PERCEPTION_ROOM_STATE,
-                                "persona_id": pid,
-                                "payload": {
-                                    "building_id": building_id,
-                                    "bundle": bundle,
-                                    "allow_diff": allow_diff,
-                                },
-                            }],
-                            deliver=True,
-                        )
-                    elif not sai_mem.is_ready():
-                        # push_room_state は未 ready を黙って return する —
-                        # ここで検めないと ok=True のまま知覚が静かに失われる。
-                        # 台帳あり側 (perception.room_state handler) の
-                        # 「未 ready は例外で pending に残す」と対称の失敗扱い。
-                        LOGGER.warning(
-                            "[dynamic_state] surroundings push skipped: "
-                            "SAIMemory not ready for %s -> %s",
-                            pid, building_id,
-                        )
-                        ok = False
-                    else:
-                        sai_mem.push_room_state(
-                            building_id, bundle, allow_diff=allow_diff,
-                        )
+                    ledger = manager.execution_ledger
+                    from saiverse.execution_ledger_wiring import (
+                        TARGET_PERCEPTION_ROOM_STATE,
+                    )
+                    execution_id, _created = ledger.begin_execution(
+                        "room_state.entry_push",
+                        idempotency_key=None, persona_id=pid,
+                    )
+                    ledger.mark_running(execution_id)
+                    ledger.mark_applied(
+                        execution_id,
+                        result={"building_id": building_id},
+                        outbox_items=[{
+                            "target": TARGET_PERCEPTION_ROOM_STATE,
+                            "persona_id": pid,
+                            "payload": {
+                                "building_id": building_id,
+                                "bundle": bundle,
+                                "allow_diff": allow_diff,
+                            },
+                        }],
+                        deliver=True,
+                    )
         except Exception:
             LOGGER.warning(
                 "[dynamic_state] surroundings push on entry failed -> %s",

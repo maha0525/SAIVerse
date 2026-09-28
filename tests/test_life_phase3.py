@@ -5,7 +5,8 @@
   ``sea.runtime.SEARuntime.run_cache_keepalive``): lives 未宣言は従来どおり許可、
   宣言済みの日はライフ区間内のみ許可 (谷では touch せず連鎖を自然停止)、
   判定失敗時は許可側にフォールバック
-- ライフ終端の節目 (``day_plan._handle_life_end``、§6.2 v0.4): 終端が能動的に
+- ライフ終端の節目 (``day_plan.apply_life_boundary`` の end、§6.2 v0.4。実行
+  台帳の下で決着し、通知は outbox → saimemory.append の実ハンドラで届く): 終端が能動的に
   行うのは keep-alive 予約 (``ttl:{persona_id}``) の cancel と TTL override の
   遅延解除予約だけ。**anchor は触らない** (session_anchor 行は不変) — touch が
   止まれば TTL で自然失効する。
@@ -44,6 +45,11 @@ from saiverse import clock
 from saiverse import day_plan
 from saiverse.day_simulator import DaySimulator
 from saiverse.event_scheduler import EventScheduler
+from saiverse.execution_ledger import ExecutionLedger
+from saiverse.execution_ledger_wiring import (
+    TARGET_SAIMEMORY_APPEND,
+    _make_saimemory_append_handler,
+)
 from saiverse.saiverse_manager import SAIVerseManager
 from sea.runtime import SEARuntime
 
@@ -80,13 +86,25 @@ def _reset_clock():
 
 
 class FakeAdapter:
-    """SAIMemory adapter の最小スタブ (append_persona_message の記録のみ)。"""
+    """SAIMemory adapter の最小スタブ (追記の記録のみ)。
+
+    ライフ境界の通知は台帳の outbox (saimemory.append) を経て
+    ``append_ledger_message`` で届く。``append_persona_message`` は本物の adapter
+    が持つ口で、境界側はこれの有無で「届け先があるか」を判定する。
+    """
 
     def __init__(self):
         self.messages: List[Dict[str, Any]] = []
 
     def append_persona_message(self, payload):
         self.messages.append(payload)
+
+    def append_ledger_message(
+        self, message, *, execution_id, outbox_id, building_id=None,
+        thread_suffix=None,
+    ):
+        self.messages.append(message)
+        return f"msg-{outbox_id}"
 
 
 @pytest.fixture
@@ -124,10 +142,31 @@ def manager(session_factory):
     mgr.set_persona_cache_override = SAIVerseManager.set_persona_cache_override.__get__(mgr)
     mgr.clear_persona_cache_override = SAIVerseManager.clear_persona_cache_override.__get__(mgr)
     mgr.resolve_persona_cache = SAIVerseManager.resolve_persona_cache.__get__(mgr)
+    # 本番 manager は実行台帳を無条件に持つ。境界通知の配送は本番と同じ
+    # saimemory.append の実ハンドラを通す。
+    ledger = ExecutionLedger(session_factory=session_factory)
+    ledger.register_outbox_handler(
+        TARGET_SAIMEMORY_APPEND, _make_saimemory_append_handler(mgr),
+    )
+    mgr.execution_ledger = ledger
 
     runtime = SEARuntime(mgr)
     mgr.sea_runtime = runtime
     return mgr
+
+
+def _life_start(manager, life, *, index=0, plan_date=PLAN_DATE):
+    """day_open 経路と同じ入口 (apply_life_boundary) でライフ開始の節目を決着させる。"""
+    assert day_plan.apply_life_boundary(
+        manager, PERSONA_ID, plan_date, life, boundary="start", index=index,
+    ) is True
+
+
+def _life_end(manager, life, *, index=0, plan_date=PLAN_DATE):
+    """day_close 経路と同じ入口 (apply_life_boundary) でライフ終了の節目を決着させる。"""
+    assert day_plan.apply_life_boundary(
+        manager, PERSONA_ID, plan_date, life, boundary="end", index=index,
+    ) is True
 
 
 def _save_life(manager, *, start="09:00", end="11:00", budget=4, mode="free"):
@@ -198,7 +237,7 @@ def test_life_end_does_not_touch_anchor(manager):
     _save_anchor_rows(lifecycle, anchors)
 
     lives = _save_life(manager, start="09:00", end="11:00", mode="free")
-    day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_end(manager, lives[0])
 
     # anchor は不変。TTL 内の resolve は従来どおり self anchor を返す
     # (= 惜しい谷の再訪は Case 3 に落ちず、生きたキャッシュで再開できる)
@@ -220,7 +259,7 @@ def test_life_end_cancels_keepalive_reservation(manager):
     )
 
     lives = _save_life(manager, start="09:00", end="11:00", mode="free")
-    day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_end(manager, lives[0])
 
     assert not manager.event_scheduler.has_key(f"ttl:{PERSONA_ID}:claude-x")
     assert not manager.event_scheduler.has_key(f"ttl:{PERSONA_ID}:light-model")
@@ -229,7 +268,7 @@ def test_life_end_cancels_keepalive_reservation(manager):
 
 def test_life_end_notifies_boundary(manager):
     lives = _save_life(manager, start="09:00", end="11:00", mode="free")
-    day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_end(manager, lives[0])
     texts = [m["content"] for m in manager.personas[PERSONA_ID].sai_memory.messages]
     assert any("活動終了" in t for t in texts)
 
@@ -240,7 +279,7 @@ def test_life_end_without_session_lifecycle_does_not_crash(manager):
     manager.sea_runtime = None
     clock.enable_virtual(BASE + timedelta(hours=9, minutes=40))
     lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
-    day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_end(manager, lives[0])
     texts = [m["content"] for m in manager.personas[PERSONA_ID].sai_memory.messages]
     assert any("活動終了" in t for t in texts)
     assert manager.event_scheduler.has_key(TTL_CLEAR_KEY)
@@ -254,7 +293,7 @@ def test_life_end_without_session_lifecycle_does_not_crash(manager):
 def test_even_mode_life_start_sets_ttl_override(manager):
     lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
     assert manager.get_persona_cache_override(PERSONA_ID) is None
-    day_plan._handle_life_start(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_start(manager, lives[0])
     assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
 
 
@@ -263,10 +302,10 @@ def test_even_mode_life_end_schedules_delayed_clear_not_immediate(manager):
     (即時に 5m へ戻すと anchor の生存評価が実キャッシュの寿命とズレるため)。"""
     clock.enable_virtual(BASE + timedelta(hours=9, minutes=40))
     lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
-    day_plan._handle_life_start(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_start(manager, lives[0])
     assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
 
-    day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_end(manager, lives[0])
     # 即時 clear されない
     assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
     # 遅延解除の予約が入っている
@@ -281,8 +320,8 @@ def test_life_ttl_clear_fire_respects_user_change(manager):
     """予約〜発火の間にユーザーが override を変更していたら、発火体は触らない。"""
     clock.enable_virtual(BASE + timedelta(hours=9, minutes=40))
     lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
-    day_plan._handle_life_start(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
-    day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_start(manager, lives[0])
+    _life_end(manager, lives[0])
 
     # 発火前にユーザーが人設定タブで明示変更
     manager.set_persona_cache_override(PERSONA_ID, enabled=True, ttl="5m")
@@ -292,21 +331,27 @@ def test_life_ttl_clear_fire_respects_user_change(manager):
 
 def test_next_life_start_cancels_pending_ttl_clear(manager):
     """次のライフが TTL 経過前に始まったら、前のライフの遅延解除予約を cancel
-    する — ライフの最中に解除が発火して override が外れる事故を防ぐ。"""
+    する — ライフの最中に解除が発火して override が外れる事故を防ぐ。
+
+    次のライフは次の営業日のもの (v0.5 はライフ = その日の起床〜就寝で、境界は
+    (persona, 営業日) につき一度だけ台帳に claim される)。時刻は「前のライフの
+    遅延解除が発火する前に次の開始が来る」並びを作るための合成。
+    """
+    next_date = "2026-07-05"
     clock.enable_virtual(BASE + timedelta(hours=9, minutes=40))
-    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "end": "09:40", "budget_pulses": 2, "mode": "even"},
+    lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
+    day_plan.save_lives(manager, PERSONA_ID, next_date, [
         {"start": "10:00", "end": "10:40", "budget_pulses": 2, "mode": "even"},
     ])
-    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    next_lives = day_plan.get_lives(manager, PERSONA_ID, next_date)
 
-    day_plan._handle_life_start(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
-    day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_start(manager, lives[0])
+    _life_end(manager, lives[0])
     assert manager.event_scheduler.has_key(TTL_CLEAR_KEY)
 
     # 20 分後に次のライフが開始 (TTL 経過前)
     clock.advance_to(BASE + timedelta(hours=10))
-    day_plan._handle_life_start(manager, PERSONA_ID, PLAN_DATE, 1, lives[1])
+    _life_start(manager, next_lives[0], plan_date=next_date)
     assert not manager.event_scheduler.has_key(TTL_CLEAR_KEY)
     # override は 1h のまま維持される (前のライフの値が望む値と同じ)
     assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
@@ -314,9 +359,9 @@ def test_next_life_start_cancels_pending_ttl_clear(manager):
 
 def test_free_mode_life_does_not_touch_cache_ttl(manager):
     lives = _save_life(manager, start="09:00", end="11:00", mode="free")
-    day_plan._handle_life_start(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_start(manager, lives[0])
     assert manager.get_persona_cache_override(PERSONA_ID) is None
-    day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_end(manager, lives[0])
     assert manager.get_persona_cache_override(PERSONA_ID) is None
     assert not manager.event_scheduler.has_key(TTL_CLEAR_KEY)
 
@@ -328,10 +373,10 @@ def test_even_mode_life_respects_existing_explicit_override(manager):
     clock.enable_virtual(BASE + timedelta(hours=9, minutes=40))
     lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
 
-    day_plan._handle_life_start(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_start(manager, lives[0])
     assert manager.get_persona_cache_override(PERSONA_ID) == {"enabled": True, "ttl": "5m"}
 
-    day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_end(manager, lives[0])
     day_plan._clear_life_ttl_override(manager, PERSONA_ID)
     # ライフが設定した値 (1h) と一致しないので clear されず、明示設定のまま残る
     assert manager.get_persona_cache_override(PERSONA_ID) == {"enabled": True, "ttl": "5m"}
@@ -445,8 +490,8 @@ def test_life_boundary_simulation_end_behavior(manager):
     v0.5 (life.md §11.2): 専用のライフ境界イベント予約 (``schedule_lives``)
     は廃止され、ライフ開始/終了処理は day_open/day_close の発火経路
     (``autonomy_wiring.fire_judgment_point``) 直下で呼ばれる。ここではその
-    呼び出し方 (``_handle_life_start``/``_handle_life_end`` を直接呼ぶ) を
-    模して統合挙動を確認する — TTL 遅延解除の予約だけは引き続き
+    呼び出し方 (``apply_life_boundary`` を直接呼ぶ) を模して統合挙動を
+    確認する — TTL 遅延解除の予約だけは引き続き
     EventScheduler 経由なので DaySimulator で発火させる。
     """
     persona = manager.personas[PERSONA_ID]
@@ -456,11 +501,11 @@ def test_life_boundary_simulation_end_behavior(manager):
 
     clock.enable_virtual(BASE + timedelta(hours=9))
     lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
-    day_plan._handle_life_start(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_start(manager, lives[0])
     assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
 
     clock.advance_to(BASE + timedelta(hours=9, minutes=40))
-    day_plan._handle_life_end(manager, PERSONA_ID, PLAN_DATE, 0, lives[0])
+    _life_end(manager, lives[0])
 
     # anchor は不変 — 惜しい谷の再訪は生きたキャッシュで再開できる
     assert lifecycle.load_anchors(persona) == anchors

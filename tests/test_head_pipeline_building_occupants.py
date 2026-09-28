@@ -7,7 +7,8 @@
 2. 台帳経路: deliver=False だけの回は outbox に積まれず、基準 (last_notified) は
    進む。以後は新しい部屋の顔ぶれとの比較になるので、同じ部屋での入退室が正しく
    出る。
-3. 直接経路 (台帳なし): deliver=False は push されず、基準は進む。
+3. (欠番 — 台帳なしの直接経路は 2026-09-28 監査で撤去。台帳は SAIVerseManager
+   が無条件に持つ)
 4. 再会の想起はこの検知器からは発火しない — 発火点は Pulse の頭の同席チェック
    (``integration.inject_copresence_recall``、tests/test_copresence_recall.py)。
 5. 入室 hook は在室者も検知の対象にする — 移動した本人が Pulse を打つ前に誰かが
@@ -100,7 +101,7 @@ def test_same_room_entry_and_exit_are_still_delivered():
 
 
 # ---------------------------------------------------------------------------
-# 配送経路 (台帳あり / なし) の共通の足場
+# 配送経路 (台帳) の共通の足場
 # ---------------------------------------------------------------------------
 
 
@@ -426,33 +427,6 @@ def test_entry_hook_moves_the_occupant_baseline_to_the_new_room(session_factory)
 
 
 # ---------------------------------------------------------------------------
-# 3. 直接経路 (台帳なし)
-# ---------------------------------------------------------------------------
-
-
-def test_direct_path_skips_delivery_but_advances_baseline():
-    occupants = {ROOM_A: [], ROOM_B: ["elis"]}
-    manager = _FakeManager(occupants)      # execution_ledger なし
-    pipeline = _pipeline()
-    pipeline.capture_all(_ctx(ROOM_A, manager))
-    sai_mem = _FakeMemory()
-    persona = _persona(sai_mem)
-
-    assert inject_diff_notifications(
-        persona, manager, ROOM_B, pipeline=pipeline, model_key=MODEL,
-        detect_room=False,
-    ) is False
-    assert sai_mem.pushed == []
-
-    occupants[ROOM_B] = ["elis", "aifi"]
-    assert inject_diff_notifications(
-        persona, manager, ROOM_B, pipeline=pipeline, model_key=MODEL,
-        detect_room=False,
-    ) is True
-    assert sai_mem.pushed == [("world_state", "アイフィ が入室しました")]
-
-
-# ---------------------------------------------------------------------------
 # 4. 再会の想起はこの検知器からは発火しない (発火点は Pulse の頭の同席チェック)
 # ---------------------------------------------------------------------------
 
@@ -471,20 +445,6 @@ def test_diff_detection_does_not_fire_recall_via_ledger(session_factory):
     )
     assert _outbox_payloads(session_factory) == []       # 文は届けない
     assert sai_mem.pushed == []                          # 想起もここでは積まない
-
-
-def test_diff_detection_does_not_fire_recall_direct():
-    manager = _FakeManager({ROOM_A: [], ROOM_B: ["elis"]})
-    pipeline = _pipeline()
-    pipeline.capture_all(_ctx(ROOM_A, manager))
-    sai_mem = _FakeMemory()
-    persona = _persona(sai_mem, recall_text="[想起: エリスとの過去の会話]")
-
-    inject_diff_notifications(
-        persona, manager, ROOM_B, pipeline=pipeline, model_key=MODEL,
-        detect_room=False,
-    )
-    assert sai_mem.pushed == []
 
 
 # ---------------------------------------------------------------------------
@@ -522,9 +482,10 @@ def test_preview_shows_a_departure_that_has_not_been_detected_yet():
     assert sai_mem.pushed == []                     # 知覚バッファは触らない
 
 
-def test_preview_does_not_advance_the_baseline():
+def test_preview_does_not_advance_the_baseline(session_factory):
     """プレビューの後でも、実 Pulse の検知が同じ差分を届ける。"""
-    manager = _FakeManager({ROOM_B: ["elis", "aifi"]})
+    ledger = ExecutionLedger(session_factory=session_factory)
+    manager = _FakeManager({ROOM_B: ["elis", "aifi"]}, ledger=ledger)
     pipeline = _pipeline()
     pipeline.capture_all(_ctx(ROOM_B, manager))
     sai_mem = _FakeMemory()
@@ -532,12 +493,15 @@ def test_preview_does_not_advance_the_baseline():
 
     manager.occupants[ROOM_B] = ["elis"]
     _preview(persona, manager, ROOM_B, pipeline)
+    assert _outbox_payloads(session_factory) == []   # プレビューは積まない
 
     assert inject_diff_notifications(
         persona, manager, ROOM_B, pipeline=pipeline, model_key=MODEL,
         detect_room=False,
     ) is True
-    assert sai_mem.pushed == [("world_state", "アイフィ が退室しました")]
+    assert [
+        p["content"] for p in _outbox_payloads(session_factory)
+    ] == ["アイフィ が退室しました"]
 
 
 def test_preview_is_idempotent():
