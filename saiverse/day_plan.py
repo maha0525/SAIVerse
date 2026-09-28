@@ -3386,10 +3386,24 @@ def is_in_user_conversation(manager: Any, persona_id: str) -> bool:
 
 
 def _building_display_name(manager: Any, building_id: Any) -> str:
-    """building_id を表示名へ解決する (building_map が無い / 未登録なら ID のまま)。"""
-    building = (getattr(manager, "building_map", {}) or {}).get(building_id)
-    name = getattr(building, "name", None)
-    return str(name or building_id)
+    """building_id をペルソナに見せる表示名へ解決する。
+
+    - id が空 (None / "") なら「どこか」。
+    - ``manager.buildings`` に無い id、または名前が空の Building は id の文字列。
+
+    引くのは ``manager.buildings`` (候補施設を列挙する ``facility_map`` と同じ
+    入れ物)。本物の manager では ``building_map`` と ``buildings`` は同じ
+    Building オブジェクトを共有し、追加・削除・改名は常に両方へ反映されるので、
+    どちらを引いても結果は変わらない。かつてこのモジュールには ``building_map``
+    を引く同名定義も並んでいて後段の定義に黙って上書きされていた (2026-09-28
+    に一本化)。二重定義の再発は ``tests/test_no_duplicate_definitions.py`` が止める。
+    """
+    if not building_id:
+        return "どこか"
+    for b in getattr(manager, "buildings", None) or []:
+        if getattr(b, "building_id", None) == building_id:
+            return str(getattr(b, "name", "") or building_id)
+    return str(building_id)
 
 
 def _record_move_failure(
@@ -4742,16 +4756,6 @@ def _record_presence_only(
 # Pulse が走った場合は presence_only を付けない — 実際の思考記録が SAIMemory に
 # 残るため、「実行済み」表示が正直になる。
 # ---------------------------------------------------------------------------
-
-
-def _building_display_name(manager: Any, building_id: Optional[str]) -> str:
-    """Building の表示名 (見つからなければ id をそのまま返す)。"""
-    if not building_id:
-        return "どこか"
-    for b in getattr(manager, "buildings", None) or []:
-        if getattr(b, "building_id", None) == building_id:
-            return getattr(b, "name", "") or building_id
-    return building_id
 
 
 def _resolve_outing_destination(
