@@ -43,7 +43,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-from contextlib import nullcontext
 from datetime import date, timedelta
 from typing import Any, Callable, Dict, Optional
 
@@ -275,20 +274,13 @@ def playbook_available(manager: Any, playbook_name: str) -> bool:
 
 
 def _judgment_lock(manager: Any, persona_id: str):
-    """MetaLayer の per-persona Lock (あれば)。判断 Pulse の直列化を共有する。"""
-    meta_layer = getattr(manager, "meta_layer", None)
-    get_lock = getattr(meta_layer, "_get_lock", None)
-    if callable(get_lock):
-        try:
-            lock = get_lock(persona_id)
-            if hasattr(lock, "__enter__"):
-                return lock
-        except Exception:
-            LOGGER.warning(
-                "[autonomy-wiring] failed to acquire meta-layer lock for %s",
-                persona_id, exc_info=True,
-            )
-    return nullcontext()
+    """MetaLayer の per-persona Lock。判断 Pulse の直列化を共有する。
+
+    Lock が取れない世界で無 Lock (nullcontext) に倒すと、同一ペルソナの判断
+    Pulse の直列化が黙って外れる。``manager.meta_layer`` は SAIVerseManager が
+    無条件に持つので、壊れていれば例外で止まる方が正しい (fail-closed)。
+    """
+    return manager.meta_layer._get_lock(persona_id)
 
 
 # ---------------------------------------------------------------------------
@@ -430,12 +422,13 @@ def fire_judgment_point(
     - **day_open**: :func:`saiverse.day_plan.confirm_life_for_today` で
       ユーザー設定 (PersonaSchedule の起床・就寝 + ``context`` 経由の
       ``daily_budget_pulses``) から今日のライフを確定する (冪等 — 既に
-      確定済みなら何もしない)。**当日はじめての確定のときだけ**
-      :func:`saiverse.day_plan._handle_life_start` を呼ぶ (TTL override・
-      tail 通知。再確定では二重通知しない)
+      確定済みなら何もしない)。節目処理は
+      :func:`saiverse.day_plan.apply_life_boundary` (start) が実行台帳の下で
+      決着させる (TTL override・tail 通知。lives[0] の ``started`` マーカーで
+      一度きり)
     - **day_close**: その日の確定済みライフがあれば
-      :func:`saiverse.day_plan._handle_life_end` を呼ぶ (keep-alive 予約
-      cancel・TTL 遅延解除予約・tail 通知)
+      :func:`saiverse.day_plan.apply_life_boundary` (end) を呼ぶ (keep-alive
+      予約 cancel・TTL 遅延解除予約・tail 通知。``ended`` マーカーで一度きり)
 
     Returns:
         ``run_judgment_point`` の結果 dict (``submitted`` / ``reason`` /
@@ -662,7 +655,7 @@ def _confirm_life_at_day_open(
     無ければそれぞれ最低値・自動判定)。確定は冪等
     (:func:`~saiverse.day_plan.confirm_life_for_today` が既存確定を保持する)。
 
-    節目処理 (:func:`~saiverse.day_plan._handle_life_start`) の一度きり保証は
+    節目処理 (:func:`~saiverse.day_plan.apply_life_boundary`) の一度きり保証は
     lives[0] の永続マーカー ``started`` が持つ (Codex W3 第八陣 —
     :func:`_apply_life_end_at_day_close` の ``ended`` の鏡像)。従来の
     「当日はじめての確定のときだけ」ガードは、**確定は済んだが節目が失敗した**

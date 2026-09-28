@@ -41,7 +41,7 @@ def estimate_chronicle_generation_cost(
     conn: sqlite3.Connection,
     *,
     model_name: str,
-    excluded_entry_ids: Optional[frozenset] = frozenset(),
+    absorption_excluded_entry_ids: Optional[frozenset] = frozenset(),
     db_lock=None,
     compile_before: Optional[tuple] = None,
     tail_fold_estimator=None,
@@ -56,11 +56,14 @@ def estimate_chronicle_generation_cost(
     Args:
         conn: persona の memory.db 接続
         model_name: 見積もり対象モデル名（pricing 有無で is_free_tier を判定）
-        excluded_entry_ids: 圧縮区間として提示中の digest entry id 集合
-            (生成経路と同じ集合を渡さないと束ねコールの見積もりが乖離する)。
-            **None = 照会失敗 (fold の有無が不明)** — 生成経路が束ねを見送る
-            のと同形に、束ねコールを 0 と見積もる。既定の空集合は
-            「fold という概念ごと無い環境」(CLI / テスト) 用
+        absorption_excluded_entry_ids: 圧縮区間として提示中の digest entry
+            id 集合 — **吸収の見積もり専用** (生成経路の吸収計画と同じ集合を
+            渡さないと吸収コールの見積もりが乖離する)。**None = 照会失敗
+            (fold の有無が不明)** — 生成経路が吸収を見送るのと同形に、吸収
+            コールを 0 と見積もる。既定の空集合は「fold という概念ごと無い
+            環境」(CLI / テスト) 用。束ねの見積もりはこの集合を使わない —
+            実行 (run_band_overflow) と同じく除外なしで数える
+            (chronicle_consolidation_veto_removal 機構 A、2026-09-27)
         db_lock: 同じ DB を書く adapter がいる場合、その ``_db_lock``。見積もり
             自体は読むだけだが、Memopedia の初期化はテーブル作成の書き込みを伴う
             (docs/issues/memopedia_writers_bypass_adapter_lock.md)
@@ -132,7 +135,7 @@ def estimate_chronicle_generation_cost(
     # 極小 run の隣人吸収 (arasuji_tiny_run_absorption): 生成経路 (generate_
     # chronicle の全量計画 / build_arasuji) と同じ分割・同じ吸収計画で数える —
     # 表示と実走が違う数を言ってはならない (§16-2 と同じ裁定)。
-    # excluded_entry_ids=None (fold 不明) の回は生成側が吸収を見送るので、
+    # absorption_excluded_entry_ids=None (fold 不明) の回は生成側が吸収を見送るので、
     # 見積もりも吸収 0 (前回の未完了の flush だけ数える) が同形。
     from sai_memory.arasuji.absorption import (
         list_stale_upper_ids,
@@ -165,7 +168,7 @@ def estimate_chronicle_generation_cost(
         # CLI の --limit>0 実行と同形: 吸収は見送り。前回の未完了 (content_
         # stale) の flush だけは実行側 (run_absorption) が無条件に行うので数える。
         counted_upper_ids = list(list_stale_upper_ids(conn))
-    elif excluded_entry_ids is None or not tiny_chunks:
+    elif absorption_excluded_entry_ids is None or not tiny_chunks:
         counted_upper_ids = list(list_stale_upper_ids(conn))
     else:
         # 計画の例外は**伝播させる** (Codex 四巡 G1 — 「表示 ≥ 実走」)。実行側
@@ -178,7 +181,7 @@ def estimate_chronicle_generation_cost(
             absorption_plan = plan_absorption(
                 conn, tiny_chunks, all_messages, processed_ids,
                 target_chars=chronicle_band_budget(),
-                excluded_entry_ids=frozenset(excluded_entry_ids),
+                excluded_entry_ids=frozenset(absorption_excluded_entry_ids),
             )
         except sqlite3.OperationalError as exc:
             from sai_memory.arasuji.storage import is_missing_table_error
@@ -213,27 +216,24 @@ def estimate_chronicle_generation_cost(
 
     # 束ね (統合 LLM) の予測: 実行 (bands.run_band_overflow) と同じ計画の
     # dry 実行 — 既存のレベル別の並び + 新規チャンク (レベル1 到着) で判定する。
+    # 実行と同じく提示中の圧縮区間による除外は無い (機構 A) — fold 照会の
+    # 成否にも依存しない (照会失敗で見送るのは吸収だけ)。
     from sai_memory.arasuji.bands import EST_PARENT_CHARS, plan_band_overflow
-    if excluded_entry_ids is None:
-        # fold の有無が不明 — 生成経路は束ねを見送るので、見積もりも 0 が同形。
+    try:
+        consolidation_calls = plan_band_overflow(
+            conn,
+            extra_leaves=[
+                (
+                    c.coverage_chars,
+                    min((m.created_at for m in c.messages), default=None),
+                    max((m.created_at for m in c.messages), default=None),
+                    EST_PARENT_CHARS,
+                )
+                for c in plan.chunks
+            ],
+        )
+    except Exception:
         consolidation_calls = 0
-    else:
-        try:
-            consolidation_calls = plan_band_overflow(
-                conn,
-                extra_leaves=[
-                    (
-                        c.coverage_chars,
-                        min((m.created_at for m in c.messages), default=None),
-                        max((m.created_at for m in c.messages), default=None),
-                        EST_PARENT_CHARS,
-                    )
-                    for c in plan.chunks
-                ],
-                excluded_entry_ids=set(excluded_entry_ids) or None,
-            )
-        except Exception:
-            consolidation_calls = 0
 
     # 上位あらすじの連鎖再生成 (吸収の裁定 3) は独立に数える —
     # consolidation_calls へ混ぜると CLI の max_folds (束ねの上限) が膨らむ。

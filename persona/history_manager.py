@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, TYPE_CHECKING, Any
 import re
+import uuid
 from datetime import datetime, timezone
 
 if TYPE_CHECKING:
@@ -114,7 +115,34 @@ class HistoryManager:
                 target.write_text("[]", encoding="utf-8")
         try:
             data = json.loads(target.read_text(encoding="utf-8"))
-        except Exception:
+            if not isinstance(data, list):
+                # JSON として読めても配列でなければアーカイブとしては破損
+                # (null・オブジェクト・文字列は extend できず、放置すると
+                # 追記のたびに同じ例外で取り出し済みメッセージが行き場を失う)。
+                raise ValueError(
+                    f"archive top-level is {type(data).__name__}, not list"
+                )
+        except Exception as exc:
+            # 読めないアーカイブを空リストで上書きすると中身が消える。破損した
+            # ファイルは退避名へ移して残し、同じ名前で新しいアーカイブを始める
+            # (退避名は ``*.json`` に掛からないので、次回の glob は拾わない)。
+            corrupt_stamp = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}"
+            corrupt_path = target.with_name(f"{target.name}.corrupt-{corrupt_stamp}")
+            LOGGER.warning(
+                "[old_log] archive %s is unreadable (%s); moving it aside to %s "
+                "and starting a new archive",
+                target, exc, corrupt_path.name,
+            )
+            try:
+                target.rename(corrupt_path)
+            except OSError:
+                # 退避できないなら元のファイルには触らず、別名の新アーカイブへ書く。
+                LOGGER.error(
+                    "[old_log] failed to move unreadable archive %s aside; "
+                    "leaving it untouched and writing to a new archive",
+                    target, exc_info=True,
+                )
+                target = old_dir / f"{corrupt_stamp}_{uuid.uuid4().hex[:8]}.json"
             data = []
         data.extend(msgs)
         target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")

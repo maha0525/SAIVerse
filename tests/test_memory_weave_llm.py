@@ -118,7 +118,11 @@ class TestCurationUsesWeaveChain(unittest.TestCase):
 
         class _FakeAdapter:
             def __init__(self, c):
+                from sai_memory.db_locks import lock_for
+
                 self.conn = c
+                # 本物の adapter は __init__ で必ず DB の錠前を持つ
+                self._db_lock = lock_for(c)
 
             def append_persona_message(self, msg):
                 pass

@@ -119,6 +119,46 @@ class EntranceTopologyTestCase(unittest.TestCase):
         denial = self.check("c1", "t1")
         self.assertIsNotNone(denial)
         self.assertIn("入口が設定されていない", denial)
+        # 入口が無ければ移動させる先が無い — リダイレクト先を運ばない (§2.5)
+        self.assertIsNone(getattr(denial, "redirect_building_id", None))
+
+    # --- 直行の拒否は入口 ID を運ぶ (region.md §2.5 — move_entity が入口まで動かす) ---
+
+    def test_direct_denial_carries_entrance_redirect(self):
+        denial = self.check("c1", "t1")
+        self.assertEqual(denial.code, "not_via_entrance")
+        self.assertEqual(denial.redirect_building_id, "entrance_top")
+        self.assertIn("入口 '霧の谷: 入口' まで移動しました", denial.redirect_message)
+
+    def test_direct_denial_to_subregion_redirects_to_outermost_entrance(self):
+        # 境界が複数のときは一番外側の入口で止まる
+        self.assertEqual(self.check("c1", "s1").redirect_building_id, "entrance_top")
+        self.assertEqual(
+            self.check("c1", "entrance_sub").redirect_building_id, "entrance_top"
+        )
+        # Region 内部から SubRegion 内部への直行は SubRegion の入口
+        self.assertEqual(self.check("t1", "s1").redirect_building_id, "entrance_sub")
+
+    def test_at_outer_entrance_redirects_to_inner_entrance(self):
+        # 既に最外殻の入口に立っていれば、一つ内側の境界の入口まで進んで
+        # 止まる (region.md §2.5 第 2 項)
+        denial = self.check("entrance_top", "s1")
+        self.assertEqual(denial.code, "not_via_entrance")
+        self.assertEqual(denial.redirect_building_id, "entrance_sub")
+        self.assertIn("'祠' は『霧降りの森』の内部です", denial.redirect_message)
+        self.assertIn("入口 '霧降りの森: 入口' まで移動しました", denial.redirect_message)
+
+    def test_at_outer_entrance_without_inner_entrance_denies(self):
+        self.regions["sub"].entrance_building_id = None
+        denial = self.check("entrance_top", "s1")
+        self.assertIn("入口が設定されていない", denial)
+        self.assertIsNone(getattr(denial, "redirect_building_id", None))
+
+    def test_entry_policy_denial_carries_no_redirect(self):
+        # 境界点 (入口→内部) での拒否は、もう入口にいるので移動させない
+        self.regions["top"].config = {"entry_policy": "locked"}
+        denial = self.check("entrance_top", "t1")
+        self.assertIsNone(getattr(denial, "redirect_building_id", None))
 
     # --- entry policy (入口→内部の境界点で執行) ---
 
@@ -167,15 +207,21 @@ class EntranceTopologyTestCase(unittest.TestCase):
             self.assertIsNone(self.check("c1", "s1"))
         self.assertIsNotNone(self.check("c1", "s1"))
 
-    # --- 縮退 ---
+    # --- 検査の部品が壊れた世界 (fail-closed) ---
 
-    def test_manager_without_region_support_allows(self):
+    def test_manager_without_region_support_fails_closed(self):
+        """get_region が無い manager で素通しに倒さず、エラーで止まる。
+
+        検査の部品が壊れた日に「全移動が無検査で通る」のではなく「移動が
+        止まって症状が見える」のが正 (2026-09-26 監査のまはー裁定)。
+        """
         om = OccupancyManager.__new__(OccupancyManager)
         om._manager_ref = object()  # get_region を持たない
         om.building_map = self.buildings
         import threading
         om._topology_bypass = threading.local()
-        self.assertIsNone(om._check_entrance_topology("p1", "c1", "t1"))
+        with self.assertRaises(AttributeError):
+            om._check_entrance_topology("p1", "c1", "t1")
 
     def test_corrupted_self_referencing_region_no_infinite_loop(self):
         self.regions["loop"] = FakeRegion(

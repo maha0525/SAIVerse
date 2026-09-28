@@ -27,23 +27,118 @@ class MoveDenialMessage(str):
     ``current_building_id`` は拒否時点の DB 確定現在地 (判明している場合)。
     仲裁負けの直後は in-memory mirror がまだ勝者の移動を映していないことが
     あるため、409 応答はこちらを優先する (Codex 第三巡 P2)。
+
+    ``redirect_building_id`` / ``redirect_message`` は Region 内部への直行
+    (code ``not_via_entrance``) でだけ入る。``move_entity`` はこの拒否を
+    受けると、拒否で終わらずに入口 (redirect_building_id) まで実際に移動し、
+    成功したら redirect_message (入口まで移動した旨の案内文) を返す
+    (docs/intent/region.md §2.5)。
     """
     code: str = "move_failed"
     current_building_id: Optional[str] = None
+    redirect_building_id: Optional[str] = None
+    redirect_message: Optional[str] = None
 
     def __new__(
         cls,
         text: str,
         code: str = "move_failed",
         current_building_id: Optional[str] = None,
+        redirect_building_id: Optional[str] = None,
+        redirect_message: Optional[str] = None,
     ):
         obj = super().__new__(cls, text)
         obj.code = code
         obj.current_building_id = current_building_id
+        obj.redirect_building_id = redirect_building_id
+        obj.redirect_message = redirect_message
         return obj
 
 
 CAS_CONFLICT = "cas_conflict"
+NOT_VIA_ENTRANCE = "not_via_entrance"
+REDIRECTED_TO_ENTRANCE = "redirected_to_entrance"
+
+
+class MoveRedirectedNotice(str):
+    """Region 内部への直行が入口で止まったときの **成功側** の案内文。
+
+    ``move_entity`` はこの場合 ``(True, MoveRedirectedNotice(...))`` を返す
+    (docs/intent/region.md §2.5)。文字列としては案内文そのもので、
+    ``code == "redirected_to_entrance"`` で「依頼先ではなく入口に着いた」ことを
+    判別できる。``current_building_id`` は実際に到着した入口の Building ID。
+    """
+    code: str = REDIRECTED_TO_ENTRANCE
+    current_building_id: Optional[str] = None
+
+    def __new__(cls, text: str, current_building_id: Optional[str] = None):
+        obj = super().__new__(cls, text)
+        obj.code = REDIRECTED_TO_ENTRANCE
+        obj.current_building_id = current_building_id
+        return obj
+
+
+def is_redirect_notice(msg: Any) -> bool:
+    """move_entity の成功メッセージが入口で止まった案内かどうか。"""
+    return getattr(msg, "code", None) == REDIRECTED_TO_ENTRANCE
+
+
+def arrived_building_id(ok: bool, msg: Any, requested_to_id: str) -> Optional[str]:
+    """move_entity の結果から実際の到着地を返す (失敗なら None)。
+
+    移動を報せる機構 (現象トリガー・管理画面の応答) が、依頼先ではなく実際の
+    到着地を運ぶための読み取り口 (region.md §2.5)。
+    """
+    if not ok:
+        return None
+    if is_redirect_notice(msg):
+        return getattr(msg, "current_building_id", None) or requested_to_id
+    return requested_to_id
+
+
+# 入れ子は 1 段まで (region.md §1) なので、City → SubRegion 内部の直行でも
+# 「トップの入口 → SubRegion の入口 → 目的地」の 3 手で必ず着くか止まる。
+MAX_ENTRANCE_STEPS = 3
+
+
+def move_through_entrances(
+    move: Callable[[str, str], Tuple[bool, Optional[str]]],
+    from_id: str,
+    to_id: str,
+    max_steps: int = MAX_ENTRANCE_STEPS,
+) -> Tuple[bool, Optional[str], str]:
+    """機構がペルソナの意図を代行する移動を、境界を一段ずつ通過して目的地まで進める。
+
+    region.md §2.5「読む人の違いによる、呼び出し側の追従」: 時間割の外出・帰宅、
+    召喚、会話終了後の帰宅は、入口で止めたままだと誰も次の一歩を打てずに詰む。
+    ``move(from, to)`` (``move_entity`` と同じ ``(ok, msg)`` 契約の 1 手) を、
+    入口で止まった案内が返る限り実際の到着地から同じ目的地へ打ち直す。各手で
+    entry policy は普通に掛かり、止められたらそこで正直に止まる (入口までは
+    来ている)。
+
+    ``move`` を差し込み式にしているのは、呼び出し側が 1 手ごとの付随処理
+    (runtime の PERSONA_MOVE トリガー等) を自分の移動関数に持っているため。
+
+    Returns:
+        ``(reached, msg, location)`` — reached は目的地に着いたか。msg は最後の
+        1 手の文 (失敗ならその理由、目的地に届かずに手数が尽きたなら最後の案内文)。
+        location は最終的な現在地 (失敗した手の移動元 = 実際に居る場所)。
+    """
+    current = from_id
+    last_msg: Optional[str] = None
+    for _ in range(max(1, max_steps)):
+        ok, msg = move(current, to_id)
+        if not ok:
+            return False, msg, current
+        if not is_redirect_notice(msg):
+            return True, msg, to_id
+        arrived = getattr(msg, "current_building_id", None)
+        last_msg = msg
+        if not arrived or arrived == current:
+            # 案内が到着地を運ばない / 一歩も進まない — 打ち直しても同じ結果
+            break
+        current = arrived
+    return False, last_msg, current
 
 
 class OccupancyManager:
@@ -100,13 +195,12 @@ class OccupancyManager:
         """
         chain: List[str] = []
         building = self.building_map.get(building_id)
-        get_region = getattr(self._manager_ref, "get_region", None)
         rid = getattr(building, "region_id", None)
-        while rid and get_region:
+        while rid:
             if rid in chain:  # 自己参照の破損データで無限ループしない
                 break
             chain.append(rid)
-            region = get_region(rid)
+            region = self._manager_ref.get_region(rid)
             rid = getattr(region, "parent_region_id", None) if region else None
         return chain
 
@@ -119,12 +213,14 @@ class OccupancyManager:
         境界越え。新規スコープがちょうど 1 つ、かつ移動元がその入口 Building の
         ときだけ通過を許し、その境界点で entry policy を執行する。
         退出方向 (新規スコープなし) は制限しない。
+
+        検査の部品 (``manager.get_region``) が欠けた世界で素通しに倒さない —
+        全移動が無検査で通るより、移動がエラーで止まって症状が見える方が正しい
+        (fail-closed、2026-09-26 監査のまはー裁定)。
         """
         if self._topology_bypassed():
             return None
-        get_region = getattr(self._manager_ref, "get_region", None)
-        if get_region is None:
-            return None
+        get_region = self._manager_ref.get_region
         from_scopes = set(self._scope_chain(from_id))
         to_chain = self._scope_chain(to_id)
         new_scopes = [s for s in to_chain if s not in from_scopes]
@@ -137,18 +233,38 @@ class OccupancyManager:
                 # 入口→内部の正規の通過。境界点で entry policy を執行する
                 return self._check_entry_policy(entity_id, region)
 
-        # 直行は拒否し、最外殻の新規スコープの入口を案内する
+        # 直行。最外殻の新規スコープの入口を案内し、入口が設定されていれば
+        # 入口 ID を運ぶ — move_entity はこれを見て入口まで移動して止める
+        # (region.md §2.5)。境界が複数でも一番外側の入口で止まる。
         outer = get_region(new_scopes[-1])
         dest_name = self.building_map[to_id].name if to_id in self.building_map else to_id
         if outer is None:
             return f"移動失敗: '{dest_name}' の所属 Region 情報が見つかりません。"
+        if (
+            len(new_scopes) >= 2
+            and getattr(outer, "entrance_building_id", None) == from_id
+        ):
+            # 既に最外殻の入口に立っている (region.md §2.5 第 2 項): 一つ内側の
+            # 境界の入口まで進んで止まる。この一歩は外側の境界を正規に通過する
+            # ので、再帰側の移動で外側の entry policy が普通に掛かる。入れ子は
+            # 1 段までなので、ここで全ケースが尽きる。
+            outer = get_region(new_scopes[-2])
+            if outer is None:
+                return f"移動失敗: '{dest_name}' の所属 Region 情報が見つかりません。"
         entrance_id = getattr(outer, "entrance_building_id", None)
         if entrance_id:
             entrance = self.building_map.get(entrance_id)
             entrance_name = getattr(entrance, "name", entrance_id) if entrance else entrance_id
-            return (
+            return MoveDenialMessage(
                 f"移動失敗: '{dest_name}' は『{outer.name}』の内部です。"
-                f"入口 '{entrance_name}' (ID: {entrance_id}) から入ってください。"
+                f"入口 '{entrance_name}' (ID: {entrance_id}) から入ってください。",
+                code=NOT_VIA_ENTRANCE,
+                redirect_building_id=entrance_id,
+                redirect_message=(
+                    f"'{dest_name}' は『{outer.name}』の内部です。"
+                    f"入口 '{entrance_name}' まで移動しました。"
+                    "中へ入るには入口からもう一度移動してください。"
+                ),
             )
         return (
             f"移動失敗: '{dest_name}' は『{outer.name}』の内部ですが、"
@@ -179,11 +295,12 @@ class OccupancyManager:
         ゲーム進行中 (phase が playing / paused) の Region 内 Building は、
         参加者 (state.participants) と Ruler 以外の入場を拒否する。退出方向は
         制限しない (退出はポーズで対応)。設計: temp/region_rpg_intent.md §D (不変条件 4)
+
+        検査の部品 (``manager.get_top_region_of_building``) が欠けた世界で
+        素通しに倒さない — 入口トポロジー検査と同じ fail-closed
+        (2026-09-26 監査のまはー裁定の同族)。
         """
-        get_top_region = getattr(self._manager_ref, "get_top_region_of_building", None)
-        if get_top_region is None:
-            return None
-        region = get_top_region(to_id)
+        region = self._manager_ref.get_top_region_of_building(to_id)
         if region is None or not region.is_game_region:
             return None
         phase = region.state.get("phase")
@@ -204,8 +321,21 @@ class OccupancyManager:
         entity_type: str,  # 'ai' or 'user'
         from_id: str,
         to_id: str,
+        _redirecting: bool = False,
     ) -> Tuple[bool, Optional[str]]:
         """エンティティを建物間で移動させる。移動に関するすべてのロジックをここに集約する。
+
+        **成功 = 依頼した to_id に到着、ではない** (region.md §2.5): 外部から
+        Region 内部への直行は、まだ入っていない一番外側の境界の入口 (既にその
+        入口に立っていれば一つ内側の入口) まで移動して止まり、
+        ``(True, MoveRedirectedNotice(案内文, current_building_id=入口))`` を
+        返す (``is_redirect_notice(msg)`` で判別)。実際の現在地は canonical
+        location (persona.current_building_id / state.user_current_building_id)
+        か通知の ``current_building_id`` を読むこと。入口への移動が通らなければ
+        その移動自身の失敗理由で ``(False, 理由)`` を返す。入口へのリダイレクトは
+        1 ホップ限り (``_redirecting`` は内部用で、再帰側の再リダイレクトを止める)。
+        機構がペルソナの意図を代行する移動で目的地まで進ませたいときは
+        モジュール関数 ``move_through_entrances`` を使う。
 
         W5/B1 (分離監査「移動 DB を先に commit し、後処理失敗で失敗結果と実世界が
         分裂する」) の構造:
@@ -258,6 +388,41 @@ class OccupancyManager:
 
         topology_denial = self._check_entrance_topology(entity_id, from_id, to_id)
         if topology_denial:
+            # 直行 (region.md §2.5): その場で拒否せず、まだ入っていない一番外側の
+            # 境界の入口 (既にそこに立っていれば一つ内側の入口) まで移動して
+            # 止める。入口が無い / 境界点 (入口→内部) の policy 拒否は移動せずに
+            # 拒否文で終わる。
+            redirect_id = getattr(topology_denial, "redirect_building_id", None)
+            if (
+                not _redirecting
+                and redirect_id
+                and redirect_id != from_id
+                and redirect_id != to_id
+            ):
+                logging.info(
+                    "move_entity redirected to entrance: %s (%s -> %s, requested %s)",
+                    entity_id, from_id, redirect_id, to_id,
+                )
+                ok, redirect_result = self.move_entity(
+                    entity_id, entity_type, from_id, redirect_id,
+                    _redirecting=True,
+                )
+                if ok:
+                    return True, MoveRedirectedNotice(
+                        getattr(topology_denial, "redirect_message", None)
+                        or str(topology_denial),
+                        current_building_id=redirect_id,
+                    )
+                logging.info(
+                    "move_entity redirect to entrance failed: %s (%s -> %s): %s",
+                    entity_id, from_id, redirect_id, redirect_result,
+                )
+                # 入口への移動が通らなかった理由 (定員・隔離・鍵・現在地のずれ)
+                # をそのまま運ぶ。元の直行拒否文 (「入口 X から入って」) は、
+                # 一つ内側への一歩のケースでは X = いま立っている場所になって
+                # 意味が通らないため返さない。CAS 競合は code ごと素通しになり、
+                # route 層の 409 再同期がそのまま効く。
+                return False, redirect_result
             logging.info(
                 "move_entity blocked by entrance topology: %s (%s -> %s): %s",
                 entity_id, from_id, to_id, topology_denial,
@@ -290,9 +455,9 @@ class OccupancyManager:
             logging.warning("move_entity aborted: unknown entity type %s", entity_type)
             return False, f"不明なエンティティタイプ: {entity_type}"
 
-        ledger = getattr(self._manager_ref, "execution_ledger", None)
-        if ledger is None:
-            return self._move_entity_legacy(entity_id, entity_type, from_id, to_id)
+        # 台帳は SAIVerseManager が無条件に持つ。台帳なしの縮退経路 (旧実装の
+        # 並行コピー) は 2026-09-26 監査で撤去した — 移動は台帳経路一本。
+        ledger = self._manager_ref.execution_ledger
 
         persona_queue_id = entity_id if entity_type == 'ai' else None
         execution_id, _created = ledger.begin_execution(
@@ -513,7 +678,7 @@ class OccupancyManager:
         到着記録) — in-memory occupants は commit 後まで触らないため、ここでは
         無変異で導出する。
 
-        event_key は移動ごとの採番 ID (台帳 execution_id / legacy は uuid) を含む
+        event_key は移動ごとの採番 ID (台帳 execution_id / 未指定なら uuid) を含む
         (分離監査 P2-1: 秒精度 timestamp では同一秒の同経路移動が衝突していた)。
         移動 tx は原子的でイベントの部分状態が残らないため、再試行時の key 再利用
         は不要。
@@ -640,147 +805,6 @@ class OccupancyManager:
             "payload": payload, "persona_id": persona_queue_id,
         })
         return items
-
-    def _move_entity_legacy(
-        self,
-        entity_id: str,
-        entity_type: str,
-        from_id: str,
-        to_id: str,
-    ) -> Tuple[bool, Optional[str]]:
-        """execution_ledger の無い環境 (旧テストスタブ等) の縮退経路。
-
-        従来実装のまま: DB commit 後の後処理 (イベント・hook) が裸で走る。
-        本番 manager は常に台帳を持つため、この経路は縮退時のみ。
-        CAS (P1-2) と canonical sync (P1-1 残片) は台帳経路と同じ規律で行う。
-        """
-        logging.warning(
-            "move_entity: manager has no execution_ledger; running in legacy "
-            "mode (%s -> %s)", from_id, to_id,
-        )
-        db = self.SessionLocal()
-        try:
-            now = datetime.now()
-            if entity_type == 'ai':
-                active_rows = db.query(BuildingOccupancyLog).filter_by(
-                    AIID=entity_id, EXIT_TIMESTAMP=None,
-                ).order_by(
-                    BuildingOccupancyLog.ENTRY_TIMESTAMP.desc(),
-                    BuildingOccupancyLog.ID.desc(),
-                ).all()
-                if len(active_rows) > 1:
-                    db.rollback()
-                    logging.error(
-                        "move_entity(legacy): duplicate active occupancy rows "
-                        "for %s (%d rows)", entity_id, len(active_rows),
-                    )
-                    return False, (
-                        "移動失敗: 占有記録が破損しています (現在地が複数)。"
-                        "再起動時の自動修復をお試しください。"
-                    )
-                if active_rows and active_rows[0].BUILDINGID != from_id:
-                    current_bid = active_rows[0].BUILDINGID
-                    db.rollback()
-                    return False, self._stale_from_message(current_bid)
-                if active_rows:
-                    if not self._close_active_row_cas(db, active_rows[0].ID, now):
-                        db.rollback()
-                        return False, self._stale_from_message(
-                            self._read_ai_location_db(db, entity_id)
-                        )
-                if not self._insert_active_row_cas(db, entity_id, to_id, now):
-                    db.rollback()
-                    return False, self._stale_from_message(
-                        self._read_ai_location_db(db, entity_id)
-                    )
-                entity_name = self.id_to_name_map.get(entity_id, entity_id)
-            else:
-                user = db.query(UserModel).filter_by(USERID=int(entity_id)).first()
-                if not user:
-                    return False, "移動失敗: ユーザーが見つかりません。"
-                if user.CURRENT_BUILDINGID is not None and user.CURRENT_BUILDINGID != from_id:
-                    current_bid = user.CURRENT_BUILDINGID
-                    db.rollback()
-                    return False, self._stale_from_message(current_bid)
-                if not self._cas_update_user_location(
-                    db, int(entity_id), from_id, to_id
-                ):
-                    db.rollback()
-                    return False, self._stale_from_message(
-                        self._read_user_location_db(db, int(entity_id))
-                    )
-                entity_name = user.USERNAME or "ユーザー"
-
-            db.commit()
-
-            if entity_id in self.occupants.get(from_id, []):
-                self.occupants[from_id].remove(entity_id)
-            self.occupants.setdefault(to_id, []).append(entity_id)
-
-            # 確定位置の公開は後処理より前 (台帳経路と同じ規律 —
-            # 2026-07-21 Codex 第二巡 P1)
-            self._sync_canonical_location(entity_id, entity_type, to_id)
-
-            mgr = self._manager_ref
-            if mgr is not None and hasattr(mgr, "add_building_event"):
-                for event_building_id, event_msg in self._build_occupancy_events(
-                    entity_id, entity_type, entity_name, from_id, to_id, now,
-                ):
-                    heard_by = event_msg.pop("heard_by", [])
-                    event_msg.pop("ingested_by", None)
-                    # 上の occupants 更新後なので heard_by を再算出せずそのまま使う
-                    mgr.add_building_event(event_building_id, event_msg, heard_by=heard_by)
-            else:
-                logging.warning(
-                    "occupancy event ignored: manager_ref unavailable for %s -> %s",
-                    from_id, to_id,
-                )
-
-            logging.info(f"Moved {entity_type} '{entity_id}' from {from_id} to {to_id}.")
-
-            if entity_type == "ai":
-                try:
-                    from saiverse.dynamic_state import DynamicStateManager
-                    manager = self._manager_ref
-                    if manager:
-                        persona = getattr(manager, "personas", {}).get(entity_id)
-                        if persona:
-                            DynamicStateManager.on_building_entered(persona, to_id, manager)
-                except Exception:
-                    logging.exception("[dynamic_state] on_building_entered failed for %s -> %s", entity_id, to_id)
-
-                try:
-                    from saiverse.addon_hooks import dispatch_hook
-                    dispatch_hook(
-                        "persona_exited_building",
-                        persona_id=entity_id,
-                        building_id=from_id,
-                        from_building_id=from_id,
-                        to_building_id=to_id,
-                    )
-                    dispatch_hook(
-                        "persona_entered_building",
-                        persona_id=entity_id,
-                        building_id=to_id,
-                        from_building_id=from_id,
-                    )
-                except Exception:
-                    logging.exception(
-                        "[addon_hooks] persona move hook dispatch failed "
-                        "for %s -> %s", entity_id, to_id,
-                    )
-
-            lifecycle = getattr(self._manager_ref, "game_lifecycle", None)
-            if lifecycle is not None:
-                lifecycle.on_entity_moved(entity_id, from_id, to_id)
-
-            return True, None
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to move {entity_type} '{entity_id}' in DB: {e}", exc_info=True)
-            return False, "データベースの更新中にエラーが発生しました。"
-        finally:
-            db.close()
 
     def _stale_from_message(self, current_bid: Optional[str]) -> "MoveDenialMessage":
         """CAS 競合 (現在地が変わっている) の拒否メッセージを組み立てる。

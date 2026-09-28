@@ -347,6 +347,44 @@
     opacity: 0.55;
 }
 
+/* 表示中の建物が削除され、引っ越し先が見つからなかったときの案内
+   (docs/issues/deleted_current_building_dead_end.md)。チャット本文の中央に
+   置き、システム通知の警告と同じ琥珀色の系統で控えめに出す。
+   ダーク既定 + 下の :global([data-theme="light"]) で明るい側を上書きする。 */
+.lostBuildingNotice {
+    align-self: center;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    max-width: 560px;
+    margin: 3rem auto 0;
+    padding: 0.9rem 1.1rem;
+    border: 1px solid rgba(240, 173, 78, 0.35);
+    border-radius: 10px;
+    background-color: rgba(240, 173, 78, 0.1);
+    color: var(--foreground);
+    font-size: 0.9rem;
+    line-height: 1.55;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    box-sizing: border-box;
+}
+
+.lostBuildingNoticeIcon {
+    flex-shrink: 0;
+    margin-top: 0.1rem;
+    color: #f0ad4e;
+}
+
+:global([data-theme="light"]) .lostBuildingNotice {
+    border-color: rgba(200, 130, 20, 0.4);
+    background-color: rgba(240, 173, 78, 0.12);
+}
+
+:global([data-theme="light"]) .lostBuildingNoticeIcon {
+    color: #b8740f;
+}
+
 .bubble {
     display: none;
 }

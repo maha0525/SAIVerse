@@ -13,6 +13,7 @@ from sqlalchemy import func
 
 from saiverse import task_book
 from saiverse.buildings import Building
+from saiverse.occupancy_manager import arrived_building_id, is_redirect_notice
 from database.models import (
     AI as AIModel,
     Building as BuildingModel,
@@ -994,6 +995,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             )
             return {
                 "ITEM_ID": item.ITEM_ID,
+                # ペルソナが会話で使う短縮参照 item:N の N (saiverse/references.py)
+                "SHORT_ID": item.SHORT_ID,
                 "NAME": item.NAME,
                 "TYPE": item.TYPE,
                 "DESCRIPTION": item.DESCRIPTION or "",
@@ -1703,11 +1706,16 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             ai_id, from_building_id, target_building_id
         )
         if success:
-            # 位置属性と cursor 儀式は move_entity が canonical sync 済み (W7 柱5)
-            return (
-                f"Successfully moved '{persona.persona_name}' to "
-                f"'{self.building_map[target_building_id].name}'."
-            )
+            # 位置属性と cursor 儀式は move_entity が canonical sync 済み (W7 柱5)。
+            # Region 内部への直行は入口で止まるので、報せるのは依頼先ではなく
+            # 実際の到着地 + 入口で止まった案内文 (docs/intent/region.md §2.5)
+            arrived = arrived_building_id(success, reason, target_building_id)
+            arrived_building = self.building_map.get(arrived)
+            arrived_name = arrived_building.name if arrived_building else arrived
+            result = f"Successfully moved '{persona.persona_name}' to '{arrived_name}'."
+            if is_redirect_notice(reason):
+                result = f"{result} {reason}"
+            return result
         return f"Failed to move: {reason}"
 
     def trigger_world_event(self, event_message: str) -> str:

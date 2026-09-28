@@ -36,6 +36,7 @@ from saiverse import clock
 from saiverse import day_plan
 from saiverse import execution_ledger as XL
 from saiverse.event_scheduler import EventScheduler
+from saiverse.meta_layer import MetaLayer
 
 PERSONA_ID = "alice"
 PLAN_DATE = "2026-07-04"
@@ -145,6 +146,9 @@ def _make_manager(session_factory, *, active=True, with_playbooks=True):
         pulse_controller=RecordingPulseController(),
         _autonomy_managers={},
     )
+    # 判断点の直列化 Lock は本番 manager が無条件に持つ MetaLayer から取る
+    # (autonomy_wiring._judgment_lock は無 Lock へ倒さない)。
+    manager.meta_layer = MetaLayer(manager)
     return manager, persona
 
 
@@ -1564,6 +1568,7 @@ def test_adapter_has_assistant_message_since(tmp_path, monkeypatch):
 def test_slots_fire_on_real_dispatch_thread(session_factory):
     """day_plan の予約はシム専用ではない — 実時刻の dispatch スレッドで発火する。"""
     manager, _ = _make_manager(session_factory)
+    _attach_ledger(manager, session_factory)  # コマ発火は台帳経路一本
     today = datetime.now().date().isoformat()
     past = (datetime.now()).strftime("%H:%M")  # 過去/現在時刻 → 即時発火
     day_plan.save_day_plan(manager, PERSONA_ID, today, [

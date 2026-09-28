@@ -71,8 +71,11 @@ def manager(session_factory):
     """SAIVerseManager の最小スタブ。
 
     day_plan が触る実属性のみ: SessionLocal / personas / occupancy_manager /
-    event_scheduler。
+    event_scheduler / execution_ledger。本番 manager は実行台帳を無条件に持つ
+    (台帳なしの縮退経路は 2026-09-26 監査で撤去) ので、スタブも本物を積む。
     """
+    from saiverse.execution_ledger import ExecutionLedger
+
     db = session_factory()
     try:
         db.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
@@ -118,6 +121,7 @@ def manager(session_factory):
         personas=personas,
         occupancy_manager=StubOccupancy(personas),
         event_scheduler=EventScheduler(),  # start() しない (シム前提)
+        execution_ledger=ExecutionLedger(session_factory),
     )
 
 
@@ -610,6 +614,118 @@ def test_move_failure_runs_in_place_and_notifies_persona(manager, task_refs):
     assert notices[0]["kind"] == "world_state"
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert slots[0]["status"] == "done"
+
+
+class _RegionOccupancyStub:
+    """「図書館」が Region『学園』の内部にある世界の move_entity 契約
+    (docs/intent/region.md §2.5)。外から図書館への直行は入口 campus_gate で
+    止まって案内文つきの成功を返し、入口からの一歩は locked なら鍵の文で拒否する。
+    """
+
+    def __init__(self, personas: Dict[str, Any], locked: bool = False):
+        self.moves: List[tuple] = []
+        self._personas = personas
+        self.locked = locked
+
+    def move_entity(self, entity_id, entity_type, from_id, to_id):
+        from saiverse.occupancy_manager import MoveRedirectedNotice
+
+        self.moves.append((entity_id, entity_type, from_id, to_id))
+        persona = self._personas[entity_id]
+        if to_id == "library" and from_id != "campus_gate":
+            persona.current_building_id = "campus_gate"
+            return True, MoveRedirectedNotice(
+                "'図書館' は『学園』の内部です。入口 '学園: 入口' まで移動しました。"
+                "中へ入るには入口からもう一度移動してください。",
+                current_building_id="campus_gate",
+            )
+        if to_id == "library" and self.locked:
+            return False, "移動失敗: 『学園』には鍵がかかっています。"
+        persona.current_building_id = to_id
+        return True, None
+
+
+def test_facility_move_into_region_passes_entrance_in_two_steps(manager):
+    """目的地が Region 内部なら、入口で止まった移動を打ち直して目的地まで進む
+    (時間割は機構がペルソナの意図を代行する移動 — region.md §2.5)。"""
+    persona = manager.personas[PERSONA_ID]
+    stub = _RegionOccupancyStub(manager.personas)
+    manager.occupancy_manager = stub
+
+    assert day_plan._move_to_facility(
+        manager, PERSONA_ID, {"facility": "library", "title": "調べもの"}
+    ) is True
+    assert stub.moves == [
+        (PERSONA_ID, "ai", "alice_room", "library"),
+        (PERSONA_ID, "ai", "campus_gate", "library"),
+    ]
+    assert persona.current_building_id == "library"
+
+
+def test_facility_move_into_locked_region_stops_at_entrance(manager):
+    """入口からの一歩が鍵に止められたら移動失敗 (False) で、ペルソナは入口に
+    居るまま。失敗の知覚は実際の現在地 (入口) と鍵の理由を運ぶ。"""
+    persona = manager.personas[PERSONA_ID]
+    notices: List[Dict[str, Any]] = []
+    persona.sai_memory = SimpleNamespace(
+        push_perception=(
+            lambda kind, content, **kw: notices.append(
+                {"kind": kind, "content": content}
+            )
+        ),
+    )
+    # 表示名の解決は manager.buildings を引く (_building_display_name)
+    manager.buildings = [
+        SimpleNamespace(building_id=bid, name=name)
+        for bid, name in (
+            ("alice_room", "アリスの部屋"),
+            ("campus_gate", "学園: 入口"),
+            ("library", "図書館"),
+        )
+    ]
+    stub = _RegionOccupancyStub(manager.personas, locked=True)
+    manager.occupancy_manager = stub
+
+    assert day_plan._move_to_facility(
+        manager, PERSONA_ID, {"facility": "library", "title": "調べもの"}
+    ) is False
+    assert len(stub.moves) == 2
+    assert persona.current_building_id == "campus_gate"
+    assert len(notices) == 1
+    content = notices[0]["content"]
+    assert "「図書館」へ移動できませんでした" in content
+    assert "鍵がかかっています" in content
+    assert "現在地「学園: 入口」で行います" in content
+
+
+def test_building_display_name_resolution():
+    """ペルソナに見せる場所名の解決 (移動失敗の知覚・外出/自室コマの文面が共用)。
+
+    一本化前は同名定義が二つあり、後の定義が黙って勝っていた。ここでその
+    実効の意味 (manager.buildings を引く / 空 id は「どこか」/ 不明 id と
+    名前の空は id の文字列) を固定する。
+    """
+    manager = SimpleNamespace(buildings=[
+        SimpleNamespace(building_id="library", name="図書館"),
+        SimpleNamespace(building_id="nameless", name=""),
+    ])
+    resolve = day_plan._building_display_name
+    assert resolve(manager, "library") == "図書館"
+    assert resolve(manager, "nameless") == "nameless"
+    assert resolve(manager, "unknown_room") == "unknown_room"
+    assert resolve(manager, None) == "どこか"
+    assert resolve(manager, "") == "どこか"
+    assert resolve(SimpleNamespace(), "library") == "library"  # buildings 無し
+
+
+def test_building_display_name_reads_buildings_not_building_map():
+    """引く入れ物は manager.buildings。本物の manager では building_map と同じ
+    Building を共有するので食い違わないが、どちらの意味かをここで決めておく。"""
+    manager = SimpleNamespace(
+        buildings=[SimpleNamespace(building_id="library", name="図書館")],
+        building_map={"library": SimpleNamespace(building_id="library", name="別名")},
+    )
+    assert day_plan._building_display_name(manager, "library") == "図書館"
 
 
 # ---------------------------------------------------------------------------
@@ -2089,24 +2205,6 @@ def test_handler_raise_marks_unknown_closes_episode_retains_reservation(manager,
     exec_id = _slot_exec_id(manager)
     assert ledger.get_execution(exec_id)["status"] == "unknown"
     assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 5  # 予約保持
-
-
-def test_no_ledger_manager_falls_back_to_legacy_fire(manager, task_refs):
-    """縮退: execution_ledger を持たない manager では従来経路で done へ到達する。"""
-    assert getattr(manager, "execution_ledger", None) is None
-    day_plan.init_budget_ledger(manager, PERSONA_ID, PLAN_DATE, 20)
-    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
-    clock.enable_virtual(BASE + timedelta(hours=9))
-
-    with patch("sea.work_session.run_work_session",
-               return_value=_mock_work_session_result(rounds_used=3)) as mock_ws:
-        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
-
-    assert mock_ws.call_count == 1
-    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert slots[0]["status"] == "done"
-    # 旧経路: consume_budget が実測 3 を積む
-    assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3
 
 
 # ---------------------------------------------------------------------------

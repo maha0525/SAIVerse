@@ -138,7 +138,7 @@ def _resolve_anchor_state(
     anchor.updated_at は LLM 呼び出し成功時にのみ touch されるため、prompt cache
     書き込みの真の起点になる。
     """
-    runtime = getattr(manager, "sea_runtime", None) or getattr(manager, "runtime", None)
+    runtime = manager.sea_runtime
     if runtime is None:
         return (None, None)
     lifecycle = getattr(runtime, "session_lifecycle", None)

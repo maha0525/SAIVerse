@@ -1531,9 +1531,7 @@ class DirectInsertMigrationTest(unittest.TestCase):
             persona_id="p1",
             sai_memory=SimpleNamespace(push_perception=_push),
         )
-        # NOTE: day_plan には _building_display_name が二重定義されており
-        # (3599 行 = building_map 版 / 5292 行 = buildings 版)、モジュール
-        # ロード時は後者が勝つ。テストは実効定義 (buildings リスト) に合わせる。
+        # 表示名の解決は manager.buildings を引く (day_plan._building_display_name)
         manager = SimpleNamespace(buildings=[
             SimpleNamespace(building_id="b_target", name="工房"),
             SimpleNamespace(building_id="b_current", name="自宅"),

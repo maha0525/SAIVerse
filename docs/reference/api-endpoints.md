@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 360（tag グループ: 26）
+**エンドポイント数**: 361（tag グループ: 26）
 
 ## addon
 
@@ -387,6 +387,7 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 |---|---|---|
 | GET | `/api/system/alerts` | Return system-level alerts populated during startup. |
 | GET | `/api/system/announcements` | Return announcements from the configured Gist. |
+| POST | `/api/system/channel` | Switch this install to the other release line, through the updater. |
 | POST | `/api/system/legacy-log/{building_id}/archive` | 読めなくなった旧形式の履歴ファイルを脇へ退避し、警告を閉じる。 |
 | GET | `/api/system/quarantine` | Return all buildings currently quarantined due to log corruption. |
 | POST | `/api/system/quarantine/{building_id}/reset` | Reset a quarantined building to empty history (fresh start). |

@@ -236,6 +236,17 @@ class PersonaCore(
         """Get the current playbook execution state for UI display."""
         return dict(self.execution_state)
 
+    @property
+    def persona_dir(self) -> Optional[Path]:
+        """ペルソナのファイル置き場 (``~/.saiverse/personas/<id>/`` など)。
+
+        実体は SAIMemoryAdapter が持つ (``SAIMemoryAdapter.persona_dir``)。
+        SAIMemory の初期化に失敗して adapter が無いときは None。
+        """
+        if self.sai_memory is None:
+            return None
+        return self.sai_memory.persona_dir
+
     # -- Lazy LLM client properties ------------------------------------------
     # Clients are created on first access rather than at startup, which avoids
     # heavy initialisation (API probes, SDK setup) for every persona at boot.

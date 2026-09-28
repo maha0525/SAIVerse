@@ -399,6 +399,14 @@ def _build_mock_manager(db_file: Optional[str], scenario) -> Any:
         sea_runtime=MockWorkRuntime(MockSessionLLMClient()),
         _engine=engine,
     )
+    # 本番 SAIVerseManager が無条件に持つ部品。判断点の直列化 Lock
+    # (autonomy_wiring._judgment_lock) と、コマ発火の実行台帳 (台帳なしの
+    # 縮退経路は 2026-09-26 監査で撤去)。
+    from saiverse.execution_ledger import ExecutionLedger
+    from saiverse.meta_layer import MetaLayer
+
+    manager.meta_layer = MetaLayer(manager)
+    manager.execution_ledger = ExecutionLedger(session_factory)
     persona_path = Path(tempfile.mkdtemp(prefix="day_sim_"))
     manager.pulse_controller = MockJudgmentPulseController(
         manager, _default_mock_judge, persona_path,

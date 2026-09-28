@@ -249,7 +249,6 @@ class _RowItem:
     start_time: Optional[int]
     end_time: Optional[int]
     entry: Optional[ArasujiEntry] = None  # dry の模擬ノードでは None
-    excluded: bool = False  # 圧縮区間として提示中 — 畳まず、字数も数えない
     #: 直前のノードとの間に「未統合の下位レベルノード」が居る = 畳み範囲は
     #: この手前で切れる (跨ぐとその下位ノードが親の被覆範囲に内包されて
     #: 孤児化する)。未編纂の生ログ (穴) はもう境界にしない — 統合は穴を
@@ -262,11 +261,7 @@ class _RowItem:
         return max(1, self.coverage)
 
 
-def _load_rows(
-    conn: sqlite3.Connection,
-    *,
-    excluded_entry_ids: Optional[Set[str]] = None,
-) -> Dict[int, List[_RowItem]]:
+def _load_rows(conn: sqlite3.Connection) -> Dict[int, List[_RowItem]]:
     """レベル別の並び = {level: 未束ねノードの時系列列}。
 
     - 孤児 (**自分より上位**の entry の被覆範囲に真に内包される未束ねノード)
@@ -276,9 +271,13 @@ def _load_rows(
       同レベルの entry に内包されるだけのもの (期間 0 秒の一括インポート産
       Lv1 等) は孤児ではなく、通常の並びに立つ (重複被覆は別課題 —
       docs/issues/lv1_source_ids_duplicates_and_orphans.md)。
-    - ``excluded_entry_ids`` (圧縮区間として提示コンテキストに表示中の digest)
-      は字数の勘定からも畳み対象からも外すが、**並びには残す** (excluded
-      マーク)。畳みの範囲はこれを跨がない。
+    - どこかのモデルの提示コンテキストで digest 表示中 (圧縮区間) のエントリも
+      **区別しない** — 字数の勘定にも畳み対象にも入り、境界にもならない
+      (docs/intent/chronicle_consolidation_veto_removal.md 機構 A、
+      2026-09-27)。提示は視点であって共有の記録に拒否権を持たない: 束ねは
+      子の本文を書き換えない (親の追加と統合済み印だけ) ので、表示中の digest
+      のバイト列は束ねの前後で変わらない。同じ期間の二重提示は、帯の組み直し
+      (節目) の側が受ける。
     """
     from sai_memory.arasuji.storage import _ENTRY_COLUMNS, _row_to_entry
 
@@ -309,7 +308,6 @@ def _load_rows(
         "AND json_extract(metadata, '$.origin_track_id') IS NULL"
     ).fetchall()
 
-    excluded = excluded_entry_ids or set()
     out: Dict[int, List[_RowItem]] = {}
     for row in rows:
         entry = _row_to_entry(row)
@@ -321,7 +319,6 @@ def _load_rows(
             start_time=entry.start_time,
             end_time=entry.end_time,
             entry=entry,
-            excluded=entry.id in excluded,
         ))
     for level, level_row in out.items():
         _mark_uncompiled_gaps(conn, level, level_row)
@@ -626,11 +623,18 @@ class _Fold:
 def _plan_fold_for_level(row: Sequence[_RowItem]) -> Optional[List[_RowItem]]:
     """並び 1 本の発火判定と畳み範囲の決定。
 
-    合計字数 (excluded を除く) が上限を超えたら、新しい側に「残す量」だけを
-    残して、古い側の連続部分を畳み範囲にする。
+    合計字数が上限を超えたら、新しい側に「残す量」だけを残して、古い側の
+    連続部分を畳み範囲にする。
 
-    範囲が跨げない境界は 2 種類 — excluded (提示中の圧縮区間) と gap_before
-    (間に未統合の下位レベルノードが居る = 跨ぐと孤児化)。境界で刻んだ区間のうち、
+    勘定の主語 (2026-09-27、chronicle_consolidation_veto_removal 機構 A):
+    上限と残す量はどちらも**並びの全ノード**の字数で数える — どこかのモデルの
+    窓が digest で提示中のノードも含む。残す量の目的は「いちばん新しい体験を
+    細かいまま保つ」ことで、新しさは木と時間の性質であって提示状態の性質では
+    ない。
+
+    範囲が跨げない境界は gap_before (間に未統合の下位レベルノードが居る =
+    跨ぐと孤児化) の 1 種類だけ。提示中の圧縮区間は境界ではない (旧・境界①は
+    同日に廃止)。境界で刻んだ区間のうち、
     **2 件以上ある最古の区間**を畳む。最古の区間が 1 件でも、その先の区間は
     独立に畳める (先頭だけを見て打ち切ると、一時的な境界の手前 1 件が
     その後ろの過予算区間を永久に人質に取る — Codex レビュー 2026-07-28 high3)。
@@ -644,29 +648,22 @@ def _plan_fold_for_level(row: Sequence[_RowItem]) -> Optional[List[_RowItem]]:
     切り詰めで残った分は :func:`_plan_folds` の次周が拾う (2026-09-08
     まはー裁定 — 理由は定数のコメント)。
     """
-    eligible_chars = sum(i.chars for i in row if not i.excluded)
-    if eligible_chars <= BAND_CHAR_LIMIT:
+    total_chars = sum(i.chars for i in row)
+    if total_chars <= BAND_CHAR_LIMIT:
         return None
     # 新しい側から「残す量」ぶんを確保し、その手前までが畳み範囲の候補。
     keep = 0
     cut = len(row)
     for i in range(len(row) - 1, -1, -1):
-        if row[i].excluded:
-            continue
         if keep + row[i].chars > BAND_CHAR_KEEP:
             break
         keep += row[i].chars
         cut = i
     prefix = row[:cut]
-    # 境界 (excluded / gap_before) で連続区間に刻む。
+    # 境界 (gap_before) で連続区間に刻む。
     segments: List[List[_RowItem]] = []
     current: List[_RowItem] = []
     for item in prefix:
-        if item.excluded:
-            if current:
-                segments.append(current)
-            current = []
-            continue
         if item.gap_before and current:
             segments.append(current)
             current = []
@@ -733,25 +730,24 @@ def plan_band_overflow(
     conn: sqlite3.Connection,
     *,
     extra_leaves: Optional[Sequence[Sequence]] = None,
-    excluded_entry_ids: Optional[Set[str]] = None,
     pending_source_ids: Optional[Set[str]] = None,
 ) -> int:
     """束ねの発生回数 (連鎖含む) を LLM なしで予測する。
 
     :func:`run_band_overflow` と同じ計画 (:func:`_plan_folds`) を共有する。
+    実行と同じく、提示中の圧縮区間による除外は無い (機構 A、2026-09-27)。
 
     Args:
         extra_leaves: これから確定する新チャンク (レベル1) の
             ``(coverage_chars, start_time, end_time[, est_chars])`` 列。
             並びに加算して予測する (確認ゲートは実行前に呼ぶため)。
-        excluded_entry_ids: 圧縮区間として提示中の digest entry id 集合。
         pending_source_ids: 旧設計 (連続性ギャップ判定) の名残り。現設計では
             使わない — 呼び出し側互換のため受け取るだけ。
 
     Returns:
         予測される LLM コール回数。
     """
-    rows = _load_rows(conn, excluded_entry_ids=excluded_entry_ids)
+    rows = _load_rows(conn)
     if extra_leaves:
         row1 = rows.setdefault(1, [])
         for leaf in extra_leaves:
@@ -1135,10 +1131,7 @@ def _consolidate_fold(
     return parent
 
 
-def _any_level_over_limit(
-    conn: sqlite3.Connection,
-    excluded_entry_ids: Optional[Set[str]] = None,
-) -> bool:
+def _any_level_over_limit(conn: sqlite3.Connection) -> bool:
     """どこかのレベルの並びが上限を超えている可能性があるか (安価な前検査)。
 
     :func:`run_band_overflow` はチャンク確定のたびに呼ばれる (executor の
@@ -1157,15 +1150,12 @@ def _any_level_over_limit(
     (:func:`run_band_overflow` 冒頭) が帯の警告として可視化する。
     """
     rows = conn.execute(
-        "SELECT level, id, length(COALESCE(content, '')) FROM arasuji_entries "
+        "SELECT level, length(COALESCE(content, '')) FROM arasuji_entries "
         "WHERE is_consolidated = 0 AND origin_track_id IS NULL "
         "AND (is_incomplete IS NULL OR is_incomplete = 0)"
     ).fetchall()
-    excluded = excluded_entry_ids or set()
     totals: Dict[int, int] = {}
-    for level, entry_id, chars in rows:
-        if entry_id in excluded:
-            continue
+    for level, chars in rows:
         totals[level] = totals.get(level, 0) + int(chars or 0)
     return any(total > BAND_CHAR_LIMIT for total in totals.values())
 
@@ -1176,7 +1166,6 @@ def run_band_overflow(
     *,
     persona_id: Optional[str] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
-    excluded_entry_ids: Optional[Set[str]] = None,
     batch_callback: Optional[Callable] = None,
     max_folds: Optional[int] = None,
     extraction_failures: Optional[List[str]] = None,
@@ -1196,9 +1185,12 @@ def run_band_overflow(
     この関数を呼ぶので、大量編纂の 1 走行では承認済みの dry 予測件数
     (``max_folds`` の累計) まで束ねが積み上がる。
 
+    どこかのモデルの窓が digest で提示中のエントリも区別せずに数え・畳む
+    (提示は束ねに拒否権を持たない — chronicle_consolidation_veto_removal
+    機構 A、2026-09-27)。束ねは子の本文に触れない (親の追加と統合済み印
+    だけ) ので、提示中の digest のバイト列は変わらない。
+
     Args:
-        excluded_entry_ids: 圧縮区間として提示コンテキストに表示中の digest
-            entry id 集合 (字数の勘定・畳み対象から外し、畳み範囲は跨がない)。
         batch_callback: Fragment 抽出コールバック
             ``(List[Message], chronicle_entry_id) -> None``。恒等圧縮の子が
             初めて要約に変わる束ねでのみ、その子の生メッセージで呼ぶ。
@@ -1283,9 +1275,9 @@ def run_band_overflow(
             break
         # 安価な前検査 — 編纂の各チャンク確定後にも呼ばれるので、超過の無い
         # 回は並びの完全な読み直し (隣接ごとの隙間検査) をしないで抜ける。
-        if not _any_level_over_limit(conn, excluded_entry_ids):
+        if not _any_level_over_limit(conn):
             break
-        rows = _load_rows(conn, excluded_entry_ids=excluded_entry_ids)
+        rows = _load_rows(conn)
         # 計画時に見えている未統合ノードの id 集合 — tx 内再検査の
         # 「計画後に新規出現したか」の基準 (_plan_folds は rows を消費するので
         # 先に取る)。

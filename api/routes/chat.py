@@ -10,6 +10,7 @@ import json
 import os
 
 from saiverse.data_paths import get_saiverse_home
+from saiverse.occupancy_manager import is_redirect_notice
 
 class ChatMessageImage(BaseModel):
     url: str  # URL to access the image
@@ -1347,6 +1348,9 @@ class UtterRequest(BaseModel):
       再送は current == target になるため move をスキップし、`client_message_id`
       の冪等キーで発言は一度だけ載る。
     - 並行デバイスの競合は expected_from_building_id の CAS (409) が検出する。
+    - Region 内部への直行が入口で止まったら (docs/intent/region.md §2.5)、
+      発言は送らずに 409 `redirected_to_entrance` (案内文 + 実際の現在地 =
+      入口) を返す。送り直せば入口→内部の一歩になる。
 
     See: docs/intent/building_memory_unified.md §C-2
     """
@@ -1417,6 +1421,29 @@ def utter_message(req: UtterRequest, manager = Depends(get_manager)):
                     "code": "move_failed",
                     "message": f"発言先への移動に失敗: {msg}",
                     "current_building_id": manager.state.user_current_building_id,
+                },
+            )
+        if is_redirect_notice(msg):
+            # Region 内部への直行は入口まで来て止まる (docs/intent/region.md §2.5)。
+            # 内部のつもりの発言を入口で言わせないため、発言は送らない。応答は
+            # 「現在地ではない建物への発言」の拒否と同じ 409 の形で、案内文と
+            # 実際の現在地 (入口) を運ぶ — クライアントは本文を入力欄へ戻し、
+            # 現在地を入口へ再同期する。送り直せば入口→内部の一歩になる。
+            arrived = (
+                getattr(msg, "current_building_id", None)
+                or manager.state.user_current_building_id
+            )
+            logging.info(
+                "[USER_UTTER] Auto-move stopped at entrance %s (requested %s) — "
+                "utterance not sent",
+                arrived, req.target_building_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "redirected_to_entrance",
+                    "message": str(msg),
+                    "current_building_id": arrived,
                 },
             )
 

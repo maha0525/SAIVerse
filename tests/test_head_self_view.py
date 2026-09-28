@@ -15,8 +15,8 @@
    添付する。システムプロンプトには入れない。
 3. 既存 head への欠損補完 — 新 Section が ``recapture_missing`` で足された回に、
    全アイテムを「加わりました」と通知しない (cached_head_architecture.md C8)。
-4. 差分通知の画像 — 加わったアイテムの画像が知覚まで運ばれる (台帳経路・
-   台帳なしの degrade 経路の両方)。
+4. 差分通知の画像 — 加わったアイテムの画像が知覚まで運ばれる (台帳の outbox
+   payload と、配送ハンドラを通った知覚バッファの口の両方)。
 5. 境界 — 実際の ``prepare_context`` の出力 (LLM に渡るメッセージ列) に、
    インベントリのアイテム名と外見の行・画像が載る。コア記憶とスペル一覧も同じ
    テストで見る (登録されているのに描画されない章を捕まえる)。
@@ -124,6 +124,7 @@ class SelfViewWorld:
             personas={PERSONA_ID: self.persona},
             get_all_items_for_persona=self._items_for,
             get_bag_contents_recursive=lambda item_id: [],
+            sea_runtime=None,  # 本番 manager は無条件に持つ (未構築なら None)
         )
 
     def _items_for(self, persona_id):
@@ -432,21 +433,51 @@ class _ConstSection:
 
 
 class _RecordingSaiMemory:
+    """台帳の配送 (perception.push の実ハンドラ) が書き込む口だけの替え玉。"""
+
     def __init__(self):
         self.pushed: List[tuple] = []
 
     def is_ready(self):
         return True
 
-    def push_perception(self, kind, content, **kwargs):
+    def push_ledger_perception(
+        self, *, execution_id, outbox_id, kind, content, **kwargs,
+    ):
         self.pushed.append((kind, content, kwargs))
+        return True
 
 
 class MissingSectionBackfillTest(_WorldTestBase):
-    """新 Section が既存 head へ欠損補完で足される回の既読基準 (C8)。"""
+    """新 Section が既存 head へ欠損補完で足される回の既読基準 (C8)。
+
+    検知は台帳 (outbox) に積まれ、本番と同じ perception.push の配送ハンドラ
+    (execution_ledger_wiring) を通って知覚バッファの口まで届く。
+    """
 
     def setUp(self):
         super().setUp()
+        from database.models import Base
+        from saiverse.execution_ledger import ExecutionLedger
+        from saiverse.execution_ledger_wiring import (
+            TARGET_PERCEPTION_PUSH,
+            _make_perception_push_handler,
+        )
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        self.addCleanup(engine.dispose)
+        Base.metadata.create_all(engine)
+        ledger = ExecutionLedger(session_factory=sessionmaker(bind=engine))
+        ledger.register_outbox_handler(
+            TARGET_PERCEPTION_PUSH,
+            _make_perception_push_handler(self.world.manager),
+        )
+        self.world.manager.execution_ledger = ledger
+
         self.registry = HeadSectionRegistry()
         self.registry.register(_ConstSection())
         self.pipeline = HeadPipeline(registry=self.registry)
@@ -460,7 +491,7 @@ class MissingSectionBackfillTest(_WorldTestBase):
         snapshot = self.pipeline.get_snapshot(PERSONA_ID, MODEL)
         self.assertIsNotNone(snapshot.sections.get(SELF_VIEW_SECTION_NAME))
 
-        # 実際の Pulse 頭の検知 (台帳なしの degrade 経路) を通す
+        # 実際の Pulse 頭の検知 (台帳経路) を通す
         pushed = inject_diff_notifications(
             self.world.persona, self.world.manager, BUILDING,
             pipeline=self.pipeline, model_key=MODEL, detect_room=False,
@@ -494,8 +525,8 @@ class MissingSectionBackfillTest(_WorldTestBase):
             pipeline=self.pipeline, model_key=MODEL, detect_room=False,
         ))
 
-    def test_labels_without_images_do_not_pass_media(self):
-        """画像の無いラベルは従来どおり media を渡さない (既存の push 口の互換)。"""
+    def test_labels_without_images_carry_no_media(self):
+        """画像の無いラベルは空の media で届く (画像を捏造しない)。"""
         ensure_snapshot(self.pipeline, self.world.ctx())
         self.world.inventory.pop(1)
         inject_diff_notifications(
@@ -504,7 +535,7 @@ class MissingSectionBackfillTest(_WorldTestBase):
         )
         records = self.world.persona.sai_memory.pushed
         self.assertEqual(len(records), 1)
-        self.assertNotIn("media", records[0][2])
+        self.assertEqual(records[0][2]["media"], [])
 
 
 class LedgerDeliveryMediaTest(_WorldTestBase):

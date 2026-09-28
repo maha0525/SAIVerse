@@ -491,6 +491,18 @@
     "ja": "記憶の想起の判定が時間内に終わらず、今回は従来の方式で想起しました（判定の費用は発生しています）。グローバル設定で待ち時間を延ばすか、より速いモデルを割り当てると直ります。",
     "en": "The memory-recall judgment did not finish in time, so this turn fell back to the previous recall method (the judgment was still billed). Increase the wait time in Global Settings, or assign a faster model."
   },
+  "app.page.text095": {
+    "ja": "この世界には建物がひとつもありません。設定の「世界の編集」から建物を作成してください。",
+    "en": "This world has no buildings. Create one from the World Editor in Settings."
+  },
+  "app.page.text096": {
+    "ja": "表示していた建物は削除されました。サイドバーかマップから別の建物を選んでください。",
+    "en": "The building you were viewing has been deleted. Select another building from the sidebar or the map."
+  },
+  "app.page.text097": {
+    "ja": "建物が選ばれていません",
+    "en": "No building selected"
+  },
   "app.phenomena.page.text001": {
     "ja": "編集内容が保存されていません。閉じてよろしいですか？",
     "en": "You have unsaved changes. Close anyway?"
@@ -2594,6 +2606,10 @@
   "components.ItemModal.text036": {
     "ja": "この部屋にしまえるアイテムはありません",
     "en": "No items in this room to stow"
+  },
+  "components.ItemModal.text037": {
+    "ja": "ペルソナが会話の中でこのアイテムを指すときに使う番号です",
+    "en": "The number personas use to refer to this item in conversation"
   },
   "components.MCPSection.text001": {
     "ja": "必要なランタイムが見つからない",

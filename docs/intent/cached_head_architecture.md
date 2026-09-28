@@ -270,7 +270,7 @@ Section の登録は startup 時に集中させる (アドオン由来 Section �
 > - **置き場**: `_compose_messages` が、システムプロンプトと Memory Weave の後ろに独立した `role: "user"` のメッセージとして置き、画像 (外見と、インベントリの中の開いた写真など) を `metadata.media` で添付する。システムプロンプトには入れない (画像を添付できるのは独立したメッセージだけ)。印は `__self_view__` と、head の視覚メッセージの共通の印 `__visual_context__` (LLM クライアントの画像枠を使わない・自動想起のクエリから外れる、という既存の扱いを受けるため)。
 > - **中身**: `<system>` で包んだ「# あなた自身」の下に「## 外見」(画像が引けないペルソナは節ごと省く) と「## インベントリ」(空なら「インベントリにアイテムはありません。」)。アイテム 1 件の描き方は部屋と同じ `_render_item_entry` で、世界の読みは `builtin_data/tools/get_visual_context.read_self_view` (現在地の部屋には依存しない)。
 > - **撮り直し**: `refresh_on_events` は空 (Metabolism / anchor TTL 切れ / 欠損補完だけ)。移動では撮り直さない — 持ち物は移動で変わらない。
-> - **差分通知**: インベントリへの追加・インベントリからの削除・名前の変更、外見の画像の変更を末尾通知にする。加わったアイテムと変わった外見には描画と同じ画像を `NotificationLabel.media` で添付し、知覚まで運ぶ (`integration._push_section_diffs` / 台帳なしの degrade 経路の両方。それまで `NotificationLabel.media` は配送経路で捨てられていた)。外見の設定が外されたときは「外されました」と文だけで知らせる。DB の読み失敗は capture が例外として上げて前の値を据え置くので、空の外見が届くのは本当に外されたか、画像ファイルが無くなったときに限られる。
+> - **差分通知**: インベントリへの追加・インベントリからの削除・名前の変更、外見の画像の変更を末尾通知にする。加わったアイテムと変わった外見には描画と同じ画像を `NotificationLabel.media` で添付し、知覚まで運ぶ (`integration._push_section_diffs` の台帳 outbox 経路。当時あった台帳なしの degrade 経路は 2026-09-28 に撤去。それまで `NotificationLabel.media` は配送経路で捨てられていた)。外見の設定が外されたときは「外されました」と文だけで知らせる。DB の読み失敗は capture が例外として上げて前の値を据え置くので、空の外見が届くのは本当に外されたか、画像ファイルが無くなったときに限られる。
 > - **required ではない**: 失敗したら head から欠けるだけ。既存の head には次の Pulse の欠損補完 (`recapture_missing`) で足され、そのとき既読基準 (B) が初期化されるので、初回に全アイテムを「加わりました」と通知しない (C8)。
 
 **当初の設計**: 既存の `runtime_context.py` の visual_context cache (anchor キー) は、`VisualContextSection` (refresh_on_events: `{building_entered, appearance_changed}`) として本機構に乗せ替えられる。
@@ -356,7 +356,7 @@ Section の `refresh_on_events` 未指定 = 空 frozenset = Metabolism のみで
 - **B は A から独立した台帳** — capture 失敗で A の key が省かれても、その Section の B は落とさない (落とすと復旧後に故障期間中の差分が届かない)。
 - **event 再 capture (`capture_for_event`)・欠損復帰 (`recapture_missing`) も同じ**: B が無い Section だけ初期化し、既存 B は据え置く。
 - **store への保存は「保存時点の最新 in-memory B」を書く** — 古い B のコピーを抱えた保存が遅れて着地して、並行配送が進めた durable B を巻き戻さないよう、(persona, model) 単位で保存を直列化し、保存直前に B を読み直す。B は単調にしか進まないので「新しい B + 古い A の版」は無害、逆は再起動後の再通知重複になる。
-- **台帳なしの degrade 配送経路も「検出 → push 成功 → B 前進」の順** — push 失敗・SAIMemory 未 ready では B を据え置き、次回 flush の再検出に委ねる (at-least-once)。一部のラベルだけ push に失敗した回は、成功した分も次回に再び届く (本番の manager は必ず台帳を持つので、この経路はテスト環境でしか通らない)。
+- **配送経路は台帳の一本だけ (2026-09-28)** — 以前は台帳が無い環境向けに知覚へ直接 push する degrade 経路があったが、本番の manager は台帳を無条件に持つのでこの経路は走らず、直すとき片方だけ直して割れる温床だったため撤去した。SAIMemory 未 ready などの配送失敗は、台帳の配送ハンドラが例外で表明して outbox に pending のまま残し、関所 / 回復 tick が引き継ぐ。
 - **「検出 → 台帳に積む → B 前進」はペルソナ単位で一本に並べる (2026-09-26)** — ペルソナ P の Pulse 頭と、別のペルソナが P の部屋へ入ってきたときの検知 (`saiverse/dynamic_state.on_building_entered`、P の Beat ロックは取らない) が同時に走ると、同じ古い B から同じ差分を見つけて二回積んでいた。ペルソナ単位の通知ロックの中で三つを行い、後から来た側は進んだ B と比べる。ツール成功時の内容型通知 (`notify.py`) も同じロックに入る。**配送 (台帳の即時配送) はロックを離してから行う** — 移動の配送ハンドラは台帳の配送ロックを握ったまま他人の検知に入るので、通知ロックを握ったまま配送ロックを取ると逆順で固まる。ロック順序は「台帳の配送ロック → 通知ロック → 保存ロック → pipeline のロック」の一方向。経緯: [issues/head_diff_notification_duplicate_delivery.md](../issues/head_diff_notification_duplicate_delivery.md)
 - **B の前進は、メモリに読み込まれていないモデルの組にも及ぶ (2026-09-26)** — B はペルソナとモデルの組ごとに保存され、再起動後はそのとき使うモデルの組だけが読み込まれる。読み込まれた組だけを進めると、DB にだけある別モデルの組が古い B のまま残り、後でそのモデルが読み込まれたときに同じ差分を再配送していた。`advance_last_notified_many` (一回の配送で届けた Section をまとめて受け取る。単数版の `advance_last_notified` はその委譲) は、メモリ上の組に加えて DB にだけある同じペルソナの組の B も、届けた Section の分だけ進める。DB の処理は Section の数によらず一回 (入室の配送は台帳の配送ロックを握ったまま走るので、ここで往復を重ねると他のペルソナの配送まで待たせる)。DB からの読み込み (`load_from_store`) も通知ロックの中で行い、進める途中に古い組が読み込まれるのを防ぐ。経緯: 同 issue のケース 4。
 - **撮り直しはメモリに組が無いとき、先に DB の B を読み込む (2026-09-26)** — 再起動後、差分検知の読み込み (`ensure_snapshot`) より先にスペルの切り替え・Metabolism などの撮り直し (`dispatch_event` → `capture_all`) が来ると、`capture_all` はメモリに組が無いのを「B の無い初回」と扱い、DB に残っていた未配送の変化の B を撮ったばかりの値で上書きしていた (その変化は二度と届かない — 上の「capture_all は B に触らない」の違反)。`capture_all` はメモリに組が無ければ撮る前に `load_from_store` で読み込み、DB に行が本当に無いときだけ B を初期化する。撮影から保存までは通知ロックの中で行い、B の前進と並べる (新しいモデルの初回撮影が B の前進に割り込まれて古い値で上書きされる隙間もこれで閉じた)。`capture_all` は通知ロックを取るので、pipeline のロックや保存ロックを握ったまま呼ばない (`capture_for_event` はロックを離してから落ちる)。経緯: 同 issue のケース 5。
@@ -364,7 +364,7 @@ Section の `refresh_on_events` 未指定 = 空 frozenset = Metabolism のみで
 
 - **並べても閉じない残り (2026-09-26 受け入れ)** — ツールが書き込んでから内容型通知を出すまでの間に差分検知が先に同じ変化を見つけた回は、変化の知らせとツール側の知らせの二通りが届く (ツール側は B を見ずに必ず出す)。詳細は同 issue の「現在の状態」。
 
-回帰: `tests/test_head_pipeline.py` (capture_all / METABOLISM dispatch / capture_for_event / recapture_missing の基準据え置き、保存時の B 読み直し)、`tests/test_head_pipeline_anchor_ttl.py` (TTL 切れ再 capture 後の配送)、`tests/test_head_mutation_notify.py` (degrade 経路の配送確定後前進)、`tests/test_head_diff_notify_serialization.py` (同時検知で一回しか積まれない、配送は通知ロックの外)。
+回帰: `tests/test_head_pipeline.py` (capture_all / METABOLISM dispatch / capture_for_event / recapture_missing の基準据え置き、保存時の B 読み直し)、`tests/test_head_pipeline_anchor_ttl.py` (TTL 切れ再 capture 後の配送)、`tests/test_head_mutation_notify.py` (outbox 積みの確定後前進)、`tests/test_head_diff_notify_serialization.py` (同時検知で一回しか積まれない、配送は通知ロックの外)。
 
 ---
 

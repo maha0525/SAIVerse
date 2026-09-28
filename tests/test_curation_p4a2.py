@@ -783,7 +783,12 @@ def _make_run_manager(conn: sqlite3.Connection) -> Any:
 
     class _FakeAdapter:
         def __init__(self, c):
+            from sai_memory.db_locks import lock_for
+
             self.conn = c
+            # 本物の SAIMemoryAdapter は __init__ で必ず DB の錠前を持つ
+            # (run_pending_plans は代用ロックへ倒さず直接読む)
+            self._db_lock = lock_for(c)
             self.memopedia = _make_memopedia_stub(c)
             self._messages = fake_messages
 
