@@ -106,6 +106,8 @@ saiverse/
 ├── buildings.py            # Building モデルヘルパ
 ├── building_id_repair.py   # 区切り記号（/ \）を含む古い部屋 ID を起動時に付け替える（DB の参照・フォルダ・
 │                           #   付け替えの記録 cities/<city>/building_id_renames.json）
+├── building_leftover_cleanup.py # 消えた建物を指して残ったアイテムの置き場所・設置物・建物のリアルタイム
+│                           #   スペルを起動時に片付ける（付け替えの後。アイテムは消さず、どこにも置かない状態へ）
 ├── data_paths.py           # パス管理（user_data/builtin_data）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
 ├── observer_manager.py     # Observer（定期観測 Fixture）

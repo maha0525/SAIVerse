@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 365（tag グループ: 26）
+**エンドポイント数**: 366（tag グループ: 26）
 
 ## addon
 
@@ -463,7 +463,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/world/buildings` |  |
 | PUT | `/api/world/buildings/positions` | 街マップ編集モード用: 複数 Building の MAP_X/MAP_Y を一括更新する。 |
 | PUT | `/api/world/buildings/{building_id}` |  |
-| DELETE | `/api/world/buildings/{building_id}` |  |
+| DELETE | `/api/world/buildings/{building_id}` | 建物を消す。``items`` は中に直接置かれたアイテムの扱い。 |
+| GET | `/api/world/buildings/{building_id}/deletion-preview` | 建物を消したら何が一緒に消え、何が残るかの数 (削除の確認ダイアログ用)。 |
 | GET | `/api/world/buildings/{building_id}/realtime-spell` | Building に設定されたリアルタイムスペル一覧を取得する。 |
 | POST | `/api/world/buildings/{building_id}/realtime-spell` | Building にリアルタイムスペル binding を追加する。 |
 | DELETE | `/api/world/buildings/{building_id}/realtime-spell/{binding_id}` | Building のリアルタイムスペル binding を削除する。 |

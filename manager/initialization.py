@@ -175,6 +175,29 @@ class InitializationMixin:
             alerts = [unexpected_failure_alert(exc)]
         self.startup_alerts.extend(alerts)
 
+    def _cleanup_deleted_building_leftovers(self) -> None:
+        """Step 1a': 消えた建物を指したまま残っているアイテムの置き場所・設置物・
+        リアルタイムスペルを片付ける (saiverse/building_leftover_cleanup.py)。
+
+        部屋 ID の付け替え (_repair_unsafe_building_ids) の後に走らせる — 付け替えは
+        建物を指す行も新しい ID へ移すので、その前に走らせると付け替え待ちの行を
+        残骸と取り違える。アイテムと定期観測を読み込む前 (_init_buildings /
+        start_pull_observers) に済ませる。**起動は止めない。**
+        """
+        from saiverse.building_leftover_cleanup import cleanup_deleted_building_leftovers
+
+        try:
+            cleanup_deleted_building_leftovers(
+                session_factory=self.SessionLocal,
+                db_path=self.db_path,
+            )
+        except Exception:
+            LOGGER.error(
+                "[building-leftover-cleanup] 消えた建物の残骸の片付けが例外で止まりました"
+                " (起動は続けます。次の起動でもう一度試します)",
+                exc_info=True,
+            )
+
     def _init_buildings(self) -> None:
         """Step 1b: Load Static Assets from DB."""
         self.regions: Dict[str, Region] = self._load_regions_from_db()

@@ -1,11 +1,15 @@
 """Region CRUD (AdminService) のバリデーションと DB 反映のテスト。
 
-AdminService の region 系メソッドは self.SessionLocal しか使わないため、
-__new__ で生成して SessionLocal だけ差し込む軽量構成でテストする。
+AdminService の region 系メソッドは主に self.SessionLocal しか使わないため、
+__new__ で生成して SessionLocal を差し込む軽量構成でテストする。Region の
+削除は自動生成された入口の Building を delete_building で消し、delete_building
+は commit の後に manager (定期観測の予約の取り消し・アイテムの読み直し) を
+触るので、何もしない manager の代役も差し込む。
 """
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -34,6 +38,7 @@ class RegionAdminTestCase(unittest.TestCase):
 
         self.svc = AdminService.__new__(AdminService)
         self.svc.SessionLocal = self.SessionLocal
+        self.svc.manager = SimpleNamespace(_load_items_from_db=lambda: None)
 
     def tearDown(self):
         self.engine.dispose()
@@ -489,6 +494,7 @@ class BuildingCityImmutableTestCase(unittest.TestCase):
 
         self.svc = AdminService.__new__(AdminService)
         self.svc.SessionLocal = self.SessionLocal
+        self.svc.manager = SimpleNamespace(_load_items_from_db=lambda: None)
 
     def tearDown(self):
         self.engine.dispose()
