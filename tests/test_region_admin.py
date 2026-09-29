@@ -9,7 +9,9 @@ __new__ で生成して SessionLocal を差し込む軽量構成でテストす�
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -39,10 +41,19 @@ class RegionAdminTestCase(unittest.TestCase):
         self.svc = AdminService.__new__(AdminService)
         self.svc.SessionLocal = self.SessionLocal
         self.svc.manager = SimpleNamespace(_load_items_from_db=lambda: None)
+        # 入口の建物の削除は、残る記録を特殊な ID へ付け替える (付け替えの記録・
+        # 記憶のファイル・多重起動の確認は SAIVERSE_HOME の下)。一時フォルダへ向ける。
+        self._home = tempfile.TemporaryDirectory(prefix="saiverse_home_")
+        self.svc.saiverse_home = Path(self._home.name)
+        self.svc.db_path = self.db_path
+        env = patch.dict(os.environ, {"SAIVERSE_HOME": self._home.name})
+        env.start()
+        self.addCleanup(env.stop)
 
     def tearDown(self):
         self.engine.dispose()
         os.unlink(self.db_path)
+        self._home.cleanup()
 
     def _get_region(self, region_id):
         db = self.SessionLocal()

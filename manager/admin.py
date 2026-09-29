@@ -39,6 +39,11 @@ from manager.ids import (
     is_valid_identifier,
 )
 from manager.state import CoreState
+from saiverse.building_retirement import (
+    TOMBSTONE_PREFIX,
+    is_tombstone_id,
+    pending_retirement_ids,
+)
 from scripts.import_playbook import infer_scope_from_path
 from builtin_data.tools.save_playbook import save_playbook
 
@@ -522,6 +527,18 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
             city = db.query(CityModel).filter_by(CITYID=city_id).first()
 
+            # 消した建物の ID のうち、残る会話などを特殊な ID へ移す作業がまだ
+            # 済んでいないもの (saiverse/building_retirement.py)。済むまでは使わない
+            # — 済む前に同じ ID の建物を作ると、ペルソナの記憶の中の古い印が
+            # 新しい建物を指す。済めば空くので、番号は歯抜けにならない。
+            pending_retired = pending_retirement_ids(self.saiverse_home)
+
+            def id_taken(cid: str) -> bool:
+                return (
+                    db.query(BuildingModel).filter_by(BUILDINGID=cid).first() is not None
+                    or cid.lower() in pending_retired
+                )
+
             # Use custom ID if provided, otherwise generate. Either way the ID
             # must satisfy the charset contract (manager/ids.py) — it goes
             # verbatim into log folder paths, saiverse:// URIs and API paths.
@@ -529,18 +546,24 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 building_id = building_id.strip()
                 if not is_valid_identifier(building_id):
                     return charset_error("Building ID", building_id)
+                if is_tombstone_id(building_id):
+                    return (
+                        f"Error: Building IDs starting with '{TOMBSTONE_PREFIX}' are reserved "
+                        "for the records of deleted buildings (got: "
+                        f"'{building_id}')."
+                    )
             else:
                 # 日本語名など slug が空になる名前は building_<連番>_<city> へ
                 # フォールバック (issue 論点 1: 読み変換は導入せず、まず口を塞ぐ)
                 building_id = build_identifier(
-                    name,
-                    city.CITY_SLUG,
-                    stem="building",
-                    exists=lambda cid: db.query(BuildingModel)
-                    .filter_by(BUILDINGID=cid)
-                    .first()
-                    is not None,
+                    name, city.CITY_SLUG, stem="building", exists=id_taken,
                 )
+                if is_tombstone_id(building_id):
+                    # 名前から作った ID が消した建物の記録の頭 (deleted_) で始まる
+                    # (名前が「Deleted ...」など)。その形は使わず、連番の形にする。
+                    building_id = build_identifier(
+                        "", city.CITY_SLUG, stem="building", exists=id_taken,
+                    )
 
             # 大文字小文字を畳んで検査する: Building ID はフォルダ名
             # (~/.saiverse/cities/<city>/buildings/<id>/) になり、Windows の
@@ -554,6 +577,14 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 return (
                     f"Error: A building with the ID '{building_id}' "
                     "already exists (IDs are compared case-insensitively)."
+                )
+            if building_id.lower() in pending_retired:
+                # 利用者が選んだ ID (手で付けた ID・名前から作った ID)。連番で黙って
+                # 別の ID にせず、理由を返す。
+                return (
+                    f"Error: The ID '{building_id}' belonged to a deleted building, and "
+                    "setting its remaining records aside has not finished yet. Restart "
+                    "SAIVerse to finish it, then try again."
                 )
 
             new_building = BuildingModel(
@@ -643,9 +674,17 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
           付いたまま)。``delete`` なら入れ物の中身ごと入れ子の底まで消す。
         - 建物に結びつけたリアルタイムスペルは建物自身の設定なので消す。
         - この部屋の会話の記録 (building_messages) は消さない (FLOW-15)。
+          ただし、会話を含めて消した部屋を指して残るもの全部を、特殊な ID
+          (``deleted_<ID>_<日時>``) へ付け替えて元の ID を空ける
+          (saiverse/building_retirement.py、issue の「3. ID の使い回し」)。
+          同じ ID の建物を後で作っても、消した部屋の会話や控えは戻らない。
 
-        以上と入退室の記録・建物の行を一つの transaction で消す。建物の行を
-        最後に消すのは、設置物の特定が建物の ID に依っているため。
+        以上と入退室の記録・建物の行・残る参照の付け替えを一つの transaction で
+        行う。建物の行を最後に消すのは、設置物の特定が建物の ID に依っているため。
+        付け替えの記録は commit の前に書き、書けなければ削除ごと止める。commit の
+        後に、ペルソナの記憶のファイルの印と部屋のフォルダを付け替える — ここが
+        済まなくても削除は済んでいるので「削除に失敗」とは返さない (記録が残り、
+        次の起動が続きを行う)。
         """
         if item_policy not in BUILDING_ITEM_POLICIES:
             return (
@@ -654,14 +693,21 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             )
         if self._is_seeded_entity(building_id):
             return "Error: Seeded buildings cannot be deleted."
+        from saiverse.building_retirement import plan_retirement
         from saiverse.observer_manager import cancel_observer_jobs, delete_fixture_rows
 
         observer_ids: List[str] = []
+        retirement = None
         db = self.SessionLocal()
         try:
             building = db.query(BuildingModel).filter_by(BUILDINGID=building_id).first()
             if not building:
                 return "Error: Building not found."
+            city_slug = (
+                db.query(CityModel.CITY_SLUG).filter_by(CITYID=building.CITYID).scalar()
+            )
+            if not city_slug:
+                return "Error: The city of this building was not found."
 
             # Check AI occupancy
             occupancy = (
@@ -735,9 +781,25 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 synchronize_session=False
             )
             db.delete(building)
+            db.flush()
+
+            # --- 残るもの (会話など) を特殊な ID へ付け替えて、元の ID を空ける ---
+            # 記録に「予定」を書いてから (書けなければ例外で削除ごと巻き戻す)、
+            # 同じ transaction で参照を書き換える。
+            retirement = plan_retirement(
+                db,
+                saiverse_home=self.saiverse_home,
+                city_slug=city_slug,
+                building_id=building_id,
+                building_name=building_name,
+            )
+            retirement.rewrite_references(db)
             db.commit()
         except Exception as exc:
             db.rollback()
+            if retirement is not None:
+                # 削除は確定していないので、元の ID を「使用中」のまま残さない
+                retirement.cancel()
             logging.error(
                 "Failed to delete building '%s': %s", building_id, exc, exc_info=True
             )
@@ -745,9 +807,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         finally:
             db.close()
 
-        # 削除は commit 済み。ここから先 (予約の取り消し・アイテムの読み直し) が
-        # 倒れても「削除に失敗した」とは返さない — 返すと利用者は消えていない
-        # と思ってやり直し、「Building not found」を見ることになる。
+        # 削除は commit 済み。ここから先 (予約の取り消し・アイテムの読み直し・
+        # 記憶の印とフォルダの付け替え) が倒れても「削除に失敗した」とは返さない
+        # — 返すと利用者は消えていないと思ってやり直し、「Building not found」を
+        # 見ることになる。
         try:
             cancel_observer_jobs(self.manager, observer_ids)
             if direct_item_ids:
@@ -757,11 +820,20 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "Building '%s' was deleted, but refreshing observers/items afterwards failed.",
                 building_id, exc_info=True,
             )
+        try:
+            retirement.finish(session_factory=self.SessionLocal, db_path=self.db_path)
+        except Exception:
+            logging.error(
+                "Building '%s' was deleted and its records were moved to '%s' in the "
+                "database, but rewriting persona memory marks / moving the folder failed. "
+                "The next startup continues it.",
+                building_id, retirement.new_id, exc_info=True,
+            )
         logging.info(
             "Deleted building '%s' (%s): items %s=%d (removed rows=%d), fixtures=%d, "
-            "observers=%d. Conversation records are kept.",
+            "observers=%d. Conversation records are kept under '%s'.",
             building_name, building_id, item_policy, len(direct_item_ids),
-            deleted_item_count, len(fixture_ids), len(observer_ids),
+            deleted_item_count, len(fixture_ids), len(observer_ids), retirement.new_id,
         )
         parts = [f"Building '{building_name}' deleted successfully."]
         if fixture_ids:

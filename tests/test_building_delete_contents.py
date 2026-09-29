@@ -14,6 +14,7 @@ DB は隔離した file sqlite (TestClient はワーカースレッドでルー�
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from datetime import datetime
 import unittest
@@ -61,6 +62,12 @@ class BuildingDeleteTestBase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._cleanup_temp)
+        # SAIVERSE_HOME は一時フォルダ (付け替えの記録・記憶のファイル・多重起動の確認の置き場)
+        self.home = Path(self._tmp.name) / "home"
+        self.home.mkdir()
+        env = patch.dict(os.environ, {"SAIVERSE_HOME": str(self.home)})
+        env.start()
+        self.addCleanup(env.stop)
         self.db_file = Path(self._tmp.name) / "saiverse_test.db"
         self.engine = create_engine(
             f"sqlite:///{self.db_file}", connect_args={"check_same_thread": False}
@@ -96,6 +103,8 @@ class BuildingDeleteTestBase(unittest.TestCase):
 
         self.svc = AdminService.__new__(AdminService)
         self.svc.SessionLocal = self.Session
+        self.svc.saiverse_home = self.home
+        self.svc.db_path = str(self.db_file)
         self.svc.manager = self.manager
         self.manager.delete_building = self.svc.delete_building
         self.manager.get_building_deletion_preview = self.svc.get_building_deletion_preview
@@ -239,6 +248,17 @@ class BuildingDeleteTestBase(unittest.TestCase):
         finally:
             db.close()
 
+    def _retire_entries(self, old_id):
+        """付け替えの記録のうち、消した部屋 old_id の要素 (書かれた順)。"""
+        path = self.home / "cities" / "city_a" / "building_id_renames.json"
+        if not path.exists():
+            return []
+        record = json.loads(path.read_text(encoding="utf-8"))
+        return [
+            e for e in record["renames"]
+            if e.get("kind") == "retire" and e.get("old_id") == old_id
+        ]
+
     def _seed_full_target(self):
         """道具店に、アイテム (入れ子の入れ物を含む)・設置物・スペル・会話を置く。"""
         self._add_item("map", "building", TARGET, 1)
@@ -349,12 +369,16 @@ class DeleteBuildingFixturesAndSpellsTest(BuildingDeleteTestBase):
             [("building", OTHER), ("persona", "persona-a")],
         )
 
-    def test_conversation_records_are_kept(self):
+    def test_conversation_records_are_kept_under_a_tombstone_id(self):
         self._seed_full_target()
         self._add_message(TARGET, 2, content="入室", event_type="occupancy")
         self.svc.delete_building(TARGET)
-        # FLOW-15: 会話の記録は消さない
-        self.assertEqual(self._message_count(TARGET), 2)
+        # FLOW-15: 会話の記録は消さない。元の ID からは外し、特殊な ID の下に残す
+        [entry] = self._retire_entries(TARGET)
+        self.assertEqual(entry["status"], "done")
+        self.assertRegex(entry["new_id"], r"^deleted_shop_city_a_\d{14}$")
+        self.assertEqual(self._message_count(TARGET), 0)
+        self.assertEqual(self._message_count(entry["new_id"]), 2)
         self.assertEqual(self._message_count(OTHER), 1)
 
     def test_occupancy_log_rows_are_deleted(self):
@@ -450,6 +474,10 @@ class DeleteBuildingRefusalTest(BuildingDeleteTestBase):
         self.svc.SessionLocal = self.Session
         self._assert_nothing_deleted()
         self.assertTrue(self._exists(Item, ITEM_ID="gem"))
+        # 会話は元の ID のまま。付け替えの予定は閉じ、元の ID を使用中のまま残さない
+        self.assertEqual(self._message_count(TARGET), 1)
+        [entry] = self._retire_entries(TARGET)
+        self.assertEqual((entry["status"], entry["note"]), ("done", "building_kept"))
 
 
 class DeletionPreviewTest(BuildingDeleteTestBase):
@@ -483,8 +511,34 @@ class DeletionPreviewTest(BuildingDeleteTestBase):
 
 
 class IdReuseTest(BuildingDeleteTestBase):
-    def test_new_building_with_reused_id_gets_no_items_or_fixtures(self):
-        """issue の再現: 消した建物と同じ ID の新しい建物に、中身が戻ってこない。"""
+    def _seed_persona_rows(self, building_id):
+        """ペルソナごとの「その部屋の控え」と「どこまで読んだか」。"""
+        from database.models import PersonaBuildingState, PersonaPulseCursor
+
+        db = self.Session()
+        try:
+            db.add(AI(AIID="ai-1", HOME_CITYID=CITY_ID, AINAME="テスト"))
+            db.flush()
+            db.add(PersonaPulseCursor(PERSONA_ID="ai-1", BUILDING_ID=building_id, CURSOR_SEQ=1))
+            db.add(PersonaBuildingState(PERSONA_ID="ai-1", BUILDING_ID=building_id))
+            db.commit()
+        finally:
+            db.close()
+
+    def _persona_row_counts(self, building_id):
+        from database.models import PersonaBuildingState, PersonaPulseCursor
+
+        db = self.Session()
+        try:
+            return (
+                db.query(PersonaPulseCursor).filter_by(BUILDING_ID=building_id).count(),
+                db.query(PersonaBuildingState).filter_by(BUILDING_ID=building_id).count(),
+            )
+        finally:
+            db.close()
+
+    def test_new_building_with_reused_id_gets_nothing_back(self):
+        """issue の再現: 消した建物と同じ ID (同じ番号) の新しい建物に、何も戻ってこない。"""
         # 日本語名なので building_1_city_a が付く
         created = self.svc.create_building("鉄腕の道具店", "", 5, "", CITY_ID)
         self.assertNotIn("Error", created)
@@ -494,9 +548,11 @@ class IdReuseTest(BuildingDeleteTestBase):
         self._add_fixture("news", reused)
         self._add_spell("building", reused)
         self._add_message(reused, 1, content="道具店での会話")
+        self._seed_persona_rows(reused)
 
         self.assertFalse(self.svc.delete_building(reused).startswith("Error"))
         created = self.svc.create_building("霧雨の宿亭", "", 5, "", CITY_ID)
+        # 番号は歯抜けにならない (同じ番号をもう一度使う)
         self.assertIn(f"(ID: {reused})", created)
 
         preview = self.svc.get_building_deletion_preview(reused)
@@ -506,10 +562,25 @@ class IdReuseTest(BuildingDeleteTestBase):
         self.assertNotIn(("building", reused), self._spells())
         self.assertTrue(self._exists(Item, ITEM_ID="old_map"))  # keep で残っている
         self.assertIsNone(self._loc("old_map"))
-        # 会話の記録は今の段階ではまだ同じ ID に残り、新しい部屋の過去として
-        # 見えてしまう。残す会話を特殊な ID へ付け替えるのは後の段階
-        # (issue の「3. ID の使い回し」)。そこが入ったらこの期待値は 0 になる。
-        self.assertEqual(preview["conversation_message_count"], 1)
+        # 会話とペルソナごとの控えは、消した部屋の特殊な ID の下に移っている
+        self.assertEqual(preview["conversation_message_count"], 0)
+        self.assertEqual(self._message_count(reused), 0)
+        self.assertEqual(self._persona_row_counts(reused), (0, 0))
+        [entry] = self._retire_entries(reused)
+        self.assertEqual(self._message_count(entry["new_id"]), 1)
+        self.assertEqual(self._persona_row_counts(entry["new_id"]), (1, 1))
+
+    def test_ascii_name_recreated_with_the_same_slug_gets_nothing_back(self):
+        created = self.svc.create_building("Tea House", "", 5, "", CITY_ID)
+        slug = "tea_house_city_a"
+        self.assertIn(f"(ID: {slug})", created)
+        self._add_message(slug, 1, content="お茶の話")
+
+        self.assertFalse(self.svc.delete_building(slug).startswith("Error"))
+        created = self.svc.create_building("Tea House", "", 5, "", CITY_ID)
+
+        self.assertIn(f"(ID: {slug})", created)
+        self.assertEqual(self._message_count(slug), 0)
 
 
 class BuildingDeleteApiTest(BuildingDeleteTestBase):

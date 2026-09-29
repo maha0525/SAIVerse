@@ -113,6 +113,9 @@ class SAIVerseManager(
         # 消えた建物を指したまま残っているアイテムの置き場所・設置物などを片付ける
         # (付け替えの後、アイテムと定期観測を読み込む前)
         self._cleanup_deleted_building_leftovers()
+        # 消した建物を指して残る会話などを特殊な ID へ付け替え、元の ID を空ける
+        # (削除の場で済まなかった続きと、昔消した建物の残骸。記憶のファイルを開く前)
+        self._retire_deleted_building_ids()
         self._init_buildings()
         self._init_file_paths()
         self._init_avatars()
