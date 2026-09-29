@@ -1947,6 +1947,54 @@
     "ja": "Chronicle / Memopedia / Fragment の未生成分",
     "en": "Missing embeddings for Chronicle / Memopedia / Fragments"
   },
+  "components.FixtureMetaEditor.text001": {
+    "ja": "メタ情報を編集",
+    "en": "Edit metadata"
+  },
+  "components.FixtureMetaEditor.text002": {
+    "ja": "設置物名",
+    "en": "Fixture name"
+  },
+  "components.FixtureMetaEditor.text003": {
+    "ja": "説明",
+    "en": "Description"
+  },
+  "components.FixtureMetaEditor.text004": {
+    "ja": "保存中...",
+    "en": "Saving..."
+  },
+  "components.FixtureMetaEditor.text005": {
+    "ja": "保存",
+    "en": "Save"
+  },
+  "components.FixtureMetaEditor.text006": {
+    "ja": "キャンセル",
+    "en": "Cancel"
+  },
+  "components.FixtureMetaEditor.text007": {
+    "ja": "削除中...",
+    "en": "Deleting..."
+  },
+  "components.FixtureMetaEditor.text008": {
+    "ja": "削除",
+    "en": "Delete"
+  },
+  "components.FixtureMetaEditor.text009": {
+    "ja": "この設置物を削除しますか？",
+    "en": "Delete this fixture?"
+  },
+  "components.FixtureMetaEditor.text010": {
+    "ja": "この設置物を削除しますか？購読中のフィードと取得済みの記事もすべて削除されます。",
+    "en": "Delete this fixture? Its subscribed feeds and all fetched articles will also be deleted."
+  },
+  "components.FixtureMetaEditor.text011": {
+    "ja": "保存に失敗しました",
+    "en": "Failed to save"
+  },
+  "components.FixtureMetaEditor.text012": {
+    "ja": "削除に失敗しました",
+    "en": "Failed to delete"
+  },
   "components.GlobalSettingsModal.text001": {
     "ja": "保存できませんでした: {p1}",
     "en": "Could not save: {p1}"
@@ -2610,6 +2658,22 @@
   "components.ItemModal.text037": {
     "ja": "ペルソナが会話の中でこのアイテムを指すときに使う番号です",
     "en": "The number personas use to refer to this item in conversation"
+  },
+  "components.ItemModal.text038": {
+    "ja": "削除中...",
+    "en": "Deleting..."
+  },
+  "components.ItemModal.text039": {
+    "ja": "削除",
+    "en": "Delete"
+  },
+  "components.ItemModal.text040": {
+    "ja": "このアイテムを削除しますか？",
+    "en": "Delete this item?"
+  },
+  "components.ItemModal.text041": {
+    "ja": "削除に失敗しました",
+    "en": "Failed to delete"
   },
   "components.MCPSection.text001": {
     "ja": "必要なランタイムが見つからない",

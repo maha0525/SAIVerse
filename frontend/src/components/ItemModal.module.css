@@ -175,6 +175,8 @@
 .select,
 .descriptionTextarea {
     width: 100%;
+    /* padding と枠を幅 100% に含める (無いと右端がフォームの余白を越えてはみ出す) */
+    box-sizing: border-box;
     padding: 0.625rem 0.75rem;
     background: #111827;
     border: 1px solid #374151;
@@ -494,6 +496,21 @@
     color: #fff;
 }
 
+/* 削除 (メタ情報編集の操作列の左端)。アイテムと設置物 (FixtureMetaEditor) で共用。
+   .toggleBtn の配色より強く効かせるため 2 クラス指定で書く */
+.toggleBtn.deleteBtn {
+    margin-right: auto;
+    background: rgba(220, 38, 38, 0.12);
+    border-color: #b91c1c;
+    color: #f87171;
+}
+
+.toggleBtn.deleteBtn:hover:not(:disabled) {
+    background: #dc2626;
+    border-color: #b91c1c;
+    color: #fff;
+}
+
 .editTextarea {
     width: 100%;
     min-height: 400px;
@@ -745,6 +762,18 @@
 :global([data-theme="light"]) .toggleBtn:hover {
     background: #e2e8f0;
     color: #1f2937;
+}
+
+:global([data-theme="light"]) .toggleBtn.deleteBtn {
+    background: #fef2f2;
+    border-color: #fca5a5;
+    color: #dc2626;
+}
+
+:global([data-theme="light"]) .toggleBtn.deleteBtn:hover:not(:disabled) {
+    background: #dc2626;
+    border-color: #b91c1c;
+    color: #fff;
 }
 
 :global([data-theme="light"]) .editTextarea {

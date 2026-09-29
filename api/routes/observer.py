@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Header
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
 from api.deps import get_manager
 
@@ -57,6 +57,25 @@ class CreateFixtureRequest(BaseModel):
     description: str = ""
     state_json: Optional[str] = None
     source_context: Optional[str] = None
+
+
+class UpdateFixtureMetaRequest(BaseModel):
+    """設置物の名前・説明文の更新。送った欄だけを変更する (model_fields_set)。
+
+    null は「変更しない」ではなく入力誤りとして 422 にする (省略と区別する)。
+    長さ・空文字の検証は ObserverManager.update_fixture_meta が持つ。
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[StrictStr] = None
+    description: Optional[StrictStr] = None
+
+    @field_validator("name", "description")
+    @classmethod
+    def _reject_null(cls, value):
+        if value is None:
+            raise ValueError("null は指定できません。変更しない欄は省略してください。")
+        return value
 
 
 class CreateObserverRequest(BaseModel):
@@ -146,6 +165,10 @@ def get_fixture(fixture_id: str, manager=Depends(get_manager)):
     fixture = obs_mgr.get_fixture(fixture_id)
     if not fixture:
         raise HTTPException(status_code=404, detail="Fixture not found")
+    return _fixture_payload(fixture)
+
+
+def _fixture_payload(fixture) -> dict:
     return {
         "fixture_id": fixture.FIXTURE_ID,
         "building_id": fixture.BUILDING_ID,
@@ -154,6 +177,51 @@ def get_fixture(fixture_id: str, manager=Depends(get_manager)):
         "description": fixture.DESCRIPTION,
         "state_json": fixture.STATE_JSON,
     }
+
+
+@router.patch("/fixture/{fixture_id}")
+def update_fixture_meta(
+    fixture_id: str,
+    body: UpdateFixtureMetaRequest,
+    manager=Depends(get_manager),
+):
+    """設置物の名前・説明文を更新する (送った欄だけ)。
+
+    現 City の設置物でなければ 404。検証違反と、変更する欄が無い body は 422。
+    返り値は GET /fixture/{fixture_id} と同じ形の更新後の設置物。
+    """
+    obs_mgr = manager.observer_manager
+    if not obs_mgr:
+        raise HTTPException(status_code=503, detail="Observer manager not available")
+
+    fields = body.model_fields_set
+    try:
+        fixture = obs_mgr.update_fixture_meta(
+            fixture_id,
+            name=body.name if "name" in fields else None,
+            description=body.description if "description" in fields else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if fixture is None:
+        raise HTTPException(status_code=404, detail="Fixture not found")
+    return _fixture_payload(fixture)
+
+
+@router.delete("/fixture/{fixture_id}")
+def delete_fixture(fixture_id: str, manager=Depends(get_manager)):
+    """設置物を削除する (属する行もすべて道連れ)。
+
+    道連れは観測設定・観測履歴・フィード購読・記事・既読カーソル・スタンドの
+    配信設定 (ObserverManager.delete_fixture)。現 City の設置物でなければ 404。
+    """
+    obs_mgr = manager.observer_manager
+    if not obs_mgr:
+        raise HTTPException(status_code=503, detail="Observer manager not available")
+
+    if not obs_mgr.delete_fixture(fixture_id):
+        raise HTTPException(status_code=404, detail="Fixture not found")
+    return {"deleted": True}
 
 
 @router.get("/building/{building_id}/fixtures")

@@ -2,7 +2,7 @@ import { apiFetch } from '@/i18n/api';
 import { getFormatLocale, t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 import { useState, useEffect, useCallback } from 'react';
-import { X, FileText, Code2, Pencil, Save, XCircle, Settings, ArrowRightLeft, Package, PackagePlus, PackageOpen, Check, Square, Image as ImageIcon, File } from 'lucide-react';
+import { X, FileText, Code2, Pencil, Save, XCircle, Trash2, Settings, ArrowRightLeft, Package, PackagePlus, PackageOpen, Check, Square, Image as ImageIcon, File } from 'lucide-react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -97,6 +97,8 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
     const [buildings, setBuildings] = useState<Building[]>([]);
     const [isLoadingBuildings, setIsLoadingBuildings] = useState(false);
     const [isSavingMeta, setIsSavingMeta] = useState(false);
+    const [isDeleting, setIsDeleting] = useState(false);
+    const isMetaBusy = isSavingMeta || isDeleting;
 
     // Bag contents
     const [bagContents, setBagContents] = useState<BagContentItem[]>([]);
@@ -343,6 +345,46 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
         }
     };
 
+    // 削除 (設置物の FixtureMetaEditor と同じ手順: 確認 → DELETE → 親へ通知)
+    const handleDelete = async () => {
+        if (!item) return;
+        if (!window.confirm(uiText("components.ItemModal.text040"))) return;
+
+        setIsDeleting(true);
+        setError(null);
+
+        try {
+            // 失敗は manager.delete_item の "Error: ..." を _check_result が 400 に写す
+            const res = await apiFetch(`/api/world/items/${encodeURIComponent(item.id)}`, {
+                method: 'DELETE',
+            });
+            if (!res.ok) {
+                const data = await res.json().catch(() => null);
+                throw new Error(
+                    data && typeof data.detail === 'string'
+                        ? data.detail
+                        : uiText("components.ItemModal.text041")
+                );
+            }
+
+            setIsMetaEditing(false);
+            if (onItemUpdated) {
+                // 親 (RightSidebar) は再取得してモーダルを閉じる
+                onItemUpdated();
+            } else {
+                // 通知先の無い呼び出し元 (リンクから開いたモーダル等) では、
+                // 消えたアイテムを開いたままにしない
+                if (onWorldChanged) onWorldChanged();
+                onClose();
+            }
+        } catch (err) {
+            console.error(err);
+            setError(err instanceof Error ? err.message : uiText("components.ItemModal.text041"));
+        } finally {
+            setIsDeleting(false);
+        }
+    };
+
     // --- まとめ収納 (部屋 ⇔ Bag) ---
 
     // いまいる部屋のアイテムを取得する (この Bag 自身は除く)
@@ -531,7 +573,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                     value={editName}
                                     onChange={(e) => setEditName(e.target.value)}
                                     className={styles.input}
-                                    disabled={isSavingMeta}
+                                    disabled={isMetaBusy}
                                 />
                             </div>
                             <div className={styles.formGroup}>
@@ -542,7 +584,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                     onChange={(e) => setEditDescription(e.target.value)}
                                     className={styles.descriptionTextarea}
                                     rows={3}
-                                    disabled={isSavingMeta}
+                                    disabled={isMetaBusy}
                                 />
                             </div>
                             <div className={styles.formGroup}>
@@ -565,7 +607,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                         }
                                     }}
                                     className={styles.select}
-                                    disabled={isSavingMeta || isLoadingBuildings}
+                                    disabled={isMetaBusy || isLoadingBuildings}
                                 >
                                     <option data-i18n="components.ItemModal.text009" value="world">{uiText("components.ItemModal.text009")}</option>
                                     <optgroup label={uiText("components.ItemModal.label001")}>
@@ -583,10 +625,19 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                 </select>
                             </div>
                             <div className={styles.metaEditActions}>
+                                {/* 削除は保存・キャンセルから離して左端に置く (押し間違い防止) */}
+                                <button
+                                    className={`${styles.toggleBtn} ${styles.deleteBtn}`}
+                                    onClick={handleDelete}
+                                    disabled={isMetaBusy}
+                                >
+                                    <Trash2 size={16} />
+                                    <span data-i18n="components.ItemModal.text038 components.ItemModal.text039">{isDeleting ? uiText("components.ItemModal.text038") : uiText("components.ItemModal.text039")}</span>
+                                </button>
                                 <button
                                     className={`${styles.toggleBtn} ${styles.saveBtn}`}
                                     onClick={handleSaveMeta}
-                                    disabled={isSavingMeta}
+                                    disabled={isMetaBusy}
                                 >
                                     <Save size={16} />
                                     <span data-i18n="components.ItemModal.text010 components.ItemModal.text011">{isSavingMeta ? uiText("components.ItemModal.text010") : uiText("components.ItemModal.text011")}</span>
@@ -594,7 +645,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                 <button
                                     className={`${styles.toggleBtn} ${styles.cancelBtn}`}
                                     onClick={handleCancelMetaEdit}
-                                    disabled={isSavingMeta}
+                                    disabled={isMetaBusy}
                                 >
                                     <XCircle size={16} />
                                     <span data-i18n="components.ItemModal.text012">{uiText("components.ItemModal.text012")}</span>

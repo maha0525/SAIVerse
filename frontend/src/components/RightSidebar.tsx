@@ -28,6 +28,8 @@ import ItemCreateModal from './ItemCreateModal';
 import PersonaMenu from './PersonaMenu';
 import ModalOverlay from './common/ModalOverlay';
 import fixtureStyles from './FixtureModal.module.css';
+import itemModalStyles from './ItemModal.module.css';
+import FixtureMetaEditor, { FixtureMetaEditButton } from './FixtureMetaEditor';
 import MemoryModal from './MemoryModal';
 import ScheduleModal from './ScheduleModal';
 import SettingsModal from './SettingsModal';
@@ -549,8 +551,15 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
 
                 {selectedFixture && (
                     <FixtureModal
+                        key={selectedFixture.id}
                         fixture={selectedFixture}
                         onClose={() => setSelectedFixture(null)}
+                        // 名前・説明の保存と削除の後: アイテム (onItemUpdated) と
+                        // 同じく部屋の表示を取り直してモーダルを閉じる
+                        onFixtureUpdated={() => {
+                            fetchDetails();
+                            setSelectedFixture(null);
+                        }}
                     />
                 )}
 
@@ -647,25 +656,60 @@ function parseFixtureState(stateJson: string | null): Record<string, any> | null
     }
 }
 
-function FixtureModal({ fixture, onClose }: { fixture: Fixture; onClose: () => void }) {
+interface FixtureModalProps {
+    fixture: Fixture;
+    onClose: () => void;
+    /** 名前・説明の保存か削除が成功した (ItemModal の onItemUpdated と同じ扱い)。 */
+    onFixtureUpdated: () => void;
+}
+
+/** 設置物モーダル共通のヘッダー: 名前 + 歯車 (メタ情報を編集) + 閉じる。 */
+function FixtureModalHeader({ fixture, isMetaEditing, onStartMetaEdit, onClose }: {
+    fixture: Fixture;
+    isMetaEditing: boolean;
+    onStartMetaEdit: () => void;
+    onClose: () => void;
+}) {
+    return (
+        <div className={fixtureStyles.header}>
+            <h3 className={fixtureStyles.title}>{fixture.name}</h3>
+            <div className={itemModalStyles.headerActions}>
+                {!isMetaEditing && <FixtureMetaEditButton onClick={onStartMetaEdit} />}
+                <button className={fixtureStyles.closeButton} onClick={onClose}>
+                    <X size={18} />
+                </button>
+            </div>
+        </div>
+    );
+}
+
+function FixtureModal({ fixture, onClose, onFixtureUpdated }: FixtureModalProps) {
     useLocale();
     const state = parseFixtureState(fixture.state_json);
+    const [isMetaEditing, setIsMetaEditing] = useState(false);
 
     if (fixture.type === 'feed_stand') {
-        return <FeedStandModal fixture={fixture} state={state} onClose={onClose} />;
+        return <FeedStandModal fixture={fixture} state={state} onClose={onClose} onFixtureUpdated={onFixtureUpdated} />;
     }
 
     return (
         <ModalOverlay onClose={onClose} className={fixtureStyles.overlay}>
             <div className={fixtureStyles.modal} onClick={e => e.stopPropagation()}>
-                <div className={fixtureStyles.header}>
-                    <h3 className={fixtureStyles.title}>{fixture.name}</h3>
-                    <button className={fixtureStyles.closeButton} onClick={onClose}>
-                        <X size={18} />
-                    </button>
-                </div>
+                <FixtureModalHeader
+                    fixture={fixture}
+                    isMetaEditing={isMetaEditing}
+                    onStartMetaEdit={() => setIsMetaEditing(true)}
+                    onClose={onClose}
+                />
+                {isMetaEditing && (
+                    <FixtureMetaEditor
+                        fixture={fixture}
+                        onCancel={() => setIsMetaEditing(false)}
+                        onChanged={onFixtureUpdated}
+                    />
+                )}
                 <div className={fixtureStyles.content}>
-                    {fixture.description && (
+                    {!isMetaEditing && fixture.description && (
                         <p className={fixtureStyles.description}>{fixture.description}</p>
                     )}
                     <div className={fixtureStyles.fixtureId}>{uiText("components.RightSidebar.label001")}{fixture.id}</div>
@@ -740,12 +784,14 @@ interface NumberFieldState {
     value: string;
 }
 
-function FeedStandModal({ fixture, state, onClose }: {
+function FeedStandModal({ fixture, state, onClose, onFixtureUpdated }: {
     fixture: Fixture;
     state: Record<string, any> | null;
     onClose: () => void;
+    onFixtureUpdated: () => void;
 }) {
     useLocale();
+    const [isMetaEditing, setIsMetaEditing] = useState(false);
     const display = state && typeof state.feed_stand === 'object' && state.feed_stand ? state.feed_stand : null;
     const subscriptions: string[] = Array.isArray(display?.subscriptions) ? display.subscriptions : [];
     const latest: string[] = Array.isArray(display?.latest) ? display.latest : [];
@@ -889,14 +935,21 @@ function FeedStandModal({ fixture, state, onClose }: {
     return (
         <ModalOverlay onClose={onClose} className={fixtureStyles.overlay}>
             <div className={fixtureStyles.modal} onClick={e => e.stopPropagation()}>
-                <div className={fixtureStyles.header}>
-                    <h3 className={fixtureStyles.title}>{fixture.name}</h3>
-                    <button className={fixtureStyles.closeButton} onClick={onClose}>
-                        <X size={18} />
-                    </button>
-                </div>
+                <FixtureModalHeader
+                    fixture={fixture}
+                    isMetaEditing={isMetaEditing}
+                    onStartMetaEdit={() => setIsMetaEditing(true)}
+                    onClose={onClose}
+                />
+                {isMetaEditing && (
+                    <FixtureMetaEditor
+                        fixture={fixture}
+                        onCancel={() => setIsMetaEditing(false)}
+                        onChanged={onFixtureUpdated}
+                    />
+                )}
                 <div className={fixtureStyles.content}>
-                    {fixture.description && (
+                    {!isMetaEditing && fixture.description && (
                         <p className={fixtureStyles.description}>{fixture.description}</p>
                     )}
 
