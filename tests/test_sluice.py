@@ -3,7 +3,8 @@
 - コア記憶の適用 (core_adds / core_updates / core_removes) が実 SAIMemory
   (temp DB) に届くこと
 - 手帳メモ (want/did) が activities/memos に span・idem 込みで書かれること
-- 約束 (promises) がタスク帳 (temp 中央 DB) に書かれること
+- 約束 (promise_adds / promise_updates) がタスク帳 (temp 中央 DB) に書かれること
+  (変更の参照は一覧の位置の写し promise:N だけを受ける)
 - 同じ実行 ID (run_id) の再適用が重複しないこと
 - 一覧に無い / 形の違う activity_ref の要素だけが捨てられ、他は適用されること
 - **確実に通るゲート**: スルース失敗で退場 (anchor 前進) が止まり、成功で進むこと
@@ -69,7 +70,8 @@ def _sluice_result(**overrides):
         "core_removes": [],
         "want_memos": [],
         "did_memos": [],
-        "promises": [],
+        "promise_adds": [],
+        "promise_updates": [],
     }
     base.update(overrides)
     return base
@@ -451,7 +453,9 @@ class SluiceRunTest(_AdapterTestBase):
 
     def test_core_ops_missing_required_field_are_rejected(self):
         """⭐ 本文の無い書き換え・参照の無い削除は要素棄却 (schema では必須だが、
-        台帳の記録の再適用や別実装から欠けた入力が来ても握り潰さない)。"""
+        台帳の記録の再適用や別実装から欠けた入力が来ても握り潰さない)。
+        欠落・null は parse の関所 (「必須欄 〜」)、空白だけの本文は適用側で
+        弾かれる — どちらも数と記録に残る。"""
         from sai_memory.core_memory import add_core_memory
         with self.adapter._db_lock:
             mid = add_core_memory(self.adapter.conn, "元の本文")
@@ -468,8 +472,9 @@ class SluiceRunTest(_AdapterTestBase):
         self.assertEqual(summary["ops_failed"], 3)
         self.assertEqual(self._list_core()[0].content, "元の本文")
         record = _read_sluice_record(self.adapter)[0]
+        self.assertIn("必須欄 content がありません", record)
         self.assertIn(f"update 失敗: core:{mid} の新しい本文が空でした", record)
-        self.assertIn("remove 失敗: memory_ref が core:N の形ではありません", record)
+        self.assertIn("必須欄 memory_ref がありません", record)
 
     def test_llm_call_carries_the_output_cap(self):
         """⭐ 出力上限はこのコールだけに付ける (暴走したときの課金と待ち時間の
@@ -629,11 +634,46 @@ class SluiceRunTest(_AdapterTestBase):
         with self.assertRaises(sluice.SluiceOutputError):
             self._run({"reflection": "x", "ops": []})  # 旧形式 = 欄が揃わない
         with self.assertRaises(sluice.SluiceOutputError):
-            self._run({**_sluice_result(), "promises": None})  # null も不可
+            self._run({**_sluice_result(), "promise_updates": None})  # null も不可
+        # 旧世代の約束欄 (promises 一本) だけで二一覧を欠く応答も棄却される。
+        legacy_promises = _sluice_result(promises=[])
+        del legacy_promises["promise_adds"]
+        del legacy_promises["promise_updates"]
+        with self.assertRaises(sluice.SluiceOutputError):
+            self._run(legacy_promises)
         missing_reflection = _sluice_result()
         del missing_reflection["reflection"]
         with self.assertRaises(sluice.SluiceOutputError):
             self._run(missing_reflection)
+        self.assertEqual(self._list_core(), [])
+
+    def test_null_required_element_fields_are_rejected_at_parse(self):
+        """必須欄 (content / promise_ref) の null・欠落は要素の形の不正として
+        棄却する — 「未指定」へ丸めて適用側に任せると、凍結後の破損検出
+        (再読で棄却が出る = 破損) がこの形だけ素通りする (Codex 四巡目)。"""
+        result = {
+            **_sluice_result(),
+            "promise_adds": [{"content": None}],
+            "promise_updates": [{"due": "2026-10-01"}],  # promise_ref 欠落
+        }
+        summary, _ = self._run(result)
+        self.assertEqual(summary["promises_applied"], 0)
+        self.assertEqual(summary["promises_failed"], 2)
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertIn("必須欄", record)
+
+    def test_legacy_field_alongside_current_lists_fails_closed(self):
+        """現行の八欄が揃っていても、旧欄 (promises / ops) が混ざった応答は
+        全体棄却する — 適用側は現行の欄しか読まないので、旧欄に入った操作を
+        黙って失わないための関所 (schema に無いキーでも、制約の緩い
+        プロバイダは出力しうる)。"""
+        with self.assertRaises(sluice.SluiceOutputError):
+            self._run({
+                **_sluice_result(),
+                "promises": [{"op": "add", "content": "旧欄に入った約束"}],
+            })
+        with self.assertRaises(sluice.SluiceOutputError):
+            self._run({**_sluice_result(), "ops": []})
         self.assertEqual(self._list_core(), [])
 
     # -- case: コア記憶 CAS (Codex 第七巡 修正 2 — タスク帳 CAS の同族) -----
@@ -881,6 +921,11 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         from saiverse import task_book
         return task_book.list_open(self.manager, "tester")
 
+    def _ref(self, task_id):
+        """一覧に載る位置の参照 (promise:N)。プロンプトの並びと同じ list_open 順。"""
+        ids = [r["task_id"] for r in self._task_rows()]
+        return f"promise:{ids.index(task_id) + 1}"
+
     # -- 手帳: 新アクティビティ + 既存 id、span・idem・日付 ----------------
 
     def test_memos_written_with_span_and_idem(self):
@@ -1109,7 +1154,7 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         result = {
             **_sluice_result(),
             "want_memos": [{"new_activity_name": "小説を書く", "text": "続きを書きたい"}],
-            "promises": [{"op": "add", "content": "水曜までに挿絵を渡す", "due": "2026-08-26"}],
+            "promise_adds": [{"content": "水曜までに挿絵を渡す", "due": "2026-08-26"}],
         }
         self._run(result)
         # 成功でマーカーが進むので、再試行相当としてマーカーを巻き戻す
@@ -1177,9 +1222,9 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
     def test_promise_add_with_and_without_due(self):
         result = {
             **_sluice_result(),
-            "promises": [
-                {"op": "add", "content": "水曜までに挿絵を渡す", "due": "2026-08-26"},
-                {"op": "add", "content": "ずっと一緒にいる"},
+            "promise_adds": [
+                {"content": "水曜までに挿絵を渡す", "due": "2026-08-26"},
+                {"content": "ずっと一緒にいる"},
             ],
         }
         summary, _ = self._run(result)
@@ -1204,9 +1249,9 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         「失くすことが許されない」): 期限なしで保存 + 記録に明記。"""
         result = {
             **_sluice_result(),
-            "promises": [
-                {"op": "add", "content": "そのうち返事する", "due": "来週の水曜"},
-                {"op": "add", "content": "正しい約束", "due": "2026-08-26"},
+            "promise_adds": [
+                {"content": "そのうち返事する", "due": "来週の水曜"},
+                {"content": "正しい約束", "due": "2026-08-26"},
             ],
         }
         summary, _ = self._run(result)
@@ -1227,8 +1272,8 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         )
         result = {
             **_sluice_result(),
-            "promises": [{
-                "op": "update", "task_ref": entry["task_id"],
+            "promise_updates": [{
+                "promise_ref": self._ref(entry["task_id"]),
                 "content": "挿絵を渡す (下書きから)", "due": "来週の水曜",
             }],
         }
@@ -1246,10 +1291,10 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         (Windows の timestamp() は 0001-01-01 で OSError を投げる)。"""
         result = {
             **_sluice_result(),
-            "promises": [
-                {"op": "add", "content": "紀元の約束", "due": "0001-01-01"},
-                {"op": "add", "content": "遠未来の約束", "due": "9999-12-31"},
-                {"op": "add", "content": "正しい約束", "due": "2026-08-26"},
+            "promise_adds": [
+                {"content": "紀元の約束", "due": "0001-01-01"},
+                {"content": "遠未来の約束", "due": "9999-12-31"},
+                {"content": "正しい約束", "due": "2026-08-26"},
             ],
         }
         summary, _ = self._run(result)
@@ -1310,17 +1355,21 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
                 {"activity_ref": 1, "text": "activity_ref が数値"},
                 {"activity_ref": f"act:{act.id}", "text": "正しいメモ"},
             ],
-            "promises": [
-                {"op": "add", "content": "期限が配列", "due": []},
-                {"op": "add", "content": "正しい約束", "due": "2026-08-26"},
+            "promise_adds": [
+                {"content": "期限が配列", "due": []},
+                {"content": "正しい約束", "due": "2026-08-26"},
+            ],
+            "promise_updates": [
+                {"promise_ref": 1, "content": "参照が数値"},
             ],
         }
         summary, _ = self._run(result)
         self.assertFalse(summary["skipped"])
         self.assertEqual((summary["ops_applied"], summary["ops_failed"]), (1, 1))
         self.assertEqual((summary["memos_applied"], summary["memos_failed"]), (1, 2))
+        # 約束の二一覧の棄却は「約束」の失敗へ合算される。
         self.assertEqual(
-            (summary["promises_applied"], summary["promises_failed"]), (1, 1),
+            (summary["promises_applied"], summary["promises_failed"]), (1, 2),
         )
 
         from sai_memory.core_memory import list_core_memories
@@ -1334,7 +1383,8 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         self.assertIn("コア記憶の追加の1件目を棄却", record)
         self.assertIn("やりたいメモの1件目を棄却", record)
         self.assertIn("やったメモの1件目を棄却", record)
-        self.assertIn("約束の1件目を棄却", record)
+        self.assertIn("約束の追加の1件目を棄却", record)
+        self.assertIn("約束の変更の1件目を棄却", record)
 
     def test_promise_update_changes_existing_entry(self):
         from saiverse import task_book
@@ -1343,29 +1393,9 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         )
         result = {
             **_sluice_result(),
-            "promises": [{
-                "op": "update", "task_ref": entry["task_id"],
+            "promise_updates": [{
+                "promise_ref": "promise:1",
                 "content": "挿絵を金曜までに渡す", "due": "2026-08-28",
-            }],
-        }
-        summary, _ = self._run(result)
-        self.assertEqual(summary["promises_applied"], 1)
-        updated = task_book.get_entry(self.manager, "tester", entry["task_id"])
-        self.assertEqual(updated["content"], "挿絵を金曜までに渡す")
-        self.assertIsNotNone(updated["due_at"])
-
-    def test_promise_update_accepts_task_prefixed_ref(self):
-        """一覧の [task:ID] をそのまま写した task_ref (task: 付き) でも update が
-        適用される — 一覧の提示形とペルソナの正しい写しが一致する。"""
-        from saiverse import task_book
-        entry = task_book.add_entry(
-            self.manager, "tester", "挿絵を渡す", origin="user", counterpart="user",
-        )
-        result = {
-            **_sluice_result(),
-            "promises": [{
-                "op": "update", "task_ref": f"task:{entry['task_id']}",
-                "content": "挿絵を金曜までに渡す",
             }],
         }
         summary, _ = self._run(result)
@@ -1373,35 +1403,185 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         self.assertEqual(summary["promises_failed"], 0)
         updated = task_book.get_entry(self.manager, "tester", entry["task_id"])
         self.assertEqual(updated["content"], "挿絵を金曜までに渡す")
+        self.assertIsNotNone(updated["due_at"])
+        # 記録は番号ではなく、どの約束かを本文で言う (promise:N はその場限り)。
         record = _read_sluice_record(self.adapter)[0]
-        self.assertIn(f"タスク帳の約束 {entry['task_id']} を更新", record)
+        self.assertIn("タスク帳の約束「挿絵を渡す」を更新: 挿絵を金曜までに渡す", record)
 
-    def test_promise_update_task_ref_with_trailing_garbage_rejected(self):
-        """task:ID の後ろに余計な文字が付いた task_ref は推測で救済せず棄却 —
-        その要素だけ失敗し、対象タスクは変わらない。記録には元の値が残る。"""
+    def test_promise_update_resolves_the_position_among_several(self):
+        """promise:N は一覧の N 番目を指す — 2 番目を指した変更は 2 番目だけに効く。"""
+        from saiverse import task_book
+        first = task_book.add_entry(
+            self.manager, "tester", "一つ目の約束", origin="user", counterpart="user",
+        )
+        second = task_book.add_entry(
+            self.manager, "tester", "二つ目の約束", origin="user", counterpart="user",
+        )
+        target_ref = self._ref(second["task_id"])
+        result = {
+            **_sluice_result(),
+            "promise_updates": [{"promise_ref": target_ref, "content": "二つ目を直した"}],
+        }
+        summary, _ = self._run(result)
+        self.assertEqual(summary["promises_applied"], 1)
+        self.assertEqual(
+            task_book.get_entry(self.manager, "tester", second["task_id"])["content"],
+            "二つ目を直した",
+        )
+        self.assertEqual(
+            task_book.get_entry(self.manager, "tester", first["task_id"])["content"],
+            "一つ目の約束",
+        )
+
+    def test_promise_update_ref_outside_the_list_rejected(self):
+        """一覧に無い番号 (promise:9) はその要素だけ棄却 — 他の要素は適用される。"""
         from saiverse import task_book
         entry = task_book.add_entry(
             self.manager, "tester", "挿絵を渡す", origin="user", counterpart="user",
         )
-        broken_ref = f"task:{entry['task_id']}',content':'挿絵を金曜までに渡す"
         result = {
             **_sluice_result(),
-            "promises": [{
-                "op": "update", "task_ref": broken_ref,
-                "content": "挿絵を金曜までに渡す",
-            }],
+            "promise_adds": [{"content": "本物の約束", "due": "2026-08-26"}],
+            "promise_updates": [{"promise_ref": "promise:9", "content": "発明された参照"}],
         }
         summary, _ = self._run(result)
-        self.assertEqual(summary["promises_applied"], 0)
+        self.assertEqual(summary["promises_applied"], 1)
         self.assertEqual(summary["promises_failed"], 1)
         unchanged = task_book.get_entry(self.manager, "tester", entry["task_id"])
         self.assertEqual(unchanged["content"], "挿絵を渡す")
+        self.assertEqual(
+            sorted(r["content"] for r in self._task_rows()), ["挿絵を渡す", "本物の約束"],
+        )
         record = _read_sluice_record(self.adapter)[0]
-        self.assertIn("一覧にありません", record)
-        self.assertIn(repr(broken_ref), record)
+        self.assertIn("promise:9 は一覧にありません", record)
+
+    def test_promise_update_malformed_refs_rejected(self):
+        """promise:N の完全一致でない参照は推測で救済せず棄却する — 後ろに本文が
+        続くもの、UUID の丸写し、旧形式の task:ID、裸の数字。対象は変わらず、
+        記録には元の値が残る。"""
+        from saiverse import task_book
+        entry = task_book.add_entry(
+            self.manager, "tester", "挿絵を渡す", origin="user", counterpart="user",
+        )
+        broken_refs = [
+            "promise:1extra",
+            "promise:1',content':'挿絵を金曜までに渡す",
+            entry["task_id"],
+            f"task:{entry['task_id']}",
+            "task:1",
+            "1",
+        ]
+        result = {
+            **_sluice_result(),
+            "promise_updates": [
+                {"promise_ref": ref, "content": "挿絵を金曜までに渡す"}
+                for ref in broken_refs
+            ],
+        }
+        summary, _ = self._run(result)
+        self.assertEqual(summary["promises_applied"], 0)
+        self.assertEqual(summary["promises_failed"], len(broken_refs))
+        unchanged = task_book.get_entry(self.manager, "tester", entry["task_id"])
+        self.assertEqual(unchanged["content"], "挿絵を渡す")
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertEqual(record.count("promise:N の形ではありません"), len(broken_refs))
+        for ref in broken_refs:
+            self.assertIn(repr(ref), record)
+
+    def test_promise_update_without_changes_rejected(self):
+        """content / due / clear_due が全部無い変更 (clear_due=False も無いのと
+        同じ) は「変更内容がありません」で棄却する — 空の update の採取を
+        成功扱いにしない。"""
+        from saiverse import task_book
+        entry = task_book.add_entry(
+            self.manager, "tester", "挿絵を渡す",
+            origin="user", counterpart="user", due_at=1_800_000_000,
+        )
+        ref = self._ref(entry["task_id"])
+        result = {
+            **_sluice_result(),
+            "promise_updates": [
+                {"promise_ref": ref},
+                {"promise_ref": ref, "content": "  ", "clear_due": False},
+            ],
+        }
+        summary, _ = self._run(result)
+        self.assertEqual(summary["promises_applied"], 0)
+        self.assertEqual(summary["promises_failed"], 2)
+        unchanged = task_book.get_entry(self.manager, "tester", entry["task_id"])
+        self.assertEqual(unchanged["revision"], entry["revision"])
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertEqual(record.count("変更内容がありません"), 2)
+
+    def test_promise_update_due_only(self):
+        """期限だけの変更 (content 省略) は本文を変えずに期限だけを動かす。"""
+        from saiverse import task_book
+        entry = task_book.add_entry(
+            self.manager, "tester", "感想を伝える",
+            origin="user", counterpart="user", due_at=1_800_000_000,
+        )
+        result = {
+            **_sluice_result(),
+            "promise_updates": [{
+                "promise_ref": self._ref(entry["task_id"]), "due": "2026-10-10",
+            }],
+        }
+        summary, _ = self._run(result)
+        self.assertEqual(summary["promises_applied"], 1)
+        self.assertEqual(summary["promises_failed"], 0)
+        updated = task_book.get_entry(self.manager, "tester", entry["task_id"])
+        self.assertEqual(updated["content"], "感想を伝える")
+        self.assertEqual(
+            datetime.fromtimestamp(updated["due_at"]).strftime("%Y-%m-%d"),
+            "2026-10-10",
+        )
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertIn("(期限のみ)", record)
+
+    def test_promise_add_with_empty_content_rejected(self):
+        """content が空 (空白だけを含む) の追加はその要素だけ棄却する。"""
+        result = {
+            **_sluice_result(),
+            "promise_adds": [
+                {"content": ""},
+                {"content": "   ", "due": "2026-08-26"},
+                {"content": "本物の約束"},
+            ],
+        }
+        summary, _ = self._run(result)
+        self.assertEqual(summary["promises_applied"], 1)
+        self.assertEqual(summary["promises_failed"], 2)
+        self.assertEqual([r["content"] for r in self._task_rows()], ["本物の約束"])
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertEqual(record.count("content が空でした"), 2)
+
+    def test_promise_add_of_a_living_promise_is_skipped(self):
+        """一覧に生きている約束と同じ本文の追加は書かない (再 add の歯止め)。
+        手帳メモ・コア記憶の同一内容スキップと同じく成功に数え、記録に
+        「既にある」と残す。"""
+        from saiverse import task_book
+        task_book.add_entry(
+            self.manager, "tester", "挿絵を渡す", origin="user", counterpart="user",
+        )
+        result = {
+            **_sluice_result(),
+            "promise_adds": [
+                {"content": "挿絵を渡す"},
+                {"content": "新しい約束"},
+                {"content": "新しい約束"},
+            ],
+        }
+        summary, _ = self._run(result)
+        self.assertEqual(summary["promises_applied"], 3)
+        self.assertEqual(summary["promises_failed"], 0)
+        self.assertEqual(
+            sorted(r["content"] for r in self._task_rows()), ["挿絵を渡す", "新しい約束"],
+        )
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertEqual(record.count("既にタスク帳にあるため追加しませんでした"), 2)
 
     def test_promise_clear_due_removes_deadline(self):
-        """clear_due=True の update は期限を外す (期限の撤回)。"""
+        """clear_due=True の変更は期限を外す (期限の撤回)。"""
         from saiverse import task_book
         entry = task_book.add_entry(
             self.manager, "tester", "挿絵を渡す",
@@ -1409,9 +1589,7 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         )
         result = {
             **_sluice_result(),
-            "promises": [{
-                "op": "update", "task_ref": entry["task_id"], "clear_due": True,
-            }],
+            "promise_updates": [{"promise_ref": "promise:1", "clear_due": True}],
         }
         summary, _ = self._run(result)
         self.assertEqual(summary["promises_applied"], 1)
@@ -1430,13 +1608,10 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         )
         result = {
             **_sluice_result(),
-            "promises": [
-                {
-                    "op": "update", "task_ref": entry["task_id"],
-                    "due": "2026-08-28", "clear_due": True,
-                },
-                {"op": "add", "content": "別の約束", "due": "2026-08-26"},
-            ],
+            "promise_adds": [{"content": "別の約束", "due": "2026-08-26"}],
+            "promise_updates": [{
+                "promise_ref": "promise:1", "due": "2026-08-28", "clear_due": True,
+            }],
         }
         summary, _ = self._run(result)
         self.assertEqual(summary["promises_applied"], 1)
@@ -1448,7 +1623,7 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         self.assertIn("同時に指定できません", record)
 
     def test_promise_update_without_clear_due_keeps_deadline(self):
-        """clear_due 省略の update は期限を変更しない (従来どおり)。"""
+        """clear_due 省略の変更は期限を変更しない (従来どおり)。"""
         from saiverse import task_book
         entry = task_book.add_entry(
             self.manager, "tester", "挿絵を渡す",
@@ -1456,8 +1631,8 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         )
         result = {
             **_sluice_result(),
-            "promises": [{
-                "op": "update", "task_ref": entry["task_id"], "content": "挿絵を渡す (下書きから)",
+            "promise_updates": [{
+                "promise_ref": "promise:1", "content": "挿絵を渡す (下書きから)",
             }],
         }
         summary, _ = self._run(result)
@@ -1465,6 +1640,46 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         updated = task_book.get_entry(self.manager, "tester", entry["task_id"])
         self.assertEqual(updated["due_at"], 1_800_000_000)
         self.assertEqual(updated["content"], "挿絵を渡す (下書きから)")
+
+    def test_clear_due_on_an_undated_promise_is_a_harmless_noop(self):
+        """期限の無い約束への clear_due は棄却せず空振りとして記録する (実験で
+        軽量モデルが余分に付けた形)。content が併記されていればそちらは適用し、
+        clear_due だけの要素は空振りの成功 (望まれた「期限なし」は既に成立)。"""
+        from saiverse import task_book
+        with_content = task_book.add_entry(
+            self.manager, "tester", "模様替えの案を3つ出す",
+            origin="user", counterpart="user",
+        )
+        alone = task_book.add_entry(
+            self.manager, "tester", "アルバムを整理する",
+            origin="user", counterpart="user",
+        )
+        result = {
+            **_sluice_result(),
+            "promise_updates": [
+                {
+                    "promise_ref": self._ref(with_content["task_id"]),
+                    "content": "模様替えの案を5つ出す", "clear_due": True,
+                },
+                {"promise_ref": self._ref(alone["task_id"]), "clear_due": True},
+            ],
+        }
+        summary, _ = self._run(result)
+        self.assertEqual(summary["promises_applied"], 2)
+        self.assertEqual(summary["promises_failed"], 0)
+        updated = task_book.get_entry(self.manager, "tester", with_content["task_id"])
+        self.assertEqual(updated["content"], "模様替えの案を5つ出す")
+        self.assertIsNone(updated["due_at"])
+        untouched = task_book.get_entry(self.manager, "tester", alone["task_id"])
+        self.assertEqual(untouched["revision"], alone["revision"])
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertIn(
+            "約束「模様替えの案を3つ出す」は一覧の時点で期限が無いため、期限は変更しませんでした", record,
+        )
+        self.assertIn(
+            "約束「アルバムを整理する」は一覧の時点で期限が無いため、期限は変更しませんでした", record,
+        )
+        self.assertNotIn("期限を撤回", record)
 
     def test_concurrent_user_edit_wins_over_stale_sluice_update(self):
         """LLM 実行中にユーザーが同じタスクを編集したら、スルースの古い判断は
@@ -1476,9 +1691,8 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         )
         result = {
             **_sluice_result(),
-            "promises": [{
-                "op": "update", "task_ref": entry["task_id"],
-                "content": "スルースの古い判断",
+            "promise_updates": [{
+                "promise_ref": "promise:1", "content": "スルースの古い判断",
             }],
         }
         manager = self.manager
@@ -1510,15 +1724,13 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         record = _read_sluice_record(self.adapter)[0]
         self.assertIn("実行中に変更されたため適用しませんでした", record)
 
-    def test_promise_update_invented_task_ref_fails_element_only(self):
-        """LLM が発明した task_ref は同梱一覧の検証で棄却 → その要素だけ失敗し、
+    def test_promise_update_with_an_empty_list_fails_element_only(self):
+        """一覧が空のときの promise:1 は発明された参照 — その要素だけ失敗し、
         スルース全体 (と他の要素) は成功する。"""
         result = {
             **_sluice_result(),
-            "promises": [
-                {"op": "update", "task_ref": "no-such-task", "content": "更新"},
-                {"op": "add", "content": "本物の約束", "due": "2026-08-26"},
-            ],
+            "promise_adds": [{"content": "本物の約束", "due": "2026-08-26"}],
+            "promise_updates": [{"promise_ref": "promise:1", "content": "更新"}],
         }
         summary, _ = self._run(result)
         self.assertEqual(summary["promises_applied"], 1)
@@ -1528,7 +1740,7 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         self.assertEqual(rows[0]["content"], "本物の約束")
         # 棄却の事実は判断ターンの記録に残る (黙って捨てない)。
         record = _read_sluice_record(self.adapter)[0]
-        self.assertIn("一覧にありません", record)
+        self.assertIn("promise:1 は一覧にありません", record)
 
     # -- プロンプト同梱: open なタスク一覧 (閉語彙・再提案防止) ------------
 
@@ -1555,40 +1767,45 @@ class SluiceApplyExtensionTest(_AdapterTestBase):
         _summary, client = self._run(_sluice_result())
         prompt = client.calls[0]["messages"][-1]["content"]
         self.assertIn(
-            f"[task:{dated['task_id']}] 水曜までに挿絵を渡す (期限: 2026-08-26)",
+            f"[{self._ref(dated['task_id'])}] 水曜までに挿絵を渡す (期限: 2026-08-26)",
             prompt,
         )
         self.assertIn(
-            f"[task:{undated['task_id']}] ずっと一緒にいる (期限なし)",
+            f"[{self._ref(undated['task_id'])}] ずっと一緒にいる (期限なし)",
             prompt,
         )
         self.assertNotIn("終わった約束", prompt)
+        # UUID は見せない (丸写しが参照欄を崩す温床だった)。task: 接頭辞も使わない
+        # — 参照文法の正典で task:N は目的の木の short_id を指す別の語。
+        self.assertNotIn(dated["task_id"], prompt)
+        self.assertNotIn(undated["task_id"], prompt)
+        self.assertNotIn("[task:", prompt)
         # 再提案防止の誘導文が載っている。
-        self.assertIn("再び\n  add する必要はありません", prompt)
+        self.assertIn("再び add しないでください", prompt)
 
     def test_prompt_with_no_open_tasks_shows_placeholder(self):
         _summary, client = self._run(_sluice_result())
         prompt = client.calls[0]["messages"][-1]["content"]
         self.assertIn("（開いている約束はありません）", prompt)
 
-    def test_promise_update_to_offered_task_id_succeeds(self):
-        """同梱一覧に載る task_id への update は検証を通過して適用される。"""
+    def test_promise_update_to_offered_position_succeeds(self):
+        """同梱一覧に載る promise:N への変更は検証を通過して適用される。"""
         from saiverse import task_book
         entry = task_book.add_entry(
             self.manager, "tester", "挿絵を渡す", origin="user", counterpart="user",
         )
         result = {
             **_sluice_result(),
-            "promises": [{
-                "op": "update", "task_ref": entry["task_id"], "content": "挿絵を月曜までに渡す",
+            "promise_updates": [{
+                "promise_ref": "promise:1", "content": "挿絵を月曜までに渡す",
             }],
         }
         summary, client = self._run(result)
         self.assertEqual(summary["promises_applied"], 1)
         self.assertEqual(summary["promises_failed"], 0)
-        # 一覧にも同じ id が載っていた (閉語彙の出どころの確認)。
+        # 一覧にも同じ番号が載っていた (閉語彙の出どころの確認)。
         prompt = client.calls[0]["messages"][-1]["content"]
-        self.assertIn(f"[task:{entry['task_id']}]", prompt)
+        self.assertIn("[promise:1] 挿絵を渡す", prompt)
         updated = task_book.get_entry(self.manager, "tester", entry["task_id"])
         self.assertEqual(updated["content"], "挿絵を月曜までに渡す")
 
@@ -1760,7 +1977,7 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         **_sluice_result(reflection="採取"),
         "core_adds": [{"content": "まはーは海外赴任中"}],
         "want_memos": [{"new_activity_name": "小説を書く", "text": "続きを書きたい"}],
-        "promises": [{"op": "add", "content": "水曜までに挿絵を渡す", "due": "2026-08-26"}],
+        "promise_adds": [{"content": "水曜までに挿絵を渡す", "due": "2026-08-26"}],
     }
 
     def _run(self, result, *, finalize=True):
@@ -1871,10 +2088,10 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         result = {
             **_sluice_result(),
             "want_memos": [{"new_activity_name": "小説を書く", "text": "続き"}],
-            "promises": [
-                {"op": "add", "content": "紀元の約束", "due": "0001-01-01"},
-                {"op": "add", "content": "遠未来の約束", "due": "9999-12-31"},
-                {"op": "add", "content": "正しい約束", "due": "2026-08-26"},
+            "promise_adds": [
+                {"content": "紀元の約束", "due": "0001-01-01"},
+                {"content": "遠未来の約束", "due": "9999-12-31"},
+                {"content": "正しい約束", "due": "2026-08-26"},
             ],
         }
         # 1 回目: メモ書き込み障害で applied 凍結 (境界日付が結果に残る)。
@@ -2066,7 +2283,7 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
             summary, client, persona = self._run(self._RESULT)
 
         self.assertTrue(
-            any("記録の形式が古いため再利用しません" in line for line in logs.output),
+            any("記録の形式が古いか壊れているため再利用しません" in line for line in logs.output),
         )
         self.assertEqual(len(client.calls), 1)  # 新しい LLM コールで採り直す
         self.assertFalse(summary["skipped"])
@@ -2083,9 +2300,251 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         self.assertEqual(retried["status"], "completed")
         self.assertEqual(persona._sluice_last_pan_id, "m4")
 
-    def test_recorded_result_without_seen_ids_fails_closed(self):
+    def test_legacy_promises_record_is_not_reused_and_a_new_call_runs(self):
+        """⭐ 旧世代 (約束が promises 一本 = format core3) の記録も再利用しない。
+
+        新しい適用側は promise_adds / promise_updates しか読まないので、そのまま
+        渡すと約束の採取が「ゼロ」として静かに消える。別キー
+        (``#format-promise2``) で新しい LLM コールを立てて採り直す。旧世代が
+        途中まで適用して既に書いた約束は、同じ本文の再追加として書かない
+        (世代を跨いだ重複の歯止め)。
+        """
+        from saiverse import task_book
+        self.assertEqual(sluice._RESPONSE_FORMAT_TAG, "promise2")
+        legacy_response = {
+            **_sluice_result(reflection="旧形式"),
+            "promises": [{"op": "add", "content": "水曜までに挿絵を渡す"}],
+        }
+        del legacy_response["promise_adds"]
+        del legacy_response["promise_updates"]
+        self.assertTrue(sluice._is_legacy_response(legacy_response))
+        # 旧世代の適用が約束の追加までは済ませていた状態 (旧 idem_key の行)。
+        task_book.add_entry(
+            self.manager, "tester", "水曜までに挿絵を渡す",
+            origin="sluice", counterpart="user", idem_key="sluice:m0..m4:p0",
+        )
+        execution_id, runnable, _status = self.ledger.claim_execution(
+            "sluice.pan", "tester:m0", "tester",
+        )
+        self.assertTrue(runnable)
+        self.assertTrue(self.ledger.try_mark_running(execution_id))
+        self.ledger.mark_applied(execution_id, result={
+            "response": legacy_response,
+            "span_start_id": "m0", "span_end_id": "m4",
+            "seen_ids": [f"m{i}" for i in range(5)],
+            "offered_activities": {},
+            "offered_tasks": {},
+            "core_snapshot": {},
+            "prompt": "p",
+        })
+
+        with self.assertLogs("sea.sluice", level="WARNING") as logs:
+            summary, client, _persona = self._run(self._RESULT)
+
+        self.assertTrue(
+            any("記録の形式が古いか壊れているため再利用しません" in line for line in logs.output),
+        )
+        self.assertEqual(len(client.calls), 1)  # 新しい LLM コールで採り直す
+        self.assertEqual(self._ledger_row()["status"], "applied")  # 旧行は不変
+        retried = self.ledger.find_execution(
+            "sluice.pan", "tester:m0#format-promise2",
+        )
+        self.assertEqual(retried["status"], "completed")
+        # 新しい応答の他の採取は適用され、約束は世代を跨いで重複しない。
+        self.assertIn("まはーは海外赴任中", [c.content for c in self._list_core()])
+        self.assertEqual(
+            [r["content"] for r in self._task_rows()], ["水曜までに挿絵を渡す"],
+        )
+        self.assertEqual(summary["promises_applied"], 1)  # 同一本文スキップも成功扱い
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertIn("既にタスク帳にあるため追加しませんでした", record)
+
+    def test_is_legacy_response_requires_every_current_list(self):
+        """現行形式はコア三欄と約束二欄を全部持つ。どれかが欠けた応答、ops か
+        promises を持つ応答は旧世代として採り直しに回す。"""
+        self.assertFalse(sluice._is_legacy_response(_sluice_result()))
+        for field in (
+            "core_adds", "core_updates", "core_removes",
+            "promise_adds", "promise_updates",
+        ):
+            broken = _sluice_result()
+            del broken[field]
+            self.assertTrue(sluice._is_legacy_response(broken), field)
+        self.assertTrue(sluice._is_legacy_response(_sluice_result(promises=[])))
+        self.assertTrue(sluice._is_legacy_response(_sluice_result(ops=[])))
+        self.assertTrue(sluice._is_legacy_response(None))
+
+    def test_corrupted_current_format_record_is_not_reused(self):
+        """現行の欄が揃っていても形が壊れた記録 (欄が null 等) は再利用しない —
+        再適用側の寛容な読みに通すと「採取ゼロで完了」になり、本人が指定した
+        操作が静かに失われる (Codex 二巡目)。旧世代と同じ別キーの採り直しへ回す。"""
+        execution_id, runnable, _status = self.ledger.claim_execution(
+            "sluice.pan", "tester:m0", "tester",
+        )
+        self.assertTrue(runnable)
+        self.assertTrue(self.ledger.try_mark_running(execution_id))
+        self.ledger.mark_applied(execution_id, result={
+            "response": _sluice_result(promise_updates=None),  # 凍結後の破損を模す
+            "span_start_id": "m0", "span_end_id": "m4",
+            "seen_ids": [f"m{i}" for i in range(5)],
+            "offered_activities": {}, "offered_tasks": {},
+            "core_snapshot": {}, "prompt": "p",
+        })
+
+        with self.assertLogs("sea.sluice", level="WARNING") as logs:
+            summary, client, _persona = self._run(self._RESULT)
+
+        self.assertTrue(
+            any("壊れているため再利用しません" in line for line in logs.output),
+        )
+        self.assertEqual(len(client.calls), 1)  # 新しい LLM コールで採り直す
+        retried = self.ledger.find_execution(
+            "sluice.pan", "tester:m0#format-promise2",
+        )
+        self.assertEqual(retried["status"], "completed")
+        self.assertFalse(summary["skipped"])
+
+    def test_record_with_type_invalid_element_is_repanned_not_crashed(self):
+        """要素の型が壊れた記録 (content が int 等) も採り直す (Codex 三巡目) —
+        凍結されるのは検証済みの応答なので、再読で要素棄却が出る = 凍結後の
+        破損。生のまま適用すると .strip() が int で例外化し、applied の行が
+        残ったまま毎回同じクラッシュを繰り返す。"""
+        execution_id, runnable, _status = self.ledger.claim_execution(
+            "sluice.pan", "tester:m0", "tester",
+        )
+        self.assertTrue(runnable)
+        self.assertTrue(self.ledger.try_mark_running(execution_id))
+        self.ledger.mark_applied(execution_id, result={
+            "response": _sluice_result(promise_adds=[{"content": 123}]),
+            "span_start_id": "m0", "span_end_id": "m4",
+            "seen_ids": [f"m{i}" for i in range(5)],
+            "offered_activities": {}, "offered_tasks": {},
+            "core_snapshot": {}, "prompt": "p",
+        })
+
+        summary, client, _persona = self._run(self._RESULT)  # 例外にならない
+        self.assertEqual(len(client.calls), 1)  # 新しい LLM コールで採り直す
+        retried = self.ledger.find_execution(
+            "sluice.pan", "tester:m0#format-promise2",
+        )
+        self.assertEqual(retried["status"], "completed")
+
+    def test_restore_offered_tasks_rejects_corrupt_shapes(self):
+        """対応表の破損は None (= 記録ごと採り直し) — 鍵の別表記 ("01" は
+        promise:1 の引く "1" と一致せず静かな喪失になる)、空白だけの task_id、
+        負・None の revision、dict でない形 (Codex 四巡目)。"""
+        base = {"task_id": "t-1", "revision": 0, "due_at": None, "content": "x"}
+        restored = sluice._restore_offered_tasks({"1": dict(base)})
+        self.assertIsNotNone(restored)
+        self.assertIn("1", restored)
+        for corrupt in (
+            {"01": dict(base)},
+            {"1": {**base, "task_id": " "}},
+            {"1": {**base, "task_id": " t-1 "}},  # 前後空白は完全一致検索に当たらない
+            {"1": {**base, "revision": -1}},
+            {"1": {**base, "revision": None}},
+            {"1": "not-a-dict"},
+            "not-a-dict",
+        ):
+            self.assertIsNone(sluice._restore_offered_tasks(corrupt), repr(corrupt))
+
+    def test_record_with_empty_seen_ids_is_repanned(self):
+        """見た集合が空の記録は再適用せず採り直す — 書き手は空を凍結しない
+        (SluiceEmptySeenSetError で failed) ので空は破損。通すと見ていない
+        会話の上をマーカーが進んで畳まれ (Codex 五巡目)、再適用の分岐で
+        送出すると applied の行が残ったまま毎回同じ例外になり自動回復
+        しない (Codex 六巡目) — だから別キーの採り直しへ。"""
+        execution_id, runnable, _status = self.ledger.claim_execution(
+            "sluice.pan", "tester:m0", "tester",
+        )
+        self.assertTrue(runnable)
+        self.assertTrue(self.ledger.try_mark_running(execution_id))
+        self.ledger.mark_applied(execution_id, result={
+            "response": _sluice_result(),
+            "span_start_id": "m0", "span_end_id": "m4",
+            "seen_ids": [],  # 破損 (正規の書き手は空を凍結しない)
+            "offered_activities": {}, "offered_tasks": {},
+            "core_snapshot": {}, "prompt": "p",
+        })
+        summary, client, _persona = self._run(self._RESULT)  # 例外にならない
+        self.assertEqual(len(client.calls), 1)  # 新しい LLM コールで採り直す
+        retried = self.ledger.find_execution(
+            "sluice.pan", "tester:m0#format-promise2",
+        )
+        self.assertEqual(retried["status"], "completed")
+        self.assertFalse(summary["skipped"])
+
+    def test_restore_offered_activities_rejects_corrupt_shapes(self):
+        """アクティビティ一覧の破損も None (= 記録ごと採り直し) — 数字でない鍵は
+        以前は再適用の int() で例外化し、applied の行が残ったまま毎回クラッシュ
+        する形だった (対応表の破損と同族)。"""
+        self.assertEqual(
+            sluice._restore_offered_activities({"3": "小説を書く"}),
+            {3: "小説を書く"},
+        )
+        self.assertEqual(sluice._restore_offered_activities({}), {})
+        for corrupt in (
+            {"abc": "小説を書く"},
+            {"01": "小説を書く"},  # 非正準表記 — "1" と衝突しうる
+            {3: "小説を書く"},     # 凍結形式は str(id) だけ
+            {"3": 123},
+            {"1" + "0" * 5000: "x"},  # 長大な鍵 — int() の桁上限で例外化させない
+            "not-a-dict",
+            None,                   # 欄ごと欠落 (空 dict へ丸めない)
+        ):
+            self.assertIsNone(
+                sluice._restore_offered_activities(corrupt), repr(corrupt),
+            )
+
+    def test_record_with_corrupt_activity_key_is_repanned_not_crashed(self):
+        """アクティビティ一覧の鍵が壊れた記録は採り直す — 例外にも静かな
+        completed にもしない。"""
+        execution_id, runnable, _status = self.ledger.claim_execution(
+            "sluice.pan", "tester:m0", "tester",
+        )
+        self.assertTrue(runnable)
+        self.assertTrue(self.ledger.try_mark_running(execution_id))
+        self.ledger.mark_applied(execution_id, result={
+            "response": _sluice_result(),
+            "span_start_id": "m0", "span_end_id": "m4",
+            "seen_ids": [f"m{i}" for i in range(5)],
+            "offered_activities": {"abc": "小説を書く"},  # 破損した鍵
+            "offered_tasks": {},
+            "core_snapshot": {}, "prompt": "p",
+        })
+
+        summary, client, _persona = self._run(self._RESULT)  # 例外にならない
+        self.assertEqual(len(client.calls), 1)  # 新しい LLM コールで採り直す
+        retried = self.ledger.find_execution(
+            "sluice.pan", "tester:m0#format-promise2",
+        )
+        self.assertEqual(retried["status"], "completed")
+
+    def test_unusable_record_at_format_key_fails_closed(self):
+        """採り直し用の別キーの記録まで壊れていたら送出する — キーを無限に
+        育てず、静かな completed も作らない (退場停止 → 次回は人の裁定)。"""
+        for key in ("tester:m0", "tester:m0#format-promise2"):
+            execution_id, runnable, _status = self.ledger.claim_execution(
+                "sluice.pan", key, "tester",
+            )
+            self.assertTrue(runnable)
+            self.assertTrue(self.ledger.try_mark_running(execution_id))
+            self.ledger.mark_applied(execution_id, result={
+                "response": _sluice_result(promise_updates=None),
+                "span_start_id": "m0", "span_end_id": "m4",
+                "seen_ids": [f"m{i}" for i in range(5)],
+                "offered_activities": {}, "offered_tasks": {},
+                "core_snapshot": {}, "prompt": "p",
+            })
+        with self.assertRaises(sluice.SluiceOutputError):
+            self._run(self._RESULT)
+        self.assertEqual(self._list_core(), [])
+
+    def test_recorded_result_without_seen_ids_is_repanned(self):
         """seen_ids の無い記録は span から再構成しない (Codex 第五巡 修正 1 —
-        「別読みの近似」の同族)。送出してゲート失敗 (退場停止) に乗る。"""
+        「別読みの近似」の同族)。送出だと applied の行が残ったまま毎回同じ
+        例外で自動回復しないので、破損記録として別キーの採り直しへ回す
+        (Codex 六巡目)。"""
         execution_id, runnable, _status = self.ledger.claim_execution(
             "sluice.pan", "tester:m0", "tester",
         )
@@ -2097,8 +2556,13 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
             # seen_ids を意図的に欠落させる (旧形式の記録)。
             "offered_activities": {}, "offered_tasks": {}, "prompt": "p",
         })
-        with self.assertRaises(sluice.SluiceContextUnavailableError):
-            self._run(self._RESULT)
+        summary, client, _persona = self._run(self._RESULT)
+        self.assertEqual(len(client.calls), 1)  # 新しい LLM コールで採り直す
+        retried = self.ledger.find_execution(
+            "sluice.pan", "tester:m0#format-promise2",
+        )
+        self.assertEqual(retried["status"], "completed")
+        self.assertFalse(summary["skipped"])
 
     def test_unfinalized_run_reapplies_idempotently_then_finalizes(self):
         """finalize=False で返った回 (確定保留) の再適用は重複せず、次の確定で
@@ -2222,12 +2686,13 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         self.assertEqual(self._ledger_row()["status"], "completed")
         self.assertEqual(persona2._sluice_last_pan_id, "m4")
 
-    # -- 旧形式の記録は task の CAS を無効化しない (Codex 第八巡 修正 4) -------
+    # -- 記録の破損は task の CAS を無効化しない (Codex 第八巡 修正 4) -------
 
-    def test_legacy_record_without_task_revisions_rejects_updates(self):
-        """revision を持たない旧形式 (offered_task_ids) の記録から復元した update は
-        棄却する。None で渡すと update_entry が「現在値を読み直して CAS」に落ち、
-        どんな現在値にも当たって古い判断がユーザー編集を上書きする。"""
+    def test_record_without_task_revision_is_repanned(self):
+        """revision の欠けた対応表 (記録の破損) は記録ごと採り直す (Codex
+        三巡目) — 要素棄却で completed にすると、凍結済みの約束の変更が
+        新しい LLM 判断の機会なく失われる。None で CAS へ渡す形にもならない
+        (update_entry の None は「現在値を読み直して CAS」= CAS 無効化)。"""
         from saiverse import task_book
         entry = task_book.add_entry(
             self.manager, "tester", "挿絵を渡す", origin="user", counterpart="user",
@@ -2238,26 +2703,29 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         self.assertTrue(runnable)
         self.assertTrue(self.ledger.try_mark_running(execution_id))
         self.ledger.mark_applied(execution_id, result={
-            "response": _sluice_result(promises=[{
-                "op": "update", "task_ref": entry["task_id"],
-                "content": "スルースの古い判断",
+            "response": _sluice_result(promise_updates=[{
+                "promise_ref": "promise:1", "content": "スルースの古い判断",
             }]),
             "span_start_id": "m0", "span_end_id": "m4",
             "seen_ids": [f"m{i}" for i in range(5)],
             "offered_activities": {}, "core_snapshot": {}, "prompt": "p",
-            # 旧形式: revision を持たない ID 列だけ。
-            "offered_task_ids": [entry["task_id"]],
+            # 破損: revision の欄が無い。
+            "offered_tasks": {"1": {"task_id": entry["task_id"]}},
         })
 
-        summary, client, _persona = self._run(self._RESULT)
-        self.assertEqual(client.calls, [])  # 記録の再利用 (LLM なし)
-        self.assertEqual(summary["promises_applied"], 0)
-        self.assertEqual(summary["promises_failed"], 1)
+        with self.assertLogs("sea.sluice", level="WARNING") as logs:
+            summary, client, _persona = self._run(self._RESULT)
+        self.assertTrue(
+            any("壊れているため再利用しません" in line for line in logs.output),
+        )
+        self.assertEqual(len(client.calls), 1)  # 新しい LLM コールで採り直す
+        self.assertFalse(summary["skipped"])
         current = task_book.get_entry(self.manager, "tester", entry["task_id"])
-        self.assertEqual(current["content"], "挿絵を渡す")  # 上書きされていない
-        record = _read_sluice_record(self.adapter)[0]
-        self.assertIn("スナップショット情報が無いため適用しませんでした", record)
-        self.assertEqual(self._ledger_row()["status"], "completed")
+        self.assertEqual(current["content"], "挿絵を渡す")  # 古い判断で上書きされない
+        retried = self.ledger.find_execution(
+            "sluice.pan", "tester:m0#format-promise2",
+        )
+        self.assertEqual(retried["status"], "completed")
 
     def test_recorded_task_revision_still_applies_updates(self):
         """現行形式 (offered_tasks に revision) の記録は従来どおり CAS して適用する
@@ -2272,14 +2740,16 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         self.assertTrue(runnable)
         self.assertTrue(self.ledger.try_mark_running(execution_id))
         self.ledger.mark_applied(execution_id, result={
-            "response": _sluice_result(promises=[{
-                "op": "update", "task_ref": entry["task_id"],
-                "content": "挿絵を月曜までに渡す",
+            "response": _sluice_result(promise_updates=[{
+                "promise_ref": "promise:1", "content": "挿絵を月曜までに渡す",
             }]),
             "span_start_id": "m0", "span_end_id": "m4",
             "seen_ids": [f"m{i}" for i in range(5)],
             "offered_activities": {}, "core_snapshot": {}, "prompt": "p",
-            "offered_tasks": {entry["task_id"]: entry["revision"]},
+            "offered_tasks": {"1": {
+                "task_id": entry["task_id"], "revision": entry["revision"],
+                "due_at": None, "content": "挿絵を渡す",
+            }},
         })
 
         summary, client, _persona = self._run(self._RESULT)
@@ -2288,6 +2758,106 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         self.assertEqual(summary["promises_failed"], 0)
         current = task_book.get_entry(self.manager, "tester", entry["task_id"])
         self.assertEqual(current["content"], "挿絵を月曜までに渡す")
+
+    def test_record_with_null_task_revision_is_repanned(self):
+        """revision が None の対応表も破損として記録ごと採り直す — REVISION 列は
+        NOT NULL なので正規の書き手は常に int を凍結する。None を CAS へ渡すと
+        update_entry が「省略 = 現在値を読み直して CAS」に落ちて古い判断が
+        ユーザー編集を上書きできるため、要素適用には決して進めない。"""
+        from saiverse import task_book
+        entry = task_book.add_entry(
+            self.manager, "tester", "挿絵を渡す", origin="user", counterpart="user",
+        )
+        execution_id, runnable, _status = self.ledger.claim_execution(
+            "sluice.pan", "tester:m0", "tester",
+        )
+        self.assertTrue(runnable)
+        self.assertTrue(self.ledger.try_mark_running(execution_id))
+        self.ledger.mark_applied(execution_id, result={
+            "response": _sluice_result(promise_updates=[{
+                "promise_ref": "promise:1", "content": "スルースの古い判断",
+            }]),
+            "span_start_id": "m0", "span_end_id": "m4",
+            "seen_ids": [f"m{i}" for i in range(5)],
+            "offered_activities": {}, "core_snapshot": {}, "prompt": "p",
+            "offered_tasks": {"1": {
+                "task_id": entry["task_id"], "revision": None,
+                "due_at": None, "content": "挿絵を渡す",
+            }},
+        })
+
+        summary, client, _persona = self._run(self._RESULT)
+        self.assertEqual(len(client.calls), 1)  # 新しい LLM コールで採り直す
+        current = task_book.get_entry(self.manager, "tester", entry["task_id"])
+        self.assertEqual(current["content"], "挿絵を渡す")  # 上書きされていない
+        retried = self.ledger.find_execution(
+            "sluice.pan", "tester:m0#format-promise2",
+        )
+        self.assertEqual(retried["status"], "completed")
+
+    def test_apply_rejects_snapshot_without_valid_revision(self):
+        """適用側の帯 (二重の網): 対応表の revision が None / 欠落の要素は
+        update_entry へ進めず棄却する。復元経路は記録ごと採り直すので通常は
+        ここへ来ないが、None が CAS 無効化に化ける口は適用側でも閉じておく。"""
+        from types import SimpleNamespace as _NS
+        from saiverse import task_book
+        entry = task_book.add_entry(
+            self.manager, "tester", "挿絵を渡す", origin="user", counterpart="user",
+        )
+        for broken_snapshot in (
+            {"task_id": entry["task_id"], "revision": None},
+            {"task_id": entry["task_id"]},
+        ):
+            applied, failed, lines = sluice._apply_promises(
+                _NS(manager=self.manager), _NS(persona_id="tester"),
+                [], [{"promise_ref": "promise:1", "content": "古い判断"}],
+                idem_prefix="t", span_start_id=None, span_end_id=None,
+                offered_tasks={"1": broken_snapshot},
+            )
+            self.assertEqual((applied, failed), (0, 1))
+            self.assertTrue(
+                any("スナップショット情報が無いため" in line for line in lines),
+            )
+        current = task_book.get_entry(self.manager, "tester", entry["task_id"])
+        self.assertEqual(current["content"], "挿絵を渡す")
+
+    def test_record_without_due_at_snapshot_applies_real_clear(self):
+        """対応表に due_at の欄が無い (記録の破損) とき、clear_due だけの変更を
+        「一覧の時点で期限なし」の空振り成功に丸めない — 実体に期限が残って
+        いるのに成功と記録される形を防ぎ、実際の期限撤回 (CAS つき) へ進める。"""
+        from saiverse import task_book
+        entry = task_book.add_entry(
+            self.manager, "tester", "挿絵を渡す", origin="user",
+            counterpart="user", due_at=1_800_000_000,
+        )
+        execution_id, runnable, _status = self.ledger.claim_execution(
+            "sluice.pan", "tester:m0", "tester",
+        )
+        self.assertTrue(runnable)
+        self.assertTrue(self.ledger.try_mark_running(execution_id))
+        self.ledger.mark_applied(execution_id, result={
+            "response": _sluice_result(promise_updates=[{
+                "promise_ref": "promise:1", "clear_due": True,
+            }]),
+            "span_start_id": "m0", "span_end_id": "m4",
+            "seen_ids": [f"m{i}" for i in range(5)],
+            "offered_activities": {}, "core_snapshot": {}, "prompt": "p",
+            # 破損: due_at の欄が無い (revision は正しい)。
+            "offered_tasks": {"1": {
+                "task_id": entry["task_id"], "revision": entry["revision"],
+                "content": "挿絵を渡す",
+            }},
+        })
+
+        summary, client, _persona = self._run(self._RESULT)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(summary["promises_applied"], 1)
+        self.assertEqual(summary["promises_failed"], 0)
+        current = task_book.get_entry(self.manager, "tester", entry["task_id"])
+        self.assertIsNone(current["due_at"])  # 本当に期限が外れている
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertNotIn("一覧の時点で期限が無いため", record)
+        self.assertIn("期限を撤回", record)
 
     # -- 型不正は凍結の前に落とす (Codex 第八巡 修正 6) ----------------------
 
@@ -2333,6 +2903,42 @@ class SluiceLedgerRetryTest(_AdapterTestBase):
         self.assertEqual(
             row["result"]["response"]["core_adds"][0]["content"], "まはーは海外赴任中",
         )
+
+    def test_offered_promise_map_is_frozen_and_replayed_by_position(self):
+        """台帳には「一覧の位置 N → task_id と revision」の対応が凍結され、記録の
+        再利用 (LLM なし) でも promise:N が同じ一件へ解決される。"""
+        from saiverse import task_book
+        entry = task_book.add_entry(
+            self.manager, "tester", "挿絵を渡す",
+            origin="user", counterpart="user", due_at=1_800_000_000,
+        )
+        result = {
+            **_sluice_result(reflection="採取"),
+            "want_memos": [{"new_activity_name": "小説を書く", "text": "続き"}],
+            "promise_updates": [{"promise_ref": "promise:1", "content": "挿絵を月曜に渡す"}],
+        }
+        # メモ段の障害で applied 凍結 → 約束は未適用のまま記録が残る。
+        with patch(
+            "sai_memory.memory.pocketbook.add_memo",
+            side_effect=RuntimeError("disk error"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._run(result)
+        row = self._ledger_row()
+        self.assertEqual(row["status"], "applied")
+        self.assertEqual(row["result"]["offered_tasks"], {"1": {
+            "task_id": entry["task_id"], "revision": entry["revision"],
+            "due_at": 1_800_000_000, "content": "挿絵を渡す",
+        }})
+
+        summary, client, _persona = self._run(result)
+        self.assertEqual(client.calls, [])  # 記録の再利用
+        self.assertEqual(summary["promises_applied"], 1)
+        self.assertEqual(
+            task_book.get_entry(self.manager, "tester", entry["task_id"])["content"],
+            "挿絵を月曜に渡す",
+        )
+        self.assertEqual(self._ledger_row()["status"], "completed")
 
 
 class MetabolismUnseenTailGuardTest(_AdapterTestBase):
@@ -4601,7 +5207,7 @@ class SluiceResponseSchemaShapeTest(unittest.TestCase):
         props = sluice._RESPONSE_SCHEMA["properties"]
         self.assertEqual(list(props), [
             "reflection", "core_adds", "core_updates", "core_removes",
-            "want_memos", "did_memos", "promises",
+            "want_memos", "did_memos", "promise_adds", "promise_updates",
         ])
         self.assertEqual(sluice._RESPONSE_SCHEMA["required"], list(props))
         self.assertEqual(props["core_adds"]["items"]["required"], ["content"])
@@ -4617,6 +5223,33 @@ class SluiceResponseSchemaShapeTest(unittest.TestCase):
                 ["activity_ref", "new_activity_name", "text"],
             )
 
+    def test_promises_are_split_by_kind_with_the_ref_first(self):
+        """⭐ 約束も種類別の二一覧 (docs/issues/sluice_task_ref_prefix_rejected.md)。
+
+        旧 ``promises`` (op 一本だけ必須、参照欄が最後) は型の規律 2 の違反形で、
+        変更内容の無い update・参照欄への本文の流れ込みが本番で出た。追加は
+        本文が必須、変更は参照が必須で先頭 (propertyOrdering)。参照は文字列の
+        promise:N — task_ref / task: の語はもう型に無い。
+        """
+        props = sluice._RESPONSE_SCHEMA["properties"]
+        self.assertNotIn("promises", props)
+        adds = props["promise_adds"]["items"]
+        self.assertEqual(list(adds["properties"]), ["content", "due"])
+        self.assertEqual(adds["required"], ["content"])
+        updates = props["promise_updates"]["items"]
+        self.assertEqual(
+            list(updates["properties"]),
+            ["promise_ref", "content", "due", "clear_due"],
+        )
+        self.assertEqual(updates["required"], ["promise_ref"])
+        self.assertEqual(updates["properties"]["promise_ref"]["type"], "string")
+        self.assertEqual(updates["properties"]["clear_due"]["type"], "boolean")
+        import json
+        dumped = json.dumps(sluice._RESPONSE_SCHEMA, ensure_ascii=False)
+        self.assertNotIn("task_ref", dumped)
+        self.assertNotIn("task:", dumped)
+        self.assertNotIn('"op"', dumped)
+
     def test_parse_ref_accepts_only_the_offered_wording(self):
         """参照の解決は同梱の語の写しだけを通す (前後の空白は許す)。"""
         self.assertEqual(sluice._parse_ref("core:2", sluice._CORE_REF_RE), 2)
@@ -4628,6 +5261,12 @@ class SluiceResponseSchemaShapeTest(unittest.TestCase):
             "core:" + "2" * 5000,
         ):
             self.assertIsNone(sluice._parse_ref(bad, sluice._CORE_REF_RE))
+        self.assertEqual(sluice._parse_ref("promise:3", sluice._PROMISE_REF_RE), 3)
+        for bad in (
+            "promise:1extra", "promise:", "task:1", "3", "promise:" + "1" * 5000,
+            "74b3bbe2-0000-0000-0000-000000000000",
+        ):
+            self.assertIsNone(sluice._parse_ref(bad, sluice._PROMISE_REF_RE))
 
 
 if __name__ == "__main__":

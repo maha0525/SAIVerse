@@ -400,6 +400,38 @@ class CaptureApplyTest(_CaptureTestBase):
 
         self.addCleanup(_cleanup_tb)
 
+    def test_capture_resolves_promise_updates_by_list_position(self):
+        """読み返しの採取も、約束の変更を一覧の位置 (promise:N) で引く — 指示文に
+        並べた番号と、照合の対応表が同じ並びから作られている。"""
+        from saiverse import task_book
+        entry = task_book.add_entry(
+            self.manager, "tester", "星の話をする", origin="user", counterpart="user",
+        )
+        ids = self._append_conversation(2)
+        self._record_span(ids[0], ids[-1])
+        result = {
+            **_sluice_result(reflection="読み返した"),
+            "promise_updates": [
+                {"promise_ref": "promise:1", "content": "星の話の続きをする"},
+                {"promise_ref": "promise:2", "content": "一覧に無い番号"},
+            ],
+        }
+        client = FakeLLMClient(result)
+        runtime = FakeRuntime(client)
+        lifecycle = SimpleNamespace(runtime=runtime, manager=self.manager)
+        summary = sluice.run_sluice_capture(
+            lifecycle, self._persona(), mode="persona",
+        )
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(summary["captures_applied"], 1)
+        self.assertEqual(summary["captures_failed"], 1)
+        prompt = client.calls[0]["messages"][-1]["content"]
+        self.assertIn("[promise:1] 星の話をする", prompt)
+        self.assertEqual(
+            task_book.get_entry(self.manager, "tester", entry["task_id"])["content"],
+            "星の話の続きをする",
+        )
+
     def test_capture_applies_core_memo_promise_and_records(self):
         from datetime import datetime as _dt
 
@@ -412,7 +444,7 @@ class CaptureApplyTest(_CaptureTestBase):
             "want_memos": [
                 {"new_activity_name": "小説を書く", "text": "星の話を書きたい"},
             ],
-            "promises": [{"op": "add", "content": "星の話の続きを送る"}],
+            "promise_adds": [{"content": "星の話の続きを送る"}],
         }
         client = FakeLLMClient(result)
         runtime = FakeRuntime(client)

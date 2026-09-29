@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 51
+**テーブル数**: 52
 
 ## addon_config
 
@@ -282,7 +282,8 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `CORE_MEMORY_CHAR_BUDGET` | INTEGER | — |  |
 | `CHRONICLE_CHAR_BUDGET` | INTEGER | — |  |
 | `SPELL_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
-| `REALTIME_INFO_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
+| `REALTIME_CURRENT_TIME_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
+| `REALTIME_LAST_UTTERANCE_ENABLED` | BOOLEAN | NOT NULL, default=False |  |
 | `METABOLISM_ANCHORS` | TEXT | — |  |
 | `AUTONOMY_ENABLED` | BOOLEAN | NOT NULL, default=True |  |
 | `LAST_KNOWN_VERSION` | VARCHAR(64) | — |  |
@@ -431,6 +432,18 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `DIGEST_REF` | VARCHAR(255) | — |  |
 | `META_JSON` | TEXT | — |  |
 
+## feed_fixture_config
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `FIXTURE_ID` | VARCHAR(36) | PK, FK→fixture.FIXTURE_ID, NOT NULL |  |
+| `FETCH_INTERVAL_SEC` | INTEGER | — |  |
+| `SUMMARY_MAX_CHARS` | INTEGER | — |  |
+| `TITLE_MAX_CHARS` | INTEGER | — |  |
+| `MAX_ITEMS_PER_PUSH` | INTEGER | — |  |
+| `CREATED_AT` | DATETIME | NOT NULL |  |
+| `UPDATED_AT` | DATETIME | NOT NULL |  |
+
 ## feed_subscription
 
 | カラム | 型 | 制約 | 説明 |
@@ -446,6 +459,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `LAST_OK_AT` | DATETIME | — |  |
 | `LAST_ERROR` | VARCHAR(512) | — |  |
 | `CONSECUTIVE_FAILURES` | INTEGER | NOT NULL, default=0 |  |
+| `LAST_ATTEMPT_AT` | DATETIME | — |  |
 | `CREATED_AT` | DATETIME | NOT NULL |  |
 | `UPDATED_AT` | DATETIME | NOT NULL |  |
 

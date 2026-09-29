@@ -8,6 +8,7 @@ create_building — API・ツール・manager 委譲の全経路がここへ集�
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -39,10 +40,14 @@ class BuildingAdminIdTestCase(unittest.TestCase):
 
         self.svc = AdminService.__new__(AdminService)
         self.svc.SessionLocal = self.SessionLocal
+        # 作成の口は、消した建物の付け替えの記録 (<ホーム>/cities/*/) を読む
+        self._home = tempfile.TemporaryDirectory(prefix="saiverse_home_")
+        self.svc.saiverse_home = Path(self._home.name)
 
     def tearDown(self):
         self.engine.dispose()
         os.unlink(self.db_path)
+        self._home.cleanup()
 
     def _get(self, building_id):
         db = self.SessionLocal()

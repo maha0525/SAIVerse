@@ -132,11 +132,16 @@ class AI(Base):
     # (manager/admin.py)。
     CHRONICLE_CHAR_BUDGET = Column(Integer, nullable=True)
     SPELL_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona spell system toggle (基幹機能化に伴い v0.3.0.dev3 でデフォルト ON 化)
-    # Per-persona toggle for the realtime info section (現在時刻 / 前回発言時刻)
-    # injected by sea/runtime.py:_build_realtime_context. OFF にすると、その動的
-    # コンテキストブロックをこのペルソナには一切送らない。夜になると時刻を気にして
-    # 会話が成立しなくなるモデル向けの脱出経路 (docs/issues/realtime_info_current_time_toggle.md)。
-    REALTIME_INFO_ENABLED = Column(Boolean, default=True, nullable=False)
+    # リアルタイム情報 (sea/runtime.py:_build_realtime_context) の項目別トグル
+    # (docs/intent/realtime_info.md)。2026-09-28 に全体トグル REALTIME_INFO_ENABLED を
+    # 廃止して 2 列に分けた — 項目別にすると「全項目 OFF なら送らない」が同じ意味を
+    # 持つので、セクション丸ごとの ON/OFF は置かない。
+    # 「現在時刻」の行を見せるか。夜になると時刻を気にして会話が成立しなくなる
+    # モデル向けの脱出経路 (旧列の値をマイグレーションで引き継ぐ)。
+    REALTIME_CURRENT_TIME_ENABLED = Column(Boolean, default=True, nullable=False)
+    # 「あなたの前回発言」の行を見せるか。既定 OFF — 不具合修正の副作用で
+    # 全ペルソナの見え方が変わらないよう、欲しい人が明示的に ON にする。
+    REALTIME_LAST_UTTERANCE_ENABLED = Column(Boolean, default=False, nullable=False)
     # ⚠️ legacy: anchor 状態は session_anchor テーブルへ行分離済み (beat_execution_context.md §3.1)。
     # この列は backfill_session_anchors (database/migrate.py) の変換元としてのみ残存 (変換後は常に NULL)。
     # 列 DROP は後続の掃除 wave (破壊的 migration になるため)。
@@ -984,6 +989,12 @@ class FeedSubscription(Base):
     LAST_OK_AT = Column(DateTime, nullable=True)
     LAST_ERROR = Column(String(512), nullable=True)
     CONSECUTIVE_FAILURES = Column(Integer, default=0, nullable=False)
+    # 最後に取得を試みた時刻 (naive UTC、成功・失敗とも)。取得ワーカーは
+    # 固定の刻みで起き、所属スタンドの取得間隔がここから経過した購読だけを
+    # 取得する (FeedManager._fetch_all のゲート)。NULL = まだ一度も試して
+    # いない = 次の刻みで取得する。nullable なので追加系 migration
+    # (try_additive_migration / _ensure_feed_tables) で既存 DB に足せる。
+    LAST_ATTEMPT_AT = Column(DateTime, nullable=True)
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     __table_args__ = (
@@ -1044,6 +1055,27 @@ class FeedReadCursor(Base):
     __table_args__ = (
         UniqueConstraint('PERSONA_ID', 'SUBSCRIPTION_ID', name='uq_feed_cursor_persona_sub'),
     )
+
+
+class FeedFixtureConfig(Base):
+    """フィード施設 (Fixture TYPE="feed_stand") ごとの配信設定 (2026-09-29)。
+
+    4 欄とも nullable で、NULL は「既定値を使う」。解決順は
+    スタンドの設定値 > env > 組み込み既定 (FeedManager.resolve_stand_settings)。
+    要約・見出しの上限は env を持たない (スタンド設定と組み込み既定だけ)。
+    未読ストック上限 (SAIVERSE_FEED_MAX_PENDING) はペルソナ単位の共有予算
+    なのでここには置かない。行が無いスタンドは全欄 NULL と同じ扱い。
+    """
+    __tablename__ = "feed_fixture_config"
+    FIXTURE_ID = Column(
+        String(36), ForeignKey("fixture.FIXTURE_ID"), primary_key=True
+    )
+    FETCH_INTERVAL_SEC = Column(Integer, nullable=True)
+    SUMMARY_MAX_CHARS = Column(Integer, nullable=True)
+    TITLE_MAX_CHARS = Column(Integer, nullable=True)
+    MAX_ITEMS_PER_PUSH = Column(Integer, nullable=True)
+    CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class RealtimeSpellBinding(Base):

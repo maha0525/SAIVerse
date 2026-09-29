@@ -527,6 +527,11 @@ def migrate_database_in_place(db_path: str):
         _migrate_interaction_mode_to_autonomy_enabled(source_engine, target_engine)
         _migrate_activity_state_to_autonomy_enabled(source_engine, target_engine)
 
+        # Post-migration: 旧 REALTIME_INFO_ENABLED (リアルタイム情報の全体トグル)
+        # を項目別の 2 列へ写す (2026-09-28, docs/intent/realtime_info.md)。
+        # 列コピー段は新スキーマに無い旧列を運ばないので、明示の変換が要る。
+        _migrate_realtime_info_to_item_toggles(source_engine, target_engine)
+
         # Post-migration: assign slot numbers to existing items (in order of CREATED_AT)
         _assign_initial_slot_numbers(target_engine)
 
@@ -700,6 +705,89 @@ def _migrate_activity_state_to_autonomy_enabled(source_engine, target_engine) ->
     except Exception as exc:
         logging.error(
             "ACTIVITY_STATE -> AUTONOMY_ENABLED 変換に失敗しました: %s",
+            exc,
+            exc_info=True,
+        )
+        raise
+
+
+def _migrate_realtime_info_to_item_toggles(source_engine, target_engine) -> None:
+    """Map legacy AI.REALTIME_INFO_ENABLED onto the two per-item toggles (2026-09-28).
+
+    The realtime-info section used to have a single whole-section toggle. It was
+    split into REALTIME_CURRENT_TIME_ENABLED / REALTIME_LAST_UTTERANCE_ENABLED
+    (docs/intent/realtime_info.md). The mapping keeps every persona's rendered
+    text byte-identical at release time:
+
+    - old True  -> CURRENT_TIME=True,  LAST_UTTERANCE=False
+    - old False -> CURRENT_TIME=False, LAST_UTTERANCE=False
+
+    LAST_UTTERANCE is never touched here: it stays at the column default (False)
+    that the copy phase already wrote. (Before the split the last-utterance line
+    never rendered at all because of the epoch-seconds parsing bug, so False is
+    what every persona actually saw.)
+
+    Reads the **source** (backup) DB because the new schema no longer carries
+    the old column. No-op when the source has no REALTIME_INFO_ENABLED column.
+
+    The old column must NOT be listed in KNOWN_COLUMN_DROPS: that early drop
+    runs before the copy phase and would destroy the value before this step
+    can read it.
+    """
+    try:
+        source_inspector = inspect(source_engine)
+        if not source_inspector.has_table("AI"):
+            return
+        source_cols = {c["name"] for c in source_inspector.get_columns("AI")}
+        if "REALTIME_INFO_ENABLED" not in source_cols:
+            logging.info("REALTIME_INFO_ENABLED が source DB に存在しないため、変換をスキップします。")
+            return
+
+        with source_engine.connect() as src:
+            rows = src.execute(text('SELECT AIID, REALTIME_INFO_ENABLED FROM "AI"')).fetchall()
+
+        if not rows:
+            return
+
+        with target_engine.begin() as tgt:
+            converted = 0
+            for ai_id, legacy_enabled in rows:
+                # NULL は旧列の既定 (True) と同じ扱い — 旧列は NOT NULL だったが、
+                # 手で作られた DB で NULL が来ても「見せていた」側に倒す。
+                # SQLite は列型を強制しないので、手作業の DB では文字列 "0" /
+                # "false" が来うる — bool("0") は True になり、OFF にした選択を
+                # 勝手に ON へ反転させてしまうため、文字列は明示的に読む。
+                # 許可表現の外の値は、黙って倒さず WARNING を残して旧列の既定
+                # (True) に倒す (移行全体を止めるほどの異常ではない)。
+                if isinstance(legacy_enabled, str):
+                    normalized = legacy_enabled.strip().lower()
+                    if normalized in ("0", "0.0", "false", "no", "off", ""):
+                        enabled = False
+                    elif normalized in ("1", "true", "yes", "on"):
+                        enabled = True
+                    else:
+                        logging.warning(
+                            "REALTIME_INFO_ENABLED の値 %r (AIID=%s) を解釈できません。"
+                            "旧列の既定 (True) に倒します。",
+                            legacy_enabled, ai_id,
+                        )
+                        enabled = True
+                elif legacy_enabled is None:
+                    enabled = True
+                else:
+                    enabled = bool(legacy_enabled)
+                tgt.execute(
+                    text('UPDATE "AI" SET REALTIME_CURRENT_TIME_ENABLED = :enabled WHERE AIID = :id'),
+                    {"enabled": enabled, "id": ai_id},
+                )
+                converted += 1
+        logging.info(
+            "REALTIME_INFO_ENABLED -> REALTIME_CURRENT_TIME_ENABLED 変換完了: %d 件のレコードを更新しました。",
+            converted,
+        )
+    except Exception as exc:
+        logging.error(
+            "REALTIME_INFO_ENABLED -> REALTIME_CURRENT_TIME_ENABLED 変換に失敗しました: %s",
             exc,
             exc_info=True,
         )
@@ -1563,7 +1651,10 @@ def migrate_deadline_tasks_to_task_book(db_path: str) -> None:
 
 def _ensure_feed_tables(engine) -> None:
     """フィード取り込み 3 テーブル (feed_subscription / feed_item / feed_read_cursor)
-    を軽量パスで現行スキーマへ収束させる。
+    と、スタンドごとの配信設定 feed_fixture_config (2026-09-29) を軽量パスで
+    現行スキーマへ収束させる。重複修復・再構築・一意 index の補修は従来どおり
+    3 テーブルだけが対象 (feed_fixture_config は FIXTURE_ID が主キーで重複が
+    起こりえない)。
 
     docs/intent/rss_feed_intake.md。新規テーブルは needs_migration →
     try_additive_migration の汎用パス (missing_tables → CREATE TABLE) でも作られる
@@ -1598,7 +1689,12 @@ def _ensure_feed_tables(engine) -> None:
     get-or-create) が効かず、重複購読を黙って作る。一時ロック等の一過性の
     失敗も、握り潰すのではなく migration の再実行で解決するのが正しい。
     """
-    from database.models import FeedSubscription, FeedItem, FeedReadCursor
+    from database.models import (
+        FeedFixtureConfig,
+        FeedItem,
+        FeedReadCursor,
+        FeedSubscription,
+    )
     try:
         with engine.begin() as conn:
             # pysqlite (既定の legacy isolation) は BEGIN の発行を最初の DML
@@ -1610,11 +1706,15 @@ def _ensure_feed_tables(engine) -> None:
             if raw is not None and not getattr(raw, "in_transaction", False):
                 conn.exec_driver_sql("BEGIN")
             # FK (feed_item / feed_read_cursor → feed_subscription) があるため
-            # 購読を先に作る
+            # 購読を先に作る。feed_fixture_config (スタンドごとの配信設定、
+            # 2026-09-29) は全欄 nullable の新表で、ここでは CREATE だけが
+            # 起きる。feed_subscription.LAST_ATTEMPT_AT (取得間隔のゲートの
+            # 基準) も nullable 列なので、列補修の ALTER で足りる。
             for table in (
                 FeedSubscription.__table__,
                 FeedItem.__table__,
                 FeedReadCursor.__table__,
+                FeedFixtureConfig.__table__,
             ):
                 _sync_feed_table_schema(conn, table)
             # 列補修の直後・重複修復より前に、既存行の NULL を既定値で埋める

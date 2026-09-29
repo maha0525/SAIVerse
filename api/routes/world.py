@@ -310,9 +310,35 @@ def update_building(building_id: str, b: BuildingUpdate, manager: SAIVerseManage
             )
     return _check_result(manager.update_building(building_id, b.name, b.capacity, b.description, b.system_instruction, b.city_id, b.tool_ids, b.auto_interval, b.image_path, b.extra_prompt_files, item_display_limit))
 
+@router.get("/buildings/{building_id}/deletion-preview")
+def get_building_deletion_preview(building_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """建物を消したら何が一緒に消え、何が残るかの数 (削除の確認ダイアログ用)。
+
+    中に直接置かれたアイテムの数と入れ物の中身の数、一緒に消える設置物の
+    数と名前、残る会話の記録の数を返す。何も変えない。
+    """
+    preview = manager.get_building_deletion_preview(building_id)
+    if preview is None:
+        raise HTTPException(status_code=404, detail="Building not found")
+    return preview
+
 @router.delete("/buildings/{building_id}")
-def delete_building(building_id: str, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.delete_building(building_id))
+def delete_building(
+    building_id: str,
+    items: str = "keep",
+    manager: SAIVerseManager = Depends(get_manager),
+):
+    """建物を消す。``items`` は中に直接置かれたアイテムの扱い。
+
+    ``keep`` (既定) = どこにも置かれていない状態で残す / ``delete`` = 入れ物の
+    中身ごと消す。設置物は常に一緒に消え、会話の記録は常に残る。
+    """
+    if items not in ("keep", "delete"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"items must be 'keep' or 'delete' (got '{items}').",
+        )
+    return _check_result(manager.delete_building(building_id, item_policy=items))
 
 
 # --- Regions ---
@@ -623,7 +649,13 @@ def get_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
 
 @router.delete("/items/{item_id}")
 def delete_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """アイテムを消す。入れ物なら、直接の中身は入れ物があった場所へ出される。"""
     return _check_result(manager.delete_item(item_id))
+
+@router.delete("/items/{item_id}/contents")
+def delete_bag_contents(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """入れ物の中身を、入れ子の中身まで含めてすべて消す (入れ物自身は残る)。"""
+    return _check_result(manager.delete_bag_contents(item_id))
 
 
 # --- Playbook ---

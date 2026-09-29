@@ -231,6 +231,12 @@ class SessionLifecycle:
         # 最終防衛ラインを「SAIMemory absent (従来のメモリ上の履歴)」で見送った
         # ことをペルソナごと 1 度だけ INFO に残すための既出集合。
         self._floor_absent_logged: Set[str] = set()
+        # 実在しない発言を指す起点の行をプレビューの読み (行を消さない) で
+        # 見つけたことを、(persona, model, anchor) ごとプロセスごとに 1 度だけ
+        # 警告するための既出集合 (:meth:`_drop_dangling_anchor_rows`)。
+        # context-status のポーリングで毎回同じ警告を出さない。本番の読みは
+        # 行を消すので毎回警告する (消えれば二度目は出ない)。
+        self._dangling_anchor_preview_warned: Set[Tuple[str, str, str]] = set()
         # Metabolism 系 LLM (スルース・編纂・束ね) が RateLimitError で失敗した
         # persona の小休止 (docs/intent/sluice_coverage_gaps.md 第一段 C-1)。
         # persona_id → 小休止が明ける時刻 (time.monotonic())。メモリ上のみ —
@@ -983,6 +989,40 @@ class SessionLifecycle:
         finally:
             db.close()
 
+    def delete_anchor_entry_if_matches(
+        self, persona_id: Optional[str], model_key: Optional[str],
+        expected_anchor_id: str,
+    ) -> bool:
+        """(persona, model) の行を、起点がまだ ``expected_anchor_id`` のときだけ消す。
+
+        実在しない発言を指す起点の行の除去用
+        (docs/issues/dangling_session_anchor_refuses_every_pulse.md)。条件付き
+        DELETE 1 文 (= 原子的) なので、確認と削除の間に別の書き手が新しい
+        起点を書いていたら、その行は消さない (upsert の CAS と同じ形)。
+
+        Returns:
+            消したら True。行が無い・起点が変わっていたら False。DB の失敗は
+            例外のまま返す (呼び出し側が厳格さに応じて裁く)。
+        """
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return False
+        if not persona_id or not model_key or not expected_anchor_id:
+            return False
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import SessionAnchor
+            deleted = db.query(SessionAnchor).filter_by(
+                PERSONA_ID=persona_id, MODEL_KEY=str(model_key),
+                ANCHOR_MESSAGE_ID=str(expected_anchor_id),
+            ).delete(synchronize_session=False)
+            db.commit()
+            return bool(deleted)
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
     def clear_anchor_entries(self, persona_id: Optional[str]) -> None:
         """persona の anchor 行を全 model 分削除する (記憶の整理 = anchor リセット用)。"""
         if not self.manager or not hasattr(self.manager, "SessionLocal"):
@@ -1044,6 +1084,13 @@ class SessionLifecycle:
         マーカーとの順序が引けないときは前進しない (fail-closed — 記録なしで
         範囲を提示から出さない)。
 
+        起点は memory.db に実在する発言を指す (2026-09-29 —
+        docs/issues/dangling_session_anchor_refuses_every_pulse.md)。実在しないと
+        確かに分かった行は、自行でも他モデルの行でも「無かったこと」にして
+        (本番の読みでは行を消す) 解決する — 自行が壊れていれば、そのモデルで
+        初めて話すときと同じ道 (最前線 / 借用 / 最小ロード) で窓を始める。
+        詳細は :meth:`_drop_dangling_anchor_rows`。
+
         Args:
             model_key: 「自 model」として扱う model。ExecutionContext が届いている
                 呼び出し元は ``execution_context.model_key`` を明示で渡す
@@ -1080,6 +1127,14 @@ class SessionLifecycle:
         anchors = (
             self.load_anchor_entries_strict(persona_id) if strict
             else self.load_anchor_entries(persona_id)
+        )
+        # 起点は memory.db に実在する発言を指す。実在しないと確かに分かった
+        # 行は「無かったこと」にする — 自行なら下の Case 2 (そのモデルで初めて
+        # 話すときと同じ道) へ落ち、他モデルの行なら借用候補から外れる
+        # (docs/issues/dangling_session_anchor_refuses_every_pulse.md)。
+        anchors = self._drop_dangling_anchor_rows(
+            persona, persona_id, anchors,
+            persist_advance=persist_advance, strict=strict,
         )
 
         # Case 1: 自 model の行がある。温かければそのまま (§13 裁定 1 の芯)。
@@ -1223,6 +1278,129 @@ class SessionLifecycle:
         # Case 3: 起点が定義できない (新規ペルソナ等) — bootstrap
         LOGGER.debug("[metabolism] No anchor row — bootstrap minimal load")
         return (None, "minimal")
+
+    def _drop_dangling_anchor_rows(
+        self,
+        persona,
+        persona_id: Optional[str],
+        anchors: Dict[str, Any],
+        *,
+        persist_advance: bool,
+        strict: bool,
+    ) -> Dict[str, Any]:
+        """起点が memory.db に実在しない行を除いた ``anchors`` を返す。
+
+        docs/issues/dangling_session_anchor_refuses_every_pulse.md: 起点の行
+        (saiverse.db) と発言 (memory.db) は別ファイルなので、発言が消えても
+        起点は自動では直らない (v0.2 からの持ち込み / 記憶の画面からの削除)。
+        そのまま使うと厳格な窓の読みが毎回例外になり、返事が成功しないので
+        起点も書き直されず、ペルソナは見送られ続ける。
+
+        規則:
+
+        - 実在の確認は全行の起点を一括の照会 1 回で、adapter の錠前の内側で
+          行う (スレッド・scope 不問 — ``get_message_position`` と同じ意味)。
+        - 器が ``absent`` (従来のメモリ上モード) なら確かめない。``broken`` は
+          厳格なら例外、既定なら確かめない。
+        - 照会そのものが失敗したら消さない — 厳格なら例外、既定なら行を
+          そのまま使う (従来どおり)。「無い」と確かに分かったときだけ除く。
+        - 除いた行は、``persist_advance=True`` なら起点がまだ同じ値のときだけ
+          消す (条件付き削除 — 並行して新しい起点を書いた書き手を潰さない)。
+          プレビュー (False) は同じ結果を返すが行は触らない。
+        """
+        candidate_ids = {
+            str(entry["anchor_id"])
+            for entry in anchors.values()
+            if entry and entry.get("anchor_id")
+        }
+        if not candidate_ids:
+            return anchors
+        from persona.history_manager import (
+            HistoryStoreUnavailableError,
+            memory_store_state,
+        )
+        adapter = getattr(persona, "sai_memory", None)
+        try:
+            state = memory_store_state(adapter)
+        except Exception:
+            # 器の状態そのものが引けない (is_ready を持たない部分構築の器等) —
+            # 照会の失敗と同じ扱い: 消さない。
+            if strict:
+                raise
+            LOGGER.warning(
+                "[metabolism] memory store state unavailable; skipping the "
+                "anchor existence check (persona=%s)", persona_id, exc_info=True,
+            )
+            return anchors
+        if state == "absent":
+            return anchors
+        if state == "broken":
+            if strict:
+                raise HistoryStoreUnavailableError(
+                    "memory store is broken (enabled but no connection); the "
+                    f"window anchors cannot be verified (persona={persona_id})"
+                )
+            return anchors
+        try:
+            from contextlib import nullcontext
+
+            from sai_memory.memory.storage import get_existing_message_ids
+            lock = getattr(adapter, "_db_lock", None)
+            with (lock if lock is not None else nullcontext()):
+                existing = get_existing_message_ids(adapter.conn, candidate_ids)
+        except Exception:
+            if strict:
+                raise
+            LOGGER.warning(
+                "[metabolism] anchor existence check failed; using the anchor "
+                "rows as they are (persona=%s)", persona_id, exc_info=True,
+            )
+            return anchors
+
+        kept: Dict[str, Any] = {}
+        for model_key, entry in anchors.items():
+            anchor_id = entry.get("anchor_id") if entry else None
+            if not anchor_id or str(anchor_id) in existing:
+                kept[model_key] = entry
+                continue
+            if not persist_advance:
+                warn_key = (str(persona_id), str(model_key), str(anchor_id))
+                with self._warn_lock:
+                    first_time = warn_key not in self._dangling_anchor_preview_warned
+                    if first_time:
+                        self._dangling_anchor_preview_warned.add(warn_key)
+                if first_time:
+                    LOGGER.warning(
+                        "[metabolism] window anchor %s is missing from memory.db; "
+                        "treating the row as absent (preview: the row would be "
+                        "dropped on the next real resolve) (persona=%s model=%s)",
+                        anchor_id, persona_id, model_key,
+                    )
+                continue
+            try:
+                deleted = self.delete_anchor_entry_if_matches(
+                    persona_id, model_key, str(anchor_id),
+                )
+            except Exception:
+                if strict:
+                    raise
+                LOGGER.warning(
+                    "[metabolism] window anchor %s is missing from memory.db; "
+                    "treating the row as absent, but the row could not be "
+                    "dropped (persona=%s model=%s)",
+                    anchor_id, persona_id, model_key, exc_info=True,
+                )
+                continue
+            LOGGER.warning(
+                "[metabolism] window anchor %s is missing from memory.db; %s "
+                "(persona=%s model=%s) — the window starts the same way as the "
+                "first session on this model",
+                anchor_id,
+                "dropped the row" if deleted
+                else "the row changed concurrently and was kept",
+                persona_id, model_key,
+            )
+        return kept
 
     def _resolve_frontier_anchor(
         self, persona, *, strict: bool = False,

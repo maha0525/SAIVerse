@@ -1947,6 +1947,54 @@
     "ja": "Chronicle / Memopedia / Fragment の未生成分",
     "en": "Missing embeddings for Chronicle / Memopedia / Fragments"
   },
+  "components.FixtureMetaEditor.text001": {
+    "ja": "メタ情報を編集",
+    "en": "Edit metadata"
+  },
+  "components.FixtureMetaEditor.text002": {
+    "ja": "設置物名",
+    "en": "Fixture name"
+  },
+  "components.FixtureMetaEditor.text003": {
+    "ja": "説明",
+    "en": "Description"
+  },
+  "components.FixtureMetaEditor.text004": {
+    "ja": "保存中...",
+    "en": "Saving..."
+  },
+  "components.FixtureMetaEditor.text005": {
+    "ja": "保存",
+    "en": "Save"
+  },
+  "components.FixtureMetaEditor.text006": {
+    "ja": "キャンセル",
+    "en": "Cancel"
+  },
+  "components.FixtureMetaEditor.text007": {
+    "ja": "削除中...",
+    "en": "Deleting..."
+  },
+  "components.FixtureMetaEditor.text008": {
+    "ja": "削除",
+    "en": "Delete"
+  },
+  "components.FixtureMetaEditor.text009": {
+    "ja": "この設置物を削除しますか？",
+    "en": "Delete this fixture?"
+  },
+  "components.FixtureMetaEditor.text010": {
+    "ja": "この設置物を削除しますか？購読中のフィードと取得済みの記事もすべて削除されます。",
+    "en": "Delete this fixture? Its subscribed feeds and all fetched articles will also be deleted."
+  },
+  "components.FixtureMetaEditor.text011": {
+    "ja": "保存に失敗しました",
+    "en": "Failed to save"
+  },
+  "components.FixtureMetaEditor.text012": {
+    "ja": "削除に失敗しました",
+    "en": "Failed to delete"
+  },
   "components.GlobalSettingsModal.text001": {
     "ja": "保存できませんでした: {p1}",
     "en": "Could not save: {p1}"
@@ -2610,6 +2658,50 @@
   "components.ItemModal.text037": {
     "ja": "ペルソナが会話の中でこのアイテムを指すときに使う番号です",
     "en": "The number personas use to refer to this item in conversation"
+  },
+  "components.ItemModal.text038": {
+    "ja": "削除中...",
+    "en": "Deleting..."
+  },
+  "components.ItemModal.text039": {
+    "ja": "削除",
+    "en": "Delete"
+  },
+  "components.ItemModal.text040": {
+    "ja": "このアイテムを削除しますか？",
+    "en": "Delete this item?"
+  },
+  "components.ItemModal.text041": {
+    "ja": "削除に失敗しました",
+    "en": "Failed to delete"
+  },
+  "components.ItemModal.text042": {
+    "ja": "「{p1}」には {p2} 個のアイテムが入っています。",
+    "en": "\"{p1}\" contains {p2} item(s)."
+  },
+  "components.ItemModal.text043": {
+    "ja": "中の入れ物に入っているものも含めると {p1} 個です。",
+    "en": "{p1} item(s) in total, including those inside nested bags."
+  },
+  "components.ItemModal.text044": {
+    "ja": "中身を出して削除",
+    "en": "Take out contents and delete"
+  },
+  "components.ItemModal.text045": {
+    "ja": "「中身を出して削除」では、中身はこのアイテムが置かれていた場所に出されます。",
+    "en": "With \"Take out contents and delete\", the contents are placed where this item was."
+  },
+  "components.ItemModal.text046": {
+    "ja": "中身ごと削除",
+    "en": "Delete with contents"
+  },
+  "components.ItemModal.text047": {
+    "ja": "やめる",
+    "en": "Cancel"
+  },
+  "components.ItemModal.text048": {
+    "ja": "中身は削除しましたが、入れ物の削除に失敗しました: {p1}",
+    "en": "The contents were deleted, but deleting the bag failed: {p1}"
   },
   "components.MCPSection.text001": {
     "ja": "必要なランタイムが見つからない",
@@ -5919,6 +6011,114 @@
     "ja": "この部屋にアイテムを作る",
     "en": "Create item in this room"
   },
+  "components.RightSidebar.text020": {
+    "ja": "購読中のフィード",
+    "en": "Subscribed feeds"
+  },
+  "components.RightSidebar.text021": {
+    "ja": "購読中のフィードはありません",
+    "en": "No subscribed feeds"
+  },
+  "components.RightSidebar.text022": {
+    "ja": "新着記事",
+    "en": "Latest articles"
+  },
+  "components.RightSidebar.text023": {
+    "ja": "まだ記事が届いていません",
+    "en": "No articles yet"
+  },
+  "components.RightSidebar.text024": {
+    "ja": "配信の設定",
+    "en": "Delivery settings"
+  },
+  "components.RightSidebar.text025": {
+    "ja": "このスタンドからペルソナに届く記事の量を調整できます。",
+    "en": "Adjust how much this stand delivers to personas."
+  },
+  "components.RightSidebar.text026": {
+    "ja": "取得間隔",
+    "en": "Fetch interval"
+  },
+  "components.RightSidebar.text027": {
+    "ja": "フィードを取りに行く間隔です。短いほど多くの記事が届きます。",
+    "en": "How often the feeds are fetched. Shorter intervals deliver more articles."
+  },
+  "components.RightSidebar.text028": {
+    "ja": "既定 ({p1})",
+    "en": "Default ({p1})"
+  },
+  "components.RightSidebar.text029": {
+    "ja": "{p1} 時間",
+    "en": "{p1} h"
+  },
+  "components.RightSidebar.text030": {
+    "ja": "{p1} 分",
+    "en": "{p1} min"
+  },
+  "components.RightSidebar.text031": {
+    "ja": "要約の長さ (字)",
+    "en": "Summary length (characters)"
+  },
+  "components.RightSidebar.text032": {
+    "ja": "記事 1 件につき、ペルソナへ届ける要約の字数です。0 にすると要約を載せません。",
+    "en": "Characters of summary delivered per article. 0 leaves the summary out."
+  },
+  "components.RightSidebar.text033": {
+    "ja": "見出しの上限 (字)",
+    "en": "Headline limit (characters)"
+  },
+  "components.RightSidebar.text034": {
+    "ja": "見出しがこれより長いときは、末尾を「…」にして切り詰めます。",
+    "en": "Longer headlines are shortened and end with \"…\"."
+  },
+  "components.RightSidebar.text035": {
+    "ja": "1 回に届く件数",
+    "en": "Articles per delivery"
+  },
+  "components.RightSidebar.text036": {
+    "ja": "1 回の配送で、購読しているフィード 1 つからペルソナへ届く記事の数です。0 にするとこのスタンドからは届きません。",
+    "en": "Number of articles each subscribed feed delivers to a persona at a time. 0 stops delivery from this stand."
+  },
+  "components.RightSidebar.text037": {
+    "ja": "既定値を使う ({p1})",
+    "en": "Use default ({p1})"
+  },
+  "components.RightSidebar.text038": {
+    "ja": "保存",
+    "en": "Save"
+  },
+  "components.RightSidebar.text039": {
+    "ja": "保存中...",
+    "en": "Saving..."
+  },
+  "components.RightSidebar.text040": {
+    "ja": "保存しました",
+    "en": "Saved"
+  },
+  "components.RightSidebar.text041": {
+    "ja": "保存に失敗しました: {p1}",
+    "en": "Failed to save: {p1}"
+  },
+  "components.RightSidebar.text042": {
+    "ja": "設定を読み込めませんでした: {p1}",
+    "en": "Could not load the settings: {p1}"
+  },
+  "components.RightSidebar.text043": {
+    "ja": "設定を読み込み中...",
+    "en": "Loading settings..."
+  },
+  "components.RightSidebar.text044": {
+    "ja": "「{p1}」は {p2} 以上 {p3} 以下の整数で入力してください",
+    "en": "\"{p1}\" must be a whole number from {p2} to {p3}"
+  },
+  "components.RightSidebar.text045": {
+    "ja": "{p1} 字",
+    "en": "{p1} chars"
+  },
+  "components.RightSidebar.text046": {
+    "ja": "{p1} 件",
+    "en": "{p1} items"
+  },
   "components.ScheduleModal.text001": {
     "ja": "このアラームを削除しますか？",
     "en": "Delete this alarm?"
@@ -7031,10 +7231,6 @@
     "ja": "この City を削除しますか？",
     "en": "Delete this City?"
   },
-  "components.settings.WorldEditor.text016": {
-    "ja": "この Building を削除しますか？",
-    "en": "Delete this building?"
-  },
   "components.settings.WorldEditor.text017": {
     "ja": "このペルソナを削除しますか？",
     "en": "Delete this persona?"
@@ -7575,6 +7771,54 @@
     "ja": "日本語 (Japanese)",
     "en": "Japanese"
   },
+  "components.settings.WorldEditor.text149": {
+    "ja": "「{p1}」を削除します。この操作は元に戻せません。",
+    "en": "You are about to delete \"{p1}\". This cannot be undone."
+  },
+  "components.settings.WorldEditor.text150": {
+    "ja": "この Building で交わされた会話の記録（{p1} 件）は、削除した後も残ります。",
+    "en": "The conversation held in this building ({p1} message(s)) will remain after the deletion."
+  },
+  "components.settings.WorldEditor.text151": {
+    "ja": "この Building に置かれている設置物 {p1} 個（{p2}）も一緒に削除されます。フィードの購読や取得した記事など、設置物に付いている記録も消えます。",
+    "en": "The {p1} fixture(s) in this building ({p2}) will also be deleted, together with their records such as feed subscriptions and fetched articles."
+  },
+  "components.settings.WorldEditor.text152": {
+    "ja": "、",
+    "en": ", "
+  },
+  "components.settings.WorldEditor.text153": {
+    "ja": "この Building にはアイテムが {p1} 個置かれています。",
+    "en": "{p1} item(s) are placed in this building."
+  },
+  "components.settings.WorldEditor.text154": {
+    "ja": "中の入れ物に入っているものも含めると {p1} 個です。",
+    "en": "{p1} item(s) in total, including those inside bags."
+  },
+  "components.settings.WorldEditor.text155": {
+    "ja": "これらのアイテムをどうしますか？",
+    "en": "What should happen to these items?"
+  },
+  "components.settings.WorldEditor.text156": {
+    "ja": "残す（どこにも置かれていない状態になります。ワールドエディタのアイテムの画面から置き直せます）",
+    "en": "Keep them (they will not be placed anywhere; you can place them again from the Items tab of the World Editor)"
+  },
+  "components.settings.WorldEditor.text157": {
+    "ja": "Building と一緒に削除する（入れ物の中身も削除されます。元に戻せません）",
+    "en": "Delete them with the building (the contents of bags are deleted too; this cannot be undone)"
+  },
+  "components.settings.WorldEditor.text158": {
+    "ja": "削除",
+    "en": "Delete"
+  },
+  "components.settings.WorldEditor.text159": {
+    "ja": "削除中...",
+    "en": "Deleting..."
+  },
+  "components.settings.WorldEditor.text160": {
+    "ja": "やめる",
+    "en": "Cancel"
+  },
   "components.SettingsModal.text001": {
     "ja": "読み込み中のため保存できません。少し待ってから再度お試しください。",
     "en": "Cannot save while loading. Wait a moment and try again."
@@ -7927,17 +8171,21 @@
     "ja": "リアルタイム情報",
     "en": "Real-time information"
   },
-  "components.SettingsModal.text086": {
-    "ja": "有効",
-    "en": "Enabled"
+  "components.SettingsModal.realtimeCurrentTimeLabel": {
+    "ja": "現在日時",
+    "en": "Current date and time"
   },
-  "components.SettingsModal.text087": {
-    "ja": "無効",
-    "en": "Disabled"
+  "components.SettingsModal.realtimeCurrentTimeDescription": {
+    "ja": "現在の日時をペルソナに知らせます。",
+    "en": "Tell the persona the current date and time."
   },
-  "components.SettingsModal.text088": {
-    "ja": "発言の直前に現在時刻・前回発言時刻・空間情報などの動的コンテキストを提供します。無効にすると、これらをこのペルソナには一切送りません（時刻を気にして会話が成立しなくなる場合などに）。",
-    "en": "Provide dynamic context such as the current time, previous reply time and spatial information immediately before a reply. Disable it to stop sending this information to this persona, for example if time awareness disrupts conversation."
+  "components.SettingsModal.realtimeLastUtteranceLabel": {
+    "ja": "前回発言日時",
+    "en": "Date and time of previous reply"
+  },
+  "components.SettingsModal.realtimeLastUtteranceDescription": {
+    "ja": "前回の発言からどれだけ時間が経ったか分かるよう、前回発言の日時を知らせます。",
+    "en": "Tell the persona when it last spoke, so it can tell how much time has passed since then."
   },
   "components.SettingsModal.text089": {
     "ja": "事前実行スペル",

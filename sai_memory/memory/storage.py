@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from sai_memory.logging_utils import debug
 
@@ -2488,6 +2488,29 @@ def get_message_position(
     if row is None:
         return None
     return (int(row[0]) if row[0] is not None else None, int(row[1]))
+
+
+def get_existing_message_ids(
+    conn: sqlite3.Connection, message_ids: Iterable[str],
+) -> Set[str]:
+    """``message_ids`` のうち messages に実在する id の集合 (スレッド・scope 不問)。
+
+    実在の意味は :func:`get_message_position` と同じ (行が物理的に在るか)。
+    複数の id を一括の照会で確かめる — 起点の実在確認
+    (``SessionLifecycle.resolve_metabolism_anchor``) 用。照会の失敗は例外の
+    まま返す (呼び出し側が「無い」と「確かめられなかった」を区別するため)。
+    """
+    ids = sorted({str(mid) for mid in message_ids if mid})
+    out: Set[str] = set()
+    chunk_size = 500  # SQLite の既定の変数上限 999 の内側
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i:i + chunk_size]
+        ph = ",".join("?" for _ in chunk)
+        cur = conn.execute(
+            f"SELECT id FROM messages WHERE id IN ({ph})", tuple(chunk),
+        )
+        out.update(str(row[0]) for row in cur.fetchall())
+    return out
 
 
 def canonical_position_key(

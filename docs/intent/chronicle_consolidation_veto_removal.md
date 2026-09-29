@@ -1,6 +1,6 @@
 # 束ねから提示の拒否権を外す — 記憶の整理は前進し、見え方は見る側が節目で合わせる
 
-**ステータス**: 検証待ち — 「拒否権の構造ごと撤去する」という方向は 2026-09-27 まはー裁定。**第一段 (機構 A・B — 束ねの拒否権撤去と帯の降下規則) は実装・レビュー収束済みで v0.3.16 に載せて発行待ち、発行後に発端の報告者の再測定待ち**。第二段 (機構 C — 補修の同構造化: 旧版保持 + 節目乗り換え) は方向確定済み (2026-09-27 まはー「根本的には束ねと同じ話」)、設計詳細と実装は第一段の出荷後
+**ステータス**: 検証待ち — 「拒否権の構造ごと撤去する」という方向は 2026-09-27 まはー裁定。**第一段 (機構 A・B — 束ねの拒否権撤去と帯の降下規則) は実装・レビュー収束済みで v0.3.16 として発行済み (2026-09-28)、発端の報告者の再測定待ち**。第二段 (機構 C — 補修の同構造化: 旧版保持 + 節目乗り換え) は方向確定済み (2026-09-27 まはー「根本的には束ねと同じ話」)、設計詳細と実装は第一段の出荷後
 **発端**: [issues/chronicle_consolidation_vetoed_by_model_folds.md](../issues/chronicle_consolidation_vetoed_by_model_folds.md) — モデルを切り替えて使うペルソナで束ねが恒久停止し、頭の Chronicle 枠が予算を超えて肥大し続ける (なかみつさんの報告、実測つき)
 **関連**: [arasuji_levels.md](arasuji_levels.md) §3-2 (境界① — 本設計が廃止)・§14-6-3 (温度判定の一本化)・§15 (読み戻し)・§16-3 (窓の誕生時の護り)、[chronicle_coverage_gaps.md](chronicle_coverage_gaps.md) (「本物の保護」の仕分け — 本設計が統合の分を撤去し吸収の分を絞る)、[experience_structure.md](experience_structure.md) §4-4、`sea/session_lifecycle.py` `collect_folded_chronicle_entry_ids` / `sai_memory/arasuji/bands.py` / `sai_memory/arasuji/context.py` / `sai_memory/arasuji/absorption.py` / `sea/head_pipeline/sections/memory_weave.py`
 

@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 361（tag グループ: 26）
+**エンドポイント数**: 366（tag グループ: 26）
 
 ## addon
 
@@ -164,7 +164,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 |---|---|---|
 | POST | `/api/feeds/fetch` | 全フィードの手動取得を起動する (完了は待たず 202 を返す)。 |
 | POST | `/api/feeds/fixtures` | フィード施設を作成する。プリセットから、または空の施設として。 |
-| GET | `/api/feeds/fixtures` | フィード施設の一覧 (購読と健康状態つき)。 |
+| GET | `/api/feeds/fixtures` | フィード施設の一覧 (購読と健康状態、配信設定つき)。 |
+| PATCH | `/api/feeds/fixtures/{fixture_id}/config` | スタンドの配信設定 (取得間隔 / 要約の長さ / 見出しの上限 / 1 回の |
 | GET | `/api/feeds/items` | フィード施設の取得済み記事一覧 (新しい順)。 |
 | GET | `/api/feeds/presets` | フィードプリセット (購読束 + 施設の見た目) の一覧。 |
 | POST | `/api/feeds/subscriptions` | 購読を追加する。 |
@@ -226,6 +227,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/observer/config` | Observer を作成 (upsert) する。 |
 | POST | `/api/observer/fixture` | Fixture を作成 (upsert) する。 |
 | GET | `/api/observer/fixture/{fixture_id}` | Fixture の情報を取得する。 |
+| PATCH | `/api/observer/fixture/{fixture_id}` | 設置物の名前・説明文を更新する (送った欄だけ)。 |
+| DELETE | `/api/observer/fixture/{fixture_id}` | 設置物を削除する (属する行もすべて道連れ)。 |
 | GET | `/api/observer/{observer_id}/history/{metric_name}` | Observer の指定メトリクスの履歴を取得する。 |
 | GET | `/api/observer/{observer_id}/latest` | Observer の最新メトリクス (STATE_JSON キャッシュ) を取得する。 |
 | POST | `/api/observer/{observer_id}/push` | 外部アプリから Observer にメトリクスを push する。 |
@@ -460,7 +463,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/world/buildings` |  |
 | PUT | `/api/world/buildings/positions` | 街マップ編集モード用: 複数 Building の MAP_X/MAP_Y を一括更新する。 |
 | PUT | `/api/world/buildings/{building_id}` |  |
-| DELETE | `/api/world/buildings/{building_id}` |  |
+| DELETE | `/api/world/buildings/{building_id}` | 建物を消す。``items`` は中に直接置かれたアイテムの扱い。 |
+| GET | `/api/world/buildings/{building_id}/deletion-preview` | 建物を消したら何が一緒に消え、何が残るかの数 (削除の確認ダイアログ用)。 |
 | GET | `/api/world/buildings/{building_id}/realtime-spell` | Building に設定されたリアルタイムスペル一覧を取得する。 |
 | POST | `/api/world/buildings/{building_id}/realtime-spell` | Building にリアルタイムスペル binding を追加する。 |
 | DELETE | `/api/world/buildings/{building_id}/realtime-spell/{binding_id}` | Building のリアルタイムスペル binding を削除する。 |
@@ -473,7 +477,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/world/items` |  |
 | PUT | `/api/world/items/{item_id}` |  |
 | GET | `/api/world/items/{item_id}` | Get item details including owner information. |
-| DELETE | `/api/world/items/{item_id}` |  |
+| DELETE | `/api/world/items/{item_id}` | アイテムを消す。入れ物なら、直接の中身は入れ物があった場所へ出される。 |
+| DELETE | `/api/world/items/{item_id}/contents` | 入れ物の中身を、入れ子の中身まで含めてすべて消す (入れ物自身は残る)。 |
 | GET | `/api/world/playbooks` | List all playbooks. |
 | POST | `/api/world/playbooks` | Create a new playbook. |
 | POST | `/api/world/playbooks/import` | Import a playbook from JSON content. Creates new or updates existing based on name. |

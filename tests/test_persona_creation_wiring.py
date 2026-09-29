@@ -40,6 +40,20 @@ from saiverse import model_configs
 _TEST_MODEL_DEFINITION = {"model": "vendor/test-model", "provider": "stub", "context_length": 1000}
 
 
+def _reserve_retiring_id(saiverse_home, old_id):
+    """消した建物の元の ID で、付け替えが「予定」のまま済んでいないものを記録に書く
+    (saiverse/building_retirement.py)。済むまで新しい建物に使えない。"""
+    import json
+
+    record = Path(saiverse_home) / "cities" / "city_a" / "building_id_renames.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"format_version": 1, "renames": [{
+        "kind": "retire", "source": "delete", "old_id": old_id,
+        "new_id": f"deleted_{old_id}_20260929182800", "city_slug": "city_a",
+        "status": "planned", "planned_at": "2026-09-29T18:28:00+09:00",
+    }]}), encoding="utf-8")
+
+
 class _StubPersonaCore:
     """PersonaCore の代わり。生成経路が触る属性だけ持つ。"""
 
@@ -187,6 +201,36 @@ class PersonaCreationWiringTestCase(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(ai_id, "persona_2_city_a")
         self.assertEqual(room_id, "persona_2_city_a_room")
+
+    # --- 使えない建物 ID を私室に付けない (docs/issues/building_delete_leaves_contents.md) ---
+
+    def test_private_room_skips_an_id_whose_retirement_has_not_finished(self):
+        # 消した建物の元の ID は、残る会話などの付け替えが済むまで新しい建物に
+        # 付けない。私室の ID は利用者が選んだものではないので、断らずに次の候補へ
+        _reserve_retiring_id(self.svc.saiverse_home, "sophie_city_a_room")
+        ok, msg, ai_id, room_id = self._create("Sophie")
+        self.assertTrue(ok, msg)
+        self.assertEqual(ai_id, "sophie_city_a")
+        self.assertNotEqual(room_id, "sophie_city_a_room")
+        self.assertEqual(self._room_id_in_db(ai_id), room_id)
+
+    def test_serial_ai_id_skips_a_room_number_whose_retirement_has_not_finished(self):
+        # 連番の AIID と私室は同じ番号を共有する。私室の番号が使えないなら、
+        # AIID ごと次の番号へ進む (番号が食い違わない)
+        _reserve_retiring_id(self.svc.saiverse_home, "persona_1_city_a_room")
+        ok, msg, ai_id, room_id = self._create("エア")
+        self.assertTrue(ok, msg)
+        self.assertEqual(ai_id, "persona_2_city_a")
+        self.assertEqual(room_id, "persona_2_city_a_room")
+
+    def test_private_room_never_gets_a_deleted_prefixed_id(self):
+        # deleted_ で始まる ID は、消した建物の記録を移した先の形。名前が「Deleted X」
+        # でも、私室にその形を付けない
+        ok, msg, ai_id, room_id = self._create("Deleted X")
+        self.assertTrue(ok, msg)
+        self.assertEqual(ai_id, "deleted_x_city_a")
+        self.assertFalse(room_id.lower().startswith("deleted_"), room_id)
+        self.assertEqual(self._room_id_in_db(ai_id), room_id)
 
     def test_names_that_normalize_alike_fail_loudly_not_silently(self):
         # slug 化は情報を落とす写像 — 「A店」と「A森」はどちらも a になる。
@@ -460,6 +504,27 @@ class BlueprintSpawnWiringTestCase(unittest.TestCase):
         self.assertTrue(ok, msg)
         row = self._ai_row("persona_2_city_a")
         self.assertIsNotNone(row, "既存私室の番号を飛ばした連番になっていない")
+        self.assertEqual(row.PRIVATE_ROOM_ID, "persona_2_city_a_room")
+
+    def test_private_room_skips_ids_that_cannot_be_used(self):
+        # 消した建物の付け替えが済んでいない元の ID と deleted_ の形は、私室に付けない
+        _reserve_retiring_id(self.svc.saiverse_home, "golem_city_a_room")
+        ok, msg = self._spawn("Golem")
+        self.assertTrue(ok, msg)
+        room = self._ai_row("golem_city_a").PRIVATE_ROOM_ID
+        self.assertNotEqual(room, "golem_city_a_room")
+
+        ok, msg = self._spawn("Deleted Golem")
+        self.assertTrue(ok, msg)
+        room = self._ai_row("deleted_golem_city_a").PRIVATE_ROOM_ID
+        self.assertFalse(room.lower().startswith("deleted_"), room)
+
+    def test_serial_skips_a_room_number_whose_retirement_has_not_finished(self):
+        _reserve_retiring_id(self.svc.saiverse_home, "persona_1_city_a_room")
+        ok, msg = self._spawn("ホムンクルス")
+        self.assertTrue(ok, msg)
+        row = self._ai_row("persona_2_city_a")
+        self.assertIsNotNone(row, "使えない私室の番号を飛ばした連番になっていない")
         self.assertEqual(row.PRIVATE_ROOM_ID, "persona_2_city_a_room")
 
     def test_the_override_model_is_not_saved_as_the_spawned_personas_default_model(self):

@@ -110,6 +110,12 @@ class SAIVerseManager(
         self._init_city_config(city_name)
         # 部屋を読み込む前に、フォルダ名や URL を壊す文字を含む古い部屋 ID を付け替える
         self._repair_unsafe_building_ids()
+        # 消えた建物を指したまま残っているアイテムの置き場所・設置物などを片付ける
+        # (付け替えの後、アイテムと定期観測を読み込む前)
+        self._cleanup_deleted_building_leftovers()
+        # 消した建物を指して残る会話などを特殊な ID へ付け替え、元の ID を空ける
+        # (削除の場で済まなかった続きと、昔消した建物の残骸。記憶のファイルを開く前)
+        self._retire_deleted_building_ids()
         self._init_buildings()
         self._init_file_paths()
         self._init_avatars()
@@ -1843,11 +1849,20 @@ class SAIVerseManager(
             if building_id not in self.building_histories:
                 self.building_histories[building_id] = []
 
-    def delete_building(self, building_id: str) -> str:
-        """Deletes a building after checking for occupants."""
+    def get_building_deletion_preview(self, building_id: str) -> Optional[Dict[str, Any]]:
+        """建物を消したら何が一緒に消え、何が残るかの数 (確認ダイアログ用)。"""
+        return self.admin.get_building_deletion_preview(building_id)
+
+    def delete_building(self, building_id: str, item_policy: str = "keep") -> str:
+        """Deletes a building after checking for occupants.
+
+        ``item_policy``: 中に直接置かれたアイテムを ``keep`` (どこにも置かれて
+        いない状態で残す、既定) か ``delete`` (入れ物の中身ごと消す) か。
+        設置物は常に一緒に消え、会話の記録は常に残る (AdminService.delete_building)。
+        """
         # Check if building is in our city before deletion
         was_in_city = building_id in self.building_map
-        result = self.admin.delete_building(building_id)
+        result = self.admin.delete_building(building_id, item_policy=item_policy)
         # If deletion succeeded and it was in our city, reload buildings list
         if not result.startswith("Error") and was_in_city:
             self._reload_buildings()
@@ -1942,13 +1957,16 @@ class SAIVerseManager(
         # 依存する箇所は無い。
         ruler_stem = f"ruler_{region_id}"
         if not is_valid_identifier(ruler_stem):
+            from saiverse.building_retirement import BuildingIdAvailability
+
             db = self.SessionLocal()
             try:
+                building_ids = BuildingIdAvailability(db, self.saiverse_home)
                 ruler_stem = build_identifier(
                     ruler_stem,
                     stem="ruler",
                     ensure_unique=True,
-                    exists=lambda s: ai_stem_taken(db, s, self.city_name),
+                    exists=lambda s: ai_stem_taken(db, s, self.city_name, building_ids),
                 )
             finally:
                 db.close()
@@ -2046,7 +2064,8 @@ class SAIVerseManager(
         core_memory_char_budget: Optional[int] = None,
         chronicle_char_budget: Optional[int] = None,
         spell_enabled: Optional[bool] = None,
-        realtime_info_enabled: Optional[bool] = None,
+        realtime_current_time_enabled: Optional[bool] = None,
+        realtime_last_utterance_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
         user_conv_timeout_minutes: Optional[int] = None,
         language: Optional[str] = None,
@@ -2078,7 +2097,8 @@ class SAIVerseManager(
             core_memory_char_budget=core_memory_char_budget,
             chronicle_char_budget=chronicle_char_budget,
             spell_enabled=spell_enabled,
-            realtime_info_enabled=realtime_info_enabled,
+            realtime_current_time_enabled=realtime_current_time_enabled,
+            realtime_last_utterance_enabled=realtime_last_utterance_enabled,
             meta_judgment_config=meta_judgment_config,
             user_conv_timeout_minutes=user_conv_timeout_minutes,
             language=language,
@@ -2181,6 +2201,9 @@ class SAIVerseManager(
 
     def delete_item(self, item_id: str) -> str:
         return self.admin.delete_item(item_id)
+
+    def delete_bag_contents(self, item_id: str) -> str:
+        return self.admin.delete_bag_contents(item_id)
 
     # --- Playbook Management ---
 
