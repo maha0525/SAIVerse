@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 362（tag グループ: 26）
+**エンドポイント数**: 365（tag グループ: 26）
 
 ## addon
 
@@ -227,6 +227,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/observer/config` | Observer を作成 (upsert) する。 |
 | POST | `/api/observer/fixture` | Fixture を作成 (upsert) する。 |
 | GET | `/api/observer/fixture/{fixture_id}` | Fixture の情報を取得する。 |
+| PATCH | `/api/observer/fixture/{fixture_id}` | 設置物の名前・説明文を更新する (送った欄だけ)。 |
+| DELETE | `/api/observer/fixture/{fixture_id}` | 設置物を削除する (属する行もすべて道連れ)。 |
 | GET | `/api/observer/{observer_id}/history/{metric_name}` | Observer の指定メトリクスの履歴を取得する。 |
 | GET | `/api/observer/{observer_id}/latest` | Observer の最新メトリクス (STATE_JSON キャッシュ) を取得する。 |
 | POST | `/api/observer/{observer_id}/push` | 外部アプリから Observer にメトリクスを push する。 |
@@ -474,7 +476,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/world/items` |  |
 | PUT | `/api/world/items/{item_id}` |  |
 | GET | `/api/world/items/{item_id}` | Get item details including owner information. |
-| DELETE | `/api/world/items/{item_id}` |  |
+| DELETE | `/api/world/items/{item_id}` | アイテムを消す。入れ物なら、直接の中身は入れ物があった場所へ出される。 |
+| DELETE | `/api/world/items/{item_id}/contents` | 入れ物の中身を、入れ子の中身まで含めてすべて消す (入れ物自身は残る)。 |
 | GET | `/api/world/playbooks` | List all playbooks. |
 | POST | `/api/world/playbooks` | Create a new playbook. |
 | POST | `/api/world/playbooks/import` | Import a playbook from JSON content. Creates new or updates existing based on name. |

@@ -12,6 +12,7 @@
 
 - 同じ Item が異なる所有者に紐付くことで、建物に置かれているのか・ペルソナが手に持っているのかを表現する
 - 配置の更新は [Tool](tool.md) の `item_move`（`builtin_data/tools/item_move.py`、`destination_type`: building/persona/bag）で行う。pickup/place/use の実体はマネージャの `SAIVerseManager.pickup_item_for_persona` / `use_item_for_persona`（→ `item_service`）
+- 削除 (ユーザー操作・World Editor、`manager/admin.py`): `delete_item` は入れ物 (bag) を消すとき、直接の中身を入れ物があった場所 (部屋 / ペルソナの持ち物 / 外側の入れ物 / どこにも置かない) へ出してから消す。入れ子の入れ物は中身ごとそのまま出る。中身も一緒に消すときは、先に `delete_bag_contents` (入れ子まで全部消し、入れ物は残す) を呼ぶ。どちらも置き場所の行とアイテムの行だけを消し、参照しているファイルは消さない
 
 ## 拡張中の存在論
 
