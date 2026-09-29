@@ -7,7 +7,7 @@ Supported models:
 - gpt_image_2: OpenAI GPT Image 2 (previous generation)
 - gpt_image_2_5_flare: OpenAI GPT Image 2.5 Flare (state of the art, fastest high-quality generation)
 - gpt_image_2_5_sunburst: OpenAI GPT Image 2.5 Sunburst (state of the art, best editing precision with reference images)
-- grok_imagine: xAI Grok Imagine Image Pro (can also create slightly NSFW images)
+- grok_imagine: xAI Grok Imagine Image 2.0 (can also create slightly NSFW images)
 
 Input image URI formats:
 - saiverse://image/<filename> - Generated image file
@@ -401,13 +401,29 @@ def _generate_with_gpt_image_2_5_sunburst(
     return _generate_with_gpt_image("gpt-image-2.5-sunburst", prompt, aspect_ratio, quality, input_image_paths, size)
 
 
+_XAI_IMAGINE_MODEL = "grok-imagine-image-2.0"
+
+
+def _xai_quality_params(quality: str) -> dict:
+    """Translate the tool-level quality into xAI image request parameters.
+
+    Imagine 2.0 prices by (quality, resolution) and only offers quality
+    low/medium, so the top tool levels map to medium at 2k.
+    """
+    if quality in ("high", "xhigh", "max", "auto"):
+        return {"quality": "medium", "resolution": "2k"}
+    if quality == "medium":
+        return {"quality": "medium", "resolution": "1k"}
+    return {"quality": "low", "resolution": "1k"}
+
+
 def _generate_with_grok_imagine(
     prompt: str,
     aspect_ratio: str = "1:1",
     quality: str = "high",
     input_image_paths: Optional[List[Path]] = None,
 ) -> Tuple[bytes, str]:
-    """Generate image using xAI Grok Imagine Image Pro."""
+    """Generate image using xAI Grok Imagine Image 2.0."""
     import xai_sdk
 
     api_key = os.getenv("XAI_API_KEY")
@@ -416,15 +432,14 @@ def _generate_with_grok_imagine(
 
     client = xai_sdk.Client(api_key=api_key)
 
-    # Map quality to resolution
-    resolution = "2k" if quality in ("high", "xhigh", "max", "auto") else "1k"
+    quality_params = _xai_quality_params(quality)
 
     kwargs: dict = {
         "prompt": prompt,
-        "model": "grok-imagine-image-pro",
+        "model": _XAI_IMAGINE_MODEL,
         "aspect_ratio": aspect_ratio,
-        "resolution": resolution,
         "image_format": "base64",
+        **quality_params,
     }
 
     # Input images for editing mode
@@ -438,8 +453,8 @@ def _generate_with_grok_imagine(
         kwargs["image_urls"] = image_urls
 
     logger.info(
-        f"[grok_imagine] Generating with aspect_ratio={aspect_ratio}, "
-        f"resolution={resolution}"
+        f"[grok_imagine] Generating with model={_XAI_IMAGINE_MODEL}, "
+        f"aspect_ratio={aspect_ratio}, {quality_params}"
     )
 
     response = client.image.sample(**kwargs)
@@ -452,7 +467,7 @@ def _generate_with_grok_imagine(
     if image_data is None:
         # Response might contain image bytes directly
         if hasattr(response, "image") and response.image:
-            return response.image, "image/png"
+            return response.image, _sniff_image_mime(response.image)
         raise RuntimeError(
             f"No image data in xAI response. Response attributes: "
             f"{[a for a in dir(response) if not a.startswith('_')]}"
@@ -466,7 +481,20 @@ def _generate_with_grok_imagine(
     else:
         raise RuntimeError(f"Unexpected image data type: {type(image_data)}")
 
-    return image_bytes, "image/png"
+    return image_bytes, _sniff_image_mime(image_bytes)
+
+
+def _sniff_image_mime(data: bytes) -> str:
+    """Return the MIME type of image bytes from their magic number (PNG if unknown).
+
+    xAI returns JPEG even when nothing asks for it; declaring PNG would store a
+    JPEG under a .png name with image/png metadata.
+    """
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
 
 
 def _log_gemini_response(resp) -> None:
@@ -573,7 +601,7 @@ def generate_image(
               (OpenAI GPT Image 2.5 Flare)
             - gpt_image_2_5_sunburst: State of the art, best editing precision with
               reference images (OpenAI GPT Image 2.5 Sunburst)
-            - grok_imagine: High quality image generation (xAI Grok Imagine Pro)
+            - grok_imagine: High quality image generation (xAI Grok Imagine Image 2.0)
         aspect_ratio: Image aspect ratio ("1:1", "16:9", "9:16", "4:3", "3:4")
         quality: Image quality level ("low", "medium", "high", "xhigh", "max", "auto").
             "auto" uses the global default quality setting.
@@ -800,7 +828,7 @@ def schema() -> ToolSchema:
             "- gpt_image_2_5_sunburst: State of the art, best editing precision with reference images (OpenAI GPT Image 2.5 Sunburst)\n"
             "- gpt_image_1_5: Legacy photorealistic quality (OpenAI)\n"
             "- gpt_image_2: Previous generation photorealistic quality (OpenAI)\n"
-            "- grok_imagine: High quality image generation (xAI Grok Imagine Pro)\n\n"
+            "- grok_imagine: High quality image generation (xAI Grok Imagine Image 2.0)\n\n"
             "Prompt tips:\n"
             "- Be specific and detailed about what you want\n"
             "- Include art style, lighting, mood, and composition\n"

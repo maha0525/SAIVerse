@@ -214,6 +214,99 @@ class TestAugust2026ModelCatalog(unittest.TestCase):
         )
 
 
+class TestSeptember2026ModelCatalog(unittest.TestCase):
+    def test_new_model_ids_context_and_pricing(self):
+        expected = {
+            "claude-sonnet-5.5": ("claude-sonnet-5-5", 1_000_000, 2, 10),
+            "claude-opus-5.5": ("claude-opus-5-5", 1_000_000, 4, 20),
+            "gpt-6-sol": ("gpt-6-sol", 272_000, 2, 10),
+            "gpt-6-luna": ("gpt-6-luna", 272_000, 0.1, 0.5),
+            "gpt-6.1-sol": ("gpt-6.1-sol", 272_000, 2, 10),
+            "grok-4.7": ("grok-4.7", 500_000, 2, 6),
+        }
+
+        for config_key, (api_model, context, input_rate, output_rate) in expected.items():
+            with self.subTest(model=config_key):
+                config = model_configs.get_model_config(config_key)
+                self.assertEqual(config.get("model"), api_model)
+                self.assertEqual(config.get("context_length"), context)
+                self.assertEqual(config.get("pricing", {}).get("input_per_1m_tokens"), input_rate)
+                self.assertEqual(config.get("pricing", {}).get("output_per_1m_tokens"), output_rate)
+
+    def test_cache_rates(self):
+        cached = {
+            "claude-sonnet-5.5": 0.2,
+            "claude-opus-5.5": 0.2,
+            "gpt-6-sol": 0.2,
+            "gpt-6-luna": 0.01,
+            "gpt-6.1-sol": 0.1,
+            "grok-4.7": 0.5,
+        }
+        for config_key, rate in cached.items():
+            with self.subTest(model=config_key):
+                pricing = model_configs.get_model_pricing(config_key)
+                self.assertEqual(pricing["cached_input_per_1m_tokens"], rate)
+
+    def test_claude_5_5_cache_write_rates_and_minimum(self):
+        # Opus 5.5 は Opus 5 より安く、Sonnet 5.5 は Sonnet 5 と同額。
+        # 両方とも最小キャッシュ長は 512 tokens (Sonnet 5 は 1024、Opus 5 は 4096)。
+        write_rates = {
+            "claude-sonnet-5.5": (2.5, 4),
+            "claude-opus-5.5": (5, 8),
+        }
+        for config_key, (write_5m, write_1h) in write_rates.items():
+            with self.subTest(model=config_key):
+                config = model_configs.get_model_config(config_key)
+                pricing = config["pricing"]
+                self.assertEqual(pricing["cache_write_per_1m_tokens"], write_5m)
+                self.assertEqual(pricing["cache_write_1h_per_1m_tokens"], write_1h)
+                self.assertEqual(config["cache"]["min_tokens"], 512)
+
+    def test_default_thinking_effort_follows_each_model(self):
+        # Sonnet 5.5 は high、Opus 5.5 は medium が既定。設定値と UI 既定値が食い違うと、
+        # UI で触っていないペルソナだけ別の深さで走る。
+        defaults = {"claude-sonnet-5.5": "high", "claude-opus-5.5": "medium"}
+        for config_key, effort in defaults.items():
+            with self.subTest(model=config_key):
+                config = model_configs.get_model_config(config_key)
+                self.assertEqual(config["thinking_type"], "adaptive")
+                self.assertEqual(config["thinking_effort"], effort)
+                self.assertEqual(config["parameters"]["thinking_effort"]["default"], effort)
+
+    def test_gpt_6_default_reasoning_is_medium(self):
+        for config_key in ("gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"):
+            with self.subTest(model=config_key):
+                config = model_configs.get_model_config(config_key)
+                self.assertEqual(config["parameters"]["reasoning_effort"]["default"], "medium")
+
+    def test_gpt_6_1_sol_has_no_reasoning_off_switch(self):
+        # 6.1 Sol は none / minimal を受け付けない。選択肢に置くと 400 になる。
+        options = model_configs.get_model_config("gpt-6.1-sol")["parameters"]["reasoning_effort"]["options"]
+        self.assertNotIn("none", options)
+        self.assertNotIn("minimal", options)
+
+    def test_grok_4_7_shares_grok_4_6_tiered_pricing(self):
+        pricing = model_configs.get_model_pricing("grok-4.7")
+        self.assertEqual(pricing["long_context_threshold_tokens"], 200_000)
+        cost = model_configs.calculate_cost("grok-4.7", 250_000, 100_000, cached_tokens=50_000)
+        # regular input: 0.2M * $4, cached input: 0.05M * $1, output: 0.1M * $12
+        self.assertAlmostEqual(cost, 2.05)
+
+    def test_codex_variants_of_gpt_6_are_subscription_backed(self):
+        # Codex 版は API 名 (gpt-6-sol / gpt-6-luna) が API 版の設定キーと衝突する。
+        # 価格は設定キー (codex-*) 側で引かれ、そこが無価格であること。
+        for config_key, api_model in (
+            ("codex-gpt-6-sol", "gpt-6-sol"),
+            ("codex-gpt-6-luna", "gpt-6-luna"),
+        ):
+            with self.subTest(model=config_key):
+                config = model_configs.MODEL_CONFIGS[config_key]
+                self.assertEqual(config.get("model"), api_model)
+                self.assertEqual(config.get("provider_ref"), "openai_codex")
+                self.assertEqual(config.get("context_length"), 272_000)
+                self.assertIsNone(config.get("pricing"))
+
+
 class TestFindModelConfig(unittest.TestCase):
     def test_find_by_config_key(self):
         key, config = model_configs.find_model_config("claude-sonnet-4-5")
