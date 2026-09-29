@@ -115,6 +115,22 @@ interface ModelChoice {
     reflex_only?: boolean;
 }
 
+/** 建物を消したら何が一緒に消え、何が残るか (GET /api/world/buildings/{id}/deletion-preview)。
+ *  docs/issues/building_delete_leaves_contents.md */
+interface BuildingDeletionPreview {
+    building_id: string;
+    building_name: string;
+    /** 建物に直接置かれたアイテムの数 */
+    item_count: number;
+    /** そのうちの入れ物の中に (入れ子の底まで) 入っているアイテムの数 */
+    nested_item_count: number;
+    /** 建物と一緒に必ず消える設置物 */
+    fixture_count: number;
+    fixture_names: string[];
+    /** 消さずに残る、この部屋の会話の記録の数 (入退室などの出来事は数えない) */
+    conversation_message_count: number;
+}
+
 /** Wrapper around fetch that checks res.ok and shows alert on error.
  * Returns the parsed JSON body on success (true when the body is not JSON), false on error. */
 async function apiCall(url: string, options?: RequestInit): Promise<any> {
@@ -287,6 +303,10 @@ export default function WorldEditor() {
     // Selection State
     const [selectedCity, setSelectedCity] = useState<City | null>(null);
     const [selectedBuilding, setSelectedBuilding] = useState<Building | null>(null);
+    // 建物の削除の確認 (消す前に、残るもの・一緒に消えるものを見せてアイテムの扱いを選ばせる)
+    const [buildingDeletePreview, setBuildingDeletePreview] = useState<BuildingDeletionPreview | null>(null);
+    const [buildingItemPolicy, setBuildingItemPolicy] = useState<'keep' | 'delete'>('keep');
+    const [isDeletingBuilding, setIsDeletingBuilding] = useState(false);
     const [selectedAI, setSelectedAI] = useState<AI | null>(null);
     const [selectedItem, setSelectedItem] = useState<Item | null>(null);
     const [selectedBlueprint, setSelectedBlueprint] = useState<Blueprint | null>(null);
@@ -388,6 +408,7 @@ export default function WorldEditor() {
     const handleBuildingSelect = (b: Building) => {
         setSelectedBuilding(b);
         selectedBuildingIdRef.current = b.BUILDINGID;
+        setBuildingDeletePreview(null);
         // Parse extra prompt files from JSON
         let extraPrompts: string[] = [];
         if (b.EXTRA_PROMPT_FILES) {
@@ -406,16 +427,104 @@ export default function WorldEditor() {
     };
     const handleCreateBuilding = async () => { if (await apiCall('/api/world/buildings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, description: formData.description || "", capacity: formData.capacity || 1, system_instruction: formData.system_instruction || "", city_id: formData.city_id, building_id: formData.building_id || null }) })) { buildingList.load(); setFormData({}); } };
     const handleUpdateBuilding = async () => { if (await apiCall(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...formData, tool_ids: formData.tool_ids || [] }) })) { buildingList.load(); } };
+    // 削除ボタン: まず何が残り何が一緒に消えるかを数えてもらい、確認の欄を開く
+    // (その場で消さない)。会話の記録は残ることを伝えるだけで選ばせない (FLOW-15)。
+    // 設置物は必ず一緒に消える。アイテムは「残す」(既定) か「一緒に消す」かを選ぶ。
     const handleDeleteBuilding = async () => {
-        const deletedId = selectedBuilding!.BUILDINGID;
-        if (confirm(uiText("components.settings.WorldEditor.text016")) && await apiCall(`/api/world/buildings/${deletedId}`, { method: 'DELETE' })) {
-            setSelectedBuilding(null);
-            selectedBuildingIdRef.current = null;
-            setFormData({});
-            buildingList.load();
-            // Notify main page so it can update if the deleted building was current
-            window.dispatchEvent(new CustomEvent('building-deleted', { detail: { buildingId: deletedId } }));
+        const targetId = selectedBuilding!.BUILDINGID;
+        const preview = await apiCall(`/api/world/buildings/${encodeURIComponent(targetId)}/deletion-preview`);
+        // 数えている間に別の建物へ移っていたら、この応答はもう古い
+        if (!preview || typeof preview !== 'object' || selectedBuildingIdRef.current !== targetId) return;
+        setBuildingItemPolicy('keep');
+        setBuildingDeletePreview(preview as BuildingDeletionPreview);
+    };
+    const confirmDeleteBuilding = async () => {
+        if (!buildingDeletePreview || isDeletingBuilding) return;
+        const deletedId = buildingDeletePreview.building_id;
+        setIsDeletingBuilding(true);
+        try {
+            const ok = await apiCall(
+                `/api/world/buildings/${encodeURIComponent(deletedId)}?items=${buildingItemPolicy}`,
+                { method: 'DELETE' },
+            );
+            if (ok) {
+                setBuildingDeletePreview(null);
+                setSelectedBuilding(null);
+                selectedBuildingIdRef.current = null;
+                setFormData({});
+                buildingList.load();
+                // Notify main page so it can update if the deleted building was current
+                window.dispatchEvent(new CustomEvent('building-deleted', { detail: { buildingId: deletedId } }));
+            }
+        } finally {
+            setIsDeletingBuilding(false);
         }
+    };
+    const renderBuildingDeleteConfirm = (preview: BuildingDeletionPreview) => {
+        const totalItems = preview.item_count + preview.nested_item_count;
+        return (
+            <div className={styles.deleteConfirm}>
+                <p data-i18n="components.settings.WorldEditor.text149" className={styles.deleteConfirmTitle}>
+                    {uiText("components.settings.WorldEditor.text149", { p1: preview.building_name })}
+                </p>
+                {preview.conversation_message_count > 0 && (
+                    <p data-i18n="components.settings.WorldEditor.text150" className={styles.deleteConfirmText}>
+                        {uiText("components.settings.WorldEditor.text150", { p1: preview.conversation_message_count })}
+                    </p>
+                )}
+                {preview.fixture_count > 0 && (
+                    <p data-i18n="components.settings.WorldEditor.text151" className={styles.deleteConfirmText}>
+                        {uiText("components.settings.WorldEditor.text151", {
+                            p1: preview.fixture_count,
+                            p2: preview.fixture_names.join(uiText("components.settings.WorldEditor.text152")),
+                        })}
+                    </p>
+                )}
+                {preview.item_count > 0 && (
+                    <div className={styles.deleteConfirmItems}>
+                        <p data-i18n="components.settings.WorldEditor.text153 components.settings.WorldEditor.text154" className={styles.deleteConfirmText}>
+                            {uiText("components.settings.WorldEditor.text153", { p1: preview.item_count })}
+                            {preview.nested_item_count > 0 && (
+                                <> {uiText("components.settings.WorldEditor.text154", { p1: totalItems })}</>
+                            )}
+                        </p>
+                        <p data-i18n="components.settings.WorldEditor.text155" className={styles.deleteConfirmText}>
+                            {uiText("components.settings.WorldEditor.text155")}
+                        </p>
+                        <label className={styles.deleteConfirmOption}>
+                            <input
+                                type="radio"
+                                name="building-item-policy"
+                                checked={buildingItemPolicy === 'keep'}
+                                onChange={() => setBuildingItemPolicy('keep')}
+                                disabled={isDeletingBuilding}
+                            />
+                            <span data-i18n="components.settings.WorldEditor.text156">{uiText("components.settings.WorldEditor.text156")}</span>
+                        </label>
+                        <label className={styles.deleteConfirmOption}>
+                            <input
+                                type="radio"
+                                name="building-item-policy"
+                                checked={buildingItemPolicy === 'delete'}
+                                onChange={() => setBuildingItemPolicy('delete')}
+                                disabled={isDeletingBuilding}
+                            />
+                            <span data-i18n="components.settings.WorldEditor.text157">{uiText("components.settings.WorldEditor.text157")}</span>
+                        </label>
+                    </div>
+                )}
+                <div className={styles.deleteConfirmActions}>
+                    <button className={styles.dangerBtn} onClick={confirmDeleteBuilding} disabled={isDeletingBuilding}>
+                        <span data-i18n="components.settings.WorldEditor.text158 components.settings.WorldEditor.text159">
+                            {isDeletingBuilding ? uiText("components.settings.WorldEditor.text159") : uiText("components.settings.WorldEditor.text158")}
+                        </span>
+                    </button>
+                    <button className={styles.cancelBtn} onClick={() => setBuildingDeletePreview(null)} disabled={isDeletingBuilding}>
+                        <span data-i18n="components.settings.WorldEditor.text160">{uiText("components.settings.WorldEditor.text160")}</span>
+                    </button>
+                </div>
+            </div>
+        );
     };
 
     // --- AI Handlers ---
@@ -688,7 +797,9 @@ export default function WorldEditor() {
                                 <small data-i18n="components.settings.WorldEditor.text062" style={{ color: '#666', fontSize: '0.8rem' }}>{uiText("components.settings.WorldEditor.text062")}</small>
                             </div>}
                             {selectedBuilding && <div className={styles.field}><label data-i18n="components.settings.WorldEditor.text063">{uiText("components.settings.WorldEditor.text063")}</label><div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>{toolOptions.map(t => (<label key={t.TOOLID} style={{ background: '#f1f5f9', padding: '0.25rem' }}><input type="checkbox" checked={(formData.tool_ids || []).includes(t.TOOLID)} onChange={e => { const c = formData.tool_ids || []; if (e.target.checked) setFormData({ ...formData, tool_ids: [...c, t.TOOLID] }); else setFormData({ ...formData, tool_ids: c.filter((id: any) => id !== t.TOOLID) }); }} /> {t.TOOLNAME}</label>))}</div></div>}
-                            {renderFormActions(selectedBuilding, handleCreateBuilding, handleUpdateBuilding, handleDeleteBuilding)}
+                            {selectedBuilding && buildingDeletePreview && buildingDeletePreview.building_id === selectedBuilding.BUILDINGID
+                                ? renderBuildingDeleteConfirm(buildingDeletePreview)
+                                : renderFormActions(selectedBuilding, handleCreateBuilding, handleUpdateBuilding, handleDeleteBuilding)}
                         </div>
                     </div>
                 )}

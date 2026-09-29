@@ -7231,10 +7231,6 @@
     "ja": "この City を削除しますか？",
     "en": "Delete this City?"
   },
-  "components.settings.WorldEditor.text016": {
-    "ja": "この Building を削除しますか？",
-    "en": "Delete this building?"
-  },
   "components.settings.WorldEditor.text017": {
     "ja": "このペルソナを削除しますか？",
     "en": "Delete this persona?"
@@ -7774,6 +7770,54 @@
   "components.settings.WorldEditor.text148": {
     "ja": "日本語 (Japanese)",
     "en": "Japanese"
+  },
+  "components.settings.WorldEditor.text149": {
+    "ja": "「{p1}」を削除します。この操作は元に戻せません。",
+    "en": "You are about to delete \"{p1}\". This cannot be undone."
+  },
+  "components.settings.WorldEditor.text150": {
+    "ja": "この Building で交わされた会話の記録（{p1} 件）は、削除した後も残ります。",
+    "en": "The conversation held in this building ({p1} message(s)) will remain after the deletion."
+  },
+  "components.settings.WorldEditor.text151": {
+    "ja": "この Building に置かれている設置物 {p1} 個（{p2}）も一緒に削除されます。フィードの購読や取得した記事など、設置物に付いている記録も消えます。",
+    "en": "The {p1} fixture(s) in this building ({p2}) will also be deleted, together with their records such as feed subscriptions and fetched articles."
+  },
+  "components.settings.WorldEditor.text152": {
+    "ja": "、",
+    "en": ", "
+  },
+  "components.settings.WorldEditor.text153": {
+    "ja": "この Building にはアイテムが {p1} 個置かれています。",
+    "en": "{p1} item(s) are placed in this building."
+  },
+  "components.settings.WorldEditor.text154": {
+    "ja": "中の入れ物に入っているものも含めると {p1} 個です。",
+    "en": "{p1} item(s) in total, including those inside bags."
+  },
+  "components.settings.WorldEditor.text155": {
+    "ja": "これらのアイテムをどうしますか？",
+    "en": "What should happen to these items?"
+  },
+  "components.settings.WorldEditor.text156": {
+    "ja": "残す（どこにも置かれていない状態になります。ワールドエディタのアイテムの画面から置き直せます）",
+    "en": "Keep them (they will not be placed anywhere; you can place them again from the Items tab of the World Editor)"
+  },
+  "components.settings.WorldEditor.text157": {
+    "ja": "Building と一緒に削除する（入れ物の中身も削除されます。元に戻せません）",
+    "en": "Delete them with the building (the contents of bags are deleted too; this cannot be undone)"
+  },
+  "components.settings.WorldEditor.text158": {
+    "ja": "削除",
+    "en": "Delete"
+  },
+  "components.settings.WorldEditor.text159": {
+    "ja": "削除中...",
+    "en": "Deleting..."
+  },
+  "components.settings.WorldEditor.text160": {
+    "ja": "やめる",
+    "en": "Cancel"
   },
   "components.SettingsModal.text001": {
     "ja": "読み込み中のため保存できません。少し待ってから再度お試しください。",

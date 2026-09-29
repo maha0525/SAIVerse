@@ -16,6 +16,7 @@ from database.models import (
 )
 from manager.ids import build_identifier
 from manager.persona import ai_stem_taken
+from saiverse.building_retirement import BuildingIdAvailability
 from persona.core import PersonaCore
 from saiverse.buildings import Building
 from saiverse.persona_model_selection import (
@@ -197,10 +198,13 @@ class BlueprintMixin:
             # slug が残らなければ persona_<連番> へ落ち、連番を選ぶときは私室
             # Building の空きも一緒に予約する (理由は manager/persona.py と同じ)。
             city_slug = home_city.CITY_SLUG
+            # 私室に付けてよい ID かの規則 (saiverse/building_retirement.py、
+            # 建物を作る口の全部で共有)
+            building_ids = BuildingIdAvailability(db, self.saiverse_home)
             ai_stem = build_identifier(
                 entity_name,
                 stem="persona",
-                exists=lambda s: ai_stem_taken(db, s, city_slug),
+                exists=lambda s: ai_stem_taken(db, s, city_slug, building_ids),
             )
             new_ai_id = f"{ai_stem}_{city_slug}"
 
@@ -217,17 +221,15 @@ class BlueprintMixin:
                 )
 
             # ensure_unique=True の理由は manager/persona.py の同じ箇所と同じ:
-            # 私室と同じ ID の Building が既に存在しうる。
+            # 私室と同じ ID の Building が既に存在しうる。使えない ID は断らずに
+            # 次の候補へ進む (私室の ID は利用者が選んだものではない)。
             private_room_id = build_identifier(
                 ai_stem,
                 city_slug,
                 "room",
                 stem="persona",
                 ensure_unique=True,
-                exists=lambda bid: db.query(BuildingModel)
-                .filter_by(BUILDINGID=bid)
-                .first()
-                is not None,
+                exists=lambda bid: not building_ids.is_usable(bid),
             )
             private_room_model = BuildingModel(
                 CITYID=blueprint.CITYID,
