@@ -1210,4 +1210,23 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.16 -> 0.3.17 (schema changes are applied by migrate.py at startup).",
     ),
+    # ---- v0.3.18 ----
+    # この版はモデル定義 (builtin_data/models/) と画像生成ツールの変更だけで、DB の
+    # 変更も更新の鎖で行う移行も無いので、この版の辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_18",
+        scope="city",
+        from_version="0.3.17",
+        to_version="0.3.18",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.17 -> 0.3.18 (no DB changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_18",
+        scope="ai",
+        from_version="0.3.17",
+        to_version="0.3.18",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.17 -> 0.3.18 (no DB changes).",
+    ),
 ]
