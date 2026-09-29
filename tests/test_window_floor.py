@@ -65,6 +65,17 @@ def _make_lifecycle(session_factory):
     return lc
 
 
+def _anchors_exist():
+    """起点の実在確認 (resolve の入口の一括照会) を「全部実在する」と答えさせる。
+
+    偽の器 (``conn=object()`` 等) はこの照会に答えられない。実在確認そのものは
+    tests/test_dangling_session_anchor.py が本物の memory.db で固定する。"""
+    return patch(
+        "sai_memory.memory.storage.get_existing_message_ids",
+        side_effect=lambda conn, ids: {str(i) for i in ids},
+    )
+
+
 def _msg(mid, at, chars):
     return {"id": mid, "content": "x" * chars, "created_at": at}
 
@@ -547,7 +558,8 @@ def test_preflight_cycle_is_stable_when_a_straddling_fold_alone_exceeds_high(ses
                   return_value=[]), \
             patch("saiverse.dynamic_state.DynamicStateManager.on_metabolism",
                   lambda *a, **k: None), \
-            patch.dict(_os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}):
+            patch.dict(_os.environ, {"SAIVERSE_SLUICE_ENABLED": "0"}), \
+            _anchors_exist():
         first = _preflight()
         second = _preflight()
         third = _preflight()
@@ -797,7 +809,7 @@ def test_strict_anchor_resolution_raises_on_frontier_failure(session_factory):
         ),
     )
     with patch("sai_memory.arasuji.storage.get_frontier_anchor_id",
-               side_effect=RuntimeError("db down")):
+               side_effect=RuntimeError("db down")), _anchors_exist():
         assert lc.resolve_metabolism_anchor(persona, model_key=MODEL) == ("m0", "self")
         with pytest.raises(RuntimeError):
             lc.resolve_metabolism_anchor(persona, model_key=MODEL, strict=True)
@@ -1221,9 +1233,16 @@ def test_frontier_probe_and_query_run_under_the_adapter_lock(session_factory):
         seen.append(("query", lock.held))
         return None
 
-    with patch("sai_memory.arasuji.storage.get_frontier_anchor_id", side_effect=_frontier):
+    def _exists(conn, ids):
+        # 起点の実在確認 (dangling_session_anchor_refuses_every_pulse.md) も
+        # 同じ錠前の内側
+        seen.append(("exists", lock.held))
+        return {str(i) for i in ids}
+
+    with patch("sai_memory.arasuji.storage.get_frontier_anchor_id", side_effect=_frontier), \
+            patch("sai_memory.memory.storage.get_existing_message_ids", side_effect=_exists):
         assert lc.resolve_metabolism_anchor(persona, model_key=MODEL, strict=True) == ("m0", "self")
-    assert seen == [("probe", True), ("query", True)]
+    assert seen == [("exists", True), ("probe", True), ("query", True)]
     assert lock.held is False
 
 
@@ -1317,7 +1336,7 @@ def test_strict_resolve_does_not_advance_over_corrupted_folds(session_factory):
     with patch("sai_memory.arasuji.storage.get_frontier_anchor_id", return_value="m3"), \
             patch("sai_memory.arasuji.storage.compare_message_positions", return_value=1), \
             patch.object(lc, "_plan_marker_crossing_record",
-                         return_value=(True, None)):
+                         return_value=(True, None)), _anchors_exist():
         with pytest.raises(ValueError):
             lc.resolve_metabolism_anchor(persona, model_key=MODEL, strict=True)
         with patch.object(lc, "get_metabolism_watermarks", return_value=WM):
@@ -1406,7 +1425,8 @@ def test_preview_refill_strict_distinguishes_read_failure_from_no_material(
             patch.object(lc, "perception_blocks_for", return_value=[]), \
             patch("sai_memory.arasuji.storage."
                   "get_latest_primary_entry_before_message",
-                  side_effect=RuntimeError("database is locked")):
+                  side_effect=RuntimeError("database is locked")), \
+            _anchors_exist():
         assert lc.preview_refilled_history(persona, MODEL) is None
         with pytest.raises(RuntimeError):
             lc.preview_refilled_history(persona, MODEL, raise_on_error=True)
@@ -1440,7 +1460,7 @@ def test_refill_does_not_write_over_unreadable_folds(session_factory):
         ),
     )
     with patch.object(lc, "get_metabolism_watermarks", return_value=WM), \
-            patch.object(lc, "_write_refill") as write:
+            patch.object(lc, "_write_refill") as write, _anchors_exist():
         with pytest.raises(ValueError):
             lc.maybe_run_window_refill(persona, "room", model_key=MODEL)
     write.assert_not_called()
