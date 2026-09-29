@@ -140,6 +140,7 @@ class TestImageGenerator(unittest.TestCase):
             ("medium", {"quality": "medium", "resolution": "1k"}),
             ("high", {"quality": "medium", "resolution": "2k"}),
             ("auto", {"quality": "medium", "resolution": "2k"}),
+            ("xhigh", {"quality": "medium", "resolution": "2k"}),
             ("max", {"quality": "medium", "resolution": "2k"}),
         ]
         for requested, expected in cases:
@@ -191,7 +192,8 @@ class TestImageGenerator(unittest.TestCase):
     @patch.object(_mod, 'store_image_bytes')
     @patch.object(_mod, '_generate_with_grok_imagine')
     def test_generate_image_grok_imagine_dispatch(self, mock_gen, mock_store, mock_avail):
-        mock_gen.return_value = (b'imgdata', 'image/png')
+        # バックエンドが返した MIME (xAI は JPEG) が、そのまま保存側へ渡ること。
+        mock_gen.return_value = (b'imgdata', 'image/jpeg')
 
         with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
             tmp.write(b'imgdata')
@@ -203,12 +205,15 @@ class TestImageGenerator(unittest.TestCase):
              patch('tools.context.get_active_persona_id', return_value=None), \
              patch('tools.context.get_active_manager', return_value=None):
             text, info, path, metadata, item_id = generate_image(
-                'a cat', model='grok_imagine'
+                'a cat', model='grok_imagine', aspect_ratio='16:9', quality='low'
             )
 
         self.assertIn('grok_imagine', text)
         self.assertEqual(Path(path), temp_path)
         mock_gen.assert_called_once()
+        # プロンプト・縦横比・品質が、この順でバックエンドへ届くこと。
+        self.assertEqual(mock_gen.call_args.args[:3], ('a cat', '16:9', 'low'))
+        self.assertEqual(mock_store.call_args.args[1], 'image/jpeg')
         temp_path.unlink(missing_ok=True)
 
     def test_tool_registration(self):
