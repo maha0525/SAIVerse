@@ -637,9 +637,23 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentB
 }
 
 
+function parseFixtureState(stateJson: string | null): Record<string, any> | null {
+    if (!stateJson) return null;
+    try {
+        const parsed = JSON.parse(stateJson);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
 function FixtureModal({ fixture, onClose }: { fixture: Fixture; onClose: () => void }) {
     useLocale();
-    const state = fixture.state_json ? JSON.parse(fixture.state_json) : null;
+    const state = parseFixtureState(fixture.state_json);
+
+    if (fixture.type === 'feed_stand') {
+        return <FeedStandModal fixture={fixture} state={state} onClose={onClose} />;
+    }
 
     return (
         <ModalOverlay onClose={onClose} className={fixtureStyles.overlay}>
@@ -684,6 +698,328 @@ function FixtureModal({ fixture, onClose }: { fixture: Fixture; onClose: () => v
                     ) : (
                         <div data-i18n="components.RightSidebar.text018" className={fixtureStyles.emptyState}>{uiText("components.RightSidebar.text018")}</div>
                     )}
+                </div>
+            </div>
+        </ModalOverlay>
+    );
+}
+
+
+// ── フィードスタンド (Fixture TYPE="feed_stand") のモーダル ──
+// 観測値の表は出さない (この用途では無意味 — 2026-09-29 まはー裁定)。
+// STATE_JSON の feed_stand キー (書き手は feed_manager.update_fixture_display) を
+// 「購読中のフィード」「新着記事」として見せ、スタンドごとの配信設定を編集させる。
+
+type StandSettingKey = 'fetch_interval_sec' | 'summary_max_chars' | 'title_max_chars' | 'max_items_per_push';
+type StandSettings = Record<StandSettingKey, number>;
+type StandConfig = Record<StandSettingKey, number | null>;
+
+// api/routes/feeds.py の検証範囲 (saiverse/feed_manager.py の STAND_CONFIG_RANGES) と同じ
+const STAND_NUMBER_RANGES: Record<Exclude<StandSettingKey, 'fetch_interval_sec'>, [number, number]> = {
+    summary_max_chars: [0, 1000],
+    title_max_chars: [20, 500],
+    max_items_per_push: [0, 10],
+};
+const STAND_INTERVAL_PRESETS_HOURS = [1, 3, 6, 12, 24];
+
+function formatInterval(seconds: number): string {
+    if (seconds % 3600 === 0) {
+        return uiText("components.RightSidebar.text029", { p1: seconds / 3600 });
+    }
+    return uiText("components.RightSidebar.text030", { p1: Math.round(seconds / 60) });
+}
+
+function errorDetailText(data: any, status: number): string {
+    // FastAPI の 422 (入力検証) は detail が配列で届くので、文字列のときだけそのまま出す
+    if (data && typeof data.detail === 'string') return data.detail;
+    return `HTTP ${status}`;
+}
+
+interface NumberFieldState {
+    useDefault: boolean;
+    value: string;
+}
+
+function FeedStandModal({ fixture, state, onClose }: {
+    fixture: Fixture;
+    state: Record<string, any> | null;
+    onClose: () => void;
+}) {
+    useLocale();
+    const display = state && typeof state.feed_stand === 'object' && state.feed_stand ? state.feed_stand : null;
+    const subscriptions: string[] = Array.isArray(display?.subscriptions) ? display.subscriptions : [];
+    const latest: string[] = Array.isArray(display?.latest) ? display.latest : [];
+
+    const [loadState, setLoadState] = useState<'loading' | 'ready' | 'error'>('loading');
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [defaults, setDefaults] = useState<StandSettings | null>(null);
+    // 取得間隔は選択肢 ('' = 既定)、他の 3 欄は「既定値を使う」+ 数値入力
+    const [intervalChoice, setIntervalChoice] = useState<string>('');
+    const [savedInterval, setSavedInterval] = useState<number | null>(null);
+    const [fields, setFields] = useState<Record<Exclude<StandSettingKey, 'fetch_interval_sec'>, NumberFieldState>>({
+        summary_max_chars: { useDefault: true, value: '' },
+        title_max_chars: { useDefault: true, value: '' },
+        max_items_per_push: { useDefault: true, value: '' },
+    });
+    const [saving, setSaving] = useState(false);
+    const [saveMessage, setSaveMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+
+    const applyConfig = useCallback((config: StandConfig, defs: StandSettings) => {
+        setDefaults(defs);
+        setSavedInterval(config.fetch_interval_sec);
+        setIntervalChoice(config.fetch_interval_sec == null ? '' : String(config.fetch_interval_sec));
+        setFields({
+            summary_max_chars: {
+                useDefault: config.summary_max_chars == null,
+                value: String(config.summary_max_chars ?? defs.summary_max_chars),
+            },
+            title_max_chars: {
+                useDefault: config.title_max_chars == null,
+                value: String(config.title_max_chars ?? defs.title_max_chars),
+            },
+            max_items_per_push: {
+                useDefault: config.max_items_per_push == null,
+                value: String(config.max_items_per_push ?? defs.max_items_per_push),
+            },
+        });
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            setLoadState('loading');
+            try {
+                const res = await apiFetch('/api/feeds/fixtures');
+                const data = await res.json().catch(() => null);
+                if (cancelled) return;
+                if (!res.ok) {
+                    setLoadError(errorDetailText(data, res.status));
+                    setLoadState('error');
+                    return;
+                }
+                const entry = Array.isArray(data)
+                    ? data.find((f: { fixture_id: string }) => f.fixture_id === fixture.id)
+                    : null;
+                if (!entry || !entry.config || !entry.defaults) {
+                    setLoadError(`HTTP ${res.status}`);
+                    setLoadState('error');
+                    return;
+                }
+                applyConfig(entry.config, entry.defaults);
+                setLoadState('ready');
+            } catch (e) {
+                if (cancelled) return;
+                setLoadError(String(e));
+                setLoadState('error');
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [fixture.id, applyConfig]);
+
+    const numberLabels: Record<Exclude<StandSettingKey, 'fetch_interval_sec'>, { label: string; help: string; unit: (n: number) => string }> = {
+        summary_max_chars: {
+            label: uiText("components.RightSidebar.text031"),
+            help: uiText("components.RightSidebar.text032"),
+            unit: (n) => uiText("components.RightSidebar.text045", { p1: n }),
+        },
+        title_max_chars: {
+            label: uiText("components.RightSidebar.text033"),
+            help: uiText("components.RightSidebar.text034"),
+            unit: (n) => uiText("components.RightSidebar.text045", { p1: n }),
+        },
+        max_items_per_push: {
+            label: uiText("components.RightSidebar.text035"),
+            help: uiText("components.RightSidebar.text036"),
+            unit: (n) => uiText("components.RightSidebar.text046", { p1: n }),
+        },
+    };
+
+    const handleSave = async () => {
+        setSaveMessage(null);
+        const body: StandConfig = {
+            fetch_interval_sec: intervalChoice === '' ? null : Number(intervalChoice),
+            summary_max_chars: null,
+            title_max_chars: null,
+            max_items_per_push: null,
+        };
+        for (const key of Object.keys(STAND_NUMBER_RANGES) as Array<keyof typeof STAND_NUMBER_RANGES>) {
+            const field = fields[key];
+            if (field.useDefault) continue;
+            const [low, high] = STAND_NUMBER_RANGES[key];
+            const trimmed = field.value.trim();
+            const parsed = Number(trimmed);
+            if (trimmed === '' || !Number.isInteger(parsed) || parsed < low || parsed > high) {
+                setSaveMessage({
+                    kind: 'error',
+                    text: uiText("components.RightSidebar.text044", { p1: numberLabels[key].label, p2: low, p3: high }),
+                });
+                return;
+            }
+            body[key] = parsed;
+        }
+        setSaving(true);
+        try {
+            const res = await apiFetch(`/api/feeds/fixtures/${encodeURIComponent(fixture.id)}/config`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                setSaveMessage({ kind: 'error', text: uiText("components.RightSidebar.text041", { p1: errorDetailText(data, res.status) }) });
+                return;
+            }
+            if (data?.config && data?.defaults) applyConfig(data.config, data.defaults);
+            setSaveMessage({ kind: 'ok', text: uiText("components.RightSidebar.text040") });
+        } catch (e) {
+            setSaveMessage({ kind: 'error', text: uiText("components.RightSidebar.text041", { p1: String(e) }) });
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    // 既定の選択肢 + 1/3/6/12/24 時間。保存値が選択肢に無い値 (API で直接
+    // 設定された等) なら、その値も選択肢に足して黙って失わない。
+    const intervalOptions = STAND_INTERVAL_PRESETS_HOURS.map(h => h * 3600);
+    if (savedInterval != null && !intervalOptions.includes(savedInterval)) {
+        intervalOptions.push(savedInterval);
+        intervalOptions.sort((a, b) => a - b);
+    }
+
+    return (
+        <ModalOverlay onClose={onClose} className={fixtureStyles.overlay}>
+            <div className={fixtureStyles.modal} onClick={e => e.stopPropagation()}>
+                <div className={fixtureStyles.header}>
+                    <h3 className={fixtureStyles.title}>{fixture.name}</h3>
+                    <button className={fixtureStyles.closeButton} onClick={onClose}>
+                        <X size={18} />
+                    </button>
+                </div>
+                <div className={fixtureStyles.content}>
+                    {fixture.description && (
+                        <p className={fixtureStyles.description}>{fixture.description}</p>
+                    )}
+
+                    <h4 data-i18n="components.RightSidebar.text020" className={fixtureStyles.sectionTitle}>{uiText("components.RightSidebar.text020")}</h4>
+                    {subscriptions.length > 0 ? (
+                        <ul className={fixtureStyles.feedList}>
+                            {subscriptions.map((title, i) => (
+                                <li key={`sub-${i}`} className={fixtureStyles.feedListItem}>{title}</li>
+                            ))}
+                        </ul>
+                    ) : (
+                        <div data-i18n="components.RightSidebar.text021" className={fixtureStyles.emptyInline}>{uiText("components.RightSidebar.text021")}</div>
+                    )}
+
+                    <h4 data-i18n="components.RightSidebar.text022" className={fixtureStyles.sectionTitle}>{uiText("components.RightSidebar.text022")}</h4>
+                    {latest.length > 0 ? (
+                        <ul className={fixtureStyles.feedList}>
+                            {latest.map((title, i) => (
+                                <li key={`latest-${i}`} className={fixtureStyles.feedListItem}>{title}</li>
+                            ))}
+                        </ul>
+                    ) : (
+                        <div data-i18n="components.RightSidebar.text023" className={fixtureStyles.emptyInline}>{uiText("components.RightSidebar.text023")}</div>
+                    )}
+
+                    <div className={fixtureStyles.settingsSection}>
+                        <h4 data-i18n="components.RightSidebar.text024" className={fixtureStyles.sectionTitle}>{uiText("components.RightSidebar.text024")}</h4>
+                        <p data-i18n="components.RightSidebar.text025" className={fixtureStyles.settingsLead}>{uiText("components.RightSidebar.text025")}</p>
+
+                        {loadState === 'loading' && (
+                            <div data-i18n="components.RightSidebar.text043" className={fixtureStyles.emptyInline}>{uiText("components.RightSidebar.text043")}</div>
+                        )}
+                        {loadState === 'error' && (
+                            <div className={fixtureStyles.errorText}>{uiText("components.RightSidebar.text042", { p1: loadError ?? '' })}</div>
+                        )}
+                        {loadState === 'ready' && defaults && (
+                            <>
+                                <div className={fixtureStyles.settingRow}>
+                                    <label data-i18n="components.RightSidebar.text026" className={fixtureStyles.settingLabel} htmlFor={`feed-interval-${fixture.id}`}>
+                                        {uiText("components.RightSidebar.text026")}
+                                    </label>
+                                    <select
+                                        id={`feed-interval-${fixture.id}`}
+                                        className={fixtureStyles.settingSelect}
+                                        value={intervalChoice}
+                                        onChange={e => { setIntervalChoice(e.target.value); setSaveMessage(null); }}
+                                        disabled={saving}
+                                    >
+                                        <option value="">{uiText("components.RightSidebar.text028", { p1: formatInterval(defaults.fetch_interval_sec) })}</option>
+                                        {intervalOptions.map(sec => (
+                                            <option key={sec} value={String(sec)}>{formatInterval(sec)}</option>
+                                        ))}
+                                    </select>
+                                    <div data-i18n="components.RightSidebar.text027" className={fixtureStyles.settingHelp}>{uiText("components.RightSidebar.text027")}</div>
+                                </div>
+
+                                {(Object.keys(STAND_NUMBER_RANGES) as Array<keyof typeof STAND_NUMBER_RANGES>).map(key => {
+                                    const field = fields[key];
+                                    const [low, high] = STAND_NUMBER_RANGES[key];
+                                    const meta = numberLabels[key];
+                                    const inputId = `feed-${key}-${fixture.id}`;
+                                    return (
+                                        <div key={key} className={fixtureStyles.settingRow}>
+                                            <label className={fixtureStyles.settingLabel} htmlFor={inputId}>{meta.label}</label>
+                                            <div className={fixtureStyles.settingControls}>
+                                                <label className={fixtureStyles.defaultToggle}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={field.useDefault}
+                                                        disabled={saving}
+                                                        onChange={e => {
+                                                            const useDefault = e.target.checked;
+                                                            setFields(prev => ({
+                                                                ...prev,
+                                                                [key]: {
+                                                                    useDefault,
+                                                                    // 既定値へ戻すときは入力欄も既定値の表示に揃える
+                                                                    value: useDefault ? String(defaults[key]) : prev[key].value,
+                                                                },
+                                                            }));
+                                                            setSaveMessage(null);
+                                                        }}
+                                                    />
+                                                    {uiText("components.RightSidebar.text037", { p1: meta.unit(defaults[key]) })}
+                                                </label>
+                                                <input
+                                                    id={inputId}
+                                                    type="number"
+                                                    className={fixtureStyles.settingInput}
+                                                    min={low}
+                                                    max={high}
+                                                    step={1}
+                                                    value={field.useDefault ? String(defaults[key]) : field.value}
+                                                    disabled={field.useDefault || saving}
+                                                    onChange={e => {
+                                                        const value = e.target.value;
+                                                        setFields(prev => ({ ...prev, [key]: { ...prev[key], value } }));
+                                                        setSaveMessage(null);
+                                                    }}
+                                                />
+                                            </div>
+                                            <div className={fixtureStyles.settingHelp}>{meta.help}</div>
+                                        </div>
+                                    );
+                                })}
+
+                                <div className={fixtureStyles.settingActions}>
+                                    <button
+                                        className={fixtureStyles.saveButton}
+                                        onClick={handleSave}
+                                        disabled={saving}
+                                    >
+                                        {saving ? uiText("components.RightSidebar.text039") : uiText("components.RightSidebar.text038")}
+                                    </button>
+                                    {saveMessage && (
+                                        <span className={saveMessage.kind === 'ok' ? fixtureStyles.saveOk : fixtureStyles.errorText}>
+                                            {saveMessage.text}
+                                        </span>
+                                    )}
+                                </div>
+                            </>
+                        )}
+                    </div>
                 </div>
             </div>
         </ModalOverlay>

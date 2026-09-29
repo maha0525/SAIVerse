@@ -99,6 +99,7 @@
 
 ## アドオン / 外部連携 / ハード
 
+- **Godot Vessel のユーザー由来ファイルをユーザーデータ側へ引っ越す** — アドオンフォルダ内に湧く「ユーザーの財産」(ユーザーが置く VRM、ペルソナ固有の生成モーション、表情プロファイル) を `~/.saiverse/user_data/addon_data/` 側へ移す。今の置き場だとアンインストール (フォルダ丸ごと削除) で消える。Stackchan vessel でのアバターの置き場所なども参考に (まはー 2026-09-29、リポジトリ化の議論から)。ペアリング情報と動き方の好みは既に addon_data 側にあり、この 3 つだけが取り残されている。**背景の 3D データ (舞台) も同族**: ユーザーが差し替えたり Building ごとに変えたりできる想定にする。行き着く形は「リポジトリには配布可能な VRM 素体と背景の見本を同梱し、導入時にユーザーデータ側へコピーし、実行時はユーザーデータ側だけを読む」運用 (まはー 2026-09-29)。導入時コピーはワンタッチ導入の setup steps に書ける。技術の鍵は Godot クライアントが実行時にプロジェクト外のファイルを読むことで、intent の未解決リスク「書き出しビルドでの外部 VRM ロード」と同一課題 — 解けたら VRM 差し替え・背景差し替え・実行ファイル配布が同時に解ける。隣接: [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md)、[addon_catalog_management.md](../intent/addon_catalog_management.md)。 `2026-09-29`
 - **M5Stamp Fly v1.1(ドローン)と遊ぶ** — [switch-science 11202](https://www.switch-science.com/products/11202)。オープンソースのプログラマブル・ミニドローン(高度維持・障害物回避・姿勢検出)。ペルソナの身体として? まずは「たのしそう」枠。 🔥 `2026-07-08`
 - **Wi-Fi カメラ連携** — [M5Stack CamS3 (switch-science 9923)](https://www.switch-science.com/products/9923) や tapo C220 のような Wi-Fi カメラと SAIVerse を連携させる。**カギ: Stackchan の視覚とどう繋ぐか**。隣接: 下の NPU カメラモニタリング、Stackchan 視覚。 `2026-07-08`
 - **NPU で Gemma 3n E4B カメラモニタリング** — NPU で E4B を動かせる環境が整った。カメラを 10 秒ごとにチェックして「見た内容」を記録する常時モニタリングを実現したい。隣接: **Observer 連携**、上の Wi-Fi カメラ連携。 ↳ **[physical_ear.md](../intent/physical_ear.md) の視覚版兄弟** (同じ「NPU E4B 常時知覚 → 判断 → 記録/通知/会話」構造)。耳の設計が固まったらこの抽象に乗せる。 ↳ 全体方針は [realtime_foundation.md](../intent/realtime_foundation.md) (セイリエンス層の視覚インスタンス・実体アンカー認識索引の入口)。 🔥 `2026-07-08`

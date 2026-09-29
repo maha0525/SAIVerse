@@ -989,6 +989,12 @@ class FeedSubscription(Base):
     LAST_OK_AT = Column(DateTime, nullable=True)
     LAST_ERROR = Column(String(512), nullable=True)
     CONSECUTIVE_FAILURES = Column(Integer, default=0, nullable=False)
+    # 最後に取得を試みた時刻 (naive UTC、成功・失敗とも)。取得ワーカーは
+    # 固定の刻みで起き、所属スタンドの取得間隔がここから経過した購読だけを
+    # 取得する (FeedManager._fetch_all のゲート)。NULL = まだ一度も試して
+    # いない = 次の刻みで取得する。nullable なので追加系 migration
+    # (try_additive_migration / _ensure_feed_tables) で既存 DB に足せる。
+    LAST_ATTEMPT_AT = Column(DateTime, nullable=True)
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     __table_args__ = (
@@ -1049,6 +1055,27 @@ class FeedReadCursor(Base):
     __table_args__ = (
         UniqueConstraint('PERSONA_ID', 'SUBSCRIPTION_ID', name='uq_feed_cursor_persona_sub'),
     )
+
+
+class FeedFixtureConfig(Base):
+    """フィード施設 (Fixture TYPE="feed_stand") ごとの配信設定 (2026-09-29)。
+
+    4 欄とも nullable で、NULL は「既定値を使う」。解決順は
+    スタンドの設定値 > env > 組み込み既定 (FeedManager.resolve_stand_settings)。
+    要約・見出しの上限は env を持たない (スタンド設定と組み込み既定だけ)。
+    未読ストック上限 (SAIVERSE_FEED_MAX_PENDING) はペルソナ単位の共有予算
+    なのでここには置かない。行が無いスタンドは全欄 NULL と同じ扱い。
+    """
+    __tablename__ = "feed_fixture_config"
+    FIXTURE_ID = Column(
+        String(36), ForeignKey("fixture.FIXTURE_ID"), primary_key=True
+    )
+    FETCH_INTERVAL_SEC = Column(Integer, nullable=True)
+    SUMMARY_MAX_CHARS = Column(Integer, nullable=True)
+    TITLE_MAX_CHARS = Column(Integer, nullable=True)
+    MAX_ITEMS_PER_PUSH = Column(Integer, nullable=True)
+    CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class RealtimeSpellBinding(Base):
