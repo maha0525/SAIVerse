@@ -1187,4 +1187,27 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.15 -> 0.3.16 (no DB changes).",
     ),
+    # ---- v0.3.17 ----
+    # この版の DB 変更は migrate.py が起動時に当てる: フィードの追加 (新表
+    # feed_fixture_config と列 feed_subscription.LAST_ATTEMPT_AT) は軽量パス、
+    # リアルタイム情報の全体トグル AI.REALTIME_INFO_ENABLED を項目別の 2 列へ
+    # 分けた変更は全書換パス (_migrate_realtime_info_to_item_toggles が旧値を
+    # 引き継ぐ)。建物の削除の残骸の付け替えは起動時の片付けが行う。
+    # どれも更新の鎖で行う移行ではないので、この版の辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_17",
+        scope="city",
+        from_version="0.3.16",
+        to_version="0.3.17",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.16 -> 0.3.17 (schema changes are applied by migrate.py at startup).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_17",
+        scope="ai",
+        from_version="0.3.16",
+        to_version="0.3.17",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.16 -> 0.3.17 (schema changes are applied by migrate.py at startup).",
+    ),
 ]
