@@ -83,6 +83,92 @@ def city_fixture_ids(db: Session, city_id: int):
     )
 
 
+def delete_fixture_dependent_rows(db: Session, fixture_id: str) -> List[str]:
+    """設置物 1 つにぶら下がる行を、渡されたセッションの中で消す (設置物の行自体は消さない)。
+
+    道連れの対象 (fixture.FIXTURE_ID を参照する全テーブル):
+    - observer_config (同じ FIXTURE_ID) と、その子の observer_metrics
+      (OBSERVER_ID で紐づく)
+    - feed_subscription (同じ FIXTURE_ID) と、その子の feed_item /
+      feed_read_cursor (SUBSCRIPTION_ID で紐づく)
+    - feed_fixture_config (同じ FIXTURE_ID)
+
+    commit はしない (呼び出し側の transaction に載る)。所有権の確認もしない —
+    どの設置物を消してよいかは呼び出し側が決める (ObserverManager.delete_fixture
+    は City 境界の条件付き DELETE、建物の削除は消す建物に属する設置物)。
+
+    Returns: 消した観測設定の OBSERVER_ID の一覧。呼び出し側は commit の後に
+    EventScheduler の ``observer:<id>`` を取り消す (:func:`cancel_observer_jobs`)。
+    """
+    observer_ids = [
+        row[0]
+        for row in db.query(ObserverConfig.OBSERVER_ID)
+        .filter(ObserverConfig.FIXTURE_ID == fixture_id)
+        .all()
+    ]
+    if observer_ids:
+        db.query(ObserverMetric).filter(
+            ObserverMetric.OBSERVER_ID.in_(observer_ids)
+        ).delete(synchronize_session=False)
+    db.query(ObserverConfig).filter(
+        ObserverConfig.FIXTURE_ID == fixture_id
+    ).delete(synchronize_session=False)
+
+    def subscription_ids():
+        return db.query(FeedSubscription.SUBSCRIPTION_ID).filter(
+            FeedSubscription.FIXTURE_ID == fixture_id
+        )
+
+    # 購読の子 (記事・既読カーソル) を、購読本体より先に消す
+    # (子の特定に購読行を使うため)
+    db.query(FeedItem).filter(
+        FeedItem.SUBSCRIPTION_ID.in_(subscription_ids())
+    ).delete(synchronize_session=False)
+    db.query(FeedReadCursor).filter(
+        FeedReadCursor.SUBSCRIPTION_ID.in_(subscription_ids())
+    ).delete(synchronize_session=False)
+    db.query(FeedSubscription).filter(
+        FeedSubscription.FIXTURE_ID == fixture_id
+    ).delete(synchronize_session=False)
+    db.query(FeedFixtureConfig).filter(
+        FeedFixtureConfig.FIXTURE_ID == fixture_id
+    ).delete(synchronize_session=False)
+    return observer_ids
+
+
+def delete_fixture_rows(db: Session, fixture_ids: List[str]) -> List[str]:
+    """設置物の行と、それぞれにぶら下がる行を、渡されたセッションの中で消す。
+
+    所有権の確認はしない (呼び出し側が消してよい設置物だけを渡す)。commit も
+    しない。建物の削除 (manager/admin.py) と、起動時の残骸の片付け
+    (saiverse/building_leftover_cleanup.py) が使う。
+
+    Returns: 消した観測設定の OBSERVER_ID の一覧 (commit の後に
+    :func:`cancel_observer_jobs` へ渡す)。
+    """
+    observer_ids: List[str] = []
+    for fixture_id in fixture_ids:
+        observer_ids.extend(delete_fixture_dependent_rows(db, fixture_id))
+        db.query(Fixture).filter(Fixture.FIXTURE_ID == fixture_id).delete(
+            synchronize_session=False
+        )
+    return observer_ids
+
+
+def cancel_observer_jobs(manager: Any, observer_ids: List[str]) -> None:
+    """消した観測設定の定期実行 (EventScheduler の ``observer:<id>``) を取り消す。
+
+    commit の後に呼ぶ。取り消し前に一度発火しても、_execute_pull は設定行が
+    無ければ何もしない。予約されていない ID (push 型など) の取り消しは何もしない。
+    event_scheduler を持たない manager (テストなど) では何もしない。
+    """
+    scheduler = getattr(manager, "event_scheduler", None)
+    if scheduler is None:
+        return
+    for observer_id in observer_ids:
+        scheduler.cancel(f"observer:{observer_id}")
+
+
 #: 一時的なロック/スナップショット競合と判定する SQLite エラーメッセージ片。
 #: これ**以外**の OperationalError (JSON1 不在・スキーマ不整合・ディスク障害
 #: 等の恒久障害) は再試行せず伝播する — 無差別再試行は根因を「一時的競合」と
@@ -382,12 +468,8 @@ class ObserverManager:
     def delete_fixture(self, fixture_id: str) -> bool:
         """設置物を削除する。その設置物に属する行もすべて道連れにする。
 
-        道連れの対象 (fixture.FIXTURE_ID を参照する全テーブル):
-        - observer_config (同じ FIXTURE_ID) と、その子の observer_metrics
-          (OBSERVER_ID で紐づく)
-        - feed_subscription (同じ FIXTURE_ID) と、その子の feed_item /
-          feed_read_cursor (SUBSCRIPTION_ID で紐づく)
-        - feed_fixture_config (同じ FIXTURE_ID)
+        道連れの対象と消し方は :func:`delete_fixture_dependent_rows` (建物の
+        削除と共有する一つの実装)。
 
         City 所有権境界の条件は本体 (fixture 行) の DELETE 文自身が運ぶ。
         道連れは本体の DELETE が行を消せた場合だけ、同一 transaction 内で
@@ -419,39 +501,7 @@ class ObserverManager:
                 db.rollback()
                 return False
 
-            observer_ids = [
-                row[0]
-                for row in db.query(ObserverConfig.OBSERVER_ID)
-                .filter(ObserverConfig.FIXTURE_ID == fixture_id)
-                .all()
-            ]
-            if observer_ids:
-                db.query(ObserverMetric).filter(
-                    ObserverMetric.OBSERVER_ID.in_(observer_ids)
-                ).delete(synchronize_session=False)
-            db.query(ObserverConfig).filter(
-                ObserverConfig.FIXTURE_ID == fixture_id
-            ).delete(synchronize_session=False)
-
-            def subscription_ids():
-                return db.query(FeedSubscription.SUBSCRIPTION_ID).filter(
-                    FeedSubscription.FIXTURE_ID == fixture_id
-                )
-
-            # 購読の子 (記事・既読カーソル) を、購読本体より先に消す
-            # (子の特定に購読行を使うため)
-            db.query(FeedItem).filter(
-                FeedItem.SUBSCRIPTION_ID.in_(subscription_ids())
-            ).delete(synchronize_session=False)
-            db.query(FeedReadCursor).filter(
-                FeedReadCursor.SUBSCRIPTION_ID.in_(subscription_ids())
-            ).delete(synchronize_session=False)
-            db.query(FeedSubscription).filter(
-                FeedSubscription.FIXTURE_ID == fixture_id
-            ).delete(synchronize_session=False)
-            db.query(FeedFixtureConfig).filter(
-                FeedFixtureConfig.FIXTURE_ID == fixture_id
-            ).delete(synchronize_session=False)
+            observer_ids = delete_fixture_dependent_rows(db, fixture_id)
             db.commit()
         except Exception:
             db.rollback()
@@ -459,10 +509,7 @@ class ObserverManager:
         finally:
             db.close()
 
-        scheduler = getattr(self.manager, "event_scheduler", None)
-        if scheduler is not None:
-            for observer_id in observer_ids:
-                scheduler.cancel(f"observer:{observer_id}")
+        cancel_observer_jobs(self.manager, observer_ids)
         LOGGER.info(
             "[observer] fixture deleted: %s (observers=%d)",
             fixture_id, len(observer_ids),

@@ -13,6 +13,7 @@
 - 同じ Item が異なる所有者に紐付くことで、建物に置かれているのか・ペルソナが手に持っているのかを表現する
 - 配置の更新は [Tool](tool.md) の `item_move`（`builtin_data/tools/item_move.py`、`destination_type`: building/persona/bag）で行う。pickup/place/use の実体はマネージャの `SAIVerseManager.pickup_item_for_persona` / `use_item_for_persona`（→ `item_service`）
 - 削除 (ユーザー操作・World Editor、`manager/admin.py`): `delete_item` は入れ物 (bag) を消すとき、直接の中身を入れ物があった場所 (部屋 / ペルソナの持ち物 / 外側の入れ物 / どこにも置かない) へ出してから消す。入れ子の入れ物は中身ごとそのまま出る。中身も一緒に消すときは、先に `delete_bag_contents` (入れ子まで全部消し、入れ物は残す) を呼ぶ。どちらも置き場所の行とアイテムの行だけを消し、参照しているファイルは消さない
+- 建物の削除 (`AdminService.delete_building(item_policy=...)`): 建物に直接置かれたアイテムは、利用者が確認の欄で選んだとおりに扱う。`keep` (既定) は置き場所の行だけを消して「どこにも置かれていない」(`world`) 状態で残し、入れ物の中身は入れ物に付いたまま。`delete` は入れ物の中身を入れ子の底まで含めて消す (`delete_bag_contents` と同じ実装)。建物に置かれた Fixture は、ぶら下がる観測設定・観測値・フィード購読・記事・既読カーソル・配信設定ごと必ず一緒に消える (`saiverse/observer_manager.py::delete_fixture_rows`、`ObserverManager.delete_fixture` と同じ実装)。部屋の会話の記録は残る (特殊な ID `deleted_<ID>_<日時>` の下へ移り、同じ ID の新しい部屋には戻らない — `saiverse/building_retirement.py`)。以前の削除が残した「消えた建物を指す置き場所・設置物・建物のリアルタイムスペル」は、起動時に `saiverse/building_leftover_cleanup.py` が片付ける (アイテムは消さずに `world` へ移す)。経緯は [`building_delete_leaves_contents.md`](../issues/building_delete_leaves_contents.md)
 
 ## 拡張中の存在論
 

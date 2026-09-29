@@ -17,13 +17,16 @@ from saiverse.occupancy_manager import arrived_building_id, is_redirect_notice
 from database.models import (
     AI as AIModel,
     Building as BuildingModel,
+    BuildingMessage as BuildingMessageModel,
     BuildingOccupancyLog,
     BuildingToolLink,
     City as CityModel,
+    Fixture as FixtureModel,
     User as UserModel,
     Item as ItemModel,
     ItemLocation as ItemLocationModel,
     Playbook as PlaybookModel,
+    RealtimeSpellBinding as RealtimeSpellBindingModel,
     Region as RegionModel,
 )
 from manager.blueprints import BlueprintMixin
@@ -36,6 +39,10 @@ from manager.ids import (
     is_valid_identifier,
 )
 from manager.state import CoreState
+from saiverse.building_retirement import (
+    BuildingIdAvailability,
+    is_tombstone_id,
+)
 from scripts.import_playbook import infer_scope_from_path
 from builtin_data.tools.save_playbook import save_playbook
 
@@ -67,6 +74,84 @@ def _chunks(values: List[str], size: int = 500):
     """SQL の IN 句に渡す値を、SQLite の変数上限に届かない大きさに分ける。"""
     for start in range(0, len(values), size):
         yield values[start:start + size]
+
+
+def _collect_nested_item_ids(db, container_ids: List[str]) -> List[str]:
+    """入れ物の中身を、入れ子の入れ物の中身まで含めて集める (入れ物自身は含めない)。
+
+    TYPE を問わず「この ITEM_ID を入れ物にしている行」(OWNER_KIND='bag') を
+    中身とみなす (world editor で bag から別の TYPE に変えられた入れ物の中身も
+    拾う)。幅優先でたどり、壊れた循環があっても止まる。
+    """
+    seen = set(container_ids)
+    found: List[str] = []
+    frontier = list(container_ids)
+    while frontier:
+        next_frontier: List[str] = []
+        for chunk in _chunks(frontier):
+            rows = (
+                db.query(ItemLocationModel.ITEM_ID)
+                .filter(
+                    ItemLocationModel.OWNER_KIND == "bag",
+                    ItemLocationModel.OWNER_ID.in_(chunk),
+                )
+                .all()
+            )
+            for (child_id,) in rows:
+                if child_id in seen:
+                    continue
+                seen.add(child_id)
+                found.append(child_id)
+                next_frontier.append(child_id)
+        frontier = next_frontier
+    return found
+
+
+def _delete_item_rows(db, item_ids: List[str]) -> None:
+    """アイテムの置き場所の行とアイテムの行を消す (commit しない)。
+
+    アイテムが参照しているファイル (絵や文書) は消さない — 他の削除経路と同じ。
+    """
+    for chunk in _chunks(item_ids):
+        db.query(ItemLocationModel).filter(
+            ItemLocationModel.ITEM_ID.in_(chunk)
+        ).delete(synchronize_session=False)
+    for chunk in _chunks(item_ids):
+        db.query(ItemModel).filter(
+            ItemModel.ITEM_ID.in_(chunk)
+        ).delete(synchronize_session=False)
+
+
+def _delete_bag_contents_rows(db, bag_id: str) -> List[str]:
+    """入れ物の中身を入れ子の底まで消し、消した ITEM_ID を返す (入れ物自身は残す。commit しない)。
+
+    壊れた循環 (この入れ物が、自分の中にある入れ物の中にも入っている) のときは、
+    入れ物自身の置き場所が消えた入れ物を指して残る。それを「どこにも置かない」に
+    戻して、辿れないアイテムにしない。
+    """
+    to_delete = _collect_nested_item_ids(db, [bag_id])
+    if not to_delete:
+        return to_delete
+    _delete_item_rows(db, to_delete)
+    deleted_set = set(to_delete)
+    own_location = (
+        db.query(ItemLocationModel)
+        .filter(ItemLocationModel.ITEM_ID == bag_id)
+        .first()
+    )
+    if (
+        own_location
+        and own_location.OWNER_KIND == "bag"
+        and own_location.OWNER_ID in deleted_set
+    ):
+        db.delete(own_location)
+    return to_delete
+
+
+#: 建物を消すとき、中に直接置かれていたアイテムをどうするか
+#: (docs/issues/building_delete_leaves_contents.md の裁定 D)。
+#: keep = どこにも置かれていない状態で残す (既定) / delete = 入れ物の中身ごと消す。
+BUILDING_ITEM_POLICIES = ("keep", "delete")
 
 
 class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
@@ -441,6 +526,16 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
             city = db.query(CityModel).filter_by(CITYID=city_id).first()
 
+            # 新しい建物に付けてよい ID かの規則 (saiverse/building_retirement.py、
+            # 建物を作る口の全部で共有): 大文字小文字を畳んで既存の建物と重ならない
+            # (ID はフォルダ名 ~/.saiverse/cities/<city>/buildings/<id>/ になり、
+            # Windows のファイルシステムは大文字小文字を区別しない)、消した建物の
+            # 記録の頭 deleted_ で始まらない、消した建物の元の ID で残る会話などを
+            # 特殊な ID へ移す作業が済んでいないものではない (済む前に同じ ID の
+            # 建物を作ると、ペルソナの記憶の中の古い印が新しい建物を指す。済めば
+            # 空くので、番号は歯抜けにならない)。
+            ids = BuildingIdAvailability(db, self.saiverse_home)
+
             # Use custom ID if provided, otherwise generate. Either way the ID
             # must satisfy the charset contract (manager/ids.py) — it goes
             # verbatim into log folder paths, saiverse:// URIs and API paths.
@@ -450,30 +545,25 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     return charset_error("Building ID", building_id)
             else:
                 # 日本語名など slug が空になる名前は building_<連番>_<city> へ
-                # フォールバック (issue 論点 1: 読み変換は導入せず、まず口を塞ぐ)
+                # フォールバック (issue 論点 1: 読み変換は導入せず、まず口を塞ぐ)。
+                # 連番は機械が選ぶ候補なので、使えない番号は飛ばす。
                 building_id = build_identifier(
-                    name,
-                    city.CITY_SLUG,
-                    stem="building",
-                    exists=lambda cid: db.query(BuildingModel)
-                    .filter_by(BUILDINGID=cid)
-                    .first()
-                    is not None,
+                    name, city.CITY_SLUG, stem="building",
+                    exists=lambda cid: not ids.is_usable(cid),
                 )
+                if is_tombstone_id(building_id):
+                    # 名前から作った ID が消した建物の記録の頭 (deleted_) で始まる
+                    # (名前が「Deleted ...」など)。その形は使わず、連番の形にする。
+                    building_id = build_identifier(
+                        "", city.CITY_SLUG, stem="building",
+                        exists=lambda cid: not ids.is_usable(cid),
+                    )
 
-            # 大文字小文字を畳んで検査する: Building ID はフォルダ名
-            # (~/.saiverse/cities/<city>/buildings/<id>/) になり、Windows の
-            # ファイルシステムは大文字小文字を区別しないため、'Cafe' と 'cafe'
-            # を別 Building として通すとログの保存先が同じになる
-            if (
-                db.query(BuildingModel)
-                .filter(func.lower(BuildingModel.BUILDINGID) == building_id.lower())
-                .first()
-            ):
-                return (
-                    f"Error: A building with the ID '{building_id}' "
-                    "already exists (IDs are compared case-insensitively)."
-                )
+            # 利用者が選んだ ID (手で付けた ID・名前から作った ID) が使えなければ、
+            # 連番で黙って別の ID にせず、理由を返す。
+            reason = ids.unusable_reason(building_id)
+            if reason is not None:
+                return ids.error(building_id, reason)
 
             new_building = BuildingModel(
                 CITYID=city_id,
@@ -486,24 +576,116 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             db.add(new_building)
             db.commit()
             logging.info("Created new building '%s' (ID: %s) in city %s.", name, building_id, city_id)
-            return (
-                f"Building '{name}' (ID: {building_id}) created successfully. "
-                "A restart is required for it to be usable."
-            )
+            # 自分の City の建物なら SAIVerseManager.create_building がその場で
+            # 読み直すので、再起動は要らない (呼び出し側はこの文面から ID を
+            # 抜き出すので "(ID: ...)" の形は変えない)
+            return f"Building '{name}' (ID: {building_id}) created successfully."
         except Exception as exc:
             db.rollback()
             return f"Error: {exc}"
         finally:
             db.close()
 
-    def delete_building(self, building_id: str) -> str:
+    def get_building_deletion_preview(self, building_id: str) -> Optional[Dict[str, Any]]:
+        """建物を消したら何が起きるかを数える (確認ダイアログ用。何も変えない)。
+
+        - ``item_count``: 建物に直接置かれたアイテムの数
+        - ``nested_item_count``: そのうちの入れ物の中に (入れ子の底まで) 入っているアイテムの数
+        - ``fixture_count`` / ``fixture_names``: 建物と一緒に必ず消える設置物
+        - ``conversation_message_count``: 消さずに残る、この部屋の会話の記録の数
+          (building_messages のうち event_type が無い行 = 発言。入退室などの
+          出来事の行は数えない)
+
+        建物が無ければ None。
+        """
+        db = self.SessionLocal()
+        try:
+            building = db.query(BuildingModel).filter_by(BUILDINGID=building_id).first()
+            if not building:
+                return None
+            direct_ids = [
+                row[0]
+                for row in db.query(ItemLocationModel.ITEM_ID)
+                .filter(
+                    ItemLocationModel.OWNER_KIND == "building",
+                    ItemLocationModel.OWNER_ID == building_id,
+                )
+                .all()
+            ]
+            nested_ids = _collect_nested_item_ids(db, direct_ids) if direct_ids else []
+            fixture_names = [
+                row[0]
+                for row in db.query(FixtureModel.NAME)
+                .filter(FixtureModel.BUILDING_ID == building_id)
+                .order_by(FixtureModel.NAME)
+                .all()
+            ]
+            conversation_count = (
+                db.query(func.count(BuildingMessageModel.id))
+                .filter(
+                    BuildingMessageModel.building_id == building_id,
+                    BuildingMessageModel.event_type.is_(None),
+                )
+                .scalar()
+            ) or 0
+            return {
+                "building_id": building_id,
+                "building_name": building.BUILDINGNAME,
+                "item_count": len(direct_ids),
+                "nested_item_count": len(nested_ids),
+                "fixture_count": len(fixture_names),
+                "fixture_names": fixture_names,
+                "conversation_message_count": int(conversation_count),
+            }
+        finally:
+            db.close()
+
+    def delete_building(self, building_id: str, item_policy: str = "keep") -> str:
+        """建物を消す。中の設置物は必ず、アイテムは ``item_policy`` に従って片付ける。
+
+        docs/issues/building_delete_leaves_contents.md の裁定:
+
+        - 設置物 (と、ぶら下がる観測設定・観測値・フィード購読・記事・既読
+          カーソル・スタンドの配信設定) は建物と一緒に消す。
+        - 建物に直接置かれたアイテムは、``keep`` (既定) なら置き場所の行だけを
+          消して「どこにも置かれていない」状態で残す (入れ物の中身は入れ物に
+          付いたまま)。``delete`` なら入れ物の中身ごと入れ子の底まで消す。
+        - 建物に結びつけたリアルタイムスペルは建物自身の設定なので消す。
+        - この部屋の会話の記録 (building_messages) は消さない (FLOW-15)。
+          ただし、会話を含めて消した部屋を指して残るもの全部を、特殊な ID
+          (``deleted_<ID>_<日時>``) へ付け替えて元の ID を空ける
+          (saiverse/building_retirement.py、issue の「3. ID の使い回し」)。
+          同じ ID の建物を後で作っても、消した部屋の会話や控えは戻らない。
+
+        以上と入退室の記録・建物の行・残る参照の付け替えを一つの transaction で
+        行う。建物の行を最後に消すのは、設置物の特定が建物の ID に依っているため。
+        付け替えの記録は commit の前に書き、書けなければ削除ごと止める。commit の
+        後に、ペルソナの記憶のファイルの印と部屋のフォルダを付け替える — ここが
+        済まなくても削除は済んでいるので「削除に失敗」とは返さない (記録が残り、
+        次の起動が続きを行う)。
+        """
+        if item_policy not in BUILDING_ITEM_POLICIES:
+            return (
+                f"Error: Unknown item policy '{item_policy}' "
+                f"(expected one of: {', '.join(BUILDING_ITEM_POLICIES)})."
+            )
         if self._is_seeded_entity(building_id):
             return "Error: Seeded buildings cannot be deleted."
+        from saiverse.building_retirement import plan_retirement
+        from saiverse.observer_manager import cancel_observer_jobs, delete_fixture_rows
+
+        observer_ids: List[str] = []
+        retirement = None
         db = self.SessionLocal()
         try:
             building = db.query(BuildingModel).filter_by(BUILDINGID=building_id).first()
             if not building:
                 return "Error: Building not found."
+            city_slug = (
+                db.query(CityModel.CITY_SLUG).filter_by(CITYID=building.CITYID).scalar()
+            )
+            if not city_slug:
+                return "Error: The city of this building was not found."
 
             # Check AI occupancy
             occupancy = (
@@ -530,19 +712,118 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     "user is currently in it."
                 )
 
-            db.query(BuildingOccupancyLog).filter_by(BUILDINGID=building_id).delete()
-            db.delete(building)
-            db.commit()
-            logging.info("Deleted building '%s'.", building.BUILDINGNAME)
-            return (
-                f"Building '{building.BUILDINGNAME}' deleted successfully. "
-                "A restart is required for changes to apply."
+            building_name = building.BUILDINGNAME
+
+            # --- アイテム ---
+            direct_item_ids = [
+                row[0]
+                for row in db.query(ItemLocationModel.ITEM_ID)
+                .filter(
+                    ItemLocationModel.OWNER_KIND == "building",
+                    ItemLocationModel.OWNER_ID == building_id,
+                )
+                .all()
+            ]
+            deleted_item_count = 0
+            if direct_item_ids:
+                if item_policy == "delete":
+                    nested_ids = _collect_nested_item_ids(db, direct_item_ids)
+                    all_ids = direct_item_ids + nested_ids
+                    _delete_item_rows(db, all_ids)
+                    deleted_item_count = len(all_ids)
+                else:
+                    # どこにも置かれていない状態 = 置き場所の行が無い
+                    # (update_item の world と同じ表し方)。入れ物の中身は入れ物に
+                    # 付いているので触らない。
+                    db.query(ItemLocationModel).filter(
+                        ItemLocationModel.OWNER_KIND == "building",
+                        ItemLocationModel.OWNER_ID == building_id,
+                    ).delete(synchronize_session=False)
+
+            # --- 設置物 (ぶら下がる行ごと) ---
+            fixture_ids = [
+                row[0]
+                for row in db.query(FixtureModel.FIXTURE_ID)
+                .filter(FixtureModel.BUILDING_ID == building_id)
+                .all()
+            ]
+            observer_ids = delete_fixture_rows(db, fixture_ids)
+
+            # --- 建物に結びつけたリアルタイムスペル ---
+            db.query(RealtimeSpellBindingModel).filter(
+                RealtimeSpellBindingModel.OWNER_KIND == "building",
+                RealtimeSpellBindingModel.OWNER_ID == building_id,
+            ).delete(synchronize_session=False)
+
+            db.query(BuildingOccupancyLog).filter_by(BUILDINGID=building_id).delete(
+                synchronize_session=False
             )
+            db.delete(building)
+            db.flush()
+
+            # --- 残るもの (会話など) を特殊な ID へ付け替えて、元の ID を空ける ---
+            # 記録に「予定」を書いてから (書けなければ例外で削除ごと巻き戻す)、
+            # 同じ transaction で参照を書き換える。
+            retirement = plan_retirement(
+                db,
+                saiverse_home=self.saiverse_home,
+                city_slug=city_slug,
+                building_id=building_id,
+                building_name=building_name,
+            )
+            retirement.rewrite_references(db)
+            db.commit()
         except Exception as exc:
             db.rollback()
+            if retirement is not None:
+                # 削除は確定していないので、元の ID を「使用中」のまま残さない
+                retirement.cancel()
+            logging.error(
+                "Failed to delete building '%s': %s", building_id, exc, exc_info=True
+            )
             return f"Error: {exc}"
         finally:
             db.close()
+
+        # 削除は commit 済み。ここから先 (予約の取り消し・アイテムの読み直し・
+        # 記憶の印とフォルダの付け替え) が倒れても「削除に失敗した」とは返さない
+        # — 返すと利用者は消えていないと思ってやり直し、「Building not found」を
+        # 見ることになる。
+        try:
+            cancel_observer_jobs(self.manager, observer_ids)
+            if direct_item_ids:
+                self.manager._load_items_from_db()
+        except Exception:
+            logging.error(
+                "Building '%s' was deleted, but refreshing observers/items afterwards failed.",
+                building_id, exc_info=True,
+            )
+        try:
+            retirement.finish(session_factory=self.SessionLocal, db_path=self.db_path)
+        except Exception:
+            logging.error(
+                "Building '%s' was deleted and its records were moved to '%s' in the "
+                "database, but rewriting persona memory marks / moving the folder failed. "
+                "The next startup continues it.",
+                building_id, retirement.new_id, exc_info=True,
+            )
+        logging.info(
+            "Deleted building '%s' (%s): items %s=%d (removed rows=%d), fixtures=%d, "
+            "observers=%d. Conversation records are kept under '%s'.",
+            building_name, building_id, item_policy, len(direct_item_ids),
+            deleted_item_count, len(fixture_ids), len(observer_ids), retirement.new_id,
+        )
+        parts = [f"Building '{building_name}' deleted successfully."]
+        if fixture_ids:
+            parts.append(f"{len(fixture_ids)} fixture(s) were deleted with it.")
+        if direct_item_ids:
+            if item_policy == "delete":
+                parts.append(f"{deleted_item_count} item(s) were deleted with it.")
+            else:
+                parts.append(
+                    f"{len(direct_item_ids)} item(s) were kept and are no longer placed anywhere."
+                )
+        return " ".join(parts)
 
     def update_building(
         self,
@@ -692,6 +973,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # 入口 Building の ID は entrance_<region_id> なので、ここが素通しだと
             # Building 側の契約ごと破れる — game_create_subregion (Ruler ペルソナが
             # 自分で SubRegion を作る口) は日本語名をそのまま渡してくる。
+            # 入口の建物に付けてよい ID かの規則 (create_building と共有。既存の建物・
+            # deleted_ の形・消した建物の付け替えが済んでいない元の ID を避ける)
+            building_ids = BuildingIdAvailability(db, self.saiverse_home)
+
             if region_id and region_id.strip():
                 region_id = region_id.strip()
                 if not is_valid_identifier(region_id):
@@ -703,13 +988,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     if not will_auto_create_entrance:
                         return False
                     # 派生する入口 Building の ID も一緒に予約する。Region 側が
-                    # 空いていても entrance_<rid> が埋まっていると、下の入口自動
+                    # 空いていても entrance_<rid> が使えないと、下の入口自動
                     # 作成がエラーで止まる — 連番を一つ進めれば避けられる衝突なので
                     # 候補選びの段階で見る (Region を消しても入口 Building が残る
-                    # 経路があり、連番の若い番号ほど当たりやすい)。
-                    return db.query(BuildingModel).filter_by(
-                        BUILDINGID=entrance_id_for(rid)
-                    ).first() is not None
+                    # 経路があり、連番の若い番号ほど当たりやすい。Region を消すと
+                    # 入口の建物も消え、その ID の付け替えが済むまでは使えない)。
+                    return not building_ids.is_usable(entrance_id_for(rid))
 
                 region_id = build_identifier(
                     name,
@@ -776,13 +1060,11 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 # ここへ来る衝突は「名前から導いた ID」か「カスタム ID」の場合。
                 # どちらもユーザーが選んだものなので、連番で黙って別 ID にせず
                 # エラーで返す (上の予約は、機械が選ぶ連番候補にだけ効く)。
-                # 大文字小文字を畳む理由は create_building の同じ検査と同じ
-                if (
-                    db.query(BuildingModel)
-                    .filter(func.lower(BuildingModel.BUILDINGID) == entrance_id.lower())
-                    .first()
-                ):
-                    return f"Error: A building with the ID '{entrance_id}' already exists."
+                # 入口の ID は Region ID から決まる (delete_region はこの形で
+                # 自動生成の入口かを判定する) ので、別の ID に逃がすこともできない。
+                reason = building_ids.unusable_reason(entrance_id)
+                if reason is not None:
+                    return building_ids.error(entrance_id, reason)
                 db.add(BuildingModel(
                     CITYID=city_id,
                     BUILDINGID=entrance_id,
@@ -1287,54 +1569,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 return f"Error: Item '{item.NAME}' is not a bag."
             bag_name = item.NAME
 
-            # 入れ子を幅優先でたどって、消す ITEM_ID を集める (循環していても止まる)
-            seen = {item_id}
-            to_delete: List[str] = []
-            frontier = [item_id]
-            while frontier:
-                next_frontier: List[str] = []
-                for chunk in _chunks(frontier):
-                    rows = (
-                        db.query(ItemLocationModel.ITEM_ID)
-                        .filter(
-                            ItemLocationModel.OWNER_KIND == "bag",
-                            ItemLocationModel.OWNER_ID.in_(chunk),
-                        )
-                        .all()
-                    )
-                    for (child_id,) in rows:
-                        if child_id in seen:
-                            continue
-                        seen.add(child_id)
-                        to_delete.append(child_id)
-                        next_frontier.append(child_id)
-                frontier = next_frontier
-
-            if to_delete:
-                for chunk in _chunks(to_delete):
-                    db.query(ItemLocationModel).filter(
-                        ItemLocationModel.ITEM_ID.in_(chunk)
-                    ).delete(synchronize_session=False)
-                for chunk in _chunks(to_delete):
-                    db.query(ItemModel).filter(
-                        ItemModel.ITEM_ID.in_(chunk)
-                    ).delete(synchronize_session=False)
-
-                # 壊れた循環 (この入れ物が、自分の中にある入れ物の中にも入っている) の
-                # ときは、入れ物自身の置き場所が消えた入れ物を指して残る。それを
-                # 「どこにも置かない」に戻して、辿れないアイテムにしない。
-                deleted_set = set(to_delete)
-                own_location = (
-                    db.query(ItemLocationModel)
-                    .filter(ItemLocationModel.ITEM_ID == item_id)
-                    .first()
-                )
-                if (
-                    own_location
-                    and own_location.OWNER_KIND == "bag"
-                    and own_location.OWNER_ID in deleted_set
-                ):
-                    db.delete(own_location)
+            to_delete = _delete_bag_contents_rows(db, item_id)
             db.commit()
         except Exception as exc:
             db.rollback()
