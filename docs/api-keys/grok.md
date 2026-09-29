@@ -24,14 +24,25 @@
 | Grok 4.20 Beta | $1.25/1M tokens | $0.20/1M tokens | $2.50/1M tokens |
 | Grok 4.5 | $2.00/1M tokens | $0.30/1M tokens | $6.00/1M tokens |
 | Grok 4.6 | $2.00/1M tokens | $0.50/1M tokens | $6.00/1M tokens |
+| Grok 4.7 | $2.00/1M tokens | $0.50/1M tokens | $6.00/1M tokens |
 
 どのモデルも、1回の入力が20万トークンを超えると単価が2倍になります。
+
+### 画像生成の料金（Grok Imagine Image 2.0）
+
+| 品質 | 解像度 1k | 解像度 2k |
+|------|-----------|-----------|
+| low | $0.04 / 枚 | $0.06 / 枚 |
+| medium | $0.06 / 枚 | $0.08 / 枚 |
+
+`generate_image` ツールの `grok_imagine_2` がこのモデルを使います。ツール側の品質が `low` なら low・1k、`medium` なら medium・1k、`high` 以上なら medium・2k で生成します。
 
 ## 4. 利用可能なモデル
 
 - **Grok 4.3**: 上の表で一番安いモデル（画像理解対応、チュートリアルの既定）
 - **Grok 4.20 Beta**: 推論あり / 推論なしの2種類（画像理解対応）
-- **Grok 4.5 / Grok 4.6**: 上位モデル（画像理解対応）
+- **Grok 4.5 / Grok 4.6 / Grok 4.7**: 上位モデル（画像理解対応）
+- **Grok Imagine Image 2.0**: 画像生成モデル（文章からの生成と、参照画像つきの編集に対応）
 
 以前同梱していた Grok 4 (0709) と Grok 4.1 Fast Reasoning は、xAI 側で Grok 4.3 に置き換えられていて、呼んだ名前と実際に答えるモデルが一致しなくなったため、2026年9月に同梱モデルから外しました。
 

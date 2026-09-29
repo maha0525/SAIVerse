@@ -42,9 +42,10 @@
               "nano_banana_2",
               "gpt_image_2_5_flare",
               "gpt_image_2_5_sunburst",
-              "grok_imagine"
+              "grok_imagine",
+              "grok_imagine_2"
             ],
-            "description": "使用するモデル。nano_banana_2(高速・高品質, Gemini 3.1 Flash), gpt_image_2_5_flare(最高品質かつ高速, OpenAI GPT Image 2.5 Flare), gpt_image_2_5_sunburst(参照画像を使う編集の精度が最高, OpenAI GPT Image 2.5 Sunburst), grok_imagine(多少NSFWな画像の生成が可能, xAI Grok Imagine Pro)。デフォルトはnano_banana_2"
+            "description": "使用するモデル。nano_banana_2(高速・高品質, Gemini 3.1 Flash), gpt_image_2_5_flare(最高品質かつ高速, OpenAI GPT Image 2.5 Flare), gpt_image_2_5_sunburst(参照画像を使う編集の精度が最高, OpenAI GPT Image 2.5 Sunburst), grok_imagine(多少NSFWな画像の生成が可能, xAI Grok Imagine Pro), grok_imagine_2(xAIの新しい画像モデル, Grok Imagine Image 2.0)。デフォルトはnano_banana_2"
           },
           "quality": {
             "type": "string",
