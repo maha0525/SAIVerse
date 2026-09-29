@@ -44,7 +44,6 @@ class TestImageGenerator(unittest.TestCase):
         temp_path.unlink(missing_ok=True)
 
     @patch.object(_mod, '_is_image_model_available', return_value=True)
-    @patch.object(_mod, '_generate_with_grok_imagine_2', side_effect=RuntimeError("No key"))
     @patch.object(_mod, '_generate_with_grok_imagine', side_effect=RuntimeError("No key"))
     @patch.object(_mod, '_generate_with_gpt_image_1_5', side_effect=RuntimeError("No key"))
     @patch.object(_mod, '_generate_with_gpt_image_2', side_effect=RuntimeError("No key"))
@@ -53,7 +52,7 @@ class TestImageGenerator(unittest.TestCase):
     @patch.object(_mod, '_generate_with_nano_banana_pro', side_effect=RuntimeError("No candidates"))
     @patch.object(_mod, '_generate_with_nano_banana_2', side_effect=RuntimeError("No candidates"))
     def test_generate_image_error_returns_error_text(
-        self, mock_nb2, mock_nbp, mock_sunburst, mock_flare, mock_gpt2, mock_gpt15, mock_grok, mock_grok2, mock_avail
+        self, mock_nb2, mock_nbp, mock_sunburst, mock_flare, mock_gpt2, mock_gpt15, mock_grok, mock_avail
     ):
         # When all backends fail, should return error text without raising
         with patch('tools.context.get_active_persona_id', return_value=None), \
@@ -133,45 +132,28 @@ class TestImageGenerator(unittest.TestCase):
         mock_gen.assert_called_once()
         temp_path.unlink(missing_ok=True)
 
-    @patch.object(_mod, '_generate_with_grok')
-    def test_grok_wrappers_pass_xai_model_id(self, mock_common):
-        mock_common.return_value = (b'imgdata', 'image/png')
-
-        cases = [
-            (_mod._generate_with_grok_imagine, "grok-imagine-image-pro"),
-            (_mod._generate_with_grok_imagine_2, "grok-imagine-image-2.0"),
-        ]
-        for wrapper, expected_model in cases:
-            with self.subTest(model=expected_model):
-                mock_common.reset_mock()
-                wrapper('p')
-                mock_common.assert_called_once()
-                self.assertEqual(mock_common.call_args.args[0], expected_model)
-
     def test_xai_quality_params(self):
         # Imagine 2.0 は (quality, resolution) の組で課金され、quality は low/medium のみ。
-        # 最上位のツール品質は medium@2k に寄せる。Pro は従来どおり resolution だけ。
+        # 最上位のツール品質は medium@2k に寄せる。
         cases = [
-            ("grok-imagine-image-2.0", "low", {"quality": "low", "resolution": "1k"}),
-            ("grok-imagine-image-2.0", "medium", {"quality": "medium", "resolution": "1k"}),
-            ("grok-imagine-image-2.0", "high", {"quality": "medium", "resolution": "2k"}),
-            ("grok-imagine-image-2.0", "auto", {"quality": "medium", "resolution": "2k"}),
-            ("grok-imagine-image-2.0", "max", {"quality": "medium", "resolution": "2k"}),
-            ("grok-imagine-image-pro", "low", {"resolution": "1k"}),
-            ("grok-imagine-image-pro", "high", {"resolution": "2k"}),
+            ("low", {"quality": "low", "resolution": "1k"}),
+            ("medium", {"quality": "medium", "resolution": "1k"}),
+            ("high", {"quality": "medium", "resolution": "2k"}),
+            ("auto", {"quality": "medium", "resolution": "2k"}),
+            ("max", {"quality": "medium", "resolution": "2k"}),
         ]
-        for xai_model, requested, expected in cases:
-            with self.subTest(model=xai_model, quality=requested):
-                self.assertEqual(_mod._xai_quality_params(xai_model, requested), expected)
+        for requested, expected in cases:
+            with self.subTest(quality=requested):
+                self.assertEqual(_mod._xai_quality_params(requested), expected)
 
     @patch.dict(os.environ, {"XAI_API_KEY": "test-key"})
     @patch('xai_sdk.Client')
-    def test_grok_imagine_2_request_shape(self, mock_client):
+    def test_grok_imagine_request_shape(self, mock_client):
         response = MagicMock()
         response.data = base64.b64encode(b'img').decode()
         mock_client.return_value.image.sample.return_value = response
 
-        image_bytes, mime = _mod._generate_with_grok_imagine_2('p', '16:9', 'medium')
+        image_bytes, mime = _mod._generate_with_grok_imagine('p', '16:9', 'medium')
 
         self.assertEqual((image_bytes, mime), (b'img', 'image/png'))
         kwargs = mock_client.return_value.image.sample.call_args.kwargs
@@ -201,14 +183,14 @@ class TestImageGenerator(unittest.TestCase):
         response.data = base64.b64encode(jpeg).decode()
         mock_client.return_value.image.sample.return_value = response
 
-        _, mime = _mod._generate_with_grok_imagine_2('p')
+        _, mime = _mod._generate_with_grok_imagine('p')
 
         self.assertEqual(mime, 'image/jpeg')
 
     @patch.object(_mod, '_is_image_model_available', return_value=True)
     @patch.object(_mod, 'store_image_bytes')
-    @patch.object(_mod, '_generate_with_grok_imagine_2')
-    def test_generate_image_grok_imagine_2_dispatch(self, mock_gen, mock_store, mock_avail):
+    @patch.object(_mod, '_generate_with_grok_imagine')
+    def test_generate_image_grok_imagine_dispatch(self, mock_gen, mock_store, mock_avail):
         mock_gen.return_value = (b'imgdata', 'image/png')
 
         with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
@@ -221,16 +203,13 @@ class TestImageGenerator(unittest.TestCase):
              patch('tools.context.get_active_persona_id', return_value=None), \
              patch('tools.context.get_active_manager', return_value=None):
             text, info, path, metadata, item_id = generate_image(
-                'a cat', model='grok_imagine_2'
+                'a cat', model='grok_imagine'
             )
 
-        self.assertIn('grok_imagine_2', text)
+        self.assertIn('grok_imagine', text)
         self.assertEqual(Path(path), temp_path)
         mock_gen.assert_called_once()
         temp_path.unlink(missing_ok=True)
-
-    def test_grok_imagine_2_needs_xai_key(self):
-        self.assertEqual(_mod._get_model_api_key_env('grok_imagine_2'), 'XAI_API_KEY')
 
     def test_tool_registration(self):
         from tools import TOOL_REGISTRY

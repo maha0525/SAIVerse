@@ -35,7 +35,7 @@
 | low | $0.04 / 枚 | $0.06 / 枚 |
 | medium | $0.06 / 枚 | $0.08 / 枚 |
 
-`generate_image` ツールの `grok_imagine_2` がこのモデルを使います。ツール側の品質が `low` なら low・1k、`medium` なら medium・1k、`high` 以上なら medium・2k で生成します。
+`generate_image` ツールの `grok_imagine` がこのモデルを使います（以前は Grok Imagine Pro でした）。ツール側の品質が `low` なら low・1k、`medium` なら medium・1k、`high` 以上なら medium・2k で生成します。
 
 ## 4. 利用可能なモデル
 
