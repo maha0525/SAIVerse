@@ -511,6 +511,28 @@
     color: #fff;
 }
 
+/* 中身のある入れ物を削除するときの「中身をどうするか」の選択欄 (操作列と入れ替わる) */
+.deleteChoice {
+    margin-top: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: rgba(220, 38, 38, 0.08);
+    border: 1px solid #7f1d1d;
+    border-radius: 8px;
+}
+
+.deleteChoiceText {
+    margin: 0;
+    font-size: 0.9rem;
+    color: #e5e7eb;
+    line-height: 1.5;
+}
+
+.deleteChoiceNote {
+    margin: 0.25rem 0 0;
+    font-size: 0.8rem;
+    color: #9ca3af;
+}
+
 .editTextarea {
     width: 100%;
     min-height: 400px;
@@ -774,6 +796,19 @@
     background: #dc2626;
     border-color: #b91c1c;
     color: #fff;
+}
+
+:global([data-theme="light"]) .deleteChoice {
+    background: #fef2f2;
+    border-color: #fca5a5;
+}
+
+:global([data-theme="light"]) .deleteChoiceText {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .deleteChoiceNote {
+    color: #64748b;
 }
 
 :global([data-theme="light"]) .editTextarea {

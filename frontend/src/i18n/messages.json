@@ -2675,6 +2675,34 @@
     "ja": "削除に失敗しました",
     "en": "Failed to delete"
   },
+  "components.ItemModal.text042": {
+    "ja": "「{p1}」には {p2} 個のアイテムが入っています。",
+    "en": "\"{p1}\" contains {p2} item(s)."
+  },
+  "components.ItemModal.text043": {
+    "ja": "中の入れ物に入っているものも含めると {p1} 個です。",
+    "en": "{p1} item(s) in total, including those inside nested bags."
+  },
+  "components.ItemModal.text044": {
+    "ja": "中身を出して削除",
+    "en": "Take out contents and delete"
+  },
+  "components.ItemModal.text045": {
+    "ja": "「中身を出して削除」では、中身はこのアイテムが置かれていた場所に出されます。",
+    "en": "With \"Take out contents and delete\", the contents are placed where this item was."
+  },
+  "components.ItemModal.text046": {
+    "ja": "中身ごと削除",
+    "en": "Delete with contents"
+  },
+  "components.ItemModal.text047": {
+    "ja": "やめる",
+    "en": "Cancel"
+  },
+  "components.ItemModal.text048": {
+    "ja": "中身は削除しましたが、入れ物の削除に失敗しました: {p1}",
+    "en": "The contents were deleted, but deleting the bag failed: {p1}"
+  },
   "components.MCPSection.text001": {
     "ja": "必要なランタイムが見つからない",
     "en": "Required runtime not found"

@@ -623,7 +623,13 @@ def get_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
 
 @router.delete("/items/{item_id}")
 def delete_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """アイテムを消す。入れ物なら、直接の中身は入れ物があった場所へ出される。"""
     return _check_result(manager.delete_item(item_id))
+
+@router.delete("/items/{item_id}/contents")
+def delete_bag_contents(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """入れ物の中身を、入れ子の中身まで含めてすべて消す (入れ物自身は残る)。"""
+    return _check_result(manager.delete_bag_contents(item_id))
 
 
 # --- Playbook ---

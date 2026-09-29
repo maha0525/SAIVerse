@@ -63,6 +63,12 @@ class _Unset:
 UNSET = _Unset()
 
 
+def _chunks(values: List[str], size: int = 500):
+    """SQL の IN 句に渡す値を、SQLite の変数上限に届かない大きさに分ける。"""
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
+
+
 class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     """Administrative operations for world editing and CRUD."""
 
@@ -1174,15 +1180,80 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         return f"Item '{name}' updated successfully."
 
     def delete_item(self, item_id: str) -> str:
+        """アイテムを 1 個消す。入れ物 (bag) なら、直接の中身を入れ物があった場所へ出してから消す。
+
+        中身を残したまま入れ物だけ消すと、中身の置き場所は「消えた入れ物の中」を
+        指したまま残り、どの部屋にも持ち物にも出てこないアイテムになる。それを
+        作らないために、直接の中身 (入れ物の中の入れ物は、その中身ごと) を
+        入れ物の置き場所 (部屋 / ペルソナの持ち物 / 外側の入れ物 / どこにも置かない)
+        へ移す。移動と削除は一つのトランザクションで行い、半分だけ出た状態を残さない。
+
+        中身も一緒に消したいときは、先に ``delete_bag_contents`` を呼ぶ。
+        """
         db = self.SessionLocal()
         try:
             item = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).first()
             if not item:
                 return f"Error: Item '{item_id}' not found."
             item_name = item.NAME
+
+            own_location = (
+                db.query(ItemLocationModel)
+                .filter(ItemLocationModel.ITEM_ID == item_id)
+                .first()
+            )
+            dest_kind = own_location.OWNER_KIND if own_location else "world"
+            dest_id = own_location.OWNER_ID if own_location else ""
+            # TYPE を問わず「この ITEM_ID を入れ物にしている行」を中身とみなす
+            # (world editor で bag から別の TYPE に変えられた入れ物の中身も拾う)。
+            children = sorted(
+                db.query(ItemLocationModel)
+                .filter(
+                    ItemLocationModel.OWNER_KIND == "bag",
+                    ItemLocationModel.OWNER_ID == item_id,
+                )
+                .all(),
+                key=lambda r: (r.SLOT_NUMBER is None, r.SLOT_NUMBER or 0, r.LOCATION_ID),
+            )
+
+            # 先に入れ物自身の置き場所を消して、そのスロットを中身が使えるようにする
+            # (クエリの delete は即座に SQL を出すので、下の空きスロット計算に反映される)。
             db.query(ItemLocationModel).filter(ItemLocationModel.ITEM_ID == item_id).delete(
                 synchronize_session=False
             )
+
+            if children:
+                if dest_kind in {"building", "persona", "bag"}:
+                    dest_rows = (
+                        db.query(ItemLocationModel)
+                        .filter(
+                            ItemLocationModel.OWNER_KIND == dest_kind,
+                            ItemLocationModel.OWNER_ID == dest_id,
+                        )
+                        .all()
+                    )
+                    occupied = {r.SLOT_NUMBER for r in dest_rows if r.SLOT_NUMBER is not None}
+                    for child in children:
+                        if dest_kind == "bag" and child.ITEM_ID == dest_id:
+                            # 壊れた循環 (外側の入れ物がこの入れ物の中にもある) のときだけ、
+                            # 自分自身の中に入れる形になるので、どこにも置かない扱いにする
+                            db.delete(child)
+                            continue
+                        slot = 1
+                        while slot in occupied:
+                            slot += 1
+                        occupied.add(slot)
+                        child.OWNER_KIND = dest_kind
+                        child.OWNER_ID = dest_id
+                        child.SLOT_NUMBER = slot
+                else:
+                    # 入れ物がどこにも置かれていなかった: 中身も「どこにも置かない」
+                    # (= 置き場所の行が無い。update_item の world と同じ表し方)
+                    for child in children:
+                        db.delete(child)
+                # 置き場所の行の変更を、アイテム本体の削除より先に確定させる
+                db.flush()
+
             db.delete(item)
             db.commit()
         except Exception as exc:
@@ -1193,7 +1264,89 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             db.close()
 
         self.manager._load_items_from_db()
+        if children:
+            return (
+                f"Item '{item_name}' deleted successfully. "
+                f"{len(children)} item(s) inside were moved out to where it was."
+            )
         return f"Item '{item_name}' deleted successfully."
+
+    def delete_bag_contents(self, item_id: str) -> str:
+        """入れ物 (bag) の中身を、入れ子の入れ物の中身まで含めてすべて消す。入れ物自身は残す。
+
+        「入れ物を中身ごと消す」は、これを呼んでから ``delete_item`` を呼ぶ。
+        消すのは delete_item と同じ範囲 (置き場所の行とアイテムの行) で、
+        アイテムが参照しているファイルは消さない。一つのトランザクションで行う。
+        """
+        db = self.SessionLocal()
+        try:
+            item = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).first()
+            if not item:
+                return f"Error: Item '{item_id}' not found."
+            if (item.TYPE or "").lower() != "bag":
+                return f"Error: Item '{item.NAME}' is not a bag."
+            bag_name = item.NAME
+
+            # 入れ子を幅優先でたどって、消す ITEM_ID を集める (循環していても止まる)
+            seen = {item_id}
+            to_delete: List[str] = []
+            frontier = [item_id]
+            while frontier:
+                next_frontier: List[str] = []
+                for chunk in _chunks(frontier):
+                    rows = (
+                        db.query(ItemLocationModel.ITEM_ID)
+                        .filter(
+                            ItemLocationModel.OWNER_KIND == "bag",
+                            ItemLocationModel.OWNER_ID.in_(chunk),
+                        )
+                        .all()
+                    )
+                    for (child_id,) in rows:
+                        if child_id in seen:
+                            continue
+                        seen.add(child_id)
+                        to_delete.append(child_id)
+                        next_frontier.append(child_id)
+                frontier = next_frontier
+
+            if to_delete:
+                for chunk in _chunks(to_delete):
+                    db.query(ItemLocationModel).filter(
+                        ItemLocationModel.ITEM_ID.in_(chunk)
+                    ).delete(synchronize_session=False)
+                for chunk in _chunks(to_delete):
+                    db.query(ItemModel).filter(
+                        ItemModel.ITEM_ID.in_(chunk)
+                    ).delete(synchronize_session=False)
+
+                # 壊れた循環 (この入れ物が、自分の中にある入れ物の中にも入っている) の
+                # ときは、入れ物自身の置き場所が消えた入れ物を指して残る。それを
+                # 「どこにも置かない」に戻して、辿れないアイテムにしない。
+                deleted_set = set(to_delete)
+                own_location = (
+                    db.query(ItemLocationModel)
+                    .filter(ItemLocationModel.ITEM_ID == item_id)
+                    .first()
+                )
+                if (
+                    own_location
+                    and own_location.OWNER_KIND == "bag"
+                    and own_location.OWNER_ID in deleted_set
+                ):
+                    db.delete(own_location)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logging.error(
+                "Failed to delete contents of bag '%s': %s", item_id, exc, exc_info=True
+            )
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
+        self.manager._load_items_from_db()
+        return f"Deleted {len(to_delete)} item(s) from bag '{bag_name}'."
 
     # --- AI management ---
 

@@ -2184,6 +2184,9 @@ class SAIVerseManager(
     def delete_item(self, item_id: str) -> str:
         return self.admin.delete_item(item_id)
 
+    def delete_bag_contents(self, item_id: str) -> str:
+        return self.admin.delete_bag_contents(item_id)
+
     # --- Playbook Management ---
 
     def get_playbook_details(self, playbook_id: int) -> Optional[Dict[str, Any]]:

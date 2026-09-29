@@ -43,6 +43,10 @@ interface RoomItem {
 /** まとめ操作のビュー。null = 通常の中身表示。 */
 type BulkMode = 'stow' | 'takeout' | null;
 
+/** 入れ物の中身を、入れ子の入れ物の中身まで含めて数える。 */
+const countAllContents = (list: BagContentItem[]): number =>
+    list.reduce((n, ci) => n + 1 + countAllContents(ci.contained_items || []), 0);
+
 interface Building {
     id: string;
     name: string;
@@ -98,6 +102,10 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
     const [isLoadingBuildings, setIsLoadingBuildings] = useState(false);
     const [isSavingMeta, setIsSavingMeta] = useState(false);
     const [isDeleting, setIsDeleting] = useState(false);
+    // 中身のある入れ物を削除するときの「中身をどうするか」の選択欄
+    const [showBagDeleteChoice, setShowBagDeleteChoice] = useState(false);
+    // 実行中の削除が「中身ごと削除」か (ボタンの「削除中...」表示の出し分け用)
+    const [deletingWithContents, setDeletingWithContents] = useState(false);
     const isMetaBusy = isSavingMeta || isDeleting;
 
     // Bag contents
@@ -209,6 +217,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
         setRoomItems([]);
         setSelectedIds(new Set());
         setBulkError(null);
+        setShowBagDeleteChoice(false);
         if (isOpen && item) {
             loadItemDetails(item.id);
             loadBuildings();
@@ -283,6 +292,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
             loadBuildings(),
             loadBagItemsInBuilding(),
         ]);
+        setShowBagDeleteChoice(false);
         setIsMetaEditing(true);
         setIsEditing(false);
     };
@@ -294,6 +304,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
             setEditOwnerKind(itemDetails.OWNER_KIND || 'world');
             setEditOwnerId(itemDetails.OWNER_ID || '');
         }
+        setShowBagDeleteChoice(false);
         setIsMetaEditing(false);
     };
 
@@ -345,28 +356,54 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
         }
     };
 
-    // 削除 (設置物の FixtureMetaEditor と同じ手順: 確認 → DELETE → 親へ通知)
+    // 削除 (設置物の FixtureMetaEditor と同じ手順: 確認 → DELETE → 親へ通知)。
+    // 中身のある入れ物だけは確認ダイアログの代わりに「中身をどうするか」の選択欄を出す。
     const handleDelete = async () => {
         if (!item) return;
+        if (item.type === 'bag' && bagContents.length > 0) {
+            setError(null);
+            setShowBagDeleteChoice(true);
+            return;
+        }
         if (!window.confirm(uiText("components.ItemModal.text040"))) return;
+        await runDelete(false);
+    };
+
+    /** DELETE を 1 本送る。失敗は manager の "Error: ..." を _check_result が 400 に写す。 */
+    const requestDelete = async (path: string) => {
+        const res = await apiFetch(path, { method: 'DELETE' });
+        if (!res.ok) {
+            const data = await res.json().catch(() => null);
+            throw new Error(
+                data && typeof data.detail === 'string'
+                    ? data.detail
+                    : uiText("components.ItemModal.text041")
+            );
+        }
+    };
+
+    /**
+     * アイテムを削除する。
+     * withContents=false: 入れ物なら中身はサーバー側で入れ物があった場所へ出される。
+     * withContents=true: 中身をすべて消してから入れ物を消す (「中身ごと削除」)。
+     */
+    const runDelete = async (withContents: boolean) => {
+        if (!item) return;
 
         setIsDeleting(true);
+        setDeletingWithContents(withContents);
         setError(null);
 
+        const itemPath = `/api/world/items/${encodeURIComponent(item.id)}`;
+        let contentsDeleted = false;
         try {
-            // 失敗は manager.delete_item の "Error: ..." を _check_result が 400 に写す
-            const res = await apiFetch(`/api/world/items/${encodeURIComponent(item.id)}`, {
-                method: 'DELETE',
-            });
-            if (!res.ok) {
-                const data = await res.json().catch(() => null);
-                throw new Error(
-                    data && typeof data.detail === 'string'
-                        ? data.detail
-                        : uiText("components.ItemModal.text041")
-                );
+            if (withContents) {
+                await requestDelete(`${itemPath}/contents`);
+                contentsDeleted = true;
             }
+            await requestDelete(itemPath);
 
+            setShowBagDeleteChoice(false);
             setIsMetaEditing(false);
             if (onItemUpdated) {
                 // 親 (RightSidebar) は再取得してモーダルを閉じる
@@ -379,7 +416,16 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
             }
         } catch (err) {
             console.error(err);
-            setError(err instanceof Error ? err.message : uiText("components.ItemModal.text041"));
+            const reason = err instanceof Error ? err.message : uiText("components.ItemModal.text041");
+            if (contentsDeleted) {
+                // 中身はもう消えていて、入れ物だけが残っている。その姿を画面に反映する
+                setShowBagDeleteChoice(false);
+                await loadBagContents(item.id);
+                if (onWorldChanged) onWorldChanged();
+                setError(uiText("components.ItemModal.text048", { p1: reason }));
+            } else {
+                setError(reason);
+            }
         } finally {
             setIsDeleting(false);
         }
@@ -540,6 +586,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
     // Display name (use edited name if meta editing, otherwise item name)
     const displayName = isMetaEditing ? editName : (itemDetails?.NAME || item.name);
     const displayDescription = isMetaEditing ? editDescription : (itemDetails?.DESCRIPTION || item.description);
+    const totalBagContents = countAllContents(bagContents);
 
     return (
         <ModalOverlay onClose={onClose} className={styles.overlay}>
@@ -624,6 +671,46 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                     )}
                                 </select>
                             </div>
+                            {showBagDeleteChoice ? (
+                                <div className={styles.deleteChoice}>
+                                    <p data-i18n="components.ItemModal.text042 components.ItemModal.text043" className={styles.deleteChoiceText}>
+                                        {uiText("components.ItemModal.text042", { p1: itemDetails?.NAME || item.name, p2: bagContents.length })}
+                                        {totalBagContents > bagContents.length && (
+                                            <> {uiText("components.ItemModal.text043", { p1: totalBagContents })}</>
+                                        )}
+                                    </p>
+                                    <p data-i18n="components.ItemModal.text045" className={styles.deleteChoiceNote}>
+                                        {uiText("components.ItemModal.text045")}
+                                    </p>
+                                    <div className={styles.metaEditActions}>
+                                        {/* 取り返しのつかない方は左端に離して置く (通常の削除ボタンと同じ配置) */}
+                                        <button
+                                            className={`${styles.toggleBtn} ${styles.deleteBtn}`}
+                                            onClick={() => runDelete(true)}
+                                            disabled={isMetaBusy}
+                                        >
+                                            <Trash2 size={16} />
+                                            <span data-i18n="components.ItemModal.text038 components.ItemModal.text046">{isDeleting && deletingWithContents ? uiText("components.ItemModal.text038") : uiText("components.ItemModal.text046")}</span>
+                                        </button>
+                                        <button
+                                            className={styles.toggleBtn}
+                                            onClick={() => runDelete(false)}
+                                            disabled={isMetaBusy}
+                                        >
+                                            <PackageOpen size={16} />
+                                            <span data-i18n="components.ItemModal.text038 components.ItemModal.text044">{isDeleting && !deletingWithContents ? uiText("components.ItemModal.text038") : uiText("components.ItemModal.text044")}</span>
+                                        </button>
+                                        <button
+                                            className={`${styles.toggleBtn} ${styles.cancelBtn}`}
+                                            onClick={() => setShowBagDeleteChoice(false)}
+                                            disabled={isMetaBusy}
+                                        >
+                                            <XCircle size={16} />
+                                            <span data-i18n="components.ItemModal.text047">{uiText("components.ItemModal.text047")}</span>
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : (
                             <div className={styles.metaEditActions}>
                                 {/* 削除は保存・キャンセルから離して左端に置く (押し間違い防止) */}
                                 <button
@@ -651,6 +738,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                     <span data-i18n="components.ItemModal.text012">{uiText("components.ItemModal.text012")}</span>
                                 </button>
                             </div>
+                            )}
                         </div>
                         {error && <div className={styles.error}>{error}</div>}
                     </div>
