@@ -16,7 +16,8 @@ To use function tools, use /v1/responses or set reasoning_effort to 'none'.
 
 ## 確認した事実 (2026-09-30、実機。隔離した単体スクリプトで、モデル設定 → ファクトリ → OpenAIClient → API の経路)
 
-- Sol / Luna (今回追加) と Astra (既存) の 3 本すべてで同じ 400。UI の既定エフォート (Sol・Luna は medium、Astra は high) が付いたまま送られるため。
+- Sol / Luna / 6.1 Sol (今回追加) と Astra (既存) の 4 本すべてで同じ 400。UI の既定エフォート (Sol・Luna・6.1 Sol は medium、Astra は high) が付いたまま送られるため。
+- 6.1 Sol は推論エフォートの `none` を持たない (low / medium / high / xhigh / max のみ、公式の仕様ページ)。次の「直す方向」の 1 (エフォートを `none` にしてツールを付ける) は 6.1 Sol では取れず、ツールを使うなら Responses API しかない。
 - 同じ 3 本で、ツールなしの通常応答・構造化出力・ストリーミングは成功する。
 - OpenAI 公式のモデル一覧ページにも同じ制約が書いてある (Chat Completions は推論エフォート `none` のときだけ関数ツール可、Responses API は全エフォートで可)。
 - ネイティブのツール呼び出しを宣言している LLM ノード (`available_tools`) は、現行の組み込みプレイブックには無い (`builtin_data/playbooks/archive/` の 4 本だけ)。ペルソナの道具はスペルで動くので、通常の会話・自律行動・スルース・記憶整理はツールなしで呼ばれ、この制約に当たらない。

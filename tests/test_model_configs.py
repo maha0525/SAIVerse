@@ -221,6 +221,7 @@ class TestSeptember2026ModelCatalog(unittest.TestCase):
             "claude-opus-5.5": ("claude-opus-5-5", 1_000_000, 4, 20),
             "gpt-6-sol": ("gpt-6-sol", 272_000, 2, 10),
             "gpt-6-luna": ("gpt-6-luna", 272_000, 0.1, 0.5),
+            "gpt-6.1-sol": ("gpt-6.1-sol", 272_000, 2, 10),
             "grok-4.7": ("grok-4.7", 500_000, 2, 6),
         }
 
@@ -238,6 +239,7 @@ class TestSeptember2026ModelCatalog(unittest.TestCase):
             "claude-opus-5.5": 0.2,
             "gpt-6-sol": 0.2,
             "gpt-6-luna": 0.01,
+            "gpt-6.1-sol": 0.1,
             "grok-4.7": 0.5,
         }
         for config_key, rate in cached.items():
@@ -272,10 +274,16 @@ class TestSeptember2026ModelCatalog(unittest.TestCase):
                 self.assertEqual(config["parameters"]["thinking_effort"]["default"], effort)
 
     def test_gpt_6_default_reasoning_is_medium(self):
-        for config_key in ("gpt-6-sol", "gpt-6-luna"):
+        for config_key in ("gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"):
             with self.subTest(model=config_key):
                 config = model_configs.get_model_config(config_key)
                 self.assertEqual(config["parameters"]["reasoning_effort"]["default"], "medium")
+
+    def test_gpt_6_1_sol_has_no_reasoning_off_switch(self):
+        # 6.1 Sol は none / minimal を受け付けない。選択肢に置くと 400 になる。
+        options = model_configs.get_model_config("gpt-6.1-sol")["parameters"]["reasoning_effort"]["options"]
+        self.assertNotIn("none", options)
+        self.assertNotIn("minimal", options)
 
     def test_grok_4_7_shares_grok_4_6_tiered_pricing(self):
         pricing = model_configs.get_model_pricing("grok-4.7")
