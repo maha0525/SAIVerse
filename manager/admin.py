@@ -40,9 +40,8 @@ from manager.ids import (
 )
 from manager.state import CoreState
 from saiverse.building_retirement import (
-    TOMBSTONE_PREFIX,
+    BuildingIdAvailability,
     is_tombstone_id,
-    pending_retirement_ids,
 )
 from scripts.import_playbook import infer_scope_from_path
 from builtin_data.tools.save_playbook import save_playbook
@@ -527,17 +526,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
             city = db.query(CityModel).filter_by(CITYID=city_id).first()
 
-            # 消した建物の ID のうち、残る会話などを特殊な ID へ移す作業がまだ
-            # 済んでいないもの (saiverse/building_retirement.py)。済むまでは使わない
-            # — 済む前に同じ ID の建物を作ると、ペルソナの記憶の中の古い印が
-            # 新しい建物を指す。済めば空くので、番号は歯抜けにならない。
-            pending_retired = pending_retirement_ids(self.saiverse_home)
-
-            def id_taken(cid: str) -> bool:
-                return (
-                    db.query(BuildingModel).filter_by(BUILDINGID=cid).first() is not None
-                    or cid.lower() in pending_retired
-                )
+            # 新しい建物に付けてよい ID かの規則 (saiverse/building_retirement.py、
+            # 建物を作る口の全部で共有): 大文字小文字を畳んで既存の建物と重ならない
+            # (ID はフォルダ名 ~/.saiverse/cities/<city>/buildings/<id>/ になり、
+            # Windows のファイルシステムは大文字小文字を区別しない)、消した建物の
+            # 記録の頭 deleted_ で始まらない、消した建物の元の ID で残る会話などを
+            # 特殊な ID へ移す作業が済んでいないものではない (済む前に同じ ID の
+            # 建物を作ると、ペルソナの記憶の中の古い印が新しい建物を指す。済めば
+            # 空くので、番号は歯抜けにならない)。
+            ids = BuildingIdAvailability(db, self.saiverse_home)
 
             # Use custom ID if provided, otherwise generate. Either way the ID
             # must satisfy the charset contract (manager/ids.py) — it goes
@@ -546,46 +543,27 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 building_id = building_id.strip()
                 if not is_valid_identifier(building_id):
                     return charset_error("Building ID", building_id)
-                if is_tombstone_id(building_id):
-                    return (
-                        f"Error: Building IDs starting with '{TOMBSTONE_PREFIX}' are reserved "
-                        "for the records of deleted buildings (got: "
-                        f"'{building_id}')."
-                    )
             else:
                 # 日本語名など slug が空になる名前は building_<連番>_<city> へ
-                # フォールバック (issue 論点 1: 読み変換は導入せず、まず口を塞ぐ)
+                # フォールバック (issue 論点 1: 読み変換は導入せず、まず口を塞ぐ)。
+                # 連番は機械が選ぶ候補なので、使えない番号は飛ばす。
                 building_id = build_identifier(
-                    name, city.CITY_SLUG, stem="building", exists=id_taken,
+                    name, city.CITY_SLUG, stem="building",
+                    exists=lambda cid: not ids.is_usable(cid),
                 )
                 if is_tombstone_id(building_id):
                     # 名前から作った ID が消した建物の記録の頭 (deleted_) で始まる
                     # (名前が「Deleted ...」など)。その形は使わず、連番の形にする。
                     building_id = build_identifier(
-                        "", city.CITY_SLUG, stem="building", exists=id_taken,
+                        "", city.CITY_SLUG, stem="building",
+                        exists=lambda cid: not ids.is_usable(cid),
                     )
 
-            # 大文字小文字を畳んで検査する: Building ID はフォルダ名
-            # (~/.saiverse/cities/<city>/buildings/<id>/) になり、Windows の
-            # ファイルシステムは大文字小文字を区別しないため、'Cafe' と 'cafe'
-            # を別 Building として通すとログの保存先が同じになる
-            if (
-                db.query(BuildingModel)
-                .filter(func.lower(BuildingModel.BUILDINGID) == building_id.lower())
-                .first()
-            ):
-                return (
-                    f"Error: A building with the ID '{building_id}' "
-                    "already exists (IDs are compared case-insensitively)."
-                )
-            if building_id.lower() in pending_retired:
-                # 利用者が選んだ ID (手で付けた ID・名前から作った ID)。連番で黙って
-                # 別の ID にせず、理由を返す。
-                return (
-                    f"Error: The ID '{building_id}' belonged to a deleted building, and "
-                    "setting its remaining records aside has not finished yet. Restart "
-                    "SAIVerse to finish it, then try again."
-                )
+            # 利用者が選んだ ID (手で付けた ID・名前から作った ID) が使えなければ、
+            # 連番で黙って別の ID にせず、理由を返す。
+            reason = ids.unusable_reason(building_id)
+            if reason is not None:
+                return ids.error(building_id, reason)
 
             new_building = BuildingModel(
                 CITYID=city_id,
@@ -995,6 +973,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # 入口 Building の ID は entrance_<region_id> なので、ここが素通しだと
             # Building 側の契約ごと破れる — game_create_subregion (Ruler ペルソナが
             # 自分で SubRegion を作る口) は日本語名をそのまま渡してくる。
+            # 入口の建物に付けてよい ID かの規則 (create_building と共有。既存の建物・
+            # deleted_ の形・消した建物の付け替えが済んでいない元の ID を避ける)
+            building_ids = BuildingIdAvailability(db, self.saiverse_home)
+
             if region_id and region_id.strip():
                 region_id = region_id.strip()
                 if not is_valid_identifier(region_id):
@@ -1006,13 +988,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     if not will_auto_create_entrance:
                         return False
                     # 派生する入口 Building の ID も一緒に予約する。Region 側が
-                    # 空いていても entrance_<rid> が埋まっていると、下の入口自動
+                    # 空いていても entrance_<rid> が使えないと、下の入口自動
                     # 作成がエラーで止まる — 連番を一つ進めれば避けられる衝突なので
                     # 候補選びの段階で見る (Region を消しても入口 Building が残る
-                    # 経路があり、連番の若い番号ほど当たりやすい)。
-                    return db.query(BuildingModel).filter_by(
-                        BUILDINGID=entrance_id_for(rid)
-                    ).first() is not None
+                    # 経路があり、連番の若い番号ほど当たりやすい。Region を消すと
+                    # 入口の建物も消え、その ID の付け替えが済むまでは使えない)。
+                    return not building_ids.is_usable(entrance_id_for(rid))
 
                 region_id = build_identifier(
                     name,
@@ -1079,13 +1060,11 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 # ここへ来る衝突は「名前から導いた ID」か「カスタム ID」の場合。
                 # どちらもユーザーが選んだものなので、連番で黙って別 ID にせず
                 # エラーで返す (上の予約は、機械が選ぶ連番候補にだけ効く)。
-                # 大文字小文字を畳む理由は create_building の同じ検査と同じ
-                if (
-                    db.query(BuildingModel)
-                    .filter(func.lower(BuildingModel.BUILDINGID) == entrance_id.lower())
-                    .first()
-                ):
-                    return f"Error: A building with the ID '{entrance_id}' already exists."
+                # 入口の ID は Region ID から決まる (delete_region はこの形で
+                # 自動生成の入口かを判定する) ので、別の ID に逃がすこともできない。
+                reason = building_ids.unusable_reason(entrance_id)
+                if reason is not None:
+                    return building_ids.error(entrance_id, reason)
                 db.add(BuildingModel(
                     CITYID=city_id,
                     BUILDINGID=entrance_id,

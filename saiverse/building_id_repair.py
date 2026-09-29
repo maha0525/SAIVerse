@@ -84,6 +84,9 @@ NOTE_ROOM_NOT_FOUND = "room_not_found"
 #: 記録の要素の種類。``kind`` の無い要素はこのモジュールの付け替え (安全でない ID の修復)。
 #: ``retire`` は消した部屋の ID を特殊な ID へ付け替えたもの
 #: (saiverse/building_retirement.py が書き、再開する)。このモジュールは触らない。
+#: ``retire`` の要素の状態は ``planned`` / ``done`` のほかに、付け替えを終えずに閉じた
+#: ``cancelled`` と ``abandoned`` がある (意味は building_retirement.py の冒頭)。この
+#: モジュールの読み手は ``retire`` の要素を状態によらず読み飛ばすので、どれも影響しない。
 ENTRY_KIND_RETIRE = "retire"
 
 
@@ -1416,6 +1419,26 @@ def _memory_location_unsafe_alert(persona_id: str, name: str) -> dict:
     )
 
 
+#: :func:`_memory_location_skipped_alert` の details の reason
+REASON_MEMORY_LOCATION_SKIPPED = "memory_location_unsafe_skipped"
+
+
+def _memory_location_skipped_alert(persona_id: str, name: str) -> dict:
+    """場所を決められない記憶のファイルを、待たずに飛ばしたときの警告 (再試行しない)。"""
+    return _alert(
+        f"building_memory_location_skipped_{persona_id}",
+        f"ペルソナ「{name}」の記憶の中の部屋の名前を書き換えられませんでした",
+        "部屋の内部の名前を付け替えたので、ペルソナの記憶のファイルに記録されている"
+        "部屋の内部の名前も書き換える必要があります。このペルソナの内部の名前は、"
+        "記憶のファイルが入ったフォルダの場所を安全に決められない形をしています"
+        "（区切り記号が続いている、先頭や末尾にある など）。場所を決められないので、"
+        "次の起動でも書き換えられません。このペルソナの記憶は書き換えずに、残りの作業を"
+        "済ませました。このペルソナの記憶の中の部屋の印は、付け替える前の名前のまま残ります。"
+        "この警告の内容を添えて開発者に知らせてください。",
+        {"reason": REASON_MEMORY_LOCATION_SKIPPED, "persona_id": persona_id},
+    )
+
+
 def _memory_backup_failed_alert(persona_id: str, name: str, path: Path, exc: BaseException) -> dict:
     return _alert(
         f"building_id_repair_memory_backup_{persona_id}",
@@ -1587,6 +1610,15 @@ class PersonaMemoryRewriter:
     書き換えをまるごと巻き戻して失敗を返す。
 
     警告は ``alerts`` (呼び出し側の一覧) に積む。
+
+    ``unlocatable_blocks`` は、記憶のファイルの場所を安全に決められない ID
+    (空の段・``.``・``..``) のペルソナを「済まなかった」に数えるか。既定の True は
+    部屋 ID の付け替え (この場所を決められない形は、次の起動でも変わらないが、
+    付け替えの記録を「予定」のまま残して毎起動知らせる)。False は消した部屋の ID の
+    付け替え (saiverse/building_retirement.py) — 「予定」が残る間は元の ID を新しい
+    建物に使えないので、どの起動でも書き換えられないファイルを待つと、元の ID が
+    永遠に使えなくなる。False のときは警告 (:func:`_memory_location_skipped_alert`) を
+    出し、そのペルソナは書き換えずに済んだものとして数える。
     """
 
     def __init__(
@@ -1596,11 +1628,13 @@ class PersonaMemoryRewriter:
         saiverse_home: Path,
         backup_kind: str,
         alerts: List[dict],
+        unlocatable_blocks: bool = True,
     ) -> None:
         self.session_factory = session_factory
         self.saiverse_home = Path(saiverse_home)
         self.backup_kind = backup_kind
         self.alerts = alerts
+        self.unlocatable_blocks = unlocatable_blocks
         # 複製の置き場。最初に複製するときに決める (この書き換え器で一つ)。
         self._backup_dir: Optional[Path] = None
 
@@ -1622,6 +1656,8 @@ class PersonaMemoryRewriter:
 
         - 場所を安全に決められない ID (空の段・``.``・``..``) のペルソナは、警告を出して
           False を返す — 呼び出し側は記録を「完了」にせず、次の起動でもう一度確かめる。
+          ``unlocatable_blocks`` が False なら、警告を出して書き換えずに済んだものとして
+          数える (戻り値を False にしない)。
         - この OS のフォルダ名に使えない文字を含む ID のペルソナには、記憶のファイルが
           作られていないので、処理済みとして扱う。
 
@@ -1643,6 +1679,14 @@ class PersonaMemoryRewriter:
         for persona_id, name in personas:
             display_name = name or persona_id
             parts = legacy_folder_parts(persona_id)
+            if parts is None and not self.unlocatable_blocks:
+                LOGGER.warning(
+                    "%s ペルソナ %r の記憶のファイルの場所を安全に決められないので、書き換えません。"
+                    "どの起動でも場所を決められないので、このペルソナは待たずに付け替えを済ませます",
+                    _LOG_PREFIX, persona_id,
+                )
+                self.alerts.append(_memory_location_skipped_alert(persona_id, display_name))
+                continue
             if parts is None:
                 LOGGER.warning(
                     "%s ペルソナ %r の記憶のファイルの場所を安全に決められないので、書き換えません。"
@@ -2279,6 +2323,7 @@ __all__ = [
     "JSON_COLUMNS",
     "MemoryUpdate",
     "PersonaMemoryRewriter",
+    "REASON_MEMORY_LOCATION_SKIPPED",
     "RENAMES_FILENAME",
     "STATUS_DONE",
     "STATUS_PLANNED",

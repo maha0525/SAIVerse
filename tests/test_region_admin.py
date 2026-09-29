@@ -134,6 +134,39 @@ class RegionAdminTestCase(unittest.TestCase):
         self.assertIsNotNone(region)
         self.assertEqual(region.ENTRANCE_BUILDING_ID, "entrance_region_2_city_a")
 
+    def _reserve_retiring_id(self, old_id):
+        """消した建物の元の ID で、付け替えが「予定」のまま済んでいないものを記録に書く。"""
+        import json
+
+        record = Path(self._home.name) / "cities" / "city_a" / "building_id_renames.json"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"format_version": 1, "renames": [{
+            "kind": "retire", "source": "delete", "old_id": old_id,
+            "new_id": f"deleted_{old_id}_20260929182800", "city_slug": "city_a",
+            "status": "planned", "planned_at": "2026-09-29T18:28:00+09:00",
+        }]}), encoding="utf-8")
+
+    def test_numbered_region_id_skips_candidate_whose_entrance_is_still_retiring(self):
+        # 消した入口の ID は、残る会話などの付け替えが済むまで新しい建物に使えない。
+        # 連番は機械が選ぶ候補なので、断らずに次の番号へ進む
+        self._reserve_retiring_id("entrance_region_1_city_a")
+        result = self.svc.create_region("霧降りの森", "", "generic", 1)
+        self.assertNotIn("Error", result)
+        self.assertIsNone(self._get_region("region_1_city_a"))
+        region = self._get_region("region_2_city_a")
+        self.assertIsNotNone(region)
+        self.assertEqual(region.ENTRANCE_BUILDING_ID, "entrance_region_2_city_a")
+
+    def test_derived_entrance_id_still_retiring_is_refused(self):
+        # 名前から導いた Region ID の入口は ID が決まっている (delete_region はこの形で
+        # 自動の入口かを判定する) ので、別の ID に逃がさず理由を返す
+        self._reserve_retiring_id("entrance_region_mist_valley_city_a")
+        result = self.svc.create_region("Mist Valley", "", "generic", 1)
+        self.assertIn("Error", result)
+        self.assertIn("has not finished", result)
+        self.assertIsNone(self._get_region("region_mist_valley_city_a"))
+        self.assertIsNone(self._get_building("entrance_region_mist_valley_city_a"))
+
     def _add_building(self, building_id, name="無関係な建物"):
         db = self.SessionLocal()
         try:

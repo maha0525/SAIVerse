@@ -25,6 +25,7 @@ from manager.ids import (
 )
 from persona.core import PersonaCore
 from saiverse import task_book
+from saiverse.building_retirement import BuildingIdAvailability
 from saiverse.persona_model_selection import (
     attach_speaking_model_choice,
     initial_speaking_model,
@@ -32,23 +33,25 @@ from saiverse.persona_model_selection import (
 )
 
 
-def ai_stem_taken(db, stem: str, city_slug: str) -> bool:
+def ai_stem_taken(
+    db, stem: str, city_slug: str, building_ids: BuildingIdAvailability,
+) -> bool:
     """``stem`` が AIID または私室 Building の席を埋めているか。
 
     自動生成の連番 (persona_N / ruler_N) を選ぶ側が、AIID と私室の両方の空きを
-    まとめて予約するための検査。比較は大文字小文字を畳む — ID はフォルダ名
+    まとめて予約するための検査。AIID の比較は大文字小文字を畳む — ID はフォルダ名
     (``~/.saiverse/personas/<id>/``) になり、Windows のファイルシステムは大文字
-    小文字を区別しないため、DB 上は別行でも保存先が同じになる。
+    小文字を区別しないため、DB 上は別行でも保存先が同じになる。私室の ID は
+    新しい建物に付けてよい ID かの規則 (``building_ids``。既存の建物・``deleted_`` の
+    形・消した建物の付け替えが済んでいない元の ID を避ける) で見る — 私室の ID だけ
+    使えない番号を選ぶと、AIID と私室の番号が食い違う。
     """
     candidate = f"{stem}_{city_slug}".lower()
-    room = private_room_candidate(stem, city_slug).lower()
+    room = private_room_candidate(stem, city_slug)
     return (
         db.query(AIModel).filter(func.lower(AIModel.AIID) == candidate).first()
         is not None
-        or db.query(BuildingModel)
-        .filter(func.lower(BuildingModel.BUILDINGID) == room)
-        .first()
-        is not None
+        or not building_ids.is_usable(room)
     )
 
 
@@ -485,6 +488,9 @@ class PersonaMixin:
             # なる永続キーなので、Building / Region と同じ文字種契約に従う
             # (manager/ids.py、issue 論点 3)。契約は ASCII のみを保証するので、
             # パス脱出文字 (区切り・'..') の検査もこれで兼ねる。
+            # 私室に付けてよい ID かの規則 (saiverse/building_retirement.py、
+            # 建物を作る口の全部で共有)
+            building_ids = BuildingIdAvailability(db, self.saiverse_home)
             if custom_ai_id:
                 if not is_valid_identifier(custom_ai_id):
                     return (False, charset_error("Persona ID", custom_ai_id), None, None)
@@ -501,7 +507,7 @@ class PersonaMixin:
                 ai_stem = build_identifier(
                     name,
                     stem="persona",
-                    exists=lambda s: ai_stem_taken(db, s, self.city_name),
+                    exists=lambda s: ai_stem_taken(db, s, self.city_name, building_ids),
                 )
             new_ai_id = f"{ai_stem}_{self.city_name}"
 
@@ -526,16 +532,16 @@ class PersonaMixin:
             # は今も要る: 私室と同じ ID の Building が既に存在しうる (ユーザーが
             # 手で作った Building や、契約前の遺産)。素通しにすると PK 衝突で
             # commit が落ち、既存の部屋を指す ID のまま下のインメモリ登録が走る。
+            # 私室の ID は利用者が選んだものではないので、使えない ID (既存の
+            # 建物・deleted_ の形・消した建物の付け替えが済んでいない元の ID) は
+            # 断らずに次の候補へ進む。
             new_building_id = build_identifier(
                 ai_stem,
                 self.city_name,
                 "room",
                 stem="persona",
                 ensure_unique=True,
-                exists=lambda bid: db.query(BuildingModel)
-                .filter_by(BUILDINGID=bid)
-                .first()
-                is not None,
+                exists=lambda bid: not building_ids.is_usable(bid),
             )
 
             from saiverse.persona_language import get_city_language, validate_language

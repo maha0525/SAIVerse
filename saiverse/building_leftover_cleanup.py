@@ -20,6 +20,9 @@ ID を指したままのアイテムの置き場所・設置物 (とそれにぶ
 会話の記録 (building_messages) とペルソナ側の表には触らない — 残す会話などは、
 この後に走る付け替え (saiverse/building_retirement.py) が特殊な ID へ移す。
 
+「建物が無い」は大文字小文字を畳んで判定する (``shop_a1`` の行は、建物
+``Shop_A1`` があれば残骸とみなさない。:func:`_missing_building_ids`)。
+
 何度走らせても結果は同じ (残骸が無ければ何もしない)。同じ DB を使う別の
 SAIVerse が動いている間は、部屋 ID の付け替え (saiverse/building_id_repair.py)
 と同じ関所で見送る — 相手のプロセスが建物を作っている最中の行を、建物の無い
@@ -28,7 +31,7 @@ SAIVerse が動いている間は、部屋 ID の付け替え (saiverse/building
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from database.models import (
     Building,
@@ -40,6 +43,34 @@ from database.models import (
 LOGGER = logging.getLogger(__name__)
 
 _LOG_PREFIX = "[building-leftover-cleanup]"
+
+
+def _missing_building_ids(db, column, building_ids: Sequence[str], *filters) -> List[str]:
+    """``column`` に現れる建物 ID のうち、建物が無いもの。
+
+    大文字小文字だけ違う建物がある ID は含めない (警告のログだけ) — 付け替え
+    (saiverse/building_retirement.py) の残骸の見つけ方と作成の口 (create_building) は
+    大文字小文字を畳んで比べるので、ここだけ区別すると、建物のフォルダを共有する
+    (Windows は大文字小文字を区別しない) 今ある建物の中身を残骸として片付けてしまう。
+    取り違えるくらいなら残す方に倒す。
+    """
+    existing = set(building_ids)
+    existing_lower = {b.lower() for b in building_ids}
+    values = (
+        db.query(column).filter(column.isnot(None), *filters).distinct().all()
+    )
+    missing: List[str] = []
+    for (value,) in values:
+        if value in existing:
+            continue
+        if isinstance(value, str) and value.lower() in existing_lower:
+            LOGGER.warning(
+                "%s 建物の行の無い ID %r (%s) は、大文字小文字だけ違う建物があるので片付けません",
+                _LOG_PREFIX, value, column,
+            )
+            continue
+        missing.append(value)
+    return sorted(missing, key=str)
 
 
 def cleanup_deleted_building_leftovers(*, session_factory, db_path) -> Optional[Dict[str, int]]:
@@ -66,33 +97,45 @@ def cleanup_deleted_building_leftovers(*, session_factory, db_path) -> Optional[
 
     db = session_factory()
     try:
-        existing_buildings = db.query(Building.BUILDINGID)
+        building_ids = [
+            row[0] for row in db.query(Building.BUILDINGID).all() if row[0] is not None
+        ]
 
+        item_owner_ids = _missing_building_ids(
+            db, ItemLocation.OWNER_ID, building_ids, ItemLocation.OWNER_KIND == "building",
+        )
         orphan_item_locations = (
             db.query(ItemLocation)
             .filter(
                 ItemLocation.OWNER_KIND == "building",
-                ItemLocation.OWNER_ID.notin_(existing_buildings),
+                ItemLocation.OWNER_ID.in_(item_owner_ids),
             )
             .delete(synchronize_session=False)
+            if item_owner_ids else 0
         )
 
+        fixture_building_ids = _missing_building_ids(db, Fixture.BUILDING_ID, building_ids)
         orphan_fixture_ids: List[str] = [
             row[0]
             for row in db.query(Fixture.FIXTURE_ID)
-            .filter(Fixture.BUILDING_ID.notin_(existing_buildings))
+            .filter(Fixture.BUILDING_ID.in_(fixture_building_ids))
             .all()
-        ]
+        ] if fixture_building_ids else []
         # 起動の途中 (定期観測の予約より前) に走るので、予約の取り消しは要らない
         delete_fixture_rows(db, orphan_fixture_ids)
 
+        spell_owner_ids = _missing_building_ids(
+            db, RealtimeSpellBinding.OWNER_ID, building_ids,
+            RealtimeSpellBinding.OWNER_KIND == "building",
+        )
         orphan_spells = (
             db.query(RealtimeSpellBinding)
             .filter(
                 RealtimeSpellBinding.OWNER_KIND == "building",
-                RealtimeSpellBinding.OWNER_ID.notin_(existing_buildings),
+                RealtimeSpellBinding.OWNER_ID.in_(spell_owner_ids),
             )
             .delete(synchronize_session=False)
+            if spell_owner_ids else 0
         )
         db.commit()
     except Exception:

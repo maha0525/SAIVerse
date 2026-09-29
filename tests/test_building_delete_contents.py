@@ -474,10 +474,13 @@ class DeleteBuildingRefusalTest(BuildingDeleteTestBase):
         self.svc.SessionLocal = self.Session
         self._assert_nothing_deleted()
         self.assertTrue(self._exists(Item, ITEM_ID="gem"))
-        # 会話は元の ID のまま。付け替えの予定は閉じ、元の ID を使用中のまま残さない
+        # 会話は元の ID のまま。付け替えの予定は「消えなかった」で閉じ (「完了」とは
+        # 書かない)、元の ID を使用中のまま残さない
         self.assertEqual(self._message_count(TARGET), 1)
         [entry] = self._retire_entries(TARGET)
-        self.assertEqual((entry["status"], entry["note"]), ("done", "building_kept"))
+        self.assertEqual((entry["status"], entry["note"]), ("cancelled", "building_kept"))
+        from saiverse.building_retirement import pending_retirement_ids
+        self.assertEqual(pending_retirement_ids(self.home), set())
 
 
 class DeletionPreviewTest(BuildingDeleteTestBase):
@@ -696,6 +699,29 @@ class StartupLeftoverCleanupTest(BuildingDeleteTestBase):
         })
         self.assertEqual(self._fixture_counts("o"), ALL_ONE)
         self.assertEqual(self._loc("valid"), ("building", OTHER, 1))
+
+    def test_rows_whose_owner_differs_from_a_building_only_in_case_survive(self):
+        # 建物 Shop_A1 と、shop_a1 を指す行。作成の口と付け替えは大文字小文字を
+        # 畳んで比べる (フォルダも Windows では同じ場所) ので、今ある建物の中身として
+        # 扱い、残骸として片付けない
+        self._add_building("Shop_A1", "大文字の店")
+        self._add_item("cased_item", "building", "shop_a1", 1)
+        self._add_fixture("cased", "shop_a1")
+        self._add_spell("building", "shop_a1")
+        gone = self._seed_leftovers()
+
+        counts = self._run()
+
+        self.assertEqual(counts, {
+            "unplaced_items": 2, "deleted_fixtures": 1, "deleted_realtime_spells": 1,
+        })
+        self.assertEqual(self._loc("cased_item"), ("building", "shop_a1", 1))
+        self.assertEqual(self._fixture_counts("cased"), ALL_ONE)
+        self.assertIn(("building", "shop_a1"), self._spells())
+        # 本物の残骸は片付く
+        self.assertIsNone(self._loc("orphan"))
+        self.assertEqual(self._fixture_counts("g"), ALL_ZERO)
+        self.assertNotIn(("building", gone), self._spells())
 
     def test_cleanup_skips_when_another_process_owns_db(self):
         self._seed_leftovers()

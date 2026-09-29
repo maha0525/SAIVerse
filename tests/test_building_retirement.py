@@ -407,6 +407,58 @@ class FailureAndReservationTests(_RetirementTestCase):
         self.assertFalse((self.buildings_root / self.ROOM).exists())
         self.assertTrue((self.buildings_root / entry["new_id"]).is_dir())
 
+    def test_persona_whose_memory_cannot_be_located_does_not_keep_the_retirement_planned(self) -> None:
+        """場所を決められない記憶のファイル (ID が a//b など) は、どの起動でも書き換えられない。
+
+        待つと記録が永遠に「予定」のまま残り、元の ID がずっと使えなくなるので待たない
+        (部屋 ID の付け替えは今までどおり待つ — test_building_id_separator_repair)。
+        """
+        self._seed()
+        self._add(AI(AIID="a//b", HOME_CITYID=CITY_ID, AINAME="古い子"))
+
+        self.assertFalse(self.svc.delete_building(self.ROOM).startswith("Error"))
+
+        [entry] = self._retire_entries(self.ROOM)
+        self.assertEqual(entry["status"], "done")
+        self.assertEqual(retirement.pending_retirement_ids(self.home), set())
+        # 場所の分かるペルソナの記憶は書き換わっている
+        self.assertEqual(
+            json.loads(self._memory_rows()["messages"][0][2])["building_msg_ref"],
+            f"{entry['new_id']}:{entry['new_id']}:1",
+        )
+        self.assertIn(f"(ID: {self.ROOM})", self._create("星見の塔"))
+
+    def test_unlocatable_memory_is_reported_once_at_startup_and_does_not_block(self) -> None:
+        self._seed()
+        self._add(AI(AIID="a//b", HOME_CITYID=CITY_ID, AINAME="古い子"))
+        with patch(_OWNS_DB, return_value=(True, "pid 1234")):
+            self.assertFalse(self.svc.delete_building(self.ROOM).startswith("Error"))
+        self.assertEqual(self._retire_entries(self.ROOM)[0]["status"], "planned")
+
+        alerts = self._startup()
+
+        self.assertEqual(
+            [(a["details"]["reason"], a["details"]["persona_id"]) for a in alerts],
+            [(repair.REASON_MEMORY_LOCATION_SKIPPED, "a//b")],
+        )
+        self.assertEqual(self._retire_entries(self.ROOM)[0]["status"], "done")
+        self.assertEqual(retirement.pending_retirement_ids(self.home), set())
+        # 済んだので、次の起動では何も出ない
+        self.assertEqual(self._startup(), [])
+
+    def test_transient_memory_failure_still_keeps_the_retirement_planned(self) -> None:
+        """開けない・書けない記憶のファイルは次の起動で直りうるので、今までどおり待つ。"""
+        self._seed()
+        self._add(AI(AIID="a//b", HOME_CITYID=CITY_ID, AINAME="古い子"))
+        with patch(
+            "saiverse.building_id_repair.apply_memory_rewrite",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            self.assertFalse(self.svc.delete_building(self.ROOM).startswith("Error"))
+        [entry] = self._retire_entries(self.ROOM)
+        self.assertEqual(entry["status"], "planned")
+        self.assertEqual(retirement.pending_retirement_ids(self.home), {self.ROOM})
+
     def test_record_that_cannot_be_written_stops_the_deletion(self) -> None:
         self._seed()
         with patch("saiverse.building_retirement._save_record", side_effect=OSError("disk full")):
@@ -414,6 +466,75 @@ class FailureAndReservationTests(_RetirementTestCase):
         self.assertTrue(result.startswith("Error"), result)
         self.assertEqual(self._scalar('SELECT COUNT(*) FROM "building"'), 1)
         self.assertEqual(self._message_count(self.ROOM), 1)
+
+
+class FolderScopeTests(_RetirementTestCase):
+    """フォルダは消した建物の City の置き場と、City の置き場ができる前の置き場からだけ移す。"""
+
+    ROOM = "shop_city_a"
+
+    def _folder_in(self, root: Path, building_id: str) -> Path:
+        folder = root / building_id
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "log.json").write_text("[]", encoding="utf-8")
+        return folder
+
+    @property
+    def other_city_root(self) -> Path:
+        return self.home / "cities" / "city_b" / "buildings"
+
+    @property
+    def legacy_root(self) -> Path:
+        return self.home / "buildings"
+
+    def _assert_moved_here_only(self, old_id: str, tomb: str) -> None:
+        self.assertFalse((self.buildings_root / old_id).exists())
+        self.assertTrue((self.buildings_root / tomb / "log.json").is_file())
+        self.assertFalse((self.legacy_root / old_id).exists())
+        self.assertTrue((self.legacy_root / tomb / "log.json").is_file())
+        # 別の City の同じ名前のフォルダは、その City の持ち物なので触らない
+        self.assertTrue((self.other_city_root / old_id / "log.json").is_file())
+        self.assertFalse((self.other_city_root / tomb).exists())
+
+    def test_delete_leaves_another_citys_same_named_folder_untouched(self) -> None:
+        self.assertIn(f"(ID: {self.ROOM})", self._create("Shop"))
+        for root in (self.buildings_root, self.other_city_root, self.legacy_root):
+            self._folder_in(root, self.ROOM)
+
+        self.assertFalse(self.svc.delete_building(self.ROOM).startswith("Error"))
+
+        [entry] = self._retire_entries(self.ROOM)
+        self.assertEqual((entry["status"], entry["city_slug"]), ("done", CITY))
+        self._assert_moved_here_only(self.ROOM, entry["new_id"])
+
+    def test_resumed_deletion_uses_the_recorded_city(self) -> None:
+        self.assertIn(f"(ID: {self.ROOM})", self._create("Shop"))
+        for root in (self.buildings_root, self.other_city_root, self.legacy_root):
+            self._folder_in(root, self.ROOM)
+        with patch(_OWNS_DB, return_value=(True, "pid 1234")):
+            self.assertFalse(self.svc.delete_building(self.ROOM).startswith("Error"))
+        self.assertTrue((self.buildings_root / self.ROOM).is_dir())
+
+        self.assertEqual(self._startup(), [])
+
+        [entry] = self._retire_entries(self.ROOM)
+        self.assertEqual(entry["status"], "done")
+        self._assert_moved_here_only(self.ROOM, entry["new_id"])
+
+    def test_startup_leftovers_use_the_starting_city_and_record_it(self) -> None:
+        gone = "building_9_city_a"
+        self._add(self._message(gone, 1, content="昔の会話"))
+        for root in (self.buildings_root, self.other_city_root, self.legacy_root):
+            self._folder_in(root, gone)
+
+        with patch(_OWNS_DB, return_value=(False, "")):
+            self.assertEqual(self._startup(now=NOW), [])
+
+        [entry] = self._retire_entries(gone)
+        self.assertEqual(
+            (entry["status"], entry["source"], entry["city_slug"]), ("done", "leftover", CITY),
+        )
+        self._assert_moved_here_only(gone, entry["new_id"])
 
 
 class TombstonePrefixTests(_RetirementTestCase):
@@ -523,10 +644,16 @@ class StartupTests(_RetirementTestCase):
         self.assertEqual(self._startup(), [])
 
         [entry] = self._retire_entries("shop_city_a")
-        self.assertEqual((entry["status"], entry["note"]), ("done", "building_kept"))
+        # 何も付け替えていないので「完了」とは書かない
+        self.assertEqual((entry["status"], entry["note"]), ("cancelled", "building_kept"))
         self.assertEqual(self._message_count("shop_city_a"), 1)
         self.assertEqual(self._memory_rows(), memory_before)
         self.assertEqual(retirement.pending_retirement_ids(self.home), set())
+        # 閉じた要素は続きを行わない (二度目の起動で何も変わらない)
+        record_before = self._record()
+        self.assertEqual(self._startup(), [])
+        self.assertEqual(self._record(), record_before)
+        self.assertEqual(self._memory_rows(), memory_before)
 
     def test_planned_entry_whose_id_was_reused_is_closed_with_an_alert(self) -> None:
         """記憶の印が済む前に同じ ID の建物が (作成の口の外から) 作られていた予定。"""
@@ -550,11 +677,30 @@ class StartupTests(_RetirementTestCase):
 
         self.assertEqual([a["details"]["reason"] for a in alerts], ["id_reused"])
         [entry] = self._retire_entries("shop_city_a")
-        self.assertEqual((entry["status"], entry["note"]), ("done", "id_reused"))
+        # 記憶の印とフォルダは付け替えていないので「完了」とは書かない
+        self.assertEqual((entry["status"], entry["note"]), ("abandoned", "id_reused"))
+        self.assertNotIn("done_at", entry)
         # 新しい建物のものは動かさない
         self.assertEqual(self._message_count("shop_city_a"), 1)
         self.assertEqual(self._memory_rows(), memory_before)
         self.assertTrue((self.buildings_root / "shop_city_a").is_dir())
+        # 閉じた要素は元の ID を押さえず、次の起動でも続きを行わない
+        self.assertEqual(retirement.pending_retirement_ids(self.home), set())
+        record_before = self._record()
+        self.assertEqual(self._startup(), [])
+        self.assertEqual(self._record(), record_before)
+        self.assertEqual(self._memory_rows(), memory_before)
+        self.assertTrue((self.buildings_root / "shop_city_a").is_dir())
+        # 部屋 ID の付け替えもこの要素を読み飛ばす (Discord の対応表の知らせも出さない)
+        self.assertEqual(
+            repair.discord_mapping_alerts(
+                self._record(),
+                {repair.DISCORD_CHANNEL_MAP_ENV: json.dumps(
+                    [{"channel_id": "1", "building_id": "shop_city_a"}],
+                )},
+            ),
+            [],
+        )
 
     def test_unsafe_id_repair_ignores_retire_entries(self) -> None:
         self.record_path.parent.mkdir(parents=True, exist_ok=True)

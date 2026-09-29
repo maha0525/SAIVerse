@@ -13,9 +13,8 @@
 ここでは、消した部屋を指して残るものを全部、特殊な ID
 ``deleted_<旧ID>_<YYYYMMDDHHMMSS>`` (ローカル時刻。埋まっていれば ``_2``、``_3`` …) へ
 付け替える。元の ID は完全に空き、次に作る建物が同じ ID を使っても何も戻らず、
-番号の歯抜けも出ない。``deleted_`` で始まる ID は建物の作成の口
-(manager/admin.py::create_building) が受け付けないので、特殊な ID が部屋として
-生き返ることは無い。
+番号の歯抜けも出ない。``deleted_`` で始まる ID は建物を作る口のどれも使わない
+(:class:`BuildingIdAvailability`) ので、特殊な ID が部屋として生き返ることは無い。
 
 付け替えの部品は 2026-09-11 の部屋 ID の付け替え (saiverse/building_id_repair.py) の
 ものを使う: 部屋を指す DB の欄の全部と JSON の欄 (値の完全一致だけ)・会話の
@@ -43,8 +42,20 @@ ID は建物にならないので、特殊な ID の下で照合が使われる�
 
 3・4 が済まなくても削除は済んでいる (DB は commit 済み)。記録は「予定」のまま
 残り、次の起動 (:func:`retire_deleted_buildings`) が 3 から続ける。「予定」が残って
-いる間は、元の ID を建物の作成の口が使わない (:func:`pending_retirement_ids`)。
-済めば空く。
+いる間は、元の ID を新しい建物に付けない (:class:`BuildingIdAvailability` — 建物の
+作成の口と、ID を自動で決める口 (ペルソナの私室・設計図から作る私室・Region の
+自動の入口) の全部がこの規則を使う)。済めば空く。
+
+3 の例外: 記憶のファイルの場所を安全に決められない ID (``a//b`` など) のペルソナは
+待たない。どの起動でも場所を決められないので、待つと元の ID が永遠に使えなくなる。
+警告を出し、そのペルソナの記憶は書き換えずに済んだものとして数える
+(:class:`~saiverse.building_id_repair.PersonaMemoryRewriter` の ``unlocatable_blocks``)。
+記憶のファイルが開けない・複製が取れない・書き換えが例外で止まったときは、次の
+起動で直りうるので「予定」のまま残す。
+
+4 で移すフォルダは、消した建物の City の置き場 ``cities/<その City>/buildings/<旧ID>``
+と、City の置き場ができる前の ``<ホーム>/buildings/<旧ID>`` だけ (:func:`_folder_roots`)。
+別の City の置き場にある同じ名前のフォルダは、その City の持ち物なので動かさない。
 
 同じ DB を別の SAIVerse が使っている間は、3・4 を削除の場では行わず、次の起動へ
 回す — 相手のプロセスの記憶のファイルの書き手とは、こちらの錠前で順番を付けられない。
@@ -56,8 +67,24 @@ ID は建物にならないので、特殊な ID の下で照合が使われる�
   無ければ 3 から。旧 ID の建物がある場合は触らずに閉じる (削除が巻き戻っていた、
   または済む前に同じ ID の建物が作られた)。
 - 今までに消した建物の残骸 (建物の行が無いのに、その ID の会話などが残っている)
-  を、同じやり方で付け替える。
+  を、同じやり方で付け替える。フォルダは、起動した City の置き場と古い置き場から移す
+  (どの City の建物だったかは DB に残っていない)。記録の要素には、そのとき使った
+  City の識別子を ``city_slug`` として書き、続きもその City の置き場で行う。
 - 同じ DB を別の SAIVerse が使っている間は見送る。
+
+記録の要素 (``"kind": "retire"``) の状態 (``status``):
+
+- ``planned``: 付け替えの途中。元の ID は新しい建物に使わない。起動時に続きを行う。
+- ``done``: 付け替えが済んだ (DB・記憶の印・フォルダ)。元の ID は空いている。
+- ``cancelled``: 建物は消えなかった (削除が巻き戻った。``note`` は ``building_kept``)。
+  何も付け替えていない。
+- ``abandoned``: 付け替えを終えずに止めた (``note`` は ``id_reused`` — 記憶の印と
+  フォルダを付け替える前に、同じ ID の建物が作られていた)。DB の会話などは特殊な ID
+  の下にあるが、記憶の印とフォルダは元の ID のまま。警告を出す。
+
+``cancelled`` と ``abandoned`` は閉じた要素で、元の ID を押さえず、続きも行わない
+(読み手は「``planned`` かどうか」だけを見る。部屋 ID の付け替えは ``retire`` の要素を
+状態によらず読み飛ばす)。
 """
 from __future__ import annotations
 
@@ -66,7 +93,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from sqlalchemy import text
 
@@ -75,6 +102,7 @@ from manager.ids import is_safe_path_component
 from saiverse.building_id_repair import (
     DIRECT_REFERENCE_COLUMNS,
     ENTRY_KIND_RETIRE,
+    REASON_MEMORY_LOCATION_SKIPPED,
     RENAMES_FILENAME,
     STATUS_DONE,
     STATUS_PLANNED,
@@ -109,9 +137,17 @@ BACKUP_KIND = "building_retirement"
 #: 記録の要素の出どころ
 SOURCE_DELETE = "delete"
 SOURCE_LEFTOVER = "leftover"
+#: 記録の要素の閉じた状態 (「予定」「完了」は building_id_repair と同じ語)。意味は冒頭。
+STATUS_CANCELLED = "cancelled"  # 建物は消えなかった。何も付け替えていない
+STATUS_ABANDONED = "abandoned"  # 付け替えを終えずに止めた
 #: 記録を閉じた理由
-NOTE_BUILDING_KEPT = "building_kept"  # 削除が commit されなかった
-NOTE_ID_REUSED = "id_reused"  # 済む前に同じ ID の建物が作られた
+NOTE_BUILDING_KEPT = "building_kept"  # 削除が commit されなかった (STATUS_CANCELLED)
+NOTE_ID_REUSED = "id_reused"  # 済む前に同じ ID の建物が作られた (STATUS_ABANDONED)
+
+#: :meth:`BuildingIdAvailability.unusable_reason` の戻り値
+ID_TAKEN = "taken"  # 建物がある (大文字小文字を問わない)
+ID_TOMBSTONE = "tombstone"  # 特殊な ID の形 (deleted_ で始まる)
+ID_RETIRING = "retiring"  # 消した建物の元の ID で、付け替えが済んでいない
 
 _MAX_SUFFIX = 10_000
 
@@ -255,25 +291,80 @@ def pending_retirement_ids(saiverse_home: Path) -> Set[str]:
     return out
 
 
-def _folder_roots(saiverse_home: Path) -> List[Path]:
-    """部屋のフォルダの置き場: 全 City の ``cities/<slug>/buildings`` と、もっと古い ``buildings``。
+class BuildingIdAvailability:
+    """新しい建物にその ID を付けてよいかの規則。建物を作る口の全部がこれを使う。
 
-    全 City を見るのは、建物 ID が City をまたいで一意で、同じ ID の会話の行は City を
-    問わず全部付け替わるから。別の City の置き場に同じ名前のフォルダ (昔消した部屋の
-    古い会話のファイル) が残っていると、後でその City に同じ ID の建物ができたとき、
-    起動時の過去ログの取り込みがそれを新しい部屋へ入れてしまう。
+    使えない ID:
+
+    - 建物がある ID (大文字小文字を問わない — ID はフォルダ名になり、Windows の
+      ファイルシステムは大文字小文字を区別しない)
+    - 特殊な ID の形 (``deleted_`` で始まる。:func:`is_tombstone_id`)
+    - 消した建物の元の ID で、付け替えが「予定」のまま済んでいないもの
+      (:func:`pending_retirement_ids`)。済む前に同じ ID の建物を作ると、ペルソナの
+      記憶の中の古い印が新しい建物を指す。
+
+    使う口: 建物の作成 (manager/admin.py::create_building)、ペルソナの私室
+    (manager/persona.py)、設計図から作る私室 (manager/blueprints.py)、Region の
+    自動の入口 (manager/admin.py::create_region)。利用者が選んだ ID (手で付けた ID・
+    名前から作った ID・Region ID から決まる入口の ID) が使えなければ理由を返し、
+    機械が選ぶ候補 (連番・私室の ID) なら次の候補へ進む — どちらにするかは呼び出し側が
+    決める。
+
+    記録は作るときに一度だけ読む (1 回の作成の中で何度も尋ねるため)。
+    """
+
+    def __init__(self, db, saiverse_home: Path) -> None:
+        self._db = db
+        self.retiring: Set[str] = pending_retirement_ids(saiverse_home)
+
+    def unusable_reason(self, building_id: str) -> Optional[str]:
+        """使えなければ理由 (:data:`ID_TAKEN` / :data:`ID_TOMBSTONE` / :data:`ID_RETIRING`)、使えれば None。"""
+        if is_tombstone_id(building_id):
+            return ID_TOMBSTONE
+        row = self._db.execute(
+            text('SELECT 1 FROM "building" WHERE lower("BUILDINGID") = :bid LIMIT 1'),
+            {"bid": building_id.lower()},
+        ).first()
+        if row is not None:
+            return ID_TAKEN
+        if building_id.lower() in self.retiring:
+            return ID_RETIRING
+        return None
+
+    def is_usable(self, building_id: str) -> bool:
+        return self.unusable_reason(building_id) is None
+
+    @staticmethod
+    def error(building_id: str, reason: str) -> str:
+        """使えない理由を伝えるエラー文字列 (API・ツールの戻り値にそのまま出る)。"""
+        if reason == ID_TOMBSTONE:
+            return (
+                f"Error: Building IDs starting with '{TOMBSTONE_PREFIX}' are reserved "
+                "for the records of deleted buildings (got: "
+                f"'{building_id}')."
+            )
+        if reason == ID_RETIRING:
+            return (
+                f"Error: The ID '{building_id}' belonged to a deleted building, and "
+                "setting its remaining records aside has not finished yet. Restart "
+                "SAIVerse to finish it, then try again."
+            )
+        return (
+            f"Error: A building with the ID '{building_id}' "
+            "already exists (IDs are compared case-insensitively)."
+        )
+
+
+def _folder_roots(saiverse_home: Path, city_slug: str) -> List[Path]:
+    """部屋のフォルダの置き場: この City の ``cities/<slug>/buildings`` と、もっと古い ``buildings``。
+
+    部屋 ID の付け替え (building_id_repair.repair_unsafe_building_ids) と同じ二つ。
+    別の City の置き場は、その City の持ち物なので見ない — 建物 ID は City をまたいで
+    一意だが、別の City の置き場に同じ名前のフォルダがあっても、それはこの建物の
+    ものではない。
     """
     home = Path(saiverse_home)
-    roots: List[Path] = []
-    try:
-        children = sorted((home / "cities").iterdir())
-    except OSError:
-        children = []
-    for child in children:
-        if is_safe_path_component(child.name) and child.is_dir():
-            roots.append(child / "buildings")
-    roots.append(home / "buildings")
-    return roots
+    return [home / "cities" / city_slug / "buildings", home / "buildings"]
 
 
 def _move_folders(folder_roots: Sequence[Path], old_id: str, new_id: str) -> Tuple[bool, Optional[str]]:
@@ -294,20 +385,33 @@ def _move_folders(folder_roots: Sequence[Path], old_id: str, new_id: str) -> Tup
     return ok, problem
 
 
+def _split_memory_alerts(memory_alerts: Sequence[dict]) -> Tuple[List[dict], List[dict]]:
+    """記憶のファイルの警告を (済まなかったもの, 待たずに飛ばしたもの) に分ける。"""
+    skipped = [
+        a for a in memory_alerts
+        if (a.get("details") or {}).get("reason") == REASON_MEMORY_LOCATION_SKIPPED
+    ]
+    failed = [a for a in memory_alerts if a not in skipped]
+    return failed, skipped
+
+
 def _finish_files(
     pairs: Sequence[Tuple[str, str]],
     *,
     session_factory,
     saiverse_home: Path,
-    folder_roots: Sequence[Path],
+    folder_roots: Mapping[str, Sequence[Path]],
     record_path: Path,
 ) -> Tuple[Dict[str, bool], List[dict], Dict[str, str]]:
     """手順 3・4・5: 記憶のファイルの印を書き換え、フォルダを移し、済んだ要素を「完了」にする。
+
+    ``folder_roots`` は {特殊な ID: その部屋のフォルダの置き場} (:func:`_folder_roots`)。
 
     戻り値は ({特殊な ID: 完了にしたか}, 記憶のファイルの警告, {特殊な ID: フォルダを
     移せなかった理由})。記憶のファイルの書き換えは全ペルソナを一度に回る (渡された
     付け替えを全部まとめて)。一人でも済まなければ、どの要素も「完了」にしない
     (次の起動でもう一度 3 から — 完全一致の置き換えなので、済んだペルソナは変わらない)。
+    記憶のファイルの場所を安全に決められないペルソナは待たない (警告だけ。冒頭の「3 の例外」)。
     """
     memory_alerts: List[dict] = []
     rewriter = PersonaMemoryRewriter(
@@ -315,6 +419,7 @@ def _finish_files(
         saiverse_home=saiverse_home,
         backup_kind=BACKUP_KIND,
         alerts=memory_alerts,
+        unlocatable_blocks=False,
     )
     memories_done = rewriter.rewrite({old_id: new_id for old_id, new_id in pairs})
     results: Dict[str, bool] = {}
@@ -322,7 +427,7 @@ def _finish_files(
     plans = _deepest_first([_Plan(old_id, old_id, new_id=new_id) for old_id, new_id in pairs])
     for plan in plans:
         assert plan.new_id is not None
-        folder_ok, problem = _move_folders(folder_roots, plan.old_id, plan.new_id)
+        folder_ok, problem = _move_folders(folder_roots[plan.new_id], plan.old_id, plan.new_id)
         if not folder_ok:
             LOGGER.error(
                 "%s 部屋 %r -> %r のフォルダを移せませんでした: %s",
@@ -382,7 +487,7 @@ class Retirement:
 
     @property
     def folder_roots(self) -> List[Path]:
-        return _folder_roots(self.saiverse_home)
+        return _folder_roots(self.saiverse_home, self.city_slug)
 
     def rewrite_references(self, db) -> None:
         """手順 2: 残る参照を特殊な ID へ書き換える (建物の削除と同じ session。commit しない)。"""
@@ -400,7 +505,7 @@ class Retirement:
         """削除が巻き戻ったとき、記録の「予定」を閉じる (元の ID を使用中のままにしない)。"""
         _update_entry(
             self.record_path, self.new_id,
-            status=STATUS_DONE, done_at=_now(), note=NOTE_BUILDING_KEPT,
+            status=STATUS_CANCELLED, closed_at=_now(), note=NOTE_BUILDING_KEPT,
         )
 
     def finish(self, *, session_factory, db_path) -> bool:
@@ -420,9 +525,16 @@ class Retirement:
             [(self.old_id, self.new_id)],
             session_factory=session_factory,
             saiverse_home=self.saiverse_home,
-            folder_roots=self.folder_roots,
+            folder_roots={self.new_id: self.folder_roots},
             record_path=self.record_path,
         )
+        failed_alerts, skipped_alerts = _split_memory_alerts(memory_alerts)
+        if skipped_alerts:
+            LOGGER.warning(
+                "%s 消した部屋 %r: 記憶のファイルの場所を決められないペルソナは書き換えずに"
+                "済ませました: %s",
+                _LOG_PREFIX, self.old_id, [a.get("details") for a in skipped_alerts],
+            )
         done = bool(results.get(self.new_id))
         if not done:
             LOGGER.warning(
@@ -430,7 +542,7 @@ class Retirement:
                 "次の起動で続けます。済むまで元の ID は新しい建物に使いません。"
                 "記憶の警告: %s / フォルダ: %s",
                 _LOG_PREFIX, self.old_id,
-                [a.get("details") for a in memory_alerts], folder_problems,
+                [a.get("details") for a in failed_alerts], folder_problems,
             )
         return done
 
@@ -467,7 +579,7 @@ def plan_retirement(
         taken |= _recorded_new_ids(record_path)
         new_id = choose_tombstone_id(
             building_id, now=now or datetime.now(), taken=taken,
-            folder_roots=_folder_roots(home),
+            folder_roots=_folder_roots(home, city_slug),
         )
         _append_entries(record_path, [{
             "kind": ENTRY_KIND_RETIRE,
@@ -618,6 +730,8 @@ def retire_deleted_buildings(
         # -- 「予定」のまま残った要素 ------------------------------------------
         db_plans: List[_Plan] = []
         file_pairs: List[Tuple[str, str]] = []
+        #: {特殊な ID: フォルダの置き場}。要素に書いた City の置き場 (無ければ起動した City)
+        folder_roots: Dict[str, List[Path]] = {}
         unstamped: Set[str] = set()
         seen: Set[str] = set()
         for entry in record["renames"]:
@@ -640,11 +754,13 @@ def retire_deleted_buildings(
                 if entry.get("db_renamed_at"):
                     LOGGER.error(
                         "%s 消した部屋 %r の付け替えが済む前に、同じ ID の建物が作られていました。"
-                        "新しい建物のものを動かさないよう、続きを止めて記録を閉じます",
+                        "新しい建物のものを動かさないよう、続きを止めて記録を閉じます"
+                        " (記憶の印とフォルダは付け替えていません)",
                         _LOG_PREFIX, old_id,
                     )
                     _update_entry(
-                        record_path, new_id, status=STATUS_DONE, done_at=_now(), note=NOTE_ID_REUSED,
+                        record_path, new_id,
+                        status=STATUS_ABANDONED, closed_at=_now(), note=NOTE_ID_REUSED,
                     )
                     alerts.append(_id_reused_alert(old_id, new_id))
                 else:
@@ -654,9 +770,13 @@ def retire_deleted_buildings(
                     )
                     _update_entry(
                         record_path, new_id,
-                        status=STATUS_DONE, done_at=_now(), note=NOTE_BUILDING_KEPT,
+                        status=STATUS_CANCELLED, closed_at=_now(), note=NOTE_BUILDING_KEPT,
                     )
                 continue
+            entry_city = entry.get("city_slug")
+            if not isinstance(entry_city, str) or not is_safe_path_component(entry_city):
+                entry_city = city_slug
+            folder_roots[new_id] = _folder_roots(home, entry_city)
             if _references_remain(db, direct_columns, old_id):
                 db_plans.append(_Plan(old_id, entry.get("building_name") or old_id, new_id=new_id))
             elif not entry.get("db_renamed_at"):
@@ -668,12 +788,13 @@ def retire_deleted_buildings(
         leftovers = _detect_leftovers(db, schema, building_ids, seen)
         new_entries: List[dict] = []
         if leftovers:
-            folder_roots = _folder_roots(home)
+            # どの City の建物だったかは DB に残っていないので、起動した City の置き場
+            leftover_roots = _folder_roots(home, city_slug)
             taken = _collect_taken_ids(db, direct_columns, building_ids)
             taken |= _recorded_new_ids(record_path)
             stamp = now or datetime.now()
             for old_id in leftovers:
-                new_id = choose_tombstone_id(old_id, now=stamp, taken=taken, folder_roots=folder_roots)
+                new_id = choose_tombstone_id(old_id, now=stamp, taken=taken, folder_roots=leftover_roots)
                 taken.add(new_id.lower())
                 new_entries.append({
                     "kind": ENTRY_KIND_RETIRE,
@@ -681,6 +802,7 @@ def retire_deleted_buildings(
                     "old_id": old_id,
                     "new_id": new_id,
                     "building_name": None,
+                    "city_slug": city_slug,
                     "status": STATUS_PLANNED,
                     "planned_at": _now(),
                 })
@@ -705,6 +827,7 @@ def retire_deleted_buildings(
         for entry in new_entries:
             db_plans.append(_Plan(entry["old_id"], entry["old_id"], new_id=entry["new_id"]))
             file_pairs.append((entry["old_id"], entry["new_id"]))
+            folder_roots[entry["new_id"]] = _folder_roots(home, city_slug)
 
     if not file_pairs:
         return alerts
@@ -771,13 +894,17 @@ def retire_deleted_buildings(
         file_pairs,
         session_factory=session_factory,
         saiverse_home=home,
-        folder_roots=_folder_roots(home),
+        folder_roots=folder_roots,
         record_path=record_path,
     )
+    failed_alerts, skipped_alerts = _split_memory_alerts(memory_alerts)
+    # 場所を決められない記憶のファイルは待たずに飛ばした (次の起動でも書き換えられない) ので、
+    # 付け替えが済んだかどうかに関わらず知らせる
+    alerts.extend(skipped_alerts)
     unfinished = [pair for pair in file_pairs if not results.get(pair[1])]
     if unfinished:
         alerts.append(_unfinished_alert(unfinished, {
-            "memory": [a.get("details") for a in memory_alerts],
+            "memory": [a.get("details") for a in failed_alerts],
             "folders": folder_problems,
         }))
     return alerts
@@ -785,8 +912,14 @@ def retire_deleted_buildings(
 
 __all__ = [
     "BACKUP_KIND",
+    "BuildingIdAvailability",
+    "ID_RETIRING",
+    "ID_TAKEN",
+    "ID_TOMBSTONE",
     "LEFTOVER_DETECTION_COLUMNS",
     "Retirement",
+    "STATUS_ABANDONED",
+    "STATUS_CANCELLED",
     "TOMBSTONE_PREFIX",
     "choose_tombstone_id",
     "is_tombstone_id",

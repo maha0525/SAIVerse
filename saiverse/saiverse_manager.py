@@ -1957,13 +1957,16 @@ class SAIVerseManager(
         # 依存する箇所は無い。
         ruler_stem = f"ruler_{region_id}"
         if not is_valid_identifier(ruler_stem):
+            from saiverse.building_retirement import BuildingIdAvailability
+
             db = self.SessionLocal()
             try:
+                building_ids = BuildingIdAvailability(db, self.saiverse_home)
                 ruler_stem = build_identifier(
                     ruler_stem,
                     stem="ruler",
                     ensure_unique=True,
-                    exists=lambda s: ai_stem_taken(db, s, self.city_name),
+                    exists=lambda s: ai_stem_taken(db, s, self.city_name, building_ids),
                 )
             finally:
                 db.close()
