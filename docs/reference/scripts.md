@@ -86,8 +86,8 @@ python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saive
 
 | スクリプト | 用途 |
 |---|---|
-| `update_engine.py` | 全update入口の正典。clean Git fast-forward、更新前world snapshot、phase fail-stop、同一条件restart、health確認、失敗時rollback。依存更新を始める前にリポジトリ直下の `.update_complete` を消し、全段が成功したときだけ「VERSION + requirements.txt / requirements.lock / frontend/package-lock.json の sha256」を JSON で刻み直す (一時ファイル + `os.replace` で atomic)。途中で死ねば印は必ず無く、次回起動は実在照合を通る |
-| `update_engine.py --check-complete` | 起動前の「更新が仕上がっているか」検査 (start.bat / start.sh が呼ぶ)。コードも依存も書き換えない。終了コード 0=起動可 / 10=`--manual` で仕上げが必要 / 11=判定できなかったので警告して起動続行。詳細は [issue](../issues/v0229_update_bat_truncates_after_git_pull.md) |
+| `update_engine.py` | 全update入口の正典。clean Git fast-forward、更新前world snapshot、phase fail-stop、同一条件restart、health確認、失敗時rollback。依存更新を始める前にリポジトリ直下の `.update_complete` を消し、全段が成功したときだけ「VERSION + requirements.txt / requirements.lock / frontend/package-lock.json の sha256」を JSON で刻み直す (一時ファイル + `os.replace` で atomic)。途中で死ねば印は必ず無く、次回起動は実在照合を通る。画面の「Update」ボタンからの更新 (と チャンネル切り替え) では、バックエンドの終了後にこのフォルダの画面のサーバー (`frontend` で動く node と、start.bat の「SAIVerse Frontend」の窓) も止め、依存を入れ直したあと本番モード (`next start`) だったなら `npm run build` し、バックエンドの健全性確認のあとに同じモードで見える窓として立て直す。バックエンドも見える窓で再起動する。バックエンド停止後のどの段で失敗しても、(必要なら巻き戻して) 元の版のバックエンドと画面を立ち上げ直してから失敗として終える。`--manual` (update.bat / update.sh / 起動時の仕上げ) は、このフォルダの画面のサーバーが動いていれば何も変えずに断る ([issue](../issues/ui_update_fails_while_frontend_runs.md)) |
+| `update_engine.py --check-complete` | 起動前の「更新が仕上がっているか」検査 (start.bat / start.sh が呼ぶ)。コードも依存も書き換えない。終了コード 0=起動可 / 10=`--manual` で仕上げが必要 / 11=判定できなかったので警告して起動続行。完了の印が一致していても、`frontend/package.json` が宣言する部品 (dependencies。devDependencies は `NODE_ENV=production` の npm ci が入れないので数えない) が `node_modules` に一つでも欠けていれば 10 を返す。詳細は [issue](../issues/v0229_update_bat_truncates_after_git_pull.md) |
 | `self_update.py` | 旧セルフアップデート入口から `update_engine.py` への互換wrapper |
 | `set_version.py` | バージョン刻印 |
 | `snapshot.py` | world snapshot format v2のsave/list/inspect/restore/delete。restoreは停止状態だけで実行 |

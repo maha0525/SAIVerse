@@ -10,6 +10,7 @@ finished update it did not actually verify.
 from __future__ import annotations
 
 import json
+import shutil
 from importlib import metadata
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -23,6 +24,17 @@ from scripts import update_engine
 _INSTALLED_PYTEST = metadata.version("pytest")
 
 
+@pytest.fixture(autouse=True)
+def _no_running_frontend():  # type: ignore[no-untyped-def]
+    """The fixture checkouts have a frontend directory, so run_update would list
+    this machine's real processes. Answer "none running" instead; the frontend
+    handling itself is covered in test_update_engine_frontend.py."""
+    with patch.object(
+        update_engine, "find_frontend_servers", return_value=update_engine.FrontendServers([], None)
+    ):
+        yield
+
+
 def _make_project(tmp_path: Path, version: str = "0.3.0") -> Path:
     """A checkout that a completed update would leave behind."""
     (tmp_path / "VERSION").write_text(version + "\n", encoding="utf-8")
@@ -33,6 +45,17 @@ def _make_project(tmp_path: Path, version: str = "0.3.0") -> Path:
     frontend = tmp_path / "frontend"
     (frontend / "node_modules").mkdir(parents=True)
     (frontend / "package-lock.json").write_text('{"name": "saiverse"}\n', encoding="utf-8")
+    # The start-time check verifies every package package.json declares is in
+    # node_modules (docs/issues/ui_update_fails_while_frontend_runs.md), so a
+    # completed checkout has both, scoped names included.
+    (frontend / "package.json").write_text(
+        json.dumps({"dependencies": {"next": "^16.0.0"}, "devDependencies": {"@types/node": "^25.0.0"}}),
+        encoding="utf-8",
+    )
+    for name in ("next", "@types/node"):
+        package_dir = frontend / "node_modules" / name
+        package_dir.mkdir(parents=True)
+        (package_dir / "package.json").write_text('{"name": "%s"}\n' % name, encoding="utf-8")
     return tmp_path
 
 
@@ -374,7 +397,7 @@ def test_no_marker_with_a_degraded_parser_is_inconclusive_not_ready(tmp_path: Pa
 def test_no_marker_without_node_modules_demands_the_update_be_finished(tmp_path: Path) -> None:
     """npm never ran: the frontend build would fail after starting."""
     project = _make_project(tmp_path)
-    (project / "frontend" / "node_modules").rmdir()
+    shutil.rmtree(project / "frontend" / "node_modules")
     with patch.object(
         update_engine,
         "missing_dependencies",
@@ -440,7 +463,7 @@ def test_legacy_bare_version_marker_without_node_modules_demands_the_update_be_f
 ) -> None:
     project = _make_project(tmp_path)
     update_engine.marker_path(project).write_text("0.3.0\n", encoding="utf-8")
-    (project / "frontend" / "node_modules").rmdir()
+    shutil.rmtree(project / "frontend" / "node_modules")
     with patch.object(
         update_engine,
         "missing_dependencies",
@@ -801,7 +824,7 @@ def test_update_dependencies_installs_from_the_lock(tmp_path: Path) -> None:
     project = _make_project(tmp_path)
     commands: list[list[str]] = []
 
-    def recording_run(command, *, cwd, label, timeout=900, check=True):  # type: ignore[no-untyped-def]
+    def recording_run(command, *, cwd, label, timeout=900, check=True, encoding=None):  # type: ignore[no-untyped-def]
         commands.append(list(command))
         return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -822,7 +845,7 @@ def test_update_dependencies_never_falls_back_when_the_lock_is_missing(tmp_path:
     (project / "requirements.lock").unlink()
     commands: list[list[str]] = []
 
-    def recording_run(command, *, cwd, label, timeout=900, check=True):  # type: ignore[no-untyped-def]
+    def recording_run(command, *, cwd, label, timeout=900, check=True, encoding=None):  # type: ignore[no-untyped-def]
         commands.append(list(command))
         if command[:5] == ["python", "-m", "pip", "install", "-r"]:
             raise update_engine.UpdateError(f"{label} failed with exit 1: no such file {command[-1]}")
@@ -844,7 +867,7 @@ def _fake_run_with_pip_check(returncode: int, stdout: str, stderr: str = ""):  #
     """``_run`` that answers ``pip check`` with the given result and 0 to the rest."""
     calls: list[dict] = []
 
-    def fake_run(command, *, cwd, label, timeout=900, check=True):  # type: ignore[no-untyped-def]
+    def fake_run(command, *, cwd, label, timeout=900, check=True, encoding=None):  # type: ignore[no-untyped-def]
         calls.append({"command": list(command), "check": check})
         if command[-2:] == ["pip", "check"]:
             if check and returncode != 0:
