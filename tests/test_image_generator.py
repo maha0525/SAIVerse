@@ -132,6 +132,90 @@ class TestImageGenerator(unittest.TestCase):
         mock_gen.assert_called_once()
         temp_path.unlink(missing_ok=True)
 
+    def test_xai_quality_params(self):
+        # Imagine 2.0 は (quality, resolution) の組で課金され、quality は low/medium のみ。
+        # 最上位のツール品質は medium@2k に寄せる。
+        cases = [
+            ("low", {"quality": "low", "resolution": "1k"}),
+            ("medium", {"quality": "medium", "resolution": "1k"}),
+            ("high", {"quality": "medium", "resolution": "2k"}),
+            ("auto", {"quality": "medium", "resolution": "2k"}),
+            ("xhigh", {"quality": "medium", "resolution": "2k"}),
+            ("max", {"quality": "medium", "resolution": "2k"}),
+        ]
+        for requested, expected in cases:
+            with self.subTest(quality=requested):
+                self.assertEqual(_mod._xai_quality_params(requested), expected)
+
+    @patch.dict(os.environ, {"XAI_API_KEY": "test-key"})
+    @patch('xai_sdk.Client')
+    def test_grok_imagine_request_shape(self, mock_client):
+        response = MagicMock()
+        response.data = base64.b64encode(b'img').decode()
+        mock_client.return_value.image.sample.return_value = response
+
+        image_bytes, mime = _mod._generate_with_grok_imagine('p', '16:9', 'medium')
+
+        self.assertEqual((image_bytes, mime), (b'img', 'image/png'))
+        kwargs = mock_client.return_value.image.sample.call_args.kwargs
+        self.assertEqual(kwargs['model'], 'grok-imagine-image-2.0')
+        self.assertEqual(kwargs['aspect_ratio'], '16:9')
+        self.assertEqual(kwargs['quality'], 'medium')
+        self.assertEqual(kwargs['resolution'], '1k')
+        self.assertEqual(kwargs['image_format'], 'base64')
+
+    def test_sniff_image_mime(self):
+        # xAI は JPEG を返す。中身から MIME を決めないと JPEG が .png / image/png で保存される。
+        cases = [
+            (b"\xff\xd8\xff\xe0" + b"x" * 20, "image/jpeg"),
+            (b"RIFF\x00\x00\x00\x00WEBPVP8 ", "image/webp"),
+            (b"\x89PNG\r\n\x1a\n" + b"x" * 20, "image/png"),
+            (b"not an image", "image/png"),
+        ]
+        for data, expected in cases:
+            with self.subTest(expected=expected, head=data[:4]):
+                self.assertEqual(_mod._sniff_image_mime(data), expected)
+
+    @patch.dict(os.environ, {"XAI_API_KEY": "test-key"})
+    @patch('xai_sdk.Client')
+    def test_grok_returns_mime_of_the_actual_bytes(self, mock_client):
+        jpeg = b"\xff\xd8\xff\xe0" + b"x" * 20
+        response = MagicMock()
+        response.data = base64.b64encode(jpeg).decode()
+        mock_client.return_value.image.sample.return_value = response
+
+        _, mime = _mod._generate_with_grok_imagine('p')
+
+        self.assertEqual(mime, 'image/jpeg')
+
+    @patch.object(_mod, '_is_image_model_available', return_value=True)
+    @patch.object(_mod, 'store_image_bytes')
+    @patch.object(_mod, '_generate_with_grok_imagine')
+    def test_generate_image_grok_imagine_dispatch(self, mock_gen, mock_store, mock_avail):
+        # バックエンドが返した MIME (xAI は JPEG) が、そのまま保存側へ渡ること。
+        mock_gen.return_value = (b'imgdata', 'image/jpeg')
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp:
+            tmp.write(b'imgdata')
+            temp_path = Path(tmp.name)
+        mock_store.return_value = ({"uri": "saiverse://image/test", "mime_type": "image/png"}, temp_path)
+
+        with patch.object(_mod, 'get_active_persona_id', return_value=None, create=True), \
+             patch.object(_mod, 'get_active_manager', return_value=None, create=True), \
+             patch('tools.context.get_active_persona_id', return_value=None), \
+             patch('tools.context.get_active_manager', return_value=None):
+            text, info, path, metadata, item_id = generate_image(
+                'a cat', model='grok_imagine', aspect_ratio='16:9', quality='low'
+            )
+
+        self.assertIn('grok_imagine', text)
+        self.assertEqual(Path(path), temp_path)
+        mock_gen.assert_called_once()
+        # プロンプト・縦横比・品質が、この順でバックエンドへ届くこと。
+        self.assertEqual(mock_gen.call_args.args[:3], ('a cat', '16:9', 'low'))
+        self.assertEqual(mock_store.call_args.args[1], 'image/jpeg')
+        temp_path.unlink(missing_ok=True)
+
     def test_tool_registration(self):
         from tools import TOOL_REGISTRY
         self.assertIn('generate_image', TOOL_REGISTRY)

@@ -1637,16 +1637,27 @@ export default function Home() {
                             fetchBuildingInfo();
                         }
 
-                        // If we were updating, show completion toast
+                        // If we were updating, reload once so the browser runs the
+                        // screen the update just built (the updater stops the
+                        // frontend server, rebuilds it and starts it again; the
+                        // code still loaded in this tab is the previous version's).
+                        // The completion toast is shown after the reload.
                         if (isUpdating) {
                             setIsUpdating(false);
                             sessionStorage.removeItem('saiverse_updating');
-                            const toastId = `update-complete-${Date.now()}`;
-                            setToasts(prev => [...prev, { id: toastId, content: 'Update complete! Application has been restarted.' }]);
-                            setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
+                            sessionStorage.setItem('saiverse_update_finished', 'true');
+                            window.location.reload();
+                            return;
                         }
                     }
                     // backendConnected && isUpdating: backend hasn't shut down yet, keep waiting
+                } else if (res.status >= 500 && backendConnected) {
+                    // The frontend server answered but could not reach the backend
+                    // (the proxy returns 5xx while the backend restarts). Without
+                    // this, an update where the frontend server itself stays up
+                    // never saw the disconnect, so it never saw the reconnect
+                    // either and "Updating" spun forever.
+                    setBackendConnected(false);
                 }
             } catch {
                 // Backend not responding
@@ -1658,6 +1669,17 @@ export default function Home() {
 
         return () => clearInterval(reconnectInterval);
     }, [backendConnected, isUpdating]);
+
+    // 更新の完了で読み直した直後: 完了の知らせをここで出す (読み直す前に出すと消えるため)。
+    useEffect(() => {
+        if (sessionStorage.getItem('saiverse_update_finished') !== 'true') return;
+        sessionStorage.removeItem('saiverse_update_finished');
+        const toastId = `update-complete-${Date.now()}`;
+        setToasts(prev => [...prev, { id: toastId, content: 'Update complete! Application has been restarted.' }]);
+        // 片付けの関数は返さない: 開発モードの二重実行で掃除だけが走ると、
+        // 旗はもう消えているので知らせが画面に残り続ける。
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
+    }, []);
 
     // 設定画面からチャンネルを切り替えたときも、更新ボタンと同じ「再起動待ち」に乗せる。
     useEffect(() => {
