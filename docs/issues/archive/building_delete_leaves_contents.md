@@ -3,7 +3,7 @@
 **ステータス**: ✅ 完了 — v0.3.17 で発行済み。2026-10-01 にまはーが実機で、消した部屋の会話とアイテムが、同じ ID で作り直した部屋に戻らないことを確認した (詳細は経緯)
 **優先度**: high (ふつうの画面操作だけで、消した部屋の中身と会話が無関係な新しい部屋に混ざる)
 **作成日**: 2026-09-29
-**関連**: `manager/admin.py::delete_building` / `manager/ids.py::build_identifier` / [`feed_fixture_no_delete_or_edit.md`](../feed_fixture_no_delete_or_edit.md) (設置物の削除。この issue の発見元) / [`docs/audits/2026-09-12_normal_behavior_consolidation/normal_behavior.md`](../../audits/2026-09-12_normal_behavior_consolidation/normal_behavior.md) の FLOW-15 と「不可逆な操作に共通する規範」
+**関連**: `manager/admin.py::delete_building` / `manager/ids.py::build_identifier` / [`feed_fixture_no_delete_or_edit.md`](feed_fixture_no_delete_or_edit.md) (設置物の削除。この issue の発見元) / [`docs/audits/2026-09-12_normal_behavior_consolidation/normal_behavior.md`](../../audits/2026-09-12_normal_behavior_consolidation/normal_behavior.md) の FLOW-15 と「不可逆な操作に共通する規範」
 
 ## 症状
 
