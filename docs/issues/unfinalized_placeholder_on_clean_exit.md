@@ -16,4 +16,4 @@
 ## 関連
 
 - `docs/issues/orphaned_streaming_placeholder_cleanup.md` (親問題 — Beat 死亡側は解決済み)
-- [server_cut_stream_writes_no_interruption_notice.md](server_cut_stream_writes_no_interruption_notice.md) (この残債が見つかったレビューの対象)
+- [server_cut_stream_writes_no_interruption_notice.md](archive/server_cut_stream_writes_no_interruption_notice.md) (この残債が見つかったレビューの対象)
