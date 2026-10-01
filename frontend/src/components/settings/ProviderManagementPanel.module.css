@@ -200,6 +200,20 @@
     border-radius: 0 0 6px 6px;
 }
 
+/* One key variable's label + input. A provider with two key variables
+   (Gemini: paid tier and free tier) stacks two of these, separated by a rule. */
+.keyField {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.keyField + .keyField {
+    margin-top: 4px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color, #e0e0e0);
+}
+
 .keyPanelHeader {
     display: flex;
     align-items: center;

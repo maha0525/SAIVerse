@@ -43,6 +43,13 @@ ALL_PROTOCOLS = {
 CONNECTION_TEST_TIMEOUT = 5.0
 
 
+class ApiKeyEnvInfo(BaseModel):
+    """One environment variable a provider's API key can be read from."""
+    name: str
+    # Whether this variable is set (non-empty) in the environment right now.
+    configured: bool
+
+
 class ProviderInfo(BaseModel):
     """Provider info returned to the UI."""
     id: str
@@ -50,9 +57,17 @@ class ProviderInfo(BaseModel):
     protocol: str
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
+    # Every environment variable this provider's key can be read from: the
+    # primary api_key_env first, then the definition's api_key_env_alternates
+    # (e.g. Gemini's free-tier key next to its paid-tier key). Empty when the
+    # provider names no api_key_env. The key panel in the UI shows one input
+    # per entry.
+    api_key_envs: list[ApiKeyEnvInfo] = []
     builtin: bool = False
-    # Whether the api_key_env variable is set in the environment.
-    # None means no api_key_env is configured (e.g., local Ollama).
+    # Whether ANY of the api_key_envs variables is set in the environment —
+    # the same "any one is enough" rule model availability uses
+    # (saiverse.model_configs.is_model_available), so the badge and the model
+    # list agree. None means no api_key_env is configured (e.g., local Ollama).
     api_key_configured: Optional[bool] = None
     # False for backends that accept any key (local servers such as LM Studio
     # or llama.cpp). Such providers stay usable with no key configured.
@@ -119,17 +134,48 @@ class InlineConnectionTestRequest(BaseModel):
     provider_id: Optional[str] = None
 
 
+def _api_key_env_names(cfg: dict) -> list[str]:
+    """Names of every environment variable this provider's key can be read from.
+
+    The primary ``api_key_env`` first, then ``api_key_env_alternates``. The
+    alternates follow the same rule as
+    ``saiverse.model_configs._get_required_env_vars``: read only when the field
+    is a list, keep only non-empty strings, and drop duplicates (including a
+    repeat of the primary name). A provider with no ``api_key_env`` has none.
+    """
+    primary = cfg.get("api_key_env")
+    if not primary:
+        return []
+    names = [primary]
+    alternates = cfg.get("api_key_env_alternates")
+    if isinstance(alternates, list):
+        for alt in alternates:
+            if isinstance(alt, str) and alt and alt not in names:
+                names.append(alt)
+    return names
+
+
 def _to_provider_info(pid: str, cfg: dict) -> ProviderInfo:
+    """Build the UI-facing info for a provider.
+
+    Every route that returns a provider (list, single get, create, update,
+    reload) goes through here, so they all report the same key variables.
+    """
     api_key_env = cfg.get("api_key_env")
+    api_key_envs = [
+        ApiKeyEnvInfo(name=name, configured=bool(os.environ.get(name)))
+        for name in _api_key_env_names(cfg)
+    ]
     api_key_configured: Optional[bool] = None
-    if api_key_env:
-        api_key_configured = bool(os.environ.get(api_key_env))
+    if api_key_envs:
+        api_key_configured = any(env.configured for env in api_key_envs)
     return ProviderInfo(
         id=pid,
         display_name=cfg.get("display_name", pid),
         protocol=cfg.get("protocol", "unknown"),
         base_url=cfg.get("base_url"),
         api_key_env=api_key_env,
+        api_key_envs=api_key_envs,
         builtin=cfg.get("source") == provider_configs.SOURCE_BUILTIN,
         api_key_configured=api_key_configured,
         api_key_required=cfg.get("api_key_required"),
