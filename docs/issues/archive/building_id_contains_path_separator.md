@@ -1,8 +1,8 @@
 # 部屋 ID に「/」が入った部屋で、過去ログが移らず毎回の起動で警告が出続ける (部屋 ID を付け替えて直す)
 
 **起票**: 2026-09-11 (N さんの報告「久しぶりに起動したら『過去ログが未取込』の警告で画面が埋まった」、まはー経由)
-**状態**: 実装済み・検証待ち — v0.3.12 (`hotfix/v0.3.12`) に載せる。設計はすべてまはーの GO 済み。残るのは利用者の環境での確認 (N さんが更新した後)
-**関連**: `saiverse/legacy_log_import.py` (`find_log_files` / `_scan_one_building` / `_child_by_name`)、`manager/initialization.py`、`manager/ids.py`、[legacy_log_import_misses_decomposed_folder_names.md](legacy_log_import_misses_decomposed_folder_names.md)、[archive/building_id_no_charset_constraint.md](archive/building_id_no_charset_constraint.md)、[building_memory_unified.md](../intent/building_memory_unified.md) の「過去ログ取り込みの自動化と検算」、[room_state_packages.md](../intent/room_state_packages.md)、[execution_ledger.md](../intent/execution_ledger.md)
+**状態**: ✅ 完了 — v0.3.12 で発行済み。報告者への案内も済み (2026-10-01 まはー)。再発したら起案し直す
+**関連**: `saiverse/legacy_log_import.py` (`find_log_files` / `_scan_one_building` / `_child_by_name`)、`manager/initialization.py`、`manager/ids.py`、[legacy_log_import_misses_decomposed_folder_names.md](legacy_log_import_misses_decomposed_folder_names.md)、[archive/building_id_no_charset_constraint.md](building_id_no_charset_constraint.md)、[building_memory_unified.md](../../intent/building_memory_unified.md) の「過去ログ取り込みの自動化と検算」、[room_state_packages.md](../../intent/room_state_packages.md)、[execution_ledger.md](../../intent/execution_ledger.md)
 
 ## 症状
 
@@ -228,3 +228,4 @@ DB だけを戻すと、ペルソナの記憶のファイルとフォルダが�
 - 2026-09-11: 上の直しをコミット (0f15ff50)。Codex の指摘の当たる場所が、付け替えの失敗や中断に「DB だけをバックアップから戻す」「関係ないフォルダが置かれる」が重なる場合へ移ってきたので、レビューを終えてよいかをまはーに上げ、まはーが終了を決めた (「了解、まぁ大丈夫だと思う。完了で。」)。最後の直しは Codex を通していない (テストと私の読み直しで確かめた)。フルスイート 5,993 件緑。隔離環境 (test_data の複製に N さんの形の部屋「2/28」と、2 段のフォルダの古い会話 23 行を足したもの) を実際の起動経路に通し、次を出力で確かめた: 付け替え (照合の欠けは前 21・後 21 で増えない) → フォルダの移動と空になった途中のフォルダの削除 → 古い会話 23 件の取り込み → 画面の警告 0 件 → 会話 API で 23 件が元の順 (既定の 20 件の頁は続きあり) → アドオンのメタデータは元の 5 番目の会話に付いたまま → ペルソナの記憶は印だけが新しい ID で、文面は変わらない → DB と記憶のバックアップが作られる → 部屋の設定の保存 API が 200。
 
 - 2026-09-11: v0.3.12 として発行 (PR #290 → main、タグ v0.3.12)。発行前の状態 = 実装とレビューを終え、フルスイートと隔離環境での起動確認 (付け替え→取り込み 23 件→警告なし→会話が元の順→部屋の設定の保存) も通過。残 = N さんの環境で警告が消えて古い会話が見えることの確認。
+- 2026-10-01 (台帳から外した): まはーが 2026-10-01 に「案内は全部済んでいる。いま他に不具合報告は来ていない。再発したらそのとき起案する」と伝えたので、完了として台帳から外した。 台帳から押し出した旧文面: 「v0.3.12 として発行済み。次は N さんに更新を案内し、N さんの環境で警告が消えて古い会話が見えることの確認をもらう。」(誰待ち: まはー (更新案内) → 外部 (N さんの確認)) 旧ステータス行: 「**状態**: 実装済み・検証待ち — v0.3.12 (`hotfix/v0.3.12`) に載せる。設計はすべてまはーの GO 済み。残るのは利用者の環境での確認 (N さんが更新した後)」

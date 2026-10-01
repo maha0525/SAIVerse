@@ -665,7 +665,7 @@ chronicle のカテゴリだけを除き、コア記憶のカテゴリ (`core`) 
 **根拠**
 
 - **(まはー原文、2026-09-09)**「regionとゲーム、FixtureとObserver、この辺は0.4.0以降のリリースにするために意図的に配線を繋いでない。ただ、何も書かれてないのは今みたいに混乱を招くから問題だね。」
-- **(まはー原文、2026-09-11、部屋 ID の付け替え)**「2段のフォルダをそのまま運用し続けること自体、かなりまずそうに思うけどその点はどう？」→ 付け替え案へ「うん、それが良い！」、会話一件ずつの識別番号も新しい ID へ切り替える提案、記憶の中の機械が読む印だけ書き換える案へ「Ok、どちらもbで！」(`docs/issues/building_id_contains_path_separator.md`)
+- **(まはー原文、2026-09-11、部屋 ID の付け替え)**「2段のフォルダをそのまま運用し続けること自体、かなりまずそうに思うけどその点はどう？」→ 付け替え案へ「うん、それが良い！」、会話一件ずつの識別番号も新しい ID へ切り替える提案、記憶の中の機械が読む印だけ書き換える案へ「Ok、どちらもbで！」(`docs/issues/archive/building_id_contains_path_separator.md`)
 - `docs/intent/city_identity.md` §3 / §4 (仕様文書 — 識別子と表示名)、`docs/intent/region.md` §3 (仕様文書)
 - `docs/user-guide/world-editor.md` / `city-map.md` (利用者向け説明)
 - `docs/audits/2026-09-10_normal_behavior_remaining_evidence/findings.md` 議題 6 の節 (部屋を消しても `building_messages` に触らないことをコードで確認済み)

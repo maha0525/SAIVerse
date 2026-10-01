@@ -544,3 +544,7 @@ LM Studio は OpenAI 互換 API を提供するため `openai_compat` で扱え�
 - **expansion_data のプロバイダも対象**: 将来的にアドオンが独自プロバイダを同梱する余地として、`expansion_data/<addon>/providers/` も `iter_files()` の対象に含める
 - **既存の `is_model_available()` との関係**: 環境変数チェックは引き続き機能。`provider_ref` 経由で `api_key_env` を解決した後、既存ロジックがそのまま使える
 - **`get_provider_for_model()` ヘルパー**: UI での「このモデルはどのプロバイダを使っているか」表示用に、新規ヘルパーを `model_configs.py` に追加（`provider_ref` 優先、なければ `provider` フィールドから推定）
+
+## 経緯 (2026-10-01 in_flight 台帳より移送)
+
+- 2026-10-01 (台帳の行を差し替えた): PR #320 はマージ済みで v0.3.15 に載った (release_history の v0.3.15 の範囲) ので、PR 確認待ちの文面を外した。 台帳から押し出した旧文面: 「実装・隔離環境での画面と保存の確認まで完了し、PR を作って確認待ちにする。次 = まはーが PR の内容を確認してマージし、実機のプロバイダタブでキー設定ボタンと保存の反映を見る。」(誰待ち: まはー (PR 確認 → 実機確認))

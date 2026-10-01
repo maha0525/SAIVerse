@@ -24,7 +24,7 @@
 **棚卸しの結果 (2026-08-16)** — 約3週間の設計世代交代 (時間割の抜本改修 / あらすじのレベル制 / Track 撤廃 順序① / 編纂入口の一本化) と突き合わせた:
 
 - **実機検証の本線は [統合検証手順 (2026-08-07)](../handoff/2026-08-07_timetable_live_verification_run.md) へ合流済み**。同手順が「実行台帳 W1/W2/W5 の正常系 + 横断ライフ一日」を守備範囲として明記し、W7 の起動時修復ログ (Step 1) や W6 の rebasing / stale save 静穏 (Step 3 横断観察) も拾う。詳細は「横断 実機検証」節。
-- **W4 の実機検証は後継行へ移管して閉じる**。[あらすじのレベル制](../intent/arasuji_levels.md) が chronicle_consolidation / chronicle_eviction の圧縮規則を置き換える正典であることを自ら宣言しており、実機検証もそちらの行 (エリス合格済み・残 = aifi 再編纂とレベル1束ねの初発火観察) と [applier_veto_deadlock issue](../issues/chronicle_eviction_applier_veto_deadlock.md) が持つ。W4 固有に検証する対象はもう無い。
+- **W4 の実機検証は後継行へ移管して閉じる**。[あらすじのレベル制](../intent/arasuji_levels.md) が chronicle_consolidation / chronicle_eviction の圧縮規則を置き換える正典であることを自ら宣言しており、実機検証もそちらの行 (エリス合格済み・残 = aifi 再編纂とレベル1束ねの初発火観察) と [applier_veto_deadlock issue](../issues/archive/chronicle_eviction_applier_veto_deadlock.md) が持つ。W4 固有に検証する対象はもう無い。
 - **W9 (柱7 完全手動モード) は v3 待ち凍結**。自律行動の運転は [autonomous_behavior_v3](../intent/autonomous_behavior_v3.md) で再設計中 (運転の v0.4 分離裁定 2026-08-01) で、v2 配線に gate を新設しても土台ごと入れ替わる。A10 の finding は消えていない — 凍結であって解決ではない。
 - **S9 (柱8) は患部消滅を裏取りして消し込み** (レビュー台帳 SEA 行 2026-08-16)。Metabolism の発火判定が字数三水位へ世代交代し、指摘対象の件数差分 gate が現行コードに存在しない。
 - **A3 (host/City 時差) は残存を再裏取り**。autonomy_wiring.py に timezone 処理なしのまま (2026-08-16 grep)。host=City 同一 TZ の現行構成では潜伏。着手裁定待ちは変わらず。
@@ -64,7 +64,7 @@
 
 ### W4 ☑ 実行台帳 Phase 4 — Metabolism 残片 = 体験の構造 工程(2) と統合 — 実装済み (2026-07-27)・検証は世代交代先へ移管して閉じた (2026-08-16 棚卸し)
 
-- **棚卸し (2026-08-16)**: 本 wave の実機検証は独立には行わない — 圧縮規則の正典が [あらすじのレベル制](../intent/arasuji_levels.md) へ世代交代し (同 intent 冒頭が chronicle_consolidation / chronicle_eviction の置き換えを宣言)、実機検証もそちら (2026-07-29 エリスで §11-4 合格、残 = aifi 再編纂とレベル1束ね初発火の観察) と [applier_veto_deadlock issue](../issues/chronicle_eviction_applier_veto_deadlock.md) の行が真実を持つ。以下の記録は経緯として保存
+- **棚卸し (2026-08-16)**: 本 wave の実機検証は独立には行わない — 圧縮規則の正典が [あらすじのレベル制](../intent/arasuji_levels.md) へ世代交代し (同 intent 冒頭が chronicle_consolidation / chronicle_eviction の置き換えを宣言)、実機検証もそちら (2026-07-29 エリスで §11-4 合格、残 = aifi 再編纂とレベル1束ね初発火の観察) と [applier_veto_deadlock issue](../issues/archive/chronicle_eviction_applier_veto_deadlock.md) の行が真実を持つ。以下の記録は経緯として保存
 
 - **スコープ**: M2 (Chronicle 生成の残る原子性課題)。**S2/M1 は統合工事 §6-5 で先取り済み** — 差分を調査してから着手 (残量は小さい可能性が高い)
 - **統合裁定 (2026-07-19)**: Chronicle 生成は [体験の構造](../intent/experience_structure.md) 工程(2) で episode 整列 (サイズ+列のあふれ束ね・バッチ降格・恒等圧縮) に世代交代する。**旧バッチ生成経路に hardening を入れない** (捨てる経路を固めるのは二度手間) — 新設経路を最初から原子的に作り、M2 はそこで消化する
@@ -73,7 +73,7 @@
 - **実機検証で出た欠陥 (2026-07-24)**: エリスの Chronicle 一覧に単独発言のエントリが並ぶというまはーの観察から調査。**一次あらすじが標準被覆 U=1 万字に対し実測 9〜6,344 字に崩れている** — 自動経路の evict 境界 (退場の刻み幅) は U と無関係に数件ずつ動くのに、`_plan_run` は run 末尾で `_flush_pending()` を無条件に確定するため、「まだ相手が退場していない端数」が「束ねる相手がいない豆粒」(§4-3 恒等圧縮) と同一視される。§4-4 (同一レベルの再圧縮禁止) により後から束ね直せない。二次以上のあらすじ 側の `bands.py` `_select_bundle_run` には「目標未達の列は束ねず持ち越す」規律があるのに**一次あらすじだけ持ち越しの器が無い**という非対称 → [`chronicle_undersized_lv1_chunks`](../issues/chronicle_undersized_lv1_chunks.md) (解消は下の差し戻し行へ)。なお発端の 2 エントリ自体は W4 の欠陥ではなく、W5/M8 で根治済みの `ingested_by` 非永続化バグが 7/18 に作った重複 user 行を、W4 の集合ベース未処理判定が**正しく**拾った結果 → [`chronicle_orphan_duplicate_user_messages`](../issues/chronicle_orphan_duplicate_user_messages.md) (データ掃除のみ残)
 - **差し戻し (2026-07-24→25): 退場設計の世代交代 = [chronicle_eviction.md](../intent/chronicle_eviction.md) 実装 — 実装待ち**。当初の借用案 (一次あらすじ端数を提示中の生ログで最小限巻き込んで U を満たす) は Codex レビューで **open episode 分断の P1** が出て撤回。まはーとの設計対話で退場の粒度そのものを変える上流の解に到達し、intent は **2026-07-25 レビュー通過・設計確定**。スコープ = ①退場を時系列一本線→ **episode 単位** (open は単独 digest・closed 同士は束ねる) ②水位をメッセージ数→ **文字数三水位** (既定 低4万/目標6万/高12万、全モデル一律・モデルファイルでユーザー設定可) ③ experience_structure §6 **pulse 関節細分**の実装 (open episode の部分圧縮) ④ digest の**時系列位置置き換えレンダリング** + 圧縮マーク注釈 ⑤借用実装 (alignment / session_lifecycle / テスト、未コミット) の撤回。**W4 検証項目の読み替え**: evict boundary (D1) と open episode 丸ごと回避スナップ (D2) はこの実装で世代交代するため旧実装のまま検証しない。恒等転写・列のあふれ束ね (bands)・チャンク単一 tx (M2-a/c/d/e) は現行のまま有効。**上書きされる裁定**: 柱2 §6-5 の「Metabolism 閾値はモデル依存」→ 全モデル一律・文字数三水位 ([beat_execution_context.md](../intent/beat_execution_context.md) §3.2 に注記済み)。既存小粒ノードの掃除 (19 identity + 17 batch、本番記憶書き換え=まはー承認必須) と重複 user 行掃除は実装と別枠
 - **差し戻しの消化 (2026-07-25→27)**: **下段 (生ログ → 一次あらすじ) = 実装済み** ([chronicle_eviction.md](../intent/chronicle_eviction.md)、`e8c061d` + `3fa2711` + `53448ef`、Codex 3 巡 + サブエージェント 1 巡消し込み)。**上段 (一次 → 二次以上の束ねと提示) = 実装済み** ([chronicle_consolidation.md](../intent/chronicle_consolidation.md) v0.2、`f19553f`) — 束ねの発火を「未束ね字数 > 提示予算/4」に、選抜を質量ベース (比率 10 倍以内 + 卒業 = 合算 ≥ 5×最大) に世代交代し、束ね不能ノードは治療 (隣人への合流) で回収。提示粒度は累積質量ルールへ。Codex レビュー 5 巡で P1×9 消し込み、bands 33 件 + 全体 3,222 passed。**残 = まはー実機検証**
-- **実装レビューで発掘した本設計以前からの欠陥 (消化状況は各項に付記)**: [`chronicle_eviction_applier_veto_deadlock`](../issues/chronicle_eviction_applier_veto_deadlock.md) (P1 — 適用側の拒否権で anchor が恒久的に詰まる) **2026-07-27 実装完了** (`fadd6de`。顔その1=編纂対象ゼロ fold を吸収限定退場へ / 顔その2=あらすじ手動削除の道連れ + 恒久欠落記録の撤去。残 = まはー実機検証 = 通常運転の Metabolism が退行していないこと) / ~~[`chronicle_run_boundary_lost_by_excluded_tag`](../issues/archive/chronicle_run_boundary_lost_by_excluded_tag.md) (P1 — 除外タグ 1 件で run 境界が消え §4-5 の偽の隣接が起きる)~~ **2026-07-27 解決** (境界を fold の先頭 id でなく所属 fold で持つ。この修正への攻撃レビューで [`fold_range_and_chronicle_entry_not_one_to_one`](../issues/fold_range_and_chronicle_entry_not_one_to_one.md) (P2 — 退場する範囲とあらすじの範囲の一対一が強制されていない) を新たに発掘・issue 化) / [`chronicle_split_episode_digest_double_description`](../issues/chronicle_split_episode_digest_double_description.md) (まはーへの再説明待ち)。W4 の完了条件には含めず、独立 issue として消化する
+- **実装レビューで発掘した本設計以前からの欠陥 (消化状況は各項に付記)**: [`chronicle_eviction_applier_veto_deadlock`](../issues/archive/chronicle_eviction_applier_veto_deadlock.md) (P1 — 適用側の拒否権で anchor が恒久的に詰まる) **2026-07-27 実装完了** (`fadd6de`。顔その1=編纂対象ゼロ fold を吸収限定退場へ / 顔その2=あらすじ手動削除の道連れ + 恒久欠落記録の撤去。残 = まはー実機検証 = 通常運転の Metabolism が退行していないこと) / ~~[`chronicle_run_boundary_lost_by_excluded_tag`](../issues/archive/chronicle_run_boundary_lost_by_excluded_tag.md) (P1 — 除外タグ 1 件で run 境界が消え §4-5 の偽の隣接が起きる)~~ **2026-07-27 解決** (境界を fold の先頭 id でなく所属 fold で持つ。この修正への攻撃レビューで [`fold_range_and_chronicle_entry_not_one_to_one`](../issues/fold_range_and_chronicle_entry_not_one_to_one.md) (P2 — 退場する範囲とあらすじの範囲の一対一が強制されていない) を新たに発掘・issue 化) / [`chronicle_split_episode_digest_double_description`](../issues/chronicle_split_episode_digest_double_description.md) (まはーへの再説明待ち)。W4 の完了条件には含めず、独立 issue として消化する
 - **完了条件**: 記憶監査・SEA 監査の Metabolism 系 finding が全消し込み + 体験の構造 §4 の圧縮七原則が生成経路の回帰で固定される ✔ / **差し戻し後**: chronicle_eviction 実装 ✔ + chronicle_consolidation 実装 ✔ + 両 intent §9 / §10 の検証が実機通過 (残)
 
 ### W5 ☑ 実行台帳 Phase 5 — 配送系と移動 — 実装済み・実機検証待ち (2026-07-21)
@@ -245,7 +245,7 @@ U 以上を畳み切った時にも成立していた)。
 →**種類を問わず未畳みの先頭を畳む**へ) ④二段構えでfoldsの時系列順が崩れ子episodeの記録順が逆転。
 Codexは4巡目でクレジット上限(OpenAI障害と同時)→サブエージェントへ交代。
 サブエージェント=93,312通り総当たりで**計画側の契約違反・偽の隣接・無限ループ0件**を確認したうえで、⑤最後の手段がanchor非停滞の回にも発火(手前を今回畳んでいても前提が真になる→**日常経路で小粒ノードを作り観測フラグも死ぬ**。
-修正済) + **本変更以前から在る欠陥2件を発見→issue化のみ**: [applier_veto_deadlock](../issues/chronicle_eviction_applier_veto_deadlock.md)(適用側の拒否権2つを計画側が知らず永久ループ。
+修正済) + **本変更以前から在る欠陥2件を発見→issue化のみ**: [applier_veto_deadlock](../issues/archive/chronicle_eviction_applier_veto_deadlock.md)(適用側の拒否権2つを計画側が知らず永久ループ。
 強制クローズでも救えなかった経路) / [run_boundary_lost_by_excluded_tag](../issues/archive/chronicle_run_boundary_lost_by_excluded_tag.md)(編纂のrun境界がfold先頭id依存で除外タグ1件で消え、離れたfoldが一つのあらすじに=§4-5偽の隣接。
 **2026-07-27解決**=境界を先頭idでなく所属foldで持つ形へ交代し、先頭が編纂対象から落ちても境界が立つ。
 純関数側と実DB側の両方に「先頭が居ない群」の回帰を追加。
@@ -256,7 +256,7 @@ Codex攻撃レビュー4巡で契約違反時の縮退も固め=所属不明(重
 種類で書くと「達成しない発火」と「達成できるのに発火しない穴」の両方が開く**(同一変更で2回踏んだ)。
 回帰=本体3251 passed・ruff clean。
 **残=まはー実機検証** — 当時の残件は二つとも消化済み: ①W4 発掘の P1 = applier_veto_deadlock は **2026-07-27 実装完了** (`fadd6de`。
-検証待ちは[専用行](../issues/chronicle_eviction_applier_veto_deadlock.md)が持つ) ②上段(二次以上のあらすじ)の偽の隣接と二箇所のズレも同日 chronicle_consolidation で実装完了 (`f19553f`) → **2026-07-28 に[あらすじのレベル制](../intent/arasuji_levels.md)へ世代交代**(そちらの専用行が真実を持つ)。
+検証待ちは[専用行](../issues/archive/chronicle_eviction_applier_veto_deadlock.md)が持つ) ②上段(二次以上のあらすじ)の偽の隣接と二箇所のズレも同日 chronicle_consolidation で実装完了 (`f19553f`) → **2026-07-28 に[あらすじのレベル制](../intent/arasuji_levels.md)へ世代交代**(そちらの専用行が真実を持つ)。
 よって退場側 intent §9 (a)〜(d) の実機検証を止めていた条件も解けている。
 走行メモ=[2026-07-25](../handoff/2026-07-25_chronicle_eviction_handoff.md)。
 W1〜W3/W5〜W8の実機検証は退場経路と独立なので並行消化可。

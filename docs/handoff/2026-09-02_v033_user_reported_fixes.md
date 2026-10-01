@@ -105,7 +105,7 @@ Windows 環境では**確認する手段が無い**。報告者の環境で確�
   BUILDINGID は合成済みの 1 文字 (NFC)。パスで開けば見つかるがディレクトリ一覧との
   文字列比較では一致せず、取り込みが「対象 0 件」で空振りしていた
 - **緑の条件**: 起動でバナーが消え、その部屋の過去の会話が画面に出ること
-- issue: [legacy_log_import_misses_decomposed_folder_names](../issues/legacy_log_import_misses_decomposed_folder_names.md)
+- issue: [legacy_log_import_misses_decomposed_folder_names](../issues/archive/legacy_log_import_misses_decomposed_folder_names.md)
 
 ### 3-2. カタログ・アドオン取得・更新通知・お知らせが全滅
 
@@ -114,7 +114,7 @@ Windows 環境では**確認する手段が無い**。報告者の環境で確�
   **0 個**。urllib 経由の HTTPS が接続先を問わず必ず失敗する
 - **緑の条件**: カタログが開くこと。**あわせてアドオンのインストール、更新通知、
   お知らせも戻っているはず** (同じ 4 経路が一度に直る)
-- issue: [urllib_https_fails_when_os_trust_store_empty](../issues/urllib_https_fails_when_os_trust_store_empty.md)
+- issue: [urllib_https_fails_when_os_trust_store_empty](../issues/archive/urllib_https_fails_when_os_trust_store_empty.md)
 
 ### 3-3. Chronicle が開けず、その後 Memopedia が固まる ← **根本原因は未特定**
 
@@ -125,7 +125,7 @@ Windows 環境では**確認する手段が無い**。報告者の環境で確�
 - **直っていない部分**: **その環境で引っ越しが何で倒れているかは未特定。**
   接続リークを塞いだので「後続が巻き添えになる」ことは無くなるが、Chronicle が
   開けないこと自体は直っていない可能性が高い
-- issue: [memory_db_connection_leak_on_init_failure](../issues/memory_db_connection_leak_on_init_failure.md)
+- issue: [memory_db_connection_leak_on_init_failure](../issues/archive/memory_db_connection_leak_on_init_failure.md)
 
 ---
 

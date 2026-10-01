@@ -1,10 +1,10 @@
 # Issue: Codex 系モデルの応答が複数メッセージで届くと、スペルが前の文に直結して不発になる
 
-**ステータス**: 🟠 実装中
+**ステータス**: ✅ 完了 — v0.3.16 で発行済み。報告者への案内も済み (2026-10-01 まはー)。再発したら起案し直す
 **優先度**: high (ユーザー報告 2 件。該当モデルではコア記憶に指示しても直せない)
 **作成日**: 2026-09-27
 **報告**: an nin さん (Discord、2026-09-25。GPT-5.6 Sol Codex / GPT-6 Astra Codex で再発、Gemini 3.8 Flash では起きない) と noble_piglet_59694 さん (同スレッド。ログと再現手順つき)。どちらも v0.3.14。
-**関連**: `llm_clients/openai_codex.py` (`_iter_chunks`)、`sea/runtime_llm.py` (`_SPELL_PATTERN` の行頭判定と chunk の結合)。同族の既存 issue: [spell_backtick_wrapping_misfire.md](spell_backtick_wrapping_misfire.md) (こちらも「行頭に /spell が来ない」形だが原因は別)
+**関連**: `llm_clients/openai_codex.py` (`_iter_chunks`)、`sea/runtime_llm.py` (`_SPELL_PATTERN` の行頭判定と chunk の結合)。同族の既存 issue: [spell_backtick_wrapping_misfire.md](../spell_backtick_wrapping_misfire.md) (こちらも「行頭に /spell が来ない」形だが原因は別)
 
 ## 症状
 
@@ -28,7 +28,7 @@
 
 ## 報告に含まれる別の一件 (上限どおりの挙動だが、黙って不発になる点は既知の未実装)
 
-noble_piglet さんの比較報告にある Claude Opus 4.6 の不発 1 回は、スペルのラウンド (スペルの結果を受けて続きを生成する繰り返し) の上限に達したもので、書式の崩れではない (既定 3 回、ログの `After round 3: has more spells=True` がその印)。上限は環境変数 `SAIVERSE_SPELL_MAX_ROUNDS` で変えられる。ただし「上限に達したことが本人にもユーザーにも知らされず黙って不発になる」ことは仕様ではなく、残り回数の提示と不発の通知を足す設計が別 issue ([spell_round_limit_redesign.md](spell_round_limit_redesign.md)) に既にある (未着手)。
+noble_piglet さんの比較報告にある Claude Opus 4.6 の不発 1 回は、スペルのラウンド (スペルの結果を受けて続きを生成する繰り返し) の上限に達したもので、書式の崩れではない (既定 3 回、ログの `After round 3: has more spells=True` がその印)。上限は環境変数 `SAIVERSE_SPELL_MAX_ROUNDS` で変えられる。ただし「上限に達したことが本人にもユーザーにも知らされず黙って不発になる」ことは仕様ではなく、残り回数の提示と不発の通知を足す設計が別 issue ([spell_round_limit_redesign.md](../spell_round_limit_redesign.md)) に既にある (未着手)。
 
 ## レビューの経緯と、受けなかった指摘 (2026-09-27)
 
@@ -40,3 +40,7 @@ noble_piglet さんの比較報告にある Claude Opus 4.6 の不発 1 回は�
 
 - 2026-09-27: 起票。原因をコードで確認し、修正に着手。同日、修正・テスト・レビュー消し込みまで完了。
 - 2026-09-28: PR #323 で develop にマージ済み。v0.3.16 に載せて発行待ち。台帳の旧文面: 「修正・テスト・レビューの消し込みまで完了し、PR を作って確認待ちにする。次 = まはーが PR を確認してマージし、リリース後に報告者二人へ返信文 (起草済み) を送って回復確認をもらう。」
+
+## 経緯 (2026-10-01 in_flight 台帳より移送)
+
+- 2026-10-01 (台帳から外した): まはーが 2026-10-01 に「案内は全部済んでいる。いま他に不具合報告は来ていない。再発したらそのとき起案する」と伝えたので、完了として台帳から外した。 台帳から押し出した旧文面: 「修正は v0.3.16 として発行済み。次 = 報告者二人へ返信文 (起草済み) を送って回復確認をもらう。」(誰待ち: まはー (返信の送信) → 外部 (報告者の確認)) 旧ステータス行: 「**ステータス**: 🟠 実装中」
