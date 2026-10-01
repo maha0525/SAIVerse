@@ -3,20 +3,17 @@ import { fileURLToPath } from "node:url";
 
 import type { NextConfig } from "next";
 
+import devOrigins from "./dev-origins.cjs";
+
 const configDir = path.dirname(fileURLToPath(import.meta.url));
 
 const nextConfig: NextConfig = {
     turbopack: {
         root: configDir,
     },
-    allowedDevOrigins: (() => {
-        // Base: always allow loopback and all Tailscale domains (*.ts.net covers any tailnet)
-        const origins: string[] = ["localhost", "127.0.0.1", "*.ts.net"];
-        // Optional: comma-separated extra origins via env var (e.g. LAN hostname, custom domain)
-        const extra = process.env.SAIVERSE_ALLOWED_ORIGINS;
-        if (extra) origins.push(...extra.split(",").map((s) => s.trim()).filter(Boolean));
-        return origins;
-    })(),
+    // Loopback and Tailscale names, plus SAIVERSE_ALLOWED_ORIGINS (LAN hostname,
+    // custom domain). The list and its matching rules live in dev-origins.cjs.
+    allowedDevOrigins: devOrigins.buildAllowedDevOrigins(process.env.SAIVERSE_ALLOWED_ORIGINS),
     async rewrites() {
         // fallback に置くことで、Next.js の動的 Route Handler
         // (app/api/addon/[...path]/route.ts など) が先に評価される。
