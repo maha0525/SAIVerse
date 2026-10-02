@@ -1,6 +1,20 @@
 # MCP 接続の復旧経路の穴（remote 化で顕在化しやすい）
 
-**ステータス**: 未着手（Elyth Remote MCP 移行のスコープから分離）
+**ステータス**: 一部検証待ち（2026-10-02: 1(a) の per_persona wrapper 判定を実装。実接続での検証は未実施。残るライフサイクル設計は未着手）
+
+## 現在地 (2026-10-02)
+
+per_persona の wrapper が「登録表にあるか」だけを見て切断済み接続へ送り続ける穴を修正。新しい呼び出しの入口で `connected` まで確認し、未接続と同じ `_start_instance` 経路へ戻す。これは下記追記 3 の判定変更に限る。送信後に結果が不明となった**同じ操作の自動再送はしない**。
+
+実装の所有境界と検証範囲は [intent §I](../intent/mcp_addon_integration.md#per_persona-ツール呼び出しの接続回復-2026-10-02)。`tests/test_mcp_wrapper_recovery.py` は fake 接続で実 `_start_instance` を通し、切断済み/未接続の回復、生存接続の再利用、backoff、起動中/停止中/起動着地時の停止、参照保持、他ペルソナの分離、送信後の再送禁止、global の非変更を検査する。
+
+残りは実接続での回復確認と、従来どおり未着手の再接続処理の統合・起動の明示的キャンセル・desired state の設計。実 MCP、認証情報、本番ペルソナは今回使用していない。本 issue 全体は閉じない。
+
+### 検証記録 (2026-10-02)
+
+- 修正前の新規回帰 12 件は 7 件失敗 / 5 件通過。切断済みの接続では起動・backoff・遷移ガードを迂回することを再現。
+- 修正後は実 `_shutdown_instance` を通す競合検査も加えた新規 13 件を含め、MCP 関連 8 ファイルで **125 passed / 5 subtests passed**。隔離した `SAIVERSE_HOME` で実行し、transport は fake。既知の google.genai の `TUPLE` 警告 1 件あり。
+- 変更 Python の ruff、`check_in_flight.py` (既存 RSS 行の経過措置警告のみ)、`git diff --check` は通過。フルスイートと実サービスは未実施。
 
 > **2026-08-10 追記**: per_persona ツール検出の再設計 (`docs/intent/mcp_addon_integration.md` §I — 起動時 discovery を廃止し、Pulse 頭でペルソナ自身の接続を張り Beat 頭で一覧を聞き直す) が確定した。実装されれば **2 と 3 は工程ごと消滅**する (「一回きりの検出」が無くなり、鍵保存の次の Pulse から自然に使える / 接続失敗は既存の失敗記録に載る)。**1 も接続ライフサイクルが Pulse 単位になることで形が変わる** — 「切れた接続を掴み続ける」は「Pulse 頭の接続確立が毎回やり直す」に置き換わる見込み。§I の実装と検証が済んだ時点で、本 issue の残りを再評価して閉じるか書き直す。
 >

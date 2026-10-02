@@ -2407,7 +2407,11 @@ def _make_mcp_tool_wrapper(
                 )
 
             instance_key = _make_instance_key(qualified_name, persona_id)
-            if instance_key not in manager._connections:
+            # call_tool の失敗後は切断済み接続も表に残る。新しい呼び出しの
+            # 入口で生存まで確かめ、既存の起動・backoff・遷移ガードへ戻す。
+            # 送信後の例外はここへ戻さない (結果不明の操作を自動再送しない)。
+            existing = manager._connections.get(instance_key)
+            if existing is None or not existing.connected:
                 if manager._is_in_backoff(instance_key):
                     entry = manager._failed_instances[instance_key]
                     category = str(entry.get("last_category") or ERROR_CATEGORY_UNKNOWN)
