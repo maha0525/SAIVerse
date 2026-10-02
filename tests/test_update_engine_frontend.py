@@ -1,4 +1,4 @@
-"""The update engine and the frontend server (docs/issues/ui_update_fails_while_frontend_runs.md).
+"""The update engine and the frontend server (docs/issues/archive/ui_update_fails_while_frontend_runs.md).
 
 On Windows a running ``next start`` / ``next dev`` holds a native module in
 ``frontend/node_modules`` open, so ``npm ci`` beside it fails after deleting

@@ -166,7 +166,7 @@ def test_process_alive_fails_closed_without_psutil(monkeypatch) -> None:  # type
     """Without psutil, "cannot check" must not be reported as "already exited".
 
     That lie once let the updater proceed beside a live backend
-    (docs/issues/self_update_unsafe_without_psutil.md).
+    (docs/issues/archive/self_update_unsafe_without_psutil.md).
     """
     monkeypatch.setitem(sys.modules, "psutil", None)  # makes `import psutil` fail
     with pytest.raises(update_engine.UpdateError, match="psutil"):

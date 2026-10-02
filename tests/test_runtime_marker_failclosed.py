@@ -2,7 +2,7 @@
 
 psutil の無い環境ではプロセス照合が "unknown" になる。かつては "running" しか
 拒否側に数えず、稼働中プロセスの City を CITY_SLUG 自動修復が改名しうる穴が
-あった (docs/issues/self_update_unsafe_without_psutil.md)。unknown は
+あった (docs/issues/archive/self_update_unsafe_without_psutil.md)。unknown は
 「稼働中かもしれない」として起動時検査と同じ向き (拒否側) に数える。
 
 同族の欠陥として、os.kill(pid, 0) の PermissionError (プロセスは存在するが

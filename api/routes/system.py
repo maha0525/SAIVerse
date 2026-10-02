@@ -622,7 +622,7 @@ def _resolve_updater() -> tuple[Path, Path, str]:
 def _refuse_without_updater_psutil(venv_python: str) -> None:
     # UI 更新で走るアップデータは更新前のチェックアウトのもの。psutil 無しでは
     # アップデータの終了待ちが fail-closed で中止し、バックエンドだけが落ちて
-    # 戻らない (docs/issues/self_update_unsafe_without_psutil.md)。断るなら
+    # 戻らない (docs/issues/archive/self_update_unsafe_without_psutil.md)。断るなら
     # 本体が生きているうちに断る。検査は API プロセス自身の import ではなく、
     # アップデータが実際に使う venv の interpreter で行う (両者は別インストール
     # でありうる)。import だけでなく create_time() まで呼ぶのは、壊れた

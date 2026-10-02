@@ -46,7 +46,7 @@ def _make_project(tmp_path: Path, version: str = "0.3.0") -> Path:
     (frontend / "node_modules").mkdir(parents=True)
     (frontend / "package-lock.json").write_text('{"name": "saiverse"}\n', encoding="utf-8")
     # The start-time check verifies every package package.json declares is in
-    # node_modules (docs/issues/ui_update_fails_while_frontend_runs.md), so a
+    # node_modules (docs/issues/archive/ui_update_fails_while_frontend_runs.md), so a
     # completed checkout has both, scoped names included.
     (frontend / "package.json").write_text(
         json.dumps({"dependencies": {"next": "^16.0.0"}, "devDependencies": {"@types/node": "^25.0.0"}}),
