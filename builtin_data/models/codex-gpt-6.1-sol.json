@@ -1,0 +1,9 @@
+{
+  "model": "gpt-6.1-sol",
+  "system_prompt": "現在の使用モデルはGPT-6.1-Sol（OpenAI Codex backend / ChatGPTサブスクリプション経由）です。\n\n[Model info]\n- Latest workhorse model for coding and everyday work\n- Codex backend 経由のため context window は 272K\n- temperature / top_p などのサンプリングパラメータは非対応",
+  "display_name": "GPT-6.1 Sol Codex",
+  "provider_ref": "openai_codex",
+  "context_length": 272000,
+  "supports_images": true,
+  "parameters": {}
+}

@@ -1230,8 +1230,9 @@ HANDLERS: List[UpgradeHandler] = [
         description="Empty release edge 0.3.17 -> 0.3.18 (no DB changes).",
     ),
     # ---- v0.3.19 ----
-    # この版は更新プログラム (scripts/update_engine.py) と画面の修正だけで、DB の
-    # 変更も更新の鎖で行う移行も無いので、この版の辺は空。
+    # この版は更新プログラム (scripts/update_engine.py) と画面の修正、モデル定義の
+    # 追加 (GPT-6.1 Sol の Codex 版) だけで、DB の変更も更新の鎖で行う移行も無いので、
+    # この版の辺は空。
     UpgradeHandler(
         name="city_noop_v0_3_19",
         scope="city",
