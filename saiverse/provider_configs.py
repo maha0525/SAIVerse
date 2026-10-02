@@ -29,7 +29,7 @@ from .data_paths import (
     LAYER_USER_DATA,
     PROVIDERS_DIR,
     USER_DATA_DIR,
-    iter_files_with_layer,
+    iter_file_candidates_with_layer,
 )
 
 if TYPE_CHECKING:
@@ -52,6 +52,39 @@ SOURCE_USER_DATA = LAYER_USER_DATA
 SOURCE_UNKNOWN = "unknown"
 
 
+def _provider_shape_error(config: object, default_id: str) -> str | None:
+    """Check the loader/API shape without changing credential policy.
+
+    Keep omitted display fields compatible with the API's existing defaults,
+    but never turn an explicit null/wrong type into a usable declaration.
+    Errors name only fields and types, never their possibly sensitive values.
+    """
+    if not isinstance(config, dict):
+        return "JSON root must be an object"
+    provider_id = config.get("id", default_id)
+    if not isinstance(provider_id, str) or not provider_id:
+        return "id must be a non-empty string"
+    for field, default in (("display_name", provider_id), ("protocol", "unknown")):
+        if not isinstance(config.get(field, default), str):
+            return f"{field} must be a string"
+    optional_types = {
+        "base_url": str,
+        "api_key_env": str,
+        "api_key_required": bool,
+        "default_request_kwargs": dict,
+        "default_convert_system_to_user": bool,
+        "default_supports_images": bool,
+        "default_max_image_bytes": int,
+    }
+    for field, expected_type in optional_types.items():
+        value = config.get(field)
+        # Exact type matters: JSON true is not an integer byte count, and
+        # strings such as "false" must not become truthy model defaults.
+        if value is not None and type(value) is not expected_type:
+            return f"{field} must be {expected_type.__name__} or null"
+    return None
+
+
 def load_configs() -> dict[str, dict]:
     """Load provider configurations from all sources, respecting priority.
 
@@ -60,27 +93,37 @@ def load_configs() -> dict[str, dict]:
         ``source`` layer it was loaded from.
     """
     configs: dict[str, dict] = {}
-    seen_keys: set[str] = set()
+    seen_names: set[str] = set()
+    selected: dict[str, tuple[int, Path, str]] = {}
+    selected_names: dict[str, str] = {}
+    rejected: list[tuple[int, Path, str, str, str]] = []
 
-    for config_file, layer in iter_files_with_layer(PROVIDERS_DIR, "*.json"):
+    candidates = iter_file_candidates_with_layer(PROVIDERS_DIR, "*.json")
+    for index, (config_file, layer) in enumerate(candidates):
+        if config_file.name in seen_names:
+            continue
+        provider_id = config_file.stem
         try:
             config_data = json.loads(config_file.read_text(encoding="utf-8"))
-        except Exception as exc:
-            LOGGER.warning(
-                "Failed to load provider config from %s: %s",
-                config_file.name, exc,
-            )
+        except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+            # Exception messages may include file contents. The exception type
+            # identifies parse/read failures without copying config values.
+            rejected.append((index, config_file, layer, provider_id, type(exc).__name__))
             continue
 
-        provider_id = config_data.get("id") or config_file.stem
-        if not isinstance(provider_id, str) or not provider_id:
-            LOGGER.warning(
-                "Provider config %s missing valid 'id', skipping",
-                config_file.name,
-            )
+        if isinstance(config_data, dict):
+            declared_id = config_data.get("id", provider_id)
+            if isinstance(declared_id, str) and declared_id:
+                provider_id = declared_id
+        error = _provider_shape_error(config_data, config_file.stem)
+        if error:
+            rejected.append((index, config_file, layer, provider_id, error))
             continue
 
-        if provider_id in seen_keys:
+        # Only a valid candidate claims its filename or ID. In particular, a
+        # broken user_data/openrouter.json must not hide the shipped provider.
+        seen_names.add(config_file.name)
+        if provider_id in configs:
             continue
 
         # Taken from the root this file was walked from, never from its
@@ -91,10 +134,32 @@ def load_configs() -> dict[str, dict]:
         config_data["source"] = layer
 
         configs[provider_id] = config_data
-        seen_keys.add(provider_id)
+        selected[provider_id] = (index, config_file, layer)
+        selected_names[config_file.name] = provider_id
         LOGGER.debug(
-            "Loaded provider config: %s from %s (source=%s)",
-            provider_id, config_file, config_data["source"],
+            "Loaded provider config: %r from %r (source=%s)",
+            provider_id, str(config_file.absolute()), config_data["source"],
+        )
+
+    # Report the actual result, not a promise that a lower candidate will work.
+    # ID collisions may use different filenames; filename collisions may use
+    # different IDs. Both are existing priority rules and both need a trace.
+    for index, config_file, layer, provider_id, reason in rejected:
+        fallback = "none"
+        for fallback_id in (provider_id, selected_names.get(config_file.name)):
+            if fallback_id not in selected:
+                continue
+            selected_index, selected_path, selected_layer = selected[fallback_id]
+            if selected_index > index:
+                fallback = (
+                    f"path={str(selected_path.absolute())!r} source={selected_layer} "
+                    f"provider_id={fallback_id!r}"
+                )
+                break
+        LOGGER.warning(
+            "Skipping invalid provider config: path=%r source=%s provider_id=%r "
+            "reason=%s; fallback=%s",
+            str(config_file.absolute()), layer, provider_id, reason, fallback,
         )
 
     LOGGER.info("Loaded %d provider configurations", len(configs))
@@ -230,9 +295,9 @@ def save_provider(provider_id: str, config: dict) -> ReapplyResult:
     save_data["id"] = provider_id  # Ensure id is consistent with filename
 
     # Written beside the target and moved into place, never truncated in place:
-    # a crash partway through a direct write leaves half a JSON file, and a file
-    # that fails to parse does not fall back to the layer underneath — it takes
-    # the provider out of the list entirely (see
+    # a crash partway through a direct write leaves half a JSON file. The loader
+    # can fall back to a valid lower layer, but an override should not be lost
+    # and a user-only provider may have no fallback (see
     # docs/issues/malformed_provider_json_breaks_provider_list.md).
     staged = target_dir / f"{provider_id}.json.tmp"
     try:

@@ -1,10 +1,10 @@
 # 壊れたプロバイダ JSON 一枚でプロバイダ一覧が 500 になる
 
 **起票**: 2026-08-04（資格情報の層束縛の改修中に発見。一度直そうとして、より悪い状態を作ったので差し戻した）
-**状態**: 未着手
-**関連**: `saiverse/provider_configs.py: load_configs()`、`saiverse/data_paths.py: iter_files_with_layer()`、`api/routes/providers.py: _to_provider_info()`
+**状態**: 検証待ち（隔離回帰まで完了、PR 確認・実機確認待ち）
+**関連**: `saiverse/provider_configs.py: load_configs()`、`saiverse/data_paths.py: iter_file_candidates_with_layer()`、`api/routes/providers.py: _to_provider_info()`
 
-## 何が起きるか
+## 修正前に何が起きていたか
 
 `~/.saiverse/user_data/providers/*.json` の一枚に型の打ち間違いがあると、**そのプロバイダだけでなく一覧全体**が壊れる。
 
@@ -39,3 +39,22 @@
 ## なぜ今回の改修に含めなかったか
 
 資格情報の層束縛という主題とは別の話で、しかも上のとおり loader の列挙構造に手を入れないと正しく直らない。中途半端に塞ぐと被害が増えることを実際に確認したので、構造ごと直せるときにまとめてやる。
+
+
+## 実装と検証 (2026-10-02)
+
+- `data_paths.iter_file_candidates_with_layer()` が同名を含む全候補と辿った層を返す。従来の `iter_files_with_layer()` / `iter_files()` の優先順位はそのまま維持する。
+- provider loader が JSON の辞書・ID・API に返すフィールドの型を検査してから、ファイル名と ID を使用済みにする。不正な候補は下位候補を隠さない。`display_name` / `protocol` の明示 `null` は不正だが、省略時の従来の既定値は互換性のため維持する。
+- 警告は絶対パス・辿った層・ID・構造上の理由と、実際に採用できた代替の出自（無ければ `fallback=none`）を返す。JSON 本文・不正な値・例外の本文は記録せず、パスと ID の改行もエスケープする。
+- 検証は隔離した `SAIVERSE_HOME` と一時ファイルのみ。JSON 構文破損・ルート型・必須表示フィールドの `null`・任意フィールドの誤型・同名/別名同一 ID・同名異 ID・三層連続の破損・アドオン間の優先順位・リンク越しの出自を含む。実ローダーから `GET /api/providers` と `GET /api/models` まで通し、同梱 OpenRouter の参照モデルが全件維持されることも確認する。
+- `tests/test_provider_config_fallback.py`: 65 件成功。変更 Python の `ruff check`、`git diff --check`、`scripts/check_in_flight.py` も成功（台帳の既存経過措置警告のみ）。
+- 関連 8 ファイルの回帰は、一時的な DNS スタブとネットワーク接続禁止下で 348 件・72 subtests 成功。これは模擬環境での検証であり、実 DNS での成功ではない。スタブなしの既存 provider 2 ファイルは、この実行環境の DNS 制約により 40 件失敗・68 件成功・16 subtests 成功。製品側の URL/資格情報検査は変更していない。
+- 本番ペルソナ・LLM・外部 API は呼び出していない。provider/model の原子的スナップショット公開も本変更の対象外。
+
+## 次の確認
+
+PR の内容を確認してからマージし、実機で壊れた上書きがあってもプロバイダタブとモデル一覧が開けることを確認する。実機確認前なので issue は未解決フォルダに残す。
+
+## 経緯
+
+- 2026-10-02: 未着手から実装に入り、隔離回帰後に検証待ちへ進めた。旧台帳文面: 「型検査を優先解決の前に置く修正を進めている。次 = 隔離ファイルから API 一覧と参照モデルまで回帰検証し、PR の確認待ちにする。」（誰待ち: 私 (実装・検証)）
