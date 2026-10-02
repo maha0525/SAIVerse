@@ -29,8 +29,8 @@ SAIVerseの環境構築手順を説明します。
 ### Windows
 
 1. 入手した `SAIVerse` フォルダを開く
-2. `SAIVerse` フォルダ内の **`setup.bat`** をダブルクリック
-3. セットアップ完了後、**`start.bat`** をダブルクリック
+2. `SAIVerse` フォルダ内の **`setup.bat`** をダブルクリック（拡張子を表示していない場合は、歯車のアイコンの「setup」です。「setup.sh」ではありません）
+3. セットアップ完了後、**`start.bat`** をダブルクリック（拡張子を表示していない場合は、歯車のアイコンの「start」です。「start.sh」ではありません）
 4. ブラウザで http://localhost:3000 が自動的に開きます
 
 ### macOS / Linux

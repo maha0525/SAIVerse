@@ -81,6 +81,7 @@ Pure Python 実装の `dulwich` で clone/pull を Python 側で完結させる�
 
 - 2026-05-23: issue 起票。案 1 を実装 (Windows 自動インストール + .gitattributes 追加)。実機テスト未実施。
 - 2026-07-19: **update 経路の PortableGit 断線を修正**。`setup.bat` は自身のセッション内で `.git-portable\cmd` を PATH に前置きするが、`update.bat` / `update.sh` は**別セッション**で起動され、実体の `scripts/update_engine.py` は `shutil.which("git")` と `["git", ...]` を直接叩く。よって「PortableGit しか無い (システム/winget Git 無し)」ユーザーは、後日 update を回すと git 未検出で `assert_git_update_ready` が中断していた。修正: `update_engine._ensure_portable_git_on_path(project_dir)` を新設し `run_update()` 冒頭 (git readiness チェック前) で呼ぶ。`<project>/.git-portable/cmd/git.exe` が在れば同 cmd ディレクトリを PATH 先頭へ前置き (既存なら no-op、非 Windows は `.git-portable` 自体が無いので no-op)。update.bat/update.sh/self_update.py は 3 者とも update_engine.py に委譲するので単一箇所の修正で parity 維持。回帰 `tests/test_update_engine_safety.py` に 3 件追加 (存在時前置き / 不在時 no-op / 冪等)。**setup 経路の自動インストール自体は 2026-05-23 実装のまま。残るはクリーン環境実機テスト (まはー) と README 書き直し。**
+- 2026-10-02: v0.3.19 の発行当日、クリーンな Windows (Windows サンドボックス) でのテストを準備しているときに、「最新ではない ZIP から導入すると、中身は古い版のまま更新できなくなる」不具合が見つかった ([setup_from_older_zip_blocks_update.md](setup_from_older_zip_blocks_update.md))。Git を初期化する処理を `scripts/init_git_repo.py` に移して直した。上の表の「setup.bat Step 9」のうち、`git init/fetch/reset` の部分はこのスクリプトが持つ。クリーンな Windows でのテストは、この修正を載せた版の ZIP で行う。
 
 ## 経緯: ZIP インストールの Git 自動導入 (2026-08-04 in_flight 台帳より移送)
 
@@ -93,3 +94,4 @@ Pure Python 実装の `dulwich` で clone/pull を Python 側で完結させる�
 ## 経緯 (2026-10-01 in_flight 台帳より移送)
 
 - 2026-10-01 (台帳の行を差し替えた): 「v0.3.0 の門」の行を、同じクリーン Windows テストを指すこの行へ寄せた。 台帳から押し出した旧文面: 「コード実装済み (setup.bat の自動 git 導入 winget→PortableGit fallback / update 経路の PATH 通し / README 更新)。次 = クリーン Windows (git 未導入) での実機テスト — 次バージョンリリース時にまはーと一緒に確認。」(誰待ち: まはー(次リリース時 実機テスト))
+- 2026-10-02 (台帳の行を差し替えた): 古い ZIP の不具合の修正を先に入れることになったので、テストを「修正を載せた版の ZIP で行う」へ進めた。 台帳から押し出した旧文面: 「コード実装済み (setup.bat の自動 git 導入 winget→PortableGit fallback / update 経路の PATH 通し / README 更新)。次 = クリーン Windows (git 未導入) での実機テスト — 次バージョンリリース時にまはーと一緒に確認。v0.3.0 の門に残っていたクリーン実機テストも、この一件で兼ねる。」(誰待ち: まはー(次リリース時 実機テスト))

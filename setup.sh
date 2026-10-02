@@ -99,19 +99,11 @@ fi
 
 # --- 9. Initialize git repository if git is available ---
 if command -v git &>/dev/null; then
-    if [ ! -d ".git" ]; then
-        echo ""
-        echo "[SETUP] Git が見つかりました。自動更新のためリポジトリを初期化中..."
-        git init
-        git remote add origin https://github.com/maha0525/SAIVerse.git
-        git fetch origin
-        git branch -M main
-        git reset origin/main
-        git branch --set-upstream-to=origin/main
-        echo "[OK] Git リポジトリを初期化しました"
-    else
-        echo "[OK] Git リポジトリは既に存在します"
-    fi
+    # scripts/init_git_repo.py は、Git の記録を「いつも最新の版」ではなく、このフォルダの
+    # 中身と同じ版 (VERSION と同じ名前のタグ) に合わせる。ファイルと記録が一致しないときは
+    # その場で知らせる。メッセージはスクリプトが出し、警告で終わってもセットアップは続ける。
+    # setup.bat も同じスクリプトを呼ぶ。
+    python scripts/init_git_repo.py || true
 else
     echo ""
     echo "[WARN] Git が見つかりません。自動更新には Git のインストールが必要です:"
