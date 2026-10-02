@@ -117,7 +117,7 @@ test_fixtures\start_test_server.bat
 - `SAIVERSE_USER_DATA_DIR=test_data/user_data`
 - Discord ゲートウェイの 4 つの変数（次の「外部連携の扱い」）
 
-⚠️ **`SAIVERSE_HOME` を倒すだけでは隔離になりません。** この PC の環境に `SAIVERSE_LOG_PATH` が設定されていると、一部の組み込みツールが**読み込まれた瞬間に**その先 (本番の `~/.saiverse/log.txt`) へログの口を開いて書き込みます (2026-09-11 実害 — [issue](issues/import_time_log_handlers_escape_isolation.md))。隔離環境を組むときは `SAIVERSE_LOG_PATH` も隔離先へ倒すか、空にしてください。
+⚠️ **`SAIVERSE_HOME` を倒すだけで、ほかの環境変数まで隔離されたとは限りません。** `SAIVERSE_USER_DATA_DIR` や外部連携の設定も確認してください。2026-09-11 には、引き継いだ `SAIVERSE_LOG_PATH` によってツールの import が本番ログを触る実害がありました ([issue](issues/import_time_log_handlers_escape_isolation.md))。calculator / read_url_content / send_email_to_user の独自 FileHandler は撤去し、この 3 本は同変数を参照せず、本体のログ設定へ合流します。古い版やアドオンも含む検証では、残存する独自の保存先変数を調べ、隔離先へ向けるか環境から外してください。
 
 ### 外部連携の扱い
 

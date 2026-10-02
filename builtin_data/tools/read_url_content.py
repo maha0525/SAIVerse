@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-from pathlib import Path
 from typing import Tuple
 
 import requests
@@ -21,18 +20,7 @@ from tools.core import ToolResult, ToolSchema
 # ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
-LOG_FILE = Path(os.getenv("SAIVERSE_LOG_PATH", str(Path.cwd() / "saiverse_log.txt")))
-LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-LOG_FILE.touch(exist_ok=True)
-
 logger = logging.getLogger(__name__)
-if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(LOG_FILE) for h in logger.handlers):
-    handler = logging.FileHandler(LOG_FILE)
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-logger.propagate = False
 
 # ---------------------------------------------------------------------------
 # Configuration
