@@ -1026,35 +1026,38 @@ class AbsorptionResult:
 
 def _repoint_fragments(
     conn: sqlite3.Connection, old_id: str, new_id: str,
-) -> List[str]:
+    *, attempted_ids: List[str],
+) -> None:
     """memopedia_fragments.chronicle_entry_id を旧→新へ付け替える (消さない)。
 
-    戻りは動かした fragment id (失敗時の巻き戻し用)。テーブルの無い DB は空。
+    UPDATE / commit より前に attempted_ids へ対象を控える。commit が確定後に
+    例外を返しても、呼び出し側が条件付きで復元できる。テーブルの無い DB は空。
     """
     try:
         rows = conn.execute(
             "SELECT id FROM memopedia_fragments WHERE chronicle_entry_id = ?",
             (old_id,),
         ).fetchall()
-        if not rows:
-            return []
+        attempted_ids.extend(str(r[0]) for r in rows)
+        if not attempted_ids:
+            return
+        placeholders = ",".join("?" for _ in attempted_ids)
         conn.execute(
             "UPDATE memopedia_fragments SET chronicle_entry_id = ? "
-            "WHERE chronicle_entry_id = ?",
-            (new_id, old_id),
+            f"WHERE chronicle_entry_id = ? AND id IN ({placeholders})",
+            (new_id, old_id, *attempted_ids),
         )
         conn.commit()
-        return [str(r[0]) for r in rows]
     except sqlite3.DatabaseError as exc:
         # 捕捉は DatabaseError の幅で (Codex 十二巡 Q2 — 縮退の判定を
         # OperationalError に限らず、他の DB 例外も同じ道を通す)。
         if is_missing_table_error(exc):
-            return []  # Fragment テーブルの無い DB (旧テスト等)
+            return  # Fragment テーブルの無い DB (旧テスト等)
         raise  # ロック等 — フェーズ 1 の巻き戻し → AbsorptionError へ乗せる (R3)
 
 
 def _repoint_fragments_back(
-    conn: sqlite3.Connection, fragment_ids: Sequence[str], old_id: str,
+    conn: sqlite3.Connection, fragment_ids: Sequence[str], old_id: str, new_id: str,
 ) -> None:
     if not fragment_ids:
         return
@@ -1062,8 +1065,8 @@ def _repoint_fragments_back(
         placeholders = ",".join("?" for _ in fragment_ids)
         conn.execute(
             f"UPDATE memopedia_fragments SET chronicle_entry_id = ? "
-            f"WHERE id IN ({placeholders})",
-            (old_id, *[str(f) for f in fragment_ids]),
+            f"WHERE id IN ({placeholders}) AND chronicle_entry_id = ?",
+            (old_id, *[str(f) for f in fragment_ids], new_id),
         )
         conn.commit()
     except sqlite3.DatabaseError as exc:
@@ -1445,8 +1448,10 @@ def run_absorption(
             continue
 
         # --- 差し替え。フェーズ 1 (可逆): Fragment と付記印の付け替え。 ---
-        moved_fragments: List[tuple] = []  # (old_id, [fragment_ids])
-        moved_batches: List[tuple] = []    # (old_id, [batch_ids])
+        # 成功件数ではなく試行対象を控える — commit 後に例外が返っても
+        # rollback だけでは戻らない確定済みの帰属を、撤去より先に復元する。
+        attempted_fragments: List[tuple] = []  # (old_id, [fragment_ids])
+        attempted_batches: List[tuple] = []    # (old_id, [batch_ids])
         repoint_failed = False
         recheck_conflict = False
         recheck_covered = 0
@@ -1463,19 +1468,19 @@ def run_absorption(
             else:
                 try:
                     for snap in snapshots:
-                        frag_ids = _repoint_fragments(
-                            conn, snap.id, new_entry.id,
+                        frag_ids: List[str] = []
+                        attempted_fragments.append((snap.id, frag_ids))
+                        _repoint_fragments(
+                            conn, snap.id, new_entry.id, attempted_ids=frag_ids,
                         )
-                        if frag_ids:
-                            moved_fragments.append((snap.id, frag_ids))
                     for snap in snapshots:
                         ids = [b.id for b in old_batches.get(snap.id, [])]
                         if not ids:
                             continue
+                        attempted_batches.append((snap.id, ids))
                         moved = _repoint_batches(
                             conn, ids, snap.id, new_entry.id,
                         )
-                        moved_batches.append((snap.id, ids))
                         if moved != len(ids):
                             raise AbsorptionError(
                                 f"perception stamp repoint mismatch for {snap.id}"
@@ -1498,13 +1503,15 @@ def run_absorption(
                             "[absorption] rollback of the pending repoint "
                             "failed", exc_info=True,
                         )
-                    for old_id, ids in moved_batches:
+                    # 現帰属が新 id の対象だけを戻す。未確定・復元済み・
+                    # 別 writer が他の帰属へ動かした対象は書き換えない。
+                    for old_id, ids in attempted_batches:
                         try:
                             _repoint_batches(conn, ids, new_entry.id, old_id)
                         except Exception:
                             pass
-                    for old_id, frag_ids in moved_fragments:
-                        _repoint_fragments_back(conn, frag_ids, old_id)
+                    for old_id, frag_ids in attempted_fragments:
+                        _repoint_fragments_back(conn, frag_ids, old_id, new_entry.id)
         if recheck_conflict:
             _withdraw()
             result.skipped_items += 1
