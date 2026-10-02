@@ -78,7 +78,7 @@ SAIVerse を利用する人間（`User` テーブル、`CURRENT_CITYID` / `CURRE
 
 ### Building / City
 
-**Building** は会話・活動が生じる場（`Building` テーブル）であり、**ユーザーから見えるチャットUI そのもの**。ペルソナの発言（Beat の表示用、§4）もユーザーの発言も、すべて Building に積まれることで、そこに居る他者（他ペルソナ・ユーザー）に感知される——いわば**複数主体の共有メッセージ場（共有黒板）**である。各 occupant は Building の未読メッセージを自分の Session（短期記憶）に読み込む。これにより Building（公共の場）と Session（各自の私的な短期記憶）が対をなす。Building は所属 City、収容数（`CAPACITY`）、システムプロンプト（`SYSTEM_INSTRUCTION`）、自動 pulse 間隔（`AUTO_INTERVAL_SEC`）を持つ。
+**Building** は会話・活動が生じる場（`Building` テーブル）であり、**ユーザーから見えるチャットUI そのもの**。ペルソナの発言（Beat の表示用、§4）もユーザーの発言も、すべて Building に積まれることで、そこに居る他者（他ペルソナ・ユーザー）に感知される——いわば**複数主体の共有メッセージ場（共有黒板）**である。各 occupant は Building の未読メッセージを自分の Session（短期記憶）に読み込む。これにより Building（公共の場）と Session（各自の私的な短期記憶）が対をなす。Building は所属 City、収容数（`CAPACITY`）、システムプロンプト（`SYSTEM_INSTRUCTION`）を持つ。旧自動 pulse 間隔（`AUTO_INTERVAL_SEC`）は API・DB 互換のため残るが、現行の駆動には使わず、設定 UI にも出さない（§9）。
 
 **City** は User が運営する一つの「世界」（`City` テーブル）。複数の Building を束ね、UI / API を公開するポート（`UI_PORT` / `API_PORT`）を持つ。City・Persona の双方がバージョン認識機構（`LAST_KNOWN_VERSION`）を持ち、アップデート時の状態移行を追跡する。
 
@@ -441,7 +441,7 @@ graph TD
 | **note_extractor** | `note_extractor.py` は本番 Metabolism 経路から呼ばれない。現行は `entity_extractor`（移行の名残） |
 | **ActionHandler（`::act ... ::end`）／action priority** | pre-SEA 期の「LLM 出力に埋め込んだ JSON ブロックで move / think / emotion_shift を起こす」機構。2026-06-06 `f915bf2` で呼び出し側（旧 `PersonaCore._generate` 系）が消え、以後クラスは誰からも import されない完全 dead code だった。**2026-07-23 に撤去完了**（`saiverse/action_handler.py`・`builtin_data/action_priority.json` をファイルごと削除、`persona/bootstrap.py::load_action_priority`、PersonaCore の `action_priority_path` と callback 4本（move/dispatch/explore/create_persona）、構築3箇所の注入も同時削除）。後継は Playbook の TOOL ノードと Spell |
 | **旧 city exploration（`explore_city`）** | 上記 `::act` の `explore_city` アクション専用の入口を失った経路。他都市の `/inter-city/buildings` を GET して建物一覧を host メッセージで流し込む実装で、multi-city 凍結（2026-07-16）以前から呼び出し元ゼロ。**2026-07-23 に撤去完了**（`RuntimeService.explore_city`・`SAIVerseManager._explore_city`・`AdminService` の alias） |
-| **ConversationManager** | 旧自律会話駆動プロトタイプ。2026-05-01 の認知モデル移行で no-op 化（SubLineScheduler + track_autonomous に置換——その両者も 2026-07-06 に死亡、下記）。UI の「自律会話モード」トグルと `/api/config/global-auto`・`global_auto_enabled` 旗は 2026-09-01 に撤去済み（読む者ゼロの亡霊だった）。クラス削除は別タスク |
+| **ConversationManager** | 旧自律会話駆動プロトタイプ。2026-05-01 の認知モデル移行で no-op 化（SubLineScheduler + track_autonomous に置換——その両者も 2026-07-06 に死亡、下記）。UI の「自律会話モード」トグルと `/api/config/global-auto`・`global_auto_enabled` 旗は 2026-09-01 に撤去済み（読む者ゼロの亡霊だった）。Building の旧自動インターバル入力も撤去（[issue](../issues/building_auto_interval_setting_removal.md)）。`AUTO_INTERVAL_SEC` と更新 API の `auto_interval` は互換保持し、他項目の保存時は既存値をそのまま送る。クラス・DB 列の削除は別タスク |
 | **SubLineScheduler** | v1 自律駆動（track_autonomous への 30 秒連続 Pulse）。自律行動 v2 活性化（2026-07-06）で**モジュールごと削除**（`saiverse/pulse_scheduler.py`）。後継は時間割＋判断点（`saiverse/autonomy_wiring.py`、intent: `autonomous_behavior_v2.md` / `persona_cognition/life_concept_map.md`） |
 | **track_autonomous / meta_autonomy_decision playbook** | v1 自律 Pulse の中身と能力選択。**退役完了**（2026-07-11 P2c-3: public JSON 削除・DB prune・`SELECTED_META_PLAYBOOK`/`PersonaSchedule` の巻き取り＝upgrade handler v0.3.0.dev4）。autonomy_creation / autonomy_web_research は archive、autonomy_memory_organization / fragment_organize は P4 編纂へ転生予定で archive |
 | **max_consecutive_pulses** | 連続 Pulse 上限の概念。駆動源ごと廃止（セッション予算に置換） |
