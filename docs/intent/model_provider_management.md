@@ -84,6 +84,8 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 
 `ChatOptions` の操作感は変えない。「別名で保存」「上書き保存」ボタンは追加するが、既存のスライダー・入力欄の挙動・即時反映は維持。詳細編集は別 UI に飛ばすことで、チャット UI 自体の情報密度を増やさない。
 
+モデル編集の水位は専用欄が単独所有する。追加設定 JSON に書いた水位は、保存時に空の専用欄へ引き取り (null は `none`)、入力済みの専用欄を優先する。引き取り後は JSON の同名キーを除き、保存失敗後に欄を空にしても復活させない。入力 → 専用欄 → 保存 API → user_data のモデル定義という経路で、ユーザーの指定が黙って失われないことを守る。既存の保存 API の検証・モデルへの反映は変えない。根拠は [水位 JSON issue](../issues/model_editor_drops_watermark_keys_from_json.md) の確定方針。
+
 ### 9. モデル固有の API 契約をモデル定義からプロバイダ境界まで保つ
 
 モデル JSON の `parameters` は UI 表示だけでなく、実際の API request capability と一致しなければならない。上位の SEA runtime、メディア要約、keepalive などは共通 `LLMClient` 契約として `temperature` を渡すことがあるため、非対応モデルの JSON からスライダーを消すだけでは送信を防げない。

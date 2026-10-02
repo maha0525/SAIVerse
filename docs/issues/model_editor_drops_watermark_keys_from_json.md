@@ -1,7 +1,7 @@
 # モデル編集の追加設定 JSON に書いた水位キーが、保存時に黙って消える
 
 **発見**: 2026-08-31 (掃討の水位バー追従検証中、まはーが実機で発見 — JSON に `"metabolism_high_chars": 150000` を書いて保存 → 次に開くと消えている)
-**状態**: 🔲 未解決 — 原因特定済み・修正方針確定 (まはー案)。吸収改修のコミット後に着手
+**状態**: 🟣 検証待ち — 修正を PR で提案。develop への取り込みと画面での確認は未実施
 **深刻度**: P3 — 専用欄に入れれば設定は効く。ただし「書いた値が無言で消える」のはユーザーの意図の黙殺で、設定が効かない誤解を生む
 
 ## 原因
@@ -20,4 +20,9 @@
 ## 関連
 
 - `frontend/src/components/settings/ModelEditorModal.tsx` — `WATERMARK_FIELDS` / 保存時の extraJson 剥ぎ取り
-- [issue: chat_options_metabolism_section_redesign (archive 想定)](chat_options_metabolism_section_redesign.md) — 水位のモデル定義一本化 (7/30)
+- [issue: chat_options_metabolism_section_redesign (archive 想定)](archive/chat_options_metabolism_section_redesign.md) — 水位のモデル定義一本化 (7/30)
+
+## 経緯
+
+- 2026-10-02: 確定方針に沿って、保存時に JSON の水位を空の専用欄へ引き取る変更を提案。数値と null を受け付け、非数値・正の整数以外は保存前に既存の入力エラーで止める。専用欄に値があればそちらを優先する。引き取りと同時に JSON の同名キーを取り除くため、保存失敗や水位の順序違反のあとで欄を空にしても復活しない。廃止済みの水位キーや他の追加設定は従来どおり保つ。
+- 検証: 実際の保存処理を TypeScript AST から読み出し、作成/編集、数値/null、専用欄優先、不正値、実効既定値との順序、保存失敗後の再操作を、偽 API とローカルの state setter で確認する回帰を `frontend/scripts/test-model-editor-watermarks.cjs` に追加した。画面描画と実バックエンドへの永続化はこの回帰の対象外。
