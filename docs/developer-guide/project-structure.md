@@ -152,10 +152,6 @@ api/
 
 `people/pocketbook.py` の画面側の相方は `frontend/src/components/memory/PocketbookViewer.tsx`（メモリタブの「手帳」節）。v0.3 では両方とも読むだけで、訂正の口は持たない（[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §13.2.1）。
 
-### frontend/
-
-Next.js の画面実装。`src/components/memory/PulseTimelineViewer.tsx` は Pulse の一覧・詳細・既存タグ編集を担い、同じディレクトリの `PulseTimelineViewer.module.css` がテーマ別の役割色と長文の折り返しを持つ。中立色の正典は `src/app/globals.css`。隔離した表示・操作の回帰確認は `scripts/test-pulse-timeline-theme.cjs`（[表示 intent](../intent/pulse_timeline_display.md)）。
-
 ### scripts/
 
 保守操作の実装。`update.bat` / `update.sh` / PowerShell / UI更新はいずれも同じupdate engineへ委譲する。`start.bat` / `start.sh` も起動前に `update_engine.py --check-complete` を呼び、更新が途中で死んでいれば同じ engine で仕上げてから起動する（[issue](../issues/v0229_update_bat_truncates_after_git_pull.md)）。
@@ -312,6 +308,10 @@ builtin_data/
 ├── cities.json       # City 初期設定
 └── seed_data.json    # シード用データ
 ```
+
+## メモリー画面の表示
+
+Next.js の画面実装。`src/components/memory/PulseTimelineViewer.tsx` は Pulse の一覧・詳細・既存タグ編集を担い、同じディレクトリの `PulseTimelineViewer.module.css` がテーマ別の役割色と長文の折り返しを持つ。中立色の正典は `src/app/globals.css`。隔離した表示・操作の回帰確認は `scripts/test-pulse-timeline-theme.cjs`（[表示 intent](../intent/pulse_timeline_display.md)）。
 
 ## ユーザーデータ（`~/.saiverse/`）
 
