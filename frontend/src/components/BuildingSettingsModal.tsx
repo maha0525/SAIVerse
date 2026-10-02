@@ -294,7 +294,9 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
 
                         <div className={styles.field}>
                             <label data-i18n="components.BuildingSettingsModal.text012">{uiText("components.BuildingSettingsModal.text012")}</label>
-                            <select value={cityId} onChange={e => setCityId(parseInt(e.target.value))}>
+                            {/* Existing Buildings cannot change City (W7 D5); keep the loaded
+                                city_id for ordinary saves, as WorldEditor already does. */}
+                            <select value={cityId} disabled className={styles.disabled}>
                                 {cities.map(c => (
                                     <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>
                                 ))}
