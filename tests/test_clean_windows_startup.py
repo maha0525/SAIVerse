@@ -136,11 +136,17 @@ def test_version_file_is_written_when_git_cannot_be_found(searxng_src, monkeypat
 
     assert ensure_searxng_version.ensure_version_frozen(searxng_src) is True
 
-    # SearXNG reads exactly these five names (searx/version.py).
+    # SearXNG reads exactly these five names (searx/version.py); the values are
+    # the ones SearXNG itself falls back to when git fails.
     namespace: dict = {}
     exec((searxng_src / "searx" / "version_frozen.py").read_text(encoding="utf-8"), namespace)
-    for name in ("VERSION_STRING", "VERSION_TAG", "DOCKER_TAG", "GIT_URL", "GIT_BRANCH"):
-        assert isinstance(namespace[name], str) and namespace[name]
+    assert {name: namespace[name] for name in ("VERSION_STRING", "VERSION_TAG", "DOCKER_TAG", "GIT_URL", "GIT_BRANCH")} == {
+        "VERSION_STRING": "1.0.0",
+        "VERSION_TAG": "1.0.0",
+        "DOCKER_TAG": "1.0.0",
+        "GIT_URL": "unknown",
+        "GIT_BRANCH": "unknown",
+    }
 
 
 def test_version_file_is_not_written_when_git_is_available(searxng_src, monkeypatch):
@@ -160,7 +166,7 @@ def test_existing_version_file_is_left_alone(searxng_src, monkeypatch):
     assert target.read_text(encoding="utf-8") == 'VERSION_STRING = "2026.9.1"\n'
 
 
-def test_missing_source_directory_does_not_stop_the_launcher(tmp_path, monkeypatch, capsys):
+def test_missing_source_directory_does_not_stop_the_launcher(tmp_path, monkeypatch):
     monkeypatch.setattr(ensure_searxng_version.shutil, "which", lambda name: None)
 
     assert ensure_searxng_version.main(["ensure_searxng_version.py", str(tmp_path / "not-there")]) == 0

@@ -15,7 +15,10 @@ $DownloadUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 $RequiredDlls = @("msvcp140.dll", "msvcp140_1.dll", "vcruntime140.dll", "vcruntime140_1.dll")
 
 function Get-MissingRuntimeDlls {
-    $system32 = Join-Path $env:SystemRoot "System32"
+    # From a 32-bit shell, "System32" silently points at the 32-bit folder;
+    # "Sysnative" is the name that reaches the real one.
+    $folder = if ($env:PROCESSOR_ARCHITEW6432) { "Sysnative" } else { "System32" }
+    $system32 = Join-Path $env:SystemRoot $folder
     return @($RequiredDlls | Where-Object { -not (Test-Path (Join-Path $system32 $_)) })
 }
 
@@ -31,8 +34,11 @@ if ($missing.Count -eq 0) {
     exit 0
 }
 
-if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") {
-    Write-Host "[WARN] Visual C++ runtime not found, and this is not a 64-bit Intel/AMD Windows ($env:PROCESSOR_ARCHITECTURE)."
+# A 32-bit shell on 64-bit Windows reports x86 here and keeps the real
+# architecture in PROCESSOR_ARCHITEW6432.
+$osArchitecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+if ($osArchitecture -ne "AMD64") {
+    Write-Host "[WARN] Visual C++ runtime not found, and this is not a 64-bit Intel/AMD Windows ($osArchitecture)."
     Write-Host "  Automatic installation is only available for x64."
     Write-ManualInstructions
     exit 1
@@ -46,7 +52,9 @@ $Installer = Join-Path $env:TEMP "saiverse_vc_redist.x64.exe"
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $ProgressPreference = "SilentlyContinue"
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $Installer -UseBasicParsing
+    # Without a time limit, a PC that cannot reach the network yet would hold
+    # setup here with nothing on screen.
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $Installer -UseBasicParsing -TimeoutSec 60
 } catch {
     Write-Host "[WARN] Could not download the Visual C++ runtime: $_"
     Write-ManualInstructions
