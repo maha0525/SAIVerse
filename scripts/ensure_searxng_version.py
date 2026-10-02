@@ -8,7 +8,7 @@ SearXNG works out its own version at import time by running ``git``
 ``git`` executable is not: the import dies with FileNotFoundError and the
 server never starts. That is the situation of a Windows install where setup
 put Git inside the SAIVerse folder (``.git-portable``): start.bat does not put
-that folder on PATH (docs/issues/searxng_needs_git_on_path.md).
+that folder on PATH (docs/issues/archive/searxng_needs_git_on_path.md).
 
 SearXNG skips git entirely when ``searx/version_frozen.py`` exists. So when git
 cannot be found, this script writes that file with the same fallback values

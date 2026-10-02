@@ -5,7 +5,7 @@
 # not part of Windows: most PCs have them because some other application
 # brought them along, a freshly installed Windows does not. Without them
 # SAIVerse fails at startup with "DLL load failed while importing
-# onnxruntime_pybind11_state" (docs/issues/clean_windows_missing_vc_runtime_blocks_startup.md).
+# onnxruntime_pybind11_state" (docs/issues/archive/clean_windows_missing_vc_runtime_blocks_startup.md).
 #
 # This script never fails setup: when it cannot install, it prints what to do.
 

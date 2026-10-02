@@ -4,7 +4,7 @@
 部品 (msvcp140.dll など) を必要とする。この部品は Windows に最初から入っているもの
 ではなく、入れたばかりの Windows には無い。無いまま起動すると、import の途中で
 「DLL load failed while importing onnxruntime_pybind11_state」という長いエラーで落ち、
-利用者には原因が分からない (docs/issues/clean_windows_missing_vc_runtime_blocks_startup.md)。
+利用者には原因が分からない (docs/issues/archive/clean_windows_missing_vc_runtime_blocks_startup.md)。
 
 setup.bat は scripts/install_vc_redist.ps1 でこの部品を自動で入れる。ここは、それでも
 無いまま起動されたとき (導入を断った、古い setup で入れた) の受け皿。

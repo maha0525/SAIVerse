@@ -1,8 +1,8 @@
 """A freshly installed Windows: no Visual C++ runtime, Git only inside the folder.
 
 Both were found by installing the v0.3.19 ZIP in Windows Sandbox (2026-10-02):
-docs/issues/clean_windows_missing_vc_runtime_blocks_startup.md
-docs/issues/searxng_needs_git_on_path.md
+docs/issues/archive/clean_windows_missing_vc_runtime_blocks_startup.md
+docs/issues/archive/searxng_needs_git_on_path.md
 """
 from __future__ import annotations
 

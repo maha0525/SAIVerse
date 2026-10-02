@@ -1,6 +1,6 @@
 # Git が SAIVerse のフォルダの中にしか無い PC では、Web 検索の部品 (SearXNG) が起動しない
 
-**状態**: 検証待ち (2026-10-02 発見、同日に直した。直し方が効くことは、まはーが Windows サンドボックスで手で確かめてある)
+**状態**: ✅ 完了 — 2026-10-02 に発見し、同日に直した (PR #344)。直し方が効くことは、まはーが Windows サンドボックスで手で確かめた。直した後の起動スクリプトが自動でファイルを置くところは、本物の環境では通していない (テストでは確かめてある)。再発したら起案し直す
 **深刻度**: P2 — 該当する PC では Web 検索が使えない。SAIVerse 本体は動く。該当するのは、Git が入っていない Windows に ZIP から導入した利用者のうち、winget が使えず、setup.bat が Git をフォルダの中 (`.git-portable`) に入れた人
 
 ## 何が起きるか (2026-10-02、まはーが Windows サンドボックスで v0.3.19 の ZIP を導入して確認)
@@ -54,5 +54,5 @@ SearXNG の起動時に、検索先の一つ bilibili が `ModuleNotFoundError: 
 
 ## 関連
 
-- [git_required_for_zip_install.md](git_required_for_zip_install.md) — このテストの本体
+- [git_required_for_zip_install.md](../git_required_for_zip_install.md) — このテストの本体
 - [clean_windows_missing_vc_runtime_blocks_startup.md](clean_windows_missing_vc_runtime_blocks_startup.md) — 同じテストで見つかった、本体が起動しない件
