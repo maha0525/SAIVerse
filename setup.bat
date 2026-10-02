@@ -252,19 +252,11 @@ for /f "tokens=*" %%v in ('git --version') do set GIT_VERSION=%%v
 echo [OK] %GIT_VERSION%
 
 REM --- 9b. Initialize git repository ---
-if not exist ".git" (
-    echo.
-    echo [SETUP] Initializing repository for automatic updates...
-    git init
-    git remote add origin https://github.com/maha0525/SAIVerse.git
-    git fetch origin
-    git branch -M main
-    git reset origin/main
-    git branch --set-upstream-to=origin/main
-    echo [OK] Git repository initialized
-) else (
-    echo [OK] Git repository already exists
-)
+REM scripts\init_git_repo.py records the release this folder actually contains
+REM (the tag named after VERSION), not always the newest one, and tells the user
+REM when the files do not match the record. It prints its own messages, and its
+REM warnings do not stop setup. setup.sh calls the same script.
+python scripts\init_git_repo.py
 
 :git_skip
 
