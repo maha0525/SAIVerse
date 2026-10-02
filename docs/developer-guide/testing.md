@@ -123,7 +123,9 @@ class TestWithMock(unittest.TestCase):
 
 ## CI/CD
 
-プルリクエスト時に自動でテストが実行されます。
+現在の [Discord Gateway CI](../../.github/workflows/discord_gateway.yml) は、`discord_gateway/` や指定の依存ファイルを変更する PR で、Discord Gateway の lint とテストを実行する。リポジトリ全体の Python テストや frontend の検査を実行する workflow ではない。
+
+本体・frontend の変更は上記の検査を手元の隔離環境で実行し、結果と未検証範囲を PR に記載する。GitHub に check が無いことを、全体テストの成功と扱わない。
 
 ## カバレッジ
 
