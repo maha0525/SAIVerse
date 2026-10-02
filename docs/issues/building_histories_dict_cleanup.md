@@ -24,10 +24,10 @@ Phase 2+3 で source of truth が `building_messages` テーブル (DB) に移�
 | `manager/persona.py:399` | persona 新規作成時の `building_histories[new_building_id] = []` | 同上、 削除可 |
 | `manager/blueprints.py:254` | blueprint 経由 persona 作成時の同様の初期化 | 同上、 削除可 |
 | `api/routes/chat.py:111` | debug log `manager.building_histories.keys()` で空 dict を出力 | 削除 or 「DB ベースの履歴数」 の debug log に置換 |
-| `api/routes/system.py:257, 310` | quarantine restore/reset 経路の `manager.building_histories[bid] = data` | **別 issue**: `quarantine_path_dead_code_removal.md` で扱う |
-| `persona/mixins/history.py:176` | `_save_conscious_log` メソッド名 (= 中身は `persona_pulse_cursor` DB 保存に刷新済) | rename 候補 (= `_save_pulse_cursors` 等)。 呼び出し元 `api/routes/system.py:176` も追従要 |
+| `api/routes/system.py:257, 310` | quarantine restore/reset 経路の `manager.building_histories[bid] = data` | **別 issue の撤去差分で解消、PR レビュー待ち**: `quarantine_path_dead_code_removal.md` |
+| `persona/mixins/history.py:176` | `_save_conscious_log` メソッド名 (= 中身は `persona_pulse_cursor` DB 保存に刷新済) | rename 候補 (= `_save_pulse_cursors` 等)。 旧復旧 API の呼び出し元は quarantine 撤去差分で削除 (PR レビュー待ち)。残る呼び出し元は別途確認 |
 | `manager/history.py:189-191` | `_save_building_histories` no-op 関数 | 互換のため残しているが、 呼び出し元が `_append_building_history_note` だけになれば削除可 |
-| `manager/history.py:154` | コメントに「`conscious_log.json` に save」 と旧記述 | コメント更新 |
+| `manager/history.py:154` | コメントに「`conscious_log.json` に save」 と旧記述 | 旧復旧専用の clamp メソッドごと quarantine 撤去差分で削除 (PR レビュー待ち) |
 | `saiverse/saiverse_manager.py:1773` | `building_memory_paths` の `log.json` パス算出が残存 | `persona/history_manager.py:36` に「legacy log.json (archive) のパス参照のために残す」 とあり、 archive 読み出しでは現役。 残す or 削除は要確認 |
 
 ## 整理方針

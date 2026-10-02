@@ -22,10 +22,11 @@ SAIVerse のバックエンドは、まはーの PC の中で `127.0.0.1:8000` �
 送れる (どれも画面のボタンと同じもの):
 
 - 壊れた履歴ファイルを脇へ移す (`/api/system/legacy-log/{id}/archive`)
-- 隔離された部屋をバックアップから復元する (`/api/system/quarantine/{id}/restore`)
-- 隔離された部屋を空の履歴にリセットする (`/api/system/quarantine/{id}/reset`)
+（起票時に併記した旧 quarantine の復元・リセット 2 本は、
+[撤去差分](quarantine_path_dead_code_removal.md) の PR レビュー待ち。
+その登録元は当時から呼び手が無く、実際には 404 だった。）
 
-`system.py` で確認したのはこの 3 つだが、状態を変えるルートは他にもあるので、
+`system.py` で確認したのはこの周辺だが、状態を変えるルートは他にもあるので、
 **この API 全体の話**として扱うのが正しい。
 
 ## 読み取りはできない

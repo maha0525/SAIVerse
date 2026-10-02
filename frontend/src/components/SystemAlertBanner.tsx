@@ -8,7 +8,6 @@ import { useLocale } from '@/i18n/useLocale';
 import { useEffect, useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
 import styles from "./SystemAlertBanner.module.css";
-import QuarantineModal from "./QuarantineModal";
 
 interface SystemAlert {
     id: string;
@@ -26,7 +25,6 @@ export default function SystemAlertBanner() {
     useLocale();
     const [alerts, setAlerts] = useState<SystemAlert[]>([]);
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
-    const [quarantineModalOpen, setQuarantineModalOpen] = useState(false);
     const [busyId, setBusyId] = useState<string | null>(null);
 
     const fetchAlerts = async () => {
@@ -79,8 +77,6 @@ export default function SystemAlertBanner() {
 
     if (alerts.length === 0) return null;
 
-    const hasQuarantineAlerts = alerts.some((a) => a.id.startsWith("quarantine_"));
-
     const toggle = (id: string) => {
         setExpandedIds((prev) => {
             const next = new Set(prev);
@@ -101,7 +97,6 @@ export default function SystemAlertBanner() {
                             : alert.level === "warning"
                               ? styles.warning
                               : styles.info;
-                    const isQuarantine = alert.id.startsWith("quarantine_");
                     const isUnreadableLegacyLog =
                         (alert.details || {}).kind === "unreadable";
                     return (
@@ -121,13 +116,6 @@ export default function SystemAlertBanner() {
                                         <ChevronDown size={16} className={styles.chevron} />
                                     )}
                                 </button>
-                                {isQuarantine && (
-                                    <button data-i18n="components.SystemAlertBanner.text006"
-                                        type="button"
-                                        className={styles.actionButton}
-                                        onClick={() => setQuarantineModalOpen(true)}
-                                    >{uiText("components.SystemAlertBanner.text006")}</button>
-                                )}
                                 {isUnreadableLegacyLog && (
                                     <button data-i18n="components.SystemAlertBanner.text007 components.SystemAlertBanner.text008"
                                         type="button"
@@ -158,13 +146,6 @@ export default function SystemAlertBanner() {
                     );
                 })}
             </div>
-            {hasQuarantineAlerts && (
-                <QuarantineModal
-                    isOpen={quarantineModalOpen}
-                    onClose={() => setQuarantineModalOpen(false)}
-                    onResolved={fetchAlerts}
-                />
-            )}
         </>
     );
 }
@@ -193,13 +174,8 @@ function formatKey(key: string): string {
     const labels: Record<string, string> = {
         building_id: uiText("components.SystemAlertBanner.text016"),
         backup_path: uiText("components.SystemAlertBanner.text017"),
-        corrupted_path: uiText("components.SystemAlertBanner.text018"),
-        original_path: uiText("components.SystemAlertBanner.text019"),
         parse_error: uiText("components.SystemAlertBanner.text020"),
-        rescue_error: uiText("components.SystemAlertBanner.text021"),
-        recovery_instructions: uiText("components.SystemAlertBanner.text022"),
         reason: uiText("components.SystemAlertBanner.text023"),
-        available_backups: uiText("components.SystemAlertBanner.text024"),
         kind: uiText("components.SystemAlertBanner.text025"),
         missing: uiText("components.SystemAlertBanner.text026"),
         file_entries: uiText("components.SystemAlertBanner.text027"),

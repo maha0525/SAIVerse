@@ -429,7 +429,7 @@ def test_the_notice_write_reports_success_only_with_a_db_numbered_row():
     assert runtime_llm._record_interruption_notice(
         runtime, persona, "b1", content="(通告)", msg_id="m1",
     ) is False
-    # 隔離中の部屋 (空の dict) も置けなかった扱い
+    # 空の dict も DB の採番が無いので置けなかった扱い
     persona.history_manager.add_to_building_only.return_value = {}
     assert runtime_llm._record_interruption_notice(
         runtime, persona, "b1", content="(通告)", msg_id="m1",

@@ -9,6 +9,7 @@
     "start": "next start",
     "lint": "eslint .",
     "test": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs && node scripts/test-dev-origins.cjs",
+    "test:alerts": "node scripts/test-system-alert-banner.cjs",
     "test:i18n": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs",
     "predev": "node scripts/sync-addon-panels.mjs",
     "prebuild": "node scripts/sync-addon-panels.mjs",
