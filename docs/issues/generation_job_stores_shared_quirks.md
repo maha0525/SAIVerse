@@ -1,12 +1,14 @@
 # ジョブの器 (Chronicle 生成 / スルース採取) に共通する二つの小さい癖
 
-**状態**: 未解決 (2026-09-09 起票、実害は小さく後回し)。
+**状態**: 一部実装・検証待ち (2026-10-02)。癖 2 の冪等応答は実装済み・レビュー待ち。癖 1 (完了ジョブの保持) は未解決で、保持期限・掃除方針は未決定。
 **発見の経緯**: v0.3.11 のレビューで、採取ジョブの器 (`api/routes/people/sluice.py`)
 へのローカル LLM の指摘 2 件を裏取りしたところ、手本にした Chronicle 生成の器
 (`api/routes/people/arasuji.py`) にも同じ形があると分かった。この変更で持ち込まれた
 欠陥ではなく、器の型ごと写った既存の癖。
 
 ## 癖 1: 完了したジョブがプロセス内の一覧に残り続ける
+
+**未解決・今回の対象外**。以下の掃除案は採用しておらず、保持期限も定めない。
 
 `_generation_jobs` (arasuji.py) と `_capture_jobs` (sluice.py) はプロセス内の辞書で、
 ジョブが完了・失敗・中止になっても行を消す処理が無い。サーバーを長く起動したままに
@@ -19,10 +21,36 @@
 
 ## 癖 2: 中止中のジョブへもう一度中止を送ると「Job is not running」と返る
 
-cancel の状態検査が `("pending", "running")` (arasuji 側は + "started") のみで、
-`"cancelling"` を含まない。既に中止要求済みのジョブへもう一度 cancel を押すと
+修正前は cancel の状態検査が `("pending", "running")` (arasuji 側は + "started") のみで、
+`"cancelling"` を含まなかった。既に中止要求済みのジョブへもう一度 cancel を押すと
 `{"cancelled": False, "reason": "Job is not running"}` が返り、「実行されていない」と
-誤読できる文面になる。実害は文面だけ (フラグは単調なので二重要求自体は無害)。
+誤読できる文面になっていた。実害は文面だけ (フラグは単調なので二重要求自体は無害)。
 
-直すなら: `"cancelling"` は「既に中止要求済み」を意味する応答 (例:
+対応方針: `"cancelling"` は「既に中止要求済み」を意味する応答 (例:
 `{"cancelled": True}` の冪等応答) にする。両ファイル同時。
+
+### 実装と検証の範囲 (2026-10-02、レビュー待ち)
+
+- 両 cancel API の既存ロック内で、ジョブの存在・所有 persona を確認した後に
+  `cancelling` を受理済みとして返す。再要求では行・フラグ・進捗を更新せず、
+  新しいジョブや worker も起動しない。
+- `cancelled: true` は中止要求の受理であって停止完了ではない。worker が読む
+  `cancel_requested` の単調性、チャンク間の中止、ポーリングが示す実際の終端は
+  従来どおり。`completed` / `failed` / `cancelled` への要求は従来の false 応答を保つ。
+- 新規回帰 `tests/test_generation_cancel_api.py` は合成ジョブと隔離
+  `SAIVERSE_HOME` を使い、FastAPI の実ルートへ初回・再送・終端・不在・別 persona
+  の中止要求を送り、ポーリングと行の不変性も確認する。LLM・本番データは使わない。
+- 未検証の境界はブラウザ操作と本番 worker の実走。既存の実行処理は変更しない。
+  癖 1 の行の蓄積は残るため、issue 全体は解決扱い・archive 移動にしない。
+
+### 経緯
+
+- 2026-10-02: 修正前の API 回帰で、Chronicle 3 状態・Sluice 2 状態からの
+  二度目の中止だけが失敗することを確認 (5 失敗・29 合格)。癖 2 だけを
+  両 API に同じ形で実装し、保持方針を要する癖 1 は切り離した。
+- 同日: 新規 API 回帰 34 ケースを含む関連 5 ファイルで 288 件 + 61 subtests 合格。
+  対象は `test_generation_cancel_api` / `test_arasuji_generation_status_mapping` /
+  `test_sluice_capture` / `test_sluice` / `test_sluice_cold_isolation`。変更 Python の
+  ruff、台帳検査、差分の空白検査も合格。参照文書の生成を実行し API・DB は差分なし。
+  tool-catalog はこの隔離環境にないアドオン分が消えるため、その無関係な差分を除外した。
+- 旧状態行: 「未解決 (2026-09-09 起票、実害は小さく後回し)」。
