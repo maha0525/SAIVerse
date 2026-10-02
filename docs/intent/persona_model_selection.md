@@ -1,7 +1,7 @@
 # ペルソナが話すモデルの決め方と、設定を変えたときの反映
 
 **ステータス**: 完了 — 実装・検収・レビュー (手元のモデルと Codex 二巡) → 2026-09-13 に develop へマージ (PR #294) → 同日まはーの実機で確認済み (ペルソナ側の標準モデル設定を外し、グローバル側の標準モデルを Gemma 4 31B から Gemini 3.8 Flash 無料枠へ変えてすぐ話す → 即反映)。スタックチャンに声で話しかけたときに知らせが届かない件は、別の issue に切り出した
-**載せる版**: v0.3.13 (release/v0.3.13)。「リリースノートに書くこと」は release_history の「次の版の範囲」の v0.3.13 の項に写した
+**載せるバージョン**: v0.3.13 (release/v0.3.13)。「リリースノートに書くこと」は release_history の「次のバージョンの範囲」の v0.3.13 の項に写した
 **関連**: [model_provider_management.md](model_provider_management.md) / [model_catalog_distribution.md](model_catalog_distribution.md) / [beat_execution_context.md](beat_execution_context.md) / [release_history.md](../overview/release_history.md) の v0.3.12 (5) / [stackchan_voice_errors_not_shown.md](../issues/stackchan_voice_errors_not_shown.md) / [provider_change_does_not_reach_live_personas.md](../issues/provider_change_does_not_reach_live_personas.md)
 **コード**: `saiverse/persona_model_selection.py` (決め方・決め直し・返事の始まりに決めたモデルの控え・画面へ出す文面)、`saiverse/saiverse_manager.py` (`set_model` / `set_model_parameters`)、`api/routes/admin.py` (`write_env_updates` / `update_env_vars`)、`api/routes/config.py` (`set_model` の、遅れて届いた古い選択を弾く仕組み、`write_env_updates` を呼ぶ三つの設定、モデルの作成・更新・削除・複製・チャット画面からの保存)、`api/routes/providers.py`、`api/routes/world.py` (ワールドエディタからのペルソナ設定の保存)、`saiverse/model_configs.py` と `saiverse/provider_configs.py` (`reload_configs`)、`api/routes/tutorial.py` (`auto_configure_models`)、`manager/admin.py` (`update_ai` / `create_ai`)、`manager/persona.py` (`_load_single_persona` / `_create_persona`)、`manager/blueprints.py` (設計図からの生成)、`manager/initialization.py` (`_init_model_config` / `current_model_setting_warnings`)、`saiverse/model_defaults.py` (`missing_model_warnings` / `role_model_is_defined`)、`sea/runtime.py` (`select_llm_client` / `resolve_llm_model` / `_generate_stelis_chronicle`)、`sea/runtime_runner.py` (返事の始まりに実行モデルを決める箇所)、`sea/pulse_context.py` (`resolve_execution_context` / `default_lightweight_model`)、`persona/core.py` と `persona/mixins/generation.py` (`llm_client` / `lightweight_llm_client` / `set_model` / `apply_parameter_overrides`)、`saiverse/media_summary.py` (`_resolve_client_for_model`)、`saiverse/memory_weave_llm.py` (`resolve_global_memory_weave_model`)、`builtin_data/tools/get_since_last_user_conversation.py`、`sea/session_lifecycle.py` (`invalidate_cold_sweep_fingerprints`)、`frontend/src/components/GlobalSettingsModal.tsx`、`frontend/src/components/ChatOptions.tsx`、`frontend/src/components/settings/` (モデル管理・プロバイダ管理・ワールドエディタ)、`frontend/src/components/tutorial/TutorialWizard.tsx`
 
@@ -48,7 +48,7 @@
    - 画像・音声・動画の要約モデルが無い → 組み込みの既定モデルで要約していた。
    - Memory Weave モデルが無い → すでに、選び直すまで記憶の整理が止まる形になっていた。ほかの役割をこれに揃える。
    - 標準モデルが構造化出力に対応していないときに軽量モデルへ回す既存の使い分けは、失敗の代わりではなく、モデルの能力に合わせた使い分けなので残す。
-   - 根拠: 無いときについて、まはー「確かにそうすべきだね。その方が確実で安全だと思う」(2026-09-11)。繋げないときについて、まはー「うん、動かさなくていいと思う。不慮のトラブルで使えないって状態なのだから、それはもう使えないで良いよねって感じ。SAIVerseが要らんおせっかいをするリスクの方が重い」(2026-09-12)。その結果、v0.3.12 で削除したモデルを選んでいた人は、この変更を載せた版に更新したあと選び直すまで、そのペルソナと話せない。
+   - 根拠: 無いときについて、まはー「確かにそうすべきだね。その方が確実で安全だと思う」(2026-09-11)。繋げないときについて、まはー「うん、動かさなくていいと思う。不慮のトラブルで使えないって状態なのだから、それはもう使えないで良いよねって感じ。SAIVerseが要らんおせっかいをするリスクの方が重い」(2026-09-12)。その結果、v0.3.12 で削除したモデルを選んでいた人は、この変更を載せたバージョンに更新したあと選び直すまで、そのペルソナと話せない。
    - 「止まっている」の意味 (メティスの具体化): そのモデルを使う仕事 (返事を書く、自分から動く判断、記憶の整理、画像・音声・動画の要約、会話の要約) をしない。LLM を使わない処理 (部屋の様子の記録など) は今までどおり続く。自分から動く判断は、そのモデルを使う段で失敗する。LLM は呼ばれないので費用は出ない。
    - 将来の構想との関係: [model_provider_management.md](model_provider_management.md) にある「モデル単位で、障害時に切り替える別のモデルを順序付きで指定できるようにする」(まはー構想、未実装) を入れるときは、この決まりを決め直す必要がある。ユーザーが自分で指定した切り替え先は「勝手な代わり」ではないが、この決まりは無条件の文なので、そのままでは両立しない。
    - 外部カタログとの関係: この決まりの下では、カタログから取った定義が消えると、それを選んだペルソナが止まる。カタログの intent が守ると決めていること (1: カタログが無くても機能は落ちない / 4: 更新が止まっても異常として扱わない) と両立させるため、カタログの段階 3 以降では、カタログが取れなくなっても取得済みの定義を消さない (メティスの追記、まはー未確認。段階 3 は未実装)。
@@ -101,10 +101,10 @@
 
 ## リリースノートに書くこと
 
-版が決まったら、release_history の「次の版の範囲」に写す。
+バージョンが決まったら、release_history の「次のバージョンの範囲」に写す。
 
 - 選んだモデルが SAIVerse に無いとき、または繋げないとき、代わりのモデルでは動かず止まる。選び直せば、再起動しなくても話せる。v0.3.12 で削除したモデルを選んでいた場合は、ペルソナ設定とグローバル設定の「モデルロール」で選び直す。
-- v0.3.12 のリリースノートでは「画像・音声・動画の要約モデルが無いときは、組み込みの既定モデルで要約を続ける」と伝えていたが、この版からは要約も止まる。
+- v0.3.12 のリリースノートでは「画像・音声・動画の要約モデルが無いときは、組み込みの既定モデルで要約を続ける」と伝えていたが、このバージョンからは要約も止まる。
 - 設定を変えたら、再起動しなくても効く (標準モデル、ペルソナ設定、モデル管理、プロバイダの設定)。書いている途中の返事は、始めたときのモデルで最後まで書き、次の返事から新しいモデルになる。API キーと、画像・音声・動画の要約モデルを変えたときは、書いている途中の返事にも効く。
 - 設定ファイルの無いモデルの名前は保存されず、保存したその場で知らせが出る。
 
@@ -131,7 +131,7 @@
 - v0.3.12 の組み込みモデルの棚卸しで、Codex による 2 回目のレビューで「グローバル設定の標準モデルを変えても、動いているペルソナには反映されないのに、警告だけ消える」という指摘が出た。環境変数の保存から `update_default_model` を呼んでその場で切り替える形をいったん入れたが、3 回目のレビューで穴が出たため取り下げ、「再起動するまで反映されない」を警告で知らせる形にしてリリースした。
 - 3 回目のレビューで出た穴は四つ。定義の検査より先に標準モデルの値を書き換え、途中の失敗を握り潰して成功として返す。チャット画面の一時上書きを見ずに切り替える。空に戻しても切り替わらない。保存と反映をロックなしで行うので、同時に保存すると保存された値と実行中の値が逆になりうる。
 - 2026-09-11 にコードを読み直し、四つとも確かめた。同じ理由の穴が隣に二つあった。ペルソナ設定で個別の標準モデルを空に戻しても、再起動するまで前のモデルで話し続け、警告も出ない (`update_ai` では、個別の標準モデルが空のとき何も切り替わらない)。一時上書き中にワールドエディタでペルソナを作ると、上書きのモデルではなく標準モデルになる (ペルソナを作る処理では、起動時に写しておいた一時上書きの値が使われる)。
-- 同日の文書の整合性の検査で、設計図からの生成が六か所目の書き方だったこと、.env を書き換える画面がモデル以外にも三つあること、返事の途中の切り替えが beat_execution_context の決定と食い違うこと、Memory Weave モデルを選び直しても記憶の整理を前もって行う処理が再試行しない可能性があること、外部カタログの intent が守ると決めていることとの関係が分かり、この文書に反映した。そのうち、まはーに決めてもらう 5 件を 2026-09-12 に提示し、全件の答えを得た (決まったこと 6・7・10・11 と「載せる版」)。
+- 同日の文書の整合性の検査で、設計図からの生成が六か所目の書き方だったこと、.env を書き換える画面がモデル以外にも三つあること、返事の途中の切り替えが beat_execution_context の決定と食い違うこと、Memory Weave モデルを選び直しても記憶の整理を前もって行う処理が再試行しない可能性があること、外部カタログの intent が守ると決めていることとの関係が分かり、この文書に反映した。そのうち、まはーに決めてもらう 5 件を 2026-09-12 に提示し、全件の答えを得た (決まったこと 6・7・10・11 と「載せるバージョン」)。
 - 話す標準モデルを決める順番は、起動時の読み込み (`_load_single_persona`)、一時上書きの解除 (`set_model` の空の分岐)、ペルソナ設定の保存 (`update_ai`)、プリセット (`update_default_model`)、ワールドエディタからの作成 (`_create_persona`)、設計図からの生成 (`manager/blueprints.py`) の六か所に書かれていて、並び方も「設定ファイルが無いときに次へ進むか」も少しずつ違っていた。
 - 2026-09-13: PR #294 をまはーの指示で develop へマージした。マージ時の衝突は 1 件 — Beat 分割 (スペルループの戻りが SpellLoopResult になった) と、この intent の「使うモデルが無いときは注記を差し込まず画面のエラーにする」素通しの合流で、develop の形に ModelUnavailableError を載せて解消。Beat 分割で発言の帰属先を在室表から引くようになった分、テストの模型に在室表 (空) を足した。v0.3.13 (release/v0.3.13) に載せ、実機確認は v0.3.13 の動作確認で行う。
 - 2026-09-13 (実機確認・完了): v0.3.13 でのバックエンド再起動後、まはーがペルソナ側の標準モデル設定を外し、グローバル側の標準モデルを Gemma 4 31B から Gemini 3.8 Flash (無料枠) に変えてすぐ話したところ、再起動なしで即反映された。ペルソナ個別の設定を外してグローバルへ落ちる経路と、グローバル変更の即時反映の両方が一度に通っている。

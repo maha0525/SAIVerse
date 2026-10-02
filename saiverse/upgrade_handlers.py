@@ -1113,7 +1113,7 @@ HANDLERS: List[UpgradeHandler] = [
         description="Empty release edge 0.3.11 -> 0.3.12 (column drops run in migrate.py; building-id repair runs at startup).",
     ),
     # ---- v0.3.13 ----
-    # この版の DB 変更は Building.ITEM_DISPLAY_LIMIT の追加 1 本だけ (additive)。
+    # このバージョンの DB 変更は Building.ITEM_DISPLAY_LIMIT の追加 1 本だけ (additive)。
     # 追加列は migrate.py が既存 DB に足すので、更新の鎖に移行は要らない。
     UpgradeHandler(
         name="city_noop_v0_3_13",
@@ -1132,7 +1132,7 @@ HANDLERS: List[UpgradeHandler] = [
         description="Empty release edge 0.3.12 -> 0.3.13 (only additive column Building.ITEM_DISPLAY_LIMIT; migrate.py adds it).",
     ),
     # ---- v0.3.14 ----
-    # この版の DB 変更は追加列のみ (言語設定 CITY.LANGUAGE / AI.LANGUAGE、
+    # このバージョンの DB 変更は追加列のみ (言語設定 CITY.LANGUAGE / AI.LANGUAGE、
     # 反射判断 AI.REFLEX_JUDGMENT_MODEL ほか)。追加列は migrate.py が既存 DB に
     # 足すので、更新の鎖に移行は要らない。
     UpgradeHandler(
@@ -1152,7 +1152,7 @@ HANDLERS: List[UpgradeHandler] = [
         description="Empty release edge 0.3.13 -> 0.3.14 (only additive columns; migrate.py adds them).",
     ),
     # ---- v0.3.15 ----
-    # この版に DB 変更はない (models.py / migrate.py とも v0.3.14 から無変更)。
+    # このバージョンに DB 変更はない (models.py / migrate.py とも v0.3.14 から無変更)。
     UpgradeHandler(
         name="city_noop_v0_3_15",
         scope="city",
@@ -1170,7 +1170,7 @@ HANDLERS: List[UpgradeHandler] = [
         description="Empty release edge 0.3.14 -> 0.3.15 (no DB changes).",
     ),
     # ---- v0.3.16 ----
-    # この版に DB 変更はない (models.py / migrate.py とも v0.3.15 から無変更)。
+    # このバージョンに DB 変更はない (models.py / migrate.py とも v0.3.15 から無変更)。
     UpgradeHandler(
         name="city_noop_v0_3_16",
         scope="city",
@@ -1188,12 +1188,12 @@ HANDLERS: List[UpgradeHandler] = [
         description="Empty release edge 0.3.15 -> 0.3.16 (no DB changes).",
     ),
     # ---- v0.3.17 ----
-    # この版の DB 変更は migrate.py が起動時に当てる: フィードの追加 (新表
+    # このバージョンの DB 変更は migrate.py が起動時に当てる: フィードの追加 (新表
     # feed_fixture_config と列 feed_subscription.LAST_ATTEMPT_AT) は軽量パス、
     # リアルタイム情報の全体トグル AI.REALTIME_INFO_ENABLED を項目別の 2 列へ
     # 分けた変更は全書換パス (_migrate_realtime_info_to_item_toggles が旧値を
     # 引き継ぐ)。建物の削除の残骸の付け替えは起動時の片付けが行う。
-    # どれも更新の鎖で行う移行ではないので、この版の辺は空。
+    # どれも更新の鎖で行う移行ではないので、このバージョンの辺は空。
     UpgradeHandler(
         name="city_noop_v0_3_17",
         scope="city",
@@ -1211,8 +1211,8 @@ HANDLERS: List[UpgradeHandler] = [
         description="Empty release edge 0.3.16 -> 0.3.17 (schema changes are applied by migrate.py at startup).",
     ),
     # ---- v0.3.18 ----
-    # この版はモデル定義 (builtin_data/models/) と画像生成ツールの変更だけで、DB の
-    # 変更も更新の鎖で行う移行も無いので、この版の辺は空。
+    # このバージョンはモデル定義 (builtin_data/models/) と画像生成ツールの変更だけで、DB の
+    # 変更も更新の鎖で行う移行も無いので、このバージョンの辺は空。
     UpgradeHandler(
         name="city_noop_v0_3_18",
         scope="city",
@@ -1230,9 +1230,9 @@ HANDLERS: List[UpgradeHandler] = [
         description="Empty release edge 0.3.17 -> 0.3.18 (no DB changes).",
     ),
     # ---- v0.3.19 ----
-    # この版は更新プログラム (scripts/update_engine.py) と画面の修正、モデル定義の
+    # このバージョンは更新プログラム (scripts/update_engine.py) と画面の修正、モデル定義の
     # 追加 (GPT-6.1 Sol の Codex 版) だけで、DB の変更も更新の鎖で行う移行も無いので、
-    # この版の辺は空。
+    # このバージョンの辺は空。
     UpgradeHandler(
         name="city_noop_v0_3_19",
         scope="city",
@@ -1250,8 +1250,8 @@ HANDLERS: List[UpgradeHandler] = [
         description="Empty release edge 0.3.18 -> 0.3.19 (no DB changes).",
     ),
     # ---- v0.3.20 ----
-    # この版は導入まわり (setup.bat / setup.sh と、そこから呼ぶスクリプト) と起動時の
-    # 確認の修正だけで、DB の変更も更新の鎖で行う移行も無いので、この版の辺は空。
+    # このバージョンは導入まわり (setup.bat / setup.sh と、そこから呼ぶスクリプト) と起動時の
+    # 確認の修正だけで、DB の変更も更新の鎖で行う移行も無いので、このバージョンの辺は空。
     UpgradeHandler(
         name="city_noop_v0_3_20",
         scope="city",

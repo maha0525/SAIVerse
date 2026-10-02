@@ -22,15 +22,15 @@ FileNotFoundError: [WinError 2] 指定されたファイルが見つかりませ
 
 ## 原因 (確定)
 
-SearXNG は起動のとき、自分の版の番号を知るために `git` コマンドを呼ぶ (`searx/version.py`)。版の番号を書いたファイル `searx/version_frozen.py` があれば `git` を呼ばないが、SAIVerse が取ってくる SearXNG のソースにはこのファイルが無い。
+SearXNG は起動のとき、自分のバージョンの番号を知るために `git` コマンドを呼ぶ (`searx/version.py`)。バージョンの番号を書いたファイル `searx/version_frozen.py` があれば `git` を呼ばないが、SAIVerse が取ってくる SearXNG のソースにはこのファイルが無い。
 
 setup.bat は、Git が無い PC では Git をフォルダの中 (`.git-portable\cmd`) に入れる。setup.bat 自身と更新プログラムは、その場所を PATH に足して使う。start.bat は Node.js については同じ手当てをしている (`if exist ".node\node.exe" set "PATH=%CD%\.node;%PATH%"`) が、Git については何もしていない。だから SearXNG のウィンドウからは `git` が見つからない。
 
-SearXNG のコードは、`git` が失敗したとき (`CalledProcessError`) は握って既定の版の番号で続けるが、`git` そのものが見つからないとき (`FileNotFoundError`) は握らないので、起動ごと落ちる。
+SearXNG のコードは、`git` が失敗したとき (`CalledProcessError`) は握って既定のバージョンの番号で続けるが、`git` そのものが見つからないとき (`FileNotFoundError`) は握らないので、起動ごと落ちる。
 
 ## 直したこと (2026-10-02)
 
-SearXNG を起動する直前 (`scripts/run_searxng_server.ps1` / `.sh`) に `scripts/ensure_searxng_version.py` を呼ぶ。`git` が見つからないときだけ、`searx/version_frozen.py` を書く。書く中身は、SearXNG 自身が `git` の失敗時に使う既定の値と同じ。`git` が見つかるときは何も書かないので、SearXNG はこれまでどおり本当の版の番号を名乗る。起動のたびに確かめるので、すでに導入済みのフォルダも、更新すれば直る。
+SearXNG を起動する直前 (`scripts/run_searxng_server.ps1` / `.sh`) に `scripts/ensure_searxng_version.py` を呼ぶ。`git` が見つからないときだけ、`searx/version_frozen.py` を書く。書く中身は、SearXNG 自身が `git` の失敗時に使う既定の値と同じ。`git` が見つかるときは何も書かないので、SearXNG はこれまでどおり本当のバージョンの番号を名乗る。起動のたびに確かめるので、すでに導入済みのフォルダも、更新すれば直る。
 
 start.bat でフォルダの中の Git を PATH に足す案は採らなかった。Git がどこにも無い PC (Git の自動導入に失敗した PC) では、それでも落ちるため。
 
