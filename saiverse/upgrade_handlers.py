@@ -1229,4 +1229,24 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.17 -> 0.3.18 (no DB changes).",
     ),
+    # ---- v0.3.19 ----
+    # この版は更新プログラム (scripts/update_engine.py) と画面の修正、モデル定義の
+    # 追加 (GPT-6.1 Sol の Codex 版) だけで、DB の変更も更新の鎖で行う移行も無いので、
+    # この版の辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_19",
+        scope="city",
+        from_version="0.3.18",
+        to_version="0.3.19",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.18 -> 0.3.19 (no DB changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_19",
+        scope="ai",
+        from_version="0.3.18",
+        to_version="0.3.19",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.18 -> 0.3.19 (no DB changes).",
+    ),
 ]

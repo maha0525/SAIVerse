@@ -7171,6 +7171,14 @@
     "ja": "保存すると、このキーを使うペルソナすべてに次の返答から効きます。再起動は要りません。",
     "en": "Once saved, every persona that uses this key picks it up from its next reply. No restart needed."
   },
+  "components.settings.ProviderManagementPanel.text039": {
+    "ja": "無料枠",
+    "en": "Free tier"
+  },
+  "components.settings.ProviderManagementPanel.text040": {
+    "ja": "有料枠",
+    "en": "Paid tier"
+  },
   "components.settings.WorldEditor.text001": {
     "ja": "不明なエラー",
     "en": "Unknown error"

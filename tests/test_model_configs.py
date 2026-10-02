@@ -293,11 +293,12 @@ class TestSeptember2026ModelCatalog(unittest.TestCase):
         self.assertAlmostEqual(cost, 2.05)
 
     def test_codex_variants_of_gpt_6_are_subscription_backed(self):
-        # Codex 版は API 名 (gpt-6-sol / gpt-6-luna) が API 版の設定キーと衝突する。
-        # 価格は設定キー (codex-*) 側で引かれ、そこが無価格であること。
+        # Codex 版は API 名 (gpt-6-sol / gpt-6-luna / gpt-6.1-sol) が API 版の設定キーと
+        # 衝突する。価格は設定キー (codex-*) 側で引かれ、そこが無価格であること。
         for config_key, api_model in (
             ("codex-gpt-6-sol", "gpt-6-sol"),
             ("codex-gpt-6-luna", "gpt-6-luna"),
+            ("codex-gpt-6.1-sol", "gpt-6.1-sol"),
         ):
             with self.subTest(model=config_key):
                 config = model_configs.MODEL_CONFIGS[config_key]

@@ -229,7 +229,7 @@ LLM に構造上の判断 (何を束ねるか・どこに置くか) をさせる
 - DB の行更新のみで、編纂も LLM 呼び出しも発生しない。休眠 model 復帰不能 (§12-10 極端形) の主対策。
 - 温度が生きている (キャッシュがまだ有効な) 自行は動かさない — §13 裁定 1 の芯はそのまま。
 - 新 model の初回 (自行なし) も最前線から始める。§13 実装の「直近に更新された他 model の anchor を借りる」ヒューリスティックは、この原理のある値に置き換える (Chronicle が 1 枚も無い persona だけ従来どおり借用 → 最小ロードの順で fallback)。
-- 起点は memory.db に実在する発言を指す。実在しないと確かに分かった起点は、その行を消して、そのモデルで初めて話すときと同じ道で窓を始める (2026-09-29, [docs/issues/dangling_session_anchor_refuses_every_pulse.md](../issues/dangling_session_anchor_refuses_every_pulse.md))。他モデルの行なら借用候補から外す。確かめる照会そのものが失敗したときは消さない (厳格な読みは例外、既定の読みは行をそのまま使う)。行を消すのは本番の読み (`persist_advance=True`) だけ。
+- 起点は memory.db に実在する発言を指す。実在しないと確かに分かった起点は、その行を消して、そのモデルで初めて話すときと同じ道で窓を始める (2026-09-29, [docs/issues/archive/dangling_session_anchor_refuses_every_pulse.md](../issues/archive/dangling_session_anchor_refuses_every_pulse.md))。他モデルの行なら借用候補から外す。確かめる照会そのものが失敗したときは消さない (厳格な読みは例外、既定の読みは行をそのまま使う)。行を消すのは本番の読み (`persist_advance=True`) だけ。
 
 #### 不変条件: 起点はスルースのパンマーカーを越えない (2026-08-23 まはー裁定)
 
@@ -415,3 +415,7 @@ Codex 指摘対応: 畳み結果 (ok/noop/failed/deferred/disabled) を UI ま�
 **Codex 消し込み完了 (2026-07-30、計7巡で承認)**: fold 保持前進 (+失敗伝播) / fail-open 裁定明記 (§14-6の9) / cold sweep ロック内再判定 / keepalive touch の CAS + 予約抑止 / work_session の hold を組成前へ拡大 / keepalive 組成の読み専用化 ([archive](../issues/archive/s14_codex_round2_findings.md))。
 派生で新 issue: [関所閉鎖の slot 消費](../issues/work_session_gate_closed_consumes_slot.md) (裁定待ち・別件)。
 残 = まはーの実機検証 (§13 と §14 まとめて)
+
+## 経緯 (2026-10-01 in_flight 台帳より移送)
+
+- 2026-10-01 (台帳の行を差し替えた): aifi の再編纂は 2026-08-31 に実施済み (本 intent §16-4「実機検証の結果」) なので、次の一手から外した。 台帳から押し出した旧文面: 「実装完了。エリスは実機修復と初編纂まで成功、air は点検の結果修復不要。次 = aifi の再編纂 (未編纂期間の消化、汎用ツール整備済み) と LLM 束ね品質の本番初発火の観察。提示側の簡素化は presentation_gap 実機検証後へ先送り (intent §12-7)。」(誰待ち: まはー (aifi 実施のタイミング))

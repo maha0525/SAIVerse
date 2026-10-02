@@ -3,7 +3,7 @@
 **ステータス**: 🔴 未解決 (未着手)
 **優先度**: low (一つの DB を一つの街で使う普段の形では起きない。一つの DB を複数の街で共有する形でだけ効く)
 **作成日**: 2026-09-29
-**きっかけ**: フィードスタンドの削除 (docs/issues/feed_fixture_no_delete_or_edit.md) の Codex 敵対レビュー 1 巡目。まはーの判断で、その変更の範囲外として issue に残す。
+**きっかけ**: フィードスタンドの削除 (docs/issues/archive/feed_fixture_no_delete_or_edit.md) の Codex 敵対レビュー 1 巡目。まはーの判断で、その変更の範囲外として issue に残す。
 
 ## 症状
 

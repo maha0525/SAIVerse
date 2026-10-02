@@ -225,3 +225,7 @@ try/finally で囲む形になる。システムで最も熱い経路への構�
    そのためには placeholder の id を Beat の器へ載せる必要がある
 3. 起動時に `_streaming_placeholder: True` のまま残っている行を掃く。
    実行中の Beat の placeholder を誤って消さないよう、起動直後に限る
+
+## 経緯
+
+- 2026-10-01: メティスが本番ログを掃いた。2026-08-29 以降の backend.log 111 本に、補填の印 (「memory backfill on beat death succeeded」「…failed」) は一度も出ていなかった。確定後の隙間で Beat が死んだ回がまだ起きていないということで、実地の発生待ちは続く。

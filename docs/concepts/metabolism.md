@@ -76,7 +76,7 @@ Metabolism は短期記憶を区切り直す節目であり、同時に**短期�
 
 `resolve_metabolism_anchor` のフォールバック順（intent §14-2、2026-07-29）: 当該モデルの anchor 行（**温かければ絶対に動かさない**。冷え切っていて編纂の最前線より後ろなら、最前線まで前進して永続化 — 編纂なし・LLM なしの行更新のみ。**スルースのパンマーカーを越えて前進するときは、越えた範囲〈スルース未通過〉を memory.db の `sluice_skipped_spans` に記録してから進む — 記録が書けなければ前進しない**。通っていない範囲はユーザーに分かる状態で明示し、後から通せる、が制約〈旧「パンマーカーの次で頭打ち」は 2026-09-08 に撤回。経緯は intent [sluice_coverage_gaps](../intent/sluice_coverage_gaps.md)〉）→ 行が無ければ最前線（Chronicle の `source_ids` から導出。行は LLM 成功後の touch が立てる）→ 最前線より先の他モデル行があれば借用（編纂なしで前進する設計の persona 等）→ どれも無ければブートストラップ最小ロード。**実装済**。
 
-起点は memory.db に実在する発言を指す。実在しないと確かに分かった起点は、その行を消して、そのモデルで初めて話すときと同じ道で窓を始める（他モデルの行なら借用しない。確かめる照会が失敗したときは消さない。プレビューの読みは行を触らない）（2026-09-29、[issue](../issues/dangling_session_anchor_refuses_every_pulse.md)）。
+起点は memory.db に実在する発言を指す。実在しないと確かに分かった起点は、その行を消して、そのモデルで初めて話すときと同じ道で窓を始める（他モデルの行なら借用しない。確かめる照会が失敗したときは消さない。プレビューの読みは行を触らない）（2026-09-29、[issue](../issues/archive/dangling_session_anchor_refuses_every_pulse.md)）。
 
 **編纂の最前線** = 「どこまで編纂が終わっているか」の境界。真実は Chronicle 自身（一次エントリの `source_ids`）が持ち、anchor とは独立した persona 単位の概念（`get_frontier_anchor_id`）。anchor 行が全部消えても最前線は編纂結果と一緒に生き残る。
 

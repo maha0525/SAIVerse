@@ -320,9 +320,15 @@ def test_engine_preflight_for_a_switch_runs_after_the_old_process_exited(tmp_pat
         order.append("preflight")
         raise update_engine.UpdateError("stop here: order is what this test checks")
 
+    def record_restart(config):  # type: ignore[no-untyped-def]
+        order.append("restart previous")
+        return SimpleNamespace(pid=1)
+
     with patch.object(update_engine, "wait_for_owned_process_exit", side_effect=record_wait), patch.object(
         update_engine, "preflight_switch", side_effect=record_preflight
-    ), patch.object(update_engine, "_ensure_portable_git_on_path"):
+    ), patch.object(update_engine, "_ensure_portable_git_on_path"), patch.object(
+        update_engine, "restart_application", side_effect=record_restart
+    ), patch.object(update_engine, "wait_for_healthy_restart", return_value={}):
         with pytest.raises(update_engine.UpdateError):
             update_engine.run_update(
                 {"main_pid": 1234, "venv_python": "python"},
@@ -330,4 +336,7 @@ def test_engine_preflight_for_a_switch_runs_after_the_old_process_exited(tmp_pat
                 switch_channel="early_access",
             )
 
-    assert order == ["wait", "preflight"]
+    # A refusal after the old backend exited (a network blip in the fetch, a
+    # file written while shutting down) brings the unchanged version back up
+    # instead of leaving SAIVerse stopped.
+    assert order == ["wait", "preflight", "restart previous"]

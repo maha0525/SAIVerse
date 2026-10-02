@@ -9,15 +9,33 @@ import styles from './ProviderManagementPanel.module.css';
 import ProviderEditorModal, { ProviderEditorMode } from './ProviderEditorModal';
 import CodexLoginModal from './CodexLoginModal';
 
+interface ApiKeyEnvInfo {
+    name: string;
+    configured: boolean;
+}
+
 interface ProviderInfo {
     id: string;
     display_name: string;
     protocol: string;
     base_url?: string | null;
     api_key_env?: string | null;
+    // Every environment variable this provider's key can be saved as: the
+    // primary one first, then the alternates (Gemini has a paid-tier and a
+    // free-tier variable). A backend that predates this field omits it.
+    api_key_envs?: ApiKeyEnvInfo[];
     builtin: boolean;
+    // True when any one of the key variables is set.
     api_key_configured?: boolean | null;
 }
+
+// The key variables to show an input for. Falls back to the primary variable
+// alone when the backend does not report api_key_envs.
+const keyEnvsOf = (p: ProviderInfo): ApiKeyEnvInfo[] => {
+    if (p.api_key_envs && p.api_key_envs.length > 0) return p.api_key_envs;
+    if (p.api_key_env) return [{ name: p.api_key_env, configured: !!p.api_key_configured }];
+    return [];
+};
 
 // How-to-get-a-key pages under docs/api-keys/, keyed by the environment variable
 // the key is saved as (the same pages the setup tutorial links to). Keying by the
@@ -32,6 +50,14 @@ const API_KEY_DOCS: Record<string, string> = {
     OPENROUTER_API_KEY: 'openrouter',
     NVIDIA_API_KEY: 'nvidia-nim',
     TYPESAFE_API_KEY: 'typesafe',
+};
+
+// A name for the tier a key variable belongs to, shown next to its label so
+// that two inputs under one provider can be told apart. Keyed by the variable,
+// like API_KEY_DOCS. A variable that is not listed gets no extra name.
+const API_KEY_TIER_LABELS: Record<string, () => string> = {
+    GEMINI_FREE_API_KEY: () => uiText("components.settings.ProviderManagementPanel.text039"),
+    GEMINI_API_KEY: () => uiText("components.settings.ProviderManagementPanel.text040"),
 };
 
 const openApiKeyDocs = (filename: string) => {
@@ -67,9 +93,10 @@ export default function ProviderManagementPanel() {
     const [codexStatus, setCodexStatus] = useState<CodexAuthStatus | null>(null);
     const [codexLoginOpen, setCodexLoginOpen] = useState(false);
     // The provider whose API key panel is open (one at a time), and what has been
-    // typed into it. The saved key itself is never fetched or shown.
+    // typed into it, per environment variable (a provider can have more than one
+    // key variable). The saved key itself is never fetched or shown.
     const [keyPanelFor, setKeyPanelFor] = useState<string | null>(null);
-    const [keyInput, setKeyInput] = useState('');
+    const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
     const [keySaving, setKeySaving] = useState(false);
     // Synchronous double-submit guard: keySaving (state) updates asynchronously,
     // so Enter + click in the same tick could both pass the state check.
@@ -144,16 +171,16 @@ export default function ProviderManagementPanel() {
     };
 
     const toggleKeyPanel = (id: string) => {
-        setKeyInput('');
+        setKeyInputs({});
         setKeyPanelFor(prev => (prev === id ? null : id));
     };
 
     // Saved through the same endpoint as the environment settings screen. That
     // save drops every persona's cached connection, so the new key is used from
-    // each persona's next reply without a restart.
-    const handleSaveApiKey = async (provider: ProviderInfo) => {
-        const envKey = provider.api_key_env;
-        const value = keyInput.trim();
+    // each persona's next reply without a restart. Only the one variable named
+    // by envKey is saved; what is typed into the provider's other inputs stays.
+    const handleSaveApiKey = async (provider: ProviderInfo, envKey: string) => {
+        const value = (keyInputs[envKey] ?? '').trim();
         if (!envKey || !value || keySavingRef.current) return;
         keySavingRef.current = true;
         setKeySaving(true);
@@ -178,8 +205,19 @@ export default function ProviderManagementPanel() {
             if (notices.length > 0) {
                 alert(notices.join('\n\n'));
             }
-            setKeyInput('');
-            setKeyPanelFor(null);
+            if (keyEnvsOf(provider).length > 1) {
+                // More than one key variable: clear only the input that was
+                // saved and keep the panel open, so the other one can be
+                // entered right after.
+                setKeyInputs(prev => {
+                    const next = { ...prev };
+                    delete next[envKey];
+                    return next;
+                });
+            } else {
+                setKeyInputs({});
+                setKeyPanelFor(null);
+            }
             setNotice(uiText("components.settings.ProviderManagementPanel.text036"));
             loadProviders();
         } catch (e) {
@@ -228,57 +266,75 @@ export default function ProviderManagementPanel() {
         }
     };
 
-    // The inline panel under a provider row for entering its API key.
+    // The inline panel under a provider row for entering its API key: one
+    // label + how-to link + input + save button per key variable.
     const renderKeyPanel = (p: ProviderInfo) => {
-        if (!p.api_key_env) return null;
-        const docsFile = API_KEY_DOCS[p.api_key_env];
+        const keyEnvs = keyEnvsOf(p);
+        if (keyEnvs.length === 0) return null;
         return (
             <div className={styles.keyPanel}>
-                <div className={styles.keyPanelHeader}>
-                    <label data-i18n="components.settings.ProviderManagementPanel.text029 components.settings.ProviderManagementPanel.text030" htmlFor={`api-key-${p.id}`} className={styles.keyLabel}>
-                        {uiText("components.settings.ProviderManagementPanel.text029")}
-                        <span className={styles.keyEnvName}>
-                            {uiText("components.settings.ProviderManagementPanel.text030", { p1: p.api_key_env })}
-                        </span>
-                    </label>
-                    {docsFile && (
-                        <button data-i18n="components.settings.ProviderManagementPanel.text031 components.settings.ProviderManagementPanel.text032"
-                            type="button"
-                            className={styles.docLink}
-                            onClick={() => openApiKeyDocs(docsFile)}
-                            title={uiText("components.settings.ProviderManagementPanel.text032")}
-                        >
-                            <ExternalLink size={12} />{uiText("components.settings.ProviderManagementPanel.text031")}</button>
-                    )}
-                </div>
-                <div className={styles.keyInputRow}>
-                    <input data-i18n="components.settings.ProviderManagementPanel.text033 components.settings.ProviderManagementPanel.text034"
-                        id={`api-key-${p.id}`}
-                        type="password"
-                        autoComplete="new-password"
-                        className={styles.keyInput}
-                        placeholder={p.api_key_configured
-                            ? uiText("components.settings.ProviderManagementPanel.text033")
-                            : uiText("components.settings.ProviderManagementPanel.text034")}
-                        value={keyInput}
-                        onChange={(e) => setKeyInput(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-                                e.preventDefault();
-                                handleSaveApiKey(p);
-                            }
-                        }}
-                        autoFocus
-                    />
-                    <button data-i18n="components.settings.ProviderManagementPanel.text035"
-                        type="button"
-                        className={styles.btnPrimary}
-                        onClick={() => handleSaveApiKey(p)}
-                        disabled={!keyInput.trim() || keySaving}
-                    >
-                        {uiText("components.settings.ProviderManagementPanel.text035")}
-                    </button>
-                </div>
+                {keyEnvs.map((env, index) => {
+                    const docsFile = API_KEY_DOCS[env.name];
+                    // The tier name exists to tell two inputs apart, so a
+                    // provider with a single input (e.g. a user-made one that
+                    // happens to read GEMINI_API_KEY) shows none.
+                    const tierLabel = keyEnvs.length > 1 ? API_KEY_TIER_LABELS[env.name] : undefined;
+                    const inputId = `api-key-${p.id}-${env.name}`;
+                    const typed = keyInputs[env.name] ?? '';
+                    return (
+                        <div key={env.name} className={styles.keyField}>
+                            <div className={styles.keyPanelHeader}>
+                                <label data-i18n="components.settings.ProviderManagementPanel.text029 components.settings.ProviderManagementPanel.text030 components.settings.ProviderManagementPanel.text039 components.settings.ProviderManagementPanel.text040" htmlFor={inputId} className={styles.keyLabel}>
+                                    {uiText("components.settings.ProviderManagementPanel.text029")}
+                                    {tierLabel && <span>{tierLabel()}</span>}
+                                    <span className={styles.keyEnvName}>
+                                        {uiText("components.settings.ProviderManagementPanel.text030", { p1: env.name })}
+                                    </span>
+                                </label>
+                                {docsFile && (
+                                    <button data-i18n="components.settings.ProviderManagementPanel.text031 components.settings.ProviderManagementPanel.text032"
+                                        type="button"
+                                        className={styles.docLink}
+                                        onClick={() => openApiKeyDocs(docsFile)}
+                                        title={uiText("components.settings.ProviderManagementPanel.text032")}
+                                    >
+                                        <ExternalLink size={12} />{uiText("components.settings.ProviderManagementPanel.text031")}</button>
+                                )}
+                            </div>
+                            <div className={styles.keyInputRow}>
+                                <input data-i18n="components.settings.ProviderManagementPanel.text033 components.settings.ProviderManagementPanel.text034"
+                                    id={inputId}
+                                    type="password"
+                                    autoComplete="new-password"
+                                    className={styles.keyInput}
+                                    placeholder={env.configured
+                                        ? uiText("components.settings.ProviderManagementPanel.text033")
+                                        : uiText("components.settings.ProviderManagementPanel.text034")}
+                                    value={typed}
+                                    onChange={(e) => {
+                                        const value = e.target.value;
+                                        setKeyInputs(prev => ({ ...prev, [env.name]: value }));
+                                    }}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                                            e.preventDefault();
+                                            handleSaveApiKey(p, env.name);
+                                        }
+                                    }}
+                                    autoFocus={index === 0}
+                                />
+                                <button data-i18n="components.settings.ProviderManagementPanel.text035"
+                                    type="button"
+                                    className={styles.btnPrimary}
+                                    onClick={() => handleSaveApiKey(p, env.name)}
+                                    disabled={!typed.trim() || keySaving}
+                                >
+                                    {uiText("components.settings.ProviderManagementPanel.text035")}
+                                </button>
+                            </div>
+                        </div>
+                    );
+                })}
                 <div data-i18n="components.settings.ProviderManagementPanel.text038" className={styles.keyHint}>
                     {uiText("components.settings.ProviderManagementPanel.text038")}
                 </div>

@@ -89,3 +89,7 @@ Pure Python 実装の `dulwich` で clone/pull を Python 側で完結させる�
 コードは実装済み(setup.bat の自動 git インストール=winget→PortableGit fallback+git init/fetch/reset / update 経路の PortableGit PATH 通し=2026-07-19 修正 / README を「Git 不要」前提に更新済み)。
 残=**クリーン Windows(git 未導入)での実機テスト**: winget 経路・PortableGit fallback・再実行無害・`git reset origin/main` 後の status clean(.gitattributes×ZIP 展開の line ending)。
 **次バージョンリリース時にまはーと一緒に実機確認**予定
+
+## 経緯 (2026-10-01 in_flight 台帳より移送)
+
+- 2026-10-01 (台帳の行を差し替えた): 「v0.3.0 の門」の行を、同じクリーン Windows テストを指すこの行へ寄せた。 台帳から押し出した旧文面: 「コード実装済み (setup.bat の自動 git 導入 winget→PortableGit fallback / update 経路の PATH 通し / README 更新)。次 = クリーン Windows (git 未導入) での実機テスト — 次バージョンリリース時にまはーと一緒に確認。」(誰待ち: まはー(次リリース時 実機テスト))

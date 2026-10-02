@@ -16,5 +16,5 @@ sea/runtime_llm.py で、建物へ本文を直接書く経路 (`_emit_say_and_ca
 
 ## 関連
 
-- [server_cut_stream_writes_no_interruption_notice.md](server_cut_stream_writes_no_interruption_notice.md) (同じ判定を通告側に入れた実装)
+- [server_cut_stream_writes_no_interruption_notice.md](archive/server_cut_stream_writes_no_interruption_notice.md) (同じ判定を通告側に入れた実装)
 - [unfinalized_placeholder_on_clean_exit.md](unfinalized_placeholder_on_clean_exit.md) (同じレビューで出た隣の残債)
