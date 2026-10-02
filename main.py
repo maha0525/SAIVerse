@@ -56,6 +56,11 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     psutil = None  # type: ignore
 
+# Windows で Visual C++ の部品が無いと、この先の import (記憶の検索の onnxruntime) が
+# 長いエラーで落ちる。その前に、読める案内を出して止める。
+from saiverse.windows_runtime_check import exit_if_vc_runtime_missing
+exit_if_vc_runtime_missing()
+
 from saiverse.saiverse_manager import SAIVerseManager
 from database.paths import default_db_path
 from database.backup import run_startup_backup

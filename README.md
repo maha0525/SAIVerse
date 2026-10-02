@@ -4,6 +4,7 @@
 </p>
 
 <p align="center">
+  <a href="https://saiverse.net"><img src="https://img.shields.io/badge/%E5%85%AC%E5%BC%8F%E3%82%B5%E3%82%A4%E3%83%88-saiverse.net-2ea44f" alt="公式サイト"></a>
   <a href="https://discord.gg/qMcgEk83Ag"><img src="https://img.shields.io/badge/Discord-%E3%82%B3%E3%83%9F%E3%83%A5%E3%83%8B%E3%83%86%E3%82%A3-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://github.com/maha0525/SAIVerse/releases/latest"><img src="https://img.shields.io/github/v/release/maha0525/SAIVerse?label=%E6%9C%80%E6%96%B0%E3%83%90%E3%83%BC%E3%82%B8%E3%83%A7%E3%83%B3" alt="Latest Release"></a>
   <a href="https://github.com/maha0525/SAIVerse/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"></a>
@@ -12,6 +13,7 @@
 **あなたのAIパートナーと自由に話そう！**
 
 SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトです。<br>
+公式サイト: https://saiverse.net<br>
 ※現在プレリリース中！絶賛テスト&改善の最中です
 
 ## アピールポイント
@@ -130,7 +132,7 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 
 ### 前提条件
 
-下記を用意してください（**Windows では手動インストールが必須なのは Python だけ**です。Node.js・Git は `setup.bat` が自動で導入します）。
+下記を用意してください（**Windows では手動インストールが必須なのは Python だけ**です。Node.js・Git・Microsoft Visual C++ 再頒布可能パッケージは `setup.bat` が自動で導入します）。
 - [Python 3.13.15](https://www.python.org/downloads/release/python-31315/)（推奨。3.11〜3.13も可。3.14以降は非対応）
   - リンク先ページを下にスクロールし、**Windows**: `Windows installer (64-bit)`、**Mac**: `macOS 64-bit universal2 installer` をダウンロードしてください<br>
   **（目立つボタンの「Download Python install manager」ではありません）**
@@ -163,13 +165,13 @@ git clone https://github.com/maha0525/SAIVerse.git
 
 #### インストール
 
-`SAIVerse` フォルダ内の **`setup.bat`** をダブルクリック
+`SAIVerse` フォルダ内の **`setup.bat`** をダブルクリック（拡張子を表示していない場合は、歯車のアイコンの「setup」です。「setup.sh」ではありません）
 ![setup.bat](assets/image/guide/quickstart_setup_win.png)
 ※Python仮想環境の作成、依存パッケージのインストール、データベース初期化、埋め込みモデルのダウンロードを自動実行します
 
 #### 起動
 
-**`start.bat`** をダブルクリック
+**`start.bat`** をダブルクリック（拡張子を表示していない場合は、歯車のアイコンの「start」です。「start.sh」ではありません）
 ![start.bat](assets/image/guide/quickstart_start_win.png)
 →2～3個コンソールウィンドウが開きます
 →ブラウザで http://localhost:3000 が自動的に開きます
