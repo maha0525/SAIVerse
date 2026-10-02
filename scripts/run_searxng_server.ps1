@@ -51,6 +51,11 @@ Write-Host "[INFO] Merging SearXNG settings..."
 $mergeScript = Join-Path $ScriptRoot "merge_searxng_settings.py"
 & $venvPython $mergeScript
 
+# SearXNG asks git for its version at start-up and dies when git cannot be
+# found (Git installed only inside the SAIVerse folder). Let it start without git.
+$versionScript = Join-Path $ScriptRoot "ensure_searxng_version.py"
+& $venvPython $versionScript "$SRC_DIR"
+
 # Start server
 $env:SEARXNG_SETTINGS_PATH = "$SETTINGS_PATH"
 $env:SEARXNG_PORT = "$PORT"

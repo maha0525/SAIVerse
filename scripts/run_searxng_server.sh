@@ -25,6 +25,10 @@ python_bin="${VENV_DIR}/bin/python"
 echo "[INFO] Merging SearXNG settings..." >&2
 "${python_bin}" "${SCRIPT_DIR}/merge_searxng_settings.py"
 
+# SearXNG asks git for its version at start-up and dies when git cannot be
+# found. Let it start without git. (run_searxng_server.ps1 does the same.)
+"${python_bin}" "${SCRIPT_DIR}/ensure_searxng_version.py" "${SRC_DIR}"
+
 export SEARXNG_SETTINGS_PATH="${SETTINGS_PATH}"
 export SEARXNG_PORT="${PORT}"
 export SEARXNG_BIND_ADDRESS="${BIND_ADDRESS}"

@@ -98,6 +98,12 @@ echo [OK] Node.js %NODE_VERSION%
 REM Restore working directory (winget/MSI install can change CWD to System32)
 cd /d "%~dp0"
 
+REM --- 2b. Visual C++ runtime check & auto-install ---
+REM onnxruntime (memory search) needs the Microsoft Visual C++ Redistributable,
+REM which a freshly installed Windows does not have. Without it SAIVerse fails
+REM at startup. The script prints its own messages and does not stop setup.
+powershell -ExecutionPolicy Bypass -File scripts\install_vc_redist.ps1
+
 REM --- 3. Create venv if not exists ---
 if not exist ".venv\Scripts\activate.bat" (
     if exist ".venv" (
