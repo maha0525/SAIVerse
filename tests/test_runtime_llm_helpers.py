@@ -325,10 +325,9 @@ class EmitSayAndCaptureTest(unittest.TestCase):
 class BuildToolsSpecSeesThroughTheCacheWrapperTest(unittest.TestCase):
     """送る tools の形式は、実際に HTTP を叩く client で決めること。
 
-    _build_tools_spec は client の class 名で分岐する。LlamaCachedClient は
-    facade なので、包みの名前で判定するとどの分岐にも当たらず Gemini 形式へ
-    落ち、OpenAI 互換のサーバーへ google.genai の Tool が送られる。
-    docs/issues/llama_cached_client_state_delegation_missing.md
+    _build_tools_spec は client の tool_spec_format() で分岐する。
+    LlamaCachedClient は facade なので、内側が申告する形式をそのまま渡す。
+    docs/issues/archive/llama_cached_client_state_delegation_missing.md
     """
 
     def _tool_name(self):
@@ -344,11 +343,12 @@ class BuildToolsSpecSeesThroughTheCacheWrapperTest(unittest.TestCase):
         from llm_clients.llama_cache import LlamaCachedClient
         from sea.runtime import SEARuntime
 
-        class OpenAIClient(LLMClient):  # 名前だけを借りた代役
-            pass
+        class FakeCompatibleClient(LLMClient):
+            def tool_spec_format(self):
+                return "openai"
 
         name = self._tool_name()
-        inner = OpenAIClient()
+        inner = FakeCompatibleClient()
         wrapper = LlamaCachedClient(inner, cache=None)
 
         bare = SEARuntime._build_tools_spec(None, [name], inner)

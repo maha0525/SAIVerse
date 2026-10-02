@@ -93,6 +93,8 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 - **責任境界**: モデル JSON は capability の正典、provider client は最終送信の番人とする。UI に項目がないことだけを安全境界にせず、直接引数や古い user override が来ても provider が非対応値を送らない。
 - **会話の完全性**: provider が不正な末尾 role を自動で user role に変えたり、架空の user message を追加したりしてはならない。API が禁止する prefilled model turn は送信前に検出し、原因が追える `invalid_request` とログで停止する。
 - **関数呼び出しの同一性**: 上流が発行した tool call ID は Gemini の `FunctionCall.id` / `FunctionResponse.id` まで同一値で運ぶ。名前だけの照合へ情報を落とさない。
+- **ツール定義の入力形式**: ツールの `ToolSchema` → OpenAI/Gemini 向けカタログ → SEA の名前選別 → クライアントの request serializer、という経路で、選択したツールを落とさず届ける。入力形式の正典は `LLMClient.tool_spec_format()` とし、クラス名・提供元名・モデル JSON から推測しない。OpenAI / Anthropic / Ollama / NIM / Codex / xAI は OpenAI の function dict、Gemini は `types.Tool` を受け取り、必要な wire 形式への変換は各クライアントが持つ。wrapper は内側の申告を委譲し、SEA は wrapper の内部を覗かない。未申告・未知の形式は送信前に明示エラーにし、Gemini へ暗黙に落とさない。これはモデルの tool calling 可否とは別の、クライアントへの入力契約である。
+    - **確認の境界**: 合成カタログから名前選別、Codex の Responses body / Anthropic・xAI の変換 / Gemini の SDK 型までを外部通信なしで確認する。新しい派生クラスと多段 wrapper でも同じ契約を保つ。永続データ・設定の移行は不要。実 API の応答・本番ペルソナとの会話はこの隔離検証には含めない ([issue](../issues/tools_spec_dispatch_by_class_name.md))。
 - **使用量の帰属**: 使用量と費用は API モデル名ではなく設定キー (JSON のファイル名) に帰属させる。Codex のようなサブスクで賄われる設定は従量課金版と同じ API モデル名を持つため、API 名で価格を引くと課金されていない呼び出しに従量単価が付く。`LLMClient.config_key` を価格引き当ての正典とし、client 側が `_store_usage(model=...)` で API 名に差し替えてはならない。
 - **検証**: モデル JSON の価格・capability 読み込み、runtime 由来の sampling override 除去、通常 user 終端の通過、model 終端のローカル拒否、function call/response ID の往復を、外部 API を呼ばないテストで境界横断して確認する。
 
