@@ -162,9 +162,10 @@ def test_alternates_without_a_primary_variable_list_nothing():
 
 
 def test_every_route_that_returns_a_provider_reports_the_same_variables(
-    client, user_data, monkeypatch,
+    client, user_data, monkeypatch, mock_provider_network,
 ):
     """List, single get, update, reload and create all build the info one way."""
+    mock_provider_network("example.com")
     monkeypatch.setenv("GEMINI_FREE_API_KEY", DUMMY)
     expected = [
         {"name": "GEMINI_API_KEY", "configured": False},
