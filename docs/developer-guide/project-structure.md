@@ -152,6 +152,10 @@ api/
 
 `people/pocketbook.py` の画面側の相方は `frontend/src/components/memory/PocketbookViewer.tsx`（メモリタブの「手帳」節）。v0.3 では両方とも読むだけで、訂正の口は持たない（[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §13.2.1）。
 
+### frontend/
+
+`next.config.ts` の通常 API rewrite と `src/app/api/{addon,mcp}/` の Route Handler は、`backend-origin.cjs` の共通関数でバックエンドの接続先を選ぶ。正式名・旧名・既定値の順序と不一致の警告はここに集約し、SSE やメディア転送は各 Route Handler が持つ。`scripts/test-backend-origin.cjs` が設定と全経路を fake fetch で検査し、`scripts/test-backend-origin-http.cjs` が実 Next.js から fake 18000 への中継を検査する（[intent](../intent/frontend_backend_origin.md)）。
+
 ### scripts/
 
 保守操作の実装。`update.bat` / `update.sh` / PowerShell / UI更新はいずれも同じupdate engineへ委譲する。`start.bat` / `start.sh` も起動前に `update_engine.py --check-complete` を呼び、更新が途中で死んでいれば同じ engine で仕上げてから起動する（[issue](../issues/v0229_update_bat_truncates_after_git_pull.md)）。

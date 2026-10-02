@@ -12,7 +12,9 @@
     "test:i18n": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs",
     "predev": "node scripts/sync-addon-panels.mjs",
     "prebuild": "node scripts/sync-addon-panels.mjs",
-    "sync:addon-panels": "node scripts/sync-addon-panels.mjs"
+    "sync:addon-panels": "node scripts/sync-addon-panels.mjs",
+    "test:backend-origin": "node scripts/test-backend-origin.cjs",
+    "test:backend-origin:http": "node scripts/test-backend-origin-http.cjs"
   },
   "keywords": [],
   "author": "",

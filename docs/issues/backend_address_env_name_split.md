@@ -1,9 +1,13 @@
 # Issue: 画面がバックエンドの居場所を 2 つの別名で読んでいて、隔離テストでもアドオン通信だけ本番へ行く
 
-**ステータス**: 🔲 未着手
+**ステータス**: 🟣 検証待ち
 **優先度**: medium
 **作成日**: 2026-09-21
 **関連**: `frontend/next.config.ts` / `frontend/src/app/api/**/route.ts` 3 本 / `test_fixtures/start_test_frontend.bat`
+
+## 採用方針
+
+2026-10-02 に B 案を承認。`SAIVERSE_BACKEND_ORIGIN` を優先し、空なら旧名 `SAIVERSE_BACKEND_URL`、両方空なら既定の 8000。両名が非空で異なる場合は値を含めず警告する。設計・境界は [intent](../intent/frontend_backend_origin.md)。以下の背景は修正前の記録。
 
 ## 背景
 
@@ -75,3 +79,18 @@
 ## ログ
 
 - 2026-09-21: 起票。アドオンのクライアント操作がメタデータを読めない不具合 ([PR #313](https://github.com/maha0525/SAIVerse/pull/313)) を隔離環境で検証している最中に踏んだ。A / B のどちらで直すかは未決。
+
+## 経緯
+
+- 2026-10-02: B 案で実装着手。4 箇所の選択を共通関数へ集約し、旧名互換を維持する。隔離した fake バックエンドだけで回帰検証し、本番への操作は行わない。
+
+- 2026-10-02: 共通 resolver と 4 箇所の読み替え、env 見本・リファレンス・隔離手順を実装。従来の URL 結合とプロキシ処理を維持した。
+- 2026-10-02: `npm test`、`npm run test:backend-origin` (13 設定パターンと全メソッド・stream 回帰)、`tsc --noEmit`、隔離先指定の `npm run build` が成功。`npm run test:backend-origin:http` は fake 18000 と実 Next.js 18010 で通常 API/addon/MCP の GET・POST、query/cookie、Range/206、メディア例外、SSE/stream の逐次チャンクを 10 リクエストで確認。本番・実 LLM・永続データには触れていない。台帳検査は既存の経過措置警告のみ。
+- 台帳から移送した旧次アクション: 「通常 API とアドオン・MCP の接続先選択を共通化する段階。次は旧名互換と書き込み・SSE・Range の隔離回帰を通し、draft PR でレビューする。」
+
+## 残る検証
+
+- 変更した TypeScript の ESLint は既存の `no-explicit-any` 警告 1 件のみ。CommonJS ファイルの ESLint は既存設定の `react-hooks` plugin 不在エラーで実行不可（未変更の `dev-origins.cjs` 単独でも再現）。新規 CommonJS は `node --check` と専用回帰で確認。
+- draft PR のレビューと利用者の実機での確認待ち。実ブラウザの長時間音声再生、Windows の起動ファイルは今回動かしていない。
+- build と start に異なる環境変数を渡す運用は対象外。設定変更時は同じ値で再ビルド・再起動する。
+- 末尾 `/` やパスを含む値の URL 結合は従来のまま。共通のパス接頭辞対応・URL 正規化は別判断。
