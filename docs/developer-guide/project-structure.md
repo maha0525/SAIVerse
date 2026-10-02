@@ -98,6 +98,7 @@ saiverse/
 │                           #   設定ファイルの無いモデル名を保存しない検査と知らせの文面（persona_model_selection.md）
 ├── provider_security.py    # provider credentialと接続先URLの束縛・SSRF境界
 ├── file_policy.py          # persisted pathのmanaged root境界
+├── media_cleanup.py        # 未公開の新規文書ファイルの所有権と登録失敗時の後始末（commit 試行後は保持）
 ├── tls_trust.py            # HTTPS の信頼元を起動時に一度決める。OS の証明書ストアが空の環境
 │                           #   （macOS の Python）で同梱 certifi へ退避し、urllib 経由の通信を救う
 ├── runtime_marker.py       # City単位process identity marker（保守操作の停止判定）
