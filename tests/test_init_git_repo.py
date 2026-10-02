@@ -156,7 +156,7 @@ def test_release_folder_with_changed_files_is_reported(published, tmp_path, caps
 
     out = capsys.readouterr().out
     assert code == init_git_repo.EXIT_FILES_DO_NOT_MATCH
-    assert "1 files differ" in out
+    assert "1 file differs" in out
     assert "v1.0.0" in out
     assert (folder / "app.py").read_text(encoding="utf-8") == "print('edited by the user')\n"
 
@@ -204,11 +204,43 @@ def test_folder_that_already_has_a_recorded_revision_is_left_alone(published, tm
     assert _git(folder, "rev-parse", "HEAD") == head
 
 
-@pytest.mark.parametrize("script", ["setup.bat", "setup.sh"])
-def test_setup_scripts_delegate_to_the_shared_implementation(script):
-    """Setup parity: both platforms go through init_git_repo.py, and neither
-    keeps its own copy of the reset that recorded the newest release
-    unconditionally."""
-    text = (REPO_ROOT / script).read_text(encoding="utf-8")
-    assert "init_git_repo.py" in text
-    assert "git reset origin/main" not in text
+def test_existing_folder_with_unmatched_files_is_told_and_left_alone(published, tmp_path, capsys):
+    # What the earlier setup left behind for an older ZIP: the newest release
+    # recorded, the older files in the folder.
+    folder = _install_from_zip(published, "v1.0.0", tmp_path / "installed")
+    _git(folder, "init")
+    _git(folder, "remote", "add", "origin", str(published))
+    _git(folder, "fetch", "origin")
+    _git(folder, "symbolic-ref", "HEAD", "refs/heads/main")
+    _git(folder, "reset", "origin/main")
+    head = _git(folder, "rev-parse", "HEAD")
+
+    code = init_git_repo.init_repository(folder, str(published))
+
+    out = capsys.readouterr().out
+    assert code == init_git_repo.EXIT_FILES_DO_NOT_MATCH
+    assert "[OK] Git repository already exists" in out
+    assert "will refuse to update" in out
+    assert init_git_repo.LATEST_ZIP_URL in out
+    # A folder Git already records may be someone's work in progress: nothing is moved.
+    assert _git(folder, "rev-parse", "HEAD") == head
+    assert (folder / "VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
+
+
+def _command_lines(script: str) -> list[str]:
+    """The lines of a setup script that run something (comments dropped)."""
+    comment = "REM " if script.endswith(".bat") else "#"
+    lines = (REPO_ROOT / script).read_text(encoding="utf-8").splitlines()
+    return [line.strip() for line in lines if line.strip() and not line.strip().startswith(comment)]
+
+
+@pytest.mark.parametrize(
+    ("script", "call"),
+    [("setup.bat", "python scripts\\init_git_repo.py"), ("setup.sh", "python scripts/init_git_repo.py")],
+)
+def test_setup_scripts_delegate_to_the_shared_implementation(script, call):
+    """Setup parity: both platforms run init_git_repo.py, and neither keeps a
+    reset of its own (the one that recorded the newest release unconditionally)."""
+    commands = _command_lines(script)
+    assert any(line.startswith(call) for line in commands), f"{script} does not run {call}"
+    assert not any("git reset" in line or "git init" in line for line in commands)

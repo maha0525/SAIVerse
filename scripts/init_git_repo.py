@@ -56,6 +56,18 @@ def _git(project_dir: Path, *args: str, check: bool = True) -> subprocess.Comple
     return result
 
 
+def _git_showing_progress(project_dir: Path, *args: str) -> None:
+    """Run a long git command with its own output on the setup window.
+
+    The download can take minutes on a slow line; with the output captured the
+    window would sit silent and look frozen.
+    """
+    sys.stdout.flush()
+    result = subprocess.run(["git", *args], cwd=project_dir, stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        raise GitInitError(f"git {' '.join(args)} failed (exit {result.returncode}); see the messages above")
+
+
 def read_version(project_dir: Path) -> str | None:
     """The version the folder says it is, or None when it does not say."""
     try:
@@ -90,8 +102,8 @@ def count_mismatched_files(project_dir: Path) -> int:
     The same question the updater asks before it starts (tracked files only;
     untracked files do not block an update).
     """
-    status = _git(project_dir, "status", "--porcelain", "-z", "--untracked-files=no").stdout
-    return len([entry for entry in status.split("\0") if entry.strip()])
+    status = _git(project_dir, "status", "--porcelain", "--untracked-files=no").stdout
+    return len([line for line in status.splitlines() if line.strip()])
 
 
 def commits_behind(project_dir: Path) -> int:
@@ -115,10 +127,33 @@ def has_recorded_revision(project_dir: Path) -> bool:
     return _git(project_dir, "rev-parse", "--quiet", "--verify", "HEAD^{commit}", check=False).returncode == 0
 
 
+def _differ_phrase(count: int) -> str:
+    return "1 file differs" if count == 1 else f"{count} files differ"
+
+
+def report_existing_repository(project_dir: Path) -> int:
+    """A folder Git already records is left exactly as it is.
+
+    It may be a developer's checkout with work in progress, so nothing is moved
+    here. It may also be a folder an earlier setup left with a record that does
+    not match its files; that user is told what they are looking at, because
+    nothing else will tell them why updates are refused.
+    """
+    print("[OK] Git repository already exists")
+    mismatched = count_mismatched_files(project_dir)
+    if not mismatched:
+        return EXIT_OK
+    print(f"[INFO] Git reports local changes in this folder ({_differ_phrase(mismatched)} from the recorded version).")
+    print("  If you edited those files yourself, this is expected.")
+    print("  If you did not, update.bat / update.sh and the Update button will refuse to update.")
+    print("  A new folder made from the newest ZIP can update again (run setup there):")
+    print(f"    {LATEST_ZIP_URL}")
+    return EXIT_FILES_DO_NOT_MATCH
+
+
 def init_repository(project_dir: Path, remote_url: str) -> int:
     if has_recorded_revision(project_dir):
-        print("[OK] Git repository already exists")
-        return EXIT_OK
+        return report_existing_repository(project_dir)
 
     print("")
     print("[SETUP] Initializing repository for automatic updates...")
@@ -129,22 +164,26 @@ def init_repository(project_dir: Path, remote_url: str) -> int:
     if _git(project_dir, "remote", "get-url", "origin", check=False).returncode != 0:
         _git(project_dir, "remote", "add", "origin", remote_url)
     print("[SETUP] Downloading the update history (this can take a few minutes)...")
-    _git(project_dir, "fetch", "origin")
+    _git_showing_progress(project_dir, "fetch", "origin")
     # Nothing is recorded yet, so there is no branch to rename; point the
     # not-yet-existing current branch at the release branch's name instead.
     _git(project_dir, "symbolic-ref", "HEAD", f"refs/heads/{RELEASE_BRANCH}")
+    # Which branch updates come from. Written before the record itself, so that
+    # the reset below is the last step: a folder with a recorded revision is
+    # always a finished one, whenever the window was closed.
+    _git(project_dir, "config", f"branch.{RELEASE_BRANCH}.remote", "origin")
+    _git(project_dir, "config", f"branch.{RELEASE_BRANCH}.merge", f"refs/heads/{RELEASE_BRANCH}")
 
     version = read_version(project_dir)
     tag = resolve_release_tag(project_dir, version)
     # A mixed reset: it moves Git's record and leaves every file in the folder
     # as it is. Nothing the user has is overwritten here.
     _git(project_dir, "reset", "--quiet", tag or upstream)
-    _git(project_dir, "branch", f"--set-upstream-to={upstream}")
 
     mismatched = count_mismatched_files(project_dir)
     if mismatched:
         print("")
-        print(f"[WARN] The files in this folder do not match the version Git recorded for it ({mismatched} files differ).")
+        print(f"[WARN] The files in this folder do not match the version Git recorded for it ({_differ_phrase(mismatched)}).")
         if tag:
             print(f"  Git recorded this folder as {tag}, the release named in its VERSION file.")
         else:
