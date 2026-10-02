@@ -18,6 +18,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+_Endpoint = tuple[str, int]
+
 _HEALTH_CHECK_TIMEOUT = 2.0
 _HEALTH_CHECK_WAIT_MAX = 120.0
 _HEALTH_CHECK_INTERVAL = 2.0
@@ -64,7 +66,7 @@ class ManagedServer:
 
 
 class LlamaServerManager:
-    """Manages llama.cpp server processes (one per port).
+    """Manages llama.cpp server processes (one per host/port endpoint).
 
     Two launch modes:
       - Command mode: ``llama_server.command`` points to a .bat/.sh script.
@@ -75,22 +77,22 @@ class LlamaServerManager:
     """
 
     def __init__(self) -> None:
-        self._servers: Dict[int, ManagedServer] = {}
+        self._servers: Dict[_Endpoint, ManagedServer] = {}
         self._lock = threading.Lock()
         self._idle_checker: Optional[threading.Thread] = None
         self._idle_checker_stop = threading.Event()
-        # _slots_warned ((port, 世代番号) → 最終警告時刻) は専用ロックで
+        # _slots_warned (((host, port), 世代番号) → 最終警告時刻) は専用ロックで
         # 守る: /slots の問い合わせは self._lock 保持中にも走る (停止直前の
         # 再確認) ため、warn 経路が self._lock を取り直すと非再入ロックで
         # 自己デッドロックする。世代番号をキーに含めるのは、旧世代の probe が
         # 再起動後に新世代の警告を抑止しないため
-        self._slots_warned: Dict[tuple[int, int], float] = {}
+        self._slots_warned: Dict[tuple[_Endpoint, int], float] = {}
         self._warn_lock = threading.Lock()
         # 外部管理サーバーの直近 /health 成功時刻 ((host, port) → monotonic)
-        self._external_ok: Dict[tuple[str, int], float] = {}
-        # 貸出中のリクエスト数 (port → count)。ポート単位で持つ — リクエストは
-        # ポートへ飛ぶので、途中で世代交代してもそのポートの現職を守り続ける
-        self._inflight: Dict[int, int] = {}
+        self._external_ok: Dict[_Endpoint, float] = {}
+        # 貸出中のリクエスト数 ((host, port) → count)。接続先単位で持つ —
+        # 途中で世代交代しても同じ接続先の現職を守るが、別 host には届かない
+        self._inflight: Dict[_Endpoint, int] = {}
 
     def ensure_running(self, base_url: str, config: Dict[str, Any]) -> None:
         """サーバーの存在を保証し、使用中であることを申告する。
@@ -118,11 +120,10 @@ class LlamaServerManager:
 
         endpoint = (host, port)
         with self._lock:
-            managed = self._servers.get(port)
+            managed = self._servers.get(endpoint)
             if (
                 managed is not None
                 and managed.identity == desired_identity
-                and managed.host == host
                 and managed.process.poll() is None
             ):
                 managed.last_activity = time.monotonic()
@@ -143,12 +144,11 @@ class LlamaServerManager:
         probe_finished = time.monotonic()
 
         with self._lock:
-            managed = self._servers.get(port)
+            managed = self._servers.get(endpoint)
             # 待っている間に他スレッドが処理した可能性があるので再確認
             if (
                 managed is not None
                 and managed.identity == desired_identity
-                and managed.host == host
                 and managed.process.poll() is None
             ):
                 managed.last_activity = time.monotonic()
@@ -157,8 +157,8 @@ class LlamaServerManager:
             if managed is None:
                 if healthy:
                     logger.info(
-                        "[llama_server] Port %d already responding (externally managed), using as-is",
-                        port,
+                        "[llama_server] Endpoint %s:%d already responding (externally managed), using as-is",
+                        host, port,
                     )
                     self._external_ok[endpoint] = probe_finished
                     return
@@ -170,47 +170,32 @@ class LlamaServerManager:
                 if last_ok is not None and last_ok >= probe_started:
                     return
                 self._external_ok.pop(endpoint, None)
-            elif managed.identity != desired_identity or managed.host != host:
+            elif managed.identity != desired_identity:
                 if managed.process.poll() is not None and healthy:
                     # 旧プロセスは死んでいてポートは別物が応答 = 外部再利用。
                     # ここで起動するとポート衝突する
-                    self._servers.pop(port, None)
+                    self._servers.pop(endpoint, None)
                     logger.warning(
-                        "[llama_server] Port %d: 管理下プロセスは死んでいるがポートは応答 — "
+                        "[llama_server] Endpoint %s:%d: 管理下プロセスは死んでいるがポートは応答 — "
                         "外部プロセスが再利用中とみなし、起動しない",
-                        port,
-                    )
-                    self._external_ok[endpoint] = probe_finished
-                    return
-                if managed.host != host and healthy:
-                    # 同一ポートを別 host で使い分ける構成はサポート外。
-                    # ターゲット endpoint は応答しており、それが管理下プロセス
-                    # (別 host に bind) か外部かは証明できない — 壊さず・
-                    # 上書き起動もせず、応答している現状を使う。応答者が
-                    # 管理下プロセス (wildcard bind や host 別名) の可能性が
-                    # あるため、活動時刻も更新して idle 停止の誤射を防ぐ
-                    managed.last_activity = time.monotonic()
-                    logger.warning(
-                        "[llama_server] Port %d: 管理下は %s、要求は %s で endpoint は応答中 — "
-                        "同一ポートの多 host 構成はサポート外のため、上書きせず現状を使う",
-                        port, managed.host, host,
+                        host, port,
                     )
                     self._external_ok[endpoint] = probe_finished
                     return
                 logger.info(
-                    "[llama_server] Port %d config changed (have=%s@%s, want=%s@%s), restarting",
-                    port, managed.identity, managed.host, desired_identity, host,
+                    "[llama_server] Endpoint %s:%d config changed (have=%s, want=%s), restarting",
+                    host, port, managed.identity, desired_identity,
                 )
-                self._stop_server(port)
+                self._stop_server(endpoint)
             else:
                 # identity・host 一致だがプロセス死亡。ポートが応答するなら
                 # 外部が再利用している = 起動すると衝突するので手を出さない
-                self._servers.pop(port, None)
+                self._servers.pop(endpoint, None)
                 if healthy:
                     logger.warning(
-                        "[llama_server] Port %d: 管理下プロセスは死んでいるがポートは応答 — "
+                        "[llama_server] Endpoint %s:%d: 管理下プロセスは死んでいるがポートは応答 — "
                         "外部プロセスが再利用中とみなし、起動しない",
-                        port,
+                        host, port,
                     )
                     self._external_ok[endpoint] = probe_finished
                     return
@@ -234,19 +219,19 @@ class LlamaServerManager:
         if not isinstance(llama_cfg, dict):
             yield
             return
-        _, port = self._parse_host_port(base_url)
+        endpoint = self._parse_host_port(base_url)
         with self._lock:
-            self._inflight[port] = self._inflight.get(port, 0) + 1
+            self._inflight[endpoint] = self._inflight.get(endpoint, 0) + 1
         try:
             yield
         finally:
             with self._lock:
-                remaining = self._inflight.get(port, 0) - 1
+                remaining = self._inflight.get(endpoint, 0) - 1
                 if remaining <= 0:
-                    self._inflight.pop(port, None)
+                    self._inflight.pop(endpoint, None)
                 else:
-                    self._inflight[port] = remaining
-                current = self._servers.get(port)
+                    self._inflight[endpoint] = remaining
+                current = self._servers.get(endpoint)
                 if current is not None and current.process.poll() is None:
                     current.last_activity = time.monotonic()
                     current.busy_since = None
@@ -257,9 +242,9 @@ class LlamaServerManager:
             self._idle_checker.join(timeout=5)
             self._idle_checker = None
         with self._lock:
-            ports = list(self._servers.keys())
-            for port in ports:
-                self._stop_server(port)
+            endpoints = list(self._servers.keys())
+            for endpoint in endpoints:
+                self._stop_server(endpoint)
 
     def _launch(
         self,
@@ -269,6 +254,7 @@ class LlamaServerManager:
         llama_cfg: Dict[str, Any],
         identity: str,
     ) -> None:
+        endpoint = (host, port)
         command = llama_cfg.get("command")
         cwd: str | None = None
         if isinstance(command, str) and command.strip():
@@ -281,9 +267,9 @@ class LlamaServerManager:
         with self._warn_lock:
             # 再起動で /slots 可否は変わりうる。旧世代の警告記録ごと掃除する
             self._slots_warned = {
-                k: v for k, v in self._slots_warned.items() if k[0] != port
+                k: v for k, v in self._slots_warned.items() if k[0] != endpoint
             }
-        self._external_ok.pop((host, port), None)
+        self._external_ok.pop(endpoint, None)
         logger.info("[llama_server] Launching: %s (cwd=%s)", " ".join(cmd), cwd or "<inherit>")
 
         flags = 0
@@ -311,13 +297,13 @@ class LlamaServerManager:
             # 停止候補になるのは idle_timeout 経過後なので、それより短い
             # busy_deadline は効かない。黙って遅延させず、丸めて知らせる
             logger.warning(
-                "[llama_server] Port %d: busy_deadline (%.0fs) < idle_timeout (%.0fs) は"
+                "[llama_server] Endpoint %s:%d: busy_deadline (%.0fs) < idle_timeout (%.0fs) は"
                 "実現できないため idle_timeout に丸める",
-                port, float(busy_deadline), float(idle_timeout),
+                host, port, float(busy_deadline), float(idle_timeout),
             )
             busy_deadline = idle_timeout
 
-        self._servers[port] = ManagedServer(
+        self._servers[endpoint] = ManagedServer(
             process=process,
             identity=identity,
             port=port,
@@ -329,13 +315,13 @@ class LlamaServerManager:
 
         health_base = f"http://{host}:{port}"
         if not self._wait_for_health(health_base, process):
-            self._stop_server(port)
+            self._stop_server(endpoint)
             raise RuntimeError(
                 f"llama-server failed to become healthy within {_HEALTH_CHECK_WAIT_MAX:.0f}s "
-                f"(port={port})"
+                f"(host={host}, port={port})"
             )
 
-        logger.info("[llama_server] Server ready on port %d (PID %d)", port, process.pid)
+        logger.info("[llama_server] Server ready on %s:%d (PID %d)", host, port, process.pid)
 
     @staticmethod
     def _build_command_mode(command: str) -> list[str]:
@@ -395,19 +381,19 @@ class LlamaServerManager:
                 if not self._servers:
                     break
                 now = time.monotonic()
-                candidates: list[tuple[int, ManagedServer]] = [
-                    (port, managed)
-                    for port, managed in self._servers.items()
+                candidates: list[tuple[_Endpoint, ManagedServer]] = [
+                    (endpoint, managed)
+                    for endpoint, managed in self._servers.items()
                     if managed.idle_timeout != 0
                     and now - managed.last_activity >= managed.idle_timeout
                 ]
 
-            for port, observed in candidates:
+            for endpoint, observed in candidates:
                 # /slots への問い合わせはロック外 (HTTP 待ちで他スレッドを塞がない)
-                state = self._probe_slots(port, observed)
-                self._finalize_stop(port, observed, state)
+                state = self._probe_slots(endpoint[1], observed)
+                self._finalize_stop(endpoint, observed, state)
 
-    def _finalize_stop(self, port: int, observed: ManagedServer, state: str) -> None:
+    def _finalize_stop(self, endpoint: _Endpoint, observed: ManagedServer, state: str) -> None:
         """観測時と同じサーバーが、今なお停止条件を満たすときだけ止める。
 
         候補選定〜busy 判定の間はロックを解放しているので、その間に
@@ -420,17 +406,18 @@ class LlamaServerManager:
         止めない** — busy_deadline の強制停止にも使わない (証明の無い kill は
         今回防ごうとした事故そのもの)。
         """
+        host, port = endpoint
         if state not in ("idle", "busy"):
             # "unknown" と未知の値はどちらも停止根拠にしない (fail-safe)。
             # unknown の warn は _probe_slots 側が出している
             if state != "unknown":
                 logger.error(
-                    "[llama_server] Port %d: 未知の状態 %r — 停止しない (fail-safe)",
-                    port, state,
+                    "[llama_server] Endpoint %s:%d: 未知の状態 %r — 停止しない (fail-safe)",
+                    host, port, state,
                 )
             return
         with self._lock:
-            managed = self._servers.get(port)
+            managed = self._servers.get(endpoint)
             if managed is not observed:
                 return  # 再起動などで世代が変わった。この観測は無効
             idle_secs = time.monotonic() - managed.last_activity
@@ -454,18 +441,18 @@ class LlamaServerManager:
                             managed.busy_since = None
                         return  # 観測が古い — 完了・保存直後のサーバーを撃たない
                     logger.warning(
-                        "[llama_server] Port %d busy for %.0fs, exceeded deadline (%.0fs), forcing stop",
-                        port, busy_secs, managed.busy_deadline,
+                        "[llama_server] Endpoint %s:%d busy for %.0fs, exceeded deadline (%.0fs), forcing stop",
+                        host, port, busy_secs, managed.busy_deadline,
                     )
-                    self._stop_server(port)
+                    self._stop_server(endpoint)
                 else:
                     logger.debug(
-                        "[llama_server] Port %d still processing (%.0fs/%.0fs deadline)",
-                        port, busy_secs, managed.busy_deadline,
+                        "[llama_server] Endpoint %s:%d still processing (%.0fs/%.0fs deadline)",
+                        host, port, busy_secs, managed.busy_deadline,
                     )
                 return
             managed.busy_since = None  # idle 観測 = 処理は終わっている
-            if self._inflight.get(port, 0) > 0:
+            if self._inflight.get(endpoint, 0) > 0:
                 # 貸出中のリクエストがある。/slots が暇に見えても応答直後や
                 # KV save 中でありうる — idle 停止はしない。busy_deadline の
                 # 強制停止 (上の busy 分岐) には札は効かない: ハング回収の
@@ -481,24 +468,25 @@ class LlamaServerManager:
             if idle_secs < managed.idle_timeout:
                 return
             logger.info(
-                "[llama_server] Port %d idle for %.0fs (timeout=%.0fs), stopping",
-                port, idle_secs, managed.idle_timeout,
+                "[llama_server] Endpoint %s:%d idle for %.0fs (timeout=%.0fs), stopping",
+                host, port, idle_secs, managed.idle_timeout,
             )
-            self._stop_server(port)
+            self._stop_server(endpoint)
 
-    def _stop_server(self, port: int) -> None:
-        managed = self._servers.pop(port, None)
+    def _stop_server(self, endpoint: _Endpoint) -> None:
+        host, port = endpoint
+        managed = self._servers.pop(endpoint, None)
         if managed is None:
             return
         proc = managed.process
         if proc.poll() is not None:
-            logger.debug("[llama_server] Port %d process already exited (rc=%s)", port, proc.returncode)
+            logger.debug("[llama_server] Endpoint %s:%d process already exited (rc=%s)", host, port, proc.returncode)
             return
-        logger.info("[llama_server] Stopping server on port %d (PID %d)", port, proc.pid)
+        logger.info("[llama_server] Stopping server on %s:%d (PID %d)", host, port, proc.pid)
         try:
             self._kill_process_tree(proc)
         except Exception as exc:
-            logger.error("[llama_server] Failed to stop port %d cleanly: %s", port, exc)
+            logger.error("[llama_server] Failed to stop %s:%d cleanly: %s", host, port, exc)
 
     @staticmethod
     def _kill_process_tree(proc: subprocess.Popen) -> None:
@@ -588,16 +576,16 @@ class LlamaServerManager:
         再利用されると旧世代の記録が新世代の鍵に化ける。
         """
         now = time.monotonic()
-        key = (port, managed.generation)
+        key = ((managed.host, port), managed.generation)
         with self._warn_lock:
             last = self._slots_warned.get(key)
             if last is not None and now - last < _WARN_REPEAT_INTERVAL:
                 return
             self._slots_warned[key] = now
         logger.warning(
-            "[llama_server] Port %d: /slots が使えない (%s) ため busy 判定不能。"
+            "[llama_server] Endpoint %s:%d: /slots が使えない (%s) ため busy 判定不能。"
             "このサーバーの idle 自動停止は働かない。--no-slots を外すと有効になる",
-            port, reason,
+            managed.host, port, reason,
         )
 
     def _health_check(self, base_url: str) -> bool:
