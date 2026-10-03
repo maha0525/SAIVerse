@@ -17,7 +17,7 @@ from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 from tools import OPENAI_TOOLS_SPEC
 from saiverse.llm_router import route
 
-from .base import LLMClient, get_llm_logger
+from .base import LLMClient, ToolSpecFormat, get_llm_logger
 from .exceptions import (
     AuthenticationError,
     EmptyResponseError,
@@ -235,6 +235,9 @@ class XAIClient(LLMClient):
     Uses ``xai_sdk.Client`` for all API operations including text generation,
     streaming, tool calling, structured output, and image understanding.
     """
+
+    def tool_spec_format(self) -> ToolSpecFormat:
+        return "openai"
 
     def __init__(
         self,
