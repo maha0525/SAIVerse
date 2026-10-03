@@ -178,6 +178,7 @@ def test_create_document_returns_short_ref_usable_by_read(manager, tmp_path, mon
     class _Session:
         def add(self, *_a, **_k): pass
         def query(self, *_a, **_k): return _Query()
+        def flush(self): pass
         def commit(self): pass
         def rollback(self): pass
         def close(self): pass
@@ -200,10 +201,10 @@ def test_create_document_returns_short_ref_usable_by_read(manager, tmp_path, mon
 
     monkeypatch.setattr(
         "saiverse.media_utils.store_document_text",
-        lambda content, source=None: ({}, doc_path),
+        lambda content, source=None, new_files=None: ({}, doc_path),
     )
     monkeypatch.setattr(
-        "saiverse.media_summary.ensure_document_summary", lambda path: "要約"
+        "saiverse.media_summary.ensure_document_summary", lambda path, new_files=None: "要約"
     )
 
     ids_before = set(svc.items.keys())

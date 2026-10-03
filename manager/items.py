@@ -14,6 +14,7 @@ from database.models import (
     Item as ItemModel,
     ItemLocation as ItemLocationModel,
 )
+from saiverse.media_cleanup import NewMediaFiles
 from saiverse.references import parse_ref
 from saiverse.file_policy import enforce_allowed_file_path
 
@@ -843,58 +844,64 @@ class ItemService:
         finally:
             db.close()
 
-        from saiverse.media_utils import store_document_text
-        try:
-            metadata, file_path = store_document_text(content, source="tool:document_create")
-        except Exception as exc:
-            raise RuntimeError(f"ファイルの保存に失敗しました: {exc}") from exc
+        with NewMediaFiles() as new_files:
+            from saiverse.media_utils import store_document_text
+            try:
+                metadata, file_path = store_document_text(
+                    content, source="tool:document_create", new_files=new_files,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"ファイルの保存に失敗しました: {exc}") from exc
 
-        from saiverse.media_summary import ensure_document_summary
-        summary = ensure_document_summary(file_path)
-        if not summary:
-            summary = description
+            from saiverse.media_summary import ensure_document_summary
+            summary = ensure_document_summary(file_path, new_files=new_files)
+            if not summary:
+                summary = description
 
-        item_id = str(uuid.uuid4())
-        timestamp = datetime.utcnow()
+            item_id = str(uuid.uuid4())
+            timestamp = datetime.utcnow()
 
-        db = self.manager.SessionLocal()
-        try:
-            # 置き場所を書く前に、その部屋が今も在ることを同じセッションで確かめる。
-            self._require_building(db, building_id, "文書")
-            relative_path = str(file_path.relative_to(self.manager.saiverse_home))
-            initial_state = {"is_open": True}
-            item_row = ItemModel(
-                ITEM_ID=item_id,
-                NAME=name,
-                TYPE="document",
-                DESCRIPTION=summary,
-                FILE_PATH=relative_path,
-                STATE_JSON=json.dumps(initial_state),
-                CREATOR_ID=persona_id,
-                SOURCE_CONTEXT=source_context,
-                CREATED_AT=timestamp,
-                UPDATED_AT=timestamp,
-            )
-            db.add(item_row)
+            db = self.manager.SessionLocal()
+            try:
+                # 置き場所を書く前に、その部屋が今も在ることを同じセッションで確かめる。
+                self._require_building(db, building_id, "文書")
+                relative_path = str(file_path.relative_to(self.manager.saiverse_home))
+                initial_state = {"is_open": True}
+                item_row = ItemModel(
+                    ITEM_ID=item_id,
+                    NAME=name,
+                    TYPE="document",
+                    DESCRIPTION=summary,
+                    FILE_PATH=relative_path,
+                    STATE_JSON=json.dumps(initial_state),
+                    CREATOR_ID=persona_id,
+                    SOURCE_CONTEXT=source_context,
+                    CREATED_AT=timestamp,
+                    UPDATED_AT=timestamp,
+                )
+                db.add(item_row)
 
-            slot_num = self._assign_slot(db, "building", building_id)
-            location_row = ItemLocationModel(
-                ITEM_ID=item_id,
-                OWNER_KIND="building",
-                OWNER_ID=building_id,
-                SLOT_NUMBER=slot_num,
-                UPDATED_AT=timestamp,
-            )
-            db.add(location_row)
-            db.commit()
-        except MissingBuildingError:
-            db.rollback()
-            raise  # 書く前の拒否 — 「登録に失敗」で包まずそのまま伝える
-        except Exception as exc:
-            db.rollback()
-            raise RuntimeError(f"データベース登録に失敗しました: {exc}") from exc
-        finally:
-            db.close()
+                slot_num = self._assign_slot(db, "building", building_id)
+                location_row = ItemLocationModel(
+                    ITEM_ID=item_id,
+                    OWNER_KIND="building",
+                    OWNER_ID=building_id,
+                    SLOT_NUMBER=slot_num,
+                    UPDATED_AT=timestamp,
+                )
+                db.add(location_row)
+                # Flush errors are known to precede commit; commit errors are not.
+                db.flush()
+                new_files.preserve()
+                db.commit()
+            except MissingBuildingError:
+                db.rollback()
+                raise  # 書く前の拒否 — 「登録に失敗」で包まずそのまま伝える
+            except Exception as exc:
+                db.rollback()
+                raise RuntimeError(f"データベース登録に失敗しました: {exc}") from exc
+            finally:
+                db.close()
 
         self.items[item_id] = {
             "item_id": item_id,

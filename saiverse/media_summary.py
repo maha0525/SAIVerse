@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from .media_cleanup import NewMediaFiles
 from .media_utils import (
     get_media_summary,
     save_media_summary,
@@ -140,14 +141,16 @@ def ensure_image_summary(path: Path, mime_type: str) -> Optional[str]:
             _generating_paths.discard(path_key)
 
 
-def ensure_document_summary(path: Path) -> Optional[str]:
+def ensure_document_summary(
+    path: Path, *, new_files: Optional[NewMediaFiles] = None,
+) -> Optional[str]:
     """Ensure a document summary exists; generate if missing."""
     summary = get_media_summary(path)
     if summary:
         return summary
     generated = _generate_document_summary(path)
     if generated:
-        save_media_summary(path, generated)
+        save_media_summary(path, generated, new_files=new_files)
         return generated
     return None
 
