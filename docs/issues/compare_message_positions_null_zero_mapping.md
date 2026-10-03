@@ -1,26 +1,30 @@
-# compare_message_positions が NULL created_at を 0 に写像する (正典順序の二枚目)
+# compare_message_positions が NULL created_at を 0 に写像する (比較器と起点管理の修正)
 
 **発見**: 2026-08-31 (被覆補修 §16 の Codex 消し込み中、実装エージェントの同族走査)
-**状態**: 🟣 検証待ち — 実装・隔離回帰テスト済み、PR レビュー待ち。未マージのため archive へ移さない。
+**状態**: 🟣 検証待ち — 比較器はレビューで妥当と確認。下流の残件を別 issue に記録し、文書追補の確認・採用待ち。未マージのため archive へ移さない。
 **深刻度**: P3 — created_at が NULL の行と 0 (1970 epoch) または負の epoch の行が同一 DB に混在すると順序が逆転しうる
 
 ## 事実
 
 メッセージの正典順序の正は「NULL created_at は全ての実時刻より前」
 (`sai_memory/memory/storage.py` の `_canonical_before_clause` 族)。
-被覆補修 (§16) はこの共有述語に一本化済みだが、発見時の
+被覆補修 (§16) の位置判定はこの共有述語に一本化済みだが、発見時の
 `sai_memory/arasuji/storage.py` の `compare_message_positions` は NULL→0 の
-写像で比較しており、規則の二枚目として残っていた。
+写像で比較しており、比較器にも別の順序規則が残っていた。
+本 PR で揃えたのはこの比較器と、下記の `sea/session_lifecycle.py` の呼び手 5 か所の
+位置判断。`Message` への変換や、その後の要約材料・吸収処理の並べ替えまで
+一本化したわけではない。下流の NULL→0 写像は
+[別 issue](message_timestamp_null_zero_downstream.md) に残す。
 
 ## 修正の全体と責任
 
 インポートで時刻が欠けた生ログも、履歴表示・Chronicle・提示窓で同じ歴史位置に
-並ばなければならない。保存値はそのまま読み、比較器が `memory.storage` の
+並ばなければならない、というのが全体の不変条件。本 PR の比較器は保存値をそのまま読み、`memory.storage` の
 `canonical_position_key` を使う。NULL は負の epoch を含む全実時刻より前、
 NULL 同士・同秒同士は rowid 順。この規則は W8 の既存仕様であり、新しい裁定ではない。
 
-修正箇所は呼び手ごとの境界調整ではなく、全呼び手が使う比較器。
-SQL の並び・境界句や永続データの移行は変更しない。既存データに対する次の位置判断が揃い、
+修正箇所は呼び手ごとの境界調整ではなく、下記 5 か所が使う比較器。
+SQL の並び・境界句や永続データの移行は変更しない。この 5 か所の位置判断が揃い、
 既存の起点・fold を一括で書き換える処理は加えない。
 
 ### 呼び手の確認
@@ -51,9 +55,12 @@ SQL の並び・境界句や永続データの移行は変更しない。既存�
 
 - 2026-08-31: §16 の消し込み中に発見。旧状態は「未解決 — 影響先が §14 の anchor 前進系のため、v0.3 リリース前には触らない (まはー裁定を経ず既存機構の挙動を変えない)」。当時は NULL と 0 の混在だけを影響条件としていた。
 - 2026-10-02: v0.3.20 発行後のバックログ修正として着手。W8 の既存仕様と全呼び手を再確認し、負の epoch にも同じ逆転があることを隔離回帰で確認。共有キーへ統一し、PR レビュー待ちにした。
+- 2026-10-03: [PR #346 のレビュー](https://github.com/maha0525/SAIVerse/pull/346#issuecomment-5964245268) は比較器と呼び手 5 か所を妥当と判断。下流の NULL→0 写像は実コードで再確認し、[別 issue](message_timestamp_null_zero_downstream.md) に分離した。この追補では実行コードを変えない。
+- 同日、台帳から押し出した旧文面: 「共有キーへの統一と隔離回帰テストは通っており、PR レビュー待ち。次 = 差分と既存の境界仕様をレビューし、採用を判断する。」(誰待ち: まはー (PR レビュー))
 
 ## 関連
 
 - `tests/test_coverage_repair.py` — 一本化済み側の回帰
 - [W8 の正典順序と NULL の裁定記録](../handoff/2026-07-22_w8_time_order_handoff.md)
 - [intent: あらすじのレベル制](../intent/arasuji_levels.md) §14 / §16
+- [未着手: 下流に残る NULL→0 写像](message_timestamp_null_zero_downstream.md)
