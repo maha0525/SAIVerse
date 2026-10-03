@@ -348,6 +348,25 @@ def reload_providers():
     ]
 
 
+def _connection_test_http_error(status_code: int) -> str:
+    """Build diagnostics from the status alone, never from upstream text.
+
+    Providers may reflect credentials in their body or reason phrase. Truncating
+    that text (or replacing just the key we know) is not a secrecy boundary.
+    """
+    if status_code == 401:
+        explanation = "認証に失敗しました。API キーの設定を確認してください。"
+    elif status_code == 403:
+        explanation = "アクセスが拒否されました。API キーの権限とプロバイダの利用条件を確認してください。"
+    elif status_code == 429:
+        explanation = "利用制限に達しました。時間をおいて再試行するか、利用枠を確認してください。"
+    elif 500 <= status_code < 600:
+        explanation = "プロバイダ側でエラーが発生しました。時間をおいて再試行してください。"
+    else:
+        explanation = "正常な応答を受け取れませんでした。URL とプロトコルの設定を確認してください。"
+    return f"HTTP {status_code}: {explanation}"
+
+
 def _run_connection_test(
     protocol: str,
     base_url: Optional[str],
@@ -382,8 +401,13 @@ def _run_connection_test(
             # save" — a definition that saving would reject can still be probed,
             # as long as the probe carries no credential.
             validate_provider_url(base_url)
-    except ValueError as exc:
-        return ConnectionTestResponse(success=False, error=str(exc))
+    except ValueError:
+        # URL/credential validation errors can include caller-controlled values
+        # (including malformed ports and environment variable names).
+        return ConnectionTestResponse(
+            success=False,
+            error="接続設定が拒否されました。接続先 URL と API キーの環境変数設定を確認してください。",
+        )
 
     start = time.monotonic()
 
@@ -404,7 +428,7 @@ def _run_connection_test(
         else:
             return ConnectionTestResponse(
                 success=False,
-                error=f"このプロトコルは接続テスト未対応: {protocol}",
+                error="このプロトコルは接続テスト未対応です",
             )
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -413,7 +437,7 @@ def _run_connection_test(
             return ConnectionTestResponse(
                 success=False,
                 status_code=resp.status_code,
-                error=f"HTTP {resp.status_code}: {resp.text[:200]}",
+                error=_connection_test_http_error(resp.status_code),
                 elapsed_ms=elapsed_ms,
             )
 
@@ -427,8 +451,10 @@ def _run_connection_test(
             elif protocol == "ollama_compat":
                 # Ollama format: {"models": [{"name": "..."}, ...]}
                 models = [m["name"] for m in data.get("models", []) if isinstance(m, dict) and m.get("name")]
-        except Exception as exc:
-            LOGGER.warning("Failed to parse provider test response: %s", exc)
+        except Exception:
+            # Parser exceptions may quote upstream content; keep the event, not
+            # the exception, its traceback, or the response body.
+            LOGGER.warning("Failed to parse provider test response")
 
         return ConnectionTestResponse(
             success=True,
@@ -441,16 +467,23 @@ def _run_connection_test(
             success=False,
             error=f"接続タイムアウト ({CONNECTION_TEST_TIMEOUT}s)",
         )
-    except httpx.ConnectError as exc:
+    except httpx.ConnectError:
         return ConnectionTestResponse(
             success=False,
-            error=f"接続失敗: {exc}",
+            error="接続失敗: 接続先とネットワークの設定を確認してください。",
         )
-    except Exception as exc:
-        LOGGER.exception("Provider connection test failed")
+    except httpx.RequestError:
         return ConnectionTestResponse(
             success=False,
-            error=f"予期しないエラー: {exc}",
+            error="通信エラー: 接続先とネットワークの状態を確認してください。",
+        )
+    except Exception:
+        # A traceback includes the exception text, which may contain a URL,
+        # credential, or upstream response. Never log it for this probe.
+        LOGGER.error("Provider connection test failed")
+        return ConnectionTestResponse(
+            success=False,
+            error="予期しないエラー: 接続テストを完了できませんでした。",
         )
 
 
