@@ -25,6 +25,7 @@ os.environ.setdefault("SAIVERSE_SKIP_TOOL_IMPORTS", "1")
 
 import httpx  # the NIM raw path posts with httpx
 import httpx2  # openai 3.x runs on httpx2
+import pytest
 
 from llm_clients.factory import get_llm_client
 from saiverse import data_paths, model_configs, provider_configs
@@ -78,6 +79,13 @@ def _image_parts(message: dict) -> list:
     return [part for part in content if part.get("type") == "image_url"]
 
 
+@pytest.fixture
+def nim_test_network(mock_provider_network):
+    """Both raw and SDK requests below are captured by MockTransport."""
+    mock_provider_network("integrate.api.nvidia.com")
+
+
+@pytest.mark.usefixtures("nim_test_network")
 class TestNimStructuredOutputRequest(unittest.TestCase):
 
     def setUp(self):

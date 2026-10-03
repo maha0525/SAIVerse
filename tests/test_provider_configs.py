@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from saiverse import data_paths, model_configs, provider_configs
 from llm_clients.factory import _resolve_protocol
 
@@ -39,6 +41,16 @@ def _read_builtin_provider(pid: str) -> dict:
     # what load_configs() stamps for builtin_data files
     cfg["source"] = provider_configs.SOURCE_BUILTIN
     return cfg
+
+
+@pytest.fixture
+def credential_test_network(mock_provider_network):
+    """These tests validate/save configs; none should contact a provider."""
+    mock_provider_network(
+        "example.com", "example.org", "api.moonshot.cn", "api.openai.com",
+        "api.platform.preferredai.jp", "api.typesafe.ai", "api.sakana.ai",
+        "openrouter.ai", "integrate.api.nvidia.com",
+    )
 
 
 class TestLoadProviders(unittest.TestCase):
@@ -531,6 +543,7 @@ class TestListModelsUsingProvider(unittest.TestCase):
         self.assertEqual(using, [])
 
 
+@pytest.mark.usefixtures("credential_test_network")
 class TestCredentialLayerBinding(unittest.TestCase):
     """Who declared a credential pairing decides whether it is allowed.
 
