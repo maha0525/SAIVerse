@@ -120,7 +120,26 @@ def upsert_row(table_name: str, row: RowData, db: Session = Depends(get_db)):
                 if val == "":
                     val = None
                 clean_data[col.key] = val
-                
+
+        # The generic editor must preserve the same Building city invariant as
+        # AdminService.update_building. Check before merge copies any fields.
+        if model is models.Building and "CITYID" in clean_data:
+            building_id = clean_data.get("BUILDINGID")
+            # RowData is untyped: compare using the column's DB semantics so
+            # "1" still means city 1, without truncating 1.5 or coercing bad text.
+            existing = db.query(
+                models.Building, models.Building.CITYID == clean_data["CITYID"],
+            ).filter(models.Building.BUILDINGID == building_id).first()
+            if existing is not None:
+                building, same_city = existing
+                if not same_city:
+                    raise ValueError(
+                        f"Error: The city of '{building.BUILDINGNAME}' cannot be "
+                        "changed. (City transfer requires a dedicated migration, "
+                        "which is out of scope while multi-city is frozen.)"
+                    )
+                clean_data["CITYID"] = building.CITYID
+
         instance = model(**clean_data)
         db.merge(instance)
         db.commit()

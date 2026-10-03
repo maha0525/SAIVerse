@@ -1,6 +1,7 @@
 # City の識別子と表示名
 
 > **ステータス**: 完了 (2026-08-15 まはー実機検証済み)
+> §4-1 の汎用 DB 更新の補強は検証待ち (2026-10-03、隔離 API 回帰は合格・実機未確認)。
 >
 > 関連: [概念リファレンス Building / City](../concepts/building-city.md) / [landscape §2](../overview/landscape.md)
 
@@ -97,7 +98,11 @@ City は「名前」を入れる欄を 2 つ持っているが、**どちらが�
 
 `CITY_SLUG` の不変性とは別に、既存 Building の `CITYID` は通常の設定更新では変更不可である。根拠は [W7 分離監査の裁定 D5](../handoff/2026-07-21_w7_location_occupancy_handoff.md#d5-p1-7--building-の-city-変更を-immutable-化)。City 間の移送は、ユーザーの現在地・Region・私室・item/tool link を一括して扱う専用 migration の責務で、multi-city 凍結中は提供しない。
 
-通常の建物更新経路では、この境界を `manager/admin.py:update_building` が守る。汎用 DB 編集の `POST /api/db/tables/building` はこの拒否を通らない既知の穴があり、[別 issue](../issues/building_city_immutable_generic_db_bypass.md) で扱う。既存 Building を読む画面は、DB → テーブル API から受け取った所属 City を表示し、同じ `CITYID` のまま通常項目を保存する。World Editor と個別の BuildingSettingsModal のどちらも City 欄は表示のみとし、保存時に拒否される選択を案内しない。新規 Building の City 選択やバックエンドの拒否条件は変えない。個別モーダルの追従と検証範囲は [issue](../issues/building_settings_city_selector_editable.md) に記録する。
+通常の建物更新経路では、この境界を `manager/admin.py:update_building` が守る。汎用 DB 編集の `POST /api/db/tables/building` も、`db.merge` より前に既存行の `CITYID` と指定値を比較し、変更を同じ理由で拒否する。汎用入力は列型で検証されないため、同値の判定は DB の列との比較に任せ、数値文字列 (`"1"` など) も従来どおり受け取り、保存値は既存の整数 ID に揃える。拒否は通常項目も含む更新全体のロールバックに流す。`CITYID` を省いた更新・現在と同値の更新・新規 Building の City 指定は維持する。汎用 API は管理サービスを通らず直接保存するため、その書き込み境界で守り、画面だけの制限には依存しない。
+
+既存 Building を読む画面は、DB → テーブル API から受け取った所属 City を表示し、同じ `CITYID` のまま通常項目を保存する。World Editor と個別の BuildingSettingsModal のどちらも City 欄は表示のみとし、保存時に拒否される選択を案内しない。個別モーダルの追従と検証範囲は [issue](../issues/building_settings_city_selector_editable.md) に記録する。
+
+この補強は、通常設定・汎用編集 → 保存 → 次の読み取りで、ユーザーの現在地・Region・私室・item/tool link が参照する所属を維持するためのもの。City 移送や DB 編集全体の再設計は含めない。合成 SQLite を使う実 API 回帰で保存・拒否・ロールバックを確認し、通常サービスの既存回帰とも比較した。実ブラウザや稼働中の世界での操作確認は未実施で、残る確認は [汎用 DB の issue](../issues/building_city_immutable_generic_db_bypass.md) に記録する。
 
 ## 5. 変更を置く場所と、その理由
 
