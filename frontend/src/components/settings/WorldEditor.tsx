@@ -113,6 +113,7 @@ interface ModelChoice {
     /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
      *  この画面が出すのは会話に使う欄だけなので、印の付いたものは選択肢に出さない。 */
     reflex_only?: boolean;
+    config_error?: { path: string; source: string; reason: string } | null;
 }
 
 /** 建物を消したら何が一緒に消え、何が残るか (GET /api/world/buildings/{id}/deletion-preview)。
@@ -822,14 +823,14 @@ export default function WorldEditor() {
                                     {formData.default_model && !conversationModelChoices.some(m => m.id === formData.default_model) && (
                                         <option data-i18n="components.settings.WorldEditor.text073" value={formData.default_model}>{uiText("components.settings.WorldEditor.text073")}{formData.default_model}</option>
                                     )}
-                                    {conversationModelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                    {conversationModelChoices.map(m => <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>)}
                                 </Select></Field>
                                 <Field label={uiText("components.settings.WorldEditor.text074")}><Select value={formData.lightweight_model || ''} onChange={(e: any) => setFormData({ ...formData, lightweight_model: e.target.value })}>
                                     <option data-i18n="components.settings.WorldEditor.text075" value="">{uiText("components.settings.WorldEditor.text075")}</option>
                                     {formData.lightweight_model && !conversationModelChoices.some(m => m.id === formData.lightweight_model) && (
                                         <option data-i18n="components.settings.WorldEditor.text076" value={formData.lightweight_model}>{uiText("components.settings.WorldEditor.text076")}{formData.lightweight_model}</option>
                                     )}
-                                    {conversationModelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                    {conversationModelChoices.map(m => <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>)}
                                 </Select></Field>
                                 <Field label={uiText("components.settings.WorldEditor.text077")}>
                                     <label data-i18n="components.settings.WorldEditor.text078 components.settings.WorldEditor.text079" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>

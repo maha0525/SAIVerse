@@ -31,14 +31,7 @@ VALID_UI_PROTOCOLS = {"openai_compat", "ollama_compat"}
 
 # All known protocols accepted on update. Used to validate that update
 # requests don't introduce unknown protocol names by typo.
-ALL_PROTOCOLS = {
-    "openai_compat", "ollama_compat", "anthropic_native", "gemini_native",
-    "xai_native", "nvidia_nim", "openai_codex",
-    # 反射判断 (docs/intent/reflex_judgment.md) が話す System One 形式の宛先。
-    # llm_clients/ ではなく saiverse/reflex_judgment.py がコード実装を持つので、
-    # 他の native 系と同じく UI からは作れない (VALID_UI_PROTOCOLS に入れない)。
-    "jev_compat",
-}
+ALL_PROTOCOLS = provider_configs.SUPPORTED_PROVIDER_PROTOCOLS
 
 CONNECTION_TEST_TIMEOUT = 5.0
 
@@ -50,11 +43,20 @@ class ApiKeyEnvInfo(BaseModel):
     configured: bool
 
 
+class ProviderConfigError(BaseModel):
+    path: str
+    source: str
+    reason: str
+
+
 class ProviderInfo(BaseModel):
     """Provider info returned to the UI."""
     id: str
     display_name: str
     protocol: str
+    available: bool = True
+    config_error: Optional[ProviderConfigError] = None
+    source: str = "unknown"
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
     # Every environment variable this provider's key can be read from: the
@@ -171,6 +173,9 @@ def _to_provider_info(pid: str, cfg: dict) -> ProviderInfo:
         api_key_configured = any(env.configured for env in api_key_envs)
     return ProviderInfo(
         id=pid,
+        available=not bool(cfg.get("config_error")),
+        config_error=cfg.get("config_error"),
+        source=cfg.get("source", "unknown"),
         display_name=cfg.get("display_name", pid),
         protocol=cfg.get("protocol", "unknown"),
         base_url=cfg.get("base_url"),
@@ -261,6 +266,9 @@ def update_provider(provider_id: str, req: ProviderUpdateRequest):
     existing = provider_configs.get_provider(provider_id)
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Provider not found: {provider_id}")
+
+    if existing.get("config_error"):
+        raise HTTPException(status_code=409, detail="Repair the invalid provider file before editing")
 
     # Merge the patch onto the existing config; unspecified fields keep their values
     merged = dict(existing)
@@ -489,6 +497,10 @@ def test_provider_connection(provider_id: str):
     cfg = provider_configs.get_provider(provider_id)
     if cfg is None:
         raise HTTPException(status_code=404, detail=f"Provider not found: {provider_id}")
+    if cfg.get("config_error"):
+        return ConnectionTestResponse(
+            success=False, error=provider_configs.config_error_message(cfg["config_error"]),
+        )
     return _run_connection_test(
         protocol=cfg.get("protocol", ""),
         base_url=cfg.get("base_url"),

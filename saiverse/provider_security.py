@@ -90,7 +90,10 @@ def validate_provider_config(provider_id: str, config: dict) -> None:
     ``user_data/`` as well. Nothing here sandboxes add-on code; that boundary
     would have to be a separate mechanism.
     """
-    from saiverse.provider_configs import SOURCE_BUILTIN, SOURCE_USER_DATA
+    from saiverse.provider_configs import SOURCE_BUILTIN, SOURCE_USER_DATA, config_error_message
+
+    if config.get("config_error"):
+        raise ValueError(config_error_message(config["config_error"]))
 
     base_url = config.get("base_url")
     if isinstance(base_url, str) and base_url.strip():
@@ -168,7 +171,11 @@ def validate_model_config_connection(model_key: str, config: dict) -> None:
         SOURCE_BUILTIN,
         SOURCE_USER_DATA,
         get_provider,
+        config_error_message,
     )
+
+    if config.get("provider_config_error"):
+        raise ValueError(config_error_message(config["provider_config_error"]))
 
     base_url = config.get("base_url")
     api_key_env = config.get("api_key_env")

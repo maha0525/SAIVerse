@@ -15,6 +15,7 @@ export type ModelEditorMode = 'create' | 'edit';
 interface ProviderChoice {
     id: string;
     display_name: string;
+    available?: boolean;
 }
 
 export interface ModelCloneSource {
@@ -183,9 +184,10 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             if (!res.ok) return;
             const data = await res.json();
             setProviders(
-                (data as Array<{ id: string; display_name: string }>).map(p => ({
+                (data as ProviderChoice[]).map(p => ({
                     id: p.id,
                     display_name: p.display_name,
+                    available: p.available,
                 })),
             );
         } catch (e) {
@@ -415,8 +417,8 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
                                 >
                                     <option data-i18n="components.settings.ModelEditorModal.text041" value="">{uiText("components.settings.ModelEditorModal.text041")}</option>
                                     {providers.map(p => (
-                                        <option key={p.id} value={p.id}>
-                                            {p.display_name} ({p.id})
+                                        <option key={p.id} value={p.id} disabled={p.available === false}>
+                                            {p.display_name}{p.available === false ? ` (${uiText("providerConfig.invalid")})` : ""} ({p.id})
                                         </option>
                                     ))}
                                 </select>

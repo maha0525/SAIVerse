@@ -15,6 +15,7 @@ from saiverse.model_defaults import is_reflex_only_model
 from saiverse.model_configs import (
     get_model_choices_with_display_names,
     get_model_config,
+    get_model_config_error,
     get_model_parameters,
     get_model_parameter_defaults,
     get_cache_config,
@@ -39,6 +40,8 @@ class ModelInfo(BaseModel):
     # 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない) の印。
     # 会話に使う選択欄はこの印の付いたモデルを出さない (一覧からは落とさない)。
     reflex_only: bool = False
+    available: bool = True
+    config_error: Optional[Dict[str, str]] = None
 
 class PlaybookParamInfo(BaseModel):
     """Parameter info for playbook input_schema."""
@@ -99,13 +102,14 @@ class ModelConfigResponse(BaseModel):
 def get_models():
     """List available LLM models.
 
-    Only models whose required API key is configured are returned.
+    Missing-key models are omitted; invalid-provider models remain visible as unavailable.
     Includes pricing info (USD per 1M tokens) when available.
     """
     choices = get_model_choices_with_display_names()
     result = []
     for mid, name in choices:
-        if not is_model_available(mid):
+        error = get_model_config_error(mid)
+        if not is_model_available(mid) and not error:
             continue
         cfg = get_model_config(mid)
         pricing = cfg.get("pricing", {})
@@ -118,6 +122,8 @@ def get_models():
             }
         result.append({
             "id": mid,
+            "available": is_model_available(mid),
+            "config_error": error,
             "name": name,
             "provider": cfg.get("provider"),
             "group": cfg.get("group") or cfg.get("provider_ref") or cfg.get("provider"),
