@@ -1227,6 +1227,10 @@
     "ja": "名前",
     "en": "Name"
   },
+  "components.BuildingSettingsModal.cityImmutableHint": {
+    "ja": "既存の建物の都市は変更できません。",
+    "en": "The city of an existing building cannot be changed."
+  },
   "components.BuildingSettingsModal.text012": {
     "ja": "都市",
     "en": "City"
