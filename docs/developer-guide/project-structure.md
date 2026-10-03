@@ -309,6 +309,10 @@ builtin_data/
 └── seed_data.json    # シード用データ
 ```
 
+## メモリー画面の表示
+
+Next.js の画面実装。`src/components/memory/PulseTimelineViewer.tsx` は Pulse の一覧・詳細・既存タグ編集を担い、同じディレクトリの `PulseTimelineViewer.module.css` がテーマ別の役割色と長文の折り返しを持つ。中立色の正典は `src/app/globals.css`。隔離した表示・操作の回帰確認は `scripts/test-pulse-timeline-theme.cjs`（[表示 intent](../intent/pulse_timeline_display.md)）。
+
 ## ユーザーデータ（`~/.saiverse/`）
 
 ユーザーデータはリポジトリ外に保存される（`SAIVERSE_HOME` env で変更可）。

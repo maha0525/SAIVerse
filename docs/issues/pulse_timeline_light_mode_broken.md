@@ -1,6 +1,6 @@
 # Pulse タイムラインがライトモードに対応していない (逆パターン)
 
-**ステータス: 未解決** (2026-08-08 起票。時間割実機検証中にまはーが発見)
+**ステータス: 検証待ち (未解決)** (2026-08-08 起票。時間割実機検証中にまはーが発見)
 
 ## 症状
 
@@ -15,3 +15,13 @@
 ## 関連
 
 - [統合検証手順](../handoff/2026-08-07_timetable_live_verification_run.md) Step 2〜3 (検証中に発見)
+
+## 修正候補と検証 (2026-10-02)
+
+原因は `PulseTimelineViewer.tsx` の sticky ヘッダー・select・本文背景と補助文字にダーク固定色が散在していたこと。中立色を既存のテーマ変数へ寄せ、役割・Spell・注意色はメモリー画面の既存パレットで明暗を切り替える。候補リスト、長文の折り返し、狭幅の操作列も対象。取得・タグ・編集保存の挙動は変更しない。[表示 intent](../intent/pulse_timeline_display.md)。
+
+- 隔離した React element/handler テスト: 一覧→展開→select 編集→折りたたみ→再展開、未保存状態と詳細キャッシュの保持を確認。`cd frontend && node scripts/test-pulse-timeline-theme.cjs`。
+- 実視認は未完了: dot クラウドブラウザーが隔離 localhost を `net::ERR_BLOCKED_BY_CLIENT` で拒否。テーマ・360/960/1600px の見え方が合格したとは扱わない。
+- 次は両テーマで、ヘッダー・行・入力プロンプト・gap・select 候補・未保存の印、長文、更新と閉じる/再表示を確認。まはーのレビューまで issue は archive しない。
+
+検証記録: `npm test`、`node scripts/test-pulse-timeline-theme.cjs`、対象 TSX の ESLint、`npx tsc --noEmit`、`npm run build`、`python scripts/check_in_flight.py`、`git diff --check` は通過。全体 `npm run lint` は既存 CJS にも再現する設定エラー (`react-hooks/set-state-in-effect` に plugin が適用されない) で停止。実視認の代替合格にはしない。
