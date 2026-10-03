@@ -1,7 +1,7 @@
 # 「建物へ喋った」の印が、書き込みの成否を見ずに立つ
 
 **発見**: 2026-09-14 (中断通告の追加への代行レビュー二巡目、指摘 3)
-**状態**: 検証待ち (2026-10-02、直接書き込み4経路・segment・スペル途中の既存退避の判定を修正。隔離回帰緑、レビュー待ち)
+**状態**: 検証待ち (2026-10-03、採番による成功判定は隔離回帰・レビュー確認済み、マージ判断待ち。下記の既存の未補填2経路は未解決)
 **深刻度**: P3 — 発火には「建物への書き込みが DB で失敗し、かつ直後に Beat が例外で死ぬ」の重なりが要る
 
 ## 症状
@@ -38,10 +38,47 @@ sea/runtime_llm.py で、建物へ本文を直接書く経路 (`_emit_say_and_ca
 - 同日: 先行 segment 成功・締め segment 失敗を同期 / streaming fallback / tool の3経路で再現。締めが成功した対照群も通す。
 - 同日: 実 `RuntimeEmitters.emit_say` が履歴の未採番 dict を返す境界を通し、`_emit_beat_segments` の戻り値・segment の採番・保存完了イベントが一致することを検証。`tests/test_streaming_placeholder_salvage.py` の末尾へ回帰を追加し、既存の隔離設定削除とは行を分けた。
 - 同日: `test_runtime_llm_helpers` / `test_pipeline_stream_spell_voicing` / `test_tell_spell` / `test_streaming_placeholder_salvage` / `test_beat_segment_records` / `test_beat_finalize` の隔離実行は **285 passed + 6 subtests passed**。変更 Python の `ruff check`、`git diff --check`、`scripts/check_in_flight.py` も合格 (台帳は既存 RSS 行の経過措置警告のみ)。フルスイートは未実行。
-- 本番ペルソナ、実 LLM、実データの書き込みは実施していない。レビューと実地の異常経路の確認を待つため、issue は archive へ動かさない。
+- 本番ペルソナ、実 LLM、実データの書き込みは実施していない。作成時はレビューと実地の異常経路の確認待ちとして archive へ動かさなかった。後日のレビュー結果と残る穴は下記に記録する。
 
 ## スペル途中の既存退避の確認と、対象外の救済拡張
 
 追加監査で、`_close_streaming_beat` 内の `_write_beat_body_directly` も未採番 dict で補填キーを置き `True` を返していた。これは「建物へ書いたか」という既存の戻り値契約に反するため、同じ採番の門を既存の位置に入れた。`no-placeholder` / `finalize-failure` の2経路を実 `_run_spell_loop` で通し、修正前に未採番4種 × 2経路の8例と、先行成功・後続失敗3種 × 2経路の6例を再現。修正後は成功の対照群とともに16例が合格。さらに実 node の出口で、退避成功時だけ補填が走り、退避失敗時は既存の最終確定が呼ばれる2例を固定した。
 
 [finalize_failure_rescue_expansion.md](finalize_failure_rescue_expansion.md) で裁定待ちなのは、直接退避を締めくくり・普段の返事・中断時の確定にも新設することと、二重配信防止の仕組み。本変更は新しい退避先・再試行ループ・配信機構を作らない。通常の memorize や、中断した言いかけの保存 `_save_cut_utterance` が本人の記憶を残す方針も変えず、既存の直接保存を根拠とした「補填」の成功判定だけを揃える。
+
+## 残る境界: 先行 segment が建物だけに残る2経路（未解決）
+
+[PR #357 のレビュー](https://github.com/maha0525/SAIVerse/pull/357#issuecomment-5964632697) を受け、
+現行と修正前の呼び出し側を照合した。次の2件は**この PR より前からの穴**であり、
+今回の「建物に保存できた本文だけを補填する」判定修正では解決していない。
+どちらも前提は、その周の SAIMemory 書き込みに失敗していること。
+
+1. **非ストリーミングの混在結果**: 先行 segment A の記憶書き込みが失敗し、
+   建物への保存は成功する。末尾 B は建物への保存に失敗し、その後 Beat が例外で終わると、
+   A は建物にはあるが記憶に無いまま残り得る。
+   [tool 側の呼び出し](https://github.com/maha0525/SAIVerse/blob/1157a4793a1c897b4b33d5a8126f2ae897988285/sea/runtime_llm.py#L5463-L5485) と
+   [同期側](https://github.com/maha0525/SAIVerse/blob/1157a4793a1c897b4b33d5a8126f2ae897988285/sea/runtime_llm.py#L6467-L6494)
+   は末尾自身の採番を確かめて `final_continuation` を補填対象にするが、
+   先行 segment ごとの未記憶本文は出口へ渡していない。
+   旧実装も補填候補は末尾 B で、A の欠落は直していなかった。今回止めたのは、
+   A の保存成功を根拠に**建物に無い B を記憶へ書く**誤り。
+2. **ストリーミングの placeholder 確定**: 周の記憶書き込みが失敗して
+   `_round_memorized=False` でも、[`_close_streaming_beat` の確定成功](https://github.com/maha0525/SAIVerse/blob/1157a4793a1c897b4b33d5a8126f2ae897988285/sea/runtime_llm.py#L3171-L3189)
+   は `segment.emitted=True` にして戻る。直接退避の枝と違って、
+   `BEAT_BODY_UNMEMORIZED_KEY` にその周の本文を残さない。
+   後続 continuation で Beat が失敗したとき、保存済みの先行 segment は再 emit されず、
+   記憶に欠けた本文も補填へ届かない。この枝は今回の修正前も同じだった。
+
+segment ごとの「建物に保存済み・本人の記憶には未記入」を出口まで運び、
+一度だけ補填する修正は別途設計・実装する。保存済みの事実と記憶済みの事実の所有者、
+HTML を含まない記憶用本文、重複補填の防止を一緒に確認する必要がある。
+この追記は方式の採用や runtime 拡張の承認ではなく、未解決範囲の記録である。
+
+将来の隔離回帰は、A の記憶失敗＋建物成功 → B の建物失敗 → Beat 終了と、
+A の記憶失敗＋placeholder 確定成功 → continuation 失敗 → Beat 終了を通し、
+A だけが一度補填されることを確かめる。今回これらを修正済み・回帰で保護済みとはしない。
+
+### レビュー結果と台帳の旧記録
+
+- 2026-10-03: 上記レビューは採番で門番する変更にコード修正を求めず、既存の2件を記録するよう指摘した。Windows の統合フルスイートについても当該 PR 起因の失敗なしとの報告があるが、この文書追記で独自に同じ実機検証をしたわけではない。実地の異常経路の確認は未実施。
+- 台帳の更新前の行（2026-10-02）: 状態「検証待ち」、次アクション「直接書き込み・締め segment・スペル途中の既存退避の採番判定は隔離回帰の確認を終え、レビュー待ち。次は差分レビューを受け、既存の成功経路と失敗時の出口の扱いを確認する。」、誰待ち「私 (レビュー対応)」。
