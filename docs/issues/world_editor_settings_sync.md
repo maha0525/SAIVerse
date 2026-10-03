@@ -29,13 +29,13 @@ City / Building / Persona などの設定項目が、個別の設定モーダル
 | 対象・経路 | 保存できる項目 | 制限・根拠 |
 |---|---|---|
 | City / WorldEditor | 表示名 `name`、説明 `description`、`ui_port`、`api_port`、`timezone`、`language`。既存 City は背景 `map_background_image`、起動時オンライン設定 `online_mode` も編集 | 内部識別子 `slug` は作成時だけ。既存では表示のみ。[WE-C] / [W-API-C] |
-| City / TutorialWizard | 表示名、タイムゾーン、言語 | 他の City 値は既存値を保存用に渡すだけで、入力欄ではない。[T-C] |
+| City / TutorialWizard | 表示名、タイムゾーン、言語 | 説明・オンライン設定・ポートは既存値を再送する。`host_avatar_path` / `map_background_image` は未送信で、保存時に既存の画像設定を `None` へ消してしまう（[未解決 issue](tutorial_city_resave_clears_images.md)）。[T-C] / [W-API-C] / [W-C-SAVE] |
 | City / CityMap | 表示名、背景画像の設定・解除 | それぞれ専用 PATCH。[MAP-C] |
 | Building / WorldEditor (既存) | 名前、説明、収容数、システム指示、内部画像、追加プロンプトファイル、アイテム表示上限、旧 Tool 紐付け、旧自動インターバル | Building ID と所属 City は表示のみ。[WE-B] / [W-API-B] |
 | Building / BuildingSettingsModal | 上記の既存 Building 項目に加え、事前実行 Spell の追加・削除 (Spell 名、引数、ラベル) | City 選択 UI はあるが変更はサーバーに拒否される。Spell は通常の保存ボタンと独立した即時 POST/DELETE。[B-FORM] / [B-SPELL] |
 | Building / WorldEditor (作成) | 名前、任意の Building ID、City、収容数、説明、システム指示 | 作成 payload はこの 6 項目。調査時点の自動インターバル欄は表示されるが POST には含まれない。[WE-B-SAVE] |
 | Building / Sidebar (作成) | 名前 | 現在の City を使用。収容数 10、説明・指示は空で作成する簡易入口。[SIDEBAR-B] |
-| Building / CityMap | マップ座標 `MAP_X` / `MAP_Y` | マップ編集の位置保存。通常の Building 設定とは別 API。[MAP-UI] / [MAP-B] |
+| Building / CityMap | マップ座標 `MAP_X` / `MAP_Y` | マップ編集の位置保存。通常の Building 設定とは別 API。サーバー側の City スコープ検証なし: `building_id` だけで行を検索する。[MAP-UI] / [MAP-B] |
 | Persona / WorldEditor (既存) | 名前、説明、システムプロンプト、ホーム City、標準モデル、軽量モデル、自律 ON/OFF、アバター、外見画像 | 建物への移動は別操作。自律 UI の残存には下記注意。[WE-P] / [WE-P-SAVE] |
 | Persona / SettingsModal | 説明、システムプロンプト、標準・軽量モデル、アバター、外見画像に加え、次表の個別設定 | 名前は表示のみ、ホーム City の変更欄なし。事前実行 Spell は別の即時保存。[P-IDENTITY] / [P-SAVE] / [P-BASIC] |
 | Persona / WorldEditor (作成) | 名前、システムプロンプト、ホーム City | 説明欄も見えるが作成 payload に含まれない。既存編集との相違。[WE-P] / [WE-P-SAVE] |
@@ -56,7 +56,7 @@ City / Building / Persona などの設定項目が、個別の設定モーダル
 | Persona | 紐付けユーザー `linked_user_id` | SettingsModal [P-BASIC] | UI と `AIUpdate` に無し。個別 PATCH が `UserAiLink` を更新する別の関連データ。[P-LINK] |
 | Persona / Building | 事前実行 Spell の追加・削除、作成時の `spell_name` / `spell_args_json` / `label` | SettingsModal [P-RT-SPELL] / BuildingSettingsModal [B-SPELL] | WorldEditor に管理 UI なし。専用 API の機能であり、通常の設定 payload に足すだけでは揃わない。応答の `enabled` / `priority` は両モーダルとも編集欄が無いため差分に数えない |
 | Persona (作成のみ) | カスタム `ai_id` | PersonaWizard [P-WIZARD] | WorldEditor に欄なし。共通の `AICreate` は受理済み。[W-API-P] |
-| Building | マップ座標 `MAP_X` / `MAP_Y` | CityMap [MAP-B] | WorldEditor に数値編集欄なし。位置を地図上で編集する専用経路を重複させるかは別途判断 |
+| Building | マップ座標 `MAP_X` / `MAP_Y` | CityMap [MAP-B] | WorldEditor に数値編集欄なし。サーバー側の City スコープ検証が無い既存の制限と、専用経路を重複させるかの判断を分ける |
 
 **この範囲で City の個別経路だけにある設定は見つからなかった。** チュートリアルの表示名・言語・タイムゾーンと、街マップの背景画像は WorldEditor にもある。`host_avatar_path` のような API 欄だけを根拠に「個別 UI の追加に追いついていない」とは数えない。
 
@@ -69,6 +69,8 @@ City / Building / Persona などの設定項目が、個別の設定モーダル
 - **旧自動インターバル**: 調査版では両方に入力欄がある ([WE-B] 738 行 / [B-FORM] 314–322 行)。新機能の欠落ではなく [削除 issue](building_auto_interval_setting_removal.md) の対象。別 draft 作業 `feature/remove-obsolete-building-interval-inputs` で両入力欄を撤去予定 (保存互換は保持)。この監査は削除・DB 廃止の判断を行わない。
 - **アイテム表示上限**: 両 UI に実装済み。空欄 = 既定、0 = 非表示を同じように扱う ([WE-B] / [B-FORM])。[両経路への配置は裁定済み](../intent/room_item_display_cap.md) なので欠落に数えない。
 - **旧 Tool 紐付け**: 両 UI に欄があるが、`BuildingToolLink` は現在の Tool/Spell 実行経路では使われない ([CLAUDE.md](../../CLAUDE.md))。新しい Spell 管理と同一視しない。
+- **チュートリアルの City 再保存**: 未編集の案内役アバターと地図背景が消える。送信 payload → `CityUpdate` の未送信時の既定値 → `AdminService.update_city` の上書きまで照合した。画面の不足とは別の保存不具合として [issue](tutorial_city_resave_clears_images.md) に分離し、今回ランタイムは変更しない。
+- **CityMap の座標保存**: `PUT /api/world/buildings/positions` は Building ID ごとに更新し、対象が現在の City に属するかをサーバーで検査しない。画面が現在の街の建物を送ることと、API が所属を保証することは別。所属 City 自体を変更する API ではない。
 - **モデル欄を消す過去の不具合**: [別 issue で修正済み](archive/world_editor_save_wipes_persona_model_overrides.md)。追加モデルの編集欄が無いことと、保存で既存値を消すことは別件。[現行保存処理][W-P-SAVE]は未送信欄を保持する。
 - **作成フォームの表示と送信**: Persona の説明欄は新規作成でも表示されるが、POST は送らない ([WE-P] 862 行 / [WE-P-SAVE] 540 行)。これは優先順位の判断とは別に、追加前に確認できる既存の不整合。今回の docs 変更では直していない。
 
@@ -113,6 +115,8 @@ City / Building / Persona などの設定項目が、個別の設定モーダル
 
 - 2026-10-02: City / Building / Persona の入力・送信・受け側を机上照合し、差分表と意図的な制限を追記。UI 追加・DB 変更・本番操作は行っていない。追加範囲と優先順位は未決のまま。
 
+- 2026-10-03: [PR #362 のレビュー](https://github.com/maha0525/SAIVerse/pull/362#issuecomment-5964788305) を再照合し、TutorialWizard の画像保持という誤記を訂正、未解決 issue を分離。CityMap の座標更新に所属検査が無いことを追記。実機の保存往復は引き続き未検証。
+
 <!-- 棚卸し時点のソース。後続の UI 整理で行が動いても参照先を保つ。 -->
 [WE-C]: https://github.com/maha0525/SAIVerse/blob/53944ed9faf3eecd03e92ea5a07ec1b1329479a2/frontend/src/components/settings/WorldEditor.tsx#L681-L711
 [W-API-C]: https://github.com/maha0525/SAIVerse/blob/53944ed9faf3eecd03e92ea5a07ec1b1329479a2/api/routes/world.py#L31-L52
@@ -154,3 +158,4 @@ City / Building / Persona などの設定項目が、個別の設定モーダル
 [P-IDENTITY]: https://github.com/maha0525/SAIVerse/blob/53944ed9faf3eecd03e92ea5a07ec1b1329479a2/frontend/src/components/SettingsModal.tsx#L496-L502
 [G-ENV]: https://github.com/maha0525/SAIVerse/blob/53944ed9faf3eecd03e92ea5a07ec1b1329479a2/frontend/src/components/GlobalSettingsModal.tsx#L697-L710
 [G-PANELS]: https://github.com/maha0525/SAIVerse/blob/53944ed9faf3eecd03e92ea5a07ec1b1329479a2/frontend/src/components/GlobalSettingsModal.tsx#L1460-L1473
+[W-C-SAVE]: https://github.com/maha0525/SAIVerse/blob/53944ed9faf3eecd03e92ea5a07ec1b1329479a2/manager/admin.py#L247-L303
