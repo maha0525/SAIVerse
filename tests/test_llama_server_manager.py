@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -29,6 +30,25 @@ from llm_clients.llama_server import LlamaServerManager, ManagedServer
 
 PORT = 8088
 BASE_URL = f"http://127.0.0.1:{PORT}/v1"
+ENDPOINT = ("127.0.0.1", PORT)
+OTHER_ENDPOINT = ("nebula", PORT)
+OTHER_URL = f"http://nebula:{PORT}/v1"
+
+
+@pytest.fixture(autouse=True)
+def _no_live_backend(monkeypatch):
+    """失敗したテストも実 HTTP・プロセス起動・停止・監視スレッドへ漏らさない。"""
+    def forbidden(*args, **kwargs):
+        pytest.fail("Live backend interaction is forbidden in isolated manager tests")
+
+    monkeypatch.setattr(httpx, "get", forbidden)
+    monkeypatch.setattr(httpx.Client, "send", forbidden)
+    monkeypatch.setattr("llm_clients.llama_server.subprocess.Popen", forbidden)
+    monkeypatch.setattr(LlamaServerManager, "_kill_process_tree", forbidden)
+    monkeypatch.setattr(LlamaServerManager, "_ensure_idle_checker", forbidden)
+    # SDK の構築も置換する。API 呼び出しは各テストが明示的に偽物を差す。
+    sdk = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=forbidden)))
+    monkeypatch.setattr("llm_clients.openai.OpenAI", lambda **kwargs: sdk)
 
 
 def _proc(alive: bool = True):
@@ -55,7 +75,7 @@ def _managed(*, alive=True, host="127.0.0.1", identity="test",
 
 def _register(mgr, **kwargs):
     managed = _managed(**kwargs)
-    mgr._servers[PORT] = managed
+    mgr._servers[(managed.host, PORT)] = managed
     return managed
 
 
@@ -142,7 +162,7 @@ def test_warning_repeats_after_interval(caplog):
     with patch("llm_clients.llama_server.httpx.get", return_value=_resp(501)):
         with caplog.at_level("WARNING"):
             mgr._probe_slots(PORT, managed)
-            mgr._slots_warned[(PORT, managed.generation)] -= 1801.0
+            mgr._slots_warned[(ENDPOINT, managed.generation)] -= 1801.0
             mgr._probe_slots(PORT, managed)
     warnings = [r for r in caplog.records if "busy 判定不能" in r.getMessage()]
     assert len(warnings) == 2
@@ -182,7 +202,7 @@ def test_warning_not_suppressed_when_previous_generation_reused_address(caplog):
     mgr = LlamaServerManager()
     managed = _managed()
     # 旧世代がこのアドレスに載ったまま警告済みの記録を残して回収された状況
-    mgr._slots_warned[(PORT, id(managed))] = time.monotonic()
+    mgr._slots_warned[(ENDPOINT, id(managed))] = time.monotonic()
     with patch("llm_clients.llama_server.httpx.get", return_value=_resp(501)):
         with caplog.at_level("WARNING"):
             assert mgr._probe_slots(PORT, managed) == "unknown"
@@ -225,8 +245,8 @@ def test_finalize_stop_stops_idle_server():
     mgr = LlamaServerManager()
     observed = _register(mgr, alive=False, idle_for=700.0)
     with patch.object(mgr, "_probe_slots", return_value="idle"):
-        mgr._finalize_stop(PORT, observed, "idle")
-    assert PORT not in mgr._servers
+        mgr._finalize_stop(ENDPOINT, observed, "idle")
+    assert ENDPOINT not in mgr._servers
 
 
 def test_finalize_stop_aborts_when_reprobe_flips_to_busy():
@@ -234,16 +254,16 @@ def test_finalize_stop_aborts_when_reprobe_flips_to_busy():
     mgr = LlamaServerManager()
     observed = _register(mgr, idle_for=700.0)
     with patch.object(mgr, "_probe_slots", return_value="busy"):
-        mgr._finalize_stop(PORT, observed, "idle")
-    assert PORT in mgr._servers
+        mgr._finalize_stop(ENDPOINT, observed, "idle")
+    assert ENDPOINT in mgr._servers
 
 
 def test_finalize_stop_aborts_when_activity_resumed():
     mgr = LlamaServerManager()
     observed = _register(mgr, idle_for=700.0)
     observed.last_activity = time.monotonic()  # 新しい利用が始まった
-    mgr._finalize_stop(PORT, observed, "idle")
-    assert PORT in mgr._servers
+    mgr._finalize_stop(ENDPOINT, observed, "idle")
+    assert ENDPOINT in mgr._servers
 
 
 def test_finalize_stop_aborts_when_server_generation_changed():
@@ -251,24 +271,24 @@ def test_finalize_stop_aborts_when_server_generation_changed():
     observed = _register(mgr, idle_for=700.0)
     replacement = _register(mgr, idle_for=700.0)  # 同ポートを新世代で上書き
     assert observed is not replacement
-    mgr._finalize_stop(PORT, observed, "idle")
-    assert mgr._servers[PORT] is replacement
+    mgr._finalize_stop(ENDPOINT, observed, "idle")
+    assert mgr._servers[ENDPOINT] is replacement
 
 
 def test_finalize_stop_never_stops_unknown_even_past_deadline():
     """証明不能は busy_deadline を超えても止めない (証明の無い kill をしない)。"""
     mgr = LlamaServerManager()
     observed = _register(mgr, idle_for=4000.0)  # busy_deadline=3600 を超過
-    mgr._finalize_stop(PORT, observed, "unknown")
-    assert PORT in mgr._servers
+    mgr._finalize_stop(ENDPOINT, observed, "unknown")
+    assert ENDPOINT in mgr._servers
 
 
 def test_finalize_stop_ignores_unexpected_state():
     """三値以外の値 (タイポ等) が停止根拠に化けない。"""
     mgr = LlamaServerManager()
     observed = _register(mgr, idle_for=4000.0)
-    mgr._finalize_stop(PORT, observed, "idlle")
-    assert PORT in mgr._servers
+    mgr._finalize_stop(ENDPOINT, observed, "idlle")
+    assert ENDPOINT in mgr._servers
 
 
 def test_finalize_stop_busy_observation_refreshes_activity_clock():
@@ -277,8 +297,8 @@ def test_finalize_stop_busy_observation_refreshes_activity_clock():
     mgr = LlamaServerManager()
     observed = _register(mgr, idle_for=700.0)
     before = observed.last_activity
-    mgr._finalize_stop(PORT, observed, "busy")
-    assert PORT in mgr._servers
+    mgr._finalize_stop(ENDPOINT, observed, "busy")
+    assert ENDPOINT in mgr._servers
     assert observed.last_activity > before
     assert observed.busy_since is not None
 
@@ -288,8 +308,8 @@ def test_finalize_stop_forces_busy_server_past_deadline():
     observed = _register(mgr, alive=False, idle_for=700.0)
     observed.busy_since = time.monotonic() - 4000.0  # busy_deadline=3600 超過
     with patch.object(mgr, "_probe_slots", return_value="busy"):
-        mgr._finalize_stop(PORT, observed, "busy")
-    assert PORT not in mgr._servers
+        mgr._finalize_stop(ENDPOINT, observed, "busy")
+    assert ENDPOINT not in mgr._servers
 
 
 def test_busy_deadline_fires_even_with_lease_held():
@@ -300,10 +320,10 @@ def test_busy_deadline_fires_even_with_lease_held():
     mgr = LlamaServerManager()
     observed = _register(mgr, alive=False, idle_for=700.0)
     observed.busy_since = time.monotonic() - 4000.0
-    mgr._inflight[PORT] = 1  # ハングしたリクエストが札を保持
+    mgr._inflight[ENDPOINT] = 1  # ハングしたリクエストが札を保持
     with patch.object(mgr, "_probe_slots", return_value="busy"):
-        mgr._finalize_stop(PORT, observed, "busy")
-    assert PORT not in mgr._servers
+        mgr._finalize_stop(ENDPOINT, observed, "busy")
+    assert ENDPOINT not in mgr._servers
 
 
 def test_busy_deadline_aborts_when_reprobe_shows_completion():
@@ -314,8 +334,8 @@ def test_busy_deadline_aborts_when_reprobe_shows_completion():
     observed = _register(mgr, idle_for=700.0)
     observed.busy_since = time.monotonic() - 4000.0
     with patch.object(mgr, "_probe_slots", return_value="idle"):
-        mgr._finalize_stop(PORT, observed, "busy")
-    assert PORT in mgr._servers
+        mgr._finalize_stop(ENDPOINT, observed, "busy")
+    assert ENDPOINT in mgr._servers
     assert observed.busy_since is None
 
 
@@ -327,8 +347,8 @@ def test_busy_deadline_keeps_clock_when_reprobe_unknown():
     before = time.monotonic() - 4000.0
     observed.busy_since = before
     with patch.object(mgr, "_probe_slots", return_value="unknown"):
-        mgr._finalize_stop(PORT, observed, "busy")
-    assert PORT in mgr._servers
+        mgr._finalize_stop(ENDPOINT, observed, "busy")
+    assert ENDPOINT in mgr._servers
     assert observed.busy_since == before
 
 
@@ -338,9 +358,9 @@ def test_finalize_stop_idle_observation_clears_busy_since():
     observed.busy_since = time.monotonic() - 100.0
     # 再確認で busy に転じたケースでも busy_since はクリア済みであること
     with patch.object(mgr, "_probe_slots", return_value="busy"):
-        mgr._finalize_stop(PORT, observed, "idle")
+        mgr._finalize_stop(ENDPOINT, observed, "idle")
     assert observed.busy_since is None
-    assert PORT in mgr._servers
+    assert ENDPOINT in mgr._servers
 
 
 def test_request_lease_blocks_stop_and_release_refreshes_clock(tmp_path):
@@ -352,12 +372,12 @@ def test_request_lease_blocks_stop_and_release_refreshes_clock(tmp_path):
     managed.busy_since = time.monotonic() - 100.0
     before = managed.last_activity
     with mgr.request_lease(BASE_URL, _config(str(bat))):
-        assert mgr._inflight[PORT] == 1
+        assert mgr._inflight[ENDPOINT] == 1
         # /slots が「暇」でも札がある間は撃てない (応答直後・KV save 中)
         with patch.object(mgr, "_probe_slots", return_value="idle"):
-            mgr._finalize_stop(PORT, managed, "idle")
-        assert PORT in mgr._servers
-    assert mgr._inflight.get(PORT, 0) == 0
+            mgr._finalize_stop(ENDPOINT, managed, "idle")
+        assert ENDPOINT in mgr._servers
+    assert mgr._inflight.get(ENDPOINT, 0) == 0
     assert managed.last_activity > before  # 返却 = 完了時刻からの idle 起算
     assert managed.busy_since is None
 
@@ -371,11 +391,11 @@ def test_request_lease_released_on_exception(tmp_path):
     with pytest.raises(RuntimeError):
         with mgr.request_lease(BASE_URL, _config(str(bat))):
             raise RuntimeError("stream interrupted")
-    assert mgr._inflight.get(PORT, 0) == 0
+    assert mgr._inflight.get(ENDPOINT, 0) == 0
 
 
 def test_request_lease_protects_across_generation_swap(tmp_path):
-    """札はポートに付く — 貸出中に世代交代しても、新世代を守り続ける。
+    """札は接続先に付く — 貸出中に世代交代しても、新世代を守り続ける。
 
     ストリーム中にプロセスが死んで再起動された場合、旧世代に付けた札が
     置き去りになって新世代が無防備になる、という穴 (十二巡目) の封じ。
@@ -387,8 +407,8 @@ def test_request_lease_protects_across_generation_swap(tmp_path):
     with mgr.request_lease(BASE_URL, _config(str(bat))):
         replacement = _register(mgr, idle_for=700.0)  # 貸出中に世代交代
         with patch.object(mgr, "_probe_slots", return_value="idle"):
-            mgr._finalize_stop(PORT, replacement, "idle")
-        assert mgr._servers[PORT] is replacement  # 新世代も撃たれない
+            mgr._finalize_stop(ENDPOINT, replacement, "idle")
+        assert mgr._servers[ENDPOINT] is replacement  # 新世代も撃たれない
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +476,7 @@ def test_ensure_running_does_not_launch_over_external_port_reuse(tmp_path, caplo
         with caplog.at_level("WARNING"):
             mgr.ensure_running(BASE_URL, config)
     launch.assert_not_called()
-    assert PORT not in mgr._servers
+    assert ENDPOINT not in mgr._servers
     assert [r for r in caplog.records if "外部プロセスが再利用中" in r.getMessage()]
 
 
@@ -515,7 +535,7 @@ def test_ensure_running_newer_negative_probe_launches(tmp_path):
 
 
 def test_ensure_running_host_mismatch_is_not_fast_path(tmp_path):
-    """同じポートでも host が違えば高速経路で成功扱いにしない。"""
+    """同じポートでも別 host は高速経路で成功扱いにせず、既存台帳も置換しない。"""
     mgr = LlamaServerManager()
     bat = tmp_path / "start_model.bat"
     bat.write_text("@echo off\n", encoding="utf-8")
@@ -529,22 +549,19 @@ def test_ensure_running_host_mismatch_is_not_fast_path(tmp_path):
         patch.object(mgr, "_stop_server") as stop,
     ):
         mgr.ensure_running(BASE_URL, config)  # 127.0.0.1 向けの要求
-    stop.assert_called_once()   # 旧 host の管理サーバーを置換
+    stop.assert_not_called()  # 別 host の管理サーバーには触れない
     launch.assert_called_once()
 
 
 def test_ensure_running_host_mismatch_with_healthy_endpoint_does_not_destroy(tmp_path, caplog):
-    """host 不一致でターゲット endpoint が応答中なら、壊さず・上書き起動もしない。
-
-    応答者が別 host に bind した管理下プロセスか外部かは証明できないため、
-    kill も衝突起動もせず現状を使う (同一ポートの多 host 構成はサポート外)。
-    """
+    """応答する外部 endpoint は、別 host の管理台帳や activity に触れない。"""
     mgr = LlamaServerManager()
     bat = tmp_path / "start_model.bat"
     bat.write_text("@echo off\n", encoding="utf-8")
     config = _config(str(bat))
     identity = mgr._desired_identity(config["llama_server"])
-    managed = _register(mgr, identity=identity, host="192.168.1.20", alive=True)
+    managed = _register(mgr, identity=identity, host="192.168.1.20", idle_for=700.0)
+    before = managed.last_activity
     with (
         patch.object(mgr, "_health_check", return_value=True),
         patch.object(mgr, "_launch") as launch,
@@ -554,37 +571,36 @@ def test_ensure_running_host_mismatch_with_healthy_endpoint_does_not_destroy(tmp
             mgr.ensure_running(BASE_URL, config)
     stop.assert_not_called()
     launch.assert_not_called()
-    assert mgr._servers[PORT] is managed  # 管理記録も壊さない
-    assert [r for r in caplog.records if "多 host 構成はサポート外" in r.getMessage()]
-    # 応答者が管理下プロセス (wildcard bind 等) の可能性があるため、
-    # 活動時刻を更新して idle 停止の誤射を防ぐ
-    assert time.monotonic() - managed.last_activity < 1.0
+    assert mgr._servers[(managed.host, PORT)] is managed
+    assert managed.last_activity == before
+    assert ENDPOINT in mgr._external_ok
+    assert not [r for r in caplog.records if "多 host 構成はサポート外" in r.getMessage()]
 
 
 # ---------------------------------------------------------------------------
 # _launch の設定検証と warn 記録の掃除
 # ---------------------------------------------------------------------------
 
-def _launch_with(mgr, tmp_path, llama_cfg_extra=None):
+def _launch_with(mgr, tmp_path, llama_cfg_extra=None, *, host="127.0.0.1", healthy=True):
     bat = tmp_path / "start_model.bat"
     bat.write_text("@echo off\n", encoding="utf-8")
     llama_cfg = {"command": str(bat), **(llama_cfg_extra or {})}
     with (
         patch("llm_clients.llama_server.subprocess.Popen", return_value=_proc()),
-        patch.object(LlamaServerManager, "_wait_for_health", return_value=True),
+        patch.object(LlamaServerManager, "_wait_for_health", return_value=healthy),
         patch.object(LlamaServerManager, "_open_log_file", return_value=None),
     ):
-        mgr._launch("127.0.0.1", PORT, {}, llama_cfg, "identity")
+        mgr._launch(host, PORT, {}, llama_cfg, "identity")
 
 
-def test_launch_clears_warned_records_for_port(tmp_path):
+def test_launch_clears_warned_records_for_endpoint(tmp_path):
     mgr = LlamaServerManager()
-    mgr._slots_warned[(PORT, 111)] = time.monotonic()
-    mgr._slots_warned[(9999, 222)] = time.monotonic()
+    mgr._slots_warned[(ENDPOINT, 111)] = time.monotonic()
+    mgr._slots_warned[(("127.0.0.1", 9999), 222)] = time.monotonic()
     _launch_with(mgr, tmp_path)
-    assert not [k for k in mgr._slots_warned if k[0] == PORT]
-    assert (9999, 222) in mgr._slots_warned
-    assert mgr._servers[PORT].host == "127.0.0.1"
+    assert not [k for k in mgr._slots_warned if k[0] == ENDPOINT]
+    assert (("127.0.0.1", 9999), 222) in mgr._slots_warned
+    assert mgr._servers[ENDPOINT].host == "127.0.0.1"
 
 
 def test_launch_clamps_busy_deadline_below_idle_timeout(tmp_path, caplog):
@@ -592,7 +608,7 @@ def test_launch_clamps_busy_deadline_below_idle_timeout(tmp_path, caplog):
     mgr = LlamaServerManager()
     with caplog.at_level("WARNING"):
         _launch_with(mgr, tmp_path, {"idle_timeout": 3600, "busy_deadline": 60})
-    assert mgr._servers[PORT].busy_deadline == 3600
+    assert mgr._servers[ENDPOINT].busy_deadline == 3600
     assert [r for r in caplog.records if "丸める" in r.getMessage()]
 
 
@@ -749,3 +765,403 @@ def test_llama_cached_client_lease_covers_restore_through_save():
     assert order.index("ensure") < order.index("restore")
     assert order.index("lease_enter") < order.index("restore")
     assert order.index("save") < order.index("lease_exit")
+
+# 同じポート番号でも、別 host のリクエストはローカルの寿命に触れない。
+def test_remote_lease_does_not_refresh_local_activity():
+    mgr = LlamaServerManager()
+    local = _register(mgr, idle_for=700.0)
+    local.busy_since = time.monotonic() - 100.0
+    before = (local.last_activity, local.busy_since)
+    with mgr.request_lease(OTHER_URL, _config("unused.sh")):
+        pass
+    assert (local.last_activity, local.busy_since) == before
+
+
+def test_healthy_remote_does_not_refresh_local_activity():
+    mgr = LlamaServerManager()
+    config = _config("unused.sh")
+    identity = mgr._desired_identity(config["llama_server"])
+    local = _register(mgr, identity=identity, idle_for=700.0)
+    before = local.last_activity
+    with (
+        patch.object(mgr, "_health_check", return_value=True),
+        patch.object(mgr, "_launch") as launch,
+        patch.object(mgr, "_stop_server") as stop,
+    ):
+        mgr.ensure_running(OTHER_URL, config)
+    launch.assert_not_called()
+    stop.assert_not_called()
+    assert local.last_activity == before
+
+
+def test_fast_path_only_refreshes_matching_host():
+    mgr = LlamaServerManager()
+    config = _config("unused.sh")
+    identity = mgr._desired_identity(config["llama_server"])
+    local = _register(mgr, identity=identity, idle_for=700.0)
+    other = _register(mgr, identity=identity, host="nebula", idle_for=700.0)
+    before_local, before_other = local.last_activity, other.last_activity
+    with patch.object(mgr, "_health_check") as health:
+        mgr.ensure_running(OTHER_URL, config)
+    health.assert_not_called()
+    assert mgr._servers == {ENDPOINT: local, OTHER_ENDPOINT: other}
+    assert local.last_activity == before_local
+    assert other.last_activity > before_other
+
+
+def test_external_recheck_cache_is_independent_of_managed_same_port():
+    mgr = LlamaServerManager()
+    local = _register(mgr, idle_for=700.0)
+    before = local.last_activity
+    with patch.object(mgr, "_health_check", return_value=True) as health:
+        mgr.ensure_running(OTHER_URL, _config("unused.sh"))
+        mgr.ensure_running(OTHER_URL, _config("unused.sh"))
+    health.assert_called_once_with(f"http://nebula:{PORT}")
+    assert mgr._servers == {ENDPOINT: local}
+    assert set(mgr._external_ok) == {OTHER_ENDPOINT}
+    assert local.last_activity == before
+
+
+def test_other_host_external_cache_does_not_suppress_local_launch():
+    mgr = LlamaServerManager()
+    config = _config("unused.sh")
+    mgr._external_ok[OTHER_ENDPOINT] = time.monotonic()
+    with (
+        patch.object(mgr, "_health_check", return_value=False),
+        patch.object(mgr, "_launch") as launch,
+        patch.object(mgr, "_ensure_idle_checker"),
+    ):
+        mgr.ensure_running(BASE_URL, config)
+    launch.assert_called_once_with(*ENDPOINT, config, config["llama_server"], mgr._desired_identity(config["llama_server"]))
+    assert OTHER_ENDPOINT in mgr._external_ok
+
+
+@pytest.mark.parametrize("healthy", [False, True])
+def test_config_change_only_replaces_matching_endpoint(healthy):
+    mgr = LlamaServerManager()
+    config = _config("new_model.sh")
+    local = _register(mgr, identity="old-model")
+    other = _register(mgr, host="nebula", identity="other-model", idle_for=700.0)
+    before = other.last_activity
+    with (
+        patch.object(mgr, "_health_check", return_value=healthy),
+        patch.object(mgr, "_kill_process_tree") as kill,
+        patch.object(mgr, "_launch") as launch,
+        patch.object(mgr, "_ensure_idle_checker"),
+    ):
+        mgr.ensure_running(BASE_URL, config)
+    kill.assert_called_once_with(local.process)
+    launch.assert_called_once_with(*ENDPOINT, config, config["llama_server"], mgr._desired_identity(config["llama_server"]))
+    assert mgr._servers == {OTHER_ENDPOINT: other}
+    assert other.last_activity == before
+
+
+@pytest.mark.parametrize("same_identity", [False, True])
+def test_dead_endpoint_external_reuse_preserves_other_host(same_identity):
+    mgr = LlamaServerManager()
+    config = _config("unused.sh")
+    identity = mgr._desired_identity(config["llama_server"])
+    _register(mgr, alive=False, identity=identity if same_identity else "old-model")
+    other = _register(mgr, host="nebula", idle_for=700.0)
+    before = other.last_activity
+    with (
+        patch.object(mgr, "_health_check", return_value=True),
+        patch.object(mgr, "_launch") as launch,
+    ):
+        mgr.ensure_running(BASE_URL, config)
+    launch.assert_not_called()
+    assert mgr._servers == {OTHER_ENDPOINT: other}
+    assert set(mgr._external_ok) == {ENDPOINT}
+    assert other.last_activity == before
+
+
+def test_nested_leases_and_exception_are_counted_per_endpoint():
+    mgr = LlamaServerManager()
+    local = _register(mgr, idle_for=700.0)
+    other = _register(mgr, host="nebula", idle_for=700.0)
+    before_other = other.last_activity
+    config = _config("unused.sh")
+    with mgr.request_lease(BASE_URL, config):
+        with mgr.request_lease(OTHER_URL, config):
+            with pytest.raises(RuntimeError, match="interrupted"):
+                with mgr.request_lease(BASE_URL, config):
+                    assert mgr._inflight == {ENDPOINT: 2, OTHER_ENDPOINT: 1}
+                    raise RuntimeError("interrupted")
+            assert mgr._inflight == {ENDPOINT: 1, OTHER_ENDPOINT: 1}
+            assert other.last_activity == before_other
+        assert mgr._inflight == {ENDPOINT: 1}
+        assert other.last_activity > before_other
+        before_other = other.last_activity
+    assert mgr._inflight == {}
+    assert other.last_activity == before_other
+    assert local.busy_since is None
+
+
+def test_other_host_lease_does_not_block_local_idle_stop():
+    mgr = LlamaServerManager()
+    local = _register(mgr, idle_for=700.0)
+    other = _register(mgr, host="nebula", idle_for=700.0)
+    with mgr.request_lease(OTHER_URL, _config("unused.sh")):
+        with (
+            patch.object(mgr, "_probe_slots", return_value="idle"),
+            patch.object(mgr, "_kill_process_tree") as kill,
+        ):
+            mgr._finalize_stop(OTHER_ENDPOINT, other, "idle")
+            kill.assert_not_called()
+            mgr._finalize_stop(ENDPOINT, local, "idle")
+            kill.assert_called_once_with(local.process)
+        assert mgr._servers == {OTHER_ENDPOINT: other}
+    assert mgr._inflight == {}
+
+
+def test_idle_checker_routes_same_port_candidates_by_endpoint():
+    mgr = LlamaServerManager()
+    local = _register(mgr, idle_for=700.0)
+    other = _register(mgr, host="nebula", idle_for=700.0)
+    disabled = _register(mgr, host="disabled", idle_timeout=0, idle_for=700.0)
+    with (
+        patch.object(mgr._idle_checker_stop, "wait", side_effect=[False, True]),
+        patch.object(mgr, "_probe_slots", return_value="idle"),
+        patch.object(mgr, "_kill_process_tree") as kill,
+    ):
+        mgr._idle_check_loop()
+    assert [call.args[0] for call in kill.call_args_list] == [local.process, other.process]
+    assert mgr._servers == {("disabled", PORT): disabled}
+
+
+def test_shutdown_stops_each_managed_endpoint_but_not_external():
+    mgr = LlamaServerManager()
+    local = _register(mgr)
+    other = _register(mgr, host="nebula")
+    mgr._external_ok[("external", PORT)] = time.monotonic()
+    with patch.object(mgr, "_kill_process_tree") as kill:
+        mgr.shutdown_all()
+        mgr.shutdown_all()  # repeated shutdown is harmless
+    assert [call.args[0] for call in kill.call_args_list] == [local.process, other.process]
+    assert mgr._servers == {}
+    assert mgr._idle_checker_stop.is_set()
+
+
+def test_launch_preserves_same_port_other_host_state(tmp_path):
+    mgr = LlamaServerManager()
+    other = _register(mgr, host="nebula")
+    now = time.monotonic()
+    mgr._slots_warned[(ENDPOINT, 1)] = now
+    mgr._slots_warned[(OTHER_ENDPOINT, other.generation)] = now
+    mgr._external_ok = {ENDPOINT: now, OTHER_ENDPOINT: now}
+    _launch_with(mgr, tmp_path)
+    assert mgr._servers[ENDPOINT].host == ENDPOINT[0]
+    assert mgr._servers[OTHER_ENDPOINT] is other
+    assert mgr._slots_warned == {(OTHER_ENDPOINT, other.generation): now}
+    assert mgr._external_ok == {OTHER_ENDPOINT: now}
+
+
+def test_launch_failure_only_removes_failed_endpoint(tmp_path):
+    mgr = LlamaServerManager()
+    other = _register(mgr, host="nebula")
+    with patch.object(mgr, "_kill_process_tree") as kill:
+        with pytest.raises(RuntimeError, match="failed to become healthy"):
+            _launch_with(mgr, tmp_path, healthy=False)
+    kill.assert_called_once()
+    assert kill.call_args.args[0] is not other.process
+    assert mgr._servers == {OTHER_ENDPOINT: other}
+
+
+def test_warning_records_include_host_and_generation(caplog):
+    mgr = LlamaServerManager()
+    local = _register(mgr)
+    other = _register(mgr, host="nebula")
+    with caplog.at_level("WARNING"):
+        mgr._warn_slots_unavailable(PORT, local, "test")
+        mgr._warn_slots_unavailable(PORT, other, "test")
+        mgr._warn_slots_unavailable(PORT, local, "test")
+    assert set(mgr._slots_warned) == {
+        (ENDPOINT, local.generation), (OTHER_ENDPOINT, other.generation),
+    }
+    warnings = [r.getMessage() for r in caplog.records if "busy 判定不能" in r.getMessage()]
+    assert len(warnings) == 2
+    assert f"127.0.0.1:{PORT}" in warnings[0]
+    assert f"nebula:{PORT}" in warnings[1]
+
+
+@pytest.mark.parametrize("other_host", ["nebula", "192.168.1.20", "2001:db8::1"])
+def test_distinct_host_names_are_not_merged(other_host):
+    mgr = LlamaServerManager()
+    host_in_url = f"[{other_host}]" if ":" in other_host else other_host
+    other_url = f"http://{host_in_url}:{PORT}/v1"
+    config = _config("unused.sh")
+    with mgr.request_lease(BASE_URL, config), mgr.request_lease(other_url, config):
+        assert mgr._inflight == {ENDPOINT: 1, (other_host, PORT): 1}
+    assert mgr._inflight == {}
+
+
+def test_no_server_config_skips_all_lifecycle_state():
+    mgr = LlamaServerManager()
+    local = _register(mgr, idle_for=700.0)
+    before = local.last_activity
+    with mgr.request_lease(BASE_URL, {}):
+        mgr.ensure_running(BASE_URL, {})
+        assert mgr._inflight == {}
+    assert local.last_activity == before
+
+
+def test_openai_client_remote_request_leases_only_its_endpoint():
+    from llm_clients.openai import OpenAIClient
+
+    mgr = LlamaServerManager()
+    local = _register(mgr, idle_for=700.0)
+    local.busy_since = time.monotonic() - 100.0
+    before = (local.last_activity, local.busy_since)
+    client = OpenAIClient("test-model", api_key="dummy", base_url=OTHER_URL)
+    client.bind_llama_server(OTHER_URL, _config("unused.sh"))
+
+    def send(**kwargs):
+        assert mgr._inflight == {OTHER_ENDPOINT: 1}
+        return "synthetic response"
+
+    with (
+        patch("llm_clients.llama_server.get_server_manager", return_value=mgr),
+        patch.object(mgr, "_health_check", return_value=True),
+        patch.object(client, "client") as sdk,
+    ):
+        sdk.chat.completions.create.side_effect = send
+        assert client._create_completion(model="test-model", messages=[]) == "synthetic response"
+    assert (local.last_activity, local.busy_since) == before
+    assert mgr._servers == {ENDPOINT: local}
+    assert mgr._inflight == {}
+
+
+def test_openai_stream_close_returns_only_matching_host_lease():
+    from llm_clients.openai import OpenAIClient
+
+    mgr = LlamaServerManager()
+    config = _config("unused.sh")
+    identity = mgr._desired_identity(config["llama_server"])
+    local = _register(mgr, identity=identity, idle_for=700.0)
+    other = _register(mgr, host="nebula", identity=identity, idle_for=700.0)
+    before = local.last_activity
+    client = OpenAIClient("test-model", api_key="dummy", base_url=OTHER_URL)
+    client.bind_llama_server(OTHER_URL, config)
+    with (
+        patch("llm_clients.llama_server.get_server_manager", return_value=mgr),
+        patch.object(client, "_generate_stream_impl", return_value=iter(["a", "b"])),
+    ):
+        stream = client.generate_stream([])
+        assert next(stream) == "a"
+        assert mgr._inflight == {OTHER_ENDPOINT: 1}
+        before_release = other.last_activity
+        stream.close()
+    assert mgr._inflight == {}
+    assert local.last_activity == before
+    assert other.last_activity >= before_release
+
+
+def test_failed_other_host_probe_keeps_existing_local_process():
+    """既存の設定起動経路は変えないが、同ポートの別 host は停止しない。"""
+    mgr = LlamaServerManager()
+    local = _register(mgr, idle_for=700.0)
+    before = local.last_activity
+    config = _config("unused.sh")
+    with (
+        patch.object(mgr, "_health_check", return_value=False),
+        patch.object(mgr, "_launch") as launch,
+        patch.object(mgr, "_ensure_idle_checker"),
+    ):
+        mgr.ensure_running(OTHER_URL, config)
+    launch.assert_called_once_with(*OTHER_ENDPOINT, config, config["llama_server"], mgr._desired_identity(config["llama_server"]))
+    assert mgr._servers == {ENDPOINT: local}
+    assert local.last_activity == before
+
+
+def test_url_variants_share_only_the_same_host_and_port():
+    mgr = LlamaServerManager()
+    config = _config("unused.sh")
+    with mgr.request_lease(f"http://NEBULA:{PORT}/v1", config):
+        with mgr.request_lease(f"http://nebula:{PORT}/another-path", config):
+            with mgr.request_lease(f"http://nebula:{PORT + 1}/v1", config):
+                assert mgr._inflight == {OTHER_ENDPOINT: 2, ("nebula", PORT + 1): 1}
+    assert mgr._inflight == {}
+
+
+def test_stale_probe_cannot_use_other_host_external_success():
+    mgr = LlamaServerManager()
+    config = _config("unused.sh")
+
+    def observe_another_host(base):
+        mgr._external_ok[OTHER_ENDPOINT] = time.monotonic() + 0.001
+        return False
+
+    with (
+        patch.object(mgr, "_health_check", side_effect=observe_another_host),
+        patch.object(mgr, "_launch") as launch,
+        patch.object(mgr, "_ensure_idle_checker"),
+    ):
+        mgr.ensure_running(BASE_URL, config)
+    launch.assert_called_once()
+    assert launch.call_args.args[:2] == ENDPOINT
+
+
+@pytest.mark.parametrize("alias", ["localhost", "localhost.localdomain", "127.9.8.7", "::1", "0.0.0.0", "::"])
+def test_loopback_alias_lease_prevents_idle_stop(alias):
+    mgr = LlamaServerManager()
+    local = _register(mgr, idle_for=700.0)
+    url_host = f"[{alias}]" if ":" in alias else alias
+    with mgr.request_lease(f"http://{url_host}:{PORT}/v1", _config("unused.sh")):
+        with patch.object(mgr, "_probe_slots", return_value="idle"), patch.object(mgr, "_kill_process_tree") as kill:
+            mgr._finalize_stop(ENDPOINT, local, "idle")
+        kill.assert_not_called()
+        assert mgr._inflight == {ENDPOINT: 1}
+    assert mgr._servers[ENDPOINT] is local
+    assert mgr._inflight == {}
+
+
+def test_concurrent_alias_startup_launches_once():
+    mgr = LlamaServerManager()
+    config = _config("unused.sh")
+    probes = threading.Barrier(2)
+    errors = []
+
+    def health(_base):
+        probes.wait(timeout=5)
+        return False
+
+    def ensure(url):
+        try:
+            mgr.ensure_running(url, config)
+        except BaseException as exc:
+            errors.append(exc)
+
+    with (
+        patch.object(mgr, "_health_check", side_effect=health),
+        patch.object(mgr, "_launch", wraps=mgr._launch) as launches,
+        patch.object(mgr, "_build_command_mode", return_value=["fake-server"]),
+        patch("llm_clients.llama_server.subprocess.Popen", return_value=_proc()),
+        patch.object(mgr, "_wait_for_health", return_value=True),
+        patch.object(mgr, "_open_log_file", return_value=None),
+        patch.object(mgr, "_ensure_idle_checker"),
+    ):
+        threads = [threading.Thread(target=ensure, args=(url,)) for url in [BASE_URL, f"http://localhost:{PORT}/v1"]]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert not any(thread.is_alive() for thread in threads)
+    assert not errors
+    launches.assert_called_once()
+    assert set(mgr._servers) == {ENDPOINT}
+
+
+@pytest.mark.parametrize("host", ["localhost", "::1", "::"])
+def test_launch_keeps_original_host_and_canonical_bookkeeping(tmp_path, host):
+    mgr = LlamaServerManager()
+    _launch_with(mgr, tmp_path, host=host)
+    assert set(mgr._servers) == {ENDPOINT}
+    managed = mgr._servers[ENDPOINT]
+    assert managed.host == host
+    with patch("llm_clients.llama_server.httpx.get", return_value=_resp(200, [{"is_processing": False}])) as get:
+        assert mgr._probe_slots(PORT, managed) == "idle"
+    authority = f"[{host}]" if ":" in host else host
+    assert get.call_args.args[0] == f"http://{authority}:{PORT}/slots"
+    with patch.object(mgr, "_kill_process_tree") as kill:
+        mgr.shutdown_all()
+    kill.assert_called_once_with(managed.process)
