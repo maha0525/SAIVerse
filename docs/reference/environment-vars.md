@@ -10,12 +10,15 @@
 
 | 変数 | 既定 | 説明 |
 |---|---|---|
-| `SAIVERSE_BACKEND_ORIGIN` | 旧名の値、なければ `http://127.0.0.1:8000` | 通常 API の rewrite とアドオンの設定・SSE・音声、MCP のすべてに使う接続先。隔離テストは `http://127.0.0.1:18000` を明示する |
+| `SAIVERSE_BACKEND_ORIGIN` | 旧名の値、なければ `http://127.0.0.1:8000` | 通常 API の rewrite とアドオンの設定・SSE・音声ファイル、MCP の HTTP 中継先（音声通話の WebSocket は別）。隔離テストは `http://127.0.0.1:18000` を明示する |
 | `SAIVERSE_BACKEND_URL` | 未設定 | 非推奨の互換名。正式名が未設定・空文字・空白のみのときだけ使う |
+| `NEXT_PUBLIC_SAIVERSE_BACKEND_WS_HOST` | ブラウザのホスト名 + `:8000` | 音声通話の直接 WebSocket 接続先。中継を通らず ORIGIN/URL からも導出しない。隔離時は `127.0.0.1:18000` を明示する（スキーム・パスなし、ブラウザから到達できる `host:port`） |
 
 両名とも前後の空白を除いて判定し、両方が非空で異なる場合は正式名を採用してサーバーに警告する。警告に設定値は含めない。**両方が空なら通常環境の 8000 を向く**ので、名前の統一だけで隔離されるわけではない。
 
-設定値は `http://host:port` のような origin とし、末尾 `/`・パス・クエリ・フラグメントを含めない。URL の結合は従来どおり（rewrite は文字列連結、Route Handler はルート相対 URL）で、たとえば末尾 `/` を付けると rewrite は `//api`、パスを付けると rewrite にだけ接頭辞が残る。共通の base path は未対応で、今回も URL の正規化はしない。詳細: [intent](../intent/frontend_backend_origin.md)。
+音声通話用の公開ホストは build 時にブラウザ用コードへ埋め込まれる。未設定・空白では通常環境の 8000 を向くため、隔離時は HTTP 用と WebSocket 用を両方設定し、変更時は再ビルド・再起動する。音声通話は画面のプロトコルに従い HTTP なら `ws`、HTTPS なら `wss` を使う。
+
+HTTP 中継の設定値は `http://host:port` のような origin とし、末尾 `/`・パス・クエリ・フラグメントを含めない。URL の結合は従来どおり（rewrite は文字列連結、Route Handler はルート相対 URL）で、たとえば末尾 `/` を付けると rewrite は `//api`、パスを付けると rewrite にだけ接頭辞が残る。共通の base path は未対応で、今回も URL の正規化はしない。詳細: [intent](../intent/frontend_backend_origin.md)。
 
 ## LLM API キー / 接続
 

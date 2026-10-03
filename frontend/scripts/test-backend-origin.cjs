@@ -44,7 +44,24 @@ async function withTimeout(promise) {
         })]);
     } finally { clearTimeout(timer); }
 }
+function verifyIsolatedVoiceHost() {
+    const launcher = fs.readFileSync(path.join(frontendDir, "../test_fixtures/start_test_frontend.bat"), "utf8");
+    const assignment = launcher.match(/^set "NEXT_PUBLIC_SAIVERSE_BACKEND_WS_HOST=([^"\r\n]+)"$/m);
+    assert.ok(assignment, "isolated launcher must configure the direct voice WebSocket host");
+    assert.equal(assignment[1], "127.0.0.1:18000");
+    const source = ts.createSourceFile("VoiceCallModal.tsx", fs.readFileSync(path.join(frontendDir, "src/components/VoiceCallModal.tsx"), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const helper = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "buildWebSocketUrl");
+    assert.ok(helper, "exercise the actual voice URL builder");
+    const compiled = ts.transpileModule(helper.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    const buildUrl = new Function("process", "window", `${compiled}; return buildWebSocketUrl();`);
+    for (const [protocol, scheme] of [["http:", "ws"], ["https:", "wss"]]) {
+        const url = buildUrl({ env: { NEXT_PUBLIC_SAIVERSE_BACKEND_WS_HOST: assignment[1] } }, { location: { protocol, hostname: "synthetic-ui.example" } });
+        assert.equal(url, `${scheme}://127.0.0.1:18000/api/voice/call`);
+    }
+    console.log("OK: isolated launcher and real voice URL builder select 18000 for HTTP/HTTPS (no sockets)");
+}
 async function main() {
+    verifyIsolatedVoiceHost();
     console.warn = (message) => warnings.push(message);
     globalThis.fetch = async (input, init = {}) => {
         const url = new URL(input);
