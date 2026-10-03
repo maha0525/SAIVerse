@@ -1205,19 +1205,27 @@ def list_batches_annexed_to(
 
 def reassign_batches_annexed(
     conn: sqlite3.Connection, old_entry_id: str, new_entry_id: str,
+    *, batch_ids: Optional[Sequence[int]] = None,
 ) -> int:
     """付記印を旧 entry から新 entry へ付け替える。**commit しない**。
 
     Chronicle 再生成の swap 用 — replacement 本文への転写 (継承) と同一 tx で
     呼ぶ契約。付け替え後は旧 entry の削除 (unmark) が no-op になる。
+    batch_ids 指定時はその試行対象だけを動かす (不確定 commit の復元記録と一致)。
     """
     if not old_entry_id or not new_entry_id:
         return 0
+    params: List[Union[str, int]] = [str(new_entry_id), str(old_entry_id)]
+    where = "WHERE annexed_entry_id = ?"
+    if batch_ids is not None:
+        if not batch_ids:
+            return 0
+        where += f" AND id IN ({','.join('?' for _ in batch_ids)})"
+        params.extend(int(bid) for bid in batch_ids)
     try:
         cur = conn.execute(
-            "UPDATE perception_batches SET annexed_entry_id = ? "
-            "WHERE annexed_entry_id = ?",
-            (str(new_entry_id), str(old_entry_id)),
+            "UPDATE perception_batches SET annexed_entry_id = ? " + where,
+            params,
         )
     except sqlite3.OperationalError as exc:
         from sai_memory.arasuji.storage import is_missing_table_error
