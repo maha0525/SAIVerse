@@ -427,6 +427,7 @@ graph TD
 | 概念 | 状態 |
 |---|---|
 | **Metabolism の強制クローズ** | 退場が手詰まりのとき最古の open episode を機構が閉じていた（旧 `chronicle_eviction.md` §5-5、`_force_close_episode`）。**2026-07-25 撤去** — U 未満の open も畳めるようになり手詰まりが消えた。そもそも「開きっぱなしの episode を閉じる」のは提示コンテキストの都合ではなく **episode 側がタイムアウトを検知して閉じる仕事**（まはー裁定）。場所が足りないという理由でペルソナの出来事に「終わった」と判定を下してはいけない。検知機構は未実装 |
+| **旧 Building ログの quarantine** | **撤去差分の PR レビュー待ち**（2026-10-02、[issue](../issues/quarantine_path_dead_code_removal.md)）。DB 化後、登録元の呼び手が無かった旧 log.json 隔離・復元・リセット API / UI と拒否分岐を撤去。旧ファイルの不足分を DB に取り込む検算と、読めないファイルを脇へ移す操作は現役のまま。既存ファイル・DB データはこの整理で変更しない |
 | **Blueprint** | `blueprint` テーブルは実在するが（ペルソナ生成テンプレート）、現状は運用されていない |
 | **Emotion** | PersonaCore の感情モジュールとして存在するが、実質未活用 |
 | **task (standalone tasks.db)** | per-persona `tasks.db` は統合 Task モデル（main DB `persona_task`）へ一本化され廃止。その `persona_task` 自体も目的の木として退役した（下記） |

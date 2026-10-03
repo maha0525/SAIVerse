@@ -371,21 +371,6 @@ class OccupancyManager:
             return False, f"移動失敗: 建物 '{to_id}' が見つかりません。"
         if from_id == to_id:
             return True, "同じ場所にいます。"
-        # Quarantine block: refuse entry to buildings whose log.json was
-        # detected as corrupted/zero-byte at startup. The user must resolve
-        # via the UI (restore from backup / reset / handle manually) before
-        # the building accepts new entries.
-        quarantined = getattr(self._manager_ref, "quarantined_buildings", None) or {}
-        if to_id in quarantined:
-            logging.warning(
-                "move_entity blocked: destination %s is quarantined (corrupted log.json)",
-                to_id,
-            )
-            return False, (
-                f"移動失敗: 建物 '{self.building_map[to_id].name}' は会話履歴ファイルが"
-                "破損しているため一時的に隔離されています。アラートバナーから対応してください。"
-            )
-
         topology_denial = self._check_entrance_topology(entity_id, from_id, to_id)
         if topology_denial:
             # 直行 (region.md §2.5): その場で拒否せず、まだ入っていない一番外側の
@@ -417,7 +402,7 @@ class OccupancyManager:
                     "move_entity redirect to entrance failed: %s (%s -> %s): %s",
                     entity_id, from_id, redirect_id, redirect_result,
                 )
-                # 入口への移動が通らなかった理由 (定員・隔離・鍵・現在地のずれ)
+                # 入口への移動が通らなかった理由 (定員・鍵・現在地のずれ)
                 # をそのまま運ぶ。元の直行拒否文 (「入口 X から入って」) は、
                 # 一つ内側への一歩のケースでは X = いま立っている場所になって
                 # 意味が通らないため返さない。CAS 競合は code ごと素通しになり、
@@ -599,12 +584,6 @@ class OccupancyManager:
                 entity_id, entity_type, entity_name, from_id, to_id, now,
                 move_key=execution_id,
             ):
-                if event_building_id in quarantined:
-                    logging.warning(
-                        "move_entity: building %s is quarantined — occupancy "
-                        "event skipped", event_building_id,
-                    )
-                    continue
                 insert_building_message_in_session(
                     db, event_building_id, event_msg
                 )

@@ -102,7 +102,6 @@ def main() -> None:
 
     # --- 世界側 (SAIVerseManager の代役) -------------------------------
     world = SimpleNamespace(
-        quarantined_buildings={},
         SessionLocal=session_local,
         occupants={BID: [PERSONA]},
     )

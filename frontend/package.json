@@ -4,6 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "test:alerts": "node scripts/test-system-alert-banner.cjs",
     "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "start": "next start",

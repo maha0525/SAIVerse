@@ -12,13 +12,14 @@
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from api.routes import system as system_routes
@@ -126,7 +127,14 @@ class LegacyLogArchiveApiTest(unittest.TestCase):
         self.manager.startup_alerts.append(alert)
 
         res = self._archive(escaping_id)
-        self.assertEqual(res.status_code, 400)
+        # Linux の /../ は HTTP クライアントが正規化し、ルート到達前に 404。
+        # Windows の区切りは関数まで届くため 400。どちらも書き込まない。
+        self.assertIn(res.status_code, (400, 404))
+        # ルーティングによる拒否だけでは内部のパス検査を通したことに
+        # ならないので、同じ ID を関数にも渡し、明示的な 400 を固定する。
+        with self.assertRaises(HTTPException) as raised:
+            asyncio.run(system_routes.archive_unreadable_legacy_log(escaping_id))
+        self.assertEqual(raised.exception.status_code, 400)
         self.assertTrue(outside.exists())
         self.assertTrue(self.log_path.exists())
 

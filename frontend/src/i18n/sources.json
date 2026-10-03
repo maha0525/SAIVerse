@@ -5459,114 +5459,6 @@
     "file": "components/PlaybookPermissionDialog.tsx",
     "line": 87
   },
-  "components.QuarantineModal.text001": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 62
-  },
-  "components.QuarantineModal.text002": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 65
-  },
-  "components.QuarantineModal.text003": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 77
-  },
-  "components.QuarantineModal.text004": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 93
-  },
-  "components.QuarantineModal.text005": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 94
-  },
-  "components.QuarantineModal.text006": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 105
-  },
-  "components.QuarantineModal.text007": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 127
-  },
-  "components.QuarantineModal.text008": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 135
-  },
-  "components.QuarantineModal.text009": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 138
-  },
-  "components.QuarantineModal.text010": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 151
-  },
-  "components.QuarantineModal.text011": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 155
-  },
-  "components.QuarantineModal.text012": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 157
-  },
-  "components.QuarantineModal.text013": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 162
-  },
-  "components.QuarantineModal.text014": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 170
-  },
-  "components.QuarantineModal.text015": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 173
-  },
-  "components.QuarantineModal.text016": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 202
-  },
-  "components.QuarantineModal.text017": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 208
-  },
-  "components.QuarantineModal.text018": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 212
-  },
-  "components.QuarantineModal.text019": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 215
-  },
-  "components.QuarantineModal.text020": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 223
-  },
-  "components.QuarantineModal.text021": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 236
-  },
-  "components.QuarantineModal.text022": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 238
-  },
-  "components.QuarantineModal.text023": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 239
-  },
-  "components.QuarantineModal.text024": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 240
-  },
-  "components.QuarantineModal.text025": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 251
-  },
-  "components.QuarantineModal.text026": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 252
-  },
-  "components.QuarantineModal.text027": {
-    "file": "components/QuarantineModal.tsx",
-    "line": 253
-  },
   "components.RightSidebar.text001": {
     "file": "components/RightSidebar.tsx",
     "line": 283
@@ -7743,10 +7635,6 @@
     "file": "components/Sidebar.tsx",
     "line": 386
   },
-  "components.Sidebar.text006": {
-    "file": "components/Sidebar.tsx",
-    "line": 420
-  },
   "components.Sidebar.text007": {
     "file": "components/Sidebar.tsx",
     "line": 429
@@ -7823,10 +7711,6 @@
     "file": "components/SystemAlertBanner.tsx",
     "line": 68
   },
-  "components.SystemAlertBanner.text006": {
-    "file": "components/SystemAlertBanner.tsx",
-    "line": 124
-  },
   "components.SystemAlertBanner.text007": {
     "file": "components/SystemAlertBanner.tsx",
     "line": 134
@@ -7871,33 +7755,13 @@
     "file": "components/SystemAlertBanner.tsx",
     "line": 191
   },
-  "components.SystemAlertBanner.text018": {
-    "file": "components/SystemAlertBanner.tsx",
-    "line": 192
-  },
-  "components.SystemAlertBanner.text019": {
-    "file": "components/SystemAlertBanner.tsx",
-    "line": 193
-  },
   "components.SystemAlertBanner.text020": {
     "file": "components/SystemAlertBanner.tsx",
     "line": 194
   },
-  "components.SystemAlertBanner.text021": {
-    "file": "components/SystemAlertBanner.tsx",
-    "line": 195
-  },
-  "components.SystemAlertBanner.text022": {
-    "file": "components/SystemAlertBanner.tsx",
-    "line": 196
-  },
   "components.SystemAlertBanner.text023": {
     "file": "components/SystemAlertBanner.tsx",
     "line": 197
-  },
-  "components.SystemAlertBanner.text024": {
-    "file": "components/SystemAlertBanner.tsx",
-    "line": 198
   },
   "components.SystemAlertBanner.text025": {
     "file": "components/SystemAlertBanner.tsx",
