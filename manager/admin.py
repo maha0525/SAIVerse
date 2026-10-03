@@ -50,7 +50,7 @@ from builtin_data.tools.save_playbook import save_playbook
 class _Unset:
     """「この項目は送られてこなかった」を表す印 (値の None とは別物)。
 
-    Building の更新は複数の画面から同じ 1 本の経路へ来る。新しい設定を
+    City / Building などの更新は複数の画面から同じ 1 本の経路へ来る。新しい設定を
     知らない画面が項目ごと送らないのと、知っている画面が「空欄にした」と
     して null を送るのは意味が違う — 前者は触らない、後者は上書きを外す。
     既定引数を None にするとこの二つが潰れて、古い画面で保存するたびに
@@ -252,9 +252,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         ui_port: int,
         api_port: int,
         timezone_name: str,
-        host_avatar_path: Optional[str] = None,
+        host_avatar_path: Any = UNSET,
         host_avatar_upload: Optional[str] = None,
-        map_background_image: Optional[str] = None,
+        map_background_image: Any = UNSET,
         language: Optional[str] = None,
     ) -> str:
         """City の設定を更新する。``name`` は**表示名** (CITYNAME)。
@@ -262,6 +262,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         内部の識別子 (CITY_SLUG) はここでは変更できない — 発行済みの Building ID・
         ペルソナ ID・ディスク上のログ保存先が既にその文字列を含んでおり、後から
         変えると食い違う (docs/intent/city_identity.md §4 不変条件 2)。
+        画像は UNSET なら保持し、None / 空文字を明示したときだけ解除する。
         """
         db = self.SessionLocal()
         try:
@@ -287,7 +288,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             if language is not None:
                 from saiverse.persona_language import validate_language
                 city.LANGUAGE = validate_language(language)
-            avatar_value: Optional[str] = (host_avatar_path or "").strip() or None
+            avatar_changed = host_avatar_path is not UNSET or bool(host_avatar_upload)
+            avatar_value = city.HOST_AVATAR_IMAGE
+            if host_avatar_path is not UNSET:
+                avatar_value = (host_avatar_path or "").strip() or None
             if host_avatar_upload:
                 try:
                     upload_path = Path(host_avatar_upload)
@@ -296,9 +300,11 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     db.rollback()
                     logging.error("Failed to process host avatar upload: %s", exc, exc_info=True)
                     return f"Error: Failed to process host avatar upload: {exc}"
-            city.HOST_AVATAR_IMAGE = avatar_value
-            # 街マップ背景画像 (空文字は NULL として保存)
-            city.MAP_BACKGROUND_IMAGE = (map_background_image or "").strip() or None
+            if avatar_changed:
+                city.HOST_AVATAR_IMAGE = avatar_value
+            # 未送信の画像には触らない。null / 空文字の明示だけ NULL として保存。
+            if map_background_image is not UNSET:
+                city.MAP_BACKGROUND_IMAGE = (map_background_image or "").strip() or None
             db.commit()
 
             if city.CITYID == self.state.city_id:
@@ -323,7 +329,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 for persona in self.state.personas.values():
                     persona.timezone = self.state.timezone_info
                     persona.timezone_name = self.state.timezone_name
-                self.manager.reload_host_avatar(avatar_value)
+                if avatar_changed:
+                    self.manager.reload_host_avatar(avatar_value)
 
             self._load_cities_from_db()
             logging.info(

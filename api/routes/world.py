@@ -47,6 +47,8 @@ class CityUpdate(BaseModel):
     ui_port: int
     api_port: int
     timezone: str
+    # 画像を扱わない画面の保存では保持する。null / 空文字の明示だけ解除。
+    # 未送信との区別はルートで model_fields_set を使う (型は string | null のまま)。
     host_avatar_path: Optional[str] = None
     map_background_image: Optional[str] = None
     language: Optional[str] = None
@@ -204,7 +206,15 @@ def create_city(city: CityCreate, manager: SAIVerseManager = Depends(get_manager
 
 @router.put("/cities/{city_id}")
 def update_city(city_id: int, city: CityUpdate, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.update_city(city_id, city.name, city.description, city.online_mode, city.ui_port, city.api_port, city.timezone, city.host_avatar_path, None, city.map_background_image, language=city.language))
+    # 未送信を None に潰すと、チュートリアルなど画像を扱わない入口の保存で消える。
+    # 現在値の再送ではなく、保存側まで UNSET を渡して「触らない」を保証する。
+    return _check_result(manager.update_city(
+        city_id, city.name, city.description, city.online_mode,
+        city.ui_port, city.api_port, city.timezone,
+        host_avatar_path=city.host_avatar_path if "host_avatar_path" in city.model_fields_set else UNSET,
+        map_background_image=city.map_background_image if "map_background_image" in city.model_fields_set else UNSET,
+        language=city.language,
+    ))
 
 @router.patch("/cities/{city_id}/name")
 def update_city_display_name(city_id: int, req: CityDisplayNameUpdate, manager: SAIVerseManager = Depends(get_manager)):

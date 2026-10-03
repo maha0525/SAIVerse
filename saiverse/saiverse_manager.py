@@ -1735,15 +1735,16 @@ class SAIVerseManager(
         ui_port: int,
         api_port: int,
         timezone_name: str,
-        host_avatar_path: Optional[str] = None,
+        host_avatar_path: Any = UNSET,
         host_avatar_upload: Optional[str] = None,
-        map_background_image: Optional[str] = None,
+        map_background_image: Any = UNSET,
         language: Optional[str] = None,
     ) -> str:
         """ワールドエディタから City の設定を更新する。``name`` は表示名 (CITYNAME)。
 
         内部の識別子 (CITY_SLUG) は作成後に変更できないため、ここでは受け取らない
         (docs/intent/city_identity.md §4 不変条件 2)。
+        画像の UNSET は省略 (= 保持)、None / 空文字は明示的な解除として渡す。
         """
         return self.admin.update_city(
             city_id,
