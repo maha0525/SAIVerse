@@ -124,8 +124,10 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         const extra: Record<string, unknown> = {};
         for (const [field, value] of Object.entries(cfg)) {
             if ((BASIC_FIELDS as readonly string[]).includes(field)) continue;
-            // 水位は専用欄が単独所有 (null も 'none' として欄に写し、JSON には残さない)
-            if ((WATERMARK_FIELDS as readonly string[]).includes(field)) {
+            // 数値/null は専用欄が単独所有。表せない型は JSON に残し、
+            // 保存時の検査で知らせる (空欄に変えて黙って消してはいけない)。
+            if ((WATERMARK_FIELDS as readonly string[]).includes(field)
+                && (value === null || typeof value === 'number')) {
                 wm[field as WatermarkField] = watermarkFieldFromConfig(value);
                 continue;
             }
