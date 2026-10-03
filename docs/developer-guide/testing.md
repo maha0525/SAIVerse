@@ -118,7 +118,21 @@ class TestWithMock(unittest.TestCase):
   呼び出し側の責任であり、この fixture 自体は実通信を封じる仕組みではない。
   IP リテラルの private / metadata / loopback 判定は保つ。URL セキュリティの DNS
   回答を検べるテストは専用の回答を持ち、ローカル HTTP 結合テストには適用しない。
-  全体 autouse 化や本番の URL 検査の差し替えで解決しない。
+  全体 autouse 化や本番の URL 検査の差し替えで解決しない。全テストへ合成 DNS を
+  適用すると、本来の DNS 回答を検査するセキュリティテストやローカル HTTP 結合テスト
+  まで別の条件で動き、検査対象を隠してしまうため。
+- **共有 API の差し替えは利用者の OS の代替経路も検べる**: 外部通信を止めるつもりで
+  全 socket の接続を拒否すると、Windows のイベントループの自己通信用 TCP 接続も
+  止まる。Linux の C 実装の socketpair だけではこの失敗を見つけられない。
+  [fixture の契約テスト](../../tests/test_provider_test_network.py) では共有 socket API の
+  同一性と、公開 socket API で TCP fallback を再現した TestClient の起動・リクエストを
+  固定する。ただし Linux 上の再現を実 Windows / ProactorEventLoop の実行と同一視しない。
+- **ダミーの資格情報は必要なテストだけに置く**: 実行部分を fake に任せるテストでも、
+  モデル選択前に資格情報を検査する場合がある。必要なダミーキーをそのテストだけで設定し、
+  全体への注入や資格情報検査の丸ごとの差し替えで未設定時の挙動を隠さない。
+- **パスの入口検査と展開先検査は分ける**: snapshot の rooted path は POSIX では入口で、
+  Windows では ZIP 展開先の包含検査で拒否される。OS ごとの期待を明示し、展開先の
+  包含検査そのものも一時 ZIP を使って独立に固定する。
 - **ツールは動的ロードされる**: `TOOL_REGISTRY` はモジュールを動的に読み込んで構築されるため、モジュールトップの参照を差し替える `patch('module.func')` では効かない場合がある。**`patch.object`** で対象オブジェクトを直接差し替える（→ [reference_test_infrastructure]）。
 - **DB テストは一時 DB を使う**: 本番 DB を触らない。テンポラリファイルに対して検証する。
 - **Windows の SQLite ロック**: Windows ではファイルハンドルが開いたままだと削除・置換で `WinError 32` が出やすい。teardown で接続を確実に close してから片付ける。
