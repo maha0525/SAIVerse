@@ -2905,3 +2905,219 @@ def test_unexecuted_spells_leave_only_the_cast_line_without_a_result_block(
     assert '"step": 1' in row
     assert "unknown_spell" in row
     assert "args={broken" in row
+
+
+# ---------------------------------------------------------------------------
+# 建物への直接書き込みは、DB 採番がある回だけ Beat 死亡時の記憶補填を許す。
+# ---------------------------------------------------------------------------
+
+class _FakeToolStreamClient(_FakeStreamClient):
+    def __init__(self, text, detection):
+        super().__init__(chunks=[text])
+        self._detection = detection
+
+    def consume_tool_detection(self):
+        return self._detection
+
+
+@pytest.mark.parametrize("route", ["sync", "fallback", "tool_text", "tool_both"])
+@pytest.mark.parametrize("emitted", [
+    None, {}, {"content": "保存されなかった本文"},
+    {"message_id": "", "content": "保存されなかった本文"},
+    {"message_id": "saved-1", "content": "保存できた本文"},
+], ids=["none", "empty-dict", "missing-id", "empty-id", "saved"])
+def test_direct_say_backfill_requires_a_persisted_message_id(monkeypatch, route, emitted):
+    """実 node の4経路を通し、保存直後の例外で未保存本文を記憶へ作らない。"""
+    text = "この発言の保存成否を確認する。"
+    node_def = _memorize_node_def()
+    if route == "sync":
+        client = _FakeSyncClient(text)
+    elif route == "fallback":
+        client = _FakeStreamClient(chunks=[text])
+    else:
+        node_def.available_tools = ["test_tool"]
+        detection = None if route == "tool_text" else {
+            "type": "both", "content": text, "tool_name": "test_tool", "tool_args": {},
+        }
+        client = _FakeToolStreamClient(text, detection)
+
+    async def _no_spells(**kwargs):
+        return runtime_llm.SpellLoopResult(
+            segments=[], final_continuation=kwargs["text"], loop_count=0,
+        )
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_no_spells, node_def=node_def,
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: route != "sync")
+    runtime._emit_speak_start.return_value = None
+    # _recording_emit_say は None を既定の成功にするため、このテストでは戻り値を
+    # そのまま返す fake にする。実際の _emit_say_and_capture は置き換えない。
+    runtime._emit_say.side_effect = lambda *args, **kwargs: emitted
+    runtime._dump_llm_io.side_effect = RuntimeError("death after direct say")
+    state = {"_messages": [], "_pulse_id": "pl-1"}
+
+    with pytest.raises(LLMError, match="death after direct say"):
+        asyncio.run(node(state))
+
+    runtime._emit_say.assert_called_once()
+    assert runtime._emit_say.call_args.args[2] == text
+    runtime._emit_speak_finalize.assert_not_called()
+    if isinstance(emitted, dict) and emitted.get("message_id"):
+        runtime._store_memory.assert_called_once()
+        assert runtime._store_memory.call_args.args[1] == text
+        assert state["_last_message_id"] == "saved-1"
+    else:
+        runtime._store_memory.assert_not_called()
+        assert "_last_message_id" not in state
+
+
+@pytest.mark.parametrize("failed", [None, {}, {"content": "未保存の続き"}],
+                         ids=["none", "empty-dict", "missing-id"])
+def test_failed_segment_does_not_replace_a_prior_saved_say(monkeypatch, failed):
+    """tool の直書きが成功し、その後の segment が失敗しても成功の写しは残す。"""
+    saved_text = "最初に保存できた発言。"
+    missing_text = "建物には保存できなかった続き。"
+    node_def = _memorize_node_def()
+    node_def.available_tools = ["test_tool"]
+
+    async def _one_spell_round(**kwargs):
+        return runtime_llm.SpellLoopResult(
+            segments=[runtime_llm.BeatSegment(text=missing_text, building_id="b1")],
+            final_continuation=missing_text,
+            loop_count=1,
+            stop_error=RuntimeError("death after failed continuation"),
+        )
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=_FakeToolStreamClient(saved_text, None),
+        spell_loop=_one_spell_round, node_def=node_def,
+    )
+    runtime._emit_say.side_effect = [
+        {"message_id": "saved-1", "content": saved_text}, failed,
+    ]
+    state = {"_messages": [], "_pulse_id": "pl-1"}
+
+    with pytest.raises(LLMError, match="death after failed continuation"):
+        asyncio.run(node(state))
+
+    assert runtime._emit_say.call_count == 2
+    runtime._store_memory.assert_called_once()
+    assert runtime._store_memory.call_args.args[1] == saved_text
+    assert state["_last_message_id"] == "saved-1"
+
+
+@pytest.mark.parametrize("route", ["sync", "fallback", "tool_text"])
+@pytest.mark.parametrize("closing_saved", [False, True])
+def test_segment_backfill_requires_the_closing_segment_to_be_saved(
+    monkeypatch, route, closing_saved,
+):
+    """先行 segment の成功を、別本文である締めの continuation の証拠にしない。"""
+    opening = "スペルの前に話した本文。"
+    continuation = "スペルの後に話した本文。"
+    node_def = _memorize_node_def()
+    if route == "sync":
+        client = _FakeSyncClient(opening)
+    elif route == "fallback":
+        client = _FakeStreamClient(chunks=[opening])
+    else:
+        client = _FakeToolStreamClient(opening, None)
+        node_def.available_tools = ["test_tool"]
+
+    async def _two_segments(**kwargs):
+        return runtime_llm.SpellLoopResult(
+            segments=[
+                runtime_llm.BeatSegment(text=opening, building_id="b1"),
+                runtime_llm.BeatSegment(text=continuation, building_id="b2"),
+            ],
+            final_continuation=continuation, loop_count=1,
+        )
+
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=_two_segments, node_def=node_def,
+    )
+    monkeypatch.setattr(runtime_llm, "_is_llm_streaming_enabled", lambda: route != "sync")
+    runtime._emit_speak_start.return_value = None
+    responses = [
+        {"message_id": "opening-1", "content": opening},
+        ({"message_id": "closing-1", "content": continuation}
+         if closing_saved else {"content": continuation}),
+    ]
+    # tool streaming の最初の直書きは失敗させ、segments の結果だけを観察する。
+    runtime._emit_say.side_effect = ([None] if route == "tool_text" else []) + responses
+    runtime._dump_llm_io.side_effect = RuntimeError("death after mixed segments")
+    state = {"_messages": [], "_pulse_id": "pl-1"}
+
+    with pytest.raises(LLMError, match="death after mixed segments"):
+        asyncio.run(node(state))
+
+    assert runtime._emit_say.call_count == (3 if route == "tool_text" else 2)
+    if closing_saved:
+        runtime._store_memory.assert_called_once()
+        assert runtime._store_memory.call_args.args[1] == continuation
+        assert state["_last_message_id"] == "closing-1"
+    else:
+        # 先行周の記憶はスペルループが扱う。締めを補填する根拠は無い。
+        runtime._store_memory.assert_not_called()
+        assert state["_last_message_id"] == "opening-1"
+
+
+@pytest.mark.parametrize("emitted", [None, {}, {"content": "本文"},
+                                     {"message_id": "", "content": "本文"},
+                                     {"message_id": "segment-1", "content": "本文"}],
+                         ids=["none", "empty-dict", "missing-id", "empty-id", "saved"])
+def test_segment_success_uses_the_real_emit_say_persistence_contract(monkeypatch, emitted):
+    """実 emit_say が未採番 dict を透過しても、helper は保存成功と数えない。"""
+    from sea.runtime_emitters import RuntimeEmitters
+
+    runtime = MagicMock()
+    runtime.manager.occupants = {"b1": ["p1"]}
+    persona = SimpleNamespace(persona_id="p1", history_manager=MagicMock())
+    persona.history_manager.add_to_building_only.return_value = emitted
+    runtime._emit_say.side_effect = RuntimeEmitters(runtime).emit_say
+    monkeypatch.setattr("saiverse.addon_hooks.dispatch_hook", lambda *args, **kwargs: None)
+    segment = runtime_llm.BeatSegment(text="本文", building_id="b1")
+    state = {"_last_message_id": "prior-1"}
+    events = []
+
+    wrote = runtime_llm._emit_beat_segments(
+        runtime, persona, state, [segment], pulse_id="pl-1", event_callback=events.append,
+        final_metadata_factory=lambda seg: {},
+    )
+
+    persisted = isinstance(emitted, dict) and bool(emitted.get("message_id"))
+    assert wrote is persisted
+    assert segment.saved_message_id == ("segment-1" if persisted else None)
+    assert state["_last_message_id"] == ("segment-1" if persisted else "prior-1")
+    assert any(e["type"] == "speak_persisted" for e in events) is persisted
+
+
+@pytest.mark.parametrize("saved", [False, True])
+def test_failed_spell_fallback_leaves_the_existing_exit_save_eligible(monkeypatch, caplog, saved):
+    """退避失敗を確定扱いしない。成功時だけ既存の出口保存を飛ばし記憶を補填する。"""
+    runtime, persona, node, events = _build_spell_node(
+        monkeypatch, calls=[[f"周の本文。\n{SPELL_LINE}"]],
+        node_def=_memorize_node_def(),
+    )
+    runtime._emit_speak_finalize.return_value = SpeakFinalizeResult(status="missing")
+    runtime._emit_say.side_effect = lambda *a, **kw: (
+        {"message_id": "saved-1", "content": "周の本文。"} if saved else {"content": "周の本文。"}
+    )
+    # 周の最初の本文保存だけ失敗させ、後の記憶保存の成否と区別する。
+    runtime._store_memory.side_effect = lambda *a, **kw: (
+        None if runtime._store_memory.call_count == 1 else "memory-1"
+    )
+
+    def stop_after_fallback(*args, **kwargs):
+        raise ExecutionCancelledException(message="stop after direct fallback", interrupted_by="user")
+
+    monkeypatch.setattr(runtime_llm, "refresh_mcp_tools_at_head", stop_after_fallback)
+    state = _spell_state()
+    with caplog.at_level(logging.INFO), pytest.raises(LLMError, match="stop after direct fallback"):
+        asyncio.run(node(state))
+
+    runtime._emit_say.assert_called_once()
+    # 成功した退避は確定済み。失敗なら既存の出口による最終保存が対象を見つける。
+    assert runtime._emit_speak_finalize.call_count == (1 if saved else 2)
+    assert bool(state.get(runtime_llm.BEAT_BODY_UNMEMORIZED_KEY)) is saved
+    assert any("memory backfill on beat death succeeded" in r.message for r in caplog.records) is saved
