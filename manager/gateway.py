@@ -390,11 +390,6 @@ class GatewayMixin:
         runtime.submit(enqueue())
 
     def _append_gateway_history(self, building_id: str, entry: Dict[str, Any]) -> None:
-        if building_id in self.quarantined_buildings:
-            logging.warning(
-                "Gateway entry refused: building %s is quarantined", building_id,
-            )
-            return
         # DB が source of truth (Phase 2+3)。 add_building_event 経由で seq / message_id
         # を独立採番する。
         try:

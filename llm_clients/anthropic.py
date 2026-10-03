@@ -12,7 +12,7 @@ import httpx2
 from anthropic import Anthropic
 from anthropic.types import Message
 
-from .base import EmptyResponseError, LLMClient, get_llm_logger
+from .base import EmptyResponseError, LLMClient, ToolSpecFormat, get_llm_logger
 from .anthropic_request_builder import build_request_params
 from .anthropic_response_parser import (
     _extract_text_from_response,
@@ -57,6 +57,9 @@ DEFAULT_TIMEOUT_SECONDS = 1800.0  # 30 min; override via ANTHROPIC_TIMEOUT_SECON
 
 class AnthropicClient(LLMClient):
     """Native Anthropic Claude client with prompt caching support."""
+
+    def tool_spec_format(self) -> ToolSpecFormat:
+        return "openai"
 
     def __init__(
         self,

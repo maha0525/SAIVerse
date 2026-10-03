@@ -1031,6 +1031,112 @@ def test_compare_message_positions(tmp_path):
     conn.close()
 
 
+def test_compare_message_positions_matches_sql_canonical_order(tmp_path):
+    """NULL / 負の epoch / 0 / 同秒を、挿入順と異なる履歴順で比較する。"""
+    from sai_memory.arasuji.storage import compare_message_positions
+    from sai_memory.memory.storage import get_messages_from_id
+
+    with contextlib.closing(_memory_conn(tmp_path)) as conn:
+        for mid, ts in [
+            ("zero-a", 0), ("positive", 1), ("null-a", None),
+            ("negative-a", -1), ("zero-b", 0), ("null-b", None),
+            ("negative-b", -1),
+        ]:
+            _add_message(conn, mid, ts)
+        expected = [
+            "null-a", "null-b", "negative-a", "negative-b",
+            "zero-a", "zero-b", "positive",
+        ]
+        sql_order = [row[0] for row in conn.execute(
+            "SELECT id FROM messages ORDER BY created_at, rowid",
+        )]
+        assert sql_order == expected
+        for i, id_a in enumerate(expected):
+            # 比較の前後関係は、実際の提示窓の SQL 境界とも一致する。
+            assert [m.id for m in get_messages_from_id(conn, "t-main", id_a)] == expected[i:]
+            for j, id_b in enumerate(expected):
+                assert compare_message_positions(conn, id_a, id_b) == (i > j) - (i < j)
+
+
+@pytest.mark.parametrize("id_a,id_b", [
+    ("present", "missing"), ("missing", "present"),
+    ("missing", "missing"), ("missing", "other-missing"),
+])
+def test_compare_message_positions_requires_existing_rows(tmp_path, id_a, id_b):
+    """NULL の実在行と不存在を区別し、同じ不在 ID 同士も比較不能とする。"""
+    from sai_memory.arasuji.storage import compare_message_positions
+
+    with contextlib.closing(_memory_conn(tmp_path)) as conn:
+        _add_message(conn, "present", None)
+        assert compare_message_positions(conn, id_a, id_b) is None
+        assert compare_message_positions(conn, "present", "present") == 0
+
+
+@pytest.mark.parametrize("frontier_ts", [-1, 0, 1])
+def test_cold_null_anchor_advances_and_preserves_canonical_boundaries(
+    session_factory, tmp_path, frontier_ts,
+):
+    """遅れて入った NULL 行から実時刻へ前進し、fold と未通過記録も同順で切る。"""
+    from sea.session_window import FoldedRange
+
+    lc = _make_lifecycle(session_factory)
+    with contextlib.closing(_memory_conn(tmp_path)) as conn:
+        _add_message(conn, "frontier", frontier_ts)
+        _add_message(conn, "old", None)
+        _add_message(conn, "marker", None)
+        _add_message(conn, "unseen", None)
+        _add_l1_entry(conn, ["old", "marker", "unseen"])
+        stale = _now() - timedelta(days=3)
+        lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+            "anchor_id": "old", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+        })
+        lc.save_folded_ranges(PERSONA_ID, "model-a", [
+            FoldedRange(message_ids=["old", "marker", "unseen"]),
+            FoldedRange(message_ids=["unseen", "frontier"]),
+        ])
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+        )
+        _set_pan_marker(persona, "marker")
+
+        assert lc.resolve_metabolism_anchor(persona) == ("frontier", "frontier")
+        row = lc.load_anchor_entry(PERSONA_ID, "model-a")
+        assert row["anchor_id"] == "frontier"
+        assert row["updated_at"] == stale.isoformat()
+        assert [f.message_ids for f in lc.load_folded_ranges(PERSONA_ID, "model-a")] == [
+            ["unseen", "frontier"],
+        ]
+        assert _skipped_spans(conn) == [("unseen", "frontier")]
+        assert lc.resolve_metabolism_anchor(persona) == ("frontier", "self")
+
+
+@pytest.mark.parametrize("real_ts", [-1, 0])
+def test_null_frontier_does_not_rewind_existing_or_borrowed_anchor(
+    session_factory, tmp_path, real_ts,
+):
+    """NULL の最前線を、既に実時刻へ進んだ起点より新しいと誤認しない。"""
+    lc = _make_lifecycle(session_factory)
+    with contextlib.closing(_memory_conn(tmp_path)) as conn:
+        _add_message(conn, "real", real_ts)
+        _add_message(conn, "null-frontier", None)
+        _add_l1_entry(conn, ["real"])
+        stale = _now() - timedelta(days=3)
+        lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+            "anchor_id": "real", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+        })
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID, model="model-a", sai_memory=_adapter(conn),
+        )
+        _set_pan_marker(persona, "real")
+        assert lc.resolve_metabolism_anchor(persona) == ("real", "self")
+        assert lc.load_anchor_entry(PERSONA_ID, "model-a")["anchor_id"] == "real"
+        assert _skipped_spans(conn) == []
+
+        persona.model = "model-b"
+        assert lc.resolve_metabolism_anchor(persona) == ("real", "other")
+        assert lc.load_anchor_entry(PERSONA_ID, "model-b") is None
+
+
 def test_resolve_cold_self_anchor_advances_to_frontier(session_factory, tmp_path):
     """§14-2 機構1: 冷え切った自行は最前線まで前進し、行が永続化される。
 

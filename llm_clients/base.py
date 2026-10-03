@@ -6,7 +6,10 @@ import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Literal, Optional
+
+
+ToolSpecFormat = Literal["openai", "gemini"]
 
 
 @dataclass
@@ -57,6 +60,16 @@ class LLMClient:
         self.supports_video = supports_video
         self.model: str = ""  # Set by subclasses (API model name)
         self.config_key: str = ""  # Config file key for pricing lookup
+
+    def tool_spec_format(self) -> ToolSpecFormat:
+        """Declare the tool schema accepted by generate / generate_stream.
+
+        This describes the client's input, not its provider's wire protocol or
+        whether a particular model supports tool calling. Wrappers must delegate
+        to their inner client. Clients without a declaration fail explicitly
+        rather than silently receiving another provider's schema.
+        """
+        raise NotImplementedError("LLM client must declare tool_spec_format()")
 
     def ensure_backend(self) -> None:
         """リクエスト送信前にバックエンドの存在を保証するフック (既定は何もしない)。
@@ -326,4 +339,4 @@ class EmptyResponseError(RuntimeError):
     """Raised when LLM returns an empty response (no text or function call)."""
 
 
-__all__ = ["LLMClient", "UsageInfo", "log_llm_request", "log_llm_response", "get_llm_logger", "IncompleteStreamError", "EmptyResponseError"]
+__all__ = ["LLMClient", "ToolSpecFormat", "UsageInfo", "log_llm_request", "log_llm_response", "get_llm_logger", "IncompleteStreamError", "EmptyResponseError"]

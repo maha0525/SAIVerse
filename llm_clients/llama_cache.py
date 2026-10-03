@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterator, List, Optional
 import httpx
 
 from tools.context import get_active_persona_id
-from .base import LLMClient
+from .base import LLMClient, ToolSpecFormat
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +193,9 @@ class LlamaCachedClient(LLMClient):
         return self._inner.backend_lease()
 
     # ── リクエストの組み立て ────────────────────────────────────────────
+    def tool_spec_format(self) -> ToolSpecFormat:
+        return self._inner.tool_spec_format()
+
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         self._inner.configure_parameters(parameters)
 

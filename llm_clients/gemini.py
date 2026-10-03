@@ -265,7 +265,7 @@ from saiverse.media_summary import (
 from tools import GEMINI_TOOLS_SPEC
 from saiverse.llm_router import route
 
-from .base import EmptyResponseError, IncompleteStreamError, LLMClient, get_llm_logger
+from .base import EmptyResponseError, IncompleteStreamError, LLMClient, ToolSpecFormat, get_llm_logger
 from saiverse.logging_config import log_timeout_event
 from .utils import content_to_text, is_truthy_flag, merge_reasoning_strings
 
@@ -404,6 +404,9 @@ def clamp_auto_cache_keep_seconds(value: Any) -> int:
 
 class GeminiClient(LLMClient):
     """Client for Google Gemini API."""
+
+    def tool_spec_format(self) -> ToolSpecFormat:
+        return "gemini"
 
     def __init__(
         self,

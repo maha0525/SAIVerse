@@ -1794,17 +1794,23 @@ def compare_message_positions(
 ) -> Optional[int]:
     """メッセージ 2 件の正典順 ((created_at, rowid) — W8 S7) を比較する。
 
+    NULL created_at は全ての実時刻より前、NULL 同士・同秒同士は rowid 順。
+    Python 側の順序は memory.storage の共有キーに委譲する。
+
     Returns:
         id_a が id_b より後なら 1、前なら -1、同一なら 0。
-        どちらかが messages に存在しなければ None (比較不能)。
+        どちらかが messages に存在しなければ None (同じ不在 ID 同士も比較不能)。
     """
-    if id_a == id_b:
-        return 0
+    from sai_memory.memory.storage import canonical_position_key
+
     cur = conn.execute(
         "SELECT id, created_at, rowid FROM messages WHERE id IN (?, ?)",
         (str(id_a), str(id_b)),
     )
-    positions = {str(row[0]): (row[1] or 0, row[2]) for row in cur.fetchall()}
+    positions = {
+        str(row[0]): canonical_position_key(row[1], row[2])
+        for row in cur.fetchall()
+    }
     pos_a = positions.get(str(id_a))
     pos_b = positions.get(str(id_b))
     if pos_a is None or pos_b is None:

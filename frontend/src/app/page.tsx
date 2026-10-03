@@ -421,7 +421,7 @@ export default function Home() {
     const viewBuildingRef = useRef<(buildingId: string) => void>(() => { });
     const handleNavigateBuildingFromLink = useCallback(async (buildingId: string) => {
         if (!buildingId) return;
-        // 消えた部屋・隔離中の部屋のリンクを踏んでも画面を壊さない。
+        // 消えた部屋のリンクを踏んでも画面を壊さない。
         // /api/info/details は知らない building_id に対して id:"unknown" を返すので、
         // 切り替える前にここで弾く (弾いたときは表示を一切変えない)。
         try {

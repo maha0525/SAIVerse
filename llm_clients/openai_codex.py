@@ -29,7 +29,7 @@ import httpx
 from curl_cffi import requests as cffi_requests
 from filelock import FileLock, Timeout as FileLockTimeout
 
-from .base import LLMClient
+from .base import LLMClient, ToolSpecFormat
 from .openai_codex_auth import (
     CODEX_IMPERSONATE,
     CODEX_ORIGINATOR,
@@ -123,6 +123,9 @@ class OpenAICodexClient(LLMClient):
         * Auto refresh of expired OAuth tokens (401 → refresh_token grant →
           write-back to the store the tokens came from)
     """
+
+    def tool_spec_format(self) -> ToolSpecFormat:
+        return "openai"
 
     def __init__(
         self,

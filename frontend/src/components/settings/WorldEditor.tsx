@@ -421,6 +421,7 @@ export default function WorldEditor() {
             // 読んでいる間に別の Building へ移っていたら、この応答はもう古い
             if (selectedBuildingIdRef.current !== b.BUILDINGID) return;
             const ids = links.filter((l: any) => l.BUILDINGID === b.BUILDINGID).map((l: any) => l.TOOLID);
+            // auto_interval は旧 API の必須項目。入力欄は出さず、保存済みの値を保持する。
             // item_display_limit は 0 も有効な値 (アイテムを様子に出さない部屋) なので
             // `||` で潰さない。null = 設定なし = 既定の 10 個。
             setFormData({ name: b.BUILDINGNAME, description: b.DESCRIPTION, capacity: b.CAPACITY, system_instruction: b.SYSTEM_INSTRUCTION, city_id: b.CITYID, auto_interval: b.AUTO_INTERVAL_SEC, tool_ids: ids, image_path: b.IMAGE_PATH || '', extra_prompt_files: extraPrompts, item_display_limit: b.ITEM_DISPLAY_LIMIT ?? null });
@@ -734,10 +735,7 @@ export default function WorldEditor() {
                             <Field label={uiText("components.settings.WorldEditor.text051")}><Select value={formData.city_id || ''} disabled={!!selectedBuilding} style={selectedBuilding ? { opacity: 0.7, cursor: 'not-allowed' } : undefined} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
                                 <option data-i18n="components.settings.WorldEditor.text052" value="">{uiText("components.settings.WorldEditor.text052")}</option>{cityOptions.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
-                            <div className={styles.row}>
-                                <Field label={uiText("components.settings.WorldEditor.text053")}><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
-                                <Field label={uiText("components.settings.WorldEditor.text054")}><NumInput value={formData.auto_interval || 10} onChange={(e: any) => setFormData({ ...formData, auto_interval: parseInt(e.target.value) })} /></Field>
-                            </div>
+                            <Field label={uiText("components.settings.WorldEditor.text053")}><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
                             {selectedBuilding && <Field label={uiText("components.settings.WorldEditor.itemDisplayLimit")}>
                                 <NumInput
                                     min={0}

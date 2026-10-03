@@ -64,7 +64,6 @@ class HistoryManager:
         building_memory_paths: Dict[str, Path],
         initial_persona_history: Optional[List[Dict[str, str]]] = None,
         memory_adapter: Optional["SAIMemoryAdapter"] = None,
-        quarantined_buildings: Optional[Dict[str, Any]] = None,
         db_session_factory: Optional[Callable[[], "Session"]] = None,
     ):
         self.persona_id = persona_id
@@ -74,18 +73,12 @@ class HistoryManager:
         self.building_memory_paths = building_memory_paths
         self.messages = initial_persona_history if initial_persona_history is not None else []
         self.memory_adapter = memory_adapter
-        # 隔離フラグ参照 (= 防御的にしか使わないが互換のため保持)
-        self._quarantined_buildings = quarantined_buildings if quarantined_buildings is not None else {}
         # NOTE: 旧 metabolism_anchor_message_id (persona 単一可変属性) は廃止。
         # anchor の正は session_anchor 行 (persona, model)、prefix 組成時の値は
         # state["_prefix_anchor_id"] で call-local に運ぶ (beat_execution_context.md §3.2)。
         # building_messages テーブルアクセス用 SessionLocal。 None なら no-op
         # (= 既存 MagicMock テスト互換のフォールバック)。 本番では PersonaCore が必須で渡す。
         self._db_session_factory = db_session_factory
-
-    def reset_seq_counter_for_building(self, building_id: str, value: int) -> None:
-        """[Deprecated] DB が seq を管理するため no-op。 旧 caller 互換のため残存。"""
-        return
 
     def set_memory_adapter(self, adapter: Optional["SAIMemoryAdapter"]) -> None:
         self.memory_adapter = adapter
@@ -246,11 +239,6 @@ class HistoryManager:
 
         Returns the saved building message dict (with DB-assigned seq / message_id).
         """
-        if building_id in self._quarantined_buildings:
-            LOGGER.warning(
-                "add_message: building %s is quarantined — refusing", building_id
-            )
-            return {}
         prepared_msg = self._prepare_message(msg)
         if heard_by:
             metadata = prepared_msg.setdefault("metadata", {})
@@ -277,11 +265,6 @@ class HistoryManager:
         heard_by: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Adds a message only to the building DB (skip persona log)."""
-        if building_id in self._quarantined_buildings:
-            LOGGER.warning(
-                "add_to_building_only: building %s is quarantined — refusing", building_id
-            )
-            return {}
         prepared_msg = self._prepare_message(msg)
         for_insert = self._prepare_for_insert(prepared_msg, heard_by)
         from database.building_messages import insert_building_message
@@ -1126,13 +1109,12 @@ class HistoryManager:
     def save_all(self) -> None:
         """Saves the persona's own log file (persona_log_path).
 
-        **Note**: this method NO LONGER saves building histories. Building
-        histories are saved at the manager level via
-        ``manager._save_modified_buildings()`` which respects the modified
-        set and quarantine state. The previous behavior — iterating ALL
+        **Note**: building histories are persisted directly to the DB.
+        This method must not write legacy building log.json files. The
+        previous behavior — iterating ALL
         ``building_memory_paths`` and writing ``[]`` for missing keys —
         was the root cause of a 24-building data loss event (see
-        docs/intent/building_log_safety.md).
+        docs/intent/building_memory_unified.md).
         """
         self.persona_log_path.parent.mkdir(parents=True, exist_ok=True)
         self.persona_log_path.write_text(
