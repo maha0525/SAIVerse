@@ -112,7 +112,10 @@ class TestWithMock(unittest.TestCase):
 - **HTTP のモックだけでは DNS は止まらない**: provider の接続先検査は SDK / HTTP
   クライアントより前に名前を引く。通信しない設定テストや、HTTP が既にモックされた
   単体テストは `mock_provider_network("期待する公開ホスト")` を明示的に使う
-  (`tests/conftest.py`)。列挙していないホストの DNS と実ソケット接続は失敗する。
+  (`tests/conftest.py`)。provider の名前解決だけを差し替え、列挙していないホストは失敗する。
+  プロセス全体の `socket.getaddrinfo` / `connect` / `connect_ex` は変えない。Windows の
+  イベントループが内部で使う TCP socketpair を壊さないため。HTTP/SDK のモックは
+  呼び出し側の責任であり、この fixture 自体は実通信を封じる仕組みではない。
   IP リテラルの private / metadata / loopback 判定は保つ。URL セキュリティの DNS
   回答を検べるテストは専用の回答を持ち、ローカル HTTP 結合テストには適用しない。
   全体 autouse 化や本番の URL 検査の差し替えで解決しない。

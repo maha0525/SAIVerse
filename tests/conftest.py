@@ -4,6 +4,7 @@ import ipaddress
 import socket
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest  # noqa: F401
 
@@ -22,9 +23,12 @@ def mock_provider_network(monkeypatch):
 
     Call with the public hostnames this unit test expects. URL/credential
     validation still runs, numeric addresses retain their real classification,
-    and unexpected DNS or socket connections fail rather than reaching a real
-    service. Never apply this fixture to the whole suite or to live HTTP tests.
+    and unexpected provider DNS fails. The process socket API stays untouched
+    so event-loop self-pipes keep working. HTTP/SDK mocking remains the test
+    caller's responsibility; this fixture is not a network sandbox.
     """
+    from saiverse import provider_security
+
     def install(*public_hosts):
         expected_hosts = set(public_hosts)
 
@@ -46,12 +50,9 @@ def mock_provider_network(monkeypatch):
             sockaddr = (str(address), port, 0, 0) if address.version == 6 else (str(address), port)
             return [(resolved_family, type or socket.SOCK_STREAM, proto or socket.IPPROTO_TCP, "", sockaddr)]
 
-        def reject_connection(*_args, **_kwargs):
-            raise AssertionError("Real socket connection in mocked provider test; mock the HTTP transport")
-
-        monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
-        monkeypatch.setattr(socket.socket, "connect", reject_connection)
-        monkeypatch.setattr(socket.socket, "connect_ex", reject_connection)
+        # Replacing socket.getaddrinfo on the shared module also affects every
+        # other consumer. Bind only provider_security's module reference instead.
+        monkeypatch.setattr(provider_security, "socket", SimpleNamespace(getaddrinfo=getaddrinfo))
 
     return install
 
