@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import atexit
+import ipaddress
 import logging
 import os
 import shutil
@@ -115,10 +116,10 @@ class LlamaServerManager:
             return
 
         host, port = self._parse_host_port(base_url)
-        health_base = f"http://{host}:{port}"
+        health_base = self._http_base(host, port)
         desired_identity = self._desired_identity(llama_cfg)
 
-        endpoint = (host, port)
+        endpoint = self._endpoint_key(host, port)
         with self._lock:
             managed = self._servers.get(endpoint)
             if (
@@ -219,7 +220,7 @@ class LlamaServerManager:
         if not isinstance(llama_cfg, dict):
             yield
             return
-        endpoint = self._parse_host_port(base_url)
+        endpoint = self._endpoint_key(*self._parse_host_port(base_url))
         with self._lock:
             self._inflight[endpoint] = self._inflight.get(endpoint, 0) + 1
         try:
@@ -254,7 +255,7 @@ class LlamaServerManager:
         llama_cfg: Dict[str, Any],
         identity: str,
     ) -> None:
-        endpoint = (host, port)
+        endpoint = self._endpoint_key(host, port)
         command = llama_cfg.get("command")
         cwd: str | None = None
         if isinstance(command, str) and command.strip():
@@ -313,7 +314,7 @@ class LlamaServerManager:
             busy_deadline=float(busy_deadline),
         )
 
-        health_base = f"http://{host}:{port}"
+        health_base = self._http_base(host, port)
         if not self._wait_for_health(health_base, process):
             self._stop_server(endpoint)
             raise RuntimeError(
@@ -528,7 +529,7 @@ class LlamaServerManager:
         """
         try:
             resp = httpx.get(
-                f"http://{managed.host}:{port}/slots",
+                f"{self._http_base(managed.host, port)}/slots",
                 timeout=_HEALTH_CHECK_TIMEOUT,
             )
         except Exception as exc:
@@ -576,7 +577,7 @@ class LlamaServerManager:
         再利用されると旧世代の記録が新世代の鍵に化ける。
         """
         now = time.monotonic()
-        key = ((managed.host, port), managed.generation)
+        key = (self._endpoint_key(managed.host, port), managed.generation)
         with self._warn_lock:
             last = self._slots_warned.get(key)
             if last is not None and now - last < _WARN_REPEAT_INTERVAL:
@@ -650,6 +651,25 @@ class LlamaServerManager:
         if not p:
             return ""
         return str(Path(os.path.expandvars(os.path.expanduser(p))).resolve())
+
+    @staticmethod
+    def _endpoint_key(host: str, port: int) -> _Endpoint:
+        """Canonicalize local aliases without DNS; keep the connection host intact."""
+        normalized = host.lower().rstrip(".")
+        if normalized in {"localhost", "localhost.localdomain"}:
+            return "127.0.0.1", port
+        try:
+            address = ipaddress.ip_address(normalized)
+        except ValueError:
+            return host, port
+        if address.is_loopback or address.is_unspecified:
+            return "127.0.0.1", port
+        return host, port
+
+    @staticmethod
+    def _http_base(host: str, port: int) -> str:
+        authority = f"[{host}]" if ":" in host else host
+        return f"http://{authority}:{port}"
 
     @staticmethod
     def _parse_host_port(base_url: str) -> tuple[str, int]:

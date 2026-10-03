@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -983,7 +984,7 @@ def test_warning_records_include_host_and_generation(caplog):
     assert f"nebula:{PORT}" in warnings[1]
 
 
-@pytest.mark.parametrize("other_host", ["localhost", "::1", "0.0.0.0", "nebula"])
+@pytest.mark.parametrize("other_host", ["nebula", "192.168.1.20", "2001:db8::1"])
 def test_distinct_host_names_are_not_merged(other_host):
     mgr = LlamaServerManager()
     host_in_url = f"[{other_host}]" if ":" in other_host else other_host
@@ -1098,3 +1099,69 @@ def test_stale_probe_cannot_use_other_host_external_success():
         mgr.ensure_running(BASE_URL, config)
     launch.assert_called_once()
     assert launch.call_args.args[:2] == ENDPOINT
+
+
+@pytest.mark.parametrize("alias", ["localhost", "localhost.localdomain", "127.9.8.7", "::1", "0.0.0.0", "::"])
+def test_loopback_alias_lease_prevents_idle_stop(alias):
+    mgr = LlamaServerManager()
+    local = _register(mgr, idle_for=700.0)
+    url_host = f"[{alias}]" if ":" in alias else alias
+    with mgr.request_lease(f"http://{url_host}:{PORT}/v1", _config("unused.sh")):
+        with patch.object(mgr, "_probe_slots", return_value="idle"), patch.object(mgr, "_kill_process_tree") as kill:
+            mgr._finalize_stop(ENDPOINT, local, "idle")
+        kill.assert_not_called()
+        assert mgr._inflight == {ENDPOINT: 1}
+    assert mgr._servers[ENDPOINT] is local
+    assert mgr._inflight == {}
+
+
+def test_concurrent_alias_startup_launches_once():
+    mgr = LlamaServerManager()
+    config = _config("unused.sh")
+    probes = threading.Barrier(2)
+    errors = []
+
+    def health(_base):
+        probes.wait(timeout=5)
+        return False
+
+    def ensure(url):
+        try:
+            mgr.ensure_running(url, config)
+        except BaseException as exc:
+            errors.append(exc)
+
+    with (
+        patch.object(mgr, "_health_check", side_effect=health),
+        patch.object(mgr, "_launch", wraps=mgr._launch) as launches,
+        patch.object(mgr, "_build_command_mode", return_value=["fake-server"]),
+        patch("llm_clients.llama_server.subprocess.Popen", return_value=_proc()),
+        patch.object(mgr, "_wait_for_health", return_value=True),
+        patch.object(mgr, "_open_log_file", return_value=None),
+        patch.object(mgr, "_ensure_idle_checker"),
+    ):
+        threads = [threading.Thread(target=ensure, args=(url,)) for url in [BASE_URL, f"http://localhost:{PORT}/v1"]]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert not any(thread.is_alive() for thread in threads)
+    assert not errors
+    launches.assert_called_once()
+    assert set(mgr._servers) == {ENDPOINT}
+
+
+@pytest.mark.parametrize("host", ["localhost", "::1", "::"])
+def test_launch_keeps_original_host_and_canonical_bookkeeping(tmp_path, host):
+    mgr = LlamaServerManager()
+    _launch_with(mgr, tmp_path, host=host)
+    assert set(mgr._servers) == {ENDPOINT}
+    managed = mgr._servers[ENDPOINT]
+    assert managed.host == host
+    with patch("llm_clients.llama_server.httpx.get", return_value=_resp(200, [{"is_processing": False}])) as get:
+        assert mgr._probe_slots(PORT, managed) == "idle"
+    authority = f"[{host}]" if ":" in host else host
+    assert get.call_args.args[0] == f"http://{authority}:{PORT}/slots"
+    with patch.object(mgr, "_kill_process_tree") as kill:
+        mgr.shutdown_all()
+    kill.assert_called_once_with(managed.process)
