@@ -1,7 +1,7 @@
 # Intent: Pulse タイムラインの表示
 
-**ステータス**: 検証待ち。テーマ追従の修正は develop に取り込み済み。実機での見え方の確認は未完了。
-**関連**: [ライトモードの issue](../issues/pulse_timeline_light_mode_broken.md)、[既存の表示・編集機能の記録](persona_cognition/handoff_2026-05-26.md)
+**ステータス**: 完了。テーマ追従の修正は develop に取り込み済みで、隔離環境の実ブラウザで両テーマの見え方を確認した。
+**関連**: [ライトモードの issue](../issues/archive/pulse_timeline_light_mode_broken.md)、[既存の表示・編集機能の記録](persona_cognition/handoff_2026-05-26.md)
 
 ## 全体と責任
 
