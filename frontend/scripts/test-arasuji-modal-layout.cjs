@@ -1,0 +1,105 @@
+/* Run explicitly: node scripts/test-arasuji-modal-layout.cjs
+ * CSS contract and isolated event checks; browser rendering is a separate gate. */
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const ts = require('typescript');
+const React = require('react');
+const postcss = require('postcss');
+const componentDir = path.join(__dirname, '../src/components');
+const css = postcss.parse(fs.readFileSync(path.join(componentDir, 'memory/ArasujiViewer.module.css'), 'utf8'));
+const rule = (selector, media = false) => css.nodes.flatMap(n => n.type === 'atrule' && media ? n.nodes : [n]).find(n => n.type === 'rule' && n.selector === selector && (n.parent.type === 'atrule') === media);
+const value = (selector, property, media = false) => rule(selector, media).nodes.find(n => n.prop === property)?.value;
+assert.equal(value('.modal', 'width'), '100%');
+assert.equal(value('.modal', 'max-width'), '36rem');
+assert.equal(value('.modal', 'min-width'), '0');
+assert.equal(value('.modal', 'box-sizing'), 'border-box');
+assert.equal(value('.modal', 'overflow-wrap'), 'anywhere');
+assert.equal(value('.modalOverlay', 'align-items'), 'safe center');
+assert.equal(value('.modalOverlay', 'box-sizing'), 'border-box');
+assert.equal(value('.modalOverlay', 'padding', true), '0.5rem');
+assert.equal(value('.modalOverlay', 'align-items', true), 'flex-start');
+assert.equal(value('.repairEstimateRow', 'flex-wrap', true), 'wrap');
+assert.equal(value('.repairEstimateValue', 'min-width'), '0');
+assert.equal(value('.modalActions', 'flex-wrap'), 'wrap');
+assert.equal(value('.modal', 'overflow-y'), undefined, 'scrolling remains owned by ModalOverlay');
+assert.equal(value('.modal', 'max-height'), undefined, 'no nested scroll viewport');
+const overlayCss = fs.readFileSync(path.join(componentDir, 'common/ModalOverlay.module.css'), 'utf8');
+assert.match(overlayCss, /overflow-y: auto/);
+// Both dialogs use the same constrained surface; theme colors stay with existing rules.
+assert.equal(value('.modal', 'background-color'), '#1f2023');
+assert.equal(value(':global([data-theme="light"]) .modal', 'background-color'), '#ffffff');
+let cursor = 0;
+let collectEffects = true;
+const state = [];
+const effects = [];
+const requests = [];
+const hooks = { ...React, useEffect: callback => { if (collectEffects) effects.push(callback); }, useCallback: callback => callback, useRef: initial => ({ current: initial }), useState(initial) {
+    const i = cursor++;
+    if (!(i in state)) state[i] = typeof initial === 'function' ? initial() : initial;
+    return [state[i], next => { state[i] = typeof next === 'function' ? next(state[i]) : next; }];
+} };
+const ModalOverlay = function ModalOverlay() {};
+const customRequire = name => {
+    if (name === 'react') return hooks;
+    if (name === '@/i18n/useLocale') return { useLocale() {} };
+    if (name === '@/i18n/core') return { getFormatLocale: () => 'en-US', t: (key, params) => `${key} ${JSON.stringify(params || {})}` };
+    if (name.endsWith('.css')) return { __esModule: true, default: new Proxy({}, { get: (_, key) => key }) };
+    if (name.endsWith('/ModalOverlay')) return { __esModule: true, default: ModalOverlay };
+    if (name.endsWith('/ContextVolumeBar')) return { __esModule: true, default: () => null, canDrawContextVolumeBar: () => false };
+    if (name === 'lucide-react') return new Proxy({}, { get: (_, key) => key });
+    if (name === '@/i18n/api') return { apiFetch: async (url, options) => {
+        requests.push({ url, options });
+        const data = url.endsWith('/cost-estimate') ? { unprocessed_messages: 400, estimated_llm_calls: 24, estimated_cost_usd: 0.48, model_name: 'SyntheticLongModelName'.repeat(20), currency: 'USD', repair_incomplete: true, consolidation_calls: 8 } : url.endsWith('/stats') ? { max_level: 0, counts_by_level: {}, total_count: 0 } : { entries: [] };
+        return { ok: !url.endsWith('/latest'), json: async () => data };
+    } };
+    return require(name);
+};
+function load(relative, req = customRequire) {
+    const moduleObject = { exports: {} };
+    const source = fs.readFileSync(path.join(componentDir, relative), 'utf8');
+    new Function('require', 'module', 'exports', ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText)(req, moduleObject, moduleObject.exports);
+    return moduleObject.exports.default;
+}
+const Viewer = load('memory/ArasujiViewer.tsx');
+const render = () => { cursor = 0; return Viewer({ personaId: 'synthetic-only' }); };
+const nodes = tree => !tree || typeof tree !== 'object' ? [] : Array.isArray(tree) ? tree.flatMap(nodes) : [tree, ...nodes(tree.props?.children)];
+const find = (tree, predicate) => nodes(tree).find(predicate);
+(async () => {
+    render();
+    collectEffects = false;
+    effects.forEach(effect => effect());
+    await new Promise(resolve => setImmediate(resolve));
+    let tree = render();
+    const open = () => find(render(), n => n.props?.className === 'repairBannerBtn').props.onClick();
+    open(); open();
+    tree = render();
+    assert.equal(nodes(tree).filter(n => n.type === ModalOverlay).length, 1, 'repeated opening yields one dialog');
+    assert.ok(find(tree, n => n.props?.className === 'repairEstimateValue' && String(n.props.children).includes('SyntheticLongModelName')), 'long model fixture is retained');
+    find(tree, n => n.props?.className === 'cancelBtn').props.onClick();
+    assert.equal(nodes(render()).filter(n => n.type === ModalOverlay).length, 0, 'Cancel closes');
+    open();
+    find(render(), n => n.type === ModalOverlay).props.onClose();
+    assert.equal(nodes(render()).filter(n => n.type === ModalOverlay).length, 0, 'overlay closes');
+    open();
+    assert.equal(nodes(render()).filter(n => n.type === ModalOverlay).length, 1, 'reopen works');
+    find(render(), n => n.type === ModalOverlay).props.onClose();
+    find(render(), n => n.props?.className === 'generateBtnLarge').props.onClick();
+    tree = render();
+    assert.equal(nodes(tree).filter(n => n.type === ModalOverlay).length, 1, 'manual fold confirmation opens');
+    assert.equal(nodes(tree).filter(n => n.props?.className === 'modal').length, 1, 'manual fold shares the bounded surface');
+    find(tree, n => n.props?.className === 'cancelBtn').props.onClick();
+    assert.equal(nodes(render()).filter(n => n.type === ModalOverlay).length, 0, 'manual fold Cancel closes');
+    assert.ok(requests.every(r => !r.options?.method), 'confirmation-only tests never start a job or write');
+    const Overlay = load('common/ModalOverlay.tsx');
+    let closed = 0;
+    const overlay = Overlay({ onClose: () => closed++, children: null });
+    const target = {};
+    overlay.props.onMouseDown({ target: {}, currentTarget: target });
+    overlay.props.onMouseUp({ target, currentTarget: target });
+    assert.equal(closed, 0, 'drag from dialog to backdrop does not close');
+    overlay.props.onMouseDown({ target, currentTarget: target });
+    overlay.props.onMouseUp({ target, currentTarget: target });
+    assert.equal(closed, 1, 'backdrop click closes once');
+    console.log('Arasuji modal sizing contracts and isolated cancel/reopen/drag guards passed. Browser visuals remain a separate check.');
+})().catch(error => { console.error(error); process.exitCode = 1; });
