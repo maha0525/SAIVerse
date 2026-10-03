@@ -105,7 +105,6 @@ class _MoveLedgerFixture(unittest.TestCase):
 
         self.manager = SimpleNamespace(
             execution_ledger=self.ledger,
-            quarantined_buildings={},
             personas={},
             get_region=lambda region_id: None,
             get_top_region_of_building=lambda building_id: None,

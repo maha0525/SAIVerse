@@ -127,8 +127,12 @@ def find_file(subdir: str, filename: str) -> Path | None:
     return None
 
 
-def iter_files_with_layer(subdir: str, pattern: str = "*") -> Iterator[tuple[Path, str]]:
-    """Same as :func:`iter_files`, but also reports which layer yielded the file.
+def iter_file_candidates_with_layer(subdir: str, pattern: str = "*") -> Iterator[tuple[Path, str]]:
+    """Yield every candidate in priority order, including duplicate filenames.
+
+    Provider validation uses lower-priority candidates only to identify IDs
+    shadowed by an unreadable override; it never adopts their connection.
+    Use :func:`iter_files_with_layer` for ordinary filename-based shadowing.
 
     The layer is the root this loop actually walked — not something re-derived
     from the path afterwards. Callers that make trust decisions per layer need
@@ -136,14 +140,11 @@ def iter_files_with_layer(subdir: str, pattern: str = "*") -> Iterator[tuple[Pat
     resolve into another root, but the definition was still shipped by the
     add-on that placed it there.
     """
-    seen_names: set[str] = set()
-
     # 1. User data (highest priority)
     user_path = USER_DATA_DIR / subdir
     if user_path.exists():
         for file_path in user_path.glob(pattern):
             if file_path.is_file():
-                seen_names.add(file_path.name)
                 yield file_path, LAYER_USER_DATA
 
     # 2. Expansion data - project-based structure
@@ -154,16 +155,27 @@ def iter_files_with_layer(subdir: str, pattern: str = "*") -> Iterator[tuple[Pat
             exp_path = project_dir / subdir
             if exp_path.exists():
                 for file_path in exp_path.glob(pattern):
-                    if file_path.is_file() and file_path.name not in seen_names:
-                        seen_names.add(file_path.name)
+                    if file_path.is_file():
                         yield file_path, LAYER_EXPANSION
 
     # 3. Builtin data (lowest priority)
     builtin_path = BUILTIN_DATA_DIR / subdir
     if builtin_path.exists():
         for file_path in builtin_path.glob(pattern):
-            if file_path.is_file() and file_path.name not in seen_names:
+            if file_path.is_file():
                 yield file_path, LAYER_BUILTIN
+
+
+def iter_files_with_layer(subdir: str, pattern: str = "*") -> Iterator[tuple[Path, str]]:
+    """Same as :func:`iter_files`, with the layer the loader actually walked."""
+    seen_names: set[str] = set()
+    for file_path, layer in iter_file_candidates_with_layer(subdir, pattern):
+        # Keep the existing iterator's behavior even for recursive patterns:
+        # user/builtin roots could yield multiple paths with the same basename.
+        if layer == LAYER_USER_DATA or file_path.name not in seen_names:
+            if layer != LAYER_BUILTIN:
+                seen_names.add(file_path.name)
+            yield file_path, layer
 
 
 def iter_files(subdir: str, pattern: str = "*") -> Iterator[Path]:

@@ -17,7 +17,7 @@ from saiverse.llm_router import route
 
 from . import openai_errors
 from . import openai_runtime
-from .base import LLMClient, get_llm_logger
+from .base import LLMClient, ToolSpecFormat, get_llm_logger
 from .exceptions import (
     AuthenticationError,
     EmptyResponseError as LLMEmptyResponseError,
@@ -254,6 +254,9 @@ def _strip_reserved_headers(headers: Any, where: str) -> Dict[str, str]:
 
 class OpenAIClient(LLMClient):
     """Client for OpenAI-compatible chat completions API."""
+
+    def tool_spec_format(self) -> ToolSpecFormat:
+        return "openai"
 
     def __init__(
         self,

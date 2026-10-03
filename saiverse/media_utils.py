@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
+from .media_cleanup import NewMediaFiles
+
 try:
     from PIL import Image  # type: ignore
 except ImportError:  # pragma: no cover
@@ -465,14 +467,19 @@ def get_media_summary(path: Path) -> Optional[str]:
         return None
 
 
-def save_media_summary(path: Path, summary: str) -> None:
+def save_media_summary(
+    path: Path, summary: str, *, new_files: Optional[NewMediaFiles] = None,
+) -> None:
     summary_path = _summary_path_for_media(path)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     text = summary.strip()
     if not text:
         text = summary.strip()
     try:
-        summary_path.write_text(text, encoding="utf-8")
+        if new_files is None:
+            summary_path.write_text(text, encoding="utf-8")
+        else:
+            new_files.write_bytes(summary_path, text.encode("utf-8"))
     except OSError:
         LOGGER.exception("Failed to write media summary: %s", summary_path)
 
@@ -495,13 +502,19 @@ def store_image_bytes(data: bytes, mime_type: str, *, source: str = "generated")
     return metadata, dest_path
 
 
-def store_document_text(content: str, *, source: str = "generated") -> Tuple[Dict[str, str], Path]:
+def store_document_text(
+    content: str, *, source: str = "generated", new_files: Optional[NewMediaFiles] = None,
+) -> Tuple[Dict[str, str], Path]:
     """Store text content as a document file and return metadata and path."""
     dest_dir = _ensure_document_dir()
     filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex}.txt"
     dest_path = dest_dir / filename
     try:
-        dest_path.write_text(content, encoding="utf-8")
+        if new_files is None:
+            with dest_path.open("x", encoding="utf-8") as stream:
+                stream.write(content)
+        else:
+            new_files.write_bytes(dest_path, content.encode("utf-8"))
     except OSError:
         LOGGER.exception("Failed to write document file: %s", dest_path)
         raise

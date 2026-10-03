@@ -1227,6 +1227,10 @@
     "ja": "名前",
     "en": "Name"
   },
+  "components.BuildingSettingsModal.cityImmutableHint": {
+    "ja": "既存の建物の都市は変更できません。",
+    "en": "The city of an existing building cannot be changed."
+  },
   "components.BuildingSettingsModal.text012": {
     "ja": "都市",
     "en": "City"
@@ -1234,10 +1238,6 @@
   "components.BuildingSettingsModal.text013": {
     "ja": "定員",
     "en": "Capacity"
-  },
-  "components.BuildingSettingsModal.text014": {
-    "ja": "自動インターバル（秒）",
-    "en": "Automatic interval (seconds)"
   },
   "components.BuildingSettingsModal.text015": {
     "ja": "説明",
@@ -5827,114 +5827,6 @@
     "ja": "ペルソナには使わせない",
     "en": "Never allow personas to use this"
   },
-  "components.QuarantineModal.text001": {
-    "ja": "バックアップを選択してください。",
-    "en": "Select a backup."
-  },
-  "components.QuarantineModal.text002": {
-    "ja": "「{p1}」を以下のバックアップから復元します。よろしいですか？\n\n{p2}",
-    "en": "Restore \"{p1}\" from this backup?\n\n{p2}"
-  },
-  "components.QuarantineModal.text003": {
-    "ja": "復元失敗",
-    "en": "Restore failed"
-  },
-  "components.QuarantineModal.text004": {
-    "ja": "「{p1}」を空履歴で再開します。\n\n破損ファイルは退避済みなので無事ですが、",
-    "en": "Restart \"{p1}\" with empty history.\n\nThe damaged file has been safely set aside, but "
-  },
-  "components.QuarantineModal.text005": {
-    "ja": "この操作後は新規会話のみ表示されます。本当に進めますか？",
-    "en": "only new conversations will appear after this operation. Really proceed?"
-  },
-  "components.QuarantineModal.text006": {
-    "ja": "リセット失敗",
-    "en": "Reset failed"
-  },
-  "components.QuarantineModal.text007": {
-    "ja": "破損ビルディングの管理",
-    "en": "Damaged building management"
-  },
-  "components.QuarantineModal.text008": {
-    "ja": "読み込み中...",
-    "en": "Loading..."
-  },
-  "components.QuarantineModal.text009": {
-    "ja": "✓ 隔離中のビルディングはありません。すべて正常です。",
-    "en": "✓ No quarantined buildings. All are healthy."
-  },
-  "components.QuarantineModal.text010": {
-    "ja": "異常理由:",
-    "en": "Reason:"
-  },
-  "components.QuarantineModal.text011": {
-    "ja": "退避先:",
-    "en": "Saved at:"
-  },
-  "components.QuarantineModal.text012": {
-    "ja": "（退避失敗）",
-    "en": "(failed to set aside)"
-  },
-  "components.QuarantineModal.text013": {
-    "ja": "退避エラー:",
-    "en": "Backup error:"
-  },
-  "components.QuarantineModal.text014": {
-    "ja": " バックアップから復元",
-    "en": " Restore from backup"
-  },
-  "components.QuarantineModal.text015": {
-    "ja": "利用可能なバックアップがありません。",
-    "en": "No backups available."
-  },
-  "components.QuarantineModal.text016": {
-    "ja": "選択したバックアップで復元",
-    "en": "Restore selected backup"
-  },
-  "components.QuarantineModal.text017": {
-    "ja": "または",
-    "en": "or"
-  },
-  "components.QuarantineModal.text018": {
-    "ja": " リセット（空履歴で再開）",
-    "en": " Reset (restart with empty history)"
-  },
-  "components.QuarantineModal.text019": {
-    "ja": "破損ファイルは退避先に保持されたまま、新規空履歴で再開します。 後から手動で復旧することも可能です。",
-    "en": "Start with an empty history while keeping the damaged file at its backup location. Manual recovery is still possible later."
-  },
-  "components.QuarantineModal.text020": {
-    "ja": "リセット",
-    "en": "Reset"
-  },
-  "components.QuarantineModal.text021": {
-    "ja": "手動対応する場合",
-    "en": "Manual recovery"
-  },
-  "components.QuarantineModal.text022": {
-    "ja": "上記の操作を使わず手動で対応したい場合は、SAIVerseを停止してから",
-    "en": "To recover manually instead of using these operations, stop SAIVerse and repair the "
-  },
-  "components.QuarantineModal.text023": {
-    "ja": " ファイルを修復し、元の",
-    "en": " file, then rename it back to "
-  },
-  "components.QuarantineModal.text024": {
-    "ja": "にリネームしてSAIVerseを再起動してください。",
-    "en": " and restart SAIVerse."
-  },
-  "components.QuarantineModal.text025": {
-    "ja": "JSONパース失敗（破損）",
-    "en": "JSON parsing failed (damaged)"
-  },
-  "components.QuarantineModal.text026": {
-    "ja": "0バイトファイル（書き込み中断の痕跡）",
-    "en": "Empty file (sign of an interrupted write)"
-  },
-  "components.QuarantineModal.text027": {
-    "ja": "構造異常（配列ではない）",
-    "en": "Invalid structure (not an array)"
-  },
   "components.RightSidebar.text001": {
     "ja": "現在地",
     "en": "Current location"
@@ -7391,10 +7283,6 @@
     "ja": "定員",
     "en": "Capacity"
   },
-  "components.settings.WorldEditor.text054": {
-    "ja": "インターバル（秒）",
-    "en": "Interval (seconds)"
-  },
   "components.settings.WorldEditor.itemDisplayLimit": {
     "ja": "部屋の様子に表示するアイテム数（空欄で既定の 10 個）",
     "en": "Items shown in room view (leave empty for default 10)"
@@ -8323,10 +8211,6 @@
     "ja": "作成",
     "en": "Create"
   },
-  "components.Sidebar.text006": {
-    "ja": "このビルディングは会話履歴ファイルが破損しているため隔離中です。アラートバナーから対応してください。",
-    "en": "This building is quarantined because its conversation history file is damaged. Use the alert banner to resolve it."
-  },
   "components.Sidebar.text007": {
     "ja": "折り畳む",
     "en": "Collapse"
@@ -8403,10 +8287,6 @@
     "ja": "移せませんでした。バックエンドに繋がっていない可能性があります。",
     "en": "Could not move it. The backend may be disconnected."
   },
-  "components.SystemAlertBanner.text006": {
-    "ja": "対応する",
-    "en": "Resolve"
-  },
   "components.SystemAlertBanner.text007": {
     "ja": "移しています…",
     "en": "Moving…"
@@ -8451,33 +8331,13 @@
     "ja": "退避先",
     "en": "Backup location"
   },
-  "components.SystemAlertBanner.text018": {
-    "ja": "退避先",
-    "en": "Backup location"
-  },
-  "components.SystemAlertBanner.text019": {
-    "ja": "元の場所",
-    "en": "Original location"
-  },
   "components.SystemAlertBanner.text020": {
     "ja": "パースエラー",
     "en": "Parse error"
   },
-  "components.SystemAlertBanner.text021": {
-    "ja": "退避エラー",
-    "en": "Backup error"
-  },
-  "components.SystemAlertBanner.text022": {
-    "ja": "復元手順",
-    "en": "Recovery steps"
-  },
   "components.SystemAlertBanner.text023": {
     "ja": "異常理由",
     "en": "Reason"
-  },
-  "components.SystemAlertBanner.text024": {
-    "ja": "利用可能なバックアップ",
-    "en": "Available backups"
   },
   "components.SystemAlertBanner.text025": {
     "ja": "状態",
@@ -9707,33 +9567,9 @@
     "ja": "Manager not ready",
     "en": "Manager not ready"
   },
-  "api.system.text003": {
-    "ja": "Building {p1} is not quarantined",
-    "en": "Building {p1} is not quarantined"
-  },
-  "api.system.text004": {
-    "ja": "Backup '{p1}' is not in the available backup list",
-    "en": "Backup '{p1}' is not in the available backup list"
-  },
-  "api.system.text005": {
-    "ja": "Backup file does not exist: {p1}",
-    "en": "Backup file does not exist: {p1}"
-  },
-  "api.system.text006": {
-    "ja": "復元完了: {p1}件のメッセージを読み込みました",
-    "en": "Restored: loaded {p1} messages"
-  },
   "api.system.text007": {
     "ja": "Manager not ready",
     "en": "Manager not ready"
-  },
-  "api.system.text008": {
-    "ja": "Building {p1} is not quarantined",
-    "en": "Building {p1} is not quarantined"
-  },
-  "api.system.text009": {
-    "ja": "リセット完了: 空履歴で再開。破損ファイルは {p1} に保持。",
-    "en": "Reset complete: restarted with empty history. Damaged file kept at {p1}."
   },
   "api.system.text010": {
     "ja": "Manager not ready",
@@ -9766,22 +9602,6 @@
   "api.system.text017": {
     "ja": "この環境には更新の安全確認に必要な部品 (psutil) がまだ入っていません。SAIVerse を終了してから update.bat (macOS / Linux は update.sh) を一度実行してください。それ以降はこのボタンから更新できます。",
     "en": "The psutil package required for update safety checks is missing. Exit SAIVerse and run update.bat (update.sh on macOS/Linux) once. After that, this button can perform updates."
-  },
-  "api.system.text018": {
-    "ja": "Backup is not a valid history (expected list, got {p1})",
-    "en": "Backup is not a valid history (expected list, got {p1})"
-  },
-  "api.system.text019": {
-    "ja": "Backup file is not valid JSON: {p1}",
-    "en": "Backup file is not valid JSON: {p1}"
-  },
-  "api.system.text020": {
-    "ja": "Failed to restore backup: {p1}",
-    "en": "Failed to restore backup: {p1}"
-  },
-  "api.system.text021": {
-    "ja": "Failed to reset: {p1}",
-    "en": "Failed to reset: {p1}"
   },
   "api.system.text022": {
     "ja": "退避に失敗しました: {p1}",
@@ -11451,18 +11271,6 @@
     "ja": "City",
     "en": "City"
   },
-  "components.QuarantineModal.label001": {
-    "ja": "Close",
-    "en": "Close"
-  },
-  "components.QuarantineModal.label002": {
-    "ja": " .corrupted_*",
-    "en": " .corrupted_*"
-  },
-  "components.QuarantineModal.label003": {
-    "ja": " log.json ",
-    "en": " log.json "
-  },
   "components.RightSidebar.label001": {
     "ja": "ID: ",
     "en": "ID: "
@@ -11962,5 +11770,17 @@
   "components.memory.MemopediaConversion.period": {
     "ja": "。",
     "en": "."
+  },
+  "providerConfig.invalid": {
+    "ja": "プロバイダ設定ファイルが壊れているため利用不可",
+    "en": "Unavailable: invalid provider configuration file"
+  },
+  "providerConfig.repair": {
+    "ja": "このファイルを修正し、プロバイダ設定を再読み込みしてください。接続先やキーは自動で切り替えません。",
+    "en": "Repair this file and reload provider settings. The connection and key will not be switched automatically."
+  },
+  "providerConfig.reloadFailed": {
+    "ja": "設定を再読み込みできませんでした。もう一度試してください。",
+    "en": "Could not reload settings. Please try again."
   }
 }

@@ -17,7 +17,9 @@
  */
 import type { NextRequest } from "next/server";
 
-const BACKEND = process.env.SAIVERSE_BACKEND_URL ?? "http://127.0.0.1:8000";
+import { resolveBackendOrigin } from "../../../../../backend-origin.cjs";
+
+const BACKEND = resolveBackendOrigin();
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";

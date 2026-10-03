@@ -9,8 +9,8 @@ from __future__ import annotations
 import logging
 import os
 import re
-from pathlib import Path
 from typing import Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -21,18 +21,7 @@ from tools.core import ToolResult, ToolSchema
 # ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
-LOG_FILE = Path(os.getenv("SAIVERSE_LOG_PATH", str(Path.cwd() / "saiverse_log.txt")))
-LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-LOG_FILE.touch(exist_ok=True)
-
 logger = logging.getLogger(__name__)
-if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(LOG_FILE) for h in logger.handlers):
-    handler = logging.FileHandler(LOG_FILE)
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-logger.propagate = False
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -45,6 +34,21 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+
+def _url_for_log(url: str) -> str:
+    """Keep destination context without userinfo, query, or fragment secrets."""
+    if not isinstance(url, str) or not url.strip():
+        return "<empty URL>"
+    normalized = url.strip()
+    if not normalized.startswith(("http://", "https://")):
+        normalized = "https://" + normalized
+    try:
+        parsed = urlsplit(normalized)
+        return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", ""))
+    except ValueError:
+        # Parsing failure must never put the unredacted input into a log.
+        return "<invalid URL>"
 
 
 def _clean_html(soup: BeautifulSoup) -> BeautifulSoup:
@@ -102,7 +106,7 @@ def read_url_content(
     Returns:
         (整形済みメッセージ, 履歴用スニペット)
     """
-    logger.info("read_url_content called with url=%s, max_chars=%s", url, max_chars)
+    logger.info("read_url_content called with url=%s, max_chars=%s", _url_for_log(url), max_chars)
 
     # Normalize empty strings from SEA runtime to None
     if max_chars == "" or max_chars is None:
@@ -173,7 +177,7 @@ def read_url_content(
     # Compact snippet for history
     snippet = f"URL読み込み: {url} ({len(markdown)}文字)"
     
-    logger.info("read_url_content completed: %d chars from %s", len(markdown), url)
+    logger.info("read_url_content completed: %d chars from %s", len(markdown), _url_for_log(url))
     return message, ToolResult(history_snippet=snippet)
 
 

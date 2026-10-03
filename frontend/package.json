@@ -4,15 +4,19 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "test:alerts": "node scripts/test-system-alert-banner.cjs",
     "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs && node scripts/test-dev-origins.cjs",
+    "test": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs && node scripts/test-dev-origins.cjs && node scripts/test-model-editor-watermarks.cjs && node scripts/test-provider-config-errors.cjs",
+    "test:arasuji-busy": "node scripts/test-arasuji-busy.cjs",
     "test:i18n": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs",
     "predev": "node scripts/sync-addon-panels.mjs",
     "prebuild": "node scripts/sync-addon-panels.mjs",
-    "sync:addon-panels": "node scripts/sync-addon-panels.mjs"
+    "sync:addon-panels": "node scripts/sync-addon-panels.mjs",
+    "test:backend-origin": "node scripts/test-backend-origin.cjs",
+    "test:backend-origin:http": "node scripts/test-backend-origin-http.cjs"
   },
   "keywords": [],
   "author": "",

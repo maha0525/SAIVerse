@@ -456,6 +456,8 @@ async def cancel_sluice_capture(persona_id: str, job_id: str):
         job = _capture_jobs.get(job_id)
         if not job or job.get("persona_id") != persona_id:
             raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        if job.get("status") == "cancelling":
+            return {"cancelled": True}
         if job.get("status") not in ("pending", "running"):
             return {"cancelled": False, "reason": "Job is not running"}
         job["cancel_requested"] = True

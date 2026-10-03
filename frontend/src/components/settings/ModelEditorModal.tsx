@@ -15,6 +15,7 @@ export type ModelEditorMode = 'create' | 'edit';
 interface ProviderChoice {
     id: string;
     display_name: string;
+    available?: boolean;
 }
 
 export interface ModelCloneSource {
@@ -37,7 +38,8 @@ const DEFAULT_CONTEXT_LENGTH = 128000;
 
 // Metabolism の水位 (文字数)。キーは三値 — 無し (= 一律既定に従う) / 明示 null
 // (= その水位を持たない = Metabolism なし) / 数値。専用欄が**単独所有**し、追加設定
-// JSON からは常に除外する (二重所有だと空欄にしても JSON 側の null が復活する —
+// JSON に入力した値は空の専用欄へ引き取り、JSON から取り除く (二重所有だと
+// 空欄にしても JSON 側の null が復活する —
 // Codex 指摘 2026-07-30)。欄の表記: 空欄 = キー無し / "none" = null / 数字 = 数値。
 // 旧 metabolism_low_chars (最初に読み込む文字数) は 2026-09-04 廃止 — 専用欄から
 // 外れたため、古いモデル JSON に残っているキーは追加設定 JSON 側に現れる
@@ -123,8 +125,10 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
         const extra: Record<string, unknown> = {};
         for (const [field, value] of Object.entries(cfg)) {
             if ((BASIC_FIELDS as readonly string[]).includes(field)) continue;
-            // 水位は専用欄が単独所有 (null も 'none' として欄に写し、JSON には残さない)
-            if ((WATERMARK_FIELDS as readonly string[]).includes(field)) {
+            // 数値/null は専用欄が単独所有。表せない型は JSON に残し、
+            // 保存時の検査で知らせる (空欄に変えて黙って消してはいけない)。
+            if ((WATERMARK_FIELDS as readonly string[]).includes(field)
+                && (value === null || typeof value === 'number')) {
                 wm[field as WatermarkField] = watermarkFieldFromConfig(value);
                 continue;
             }
@@ -180,9 +184,10 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             if (!res.ok) return;
             const data = await res.json();
             setProviders(
-                (data as Array<{ id: string; display_name: string }>).map(p => ({
+                (data as ProviderChoice[]).map(p => ({
                     id: p.id,
                     display_name: p.display_name,
+                    available: p.available,
                 })),
             );
         } catch (e) {
@@ -237,6 +242,31 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             return;
         }
 
+        // JSON に書いた水位は空の専用欄へ引き取る。見えている欄に値があれば
+        // そちらが優先。引き取り後は JSON から外し、保存失敗後に欄を空にしても
+        // 古い JSON の値が復活しないよう、所有者を専用欄ひとつに保つ。
+        const nextWatermarks = { ...watermarks };
+        let hasJsonWatermarks = false;
+        for (const field of WATERMARK_FIELDS) {
+            if (!Object.prototype.hasOwnProperty.call(extra, field)) continue;
+            hasJsonWatermarks = true;
+            if (nextWatermarks[field].trim() === '') {
+                const value = extra[field];
+                if (value !== null && (
+                    typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1
+                )) {
+                    setSaveError(uiText("components.settings.ModelEditorModal.text018", { p1: field }));
+                    return;
+                }
+                nextWatermarks[field] = watermarkFieldFromConfig(value);
+            }
+            delete extra[field];
+        }
+        if (hasJsonWatermarks) {
+            setWatermarks(nextWatermarks);
+            setExtraJson(JSON.stringify(extra, null, 2));
+        }
+
         // Basic fields override extra (so accidental duplicates in JSON don't shadow the form)
         const merged: Record<string, unknown> = {
             ...extra,
@@ -262,7 +292,7 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
             metabolism_target_chars: effectiveDefaults?.metabolism_target_chars ?? null,
         };
         for (const field of WATERMARK_FIELDS) {
-            const raw = watermarks[field].trim();
+            const raw = nextWatermarks[field].trim();
             delete merged[field];
             if (raw === '') continue;
             if (raw.toLowerCase() === 'none') {
@@ -387,8 +417,8 @@ export default function ModelEditorModal({ isOpen, mode, modelKey, cloneSource, 
                                 >
                                     <option data-i18n="components.settings.ModelEditorModal.text041" value="">{uiText("components.settings.ModelEditorModal.text041")}</option>
                                     {providers.map(p => (
-                                        <option key={p.id} value={p.id}>
-                                            {p.display_name} ({p.id})
+                                        <option key={p.id} value={p.id} disabled={p.available === false}>
+                                            {p.display_name}{p.available === false ? ` (${uiText("providerConfig.invalid")})` : ""} ({p.id})
                                         </option>
                                     ))}
                                 </select>

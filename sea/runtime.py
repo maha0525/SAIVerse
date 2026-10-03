@@ -936,24 +936,17 @@ class SEARuntime:
         return client
 
     def _build_tools_spec(self, tool_names: List[str], llm_client: Any) -> List[Any]:
-        """Build tools spec for LLM based on available tool names and llm_client type."""
+        """Select tools using the input format declared by the client."""
         from tools import GEMINI_TOOLS_SPEC, OPENAI_TOOLS_SPEC
 
         LOGGER.info("[sea] _build_tools_spec called with tool_names: %s", tool_names)
 
-        # Determine provider from llm_client class name.
-        # 送る形式を決めるのは実際に HTTP を叩く client なので、facade
-        # (LlamaCachedClient) で包まれていたら中身の class 名で判定する。
-        # 包みの名前で判定すると、どの分岐にも当たらず Gemini 形式へ落ちて、
-        # OpenAI 互換のサーバーへ google.genai の Tool を送ることになる
-        # (docs/issues/llama_cached_client_state_delegation_missing.md)。
-        target_client = getattr(llm_client, "_inner", llm_client)
-        client_class_name = type(target_client).__name__
-        LOGGER.info("[sea] LLM client class: %s", client_class_name)
+        tool_format = llm_client.tool_spec_format()
+        LOGGER.info("[sea] LLM tool spec format: %s", tool_format)
 
-        if client_class_name in ("OpenAIClient", "AnthropicClient", "OllamaClient", "NvidiaNIMClient"):
+        if tool_format == "openai":
             # Filter OpenAI tools spec (OpenAI-compatible)
-            LOGGER.info("[sea] Using OpenAI-compatible tools format (client: %s)", client_class_name)
+            LOGGER.info("[sea] Using OpenAI-compatible tools format")
             LOGGER.info("[sea] Filtering from OPENAI_TOOLS_SPEC (total: %d)", len(OPENAI_TOOLS_SPEC))
             filtered = [
                 tool for tool in OPENAI_TOOLS_SPEC
@@ -964,9 +957,9 @@ class SEARuntime:
                 LOGGER.info("[sea] - OpenAI tool: %s", tool.get("function", {}).get("name"))
                 LOGGER.info("[sea]   Full spec: %s", tool)
             return filtered
-        else:
+        elif tool_format == "gemini":
             # Filter Gemini tools spec - combine all matching declarations into a single Tool
-            LOGGER.info("[sea] Using Gemini tools format (client: %s)", client_class_name)
+            LOGGER.info("[sea] Using Gemini tools format")
             from google.genai import types
             all_matching_decls = []
             for tool in GEMINI_TOOLS_SPEC:
@@ -988,6 +981,8 @@ class SEARuntime:
                 filtered = []
                 LOGGER.info("[sea] Built Gemini tools spec: 0 tools")
             return filtered
+
+        raise ValueError(f"Unsupported tool spec format: {tool_format!r}")
 
     def _dump_llm_io(
         self,

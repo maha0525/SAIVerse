@@ -87,15 +87,9 @@ class SAIVerseManager(
         db_path: str,
         sds_url: str = os.getenv("SDS_URL", "http://127.0.0.1:8080"),
     ):
-        # --- Critical: startup_alerts and quarantine state must exist before
+        # --- Critical: startup_alerts must exist before
         # _init_building_histories so corruption events can be recorded.
         self.startup_alerts: List[Dict[str, Any]] = []
-        # Buildings whose log.json is corrupted/zero-byte. While quarantined:
-        #   - building_histories does NOT contain the key (treated as "no truth")
-        #   - save_building_histories refuses to write
-        #   - move_entity refuses entry
-        # Quarantine info: {building_id: {"reason", "corrupted_path", "available_backups"}}
-        self.quarantined_buildings: Dict[str, Dict[str, Any]] = {}
         # Buildings whose in-memory history was modified since last save.
         # Used to scope explicit save calls so we never iterate the full path map.
         self.modified_buildings: Set[str] = set()

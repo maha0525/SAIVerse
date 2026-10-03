@@ -1,3 +1,4 @@
+import ProviderConfigErrorNotice, { ProviderConfigError } from "./ProviderConfigErrorNotice";
 
 import { apiFetch } from '@/i18n/api';
 
@@ -10,6 +11,7 @@ import ModelEditorModal, { ModelEditorMode, ModelCloneSource } from './ModelEdit
 
 interface ModelInfo {
     id: string;
+    config_error?: ProviderConfigError | null;
     name: string;
     provider?: string | null;
     group?: string | null;
@@ -137,6 +139,7 @@ export default function ModelManagementPanel() {
                             <div className={styles.rowLeft}>
                                 <div className={styles.rowName}>{m.name}</div>
                                 <div data-i18n="components.settings.ModelManagementPanel.text013" className={styles.rowSub}>{m.id}{uiText("components.settings.ModelManagementPanel.text013")}{m.provider || '?'}</div>
+                                {m.config_error && <ProviderConfigErrorNotice error={m.config_error} />}
                             </div>
                             <div className={styles.rowActions}>
                                 <button data-i18n="components.settings.ModelManagementPanel.text014" className={styles.iconBtn} onClick={() => openEdit(m.id)}>

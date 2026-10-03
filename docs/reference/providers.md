@@ -139,3 +139,12 @@
 判定に使う層は、`saiverse/provider_configs.py: load_configs()` が**実際に辿ったディレクトリ**をそのまま `source` として刻む。あとからパスを解決し直して判定はしない（`expansion_data` に置いたシンボリックリンクやジャンクションが `user_data` を指していると、解決先の層で信用してしまうため）。**JSON の中に `"source"` や `"builtin"` を書いても読み込み時に捨てられる**ので、定義が自分で層を名乗ることもできない。検査は `saiverse/provider_security.py: validate_provider_config` の一箇所にあり、保存時とクライアント構築時（＝毎回の LLM 呼び出し）の両方が通る。
 
 **この仕組みが縛るのはアドオンの「宣言」であって、アドオンの「動作」ではない。** アドオンのツールは同一プロセスで Python として実行される（`tools/__init__.py` が `exec_module` で読み込む）ので、アドオンのコードは環境変数を直接読むことも、独自に通信することも、`user_data` に書き込むこともできる。ここはアドオンを隔離する仕組みではない。設計の経緯は `docs/intent/model_provider_management.md` の不変条件 11。
+
+
+## 壊れた設定ファイル
+
+上位層の provider JSON が壊れている場合、下位層へ自動で切り替えない。接続先・キー・モデルはそのまま利用停止し、API とプロバイダ／モデル管理画面にファイルのパス・層・理由を表示する（値は表示しない）。参照モデルも一覧に残る。ファイルを修復したあと、`POST /api/providers/reload` または再起動で読み直す。
+
+`GET /api/providers` は各行の `available`（設定の構造が有効か）と `config_error`（無ければ null）を返す。API キーの有無は従来の `api_key_configured` で別途確認する。モデルの2本の一覧 API も `available` と `config_error` を返し、壊れた provider を参照するモデルを黙って隠さない。
+
+`protocol` は実装が扱える値を必須とする。会話用 factory が扱える7種に加え、反射判断専用の `jev_compat` を受け付ける。`api_key_env_alternates` は省略か、非空文字列だけのリスト。`base_url` / `api_key_env` の null は従来のプロトコル既定動作を保ち、認証なしの宣言は `api_key_required: false` が担う。

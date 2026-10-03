@@ -261,7 +261,7 @@ Per-persona: `~/.saiverse/personas/<id>/log.json`, `conscious_log.json`. Set `SA
 
 ### Memory and History
 
-Building chat history is kept in memory and logged to `~/.saiverse/cities/<city>/buildings/<building>/log.json`. SAIMemory rows are appended via `SAIMemoryAdapter.append_building_message()` / `append_persona_message()`. Pulse internal thoughts use tag `internal` with a `pulse_id` for grouping; user conversations use tag `conversation`.
+Building chat history is stored in the `building_messages` table in `saiverse.db`. Legacy `~/.saiverse/cities/<city>/buildings/<building>/log.json` files are import sources only; normal chat writes never update them. SAIMemory rows are appended via `SAIMemoryAdapter.append_building_message()` / `append_persona_message()`. Pulse internal thoughts use tag `internal` with a `pulse_id` for grouping; user conversations use tag `conversation`.
 
 ### Setup/Update Script Parity
 

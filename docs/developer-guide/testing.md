@@ -34,6 +34,28 @@ python -m pytest tests/test_persona_mixins.py::test_timestamp_to_epoch_parses_is
 python -m pytest tests/<file>.py::<TestClass>::<test_method>
 ```
 
+## フロントエンドの回帰検査
+
+```bash
+cd frontend
+npm ci
+npm test
+# 接続先とプロキシだけ:
+npm run test:backend-origin
+```
+
+`test-backend-origin.cjs` は実際の `next.config.ts` と三つの Route Handler を読み、fetch を fake に置き換える。正式名のみ・旧名のみ・空白・不一致・既定値、従来の URL 結合、書き込み body・クエリ・ヘッダ・206/Range、メディア例外、SSE と `/stream` の逐次転送・キャンセルを検査する。接続先の期待値は隔離用 18000 を中心に指定し、8000 を含め実ネットワークへの通信は一切行わない。実ブラウザでの音声再生は別途確認が必要。
+
+実際の Next.js サーバーを経由する HTTP smoke は別コマンド。リポジトリの fake だけで検証でき、本番バックエンドは不要:
+
+```bash
+cd frontend
+SAIVERSE_BACKEND_ORIGIN=http://127.0.0.1:18000 SAIVERSE_BACKEND_URL= npm run build
+npm run test:backend-origin:http
+```
+
+この検査は 18000 の fake バックエンドと 18010 の production-mode Next.js を自分で起動し、通常 API / addon / MCP の読み書き、SSE、Range、メディアを通す。ポートが使用中、または build の rewrite が 18000 以外なら中止する。終了時は自分で起動したサーバーだけを停止する。`npm test` には追加せず、上の二つの専用テストを個別実行する。
+
 ## テストファイル
 
 `tests/` に 230 本超（`test_*.py`）。代表例:
