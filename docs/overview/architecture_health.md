@@ -148,7 +148,7 @@ Beat 型の担当範囲は「中身の対」だけに縮小（設計書の Beat 
 | `sai_memory` → `saiverse` | 4 箇所 | `usage_tracker` / `model_configs` / `references` |
 | `sai_memory` → `scripts` | **`arasuji/storage.py:797` → `scripts.arasuji.build_arasuji_core`** | 再生成ロジックがライブラリでなくスクリプト側に居る |
 | `manager` → `api` | `runtime.py:13` → `api.deps.avatar_path_to_url` | URL 変換ヘルパ |
-| `manager` → `scripts` | `admin.py:28` → `scripts.import_playbook.infer_scope_from_path` | パス→scope 推論 |
+| ~~`manager` → `scripts`~~ | ~~`admin.py:28` → `scripts.import_playbook.infer_scope_from_path`~~ | 2026-10-03 解消: `saiverse/playbook_scope.py` に純粋ヘルパを移し、管理サービスと CLI が共有 ([intent](../intent/playbook_scope.md)) |
 | `database` → `saiverse` | 3 箇所 | `__version__` / `data_paths` / `model_configs` |
 
 **なぜ危ないか**:
@@ -163,7 +163,7 @@ Beat 型の担当範囲は「中身の対」だけに縮小（設計書の Beat 
 **処方**（段階的・触ったついでに 1 辺ずつ）:
 1. **逆流の悪質な 2 件を先に**: `scripts.arasuji.build_arasuji_core` の再生成ロジックを
    `sai_memory/arasuji/` 側へ移す（scripts はそれを呼ぶだけにする）。`manager → api.deps` /
-   `manager → scripts.import_playbook` も関数の移動だけで切れる
+   ~~`manager → scripts.import_playbook`~~ は関数の移動だけで切れる（後者は 2026-10-03 解消）
 2. **横断ユーティリティの leaf パッケージ化**: `saiverse/` から `model_configs` / `logging_config` /
    `media_utils` / `media_summary` / `usage_tracker` / `data_paths` / `references` を
    「どこからも import してよい」leaf パッケージ（例: `saicore/`）へ移す。旧パスに
@@ -172,6 +172,11 @@ Beat 型の担当範囲は「中身の対」だけに縮小（設計書の Beat 
    `tools/` と `llm_clients/` の双方がそれを見る形にする
 
 **トリガー**: 1 は谷間タスクで即可能（小さく独立）。2 は新しい横断ユーティリティを足したくなった時・循環 import エラーを踏んだ時。一括移行はしない。
+
+**部分解消 (2026-10-03)**: Playbook のパス→scope 推論だけを標準ライブラリに依存する
+共有モジュールへ移した。import 時の `sys.path` 不変・CLI/保存処理への非依存、
+管理サービスの CLI 非依存と両取り込み入口の引数を隔離テストで固定。
+CLI の起動処理・保存側・ほかの逆流は変更していない。§2 の循環計測値は初回健診時の記録であり、再計測ではない。
 
 ### 3.4 [P2] frontend `page.tsx` — 3,092 行の神ページ
 

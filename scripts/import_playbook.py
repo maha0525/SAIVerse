@@ -26,37 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from builtin_data.tools.save_playbook import save_playbook  # type: ignore
-
-
-def infer_scope_from_path(path: Path) -> tuple[str, str | None, str | None]:
-    """Infer playbook scope from file path.
-
-    Returns: (scope, persona_id, building_id)
-    - */playbooks/public/*.json → ("public", None, None)
-    - */playbooks/building/<building_id>/*.json → ("building", None, building_id)
-    - */playbooks/personal/<persona_id>/*.json → ("personal", persona_id, None)
-    
-    Works for both:
-    - user_data/playbooks/...
-    - builtin_data/playbooks/...
-    - sea/playbooks/... (legacy)
-    """
-    parts = path.resolve().parts
-    try:
-        playbooks_idx = parts.index("playbooks")
-        if playbooks_idx + 1 < len(parts):
-            scope_dir = parts[playbooks_idx + 1]
-            if scope_dir == "public":
-                return ("public", None, None)
-            elif scope_dir == "building" and playbooks_idx + 2 < len(parts):
-                building_id = parts[playbooks_idx + 2]
-                return ("building", None, building_id)
-            elif scope_dir == "personal" and playbooks_idx + 2 < len(parts):
-                persona_id = parts[playbooks_idx + 2]
-                return ("personal", persona_id, None)
-    except ValueError:
-        pass
-    return ("public", None, None)
+from saiverse.playbook_scope import infer_scope_from_path
 
 
 def main() -> None:
