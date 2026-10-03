@@ -214,7 +214,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         # 返す形で壊れる (2026-08-09 に _on_persona_registered で実際に発生)。
         # 欠落は tests/test_mixin_host_contract.py が機械的に検査する。
         self._on_persona_registered = manager._on_persona_registered
-        self.quarantined_buildings = manager.quarantined_buildings
         self.startup_warnings = manager.startup_warnings
         self.occupancy_manager = manager.occupancy_manager
         self.conversation_managers = manager.conversation_managers
@@ -2127,7 +2126,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             for building_id in self.building_map.keys():
                 # heard_by = current occupants so all present personas perceive
                 # the world event in their auto_ingest. add_building_event
-                # handles quarantine skip and modified_buildings marking.
+                # writes the event to the building_messages table.
                 self.add_building_event(
                     building_id,
                     {"role": "host", "content": formatted_message},

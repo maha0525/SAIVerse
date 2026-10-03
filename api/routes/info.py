@@ -562,11 +562,16 @@ def list_available_models():
     だけで、文章を書けない) で、会話系の選択欄はこの印の付いたものを出さない。
     一覧からは落とさない — モデル管理画面と反射判断の選択欄には出す必要がある。
     """
-    from saiverse.model_configs import get_model_choices_with_display_names
+    from saiverse.model_configs import (
+        get_model_choices_with_display_names, get_model_config_error, is_model_available,
+    )
     from saiverse.model_defaults import is_reflex_only_model
     choices = get_model_choices_with_display_names()
     return [
-        {"id": mid, "name": name, "reflex_only": is_reflex_only_model(mid)}
+        {
+            "id": mid, "name": name, "reflex_only": is_reflex_only_model(mid),
+            "available": is_model_available(mid), "config_error": get_model_config_error(mid),
+        }
         for mid, name in choices
     ]
 

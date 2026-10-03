@@ -593,7 +593,8 @@ def _emit_beat_segments(
     に行ができた回だけ ``True``。呼び出し元はこの値で「建物には本文があるのに
     記憶に無い」形の補填 (`_backfill_memory_on_beat_death`) を起こすので、書き
     込みが全部失敗した回に ``True`` を返すと、建物のどこにも無い本文が記憶にだけ
-    入る。
+    入る。成功したセグメントに ``saved_message_id`` も残すので、呼び出し元は
+    締めの本文を補填するとき、いずれかの成功ではなく締め自身の保存を確認する。
     """
     prepared: List[Tuple[str, "BeatSegment"]] = []
     for idx, segment in enumerate(segments):
@@ -638,13 +639,14 @@ def _emit_beat_segments(
             event_callback=event_callback,
             occupants_snapshot=segment.occupants,
         )
-        # 建物の行ができた回だけ数える (`_emit_say` は書けなかった回に None)。
-        if isinstance(bmsg, dict):
+        # DB 採番がある回だけ成功。書き込み失敗でも未採番の dict が返りうる。
+        if isinstance(bmsg, dict) and bmsg.get("message_id"):
             wrote = True
+            segment.saved_message_id = str(bmsg["message_id"])
             # 保存した発言の形を記録に書き足す (スペルの結果で終わる周の本文 /
             # 実行が終わる前に止まった周の本文)。返事が止まった回の後始末が
             # 通告の文面を選ぶ材料になる。
-            if bmsg.get("message_id") and segment.form != SAVED_FORM_COMPLETE:
+            if segment.form != SAVED_FORM_COMPLETE:
                 note_saved_utterance(
                     getattr(persona, "persona_id", None),
                     message_id=str(bmsg["message_id"]),
@@ -2627,6 +2629,10 @@ class BeatSegment:
     下書き行 (placeholder) を Beat ごとに確定させるので、呼び出し元が同じ本文を
     もう一度建物へ書かないようにする。
 
+    ``saved_message_id`` は ``_emit_beat_segments`` が直接保存できた行の DB 採番。
+    その呼び出し後に、締めの continuation を記憶へ補填してよいかを確かめる。
+    ``emitted`` は退避書き込みの試行前にも立つので、保存の証拠には流用しない。
+
     ``occupants`` は **その Beat が始まった時点の在室者** の写し (契約 3)。
     ストリーミングを使わない経路は全 Beat の記録をループ完了後にまとめて
     書くので、書くときに在室表を引くと Beat 1 の「聞いた人」にまでループが
@@ -2656,6 +2662,7 @@ class BeatSegment:
     reasoning_text: str = ""
     reasoning_details: Any = None
     form: str = SAVED_FORM_COMPLETE
+    saved_message_id: Optional[str] = None
 
 
 @dataclass
@@ -3090,17 +3097,15 @@ async def _run_spell_loop(
                 event_callback=event_callback,
                 occupants_snapshot=segment.occupants,
             )
-            if (
-                isinstance(_direct, dict) and _direct.get("message_id")
-                and segment.form != SAVED_FORM_COMPLETE
-            ):
+            saved = isinstance(_direct, dict) and bool(_direct.get("message_id"))
+            if saved and segment.form != SAVED_FORM_COMPLETE:
                 note_saved_utterance(
                     getattr(persona, "persona_id", None),
                     message_id=str(_direct["message_id"]),
                     form=segment.form,
                 )
-            if not _round_memorized:
-                # この周の本文が記憶に入らなかった (書き込み失敗) 回。
+            if saved and not _round_memorized:
+                # この周の本文が建物に保存されたが、記憶に入らなかった回。
                 # 建物にだけ本文がある形になったので、Beat の出口の補填
                 # (`_backfill_memory_on_beat_death`) が拾えるように置く。
                 # 記憶に入った回は置かない — 置くと同じ本文が二重になる。
@@ -3119,7 +3124,7 @@ async def _run_spell_loop(
                 if extra.get("reasoning"):
                     _fallback_say["reasoning"] = extra["reasoning"]
                 event_callback(_fallback_say)
-            return True
+            return saved
 
         if not msg_id or st.get("finalized"):
             # 下書き行が作れなかった / もう確定している回。確定する先が無いので、
@@ -4689,7 +4694,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         # 無い」形なので、補填 (`_backfill_memory_on_beat_death`) の発火条件に
         # 数える (2026-08-27 Codex 指摘)。beat_said_text は say した瞬間の
         # 本文の写し — 同期経路では say の後に text が continuation へ
-        # 差し替わるため、閉包の text をそのまま読めない。
+        # 差し替わるため、閉包の text をそのまま読めない。印と写しは DB 採番
+        # (message_id) がある回だけ更新し、後続の保存失敗では前の成功を消さない。
         beat_said = False
         beat_said_text = ""
         # 「Beat 死亡時の後始末が下書き行を始末した」の印。始末の形は二つあり、
@@ -5252,13 +5258,14 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 include_total=False,
                             )
                             eff_bid = runtime._effective_building_id(persona, building_id)
-                            _emit_say_and_capture(
+                            _said = _emit_say_and_capture(
                                 runtime, persona, eff_bid, text, state,
                                 pulse_id=pulse_id, metadata=msg_metadata,
                                 event_callback=event_callback,
                             )
-                            beat_said = True
-                            beat_said_text = text
+                            if isinstance(_said, dict) and _said.get("message_id"):
+                                beat_said = True
+                                beat_said_text = text
                             LOGGER.info("[sea] 'both' response: text kept in UI and Building history (len=%d), tool call continues", len(text))
                         elif text_chunks:
                             # "tool_call" only — discard streamed text
@@ -5306,8 +5313,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             pulse_id=pulse_id, metadata=msg_metadata,
                             event_callback=event_callback,
                         )
-                        beat_said = True
-                        beat_said_text = text
+                        if isinstance(_tool_said, dict) and _tool_said.get("message_id"):
+                            beat_said = True
+                            beat_said_text = text
                         if (
                             cancelled_during_stream and text.strip()
                             and isinstance(_tool_said, dict)
@@ -5472,7 +5480,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             final_say_extra=_spell_say_extra or None,
                             strip_prefix=_bubble1_emitted_early,
                         )
-                        if _spell_said:
+                        if _spell_said and _spell_result.segments[-1].saved_message_id:
                             beat_said = True
                             beat_said_text = _spell_continuation
                         LOGGER.info(
@@ -5991,7 +5999,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                         ),
                                         final_say_extra=_spell_say_extra_ns or None,
                                     )
-                                    if _fb_said_ns:
+                                    if _fb_said_ns and _pending_segs_ns[-1].saved_message_id:
                                         beat_said = True
                                         beat_said_text = _continuation_ns
                                     if _final_stream_error_ns and _final_has_body_ns:
@@ -6327,12 +6335,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 pulse_id=pulse_id, metadata=msg_metadata,
                                 event_callback=event_callback,
                             )
-                            beat_said = True
-                            beat_said_text = text
                             # 「載った」の判定は message_id の有無 (DB 採番 =
                             # insert が通った証拠。builtin_data/tools/tell.py の
                             # 裁定と同じ)。dict が返っただけでは書けていない。
                             if isinstance(_fb_bmsg, dict) and _fb_bmsg.get("message_id"):
+                                beat_said = True
+                                beat_said_text = text
                                 _partial_saved_id = str(_fb_bmsg["message_id"])
 
                         if _stream_cut_body:
@@ -6481,7 +6489,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 final_say_extra=_sync_say_extra or None,
                                 strip_prefix=_bubble1_emitted_early_sync,
                             )
-                            if _sync_said:
+                            if _sync_said and _spell_segments_sync[-1].saved_message_id:
                                 beat_said = True
                                 beat_said_text = _continuation_sync
                         else:
@@ -6493,13 +6501,14 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 reasoning_details=reasoning_details,
                             )
                             eff_bid = runtime._effective_building_id(persona, building_id)
-                            _emit_say_and_capture(
+                            _said = _emit_say_and_capture(
                                 runtime, persona, eff_bid, text, state,
                                 pulse_id=pulse_id, metadata=msg_metadata,
                                 event_callback=event_callback,
                             )
-                            beat_said = True
-                            beat_said_text = text
+                            if isinstance(_said, dict) and _said.get("message_id"):
+                                beat_said = True
+                                beat_said_text = text
                             if event_callback is not None:
                                 LOGGER.info("[DEBUG] Sending 'say' event with content: %s", text[:100] if text else "(empty)")
                                 say_event: Dict[str, Any] = {

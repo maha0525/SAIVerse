@@ -113,6 +113,7 @@ interface ModelChoice {
     /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
      *  この画面が出すのは会話に使う欄だけなので、印の付いたものは選択肢に出さない。 */
     reflex_only?: boolean;
+    config_error?: { path: string; source: string; reason: string } | null;
 }
 
 /** 建物を消したら何が一緒に消え、何が残るか (GET /api/world/buildings/{id}/deletion-preview)。
@@ -420,6 +421,7 @@ export default function WorldEditor() {
             // 読んでいる間に別の Building へ移っていたら、この応答はもう古い
             if (selectedBuildingIdRef.current !== b.BUILDINGID) return;
             const ids = links.filter((l: any) => l.BUILDINGID === b.BUILDINGID).map((l: any) => l.TOOLID);
+            // auto_interval は旧 API の必須項目。入力欄は出さず、保存済みの値を保持する。
             // item_display_limit は 0 も有効な値 (アイテムを様子に出さない部屋) なので
             // `||` で潰さない。null = 設定なし = 既定の 10 個。
             setFormData({ name: b.BUILDINGNAME, description: b.DESCRIPTION, capacity: b.CAPACITY, system_instruction: b.SYSTEM_INSTRUCTION, city_id: b.CITYID, auto_interval: b.AUTO_INTERVAL_SEC, tool_ids: ids, image_path: b.IMAGE_PATH || '', extra_prompt_files: extraPrompts, item_display_limit: b.ITEM_DISPLAY_LIMIT ?? null });
@@ -733,10 +735,7 @@ export default function WorldEditor() {
                             <Field label={uiText("components.settings.WorldEditor.text051")}><Select value={formData.city_id || ''} disabled={!!selectedBuilding} style={selectedBuilding ? { opacity: 0.7, cursor: 'not-allowed' } : undefined} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
                                 <option data-i18n="components.settings.WorldEditor.text052" value="">{uiText("components.settings.WorldEditor.text052")}</option>{cityOptions.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>)}
                             </Select></Field>
-                            <div className={styles.row}>
-                                <Field label={uiText("components.settings.WorldEditor.text053")}><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
-                                <Field label={uiText("components.settings.WorldEditor.text054")}><NumInput value={formData.auto_interval || 10} onChange={(e: any) => setFormData({ ...formData, auto_interval: parseInt(e.target.value) })} /></Field>
-                            </div>
+                            <Field label={uiText("components.settings.WorldEditor.text053")}><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
                             {selectedBuilding && <Field label={uiText("components.settings.WorldEditor.itemDisplayLimit")}>
                                 <NumInput
                                     min={0}
@@ -824,14 +823,14 @@ export default function WorldEditor() {
                                     {formData.default_model && !conversationModelChoices.some(m => m.id === formData.default_model) && (
                                         <option data-i18n="components.settings.WorldEditor.text073" value={formData.default_model}>{uiText("components.settings.WorldEditor.text073")}{formData.default_model}</option>
                                     )}
-                                    {conversationModelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                    {conversationModelChoices.map(m => <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>)}
                                 </Select></Field>
                                 <Field label={uiText("components.settings.WorldEditor.text074")}><Select value={formData.lightweight_model || ''} onChange={(e: any) => setFormData({ ...formData, lightweight_model: e.target.value })}>
                                     <option data-i18n="components.settings.WorldEditor.text075" value="">{uiText("components.settings.WorldEditor.text075")}</option>
                                     {formData.lightweight_model && !conversationModelChoices.some(m => m.id === formData.lightweight_model) && (
                                         <option data-i18n="components.settings.WorldEditor.text076" value={formData.lightweight_model}>{uiText("components.settings.WorldEditor.text076")}{formData.lightweight_model}</option>
                                     )}
-                                    {conversationModelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                    {conversationModelChoices.map(m => <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>)}
                                 </Select></Field>
                                 <Field label={uiText("components.settings.WorldEditor.text077")}>
                                     <label data-i18n="components.settings.WorldEditor.text078 components.settings.WorldEditor.text079" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>

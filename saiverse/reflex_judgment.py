@@ -70,10 +70,9 @@ from typing import Any, Deque, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import httpx
 
-LOGGER = logging.getLogger("saiverse.reflex_judgment")
+from saiverse.provider_protocols import JEV_COMPAT_PROTOCOL
 
-#: System One の形をそのまま話せる provider の protocol。
-JEV_COMPAT_PROTOCOL = "jev_compat"
+LOGGER = logging.getLogger("saiverse.reflex_judgment")
 
 #: 答える側の種別。``resolve_backend`` が決め、``evaluate`` がどちらの道を通すかを選ぶ。
 #: 提供元の名前ではなくこの 2 値だけで分岐する。

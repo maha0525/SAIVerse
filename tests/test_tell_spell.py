@@ -275,8 +275,8 @@ def test_tell_empty_generation_does_not_emit():
 
 
 @pytest.mark.parametrize("emit_result", [
-    None,                                        # 隔離建物 / 保存前に例外
-    {},                                          # add_to_building_only の隔離返り値
+    None,                                        # 保存前に例外
+    {},                                          # 採番された行が返らなかった場合
     {"role": "assistant", "content": "まはー、聞いて。"},  # DB insert 失敗 = 渡した dict がそのまま返る
 ])
 def test_tell_reports_history_failure_without_claiming_silence(emit_result):

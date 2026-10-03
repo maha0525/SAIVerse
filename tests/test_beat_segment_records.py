@@ -1249,3 +1249,80 @@ def test_the_early_bubble_without_reasoning_carries_no_top_level_key():
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__])
+
+
+@pytest.mark.parametrize("path", ["no-placeholder", "finalize-failure"])
+@pytest.mark.parametrize("emitted", [None, {}, {"content": "未保存"},
+                                     {"message_id": "", "content": "未保存"},
+                                     {"message_id": "saved-1", "content": "保存済み"}],
+                         ids=["none", "empty-dict", "missing-id", "empty-id", "saved"])
+def test_direct_spell_fallback_only_marks_a_persisted_body(monkeypatch, path, emitted):
+    """実スペルループの退避2経路で、採番だけが補填キーと確定扱いの根拠になる。"""
+    from sea.cancellation import ExecutionCancelledException
+
+    runtime = SpellLoopRuntime()
+    runtime._store_memory = MagicMock(return_value=None)
+    runtime._emit_say = MagicMock(return_value=emitted)
+    runtime._emit_speak_finalize = MagicMock(return_value=SpeakFinalizeResult(status="missing"))
+    st = _streaming_state("draft-0" if path == "finalize-failure" else None, "b1")
+    state = {"_pulse_id": "pulse-1"}
+    events = []
+    body = f"周の本文。\n{SPELL_LINE}"
+
+    def stop_after_fallback(*args, **kwargs):
+        raise ExecutionCancelledException(message="stop after fallback", interrupted_by="user")
+
+    monkeypatch.setattr(runtime_llm, "refresh_mcp_tools_at_head", stop_after_fallback)
+    with pytest.raises(ExecutionCancelledException, match="stop after fallback"):
+        _run_loop(
+            runtime, ScriptedStreamClient([]), body, _ok_spell(),
+            streaming_state=st, event_callback=events.append, state=state,
+        )
+
+    saved = isinstance(emitted, dict) and bool(emitted.get("message_id"))
+    assert state.get(runtime_llm.BEAT_BODY_UNMEMORIZED_KEY) == (body if saved else None)
+    assert state.get("_last_message_id") == ("saved-1" if saved else None)
+    # 既存 placeholder の失敗を、直接退避に成功したときだけ確定扱いにする。
+    assert st["finalized"] is (saved and path == "finalize-failure")
+    assert runtime._emit_speak_finalize.call_count == (path == "finalize-failure")
+    runtime._emit_say.assert_called_once()
+    # announce は保存失敗でも変えない。どちらの経路も say は従来の1件だけ。
+    assert len([e for e in events if e["type"] == "say"]) == 1
+
+
+@pytest.mark.parametrize("path", ["no-placeholder", "finalize-failure"])
+@pytest.mark.parametrize("failed", [None, {}, {"content": "未保存の次の周"}],
+                         ids=["none", "empty-dict", "missing-id"])
+def test_failed_spell_fallback_keeps_the_prior_persisted_body(monkeypatch, path, failed):
+    """2周目の退避失敗は、1周目に実際に保存できた本文の補填を上書きしない。"""
+    from sea.cancellation import ExecutionCancelledException
+
+    runtime = SpellLoopRuntime()
+    runtime._store_memory = MagicMock(return_value=None)
+    runtime._emit_say = MagicMock(side_effect=[{"message_id": "saved-1"}, failed])
+    runtime._emit_speak_finalize = MagicMock(return_value=SpeakFinalizeResult(status="missing"))
+    has_placeholder = path == "finalize-failure"
+    runtime._emit_speak_start = MagicMock(return_value="draft-1" if has_placeholder else None)
+    st = _streaming_state("draft-0" if has_placeholder else None, "b1")
+    first = f"保存できた最初の周。\n{SPELL_LINE}"
+    second = f"保存できない次の周。\n{SPELL_LINE}"
+    state = {"_pulse_id": "pulse-1"}
+    boundaries = []
+
+    def stop_after_second_fallback(*args, **kwargs):
+        boundaries.append(dict(st))
+        if len(boundaries) == 2:
+            raise ExecutionCancelledException(message="stop after second fallback", interrupted_by="user")
+
+    monkeypatch.setattr(runtime_llm, "refresh_mcp_tools_at_head", stop_after_second_fallback)
+    with pytest.raises(ExecutionCancelledException, match="stop after second fallback"):
+        _run_loop(
+            runtime, ScriptedStreamClient([second]), first, _ok_spell(),
+            streaming_state=st, state=state,
+        )
+
+    assert runtime._emit_say.call_count == 2
+    assert state[runtime_llm.BEAT_BODY_UNMEMORIZED_KEY] == first
+    assert state["_last_message_id"] == "saved-1"
+    assert boundaries[0]["finalized"] is has_placeholder
+    assert boundaries[1]["finalized"] is False

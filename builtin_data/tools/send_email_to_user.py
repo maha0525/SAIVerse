@@ -5,7 +5,6 @@ import os
 import smtplib
 import ssl
 from email.message import EmailMessage
-from pathlib import Path
 from typing import Dict, Union, Optional
 
 from sqlalchemy import create_engine
@@ -16,19 +15,7 @@ from database.paths import default_db_path
 from tools.context import get_active_persona_id
 from tools.core import ToolSchema
 
-# Minimal logger that writes to the shared SAIVerse log.
-LOG_FILE = Path(os.getenv("SAIVERSE_LOG_PATH", str(Path.cwd() / "saiverse_log.txt")))
-LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-LOG_FILE.touch(exist_ok=True)
-
 logger = logging.getLogger(__name__)
-if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(LOG_FILE) for h in logger.handlers):
-    handler = logging.FileHandler(LOG_FILE)
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-logger.propagate = False
 
 
 def _load_smtp_config() -> Union[Dict[str, Union[str, int, bool]], str]:

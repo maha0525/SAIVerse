@@ -6,9 +6,10 @@ import { getFormatLocale } from '@/i18n/core';
 import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 import { useState, useEffect, useCallback } from 'react';
+import styles from './PulseTimelineViewer.module.css';
 
 // Pulse タイムライン: SAIMemory messages を pulse_id でグルーピングして
-// Pulse ごとの動作を可視化する。設計: docs/intent/persona_cognition/debug_controller.md
+// Pulse ごとの動作を可視化する。設計: docs/intent/pulse_timeline_display.md
 // ⚠ Track の題・種別・連番の表示欄は束 6c (2026-08-22) で撤去した — 書き手が
 // 退役して常に空だったため (docs/intent/track_retirement.md §8.6)。
 
@@ -58,18 +59,18 @@ interface PulseDetail {
 const btnStyle: React.CSSProperties = {
     padding: '3px 10px',
     borderRadius: '4px',
-    border: '1px solid #555',
-    background: 'rgba(120,120,120,0.12)',
+    border: '1px solid var(--border-color)',
+    background: 'var(--bg-tertiary)',
     color: 'inherit',
     cursor: 'pointer',
     fontSize: '0.8rem',
 };
 
 const cardStyle: React.CSSProperties = {
-    border: '1px solid rgba(255,255,255,0.1)',
+    border: '1px solid var(--border-color)',
     borderRadius: '6px',
     marginBottom: '0.5rem',
-    background: 'rgba(100,100,100,0.06)',
+    background: 'var(--bg-secondary)',
 };
 
 const headerStyle: React.CSSProperties = {
@@ -87,10 +88,10 @@ function fmtTime(epoch: number | null): string {
 }
 
 function roleColor(lr: string | null): string {
-    if (lr === 'main_line') return '#69db7c';
-    if (lr === 'sub_line') return '#74c0fc';
-    if (lr === 'meta_judgment') return '#ffd43b';
-    return '#888';
+    if (lr === 'main_line') return 'var(--timeline-main)';
+    if (lr === 'sub_line') return 'var(--timeline-sub)';
+    if (lr === 'meta_judgment') return 'var(--timeline-warning)';
+    return 'var(--text-secondary)';
 }
 
 const LINE_ROLES = ['main_line', 'sub_line', 'meta_judgment'] as const;
@@ -98,9 +99,9 @@ const SCOPES = ['committed', 'volatile', 'discardable'] as const;
 
 const selectStyle: React.CSSProperties = {
     fontSize: '0.68rem',
-    background: 'rgba(0,0,0,0.3)',
+    background: 'var(--bg-tertiary)',
     color: 'inherit',
-    border: '1px solid rgba(255,255,255,0.15)',
+    border: '1px solid var(--border-color)',
     borderRadius: '3px',
     padding: '0 2px',
     cursor: 'pointer',
@@ -204,23 +205,25 @@ export default function PulseTimelineViewer({ personaId }: Props) {
 
     return (
         // .content が overflow:hidden なので、スクロールはこの Viewer 側が担う
-        <div style={{ padding: '0.5rem', height: '100%', overflowY: 'auto', boxSizing: 'border-box' }}>
+        <div className={styles.viewer}>
             <div style={{
                 display: 'flex',
                 justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: '0.5rem',
                 alignItems: 'center',
                 position: 'sticky',
                 top: 0,
                 zIndex: 2,
-                background: '#1f2023',
+                background: 'var(--bg-secondary)',
                 padding: '0.5rem',
                 margin: '-0.5rem -0.5rem 0.5rem -0.5rem',
             }}>
-                <span data-i18n="components.memory.PulseTimelineViewer.text001" style={{ fontSize: '0.85rem', color: '#888' }}>
+                <span data-i18n="components.memory.PulseTimelineViewer.text001" style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
                     {items.length}{uiText("components.memory.PulseTimelineViewer.text001")}</span>
-                <div style={{ display: 'flex', gap: '0.3rem' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
                     {Object.keys(edits).length > 0 && (
-                        <button data-i18n="components.memory.PulseTimelineViewer.text002 components.memory.PulseTimelineViewer.text003" onClick={saveEdits} disabled={saving} style={{ ...btnStyle, background: 'rgba(105,219,124,0.2)', borderColor: '#69db7c' }}>
+                        <button data-i18n="components.memory.PulseTimelineViewer.text002 components.memory.PulseTimelineViewer.text003" onClick={saveEdits} disabled={saving} style={{ ...btnStyle, background: 'var(--bg-tertiary)', borderColor: 'var(--timeline-main)' }}>
                             {saving ? uiText("components.memory.PulseTimelineViewer.text002") : uiText("components.memory.PulseTimelineViewer.text003", { p1: Object.keys(edits).length })}
                         </button>
                     )}
@@ -233,7 +236,7 @@ export default function PulseTimelineViewer({ personaId }: Props) {
             {items.map((p) => (
                 <div key={p.pulse_id} style={cardStyle}>
                     <div style={headerStyle} onClick={() => toggle(p.pulse_id)}>
-                        <span style={{ color: '#888', fontSize: '0.75rem' }}>{fmtTime(p.last_created_at)}</span>
+                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{fmtTime(p.last_created_at)}</span>
                         {p.line_roles.map((lr) => (
                             <span
                                 key={lr}
@@ -242,13 +245,13 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                                 {lr}
                             </span>
                         ))}
-                        <span style={{ marginLeft: 'auto', fontSize: '0.72rem', color: '#777' }}>
+                        <span style={{ marginLeft: 'auto', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
                             {p.message_count} {uiText("components.memory.PulseTimelineViewer.label001")}{p.pulse_id.slice(0, 8)} · {expanded === p.pulse_id ? '▲' : '▼'}
                         </span>
                     </div>
 
                     {expanded === p.pulse_id && (
-                        <div style={{ padding: '0.4rem 0.6rem', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+                        <div style={{ padding: '0.4rem 0.6rem', borderTop: '1px solid var(--border-color)' }}>
                             {(() => {
                                 const msgs = detail[p.pulse_id]?.messages || [];
                                 const prompts = detail[p.pulse_id]?.prompts || [];
@@ -269,18 +272,18 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                                 }
 
                                 if (timeline.length === 0) {
-                                    return <span style={{ fontSize: '0.75rem', color: '#888' }}>{uiText("components.memory.PulseTimelineViewer.label002")}</span>;
+                                    return <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{uiText("components.memory.PulseTimelineViewer.label002")}</span>;
                                 }
 
                                 const renderPrompt = (pr: PulsePrompt, key: string) => (
                                     <details key={key} style={{ marginBottom: '0.3rem' }}>
-                                        <summary data-i18n="components.memory.PulseTimelineViewer.text006" style={{ fontSize: '0.72rem', color: '#9ad', cursor: 'pointer' }}>{uiText("components.memory.PulseTimelineViewer.text006")}{fmtTime(pr.created_at)}
+                                        <summary data-i18n="components.memory.PulseTimelineViewer.text006" style={{ fontSize: '0.72rem', color: 'var(--timeline-sub)', cursor: 'pointer' }}>{uiText("components.memory.PulseTimelineViewer.text006")}{fmtTime(pr.created_at)}
                                         </summary>
-                                        <pre style={{
+                                        <pre className={styles.content} style={{
                                             fontSize: '0.7rem',
                                             whiteSpace: 'pre-wrap',
                                             wordBreak: 'break-word',
-                                            background: 'rgba(0,0,0,0.2)',
+                                            background: 'var(--bg-tertiary)',
                                             padding: '0.3rem 0.5rem',
                                             borderRadius: '4px',
                                             maxHeight: '320px',
@@ -294,8 +297,8 @@ export default function PulseTimelineViewer({ personaId }: Props) {
 
                                 const renderMessage = (m: PulseMessage) => (
                                     <div key={m.entry_id} style={{ marginBottom: '0.4rem', opacity: m.scope === 'discardable' ? 0.5 : 1 }}>
-                                        <div style={{ fontSize: '0.7rem', display: 'flex', gap: '0.4rem', marginBottom: '2px', alignItems: 'center' }}>
-                                            <span style={{ color: '#aaa' }}>{m.role}</span>
+                                        <div style={{ fontSize: '0.7rem', display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '2px', alignItems: 'center' }}>
+                                            <span style={{ color: 'var(--text-secondary)' }}>{m.role}</span>
                                             <select
                                                 value={m.line_role || ''}
                                                 onChange={(e) => recordEdit(m.entry_id, 'line_role', e.target.value)}
@@ -306,25 +309,26 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                                             <select
                                                 value={m.scope || ''}
                                                 onChange={(e) => recordEdit(m.entry_id, 'scope', e.target.value)}
-                                                style={{ ...selectStyle, color: m.scope === 'discardable' ? '#ff8787' : '#888' }}
+                                                style={{ ...selectStyle, color: m.scope === 'discardable' ? 'var(--timeline-discardable)' : 'var(--text-secondary)' }}
                                             >
                                                 {SCOPES.map((s) => <option key={s} value={s}>{s}</option>)}
                                             </select>
                                             {m.spell_seq != null && (
-                                                <span style={{ color: '#c4a7e7', fontSize: '0.68rem' }}>
+                                                <span style={{ color: 'var(--timeline-spell)', fontSize: '0.68rem' }}>
                                                     {uiText("components.memory.PulseTimelineViewer.label003")}{m.spell_seq}
                                                 </span>
                                             )}
                                             {edits[m.entry_id] && (
-                                                <span style={{ color: '#69db7c', fontSize: '0.65rem' }}>*</span>
+                                                <span style={{ color: 'var(--timeline-main)', fontSize: '0.65rem' }}>*</span>
                                             )}
                                         </div>
                                         <div
+                                            className={styles.content}
                                             style={{
                                                 fontSize: '0.8rem',
                                                 whiteSpace: 'pre-wrap',
                                                 wordBreak: 'break-word',
-                                                background: 'rgba(0,0,0,0.15)',
+                                                background: 'var(--bg-tertiary)',
                                                 padding: '0.3rem 0.5rem',
                                                 borderRadius: '4px',
                                                 fontFamily: 'monospace',
@@ -340,23 +344,23 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                                 if (gapMsgs.length > 0) {
                                     elements.push(
                                         <div data-i18n="components.memory.PulseTimelineViewer.text007 components.memory.PulseTimelineViewer.text008" key="gap-header" style={{
-                                            fontSize: '0.68rem', color: '#e0a060',
-                                            borderBottom: '1px dashed rgba(224,160,96,0.3)',
+                                            fontSize: '0.68rem', color: 'var(--timeline-gap)',
+                                            borderBottom: '1px dashed var(--timeline-gap)',
                                             paddingBottom: '0.2rem', marginBottom: '0.3rem',
                                         }}>{uiText("components.memory.PulseTimelineViewer.text007")}{gapMsgs.length}{uiText("components.memory.PulseTimelineViewer.text008")}</div>
                                     );
                                     gapMsgs.forEach((g, gi) => {
                                         elements.push(
                                             <div key={`gap-${gi}`} style={{ marginBottom: '0.3rem', opacity: 0.75 }}>
-                                                <div style={{ fontSize: '0.7rem', display: 'flex', gap: '0.4rem', marginBottom: '2px' }}>
-                                                    <span style={{ color: '#e0a060' }}>{g.role}</span>
-                                                    <span style={{ color: '#888' }}>{fmtTime(g.created_at)}</span>
+                                                <div style={{ fontSize: '0.7rem', display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '2px' }}>
+                                                    <span style={{ color: 'var(--timeline-gap)' }}>{g.role}</span>
+                                                    <span style={{ color: 'var(--text-secondary)' }}>{fmtTime(g.created_at)}</span>
                                                 </div>
-                                                <div style={{
+                                                <div className={styles.content} style={{
                                                     fontSize: '0.8rem', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                                                    background: 'rgba(224,160,96,0.06)', padding: '0.3rem 0.5rem',
+                                                    background: 'var(--bg-tertiary)', padding: '0.3rem 0.5rem',
                                                     borderRadius: '4px', fontFamily: 'monospace',
-                                                    borderLeft: '2px solid rgba(224,160,96,0.3)',
+                                                    borderLeft: '2px solid var(--timeline-gap)',
                                                 }}>
                                                     {g.content}
                                                 </div>
@@ -365,7 +369,7 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                                     });
                                     elements.push(
                                         <div key="gap-separator" style={{
-                                            borderBottom: '1px dashed rgba(224,160,96,0.3)',
+                                            borderBottom: '1px dashed var(--timeline-gap)',
                                             marginBottom: '0.3rem',
                                         }} />
                                     );
@@ -383,8 +387,8 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                                         inSpellGroup = true;
                                         elements.push(
                                             <div key={`spell-start-${i}`} style={{
-                                                fontSize: '0.68rem', color: '#c4a7e7',
-                                                borderTop: '1px dashed rgba(196,167,231,0.3)',
+                                                fontSize: '0.68rem', color: 'var(--timeline-spell)',
+                                                borderTop: '1px dashed var(--timeline-spell)',
                                                 paddingTop: '0.3rem', marginTop: '0.2rem', marginBottom: '0.15rem',
                                             }}>
                                                 {uiText("components.memory.PulseTimelineViewer.label004")}{spellId.slice(0, 8)}
@@ -395,7 +399,7 @@ export default function PulseTimelineViewer({ personaId }: Props) {
                                         currentSpellOrigin = null;
                                         elements.push(
                                             <div key={`spell-end-${i}`} style={{
-                                                borderTop: '1px dashed rgba(196,167,231,0.3)',
+                                                borderTop: '1px dashed var(--timeline-spell)',
                                                 marginTop: '0.15rem', marginBottom: '0.3rem',
                                             }} />
                                         );
@@ -416,7 +420,7 @@ export default function PulseTimelineViewer({ personaId }: Props) {
             ))}
 
             {items.length === 0 && !loading && (
-                <div data-i18n="components.memory.PulseTimelineViewer.text009" style={{ color: '#888', fontSize: '0.85rem', padding: '1rem' }}>{uiText("components.memory.PulseTimelineViewer.text009")}</div>
+                <div data-i18n="components.memory.PulseTimelineViewer.text009" style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', padding: '1rem' }}>{uiText("components.memory.PulseTimelineViewer.text009")}</div>
             )}
         </div>
     );

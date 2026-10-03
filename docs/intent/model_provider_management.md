@@ -1,6 +1,6 @@
 # Intent: モデル＆プロバイダ管理 UI
 
-**ステータス**: 実装完了（Phase 1-4 完了、2026-05-11）。実機検証はまはー側で実施。§10（アプリ帰属ヘッダー）は実装済み・実機検証待ち。§12（プロバイダタブの API キー入力）は実機検証まで完了（2026-10-02）。
+**ステータス**: 実装完了（Phase 1-4 完了、2026-05-11）。実機検証はまはー側で実施。§10（アプリ帰属ヘッダー）は実装済み・実機検証待ち。§12（プロバイダタブの API キー入力）は実機検証まで完了（2026-10-02）。§1 の不正なプロバイダ定義の利用停止・可視化は検証待ち（隔離回帰まで完了、PR 確認・実機確認待ち）。
 
 ## これは何か
 
@@ -46,7 +46,15 @@ builtin モデル（例: `claude-opus-4-7.json`）の thinking_effort、cache TT
 
 ### 1. 3 層優先順位は維持する
 
-`user_data/` > `expansion_data/` > `builtin_data/` の優先順位は、プロバイダ JSON ・モデル JSON ともに維持する。`saiverse/data_paths.py:iter_files()` が既にこの優先順位で検索しているため、プロバイダディレクトリも同じ仕組みに乗せる。
+`user_data/` > `expansion_data/` > `builtin_data/` の優先順位は、プロバイダ JSON ・モデル JSON ともに維持する。
+
+**不正なプロバイダ定義の扱い**（[issue](../issues/malformed_provider_json_breaks_provider_list.md)）:
+
+- **利用者が頼れる結果**: 上書きが壊れたとき、接続先・キー・モデルを勝手に切り替えない。その provider と参照モデルを「設定ファイルが壊れているため利用不可」と表示し、関係ない一覧とモデルは使えるままにする。ファイル自体は変更しない。
+- **経路と責任**: 3 層の JSON 候補 → provider loader の検査と優先解決 → model loader の `provider_ref` 解決 → API / 管理画面 / 可用性判定 → 接続直前の検査。壊れた上位定義もファイル名と ID を占有する。読めない ID は filename stem を使い、同名の下位定義からは ID の対応だけを取り、接続情報は一切採用しない。全消費者が同じ停止状態を見る。
+- **型の境界**: 根は辞書、ID は保存時と同じ英数字・`_`・`.`・`-` の非空識別子。`display_name` は省略時に ID を使い、明示 `null` と誤型は拒否する。`protocol` は実装の対応集合に含まれる文字列を必須とする（会話 factory の対応集合と、別実装を持つ反射判断専用 `jev_compat`）。`api_key_env_alternates` は省略、または非空文字列のみのリスト。`base_url` / `api_key_env` の明示 `null` は任意項目として許す。`null` 自体は「認証なし」の宣言ではなく、手元の OpenAI 互換サーバーでは `api_key_required: false` が SDK のダミーキー利用を指定する。
+- **運用**: API とプロバイダタブに、壊れたファイルの絶対パス・辿った層・理由を表示する。生の不正値、JSON 本文、例外本文、接続先・キー値は診断に含めない。参照モデルは一覧に残し、同じ理由を表示する。provider/model の原子的スナップショット公開は別課題だが、接続直前には現在の provider も検査し、古いモデル解決結果から壊れた設定を使わせない。
+- **検証する旅程**: 同名 / 別名同一 ID / 同名異 ID / 三層の衝突、読めない JSON、null・誤型・未知 protocol・代替キー名を隔離ファイルから実ローダーへ通す。両モデル API に利用不可の参照モデルが残り、接続生成前に停止すること、修復後の reload で同じモデルが復帰することを確認する。外部 API や本番ペルソナは起動しない。
 
 ### 2. 既存モデル JSON は引き続き読める
 
@@ -84,6 +92,8 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 
 `ChatOptions` の操作感は変えない。「別名で保存」「上書き保存」ボタンは追加するが、既存のスライダー・入力欄の挙動・即時反映は維持。詳細編集は別 UI に飛ばすことで、チャット UI 自体の情報密度を増やさない。
 
+モデル編集の水位は専用欄が単独所有する。追加設定 JSON に書いた水位は、保存時に空の専用欄へ引き取り (null は `none`)、入力済みの専用欄を優先する。引き取り後は JSON の同名キーを除き、保存失敗後に欄を空にしても復活させない。編集・複製の読み込み時に専用欄へ写せない型 (文字列・真偽値・配列・オブジェクト) は、元の値のまま JSON に残し、保存時の入力エラーで知らせる。既存モデルの読み込み → 画面入力 → 専用欄 → 保存 API → user_data のモデル定義という経路で、ユーザーの指定が黙って失われないことを守る。既存の保存 API の検証・モデルへの反映は変えない。根拠は [水位 JSON issue](../issues/model_editor_drops_watermark_keys_from_json.md) の確定方針。
+
 ### 9. モデル固有の API 契約をモデル定義からプロバイダ境界まで保つ
 
 モデル JSON の `parameters` は UI 表示だけでなく、実際の API request capability と一致しなければならない。上位の SEA runtime、メディア要約、keepalive などは共通 `LLMClient` 契約として `temperature` を渡すことがあるため、非対応モデルの JSON からスライダーを消すだけでは送信を防げない。
@@ -93,6 +103,8 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 - **責任境界**: モデル JSON は capability の正典、provider client は最終送信の番人とする。UI に項目がないことだけを安全境界にせず、直接引数や古い user override が来ても provider が非対応値を送らない。
 - **会話の完全性**: provider が不正な末尾 role を自動で user role に変えたり、架空の user message を追加したりしてはならない。API が禁止する prefilled model turn は送信前に検出し、原因が追える `invalid_request` とログで停止する。
 - **関数呼び出しの同一性**: 上流が発行した tool call ID は Gemini の `FunctionCall.id` / `FunctionResponse.id` まで同一値で運ぶ。名前だけの照合へ情報を落とさない。
+- **ツール定義の入力形式**: ツールの `ToolSchema` → OpenAI/Gemini 向けカタログ → SEA の名前選別 → クライアントの request serializer、という経路で、選択したツールを落とさず届ける。入力形式の正典は `LLMClient.tool_spec_format()` とし、クラス名・提供元名・モデル JSON から推測しない。OpenAI / Anthropic / Ollama / NIM / Codex / xAI は OpenAI の function dict、Gemini は `types.Tool` を受け取り、必要な wire 形式への変換は各クライアントが持つ。wrapper は内側の申告を委譲し、SEA は wrapper の内部を覗かない。未申告・未知の形式は送信前に明示エラーにし、Gemini へ暗黙に落とさない。これはモデルの tool calling 可否とは別の、クライアントへの入力契約である。
+    - **確認の境界**: 合成カタログから名前選別、Codex の Responses body / Anthropic・xAI の変換 / Gemini の SDK 型までを外部通信なしで確認する。新しい派生クラスと多段 wrapper でも同じ契約を保つ。永続データ・設定の移行は不要。実 API の応答・本番ペルソナとの会話はこの隔離検証には含めない ([issue](../issues/tools_spec_dispatch_by_class_name.md))。
 - **使用量の帰属**: 使用量と費用は API モデル名ではなく設定キー (JSON のファイル名) に帰属させる。Codex のようなサブスクで賄われる設定は従量課金版と同じ API モデル名を持つため、API 名で価格を引くと課金されていない呼び出しに従量単価が付く。`LLMClient.config_key` を価格引き当ての正典とし、client 側が `_store_usage(model=...)` で API 名に差し替えてはならない。
 - **検証**: モデル JSON の価格・capability 読み込み、runtime 由来の sampling override 除去、通常 user 終端の通過、model 終端のローカル拒否、function call/response ID の往復を、外部 API を呼ばないテストで境界横断して確認する。
 
@@ -118,7 +130,7 @@ API キーを無関係な送信先と結び付けさせない、という束縛�
 
 - **最終結果**: 利用者は自分のプロバイダ設定を UI から自由に編集できる。同梱プロバイダを上書きしても、同梱の鍵名(`OPENROUTER_API_KEY` 等)をそのまま使い続けられる。一方、アドオンが**同梱を装った JSON を置く**ことで利用者の既知のキーを自分の宛先へ向けることはできない。
 - **保護範囲の限界(明示)**: これはアドオンの**宣言**を縛るものであって、アドオンの**動作**を縛るものではない。アドオンのツールは同一プロセスで `exec_module` により実行されるため、アドオンのコードは `os.environ` を直接読み、独自に通信し、`user_data/` へ書き込むこともできる。これは旧設計でも同じで、本変更が広げた面ではない。**アドオンのコードを未信頼として扱うなら、それは別プロセス/権限制御という別の機構の仕事であり、この不変条件を「アドオンの隔離」と読んではならない。**
-- **責任境界**: 層の判定は `provider_configs.load_configs()` が**実際に辿ったルート**をそのまま `source` として刻む(`data_paths.iter_files_with_layer()`)。読み込み後にパスから導出し直してはならない — `expansion_data/` 配下の symlink や Windows junction が別層へ解決されると、置いた場所ではなく解決先の層で信用してしまう。ファイル内に書かれた `source` / `builtin` は読み込み時に捨てる。刻印の無い設定は信用しない(fail-closed)。
+- **責任境界**: 層の判定は `provider_configs.load_configs()` が**実際に辿ったルート**をそのまま `source` として刻む(`data_paths.iter_file_candidates_with_layer()`)。読み込み後にパスから導出し直してはならない — `expansion_data/` 配下の symlink や Windows junction が別層へ解決されると、置いた場所ではなく解決先の層で信用してしまう。ファイル内に書かれた `source` / `builtin` は読み込み時に捨てる。刻印の無い設定は信用しない(fail-closed)。
 - **非信頼層では「書かない」も許さない**: `api_key_env` を空にすると OpenAI 互換クライアントは `OPENAI_API_KEY` へフォールバックする (`llm_clients/openai.py`)。したがって未記入は中立ではなく「利用者の既定キーをこの `base_url` へ送れ」という宣言と同義になる。非信頼層の定義は、名前空間付き変数を名乗るか `api_key_required: false` を明記するかの**いずれかを必ず選ばせる**。歯止めの条件をプロトコル種別で書いてはならない — 目的は「非信頼の定義が、自分で名指ししていない資格情報を送らせないこと」であって、特定プロトコルの都合ではない。
 - **モデル設定にも同じ層を刻む**: 資格情報を送るかどうかを決めるのはプロバイダだけではない。モデル JSON も `base_url` を直書きでき、その場合 `api_key_env` を書かなければクライアントが同梱の変数へフォールバックする。したがってモデルも `model_configs.load_configs()` で `source` を刻み、**接続先を自分で名指しする非信頼層のモデルには、プロバイダと同じ二択（自分専用の `SAIVERSE_MODEL_<キー>_API_KEY` を名乗るか、本物の `api_key_required: false` を明記するか）を課す**。`user_data` のモデルは本人が書いたものなので従来どおり自由。ファイル内に書かれた `source` は読み込み時に捨てる。
     - この規則を「同梱モデルに該当例が無いから不要」と判断してはならない。出荷物に無いことは、利用者やアドオンが後から足すモデルへの境界を何ら保証しない。
@@ -254,7 +266,7 @@ def list_models_using_provider(provider_id: str) -> list[str]: ...  # 削除前�
 def is_builtin(provider_id: str) -> bool: ...
 ```
 
-`load_configs()` は `iter_files_with_layer(PROVIDERS_DIR, "*.json")` で 3 層優先順位読み込み。走査したルートが `(path, layer)` で返るので、その `layer` をそのまま `source` として刻む。**ファイル内に書かれた `source` / `builtin` は捨てる**（不変条件 11）。API 応答の `builtin` フィールドは `source == "builtin"` から導出した表示用の値。
+`load_configs()` は `iter_file_candidates_with_layer(PROVIDERS_DIR, "*.json")` で 3 層の候補を受け取り、構造検査を通った候補だけでファイル名・ID の優先順位を確定する（不変条件 1）。走査したルートが `(path, layer)` で返るので、その `layer` をそのまま `source` として刻む。**ファイル内に書かれた `source` / `builtin` は捨てる**（不変条件 11）。API 応答の `builtin` フィールドは `source == "builtin"` から導出した表示用の値。
 
 ### D. factory.py の更新
 
