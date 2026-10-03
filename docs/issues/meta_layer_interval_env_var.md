@@ -26,21 +26,30 @@
   で止まっている。env の変更だけで判断点や watchdog が動き出すわけではない。
   出荷範囲と後続設計は [自律行動 v3 §11](../intent/autonomous_behavior_v3.md) を参照する。
 
-**検証範囲**: 隔離環境・LLM なしで
-[`test_meta_layer.py`](../../tests/test_meta_layer.py)、
-[`test_autonomy_manager.py`](../../tests/test_autonomy_manager.py)、
-[`test_v03_autonomy_gate.py`](../../tests/test_v03_autonomy_gate.py) を実行した。
-加えて合成 manager を使った起動しないコンストラクタ確認で、引数・設定・env の優先順位、
-設定の既定値が env に優先すること、秒→分換算・下限・不正値・未設定時の挙動を確認した。
-実ペルソナの自律起動や interval の実時間検証は行っていない。
+**検証範囲（2026-10-02 の実行記録）**:
+
+- **リポジトリの既存自動テスト**: 隔離環境・LLM なしで
+  [`test_meta_layer.py`](../../tests/test_meta_layer.py)、
+  [`test_autonomy_manager.py`](../../tests/test_autonomy_manager.py)、
+  [`test_v03_autonomy_gate.py`](../../tests/test_v03_autonomy_gate.py) を実行した。
+  これらは MetaLayer の共有基盤、watchdog、v0.3 の停止を扱うが、
+  **env の読み出しと上記の優先順位を検証するテストではない**。
+- **その場の手動・合成確認（リポジトリに未収録）**: 合成 manager と、起動しない
+  `AutonomyManager` コンストラクタの7ケースで、引数・設定・env の優先順位、
+  設定の既定値が env に優先すること、秒→分換算・下限・不正値・未設定時を確認した。
+  退役メソッド3件の不存在も手動で確認した。これは今回の確認記録であり、
+  将来の変更を継続監視する自動回帰テストがあるという意味ではない。
+- **未検証**: 実ペルソナの自律起動と interval の実時間検証。v0.4 の留保は残る。
 
 ## 経緯: 起票時の記録（以下の確認・追加実装案は現行手順ではない）
 
 2026-10-02: 旧 v1 判断の退役と、名前を残した env の現存を分けて記録した。
+2026-10-03: 関連6テスト（MetaLayer / AutonomyManager / v0.3 gate / Pulse 復帰 / Spell 不使用 / SpellList）を隔離 HOME・LLM なしで再実行し、120 passed（既存 warning 5件）。この再実行にも env 優先順位の自動テストは含まれない。
+2026-10-03: [PR #360 のレビュー](https://github.com/maha0525/SAIVerse/pull/360#issuecomment-5964735859) を受け、自動テストとその場の手動・合成確認を区別した。
 以下は 2026-05-08 時点の未確認事項と提案であり、退役した判断経路や新しい DB 列を
 復活・追加するための指示ではない。
 
-**ステータス**: 🔲 未着手
+**起票時のステータス**: 🔲 未着手
 **優先度**: low
 **作成日**: 2026-05-08
 **関連**: `saiverse/meta_layer.py`, [docs/intent/persona_cognition/README.md](../intent/persona_cognition/README.md) Phase 4 進捗表

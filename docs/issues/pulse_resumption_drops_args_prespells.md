@@ -9,7 +9,8 @@
 復帰時は**入力データを維持し、副作用のある事前アクションを繰り返さない**。
 
 - [`PulseController._queue_for_resumption`](../../sea/pulse_controller.py) は既に
-  `args=request.args` を引き継ぐ。生成前の再検査 `pre_generation_check` も引き継ぐ。
+  `args=request.args` で**同じ `args` dict の参照を引き継ぐ（複製はしない）**。
+  生成前の再検査 `pre_generation_check` も引き継ぐ。dict を複製すべきかの設計判断は本変更の範囲外。
 - `pre_spells` は意図的に引き継がない。メール送信・画像生成などを含み得るため、
   復帰のたびに再実行すると副作用が重複する。実装コメントは、未実行のまま中断された
   `pre_spells` が失われる窓を残す判断も記録している。これは今回解消したと扱わない。
@@ -18,20 +19,22 @@
 
 **参照先**: 起動・中断の設計は [Pulse dispatch](../intent/persona_cognition/pulse_dispatch.md)、
 事前スペルの役割は [nested subline spell §13](../intent/persona_cognition/nested_subline_spell.md)。
-復帰時のコピー契約は上記実装と
+復帰 request へのフィールド継承は上記実装と
 [`test_pulse_controller_resumption.py`](../../tests/test_pulse_controller_resumption.py) が記録する。
 
 **検証範囲**: 隔離環境・LLM なしで上記回帰テスト 1 件を実行し、`args` の維持と
-`pre_spells` の非継承を確認した。これは request のコピー契約の検証であり、実際の
+`pre_spells` の非継承を確認した。このテストは `args` の値を比較しており、
+dict の同一性・複製の有無を検査していない。同一参照の根拠は上記実装である。実際の
 スケジュール発火 → ユーザー割り込み → 復帰完了の実機検証を代替しない。
 
 ## 経緯: 起票時の記録（以下の修正案は現行手順ではない）
 
 2026-10-02: 現行コード・回帰テストと照合し、入力と副作用の区別を冒頭に追記した。
+2026-10-03: [PR #360 のレビュー](https://github.com/maha0525/SAIVerse/pull/360#issuecomment-5964735859) を受け、同一 dict の参照を引き継ぐ実装と、値だけを確認する既存テストを区別した。
 以下は 2026-07-20 の問題認識と提案を残した履歴。
 
 **発見**: 2026-07-20、W3 (実行台帳 Phase 3 — schedule) の調査中。
-**状態**: 未解決 (W3 スコープ外として分離)。
+**起票時の状態**: 未解決 (W3 スコープ外として分離)。
 
 ### 事実
 
