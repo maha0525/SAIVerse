@@ -206,13 +206,30 @@ def test_new_files_cleanup_multiple_paths_but_not_preexisting_summary(tmp_path):
     assert summary.read_text() == "Existing shared summary"
 
 
+def _symlink_or_skip(link, target):
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"This environment cannot create symlinks: {exc}")
+
+
+@pytest.mark.parametrize("error", [OSError("symlink privilege unavailable"), NotImplementedError("symlinks unsupported")])
+def test_symlink_setup_skips_only_unavailable_environment(tmp_path, monkeypatch, error):
+    def unavailable(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(Path, "symlink_to", unavailable)
+    with pytest.raises(pytest.skip.Exception, match="cannot create symlinks"):
+        _symlink_or_skip(tmp_path / "link", tmp_path / "target")
+
+
 @pytest.mark.parametrize("symlink", [False, True])
 def test_exclusive_create_never_owns_preexisting_file_or_symlink(tmp_path, symlink):
     original = tmp_path / "original.txt"
     original.write_bytes(b"owned by somebody else")
     target = tmp_path / "target.txt"
     if symlink:
-        target.symlink_to(original)
+        _symlink_or_skip(target, original)
     else:
         target.write_bytes(b"preexisting")
     with pytest.raises(FileExistsError):
@@ -253,7 +270,7 @@ def test_cleanup_preserves_replaced_or_shared_files(tmp_path, replacement):
                 if replacement == "file":
                     path.write_bytes(b"replacement")
                 else:
-                    path.symlink_to(other)
+                    _symlink_or_skip(path, other)
             raise RuntimeError("failed")
     assert path.exists()
     assert other.read_bytes() == b"existing"
