@@ -47,3 +47,14 @@
 - [arasuji_tiny_run_absorption](archive/arasuji_tiny_run_absorption.md) — 本体。Codex 十二巡 + ローカル 1 巡の消し込み記録と受容残余
 - [arasuji_levels.md §7-9](../intent/arasuji_levels.md#7-9-差し替え失敗でも知識と知覚の帰属を保つ) — 帰属維持の不変条件
 - `sai_memory/arasuji/absorption.py` フェーズ 1 / `sai_memory/arasuji/storage.py` regenerate_entry
+
+
+## 追加レビュー: 前向き付け替えの取り残し (2026-10-03)
+
+- 技術原因: 前向き UPDATE を記録済み ID へ絞った後、SELECT と UPDATE の間に別接続が旧 entry に追加した Fragment を成功経路が見落とした。判断の誤り: 復元対象の厳密さだけを優先し、旧削除へ進める条件を再検証しなかった。検出漏れの条件: 並行 writer のテストが失敗後の復元だけを対象にしていた。
+- 吸収・再生成とも、UPDATE が持つ書き込みトランザクション内で commit 前に旧 entry の参照残留を検査する。残っていれば例外にして既存の rollback → 条件付き復元 → replacement 取り下げへ戻し、旧 entry は残す。対象外の行を勝手に移さない。
+- 別 SQLite 接続が SELECT 完了直後に Fragment を追加する再現を、吸収の一つ目・二つ目の旧 entry と再生成の計 3 件で修正前に確認。既存の commit 確定後例外復元も維持する。
+- 成功側の完全性と失敗側の復元範囲を対で検査する型は、ファイル置換と接続・ツール登録の入れ替えにも適用できる。これらの別領域を本 PR で変更・検証したとは扱わない。
+- 元からの「最初の SELECT が空の経路」や付け替え commit 後から旧削除までの並行 writer、継続的な復元失敗、replacement への対象外参照の制約は再設計しない。今回防ぐのは、非空の試行対象 SELECT → ID 限定 UPDATE の窓で新たに生じた取り残し。
+
+- 追加修正後の関連回帰 **480 passed** (arasuji / perception / storage 427 件、予算解決 / eviction 53 件)。ruff・台帳検査・diff check 合格。生成のみ fake、SQLite 更新・commit・復元・撤去は実処理。Windows / 本番データは未検証。

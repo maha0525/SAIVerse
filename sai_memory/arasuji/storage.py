@@ -1489,6 +1489,13 @@ def regenerate_entry(
                 f"WHERE chronicle_entry_id = ? AND id IN ({ph})",
                 (new_entry.id, entry_id, *attempted_fragment_ids),
             )
+            # UPDATE と同じ書き込みトランザクションで、未記録の参照を確認。
+            # 取り残したまま旧 entry を消さず、条件付き復元・取り下げへ進む。
+            if conn.execute(
+                "SELECT 1 FROM memopedia_fragments WHERE chronicle_entry_id = ? LIMIT 1",
+                (entry_id,),
+            ).fetchone() is not None:
+                raise sqlite3.OperationalError("concurrent fragment remains on the old entry")
             conn.commit()
     except sqlite3.DatabaseError as exc:
         # 捕捉は DatabaseError の幅で (Codex 十二巡 Q2): OperationalError だけ

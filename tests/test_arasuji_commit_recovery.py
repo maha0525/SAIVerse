@@ -306,3 +306,46 @@ def test_regeneration_still_aborts_when_material_batches_change(memory, monkeypa
 
     _run(memory, memory.conn, "regenerate", monkeypatch, after_generate=add_material_during_generation)
     _assert_recovered(memory)
+
+
+class _InsertFragmentAfterSelection:
+    """A separate writer commits after the real SELECT has released its cursor."""
+
+    def __init__(self, memory, occurrence):
+        self.memory = memory
+        self._real = memory.conn
+        self.occurrence = occurrence
+        self.selections = 0
+        self.inserted_owner = None
+
+    def execute(self, sql, parameters=(), **kwargs):
+        cursor = self._real.execute(sql, parameters, **kwargs)
+        if self.memory.created and sql == "SELECT id FROM memopedia_fragments WHERE chronicle_entry_id = ?":
+            rows = cursor.fetchall()
+            self.selections += 1
+            if self.selections == self.occurrence:
+                with closing(sqlite3.connect(self.memory.path)) as other, other:
+                    other.execute(
+                        "INSERT INTO memopedia_fragments (id, content, entity_id, chronicle_entry_id, created_at) "
+                        "VALUES ('concurrent-fragment', '合成知識', 'root_chronicle', ?, 1)",
+                        parameters,
+                    )
+                self.inserted_owner = parameters[0]
+            return SimpleNamespace(fetchall=lambda: rows)
+        return cursor
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+@pytest.mark.parametrize("operation,occurrence", [("absorption", 1), ("absorption", 2), ("regenerate", 1)])
+def test_fragment_added_after_selection_aborts_swap(memory, monkeypatch, operation, occurrence):
+    proxy = _InsertFragmentAfterSelection(memory, occurrence)
+    _run(memory, proxy, operation, monkeypatch)
+    assert proxy.inserted_owner is not None
+    _assert_recovered(memory)
+    owner = memory.conn.execute(
+        "SELECT chronicle_entry_id FROM memopedia_fragments WHERE id = 'concurrent-fragment'",
+    ).fetchone()[0]
+    assert owner == proxy.inserted_owner
+    assert get_entry(memory.conn, owner) is not None

@@ -1047,6 +1047,13 @@ def _repoint_fragments(
             f"WHERE chronicle_entry_id = ? AND id IN ({placeholders})",
             (new_id, old_id, *attempted_ids),
         )
+        # UPDATE の書き込み錠を保持したまま、SELECT 後に増えた参照を検知する。
+        # 未記録の行を勝手に動かさず、旧 entry の削除前に既存の復元へ戻す。
+        if conn.execute(
+            "SELECT 1 FROM memopedia_fragments WHERE chronicle_entry_id = ? LIMIT 1",
+            (old_id,),
+        ).fetchone() is not None:
+            raise sqlite3.OperationalError("concurrent fragment remains on the old entry")
         conn.commit()
     except sqlite3.DatabaseError as exc:
         # 捕捉は DatabaseError の幅で (Codex 十二巡 Q2 — 縮退の判定を
