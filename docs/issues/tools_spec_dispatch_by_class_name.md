@@ -1,6 +1,6 @@
 # tool spec の形式判定がクラス名の一覧で行われ、Codex と wrapper が漏れる
 
-**状態**: 検証待ち (2026-10-02 実装済み、レビュー・実機確認待ち。未マージ)。2026-08-01 起票、Codex レビュー二巡目の指摘2。使用量帰属の修正とは独立。
+**状態**: 検証待ち (develop に取り込み済み、実機確認待ち)。2026-08-01 起票、Codex レビュー二巡目の指摘2。使用量帰属の修正とは独立。
 
 ## 起票時の現象
 
@@ -55,3 +55,5 @@ else:
 - 最初の関連回帰は SOCKS proxy に必要な `socksio` 不足で SDK 初期化が失敗した。テスト環境に追加後、6 ファイルで 215 passed / 11 failed / 7 subtests passed。残る11件は既存 LLM クライアントテストの外部ホスト DNS 解決失敗 (`provider_security`、OpenRouter 等) で、今回の dispatch に到達する前に止まる。新規29件と既存 runtime helper の計52件は全通過 (4 subtests passed)。
 - SEA 回帰一式・新規 dispatch・runtime helper・Codex stream・Anthropic request builder・llama-server を合わせた隔離検証は 168 passed / 4 subtests passed。Google SDK の既存 `TUPLE` 警告と `ast.Num` 非推奨警告のみ。
 - 元の `_build_tools_spec` を `git show HEAD:sea/runtime.py` から隔離プロセス内だけに復元すると、Codex body・xAI serializer・新しい派生クラスの3回帰がすべて失敗することも確認。現行コードへ戻した別プロセスでは上記168件が通過した。
+
+- 2026-10-03: PR #349 を develop へマージした (レビューはメティス、マージの判断はまはー)。台帳から移送した旧次アクション: 「実装と隔離回帰が揃い、レビュー待ち。次 = capability 宣言と serializer 境界をレビューし、承認した環境で Codex・wrapper の tool call を確認する。」(誰待ち: まはー (レビュー・実機確認))

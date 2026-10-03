@@ -1,6 +1,6 @@
 # 組み込みツールのログの責任境界
 
-**ステータス**: 検証待ち — [既存 issue の対応方針](../issues/import_time_log_handlers_escape_isolation.md)に沿う撤去・隔離回帰済み、PR レビュー待ち (develop 未マージ)
+**ステータス**: 検証待ち — [既存 issue の対応方針](../issues/import_time_log_handlers_escape_isolation.md)に沿う撤去・隔離回帰済みで、develop に取り込み済み。実機のログでの確認待ち
 
 ## 全体像と約束
 

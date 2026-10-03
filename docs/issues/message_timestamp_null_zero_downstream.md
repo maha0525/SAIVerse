@@ -10,7 +10,7 @@
 `rowid` 順 (W8 S7)。保存行 → Python の材料 → 要約・吸収 → 提示・想起を通して、
 インポートされた時刻欠落行もこの歴史位置を保つ必要がある。
 
-[比較器の修正](compare_message_positions_null_zero_mapping.md) が揃えたのは
+[比較器の修正](archive/compare_message_positions_null_zero_mapping.md) が揃えたのは
 `compare_message_positions` と `session_lifecycle` の呼び手 5 か所の位置判断。
 下記の変換・並べ替えは別経路であり、この PR で解消したものには数えない。
 

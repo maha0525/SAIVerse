@@ -1,6 +1,6 @@
 # Issue: ワールドエディタが他経路の設定追加に追いついていない(同期監査)
 
-**ステータス**: 🟣 検証待ち (City / Building / Persona の机上棚卸し済み。まはーの範囲・優先順位判断待ち。UI 追加は未着手)
+**ステータス**: 🔵 設計中 (City / Building / Persona の机上棚卸しは develop に取り込み済み。まはーの範囲・優先順位判断待ち。UI 追加は未着手)
 **優先度**: mid
 **作成日**: 2026-07-08
 **関連**: `frontend/src/components/settings/WorldEditor.tsx` ↔ 各設定モーダル(`GlobalSettingsModal.tsx`, `BuildingSettingsModal.tsx`, `SettingsModal.tsx` 等。旧 `PersonaProfileModal.tsx` は削除済み)
@@ -116,6 +116,7 @@ City / Building / Persona などの設定項目が、個別の設定モーダル
 - 2026-10-02: City / Building / Persona の入力・送信・受け側を机上照合し、差分表と意図的な制限を追記。UI 追加・DB 変更・本番操作は行っていない。追加範囲と優先順位は未決のまま。
 
 - 2026-10-03: [PR #362 のレビュー](https://github.com/maha0525/SAIVerse/pull/362#issuecomment-5964788305) を再照合し、TutorialWizard の画像保持という誤記を訂正、未解決 issue を分離。CityMap の座標更新に所属検査が無いことを追記。実機の保存往復は引き続き未検証。
+- 2026-10-03: PR #362 を develop へマージした (レビューはメティス、マージの判断はまはー)。台帳から移送した旧次アクション: 「City / Building / Persona の比較表をレビュー待ち。次 = まはーと追加範囲・優先順位を決め、必要な項目だけ保存契約と往復確認を設計する。UI 追加は未着手。」(誰待ち: まはー (範囲・優先順位))
 
 <!-- 棚卸し時点のソース。後続の UI 整理で行が動いても参照先を保つ。 -->
 [WE-C]: https://github.com/maha0525/SAIVerse/blob/53944ed9faf3eecd03e92ea5a07ec1b1329479a2/frontend/src/components/settings/WorldEditor.tsx#L681-L711

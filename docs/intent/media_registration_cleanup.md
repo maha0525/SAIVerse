@@ -1,6 +1,6 @@
 # 作成直後の文書と登録失敗の後始末
 
-> **ステータス**: 検証待ち (2026-10-02、文書側の実装・隔離回帰済み、PR レビュー待ち)
+> **ステータス**: 検証待ち (文書側の実装は develop に取り込み済み。画像の方針は未確定)
 > **関連**: [元 issue](../issues/media_files_orphaned_when_item_creation_fails.md)、[部屋のアイテム表示](room_item_display_cap.md)、[メディア入力](multimodal_input_pipeline.md)
 
 ## 全体と所有権
