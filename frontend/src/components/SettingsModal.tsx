@@ -94,6 +94,7 @@ interface ModelChoice {
     /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
      *  会話に使う欄では選択肢に出さない — 反射判断の欄だけが選べる。 */
     reflex_only?: boolean;
+    config_error?: { path: string; source: string; reason: string } | null;
 }
 
 export default function SettingsModal({ isOpen, onClose, personaId }: SettingsModalProps) {
@@ -513,7 +514,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         <option data-i18n="components.SettingsModal.text014" value={defaultModel}>{uiText("components.SettingsModal.text014")}{defaultModel}</option>
                                     )}
                                     {conversationModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
                                     ))}
                                 </select>
                             </div>
@@ -530,7 +531,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         <option data-i18n="components.SettingsModal.text017" value={lightweightModel}>{uiText("components.SettingsModal.text017")}{lightweightModel}</option>
                                     )}
                                     {conversationModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
                                     ))}
                                 </select>
                                 <div data-i18n="components.SettingsModal.text018" className={styles.description}>{uiText("components.SettingsModal.text018")}</div>
@@ -548,7 +549,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         <option data-i18n="components.SettingsModal.text021" value={memoryWeaveModel}>{uiText("components.SettingsModal.text021")}{memoryWeaveModel}</option>
                                     )}
                                     {conversationModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
                                     ))}
                                 </select>
                                 <div data-i18n="components.SettingsModal.text022" className={styles.description}>{uiText("components.SettingsModal.text022")}</div>
@@ -566,7 +567,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         <option data-i18n="components.SettingsModal.text025" value={visionModel}>{uiText("components.SettingsModal.text025")}{visionModel}</option>
                                     )}
                                     {conversationModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
                                     ))}
                                 </select>
                                 <div data-i18n="components.SettingsModal.text026" className={styles.description}>{uiText("components.SettingsModal.text026")}</div>
@@ -584,7 +585,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         <option data-i18n="components.SettingsModal.text029" value={audioModel}>{uiText("components.SettingsModal.text029")}{audioModel}</option>
                                     )}
                                     {conversationModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
                                     ))}
                                 </select>
                                 <div data-i18n="components.SettingsModal.text030" className={styles.description}>{uiText("components.SettingsModal.text030")}</div>
@@ -602,7 +603,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         <option data-i18n="components.SettingsModal.text033" value={videoModel}>{uiText("components.SettingsModal.text033")}{videoModel}</option>
                                     )}
                                     {conversationModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
                                     ))}
                                 </select>
                                 <div data-i18n="components.SettingsModal.text034" className={styles.description}>{uiText("components.SettingsModal.text034")}</div>
@@ -620,7 +621,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         <option data-i18n="components.SettingsModal.reflexJudgmentModelUnknown" value={reflexJudgmentModel}>{uiText("components.SettingsModal.reflexJudgmentModelUnknown")}{reflexJudgmentModel}</option>
                                     )}
                                     {availableModels.map(m => (
-                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
                                     ))}
                                 </select>
                                 <div data-i18n="components.SettingsModal.reflexJudgmentModelDescription" className={styles.description}>{uiText("components.SettingsModal.reflexJudgmentModelDescription")}</div>

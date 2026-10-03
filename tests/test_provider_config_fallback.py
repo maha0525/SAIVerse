@@ -1,4 +1,4 @@
-"""Invalid provider overrides must not hide valid lower-layer definitions.
+"""Invalid provider overrides stay visible and must never choose a lower connection.
 
 All files and active registries are isolated; no persona, LLM, or network runs.
 """
@@ -58,11 +58,12 @@ def load_registries(monkeypatch):
 
 @pytest.fixture
 def client():
-    from api.routes import info
+    from api.routes import config, info
 
     app = FastAPI()
     app.include_router(providers.router, prefix="/api/providers")
     app.include_router(info.router, prefix="/api")
+    app.include_router(config.router, prefix="/api/config")
     with TestClient(app) as client:
         yield client
 
@@ -98,164 +99,184 @@ def test_ordinary_iterator_keeps_recursive_same_root_behavior(layers, layer):
 @pytest.mark.parametrize("field,value", [
     ("display_name", None), ("display_name", 5), ("display_name", []),
     ("protocol", None), ("protocol", False), ("protocol", {}),
+    ("protocol", "DO_NOT_LOG"), ("protocol", ""),
     ("base_url", 0), ("base_url", []),
-    ("api_key_env", 0), ("api_key_env", 7), ("api_key_env", ["DO_NOT_LOG"]),
+    ("api_key_env", 0), ("api_key_env", ["DO_NOT_LOG"]),
     ("api_key_required", "false"), ("api_key_required", 0),
-    ("default_request_kwargs", []),
-    ("default_convert_system_to_user", "false"),
+    ("default_request_kwargs", []), ("default_convert_system_to_user", "false"),
     ("default_supports_images", "true"),
     ("default_max_image_bytes", "1024"), ("default_max_image_bytes", True),
+    ("api_key_env_alternates", {}), ("api_key_env_alternates", None),
+    ("api_key_env_alternates", "OTHER_KEY"), ("api_key_env_alternates", [None]),
+    ("api_key_env_alternates", [3]), ("api_key_env_alternates", [""]),
+    ("api_key_env_alternates", [" "]),
 ])
-def test_invalid_fields_fall_back_before_filename_or_id_shadowing(
-    layers, monkeypatch, client, filename, field, value,
+def test_invalid_override_blocks_all_consumers(
+    layers, monkeypatch, client, caplog, filename, field, value,
 ):
+    from llm_clients import factory
+    from saiverse.provider_security import validate_model_config_connection
+
     write_config(layers["builtin"], "example.json", VALID)
     write_config(layers["builtin"], "unrelated.json", {**VALID, "id": "unrelated"})
-    invalid = write_config(layers["user_data"], filename, {**VALID, field: value})
+    invalid = write_config(layers["user_data"], filename, {
+        **VALID, "base_url": "https://DO_NOT_LOG.invalid/v1", field: value,
+    })
     before = invalid.read_bytes()
     write_config(layers["builtin"], "model.json", {
         "model": "synthetic", "provider_ref": "example", "display_name": "Synthetic",
     }, subdir="models")
-
-    configs = load_registries(monkeypatch)
-    assert configs["example"] == {**VALID, "source": "builtin"}
+    with caplog.at_level(logging.WARNING):
+        configs = load_registries(monkeypatch)
+    error = configs["example"]["config_error"]
+    assert error == {"path": str(invalid.absolute()), "source": "user_data", "reason": error["reason"]}
+    assert field in error["reason"]
+    assert "DO_NOT_LOG" not in caplog.text
+    assert "base_url" not in configs["example"]
+    assert configs["unrelated"]["source"] == "builtin"
     response = client.get("/api/providers")
     assert response.status_code == 200
-    assert {row["id"] for row in response.json()} == {"example", "unrelated"}
-    assert client.get("/api/providers/example").json()["builtin"] is True
+    row = next(row for row in response.json() if row["id"] == "example")
+    assert row["config_error"] == error
+    assert row["available"] is False
+    assert row["base_url"] is None
+    assert row["api_key_envs"] == []
+    assert "DO_NOT_LOG" not in response.text
     assert client.get("/api/providers/example/models").json() == ["model"]
     model = model_configs.MODEL_CONFIGS["model"]
-    assert model["protocol"] == VALID["protocol"]
-    assert model["base_url"] == VALID["base_url"]
-    assert model["api_key_required"] is False
-    assert [row["id"] for row in client.get("/api/models").json()] == ["model"]
+    assert "base_url" not in model
+    assert not model_configs.is_model_available("model")
+    for route in ("/api/models", "/api/config/models"):
+        response = client.get(route)
+        assert response.status_code == 200
+        row = next(row for row in response.json() if row["id"] == "model")
+        assert row["available"] is False
+        assert row["config_error"] == error
+    # Neither validation nor the real factory may get as far as DNS or SDK creation.
+    def forbidden(*args, **kwargs):
+        pytest.fail("Invalid provider reached a connection boundary")
+    monkeypatch.setattr("saiverse.provider_security.validate_provider_url", forbidden)
+    for name in ("OpenAIClient", "OllamaClient", "GeminiClient", "AnthropicClient"):
+        monkeypatch.setattr(factory, name, forbidden)
+    with pytest.raises(ValueError, match="Provider configuration is invalid"):
+        validate_model_config_connection("model", model)
+    with pytest.raises(ValueError, match="Provider configuration is invalid"):
+        factory.get_llm_client("model", "openai", 4096, model)
+    probe = client.post("/api/providers/example/test").json()
+    assert probe["success"] is False
+    assert "Provider configuration is invalid" in probe["error"]
     assert invalid.read_bytes() == before
 
 
 @pytest.mark.parametrize("contents", [
-    "{", "null", "[]", '"text"', "12", "true", "[{}]",
+    "{", "null", "[]", '\"text\"', "12", "true", "[{}]",
     '{"id": null}', '{"id": []}', '{"id": {}}', '{"id": 42}', '{"id": ""}',
+    '{"id": " "}', '{"id": "DO_NOT_LOG/token"}',
 ])
-def test_malformed_json_and_identity_do_not_escape_loader(layers, monkeypatch, client, contents):
+def test_malformed_json_and_identity_remain_visible(layers, monkeypatch, client, contents):
     write_config(layers["builtin"], "example.json", VALID)
     path = write_config(layers["user_data"], "example.json", {})
     path.write_text(contents, encoding="utf-8")
     configs = load_registries(monkeypatch)
-    assert configs["example"]["source"] == "builtin"
+    assert configs["example"]["source"] == "user_data"
+    assert configs["example"]["config_error"]["path"] == str(path.absolute())
     assert client.get("/api/providers").status_code == 200
 
 
 @pytest.mark.parametrize("failure", ["utf8", "read_error"])
-def test_unreadable_override_uses_lower_layer(layers, monkeypatch, failure):
+def test_unreadable_override_stops_lower_layer(layers, monkeypatch, failure):
     write_config(layers["builtin"], "example.json", VALID)
     path = write_config(layers["user_data"], "example.json", VALID)
     if failure == "utf8":
         path.write_bytes(b"\xff\xfe")
     else:
         original = Path.read_text
-
         def read_text(self, *args, **kwargs):
             if self == path:
                 raise PermissionError("DO_NOT_LOG")
             return original(self, *args, **kwargs)
-
         monkeypatch.setattr(Path, "read_text", read_text)
-    assert provider_configs.load_configs()["example"]["source"] == "builtin"
-
-
-@pytest.mark.parametrize("same_filename", [True, False])
-def test_all_three_layers_and_later_addon_are_considered(layers, same_filename):
-    write_config(layers["builtin"], "example.json", VALID)
-    write_config(layers["user_data"], "example.json", {**VALID, "protocol": None})
-    exp_name = "example.json" if same_filename else "addon-provider.json"
-    exp_path = write_config(layers["expansion"], exp_name, {**VALID, "display_name": None})
-    assert provider_configs.load_configs()["example"]["source"] == "builtin"
-    later = layers["expansion"].parent / "z_addon"
-    write_config(later, exp_name, {**VALID, "display_name": "Later addon"})
-    assert provider_configs.load_configs()["example"]["display_name"] == "Later addon"
-    exp_path.write_text(json.dumps({**VALID, "display_name": "First addon"}), encoding="utf-8")
-    assert provider_configs.load_configs()["example"]["display_name"] == "First addon"
+    assert provider_configs.load_configs()["example"]["config_error"]["source"] == "user_data"
 
 
 @pytest.mark.parametrize("filename", ["example.json", "renamed.json"])
-def test_valid_override_retains_priority(layers, filename):
+def test_three_layers_keep_broken_highest_until_repaired(layers, filename):
     write_config(layers["builtin"], "example.json", VALID)
     write_config(layers["expansion"], "example.json", {**VALID, "display_name": "Addon"})
-    write_config(layers["user_data"], filename, {**VALID, "display_name": "User"})
+    write_config(layers["expansion"].parent / "z_addon", "example.json", VALID)
+    high = write_config(layers["user_data"], filename, {**VALID, "protocol": None})
+    assert provider_configs.load_configs()["example"]["source"] == "user_data"
+    high.write_text(json.dumps({**VALID, "display_name": "User"}), encoding="utf-8")
     configs = provider_configs.load_configs()
     assert list(configs) == ["example"]
     assert configs["example"]["display_name"] == "User"
-    assert configs["example"]["source"] == "user_data"
+    assert "config_error" not in configs["example"]
 
 
-def test_different_ids_same_filename_shadow_only_when_valid(layers):
+def test_different_ids_same_filename_block_hidden_provider_too(layers):
     write_config(layers["builtin"], "shared.json", VALID)
-    path = write_config(layers["user_data"], "shared.json", {**VALID, "id": "custom", "protocol": None})
-    assert list(provider_configs.load_configs()) == ["example"]
-    path.write_text(json.dumps({**VALID, "id": "custom"}), encoding="utf-8")
-    assert list(provider_configs.load_configs()) == ["custom"]
+    high = write_config(layers["user_data"], "shared.json", {**VALID, "id": "custom", "protocol": None})
+    configs = provider_configs.load_configs()
+    for pid in ("custom", "example"):
+        assert configs[pid]["config_error"]["path"] == str(high.absolute())
+        assert "base_url" not in configs[pid]
 
 
-def test_optional_nulls_and_legacy_omissions_remain_accepted(layers, monkeypatch, client):
-    write_config(layers["user_data"], "legacy.json", {
-        "base_url": None, "api_key_env": None, "api_key_required": None,
-        "default_request_kwargs": None, "default_convert_system_to_user": None,
-        "default_supports_images": None, "default_max_image_bytes": None,
+def test_unparseable_filename_alias_blocks_lower_id_and_alternate_name(layers):
+    write_config(layers["builtin"], "other.json", VALID)
+    write_config(layers["expansion"], "shared.json", VALID)
+    high = write_config(layers["user_data"], "shared.json", None)
+    configs = provider_configs.load_configs()
+    assert configs["example"]["config_error"]["path"] == str(high.absolute())
+    assert configs["shared"]["config_error"]["path"] == str(high.absolute())
+
+
+def test_broken_lower_definition_cannot_disable_valid_higher(layers):
+    write_config(layers["user_data"], "renamed.json", VALID)
+    write_config(layers["builtin"], "example.json", {**VALID, "protocol": None})
+    assert provider_configs.load_configs()["example"] == {**VALID, "source": "user_data"}
+
+
+def test_optional_nulls_and_empty_alternates_are_accepted(layers, monkeypatch, client):
+    write_config(layers["user_data"], "example.json", {
+        **VALID, "base_url": None, "api_key_env": None, "api_key_env_alternates": [],
+        "api_key_required": None, "default_request_kwargs": None,
+        "default_convert_system_to_user": None, "default_supports_images": None,
+        "default_max_image_bytes": None,
     })
-    load_registries(monkeypatch)
-    response = client.get("/api/providers/legacy")
-    assert response.status_code == 200
-    assert response.json()["id"] == "legacy"
-    assert response.json()["display_name"] == "legacy"
-    assert response.json()["protocol"] == "unknown"
-    assert response.json()["api_key_env"] is None
+    configs = load_registries(monkeypatch)
+    assert "config_error" not in configs["example"]
+    assert client.get("/api/providers/example").json()["base_url"] is None
 
 
-@pytest.mark.parametrize("filename,declared_id", [
-    ("example.json", "example"), ("renamed.json", "example"), ("example.json", "different"),
-])
-def test_warnings_identify_source_and_actual_fallback_without_values(
-    layers, caplog, filename, declared_id,
-):
-    low = write_config(layers["builtin"], "example.json", VALID)
-    high = write_config(layers["user_data"], filename, {
-        **VALID, "id": declared_id, "api_key_env": {"secret": "DO_NOT_LOG"},
-        "base_url": "https://DO_NOT_LOG.invalid/", "default_headers": {"Authorization": "DO_NOT_LOG"},
-    })
-    with caplog.at_level(logging.WARNING, logger="saiverse.provider_configs"):
-        provider_configs.load_configs()
-    message = caplog.messages[0]
-    assert f"path={str(high.absolute())!r} source=user_data provider_id={declared_id!r}" in message
-    assert f"fallback=path={str(low.absolute())!r} source=builtin provider_id='example'" in message
-    assert "api_key_env" in message
-    assert "DO_NOT_LOG" not in caplog.text
+def test_missing_protocol_is_visible_as_invalid(layers):
+    write_config(layers["user_data"], "legacy.json", {})
+    assert "protocol" in provider_configs.load_configs()["legacy"]["config_error"]["reason"]
 
 
-def test_missing_fallback_is_explicit_and_unrelated_provider_survives(layers, monkeypatch, client, caplog):
-    write_config(layers["user_data"], "broken.json", {**VALID, "id": "broken", "protocol": None})
+def test_invalid_only_provider_remains_visible(layers, monkeypatch, client):
+    write_config(layers["user_data"], "broken.json", {"protocol": None})
     write_config(layers["builtin"], "example.json", VALID)
-    with caplog.at_level(logging.WARNING, logger="saiverse.provider_configs"):
-        configs = load_registries(monkeypatch)
-    assert list(configs) == ["example"]
-    assert "provider_id='broken'" in caplog.text
-    assert "fallback=none" in caplog.text
-    assert client.get("/api/providers").status_code == 200
+    load_registries(monkeypatch)
+    response = client.get("/api/providers")
+    assert response.status_code == 200
+    assert {row["id"] for row in response.json()} == {"broken", "example"}
 
 
-def test_fallback_keeps_walked_layer_for_symlink(layers):
-    # A valid lower candidate through an addon link must not inherit builtin trust.
-    builtin = write_config(layers["builtin"], "example.json", VALID)
+def test_walked_layer_and_diagnostics_cannot_be_forged(layers):
+    builtin = write_config(layers["builtin"], "example.json", {**VALID, "config_error": {"reason": "fake"}})
     addon_dir = layers["expansion"] / "providers"
     addon_dir.mkdir(parents=True)
     try:
         (addon_dir / "example.json").symlink_to(builtin)
     except (OSError, NotImplementedError):
         pytest.skip("symlinks unavailable")
-    write_config(layers["user_data"], "example.json", {**VALID, "protocol": None})
-    assert provider_configs.load_configs()["example"]["source"] == "expansion"
+    config = provider_configs.load_configs()["example"]
+    assert config["source"] == "expansion"
+    assert "config_error" not in config
 
 
-def test_shipped_openrouter_models_survive_broken_override(layers, monkeypatch, client):
+def test_shipped_openrouter_models_visible_unavailable_then_repaired(layers, monkeypatch, client):
     monkeypatch.setattr(data_paths, "BUILTIN_DATA_DIR", SHIPPED_DATA)
     monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-key-for-isolated-test")
     baseline = load_registries(monkeypatch)
@@ -263,17 +284,143 @@ def test_shipped_openrouter_models_survive_broken_override(layers, monkeypatch, 
         key: config for key, config in model_configs.MODEL_CONFIGS.items()
         if config.get("provider_ref") == "openrouter"
     }
-    assert expected, "The shipped models must exercise provider_ref resolution"
+    assert expected
     path = write_config(layers["user_data"], "openrouter.json", {})
     path.write_text('{"protocol":', encoding="utf-8")
     configs = load_registries(monkeypatch)
-    assert configs == baseline
+    assert configs["openrouter"]["config_error"]
+    assert set(client.get("/api/providers/openrouter/models").json()) == set(expected)
+    for route in ("/api/models", "/api/config/models"):
+        response = client.get(route)
+        assert response.status_code == 200
+        rows = {row["id"]: row for row in response.json()}
+        for key in expected:
+            assert rows[key]["available"] is False
+            assert rows[key]["config_error"]["path"] == str(path.absolute())
+            assert not model_configs.is_model_available(key)
+    path.unlink()  # explicit user repair/removal allows lower-layer settings again
+    assert load_registries(monkeypatch) == baseline
     for key, config in expected.items():
         assert model_configs.MODEL_CONFIGS[key] == config
+        assert model_configs.is_model_available(key)
+
+
+def test_alias_discovered_after_lower_id_still_blocks_it(layers):
+    # Enumeration order within one root must not decide whether an override is safe.
+    write_config(layers["user_data"], "shared.json", None)
+    write_config(layers["builtin"], "first.json", VALID)
+    write_config(layers["builtin"], "shared.json", VALID)
+    assert provider_configs.load_configs()["example"]["config_error"]["source"] == "user_data"
+
+
+def test_stale_resolved_model_and_reflex_cannot_use_newly_broken_provider(layers, monkeypatch):
+    from llm_clients import factory
+    from saiverse import reflex_judgment
+
+    write_config(layers["builtin"], "example.json", VALID)
+    write_config(layers["builtin"], "model.json", {
+        "model": "synthetic", "provider_ref": "example",
+    }, subdir="models")
+    load_registries(monkeypatch)
+    stale = dict(model_configs.MODEL_CONFIGS["model"])
+    write_config(layers["user_data"], "example.json", {**VALID, "protocol": "typo"})
+    monkeypatch.setattr(provider_configs, "PROVIDER_CONFIGS", provider_configs.load_configs())
+    assert not model_configs.is_model_available("model")
+    monkeypatch.setattr(factory, "OpenAIClient", lambda *a, **k: pytest.fail("SDK constructed"))
+    with pytest.raises(ValueError, match="Provider configuration is invalid"):
+        factory.get_llm_client("model", "openai", 4096, stale)
+    with pytest.raises(reflex_judgment.ReflexJudgmentUnavailable, match="Provider configuration is invalid"):
+        reflex_judgment.resolve_backend("model")
+
+
+def test_null_endpoint_and_key_keep_factory_semantics(layers, monkeypatch):
+    from types import SimpleNamespace
+    from llm_clients import factory
+
+    write_config(layers["user_data"], "example.json", {
+        **VALID, "base_url": None, "api_key_env": None, "api_key_required": False,
+    })
+    write_config(layers["builtin"], "model.json", {
+        "model": "synthetic", "provider_ref": "example",
+    }, subdir="models")
+    load_registries(monkeypatch)
+    seen = []
+    def capture(*args, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace()
+    monkeypatch.setattr(factory, "OpenAIClient", capture)
+    factory.get_llm_client("model", "openai", 4096)
+    assert seen[0]["api_key"] == factory._LOCAL_SERVER_PLACEHOLDER_KEY
+    assert "api_key_env" not in seen[0]
+    assert "base_url" not in seen[0]  # null leaves endpoint choice to this protocol's existing client
+
+
+def test_protocol_validation_matches_factory_dispatch_and_reflex_implementation():
+    import ast
+    import inspect
+    import textwrap
+    from llm_clients import factory
+    from saiverse import reflex_judgment
+    from saiverse.provider_protocols import SUPPORTED_PROVIDER_PROTOCOLS
+
+    code = ast.parse(textwrap.dedent(inspect.getsource(factory.get_llm_client)))
+    dispatched = {
+        node.comparators[0].value for node in ast.walk(code)
+        if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
+        and node.left.id == "protocol" and isinstance(node.ops[0], ast.Eq)
+        and isinstance(node.comparators[0], ast.Constant)
+    }
+    assert dispatched == factory.SUPPORTED_PROTOCOLS
+    assert SUPPORTED_PROVIDER_PROTOCOLS == dispatched | {reflex_judgment.JEV_COMPAT_PROTOCOL}
+    for protocol in SUPPORTED_PROVIDER_PROTOCOLS:
+        assert provider_configs._provider_shape_error({**VALID, "protocol": protocol}, "example") is None
+    for path in (SHIPPED_DATA / "providers").glob("*.json"):
+        assert provider_configs._provider_shape_error(json.loads(path.read_text()), path.stem) is None
+
+
+def test_reply_binding_stops_selected_model_instead_of_switching(layers, monkeypatch):
+    from llm_clients import factory
+    from llm_clients.exceptions import ModelUnavailableError
+    from saiverse.persona_model_selection import ReplyModelBinding, TIER_STANDARD
+
+    write_config(layers["user_data"], "example.json", {**VALID, "protocol": None})
+    write_config(layers["builtin"], "model.json", {
+        "model": "synthetic", "provider_ref": "example",
+    }, subdir="models")
+    load_registries(monkeypatch)
+    created = []
+    def forbidden(*args, **kwargs):
+        created.append(args)
+        pytest.fail("A replacement client was created")
+    monkeypatch.setattr(factory, "OpenAIClient", forbidden)
+    monkeypatch.setattr(factory, "GeminiClient", forbidden)
+
+    class SyntheticPersona:
+        persona_id = "isolated-fixture"
+        persona_name = "Fixture"
+        model = "model"
+        lightweight_model = None
+        @property
+        def llm_client(self):
+            return factory.get_llm_client(self.model, "openai", 4096)
+
+    persona = SyntheticPersona()
+    binding = ReplyModelBinding.capture(persona)
+    with pytest.raises(ModelUnavailableError) as exc_info:
+        binding.client_for(TIER_STANDARD)
+    assert exc_info.value.model == "model"
+    assert exc_info.value.reason == "unreachable"
+    assert persona.model == "model"
+    assert created == []
+
+
+def test_invalid_id_diagnostic_never_returns_raw_value(layers, monkeypatch, client, caplog):
+    write_config(layers["user_data"], "broken.json", {
+        **VALID, "id": "DO_NOT_LOG/token", "display_name": "DO_NOT_LOG", "protocol": None,
+    })
+    with caplog.at_level(logging.WARNING):
+        configs = load_registries(monkeypatch)
+    assert list(configs) == ["broken"]
     response = client.get("/api/providers")
     assert response.status_code == 200
-    assert {row["id"] for row in response.json()} == set(baseline)
-    assert set(client.get("/api/providers/openrouter/models").json()) == set(expected)
-    response = client.get("/api/models")
-    assert response.status_code == 200
-    assert set(expected) <= {row["id"] for row in response.json()}
+    assert "DO_NOT_LOG" not in response.text + caplog.text

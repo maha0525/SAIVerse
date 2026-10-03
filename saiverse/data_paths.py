@@ -130,8 +130,8 @@ def find_file(subdir: str, filename: str) -> Path | None:
 def iter_file_candidates_with_layer(subdir: str, pattern: str = "*") -> Iterator[tuple[Path, str]]:
     """Yield every candidate in priority order, including duplicate filenames.
 
-    Consumers that validate before shadowing (e.g. provider configs) must see
-    lower-priority candidates when an override is unreadable or malformed.
+    Provider validation uses lower-priority candidates only to identify IDs
+    shadowed by an unreadable override; it never adopts their connection.
     Use :func:`iter_files_with_layer` for ordinary filename-based shadowing.
 
     The layer is the root this loop actually walked — not something re-derived

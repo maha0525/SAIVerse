@@ -1,3 +1,4 @@
+import ProviderConfigErrorNotice, { ProviderConfigError } from "./ProviderConfigErrorNotice";
 
 import { apiFetch } from '@/i18n/api';
 
@@ -16,6 +17,7 @@ interface ApiKeyEnvInfo {
 
 interface ProviderInfo {
     id: string;
+    config_error?: ProviderConfigError | null;
     display_name: string;
     protocol: string;
     base_url?: string | null;
@@ -25,6 +27,7 @@ interface ProviderInfo {
     // free-tier variable). A backend that predates this field omits it.
     api_key_envs?: ApiKeyEnvInfo[];
     builtin: boolean;
+    source?: string;
     // True when any one of the key variables is set.
     api_key_configured?: boolean | null;
 }
@@ -116,6 +119,25 @@ export default function ProviderManagementPanel() {
             setLoading(false);
         }
     }, []);
+
+    const reloadPending = useRef(false);
+    const reloadProviders = async () => {
+        if (reloadPending.current) return;
+        reloadPending.current = true;
+        setLoading(true);
+        setNotice(null);
+        try {
+            const res = await apiFetch('/api/providers/reload', { method: 'POST' });
+            if (!res.ok) throw new Error(`Reload failed: ${res.status}`);
+            setProviders(await res.json());
+        } catch (e) {
+            console.error('Failed to reload providers', e);
+            setNotice(uiText("providerConfig.reloadFailed"));
+        } finally {
+            reloadPending.current = false;
+            setLoading(false);
+        }
+    };
 
     const loadCodexStatus = useCallback(async () => {
         try {
@@ -347,7 +369,7 @@ export default function ProviderManagementPanel() {
             <div className={styles.header}>
                 <h3 data-i18n="components.settings.ProviderManagementPanel.text012">{uiText("components.settings.ProviderManagementPanel.text012")}</h3>
                 <div className={styles.actions}>
-                    <button data-i18n="components.settings.ProviderManagementPanel.text013" className={styles.btnSecondary} onClick={loadProviders}>
+                    <button data-i18n="components.settings.ProviderManagementPanel.text013" className={styles.btnSecondary} onClick={reloadProviders} disabled={loading}>
                         <RefreshCw size={14} />{uiText("components.settings.ProviderManagementPanel.text013")}</button>
                     <button data-i18n="components.settings.ProviderManagementPanel.text014" className={styles.btnPrimary} onClick={openCreate}>
                         <Plus size={14} />{uiText("components.settings.ProviderManagementPanel.text014")}</button>
@@ -372,7 +394,7 @@ export default function ProviderManagementPanel() {
                                         <div className={styles.rowName}>
                                             {p.display_name}
                                             <span className={`${styles.badge} ${p.builtin ? '' : styles.badgeUser}`}>
-                                                {p.builtin ? 'builtin' : 'user_data'}
+                                                {p.source || (p.builtin ? 'builtin' : 'user_data')}
                                             </span>
                                             {p.api_key_env && (
                                                 <span data-i18n="components.settings.ProviderManagementPanel.text017" className={`${styles.badge} ${p.api_key_configured ? styles.badgeKeyOk : styles.badgeKeyMissing}`}>
@@ -385,6 +407,7 @@ export default function ProviderManagementPanel() {
                                             {p.id}{uiText("components.settings.ProviderManagementPanel.text018")}{p.protocol}
                                             {p.base_url && uiText("components.settings.ProviderManagementPanel.text019", { p1: p.base_url })}
                                         </div>
+                                        {p.config_error && <ProviderConfigErrorNotice error={p.config_error} />}
                                     </div>
                                     <div className={styles.rowActions}>
                                         {p.protocol === 'openai_codex' && (
@@ -404,13 +427,13 @@ export default function ProviderManagementPanel() {
                                             >
                                                 <KeyRound size={12} />{uiText("components.settings.ProviderManagementPanel.text028")}</button>
                                         )}
-                                        <button data-i18n="components.settings.ProviderManagementPanel.text022 components.settings.ProviderManagementPanel.text023" className={styles.iconBtn} onClick={() => openEdit(p.id)}>
+                                        <button data-i18n="components.settings.ProviderManagementPanel.text022 components.settings.ProviderManagementPanel.text023" className={styles.iconBtn} onClick={() => openEdit(p.id)} disabled={!!p.config_error}>
                                             <Edit2 size={12} /> {p.builtin ? uiText("components.settings.ProviderManagementPanel.text022") : uiText("components.settings.ProviderManagementPanel.text023")}
                                         </button>
                                         <button data-i18n="components.settings.ProviderManagementPanel.text024 components.settings.ProviderManagementPanel.text025 components.settings.ProviderManagementPanel.text026"
                                             className={`${styles.iconBtn} ${styles.deleteBtn}`}
                                             onClick={() => handleDelete(p)}
-                                            disabled={p.builtin}
+                                            disabled={p.builtin || !!p.config_error}
                                             title={p.builtin ? uiText("components.settings.ProviderManagementPanel.text024") : uiText("components.settings.ProviderManagementPanel.text025")}
                                         >
                                             <Trash2 size={12} />{uiText("components.settings.ProviderManagementPanel.text026")}</button>

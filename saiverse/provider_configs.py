@@ -19,7 +19,6 @@ import json
 import logging
 import os
 import re
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .data_paths import (
@@ -31,6 +30,7 @@ from .data_paths import (
     USER_DATA_DIR,
     iter_file_candidates_with_layer,
 )
+from .provider_protocols import SUPPORTED_PROVIDER_PROTOCOLS
 
 if TYPE_CHECKING:
     from .persona_model_selection import ReapplyResult
@@ -62,11 +62,19 @@ def _provider_shape_error(config: object, default_id: str) -> str | None:
     if not isinstance(config, dict):
         return "JSON root must be an object"
     provider_id = config.get("id", default_id)
-    if not isinstance(provider_id, str) or not provider_id:
-        return "id must be a non-empty string"
-    for field, default in (("display_name", provider_id), ("protocol", "unknown")):
-        if not isinstance(config.get(field, default), str):
-            return f"{field} must be a string"
+    if not isinstance(provider_id, str) or not _SAFE_ID_PATTERN.fullmatch(provider_id):
+        return "id must be a non-empty safe identifier"
+    if not isinstance(config.get("display_name", provider_id), str):
+        return "display_name must be a string"
+    protocol = config.get("protocol")
+    if not isinstance(protocol, str) or protocol not in SUPPORTED_PROVIDER_PROTOCOLS:
+        return "protocol must name a supported protocol"
+    if "api_key_env_alternates" in config:
+        alternates = config["api_key_env_alternates"]
+        if not isinstance(alternates, list) or any(
+            not isinstance(name, str) or not name.strip() for name in alternates
+        ):
+            return "api_key_env_alternates must be a list of non-empty strings"
     optional_types = {
         "base_url": str,
         "api_key_env": str,
@@ -85,82 +93,77 @@ def _provider_shape_error(config: object, default_id: str) -> str | None:
     return None
 
 
-def load_configs() -> dict[str, dict]:
-    """Load provider configurations from all sources, respecting priority.
+def _invalid_provider(provider_id: str, error: dict[str, str]) -> dict:
+    """A visible disabled entry, containing no unvalidated connection values."""
+    return {
+        "id": provider_id, "display_name": provider_id, "protocol": "invalid",
+        "source": error["source"], "config_error": error,
+    }
 
-    Returns:
-        Dict mapping provider_id -> provider config dict, each stamped with the
-        ``source`` layer it was loaded from.
+
+def config_error_message(error: dict[str, str]) -> str:
+    """Safe diagnostic for connection failures (never raw JSON/exception text)."""
+    return (
+        "Provider configuration is invalid: "
+        f"path={error['path']!r} source={error['source']} reason={error['reason']}"
+    )
+
+
+def load_configs() -> dict[str, dict]:
+    """Select each highest-priority definition, including visible invalid ones.
+
+    Invalid overrides claim their filename and ID just like valid overrides.
+    A lower file with that name is read only to discover its ID, so references
+    to a differently named ID are blocked too. Its connection is never used.
     """
     configs: dict[str, dict] = {}
-    seen_names: set[str] = set()
-    selected: dict[str, tuple[int, Path, str]] = {}
-    selected_names: dict[str, str] = {}
-    rejected: list[tuple[int, Path, str, str, str]] = []
-
+    seen_names: dict[str, dict[str, str] | None] = {}
+    name_priority: dict[str, int] = {}
+    id_priority: dict[str, int] = {}
     candidates = iter_file_candidates_with_layer(PROVIDERS_DIR, "*.json")
     for index, (config_file, layer) in enumerate(candidates):
-        if config_file.name in seen_names:
+        if config_file.name in seen_names and seen_names[config_file.name] is None:
             continue
         provider_id = config_file.stem
+        config_data = None
         try:
             config_data = json.loads(config_file.read_text(encoding="utf-8"))
+            if isinstance(config_data, dict):
+                declared_id = config_data.get("id", provider_id)
+                if isinstance(declared_id, str) and _SAFE_ID_PATTERN.fullmatch(declared_id):
+                    provider_id = declared_id
+            reason = _provider_shape_error(config_data, config_file.stem)
         except (OSError, UnicodeError, ValueError, RecursionError) as exc:
-            # Exception messages may include file contents. The exception type
-            # identifies parse/read failures without copying config values.
-            rejected.append((index, config_file, layer, provider_id, type(exc).__name__))
+            reason = type(exc).__name__  # exception text may contain raw values
+
+        if config_file.name in seen_names:
+            error = seen_names[config_file.name]
+            priority = name_priority[config_file.name]
+            if provider_id not in configs or priority < id_priority[provider_id]:
+                configs[provider_id] = _invalid_provider(provider_id, error)
+                id_priority[provider_id] = priority
             continue
 
-        if isinstance(config_data, dict):
-            declared_id = config_data.get("id", provider_id)
-            if isinstance(declared_id, str) and declared_id:
-                provider_id = declared_id
-        error = _provider_shape_error(config_data, config_file.stem)
-        if error:
-            rejected.append((index, config_file, layer, provider_id, error))
-            continue
-
-        # Only a valid candidate claims its filename or ID. In particular, a
-        # broken user_data/openrouter.json must not hide the shipped provider.
-        seen_names.add(config_file.name)
+        error = None if reason is None else {
+            "path": str(config_file.absolute()), "source": layer, "reason": reason,
+        }
+        seen_names[config_file.name] = error
+        name_priority[config_file.name] = index
         if provider_id in configs:
             continue
+        id_priority[provider_id] = index
+        if error:
+            configs[provider_id] = _invalid_provider(provider_id, error)
+            LOGGER.warning("%s; no lower-layer fallback", config_error_message(error))
+            continue
 
-        # Taken from the root this file was walked from, never from its
-        # contents: a definition must not be able to claim a layer it was not
-        # loaded from. ``builtin`` was the previous marker, and it lived inside
-        # the file — so it is dropped rather than trusted.
+        # Both trust and error markers belong to the loader, never the JSON.
         config_data.pop("builtin", None)
+        config_data.pop("config_error", None)
         config_data["source"] = layer
-
         configs[provider_id] = config_data
-        selected[provider_id] = (index, config_file, layer)
-        selected_names[config_file.name] = provider_id
-        LOGGER.debug(
-            "Loaded provider config: %r from %r (source=%s)",
-            provider_id, str(config_file.absolute()), config_data["source"],
-        )
-
-    # Report the actual result, not a promise that a lower candidate will work.
-    # ID collisions may use different filenames; filename collisions may use
-    # different IDs. Both are existing priority rules and both need a trace.
-    for index, config_file, layer, provider_id, reason in rejected:
-        fallback = "none"
-        for fallback_id in (provider_id, selected_names.get(config_file.name)):
-            if fallback_id not in selected:
-                continue
-            selected_index, selected_path, selected_layer = selected[fallback_id]
-            if selected_index > index:
-                fallback = (
-                    f"path={str(selected_path.absolute())!r} source={selected_layer} "
-                    f"provider_id={fallback_id!r}"
-                )
-                break
-        LOGGER.warning(
-            "Skipping invalid provider config: path=%r source=%s provider_id=%r "
-            "reason=%s; fallback=%s",
-            str(config_file.absolute()), layer, provider_id, reason, fallback,
-        )
+        LOGGER.debug("Loaded provider config: %r from %r (source=%s)",
+                     provider_id, str(config_file.absolute()), layer)
 
     LOGGER.info("Loaded %d provider configurations", len(configs))
     return configs
@@ -290,14 +293,14 @@ def save_provider(provider_id: str, config: dict) -> ReapplyResult:
 
     # Strip the derived layer markers; they are re-stamped from the path on load
     save_data = {
-        k: v for k, v in config.items() if k not in ("source", "builtin")
+        k: v for k, v in config.items() if k not in ("source", "builtin", "config_error")
     }
     save_data["id"] = provider_id  # Ensure id is consistent with filename
 
     # Written beside the target and moved into place, never truncated in place:
     # a crash partway through a direct write leaves half a JSON file. The loader
-    # can fall back to a valid lower layer, but an override should not be lost
-    # and a user-only provider may have no fallback (see
+    # disables broken definitions rather than switching connection/key, so a
+    # partial write would make all referencing models unavailable (see
     # docs/issues/malformed_provider_json_breaks_provider_list.md).
     staged = target_dir / f"{provider_id}.json.tmp"
     try:

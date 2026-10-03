@@ -59,6 +59,7 @@ SAIVerse/
 
 ```
 saiverse/
+├── provider_protocols.py   # provider 検査・会話 factory・反射判断が共有する対応 protocol 名
 ├── saiverse_manager.py     # 中央オーケストレーター（SAIVerseManager）
 ├── occupancy_manager.py    # 移動・占有管理（OccupancyManager）
 ├── conversation_manager.py # 自律会話駆動（旧プロトタイプ・実質 no-op）

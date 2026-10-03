@@ -6,6 +6,7 @@ import os
 from typing import Dict, Optional
 
 from saiverse import model_configs as _model_configs
+from saiverse.provider_protocols import SUPPORTED_LLM_PROTOCOLS
 from saiverse.model_configs import get_model_config, get_model_parameter_defaults
 
 from .anthropic import AnthropicClient
@@ -40,15 +41,7 @@ _LEGACY_PROVIDER_TO_PROTOCOL = {
 #: Protocols this factory can actually build a client for. The elif chain in
 #: get_llm_client dispatches on exactly this set, and its unknown-protocol
 #: error message is built from it — keep the two together when adding a client.
-SUPPORTED_PROTOCOLS = frozenset({
-    "openai_compat",
-    "openai_codex",
-    "nvidia_nim",
-    "anthropic_native",
-    "gemini_native",
-    "xai_native",
-    "ollama_compat",
-})
+SUPPORTED_PROTOCOLS = SUPPORTED_LLM_PROTOCOLS
 
 
 def _resolve_protocol(provider: str, config: Dict | None) -> str:

@@ -11962,5 +11962,17 @@
   "components.memory.MemopediaConversion.period": {
     "ja": "。",
     "en": "."
+  },
+  "providerConfig.invalid": {
+    "ja": "プロバイダ設定ファイルが壊れているため利用不可",
+    "en": "Unavailable: invalid provider configuration file"
+  },
+  "providerConfig.repair": {
+    "ja": "このファイルを修正し、プロバイダ設定を再読み込みしてください。接続先やキーは自動で切り替えません。",
+    "en": "Repair this file and reload provider settings. The connection and key will not be switched automatically."
+  },
+  "providerConfig.reloadFailed": {
+    "ja": "設定を再読み込みできませんでした。もう一度試してください。",
+    "en": "Could not reload settings. Please try again."
   }
 }
