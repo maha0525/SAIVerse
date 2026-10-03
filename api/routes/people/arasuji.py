@@ -1526,6 +1526,8 @@ async def cancel_arasuji_generation(
             raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
         if job.get("persona_id") != persona_id:
             raise HTTPException(status_code=404, detail=f"Job {job_id} not found for persona {persona_id}")
+        if job.get("status") == "cancelling":
+            return {"cancelled": True}
         if job.get("status") not in ("pending", "running", "started"):
             return {"cancelled": False, "reason": "Job is not running"}
         job["cancel_requested"] = True

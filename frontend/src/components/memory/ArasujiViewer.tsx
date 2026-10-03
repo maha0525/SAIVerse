@@ -117,6 +117,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         error_detail: string | null;
         error_meta: { message_ids: string[]; start_time: number; end_time: number } | null;
     } | null>(null);
+    // Generation and coverage repair share one job: every start control must
+    // stay blocked until it reaches a terminal state, including cancellation.
+    const isGenerationBusy = ['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '');
     const [errorBatchMessages, setErrorBatchMessages] = useState<SourceMessage[]>([]);
     const [isLoadingErrorBatch, setIsLoadingErrorBatch] = useState(false);
     const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
@@ -555,6 +558,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
 
     // 生成 (窓の畳み — §13 の手動入口)。従来どおり空 body = mode 既定 (compaction)。
     const startGeneration = async () => {
+        if (isGenerationBusy) return;
         setShowGenerateModal(false);
         await postGenerateJob({});
     };
@@ -563,6 +567,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     // confirmed_unprocessed_messages = いま画面で承認した件数。実行直前に対象が
     // 増えていたら backend が estimate_stale で止める (時点ずれの歯止め)。
     const startRepair = async () => {
+        if (isGenerationBusy) return;
         setShowRepairModal(false);
         await postGenerateJob({
             mode: 'repair',
@@ -753,7 +758,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         <button data-i18n="components.memory.ArasujiViewer.text041 components.memory.ArasujiViewer.text042"
                             className={styles.generateBtn}
                             onClick={openGenerateModal}
-                            disabled={generationJob?.status === 'running'}
+                            disabled={isGenerationBusy}
                             title={uiText("components.memory.ArasujiViewer.text041")}
                         >
                             <Play size={14} />{uiText("components.memory.ArasujiViewer.text042")}</button>
@@ -951,7 +956,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                     {/* 未完了の印はジョブ開始時に置かれ完了時に外れるので、
                                         走行中は「放置された未完了」ではない — 再実行を
                                         促すのは止まっているときだけ (2026-09-01 実機指摘)。 */}
-                                    {['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '')
+                                    {isGenerationBusy
                                         ? uiText("components.memory.ArasujiViewer.text068")
                                         : uiText("components.memory.ArasujiViewer.text069")}
                                 </>
@@ -963,7 +968,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             // pending (ポーリングが backend 状態を写す最大 2 秒) と
                             // cancelling も塞ぐ — claim なしジョブの並走防御は
                             // この無効化だけなので、進行中の状態を全部覆う。
-                            disabled={['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '')}
+                            disabled={isGenerationBusy}
                             title={uiText("components.memory.ArasujiViewer.text070")}
                         >{uiText("components.memory.ArasujiViewer.text071")}</button>
                     </div>
@@ -1335,7 +1340,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                     (repairEstimate.unprocessed_messages < 1
                                         && (repairEstimate.consolidation_calls ?? 0) < 1
                                         && !repairEstimate.repair_incomplete)
-                                    || ['running', 'started', 'pending', 'cancelling'].includes(generationJob?.status ?? '')
+                                    || isGenerationBusy
                                 }
                             >
                                 <Play size={14} />{uiText("components.memory.ArasujiViewer.text119")}</button>
@@ -1358,7 +1363,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             <button data-i18n="components.memory.ArasujiViewer.text123"
                                 className={styles.startBtn}
                                 onClick={startGeneration}
-                                disabled={!canFold}
+                                disabled={!canFold || isGenerationBusy}
                                 title={generateDisabledReason()}
                             >
                                 <Play size={14} />{uiText("components.memory.ArasujiViewer.text123")}</button>
