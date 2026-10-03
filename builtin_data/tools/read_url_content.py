@@ -10,6 +10,7 @@ import logging
 import os
 import re
 from typing import Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -33,6 +34,21 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+
+def _url_for_log(url: str) -> str:
+    """Keep destination context without userinfo, query, or fragment secrets."""
+    if not isinstance(url, str) or not url.strip():
+        return "<empty URL>"
+    normalized = url.strip()
+    if not normalized.startswith(("http://", "https://")):
+        normalized = "https://" + normalized
+    try:
+        parsed = urlsplit(normalized)
+        return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", ""))
+    except ValueError:
+        # Parsing failure must never put the unredacted input into a log.
+        return "<invalid URL>"
 
 
 def _clean_html(soup: BeautifulSoup) -> BeautifulSoup:
@@ -90,7 +106,7 @@ def read_url_content(
     Returns:
         (整形済みメッセージ, 履歴用スニペット)
     """
-    logger.info("read_url_content called with url=%s, max_chars=%s", url, max_chars)
+    logger.info("read_url_content called with url=%s, max_chars=%s", _url_for_log(url), max_chars)
 
     # Normalize empty strings from SEA runtime to None
     if max_chars == "" or max_chars is None:
@@ -161,7 +177,7 @@ def read_url_content(
     # Compact snippet for history
     snippet = f"URL読み込み: {url} ({len(markdown)}文字)"
     
-    logger.info("read_url_content completed: %d chars from %s", len(markdown), url)
+    logger.info("read_url_content completed: %d chars from %s", len(markdown), _url_for_log(url))
     return message, ToolResult(history_snippet=snippet)
 
 

@@ -215,3 +215,34 @@ def test_email_preserves_smtp_failure(email_tool, caplog):
         result = module.send_email_to_user(7, "Synthetic subject", "Synthetic body")
     assert result == "Failed to send email: synthetic SMTP failure"
     assert "email send failed for user_id=7" in caplog.text
+
+
+@pytest.mark.parametrize("url, safe", [
+    ("https://private-user:private-pass@example.invalid/path?token=private-token#private-fragment", "https://example.invalid/path"),
+    ("private-user:private-pass@example.invalid/path?token=private-token#private-fragment", "https://example.invalid/path"),
+    ("https://private-user:private-pass@[::1]:8443/path?token=private-token#private-fragment", "https://[::1]:8443/path"),
+])
+def test_url_reader_logs_redacted_url_only(url_reader, monkeypatch, caplog, url, safe):
+    response = MagicMock()
+    response.headers = {"Content-Type": "text/html"}
+    response.apparent_encoding = "utf-8"
+    response.text = "<main>Safe content</main>"
+    get = MagicMock(return_value=response)
+    monkeypatch.setattr(url_reader.requests, "get", get)
+    with caplog.at_level("INFO"):
+        url_reader.read_url_content(url)
+    records = [record.getMessage() for record in caplog.records if record.name == url_reader.logger.name]
+    assert len(records) == 2
+    assert all(safe in record for record in records)
+    for secret in ["private-user", "private-pass", "private-token", "private-fragment"]:
+        assert secret not in caplog.text
+    assert get.call_args.args[0] == (url if url.startswith("https://") else "https://" + url)
+
+
+def test_url_reader_does_not_log_malformed_url_secrets(url_reader, monkeypatch, caplog):
+    url = "https://private-user:private-pass@[invalid?private-token#private-fragment"
+    monkeypatch.setattr(url_reader.requests, "get", MagicMock(side_effect=url_reader.requests.exceptions.InvalidURL("invalid")))
+    with caplog.at_level("INFO"):
+        url_reader.read_url_content(url)
+    for secret in ["private-user", "private-pass", "private-token", "private-fragment"]:
+        assert secret not in caplog.text
