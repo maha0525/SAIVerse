@@ -226,6 +226,7 @@ LLM に構造上の判断 (何を束ねるか・どこに置くか) をさせる
 - 被覆の保証: 「退場は必ず編纂」の不変条件により、最前線より後ろは必ず Chronicle が覆っている。飛ばした範囲は Chronicle として提示される。
 - **ただし Chronicle の被覆だけでは足りず、スルースの通過も要る** (2026-08-23 追加、下の不変条件)。Chronicle が覆っていても、その範囲を本人がまだ見ていなければ、飛ばした瞬間にコア記憶・手帳・約束を採る機会が永久に失われる。→ 2026-09-08 撤回: 機会は永久には失われない — 通っていない範囲は記録され、UI 操作で後から通せる ([sluice_coverage_gaps.md](sluice_coverage_gaps.md))。
 - 前進のみ。後退はしない。自行が最前線ならなにもしない。
+- `session_lifecycle` の位置判断 5 か所 (起点の前進・圧縮区間の保持・借用・スルース通過記録・§15 の読み戻し) は、比較器を通して生ログの正典順に揃える。`created_at IS NULL` は負の epoch を含む全実時刻より前、NULL 同士と同秒同士は `rowid` 順 (W8 S7)。SQL の境界句と Python の `canonical_position_key` がこの規則を持ち、比較器は NULL を epoch 0 に置き換えない ([比較器の修正](../issues/compare_message_positions_null_zero_mapping.md))。`Message` 化や要約材料・吸収処理の並べ替えに残る NULL→0 写像は、この修正に含まず [別 issue](../issues/message_timestamp_null_zero_downstream.md) で追う。
 - DB の行更新のみで、編纂も LLM 呼び出しも発生しない。休眠 model 復帰不能 (§12-10 極端形) の主対策。
 - 温度が生きている (キャッシュがまだ有効な) 自行は動かさない — §13 裁定 1 の芯はそのまま。
 - 新 model の初回 (自行なし) も最前線から始める。§13 実装の「直近に更新された他 model の anchor を借りる」ヒューリスティックは、この原理のある値に置き換える (Chronicle が 1 枚も無い persona だけ従来どおり借用 → 最小ロードの順で fallback)。
