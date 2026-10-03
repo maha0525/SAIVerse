@@ -41,6 +41,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
     const [name, setName] = useState('');
     const [description, setDescription] = useState('');
     const [capacity, setCapacity] = useState(10);
+    // Legacy API compatibility only; this value no longer drives autonomous behavior.
     const [autoInterval, setAutoInterval] = useState(10);
     // 部屋の様子に出すアイテムの個数の上限。null = 設定なし = 既定の 10 個。
     // 0 も有効な値 (アイテムを様子に出さない部屋) — docs/intent/room_item_display_cap.md 設計 4。
@@ -108,7 +109,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                     setName(building.BUILDINGNAME || '');
                     setDescription(building.DESCRIPTION || '');
                     setCapacity(building.CAPACITY || 10);
-                    setAutoInterval(building.AUTO_INTERVAL_SEC || 10);
+                    setAutoInterval(building.AUTO_INTERVAL_SEC ?? 10);
                     // 0 も有効な値なので `||` で潰さない (WorldEditor 側と同じ扱い)
                     setItemDisplayLimit(building.ITEM_DISPLAY_LIMIT ?? null);
                     setSystemInstruction(building.SYSTEM_INSTRUCTION || '');
@@ -301,25 +302,14 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                             </select>
                         </div>
 
-                        <div className={styles.row}>
-                            <div className={styles.field}>
-                                <label data-i18n="components.BuildingSettingsModal.text013">{uiText("components.BuildingSettingsModal.text013")}</label>
-                                <input
-                                    type="number"
-                                    value={capacity}
-                                    onChange={e => setCapacity(parseInt(e.target.value) || 1)}
-                                    min={1}
-                                />
-                            </div>
-                            <div className={styles.field}>
-                                <label data-i18n="components.BuildingSettingsModal.text014">{uiText("components.BuildingSettingsModal.text014")}</label>
-                                <input
-                                    type="number"
-                                    value={autoInterval}
-                                    onChange={e => setAutoInterval(parseInt(e.target.value) || 10)}
-                                    min={1}
-                                />
-                            </div>
+                        <div className={styles.field}>
+                            <label data-i18n="components.BuildingSettingsModal.text013">{uiText("components.BuildingSettingsModal.text013")}</label>
+                            <input
+                                type="number"
+                                value={capacity}
+                                onChange={e => setCapacity(parseInt(e.target.value) || 1)}
+                                min={1}
+                            />
                         </div>
 
                         <div className={styles.field}>

@@ -16,7 +16,7 @@
 
 これらが [PulseController](../concepts/pulse.md) に Pulse を投げ、優先度（USER > SCHEDULE > AUTO）で捌かれる。
 
-Building 側の自動 pulse 間隔は `AUTO_INTERVAL_SEC` カラム（既定 10 秒）で持つ。
+Building の旧自動 pulse 間隔 `AUTO_INTERVAL_SEC`（既定 10）は API・DB 互換のための残置値で、現行の駆動には使わない。Building 設定モーダルとワールドエディタの入力欄は撤去し、他項目の保存時は既存値をそのまま送る。
 
 ## AUTONOMY_ENABLED（自律行動の ON/OFF）
 

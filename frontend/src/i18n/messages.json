@@ -1235,10 +1235,6 @@
     "ja": "定員",
     "en": "Capacity"
   },
-  "components.BuildingSettingsModal.text014": {
-    "ja": "自動インターバル（秒）",
-    "en": "Automatic interval (seconds)"
-  },
   "components.BuildingSettingsModal.text015": {
     "ja": "説明",
     "en": "Description"
@@ -7282,10 +7278,6 @@
   "components.settings.WorldEditor.text053": {
     "ja": "定員",
     "en": "Capacity"
-  },
-  "components.settings.WorldEditor.text054": {
-    "ja": "インターバル（秒）",
-    "en": "Interval (seconds)"
   },
   "components.settings.WorldEditor.itemDisplayLimit": {
     "ja": "部屋の様子に表示するアイテム数（空欄で既定の 10 個）",
