@@ -58,6 +58,11 @@ function expectCity(tree, fixture) {
     assert.equal(select.props.value, fixture.CITYID);
     assert.equal(select.props.disabled, true, 'existing Building City must not be editable');
     assert.equal(select.props.onChange, undefined, 'City has no editing handler');
+    assert.equal(select.props['aria-describedby'], 'building-city-immutable-hint');
+    const hints = all(tree, node => node.props?.id === 'building-city-immutable-hint');
+    assert.equal(hints.length, 1, 'City has a visible read-only explanation');
+    assert.equal(text(hints[0]), key('cityImmutableHint'));
+    assert.equal(hints[0].props.className, 'hint');
     const html = renderToStaticMarkup(select);
     assert.match(html, /^<select[^>]* disabled=""/);
     const city = cities.find(row => row.CITYID === fixture.CITYID);

@@ -97,7 +97,7 @@ City は「名前」を入れる欄を 2 つ持っているが、**どちらが�
 
 `CITY_SLUG` の不変性とは別に、既存 Building の `CITYID` は通常の設定更新では変更不可である。根拠は [W7 分離監査の裁定 D5](../handoff/2026-07-21_w7_location_occupancy_handoff.md#d5-p1-7--building-の-city-変更を-immutable-化)。City 間の移送は、ユーザーの現在地・Region・私室・item/tool link を一括して扱う専用 migration の責務で、multi-city 凍結中は提供しない。
 
-この境界は `manager/admin.py:update_building` が守る。既存 Building を読む画面は、DB → テーブル API から受け取った所属 City を表示し、同じ `CITYID` のまま通常項目を保存する。World Editor と個別の BuildingSettingsModal のどちらも City 欄は表示のみとし、保存時に拒否される選択を案内しない。新規 Building の City 選択やバックエンドの拒否条件は変えない。個別モーダルの追従と検証範囲は [issue](../issues/building_settings_city_selector_editable.md) に記録する。
+通常の建物更新経路では、この境界を `manager/admin.py:update_building` が守る。汎用 DB 編集の `POST /api/db/tables/building` はこの拒否を通らない既知の穴があり、[別 issue](../issues/building_city_immutable_generic_db_bypass.md) で扱う。既存 Building を読む画面は、DB → テーブル API から受け取った所属 City を表示し、同じ `CITYID` のまま通常項目を保存する。World Editor と個別の BuildingSettingsModal のどちらも City 欄は表示のみとし、保存時に拒否される選択を案内しない。新規 Building の City 選択やバックエンドの拒否条件は変えない。個別モーダルの追従と検証範囲は [issue](../issues/building_settings_city_selector_editable.md) に記録する。
 
 ## 5. 変更を置く場所と、その理由
 

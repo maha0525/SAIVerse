@@ -296,11 +296,14 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                             <label data-i18n="components.BuildingSettingsModal.text012">{uiText("components.BuildingSettingsModal.text012")}</label>
                             {/* Existing Buildings cannot change City (W7 D5); keep the loaded
                                 city_id for ordinary saves, as WorldEditor already does. */}
-                            <select value={cityId} disabled className={styles.disabled}>
+                            <select value={cityId} disabled className={styles.disabled} aria-describedby="building-city-immutable-hint">
                                 {cities.map(c => (
                                     <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>
                                 ))}
                             </select>
+                            <span id="building-city-immutable-hint" className={styles.hint} data-i18n="components.BuildingSettingsModal.cityImmutableHint">
+                                {uiText("components.BuildingSettingsModal.cityImmutableHint")}
+                            </span>
                         </div>
 
                         <div className={styles.row}>
