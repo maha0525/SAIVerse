@@ -1316,13 +1316,17 @@ class MCPClientManager:
                 return self._mark_persona_tools_unavailable(membership_key)
 
             try:
-                await self._start_instance(
+                retired_existing = await self._start_instance(
                     instance_key, qualified_name, persona_id=persona_id
                 )
             except Exception:
                 # _start_instance が失敗記録 + backoff を済ませている
                 # (= get_failed_instances / UI に出る)。
                 return self._mark_persona_tools_unavailable(membership_key)
+            if retired_existing:
+                # この取得自身が旧接続を退役させた分だけを織り込む。現在の版へ
+                # 無条件に追随すると、await 中の外部無効化まで見逃してしまう。
+                version_at_start += 1
             # Lazy-start (wrapper 経路) と同じ自己参照。refcount=0 での停止は
             # addon disable / manual stop 側の remove_reference が担う。
             self._add_reference(instance_key, f"persona:{persona_id}")
@@ -1440,13 +1444,14 @@ class MCPClientManager:
         qualified_name: str,
         persona_id: Optional[str] = None,
         instance_context: Optional[Dict[str, str]] = None,
-    ) -> None:
+    ) -> bool:
         """Open a fresh MCPServerConnection and register its tools.
 
         Raises on connection failure after recording the failure with its
         error category and updating the exponential backoff deadline.
         Caller is responsible for adding a reference (refcount) after a
-        successful start.
+        successful start. Returns whether this start retired a disconnected
+        connection (which advances per-persona membership by one generation).
 
         ``instance_context`` supplies ``${instance.*}`` values for named
         instances (設計 G). When omitted, it is recovered from
@@ -1467,7 +1472,7 @@ class MCPClientManager:
         if existing is not None and existing.connected:
             # 別経路が先に張り終えていた (Pulse 頭 と wrapper の遅延起動が
             # 重なる等)。二重に張らない。
-            return
+            return False
         if instance_key in self._starting:
             raise MCPInstanceBusyError(instance_key, "起動処理が進行中です")
         if instance_key in self._stopping:
@@ -1476,66 +1481,83 @@ class MCPClientManager:
             # per_persona なら次の Pulse 頭が張り直す。
             raise MCPInstanceBusyError(instance_key, "停止処理が進行中です")
 
-        if instance_context is None:
-            instance_context = self._instance_contexts.get(instance_key)
-
-        raw_config = meta["raw_config"]
-        resolved = resolve_config_placeholders(
-            raw_config, persona_id=persona_id, instance_context=instance_context
-        )
-
-        # 未解決 placeholder の検査は connect() の関所が持つ (missing_config に
-        # 分類されて下の except 分岐が失敗記録 + backoff を済ませる)。ここで
-        # 二重に数えると、検査の条件が二箇所で食い違う余地を作る。
-        connection = MCPServerConnection(
-            qualified_name, resolved, instance_key=instance_key
-        )
         self._starting.add(instance_key)
         try:
-            await connection.connect()
-        except Exception as exc:
-            category = _classify_error(exc)
-            user_msg = _build_user_error_message(
-                qualified_name, meta.get("addon_name"), category, str(exc)
-            )
-            self._record_failure(instance_key, category, user_msg, exc)
-            LOGGER.error(
-                "MCP startup error: instance=%s category=%s msg=%s",
-                instance_key,
-                category,
-                user_msg,
-            )
-            raise
-        finally:
-            self._starting.discard(instance_key)
-            # 旗はここで必ず降ろす。接続が失敗した回に残すと、次に成功した
-            # 起動が着地した瞬間に自壊する (要求は「あの起動」に向いたもの)。
-            stop_requested = instance_key in self._stop_requested
-            self._stop_requested.discard(instance_key)
+            if existing is not None:
+                # 置換は旧世代の退役まで含む。通常の _shutdown_instance は
+                # 起動中への停止要求も発行するので、ここでは同じ退役本体を
+                # _stopping 保持下で直接使い、自分の起動を停止させない。
+                self._stopping.add(instance_key)
+                try:
+                    await self._shutdown_instance_locked(
+                        instance_key, force=False, recoverable=True,
+                    )
+                finally:
+                    self._stopping.discard(instance_key)
+                if instance_key in self._stop_requested:
+                    raise MCPInstanceBusyError(
+                        instance_key, "起動中に停止が要求されました"
+                    )
 
-        if stop_requested:
-            # 起動中に停止を頼まれていた (アドオン無効化・手動停止・全停止)。
-            # 起動は途中でキャンセルしないので、着地した瞬間に自分で畳む。
-            # これをしないと、停止側は _connections を見て「無いから対象外」と
-            # 判断しているため、subprocess と wrapper が残り続ける。
-            LOGGER.info(
-                "MCP: instance '%s' was asked to stop while starting; "
-                "shutting it down right after connect", instance_key,
+            if instance_context is None:
+                instance_context = self._instance_contexts.get(instance_key)
+
+            raw_config = meta["raw_config"]
+            resolved = resolve_config_placeholders(
+                raw_config, persona_id=persona_id, instance_context=instance_context
+            )
+
+            # 未解決 placeholder の検査は connect() の関所が持つ (missing_config に
+            # 分類されて下の except 分岐が失敗記録 + backoff を済ませる)。ここで
+            # 二重に数えると、検査の条件が二箇所で食い違う余地を作る。
+            connection = MCPServerConnection(
+                qualified_name, resolved, instance_key=instance_key
             )
             try:
-                await connection.disconnect()
+                await connection.connect()
             except Exception as exc:
-                LOGGER.debug(
-                    "MCP: failed to disconnect just-started instance '%s': %s",
-                    instance_key, exc,
+                category = _classify_error(exc)
+                user_msg = _build_user_error_message(
+                    qualified_name, meta.get("addon_name"), category, str(exc)
                 )
-            raise MCPInstanceBusyError(
-                instance_key, "起動中に停止が要求されました"
-            )
+                self._record_failure(instance_key, category, user_msg, exc)
+                LOGGER.error(
+                    "MCP startup error: instance=%s category=%s msg=%s",
+                    instance_key,
+                    category,
+                    user_msg,
+                )
+                raise
 
-        self._clear_failure(instance_key)
-        self._connections[instance_key] = connection
-        self._register_tools(connection, qualified_name, instance_key, persona_id)
+            if instance_key in self._stop_requested:
+                # 起動中に停止を頼まれていた (アドオン無効化・手動停止・全停止)。
+                # 起動は途中でキャンセルしないので、着地した瞬間に自分で畳む。
+                # これをしないと、停止側は _connections を見て「無いから対象外」と
+                # 判断しているため、subprocess と wrapper が残り続ける。
+                LOGGER.info(
+                    "MCP: instance '%s' was asked to stop while starting; "
+                    "shutting it down right after connect", instance_key,
+                )
+                try:
+                    await connection.disconnect()
+                except Exception as exc:
+                    LOGGER.debug(
+                        "MCP: failed to disconnect just-started instance '%s': %s",
+                        instance_key, exc,
+                    )
+                raise MCPInstanceBusyError(
+                    instance_key, "起動中に停止が要求されました"
+                )
+
+            self._clear_failure(instance_key)
+            self._connections[instance_key] = connection
+            self._register_tools(connection, qualified_name, instance_key, persona_id)
+            return existing is not None
+        finally:
+            self._starting.discard(instance_key)
+            # 停止要求はこの起動だけに向いたもの。退役・接続・中止後の切断まで
+            # ガードを保持し、失敗・キャンセルでも次回に要求を持ち越さない。
+            self._stop_requested.discard(instance_key)
 
     # -- Failure tracking / backoff --------------------------------------
 
