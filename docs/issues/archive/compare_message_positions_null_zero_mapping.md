@@ -1,7 +1,7 @@
 # compare_message_positions が NULL created_at を 0 に写像する (比較器と起点管理の修正)
 
 **発見**: 2026-08-31 (被覆補修 §16 の Codex 消し込み中、実装エージェントの同族走査)
-**状態**: 🟣 検証待ち — 比較器はレビューで妥当と確認。下流の残件を別 issue に記録し、文書追補の確認・採用待ち。未マージのため archive へ移さない。
+**状態**: ✅ 完了 — 比較器の修正は develop に取り込み済み。画面に現れる変化は無く、Windows の全テストで確認した。下流に残る NULL→0 写像は別 issue で追う。
 **深刻度**: P3 — created_at が NULL の行と 0 (1970 epoch) または負の epoch の行が同一 DB に混在すると順序が逆転しうる
 
 ## 事実
@@ -14,7 +14,7 @@
 本 PR で揃えたのはこの比較器と、下記の `sea/session_lifecycle.py` の呼び手 5 か所の
 位置判断。`Message` への変換や、その後の要約材料・吸収処理の並べ替えまで
 一本化したわけではない。下流の NULL→0 写像は
-[別 issue](message_timestamp_null_zero_downstream.md) に残す。
+[別 issue](../message_timestamp_null_zero_downstream.md) に残す。
 
 ## 修正の全体と責任
 
@@ -55,12 +55,13 @@ SQL の並び・境界句や永続データの移行は変更しない。この 
 
 - 2026-08-31: §16 の消し込み中に発見。旧状態は「未解決 — 影響先が §14 の anchor 前進系のため、v0.3 リリース前には触らない (まはー裁定を経ず既存機構の挙動を変えない)」。当時は NULL と 0 の混在だけを影響条件としていた。
 - 2026-10-02: v0.3.20 発行後のバックログ修正として着手。W8 の既存仕様と全呼び手を再確認し、負の epoch にも同じ逆転があることを隔離回帰で確認。共有キーへ統一し、PR レビュー待ちにした。
-- 2026-10-03: [PR #346 のレビュー](https://github.com/maha0525/SAIVerse/pull/346#issuecomment-5964245268) は比較器と呼び手 5 か所を妥当と判断。下流の NULL→0 写像は実コードで再確認し、[別 issue](message_timestamp_null_zero_downstream.md) に分離した。この追補では実行コードを変えない。
+- 2026-10-03: [PR #346 のレビュー](https://github.com/maha0525/SAIVerse/pull/346#issuecomment-5964245268) は比較器と呼び手 5 か所を妥当と判断。下流の NULL→0 写像は実コードで再確認し、[別 issue](../message_timestamp_null_zero_downstream.md) に分離した。この追補では実行コードを変えない。
 - 同日、台帳から押し出した旧文面: 「共有キーへの統一と隔離回帰テストは通っており、PR レビュー待ち。次 = 差分と既存の境界仕様をレビューし、採用を判断する。」(誰待ち: まはー (PR レビュー))
+- 2026-10-03: PR #346 を develop へマージした (レビューはメティス、マージの判断はまはー)。台帳から移送した旧次アクション: 「比較器の修正と下流の残件を分けた文書追補の確認待ち。次 = PR の追補を確認し、採用を判断する。下流の実装変更は別 issue の未着手として残す。」(誰待ち: まはー (PR 確認・採用判断))
 
 ## 関連
 
 - `tests/test_coverage_repair.py` — 一本化済み側の回帰
-- [W8 の正典順序と NULL の裁定記録](../handoff/2026-07-22_w8_time_order_handoff.md)
-- [intent: あらすじのレベル制](../intent/arasuji_levels.md) §14 / §16
-- [未着手: 下流に残る NULL→0 写像](message_timestamp_null_zero_downstream.md)
+- [W8 の正典順序と NULL の裁定記録](../../handoff/2026-07-22_w8_time_order_handoff.md)
+- [intent: あらすじのレベル制](../../intent/arasuji_levels.md) §14 / §16
+- [未着手: 下流に残る NULL→0 写像](../message_timestamp_null_zero_downstream.md)

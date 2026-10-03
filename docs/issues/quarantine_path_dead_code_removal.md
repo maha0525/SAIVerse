@@ -1,6 +1,6 @@
 # Issue: quarantine 経路 (corrupted log.json recovery) の dead code 撤去
 
-**ステータス**: 🟣 検証待ち (撤去差分の PR レビュー待ち、未マージ)
+**ステータス**: 🟣 検証待ち (撤去は develop に取り込み済み。次の起動でのログ確認待ち)
 **優先度**: low (= 害なし、 ただし「触れない UI が残っている」 状態)
 **作成日**: 2026-05-20
 **関連**:
@@ -100,3 +100,5 @@ Phase 2+3 で source of truth が DB (`building_messages`) に移行した結果
 - `npm test`、独立した `npm run test:alerts`、`npx --no-install tsc --noEmit`、標準の `npm run build` (**Next.js 16.1.6 / Turbopack**) が合格。アラートの critical 自動展開、開閉、退避キャンセル、HTTP / 通信失敗、再試行、処理中のボタン無効化、他のアラートの残存をコンポーネントの state / handler で検査。ブラウザ実機の外観確認は未実施。
 - 変更 Python の `ruff check`、`git diff --check`、`scripts/check_in_flight.py` が合格 (台帳の既存経過措置 1 行は警告のまま)。
 - `scripts/gen_reference_docs.py` で API 参照を再生成 (366 → 363 ルート)。`--check` は API / DB 参照が一致。tool-catalog はこの環境に無いアドオン由来の既存差分が出るため変更を戻し、無関係なツール一覧削除は含めない。
+
+- 2026-10-03: PR #352 を develop へマージした (レビューはメティス、マージの判断はまはー)。台帳から移送した旧次アクション: 「撤去差分の PR レビュー待ち。次 = 旧 API / UI の撤去範囲と、現役の旧ログ取り込み・退避・通常アラートの回帰検査をレビューする。」(誰待ち: まはー (PR レビュー))
