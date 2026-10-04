@@ -24,8 +24,8 @@
 カタログの intent の「導入時の質問と、アドオン専用の Python 環境」の仕組みを使う。導入時に「使う音声エンジンを選んでください」と訊き、選択肢は次の三つで、複数選べる。
 
 - OpenAI TTS / ElevenLabs (GPU は要らない。API キーを入れるだけ)
-- GPT-SoVITS (NVIDIA の GPU が要る。数 GB のダウンロード。Windows と Linux だけに出す)
-- Irodori-TTS (NVIDIA の GPU が要る。数 GB のダウンロード。Windows と Linux だけに出す)
+- GPT-SoVITS (数 GB のダウンロード。Windows と Linux は NVIDIA の GPU、Mac は Mac の GPU (MPS) か CPU で動かす。Mac では「動作未確認」と添える)
+- Irodori-TTS (同上)
 
 GPT-SoVITS と Irodori-TTS は、それぞれ専用の Python 環境に入れる。GPT-SoVITS の requirements は requirements.lock と両立せず、GPT-SoVITS と Irodori-TTS も互いに両立しない (下の「経緯」の 2026-09-11 の洗い出し) ので、本体の venv にも、二つ一緒の環境にも入れられない。
 
@@ -57,14 +57,15 @@ Stack-chan Vessel:
 
 確かめること:
 
-7. 隔離した `SAIVERSE_HOME` と新しい venv に、カタログの導入経路で voice-tts を入れ、選択肢ごとに声が出るところまで確かめる。Windows (まはーの開発機) と Linux (NOVA) の両方で行う。本体の venv のパッケージが、導入の前後で変わっていないことも確かめる (下の「経緯」の「公開前にやること」の 6 の項目も含む)。
+7. 隔離した `SAIVERSE_HOME` と新しい venv に、カタログの導入経路で voice-tts を入れ、選択肢ごとに声が出るところまで確かめる。Windows (まはーの開発機) と Linux (NOVA) の両方で行う。Mac は確かめる機体が無いので、「動作未確認」と添えて配り、利用者の報告を受けて直す (2026-10-05 まはー判断)。本体の venv のパッケージが、導入の前後で変わっていないことも確かめる (下の「経緯」の「公開前にやること」の 6 の項目も含む)。
 
 ## 確かめたこと・確かめ方 (2026-10-05)
 
 - **SAIVerse が対応する Python に、CUDA に対応した torch があるか: ある。** PyTorch の配布ページ (`https://download.pytorch.org/whl/cu128/torch/` と `cu130/torch/`) の一覧で、Python 3.11〜3.14 の Windows 用 (`win_amd64`) と Linux 用 (`manylinux_2_28_x86_64`) が、CUDA 12.8 向けは torch 2.11.0、CUDA 13.0 向けは torch 2.14.1 まで配られていることを見た。どちらを使うかは、NVIDIA のドライバの新しさとの兼ね合いで、作業 3 のときに決める。
 - **requirements.txt の `torchcodec` が、本体の venv に torch 系のパッケージを持ち込むか: 持ち込まない。** PyPI の torchcodec 0.17.0 の依存 (`requires_dist`) は、開発用の追加分 (`extra == "dev"`) の numpy・pytest・pillow だけだった。torchcodec は Irodori-TTS だけが使うので、作業 2 で Irodori-TTS を専用の環境へ移すときに、requirements.txt から Irodori-TTS 用の requirements のファイルへ移す。
 - **その torch で GPT-SoVITS と Irodori-TTS が実際に声を作れるか: 作業 7 で確かめる。** 一覧を見ても分からないので、実際に合成する。Windows はまはーの開発機、Linux は NOVA (Ubuntu) で、隔離した `SAIVERSE_HOME` と新しい venv にカタログの導入経路で入れ、選択肢ごとに声が出るところまで見る。
-- **macOS: GPU で動かすエンジンは選択肢に出さない。** Mac には NVIDIA の GPU が載らないので、CUDA を前提にした GPT-SoVITS と Irodori-TTS の選択肢は、Mac では意味を持たない。確かめる Mac も無い。macOS ではクラウドのエンジンの選択肢だけを出す。そのために、カタログの仕組みに「この選択肢はこの OS でだけ出す」という指定を足す (カタログの intent の「manifest に足すもの」の `platforms`)。
+- **macOS: GPT-SoVITS と Irodori-TTS も選択肢に出し、「Mac では動作未確認」と添える** (2026-10-05 まはー判断)。どちらも公式に Mac に対応している。GPT-SoVITS の README には Apple silicon で確かめた組み合わせが載っていて、導入時に MPS か CPU を選べる。Irodori-TTS の README は、Mac では PyPI の普通の PyTorch で CPU か MPS を使うと書いている。Mac の専用の環境には CUDA 用ではない普通の torch を入れる。voice-tts の GPT-SoVITS の設定 (`device`) はいま `cuda` と `cpu` しか扱わないので、MPS を使うなら作業 1 のときに足す。確かめる Mac は無いので、利用者の報告を受けて直す。
+- (2026-10-05 に一度「Mac では出さない」と書いた。NVIDIA の GPU が無いことから、確かめずにローカルの音声エンジンが使えないと決めつけた飛躍で、まはーの指摘で取り下げた。)
 
 ## 経緯
 
