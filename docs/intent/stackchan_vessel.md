@@ -1,6 +1,6 @@
 # Intent: スタックチャン Vessel 統合（saiverse-stackchan-addon）
 
-**ステータス**: v0.14（2026-07-11 改訂、内蔵 IMU の解釈済み身体感覚スペルを追加。生の9軸スナップショットは維持し、首角度を使った脚側基準の加速度と磁気方位を別スペルで返す）
+**ステータス**: v0.15（2026-10-04 改訂、アドオン v0.5.0 でファームウェアとゲートウェイを本家 kisaragi-mochi/stackchan-mcp の配布物に切り替え、本家に無い内蔵センサーの読み取り (不変条件 15・16、C-4) を外した。経緯は末尾の「v0.14 → v0.15」）
 
 ## v0.4 → v0.5 の主要変更（路線変更）
 
@@ -292,6 +292,8 @@ SAIVerse のユーザー層（AITuber 運用者・創作者中心）が組み込
 
 ### 15. 内蔵センサーは専用 tool で読み、内部 I2C bus を汎用公開しない（v0.11 追加）
 
+> **2026-10-04 から、アドオン v0.5.0 ではこの機能 (`read_imu` / `read_environment` / `scan_nfc`) を外している。** 本家のファームウェアとゲートウェイにセンサー読み取りが入るまで (本家 PR #339 が未マージ)。戻すときのために契約はここに残す。戻すときは、アドオンのコミット `51711d6` を revert する。
+
 CoreS3 / StackChan 本体に標準搭載された IMU 等のセンサーは、Vessel の身体感覚として pull 型のスナップショット tool から読む。電源管理 IC、音声 codec、タッチ controller 等と共有する内部 I2C bus（GPIO 12/11）を raw read/write tool として公開してはならない。各センサー専用 driver が必要な register だけを扱い、PMIC 等へ到達できない tool surface を保つ。
 
 IMU の最初の契約は 9 軸スナップショット（BMI270 の加速度・角速度 + BMM150 の磁束密度）で、物理単位（g / dps / µT）と検証用 raw 値を同時に返す。連続姿勢ストリームや Shake / PickUp / PutDown の event push は別機能として扱い、単発読取 tool に暗黙の background task や会話注入を持ち込まない。
@@ -301,6 +303,8 @@ LTR-553ALS-WA は `read_environment` で、環境光の 2 ADC channel と近接�
 stackchan-mcp gateway の生 tool は非公開とし、SAIVerse addon の native wrapper が「現在 Building → vessel → gateway instance」を解決して現在の身体へ転送する（K-4 と同じ規則）。
 
 ### 16. IMU は生データと身体感覚の二層で提供する（v0.14 追加）
+
+> **2026-10-04 から、アドオン v0.5.0 では `read_imu` も `read_imu_context` も外している** (不変条件 15 の注記と同じ理由)。
 
 `read_imu` は診断・検証用の生スナップショットとして残す。一方、ペルソナが身体の状況を読むための `read_imu_context` は、同じ機体の `read_imu` と `get_head_angles` を組み合わせて次を返す:
 
@@ -601,6 +605,8 @@ native wrap (= addon 側 `tools/stackchan_*.py`) は **作らない**。Vessel �
 
 #### C-4. 内蔵センサー（pull 型身体感覚）
 
+> **2026-10-04 から、アドオン v0.5.0 では外している** (不変条件 15 の注記と同じ理由)。
+
 内蔵 IMU の値は stackchan-mcp firmware の専用 tool → gateway の MCP relay → addon native wrapper の 3 層で取得する。firmware は内部 I2C bus handle を driver にだけ渡し、gateway / addon には sensor 値だけを返す。addon wrapper は K-4 の dispatcher を使って現在の Vessel に対応する gateway instance を選ぶ。
 
 初期実装は単発の 9 軸読取に限定する。静止時の重力軸（約 ±1g）と、機体を上下反転した時の符号反転を実機検証の主判定にする。BMM150 は StackChan のサーボ磁石・周辺磁場の影響を受けるため、初期検証では有限値を取得できることを確認し、方位精度までは合否条件に含めない。
@@ -731,7 +737,13 @@ stackchan-mcp の `set_avatar` / `set_blink` / `set_mouth` で基本的な表情
 
 #### I-1. ファーム取得
 
-stackchan-mcp の GitHub Releases から `merged-binary.bin`（または `xiaozhi.bin`）をダウンロード。SAIVerse の `saiverse stackchan download-firmware` サブコマンド（または UI ボタン）が、最新リリースタグを自動取得 → `~/.saiverse/addons/saiverse-stackchan-addon/firmware/` に保存。
+**アドオンの導入時と、`setup_version` が上がった更新時に、アドオンの setup (`addon.json` の `download_file`) が本家の配布ページから `merged-binary.bin` を取得する** (v0.15、アドオン v0.5.0 から)。取得するリリースはタグ名と SHA256 で固定し (「最新」は追わない)、置き場所はアドオンの永続データの `firmware/merged-binary.bin` (`~/.saiverse/user_data/addon_data/saiverse-stackchan-addon/firmware/merged-binary.bin`)。アドオンはこのファームウェアを同梱も再配布もしない (不変条件 8)。
+
+- **ゲートウェイとファームウェアは、本家が同じ日に出した組み合わせで固定する。** アドオン v0.5.0 は gateway 0.18.0 (`mcp_servers.json` で `stackchan-mcp[tts]==0.18.0`) と firmware-v1.17.0。片方を上げるときは、もう片方も本家の組み合わせに合わせて上げ、`setup_version` を上げる。
+- **書き込みに使うファイルの探し方は、開発者の PC でもユーザーの PC でも同じ 2 段階だけ**: アドオンの詳細設定「ファームウェアのファイルの場所」(`firmware_path`) → 上の既定の置き場所。開発者が手元のビルドを使うときは設定で明示する。開発者の PC にだけある場所を探すようにしてはならない — 置くと、配布物が無いという欠陥が開発者からだけ見えなくなる (2026-09 に、この形で実ユーザーが導入時に詰まった。経緯は `docs/issues/stackchan_firmware_not_distributed.md`)。
+- 見つからないときは、画面の警告と書き込み API の 404 が、入手先 (本家の配布ページの、名前が `firmware-` で始まるリリース) と置き場所を案内する。本家の配布ページの一番上に出る「最新」のリリースはゲートウェイのもので、ファームウェアが付いていないことがある。
+
+当初の計画 (`saiverse stackchan download-firmware` サブコマンド、または UI ボタンで最新リリースを自動取得) は実装されず、上の形で置き換えた。
 
 #### I-2. ファーム書き込み
 
@@ -986,7 +998,7 @@ Phase の番号は v0.4 から **再定義**。v0.4 までの Phase 1〜2-D は�
 
 - **本体 `tools/mcp_client.py` の `reconnect_server` 改修**: ペアリング操作で AddonConfig を内部更新しても、 既起動の MCP subprocess は古い env で動き続ける問題を解消。 `reconnect_server` 内で **source `mcp_servers.json` を再 load → `_interpolate_value` で AddonConfig 最新値で再 interpolate → `_server_meta["raw_config"]` を上書き → connection.config を resolve → disconnect/connect** の流れを実装。 注意: `_server_meta["raw_config"]` は起動時に解決済みなので、 そのまま再 resolve すると no-op (= source JSON 再 load が必須)。 他 addon が AddonConfig を rotate するシナリオ全般で活きる
 - **本体 `AddonManagerModal.tsx` + `sync-addon-panels.mjs` の `AddonPanelProps.onConfigChanged` 追加**: addon panel が内部的に AddonConfig を書き換えた時、 親 (AddonManagerModal) に通知して `/api/addon/` を再 fetch → `ParamsSection` の表示を最新値で再描画する経路。 `ParamsSection` 側にも `useEffect([addon.params])` で globalParams state の追従を追加。 他 addon (OAuth token 自動更新等) でも汎用に使える
-- **アドオン `api_routes.py` の `_firmware_resolve_path()` 3 段階 fallback**: AddonConfig.firmware_path → `<repo>/temp/stackchan-mcp/firmware/build/merged-binary.bin` (= 開発者ローカルビルド) → `~/.saiverse/addons/saiverse-stackchan-addon/firmware/merged-binary.bin` (= 一般ユーザー DL 配置)。 GPL-3.0 firmware を addon に複製しない方針 (= §不変条件 8) と整合
+- **アドオン `api_routes.py` の `_firmware_resolve_path()` 3 段階 fallback** (2026-10-04 に 2 段階へ縮めた。現在の形は I-1): AddonConfig.firmware_path → `<repo>/temp/stackchan-mcp/firmware/build/merged-binary.bin` (= 開発者ローカルビルド) → `~/.saiverse/addons/saiverse-stackchan-addon/firmware/merged-binary.bin` (= 一般ユーザー DL 配置)。 GPL-3.0 firmware を addon に複製しない方針 (= §不変条件 8) と整合
 - **アドオン `PairResponse.gateway_ws_url`**: device に提示する Gateway URL を backend で AddonConfig (`vision_host` + `gateway_ws_port`) から組み立てて返す。 UI は表示するだけ (= port hardcode の不整合を回避)
 
 **解決済み 引き継ぎ事項** (Phase 1'/Phase 4 からの繰越):
@@ -1401,3 +1413,13 @@ PR 投稿は当面 dev/integration 運用継続、 実機で安定運用が確�
 - **per-vessel capability カタログ、手動が基盤**: ユニット由来ツールは搭載機体でのみ visible（不変条件 #14）。`unit_env3_enabled` 等の addon 単一 toggle を per-vessel に作り変える。自動検出は手動の上に乗る後付けアシスト（まはー判断: 手動を先に確実な基盤として作り、自動検出ボタンで設定欄を埋める）。
 - **機体管理 UI が必要**（まはー判断）: 機体ごとの接続 / バインド / capability / ペアリング / 削除を一望。
 - 当初「v0.9 で書く」としていたが既存が v0.9（Phase 3' 完了）だったため **v0.10** として追記。将来余地 §1〜§3 を実装フェーズに引き上げ。
+
+### v0.14 → v0.15 で確定（本家の配布物への切り替え、2026-10-04）
+
+外部のユーザーから「Stack-chan Vessel v0.4.0 を有効化しても『ファームウェア書き込み』が使えない」と報告があった (2026-09-05)。ファームウェアを同梱しないのは不変条件 8 どおりの意図だったが、ユーザーが取ってくる先がどこにも無く、開発者の PC にだけある探し場所のせいで、それが開発中に見えていなかった。経緯と調査の全体は `docs/issues/stackchan_firmware_not_distributed.md`。
+
+- **ファームウェアもゲートウェイも、fork (`maha0525/stackchan-mcp`) をやめて本家の配布物を使う** (まはーの方針)。fork にしか無かった修正のうち SAIVerse に要るのは、無音で切れた接続からの復帰 (本家 PR #240、本家に入った) と内蔵センサーの読み取り (本家 PR #339、未マージ) だけだった。まはーが如月もちさんに依頼し、本家が gateway 0.18.0 と firmware-v1.17.0 を組み合わせで出した (2026-10-03)。
+- **内蔵センサーの読み取りは、本家に入るまで外す** (不変条件 15・16、C-4 に注記)。まはーの機体もユーザーと同じファームウェアを使うため、まはーのペルソナからも使えなくなる。それでも開発者とユーザーが別のものを動かす状態を残さないことを優先した。
+- **ファームウェアの取得はアドオンの setup の `download_file` で行い、リリースをタグ名と SHA256 で固定する** (I-1)。
+- **開発者の PC にだけある探し場所 (`<repo>/temp/stackchan-mcp/firmware/build/`) を削除した** (I-1)。
+- アドオンの配布は、公開カタログが指す v0.4.0 (2026-05-23) から 4 か月以上止まっていた。v0.5.0 はその間に開発者の手元で動いていた変更 (複数機体の同時稼働、機体管理の画面、ユニット配置、ToF ほか) を丸ごと含む。

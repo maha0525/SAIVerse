@@ -1,0 +1,14 @@
+.notice {
+    margin-top: 6px;
+    padding: 8px 10px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    color: var(--error-color, #c53030);
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+    min-width: 0;
+}
+
+:global([data-theme="dark"]) .notice {
+    color: #fca5a5;
+}

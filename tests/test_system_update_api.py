@@ -2,7 +2,7 @@
 
 UI 更新で走るアップデータは更新前のチェックアウトのもの。psutil の無い環境では
 アップデータの終了待ちが fail-closed で中止し、バックエンドだけが落ちて戻らない
-(docs/issues/self_update_unsafe_without_psutil.md)。断るなら本体が生きている
+(docs/issues/archive/self_update_unsafe_without_psutil.md)。断るなら本体が生きている
 うちに断る — ここで固定するのは:
 
 - 検査は API プロセス自身の import ではなく、アップデータが実際に使う venv の

@@ -59,6 +59,7 @@ SAIVerse/
 
 ```
 saiverse/
+├── provider_protocols.py   # provider 検査・会話 factory・反射判断が共有する対応 protocol 名
 ├── saiverse_manager.py     # 中央オーケストレーター（SAIVerseManager）
 ├── occupancy_manager.py    # 移動・占有管理（OccupancyManager）
 ├── conversation_manager.py # 自律会話駆動（旧プロトタイプ・実質 no-op）
@@ -98,6 +99,7 @@ saiverse/
 │                           #   設定ファイルの無いモデル名を保存しない検査と知らせの文面（persona_model_selection.md）
 ├── provider_security.py    # provider credentialと接続先URLの束縛・SSRF境界
 ├── file_policy.py          # persisted pathのmanaged root境界
+├── media_cleanup.py        # 未公開の新規文書ファイルの所有権と登録失敗時の後始末（commit 試行後は保持）
 ├── tls_trust.py            # HTTPS の信頼元を起動時に一度決める。OS の証明書ストアが空の環境
 │                           #   （macOS の Python）で同梱 certifi へ退避し、urllib 経由の通信を救う
 ├── runtime_marker.py       # City単位process identity marker（保守操作の停止判定）
@@ -112,6 +114,7 @@ saiverse/
 │                           #   元の ID を空ける（DB の参照・記憶の印・フォルダ。部品は building_id_repair と共有）。
 │                           #   済まなかった続きと、昔消した建物の残骸は起動時に付け替える
 ├── data_paths.py           # パス管理（user_data/builtin_data）
+├── playbook_scope.py       # 管理サービスと CLI が共有するパス→Playbook 公開範囲の推論（保存・CLI に非依存）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
 ├── observer_manager.py     # Observer（定期観測 Fixture）
 └── ...                     # その他コアモジュール
@@ -151,6 +154,10 @@ api/
 実在するルートの一覧は自動生成の [api-endpoints.md](../reference/api-endpoints.md) が正（この木は入口の説明で、網羅ではない）。
 
 `people/pocketbook.py` の画面側の相方は `frontend/src/components/memory/PocketbookViewer.tsx`（メモリタブの「手帳」節）。v0.3 では両方とも読むだけで、訂正の口は持たない（[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §13.2.1）。
+
+### frontend/
+
+`next.config.ts` の通常 API rewrite と `src/app/api/{addon,mcp}/` の Route Handler は、`backend-origin.cjs` の共通関数でバックエンドの接続先を選ぶ。正式名・旧名・既定値の順序と不一致の警告はここに集約し、SSE やメディア転送は各 Route Handler が持つ。`scripts/test-backend-origin.cjs` が設定と全経路を fake fetch で検査し、`scripts/test-backend-origin-http.cjs` が実 Next.js から fake 18000 への中継を検査する（[intent](../intent/frontend_backend_origin.md)）。
 
 ### scripts/
 
@@ -308,6 +315,10 @@ builtin_data/
 ├── cities.json       # City 初期設定
 └── seed_data.json    # シード用データ
 ```
+
+## メモリー画面の表示
+
+Next.js の画面実装。`src/components/memory/PulseTimelineViewer.tsx` は Pulse の一覧・詳細・既存タグ編集を担い、同じディレクトリの `PulseTimelineViewer.module.css` がテーマ別の役割色と長文の折り返しを持つ。中立色の正典は `src/app/globals.css`。隔離した表示・操作の回帰確認は `scripts/test-pulse-timeline-theme.cjs`（[表示 intent](../intent/pulse_timeline_display.md)）。
 
 ## ユーザーデータ（`~/.saiverse/`）
 

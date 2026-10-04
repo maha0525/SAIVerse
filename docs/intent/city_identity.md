@@ -1,6 +1,7 @@
 # City の識別子と表示名
 
 > **ステータス**: 完了 (2026-08-15 まはー実機検証済み)
+> §4-1 の汎用 DB 書き込みルート撤去は検証待ち (2026-10-04、隔離 API 回帰は合格・実機未確認)。
 >
 > 関連: [概念リファレンス Building / City](../concepts/building-city.md) / [landscape §2](../overview/landscape.md)
 
@@ -93,7 +94,37 @@ City は「名前」を入れる欄を 2 つ持っているが、**どちらが�
 
 不変条件 2 が今回もっとも大きな挙動変更にあたる。今は World Editor から識別子を編集でき、それが壊れる供給源になっている。
 
+### 4-1. 既存 Building の所属 City も通常編集では変えない
+
+`CITY_SLUG` の不変性とは別に、既存 Building の `CITYID` は通常の設定更新では変更不可である。根拠は [W7 分離監査の裁定 D5](../handoff/2026-07-21_w7_location_occupancy_handoff.md#d5-p1-7--building-の-city-変更を-immutable-化)。City 間の移送は、ユーザーの現在地・Region・私室・item/tool link を一括して扱う専用 migration の責務で、multi-city 凍結中は提供しない。
+
+通常の建物更新経路では、この境界を `manager/admin.py:update_building` が守る。汎用 DB の `POST /api/db/tables/{table}` と `DELETE /api/db/tables/{table}` は撤去し、管理サービスを通らない書き換え・削除→同じ ID の再作成による迂回経路を無くす。既存 Building の保存前に `CITYID` だけを検査しても、削除→作成や削除時の後始末の省略は防げないため、未使用の書き込み入口そのものを閉じる。汎用 GET のテーブル一覧・スキーマ・ページ送り・総件数ヘッダは維持する。
+
+既存 Building を読む画面は、DB → テーブル GET API から受け取った所属 City を表示し、通常の world API で同じ `CITYID` のまま通常項目を保存する。World Editor と個別の BuildingSettingsModal のどちらも City 欄は表示のみとし、保存時に拒否される選択を案内しない。新規作成・更新・削除は既存の専用サービスの責務で、退役 ID と関連データの後始末もそこを通る。個別モーダルの追従と検証範囲は [issue](../issues/building_settings_city_selector_editable.md) に記録する。
+
+この撤去は、通常設定 → 専用 API → 保存 → GET での読み取りを保ちながら、ユーザーの現在地・Region・私室・item/tool link が参照する所属と削除時の整合性を守るためのもの。City 移送・DB スキーマ変更・既存 DB 内容の削除は含めない。撤去前に frontend・scripts・同梱アドオン関連資材・tests を全 tracked code の検索と呼び出し先の追跡で確認し、テスト以外の汎用書き込み caller は無かった。隔離した実 API で書き込みルートの 405 と GET の保持を確認し、通常サービスの既存回帰とも比較した。実ブラウザや稼働中の世界での操作確認は未実施で、監査 OPS-09 への結論・検証範囲は [汎用 DB の issue](../issues/archive/building_city_immutable_generic_db_bypass.md) に記録する。
+
 ## 5. 変更を置く場所と、その理由
+
+### City 再保存で画像を保持する境界（2026-10-03）
+
+チュートリアルや World Editor で名前などを保存しても、その画面が編集していない
+画像設定は保持する。入口は各画面の PUT、真実の保存先は City の DB 行、読み手は
+DB 一覧 API と CityMap 用 API である。`HOST_AVATAR_IMAGE` は旧項目であり、
+現在の画面に案内役アバターを表示する機能の保証ではない。
+
+画像2項目は、**未送信なら触らず、明示的な `null` / 空文字なら解除する**。
+API は Pydantic の `model_fields_set` で未送信を区別し、manager / AdminService は
+既存の `UNSET` を保ったまま、DB へ書く直前までその区別を持つ。取得した古い画像を
+画面から再送する対処では、別画面で更新した値を戻しうるため、保存側に責任を置く。
+画像以外の必須項目・City 作成・`CITY_SLUG` の不変性は変えない。
+
+隔離 DB の合成 City で、初回画像保存 → 画像を送らない再保存 → DB の再読込と
+DB 一覧 / CityMap API の応答まで検べる。片方だけ更新、両方解除、画像なしの初回保存も
+固定し、実ブラウザの再表示と実機確認は別途残す。詳細と状態は
+[チュートリアル再保存の issue](../issues/tutorial_city_resave_clears_images.md) が持つ。
+
+### 識別子と表示名の分離
 
 | 変更 | 場所 | なぜここが持ち主か |
 |---|---|---|

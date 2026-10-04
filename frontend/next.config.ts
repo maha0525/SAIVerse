@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { NextConfig } from "next";
 
 import devOrigins from "./dev-origins.cjs";
+import { resolveBackendOrigin } from "./backend-origin.cjs";
 
 const configDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -28,7 +29,7 @@ const nextConfig: NextConfig = {
                     source: '/api/:path*',
                     // 既定は本番バックエンド。隔離テスト環境 (port 18000,
                     // docs/test_environment.md) へ向けるときだけ env で差し替える
-                    destination: `${process.env.SAIVERSE_BACKEND_ORIGIN || 'http://127.0.0.1:8000'}/api/:path*`,
+                    destination: `${resolveBackendOrigin()}/api/:path*`,
                 },
             ],
         };

@@ -127,8 +127,6 @@ class PersonaCore(
         # Initialise SAIMemory bridge for long-term recall/summary
         self.sai_memory: Optional[SAIMemoryAdapter] = initialise_memory_adapter(self)
 
-        # Quarantine awareness (defense-in-depth)。
-        _quar_dict = getattr(manager_ref, "quarantined_buildings", None) if manager_ref else None
         # Building Memory は DB が source of truth。 manager.SessionLocal を渡す。
         _db_factory = getattr(manager_ref, "SessionLocal", None) if manager_ref else None
 
@@ -138,7 +136,6 @@ class PersonaCore(
             building_memory_paths=self.building_memory_paths,
             initial_persona_history=self.messages,
             memory_adapter=self.sai_memory,
-            quarantined_buildings=_quar_dict,
             db_session_factory=_db_factory,
         )
 

@@ -87,15 +87,9 @@ class SAIVerseManager(
         db_path: str,
         sds_url: str = os.getenv("SDS_URL", "http://127.0.0.1:8080"),
     ):
-        # --- Critical: startup_alerts and quarantine state must exist before
+        # --- Critical: startup_alerts must exist before
         # _init_building_histories so corruption events can be recorded.
         self.startup_alerts: List[Dict[str, Any]] = []
-        # Buildings whose log.json is corrupted/zero-byte. While quarantined:
-        #   - building_histories does NOT contain the key (treated as "no truth")
-        #   - save_building_histories refuses to write
-        #   - move_entity refuses entry
-        # Quarantine info: {building_id: {"reason", "corrupted_path", "available_backups"}}
-        self.quarantined_buildings: Dict[str, Dict[str, Any]] = {}
         # Buildings whose in-memory history was modified since last save.
         # Used to scope explicit save calls so we never iterate the full path map.
         self.modified_buildings: Set[str] = set()
@@ -1741,15 +1735,16 @@ class SAIVerseManager(
         ui_port: int,
         api_port: int,
         timezone_name: str,
-        host_avatar_path: Optional[str] = None,
+        host_avatar_path: Any = UNSET,
         host_avatar_upload: Optional[str] = None,
-        map_background_image: Optional[str] = None,
+        map_background_image: Any = UNSET,
         language: Optional[str] = None,
     ) -> str:
         """ワールドエディタから City の設定を更新する。``name`` は表示名 (CITYNAME)。
 
         内部の識別子 (CITY_SLUG) は作成後に変更できないため、ここでは受け取らない
         (docs/intent/city_identity.md §4 不変条件 2)。
+        画像の UNSET は省略 (= 保持)、None / 空文字は明示的な解除として渡す。
         """
         return self.admin.update_city(
             city_id,

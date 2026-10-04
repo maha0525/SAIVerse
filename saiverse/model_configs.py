@@ -94,6 +94,8 @@ def _resolve_provider_ref(config: Dict) -> Dict:
         Resolved config dict (a shallow copy if changes were made, otherwise
         the original dict).
     """
+    if "provider_config_error" in config:
+        config = {key: value for key, value in config.items() if key != "provider_config_error"}
     provider_ref = config.get("provider_ref")
     if not provider_ref:
         return config
@@ -111,6 +113,11 @@ def _resolve_provider_ref(config: Dict) -> Dict:
         return config
 
     resolved = dict(config)
+    if provider.get("config_error"):
+        resolved["provider_config_error"] = dict(provider["config_error"])
+        resolved["provider"] = "invalid"
+        resolved["protocol"] = "invalid"
+        return resolved
 
     # Map protocol -> legacy provider field for factory.py compatibility
     protocol = provider.get("protocol")
@@ -873,6 +880,18 @@ def _get_required_env_vars(model: str) -> list[str]:
     return []
 
 
+def get_model_config_error(model: str) -> dict[str, str] | None:
+    """Return the provider failure, including one published since model reload."""
+    from .provider_configs import get_provider
+
+    config = MODEL_CONFIGS.get(model, {})
+    provider_ref = config.get("provider_ref")
+    provider = get_provider(provider_ref) if provider_ref else None
+    if provider and provider.get("config_error"):
+        return provider["config_error"]
+    return config.get("provider_config_error")
+
+
 def is_model_available(model: str) -> bool:
     """Check if a model's required API key is configured.
 
@@ -881,6 +900,8 @@ def is_model_available(model: str) -> bool:
     - At least one of the required env vars is set, or
     - The provider is unknown (don't hide by mistake).
     """
+    if get_model_config_error(model):
+        return False
     env_vars = _get_required_env_vars(model)
     if not env_vars:
         return True

@@ -67,6 +67,34 @@ class DbManagerPaginationTest(unittest.TestCase):
         app.dependency_overrides[db_manager.get_db] = override_get_db
         self.client = TestClient(app)
 
+    def test_table_catalog_and_schemas_remain_available(self):
+        res = self.client.get("/api/db/tables")
+        self.assertEqual(res.status_code, 200)
+        tables = res.json()
+        self.assertEqual([table["name"] for table in tables], sorted(db_manager.TABLE_MAP))
+        tool = next(table for table in tables if table["name"] == "tool")
+        self.assertEqual(tool["pk_columns"], ["TOOLID"])
+        self.assertIn("TOOLNAME", tool["columns"])
+
+    def test_generic_write_routes_are_unavailable(self):
+        """全テーブルの汎用書き込みを閉じ、GET の一覧・スキーマは残す。"""
+        schema = self.client.get("/openapi.json").json()
+        self.assertEqual(set(schema["paths"]["/api/db/tables/{table_name}"]), {"get"})
+        before = self.client.get("/api/db/tables/tool?limit=1000").json()
+        # Building の DELETE → 同 ID の POST による City 変更も入口で止める。
+        payloads = {
+            "DELETE": {"pks": {"BUILDINGID": "synthetic", "TOOLID": 1}},
+            "POST": {"data": {"BUILDINGID": "synthetic", "CITYID": 2,
+                              "TOOLID": 1, "TOOLNAME": "Must not be saved"}},
+        }
+        for table in [*db_manager.TABLE_MAP, "not_a_table"]:
+            for method, payload in payloads.items():
+                with self.subTest(table=table, method=method):
+                    res = self.client.request(method, f"/api/db/tables/{table}", json=payload)
+                    self.assertEqual(res.status_code, 405)
+                    self.assertIn("GET", res.headers["allow"])
+        self.assertEqual(self.client.get("/api/db/tables/tool?limit=1000").json(), before)
+
     def test_default_page_reports_total_count(self):
         """引数なしでも「全部で何件あるか」が分かる。"""
         res = self.client.get("/api/db/tables/tool")

@@ -29,6 +29,7 @@ interface ModelInfo {
     /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
      *  チャットのモデル一時上書きは会話に使うので、選択肢には出さない。 */
     reflex_only?: boolean;
+    config_error?: { path: string; source: string; reason: string } | null;
 }
 
 interface ParamSpec {
@@ -717,14 +718,14 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                             {groupedModels.favorites.length > 0 && (
                                                 <optgroup data-i18n="components.ChatOptions.text038" label={uiText("components.ChatOptions.text038")}>
                                                     {groupedModels.favorites.map(m => (
-                                                        <option key={`fav-${m.id}`} value={m.id}>{m.name}</option>
+                                                        <option key={`fav-${m.id}`} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
                                                     ))}
                                                 </optgroup>
                                             )}
                                             {groupedModels.sortedGroups.map(group => (
                                                 <optgroup key={group} label={groupLabel(group)}>
                                                     {groupedModels.byGroup[group].map(m => (
-                                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                                        <option key={m.id} value={m.id} disabled={!!m.config_error}>{m.name}{m.config_error ? ` (${uiText("providerConfig.invalid")})` : ""}</option>
                                                     ))}
                                                 </optgroup>
                                             ))}

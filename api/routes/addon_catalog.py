@@ -223,7 +223,10 @@ def list_installed():
             continue
         result.append(InstalledAddonInfo(
             addon_id=manifest.name,
-            display_name=manifest.display_name,
+            # manifest の display_name は {"ja": ..., "en": ...} の辞書でもよい
+            # (AddonManifest.display_name)。ここは文字列の欄なので、辞書のまま
+            # 渡すと検証で落ち、1 件でも辞書のアドオンがあると一覧全体が 500 になる。
+            display_name=manifest.get_display_name(),
             version=manifest.version,
             manifest_version=manifest.manifest_version,
             setup_version=manifest.setup_version,

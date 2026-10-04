@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import os
 import json
+import pytest
 import httpx2  # anthropic 1.x / openai 3.x run on httpx2: their http_client, Timeout and exception Request/Response are httpx2 types
 from typing import List, Dict, Iterator
 from google.genai import types as genai_types
@@ -39,6 +40,18 @@ if not saiverse_tools.OPENAI_TOOLS_SPEC:
 if not saiverse_tools.GEMINI_TOOLS_SPEC:
     saiverse_tools.GEMINI_TOOLS_SPEC.append(genai_types.Tool(function_declarations=[]))
 
+@pytest.fixture
+def openrouter_test_network(mock_provider_network):
+    """Only the marked SDK-mocked or MockTransport header tests use this."""
+    mock_provider_network("openrouter.ai")
+
+
+@pytest.fixture
+def nim_factory_test_network(mock_provider_network):
+    """The marked factory test replaces the OpenAI SDK constructor."""
+    mock_provider_network("integrate.api.nvidia.com")
+
+
 class TestLLMClients(unittest.TestCase):
 
     def setUp(self):
@@ -74,6 +87,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(client.context_length, 1000)
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("nim_factory_test_network")
     def test_get_llm_client_custom_openai_base(self, mock_openai):
         os.environ['NVIDIA_API_KEY'] = 'test_nim_key'
         self.addCleanup(lambda: os.environ.pop('NVIDIA_API_KEY', None))
@@ -109,6 +123,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(kwargs["reasoning_passback_field"], "reasoning_details")
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_default_headers_reach_the_openai_sdk(self, mock_openai):
         """default_headers must land on the SDK client, not on request kwargs.
 
@@ -140,6 +155,7 @@ class TestLLMClients(unittest.TestCase):
         )
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_malformed_default_headers_do_not_break_the_call(self, mock_openai):
         """A broken header entry is dropped; the LLM call still goes through.
 
@@ -162,6 +178,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(kwargs["default_headers"], {"X-OpenRouter-Title": "SAIVerse"})
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_default_headers_of_wrong_type_are_ignored(self, mock_openai):
         self._set_env('OPENROUTER_API_KEY', 'test_or_key')
 
@@ -229,6 +246,7 @@ class TestLLMClients(unittest.TestCase):
         return captured[-1]
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_attribution_headers_reach_the_wire(self, mock_openai):
         self._set_env('OPENROUTER_API_KEY', 'test_or_key')
 
@@ -251,6 +269,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(sent.get("x-openrouter-categories"), "roleplay,general-chat")
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_default_headers_cannot_replace_the_credential(self, mock_openai):
         """A config file must not be able to swap the API key for another value.
 
@@ -284,6 +303,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(sent.get("http-referer"), "https://saiverse.net")
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_extra_headers_cannot_replace_the_credential(self, mock_openai):
         """The per-request door onto the credential passes the same gate.
 
@@ -312,6 +332,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(sent.get("x-trace"), "keep-me")
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_override_works_across_header_name_spellings(self, mock_openai):
         """Overriding must not depend on matching the shipped capitalisation.
 
@@ -336,6 +357,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertNotIn("saiverse.net", sent.get("http-referer", ""))
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_non_ascii_header_value_is_dropped_not_raised(self, mock_openai):
         """httpx encodes header values as ASCII, so a Japanese value would
         raise while building the request and stop the conversation — the exact
@@ -362,6 +384,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(sent.get("http-referer"), "https://saiverse.net")
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_header_shapes_h11_rejects_are_dropped(self, mock_openai):
         """Values that only fail on the way out still have to fail open.
 
@@ -399,6 +422,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(sent.get("http-referer"), "https://saiverse.net")
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_extra_headers_of_wrong_shape_does_not_break_the_call(self, mock_openai):
         """A string where an object belongs must not reach the SDK.
 

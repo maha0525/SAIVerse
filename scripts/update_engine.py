@@ -467,7 +467,7 @@ def missing_frontend_packages(project_dir: Path) -> list[str] | None:
     that fails half-way on Windows (a file held open by a running frontend
     server) leaves the folder behind with almost nothing in it, and that
     folder used to be read as a finished install
-    (docs/issues/ui_update_fails_while_frontend_runs.md). Versions are not
+    (docs/issues/archive/ui_update_fails_while_frontend_runs.md). Versions are not
     compared -- that is npm's job and ``package-lock.json`` is already part of
     the completion fingerprint; what this guards against is a package that is
     simply not there.
@@ -662,7 +662,7 @@ def _process_alive(pid: int) -> bool:
 
     Fail closed: without psutil "cannot check" is indistinguishable from
     "already exited", and guessing "exited" once let the updater run beside a
-    live backend (docs/issues/self_update_unsafe_without_psutil.md), so the
+    live backend (docs/issues/archive/self_update_unsafe_without_psutil.md), so the
     honest answer is to abort the update instead of guessing.
     """
     try:
@@ -1545,7 +1545,7 @@ def _terminate_spawned(process: subprocess.Popen[Any]) -> None:
 # start-dev.*) runs as its own node process, separate from the backend. On
 # Windows it keeps ``node_modules/@next/swc-*/next-swc.*.node`` loaded, so a
 # ``npm ci`` beside it fails with EPERM after deleting every other package
-# (docs/issues/ui_update_fails_while_frontend_runs.md). A detached update
+# (docs/issues/archive/ui_update_fails_while_frontend_runs.md). A detached update
 # therefore stops this checkout's frontend before touching anything, and starts
 # it again -- in the mode it was running in -- once the backend is back.
 

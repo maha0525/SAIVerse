@@ -5,6 +5,8 @@ rem Without SAIVERSE_BACKEND_ORIGIN the frontend proxies /api to 127.0.0.1:8000,
 rem which is the PRODUCTION backend - never use this script without the env var below.
 setlocal
 set "SAIVERSE_BACKEND_ORIGIN=http://127.0.0.1:18000"
+rem Voice calls bypass the proxy; keep their direct WebSocket isolated too.
+set "NEXT_PUBLIC_SAIVERSE_BACKEND_WS_HOST=127.0.0.1:18000"
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "PROJECT_ROOT=%%~fI"
 cd /d "%PROJECT_ROOT%"

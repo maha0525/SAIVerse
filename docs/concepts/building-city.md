@@ -27,7 +27,7 @@ City は User が運営する一つの「世界」。複数の Building を束�
 - 所属 City
 - `CAPACITY`（収容数上限。[OccupancyManager](../overview/landscape.md) が enforce）
 - `SYSTEM_INSTRUCTION`（システムプロンプト）
-- `AUTO_INTERVAL_SEC`（自動 pulse 間隔）
+- `AUTO_INTERVAL_SEC`（旧自動 pulse 間隔。API・DB 互換のため残置し、現行の駆動には使わない。設定 UI からは撤去し、他項目を保存するときも既存値を保持する）
 - `PHYSICAL_VESSEL_ID`（物理デバイスに紐付く Vessel Building の場合 → [Item](item.md)）
 
 ### City の属性（`City` テーブル）

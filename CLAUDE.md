@@ -261,7 +261,7 @@ Per-persona: `~/.saiverse/personas/<id>/log.json`, `conscious_log.json`. Set `SA
 
 ### Memory and History
 
-Building chat history is kept in memory and logged to `~/.saiverse/cities/<city>/buildings/<building>/log.json`. SAIMemory rows are appended via `SAIMemoryAdapter.append_building_message()` / `append_persona_message()`. Pulse internal thoughts use tag `internal` with a `pulse_id` for grouping; user conversations use tag `conversation`.
+Building chat history is stored in the `building_messages` table in `saiverse.db`. Legacy `~/.saiverse/cities/<city>/buildings/<building>/log.json` files are import sources only; normal chat writes never update them. SAIMemory rows are appended via `SAIMemoryAdapter.append_building_message()` / `append_persona_message()`. Pulse internal thoughts use tag `internal` with a `pulse_id` for grouping; user conversations use tag `conversation`.
 
 ### Setup/Update Script Parity
 
@@ -292,7 +292,7 @@ Full list: `docs/reference/environment-vars.md`. Set in `.env` (see `.env.exampl
 - `docs/overview/landscape.md` — 概念の俯瞰地図（何があってどう繋がるか）
 - `docs/overview/roadmap_status.md` — 進捗マップ（何が予定され、いまどこにいるか）
 - `docs/overview/in_flight.md` — 進行中案件の台帳
-- `docs/overview/release_history.md` — リリース履歴と次の版に入れる範囲の正典 (リリース判定はここと突き合わせる)
+- `docs/overview/release_history.md` — リリース履歴と次のバージョンに入れる範囲の正典 (リリース判定はここと突き合わせる)
 - `docs/overview/architecture_health.md` — サブシステム別の負債監査
 - `docs/concepts/` — 各概念の開発者向けリファレンス（索引は `concepts/README.md`）
 - `docs/reference/` — DB スキーマ、API、ツール、env var、スクリプト

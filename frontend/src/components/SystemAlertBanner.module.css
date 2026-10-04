@@ -60,24 +60,6 @@
     background: rgba(255, 255, 255, 0.05);
 }
 
-.actionButton {
-    margin: 8px 12px 8px 0;
-    padding: 6px 14px;
-    border-radius: 4px;
-    background: #c14d4d;
-    color: white;
-    border: none;
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-    align-self: center;
-}
-
-.actionButton:hover {
-    background: #d15d5d;
-}
-
 /* 取り消しの効く操作 (ファイルを脇へ移すなど)。破壊的でないことを色で分ける。 */
 .secondaryButton {
     margin: 8px 12px 8px 0;

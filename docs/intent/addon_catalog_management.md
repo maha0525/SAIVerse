@@ -396,20 +396,23 @@ Phase 4 (既存アドオン整備) で各アドオンを更新:
 
 | 資産 | 用途 | 現状の取得経路 | addon installer 側の対応 |
 |---|---|---|---|
-| `stackchan-mcp` gateway | LCD/音声 I/O 等を MCP server として SAIVerse に提供 | mcp_servers.json で `uvx --from git+https://github.com/maha0525/stackchan-mcp.git@dev/integration#subdirectory=gateway` を pin、**SAIVerse 起動時に uvx が自動 fetch + cache**。ローカル clone は不要 | **不要**: addon 側は何もしなくて良い (uvx + mcp 経路が既に解決済み) |
-| `merged-binary.bin` (firmware) | ESP32-S3 device に flash する image | GPL-3.0 ライセンスのため addon repo 同梱不可。現状はまはー手元 ESP-IDF build を `<repo>/temp/stackchan-mcp/firmware/build/merged-binary.bin` で参照 | **当面手動配置、後追いで GitHub Releases 化** |
+| `stackchan-mcp` gateway | LCD/音声 I/O 等を MCP server として SAIVerse に提供 | mcp_servers.json で、本家が PyPI に公開しているパッケージを `uvx --from stackchan-mcp[tts]==0.18.0` とバージョンで固定 (アドオン v0.5.0、2026-10-04)。**SAIVerse 起動時に uvx が自動 fetch + cache**。ローカル clone は不要 | **不要**: addon 側は何もしなくて良い (uvx + mcp 経路が既に解決済み) |
+| `merged-binary.bin` (firmware) | ESP32-S3 device に flash する image | GPL-3.0 ライセンスのため addon repo 同梱不可。アドオン v0.5.0 から、本家 (kisaragi-mochi/stackchan-mcp) の配布ページのリリースを setup の `download_file` で取得する (下の「firmware 配布の方針」) | **`download_file` step** (タグ名と SHA256 で固定) |
 
 ### 当初の誤認 (2026-05-22 → 5-23 訂正)
 
 最初の Intent Doc では「stackchan-mcp 本体も addon の setup で `git_clone` する」と書いていたが、これは事実誤認。実際は mcp_servers.json の `uvx --from git+...` が gateway を自動取得するため、addon の setup section に gateway clone step は不要。
 
-### firmware 配布の方針 (案 B → 後追いで A)
+### firmware 配布の方針 (案 B → 案 D、2026-10-04)
+
+> **2026-10-04 の裁定で、案 A ではなく案 D を採った。** 案 B (手動配置) のまま、ユーザーが取ってくる先がどこにも無い状態で実ユーザーが詰まった (`docs/issues/stackchan_firmware_not_distributed.md`)。fork から配る案 A を採ると、まはーが GPL-3.0 の配布者になり、fork 固有のブランチを配布用に保守し続ける必要がある。fork にしか無い修正の大半が本家に入っていたので、本家の配布物を直接使う案 D にした。
 
 | 案 | 配布手段 | 採否 |
 |---|---|---|
-| A | maha0525/stackchan-mcp の GitHub Releases に firmware を publish → addon.json に `download_file` step | **将来採用 (Phase 4-D')**: 新規ユーザー向け配布手段として整備 |
+| A | maha0525/stackchan-mcp の GitHub Releases に firmware を publish → addon.json に `download_file` step | ~~将来採用 (Phase 4-D')~~ → **不採用 (2026-10-04、D を採った)** |
 | B | firmware は手動配置のまま、addon.json は `manifest_version: 2` 化のみ (setup section なし) | **当面採用 (Phase 4-D)**: まはー実機は既に flash 済み、新規ユーザー出現までの暫定 |
 | C | CI で自動 Releases 化 | 別タスク化、優先度低 |
+| D | **本家 (kisaragi-mochi/stackchan-mcp) の GitHub Releases の firmware を、addon.json の `download_file` step で直接取得** (タグ名と SHA256 で固定、ゲートウェイも本家が同じ日に出した組み合わせに固定) | **採用 (アドオン v0.5.0、2026-10-04)**。A は不採用 |
 
 ### Phase 4-D の setup.steps
 
