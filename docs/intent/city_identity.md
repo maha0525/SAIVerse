@@ -1,6 +1,7 @@
 # City の識別子と表示名
 
 > **ステータス**: 完了 (2026-08-15 まはー実機検証済み)
+> §4-1 の汎用 DB 書き込みルート撤去は検証待ち (2026-10-04、隔離 API 回帰は合格・実機未確認)。
 >
 > 関連: [概念リファレンス Building / City](../concepts/building-city.md) / [landscape §2](../overview/landscape.md)
 
@@ -97,7 +98,11 @@ City は「名前」を入れる欄を 2 つ持っているが、**どちらが�
 
 `CITY_SLUG` の不変性とは別に、既存 Building の `CITYID` は通常の設定更新では変更不可である。根拠は [W7 分離監査の裁定 D5](../handoff/2026-07-21_w7_location_occupancy_handoff.md#d5-p1-7--building-の-city-変更を-immutable-化)。City 間の移送は、ユーザーの現在地・Region・私室・item/tool link を一括して扱う専用 migration の責務で、multi-city 凍結中は提供しない。
 
-通常の建物更新経路では、この境界を `manager/admin.py:update_building` が守る。汎用 DB 編集の `POST /api/db/tables/building` はこの拒否を通らない既知の穴があり、[別 issue](../issues/building_city_immutable_generic_db_bypass.md) で扱う。既存 Building を読む画面は、DB → テーブル API から受け取った所属 City を表示し、同じ `CITYID` のまま通常項目を保存する。World Editor と個別の BuildingSettingsModal のどちらも City 欄は表示のみとし、保存時に拒否される選択を案内しない。新規 Building の City 選択やバックエンドの拒否条件は変えない。個別モーダルの追従と検証範囲は [issue](../issues/building_settings_city_selector_editable.md) に記録する。
+通常の建物更新経路では、この境界を `manager/admin.py:update_building` が守る。汎用 DB の `POST /api/db/tables/{table}` と `DELETE /api/db/tables/{table}` は撤去し、管理サービスを通らない書き換え・削除→同じ ID の再作成による迂回経路を無くす。既存 Building の保存前に `CITYID` だけを検査しても、削除→作成や削除時の後始末の省略は防げないため、未使用の書き込み入口そのものを閉じる。汎用 GET のテーブル一覧・スキーマ・ページ送り・総件数ヘッダは維持する。
+
+既存 Building を読む画面は、DB → テーブル GET API から受け取った所属 City を表示し、通常の world API で同じ `CITYID` のまま通常項目を保存する。World Editor と個別の BuildingSettingsModal のどちらも City 欄は表示のみとし、保存時に拒否される選択を案内しない。新規作成・更新・削除は既存の専用サービスの責務で、退役 ID と関連データの後始末もそこを通る。個別モーダルの追従と検証範囲は [issue](../issues/building_settings_city_selector_editable.md) に記録する。
+
+この撤去は、通常設定 → 専用 API → 保存 → GET での読み取りを保ちながら、ユーザーの現在地・Region・私室・item/tool link が参照する所属と削除時の整合性を守るためのもの。City 移送・DB スキーマ変更・既存 DB 内容の削除は含めない。撤去前に frontend・scripts・同梱アドオン関連資材・tests を全 tracked code の検索と呼び出し先の追跡で確認し、テスト以外の汎用書き込み caller は無かった。隔離した実 API で書き込みルートの 405 と GET の保持を確認し、通常サービスの既存回帰とも比較した。実ブラウザや稼働中の世界での操作確認は未実施で、監査 OPS-09 への結論・検証範囲は [汎用 DB の issue](../issues/building_city_immutable_generic_db_bypass.md) に記録する。
 
 ## 5. 変更を置く場所と、その理由
 

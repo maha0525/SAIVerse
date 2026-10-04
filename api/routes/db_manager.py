@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Body, Query, Response
-from sqlalchemy.orm import Session
-from sqlalchemy import inspect, text
-from typing import List, Dict, Any, Optional
-from pydantic import BaseModel
+import inspect as py_inspect
 import logging
 from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import BaseModel
+from sqlalchemy import inspect
+from sqlalchemy.orm import Session
 
 from api.deps import get_db
 from database import models
@@ -12,7 +13,6 @@ from database import models
 LOGGER = logging.getLogger(__name__)
 router = APIRouter()
 
-import inspect as py_inspect
 
 # Dynamically map table names to model classes
 TABLE_MAP = {}
@@ -28,16 +28,10 @@ MAX_TABLE_ROWS_PER_REQUEST = 1000
 
 class TableInfo(BaseModel):
     name: str
-    columns: List[str]
-    pk_columns: List[str]
+    columns: list[str]
+    pk_columns: list[str]
 
-class RowData(BaseModel):
-    data: Dict[str, Any]
-
-class DeleteRequest(BaseModel):
-    pks: Dict[str, Any]
-
-@router.get("/tables", response_model=List[TableInfo])
+@router.get("/tables", response_model=list[TableInfo])
 def list_tables():
     """List all available database tables and their schemas."""
     tables = []
@@ -54,7 +48,7 @@ def get_table_data(
     response: Response,
     limit: int = Query(100, ge=1, le=MAX_TABLE_ROWS_PER_REQUEST),
     offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db),  # noqa: B008
 ):
     """Get data from a specific table.
 
@@ -94,73 +88,4 @@ def get_table_data(
         return result
     except Exception as e:
         LOGGER.error(f"DB Read Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/tables/{table_name}")
-def upsert_row(table_name: str, row: RowData, db: Session = Depends(get_db)):
-    """Insert or Update a row."""
-    if table_name not in TABLE_MAP:
-        raise HTTPException(status_code=404, detail="Table not found")
-    
-    model = TABLE_MAP[table_name]
-    mapper = inspect(model)
-    data = row.data
-    
-    try:
-        # Check if PKs exist to determine update vs insert (or use merge)
-        # SQLAlchemy merge acts as upsert based on PKs
-        
-        # Convert types if necessary (e.g. empty string to None, bools)
-        # Simple boolean/datetime conversion logic might be needed here akin to legacy db_manager.py
-        clean_data = {}
-        for col in mapper.columns:
-            if col.key in data:
-                val = data[col.key]
-                # Type sanitization
-                if val == "":
-                    val = None
-                clean_data[col.key] = val
-                
-        instance = model(**clean_data)
-        db.merge(instance)
-        db.commit()
-        return {"success": True, "message": "Row saved"}
-    except Exception as e:
-        db.rollback()
-        LOGGER.error(f"DB Write Error: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-
-@router.delete("/tables/{table_name}")
-def delete_row(table_name: str, req: DeleteRequest, db: Session = Depends(get_db)):
-    """Delete a row by Primary Key(s)."""
-    if table_name not in TABLE_MAP:
-        raise HTTPException(status_code=404, detail="Table not found")
-    
-    model = TABLE_MAP[table_name]
-    mapper = inspect(model)
-    required_pks = {column.key for column in mapper.primary_key}
-    supplied_pks = set(req.pks)
-    if not required_pks or supplied_pks != required_pks:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Exactly these primary keys are required: {sorted(required_pks)}",
-        )
-    try:
-        # Build filter from PKs
-        query = db.query(model)
-        for pk, val in req.pks.items():
-            query = query.filter(getattr(model, pk) == val)
-            
-        instance = query.first()
-        if not instance:
-            raise HTTPException(status_code=404, detail="Row not found")
-            
-        db.delete(instance)
-        db.commit()
-        return {"success": True, "message": "Row deleted"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        LOGGER.error(f"DB Delete Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

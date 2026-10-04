@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 363（tag グループ: 26）
+**エンドポイント数**: 361（tag グループ: 26）
 
 ## addon
 
@@ -155,8 +155,6 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 |---|---|---|
 | GET | `/api/db/tables` | List all available database tables and their schemas. |
 | GET | `/api/db/tables/{table_name}` | Get data from a specific table. |
-| POST | `/api/db/tables/{table_name}` | Insert or Update a row. |
-| DELETE | `/api/db/tables/{table_name}` | Delete a row by Primary Key(s). |
 
 ## feeds
 
