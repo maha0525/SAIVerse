@@ -98,7 +98,9 @@ voice-tts の upstream (元になっているリポジトリ) は `Nature109/sai
 1. `setup.bat` は `scripts/install_backends.py` を通して、GPT-SoVITS の requirements.txt をそのまま `pip install -r` する。その中の `numpy<2.0` と `pydantic<=2.10.6` は、requirements.lock (numpy は Python 3.12 以上で 2.5.2、3.11 で 2.4.6。pydantic は 2.13.5) と両立しない。さらに、`gradio<5` で入る gradio 4.44.1 は `pillow<11` を、それが連れてくる gradio-client 1.3.0 は `websockets<13` を、`torchmetrics<=1.5` で入る torchmetrics 1.5.0 は `numpy<2.0` を要求していて、requirements.lock の pillow 11.3.0・websockets 16.1.1・numpy と衝突する。
 2. `saiverse/addon_installer.py` では、requirements.lock が constraints として pip に渡されるのは `pip_install` の step だけで、`platform_script` の step で実行されるスクリプトには渡されない ([addon_setup_scripts_bypass_lock_constraints.md](addon_setup_scripts_bypass_lock_constraints.md))。旧手順のまま実行すると、venv の本体のパッケージが requirements.lock の版から引き下げられる。
 
-#### 公開前にやること (2026-09-11 にメティスが洗い出した。進め方はまはー未決)
+#### 公開前にやること (2026-09-11 にメティスが洗い出した)
+
+> 2026-10-05 以降の作業は、この issue の上の「やる作業」が正。下の一覧は 9/11 時点の記録として残してある。
 
 1. **voice-tts 用の GPT-SoVITS の requirements を、voice-tts 側で持つ。** GPT-SoVITS の requirements.txt を元に、次を変える。
    - `gradio` を外す。GPT-SoVITS の推論で読み込まれるコード (`GPT_SoVITS/TTS_infer_pack/TTS.py` から import を辿れる範囲) は、gradio を import していない。gradio を import しているのは、WebUI の 5 つ (`webui.py`、`GPT_SoVITS/inference_webui.py`、`GPT_SoVITS/inference_webui_fast.py`、`tools/uvr5/webui.py`、`tools/subfix_webui.py`) と `tools/my_utils.py` だった。`tools/my_utils.py` を import しているのは、WebUI、学習・データ準備・書き出し用のスクリプト、実験的なストリーミング推論のスクリプト (`GPT_SoVITS/stream_v2pro.py`) で、voice-tts の入口 (`tools/speak/engine/gpt_sovits.py` の `from TTS_infer_pack.TTS import TTS, TTS_Config`) から辿れる範囲には無い。これはコードを辿った確認で、gradio を外した venv で合成してはいない。
@@ -118,7 +120,11 @@ voice-tts の upstream (元になっているリポジトリ) は `Nature109/sai
    - Linux で、カタログから入れて声が出る: 未検証 (`setup.sh` が無い)。
    - 参照音声を設定済みのペルソナがいる既存の環境に 4 の移行を当てて、そのペルソナの声が出る: 未検証。
 
-#### まはーが決めること (2026-09-11 時点で未決)
+#### まはーが決めること (2026-09-11 時点。2026-10-05 にそれぞれの今の扱いを書き足した)
+
+> - 一つ目 (旧手順の 3 番を外すか): カタログの intent の「導入時の質問と、アドオン専用の Python 環境」が採られれば外れる。採るかどうかは、会話の中でまはーに問いとして出している (2026-10-05)。
+> - 二つ目 (PR #5・#6 を公開前に upstream にマージするか): いまは答えなくてよい。理由は上の「決まっていること」。
+> - 三つ目 (Irodori-TTS を公開に含めるか): 専用の環境なら GPT-SoVITS と別々に入れられるので、両立しないことは外す理由ではなくなった。含める前提で「やる作業」の 2 に入れてある。
 
 - **旧手順の 3 番 (`setup.bat` を `platform_script` の step で実行する) を、計画から外すか。**
 - **upstream にまだマージされていない PR #5・#6 を、公開前にマージするか。** #5 は GPT-SoVITS の合成を別プロセスに移して、SAIVerse 本体のどのスレッドが GIL を握り続けても合成が遅くならないようにするもので、[mcp_cancel_scope_spin_gil_starvation.md](mcp_cancel_scope_spin_gil_starvation.md) の修正方針 B にあたる。GIL 飢餓の元になった本体側の不具合を直す修正方針 A は、2026-05-24 に回帰テストと一緒に実装済み。
