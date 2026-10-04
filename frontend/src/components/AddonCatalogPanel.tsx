@@ -5,11 +5,12 @@ import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 import { resolveI18nText } from '@/i18n/resolve';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, Download, ArrowUpCircle, CheckCircle2, Trash2 } from 'lucide-react';
 import styles from './AddonCatalogPanel.module.css';
 import AddonInstallProgressDialog, { CatalogOperation } from './AddonInstallProgressDialog';
-import AddonActionConfirmDialog from './AddonActionConfirmDialog';
+import AddonActionConfirmDialog, { ConfirmProceedResult, SetupLoadState } from './AddonActionConfirmDialog';
+import type { SetupAnswers, SetupQuestion, SetupStep } from './AddonSetupQuestions';
 
 // ---------------------------------------------------------------------------
 // Types (mirror backend pydantic models)
@@ -53,6 +54,28 @@ interface RegistryResponse {
         updated_at?: string | null;
         addons: RegistryAddonEntry[];
     };
+}
+
+/** POST /install/prepare・/update/prepare の答え (update だけ needs_setup を持つ) */
+interface PrepareResponse {
+    addon_id: string;
+    version?: string;
+    setup_version?: number;
+    needs_setup?: boolean;
+    questions?: SetupQuestion[];
+    steps?: SetupStep[];
+}
+
+/** 失敗した応答から、利用者に見せる理由を取り出す (FastAPI の detail を優先) */
+async function readErrorDetail(res: Response): Promise<string> {
+    const text = await res.text().catch(() => '');
+    try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed.detail === 'string') return parsed.detail;
+    } catch {
+        // JSON でなければ本文をそのまま使う
+    }
+    return `HTTP ${res.status}${text ? `: ${text}` : ''}`;
 }
 
 interface AddonCatalogPanelProps {
@@ -127,12 +150,98 @@ export default function AddonCatalogPanel({
         entry: RegistryAddonEntry;
         operation: CatalogOperation;
         state: RowState;
+        /** install / update の prepare の結果。uninstall では undefined */
+        setup?: SetupLoadState;
     } | null>(null);
     const [progressTarget, setProgressTarget] = useState<{
         entry: RegistryAddonEntry;
         operation: CatalogOperation;
         deleteData?: boolean;
+        answers?: SetupAnswers;
     } | null>(null);
+
+    // prepare の呼び出しごとに番号を振る。応答が返ったときに番号が進んで
+    // いれば、その確認ダイアログはもう閉じられている。
+    const prepareSeqRef = useRef(0);
+    // install/prepare が成功し、まだ confirm も cancel もしていない addon_id。
+    // 確認ダイアログを閉じる経路 (キャンセル・背景クリック・モーダルごと
+    // 閉じる) のどれでも、ここが残っていれば cancel を送る。
+    const pendingInstallRef = useRef<string | null>(null);
+
+    const sendInstallCancel = useCallback((addonId: string) => {
+        apiFetch('/api/addon-catalog/install/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ addon_id: addonId }),
+        }).then(async (res) => {
+            if (!res.ok) {
+                console.error('[AddonCatalog] install/cancel failed:', await readErrorDetail(res));
+            }
+        }).catch((e) => {
+            console.error('[AddonCatalog] install/cancel failed:', e instanceof Error ? e.message : String(e));
+        });
+    }, []);
+
+    // パネルが消えるとき (アドオン管理モーダルを閉じた / タブを切り替えた)、
+    // 開きかけの導入を取り消す。応答待ちの prepare も番号を進めて取り消し扱いにする。
+    useEffect(() => () => {
+        prepareSeqRef.current++;
+        const pending = pendingInstallRef.current;
+        pendingInstallRef.current = null;
+        if (pending) sendInstallCancel(pending);
+    }, [sendInstallCancel]);
+
+    const startPrepare = async (entry: RegistryAddonEntry, operation: 'install' | 'update') => {
+        const seq = ++prepareSeqRef.current;
+        const path = operation === 'install'
+            ? '/api/addon-catalog/install/prepare'
+            : '/api/addon-catalog/update/prepare';
+        let setup: SetupLoadState;
+        try {
+            const res = await apiFetch(path, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ addon_id: entry.id }),
+            });
+            if (!res.ok) throw new Error(await readErrorDetail(res));
+            const data: PrepareResponse = await res.json();
+            if (seq !== prepareSeqRef.current) {
+                // 応答を待つ間に確認ダイアログが閉じられた。導入の準備は取り消す。
+                // ただし同じアドオンの新しい準備が生きているとき (閉じてすぐ開き直した
+                // とき) は送らない — cancel は addon_id でしか区別されず、新しい方の
+                // 準備したフォルダを消してしまう。
+                if (operation === 'install' && pendingInstallRef.current !== entry.id) {
+                    sendInstallCancel(entry.id);
+                }
+                return;
+            }
+            if (operation === 'install') pendingInstallRef.current = entry.id;
+            setup = {
+                status: 'ready',
+                plan: { questions: data.questions ?? [], steps: data.steps ?? [] },
+                // install は常に setup が走る。update はサーバーの判定に従う
+                needsSetup: operation === 'install' ? true : data.needs_setup !== false,
+            };
+        } catch (e) {
+            if (seq !== prepareSeqRef.current) return;
+            const msg = e instanceof Error ? e.message : String(e);
+            console.error(`[AddonCatalog] ${operation}/prepare failed:`, msg);
+            setup = { status: 'error', message: msg };
+        }
+        setConfirmTarget((prev) => (
+            prev && prev.entry.id === entry.id && prev.operation === operation
+                ? { ...prev, setup }
+                : prev
+        ));
+    };
+
+    const closeConfirm = () => {
+        prepareSeqRef.current++;
+        const pending = pendingInstallRef.current;
+        pendingInstallRef.current = null;
+        if (pending) sendInstallCancel(pending);
+        setConfirmTarget(null);
+    };
 
     const loadAll = useCallback(async (force = false) => {
         setLoading(true);
@@ -181,7 +290,9 @@ export default function AddonCatalogPanel({
         if (state.kind === 'not_installed') operation = 'install';
         else if (state.kind === 'update_available') operation = 'update';
         else return; // installed_latest はアクションなし (uninstall は別ボタン)
-        setConfirmTarget({ entry, operation, state });
+        // 確認ダイアログはすぐ開き、質問は prepare の応答で埋める
+        setConfirmTarget({ entry, operation, state, setup: { status: 'loading' } });
+        void startPrepare(entry, operation);
     };
 
     const handleUninstall = (entry: RegistryAddonEntry, state: RowState) => {
@@ -189,12 +300,16 @@ export default function AddonCatalogPanel({
         setConfirmTarget({ entry, operation: 'uninstall', state });
     };
 
-    const handleConfirmProceed = (deleteData: boolean | undefined) => {
+    const handleConfirmProceed = ({ deleteData, answers }: ConfirmProceedResult) => {
         if (!confirmTarget) return;
+        // confirm に進むので、準備した導入は取り消さない
+        prepareSeqRef.current++;
+        pendingInstallRef.current = null;
         setProgressTarget({
             entry: confirmTarget.entry,
             operation: confirmTarget.operation,
             deleteData,
+            answers,
         });
         setConfirmTarget(null);
     };
@@ -314,7 +429,8 @@ export default function AddonCatalogPanel({
                     entry={confirmTarget.entry}
                     operation={confirmTarget.operation}
                     state={confirmTarget.state}
-                    onCancel={() => setConfirmTarget(null)}
+                    setup={confirmTarget.setup}
+                    onCancel={closeConfirm}
                     onProceed={handleConfirmProceed}
                 />
             )}
@@ -325,6 +441,7 @@ export default function AddonCatalogPanel({
                     displayName={progressTarget.entry.display_name}
                     operation={progressTarget.operation}
                     deleteData={progressTarget.deleteData}
+                    answers={progressTarget.answers}
                     onClose={handleProgressClose}
                 />
             )}

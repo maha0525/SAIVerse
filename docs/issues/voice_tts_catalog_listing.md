@@ -1,7 +1,7 @@
 # voice-tts をアドオンカタログに載せる
 
 **起票**: 2026-10-05 (アドオンカタログの intent の Phase 4-E から、この件だけを切り出した)
-**状態**: 設計中。前提になるカタログの仕組み (導入時の質問と、アドオン専用の Python 環境) が、まはーの確認待ち
+**状態**: 実装待ち。前提になるカタログの仕組み (導入時の質問と、アドオン専用の Python 環境) は 2026-10-05 にまはーの GO が出て実装中。仕組みが本体に入ったら、この issue の「やる作業」に入る
 **関連**: [addon_catalog_management.md](../intent/addon_catalog_management.md) の「導入時の質問と、アドオン専用の Python 環境」、[addon_setup_scripts_bypass_lock_constraints.md](addon_setup_scripts_bypass_lock_constraints.md)、[stackchan_firmware_not_distributed.md](stackchan_firmware_not_distributed.md)
 
 ## 何をする件か
@@ -19,7 +19,7 @@
   - 表示名と説明を、日本語と英語で持つ変更
 - **upstream の PR #5・#6 は、2026-10-05 の時点で upstream では開いたまま (未マージ)。** 下の「経緯」にある 9/11 の問い「公開前に upstream にマージするか」は、カタログがフォークを指すので、いまは答えなくてよい。カタログを Nature109 のリポジトリへ戻す前には、この二つと上の残りの変更を upstream に取り込んでもらう必要がある。取り込まれないまま戻すと、利用者の手元からこれらの変更が消える。
 
-## 載せ方 (メティスの案、まはーの確認待ち)
+## 載せ方 (2026-10-05 にまはー GO — エンジンを選ばせて、重いものは専用の環境に入れる形)
 
 カタログの intent の「導入時の質問と、アドオン専用の Python 環境」の仕組みを使う。導入時に「使う音声エンジンを選んでください」と訊き、選択肢は次の三つで、複数選べる。
 

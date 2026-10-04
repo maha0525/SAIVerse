@@ -92,6 +92,24 @@ def test_world_state_stays_in_snapshot_payload(tmp_path: Path, monkeypatch) -> N
     }
 
 
+def test_addon_install_is_not_snapshot_payload(tmp_path: Path, monkeypatch) -> None:
+    """アドオン専用の Python 環境と導入時の答え (addon_install/) はアーカイブに入らない。
+
+    数 GB の環境が更新のたびに保存されないように。並びの addon_data/ (利用者の
+    データ) は入ったままであること。
+    """
+    home = tmp_path / "home"
+    _populate_world(home)
+    _write(home / "addon_install" / "voice-tts" / "envs" / "gpt_sovits" / "pyvenv.cfg", "venv")
+    _write(home / "addon_install" / "voice-tts" / "setup_answers.json", "{}")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    names = {entry.archive_path for entry in snapshot.collect_files_to_snapshot()}
+
+    assert not [n for n in names if n.startswith("addon_install/")]
+    assert "user_data/addon_data/stackchan/avatar_sets/mira.png" in names
+
+
 # ---- restore 側 1: アーカイブメンバーの受け入れと拒否 ----
 
 def test_old_archives_with_llama_cache_still_restore() -> None:

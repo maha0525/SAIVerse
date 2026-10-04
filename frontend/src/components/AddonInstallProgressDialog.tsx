@@ -10,14 +10,52 @@ import { CheckCircle2, AlertCircle, AlertTriangle, X } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 import styles from './AddonInstallProgressDialog.module.css';
 
-export type CatalogOperation = 'install' | 'update' | 'uninstall';
+/**
+ * - install / update: prepare で質問を受け取ったあとの confirm (答えを付ける)
+ * - uninstall
+ * - options: 導入済みのアドオンで、導入時の質問に選択肢を足す
+ */
+export type CatalogOperation = 'install' | 'update' | 'uninstall' | 'options';
 
 interface Props {
     addonId: string;
     displayName: string;
     operation: CatalogOperation;
     deleteData?: boolean;
+    /** install / update / options で送る答え ({question_id: [choice_id, ...]}) */
+    answers?: Record<string, string[]>;
     onClose: () => void;
+}
+
+/** 操作ごとの SSE の口と body。旧 POST /install・/update は使わない。 */
+function buildRequest(
+    operation: CatalogOperation,
+    addonId: string,
+    deleteData: boolean | undefined,
+    answers: Record<string, string[]> | undefined,
+): { path: string; body: Record<string, unknown> } {
+    switch (operation) {
+        case 'install':
+            return {
+                path: '/api/addon-catalog/install/confirm',
+                body: { addon_id: addonId, answers: answers ?? {} },
+            };
+        case 'update':
+            return {
+                path: '/api/addon-catalog/update/confirm',
+                body: { addon_id: addonId, answers: answers ?? {} },
+            };
+        case 'options':
+            return {
+                path: `/api/addon-catalog/installed/${encodeURIComponent(addonId)}/options`,
+                body: { answers: answers ?? {} },
+            };
+        case 'uninstall': {
+            const body: Record<string, unknown> = { addon_id: addonId };
+            if (deleteData != null) body.delete_data = deleteData;
+            return { path: '/api/addon-catalog/uninstall', body };
+        }
+    }
 }
 
 interface LogEntry {
@@ -40,6 +78,7 @@ function opLabel(op: CatalogOperation): string {
         case 'install': return uiText("components.AddonInstallProgressDialog.text001");
         case 'update': return uiText("components.AddonInstallProgressDialog.text002");
         case 'uninstall': return uiText("components.AddonInstallProgressDialog.text003");
+        case 'options': return uiText("components.AddonInstallProgressDialog.text014");
     }
 }
 
@@ -48,6 +87,7 @@ export default function AddonInstallProgressDialog({
     displayName,
     operation,
     deleteData,
+    answers,
     onClose,
 }: Props) {
     useLocale();
@@ -64,11 +104,7 @@ export default function AddonInstallProgressDialog({
         const ac = new AbortController();
         abortRef.current = ac;
 
-        const path = `/api/addon-catalog/${operation}`;
-        const body: Record<string, unknown> = { addon_id: addonId };
-        if (operation === 'uninstall' && deleteData != null) {
-            body.delete_data = deleteData;
-        }
+        const { path, body } = buildRequest(operation, addonId, deleteData, answers);
 
         (async () => {
             try {
@@ -130,8 +166,10 @@ export default function AddonInstallProgressDialog({
         return () => {
             ac.abort();
         };
+        // answers は親が一度だけ作って渡す (開いている間は変わらない) ので、
+        // 中身ではなく参照で依存させてよい。
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [addonId, operation, deleteData]);
+    }, [addonId, operation, deleteData, answers]);
 
     function handleEvent(ev: {
         phase: string;
@@ -181,7 +219,11 @@ export default function AddonInstallProgressDialog({
             <div className={styles.dialog} onClick={(e) => e.stopPropagation()}>
                 <div className={styles.header}>
                     <div>
-                        <h3 data-i18n="components.AddonInstallProgressDialog.text005 components.AddonInstallProgressDialog.text006">{displayName}{uiText("components.AddonInstallProgressDialog.text005")}{opLabel(operation)}{uiText("components.AddonInstallProgressDialog.text006")}</h3>
+                        {operation === 'options' ? (
+                            <h3 data-i18n="components.AddonInstallProgressDialog.text015">{uiText("components.AddonInstallProgressDialog.text015", { p1: displayName })}</h3>
+                        ) : (
+                            <h3 data-i18n="components.AddonInstallProgressDialog.text005 components.AddonInstallProgressDialog.text006">{displayName}{uiText("components.AddonInstallProgressDialog.text005")}{opLabel(operation)}{uiText("components.AddonInstallProgressDialog.text006")}</h3>
+                        )}
                         <div className={styles.subId}>{addonId}</div>
                     </div>
                     {!inProgress && (

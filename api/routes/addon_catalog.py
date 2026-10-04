@@ -1,18 +1,26 @@
 """アドオンカタログ API。
 
-GET  /api/addon-catalog/registry       - registry.json fetch (キャッシュ済み)
-GET  /api/addon-catalog/installed      - 現在 installed なアドオン一覧
-POST /api/addon-catalog/install        - インストール (SSE 進捗ストリーム)
-POST /api/addon-catalog/update         - 更新 (SSE 進捗ストリーム)
-POST /api/addon-catalog/uninstall      - アンインストール (SSE 進捗ストリーム)
+GET  /api/addon-catalog/registry                     - registry.json fetch (キャッシュ済み)
+GET  /api/addon-catalog/installed                    - 現在 installed なアドオン一覧
+POST /api/addon-catalog/install/prepare              - 導入の一段目 (取得 + 質問と step の一覧)
+POST /api/addon-catalog/install/confirm              - 導入の二段目 (SSE 進捗ストリーム)
+POST /api/addon-catalog/install/cancel               - 導入の prepare を取り消す
+POST /api/addon-catalog/update/prepare               - 更新の一段目
+POST /api/addon-catalog/update/confirm               - 更新の二段目 (SSE 進捗ストリーム)
+POST /api/addon-catalog/update/cancel                - 更新の prepare を取り消す
+GET  /api/addon-catalog/installed/{addon_id}/options - 導入済みアドオンの質問の出し直し
+POST /api/addon-catalog/installed/{addon_id}/options - 選択肢を足して反映 (SSE 進捗ストリーム)
+POST /api/addon-catalog/uninstall                    - アンインストール (SSE 進捗ストリーム)
 
-設計は ``docs/intent/addon_catalog_management.md`` を参照。
+設計は ``docs/intent/addon_catalog_management.md`` を参照 (二段構えと質問は
+「導入時の質問と、アドオン専用の Python 環境」の節)。
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import re
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -22,12 +30,24 @@ from pydantic import BaseModel, Field
 
 from api.deps import get_manager
 from saiverse.addon_installer import (
+    AddonAnswersError,
     AddonInstallError,
     AddonManifestError,
+    AddonStateError,
+    AddonVersionError,
     ProgressEvent,
-    install_addon,
+    cancel_install,
+    cancel_update,
+    execute_install_plan,
+    execute_options_plan,
+    execute_update_plan,
+    get_installed_options,
+    plan_install_confirm,
+    plan_options_apply,
+    plan_update_confirm,
+    prepare_install,
+    prepare_update,
     uninstall_addon,
-    update_addon,
 )
 from saiverse.addon_manifest import AddonManifest, load_manifest
 from saiverse.addon_registry import (
@@ -61,6 +81,18 @@ def _get_lock(addon_id: str) -> threading.Lock:
         return lock
 
 
+# addon_id の形式 (addon.json の name と同じ規則 — saiverse/addon_manifest.py)。
+# installer の深い所 (get_addon_install_dir 等) でも不正なパスは ValueError で
+# 止まるが、それは呼び出し順にたまたま守られている形なので、API の入口で
+# 検査して 400 を返す。addon_id はこの後ファイルパスの組み立てに使われる。
+_ADDON_ID_RE = re.compile(r"^[a-z][a-z0-9\-_]*$")
+
+
+def _check_addon_id(addon_id: str) -> None:
+    if not _ADDON_ID_RE.match(addon_id or ""):
+        raise HTTPException(400, detail=f"invalid addon_id: {addon_id!r}")
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -79,19 +111,28 @@ class RegistryResponse(BaseModel):
     registry: Registry
 
 
-class InstallRequest(BaseModel):
+class PrepareRequest(BaseModel):
     addon_id: str
     version: Optional[str] = Field(
         None,
-        description="導入するバージョン (省略時は latest)",
+        description="導入 / 更新するバージョン (省略時は latest)",
     )
 
 
-class UpdateRequest(BaseModel):
+class ConfirmRequest(BaseModel):
     addon_id: str
-    version: Optional[str] = Field(
-        None, description="更新先バージョン (省略時は latest)"
+    answers: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="{質問 id: [選択肢 id, ...]} (一つだけ選ぶ質問も要素 1 の一覧)",
     )
+
+
+class CancelRequest(BaseModel):
+    addon_id: str
+
+
+class OptionsApplyRequest(BaseModel):
+    answers: Dict[str, List[str]] = Field(default_factory=dict)
 
 
 class UninstallRequest(BaseModel):
@@ -248,22 +289,29 @@ async def _run_with_progress_sse(
     addon_id: str,
     runner: "callable[[ProgressEvent.__class__], Any]",  # type: ignore[name-defined]
     require_lock: bool = True,
+    held_lock: Optional[threading.Lock] = None,
 ):
     """worker thread で installer を回し、進捗を SSE で stream するヘルパ。
 
     runner は ``progress_callback`` を 1 引数で受け取る関数。worker thread 内で
     呼ばれる。完了 / エラーで queue に sentinel を入れて async 側を終了させる。
+    ``held_lock`` には、呼び出し側が既に取っている per-addon lock を渡せる
+    (confirm 系 — 計画と実行の間に cancel が割り込まないよう、計画の前から取る)。
+    どちらの形でも、解放はストリーム終了時にこの関数が行う。
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
     SENTINEL_DONE = object()
 
-    lock = _get_lock(addon_id) if require_lock else None
-    if lock is not None and not lock.acquire(blocking=False):
-        raise HTTPException(
-            409,
-            detail=f"addon '{addon_id}' は他の install/update/uninstall 処理中です",
-        )
+    if held_lock is not None:
+        lock: Optional[threading.Lock] = held_lock
+    else:
+        lock = _get_lock(addon_id) if require_lock else None
+        if lock is not None and not lock.acquire(blocking=False):
+            raise HTTPException(
+                409,
+                detail=f"addon '{addon_id}' は他の install/update/uninstall 処理中です",
+            )
 
     final_state: Dict[str, Any] = {"ok": False, "error": None, "manifest": None}
 
@@ -340,80 +388,238 @@ async def _run_with_progress_sse(
 
 
 # ---------------------------------------------------------------------------
-# POST endpoints (install / update / uninstall)
+# 二段構えの導入・更新、質問の出し直し
 # ---------------------------------------------------------------------------
+#
+# prepare は取得 (git fetch) と manifest の検証だけを行い、質問と step の一覧を
+# 返す (確認ダイアログに出す)。confirm は答えを受け取って checkout と step の
+# 実行を SSE で流す。prepare と confirm の間の「どの commit を指しているか」は
+# installer が ~/.saiverse/addon_install/<id>/pending.json に残す。
 
-@router.post("/install")
-async def post_install(req: InstallRequest, manager=Depends(get_manager)):
-    """アドオンを registry 経由でインストール (SSE 進捗 stream)。"""
+
+def _http_error(e: AddonInstallError) -> HTTPException:
+    """installer の例外を HTTP エラーへ。"""
+    if isinstance(e, AddonStateError):
+        return HTTPException(409, detail=str(e))
+    if isinstance(e, (AddonAnswersError, AddonVersionError, AddonManifestError)):
+        return HTTPException(400, detail=str(e))
+    # 残りは主に git の取得失敗 (ネットワーク・取得元)
+    return HTTPException(502, detail=str(e))
+
+
+def _with_lock(addon_id: str, fn):
+    """per-addon lock を取って fn() を実行する (取れなければ 409)。"""
+    lock = _get_lock(addon_id)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(
+            409,
+            detail=f"addon '{addon_id}' は他の install/update/uninstall 処理中です",
+        )
     try:
-        registry = fetch_registry()
+        return fn()
+    except AddonInstallError as e:
+        raise _http_error(e) from e
+    finally:
+        lock.release()
+
+
+def _fetch_registry_or_503() -> Registry:
+    try:
+        return fetch_registry()
     except RuntimeError as e:
         raise HTTPException(503, detail=f"registry fetch failed: {e}") from e
 
-    entry, ver = _resolve_version(registry, req.addon_id, req.version)
-    addon_dir = EXPANSION_DATA_DIR / req.addon_id
-    if addon_dir.exists():
+
+def _plan_or_http_error(fn):
+    try:
+        return fn()
+    except AddonInstallError as e:
+        raise _http_error(e) from e
+
+
+def _plan_with_held_lock(addon_id: str, plan_fn):
+    """confirm の計画を、実行まで持ち続ける鍵の中で立てる。
+
+    計画 (pending の読み取り) と実行の間に cancel 等が割り込むと、計画が指す
+    フォルダが消えてから実行が走る。鍵を計画の前に取り、実行側
+    (``_run_with_progress_sse`` の ``held_lock``) まで持ち越すことで一続きにする。
+    返値は (plan, lock)。計画で失敗したら鍵を放して HTTP エラーにする。
+    """
+    lock = _get_lock(addon_id)
+    if not lock.acquire(blocking=False):
         raise HTTPException(
             409,
-            detail=f"addon '{req.addon_id}' は既にインストール済みです。"
-                   f"更新は /update、削除は /uninstall を使ってください。",
+            detail=f"addon '{addon_id}' は他の install/update/uninstall 処理中です",
         )
+    try:
+        return _plan_or_http_error(plan_fn), lock
+    except BaseException:
+        lock.release()
+        raise
 
-    def runner(progress_cb):
-        manifest = install_addon(
+
+@router.post("/install/prepare")
+def post_install_prepare(req: PrepareRequest):
+    """導入の一段目: 取得して、質問と (この OS で当てはまる) step の一覧を返す。"""
+    _check_addon_id(req.addon_id)
+    registry = _fetch_registry_or_503()
+    entry, ver = _resolve_version(registry, req.addon_id, req.version)
+
+    def run():
+        return prepare_install(
             repo_url=entry.repo_url,
             commit=ver.commit,
             addon_id=req.addon_id,
-            progress_callback=progress_cb,
+            min_saiverse_version=ver.min_saiverse_version,
+            expansion_dir=EXPANSION_DATA_DIR,
         )
+
+    prepared = _with_lock(req.addon_id, run)
+    payload = prepared.to_dict()
+    payload.pop("needs_setup", None)
+    return payload
+
+
+@router.post("/install/confirm")
+async def post_install_confirm(req: ConfirmRequest, manager=Depends(get_manager)):
+    """導入の二段目: 答えで選んだ step を実行する (SSE 進捗 stream)。"""
+    _check_addon_id(req.addon_id)
+    plan, lock = _plan_with_held_lock(
+        req.addon_id,
+        lambda: plan_install_confirm(req.addon_id, req.answers, EXPANSION_DATA_DIR),
+    )
+
+    def runner(progress_cb):
+        manifest = execute_install_plan(plan, progress_callback=progress_cb)
         _try_register_addon(req.addon_id, manager)
         return manifest
 
-    return await _run_with_progress_sse(
-        operation_label="install",
-        addon_id=req.addon_id,
-        runner=runner,
-    )
-
-
-@router.post("/update")
-async def post_update(req: UpdateRequest, manager=Depends(get_manager)):
-    """インストール済みアドオンを registry 経由で更新 (SSE 進捗 stream)。"""
     try:
-        registry = fetch_registry()
-    except RuntimeError as e:
-        raise HTTPException(503, detail=f"registry fetch failed: {e}") from e
+        return await _run_with_progress_sse(
+            operation_label="install",
+            addon_id=req.addon_id,
+            runner=runner,
+            held_lock=lock,
+        )
+    except BaseException:
+        lock.release()
+        raise
 
+
+@router.post("/install/cancel")
+def post_install_cancel(req: CancelRequest):
+    """導入の prepare で作ったフォルダを消す。"""
+    _check_addon_id(req.addon_id)
+    _with_lock(req.addon_id, lambda: cancel_install(req.addon_id, EXPANSION_DATA_DIR))
+    return {"addon_id": req.addon_id, "cancelled": True}
+
+
+@router.post("/update/prepare")
+def post_update_prepare(req: PrepareRequest):
+    """更新の一段目: カタログの repo_url から取得して、setup のやり直しの要否と、
+    出し直す質問 (新しい質問・選択肢が増えた質問、答えが無ければ全部) を返す。"""
+    _check_addon_id(req.addon_id)
+    registry = _fetch_registry_or_503()
     addon_dir = EXPANSION_DATA_DIR / req.addon_id
     if not addon_dir.exists():
         raise HTTPException(
             404,
-            detail=f"addon '{req.addon_id}' は未インストールです。/install を使ってください。",
+            detail=f"addon '{req.addon_id}' は未インストールです。/install/prepare を使ってください。",
         )
-    _entry, ver = _resolve_version(registry, req.addon_id, req.version)
+    entry, ver = _resolve_version(registry, req.addon_id, req.version)
+
+    def run():
+        return prepare_update(
+            addon_id=req.addon_id,
+            repo_url=entry.repo_url,
+            new_commit=ver.commit,
+            min_saiverse_version=ver.min_saiverse_version,
+            expansion_dir=EXPANSION_DATA_DIR,
+        )
+
+    return _with_lock(req.addon_id, run).to_dict()
+
+
+@router.post("/update/confirm")
+async def post_update_confirm(req: ConfirmRequest, manager=Depends(get_manager)):
+    """更新の二段目: checkout して、setup_version が上がっていれば setup をやり直す
+    (SSE 進捗 stream)。"""
+    _check_addon_id(req.addon_id)
+    plan, lock = _plan_with_held_lock(
+        req.addon_id,
+        lambda: plan_update_confirm(req.addon_id, req.answers, EXPANSION_DATA_DIR),
+    )
 
     def runner(progress_cb):
-        manifest = update_addon(
-            addon_id=req.addon_id,
-            new_commit=ver.commit,
-            progress_callback=progress_cb,
-        )
+        manifest = execute_update_plan(plan, progress_callback=progress_cb)
         # update 時は再 register でいいが、unregister → register の順で
         # 古い hook を確実に消したい場合もある。Phase 2 では register のみ。
         _try_register_addon(req.addon_id, manager)
         return manifest
 
-    return await _run_with_progress_sse(
-        operation_label="update",
-        addon_id=req.addon_id,
-        runner=runner,
+    try:
+        return await _run_with_progress_sse(
+            operation_label="update",
+            addon_id=req.addon_id,
+            runner=runner,
+            held_lock=lock,
+        )
+    except BaseException:
+        lock.release()
+        raise
+
+
+@router.post("/update/cancel")
+def post_update_cancel(req: CancelRequest):
+    """更新の prepare を取り消す (fetch しただけなので、記録を消すだけ)。"""
+    _check_addon_id(req.addon_id)
+    _with_lock(req.addon_id, lambda: cancel_update(req.addon_id))
+    return {"addon_id": req.addon_id, "cancelled": True}
+
+
+@router.get("/installed/{addon_id}/options")
+def get_installed_addon_options(addon_id: str):
+    """導入済みアドオンの質問 (保存済みの答えに selected: true) と、答えを足したときに
+    実行の候補になる step を返す。"""
+    _check_addon_id(addon_id)
+    prepared = _plan_or_http_error(
+        lambda: get_installed_options(addon_id, EXPANSION_DATA_DIR)
     )
+    return {"questions": prepared.questions, "steps": prepared.steps}
+
+
+@router.post("/installed/{addon_id}/options")
+async def post_installed_addon_options(
+    addon_id: str, req: OptionsApplyRequest, manager=Depends(get_manager)
+):
+    """選択肢を足して、新しく実行の条件を満たした step だけを実行する (SSE 進捗 stream)。"""
+    _check_addon_id(addon_id)
+    plan, lock = _plan_with_held_lock(
+        addon_id,
+        lambda: plan_options_apply(addon_id, req.answers, EXPANSION_DATA_DIR),
+    )
+
+    def runner(progress_cb):
+        manifest = execute_options_plan(plan, progress_callback=progress_cb)
+        _try_register_addon(addon_id, manager)
+        return manifest
+
+    try:
+        return await _run_with_progress_sse(
+            operation_label="options",
+            addon_id=addon_id,
+            runner=runner,
+            held_lock=lock,
+        )
+    except BaseException:
+        lock.release()
+        raise
 
 
 @router.post("/uninstall")
 async def post_uninstall(req: UninstallRequest, manager=Depends(get_manager)):
     """アドオンをアンインストール (SSE 進捗 stream)。"""
+    _check_addon_id(req.addon_id)
     addon_dir = EXPANSION_DATA_DIR / req.addon_id
     if not addon_dir.exists():
         raise HTTPException(404, detail=f"addon '{req.addon_id}' は未インストールです")
@@ -422,10 +628,12 @@ async def post_uninstall(req: UninstallRequest, manager=Depends(get_manager)):
         # 先に unregister してから物理削除する (running な hook が file を握ら
         # ないように)
         _try_unregister_addon(req.addon_id, manager)
+        # 専用の環境と答え (addon_install/<id>/) は uninstall_addon が必ず消す
         uninstall_addon(
             addon_id=req.addon_id,
             delete_data=req.delete_data,
             progress_callback=progress_cb,
+            expansion_dir=EXPANSION_DATA_DIR,
         )
         return None
 

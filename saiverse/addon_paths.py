@@ -19,17 +19,109 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+import platform
+import re
 from pathlib import Path
 
 from saiverse.data_paths import USER_DATA_DIR, get_saiverse_home
 
 LOGGER = logging.getLogger(__name__)
 
+# 専用の環境の中に置く、作ったときの記録 (使った Python のバージョン)
+ADDON_ENV_RECORD_NAME = "saiverse_env.json"
+_ENV_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+class AddonEnvError(RuntimeError):
+    """アドオン専用の Python 環境が使えない (無い / 本体の Python と食い違う)。"""
+
 
 def _validate_addon_id(addon_name: str) -> None:
     if not addon_name or "/" in addon_name or "\\" in addon_name or ".." in addon_name:
         raise ValueError(f"Invalid addon_name: {addon_name!r}")
+
+
+def _validate_env_name(name: str) -> None:
+    if not _ENV_NAME_RE.match(name or ""):
+        raise ValueError(f"Invalid addon env name: {name!r}")
+
+
+def get_addon_install_dir(addon_name: str) -> Path:
+    """アドオンの導入物の置き場所を返す (作成はしない)。
+
+    返値: ``~/.saiverse/addon_install/<addon_name>/``
+
+    専用の Python 環境 (``envs/<name>/``) と導入時の答え (``setup_answers.json``)
+    を置く。世界の状態ではなく再生成できる導入物なので、スナップショットの
+    対象外 (``scripts/snapshot.py`` の ``EXCLUDED_FROM_SNAPSHOT``)。アンインストール
+    ではアドオンのフォルダと一緒に必ず消える。
+    設計: ``docs/intent/addon_catalog_management.md``「導入時の質問と、アドオン専用の
+    Python 環境」。
+    """
+    _validate_addon_id(addon_name)
+    return get_saiverse_home() / "addon_install" / addon_name
+
+
+def get_addon_env_dir(addon_name: str, env_name: str) -> Path:
+    """アドオン専用の Python 環境のフォルダ (作成はしない)。"""
+    _validate_env_name(env_name)
+    return get_addon_install_dir(addon_name) / "envs" / env_name
+
+
+def addon_env_python_path(env_dir: Path) -> Path:
+    """venv の中の python 実行ファイルの場所 (存在は確かめない)。"""
+    if platform.system() == "Windows":
+        return env_dir / "Scripts" / "python.exe"
+    return env_dir / "bin" / "python"
+
+
+def current_python_version() -> str:
+    """本体の Python のバージョン (専用の環境の作り直しの判定に使う)。"""
+    return platform.python_version()
+
+
+def read_addon_env_record(env_dir: Path) -> dict | None:
+    """専用の環境を作ったときの記録。無い / 壊れていれば None。"""
+    path = env_dir / ADDON_ENV_RECORD_NAME
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        LOGGER.warning("addon_paths: unreadable env record %s", path, exc_info=True)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def get_addon_env_python(addon_name: str, env_name: str) -> Path:
+    """アドオン専用の Python 環境の python の場所を返す。
+
+    アドオンのコードは、専用の環境のパッケージを使う処理を、この Python で別の
+    プロセスとして起動する (SAIVerse のプロセスの中では import できない)。
+
+    環境が無いとき、作ったときの記録が無いとき、記録された Python のバージョンが
+    本体の Python と食い違うときは ``AddonEnvError`` を投げる。古い環境の場所を
+    黙って返さない — 作り直しは setup のやり直しで行う。
+    """
+    env_dir = get_addon_env_dir(addon_name, env_name)
+    python = addon_env_python_path(env_dir)
+    record = read_addon_env_record(env_dir)
+    if record is None or not python.exists():
+        raise AddonEnvError(
+            f"addon {addon_name!r}: Python environment {env_name!r} is not set up "
+            f"({env_dir}). Run the addon's setup again."
+        )
+    recorded = record.get("python_version")
+    current = current_python_version()
+    if recorded != current:
+        raise AddonEnvError(
+            f"addon {addon_name!r}: Python environment {env_name!r} was created with "
+            f"Python {recorded}, but SAIVerse now runs Python {current}. "
+            "Run the addon's setup again to rebuild it."
+        )
+    return python
 
 
 def get_addon_data_dir(addon_name: str) -> Path:
@@ -68,4 +160,11 @@ def get_addon_storage_path(addon_name: str) -> Path:
     return path
 
 
-__all__ = ["get_addon_storage_path", "get_addon_data_dir"]
+__all__ = [
+    "AddonEnvError",
+    "get_addon_storage_path",
+    "get_addon_data_dir",
+    "get_addon_install_dir",
+    "get_addon_env_dir",
+    "get_addon_env_python",
+]

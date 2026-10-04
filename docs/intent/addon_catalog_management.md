@@ -1,6 +1,6 @@
 # Intent: アドオンカタログ管理 (curated registry + ワンタッチ導入)
 
-**ステータス**: 設計中 (2026-10-05)。Phase 4 は voice-tts を除いて完了 (2026-05-23)。「導入時の質問と、アドオン専用の Python 環境」の節 (2026-10-05 起草) が、まはーの確認待ち。voice-tts をカタログに載せる件は [voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md) に切り出した
+**ステータス**: 検証待ち (2026-10-05 にまはー GO、同日実装済み)。「導入時の質問と、アドオン専用の Python 環境」の本体の作業 1〜10 は実装済みで、隔離環境の通し (導入 → 選択肢の追加 → アンインストール、本物の venv と pip) も同日に確認した。画面の実表示と実物での通しは、voice-tts の掲載 ([voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md)) と一緒に行う。Phase 4 は voice-tts を除いて完了 (2026-05-23)
 
 ## これは何か
 
@@ -149,7 +149,7 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 - `remove_dir`: addon ディレクトリ配下、または永続データ (`addon_data/<id>/`) 配下の指定パスを削除
 - `download_file`: URL + 期待 SHA256 を指定して永続データ配下に DL (stackchan v0.5.0 のファームウェア取得で使用中)
 
-**禁止**: 任意シェルコマンド、`curl | sh`、`exec`、addon ディレクトリ外への書き込み。
+**禁止**: 任意シェルコマンド、`curl | sh`、`exec`。書き込んでよい場所は次の三つだけ (2026-10-05 に「addon ディレクトリ外への書き込み禁止」から改めた): ① アドオンのフォルダ `expansion_data/<id>/` (git_clone の取得先など)、② 永続データ `~/.saiverse/user_data/addon_data/<id>/` (download_file の置き先)、③ 導入物 `~/.saiverse/addon_install/<id>/` (専用の Python 環境と答え)。
 
 `skip_if_exists` 指定があれば、そのパスが既存ならステップをスキップ (voice-tts 再 setup 回避用)。
 
@@ -215,9 +215,9 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 4. **setup_version の単調増加**: setup の再実行が必要な変更を入れたら setup_version をインクリメント。これを守らないとユーザーが古い external 資産のまま新しいコードを動かす事態が起きる。
 5. **setup 前に必ずユーザー承認**: 各 setup step の内容 (実行コマンド) をダイアログで提示してから実行する。
 
-## 導入時の質問と、アドオン専用の Python 環境 (2026-10-05 起草、まはーの確認待ち)
+## 導入時の質問と、アドオン専用の Python 環境 (2026-10-05 起草、同日まはー GO)
 
-この節は、メティスが 2026-10-05 に書いた設計案で、まはーはまだ読んでいない。まはーの発言で支えられているのは、導入時に何かを選ばせる仕組みを作ることだけ (「なんとかUI上でsetup.bat同様のウィザード動かす感じのシステム作れない？セットアップ中に何かを選ぶみたいなのは普通にあると思うのよ。」)。専用の Python 環境、置き場所、step の種類の扱いは、どれもメティスの提案。同日に Fable のセッションで検収し、整合性の検査 (Opus のサブエージェント) も通して、矛盾と抜けを直した (アンインストール後の答えの扱い、step を OS で出し分ける `os`、`min_saiverse_version` の検査、手で入れたアドオンの更新の扱い — setup_version と取得元、文書の直しの作業化)。
+この節は、メティスが 2026-10-05 に書いた設計案。まはーの GO は同日の会話で出た (要点 — 導入時にエンジンを選べる・重いパッケージは本体と別の箱に入る — を会話の問いで確認し、「それでいいよー」)。起点になったまはーの発言は「なんとかUI上でsetup.bat同様のウィザード動かす感じのシステム作れない？セットアップ中に何かを選ぶみたいなのは普通にあると思うのよ。」。同日に Fable のセッションで検収し、整合性の検査 (Opus のサブエージェント) も通して、矛盾と抜けを直した (アンインストール後の答えの扱い、step を OS で出し分ける `os`、`min_saiverse_version` の検査、手で入れたアドオンの更新の扱い — setup_version と取得元、文書の直しの作業化)。
 
 この仕組みを最初に使うのは voice-tts で、voice-tts をどう載せるかは [voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md) にある。
 
@@ -315,6 +315,8 @@ voice-tts をカタログに載せようとして、いまの仕組みでは次�
 9. 文書を設計の確定に合わせて直す: この文書の「禁止」の文を書いてよい場所の一覧の形に (下の小節)、[dependency_management.md](dependency_management.md) §2-3 の「アドオンの pip install には lock を constraints として渡す」の文と §2-4 の表に `env` の付いた step の例外を (上の「守ること」の 7)、それぞれ反映する。
 10. 更新の取得先を、導入時の origin ではなくカタログの `repo_url` にする (`update_addon`。下の「カタログが指す先を切り替えるとき」)。voice-tts には手で入れたもの (origin が Nature109 を指す) が既にあり、カタログはまはーのフォークを指すので、この修正は voice-tts を載せる本体のリリースまでに要る。
 11. 隔離した `SAIVERSE_HOME` と新しい venv で、質問・`when`・`env`・`os` の付いたアドオンを導入し、選んだ step だけが実行されること、`env` の付いた step の前後で本体の venv のパッケージが変わっていないことを確かめる。手で入れた形 (git clone 済みのフォルダ) をカタログから更新する経路も確かめる。
+
+(2026-10-05: 1〜10 は実装済み。11 のうち、導入 → 選択肢の追加 → アンインストールの通しは、隔離した `SAIVERSE_HOME` で本物の git・venv・pip を使って同日に確認した — 専用の環境にだけパッケージが入り、本体の venv は変わらず、アンインストールで専用の環境と答えが消える。画面の実表示と、手で入れた形の更新の実物での通しは、voice-tts の掲載のときに行う。)
 
 ### カタログが指す先を切り替えるとき
 

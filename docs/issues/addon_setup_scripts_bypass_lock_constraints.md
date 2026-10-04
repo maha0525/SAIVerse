@@ -2,7 +2,7 @@
 
 **起票**: 2026-09-11 (voice-tts をアドオンカタログに載せる前に必要な作業を洗い出す中で見つけた)
 **状態**: 未着手
-**優先度**: high (メティスの判断。voice-tts を今の setup のままアドオンカタログに載せると、setup の step を持つアドオンとして最初にこの経路を通るため)。2026-10-05 に、voice-tts の重いパッケージをアドオン専用の Python 環境に入れる設計案を [addon_catalog_management.md](../intent/addon_catalog_management.md) に書いた (まはーの確認待ち)。この案が採られると、voice-tts はこの経路を通らなくなり、high にした理由は無くなる。そのときに優先度を見直す。直すときは、constraints を渡すのを専用の環境を使わない step だけにする (同じ intent の不変条件 7 — 2026-10-05 時点ではまだ設計案で、まはーの確認待ち)
+**優先度**: low (2026-10-05 に見直した。アドオン専用の Python 環境の設計 [addon_catalog_management.md](../intent/addon_catalog_management.md) にまはーの GO が出て、voice-tts はこの経路を通らなくなった。直しが入るまでは「`env` の付いていないスクリプトで pip を呼ぶアドオンはカタログに載せない」(同 intent の不変条件 7) で塞いである。起票時は high — voice-tts が当時の setup のまま載ると、この経路を最初に通るはずだった。)直すときは、constraints を渡すのを専用の環境を使わない step だけにする (同じ intent の不変条件 7 — 2026-10-05 にまはーの GO が出た)
 **関連**: [dependency_management.md](../intent/dependency_management.md) §2-2・§2-3・§2-4、[addon_catalog_management.md](../intent/addon_catalog_management.md) Phase 4-E、[pip_check_warning_reinstall_advice.md](pip_check_warning_reinstall_advice.md)、`saiverse/addon_installer.py`
 
 ## 現象
