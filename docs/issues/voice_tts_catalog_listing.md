@@ -10,7 +10,7 @@
 
 ## 決まっていること
 
-- **カタログは、まずまはーのフォーク (`maha0525/saiverse-voice-tts`) を指して載せる。** まはー (2026-10-05):「ひとまず俺のフォークで問題ない」。いずれ Nature109 のリポジトリへ戻す。戻す前に要る本体の修正は、カタログの intent の「カタログが指す先の切り替え」にある。
+- **カタログは、まずまはーのフォーク (`maha0525/saiverse-voice-tts`) を指して載せる。** まはー (2026-10-05):「ひとまず俺のフォークで問題ない」。いずれ Nature109 のリポジトリへ戻す。戻す前に要る本体の修正は、カタログの intent の「カタログが指す先を切り替えるとき」にある (この修正は、載せる時点から要ることが 2026-10-05 に分かった — 下の作業 8 の注記)。
 - **フォークの main には、upstream にまだ入っていない次の 5 つを入れた** (`b964fcd`。2026-10-05、まはーが push を承認した)。upstream の main (`a9be97d`) の上に積んである。
   - GPT-SoVITS の合成の別プロセス化 (upstream の PR #5)
   - 音声のストリームが止まったときに、SAIVerse の終了処理が止まったままにならないよう、待ち時間に上限を付ける修正 (upstream の PR #6)
@@ -34,8 +34,8 @@ GPT-SoVITS と Irodori-TTS は、それぞれ専用の Python 環境に入れる
 - voice-tts のパッケージ (requirements.txt): `pip_install` の step (本体の venv)。`torchcodec` は Irodori-TTS 用の requirements のファイルへ移す (下の「確かめたこと・確かめ方」)。
 - 設定ファイルのひな形 (`config/default.json` と `voice_profiles/registry.json`) の作成: `python_script` の step (本体の Python。パッケージは入れない)。
 - GPT-SoVITS 本体と Irodori-TTS 本体の取得: `git_clone` の step (commit で固定)。
-- GPT-SoVITS と Irodori-TTS のパッケージと、CUDA に対応した torch: `env` の付いた `pip_install` の step。CUDA に対応した torch のダウンロード先 (`https://download.pytorch.org/whl/cu128` など) は、requirements のファイルに書く。
-- GPT-SoVITS と Irodori-TTS のモデルの重みと、NLTK のデータ: `env` の付いた `python_script` の step。
+- GPT-SoVITS と Irodori-TTS のパッケージと torch: `env` の付いた `pip_install` の step。torch は OS で違う (Windows と Linux は CUDA に対応した torch、Mac は普通の torch) ので、requirements のファイルを OS で分け、step の `os` の指定 (カタログの intent の「manifest に足すもの」) で出し分ける。CUDA に対応した torch のダウンロード先 (`https://download.pytorch.org/whl/cu128` など) は、requirements のファイルに書く。
+- GPT-SoVITS と Irodori-TTS のモデルの重みと、NLTK のデータ: `env` の付いた `python_script` の step。NLTK のデータは、保存先を指定しないと `~/nltk_data` に落ちて (いまの setup.bat がこの形)、アンインストールで消えない場所に残る。保存先を専用の環境の下に指定し、合成の別プロセスを起動するときも同じ場所を指す (`NLTK_DATA`)。
 - CUDA が使えるかの確認: 専用の環境には最初から CUDA に対応した torch を入れるので、入れ直しの処理は要らない。使えなかったときの知らせ方は、実装のときに決める。
 - Playbook の取り込み (`import_all_playbooks.py --force`): 載せない。本体の DB を書き換える処理で、step の allowlist に載せる種類のものではない。2026-10-05 の時点で、本体の同梱 Playbook に voice-tts 用のノード (`tts_speak`) は無い。
 
@@ -45,11 +45,11 @@ GPT-SoVITS と Irodori-TTS は、それぞれ専用の Python 環境に入れる
 
 voice-tts (まはーのフォーク):
 
-1. GPT-SoVITS の合成の別プロセスを、専用の環境の Python で起動する。いまは本体の Python (`sys.executable`) で起動している。
+1. GPT-SoVITS の合成の別プロセスを、専用の環境の Python で起動する。いまは本体の Python (`sys.executable`) で起動している。あわせて、GPT-SoVITS の設定の `device` に `mps` を足す (いまは `cuda` と `cpu` だけ。Mac の選択肢を出すと決めたので、必ずやる)。
 2. **Irodori-TTS の合成を、GPT-SoVITS と同じように別プロセスにし、専用の環境の Python で起動する。** いまは SAIVerse と同じプロセスの中で合成しているので、このままでは Irodori-TTS を選んだ利用者の本体の venv に Irodori-TTS のパッケージが入る。
-3. 専用の環境に入れる requirements のファイルを、GPT-SoVITS 用と Irodori-TTS 用に作る (GPT-SoVITS 用は gradio を外す。理由は下の「経緯」の「公開前にやること」の 1)。
-4. setup.bat がしている処理を、上の置き換え先のとおり step とスクリプトに置き換え、`addon.json` を manifest v2 にする。
-5. 参照音声と合成音声を永続データの規約の場所へ移す (下の「経緯」の「公開前にやること」の 4)。
+3. 専用の環境に入れる requirements のファイルを、GPT-SoVITS 用と Irodori-TTS 用に作り、torch の違いにあわせて OS の分も分ける (Windows・Linux は CUDA に対応した torch、Mac は普通の torch。出し分けは step の `os` の指定)。GPT-SoVITS 用からは gradio を外す — 推論のコードは gradio を使わない (下の「経緯」の「公開前にやること」の 1 で確認済み)。専用の環境になったので requirements.lock との衝突は外す理由でなくなったが、WebUI 専用の重い依存を入れない理由は残る。numpy・pydantic の上限も同じで、専用の環境では upstream の指定のまま入れてよく、外す必要はない。
+4. setup.bat がしている処理を、上の置き換え先のとおり step とスクリプトに置き換え、`addon.json` を manifest v2 にする。**このとき `setup_version` は 2 以上にする** — 古い形式の manifest は setup_version 1 と数えられ、更新で setup が走るのは値が増えたときだけなので、1 のままだと、手で入れた voice-tts をカタログから更新しても setup が一つも走らない (質問も出ず、専用の環境も作られないまま、専用の環境を前提にした新しいコードだけが入る)。
+5. **参照音声と合成音声を、永続データの規約の場所 (`addon_data/saiverse-voice-tts/` の下) へ移す。これは voice-tts と本体の両方の変更で、同じリリースで次の四つを揃える** (下の「経緯」の「公開前にやること」の 4): 本体の `ENABLED_ADDONS_FOR_STARTUP` に voice-tts を加えて起動時の移行を有効にする / 本体の参照音声のアップロード先を移行先に揃える / DB (`AddonPersonaConfig.params_json`) に記録された古い絶対パスを書き換える / voice-tts の合成音声の保存先 (`_OUT_DIR`) を規約の場所に変える。
 
 Stack-chan Vessel:
 
@@ -57,17 +57,33 @@ Stack-chan Vessel:
 
 確かめること:
 
-7. 隔離した `SAIVERSE_HOME` と新しい venv に、カタログの導入経路で voice-tts を入れ、選択肢ごとに声が出るところまで確かめる。Windows (まはーの開発機) と Linux (NOVA) の両方で行う。Mac は確かめる機体が無いので、「動作未確認」と添えて配り、利用者の報告を受けて直す (2026-10-05 まはー判断)。本体の venv のパッケージが、導入の前後で変わっていないことも確かめる (下の「経緯」の「公開前にやること」の 6 の項目も含む)。
+7. 隔離した `SAIVERSE_HOME` と新しい venv に、カタログの導入経路で voice-tts を入れ、選択肢ごとに声が出るところまで確かめる。Windows (まはーの開発機) と Linux (NOVA) の両方で行う。Mac は確かめられる実機が無いので、「動作未確認」と添えて配り、利用者の報告を受けて直す (2026-10-05 まはー判断)。本体の venv のパッケージが、導入の前後で変わっていないことも確かめる (下の「経緯」の「公開前にやること」の 6 の項目も含む)。導入時に選ばなかったエンジンをペルソナの設定で選んだときに、本体が壊れず、吹き出しに「音声なし」が出ることも見る (エンジンの選択肢は `addon.json` に残ったままなので、この食い違いは利用者が普通に踏める)。
+
+公開のカタログ (saiverse-addon-registry):
+
+8. 7 が済んだら、voice-tts の項目を registry.json に足して署名し、push する。commit は作業 1〜5 を積んだフォークの main の SHA で固定する。`min_saiverse_version` には導入時の質問の仕組みが入る本体のバージョンを、`requires.os` には windows / linux / macos を書く。それより古い SAIVerse がこの項目を導入しようとした場合は、manifest の検証が知らない欄 (`options`・`when`・`env`・`os`) で失敗し、取得したフォルダを消して終わる (2026-10-05 にコードで確認。導入は壊れないが、手で入れた voice-tts の「更新」は途中で止まって画面から操作できなくなる — 詳細はカタログの intent の本体の作業 8)。もう一つ、手で (`git clone`) 入れている既存の voice-tts は origin が Nature109 を指していて、いまの更新処理は origin から取得するため、フォークを指すカタログの commit に届かない。更新の取得先をカタログの `repo_url` にする本体の修正 (同 intent の本体の作業 10) が、voice-tts を載せるリリースまでに要る。
+
+まはーの手元:
+
+9. まはーの開発機の `expansion_data/saiverse-voice-tts/` をフォークの main に切り替える。いまは `feature/tts-out-of-process` のまま `addon.json` に未コミットの変更があり、この状態でカタログから更新すると `git checkout` が未コミットの変更で失敗する。あわせて origin をフォーク (`maha0525/saiverse-voice-tts`) に差し替える (いまの origin は Nature109。fork という名前の取得先は登録済み)。
+
+手で入れていた利用者の本体の venv には、旧 setup.bat が入れたパッケージ (torch など) が残る。カタログの更新はそれを消さない — 動作は妨げないが、ディスクに残る。片づけを案内するかは、作業 4 で addon.json を書くときに決める。
 
 ## 確かめたこと・確かめ方 (2026-10-05)
 
 - **SAIVerse が対応する Python に、CUDA に対応した torch があるか: ある。** PyTorch の配布ページ (`https://download.pytorch.org/whl/cu128/torch/` と `cu130/torch/`) の一覧で、Python 3.11〜3.14 の Windows 用 (`win_amd64`) と Linux 用 (`manylinux_2_28_x86_64`) が、CUDA 12.8 向けは torch 2.11.0、CUDA 13.0 向けは torch 2.14.1 まで配られていることを見た。どちらを使うかは、NVIDIA のドライバの新しさとの兼ね合いで、作業 3 のときに決める。
 - **requirements.txt の `torchcodec` が、本体の venv に torch 系のパッケージを持ち込むか: 持ち込まない。** PyPI の torchcodec 0.17.0 の依存 (`requires_dist`) は、開発用の追加分 (`extra == "dev"`) の numpy・pytest・pillow だけだった。torchcodec は Irodori-TTS だけが使うので、作業 2 で Irodori-TTS を専用の環境へ移すときに、requirements.txt から Irodori-TTS 用の requirements のファイルへ移す。
 - **その torch で GPT-SoVITS と Irodori-TTS が実際に声を作れるか: 作業 7 で確かめる。** 一覧を見ても分からないので、実際に合成する。Windows はまはーの開発機、Linux は NOVA (Ubuntu) で、隔離した `SAIVERSE_HOME` と新しい venv にカタログの導入経路で入れ、選択肢ごとに声が出るところまで見る。
-- **macOS: GPT-SoVITS と Irodori-TTS も選択肢に出し、「Mac では動作未確認」と添える** (2026-10-05 まはー判断)。どちらも公式に Mac に対応している。GPT-SoVITS の README には Apple silicon で確かめた組み合わせが載っていて、導入時に MPS か CPU を選べる。Irodori-TTS の README は、Mac では PyPI の普通の PyTorch で CPU か MPS を使うと書いている。Mac の専用の環境には CUDA 用ではない普通の torch を入れる。voice-tts の GPT-SoVITS の設定 (`device`) はいま `cuda` と `cpu` しか扱わないので、MPS を使うなら作業 1 のときに足す。確かめる Mac は無いので、利用者の報告を受けて直す。
+- **macOS: GPT-SoVITS と Irodori-TTS も選択肢に出し、「Mac では動作未確認」と添える** (2026-10-05 まはー判断)。どちらも公式に Mac に対応している。GPT-SoVITS の README には Apple silicon で確かめた組み合わせが載っていて、導入時に MPS か CPU を選べる。Irodori-TTS の README は、Mac では PyPI の普通の PyTorch で CPU か MPS を使うと書いている。Mac の専用の環境には CUDA 用ではない普通の torch を入れる。voice-tts の GPT-SoVITS の設定 (`device`) はいま `cuda` と `cpu` しか扱わないので、`mps` を作業 1 で足す。Irodori-TTS の `device` は設定の文字列をそのまま Irodori-TTS 本体へ渡す作り (`tools/speak/engine/irodori.py`、2026-10-05 にコードで確認) なので、こちらはコードの変更なしで `mps` を書ける見込み。確かめる Mac は無いので、利用者の報告を受けて直す。
 - (2026-10-05 に一度「Mac では出さない」と書いた。NVIDIA の GPU が無いことから、確かめずにローカルの音声エンジンが使えないと決めつけた飛躍で、まはーの指摘で取り下げた。)
 
 ## 経緯
+
+### 2026-10-05 の検収 (Fable)
+
+Opus のセッションが書いた「載せ方」と「やる作業」を、同日に Fable のセッションが検収して直した。足したもの: 公開のカタログへの掲載の作業 (8)、GPT-SoVITS への `mps` の追加を必須の作業へ (それまでは条件つきの書き方だった)、torch を OS で分けて出し分ける作り (カタログの intent に `os` の指定を足した)、作業 5 の本体側の四点の明記、まはーの手元の切り替え (9)、選ばなかったエンジンを選んだときの確かめ (7)。古い SAIVerse での導入の失敗の形も、コードで確かめて作業 8 に書いた。
+
+整合性の検査 (Opus のサブエージェント) がさらに三つ掘り当て、同日に直した: 手で入れた voice-tts をカタログから更新しても setup_version が 1 のままだと setup が走らない (作業 4 に「2 以上にする」を明記) / 手で入れた voice-tts の origin は Nature109 で、フォークを指すカタログの commit を取得できない (本体の修正を載せるリリースの前提に昇格 — 作業 8 の注記) / NLTK のデータが `~/nltk_data` に落ちてアンインストールで残る (置き換え先に保存先の指定を明記)。
 
 ### 2026-09-11 の洗い出し (アドオンカタログの intent の Phase 4-E から、2026-10-05 にそのまま移した)
 

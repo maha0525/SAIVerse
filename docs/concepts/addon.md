@@ -53,7 +53,7 @@
 
 ### 状況
 
-既存アドオン（Elyth / voice-tts / stack-chan / X / ComfyUI ローカル画像生成）は v2 化済み。**カタログ機構は Phase 1〜4 実装済**。
+既存アドオンのうち Elyth / stack-chan / X / ComfyUI ローカル画像生成は v2 化済み。voice-tts はまだ v2 化されておらず、カタログにも載っていない（[voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md)）。**カタログ機構は Phase 1〜4 実装済**。
 
 ## 増やし方（アドオン作成の要点）
 
