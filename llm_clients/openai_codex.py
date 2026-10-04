@@ -24,6 +24,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
+from uuid import uuid4
 
 import httpx
 from curl_cffi import requests as cffi_requests
@@ -105,6 +106,91 @@ def _join_message_texts(texts: List[str]) -> str:
             joined += "\n"
         joined += text
     return joined
+
+
+class _StreamDiagnostics:
+    """DEBUG-only, response-local shape/equality evidence; never log content.
+
+    References are local aliases, not provider IDs or hashes of private text.
+    This observes the existing aggregator without suppressing repeated output.
+    See docs/intent/codex_stream_diagnostics.md.
+    """
+
+    def __init__(self) -> None:
+        self.stream = uuid4().hex[:12]
+        self.refs: Dict[str, int] = {}
+        self.last_sequence: Optional[int] = None
+
+    def _ref(self, value: Any) -> Optional[int]:
+        if not isinstance(value, str) or not value:
+            return None
+        return self.refs.setdefault(value, len(self.refs) + 1)
+
+    def _text(self, value: Any) -> Dict[str, Any]:
+        return {"chars": len(value), "ref": self._ref(value)} if isinstance(value, str) else {}
+
+    def _item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"item_ref": self._ref(item.get("id"))}
+        item_type = item.get("type")
+        result["kind"] = item_type if item_type in ("message", "function_call", "reasoning") else "other"
+        if item_type == "message":
+            phase = item.get("phase")
+            result["phase"] = phase if phase in ("commentary", "final_answer") else None
+            content = item.get("content")
+            result["parts"] = [
+                self._text(part.get("text"))
+                for part in (content if isinstance(content, list) else [])
+                if isinstance(part, dict) and part.get("type") == "output_text"
+            ]
+        elif item_type == "function_call":
+            result.update(call_ref=self._ref(item.get("call_id")),
+                          name_ref=self._ref(item.get("name")),
+                          arguments=self._text(item.get("arguments")))
+        return result
+
+    def event(self, event: Dict[str, Any], part_streamed: str) -> None:
+        kind = event.get("type")
+        sequence = event.get("sequence_number")
+        nonincreasing = False
+        if type(sequence) is int:
+            nonincreasing = self.last_sequence is not None and sequence <= self.last_sequence
+            self.last_sequence = sequence
+        if kind not in (
+            "response.created", "response.output_item.added", "response.output_item.done",
+            "response.output_text.done", "response.completed", "response.failed",
+        ) and not nonincreasing:
+            return
+        # No arbitrary event fields, raw IDs, body, arguments, or error payloads.
+        record: Dict[str, Any] = {"stream": self.stream, "event": kind if kind in (
+            "response.created", "response.output_item.added", "response.output_item.done",
+            "response.output_text.done", "response.completed", "response.failed",
+            "response.output_text.delta", "response.function_call_arguments.delta",
+        ) else "other", "sequence_nonincreasing": nonincreasing}
+        for key in ("sequence_number", "output_index", "content_index"):
+            value = event.get(key)
+            if type(value) is int:
+                record[key] = value
+        record["item_ref"] = self._ref(event.get("item_id"))
+        if kind == "response.output_text.done":
+            done_text = event.get("text") or ""
+            record.update(done=self._text(done_text), streamed_part=self._text(part_streamed),
+                          recovered_chars=(len(done_text) - len(part_streamed)
+                                           if done_text.startswith(part_streamed) else 0))
+        if isinstance(event.get("item"), dict):
+            record["item"] = self._item(event["item"])
+        response = event.get("response")
+        if isinstance(response, dict):
+            record["response_ref"] = self._ref(response.get("id"))
+            output = response.get("output")
+            record["output"] = [self._item(item) for item in (output if isinstance(output, list) else [])
+                                if isinstance(item, dict)]
+        LOG.debug("Codex stream diagnostic %s", json.dumps(record, separators=(",", ":")))
+
+    def finish(self, text: str, function_calls: int) -> None:
+        LOG.debug("Codex stream diagnostic %s", json.dumps({
+            "stream": self.stream, "event": "assembled", "text": self._text(text),
+            "function_calls": function_calls,
+        }, separators=(",", ":")))
 
 
 class OpenAICodexClient(LLMClient):
@@ -799,9 +885,13 @@ class OpenAICodexClient(LLMClient):
         usage_input = 0
         usage_output = 0
         usage_cached = 0
+        diagnostics = _StreamDiagnostics() if LOG.isEnabledFor(logging.DEBUG) else None
 
         for event in self._iter_sse_events(resp):
             event_type = event.get("type")
+            if diagnostics is not None:
+                diagnostics.event(event, "".join(delta_buffer[delta_consumed:])
+                                  if event_type == "response.output_text.done" else "")
 
             if event_type == "response.output_text.delta":
                 delta = event.get("delta") or ""
@@ -930,6 +1020,8 @@ class OpenAICodexClient(LLMClient):
         function_calls = [
             entry for entry in pending_calls.values() if entry.get("name")
         ]
+        if diagnostics is not None:
+            diagnostics.finish(final_text, len(function_calls))
 
         summary_text = "\n\n".join(
             "".join(parts) for _, parts in sorted(reasoning_summaries.items())
