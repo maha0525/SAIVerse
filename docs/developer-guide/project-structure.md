@@ -114,6 +114,7 @@ saiverse/
 │                           #   元の ID を空ける（DB の参照・記憶の印・フォルダ。部品は building_id_repair と共有）。
 │                           #   済まなかった続きと、昔消した建物の残骸は起動時に付け替える
 ├── data_paths.py           # パス管理（user_data/builtin_data）
+├── playbook_scope.py       # 管理サービスと CLI が共有するパス→Playbook 公開範囲の推論（保存・CLI に非依存）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
 ├── observer_manager.py     # Observer（定期観測 Fixture）
 └── ...                     # その他コアモジュール
