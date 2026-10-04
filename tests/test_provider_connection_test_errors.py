@@ -4,6 +4,7 @@ Both HTTP entry points use synthetic provider registries and a fake HTTP
 transport. No credentials, persona state, or real provider connections are used.
 """
 import logging
+import socket
 
 import httpx
 import pytest
@@ -11,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from api.routes import providers
-from saiverse import provider_configs
+from saiverse import provider_configs, provider_security
 
 SECRET = "dummy-api-key-do-not-reflect"
 UPSTREAM_SECRET = "unknown-upstream-secret-do-not-reflect"
@@ -35,11 +36,14 @@ def probe(request, tmp_path, monkeypatch, mock_provider_network, caplog):
     real_http_client = httpx.Client
     requests = []
 
-    def run(handler, *, protocol="openai_compat", base_url=BASE_URL, api_key_env=API_KEY_ENV):
+    def run(
+        handler, *, protocol="openai_compat", base_url=BASE_URL, api_key_env=API_KEY_ENV,
+        source=provider_configs.SOURCE_USER_DATA,
+    ):
         cfg = {
             "id": "synthetic",
             "display_name": "Synthetic provider",
-            "source": provider_configs.SOURCE_USER_DATA,
+            "source": source,
             "protocol": protocol,
             "base_url": base_url,
             "api_key_env": api_key_env,
@@ -80,9 +84,17 @@ def assert_safe(response, caplog):
 
 @pytest.mark.parametrize("protocol", ["openai_compat", "ollama_compat"])
 @pytest.mark.parametrize(("status", "diagnostic"), [
-    (301, "URL"), (400, "URL"), (401, "認証"), (403, "権限"),
-    (404, "URL"), (429, "利用制限"), (500, "プロバイダ側"),
-    (502, "プロバイダ側"), (503, "プロバイダ側"),
+    *[(status, "リダイレクト応答を受け取りました。自動追跡はしません。接続先 URL と http/https の設定を確認してください。")
+      for status in (300, 301, 302, 307, 308, 399)],
+    (400, "リクエストが拒否されました。リクエストまたは認証の形式を確認してください。"),
+    (401, "認証に失敗しました。API キーの設定を確認してください。"),
+    (403, "アクセスが拒否されました。API キーの権限とプロバイダの利用条件を確認してください。"),
+    (404, "接続先が見つかりません。base_url のパスと /v1 の有無を確認してください。"),
+    (405, "HTTP メソッドが許可されていません。プロトコルの設定を確認してください。"),
+    (408, "正常な応答を受け取れませんでした。URL とプロトコルの設定を確認してください。"),
+    (429, "利用制限に達しました。時間をおいて再試行するか、利用枠を確認してください。"),
+    *[(status, "プロバイダ側でエラーが発生しました。時間をおいて再試行してください。")
+      for status in (500, 502, 503, 599)],
 ])
 def test_http_failures_return_safe_status_diagnostics(probe, caplog, protocol, status, diagnostic):
     run, requests = probe
@@ -92,7 +104,10 @@ def test_http_failures_return_safe_status_diagnostics(probe, caplog, protocol, s
         return httpx.Response(
             status,
             text=body,
-            headers={"x-upstream-diagnostic": UPSTREAM_SECRET},
+            headers={
+                "x-upstream-diagnostic": UPSTREAM_SECRET,
+                "location": f"https://redirect.example.invalid/{SECRET}",
+            },
             extensions={"reason_phrase": UPSTREAM_SECRET.encode()},
         )
 
@@ -101,8 +116,7 @@ def test_http_failures_return_safe_status_diagnostics(probe, caplog, protocol, s
     data = response.json()
     assert data["success"] is False
     assert data["status_code"] == status
-    assert f"HTTP {status}" in data["error"]
-    assert diagnostic in data["error"]
+    assert data["error"] == f"HTTP {status}: {diagnostic}"
     assert data["models"] is None
     assert data["elapsed_ms"] >= 0
     assert len(requests) == 1
@@ -120,6 +134,7 @@ def test_http_failures_return_safe_status_diagnostics(probe, caplog, protocol, s
     (httpx.RemoteProtocolError, "通信エラー"),
     (httpx.ReadError, "通信エラー"),
     (RuntimeError, "予期しないエラー"),
+    (ValueError, "予期しないエラー"),
 ])
 def test_transport_exception_text_is_not_returned_or_logged(probe, caplog, exception, diagnostic):
     run, requests = probe
@@ -162,15 +177,36 @@ def test_success_preserves_model_discovery(probe, caplog, protocol, listing):
     assert response.json()["models"] == ["synthetic-model"]
 
 
-def test_destination_rejection_is_safe_and_sends_nothing(probe, caplog):
+@pytest.mark.parametrize("api_key_env", [None, API_KEY_ENV])
+@pytest.mark.parametrize(("base_url", "diagnostic"), [
+    (f"https://provider.example.invalid:{URL_MARKER}/{SECRET}",
+     "Provider base_url port must be an integer between 0 and 65535"),
+    (f"https://provider.example.invalid:65536/{SECRET}",
+     "Provider base_url port must be an integer between 0 and 65535"),
+    (f"https://[{SECRET}]/{URL_MARKER}", "Provider base_url must be a valid HTTP(S) URL"),
+    (f"https://user:{SECRET}@provider.example.invalid\uff1a443/{URL_MARKER}",
+     "Provider base_url must be a valid HTTP(S) URL"),
+    (f"https://user:{SECRET}@provider.example.invalid/{URL_MARKER}",
+     "Provider base_url must not contain credentials, query, or fragment"),
+    (f"https://provider.example.invalid/{URL_MARKER}?key={SECRET}",
+     "Provider base_url must not contain credentials, query, or fragment"),
+    (f"https://provider.example.invalid/{URL_MARKER}#{SECRET}",
+     "Provider base_url must not contain credentials, query, or fragment"),
+    (f"http://provider.example.invalid/{URL_MARKER}",
+     "Plain HTTP provider URLs require loopback or an explicit allowed host"),
+    (f"https://10.0.0.1/{URL_MARKER}",
+     "Provider host resolves to a non-public address (10.0.0.1); "
+     "add the host to SAIVERSE_PROVIDER_ALLOWED_HOSTS to permit it"),
+])
+def test_destination_rejection_is_safe_and_sends_nothing(probe, caplog, api_key_env, base_url, diagnostic):
     run, requests = probe
     response = run(
         lambda _: pytest.fail("Rejected URL reached HTTP transport"),
-        base_url=f"https://provider.example.invalid:{URL_MARKER}/{SECRET}",
+        base_url=base_url, api_key_env=api_key_env,
     )
     assert_safe(response, caplog)
     assert response.json()["success"] is False
-    assert "設定" in response.json()["error"]
+    assert response.json()["error"] == diagnostic
     assert requests == []
 
 
@@ -209,3 +245,50 @@ def test_malformed_listing_keeps_existing_reachable_behavior(probe, caplog, cont
     assert_safe(response, caplog)
     assert response.json()["success"] is True
     assert response.json()["models"] == []
+
+
+@pytest.mark.parametrize("api_key_env", [None, API_KEY_ENV])
+def test_dns_rejection_preserves_local_diagnostic_without_resolver_text(probe, caplog, monkeypatch, api_key_env):
+    run, requests = probe
+
+    def fail_resolution(*_args, **_kwargs):
+        raise socket.gaierror(f"{SECRET} {UPSTREAM_SECRET} {BASE_URL}")
+
+    monkeypatch.setattr(provider_security.socket, "getaddrinfo", fail_resolution)
+    response = run(lambda _: pytest.fail("Rejected host reached HTTP transport"), api_key_env=api_key_env)
+    assert_safe(response, caplog)
+    assert response.json()["success"] is False
+    assert response.json()["error"] == "Provider host could not be resolved: provider.example.invalid"
+    assert requests == []
+
+
+def test_credential_policy_preserves_local_diagnostic_without_key_values(probe, caplog, monkeypatch):
+    run, requests = probe
+    monkeypatch.setenv("OPENAI_API_KEY", UPSTREAM_SECRET)
+    response = run(
+        lambda _: pytest.fail("Rejected credential reached HTTP transport"),
+        api_key_env="OPENAI_API_KEY", source=provider_configs.SOURCE_EXPANSION,
+    )
+    assert_safe(response, caplog)
+    assert response.json()["success"] is False
+    assert response.json()["error"] == (
+        "Provider 'synthetic' was not configured by the owner (source=expansion); "
+        f"it must use {API_KEY_ENV} instead of OPENAI_API_KEY"
+    )
+    assert requests == []
+
+
+def test_shared_credential_preserves_local_diagnostic_without_key_values(probe, caplog):
+    run, requests = probe
+    provider_configs.PROVIDER_CONFIGS["other"] = {"api_key_env": API_KEY_ENV.lower()}
+    response = run(
+        lambda _: pytest.fail("Shared credential reached HTTP transport"),
+        source=provider_configs.SOURCE_EXPANSION,
+    )
+    assert_safe(response, caplog)
+    assert response.json()["success"] is False
+    assert response.json()["error"] == (
+        "Provider 'synthetic' was not configured by the owner (source=expansion); "
+        f"{API_KEY_ENV} is already read by 'other' — rename this provider so its credential is its own"
+    )
+    assert requests == []

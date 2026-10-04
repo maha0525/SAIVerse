@@ -1182,9 +1182,10 @@ class TestCredentialLayerBinding(unittest.TestCase):
             "provider_id": "not_saved_yet",
         }).json()
         self.assertFalse(body["success"])
-        self.assertIn("接続設定が拒否されました", body["error"])
-        self.assertNotIn("OPENAI_API_KEY", body["error"])
-        self.assertNotIn("not_saved_yet", body["error"])
+        self.assertEqual(body["error"], (
+            "Provider 'not_saved_yet' was not configured by the owner (source=unknown); "
+            "it must use SAIVERSE_PROVIDER_NOT_SAVED_YET_API_KEY instead of OPENAI_API_KEY"
+        ))
 
     def test_saved_override_does_not_persist_the_layer_marker(self):
         from fastapi import FastAPI

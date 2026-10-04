@@ -28,7 +28,12 @@ def _explicitly_allowed_hosts() -> set[str]:
 
 def validate_provider_url(base_url: str) -> None:
     """Reject credential destinations that can reach undeclared local services."""
-    parsed = urlsplit(base_url)
+    try:
+        parsed = urlsplit(base_url)
+    except ValueError:
+        # urllib may quote an entire malformed netloc (including userinfo) or
+        # bracketed host. Own the diagnostic before callers display it.
+        raise ValueError("Provider base_url must be a valid HTTP(S) URL") from None
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("Provider base_url must be an absolute HTTP(S) URL")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
@@ -47,9 +52,15 @@ def validate_provider_url(base_url: str) -> None:
             raise ValueError("Plain HTTP provider URLs require loopback or an explicit allowed host") from exc
 
     try:
+        port = parsed.port
+    except ValueError:
+        # Invalid-port errors quote the raw port, which need not be a number.
+        raise ValueError("Provider base_url port must be an integer between 0 and 65535") from None
+
+    try:
         addresses = {
             info[4][0]
-            for info in socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+            for info in socket.getaddrinfo(hostname, port or (443 if parsed.scheme == "https" else 80))
         }
     except OSError as exc:
         raise ValueError(f"Provider host could not be resolved: {hostname}") from exc

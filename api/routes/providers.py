@@ -354,10 +354,18 @@ def _connection_test_http_error(status_code: int) -> str:
     Providers may reflect credentials in their body or reason phrase. Truncating
     that text (or replacing just the key we know) is not a secrecy boundary.
     """
-    if status_code == 401:
+    if 300 <= status_code < 400:
+        explanation = "リダイレクト応答を受け取りました。自動追跡はしません。接続先 URL と http/https の設定を確認してください。"
+    elif status_code == 400:
+        explanation = "リクエストが拒否されました。リクエストまたは認証の形式を確認してください。"
+    elif status_code == 401:
         explanation = "認証に失敗しました。API キーの設定を確認してください。"
     elif status_code == 403:
         explanation = "アクセスが拒否されました。API キーの権限とプロバイダの利用条件を確認してください。"
+    elif status_code == 404:
+        explanation = "接続先が見つかりません。base_url のパスと /v1 の有無を確認してください。"
+    elif status_code == 405:
+        explanation = "HTTP メソッドが許可されていません。プロトコルの設定を確認してください。"
     elif status_code == 429:
         explanation = "利用制限に達しました。時間をおいて再試行するか、利用枠を確認してください。"
     elif 500 <= status_code < 600:
@@ -401,13 +409,11 @@ def _run_connection_test(
             # save" — a definition that saving would reject can still be probed,
             # as long as the probe carries no credential.
             validate_provider_url(base_url)
-    except ValueError:
-        # URL/credential validation errors can include caller-controlled values
-        # (including malformed ports and environment variable names).
-        return ConnectionTestResponse(
-            success=False,
-            error="接続設定が拒否されました。接続先 URL と API キーの環境変数設定を確認してください。",
-        )
+    except ValueError as exc:
+        # These diagnostics are owned by provider_security and describe local
+        # settings (host / credential variable names, never their values).
+        # Keep this catch separate from untrusted HTTP/transport/parser errors.
+        return ConnectionTestResponse(success=False, error=str(exc))
 
     start = time.monotonic()
 
