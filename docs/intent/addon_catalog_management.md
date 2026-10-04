@@ -1,6 +1,6 @@
 # Intent: アドオンカタログ管理 (curated registry + ワンタッチ導入)
 
-**ステータス**: 設計中 (2026-10-05)。Phase 4 は voice-tts を除いて完了 (2026-05-23)。voice-tts をカタログに載せるために、「導入時の質問と、アドオン専用の Python 環境」の節 (2026-10-05 起草) を足した。まはーの確認待ち
+**ステータス**: 設計中 (2026-10-05)。Phase 4 は voice-tts を除いて完了 (2026-05-23)。「導入時の質問と、アドオン専用の Python 環境」の節 (2026-10-05 起草) が、まはーの確認待ち。voice-tts をカタログに載せる件は [voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md) に切り出した
 
 ## これは何か
 
@@ -214,12 +214,9 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 
 ## 導入時の質問と、アドオン専用の Python 環境 (2026-10-05 起草、まはーの確認待ち)
 
-この節は、メティスが 2026-10-05 に書いた設計案で、まはーはまだ読んでいない。まはーの発言で支えられているのは、次の二つだけ。
+この節は、メティスが 2026-10-05 に書いた設計案で、まはーはまだ読んでいない。まはーの発言で支えられているのは、導入時に何かを選ばせる仕組みを作ることだけ (「なんとかUI上でsetup.bat同様のウィザード動かす感じのシステム作れない？セットアップ中に何かを選ぶみたいなのは普通にあると思うのよ。」)。専用の Python 環境、置き場所、step の種類の扱いは、どれもメティスの提案。
 
-- 導入時に何かを選ばせる仕組みを作ること (「なんとかUI上でsetup.bat同様のウィザード動かす感じのシステム作れない？セットアップ中に何かを選ぶみたいなのは普通にあると思うのよ。」)
-- voice-tts のカタログは、まずまはーのフォークを指すこと (「ひとまず俺のフォークで問題ない」)
-
-専用の Python 環境、置き場所、step の種類の扱いは、どれもメティスの提案。
+この仕組みを最初に使うのは voice-tts で、voice-tts をどう載せるかは [voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md) にある。
 
 ### 要点
 
@@ -229,26 +226,23 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 
 voice-tts をカタログに載せようとして、いまの仕組みでは次の三つが解けないと分かった (2026-10-05)。
 
-1. **利用者ごとに入れるものを変えられない。** setup の step は、導入した全員に同じように実行される。voice-tts では、OpenAI TTS と ElevenLabs は API キーだけで動くが、GPT-SoVITS と Irodori-TTS は NVIDIA の GPU と数 GB のダウンロードが要る。GPU の無い利用者も、数 GB をダウンロードすることになる。
-2. **GPT-SoVITS のパッケージを本体の venv に入れると、本体のパッケージのバージョンが変わる。** Phase 4-E の節 (2026-09-11) に書いたとおり、GPT-SoVITS の requirements.txt には `numpy<2.0` や `pydantic<=2.10.6` が指定されていて、requirements.lock と両立しない。上限を外せば同じ venv で合成できたという記録もある (2026-09-03、[dependency_management.md](dependency_management.md) §5 の 6) が、外した requirements を voice-tts 側で持ち続けることになる。GPT-SoVITS と Irodori-TTS も、transformers・peft・gradio のバージョンの条件が互いに両立しない。
-3. **setup.bat は、カタログからは実行できない。** setup.bat の最後には `pause` があり、利用者がキーを押すまで終わらない。また、setup.bat を実行すると、GPT-SoVITS はバージョンを固定せずにその時点の最新が取得され、torch は `--force-reinstall` で本体の venv に入れ直される。
+1. **利用者ごとに入れるものを変えられない。** setup の step は、導入した全員に同じように実行される。たとえば voice-tts では、クラウドの音声エンジンは API キーだけで動くが、GPU で動かす音声エンジンは NVIDIA の GPU と数 GB のダウンロードが要る。GPU の無い利用者も、数 GB をダウンロードすることになる。
+2. **アドオンが使うパッケージが、本体の requirements.lock と両立しないことがある。** 両立しないパッケージを本体の venv に入れると、本体のパッケージのバージョンが変わる。いまの仕組みでは、両立しないパッケージを要るアドオンは、カタログからは入れられない。
+3. **アドオンの既存の setup スクリプトは、カタログからは実行できないことがある。** たとえば voice-tts の setup.bat は、最後に `pause` で利用者がキーを押すまで終わらず、torch を `--force-reinstall` で本体の venv に入れ直す。
 
-1 は、導入時に質問を出せれば解ける。3 は、setup.bat の仕事を manifest に書いた step に置き換えれば解ける (置き換え先は下の「setup.bat がしている処理の置き換え先」)。2 は、どちらでも解けない。GPT-SoVITS を選んだ利用者の本体の venv は、結局書き換わるからだ。2 を解くのが、アドオン専用の Python 環境になる。
+1 は、導入時に質問を出せれば解ける。3 は、スクリプトの処理を manifest に書いた step に置き換えれば解ける。2 は、どちらでも解けない。両立しないパッケージを選んだ利用者の本体の venv は、結局書き換わるからだ。2 を解くのが、アドオン専用の Python 環境になる。
 
-### 利用者から見える流れ (voice-tts の場合)
+### 利用者から見える流れ
 
-1. カタログで voice-tts の「導入」を押す。
-2. 確認ダイアログに、voice-tts が用意した質問が出る。「使う音声エンジンを選んでください」に対して、選択肢は次の三つで、複数選べる。
-   - OpenAI TTS / ElevenLabs (GPU は要らない。API キーを入れるだけ)
-   - GPT-SoVITS (NVIDIA の GPU が要る。数 GB のダウンロード)
-   - Irodori-TTS (NVIDIA の GPU が要る。数 GB のダウンロード)
+1. カタログでアドオンの「導入」を押す。
+2. 確認ダイアログに、そのアドオンが用意した質問が出る (例: voice-tts なら「使う音声エンジンを選んでください」)。
 3. 確認ダイアログには、選んだ答えに応じて実行される step の一覧が出る。利用者が承認してから実行する (不変条件 5 はそのまま)。
 4. 進み具合は、いまと同じ進捗ダイアログに出る。
-5. あとでエンジンを足したくなったら、「導入済み」タブのそのアドオンから、同じ質問をもう一度開く。前に選んだ選択肢は選ばれた状態で出て、外すことはできない。新しく選んだ選択肢について、実行される step の一覧を確認ダイアログで見せ、承認されたら、その選択肢の `when` に当てはまる step だけを実行する。`when` の無い step はやり直さない。
+5. あとで選択肢を足したくなったら、「導入済み」タブのそのアドオンから、同じ質問をもう一度開く。前に選んだ選択肢は選ばれた状態で出て、外すことはできない。新しく選んだ選択肢について、実行される step の一覧を確認ダイアログで見せ、承認されたら、その選択肢の `when` に当てはまる step だけを実行する。`when` の無い step はやり直さない。
 
 ### manifest に足すもの
 
-`setup` に `options` (質問の一覧) を足し、各 step に `when` (この答えのときだけ実行する) と `env` (この step を専用の Python 環境で実行する) を足す。下の例は形を示すためのもので、voice-tts の step の全部ではない (全部は「setup.bat がしている処理の置き換え先」)。
+`setup` に `options` (質問の一覧) を足し、各 step に `when` (この答えのときだけ実行する) と `env` (この step を専用の Python 環境で実行する) を足す。下は形を示すための例。
 
 ```json
 {
@@ -261,13 +255,12 @@ voice-tts をカタログに載せようとして、いまの仕組みでは次�
         "multiple": true,
         "choices": [
           {"id": "cloud", "label": {"ja": "OpenAI TTS / ElevenLabs (GPU 不要)", "en": "..."}, "default": true},
-          {"id": "gpt_sovits", "label": {"ja": "GPT-SoVITS (NVIDIA の GPU が必要、数 GB)", "en": "..."}},
-          {"id": "irodori", "label": {"ja": "Irodori-TTS (NVIDIA の GPU が必要、数 GB)", "en": "..."}}
+          {"id": "gpt_sovits", "label": {"ja": "GPT-SoVITS (NVIDIA の GPU が必要、数 GB)", "en": "..."}}
         ]
       }
     ],
     "steps": [
-      {"name": "voice-tts のパッケージ", "type": "pip_install", "requirements": "requirements.txt"},
+      {"name": "アドオンのパッケージ", "type": "pip_install", "requirements": "requirements.txt"},
       {"name": "GPT-SoVITS 本体", "type": "git_clone", "url": "https://github.com/RVC-Boss/GPT-SoVITS.git",
        "commit": "<40 桁の SHA>", "dest": "external/GPT-SoVITS", "when": {"engines": "gpt_sovits"}},
       {"name": "GPT-SoVITS のパッケージ", "type": "pip_install", "requirements": "envs/gpt_sovits.txt",
@@ -293,21 +286,8 @@ voice-tts をカタログに載せようとして、いまの仕組みでは次�
 - 専用の環境が無ければ、step の前に本体の Python (`sys.executable`) の `-m venv` で作る。作るときに、使った Python のバージョンを環境の中に記録しておく。本体の Python のバージョンが変わっていたら、その環境は作り直しが要るものとして扱い、次に setup を実行するときに作り直す。
 - `env` の付いた step は、専用の環境の Python で実行する。`pip_install` はその環境の pip で、`python_script` はその環境の Python で起動し、環境変数 `VIRTUAL_ENV` と `PATH` もその環境を指すようにする。スクリプトの中から `pip` や `python` を呼んでも、本体の venv ではなく専用の環境に入る。
 - `env` の付いた step には、requirements.lock を constraints として渡さない。その step は本体の venv にパッケージを入れないので、本体のパッケージのバージョンが変わることがない。`env` の付いていない step は、これまでどおり本体の venv で実行し、`pip_install` には constraints が渡る ([addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md) の直し方を入れるときも、constraints を渡すのは `env` の付いていない step だけにする)。
-- アドオンのコードは、本体の新しい関数 (例: `get_addon_env_python(addon_id, name)`) で、その環境の Python の場所を受け取る。voice-tts では、GPT-SoVITS の合成の別プロセス (2026-10-05 にフォークの main に入った) を、この Python で起動する。いまは本体の Python で起動している。
-- Irodori-TTS は、いまは SAIVerse と同じプロセスの中で合成している。GPT-SoVITS と同じように別プロセスにして、専用の環境の Python で起動するように変える (下の「この設計でやる作業」の 9)。
+- アドオンのコードは、本体の新しい関数 (例: `get_addon_env_python(addon_id, name)`) で、その環境の Python の場所を受け取る。専用の環境のパッケージを使う処理は、SAIVerse のプロセスの中では動かせないので、この Python で別のプロセスとして起動する。
 - アンインストールでは、`addon_install/<addon_id>/` を、アドオンのフォルダと一緒に必ず消す。作り直せるものなので、利用者のデータ (`addon_data/`) のように残すかどうかを選ばせない。
-
-### setup.bat がしている処理の置き換え先
-
-voice-tts の setup.bat がしている処理は、次のように置き換える。
-
-- voice-tts のパッケージ (requirements.txt): `pip_install` の step (本体の venv)。requirements.txt にある `torchcodec` が本体の venv に torch 系のパッケージを持ち込むかは、確かめていない。持ち込むなら、Irodori-TTS を専用の環境へ移すときに、requirements.txt から外して Irodori-TTS の環境の側へ移す。
-- 設定ファイルのひな形 (`config/default.json` と `voice_profiles/registry.json`) の作成: `python_script` の step (本体の Python。パッケージは入れない)。
-- GPT-SoVITS 本体の取得: `git_clone` の step (commit で固定)。
-- GPT-SoVITS のパッケージと、CUDA に対応した torch: `env` の付いた `pip_install` の step。CUDA に対応した torch のダウンロード先 (`https://download.pytorch.org/whl/cu128` など) は、requirements のファイルに書く。
-- GPT-SoVITS のモデルの重みと、NLTK のデータ: `env` の付いた `python_script` の step。
-- CUDA が使えるかの確認: 専用の環境には最初から CUDA に対応した torch を入れるので、入れ直しの処理は要らない。使えなかったときの知らせ方は、実装のときに決める。
-- Playbook の取り込み (`import_all_playbooks.py --force`): 載せない。本体の DB を書き換える処理で、step の allowlist に載せる種類のものではない。2026-10-05 の時点で、本体の同梱 Playbook に voice-tts 用のノード (`tts_speak`) は無い。
 
 ### `git_clone` の step で、取得先のフォルダが既にあるときの扱い
 
@@ -318,11 +298,7 @@ voice-tts の setup.bat がしている処理は、次のように置き換え�
 6. **答えで変えられるのは、どの step を実行するかだけ。** step の中身 (URL・commit・スクリプト・引数) は manifest に書かれたもので、利用者の答えからは作らない。
 7. **`env` の付いた step は、本体の venv に何も入れない。** これを保証するのは導入の仕組み (`addon_installer.py`) で、`env` の付いた step を専用の環境の Python・pip・環境変数で起動することで保証する。requirements.lock の constraints を外してよいのは、この形で起動される step だけ。[dependency_management.md](dependency_management.md) §2-4 の表では、「アドオンは本体の部品を動かせない」を守る仕組みとして「`addon_installer.py` が constraints を渡す」が挙がっている。この設計が確定したら、そこにこの起動の形を足す。
 
-### この設計でやる作業
-
-この設計を採ったら、voice-tts をカタログに載せるまでに次を全部やる。どれかを残したまま載せると、選択肢の一部が専用の環境を使わずに本体の venv を書き換えるか、動かない。
-
-本体 (SAIVerse):
+### この仕組みでやる本体の作業
 
 1. manifest に `options`・`when`・`env` を足し、検査を通す (`saiverse/addon_manifest.py`)。
 2. 導入の仕組みで、答えの保存、専用の環境の作成と作り直し、`env` の付いた step の起動、`when` による step の選択を行う (`saiverse/addon_installer.py`)。
@@ -331,30 +307,15 @@ voice-tts の setup.bat がしている処理は、次のように置き換え�
 5. `addon_install` を、更新前のスナップショットの対象から外す (`scripts/snapshot.py` の `EXCLUDED_FROM_SNAPSHOT`)。
 6. アドオンのコードが専用の環境の Python の場所を受け取る関数を足す。
 7. 画面: 確認ダイアログに質問を出し、答えに応じた step の一覧を出す。「導入済み」タブから質問をもう一度開けるようにする。
+8. 隔離した `SAIVERSE_HOME` と新しい venv で、質問・`when`・`env` の付いたアドオンを導入し、選んだ step だけが実行されること、`env` の付いた step の前後で本体の venv のパッケージが変わっていないことを確かめる。
 
-voice-tts (まはーのフォーク):
+### カタログが指す先を切り替えるとき
 
-8. GPT-SoVITS の合成の別プロセスを、専用の環境の Python で起動する。
-9. **Irodori-TTS の合成を、GPT-SoVITS と同じように別プロセスにし、専用の環境の Python で起動する。** いまは SAIVerse と同じプロセスの中で合成しているので、このままでは Irodori-TTS を選んだ利用者の本体の venv に Irodori-TTS のパッケージが入る。
-10. 専用の環境に入れる requirements のファイルを、GPT-SoVITS 用と Irodori-TTS 用に作る (GPT-SoVITS 用は gradio を外す)。
-11. setup.bat がしている処理を、上の置き換え先のとおり step とスクリプトに置き換え、`addon.json` を manifest v2 にする。
-12. 参照音声と合成音声を永続データの規約の場所へ移す (Phase 4-E の「公開前にやること」の 4)。
+カタログの `repo_url` を別のリポジトリに書き換えても、いまの更新処理 (`update_addon`) は、導入したときの URL (アドオンのフォルダの git の origin に記録されている) から取得する。そのため、導入済みの利用者の更新は、古い URL から取得され続ける。カタログが指す先を切り替える必要が出たら、その前のリリースで、更新処理をカタログの `repo_url` から取得する形に修正しておく (利用者がその本体へ更新したあとでないと効かないため)。いま切り替えの予定があるのは voice-tts (まはーのフォークから Nature109 のリポジトリへ、[voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md))。
 
-Stack-chan Vessel:
+### この文書の「禁止」の文との関係
 
-13. 声のサンプルレートを、エンジンが実際に出した値で送る (v0.5.2 として用意済み、未公開)。
-
-確かめること:
-
-14. 隔離した `SAIVERSE_HOME` と新しい venv に、カタログの導入経路で voice-tts を入れ、選択肢ごとに声が出るところまで確かめる (Phase 4-E の「公開前にやること」の 6)。本体の venv のパッケージが導入の前後で変わっていないことも確かめる。
-
-### この設計で解けないもの・別に要るもの
-
-- **本体の Python のバージョンに合う、CUDA に対応した torch があるか。** Python のバージョンごとに確かめが要る (2026-10-05 時点で未確認)。
-- **macOS と Linux。** 専用の環境の作り方は OS に依らないが、GPT-SoVITS のパッケージが macOS で入るかは確かめていない。
-- **カタログが指す先の切り替え。** voice-tts は、まずまはーのフォーク (`maha0525/saiverse-voice-tts`) を指して載せる (2026-10-05 まはー判断)。いずれ Nature109 のリポジトリへ戻すときには、本体の更新処理 (`update_addon`) を、カタログに書かれたリポジトリの URL (`repo_url`) から取得する形に修正しておく必要がある。いまの更新処理は、導入したときの URL (アドオンのフォルダの git の origin に記録されている) から取得する。そのため、カタログの `repo_url` を書き換えても、導入済みの利用者の更新は古い URL から取得され続ける。この修正は、カタログの指す先を切り替える前のリリースに入れる (利用者がその本体へ更新したあとでないと効かないため)。
-- **Stack-chan で声を出すとき。** Stack-chan Vessel は、v0.5.1 まで声のサンプルレートを常に 32 kHz として送っていて、OpenAI TTS と ElevenLabs (24 kHz) の声は速く高く再生されるはずだった (コードを読んで見つけた。実機の音では未確認)。エンジンが実際に出した値を送るように直した版を、v0.5.2 として用意した (2026-10-05、未公開)。
-- **この文書の「禁止」の文との関係。** 「インストールフロー」の前にある「addon ディレクトリ外への書き込み」の禁止は、`download_file` (`addon_data/` に書く) を入れた時点で実装と合わなくなっている。専用の環境は、さらに `addon_install/` へ書く。設計が確定したら、この禁止の文を、書いてよい場所の一覧の形に直す。
+「インストールフロー」の前にある「addon ディレクトリ外への書き込み」の禁止は、`download_file` (`addon_data/` に書く) を入れた時点で実装と合わなくなっている。専用の環境は、さらに `addon_install/` へ書く。設計が確定したら、この禁止の文を、書いてよい場所の一覧の形に直す。
 
 ## Phase 計画
 
@@ -393,76 +354,9 @@ Stack-chan Vessel:
 - **4-F registry public 化**: github.com/maha0525/saiverse-addon-registry を public で作成 + push、 raw.githubusercontent.com 経由で env override なしで fetch できることを実機確認 ✅
 - **インシデント (2026-05-23)**: Phase 4-D で stackchan のコード path 変更を push したが migration 起動時呼び出しを「voice-tts 完了後」 と遅延、 結果まはー の SAIVerse 再起動でアバター画像 / ペアリング情報が UI から不可視に。 手動コピーで復旧後、 `ENABLED_ADDONS_FOR_STARTUP` フィルタを設けて voice-tts 以外を起動時 migration 有効化 (`c362b1e`)。 教訓: 「コード path 変更と migration はセット commit」、 詳細は memory `feedback_code_path_migration_coupling.md`
 
-### Phase 4-E: voice-tts v2 化 (2026-09-11 に公開前の作業を洗い出し、2026-10-05 に設計案を追記)
+### Phase 4-E: voice-tts のカタログ掲載 (2026-10-05 に issue へ切り出した)
 
-> **2026-10-05 の更新。** 次の二つのことがあった。
->
-> - **upstream にまだマージされていない PR #5・#6 (別プロセス化と、終了処理の待ち時間の上限) を、まはーのフォークの main に入れた** (`b964fcd`)。まはーが push を承認した (2026-10-05「いいよ！」)。フォークの main は、upstream の main (`a9be97d`) に次の 5 つを足した形になっている。別プロセス化、終了処理の待ち時間の上限、GPT-SoVITS でも GPU と CPU を設定で選べる変更、音声が作られなかった吹き出しに「音声なし」と表示する変更 (`unavailable_keys`。本体側の表示の処理は main に入っている)、表示名と説明を日本語と英語で持つ変更。下の「まはーが決めること」の二つ目の問いは「公開前に upstream にマージするか」で、これには答えていない。カタログはまずフォークを指して載せる (まはー判断、上の節の冒頭に原文)。
-> - **メティスが、旧手順の 3 番 (`setup.bat` を `platform_script` の step で実行する) に代わる設計案を書いた。** 上の「導入時の質問と、アドオン専用の Python 環境」の節。まはーの確認待ちで、3 番を計画から外すかどうかは、下の「まはーが決めること」のとおり、まだ決まっていない。この設計案が採られた場合、下の「公開前にやること」の 1 (GPT-SoVITS の requirements を voice-tts 側で持つ) は requirements.lock と両立させる必要がなくなり、2 (スクリプトの中の pip にも constraints を渡す) は voice-tts には要らなくなる。Irodori-TTS が GPT-SoVITS と両立しないことも、別々の環境に入れられるので、公開から外す理由ではなくなる。
-
-voice-tts の upstream (元になっているリポジトリ) は `Nature109/saiverse-voice-tts` で、GitHub 上でそれを複製したフォーク `maha0525/saiverse-voice-tts` もある。PR #4〜#6 は maha0525 が作成し、#4 は Nature109 のアカウントがマージした。
-
-この節では、次の語をこの意味で使う。
-
-- **requirements.lock** は、本体が動作を確かめた版に全パッケージを固定した一覧 ([dependency_management.md](dependency_management.md))。
-- **constraints** は、pip の `-c` オプションで渡す「この一覧に書いてある版から動かすな」という指定。
-- **venv** は、SAIVerse が使う Python の仮想環境 (virtual environment)。本体とアドオンのパッケージは同じ venv に入る。
-- **衝突** は、パッケージ同士の版の条件が両立しないこと (pip check の警告文と同じ呼び方)。
-- **GIL** (Global Interpreter Lock) は、Python が一度に一つのスレッドにしか処理をさせない仕組み。
-
-#### 2026-09-11 時点の現状
-
-- 旧手順が前提にしていた PR #4 (音声の配信経路と再生キューの変更) は、2026-05-24 にマージ済み。upstream の main ブランチには、それ以降のコミットが無い。
-- `addon.json` に `manifest_version` も `setup` も無い。upstream の main ブランチ、フォークの main ブランチ、まはーの手元の `expansion_data/saiverse-voice-tts/` の三つで確認した。このままでは、アドオンカタログから GPT-SoVITS を入れられない。
-- 公開の registry.json に voice-tts は載っていない (載っているのは Elyth・X・stackchan)。
-- 合成した音声は、旧来の `~/.saiverse/user_data/voice/out/` に保存されている (`tools/speak/playback_worker.py` の `_OUT_DIR`)。
-- ペルソナごとの参照音声は、本体のアップロード処理 (`api/routes/addon.py` の `_resolve_file_dir`) によって `~/.saiverse/user_data/addon_files/saiverse-voice-tts/personas/<persona_id>/` に保存され、その絶対パスが DB の `AddonPersonaConfig.params_json` に記録される。voice-tts の合成では、記録された絶対パスがそのまま使われる (`tools/speak/profiles.py` の `_resolve_ref_audio`)。
-- 本体の `saiverse/addon_migrations.py` には、voice-tts の参照音声 (`addon_files/saiverse-voice-tts/` から `addon_data/saiverse-voice-tts/inputs/` へ) と合成音声 (`voice/out/` から `addon_data/saiverse-voice-tts/outputs/` へ) を移す処理がすでにある。`ENABLED_ADDONS_FOR_STARTUP` に voice-tts が入っていないので、起動時には実行されない。
-- upstream にまだマージされていない PR が 2 本ある。#5 は GPT-SoVITS の合成の別プロセス化 (2026-05-24 に作成)。#6 は、音声のストリームが止まったときに SAIVerse の終了処理が止まったままにならないよう、待ち時間に上限を付ける修正 (2026-08-27 に作成)。まはーの手元の `feature/tts-out-of-process` ブランチ (#5 のブランチ) には、`tools/speak/engine/gpt_sovits.py` と `tools/speak/playback_worker.py` にコミットされていない変更がある。
-- voice-tts には Windows 用の `setup.bat` しかなく、`setup.sh` は無い。voice-tts の requirements.txt のコメントには、どのプラットフォームでも使える導入コマンドとして `python scripts/install_backends.py gpt_sovits` が書かれている。
-
-#### 旧手順の 3 番が、いまのままでは成り立たない理由
-
-旧手順 (この節の最後に残してある) の 3 番は、「`setup.bat` を `platform_script` の step で登録する」としていた。これは requirements.lock の導入 (2026-09-02) より前に書かれたもので、いまは次の二つの理由で成り立たない。3 番を計画から外すかどうかは、まはーが決める。
-
-1. `setup.bat` は `scripts/install_backends.py` を通して、GPT-SoVITS の requirements.txt をそのまま `pip install -r` する。その中の `numpy<2.0` と `pydantic<=2.10.6` は、requirements.lock (numpy は Python 3.12 以上で 2.5.2、3.11 で 2.4.6。pydantic は 2.13.5) と両立しない。さらに、`gradio<5` で入る gradio 4.44.1 は `pillow<11` を、それが連れてくる gradio-client 1.3.0 は `websockets<13` を、`torchmetrics<=1.5` で入る torchmetrics 1.5.0 は `numpy<2.0` を要求していて、requirements.lock の pillow 11.3.0・websockets 16.1.1・numpy と衝突する。
-2. `saiverse/addon_installer.py` では、requirements.lock が constraints として pip に渡されるのは `pip_install` の step だけで、`platform_script` の step で実行されるスクリプトには渡されない ([addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md))。旧手順のまま実行すると、venv の本体のパッケージが requirements.lock の版から引き下げられる。
-
-#### 公開前にやること (2026-09-11 にメティスが洗い出した。進め方はまはー未決)
-
-1. **voice-tts 用の GPT-SoVITS の requirements を、voice-tts 側で持つ。** GPT-SoVITS の requirements.txt を元に、次を変える。
-   - `gradio` を外す。GPT-SoVITS の推論で読み込まれるコード (`GPT_SoVITS/TTS_infer_pack/TTS.py` から import を辿れる範囲) は、gradio を import していない。gradio を import しているのは、WebUI の 5 つ (`webui.py`、`GPT_SoVITS/inference_webui.py`、`GPT_SoVITS/inference_webui_fast.py`、`tools/uvr5/webui.py`、`tools/subfix_webui.py`) と `tools/my_utils.py` だった。`tools/my_utils.py` を import しているのは、WebUI、学習・データ準備・書き出し用のスクリプト、実験的なストリーミング推論のスクリプト (`GPT_SoVITS/stream_v2pro.py`) で、voice-tts の入口 (`tools/speak/engine/gpt_sovits.py` の `from TTS_infer_pack.TTS import TTS, TTS_Config`) から辿れる範囲には無い。これはコードを辿った確認で、gradio を外した venv で合成してはいない。
-   - `numpy<2.0` と `pydantic<=2.10.6` の上限を外す。2026-09-03 00:11 の再起動で、numpy 2.5.2 と pydantic 2.13.5 が入った venv (まはーの開発機、Windows、Python 3.13) のまま、voice-tts の合成は成功している ([dependency_management.md](dependency_management.md) §5 の 6)。
-   - `torchmetrics<=1.5` を `torchmetrics>=1.5.2` にする。torchmetrics は `GPT_SoVITS/AR/models/t2s_model.py` が import していて、推論で必要になる。1.5.0 は `numpy<2.0` を要求するが、1.5.2 以降は numpy の上限を持たない (PyPI で確認)。1.5.2 以降で推論が通るかは未確認。
-   - voice-tts の requirements.txt に、numba の版の条件を足す ([dependency_management.md](dependency_management.md) §3-3 に残っている宿題)。まはーの開発機の venv では 2026-09-02 20:47 に numba 0.67.0 へ上がっていて、9/3 の合成はその版で成功した。
-2. **`saiverse/addon_installer.py` で、`platform_script` / `python_script` の step で実行されるスクリプトの中の pip にも、requirements.lock が constraints として渡るようにする (本体側)。** [addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md)。
-3. **`addon.json` を manifest v2 にする。** `manifest_version`・`setup_version`・`data_subdirs`・`setup.steps` を書く。1 の requirements をどの step で入れるか (`pip_install` の step に分けるか、スクリプトの中に残すか) は未決。スクリプトを使うなら、`platform_script` の step の `unix` 側のスクリプトも要る。いまの `saiverse/addon_installer.py` は、実行中の OS 向けのスクリプトが無いとその step を失敗にせず飛ばして先へ進むので、`setup.sh` が無いまま載せると、macOS と Linux では GPT-SoVITS が入らないまま導入が成功したように見える。
-4. **参照音声と合成音声を、永続データの規約の場所へ移す。** 本体の `ENABLED_ADDONS_FOR_STARTUP` に voice-tts を加えると、起動時に参照音声のファイルが `addon_data/saiverse-voice-tts/inputs/` へ移る。しかし DB に記録された参照音声の絶対パスと、本体のアップロード処理の保存先は、古い `addon_files/` のまま残る。合成では記録された絶対パスがそのまま使われるので、参照音声のファイルが見つからずにエラーになる。移行を有効にするときは、同じリリースで次の三つを揃える (2026-05-23 のインシデントの教訓「コード path 変更と migration はセット commit」)。
-   - 本体: voice-tts の参照音声のアップロード先を、移行先の `addon_data/saiverse-voice-tts/inputs/` と揃える。ファイルを受け付ける他のアドオンの保存先をどう扱うかも、あわせて決める。
-   - 本体: DB の `AddonPersonaConfig.params_json` に記録された、古い場所の絶対パスを書き換える。
-   - voice-tts: 合成音声の保存先 (`_OUT_DIR`) を `get_addon_data_dir(...)/outputs/` に変える。
-5. **upstream に PR を出してマージし、registry.json に voice-tts を載せる。**
-6. **公開前の検証。** 隔離した `SAIVERSE_HOME` と、requirements.lock だけを入れた新しい venv に、アドオンカタログの導入経路で voice-tts を入れ、GPT-SoVITS で実際に声が出るところまで確かめる。[dependency_management.md](dependency_management.md) §5 の 4 で「voice-tts の実導入は本番 venv の同期のときに」と後に回していた検証にあたる。証拠は次の項目ごとに残す。2026-09-11 の時点では、すべて未検証。
-   - Windows で、カタログから入れて声が出る: 未検証。
-   - macOS で、カタログから入れて声が出る: 未検証 (`setup.sh` が無い)。
-   - Linux で、カタログから入れて声が出る: 未検証 (`setup.sh` が無い)。
-   - 参照音声を設定済みのペルソナがいる既存の環境に 4 の移行を当てて、そのペルソナの声が出る: 未検証。
-
-#### まはーが決めること (2026-09-11 時点で未決)
-
-- **旧手順の 3 番 (`setup.bat` を `platform_script` の step で実行する) を、計画から外すか。**
-- **upstream にまだマージされていない PR #5・#6 を、公開前にマージするか。** #5 は GPT-SoVITS の合成を別プロセスに移して、SAIVerse 本体のどのスレッドが GIL を握り続けても合成が遅くならないようにするもので、[mcp_cancel_scope_spin_gil_starvation.md](../issues/mcp_cancel_scope_spin_gil_starvation.md) の修正方針 B にあたる。GIL 飢餓の元になった本体側の不具合を直す修正方針 A は、2026-05-24 に回帰テストと一緒に実装済み。
-- **Irodori-TTS を公開に含めるか。** Irodori-TTS の pyproject.toml は `transformers>=5.12.1,<6`・`peft>=0.18.0`・`gradio>=5.0.0` を要求していて、GPT-SoVITS の requirements.txt の `transformers>=4.43,<=4.50`・`peft<0.18.0`・`gradio<5` と両立しない。同じ venv に両方は入らない。`addon.json` のエンジンの選択肢 (`engine`) には、今も `irodori` がある。
-
-#### 旧手順 (2026-05-23。3 番は、上に書いた理由でいまのままでは成り立たない)
-
-voice-tts repo は `origin = Nature109/saiverse-voice-tts` の共有 repo で、 現在 PR #4 (subscribe-before-open) がレビュー待ち。 v2 化は別 PR で出す方針:
-
-1. まはー: ナチュレに「manifest v2 化 PR を別途出す」連絡
-2. main 起点で `feature/manifest-v2` を切る
-3. addon.json v2 化 (manifest_version=2, setup_version, data_subdirs)、 `setup.bat` を `platform_script` step で登録 (skip_if_exists=`external/GPT-SoVITS`)、 永続データ参照を `get_addon_data_dir(...)/inputs/` と `get_addon_data_dir(...)/outputs/` に変更
-4. PR 提出 → ナチュレレビュー → マージ
-5. マージ後、 SAIVerse 本体の `ENABLED_ADDONS_FOR_STARTUP` に `saiverse-voice-tts` を追加、 registry.json に voice-tts エントリを追加
+voice-tts をカタログに載せる件は、アドオンカタログの仕組みの話ではなく voice-tts 一件の段取りなので、[voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md) に移した。2026-09-11 の洗い出しと 2026-05-23 の旧手順も、そこの「経緯」にそのまま移してある。
 
 ## まはー回答 (2026-05-22 一次レビュー)
 
