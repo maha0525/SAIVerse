@@ -102,7 +102,7 @@ City は「名前」を入れる欄を 2 つ持っているが、**どちらが�
 
 既存 Building を読む画面は、DB → テーブル GET API から受け取った所属 City を表示し、通常の world API で同じ `CITYID` のまま通常項目を保存する。World Editor と個別の BuildingSettingsModal のどちらも City 欄は表示のみとし、保存時に拒否される選択を案内しない。新規作成・更新・削除は既存の専用サービスの責務で、退役 ID と関連データの後始末もそこを通る。個別モーダルの追従と検証範囲は [issue](../issues/building_settings_city_selector_editable.md) に記録する。
 
-この撤去は、通常設定 → 専用 API → 保存 → GET での読み取りを保ちながら、ユーザーの現在地・Region・私室・item/tool link が参照する所属と削除時の整合性を守るためのもの。City 移送・DB スキーマ変更・既存 DB 内容の削除は含めない。撤去前に frontend・scripts・同梱アドオン関連資材・tests を全 tracked code の検索と呼び出し先の追跡で確認し、テスト以外の汎用書き込み caller は無かった。隔離した実 API で書き込みルートの 405 と GET の保持を確認し、通常サービスの既存回帰とも比較した。実ブラウザや稼働中の世界での操作確認は未実施で、監査 OPS-09 への結論・検証範囲は [汎用 DB の issue](../issues/building_city_immutable_generic_db_bypass.md) に記録する。
+この撤去は、通常設定 → 専用 API → 保存 → GET での読み取りを保ちながら、ユーザーの現在地・Region・私室・item/tool link が参照する所属と削除時の整合性を守るためのもの。City 移送・DB スキーマ変更・既存 DB 内容の削除は含めない。撤去前に frontend・scripts・同梱アドオン関連資材・tests を全 tracked code の検索と呼び出し先の追跡で確認し、テスト以外の汎用書き込み caller は無かった。隔離した実 API で書き込みルートの 405 と GET の保持を確認し、通常サービスの既存回帰とも比較した。実ブラウザや稼働中の世界での操作確認は未実施で、監査 OPS-09 への結論・検証範囲は [汎用 DB の issue](../issues/archive/building_city_immutable_generic_db_bypass.md) に記録する。
 
 ## 5. 変更を置く場所と、その理由
 

@@ -1,12 +1,12 @@
 # Issue: 汎用 DB 編集が既存 Building の City 変更拒否を迂回する
 
-**ステータス**: 検証待ち (2026-10-04、汎用書き込みルートを撤去・隔離 API 回帰済み。レビュー・実機確認待ち)
+**ステータス**: ✅ 完了 (汎用の書き込み・削除ルートの撤去を develop に取り込み済み。画面からの呼び手が無い入口の撤去なので、画面での確認対象は無い)
 **優先度**: high
-**関連**: `api/routes/db_manager.py` / `manager/admin.py:update_building` / [City intent §4-1](../intent/city_identity.md#4-1-既存-building-の所属-city-も通常編集では変えない)
+**関連**: `api/routes/db_manager.py` / `manager/admin.py:update_building` / [City intent §4-1](../../intent/city_identity.md#4-1-既存-building-の所属-city-も通常編集では変えない)
 
 ## 守ることと問題
 
-[W7 D5](../handoff/2026-07-21_w7_location_occupancy_handoff.md#d5-p1-7--building-の-city-変更を-immutable-化) は、既存 Building の所属 City を通常更新で変えることを禁止している。ユーザーの現在地・Region・私室・item/tool link などの参照をまとめて移送しない限り、DB の City だけ変わると世界の参照範囲が食い違う。
+[W7 D5](../../handoff/2026-07-21_w7_location_occupancy_handoff.md#d5-p1-7--building-の-city-変更を-immutable-化) は、既存 Building の所属 City を通常更新で変えることを禁止している。ユーザーの現在地・Region・私室・item/tool link などの参照をまとめて移送しない限り、DB の City だけ変わると世界の参照範囲が食い違う。
 
 通常の `PUT /api/world/buildings/{id}` は `AdminService.update_building` を通り、現在の `CITYID` と違う値を拒否する。しかし修正前の `POST /api/db/tables/building` は、受け取った列から `Building` を組み立て `db.merge(instance)` → `db.commit()` で保存していた。既存行かどうかの識別は主キーに任せており、City 不変条件も管理サービスも通らなかった。BuildingSettingsModal / WorldEditor の表示専用化だけでは、この入口は塞がらなかった。
 
@@ -57,3 +57,5 @@
 - 2026-10-03: レビューで数値文字列の互換性を点検。現行フロントは汎用 API を GET に使用し、Building の保存は型付き world API へ送るが、汎用 POST 自体は `Any` の入口である。最初の Python 比較では同じ City の文字列表現 4 件が回帰で失敗したため、DB の列との比較と既存整数の保存に置き換えた。小数や不正文字列を整数へ切り捨てずに拒否することも追加検証した。
 
 - 2026-10-04: DELETE → 同 ID の POST による迂回が判明。初案は更新一回だけの不変条件に絞り、逆向きの操作と実利用の根拠を検討していなかった。レビューで未使用の書き込み窓口自体を撤去するまはーの方針を確認し、個別ガード追加から入口撤去へ変更した。
+
+- 2026-10-04: PR #369 を develop へマージした (レビューはメティス、マージの判断はまはー)。画面から使われていない入口の撤去で、実機で見る振る舞いの変化が無いため、完了として archive へ移した。

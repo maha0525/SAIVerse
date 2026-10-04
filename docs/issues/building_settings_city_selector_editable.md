@@ -29,10 +29,12 @@
 
 - 2026-10-03: [レビュー](https://github.com/maha0525/SAIVerse/pull/365#issuecomment-5964788128) は Windows 隔離ブラウザで現在 City の表示と編集不可を確認。見た目だけでは理由が分かりにくいため、「既存の建物の都市は変更できません」の日英説明を添え、`aria-describedby` で City 欄と結び付けた。既存の disabled style と保存値は維持する。
 - 説明の表示・関連付けを既存 8 ケースへ追加し、修正前の不足→修正後の合格を確認。`npm test` / TypeScript / TSX lint (エラー 0、既存警告 9)、隔離 DB の既存サービス回帰 2 件も合格。
-- 汎用 DB POST が City 不変条件を迂回する経路はメモリ内 SQLite と実 FastAPI ルートで再現し、[別 issue](building_city_immutable_generic_db_bypass.md) に切り離した。今回バックエンド制約は変更していない。
+- 汎用 DB POST が City 不変条件を迂回する経路はメモリ内 SQLite と実 FastAPI ルートで再現し、[別 issue](archive/building_city_immutable_generic_db_bypass.md) に切り離した。今回バックエンド制約は変更していない。
 
 - 台帳から移送した旧次アクション: 「City 欄の表示専用化と保存値保持の回帰確認は済み、隔離ブラウザでの確認待ち。次 = City が選び直せないことと、通常項目の保存・読戻しを確認する。」
 
 - 2026-10-03: 正規の `npm run build` (Turbopack) は隔離先指定で合格。別途の webpack は未変更 `page.module.css` の global-only selector で失敗。実 TSX から合成データの静的 HTML と既存 CSS を作りクラウドブラウザで表示を試みたが、ローカル URL を開く前に `net::ERR_BLOCKED_BY_CLIENT` となった。表示確認・viewport 測定は成立しておらず、新しい説明の実ブラウザ検証は未実施。
 
 - 2026-10-03: PR #365 を develop へマージした (レビューはメティス、マージの判断はまはー)。台帳から移送した旧次アクション: 「City 欄の表示専用化に、変更できない理由の説明を添えた段階。次 = 説明の見やすさと通常項目の保存・読戻しを隔離ブラウザで確認する。」(誰待ち: 私 (PR レビュー対応) → まはー (実機確認))
+
+- 2026-10-04: 汎用の DB 編集の窓口は PR #369 で書き込み・削除のルートごと撤去された。台帳の行から外した一文: 「汎用の保存経路から City を変えられる穴は別 issue。」
