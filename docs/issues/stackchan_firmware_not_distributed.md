@@ -81,9 +81,11 @@
 
 **残りの手順** (まはーの承認・操作が要るもの):
 
-1. アドオンのリポジトリの `main` を `release/v0.5.0` (`daf884b211a87c449c20f470963269c7276fda72`) まで進めて GitHub へ push し、タグ `v0.5.0` と GitHub Release を作る。公開カタログは v0.4.0 のコミットを指したままなので、push だけではユーザーに何も届かない。
-2. まはーの SAIVerse で、公開カタログの代わりに手元のカタログのファイル (v0.5.0 を載せたもの) を読ませて、カタログの「更新」を押す。これがユーザーの更新と同じ道 (`update_addon` → setup の再実行 → ファームウェアのダウンロード) を通る。その後、パネルから firmware-v1.17.0 を機体に書き込み、Wi-Fi と接続先を設定し直し、ペルソナを降ろして声・首・カメラ・表情を確かめる。
+1. ~~アドオンを GitHub へ push し、タグ `v0.5.0` と GitHub Release を作る~~ — 2026-10-04 に済み (まはー承認)。`main` = `daf884b`、Release は https://github.com/maha0525/saiverse-stackchan-addon/releases/tag/v0.5.0 (本文は公開前に言葉づかいの検査を通した)。
+2. まはーの SAIVerse で、公開カタログの代わりに手元のカタログのファイル (`temp/addon-registry-local.json`、v0.5.0 を載せたもの。SAIVerse と同じ読み方で読めることを確認済み) を `.env` の `SAIVERSE_ADDON_REGISTRY_URL` で読ませて、カタログの「更新」を押す。これがユーザーの更新と同じ道 (`update_addon` → setup の再実行 → ファームウェアのダウンロード) を通る。その後、パネルから firmware-v1.17.0 を機体に書き込み、Wi-Fi と接続先を設定し直し、ペルソナを降ろして声・首・カメラ・表情を確かめる。
 3. 問題がなければ、公開カタログ (`saiverse-addon-registry`) の `registry.payload.json` に 0.5.0 を足し、まはーの秘密鍵で `sign_registry.py` を実行して push する。秘密鍵はまはーの手元にしか無い。
+
+**更新の操作の副作用 (2026-10-04 に写しで確認)**: カタログの「更新」は `git fetch --depth 1` を使うので、完全な履歴を持つリポジトリ (開発者の手元のアドオンのフォルダ) が浅い履歴の状態になる。写しで試すと、更新の前は 75 コミット見えていた履歴が、更新の後は 1 コミットしか見えなくなった。ユーザーの導入物では実害は無い。開発者の手元では `git fetch --unshallow origin` で戻せる。本体の `saiverse/addon_installer.py` の `update_addon` の挙動で、今回は直していない。
 
 **本家のリリースが出てから書くこと** (2026-10-03 に本家の最新 `upstream/main` 6a28ca4 で確かめた事実つき。すべて上の 2 コミットで済んだ)。
 
