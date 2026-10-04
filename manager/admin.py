@@ -43,7 +43,7 @@ from saiverse.building_retirement import (
     BuildingIdAvailability,
     is_tombstone_id,
 )
-from scripts.import_playbook import infer_scope_from_path
+from saiverse.playbook_scope import infer_scope_from_path
 from builtin_data.tools.save_playbook import save_playbook
 
 
