@@ -255,7 +255,8 @@ voice-tts をカタログに載せようとして、いまの仕組みでは次�
         "multiple": true,
         "choices": [
           {"id": "cloud", "label": {"ja": "OpenAI TTS / ElevenLabs (GPU 不要)", "en": "..."}, "default": true},
-          {"id": "gpt_sovits", "label": {"ja": "GPT-SoVITS (NVIDIA の GPU が必要、数 GB)", "en": "..."}}
+          {"id": "gpt_sovits", "label": {"ja": "GPT-SoVITS (NVIDIA の GPU が必要、数 GB)", "en": "..."},
+           "platforms": ["windows", "linux"]}
         ]
       }
     ],
@@ -274,6 +275,7 @@ voice-tts をカタログに載せようとして、いまの仕組みでは次�
 
 - 質問の形は、選択肢から選ぶもの (一つ、または複数) だけにする。自由に文字を入力させる形は作らない。答えが step の引数やコマンドに入り込む経路を作らないためで、答えにできるのは「どの step を実行するか」の選択だけになる。
 - `when` の読み方: `{"engines": "gpt_sovits"}` は、質問 `engines` の答えに `gpt_sovits` が含まれるとき、という意味。一つだけ選ぶ質問では、答えがそれと等しいとき。`when` に質問を二つ以上書いたときは、全部が当てはまるときだけ実行する。
+- 選択肢に `platforms` (`windows` / `linux` / `macos` の一覧) を書くと、その OS でだけその選択肢を出す。書かなければ、どの OS でも出す。たとえば NVIDIA の GPU を前提にした選択肢は、NVIDIA の GPU が載らない Mac では出さない。
 - `when` の無い step は、これまでどおり全員に実行される。`options` を持たないアドオン (Elyth・X・stackchan) は、何も変わらない。
 - 答えは `~/.saiverse/addon_install/<addon_id>/setup_answers.json` に残す (置き場所の理由は次の小節)。更新で setup_version が上がって step をやり直すときは、この答えを使い、質問を出し直さない。新しいバージョンで、質問が増えたとき、または既にある質問に選択肢が増えたときは、その質問だけを、前の答えが選ばれた状態で出し直す。
 - アンインストールしてから導入し直すときは、質問をもう一度出す。残っている答えがあれば、それが選ばれた状態で出す。
@@ -300,7 +302,7 @@ voice-tts をカタログに載せようとして、いまの仕組みでは次�
 
 ### この仕組みでやる本体の作業
 
-1. manifest に `options`・`when`・`env` を足し、検査を通す (`saiverse/addon_manifest.py`)。
+1. manifest に `options` (選択肢の `platforms` を含む)・`when`・`env` を足し、検査を通す (`saiverse/addon_manifest.py`)。
 2. 導入の仕組みで、答えの保存、専用の環境の作成と作り直し、`env` の付いた step の起動、`when` による step の選択を行う (`saiverse/addon_installer.py`)。
 3. `git_clone` の step で、取得先のフォルダが既にあるときに、指定された commit に切り替える。
 4. アンインストールで `addon_install/<addon_id>/` を消す。
