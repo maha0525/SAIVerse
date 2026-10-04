@@ -294,7 +294,7 @@ voice-tts をカタログに載せようとして、いまの仕組みでは次�
 - `env` の付いた step は、専用の環境の Python で実行する。`pip_install` はその環境の pip で、`python_script` はその環境の Python で起動し、環境変数 `VIRTUAL_ENV` と `PATH` もその環境を指すようにする。スクリプトの中から `pip` や `python` を呼んでも、本体の venv ではなく専用の環境に入る。
 - `env` の付いた step には、requirements.lock を constraints として渡さない。その step は本体の venv にパッケージを入れないので、本体のパッケージのバージョンが変わることがない。`env` の付いていない step は、これまでどおり本体の venv で実行し、`pip_install` には constraints が渡る ([addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md) の直し方を入れるときも、constraints を渡すのは `env` の付いていない step だけにする)。
 - アドオンのコードは、本体の新しい関数 (例: `get_addon_env_python(addon_id, name)`) で、その環境の Python の場所を受け取る。voice-tts では、GPT-SoVITS の合成の別プロセス (2026-10-05 にフォークの main に入った) を、この Python で起動する。いまは本体の Python で起動している。
-- Irodori-TTS は、いまは SAIVerse と同じプロセスの中で合成している。専用の環境で動かすには、GPT-SoVITS と同じように別プロセスにする変更が voice-tts 側に要る。
+- Irodori-TTS は、いまは SAIVerse と同じプロセスの中で合成している。GPT-SoVITS と同じように別プロセスにして、専用の環境の Python で起動するように変える (下の「この設計でやる作業」の 9)。
 - アンインストールでは、`addon_install/<addon_id>/` を、アドオンのフォルダと一緒に必ず消す。作り直せるものなので、利用者のデータ (`addon_data/`) のように残すかどうかを選ばせない。
 
 ### setup.bat がしている処理の置き換え先
@@ -317,6 +317,36 @@ voice-tts の setup.bat がしている処理は、次のように置き換え�
 
 6. **答えで変えられるのは、どの step を実行するかだけ。** step の中身 (URL・commit・スクリプト・引数) は manifest に書かれたもので、利用者の答えからは作らない。
 7. **`env` の付いた step は、本体の venv に何も入れない。** これを保証するのは導入の仕組み (`addon_installer.py`) で、`env` の付いた step を専用の環境の Python・pip・環境変数で起動することで保証する。requirements.lock の constraints を外してよいのは、この形で起動される step だけ。[dependency_management.md](dependency_management.md) §2-4 の表では、「アドオンは本体の部品を動かせない」を守る仕組みとして「`addon_installer.py` が constraints を渡す」が挙がっている。この設計が確定したら、そこにこの起動の形を足す。
+
+### この設計でやる作業
+
+この設計を採ったら、voice-tts をカタログに載せるまでに次を全部やる。どれかを残したまま載せると、選択肢の一部が専用の環境を使わずに本体の venv を書き換えるか、動かない。
+
+本体 (SAIVerse):
+
+1. manifest に `options`・`when`・`env` を足し、検査を通す (`saiverse/addon_manifest.py`)。
+2. 導入の仕組みで、答えの保存、専用の環境の作成と作り直し、`env` の付いた step の起動、`when` による step の選択を行う (`saiverse/addon_installer.py`)。
+3. `git_clone` の step で、取得先のフォルダが既にあるときに、指定された commit に切り替える。
+4. アンインストールで `addon_install/<addon_id>/` を消す。
+5. `addon_install` を、更新前のスナップショットの対象から外す (`scripts/snapshot.py` の `EXCLUDED_FROM_SNAPSHOT`)。
+6. アドオンのコードが専用の環境の Python の場所を受け取る関数を足す。
+7. 画面: 確認ダイアログに質問を出し、答えに応じた step の一覧を出す。「導入済み」タブから質問をもう一度開けるようにする。
+
+voice-tts (まはーのフォーク):
+
+8. GPT-SoVITS の合成の別プロセスを、専用の環境の Python で起動する。
+9. **Irodori-TTS の合成を、GPT-SoVITS と同じように別プロセスにし、専用の環境の Python で起動する。** いまは SAIVerse と同じプロセスの中で合成しているので、このままでは Irodori-TTS を選んだ利用者の本体の venv に Irodori-TTS のパッケージが入る。
+10. 専用の環境に入れる requirements のファイルを、GPT-SoVITS 用と Irodori-TTS 用に作る (GPT-SoVITS 用は gradio を外す)。
+11. setup.bat がしている処理を、上の置き換え先のとおり step とスクリプトに置き換え、`addon.json` を manifest v2 にする。
+12. 参照音声と合成音声を永続データの規約の場所へ移す (Phase 4-E の「公開前にやること」の 4)。
+
+Stack-chan Vessel:
+
+13. 声のサンプルレートを、エンジンが実際に出した値で送る (v0.5.2 として用意済み、未公開)。
+
+確かめること:
+
+14. 隔離した `SAIVERSE_HOME` と新しい venv に、カタログの導入経路で voice-tts を入れ、選択肢ごとに声が出るところまで確かめる (Phase 4-E の「公開前にやること」の 6)。本体の venv のパッケージが導入の前後で変わっていないことも確かめる。
 
 ### この設計で解けないもの・別に要るもの
 
