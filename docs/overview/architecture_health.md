@@ -148,7 +148,7 @@ Beat 型の担当範囲は「中身の対」だけに縮小（設計書の Beat 
 | `sai_memory` → `saiverse` | 4 箇所 | `usage_tracker` / `model_configs` / `references` |
 | `sai_memory` → `scripts` | **`arasuji/storage.py:797` → `scripts.arasuji.build_arasuji_core`** | 再生成ロジックがライブラリでなくスクリプト側に居る |
 | `manager` → `api` | `runtime.py:13` → `api.deps.avatar_path_to_url` | URL 変換ヘルパ |
-| ~~`manager` → `scripts`~~ | ~~`admin.py:28` → `scripts.import_playbook.infer_scope_from_path`~~ | 2026-10-03 解消: `saiverse/playbook_scope.py` に純粋ヘルパを移し、管理サービスと CLI が共有 ([intent](../intent/playbook_scope.md)) |
+| ~~`manager` → `scripts`~~ | ~~`admin.py:28` → `scripts.import_playbook.infer_scope_from_path`~~ | 2026-10-03 解消: [`saiverse/playbook_scope.py`](../../saiverse/playbook_scope.py) に純粋ヘルパを移し、管理サービスと CLI が共有 ([配置と公開範囲](../concepts/playbook.md#ファイルの配置と公開範囲)) |
 | `database` → `saiverse` | 3 箇所 | `__version__` / `data_paths` / `model_configs` |
 
 **なぜ危ないか**:
@@ -174,7 +174,9 @@ Beat 型の担当範囲は「中身の対」だけに縮小（設計書の Beat 
 **トリガー**: 1 は谷間タスクで即可能（小さく独立）。2 は新しい横断ユーティリティを足したくなった時・循環 import エラーを踏んだ時。一括移行はしない。
 
 **部分解消 (2026-10-03)**: Playbook のパス→scope 推論だけを標準ライブラリに依存する
-共有モジュールへ移した。import 時の `sys.path` 不変・CLI/保存処理への非依存、
+共有モジュール [`saiverse/playbook_scope.py`](../../saiverse/playbook_scope.py) へ移した。
+配置による規則は [Playbook の説明](../concepts/playbook.md#ファイルの配置と公開範囲) を参照。
+import 時の `sys.path` 不変・CLI/保存処理への非依存、
 管理サービスの CLI 非依存と両取り込み入口の引数を隔離テストで固定。
 CLI の起動処理・保存側・ほかの逆流は変更していない。§2 の循環計測値は初回健診時の記録であり、再計測ではない。
 

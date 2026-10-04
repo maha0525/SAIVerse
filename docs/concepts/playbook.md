@@ -47,6 +47,32 @@ Pulse の入口となる2つの Playbook がある:
 
 > `save_playbook` ツール（グラフを検証してから保存）を使う手もある。
 
+### ファイルの配置と公開範囲
+
+管理画面または CLI から取り込むとき、ファイルの配置から公開範囲 (`scope`) と
+所有ペルソナ・対象建物を推論する。
+
+| `playbooks/` 以下の配置 | 登録される公開範囲 |
+|---|---|
+| `public/<file>.json` | `public`: すべてのペルソナが利用できる |
+| `personal/<persona_id>/<file>.json` | `personal`: 指定したペルソナ用 |
+| `building/<building_id>/<file>.json` | `building`: 指定した建物用 |
+
+この規則は `builtin_data/playbooks/`、`~/.saiverse/user_data/playbooks/`、
+`expansion_data/<addon>/playbooks/`、旧配置の `sea/playbooks/` に共通する。
+パスを `Path.resolve()` で解決した後、最初の `playbooks` 要素を基準にするため、
+相対パスや symlink も解決先の配置で決まる。
+
+`playbooks` がない、直後に範囲名がない・未知、または `personal` / `building` の
+次のパス要素がない場合は `public` として扱う。推論はファイルの存在・拡張子・ID の
+妥当性を検査せず、`personal` / `building` の次の要素をそのまま ID として使う。
+ファイルの読み込みや保存時の検査は取り込み・保存側が担当する。
+
+CLI (`scripts/import_playbook.py`) の `--scope`、`--persona-id`、`--building-id` を
+空でない値で明示すると、それぞれ対応する推論値より優先される。未指定の項目や
+空文字の ID は推論値を使う。
+推論の実装は [`saiverse/playbook_scope.py`](../../saiverse/playbook_scope.py) にある。
+
 ## 実装
 
 - 実行ランタイム: `sea/runtime.py` / `sea/runtime_llm.py`（SEARuntime、LangGraph ベース）
