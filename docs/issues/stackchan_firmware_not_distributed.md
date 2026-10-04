@@ -105,7 +105,7 @@
 1. 1号機に firmware-v1.17.0 を書き込んで確かめる (まはー)。
 2. ~~アドオンの直しを GitHub へ上げる~~ — 2026-10-04 に v0.5.1 (`dcd6699`) として push し、タグと GitHub Release を作った (まはー承認)。公開カタログに載せるのは v0.5.1。手元のカタログのファイル (`temp/addon-registry-local.json`) も 0.5.1 に向けた。
 3. ~~本体のカタログの導入済み一覧の修正を含む SAIVerse を先に出す~~ — 2026-10-04 に SAIVerse v0.3.21 として発行した (修正のコミットは rebase 後の `5e852d48`)。1号機も firmware-v1.17.0 で接続と顔の表示を確認した (モジュールは外した状態)。
-4. 公開カタログに載せ、まはーの秘密鍵で署名する。載せる中身 (`saiverse-addon-registry` の `registry.payload.json` に v0.5.1 を足し、説明文を今の実態に直し、必要な SAIVerse のバージョンを 0.3.21 と書いた) は用意済みで、署名待ち。署名して push したら、まはーの `.env` の `SAIVERSE_ADDON_REGISTRY_URL` の行を消す。なお、カタログの項目の「必要な SAIVerse のバージョン」(`min_saiverse_version`) は、いまの SAIVerse ではどこでも確かめられておらず、古い SAIVerse の利用者も v0.5.1 に更新できてしまう (説明文で案内している)。
+4. ~~公開カタログに載せて署名する~~ — 2026-10-04 に `saiverse-addon-registry` の `8e37c67` で v0.5.1 を掲載した (まはーの鍵 key_id=7f840ff5961afbd1 で署名し、SAIVerse に組み込んだ公開鍵で検証してから push。公開の URL から SAIVerse と同じ読み方で取って、v0.5.1 が見えることも確かめた)。まはーの手元も、カタログからの更新で v0.5.1 (`dcd6699`) になっている。残り = まはーの `.env` の `SAIVERSE_ADDON_REGISTRY_URL` の行を消すことと、最初の報告者への連絡。なお、カタログの項目の「必要な SAIVerse のバージョン」(`min_saiverse_version`) は、いまの SAIVerse ではどこでも確かめられておらず、古い SAIVerse の利用者も v0.5.1 に更新できてしまう (説明文で案内している)。
 
 **更新の操作の副作用 (2026-10-04 に写しで確認)**: カタログの「更新」は `git fetch --depth 1` を使うので、完全な履歴を持つリポジトリ (開発者の手元のアドオンのフォルダ) が浅い履歴の状態になる。写しで試すと、更新の前は 75 コミット見えていた履歴が、更新の後は 1 コミットしか見えなくなった。ユーザーの導入物では実害は無い。開発者の手元では `git fetch --unshallow origin` で戻せる。本体の `saiverse/addon_installer.py` の `update_addon` の挙動で、今回は直していない。
 
