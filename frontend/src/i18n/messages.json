@@ -1015,6 +1015,10 @@
     "ja": " 削除",
     "en": " Delete"
   },
+  "components.AddonCatalogPanel.text014": {
+    "ja": " 処理中",
+    "en": " In progress"
+  },
   "components.AddonInstallProgressDialog.text001": {
     "ja": "導入",
     "en": "Install"
@@ -1060,8 +1064,8 @@
     "en": "Connection error"
   },
   "components.AddonInstallProgressDialog.text012": {
-    "ja": "実行中... 完了までお待ちください",
-    "en": "Running... Please wait"
+    "ja": "実行中です。この画面を閉じても、処理はサーバーで続きます",
+    "en": "Running. Closing this window does not stop the process on the server"
   },
   "components.AddonInstallProgressDialog.text013": {
     "ja": "閉じる",
@@ -1074,6 +1078,22 @@
   "components.AddonInstallProgressDialog.text015": {
     "ja": "{p1} の選択肢を追加しています",
     "en": "Adding choices to {p1}"
+  },
+  "components.AddonInstallProgressDialog.text016": {
+    "ja": "接続が切れましたが、処理はサーバーで続いています。終わるまで様子を確かめています…",
+    "en": "The connection was lost, but the process is still running on the server. Checking until it finishes…"
+  },
+  "components.AddonInstallProgressDialog.text017": {
+    "ja": "処理は終わりました",
+    "en": "The process has finished"
+  },
+  "components.AddonInstallProgressDialog.text018": {
+    "ja": "結果は一覧で確認してください。",
+    "en": "Please check the result in the list."
+  },
+  "components.AddonInstallProgressDialog.text019": {
+    "ja": "閉じる (処理は続きます)",
+    "en": "Close (keeps running)"
   },
   "components.AddonManagerModal.text001": {
     "ja": "（未対応の型: {p1}）",

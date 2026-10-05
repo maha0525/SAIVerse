@@ -162,6 +162,7 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
    - b. `git checkout <commit_sha>`
    - c. addon.json を読み込み、setup_version / setup.steps を取得
    - d. 各ステップを順次実行、進捗を UI に流す
+   - 進捗の接続が途中で切れても、処理は最後まで走る。同じアドオンへの別の操作を断る鍵 (per-addon lock) は、接続の終わりではなく処理の終わりで放す。画面は接続が切れたら `GET /api/addon-catalog/operations/{addon_id}` を問い合わせて処理の終わりを待ち、記録された結果を出す (記録が無ければ成否は言わない)。進捗の行が出ない間も、サーバーは 10 秒ごとに SSE のコメント行を送って接続を保つ — Next.js の中継は 30 秒間データが流れないと上流との接続を切る (2026-10-06、[addon_install_progress_dialog_stuck_on_long_installs.md](../issues/addon_install_progress_dialog_stuck_on_long_installs.md))
 4. 完了後、SAIVerse のアドオンローダを reload (再起動なしで認識させる)
    - これは `saiverse/addon_loader.py` 側の reload 経路があるかを実装前に確認 (未調査)
 
