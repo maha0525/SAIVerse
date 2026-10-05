@@ -90,7 +90,20 @@ Stack-chan Vessel:
 - **本体の env step の環境変数に、Windows でだけ `CL=/utf-8` を足した** (旧 setup.bat と同じ、ソースビルドの文字コード事故よけ)。
 - **Irodori-TTS は、設定の device が使えないとき (CUDA の無い機械での cuda) に MPS → CPU へ自動で落とすようにした。** 設定のひな形が cuda + bf16 で、そのままでは Mac と GPU の無い機械で必ず失敗するため。GPT-SoVITS は従来どおり自動では切り替えない (mps は明示したときだけ)。
 - **モデルの重みと NLTK のデータは専用の環境の下に置く** (`NLTK_DATA` / `HF_HOME` を環境の下に固定)。アンインストールで環境ごと消える。
-- 作業 7 で見るべき残りの注意: Irodori の依存 `dacvae` が commit 固定されずに入る / torch 2.11 と torchcodec 0.10 の組での Irodori の参照音声の読み込み / Intel Mac ではローカルの二つのエンジンの導入が失敗する (torch 2.11 の Mac 向け wheel は Apple silicon だけ) / クラウドだけを選んで導入したとき、ペルソナの既定のエンジンが gpt_sovits のままなので、エンジンを選び直すまで「音声なし」になる。
+- 作業 7 で見るべき残りの注意: Irodori の依存 `dacvae` が commit 固定されずに入る (→ 同日の通し確認で requirements に commit 固定で明記して解消) / torch 2.11 と torchcodec 0.10 の組での Irodori の参照音声の読み込み / Intel Mac ではローカルの二つのエンジンの導入が失敗する (torch 2.11 の Mac 向け wheel は Apple silicon だけ) / クラウドだけを選んで導入したとき、ペルソナの既定のエンジンが gpt_sovits のままなので、エンジンを選び直すまで「音声なし」になる。
+
+### 2026-10-05 の通し確認 (作業 7 の Windows 側)
+
+隔離した `SAIVERSE_HOME` と新しい venv で、カタログの導入経路 (prepare → 質問 → confirm、選択肢の追加) を本物の git・venv・pip・重みのダウンロードで通し、**三つの選択肢すべてで実際に動くところまで確認した**: クラウドだけの導入 (専用環境を作らない)、GPT-SoVITS (専用環境の別プロセスで合成、32kHz の wav が出た)、Irodori-TTS (同、48kHz)。本体の venv の代役には torch が入っていないことも確認。この通しで見つけて直した導入の地雷が四つ:
+
+1. **日本語のコメントを含む requirements を、日本語 Windows の pip が読めない** (新しい venv に同梱される pip 24 系は、文字コードの宣言が無いとロケールの cp932 で読もうとして失敗する)。全 requirements の先頭に宣言行を足した。
+2. **matplotlib が無い**。GPT-SoVITS の推論の import 連鎖が読むのに upstream の requirements に無く、gradio の巻き添えで入っていた (gradio を外したので切れた)。明示した。
+3. **Irodori の依存 dacvae が pip から見えない**。pyproject には名前だけで、入手先 (GitHub) は uv 専用の欄にあり pip は読まない。requirements に commit 固定で明記した。事前の依存解決の確認を uv で行ったために素通りした — **解決の確認は、実際に導入する道具 (pip) で行う**。
+4. **sentencepiece の縛り (<0.2) に Python 3.13 の Windows 用 wheel が無い**。ソースビルドも今の CMake が拒む。取得直後に縛りを <0.3 へ手直しする step を足し、0.2 系の wheel で入ることを確認した。
+
+ほかに一つ、環境の注意: 専用環境を深いフォルダの下に作ると、torch の DLL のパスが Windows の 260 字の上限を超えて読めない (WinError 206)。既定の `~/.saiverse/addon_install/` なら収まるが、`SAIVERSE_HOME` を深い場所に向けている利用者は踏みうる。
+
+残り: Linux (NOVA) での同じ通し / 画面からの実操作 (質問ダイアログの実表示、選ばなかったエンジンを選んだときの「音声なし」) — 画面はまはーと一緒に見る。
 
 ### 2026-10-05 の検収 (Fable)
 
