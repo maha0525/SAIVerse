@@ -1,7 +1,7 @@
 # voice-tts をアドオンカタログに載せる
 
 **起票**: 2026-10-05 (アドオンカタログの intent の Phase 4-E から、この件だけを切り出した)
-**状態**: 実装待ち。前提になるカタログの仕組み (導入時の質問と、アドオン専用の Python 環境) は 2026-10-05 にまはーの GO が出て実装中。仕組みが本体に入ったら、この issue の「やる作業」に入る
+**状態**: 検証待ち。前提になるカタログの仕組み (導入時の質問と、アドオン専用の Python 環境) は 2026-10-05 に本体に入り、同日にこの issue の作業 1〜5 (voice-tts 側と本体側) も実装した (下の「経緯」の「2026-10-05 の実装」)。残りは 7 (隔離した環境での通し確認) → 8 (カタログへの掲載。まはーの署名が要る) → 9 (まはーの手元の切り替え)
 **関連**: [addon_catalog_management.md](../intent/addon_catalog_management.md) の「導入時の質問と、アドオン専用の Python 環境」、[addon_setup_scripts_bypass_lock_constraints.md](addon_setup_scripts_bypass_lock_constraints.md)、[stackchan_firmware_not_distributed.md](stackchan_firmware_not_distributed.md)
 
 ## 何をする件か
@@ -43,6 +43,8 @@ GPT-SoVITS と Irodori-TTS は、それぞれ専用の Python 環境に入れる
 
 カタログの intent の「この仕組みでやる本体の作業」が済んでいることが前提。そのうえで、voice-tts をカタログに載せるまでに次を全部やる。どれかを残したまま載せると、選択肢の一部が専用の環境を使わずに本体の venv を書き換えるか、動かない。
 
+> 1〜6 は 2026-10-05 に実装済み (1〜4 と 5 の voice-tts 側はフォークの作業コピー、5 の本体側は develop。実装の中の判断は「経緯」の「2026-10-05 の実装」)。片づけの案内 (下の注記) は voice-tts の README に「消されずに残る。動作の妨げにはならない」と書いた。
+
 voice-tts (まはーのフォーク):
 
 1. GPT-SoVITS の合成の別プロセスを、専用の環境の Python で起動する。いまは本体の Python (`sys.executable`) で起動している。あわせて、GPT-SoVITS の設定の `device` に `mps` を足す (いまは `cuda` と `cpu` だけ。Mac の選択肢を出すと決めたので、必ずやる)。
@@ -78,6 +80,17 @@ Stack-chan Vessel:
 - (2026-10-05 に一度「Mac では出さない」と書いた。NVIDIA の GPU が無いことから、確かめずにローカルの音声エンジンが使えないと決めつけた飛躍で、まはーの指摘で取り下げた。)
 
 ## 経緯
+
+### 2026-10-05 の実装 (Fable が検収、実装は Opus のサブエージェント)
+
+作業 1〜5 を同日に実装した。voice-tts 側はフォークの main の作業コピー (addon.json v2・エンジン専用環境の requirements・合成の子プロセス化の一般化・保存先の変更)、本体側は develop (アップロード先を全アドオン共通で `addon_data/<id>/inputs/` に一本化・起動時のフォルダ移行の有効化・DB に記録された絶対パスの書き換え)。計画から変えた点と、実装で決めた点:
+
+- **GPT-SoVITS の requirements から `numpy<2.0` を外し、`torchmetrics` を 1.5.2 以降にした。** numpy 1.x には Python 3.13 用の wheel が無い (PyPI で確認)。numpy 2 系での合成は本体 venv (numpy 2.5.2) で実績がある。
+- **`jieba_fast` は、純 Python の jieba を同じ名前で提供する中継パッケージ (voice-tts 同梱) に差し替えた。** jieba_fast は PyPI に wheel が無く、C コンパイラの無い利用者の環境では pip が失敗するため。使われる API 三つが jieba に同名であることを固定 commit の grep で確認し、使い捨ての venv で中継の動作も確かめた。
+- **本体の env step の環境変数に、Windows でだけ `CL=/utf-8` を足した** (旧 setup.bat と同じ、ソースビルドの文字コード事故よけ)。
+- **Irodori-TTS は、設定の device が使えないとき (CUDA の無い機械での cuda) に MPS → CPU へ自動で落とすようにした。** 設定のひな形が cuda + bf16 で、そのままでは Mac と GPU の無い機械で必ず失敗するため。GPT-SoVITS は従来どおり自動では切り替えない (mps は明示したときだけ)。
+- **モデルの重みと NLTK のデータは専用の環境の下に置く** (`NLTK_DATA` / `HF_HOME` を環境の下に固定)。アンインストールで環境ごと消える。
+- 作業 7 で見るべき残りの注意: Irodori の依存 `dacvae` が commit 固定されずに入る / torch 2.11 と torchcodec 0.10 の組での Irodori の参照音声の読み込み / Intel Mac ではローカルの二つのエンジンの導入が失敗する (torch 2.11 の Mac 向け wheel は Apple silicon だけ) / クラウドだけを選んで導入したとき、ペルソナの既定のエンジンが gpt_sovits のままなので、エンジンを選び直すまで「音声なし」になる。
 
 ### 2026-10-05 の検収 (Fable)
 

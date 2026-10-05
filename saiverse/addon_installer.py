@@ -593,10 +593,18 @@ def _ensure_addon_env(addon_id: str, env_name: str, progress: ProgressCallback) 
 def _env_process_vars(env_dir: Path) -> dict:
     """専用の環境で起動する子プロセスの環境変数 (VIRTUAL_ENV と PATH をその環境へ)。"""
     bin_dir = addon_env_python_path(env_dir).parent
-    return {
+    env_vars = {
         "VIRTUAL_ENV": str(env_dir),
         "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
     }
+    if os.name == "nt":
+        # wheel の無いパッケージを pip がソースビルドするとき、CP932 ロケールだと
+        # MSVC が非 ASCII を含むソースで字句解析に失敗することがある。/utf-8 を
+        # 渡して回避する (voice-tts の旧 setup.bat と同じ手当て。MSVC 以外は読まない)。
+        # 利用者が自分で CL を立てていたら消さずに後ろへ足す。
+        existing_cl = os.environ.get("CL", "").strip()
+        env_vars["CL"] = f"{existing_cl} /utf-8".strip()
+    return env_vars
 
 
 def _resolve_step_env(

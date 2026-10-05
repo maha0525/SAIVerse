@@ -28,9 +28,10 @@ from saiverse.data_paths import get_saiverse_home, migrate_legacy_user_data
 migrate_legacy_user_data()
 
 # Migrate legacy per-addon persistent data dirs to the new addon_data/ layout.
-# voice-tts is intentionally excluded until its v2 PR lands (its code still
-# references the legacy paths on the Nature109 shared repo); see
-# saiverse/addon_migrations.py ENABLED_ADDONS_FOR_STARTUP.
+# Addon-owned locations are gated by ENABLED_ADDONS_FOR_STARTUP; uploaded files
+# under user_data/addon_files/ are moved for every addon (the core upload API owns
+# that location). The absolute paths recorded in the DB are rewritten later, once
+# db_path is known (rewrite_addon_file_paths_in_db below).
 from saiverse.addon_migrations import migrate_addon_data_dirs, ENABLED_ADDONS_FOR_STARTUP
 migrate_addon_data_dirs(addon_ids=ENABLED_ADDONS_FOR_STARTUP)
 
@@ -314,6 +315,13 @@ def main():
             logging.info("Database migration completed.")
         backfill_track_short_ids(str(db_path))
         backfill_item_short_ids(str(db_path))
+
+    # アップロード済みファイルの絶対パスの書き換え (saiverse/addon_migrations.py):
+    # 起動直後の migrate_addon_data_dirs が addon_files/<id>/ を addon_data/<id>/inputs/
+    # へ動かしたので、アドオン設定の params_json に記録されたパスも同じ規則で揃える。
+    # 書き換え後の値は addon_files/ を指さないので、起動ごとに無条件で呼んで問題ない。
+    from saiverse.addon_migrations import rewrite_addon_file_paths_in_db
+    rewrite_addon_file_paths_in_db(str(db_path))
 
     # 参照アドレッシング統一のデータ移行 (day_plan slots_json の desire:→task:) は
     # schema 変更を伴わないため needs_migration では拾えない。冪等かつ desire: を含む
