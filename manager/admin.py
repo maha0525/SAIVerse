@@ -844,6 +844,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         image_path: Optional[str] = None,
         extra_prompt_files: Optional[List[str]] = None,
         item_display_limit: Any = UNSET,
+        show_movement_notices: Any = UNSET,
     ) -> str:
         """Building の設定を更新する。
 
@@ -852,7 +853,13 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         送られてこなかったので触らない / None = 上書きを外して既定に戻す /
         0 以上の整数 = その個数。負数はここでも拒否する (画面を通らない
         呼び出しもあるので、入口の検査だけに任せない)。
+
+        ``show_movement_notices`` は入退室通知の画面表示だけの設定。
+        UNSET = 保持 / None = 全体設定を継承 / bool = 部屋ごとの上書き。
         """
+        if show_movement_notices is not UNSET and show_movement_notices is not None:
+            if not isinstance(show_movement_notices, bool):
+                return "Error: 入退室通知の表示設定には true / false / null を指定してください。"
         if item_display_limit is not UNSET:
             if item_display_limit is not None:
                 try:
@@ -900,6 +907,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 building.EXTRA_PROMPT_FILES = json.dumps(extra_prompt_files) if extra_prompt_files else None
             if item_display_limit is not UNSET:
                 building.ITEM_DISPLAY_LIMIT = item_display_limit
+            if show_movement_notices is not UNSET:
+                building.SHOW_MOVEMENT_NOTICES = show_movement_notices
 
             db.query(BuildingToolLink).filter_by(BUILDINGID=building_id).delete(
                 synchronize_session=False

@@ -37,6 +37,9 @@ import SpellConfirmDialog, { SpellConfirmData } from '@/components/SpellConfirmD
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
 import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell, Map as MapIcon, CornerDownRight, RotateCcw, Undo2 } from 'lucide-react';
+import { shouldShowMovementMessage } from '@/lib/movementNotices';
+import { useMovementNoticeSettings } from '@/hooks/useMovementNoticeSettings';
+import { useMovementNoticeAutoScroll } from '@/hooks/useMovementNoticeAutoScroll';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 import { useAddonEvents } from '@/hooks/useAddonEvents';
 import { useActiveClientTab } from '@/hooks/useActiveClientTab';
@@ -44,6 +47,7 @@ import { useClientActions } from '@/hooks/useClientActions';
 import { ActiveClientIndicator } from '@/components/ActiveClientIndicator';
 import AddonBubbleButtons, { BubbleButtonDef } from '@/components/AddonBubbleButtons';
 import SystemAlertBanner from '@/components/SystemAlertBanner';
+import HistoryContinuation from '@/components/HistoryContinuation';
 
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
 const sanitizeSchema = {
@@ -121,6 +125,8 @@ interface MessageLLMUsageTotal {
 interface Message {
     id?: string;
     role: 'user' | 'assistant' | 'system' | 'host';
+    is_movement_notice?: boolean;
+    building_id?: string | null;
     content: string;
     timestamp?: string; // ISO string
     avatar?: string;
@@ -354,6 +360,7 @@ export default function Home() {
     }, [dispatchClientActions, updateAddonMetadata]));
 
     const [messages, setMessages] = useState<Message[]>([]);
+    const { settings: movementNoticeSettings } = useMovementNoticeSettings();
     const [inputValue, setInputValue] = useState('');
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
     // metabolism 完了メッセージを 2 秒見せてから 'Thinking...' に戻す遅延タイマー。
@@ -372,7 +379,6 @@ export default function Home() {
     const [hasMore, setHasMore] = useState(true);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const previousScrollHeightRef = useRef<number>(0);
-    const prevNewestIdRef = useRef<string | undefined>(undefined); // Track newest message ID
     const isProcessingRef = useRef(false); // Suppress polling during active request
 
     // User identity cache (for optimistic message display)
@@ -742,27 +748,14 @@ export default function Home() {
         }
     }, [isHistoryLoaded]); // Only on initial history ready
 
-    // Scroll to bottom on NEW user/assistant messages (append)
-    useEffect(() => {
-        const currentNewestId = messages[messages.length - 1]?.id;
-        const prevNewestId = prevNewestIdRef.current;
-
-        // Update ref
-        prevNewestIdRef.current = currentNewestId;
-
-        // If newest ID didn't change, old history was prepended - don't scroll
-        if (prevNewestId !== undefined && currentNewestId === prevNewestId) {
-            return;
-        }
-
-        if (messages.length > 0 && !isLoadingMore && isHistoryLoaded) {
-            messagesEndRef.current?.scrollIntoView({
-                behavior: 'smooth',
-                block: 'end'
-            });
-        }
-    }, [messages.length, isLoadingMore, isHistoryLoaded]);
-
+    useMovementNoticeAutoScroll({
+        messages,
+        settings: movementNoticeSettings,
+        currentBuildingId,
+        ready: isHistoryLoaded,
+        loadingOlder: isLoadingMore,
+        endRef: messagesEndRef,
+    });
 
     // Restore scroll position after loading previous history
     useEffect(() => {
@@ -3803,6 +3796,13 @@ export default function Home() {
                     ref={chatAreaRef}
                     onScroll={handleScroll}
                 >
+                    <HistoryContinuation
+                        oldestId={messages[0]?.id}
+                        hasMore={hasMore}
+                        ready={isHistoryLoaded}
+                        loading={isLoadingMore}
+                        onLoad={fetchHistory}
+                    />
                     {isLoadingMore && <div style={{ textAlign: 'center', padding: '10px', color: '#666' }}>{uiText("app.page.label016")}</div>}
                     {lostBuildingNotice !== null && (
                         <div className={styles.lostBuildingNotice} role="status">
@@ -3815,6 +3815,8 @@ export default function Home() {
                         </div>
                     )}
                     {messages.map((msg, idx) => {
+                        // Keep all records/IDs for pagination and polling; only suppress this render.
+                        if (!shouldShowMovementMessage(msg, movementNoticeSettings, currentBuildingId)) return null;
                         // System notices (world events / warnings / info) are NOT AI utterances:
                         // render them author-less and compact, distinct from user/assistant bubbles.
                         // Errors stay as assistant cards (role 'assistant', has retry/detail affordances).

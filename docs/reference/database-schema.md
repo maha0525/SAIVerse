@@ -246,6 +246,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `REGION_ID` | VARCHAR(255) | FK→region.REGION_ID |  |
 | `FACILITY_ROLES` | TEXT | — |  |
 | `ITEM_DISPLAY_LIMIT` | INTEGER | — |  |
+| `SHOW_MOVEMENT_NOTICES` | BOOLEAN | — |  |
 
 ## ai
 
@@ -672,6 +673,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `LAST_TUTORIAL_VERSION` | INTEGER | NOT NULL, default=1 |  |
 | `SELECTED_META_PLAYBOOK` | VARCHAR(255) | — |  |
 | `FAVORITE_MODELS` | TEXT | — |  |
+| `SHOW_MOVEMENT_NOTICES` | BOOLEAN | NOT NULL, default=True |  |
 | `METABOLISM_TARGET_CHARS` | INTEGER | — |  |
 | `METABOLISM_HIGH_CHARS` | INTEGER | — |  |
 

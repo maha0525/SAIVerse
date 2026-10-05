@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 from typing import List, Optional, Any
 import shutil
 from pathlib import Path
@@ -81,6 +81,8 @@ class BuildingUpdate(BaseModel):
     # したとき「未送信 = null = 解除」にすると設定が黙って消えるので、
     # 未送信と null 明示の区別 (model_fields_set) は残す。
     item_display_limit: Optional[int] = None
+    # 入退室通知の画面表示。未送信は保持、null 明示は全体設定の継承へ戻す。
+    show_movement_notices: Optional[StrictBool] = None
 
 
 class RegionCreate(BaseModel):
@@ -318,7 +320,14 @@ def update_building(building_id: str, b: BuildingUpdate, manager: SAIVerseManage
                 status_code=400,
                 detail="部屋の様子に表示するアイテム数には 0 以上の数を入れてください（空欄で既定の 10 個）。",
             )
-    return _check_result(manager.update_building(building_id, b.name, b.capacity, b.description, b.system_instruction, b.city_id, b.tool_ids, b.auto_interval, b.image_path, b.extra_prompt_files, item_display_limit))
+    display_settings = {}
+    if "show_movement_notices" in b.model_fields_set:
+        display_settings["show_movement_notices"] = b.show_movement_notices
+    return _check_result(manager.update_building(
+        building_id, b.name, b.capacity, b.description, b.system_instruction,
+        b.city_id, b.tool_ids, b.auto_interval, b.image_path, b.extra_prompt_files,
+        item_display_limit, **display_settings,
+    ))
 
 @router.get("/buildings/{building_id}/deletion-preview")
 def get_building_deletion_preview(building_id: str, manager: SAIVerseManager = Depends(get_manager)):

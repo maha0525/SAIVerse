@@ -11886,5 +11886,49 @@
   "providerConfig.reloadFailed": {
     "ja": "設定を再読み込みできませんでした。もう一度試してください。",
     "en": "Could not reload settings. Please try again."
+  },
+  "movementNotices.label": {
+    "ja": "入退室ログ",
+    "en": "Entry and exit notices"
+  },
+  "movementNotices.globalHint": {
+    "ja": "チャットでユーザー・ペルソナの入退室通知を表示するかを設定します。Building ごとの設定が優先されます。記録やペルソナの認識は変わりません。",
+    "en": "Choose whether chat shows user and persona entry/exit notices. Each Building can override this setting. Records and persona awareness are unchanged."
+  },
+  "movementNotices.buildingHint": {
+    "ja": "この Building のチャットでユーザー・ペルソナの入退室通知を表示するかを設定します。記録やペルソナの認識は変わりません。",
+    "en": "Choose whether chat shows user and persona entry/exit notices from this Building. Records and persona awareness are unchanged."
+  },
+  "movementNotices.inherit": {
+    "ja": "グローバル設定に合わせる",
+    "en": "Use global setting"
+  },
+  "movementNotices.show": {
+    "ja": "表示",
+    "en": "Show"
+  },
+  "movementNotices.hide": {
+    "ja": "非表示",
+    "en": "Hide"
+  },
+  "movementNotices.saving": {
+    "ja": "保存中…",
+    "en": "Saving…"
+  },
+  "movementNotices.saveError": {
+    "ja": "保存できませんでした。もう一度選び直してください。",
+    "en": "Could not save. Please select the setting again."
+  },
+  "movementNotices.loadError": {
+    "ja": "入退室ログの設定を読み込めませんでした。",
+    "en": "Could not load entry and exit notice settings."
+  },
+  "movementNotices.retry": {
+    "ja": "再読み込み",
+    "en": "Retry"
+  },
+  "movementNotices.loadOlder": {
+    "ja": "以前のメッセージを読み込む",
+    "en": "Load older messages"
   }
 }
