@@ -1472,11 +1472,14 @@ def plan_options_apply(
     final = fill_defaults(manifest, merged)
     satisfied = select_steps(manifest.setup_steps, final)
     new_steps = [s for s in satisfied if s.when and not step_when_matches(s, saved)]
-    # 空から作られる env (新規作成・Python の版違いでの作り直し) を使う step は、
-    # 前から条件を満たしていたものも走らせる。新しく条件を満たした step だけだと、
-    # 作り直された env に、前の step が入れていたパッケージが戻らない。
+    # 空から作られる env (新規作成・消えた/壊れた環境・Python の版違い) を使う
+    # step は、前から条件を満たしていたものも走らせる。新しく条件を満たした step
+    # だけだと、作り直された env に、前の step が入れていたパッケージが戻らない。
+    # 判定を satisfied 全体に広げてあるのは、答えを変えずに確定し直したときも
+    # 消えた環境が作り直されるようにするため — 「選択肢の確定のやり直し」が、
+    # 専用環境の修復の入口を兼ねる (答えも環境も変わっていなければ従来どおり何もしない)。
     rebuilt_envs = {
-        env for s in new_steps
+        env for s in satisfied
         if (env := _step_env(s)) is not None and _env_needs_full_run(addon_id, env)
     }
     steps = [

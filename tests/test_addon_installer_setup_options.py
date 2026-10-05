@@ -725,6 +725,36 @@ def test_options_reruns_env_mates_when_the_env_will_be_rebuilt(home, expansion) 
     assert [s.name for s in plan.steps] == ["gpt-pkgs"]
 
 
+def test_options_reapply_with_unchanged_answers_repairs_a_missing_env(home, expansion) -> None:
+    """答えを変えない「確定のやり直し」が、消えた専用環境の作り直しの入口になる。
+
+    利用者が専用環境を手で消した (または壊れた) とき、選択肢の画面を開いて
+    そのまま確定すれば作り直される。環境が健全なら従来どおり何も走らない
+    (2026-10-05 の隔離の通し確認で、入口が無いことを踏んで直した)。
+    """
+    _installed_with_env_manifest(expansion)
+    addon_installer.save_answers(ADDON_ID, {"engines": ["cloud", "gpt"]})
+
+    # env が無い (消えた / 壊れて片づけた) → 答えが同じでも、その env を使う
+    # step が全部走る
+    plan = addon_installer.plan_options_apply(
+        ADDON_ID, {"engines": ["cloud", "gpt"]}, expansion_dir=expansion)
+    assert [s.name for s in plan.steps] == ["cloud-pkgs", "gpt-pkgs"]
+
+    # env が健全なら何も走らない
+    env_dir = addon_paths.get_addon_env_dir(ADDON_ID, "eng")
+    env_dir.mkdir(parents=True)
+    (env_dir / addon_paths.ADDON_ENV_RECORD_NAME).write_text(
+        json.dumps({"python_version": addon_paths.current_python_version()}),
+        encoding="utf-8")
+    python = addon_paths.addon_env_python_path(env_dir)
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.write_text("", encoding="utf-8")
+    plan = addon_installer.plan_options_apply(
+        ADDON_ID, {"engines": ["cloud", "gpt"]}, expansion_dir=expansion)
+    assert plan.steps == []
+
+
 def test_broken_pending_record_is_treated_as_absent(home, expansion) -> None:
     """commit の欠けた途中経過の記録は「無い」扱い (KeyError で 500 にしない)。"""
     install_dir = addon_paths.get_addon_install_dir(ADDON_ID)
