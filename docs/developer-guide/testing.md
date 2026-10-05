@@ -44,6 +44,13 @@ npm test
 npm run test:backend-origin
 ```
 
+`test-item-viewer.cjs` は `npm test` に含まれる（単独では `npm run test:item-viewer`）。
+チャットの実リンク callback とインベントリの実 TSX を合成 API / hooks ハーネスで実行し、
+短縮 ID / UUID の種類・名前・本文表示、削除済み参照、遅延応答、閉じ直し、persona 切替、
+閲覧専用の入れ子を検査する。ブラウザのレイアウトと画像 bytes の取得はこの検査の範囲外。
+サーバー側の対応は `python -m pytest tests/test_item_viewer_api.py -n 0` で、
+隔離 DB とファイルを使ってメタデータから画像 / 文書本文までを通す。
+
 `test-backend-origin.cjs` は実際の `next.config.ts` と三つの Route Handler を読み、fetch を fake に置き換える。正式名のみ・旧名のみ・空白・不一致・既定値、従来の URL 結合、書き込み body・クエリ・ヘッダ・206/Range、メディア例外、SSE と `/stream` の逐次転送・キャンセルを検査する。接続先の期待値は隔離用 18000 を中心に指定し、8000 を含め実ネットワークへの通信は一切行わない。実ブラウザでの音声再生は別途確認が必要。
 
 実際の Next.js サーバーを経由する HTTP smoke は別コマンド。リポジトリの fake だけで検証でき、本番バックエンドは不要:
