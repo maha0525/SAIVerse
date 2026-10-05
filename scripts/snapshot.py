@@ -71,6 +71,10 @@ EXCLUDED_FROM_SNAPSHOT = frozenset({
                           # 失敗しても warning を出して fresh に続行する設計で、無くても
                           # 動く。復元時も home 側の現物を残す（世界を過去へ戻しても
                           # キャッシュは現在のものでよく、消すと再生成コストが大きい）
+    "addon_install",      # アドオン専用の Python 環境と導入時の答え。expansion_data/ の
+                          # アドオンと同じく世界の状態ではなく再生成できる導入物で、
+                          # 環境は数 GB になる。答えも同じ場所に置き、戻しても実際の
+                          # 環境と食い違わないようにしている（addon_data/ とは別物）
 })
 
 # 復元時、アーカイブのメンバーとして入っていたら危険として拒否するもの。
@@ -260,6 +264,7 @@ def collect_files_to_snapshot() -> List[SnapshotEntry]:
     - ~/.saiverse/{log.txt,.runtime.json}
     - ~/.saiverse/user_data/logs/ 配下
     - ~/.saiverse/llama_cache/ 配下（llama.cpp の KV キャッシュ。再生成可能）
+    - ~/.saiverse/addon_install/ 配下（アドオン専用の Python 環境と導入時の答え）
     """
     home = saiverse_home()
     if not home.exists():

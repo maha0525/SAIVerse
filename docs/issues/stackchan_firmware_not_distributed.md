@@ -4,7 +4,7 @@
 **優先度**: high (= 実ユーザーが導入時点で詰まっている)
 **作成日**: 2026-09-07
 **報告**: 外部ユーザー (Stack-chan Vessel v0.4.0、「ファームウェア書き込み」が利用不可)
-**関連**: `docs/intent/stackchan_vessel.md` §不変条件 8 / §I-1、`docs/intent/addon_catalog_management.md` §firmware 配布の方針、`docs/issues/stackchan_mcp_upstream_pr_strategy.md`
+**関連**: `docs/intent/stackchan_vessel.md` §不変条件 8 / §I-1、`docs/issues/stackchan_mcp_upstream_pr_strategy.md`。firmware 配布の方針 (案 A〜D) は、2026-10-05 にアドオンカタログの intent からこの文書の末尾「経緯」へ移した
 
 ## 現在の方針 (2026-10-03)
 
@@ -28,7 +28,7 @@
 2. **アドオンが本家のファームウェアを自動で取ってくる** — 下の B の `download_file` の `url` を、fork ではなく本家の配布物に向ける。本家の配布物は `firmware-` で始まるタグにしか付いていないので、タグ名まで書いた URL と SHA256 を書く。
 3. **センサー読み取りのスペルをふさぐ** — 本家のファームウェアにはセンサー読み取りが無いので、スペル 4 つをペルソナから見えなくする。あわせて、ゲートウェイの取得元 (`mcp_servers.json` が fork の `feature/stackchan-imu-readings` を指している) を本家に戻すかを決める。今のアドオンを本家のファームウェアで動かしたときにスペルがどう失敗するかは未確認。
 
-`docs/intent/addon_catalog_management.md` §firmware 配布の方針には、「案 A = fork の配布ページに置く」を将来採用する案として書いてある。1 の返事で方針が固まったら、そちらも書き換える。
+`docs/intent/addon_catalog_management.md` §firmware 配布の方針には、「案 A = fork の配布ページに置く」を将来採用する案として書いてある。1 の返事で方針が固まったら、そちらも書き換える。(2026-10-04 に案 D 採用で書き換え済み。2026-10-05 に、その節ごとこの文書の末尾「経緯」へ移した。)
 
 下の C (紛らわしい旧ファームウェアの片付けと案内文) と D (開発者の環境でだけ成功する経路) は、この方針でもそのまま要る。
 
@@ -104,10 +104,10 @@
 
 1. 1号機に firmware-v1.17.0 を書き込んで確かめる (まはー)。
 2. ~~アドオンの直しを GitHub へ上げる~~ — 2026-10-04 に v0.5.1 (`dcd6699`) として push し、タグと GitHub Release を作った (まはー承認)。公開カタログに載せるのは v0.5.1。手元のカタログのファイル (`temp/addon-registry-local.json`) も 0.5.1 に向けた。
-3. 本体の `1e6ead2a` (カタログの導入済み一覧の修正) を含む SAIVerse を先に出す。出す前に Stack-chan v0.5.x を公開カタログに載せると、更新した人のカタログ画面が 500 で開けなくなる。
-4. 公開カタログに載せ、まはーの秘密鍵で署名する。まはーの `.env` の `SAIVERSE_ADDON_REGISTRY_URL` の行を消す。
+3. ~~本体のカタログの導入済み一覧の修正を含む SAIVerse を先に出す~~ — 2026-10-04 に SAIVerse v0.3.21 として発行した (修正のコミットは rebase 後の `5e852d48`)。1号機も firmware-v1.17.0 で接続と顔の表示を確認した (モジュールは外した状態)。
+4. ~~公開カタログに載せて署名する~~ — 2026-10-04 に `saiverse-addon-registry` の `8e37c67` で v0.5.1 を掲載した (まはーの鍵 key_id=7f840ff5961afbd1 で署名し、SAIVerse に組み込んだ公開鍵で検証してから push。公開の URL から SAIVerse と同じ読み方で取って、v0.5.1 が見えることも確かめた)。まはーの手元も、カタログからの更新で v0.5.1 (`dcd6699`) になっている。残り = まはーの `.env` の `SAIVERSE_ADDON_REGISTRY_URL` の行を消すことと、最初の報告者への連絡。なお、カタログの項目の「必要な SAIVerse のバージョン」(`min_saiverse_version`) は、いまの SAIVerse ではどこでも確かめられておらず、古い SAIVerse の利用者も v0.5.1 に更新できてしまう (説明文で案内している)。
 
-**更新の操作の副作用 (2026-10-04 に写しで確認)**: カタログの「更新」は `git fetch --depth 1` を使うので、完全な履歴を持つリポジトリ (開発者の手元のアドオンのフォルダ) が浅い履歴の状態になる。写しで試すと、更新の前は 75 コミット見えていた履歴が、更新の後は 1 コミットしか見えなくなった。ユーザーの導入物では実害は無い。開発者の手元では `git fetch --unshallow origin` で戻せる。本体の `saiverse/addon_installer.py` の `update_addon` の挙動で、今回は直していない。
+**更新の操作の副作用 (2026-10-04 に写しで確認 → 2026-10-05 に直った)**: カタログの「更新」は `git fetch --depth 1` を使うので、完全な履歴を持つリポジトリ (開発者の手元のアドオンのフォルダ) が浅い履歴の状態になる。写しで試すと、更新の前は 75 コミット見えていた履歴が、更新の後は 1 コミットしか見えなくなった。ユーザーの導入物では実害は無い。開発者の手元では `git fetch --unshallow origin` で戻せる。2026-10-05 の導入の仕組みの改修で、`--depth 1` を付けるのは既に浅いリポジトリのときだけになり、完全な履歴は浅くならなくなった (更新後も完全な履歴のままであることをテストで固定してある)。
 
 **本家のリリースが出てから書くこと** (2026-10-03 に本家の最新 `upstream/main` 6a28ca4 で確かめた事実つき。すべて上の 2 コミットで済んだ)。
 
@@ -115,7 +115,7 @@
 - 本家のゲートウェイには、アドオンの `spell_tools` に載っていないツールが 16 個ある (`beat_*`、`port_b_ws2812_*`、`port_c_ws2812_*`、`stackchan_follow_led_stream`)。SAIVerse の MCP クライアントは載っていないツールをペルソナから届かないものとして扱うので、追記しなくても漏れない。
 - `addon.json` に `download_file` step を足す (下の B)。`url` は本家のファームウェアのリリース、`sha256` はその `merged-binary.bin` のもの。`version` を 0.5.0 に、`setup_version` を 2 にする。
 - 公開カタログ (`maha0525/saiverse-addon-registry`) に 0.5.0 を載せる。
-- `docs/intent/stackchan_vessel.md` と `docs/intent/addon_catalog_management.md` §firmware 配布の方針を、実際の形に合わせる。`stackchan_vessel.md` は、ファームウェアの探し方 (I-1 と Phase 2' の「3 段階」) と、センサーの記述 (不変条件 15・16 と C-4) が古くなる。
+- `docs/intent/stackchan_vessel.md` と `docs/intent/addon_catalog_management.md` §firmware 配布の方針を、実際の形に合わせる (その節は 2026-10-05 に、この文書の末尾「経緯」へ移った)。`stackchan_vessel.md` は、ファームウェアの探し方 (I-1 と Phase 2' の「3 段階」) と、センサーの記述 (不変条件 15・16 と C-4) が古くなる。
 - アドオンの中で、ゲートウェイの取得元を変えるときに一緒に直す古い記述: `mcp_servers.json` の `_comment_command` と `_comment_scope`、`addon.json` の `data_subdirs.firmware` の説明、`NOTICE` (stackchan-mcp の記載が無い)、`tools/units/README.md` と `tools/see.py` の fork への言及。
 
 ## 症状
@@ -230,3 +230,50 @@ firmware を更新するときは `addon.json` の `url` + `sha256` を差し替
 
 1. **fork の Releases に firmware バイナリを置くか** (= まはーが GPL-3.0 の配布者になることを受け入れるか)。置かない場合、「普通に導入して普通に動く」は達成できず、C の案内改善までが上限になる
 2. **どのブランチを配布版とするか** — 現状 `integrate/all-fixes-2026-06-24` と `feature/stackchan-imu-readings` が分かれている。配布用の統合ブランチを一本作る必要がある
+
+## 経緯 — アドオンカタログの intent にあった「stackchan addon の setup 要件」の節 (2026-10-05 に移送)
+
+以下は `docs/intent/addon_catalog_management.md` に 2026-05-22〜2026-10-04 の間書かれていた節。カタログの仕組みの話ではなく stackchan 一件の段取りなので、voice-tts の Phase 4-E と同じ扱いで、この issue へそのまま移した。内容はこの issue の上の各節が後から上書きしており、ここは当時の記録。
+
+### 実際の外部資産依存関係
+
+| 資産 | 用途 | 現状の取得経路 | addon installer 側の対応 |
+|---|---|---|---|
+| `stackchan-mcp` gateway | LCD/音声 I/O 等を MCP server として SAIVerse に提供 | mcp_servers.json で、本家が PyPI に公開しているパッケージを `uvx --from stackchan-mcp[tts]==0.18.0` とバージョンで固定 (アドオン v0.5.0、2026-10-04)。**SAIVerse 起動時に uvx が自動 fetch + cache**。ローカル clone は不要 | **不要**: addon 側は何もしなくて良い (uvx + mcp 経路が既に解決済み) |
+| `merged-binary.bin` (firmware) | ESP32-S3 device に flash する image | GPL-3.0 ライセンスのため addon repo 同梱不可。アドオン v0.5.0 から、本家 (kisaragi-mochi/stackchan-mcp) の配布ページのリリースを setup の `download_file` で取得する (下の「firmware 配布の方針」) | **`download_file` step** (タグ名と SHA256 で固定) |
+
+### 当初の誤認 (2026-05-22 → 5-23 訂正)
+
+最初の Intent Doc では「stackchan-mcp 本体も addon の setup で `git_clone` する」と書いていたが、これは事実誤認。実際は mcp_servers.json の `uvx --from git+...` が gateway を自動取得するため、addon の setup section に gateway clone step は不要。
+
+### firmware 配布の方針 (案 B → 案 D、2026-10-04)
+
+> **2026-10-04 の裁定で、案 A ではなく案 D を採った。** 案 B (手動配置) のまま、ユーザーが取ってくる先がどこにも無い状態で実ユーザーが詰まった (この issue)。fork から配る案 A を採ると、まはーが GPL-3.0 の配布者になり、fork 固有のブランチを配布用に保守し続ける必要がある。fork にしか無い修正の大半が本家に入っていたので、本家の配布物を直接使う案 D にした。
+
+| 案 | 配布手段 | 採否 |
+|---|---|---|
+| A | maha0525/stackchan-mcp の GitHub Releases に firmware を publish → addon.json に `download_file` step | ~~将来採用 (Phase 4-D')~~ → **不採用 (2026-10-04、D を採った)** |
+| B | firmware は手動配置のまま、addon.json は `manifest_version: 2` 化のみ (setup section なし) | **当面採用 (Phase 4-D)**: まはー実機は既に flash 済み、新規ユーザー出現までの暫定 |
+| C | CI で自動 Releases 化 | 別タスク化、優先度低 |
+| D | **本家 (kisaragi-mochi/stackchan-mcp) の GitHub Releases の firmware を、addon.json の `download_file` step で直接取得** (タグ名と SHA256 で固定、ゲートウェイも本家が同じ日に出した組み合わせに固定) | **採用 (アドオン v0.5.0、2026-10-04)**。A は不採用 |
+
+### Phase 4-D の setup.steps
+
+```json
+{
+  "manifest_version": 2,
+  "setup_version": 1
+  /* setup section なし — firmware は当面手動配置 */
+}
+```
+
+`_firmware_resolve_path()` (`api_routes.py:1345`) の 3 段階解決の (3) `user_default` パスは Phase 4 中に新規約 `~/.saiverse/user_data/addon_data/saiverse-stackchan-addon/firmware/merged-binary.bin` に揃える (永続データの統一規約に合わせるため)。
+
+### Phase 1 検証順序の更新 (再訂正)
+
+1. Elyth (永続データなし) → 2. X-addon (poll_state / reply_log の永続データあり) → 3. **stackchan の v2 化 (setup なし + 永続データ移行のみ)** → 4. voice-tts (最大)。stackchan の firmware Releases DL 経路は Phase 4-D' として別途。
+
+### カタログの intent の「未確定事項」にあった stackchan の 2 件 (同日に移送)
+
+- **stackchan の external 資産有無**: 解決済み (上の「実際の外部資産依存関係」)。firmware は GPL-3.0 で同梱不可、Releases DL が筋。
+- **stackchan-mcp の Releases 整備状況**: 本家の配布物を直接使う案 D と、v0.5.0〜v0.5.1 の発行で決着した (この issue の上の各節)。

@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 361（tag グループ: 26）
+**エンドポイント数**: 369（tag グループ: 26）
 
 ## addon
 
@@ -47,11 +47,19 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | メソッド | パス | 説明 |
 |---|---|---|
 | GET | `/api/addon-catalog/debug/registry-url` | 現在の registry URL と env 上書きの状態を返す。 |
-| POST | `/api/addon-catalog/install` | アドオンを registry 経由でインストール (SSE 進捗 stream)。 |
+| POST | `/api/addon-catalog/install/cancel` | 導入の prepare で作ったフォルダを消す。 |
+| POST | `/api/addon-catalog/install/confirm` | 導入の二段目: 答えで選んだ step を実行する (SSE 進捗 stream)。 |
+| POST | `/api/addon-catalog/install/prepare` | 導入の一段目: 取得して、質問と (この OS で当てはまる) step の一覧を返す。 |
 | GET | `/api/addon-catalog/installed` | expansion_data/ 配下にある全アドオンの現在状態を返す。 |
+| GET | `/api/addon-catalog/installed/{addon_id}/options` | 導入済みアドオンの質問 (保存済みの答えに selected: true) と、答えを足したときに |
+| POST | `/api/addon-catalog/installed/{addon_id}/options` | 選択肢を足して、新しく実行の条件を満たした step だけを実行する (SSE 進捗 stream)。 |
+| GET | `/api/addon-catalog/operations` | 実行中の操作 (install / update / options / uninstall) の一覧。 |
+| GET | `/api/addon-catalog/operations/{addon_id}` | アドオン 1 件の操作が実行中か、最後に終わった操作がどう終わったか。 |
 | GET | `/api/addon-catalog/registry` | registry.json を fetch (キャッシュ済み) して返す。 |
 | POST | `/api/addon-catalog/uninstall` | アドオンをアンインストール (SSE 進捗 stream)。 |
-| POST | `/api/addon-catalog/update` | インストール済みアドオンを registry 経由で更新 (SSE 進捗 stream)。 |
+| POST | `/api/addon-catalog/update/cancel` | 更新の prepare を取り消す (fetch しただけなので、記録を消すだけ)。 |
+| POST | `/api/addon-catalog/update/confirm` | 更新の二段目: checkout して、setup_version が上がっていれば setup をやり直す |
+| POST | `/api/addon-catalog/update/prepare` | 更新の一段目: カタログの repo_url から取得して、setup のやり直しの要否と、 |
 
 ## addon-events
 

@@ -921,7 +921,27 @@
   },
   "components.AddonActionConfirmDialog.text023": {
     "ja": "する",
-    "en": "Confirm"
+    "en": " Confirm"
+  },
+  "components.AddonActionConfirmDialog.text024": {
+    "ja": "選択肢を追加",
+    "en": "Add choices"
+  },
+  "components.AddonActionConfirmDialog.text025": {
+    "ja": "{p1} の導入時の選択肢を追加",
+    "en": "Add setup choices for {p1}"
+  },
+  "components.AddonActionConfirmDialog.text026": {
+    "ja": "導入時の質問を読み込んでいます…",
+    "en": "Loading setup questions..."
+  },
+  "components.AddonActionConfirmDialog.text027": {
+    "ja": "導入時の質問を読み込めませんでした",
+    "en": "Could not load the setup questions"
+  },
+  "components.AddonActionConfirmDialog.text028": {
+    "ja": "前に選んだ選択肢は外せません。新しく選んだ選択肢に必要な手順だけを実行します。",
+    "en": "Choices you selected before cannot be removed. Only the steps needed for the newly selected choices will run."
   },
   "components.AddonBubbleButtons.text001": {
     "ja": "音声の再生に失敗しました",
@@ -995,6 +1015,10 @@
     "ja": " 削除",
     "en": " Delete"
   },
+  "components.AddonCatalogPanel.text014": {
+    "ja": " 処理中",
+    "en": " In progress"
+  },
   "components.AddonInstallProgressDialog.text001": {
     "ja": "導入",
     "en": "Install"
@@ -1040,12 +1064,36 @@
     "en": "Connection error"
   },
   "components.AddonInstallProgressDialog.text012": {
-    "ja": "実行中... 完了までお待ちください",
-    "en": "Running... Please wait"
+    "ja": "実行中です。この画面を閉じても、処理はサーバーで続きます",
+    "en": "Running. Closing this window does not stop the process on the server"
   },
   "components.AddonInstallProgressDialog.text013": {
     "ja": "閉じる",
     "en": "Close"
+  },
+  "components.AddonInstallProgressDialog.text014": {
+    "ja": "選択肢の追加",
+    "en": "Adding choices "
+  },
+  "components.AddonInstallProgressDialog.text015": {
+    "ja": "{p1} の選択肢を追加しています",
+    "en": "Adding choices to {p1}"
+  },
+  "components.AddonInstallProgressDialog.text016": {
+    "ja": "接続が切れましたが、処理はサーバーで続いています。終わるまで様子を確かめています…",
+    "en": "The connection was lost, but the process is still running on the server. Checking until it finishes…"
+  },
+  "components.AddonInstallProgressDialog.text017": {
+    "ja": "処理は終わりました",
+    "en": "The process has finished"
+  },
+  "components.AddonInstallProgressDialog.text018": {
+    "ja": "結果は一覧で確認してください。",
+    "en": "Please check the result in the list."
+  },
+  "components.AddonInstallProgressDialog.text019": {
+    "ja": "閉じる (処理は続きます)",
+    "en": "Close (keeps running)"
   },
   "components.AddonManagerModal.text001": {
     "ja": "（未対応の型: {p1}）",
@@ -1182,6 +1230,62 @@
   "components.AddonManagerModal.text034": {
     "ja": "「カタログ」タブから導入できます",
     "en": "Install addons from the Catalog tab"
+  },
+  "components.AddonManagerModal.text035": {
+    "ja": "選択肢を追加",
+    "en": "Add choices"
+  },
+  "components.AddonManagerModal.text036": {
+    "ja": "導入時の質問をもう一度開いて、選択肢を追加します",
+    "en": "Reopen the setup questions to add choices"
+  },
+  "components.AddonSetupQuestions.text001": {
+    "ja": "導入時の質問",
+    "en": "Setup questions"
+  },
+  "components.AddonSetupQuestions.text002": {
+    "ja": "複数選べます",
+    "en": "Select all that apply"
+  },
+  "components.AddonSetupQuestions.text003": {
+    "ja": "一つ選んでください",
+    "en": "Choose one"
+  },
+  "components.AddonSetupQuestions.text004": {
+    "ja": "選択済み",
+    "en": "Selected"
+  },
+  "components.AddonSetupQuestions.text005": {
+    "ja": "一つだけ選ぶ質問の答えは、導入後には変えられません",
+    "en": "Single-choice answers cannot be changed after installation"
+  },
+  "components.AddonSetupQuestions.text006": {
+    "ja": "実行される手順",
+    "en": "Steps that will run"
+  },
+  "components.AddonSetupQuestions.text007": {
+    "ja": "新しく実行される手順",
+    "en": "Steps that will newly run"
+  },
+  "components.AddonSetupQuestions.text008": {
+    "ja": "実行される手順はありません",
+    "en": "No steps will run"
+  },
+  "components.AddonSetupQuestions.text009": {
+    "ja": "新しく実行される手順はありません。追加したい選択肢を選んでください。",
+    "en": "No new steps will run. Select the choices you want to add."
+  },
+  "components.AddonSetupQuestions.text010": {
+    "ja": "専用の Python 環境: {p1}",
+    "en": "Dedicated Python environment: {p1}"
+  },
+  "components.AddonSetupQuestions.text011": {
+    "ja": "前に選んだ答えしだいで実行",
+    "en": "Runs depending on your earlier answers"
+  },
+  "components.AddonSetupQuestions.text012": {
+    "ja": "この質問に答えてください",
+    "en": "Please answer this question"
   },
   "components.BuildingSettingsModal.text001": {
     "ja": "Building データの読み込みに失敗しました",

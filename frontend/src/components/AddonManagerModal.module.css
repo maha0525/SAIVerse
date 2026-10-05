@@ -261,6 +261,28 @@
     margin: 0;
 }
 
+/* 導入時の質問をもう一度開く (質問を持つアドオンだけに出る) */
+.setupOptionsBtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    padding: 4px 9px;
+    background: #f8fafc;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    font-size: 0.78rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.setupOptionsBtn:hover {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+}
+
 /* --- Toggle --- */
 
 .enabledToggle {
@@ -824,6 +846,17 @@
 
 :global([data-theme="dark"]) .expandBtn {
     color: #64748b;
+}
+
+:global([data-theme="dark"]) .setupOptionsBtn {
+    background: #0f172a;
+    color: #cbd5e1;
+    border-color: #334155;
+}
+
+:global([data-theme="dark"]) .setupOptionsBtn:hover {
+    background: #1e293b;
+    border-color: #475569;
 }
 
 :global([data-theme="dark"]) .expandBtn:hover {
