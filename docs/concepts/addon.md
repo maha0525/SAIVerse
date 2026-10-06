@@ -53,7 +53,7 @@
 
 ### 状況
 
-既存アドオンのうち Elyth / stack-chan / X / ComfyUI ローカル画像生成は v2 化済み。voice-tts はまだ v2 化されておらず、カタログにも載っていない（[voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md)）。**カタログ機構は Phase 1〜4 実装済**。
+既存アドオンのうち Elyth / stack-chan / X / ComfyUI ローカル画像生成 / voice-tts は v2 化済みで、voice-tts は 2026-10-06 (SAIVerse v0.3.22) からカタログに載っている（経緯は [voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md)）。**カタログ機構は Phase 1〜4 実装済**。
 
 ## 増やし方（アドオン作成の要点）
 

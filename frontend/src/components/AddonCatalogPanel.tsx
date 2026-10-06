@@ -6,7 +6,7 @@ import { useLocale } from '@/i18n/useLocale';
 import { resolveI18nText } from '@/i18n/resolve';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { RefreshCw, Download, ArrowUpCircle, CheckCircle2, Trash2 } from 'lucide-react';
+import { RefreshCw, Download, ArrowUpCircle, CheckCircle2, Trash2, Loader2 } from 'lucide-react';
 import styles from './AddonCatalogPanel.module.css';
 import AddonInstallProgressDialog, { CatalogOperation } from './AddonInstallProgressDialog';
 import AddonActionConfirmDialog, { ConfirmProceedResult, SetupLoadState } from './AddonActionConfirmDialog';
@@ -167,6 +167,17 @@ export default function AddonCatalogPanel({
     // 確認ダイアログを閉じる経路 (キャンセル・背景クリック・モーダルごと
     // 閉じる) のどれでも、ここが残っていれば cancel を送る。
     const pendingInstallRef = useRef<string | null>(null);
+    // サーバーで操作 (導入・更新・削除・選択肢の追加) が走っている addon_id。
+    // 進捗の小窓を途中で閉じても処理は裏で続くので、その間は行の操作を止める
+    // (押してもサーバーの鍵で断られるだけ)。終わったら一覧を取り直す。
+    const [runningOps, setRunningOps] = useState<Set<string>>(new Set());
+
+    const fetchRunningOps = useCallback(async (): Promise<Set<string>> => {
+        const res = await apiFetch('/api/addon-catalog/operations');
+        if (!res.ok) throw new Error(await readErrorDetail(res));
+        const ops: Array<{ addon_id: string }> = await res.json();
+        return new Set(ops.map((op) => op.addon_id));
+    }, []);
 
     const sendInstallCancel = useCallback((addonId: string) => {
         apiFetch('/api/addon-catalog/install/cancel', {
@@ -264,6 +275,12 @@ export default function AddonCatalogPanel({
             const m = new Map<string, { version: string }>();
             for (const a of inst) m.set(a.addon_id, { version: a.version });
             setInstalledInfo(m);
+            try {
+                setRunningOps(await fetchRunningOps());
+            } catch (e) {
+                // 取れなくても一覧は出す (行の操作はサーバーの鍵が守る)
+                console.error('[AddonCatalog] operations fetch failed:', e instanceof Error ? e.message : String(e));
+            }
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             setError(msg);
@@ -271,11 +288,39 @@ export default function AddonCatalogPanel({
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [fetchRunningOps]);
 
     useEffect(() => {
         loadAll(false);
     }, [loadAll]);
+
+    // 裏で走っている操作がある間は、終わるまで数秒おきに確かめる
+    // (進捗の小窓を開いている間は小窓が見張るので、ここでは見ない)
+    useEffect(() => {
+        if (runningOps.size === 0 || progressTarget) return;
+        let cancelled = false;
+        const timer = setTimeout(async () => {
+            let next: Set<string>;
+            try {
+                next = await fetchRunningOps();
+            } catch {
+                // 次の確認をもう一度予約する (中身は同じ、参照だけ変える)
+                if (!cancelled) setRunningOps(new Set(runningOps));
+                return;
+            }
+            if (cancelled) return;
+            const ended = Array.from(runningOps).some((id) => !next.has(id));
+            setRunningOps(next);
+            if (ended) {
+                await loadAll(false);
+                await onInstalledChanged();
+            }
+        }, 5000);
+        return () => {
+            cancelled = true;
+            clearTimeout(timer);
+        };
+    }, [runningOps, progressTarget, fetchRunningOps, loadAll, onInstalledChanged]);
 
     const rows = useMemo(() => {
         if (!registry) return [];
@@ -286,6 +331,7 @@ export default function AddonCatalogPanel({
     }, [registry, installedInfo]);
 
     const handleAction = (entry: RegistryAddonEntry, state: RowState) => {
+        if (runningOps.has(entry.id)) return;
         let operation: CatalogOperation;
         if (state.kind === 'not_installed') operation = 'install';
         else if (state.kind === 'update_available') operation = 'update';
@@ -297,6 +343,7 @@ export default function AddonCatalogPanel({
 
     const handleUninstall = (entry: RegistryAddonEntry, state: RowState) => {
         if (state.kind === 'not_installed') return;
+        if (runningOps.has(entry.id)) return;
         setConfirmTarget({ entry, operation: 'uninstall', state });
     };
 
@@ -357,6 +404,7 @@ export default function AddonCatalogPanel({
                     {rows.map(({ entry, state }) => {
                         const dispName = resolveI18nText(entry.display_name_i18n, currentLocale, entry.display_name_en, entry.display_name);
                         const descText = resolveI18nText(entry.description_i18n, currentLocale, entry.description_en, entry.description);
+                        const busy = runningOps.has(entry.id);
                         return (
                             <div key={entry.id} className={styles.row}>
                                 <div className={styles.rowLeft}>
@@ -370,6 +418,11 @@ export default function AddonCatalogPanel({
                                         {state.kind === 'update_available' && (
                                             <span data-i18n="components.AddonCatalogPanel.text007" className={`${styles.badge} ${styles.badgeUpdate}`}>
                                                 <ArrowUpCircle size={11} />{uiText("components.AddonCatalogPanel.text007")}{state.current_version} → v{state.new_version}
+                                            </span>
+                                        )}
+                                        {busy && (
+                                            <span data-i18n="components.AddonCatalogPanel.text014" className={styles.badge}>
+                                                <Loader2 size={11} />{uiText("components.AddonCatalogPanel.text014")}
                                             </span>
                                         )}
                                         {entry.category && (
@@ -393,6 +446,7 @@ export default function AddonCatalogPanel({
                                         <button data-i18n="components.AddonCatalogPanel.text010"
                                             className={styles.btnPrimary}
                                             onClick={() => handleAction(entry, state)}
+                                            disabled={busy}
                                         >
                                             <Download size={12} />{uiText("components.AddonCatalogPanel.text010")}</button>
                                     )}
@@ -401,11 +455,13 @@ export default function AddonCatalogPanel({
                                             <button data-i18n="components.AddonCatalogPanel.text011"
                                                 className={styles.btnPrimary}
                                                 onClick={() => handleAction(entry, state)}
+                                                disabled={busy}
                                             >
                                                 <ArrowUpCircle size={12} />{uiText("components.AddonCatalogPanel.text011")}</button>
                                             <button data-i18n="components.AddonCatalogPanel.text012"
                                                 className={`${styles.iconBtn} ${styles.deleteBtn}`}
                                                 onClick={() => handleUninstall(entry, state)}
+                                                disabled={busy}
                                             >
                                                 <Trash2 size={12} />{uiText("components.AddonCatalogPanel.text012")}</button>
                                         </>
@@ -414,6 +470,7 @@ export default function AddonCatalogPanel({
                                         <button data-i18n="components.AddonCatalogPanel.text013"
                                             className={`${styles.iconBtn} ${styles.deleteBtn}`}
                                             onClick={() => handleUninstall(entry, state)}
+                                            disabled={busy}
                                         >
                                             <Trash2 size={12} />{uiText("components.AddonCatalogPanel.text013")}</button>
                                     )}

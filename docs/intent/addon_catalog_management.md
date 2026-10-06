@@ -1,6 +1,6 @@
 # Intent: アドオンカタログ管理 (curated registry + ワンタッチ導入)
 
-**ステータス**: 検証待ち (2026-10-05 にまはー GO、同日実装済み)。「導入時の質問と、アドオン専用の Python 環境」の本体の作業 1〜10 は実装済みで、隔離環境の通し (導入 → 選択肢の追加 → アンインストール、本物の venv と pip) も同日に確認した。画面の実表示と実物での通しは、voice-tts の掲載 ([voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md)) と一緒に行う。Phase 4 は voice-tts を除いて完了 (2026-05-23)
+**ステータス**: 完了 (2026-10-06)。「導入時の質問と、アドオン専用の Python 環境」は 2026-10-05 にまはーの GO で実装し、隔離環境の通し (Windows と Linux、導入から声が出るまで) と、まはーの実機での画面の実操作 (質問ダイアログ → voice-tts 0.6.0 への更新 → 再起動 → 本番のペルソナの声) まで確認した (2026-10-06)。実機の確認で見つけた不具合二つ (長い導入で進捗の小窓が完了を受け取れない / 消えた専用環境の作り直しの入口が無い) も同日に修正済み。voice-tts の公開カタログへの掲載だけが残っていて、それは v0.3.22 の発行と一緒に行う ([voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md))。Phase 4 は voice-tts を除いて完了 (2026-05-23)
 
 ## これは何か
 
@@ -110,7 +110,7 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 
 現状の `addon.json` (params_schema / ui_extensions など) に `setup` セクションを追加:
 
-> 下の例は 2026-05-22 当初の形で、step の書き方の見本としてだけ読む。voice-tts を実際に載せる形はこの例とは違う — `setup.bat` を `platform_script` の step で実行する案は 2026-10-05 に取り下げた ([voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md))。
+> 下の例は 2026-05-22 当初の形で、step の書き方の見本としてだけ読む。voice-tts を実際に載せる形はこの例とは違う — `setup.bat` を `platform_script` の step で実行する案は 2026-10-05 に取り下げた ([voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md))。
 
 ```json
 {
@@ -162,6 +162,7 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
    - b. `git checkout <commit_sha>`
    - c. addon.json を読み込み、setup_version / setup.steps を取得
    - d. 各ステップを順次実行、進捗を UI に流す
+   - 進捗の接続が途中で切れても、処理は最後まで走る。同じアドオンへの別の操作を断る鍵 (per-addon lock) は、接続の終わりではなく処理の終わりで放す。画面は接続が切れたら `GET /api/addon-catalog/operations/{addon_id}` を問い合わせて処理の終わりを待ち、記録された結果を出す (記録が無ければ成否は言わない)。進捗の行が出ない間も、サーバーは 10 秒ごとに SSE のコメント行を送って接続を保つ — Next.js の中継は 30 秒間データが流れないと上流との接続を切る (2026-10-06、[addon_install_progress_dialog_stuck_on_long_installs.md](../issues/archive/addon_install_progress_dialog_stuck_on_long_installs.md))
 4. 完了後、SAIVerse のアドオンローダを reload (再起動なしで認識させる)
    - これは `saiverse/addon_loader.py` 側の reload 経路があるかを実装前に確認 (未調査)
 
@@ -219,7 +220,7 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 
 この節は、メティスが 2026-10-05 に書いた設計案。まはーの GO は同日の会話で出た (要点 — 導入時にエンジンを選べる・重いパッケージは本体と別の箱に入る — を会話の問いで確認し、「それでいいよー」)。起点になったまはーの発言は「なんとかUI上でsetup.bat同様のウィザード動かす感じのシステム作れない？セットアップ中に何かを選ぶみたいなのは普通にあると思うのよ。」。同日に Fable のセッションで検収し、整合性の検査 (Opus のサブエージェント) も通して、矛盾と抜けを直した (アンインストール後の答えの扱い、step を OS で出し分ける `os`、`min_saiverse_version` の検査、手で入れたアドオンの更新の扱い — setup_version と取得元、文書の直しの作業化)。
 
-この仕組みを最初に使うのは voice-tts で、voice-tts をどう載せるかは [voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md) にある。
+この仕組みを最初に使うのは voice-tts で、voice-tts をどう載せるかは [voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md) にある。
 
 ### 要点
 
@@ -278,7 +279,7 @@ voice-tts をカタログに載せようとして、いまの仕組みでは次�
 - 質問の形は、選択肢から選ぶもの (一つ、または複数) だけにする。自由に文字を入力させる形は作らない。答えが step の引数やコマンドに入り込む経路を作らないためで、答えにできるのは「どの step を実行するか」の選択だけになる。
 - `when` の読み方: `{"engines": "gpt_sovits"}` は、質問 `engines` の答えに `gpt_sovits` が含まれるとき、という意味。一つだけ選ぶ質問では、答えがそれと等しいとき。`when` に質問を二つ以上書いたときは、全部が当てはまるときだけ実行する。
 - `when` の無い step は、これまでどおり全員に実行される。`options` を持たないアドオン (Elyth・X・stackchan) は、何も変わらない。
-- `os` の読み方: `{"os": ["windows", "linux"]}` のように、registry の `requires.os` と同じ語彙 (windows / linux / macos) の一覧で書く。実行中の OS が一覧に無い step は飛ばす。`when` と両方あるときは、両方が当てはまるときだけ実行する。最初に要るのは voice-tts で、Windows と Linux の専用の環境には CUDA に対応した torch を、Mac には普通の torch を入れるため、requirements のファイルを OS で分ける ([voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md))。
+- `os` の読み方: `{"os": ["windows", "linux"]}` のように、registry の `requires.os` と同じ語彙 (windows / linux / macos) の一覧で書く。実行中の OS が一覧に無い step は飛ばす。`when` と両方あるときは、両方が当てはまるときだけ実行する。最初に要るのは voice-tts で、Windows と Linux の専用の環境には CUDA に対応した torch を、Mac には普通の torch を入れるため、requirements のファイルを OS で分ける ([voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md))。
 - 答えは `~/.saiverse/addon_install/<addon_id>/setup_answers.json` に残す (置き場所の理由は次の小節)。更新で setup_version が上がって step をやり直すときは、この答えを使い、質問を出し直さない。新しいバージョンで、質問が増えたとき、または既にある質問に選択肢が増えたときは、その質問だけを、前の答えが選ばれた状態で出し直す。逆に、新しいバージョンに無くなった質問・選択肢の答えは、保存から捨てる (残すと、もう画面に出ない答えが `when` の判定に効き続ける)。質問や選択肢を増やす変更は、実行すべき step も増やす変更なので、setup_version も一緒に上げる — 上げない更新では setup は走らず、質問も出ない。保存された答えが無いまま step をやり直すことになったとき (手で入れたアドオンをカタログから更新したときが典型) は、全部の質問を最初から出す。
 - アンインストールでは、答えも一緒に消す (次の小節)。導入し直すときは、質問を最初から出す。
 - 一度選んだ選択肢を外す操作は、このたびは作らない。
@@ -320,7 +321,7 @@ voice-tts をカタログに載せようとして、いまの仕組みでは次�
 
 ### カタログが指す先を切り替えるとき
 
-カタログの `repo_url` を別のリポジトリに書き換えても、いまの更新処理 (`update_addon`) は、導入したときの URL (アドオンのフォルダの git の origin に記録されている) から取得する。そのため、導入済みの利用者の更新は、古い URL から取得され続ける。この修正 (本体の作業 10) は、当初「切り替えの必要が出たら、その前のリリースで」としていたが、voice-tts では載せる時点から要ることが分かった (2026-10-05) — 手で git clone した既存のアドオンのフォルダは origin が Nature109 を指していて、フォークを指すカタログの commit を origin からは取得できないため。将来の切り替えの予定も voice-tts (まはーのフォークから Nature109 のリポジトリへ、[voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md))。
+カタログの `repo_url` を別のリポジトリに書き換えても、いまの更新処理 (`update_addon`) は、導入したときの URL (アドオンのフォルダの git の origin に記録されている) から取得する。そのため、導入済みの利用者の更新は、古い URL から取得され続ける。この修正 (本体の作業 10) は、当初「切り替えの必要が出たら、その前のリリースで」としていたが、voice-tts では載せる時点から要ることが分かった (2026-10-05) — 手で git clone した既存のアドオンのフォルダは origin が Nature109 を指していて、フォークを指すカタログの commit を origin からは取得できないため。将来の切り替えの予定も voice-tts (まはーのフォークから Nature109 のリポジトリへ、[voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md))。
 
 ### この文書の「禁止」の文との関係
 
@@ -365,7 +366,7 @@ voice-tts をカタログに載せようとして、いまの仕組みでは次�
 
 ### Phase 4-E: voice-tts のカタログ掲載 (2026-10-05 に issue へ切り出した)
 
-voice-tts をカタログに載せる件は、アドオンカタログの仕組みの話ではなく voice-tts 一件の段取りなので、[voice_tts_catalog_listing.md](../issues/voice_tts_catalog_listing.md) に移した。2026-09-11 の洗い出しと 2026-05-23 の旧手順も、そこの「経緯」にそのまま移してある。
+voice-tts をカタログに載せる件は、アドオンカタログの仕組みの話ではなく voice-tts 一件の段取りなので、[voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md) に移した。2026-09-11 の洗い出しと 2026-05-23 の旧手順も、そこの「経緯」にそのまま移してある。
 
 ## まはー回答 (2026-05-22 一次レビュー)
 

@@ -1288,4 +1288,26 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.20 -> 0.3.21 (no DB changes).",
     ),
+    # ---- v0.3.22 ----
+    # このバージョンはアドオンカタログの「導入時の質問と、アドオン専用の Python 環境」
+    # 一式 (進捗の小窓の立て直し・専用環境の修復の入口・min_saiverse_version の検査を
+    # 含む)。DB の schema 変更は無い。アップロードされたファイルの置き場所の移行と、
+    # 記録された絶対パスの書き換えは、冪等な起動時の処理 (saiverse/addon_migrations.py)
+    # で毎回行う形なので、更新の鎖では行わない。よってこのバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_22",
+        scope="city",
+        from_version="0.3.21",
+        to_version="0.3.22",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.21 -> 0.3.22 (no DB changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_22",
+        scope="ai",
+        from_version="0.3.21",
+        to_version="0.3.22",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.21 -> 0.3.22 (no DB changes).",
+    ),
 ]

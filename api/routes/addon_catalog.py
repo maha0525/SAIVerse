@@ -11,6 +11,8 @@ POST /api/addon-catalog/update/cancel                - 更新の prepare を取�
 GET  /api/addon-catalog/installed/{addon_id}/options - 導入済みアドオンの質問の出し直し
 POST /api/addon-catalog/installed/{addon_id}/options - 選択肢を足して反映 (SSE 進捗ストリーム)
 POST /api/addon-catalog/uninstall                    - アンインストール (SSE 進捗ストリーム)
+GET  /api/addon-catalog/operations                   - 実行中の操作の一覧
+GET  /api/addon-catalog/operations/{addon_id}        - 操作が実行中か / 最後の操作の結果 (SSE が切れた画面の立て直し用)
 
 設計は ``docs/intent/addon_catalog_management.md`` を参照 (二段構えと質問は
 「導入時の質問と、アドオン専用の Python 環境」の節)。
@@ -22,6 +24,7 @@ import json
 import logging
 import re
 import threading
+import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -79,6 +82,24 @@ def _get_lock(addon_id: str) -> threading.Lock:
             lock = threading.Lock()
             _addon_locks[addon_id] = lock
         return lock
+
+
+# ---------------------------------------------------------------------------
+# 実行中の操作と、最後に終わった操作の結果
+# ---------------------------------------------------------------------------
+#
+# SSE の接続は処理の途中で切れることがある (Next.js の rewrites の中継は、
+# 30 秒間データが流れないと上流との接続を切る。2026-10-06 の 30 分の更新で
+# 踏んだ — docs/issues/addon_install_progress_dialog_stuck_on_long_installs.md)。
+# 切れても worker thread は最後まで走るので、画面が「まだ走っているか」
+# 「どう終わったか」を問い合わせで知れるよう、worker 自身がここを書く。
+# 記録はメモリだけ (再起動で消える)。
+
+_ops_state_lock = threading.Lock()
+# addon_id -> {"kind": ..., "operation_id": ...}
+_running_ops: Dict[str, Dict[str, Any]] = {}
+# addon_id -> 最後に終わった操作の finished イベント (operation_id 付き)
+_last_results: Dict[str, Dict[str, Any]] = {}
 
 
 # addon_id の形式 (addon.json の name と同じ規則 — saiverse/addon_manifest.py)。
@@ -140,6 +161,28 @@ class UninstallRequest(BaseModel):
     delete_data: bool = Field(
         False,
         description="True で永続データ (~/.saiverse/user_data/addon_data/<id>/) も削除",
+    )
+
+
+class RunningOperation(BaseModel):
+    """実行中の操作 (install / update / options / uninstall)。"""
+    addon_id: str
+    kind: str
+    operation_id: str
+
+
+class OperationStatus(BaseModel):
+    """アドオン 1 件の操作の状態。SSE が切れた画面が立て直しに使う。"""
+    addon_id: str
+    running: bool
+    kind: Optional[str] = Field(None, description="実行中の操作の種類 (実行中でなければ null)")
+    operation_id: Optional[str] = Field(None, description="実行中の操作の id (実行中でなければ null)")
+    last_result: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "最後に終わった操作の finished イベント (operation_id 付き)。"
+            "バックエンドの再起動後は null"
+        ),
     )
 
 
@@ -275,9 +318,46 @@ def list_installed():
     return result
 
 
+@router.get("/operations", response_model=List[RunningOperation])
+def list_running_operations():
+    """実行中の操作 (install / update / options / uninstall) の一覧。"""
+    with _ops_state_lock:
+        return [
+            RunningOperation(addon_id=addon_id, **op)
+            for addon_id, op in sorted(_running_ops.items())
+        ]
+
+
+@router.get("/operations/{addon_id}", response_model=OperationStatus)
+def get_operation_status(addon_id: str):
+    """アドオン 1 件の操作が実行中か、最後に終わった操作がどう終わったか。
+
+    進捗の SSE が途中で切れた画面は、ここを繰り返し問い合わせて、処理の終わりを
+    待つ。
+    """
+    _check_addon_id(addon_id)
+    with _ops_state_lock:
+        op = _running_ops.get(addon_id)
+        last = _last_results.get(addon_id)
+        return OperationStatus(
+            addon_id=addon_id,
+            running=op is not None,
+            kind=op["kind"] if op else None,
+            operation_id=op["operation_id"] if op else None,
+            last_result=dict(last) if last else None,
+        )
+
+
 # ---------------------------------------------------------------------------
 # SSE: 進捗ストリーミング
 # ---------------------------------------------------------------------------
+
+# 進捗の行が出ない間も、この間隔で SSE のコメント行を送る。Next.js の rewrites の
+# 中継は 30 秒間データが流れないと上流との接続を切り、しかもブラウザ側の接続は
+# 閉じずに放置する (画面は終わりを受け取れないまま待ち続ける)。pip が巨大な
+# パッケージを展開する間は 10 分近く 1 行も出ないことがある。
+_SSE_KEEPALIVE_SEC = 10.0
+
 
 def _format_sse(event: Dict[str, Any]) -> str:
     payload = json.dumps(event, ensure_ascii=False)
@@ -294,87 +374,124 @@ async def _run_with_progress_sse(
     """worker thread で installer を回し、進捗を SSE で stream するヘルパ。
 
     runner は ``progress_callback`` を 1 引数で受け取る関数。worker thread 内で
-    呼ばれる。完了 / エラーで queue に sentinel を入れて async 側を終了させる。
+    呼ばれる。完了 / エラーで queue に ("done", finished イベント) を入れて
+    async 側を終了させる。
     ``held_lock`` には、呼び出し側が既に取っている per-addon lock を渡せる
     (confirm 系 — 計画と実行の間に cancel が割り込まないよう、計画の前から取る)。
-    どちらの形でも、解放はストリーム終了時にこの関数が行う。
-    """
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue = asyncio.Queue()
-    SENTINEL_DONE = object()
 
+    鍵の持ち主: この関数が呼ばれた時点から、鍵 (held_lock でも自前で取った
+    鍵でも) の解放はこの関数の責任になる。worker を起動できずに失敗したら
+    ここで放し、起動できたら **worker thread が処理を終えたとき** に放す。
+    ストリームの終わりでは放さない — SSE の接続が途中で切れても worker は
+    最後まで走るので、ストリーム側で放すと、走っている最中の操作に別の
+    install / update / uninstall / cancel が割り込める (2026-10-06 まで
+    そうなっていた)。
+    """
+    lock: Optional[threading.Lock] = None
     if held_lock is not None:
-        lock: Optional[threading.Lock] = held_lock
-    else:
-        lock = _get_lock(addon_id) if require_lock else None
-        if lock is not None and not lock.acquire(blocking=False):
+        lock = held_lock
+    elif require_lock:
+        lock = _get_lock(addon_id)
+        if not lock.acquire(blocking=False):
             raise HTTPException(
                 409,
                 detail=f"addon '{addon_id}' は他の install/update/uninstall 処理中です",
             )
 
-    final_state: Dict[str, Any] = {"ok": False, "error": None, "manifest": None}
+    operation_id = uuid.uuid4().hex
+    registered = False
+    try:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
 
-    def thread_progress(event: ProgressEvent) -> None:
-        loop.call_soon_threadsafe(queue.put_nowait, ("progress", event.to_dict()))
+        def thread_progress(event: ProgressEvent) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, ("progress", event.to_dict()))
 
-    def thread_worker() -> None:
-        try:
-            result = runner(thread_progress)
-            final_state["ok"] = True
-            if isinstance(result, AddonManifest):
-                final_state["manifest"] = {
-                    "name": result.name,
-                    "version": result.version,
-                    "setup_version": result.setup_version,
-                }
-        except (AddonInstallError, AddonManifestError) as e:
-            final_state["error"] = str(e)
-            LOGGER.warning("addon_catalog[%s]: %s failed: %s", addon_id, operation_label, e)
-        except Exception as e:
-            final_state["error"] = f"unexpected error: {e}"
-            LOGGER.exception(
-                "addon_catalog[%s]: %s unexpected failure", addon_id, operation_label
-            )
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, ("done", SENTINEL_DONE))
-
-    threading.Thread(
-        target=thread_worker,
-        name=f"addon-catalog-{operation_label}-{addon_id}",
-        daemon=True,
-    ).start()
-
-    async def generate():
-        try:
-            yield _format_sse({
-                "phase": "started",
-                "operation": operation_label,
-                "addon_id": addon_id,
-                "message": f"{operation_label} 開始: {addon_id}",
-            })
-            while True:
-                kind, payload = await queue.get()
-                if kind == "done":
-                    break
-                yield _format_sse({**payload, "addon_id": addon_id})
-
-            restart_required = _has_api_routes(addon_id)
+        def thread_worker() -> None:
             final_event: Dict[str, Any] = {
                 "phase": "finished",
                 "operation": operation_label,
+                "operation_id": operation_id,
                 "addon_id": addon_id,
-                "ok": final_state["ok"],
-                "restart_required": restart_required,
+                "ok": False,
             }
-            if final_state["error"]:
-                final_event["error"] = final_state["error"]
-            if final_state["manifest"]:
-                final_event["manifest"] = final_state["manifest"]
-            yield _format_sse(final_event)
-        finally:
-            if lock is not None:
-                lock.release()
+            try:
+                result = runner(thread_progress)
+                final_event["ok"] = True
+                if isinstance(result, AddonManifest):
+                    final_event["manifest"] = {
+                        "name": result.name,
+                        "version": result.version,
+                        "setup_version": result.setup_version,
+                    }
+            except (AddonInstallError, AddonManifestError) as e:
+                final_event["error"] = str(e)
+                LOGGER.warning("addon_catalog[%s]: %s failed: %s", addon_id, operation_label, e)
+            except Exception as e:
+                final_event["error"] = f"unexpected error: {e}"
+                LOGGER.exception(
+                    "addon_catalog[%s]: %s unexpected failure", addon_id, operation_label
+                )
+            finally:
+                try:
+                    final_event["restart_required"] = _has_api_routes(addon_id)
+                except Exception:
+                    LOGGER.warning(
+                        "addon_catalog[%s]: restart_required の判定に失敗", addon_id,
+                        exc_info=True,
+                    )
+                    final_event["restart_required"] = False
+                # 結果を記録してから「実行中」を外し、最後に鍵を放す。この順なら、
+                # 問い合わせが running: false を見た時点で last_result は揃っている。
+                with _ops_state_lock:
+                    _last_results[addon_id] = dict(final_event)
+                    _running_ops.pop(addon_id, None)
+                if lock is not None:
+                    lock.release()
+                LOGGER.info(
+                    "addon_catalog[%s]: %s finished (ok=%s, operation_id=%s)",
+                    addon_id, operation_label, final_event["ok"], operation_id,
+                )
+                # 接続が切れてストリームが居なくても、queue に入れるだけで害は無い
+                loop.call_soon_threadsafe(queue.put_nowait, ("done", final_event))
+
+        with _ops_state_lock:
+            _running_ops[addon_id] = {"kind": operation_label, "operation_id": operation_id}
+            registered = True
+        threading.Thread(
+            target=thread_worker,
+            name=f"addon-catalog-{operation_label}-{addon_id}",
+            daemon=True,
+        ).start()
+    except BaseException:
+        if registered:
+            with _ops_state_lock:
+                _running_ops.pop(addon_id, None)
+        if lock is not None:
+            lock.release()
+        raise
+
+    async def generate():
+        yield _format_sse({
+            "phase": "started",
+            "operation": operation_label,
+            "operation_id": operation_id,
+            "addon_id": addon_id,
+            "message": f"{operation_label} 開始: {addon_id}",
+        })
+        while True:
+            try:
+                kind, payload = await asyncio.wait_for(
+                    queue.get(), timeout=_SSE_KEEPALIVE_SEC
+                )
+            except asyncio.TimeoutError:
+                # SSE のコメント行 (画面の解析は "data: " で始まる行だけを拾う)
+                yield ": keepalive\n\n"
+                continue
+            if kind == "done":
+                yield _format_sse(payload)
+                break
+            yield _format_sse({**payload, "addon_id": addon_id})
 
     return StreamingResponse(
         generate(),
@@ -494,16 +611,13 @@ async def post_install_confirm(req: ConfirmRequest, manager=Depends(get_manager)
         _try_register_addon(req.addon_id, manager)
         return manifest
 
-    try:
-        return await _run_with_progress_sse(
-            operation_label="install",
-            addon_id=req.addon_id,
-            runner=runner,
-            held_lock=lock,
-        )
-    except BaseException:
-        lock.release()
-        raise
+    # ここから先、鍵の解放は _run_with_progress_sse の責任 (失敗時も含む)
+    return await _run_with_progress_sse(
+        operation_label="install",
+        addon_id=req.addon_id,
+        runner=runner,
+        held_lock=lock,
+    )
 
 
 @router.post("/install/cancel")
@@ -557,16 +671,13 @@ async def post_update_confirm(req: ConfirmRequest, manager=Depends(get_manager))
         _try_register_addon(req.addon_id, manager)
         return manifest
 
-    try:
-        return await _run_with_progress_sse(
-            operation_label="update",
-            addon_id=req.addon_id,
-            runner=runner,
-            held_lock=lock,
-        )
-    except BaseException:
-        lock.release()
-        raise
+    # ここから先、鍵の解放は _run_with_progress_sse の責任 (失敗時も含む)
+    return await _run_with_progress_sse(
+        operation_label="update",
+        addon_id=req.addon_id,
+        runner=runner,
+        held_lock=lock,
+    )
 
 
 @router.post("/update/cancel")
@@ -604,16 +715,13 @@ async def post_installed_addon_options(
         _try_register_addon(addon_id, manager)
         return manifest
 
-    try:
-        return await _run_with_progress_sse(
-            operation_label="options",
-            addon_id=addon_id,
-            runner=runner,
-            held_lock=lock,
-        )
-    except BaseException:
-        lock.release()
-        raise
+    # ここから先、鍵の解放は _run_with_progress_sse の責任 (失敗時も含む)
+    return await _run_with_progress_sse(
+        operation_label="options",
+        addon_id=addon_id,
+        runner=runner,
+        held_lock=lock,
+    )
 
 
 @router.post("/uninstall")

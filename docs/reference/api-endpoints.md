@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 367（tag グループ: 26）
+**エンドポイント数**: 369（tag グループ: 26）
 
 ## addon
 
@@ -53,6 +53,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/addon-catalog/installed` | expansion_data/ 配下にある全アドオンの現在状態を返す。 |
 | GET | `/api/addon-catalog/installed/{addon_id}/options` | 導入済みアドオンの質問 (保存済みの答えに selected: true) と、答えを足したときに |
 | POST | `/api/addon-catalog/installed/{addon_id}/options` | 選択肢を足して、新しく実行の条件を満たした step だけを実行する (SSE 進捗 stream)。 |
+| GET | `/api/addon-catalog/operations` | 実行中の操作 (install / update / options / uninstall) の一覧。 |
+| GET | `/api/addon-catalog/operations/{addon_id}` | アドオン 1 件の操作が実行中か、最後に終わった操作がどう終わったか。 |
 | GET | `/api/addon-catalog/registry` | registry.json を fetch (キャッシュ済み) して返す。 |
 | POST | `/api/addon-catalog/uninstall` | アドオンをアンインストール (SSE 進捗 stream)。 |
 | POST | `/api/addon-catalog/update/cancel` | 更新の prepare を取り消す (fetch しただけなので、記録を消すだけ)。 |
