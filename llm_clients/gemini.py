@@ -899,6 +899,14 @@ class GeminiClient(LLMClient):
     @staticmethod
     def _requires_json_schema(node: Any) -> bool:
         if isinstance(node, dict):
+            # types.Schema.enum is list[str]; a non-string enum/const would
+            # make _schema_from_json raise, so send the raw JSON Schema instead
+            # (keeps the constraint rather than dropping it).
+            enum_val = node.get("enum")
+            if isinstance(enum_val, list) and any(not isinstance(v, str) for v in enum_val):
+                return True
+            if "const" in node and not isinstance(node["const"], str):
+                return True
             if "additionalProperties" in node:
                 ap_val = node.get("additionalProperties")
                 if ap_val not in (None, False):
