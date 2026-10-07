@@ -2622,8 +2622,8 @@ def test_a_dialect_that_is_not_an_object_is_unavailable(monkeypatch, caplog, dia
     assert is_available() is False
 
 
-def test_a_dialect_that_is_absent_or_null_uses_the_canonical_defaults(monkeypatch):
-    """欄が無い・None のときだけ「宣言なし」(TypeSafe 正典の既定)。"""
+def test_a_dialect_that_is_absent_uses_the_canonical_defaults(monkeypatch):
+    """欄が無いときだけ「宣言なし」(TypeSafe 正典の既定)。"""
     config = _model_config()
     del config["reflex_judgment"]
     _set_configs(monkeypatch, {MODEL_KEY: config})
@@ -2631,8 +2631,28 @@ def test_a_dialect_that_is_absent_or_null_uses_the_canonical_defaults(monkeypatc
     assert backend.url == f"{BASE_URL}/v1/systemone"
     assert backend.request_shape == reflex_judgment.REQUEST_SHAPE_SYSTEM_ONE
 
+
+def test_an_explicit_null_dialect_is_unavailable(monkeypatch, caplog):
+    """宣言そのものの明示の null は「宣言なし」ではなく設定ミス (既定へ黙って落ちない)。"""
+    caplog.set_level("WARNING", logger="saiverse.reflex_judgment")
     _set_configs(monkeypatch, {MODEL_KEY: _model_config(reflex_judgment=None)})
-    assert resolve_backend().url == f"{BASE_URL}/v1/systemone"
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        resolve_backend()
+    assert "is null" in str(exc.value)
+    assert "reflex_judgment" in caplog.text
+
+
+def test_a_non_string_question_id_is_a_caller_bug(monkeypatch):
+    """qid は答えとの突き合わせの鍵。文字列でなければ呼び出し側のバグとして ValueError。"""
+    _set_configs(monkeypatch, {MODEL_KEY: _model_config()})
+
+    def must_not_be_called(request):
+        raise AssertionError("the destination must not be called")
+
+    for qid in (1, ""):
+        with pytest.raises(ValueError):
+            evaluate(STATE, {qid: {"instructions": "q"}}, timeout=2.5,
+                     transport=_transport(must_not_be_called))
 
 
 def _resolved_through_the_test_provider(monkeypatch, provider_dialect, model_fields):
@@ -2961,3 +2981,24 @@ def test_the_criteria_header_does_not_point_above(decisions_role):
              transport=_transport(_capture(captured, _predicates("m0", "m1"))))
     assert _CRITERIA_HEADER in captured["body"]["input"]
     assert "above" not in captured["body"]["input"]
+
+
+def test_a_decisions_refusal_before_sending_masks_the_api_key(decisions_role, caplog):
+    """送る前の断りの文言にも伏せ字を通す (質問の中身に API キーの値が入っていても漏らさない)。"""
+    caplog.set_level("WARNING", logger="saiverse.reflex_judgment")
+
+    def must_not_be_called(request):
+        raise AssertionError("the destination must not be called")
+
+    secret = "test-key-not-real"
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(
+            STATE,
+            {"c0": {"type": "choice", "instructions": "Which?", "options": [secret, secret]}},
+            timeout=2.5,
+            transport=_transport(must_not_be_called),
+        )
+    assert secret not in str(exc.value)
+    assert "***" in str(exc.value)
+    assert secret not in caplog.text
+    assert "refused before sending" in caplog.text

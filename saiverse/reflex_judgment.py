@@ -289,9 +289,13 @@ def _dialect(key: str, config: Mapping[str, Any]) -> Dict[str, Any]:
     書いた人の宣言が全部消えて TypeSafe 正典の既定へ黙って落ち、違う宛先・違う形で
     毎回失敗する。だから設定ミスとして解決を断る。
     """
-    raw = config.get(DIALECT_FIELD)
-    if raw is None:
+    if DIALECT_FIELD not in config:
         return {}
+    raw = config[DIALECT_FIELD]
+    if raw is None:
+        # 明示の null は「宣言なし」ではない。provider の宣言を null で消した形で、
+        # 既定へ落とすと Decisions の宛先へ System One の形を送り続ける。
+        raise _refuse_dialect(key, "is null")
     if not isinstance(raw, Mapping):
         raise _refuse_dialect(key, f"is not an object: {raw!r}")
     return dict(raw)
@@ -757,6 +761,10 @@ def _request_question(qid: str, question: Mapping[str, Any], backend: ReflexBack
         ReflexJudgmentUnavailable: 答える側が対応していない型 (部分回答を採らない
             既存の厳格さのまま、質問ひとまとまりごと不成立にする)。
     """
+    if not isinstance(qid, str) or not qid:
+        # qid は答えとの突き合わせの鍵 (Decisions では name)。文字列でないと JSON に
+        # した時点で形が変わり、返ってきた答えと対応しなくなる。
+        raise ValueError(f"question id {qid!r} must be a non-empty string")
     if not isinstance(question, Mapping):
         raise ValueError(
             f"question {qid!r} must be a mapping, got {type(question).__name__}"
@@ -1780,11 +1788,14 @@ def _evaluate(
     except ReflexJudgmentUnavailable as exc:
         # この宛先の形で表せない質問 (空の選択肢・段階が足りない score など) を、
         # 送る前に断った。設定や呼び出し方を直せば直る失敗なので、層のログにも残す。
+        # 文言には呼び出し側の質問の中身 (選択肢の値など) が入るので、他の経路と
+        # 同じく伏せ字を通してからログと例外に載せる。
+        detail = _mask_secret(str(exc), secrets)[:_ERROR_BODY_PREVIEW]
         LOGGER.warning(
             "[reflex] the %s for %r was refused before sending: %s",
-            build_label, backend.model_key, exc,
+            build_label, backend.model_key, detail,
         )
-        raise
+        raise ReflexJudgmentUnavailable(detail) from exc
     except Exception as exc:
         # 例外文言は外部由来の値を含みうるので伏せ字を通す。
         detail = _mask_secret(f"{type(exc).__name__}: {exc}", secrets)[:_ERROR_BODY_PREVIEW]
