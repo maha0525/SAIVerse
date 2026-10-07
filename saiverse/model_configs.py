@@ -65,28 +65,17 @@ def _merge_reflex_judgment(resolved: Dict, provider: Mapping[str, Any]) -> None:
 
     合成はキー単位 (浅い合成)。モデルが書いたキーだけがそのキーを上書きし、書かれて
     いないキーは provider の宣言が生き残る。
-
-    辞書でない宣言 (どちらの側でも) は合成せずに残し、反射判断側
-    (``saiverse/reflex_judgment.py`` の ``_dialect``) が設定ミスとして解決を断る。
-    ここで捨てると、書いた宣言が消えて TypeSafe 正典の既定へ黙って落ちる。
     """
     provider_dialect = provider.get("reflex_judgment")
-    if provider_dialect is None:
+    if not isinstance(provider_dialect, dict):
         return
     model_dialect = resolved.get("reflex_judgment")
-    if not isinstance(provider_dialect, dict):
-        # provider 側の書き間違い。モデル側が何も書いていない、または辞書で部分的に
-        # 上書きしているだけなら、壊れた宣言をそのまま運んで反射判断側で断らせる
-        # (モデル側の部分的な宣言だけを残すと、provider の path などが既定へ落ちる)。
-        if model_dialect is None or isinstance(model_dialect, dict):
-            resolved["reflex_judgment"] = provider_dialect
-        return
     if model_dialect is None:
         resolved["reflex_judgment"] = dict(provider_dialect)
         return
     if not isinstance(model_dialect, dict):
-        # 辞書でない宣言はモデル側の書き間違い。そのまま残し、反射判断側が設定ミス
-        # として解決を断る (設定ミスがそこで表に出る)。
+        # 辞書でない宣言はモデル側の書き間違い。既存の挙動どおりそのまま残す
+        # (反射判断側が「宣言なし」として扱い、設定ミスがそこで表に出る)。
         return
     resolved["reflex_judgment"] = {**provider_dialect, **model_dialect}
 

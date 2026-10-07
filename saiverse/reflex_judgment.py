@@ -313,8 +313,11 @@ def _dialect_field(
     value = dialect[name]
     if value is None or isinstance(value, bool) or not isinstance(value, expected):
         raise _refuse_dialect(key, f"has an unusable {name!r}: {value!r}")
-    if isinstance(value, str) and not value.strip():
-        raise _refuse_dialect(key, f"has an empty {name!r}")
+    if isinstance(value, str):
+        # 前後の空白は落とす (" answers" のまま使うと、毎回その欄が見つからない)。
+        value = value.strip()
+        if not value:
+            raise _refuse_dialect(key, f"has an empty {name!r}")
     return value
 
 
@@ -336,7 +339,7 @@ def _string_map(
             raise _refuse_dialect(
                 key, f"has an unusable entry in {name!r}: {field_key!r}: {value!r}",
             )
-        merged[field_key] = value
+        merged[field_key] = value.strip()
     return merged
 
 
@@ -1774,7 +1777,13 @@ def _evaluate(
             call = _JevCall(backend, payload, headers, timeout, transport)
         else:
             call = _LLMCall(backend, state, request_questions)
-    except ReflexJudgmentUnavailable:
+    except ReflexJudgmentUnavailable as exc:
+        # この宛先の形で表せない質問 (空の選択肢・段階が足りない score など) を、
+        # 送る前に断った。設定や呼び出し方を直せば直る失敗なので、層のログにも残す。
+        LOGGER.warning(
+            "[reflex] the %s for %r was refused before sending: %s",
+            build_label, backend.model_key, exc,
+        )
         raise
     except Exception as exc:
         # 例外文言は外部由来の値を含みうるので伏せ字を通す。

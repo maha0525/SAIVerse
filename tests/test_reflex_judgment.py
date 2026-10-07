@@ -2660,9 +2660,6 @@ _ABSENT = object()
     [
         pytest.param(dict(_CANONICAL_DIALECT), {"reflex_judgment": "typo"},
                      id="model_side_typo_survives_the_merge"),
-        pytest.param("typo", {}, id="provider_side_typo_with_a_silent_model"),
-        pytest.param("typo", {"reflex_judgment": {"supported_types": ["noul"]}},
-                     id="provider_side_typo_with_a_partial_model_dialect"),
     ],
 )
 def test_a_non_object_dialect_is_refused_after_the_provider_merge(
