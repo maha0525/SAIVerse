@@ -1897,3 +1897,373 @@ def test_the_choice_field_is_not_bound_when_options_are_missing(llm_role, monkey
 
     item = client.calls[0]["response_schema"]["properties"]["answers"]["items"]
     assert "enum" not in item["properties"]["choice"]
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Decisions (方言の宣言 request_shape: openai_decisions)
+#
+# 呼び出し側が組む質問と状況は System One の形のまま。送る直前に Decisions の形
+# (name 付きの質問の配列 + 文字列の input) へ組み替え、name 付きの答えの配列を
+# qid の辞書へ戻してから既存の検算に通す。criteria は構造に居場所があるもの
+# (choice の説明 → choices、score の段階 → levels) はそこへ写し、居場所の無い
+# noul の基準だけを input の最後に書き足す (2026-10-07 まはー裁定)。
+# ---------------------------------------------------------------------------
+
+#: 同梱の openai_decisions provider と同じ方言の宣言 (宛先だけ偽のループバック)。
+_DECISIONS_DIALECT = {
+    "request_shape": "openai_decisions",
+    "path": "/v1/decisions",
+    "answers_key": "answers",
+    "usage_key": "usage",
+    "answer_fields": {"noul": "probability", "choice": "choice", "score": "score"},
+    "usage_fields": {"input_tokens": "input_tokens", "output_tokens": "output_tokens"},
+    "supported_types": ["noul", "choice", "score"],
+}
+
+DECISIONS_KEY = "openai-decisions-gpt-6-luna"
+_CRITERIA_HEADER = "Criteria for each question (by question name):"
+
+
+@pytest.fixture
+def decisions_role(monkeypatch):
+    """役割に Decisions の形で話す偽の宛先を割り当てる。"""
+    _set_configs(monkeypatch, {
+        MODEL_KEY: _model_config(model="gpt-6-luna", reflex_judgment=dict(_DECISIONS_DIALECT)),
+    })
+
+
+def _capture(captured, response_json):
+    def handler(request):
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers.get("Authorization")
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json=response_json)
+    return handler
+
+
+def _predicates(*qids, probability=0.5):
+    return {"answers": [
+        {"type": "predicate", "name": qid, "probability": probability} for qid in qids
+    ]}
+
+
+def _shipped_decisions_configs():
+    """同梱の provider / モデル定義を、読み込み後の解決済みの姿で返す。
+
+    user_data の上書きに隠されないよう builtin_data から直接読む。会話用の
+    ``gpt-6-luna`` (provider_ref: openai) も並べて、名前の取り違えが起きないかを見る。
+    """
+    from saiverse import model_configs
+    from saiverse.data_paths import BUILTIN_DATA_DIR, MODELS_DIR, PROVIDERS_DIR
+    from saiverse.provider_configs import SOURCE_BUILTIN
+
+    def read(directory, stem):
+        return json.loads((BUILTIN_DATA_DIR / directory / f"{stem}.json").read_text(encoding="utf-8"))
+
+    providers = {}
+    for pid in ("openai_decisions", "openai"):
+        provider = read(PROVIDERS_DIR, pid)
+        provider["source"] = SOURCE_BUILTIN
+        providers[pid] = provider
+    with patch.dict("saiverse.provider_configs.PROVIDER_CONFIGS", providers, clear=True):
+        configs = {
+            DECISIONS_KEY: model_configs._resolve_provider_ref(read(MODELS_DIR, DECISIONS_KEY)),
+            "gpt-6-luna": model_configs._resolve_provider_ref(read(MODELS_DIR, "gpt-6-luna")),
+        }
+    return providers, configs
+
+
+@pytest.fixture
+def shipped_decisions(monkeypatch, mock_provider_network):
+    providers, configs = _shipped_decisions_configs()
+    _set_providers(monkeypatch, providers)
+    _set_configs(monkeypatch, configs)
+    mock_provider_network("api.openai.com")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key-not-real")
+    return configs
+
+
+def test_the_shipped_decisions_model_resolves_to_the_decisions_endpoint(shipped_decisions):
+    backend = resolve_backend(DECISIONS_KEY)
+    assert backend.kind == reflex_judgment.REFLEX_KIND_JEV
+    assert backend.url == "https://api.openai.com/v1/decisions"
+    assert backend.api_model == "gpt-6-luna"
+    assert backend.api_key_env == "OPENAI_API_KEY"
+    assert backend.request_shape == reflex_judgment.REQUEST_SHAPE_OPENAI_DECISIONS
+    assert backend.supported_types == frozenset({"noul", "choice", "score"})
+    assert backend.answer_fields["noul"] == "probability"
+    for qtype in ("noul", "choice", "score"):
+        assert resolve_backend(DECISIONS_KEY, required_type=qtype).model_key == DECISIONS_KEY
+    assert is_available(model_key=DECISIONS_KEY, required_type="noul") is True
+
+
+def test_the_decisions_model_is_kept_out_of_the_conversation_pickers(shipped_decisions):
+    """jev 互換なので会話の選択欄からは外れる。同じ API 名の会話用モデルは外れない。"""
+    from saiverse import model_defaults
+
+    assert model_defaults.is_reflex_only_model(DECISIONS_KEY) is True
+    assert model_defaults.is_reflex_only_model("gpt-6-luna") is False
+
+
+def test_a_partial_model_dialect_keeps_the_providers_request_shape():
+    """モデル側の部分的な宣言で provider の request_shape が落ちない (キー単位の合成)。"""
+    from saiverse import model_configs
+
+    providers, _configs = _shipped_decisions_configs()
+    with patch.dict("saiverse.provider_configs.PROVIDER_CONFIGS", providers, clear=True):
+        resolved = model_configs._resolve_provider_ref({
+            "model": "gpt-6-luna", "provider_ref": "openai_decisions",
+            "reflex_judgment": {"supported_types": ["noul"]},
+        })
+    assert resolved["reflex_judgment"]["request_shape"] == "openai_decisions"
+    assert resolved["reflex_judgment"]["path"] == "/v1/decisions"
+    assert resolved["reflex_judgment"]["supported_types"] == ["noul"]
+
+
+def test_an_unknown_request_shape_is_unavailable(monkeypatch, caplog):
+    caplog.set_level("WARNING", logger="saiverse.reflex_judgment")
+    _set_configs(monkeypatch, {
+        MODEL_KEY: _model_config(
+            reflex_judgment={**_CANONICAL_DIALECT, "request_shape": "something_else"},
+        ),
+    })
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        resolve_backend()
+    assert "request_shape" in str(exc.value)
+    assert "something_else" in caplog.text
+    assert is_available() is False
+
+
+def test_a_dialect_without_request_shape_is_the_system_one_shape():
+    assert resolve_backend().request_shape == reflex_judgment.REQUEST_SHAPE_SYSTEM_ONE
+
+
+def test_decisions_request_carries_named_questions_and_noul_criteria_at_the_end(decisions_role):
+    captured = {}
+    answers, _usage = evaluate(
+        STATE, QUESTIONS, timeout=2.5,
+        transport=_transport(_capture(captured, _predicates("m0", "m1", probability=0.7))),
+    )
+    assert answers == {"m0": 0.7, "m1": 0.7}
+    assert captured["url"] == f"{BASE_URL}/v1/decisions"
+    assert captured["auth"] == "Bearer test-key-not-real"
+
+    body = captured["body"]
+    assert set(body) == {"model", "input", "questions"}
+    assert body["model"] == "gpt-6-luna"
+    assert body["questions"] == [
+        {"type": "predicate", "name": "m0", "instructions": QUESTIONS["m0"]["instructions"]},
+        {"type": "predicate", "name": "m1", "instructions": QUESTIONS["m1"]["instructions"]},
+    ]
+    state_json = json.dumps(STATE, ensure_ascii=False, default=str)
+    assert body["input"] == "\n".join([
+        state_json,
+        "",
+        _CRITERIA_HEADER,
+        "[m0]",
+        "true: 関連する",
+        "false: 関連しない",
+        "[m1]",
+        "true: 関連する",
+        "false: 関連しない",
+    ])
+
+
+def test_decisions_input_has_no_criteria_section_without_noul_criteria(decisions_role):
+    captured = {}
+    evaluate(
+        "そのままの文字列の状況", {"m0": {"instructions": "質問だけ"}}, timeout=2.5,
+        transport=_transport(_capture(captured, _predicates("m0"))),
+    )
+    assert captured["body"]["input"] == "そのままの文字列の状況"
+    assert "criteria" not in captured["body"]["questions"][0]
+
+
+def test_decisions_choice_and_score_criteria_go_into_the_structure(decisions_role):
+    """choice の説明は choices、score の段階は levels へ写り、input の末尾には出ない。"""
+    captured = {}
+    response = {"answers": [
+        {"type": "choice", "name": "c0", "choice": "billing",
+         "probabilities": [{"value": "billing", "probability": 0.95}], "confidence": 0.93},
+        {"type": "score", "name": "s0", "score": 1.05},
+        {"type": "predicate", "name": "m0", "probability": 0.2},
+    ]}
+    answers, _usage = evaluate(
+        STATE,
+        {
+            "c0": {"type": "choice", "instructions": "Which department?",
+                   "options": ["billing", "shipping"],
+                   "criteria": {"billing": "Payments and refunds.", "shipping": None}},
+            "s0": {"type": "score", "instructions": "How frustrated is the customer?",
+                   "criteria": ["Calm", "Frustrated", {"label": "Very angry"}]},
+            "m0": {"type": "noul", "instructions": "Is it urgent?",
+                   "criteria": {"true": "急ぎ", "false": "急がない"}},
+        },
+        timeout=2.5, transport=_transport(_capture(captured, response)),
+    )
+    assert answers == {"c0": "billing", "s0": 1.05, "m0": 0.2}
+
+    questions = captured["body"]["questions"]
+    assert [q["name"] for q in questions] == ["c0", "s0", "m0"]
+    assert questions[0] == {
+        "type": "choice", "name": "c0", "instructions": "Which department?",
+        "choices": [
+            {"value": "billing", "description": "Payments and refunds."},
+            {"value": "shipping", "description": "shipping"},   # null の説明は値と同じ
+        ],
+    }
+    very_angry = json.dumps({"label": "Very angry"}, ensure_ascii=False)
+    assert questions[1] == {
+        "type": "score", "name": "s0", "instructions": "How frustrated is the customer?",
+        "levels": [
+            {"label": "Calm", "description": "Calm"},
+            {"label": "Frustrated", "description": "Frustrated"},
+            {"label": very_angry, "description": very_angry},
+        ],
+    }
+    for question in questions:
+        assert "criteria" not in question
+
+    tail = captured["body"]["input"].split(_CRITERIA_HEADER, 1)[1]
+    assert tail == "\n[m0]\ntrue: 急ぎ\nfalse: 急がない"   # noul の基準だけ
+
+
+def test_decisions_choice_can_be_built_from_a_criteria_mapping_alone(decisions_role):
+    captured = {}
+    answers, _usage = evaluate(
+        STATE,
+        {"c0": {"type": "choice", "instructions": "どこへ行く",
+                "criteria": {"walk": "散歩", "stay": None}}},
+        timeout=2.5,
+        transport=_transport(_capture(captured, {"answers": [
+            {"type": "choice", "name": "c0", "choice": "stay"},
+        ]})),
+    )
+    assert answers == {"c0": "stay"}
+    assert captured["body"]["questions"][0]["choices"] == [
+        {"value": "walk", "description": "散歩"},
+        {"value": "stay", "description": "stay"},
+    ]
+    assert _CRITERIA_HEADER not in captured["body"]["input"]
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        pytest.param({"type": "choice", "instructions": "選択肢なし"}, id="choice_without_values"),
+        pytest.param({"type": "choice", "instructions": "x", "options": [1, 2]},
+                     id="choice_with_non_string_options_only"),
+        pytest.param({"type": "score", "instructions": "段階なし"}, id="score_without_levels"),
+        pytest.param({"type": "score", "instructions": "x", "criteria": ["only one"]},
+                     id="score_with_one_level"),
+        pytest.param({"type": "score", "instructions": "x", "criteria": {"low": "a", "high": "b"}},
+                     id="score_with_a_mapping"),
+    ],
+)
+def test_a_question_the_decisions_shape_cannot_express_is_unavailable(decisions_role, question):
+    """表せない質問は ReflexJudgmentUnavailable (呼び出し側のバグ扱いの ValueError ではない)。"""
+    def handler(request):  # pragma: no cover - 呼ばれてはいけない
+        raise AssertionError("the destination must not be called")
+
+    with pytest.raises(ReflexJudgmentUnavailable):
+        evaluate(STATE, {"q0": question}, timeout=2.5, transport=_transport(handler))
+
+
+def test_decisions_choice_outside_the_options_is_unavailable(decisions_role):
+    response = {"answers": [{"type": "choice", "name": "c0", "choice": "fly"}]}
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(
+            STATE, {"c0": {"type": "choice", "instructions": "どれ", "options": ["walk", "stay"]}},
+            timeout=2.5, transport=_transport(_capture({}, response)),
+        )
+    assert "options" in str(exc.value)
+
+
+def test_decisions_answers_by_unrequested_names_are_ignored(decisions_role):
+    response = _predicates("m0", "m1", "extra", probability=0.4)
+    answers, _usage = evaluate(STATE, QUESTIONS, timeout=2.5, transport=_transport(_capture({}, response)))
+    assert answers == {"m0": 0.4, "m1": 0.4}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param({"answers": [
+            {"type": "predicate", "name": "m0", "probability": 0.5},
+            {"type": "refusal", "name": "m1"},
+        ]}, id="refusal"),
+        pytest.param({"answers": [
+            {"type": "predicate", "name": "m0", "probability": 0.5},
+            {"type": "predicate", "name": "m1", "probability": 0.5},
+            {"type": "predicate", "name": "m1", "probability": 0.9},
+        ]}, id="duplicate_name"),
+        pytest.param({"answers": {"m0": {"type": "predicate", "probability": 0.5},
+                                  "m1": {"type": "predicate", "probability": 0.5}}},
+                     id="answers_not_an_array"),
+        pytest.param({"answers": [
+            {"type": "predicate", "name": "m0", "probability": 0.5},
+            {"type": "predicate", "name": "m1", "probability": 0.5},
+            "not an object",
+        ]}, id="entry_not_an_object"),
+        pytest.param({"answers": [
+            {"type": "predicate", "name": "m0", "probability": 0.5},
+            {"type": "predicate", "name": "m1", "probability": 0.5},
+            {"type": "predicate", "name": 3, "probability": 0.5},
+        ]}, id="name_not_a_string"),
+        pytest.param({"answers": [
+            {"type": "predicate", "name": "m0", "probability": 0.5},
+            {"type": "predicate", "name": "m1", "probability": 1.5},
+        ]}, id="out_of_range"),
+    ],
+)
+def test_unusable_decisions_answers_are_unavailable_but_usage_is_recorded(
+    decisions_role, response, usage_calls,
+):
+    """答えが不成立でも、届いた応答の使用量は答えを読む前に記帳される (既存の順序)。"""
+    body = {**response, "usage": {"input_tokens": 50, "output_tokens": 0,
+                                  "total_tokens": 50, "input_tokens_details": {"cached_tokens": 0}}}
+    with pytest.raises(ReflexJudgmentUnavailable):
+        evaluate(STATE, QUESTIONS, timeout=2.5, persona_id="air_city_a",
+                 transport=_transport(_capture({}, body)))
+
+    assert len(usage_calls) == 1
+    assert usage_calls[0]["model_id"] == MODEL_KEY
+    assert usage_calls[0]["input_tokens"] == 50
+    assert usage_calls[0]["output_tokens"] == 0
+    assert usage_calls[0]["category"] == reflex_judgment.USAGE_CATEGORY
+
+
+def test_a_decisions_refusal_is_logged_with_its_qid(decisions_role, caplog):
+    caplog.set_level("WARNING", logger="saiverse.reflex_judgment")
+    response = {"answers": [
+        {"type": "predicate", "name": "m0", "probability": 0.5},
+        {"type": "refusal", "name": "m1"},
+    ]}
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(STATE, QUESTIONS, timeout=2.5, transport=_transport(_capture({}, response)))
+    assert "m1" in str(exc.value)
+    assert "refused" in caplog.text and "m1" in caplog.text
+
+
+def test_decisions_usage_is_recorded_on_success(decisions_role, usage_calls):
+    body = {**_predicates("m0", "m1"), "usage": {"input_tokens": 312, "output_tokens": 0}}
+    _answers, usage = evaluate(STATE, QUESTIONS, timeout=2.5,
+                               transport=_transport(_capture({}, body)))
+    assert usage == {"input_tokens": 312, "output_tokens": 0}
+    assert len(usage_calls) == 1
+    assert usage_calls[0]["input_tokens"] == 312
+
+
+def test_an_abandoned_decisions_call_still_records_its_usage(decisions_role, usage_calls):
+    """締切で見切った呼び出しの使用量の記帳は、使用量の欄の位置が同じなので形を問わず効く。"""
+    def slow_handler(request):
+        time.sleep(0.8)
+        return httpx.Response(200, json={
+            **_predicates("m0", "m1"), "usage": {"input_tokens": 77, "output_tokens": 0},
+        })
+
+    with pytest.raises(ReflexJudgmentUnavailable):
+        evaluate(STATE, QUESTIONS, timeout=0.1, transport=_transport(slow_handler))
+    _join_workers()
+    assert len(usage_calls) == 1
+    assert usage_calls[0]["input_tokens"] == 77

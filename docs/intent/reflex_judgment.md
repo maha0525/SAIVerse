@@ -36,6 +36,7 @@ Jev の実験 (docs/intent/auto_recall_jev_rerank.md) で最初の利用者 (自
 | [OpenRouter](https://openrouter.ai/typesafe/jev-1.13) | `/api/alpha/decisions` (alpha) | 正典とほぼ同一 | 同上 | OpenRouter のキー |
 | [localjev](https://github.com/githubnext/localjev) (セルフホスト) | `/v1/systemone` | 正典と互換 | 3 型すべて | 任意 (Bearer、無しも可) |
 | [simple-jev (Featherless)](https://simple-jev.featherless.ai/) | `/v1/classifier` | 中身は近似・応答の欄が異なる | choice のみ確認 | Featherless のキー ($0.03/1M 入力) |
+| [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions) (public beta、2026-10-07 追加) | `/v1/decisions` | 異なる — 質問は配列で name 付き、型名 predicate、criteria 欄なし、状況は文字列の input。答えも name 付きの配列 | predicate / choice / score | OpenAI のキー ($0.10/1M 入力、出力は課金なし) |
 
 ほかに [vLLM に System One 形式の判定モードを足す PR](https://github.com/vllm-project/vllm/pull/57250)
 が open (DiffusionGemma 系。例示サーバーは `/v1/systemone` 互換)。
@@ -44,6 +45,12 @@ Jev の実験 (docs/intent/auto_recall_jev_rerank.md) で最初の利用者 (自
 違うのは宛先の path・認証・対応する型・応答の欄の名前で、これらは全部
 「設定ファイルに書ける差」** — まはーの読みどおり、共用のモデル設定ファイルの
 形に乗せられる。
+
+OpenAI Decisions は、リクエストの組み立て方そのものが違う最初の例で、欄名の
+差し替えだけでは吸収できない。その差は方言の宣言の `request_shape` (`system_one` /
+`openai_decisions`) で吸収する。System One の形が本流で、呼び出し側が組む質問と
+状況は変えず、OpenAI へは送る直前に変換し、受け取った答えを System One の形へ
+読み戻す。分岐はこの宣言値だけで行い、提供元の名前や URL では分岐しない。
 
 ## 設計
 
@@ -119,6 +126,16 @@ ID) に `{type, instructions, criteria}` を添える形。
   Gemini は additionalProperties を使えず、qid が動的な辞書スキーマを組めない)。
 - 答える側が対応しない型 (例: simple-jev は choice のみ) を含む質問は
   「使えなかった」— 部分回答を採用しない既存の厳格さのまま。
+- **criteria の欄が無い宛先 (OpenAI Decisions) へは、criteria を構造の中の居場所へ
+  写し、居場所の無いものだけを input の最後に押し込む** (2026-10-07 まはー裁定)。
+  System One の criteria は型ごとに意味が違う — noul は `{true, false}` の基準、
+  choice は「選択肢 → 説明」の辞書、score は順序付きの段階の説明の配列 (答えは段階の
+  番号の確率加重平均で、Decisions の score と同じ意味)。だから choice の説明は
+  Decisions の `choices` の `description` へ、score の段階は `levels` へ写す。
+  Decisions の質問の構造に居場所が無いのは noul の基準だけで、それを input の最後に
+  「質問名ごとの基準」の節として書き足す (noul の基準を持つ質問が無ければ節ごと
+  付けない)。選択肢を 1 つも作れない choice や、段階が 2 つ未満の score はこの宛先で
+  表せないので「使えなかった」になる。
 
 ### 4. 変えないもの
 
@@ -152,7 +169,8 @@ ID) に `{type, instructions, criteria}` を添える形。
    スイッチへ (§4)。
 3. **同梱する設定ファイル**: TypeSafe 公式 + OpenRouter + localjev の 3 つ。
    simple-jev は初期対応に含めない (型が揃わず、想起は noul を使うので初期の
-   利用者が居ない。方言の宣言欄だけ設計に残す)。
+   利用者が居ない。方言の宣言欄だけ設計に残す)。2026-10-07 に OpenAI Decisions
+   (`openai-decisions-gpt-6-luna`) を 4 つ目として足した (経緯の同日の項)。
 4. **実装の段割り** (流れはメティス一任 → 2 段で確定):
    - **第 1 段**: 反射判断の層 (typesafe_client の器を引き継ぐ共通層) +
      jev 互換 provider type + モデルの役割「反射判断」(世界既定) +
@@ -422,3 +440,28 @@ ID) に `{type, instructions, criteria}` を添える形。
   ターンなので、最初の確定へ貼るのは設計どおり。Pulse ID での相関付けは、注記を
   含む全マージ経路の作り直しとして issue 側に切り出し済み
   (docs/issues/chat_stream_event_correlation_by_last_bubble.md、v0.4 前が適時)。
+- 2026-10-07: OpenAI が出した Decisions API (public beta) を、jev 互換の宛先の
+  4 つ目として足した (provider `openai_decisions`、モデル設定
+  `openai-decisions-gpt-6-luna`、API 上のモデル名は `gpt-6-luna`)。発想は System One と
+  同じだが、リクエストとレスポンスの組み立て方そのものが違う — 質問は name 付きの
+  配列で型名は predicate / choice / score、状況は文字列の input、criteria の欄は無く、
+  答えも name 付きの配列で返り、答えられない質問には `type: "refusal"` が返る。欄名の
+  差し替えでは吸収できないので、方言の宣言に `request_shape` を足した (既定は
+  `system_one`、宣言の無い既存の宛先はすべてこれ。知らない値は設定ミスとして解決を
+  断る)。まはーの裁定は「criteria がある Jev (System One) 側を本流のままにし、OpenAI
+  では criteria を input 内の最後に押し込む」。呼び出し側 (sea/auto_recall.py など) が
+  組む質問と状況は変えず、送る直前に変換し、答えを qid の辞書へ戻してから既存の検算に
+  通す。当初は「SAIVerse の score には段階の概念が無い」として score を外す案だったが、
+  これは誤りで、System One の score の criteria が順序付きの段階の説明の配列であり、
+  答えの意味も Decisions の score と同じだった。そこで 3 型すべてに対応させ、criteria は
+  構造の中に居場所があるもの (choice の説明・score の段階) をそこへ写し、居場所の無い
+  noul の基準だけを input の最後へ書く形にした (§3)。読み戻しでは、拒否された質問は
+  答えが無いものとして扱い (部分回答は不成立の既存の厳格さのまま。拒否は WARNING に
+  qid つきで出す)、同じ name の重複・辞書でない要素・name が文字列でない要素は不正応答に
+  し、要求していない name は無視する。使用量の欄 (`usage.input_tokens` /
+  `output_tokens`) は既定と同じ名前なので、記帳の順序 (答えを読む前に記帳) と締切で
+  見切った呼び出しの記帳はそのまま効く。**公式資料で確かめられていないこと**:
+  `context_length` の 272000 (会話用の `gpt-6-luna` の定義から写した値)、choice の
+  `description` と score の `description` を省略できるか (省略できるか分からないので、
+  説明が無いときは値・段階名と同じ文字列を入れている)、使用量の欄の名前 (公式ガイド
+  ではなく、SDK 仕様を引用した第三者資料で確認したもの)。

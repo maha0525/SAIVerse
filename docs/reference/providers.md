@@ -21,6 +21,7 @@
 | `typesafe` | TypeSafe System One | `jev_compat` | `https://api.typesafe.ai` | `TYPESAFE_API_KEY` |
 | `openrouter_systemone` | OpenRouter (System One) | `jev_compat` | `https://openrouter.ai` | `OPENROUTER_API_KEY` |
 | `localjev` | localjev (local) | `jev_compat` | `http://127.0.0.1:8080` | —（不要） |
+| `openai_decisions` | OpenAI Decisions | `jev_compat` | `https://api.openai.com` | `OPENAI_API_KEY` |
 
 `gemini` だけは `api_key_env_alternates: ["GEMINI_FREE_API_KEY"]` を併せ持つ。**`GEMINI_API_KEY` と `GEMINI_FREE_API_KEY` のどちらか一方が設定されていればモデル一覧に出る**（無料枠だけの利用を想定）。判定は `saiverse/model_configs.py` の `_get_required_env_vars()`。
 
@@ -97,14 +98,26 @@
 
 | 項目 | 既定 | 意味 |
 |---|---|---|
+| `request_shape` | `system_one` | リクエストの組み立て方。`system_one` は System One の形（`state` + qid の辞書の `questions`）をそのまま送る。`openai_decisions` は OpenAI の Decisions API の形へ送る直前に変換し、答えも読み戻す（下の節）。ほかの値は設定ミスとして、その宛先は「使えなかった」になる |
 | `path` | `/v1/systemone` | `base_url` の後ろに付ける宛先のパス |
-| `answers_key` | `answers` | 応答のどの欄に答えの辞書が載るか |
+| `answers_key` | `answers` | 応答のどの欄に答えが載るか（`system_one` は qid の辞書、`openai_decisions` は name 付きの配列） |
 | `usage_key` | `usage` | 応答のどの欄に使用量が載るか |
 | `answer_fields` | `{"noul": "noul", "choice": "choice", "score": "score"}` | 質問の型ごとに、答えの値が載る欄の名前 |
 | `usage_fields` | `{"input_tokens": "input_tokens", "output_tokens": "output_tokens"}` | 記帳する使用量の名前 → 応答の欄の名前 |
 | `supported_types` | 3 型すべて | この宛先が答えられる質問の型。対応しない型が混ざった質問は、ひとまとまりごと「使えなかった」になる |
 
-モデル側は `provider_ref` でこれを受け継ぐので、同梱の 3 つのモデル定義（`jev-latest` / `openrouter-jev-latest` / `localjev`）は宣言を持たない。使用量と費用はモデル設定キー名義で既存の記帳に載るので、単価は普通のモデルと同じく `pricing` に書く。
+モデル側は `provider_ref` でこれを受け継ぐので、同梱の 4 つのモデル定義（`jev-latest` / `openrouter-jev-latest` / `localjev` / `openai-decisions-gpt-6-luna`）は宣言を持たない（モデル側に書いた場合は、書いたキーだけが provider の宣言を上書きする）。使用量と費用はモデル設定キー名義で既存の記帳に載るので、単価は普通のモデルと同じく `pricing` に書く。
+
+#### `request_shape: "openai_decisions"` — OpenAI Decisions への変換
+
+OpenAI の [Decisions API](https://developers.openai.com/api/docs/guides/decisions)（public beta）は発想は System One と同じだが、組み立て方が違う。呼び出し側が組む質問と状況は System One の形のまま変えず、`saiverse/reflex_judgment.py` が送る直前に変換する。
+
+- **状況** は 1 本の文字列の `input` にする（文字列ならそのまま、それ以外は JSON）。
+- **質問** は qid を `name` にした配列にする。型名は noul → `predicate`、choice → `choice`、score → `score`。
+- **criteria** は Decisions に欄が無いので、構造の中に居場所があるものはそこへ写す。choice の選択肢の説明は `choices` の `description` へ（選択肢の値は `options` があればその順、無ければ criteria の辞書のキーの順。説明が無い・null のときは値と同じ文字列）、score の段階の説明は `levels` へ（2 つ以上の段階の配列が要る）。居場所の無い noul の基準（`true` / `false`）だけを、`input` の最後に「質問名ごとの基準」の節として書き足す。
+- **答え** は `name` 付きの配列で返るので、qid の辞書へ戻し、型名を SAIVerse 側へ写してから同じ検算に通す。`type: "refusal"`（答えられなかった）はその質問の答えが無いものとして扱い、同じ `name` の重複や形の壊れた要素は不正応答にする。
+
+選択肢を作れない choice や段階が 2 つ未満の score は、この宛先では表せないので「使えなかった」になる。同梱の `openai-decisions-gpt-6-luna`（API 上のモデル名は `gpt-6-luna`、単価は入力 $0.10/1M・出力は課金なし）は会話用の `gpt-6-luna` とは別のモデル定義で、protocol が `jev_compat` なので会話の選択欄には出ない。
 
 `localjev` の既定の宛先は `http://127.0.0.1:8080` (localjev 本体の既定 `LOCALJEV_HOST` / `LOCALJEV_PORT` に合わせた値。llama.cpp Server の既定ポートと同じなので、両方をローカルで動かすならどちらかのポートをずらす)。別のポートで動かしているなら、`~/.saiverse/user_data/providers/localjev.json` に同じ id で `base_url` を書いた上書きを置く。
 

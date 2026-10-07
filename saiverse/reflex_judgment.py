@@ -31,6 +31,15 @@ LLM 呼び出し) より速く・安く・形が保証される代わりに、�
     -> {"answers": {"<qid>": {"type": "noul", "noul": 0.92}},
         "usage": {"input_tokens": 312, "output_tokens": 48}}
 
+方言の宣言で ``request_shape: "openai_decisions"`` を書いた宛先 (OpenAI の Decisions
+API) だけは、組み立て方そのものが違うので送る直前に変換する — 質問は ``name`` 付きの
+配列 (型名 ``predicate`` / ``choice`` / ``score``)、状況は文字列の ``input`` で、
+criteria の欄が無い。choice の選択肢の説明は ``choices`` へ、score の段階の説明は
+``levels`` へ写し、構造の中に居場所の無い noul の基準だけを ``input`` の最後に書き
+足す。答えも ``name`` 付きの配列で返るので、
+qid の辞書へ戻してから同じ検算に通す。System One の形が本流で、呼び出し側が組む質問の
+形はどちらの宛先でも変わらない。
+
 **リクエストの形 (通常の LLM)**: 状況と質問一覧を 1 通のプロンプトに畳み、答えは
 ``{"answers": [{"qid": ..., "noul"/"score"/"choice": ...}, ...]}`` の構造化出力で
 受ける。**辞書ではなく配列**なのは、qid が実行時に決まるうえ Gemini が
@@ -101,6 +110,35 @@ _DEFAULT_ANSWERS_KEY = "answers"
 _DEFAULT_USAGE_KEY = "usage"
 _DEFAULT_ANSWER_FIELDS = {"noul": "noul", "choice": "choice", "score": "score"}
 _DEFAULT_USAGE_FIELDS = {"input_tokens": "input_tokens", "output_tokens": "output_tokens"}
+
+#: リクエストの組み立て方 (方言の宣言の ``request_shape``)。jev 互換の宛先だけが使う。
+#:
+#: - ``system_one`` (既定、宣言が無ければこれ): System One の形 (``state`` + qid の辞書の
+#:   ``questions``) をそのまま送る。本流の形で、呼び出し側が組む質問もこの形。
+#: - ``openai_decisions``: OpenAI の Decisions API の形へ、送る直前に変換する。質問は
+#:   ``name`` 付きの配列、型名は ``predicate`` / ``choice`` / ``score``、状況は文字列の
+#:   ``input``。System One の criteria は、構造の中に居場所があるものはそこへ写す
+#:   (score の段階の説明 → ``levels``、choice の選択肢の説明 → ``choices`` の
+#:   ``description``)。居場所の無い noul の criteria (はい/いいえの基準) だけを
+#:   ``input`` の最後に書き足す (2026-10-07 まはー裁定)。答えも ``name`` 付きの配列で
+#:   返るので、qid の辞書へ戻してから既存の検算に渡す。
+#:
+#: 分岐はこの宣言値だけで行う (提供元の名前や URL では分岐しない)。
+REQUEST_SHAPE_SYSTEM_ONE = "system_one"
+REQUEST_SHAPE_OPENAI_DECISIONS = "openai_decisions"
+REQUEST_SHAPES = (REQUEST_SHAPE_SYSTEM_ONE, REQUEST_SHAPE_OPENAI_DECISIONS)
+
+#: ``openai_decisions`` の形での質問の型名 (SAIVerse 側 → Decisions 側)。
+_DECISIONS_QUESTION_TYPES = {"noul": "predicate", "choice": "choice", "score": "score"}
+#: 答えの型名を SAIVerse 側へ戻す表 (Decisions 側 → SAIVerse 側)。
+_DECISIONS_ANSWER_TYPES = {value: key for key, value in _DECISIONS_QUESTION_TYPES.items()}
+#: 答えられなかった質問に Decisions が返す要素の型名 (``name`` だけが載る)。
+_DECISIONS_REFUSAL = "refusal"
+#: noul の criteria を ``input`` の最後に書き足すときの見出し (通常 LLM 向けの前置きと
+#: 揃えて英語)。
+_DECISIONS_CRITERIA_HEADER = "Criteria for each question (by question name):"
+#: score の段階の数の下限 (System One の正典も 2〜10 個)。1 個では段階にならない。
+_DECISIONS_MIN_LEVELS = 2
 
 #: 通常の LLM に組ませる構造化出力の、答えの配列が載る欄。
 _LLM_ANSWERS_KEY = "answers"
@@ -182,6 +220,8 @@ class ReflexBackend:
         answers_key / usage_key: 応答のどの欄に答え / 使用量が載るか。jev 互換のみ。
         answer_fields: 質問の型 → 答えの数値が載る欄の名前。
         usage_fields: 記帳する使用量の名前 → 応答の欄の名前。jev 互換のみ。
+        request_shape: リクエストの組み立て方 (:data:`REQUEST_SHAPES` のどれか)。
+            jev 互換のみ。既定は System One の形のまま送る ``system_one``。
     """
 
     model_key: str
@@ -199,6 +239,7 @@ class ReflexBackend:
     usage_fields: Mapping[str, str] = field(
         default_factory=lambda: dict(_DEFAULT_USAGE_FIELDS)
     )
+    request_shape: str = REQUEST_SHAPE_SYSTEM_ONE
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +303,20 @@ def _resolve_jev_backend(
         )
         raise ReflexJudgmentUnavailable(f"model {key!r} declares no usable question type")
 
+    # リクエストの組み立て方。宣言が無ければ本流 (System One の形)。宣言があるのに
+    # 知らない値なら設定ミス — 既定へ黙って落とすと、違う形のリクエストを毎回投げて
+    # 毎回失敗する (誰も気づかない) ので、他の解決失敗と同じく使えないと答える。
+    raw_shape = dialect.get("request_shape")
+    request_shape = REQUEST_SHAPE_SYSTEM_ONE if raw_shape is None else raw_shape
+    if request_shape not in REQUEST_SHAPES:
+        LOGGER.warning(
+            "[reflex] model %r declares an unknown request_shape %r (known: %s); "
+            "reflex judgment is unavailable", key, raw_shape, list(REQUEST_SHAPES),
+        )
+        raise ReflexJudgmentUnavailable(
+            f"model {key!r} declares an unknown request_shape {raw_shape!r}"
+        )
+
     return ReflexBackend(
         model_key=key,
         api_model=api_model,
@@ -274,6 +329,7 @@ def _resolve_jev_backend(
         usage_key=str(dialect.get("usage_key") or _DEFAULT_USAGE_KEY),
         answer_fields=_string_map(dialect.get("answer_fields"), _DEFAULT_ANSWER_FIELDS),
         usage_fields=_string_map(dialect.get("usage_fields"), _DEFAULT_USAGE_FIELDS),
+        request_shape=request_shape,
     )
 
 
@@ -780,6 +836,201 @@ def _record_usage(backend: ReflexBackend, usage: Mapping[str, Any], persona_id: 
 
 
 # ---------------------------------------------------------------------------
+# リクエストの形の変換 (request_shape が openai_decisions の宛先だけ)
+#
+# 呼び出し側が組む質問と状況は System One の形のまま (本流)。OpenAI の Decisions
+# API へは、送る直前にここで組み替え、受け取った答えを qid の辞書へ戻してから
+# 既存の検算 (_read_all_answers) に渡す。
+# ---------------------------------------------------------------------------
+
+
+def _as_text(value: Any) -> str:
+    """文字列はそのまま、それ以外は JSON の 1 行にする (input・説明欄へ書くとき用)。"""
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _criteria_lines(criteria: Any) -> list:
+    """noul の criteria 1 件を、input の最後に書き足す行の並びにする。
+
+    辞書なら ``key: value`` を 1 行ずつ (値が文字列でなければ JSON で書く)。辞書で
+    なければ JSON を 1 行。
+    """
+    if isinstance(criteria, Mapping):
+        return [f"{name}: {_as_text(value)}" for name, value in criteria.items()]
+    return [json.dumps(criteria, ensure_ascii=False, default=str)]
+
+
+def _decisions_input(state: Any, request_questions: Mapping[str, Mapping[str, Any]]) -> str:
+    """Decisions の ``input`` (1 本の文字列) を組む。
+
+    状況が文字列ならそのまま、それ以外は JSON。Decisions の質問の構造には noul の
+    criteria (はい/いいえの基準) の居場所が無いので、noul の criteria を持つ質問が
+    1 つでもあれば、その節を input の**最後**に書き足す (2026-10-07 まはー裁定)。
+    choice / score の criteria は質問の構造 (``choices`` / ``levels``) へ写すので、
+    ここには載せない。載せる質問が 1 つも無ければ節ごと付けない。
+    """
+    text = _as_text(state)
+    criteria_lines: list = []
+    for qid, question in request_questions.items():
+        if question.get("type") != "noul":
+            continue
+        criteria = question.get("criteria")
+        if not criteria:
+            continue
+        criteria_lines.append(f"[{qid}]")
+        criteria_lines.extend(_criteria_lines(criteria))
+    if not criteria_lines:
+        return text
+    return "\n".join([text, "", _DECISIONS_CRITERIA_HEADER, *criteria_lines])
+
+
+def _decisions_choices(qid: str, question: Mapping[str, Any], backend: ReflexBackend) -> list:
+    """choice 質問の選択肢を Decisions の ``choices`` に写す。
+
+    値は、文字列の ``options`` が使えればその順、無ければ ``criteria`` が辞書のとき
+    そのキーの順 (System One の choice の criteria は「選択肢 → 説明」の辞書)。説明は
+    ``criteria`` が辞書でその値のキーを持ち、値が null でなければそれを文字列化した
+    もの、それ以外は値と同じ文字列 (description を省略できるかは公式資料で確かめ
+    られていないので、空にはしない)。
+    """
+    criteria = question.get("criteria")
+    descriptions = criteria if isinstance(criteria, Mapping) else {}
+    options = _usable_options(question)
+    if options is not None:
+        values: Sequence[Any] = options
+    else:
+        values = list(descriptions.keys())
+    choices = []
+    for value in values:
+        text = _as_text(value)
+        described = descriptions.get(value)
+        choices.append({
+            "value": text,
+            "description": text if described is None else _as_text(described),
+        })
+    if not choices:
+        raise ReflexJudgmentUnavailable(
+            f"the destination for {backend.model_key!r} needs options (or a criteria "
+            f"mapping) for the choice question {qid!r}"
+        )
+    return choices
+
+
+def _decisions_levels(qid: str, question: Mapping[str, Any], backend: ReflexBackend) -> list:
+    """score 質問の段階の説明 (System One の criteria の配列) を ``levels`` に写す。
+
+    System One の score の criteria は順序付きの段階の説明の配列で、答えは段階の番号の
+    確率加重平均 — Decisions の score と同じ意味。2 個未満・配列でない criteria は
+    段階にならないので不成立 (Jev でも受け付けない形)。
+    """
+    criteria = question.get("criteria")
+    if not isinstance(criteria, (list, tuple)) or len(criteria) < _DECISIONS_MIN_LEVELS:
+        raise ReflexJudgmentUnavailable(
+            f"the destination for {backend.model_key!r} needs at least "
+            f"{_DECISIONS_MIN_LEVELS} ordered levels in the criteria of the score "
+            f"question {qid!r}"
+        )
+    levels = []
+    for level in criteria:
+        label = _as_text(level)
+        levels.append({"label": label, "description": label})
+    return levels
+
+
+def _decisions_questions(
+    request_questions: Mapping[str, Mapping[str, Any]], backend: ReflexBackend,
+) -> list:
+    """Decisions の ``questions`` (name 付きの配列) を、呼び出し側の順序のまま組む。
+
+    criteria は ``criteria`` の欄としては入れない (欄が無い)。choice の説明は
+    ``choices``、score の段階は ``levels`` へ写し、noul の基準は
+    :func:`_decisions_input` が input の最後へ書く。
+
+    Raises:
+        ReflexJudgmentUnavailable: この形で表せない質問 — Decisions に型が無い、選択肢を
+            作れない choice、段階を作れない score。答えられない型を含む質問と同じ扱いで、
+            ひとまとまりごと不成立にする。
+    """
+    converted = []
+    for qid, question in request_questions.items():
+        qtype = question["type"]
+        decisions_type = _DECISIONS_QUESTION_TYPES.get(qtype)
+        if decisions_type is None:
+            raise ReflexJudgmentUnavailable(
+                f"the destination for {backend.model_key!r} cannot express {qtype!r} questions"
+            )
+        entry: Dict[str, Any] = {
+            "type": decisions_type,
+            "name": qid,
+            "instructions": question["instructions"],
+        }
+        if qtype == "choice":
+            entry["choices"] = _decisions_choices(qid, question, backend)
+        elif qtype == "score":
+            entry["levels"] = _decisions_levels(qid, question, backend)
+        converted.append(entry)
+    return converted
+
+
+def _answers_from_decisions(
+    raw_answers: Any, backend: ReflexBackend, secret: _Secrets,
+) -> Dict[str, Any]:
+    """Decisions の ``answers`` (name 付きの配列) を ``{qid: 答え}`` の辞書へ戻す。
+
+    戻すときに型名を SAIVerse 側へ写す (predicate → noul)。要求していない名前は
+    辞書に載っても使われない (既存の辞書形式と同じく無視)。要求した名前の欠落は
+    呼び出し側の :func:`_read_all_answers` が部分回答として不成立にする。
+
+    - ``type: "refusal"`` の要素は、その質問の答えが無いものとして扱う (辞書に
+      載せない → 要求した質問なら不成立)。拒否されたことは WARNING に出す。
+    - 同じ ``name`` が 2 回出たら不正応答 (どちらを採るかを決められない)。
+    - 辞書でない要素・``name`` が文字列でない要素も不正応答 (黙って捨てると、壊れた
+      応答が「その質問の答えが無い」に化けて原因が見えなくなる)。
+
+    Raises:
+        ReflexJudgmentUnavailable: ``answers`` が配列でない・形の壊れた要素・名前の重複。
+    """
+    if not isinstance(raw_answers, list):
+        LOGGER.warning("[reflex] response has no %r array", backend.answers_key)
+        raise ReflexJudgmentUnavailable(f"response has no {backend.answers_key!r} array")
+
+    answers: Dict[str, Any] = {}
+    seen: set = set()
+    for entry in raw_answers:
+        if not isinstance(entry, dict):
+            shown = _masked_repr(entry, secret)[:_ERROR_BODY_PREVIEW]
+            LOGGER.warning("[reflex] an entry in %r is not an object: %s", backend.answers_key, shown)
+            raise ReflexJudgmentUnavailable(
+                f"an entry in {backend.answers_key!r} is not an object: {shown}"
+            )
+        name = entry.get("name")
+        if not isinstance(name, str):
+            shown = _masked_repr(name, secret)[:_ERROR_BODY_PREVIEW]
+            LOGGER.warning("[reflex] an entry in %r has no name string: %s", backend.answers_key, shown)
+            raise ReflexJudgmentUnavailable(
+                f"an entry in {backend.answers_key!r} has no name string: {shown}"
+            )
+        if name in seen:
+            shown = _masked_repr(name, secret)[:_ERROR_BODY_PREVIEW]
+            LOGGER.warning("[reflex] the answer for %s appears more than once", shown)
+            raise ReflexJudgmentUnavailable(f"the answer for {shown} appears more than once")
+        seen.add(name)
+
+        answer_type = entry.get("type")
+        if answer_type == _DECISIONS_REFUSAL:
+            LOGGER.warning(
+                "[reflex] %r refused to answer qid=%s",
+                backend.model_key, _masked_repr(name, secret)[:_ERROR_BODY_PREVIEW],
+            )
+            continue
+        answer = dict(entry)
+        if isinstance(answer_type, str) and answer_type in _DECISIONS_ANSWER_TYPES:
+            answer["type"] = _DECISIONS_ANSWER_TYPES[answer_type]
+        answers[name] = answer
+    return answers
+
+
+# ---------------------------------------------------------------------------
 # 答える側ごとの往復 (器は evaluate が共有する)
 # ---------------------------------------------------------------------------
 
@@ -876,7 +1127,10 @@ class _JevCall:
         _record_usage(backend, usage, persona_id)
 
         answers = data.get(backend.answers_key)
-        if not isinstance(answers, dict):
+        if backend.request_shape == REQUEST_SHAPE_OPENAI_DECISIONS:
+            # name 付きの配列で返る形。qid の辞書へ戻してから同じ検算に渡す。
+            answers = _answers_from_decisions(answers, backend, secret)
+        elif not isinstance(answers, dict):
             LOGGER.warning("[reflex] response has no %r object", backend.answers_key)
             raise ReflexJudgmentUnavailable(f"response has no {backend.answers_key!r} object")
 
@@ -1265,11 +1519,21 @@ def _evaluate(
 
     call: Optional[Any] = None
     if backend.kind == REFLEX_KIND_JEV:
-        payload = {
-            "state": state,
-            "model": backend.api_model,
-            "questions": request_questions,
-        }
+        if backend.request_shape == REQUEST_SHAPE_OPENAI_DECISIONS:
+            # 送る直前に OpenAI の Decisions の形へ組み替える (呼び出し側の質問と
+            # 状況は System One の形のまま)。表せない質問はここで不成立になり、
+            # 同時実行の枠を取る前に戻る。
+            payload: Dict[str, Any] = {
+                "model": backend.api_model,
+                "input": _decisions_input(state, request_questions),
+                "questions": _decisions_questions(request_questions, backend),
+            }
+        else:
+            payload = {
+                "state": state,
+                "model": backend.api_model,
+                "questions": request_questions,
+            }
         # API キーの値そのものはログに出さない (ヘッダごとダンプしない)。
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -1433,6 +1697,9 @@ __all__ = [
     "OUTCOME_OK",
     "OUTCOME_WINDOW_SECONDS",
     "QUESTION_TYPES",
+    "REQUEST_SHAPES",
+    "REQUEST_SHAPE_OPENAI_DECISIONS",
+    "REQUEST_SHAPE_SYSTEM_ONE",
     "REFLEX_KIND_JEV",
     "REFLEX_KIND_LLM",
     "UNAVAILABLE_DEADLINE",
