@@ -1924,7 +1924,7 @@ _DECISIONS_DIALECT = {
 
 DECISIONS_KEY = "openai-decisions-gpt-6-luna"
 _CRITERIA_HEADER = (
-    "Criteria for the questions above (each block starts with the question name "
+    "Criteria for the questions (each block starts with the question name "
     "and its instructions):"
 )
 
@@ -2165,8 +2165,8 @@ def test_decisions_choice_can_be_built_from_a_criteria_mapping_alone(decisions_r
     "question",
     [
         pytest.param({"type": "choice", "instructions": "選択肢なし"}, id="choice_without_values"),
-        pytest.param({"type": "choice", "instructions": "x", "options": [1, 2]},
-                     id="choice_with_non_string_options_only"),
+        pytest.param({"type": "choice", "instructions": "x", "options": "walk"},
+                     id="choice_with_options_that_are_not_a_list"),
         pytest.param({"type": "score", "instructions": "段階なし"}, id="score_without_levels"),
         pytest.param({"type": "score", "instructions": "x", "criteria": ["only one"]},
                      id="score_with_one_level"),
@@ -2179,8 +2179,11 @@ def test_a_question_the_decisions_shape_cannot_express_is_unavailable(decisions_
     def handler(request):  # pragma: no cover - 呼ばれてはいけない
         raise AssertionError("the destination must not be called")
 
-    with pytest.raises(ReflexJudgmentUnavailable):
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
         evaluate(STATE, {"q0": question}, timeout=2.5, transport=_transport(handler))
+    # 宛先の AssertionError も "request failed" に正規化されるので、送信の手前で
+    # 断ったことを文言で確かめる。
+    assert "request failed" not in str(exc.value)
 
 
 def test_decisions_choice_outside_the_options_is_unavailable(decisions_role):
@@ -2477,17 +2480,25 @@ def _circular_state():
     return state
 
 
+class _Unprintable:
+    """文字列にしようとすると TypeError / ValueError 以外の例外を投げる値。"""
+
+    def __str__(self):
+        raise RuntimeError("cannot print this value")
+
+
 @pytest.mark.parametrize(
     "state",
     [
         pytest.param({(1, 2): "x"}, id="non_string_key"),
         pytest.param(_circular_state(), id="circular_reference"),
+        pytest.param({"odd": _Unprintable()}, id="value_whose_str_raises"),
     ],
 )
 def test_a_state_that_cannot_become_the_decisions_input_is_unavailable(
     decisions_role, state, caplog,
 ):
-    """組み立ての TypeError / ValueError は ReflexJudgmentUnavailable にし、送らない。"""
+    """組み立ての例外は型を問わず ReflexJudgmentUnavailable にし、送らない。"""
     caplog.set_level("WARNING", logger="saiverse.reflex_judgment")
     called = []
 
@@ -2544,3 +2555,412 @@ def test_a_decisions_choice_built_from_criteria_rejects_an_unsent_value(decision
             timeout=2.5, transport=_transport(_capture({}, response)),
         )
     assert "options" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# 2 巡目のレビュー: 1 巡目の規律を、同じ理由の当てはまる隣へ広げた分
+# ---------------------------------------------------------------------------
+
+
+# --- 方言の宣言: キーがあって null・型違いなら、どの欄でも設定ミスとして断る ---
+
+
+@pytest.mark.parametrize(
+    "field_name, value",
+    [
+        pytest.param("path", None, id="path_null"),
+        pytest.param("path", 5, id="path_not_a_string"),
+        pytest.param("path", "  ", id="path_blank"),
+        pytest.param("supported_types", None, id="supported_types_null"),
+        pytest.param("supported_types", "noul", id="supported_types_a_string"),
+        pytest.param("supported_types", ["noul", None], id="supported_types_with_null_entry"),
+        pytest.param("answers_key", None, id="answers_key_null"),
+        pytest.param("answers_key", ["answers"], id="answers_key_a_list"),
+        pytest.param("usage_key", None, id="usage_key_null"),
+        pytest.param("usage_key", 1, id="usage_key_a_number"),
+        pytest.param("answer_fields", None, id="answer_fields_null"),
+        pytest.param("answer_fields", ["noul"], id="answer_fields_a_list"),
+        pytest.param("answer_fields", {"noul": None}, id="answer_fields_null_entry"),
+        pytest.param("answer_fields", {"noul": ""}, id="answer_fields_empty_entry"),
+        pytest.param("usage_fields", None, id="usage_fields_null"),
+        pytest.param("usage_fields", "input_tokens", id="usage_fields_a_string"),
+        pytest.param("usage_fields", {"input_tokens": 3}, id="usage_fields_number_entry"),
+        pytest.param("request_shape", 1, id="request_shape_a_number"),
+    ],
+)
+def test_a_dialect_field_that_is_null_or_mistyped_is_unavailable(
+    monkeypatch, caplog, field_name, value,
+):
+    """既定へ黙って落とすと、違う宛先・違う欄名で毎回失敗して誰も気づかない。"""
+    caplog.set_level("WARNING", logger="saiverse.reflex_judgment")
+    _set_configs(monkeypatch, {
+        MODEL_KEY: _model_config(reflex_judgment={**_CANONICAL_DIALECT, field_name: value}),
+    })
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        resolve_backend()
+    assert field_name in str(exc.value)
+    assert field_name in caplog.text
+    assert is_available() is False
+
+
+@pytest.mark.parametrize(
+    "dialect",
+    [
+        pytest.param("typo", id="string"),
+        pytest.param(["path"], id="list"),
+        pytest.param(0, id="number"),
+    ],
+)
+def test_a_dialect_that_is_not_an_object_is_unavailable(monkeypatch, caplog, dialect):
+    """辞書でない宣言を空の辞書 (= 宣言なし) に読み替えない。"""
+    caplog.set_level("WARNING", logger="saiverse.reflex_judgment")
+    _set_configs(monkeypatch, {MODEL_KEY: _model_config(reflex_judgment=dialect)})
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        resolve_backend()
+    assert "not an object" in str(exc.value)
+    assert "reflex_judgment" in caplog.text
+    assert is_available() is False
+
+
+def test_a_dialect_that_is_absent_or_null_uses_the_canonical_defaults(monkeypatch):
+    """欄が無い・None のときだけ「宣言なし」(TypeSafe 正典の既定)。"""
+    config = _model_config()
+    del config["reflex_judgment"]
+    _set_configs(monkeypatch, {MODEL_KEY: config})
+    backend = resolve_backend()
+    assert backend.url == f"{BASE_URL}/v1/systemone"
+    assert backend.request_shape == reflex_judgment.REQUEST_SHAPE_SYSTEM_ONE
+
+    _set_configs(monkeypatch, {MODEL_KEY: _model_config(reflex_judgment=None)})
+    assert resolve_backend().url == f"{BASE_URL}/v1/systemone"
+
+
+def _resolved_through_the_test_provider(monkeypatch, provider_dialect, model_fields):
+    """偽の provider を経由して、読み込みと同じ合成 (_resolve_provider_ref) を通す。"""
+    from saiverse import model_configs
+
+    provider = _provider()
+    if provider_dialect is _ABSENT:
+        del provider["reflex_judgment"]
+    else:
+        provider["reflex_judgment"] = provider_dialect
+    _set_providers(monkeypatch, {PROVIDER_ID: provider})
+    resolved = model_configs._resolve_provider_ref(
+        {"model": "jev-latest", "provider_ref": PROVIDER_ID, **model_fields}
+    )
+    _set_configs(monkeypatch, {MODEL_KEY: resolved})
+    return resolved
+
+
+_ABSENT = object()
+
+
+@pytest.mark.parametrize(
+    "provider_dialect, model_fields",
+    [
+        pytest.param(dict(_CANONICAL_DIALECT), {"reflex_judgment": "typo"},
+                     id="model_side_typo_survives_the_merge"),
+        pytest.param("typo", {}, id="provider_side_typo_with_a_silent_model"),
+        pytest.param("typo", {"reflex_judgment": {"supported_types": ["noul"]}},
+                     id="provider_side_typo_with_a_partial_model_dialect"),
+    ],
+)
+def test_a_non_object_dialect_is_refused_after_the_provider_merge(
+    monkeypatch, provider_dialect, model_fields,
+):
+    """合成で残った辞書でない宣言も、反射判断の解決で断られる (既定へ落ちない)。"""
+    resolved = _resolved_through_the_test_provider(monkeypatch, provider_dialect, model_fields)
+    assert resolved["reflex_judgment"] == "typo"
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        resolve_backend()
+    assert "not an object" in str(exc.value)
+
+
+def test_a_provider_without_a_dialect_still_resolves_with_the_defaults(monkeypatch):
+    resolved = _resolved_through_the_test_provider(monkeypatch, _ABSENT, {})
+    assert "reflex_judgment" not in resolved
+    assert resolve_backend().url == f"{BASE_URL}/v1/systemone"
+
+
+#: 同梱の System One の宛先 (provider id, モデル設定キー, 宛先の URL)。
+_SHIPPED_SYSTEM_ONE = [
+    ("typesafe", "jev-latest", "https://api.typesafe.ai/v1/systemone"),
+    ("openrouter_systemone", "openrouter-jev-latest", "https://openrouter.ai/api/alpha/decisions"),
+    ("localjev", "localjev", "http://127.0.0.1:8080/v1/systemone"),
+]
+
+
+@pytest.mark.parametrize(
+    "provider_id, model_key, url",
+    [pytest.param(*row, id=row[1]) for row in _SHIPPED_SYSTEM_ONE],
+)
+def test_the_shipped_system_one_destinations_still_resolve(
+    monkeypatch, mock_provider_network, provider_id, model_key, url,
+):
+    """宣言に request_shape を持たない同梱の宛先は、厳しくした規則でも今までどおり解決する。
+
+    builtin_data の provider / モデル定義を実際に読み、読み込みと同じ合成を通す。
+    """
+    from saiverse import model_configs
+    from saiverse.data_paths import BUILTIN_DATA_DIR, MODELS_DIR, PROVIDERS_DIR
+    from saiverse.provider_configs import SOURCE_BUILTIN
+
+    def read(directory, stem):
+        return json.loads((BUILTIN_DATA_DIR / directory / f"{stem}.json").read_text(encoding="utf-8"))
+
+    provider = read(PROVIDERS_DIR, provider_id)
+    provider["source"] = SOURCE_BUILTIN
+    assert "request_shape" not in provider["reflex_judgment"]
+    _set_providers(monkeypatch, {provider_id: provider})
+    _set_configs(monkeypatch, {
+        model_key: model_configs._resolve_provider_ref(read(MODELS_DIR, model_key)),
+    })
+    mock_provider_network("api.typesafe.ai", "openrouter.ai")
+
+    backend = resolve_backend(model_key)
+    assert backend.kind == reflex_judgment.REFLEX_KIND_JEV
+    assert backend.request_shape == reflex_judgment.REQUEST_SHAPE_SYSTEM_ONE
+    assert backend.url == url
+    assert backend.supported_types == frozenset({"noul", "choice", "score"})
+    assert backend.answer_fields == {"noul": "noul", "choice": "choice", "score": "score"}
+
+
+# --- 送るものの組み立てで出た例外は、型を問わず ReflexJudgmentUnavailable ---
+
+
+def test_decisions_criteria_that_cannot_become_json_are_unavailable(decisions_role, caplog):
+    caplog.set_level("WARNING", logger="saiverse.reflex_judgment")
+    called = []
+
+    def handler(request):
+        called.append(request)
+        return httpx.Response(200, json=_predicates("m0"))
+
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(
+            STATE, {"m0": {"instructions": "急ぎか", "criteria": {"true": {(1, 2): "x"}}}},
+            timeout=2.5, transport=_transport(handler),
+        )
+    assert called == []
+    assert "could not build the Decisions request" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        pytest.param({(1, 2): "x"}, id="non_string_key"),
+        pytest.param(_circular_state(), id="circular_reference"),
+        pytest.param({"odd": _Unprintable()}, id="value_whose_str_raises"),
+    ],
+)
+def test_llm_prompt_that_cannot_be_built_is_unavailable_without_calling_the_llm(
+    llm_role, monkeypatch, caplog, state,
+):
+    """通常の LLM の道も、プロンプトの組み立てで落ちたら LLM を呼ばずに「使えなかった」。"""
+    caplog.set_level("WARNING", logger="saiverse.reflex_judgment")
+    _refuse_llm_client(monkeypatch)
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(state, MIXED_QUESTIONS, timeout=2.5)
+    assert "could not build the structured-output prompt" in str(exc.value)
+    assert "could not build" in caplog.text
+
+
+@pytest.mark.parametrize("path", ["decisions", "llm"])
+def test_a_caller_bug_stays_a_value_error_even_when_the_build_would_fail(
+    decisions_role, monkeypatch, path,
+):
+    """呼び出し側のバグ (instructions が無い等) は組み立ての正規化に飲み込まれない。"""
+    if path == "llm":
+        monkeypatch.setenv(ROLE_ENV, LLM_MODEL_KEY)
+        monkeypatch.setenv(LLM_KEY_ENV, "test-key-not-real")
+        _set_configs(monkeypatch, {LLM_MODEL_KEY: _llm_model_config()})
+        _refuse_llm_client(monkeypatch)
+
+    def handler(request):  # pragma: no cover - 呼ばれてはいけない
+        raise AssertionError("the destination must not be called")
+
+    for bad_question in (
+        {"type": "noul"},                       # instructions が無い
+        "not a mapping",                        # 質問が辞書でない
+        {"type": "verdict", "instructions": "x"},  # 型が 3 型のどれでもない
+    ):
+        with pytest.raises(ValueError):
+            evaluate(_circular_state(), {"q0": bad_question}, timeout=2.5,
+                     transport=_transport(handler))
+
+
+# --- 「中身が無い」の判定を一つに揃える ---
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param([""], id="empty_string"),
+        pytest.param(["walk", "   "], id="blank_string"),
+        pytest.param(["walk", None], id="null"),
+        pytest.param(["walk", {}], id="empty_mapping"),
+    ],
+)
+def test_a_decisions_choice_with_an_empty_option_is_unavailable(decisions_role, options):
+    def handler(request):  # pragma: no cover - 呼ばれてはいけない
+        raise AssertionError("the destination must not be called")
+
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(STATE, {"c0": {"type": "choice", "instructions": "どれ", "options": options}},
+                 timeout=2.5, transport=_transport(handler))
+    assert "no content" in str(exc.value)
+
+
+def test_a_decisions_choice_with_an_empty_criteria_key_is_unavailable(decisions_role):
+    """criteria の辞書から組む choice でも、中身の無いキーは選択肢の値にできない。"""
+    def handler(request):  # pragma: no cover - 呼ばれてはいけない
+        raise AssertionError("the destination must not be called")
+
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(STATE, {"c0": {"type": "choice", "instructions": "どれ",
+                                "criteria": {"walk": "散歩", " ": "空白"}}},
+                 timeout=2.5, transport=_transport(handler))
+    # 送信の手前で断っていること (宛先の AssertionError が正規化された結果ではない)。
+    assert "no content" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "levels",
+    [
+        pytest.param(["Calm", None, "Angry"], id="null"),
+        pytest.param(["Calm", "", "Angry"], id="empty_string"),
+        pytest.param(["Calm", "  "], id="blank_string"),
+        pytest.param(["Calm", [], "Angry"], id="empty_list"),
+        pytest.param([{}, "Calm", "Angry"], id="empty_mapping"),
+    ],
+)
+def test_a_decisions_score_with_an_empty_level_is_unavailable(decisions_role, levels):
+    """段階を黙って落とすと後ろの段階の番号がずれ、score の意味が変わるので断る。"""
+    def handler(request):  # pragma: no cover - 呼ばれてはいけない
+        raise AssertionError("the destination must not be called")
+
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(STATE, {"s0": {"type": "score", "instructions": "何点", "criteria": levels}},
+                 timeout=2.5, transport=_transport(handler))
+    assert "no content" in str(exc.value)
+
+
+def test_decisions_empty_containers_count_as_no_content(decisions_role):
+    """空の辞書の説明は値と同じ文字列になり、空の入れ物の基準は末尾の節に載らない。"""
+    captured = {}
+    evaluate(
+        STATE,
+        {
+            "c0": {"type": "choice", "instructions": "どこへ行く",
+                   "options": ["walk", "stay"],
+                   "criteria": {"walk": {}, "stay": "家にいる", "extra": [], "more": {}}},
+            "m0": {"instructions": "急ぎか", "criteria": {"true": {}, "false": []}},
+        },
+        timeout=2.5,
+        transport=_transport(_capture(captured, {"answers": [
+            {"type": "choice", "name": "c0", "choice": "walk"},
+            {"type": "predicate", "name": "m0", "probability": 0.5},
+        ]})),
+    )
+    assert captured["body"]["questions"][0]["choices"] == [
+        {"value": "walk", "description": "walk"},
+        {"value": "stay", "description": "家にいる"},
+    ]
+    assert _CRITERIA_HEADER not in captured["body"]["input"]
+
+
+# --- 文字列でない options も使う ---
+
+
+def test_decisions_non_string_options_are_sent_as_text(decisions_role):
+    captured = {}
+    answers, _usage = evaluate(
+        STATE, {"c0": {"type": "choice", "instructions": "何番", "options": [1, 2]}},
+        timeout=2.5,
+        transport=_transport(_capture(captured, {"answers": [
+            {"type": "choice", "name": "c0", "choice": "2"},
+        ]})),
+    )
+    assert answers == {"c0": "2"}
+    assert captured["body"]["questions"][0]["choices"] == [
+        {"value": "1", "description": "1"},
+        {"value": "2", "description": "2"},
+    ]
+
+
+def test_decisions_non_string_options_reject_an_unsent_value(decisions_role):
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(
+            STATE, {"c0": {"type": "choice", "instructions": "何番", "options": [1, 2]}},
+            timeout=2.5,
+            transport=_transport(_capture({}, {"answers": [
+                {"type": "choice", "name": "c0", "choice": "3"},
+            ]})),
+        )
+    assert "not one of the offered options" in str(exc.value)
+
+
+# --- 選択肢の値と criteria のキーは文字列で突き合わせる ---
+
+
+def test_decisions_criteria_keys_match_the_options_as_text(decisions_role):
+    captured = {}
+    answers, _usage = evaluate(
+        STATE, {"c0": {"type": "choice", "instructions": "何番", "options": ["1"],
+                       "criteria": {1: "one"}}},
+        timeout=2.5,
+        transport=_transport(_capture(captured, {"answers": [
+            {"type": "choice", "name": "c0", "choice": "1"},
+        ]})),
+    )
+    assert answers == {"c0": "1"}
+    assert captured["body"]["questions"][0]["choices"] == [{"value": "1", "description": "one"}]
+    assert _CRITERIA_HEADER not in captured["body"]["input"]   # 節に重ならない
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        pytest.param({"options": ["walk", "walk"]}, id="duplicate_options"),
+        pytest.param({"options": [1, "1"]}, id="options_equal_as_text"),
+        pytest.param({"criteria": {1: "a", "1": "b"}}, id="criteria_keys_equal_as_text"),
+        pytest.param({"options": ["1"], "criteria": {1: "a", "1": "b"}},
+                     id="two_descriptions_for_one_option"),
+    ],
+)
+def test_decisions_choice_values_that_collide_as_text_are_unavailable(decisions_role, question):
+    """文字列にした後で重なる値は、答えや説明がどれを指すか決められないので断る。"""
+    def handler(request):  # pragma: no cover - 呼ばれてはいけない
+        raise AssertionError("the destination must not be called")
+
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(STATE, {"c0": {"type": "choice", "instructions": "どれ", **question}},
+                 timeout=2.5, transport=_transport(handler))
+    # 送信の手前で断っていること (宛先の AssertionError が正規化された結果ではない)。
+    assert "cannot express the choice question" in str(exc.value)
+
+
+def test_decisions_colliding_criteria_keys_outside_the_options_go_to_the_end(decisions_role):
+    """重なるキーでも choices の説明に使われないなら、どちらも末尾の節へ回すだけ。"""
+    captured = {}
+    evaluate(
+        STATE, {"c0": {"type": "choice", "instructions": "どれ", "options": ["x"],
+                       "criteria": {1: "a", "1": "b"}}},
+        timeout=2.5,
+        transport=_transport(_capture(captured, {"answers": [
+            {"type": "choice", "name": "c0", "choice": "x"},
+        ]})),
+    )
+    assert _input_tail(captured) == "\n[c0] どれ\n1: a\n1: b"
+
+
+# --- 末尾の節の見出し ---
+
+
+def test_the_criteria_header_does_not_point_above(decisions_role):
+    """Decisions の質問は input とは別の欄にあり、モデルから見て上にあるとは限らない。"""
+    captured = {}
+    evaluate(STATE, QUESTIONS, timeout=2.5,
+             transport=_transport(_capture(captured, _predicates("m0", "m1"))))
+    assert _CRITERIA_HEADER in captured["body"]["input"]
+    assert "above" not in captured["body"]["input"]
