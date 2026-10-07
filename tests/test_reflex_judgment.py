@@ -1906,7 +1906,9 @@ def test_the_choice_field_is_not_bound_when_options_are_missing(llm_role, monkey
 # (name 付きの質問の配列 + 文字列の input) へ組み替え、name 付きの答えの配列を
 # qid の辞書へ戻してから既存の検算に通す。criteria は構造に居場所があるもの
 # (choice の説明 → choices、score の段階 → levels) はそこへ写し、居場所の無い
-# noul の基準だけを input の最後に書き足す (2026-10-07 まはー裁定)。
+# 基準 (noul の基準と、choices に入らなかった choice の基準) を input の最後の節に
+# 書き足す。まはーの裁定 (2026-10-07) は「criteria は input の最後に押し込む」と
+# 「OpenAI だけ対応できない型を残さない」で、構造への写し込みはそれを受けた設計。
 # ---------------------------------------------------------------------------
 
 #: 同梱の openai_decisions provider と同じ方言の宣言 (宛先だけ偽のループバック)。
@@ -1921,7 +1923,10 @@ _DECISIONS_DIALECT = {
 }
 
 DECISIONS_KEY = "openai-decisions-gpt-6-luna"
-_CRITERIA_HEADER = "Criteria for each question (by question name):"
+_CRITERIA_HEADER = (
+    "Criteria for the questions above (each block starts with the question name "
+    "and its instructions):"
+)
 
 
 @pytest.fixture
@@ -1947,11 +1952,13 @@ def _predicates(*qids, probability=0.5):
     ]}
 
 
-def _shipped_decisions_configs():
+def _shipped_decisions_configs(**model_overrides):
     """同梱の provider / モデル定義を、読み込み後の解決済みの姿で返す。
 
     user_data の上書きに隠されないよう builtin_data から直接読む。会話用の
     ``gpt-6-luna`` (provider_ref: openai) も並べて、名前の取り違えが起きないかを見る。
+    ``model_overrides`` は Decisions のモデル定義に、解決の**前**に書き足す欄
+    (利用者がモデル定義を上書きしたときの姿を作る)。
     """
     from saiverse import model_configs
     from saiverse.data_paths import BUILTIN_DATA_DIR, MODELS_DIR, PROVIDERS_DIR
@@ -1967,20 +1974,26 @@ def _shipped_decisions_configs():
         providers[pid] = provider
     with patch.dict("saiverse.provider_configs.PROVIDER_CONFIGS", providers, clear=True):
         configs = {
-            DECISIONS_KEY: model_configs._resolve_provider_ref(read(MODELS_DIR, DECISIONS_KEY)),
+            DECISIONS_KEY: model_configs._resolve_provider_ref(
+                {**read(MODELS_DIR, DECISIONS_KEY), **model_overrides}
+            ),
             "gpt-6-luna": model_configs._resolve_provider_ref(read(MODELS_DIR, "gpt-6-luna")),
         }
     return providers, configs
 
 
-@pytest.fixture
-def shipped_decisions(monkeypatch, mock_provider_network):
-    providers, configs = _shipped_decisions_configs()
+def _install_shipped_decisions(monkeypatch, mock_provider_network, **model_overrides):
+    providers, configs = _shipped_decisions_configs(**model_overrides)
     _set_providers(monkeypatch, providers)
     _set_configs(monkeypatch, configs)
     mock_provider_network("api.openai.com")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key-not-real")
     return configs
+
+
+@pytest.fixture
+def shipped_decisions(monkeypatch, mock_provider_network):
+    return _install_shipped_decisions(monkeypatch, mock_provider_network)
 
 
 def test_the_shipped_decisions_model_resolves_to_the_decisions_endpoint(shipped_decisions):
@@ -2060,10 +2073,10 @@ def test_decisions_request_carries_named_questions_and_noul_criteria_at_the_end(
         state_json,
         "",
         _CRITERIA_HEADER,
-        "[m0]",
+        f"[m0] {QUESTIONS['m0']['instructions']}",
         "true: 関連する",
         "false: 関連しない",
-        "[m1]",
+        f"[m1] {QUESTIONS['m1']['instructions']}",
         "true: 関連する",
         "false: 関連しない",
     ])
@@ -2125,7 +2138,8 @@ def test_decisions_choice_and_score_criteria_go_into_the_structure(decisions_rol
         assert "criteria" not in question
 
     tail = captured["body"]["input"].split(_CRITERIA_HEADER, 1)[1]
-    assert tail == "\n[m0]\ntrue: 急ぎ\nfalse: 急がない"   # noul の基準だけ
+    # choices に入った説明は節に重ねない (shipping は null なので情報が無い)。
+    assert tail == "\n[m0] Is it urgent?\ntrue: 急ぎ\nfalse: 急がない"
 
 
 def test_decisions_choice_can_be_built_from_a_criteria_mapping_alone(decisions_role):
@@ -2267,3 +2281,266 @@ def test_an_abandoned_decisions_call_still_records_its_usage(decisions_role, usa
     _join_workers()
     assert len(usage_calls) == 1
     assert usage_calls[0]["input_tokens"] == 77
+
+
+# --- 解決: request_shape の null・answer_fields の既定・保存の関所・宛先とキーの照合 ---
+
+
+def test_an_explicit_null_request_shape_on_the_model_is_unavailable(
+    monkeypatch, mock_provider_network, caplog,
+):
+    """モデル側の null は provider の宣言をキー単位の合成で消す。既定へ黙って落とさない。
+
+    落とすと、Decisions の宛先へ System One の形を送り続けて毎回失敗する。
+    """
+    caplog.set_level("WARNING", logger="saiverse.reflex_judgment")
+    configs = _install_shipped_decisions(
+        monkeypatch, mock_provider_network, reflex_judgment={"request_shape": None},
+    )
+    dialect = configs[DECISIONS_KEY]["reflex_judgment"]
+    assert "request_shape" in dialect and dialect["request_shape"] is None
+    assert dialect["path"] == "/v1/decisions"   # 他のキーは provider の宣言が残る
+
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        resolve_backend(DECISIONS_KEY)
+    assert "request_shape" in str(exc.value)
+    assert "request_shape" in caplog.text
+    assert is_available(model_key=DECISIONS_KEY) is False
+
+
+def test_a_decisions_shape_without_answer_fields_reads_noul_from_probability(monkeypatch):
+    """request_shape だけを宣言した宛先でも、noul の答えは probability の欄から読む。"""
+    _set_configs(monkeypatch, {
+        MODEL_KEY: _model_config(
+            model="gpt-6-luna",
+            reflex_judgment={"request_shape": "openai_decisions", "path": "/v1/decisions"},
+        ),
+    })
+    backend = resolve_backend()
+    assert backend.answer_fields == {"noul": "probability", "choice": "choice", "score": "score"}
+
+    answers, _usage = evaluate(
+        STATE, QUESTIONS, timeout=2.5,
+        transport=_transport(_capture({}, _predicates("m0", "m1", probability=0.3))),
+    )
+    assert answers == {"m0": 0.3, "m1": 0.3}
+
+
+def test_declared_answer_fields_still_override_the_decisions_defaults_per_key(monkeypatch):
+    _set_configs(monkeypatch, {
+        MODEL_KEY: _model_config(reflex_judgment={
+            "request_shape": "openai_decisions", "answer_fields": {"choice": "picked"},
+        }),
+    })
+    assert resolve_backend().answer_fields == {
+        "noul": "probability", "choice": "picked", "score": "score",
+    }
+
+
+def test_the_decisions_model_cannot_be_saved_to_a_conversation_role(shipped_decisions):
+    """反射判断以外の全役割で保存を断る。反射判断の役割と、会話用の gpt-6-luna は断らない。"""
+    from saiverse import model_defaults
+
+    for role in model_defaults.MODEL_ROLES:
+        rejection = model_defaults.role_model_save_rejection(role, DECISIONS_KEY)
+        if role == "reflex_judgment_model":
+            assert rejection is None, role
+        else:
+            assert rejection == model_defaults.SAVE_REJECT_DESTINATION, role
+    assert model_defaults.role_model_save_rejection("default_model", "gpt-6-luna") is None
+
+
+@pytest.mark.parametrize(
+    "override, field_name",
+    [
+        pytest.param({"base_url": "https://decisions.attacker.example"}, "base_url", id="base_url"),
+        pytest.param({"api_key_env": "TYPESAFE_API_KEY"}, "api_key_env", id="api_key_env"),
+    ],
+)
+def test_a_decisions_model_that_rewrites_its_destination_or_key_is_unavailable(
+    monkeypatch, mock_provider_network, override, field_name,
+):
+    """provider_ref の宛先かキーの名前を書き換えたモデルは、照合で解決を断られる。"""
+    _install_shipped_decisions(monkeypatch, mock_provider_network, **override)
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        resolve_backend(DECISIONS_KEY)
+    message = str(exc.value)
+    assert "credential/destination check" in message
+    # 断られた理由が照合の食い違いそのものであること (DNS の偽装の網に掛かった別の
+    # 失敗で通っていないこと) を確かめる。
+    assert f"sets {field_name}=" in message and "does not match" in message
+    assert is_available(model_key=DECISIONS_KEY) is False
+
+
+# --- 変換: 末尾の節・説明の扱い・組み立ての失敗 ---
+
+
+def _input_tail(captured):
+    return captured["body"]["input"].split(_CRITERIA_HEADER, 1)[1]
+
+
+def test_decisions_choice_criteria_without_a_place_in_choices_go_to_the_end(decisions_role):
+    """文字列の criteria は全体を、辞書は choices に入らなかったキーだけを末尾の節へ回す。
+
+    choices に入った説明は節に重ねない。値が null・空白だけのキーは情報が無いので載せない。
+    """
+    captured = {}
+    response = {"answers": [
+        {"type": "choice", "name": "c0", "choice": "stay"},
+        {"type": "choice", "name": "c1", "choice": "tea"},
+    ]}
+    answers, _usage = evaluate(
+        STATE,
+        {
+            "c0": {"type": "choice", "instructions": "どこへ行く",
+                   "options": ["walk", "stay"], "criteria": "雨なら stay を選ぶ"},
+            "c1": {"type": "choice", "instructions": "何を飲む",
+                   "options": ["tea", "coffee"],
+                   "criteria": {"tea": "温かい", "coffee": "", "water": "選択肢に無い説明",
+                                "juice": None, "soda": "   ", "note": {"k": 1}}},
+        },
+        timeout=2.5, transport=_transport(_capture(captured, response)),
+    )
+    assert answers == {"c0": "stay", "c1": "tea"}
+
+    questions = captured["body"]["questions"]
+    assert questions[0]["choices"] == [
+        {"value": "walk", "description": "walk"},
+        {"value": "stay", "description": "stay"},
+    ]
+    assert questions[1]["choices"] == [
+        {"value": "tea", "description": "温かい"},
+        {"value": "coffee", "description": "coffee"},   # 空文字の説明は値と同じ
+    ]
+    assert _input_tail(captured) == "\n".join([
+        "",
+        "[c0] どこへ行く",
+        "雨なら stay を選ぶ",                # 文字列は引用符なしでそのまま
+        "[c1] 何を飲む",
+        "water: 選択肢に無い説明",
+        'note: {"k": 1}',
+    ])
+
+
+def test_decisions_blank_choice_descriptions_fall_back_to_the_value(decisions_role):
+    captured = {}
+    evaluate(
+        STATE,
+        {"c0": {"type": "choice", "instructions": "どこへ行く",
+                "criteria": {"walk": "", "stay": "   ", "home": "家にいる"}}},
+        timeout=2.5,
+        transport=_transport(_capture(captured, {"answers": [
+            {"type": "choice", "name": "c0", "choice": "walk"},
+        ]})),
+    )
+    assert captured["body"]["questions"][0]["choices"] == [
+        {"value": "walk", "description": "walk"},
+        {"value": "stay", "description": "stay"},
+        {"value": "home", "description": "家にいる"},
+    ]
+    assert _CRITERIA_HEADER not in captured["body"]["input"]
+
+
+def test_decisions_criteria_blocks_start_with_the_name_and_the_instructions(decisions_role):
+    """見出し行は ``[qid] instructions`` (複数行の instructions もそのまま)。
+
+    noul の文字列の criteria は引用符を付けずに書き、値が null のキーは載せない。
+    基準の中身が 1 つも残らない質問はブロックごと付けない。
+    """
+    captured = {}
+    evaluate(
+        "状況の文字列",
+        {
+            "m0": {"instructions": "急ぎか。\n締め切りを見て答える。",
+                   "criteria": "締め切りが今日なら true"},
+            "m1": {"instructions": "返事が要るか",
+                   "criteria": {"true": "質問されている", "false": None}},
+            "m2": {"instructions": "基準が空", "criteria": {"true": None}},
+        },
+        timeout=2.5, transport=_transport(_capture(captured, _predicates("m0", "m1", "m2"))),
+    )
+    assert captured["body"]["input"] == "\n".join([
+        "状況の文字列",
+        "",
+        _CRITERIA_HEADER,
+        "[m0] 急ぎか。",
+        "締め切りを見て答える。",
+        "締め切りが今日なら true",
+        "[m1] 返事が要るか",
+        "true: 質問されている",
+    ])
+
+
+def _circular_state():
+    state = {}
+    state["self"] = state
+    return state
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        pytest.param({(1, 2): "x"}, id="non_string_key"),
+        pytest.param(_circular_state(), id="circular_reference"),
+    ],
+)
+def test_a_state_that_cannot_become_the_decisions_input_is_unavailable(
+    decisions_role, state, caplog,
+):
+    """組み立ての TypeError / ValueError は ReflexJudgmentUnavailable にし、送らない。"""
+    caplog.set_level("WARNING", logger="saiverse.reflex_judgment")
+    called = []
+
+    def handler(request):
+        called.append(request)
+        return httpx.Response(200, json=_predicates("m0"))
+
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(state, {"m0": {"instructions": "急ぎか"}}, timeout=2.5,
+                 transport=_transport(handler))
+    assert called == []
+    assert "could not build the Decisions request" in str(exc.value)
+    assert "could not build the Decisions request" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param({"name": "m1", "probability": 0.5}, id="no_type"),
+        pytest.param({"type": "noul", "name": "m1", "noul": 0.5, "probability": 0.5},
+                     id="system_one_type_name"),
+        pytest.param({"type": "verdict", "name": "m1", "probability": 0.5}, id="unknown_type"),
+        pytest.param({"type": 1, "name": "m1", "probability": 0.5}, id="type_not_a_string"),
+    ],
+)
+def test_a_decisions_answer_with_an_unreadable_type_is_unavailable(decisions_role, entry):
+    response = {"answers": [{"type": "predicate", "name": "m0", "probability": 0.5}, entry]}
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(STATE, QUESTIONS, timeout=2.5, transport=_transport(_capture({}, response)))
+    assert "unexpected type" in str(exc.value)
+
+
+def test_a_predicate_returned_to_a_choice_question_is_unavailable(decisions_role):
+    """型名は読めても、質問の型と食い違う答えは既存の検算が不成立にする。"""
+    response = {"answers": [
+        {"type": "predicate", "name": "c0", "probability": 0.9, "choice": "walk"},
+    ]}
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(
+            STATE, {"c0": {"type": "choice", "instructions": "どれ", "options": ["walk", "stay"]}},
+            timeout=2.5, transport=_transport(_capture({}, response)),
+        )
+    assert "expected 'choice'" in str(exc.value)
+
+
+def test_a_decisions_choice_built_from_criteria_rejects_an_unsent_value(decisions_role):
+    """criteria の辞書だけから組んだ choice でも、送っていない値の答えは不成立。"""
+    response = {"answers": [{"type": "choice", "name": "c0", "choice": "fly"}]}
+    with pytest.raises(ReflexJudgmentUnavailable) as exc:
+        evaluate(
+            STATE,
+            {"c0": {"type": "choice", "instructions": "どこへ",
+                    "criteria": {"walk": "散歩", "stay": "家"}}},
+            timeout=2.5, transport=_transport(_capture({}, response)),
+        )
+    assert "options" in str(exc.value)

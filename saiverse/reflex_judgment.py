@@ -117,13 +117,17 @@ _DEFAULT_USAGE_FIELDS = {"input_tokens": "input_tokens", "output_tokens": "outpu
 #:   ``questions``) をそのまま送る。本流の形で、呼び出し側が組む質問もこの形。
 #: - ``openai_decisions``: OpenAI の Decisions API の形へ、送る直前に変換する。質問は
 #:   ``name`` 付きの配列、型名は ``predicate`` / ``choice`` / ``score``、状況は文字列の
-#:   ``input``。System One の criteria は、構造の中に居場所があるものはそこへ写す
-#:   (score の段階の説明 → ``levels``、choice の選択肢の説明 → ``choices`` の
-#:   ``description``)。居場所の無い noul の criteria (はい/いいえの基準) だけを
-#:   ``input`` の最後に書き足す (2026-10-07 まはー裁定)。答えも ``name`` 付きの配列で
-#:   返るので、qid の辞書へ戻してから既存の検算に渡す。
+#:   ``input``。Decisions には criteria の欄が無い。まはーの裁定 (2026-10-07) は
+#:   「System One 側を本流のままにし、OpenAI では criteria を input の最後に押し込む」と
+#:   「OpenAI だけ対応できない型を残さない」の二つで、それを受けて、構造の中に居場所が
+#:   ある基準はそこへ写す形にした (score の段階の説明 → ``levels``、choice の選択肢の
+#:   説明 → ``choices`` の ``description``)。居場所の無い基準 (noul のはい/いいえの
+#:   基準と、choices に入らなかった choice の基準) は ``input`` の最後の節に書き足す。
+#:   答えも ``name`` 付きの配列で返るので、qid の辞書へ戻してから既存の検算に渡す。
 #:
-#: 分岐はこの宣言値だけで行う (提供元の名前や URL では分岐しない)。
+#: 宣言に ``request_shape`` のキーが無いときだけ ``system_one``。キーがあって値が
+#: 上の二つ以外 (null を含む) なら設定ミスとして解決を断る。分岐はこの宣言値だけで
+#: 行う (提供元の名前や URL では分岐しない)。
 REQUEST_SHAPE_SYSTEM_ONE = "system_one"
 REQUEST_SHAPE_OPENAI_DECISIONS = "openai_decisions"
 REQUEST_SHAPES = (REQUEST_SHAPE_SYSTEM_ONE, REQUEST_SHAPE_OPENAI_DECISIONS)
@@ -134,9 +138,17 @@ _DECISIONS_QUESTION_TYPES = {"noul": "predicate", "choice": "choice", "score": "
 _DECISIONS_ANSWER_TYPES = {value: key for key, value in _DECISIONS_QUESTION_TYPES.items()}
 #: 答えられなかった質問に Decisions が返す要素の型名 (``name`` だけが載る)。
 _DECISIONS_REFUSAL = "refusal"
-#: noul の criteria を ``input`` の最後に書き足すときの見出し (通常 LLM 向けの前置きと
-#: 揃えて英語)。
-_DECISIONS_CRITERIA_HEADER = "Criteria for each question (by question name):"
+#: ``openai_decisions`` の形での answer_fields の既定。noul の答えは ``probability`` の
+#: 欄に載る。user_data で provider を上書きして answer_fields を書き忘れても、noul の
+#: 欄名を System One の既定 (``noul``) と取り違えないよう、形ごとに既定を持つ。
+_DECISIONS_DEFAULT_ANSWER_FIELDS = {"noul": "probability", "choice": "choice", "score": "score"}
+#: 構造に居場所の無い基準を ``input`` の最後に書き足すときの見出し (通常 LLM 向けの
+#: 前置きと揃えて英語)。OpenAI がモデルに ``name`` を見せるかは確かめられていないので、
+#: 各ブロックは名前だけでなく質問文 (instructions) でも質問を指す。
+_DECISIONS_CRITERIA_HEADER = (
+    "Criteria for the questions above (each block starts with the question name "
+    "and its instructions):"
+)
 #: score の段階の数の下限 (System One の正典も 2〜10 個)。1 個では段階にならない。
 _DECISIONS_MIN_LEVELS = 2
 
@@ -218,7 +230,9 @@ class ReflexBackend:
         supported_types: この宛先が答えられる質問の型。
         url: 宛先 (provider の ``base_url`` + 宣言された ``path``)。jev 互換のみ。
         answers_key / usage_key: 応答のどの欄に答え / 使用量が載るか。jev 互換のみ。
-        answer_fields: 質問の型 → 答えの数値が載る欄の名前。
+        answer_fields: 質問の型 → 答えの数値が載る欄の名前。jev 互換の宛先では、
+            宣言の無いキーの既定が ``request_shape`` ごとに違う (``openai_decisions``
+            の noul は ``probability``)。
         usage_fields: 記帳する使用量の名前 → 応答の欄の名前。jev 互換のみ。
         request_shape: リクエストの組み立て方 (:data:`REQUEST_SHAPES` のどれか)。
             jev 互換のみ。既定は System One の形のまま送る ``system_one``。
@@ -303,11 +317,16 @@ def _resolve_jev_backend(
         )
         raise ReflexJudgmentUnavailable(f"model {key!r} declares no usable question type")
 
-    # リクエストの組み立て方。宣言が無ければ本流 (System One の形)。宣言があるのに
+    # リクエストの組み立て方。キーが無ければ本流 (System One の形)。キーがあるのに
     # 知らない値なら設定ミス — 既定へ黙って落とすと、違う形のリクエストを毎回投げて
     # 毎回失敗する (誰も気づかない) ので、他の解決失敗と同じく使えないと答える。
+    # 明示の null も「キーがある」側に数える: モデル側に null を書くと、キー単位の
+    # 合成 (model_configs._merge_reflex_judgment) で provider の宣言を null で消して
+    # いる。それを既定へ落とすと、Decisions の宛先へ System One の形を送り続ける。
     raw_shape = dialect.get("request_shape")
-    request_shape = REQUEST_SHAPE_SYSTEM_ONE if raw_shape is None else raw_shape
+    request_shape = (
+        raw_shape if "request_shape" in dialect else REQUEST_SHAPE_SYSTEM_ONE
+    )
     if request_shape not in REQUEST_SHAPES:
         LOGGER.warning(
             "[reflex] model %r declares an unknown request_shape %r (known: %s); "
@@ -316,6 +335,13 @@ def _resolve_jev_backend(
         raise ReflexJudgmentUnavailable(
             f"model {key!r} declares an unknown request_shape {raw_shape!r}"
         )
+
+    # 答えの欄の名前の既定は形ごとに違う (Decisions の noul は probability の欄)。
+    default_answer_fields = (
+        _DECISIONS_DEFAULT_ANSWER_FIELDS
+        if request_shape == REQUEST_SHAPE_OPENAI_DECISIONS
+        else _DEFAULT_ANSWER_FIELDS
+    )
 
     return ReflexBackend(
         model_key=key,
@@ -327,7 +353,7 @@ def _resolve_jev_backend(
         url=f"{base_url}{path}",
         answers_key=str(dialect.get("answers_key") or _DEFAULT_ANSWERS_KEY),
         usage_key=str(dialect.get("usage_key") or _DEFAULT_USAGE_KEY),
-        answer_fields=_string_map(dialect.get("answer_fields"), _DEFAULT_ANSWER_FIELDS),
+        answer_fields=_string_map(dialect.get("answer_fields"), default_answer_fields),
         usage_fields=_string_map(dialect.get("usage_fields"), _DEFAULT_USAGE_FIELDS),
         request_shape=request_shape,
     )
@@ -849,49 +875,67 @@ def _as_text(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
 
 
-def _criteria_lines(criteria: Any) -> list:
-    """noul の criteria 1 件を、input の最後に書き足す行の並びにする。
+def _has_information(value: Any) -> bool:
+    """基準や説明として書く中身があるか (null と、空白だけの文字列は中身なし)。"""
+    if value is None:
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    return True
 
-    辞書なら ``key: value`` を 1 行ずつ (値が文字列でなければ JSON で書く)。辞書で
-    なければ JSON を 1 行。
+
+def _criteria_lines(criteria: Any) -> list:
+    """構造に居場所の無い基準 1 件を、input の最後に書き足す行の並びにする。
+
+    辞書なら ``key: value`` を 1 行ずつ (値が文字列でなければ JSON で書く。値が null・
+    空白だけの文字列のキーは情報が無いので載せない)。辞書でなければ全体を 1 行
+    (文字列ならそのまま、それ以外は JSON)。中身が無ければ空の並び。
     """
     if isinstance(criteria, Mapping):
-        return [f"{name}: {_as_text(value)}" for name, value in criteria.items()]
-    return [json.dumps(criteria, ensure_ascii=False, default=str)]
+        return [
+            f"{name}: {_as_text(value)}"
+            for name, value in criteria.items()
+            if _has_information(value)
+        ]
+    if not _has_information(criteria):
+        return []
+    return [_as_text(criteria)]
 
 
-def _decisions_input(state: Any, request_questions: Mapping[str, Mapping[str, Any]]) -> str:
+def _decisions_input(state: Any, criteria_blocks: Sequence[Sequence[str]]) -> str:
     """Decisions の ``input`` (1 本の文字列) を組む。
 
-    状況が文字列ならそのまま、それ以外は JSON。Decisions の質問の構造には noul の
-    criteria (はい/いいえの基準) の居場所が無いので、noul の criteria を持つ質問が
-    1 つでもあれば、その節を input の**最後**に書き足す (2026-10-07 まはー裁定)。
-    choice / score の criteria は質問の構造 (``choices`` / ``levels``) へ写すので、
-    ここには載せない。載せる質問が 1 つも無ければ節ごと付けない。
+    状況が文字列ならそのまま、それ以外は JSON。Decisions の質問の構造に居場所の無い
+    基準 (noul の基準と、choices に入らなかった choice の基準) を持つ質問が 1 つでも
+    あれば、その節を input の**最後**に書き足す (まはーの裁定「criteria は input の
+    最後に押し込む」)。各ブロックは ``[<qid>] <instructions>`` の見出し行で始まる —
+    OpenAI がモデルに ``name`` を見せるかは確かめられていないので、質問文でも結び
+    付ける。載せる質問が 1 つも無ければ節ごと付けない。
     """
     text = _as_text(state)
-    criteria_lines: list = []
-    for qid, question in request_questions.items():
-        if question.get("type") != "noul":
-            continue
-        criteria = question.get("criteria")
-        if not criteria:
-            continue
-        criteria_lines.append(f"[{qid}]")
-        criteria_lines.extend(_criteria_lines(criteria))
-    if not criteria_lines:
+    if not criteria_blocks:
         return text
-    return "\n".join([text, "", _DECISIONS_CRITERIA_HEADER, *criteria_lines])
+    lines = [text, "", _DECISIONS_CRITERIA_HEADER]
+    for block in criteria_blocks:
+        lines.extend(block)
+    return "\n".join(lines)
 
 
-def _decisions_choices(qid: str, question: Mapping[str, Any], backend: ReflexBackend) -> list:
+def _decisions_choices(
+    qid: str, question: Mapping[str, Any], backend: ReflexBackend,
+) -> Tuple[list, list]:
     """choice 質問の選択肢を Decisions の ``choices`` に写す。
 
-    値は、文字列の ``options`` が使えればその順、無ければ ``criteria`` が辞書のとき
-    そのキーの順 (System One の choice の criteria は「選択肢 → 説明」の辞書)。説明は
-    ``criteria`` が辞書でその値のキーを持ち、値が null でなければそれを文字列化した
-    もの、それ以外は値と同じ文字列 (description を省略できるかは公式資料で確かめ
-    られていないので、空にはしない)。
+    値は、文字列だけの ``options`` が使えればその順、無ければ ``criteria`` が辞書の
+    ときそのキーの順 (System One の choice の criteria は「選択肢 → 説明」の辞書)。
+    説明は ``criteria`` が辞書でその値のキーを持ち、値に中身があれば (null・空白だけの
+    文字列でなければ) それを文字列化したもの、それ以外は値と同じ文字列
+    (description を省略できるかは公式資料で確かめられていないので、空にはしない)。
+
+    Returns:
+        ``(choices, 末尾の節に回す行)``。``criteria`` が辞書でなければ全体を、辞書なら
+        choices の値に対応しないキー (説明として choices に入らなかったキー) だけを
+        末尾へ回す。choices に入った説明は構造の側だけに入り、節には重ねない。
     """
     criteria = question.get("criteria")
     descriptions = criteria if isinstance(criteria, Mapping) else {}
@@ -906,14 +950,20 @@ def _decisions_choices(qid: str, question: Mapping[str, Any], backend: ReflexBac
         described = descriptions.get(value)
         choices.append({
             "value": text,
-            "description": text if described is None else _as_text(described),
+            "description": _as_text(described) if _has_information(described) else text,
         })
     if not choices:
         raise ReflexJudgmentUnavailable(
             f"the destination for {backend.model_key!r} needs options (or a criteria "
             f"mapping) for the choice question {qid!r}"
         )
-    return choices
+    if isinstance(criteria, Mapping):
+        leftover = _criteria_lines(
+            {name: value for name, value in criteria.items() if name not in values}
+        )
+    else:
+        leftover = _criteria_lines(criteria)
+    return choices, leftover
 
 
 def _decisions_levels(qid: str, question: Mapping[str, Any], backend: ReflexBackend) -> list:
@@ -937,21 +987,35 @@ def _decisions_levels(qid: str, question: Mapping[str, Any], backend: ReflexBack
     return levels
 
 
-def _decisions_questions(
-    request_questions: Mapping[str, Mapping[str, Any]], backend: ReflexBackend,
-) -> list:
-    """Decisions の ``questions`` (name 付きの配列) を、呼び出し側の順序のまま組む。
+def _decisions_request(
+    state: Any,
+    request_questions: Mapping[str, Mapping[str, Any]],
+    backend: ReflexBackend,
+) -> Tuple[Dict[str, Any], Dict[str, Tuple[str, ...]]]:
+    """System One の形の状況と質問を、Decisions のリクエストへ一度に組み替える。
 
-    criteria は ``criteria`` の欄としては入れない (欄が無い)。choice の説明は
-    ``choices``、score の段階は ``levels`` へ写し、noul の基準は
-    :func:`_decisions_input` が input の最後へ書く。
+    ``questions`` (name 付きの配列) は呼び出し側の順序のまま組む。criteria は
+    ``criteria`` の欄としては入れない (欄が無い)。choice の説明は ``choices``、score の
+    段階は ``levels`` へ写し、構造に居場所の無い基準 (noul の基準、choices に入らなかった
+    choice の基準) は :func:`_decisions_input` が input の最後の節へ書く。score の
+    criteria は段階としてしか使わない (2 個以上の配列でなければ不成立) ので末尾には
+    載せない。
+
+    Returns:
+        ``(payload, qid → 実際に送った choices の value の並び)``。後者は choice の答えが
+        送った選択肢のどれかであることの検算に使う (criteria の辞書だけから組んだ
+        choice でも検算が効くように)。
 
     Raises:
         ReflexJudgmentUnavailable: この形で表せない質問 — Decisions に型が無い、選択肢を
             作れない choice、段階を作れない score。答えられない型を含む質問と同じ扱いで、
             ひとまとまりごと不成立にする。
+        TypeError / ValueError: 状況や基準を JSON にできない (呼び出し側の
+            :func:`_evaluate` が ``ReflexJudgmentUnavailable`` へ正規化する)。
     """
     converted = []
+    criteria_blocks: list = []
+    offered: Dict[str, Tuple[str, ...]] = {}
     for qid, question in request_questions.items():
         qtype = question["type"]
         decisions_type = _DECISIONS_QUESTION_TYPES.get(qtype)
@@ -959,17 +1023,30 @@ def _decisions_questions(
             raise ReflexJudgmentUnavailable(
                 f"the destination for {backend.model_key!r} cannot express {qtype!r} questions"
             )
+        instructions = question["instructions"]
         entry: Dict[str, Any] = {
             "type": decisions_type,
             "name": qid,
-            "instructions": question["instructions"],
+            "instructions": instructions,
         }
+        tail: list = []
         if qtype == "choice":
-            entry["choices"] = _decisions_choices(qid, question, backend)
+            choices, tail = _decisions_choices(qid, question, backend)
+            entry["choices"] = choices
+            offered[qid] = tuple(choice["value"] for choice in choices)
         elif qtype == "score":
             entry["levels"] = _decisions_levels(qid, question, backend)
+        else:
+            tail = _criteria_lines(question.get("criteria"))
         converted.append(entry)
-    return converted
+        if tail:
+            criteria_blocks.append([f"[{qid}] {instructions}", *tail])
+    payload = {
+        "model": backend.api_model,
+        "input": _decisions_input(state, criteria_blocks),
+        "questions": converted,
+    }
+    return payload, offered
 
 
 def _answers_from_decisions(
@@ -986,9 +1063,14 @@ def _answers_from_decisions(
     - 同じ ``name`` が 2 回出たら不正応答 (どちらを採るかを決められない)。
     - 辞書でない要素・``name`` が文字列でない要素も不正応答 (黙って捨てると、壊れた
       応答が「その質問の答えが無い」に化けて原因が見えなくなる)。
+    - ``type`` が文字列で ``predicate`` / ``choice`` / ``score`` / ``refusal`` のどれかで
+      ない要素 (型の欄が無い、``noul`` のような System One の語彙、未知の語) も不正応答。
+      写した後の型と質問の型の食い違い (predicate を choice の質問へ返す等) は、既存の
+      :func:`_read_answer` が不成立にする。
 
     Raises:
-        ReflexJudgmentUnavailable: ``answers`` が配列でない・形の壊れた要素・名前の重複。
+        ReflexJudgmentUnavailable: ``answers`` が配列でない・形の壊れた要素・名前の重複・
+            読めない型名。
     """
     if not isinstance(raw_answers, list):
         LOGGER.warning("[reflex] response has no %r array", backend.answers_key)
@@ -1017,6 +1099,20 @@ def _answers_from_decisions(
         seen.add(name)
 
         answer_type = entry.get("type")
+        if not isinstance(answer_type, str) or (
+            answer_type not in _DECISIONS_ANSWER_TYPES and answer_type != _DECISIONS_REFUSAL
+        ):
+            # 型の欄が無い・System One の語彙 (noul)・未知の語は、Decisions の応答として
+            # 読めない。型の欄が無い要素を素通しすると、既存の検算 (_read_answer) は
+            # 型の欄の無い答えを受け付けるので、壊れた応答が「判定できた」になりうる。
+            shown_name = _masked_repr(name, secret)[:_ERROR_BODY_PREVIEW]
+            shown = _masked_repr(answer_type, secret)[:_ERROR_BODY_PREVIEW]
+            LOGGER.warning(
+                "[reflex] the answer for %s has an unexpected type %s", shown_name, shown,
+            )
+            raise ReflexJudgmentUnavailable(
+                f"the answer for {shown_name} has an unexpected type {shown}"
+            )
         if answer_type == _DECISIONS_REFUSAL:
             LOGGER.warning(
                 "[reflex] %r refused to answer qid=%s",
@@ -1024,8 +1120,7 @@ def _answers_from_decisions(
             )
             continue
         answer = dict(entry)
-        if isinstance(answer_type, str) and answer_type in _DECISIONS_ANSWER_TYPES:
-            answer["type"] = _DECISIONS_ANSWER_TYPES[answer_type]
+        answer["type"] = _DECISIONS_ANSWER_TYPES[answer_type]
         answers[name] = answer
     return answers
 
@@ -1036,7 +1131,11 @@ def _answers_from_decisions(
 
 
 class _JevCall:
-    """System One の形をそのまま送る道。
+    """jev 互換の宛先へ、方言の宣言 (``request_shape``) どおりの形で 1 往復する道。
+
+    ``system_one`` なら System One の形をそのまま、``openai_decisions`` なら
+    :func:`_evaluate` が組み替えた Decisions の形を送り、答えは qid の辞書へ戻して
+    から既存の検算に渡す。
 
     ``evaluate`` の器 (同時実行の枠・ワーカースレッド・絶対締切・使用量の記帳の
     取り決め) はこのクラスの外にある。ここが持つのは「1 往復の中身」だけ。
@@ -1523,10 +1622,27 @@ def _evaluate(
             # 送る直前に OpenAI の Decisions の形へ組み替える (呼び出し側の質問と
             # 状況は System One の形のまま)。表せない質問はここで不成立になり、
             # 同時実行の枠を取る前に戻る。
-            payload: Dict[str, Any] = {
-                "model": backend.api_model,
-                "input": _decisions_input(state, request_questions),
-                "questions": _decisions_questions(request_questions, backend),
+            try:
+                payload, offered = _decisions_request(state, request_questions, backend)
+            except ReflexJudgmentUnavailable:
+                raise
+            except (TypeError, ValueError) as exc:
+                # 状況や基準を JSON にできない (文字列でないキーの辞書・循環参照など)。
+                # 送る前に組み立てで落ちたものも「今回は判定なし」として同じ扱いで
+                # 畳めるよう正規化する。例外文言は外部由来の値を含みうるので伏せ字を通す。
+                detail = _mask_secret(f"{type(exc).__name__}: {exc}", secrets)[:_ERROR_BODY_PREVIEW]
+                LOGGER.warning(
+                    "[reflex] could not build the Decisions request for %r: %s",
+                    backend.model_key, detail,
+                )
+                raise ReflexJudgmentUnavailable(
+                    f"could not build the Decisions request for {backend.model_key!r}: {detail}"
+                ) from exc
+            # choice の答えの検算は、実際に送った choices の値で行う (criteria の辞書
+            # だけから組んだ choice でも、送っていない値を「判定できた」にしない)。
+            options_by_qid = {
+                qid: offered.get(qid) if qtype == "choice" else options_by_qid[qid]
+                for qid, qtype in types_by_qid.items()
             }
         else:
             payload = {

@@ -128,15 +128,23 @@ ID) に `{type, instructions, criteria}` を添える形。
 - 答える側が対応しない型 (例: simple-jev は choice のみ) を含む質問は
   「使えなかった」— 部分回答を採用しない既存の厳格さのまま。
 - **criteria の欄が無い宛先 (OpenAI Decisions) へは、criteria を構造の中の居場所へ
-  写し、居場所の無いものだけを input の最後に押し込む** (2026-10-07 まはー裁定)。
+  写し、居場所の無いものを input の最後に押し込む**。まはーの裁定 (2026-10-07) は
+  二つある。一つは「criteria がある Jev 側を本流のままにし、OpenAI では criteria を
+  input 内の最後に押し込む」こと。もう一つは、score を対応外にする案を見たまはーが
+  「OpenAI だけ対応できない地雷を残すのは嫌だから何か対応して」と指示したこと。
+  構造へ写す形は、この二つ目を受けてメティスが System One の正典を確かめ直して
+  設計したもので、まはーがこの形そのものを裁定したわけではない。
   System One の criteria は型ごとに意味が違う — noul は `{true, false}` の基準、
   choice は「選択肢 → 説明」の辞書、score は順序付きの段階の説明の配列 (答えは段階の
   番号の確率加重平均で、Decisions の score と同じ意味)。だから choice の説明は
   Decisions の `choices` の `description` へ、score の段階は `levels` へ写す。
-  Decisions の質問の構造に居場所が無いのは noul の基準だけで、それを input の最後に
-  「質問名ごとの基準」の節として書き足す (noul の基準を持つ質問が無ければ節ごと
-  付けない)。選択肢を 1 つも作れない choice や、段階が 2 つ未満の score はこの宛先で
-  表せないので「使えなかった」になる。
+  Decisions の質問の構造に居場所が無いのは、noul の基準と、choices に入らなかった
+  choice の基準 (辞書でない criteria の全体、または送った選択肢に対応しないキー)
+  で、それを input の最後の節に書き足す。節の中の各質問は `[name] instructions` の
+  見出し行で始まる — OpenAI がモデルに `name` を見せるかは確かめられていないので、
+  質問文でも基準と質問を結び付ける。載せる基準を持つ質問が無ければ節ごと付けない。
+  選択肢を 1 つも作れない choice や、段階が 2 つ未満の score はこの宛先で表せないので
+  「使えなかった」になる。
 
 ### 4. 変えないもの
 
@@ -453,16 +461,49 @@ ID) に `{type, instructions, criteria}` を添える形。
   では criteria を input 内の最後に押し込む」。呼び出し側 (sea/auto_recall.py など) が
   組む質問と状況は変えず、送る直前に変換し、答えを qid の辞書へ戻してから既存の検算に
   通す。当初は「SAIVerse の score には段階の概念が無い」として score を外す案だったが、
-  これは誤りで、System One の score の criteria が順序付きの段階の説明の配列であり、
+  その案を見たまはーが「OpenAI だけ対応できない地雷を残すのは嫌だから何か対応して」と
+  指示した。それを受けてメティスが System One の正典を確かめ直すと、score を外す案の
+  前提は誤りで、System One の score の criteria は順序付きの段階の説明の配列であり、
   答えの意味も Decisions の score と同じだった。そこで 3 型すべてに対応させ、criteria は
   構造の中に居場所があるもの (choice の説明・score の段階) をそこへ写し、居場所の無い
-  noul の基準だけを input の最後へ書く形にした (§3)。読み戻しでは、拒否された質問は
+  noul の基準を input の最後へ書く形にした (§3)。構造へ写す形はメティスの設計で、
+  まはーの裁定そのものは「input の最後に押し込む」と「対応できない型を残さない」の
+  二つである。読み戻しでは、拒否された質問は
   答えが無いものとして扱い (部分回答は不成立の既存の厳格さのまま。拒否は WARNING に
   qid つきで出す)、同じ name の重複・辞書でない要素・name が文字列でない要素は不正応答に
   し、要求していない name は無視する。使用量の欄 (`usage.input_tokens` /
   `output_tokens`) は既定と同じ名前なので、記帳の順序 (答えを読む前に記帳) と締切で
-  見切った呼び出しの記帳はそのまま効く。**公式資料で確かめられていないこと**:
-  `context_length` の 272000 (会話用の `gpt-6-luna` の定義から写した値)、choice の
-  `description` と score の `description` を省略できるか (省略できるか分からないので、
-  説明が無いときは値・段階名と同じ文字列を入れている)、使用量の欄の名前 (公式ガイド
-  ではなく、SDK 仕様を引用した第三者資料で確認したもの)。
+  見切った呼び出しの記帳はそのまま効く。電文の欄名 (リクエストの
+  `questions[].type` / `name` / `instructions`、`choices[].value` / `description`、
+  `levels[].label` / `description`、応答の `answers[].type` / `name` / `probability` /
+  `choice` / `score` と `refusal`) は、OpenAI の公式ガイドの例から確認した。score の
+  意味はどちらも 0 起点の段階番号の確率加重平均で、TypeSafe 正典の例は段階 3 つで
+  score 1.05、OpenAI ガイドの例は probabilities の value が 0・1・2 で score 1.1 だった。
+  **公式資料で確かめられていないこと**: `context_length` の 272000 (会話用の
+  `gpt-6-luna` の定義から写した値)、choice の `description` と score の `description` を
+  省略できるか (省略できるか分からないので、説明が無いときは値・段階名と同じ文字列を
+  入れている)、使用量の欄の名前 (公式ガイドではなく、SDK 仕様を引用した第三者資料で
+  確認したもの)、OpenAI がモデルに質問の `name` を見せるか (TypeSafe 正典は「qid は
+  コード用でモデルには送らない」と明記している。見えない場合に備えて、input の最後の
+  節では質問文でも基準と質問を結び付けている)。
+- 2026-10-07 (上の変更へのレビュー): ローカル LLM と Claude のサブエージェントに
+  敵対レビューを回した (Codex は、共有設定のモデルが ChatGPT アカウントでは使えず
+  走らなかった)。直した点は次のとおり。(1) choices に入らなかった choice の基準を
+  黙って捨てていたので、input の最後の節へ回すようにした (辞書でない criteria は
+  全体を、辞書なら送った選択肢に対応しないキーだけを載せ、値が null・空白だけの
+  キーは載せない。choices に入った説明は重ねない)。(2) 節の見出し行を
+  `[name] instructions` にして、名前が見えなくても質問文で結び付くようにした。
+  (3) 辞書でない noul の基準を JSON で書いて引用符が付いていたので、文字列はそのまま
+  書くようにした。(4) 空文字 (空白だけを含む) の choice の説明も「説明なし」として
+  値と同じ文字列にした。(5) 状況や基準を JSON にできない (文字列でないキーの辞書・
+  循環参照) ときの TypeError / ValueError が素通りしていたので、伏せ字を通した文言で
+  WARNING + 「使えなかった」に正規化した。(6) 答えの型名を厳しく検算し、`predicate` /
+  `choice` / `score` / `refusal` のどれでもない要素 (型の欄が無い・`noul`・未知の語)
+  は不正応答にした — 型の欄が無い要素は既存の検算を素通りしていた。(7) criteria の
+  辞書だけから組んだ choice では答えが選択肢の内かを確かめていなかったので、実際に
+  送った choices の値で検算するようにした。(8) モデル側の `"request_shape": null` が
+  キー単位の合成で provider の宣言を消したうえで黙って `system_one` へ落ちていたので、
+  キーが無いときだけ既定にし、null は設定ミスとして解決を断るようにした。(9)
+  `answer_fields` の既定を形ごとに持たせ、`openai_decisions` では noul の欄を
+  `probability` にした (user_data で provider を上書きして answer_fields を書き忘れても
+  欄名を取り違えない)。

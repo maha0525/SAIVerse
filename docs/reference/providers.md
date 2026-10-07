@@ -86,7 +86,7 @@
 | `xai_native` | xAI ネイティブ | ✗（builtin のみ） |
 | `nvidia_nim` | NVIDIA NIM | ✗（builtin のみ） |
 | `openai_codex` | OpenAI Codex（ChatGPT OAuth） | ✗（builtin のみ） |
-| `jev_compat` | 反射判断の宛先（System One 形式） | ✗（builtin のみ） |
+| `jev_compat` | 反射判断の宛先（System One 形式。`request_shape` の宣言で OpenAI Decisions の形にも変換する） | ✗（builtin のみ） |
 
 `*_native` / `nvidia_nim` / `openai_codex` は `llm_clients/` にコード実装が必要なため builtin のみ。UI（モデル管理 > プロバイダ）から作れるのは `openai_compat` / `ollama_compat` の2種。
 
@@ -98,11 +98,11 @@
 
 | 項目 | 既定 | 意味 |
 |---|---|---|
-| `request_shape` | `system_one` | リクエストの組み立て方。`system_one` は System One の形（`state` + qid の辞書の `questions`）をそのまま送る。`openai_decisions` は OpenAI の Decisions API の形へ送る直前に変換し、答えも読み戻す（下の節）。ほかの値は設定ミスとして、その宛先は「使えなかった」になる |
+| `request_shape` | `system_one` | リクエストの組み立て方。`system_one` は System One の形（`state` + qid の辞書の `questions`）をそのまま送る。`openai_decisions` は OpenAI の Decisions API の形へ送る直前に変換し、答えも読み戻す（下の節）。既定の `system_one` になるのはキーそのものが無いときだけで、キーがあって値がこの 2 つ以外（`null` を含む。モデル側に `null` を書くと provider の宣言が消える）なら設定ミスとして、その宛先は「使えなかった」になる |
 | `path` | `/v1/systemone` | `base_url` の後ろに付ける宛先のパス |
 | `answers_key` | `answers` | 応答のどの欄に答えが載るか（`system_one` は qid の辞書、`openai_decisions` は name 付きの配列） |
 | `usage_key` | `usage` | 応答のどの欄に使用量が載るか |
-| `answer_fields` | `{"noul": "noul", "choice": "choice", "score": "score"}` | 質問の型ごとに、答えの値が載る欄の名前 |
+| `answer_fields` | `{"noul": "noul", "choice": "choice", "score": "score"}`（`request_shape` が `openai_decisions` なら `{"noul": "probability", "choice": "choice", "score": "score"}`） | 質問の型ごとに、答えの値が載る欄の名前。書いたキーだけが既定を上書きする |
 | `usage_fields` | `{"input_tokens": "input_tokens", "output_tokens": "output_tokens"}` | 記帳する使用量の名前 → 応答の欄の名前 |
 | `supported_types` | 3 型すべて | この宛先が答えられる質問の型。対応しない型が混ざった質問は、ひとまとまりごと「使えなかった」になる |
 
@@ -114,10 +114,11 @@ OpenAI の [Decisions API](https://developers.openai.com/api/docs/guides/decisio
 
 - **状況** は 1 本の文字列の `input` にする（文字列ならそのまま、それ以外は JSON）。
 - **質問** は qid を `name` にした配列にする。型名は noul → `predicate`、choice → `choice`、score → `score`。
-- **criteria** は Decisions に欄が無いので、構造の中に居場所があるものはそこへ写す。choice の選択肢の説明は `choices` の `description` へ（選択肢の値は `options` があればその順、無ければ criteria の辞書のキーの順。説明が無い・null のときは値と同じ文字列）、score の段階の説明は `levels` へ（2 つ以上の段階の配列が要る）。居場所の無い noul の基準（`true` / `false`）だけを、`input` の最後に「質問名ごとの基準」の節として書き足す。
-- **答え** は `name` 付きの配列で返るので、qid の辞書へ戻し、型名を SAIVerse 側へ写してから同じ検算に通す。`type: "refusal"`（答えられなかった）はその質問の答えが無いものとして扱い、同じ `name` の重複や形の壊れた要素は不正応答にする。
+- **criteria** は Decisions に欄が無いので、構造の中に居場所があるものはそこへ写す。choice の選択肢の説明は `choices` の `description` へ（選択肢の値は文字列だけの `options` があればその順、無ければ criteria の辞書のキーの順。説明が無い・null・空文字（空白だけを含む）のときは値と同じ文字列）、score の段階の説明は `levels` へ（2 つ以上の段階の配列が要る。score の criteria は末尾の節には載せない）。
+- **構造に居場所の無い基準** は、`input` の最後に 1 つの節として書き足す。載るのは noul の基準と、choice の基準のうち choices に入らなかったもの（criteria が辞書でなければ全体、辞書なら送った選択肢の値に対応しないキーだけ。choices に入った説明は重ねない）。値が null・空白だけのキーは情報が無いので載せない。節は英語の見出し 1 行のあと、質問ごとに `[name] instructions` の見出し行（instructions が複数行ならそのまま）と、基準の行（辞書なら `key: value`、それ以外は文字列ならそのまま・それ以外は JSON の 1 行）が続く。OpenAI がモデルに `name` を見せるかは確かめられていないので、質問文でも基準と質問を結び付けている。載せる基準が 1 つも無ければ節ごと付けない。
+- **答え** は `name` 付きの配列で返るので、qid の辞書へ戻し、型名を SAIVerse 側へ写してから同じ検算に通す。型名が `predicate` / `choice` / `score` / `refusal` のどれでもない要素（型の欄が無い・`noul` のような System One の語彙・未知の語）、同じ `name` の重複、形の壊れた要素は不正応答にする。`type: "refusal"`（答えられなかった）はその質問の答えが無いものとして扱う。写した型と質問の型が食い違う答え（predicate を choice の質問へ返す等）も不成立。choice の答えは、実際に送った `choices` の値のどれかでなければ不成立（criteria の辞書だけから組んだ choice でも同じ）。
 
-選択肢を作れない choice や段階が 2 つ未満の score は、この宛先では表せないので「使えなかった」になる。同梱の `openai-decisions-gpt-6-luna`（API 上のモデル名は `gpt-6-luna`、単価は入力 $0.10/1M・出力は課金なし）は会話用の `gpt-6-luna` とは別のモデル定義で、protocol が `jev_compat` なので会話の選択欄には出ない。
+選択肢を作れない choice や段階が 2 つ未満の score は、この宛先では表せないので「使えなかった」になる。状況や基準を JSON にできない（文字列でないキーの辞書・循環参照など）ときも、送る前に「使えなかった」になる。同梱の `openai-decisions-gpt-6-luna`（API 上のモデル名は `gpt-6-luna`、単価は入力 $0.10/1M・出力は課金なし）は会話用の `gpt-6-luna` とは別のモデル定義で、protocol が `jev_compat` なので会話の選択欄には出ない。
 
 `localjev` の既定の宛先は `http://127.0.0.1:8080` (localjev 本体の既定 `LOCALJEV_HOST` / `LOCALJEV_PORT` に合わせた値。llama.cpp Server の既定ポートと同じなので、両方をローカルで動かすならどちらかのポートをずらす)。別のポートで動かしているなら、`~/.saiverse/user_data/providers/localjev.json` に同じ id で `base_url` を書いた上書きを置く。
 
