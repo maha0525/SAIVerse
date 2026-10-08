@@ -113,7 +113,7 @@ class _StreamDiagnostics:
 
     References are local aliases, not provider IDs or hashes of private text.
     This observes the existing aggregator without suppressing repeated output.
-    See docs/intent/codex_stream_diagnostics.md.
+    See docs/issues/codex_stream_diagnostics.md.
     """
 
     def __init__(self) -> None:
@@ -890,8 +890,14 @@ class OpenAICodexClient(LLMClient):
         for event in self._iter_sse_events(resp):
             event_type = event.get("type")
             if diagnostics is not None:
-                diagnostics.event(event, "".join(delta_buffer[delta_consumed:])
-                                  if event_type == "response.output_text.done" else "")
+                try:
+                    diagnostics.event(event, "".join(delta_buffer[delta_consumed:])
+                                      if event_type == "response.output_text.done" else "")
+                except Exception:
+                    # Diagnostics must never interrupt the response. Do not log
+                    # the exception: it may contain private event content, and
+                    # the diagnostic logger itself may be what failed.
+                    diagnostics = None
 
             if event_type == "response.output_text.delta":
                 delta = event.get("delta") or ""
@@ -1021,7 +1027,11 @@ class OpenAICodexClient(LLMClient):
             entry for entry in pending_calls.values() if entry.get("name")
         ]
         if diagnostics is not None:
-            diagnostics.finish(final_text, len(function_calls))
+            try:
+                diagnostics.finish(final_text, len(function_calls))
+            except Exception:
+                # Keep the terminal state even if diagnostics fail at EOF.
+                diagnostics = None
 
         summary_text = "\n\n".join(
             "".join(parts) for _, parts in sorted(reasoning_summaries.items())

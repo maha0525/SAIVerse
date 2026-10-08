@@ -1,4 +1,4 @@
-# Intent: Codex 応答重複の切り分け
+# Issue: Codex 応答重複の切り分け
 
 **ステータス**: 診断用 draft。報告事象の根因は未確定・未修正。
 
@@ -37,7 +37,7 @@ Spell 抽出・実行 → 発言の保存と UI 表示。まず、SSE パース�
 [2026-09-27 commit](https://github.com/maha0525/SAIVerse/commit/8302996908feca500e6bc32e37d287ee7d443a6b)
 (maha0525、Claude Fable 5 co-author) は、未観測の重複・欠落・逆転への照合を
 入れず、実測時に再訪すると記録している
-([旧 issue](../issues/archive/codex_multi_message_spell_concatenation.md))。
+([旧 issue](archive/codex_multi_message_spell_concatenation.md))。
 TCP の順序保証だけではサーバー側の同じイベント生成を否定できないが、
 合成再送だけを根拠に今回の原因を決めることもできない。この段階では診断だけを足す。
 
@@ -77,7 +77,19 @@ function call、DEBUG の有無、ログへ機密文字列が含まれないこ�
 stream 印は SEA / pulse へ伝播しないため、並行呼び出しと特定の吹き出し・実行の
 対応も単独では保証しない。既存ログ・発生時刻との照合が必要になる。
 本番ペルソナ・有料 API・既存の履歴には接触していない。原因が決まったら、その
-責任境界で修正し、今回用の診断を残す必要があるか見直す。
+責任境界で修正する。
+
+## 診断ログを外す条件
+
+原因が分かった時点で、今回追加した診断ログは削除するか、原因の確認に必要な
+最小限へ縮小する。常時 DEBUG で使う環境では応答ごとに約6〜12行が積み上がるため、
+調査完了後も現在の粒度で残し続けない。縮小する場合は、残す項目とその理由をここに記録する。
+
+診断の event / finish 呼び出しだけが例外を出した場合、その応答の診断だけを停止し、
+本文・推論・tool call・usage と終端 state の処理はそのまま続ける。
+次の応答では新しい診断器を使う。例外の文面・traceback は私的な内容を含む可能性があるため
+追加ログに載せず、失敗した診断ログ経路への再ログも行わない。
+例外注入テストはこの隔離を確認するためのものであり、報告事象の原因の再現ではない。
 
 仕様の比較対象 (実際の接続先は公開 API ではなく Codex backend):
 [公式イベント定義](https://developers.openai.com/api/reference/resources/responses/streaming-events)

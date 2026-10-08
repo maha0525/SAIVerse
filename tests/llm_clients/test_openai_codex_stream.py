@@ -6,7 +6,7 @@ Codex 系 (GPT-5.3-Codex 以降) は 1 回の応答を複数の出力メッセ�
 入ること、1 メッセージの応答は従来どおりであることを確かめる。
 ネットワークには一切出ない (SSE は偽の response オブジェクトで与える)。
 
-Issue: docs/issues/codex_multi_message_spell_concatenation.md
+Issue: docs/issues/archive/codex_multi_message_spell_concatenation.md
 """
 from __future__ import annotations
 
@@ -578,3 +578,54 @@ async def test_codex_stream_reaches_sea_spell_parser_without_changing_call_count
     assert len(calls) == copies
     assert all(call.name == "document_edit" for call in calls)
     # The boundary test stops before tool execution: no live document is edited.
+
+
+@pytest.mark.parametrize("failure_at", ["response.output_item.added", "response.output_text.done", "finish"])
+def test_diagnostic_failure_only_disables_current_response(failure_at, monkeypatch, caplog):
+    import llm_clients.openai_codex as codex
+
+    caplog.set_level("DEBUG", logger=codex.LOG.name)
+    events, item = _full_message_events("private-item", "private-answer")
+    call = {"type": "function_call", "id": "private-function-item", "call_id": "private-call",
+            "name": "private-tool", "arguments": '{"secret":"private-argument"}'}
+    events += [
+        {"type": "response.reasoning_text.delta", "delta": "private-reasoning"},
+        {"type": "response.reasoning_summary_text.delta", "delta": "private-summary"},
+        {"type": "response.output_item.done", "item": call},
+        _completed([item, call]),
+    ]
+    events[-1]["response"]["usage"]["input_tokens_details"] = {"cached_tokens": 3}
+    expected = list(_client()._iter_chunks(_FakeResponse(events)))
+    caplog.clear()
+    instances = []
+
+    class FailingDiagnostics(codex._StreamDiagnostics):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+            instances.append(self)
+
+        def event(self, event, part_streamed):
+            self.calls.append(event["type"])
+            if len(instances) == 1 and event["type"] == failure_at:
+                raise RuntimeError("private-exception-content")
+            super().event(event, part_streamed)
+
+        def finish(self, text, function_calls):
+            self.calls.append("finish")
+            if len(instances) == 1 and failure_at == "finish":
+                raise RuntimeError("private-exception-content")
+            super().finish(text, function_calls)
+
+    monkeypatch.setattr(codex, "_StreamDiagnostics", FailingDiagnostics)
+    client = _client()
+    assert list(client._iter_chunks(_FakeResponse(events))) == expected
+    first_calls = list(instances[0].calls)
+    assert first_calls[-1] == failure_at
+    assert first_calls.count(failure_at) == 1
+    assert list(client._iter_chunks(_FakeResponse(events))) == expected
+    assert len(instances) == 2
+    assert instances[0].calls == first_calls
+    assert instances[1].calls == [event["type"] for event in events] + ["finish"]
+    assert "private-" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
