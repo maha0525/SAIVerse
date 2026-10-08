@@ -312,7 +312,11 @@ _GEMINI_FALLBACK_ROLES = {
 # 下の適用ループが model_id is None で素通りする。
 PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
     "gemini_paid": {
-        "default_model": "gemini-3-flash-preview-paid",
+        # 会話は Gemini 3.8 Flash。Gemini 3 Flash Preview は公式の料金ページで「legacy」と
+        # 書かれるようになったので、いまの世代の Flash に替えた (3.6〜3.8 は同じ料金)。
+        "default_model": "gemini-3.8-flash-paid",
+        # 軽量・Memory Weave・要約は Gemini 3.1 Flash-Lite のまま。このキーは名前に preview が
+        # 残っているが、送るモデル ID は正式版の gemini-3.1-flash-lite で、後継の 3.5 Flash-Lite より安い。
         "lightweight_model": "gemini-3.1-flash-lite-preview-paid",
         "memory_weave_model": "gemini-3.1-flash-lite-preview-paid",
         "image_summary_model": "gemini-3.1-flash-lite-preview-paid",
@@ -320,7 +324,8 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
         "video_summary_model": "gemini-3.1-flash-lite-preview-paid",
     },
     "gemini_free": {
-        "default_model": "gemini-3-flash-preview",
+        # 有料の設定と同じ組み合わせを、無料枠の定義で配る。
+        "default_model": "gemini-3.8-flash",
         "lightweight_model": "gemini-3.1-flash-lite-preview",
         "memory_weave_model": "gemini-3.1-flash-lite-preview",
         "image_summary_model": "gemini-3.1-flash-lite-preview",
@@ -328,23 +333,32 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
         "video_summary_model": "gemini-3.1-flash-lite-preview",
     },
     "anthropic": {
-        "default_model": "claude-sonnet-4-5",
-        "lightweight_model": "claude-haiku-4-5",
-        "memory_weave_model": "claude-haiku-4-5",
-        "image_summary_model": "claude-haiku-4-5",
+        # 会話は Sonnet 5.5。Sonnet 4.5 は廃止予定 (2026-11-30 に API から退役) で、公式が
+        # 後継に挙げているのが Sonnet 5.5。料金も Sonnet 4.5 より安い。
+        "default_model": "claude-sonnet-5.5",
+        # 軽量・Memory Weave・画像要約は Haiku 5.5。Haiku 4.5 より新しく、料金も安い。
+        "lightweight_model": "claude-haiku-5.5",
+        "memory_weave_model": "claude-haiku-5.5",
+        "image_summary_model": "claude-haiku-5.5",
         "audio_summary_model": None,  # Anthropic は音声入力非対応 → Gemini fallback
         "video_summary_model": None,
     },
     "openai": {
-        "default_model": "gpt-4o-2024-11-20",
-        "lightweight_model": "gpt-5.4-nano",
-        "memory_weave_model": "gpt-5.4-mini",
-        "image_summary_model": "gpt-5.4-nano",
+        # 会話は GPT-6.1 Sol。公式の料金ページの先頭に並ぶいまの世代で、GPT-4o より安い。
+        # GPT-6 系は Chat Completions で推論とツールを同時に使えないが、組み込みの
+        # プレイブックはツールを渡さない (docs/issues/openai_gpt6_tools_with_reasoning_chat_completions.md)。
+        "default_model": "gpt-6.1-sol",
+        # 軽量・Memory Weave・画像要約は GPT-6 Luna。いまの世代の小さいモデルで、GPT-5.4 nano より安い。
+        "lightweight_model": "gpt-6-luna",
+        "memory_weave_model": "gpt-6-luna",
+        "image_summary_model": "gpt-6-luna",
         "audio_summary_model": None,  # OpenAI 音声対応モデルは別系統 → Gemini fallback
         "video_summary_model": None,
     },
     "grok": {
-        "default_model": "grok-4.3",
+        # 会話は Grok 4.7。xAI のモデル一覧が会話向けに勧めているモデル。
+        "default_model": "grok-4.7",
+        # 軽量・Memory Weave・画像要約は Grok 4.3 のまま。Grok 4.5〜4.7 より安く、画像も読める。
         "lightweight_model": "grok-4.3",
         "memory_weave_model": "grok-4.3",
         "image_summary_model": "grok-4.3",
