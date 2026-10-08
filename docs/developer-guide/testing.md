@@ -44,6 +44,8 @@ npm test
 npm run test:backend-origin
 ```
 
+`test-movement-notices.cjs` / `test-chat-history-pagination.cjs` は `npm test` に含まれる。Windows 形式のパスによる実ローダーの共有状態、HTTP ヘッダーとエラー本文を分けた保存待ち、サーバー確認前に履歴読込ボタンを出さないことも固定する。既存の `test-building-auto-interval.cjs` / `test-building-city-immutable.cjs` も集約検査に含める。入退室通知の表示判断、全体・Building の設定欄、保存と再読込、遅延応答、開き直し、部屋切替、非表示の通知だけのページからの履歴取得を合成 API / hooks と実 TS/TSX で検査する。サーバー側は `python -m pytest tests/test_movement_notice_settings.py tests/test_movement_notice_history.py -n 0`。隔離 DB の移行・継承・保存から、移動イベントの保存と通常履歴 / 差分 / ゲーム合成ログへの読み戻しまでを通す。本番ペルソナや LLM は起動しない。
+
 `test-item-viewer.cjs` は `npm test` に含まれる（単独では `npm run test:item-viewer`）。
 チャットの実リンク callback とインベントリの実 TSX を合成 API / hooks ハーネスで実行し、
 短縮 ID / UUID の種類・名前・本文表示、削除済み参照、遅延応答、閉じ直し、persona 切替、

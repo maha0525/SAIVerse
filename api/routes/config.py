@@ -9,7 +9,7 @@ from pathlib import Path
 _log = logging.getLogger(__name__)
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 from api.deps import get_manager
 from saiverse.model_defaults import is_reflex_only_model
 from saiverse.model_configs import (
@@ -1133,6 +1133,62 @@ def set_playbook_permission(req: SetPlaybookPermissionRequest, manager=Depends(g
             ))
         db.commit()
         return {"success": True, "playbook_name": req.playbook_name, "permission_level": req.permission_level}
+    finally:
+        db.close()
+
+
+# ── Movement Notice Display ──────────────────────────────────────
+
+class MovementNoticesRequest(BaseModel):
+    show_movement_notices: StrictBool
+
+
+def _movement_notices_payload(db):
+    from database.models import Building, UserSettings
+
+    settings = db.query(UserSettings).filter(UserSettings.USERID == 1).first()
+    overrides = db.query(Building.BUILDINGID, Building.SHOW_MOVEMENT_NOTICES).filter(
+        Building.SHOW_MOVEMENT_NOTICES.is_not(None),
+    ).all()
+    return {
+        "show_movement_notices": settings.SHOW_MOVEMENT_NOTICES if settings else True,
+        "building_overrides": {building_id: shown for building_id, shown in overrides},
+    }
+
+
+@router.get("/movement-notices")
+def get_movement_notices():
+    """Read presentation-only movement notice settings, including explicit room overrides."""
+    from database.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        return _movement_notices_payload(db)
+    finally:
+        db.close()
+
+
+@router.put("/movement-notices")
+def set_movement_notices(req: MovementNoticesRequest):
+    """Save the global display default without changing room overrides or stored history."""
+    from database.models import UserSettings
+    from database.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        settings = db.query(UserSettings).filter(UserSettings.USERID == 1).first()
+        if settings is None:
+            settings = UserSettings(USERID=1)
+            db.add(settings)
+        settings.SHOW_MOVEMENT_NOTICES = req.show_movement_notices
+        db.flush()
+        payload = _movement_notices_payload(db)
+        db.commit()
+        return payload
+    except Exception:
+        db.rollback()
+        _log.warning("Failed to save movement notice display settings", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to save movement notice display settings")
     finally:
         db.close()
 

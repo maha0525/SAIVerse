@@ -12,6 +12,7 @@ import WorldEditor from './settings/WorldEditor';
 import ProviderManagementPanel from './settings/ProviderManagementPanel';
 import ModelManagementPanel from './settings/ModelManagementPanel';
 import FeedManagementPanel from './settings/FeedManagementPanel';
+import MovementNoticeSetting from './settings/MovementNoticeSetting';
 import ModalOverlay from './common/ModalOverlay';
 import WatermarkBar, { WATERMARK_LABELS, WatermarkBarValues, findWatermarkOrderViolations } from './common/WatermarkBar';
 
@@ -920,6 +921,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             <div className={styles.envContainer}>
                                 {/* Theme Selector */}
                                 <LocaleControls />
+                                <MovementNoticeSetting />
                                 <div className={styles.themeContainer}>
                                     <div>
                                         <div data-i18n="components.GlobalSettingsModal.text016" className={styles.themeLabel}>

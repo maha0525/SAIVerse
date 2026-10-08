@@ -6,7 +6,7 @@ Codex 系 (GPT-5.3-Codex 以降) は 1 回の応答を複数の出力メッセ�
 入ること、1 メッセージの応答は従来どおりであることを確かめる。
 ネットワークには一切出ない (SSE は偽の response オブジェクトで与える)。
 
-Issue: docs/issues/codex_multi_message_spell_concatenation.md
+Issue: docs/issues/archive/codex_multi_message_spell_concatenation.md
 """
 from __future__ import annotations
 
@@ -360,3 +360,272 @@ def test_structured_output_still_raises_when_nothing_parses(monkeypatch):
 
     with pytest.raises(RuntimeError, match="Failed to parse JSON"):
         client.generate([], response_schema={"type": "object"})
+
+
+# The October duplicate-response investigation changes diagnostics only.
+# These fixtures include the complete, normal lifecycle, which republishes
+# finalized text in several different events without generating another answer.
+
+def _full_message_events(item_id, text, *, phase="final_answer"):
+    item = {"type": "message", "id": item_id, "role": "assistant", "phase": phase,
+            "content": [{"type": "output_text", "text": text}]}
+    events = _message_events(item_id, [text])
+    events[0]["item"]["phase"] = phase
+    events[-1]["item"] = item
+    events.insert(-1, {"type": "response.content_part.done", "item_id": item_id,
+                       "content_index": 0, "part": item["content"][0]})
+    return events, item
+
+
+def _numbered(events):
+    return [dict(event, sequence_number=index) for index, event in enumerate(events)]
+
+
+def _diagnostics(caplog):
+    prefix = "Codex stream diagnostic "
+    return [json.loads(record.getMessage()[len(prefix):]) for record in caplog.records
+            if record.getMessage().startswith(prefix)]
+
+
+@pytest.mark.parametrize("text", ["返事です。", "/spell document_edit old_string='前' new_string='後'\n"])
+def test_normal_lifecycle_republishes_text_without_reemitting_it(text, caplog):
+    caplog.set_level("DEBUG", logger="saiverse.llm_clients.openai_codex")
+    events, item = _full_message_events("msg_1", text)
+    streamed, state = _run(_numbered(events + [_completed([item])]))
+    assert streamed == text == state["text"]
+    records = _diagnostics(caplog)
+    done = next(r for r in records if r["event"] == "response.output_text.done")
+    assembled = records[-1]
+    assert done["done"] == done["streamed_part"] == assembled["text"]
+    assert done["recovered_chars"] == 0
+    assert assembled["event"] == "assembled"
+    assert len({record["stream"] for record in records}) == 1
+    assert not any(r.get("sequence_nonincreasing") for r in records)
+    assert not any(r["event"] == "response.output_text.delta" for r in records)
+
+
+def test_distinct_identical_messages_are_preserved_and_distinguishable(caplog):
+    caplog.set_level("DEBUG", logger="saiverse.llm_clients.openai_codex")
+    text = "同じ発言"
+    first, item1 = _full_message_events("msg_1", text, phase="commentary")
+    second, item2 = _full_message_events("msg_2", text)
+    streamed, state = _run(_numbered(first + second + [_completed([item1, item2])]))
+    assert streamed == state["text"] == f"{text}\n{text}"
+    done = [r for r in _diagnostics(caplog) if r["event"] == "response.output_text.done"]
+    assert done[0]["item_ref"] != done[1]["item_ref"]
+    assert done[0]["done"]["ref"] == done[1]["done"]["ref"]
+    completed = next(r for r in _diagnostics(caplog) if r["event"] == "response.completed")
+    assert [i["phase"] for i in completed["output"]] == ["commentary", "final_answer"]
+
+
+def test_identical_content_parts_are_not_deduplicated(caplog):
+    caplog.set_level("DEBUG", logger="saiverse.llm_clients.openai_codex")
+    text = "繰り返す"
+    events, item = _full_message_events("msg_1", text)
+    events[1]["content_index"] = 0
+    extra = [dict(event, content_index=1) for event in events[1:-1]]
+    item["content"] *= 2
+    streamed, state = _run(_numbered(events[:-1] + extra + events[-1:] + [_completed([item])]))
+    assert streamed == state["text"] == text * 2
+    done = [r for r in _diagnostics(caplog) if r["event"] == "response.output_text.done"]
+    assert [r["content_index"] for r in done] == [0, 1]
+    assert done[0]["item_ref"] == done[1]["item_ref"]
+    assert done[0]["done"] == done[1]["done"]
+    assert all(r["recovered_chars"] == 0 for r in done)
+
+
+def test_same_arguments_with_distinct_tool_call_ids_stay_distinct(caplog):
+    caplog.set_level("DEBUG", logger="saiverse.llm_clients.openai_codex")
+    events = []
+    items = []
+    for index in range(2):
+        item = {"type": "function_call", "id": f"fc_{index}", "call_id": f"call_{index}",
+                "name": "document_edit", "arguments": '{"old_string":"private-original"}'}
+        items.append(item)
+        events += [
+            {"type": "response.output_item.added", "output_index": index,
+             "item": dict(item, arguments="")},
+            {"type": "response.function_call_arguments.delta", "item_id": item["id"],
+             "delta": item["arguments"]},
+            {"type": "response.output_item.done", "output_index": index, "item": item},
+        ]
+    streamed, state = _run(_numbered(events + [_completed(items)]))
+    assert streamed == ""
+    assert [c["call_id"] for c in state["function_calls"]] == ["call_0", "call_1"]
+    assert state["function_calls"][0]["arguments"] == state["function_calls"][1]["arguments"]
+    records = _diagnostics(caplog)
+    calls = next(r for r in records if r["event"] == "response.completed")["output"]
+    assert calls[0]["call_ref"] != calls[1]["call_ref"]
+    assert calls[0]["arguments"] == calls[1]["arguments"]
+    assert records[-1]["function_calls"] == 2
+    assert "private-original" not in caplog.text
+    assert "document_edit" not in caplog.text
+
+
+def test_replayed_done_is_visible_as_diagnostic_evidence_only(caplog):
+    # Synthetic hypothesis, NOT an observed incident or a desired-output spec.
+    # Do not add duplicate suppression until the reporter's wire shape is known.
+    caplog.set_level("DEBUG", logger="saiverse.llm_clients.openai_codex")
+    events, item = _full_message_events("msg_1", "返事\n")
+    events = _numbered(events)
+    events.insert(3, dict(events[2]))
+    streamed, state = _run(events + [dict(_completed([item]), sequence_number=10)])
+    records = _diagnostics(caplog)
+    done = [r for r in records if r["event"] == "response.output_text.done"]
+    assert done[0]["item_ref"] == done[1]["item_ref"]
+    assert done[0]["done"] == done[1]["done"]
+    assert done[1]["sequence_nonincreasing"] is True
+    assert done[0]["recovered_chars"] == 0
+    assert done[1]["streamed_part"]["chars"] == 0
+    assert done[1]["recovered_chars"] == done[1]["done"]["chars"]
+    assert records[-1]["text"]["chars"] == len(streamed) == len(state["text"])
+
+
+def test_nonincreasing_delta_sequence_is_logged_without_text(caplog):
+    caplog.set_level("DEBUG", logger="saiverse.llm_clients.openai_codex")
+    events = _numbered(_message_events("msg_1", ["private-delta"]))
+    events.insert(2, dict(events[1]))
+    _run(events + [dict(_completed(), sequence_number=10)])
+    deltas = [r for r in _diagnostics(caplog) if r["event"] == "response.output_text.delta"]
+    assert len(deltas) == 1
+    assert deltas[0]["sequence_nonincreasing"] is True
+    assert "private-delta" not in caplog.text
+
+
+def test_diagnostics_contain_no_raw_private_fields_or_cross_stream_identifiers(caplog):
+    caplog.set_level("DEBUG", logger="saiverse.llm_clients.openai_codex")
+    text = "private-answer-and-spell-arguments"
+    events, item = _full_message_events("private-provider-item-id", text)
+    events.insert(0, {"type": "response.created", "response": {"id": "private-response-id",
+                       "instructions": "private-instructions", "output": []}})
+    events.insert(1, {"type": "response.reasoning_text.delta", "delta": "private-reasoning"})
+    events.append(_completed([item]))
+    for event in events:
+        event["Authorization"] = "private-token"
+        event["unknown_field"] = "private-unknown"
+    _run(_numbered(events))
+    first = _diagnostics(caplog)
+    caplog.clear()
+    _run(_numbered(events))
+    second = _diagnostics(caplog)
+    assert first[0]["stream"] != second[0]["stream"]
+    # The emitted schema is closed; raw IDs are also response-local aliases.
+    assert "private-" not in json.dumps(first + second)
+
+
+def test_info_level_does_not_allocate_diagnostics(caplog, monkeypatch):
+    import llm_clients.openai_codex as codex
+
+    caplog.set_level("INFO", logger=codex.LOG.name)
+
+    def unexpected_diagnostics():
+        pytest.fail("DEBUG diagnostics must not be allocated at INFO")
+
+    monkeypatch.setattr(codex, "_StreamDiagnostics", unexpected_diagnostics)
+    streamed, state = _run(_message_events("msg_1", ["返事"]) + [_completed()])
+    assert streamed == state["text"] == "返事"
+    assert not _diagnostics(caplog)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_public_generation_paths_return_the_same_single_answer(streaming, monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="saiverse.llm_clients.openai_codex")
+    client = _client()
+    events, item = _full_message_events("msg_1", "一度だけの返事")
+    monkeypatch.setattr(client, "_inject_unsupported_media_summaries", lambda m: m)
+    monkeypatch.setattr(client, "_build_body", lambda *a, **k: {})
+    monkeypatch.setattr(client, "_post_with_auth_retry", lambda body: _FakeResponse(events + [_completed([item])]))
+    finalized = []
+    monkeypatch.setattr(client, "_finalize", lambda state, tools: finalized.append(state))
+    if streaming:
+        result = "".join(client.generate_stream([]))
+    else:
+        result = client.generate([])
+    assert result == "一度だけの返事"
+    assert len(finalized) == 1
+    assert finalized[0]["text"] == result
+
+
+@pytest.mark.parametrize("copies", [1, 4])
+@pytest.mark.asyncio
+async def test_codex_stream_reaches_sea_spell_parser_without_changing_call_count(copies, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from sea.runtime_llm import _consume_pipeline_stream, _parse_spell_lines
+
+    line = "/spell name='document_edit' args={\"old_string\":\"前\",\"new_string\":\"後\"}\n"
+    events, item = _full_message_events("msg_1", line * copies)
+    client = _client()
+    monkeypatch.setattr(client, "_inject_unsupported_media_summaries", lambda m: m)
+    monkeypatch.setattr(client, "_build_body", lambda *a, **k: {})
+    monkeypatch.setattr(client, "_post_with_auth_retry", lambda body: _FakeResponse(events + [_completed([item])]))
+    monkeypatch.setattr(client, "_finalize", lambda state, tools: None)
+    runtime = MagicMock()
+    runtime._effective_building_id.return_value = "isolated-building"
+    emitted = []
+    text, _, _, cancelled = await _consume_pipeline_stream(
+        client.generate_stream([]), runtime=runtime,
+        persona=SimpleNamespace(persona_id="isolated-persona"), building_id="isolated-building",
+        node_def=SimpleNamespace(id="llm"), state={}, pipeline_msg_id=None,
+        sub_seq_start=0, cancellation_token=None, event_callback=emitted.append,
+        emit_building_id="isolated-building",
+    )
+    assert not cancelled
+    assert text == line * copies
+    assert "".join(e["content"] for e in emitted if e["type"] == "streaming_chunk") == text
+    calls = _parse_spell_lines(text, quiet=True)
+    assert len(calls) == copies
+    assert all(call.name == "document_edit" for call in calls)
+    # The boundary test stops before tool execution: no live document is edited.
+
+
+@pytest.mark.parametrize("failure_at", ["response.output_item.added", "response.output_text.done", "finish"])
+def test_diagnostic_failure_only_disables_current_response(failure_at, monkeypatch, caplog):
+    import llm_clients.openai_codex as codex
+
+    caplog.set_level("DEBUG", logger=codex.LOG.name)
+    events, item = _full_message_events("private-item", "private-answer")
+    call = {"type": "function_call", "id": "private-function-item", "call_id": "private-call",
+            "name": "private-tool", "arguments": '{"secret":"private-argument"}'}
+    events += [
+        {"type": "response.reasoning_text.delta", "delta": "private-reasoning"},
+        {"type": "response.reasoning_summary_text.delta", "delta": "private-summary"},
+        {"type": "response.output_item.done", "item": call},
+        _completed([item, call]),
+    ]
+    events[-1]["response"]["usage"]["input_tokens_details"] = {"cached_tokens": 3}
+    expected = list(_client()._iter_chunks(_FakeResponse(events)))
+    caplog.clear()
+    instances = []
+
+    class FailingDiagnostics(codex._StreamDiagnostics):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
+            instances.append(self)
+
+        def event(self, event, part_streamed):
+            self.calls.append(event["type"])
+            if len(instances) == 1 and event["type"] == failure_at:
+                raise RuntimeError("private-exception-content")
+            super().event(event, part_streamed)
+
+        def finish(self, text, function_calls):
+            self.calls.append("finish")
+            if len(instances) == 1 and failure_at == "finish":
+                raise RuntimeError("private-exception-content")
+            super().finish(text, function_calls)
+
+    monkeypatch.setattr(codex, "_StreamDiagnostics", FailingDiagnostics)
+    client = _client()
+    assert list(client._iter_chunks(_FakeResponse(events))) == expected
+    first_calls = list(instances[0].calls)
+    assert first_calls[-1] == failure_at
+    assert first_calls.count(failure_at) == 1
+    assert list(client._iter_chunks(_FakeResponse(events))) == expected
+    assert len(instances) == 2
+    assert instances[0].calls == first_calls
+    assert instances[1].calls == [event["type"] for event in events] + ["finish"]
+    assert "private-" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)

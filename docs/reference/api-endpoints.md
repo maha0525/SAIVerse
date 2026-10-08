@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 369（tag グループ: 26）
+**エンドポイント数**: 371（tag グループ: 26）
 
 ## addon
 
@@ -141,6 +141,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | PUT | `/api/config/models/{key}` | Update a model. Builtin/expansion models get an automatic user_data copy. |
 | DELETE | `/api/config/models/{key}` | Delete a user_data model file. Builtin models are read-only. |
 | POST | `/api/config/models/{key}/clone` | Clone an existing model under a new key (always to user_data). |
+| GET | `/api/config/movement-notices` | Read presentation-only movement notice settings, including explicit room overrides. |
+| PUT | `/api/config/movement-notices` | Save the global display default without changing room overrides or stored history. |
 | POST | `/api/config/parameters` | Update global model parameter overrides. |
 | GET | `/api/config/playbook` | Get current playbook override and args. |
 | POST | `/api/config/playbook` | Set playbook override and args. |

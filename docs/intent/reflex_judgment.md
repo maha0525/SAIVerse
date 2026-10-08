@@ -4,7 +4,8 @@
 2026-09-20 に実装・実機合格・develop へマージ済み (PR #309)。第 2 段 (通常 LLM への
 変換層・ペルソナ個別の上書き・choice / score) も 2026-09-20 に実装し、PR #310 と
 追補の #314 が 2026-09-21 にマージされた。両段とも v0.3.14 に載って発行済みで、
-既定は OFF。まはーの実機評価を待っている)**
+既定は OFF。まはーの実機評価を待っている。2026-10-07 に OpenAI Decisions を答える側の
+4 つ目として足す変更を PR に出し、まはーの確認を待っている)**
 
 ## これは何か
 
@@ -36,6 +37,7 @@ Jev の実験 (docs/intent/auto_recall_jev_rerank.md) で最初の利用者 (自
 | [OpenRouter](https://openrouter.ai/typesafe/jev-1.13) | `/api/alpha/decisions` (alpha) | 正典とほぼ同一 | 同上 | OpenRouter のキー |
 | [localjev](https://github.com/githubnext/localjev) (セルフホスト) | `/v1/systemone` | 正典と互換 | 3 型すべて | 任意 (Bearer、無しも可) |
 | [simple-jev (Featherless)](https://simple-jev.featherless.ai/) | `/v1/classifier` | 中身は近似・応答の欄が異なる | choice のみ確認 | Featherless のキー ($0.03/1M 入力) |
+| [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions) (public beta、2026-10-07 追加) | `/v1/decisions` | 異なる — 質問は配列で name 付き、型名 predicate、criteria 欄なし、状況は文字列の input。答えも name 付きの配列 | predicate / choice / score | OpenAI のキー ($0.10/1M 入力、出力は課金なし) |
 
 ほかに [vLLM に System One 形式の判定モードを足す PR](https://github.com/vllm-project/vllm/pull/57250)
 が open (DiffusionGemma 系。例示サーバーは `/v1/systemone` 互換)。
@@ -44,6 +46,12 @@ Jev の実験 (docs/intent/auto_recall_jev_rerank.md) で最初の利用者 (自
 違うのは宛先の path・認証・対応する型・応答の欄の名前で、これらは全部
 「設定ファイルに書ける差」** — まはーの読みどおり、共用のモデル設定ファイルの
 形に乗せられる。
+
+OpenAI Decisions は、リクエストの組み立て方そのものが違う最初の例で、欄名の
+差し替えだけでは吸収できない。その差は方言の宣言の `request_shape` (`system_one` /
+`openai_decisions`) で吸収する。System One の形が本流で、呼び出し側が組む質問と
+状況は変えず、OpenAI へは送る直前に変換し、受け取った答えを System One の形へ
+読み戻す。分岐はこの宣言値だけで行い、提供元の名前や URL では分岐しない。
 
 ## 設計
 
@@ -119,6 +127,29 @@ ID) に `{type, instructions, criteria}` を添える形。
   Gemini は additionalProperties を使えず、qid が動的な辞書スキーマを組めない)。
 - 答える側が対応しない型 (例: simple-jev は choice のみ) を含む質問は
   「使えなかった」— 部分回答を採用しない既存の厳格さのまま。
+- **criteria の欄が無い宛先 (OpenAI Decisions) へは、criteria を構造の中の居場所へ
+  写し、居場所の無いものを input の最後に押し込む**。まはーの裁定 (2026-10-07) は
+  二つある。一つは「criteria がある Jev 側を本流のままにし、OpenAI では criteria を
+  input 内の最後に押し込む」こと。もう一つは、score を対応外にする案を見たまはーが
+  「OpenAI だけ対応できない地雷を残すのは嫌だから何か対応して」と指示したこと。
+  構造へ写す形は、この二つ目を受けてメティスが System One の正典を確かめ直して
+  設計したもので、まはーがこの形そのものを裁定したわけではない。
+  System One の criteria は型ごとに意味が違う — noul は `{true, false}` の基準、
+  choice は「選択肢 → 説明」の辞書、score は順序付きの段階の説明の配列 (答えは段階の
+  番号の確率加重平均で、Decisions の score と同じ意味)。だから choice の説明は
+  Decisions の `choices` の `description` へ、score の段階は `levels` へ写す。
+  Decisions の質問の構造に居場所が無いのは、noul の基準と、choices に入らなかった
+  choice の基準 (辞書でない criteria の全体、または送った選択肢に対応しないキー)
+  で、それを input の最後の節に書き足す。節の中の各質問は `[name] instructions` の
+  見出し行で始まる — OpenAI がモデルに `name` を見せるかは確かめられていないので、
+  質問文でも基準と質問を結び付ける。載せる基準を持つ質問が無ければ節ごと付けない。
+  choice の選択肢の値は、options が空でないリストなら (要素が文字列でなくても文字列に
+  して) その順、無ければ criteria の辞書のキーの順で、criteria のキーとの対応も文字列に
+  してから取る。「中身が無い」(null・空白だけの文字列・空の辞書・空のリスト) の判定は
+  説明・節の行・段階・選択肢の値のすべてで同じものを使う。選択肢を 1 つも作れない
+  choice、中身の無い選択肢の値や文字列にした後で重なる値を持つ choice、段階が 2 つ
+  未満の score、中身の無い段階を持つ score は、この宛先で表せないので「使えなかった」に
+  なる (段階を黙って落とすと番号がずれて score の意味が変わる)。
 
 ### 4. 変えないもの
 
@@ -152,7 +183,8 @@ ID) に `{type, instructions, criteria}` を添える形。
    スイッチへ (§4)。
 3. **同梱する設定ファイル**: TypeSafe 公式 + OpenRouter + localjev の 3 つ。
    simple-jev は初期対応に含めない (型が揃わず、想起は noul を使うので初期の
-   利用者が居ない。方言の宣言欄だけ設計に残す)。
+   利用者が居ない。方言の宣言欄だけ設計に残す)。2026-10-07 に OpenAI Decisions
+   (`openai-decisions-gpt-6-luna`) を 4 つ目として足した (経緯の同日の項)。
 4. **実装の段割り** (流れはメティス一任 → 2 段で確定):
    - **第 1 段**: 反射判断の層 (typesafe_client の器を引き継ぐ共通層) +
      jev 互換 provider type + モデルの役割「反射判断」(世界既定) +
@@ -422,3 +454,111 @@ ID) に `{type, instructions, criteria}` を添える形。
   ターンなので、最初の確定へ貼るのは設計どおり。Pulse ID での相関付けは、注記を
   含む全マージ経路の作り直しとして issue 側に切り出し済み
   (docs/issues/chat_stream_event_correlation_by_last_bubble.md、v0.4 前が適時)。
+- 2026-10-07: OpenAI が出した Decisions API (public beta) を、jev 互換の宛先の
+  4 つ目として足した (provider `openai_decisions`、モデル設定
+  `openai-decisions-gpt-6-luna`、API 上のモデル名は `gpt-6-luna`)。発想は System One と
+  同じだが、リクエストとレスポンスの組み立て方そのものが違う — 質問は name 付きの
+  配列で型名は predicate / choice / score、状況は文字列の input、criteria の欄は無く、
+  答えも name 付きの配列で返り、答えられない質問には `type: "refusal"` が返る。欄名の
+  差し替えでは吸収できないので、方言の宣言に `request_shape` を足した (既定は
+  `system_one`、宣言の無い既存の宛先はすべてこれ。知らない値は設定ミスとして解決を
+  断る)。まはーの裁定は「criteria がある Jev (System One) 側を本流のままにし、OpenAI
+  では criteria を input 内の最後に押し込む」。呼び出し側 (sea/auto_recall.py など) が
+  組む質問と状況は変えず、送る直前に変換し、答えを qid の辞書へ戻してから既存の検算に
+  通す。当初は「SAIVerse の score には段階の概念が無い」として score を外す案だったが、
+  その案を見たまはーが「OpenAI だけ対応できない地雷を残すのは嫌だから何か対応して」と
+  指示した。それを受けてメティスが System One の正典を確かめ直すと、score を外す案の
+  前提は誤りで、System One の score の criteria は順序付きの段階の説明の配列であり、
+  答えの意味も Decisions の score と同じだった。そこで 3 型すべてに対応させ、criteria は
+  構造の中に居場所があるもの (choice の説明・score の段階) をそこへ写し、居場所の無い
+  noul の基準を input の最後へ書く形にした (§3)。構造へ写す形はメティスの設計で、
+  まはーの裁定そのものは「input の最後に押し込む」と「対応できない型を残さない」の
+  二つである。読み戻しでは、拒否された質問は
+  答えが無いものとして扱い (部分回答は不成立の既存の厳格さのまま。拒否は WARNING に
+  qid つきで出す)、同じ name の重複・辞書でない要素・name が文字列でない要素は不正応答に
+  し、要求していない name は無視する。使用量の欄 (`usage.input_tokens` /
+  `output_tokens`) は既定と同じ名前なので、記帳の順序 (答えを読む前に記帳) と締切で
+  見切った呼び出しの記帳はそのまま効く。電文の欄名 (リクエストの
+  `questions[].type` / `name` / `instructions`、`choices[].value` / `description`、
+  `levels[].label` / `description`、応答の `answers[].type` / `name` / `probability` /
+  `choice` / `score` と `refusal`) は、OpenAI の公式ガイドの例から確認した。score の
+  意味はどちらも 0 起点の段階番号の確率加重平均で、TypeSafe 正典の例は段階 3 つで
+  score 1.05、OpenAI ガイドの例は probabilities の value が 0・1・2 で score 1.1 だった。
+  **公式資料で確かめられていないこと**: `context_length` の 272000 (会話用の
+  `gpt-6-luna` の定義から写した値)、choice の `description` と score の `description` を
+  省略できるか (省略できるか分からないので、説明が無いときは値・段階名と同じ文字列を
+  入れている)、使用量の欄の名前 (公式ガイドではなく、SDK 仕様を引用した第三者資料で
+  確認したもの)、OpenAI がモデルに質問の `name` を見せるか (TypeSafe 正典は「qid は
+  コード用でモデルには送らない」と明記している。見えない場合に備えて、input の最後の
+  節では質問文でも基準と質問を結び付けている)。
+- 2026-10-07 (上の変更へのレビュー): ローカル LLM と Claude のサブエージェントに
+  敵対レビューを回した (Codex は、共有設定のモデルが ChatGPT アカウントでは使えず
+  走らなかった)。直した点は次のとおり。(1) choices に入らなかった choice の基準を
+  黙って捨てていたので、input の最後の節へ回すようにした (辞書でない criteria は
+  全体を、辞書なら送った選択肢に対応しないキーだけを載せ、値が null・空白だけの
+  キーは載せない。choices に入った説明は重ねない)。(2) 節の見出し行を
+  `[name] instructions` にして、名前が見えなくても質問文で結び付くようにした。
+  (3) 辞書でない noul の基準を JSON で書いて引用符が付いていたので、文字列はそのまま
+  書くようにした。(4) 空文字 (空白だけを含む) の choice の説明も「説明なし」として
+  値と同じ文字列にした。(5) 状況や基準を JSON にできない (文字列でないキーの辞書・
+  循環参照) ときの TypeError / ValueError が素通りしていたので、伏せ字を通した文言で
+  WARNING + 「使えなかった」に正規化した。(6) 答えの型名を厳しく検算し、`predicate` /
+  `choice` / `score` / `refusal` のどれでもない要素 (型の欄が無い・`noul`・未知の語)
+  は不正応答にした — 型の欄が無い要素は既存の検算を素通りしていた。(7) criteria の
+  辞書だけから組んだ choice では答えが選択肢の内かを確かめていなかったので、実際に
+  送った choices の値で検算するようにした。(8) モデル側の `"request_shape": null` が
+  キー単位の合成で provider の宣言を消したうえで黙って `system_one` へ落ちていたので、
+  キーが無いときだけ既定にし、null は設定ミスとして解決を断るようにした。(9)
+  `answer_fields` の既定を形ごとに持たせ、`openai_decisions` では noul の欄を
+  `probability` にした (user_data で provider を上書きして answer_fields を書き忘れても
+  欄名を取り違えない)。
+- 2026-10-07 (2 巡目のレビュー): 2 巡目の指摘は、どれも 1 巡目で入れた規律が、同じ理由の
+  当てはまる隣の箇所に届いていない形だった。直した点は次のとおり。(1) null・型違いを
+  設定ミスとして断る規則を `request_shape` だけでなく方言の宣言の全欄 (`path`・
+  `answers_key`・`usage_key` は文字列、`answer_fields`・`usage_fields` は中の項目まで
+  文字列の辞書、`supported_types` は文字列のリスト) に広げ、キーが無いときだけ既定に
+  した。方言の宣言そのものが辞書でないときも、宣言なしに読み替えずに断る (provider 側の
+  宣言が辞書でないときも合成で運んで断る形をいったん入れたが、3 巡目の項のとおり
+  取り下げた)。(2) 送るものの組み立てで出た例外を、型を問わず「使えなかった」に正規化
+  した。対象は Decisions への変換と、通常の LLM の道のプロンプトの組み立てで、1 巡目は
+  Decisions の TypeError / ValueError だけだった。呼び出し側のバグの ValueError は
+  その手前で出るので、従来どおり ValueError のまま。(3) 「中身が無い」の判定を一つに
+  揃え、空の辞書・空のリストも中身なしにした。中身の無い choice の選択肢の値と score の
+  段階は、黙って落とさずに「使えなかった」にする。(4) 文字列でない options を
+  criteria のキーへの切り替えで黙って捨てていたので、文字列にして使うようにした。
+  (5) 選択肢の値と criteria のキーの対応を文字列にしてから取るようにし、文字列にした後で
+  値が重なるときや、一つの選択肢に説明が二つ対応するときは、どれを指すか決められない
+  ので断る。(6) 末尾の節の見出しから「above」を外した (Decisions の質問は input とは
+  別の欄にあり、モデルから見て上にあるとは限らない)。
+- 2026-10-07 (3 巡目のレビュー、ここで止めた): 実際に起こりうる入力 (同梱の 4 宛先、
+  宣言を持たない provider とモデル、自動想起が送る noul の質問) で壊れる箇所は見つから
+  なかった。low が 7 件出て、うち 3 件をこの巡で扱った。(1) 2 巡目で入れた「provider 側の
+  辞書でない宣言を合成で運ぶ」は取り下げた — 全モデルの設定を読む `saiverse/model_configs.py`
+  に手を入れていて、その状態でモデル管理画面から複製すると壊れた値が新しいファイルに
+  焼き付く。守ろうとした書き間違いは同梱の provider では起きず、得るものより共有の読み込みに
+  触る危うさが大きいと判断した。(2) 方言の宣言の文字列の欄と欄名の辞書の値は、前後の空白を
+  落としてから使う (`" answers"` のまま使うと毎回その欄が見つからない)。(3) この宛先の形で
+  表せない質問を送る前に断ったときも、層のログに WARNING を残す。残りの 4 件 (未知の
+  型名や使用量の欄名を黙って除くこと、文字列でない options の答えの検算が Decisions の道に
+  しか無いこと、自動想起で同じ基準が候補の数だけ input に繰り返されること、System One へ
+  文字列でない options をそのまま送ることを固定するテストが無いこと) は、手書きの設定ミスか
+  今の呼び出し側に無い入力でしか起きず、設定の検査をこれ以上精巧にすると検査の機構が本体を
+  覆い始めるので、扱わずに止めた。
+- 2026-10-07 (Codex の敵対レビュー): Codex CLI を 0.153.4 のまま使っていたため、共有設定の
+  `gpt-6.1-sol` を知らずに「ChatGPT アカウントでは使えない」と断られていた (まはーが CLI の
+  版の遅れを特定した)。`gpt-5.6-luna` に戻して回し、指摘 3 件を反映した。(1) 方言の宣言
+  そのものに明示の null を書くと「宣言なし」として既定へ落ちていたので、欄が無いときだけ
+  宣言なしにし、null は設定ミスとして断る。ただし provider ファイルの側に null を書いた
+  場合は、読み込みの合成 (`saiverse/model_configs.py`) が null の欄をモデルへ写さないので
+  宣言なしと同じ扱いになる — 3 巡目の判断どおり共有の読み込みには触らず、そのままにした。
+  (2) 送る前に表せない質問を断ったときの文言には呼び出し側の質問の中身が入るので、他の経路と
+  同じく伏せ字を通してからログと例外に載せる。(3) 質問の ID (qid) が空でない文字列でなければ、
+  答えと突き合わせられないので呼び出し側のバグとして ValueError にする (System One の道も同じ)。
+- 2026-10-08 (PR #378 への GitHub 上の Codex レビュー、採用しなかった): 「Decisions の応答の
+  `usage.input_tokens_details` にキャッシュの読み書きの数が入るので、展開してキャッシュの単価
+  ($0.01 / $0.125 per 1M) で記帳せよ」という指摘が付いた。公式ガイド
+  (https://developers.openai.com/api/docs/guides/decisions) は「入力トークンの分だけ払う。
+  キャッシュの読み書きと出力トークンへの課金は無い」と明記しており、全入力を $0.10/1M で記帳する
+  今の設定がガイドどおりになる。指摘が根拠に挙げた API リファレンスの URL は 404 で、挙がった単価は
+  通常の GPT-6 Luna (`gpt-6-luna.json` の `cached_input_per_1m_tokens: 0.01`) のものと取り違えた
+  可能性がある。応答の欄の実物は、本物の API で確かめていない。ガイドの料金が変わったら見直す。

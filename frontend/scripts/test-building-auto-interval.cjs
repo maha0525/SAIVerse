@@ -83,6 +83,8 @@ function harness(component, overrides = {}) {
     const rows = table => ({ building: buildings, city: [{ CITYID: 1, CITY_SLUG: 'test', CITYNAME: 'Test' }] }[table] || []);
     const read = table => readQueues.get(table)?.shift() ?? Promise.resolve(rows(table));
     const jsx = (type, props) => ({ type, props });
+    const helperModules = new Map();
+    const window = new EventTarget();
     const localRequire = name => {
         if (name === 'react') return hooks;
         if (name === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: 'fragment' };
@@ -91,6 +93,21 @@ function harness(component, overrides = {}) {
         if (name.endsWith('/ImageUpload') || name.endsWith('/FileUpload')) return { __esModule: true, default: () => null };
         if (name === '@/i18n/core') return { t: id => id };
         if (name === '@/i18n/useLocale') return { useLocale() {} };
+        if (name === '@/lib/movementNotices' || name === '@/lib/buildingSettingsSave') {
+            if (!helperModules.has(name)) {
+                // Keep the real save lifecycle and event behavior, with this harness's fake HTTP.
+                const module = { exports: {} };
+                const source = fs.readFileSync(path.resolve(__dirname, '../src', `${name.slice(2)}.ts`), 'utf8');
+                const output = ts.transpileModule(source, {
+                    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+                }).outputText;
+                new Function('require', 'module', 'exports', 'window', 'CustomEvent', output)(
+                    localRequire, module, module.exports, window, CustomEvent,
+                );
+                helperModules.set(name, module.exports);
+            }
+            return helperModules.get(name);
+        }
         if (name.endsWith('/lib/dbTable')) return {
             DB_TABLE_PAGE_SIZE: 100, fetchAllTableRows: read,
             fetchTablePage: async table => ({ rows: rows(table), total: rows(table).length }),

@@ -143,8 +143,12 @@ function createHarness(component, props = {}, relativePath = path.relative) {
                 useActivityTracker() {}, useAddonEvents() {},
                 useActiveClientTab: () => ({ isActive: false }),
                 useClientActions: () => ({ dispatch() {} }),
+                // Entry/exit notice display (PR #376): show everything, never scroll.
+                useMovementNoticeSettings: () => ({ settings: null }),
+                useMovementNoticeAutoScroll() {},
             };
             if (name === '@/lib/messageMarkdown') return { prepareMessageMarkdown: value => value };
+            if (name === '@/lib/movementNotices') return { shouldShowMovementMessage: () => true };
             if (name.startsWith('@/lib/')) return {};
             if (name.startsWith('.') || name.startsWith('@/')) {
                 const resolved = name.startsWith('@/') ? path.join(source, `${name.slice(2)}.tsx`) : path.resolve(path.dirname(file), `${name}.tsx`);
