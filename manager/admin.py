@@ -31,6 +31,7 @@ from database.models import (
 )
 from manager.blueprints import BlueprintMixin
 from manager.history import HistoryMixin
+from manager.items import item_db_filter
 from manager.persona import PersonaMixin
 from manager.ids import (
     build_identifier,
@@ -1286,14 +1287,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     # --- Item management ---
 
     def get_item_details(self, item_id: str) -> Optional[Dict[str, Any]]:
+        """Read item metadata by stable short ID or UUID, regardless of location."""
         db = self.SessionLocal()
         try:
-            item = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).first()
+            item = db.query(ItemModel).filter(item_db_filter(item_id)).first()
             if not item:
                 return None
             location = (
                 db.query(ItemLocationModel)
-                .filter(ItemLocationModel.ITEM_ID == item_id)
+                .filter(ItemLocationModel.ITEM_ID == item.ITEM_ID)
                 .first()
             )
             return {

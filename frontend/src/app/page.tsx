@@ -29,7 +29,7 @@ import cityMapStyles from '@/components/CityMap.module.css';
 import PeopleModal from '@/components/PeopleModal';
 import TutorialWizard from '@/components/tutorial/TutorialWizard';
 import SaiverseLink from '@/components/SaiverseLink';
-import ItemModal from '@/components/ItemModal';
+import ItemReferenceModal from '@/components/ItemReferenceModal';
 import ContextPreviewModal, { ContextPreviewData } from '@/components/ContextPreviewModal';
 import VoiceCallModal from '@/components/VoiceCallModal';
 import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/PlaybookPermissionDialog';
@@ -401,23 +401,10 @@ export default function Home() {
     // アドオン: 有効なバブルボタン定義
     const [addonBubbleButtons, setAddonBubbleButtons] = useState<BubbleButtonDef[]>([]);
 
-    // ItemModal for saiverse:// item links
-    const [linkItemModalItem, setLinkItemModalItem] = useState<{ id: string; name: string; description?: string; type: string } | null>(null);
-    const handleOpenItemFromLink = useCallback(async (itemId: string) => {
-        try {
-            const res = await apiFetch(`/api/info/details?building_id=${currentBuildingIdRef.current}`);
-            if (!res.ok) return;
-            const data = await res.json();
-            const found = data.items?.find((it: { id: string }) => it.id === itemId);
-            if (found) {
-                setLinkItemModalItem(found);
-            } else {
-                // Item not in current building, create minimal item object
-                setLinkItemModalItem({ id: itemId, name: itemId, type: 'document' });
-            }
-        } catch {
-            setLinkItemModalItem({ id: itemId, name: itemId, type: 'document' });
-        }
+    // Resolve item links independently of the currently displayed Building.
+    const [linkItemId, setLinkItemId] = useState<string | null>(null);
+    const handleOpenItemFromLink = useCallback((itemId: string) => {
+        setLinkItemId(itemId);
     }, []);
 
     // 移動イベント (「〜が○○へ移動しました」) の行き先の部屋名リンクのクリック先。
@@ -4413,12 +4400,14 @@ export default function Home() {
                 onChanged={() => setMoveTrigger(prev => prev + 1)}
             />
 
-            <ItemModal
-                isOpen={!!linkItemModalItem}
-                onClose={() => setLinkItemModalItem(null)}
-                item={linkItemModalItem}
-                currentBuildingId={currentBuildingId}
-            />
+            {linkItemId !== null && (
+                <ItemReferenceModal
+                    key={linkItemId}
+                    itemId={linkItemId}
+                    onClose={() => setLinkItemId(null)}
+                    currentBuildingId={currentBuildingId}
+                />
+            )}
 
             <ContextPreviewModal
                 isOpen={showContextPreview}

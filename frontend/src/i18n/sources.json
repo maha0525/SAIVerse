@@ -8290,5 +8290,21 @@
   "components.UserProfileModal.text010": {
     "file": "components/UserProfileModal.tsx",
     "line": 126
+  },
+  "components.ItemReferenceModal.close": {
+    "file": "components/ItemReferenceModal.tsx",
+    "line": 69
+  },
+  "components.ItemReferenceModal.loading": {
+    "file": "components/ItemReferenceModal.tsx",
+    "line": 72
+  },
+  "components.ItemReferenceModal.error": {
+    "file": "components/ItemReferenceModal.tsx",
+    "line": 72
+  },
+  "components.InventoryModal.error": {
+    "file": "components/InventoryModal.tsx",
+    "line": 97
   }
 }

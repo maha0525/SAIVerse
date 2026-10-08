@@ -67,6 +67,8 @@ interface ItemDetails {
 }
 
 interface ItemModalProps {
+    /** Inventory inspection must not add editing or movement controls. */
+    readOnly?: boolean;
     isOpen: boolean;
     onClose: () => void;
     item: Item | null;
@@ -81,7 +83,7 @@ interface ItemModalProps {
     currentBuildingId?: string | null;
 }
 
-export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorldChanged, currentBuildingId }: ItemModalProps) {
+export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorldChanged, currentBuildingId, readOnly = false }: ItemModalProps) {
     useLocale();
     const [content, setContent] = useState<string | null>(null);
     const [editContent, setEditContent] = useState<string>('');
@@ -220,9 +222,9 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
         setShowBagDeleteChoice(false);
         if (isOpen && item) {
             loadItemDetails(item.id);
-            loadBuildings();
+            if (!readOnly) loadBuildings();
         }
-    }, [isOpen, item, loadItemDetails, loadBuildings, loadBagContents]);
+    }, [isOpen, item, loadItemDetails, loadBuildings, loadBagContents, readOnly]);
 
     const handleStartEdit = () => {
         setEditContent(content || '');
@@ -594,7 +596,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                 <div className={styles.header}>
                     <h2>{displayName}</h2>
                     <div className={styles.headerActions}>
-                        {!isMetaEditing && (
+                        {!readOnly && !isMetaEditing && (
                             <button data-i18n="components.ItemModal.text005"
                                 className={styles.metaEditBtn}
                                 onClick={handleStartMetaEdit}
@@ -809,7 +811,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                     </button>
                                 </div>
                                 <div className={styles.editActions}>
-                                    {!isEditing ? (
+                                    {!readOnly && (!isEditing ? (
                                         <button data-i18n="components.ItemModal.text015"
                                             className={`${styles.toggleBtn} ${styles.editBtn}`}
                                             onClick={handleStartEdit}
@@ -840,7 +842,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                                 <span>{uiText("components.ItemModal.label007")}</span>
                                             </button>
                                         </>
-                                    )}
+                                    ))}
                                 </div>
                             </div>
                             {isLoading && <div data-i18n="components.ItemModal.text019" className={styles.loading}>{uiText("components.ItemModal.text019")}</div>}
@@ -892,7 +894,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                         <div className={styles.bagContainer}>
                             {/* まとめ収納の操作列。currentBuildingId が無いときは「しまう」を出さない
                                 (loadBagItemsInBuilding と同じ守り: 部屋を特定できないまま操作させない)。 */}
-                            <div className={styles.bulkBar}>
+                            {!readOnly && <div className={styles.bulkBar}>
                                 {bulkMode === null ? (
                                     <>
                                         {currentBuildingId && (
@@ -942,7 +944,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                                         </button>
                                     </>
                                 )}
-                            </div>
+                            </div>}
                             {bulkError && <div className={styles.error}>{bulkError}</div>}
                             {bulkMode === 'stow' ? (
                                 <>
@@ -1076,6 +1078,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated, onWorl
                         isOpen={true}
                         onClose={() => setNestedItem(null)}
                         item={nestedItem}
+                        readOnly={readOnly}
                         onItemUpdated={onItemUpdated}
                         onWorldChanged={() => {
                             // 入れ子の Bag で動かした分を、この階層の中身表示にも反映する

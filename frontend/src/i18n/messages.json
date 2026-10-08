@@ -11887,6 +11887,22 @@
     "ja": "設定を再読み込みできませんでした。もう一度試してください。",
     "en": "Could not reload settings. Please try again."
   },
+  "components.ItemReferenceModal.close": {
+    "ja": "閉じる",
+    "en": "Close"
+  },
+  "components.ItemReferenceModal.loading": {
+    "ja": "アイテムを読み込み中...",
+    "en": "Loading item..."
+  },
+  "components.ItemReferenceModal.error": {
+    "ja": "アイテムを読み込めませんでした。削除されているか、接続に問題がある可能性があります。",
+    "en": "Could not load the item. It may have been deleted, or there may be a connection problem."
+  },
+  "components.InventoryModal.error": {
+    "ja": "インベントリを読み込めませんでした。更新して再試行してください。",
+    "en": "Could not load the inventory. Refresh to try again."
+  },
   "movementNotices.label": {
     "ja": "入退室ログ",
     "en": "Entry and exit notices"

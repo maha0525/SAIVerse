@@ -46,6 +46,17 @@ npm run test:backend-origin
 
 `test-movement-notices.cjs` / `test-chat-history-pagination.cjs` は `npm test` に含まれる。Windows 形式のパスによる実ローダーの共有状態、HTTP ヘッダーとエラー本文を分けた保存待ち、サーバー確認前に履歴読込ボタンを出さないことも固定する。既存の `test-building-auto-interval.cjs` / `test-building-city-immutable.cjs` も集約検査に含める。入退室通知の表示判断、全体・Building の設定欄、保存と再読込、遅延応答、開き直し、部屋切替、非表示の通知だけのページからの履歴取得を合成 API / hooks と実 TS/TSX で検査する。サーバー側は `python -m pytest tests/test_movement_notice_settings.py tests/test_movement_notice_history.py -n 0`。隔離 DB の移行・継承・保存から、移動イベントの保存と通常履歴 / 差分 / ゲーム合成ログへの読み戻しまでを通す。本番ペルソナや LLM は起動しない。
 
+`test-item-viewer.cjs` は `npm test` に含まれる（単独では `npm run test:item-viewer`）。
+チャットの実リンク callback とインベントリの実 TSX を合成 API / hooks ハーネスで実行し、
+短縮 ID / UUID の種類・名前・本文表示、削除済み参照、遅延応答、閉じ直し、persona 切替、
+閲覧専用の入れ子を検査する。同じ18ケースをネイティブ区切りと `path.win32.relative`
+の区切りで実行する。モジュール許可リストは `/` 区切りなので、比較時にOS依存の区切りを
+正規化する。Linuxだけの実行でWindowsの子コンポーネントがスタブに化ける不具合を
+見逃さないための境界テストで、実Windows実行の代わりとは扱わない。
+ブラウザのレイアウトと画像 bytes の取得はこの検査の範囲外。
+サーバー側の対応は `python -m pytest tests/test_item_viewer_api.py -n 0` で、
+隔離 DB とファイルを使ってメタデータから画像 / 文書本文までを通す。
+
 `test-backend-origin.cjs` は実際の `next.config.ts` と三つの Route Handler を読み、fetch を fake に置き換える。正式名のみ・旧名のみ・空白・不一致・既定値、従来の URL 結合、書き込み body・クエリ・ヘッダ・206/Range、メディア例外、SSE と `/stream` の逐次転送・キャンセルを検査する。接続先の期待値は隔離用 18000 を中心に指定し、8000 を含め実ネットワークへの通信は一切行わない。実ブラウザでの音声再生は別途確認が必要。
 
 実際の Next.js サーバーを経由する HTTP smoke は別コマンド。リポジトリの fake だけで検証でき、本番バックエンドは不要:
