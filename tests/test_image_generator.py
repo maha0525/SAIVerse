@@ -233,7 +233,7 @@ class TestImageGenerator(unittest.TestCase):
         response.prompt_feedback = None
         client.models.generate_content.return_value = response
 
-        for model_id in ('gemini-3.1-flash-image-preview', 'gemini-nano-banana-2.1'):
+        for model_id in ('gemini-3.1-flash-image', 'gemini-nano-banana-2.1'):
             for quality, resolution in [('low', '1K'), ('medium', '2K'), ('high', '4K'),
                                         ('xhigh', '4K'), ('max', '4K')]:
                 with self.subTest(model=model_id, quality=quality):
@@ -258,7 +258,7 @@ class TestImageGenerator(unittest.TestCase):
 
         _mod._generate_with_nano_banana_2('legacy default')
         self.assertEqual(client.models.generate_content.call_args.kwargs['model'],
-                         'gemini-3.1-flash-image-preview')
+                         'gemini-3.1-flash-image')
 
     @patch('llm_clients.gemini_utils.build_gemini_clients')
     def test_nano_banana_2_1_requires_paid_client(self, mock_clients):

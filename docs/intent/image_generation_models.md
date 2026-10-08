@@ -20,7 +20,10 @@
 - テキストと画像の応答、参照画像（プロバイダ上限14枚）、縦横比を扱う。
   function calling・structured output・cache は送らない。
 - 既定値と自動 fallback の先頭を `nano_banana_2_1` にする。旧 `nano_banana_2` は明示指定の互換経路として残す。
-  旧 preview API ID の stable ID 移行は別作業で、この変更には含めない。
+  旧 preview API ID の stable ID 移行は別作業として 2026-10-09 に行った: `nano_banana_2` は
+  `gemini-3.1-flash-image`、`nano_banana_pro` は `gemini-3-pro-image` を使う (Google が 2026-05-28 に
+  preview の ID の終了を予告し、同日に正式版を公開。移行時点で preview も正式版も Google のモデル一覧に
+  存在することを確認済み。正式版での実際の生成は課金を伴うため確認していない)。
 
 公式仕様（2026-10-08 確認）:
 https://ai.google.dev/gemini-api/docs/models/gemini-nano-banana-2.1

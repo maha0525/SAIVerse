@@ -167,7 +167,7 @@ def _generate_with_nano_banana_2(
     quality: str = "high",
     input_image_paths: Optional[List[Path]] = None,
     *,
-    model_id: str = "gemini-3.1-flash-image-preview",
+    model_id: str = "gemini-3.1-flash-image",
 ) -> Tuple[bytes, str]:
     """Generate image using Nano Banana 2 or an explicitly selected successor."""
     from llm_clients.gemini_utils import build_gemini_clients
@@ -246,7 +246,7 @@ def _generate_with_nano_banana_pro(
     contents.append(prompt)
 
     resp = _paid_client.models.generate_content(
-        model="gemini-3-pro-image-preview",
+        model="gemini-3-pro-image",
         contents=contents,
         config=types.GenerateContentConfig(
             response_modalities=["TEXT", "IMAGE"],
