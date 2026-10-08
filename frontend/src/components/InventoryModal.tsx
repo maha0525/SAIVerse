@@ -3,10 +3,11 @@ import { apiFetch } from '@/i18n/api';
 
 import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
-import React, { useState, useEffect } from 'react';
-import { X, Package, FileText, Image as ImageIcon, Box, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { X, FileText, Image as ImageIcon, Box, RefreshCw } from 'lucide-react';
 import styles from './InventoryModal.module.css';
 import ModalOverlay from './common/ModalOverlay';
+import ItemReferenceModal from './ItemReferenceModal';
 
 interface InventoryItem {
     id: string;
@@ -24,29 +25,41 @@ interface InventoryModalProps {
 }
 
 export default function InventoryModal({ isOpen, onClose, personaId }: InventoryModalProps) {
+    // Closing or changing persona unmounts the whole viewing session.
+    return isOpen ? <InventoryContents key={personaId} personaId={personaId} onClose={onClose} /> : null;
+}
+
+function InventoryContents({ personaId, onClose }: Omit<InventoryModalProps, 'isOpen'>) {
     useLocale();
+    const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+    const [error, setError] = useState(false);
+    const requestRef = useRef(0);
     const [items, setItems] = useState<InventoryItem[]>([]);
     const [loading, setLoading] = useState(false);
 
-    useEffect(() => {
-        if (isOpen) {
-            loadItems();
-        }
-    }, [isOpen, personaId]);
-
-    const loadItems = async () => {
+    const loadItems = useCallback(async () => {
+        const request = ++requestRef.current;
         setLoading(true);
+        setError(false);
         try {
-            const res = await apiFetch(`/api/people/${personaId}/items`);
-            if (res.ok) {
-                setItems(await res.json());
+            const res = await apiFetch(`/api/people/${encodeURIComponent(personaId)}/items`);
+            if (!res.ok) throw new Error(`Inventory lookup failed: ${res.status}`);
+            const data: InventoryItem[] = await res.json();
+            if (request === requestRef.current) setItems(data);
+        } catch {
+            if (request === requestRef.current) {
+                setItems([]);
+                setError(true);
             }
-        } catch (e) {
-            console.error(e);
         } finally {
-            setLoading(false);
+            if (request === requestRef.current) setLoading(false);
         }
-    };
+    }, [personaId]);
+
+    useEffect(() => {
+        void loadItems();
+        return () => { requestRef.current += 1; };
+    }, [loadItems]);
 
     const getIcon = (type: string) => {
         switch (type) {
@@ -56,7 +69,10 @@ export default function InventoryModal({ isOpen, onClose, personaId }: Inventory
         }
     };
 
-    if (!isOpen) return null;
+    if (selectedItemId !== null) {
+        return <ItemReferenceModal key={selectedItemId} itemId={selectedItemId}
+            onClose={() => setSelectedItemId(null)} readOnly />;
+    }
 
     return (
         <ModalOverlay onClose={onClose} className={styles.overlay}>
@@ -77,12 +93,15 @@ export default function InventoryModal({ isOpen, onClose, personaId }: Inventory
 
                     {loading ? (
                         <div data-i18n="components.InventoryModal.text004" className={styles.loading}>{uiText("components.InventoryModal.text004")}</div>
+                    ) : error ? (
+                        <div className={styles.emptyState} role="alert">{uiText('components.InventoryModal.error')}</div>
                     ) : items.length === 0 ? (
                         <div data-i18n="components.InventoryModal.text005" className={styles.emptyState}>{uiText("components.InventoryModal.text005")}</div>
                     ) : (
                         <div className={styles.grid}>
                             {items.map(item => (
-                                <div key={item.id} className={styles.card}>
+                                <button type="button" key={item.id} className={styles.card}
+                                    onClick={() => setSelectedItemId(item.id)}>
                                     <div className={styles.iconWrapper}>
                                         {getIcon(item.type)}
                                     </div>
@@ -93,7 +112,7 @@ export default function InventoryModal({ isOpen, onClose, personaId }: Inventory
                                             <div className={styles.itemDesc} title={item.description}>{item.description}</div>
                                         )}
                                     </div>
-                                </div>
+                                </button>
                             ))}
                         </div>
                     )}

@@ -9,14 +9,16 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs && node scripts/test-dev-origins.cjs && node scripts/test-model-editor-watermarks.cjs && node scripts/test-provider-config-errors.cjs && node scripts/test-addon-progress-dialog.cjs && node scripts/test-model-pricing.cjs",
+    "test": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs && node scripts/test-dev-origins.cjs && node scripts/test-model-editor-watermarks.cjs && node scripts/test-provider-config-errors.cjs && node scripts/test-addon-progress-dialog.cjs && node scripts/test-movement-notices.cjs && node scripts/test-chat-history-pagination.cjs && node scripts/test-building-auto-interval.cjs && node scripts/test-building-city-immutable.cjs && node scripts/test-item-viewer.cjs && node scripts/test-model-pricing.cjs",
     "test:arasuji-busy": "node scripts/test-arasuji-busy.cjs",
     "test:i18n": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs",
     "predev": "node scripts/sync-addon-panels.mjs",
     "prebuild": "node scripts/sync-addon-panels.mjs",
     "sync:addon-panels": "node scripts/sync-addon-panels.mjs",
     "test:backend-origin": "node scripts/test-backend-origin.cjs",
-    "test:backend-origin:http": "node scripts/test-backend-origin-http.cjs"
+    "test:backend-origin:http": "node scripts/test-backend-origin-http.cjs",
+    "test:item-viewer": "node scripts/test-item-viewer.cjs",
+    "test:movement-notices": "node scripts/test-movement-notices.cjs && node scripts/test-chat-history-pagination.cjs"
   },
   "keywords": [],
   "author": "",

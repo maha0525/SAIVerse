@@ -85,4 +85,4 @@
 [PR #350 の再レビュー](https://github.com/maha0525/SAIVerse/pull/350#issuecomment-5966385486) で、設定破損の利用停止とは独立した既存挙動を分離した。いずれも未着手で、本件の修正済み範囲には含めない。
 
 - [予備 API キーが可用性表示と実リクエスト・接続テストで一致しない](provider_alternate_keys_not_used_by_requests.md)
-- [接続テストの上流エラー本文が資格情報を反射し得る](provider_connection_test_reflects_upstream_error_body.md)
+- [接続テストの上流エラー本文が資格情報を反射し得る](archive/provider_connection_test_reflects_upstream_error_body.md)

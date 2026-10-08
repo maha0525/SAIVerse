@@ -157,6 +157,8 @@ api/
 
 ### frontend/
 
+入退室ログの画面表示は `src/lib/movementNotices.ts` が全体・Building の優先順位を解決し、`src/hooks/useMovementNoticeSettings.ts` が設定変更を追随する。`useMovementNoticeAutoScroll.ts` は表示される新着だけでスクロールを追尾する。全体の操作欄は `src/components/settings/MovementNoticeSetting.tsx`、部屋別の操作欄は `BuildingSettingsModal.tsx`。`src/lib/buildingSettingsSave.ts` が部屋設定の保存待ちを持ち、閉じ直したフォームも保存前の値を読み直さない。`HistoryContinuation.tsx` は非表示の通知だけのページでも生の履歴カーソルで過去へ進める入口を残す。記録やペルソナの処理から分離した表示設定である（[intent](../intent/movement_notice_visibility.md)）。
+
 `next.config.ts` の通常 API rewrite と `src/app/api/{addon,mcp}/` の Route Handler は、`backend-origin.cjs` の共通関数でバックエンドの接続先を選ぶ。正式名・旧名・既定値の順序と不一致の警告はここに集約し、SSE やメディア転送は各 Route Handler が持つ。`scripts/test-backend-origin.cjs` が設定と全経路を fake fetch で検査し、`scripts/test-backend-origin-http.cjs` が実 Next.js から fake 18000 への中継を検査する（[intent](../intent/frontend_backend_origin.md)）。
 
 ### scripts/
@@ -319,6 +321,13 @@ builtin_data/
 ## メモリー画面の表示
 
 Next.js の画面実装。`src/components/memory/PulseTimelineViewer.tsx` は Pulse の一覧・詳細・既存タグ編集を担い、同じディレクトリの `PulseTimelineViewer.module.css` がテーマ別の役割色と長文の折り返しを持つ。中立色の正典は `src/app/globals.css`。隔離した表示・操作の回帰確認は `scripts/test-pulse-timeline-theme.cjs`（[表示 intent](../intent/pulse_timeline_display.md)）。
+
+## アイテムの閲覧
+
+`frontend/src/components/ItemReferenceModal.tsx` は URI の短縮 ID とインベントリの
+UUID を詳細 API で解決し、正しい名前・種類を `ItemModal.tsx` へ渡す。
+`InventoryModal.tsx` のカードは閲覧専用でこれを開く。チャットリンクも同じ
+解決経路を使い、現在 Building の一覧や DOCUMENT の推測には依存しない。
 
 ## ユーザーデータ（`~/.saiverse/`）
 
