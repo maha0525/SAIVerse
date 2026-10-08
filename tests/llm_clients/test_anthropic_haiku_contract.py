@@ -142,3 +142,25 @@ def test_effort_allowlist_is_shared_by_all_configuration_paths(monkeypatch, mode
     params = _capture(client, False, [{"role": "user", "content": "hello"}])
     effort = params.get("output_config", {}).get("effort")
     assert effort == ("xhigh" if model_key == "claude-haiku-5.5" else None)
+
+
+@pytest.mark.parametrize('source', ['config', 'env', 'ui'])
+@pytest.mark.parametrize('effort', ['low', 'medium', 'high', 'max', 'xhigh'])
+def test_opus_4_5_effort_preserves_supported_levels(monkeypatch, source, effort):
+    monkeypatch.setenv('CLAUDE_API_KEY', 'offline-test-key')
+    monkeypatch.delenv('ANTHROPIC_THINKING_EFFORT', raising=False)
+    config = copy.deepcopy(model_configs.get_model_config('claude-opus-4.5'))
+    config.pop('thinking_effort', None)
+    if source == 'config':
+        config['thinking_effort'] = effort
+    elif source == 'env':
+        monkeypatch.setenv('ANTHROPIC_THINKING_EFFORT', effort)
+    with patch('llm_clients.anthropic.Anthropic'):
+        client = AnthropicClient(config['model'], config)
+    if source == 'ui':
+        client.configure_parameters({'thinking_effort': effort})
+    params = _capture(client, False, [{'role': 'user', 'content': 'hello'}])
+    assert params.get('output_config', {}).get('effort') == (
+        effort if effort in ('low', 'medium', 'high') else None
+    )
+    assert params['thinking'] == {'type': 'enabled', 'budget_tokens': 8192}

@@ -281,13 +281,15 @@ def estimate_chronicle_generation_cost(
             material_per_call.extend([tail_fold_material / tail_fold_calls] * tail_fold_calls)
         avg_output_per_call = 400  # ~3-5 sentence summary
         estimated_cost = sum(
-            calculate_cost(model_name, material / 3.5 + input_overhead, avg_output_per_call)
+            calculate_cost(
+                model_name, material / 3.5 + input_overhead, avg_output_per_call, log_details=False,
+            )
             for material in material_per_call
         )
         avg_input_cons = 10 * avg_entry_tokens + 500 + context_tokens_cons
         # Upper regeneration has the same estimated prompt composition as a fold.
         estimated_cost += (consolidation_calls + upper_regen_calls) * calculate_cost(
-            model_name, avg_input_cons, avg_output_per_call,
+            model_name, avg_input_cons, avg_output_per_call, log_details=False,
         )
 
     return ChronicleCostEstimate(

@@ -10,7 +10,7 @@ from saiverse.model_configs import calculate_cost
 
 @pytest.mark.parametrize('model,threshold', [('claude-haiku-5.5', 100_000), ('grok-4.7', 200_000)])
 @pytest.mark.parametrize('offsets', [(0,), (1,), (-1, 1), (0, 0)])
-def test_estimate_uses_each_request_not_total_or_average(monkeypatch, model, threshold, offsets):
+def test_estimate_uses_each_request_not_total_or_average(monkeypatch, caplog, model, threshold, offsets):
     import sai_memory.arasuji.absorption as absorption
     import sai_memory.arasuji.alignment as alignment
     import sai_memory.arasuji.bands as bands
@@ -34,7 +34,21 @@ def test_estimate_uses_each_request_not_total_or_average(monkeypatch, model, thr
     conn = MagicMock()
     conn.execute.return_value.fetchall.return_value = []
     conn.execute.return_value.fetchone.return_value = (None,)
-    estimate = estimate_chronicle_generation_cost(conn, model_name=model, messages_override=[])
+    with caplog.at_level(10, logger="saiverse.model_configs"):
+        estimate = estimate_chronicle_generation_cost(conn, model_name=model, messages_override=[])
+    assert not [r for r in caplog.records if r.name == "saiverse.model_configs" and "Cost calculated:" in r.message]
     expected = round(sum(calculate_cost(model, tokens, 400) for tokens in inputs), 6)
     assert estimate.estimated_cost_usd == pytest.approx(expected)
     assert estimate.level1_calls == len(inputs)
+
+
+@pytest.mark.parametrize('model', ['claude-haiku-5.5', 'no-pricing-probe'])
+def test_calculate_cost_quiet_is_opt_in_and_numerically_identical(caplog, model):
+    with caplog.at_level(10, logger='saiverse.model_configs'):
+        ordinary = calculate_cost(model, 100001, 400)
+    assert any(r.name == 'saiverse.model_configs' for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(10, logger='saiverse.model_configs'):
+        quiet = calculate_cost(model, 100001, 400, log_details=False)
+    assert quiet == ordinary
+    assert not [r for r in caplog.records if r.name == 'saiverse.model_configs']
