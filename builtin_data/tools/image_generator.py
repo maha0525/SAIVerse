@@ -575,7 +575,7 @@ def get_available_image_models() -> List[str]:
 
 # Fallback priority order (most commonly available first)
 _FALLBACK_ORDER = [
-    "nano_banana_2",
+    "nano_banana_2_1",
     "nano_banana_pro",
     "gpt_image_2_5_flare",
     "gpt_image_2_5_sunburst",
@@ -587,7 +587,7 @@ _FALLBACK_ORDER = [
 
 def generate_image(
     prompt: str,
-    model: ModelType = "nano_banana_2",
+    model: ModelType = "nano_banana_2_1",
     aspect_ratio: AspectRatioType = "1:1",
     quality: QualityType = "auto",
     size: SizeType = "auto",
@@ -642,7 +642,7 @@ def generate_image(
         else:
             quality = os.getenv("SAIVERSE_IMAGE_DEFAULT_QUALITY", "high")
     if not model:
-        model = "nano_banana_2"
+        model = "nano_banana_2_1"
     if not size:
         size = "auto"
 
@@ -882,7 +882,7 @@ def schema() -> ToolSchema:
                         "gpt_image_1_5 (legacy model), gpt_image_2 (previous generation), "
                         "grok_imagine (this can also create slightly NSFW images)"
                     ),
-                    "default": "nano_banana_2"
+                    "default": "nano_banana_2_1"
                 },
                 "aspect_ratio": {
                     "type": "string",

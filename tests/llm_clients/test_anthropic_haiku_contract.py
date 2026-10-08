@@ -122,3 +122,23 @@ def test_haiku_request_crosses_sdk_to_offline_wire(haiku):
     assert captured["max_tokens"] == 128000
     assert captured["thinking"]["type"] == "adaptive"
     assert not {"temperature", "top_p", "top_k", "extra_body"}.intersection(captured)
+
+
+@pytest.mark.parametrize("model_key", ["claude-haiku-4-5", "claude-opus-4.6", "claude-sonnet-4-6", "claude-haiku-5.5"])
+@pytest.mark.parametrize("source", ["config", "env", "ui"])
+def test_effort_allowlist_is_shared_by_all_configuration_paths(monkeypatch, model_key, source):
+    monkeypatch.setenv("CLAUDE_API_KEY", "offline-test-key")
+    monkeypatch.delenv("ANTHROPIC_THINKING_EFFORT", raising=False)
+    config = copy.deepcopy(model_configs.get_model_config(model_key))
+    config.pop("thinking_effort", None)
+    if source == "config":
+        config["thinking_effort"] = "xhigh"
+    elif source == "env":
+        monkeypatch.setenv("ANTHROPIC_THINKING_EFFORT", "xhigh")
+    with patch("llm_clients.anthropic.Anthropic"):
+        client = AnthropicClient(config["model"], config)
+    if source == "ui":
+        client.configure_parameters({"thinking_effort": "xhigh"})
+    params = _capture(client, False, [{"role": "user", "content": "hello"}])
+    effort = params.get("output_config", {}).get("effort")
+    assert effort == ("xhigh" if model_key == "claude-haiku-5.5" else None)

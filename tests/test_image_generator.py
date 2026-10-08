@@ -270,8 +270,9 @@ class TestImageGenerator(unittest.TestCase):
 
     @patch.object(_mod, '_is_image_model_available', return_value=True)
     @patch.object(_mod, 'store_image_bytes')
+    @patch.object(_mod, '_generate_with_nano_banana_pro', return_value=(b'img', 'image/webp'))
     @patch.object(_mod, '_generate_with_nano_banana_2')
-    def test_nano_banana_2_1_dispatch_and_fallback(self, mock_gen, mock_store, mock_avail):
+    def test_nano_banana_2_1_dispatch_and_fallback(self, mock_gen, mock_pro, mock_store, mock_avail):
         with tempfile.TemporaryDirectory() as directory:
             temp_path = Path(directory) / 'generated.webp'
             mock_store.return_value = ({'uri': 'saiverse://image/test', 'mime_type': 'image/webp'}, temp_path)
@@ -280,6 +281,7 @@ class TestImageGenerator(unittest.TestCase):
                      patch('tools.context.get_active_persona_id', return_value=None), \
                      patch('tools.context.get_active_manager', return_value=None):
                     mock_gen.reset_mock()
+                    mock_pro.reset_mock()
                     mock_gen.side_effect = ([RuntimeError('unavailable'), (b'img', 'image/webp')]
                                             if fail_first else [(b'img', 'image/webp')])
                     text, info, path, metadata, item_id = generate_image(
@@ -294,22 +296,22 @@ class TestImageGenerator(unittest.TestCase):
                     self.assertEqual(first.kwargs, {'model_id': 'gemini-nano-banana-2.1'})
                     self.assertEqual(mock_store.call_args.args[:2], (b'img', 'image/webp'))
                     if fail_first:
-                        self.assertEqual(mock_gen.call_count, 2)
-                        self.assertEqual(mock_gen.call_args_list[1].kwargs, {})
+                        self.assertEqual(mock_gen.call_count, 1)
+                        mock_pro.assert_called_once_with('a cat', '16:9', 'low', [])
                         self.assertIn('サーバーエラー', text)
                     else:
                         self.assertEqual(mock_gen.call_count, 1)
                         self.assertIn('nano_banana_2_1', text)
 
-    def test_nano_banana_2_1_exposed_without_default_or_fallback_change(self):
+    def test_nano_banana_2_1_replaces_default_and_fallback(self):
         name = 'nano_banana_2_1'
         model_schema = _mod.schema().parameters['properties']['model']
         self.assertIn(name, model_schema['enum'])
         self.assertIn(name, get_args(_mod.ModelType))
-        self.assertEqual(model_schema['default'], 'nano_banana_2')
-        self.assertEqual(inspect.signature(generate_image).parameters['model'].default, 'nano_banana_2')
+        self.assertEqual(model_schema['default'], name)
+        self.assertEqual(inspect.signature(generate_image).parameters['model'].default, name)
         self.assertEqual(_mod._FALLBACK_ORDER, [
-            'nano_banana_2', 'nano_banana_pro', 'gpt_image_2_5_flare',
+            'nano_banana_2_1', 'nano_banana_pro', 'gpt_image_2_5_flare',
             'gpt_image_2_5_sunburst', 'gpt_image_1_5', 'gpt_image_2', 'grok_imagine',
         ])
         self.assertEqual(_mod._get_model_api_key_env(name), 'GEMINI_API_KEY')
@@ -323,6 +325,8 @@ class TestImageGenerator(unittest.TestCase):
         validate_playbook_graph(PlaybookSchema(**playbook))
         decide = next(node for node in playbook['nodes'] if node['id'] == 'decide_prompt')
         self.assertIn(name, decide['response_schema']['properties']['model']['enum'])
+        self.assertNotIn('nano_banana_2', decide['response_schema']['properties']['model']['enum'])
+        self.assertIn('デフォルトはnano_banana_2_1', decide['response_schema']['properties']['model']['description'])
 
     def test_tool_registration(self):
         from tools import TOOL_REGISTRY

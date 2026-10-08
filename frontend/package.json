@@ -9,7 +9,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs && node scripts/test-dev-origins.cjs && node scripts/test-model-editor-watermarks.cjs && node scripts/test-provider-config-errors.cjs && node scripts/test-addon-progress-dialog.cjs",
+    "test": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs && node scripts/test-dev-origins.cjs && node scripts/test-model-editor-watermarks.cjs && node scripts/test-provider-config-errors.cjs && node scripts/test-addon-progress-dialog.cjs && node scripts/test-model-pricing.cjs",
     "test:arasuji-busy": "node scripts/test-arasuji-busy.cjs",
     "test:i18n": "node scripts/check-i18n.mjs && node scripts/test-i18n.cjs",
     "predev": "node scripts/sync-addon-panels.mjs",

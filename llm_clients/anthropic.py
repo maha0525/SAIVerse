@@ -112,8 +112,18 @@ class AnthropicClient(LLMClient):
         thinking_effort = cfg.get("thinking_effort") or os.getenv("ANTHROPIC_THINKING_EFFORT")
         thinking_display = cfg.get("thinking_display") or os.getenv("ANTHROPIC_THINKING_DISPLAY")
 
-        # Validate and store thinking_effort
-        valid_efforts = ("low", "medium", "high", "xhigh", "max")
+        # The model catalog owns effort capabilities. Raw config/environment values
+        # and later UI overrides must pass the same per-model allowlist.
+        from saiverse.model_configs import find_model_config
+        _, catalog_config = find_model_config(model)
+        effort_config = cfg.get("parameters", catalog_config.get("parameters", {}))
+        effort_spec = effort_config.get("thinking_effort", {}) if isinstance(effort_config, dict) else {}
+        options = effort_spec.get("options", []) if isinstance(effort_spec, dict) else []
+        self._valid_efforts = tuple(
+            option for option in options
+            if isinstance(option, str) and option in ("low", "medium", "high", "xhigh", "max")
+        ) if isinstance(options, list) else ()
+        valid_efforts = self._valid_efforts
         if thinking_effort and thinking_effort in valid_efforts:
             self._thinking_effort = thinking_effort
 
@@ -177,7 +187,7 @@ class AnthropicClient(LLMClient):
         if not isinstance(parameters, dict):
             return
         allowed_params = {"temperature", "top_p", "top_k", "max_tokens"}
-        valid_efforts = ("low", "medium", "high", "xhigh", "max")
+        valid_efforts = self._valid_efforts
         for key, value in parameters.items():
             # Handle thinking_effort specially (stored on instance, not in _extra_params)
             if key == "thinking_effort":
