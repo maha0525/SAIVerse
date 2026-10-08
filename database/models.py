@@ -13,6 +13,7 @@ from sqlalchemy import (
     Float,
     event,
     select,
+    true,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -246,6 +247,9 @@ class Building(Base):
     # 負数は保存時に拒否する。「全部見せたい」部屋は十分大きい数を入れる
     # (「無制限」の特別な値は作らない)。
     ITEM_DISPLAY_LIMIT = Column(Integer, nullable=True)
+    # チャット画面の入退室通知だけの表示設定。NULL は全体設定を継承する。
+    # 履歴の保存・ペルソナへの配送やコンテキストには使わない。
+    SHOW_MOVEMENT_NOTICES = Column(Boolean, nullable=True)
     __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
 
 
@@ -593,6 +597,9 @@ class UserSettings(Base):
     LAST_TUTORIAL_VERSION = Column(Integer, default=1, nullable=False)
     SELECTED_META_PLAYBOOK = Column(String(255), nullable=True)  # User's preferred meta playbook
     FAVORITE_MODELS = Column(Text, nullable=True)  # JSON array of favorite model IDs
+    # 入退室通知の画面表示の全体既定。ORM / 生 SQL / 既存 DB の列追加で
+    # いずれも表示を既定にし、設定を知らない INSERT でも従来の表示を保つ。
+    SHOW_MOVEMENT_NOTICES = Column(Boolean, default=True, server_default=true(), nullable=False)
     # Metabolism 二水位 (文字数) の全体既定 (2026-09-03)。NULL = 未設定 (組み込み既定に
     # 従う)。優先順位は 組み込み既定 < この全体設定 < モデル定義 (metabolism_*_chars)。
     # 起動時と PUT /api/config/metabolism-defaults 成功時に

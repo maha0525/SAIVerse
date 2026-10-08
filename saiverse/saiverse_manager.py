@@ -2120,13 +2120,20 @@ class SAIVerseManager(
         image_path: Optional[str] = None,
         extra_prompt_files: Optional[List[str]] = None,
         item_display_limit: Any = UNSET,
+        show_movement_notices: Any = UNSET,
     ) -> str:
         """ワールドエディタからBuildingの設定を更新する
 
         ``item_display_limit`` (部屋の様子に出す建物直下のアイテムの個数の上限)
         は :data:`~manager.admin.UNSET` なら触らない — 送ってこない画面の保存で
         設定が消えないようにするため (docs/intent/room_item_display_cap.md 設計 4)。
+
+        ``show_movement_notices`` は画面専用の設定として DB にだけ保存し、
+        ペルソナが読む Building の実行時状態には持ち込まない。
         """
+        display_settings = {}
+        if show_movement_notices is not UNSET:
+            display_settings["show_movement_notices"] = show_movement_notices
         result = self.admin.update_building(
             building_id,
             name,
@@ -2139,6 +2146,7 @@ class SAIVerseManager(
             image_path,
             extra_prompt_files,
             item_display_limit,
+            **display_settings,
         )
 
         # Update in-memory Building object if DB update succeeded
