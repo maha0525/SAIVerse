@@ -7,6 +7,7 @@ User-facing item reads are global; persona inventory membership remains scoped.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from urllib.parse import quote
 from uuid import UUID
 
 import pytest
@@ -185,6 +186,37 @@ def test_missing_item_is_404(viewer_world, route, key):
     response = viewer_world.client.get(f"{route}{key}")
     assert response.status_code == 404
     assert "Item not found" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("key", ["²", "②", "８２", "٨٢", "8２"])
+@pytest.mark.parametrize("route", [
+    "/api/world/items/{key}",
+    "/api/info/item/{key}",
+    "/api/info/item/{key}/bag-contents",
+])
+def test_non_ascii_numeric_keys_are_not_short_ids(viewer_world, route, key):
+    # 82 exists: Unicode decimal digits must not alias its ASCII short ID.
+    response = viewer_world.client.get(route.format(key=quote(key, safe="")))
+    assert response.status_code == 404
+    assert "Item not found" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("key", ["²", "②", "８２", "٨٢", "8２"])
+def test_non_ascii_numeric_content_uri_is_missing(viewer_world, key):
+    response = viewer_world.client.get("/api/uri/resolve", params={
+        "uri": f"saiverse://item/{key}/content",
+    })
+    assert response.status_code == 404
+    assert "Item not found" in response.json()["detail"]
+
+
+def test_ascii_short_id_normalization_still_matches_metadata_and_content(viewer_world):
+    example = viewer_world.examples["inventory", "picture"]
+    key = quote(f" 00{example.short_id} ", safe="")
+    response = viewer_world.client.get(f"/api/world/items/{key}")
+    assert response.status_code == 200
+    assert response.json()["ITEM_ID"] == example.id
+    _assert_content(viewer_world.client.get(f"/api/info/item/{key}"), example)
 
 
 def test_inventory_for_unrelated_persona_is_empty(viewer_world):

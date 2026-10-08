@@ -47,7 +47,11 @@ npm run test:backend-origin
 `test-item-viewer.cjs` は `npm test` に含まれる（単独では `npm run test:item-viewer`）。
 チャットの実リンク callback とインベントリの実 TSX を合成 API / hooks ハーネスで実行し、
 短縮 ID / UUID の種類・名前・本文表示、削除済み参照、遅延応答、閉じ直し、persona 切替、
-閲覧専用の入れ子を検査する。ブラウザのレイアウトと画像 bytes の取得はこの検査の範囲外。
+閲覧専用の入れ子を検査する。同じ18ケースをネイティブ区切りと `path.win32.relative`
+の区切りで実行する。モジュール許可リストは `/` 区切りなので、比較時にOS依存の区切りを
+正規化する。Linuxだけの実行でWindowsの子コンポーネントがスタブに化ける不具合を
+見逃さないための境界テストで、実Windows実行の代わりとは扱わない。
+ブラウザのレイアウトと画像 bytes の取得はこの検査の範囲外。
 サーバー側の対応は `python -m pytest tests/test_item_viewer_api.py -n 0` で、
 隔離 DB とファイルを使ってメタデータから画像 / 文書本文までを通す。
 

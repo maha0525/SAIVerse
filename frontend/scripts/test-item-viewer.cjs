@@ -46,7 +46,7 @@ const itemProps = item => ({ id: item.ITEM_ID, name: item.NAME, type: item.TYPE,
 const inventoryRow = item => ({ ...itemProps(item), created_at: '2026-01-01T00:00:00Z' });
 const documentBody = '# Synthetic journal\n\nA full paragraph, including **Markdown**.';
 
-function harness(component, props = {}) {
+function createHarness(component, props = {}, relativePath = path.relative) {
     const instances = new Map(), modules = new Map(), componentIds = new WeakMap();
     const requests = [], notices = [], queued = new Map(), seenComponents = [];
     let active, cursor, effects = [], dirty = true, tree, rootProps = props, mounted = true, extra = null, nextId = 0;
@@ -148,7 +148,8 @@ function harness(component, props = {}) {
             if (name.startsWith('@/lib/')) return {};
             if (name.startsWith('.') || name.startsWith('@/')) {
                 const resolved = name.startsWith('@/') ? path.join(source, `${name.slice(2)}.tsx`) : path.resolve(path.dirname(file), `${name}.tsx`);
-                if (realFiles.has(path.relative(source, resolved))) return load(resolved);
+                // The allowlist uses repository-style separators on every host OS.
+                if (realFiles.has(relativePath(source, resolved).replace(/\\/g, '/'))) return load(resolved);
                 return { __esModule: true, default: Empty, ActiveClientIndicator: Empty };
             }
             throw new Error(`Unexpected dependency ${name}`);
@@ -241,7 +242,8 @@ function assertReadOnly(tree) {
     assert.equal(all(tree, node => ['input', 'textarea', 'select'].includes(node.type)).length, 0, 'read-only view must have no edit inputs');
 }
 
-(async () => {
+async function runCases(relativePath, label) {
+    const harness = (component, props) => createHarness(component, props, relativePath);
     let cases = 0;
     // The real chat callback must resolve short and full references without
     // inspecting the current room. A picture must never enter the JSON branch.
@@ -396,5 +398,13 @@ function assertReadOnly(tree) {
     button(tree, 'editBtn').props.onClick(); tree = await editable.settle(); button(tree, 'saveBtn');
     assert.equal(all(tree, node => node.type === 'textarea').length, 1); cases++;
 
-    console.log(`${cases} item-viewer cases passed: real chat links, canonical media/document rendering, missing references, keyed lifetime/races, inventory buttons/refresh/persona isolation, and nested read-only controls.`);
+    console.log(`${cases} item-viewer cases passed (${label}): real chat links, canonical media/document rendering, missing references, keyed lifetime/races, inventory buttons/refresh/persona isolation, and nested read-only controls.`);
+}
+
+(async () => {
+    await runCases(path.relative, 'native paths');
+    // Real Windows path semantics at the allowlist boundary, without replacing
+    // host filesystem paths. This exercises child loading on non-Windows CI too.
+    assert.ok(path.win32.relative(source, path.join(source, 'components/SaiverseLink.tsx')).includes('\\'));
+    await runCases(path.win32.relative, 'Windows-relative paths');
 })().catch(error => { console.error(error); process.exitCode = 1; });
