@@ -108,6 +108,20 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 - **使用量の帰属**: 使用量と費用は API モデル名ではなく設定キー (JSON のファイル名) に帰属させる。Codex のようなサブスクで賄われる設定は従量課金版と同じ API モデル名を持つため、API 名で価格を引くと課金されていない呼び出しに従量単価が付く。`LLMClient.config_key` を価格引き当ての正典とし、client 側が `_store_usage(model=...)` で API 名に差し替えてはならない。
 - **検証**: モデル JSON の価格・capability 読み込み、runtime 由来の sampling override 除去、通常 user 終端の通過、model 終端のローカル拒否、function call/response ID の往復を、外部 API を呼ばないテストで境界横断して確認する。
 
+#### Claude Haiku 5.5 の追加 (2026-10-08)
+
+モデル選択 → native Anthropic request → 使用量の費用計算まで、既存の §9 の契約を適用する。会話モデルの既定値・ユーザー設定は変更しない。画像モデルの既定値は別途 [画像生成モデル](image_generation_models.md) の確認済み方針に従う。
+
+- `claude-haiku-5.5` は API ID `claude-haiku-5-5`、1M context / 128K output、adaptive thinking / medium を使う。manual budget は使わない。
+- `supports_sampling_parameters: false` と `supports_assistant_prefill: false` を provider 境界へ運び、呼び出し時の sampling override を除去し、assistant 終端は内容を書き換えずローカルで拒否する。
+- effort はモデル定義の `parameters.thinking_effort.options` を許可集合にし、初期設定・環境変数・UI 更新すべてで同じ制約を適用する。`xhigh` を非対応の旧モデルへ送らない。 Opus 4.5 は `low` / `medium` / `high` を定義し、既存の手動思考予算と併用する。
+  - 追加検収で、旧定義の選択肢欠落を非対応と見なしてしまい、Opus 4.5 の有効な effort も落とす回帰を修正。原因は宣言の不足、欠落と非対応の混同、拒否ケースだけに偏った旧モデル検査の3点。宣言を送信の許可条件にするときは、既存の有効値が残る肯定ケースと禁止値の否定ケースを同じ経路で確認する。
+- 入力10万token超の単価は入力・出力・cache read・5分/1時間cache writeすべてに適用する。1時間cache writeも長文tierを優先し、未指定モデルは既存の1時間単価へ戻る。
+- Chronicle の費用見積もりは各計画呼び出しの推定入力で料金帯を選ぶ（末尾畳みは既存callbackが合計材料のみを返すため、一回あたり平均材料で概算）。ContextPreview の出力単価も表示中の入力長を使う。見積もりからの料金計算は `log_details=False` で呼び出し単位のDEBUG詳細を省き、通常の利用量計算のログは維持する。
+- adaptive モデルでは、旧 `thinking_budget` による `max_tokens` 引き上げを行わない。この修正は既存 adaptive モデルにも適用する。
+- 設定読み込み、request構築、10万token/20万token境界の料金・見積もりを隔離テストで確認する。実APIの応答・本番ペルソナの動作はこの検証に含めない。
+- 根拠: [仕様](https://platform.claude.com/docs/en/models/haiku-5-5/overview)、[移行条件](https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide)、[料金](https://platform.claude.com/docs/en/about-claude/pricing)、[cache最低長](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)。
+
 ### 10. アプリ名の申告 (`default_headers`) — 接続に属し、会話には属さない
 
 一部のバックエンドは、呼び出し元アプリを名乗るヘッダーを受け取り、それを公開ランキングに集計する。OpenRouter がこれで、`HTTP-Referer`（アプリの識別子）・`X-OpenRouter-Title`（表示名）・`X-OpenRouter-Categories`（カテゴリ、カンマ区切りで最大2つ）を送ったアプリだけが `openrouter.ai/apps` に載る。SAIVerse はここに `roleplay` と `general-chat` の二枚看板で並ぶことで、同種のアプリを探しているユーザーからの発見経路を得る。

@@ -9,6 +9,7 @@ import React, { useEffect, useState } from 'react';
 import { X, ChevronDown, ChevronRight } from 'lucide-react';
 import ModalOverlay from '@/components/common/ModalOverlay';
 import { formatCost } from '@/lib/formatCost';
+import { outputRateForInput } from '@/lib/modelPricing';
 import styles from './ContextPreviewModal.module.css';
 
 interface SectionInfo {
@@ -151,7 +152,7 @@ function PersonaPreviewView({ persona }: { persona: PersonaPreview }) {
         });
     };
 
-    const outputRate = persona.pricing?.output_per_1m_tokens;
+    const outputRate = outputRateForInput(persona.pricing, persona.total_input_tokens);
 
     return (
         <div className={styles.personaPreview}>
