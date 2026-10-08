@@ -235,7 +235,7 @@ class TestSeptember2026ModelCatalog(unittest.TestCase):
 
     def test_cache_rates(self):
         cached = {
-            "claude-sonnet-5.5": 0.2,
+            "claude-sonnet-5.5": 0.1,  # halved on 2026-10-08 (official pricing page)
             "claude-opus-5.5": 0.2,
             "gpt-6-sol": 0.2,
             "gpt-6-luna": 0.01,
