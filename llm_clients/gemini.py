@@ -897,8 +897,69 @@ class GeminiClient(LLMClient):
         return _to_schema(js)
 
     @staticmethod
+    def _to_response_json_schema(node: Any) -> Any:
+        """Rewrite a raw JSON Schema into what ``response_json_schema`` accepts.
+
+        The raw path supports ``enum`` only for strings and numbers and has no
+        ``const`` at all (google-genai ``GenerateContentConfig.response_json_schema``
+        docstring). So a string/number ``const`` becomes a one-value ``enum``;
+        a ``const`` or ``enum`` holding booleans / null is dropped and written
+        into ``description`` so the model still sees the constraint.
+        Keys inside ``properties`` are property names, not keywords, and are
+        never rewritten.
+        """
+        if isinstance(node, list):
+            return [GeminiClient._to_response_json_schema(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+
+        def representable(value: Any) -> bool:
+            return isinstance(value, str) or (
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+            )
+
+        out: Dict[str, Any] = {}
+        notes: List[str] = []
+        for key, value in node.items():
+            if key in ("properties", "patternProperties", "$defs", "definitions") and isinstance(value, dict):
+                out[key] = {
+                    name: GeminiClient._to_response_json_schema(sub)
+                    for name, sub in value.items()
+                }
+            elif key in ("items", "prefixItems", "anyOf", "oneOf", "allOf", "additionalProperties"):
+                out[key] = GeminiClient._to_response_json_schema(value)
+            elif key == "enum" and isinstance(value, list):
+                if all(representable(v) for v in value):
+                    out[key] = value
+                else:
+                    notes.append(
+                        "Allowed values: "
+                        + ", ".join(json.dumps(v, ensure_ascii=False) for v in value)
+                        + "."
+                    )
+            elif key == "const":
+                if representable(value) and "enum" not in node:
+                    out["enum"] = [value]
+                else:
+                    notes.append(f"Must be {json.dumps(value, ensure_ascii=False)}.")
+            else:
+                out[key] = value
+        if notes:
+            base = out.get("description")
+            out["description"] = " ".join(([base] if isinstance(base, str) and base else []) + notes)
+        return out
+
+    @staticmethod
     def _requires_json_schema(node: Any) -> bool:
         if isinstance(node, dict):
+            # types.Schema.enum is list[str]; a non-string enum/const would
+            # make _schema_from_json raise, so send the raw JSON Schema instead
+            # (keeps the constraint rather than dropping it).
+            enum_val = node.get("enum")
+            if isinstance(enum_val, list) and any(not isinstance(v, str) for v in enum_val):
+                return True
+            if "const" in node and not isinstance(node["const"], str):
+                return True
             if "additionalProperties" in node:
                 ap_val = node.get("additionalProperties")
                 if ap_val not in (None, False):
@@ -1465,7 +1526,7 @@ class GeminiClient(LLMClient):
         if response_schema:
             cfg_kwargs["response_mime_type"] = "application/json"
             if isinstance(response_schema, dict) and self._requires_json_schema(response_schema):
-                cfg_kwargs["response_json_schema"] = response_schema
+                cfg_kwargs["response_json_schema"] = self._to_response_json_schema(response_schema)
             else:
                 schema_obj = self._schema_from_json(response_schema)
                 if schema_obj is not None:
@@ -2378,7 +2439,7 @@ class GeminiClient(LLMClient):
         if response_schema and not use_tools:
             cfg_kwargs["response_mime_type"] = "application/json"
             if isinstance(response_schema, dict) and self._requires_json_schema(response_schema):
-                cfg_kwargs["response_json_schema"] = response_schema
+                cfg_kwargs["response_json_schema"] = self._to_response_json_schema(response_schema)
             else:
                 schema_obj = self._schema_from_json(response_schema)
                 if schema_obj is not None:
