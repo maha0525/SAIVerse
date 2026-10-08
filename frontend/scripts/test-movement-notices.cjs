@@ -14,7 +14,7 @@ const deferred = () => {
     const promise = new Promise((a, b) => { resolve = a; reject = b; });
     return { promise, resolve, reject };
 };
-function environment() {
+function environment({ windowsPaths = false } = {}) {
     const window = new EventTarget();
     const document = new EventTarget();
     document.visibilityState = 'visible';
@@ -24,6 +24,7 @@ function environment() {
     window.clearInterval = id => timers.delete(id);
     return {
         window, document, modules: new Map(),
+        modulePath: file => windowsPaths ? file.replaceAll('/', '\\') : file,
         poll: () => { for (const fn of [...timers.values()]) fn(); },
         focus: () => window.dispatchEvent(new Event('focus')),
         timerCount: () => timers.size,
@@ -53,6 +54,8 @@ function mount(relative, initialProps, apiFetch, env = environment(), locale = '
     };
     const cache = new Map();
     function load(file) {
+        // Use one identity for disk reads and caches, including Windows path.join output.
+        file = env.modulePath(file).replaceAll('\\', '/');
         const shared = /\/lib\/(movementNotices|buildingSettingsSave)\.ts$/.test(file);
         if (shared && env.modules.has(file)) return env.modules.get(file);
         if (cache.has(file)) return cache.get(file);
@@ -207,10 +210,10 @@ async function testAutoScroll() {
     view.unmount();
 }
 
-async function testSaveAcrossRemounts() {
+async function testSaveAcrossRemounts(options) {
     // Both server-commit delay and response-only delay remain serialized across modal instances.
     for (const commitEarly of [false, true]) {
-        const env = environment();
+        const env = environment(options);
         let saved = { show_movement_notices: true, building_overrides: {} };
         const writes = [], reads = [];
         const api = async (url, init) => {
@@ -467,9 +470,9 @@ async function testBuildingControl() {
     view.unmount();
 }
 
-async function testBuildingSaveAcrossReopen() {
+async function testBuildingSaveAcrossReopen(options) {
     for (const [remount, failed] of [[false, false], [true, false], [true, true]]) {
-        const env = environment();
+        const env = environment(options);
         let saved = { BUILDINGID: 'a', BUILDINGNAME: 'A', SHOW_MOVEMENT_NOTICES: null };
         let write;
         let reads = 0, writes = 0, closes = 0;
@@ -545,6 +548,61 @@ async function testCloseWhileWaitingForBuildingSave() {
     waiting.unmount();
 }
 
+async function testBuildingErrorBodyAcrossReopen() {
+    for (const remount of [false, true]) {
+        for (const rejectBody of [false, true]) {
+            const env = environment();
+            const errorBody = deferred();
+            let writes = 0, closes = 0;
+            const api = async (url, init) => {
+                if (init?.method === 'PUT') {
+                    writes++;
+                    return writes === 1
+                        ? { ok: false, status: 500, json: () => errorBody.promise }
+                        : response({});
+                }
+                if (url.startsWith('/api/db/tables/building?')) {
+                    return response([{ BUILDINGID: 'a', BUILDINGNAME: 'A' }]);
+                }
+                return response([]);
+            };
+            const props = { isOpen: true, buildingId: 'a', onClose: () => closes++ };
+            const original = mount('components/BuildingSettingsModal.tsx', props, api, env);
+            await original.settle();
+            button(original, 'components.BuildingSettingsModal.text034').props.onClick();
+            await original.settle(); // 500 headers arrived; its body has not.
+            const saveState = original.load('lib/buildingSettingsSave.ts');
+            assert.ok(saveState.pendingBuildingSettingsSave('a'), 'the shared operation includes the error body');
+            let reopened;
+            if (remount) {
+                original.unmount();
+                reopened = mount('components/BuildingSettingsModal.tsx', props, api, env);
+            } else {
+                original.update({ isOpen: false });
+                original.update({ isOpen: true });
+                reopened = original;
+            }
+            await reopened.settle();
+            assert.ok(!select(reopened), 'reopened form waits for the complete save operation');
+            assert.ok(!find(reopened.tree, node => node.type === 'button' && node.props.className === 'saveBtn'), 'no active Save is offered while waiting for the body');
+            assert.equal(writes, 1);
+            if (rejectBody) errorBody.reject(new Error('synthetic body read failure'));
+            else errorBody.resolve({ detail: 'synthetic save failure' });
+            await reopened.settle();
+            assert.equal(saveState.pendingBuildingSettingsSave('a'), undefined);
+            assert.ok(reopened.html.includes('role="alert"'));
+            assert.equal(select(reopened).props.disabled, false);
+            const retry = button(reopened, 'components.BuildingSettingsModal.text034');
+            assert.equal(retry.props.disabled, false);
+            retry.props.onClick();
+            await reopened.settle();
+            assert.equal(writes, 2, 'an enabled retry really starts the next operation');
+            assert.equal(closes, 1);
+            reopened.unmount();
+        }
+    }
+}
+
 async function testBuildingReadRaces() {
     const reads = [], writes = [];
     const api = async (url, init) => {
@@ -579,13 +637,18 @@ async function testBuildingReadRaces() {
     await testFilteringAndPagination();
     await testGlobalControl();
     await testSaveAcrossRemounts();
+    // Exercise actual remount/save flows with backslash module paths on every OS.
+    assert.match(environment({ windowsPaths: true }).modulePath(path.join(src, 'lib/movementNotices.ts')), /\\/);
+    await testSaveAcrossRemounts({ windowsPaths: true });
     await testGlobalBuildingOverlap();
     await testFailedGlobalSaveAfterRemount();
     await testAutoScroll();
     await testReadRaces();
     await testBuildingControl();
     await testBuildingReadRaces();
+    await testBuildingErrorBodyAcrossReopen();
     await testBuildingSaveAcrossReopen();
+    await testBuildingSaveAcrossReopen({ windowsPaths: true });
     await testCloseWhileWaitingForBuildingSave();
-    console.log('Movement notices: precedence, render-only history/cursors, hidden-page continuation, settings saves/retries/reopen, localization, polling/focus and stale response guards passed.');
+    console.log('Movement notices: precedence, render-only history/cursors, hidden-page continuation, settings saves/retries/reopen (native and Windows paths), localization, polling/focus and stale response guards passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

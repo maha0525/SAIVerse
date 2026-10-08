@@ -376,7 +376,8 @@ export default function Home() {
     const [isHistoryLoaded, setIsHistoryLoaded] = useState(false);
 
     // Pagination State
-    const [hasMore, setHasMore] = useState(true);
+    const [hasMore, setHasMore] = useState(false);
+    const historyRequestGenerationRef = useRef(0);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const previousScrollHeightRef = useRef<number>(0);
     const isProcessingRef = useRef(false); // Suppress polling during active request
@@ -803,15 +804,18 @@ export default function Home() {
         setSessionLogPeek(v);
     };
 
-    const resolveHasMore = (data: HistoryResponse, newMessages: Message[]) => {
-        return data.has_more !== undefined ? data.has_more : newMessages.length >= 20;
-    };
-
     const fetchHistory = async (beforeId?: string, overrideBuildingId?: string) => {
+        const bid = overrideBuildingId || currentBuildingIdRef.current;
+        const generation = ++historyRequestGenerationRef.current;
+        const isCurrent = () => generation === historyRequestGenerationRef.current
+            && bid === currentBuildingIdRef.current;
+        // Only the current view's completed response can offer older history.
+        // A previous room (including A → B → A) must not restore its has_more.
+        if (!beforeId) setHasMore(false);
+        if (!bid) return; // /user/status will start the first room-specific request.
         try {
             if (!beforeId) {
                 setIsHistoryLoaded(false);
-                setHasMore(true);
             } else {
                 setIsLoadingMore(true);
                 if (chatAreaRef.current) {
@@ -821,8 +825,6 @@ export default function Home() {
 
             const params = new URLSearchParams({ limit: '20' });
             if (beforeId) params.append('before', beforeId);
-            const bid = overrideBuildingId || currentBuildingIdRef.current;
-
             // セッションログビューの条件:
             // - Region 内 (inside): 閲覧中の建物 = 自分の実在地 のときだけ。
             //   閲覧モードで他の建物を見ている間はその建物の通常ログ。
@@ -844,15 +846,14 @@ export default function Home() {
 
             const res = await apiFetch(url);
             if (res.ok) {
-                setBackendConnected(true);
                 const data: HistoryResponse = await res.json();
+                if (!isCurrent()) return;
+                setBackendConnected(true);
                 const newMessages: Message[] = data.history || [];
-                const effectiveHasMore = resolveHasMore(data, newMessages);
+                const effectiveHasMore = data.has_more === true;
                 console.log(`[DEBUG] Fetched ${newMessages.length} items (beforeId=${beforeId}, server has_more=${data.has_more}, effectiveHasMore=${effectiveHasMore})`);
 
-                if (!effectiveHasMore) {
-                    setHasMore(false);
-                }
+                setHasMore(effectiveHasMore);
 
                 if (beforeId) {
                     setMessages(prev => {
@@ -864,7 +865,7 @@ export default function Home() {
                     });
                 } else {
                     setMessages(newMessages);
-                    setTimeout(() => setIsHistoryLoaded(true), 150);
+                    setTimeout(() => { if (isCurrent()) setIsHistoryLoaded(true); }, 150);
                 }
 
                 // アシスタントメッセージに紐付くアドオンメタデータを先読みする。
@@ -900,6 +901,7 @@ export default function Home() {
                 }
             } else {
                 const errorPayload: HistoryResponse | null = await res.json().catch(() => null);
+                if (!isCurrent()) return;
                 console.error("[DEBUG] Fetch failed", {
                     status: res.status,
                     beforeId,
@@ -915,11 +917,12 @@ export default function Home() {
                 setIsHistoryLoaded(true);
             }
         } catch (err) {
+            if (!isCurrent()) return;
             console.error("Failed to load history", err);
             setBackendConnected(false);
             if (!beforeId) setIsHistoryLoaded(true);
         } finally {
-            setIsLoadingMore(false);
+            if (isCurrent()) setIsLoadingMore(false);
         }
     };
 
@@ -1198,17 +1201,16 @@ export default function Home() {
                 if (data?.display_name) userDisplayNameRef.current = data.display_name;
                 if (data?.avatar) userAvatarRef.current = data.avatar;
                 applyActiveGame(data?.active_game ?? null);
-                // 起動直後の fetchHistory() は status 取得とレースするため、
-                // ゲーム中 (Region 内) なら refs 確定後にセッションログで取り直す
-                if (data?.active_game?.inside && data?.current_building_id) {
+                // Start both ordinary and game history only after the room and game
+                // refs are known. A request without a room cannot confirm pagination.
+                if (data?.current_building_id) {
                     setMessages([]);
                     setIsHistoryLoaded(false);
                     fetchHistory(undefined, data.current_building_id);
+                    fetchBuildingInfo(data.current_building_id);
                 }
             })
             .catch(() => setBackendConnected(false));
-        fetchHistory();
-        fetchBuildingInfo();
         // Fetch saved playbook setting and params from server.
         // Legacy values from the pre-Phase 3 era (meta_user / meta_user_manual /
         // meta_simple_speak, and the old track_user_conversation explicit

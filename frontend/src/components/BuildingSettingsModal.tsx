@@ -75,7 +75,6 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
     const isOpenRef = useRef(isOpen);
     isOpenRef.current = isOpen;
     const loadGeneration = useRef(0);
-    const savingRef = useRef(false);
 
     useEffect(() => {
         const version = loadGeneration;
@@ -213,7 +212,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
     };
 
     const handleSave = async () => {
-        if (savingRef.current || pendingBuildingSettingsSave(buildingId) || !isOpenRef.current) return;
+        if (pendingBuildingSettingsSave(buildingId) || !isOpenRef.current) return;
         // 整合性ガード (feedback_modal_id_integrity.md / エリス上書き事故 2026-04-30)
         if (loading) {
             alert(uiText("components.BuildingSettingsModal.text002"));
@@ -232,7 +231,6 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
             return;
         }
 
-        savingRef.current = true;
         setSaving(true);
         setError(null);
         const targetBuildingId = buildingId;
@@ -263,17 +261,15 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                 if (onSaved) onSaved();
                 onClose();
             } else {
-                const data = await res.json();
                 if (isStale()) return;
-                setError(data.detail || uiText("components.BuildingSettingsModal.text007"));
+                setError(res.error || uiText("components.BuildingSettingsModal.text007"));
             }
         } catch (err) {
             if (isStale()) return;
             setError(uiText("components.BuildingSettingsModal.text008"));
             console.error(err);
         } finally {
-            savingRef.current = false;
-            setSaving(false);
+            if (!isStale()) setSaving(false);
         }
     };
 
