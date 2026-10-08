@@ -17,6 +17,11 @@ def test_anthropic_stream_does_not_retry_after_first_yield() -> None:
     client._extra_params = {}
     client._thinking_config = None
     client._thinking_effort = None
+    # Fields __init__ sets since PR #379 (Haiku 5.5): capability flags and the
+    # per-model effort allowlist. This hand-built client must carry them too.
+    client._supports_sampling_parameters = True
+    client._supports_assistant_prefill = True
+    client._valid_efforts = ()
     client.supports_images = False
     client.max_image_bytes = 1024
     client.max_image_embeds = None
