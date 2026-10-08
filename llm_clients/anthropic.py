@@ -95,6 +95,8 @@ class AnthropicClient(LLMClient):
         self.model = model
 
         cfg = config or {}
+        self._supports_sampling_parameters = bool(cfg.get("supports_sampling_parameters", True))
+        self._supports_assistant_prefill = bool(cfg.get("supports_assistant_prefill", True))
 
         # Anthropic has a 5MB limit for images (configurable via model config)
         self.max_image_bytes = cfg.get("max_image_bytes", 5 * 1024 * 1024)
@@ -104,14 +106,14 @@ class AnthropicClient(LLMClient):
 
         # Extended thinking configuration
         self._thinking_config: Optional[Dict[str, Any]] = None
-        self._thinking_effort: Optional[str] = None  # "low", "medium", "high", "max"
+        self._thinking_effort: Optional[str] = None  # "low", "medium", "high", "xhigh", "max"
         thinking_type = cfg.get("thinking_type") or os.getenv("ANTHROPIC_THINKING_TYPE")
         thinking_budget = cfg.get("thinking_budget") or os.getenv("ANTHROPIC_THINKING_BUDGET")
         thinking_effort = cfg.get("thinking_effort") or os.getenv("ANTHROPIC_THINKING_EFFORT")
         thinking_display = cfg.get("thinking_display") or os.getenv("ANTHROPIC_THINKING_DISPLAY")
 
         # Validate and store thinking_effort
-        valid_efforts = ("low", "medium", "high", "max")
+        valid_efforts = ("low", "medium", "high", "xhigh", "max")
         if thinking_effort and thinking_effort in valid_efforts:
             self._thinking_effort = thinking_effort
 
@@ -157,7 +159,7 @@ class AnthropicClient(LLMClient):
                 pass
 
         # Ensure max_tokens > thinking_budget when manual thinking is enabled
-        if thinking_budget and self._max_tokens <= thinking_budget:
+        if thinking_type != "adaptive" and thinking_budget and self._max_tokens <= thinking_budget:
             # max_tokens must include both thinking budget and actual output
             self._max_tokens = thinking_budget + 4096
             logging.debug(
@@ -175,7 +177,7 @@ class AnthropicClient(LLMClient):
         if not isinstance(parameters, dict):
             return
         allowed_params = {"temperature", "top_p", "top_k", "max_tokens"}
-        valid_efforts = ("low", "medium", "high", "max")
+        valid_efforts = ("low", "medium", "high", "xhigh", "max")
         for key, value in parameters.items():
             # Handle thinking_effort specially (stored on instance, not in _extra_params)
             if key == "thinking_effort":
@@ -400,6 +402,8 @@ class AnthropicClient(LLMClient):
             supports_images=self.supports_images,
             max_image_bytes=self.max_image_bytes,
             max_image_embeds=self.max_image_embeds,
+            supports_sampling_parameters=self._supports_sampling_parameters,
+            supports_assistant_prefill=self._supports_assistant_prefill,
         )
         request_params = build_result["request_params"]
         use_tools = bool(build_result["use_tools"])
@@ -489,6 +493,8 @@ class AnthropicClient(LLMClient):
             supports_images=self.supports_images,
             max_image_bytes=self.max_image_bytes,
             max_image_embeds=self.max_image_embeds,
+            supports_sampling_parameters=self._supports_sampling_parameters,
+            supports_assistant_prefill=self._supports_assistant_prefill,
         )
         request_params = build_result["request_params"]
         use_tools = bool(build_result["use_tools"])

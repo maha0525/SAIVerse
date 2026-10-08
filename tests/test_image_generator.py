@@ -1,8 +1,11 @@
 import base64
+import inspect
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import get_args
 from unittest.mock import MagicMock, patch
 
 from tool_loader import load_builtin_tool
@@ -215,6 +218,111 @@ class TestImageGenerator(unittest.TestCase):
         self.assertEqual(mock_gen.call_args.args[:3], ('a cat', '16:9', 'low'))
         self.assertEqual(mock_store.call_args.args[1], 'image/jpeg')
         temp_path.unlink(missing_ok=True)
+
+    @patch('llm_clients.gemini_utils.build_gemini_clients')
+    @patch.object(_mod, '_load_image_bytes', return_value=(b'reference', 'image/jpeg'))
+    def test_nano_banana_request_shape(self, mock_load, mock_clients):
+        client = MagicMock()
+        mock_clients.return_value = (None, client, client)
+        part = MagicMock()
+        part.inline_data.data = b'generated'
+        part.inline_data.mime_type = 'image/webp'
+        response = MagicMock()
+        response.candidates = [MagicMock()]
+        response.candidates[0].content.parts = [part]
+        response.prompt_feedback = None
+        client.models.generate_content.return_value = response
+
+        for model_id in ('gemini-3.1-flash-image-preview', 'gemini-nano-banana-2.1'):
+            for quality, resolution in [('low', '1K'), ('medium', '2K'), ('high', '4K'),
+                                        ('xhigh', '4K'), ('max', '4K')]:
+                with self.subTest(model=model_id, quality=quality):
+                    result = _mod._generate_with_nano_banana_2(
+                        'a cat', '16:9', quality, [Path('reference.jpg')], model_id=model_id
+                    )
+                    self.assertEqual(result, (b'generated', 'image/webp'))
+                    mock_clients.assert_called_with(prefer_paid=True)
+                    kwargs = client.models.generate_content.call_args.kwargs
+                    self.assertEqual(kwargs['model'], model_id)
+                    self.assertEqual(kwargs['contents'][-1], 'a cat')
+                    self.assertEqual(kwargs['contents'][0].inline_data.data, b'reference')
+                    self.assertEqual(kwargs['contents'][0].inline_data.mime_type, 'image/jpeg')
+                    config = kwargs['config']
+                    self.assertEqual(config.response_modalities, ['TEXT', 'IMAGE'])
+                    self.assertEqual(config.image_config.aspect_ratio, '16:9')
+                    self.assertEqual(config.image_config.image_size, resolution)
+                    self.assertTrue(config.automatic_function_calling.disable)
+                    self.assertIsNone(config.tools)
+                    self.assertIsNone(config.response_schema)
+                    self.assertIsNone(config.cached_content)
+
+        _mod._generate_with_nano_banana_2('legacy default')
+        self.assertEqual(client.models.generate_content.call_args.kwargs['model'],
+                         'gemini-3.1-flash-image-preview')
+
+    @patch('llm_clients.gemini_utils.build_gemini_clients')
+    def test_nano_banana_2_1_requires_paid_client(self, mock_clients):
+        free_client = MagicMock()
+        mock_clients.return_value = (free_client, None, free_client)
+        with self.assertRaisesRegex(RuntimeError, 'paid tier'):
+            _mod._generate_with_nano_banana_2('a cat', model_id='gemini-nano-banana-2.1')
+        free_client.models.generate_content.assert_not_called()
+
+    @patch.object(_mod, '_is_image_model_available', return_value=True)
+    @patch.object(_mod, 'store_image_bytes')
+    @patch.object(_mod, '_generate_with_nano_banana_2')
+    def test_nano_banana_2_1_dispatch_and_fallback(self, mock_gen, mock_store, mock_avail):
+        with tempfile.TemporaryDirectory() as directory:
+            temp_path = Path(directory) / 'generated.webp'
+            mock_store.return_value = ({'uri': 'saiverse://image/test', 'mime_type': 'image/webp'}, temp_path)
+            for fail_first in (False, True):
+                with self.subTest(fallback=fail_first), \
+                     patch('tools.context.get_active_persona_id', return_value=None), \
+                     patch('tools.context.get_active_manager', return_value=None):
+                    mock_gen.reset_mock()
+                    mock_gen.side_effect = ([RuntimeError('unavailable'), (b'img', 'image/webp')]
+                                            if fail_first else [(b'img', 'image/webp')])
+                    text, info, path, metadata, item_id = generate_image(
+                        'a cat', model='nano_banana_2_1', aspect_ratio='16:9', quality='low'
+                    )
+                    self.assertEqual(Path(path), temp_path)
+                    self.assertIsInstance(info, ToolResult)
+                    self.assertIsNone(item_id)
+                    self.assertIn('media', metadata)
+                    first = mock_gen.call_args_list[0]
+                    self.assertEqual(first.args, ('a cat', '16:9', 'low', []))
+                    self.assertEqual(first.kwargs, {'model_id': 'gemini-nano-banana-2.1'})
+                    self.assertEqual(mock_store.call_args.args[:2], (b'img', 'image/webp'))
+                    if fail_first:
+                        self.assertEqual(mock_gen.call_count, 2)
+                        self.assertEqual(mock_gen.call_args_list[1].kwargs, {})
+                        self.assertIn('サーバーエラー', text)
+                    else:
+                        self.assertEqual(mock_gen.call_count, 1)
+                        self.assertIn('nano_banana_2_1', text)
+
+    def test_nano_banana_2_1_exposed_without_default_or_fallback_change(self):
+        name = 'nano_banana_2_1'
+        model_schema = _mod.schema().parameters['properties']['model']
+        self.assertIn(name, model_schema['enum'])
+        self.assertIn(name, get_args(_mod.ModelType))
+        self.assertEqual(model_schema['default'], 'nano_banana_2')
+        self.assertEqual(inspect.signature(generate_image).parameters['model'].default, 'nano_banana_2')
+        self.assertEqual(_mod._FALLBACK_ORDER, [
+            'nano_banana_2', 'nano_banana_pro', 'gpt_image_2_5_flare',
+            'gpt_image_2_5_sunburst', 'gpt_image_1_5', 'gpt_image_2', 'grok_imagine',
+        ])
+        self.assertEqual(_mod._get_model_api_key_env(name), 'GEMINI_API_KEY')
+        with patch.dict(os.environ, {'GEMINI_API_KEY': 'synthetic'}, clear=True):
+            self.assertIn(name, _mod.get_available_image_models())
+        with patch.dict(os.environ, {'GEMINI_FREE_API_KEY': 'synthetic'}, clear=True):
+            self.assertNotIn(name, _mod.get_available_image_models())
+        playbook_path = Path(__file__).resolve().parents[1] / 'builtin_data/playbooks/public/generate_image_playbook.json'
+        playbook = json.loads(playbook_path.read_text(encoding='utf-8'))
+        from sea.playbook_models import PlaybookSchema, validate_playbook_graph
+        validate_playbook_graph(PlaybookSchema(**playbook))
+        decide = next(node for node in playbook['nodes'] if node['id'] == 'decide_prompt')
+        self.assertIn(name, decide['response_schema']['properties']['model']['enum'])
 
     def test_tool_registration(self):
         from tools import TOOL_REGISTRY

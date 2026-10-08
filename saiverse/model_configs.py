@@ -773,7 +773,10 @@ def calculate_cost(
     )
     # Cache write tokens: use TTL-specific rate if available
     if cache_ttl == "1h" and "cache_write_1h_per_1m_tokens" in pricing:
-        cache_write_rate = pricing["cache_write_1h_per_1m_tokens"]
+        cache_write_rate = pricing.get(
+            f"{rate_prefix}cache_write_1h_per_1m_tokens",
+            pricing["cache_write_1h_per_1m_tokens"],
+        )
     else:
         cache_write_rate = pricing.get(
             f"{rate_prefix}cache_write_per_1m_tokens",

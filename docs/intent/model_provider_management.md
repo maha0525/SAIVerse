@@ -108,6 +108,16 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 - **使用量の帰属**: 使用量と費用は API モデル名ではなく設定キー (JSON のファイル名) に帰属させる。Codex のようなサブスクで賄われる設定は従量課金版と同じ API モデル名を持つため、API 名で価格を引くと課金されていない呼び出しに従量単価が付く。`LLMClient.config_key` を価格引き当ての正典とし、client 側が `_store_usage(model=...)` で API 名に差し替えてはならない。
 - **検証**: モデル JSON の価格・capability 読み込み、runtime 由来の sampling override 除去、通常 user 終端の通過、model 終端のローカル拒否、function call/response ID の往復を、外部 API を呼ばないテストで境界横断して確認する。
 
+#### Claude Haiku 5.5 の追加 (2026-10-08)
+
+モデル選択 → native Anthropic request → 使用量の費用計算まで、既存の §9 の契約を適用する。既存モデル・既定モデル・ユーザー設定は変更しない。
+
+- `claude-haiku-5.5` は API ID `claude-haiku-5-5`、1M context / 128K output、adaptive thinking / medium を使う。manual budget は使わない。
+- `supports_sampling_parameters: false` と `supports_assistant_prefill: false` を provider 境界へ運び、呼び出し時の sampling override を除去し、assistant 終端は内容を書き換えずローカルで拒否する。
+- 入力10万token超の単価は入力・出力・cache read・5分/1時間cache writeすべてに適用する。1時間cache writeも長文tierを優先し、未指定モデルは既存の1時間単価へ戻る。
+- 設定読み込み、request構築、10万token境界の料金を隔離テストで確認する。実APIの応答・本番ペルソナの動作はこの検証に含めない。
+- 根拠: [仕様](https://platform.claude.com/docs/en/models/haiku-5-5/overview)、[移行条件](https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide)、[料金](https://platform.claude.com/docs/en/about-claude/pricing)、[cache最低長](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)。
+
 ### 10. アプリ名の申告 (`default_headers`) — 接続に属し、会話には属さない
 
 一部のバックエンドは、呼び出し元アプリを名乗るヘッダーを受け取り、それを公開ランキングに集計する。OpenRouter がこれで、`HTTP-Referer`（アプリの識別子）・`X-OpenRouter-Title`（表示名）・`X-OpenRouter-Categories`（カテゴリ、カンマ区切りで最大2つ）を送ったアプリだけが `openrouter.ai/apps` に載る。SAIVerse はここに `roleplay` と `general-chat` の二枚看板で並ぶことで、同種のアプリを探しているユーザーからの発見経路を得る。
