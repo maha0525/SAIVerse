@@ -83,8 +83,9 @@ def _sanitize_schema(
         if key == "properties" and isinstance(value, dict):
             out[key] = {name: sub(s, f"{here}.{name}") for name, s in value.items()}
         elif key in ("anyOf", "oneOf") and isinstance(value, list):
-            if "anyOf" in out:
-                # Both present: keep the first one seen, drop the other.
+            if key == "oneOf" and isinstance(node.get("anyOf"), list):
+                # Both present: Gemini has one union slot. Decide by keyword,
+                # not by JSON key order — the original anyOf always wins.
                 dropped.append(here)
                 continue
             out["anyOf"] = [sub(s, f"{here}.{i}") for i, s in enumerate(value)]

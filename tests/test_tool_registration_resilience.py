@@ -58,6 +58,18 @@ class GeminiOneOfRemapTest(unittest.TestCase):
         self.assertNotIn("oneOf", out)
         self.assertEqual(dropped, ["oneOf"])
 
+    def test_existing_anyof_wins_regardless_of_key_order(self):
+        from tools.adapters.gemini import _sanitize_schema
+
+        # Same schema as above with oneOf listed first (MCP servers do not
+        # promise a key order). The result must not depend on it.
+        node = {"oneOf": [{"type": "integer"}], "anyOf": [{"type": "string"}]}
+        dropped = []
+        out = _sanitize_schema(node, dropped)
+        self.assertEqual(out["anyOf"], [{"type": "string"}])
+        self.assertNotIn("oneOf", out)
+        self.assertEqual(dropped, ["oneOf"])
+
 
 class GeminiUnsupportedKeywordTest(unittest.TestCase):
     """Real shapes that used to make ``to_gemini`` raise, so the whole tool was
@@ -195,6 +207,55 @@ class GeminiResponseSchemaEnumTest(unittest.TestCase):
             "type": "object",
             "properties": {"kind": {"type": "string", "enum": ["a", "b"]}},
         }))
+
+    def test_raw_schema_has_no_const_or_boolean_enum(self):
+        # response_json_schema supports enum only for strings and numbers and
+        # has no const (google-genai GenerateContentConfig docstring), so the
+        # raw schema must be rewritten before it is sent.
+        from llm_clients.gemini import GeminiClient
+
+        out = GeminiClient._to_response_json_schema({
+            "type": "object",
+            "properties": {
+                "flag": {"type": "boolean", "const": True, "description": "On."},
+                "level": {"type": "integer", "const": 2},
+                "mode": {"type": "string", "const": "fast"},
+                "yes": {"type": "boolean", "enum": [True, False]},
+                "num": {"type": "integer", "enum": [1, 2, 3]},
+                "const": {"type": "string"},
+                "pick": {"anyOf": [{"const": False}, {"type": "string"}]},
+            },
+        })
+        props = out["properties"]
+        self.assertEqual(props["flag"], {"type": "boolean", "description": "On. Must be true."})
+        self.assertEqual(props["level"], {"type": "integer", "enum": [2]})
+        self.assertEqual(props["mode"], {"type": "string", "enum": ["fast"]})
+        self.assertEqual(props["yes"], {"type": "boolean", "description": "Allowed values: true, false."})
+        self.assertEqual(props["num"], {"type": "integer", "enum": [1, 2, 3]})
+        # A property *named* const is a name, not the keyword.
+        self.assertEqual(props["const"], {"type": "string"})
+        self.assertEqual(props["pick"]["anyOf"][0], {"description": "Must be false."})
+
+        def walk(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if k == "properties":
+                        for sub in v.values():
+                            yield from walk(sub)
+                        continue
+                    yield k, v
+                    yield from walk(v)
+            elif isinstance(node, list):
+                for item in node:
+                    yield from walk(item)
+
+        for key, value in walk(out):
+            self.assertNotEqual(key, "const")
+            if key == "enum":
+                self.assertTrue(all(
+                    isinstance(v, str) or (isinstance(v, (int, float)) and not isinstance(v, bool))
+                    for v in value
+                ))
 
 
 class RegistrationResilienceTest(unittest.TestCase):
