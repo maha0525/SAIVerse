@@ -375,11 +375,15 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
     },
     "openrouter_free": {
         "default_model": "openrouter-nemotron-3-ultra-550b-a55b-free",
-        # Nemotron (無料) は構造化出力に対応しない (判断・編纂のページ分けが止まる)
-        # ので、決まった形の答えが要る軽量・Memory Weave と、画像要約は Nex に振る。
-        "lightweight_model": "openrouter-nex-n2.5-pro-free",
-        "memory_weave_model": "openrouter-nex-n2.5-pro-free",
-        "image_summary_model": "openrouter-nex-n2.5-pro-free",
+        # 会話は口調が揺れないよう、決まった無料モデル (Nemotron 3 Ultra) に固定する。
+        # Nemotron (無料) は構造化出力に対応しない (判断・編纂のページ分けが止まる) ので、
+        # 決まった形の答えが要る軽量・Memory Weave と、画像要約は OpenRouter の Free Models
+        # Router (openrouter/free) に振る。無料モデルの入れ替わりを OpenRouter 側が追い、
+        # 定義の require_parameters で構造化出力・画像・入力の長さに対応するモデルだけが選ばれる
+        # (2026-10-09 に確認。以前の Nex N2.5 Pro (無料) は提供が終わった)。
+        "lightweight_model": "openrouter-free-router",
+        "memory_weave_model": "openrouter-free-router",
+        "image_summary_model": "openrouter-free-router",
         "audio_summary_model": None,
         "video_summary_model": None,
     },
