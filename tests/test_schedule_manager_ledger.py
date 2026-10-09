@@ -11,7 +11,7 @@ docs/handoff/2026-07-20_w3_schedule_ledger_handoff.md D1/D3/D4/D5 と
 3. runtime 例外 (runtime_outcome=error) → 台帳 unknown + COMPLETED=False +
    再予約なし + 同一 occurrence の再 claim が runnable=False
 4. interval 失敗時 LAST_EXECUTED_AT 不変 / 成功時のみ更新
-5. periodic 判断点で handle_scheduled_judgment 例外 → failed + 同日 backoff
+5. periodic の起床・就寝の帳簿処理の例外 / False → failed + 同日 backoff
    再予約 (翌日へ飛ばない)
 6. 判断点 reason="duplicate:completed" → settled_skip: 前進 + 台帳 applied +
    再試行なし
@@ -332,11 +332,16 @@ def test_interval_last_executed_at_only_advances_on_success(env):
 
 
 # ---------------------------------------------------------------------------
-# 5. periodic 判断点の例外 → failed + 同日 backoff (翌日へ飛ばない)
+# 5. periodic の起床・就寝の帳簿処理の例外 / False → failed + 同日 backoff
 # ---------------------------------------------------------------------------
 
 
-def test_periodic_judgment_exception_retries_same_day(env, monkeypatch):
+def test_periodic_life_boundary_exception_retries_same_day(env, monkeypatch):
+    """起床の行 (judgment_day_open) は v04 段 1-2 で判断点ではなく機械の帳簿処理
+    (day_plan.handle_scheduled_life_boundary) へ回る。そこでの例外は failed +
+    同日 backoff — 翌日へ飛ばすとその日のライフが確定しない。"""
+    from saiverse import day_plan
+
     sid = _add_schedule(
         env.session_factory,
         SCHEDULE_TYPE="periodic",
@@ -346,9 +351,9 @@ def test_periodic_judgment_exception_retries_same_day(env, monkeypatch):
     )
 
     def _boom(*args, **kwargs):
-        raise RuntimeError("precondition raised")
+        raise RuntimeError("life confirmation raised")
 
-    monkeypatch.setattr(wiring, "handle_scheduled_judgment", _boom)
+    monkeypatch.setattr(day_plan, "handle_scheduled_life_boundary", _boom)
 
     env.sm.register_schedule(sid)
     fired = _entry(env, sid)
@@ -363,8 +368,48 @@ def test_periodic_judgment_exception_retries_same_day(env, monkeypatch):
     assert 60 < retry.fire_at_ts - time.time() < 600
 
 
+def test_periodic_life_boundary_false_retries_same_day_then_settles(env, monkeypatch):
+    """帳簿処理が False (節目が決着しない) → failed + 同日 backoff。再試行で
+    True になれば前進して次 occurrence (翌日) が登録される。"""
+    from saiverse import day_plan
+
+    sid = _add_schedule(
+        env.session_factory,
+        SCHEDULE_TYPE="periodic",
+        META_PLAYBOOK="judgment_day_close",
+        SCHEDULED_DATETIME=None,
+        TIME_OF_DAY=_past_time_of_day(),
+    )
+    results = [False, True]
+    calls = []
+
+    def _fake(mgr, pid, boundary, params=None):
+        calls.append(boundary)
+        return results.pop(0)
+
+    monkeypatch.setattr(day_plan, "handle_scheduled_life_boundary", _fake)
+
+    env.sm.register_schedule(sid)
+    key = _occurrence_key_of(env, _entry(env, sid), sid)
+    _fire(env, sid)
+    assert _ledger_row(env, key)["status"] == "failed"
+    retry = _entry(env, sid)
+    assert 60 < retry.fire_at_ts - time.time() < 600
+
+    _fire(env, sid)
+    assert calls == ["end", "end"]
+    assert _ledger_row(env, key)["status"] == "completed"
+    nxt = _entry(env, sid)
+    assert nxt.fire_at_ts - time.time() > 3600
+
+
 # ---------------------------------------------------------------------------
 # 6. 判断点 duplicate → settled_skip: 前進 + 台帳 applied/completed + 再試行なし
+#
+# 6〜6b は「判断点の結末 → スケジュールの精算」の器の検査。起床・就寝が機械の
+# 帳簿処理へ移って (v04 段 1-2) 時刻駆動の判断点は無くなったが、判断点名の
+# 行を受ける精算の器は残っている — 起床・就寝以外の判断点名 (judgment_on_event)
+# の行に handle_scheduled_judgment の結末を注入して検査する。
 # ---------------------------------------------------------------------------
 
 
@@ -372,7 +417,7 @@ def test_judgment_duplicate_is_settled_skip(env, monkeypatch):
     sid = _add_schedule(
         env.session_factory,
         SCHEDULE_TYPE="periodic",
-        META_PLAYBOOK="judgment_day_open",
+        META_PLAYBOOK="judgment_on_event",
         SCHEDULED_DATETIME=None,
         TIME_OF_DAY=_past_time_of_day(),
     )
@@ -458,7 +503,7 @@ def test_judgment_indeterminate_retries_and_recovers(env, monkeypatch):
     sid = _add_schedule(
         env.session_factory,
         SCHEDULE_TYPE="periodic",
-        META_PLAYBOOK="judgment_day_open",
+        META_PLAYBOOK="judgment_on_event",
         SCHEDULED_DATETIME=None,
         TIME_OF_DAY=_past_time_of_day(),
     )
@@ -498,7 +543,7 @@ def test_judgment_waiting_does_not_consume_retry_attempts(env, monkeypatch):
     sid = _add_schedule(
         env.session_factory,
         SCHEDULE_TYPE="periodic",
-        META_PLAYBOOK="judgment_day_open",
+        META_PLAYBOOK="judgment_on_event",
         SCHEDULED_DATETIME=None,
         TIME_OF_DAY=_past_time_of_day(),
     )

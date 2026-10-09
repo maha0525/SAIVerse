@@ -1453,6 +1453,37 @@ def _ensure_task_book_table(engine) -> None:
         raise
 
 
+def _ensure_persona_life_table(engine) -> None:
+    """ライフの置き場 (persona_life) を軽量パスで揃える。
+
+    autonomous_behavior_v04_plan.md 段 1-2: ライフを persona_day_plan.meta_json
+    から独立させた。新規テーブルは needs_migration → try_additive_migration の
+    汎用パスでも作られるが、タスク帳・継承エッジと同様「テーブル追加は素早く
+    確実に適用したい」ため CREATE TABLE IF NOT EXISTS 相当の冪等な軽量シンク
+    経路を別途持つ (schema_sync.ensure_table_columns_indexes に委譲)。
+
+    データの写しはしない — 旧 meta_json.lives は saiverse/day_plan.py の互換読み
+    (新テーブルに行が無い日付に限り読み取り専用で参照) が賄う。既存 DB には
+    行 0 件で追加されるだけで既存行に触れない (無害)。
+    """
+    try:
+        from database.schema_sync import ensure_table_columns_indexes
+        from database.models import PersonaLife
+        ensure_table_columns_indexes(engine, PersonaLife.__table__)
+    except Exception as e:
+        logging.error("ライフテーブルの作成に失敗しました: %s", e, exc_info=True)
+        raise
+
+
+def ensure_persona_life_table(db_path: str) -> None:
+    """ライフテーブルの軽量シンクを単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _ensure_persona_life_table(engine)
+    finally:
+        engine.dispose()
+
+
 def ensure_task_book_table(db_path: str) -> None:
     """タスク帳テーブルの軽量シンクを単体で走らせるエントリポイント。"""
     engine = create_engine(f"sqlite:///{db_path}")

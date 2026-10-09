@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 52
+**テーブル数**: 53
 
 ## addon_config
 
@@ -541,6 +541,16 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `STATUS` | VARCHAR(32) | NOT NULL, default='pending' |  |
 | `EVENT_TYPE` | VARCHAR(64) | — |  |
 | `PAYLOAD` | TEXT | — |  |
+
+## persona_life
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `PERSONA_ID` | VARCHAR(255) | PK, FK→ai.AIID, NOT NULL |  |
+| `PLAN_DATE` | VARCHAR(10) | PK, NOT NULL |  |
+| `LIVES_JSON` | TEXT | NOT NULL |  |
+| `CREATED_AT` | DATETIME | NOT NULL |  |
+| `UPDATED_AT` | DATETIME | NOT NULL |  |
 
 ## persona_pulse_cursor
 

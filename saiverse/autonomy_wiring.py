@@ -7,14 +7,16 @@ Playbook 起動) を持つが、**自動起動の配線は持たない** (中間
 - :func:`fire_judgment_point` — 本番共通の起動ゲート。AUTONOMY_ENABLED の
   ペルソナのみ発火し (既存の自律ゲートの流儀)、判断点 Playbook が DB に無ければ
   エラーでなく WARNING + スキップ。MetaLayer の per-persona Lock で他のメタ判断
-  (alert 即応等) と直列化する。day_open/day_close ではここでライフ (活動区間)
-  の確定・終了処理も行う (life.md v0.5 §4/§6.2 — ライフはユーザー設定から
-  システムが確定し、ペルソナは宣言しない)
-- :func:`handle_scheduled_judgment` — PersonaSchedule (META_PLAYBOOK=
-  ``judgment_day_open`` / ``judgment_day_close``) の発火を判断点起動へ変換する
-  (ScheduleManager._execute_schedule から呼ばれる)。起床・就寝時刻の出所は
-  PersonaSchedule 行そのもの — **スケジュール未設定のペルソナは day_open を
-  発火しない** (AI テーブルに起床・就寝カラムは存在しないため)
+  (alert 即応等) と直列化する
+- 起床・就寝 (PersonaSchedule の META_PLAYBOOK=``judgment_day_open`` /
+  ``judgment_day_close`` の行) の発火は**判断点ではない** — ScheduleManager が
+  ``saiverse.day_plan.handle_scheduled_life_boundary`` (ライフの確定と節目の
+  機械の帳簿処理、LLM なし) へ直接回す (autonomous_behavior_v3.md §6 /
+  autonomous_behavior_v04_plan.md 段 1-2)。Playbook 名は行の目印として残って
+  いるだけ。起床・就寝時刻の出所は PersonaSchedule 行そのもの
+  (:func:`_find_day_schedules`)
+- :func:`handle_scheduled_judgment` — スケジュール行に判断点 Playbook 名が
+  書かれていた場合の拒否口 (時刻駆動の判断点はもう無い)
 - :func:`handle_conversation_end` — 会話終了 (沈黙タイマーの発火)。会話の
   出来事を閉じる (機械の帳簿処理のみ。会話終了判断は
   autonomous_behavior_v3.md §8/§13.3 で退役し、本人の声の捕獲は Metabolism の
@@ -28,9 +30,9 @@ Playbook 起動) を持つが、**自動起動の配線は持たない** (中間
   engage_now を選んだときだけ従来の応対 Pulse を起動する。自律 OFF のペルソナは
   従来どおり直接応対 (非自律ペルソナのイベント応答を壊さない)
 - :func:`watchdog_tick` — AutonomyManager の定期 tick の縮退先 (v2 §4.2)。
-  正常時は何もしない。「自律 ON・起床時間帯・今日の day_plan が無い (行が無い、
-  または行はあってもコマが 0 件) or コマ予約が途絶」のときだけ day_open の
-  火入れ直し / コマ予約の再 push を行う保守的な見張り
+  正常時は何もしない。「自律 ON・起床時間帯・今日のライフが無い or コマ予約が
+  途絶」のときだけ起床の帳簿処理の火入れ直し / コマ予約の再 push を行う保守的な
+  見張り
 
 時刻はすべて ``saiverse.clock.now()`` を読む (v2 §12 の不変条件)。
 
@@ -139,9 +141,19 @@ JUDGMENT_PLAYBOOK_NAMES = frozenset(JUDGMENT_PLAYBOOK_MAP.values())
 #: Playbook 名 → 判断点 kind の逆引き
 PLAYBOOK_TO_KIND: Dict[str, str] = {v: k for k, v in JUDGMENT_PLAYBOOK_MAP.items()}
 
-#: PersonaSchedule 経由で起動してよい判断点 (時刻駆動なのは起床・就寝のみ。
-#: post_* / on_event は文脈必須なのでスケジュールから撃つと偽前提になる)
-_SCHEDULABLE_KINDS = (KIND_DAY_OPEN, KIND_DAY_CLOSE)
+#: 起床・就寝スケジュール行の Playbook 名 → ライフの節目の種類
+#: (``saiverse.day_plan.handle_scheduled_life_boundary`` の ``boundary``)。
+#: この 2 つの行の発火は判断点ではなく機械の帳簿処理 (LLM なし) —
+#: ScheduleManager がこの表で振り分ける。Playbook 名は行の目印として残る。
+LIFE_BOUNDARY_PLAYBOOKS: Dict[str, str] = {
+    JUDGMENT_PLAYBOOK_MAP[KIND_DAY_OPEN]: "start",
+    JUDGMENT_PLAYBOOK_MAP[KIND_DAY_CLOSE]: "end",
+}
+
+#: handle_scheduled_judgment に起床・就寝の Playbook 名が届いたときの拒否理由
+#: (ScheduleManager は LIFE_BOUNDARY_PLAYBOOKS で先に振り分けるので、届くのは
+#: 配線ミスのときだけ)。
+REASON_LIFE_BOUNDARY_MACHINE_ONLY = "life boundary is machine-only"
 
 #: handle_external_event の経路ラベル (テスト・ログの観察用)
 ROUTE_DIRECT_AUTONOMY_DISABLED = "direct:autonomy_disabled"
@@ -237,15 +249,17 @@ def _judgment_lock(manager: Any, persona_id: str):
 
 
 def _day_open_plan_date() -> str:
-    """day_open の plan_date (暦日)。ライフ確定 (:func:`_confirm_life_at_day_open`)
-    と冪等キー (:func:`_judgment_idempotency_key`) で必ず同源を使う (D1)。"""
+    """起床の plan_date (暦日)。ライフ確定
+    (``day_plan.handle_scheduled_life_boundary`` の start) と冪等キー
+    (:func:`_judgment_idempotency_key`) で必ず同源を使う (D1)。"""
     return clock.now().date().isoformat()
 
 
 def _day_close_plan_date(manager: Any, persona_id: str) -> str:
-    """day_close の営業日 (覚醒日)。ライフ終了 (:func:`_apply_life_end_at_day_close`)
-    と冪等キーで同源。judgment_points.build_judgment_args の KIND_DAY_CLOSE 分岐と
-    同じ規則 (深夜跨ぎリズムでは 01:00 発火の day_close は前日が営業日)。"""
+    """就寝の営業日 (覚醒日)。ライフ終了
+    (``day_plan.handle_scheduled_life_boundary`` の end) と冪等キーで同源。
+    judgment_points.build_judgment_args の KIND_DAY_CLOSE 分岐と同じ規則
+    (深夜跨ぎリズムでは 01:00 の就寝は前日が営業日)。"""
     sched = _find_day_schedules(manager, persona_id)
     return effective_plan_date(
         clock.now(), sched.get("wake"), sched.get("close"),
@@ -348,35 +362,24 @@ def fire_judgment_point(
        import は運用手順: ``python scripts/import_playbook.py --file
        builtin_data/playbooks/public/judgment_*.json``)
     3. MetaLayer の per-persona Lock で直列化 (alert 即応メタ判断と同じ列)
-    4. **実行台帳の claim** (W1 Chunk A / A2): Lock 内・precondition と境界
-       副作用より前に ``(judgment.{kind}, 冪等キー)`` の席を取る。既存
+    4. **実行台帳の claim** (W1 Chunk A / A2): Lock 内・precondition より前に
+       ``(judgment.{kind}, 冪等キー)`` の席を取る。既存
        running/applied/completed/unknown なら ``duplicate:<status>`` で即
-       return — 境界副作用 (ライフ確定/終了) も走らない。``force=True`` は
+       return。``force=True`` は
        キーを None に落とす (debug 明示発火の口)。``resume_execution_id`` は
        回復 refire 用 — claim せず既存 prepared 行を使う。台帳の無い manager
        (旧テストスタブ) は WARN 一回で従来挙動に degrade
-    5. ``precondition`` (あれば) を **Lock 取得後に** 再評価 — watchdog の
-       day_open 再発火が、待っている間に済んだ本物の day_open と二重にならない。
+    5. ``precondition`` (あれば) を **Lock 取得後に** 再評価 — Lock を待って
+       いる間に状況が変わった発火を二重に走らせない。
        失敗時は claim 済みの席を放棄する (prepared 限定 CAS — 別 claimant が
        既に走らせている running 台帳は壊さない。放棄できなければ結果の
        ``outcome`` が indeterminate になり、呼び出し側は代替経路を走らせない)
 
-    v0.5 (life.md §3/§4/§6.2): ``kind`` が day_open / day_close のときは、
-    ``run_judgment_point`` の前にライフ (活動区間) まわりのシステム処理を行う
-    (両方とも本番の day_open / day_close 発火経路はここ 1 箇所に集約される —
-    ``handle_scheduled_judgment`` と watchdog の day_open 再発火の両方が
-    この関数を通る):
-
-    - **day_open**: :func:`saiverse.day_plan.confirm_life_for_today` で
-      ユーザー設定 (PersonaSchedule の起床・就寝 + ``context`` 経由の
-      ``daily_budget_pulses``) から今日のライフを確定する (冪等 — 既に
-      確定済みなら何もしない)。節目処理は
-      :func:`saiverse.day_plan.apply_life_boundary` (start) が実行台帳の下で
-      決着させる (TTL override・tail 通知。lives[0] の ``started`` マーカーで
-      一度きり)
-    - **day_close**: その日の確定済みライフがあれば
-      :func:`saiverse.day_plan.apply_life_boundary` (end) を呼ぶ (keep-alive
-      予約 cancel・TTL 遅延解除予約・tail 通知。``ended`` マーカーで一度きり)
+    ライフ (活動区間) の確定と起床・就寝の節目処理はここでは行わない —
+    2026-10 (autonomous_behavior_v04_plan.md 段 1-2) に
+    ``saiverse.day_plan.handle_scheduled_life_boundary`` (機械の帳簿処理) へ
+    切り出した。本番で day_open / day_close をここへ撃つ経路はもう無い
+    (ScheduleManager・watchdog・回復 tick のいずれも撃たない)。
 
     Returns:
         ``run_judgment_point`` の結果 dict (``submitted`` / ``reason`` /
@@ -415,14 +418,12 @@ def fire_judgment_point(
     with _judgment_lock(manager, persona_id):
         # 排他の層構造 (2026-07-31 席競合案件・九巡目裁定): 判断の直列化は
         # ①この per-persona Lock (本番の判断起動は全てここを通る — 同一
-        # ペルソナの claim〜境界〜実行が interleave しない) と ②runtime_marker
+        # ペルソナの claim〜実行が interleave しない) と ②runtime_marker
         # (同一 DB の他プロセスを起動時に排除) が担う。台帳の CAS
         # (try_mark_running / abandon_prepared) はその下の**契約レベルの砦**
         # (直接呼び出し・将来のマルチプロセスへの防御) であって、Lock の
-        # 代替ではない。ライフ境界処理が CAS より前にあるのはこの層構造の
-        # 帰結 — 境界は Lock が直列化し、かつ confirm_life_for_today の冪等
-        # (先勝ち) と節目の永続マーカーで多重実行にも耐える。
-        # --- 実行台帳の claim (precondition・境界副作用より前、A2/D3) ---
+        # 代替ではない。
+        # --- 実行台帳の claim (precondition より前、A2/D3) ---
         ledger = getattr(manager, "execution_ledger", None)
         execution_id: Optional[str] = None
         if ledger is None:
@@ -532,45 +533,6 @@ def fire_judgment_point(
                         "submitted": False, "reason": "precondition not met",
                         "outcome": outcome, "execution_id": execution_id}
 
-        if kind == KIND_DAY_OPEN:
-            if not _confirm_life_at_day_open(manager, persona_id, context or {}):
-                # ライフ確定 / 開始の節目が決着していない (Codex W3 第八陣 —
-                # day_close の失敗伝播の鏡像)。判断を走らせず失敗を発火結果へ
-                # 伝播し、schedule 側 backoff / watchdog に再試行させる。
-                LOGGER.warning(
-                    "[autonomy-wiring] day_open aborted: life-start boundary "
-                    "failed; leaving retry to the schedule backoff "
-                    "(persona=%s)", persona_id,
-                )
-                outcome = _release_claimed_seat(
-                    ledger, execution_id, "life-start boundary failed"
-                )
-                return {"kind": kind, "playbook": playbook_name,
-                        "submitted": False,
-                        "reason": "life-start boundary failed",
-                        "outcome": outcome, "execution_id": execution_id}
-        elif kind == KIND_DAY_CLOSE:
-            if not _apply_life_end_at_day_close(manager, persona_id):
-                # ライフ終了の節目が決着していない (Codex W3 第五陣 P2)。
-                # ここで判断を走らせて成功すると schedule と判断台帳が
-                # completed になり、同一営業日の再試行が二度と来ない —
-                # 失敗を発火結果へ伝播し、schedule 側 backoff に再試行させる。
-                # 判断行は放棄 (prepared 限定 CAS → failed、副作用ゼロ) し、
-                # 再試行の claim がキーを退避して新しい prepared を取れるように
-                # する。
-                LOGGER.warning(
-                    "[autonomy-wiring] day_close aborted: life-end boundary "
-                    "failed; leaving retry to the schedule backoff "
-                    "(persona=%s)", persona_id,
-                )
-                outcome = _release_claimed_seat(
-                    ledger, execution_id, "life-end boundary failed"
-                )
-                return {"kind": kind, "playbook": playbook_name,
-                        "submitted": False,
-                        "reason": "life-end boundary failed",
-                        "outcome": outcome, "execution_id": execution_id}
-
         result = run_judgment_point(
             manager, persona_id, kind, context, execution_id=execution_id,
         )
@@ -592,134 +554,8 @@ def fire_judgment_point(
     return result
 
 
-def _confirm_life_at_day_open(
-    manager: Any, persona_id: str, context: Dict[str, Any]
-) -> bool:
-    """day_open 発火経路でのライフ確定 (life.md v0.5 §4/§11.2)。
-
-    区間はユーザーが設定した起床・就寝 (PersonaSchedule、
-    :func:`_find_day_schedules` が解決)、予算とモード上書きは ``context``
-    経由のユーザー設定値 (``daily_budget_pulses``・``life_mode_override``、
-    無ければそれぞれ最低値・自動判定)。確定は冪等
-    (:func:`~saiverse.day_plan.confirm_life_for_today` が既存確定を保持する)。
-
-    節目処理 (:func:`~saiverse.day_plan.apply_life_boundary`) の一度きり保証は
-    lives[0] の永続マーカー ``started`` が持つ (Codex W3 第八陣 —
-    :func:`_apply_life_end_at_day_close` の ``ended`` の鏡像)。従来の
-    「当日はじめての確定のときだけ」ガードは、**確定は済んだが節目が失敗した**
-    場合に TTL override と「（活動開始）」通知を永久スキップしてしまう —
-    確認 → 適用 → マークの順で、部分失敗は再試行で回復できる形にする。
-
-    Returns:
-        境界が決着したか。True = 確定+節目適用済み (今回適用 / マーカーあり /
-        ライフの無い設定)。False = 失敗 — 呼び出し元 (day_open 分岐) は判断を
-        走らせずに ``submitted=False`` で戻し、schedule 側 backoff に再試行
-        させる (day_close と同じ失敗伝播)。
-    """
-    from saiverse import day_plan
-
-    plan_date = _day_open_plan_date()
-    existing = day_plan.get_lives(manager, persona_id, plan_date)
-    already_started = bool(existing) and bool(existing[0].get("started"))
-    sched = _find_day_schedules(manager, persona_id)
-    budget = context.get("daily_budget_pulses") if isinstance(context, dict) else None
-    mode_override = context.get("life_mode_override") if isinstance(context, dict) else None
-    try:
-        life = day_plan.confirm_life_for_today(
-            manager, persona_id, plan_date,
-            sched.get("wake"), sched.get("close"),
-            requested_budget_pulses=budget,
-            mode_override=mode_override,
-        )
-    except Exception:
-        LOGGER.warning(
-            "[autonomy-wiring] failed to confirm today's life at day_open "
-            "(persona=%s date=%s)", persona_id, plan_date, exc_info=True,
-        )
-        return False
-    if life is None:
-        return True  # 起床・就寝未設定 = ライフ無しの日 (決着)
-    if already_started:
-        LOGGER.info(
-            "[autonomy-wiring] life start already applied for this business "
-            "day; skipping boundary side effects (persona=%s date=%s)",
-            persona_id, plan_date,
-        )
-        return True
-    # W5: 節目の適用は day_plan.apply_life_boundary が実行台帳の下で決着させる
-    # — マーカーと「（活動開始）」通知 outbox が world DB の単一 commit になり、
-    # 旧「マーク失敗の無条件 True + 即時リトライ」暫定 (W3 第六陣裁定) は撤去。
-    try:
-        return day_plan.apply_life_boundary(
-            manager, persona_id, plan_date, life, boundary="start",
-        )
-    except Exception:
-        LOGGER.warning(
-            "[autonomy-wiring] life-start processing failed "
-            "(persona=%s date=%s)", persona_id, plan_date, exc_info=True,
-        )
-        return False
-
-
-def _apply_life_end_at_day_close(manager: Any, persona_id: str) -> bool:
-    """day_close 発火経路でのライフ終了処理 (life.md v0.5 §4.1/§11.2)。
-
-    「ライフ終了 = 就寝判断 (day_close) の発火」そのもの — 専用のライフ境界
-    イベント予約は v0.5 で廃止した。営業日 (覚醒日) の算出は
-    ``judgment_points.build_judgment_args`` の KIND_DAY_CLOSE 分岐と同じ規則
-    (深夜跨ぎリズムでは 01:00 発火の day_close は前日が営業日)。
-
-    冪等ガード (2026-07-20 Codex W3 第二陣 P1 → W5 で恒久化): 節目処理は
-    非冪等 (keep-alive cancel + TTL 同期 + 「（活動終了）」通知) なので、
-    lives[0] の永続マーカー ``ended`` で **(persona, 営業日) につき一度**を
-    保証する。W5 以降、適用の実体は
-    :func:`~saiverse.day_plan.apply_life_boundary` — 実行台帳の claim の下で
-    マーカーと通知 outbox を world DB の単一 commit で確定し (旧「適用〜
-    マーク間 crash の at-least-once 窓」の解消)、配送は outbox_id 冪等。
-    fast-path ガードをこの関数に置くのは、schedule 再試行・watchdog・手動
-    発火のどの入口から来ても守られる位置だから。
-
-    Returns:
-        境界が決着したか (Codex W3 第五陣 P2)。True = 適用済み (今回適用 /
-        適用済みマーカーあり / lives の無い日)。False = 今回の適用が失敗 —
-        呼び出し元 (:func:`fire_judgment_point` の day_close 分岐) は**判断を
-        走らせずに** ``submitted=False`` で戻ること。判断が成功してしまうと
-        schedule と判断台帳が completed になり同一営業日の再試行が二度と来ず、
-        失敗した節目 (活動終了通知等) が永久に欠落する — 「再試行が回復する」
-        は、失敗をここで発火結果まで伝播させて初めて成立する。
-    """
-    from saiverse import day_plan
-
-    plan_date = _day_close_plan_date(manager, persona_id)
-    lives = day_plan.get_lives(manager, persona_id, plan_date)
-    if not lives:
-        return True
-    if lives[0].get("ended"):
-        LOGGER.info(
-            "[autonomy-wiring] life end already applied for this business day; "
-            "skipping boundary side effects (persona=%s date=%s)",
-            persona_id, plan_date,
-        )
-        return True
-    # W5: 節目の適用は day_plan.apply_life_boundary が実行台帳の下で決着させる
-    # — マーカーと「（活動終了）」通知 outbox が world DB の単一 commit になり、
-    # W3 第六陣 P2 の恒久解 (at-least-once 窓とマーク失敗の無条件 True の撤去)。
-    # False は従来どおり呼び出し元 (day_close 分岐) が判断を打ち切って
-    # ``submitted=False`` で schedule backoff に乗せる。
-    try:
-        return day_plan.apply_life_boundary(
-            manager, persona_id, plan_date, lives[0], boundary="end",
-        )
-    except Exception:
-        LOGGER.warning(
-            "[autonomy-wiring] life-end processing failed (persona=%s date=%s)",
-            persona_id, plan_date, exc_info=True,
-        )
-        return False
-
-
 # ---------------------------------------------------------------------------
-# day_open / day_close: PersonaSchedule の発火から (ScheduleManager が呼ぶ)
+# 判断点 Playbook 名のスケジュール行 (ScheduleManager が呼ぶ拒否口)
 # ---------------------------------------------------------------------------
 
 
@@ -729,23 +565,21 @@ def handle_scheduled_judgment(
     playbook_name: str,
     params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """PersonaSchedule (META_PLAYBOOK=judgment_*) の発火を判断点起動へ変換する。
+    """PersonaSchedule の META_PLAYBOOK に判断点 Playbook 名が書かれた行の発火口。
 
-    通常のスケジュールは「<system> プロンプト + Playbook」の submit_schedule で
-    走るが、判断点 Playbook は発火時に judgment_points が組む動的 args
-    (situation_text / response_schema) が必須のため、この専用経路を通す。
+    **時刻駆動の判断点はもう無い** — 起床・就寝 (``judgment_day_open`` /
+    ``judgment_day_close``) の行は判断点ではなく機械の帳簿処理で、
+    ScheduleManager が :data:`LIFE_BOUNDARY_PLAYBOOKS` で振り分けて
+    ``saiverse.day_plan.handle_scheduled_life_boundary`` へ直接回す
+    (autonomous_behavior_v3.md §6 / autonomous_behavior_v04_plan.md 段 1-2)。
+    ここへ起床・就寝の名前が届くのは配線ミスなので、黙って LLM の判断へ
+    流さず WARNING で拒否する (委ねると、同じ節目の入口が二本になる)。
 
-    時刻駆動で意味を持つのは day_open / day_close のみ。他の判断点名が
-    スケジュールに書かれていた場合は WARNING + スキップ (偽前提の防止)。
+    それ以外の判断点 (on_event / post_session) は文脈必須で、スケジュールから
+    撃つと偽前提になるので WARNING + スキップ。
 
     Args:
-        params: PersonaSchedule.PLAYBOOK_PARAMS (パース済み dict)。day_open は
-            ``daily_budget_rounds`` (正整数、作業ラウンドの日次予算) と
-            ``daily_budget_pulses`` (正整数、ライフの標準パルス予算 —
-            ユーザー設定。未設定/最低値未満は最低値へ切り上げ。
-            life.md v0.5 §4.2) と ``life_mode_override``
-            ("even"/"free"、モードの明示上書き。ライフ設定 UI の高度な設定
-            からの脱出口。§5.1) を context に透過する。
+        params: 使わない (呼び出し側の形を保つために残る)。
     """
     kind = PLAYBOOK_TO_KIND.get(playbook_name)
     if kind is None:
@@ -754,34 +588,20 @@ def handle_scheduled_judgment(
             "skipping (persona=%s)", playbook_name, persona_id,
         )
         return {"kind": None, "submitted": False, "reason": "not a judgment playbook"}
-    if kind not in _SCHEDULABLE_KINDS:
+    if playbook_name in LIFE_BOUNDARY_PLAYBOOKS:
         LOGGER.warning(
-            "[autonomy-wiring] judgment kind %r cannot be fired from a schedule "
-            "(only %s); skipping (persona=%s)",
-            kind, "/".join(_SCHEDULABLE_KINDS), persona_id,
+            "[autonomy-wiring] scheduled %r reached the judgment entry; the life "
+            "boundary is machine-only now and is routed to "
+            "day_plan.handle_scheduled_life_boundary — refusing to run an LLM "
+            "judgment (persona=%s)", playbook_name, persona_id,
         )
-        return {"kind": kind, "submitted": False, "reason": "kind not schedulable"}
-
-    context: Dict[str, Any] = {}
-    if kind == KIND_DAY_OPEN and isinstance(params, dict):
-        from saiverse.day_plan import LIFE_MODES
-
-        budget = params.get("daily_budget_rounds")
-        if isinstance(budget, int) and not isinstance(budget, bool) and budget >= 1:
-            context["daily_budget_rounds"] = budget
-        budget_pulses = params.get("daily_budget_pulses")
-        if isinstance(budget_pulses, int) and not isinstance(budget_pulses, bool) \
-                and budget_pulses >= 1:
-            context["daily_budget_pulses"] = budget_pulses
-        mode_override = params.get("life_mode_override")
-        if isinstance(mode_override, str) and mode_override in LIFE_MODES:
-            context["life_mode_override"] = mode_override
-
-    LOGGER.info(
-        "[autonomy-wiring] scheduled judgment firing: kind=%s persona=%s",
-        kind, persona_id,
+        return {"kind": kind, "submitted": False,
+                "reason": REASON_LIFE_BOUNDARY_MACHINE_ONLY}
+    LOGGER.warning(
+        "[autonomy-wiring] judgment kind %r cannot be fired from a schedule; "
+        "skipping (persona=%s)", kind, persona_id,
     )
-    return fire_judgment_point(manager, persona_id, kind, context)
+    return {"kind": kind, "submitted": False, "reason": "kind not schedulable"}
 
 
 # ---------------------------------------------------------------------------
@@ -1450,7 +1270,29 @@ def refire_judgment_from_recovery(
     応対の入口は payload に凍結された種別で選ぶ (:func:`_dispatch_recovered_response`)
     — ユーザー発話の仲裁は会話 Track の activate、外部イベントは応対 Pulse の
     再構成 (同 ④、2026-08-14)。
+
+    旧 kind の ``judgment.day_open`` / ``judgment.day_close`` (起床・就寝が判断点
+    だった頃の席) を拾った場合は**再発火せず**、席を放棄して閉じる — 起床・就寝は
+    機械の帳簿処理になり (``day_plan.handle_scheduled_life_boundary``)、LLM の
+    判断として撃ち直す先が無い。ライフの確定・節目は schedule と watchdog が
+    帳簿処理の側で拾う。
     """
+    if judgment_kind in (KIND_DAY_OPEN, KIND_DAY_CLOSE):
+        ledger = getattr(manager, "execution_ledger", None)
+        outcome = _release_claimed_seat(
+            ledger, execution_id,
+            "retired: life boundary is machine-only now (no LLM refire)",
+        )
+        LOGGER.info(
+            "[autonomy-wiring] recovered legacy judgment.%s seat abandoned — the "
+            "life boundary is machine-only now (persona=%s execution=%s "
+            "outcome=%s)", judgment_kind, persona_id, execution_id, outcome,
+        )
+        return {"kind": judgment_kind,
+                "playbook": JUDGMENT_PLAYBOOK_MAP.get(judgment_kind),
+                "submitted": False,
+                "reason": REASON_LIFE_BOUNDARY_MACHINE_ONLY,
+                "outcome": outcome, "execution_id": execution_id}
     result = fire_judgment_point(
         manager, persona_id, judgment_kind,
         context=context, resume_execution_id=execution_id,
@@ -1562,14 +1404,13 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
 
     正常時は何もしない。以下のときだけ火を入れ直す (判定は保守側):
 
-    - 自律 ON・起床時間帯 (day_open スケジュールの時刻〜day_close の時刻)・
-      **今日の day_plan 行が無い、または行はあるがコマが 1 件も無い**
-      → day_open を発火し直す (起床時刻にサーバーが落ちていた / 途中で
-      自律 ON になった等に加え、``confirm_life_for_today`` がライフ確定で
-      day_plan 行を先に作った後、day_open の時間割編成が全滅してコマ 0 件の
-      まま終わったケースも含む — 行の有無だけでは「未編成」を見落とす
-      2026-07-14 実機の教訓)
-    - plan はあるが pending / deferred コマの EventScheduler 予約が消えている
+    - 自律 ON・起床時間帯 (起床スケジュールの時刻〜就寝スケジュールの時刻)・
+      **今日のライフがまだ確定していない** → 起床の帳簿処理
+      (``day_plan.handle_scheduled_life_boundary`` の start — ライフ確定と開始の
+      節目、LLM なし) を発火し直す (起床時刻にサーバーが落ちていた / 途中で
+      自律 ON になった等)。確定済みなら撃たない。就寝スケジュールが無い設定は
+      ライフを定義できないので撃たない
+    - ライフはあるが pending / deferred コマの EventScheduler 予約が消えている
       (再起動等でインメモリ予約が失われた) → コマ予約を再 push する
 
     day_open / day_close の PersonaSchedule が無いペルソナ (v2 の一日リズム
@@ -1582,7 +1423,7 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
     があるなら、その区間そのものがそのペルソナの起きている時間帯。
 
     Returns:
-        ``{"action": "none"|"skip"|"day_open_refire"|"reschedule", ...}``
+        ``{"action": "none"|"skip"|"life_start_refire"|"reschedule", ...}``
         (観察・テスト用)。
     """
     if not is_autonomy_on(manager, persona_id):
@@ -1634,64 +1475,44 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
                 return {"action": "none", "reason": "not a scheduled day"}
 
     today = basis.plan_date
-    plan = day_plan.load_day_plan(manager, persona_id, today)
-    if not plan:
-        # 行そのものが無い (None) だけでなく、行はあるがコマ 0 件 ([]) も
-        # 「未編成」— confirm_life_for_today がライフ確定時に meta 行を先に
-        # 作るため、day_open の時間割編成が (丸めても救済できず) 全滅した日は
-        # 行が存在したまま slots_json="[]" で残る。plan is None だけを見ると
-        # この日は永久にリカバリ経路が無くなる (2026-07-14 実機の教訓)。
-        #
-        # day_open 再発火の制約: 見ている営業日が**暦日と同じとき**だけ撃つ。
-        # 違うとき = 前の営業日がまだ終わっていない (深夜跨ぎの尻尾、または
-        # 日付を跨いで続いている確定ライフ)。そこで新しい day_open を 00:30 に
-        # 撃つのは誤り — 起きなかった日の深夜に plan を作れば時間割が即発火
-        # するうえ、day_open が編成するのは**暦日**の時間割 (_day_open_plan_date)
-        # なので、前日の空は埋まらないまま毎 tick 撃ち続けることになる。
-        if today != now.date().isoformat():
-            LOGGER.debug(
-                "[watchdog] previous business day (%s) still in effect and has no "
-                "plan; skipping day_open refire (persona=%s basis=%s)",
-                today, persona_id, basis.source,
+    refire_blocked_reason: Optional[str] = None
+    # 「今日のライフがまだ確定していない」の判定は解決器が読んだライフ
+    # (basis.lives — persona_life、行の無い日付だけ旧 meta_json.lives の互換読み)
+    # をそのまま使う。営業日を決めた読みと同じ世代を見るため。就寝スケジュールが
+    # 無い設定はライフをそもそも定義できない (confirm_life_for_today がライフ
+    # 無しの日として決着する) ので、撃ち直しの対象にしない — 毎 tick の空撃ちと、
+    # その日のコマ予約の見張りの取りこぼしを防ぐ。
+    if not basis.lives and close:
+        # 再発火の制約: 見ている営業日が**暦日と同じとき**だけ撃つ。違うとき =
+        # 前の営業日がまだ終わっていない (深夜跨ぎの尻尾、または日付を跨いで
+        # 続いている確定ライフ)。起床の帳簿処理が確定するのは**暦日**のライフ
+        # (_day_open_plan_date) なので、ここで撃つと起きなかった日の深夜に
+        # 翌日のライフを始めてしまう。撃たない場合も、その営業日のコマ予約の
+        # 途絶は下で見張る。
+        if today == now.date().isoformat():
+            LOGGER.info(
+                "[watchdog] no life confirmed for today; re-firing the life start "
+                "(machine bookkeeping, no LLM) (persona=%s date=%s wake=%s)",
+                persona_id, today, wake,
             )
-            return {
-                "action": "none",
-                "reason": "previous business day still in effect: no day_open refire",
-            }
-
-        LOGGER.info(
-            "[watchdog] no day plan (or zero organized slots) for today; "
-            "re-firing day_open (persona=%s date=%s wake=%s)",
-            persona_id, today, wake,
+            settled = day_plan.handle_scheduled_life_boundary(
+                manager, persona_id, day_plan.LIFE_BOUNDARY_START,
+                sched.get("day_open_params"),
+            )
+            return {"action": "life_start_refire", "settled": settled}
+        LOGGER.debug(
+            "[watchdog] previous business day (%s) still in effect and has no "
+            "life; skipping life-start refire (persona=%s basis=%s)",
+            today, persona_id, basis.source,
         )
-        context: Dict[str, Any] = {}
-        params = sched.get("day_open_params")
-        if isinstance(params, dict):
-            from saiverse.day_plan import LIFE_MODES
-
-            budget = params.get("daily_budget_rounds")
-            if isinstance(budget, int) and not isinstance(budget, bool) and budget >= 1:
-                context["daily_budget_rounds"] = budget
-            budget_pulses = params.get("daily_budget_pulses")
-            if isinstance(budget_pulses, int) and not isinstance(budget_pulses, bool) \
-                    and budget_pulses >= 1:
-                context["daily_budget_pulses"] = budget_pulses
-            mode_override = params.get("life_mode_override")
-            if isinstance(mode_override, str) and mode_override in LIFE_MODES:
-                context["life_mode_override"] = mode_override
-        result = fire_judgment_point(
-            manager, persona_id, KIND_DAY_OPEN, context,
-            # Lock 待ちの間に本物の day_open が済んでいたら撃たない (二重編成防止)。
-            # ここも「行が無い」でなく「コマが無い」で判定する (上と同じ理由)。
-            precondition=lambda: not day_plan.load_day_plan(
-                manager, persona_id, today,
-            ),
+        refire_blocked_reason = (
+            "previous business day still in effect: no life-start refire"
         )
-        return {"action": "day_open_refire", "result": result}
 
     # v0.5 (life.md §11.2): 専用のライフ境界イベント予約は廃止した — ライフの
-    # 開始/終了処理は day_open/day_close の発火経路 (fire_judgment_point) に
-    # 統合済みのため、ここで見張るのはコマ予約の途絶だけでよい。
+    # 開始/終了処理は起床・就寝スケジュールの発火 (day_plan.
+    # handle_scheduled_life_boundary) が持つため、ここで見張るのはコマ予約の
+    # 途絶だけでよい。
     lost = day_plan.find_lost_slot_reservations(manager, persona_id, today)
     if lost:
         LOGGER.info(
@@ -1703,4 +1524,6 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
         )
         return {"action": "reschedule", "pushed": pushed, "lost": lost}
 
+    if refire_blocked_reason is not None:
+        return {"action": "none", "reason": refire_blocked_reason}
     return {"action": "none"}

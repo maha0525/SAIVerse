@@ -174,6 +174,17 @@ def _default_lives():
     ]
 
 
+def _overwrite_lives(manager, plan_date, lives):
+    """ライフの置き場 (persona_life) を検証なしで直接書き換える (使い切り・
+    手編集・異常系の再現用)。旧置き場 meta_json.lives は v04 段 1-2 以降
+    互換読みでしか読まれないので、そこを書いても正の置き場は変わらない。"""
+    def _set(current):
+        current[:] = [dict(life) for life in lives]
+        return True
+
+    day_plan._mutate_lives(manager, PERSONA_ID, plan_date, _set, context="test")
+
+
 def _import_judgment_playbooks(session_factory):
     db = session_factory()
     try:
@@ -339,9 +350,10 @@ def test_save_day_plan_excludes_slot_outside_life_window_when_sole_slot(manager,
             _slot("13:00", ref="none", kind="自室で過ごす", facility="own_room",
                   budget_rounds=0),
         ])
-    # save_lives が meta 行 (slots_json="[]") を既に作っているため空配列
-    # (行そのものが無い None ではない — save_day_plan は失敗して何も書かない)。
-    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == []
+    # save_day_plan は失敗して何も書かない。ライフの置き場は persona_life に
+    # 独立したので (v04 段 1-2)、save_lives は時間割の行を作らない — 行そのものが
+    # 無い (None)。
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) is None
 
 
 def test_save_day_plan_rounds_slot_before_current_time_to_now(manager, task_ref):
@@ -601,7 +613,7 @@ def test_life_budget_gate_skips_when_exhausted(manager, task_ref):
     ])
     lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
     lives[0]["used_pulses"] = 3  # 使い切っておく
-    day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE, {day_plan.META_LIVES: lives})
+    _overwrite_lives(manager, PLAN_DATE, lives)
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
 
     with patch("sea.work_session.run_work_session") as mock_ws:
@@ -661,12 +673,10 @@ def test_life_budget_gate_allows_through_when_slot_outside_any_life(manager, tas
     ])
     # ライフを直接組み替える (異常系の再現 — 発火時に slot がどのライフにも
     # 属さない状態を作る)。
-    day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE, {
-        day_plan.META_LIVES: [
-            {"start": "13:00", "end": "18:00", "budget_pulses": 4, "mode": "free",
-             "used_pulses": 0, "used_rounds": 0, "judgment_pulses": 0},
-        ],
-    })
+    _overwrite_lives(manager, PLAN_DATE, [
+        {"start": "13:00", "end": "18:00", "budget_pulses": 4, "mode": "free",
+         "used_pulses": 0, "used_rounds": 0, "judgment_pulses": 0},
+    ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
 
     with patch("sea.work_session.run_work_session") as mock_ws:
@@ -738,7 +748,10 @@ def test_fire_judgment_point_noop_life_bookkeeping_without_lives(manager, sessio
 
 
 # ---------------------------------------------------------------------------
-# _apply_life_end_at_day_close: 境界副作用の冪等ガード (Codex W3 第二陣 P1)
+# 就寝の帳簿処理 (day_plan.handle_scheduled_life_boundary の end):
+# 境界副作用の冪等ガード (Codex W3 第二陣 P1)。2026-10 (v04 段 1-2) に判断点の
+# 前段 (旧 autonomy_wiring._apply_life_end_at_day_close) から機械の帳簿処理へ
+# 切り出された — 契約 (マーカー・台帳・単一 commit) はそのまま。
 # ---------------------------------------------------------------------------
 
 
@@ -748,7 +761,23 @@ def _end_test_lives(manager):
     ])
 
 
-def test_apply_life_end_at_day_close_applies_once_per_business_day(manager):
+def _settle_end(manager):
+    """就寝時刻の帳簿処理を 1 回走らせる (自律 ON のペルソナとして)。"""
+    manager.personas[PERSONA_ID].autonomy_enabled = True
+    return day_plan.handle_scheduled_life_boundary(
+        manager, PERSONA_ID, day_plan.LIFE_BOUNDARY_END,
+    )
+
+
+def _settle_start(manager, params=None):
+    """起床時刻の帳簿処理を 1 回走らせる (自律 ON のペルソナとして)。"""
+    manager.personas[PERSONA_ID].autonomy_enabled = True
+    return day_plan.handle_scheduled_life_boundary(
+        manager, PERSONA_ID, day_plan.LIFE_BOUNDARY_START, params,
+    )
+
+
+def test_life_end_bookkeeping_applies_once_per_business_day(manager):
     """day_close の節目処理 (非冪等) は (persona, 営業日) につき一度だけ。
 
     判断 runtime の失敗で claim 行が prepared のまま残ると、schedule 側の
@@ -760,25 +789,25 @@ def test_apply_life_end_at_day_close_applies_once_per_business_day(manager):
     clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
     _end_test_lives(manager)
 
-    assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
-    assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
+    assert _settle_end(manager) is True
+    assert _settle_end(manager) is True
 
     # 節目の実行は一度きり (2 回目はマーカーで台帳に触れる前に skip) で、
     # 通知も一通だけ
     assert [s for _eid, s in _boundary_end_rows(manager)] == ["completed"]
     assert len(delivered) == 1
-    # マーカーは meta_json に永続化される — プロセスを跨いだ別インスタンス
+    # マーカーは persona_life に永続化される — プロセスを跨いだ別インスタンス
     # 経由の再呼び出しでも DB 読み (get_lives) で skip される
     lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
     assert lives[0]["ended"] is True
 
 
-def test_apply_life_end_at_day_close_noop_without_lives(manager):
+def test_life_end_bookkeeping_noop_without_lives(manager):
     """lives が無い日は従来どおり no-op (マーカーも書かない・行も作らない)。"""
     _ledger, delivered = _attach_boundary_ledger(manager)
     clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
 
-    assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
+    assert _settle_end(manager) is True
 
     assert _boundary_end_rows(manager) == []  # 節目の実行を作らない
     assert delivered == []
@@ -797,15 +826,15 @@ def test_apply_life_end_marker_not_written_when_steps_fail(manager):
     with patch.object(
         day_plan, "_cancel_keepalive_reservation", return_value=False,
     ) as cancel:
-        assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is False
+        assert _settle_end(manager) is False
     assert cancel.call_count == 1
     assert not day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0].get("ended")
     assert delivered == []
     assert [s for _eid, s in _boundary_end_rows(manager)] == ["failed"]
 
     # 再試行: 適用成功 → マーク → 以後は skip (通知は一通だけ)
-    assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
-    assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
+    assert _settle_end(manager) is True
+    assert _settle_end(manager) is True
     assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["ended"] is True
     assert len(delivered) == 1
     assert sorted(s for _eid, s in _boundary_end_rows(manager)) == [
@@ -824,7 +853,7 @@ def test_life_end_notify_skipped_when_ttl_sync_fails(manager):
     with patch.object(
         day_plan, "_sync_cache_ttl_for_life_end", return_value=False,
     ):
-        assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is False
+        assert _settle_end(manager) is False
 
     assert delivered == []
     assert _boundary_outbox_count(manager) == 0
@@ -876,7 +905,7 @@ def test_life_boundary_marker_and_notice_single_commit(manager):
     clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
     _end_test_lives(manager)
 
-    assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
+    assert _settle_end(manager) is True
     assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["ended"] is True
     assert len(delivered) == 1
     msg = delivered[0]
@@ -898,14 +927,14 @@ def test_life_end_marker_tx_failure_fails_boundary_then_recovers(manager):
     with patch.object(
         ledger, "mark_applied", side_effect=RuntimeError("tx boom"),
     ):
-        assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is False
+        assert _settle_end(manager) is False
     assert not day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0].get("ended")
     assert delivered == []  # マーカーも通知も残らない (単一 tx)
     statuses = sorted(status for _eid, status in _boundary_end_rows(manager))
     assert statuses == ["failed"]
 
     # 再試行: 回復 → マーカー + 通知が一度だけ
-    assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
+    assert _settle_end(manager) is True
     assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["ended"] is True
     assert len(delivered) == 1
     statuses = sorted(status for _eid, status in _boundary_end_rows(manager))
@@ -929,7 +958,7 @@ def test_life_end_notice_delivered_once_via_outbox(manager):
     clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
     _end_test_lives(manager)
 
-    assert wiring._apply_life_end_at_day_close(manager, PERSONA_ID) is True
+    assert _settle_end(manager) is True
     assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["ended"] is True
     assert delivered == []  # 一回目の即時配送は失敗 → pending 保持
 
@@ -941,13 +970,16 @@ def test_life_end_notice_delivered_once_via_outbox(manager):
     assert len(delivered) == 1
 
 
-def test_day_close_aborts_judgment_when_life_end_boundary_fails(manager, session_factory):
-    """境界失敗は判断の**前**に submitted=False で打ち切る (Codex W3 第五陣 P2
-    の再現固定)。マークせず戻るだけでは、判断が成功して schedule と判断台帳が
-    completed になり、同一営業日の再試行が来ずに節目 (活動終了通知) が永久に
-    欠落していた。判断行は failed (副作用ゼロ) に落ち、backoff 再試行の claim
-    がキーを退避して新しい prepared を取れる。"""
-    manager.personas[PERSONA_ID].autonomy_enabled = True
+def test_life_end_failure_returns_false_without_any_judgment_then_recovers(
+    manager, session_factory,
+):
+    """就寝の帳簿処理の失敗は False で返り (呼び出し元の schedule が backoff
+    再試行に乗せる)、判断点の席も LLM の起動も一切作らない — 起床・就寝は
+    機械の帳簿処理だけ (v3 §6、v04 段 1-2)。再試行で節目が一度だけ適用される。
+
+    旧形 (Codex W3 第五陣 P2): 判断点の前段で境界が失敗したら判断を打ち切って
+    submitted=False を返していた。判断そのものが無くなったので、失敗の伝播先は
+    schedule の再試行だけになった。"""
     _import_judgment_playbooks(session_factory)
     submissions: List[Dict[str, Any]] = []
     manager.pulse_controller = SimpleNamespace(
@@ -957,25 +989,34 @@ def test_day_close_aborts_judgment_when_life_end_boundary_fails(manager, session
     clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
     _end_test_lives(manager)
 
-    # 境界失敗は冪等段 (TTL 同期等) で注入する — 通知はマーカーと同一 tx の
-    # outbox なので、冪等段の失敗では積まれない。
     with patch.object(day_plan, "_sync_cache_ttl_for_life_end", return_value=False):
-        result = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
+        assert _settle_end(manager) is False
 
-    assert result["submitted"] is False
-    assert result["reason"] == "life-end boundary failed"
-    assert submissions == []  # 判断は走っていない
-    assert ledger.get_execution(result["execution_id"])["status"] == "failed"
+    assert submissions == []  # LLM の判断は走らない
+    assert _judgment_ledger_kinds(manager) == []  # 判断点の席も作らない
     assert not day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0].get("ended")
 
-    # 再試行 (境界回復後): claim が failed キーを退避し、境界適用 → 判断起動
-    # まで進む。スタブ controller は finalize 証跡を作らないため submitted は
-    # W1 の証跡ベース判定で False (unknown) になる — ここで固定したいのは
-    # 「打ち切りが解け、境界が適用され、判断がメタレーンへ到達する」こと。
-    result2 = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
-    assert len(submissions) == 1  # 判断が起動した
+    assert _settle_end(manager) is True
+    assert submissions == []
+    assert _judgment_ledger_kinds(manager) == []
     assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["ended"] is True
-    assert result2["execution_id"] != result["execution_id"]  # 新しい claim
+    assert ledger is manager.execution_ledger
+
+
+def _judgment_ledger_kinds(manager):
+    """実行台帳に刻まれた判断点 (judgment.*) の KIND 一覧。"""
+    from database.models import ExecutionLedgerEntry
+
+    db = manager.SessionLocal()
+    try:
+        rows = (
+            db.query(ExecutionLedgerEntry.KIND)
+            .filter(ExecutionLedgerEntry.KIND.like("judgment.%"))
+            .all()
+        )
+        return [r[0] for r in rows]
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1367,38 +1408,38 @@ def test_lives_day_settlement_failure_retains_reserved_rounds(manager, task_ref)
     assert ledger.get_execution(exec_id)["status"] == "running"
 
 
-def test_day_open_aborts_judgment_when_life_start_boundary_fails(manager, session_factory):
-    """day_open の境界失敗 (活動開始通知の追記失敗等) は判断の**前**に
-    submitted=False で打ち切り、started マーカーも書かない (Codex W3 第八陣 —
-    day_close の失敗伝播の鏡像)。再試行で境界が一度だけ適用され、判断が
-    メタレーンへ到達する。"""
-    manager.personas[PERSONA_ID].autonomy_enabled = True
+def test_life_start_failure_keeps_life_unmarked_and_retry_applies_once(
+    manager, session_factory,
+):
+    """起床の帳簿処理で節目が失敗 (TTL override 等) したら False を返し、
+    started マーカーを書かない — ライフの確定は済む。再試行で節目が一度だけ
+    適用され、判断点 (LLM) は最初から最後まで一度も起動しない (v04 段 1-2)。
+
+    旧形 (Codex W3 第八陣): 判断点 day_open の前段で境界が失敗したら判断を
+    打ち切っていた。判断そのものが無くなった。"""
     _import_judgment_playbooks(session_factory)
     submissions: List[Dict[str, Any]] = []
     manager.pulse_controller = SimpleNamespace(
         submit_meta_judgment=lambda **kwargs: submissions.append(kwargs),
     )
-    ledger = _attach_ledger(manager)
+    _attach_boundary_ledger(manager)
     clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
     _set_day_schedules(manager, session_factory)
 
     # 境界失敗は冪等段 (TTL override) で注入する — 通知はマーカーと同一 tx の
     # outbox なので、冪等段の失敗では積まれない。
     with patch.object(day_plan, "_sync_cache_ttl_for_life_start", return_value=False):
-        result = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
+        assert _settle_start(manager) is False
 
-    assert result["submitted"] is False
-    assert result["reason"] == "life-start boundary failed"
-    assert submissions == []
-    assert ledger.get_execution(result["execution_id"])["status"] == "failed"
     lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
     assert lives and not lives[0].get("started")  # 確定は済むがマークされない
+    assert submissions == []
+    assert _judgment_ledger_kinds(manager) == []
 
-    # 再試行: 境界回復 → 節目一度だけ → started マーク → 判断起動
-    result2 = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
-    assert len(submissions) == 1
+    assert _settle_start(manager) is True
     assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["started"] is True
-    assert result2["execution_id"] != result["execution_id"]
+    assert submissions == []
+    assert _judgment_ledger_kinds(manager) == []
 
 
 def test_day_open_boundary_applies_once_via_started_marker(manager, session_factory):
@@ -1415,8 +1456,8 @@ def test_day_open_boundary_applies_once_via_started_marker(manager, session_fact
     with patch.object(
         day_plan, "apply_life_boundary", wraps=day_plan.apply_life_boundary,
     ) as spy:
-        assert wiring._confirm_life_at_day_open(manager, PERSONA_ID, {}) is True
-        assert wiring._confirm_life_at_day_open(manager, PERSONA_ID, {}) is True
+        assert _settle_start(manager) is True
+        assert _settle_start(manager) is True
     assert spy.call_count == 1
     assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["started"] is True
     assert len(delivered) == 1  # 「（活動開始）」通知は一通だけ

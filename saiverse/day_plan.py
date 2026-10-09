@@ -264,11 +264,15 @@ META_BUDGET_USED = "budget_used_rounds"
 # (2026-07-13) にペルソナが過去起点・予算不整合のライフを宣言できてしまう
 # 破綻が起き、まはー裁定で責任分界を全面改訂した — ライフ = ユーザーが設定する
 # 起床・就寝の区間 (PersonaSchedule が器)。ペルソナは宣言しない。以下の宣言口
-# 検証 (重なり・谷コマ・均等モード間隔) は廃止し、システムが day_open 発火時に
-# :func:`confirm_life_for_today` で確定して焼く (呼び出し元は
-# saiverse.autonomy_wiring.fire_judgment_point)。永続化・台帳・予算ゲート・
+# 検証 (重なり・谷コマ・均等モード間隔) は廃止し、システムが起床時刻に
+# :func:`confirm_life_for_today` で確定して焼く。永続化・台帳・予算ゲート・
 # keep-alive 連動 (Phase 2〜4 実装) はそのまま生きる — 書き手が LLM から
 # システムに変わるだけ。
+#
+# 2026-10 (autonomous_behavior_v04_plan.md 段 1-2、v3 §6「起床・就寝は機械の
+# 帳簿処理のみ」): 確定と起床・就寝の節目処理は判断点 (fire_judgment_point) から
+# 切り出され、:func:`handle_scheduled_life_boundary` が LLM なしで行う。置き場も
+# persona_day_plan.meta_json から persona_life テーブルへ独立した。
 # ---------------------------------------------------------------------------
 
 #: ライフのモード (life.md §5.1): 均等 = 標準パルスの間隔を TTL 内に保つ
@@ -286,7 +290,10 @@ LIFE_EVEN_MAX_GAP_MINUTES = 50
 #: 消費 = used_pulses + used_rounds × LIFE_ROUND_BUDGET_FACTOR。
 LIFE_ROUND_BUDGET_FACTOR = 0.2
 
-#: persona_day_plan.meta_json の lives 配列のキー (life.md §11.2)。
+#: 旧置き場 persona_day_plan.meta_json の lives 配列のキー (life.md §11.2)。
+#: ライフの正の置き場は persona_life テーブル (autonomous_behavior_v04_plan.md
+#: 段 1-2)。このキーは互換読み (:func:`_legacy_lives_in_session`) だけが読む —
+#: persona_day_plan 撤去時に互換読みごと消す。
 META_LIVES = "lives"
 
 #: DEFAULT_MODEL の provider がこの集合に属せば既定モードは均等 (life.md §5.1)。
@@ -1224,39 +1231,271 @@ def _life_minutes(hhmm: str) -> int:
     return int(hhmm[:2]) * 60 + int(hhmm[3:])
 
 
-def get_lives(
-    manager: Any, persona_id: str, plan_date: Any, *, strict: bool = False
+# ---------------------------------------------------------------------------
+# ライフの置き場 (persona_life テーブル、autonomous_behavior_v04_plan.md 段 1-2)
+#
+# 正の置き場は persona_life (1 ペルソナ 1 営業日 1 行、LIVES_JSON = ライフ配列)。
+# 以前は persona_day_plan.meta_json.lives に同居していた。
+#
+# 互換読み: persona_life に行が**無い**日付に限り、旧 meta_json.lives を読み取り
+# 専用で参照する (切り替えた当日の「前日の深夜跨ぎライフ」の営業日解決を守る
+# ため)。旧置き場へは書き戻さない。書き手 (:func:`_mutate_lives`) が行の無い
+# 日付に書くときは、互換読みで得たライフを種にして persona_life に新しい行を
+# 作る (旧ライフの帳簿 — started / used_* — を新しい置き場で引き継ぐ)。
+# persona_day_plan 撤去時にこの互換読みも消す。
+# ---------------------------------------------------------------------------
+
+
+def _load_life_row(db: Session, persona_id: str, plan_date_str: str) -> Any:
+    """PersonaLife 行を与えられた Session で読む (無ければ None)。"""
+    from database.models import PersonaLife
+
+    return (
+        db.query(PersonaLife)
+        .filter_by(PERSONA_ID=persona_id, PLAN_DATE=plan_date_str)
+        .first()
+    )
+
+
+def _parse_lives_payload(
+    raw: Any,
+    *,
+    strict: bool,
+    persona_id: str,
+    plan_date_str: str,
+    source: str,
 ) -> List[Dict[str, Any]]:
-    """保存済みライフ宣言 (meta_json.lives) を返す。無ければ空リスト。
+    """ライフ配列の JSON 文字列 / 値を list[dict] に読む。
 
-    「lives が無い日 (旧データ・宣言なし) は検証もゲートも従来挙動」の判定は
-    すべてこの関数の戻り値が空かどうかで行う (life.md §4.1)。
-
-    Args:
-        strict: True で「壊れていて読めない」を例外にする (:func:`load_plan_meta`
-            の strict + lives が list でない / 要素が dict でない)。営業日の
-            選択だけが True で呼ぶ — 壊れた台帳を「ライフ未宣言の日」と読むと、
-            現行スケジュール基準で別の営業日を駆動してしまう。既定 (False) は
-            従来どおり空リスト / 不正要素の除去へ縮退する。
-
-    Raises:
-        ValueError: ``strict`` かつ台帳が壊れている場合。
+    ``strict`` は :func:`get_lives` と同じ意味: 壊れていたら例外。既定は空リスト /
+    不正要素の除去へ縮退する。``raw`` が JSON 文字列でなく読み済みの値
+    (旧 meta_json.lives) でもよい。
     """
-    meta = load_plan_meta(manager, persona_id, plan_date, strict=strict)
-    lives = meta.get(META_LIVES)
+    lives = raw
+    if isinstance(raw, str):
+        try:
+            lives = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            if strict:
+                raise ValueError(
+                    f"{source} is not valid JSON (persona={persona_id} "
+                    f"date={plan_date_str})"
+                )
+            LOGGER.warning(
+                "[day_plan] %s is not valid JSON (persona=%s date=%s); "
+                "treating as no lives", source, persona_id, plan_date_str,
+            )
+            return []
     if not isinstance(lives, list):
         if strict and lives is not None:
             raise ValueError(
-                f"meta_json.{META_LIVES} is not a list (persona={persona_id} "
+                f"{source} is not a list (persona={persona_id} "
                 f"got={type(lives).__name__})"
             )
         return []
     if strict and any(not isinstance(life, dict) for life in lives):
         raise ValueError(
-            f"meta_json.{META_LIVES} contains non-object entries "
-            f"(persona={persona_id})"
+            f"{source} contains non-object entries (persona={persona_id})"
         )
     return [life for life in lives if isinstance(life, dict)]
+
+
+def _legacy_lives_in_session(
+    db: Session, persona_id: str, plan_date_str: str, *, strict: bool = False
+) -> List[Dict[str, Any]]:
+    """互換読み: 旧置き場 persona_day_plan.meta_json.lives を**読み取り専用**で読む。
+
+    persona_life に行が無い日付だけが呼ぶ。旧置き場へは決して書かない。
+    persona_day_plan 撤去時にこの互換読みも消す。
+    """
+    row = _load_plan_row(db, persona_id, plan_date_str)
+    if row is None or not row.meta_json:
+        return []
+    try:
+        meta = json.loads(row.meta_json)
+    except (TypeError, ValueError):
+        if strict:
+            raise ValueError(
+                f"meta_json is not valid JSON (persona={persona_id} "
+                f"date={plan_date_str})"
+            )
+        LOGGER.warning(
+            "[day_plan] legacy meta_json is not valid JSON (persona=%s date=%s); "
+            "treating as no lives", persona_id, plan_date_str,
+        )
+        return []
+    if not isinstance(meta, dict):
+        if strict:
+            raise ValueError(
+                f"meta_json is not a JSON object (persona={persona_id} "
+                f"date={plan_date_str} got={type(meta).__name__})"
+            )
+        return []
+    return _parse_lives_payload(
+        meta.get(META_LIVES), strict=strict, persona_id=persona_id,
+        plan_date_str=plan_date_str, source=f"meta_json.{META_LIVES}",
+    )
+
+
+def _read_lives_in_session(
+    db: Session, persona_id: str, plan_date_str: str, *, strict: bool = False
+) -> Tuple[Any, List[Dict[str, Any]]]:
+    """``(persona_life 行 or None, ライフ配列)`` を同じ Session で読む。
+
+    行があればその LIVES_JSON が正 (空配列でも — 旧置き場は見ない)。行が無ければ
+    互換読み (:func:`_legacy_lives_in_session`) へ落ちる。
+    """
+    row = _load_life_row(db, persona_id, plan_date_str)
+    if row is not None:
+        return row, _parse_lives_payload(
+            row.LIVES_JSON, strict=strict, persona_id=persona_id,
+            plan_date_str=plan_date_str, source="persona_life.LIVES_JSON",
+        )
+    return None, _legacy_lives_in_session(
+        db, persona_id, plan_date_str, strict=strict,
+    )
+
+
+def _mutate_lives(
+    manager: Any,
+    persona_id: str,
+    plan_date: Any,
+    mutate: Callable[[List[Dict[str, Any]]], Optional[Any]],
+    *,
+    context: str = "",
+    in_session_extra: Optional[Callable[[Any], None]] = None,
+) -> Optional[Any]:
+    """ライフ配列を CAS 再試行つきで変異させる — ライフの書き手の唯一の口。
+
+    :func:`mutate_plan_meta` と同じ契約を persona_life に対して持つ:
+
+    - 読み → 計算 → 保存を**同じ CAS 試行の内側**で行う。競合のたびに
+      ``mutate`` が最新のライフ配列で呼び直され、並走した積算を失わない
+      (第七陣 P1 の契約)
+    - ``mutate`` は受け取ったリストをその場で書き換え、非 None (呼び出し元へ
+      返す結果) を返す。None = 書かずに中止 (行も作らない)
+    - ``in_session_extra`` は書き込みが確定する試行の **commit 直前**に同じ
+      Session で一度だけ呼ばれる (W5: ライフのマーカーと実行台帳の applied +
+      outbox を単一 commit に同梱する口)。例外は試行ごと rollback して伝播
+
+    行が無い日付は互換読み (旧 meta_json.lives) を種にして新しい行を INSERT
+    する (旧置き場へは書き戻さない)。
+
+    Raises:
+        RuntimeError: 再試行が枯渇した場合 (書けていない — silent 消失にしない)。
+    """
+    plan_date_str = _normalize_plan_date(plan_date)
+    from sqlalchemy.exc import IntegrityError
+
+    from database.models import PersonaLife
+
+    for _attempt in range(_CAS_MAX_RETRIES):
+        now = clock.now()
+        db = manager.SessionLocal()
+        try:
+            row = _load_life_row(db, persona_id, plan_date_str)
+            if row is None:
+                lives = _legacy_lives_in_session(db, persona_id, plan_date_str)
+                result = mutate(lives)
+                if result is None:
+                    return None
+                db.add(PersonaLife(
+                    PERSONA_ID=persona_id,
+                    PLAN_DATE=plan_date_str,
+                    LIVES_JSON=json.dumps(lives, ensure_ascii=False),
+                    CREATED_AT=now,
+                    UPDATED_AT=now,
+                ))
+                if in_session_extra is not None:
+                    try:
+                        in_session_extra(db)
+                    except Exception:
+                        db.rollback()
+                        raise
+                try:
+                    db.commit()
+                    return result
+                except IntegrityError:
+                    # 並走の書き手が先に行を作った — 更新経路で再試行
+                    db.rollback()
+                    continue
+            original = row.LIVES_JSON
+            lives = _parse_lives_payload(
+                original, strict=False, persona_id=persona_id,
+                plan_date_str=plan_date_str, source="persona_life.LIVES_JSON",
+            )
+            result = mutate(lives)
+            if result is None:
+                return None
+            changed = (
+                db.query(PersonaLife)
+                .filter(
+                    PersonaLife.PERSONA_ID == persona_id,
+                    PersonaLife.PLAN_DATE == plan_date_str,
+                    PersonaLife.LIVES_JSON == original,
+                )
+                .update(
+                    {
+                        PersonaLife.LIVES_JSON: json.dumps(
+                            lives, ensure_ascii=False,
+                        ),
+                        PersonaLife.UPDATED_AT: now,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if changed and in_session_extra is not None:
+                try:
+                    in_session_extra(db)
+                except Exception:
+                    db.rollback()
+                    raise
+            db.commit()
+            if changed:
+                return result
+        finally:
+            db.close()
+        LOGGER.info(
+            "[day_plan] lives CAS conflict (%s): lives changed since read; "
+            "retrying with fresh lives (persona=%s date=%s attempt=%d/%d)",
+            context, persona_id, plan_date_str, _attempt + 1, _CAS_MAX_RETRIES,
+        )
+    raise RuntimeError(
+        f"lives mutation kept conflicting with concurrent writes "
+        f"(persona={persona_id} date={plan_date_str} context={context})"
+    )
+
+
+def get_lives(
+    manager: Any, persona_id: str, plan_date: Any, *, strict: bool = False
+) -> List[Dict[str, Any]]:
+    """保存済みライフ (persona_life) を返す。無ければ空リスト。
+
+    persona_life に行が無い日付に限り、旧置き場 (persona_day_plan.meta_json.lives)
+    を読み取り専用で参照する (互換読み — 上の節の注記参照)。
+
+    「lives が無い日 (旧データ・宣言なし) は検証もゲートも従来挙動」の判定は
+    すべてこの関数の戻り値が空かどうかで行う (life.md §4.1)。
+
+    Args:
+        strict: True で「壊れていて読めない」を例外にする (LIVES_JSON / 旧
+            meta_json が不正 JSON、lives が list でない / 要素が dict でない)。
+            営業日の選択だけが True で呼ぶ — 壊れた台帳を「ライフ未宣言の日」と
+            読むと、現行スケジュール基準で別の営業日を駆動してしまう。既定
+            (False) は空リスト / 不正要素の除去へ縮退する。
+
+    Raises:
+        ValueError: ``strict`` かつ台帳が壊れている場合。
+    """
+    plan_date_str = _normalize_plan_date(plan_date)
+    db = manager.SessionLocal()
+    try:
+        _row, lives = _read_lives_in_session(
+            db, persona_id, plan_date_str, strict=strict,
+        )
+        return lives
+    finally:
+        db.close()
 
 
 def _life_is_overnight(life: Dict[str, Any]) -> bool:
@@ -1612,14 +1851,11 @@ def save_lives(
     plan_date_str = _normalize_plan_date(plan_date)
     normalized = _validate_and_normalize_lives(lives)
 
-    # 消費の引き継ぎは最新 meta から CAS の内側で行う (外で読んだ古い消費を
+    # 消費の引き継ぎは最新のライフから CAS の内側で行う (外で読んだ古い消費を
     # 完成値として書くと、読みと書きの間に積まれた消費が巻き戻る — 第七陣 P1)。
-    def _apply(meta: Dict[str, Any]) -> List[Dict[str, Any]]:
-        raw = meta.get(META_LIVES)
+    def _apply(lives: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         existing = {
-            (life.get("start"), life.get("end")): life
-            for life in (raw if isinstance(raw, list) else [])
-            if isinstance(life, dict)
+            (life.get("start"), life.get("end")): life for life in lives
         }
         for life in normalized:
             prev = existing.get((life["start"], life["end"]))
@@ -1631,10 +1867,10 @@ def save_lives(
                 life["used_pulses"] = 0
                 life["used_rounds"] = 0
                 life["judgment_pulses"] = 0
-        meta[META_LIVES] = normalized
+        lives[:] = normalized
         return normalized
 
-    mutate_plan_meta(
+    _mutate_lives(
         manager, persona_id, plan_date_str, _apply, context="save_lives",
     )
     LOGGER.info(
@@ -1736,10 +1972,9 @@ def confirm_life_for_today(
     requested_budget_pulses: Optional[int] = None,
     mode_override: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """起床判断 (day_open) 発火時、ユーザー設定 (PersonaSchedule の起床・就寝 +
-    予算) から今日のライフを確定して meta_json.lives に焼く
-    (life.md v0.5 §3/§4/§8.1)。呼び出し元は
-    :func:`saiverse.autonomy_wiring.fire_judgment_point`。
+    """起床時刻に、ユーザー設定 (PersonaSchedule の起床・就寝 + 予算) から今日の
+    ライフを確定して persona_life に焼く (life.md v0.5 §3/§4/§8.1)。呼び出し元は
+    :func:`handle_scheduled_life_boundary` (機械の帳簿処理 — LLM なし)。
 
     - **区間**: wake〜close をそのまま使う (深夜跨ぎも正常形)
     - **モード**: ``mode_override`` (ユーザー設定、"even"/"free") が
@@ -1896,19 +2131,14 @@ def _increment_life_field(
 ) -> Optional[Dict[str, Any]]:
     """``hhmm`` が属するライフの ``field`` へ ``inc`` を積算する共通実装。
 
-    ライフの解決と増分計算を :func:`mutate_plan_meta` の CAS 試行の**内側**で行う
+    ライフの解決と増分計算を :func:`_mutate_lives` の CAS 試行の**内側**で行う
     — 外で読んだ lives に増分を足した完成値を書くと、並走した積算が失われる
     (第七陣 P1: record_judgment_pulse 2 本並走で judgment_pulses が 2 でなく 1 に
     なる再現)。lives が無い日 / どのライフにも属さない時刻は no-op (None、行も
     作らない)。
     """
 
-    def _add(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        raw = meta.get(META_LIVES)
-        lives = (
-            [life for life in raw if isinstance(life, dict)]
-            if isinstance(raw, list) else []
-        )
+    def _add(lives: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not lives:
             return None
         idx = get_life_for_time(lives, hhmm)
@@ -1920,42 +2150,35 @@ def _increment_life_field(
             )
             return None
         lives[idx][field] = int(lives[idx].get(field) or 0) + inc
-        meta[META_LIVES] = lives
         return lives[idx]
 
-    return mutate_plan_meta(
+    return _mutate_lives(
         manager, persona_id, plan_date_str, _add, context=f"increment:{field}",
     )
 
 
 def _life_mark_mutator(
     index: int, field: str
-) -> Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]:
+) -> Callable[[List[Dict[str, Any]]], Optional[Dict[str, Any]]]:
     """lives[index] に境界マーカー (``started`` / ``ended``) を立てる mutate 閉包。
 
-    :func:`mutate_plan_meta` の CAS 試行の内側で評価される (第七陣 P1 の契約 —
-    外で読んだ meta から完成値を作らない)。lives が無い日 / index 外 / 既マークは
+    :func:`_mutate_lives` の CAS 試行の内側で評価される (第七陣 P1 の契約 —
+    外で読んだライフから完成値を作らない)。lives が無い日 / index 外 / 既マークは
     None (no-op — 書かない)。
 
     マーカーの意味: ライフ境界の節目処理 (:func:`apply_life_boundary`) は
-    非冪等 (通知を含む) なので、判断 runtime の失敗 → schedule 側 backoff
-    再試行で :func:`saiverse.autonomy_wiring.fire_judgment_point` が再突入しても
+    非冪等 (通知を含む) なので、schedule 側 backoff 再試行や watchdog の
+    再発火で :func:`handle_scheduled_life_boundary` が再突入しても
     節目が (persona, 営業日) につき一度で済むよう、済んだことをここに永続する
     (Codex W3 第二陣 P1 / 第八陣)。「確認 → 適用 → マーク」の順で、マーク
     先行だと適用されないまま封印される。
     """
-    def _mark(meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        raw = meta.get(META_LIVES)
-        lives = (
-            [life for life in raw if isinstance(life, dict)]
-            if isinstance(raw, list) else []
-        )
+    def _mark(lives: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if index >= len(lives):
             return None
         if lives[index].get(field):
             return None  # 既にマーク済み — 書かない
         lives[index][field] = True
-        meta[META_LIVES] = lives
         return lives[index]
 
     return _mark
@@ -2014,7 +2237,7 @@ def apply_life_boundary(
 
     (a) 「通知の追記成功 → 成功報告前の crash」で再試行が通知を再適用する
         at-least-once 窓 → **マーカーと通知 outbox を world DB の単一 commit**
-        (:func:`mutate_plan_meta` の ``in_session_extra`` で
+        (:func:`_mutate_lives` の ``in_session_extra`` で
         :meth:`~saiverse.execution_ledger.ExecutionLedger.mark_applied` を同梱)
         にし、配送は outbox_id 冪等 (append_ledger_message) で一度きり。
     (b) 「マーカー書き込み失敗の無条件 True + 即時リトライ 1 回」の暫定 →
@@ -2036,8 +2259,9 @@ def apply_life_boundary(
 
     Returns:
         境界が決着したか。True = 適用済み (今回適用 / 既に決着済み / 通知先
-        なし)。False = 今回の適用が失敗 — 呼び出し元は判断を走らせず
-        ``submitted=False`` で戻す (W3 の失敗伝播)。
+        なし)。False = 今回の適用が失敗 — 呼び出し元
+        (:func:`handle_scheduled_life_boundary`) は False を返して schedule 側
+        backoff に再試行させる。
     """
     plan_date_str = _normalize_plan_date(plan_date)
     if boundary == "start":
@@ -2104,7 +2328,7 @@ def apply_life_boundary(
         )
 
     try:
-        marked = mutate_plan_meta(
+        marked = _mutate_lives(
             manager, persona_id, plan_date_str,
             _life_mark_mutator(index, marker_field),
             context=f"life_boundary_{boundary}",
@@ -2155,6 +2379,178 @@ def apply_life_boundary(
             "tick", persona_id, exc_info=True,
         )
     return True
+
+
+# ---------------------------------------------------------------------------
+# 起床・就寝の節目 — 機械の帳簿処理 (autonomous_behavior_v3.md §6、
+# autonomous_behavior_v04_plan.md 段 1-2)
+#
+# 起床時刻: ライフの確定 + 開始の節目 (TTL override・「（活動開始）」通知)。
+# 就寝時刻: 終了の節目 (keep-alive 予約の cancel・TTL 遅延解除・「（活動終了）」
+# 通知)。どちらも LLM を呼ばない。以前は判断点 (fire_judgment_point の
+# day_open / day_close) の前段で行っていたが、判断点の LLM 部分の退役に先立って
+# 切り出した — Playbook が取り込まれていない世界でもライフは確定する
+# (旧経路は playbook_available の検査で確定ごと黙って飛んでいた)。
+# ---------------------------------------------------------------------------
+
+#: 節目の種類 (:func:`handle_scheduled_life_boundary` の ``boundary``)。
+LIFE_BOUNDARY_START = "start"
+LIFE_BOUNDARY_END = "end"
+
+
+def life_settings_from_params(params: Any) -> Dict[str, Any]:
+    """起床スケジュール行の PLAYBOOK_PARAMS から、ライフ確定に効く設定を拾う。
+
+    - ``daily_budget_pulses`` (正の int): ライフの標準パルス予算 (未設定 /
+      最低値未満は :func:`confirm_life_for_today` が最低値へ切り上げる)
+    - ``life_mode_override`` ("even"/"free"): モードの明示上書き (それ以外の
+      値は無視して自動判定へ — life.md §5.1)
+    """
+    out: Dict[str, Any] = {}
+    if not isinstance(params, dict):
+        return out
+    budget_pulses = params.get("daily_budget_pulses")
+    if isinstance(budget_pulses, int) and not isinstance(budget_pulses, bool) \
+            and budget_pulses >= 1:
+        out["daily_budget_pulses"] = budget_pulses
+    mode_override = params.get("life_mode_override")
+    if isinstance(mode_override, str) and mode_override in LIFE_MODES:
+        out["life_mode_override"] = mode_override
+    return out
+
+
+def handle_scheduled_life_boundary(
+    manager: Any,
+    persona_id: str,
+    boundary: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """起床 / 就寝の時刻に、ライフの確定と節目処理を機械の帳簿処理として行う。
+
+    呼び出し元は ScheduleManager (起床・就寝スケジュール行の発火) と watchdog
+    (当日のライフが無いときの起床の再発火)。
+
+    - ``"start"``: 起床・就寝時刻 (PersonaSchedule) と ``params`` のユーザー設定
+      から今日 (暦日) のライフを確定し (:func:`confirm_life_for_today`、冪等)、
+      開始の節目 (:func:`apply_life_boundary`) を決着させる
+    - ``"end"``: その営業日 (深夜跨ぎリズムでは前日) の確定済みライフに終了の
+      節目を決着させる
+
+    節目の一度きり保証は二重 — lives[0] の永続マーカー (``started`` /
+    ``ended``) と、実行台帳 ``life.boundary_start`` / ``life.boundary_end`` の
+    冪等キー ``{persona}:{plan_date}``。後者は旧経路 (判断点の前段) と同じ kind・
+    キーなので、旧経路で既に節目を済ませた日に新経路が二重に通知しない。
+
+    自律 OFF のペルソナでは何もしない (確定も節目も行わない — 自律 OFF の世界に
+    ライフは無い。アラームはライフと無関係に鳴る)。
+
+    Returns:
+        決着したか。True = 済んだ (今回適用 / 既に決着済み / ライフ無しの設定 /
+        自律 OFF で対象外)。False = 失敗 — 呼び出し元 (ScheduleManager) は
+        backoff 再試行に乗せる。
+    """
+    if boundary not in (LIFE_BOUNDARY_START, LIFE_BOUNDARY_END):
+        raise ValueError(f"unknown life boundary: {boundary!r}")
+    from saiverse.autonomy_wiring import is_autonomy_on
+
+    if not is_autonomy_on(manager, persona_id):
+        LOGGER.debug(
+            "[day_plan] life %s boundary skipped (persona=%s autonomy disabled)",
+            boundary, persona_id,
+        )
+        return True
+    if boundary == LIFE_BOUNDARY_START:
+        return _settle_life_start(manager, persona_id, params)
+    return _settle_life_end(manager, persona_id)
+
+
+def _settle_life_start(
+    manager: Any, persona_id: str, params: Optional[Dict[str, Any]]
+) -> bool:
+    """起床時刻の帳簿処理: 今日のライフを確定し、開始の節目を決着させる。
+
+    確定は冪等 (:func:`confirm_life_for_today` が既存確定を保持する)。開始の
+    節目の一度きり保証は lives[0] の ``started`` マーカー — 確定は済んだが節目が
+    失敗した日は、再試行で節目だけをやり直せる (確認 → 適用 → マークの順)。
+    """
+    from saiverse.autonomy_wiring import _day_open_plan_date, _find_day_schedules
+
+    plan_date = _day_open_plan_date()
+    settings = life_settings_from_params(params)
+    try:
+        existing = get_lives(manager, persona_id, plan_date)
+        already_started = bool(existing) and bool(existing[0].get("started"))
+        sched = _find_day_schedules(manager, persona_id)
+        life = confirm_life_for_today(
+            manager, persona_id, plan_date,
+            sched.get("wake"), sched.get("close"),
+            requested_budget_pulses=settings.get("daily_budget_pulses"),
+            mode_override=settings.get("life_mode_override"),
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to confirm today's life at wake "
+            "(persona=%s date=%s)", persona_id, plan_date, exc_info=True,
+        )
+        return False
+    if life is None:
+        return True  # 起床・就寝未設定 = ライフ無しの日 (決着)
+    if already_started:
+        LOGGER.info(
+            "[day_plan] life start already applied for this business day; "
+            "skipping boundary side effects (persona=%s date=%s)",
+            persona_id, plan_date,
+        )
+        return True
+    try:
+        return apply_life_boundary(
+            manager, persona_id, plan_date, life, boundary=LIFE_BOUNDARY_START,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] life-start processing failed (persona=%s date=%s)",
+            persona_id, plan_date, exc_info=True,
+        )
+        return False
+
+
+def _settle_life_end(manager: Any, persona_id: str) -> bool:
+    """就寝時刻の帳簿処理: その営業日のライフに終了の節目を決着させる。
+
+    営業日 (覚醒日) は ``autonomy_wiring._day_close_plan_date`` — 深夜跨ぎ
+    リズムでは 01:00 の就寝は前日が営業日。ライフの無い日は何もしない (決着)。
+    一度きり保証は lives[0] の ``ended`` マーカーと実行台帳の冪等キー。
+    """
+    from saiverse.autonomy_wiring import _day_close_plan_date
+
+    try:
+        plan_date = _day_close_plan_date(manager, persona_id)
+        lives = get_lives(manager, persona_id, plan_date)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to read lives at close (persona=%s)",
+            persona_id, exc_info=True,
+        )
+        return False
+    if not lives:
+        return True
+    if lives[0].get("ended"):
+        LOGGER.info(
+            "[day_plan] life end already applied for this business day; "
+            "skipping boundary side effects (persona=%s date=%s)",
+            persona_id, plan_date,
+        )
+        return True
+    try:
+        return apply_life_boundary(
+            manager, persona_id, plan_date, lives[0], boundary=LIFE_BOUNDARY_END,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] life-end processing failed (persona=%s date=%s)",
+            persona_id, plan_date, exc_info=True,
+        )
+        return False
 
 
 def record_judgment_pulse(
@@ -2547,8 +2943,8 @@ def _load_lives_or_unreadable(
 ) -> Any:
     """基準解決のためのライフ読み出し。読めなければ :data:`_LIVES_UNREADABLE`。
 
-    読取の失敗は例外 (DB ロック等) だけではない — 壊れた meta_json は
-    :func:`load_plan_meta` の既定経路では空 dict へ縮退し、「ライフ未宣言の日」と
+    読取の失敗は例外 (DB ロック等) だけではない — 壊れた LIVES_JSON / 互換読みの
+    旧 meta_json は :func:`get_lives` の既定経路では空へ縮退し、「ライフ未宣言の日」と
     区別がつかなくなる。ここは ``strict=True`` で読み、**壊れている**も
     **読めなかった**側に数える (縮退したまま現行スケジュール基準で別の営業日を
     駆動する方が害が大きい。Codex 九巡目 #2)。
@@ -3969,8 +4365,9 @@ def _fire_slot(
 # ---------------------------------------------------------------------------
 # コマ発火の予約 / 精算トランザクション (A5/A6, W2 Chunk B)
 #
-# slots_json と meta_json は同じ PersonaDayPlan 行。台帳遷移・slot 状態・予算・
-# episode を単一 manager.SessionLocal() の 1 commit に束ねることで、
+# slots_json と meta_json は同じ PersonaDayPlan 行、ライフの予算 (used_rounds) は
+# persona_life 行。台帳遷移・slot 状態・予算・episode を単一
+# manager.SessionLocal() の 1 commit に束ねることで、
 # 「予算記帳の非原子性 (A5)」と「done 保存失敗で episode 永久 open (A6)」を
 # 同一患部で解く。予算計算 (κ・ライフ判定) は既存関数を流用し、負 delta (返金)
 # を許す点だけ独自 (既存 consume_* は _read_nonneg_int で負を弾くため)。
@@ -4008,23 +4405,43 @@ def _row_meta(row: Any) -> Dict[str, Any]:
     return meta if isinstance(meta, dict) else {}
 
 
-def _apply_budget_delta_to_meta(
-    meta: Dict[str, Any], slot: Dict[str, Any], delta: int
+def _apply_budget_delta_in_session(
+    db: Session,
+    persona_id: str,
+    plan_date_str: str,
+    plan_row: Any,
+    slot: Dict[str, Any],
+    delta: int,
+    world_update: Dict[Any, Any],
+    conditions: List[Any],
 ) -> None:
-    """予算消費を ``delta`` だけ調整して ``meta`` (meta_json の dict) を書き換える。
+    """予算消費を ``delta`` だけ調整する書き込みを、予約 / 精算 tx の Session に積む。
 
     lives のある日は ``lives[idx].used_rounds`` (生ラウンド。κ は消費計算時に
-    :func:`get_budget_state` が掛ける) が正典、無い日は ``META_BUDGET_USED``。
+    :func:`get_budget_state` が掛ける) が正典 — 置き場は persona_life なので、
+    同じ Session で **読んだ LIVES_JSON と同じときだけ**の条件付き UPDATE を
+    発行する (不一致 = 並走の書き込みがあった → :class:`_PlanGenerationConflict`
+    で tx 全体をロールバックし、呼び出し元が最新で再試行する)。persona_life に
+    行が無く互換読み (旧 meta_json.lives) でライフが見えた日は、それを種に
+    新しい行を INSERT する (旧置き場へは書き戻さない)。
+
+    lives の無い日は従来どおり ``META_BUDGET_USED`` を ``plan_row`` の meta_json
+    へ書く: ``world_update`` に SET を足し、``conditions`` に読んだ meta の
+    CAS 条件を足す (並走の update_plan_meta を古い meta の書き戻しで消さない —
+    第六陣 P1)。lives のある日は旧 ``META_BUDGET_USED`` を書かない (A5 の二重
+    台帳廃止・lives 正典一本化)。
+
     idx は :func:`get_life_for_time` で流用。**delta は負 = 返金になりうる**ため
     ``max(0, cur + delta)`` でクランプする (既存 consume_* は負を弾くのでここでは
-    使えない)。lives のある日は旧 ``META_BUDGET_USED`` を書かない (A5 の二重台帳
-    廃止・lives 正典一本化)。
+    使えない)。
     """
     if not delta:
         return
-    raw_lives = meta.get(META_LIVES)
-    lives = [life for life in raw_lives if isinstance(life, dict)] \
-        if isinstance(raw_lives, list) else []
+    from sqlalchemy.exc import IntegrityError
+
+    from database.models import PersonaDayPlan, PersonaLife
+
+    life_row, lives = _read_lives_in_session(db, persona_id, plan_date_str)
     if lives:
         idx = get_life_for_time(lives, slot.get("start"))
         if idx is None:
@@ -4037,10 +4454,46 @@ def _apply_budget_delta_to_meta(
             return
         cur = int(lives[idx].get("used_rounds") or 0)
         lives[idx]["used_rounds"] = max(0, cur + delta)
-        meta[META_LIVES] = lives
-    else:
-        cur = _read_nonneg_int(meta.get(META_BUDGET_USED)) or 0
-        meta[META_BUDGET_USED] = max(0, cur + delta)
+        payload = json.dumps(lives, ensure_ascii=False)
+        now = clock.now()
+        if life_row is None:
+            db.add(PersonaLife(
+                PERSONA_ID=persona_id, PLAN_DATE=plan_date_str,
+                LIVES_JSON=payload, CREATED_AT=now, UPDATED_AT=now,
+            ))
+            try:
+                db.flush()
+            except IntegrityError as exc:
+                raise _PlanGenerationConflict(
+                    f"lives row created concurrently (persona={persona_id} "
+                    f"date={plan_date_str})"
+                ) from exc
+            return
+        changed = (
+            db.query(PersonaLife)
+            .filter(
+                PersonaLife.PERSONA_ID == persona_id,
+                PersonaLife.PLAN_DATE == plan_date_str,
+                PersonaLife.LIVES_JSON == life_row.LIVES_JSON,
+            )
+            .update(
+                {PersonaLife.LIVES_JSON: payload, PersonaLife.UPDATED_AT: now},
+                synchronize_session=False,
+            )
+        )
+        if not changed:
+            raise _PlanGenerationConflict(
+                f"lives changed during budget accounting (persona={persona_id} "
+                f"date={plan_date_str})"
+            )
+        return
+
+    original_meta = plan_row.meta_json
+    meta = _row_meta(plan_row)
+    cur = _read_nonneg_int(meta.get(META_BUDGET_USED)) or 0
+    meta[META_BUDGET_USED] = max(0, cur + delta)
+    world_update[PersonaDayPlan.meta_json] = json.dumps(meta, ensure_ascii=False)
+    conditions.append(PersonaDayPlan.meta_json == original_meta)
 
 
 def _find_slot_index_by_id(
@@ -4176,18 +4629,16 @@ def _reserve_slot_tx(
             PersonaDayPlan.plan_date == plan_date_str,
             PersonaDayPlan.slots_json == original_payload,
         ]
-        # 予算予約 (gated のみ)。meta_json は**書くときだけ** SET に含め、含める
-        # ときは読んだ meta も CAS 条件へ加える — slots が無傷でも並走の
-        # update_plan_meta (明日メモ等) の commit を古い meta の書き戻しで消さない
-        # (第六陣 P1)。書かないとき meta には一切触らない。
+        # 予算予約 (gated のみ)。ライフのある日は persona_life を同じ Session で
+        # 条件付き更新し、無い日は meta_json を**書くときだけ** SET に含めて読んだ
+        # meta も CAS 条件へ加える — slots が無傷でも並走の update_plan_meta
+        # (明日メモ等) の commit を古い meta の書き戻しで消さない (第六陣 P1)。
+        # 書かないとき meta には一切触らない。
         if gated and reserved:
-            original_meta = row.meta_json
-            meta = _row_meta(row)
-            _apply_budget_delta_to_meta(meta, slot, int(reserved))
-            world_update[PersonaDayPlan.meta_json] = json.dumps(
-                meta, ensure_ascii=False,
+            _apply_budget_delta_in_session(
+                db, persona_id, plan_date_str, row, slot, int(reserved),
+                world_update, conditions,
             )
-            conditions.append(PersonaDayPlan.meta_json == original_meta)
         changed = (
             db.query(PersonaDayPlan)
             .filter(*conditions)
@@ -4284,22 +4735,20 @@ def _settle_slot_tx(
                 slot_id, persona_id, plan_date_str, len(slots),
             )
 
-        # 予算の精算 (予約 → 実測。通常は返金の負 delta)。meta_json を書くときは
-        # 読んだ meta も CAS 条件へ加える — 並走の update_plan_meta (明日メモ等) の
-        # commit を古い meta の書き戻しで消さない (第六陣 P1)。
+        # 予算の精算 (予約 → 実測。通常は返金の負 delta)。ライフのある日は
+        # persona_life を同じ Session で条件付き更新し、無い日は meta_json を書く
+        # ときに読んだ meta も CAS 条件へ加える — 並走の update_plan_meta
+        # (明日メモ等) の commit を古い meta の書き戻しで消さない (第六陣 P1)。
         conditions = [
             PersonaDayPlan.persona_id == persona_id,
             PersonaDayPlan.plan_date == plan_date_str,
             PersonaDayPlan.slots_json == original_payload,
         ]
         if gated and delta:
-            original_meta = row.meta_json
-            meta = _row_meta(row)
-            _apply_budget_delta_to_meta(meta, slot, delta)
-            world_update[PersonaDayPlan.meta_json] = json.dumps(
-                meta, ensure_ascii=False,
+            _apply_budget_delta_in_session(
+                db, persona_id, plan_date_str, row, slot, delta,
+                world_update, conditions,
             )
-            conditions.append(PersonaDayPlan.meta_json == original_meta)
 
         if world_update:
             world_update[PersonaDayPlan.updated_at] = clock.now()

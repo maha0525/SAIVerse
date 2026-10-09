@@ -4,15 +4,16 @@
 
 - fire_judgment_point: 自律 ON ゲート / Playbook 欠如の WARNING スキップ /
   precondition (Lock 下の再評価)
-- handle_scheduled_judgment: 判断点スケジュール (day_open / day_close) の変換と
-  時刻駆動できない kind の棄却。ScheduleManager からの経路分岐
+- ScheduleManager の経路分岐: 起床・就寝の行は機械の帳簿処理
+  (day_plan.handle_scheduled_life_boundary) へ、その他の判断点名の行は
+  handle_scheduled_judgment の拒否へ (v04 段 1-2)
 - handle_wait_response_timeout / handle_conversation_end: 会話終了 →
   会話の出来事を閉じる帳簿処理 / social Track は WARNING のみ
   (会話終了判断は autonomous_behavior_v3.md §8/§13.3 で退役)
 - handle_external_event: on_event 判断の経路判断基準 (自律 ON / 会話中 /
   engage_now の応対起動 / フォールバック)
-- watchdog_tick: 正常時 no-op / plan 欠如時のみ day_open 再発火 /
-  コマ予約の途絶検知
+- watchdog_tick: 正常時 no-op / 当日のライフ欠如時のみ起床の帳簿処理を
+  再発火 / コマ予約の途絶検知
 - 旧経路の停止: pulse_scheduler モジュールと dispatch_subline_poll の不在、
   dispatch_autonomy_tick の watchdog 縮退
 - 本番プロセス (EventScheduler dispatch スレッド) でコマが発火すること
@@ -287,27 +288,25 @@ def _attach_finalizing_ledger(manager, session_factory):
 
 
 def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatch):
-    """A2: 定刻 (schedule) → watchdog の順でも day_open の submit は 1 回だけ。
+    """A2: 同じ冪等キーの判断点は 2 回目が duplicate になり submit は 1 回だけ。
 
-    2 回目 (watchdog 相当、precondition 付き) は claim で duplicate になり、
-    precondition の評価にも境界副作用 (ライフ確定) にも到達しない。
+    2 回目 (precondition 付き) は claim で duplicate になり、precondition の
+    評価に到達しない。判断点の汎用の重複抑止の検査で、day_open は乗り物として
+    使っている — v04 段 1-2 以降、本番で day_open をここへ撃つ経路は無く、
+    fire_judgment_point はライフ (確定・節目) に一切触れない。
     """
     manager, _ = _make_manager(session_factory)
     ledger = _attach_finalizing_ledger(manager, session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
-
-    confirmed: List[str] = []
-    monkeypatch.setattr(
-        wiring, "_confirm_life_at_day_open",
-        # 境界決着 (True) を返す (W3 第八陣で bool 契約化 — False は判断を打ち切る)
-        lambda mgr, pid, ctx: (confirmed.append(pid), True)[1],
-    )
+    _add_day_schedule(session_factory, "judgment_day_open", "08:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
 
     first = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
     assert first["submitted"] is True
     assert first["execution_id"] is not None
     assert len(manager.pulse_controller.calls) == 1
-    assert confirmed == [PERSONA_ID]
+    # 判断点はライフを確定しない (確定は起床の帳簿処理だけが行う)
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE) == []
     # Chunk B: finalize (フェイクが代行) の mark_applied 証跡で成功と判定
     assert ledger.get_execution(first["execution_id"])["status"] == XL.STATUS_APPLIED
 
@@ -323,37 +322,27 @@ def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatc
     assert second["submitted"] is False
     assert second["reason"] == f"duplicate:{XL.STATUS_APPLIED}"
     assert second["execution_id"] == first["execution_id"]
-    # 判断 Pulse は増えず、precondition も境界副作用も走っていない
+    # 判断 Pulse は増えず、precondition も走っていない
     assert len(manager.pulse_controller.calls) == 1
     assert precondition_evals == []
-    assert confirmed == [PERSONA_ID]
 
 
 def test_fire_day_open_dedup_watchdog_then_scheduled(session_factory, monkeypatch):
-    """A2: watchdog (precondition 付き) → 定刻の逆順でも submit は 1 回だけ。"""
+    """A2: precondition 付き → 無しの逆順でも submit は 1 回だけ (汎用の重複抑止)。"""
     manager, _ = _make_manager(session_factory)
     _attach_finalizing_ledger(manager, session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
-
-    confirmed: List[str] = []
-    monkeypatch.setattr(
-        wiring, "_confirm_life_at_day_open",
-        # 境界決着 (True) を返す (W3 第八陣で bool 契約化 — False は判断を打ち切る)
-        lambda mgr, pid, ctx: (confirmed.append(pid), True)[1],
-    )
 
     first = wiring.fire_judgment_point(
         manager, PERSONA_ID, "day_open", precondition=lambda: True,
     )
     assert first["submitted"] is True
     assert len(manager.pulse_controller.calls) == 1
-    assert confirmed == [PERSONA_ID]
 
     second = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
     assert second["submitted"] is False
     assert second["reason"].startswith("duplicate:")
     assert len(manager.pulse_controller.calls) == 1
-    assert confirmed == [PERSONA_ID]
 
 
 def test_fire_precondition_rejection_marks_failed_and_next_claim_runs(
@@ -448,7 +437,10 @@ def test_fire_without_ledger_degrades_with_single_warning(session_factory, caplo
 # ---------------------------------------------------------------------------
 
 
-def test_scheduled_judgment_day_open_passes_budget(session_factory, monkeypatch):
+def test_scheduled_judgment_refuses_wake_and_close_names(session_factory, monkeypatch, caplog):
+    """起床・就寝の Playbook 名が判断点の入口へ届いたら、LLM の判断へ流さず
+    WARNING で拒否する (v04 段 1-2)。本番では ScheduleManager が先に機械の
+    帳簿処理へ振り分けるので、ここへ届くのは配線ミスだけ。"""
     manager, _ = _make_manager(session_factory)
     fired: List[Any] = []
     monkeypatch.setattr(
@@ -456,43 +448,31 @@ def test_scheduled_judgment_day_open_passes_budget(session_factory, monkeypatch)
         lambda mgr, pid, kind, context=None, **kw: fired.append((kind, context))
         or {"submitted": True},
     )
-    wiring.handle_scheduled_judgment(
-        manager, PERSONA_ID, "judgment_day_open",
-        params={"daily_budget_rounds": 24, "other": "x"},
-    )
-    assert fired == [("day_open", {"daily_budget_rounds": 24})]
+    with caplog.at_level("WARNING", logger="saiverse.autonomy_wiring"):
+        for name in ("judgment_day_open", "judgment_day_close"):
+            result = wiring.handle_scheduled_judgment(
+                manager, PERSONA_ID, name, params={"daily_budget_pulses": 24},
+            )
+            assert result["submitted"] is False
+            assert result["reason"] == wiring.REASON_LIFE_BOUNDARY_MACHINE_ONLY
+    assert fired == []
+    assert manager.pulse_controller.calls == []
+    assert sum("machine-only" in m for m in caplog.messages) == 2
 
 
-def test_scheduled_judgment_day_open_passes_life_mode_override(session_factory, monkeypatch):
-    """life.md v0.5 §5.1: life_mode_override (even/free) が context に透過される。"""
-    manager, _ = _make_manager(session_factory)
-    fired: List[Any] = []
-    monkeypatch.setattr(
-        wiring, "fire_judgment_point",
-        lambda mgr, pid, kind, context=None, **kw: fired.append((kind, context))
-        or {"submitted": True},
-    )
-    wiring.handle_scheduled_judgment(
-        manager, PERSONA_ID, "judgment_day_open",
-        params={"life_mode_override": "even", "other": "x"},
-    )
-    assert fired == [("day_open", {"life_mode_override": "even"})]
-
-
-def test_scheduled_judgment_day_open_rejects_invalid_life_mode_override(session_factory, monkeypatch):
-    """LIFE_MODES 外の値は無視される (書ける口をなくす、life.md v0.5 §3)。"""
-    manager, _ = _make_manager(session_factory)
-    fired: List[Any] = []
-    monkeypatch.setattr(
-        wiring, "fire_judgment_point",
-        lambda mgr, pid, kind, context=None, **kw: fired.append((kind, context))
-        or {"submitted": True},
-    )
-    wiring.handle_scheduled_judgment(
-        manager, PERSONA_ID, "judgment_day_open",
-        params={"life_mode_override": "bogus"},
-    )
-    assert fired == [("day_open", {})]
+def test_life_settings_from_params_picks_only_life_settings():
+    """起床行の PLAYBOOK_PARAMS からライフ確定に効く値だけを拾う
+    (daily_budget_pulses / life_mode_override)。LIFE_MODES 外の値・非正の予算・
+    時間割用の daily_budget_rounds は落とす (書ける口をなくす、life.md v0.5 §3)。"""
+    assert day_plan.life_settings_from_params({
+        "daily_budget_pulses": 24, "life_mode_override": "even",
+        "daily_budget_rounds": 30, "other": "x",
+    }) == {"daily_budget_pulses": 24, "life_mode_override": "even"}
+    assert day_plan.life_settings_from_params({
+        "daily_budget_pulses": 0, "life_mode_override": "bogus",
+    }) == {}
+    assert day_plan.life_settings_from_params({"daily_budget_pulses": True}) == {}
+    assert day_plan.life_settings_from_params(None) == {}
 
 
 def test_scheduled_judgment_rejects_non_schedulable_kind(session_factory, caplog):
@@ -502,19 +482,43 @@ def test_scheduled_judgment_rejects_non_schedulable_kind(session_factory, caplog
             manager, PERSONA_ID, "judgment_post_session",
         )
     assert result["submitted"] is False
+    assert result["reason"] == "kind not schedulable"
     assert manager.pulse_controller.calls == []
 
 
-def test_schedule_manager_routes_judgment_playbooks(session_factory, monkeypatch):
-    """ScheduleManager._execute_schedule が判断点 Playbook を専用経路へ流す。"""
+def _routing_schedule(schedule_id, playbook, time_of_day, params=None):
+    import json as _json
+
+    return PersonaSchedule(
+        SCHEDULE_ID=schedule_id,
+        PERSONA_ID=PERSONA_ID,
+        SCHEDULE_TYPE="periodic",
+        META_PLAYBOOK=playbook,
+        ENABLED=True,
+        TIME_OF_DAY=time_of_day,
+        PLAYBOOK_PARAMS=_json.dumps(params) if params is not None else None,
+    )
+
+
+def test_schedule_manager_routes_wake_and_close_to_life_bookkeeping(
+    session_factory, monkeypatch,
+):
+    """ScheduleManager._execute_schedule は起床・就寝の行を判断点ではなく
+    機械の帳簿処理 (day_plan.handle_scheduled_life_boundary) へ流す。
+    判断点の入口 (handle_scheduled_judgment) も汎用の dispatch も通らない。"""
     from saiverse.schedule_manager import ScheduleManager
 
     manager, _ = _make_manager(session_factory)
     routed: List[Any] = []
     monkeypatch.setattr(
+        day_plan, "handle_scheduled_life_boundary",
+        lambda mgr, pid, boundary, params=None: routed.append((pid, boundary, params))
+        or True,
+    )
+    judged: List[Any] = []
+    monkeypatch.setattr(
         wiring, "handle_scheduled_judgment",
-        lambda mgr, pid, name, params=None: routed.append((pid, name, params))
-        or {"submitted": True},
+        lambda *a, **kw: judged.append(a) or {"submitted": True},
     )
     dispatched: List[Any] = []
     manager.pulse_dispatcher = SimpleNamespace(
@@ -523,20 +527,61 @@ def test_schedule_manager_routes_judgment_playbooks(session_factory, monkeypatch
     manager.all_personas = manager.personas
 
     sm = ScheduleManager(saiverse_manager=manager)
-    schedule = PersonaSchedule(
-        SCHEDULE_ID=1,
-        PERSONA_ID=PERSONA_ID,
-        SCHEDULE_TYPE="periodic",
-        META_PLAYBOOK="judgment_day_open",
-        ENABLED=True,
-        TIME_OF_DAY="08:00",
-        PLAYBOOK_PARAMS='{"daily_budget_rounds": 30}',
+    opened = sm._execute_schedule(
+        _routing_schedule(1, "judgment_day_open", "08:00", {"daily_budget_pulses": 30}),
+        session=None,
     )
-    outcome = sm._execute_schedule(schedule, session=None)
+    closed = sm._execute_schedule(
+        _routing_schedule(2, "judgment_day_close", "22:00"), session=None,
+    )
 
-    assert routed == [(PERSONA_ID, "judgment_day_open", {"daily_budget_rounds": 30})]
+    assert routed == [
+        (PERSONA_ID, "start", {"daily_budget_pulses": 30}),
+        (PERSONA_ID, "end", None),
+    ]
+    assert judged == []
     assert dispatched == []  # 通常の submit_schedule 経路は通らない
-    assert outcome[0] == "executed"
+    assert opened[0] == "executed"
+    assert closed[0] == "executed"
+
+
+def test_schedule_manager_life_bookkeeping_failure_is_retryable(
+    session_factory, monkeypatch,
+):
+    """帳簿処理の失敗 (False / 例外) は failed — backoff 再試行に乗る。"""
+    from saiverse.schedule_manager import ScheduleManager
+
+    manager, _ = _make_manager(session_factory)
+    sm = ScheduleManager(saiverse_manager=manager)
+    schedule = _routing_schedule(1, "judgment_day_open", "08:00")
+
+    monkeypatch.setattr(
+        day_plan, "handle_scheduled_life_boundary",
+        lambda *a, **kw: False,
+    )
+    assert sm._execute_schedule(schedule, session=None)[0] == "failed"
+
+    def _boom(*a, **kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(day_plan, "handle_scheduled_life_boundary", _boom)
+    assert sm._execute_schedule(schedule, session=None)[0] == "failed"
+
+
+def test_schedule_manager_routes_other_judgment_names_to_the_refusal(
+    session_factory, monkeypatch,
+):
+    """起床・就寝以外の判断点 Playbook 名の行は拒否口へ流れ、settled_skip
+    (前進・再試行なし) になる。"""
+    from saiverse.schedule_manager import ScheduleManager
+
+    manager, _ = _make_manager(session_factory)
+    sm = ScheduleManager(saiverse_manager=manager)
+    outcome = sm._execute_schedule(
+        _routing_schedule(3, "judgment_post_session", "08:00"), session=None,
+    )
+    assert outcome == ("settled_skip", "kind not schedulable")
+    assert manager.pulse_controller.calls == []
 
 
 def test_schedule_manager_normal_playbooks_untouched(session_factory, monkeypatch):
@@ -688,6 +733,30 @@ def _fake_fire(monkeypatch, result):
         return result
 
     monkeypatch.setattr(wiring, "fire_judgment_point", _fake)
+    return calls
+
+
+def _fake_life_start(monkeypatch):
+    """watchdog の撃ち直し先 (起床の帳簿処理) を記録だけのフェイクに差し替える。
+
+    記録は ``(boundary, params)``。v04 段 1-2 以降、watchdog は判断点
+    (fire_judgment_point) を撃たない — 撃つのは
+    ``day_plan.handle_scheduled_life_boundary`` の start だけ。判断点の方も
+    記録だけのフェイクにして、撃たれたら ``("judgment", kind)`` として同じ
+    リストに残す (撃たれないことの検査)。
+    """
+    calls: List[Any] = []
+
+    def _fake_boundary(mgr, pid, boundary, params=None):
+        calls.append((boundary, params))
+        return True
+
+    def _fake_judgment(mgr, pid, kind, context=None, **kw):
+        calls.append(("judgment", kind))
+        return {"submitted": True}
+
+    monkeypatch.setattr(day_plan, "handle_scheduled_life_boundary", _fake_boundary)
+    monkeypatch.setattr(wiring, "fire_judgment_point", _fake_judgment)
     return calls
 
 
@@ -1269,7 +1338,7 @@ def test_utterance_conflict_note_only_does_not_engage(session_factory, monkeypat
 
 def test_watchdog_noop_without_day_open_schedule(session_factory, monkeypatch):
     manager, _ = _make_manager(session_factory)
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
     assert out == {"action": "skip", "reason": "no day_open schedule"}
     assert calls == []
@@ -1278,64 +1347,71 @@ def test_watchdog_noop_without_day_open_schedule(session_factory, monkeypatch):
 def test_watchdog_noop_for_non_active(session_factory, monkeypatch):
     manager, _ = _make_manager(session_factory, active=False)
     _add_day_schedule(session_factory, "judgment_day_open", "08:00")
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
     assert out["action"] == "skip"
     assert calls == []
 
 
-def test_watchdog_refires_day_open_when_plan_missing(session_factory, monkeypatch):
+def test_watchdog_refires_life_start_when_today_has_no_life(session_factory, monkeypatch):
+    """当日のライフが無い → 起床の帳簿処理 (start) を撃ち直す。起床行の
+    PLAYBOOK_PARAMS はそのまま渡る (ライフ確定に効く値の選別は受け手が行う)。
+    判断点 (LLM) は撃たない。"""
     manager, _ = _make_manager(session_factory)
     _add_day_schedule(
         session_factory, "judgment_day_open", "08:00",
-        params={"daily_budget_rounds": 16},
+        params={"daily_budget_pulses": 16},
     )
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out["action"] == "day_open_refire"
-    assert calls == [("day_open", {"daily_budget_rounds": 16})]
+    assert out == {"action": "life_start_refire", "settled": True}
+    assert calls == [("start", {"daily_budget_pulses": 16})]
 
 
-def test_watchdog_refires_when_plan_row_exists_but_slots_are_empty(
+def test_watchdog_does_not_refire_once_the_life_is_confirmed_even_without_slots(
     session_factory, monkeypatch,
 ):
-    """2026-07-14 実機の教訓の回帰: confirm_life_for_today がライフ確定で
-    day_plan 行を先に作るため、day_open の時間割編成が (丸めても救済できず)
-    全滅した日は、行はあるが slots_json="[]" のまま残る。``plan is None`` だけ
-    を見ていた旧 watchdog はこの日を永久にリカバリできなかった——行の有無で
-    なくコマの有無で判定することを確認する (main check + precondition の
-    両方)。"""
+    """ライフが確定済みなら、時間割のコマが 0 件でも撃ち直さない。
+
+    旧 watchdog は「コマが無い」で day_open (時間割を編成する LLM 判断) を
+    撃ち直していた (2026-07-14 実機の教訓)。v04 段 1-2 で watchdog が撃つのは
+    起床の帳簿処理だけになり、見る条件も「ライフが確定しているか」になった —
+    時間割の編成は watchdog の仕事ではない。"""
     manager, _ = _make_manager(session_factory)
     _add_day_schedule(session_factory, "judgment_day_open", "08:00")
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
 
-    # 実際の破綻を再現: ライフだけ確定させ、時間割 (slots) は空のまま残す。
     day_plan.confirm_life_for_today(
         manager, PERSONA_ID, PLAN_DATE, "08:00", "22:00",
         requested_budget_pulses=10,
     )
-    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) == []
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) is None
 
-    captured: Dict[str, Any] = {}
-
-    def _fake(mgr, pid, kind, context=None, **kw):
-        captured["kind"] = kind
-        captured["precondition"] = kw.get("precondition")
-        return {"submitted": True}
-
-    monkeypatch.setattr(wiring, "fire_judgment_point", _fake)
+    calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out["action"] == "day_open_refire"
-    assert captured["kind"] == "day_open"
-    # precondition も「行はあるがコマが無い」を正しく「まだ必要」と判定する。
-    assert captured["precondition"]() is True
+    assert out == {"action": "none"}
+    assert calls == []
+
+
+def test_watchdog_does_not_refire_life_start_without_a_close_schedule(
+    session_factory, monkeypatch,
+):
+    """就寝スケジュールが無い設定はライフを定義できない (ライフ無しの日として
+    決着する) ので、撃ち直さない — 毎 tick の空撃ちにしない。"""
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "08:00")
+    clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
+    calls = _fake_life_start(monkeypatch)
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+    assert out == {"action": "none"}
+    assert calls == []
 
 
 def test_watchdog_refire_passes_life_mode_override(session_factory, monkeypatch):
-    """再起動後の watchdog day_open 再発火経路でも life_mode_override が透過される。"""
+    """再起動後の watchdog 再発火経路でも life_mode_override が透過される。"""
     manager, _ = _make_manager(session_factory)
     _add_day_schedule(
         session_factory, "judgment_day_open", "08:00",
@@ -1343,17 +1419,17 @@ def test_watchdog_refire_passes_life_mode_override(session_factory, monkeypatch)
     )
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out["action"] == "day_open_refire"
-    assert calls == [("day_open", {"life_mode_override": "free"})]
+    assert out["action"] == "life_start_refire"
+    assert calls == [("start", {"life_mode_override": "free"})]
 
 
 def test_watchdog_respects_waking_window(session_factory, monkeypatch):
     manager, _ = _make_manager(session_factory)
     _add_day_schedule(session_factory, "judgment_day_open", "08:00")
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
 
     clock.enable_virtual(datetime(2026, 7, 4, 7, 0, 0))
     assert wiring.watchdog_tick(manager, PERSONA_ID)["reason"] == "before wake"
@@ -1369,7 +1445,7 @@ def test_watchdog_respects_days_of_week(session_factory, monkeypatch):
         session_factory, "judgment_day_open", "08:00", days_of_week=[0],
     )
     clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
     assert out["reason"] == "not a scheduled day"
     assert calls == []
@@ -1384,7 +1460,7 @@ def test_watchdog_noop_when_plan_and_reservations_intact(session_factory, monkey
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
     day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
     assert out == {"action": "none"}
     assert calls == []
@@ -1698,10 +1774,10 @@ def test_watchdog_overnight_daytime_no_plan_refires(session_factory, monkeypatch
     )
     _add_day_schedule(session_factory, "judgment_day_close", "01:00")
     clock.enable_virtual(datetime(2026, 7, 4, 12, 0, 0))
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out["action"] == "day_open_refire"
-    assert calls[0][0] == "day_open"
+    assert out["action"] == "life_start_refire"
+    assert calls[0][0] == "start"
 
 
 def test_watchdog_overnight_midnight_no_plan_does_not_refire(session_factory, monkeypatch):
@@ -1711,10 +1787,10 @@ def test_watchdog_overnight_midnight_no_plan_does_not_refire(session_factory, mo
     _add_day_schedule(session_factory, "judgment_day_close", "01:00")
     # 00:30 は深夜帯 (前日リズムの尻尾)。plan が無くても撃たない。
     clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
     assert out["action"] == "none"
-    assert out["reason"] == "previous business day still in effect: no day_open refire"
+    assert out["reason"] == "previous business day still in effect: no life-start refire"
     assert calls == []
 
 
@@ -1771,7 +1847,7 @@ def test_watchdog_watches_the_business_day_of_the_running_life(
     # 予約は push していない (= 再起動で消失した状態)
     assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, yesterday) == [0]
 
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     rescheduled: List[Any] = []
     monkeypatch.setattr(
         day_plan, "reschedule_pending_slots",
@@ -1810,7 +1886,7 @@ def test_watchdog_still_watches_a_life_that_the_new_schedule_window_excludes(
     ])
     assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, yesterday) == [0]
 
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     rescheduled: List[Any] = []
     monkeypatch.setattr(
         day_plan, "reschedule_pending_slots",
@@ -1843,7 +1919,7 @@ def test_watchdog_really_repushes_the_running_lifes_slots(session_factory, monke
         {"start": "01:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
 
     out = wiring.watchdog_tick(manager, PERSONA_ID)
 
@@ -1871,12 +1947,14 @@ def test_watchdog_does_not_open_a_new_day_while_a_life_is_running(
         {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
     ])
     # 時間割は 1 コマも無い (編成が全滅した日)
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
 
     out = wiring.watchdog_tick(manager, PERSONA_ID)
 
     assert out["action"] == "none"
-    assert out["reason"] == "previous business day still in effect: no day_open refire"
+    # 走っているライフがある (= その営業日のライフは確定済み) ので撃ち直しの
+    # 判定そのものに入らない — コマ予約の見張りだけをして何もしない
+    assert out == {"action": "none"}
     assert calls == []
 
 
@@ -1899,7 +1977,7 @@ def test_watchdog_ignores_the_weekday_gate_while_a_life_is_running(
         {"start": "09:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
     ])
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
 
     out = wiring.watchdog_tick(manager, PERSONA_ID)
 
@@ -1921,7 +1999,7 @@ def test_watchdog_keeps_the_window_gate_for_a_zero_length_life(
              "used_pulses": 0, "used_rounds": 0, "judgment_pulses": 0},
         ],
     })
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
 
     out = wiring.watchdog_tick(manager, PERSONA_ID)
 
@@ -1949,11 +2027,11 @@ def test_watchdog_opens_the_new_day_even_after_yesterdays_life_ended(
     ])
 
     clock.enable_virtual(datetime(2026, 7, 5, 8, 0, 0))
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
 
-    assert out["action"] == "day_open_refire"
-    assert calls[0][0] == "day_open"
+    assert out["action"] == "life_start_refire"
+    assert calls[0][0] == "start"
 
 
 def test_watchdog_skips_the_tick_when_lives_are_unreadable(
@@ -1969,7 +2047,7 @@ def test_watchdog_skips_the_tick_when_lives_are_unreadable(
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
 
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
         out = wiring.watchdog_tick(manager, PERSONA_ID)
 
@@ -1990,6 +2068,11 @@ def test_watchdog_recovers_the_slots_that_unreadable_lives_left_unscheduled(
     _add_day_schedule(session_factory, "judgment_day_open", "07:00")
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
+    # 今日のライフは確定済み (起床の帳簿処理は済んでいる — watchdog の撃ち直しの
+    # 対象ではなく、コマ予約の見張りだけが残る日)
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+    ])
     day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "11:00", "kind": "自室で過ごす", "ref": "none",
          "facility": "own_room", "budget_rounds": 0, "note": ""},
@@ -2001,7 +2084,7 @@ def test_watchdog_recovers_the_slots_that_unreadable_lives_left_unscheduled(
     assert manager.event_scheduler.pending_count() == 0
 
     # 読めるようになった次の tick が途絶として拾い直す (実物の再 push を通す)
-    calls = _fake_fire(monkeypatch, {"submitted": True})
+    calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
 
     assert out["action"] == "reschedule"

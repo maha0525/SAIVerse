@@ -1270,6 +1270,35 @@ class PersonaDayPlan(Base):
     updated_at = Column(DateTime, nullable=False)
 
 
+class PersonaLife(Base):
+    """ライフ (その日の活動時間帯) の置き場 — 1 ペルソナ 1 日 1 行 (複合 PK)。
+
+    LIVES_JSON はライフの配列 (JSON):
+    [{start: "HH:MM", end: "HH:MM", budget_pulses: int, mode: "even"|"free",
+      used_pulses: int, used_rounds: int, judgment_pulses: int,
+      started: bool (開始の節目済み), ended: bool (終了の節目済み)}, ...]
+
+    起床時刻にシステムが機械の帳簿処理として確定し (LLM は関与しない —
+    autonomous_behavior_v3.md §6)、keep-alive・営業日の判定・画面表示が読む。
+    読み書きの口は saiverse/day_plan.py の get_lives / save_lives /
+    confirm_life_for_today / apply_life_boundary だけ。
+
+    以前は persona_day_plan.meta_json.lives に同居していた (時間割の行に
+    従属していた)。時間割の退役に先立って独立させた
+    (autonomous_behavior_v04_plan.md 段 1-2)。旧置き場は互換読みで読み取り
+    専用に参照されるだけで、書き戻さない。
+
+    NOTE: 時刻刻印はコード側で ``saiverse.clock.now()`` を書き込む
+    (PersonaDayPlan と同じ判断 — 一日シミュレータの仮想時刻を尊重)。
+    """
+    __tablename__ = "persona_life"
+    PERSONA_ID = Column(String(255), ForeignKey("ai.AIID"), primary_key=True)
+    PLAN_DATE = Column(String(10), primary_key=True)  # "YYYY-MM-DD" (営業日)
+    LIVES_JSON = Column(Text, nullable=False)
+    CREATED_AT = Column(DateTime, nullable=False)
+    UPDATED_AT = Column(DateTime, nullable=False)
+
+
 class PersonaTimetableTemplate(Base):
     """習慣テンプレート: 時間割の枠 (時間割改修 T2、timetable_redesign.md §5.1)。
 

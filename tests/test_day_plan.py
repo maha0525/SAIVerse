@@ -1685,7 +1685,7 @@ def test_reservation_tx_failure_skips_handler_and_leaves_state_unchanged(manager
     clock.enable_virtual(BASE + timedelta(hours=9))
 
     # 予算予約の書き込みで転かす (台帳 running を取った後・commit の前)
-    with patch.object(day_plan, "_apply_budget_delta_to_meta",
+    with patch.object(day_plan, "_apply_budget_delta_in_session",
                       side_effect=RuntimeError("db down")), \
             patch("sea.work_session.run_work_session") as mock_ws:
         day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
@@ -1758,6 +1758,35 @@ def test_successful_fire_settles_once_then_double_fire_is_ignored(manager, task_
     slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
     assert slots[0]["status"] == "done"  # 依然 done (二重に何も起きない)
     assert day_plan.get_budget_state(manager, PERSONA_ID, PLAN_DATE)["used"] == 3  # 不変
+
+
+def test_slot_budget_on_a_legacy_lives_day_goes_to_persona_life_not_meta(manager, task_refs):
+    """ライフの置き場の独立 (v04 段 1-2) の後も、予約 / 精算 tx のラウンド記帳は
+    ライフの帳簿 (used_rounds) に乗り続ける — 挙動は変わらない。
+
+    切り替え当日の「旧置き場 (meta_json.lives) にしかライフが無い日」は、
+    予約 tx が旧ライフを種に persona_life の行を作り、そこへ積む。旧置き場の
+    lives は書き換えない (互換読みは読み取り専用)。"""
+    _attach_ledger(manager)
+    legacy = [{"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free",
+               "used_pulses": 0, "used_rounds": 1, "judgment_pulses": 0,
+               "started": True}]
+    day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE, {day_plan.META_LIVES: legacy})
+    _save_single_gated_slot(manager, task_refs, budget_rounds=5)
+    clock.enable_virtual(BASE + timedelta(hours=9))
+
+    with patch("sea.work_session.run_work_session",
+               return_value=_mock_work_session_result(rounds_used=3)):
+        day_plan._fire_slot(manager, PERSONA_ID, PLAN_DATE, 0)
+
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert lives[0]["used_rounds"] == 1 + 3   # 予約 5 → 実測 3 に精算、旧帳簿に加算
+    assert lives[0]["started"] is True        # 旧マーカーも引き継いでいる
+    meta = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)
+    assert meta[day_plan.META_LIVES] == legacy        # 旧置き場は無傷
+    assert day_plan.META_BUDGET_USED not in meta      # 旧台帳にも書かない
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
+    assert slots[0]["status"] == "done"
 
 
 def test_mutate_slots_cas_preserves_concurrent_replacement(manager, task_refs):
@@ -1979,11 +2008,14 @@ def test_record_judgment_pulse_concurrent_increments_both_count(manager, task_re
     旧実装は外で読んだ lives に +1 した完成値を update_plan_meta へ渡していたため、
     CAS が最新 meta を読み直しても古い完成値が同キーを上書きし、並走 2 本で
     judgment_pulses が 2 でなく 1 になった。増分計算を CAS の再試行の内側へ移した
-    ことで、競合のたびに最新 meta の上へ積み直される。"""
+    ことで、競合のたびに最新 meta の上へ積み直される。
+
+    2026-10 (v04 段 1-2): ライフの置き場が persona_life へ移ったので、並走を
+    差し込む読みの口も _load_life_row に変わった (契約は同じ)。"""
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
     ])
-    real_load = day_plan._load_plan_row
+    real_load = day_plan._load_life_row
     state = {"fired": False}
 
     def hooked(db, pid, pdate):
@@ -1996,7 +2028,7 @@ def test_record_judgment_pulse_concurrent_increments_both_count(manager, task_re
             )
         return row
 
-    with patch.object(day_plan, "_load_plan_row", side_effect=hooked):
+    with patch.object(day_plan, "_load_life_row", side_effect=hooked):
         result = day_plan.record_judgment_pulse(
             manager, PERSONA_ID, PLAN_DATE, at_time="10:00",
         )
@@ -2026,11 +2058,13 @@ def test_consume_budget_concurrent_increments_accumulate(manager, task_refs):
 
 
 def test_consume_life_rounds_concurrent_increments_accumulate(manager, task_refs):
-    """第七陣 P1: consume_life_rounds の並走増分が失われず合算される (4 + 3)。"""
+    """第七陣 P1: consume_life_rounds の並走増分が失われず合算される (4 + 3)。
+
+    並走を差し込む読みの口は persona_life の _load_life_row (v04 段 1-2)。"""
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
     ])
-    real_load = day_plan._load_plan_row
+    real_load = day_plan._load_life_row
     state = {"fired": False}
 
     def hooked(db, pid, pdate):
@@ -2042,7 +2076,7 @@ def test_consume_life_rounds_concurrent_increments_accumulate(manager, task_refs
             )
         return row
 
-    with patch.object(day_plan, "_load_plan_row", side_effect=hooked):
+    with patch.object(day_plan, "_load_life_row", side_effect=hooked):
         day_plan.consume_life_rounds(
             manager, PERSONA_ID, PLAN_DATE, 3, at_time="10:00",
         )

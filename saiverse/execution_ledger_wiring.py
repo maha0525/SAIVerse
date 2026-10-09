@@ -111,9 +111,12 @@ PREPARED_REFIRE_KINDS = (
 PREPARED_REFIRE_EXPIRE_AFTER_SECONDS = 1800.0
 
 #: prepared 回収 (#2): 期限切れで failed に落とす kind と期限秒数。
-#: day_open / day_close は watchdog が自然再発火する (claim が failed キーを
-#: 退避して回る)。旧 post_conversation はここに載っていたが、会話終了判断の
-#: 退役 (2026-08-16) で kind ごと消えた。
+#: day_open / day_close は 2026-10 (autonomous_behavior_v04_plan.md 段 1-2) で
+#: 判断点ではなくなった (起床・就寝は day_plan.handle_scheduled_life_boundary の
+#: 機械の帳簿処理) — 新しい席は作られず、ここに残るのは切り替え前の旧席だけ。
+#: 再発火はせず期限で閉じる (autonomy_wiring.refire_judgment_from_recovery も
+#: この 2 kind は撃たずに放棄する)。旧 post_conversation はここに載っていたが、
+#: 会話終了判断の退役 (2026-08-16) で kind ごと消えた。
 PREPARED_EXPIRE_AFTER_SECONDS = 1800.0
 PREPARED_EXPIRE_KINDS = (
     f"{JUDGMENT_KIND_PREFIX}day_open",
