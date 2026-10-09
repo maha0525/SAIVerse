@@ -1451,6 +1451,61 @@ def _find_day_schedules(manager: Any, persona_id: str) -> Dict[str, Any]:
     return out
 
 
+def _resume_life_start(
+    manager: Any, persona_id: str, basis: Any,
+) -> Dict[str, Any]:
+    """走行中の確定ライフの開始の節目が未決着なら、解決済みの営業日で決着させる。
+
+    確定 (:func:`day_plan.confirm_life_for_today` の persona_life への commit) と
+    開始の節目 (:func:`day_plan.apply_life_boundary` — TTL 同期・「（活動開始）」
+    通知・lives[0] の ``started`` マーカー) は別の段なので、間で失敗した日
+    (節目の失敗、プロセス停止) は「確定済みだが開始が済んでいない」ライフが
+    残る。ここで見るのは ``started`` マーカー — :func:`day_plan.apply_life_boundary`
+    がマーカーと実行台帳 ``life.boundary_start`` の applied と通知 outbox を
+    **同じ commit** で書くので、マーカーの有無が開始の節目の決着の耐久記録になる。
+
+    :func:`day_plan.handle_scheduled_life_boundary` (起床の再発火) は使わない —
+    あちらは**暦日**のライフを確定する入口なので、日付を跨いで続いている
+    前営業日のライフ (深夜跨ぎの尻尾) に対して呼ぶと、翌日のライフを確定して
+    しまう。ここでは解決器が決めた営業日 (``basis.plan_date``) とそのライフを、
+    起床の帳簿処理 (:func:`day_plan._settle_life_start`) と同じ節目の入口
+    :func:`day_plan.apply_life_boundary` へそのまま渡す。
+
+    二重適用しない根拠: :func:`day_plan.apply_life_boundary` は実行台帳の冪等
+    キー ``{persona}:{plan_date}`` (kind ``life.boundary_start``) を claim し、
+    applied / completed なら何もせず True を返す。running / unknown は
+    runnable=False で False (次の tick に委ねる)。マーカーの書き込みは CAS の
+    内側で「既にマーク済みなら書かない」(``_life_mark_mutator``) ので、
+    ScheduleManager の再試行と並走しても通知は一度きり。
+    """
+    from saiverse import day_plan
+
+    lives = basis.lives or []
+    first = lives[0] if lives else None
+    if not isinstance(first, dict) or first.get("started") or first.get("ended"):
+        # 開始の節目が済んでいる (または終了まで済んでいる — 開始の通知を
+        # 後から出すと順序が逆になる) — 撃ち直すものが無い。
+        return {"action": "none"}
+
+    LOGGER.info(
+        "[watchdog] the running life has no start boundary applied; settling "
+        "the life start for the resolved business day (machine bookkeeping, "
+        "no LLM) (persona=%s date=%s)", persona_id, basis.plan_date,
+    )
+    try:
+        settled = day_plan.apply_life_boundary(
+            manager, persona_id, basis.plan_date, first,
+            boundary=day_plan.LIFE_BOUNDARY_START,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[watchdog] life-start resume failed (persona=%s date=%s); the next "
+            "tick will retry", persona_id, basis.plan_date, exc_info=True,
+        )
+        settled = False
+    return {"action": "life_start_resume", "settled": settled}
+
+
 def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
     """自律稼働の watchdog (旧 50 分メタ判断 tick の縮退形、v2 §4.2)。
 
@@ -1469,12 +1524,18 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
     起床・就寝の PersonaSchedule が無いペルソナ (一日リズム未設定) では何も
     しない。発火時は必ず INFO ログを残す。
 
+    - 確定ライフが走っている最中なのに、**その営業日の開始の節目が済んでいない**
+      (lives[0] に ``started`` マーカーが無い — 確定と開始の節目の間で失敗した
+      日) → 開始の節目だけを、解決済みの営業日で決着させる
+      (:func:`_resume_life_start`)。新しい一日は開かない
+
     見張る対象の営業日は :func:`day_plan.resolve_business_day` が決める (現在
     時刻を含む確定ライフ優先。ライフを読めなければ ``skip`` して次の tick へ
-    委ねる)。確定ライフが走っている最中なら、ライフは確定済みなので何もしない。
+    委ねる)。確定ライフが走っている最中で開始の節目も済んでいれば何もしない。
 
     Returns:
-        ``{"action": "none"|"skip"|"life_start_refire", ...}`` (観察・テスト用)。
+        ``{"action": "none"|"skip"|"life_start_refire"|"life_start_resume", ...}``
+        (観察・テスト用)。
     """
     if not is_autonomy_on(manager, persona_id):
         return {"action": "skip", "reason": "autonomy disabled"}
@@ -1504,8 +1565,12 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
         return {"action": "skip", "reason": "lives unreadable"}
 
     if basis.source == "life":
-        # 確定ライフが走っている最中 — ライフは確定済みで、撃ち直すものが無い。
-        return {"action": "none"}
+        # 確定ライフが走っている最中 — ライフは確定済みなので、新しい一日は
+        # 開かない。ただし確定 (persona_life への commit) と開始の節目
+        # (TTL 同期・「（活動開始）」通知・started マーカー) は別の段で、
+        # 間で失敗すると「確定済みだが開始が済んでいない」ライフが残る。
+        # 開始が未決着ならここで決着させる (2026-10-10 Codex 指摘)。
+        return _resume_life_start(manager, persona_id, basis)
 
     if not in_waking_window(hhmm, wake, close):
         # 起きていない時間帯 — before wake か after close か

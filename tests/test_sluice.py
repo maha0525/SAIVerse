@@ -5496,6 +5496,69 @@ class SluicePageReviewTest(_AdapterTestBase):
         # 読めた回 (全部見送りでも) で初めて記録が進む。
         self.assertEqual(self._last_presented_day(), "2026-10-09")
 
+    def test_凍結が失敗した回は提示の記録が進まず同じ業務日の再試行で候補が再提示される(self):
+        approve = _sluice_result(page_reviews=[
+            {"op_id": _PAGE_SPLIT["op_id"], "verdict": "approve"},
+        ])
+        with patch.object(
+            self.ledger, "mark_applied", side_effect=RuntimeError("commit failed"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._run(approve, ledger=True)
+        # 応答は読めたが、本人の答え (承認) は台帳に残らなかった — 「提示した」
+        # に数えると、同じ業務日の再試行で候補が出ず、承認が消える。
+        self.assertIsNone(self._last_presented_day())
+        self.assertEqual(self._pending(), [])
+        self.assertEqual(
+            self.ledger.find_execution("sluice.pan", "tester:m0")["status"], "failed",
+        )
+
+        # 同じ業務日の再試行: 新しい LLM コールで候補をもう一度見せ、承認が適用される。
+        summary, client = self._run(approve, ledger=True)
+        self.assertEqual(len(client.calls), 1)
+        self.assertTrue(self._offered(client.calls[0]))
+        self.assertEqual(summary["pages_approved"], 1)
+        self.assertEqual(len(self._pending()), 1)
+        self.assertEqual(self._last_presented_day(), "2026-10-09")
+
+    def test_凍結の後で記録の前に落ちた回は再適用が提示の記録を書く(self):
+        approve = _sluice_result(page_reviews=[
+            {"op_id": _PAGE_SPLIT["op_id"], "verdict": "approve"},
+        ])
+        # 凍結 (mark_applied の commit) までは済み、記録の段で落ちた並びを作る。
+        with patch.object(
+            sluice, "_record_page_review_offer",
+            side_effect=SystemExit("process died after freeze"),
+        ):
+            with self.assertRaises(SystemExit):
+                self._run(approve, ledger=True)
+        self.assertIsNone(self._last_presented_day())
+        recorded = self.ledger.find_execution("sluice.pan", "tester:m0")
+        self.assertEqual(recorded["status"], "applied")
+        self.assertEqual(recorded["result"]["page_review_day"], "2026-10-09")
+
+        # 次の回は凍結済み記録を再適用する (LLM なし) — そこで記録が進む。
+        summary, client = self._run(approve, ledger=True)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(summary["pages_approved"], 1)
+        self.assertEqual(self._last_presented_day(), "2026-10-09")
+
+        # 同じ業務日の後の回は再提示しない。
+        _summary, client2 = self._run(_sluice_result(), ledger=True, messages=[
+            *self._MSGS, {"id": "m5", "content": "x"},
+        ])
+        self.assertFalse(self._offered(client2.calls[0]))
+
+    def test_古い凍結記録の再適用は新しい業務日の提示の記録を巻き戻さない(self):
+        from sai_memory.curation_ops import record_presented_day
+        with self.adapter._db_lock:
+            record_presented_day(self.adapter.conn, "2026-10-10")
+        self.assertTrue(sluice._mark_page_reviews_offered(self._persona(), "2026-10-09"))
+        self.assertEqual(self._last_presented_day(), "2026-10-10")
+        # 同じ日の二度書きは冪等。
+        self.assertTrue(sluice._mark_page_reviews_offered(self._persona(), "2026-10-10"))
+        self.assertEqual(self._last_presented_day(), "2026-10-10")
+
     def test_候補を見せた回にpage_reviews欄が無い応答は他の欄の欠落と同じく棄却される(self):
         with self.assertRaises(sluice.SluiceOutputError):
             self._run(_sluice_result())  # page_reviews 欄なし

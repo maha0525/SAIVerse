@@ -792,6 +792,19 @@ def _fake_life_start(monkeypatch):
     return calls
 
 
+def _mark_life_started(manager, plan_date):
+    """その営業日の lives[0] に開始の節目の済印 (``started``) を立てる。
+
+    起床の帳簿処理が最後まで済んだ通常の状態を作る (確定だけして開始の節目が
+    済んでいないライフは、watchdog が開始の節目を決着させに行く —
+    ``_resume_life_start``)。
+    """
+    day_plan._mutate_lives(
+        manager, PERSONA_ID, plan_date,
+        day_plan._life_mark_mutator(0, "started"), context="test",
+    )
+
+
 def test_external_event_not_active_goes_direct(session_factory, monkeypatch):
     manager, _ = _make_manager(session_factory, active=False)
     calls = _fake_fire(monkeypatch, {"submitted": True})
@@ -1434,6 +1447,7 @@ def test_watchdog_does_not_refire_once_the_life_is_confirmed(
         manager, PERSONA_ID, PLAN_DATE, "08:00", "22:00",
         requested_budget_pulses=10,
     )
+    _mark_life_started(manager, PLAN_DATE)
 
     calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
@@ -1707,6 +1721,7 @@ def test_watchdog_does_not_open_a_new_day_while_a_life_is_running(
     day_plan.save_lives(manager, PERSONA_ID, "2026-07-04", [
         {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
     ])
+    _mark_life_started(manager, "2026-07-04")
     calls = _fake_life_start(monkeypatch)
 
     out = wiring.watchdog_tick(manager, PERSONA_ID)
@@ -1733,6 +1748,7 @@ def test_watchdog_ignores_the_weekday_gate_while_a_life_is_running(
     day_plan.save_lives(manager, PERSONA_ID, yesterday, [
         {"start": "20:00", "end": "10:00", "budget_pulses": 20, "mode": "free"},
     ])
+    _mark_life_started(manager, yesterday)
     calls = _fake_life_start(monkeypatch)
 
     out = wiring.watchdog_tick(manager, PERSONA_ID)
@@ -1741,6 +1757,119 @@ def test_watchdog_ignores_the_weekday_gate_while_a_life_is_running(
     # day") も出さずに何もしない
     assert out == {"action": "none"}
     assert calls == []
+
+
+def test_watchdog_settles_the_life_start_left_unapplied_after_confirmation(
+    session_factory, monkeypatch,
+):
+    """ライフの確定後に開始の節目が失敗した日は、次の watchdog が開始の節目を
+    決着させる (2026-10-10 Codex 指摘)。
+
+    確定 (persona_life への commit) と開始の節目 (apply_life_boundary) は別の
+    段。以前の watchdog はライフの存在だけを見て action:none を返したので、
+    「確定済みだが開始が済んでいない」ライフは永久に復旧しなかった。
+    """
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "08:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
+
+    # 起床の帳簿処理: 確定は commit され、開始の節目で落ちる。
+    with patch.object(
+        day_plan, "apply_life_boundary", side_effect=RuntimeError("boom"),
+    ):
+        assert day_plan.handle_scheduled_life_boundary(
+            manager, PERSONA_ID, day_plan.LIFE_BOUNDARY_START,
+        ) is False
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert len(lives) == 1 and not lives[0].get("started")
+    assert ledger.find_execution(
+        day_plan.LIFE_BOUNDARY_KIND_START, f"{PERSONA_ID}:{PLAN_DATE}",
+    ) is None
+
+    # 次の watchdog: 新しい一日は開かず (起床の再発火は撃たない)、開始の
+    # 節目だけを同じ営業日で決着させる。
+    clock.enable_virtual(datetime(2026, 7, 4, 9, 0, 0))
+    calls = _fake_life_start(monkeypatch)
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+
+    assert out == {"action": "life_start_resume", "settled": True}
+    assert calls == []
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert lives[0].get("started") is True
+    entry = ledger.find_execution(
+        day_plan.LIFE_BOUNDARY_KIND_START, f"{PERSONA_ID}:{PLAN_DATE}",
+    )
+    assert entry is not None and entry["status"] in ("applied", "completed")
+
+    # その次の watchdog は何もしない (済印を見て撃たない)。
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+    assert out == {"action": "none"}
+
+
+def test_watchdog_life_start_resume_is_idempotent_against_a_settled_ledger(
+    session_factory, monkeypatch,
+):
+    """台帳で開始の節目が決着済みなら、済印が無くても二度目の適用はしない。
+
+    apply_life_boundary は冪等キー {persona}:{plan_date} を claim し、
+    applied / completed なら何もせず True を返す — watchdog の撃ち直しと
+    ScheduleManager の再試行が重なっても通知は一度きり。
+    """
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "08:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(datetime(2026, 7, 4, 9, 0, 0))
+    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
+        {"start": "08:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    execution_id, runnable, _ = ledger.claim_execution(
+        day_plan.LIFE_BOUNDARY_KIND_START,
+        idempotency_key=f"{PERSONA_ID}:{PLAN_DATE}", persona_id=PERSONA_ID,
+    )
+    assert runnable and ledger.try_mark_running(execution_id)
+    ledger.mark_applied(execution_id, result={"boundary": "start"})
+
+    with patch.object(
+        day_plan, "_sync_cache_ttl_for_life_start",
+        side_effect=AssertionError("idempotent steps must not run again"),
+    ):
+        out = wiring.watchdog_tick(manager, PERSONA_ID)
+
+    assert out == {"action": "life_start_resume", "settled": True}
+    # 済印は付かない (台帳側で決着済みの扱い) が、副作用は二度走っていない。
+    assert ledger.find_execution(
+        day_plan.LIFE_BOUNDARY_KIND_START, f"{PERSONA_ID}:{PLAN_DATE}",
+    )["execution_id"] == execution_id
+
+
+def test_watchdog_settles_the_start_of_an_overnight_life_on_its_own_business_day(
+    session_factory, monkeypatch,
+):
+    """深夜跨ぎライフの尻尾 (暦日は翌日) で開始が未決着なら、開始の節目は
+    **そのライフの営業日** で決着させる — 暦日のライフを確定する起床の再発火
+    (handle_scheduled_life_boundary) は撃たない。"""
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "23:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "06:00")
+    clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
+    day_plan.save_lives(manager, PERSONA_ID, "2026-07-04", [
+        {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
+    ])
+    calls = _fake_life_start(monkeypatch)
+
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+
+    assert out == {"action": "life_start_resume", "settled": True}
+    assert calls == []
+    assert day_plan.get_lives(manager, PERSONA_ID, "2026-07-04")[0]["started"] is True
+    assert day_plan.get_lives(manager, PERSONA_ID, "2026-07-05") == []
+    assert ledger.find_execution(
+        day_plan.LIFE_BOUNDARY_KIND_START, f"{PERSONA_ID}:2026-07-04",
+    ) is not None
 
 
 def test_watchdog_keeps_the_window_gate_for_a_zero_length_life(

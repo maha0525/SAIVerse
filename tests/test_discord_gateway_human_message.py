@@ -1,15 +1,16 @@
-"""Discord の人間の発話の受け口 (v0.4 段 1-3 で形を修正) のテスト。
+"""Discord の人間の発話の受け口のテスト。
 
 docs/issues/discord_gateway_human_message_signature_mismatch.md:
-呼び手 (``GatewayHost.handle_human_message``) は受け口を引数 1 個で呼ぶのに、
-受け口 (``GatewayMixin.gateway_handle_human_message``) は 2 引数で定義され、
-しかも封筒 (``DiscordMessage``) に無い欄を読んでいた — この経路は呼ばれた瞬間に
-TypeError で落ちていた。
+v0.4 段 1-3 で受け口の形 (引数 1 個、封筒の欄) は呼び手に合わせて直したが、
+本体側の取り込み口 ``handle_user_input`` は発話を Web ユーザーの現在地に
+**オーナー本人の発話として**流し、Discord チャンネルの建物も送信者の素性も
+運べない (2026-10-10 Codex 敵対レビュー)。建物と送信者を運ぶ取り込み経路が
+できるまで、受け口は fail-closed で閉じる — 保存しない・起動しない・応答
+コマンドを返さない・``handle_user_input`` を呼ばない。
 
-ここでは本物のアダプタ → ホスト → 受け口 → 発話の取り込み (RuntimeService の
-非ストリーム版) → building_messages の永続化までを通し、Discord のメッセージ ID が
-``client_message_id = "discord:<id>"`` として刻まれ、再送が何も起動しないことを
-確かめる。ペルソナ・LLM には触れない (dispatcher はフェイク)。
+ここでは本物のアダプタ → ホスト → 受け口を通し、取り込み口 (RuntimeService の
+非ストリーム版) と building_messages まで何も届かないことを確かめる。
+ペルソナ・LLM には触れない (dispatcher はフェイク)。
 """
 from __future__ import annotations
 
@@ -64,8 +65,10 @@ class _Host(GatewayMixin):
     def __init__(self, runtime: RuntimeService):
         self.runtime = runtime
         self.SessionLocal = runtime.SessionLocal
+        self.handle_user_input_calls = []
 
     def handle_user_input(self, message, metadata=None, *, client_message_id=None):
+        self.handle_user_input_calls.append((message, client_message_id))
         return self.runtime.handle_user_input(
             message, metadata=metadata, client_message_id=client_message_id,
         )
@@ -99,39 +102,53 @@ def _rows(session_factory):
         db.close()
 
 
-def test_Discordの受け口が修正後の形で呼べてclient_message_idが刻まれる(session_factory):
+def test_Discordの人間の発話は取り込み口へ流さずERRORで拒否する(session_factory, caplog):
     runtime = _runtime(session_factory)
-    adapter = SAIVerseGatewayAdapter(GatewayHost(_Host(runtime)))
+    host = _Host(runtime)
+    adapter = SAIVerseGatewayAdapter(GatewayHost(host))
 
-    commands = asyncio.run(adapter.handle_human_message(_context(), _event("1234567890")))
+    with caplog.at_level("ERROR"):
+        commands = asyncio.run(
+            adapter.handle_human_message(_context(), _event("1234567890"))
+        )
 
-    assert commands == []  # 返事は Pulse 側が別経路で届ける (ここでは起動だけ)
-    # 発話は一行だけ (以前の二重書き込み _append_gateway_history は外した)
-    assert _rows(session_factory) == [("hall", "discord:1234567890", "こんにちは")]
-    dispatch = runtime.manager.pulse_dispatcher.dispatch_user_utterance
-    dispatch.assert_called_once()
-    assert dispatch.call_args.kwargs["event"]["message_id"] == "hall:1"
+    # 応答コマンドを出さない (チャンネルに何も書き戻さない)
+    assert commands == []
+    # Web 現在地・オーナー名義で処理する取り込み口を呼ばない
+    assert host.handle_user_input_calls == []
+    # 保存も起動もしない
+    assert _rows(session_factory) == []
+    runtime.manager.pulse_dispatcher.dispatch_user_utterance.assert_not_called()
+    assert any(
+        "fail-closed" in r.getMessage()
+        and "discord_gateway_human_message_signature_mismatch.md" in r.getMessage()
+        for r in caplog.records
+    )
 
 
-def test_Discordの同じ発言の再送は何も起動しない(session_factory):
+def test_Discordの同じ発言の再送も拒否され何も起動しない(session_factory):
     runtime = _runtime(session_factory)
-    adapter = SAIVerseGatewayAdapter(GatewayHost(_Host(runtime)))
+    host = _Host(runtime)
+    adapter = SAIVerseGatewayAdapter(GatewayHost(host))
 
     asyncio.run(adapter.handle_human_message(_context(), _event("777")))
     asyncio.run(adapter.handle_human_message(_context(), _event("777")))
 
-    assert _rows(session_factory) == [("hall", "discord:777", "こんにちは")]
-    runtime.manager.pulse_dispatcher.dispatch_user_utterance.assert_called_once()
+    assert host.handle_user_input_calls == []
+    assert _rows(session_factory) == []
+    runtime.manager.pulse_dispatcher.dispatch_user_utterance.assert_not_called()
 
 
 def test_DiscordのメッセージIDが無い発言はERRORで落とされる(session_factory, caplog):
     runtime = _runtime(session_factory)
-    adapter = SAIVerseGatewayAdapter(GatewayHost(_Host(runtime)))
+    host = _Host(runtime)
+    adapter = SAIVerseGatewayAdapter(GatewayHost(host))
 
     with caplog.at_level("ERROR"):
         commands = asyncio.run(adapter.handle_human_message(_context(), _event(None)))
 
     assert commands == []
+    assert host.handle_user_input_calls == []
     assert _rows(session_factory) == []
     runtime.manager.pulse_dispatcher.dispatch_user_utterance.assert_not_called()
     assert any("message_id" in r.message for r in caplog.records)

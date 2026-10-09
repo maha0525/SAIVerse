@@ -2107,11 +2107,15 @@ def _offer_page_reviews(
     """この回に本人へ見せる記憶の手入れの候補と、その業務日。無ければ ``([], None)``。
 
     業務日に一回だけ: 最後に提示した業務日が今日なら検知もしない。提示の
-    記録はここでは書かない — 呼び出し側が、**応答が読めた後** (本人が候補を
-    見て答えた後) に :func:`_mark_page_reviews_offered` で書く。入力に入らず
-    外した回・LLM が失敗した回・応答が読めなかった回は記録されず、同じ業務日の
-    後のスルースでもう一度提示される。読めた回は、全部見送りでも記録され、
-    翌業務日の検知まで再提示されない。
+    記録はここでは書かない — :func:`run_sluice` が、**本人の答えが実行台帳に
+    凍結された後** (``mark_applied`` の commit の後。台帳が無い構成では応答が
+    読めた後) に :func:`_record_page_review_offer` で書く。入力に入らず外した
+    回・LLM が失敗した回・応答が読めなかった回・凍結に失敗した回は記録されず、
+    同じ業務日の後のスルースでもう一度提示される (凍結に失敗した回は本人の
+    答えが失われているので、見せ直さないと承認が適用されないまま消える)。
+    凍結まで済んだ回は、全部見送りでも記録され、翌業務日の検知まで再提示
+    されない。凍結と記録の間でプロセスが落ちた回は、凍結済み記録の再適用が
+    同じ業務日で記録する。
 
     返す要素は ``{"op_id", "kind", "refs", "line"}`` だけに絞る (台帳に凍結
     して、記録の再適用で同じ候補を引くため)。どこで失敗しても空を返す。
@@ -2165,9 +2169,14 @@ def _offer_page_reviews(
 def _mark_page_reviews_offered(persona: Any, business_day: str) -> bool:
     """候補を見せた業務日を記録する。書けなければ False。
 
-    呼び出し側は応答が読めた後に呼ぶので、False でも応答は捨てない (WARNING を
-    出して進む)。その場合「業務日に一回だけ」は破れて同じ日にもう一度見せうるが、
-    承認の二重は予約の冪等で無害 — 見せ損ないより軽い側に倒す。
+    呼び出し側は本人の答えを台帳へ凍結した後 (または凍結済み記録の再適用の
+    とき) に呼ぶので、False でも答えは捨てない (WARNING を出して進む)。その
+    場合「業務日に一回だけ」は破れて同じ日にもう一度見せうるが、承認の二重は
+    予約の冪等で無害 — 見せ損ないより軽い側に倒す。
+
+    同じ日を二度書くのは冪等 (上書きで同じ値)。記録は後ろへ戻さない — 既に
+    より新しい業務日が記録されていれば何もせず True を返す (古い凍結記録の
+    再適用が、後の業務日の「提示済み」を巻き戻して同じ日に二度見せないため)。
     """
     persona_id = getattr(persona, "persona_id", None)
     adapter = getattr(persona, "sai_memory", None)
@@ -2175,8 +2184,14 @@ def _mark_page_reviews_offered(persona: Any, business_day: str) -> bool:
     if conn is None:
         return False
     try:
-        from sai_memory.curation_ops import record_presented_day
+        from sai_memory.curation_ops import (
+            get_last_presented_day,
+            record_presented_day,
+        )
         with adapter._db_lock:
+            last_day = get_last_presented_day(conn)
+            if last_day is not None and last_day > str(business_day):
+                return True
             record_presented_day(conn, business_day)
     except Exception:
         LOGGER.warning(
@@ -2185,6 +2200,28 @@ def _mark_page_reviews_offered(persona: Any, business_day: str) -> bool:
         )
         return False
     return True
+
+
+def _record_page_review_offer(
+    persona: Any,
+    candidates: List[Dict[str, Any]],
+    business_day: Optional[str],
+) -> None:
+    """候補を見せた回なら、その業務日を「提示した」として記録する。
+
+    :func:`run_sluice` が、本人の答えの凍結 (台帳の ``mark_applied`` の commit)
+    の後と、凍結済み記録の再適用のときに呼ぶ。書けなかったときは WARNING
+    だけ出して進む (:func:`_mark_page_reviews_offered` の取引 — 同じ業務日の
+    再提示を許す)。
+    """
+    if not candidates or not business_day:
+        return
+    if not _mark_page_reviews_offered(persona, str(business_day)):
+        LOGGER.warning(
+            "[sluice] page review offer succeeded but the day could not be "
+            "recorded; the offer may repeat within the same business day "
+            "(persona=%s)", getattr(persona, "persona_id", None),
+        )
 
 
 def _restore_page_review_candidates(raw: Any) -> Optional[List[Dict[str, Any]]]:
@@ -3308,6 +3345,15 @@ def _find_recorded_result(ledger: Any, ledger_key: str) -> Optional[Dict[str, An
             "page_review_candidates": _restore_page_review_candidates(
                 result.get("page_review_candidates", [])
             ),
+            # 候補を見せた業務日 (2026-10-10 から凍結する)。欄の無い記録は
+            # None — 再適用の回は「提示した」を書かない (その記録の書き手は
+            # 凍結より前に記録を書いていた世代)。
+            "page_review_day": (
+                result["page_review_day"]
+                if isinstance(result.get("page_review_day"), str)
+                and result.get("page_review_day")
+                else None
+            ),
         }
     return None
 
@@ -3333,7 +3379,11 @@ def _call_sluice_llm(
         (:func:`_offered_task_map` — N は約束一覧の位置),
         "core_snapshot": {core_id: 本文ハッシュ (スナップショット時点)},
         "prompt": 注入プロンプト,
-        "page_review_candidates": この回に見せた記憶の手入れの候補 (無ければ空)}``
+        "page_review_candidates": この回に見せた記憶の手入れの候補 (無ければ空),
+        "page_review_day": 候補を見せた業務日 (見せていなければ None)}``
+
+    「提示した」の記録はここでは書かない — 呼び出し元 (:func:`run_sluice`) が
+    本人の答えを台帳へ凍結した後に書く。
 
     例外 (LLM エラー・出力不適合) はそのまま送出する — 呼び出し元が台帳の
     mark_failed とゲート失敗 (退場停止) に写像する。送る中身が実際に使う
@@ -3407,11 +3457,12 @@ def _call_sluice_llm(
     # 再採取を減らすため、アクティビティ一覧と同じ読みの配下から一度で取る。
     today_memos = _list_today_memos(persona, activities)
     # 記憶の手入れの候補 (業務日に一回だけ)。最後に提示した業務日の確認と
-    # 検知はここで行い、提示の記録は**応答が読めた後** (下の
-    # _parse_structured_result の後) に書く — 入らずに飛ばされた回も、LLM が
+    # 検知はここで行い、提示の記録は**本人の答えが台帳に凍結された後**
+    # (run_sluice の mark_applied の後) に書く — 入らずに飛ばされた回も、LLM が
     # 失敗した回も、本人は候補を見ていないので「提示した」に数えない
     # (2026-10-09 ローカルレビュー指摘 3: 見る前に記録が進むと、失敗した日の
-    # 候補が誰にも見られないまま翌業務日まで闇に落ちる)。
+    # 候補が誰にも見られないまま翌業務日まで闇に落ちる)。答えが読めても凍結に
+    # 失敗した回は答えが失われるので、これも数えない (2026-10-10 Codex 指摘)。
     page_review_candidates, page_review_day = _offer_page_reviews(lifecycle, persona)
 
     def _compose(candidates: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
@@ -3515,17 +3566,9 @@ def _call_sluice_llm(
         result, persona_id,
         page_review_op_ids=_page_review_op_ids(page_review_candidates),
     )
-    # 応答が読めた = 本人が候補を見て答えた。ここで初めて「提示した」を記録する
-    # (台帳への凍結より前 — 凍結後の再適用の回は、最初の回が既に記録している)。
-    # 書けなかったときは WARNING だけ出して進む: 同じ業務日にもう一度見せて
-    # しまうことは許す (承認の二重は予約の冪等で無害。見せ損ないより軽い)。
-    if page_review_candidates and page_review_day is not None:
-        if not _mark_page_reviews_offered(persona, str(page_review_day)):
-            LOGGER.warning(
-                "[sluice] page review offer succeeded but the day could not be "
-                "recorded; the offer may repeat within the same business day "
-                "(persona=%s)", persona_id,
-            )
+    # 「提示した」の記録はここでは書かない: 応答が読めても、この後の台帳への
+    # 凍結が失敗すれば本人の答え (承認) は失われる。記録は呼び出し元
+    # (run_sluice) が凍結の commit の後に書く (2026-10-10 Codex 指摘)。
 
     # 見た集合 = 実入力の履歴 ID 列そのもの (後退方式の廃止で件数の引き算は
     # 無くなった)。退場側の包含検算 (_eviction_within_seen) の一次データ。
@@ -3550,6 +3593,11 @@ def _call_sluice_llm(
         "core_snapshot": core_snapshot,
         "prompt": prompt,
         "page_review_candidates": list(page_review_candidates),
+        "page_review_day": (
+            str(page_review_day)
+            if page_review_candidates and page_review_day is not None
+            else None
+        ),
     }
 
 
@@ -3757,6 +3805,12 @@ def run_sluice(
         # 欄の無い旧記録は [] (提案ゼロの回)。破損 (None) は上の
         # _recorded_result_unusable が採り直しへ回すので、ここでは list。
         page_review_candidates = list(recorded.get("page_review_candidates") or [])
+        # 凍結済みの答えを再適用する回も「提示した」を書く — 前回が凍結と記録の
+        # 間で落ちていた場合の取りこぼしを拾う (同じ日の二度書きは冪等、
+        # 新しい日を古い日で巻き戻しもしない — _mark_page_reviews_offered)。
+        _record_page_review_offer(
+            persona, page_review_candidates, recorded.get("page_review_day"),
+        )
         LOGGER.info(
             "[sluice] reusing recorded result (execution=%s span=%s..%s "
             "persona=%s); no new LLM call — re-applying idempotently",
@@ -3810,6 +3864,7 @@ def run_sluice(
         core_snapshot = call["core_snapshot"]
         prompt_snapshot = call["prompt"]
         page_review_candidates = list(call.get("page_review_candidates") or [])
+        page_review_day = call.get("page_review_day")
         if span_end_id is None:
             # 実際に見た範囲の末尾が特定できない (窓に id 付きの行が無い等)。
             # span 刻印もマーカー前進も行わず、適用だけ実施する。
@@ -3833,6 +3888,8 @@ def run_sluice(
                     # 見せた記憶の手入れの候補 (再適用で同じ候補から承認を
                     # 引くため。提案ゼロの回も空配列で書く)。
                     "page_review_candidates": page_review_candidates,
+                    # 候補を見せた業務日 (再適用の回が「提示した」を書くため)。
+                    "page_review_day": page_review_day,
                 })
             except Exception as exc:
                 # 凍結そのものの失敗 (DB 障害・コミット失敗)。ここを素通しすると
@@ -3855,6 +3912,11 @@ def run_sluice(
                 ledger.mark_failed(execution_id, str(exc) or type(exc).__name__)
                 raise
             ledger_status = "applied"
+        # 本人の答えが残った (台帳への凍結が commit 済み。台帳の無い構成では
+        # 応答が読めた時点) — ここで初めて「提示した」を記録する。凍結に失敗
+        # した回は上で送出して、ここへ来ない (記録が進まないので、同じ業務日の
+        # 再試行で候補をもう一度見せる)。
+        _record_page_review_offer(persona, page_review_candidates, page_review_day)
 
     reflection = str(parsed_result.get("reflection", "") or "")
 

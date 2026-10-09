@@ -62,22 +62,24 @@ class GatewayMixin:
     ) -> Sequence[GatewayCommand]:
         """Discord の人間の発話の受け口 (呼び手は ``GatewayHost.handle_human_message``)。
 
-        形は呼び手に合わせて引数 1 個 — どのチャンネル (= 建物) かは
-        ``message.context`` が運ぶ。以前は ``(message, context)`` の 2 引数で
-        定義され、さらに ``DiscordMessage`` に無い欄 (``author_name`` /
-        ``persona_id``) と ``ChannelContext`` に無い ``persona_id`` を読んでいた
-        ため、この経路は呼ばれた瞬間に TypeError で落ちていた
+        **現状は応対しない (fail-closed、2026-10-10)。** 受けた発話はどこにも
+        保存せず、ペルソナも起動せず、応答コマンドも返さない — ERROR を残して
+        ``[]`` を返すだけ。
+
+        理由: 本体側の取り込み口 ``handle_user_input`` は、発話を Web ユーザーの
+        現在地 (``state.user_current_building_id``) に**オーナー本人の発話として**
+        流す。Discord チャンネルに対応する建物 (``message.context.building_id``)
+        も、送信者が誰か (Discord ユーザー) も運べない。そのまま繋ぐと、第三者の
+        Discord の発言が別の部屋で、オーナーの言葉として、ペルソナの記憶・認知・
+        課金に作用する (部屋と著者の両方が間違う)。建物と送信者を運ぶ取り込み
+        経路ができるまでは、入口ごと閉じておく
         (docs/issues/discord_gateway_human_message_signature_mismatch.md)。
 
-        Discord のメッセージ ID は ``client_message_id = "discord:<id>"`` として
-        発話の永続化 (building_messages、UNIQUE) まで運ぶ。relay bot の再送や
-        ゲートウェイの再接続で同じ発言がもう一度届いても、永続化の段で既存行に
-        合流して何も起動しない。ID の無い発言は義務違反として落とす
-        (受け口で代理採番しない — 再送を別の発話と数えてしまうため)。
-
-        発話の記録は ``handle_user_input`` の永続化だけで行う。以前ここにあった
-        ``_append_gateway_history`` による二重書き込みは、同じ発話を二行にして
-        ペルソナに二度聞かせるので外した。
+        形は呼び手に合わせて引数 1 個 — どのチャンネル (= 建物) かは
+        ``message.context`` が運ぶ。Discord のメッセージ ID の無い発言は、
+        relay bot の義務違反として別の ERROR で区別して記録する (正しい経路が
+        できたときに ``client_message_id = "discord:<id>"`` として冪等キーに使う
+        ため、受け口で代理採番はしない)。
         """
         context = message.context
         if not context:
@@ -91,31 +93,17 @@ class GatewayMixin:
             )
             return []
 
-        result: List[str] = self.handle_user_input(
-            message.content,
-            client_message_id=f"discord:{message.message_id}",
+        logging.error(
+            "Gateway human message refused (fail-closed): there is no intake path "
+            "yet that carries the channel's building and the sender's identity, so "
+            "the message is neither stored nor answered. "
+            "(channel=%s building=%s discord_message_id=%s) "
+            "See docs/issues/discord_gateway_human_message_signature_mismatch.md",
+            context.channel_id,
+            context.building_id,
+            message.message_id,
         )
-        commands: List[GatewayCommand] = []
-        for text in result:
-            commands.append(
-                GatewayCommand(
-                    type="post_message",
-                    payload={
-                        "channel_id": context.channel_id,
-                        "content": text,
-                        # handle_user_input は発話者情報のないテキスト列を返す
-                        # ので、どのペルソナの発言かをここでは知れない (旧実装の
-                        # context.persona_id は ChannelContext に無い欄で、読んだ
-                        # 瞬間に落ちていた)。受け側 (MessageRouter.
-                        # send_post_message) は現状 persona_id を使わず
-                        # channel.send(content) だけなので、None で挙動は変わらない。
-                        "persona_id": None,
-                        "building_id": context.building_id,
-                        "city_id": context.city_id,
-                    },
-                )
-            )
-        return commands
+        return []
 
     def gateway_handle_remote_persona_message(
         self, message: DiscordMessage
