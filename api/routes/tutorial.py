@@ -315,27 +315,27 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
         # 会話は Gemini 3.8 Flash。Gemini 3 Flash Preview は公式の料金ページで「legacy」と
         # 書かれるようになったので、いまの世代の Flash に替えた (3.6〜3.8 は同じ料金)。
         "default_model": "gemini-3.8-flash-paid",
-        # 軽量・Memory Weave・要約は Gemini 3.1 Flash-Lite のまま。このキーは名前に preview が
-        # 残っているが、送るモデル ID は正式版の gemini-3.1-flash-lite で、後継の 3.5 Flash-Lite より安い。
-        "lightweight_model": "gemini-3.1-flash-lite-preview-paid",
-        "memory_weave_model": "gemini-3.1-flash-lite-preview-paid",
-        "image_summary_model": "gemini-3.1-flash-lite-preview-paid",
-        "audio_summary_model": "gemini-3.1-flash-lite-preview-paid",
-        "video_summary_model": "gemini-3.1-flash-lite-preview-paid",
+        # 軽量・Memory Weave・要約は Gemini 3.5 Flash-Lite。3.1 Flash-Lite より少し高いが、
+        # 事故が少ない (2026-10-09 まはーの判断。どちらも単価はもともと小さい)。
+        "lightweight_model": "gemini-3.5-flash-lite-paid",
+        "memory_weave_model": "gemini-3.5-flash-lite-paid",
+        "image_summary_model": "gemini-3.5-flash-lite-paid",
+        "audio_summary_model": "gemini-3.5-flash-lite-paid",
+        "video_summary_model": "gemini-3.5-flash-lite-paid",
     },
     "gemini_free": {
         # 有料の設定と同じ組み合わせを、無料枠の定義で配る。
         "default_model": "gemini-3.8-flash",
-        "lightweight_model": "gemini-3.1-flash-lite-preview",
-        "memory_weave_model": "gemini-3.1-flash-lite-preview",
-        "image_summary_model": "gemini-3.1-flash-lite-preview",
-        "audio_summary_model": "gemini-3.1-flash-lite-preview",
-        "video_summary_model": "gemini-3.1-flash-lite-preview",
+        "lightweight_model": "gemini-3.5-flash-lite",
+        "memory_weave_model": "gemini-3.5-flash-lite",
+        "image_summary_model": "gemini-3.5-flash-lite",
+        "audio_summary_model": "gemini-3.5-flash-lite",
+        "video_summary_model": "gemini-3.5-flash-lite",
     },
     "anthropic": {
-        # 会話は Sonnet 5.5。Sonnet 4.5 は廃止予定 (2026-11-30 に API から退役) で、公式が
-        # 後継に挙げているのが Sonnet 5.5。料金も Sonnet 4.5 より安い。
-        "default_model": "claude-sonnet-5.5",
+        # 会話は Opus 5.5。Sonnet 5.5 は会話の受け答えが合わなかった (2026-10-09 まはーが
+        # 実際に会話して判断)。Sonnet 4.5 は 2026-11-30 に API から退役する。
+        "default_model": "claude-opus-5.5",
         # 軽量・Memory Weave・画像要約は Haiku 5.5。Haiku 4.5 より新しく、料金も安い。
         "lightweight_model": "claude-haiku-5.5",
         "memory_weave_model": "claude-haiku-5.5",
@@ -344,10 +344,9 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
         "video_summary_model": None,
     },
     "openai": {
-        # 会話は GPT-6.1 Sol。公式の料金ページの先頭に並ぶいまの世代で、GPT-4o より安い。
-        # GPT-6 系は Chat Completions で推論とツールを同時に使えないが、組み込みの
-        # プレイブックはツールを渡さない (docs/issues/openai_gpt6_tools_with_reasoning_chat_completions.md)。
-        "default_model": "gpt-6.1-sol",
+        # 会話は GPT-5.6 Sol。GPT-6 Sol / 6.1 Sol は 5.6 Sol より安いが、会話の質が落ちて
+        # いた (2026-10-09 まはーが実際に会話して判断)。
+        "default_model": "gpt-5.6-sol",
         # 軽量・Memory Weave・画像要約は GPT-6 Luna。いまの世代の小さいモデルで、GPT-5.4 nano より安い。
         "lightweight_model": "gpt-6-luna",
         "memory_weave_model": "gpt-6-luna",
