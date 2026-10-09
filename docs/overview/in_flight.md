@@ -48,7 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🔵 設計中 | v0.4 自律運転の再開 (v2 の運転の撤去 → ティックの配線) | 実装計画の intent は起草済みで、四段 (v2 の撤去と機械化 / ティックの器 / 運転 / 実行と画面) と裁定・未決 21 件の割り付けまで載っている。次 = まはーが段分けと順序を確認し、GO が出たら段 1 (v2 の運転の撤去) の実装に入る。 | まはー (実装計画のレビュー) | [実装計画](../intent/autonomous_behavior_v04_plan.md) / [v3 intent](../intent/autonomous_behavior_v3.md) | 2026-10-09 |
+| 🟠 実装中 | v0.4 自律運転の再開 (v2 の運転の撤去 → ティックの配線) | 実装計画 (四段) はまはーの GO 済みで、段 1 の頭の決め (刺激の ID の義務化・照合の記録の掃除・メモのページ化の休止) も決着した。次 = 段 1 (記憶の手入れのスルース移設 → 起床・就寝の機械化 → on_event と ID → v2 撤去 → 穴塞ぎ) を実装する。 | 私 (段 1 の実装) | [実装計画](../intent/autonomous_behavior_v04_plan.md) / [v3 intent](../intent/autonomous_behavior_v3.md) | 2026-10-09 |
 | 🟣 検証待ち | Claude Haiku 5.5 と Nano Banana 2.1 の追加 | develop に入り、画像生成の既定は Nano Banana 2.1 になり、旧 preview の画像モデル ID も正式版へ移した。次 = まはーが本番で、Haiku 5.5 のペルソナとの会話と、既定のままの画像生成が通ることを見る (どちらも実際の課金が発生する)。 | まはー (実機確認) | [intent](../intent/image_generation_models.md) / [intent](../intent/model_provider_management.md) | 2026-10-09 |
 | 🟣 検証待ち | 入退室ログの全体・Building 別の表示設定 | develop に入り、「以前のメッセージを読み込む」ボタンの出方はメティスが隔離環境の画面で確かめ済み。次 = まはーが本番の画面で、全体と Building の表示・非表示・継承の切り替えで入退室ログだけが隠れ、会話と別の通知が残ることを見る。 | まはー (実機確認) | [intent](../intent/movement_notice_visibility.md) | 2026-10-09 |
 | 🟣 検証待ち | インベントリの画像・文書と短縮参照の詳細表示 | develop に入った。次 = まはーが本番で、インベントリの画像・文書を開いて名前・種類・中身が正しく出ることと、チャットの短縮 ID のリンクから同じアイテムが開くことを見る。 | まはー (実機確認) | [intent](../intent/reference_addressing.md) | 2026-10-09 |
