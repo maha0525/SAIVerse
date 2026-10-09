@@ -270,8 +270,14 @@ def _mutate_lives(
     行が無い日付は互換読み (旧 meta_json.lives) を種にして新しい行を INSERT
     する (旧置き場へは書き戻さない)。
 
+    読みは strict (2026-10-10 Codex 敵対レビュー 5 巡目): 壊れた記録 (persona_life
+    の LIVES_JSON / 種にする旧 meta_json) を空と読むと、その上に新しい内容を
+    書いて破損を隠す (save_lives) か、「対象なし」の no-op を成功と取り違える
+    (境界マーカー)。壊れていたら書かずに送出する。
+
     Raises:
         RuntimeError: 再試行が枯渇した場合 (書けていない — silent 消失にしない)。
+        ValueError: 読んだライフの記録が壊れている場合 (何も書いていない)。
     """
     plan_date_str = _normalize_plan_date(plan_date)
     from sqlalchemy.exc import IntegrityError
@@ -284,7 +290,9 @@ def _mutate_lives(
         try:
             row = _load_life_row(db, persona_id, plan_date_str)
             if row is None:
-                lives = _legacy_lives_in_session(db, persona_id, plan_date_str)
+                lives = _legacy_lives_in_session(
+                    db, persona_id, plan_date_str, strict=True,
+                )
                 result = mutate(lives)
                 if result is None:
                     return None
@@ -310,7 +318,7 @@ def _mutate_lives(
                     continue
             original = row.LIVES_JSON
             lives = _parse_lives_payload(
-                original, strict=False, persona_id=persona_id,
+                original, strict=True, persona_id=persona_id,
                 plan_date_str=plan_date_str, source="persona_life.LIVES_JSON",
             )
             result = mutate(lives)
@@ -369,9 +377,11 @@ def get_lives(
     Args:
         strict: True で「壊れていて読めない」を例外にする (LIVES_JSON / 旧
             meta_json が不正 JSON、lives が list でない / 要素が dict でない)。
-            営業日の選択だけが True で呼ぶ — 壊れた台帳を「ライフ未宣言の日」と
-            読むと、現行スケジュール基準で別の営業日を駆動してしまう。既定
-            (False) は空リスト / 不正要素の除去へ縮退する。
+            営業日の選択と、起床・就寝の節目 (ライフの確定・世代の検査・
+            終了対象の読み) が True で呼ぶ — 壊れた台帳を「ライフ未宣言の日」と
+            読むと、現行スケジュール基準で別の営業日を駆動する・壊れた記録を
+            新しいライフで覆う・「ライフ無しの日」で成功と封印する。既定
+            (False) は空リスト / 不正要素の除去へ縮退する (表示などの読み手)。
 
     Raises:
         ValueError: ``strict`` かつ台帳が壊れている場合。
@@ -732,7 +742,10 @@ def confirm_life_for_today(
         確定した (または既存の) ライフ dict。ライフ無し日は None。
     """
     plan_date_str = _normalize_plan_date(plan_date)
-    existing = get_lives(manager, persona_id, plan_date_str)
+    # strict: 壊れた記録を「未確定」と読むと、新しいライフで上書きして破損を
+    # 隠すか、起床・就寝未設定なら「ライフ無しの日」で決着させてしまう
+    # (2026-10-10 Codex 敵対レビュー 5 巡目)。壊れていたら送出する。
+    existing = get_lives(manager, persona_id, plan_date_str, strict=True)
     if existing:
         LOGGER.debug(
             "[day_plan] life already confirmed for today; skipping re-confirmation "
@@ -967,7 +980,9 @@ def _newer_confirmed_life_date(
     persona_day_plan から列挙する。
 
     読み出しの例外は送出する (呼び出し側は「分からない」を現在の世代と
-    取り違えず、失敗として再試行に回す)。
+    取り違えず、失敗として再試行に回す)。両置き場とも strict で読む — 壊れた
+    ライフを空 (= 新しい日は無い) に丸めると、前日の終了の回収が現在の世代の
+    キャッシュ維持・TTL・通知を触る (2026-10-10 Codex 敵対レビュー 5 巡目)。
     """
     from database.models import PersonaDayPlan, PersonaLife
 
@@ -997,7 +1012,7 @@ def _newer_confirmed_life_date(
             (
                 str(newer_date),
                 _parse_lives_payload(
-                    raw, strict=False, persona_id=persona_id,
+                    raw, strict=True, persona_id=persona_id,
                     plan_date_str=str(newer_date),
                     source="persona_life.LIVES_JSON",
                 ),
@@ -1005,7 +1020,12 @@ def _newer_confirmed_life_date(
             for newer_date, raw in life_rows
         ]
         candidates.extend(
-            (legacy_date, _legacy_lives_in_session(db, persona_id, legacy_date))
+            (
+                legacy_date,
+                _legacy_lives_in_session(
+                    db, persona_id, legacy_date, strict=True,
+                ),
+            )
             for legacy_date in legacy_dates
         )
     finally:
@@ -1050,7 +1070,9 @@ def _life_boundary_staleness(
         return f"superseded_by:{newer}"
     if boundary != LIFE_BOUNDARY_START:
         return None
-    lives = get_lives(manager, persona_id, plan_date_str)
+    # strict: 壊れた記録を空と読むと「節目のライフが無い = 現在の世代」に
+    # 落ちる (2026-10-10 Codex 敵対レビュー 5 巡目)。壊れていたら送出する。
+    lives = get_lives(manager, persona_id, plan_date_str, strict=True)
     if index >= len(lives):
         return None
     life = lives[index]
@@ -1484,7 +1506,9 @@ def _settle_life_start(
     )
     settings = life_settings_from_params(params)
     try:
-        existing = get_lives(manager, persona_id, plan_date)
+        # strict: 壊れた記録は「未開始」でも「ライフ無し」でもない — 下の
+        # except で False → backoff 再試行 (2026-10-10 Codex 敵対レビュー 5 巡目)。
+        existing = get_lives(manager, persona_id, plan_date, strict=True)
         already_started = bool(existing) and bool(existing[0].get("started"))
         # strict: 設定の**読み取り失敗**を「未設定」(ライフ無しの日として決着)
         # と混ぜない — 混ぜると DB の一時失敗でその日の起床が成功扱いのまま
@@ -1544,7 +1568,10 @@ def _settle_life_end(
         plan_date = plan_date or life_boundary_plan_date(
             manager, persona_id, LIFE_BOUNDARY_END, occurrence_at,
         )
-        lives = get_lives(manager, persona_id, plan_date)
+        # strict: 壊れた記録を「ライフの無い日」(成功で決着) と読まない —
+        # 失敗として backoff 再試行へ (2026-10-10 Codex 敵対レビュー 5 巡目)。
+        # 行が無い・正常に空の日は従来どおり下の ``not lives`` で決着する。
+        lives = get_lives(manager, persona_id, plan_date, strict=True)
     except Exception:
         LOGGER.warning(
             "[day_plan] failed to read lives at close (persona=%s)",
