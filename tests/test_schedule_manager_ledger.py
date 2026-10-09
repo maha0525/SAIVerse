@@ -383,7 +383,7 @@ def test_periodic_life_boundary_false_retries_same_day_then_settles(env, monkeyp
     results = [False, True]
     calls = []
 
-    def _fake(mgr, pid, boundary, params=None):
+    def _fake(mgr, pid, boundary, params=None, **kw):
         calls.append(boundary)
         return results.pop(0)
 

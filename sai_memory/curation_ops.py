@@ -34,6 +34,8 @@ P4-a の三層（検知 → 裁定 → 実行）のうち「裁定から実行�
     status      TEXT DEFAULT 'pending'   -- "pending"|"done"|"failed"|"rejected"
     result_json TEXT NULL                -- 実行後の結果 JSON
     executed_at INTEGER NULL             -- 実行完了 epoch 秒
+    source_key  TEXT NULL UNIQUE         -- 予約の出どころの恒久 ID（後から追加の列。
+                                         -- 旧行は NULL。enqueue_plan の source_key 参照）
 """
 from __future__ import annotations
 
@@ -90,6 +92,20 @@ def init_curation_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_curation_plans_status"
         " ON curation_plans(status)"
+    )
+    # 予約の出どころの恒久 ID（2026-10-10 Codex 敵対レビュー 2 巡目 修正 1）。
+    # スルースは「その回の実行台帳の ID + op_id」を渡す。同じ凍結記録の再適用が、
+    # 完了済み (done / failed) の予約をもう一度 pending で積まないための鍵。
+    # 既存 DB 向けの追加系マイグレーション (perception_buffer と同方式)。
+    # UNIQUE 索引で DB 側に原子的な一意を強制する — SQLite の UNIQUE は NULL の
+    # 重複を許すので、旧行と source_key を渡さない予約 (NULL) には影響しない。
+    try:
+        conn.execute("ALTER TABLE curation_plans ADD COLUMN source_key TEXT")
+    except sqlite3.OperationalError:
+        pass  # 既に存在する
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_curation_plans_source_key"
+        " ON curation_plans(source_key)"
     )
     _create_presentation_table(conn)
     conn.commit()
@@ -159,17 +175,25 @@ def enqueue_plan(
     kind: str,
     op_id: str,
     refs: List[str],
+    source_key: Optional[str] = None,
 ) -> str:
     """編纂プランを curation_plans に追加する。
 
-    同じ ``op_id`` の pending プランが既に存在する場合は **重複挿入しない**
-    （冪等。approve を二度押しされても行は 1 件のまま）。
+    重複挿入しない条件は二つ（どちらかに当たれば既存行の id を返す）:
+
+    - ``source_key`` が渡され、同じ ``source_key`` の行が **status を問わず**
+      存在する — 同じ出どころ（スルースなら同じ凍結記録の同じ承認）は、予約が
+      done / failed へ進んだ後に再適用されても積み直さない。
+    - 同じ ``op_id`` の pending プランが存在する（approve を二度押しされても、
+      別の回の承認が重なっても、未実行の行は 1 件のまま）。
 
     Args:
         conn:   per-persona memory.db の接続
         kind:   "split" | "merge"（"fold" は 2026-08-05 に撤去。受理しない）
         op_id:  検知層が付けた決定論の一意 ID（例: "split:m:12"）
         refs:   操作対象ページの参照ラベル（例: ["m:12"]）
+        source_key: 予約の出どころの恒久 ID（スルースは
+                ``f"{execution_id}:{op_id}"``）。None なら pending の抑止だけ。
 
     Returns:
         既存 pending 行の id、または新規挿入した行の id。
@@ -186,6 +210,18 @@ def enqueue_plan(
             f"enqueue_plan: 未知の kind: {kind!r}"
             f"（有効なのは {sorted(VALID_PLAN_KINDS)}）"
         )
+
+    if source_key is not None:
+        row = conn.execute(
+            "SELECT id, status FROM curation_plans WHERE source_key = ?",
+            (source_key,),
+        ).fetchone()
+        if row:
+            LOGGER.debug(
+                "[curation_ops] source_key=%r already reserved as plan %s "
+                "(status=%s); skipping", source_key, row[0], row[1],
+            )
+            return row[0]
 
     # 既存 pending を検索
     cur = conn.execute(
@@ -205,15 +241,18 @@ def enqueue_plan(
     conn.execute(
         """
         INSERT INTO curation_plans
-            (id, created_at, kind, op_id, refs_json, status)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (id, created_at, kind, op_id, refs_json, status, source_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (plan_id, now, kind, op_id, json.dumps(refs, ensure_ascii=False), STATUS_PENDING),
+        (
+            plan_id, now, kind, op_id, json.dumps(refs, ensure_ascii=False),
+            STATUS_PENDING, source_key,
+        ),
     )
     conn.commit()
     LOGGER.info(
-        "[curation_ops] enqueued plan id=%s kind=%s op_id=%r refs=%r",
-        plan_id, kind, op_id, refs,
+        "[curation_ops] enqueued plan id=%s kind=%s op_id=%r refs=%r source_key=%r",
+        plan_id, kind, op_id, refs, source_key,
     )
     return plan_id
 

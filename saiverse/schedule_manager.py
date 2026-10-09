@@ -104,6 +104,26 @@ def _occurrence_token(schedule: PersonaSchedule, next_fire: datetime) -> str:
     return str(int(next_fire.timestamp()))
 
 
+def _occurrence_instant(occurrence_token: str) -> Optional[datetime]:
+    """occurrence トークンが指す発火予定時刻 (naive local)。読めなければ None。
+
+    トークンは :func:`_occurrence_token` が登録時に決める発火予定時刻の epoch
+    (初回 interval の ``"first"`` だけは時刻を持たない)。closure に焼き込まれて
+    backoff 再試行へ、台帳の payload ``occurrence`` に凍結されて再起動後の回収
+    (``refire_occurrence``) へ、同じ値のまま運ばれる。起床・就寝の帳簿処理は
+    営業日をこの時刻から決める — 実行時の暦日を取り直すと、日付を跨いだ再試行が
+    翌日分を確定してしまう (2026-10-10 Codex 敵対レビュー 2 巡目 修正 2)。
+    """
+    try:
+        epoch = int(occurrence_token)
+    except (TypeError, ValueError):
+        return None
+    try:
+        return datetime.fromtimestamp(epoch)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _instance_token(schedule: PersonaSchedule) -> str:
     """行の一生に固有なトークン (W3 Codex 第三陣)。
 
@@ -777,7 +797,12 @@ class ScheduleManager:
                     return
 
             # --- 実行 (型付き outcome、W3 D4) ---
-            outcome_class, detail = self._execute_schedule(schedule, session)
+            # occurrence の時刻 (発火予定時刻) を渡す — 起床・就寝の帳簿処理が
+            # 営業日を決める基準。再試行・回収でも同じトークンから同じ時刻になる。
+            outcome_class, detail = self._execute_schedule(
+                schedule, session,
+                occurrence_at=_occurrence_instant(occurrence_token),
+            )
 
             # --- 精算 (W3 D3) ---
             if outcome_class in ("executed", "accepted", "settled_skip"):
@@ -1072,8 +1097,18 @@ class ScheduleManager:
             return "unknown", detail
         return "unknown", detail
 
-    def _execute_schedule(self, schedule: PersonaSchedule, session) -> Tuple[str, str]:
+    def _execute_schedule(
+        self,
+        schedule: PersonaSchedule,
+        session,
+        *,
+        occurrence_at: Optional[datetime] = None,
+    ) -> Tuple[str, str]:
         """スケジュールを実行し、型付き outcome を返す (W3 D4)。
+
+        ``occurrence_at`` はこの発火の occurrence の時刻 (発火予定時刻、
+        :func:`_occurrence_instant`)。起床・就寝の帳簿処理へだけ渡す — 営業日は
+        この時刻から決まる (None は現在時刻へ倒す互換)。
 
         META_PLAYBOOK が起床・就寝の行 (judgment_day_open / judgment_day_close
         — 名前は行の目印として残っている) の場合は、判断点ではなく機械の帳簿
@@ -1150,6 +1185,7 @@ class ScheduleManager:
                 settled = handle_scheduled_life_boundary(
                     self.manager, persona_id, boundary,
                     params=parsed_params if isinstance(parsed_params, dict) else None,
+                    occurrence_at=occurrence_at,
                 )
             except Exception as e:
                 LOGGER.exception(

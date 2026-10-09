@@ -1152,6 +1152,8 @@ def handle_scheduled_life_boundary(
     persona_id: str,
     boundary: str,
     params: Optional[Dict[str, Any]] = None,
+    *,
+    occurrence_at: Optional[datetime] = None,
 ) -> bool:
     """起床 / 就寝の時刻に、ライフの確定と節目処理を機械の帳簿処理として行う。
 
@@ -1168,6 +1170,13 @@ def handle_scheduled_life_boundary(
     ``ended``) と、実行台帳 ``life.boundary_start`` / ``life.boundary_end`` の
     冪等キー ``{persona}:{plan_date}``。後者は旧経路 (判断点の前段) と同じ kind・
     キーなので、旧経路で既に節目を済ませた日に新経路が二重に通知しない。
+
+    ``occurrence_at`` = この節目の occurrence が属する時刻 (ScheduleManager は
+    予約の発火予定時刻 = occurrence トークンを、watchdog は判定した時刻を渡す)。
+    営業日はこの時刻から決める — 実行時の暦日を取り直すと、23:59 の起床が
+    失敗して 00:01 に backoff 再試行されたとき、翌日のライフを確定・開始して
+    しまい、翌日の正規の起床が「開始済み」として省略される (2026-10-10 Codex
+    敵対レビュー 2 巡目 修正 2)。None (旧予約・直接呼び出しの互換) は現在時刻。
 
     自律 OFF のペルソナでは何もしない (確定も節目も行わない — 自律 OFF の世界に
     ライフは無い。アラームはライフと無関係に鳴る)。
@@ -1188,22 +1197,29 @@ def handle_scheduled_life_boundary(
         )
         return True
     if boundary == LIFE_BOUNDARY_START:
-        return _settle_life_start(manager, persona_id, params)
-    return _settle_life_end(manager, persona_id)
+        return _settle_life_start(
+            manager, persona_id, params, occurrence_at=occurrence_at,
+        )
+    return _settle_life_end(manager, persona_id, occurrence_at=occurrence_at)
 
 
 def _settle_life_start(
-    manager: Any, persona_id: str, params: Optional[Dict[str, Any]]
+    manager: Any,
+    persona_id: str,
+    params: Optional[Dict[str, Any]],
+    *,
+    occurrence_at: Optional[datetime] = None,
 ) -> bool:
     """起床時刻の帳簿処理: 今日のライフを確定し、開始の節目を決着させる。
 
     確定は冪等 (:func:`confirm_life_for_today` が既存確定を保持する)。開始の
     節目の一度きり保証は lives[0] の ``started`` マーカー — 確定は済んだが節目が
     失敗した日は、再試行で節目だけをやり直せる (確認 → 適用 → マークの順)。
+    営業日は ``occurrence_at`` (節目の occurrence の時刻) の暦日。
     """
     from saiverse.autonomy_wiring import _day_open_plan_date, _find_day_schedules
 
-    plan_date = _day_open_plan_date()
+    plan_date = _day_open_plan_date(occurrence_at)
     settings = life_settings_from_params(params)
     try:
         existing = get_lives(manager, persona_id, plan_date)
@@ -1242,17 +1258,23 @@ def _settle_life_start(
         return False
 
 
-def _settle_life_end(manager: Any, persona_id: str) -> bool:
+def _settle_life_end(
+    manager: Any,
+    persona_id: str,
+    *,
+    occurrence_at: Optional[datetime] = None,
+) -> bool:
     """就寝時刻の帳簿処理: その営業日のライフに終了の節目を決着させる。
 
-    営業日 (覚醒日) は ``autonomy_wiring._day_close_plan_date`` — 深夜跨ぎ
+    営業日 (覚醒日) は ``autonomy_wiring._day_close_plan_date`` を
+    ``occurrence_at`` (節目の occurrence の時刻) で引いたもの — 深夜跨ぎ
     リズムでは 01:00 の就寝は前日が営業日。ライフの無い日は何もしない (決着)。
     一度きり保証は lives[0] の ``ended`` マーカーと実行台帳の冪等キー。
     """
     from saiverse.autonomy_wiring import _day_close_plan_date
 
     try:
-        plan_date = _day_close_plan_date(manager, persona_id)
+        plan_date = _day_close_plan_date(manager, persona_id, occurrence_at)
         lives = get_lives(manager, persona_id, plan_date)
     except Exception:
         LOGGER.warning(

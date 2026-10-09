@@ -2076,29 +2076,46 @@ _CURATION_BATCH_RUNNING: set = set()
 _CURATION_BATCH_LOCK = threading.Lock()
 
 
-def _curation_business_day(lifecycle: Any, persona_id: Optional[str]) -> str:
-    """提示の回数を数える単位の業務日 ("YYYY-MM-DD")。
+def _curation_business_day(
+    lifecycle: Any, persona_id: Optional[str],
+) -> Optional[str]:
+    """提示の回数を数える単位の業務日 ("YYYY-MM-DD")。決められなければ None。
 
     :func:`saiverse.day_plan.resolve_business_day` (予約・watchdog と同じ
-    解決器) を使う。manager が無い・ライフが読めない・解決が例外のときは
-    ローカルの暦日 (``clock.now()``) に倒す。
+    解決器) を使う。manager がいるのに解決器が失敗した (例外・ライフが読め
+    ない = None) 回は **None** を返し、呼び出し側はその回の提示を見送る。
+    暦日に倒すと、前日から続くライフの深夜帯では翌日を「提示済み」と記録して
+    しまい、復旧後の正しい業務日 (前日) は記録を後ろへ戻さない防具に拒まれて、
+    見送っても毎回提示が続く (2026-10-10 Codex 敵対レビュー 2 巡目 修正 3)。
+
+    暦日 (``clock.now()``) へ倒してよいのは manager がそもそも居ない構成
+    (テスト・軽量構成 — 解決器の基準になるライフが存在しない) だけ。
     """
     from saiverse import clock
 
     manager = getattr(lifecycle, "manager", None)
-    if manager is not None and persona_id:
-        try:
-            from saiverse.day_plan import resolve_business_day
-            basis = resolve_business_day(manager, persona_id)
-            if basis is not None and basis.plan_date:
-                return str(basis.plan_date)
-        except Exception:
-            LOGGER.warning(
-                "[sluice] business day resolution failed for the page review "
-                "offer (persona=%s); using the local date", persona_id,
-                exc_info=True,
-            )
-    return clock.now().date().isoformat()
+    if manager is None:
+        return clock.now().date().isoformat()
+    if not persona_id:
+        return None
+    try:
+        from saiverse.day_plan import resolve_business_day
+        basis = resolve_business_day(manager, persona_id)
+    except Exception:
+        LOGGER.warning(
+            "[sluice] business day resolution failed for the page review "
+            "offer (persona=%s); skipping the offer this time", persona_id,
+            exc_info=True,
+        )
+        return None
+    if basis is None or not basis.plan_date:
+        LOGGER.warning(
+            "[sluice] business day could not be resolved (lives unreadable) for "
+            "the page review offer (persona=%s); skipping the offer this time",
+            persona_id,
+        )
+        return None
+    return str(basis.plan_date)
 
 
 def _offer_page_reviews(
@@ -2106,7 +2123,8 @@ def _offer_page_reviews(
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """この回に本人へ見せる記憶の手入れの候補と、その業務日。無ければ ``([], None)``。
 
-    業務日に一回だけ: 最後に提示した業務日が今日なら検知もしない。提示の
+    業務日に一回だけ: 最後に提示した業務日が今日 (以降) なら検知もしない。
+    業務日が決められない回 (:func:`_curation_business_day` が None) も見せない。提示の
     記録はここでは書かない — :func:`run_sluice` が、**本人の答えが実行台帳に
     凍結された後** (``mark_applied`` の commit の後。台帳が無い構成では応答が
     読めた後) に :func:`_record_page_review_offer` で書く。入力に入らず外した
@@ -2133,9 +2151,17 @@ def _offer_page_reviews(
         from saiverse.curation import detect_curation_candidates
 
         business_day = _curation_business_day(lifecycle, persona_id)
+        if business_day is None:
+            # 業務日が決められない回は見せない (記録も進めない)。次のスルースで
+            # 解決器が復旧すれば、その業務日で提示される。
+            return ([], None)
         with adapter._db_lock:
             last_day = get_last_presented_day(conn)
-        if last_day == business_day:
+        if last_day is not None and last_day >= business_day:
+            # 同じ業務日に提示済み。記録が業務日より**先**の日のとき (暦日へ
+            # 倒していた頃に深夜帯で翌日が記録された状態) も見せない — 記録は
+            # 後ろへ戻らない (_mark_page_reviews_offered) ので、ここで見せると
+            # 記録が進まず毎回提示が続く。業務日が記録を追い越せば再開する。
             return ([], None)
         with adapter._db_lock:
             detected = detect_curation_candidates(conn, persona_id)
@@ -2267,6 +2293,7 @@ def _apply_page_reviews(
     persona: Any,
     page_reviews: List[Any],
     candidates: List[Dict[str, Any]],
+    execution_id: Optional[str] = None,
 ) -> Tuple[int, int, int, List[str]]:
     """``page_reviews`` を適用する: approve は curation_plans に予約を積む。
 
@@ -2278,8 +2305,13 @@ def _apply_page_reviews(
 
     - 候補に無い op_id・未知の verdict は WARNING を出して無視する (記録行にも
       出さない — 返答の誤記で本人の記録を汚さない)。同じ op_id の二件目も無視。
-    - approve の予約は冪等 (``enqueue_plan`` は同じ op_id の pending があれば
-      積み直さない) — 記録の再適用で二重に積まれない。
+    - approve の予約は冪等。``execution_id`` (その回の実行台帳の ID) があれば
+      予約の出どころ ``f"{execution_id}:{op_id}"`` を渡し、``enqueue_plan`` は
+      同じ出どころの行が status を問わずあれば積み直さない — 凍結記録の再適用が、
+      予約が done / failed へ進んだ後に同じ分割・統合を再予約しない (2026-10-10
+      Codex 敵対レビュー 2 巡目 修正 1)。別の回 (別 execution_id) の同じ op_id の
+      承認は新しい出どころなので予約できる。台帳が無い構成では None (再適用も
+      無い) で、同じ op_id の pending の抑止だけに乗る。
     - skip は何もしない (翌業務日の検知で、条件が続けば再提示される)。
     - 実行は呼び出し元の確定 (``_finalize``) の後 (:func:`_maybe_launch_curation_batch`)。
     """
@@ -2338,9 +2370,13 @@ def _apply_page_reviews(
                     "memory.db connection is missing; cannot reserve the plan"
                 )
             from sai_memory.curation_ops import enqueue_plan
+            source_key = (
+                f"{execution_id}:{op_id}" if execution_id is not None else None
+            )
             with adapter._db_lock:
                 plan_id = enqueue_plan(
                     conn, cand["kind"], op_id, list(cand.get("refs") or []),
+                    source_key=source_key,
                 )
         except Exception as exc:
             failed += 1
@@ -3980,6 +4016,7 @@ def run_sluice(
     # (_finalize の末尾)。候補を見せていない回は何もしない。
     pages_approved, pages_skipped, pages_failed, page_lines = _apply_page_reviews(
         persona, _as_list(_PAGE_REVIEW_FIELD), page_review_candidates,
+        execution_id=execution_id,
     )
     applied_total = ops_applied + memos_applied + promises_applied
     result_lines = (

@@ -5310,6 +5310,11 @@ _PAGE_MERGE = {
 }
 
 
+#: 差し替え前の業務日の解決 (SluicePageReviewTest の setUp が差し替えるので、
+#: 本物を通す検査用にモジュール読み込み時点のものを取っておく)。
+_REAL_CURATION_BUSINESS_DAY = sluice._curation_business_day
+
+
 class SluicePageReviewTest(_AdapterTestBase):
     """記憶の手入れの提示 (業務日に一回)・承認の予約・確定後のバッチ起動。
 
@@ -5559,6 +5564,84 @@ class SluicePageReviewTest(_AdapterTestBase):
         self.assertTrue(sluice._mark_page_reviews_offered(self._persona(), "2026-10-10"))
         self.assertEqual(self._last_presented_day(), "2026-10-10")
 
+    # 2026-10-10 Codex 敵対レビュー 2 巡目 修正 3: 業務日の解決が失敗した回は
+    # 暦日に倒さず提示を見送る (暦日は深夜帯で翌日を「提示済み」にしてしまう)。
+
+    def _real_business_day(self, resolver):
+        """setUp の差し替えを外し、本物の業務日の解決で 1 回走らせる道具。"""
+        return (
+            patch.object(
+                sluice, "_curation_business_day", new=_REAL_CURATION_BUSINESS_DAY,
+            ),
+            patch("saiverse.day_plan.resolve_business_day", side_effect=resolver),
+        )
+
+    def test_業務日の解決が失敗した回は提示されず記録も進まず復旧した回に提示される(self):
+        from saiverse.day_plan import BusinessDay
+
+        def _boom(_manager, _pid, **_kw):
+            raise RuntimeError("lives unreadable")
+
+        for resolver in (_boom, lambda _m, _p, **_kw: None):
+            p1, p2 = self._real_business_day(resolver)
+            with p1, p2, self.assertLogs("sea.sluice", level="WARNING"):
+                summary, client = self._run(_sluice_result())
+            self.assertFalse(summary["skipped"])  # スルース本体は続行する
+            self.assertFalse(self._offered(client.calls[0]))
+            self.assertIs(client.calls[0]["response_schema"], sluice._RESPONSE_SCHEMA)
+            self.assertIsNone(self._last_presented_day())
+            self.assertEqual(self.detect_calls, [])  # 検知もしない
+
+        # 復旧した回: 解決器の業務日 (前日から続くライフの日) で提示・記録する。
+        p1, p2 = self._real_business_day(
+            lambda _m, _p, **_kw: BusinessDay("2026-10-09", "23:00", "life", []),
+        )
+        with p1, p2:
+            _summary, client = self._run(_sluice_result(page_reviews=[]))
+        self.assertTrue(self._offered(client.calls[0]))
+        self.assertEqual(self._last_presented_day(), "2026-10-09")
+
+    def test_managerの居ない構成だけは暦日に倒す(self):
+        from saiverse import clock as saiverse_clock
+
+        lifecycle = SimpleNamespace(manager=None)
+        self.assertEqual(
+            _REAL_CURATION_BUSINESS_DAY(lifecycle, "tester"),
+            saiverse_clock.now().date().isoformat(),
+        )
+        # manager がいるのに persona_id が無いときは決められない (暦日に倒さない)。
+        self.assertIsNone(_REAL_CURATION_BUSINESS_DAY(
+            SimpleNamespace(manager=self._manager(ledger=False)), None,
+        ))
+
+    def test_未来日が記録された状態からは業務日が記録を追い越せば提示が再開する(self):
+        # 暦日に倒していた頃の深夜帯で「翌日」が記録されてしまった状態。
+        from sai_memory.curation_ops import record_presented_day
+        with self.adapter._db_lock:
+            record_presented_day(self.adapter.conn, "2026-10-10")
+
+        # 本当の業務日 (前日) の回: 記録は戻せないので見せない — 見せると
+        # 記録が進まず、見送っても毎回提示が続く。
+        _summary, client = self._run(_sluice_result())
+        self.assertFalse(self._offered(client.calls[0]))
+        self.assertEqual(self._last_presented_day(), "2026-10-10")
+        self.assertEqual(self.detect_calls, [])
+
+        # 記録の日 (業務日が追いついた) も提示済みとして扱う。
+        self.day[0] = "2026-10-10"
+        _summary, client = self._run(_sluice_result(), messages=[
+            *self._MSGS, {"id": "m5", "content": "x"},
+        ])
+        self.assertFalse(self._offered(client.calls[0]))
+
+        # 記録を追い越した業務日で再開する。
+        self.day[0] = "2026-10-11"
+        _summary, client = self._run(_sluice_result(page_reviews=[]), messages=[
+            *self._MSGS, {"id": "m5", "content": "x"}, {"id": "m6", "content": "x"},
+        ])
+        self.assertTrue(self._offered(client.calls[0]))
+        self.assertEqual(self._last_presented_day(), "2026-10-11")
+
     def test_候補を見せた回にpage_reviews欄が無い応答は他の欄の欠落と同じく棄却される(self):
         with self.assertRaises(sluice.SluiceOutputError):
             self._run(_sluice_result())  # page_reviews 欄なし
@@ -5631,6 +5714,62 @@ class SluicePageReviewTest(_AdapterTestBase):
             self.ledger.find_execution("sluice.pan", "tester:m0")["status"], "completed",
         )
         self.assertEqual(self.detect_calls, ["tester"])  # 再適用では検知しない
+
+    def test_予約が完了した後の凍結記録の再適用は同じ予約を積み直さない(self):
+        # 2026-10-10 Codex 敵対レビュー 2 巡目 修正 1: pending だけを見る抑止は、
+        # 予約が done へ進んだ後の再適用で同じ分割をもう一度予約していた。
+        from sai_memory.curation_ops import _update_plan_status
+
+        result = _sluice_result(page_reviews=[
+            {"op_id": _PAGE_SPLIT["op_id"], "verdict": "approve"},
+        ])
+        with patch.object(
+            sluice, "_persist_record", side_effect=RuntimeError("disk error"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._run(result, ledger=True)
+        pending = self._pending()
+        self.assertEqual(len(pending), 1)
+        execution_id = self.ledger.find_execution(
+            "sluice.pan", "tester:m0",
+        )["execution_id"]
+        row = self.adapter.conn.execute(
+            "SELECT source_key FROM curation_plans WHERE id = ?", (pending[0]["id"],),
+        ).fetchone()
+        self.assertEqual(row[0], f"{execution_id}:{_PAGE_SPLIT['op_id']}")
+
+        # 予約は (別の確定の背景バッチで) 実行済みになった。
+        with self.adapter._db_lock:
+            _update_plan_status(self.adapter.conn, pending[0]["id"], "done", {"ok": True})
+
+        # 同じ凍結記録の再適用 (LLM なし): 新しい予約を作らない。
+        summary, client = self._run(result, ledger=True)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(self._pending(), [])
+        self.assertEqual(
+            self.adapter.conn.execute("SELECT COUNT(*) FROM curation_plans").fetchone()[0],
+            1,
+        )
+        self.assertEqual(self.batch_runs, [])  # pending が無いので起動しない
+        self.assertEqual(
+            self.ledger.find_execution("sluice.pan", "tester:m0")["status"], "completed",
+        )
+
+        # 別の回 (別 execution_id) が同じ op_id を承認したら、新しく予約できる。
+        self.day[0] = "2026-10-10"
+        summary2, client2 = self._run(result, ledger=True, messages=[
+            *self._MSGS, {"id": "m5", "content": "x"},
+        ])
+        self.assertEqual(len(client2.calls), 1)
+        self.assertTrue(self._offered(client2.calls[0]))
+        self.assertEqual(summary2["pages_approved"], 1)
+        self.assertEqual(
+            [p["op_id"] for p in self._pending()], [_PAGE_SPLIT["op_id"]],
+        )
+        self.assertEqual(
+            self.adapter.conn.execute("SELECT COUNT(*) FROM curation_plans").fetchone()[0],
+            2,
+        )
 
     def test_同じペルソナのバッチが走っている間は二本目を起動しない(self):
         from sai_memory.curation_ops import enqueue_plan

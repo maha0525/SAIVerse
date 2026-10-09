@@ -676,6 +676,116 @@ def test_life_boundary_failure_is_retried_by_the_schedule_backoff(manager, sessi
     assert sum("活動開始" in t for t in _messages(manager)) == 1
 
 
+def _schedule_row(session_factory, playbook_name):
+    db = session_factory()
+    try:
+        row = (
+            db.query(PersonaSchedule)
+            .filter_by(PERSONA_ID=PERSONA_ID, META_PLAYBOOK=playbook_name)
+            .one()
+        )
+        return row.SCHEDULE_ID, row.INSTANCE_TOKEN or "legacy", row.SYNC_GENERATION or 0
+    finally:
+        db.close()
+
+
+def test_wake_retry_across_midnight_settles_the_occurrence_day_not_the_next(
+    manager, session_factory,
+):
+    """23:59 の起床が失敗して 00:01 に backoff 再試行されても、営業日は発火予定
+    時刻 (occurrence) の日 — 前日のライフを確定・開始し、翌日分は作らない。
+    翌日の正規の起床は「開始済み」で省略されず、その日のライフを開始する
+    (2026-10-10 Codex 敵対レビュー 2 巡目 修正 2)。
+
+    本番の発火口 ScheduleManager._handle_fire を通す — occurrence トークン
+    (closure・台帳 payload が運ぶ発火予定時刻の epoch) から営業日が決まる。
+    """
+    from unittest.mock import patch
+
+    from saiverse.schedule_manager import ScheduleManager
+
+    manager.personas[PERSONA_ID].model = "claude-sonnet-5"
+    _add_day_schedule(session_factory, "judgment_day_open", "23:59")
+    _add_day_schedule(session_factory, "judgment_day_close", "06:00")
+    sid, instance_token, generation = _schedule_row(
+        session_factory, "judgment_day_open",
+    )
+    sm = ScheduleManager(saiverse_manager=manager)
+    wake_d0 = BASE.replace(hour=23, minute=59)  # 2026-07-04 23:59
+    occurrence = str(int(wake_d0.timestamp()))
+
+    # 23:59 の発火: 確定はしたが開始の節目が失敗 → failed + backoff 再試行。
+    clock.enable_virtual(wake_d0)
+    with patch.object(day_plan, "apply_life_boundary", return_value=False):
+        sm._handle_fire(sid, instance_token, occurrence, generation, 0)
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0].get("started") \
+        is not True
+    assert _messages(manager) == []
+
+    # 00:01 (暦日は翌日) に同じ occurrence の再試行。
+    clock.advance_to(wake_d0 + timedelta(minutes=2))
+    sm._handle_fire(sid, instance_token, occurrence, generation, 1)
+
+    lives_d0 = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert len(lives_d0) == 1 and lives_d0[0]["started"] is True
+    assert day_plan.get_lives(manager, PERSONA_ID, "2026-07-05") == []
+    assert _persona_life_row(manager, "2026-07-05") is None
+    assert _boundary_rows(manager, day_plan.LIFE_BOUNDARY_KIND_START) == [
+        (f"{PERSONA_ID}:{PLAN_DATE}", "completed"),
+    ]
+    assert sum("活動開始" in t for t in _messages(manager)) == 1
+
+    # 翌日の正規の起床 (2026-07-05 23:59) は省略されず、その日のライフを開始する。
+    wake_d1 = wake_d0 + timedelta(days=1)
+    clock.advance_to(wake_d1)
+    sm._handle_fire(
+        sid, instance_token, str(int(wake_d1.timestamp())), generation, 0,
+    )
+    lives_d1 = day_plan.get_lives(manager, PERSONA_ID, "2026-07-05")
+    assert len(lives_d1) == 1 and lives_d1[0]["started"] is True
+    assert sorted(_boundary_rows(manager, day_plan.LIFE_BOUNDARY_KIND_START)) == [
+        (f"{PERSONA_ID}:{PLAN_DATE}", "completed"),
+        (f"{PERSONA_ID}:2026-07-05", "completed"),
+    ]
+    assert sum("活動開始" in t for t in _messages(manager)) == 2
+
+
+def test_close_retry_uses_the_occurrence_business_day(manager, session_factory):
+    """就寝も同じ — 22:00 の就寝が失敗し、日付を跨いだ 00:30 の再試行でも、
+    営業日は発火予定時刻の日 (跨ぎでないリズムでは 00:30 の暦日でも前日でもなく
+    発火予定の 22:00 の日) のライフを終える。"""
+    from unittest.mock import patch
+
+    from saiverse.schedule_manager import ScheduleManager
+
+    manager.personas[PERSONA_ID].model = "claude-sonnet-5"
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    assert _fire_schedule(manager, "judgment_day_open", "07:00")[0] == "executed"
+
+    sid, instance_token, generation = _schedule_row(
+        session_factory, "judgment_day_close",
+    )
+    sm = ScheduleManager(saiverse_manager=manager)
+    close_d0 = BASE + timedelta(hours=22)
+    occurrence = str(int(close_d0.timestamp()))
+
+    clock.advance_to(close_d0)
+    with patch.object(day_plan, "apply_life_boundary", return_value=False):
+        sm._handle_fire(sid, instance_token, occurrence, generation, 0)
+    assert not day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0].get("ended")
+
+    # 翌 00:30 の再試行。実行時の時刻から営業日を取ると 07:00〜22:00 の
+    # リズムでは 2026-07-05 になり、ライフの無い日として「決着」してしまう。
+    clock.advance_to(close_d0 + timedelta(hours=2, minutes=30))
+    sm._handle_fire(sid, instance_token, occurrence, generation, 1)
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["ended"] is True
+    assert _boundary_rows(manager, day_plan.LIFE_BOUNDARY_KIND_END) == [
+        (f"{PERSONA_ID}:{PLAN_DATE}", "completed"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 判断点の別枠カウント: used_pulses 不変・judgment_pulses だけ積む
 # ---------------------------------------------------------------------------

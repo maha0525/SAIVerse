@@ -796,3 +796,100 @@ class TestCurationOps:
         id2 = enqueue_plan(conn, kind="merge", op_id="merge:memopedia:1+memopedia:2", refs=["memopedia:1", "memopedia:2"])
         assert id1 == id2
         assert len(list_pending(conn)) == 1
+
+    # -- 出どころの恒久 ID (source_key) — 2026-10-10 Codex 敵対レビュー 2 巡目 修正 1 --
+
+    @staticmethod
+    def _row_count(conn) -> int:
+        return conn.execute("SELECT COUNT(*) FROM curation_plans").fetchone()[0]
+
+    @pytest.mark.parametrize("final_status", ["done", "failed"])
+    def test_同じ出どころの予約は完了後にも積み直さない(self, final_status):
+        from sai_memory.curation_ops import _update_plan_status
+
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+        init_curation_tables(conn)
+        plan_id = enqueue_plan(
+            conn, "split", "split:memopedia:1", ["memopedia:1"],
+            source_key="exec-1:split:memopedia:1",
+        )
+        _update_plan_status(conn, plan_id, final_status, {"ok": True})
+        assert list_pending(conn) == []
+
+        again = enqueue_plan(
+            conn, "split", "split:memopedia:1", ["memopedia:1"],
+            source_key="exec-1:split:memopedia:1",
+        )
+        assert again == plan_id
+        assert list_pending(conn) == []
+        assert self._row_count(conn) == 1
+
+    def test_別の出どころの同じop_idは完了後に予約できる(self):
+        from sai_memory.curation_ops import _update_plan_status
+
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+        init_curation_tables(conn)
+        first = enqueue_plan(
+            conn, "split", "split:memopedia:1", ["memopedia:1"],
+            source_key="exec-1:split:memopedia:1",
+        )
+        _update_plan_status(conn, first, "done", {"ok": True})
+        second = enqueue_plan(
+            conn, "split", "split:memopedia:1", ["memopedia:1"],
+            source_key="exec-2:split:memopedia:1",
+        )
+        assert second != first
+        assert [p["id"] for p in list_pending(conn)] == [second]
+
+    def test_別の出どころでも同じop_idのpendingがあれば積み直さない(self):
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+        init_curation_tables(conn)
+        first = enqueue_plan(
+            conn, "split", "split:memopedia:1", ["memopedia:1"],
+            source_key="exec-1:split:memopedia:1",
+        )
+        second = enqueue_plan(
+            conn, "split", "split:memopedia:1", ["memopedia:1"],
+            source_key="exec-2:split:memopedia:1",
+        )
+        assert second == first
+        assert self._row_count(conn) == 1
+
+    def test_source_key列の無い旧テーブルに初期化で列が足され旧行はNULLのまま(self):
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+        conn.execute(
+            """
+            CREATE TABLE curation_plans (
+                id          TEXT PRIMARY KEY,
+                created_at  INTEGER NOT NULL,
+                kind        TEXT NOT NULL,
+                op_id       TEXT NOT NULL,
+                refs_json   TEXT NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'pending',
+                result_json TEXT,
+                executed_at INTEGER
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO curation_plans (id, created_at, kind, op_id, refs_json, status)"
+            " VALUES ('old-1', 1, 'split', 'split:memopedia:1', '[\"memopedia:1\"]', 'done')"
+        )
+        conn.execute(
+            "INSERT INTO curation_plans (id, created_at, kind, op_id, refs_json, status)"
+            " VALUES ('old-2', 2, 'split', 'split:memopedia:2', '[\"memopedia:2\"]', 'done')"
+        )
+        conn.commit()
+
+        init_curation_tables(conn)
+        init_curation_tables(conn)  # 2回目も例外なし (列の追加は冪等)
+
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(curation_plans)")}
+        assert "source_key" in cols
+        assert [r[0] for r in conn.execute(
+            "SELECT source_key FROM curation_plans ORDER BY id"
+        )] == [None, None]
+        # source_key を渡さない予約 (NULL) は UNIQUE に当たらない。
+        enqueue_plan(conn, "split", "split:memopedia:3", ["memopedia:3"])
+        enqueue_plan(conn, "split", "split:memopedia:4", ["memopedia:4"])
+        assert len(list_pending(conn)) == 2

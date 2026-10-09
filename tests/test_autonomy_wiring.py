@@ -539,8 +539,9 @@ def test_schedule_manager_routes_wake_and_close_to_life_bookkeeping(
     routed: List[Any] = []
     monkeypatch.setattr(
         day_plan, "handle_scheduled_life_boundary",
-        lambda mgr, pid, boundary, params=None: routed.append((pid, boundary, params))
-        or True,
+        lambda mgr, pid, boundary, params=None, **kw: routed.append(
+            (pid, boundary, params)
+        ) or True,
     )
     judged: List[Any] = []
     monkeypatch.setattr(
@@ -779,7 +780,7 @@ def _fake_life_start(monkeypatch):
     """
     calls: List[Any] = []
 
-    def _fake_boundary(mgr, pid, boundary, params=None):
+    def _fake_boundary(mgr, pid, boundary, params=None, **kw):
         calls.append((boundary, params))
         return True
 

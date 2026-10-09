@@ -49,7 +49,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, Optional
 
 from saiverse import clock
@@ -283,19 +283,29 @@ def _judgment_lock(manager: Any, persona_id: str):
 # ---------------------------------------------------------------------------
 
 
-def _day_open_plan_date() -> str:
+def _day_open_plan_date(at: Optional[datetime] = None) -> str:
     """起床の plan_date (暦日)。ライフ確定
-    (``day_plan.handle_scheduled_life_boundary`` の start) が使う。"""
-    return clock.now().date().isoformat()
+    (``day_plan.handle_scheduled_life_boundary`` の start) が使う。
+
+    ``at`` = 節目の occurrence が属する時刻 (予約の発火予定時刻 — backoff
+    再試行・再起動後の回収でも変わらない)。省略時 (旧予約の互換) は現在時刻。
+    実行時の暦日を取り直すと、23:59 の起床が 00:01 に再試行されたとき翌日の
+    ライフを確定してしまう (2026-10-10 Codex 敵対レビュー 2 巡目 修正 2)。"""
+    return (at or clock.now()).date().isoformat()
 
 
-def _day_close_plan_date(manager: Any, persona_id: str) -> str:
+def _day_close_plan_date(
+    manager: Any, persona_id: str, at: Optional[datetime] = None,
+) -> str:
     """就寝の営業日 (覚醒日)。ライフ終了
     (``day_plan.handle_scheduled_life_boundary`` の end) が使う
-    (深夜跨ぎリズムでは 01:00 の就寝は前日が営業日)。"""
+    (深夜跨ぎリズムでは 01:00 の就寝は前日が営業日)。
+
+    ``at`` は :func:`_day_open_plan_date` と同じ — 節目の occurrence の時刻。
+    省略時は現在時刻。"""
     sched = _find_day_schedules(manager, persona_id)
     return effective_plan_date(
-        clock.now(), sched.get("wake"), sched.get("close"),
+        at or clock.now(), sched.get("wake"), sched.get("close"),
     ).isoformat()
 
 
@@ -1615,8 +1625,10 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
         "(machine bookkeeping, no LLM) (persona=%s date=%s wake=%s)",
         persona_id, today, wake,
     )
+    # 起床の帳簿処理には「暦日 == 営業日」を判定したこの時刻をそのまま渡す —
+    # 判定と確定の間で日付を跨いでも、判定した日のライフを確定する。
     settled = day_plan.handle_scheduled_life_boundary(
         manager, persona_id, day_plan.LIFE_BOUNDARY_START,
-        sched.get("day_open_params"),
+        sched.get("day_open_params"), occurrence_at=now,
     )
     return {"action": "life_start_refire", "settled": settled}
