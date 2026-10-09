@@ -18,7 +18,7 @@
 
 - ``day_open``   — 起床判断: 時間割の編成 + 予算配分
 - ``post_session`` — セッション終了判断: タスクの裁定 (接地検証つき) + 次への接続
-- ``on_event``   — イベント到着判断: 反応の選択 (engage_now / insert_slot /
+- ``on_event``   — イベント到着判断: 反応の選択 (engage_now / add_task /
   note_only / ignore。alert は engage_now のみに縮退)
 - ``day_close``  — 就寝判断: 予定 vs 実績のふりかえり + 明日の自分へのメモ +
   ユーザーへの報告種
@@ -93,7 +93,10 @@ JUDGMENT_PLAYBOOK_MAP: Dict[str, str] = {
 
 # イベント到着判断 reaction の種別 (judgment_points.md §7)
 REACTION_ENGAGE_NOW = "engage_now"
-REACTION_INSERT_SLOT = "insert_slot"
+#: あとで取り組むためにタスク帳へシステムタスクとして積む。時間割にコマを
+#: 挿す旧 ``insert_slot`` の置き換え (autonomous_behavior_v04_plan.md 段 1-3 —
+#: 時間割の撤去より先に、唯一残る判断点の選択肢から時間割依存を外す)。
+REACTION_ADD_TASK = "add_task"
 REACTION_NOTE_ONLY = "note_only"
 REACTION_IGNORE = "ignore"
 
@@ -430,9 +433,13 @@ def build_on_event_schema(
 ) -> Dict[str, Any]:
     """イベント到着判断の response_schema (judgment_points.md §7)。
 
-    reaction は anyOf 4 分岐 (engage_now / insert_slot / note_only / ignore)。
+    reaction は anyOf 4 分岐 (engage_now / add_task / note_only / ignore)。
     **alert イベントでは anyOf を engage_now のみに動的縮退**させる
     (v1 状況 B の「強制」の継承)。
+
+    add_task はタスク帳へのシステムタスクの追加で、時間割に依存しない
+    (2026-10 段 1-3 で insert_slot から置き換え)。note_only の memo は判断の
+    記録 (ペルソナの記憶に残る判断行) に載るだけで、別の置き場には書かない。
     """
     engage_now = {
         "type": "object",
@@ -441,17 +448,19 @@ def build_on_event_schema(
     }
     variants: List[Dict[str, Any]] = [engage_now]
     if not is_alert:
-        slot = _build_slot_schema(
-            collect_slot_ref_enum(manager, persona_id),
-            collect_facility_ids(manager),
-        )
         variants.append({
             "type": "object",
             "properties": {
-                "type": {"type": "string", "const": REACTION_INSERT_SLOT},
-                "slot": slot,
+                "type": {"type": "string", "const": REACTION_ADD_TASK},
+                "task": {
+                    "type": "string",
+                    "description": (
+                        "あとで取り組むためにタスク帳に積む一件。あとで読み返した"
+                        "自分が迷わず取りかかれる具体さで、何をするかを書く"
+                    ),
+                },
             },
-            "required": ["type", "slot"],
+            "required": ["type", "task"],
         })
         variants.append({
             "type": "object",
@@ -1247,8 +1256,10 @@ def build_judgment_args(
         judgment_context = {
             "plan_date": today,
             "is_alert": is_alert,
-            # note_only の覚え書きに「何のイベントだったか」を添えるための抜粋
+            # add_task で積むタスクに「何のイベントだったか」を添えるための抜粋
             "event_text": event_text[:200],
+            # 刺激の永続 ID — add_task の出どころ参照と冪等キーに使う
+            "stimulus_id": context.get("stimulus_id"),
         }
     elif kind == KIND_DAY_CLOSE:
         # 営業日 (覚醒日) の算出 — 深夜跨ぎリズムで 01:00 に発火した就寝判断は
@@ -1910,81 +1921,6 @@ def sanitize_timetable(
         seen.add(slot["start"])
         deduped.append(slot)
     return deduped, warnings
-
-
-def insert_timetable_slot(
-    manager: Any,
-    persona_id: str,
-    plan_date: str,
-    slot: Dict[str, Any],
-    not_before: Optional[str] = None,
-) -> Tuple[Optional[int], List[str]]:
-    """コマ 1 件を今日の残り時間割へ挿入する (on_event insert_slot / resume_now)。
-
-    検証は :func:`sanitize_timetable` (単一コマ) + 時刻整合:
-
-    - ``not_before`` (HH:MM) より前の start は棄却 (過去のコマは挿入できない。
-      「今すぐ」は engage_now / resume_now が担う)
-    - start が既存コマ (消化済み含む) と重複する場合は空きが見つかるまで
-      1 分ずつ繰り下げる (上限 30 分。同時刻コマは day_plan の key 空間で
-      衝突するため)
-    - 適用は :func:`day_plan.replace_remaining_slots` (残りコマ + 挿入コマの
-      全置換)。時刻昇順の検証に失敗した場合は時間割を一切変更しない
-
-    Returns:
-        (置換後に push したコマ数 | 失敗時 None, 警告メッセージのリスト)
-    """
-    cleaned, warnings = sanitize_timetable(manager, persona_id, [slot])
-    if not cleaned:
-        return None, warnings
-    new_slot = cleaned[0]
-
-    if not_before and new_slot["start"] < not_before:
-        warnings.append(
-            f"挿入コマ rejected: start={new_slot['start']} は現在時刻 "
-            f"{not_before} より前です"
-        )
-        return None, warnings
-
-    current = load_day_plan(manager, persona_id, plan_date) or []
-    remaining = [
-        s for s in current if s.get("status") in (STATUS_PENDING, STATUS_DEFERRED)
-    ]
-    taken = {s.get("start") for s in current}
-    start = new_slot["start"]
-    for _ in range(30):
-        if start not in taken:
-            break
-        minutes = int(start[:2]) * 60 + int(start[3:]) + 1
-        if minutes >= 24 * 60:
-            warnings.append(
-                f"挿入コマ rejected: start={new_slot['start']} 以降に空き時刻が"
-                "ありません (日を跨ぐ挿入は不可)"
-            )
-            return None, warnings
-        start = f"{minutes // 60:02d}:{minutes % 60:02d}"
-    else:
-        warnings.append(
-            f"挿入コマ rejected: start={new_slot['start']} 周辺 30 分に空き時刻が"
-            "ありません"
-        )
-        return None, warnings
-    if start != new_slot["start"]:
-        warnings.append(
-            f"挿入コマ: start={new_slot['start']} は使用済みのため {start} へ繰り下げ"
-        )
-        new_slot["start"] = start
-
-    merged = sorted(remaining + [new_slot], key=lambda s: s["start"])
-    from saiverse.day_plan import replace_remaining_slots
-
-    try:
-        pushed, range_notes = replace_remaining_slots(manager, persona_id, plan_date, merged)
-    except ValueError as exc:
-        warnings.append(f"コマの挿入に失敗 (時間割は不変): {exc}")
-        return None, warnings
-    warnings.extend(range_notes)
-    return pushed, warnings
 
 
 # NOTE: 旧 ``save_desk_memo`` (作業メモを Track metadata へ保存) は 2026-08-21 に

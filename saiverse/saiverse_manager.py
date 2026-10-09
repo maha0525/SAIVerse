@@ -3,6 +3,7 @@ import json
 from collections import defaultdict
 from sqlalchemy import create_engine
 import threading
+import uuid
 import requests
 import logging
 from pathlib import Path
@@ -542,6 +543,8 @@ class SAIVerseManager(
         self._emit_trigger(
             TriggerType.SERVER_START,
             {"city_id": self.city_id, "city_name": self.city_name},
+            # 内部の一回きりの出来事 — 封筒を作った時点の uuid4 が刺激の ID
+            stimulus_id=f"server_start:{uuid.uuid4()}",
         )
         logging.info("SAIVerseManager background loops started (world is now running).")
 
@@ -580,12 +583,19 @@ class SAIVerseManager(
         except Exception:
             logging.exception("Failed to load addon server hooks")
 
-    def _emit_trigger(self, trigger_type: TriggerType, data: Dict[str, Any]) -> None:
-        """Emit a trigger event to the PhenomenonManager."""
+    def _emit_trigger(
+        self, trigger_type: TriggerType, data: Dict[str, Any], *, stimulus_id: str,
+    ) -> None:
+        """Emit a trigger event to the PhenomenonManager.
+
+        ``stimulus_id`` は必須 — 封筒 (TriggerEvent) の刺激の ID の契約
+        (``phenomena/triggers.py``) に従い、呼び出し側 (= 供給源) が発行する。
+        ここで代理採番しない。
+        """
         if not hasattr(self, "phenomenon_manager") or not self.phenomenon_manager:
             return
         try:
-            event = TriggerEvent(type=trigger_type, data=data)
+            event = TriggerEvent(type=trigger_type, data=data, stimulus_id=stimulus_id)
             self.phenomenon_manager.emit(event)
         except Exception as exc:
             logging.error("Failed to emit trigger %s: %s", trigger_type, exc, exc_info=True)
@@ -1136,6 +1146,8 @@ class SAIVerseManager(
         self._emit_trigger(
             TriggerType.SERVER_STOP,
             {"city_id": self.city_id, "city_name": self.city_name},
+            # 内部の一回きりの出来事 — 封筒を作った時点の uuid4 が刺激の ID
+            stimulus_id=f"server_stop:{uuid.uuid4()}",
         )
 
         # Phase 4-e: Stop EventScheduler. pending callback は破棄される。
@@ -1257,8 +1269,16 @@ class SAIVerseManager(
             len(self.personas),
         )
 
-    def handle_user_input(self, message: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
-        return self.runtime.handle_user_input(message, metadata=metadata)
+    def handle_user_input(
+        self,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        client_message_id: Optional[str] = None,
+    ) -> List[str]:
+        return self.runtime.handle_user_input(
+            message, metadata=metadata, client_message_id=client_message_id,
+        )
 
 
     def handle_user_input_stream(

@@ -217,8 +217,8 @@ def test_busy_with_another_activity_fires_the_on_event_judgment(manager, monkeyp
     _pretend_busy(monkeypatch, {"kind": "work_session", "episode_ref": "episode:1"})
     seen = {}
 
-    def _fake_conflict(mgr, persona_id, text, *, engage, user_id):
-        seen.update({"text": text, "user_id": user_id})
+    def _fake_conflict(mgr, persona_id, text, *, engage, user_id, stimulus_id):
+        seen.update({"text": text, "user_id": user_id, "stimulus_id": stimulus_id})
         return "none:judged"
 
     monkeypatch.setattr(
@@ -227,10 +227,15 @@ def test_busy_with_another_activity_fires_the_on_event_judgment(manager, monkeyp
     invoke = MagicMock()
 
     uc.on_user_utterance(
-        manager, PERSONA_ID, USER_ID, {"content": "ちょっといい？"}, invoke,
+        manager, PERSONA_ID, USER_ID,
+        {"content": "ちょっといい？", "message_id": "room:7"}, invoke,
     )
 
-    assert seen == {"text": "ちょっといい？", "user_id": USER_ID}
+    # 発話の永続 ID (building_messages の message_id) が刺激の ID として
+    # 仲裁の入口まで届く (on_event 判断の冪等キーの元)
+    assert seen == {
+        "text": "ちょっといい？", "user_id": USER_ID, "stimulus_id": "msg:room:7",
+    }
     # 判断が engage_now を出さなければ応答しない
     invoke.assert_not_called()
     manager.run_sea_user.assert_not_called()
@@ -241,7 +246,7 @@ def test_busy_and_engage_now_starts_the_conversation(manager, monkeypatch):
     """仲裁が engage_now を選んだら、初回発火と同じ入口で会話が始まる。"""
     _pretend_busy(monkeypatch, {"kind": "work_session", "episode_ref": "episode:1"})
 
-    def _fake_conflict(mgr, persona_id, text, *, engage, user_id):
+    def _fake_conflict(mgr, persona_id, text, *, engage, user_id, stimulus_id):
         engage()
         return "judged:engage_now"
 
@@ -711,7 +716,7 @@ def test_the_arbitration_engage_closure_keeps_the_pulse_options(manager, monkeyp
     """仲裁が engage_now を選んだ経路でも、初回と同じオプションが届く。"""
     _pretend_busy(monkeypatch, {"kind": "work_session", "episode_ref": "episode:1"})
 
-    def _fake_conflict(mgr, persona_id, text, *, engage, user_id):
+    def _fake_conflict(mgr, persona_id, text, *, engage, user_id, stimulus_id):
         engage()
         return "judged:engage_now"
 

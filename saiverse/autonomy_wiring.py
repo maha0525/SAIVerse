@@ -169,6 +169,17 @@ ROUTE_NONE_INDETERMINATE = "none:judgment_indeterminate"
 #: なし)。finalize が既に決定を適用しているかもしれないので、**代替経路を
 #: 走らせない** — 走らせると判断の決定を上書きして応答してしまう (指摘 F3)。
 ROUTE_NONE_JUDGMENT_RAN = "none:judgment_ran"
+#: 刺激の ID (stimulus_id) が無いイベントが届いた。ID は供給源の義務なので
+#: 代理採番せず、応対もしない (fail-closed — ERROR で表に出す)。
+ROUTE_NONE_MISSING_STIMULUS_ID = "none:missing_stimulus_id"
+#: 同じ刺激の再配送 (受領記録 stimulus_receipt に同じ ID が既にある)。
+#: 直接応対も判断も起動しない。ラベルを返すのは入口の
+#: ``inject_persona_event`` (受領の照合はそこで行う)。
+ROUTE_NONE_DUPLICATE_STIMULUS = "none:duplicate_stimulus"
+#: 別行動中のユーザー発話に発話の ID (message_id 由来の stimulus_id) が
+#: 付いていなかった。判断を冪等にできないので仲裁を経ずに直接会話を始める
+#: (ユーザーの呼びかけを配線の不備で黙殺しない)。ERROR で表に出す。
+ROUTE_DIRECT_MISSING_STIMULUS_ID = "direct:missing_stimulus_id"
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +286,15 @@ def _judgment_idempotency_key(
     - day_close: ``{persona}:{effective_plan_date}`` (営業日)
     - post_session: ``{persona}:{episode_ref}``。
       episode_ref が無ければ None (一意性なし)
-    - on_event: None — 毎イベント新規行。**prepared 行が durable queue** (A7/D5)
+    - on_event: ``{persona}:{stimulus_id}`` — 刺激 (外部イベント / 別行動中の
+      ユーザー発話) の供給源が発行した永続 ID から作る。同じ刺激の再配送が
+      別の席を取って判断を二度走らせる穴を塞ぐ
+      (docs/issues/on_event_judgment_has_no_idempotency_key.md)。入口
+      (:func:`handle_external_event` / :func:`handle_user_utterance_conflict`)
+      が ID の無い刺激をここへ通さないので、None になるのは ID の義務化より
+      前に作られた台帳行の再発火 (resume はキーを計算しない) か配線ミスだけ
+      — 後者は WARNING で表に出して従来どおり一意性なしで走らせる。
+      **prepared 行が durable queue** (A7/D5) なのは変わらない
     """
     if kind == KIND_DAY_OPEN:
         return f"{persona_id}:{_day_open_plan_date()}"
@@ -293,6 +312,15 @@ def _judgment_idempotency_key(
                     episode_ref = getattr(sr, "episode_ref", None)
         if episode_ref:
             return f"{persona_id}:{episode_ref}"
+        return None
+    if kind == KIND_ON_EVENT:
+        stimulus_id = context.get("stimulus_id") if isinstance(context, dict) else None
+        if isinstance(stimulus_id, str) and stimulus_id.strip():
+            return f"{persona_id}:{stimulus_id}"
+        LOGGER.warning(
+            "[autonomy-wiring] on_event judgment without a stimulus_id "
+            "(persona=%s); claiming a seat without idempotency", persona_id,
+        )
         return None
     return None
 
@@ -742,11 +770,23 @@ def handle_external_event(
     persona_id: str,
     event_text: str,
     *,
+    stimulus_id: Optional[str],
     dispatch_direct: Callable[[], None],
     is_alert: bool = False,
     dispatch_envelope: Optional[Dict[str, Any]] = None,
 ) -> str:
     """実イベントの本番入口 (inject_persona_event の既定経路)。
+
+    ``stimulus_id`` (刺激の永続 ID) は**必須**。None / 空なら ERROR を出して
+    応対も判断も起動せずに :data:`ROUTE_NONE_MISSING_STIMULUS_ID` を返す
+    (ID は供給源の義務で、ここで代理採番しない — fail-closed)。ID は on_event
+    判断の冪等キー (``{persona}:{stimulus_id}``) になる。
+
+    同じ刺激の再配送を止める受領の照合 (``saiverse.stimulus_receipt``) は
+    この関数ではなく、呼び出し元の入口 ``inject_persona_event`` の先頭で行う —
+    この関数を通らない経路 (meta_playbook を明示した直接応対) と、ここより前に
+    走る persona_event_log への記録まで含めて守るため。この関数を新しい場所から
+    呼ぶときは、先に :func:`saiverse.stimulus_receipt.claim_stimulus` を通すこと。
 
     経路の判断基準:
 
@@ -757,7 +797,7 @@ def handle_external_event(
       §7)。イベントは従来経路で応対 Pulse として submit され、PulseController の
       priority 制御 (user 優先) に従う
     - **自律 ON かつ手すき**: on_event 判断を撃つ。判断が ``engage_now`` を
-      選んだときだけ従来の応対 Pulse を起動する。insert_slot / note_only /
+      選んだときだけ従来の応対 Pulse を起動する。add_task / note_only /
       ignore は finalize が適用済みなので応対は起動しない
     - 判断が LLM へ渡る前に止まった / 副作用ゼロ確定で失敗した (Playbook
       未 import・関所閉鎖・LLM エラー等) 場合はイベントを落とさないよう従来経路へ
@@ -771,6 +811,14 @@ def handle_external_event(
     Returns:
         経路ラベル (``direct:*`` / ``judged:*``)。ログ・テストの観察用。
     """
+    if not isinstance(stimulus_id, str) or not stimulus_id.strip():
+        LOGGER.error(
+            "[autonomy-wiring] external event without a stimulus_id reached "
+            "persona %s; not responding (the source must issue a durable ID)",
+            persona_id,
+        )
+        return ROUTE_NONE_MISSING_STIMULUS_ID
+
     if not is_autonomy_on(manager, persona_id):
         dispatch_direct()
         return ROUTE_DIRECT_AUTONOMY_DISABLED
@@ -789,7 +837,12 @@ def handle_external_event(
         dispatch_direct()
         return ROUTE_DIRECT_IN_CONVERSATION
 
-    context: Dict[str, Any] = {"event_text": event_text, "is_alert": is_alert}
+    context: Dict[str, Any] = {
+        "event_text": event_text,
+        "is_alert": is_alert,
+        # 冪等キー (_judgment_idempotency_key) とタスク帳の出どころ参照に使う
+        "stimulus_id": stimulus_id,
+    }
     if dispatch_envelope:
         # 応対の材料 (user_input / meta_playbook / args / event_type) を判断の
         # 台帳 payload に凍結する。LLM に渡る judgment_context には入らない
@@ -858,6 +911,7 @@ def handle_user_utterance_conflict(
     *,
     engage: Callable[[], None],
     user_id: str,
+    stimulus_id: Optional[str],
 ) -> str:
     """別の活動中に届いたユーザー発話の仲裁 (track_retirement.md §7.4 の直結化)。
 
@@ -892,6 +946,12 @@ def handle_user_utterance_conflict(
             開いて応対する。凍結が無いと回収側は応対先を知らず、ユーザーの発話を
             「外部イベント通知」の形で流し込むしかない (会話の出来事も開かない =
             帳簿の乖離。2026-08-14 Codex 指摘 F4)。
+        stimulus_id: 発話の永続 ID (``"msg:<building_messages の message_id>"``)。
+            on_event 判断の冪等キーになる。**受領記録 (stimulus_receipt) は
+            取らない** — 発話の再送は building_messages の ``client_message_id``
+            UNIQUE が入口で止めるため、ここへ届く時点で再送ではない。ID が無い
+            (配線ミス) ときは判断を冪等にできないので、ERROR を出して仲裁を経ずに
+            直接 ``engage()`` する (ユーザーの呼びかけを黙殺しない)。
 
     Returns:
         経路ラベル (``direct:*`` / ``judged:*`` / ``none:*``)。ログ・テスト用。
@@ -899,6 +959,15 @@ def handle_user_utterance_conflict(
     if not is_autonomy_on(manager, persona_id):
         engage()
         return ROUTE_DIRECT_AUTONOMY_DISABLED
+
+    if not isinstance(stimulus_id, str) or not stimulus_id.strip():
+        LOGGER.error(
+            "[autonomy-wiring] utterance-conflict without a stimulus_id "
+            "(persona=%s); the judgment cannot be made idempotent — starting "
+            "the conversation directly", persona_id,
+        )
+        engage()
+        return ROUTE_DIRECT_MISSING_STIMULUS_ID
 
     context: Dict[str, Any] = {
         "event_text": f"ユーザーがあなたに話しかけました:\n{utterance_text}",
@@ -909,6 +978,8 @@ def handle_user_utterance_conflict(
         # に凍結して回復経路が読むためだけの同乗。
         "utterance_conflict": True,
         "conversation_user_id": user_id,
+        # 冪等キー (_judgment_idempotency_key) とタスク帳の出どころ参照に使う
+        "stimulus_id": stimulus_id,
     }
     result = fire_judgment_point(manager, persona_id, KIND_ON_EVENT, context)
     if not result.get("submitted"):

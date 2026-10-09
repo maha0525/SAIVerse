@@ -136,6 +136,59 @@ def test_non_streaming_insert_failure_is_terminal() -> None:
     service.manager.pulse_dispatcher.dispatch_user_utterance.assert_not_called()
 
 
+def test_発話の永続IDがストリーム版の受け口へ運ばれる() -> None:
+    """発話を永続化した行の message_id が dispatcher へ渡る event に載る
+    (仲裁の入口で刺激の ID ``msg:<message_id>`` になる — v0.4 段 1-3)。"""
+    service = _runtime([SimpleNamespace(persona_id="p1")])
+    saved = {"message_id": "room:5", "_was_inserted": True}
+
+    with patch(
+        "database.building_messages.insert_building_message_with_location_guard",
+        return_value=saved,
+    ):
+        list(service.handle_user_input_stream(
+            "hello", building_id="room", client_message_id="cmd-5",
+        ))
+
+    event = service.manager.pulse_dispatcher.dispatch_user_utterance.call_args.kwargs["event"]
+    assert event["message_id"] == "room:5"
+    assert event["content"] == "hello"
+
+
+def test_発話の永続IDが非ストリーム版の受け口へ運ばれる() -> None:
+    service = _runtime([SimpleNamespace(persona_id="p1")])
+    saved = {"message_id": "room:6", "_was_inserted": True}
+
+    with patch(
+        "database.building_messages.insert_building_message_with_location_guard",
+        return_value=saved,
+    ):
+        service.handle_user_input("hello")
+
+    event = service.manager.pulse_dispatcher.dispatch_user_utterance.call_args.kwargs["event"]
+    assert event["message_id"] == "room:6"
+
+
+def test_非ストリーム版も同じ送信IDの再送では何も起動しない() -> None:
+    """Discord の受け口が使う非ストリーム版にも、ストリーム版と同じ再送の歯止め。"""
+    service = _runtime([SimpleNamespace(persona_id="p1")])
+    existing = {
+        "message_id": "room:7",
+        "client_message_id": "discord:123",
+        "_was_inserted": False,
+    }
+
+    with patch(
+        "database.building_messages.insert_building_message_with_location_guard",
+        return_value=existing,
+    ) as insert:
+        replies = service.handle_user_input("hello", client_message_id="discord:123")
+
+    assert replies == []
+    assert insert.call_args.args[2]["client_message_id"] == "discord:123"
+    service.manager.pulse_dispatcher.dispatch_user_utterance.assert_not_called()
+
+
 def test_non_streaming_keeps_going_past_a_persona_without_a_usable_model() -> None:
     """ストリームでない経路でも、モデルが使えない一人でほかのペルソナを止めない。"""
     from llm_clients.exceptions import ModelUnavailableError

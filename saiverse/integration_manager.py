@@ -170,6 +170,17 @@ class IntegrationManager:
             return
 
         for event in events:
+            # 刺激の ID は供給源の義務 (BaseIntegration.poll の契約)。ここで代理
+            # 採番すると再送が「別の刺激」に数えられるので、無い封筒は落とす。
+            stimulus_id = getattr(event, "stimulus_id", None)
+            if not isinstance(stimulus_id, str) or not stimulus_id.strip():
+                LOGGER.error(
+                    "[IntegrationManager] '%s' returned an event without a "
+                    "stimulus_id; dropping it (the integration must set the "
+                    "source's durable ID — see BaseIntegration.poll): %r",
+                    integration.name, event,
+                )
+                continue
             try:
                 phenomenon_manager.emit(event)
             except Exception:

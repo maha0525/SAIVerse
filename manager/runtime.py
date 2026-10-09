@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import requests
 import threading
 import queue
+import uuid
 from google.genai import errors
 
 from api.deps import avatar_path_to_url
@@ -331,6 +332,8 @@ class RuntimeService(
         self.manager._emit_trigger(
             TriggerType.USER_MOVE,
             {"from_building": from_building, "to_building": to_building},
+            # 内部の一回きりの出来事 — 封筒を作った時点の uuid4 が刺激の ID
+            stimulus_id=f"user_move:{uuid.uuid4()}",
         )
 
     def _move_persona(
@@ -355,6 +358,8 @@ class RuntimeService(
                     "from_building": from_id,
                     "to_building": arrived_building_id(result[0], result[1], to_id),
                 },
+                # 内部の一回きりの出来事 — 封筒を作った時点の uuid4 が刺激の ID
+                stimulus_id=f"persona_move:{uuid.uuid4()}",
             )
         return result
 
@@ -585,10 +590,24 @@ class RuntimeService(
         return saved
 
     def handle_user_input(
-        self, message: str, metadata: Optional[Dict[str, Any]] = None
+        self,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        client_message_id: Optional[str] = None,
     ) -> List[str]:
+        """ユーザー発話の非ストリーム入口 (Discord の受け口などが使う)。
+
+        Args:
+            client_message_id: 送信元が発行した発話の一意 ID (冪等キー)。
+                building_messages の ``client_message_id`` (UNIQUE) に刻まれ、
+                同じ ID の再送は永続化の段で既存行に合流して**何も起動しない**
+                (ストリーム版の ``duplicate_command`` と同じ扱い)。Discord の
+                受け口は ``"discord:<Discord のメッセージ ID>"`` を渡す。
+        """
         logging.debug(
-            "[runtime] handle_user_input called (metadata_present=%s)", bool(metadata)
+            "[runtime] handle_user_input called (metadata_present=%s, client_message_id=%s)",
+            bool(metadata), client_message_id,
         )
         if not message or not str(message).strip():
             logging.error("[runtime] handle_user_input got empty message; aborting to avoid corrupt routing")
@@ -623,6 +642,7 @@ class RuntimeService(
                 message,
                 metadata,
                 responding_personas,
+                client_message_id,
             )
         except Exception:
             logging.exception("[runtime] Failed to persist user utterance")
@@ -637,6 +657,17 @@ class RuntimeService(
             return [
                 '<div class="note-box">発言を保存できなかったため、処理を開始しませんでした。再送してください。</div>'
             ]
+        # 同じ送信 ID の再送は同じ発話であって新しい依頼ではない — 応答も副作用も
+        # 起こさない (ストリーム版の duplicate_command と同じ規律)。
+        if saved_user_message.get("_was_inserted") is False:
+            logging.info(
+                "[runtime] handle_user_input: duplicate client_message_id=%s "
+                "(already accepted as %s); not dispatching again",
+                client_message_id, saved_user_message.get("message_id"),
+            )
+            return []
+        # 発話の永続 ID を受け口へ運ぶ (仲裁の冪等キー = 刺激の ID の元)
+        user_entry["message_id"] = str(saved_user_message["message_id"])
 
         # ユーザー発話イベントの受け口 (saiverse.user_conversation)。
         # 会話が開いていれば直接応答を起動し、閉じていて別の活動中なら on_event
@@ -821,6 +852,8 @@ class RuntimeService(
 
                 user_msg_id = str(saved_user_message["message_id"])
                 _enrich_event({"type": "user_message_id", "message_id": user_msg_id})
+                # 発話の永続 ID を受け口へ運ぶ (仲裁の冪等キー = 刺激の ID の元)
+                user_entry["message_id"] = user_msg_id
 
                 # A duplicate idempotency key is the same utter command, not a
                 # new request.  Never restart LLM/tool side effects; clients can

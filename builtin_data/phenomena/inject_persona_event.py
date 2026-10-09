@@ -26,6 +26,7 @@ def inject_persona_event(
     args_json: Optional[str] = None,
     event_type: Optional[str] = None,
     _manager: Any = None,
+    _stimulus_id: Optional[str] = None,
     **_kwargs: Any,
 ) -> str:
     """Inject an external event into a persona's action pipeline.
@@ -43,6 +44,14 @@ def inject_persona_event(
             handoff_2026-05-08 作業 2)。
         event_type: Event type tag for persona_event_log.
         _manager: SAIVerseManager reference (injected by PhenomenonManager).
+        _stimulus_id: 発火元の封筒 (TriggerEvent) の刺激の ID (injected by
+            PhenomenonManager)。**必須** — 無ければ ERROR で落とす (供給源の
+            義務で、ここで代理採番しない)。
+
+    **同じ刺激の再配送はここで止める** (受領記録 ``stimulus_receipt``)。照合は
+    persona_event_log への記録と、判断経由・直接応対のどちらの経路よりも前に
+    行う — 二度目を記録すればペルソナは同じイベントを二度読み、応対を起こせば
+    二度反応するため。
     """
     if _manager is None:
         LOGGER.error(
@@ -50,6 +59,33 @@ def inject_persona_event(
             persona_id,
         )
         return "error: no manager reference"
+
+    # --- 0. 刺激の受領の照合 (同じ刺激の再配送では何も起動しない) ---
+    from saiverse.autonomy_wiring import (
+        ROUTE_NONE_DUPLICATE_STIMULUS,
+        ROUTE_NONE_MISSING_STIMULUS_ID,
+    )
+    from saiverse.stimulus_receipt import (
+        CLAIM_DUPLICATE,
+        CLAIM_MISSING_ID,
+        claim_stimulus,
+    )
+
+    claim = claim_stimulus(_manager, persona_id, _stimulus_id)
+    if claim == CLAIM_MISSING_ID:
+        LOGGER.error(
+            "[inject_persona_event] event for %s has no stimulus_id; dropping it "
+            "(route=%s, type=%s)",
+            persona_id, ROUTE_NONE_MISSING_STIMULUS_ID, event_type,
+        )
+        return "error: missing stimulus_id"
+    if claim == CLAIM_DUPLICATE:
+        LOGGER.info(
+            "[inject_persona_event] redelivery of stimulus %s for %s; nothing "
+            "started (route=%s)",
+            _stimulus_id, persona_id, ROUTE_NONE_DUPLICATE_STIMULUS,
+        )
+        return "ok: duplicate stimulus"
 
     # --- 1. Record to persona_event_log ---
     try:
@@ -153,7 +189,11 @@ def inject_persona_event(
             persona_id=persona_id,
             building_id=building_id,
             user_input=user_input,
-            metadata={"source": "external_event", "event_type": event_type},
+            metadata={
+                "source": "external_event",
+                "event_type": event_type,
+                "stimulus_id": _stimulus_id,
+            },
             meta_playbook=effective_playbook,
             args=playbook_args,
         )
@@ -183,6 +223,7 @@ def inject_persona_event(
             event_text = "\n".join([event_description] + extra_lines)
             route = handle_external_event(
                 _manager, persona_id, event_text,
+                stimulus_id=_stimulus_id,
                 dispatch_direct=_dispatch_direct,
                 # 応対の材料 (組み立て済みの実物) を判断の台帳 payload に凍結する
                 # ための envelope — 回復 tick の回収が engage_now の応対を

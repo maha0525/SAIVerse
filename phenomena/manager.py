@@ -85,10 +85,16 @@ class PhenomenonManager:
 
             for rule in matching_rules:
                 args = self._resolve_arguments(rule, event)
+                # 刺激の ID はルールの引数マッピングに任せず、封筒から現象まで
+                # 必ず運ぶ (予約引数 _stimulus_id として _execute_phenomenon が注入)。
                 if self.async_execution:
-                    self._execution_queue.put((rule.PHENOMENON_NAME, args, rule.RULE_ID))
+                    self._execution_queue.put(
+                        (rule.PHENOMENON_NAME, args, rule.RULE_ID, event.stimulus_id)
+                    )
                 else:
-                    self._execute_phenomenon(rule.PHENOMENON_NAME, args)
+                    self._execute_phenomenon(
+                        rule.PHENOMENON_NAME, args, stimulus_id=event.stimulus_id,
+                    )
         except Exception as e:
             LOGGER.error("[PhenomenonManager] Error processing trigger: %s", e, exc_info=True)
 
@@ -166,8 +172,21 @@ class PhenomenonManager:
 
         return resolved
 
-    def _execute_phenomenon(self, phenomenon_name: str, args: Dict[str, Any]) -> Any:
-        """フェノメノンを実行"""
+    def _execute_phenomenon(
+        self,
+        phenomenon_name: str,
+        args: Dict[str, Any],
+        stimulus_id: Optional[str] = None,
+    ) -> Any:
+        """フェノメノンを実行
+
+        Args:
+            stimulus_id: 発火元の封筒 (TriggerEvent) の刺激 ID。``_manager`` と
+                同じ流儀で予約引数 ``_stimulus_id`` として注入する (現象は
+                ``**_kwargs`` で受ける)。トリガーを経ない直接呼び出し
+                (:meth:`invoke`) では None で、注入しない — 刺激の ID を要する
+                現象 (inject_persona_event) はその場合 fail-closed で応対しない。
+        """
         impl = PHENOMENON_REGISTRY.get(phenomenon_name)
         if not impl:
             LOGGER.error("[PhenomenonManager] Phenomenon '%s' not found in registry", phenomenon_name)
@@ -177,6 +196,8 @@ class PhenomenonManager:
             # Inject _manager reference so phenomena can access PulseController etc.
             if self.saiverse_manager is not None:
                 args["_manager"] = self.saiverse_manager
+            if stimulus_id is not None:
+                args["_stimulus_id"] = stimulus_id
 
             LOGGER.info("[PhenomenonManager] Executing phenomenon '%s' with args: %s", phenomenon_name, args)
             result = impl(**args)
@@ -191,9 +212,9 @@ class PhenomenonManager:
         LOGGER.info("[PhenomenonManager] Worker loop started")
         while not self._stop_event.is_set():
             try:
-                phenomenon_name, args, rule_id = self._execution_queue.get(timeout=1.0)
+                phenomenon_name, args, rule_id, stimulus_id = self._execution_queue.get(timeout=1.0)
                 LOGGER.debug("[PhenomenonManager] Worker processing phenomenon '%s' (rule %d)", phenomenon_name, rule_id)
-                self._execute_phenomenon(phenomenon_name, args)
+                self._execute_phenomenon(phenomenon_name, args, stimulus_id=stimulus_id)
             except queue.Empty:
                 continue
             except Exception as e:

@@ -23,12 +23,22 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class DiscordMessage:
+    """Discord の一発言を SAIVerse 本体の受け口 (manager/gateway.py) へ運ぶ封筒。
+
+    受け口は ``context`` (どのチャンネル = どの建物か) をこの封筒から読む —
+    別引数では受け取らない。``message_id`` は Discord のメッセージ ID
+    (relay bot の ``payload.message_id``) で、人間の発話の再送を止める冪等キー
+    (``client_message_id = "discord:<message_id>"``) の元になる。
+    """
+
     context: ChannelContext
     author_discord_id: str
     author_role: str
     content: str
     raw_event: GatewayEvent
     visitor: VisitorProfile | None = None
+    message_id: str | None = None
+    author_name: str = ""
 
 
 class SAIVerseGatewayAdapter(GatewayHostAdapter):
@@ -80,6 +90,7 @@ class SAIVerseGatewayAdapter(GatewayHostAdapter):
     ) -> DiscordMessage:
         author = event.payload.get("author") or {}
         content = event.payload.get("content", "")
+        raw_message_id = event.payload.get("message_id")
         return DiscordMessage(
             context=context,
             author_discord_id=str(author.get("discord_user_id", "")),
@@ -87,6 +98,8 @@ class SAIVerseGatewayAdapter(GatewayHostAdapter):
             content=content,
             raw_event=event,
             visitor=visitor,
+            message_id=str(raw_message_id) if raw_message_id else None,
+            author_name=str(author.get("display_name") or ""),
         )
 
 

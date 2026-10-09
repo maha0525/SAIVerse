@@ -77,11 +77,24 @@ class PulseDispatcher:
         「応答してはいけない失敗」を持ったときの席として。
 
         Args:
+            event: 発話の dict。``content`` と、発話を永続化した行の
+                ``message_id`` (building_messages の ``"building_id:seq"``) を
+                持つ。``message_id`` は受け口で刺激の ID (``"msg:<message_id>"``)
+                になり、別行動中の仲裁 (on_event 判断) の冪等キーへ運ばれる。
             pulse_options: 会話開始経路で main_line Pulse へ転送する起動オプション
                 (metadata / meta_playbook / args / pre_spells / event_callback)。
                 ``invoke_main_line`` の closure が抱えているものと同じ値を渡す。
         """
         from saiverse.user_conversation import UserUtteranceError, on_user_utterance
+
+        if not event.get("message_id"):
+            # 発話の取り込みは永続化を前提条件にしている (manager/runtime.py)
+            # ので、ここで ID が無いのは配線ミス。応答は止めない (仲裁側が
+            # ID 無しを ERROR で扱う) が、入口で一度表に出しておく。
+            LOGGER.error(
+                "[dispatcher] user utterance without a message_id (persona=%s); "
+                "the stimulus ID cannot reach the arbitration", persona_id,
+            )
 
         try:
             on_user_utterance(

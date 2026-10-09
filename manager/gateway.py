@@ -58,21 +58,43 @@ class GatewayMixin:
         self._gateway_initiate_memory_sync(visitor, current_building)
 
     def gateway_handle_human_message(
-        self, message: DiscordMessage, context: ChannelContext | None
+        self, message: DiscordMessage
     ) -> Sequence[GatewayCommand]:
+        """Discord の人間の発話の受け口 (呼び手は ``GatewayHost.handle_human_message``)。
+
+        形は呼び手に合わせて引数 1 個 — どのチャンネル (= 建物) かは
+        ``message.context`` が運ぶ。以前は ``(message, context)`` の 2 引数で
+        定義され、さらに ``DiscordMessage`` に無い欄 (``author_name`` /
+        ``persona_id``) と ``ChannelContext`` に無い ``persona_id`` を読んでいた
+        ため、この経路は呼ばれた瞬間に TypeError で落ちていた
+        (docs/issues/discord_gateway_human_message_signature_mismatch.md)。
+
+        Discord のメッセージ ID は ``client_message_id = "discord:<id>"`` として
+        発話の永続化 (building_messages、UNIQUE) まで運ぶ。relay bot の再送や
+        ゲートウェイの再接続で同じ発言がもう一度届いても、永続化の段で既存行に
+        合流して何も起動しない。ID の無い発言は義務違反として落とす
+        (受け口で代理採番しない — 再送を別の発話と数えてしまうため)。
+
+        発話の記録は ``handle_user_input`` の永続化だけで行う。以前ここにあった
+        ``_append_gateway_history`` による二重書き込みは、同じ発話を二行にして
+        ペルソナに二度聞かせるので外した。
+        """
+        context = message.context
         if not context:
             logging.debug("Gateway human message without context: %s", message)
             return []
+        if not message.message_id:
+            logging.error(
+                "Gateway human message without a Discord message_id; dropping it "
+                "(channel=%s) — the relay bot must forward payload.message_id",
+                context.channel_id,
+            )
+            return []
 
-        result: List[str] = self.handle_user_input(message.content)
-        entry = {
-            "role": "user",
-            "content": message.content,
-            "speaker_name": message.author_name,
-            "persona_id": message.persona_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        self._append_gateway_history(message.context.building_id, entry)
+        result: List[str] = self.handle_user_input(
+            message.content,
+            client_message_id=f"discord:{message.message_id}",
+        )
         commands: List[GatewayCommand] = []
         for text in result:
             commands.append(
@@ -81,7 +103,7 @@ class GatewayMixin:
                     payload={
                         "channel_id": context.channel_id,
                         "content": text,
-                        "persona_id": context.persona_id,
+                        "persona_id": None,
                         "building_id": context.building_id,
                         "city_id": context.city_id,
                     },
@@ -90,19 +112,34 @@ class GatewayMixin:
         return commands
 
     def gateway_handle_remote_persona_message(
-        self, visitor: VisitorProfile, message: DiscordMessage
+        self, message: DiscordMessage
     ) -> None:
+        """訪問者ペルソナの発言の受け口 (呼び手は
+        ``GatewayHost.handle_remote_persona_message``)。
+
+        人間の発話の受け口と同じ食い違い (呼び手は引数 1 個、定義は
+        ``(visitor, message)``) があったので、形を呼び手に揃えた。訪問者は
+        ``message.visitor`` が運ぶ。
+        """
+        visitor = message.visitor
+        if visitor is None:
+            logging.warning(
+                "Gateway remote persona message without a visitor; dropping it: %s",
+                message,
+            )
+            return None
+        metadata = visitor.metadata or {}
         entry = {
             "role": "assistant",
             "content": message.content,
-            "persona_id": message.persona_id,
-            "speaker_name": visitor.persona_name,
-            "avatar_image": visitor.metadata.get("avatar_image", self.default_avatar),
+            "persona_id": visitor.persona_id,
+            "speaker_name": metadata.get("persona_name", visitor.persona_id),
+            "avatar_image": metadata.get("avatar_image", self.default_avatar),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         self._append_gateway_history(message.context.building_id, entry)
         self._gateway_send_message(
-            message.context.building_id, message.content, message.persona_id
+            message.context.building_id, message.content, visitor.persona_id
         )
 
     def gateway_handle_memory_sync_initiate(

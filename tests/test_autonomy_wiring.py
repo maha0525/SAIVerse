@@ -766,6 +766,7 @@ def test_external_event_not_active_goes_direct(session_factory, monkeypatch):
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "掲示板の告知",
+        stimulus_id="ev-1",
         dispatch_direct=lambda: dispatched.append("direct"),
     )
     assert route == wiring.ROUTE_DIRECT_AUTONOMY_DISABLED
@@ -785,6 +786,7 @@ def test_external_event_in_conversation_goes_direct(session_factory, monkeypatch
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "掲示板の告知",
+        stimulus_id="ev-2",
         dispatch_direct=lambda: dispatched.append("direct"),
     )
     assert route == wiring.ROUTE_DIRECT_IN_CONVERSATION
@@ -804,6 +806,7 @@ def test_external_event_engage_now_dispatches_response(session_factory, monkeypa
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "呼びかけ",
+        stimulus_id="ev-3",
         dispatch_direct=lambda: dispatched.append("direct"),
     )
     assert route == wiring.ROUTE_JUDGED_ENGAGE_NOW
@@ -827,6 +830,7 @@ def test_external_event_non_engage_reactions_do_not_dispatch(
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "掲示板の告知",
+        stimulus_id="ev-4",
         dispatch_direct=lambda: dispatched.append("direct"),
     )
     assert route == "judged:ignore"
@@ -844,6 +848,7 @@ def test_external_event_falls_back_when_judgment_unavailable(session_factory):
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "掲示板の告知",
+        stimulus_id="ev-5",
         dispatch_direct=lambda: dispatched.append("direct"),
     )
     assert route == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
@@ -865,6 +870,7 @@ def test_external_event_without_outcome_refuses_the_fallback(
     with caplog.at_level("WARNING", logger="saiverse.judgment_points"):
         route = wiring.handle_external_event(
             manager, PERSONA_ID, "掲示板の告知",
+            stimulus_id="ev-6",
             dispatch_direct=lambda: dispatched.append("direct"),
         )
     assert route == wiring.ROUTE_NONE_INDETERMINATE
@@ -910,6 +916,7 @@ def test_external_event_indeterminate_seat_avoids_double_handling(
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "掲示板の告知",
+        stimulus_id="ev-7",
         dispatch_direct=lambda: dispatched.append("direct"),
     )
     assert route == wiring.ROUTE_NONE_INDETERMINATE
@@ -938,6 +945,7 @@ def test_external_event_freezes_dispatch_envelope_into_context(
     }
     wiring.handle_external_event(
         manager, PERSONA_ID, "掲示板の告知",
+        stimulus_id="ev-8",
         dispatch_direct=lambda: None,
         dispatch_envelope=envelope,
     )
@@ -1066,6 +1074,7 @@ def test_external_event_unknown_reaction_avoids_double_handling(
     with caplog.at_level("WARNING", logger="saiverse.autonomy_wiring"):
         route = wiring.handle_external_event(
             manager, PERSONA_ID, "掲示板の告知",
+            stimulus_id="ev-9",
             dispatch_direct=lambda: dispatched.append("direct"),
         )
     assert route == wiring.ROUTE_JUDGED_UNKNOWN
@@ -1098,6 +1107,7 @@ def test_external_event_runtime_error_marks_unknown_and_does_not_fall_back(
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "掲示板の告知",
+        stimulus_id="ev-10",
         dispatch_direct=lambda: dispatched.append("direct"),
     )
     assert route == wiring.ROUTE_NONE_JUDGMENT_RAN
@@ -1123,6 +1133,7 @@ def test_external_event_side_effect_free_failure_falls_back_once(session_factory
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "掲示板の告知",
+        stimulus_id="ev-11",
         dispatch_direct=lambda: dispatched.append("direct"),
     )
     assert route == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
@@ -1158,6 +1169,7 @@ def test_runtime_exception_after_finalize_is_indeterminate(session_factory):
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "掲示板の告知",
+        stimulus_id="ev-12",
         dispatch_direct=lambda: dispatched.append("direct"),
     )
     assert route == wiring.ROUTE_NONE_INDETERMINATE
@@ -1180,6 +1192,7 @@ def test_ledger_claim_failure_is_reported_as_indeterminate(session_factory):
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "掲示板の告知",
+        stimulus_id="ev-13",
         dispatch_direct=lambda: dispatched.append("direct"),
     )
     assert route == wiring.ROUTE_NONE_INDETERMINATE
@@ -1237,6 +1250,7 @@ def test_external_event_reaction_falls_back_to_ledger_result(
     dispatched: List[str] = []
     route = wiring.handle_external_event(
         manager, PERSONA_ID, "呼びかけ",
+        stimulus_id="ev-14",
         dispatch_direct=lambda: dispatched.append("direct"),
     )
     assert route == wiring.ROUTE_JUDGED_ENGAGE_NOW
@@ -1254,6 +1268,7 @@ def _conflict(manager, engaged: List[str]) -> str:
         manager, PERSONA_ID, "ちょっといい？",
         engage=lambda: engaged.append("engage"),
         user_id="1",
+        stimulus_id="msg:alice_room:1",
     )
 
 
@@ -2166,3 +2181,105 @@ def test_slot_fire_at_no_wake_is_same_day():
         {"start": "00:30"},
     )
     assert fire == _dt(2026, 7, 4, 0, 30, 0)
+
+
+# ---------------------------------------------------------------------------
+# 刺激の ID (v0.4 段 1-3): on_event の冪等キーと、ID の無い刺激の fail-closed
+# (docs/issues/on_event_judgment_has_no_idempotency_key.md の「決まったこと」)
+# ---------------------------------------------------------------------------
+
+
+def _on_event_context(stimulus_id):
+    return {"event_text": "掲示板の告知", "is_alert": False, "stimulus_id": stimulus_id}
+
+
+def test_on_eventの冪等キーは刺激のIDから作られる(session_factory):
+    manager, _ = _make_manager(session_factory)
+    key = wiring._judgment_idempotency_key(
+        manager, PERSONA_ID, wiring.KIND_ON_EVENT, _on_event_context("x:mention:42"),
+    )
+    assert key == f"{PERSONA_ID}:x:mention:42"
+
+
+def test_同じ刺激IDのon_event判断の二席目は拒まれ判断は一度しか走らない(session_factory):
+    """以前は on_event のキーが None で、発火のたびに新しい席を取っていた。"""
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_finalizing_ledger(manager, session_factory)
+    clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
+
+    first = wiring.fire_judgment_point(
+        manager, PERSONA_ID, wiring.KIND_ON_EVENT, _on_event_context("ev-same"),
+    )
+    assert first["submitted"] is True
+    assert ledger.get_execution(first["execution_id"])["status"] == XL.STATUS_APPLIED
+
+    second = wiring.fire_judgment_point(
+        manager, PERSONA_ID, wiring.KIND_ON_EVENT, _on_event_context("ev-same"),
+    )
+    assert second["submitted"] is False
+    assert second["reason"] == f"duplicate:{XL.STATUS_APPLIED}"
+    assert second["execution_id"] == first["execution_id"]
+    assert len(manager.pulse_controller.calls) == 1
+
+    # 別の刺激は別の席を取って走る
+    other = wiring.fire_judgment_point(
+        manager, PERSONA_ID, wiring.KIND_ON_EVENT, _on_event_context("ev-other"),
+    )
+    assert other["submitted"] is True
+    assert other["execution_id"] != first["execution_id"]
+    assert len(manager.pulse_controller.calls) == 2
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_刺激IDの無い外部イベントは応対も判断も起動せずERRORで落ちる(
+    session_factory, monkeypatch, caplog, active,
+):
+    """自律 OFF (直接応対の経路) でも ON (判断の経路) でも、ID の無い刺激は
+    代理採番せずに落とす (義務の fail-closed)。"""
+    manager, _ = _make_manager(session_factory, active=active)
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+    dispatched: List[str] = []
+    with caplog.at_level("ERROR", logger="saiverse.autonomy_wiring"):
+        route = wiring.handle_external_event(
+            manager, PERSONA_ID, "掲示板の告知",
+            stimulus_id=None,
+            dispatch_direct=lambda: dispatched.append("direct"),
+        )
+    assert route == wiring.ROUTE_NONE_MISSING_STIMULUS_ID
+    assert dispatched == []
+    assert calls == []
+    assert any("without a stimulus_id" in r.message for r in caplog.records)
+
+
+def test_刺激IDの無い別行動中の発話は判断を経ず直接会話を始める(
+    session_factory, monkeypatch,
+):
+    """発話は黙殺しない — 判断を冪等にできないので仲裁を経ずに応答する。"""
+    manager, _ = _make_manager(session_factory)
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+    engaged: List[str] = []
+    route = wiring.handle_user_utterance_conflict(
+        manager, PERSONA_ID, "ちょっといい？",
+        engage=lambda: engaged.append("engage"),
+        user_id="1",
+        stimulus_id=None,
+    )
+    assert route == wiring.ROUTE_DIRECT_MISSING_STIMULUS_ID
+    assert engaged == ["engage"]
+    assert calls == []
+
+
+def test_別行動中の発話の刺激IDが判断の文脈に同乗する(session_factory, monkeypatch):
+    manager, _ = _make_manager(session_factory)
+    captured: Dict[str, Any] = {}
+
+    def _fake(mgr, pid, kind, context=None, **kw):
+        captured["context"] = context
+        return {"submitted": True, "applied_events": []}
+
+    monkeypatch.setattr(wiring, "fire_judgment_point", _fake)
+    wiring.handle_user_utterance_conflict(
+        manager, PERSONA_ID, "ちょっといい？",
+        engage=lambda: None, user_id="1", stimulus_id="msg:alice_room:3",
+    )
+    assert captured["context"]["stimulus_id"] == "msg:alice_room:3"

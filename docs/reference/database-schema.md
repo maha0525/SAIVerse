@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 53
+**テーブル数**: 54
 
 ## addon_config
 
@@ -136,6 +136,15 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `TTL_SECONDS` | INTEGER | — |  |
 | `UPDATED_AT` | INTEGER | NOT NULL |  |
 | `FOLDED_RANGES_JSON` | TEXT | — |  |
+
+## stimulus_receipt
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `RECEIPT_ID` | INTEGER | PK, NOT NULL |  |
+| `PERSONA_ID` | VARCHAR(255) | NOT NULL |  |
+| `STIMULUS_ID` | VARCHAR(255) | NOT NULL |  |
+| `RECEIVED_AT` | INTEGER | NOT NULL |  |
 
 ## tool
 

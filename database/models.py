@@ -1299,6 +1299,37 @@ class PersonaLife(Base):
     UPDATED_AT = Column(DateTime, nullable=False)
 
 
+class StimulusReceipt(Base):
+    """外から届いた刺激の受領記録 — 同じ刺激の再配送で二度反応しないための照合。
+
+    docs/issues/on_event_judgment_has_no_idempotency_key.md の「決まったこと」
+    (2026-10-09 まはー決定)。外部イベント (現象の封筒 TriggerEvent) は供給源が
+    発行する永続 ID (``stimulus_id``) を必ず持ち、ペルソナへ届く入口
+    (``builtin_data/phenomena/inject_persona_event.py``) が一行 INSERT する。
+    (PERSONA_ID, STIMULUS_ID) の UNIQUE 衝突 = 同じ刺激の再配送で、何も起動しない。
+
+    - ``RECEIVED_AT`` は epoch 秒で、**実時間 (``time.time()``) で刻む** —
+      ``clock.now()`` の仮想時刻ではない。古さの判定 (保持期間) は再配送の窓の
+      話で、ペルソナの一日の時刻とは無関係だから (一日シミュレータで時刻を
+      進めても受領記録が一斉に古くならないように)。
+    - 掃除は**保持期間を過ぎた行だけを個別に消す**。記録全体を丸ごと消す瞬間を
+      作らない (掃除と供給が前後しても新しい行が残る)。
+    - 本文のハッシュでの同一視はしない (同じ文面の別の発話を黙殺するため)。
+    - ユーザー発話はこの表を使わない — 再送は building_messages の
+      ``client_message_id`` の UNIQUE が入口で止める。
+    - 操作は saiverse/stimulus_receipt.py に集約する。
+    """
+    __tablename__ = "stimulus_receipt"
+    RECEIPT_ID = Column(Integer, primary_key=True, autoincrement=True)
+    PERSONA_ID = Column(String(255), nullable=False)
+    STIMULUS_ID = Column(String(255), nullable=False)
+    RECEIVED_AT = Column(Integer, nullable=False)  # epoch 秒 (time.time())
+    __table_args__ = (
+        UniqueConstraint("PERSONA_ID", "STIMULUS_ID", name="uq_stimulus_receipt"),
+        Index("idx_stimulus_receipt_received_at", "RECEIVED_AT"),
+    )
+
+
 class PersonaTimetableTemplate(Base):
     """習慣テンプレート: 時間割の枠 (時間割改修 T2、timetable_redesign.md §5.1)。
 

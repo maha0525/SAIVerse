@@ -9,7 +9,7 @@
   偽 artifact_ref は棄却、desk_memo が Track metadata に載る、
   remaining_timetable の全置換
 - on_event: reaction の 4 分岐、alert での engage_now 縮退 (スキーマ + finalize
-  二重ガード)、insert_slot の時刻整合検証、note_only の plan meta 覚え書き
+  二重ガード)、add_task のタスク帳への積み込み、note_only は判断の記録だけ
 - day_close: tomorrow_memo が翌朝 day_open の状況テキストに現れる (連結。
   生の実績表 = 旧 day_digest は再供給しない、2026-07-29)
 - 生成スキーマに additionalProperties が含まれない (プロバイダ正規化層に任せる)
@@ -1212,12 +1212,12 @@ def test_on_event_dispatch_schema_four_branches(manager, task_refs):
     schema = args["response_schema"]
     _assert_no_additional_properties(schema)
     assert _reaction_types(schema) == [
-        "engage_now", "insert_slot", "note_only", "ignore",
+        "engage_now", "add_task", "note_only", "ignore",
     ]
-    # insert_slot の slot は §3.2 共通定義 (実在 ref / facility の enum)
-    slot = schema["properties"]["reaction"]["anyOf"][1]["properties"]["slot"]
-    assert "task:1" in slot["properties"]["ref"]["enum"]
-    assert slot["properties"]["facility"]["enum"] == ["library", "workshop", "own_room"]
+    # add_task は時間割に依存しない (コマの欄を持たず、積む一件の中身だけ)
+    add_task = schema["properties"]["reaction"]["anyOf"][1]
+    assert set(add_task["properties"]) == {"type", "task"}
+    assert add_task["required"] == ["type", "task"]
 
     text = args["situation_text"]
     assert "ボブが訪ねてきた" in text
@@ -1314,51 +1314,69 @@ def test_on_event_finalize_engage_now(manager, task_refs, finalize_mod, tmp_path
     assert manager.personas[PERSONA_ID].sai_memory.messages[0]["scope"] == "committed"
 
 
-def test_on_event_finalize_insert_slot_and_time_validation(
-    manager, task_refs, finalize_mod, tmp_path, caplog
+def test_on_event_finalize_add_task_adds_one_system_task(
+    manager, task_refs, finalize_mod, tmp_path
 ):
-    # 有効なコマ (現在 07:00 より後) → 挿入 + 予約
+    """add_task はタスク帳にシステムタスクを一件積む (時間割には触れない)。"""
+    from saiverse import task_book
+
     output = {
-        "monologue": "今は手が離せないから午後に見よう。",
-        "reaction": {"type": "insert_slot", "slot": {
-            "start": "15:00", "kind": "調べる", "ref": "task:1",
-            "facility": "library", "budget_rounds": 4, "note": "届いた資料を読む",
-        }},
+        "monologue": "今は手が離せないから、あとで資料を読もう。",
+        "reaction": {"type": "add_task", "task": "届いた資料を読んで要点をまとめる"},
     }
     ctx = json.dumps({"plan_date": PLAN_DATE, "is_alert": False,
-                      "event_text": "資料が届いた"})
+                      "event_text": "資料が届いた", "stimulus_id": "feed:item:9"})
     with _persona_ctx(manager, tmp_path):
         summary, _, _ = finalize_mod.judgment_finalize(
             judgment_output=output, kind="on_event", judgment_context=ctx,
         )
-    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert [(s["start"], s["status"]) for s in slots] == [("15:00", "pending")]
-    assert manager.event_scheduler.pending_count() == 1
-    assert "reaction=insert_slot" in summary
+    assert "reaction=add_task" in summary
     assert "applied=True" in summary
 
-    # 過去時刻 (06:00 < 現在 07:00) → 棄却 + WARN、時間割は不変
-    output_past = {
-        "monologue": "……",
-        "reaction": {"type": "insert_slot", "slot": {
-            "start": "06:00", "kind": "調べる", "ref": "task:1",
-            "facility": "library", "budget_rounds": 4, "note": "x",
-        }},
-    }
+    entries = task_book.list_open_system_tasks(manager, PERSONA_ID)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["origin"] == task_book.ORIGIN_SYSTEM
+    assert entry["due_at"] is None
+    assert entry["origin_ref"] == "feed:item:9"
+    assert "届いた資料を読んで要点をまとめる" in entry["content"]
+    assert "資料が届いた" in entry["content"]
+    # 時間割には何も挿さない
+    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) is None
+    # 判断の記録にも積んだことが残る
+    assert "タスク帳へ積む" in manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
+
+    # 同じ刺激への finalize の再実行 (台帳なしの直呼び) でも一件のまま
+    with _persona_ctx(manager, tmp_path):
+        finalize_mod.judgment_finalize(
+            judgment_output=output, kind="on_event", judgment_context=ctx,
+        )
+    assert len(task_book.list_open_system_tasks(manager, PERSONA_ID)) == 1
+
+
+def test_on_event_finalize_add_task_rejects_empty_task(
+    manager, task_refs, finalize_mod, tmp_path, caplog
+):
+    from saiverse import task_book
+
+    output = {"monologue": "……", "reaction": {"type": "add_task", "task": "  "}}
+    ctx = json.dumps({"plan_date": PLAN_DATE, "is_alert": False,
+                      "event_text": "資料が届いた", "stimulus_id": "feed:item:9"})
     with caplog.at_level("WARNING"):
         with _persona_ctx(manager, tmp_path):
-            summary2, _, _ = finalize_mod.judgment_finalize(
-                judgment_output=output_past, kind="on_event", judgment_context=ctx,
+            summary, _, _ = finalize_mod.judgment_finalize(
+                judgment_output=output, kind="on_event", judgment_context=ctx,
             )
-    assert any("現在時刻" in r.message for r in caplog.records)
-    assert "applied=False" in summary2
-    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert [(s["start"], s["status"]) for s in slots] == [("15:00", "pending")]
+    assert any("add_task rejected" in r.message for r in caplog.records)
+    assert "applied=False" in summary
+    assert task_book.list_open_system_tasks(manager, PERSONA_ID) == []
 
 
-def test_on_event_finalize_note_only_saves_event_memo(
+def test_on_event_finalize_note_only_stays_in_the_judgment_record(
     manager, task_refs, finalize_mod, tmp_path
 ):
+    """note_only の覚え書きは判断の記録に載るだけで、別の置き場に書かない
+    (2026-10-09 決定 — 旧実装は day_plan の meta.event_memos にも積んでいた)。"""
     output = {
         "monologue": "今すぐでなくていい。覚えておこう。",
         "reaction": {"type": "note_only",
@@ -1370,12 +1388,12 @@ def test_on_event_finalize_note_only_saves_event_memo(
         summary, _, _ = finalize_mod.judgment_finalize(
             judgment_output=output, kind="on_event", judgment_context=ctx,
         )
-    memos = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)["event_memos"]
-    assert len(memos) == 1
-    assert memos[0]["text"] == "新しい展示が始まったらしい。今度見に行く"
-    assert memos[0]["event"] == "掲示板の告知"
     assert "reaction=note_only" in summary
     assert "applied=True" in summary
+    record = manager.personas[PERSONA_ID].sai_memory.messages[0]["content"]
+    assert "新しい展示が始まったらしい。今度見に行く" in record
+    # day_plan の meta には何も書かれない
+    assert not (day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE) or {}).get("event_memos")
 
 
 def test_on_event_finalize_ignore_is_discardable(
@@ -1400,10 +1418,7 @@ def test_on_event_finalize_alert_rejects_non_engage(
     """alert ではスキーマ縮退に加えて finalize でも engage_now 以外を棄却する。"""
     output = {
         "monologue": "後回しにしたい。",
-        "reaction": {"type": "insert_slot", "slot": {
-            "start": "15:00", "kind": "調べる", "ref": "task:1",
-            "facility": "library", "budget_rounds": 4, "note": "x",
-        }},
+        "reaction": {"type": "add_task", "task": "あとで返事を考える"},
     }
     ctx = json.dumps({"plan_date": PLAN_DATE, "is_alert": True,
                       "event_text": "ユーザーからの呼びかけ"})
@@ -1837,26 +1852,28 @@ def test_finalize_tracked_delivery_failure_keeps_applied_then_repairs(
     adapter = manager.personas[PERSONA_ID].sai_memory
     adapter.fail_append = True
 
+    from saiverse import task_book
+
     output = {
-        "monologue": "今すぐでなくていい。覚えておこう。",
-        "reaction": {"type": "note_only", "memo": "新しい展示が始まったらしい"},
+        "monologue": "今すぐでなくていい。あとで見に行こう。",
+        "reaction": {"type": "add_task", "task": "新しい展示を見に行く"},
     }
     ctx = json.dumps({"plan_date": PLAN_DATE, "is_alert": False,
-                      "event_text": "掲示板の告知", "execution_id": eid})
+                      "event_text": "掲示板の告知", "execution_id": eid,
+                      "stimulus_id": "board:notice:1"})
     with _persona_ctx(manager, tmp_path):
         summary, _, _ = finalize_mod.judgment_finalize(
             judgment_output=output, kind="on_event", judgment_context=ctx,
         )
 
-    # (1) 世界更新 (event memo) は 1 回だけ適用され、summary は applied を維持
+    # (1) 世界更新 (タスク帳への一件) は 1 回だけ適用され、summary は applied を維持
     assert "applied=True" in summary
-    memos = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)["event_memos"]
-    assert len(memos) == 1
+    assert len(task_book.list_open_system_tasks(manager, PERSONA_ID)) == 1
     # 台帳は applied (「適用済み・記録待ち」)、判断行は pending に凍結
     entry = ledger.get_execution(eid)
     assert entry["status"] == XL.STATUS_APPLIED
     assert entry["result"]["kind"] == "on_event"
-    assert entry["result"]["reaction"] == "note_only"
+    assert entry["result"]["reaction"] == "add_task"
     assert _pending_outbox(session_factory, eid) == 1
     # 直書き経路は使われていない
     assert adapter.messages == []
@@ -1869,7 +1886,7 @@ def test_finalize_tracked_delivery_failure_keeps_applied_then_repairs(
     msg = adapter.ledger_messages[0][1]
     assert msg["line_role"] == "meta_judgment"
     assert msg["scope"] == "committed"
-    assert "覚え書きに留める" in msg["content"]
+    assert "タスク帳へ積む" in msg["content"]
     assert ledger.get_execution(eid)["status"] == XL.STATUS_COMPLETED
 
     # (3) 同じ execution_id で再 finalize → 世界更新は走らない
@@ -1878,8 +1895,7 @@ def test_finalize_tracked_delivery_failure_keeps_applied_then_repairs(
             judgment_output=output, kind="on_event", judgment_context=ctx,
         )
     assert "already finalized" in summary2
-    memos = day_plan.load_plan_meta(manager, PERSONA_ID, PLAN_DATE)["event_memos"]
-    assert len(memos) == 1
+    assert len(task_book.list_open_system_tasks(manager, PERSONA_ID)) == 1
     assert len(adapter.ledger_messages) == 1
 
 

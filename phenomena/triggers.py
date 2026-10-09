@@ -83,10 +83,27 @@ TRIGGER_SCHEMAS: Dict[TriggerType, Dict[str, str]] = {
 
 @dataclass
 class TriggerEvent:
-    """トリガーイベントを表すデータクラス"""
+    """トリガーイベントを表すデータクラス (現象の封筒)。
+
+    ``stimulus_id`` は**必須** (既定値なし・キーワード専用) — 外から届く刺激の
+    一意な永続 ID で、ペルソナが同じ刺激に二度反応しないための照合に使う
+    (docs/issues/on_event_judgment_has_no_idempotency_key.md の「決まったこと」、
+    docs/intent/autonomous_behavior_v04_plan.md 決定 6)。契約:
+
+    - **供給源が発行する**。受け取り口 (PhenomenonManager / inject_persona_event)
+      が代理で採番してはならない — 再送を「別の刺激」と数える経路が残るため。
+    - **同じ出来事の再送では同じ ID**。外部サービスの出来事なら、その供給源の
+      永続 ID (tweet_id・フィード記事の ID・Discord のメッセージ ID 等) から作る。
+      供給源ごとに接頭辞を付けて名前空間を分けるとよい (例 ``"x:mention:<tweet_id>"``)。
+    - **内部の一回きりの出来事** (サーバー起動・移動など、再送という概念が無い
+      もの) は封筒を作った時点の ``uuid4`` でよい — 封筒を作ったことが発行になる。
+    - **本文のハッシュは禁止**。同じ文面の別の出来事 (「うん」「ありがとう」) を
+      同一視して、二通目を黙殺してしまう。
+    """
     type: TriggerType
     data: Dict[str, Any] = field(default_factory=dict)
     timestamp: Optional[str] = None
+    stimulus_id: str = field(kw_only=True)
 
     def __post_init__(self):
         if self.timestamp is None:
@@ -97,4 +114,7 @@ class TriggerEvent:
         return self.data.get(key, default)
 
     def __repr__(self) -> str:
-        return f"TriggerEvent(type={self.type.value}, data={self.data})"
+        return (
+            f"TriggerEvent(type={self.type.value}, stimulus_id={self.stimulus_id!r}, "
+            f"data={self.data})"
+        )

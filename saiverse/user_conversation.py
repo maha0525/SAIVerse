@@ -807,6 +807,10 @@ def on_user_utterance(
     「初回の発話」と「ゲーム参加で押し出された後」でしか発火しなかった。
 
     Args:
+        event: 発話の dict。``content`` (本文) と ``message_id`` (発話を永続化
+            した building_messages 行の ID、``"building_id:seq"``) を持つ。
+            ``message_id`` は ``"msg:<message_id>"`` の形で刺激の ID として仲裁
+            (on_event 判断の冪等キー) へ運ばれる。
         pulse_options: 会話開始経路で main_line Pulse へ転送する起動オプション
             (:data:`PULSE_OPTION_KEYS`)。``invoke_main_line`` の closure が抱えて
             いるものと同じ値を渡すこと — 初回発話だけオプションが落ちると、
@@ -882,6 +886,13 @@ def on_user_utterance(
             manager, persona_id, user_id, pulse_options=pulse_options,
         )
 
+    # 発話の永続 ID (building_messages の message_id) を刺激の ID にする。
+    # 発話の取り込み (manager/runtime.py) が永続化した行の message_id を
+    # event に載せて渡す。仲裁は今は v0.4 の活動の器が無いため発火しないが、
+    # 将来の仲裁の再設計が冪等キーに使うので配線だけ通す。
+    message_id = event.get("message_id")
+    stimulus_id = f"msg:{message_id}" if message_id else None
+
     try:
         route = handle_user_utterance_conflict(
             manager,
@@ -889,6 +900,7 @@ def on_user_utterance(
             str(event.get("content") or ""),
             engage=_engage,
             user_id=user_id,
+            stimulus_id=stimulus_id,
         )
     except UserUtteranceError:
         # 会話開始側の分類 (台帳の開設失敗など) をそのまま上へ通す。

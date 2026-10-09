@@ -10,9 +10,9 @@ judgment_day_close) の最終ノードで呼ばれる。kind ディスパッチ:
    - post_session: task_verdict 適用 (done は artifact_ref の接地検証つき) /
      desk_memo → 独白記録のみ / remaining_timetable → 残りコマの全置換
    - on_event: reaction (engage_now は結果への反映のみ — 応対の起動は
-     呼び出し側の責務 / insert_slot は時刻整合検証つき挿入 / note_only は
-     plan meta への覚え書き / ignore は記録のみ)。alert では engage_now 以外を
-     棄却 (スキーマ縮退の二重ガード)
+     呼び出し側の責務 / add_task はタスク帳へシステムタスクを一件積む /
+     note_only は覚え書きを判断の記録に載せるだけ (別置きしない) / ignore は
+     記録のみ)。alert では engage_now 以外を棄却 (スキーマ縮退の二重ガード)
    - day_close: tomorrow_memo + day_theme + user_report_seeds → plan meta
 
 会話終了判断 (post_conversation) の適用は 2026-08-16 の裁定で退役した
@@ -61,11 +61,10 @@ from saiverse.judgment_points import (
     KIND_DAY_OPEN,
     KIND_ON_EVENT,
     KIND_POST_SESSION,
+    REACTION_ADD_TASK,
     REACTION_ENGAGE_NOW,
     REACTION_IGNORE,
-    REACTION_INSERT_SLOT,
     REACTION_NOTE_ONLY,
-    insert_timetable_slot,
     normalize_task_ref,
     sanitize_timetable,
 )
@@ -688,35 +687,43 @@ def _finalize_post_session(
 # ---------------------------------------------------------------------------
 
 
-def _append_event_memo(
+def _add_event_task(
     manager: Any,
     persona_id: str,
-    plan_date: str,
-    memo_text: str,
+    task_text: str,
+    *,
     event_text: Optional[str],
-) -> None:
-    """note_only の覚え書きを plan meta (``event_memos`` 配列) に積む。
+    stimulus_id: Optional[str],
+) -> Dict[str, Any]:
+    """add_task: イベントを受けて「あとで取り組む」一件をタスク帳に積む。
 
-    作業メモ (Track metadata) 様式の記録先だが、イベントは Track に属さないため
-    「その日」の付帯情報 (persona_day_plan.meta_json) を置き場にする。
+    タスク帳のシステムタスク (``ORIGIN_SYSTEM``、期限なし・相手なし) として
+    追加する — 機械がペルソナに差し込む急ぎでない依頼の亜種で、引き当て順は
+    締め切りの後 (saiverse/task_book.py)。中身は判断の意図 (``task``) と、
+    きっかけのイベントの本文の抜粋。
+
+    出どころ参照 (``origin_ref``) と冪等キーは刺激の ID から作る — 同じ刺激に
+    対する finalize の再実行で同じ一件が増えない。刺激の ID が無い (義務化
+    以前の台帳行の再発火) ときは冪等キーなしで積む。
     """
-    entry = {
-        "text": memo_text,
-        "event": str(event_text or "")[:120],
-        "at": clock.now().isoformat(timespec="seconds"),
-    }
+    from saiverse.task_book import ORIGIN_SYSTEM, add_entry
 
-    # 追記は最新 meta の上で CAS の内側で行う (外で読んだ古い一覧に append した
-    # 完成値を書くと、並走した別のメモ追記が失われる — day_plan 第七陣 P1 と同型)
-    def _append(meta: dict) -> list:
-        memos = meta.get("event_memos")
-        memos = list(memos) if isinstance(memos, list) else []
-        memos.append(entry)
-        meta["event_memos"] = memos
-        return memos
-
-    day_plan_mod.mutate_plan_meta(
-        manager, persona_id, plan_date, _append, context="event_memo",
+    event_excerpt = str(event_text or "").strip()
+    content = task_text
+    if event_excerpt:
+        content = f"{task_text}\n\n（きっかけのイベント: {event_excerpt}）"
+    meta: Dict[str, Any] = {"source": "on_event"}
+    if event_excerpt:
+        meta["event_text"] = event_excerpt
+    sid = stimulus_id if isinstance(stimulus_id, str) and stimulus_id.strip() else None
+    return add_entry(
+        manager,
+        persona_id,
+        content,
+        origin=ORIGIN_SYSTEM,
+        origin_ref=sid,
+        meta=meta,
+        idem_key=f"on_event:{sid}" if sid else None,
     )
 
 
@@ -738,7 +745,6 @@ def _finalize_on_event(
     イベント経由で reaction を読んで行う)。
     """
     applied = False
-    plan_date = ctx.get("plan_date") or clock.now().date().isoformat()
     is_alert = bool(ctx.get("is_alert"))
 
     reaction = output.get("reaction")
@@ -757,39 +763,34 @@ def _finalize_on_event(
         summary_extras.append("reaction=engage_now")
         lines.append("（このイベントに今すぐ応対する）")
         applied = True
-    elif rtype == REACTION_INSERT_SLOT:
-        summary_extras.append("reaction=insert_slot")
-        slot = reaction.get("slot")
-        if not isinstance(slot, dict):
-            warnings.append("insert_slot rejected: slot (object) がありません")
+    elif rtype == REACTION_ADD_TASK:
+        summary_extras.append("reaction=add_task")
+        task_text = str(reaction.get("task") or "").strip()
+        if not task_text:
+            warnings.append("add_task rejected: task が空です")
         else:
-            pushed, insert_warnings = insert_timetable_slot(
-                manager, persona_id, plan_date, slot,
-                not_before=clock.now().strftime("%H:%M"),
-            )
-            warnings.extend(insert_warnings)
-            if pushed is not None:
-                applied = True
-                lines.append(
-                    f"（このイベントのためのコマを時間割へ挿入: "
-                    f"{slot.get('start')} {slot.get('kind')}）"
+            try:
+                _add_event_task(
+                    manager, persona_id, task_text,
+                    event_text=ctx.get("event_text"),
+                    stimulus_id=ctx.get("stimulus_id"),
                 )
+                applied = True
+                lines.append(f"（あとで取り組むためにタスク帳へ積む: {task_text}）")
+            except Exception as exc:
+                LOGGER.exception("[judgment_finalize] add_task raised")
+                warnings.append(f"タスク帳への追加に失敗: {exc}")
     elif rtype == REACTION_NOTE_ONLY:
+        # 覚え書きは判断の記録 (この関数が組む lines → ペルソナの記憶に残る
+        # 判断行) に載るだけで、別の置き場には書かない (2026-10-09 決定 —
+        # 旧実装は day_plan の meta.event_memos にも積んでいた)。
         summary_extras.append("reaction=note_only")
         memo_text = str(reaction.get("memo") or "").strip()
         if not memo_text:
             warnings.append("note_only rejected: memo が空です")
         else:
-            try:
-                _append_event_memo(
-                    manager, persona_id, plan_date, memo_text,
-                    ctx.get("event_text"),
-                )
-                applied = True
-                lines.append(f"（覚え書きに留める: {memo_text}）")
-            except Exception as exc:
-                LOGGER.exception("[judgment_finalize] event memo append raised")
-                warnings.append(f"覚え書きの保存に失敗: {exc}")
+            applied = True
+            lines.append(f"（覚え書きに留める: {memo_text}）")
     elif rtype == REACTION_IGNORE:
         summary_extras.append("reaction=ignore")
         lines.append("（このイベントには反応しない）")

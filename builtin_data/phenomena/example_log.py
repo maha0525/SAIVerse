@@ -10,12 +10,14 @@ from phenomena.core import PhenomenonSchema
 LOGGER = logging.getLogger(__name__)
 
 
-def log_event(message: str, level: str = "info") -> str:
+def log_event(message: str, level: str = "info", **_kwargs) -> str:
     """指定されたメッセージをログに出力する
 
     Args:
         message: ログに出力するメッセージ
         level: ログレベル (debug, info, warning, error)
+        **_kwargs: PhenomenonManager が注入する予約引数 (``_manager`` /
+            ``_stimulus_id``) を受けて捨てる
 
     Returns:
         実行結果のメッセージ

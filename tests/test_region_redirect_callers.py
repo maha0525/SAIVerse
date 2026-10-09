@@ -105,19 +105,26 @@ def test_user_move_trigger_carries_actual_arrival() -> None:
     ok, msg = service.move_user("inn")
     assert ok is True
     assert str(msg) == NOTICE_TEXT
-    service.manager._emit_trigger.assert_called_once_with(
+    service.manager._emit_trigger.assert_called_once()
+    call = service.manager._emit_trigger.call_args
+    assert call.args == (
         TriggerType.USER_MOVE, {"from_building": "room", "to_building": "gate"},
     )
+    # 内部の一回きりの出来事も刺激の ID を必ず持つ (封筒の契約)
+    assert call.kwargs["stimulus_id"].startswith("user_move:")
 
 
 def test_persona_move_trigger_carries_actual_arrival() -> None:
     service = _runtime(_persona())
     ok, _msg = service._move_persona(PERSONA_ID, "plaza", "inn")
     assert ok is True
-    service.manager._emit_trigger.assert_called_once_with(
+    service.manager._emit_trigger.assert_called_once()
+    call = service.manager._emit_trigger.call_args
+    assert call.args == (
         TriggerType.PERSONA_MOVE,
         {"persona_id": PERSONA_ID, "from_building": "plaza", "to_building": "gate"},
     )
+    assert call.kwargs["stimulus_id"].startswith("persona_move:")
 
 
 # ---- 機構代行の移動: 召喚 ---------------------------------------------------

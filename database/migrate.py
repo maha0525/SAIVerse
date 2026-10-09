@@ -1484,6 +1484,36 @@ def ensure_persona_life_table(db_path: str) -> None:
         engine.dispose()
 
 
+def _ensure_stimulus_receipt_table(engine) -> None:
+    """刺激の受領記録 (stimulus_receipt) を軽量パスで揃える。
+
+    autonomous_behavior_v04_plan.md 段 1-3 (刺激の ID の義務化と、同じ刺激の
+    再配送の照合)。新規テーブルは needs_migration → try_additive_migration の
+    汎用パスでも作られるが、ライフ・タスク帳と同様「テーブル追加は素早く
+    確実に適用したい」ため CREATE TABLE IF NOT EXISTS 相当の冪等な軽量シンク
+    経路を別途持つ (schema_sync.ensure_table_columns_indexes に委譲)。
+    既存 DB には行 0 件で追加されるだけで既存行に触れない (無害)。
+    UNIQUE 制約 (uq_stimulus_receipt) はテーブル新規作成時の table.create() が
+    込みで作る (本テーブルは制約込みの定義で一括出荷され、それ以前に存在しない)。
+    """
+    try:
+        from database.schema_sync import ensure_table_columns_indexes
+        from database.models import StimulusReceipt
+        ensure_table_columns_indexes(engine, StimulusReceipt.__table__)
+    except Exception as e:
+        logging.error("刺激の受領記録テーブルの作成に失敗しました: %s", e, exc_info=True)
+        raise
+
+
+def ensure_stimulus_receipt_table(db_path: str) -> None:
+    """刺激の受領記録テーブルの軽量シンクを単体で走らせるエントリポイント。"""
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        _ensure_stimulus_receipt_table(engine)
+    finally:
+        engine.dispose()
+
+
 def ensure_task_book_table(db_path: str) -> None:
     """タスク帳テーブルの軽量シンクを単体で走らせるエントリポイント。"""
     engine = create_engine(f"sqlite:///{db_path}")
