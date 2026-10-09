@@ -16,6 +16,17 @@
       "default": 8192,
       "label": "思考トークン量",
       "description": "拡張思考に割り当てるトークン数の上限。多いほど深く考えますが、コストと応答時間が増えます。"
+    },
+    "thinking_effort": {
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "high",
+      "label": "思考の深さ",
+      "description": "モデルが応答に費やす思考の度合い。拡張思考のトークン予算と併用できます。"
     }
   },
   "pricing": {

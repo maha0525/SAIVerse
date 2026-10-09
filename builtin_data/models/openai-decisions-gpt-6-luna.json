@@ -1,0 +1,13 @@
+{
+  "model": "gpt-6-luna",
+  "display_name": "GPT-6 Luna (Decisions)",
+  "provider_ref": "openai_decisions",
+  "group": "openai",
+  "context_length": 272000,
+  "supports_structured_output": false,
+  "pricing": {
+    "input_per_1m_tokens": 0.1,
+    "output_per_1m_tokens": 0.0,
+    "currency": "USD"
+  }
+}

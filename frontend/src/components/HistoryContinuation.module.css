@@ -1,0 +1,11 @@
+.container { text-align: center; padding: 0.5rem; }
+.container button {
+    border: 1px solid #475569;
+    border-radius: 6px;
+    padding: 0.4rem 0.75rem;
+    color: #cbd5e1;
+    background: transparent;
+    cursor: pointer;
+}
+.container button:disabled { opacity: 0.5; cursor: default; }
+:global([data-theme="light"]) .container button { color: #334155; border-color: #94a3b8; }

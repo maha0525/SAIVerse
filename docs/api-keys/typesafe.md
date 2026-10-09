@@ -20,9 +20,9 @@ SAIVerse では**反射判断**（ペルソナが会話の裏で行う小さな�
 
 ## 3. 料金について
 
-- Jev の単価は入力 $0.042/1M トークン（2026年9月時点の参考値）
+- Jev の単価は入力 100 万トークンあたり $0.042 で、出力には料金がかかりません（2026年10月時点、[公式のモデルのページ](https://docs.typesafe.ai/models)で確認）
 - 判断1回あたりの入出力はごく小さいため、通常の会話モデルよりも大幅に安く動きます
-- 最新の料金は [公式ドキュメント](https://docs.typesafe.ai/) で確認してください
+- 最新の料金は [公式のモデルのページ](https://docs.typesafe.ai/models) で確認してください
 
 ## 環境変数
 
@@ -36,3 +36,4 @@ TYPESAFE_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 - [TypeSafe](https://typesafe.ai/)
 - [TypeSafe Console](https://console.typesafe.ai/)
 - [ドキュメント](https://docs.typesafe.ai/)
+- [モデルと料金](https://docs.typesafe.ai/models)

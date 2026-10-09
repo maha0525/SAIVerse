@@ -29,7 +29,7 @@ City / Building / Persona などの設定項目が、個別の設定モーダル
 | 対象・経路 | 保存できる項目 | 制限・根拠 |
 |---|---|---|
 | City / WorldEditor | 表示名 `name`、説明 `description`、`ui_port`、`api_port`、`timezone`、`language`。既存 City は背景 `map_background_image`、起動時オンライン設定 `online_mode` も編集 | 内部識別子 `slug` は作成時だけ。既存では表示のみ。[WE-C] / [W-API-C] |
-| City / TutorialWizard | 表示名、タイムゾーン、言語 | 説明・オンライン設定・ポートは既存値を再送する。調査版では未送信の `host_avatar_path` / `map_background_image` が `None` へ消える。保存側の保持修正と隔離 API 往復は実装済みで、UI / 実機は検証待ち（[issue](tutorial_city_resave_clears_images.md)）。[T-C] / [W-API-C] / [W-C-SAVE] |
+| City / TutorialWizard | 表示名、タイムゾーン、言語 | 説明・オンライン設定・ポートは既存値を再送する。調査版では未送信の `host_avatar_path` / `map_background_image` が `None` へ消える。保存側の保持修正は完了し、隔離 API 往復と隔離環境の画面での再表示まで確認済み（[issue](archive/tutorial_city_resave_clears_images.md)）。[T-C] / [W-API-C] / [W-C-SAVE] |
 | City / CityMap | 表示名、背景画像の設定・解除 | それぞれ専用 PATCH。[MAP-C] |
 | Building / WorldEditor (既存) | 名前、説明、収容数、システム指示、内部画像、追加プロンプトファイル、アイテム表示上限、旧 Tool 紐付け、旧自動インターバル | Building ID と所属 City は表示のみ。[WE-B] / [W-API-B] |
 | Building / BuildingSettingsModal | 上記の既存 Building 項目に加え、事前実行 Spell の追加・削除 (Spell 名、引数、ラベル) | City 選択 UI はあるが変更はサーバーに拒否される。Spell は通常の保存ボタンと独立した即時 POST/DELETE。[B-FORM] / [B-SPELL] |
@@ -69,7 +69,7 @@ City / Building / Persona などの設定項目が、個別の設定モーダル
 - **旧自動インターバル**: 調査版では両方に入力欄がある ([WE-B] 738 行 / [B-FORM] 314–322 行)。新機能の欠落ではなく [削除 issue](building_auto_interval_setting_removal.md) の対象。別 draft 作業 `feature/remove-obsolete-building-interval-inputs` で両入力欄を撤去予定 (保存互換は保持)。この監査は削除・DB 廃止の判断を行わない。
 - **アイテム表示上限**: 両 UI に実装済み。空欄 = 既定、0 = 非表示を同じように扱う ([WE-B] / [B-FORM])。[両経路への配置は裁定済み](../intent/room_item_display_cap.md) なので欠落に数えない。
 - **旧 Tool 紐付け**: 両 UI に欄があるが、`BuildingToolLink` は現在の Tool/Spell 実行経路では使われない ([CLAUDE.md](../../CLAUDE.md))。新しい Spell 管理と同一視しない。
-- **チュートリアルの City 再保存**: 調査版では未編集の旧ホスト画像列と地図背景の設定参照が消える。旧列は現行 UI に表示される案内役アバターではない。送信 payload → `CityUpdate` → `AdminService.update_city` の上書きを照合して [別 issue](tutorial_city_resave_clears_images.md) に分離した。後続修正は未送信を保持し、明示解除だけ反映する。隔離 API 往復は検証済みで、UI / 実機は未完了。
+- **チュートリアルの City 再保存**: 調査版では未編集の旧ホスト画像列と地図背景の設定参照が消える。旧列は現行 UI に表示される案内役アバターではない。送信 payload → `CityUpdate` → `AdminService.update_city` の上書きを照合して [別 issue](archive/tutorial_city_resave_clears_images.md) に分離した。後続修正は未送信を保持し、明示解除だけ反映する。隔離 API 往復と、隔離環境の画面でのチュートリアル保存 → 地図背景の再表示まで確認済み (2026-10-08)。
 - **CityMap の座標保存**: `PUT /api/world/buildings/positions` は Building ID ごとに更新し、対象が現在の City に属するかをサーバーで検査しない。画面が現在の街の建物を送ることと、API が所属を保証することは別。所属 City 自体を変更する API ではない。
 - **モデル欄を消す過去の不具合**: [別 issue で修正済み](archive/world_editor_save_wipes_persona_model_overrides.md)。追加モデルの編集欄が無いことと、保存で既存値を消すことは別件。[現行保存処理][W-P-SAVE]は未送信欄を保持する。
 - **作成フォームの表示と送信**: Persona の説明欄は新規作成でも表示されるが、POST は送らない ([WE-P] 862 行 / [WE-P-SAVE] 540 行)。これは優先順位の判断とは別に、追加前に確認できる既存の不整合。今回の docs 変更では直していない。

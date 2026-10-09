@@ -65,6 +65,9 @@ class ChatMessage(BaseModel):
     # 永続化は metadata["_interrupted"] (sea/runtime_llm.py INTERRUPTED_METADATA_KEY)。
     # 設計: docs/issues/user_utterance_path_failure_inventory.md
     interrupted: bool = False
+    # Presentation-only classification; never filters persisted/persona history.
+    is_movement_notice: bool = False
+    building_id: Optional[str] = None
 
 class ChatHistoryResponse(BaseModel):
     history: List[ChatMessage]
@@ -92,7 +95,9 @@ import logging
 import hashlib
 
 
-def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> "ChatMessage":
+def serialize_history_message(
+    manager, msg: Dict[str, Any], message_id: str, building_id: Optional[str] = None,
+) -> "ChatMessage":
     """building_messages の dict 1 件を ChatMessage (API レスポンス形式) へ変換する。
 
     get_chat_history のループ本体を抽出したもの。ゲームセッションログビュー
@@ -248,6 +253,16 @@ def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> 
     if metadata and "activity_trace" in metadata:
         activity_trace_data = metadata["activity_trace"]
 
+    # Existing records already retain structured occupancy metadata. Do not infer
+    # movement from prose/HTML: ordinary conversation can quote the same notice.
+    event = metadata.get("event") if isinstance(metadata, dict) else None
+    is_movement_notice = (
+        role in ("host", "system")
+        and isinstance(event, dict)
+        and event.get("type") == "occupancy"
+        and event.get("action") in ("enter", "leave")
+    )
+
     return ChatMessage(
         id=message_id,
         role=role,
@@ -265,6 +280,8 @@ def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> 
         llm_usage=llm_usage_data,
         llm_usage_total=llm_usage_total_data,
         interrupted=bool(metadata.get("_interrupted")) if metadata else False,
+        is_movement_notice=is_movement_notice,
+        building_id=building_id or msg.get("building_id"),
     )
 
 
@@ -285,10 +302,9 @@ def get_chat_history(
 
     raw_history = manager.get_building_history(current_bid)
 
-    # Filter out empty messages but KEEP note-box host events (移動 / item pickup
-    # 等)。 intent §D-2: 「移動が乱発しなくなる新ルール (= C-1 閲覧モード) の
-    # 下では、 移動メッセージはノイズではなく時系列の意味ある情報になる」
-    # 控えめなスタイル (globals.css の .note-box) で会話メッセージと区別される。
+    # Keep all nonempty records, including hidden movement notices. Visibility
+    # is a rendering preference; pagination/diff cursors and persona history
+    # must stay independent of it (movement_notice_visibility.md).
     raw_history = [
         msg for msg in raw_history
         if msg.get("content")
@@ -378,7 +394,7 @@ def get_chat_history(
                 current_bid, len(raw_history), limit, before, len(slice_history), has_more_old)
 
     final_response = [
-        serialize_history_message(manager, msg, msg["virtual_id"])
+        serialize_history_message(manager, msg, msg["virtual_id"], current_bid)
         for msg in slice_history
     ]
 

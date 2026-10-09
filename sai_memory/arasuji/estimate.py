@@ -98,7 +98,7 @@ def estimate_chronicle_generation_cost(
         get_total_message_count,
     )
     from sai_memory.memory.storage import count_messages, get_messages_for_chronicle
-    from saiverse.model_configs import get_model_pricing
+    from saiverse.model_configs import calculate_cost, get_model_pricing
 
     total_messages = count_messages(conn)
     processed_messages = get_total_message_count(conn)
@@ -162,7 +162,7 @@ def estimate_chronicle_generation_cost(
             zone_first_id, zone_run_ids,
         )
     absorption_calls = 0
-    absorption_material_chars = 0
+    absorption_material_chars: list[int] = []
     counted_upper_ids: list = []
     if skip_absorption:
         # CLI の --limit>0 実行と同形: 吸収は見送り。前回の未完了 (content_
@@ -190,7 +190,7 @@ def estimate_chronicle_generation_cost(
             counted_upper_ids = list(list_stale_upper_ids(conn))
         else:
             absorption_calls = len(absorption_plan.items)
-            absorption_material_chars = absorption_plan.material_chars
+            absorption_material_chars = [item.material_chars for item in absorption_plan.items]
             counted_upper_ids = list(absorption_plan.stale_upper_ids)
             # 吸収できない発話あり run (機構 E) は通常チャンクとして計画へ
             # 合流する — 実行 (generate_chronicle) と同じ関数で合流させ、
@@ -272,36 +272,24 @@ def estimate_chronicle_generation_cost(
     estimated_cost = 0.0
 
     if pricing and total_calls > 0:
-        input_rate = pricing.get("input_per_1m_tokens", 0)
-        output_rate = pricing.get("output_per_1m_tokens", 0)
-
-        # チャンクの入力 = 被覆生ログ + プロンプト + 文脈 + Memopedia。
-        # 吸収の合体生成の材料 (run + 開き直す隣人の生ログ) と、引き戻し後の
-        # 即時畳みの材料も同じ性質の入力。
-        llm_chunk_chars = (
-            sum(c.coverage_chars for c in plan.chunks)
-            + absorption_material_chars
-            + tail_fold_material
-        )
-        avg_input_lv1_total = (
-            llm_chunk_chars / 3.5
-            + level1_calls * (500 + context_tokens_lv1 + memopedia_tokens)
-        )
-        avg_input_cons = (
-            10 * avg_entry_tokens    # 束ねる子 digest 群 (束は 10 個前後)
-            + 500                    # prompt instructions overhead
-            + context_tokens_cons
-        )
+        # Apply the tier to each estimated request, never to their combined input.
+        # Absorption retains each planned item's material size; the tail callback
+        # supplies only an aggregate, so its per-call material remains an average.
+        input_overhead = 500 + context_tokens_lv1 + memopedia_tokens
+        material_per_call = [c.coverage_chars for c in plan.chunks] + absorption_material_chars
+        if tail_fold_calls:
+            material_per_call.extend([tail_fold_material / tail_fold_calls] * tail_fold_calls)
         avg_output_per_call = 400  # ~3-5 sentence summary
-
-        # 上位再生成は束ねと同じプロンプト組成なので、入力の見込みも同じ枠。
-        total_input = avg_input_lv1_total + (
-            consolidation_calls + upper_regen_calls
-        ) * avg_input_cons
-        total_output = total_calls * avg_output_per_call
-        estimated_cost = (
-            (total_input / 1_000_000) * input_rate
-            + (total_output / 1_000_000) * output_rate
+        estimated_cost = sum(
+            calculate_cost(
+                model_name, material / 3.5 + input_overhead, avg_output_per_call, log_details=False,
+            )
+            for material in material_per_call
+        )
+        avg_input_cons = 10 * avg_entry_tokens + 500 + context_tokens_cons
+        # Upper regeneration has the same estimated prompt composition as a fold.
+        estimated_cost += (consolidation_calls + upper_regen_calls) * calculate_cost(
+            model_name, avg_input_cons, avg_output_per_call, log_details=False,
         )
 
     return ChronicleCostEstimate(

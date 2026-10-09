@@ -25,7 +25,7 @@
   "pricing": {
     "input_per_1m_tokens": 2,
     "output_per_1m_tokens": 10,
-    "cached_input_per_1m_tokens": 0.2,
+    "cached_input_per_1m_tokens": 0.1,
     "cache_write_per_1m_tokens": 2.5,
     "cache_write_1h_per_1m_tokens": 4,
     "currency": "USD"

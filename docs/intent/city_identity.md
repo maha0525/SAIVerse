@@ -121,8 +121,8 @@ API は Pydantic の `model_fields_set` で未送信を区別し、manager / Adm
 
 隔離 DB の合成 City で、初回画像保存 → 画像を送らない再保存 → DB の再読込と
 DB 一覧 / CityMap API の応答まで検べる。片方だけ更新、両方解除、画像なしの初回保存も
-固定し、実ブラウザの再表示と実機確認は別途残す。詳細と状態は
-[チュートリアル再保存の issue](../issues/tutorial_city_resave_clears_images.md) が持つ。
+固定した。実ブラウザでのチュートリアル保存 → 地図背景の再表示は 2026-10-08 に隔離環境の画面で確認した。詳細と状態は
+[チュートリアル再保存の issue](../issues/archive/tutorial_city_resave_clears_images.md) が持つ。
 
 ### 識別子と表示名の分離
 

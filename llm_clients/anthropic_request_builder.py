@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 
+from .exceptions import InvalidRequestError
 from .utils import (
     compute_allowed_attachment_keys,
     content_to_text,
@@ -258,6 +259,8 @@ def build_request_params(
     supports_images: bool,
     max_image_bytes: Optional[int],
     max_image_embeds: Optional[int] = None,
+    supports_sampling_parameters: bool = True,
+    supports_assistant_prefill: bool = True,
 ) -> Dict[str, Any]:
     system_blocks, remaining_messages = _prepare_anthropic_system(messages, enable_cache=enable_cache, cache_ttl=cache_ttl)
     prepared_messages = _prepare_anthropic_messages(
@@ -268,6 +271,13 @@ def build_request_params(
         enable_cache=enable_cache,
         cache_ttl=cache_ttl,
     )
+
+    if not supports_assistant_prefill and prepared_messages and prepared_messages[-1]["role"] == "assistant":
+        logging.error("[anthropic] Model %s does not support assistant prefill", model)
+        raise InvalidRequestError(
+            f"Anthropic model {model} does not support a final assistant turn (prefill).",
+            user_message="このモデルは末尾の assistant 発言を継続できません。会話の入力形式を確認してください。",
+        )
 
     use_tools = bool(tools)
     use_native_structured_output = False
@@ -282,15 +292,15 @@ def build_request_params(
     # which the SDK merges into the request JSON as top-level keys. Keep them
     # out of request_params itself so the SDK boundary stays valid.
     sampling: Dict[str, Any] = {}
-    if temperature is not None:
-        sampling["temperature"] = temperature
-    elif "temperature" in extra_params:
-        sampling["temperature"] = extra_params["temperature"]
+    if supports_sampling_parameters:
+        if temperature is not None:
+            sampling["temperature"] = temperature
+        elif "temperature" in extra_params:
+            sampling["temperature"] = extra_params["temperature"]
 
-    for param in ("top_p", "top_k"):
-        if param in extra_params:
-            sampling[param] = extra_params[param]
-
+        for param in ("top_p", "top_k"):
+            if param in extra_params:
+                sampling[param] = extra_params[param]
     if sampling:
         request_params["extra_body"] = sampling
 

@@ -159,7 +159,7 @@ class TestModelSupportsImages(unittest.TestCase):
         self.assertTrue(model_configs.model_supports_images("claude-sonnet-4-5"))
 
     def test_non_vision_model(self):
-        self.assertFalse(model_configs.model_supports_images("nim-deepseek-v4-pro-0813"))
+        self.assertFalse(model_configs.model_supports_images("nim-nemotron-3-ultra"))
 
 
 class TestAugust2026ModelCatalog(unittest.TestCase):
@@ -235,7 +235,7 @@ class TestSeptember2026ModelCatalog(unittest.TestCase):
 
     def test_cache_rates(self):
         cached = {
-            "claude-sonnet-5.5": 0.2,
+            "claude-sonnet-5.5": 0.1,  # halved on 2026-10-08 (official pricing page)
             "claude-opus-5.5": 0.2,
             "gpt-6-sol": 0.2,
             "gpt-6-luna": 0.01,
@@ -315,9 +315,9 @@ class TestFindModelConfig(unittest.TestCase):
         self.assertEqual(config.get("provider"), "anthropic")
 
     def test_find_by_api_model_name(self):
-        key, config = model_configs.find_model_config("deepseek-ai/deepseek-v4-flash-0731")
+        key, config = model_configs.find_model_config("deepseek/deepseek-v4-flash")
         self.assertTrue(key)
-        self.assertEqual(config.get("model"), "deepseek-ai/deepseek-v4-flash-0731")
+        self.assertEqual(config.get("model"), "deepseek/deepseek-v4-flash")
 
     def test_not_found(self):
         key, config = model_configs.find_model_config("nonexistent-model-xyz-abc")

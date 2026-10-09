@@ -1,0 +1,23 @@
+{
+  "id": "openai_decisions",
+  "display_name": "OpenAI Decisions",
+  "protocol": "jev_compat",
+  "base_url": "https://api.openai.com",
+  "api_key_env": "OPENAI_API_KEY",
+  "reflex_judgment": {
+    "request_shape": "openai_decisions",
+    "path": "/v1/decisions",
+    "answers_key": "answers",
+    "usage_key": "usage",
+    "answer_fields": {
+      "noul": "probability",
+      "choice": "choice",
+      "score": "score"
+    },
+    "usage_fields": {
+      "input_tokens": "input_tokens",
+      "output_tokens": "output_tokens"
+    },
+    "supported_types": ["noul", "choice", "score"]
+  }
+}

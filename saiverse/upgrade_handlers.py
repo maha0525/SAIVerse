@@ -1310,4 +1310,26 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.21 -> 0.3.22 (no DB changes).",
     ),
+    # ---- v0.3.23 ----
+    # このバージョンはモデルの追加・削除と推奨の更新 (#379・#380)、入退室ログの表示設定
+    # (#376)、インベントリの詳細表示の修正 (#374)、Gemini 向けのツールのスキーマ変換 (#377)、
+    # 反射判断の OpenAI Decisions (#378)、Codex の診断ログ (#371)。DB の変更は入退室ログの
+    # 表示設定の列 (user_settings / building の SHOW_MOVEMENT_NOTICES) だけで、これは
+    # migrate.py が起動時に足す。更新の鎖で行う移行は無いので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_23",
+        scope="city",
+        from_version="0.3.22",
+        to_version="0.3.23",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.22 -> 0.3.23 (columns added by migrate.py).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_23",
+        scope="ai",
+        from_version="0.3.22",
+        to_version="0.3.23",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.22 -> 0.3.23 (columns added by migrate.py).",
+    ),
 ]

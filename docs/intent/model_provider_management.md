@@ -108,6 +108,20 @@ Phase 1 では **OpenAI 互換** と **Ollama 互換** のみ。Anthropic 互換
 - **使用量の帰属**: 使用量と費用は API モデル名ではなく設定キー (JSON のファイル名) に帰属させる。Codex のようなサブスクで賄われる設定は従量課金版と同じ API モデル名を持つため、API 名で価格を引くと課金されていない呼び出しに従量単価が付く。`LLMClient.config_key` を価格引き当ての正典とし、client 側が `_store_usage(model=...)` で API 名に差し替えてはならない。
 - **検証**: モデル JSON の価格・capability 読み込み、runtime 由来の sampling override 除去、通常 user 終端の通過、model 終端のローカル拒否、function call/response ID の往復を、外部 API を呼ばないテストで境界横断して確認する。
 
+#### Claude Haiku 5.5 の追加 (2026-10-08)
+
+モデル選択 → native Anthropic request → 使用量の費用計算まで、既存の §9 の契約を適用する。会話モデルの既定値・ユーザー設定は変更しない。画像モデルの既定値は別途 [画像生成モデル](image_generation_models.md) の確認済み方針に従う。
+
+- `claude-haiku-5.5` は API ID `claude-haiku-5-5`、1M context / 128K output、adaptive thinking / medium を使う。manual budget は使わない。
+- `supports_sampling_parameters: false` と `supports_assistant_prefill: false` を provider 境界へ運び、呼び出し時の sampling override を除去し、assistant 終端は内容を書き換えずローカルで拒否する。
+- effort はモデル定義の `parameters.thinking_effort.options` を許可集合にし、初期設定・環境変数・UI 更新すべてで同じ制約を適用する。`xhigh` を非対応の旧モデルへ送らない。 Opus 4.5 は `low` / `medium` / `high` を定義し、既存の手動思考予算と併用する。
+  - 追加検収で、旧定義の選択肢欠落を非対応と見なしてしまい、Opus 4.5 の有効な effort も落とす回帰を修正。原因は宣言の不足、欠落と非対応の混同、拒否ケースだけに偏った旧モデル検査の3点。宣言を送信の許可条件にするときは、既存の有効値が残る肯定ケースと禁止値の否定ケースを同じ経路で確認する。
+- 入力10万token超の単価は入力・出力・cache read・5分/1時間cache writeすべてに適用する。1時間cache writeも長文tierを優先し、未指定モデルは既存の1時間単価へ戻る。
+- Chronicle の費用見積もりは各計画呼び出しの推定入力で料金帯を選ぶ（末尾畳みは既存callbackが合計材料のみを返すため、一回あたり平均材料で概算）。ContextPreview の出力単価も表示中の入力長を使う。見積もりからの料金計算は `log_details=False` で呼び出し単位のDEBUG詳細を省き、通常の利用量計算のログは維持する。
+- adaptive モデルでは、旧 `thinking_budget` による `max_tokens` 引き上げを行わない。この修正は既存 adaptive モデルにも適用する。
+- 設定読み込み、request構築、10万token/20万token境界の料金・見積もりを隔離テストで確認する。実APIの応答・本番ペルソナの動作はこの検証に含めない。
+- 根拠: [仕様](https://platform.claude.com/docs/en/models/haiku-5-5/overview)、[移行条件](https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide)、[料金](https://platform.claude.com/docs/en/about-claude/pricing)、[cache最低長](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)。
+
 ### 10. アプリ名の申告 (`default_headers`) — 接続に属し、会話には属さない
 
 一部のバックエンドは、呼び出し元アプリを名乗るヘッダーを受け取り、それを公開ランキングに集計する。OpenRouter がこれで、`HTTP-Referer`（アプリの識別子）・`X-OpenRouter-Title`（表示名）・`X-OpenRouter-Categories`（カテゴリ、カンマ区切りで最大2つ）を送ったアプリだけが `openrouter.ai/apps` に載る。SAIVerse はここに `roleplay` と `general-chat` の二枚看板で並ぶことで、同種のアプリを探しているユーザーからの発見経路を得る。
@@ -328,14 +342,14 @@ def get_llm_client(model: str, provider: str, context_length: int, config: dict 
 
 接続テストの結果はサーバー側で保存しない（その時点の疎通確認のみ）。
 
-**失敗診断の境界**（[上流本文の反射 issue](../issues/provider_connection_test_reflects_upstream_error_body.md)）:
+**失敗診断の境界**（[上流本文の反射 issue](../issues/archive/provider_connection_test_reflects_upstream_error_body.md)）:
 
 - **利用者が頼れる結果**: 接続失敗の原因を判断でき、上流が資格情報や未知の機密値を本文・例外に含めても、接続テストの応答やその実装の診断ログへ転載されない。
 - **経路と責任**: 保存済み provider / 作成・編集フォーム → 共通の `_run_connection_test` → 接続先・資格情報の検査 → HTTP → API 応答 → 管理画面。共通関数が表示可能な診断を組み立て、UI に伏せ字処理を押し付けない。接続先の信頼検査は従来どおり送信前に行い、この修正で緩めない。
 - **診断の内容**: HTTP コードは残し、3xx は追跡しないリダイレクト（URL・http/https）、400 はリクエストまたは認証の形式、401 は認証、403 は権限、404 はパス（`/v1` の有無）、405 はメソッド（プロトコル設定）、429 は利用制限、5xx はプロバイダ側の障害という固定の説明を返す。その他の非 200 は URL・プロトコル設定の確認を促す。上流本文・reason phrase・HTTP/通信/解析の例外本文・接続先 URL・任意の protocol 値は診断へ埋め込まない。タイムアウト・接続失敗・通信エラー・予期しないエラーも固定文にし、JSON 解析失敗や予期しない例外の自前ログには例外本文や traceback を付けない。
 - **送信前の設定診断**: `validate_provider_url` / `validate_provider_config` が自前で組み立てる `ValueError` は、そのまま利用者へ返す。平文 HTTP・名前解決・非公開アドレス・資格情報の紐付けを切り分けるホスト名や環境変数名は残し、環境変数の値は読まない。URL 構文・port 解析の標準ライブラリ例外は userinfo 等を引用し得るため、validator 側で該当箇所だけ安全な診断へ変換する。呼び手で自前診断を一律に潰さない。
-- **変えない範囲と限界**: 成功時のモデル一覧と、200 応答の JSON が読めなくても疎通成功を返す既存挙動は維持する。通常の HTTP ライブラリのアクセスログ（httpx の INFO に出る URL 等）はこの診断境界とは別で、ログ全体の秘匿化を保証する変更ではない。全体の logger 設定を一時変更して並行リクエストのログを消すことはしない。
-- **検証する旅程**: 隔離した保存済み / フォームの両 API に、OpenAI / Ollama 互換の fake HTTP 応答を通す。ダミー資格情報と未知の機密マーカーの反射、3xx/400/401/403/404/405/429/5xx・その他ステータスの固定文、実 validator の診断到達と不正 URL の秘密非反射、接続・通信・JSON 解析・予期しない例外を確認する。本物の資格情報、外部サーバー、本番ペルソナは使わない。実ブラウザ表示と実プロバイダへの疎通は別の実機確認とする。
+- **変えない範囲と限界**: 成功時のモデル一覧と、200 応答の JSON が読めなくても疎通成功を返す既存挙動は維持する。通常の HTTP ライブラリのアクセスログ（httpx の INFO に出る URL と、上流が返した reason phrase）はこの診断境界とは別で、ログ全体の秘匿化を保証する変更ではない。全体の logger 設定を一時変更して並行リクエストのログを消すことはしない。
+- **検証する旅程**: 隔離した保存済み / フォームの両 API に、OpenAI / Ollama 互換の fake HTTP 応答を通す。ダミー資格情報と未知の機密マーカーの反射、3xx/400/401/403/404/405/429/5xx・その他ステータスの固定文、実 validator の診断到達と不正 URL の秘密非反射、接続・通信・JSON 解析・予期しない例外を確認する。本物の資格情報、外部サーバー、本番ペルソナは使わない。実ブラウザ表示は 2026-10-08 に隔離環境の画面で確認した (作成フォームと保存済みの編集画面)。実プロバイダへの疎通は別の実機確認とする。
 
 ### G. フロントエンド UI
 

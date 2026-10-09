@@ -34,7 +34,7 @@ class MissingBuildingError(RuntimeError):
 
 
 def item_db_filter(key):
-    """``short_id`` (数字) と UUID を判定して ``Item`` への WHERE 句を返す。
+    """``short_id`` (ASCII 数字) と UUID を判定して ``Item`` への WHERE 句を返す。
 
     参照アドレッシング統一で、AI 可視のアドレスは short_id (``item:N``) を使い、
     UUID は裏方 (DB 主キー・ファイル解決・frontend href) に留める。解決側は
@@ -42,7 +42,7 @@ def item_db_filter(key):
     よう UUID もフォールバックで受ける。この判定を1箇所に集約する。
     """
     s = str(key).strip()
-    if s.isdigit():
+    if s.isascii() and s.isdigit():
         return ItemModel.SHORT_ID == int(s)
     return ItemModel.ITEM_ID == s
 
@@ -1546,7 +1546,7 @@ class ItemService:
         return None
 
     def item_dict_by_key(self, key) -> Optional[Dict[str, Any]]:
-        """short_id (数字) または UUID でインメモリ item dict を引く。
+        """short_id (ASCII 数字) または UUID でインメモリ item dict を引く。
 
         AI 可視のアドレスは short_id (``item:N`` / ``saiverse://item/N``) だが、
         過去ログの UUID URI も裏方フォールバックで解決できるよう両対応する。
@@ -1554,7 +1554,7 @@ class ItemService:
         s = str(key).strip()
         if s in self.items:
             return self.items[s]
-        if s.isdigit():
+        if s.isascii() and s.isdigit():
             item_id = self._find_item_by_short_id(int(s))
             if item_id:
                 return self.items.get(item_id)

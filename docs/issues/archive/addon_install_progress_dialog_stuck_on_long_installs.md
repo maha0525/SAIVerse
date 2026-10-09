@@ -1,7 +1,7 @@
 # 長い導入で、カタログの進捗の小窓が「完了」を受け取れずに回り続ける
 
 **起票**: 2026-10-06 (voice-tts の画面確認で、まはーが実際に踏んだ)
-**状態**: 未解決。voice-tts を公開のカタログに載せる前に直す ([voice_tts_catalog_listing.md](voice_tts_catalog_listing.md) の作業に追加)
+**状態**: 完了 (2026-10-06)。同日に修正して v0.3.22 で発行した — 進捗の無い間も 10 秒ごとに生存信号を流し、切断後は問い合わせで完了に到達し、小窓はいつでも閉じられる。中継越しの切断の再現実験とテストで確認 ([voice_tts_catalog_listing.md](voice_tts_catalog_listing.md))
 **関連**: [addon_catalog_management.md](../intent/addon_catalog_management.md) の「導入時の質問と、アドオン専用の Python 環境」
 
 ## 何が起きたか
