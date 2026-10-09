@@ -956,33 +956,63 @@ def _newer_confirmed_life_date(
     """``plan_date_str`` より新しい営業日で、ライフが確定している最古の日 (無ければ None)。
 
     ライフの確定は起床の帳簿処理 (:func:`confirm_life_for_today`) だけが行う
-    ので、新しい日のライフがある = 新しい一日が既に始まっている。persona_life の
-    行だけを見る (旧置き場 meta_json.lives は切り替え前の日付にしか無い)。
+    ので、新しい日のライフがある = 新しい一日が既に始まっている。
+
+    読む優先順位は :func:`get_lives` と同じ: persona_life に行のある日付はその
+    LIVES_JSON が正 (空配列でも旧置き場は見ない)、行の無い日付だけ旧置き場
+    persona_day_plan.meta_json.lives を互換読みする。persona_life だけを見ると、
+    当日のライフが旧置き場にだけある日に前日の終了を回収したとき「新しい日は
+    無い」と誤判定し、現在のキャッシュ維持・TTL・本人への通知を触ってしまう
+    (2026-10-10 Codex 敵対レビュー 4 巡目 修正 2)。旧置き場の日付は
+    persona_day_plan から列挙する。
+
     読み出しの例外は送出する (呼び出し側は「分からない」を現在の世代と
     取り違えず、失敗として再試行に回す)。
     """
-    from database.models import PersonaLife
+    from database.models import PersonaDayPlan, PersonaLife
 
     db = manager.SessionLocal()
     try:
-        rows = (
+        life_rows = (
             db.query(PersonaLife.PLAN_DATE, PersonaLife.LIVES_JSON)
             .filter(
                 PersonaLife.PERSONA_ID == persona_id,
                 PersonaLife.PLAN_DATE > plan_date_str,
             )
-            .order_by(PersonaLife.PLAN_DATE.asc())
             .all()
+        )
+        life_dates = {str(newer_date) for newer_date, _raw in life_rows}
+        legacy_dates = [
+            str(d) for (d,) in (
+                db.query(PersonaDayPlan.plan_date)
+                .filter(
+                    PersonaDayPlan.persona_id == persona_id,
+                    PersonaDayPlan.plan_date > plan_date_str,
+                )
+                .all()
+            )
+            if str(d) not in life_dates
+        ]
+        candidates: List[Tuple[str, List[Dict[str, Any]]]] = [
+            (
+                str(newer_date),
+                _parse_lives_payload(
+                    raw, strict=False, persona_id=persona_id,
+                    plan_date_str=str(newer_date),
+                    source="persona_life.LIVES_JSON",
+                ),
+            )
+            for newer_date, raw in life_rows
+        ]
+        candidates.extend(
+            (legacy_date, _legacy_lives_in_session(db, persona_id, legacy_date))
+            for legacy_date in legacy_dates
         )
     finally:
         db.close()
-    for newer_date, raw in rows:
-        lives = _parse_lives_payload(
-            raw, strict=False, persona_id=persona_id,
-            plan_date_str=newer_date, source="persona_life.LIVES_JSON",
-        )
+    for newer_date, lives in sorted(candidates, key=lambda item: item[0]):
         if lives:
-            return str(newer_date)
+            return newer_date
     return None
 
 
@@ -1373,7 +1403,9 @@ def handle_scheduled_life_boundary(
     持ち回す — 就寝の営業日は**現在の**起床設定に依存するので、再試行のたびに
     引き直すと、間で起床設定が変わった就寝が別の日を選び、元の日のライフが
     終了の節目を永遠に失う (2026-10-10 Codex 敵対レビュー 3 巡目 修正 2)。
-    None (plan_date を凍結していない旧予約・watchdog・直接呼び出し) は従来どおり
+    台帳のある ScheduleManager は凍結値が得られない回をここへ渡さず再試行に
+    回す (旧予約の行にも実行前に凍結値を埋める — 2026-10-10 Codex 敵対レビュー
+    4 巡目 修正 1)。None (watchdog・直接呼び出し・台帳の無い構成) は従来どおり
     ``occurrence_at`` から計算する。
 
     自律 OFF のペルソナでは何もしない (確定も節目も行わない — 自律 OFF の世界に
@@ -1454,7 +1486,12 @@ def _settle_life_start(
     try:
         existing = get_lives(manager, persona_id, plan_date)
         already_started = bool(existing) and bool(existing[0].get("started"))
-        sched = _find_day_schedules(manager, persona_id)
+        # strict: 設定の**読み取り失敗**を「未設定」(ライフ無しの日として決着)
+        # と混ぜない — 混ぜると DB の一時失敗でその日の起床が成功扱いのまま
+        # 静かに失われる (2026-10-10 Codex 敵対レビュー 4 巡目 修正 3)。失敗は
+        # 下の except で False → backoff 再試行。正常に読めて空のときだけ
+        # confirm_life_for_today が None を返し「ライフ無し」で決着する。
+        sched = _find_day_schedules(manager, persona_id, strict=True)
         life = confirm_life_for_today(
             manager, persona_id, plan_date,
             sched.get("wake"), sched.get("close"),
@@ -1965,9 +2002,11 @@ def resolve_business_day(
     無い日には基準そのものが存在しない (現行スケジュールが唯一の手掛かり)。
 
     Returns:
-        :class:`BusinessDay` / **None = ライフを読めなかった** (読取失敗)。
-        None のとき呼び出し元は予約も再分類も進めず、次の watchdog へ委ねること
-        (Codex 八巡目 #2)。
+        :class:`BusinessDay` / **None = 決められなかった** (ライフ、または
+        退き先の起床・就寝設定の読取失敗)。None のとき呼び出し元は予約も
+        再分類も進めず、次の watchdog へ委ねること (Codex 八巡目 #2)。設定が
+        **正常に読めて空** (一日リズム未設定) のときは None ではなく暦日の
+        ``"schedule"`` を返す (2026-10-10 Codex 敵対レビュー 4 巡目 修正 3)。
     """
     now_dt = now or clock.now()
     today = now_dt.date()
@@ -1995,7 +2034,19 @@ def resolve_business_day(
 
     from saiverse.autonomy_wiring import _find_day_schedules, effective_plan_date
 
-    sched = _find_day_schedules(manager, persona_id)
+    # strict: 設定の**読み取り失敗**を「未設定」(暦日へ倒す) と混ぜない —
+    # 混ぜると深夜跨ぎリズムの深夜帯に翌日 (暦日) を返し、「業務日不明なら
+    # 見送る」呼び出し側 (スルースの提示等) をすり抜ける (2026-10-10 Codex
+    # 敵対レビュー 4 巡目 修正 3)。読めなければ「決められない」= None。
+    try:
+        sched = _find_day_schedules(manager, persona_id, strict=True)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to read the day schedules while resolving the "
+            "business day (persona=%s); returning None (cannot decide)",
+            persona_id, exc_info=True,
+        )
+        return None
     plan_date = effective_plan_date(now_dt, sched.get("wake"), sched.get("close"))
     if started is not None and started[1] > plan_date:
         plan_date = started[1]

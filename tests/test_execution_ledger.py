@@ -379,6 +379,71 @@ class ClaimExecutionTests(ExecutionLedgerTestBase):
         )
 
 
+class FillMissingPayloadFieldsTests(ExecutionLedgerTestBase):
+    """fill_missing_payload_fields — 無い欄だけ埋める狭い口
+    (2026-10-10 Codex 敵対レビュー 4 巡目 修正 1)。"""
+
+    KIND = "test.fill"
+    KEY = "k1"
+
+    def test_fills_only_missing_fields_and_never_overwrites(self):
+        eid, _, _ = self.ledger.claim_execution(
+            self.KIND, idempotency_key=self.KEY, payload={"budget": 3},
+        )
+        got = self.ledger.fill_missing_payload_fields(
+            eid, {"budget": 99, "plan_date": "2026-07-04"},
+        )
+        self.assertEqual(got, {"budget": 3, "plan_date": "2026-07-04"})
+        self.assertEqual(self.ledger.get_execution(eid)["payload"], got)
+        # 二度目は既存の値が勝つ (上書きしない)。
+        got = self.ledger.fill_missing_payload_fields(
+            eid, {"plan_date": "2026-07-05"},
+        )
+        self.assertEqual(got["plan_date"], "2026-07-04")
+        self.assertEqual(
+            self.ledger.get_execution(eid)["payload"]["plan_date"], "2026-07-04",
+        )
+
+    def test_fills_a_row_without_payload_and_a_running_row(self):
+        eid, _, _ = self.ledger.claim_execution(self.KIND, idempotency_key=self.KEY)
+        self.ledger.mark_running(eid)
+        got = self.ledger.fill_missing_payload_fields(eid, {"plan_date": "D"})
+        self.assertEqual(got, {"plan_date": "D"})
+        self.assertEqual(self.ledger.get_execution(eid)["payload"], {"plan_date": "D"})
+
+    def test_empty_fields_reads_without_writing(self):
+        eid, _, _ = self.ledger.claim_execution(
+            self.KIND, idempotency_key=self.KEY, payload={"a": 1},
+        )
+        self.assertEqual(self.ledger.fill_missing_payload_fields(eid, {}), {"a": 1})
+
+    def test_refuses_settled_rows(self):
+        eid, _, _ = self.ledger.claim_execution(
+            self.KIND, idempotency_key=self.KEY, payload={"a": 1},
+        )
+        self.ledger.mark_failed(eid, "rejected")
+        with self.assertRaises(XL.ExecutionLedgerError):
+            self.ledger.fill_missing_payload_fields(eid, {"plan_date": "D"})
+        self.assertEqual(self.ledger.get_execution(eid)["payload"], {"a": 1})
+
+    def test_refuses_a_broken_payload(self):
+        eid, _, _ = self.ledger.claim_execution(self.KIND, idempotency_key=self.KEY)
+        db = self.SessionLocal()
+        try:
+            db.query(ExecutionLedgerEntry).filter(
+                ExecutionLedgerEntry.EXECUTION_ID == eid,
+            ).update({ExecutionLedgerEntry.PAYLOAD_JSON: "[1, 2]"})
+            db.commit()
+        finally:
+            db.close()
+        with self.assertRaises(XL.ExecutionLedgerError):
+            self.ledger.fill_missing_payload_fields(eid, {"plan_date": "D"})
+
+    def test_unknown_execution_raises_not_found(self):
+        with self.assertRaises(XL.ExecutionNotFoundError):
+            self.ledger.fill_missing_payload_fields("nope", {"plan_date": "D"})
+
+
 class MarkAppliedAtomicityTests(ExecutionLedgerTestBase):
     def test_midway_failure_rolls_back_ledger_and_outbox(self):
         execution_id = self._begin_running(persona_id="p1")

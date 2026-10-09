@@ -598,6 +598,102 @@ class ExecutionLedger:
             db.close()
         return touched > 0
 
+    def fill_missing_payload_fields(
+        self, execution_id: str, fields: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """payload の**まだ無い欄だけ**を埋め、埋めた後の payload を返す。
+
+        payload は実行の凍結値で、:meth:`claim_execution` も既存 prepared 行の
+        payload を上書きしない。ところが凍結の欄を後から足した kind では、欄を
+        足す前に作られた行 (旧予約) に値が無く、claim へ値を渡しても永続しない
+        — 再試行のたびに引き直されて凍結の意味が無くなる (2026-10-10 Codex
+        敵対レビュー 4 巡目 修正 1 — schedule 発火の ``plan_date``)。その穴を
+        塞ぐための**狭い**口で、契約は次のとおり:
+
+        - 既にある欄は決して上書きしない (値が違っても、``None`` でも)。
+          ``fields`` の中の既存の欄は黙って捨て、既存の値を返り値に残す
+        - 対象は決着していない行 (prepared / running) だけ。applied 以降・
+          failed・unknown の payload は実行の記録なので触らず
+          :class:`ExecutionLedgerError` を送出する
+        - 読んだ PAYLOAD_JSON と一致するときだけ書く条件付き UPDATE。並走の
+          書き手と競合したら読み直して再試行する (先に埋めた値が勝つ)
+        - 壊れた payload (JSON でない / object でない) は直さずに
+          :class:`ExecutionLedgerError` を送出する
+
+        ``fields`` が空なら何も書かず、いまの payload を返す (読み取りのみ)。
+
+        Returns:
+            書き込み後 (または書く必要が無かった時点) の payload dict。
+
+        Raises:
+            ExecutionNotFoundError: 行が無い。
+            ExecutionLedgerError: 決着済みの行 / 壊れた payload / 競合が収束
+                しない。
+        """
+        for _attempt in range(3):
+            db = self._session_factory()
+            try:
+                entry = self._get_entry(db, execution_id)
+                if entry.STATUS not in (STATUS_PREPARED, STATUS_RUNNING):
+                    raise ExecutionLedgerError(
+                        f"payload of a settled execution is a record and is not "
+                        f"filled (execution={execution_id}, status={entry.STATUS})"
+                    )
+                original = entry.PAYLOAD_JSON
+                try:
+                    payload = json.loads(original) if original else {}
+                except (TypeError, ValueError) as exc:
+                    raise ExecutionLedgerError(
+                        f"PAYLOAD_JSON is not valid JSON (execution={execution_id})"
+                    ) from exc
+                if not isinstance(payload, dict):
+                    raise ExecutionLedgerError(
+                        f"PAYLOAD_JSON is not a JSON object "
+                        f"(execution={execution_id})"
+                    )
+                missing = {k: v for k, v in fields.items() if k not in payload}
+                if not missing:
+                    return payload
+                payload.update(missing)
+                changed = (
+                    db.query(ExecutionLedgerEntry)
+                    .filter(
+                        ExecutionLedgerEntry.EXECUTION_ID == execution_id,
+                        ExecutionLedgerEntry.STATUS.in_(
+                            (STATUS_PREPARED, STATUS_RUNNING)
+                        ),
+                        ExecutionLedgerEntry.PAYLOAD_JSON == original,
+                    )
+                    .update(
+                        {
+                            ExecutionLedgerEntry.PAYLOAD_JSON: json.dumps(
+                                payload, ensure_ascii=False,
+                            ),
+                            ExecutionLedgerEntry.UPDATED_AT: _now_epoch(),
+                        },
+                        synchronize_session=False,
+                    )
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+            if changed:
+                LOGGER.info(
+                    "[ledger] filled missing payload fields %s of %s",
+                    sorted(missing), execution_id,
+                )
+                return payload
+            LOGGER.info(
+                "[ledger] payload fill raced with another writer (%s); re-reading",
+                execution_id,
+            )
+        raise ExecutionLedgerError(
+            f"fill_missing_payload_fields did not converge (execution={execution_id})"
+        )
+
     def reconcile_unknown(
         self,
         execution_id: str,

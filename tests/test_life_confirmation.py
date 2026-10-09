@@ -869,6 +869,146 @@ def test_close_retry_keeps_the_frozen_business_day_after_the_wake_setting_change
     ]
 
 
+def _move_wake_to_0500(session_factory):
+    from database.models import PersonaSchedule as _PS
+
+    db = session_factory()
+    try:
+        db.query(_PS).filter_by(
+            PERSONA_ID=PERSONA_ID, META_PLAYBOOK="judgment_day_open",
+        ).update({_PS.TIME_OF_DAY: "05:00"})
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_legacy_prepared_close_row_persists_the_frozen_day_before_running(
+    manager, session_factory,
+):
+    """凍結の仕組みが入る前に作られた prepared 行 (payload に plan_date が無い)
+    を回収すると、実行の前にその行へ営業日が永続化され、設定変更後の再試行でも
+    対象日が変わらない (2026-10-10 Codex 敵対レビュー 4 巡目 修正 1)。
+
+    claim は既存 prepared 行の payload を上書きしないので、計算した値を claim に
+    渡すだけでは永続しない — 再試行のたびに現在の設定で引き直していた。
+    """
+    from unittest.mock import patch
+
+    from saiverse.schedule_manager import (
+        SCHEDULE_DISPATCH_LEDGER_KIND,
+        ScheduleManager,
+        _occurrence_key,
+    )
+
+    manager.personas[PERSONA_ID].model = "claude-sonnet-5"
+    _add_day_schedule(session_factory, "judgment_day_open", "23:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "06:00")
+    clock.enable_virtual(BASE.replace(hour=23))
+    assert _fire_schedule(manager, "judgment_day_open", "23:00")[0] == "executed"
+
+    sid, instance_token, generation = _schedule_row(
+        session_factory, "judgment_day_close",
+    )
+    close_at = BASE + timedelta(days=1, hours=6)  # 2026-07-05 06:00
+    occurrence = str(int(close_at.timestamp()))
+    # 旧予約: claim 後 (prepared) で落ちた、plan_date を持たない行。
+    legacy_payload = {
+        "schedule_id": sid, "persona_id": PERSONA_ID,
+        "schedule_type": "periodic", "instance_token": instance_token,
+        "occurrence": occurrence, "generation": generation,
+        "meta_playbook": "judgment_day_close", "attempt": 0,
+    }
+    _eid, runnable, _status = manager.execution_ledger.claim_execution(
+        SCHEDULE_DISPATCH_LEDGER_KIND,
+        _occurrence_key(sid, instance_token, generation, occurrence),
+        persona_id=PERSONA_ID, payload=legacy_payload,
+    )
+    assert runnable
+    assert [(s, p.get("plan_date")) for s, p in _dispatch_payloads(manager)] == [
+        ("prepared", None),
+    ]
+
+    # 回収の発火: 帳簿処理は失敗するが、実行前に営業日 (いまの設定 = 深夜跨ぎ
+    # で D) がその行へ永続化されている。
+    sm = ScheduleManager(saiverse_manager=manager)
+    clock.advance_to(close_at)
+    with patch.object(day_plan, "apply_life_boundary", return_value=False):
+        sm._handle_fire(sid, instance_token, occurrence, generation, 0)
+    assert [(s, p.get("plan_date")) for s, p in _dispatch_payloads(manager)] == [
+        ("failed", PLAN_DATE),
+    ]
+
+    # 再試行の前に起床だけを変える — 引き直すと翌日を指す。
+    _move_wake_to_0500(session_factory)
+    assert wiring._day_close_plan_date(manager, PERSONA_ID, close_at) == "2026-07-05"
+
+    clock.advance_to(close_at + timedelta(minutes=2))
+    sm._handle_fire(sid, instance_token, occurrence, generation, 1)
+
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["ended"] is True
+    assert _boundary_rows(manager, day_plan.LIFE_BOUNDARY_KIND_END) == [
+        (f"{PERSONA_ID}:{PLAN_DATE}", "completed"),
+    ]
+    assert [(s, p.get("plan_date")) for s, p in _dispatch_payloads(manager)] == [
+        ("failed", PLAN_DATE), ("completed", PLAN_DATE),
+    ]
+
+
+@pytest.mark.parametrize("failure", ["compute", "persist"])
+def test_close_without_a_frozen_day_does_not_run_and_is_retried(
+    manager, session_factory, failure,
+):
+    """凍結値が得られない回 (営業日の計算失敗 / 台帳への永続化失敗) は、帳簿
+    処理を実行せず、発火を failed にして backoff 再試行へ回す。次の試行で凍結
+    できれば実行される (2026-10-10 Codex 敵対レビュー 4 巡目 修正 1 — 以前は
+    None のまま実行し、帳簿処理側がその場の設定で計算していた)。"""
+    from unittest.mock import MagicMock, patch
+
+    from saiverse.schedule_manager import ScheduleManager, _schedule_key
+
+    manager.personas[PERSONA_ID].model = "claude-sonnet-5"
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    assert _fire_schedule(manager, "judgment_day_open", "07:00")[0] == "executed"
+
+    sid, instance_token, generation = _schedule_row(
+        session_factory, "judgment_day_close",
+    )
+    sm = ScheduleManager(saiverse_manager=manager)
+    close_at = BASE + timedelta(hours=22)
+    occurrence = str(int(close_at.timestamp()))
+    clock.advance_to(close_at)
+
+    bookkeeping = MagicMock(return_value=True)
+    with patch.object(day_plan, "handle_scheduled_life_boundary", bookkeeping):
+        if failure == "compute":
+            with patch.object(
+                day_plan, "life_boundary_plan_date",
+                side_effect=RuntimeError("schedules unreadable"),
+            ):
+                sm._handle_fire(sid, instance_token, occurrence, generation, 0)
+        else:
+            with patch.object(
+                manager.execution_ledger, "fill_missing_payload_fields",
+                side_effect=RuntimeError("db locked"),
+            ):
+                sm._handle_fire(sid, instance_token, occurrence, generation, 0)
+
+    bookkeeping.assert_not_called()
+    assert not day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0].get("ended")
+    assert [s for s, _p in _dispatch_payloads(manager)] == ["failed"]
+    assert manager.event_scheduler.has_key(_schedule_key(sid))  # backoff 再試行
+
+    # 次の試行 (凍結できる) は実行され、その日のライフを終える。
+    clock.advance_to(close_at + timedelta(minutes=2))
+    sm._handle_fire(sid, instance_token, occurrence, generation, 1)
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["ended"] is True
+    assert [(s, p.get("plan_date")) for s, p in _dispatch_payloads(manager)][-1] == (
+        "completed", PLAN_DATE,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 遅れた節目は「現在の世代」のライフにだけ現在状態を触る
 # (2026-10-10 Codex 敵対レビュー 3 巡目 修正 3)
@@ -1031,6 +1171,204 @@ def test_recovered_close_of_the_previous_day_does_not_touch_the_running_life(
     assert status == "completed"
     assert result.get("stale") == f"superseded_by:{next_date}"
     assert [s for s, _p in _dispatch_payloads(manager)][-1] == "completed"
+
+
+def test_recovered_close_sees_the_new_day_kept_only_in_the_legacy_place(
+    manager, session_factory,
+):
+    """当日のライフが旧置き場 (persona_day_plan.meta_json.lives) にだけある
+    (開始済み) 状態で前日の就寝を回収しても、世代の検査が当日を「新しい日」と
+    見る — キャッシュ維持・TTL・終了通知に触らず、前日の ended だけ付く
+    (2026-10-10 Codex 敵対レビュー 4 巡目 修正 2 — 以前は persona_life だけを
+    見て「新しい日は無い」と誤判定していた)。"""
+    from unittest.mock import patch
+
+    from saiverse.schedule_manager import ScheduleManager
+
+    manager.personas[PERSONA_ID].model = "claude-sonnet-5"  # 均等モード
+    overrides = _install_cache_override(manager)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    next_date = "2026-07-05"
+
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    assert _fire_schedule(manager, "judgment_day_open", "07:00")[0] == "executed"
+    assert overrides.get(PERSONA_ID) == LIFE_SET_OVERRIDE
+
+    # D 22:00 の就寝が失敗。
+    close_sid, close_tok, close_gen = _schedule_row(
+        session_factory, "judgment_day_close",
+    )
+    sm = ScheduleManager(saiverse_manager=manager)
+    close_at = BASE + timedelta(hours=22)
+    close_occ = str(int(close_at.timestamp()))
+    clock.advance_to(close_at)
+    with patch.object(day_plan, "apply_life_boundary", return_value=False):
+        sm._handle_fire(close_sid, close_tok, close_occ, close_gen, 0)
+
+    # D+1 のライフは旧置き場にだけある (persona_life に行が無い)。
+    clock.advance_to(BASE + timedelta(days=1, hours=7, minutes=5))
+    _write_legacy_meta(manager, next_date, {day_plan.META_LIVES: [{
+        "start": "07:00", "end": "22:00", "budget_pulses": 18, "mode": "even",
+        "used_pulses": 0, "judgment_pulses": 0, "started": True,
+    }]})
+    assert _persona_life_row(manager, next_date) is None
+    assert day_plan.get_lives(manager, PERSONA_ID, next_date)[0]["started"] is True
+    keepalive_key = f"ttl:{PERSONA_ID}:claude-sonnet-5"
+    manager.event_scheduler.schedule(
+        fire_at=BASE + timedelta(days=1, hours=8), callback=lambda: None,
+        key=keepalive_key,
+    )
+
+    # 前日の就寝を回収 (同じ occurrence の再試行)。
+    sm._handle_fire(close_sid, close_tok, close_occ, close_gen, 1)
+
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["ended"] is True
+    assert manager.event_scheduler.has_key(keepalive_key)
+    assert not manager.event_scheduler.has_key(TTL_CLEAR_KEY)
+    assert overrides.get(PERSONA_ID) == LIFE_SET_OVERRIDE
+    assert not any("活動終了" in t for t in _messages(manager))
+    status, result = _boundary_result(
+        manager, day_plan.LIFE_BOUNDARY_KIND_END, PLAN_DATE,
+    )
+    assert status == "completed"
+    assert result.get("stale") == f"superseded_by:{next_date}"
+    # 旧置き場へは書き戻さず、persona_life にも D+1 の行を作らない。
+    assert _persona_life_row(manager, next_date) is None
+
+
+def test_newer_life_lookup_prefers_persona_life_over_the_legacy_place(manager):
+    """新しい営業日の検索は get_lives と同じ優先順位: persona_life に行のある
+    日付はその内容が正 (空でも旧置き場を見ない)、行の無い日付だけ旧置き場。"""
+    legacy_life = {"start": "07:00", "end": "22:00", "budget_pulses": 18,
+                   "mode": "even", "started": True}
+    # 07-05: 旧置き場にライフがあるが、persona_life の行 (空) が正 → 数えない。
+    _write_legacy_meta(manager, "2026-07-05", {day_plan.META_LIVES: [legacy_life]})
+    from database.models import PersonaLife
+
+    db = manager.SessionLocal()
+    try:
+        db.add(PersonaLife(
+            PERSONA_ID=PERSONA_ID, PLAN_DATE="2026-07-05", LIVES_JSON="[]",
+            CREATED_AT=BASE, UPDATED_AT=BASE,
+        ))
+        db.commit()
+    finally:
+        db.close()
+    assert day_plan._newer_confirmed_life_date(manager, PERSONA_ID, PLAN_DATE) is None
+
+    # 07-06: 旧置き場にだけある → 数える。
+    _write_legacy_meta(manager, "2026-07-06", {day_plan.META_LIVES: [legacy_life]})
+    assert day_plan._newer_confirmed_life_date(
+        manager, PERSONA_ID, PLAN_DATE,
+    ) == "2026-07-06"
+
+
+# ---------------------------------------------------------------------------
+# 設定の読み取り失敗を「未設定」と混ぜない
+# (2026-10-10 Codex 敵対レビュー 4 巡目 修正 3)
+# ---------------------------------------------------------------------------
+
+
+def _schedules_read_fails(real):
+    """strict の読みだけを失敗させる (非 strict は従来の縮退 = 空の答え)。
+
+    本物の DB 例外では非 strict は WARNING を出して空の答えへ縮退する —
+    それを「未設定」と読むのが直す対象の欠陥。
+    """
+
+    def _fake(manager, persona_id, *, strict=False):
+        if strict:
+            raise RuntimeError("database is locked")
+        return {"wake": None, "close": None, "wake_days": None,
+                "day_open_params": None}
+
+    return _fake
+
+
+def test_wake_with_unreadable_schedules_is_not_settled_and_is_retried(
+    manager, session_factory,
+):
+    """起床の帳簿処理中に設定の読み取りが一時失敗しても、「ライフ無しの日」で
+    成功扱いにせず、失敗として backoff 再試行へ回す。復旧した再試行でライフが
+    確定・開始する。"""
+    from unittest.mock import patch
+
+    from saiverse.schedule_manager import ScheduleManager, _schedule_key
+
+    manager.personas[PERSONA_ID].model = "claude-sonnet-5"
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
+    sid, instance_token, generation = _schedule_row(
+        session_factory, "judgment_day_open",
+    )
+    sm = ScheduleManager(saiverse_manager=manager)
+    wake_at = BASE + timedelta(hours=7)
+    occurrence = str(int(wake_at.timestamp()))
+
+    clock.enable_virtual(wake_at)
+    with patch.object(
+        wiring, "_find_day_schedules",
+        new=_schedules_read_fails(wiring._find_day_schedules),
+    ):
+        sm._handle_fire(sid, instance_token, occurrence, generation, 0)
+
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE) == []
+    assert _persona_life_row(manager, PLAN_DATE) is None
+    assert [s for s, _p in _dispatch_payloads(manager)] == ["failed"]
+    assert manager.event_scheduler.has_key(_schedule_key(sid))  # backoff 再試行
+
+    clock.advance_to(wake_at + timedelta(minutes=2))
+    sm._handle_fire(sid, instance_token, occurrence, generation, 1)
+    lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
+    assert len(lives) == 1 and lives[0]["started"] is True
+    assert [s for s, _p in _dispatch_payloads(manager)][-1] == "completed"
+
+
+def test_wake_with_truly_unset_schedules_still_settles_as_no_life(manager):
+    """正常に読めて空 (本当に未設定) なら、従来どおり「ライフ無しの日」で決着。"""
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    assert day_plan.handle_scheduled_life_boundary(
+        manager, PERSONA_ID, day_plan.LIFE_BOUNDARY_START,
+        occurrence_at=BASE + timedelta(hours=7),
+    ) is True
+    assert _persona_life_row(manager, PLAN_DATE) is None
+
+
+def test_business_day_resolver_returns_none_when_schedules_are_unreadable(
+    manager, session_factory,
+):
+    """解決器は設定の読み取り失敗で None (決められない) を返し、スルースの
+    手入れの提示は見送られる。以前は空設定へ縮退して暦日を返し、深夜跨ぎ
+    リズムの深夜帯に翌日を「業務日」として渡していた。"""
+    from unittest.mock import patch
+
+    from sea import sluice
+
+    _add_day_schedule(session_factory, "judgment_day_open", "23:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "06:00")
+    # 07-05 00:30 — 跨ぎリズムの深夜帯 (営業日は 07-04)。ライフはまだ無い。
+    clock.enable_virtual(BASE + timedelta(days=1, minutes=30))
+    basis = day_plan.resolve_business_day(manager, PERSONA_ID)
+    assert basis is not None and basis.plan_date == PLAN_DATE
+
+    with patch.object(
+        wiring, "_find_day_schedules",
+        new=_schedules_read_fails(wiring._find_day_schedules),
+    ):
+        assert day_plan.resolve_business_day(manager, PERSONA_ID) is None
+        lifecycle = SimpleNamespace(manager=manager)
+        assert sluice._curation_business_day(lifecycle, PERSONA_ID) is None
+
+
+def test_business_day_resolver_with_truly_unset_schedules_is_the_calendar_day(
+    manager,
+):
+    """正常に読めて空 (本当に未設定) なら None ではなく暦日の ``schedule``。"""
+    clock.enable_virtual(BASE + timedelta(days=1, minutes=30))
+    basis = day_plan.resolve_business_day(manager, PERSONA_ID)
+    assert basis is not None
+    assert (basis.plan_date, basis.source) == ("2026-07-05", "schedule")
 
 
 def test_life_start_after_the_window_is_settled_without_starting(manager):

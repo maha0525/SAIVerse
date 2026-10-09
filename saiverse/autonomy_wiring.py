@@ -1582,10 +1582,11 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
     # (Codex 八巡目 #1)。
     basis = day_plan.resolve_business_day(manager, persona_id, now=now)
     if basis is None:
-        # ライフを読めなかった = どの営業日を見ているか分からない。何もせず
-        # 次の tick へ委ねる (Codex 八巡目 #2)。
+        # ライフ (または退き先の起床・就寝設定) を読めなかった = どの営業日を
+        # 見ているか分からない。何もせず次の tick へ委ねる (Codex 八巡目 #2)。
         LOGGER.warning(
-            "[watchdog] lives unreadable; skipping this tick (persona=%s)",
+            "[watchdog] lives or day schedules unreadable; skipping this tick "
+            "(persona=%s)",
             persona_id,
         )
         return {"action": "skip", "reason": "lives unreadable"}

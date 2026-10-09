@@ -738,8 +738,11 @@ class ScheduleManager:
             exec_id: Optional[str] = None
             occurrence_at = _occurrence_instant(occurrence_token)
             # 起床・就寝の行だけ: 節目が属する営業日 (occurrence ごとに一度だけ
-            # 決めて台帳 payload に凍結した値)。台帳の無い構成と旧予約は None
-            # (帳簿処理側が occurrence_at から計算する)。
+            # 決めて台帳 payload に凍結した値)。台帳の無い構成だけは凍結の
+            # 置き場が無いので None のまま (帳簿処理側が occurrence_at から
+            # 計算する)。台帳がある構成で凍結値を得られなかった回は実行しない
+            # (下の「凍結の永続化」)。
+            life_boundary = self._life_boundary_of(schedule)
             boundary_plan_date: Optional[str] = None
             if ledger is None:
                 if not self._ledger_missing_warned:
@@ -767,7 +770,7 @@ class ScheduleManager:
                     "attempt": attempt,
                 }
                 boundary_plan_date = self._freeze_life_boundary_plan_date(
-                    ledger, key, schedule, occurrence_at,
+                    ledger, key, schedule, life_boundary, occurrence_at,
                 )
                 if boundary_plan_date is not None:
                     payload["plan_date"] = boundary_plan_date
@@ -806,6 +809,32 @@ class ScheduleManager:
                         "occurrence %s; leaving without ledger writes", key,
                     )
                     return
+
+                # --- 凍結の永続化 (起床・就寝の行だけ) ---
+                # claim は既存 prepared 行の payload を上書きしないので、凍結を
+                # 入れる前の旧予約の prepared 行では、上で計算した値がどこにも
+                # 残らず、次の再試行がまた現在の設定で引き直す。席を取った
+                # 唯一の実行者として、行に plan_date が無ければここで埋め、
+                # **行に残った値**で実行する。凍結値が最終的に得られない
+                # (計算失敗・永続化失敗) 回は帳簿処理を実行せず、副作用ゼロの
+                # 失敗として backoff 再試行へ回す — 凍結できない回に計算し直して
+                # 実行すると、凍結の不変条件が縮退で破れる (2026-10-10 Codex
+                # 敵対レビュー 4 巡目 修正 1)。
+                if life_boundary is not None:
+                    boundary_plan_date = self._persist_life_boundary_plan_date(
+                        ledger, exec_id, schedule, life_boundary, boundary_plan_date,
+                    )
+                    if boundary_plan_date is None:
+                        detail = (
+                            f"life {life_boundary} boundary: business day could "
+                            f"not be frozen; not executing this attempt"
+                        )
+                        ledger.mark_failed(exec_id, detail)
+                        self._retry_or_give_up(
+                            schedule, session, instance_token, occurrence_token,
+                            generation, attempt, detail,
+                        )
+                        return
 
             # --- 実行 (型付き outcome、W3 D4) ---
             # occurrence の時刻 (発火予定時刻) と、凍結済みの営業日を渡す —
@@ -891,11 +920,19 @@ class ScheduleManager:
         finally:
             session.close()
 
+    @staticmethod
+    def _life_boundary_of(schedule: PersonaSchedule) -> Optional[str]:
+        """起床・就寝の行なら節目の種類 (start / end)、それ以外は None。"""
+        from saiverse.autonomy_wiring import LIFE_BOUNDARY_PLAYBOOKS
+
+        return LIFE_BOUNDARY_PLAYBOOKS.get((schedule.META_PLAYBOOK or "").strip())
+
     def _freeze_life_boundary_plan_date(
         self,
         ledger: Any,
         key: str,
         schedule: PersonaSchedule,
+        boundary: Optional[str],
         occurrence_at: Optional[datetime],
     ) -> Optional[str]:
         """起床・就寝の行の occurrence が属する営業日を、occurrence ごとに一度だけ決める。
@@ -913,14 +950,15 @@ class ScheduleManager:
         - prepared 回収: claim は既存行の payload を上書きしない (凍結値のまま)
 
         既存行に ``plan_date`` が無い (この凍結を入れる前の旧予約) ときと初回は、
-        いまの設定で計算して凍結する。起床・就寝以外の行は None。計算に失敗した
-        (設定を読めない等) ときも None — 凍結せず、帳簿処理側の計算に委ねる
-        (そちらも失敗すれば failed → 再試行で、次の試行がまた決め直す)。
-        台帳の読み出しの例外は送出する (claim と同じ失敗の扱い)。
+        いまの設定で計算した**候補**を返す。候補が行に永続するのは、新しい行を
+        作る claim (初回・failed 退避) の payload か、既存 prepared 行へ
+        :meth:`_persist_life_boundary_plan_date` が埋めたときで、実行に使うのは
+        常に行に残った値。起床・就寝以外の行 (``boundary`` が None) は None。
+        計算に失敗した (設定を読めない等) ときも None — その回は凍結値が
+        得られないので実行しない (呼び出し側が failed → backoff 再試行に回し、
+        次の試行がまた決め直す)。台帳の読み出しの例外は送出する (claim と同じ
+        失敗の扱い)。
         """
-        from saiverse.autonomy_wiring import LIFE_BOUNDARY_PLAYBOOKS
-
-        boundary = LIFE_BOUNDARY_PLAYBOOKS.get((schedule.META_PLAYBOOK or "").strip())
         if boundary is None:
             return None
         prior = ledger.find_execution(SCHEDULE_DISPATCH_LEDGER_KIND, key)
@@ -939,12 +977,51 @@ class ScheduleManager:
         except Exception:
             LOGGER.warning(
                 "[ScheduleManager] could not determine the business day of life "
-                "%s boundary schedule %d (persona=%s); not freezing it — the "
-                "bookkeeping computes it on this attempt",
+                "%s boundary schedule %d (persona=%s); this attempt will not "
+                "execute (retried with backoff)",
                 boundary, schedule.SCHEDULE_ID, schedule.PERSONA_ID,
                 exc_info=True,
             )
             return None
+
+    def _persist_life_boundary_plan_date(
+        self,
+        ledger: Any,
+        exec_id: str,
+        schedule: PersonaSchedule,
+        boundary: str,
+        candidate: Optional[str],
+    ) -> Optional[str]:
+        """起床・就寝の発火の台帳行に営業日が凍結されていることを保証し、その値を返す。
+
+        行の payload に ``plan_date`` が無ければ ``candidate`` で埋める
+        (``ExecutionLedger.fill_missing_payload_fields`` — 無い欄だけ埋め、既存の
+        値は上書きしない)。返すのは**行に残った値**で、``candidate`` ではない。
+        凍結値が得られない (``candidate`` が None で行にも無い / 台帳への書き込み・
+        読み出しが失敗した) ときは None — 呼び出し側はこの回を実行しない。
+        """
+        fields = {"plan_date": candidate} if candidate else {}
+        try:
+            payload = ledger.fill_missing_payload_fields(exec_id, fields)
+        except Exception:
+            LOGGER.warning(
+                "[ScheduleManager] could not persist the frozen business day of "
+                "life %s boundary schedule %d (persona=%s execution=%s); this "
+                "attempt will not execute (retried with backoff)",
+                boundary, schedule.SCHEDULE_ID, schedule.PERSONA_ID, exec_id,
+                exc_info=True,
+            )
+            return None
+        frozen = payload.get("plan_date")
+        if isinstance(frozen, str) and frozen:
+            return frozen
+        LOGGER.warning(
+            "[ScheduleManager] life %s boundary schedule %d (persona=%s "
+            "execution=%s) has no frozen business day; this attempt will not "
+            "execute (retried with backoff)",
+            boundary, schedule.SCHEDULE_ID, schedule.PERSONA_ID, exec_id,
+        )
+        return None
 
     def _retry_or_give_up(
         self,
