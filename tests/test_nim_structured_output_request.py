@@ -30,7 +30,25 @@ import pytest
 from llm_clients.factory import get_llm_client
 from saiverse import data_paths, model_configs, provider_configs
 
-_FLASH_0731 = "nim-deepseek-v4-flash-0731"
+# 構造化出力でも extra_body の指定が送られるかを確かめる見本。かつて同梱していた
+# DeepSeek V4 Flash 0731 (NIM) の定義と同じ形 (2026-09-21 に提供終了し、2026-10-09 に
+# 組み込みから外した)。同梱の NIM モデルに extra_body を持つものが無くなっても、
+# この仕組みの検査が空回りしないように、テストの中で持つ。
+_THINKING_KEY = "nim-thinking-probe"
+_THINKING_MODEL = {
+    "model": "deepseek-ai/deepseek-v4-flash-0731",
+    "provider_ref": "nvidia_nim",
+    "supports_structured_output": True,
+    "context_length": 1048576,
+    "supports_images": False,
+    "convert_system_to_user": True,
+    "request_kwargs": {"extra_body": {"chat_template_kwargs": {"thinking": True}}},
+    "parameters": {
+        "temperature": {"type": "float", "min": 0, "max": 2, "step": 0.1, "default": 1},
+        "top_p": {"type": "float", "min": 0, "max": 1, "step": 0.05, "default": 0.95},
+        "max_tokens": {"type": "int", "min": 32, "max": 65536, "step": 1, "default": 8192},
+    },
+}
 _API_KEY = "test-nim-key"
 _FORCED_TOOL_CHOICE = {"type": "function", "function": {"name": "_structured_output"}}
 _SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
@@ -142,10 +160,10 @@ class TestNimStructuredOutputRequest(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         return sent[0]
 
-    def test_flash_0731_structured_output_runs_with_thinking(self):
-        model_json = _read_builtin(data_paths.MODELS_DIR, _FLASH_0731)
+    def test_extra_body_thinking_rides_along_with_structured_output(self):
+        model_json = dict(_THINKING_MODEL)
 
-        request = self._send_structured(self._client(_FLASH_0731, model_json))
+        request = self._send_structured(self._client(_THINKING_KEY, model_json))
         body = json.loads(request.content)
 
         self.assertEqual(body["chat_template_kwargs"], {"thinking": True})
@@ -174,20 +192,25 @@ class TestNimStructuredOutputRequest(unittest.TestCase):
         self.assertEqual(body["tool_choice"], _FORCED_TOOL_CHOICE)
 
     def test_every_shipped_nim_extra_body_reaches_structured_output(self):
-        """同梱の NIM モデルが extra_body に書いた指定は、構造化出力でも全部送られる。"""
-        checked = []
+        """同梱の NIM モデルが extra_body に書いた指定は、構造化出力でも全部送られる。
+
+        同梱の中に extra_body を持つ NIM モデルが無い時期もあるので、テストの中の見本
+        (_THINKING_MODEL) も必ず同じ検査に通す。対象が一枚も無いまま緑になるのを防ぐ。
+        """
+        candidates = [(_THINKING_KEY, dict(_THINKING_MODEL))]
         for path in sorted((data_paths.BUILTIN_DATA_DIR / data_paths.MODELS_DIR).glob("*.json")):
-            model_json = json.loads(path.read_text(encoding="utf-8"))
+            candidates.append((path.stem, json.loads(path.read_text(encoding="utf-8"))))
+        checked = []
+        for key, model_json in candidates:
             extra_body = (model_json.get("request_kwargs") or {}).get("extra_body")
             if model_json.get("provider_ref") != "nvidia_nim" or not isinstance(extra_body, dict):
                 continue
-            checked.append(path.stem)
-            with self.subTest(model=path.stem):
-                body = json.loads(self._send_structured(self._client(path.stem, model_json)).content)
+            checked.append(key)
+            with self.subTest(model=key):
+                body = json.loads(self._send_structured(self._client(key, model_json)).content)
                 for field, value in extra_body.items():
                     self.assertEqual(body.get(field), value, field)
-        # 対象が一枚も見つからずに素通りで緑になるのを防ぐ。
-        self.assertIn(_FLASH_0731, checked)
+        self.assertIn(_THINKING_KEY, checked)
 
     def test_structured_output_keys_cannot_be_replaced_by_config(self):
         """request_kwargs や extra_body に tools / tool_choice があっても構造化出力の値が勝つ。"""

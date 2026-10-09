@@ -2,13 +2,13 @@
 
 ## 1. Anthropicアカウントの作成
 
-1. [Anthropic Console](https://console.anthropic.com/) にアクセス
+1. [Claude Console](https://platform.claude.com/) にアクセス (以前の `console.anthropic.com` は、いまはこのアドレスへ転送されます)
 2. 「Sign up」をクリックしてアカウントを作成
 3. メールアドレスの確認を完了
 
 ## 2. APIキーの生成
 
-1. ログイン後、「API Keys」セクションに移動
+1. ログイン後、「API Keys」セクション ([API Keys ページ](https://platform.claude.com/settings/keys)) に移動
 2. 「Create Key」をクリック
 3. キーに名前を付けて（例: "SAIVerse"）作成
 4. 表示されたAPIキーをコピー
@@ -47,53 +47,76 @@ Claude の Max プランか Team プランを使っているなら、毎月の A
 
 ## 3. 料金について
 
-### 主なモデルの料金（参考・2026年2月時点）
-| モデル | 入力 | キャッシュヒット | 出力 |
-|--------|------|----------------|------|
-| Claude Opus 4.6 | $5.00/1M tokens | $0.50/1M tokens | $25.00/1M tokens |
-| Claude Opus 4.5 | $5.00/1M tokens | $0.50/1M tokens | $25.00/1M tokens |
-| Claude Sonnet 4.5 | $3.00/1M tokens | $0.30/1M tokens | $15.00/1M tokens |
-| Claude Haiku 4.5 | $1.00/1M tokens | $0.10/1M tokens | $5.00/1M tokens |
+### SAIVerse で選べるモデルの料金 (2026年10月時点、[公式の料金ページ](https://platform.claude.com/docs/en/about-claude/pricing)で確認)
+
+金額はすべて 100 万トークンあたりの米ドルです。「キャッシュ書き込み」と「キャッシュ読み出し」は、下の「プロンプトキャッシュ」で説明する仕組みの料金です。
+
+| モデル | 入力 | 出力 | キャッシュ書き込み (5分) | キャッシュ書き込み (1時間) | キャッシュ読み出し |
+|--------|------|------|----------------------|------------------------|------------------|
+| Claude Fable 5.1 | $10 | $50 | $12.50 | $20 | $0.25 |
+| Claude Opus 5.5 | $4 | $20 | $5 | $8 | $0.20 |
+| Claude Sonnet 5.5 | $2 | $10 | $2.50 | $4 | $0.10 |
+| Claude Haiku 5.5 (プロンプトが 10 万トークン以下) | $0.10 | $0.50 | $0.125 | $0.20 | $0.01 |
+| Claude Haiku 5.5 (プロンプトが 10 万トークン超) | $0.50 | $2.50 | $0.625 | $1 | $0.05 |
+| Claude Fable 5 | $10 | $50 | $12.50 | $20 | $1 |
+| Claude Opus 5 | $5 | $25 | $6.25 | $10 | $0.50 |
+| Claude Sonnet 5 | $2 | $10 | $2.50 | $4 | $0.20 |
+| Claude Opus 4.8 | $5 | $25 | $6.25 | $10 | $0.50 |
+| Claude Opus 4.7 | $5 | $25 | $6.25 | $10 | $0.50 |
+| Claude Opus 4.6 | $5 | $25 | $6.25 | $10 | $0.50 |
+| Claude Sonnet 4.6 | $3 | $15 | $3.75 | $6 | $0.30 |
+| Claude Opus 4.5 | $5 | $25 | $6.25 | $10 | $0.50 |
+| Claude Sonnet 4.5 (提供終了予定) | $3 | $15 | $3.75 | $6 | $0.30 |
+| Claude Haiku 4.5 | $1 | $5 | $1.25 | $2 | $0.10 |
+
+- **Claude Haiku 5.5 だけは、プロンプトの長さで単価が変わります。** 1 回に送るプロンプトが 10 万トークンを超えると、そのリクエストは表の下の段の単価になります。ほかのモデル (Claude 4.6 以降) は、長いプロンプトでも単価は変わりません。
+- **Claude 4.7 以降のモデルは、トークンの数え方 (トークナイザー) が新しくなっています。** 公式の説明では、同じ文章でもおよそ 3 割多くトークンが数えられます。古いモデルと料金を比べるときは、単価だけでなくこの差も考えに入れてください。
+- **Claude Sonnet 4.5 は提供終了が予定されています。** 公式の告知では、2026年11月30日に API から外れ、後継には Claude Sonnet 5.5 が推奨されています ([モデルの提供終了の一覧](https://platform.claude.com/docs/en/about-claude/model-deprecations))。
 
 ### プロンプトキャッシュ
-Anthropicは「Prompt Caching」機能を提供しており、キャッシュヒット時にコストを90%削減できます。
 
-| キャッシュ種別 | 料金 |
+Anthropic には「Prompt Caching」という仕組みがあり、前のリクエストと同じ部分 (ペルソナの設定や会話履歴の前半など) を保存しておいて、次のリクエストで安く読み直せます。保存するとき (書き込み) は入力の単価より高く、読み直すとき (読み出し) は入力の単価よりずっと安くなります。
+
+| キャッシュの操作 | 料金 |
 |--------------|------|
-| キャッシュ書き込み（5分TTL） | 入力料金の1.25倍 |
-| キャッシュ書き込み（1時間TTL） | 入力料金の2倍 |
-| キャッシュ読み取り（ヒット） | 入力料金の0.1倍 |
+| キャッシュ書き込み (5分間有効) | 入力の単価の 1.25 倍 |
+| キャッシュ書き込み (1時間有効) | 入力の単価の 2 倍 |
+| キャッシュ読み出し | 入力の単価の 0.1 倍 (Claude Fable 5.1 は 0.025 倍、Claude Opus 5.5 と Claude Sonnet 5.5 は 0.05 倍) |
 
 ## 4. 利用可能なモデル
 
-- **Claude Opus 4.6**: 最新・最高性能、エージェント・コーディング向け（推奨）
-- **Claude Opus 4.5**: 高性能モデル
-- **Claude Sonnet 4.5**: 速度と性能のバランス型
-- **Claude Haiku 4.5**: 高速・低コスト、軽量タスク向け
+公式がいま「現行のモデル」として並べているのは次の 4 つです。迷ったら、公式の案内どおり Claude Opus 5.5 から始めるのがおすすめです。
+
+- **Claude Fable 5.1**: 難しい推論や、長時間かかるエージェント的な作業向けの最上位モデル
+- **Claude Opus 5.5**: 長時間のコーディングや知的作業向け。公式が「多くの用途ではまずこれ」と勧めているモデル (推奨)
+- **Claude Sonnet 5.5**: 速さと賢さのバランスが一番よいモデル
+- **Claude Haiku 5.5**: 分類や振り分けのような、量が多く速さが要る作業向けの、最速・最安のモデル
+
+この 4 つは、どれも一度に 100 万トークンまで読めます。
+
+SAIVerse では、このほかに一つ前までの世代 (Claude Fable 5、Opus 5、Sonnet 5、Opus 4.8、Opus 4.7、Opus 4.6、Sonnet 4.6、Opus 4.5、Sonnet 4.5、Haiku 4.5) も選べます。料金は上の表のとおりです。
 
 ## 5. 使用量の確認
 
-[Usage ページ](https://console.anthropic.com/settings/usage) で使用量とコストを確認できます。
+[Usage ページ](https://platform.claude.com/usage) で使用量とコストを確認できます。
 
 ## 6. 支払い設定
 
 初回利用時にクレジットカードの登録が必要です (Max / Team プランの月額クレジットだけで使う場合は不要。上の「Max / Team プランの月額 API クレジット」を参照)。
-[Billing ページ](https://console.anthropic.com/settings/billing) で設定できます。
+[Billing ページ](https://platform.claude.com/settings/billing) で設定できます。
 
 ## 環境変数
 
-SAIVerseでは以下の環境変数名を使用します：
-```
-ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-または
+SAIVerse は次の環境変数名だけを読みます。
 ```
 CLAUDE_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
+> **注意**: Anthropic 公式の SDK などで使われる `ANTHROPIC_API_KEY` という名前は、SAIVerse では読まれません。キーは必ず `CLAUDE_API_KEY` に入れてください。
+
 ## 参考リンク
 
-- [Anthropic Console](https://console.anthropic.com/)
-- [APIドキュメント](https://docs.anthropic.com/)
-- [料金ページ](https://www.anthropic.com/pricing)
+- [Claude Console](https://platform.claude.com/)
+- [APIドキュメント](https://platform.claude.com/docs/en/home)
+- [モデルの一覧](https://platform.claude.com/docs/en/models/overview)
+- [料金ページ (API)](https://platform.claude.com/docs/en/about-claude/pricing)

@@ -159,7 +159,7 @@ class TestModelSupportsImages(unittest.TestCase):
         self.assertTrue(model_configs.model_supports_images("claude-sonnet-4-5"))
 
     def test_non_vision_model(self):
-        self.assertFalse(model_configs.model_supports_images("nim-deepseek-v4-pro-0813"))
+        self.assertFalse(model_configs.model_supports_images("nim-nemotron-3-ultra"))
 
 
 class TestAugust2026ModelCatalog(unittest.TestCase):
@@ -315,9 +315,9 @@ class TestFindModelConfig(unittest.TestCase):
         self.assertEqual(config.get("provider"), "anthropic")
 
     def test_find_by_api_model_name(self):
-        key, config = model_configs.find_model_config("deepseek-ai/deepseek-v4-flash-0731")
+        key, config = model_configs.find_model_config("deepseek/deepseek-v4-flash")
         self.assertTrue(key)
-        self.assertEqual(config.get("model"), "deepseek-ai/deepseek-v4-flash-0731")
+        self.assertEqual(config.get("model"), "deepseek/deepseek-v4-flash")
 
     def test_not_found(self):
         key, config = model_configs.find_model_config("nonexistent-model-xyz-abc")
