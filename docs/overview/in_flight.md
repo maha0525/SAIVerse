@@ -48,7 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🟣 検証待ち | Claude Haiku 5.5 と Nano Banana 2.1 の追加 | develop に入り、画像生成の既定は Nano Banana 2.1 になり、旧 preview の画像モデル ID も正式版へ移した。次 = まはーが本番で、Haiku 5.5 のペルソナとの会話と、既定のままの画像生成が通ることを見る (どちらも実際の課金が発生する)。 | まはー (実機確認) | [intent](../intent/image_generation_models.md) / [intent](../intent/model_provider_management.md) | 2026-10-09 |
+| 🟣 検証待ち | Claude Haiku 5.5 と Nano Banana 2.1 の追加 | develop に入り、画像生成の既定は Nano Banana 2.1 になり、旧 preview の画像モデル ID も正式版へ移した。Haiku 5.5 はまはーが疎通を確認済み。次 = まはーが本番で、既定のままの画像生成 (Nano Banana 2.1) で一枚描けることを見る (一枚分の課金が発生する)。 | まはー (実機確認) | [intent](../intent/image_generation_models.md) / [intent](../intent/model_provider_management.md) | 2026-10-09 |
 | 🟣 検証待ち | 入退室ログの全体・Building 別の表示設定 | develop に入り、「以前のメッセージを読み込む」ボタンの出方はメティスが隔離環境の画面で確かめ済み。次 = まはーが本番の画面で、全体と Building の表示・非表示・継承の切り替えで入退室ログだけが隠れ、会話と別の通知が残ることを見る。 | まはー (実機確認) | [intent](../intent/movement_notice_visibility.md) | 2026-10-09 |
 | 🟣 検証待ち | インベントリの画像・文書と短縮参照の詳細表示 | develop に入った。次 = まはーが本番で、インベントリの画像・文書を開いて名前・種類・中身が正しく出ることと、チャットの短縮 ID のリンクから同じアイテムが開くことを見る。 | まはー (実機確認) | [intent](../intent/reference_addressing.md) | 2026-10-09 |
 | 🟣 検証待ち | Codex の返事が二重に出る件の診断ログ | 診断ログが develop に入った (返事ごとに数行、中身は記録しない)。次 = まはーの環境で再発を待ち、発生したら backend.log の診断の行で、サーバーが二重に送ったのか SAIVerse の中で二重になったのかをメティスが切り分ける。 | 実地の発生待ち (ログ確認はメティス) | [issue](../issues/codex_stream_diagnostics.md) | 2026-10-09 |
