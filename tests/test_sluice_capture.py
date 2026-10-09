@@ -1467,5 +1467,39 @@ class CaptureApiTest(_CaptureTestBase):
         self.assertEqual(ctx.exception.status_code, 404)
 
 
+class CapturePageReviewAbsentTest(_CaptureTestBase):
+    """記憶の手入れの提案は後から通す採取には載らない (2026-10-09 移設)。"""
+
+    def test_後から通す採取には記憶ページの再編の提案も返答欄も出ず提示の記録も書かれない(self):
+        ids = self._append_conversation(2, chars=10)
+        self._record_span(ids[0], ids[-1])
+        candidate = {
+            "op_id": "split:memopedia:5", "kind": "split",
+            "refs": ["memopedia:5"],
+            "line": "[肥大] memopedia:5「技術の記録」 6,000字 — 子ページへの分割を提案",
+        }
+        client = FakeLLMClient(_sluice_result())
+        with patch(
+            "saiverse.curation.detect_curation_candidates",
+            return_value=[candidate],
+        ) as detect, patch.object(
+            sluice, "_curation_business_day", return_value="2026-10-09",
+        ):
+            summary = sluice.run_sluice_capture(
+                self._lifecycle(client), self._persona(), mode="persona",
+            )
+
+        self.assertEqual(summary["status"], "ok")
+        self.assertEqual(len(client.calls), 1)
+        call = client.calls[0]
+        self.assertIs(call["response_schema"], sluice._RESPONSE_SCHEMA)
+        self.assertNotIn("page_reviews", call["response_schema"]["properties"])
+        self.assertNotIn("記憶ページの再編の提案", call["messages"][-1]["content"])
+        detect.assert_not_called()
+        from sai_memory.curation_ops import get_last_presented_day
+        with self.adapter._db_lock:
+            self.assertIsNone(get_last_presented_day(self.adapter.conn))
+
+
 if __name__ == "__main__":
     unittest.main()

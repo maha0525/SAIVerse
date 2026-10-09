@@ -537,7 +537,7 @@ def _section_curation_edits(
     persona: Any,
     since_epoch: int,
 ) -> List[str]:
-    """「棚の整理」節 — 前回の新聞生成時刻以降の編纂編集を集計する（裁定 (f)）。
+    """「記憶ページの整理」節 — 前回の新聞生成時刻以降の編纂編集を集計する（裁定 (f)）。
 
     PageEditHistory を edit_source でグルーピングする。
     日常の本文追記（edit_source='ai_conversation'）は
@@ -550,7 +550,7 @@ def _section_curation_edits(
     adapter = getattr(persona, "sai_memory", None) if persona is not None else None
     mem_conn = getattr(adapter, "conn", None) if adapter is not None else None
 
-    lines = ["## 棚の整理", ""]
+    lines = ["## 記憶ページの整理", ""]
 
     if mem_conn is None:
         lines.append(NONE_TEXT)
@@ -582,7 +582,7 @@ def _section_curation_edits(
 
     # edit_source の表示名
     SOURCE_LABELS = {
-        "curation": "棚の整理（編纂）",
+        "curation": "記憶の手入れ（分割・統合）",
         "auto_maintenance": "自動整備",
         "manual": "手動編集",
         "api": "API 経由",
@@ -669,7 +669,7 @@ def generate_day_report(
     desires = _list_all_desires(manager, persona_id, plan_date_str)
     monologue = _latest_day_close_monologue(manager, persona_id)
 
-    # 棚の整理節: 前回の新聞生成時刻以降の編纂編集を集計
+    # 記憶ページの整理節: 前回の新聞生成時刻以降の編纂編集を集計
     persona = (getattr(manager, "personas", None) or {}).get(persona_id)
     if _last_generated_epoch is None:
         _last_generated_epoch = _get_last_generated_at(persona_id)
@@ -680,7 +680,7 @@ def generate_day_report(
     day_theme = (meta.get("day_theme") or "").strip() if isinstance(meta, dict) else ""
 
     # 節順序: 人の一日の読み物 (時間割 → 就寝のふりかえり) を先に、
-    # システム的な帳簿 (セッション → 欲求 → 予算 → 棚の整理 → 独白) を後に。
+    # システム的な帳簿 (セッション → 欲求 → 予算 → 記憶ページの整理 → 独白) を後に。
     parts: List[str] = [
         f"# {persona_name} の一日新聞 — {plan_date_str}",
         "",
@@ -716,7 +716,7 @@ def save_day_report(
 
     保存と同時に、新聞生成時刻（Unix epoch 秒）を
     ``~/.saiverse/personas/<id>/day_report_last_generated_at.txt`` に記録する。
-    次回の新聞生成時にこの時刻が「棚の整理」節の窓の起点になる。
+    次回の新聞生成時にこの時刻が「記憶ページの整理」節の窓の起点になる。
 
     Args:
         report_text: 省略時は :func:`generate_day_report` で生成する。
@@ -743,7 +743,7 @@ def save_day_report(
         "[day_report] saved: persona=%s date=%s -> %s", persona_id, plan_date_str, path,
     )
 
-    # 新聞生成時刻を記録（次回の「棚の整理」節の窓の起点）
+    # 新聞生成時刻を記録（次回の「記憶ページの整理」節の窓の起点）
     _save_last_generated_at(persona_id, int(_time.time()), base_dir=_persona_base_dir)
 
     return path

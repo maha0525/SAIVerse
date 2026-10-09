@@ -3,9 +3,11 @@
 P4-a の三層（検知 → 裁定 → 実行）のうち「裁定から実行への橋渡し」と
 「実行本体」を担う。
 
-就寝判断（day_close）の finalize が approve された op_id を
-``enqueue_plan`` でここに書き込み、背景スレッドが ``run_pending_plans``
-で実行する。
+スルース（sea/sluice.py — 記憶整理の節目の本人の一手）の適用が approve
+された op_id を ``enqueue_plan`` でここに書き込み、スルースの確定後に
+背景スレッドが ``run_pending_plans`` で実行する（2026-10-09 に就寝判断
+から移設）。候補の提示は業務日に一回だけで、最後に提示した業務日は
+``curation_presentation`` テーブル（1 行）が持つ。
 
 実行関数（P4-a2 実装）:
     execute_merge(conn, survivor_page_id, absorbed_page_id, memopedia) -> dict
@@ -88,6 +90,61 @@ def init_curation_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_curation_plans_status"
         " ON curation_plans(status)"
+    )
+    _create_presentation_table(conn)
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# 提示の記録（業務日に一回だけ提示する）
+# ---------------------------------------------------------------------------
+#
+# 記憶の手入れの候補は、スルースの回に業務日一回だけ本人へ提示する。memory.db
+# はペルソナ単位なので、記録は 1 行 (id=1) だけ持つ。提示した時点で書く —
+# その回の応答が失敗しても、同じ業務日には再提示しない（見送られた候補は
+# 翌業務日の検知で、まだ条件を満たせば再提示される）。
+
+
+def _create_presentation_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS curation_presentation (
+            id                 INTEGER PRIMARY KEY CHECK (id = 1),
+            last_presented_day TEXT NOT NULL,
+            presented_at       INTEGER NOT NULL
+        )
+        """
+    )
+
+
+def get_last_presented_day(conn: sqlite3.Connection) -> Optional[str]:
+    """最後に候補を提示した業務日 ("YYYY-MM-DD")。一度も提示していなければ None。
+
+    テーブルが無い古い DB でも動くよう、読む前に冪等に作る。読み出しの例外は
+    送出する（呼び出し側が「提示しない」へ倒す — 読めないのを「未提示」と
+    誤読して同じ日に二度出さないため）。
+    """
+    _create_presentation_table(conn)
+    row = conn.execute(
+        "SELECT last_presented_day FROM curation_presentation WHERE id = 1"
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    return str(row[0])
+
+
+def record_presented_day(conn: sqlite3.Connection, business_day: str) -> None:
+    """候補を提示した業務日を記録する（上書き）。"""
+    _create_presentation_table(conn)
+    conn.execute(
+        """
+        INSERT INTO curation_presentation (id, last_presented_day, presented_at)
+        VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            last_presented_day = excluded.last_presented_day,
+            presented_at = excluded.presented_at
+        """,
+        (str(business_day), int(time.time())),
     )
     conn.commit()
 
@@ -1117,11 +1174,12 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
     - 各プランを順に実行し、status を done/failed に更新する。
     - **1 プラン = 1 トランザクション**: プラン内の全書き込み（ページ変更＋
       status=done）は成功時のみ commit され、途中失敗時は rollback されて
-      DB はプラン実行前と同一の状態に戻る（翌朝報告の「ページは変更されて
+      DB はプラン実行前と同一の状態に戻る（報告の「ページは変更されて
       いません」が事実と一致する）。
     - split の LLM 呼び出し（plan_split）はロック・トランザクションの外で行う。
     - 個々のプランの失敗は他のプランを止めない（fail-safe）。
-    - 実行後、翌朝のペルソナへの報告を event_message 形式で SAIMemory に書く。
+    - 実行後、ペルソナへの報告を event_message 形式で SAIMemory に書く
+      （実行はスルースの確定直後に走るので、時刻は就寝後とは限らない）。
     - desk 上の吸収側ページは既存の dropped_missing 機構が次の Metabolism
       snapshot で正直に下ろす（ここでは特別対応不要）。
 
@@ -1312,7 +1370,7 @@ def run_pending_plans(manager: Any, persona_id: str) -> Dict[str, Any]:
                 "ページは変更されていません。"
             )
 
-    # --- 翌朝ペルソナへの event_message（翌朝届く報告） ---
+    # --- ペルソナへの event_message（次の文脈に届く報告） ---
     _write_curation_report(
         adapter=adapter,
         persona_id=persona_id,
@@ -1341,7 +1399,8 @@ def _write_curation_report(
 ) -> None:
     """編纂完了報告を event_message 形式で SAIMemory に書く。
 
-    翌朝のペルソナの文脈（tail）に届く。
+    ペルソナの次の文脈（tail）に届く。実行はスルースの確定直後に走るので、
+    文面は時刻（夜・翌朝）を前提にしない。
     機構の名義（user ロール ＋ system タグ）で書く——ペルソナ名義で書かない。
     event_message タグ必須（タグ漏れでコンテキストに乗らない事故を防ぐ）。
     """
@@ -1355,7 +1414,7 @@ def _write_curation_report(
         # 実行対象がなかった（実際には run_pending_plans がガードするが念のため）
         return
 
-    header = "[システム通知: 夜の間に棚の整理が行われました]"
+    header = "[システム通知: 記憶ページの整理が行われました]"
     body_lines: List[str] = [header, ""]
     if report_lines:
         body_lines.extend(report_lines)

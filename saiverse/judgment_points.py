@@ -481,8 +481,6 @@ def build_day_close_schema(
     persona_id: str,
     episode_refs: Optional[List[str]] = None,
     purpose_refs: Optional[List[str]] = None,
-    curation_candidates: Optional[List[Dict[str, Any]]] = None,
-    naming_candidates: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """就寝判断の response_schema (judgment_points.md §8)。
 
@@ -494,14 +492,10 @@ def build_day_close_schema(
     配列になる。``episode_refs`` / ``purpose_refs`` のどちらかが空なら
     フィールド自体を出さない。
 
-    P4-a 編纂候補 (``curation_candidates``): 候補が空 / None なら
-    ``curation_reviews`` フィールド自体を出さない (空 enum 事故防止)。
-    各 review: ``op_id`` (候補の op_id の enum) + ``verdict`` ("approve"|"skip")。
-
-    P4-b 命名候補 (``naming_candidates``): 候補が空 / None なら
-    ``naming_reviews`` フィールド自体を出さない (空 enum 事故防止)。
-    各 review: ``cluster_id`` (候補の cluster_id の enum) +
-    ``verdict`` ("name"|"skip") + ``name`` (verdict=name の場合必須)。
+    記憶の手入れ (旧 ``curation_reviews``) は 2026-10-09 にスルース
+    (sea/sluice.py の ``page_reviews``) へ移設した — 自律 OFF のペルソナにも
+    届けるため (autonomous_behavior_v3.md §6)。メモのページ化 (旧
+    ``naming_reviews``) は休止。
     """
     schema: Dict[str, Any] = {
         "type": "object",
@@ -548,69 +542,6 @@ def build_day_close_schema(
                 "係るものだけ挙げればよい"
             ),
         }
-    # P4-a 編纂候補 — 候補が空なら空 enum 事故防止のためフィールド自体を出さない
-    if curation_candidates:
-        op_id_enum = [c["op_id"] for c in curation_candidates if c.get("op_id")]
-        if op_id_enum:
-            schema["properties"]["curation_reviews"] = {
-                "type": "array",
-                "description": (
-                    "棚の乱れの裁定。approve すると眠っている間にバックグラウンドで整理されます。"
-                    "skip は翌日以降に再提示されます"
-                ),
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "op_id": {
-                            "type": "string",
-                            "enum": op_id_enum,
-                            "description": "裁定する編纂候補の ID",
-                        },
-                        "verdict": {
-                            "type": "string",
-                            "enum": ["approve", "skip"],
-                            "description": "approve=承認（実行する） / skip=見送り（翌日再提示）",
-                        },
-                    },
-                    "required": ["op_id", "verdict"],
-                },
-            }
-    # P4-b 命名候補 — 候補が空なら空 enum 事故防止のためフィールド自体を出さない
-    if naming_candidates:
-        cluster_id_enum = [
-            c["cluster_id"] for c in naming_candidates if c.get("cluster_id")
-        ]
-        if cluster_id_enum:
-            schema["properties"]["naming_reviews"] = {
-                "type": "array",
-                "description": (
-                    "テーマの芽の裁定。name を与えるとテーマが棚に立ちます。"
-                    "skip は翌日以降に再提示されます"
-                ),
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "cluster_id": {
-                            "type": "string",
-                            "enum": cluster_id_enum,
-                            "description": "裁定する命名候補の ID",
-                        },
-                        "verdict": {
-                            "type": "string",
-                            "enum": ["name", "skip"],
-                            "description": (
-                                "name=命名してテーマページを作成 / "
-                                "skip=見送り（翌日再提示）"
-                            ),
-                        },
-                        "name": {
-                            "type": "string",
-                            "description": "テーマに付ける名前（verdict=name のとき必須）",
-                        },
-                    },
-                    "required": ["cluster_id", "verdict"],
-                },
-            }
     return schema
 
 
@@ -1144,52 +1075,11 @@ def _format_today_episodes(episodes_today: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _format_curation_candidates(candidates: List[Dict[str, Any]]) -> str:
-    """編纂候補の状況テキスト節（就寝判断用）。
-
-    ``detect_curation_candidates`` が返した候補リストを
-    「## 今日の棚の乱れ（承認したものだけ、眠っている間に整理されます）」
-    節として整形する。候補ゼロなら空文字を返す（節ごと出さない）。
-    """
-    if not candidates:
-        return ""
-    lines = [
-        "## 今日の棚の乱れ（承認したものだけ、眠っている間に整理されます）",
-    ]
-    for c in candidates:
-        lines.append(f"- {c['line']}")
-    lines.append(
-        "承認した項目に verdict='approve' を、見送りは 'skip' を設定してください。"
-        "skip は条件が続く限り翌日以降に再提示されます。"
-    )
-    return "\n".join(lines)
-
-
-def _format_naming_candidates(candidates: List[Dict[str, Any]]) -> str:
-    """命名（テーマ立て）候補の状況テキスト節（就寝判断用、P4-b）。
-
-    ``detect_naming_candidates`` が返した候補リストを
-    「## テーマの芽」節として整形する。候補ゼロなら空文字を返す（節ごと出さない）。
-    """
-    if not candidates:
-        return ""
-    lines = [
-        "## テーマの芽",
-        "以下の候補に名前を与えると、テーマとして記憶の棚に立ちます。",
-        "verdict='name' の場合、name フィールドに自分が付けたいテーマ名を記入してください。",
-    ]
-    for c in candidates:
-        lines.append(f"- {c['line']}")
-    return "\n".join(lines)
-
-
 def build_day_close_situation_text(
     manager: Any,
     persona_id: str,
     context: Dict[str, Any],
     episodes_today: Optional[List[Dict[str, Any]]] = None,
-    curation_candidates: Optional[List[Dict[str, Any]]] = None,
-    naming_candidates: Optional[List[Dict[str, Any]]] = None,
     plan_date: Optional[str] = None,
 ) -> str:
     """就寝判断の tail 注入テキスト (judgment_points.md §8「見るもの」)。
@@ -1197,11 +1087,8 @@ def build_day_close_situation_text(
     ``episodes_today`` (今日閉じた出来事) が与えられたら、層2 棚入れの
     選択材料として episode:N の一覧を添える。
 
-    ``curation_candidates`` (編纂候補) が与えられたら「今日の棚の乱れ」節を
-    追加する（P4-a 裁定の就寝判断相乗り）。候補ゼロ・None なら節ごと出さない。
-
-    ``naming_candidates`` (命名候補) が与えられたら「テーマの芽」節を追加する
-    （P4-b 裁定の就寝判断相乗り）。候補ゼロ・None なら節ごと出さない。
+    記憶の手入れの提示はスルースへ移設した (2026-10-09、
+    :func:`build_day_close_schema` の docstring を参照)。
 
     Args:
         plan_date: 営業日 "YYYY-MM-DD"。深夜跨ぎリズムで就寝判断が翌暦日 01:00
@@ -1222,16 +1109,6 @@ def build_day_close_situation_text(
     ]
     if episodes_today:
         parts += ["", _format_today_episodes(episodes_today)]
-    # P4-a 編纂候補（棚の乱れ）
-    if curation_candidates:
-        curation_text = _format_curation_candidates(curation_candidates)
-        if curation_text:
-            parts += ["", curation_text]
-    # P4-b 命名候補（テーマの芽）
-    if naming_candidates:
-        naming_text = _format_naming_candidates(naming_candidates)
-        if naming_text:
-            parts += ["", naming_text]
     return "\n".join(parts)
 
 
@@ -1403,53 +1280,21 @@ def build_judgment_args(
         purpose_refs = collect_purpose_refs(manager, persona_id) if episode_refs else []
         shelving = bool(episode_refs and purpose_refs)
 
-        # P4-a 編纂候補: ペルソナの memory.db を adapter 経由で読んで検知
-        curation_candidates: List[Dict[str, Any]] = []
-        try:
-            persona_obj = (getattr(manager, "personas", None) or {}).get(persona_id)
-            adapter = getattr(persona_obj, "sai_memory", None) if persona_obj else None
-            mem_conn = getattr(adapter, "conn", None) if adapter else None
-            if mem_conn is not None:
-                from saiverse.curation import detect_curation_candidates
-                curation_candidates = detect_curation_candidates(mem_conn, persona_id)
-        except Exception:
-            LOGGER.warning(
-                "[judgment] failed to detect curation candidates for %s",
-                persona_id, exc_info=True,
-            )
-
-        # P4-b 命名候補: main DB の persona_task から detect_naming_candidates で検知
-        naming_candidates: List[Dict[str, Any]] = []
-        try:
-            from saiverse.curation import detect_naming_candidates
-            naming_candidates = detect_naming_candidates(manager, persona_id)
-        except Exception:
-            LOGGER.warning(
-                "[judgment] failed to detect naming candidates for %s",
-                persona_id, exc_info=True,
-            )
-
+        # 記憶の手入れ (旧 curation_candidates) の提示は 2026-10-09 にスルースへ
+        # 移設した (sea/sluice.py)。メモのページ化 (旧 naming_candidates) は休止。
         situation_text = build_day_close_situation_text(
             manager, persona_id, context,
             episodes_today=episodes_today if shelving else None,
-            curation_candidates=curation_candidates if curation_candidates else None,
-            naming_candidates=naming_candidates if naming_candidates else None,
             plan_date=_day_close_plan_date,
         )
         response_schema = build_day_close_schema(
             manager, persona_id,
             episode_refs=episode_refs if shelving else None,
             purpose_refs=purpose_refs if shelving else None,
-            curation_candidates=curation_candidates if curation_candidates else None,
-            naming_candidates=naming_candidates if naming_candidates else None,
         )
         judgment_context = {
             "plan_date": _day_close_plan_date,
         }
-        if curation_candidates:
-            judgment_context["curation_candidates"] = curation_candidates
-        if naming_candidates:
-            judgment_context["naming_candidates"] = naming_candidates
         if shelving:
             judgment_context["episode_refs"] = episode_refs
             judgment_context["purpose_refs"] = purpose_refs

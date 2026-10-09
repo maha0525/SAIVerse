@@ -1,4 +1,4 @@
-"""P4-a2 編纂実行部・翌朝報告・新聞窓集計のテスト。
+"""P4-a2 編纂実行部・実行後の報告・新聞窓集計のテスト。
 
 検証対象:
 - execute_merge: 逐語結合（両者の本文が結合後に含まれる）、キーワード和集合、
@@ -7,7 +7,7 @@
   LLM が不正な割当を返した時に棄却して ValueError になる（mock LLM 必須）
 - run_pending_plans: done/failed 遷移・一部失敗が他を止めない
 - event_message: タグ規約どおり（["internal", "event_message", "curation"]）に書かれる
-- 新聞「棚の整理」節: 窓内の編纂編集が載る・ai_conversation が載らない・編集ゼロで「なし」
+- 新聞「記憶ページの整理」節: 窓内の編纂編集が載る・ai_conversation が載らない・編集ゼロで「なし」
 - 窓時刻: save_day_report で保存、次回 generate_day_report で読まれる
 """
 from __future__ import annotations
@@ -886,7 +886,11 @@ class TestRunPendingPlans:
         assert "internal" in tags, f"'internal' タグがない: {tags}"
         # 内容に報告が含まれる
         content = msg.get("content") or ""
-        assert "棚の整理" in content or "統合" in content, f"報告が含まれない: {content[:100]}"
+        # 実行はスルースの確定直後に走るので、時刻 (夜・翌朝) を前提にしない文面。
+        assert "[システム通知: 記憶ページの整理が行われました]" in content
+        assert "統合" in content, f"報告が含まれない: {content[:100]}"
+        for old in ("棚の整理", "夜の間に"):
+            assert old not in content
 
     def test_no_pending_plans_no_event_message(self):
         """pending が0件なら event_message は書かれない。"""
@@ -899,7 +903,7 @@ class TestRunPendingPlans:
 
 
 # ---------------------------------------------------------------------------
-# 新聞の「棚の整理」節のテスト
+# 新聞の「記憶ページの整理」節のテスト
 # ---------------------------------------------------------------------------
 
 
@@ -923,7 +927,9 @@ class TestSectionCurationEdits:
         lines = _section_curation_edits(persona, since)
         text = "\n".join(lines)
 
-        assert "棚の整理（編纂）" in text or "curation" in text.lower()
+        assert lines[0] == "## 記憶ページの整理"
+        assert "記憶の手入れ（分割・統合）" in text
+        assert "棚の整理" not in text
         assert "なし" not in text
 
     def test_ai_conversation_is_excluded(self):

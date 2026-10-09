@@ -5268,6 +5268,432 @@ class SluiceResponseSchemaShapeTest(unittest.TestCase):
         ):
             self.assertIsNone(sluice._parse_ref(bad, sluice._PROMISE_REF_RE))
 
+    def test_記憶の手入れの候補が無い回は応答の形が従来と同じオブジェクトになる(self):
+        self.assertIs(sluice._build_response_schema([]), sluice._RESPONSE_SCHEMA)
+        self.assertIs(sluice._build_response_schema(None), sluice._RESPONSE_SCHEMA)
+
+    def test_記憶の手入れの候補がある回だけ返答欄が末尾に必須で足される(self):
+        base_props = list(sluice._RESPONSE_SCHEMA["properties"])
+        schema = sluice._build_response_schema(
+            ["split:memopedia:5", "merge:memopedia:1+memopedia:2"],
+        )
+        props = schema["properties"]
+        # 既存の欄の並び (propertyOrdering) は変えず、末尾に足す。
+        self.assertEqual(list(props), [*base_props, "page_reviews"])
+        self.assertEqual(schema["required"], list(props))
+        items = props["page_reviews"]["items"]
+        self.assertEqual(list(items["properties"]), ["op_id", "verdict"])
+        self.assertEqual(items["required"], ["op_id", "verdict"])
+        self.assertEqual(
+            items["properties"]["op_id"]["enum"],
+            ["split:memopedia:5", "merge:memopedia:1+memopedia:2"],
+        )
+        self.assertEqual(items["properties"]["verdict"]["enum"], ["approve", "skip"])
+        # 数値の自由記入欄を置かない (v3 §13.6 / 型の規律 1)。
+        self.assertEqual(numeric_fields(schema), [])
+        # 元の静的な形は書き換えていない。
+        self.assertNotIn("page_reviews", sluice._RESPONSE_SCHEMA["properties"])
+
+
+# ---------------------------------------------------------------------------
+# 記憶の手入れ (page_reviews) — 2026-10-09 に就寝判断からスルースへ移設
+# ---------------------------------------------------------------------------
+
+_PAGE_SPLIT = {
+    "op_id": "split:memopedia:5", "kind": "split", "refs": ["memopedia:5"],
+    "line": "[肥大] memopedia:5「技術の記録」 6,000字 — 子ページへの分割を提案",
+}
+_PAGE_MERGE = {
+    "op_id": "merge:memopedia:1+memopedia:2", "kind": "merge",
+    "refs": ["memopedia:1", "memopedia:2"],
+    "line": "[類似] memopedia:1「週の記録」と memopedia:2「金曜のメモ」 — タイトル包含。統合を提案",
+}
+
+
+class SluicePageReviewTest(_AdapterTestBase):
+    """記憶の手入れの提示 (業務日に一回)・承認の予約・確定後のバッチ起動。
+
+    候補の検知 (saiverse.curation.detect_curation_candidates) と業務日の解決
+    (sluice._curation_business_day) は差し替え、背景スレッドは同期で走る
+    偽物に、バッチ本体 (run_pending_plans) は呼ばれた記録だけ残す偽物にする。
+    """
+
+    _MSGS = [{"id": f"m{i}", "content": "x"} for i in range(5)]
+
+    def setUp(self):
+        super().setUp()
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from database.models import AI, Base
+        from saiverse.execution_ledger import ExecutionLedger
+
+        self._tb_tmp = tempfile.TemporaryDirectory()
+        db_path = str(Path(self._tb_tmp.name) / "central.db")
+        self.engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(self.engine)
+        self.SessionLocal = sessionmaker(bind=self.engine)
+        self.ledger = ExecutionLedger(self.SessionLocal)
+        db = self.SessionLocal()
+        try:
+            db.add(AI(AIID="tester", HOME_CITYID=1, AINAME="tester"))
+            db.commit()
+        finally:
+            db.close()
+        self.addCleanup(self._cleanup_tb)
+
+        self.day = ["2026-10-09"]
+        self.detected = [dict(_PAGE_SPLIT)]
+        self.detect_calls = []
+        self.threads_started = []
+        self.batch_runs = []
+
+        def _detect(conn, persona_id):
+            self.detect_calls.append(persona_id)
+            return [dict(c) for c in self.detected]
+
+        test = self
+
+        class _SyncThread:
+            def __init__(self, target=None, name=None, daemon=None):
+                self._target = target
+                self.name = name
+                self.daemon = daemon
+
+            def start(self):
+                test.threads_started.append(self.name)
+                self._target()
+
+        for patcher in (
+            patch("saiverse.curation.detect_curation_candidates", side_effect=_detect),
+            patch.object(
+                sluice, "_curation_business_day",
+                side_effect=lambda _lifecycle, _pid: self.day[0],
+            ),
+            patch.object(sluice, "threading", SimpleNamespace(Thread=_SyncThread)),
+            patch(
+                "sai_memory.curation_ops.run_pending_plans",
+                side_effect=lambda _manager, pid: self.batch_runs.append(pid),
+            ),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _cleanup_tb(self):
+        self.engine.dispose()
+        gc.collect()
+        try:
+            self._tb_tmp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _manager(self, *, ledger):
+        manager = SimpleNamespace(SessionLocal=self.SessionLocal, personas={})
+        if ledger:
+            manager.execution_ledger = self.ledger
+        return manager
+
+    def _persona(self):
+        return SimpleNamespace(
+            persona_id="tester", persona_name="エア", model="claude-x",
+            sai_memory=self.adapter,
+        )
+
+    def _run(self, result, *, ledger=False, finalize=True, messages=None):
+        client = FakeLLMClient(result)
+        runtime = FakeRuntime(client)
+        lifecycle = SimpleNamespace(
+            runtime=runtime,
+            manager=self._manager(ledger=ledger),
+            touch_anchor_after_llm_call=runtime.touch_anchor_after_llm_call,
+        )
+        summary = sluice.run_sluice(
+            lifecycle, self._persona(), "b", list(messages or self._MSGS), 0, None,
+            finalize=finalize,
+        )
+        return summary, client
+
+    def _pending(self):
+        from sai_memory.curation_ops import list_pending
+        with self.adapter._db_lock:
+            return list_pending(self.adapter.conn)
+
+    def _last_presented_day(self):
+        from sai_memory.curation_ops import get_last_presented_day
+        with self.adapter._db_lock:
+            return get_last_presented_day(self.adapter.conn)
+
+    @staticmethod
+    def _offered(call):
+        return (
+            "page_reviews" in call["response_schema"]["properties"]
+            and "記憶ページの再編の提案" in call["messages"][-1]["content"]
+        )
+
+    # ① ------------------------------------------------------------------
+
+    def test_記憶ページの再編の提案は業務日に一回だけ提示される(self):
+        _summary, client = self._run(_sluice_result(page_reviews=[]))
+        first = client.calls[0]
+        self.assertTrue(self._offered(first))
+        prompt = first["messages"][-1]["content"]
+        self.assertIn(f"[{_PAGE_SPLIT['op_id']}] {_PAGE_SPLIT['line']}", prompt)
+        self.assertIn("承認したものだけ、", prompt)
+        self.assertIn("迷うものは skip してかまいません", prompt)
+        self.assertIn("採取しないのが普通です", prompt)  # 既存の姿勢は残る
+        self.assertNotIn("棚の乱れ", prompt)  # 旧称は書かない
+        self.assertEqual(
+            first["response_schema"]["properties"]["page_reviews"]["items"]
+            ["properties"]["op_id"]["enum"],
+            [_PAGE_SPLIT["op_id"]],
+        )
+        self.assertEqual(self._last_presented_day(), "2026-10-09")
+
+        # 同じ業務日の 2 回目は検知もせず、提示しない。
+        _summary, client2 = self._run(_sluice_result())
+        second = client2.calls[0]
+        self.assertFalse(self._offered(second))
+        self.assertIs(second["response_schema"], sluice._RESPONSE_SCHEMA)
+        self.assertNotIn("記憶ページの再編の提案", second["messages"][-1]["content"])
+        self.assertEqual(self.detect_calls, ["tester"])
+
+    def test_候補が無い回は提示の記録を書かず次の回にまた検知する(self):
+        self.detected = []
+        _summary, client = self._run(_sluice_result())
+        self.assertIs(client.calls[0]["response_schema"], sluice._RESPONSE_SCHEMA)
+        self.assertIsNone(self._last_presented_day())
+        self.detected = [dict(_PAGE_SPLIT)]
+        _summary, client2 = self._run(_sluice_result(page_reviews=[]))
+        self.assertTrue(self._offered(client2.calls[0]))
+
+    # ② ------------------------------------------------------------------
+
+    def test_見送った候補は同じ業務日には再提示されず翌業務日に再提示される(self):
+        summary, client = self._run(_sluice_result(page_reviews=[
+            {"op_id": _PAGE_SPLIT["op_id"], "verdict": "skip"},
+        ]))
+        self.assertTrue(self._offered(client.calls[0]))
+        self.assertEqual(summary["pages_skipped"], 1)
+        self.assertEqual(summary["pages_approved"], 0)
+        self.assertEqual(self._pending(), [])
+        record = _read_sluice_record(self.adapter)[0]
+        self.assertIn(f"記憶ページの再編を見送り: {_PAGE_SPLIT['line']}", record)
+
+        _summary, client2 = self._run(_sluice_result())
+        self.assertFalse(self._offered(client2.calls[0]))
+
+        self.day[0] = "2026-10-10"
+        _summary, client3 = self._run(_sluice_result(page_reviews=[]))
+        self.assertTrue(self._offered(client3.calls[0]))
+        self.assertEqual(self._last_presented_day(), "2026-10-10")
+
+    def test_応答が失敗した回も同じ業務日には再提示しない(self):
+        with self.assertRaises(sluice.SluiceOutputError):
+            self._run({"reflection": "x"})  # 欄が足りない応答
+        self.assertEqual(self._last_presented_day(), "2026-10-09")
+        _summary, client = self._run(_sluice_result())
+        self.assertFalse(self._offered(client.calls[0]))
+
+    def test_候補を見せた回にpage_reviews欄が無い応答は他の欄の欠落と同じく棄却される(self):
+        with self.assertRaises(sluice.SluiceOutputError):
+            self._run(_sluice_result())  # page_reviews 欄なし
+
+    # ③ ------------------------------------------------------------------
+
+    def test_承認で予約が積まれ確定後にバッチが起動する(self):
+        self.detected = [dict(_PAGE_SPLIT), dict(_PAGE_MERGE)]
+        summary, _client = self._run(_sluice_result(page_reviews=[
+            {"op_id": _PAGE_SPLIT["op_id"], "verdict": "approve"},
+            {"op_id": _PAGE_MERGE["op_id"], "verdict": "skip"},
+        ]), ledger=True, finalize=False)
+        self.assertEqual(summary["pages_approved"], 1)
+        self.assertEqual(summary["pages_skipped"], 1)
+        pending = self._pending()
+        self.assertEqual([p["op_id"] for p in pending], [_PAGE_SPLIT["op_id"]])
+        self.assertEqual(pending[0]["kind"], "split")
+        self.assertEqual(pending[0]["refs"], ["memopedia:5"])
+        # 確定前には起動しない。
+        self.assertEqual(self.threads_started, [])
+        self.assertEqual(self.batch_runs, [])
+
+        summary["finalize"]()
+        self.assertEqual(len(self.threads_started), 1)
+        self.assertEqual(self.batch_runs, ["tester"])
+        content, scope, _line_role = _read_sluice_record(self.adapter)
+        # 本人の承認は採取ありと同じく文脈に残る。
+        self.assertEqual(scope, "committed")
+        self.assertIn(
+            f"記憶ページの再編を承認（この後の整理で実行）: {_PAGE_SPLIT['line']}",
+            content,
+        )
+        self.assertIn(f"記憶ページの再編を見送り: {_PAGE_MERGE['line']}", content)
+        self.assertEqual(sluice._CURATION_BATCH_RUNNING, set())
+
+    def test_候補に無いop_idと未知のverdictは警告して無視する(self):
+        with self.assertLogs("sea.sluice", level="WARNING") as logs:
+            summary, _client = self._run(_sluice_result(page_reviews=[
+                {"op_id": "split:memopedia:999", "verdict": "approve"},
+                {"op_id": _PAGE_SPLIT["op_id"], "verdict": "maybe"},
+            ]))
+        self.assertTrue(any("not an offered candidate" in line for line in logs.output))
+        self.assertTrue(any("neither approve nor skip" in line for line in logs.output))
+        self.assertEqual(summary["pages_approved"], 0)
+        self.assertEqual(self._pending(), [])
+
+    def test_記録の再適用でも予約は二重に積まれずバッチは確定後に一度だけ起動する(self):
+        result = _sluice_result(page_reviews=[
+            {"op_id": _PAGE_SPLIT["op_id"], "verdict": "approve"},
+        ])
+        with patch.object(
+            sluice, "_persist_record", side_effect=RuntimeError("disk error"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._run(result, ledger=True)
+        # 1 回目: 予約は積まれたが確定に失敗 — バッチは起動しない。
+        self.assertEqual(len(self._pending()), 1)
+        self.assertEqual(self.threads_started, [])
+        self.assertEqual(
+            self.ledger.find_execution("sluice.pan", "tester:m0")["status"], "applied",
+        )
+
+        # 2 回目: 台帳の記録を再利用 (LLM なし)。凍結した候補から承認を引き直す。
+        summary, client = self._run(result, ledger=True)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(summary["pages_approved"], 1)
+        self.assertEqual(len(self._pending()), 1)  # enqueue_plan の冪等
+        self.assertEqual(self.batch_runs, ["tester"])
+        self.assertEqual(
+            self.ledger.find_execution("sluice.pan", "tester:m0")["status"], "completed",
+        )
+        self.assertEqual(self.detect_calls, ["tester"])  # 再適用では検知しない
+
+    def test_同じペルソナのバッチが走っている間は二本目を起動しない(self):
+        from sai_memory.curation_ops import enqueue_plan
+        with self.adapter._db_lock:
+            enqueue_plan(self.adapter.conn, "split", "split:memopedia:5", ["memopedia:5"])
+        sluice._CURATION_BATCH_RUNNING.add("tester")
+        self.addCleanup(sluice._CURATION_BATCH_RUNNING.discard, "tester")
+        lifecycle = SimpleNamespace(manager=self._manager(ledger=False))
+        sluice._maybe_launch_curation_batch(lifecycle, self._persona())
+        self.assertEqual(self.threads_started, [])
+
+    # ④ ------------------------------------------------------------------
+
+    def test_確定が破棄された回はバッチが起動しない(self):
+        summary, _client = self._run(_sluice_result(page_reviews=[
+            {"op_id": _PAGE_SPLIT["op_id"], "verdict": "approve"},
+        ]), ledger=True, finalize=False)
+        # 呼び出し元 (run_metabolism) が検算で確定を見送った = finalize を呼ばない。
+        self.assertEqual(summary["pages_approved"], 1)
+        self.assertEqual(self.threads_started, [])
+        self.assertEqual(self.batch_runs, [])
+        # 予約は pending のまま、次の確定を待つ。
+        self.assertEqual(len(self._pending()), 1)
+        self.assertEqual(
+            self.ledger.find_execution("sluice.pan", "tester:m0")["status"], "applied",
+        )
+
+    # ⑤ ------------------------------------------------------------------
+
+    def test_台帳の旧記録はpage_reviewsが無くても提案ゼロの回として再生される(self):
+        execution_id, runnable, _status = self.ledger.claim_execution(
+            "sluice.pan", "tester:m0", "tester",
+        )
+        self.assertTrue(runnable)
+        self.assertTrue(self.ledger.try_mark_running(execution_id))
+        # 2026-10-09 より前の現行形式の記録: 応答に page_reviews が無く、
+        # 結果にも page_review_candidates の欄が無い。
+        self.ledger.mark_applied(execution_id, result={
+            "response": _sluice_result(
+                reflection="旧記録", core_adds=[{"content": "旧記録の採取"}],
+            ),
+            "rejections": [],
+            "span_start_id": "m0", "span_end_id": "m4",
+            "seen_ids": [f"m{i}" for i in range(5)],
+            "offered_activities": {}, "offered_tasks": {},
+            "core_snapshot": {},
+            "prompt": "p",
+        })
+
+        summary, client = self._run(_sluice_result(), ledger=True)
+
+        self.assertEqual(client.calls, [])  # 再利用 (新しい LLM コールなし)
+        self.assertEqual(summary["ops_applied"], 1)
+        self.assertEqual(summary["pages_approved"], 0)
+        self.assertEqual(
+            self.ledger.find_execution("sluice.pan", "tester:m0")["status"], "completed",
+        )
+        self.assertEqual(self.detect_calls, [])  # 再生の回は提示しない
+        self.assertIsNone(self._last_presented_day())
+        self.assertEqual(sluice._RESPONSE_FORMAT_TAG, "promise2")  # 印は据え置き
+
+    def test_台帳の記録の候補の欄が壊れていれば採り直す(self):
+        execution_id, _runnable, _status = self.ledger.claim_execution(
+            "sluice.pan", "tester:m0", "tester",
+        )
+        self.assertTrue(self.ledger.try_mark_running(execution_id))
+        self.ledger.mark_applied(execution_id, result={
+            "response": _sluice_result(page_reviews=[
+                {"op_id": _PAGE_SPLIT["op_id"], "verdict": "approve"},
+            ]),
+            "rejections": [],
+            "span_start_id": "m0", "span_end_id": "m4",
+            "seen_ids": [f"m{i}" for i in range(5)],
+            "offered_activities": {}, "offered_tasks": {},
+            "core_snapshot": {},
+            "prompt": "p",
+            "page_review_candidates": "broken",
+        })
+
+        with self.assertLogs("sea.sluice", level="WARNING"):
+            _summary, client = self._run(
+                _sluice_result(page_reviews=[]), ledger=True,
+            )
+
+        self.assertEqual(len(client.calls), 1)  # 別キーで新しい LLM コール
+        retried = self.ledger.find_execution(
+            "sluice.pan", f"tester:m0#format-{sluice._RESPONSE_FORMAT_TAG}",
+        )
+        self.assertEqual(retried["status"], "completed")
+        self.assertEqual(self._pending(), [])
+
+    # ⑥ ------------------------------------------------------------------
+
+    def test_要求していない回のpage_reviewsは無視される(self):
+        self.detected = []
+        with self.assertLogs("sea.sluice", level="WARNING") as logs:
+            summary, client = self._run(_sluice_result(
+                core_adds=[{"content": "残す記憶"}],
+                page_reviews=[{"op_id": _PAGE_SPLIT["op_id"], "verdict": "approve"}],
+            ))
+        self.assertIs(client.calls[0]["response_schema"], sluice._RESPONSE_SCHEMA)
+        self.assertTrue(any(
+            "present although no page review was offered" in line
+            for line in logs.output
+        ))
+        # 応答全体は棄却されず、他の欄は適用される。
+        self.assertFalse(summary["skipped"])
+        self.assertEqual(summary["ops_applied"], 1)
+        self.assertEqual(summary["pages_approved"], 0)
+        self.assertEqual(self._pending(), [])
+
+    def test_提案を足すと入らない回は提案を外して採取を通す(self):
+        real_fits = sluice._ensure_input_fits
+
+        def _fits(messages, model, **kwargs):
+            if "page_reviews" in kwargs["response_schema"]["properties"]:
+                raise sluice.SluiceInputTooLargeError(str(model), 2, 1)
+            return real_fits(messages, model, **kwargs)
+
+        with patch.object(sluice, "_ensure_input_fits", side_effect=_fits):
+            summary, client = self._run(_sluice_result())
+        self.assertFalse(summary["skipped"])
+        self.assertIs(client.calls[0]["response_schema"], sluice._RESPONSE_SCHEMA)
+        self.assertNotIn(
+            "記憶ページの再編の提案", client.calls[0]["messages"][-1]["content"],
+        )
+        # 見せていないので提示の記録は書かない (同じ業務日の後の回で見せる)。
+        self.assertIsNone(self._last_presented_day())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,11 @@ Metabolism の eviction 直前、メインラインの温まった prefix (head 
 - 手帳メモ (want_memos / did_memos) — アクティビティへの日付つき一行
 - 約束 (promise_adds / promise_updates) — タスク帳への追加 / 変更
 
+これに加えて、業務日に一回だけ、記憶の手入れ (Memopedia ページの分割・統合の
+提案) を本人に見せて page_reviews で approve / skip を返させる (2026-10-09 に
+就寝判断から移設 — 自律 OFF のペルソナにも届けるため。v3 §6)。承認分は確定の
+後に背景で実行される。後から通す採取には載せない。
+
 旧名 gold_panning (砂金採り) から 2026-08-19 に世代交代した。名前の変化は性質の
 変化を運ぶ: 手作業の一掬いから「全ての水が通る構造物」へ — スルースが失敗したら
 退場は止まり (あらすじ生成の失敗と同格)、次の Metabolism 機会に再試行される。
@@ -30,6 +35,7 @@ import json
 import logging
 import os
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -323,6 +329,55 @@ _RESPONSE_SCHEMA: Dict[str, Any] = {
         "want_memos", "did_memos", "promise_adds", "promise_updates",
     ],
 }
+
+#: 記憶の手入れ (Memopedia ページの分割・統合の提案) への返答の欄。候補を提示
+#: した回だけスキーマに足す (:func:`_build_response_schema`)。2026-10-09 に就寝
+#: 判断から移設した — 自律 OFF のペルソナにも届けるため
+#: (docs/intent/autonomous_behavior_v3.md §6)。提示は業務日に一回だけ
+#: (:func:`_offer_page_reviews`)。
+_PAGE_REVIEW_FIELD = "page_reviews"
+_PAGE_REVIEW_VERDICTS = ("approve", "skip")
+
+
+def _build_response_schema(page_review_op_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    """その回に要求する応答の形。
+
+    候補が無い回は :data:`_RESPONSE_SCHEMA` そのもの (同じオブジェクト) を返す。
+    候補がある回だけ、末尾に ``page_reviews`` 欄を足した写しを返し、required にも
+    含める — 既存の欄の並び (propertyOrdering) は変えない。``op_id`` は提示した
+    候補の enum (空 enum を作らないよう、候補が無ければ欄ごと出さない)。数値の
+    欄は置かない (型の規律 1 / v3 §13.6)。
+    """
+    op_ids = [str(op_id) for op_id in (page_review_op_ids or []) if op_id]
+    if not op_ids:
+        return _RESPONSE_SCHEMA
+    schema = json.loads(json.dumps(_RESPONSE_SCHEMA, ensure_ascii=False))
+    schema["properties"][_PAGE_REVIEW_FIELD] = {
+        "type": "array",
+        "description": (
+            "記憶ページの再編の提案への返答。提案一件ごとに op_id をそのまま写し、"
+            "verdict に approve (実行する) か skip (見送る) を書く。"
+        ),
+        "items": {
+            "type": "object",
+            "properties": {
+                "op_id": {
+                    "type": "string",
+                    "enum": op_ids,
+                    "description": "同梱の「記憶ページの再編の提案」の [op_id] をそのまま写す。",
+                },
+                "verdict": {
+                    "type": "string",
+                    "enum": list(_PAGE_REVIEW_VERDICTS),
+                    "description": "approve=承認 (この後の整理で実行) / skip=見送り",
+                },
+            },
+            "required": ["op_id", "verdict"],
+        },
+    }
+    schema["required"] = [*schema["required"], _PAGE_REVIEW_FIELD]
+    return schema
+
 
 #: スルースの LLM コールの出力上限。実測の応答は 195〜411 トークン
 #: (docs/issues/sluice_structured_output_digit_loop.md の再現性実験) なので、
@@ -1086,8 +1141,13 @@ def _build_sluice_prompt(
     span_new_count: Optional[int],
     today_memos: Optional[List[Tuple[str, str, str]]] = None,
     scope_sentence: Optional[str] = None,
+    page_review_candidates: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """<system> 包みの注入プロンプトを組む (keepalive の末尾通知と同じ面)。
+
+    ``page_review_candidates`` は記憶の手入れの候補 (:func:`_offer_page_reviews`
+    の返り値)。あれば「記憶ページの再編の提案」の節を足し、応答の欄の一覧にも
+    page_reviews を含める。無ければ節ごと出さない (定常の回の文面は変わらない)。
 
     ``core_memories`` / ``total_chars`` は :func:`_read_core_state` の読みを
     呼び出し元から受け取る (CAS スナップショットと同じ姿を見せるため)。
@@ -1140,6 +1200,34 @@ def _build_sluice_prompt(
     else:
         today_block = ""
 
+    # 記憶の手入れの提案 (業務日に一回だけ載る)。無い回は節も欄名も出さない。
+    if page_review_candidates:
+        page_review_block = (
+            "4) 記憶ページの再編の提案 (page_reviews):\n"
+            "- 記憶ページについて、次の分割・統合を提案します。承認したものだけ、\n"
+            "  この後の整理で実行されます。迷うものは skip してかまいません。\n"
+            + "\n".join(
+                f"  - [{c['op_id']}] {c.get('line') or c['op_id']}"
+                for c in page_review_candidates
+            )
+            + "\n"
+            "- 返答は一件ごとに、op_id に [ ] の中身をそのまま写し、verdict に\n"
+            "  approve か skip を書きます。\n"
+            "\n"
+        )
+        fields_sentence = (
+            "- 応答には全ての欄 (reflection / core_adds / core_updates / core_removes /\n"
+            "  want_memos / did_memos / promise_adds / promise_updates / page_reviews)\n"
+            "  を含めてください。採るものが無い欄は空配列で。\n"
+        )
+    else:
+        page_review_block = ""
+        fields_sentence = (
+            "- 応答には全ての欄 (reflection / core_adds / core_updates / core_removes /\n"
+            "  want_memos / did_memos / promise_adds / promise_updates) を含めてください。\n"
+            "  採るものが無い欄は空配列で。\n"
+        )
+
     prompt = (
         "<system>\n"
         "## 記憶整理の節目 — スルース\n"
@@ -1170,12 +1258,11 @@ def _build_sluice_prompt(
         "  content に変更後の全文を書き、期限だけの変更なら content は省略します。\n"
         "  期限が撤回されたときは clear_due で期限を外せます。\n"
         "\n"
+        f"{page_review_block}"
         "姿勢:\n"
         "- **採取しないのが普通です。** ほとんどの記憶整理では何も採りません\n"
         "  （各欄は空配列）。無理に何かを刻もうとしないでください。\n"
-        "- 応答には全ての欄 (reflection / core_adds / core_updates / core_removes /\n"
-        "  want_memos / did_memos / promise_adds / promise_updates) を含めてください。\n"
-        "  採るものが無い欄は空配列で。\n"
+        f"{fields_sentence}"
         "- 既にコア記憶・手帳にあることは再度採らないでください。\n"
         "\n"
         f"### 現在のコア記憶（合計 {total_chars:,} 字 / 目安 {budget:,} 字）\n"
@@ -1969,6 +2056,332 @@ def _apply_promises(
 
 
 # ---------------------------------------------------------------------------
+# 記憶の手入れ (Memopedia ページの分割・統合の提案) — 2026-10-09 に就寝判断から移設
+# ---------------------------------------------------------------------------
+#
+# 流れ: 定常のスルースの回に、業務日一回だけ候補 (saiverse/curation.py の決定論
+# 検知) を本人に見せ、``page_reviews`` で approve / skip を返させる。approve は
+# curation_plans に予約として積み、スルースの確定 (``_finalize``) の後に背景
+# スレッドで実行する。後から通す採取 (run_sluice_capture) には載せない。
+#
+# 手入れは採取のゲート (§13.3) の成立条件ではない — 検知・提示の記録・予約・
+# 起動のどこで失敗しても、スルース本体 (と退場) は止めない (WARNING を残す)。
+# 例外は応答の形の検査だけで、候補を見せた回に page_reviews 欄が無い応答は
+# 他の欄の欠落と同じく fail-closed になる (再試行の回は同じ業務日なので候補を
+# 見せない)。
+
+#: 背景で記憶の手入れを実行中のペルソナ。同じペルソナのバッチを並走させない
+#: — 二本が同じ pending のプランを同時に読むと、同じ分割・統合が二度走る。
+_CURATION_BATCH_RUNNING: set = set()
+_CURATION_BATCH_LOCK = threading.Lock()
+
+
+def _curation_business_day(lifecycle: Any, persona_id: Optional[str]) -> str:
+    """提示の回数を数える単位の業務日 ("YYYY-MM-DD")。
+
+    :func:`saiverse.day_plan.resolve_business_day` (予約・watchdog と同じ
+    解決器) を使う。manager が無い・ライフが読めない・解決が例外のときは
+    ローカルの暦日 (``clock.now()``) に倒す。
+    """
+    from saiverse import clock
+
+    manager = getattr(lifecycle, "manager", None)
+    if manager is not None and persona_id:
+        try:
+            from saiverse.day_plan import resolve_business_day
+            basis = resolve_business_day(manager, persona_id)
+            if basis is not None and basis.plan_date:
+                return str(basis.plan_date)
+        except Exception:
+            LOGGER.warning(
+                "[sluice] business day resolution failed for the page review "
+                "offer (persona=%s); using the local date", persona_id,
+                exc_info=True,
+            )
+    return clock.now().date().isoformat()
+
+
+def _offer_page_reviews(
+    lifecycle: Any, persona: Any,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """この回に本人へ見せる記憶の手入れの候補と、その業務日。無ければ ``([], None)``。
+
+    業務日に一回だけ: 最後に提示した業務日が今日なら検知もしない。提示の
+    記録はここでは書かない — 呼び出し側が、送る中身がモデルに入ると分かった
+    直後 (LLM を呼ぶ直前) に :func:`_mark_page_reviews_offered` で書く。
+    記録した後は、その回の応答が失敗しても同じ業務日には再提示しない
+    (見送られた候補は翌業務日の検知で、まだ条件を満たせば再提示される)。
+
+    返す要素は ``{"op_id", "kind", "refs", "line"}`` だけに絞る (台帳に凍結
+    して、記録の再適用で同じ候補を引くため)。どこで失敗しても空を返す。
+    """
+    persona_id = getattr(persona, "persona_id", None)
+    adapter = getattr(persona, "sai_memory", None)
+    conn = getattr(adapter, "conn", None) if adapter is not None else None
+    if conn is None or not persona_id:
+        return ([], None)
+    try:
+        from sai_memory.curation_ops import (
+            VALID_PLAN_KINDS,
+            get_last_presented_day,
+        )
+        from saiverse.curation import detect_curation_candidates
+
+        business_day = _curation_business_day(lifecycle, persona_id)
+        with adapter._db_lock:
+            last_day = get_last_presented_day(conn)
+        if last_day == business_day:
+            return ([], None)
+        with adapter._db_lock:
+            detected = detect_curation_candidates(conn, persona_id)
+        candidates: List[Dict[str, Any]] = []
+        for cand in detected or []:
+            if not isinstance(cand, dict):
+                continue
+            op_id = cand.get("op_id")
+            kind = cand.get("kind")
+            refs = cand.get("refs")
+            if not (isinstance(op_id, str) and op_id and kind in VALID_PLAN_KINDS
+                    and isinstance(refs, list)):
+                continue
+            candidates.append({
+                "op_id": op_id,
+                "kind": kind,
+                "refs": [str(r) for r in refs],
+                "line": str(cand.get("line") or op_id),
+            })
+        if not candidates:
+            return ([], None)
+        return (candidates, business_day)
+    except Exception:
+        LOGGER.warning(
+            "[sluice] page review offer failed (persona=%s); this sluice runs "
+            "without the offer", persona_id, exc_info=True,
+        )
+        return ([], None)
+
+
+def _mark_page_reviews_offered(persona: Any, business_day: str) -> bool:
+    """候補を見せた業務日を記録する。書けなければ False (呼び出し側は見せない)。
+
+    書けないまま見せると、同じ業務日の次のスルースでまた見せてしまう — 「業務日に
+    一回だけ」を守る側に倒す。
+    """
+    persona_id = getattr(persona, "persona_id", None)
+    adapter = getattr(persona, "sai_memory", None)
+    conn = getattr(adapter, "conn", None) if adapter is not None else None
+    if conn is None:
+        return False
+    try:
+        from sai_memory.curation_ops import record_presented_day
+        with adapter._db_lock:
+            record_presented_day(conn, business_day)
+    except Exception:
+        LOGGER.warning(
+            "[sluice] recording the page review offer failed (persona=%s); "
+            "this sluice runs without the offer", persona_id, exc_info=True,
+        )
+        return False
+    return True
+
+
+def _restore_page_review_candidates(raw: Any) -> Optional[List[Dict[str, Any]]]:
+    """台帳に凍結した記憶の手入れの候補を読み戻す。破損は None。
+
+    呼び出し側は**欄が無い**旧記録 (2026-10-09 より前) に ``[]`` を渡す —
+    「提案ゼロの回」として再生する。欄があるのに読めない (配列でない、要素の
+    形が違う) ものは破損 = 記録ごと採り直し (約束の対応表と同じ扱い。破損の
+    まま再適用すると、本人の承認が黙って失われたまま completed になる)。
+    """
+    if not isinstance(raw, list):
+        return None
+    from sai_memory.curation_ops import VALID_PLAN_KINDS
+
+    restored: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        op_id = item.get("op_id")
+        kind = item.get("kind")
+        refs = item.get("refs")
+        line = item.get("line")
+        if not (isinstance(op_id, str) and op_id):
+            return None
+        if kind not in VALID_PLAN_KINDS:
+            return None
+        if not (isinstance(refs, list) and all(isinstance(r, str) for r in refs)):
+            return None
+        restored.append({
+            "op_id": op_id,
+            "kind": kind,
+            "refs": list(refs),
+            "line": line if isinstance(line, str) else op_id,
+        })
+    return restored
+
+
+def _page_review_op_ids(candidates: Optional[List[Dict[str, Any]]]) -> List[str]:
+    return [str(c["op_id"]) for c in (candidates or []) if c.get("op_id")]
+
+
+def _apply_page_reviews(
+    persona: Any,
+    page_reviews: List[Any],
+    candidates: List[Dict[str, Any]],
+) -> Tuple[int, int, int, List[str]]:
+    """``page_reviews`` を適用する: approve は curation_plans に予約を積む。
+
+    Returns:
+        ``(承認して予約した数, 見送った数, 予約に失敗した数, 記録行)``
+
+    - 候補に無い op_id・未知の verdict は WARNING を出して無視する (記録行にも
+      出さない — 返答の誤記で本人の記録を汚さない)。同じ op_id の二件目も無視。
+    - approve の予約は冪等 (``enqueue_plan`` は同じ op_id の pending があれば
+      積み直さない) — 記録の再適用で二重に積まれない。
+    - skip は何もしない (翌業務日の検知で、条件が続けば再提示される)。
+    - 実行は呼び出し元の確定 (``_finalize``) の後 (:func:`_maybe_launch_curation_batch`)。
+    """
+    persona_id = getattr(persona, "persona_id", None)
+    valid_ops = {c["op_id"]: c for c in candidates if c.get("op_id")}
+    approved = skipped = failed = 0
+    lines: List[str] = []
+    if not valid_ops:
+        if page_reviews:
+            LOGGER.warning(
+                "[sluice] page_reviews present without offered candidates; "
+                "ignored (persona=%s)", persona_id,
+            )
+        return (0, 0, 0, lines)
+
+    handled: set = set()
+    for index, review in enumerate(page_reviews):
+        if not isinstance(review, dict):
+            LOGGER.warning(
+                "[sluice] page_reviews[%d] is not an object; ignored (persona=%s)",
+                index, persona_id,
+            )
+            continue
+        op_id = str(review.get("op_id") or "").strip()
+        verdict = str(review.get("verdict") or "").strip()
+        if op_id not in valid_ops:
+            LOGGER.warning(
+                "[sluice] page_reviews[%d] op_id=%r is not an offered candidate; "
+                "ignored (persona=%s)", index, op_id, persona_id,
+            )
+            continue
+        if verdict not in _PAGE_REVIEW_VERDICTS:
+            LOGGER.warning(
+                "[sluice] page_reviews[%d] verdict=%r is neither approve nor "
+                "skip; ignored (persona=%s)", index, verdict, persona_id,
+            )
+            continue
+        if op_id in handled:
+            LOGGER.warning(
+                "[sluice] page_reviews[%d] repeats op_id=%r; ignored (persona=%s)",
+                index, op_id, persona_id,
+            )
+            continue
+        handled.add(op_id)
+        cand = valid_ops[op_id]
+        line = cand.get("line") or op_id
+        if verdict == "skip":
+            skipped += 1
+            lines.append(f"記憶ページの再編を見送り: {line}")
+            continue
+        adapter = getattr(persona, "sai_memory", None)
+        conn = getattr(adapter, "conn", None) if adapter is not None else None
+        try:
+            if conn is None:
+                raise SluiceStorageUnavailableError(
+                    "memory.db connection is missing; cannot reserve the plan"
+                )
+            from sai_memory.curation_ops import enqueue_plan
+            with adapter._db_lock:
+                plan_id = enqueue_plan(
+                    conn, cand["kind"], op_id, list(cand.get("refs") or []),
+                )
+        except Exception as exc:
+            failed += 1
+            LOGGER.warning(
+                "[sluice] reserving page review op_id=%r failed (persona=%s)",
+                op_id, persona_id, exc_info=True,
+            )
+            lines.append(
+                f"記憶ページの再編を承認しましたが、予定に入れられませんでした"
+                f"（{exc}）: {line}"
+            )
+            continue
+        approved += 1
+        LOGGER.info(
+            "[sluice] page review op_id=%r approved and reserved as plan %s "
+            "(persona=%s)", op_id, plan_id, persona_id,
+        )
+        lines.append(f"記憶ページの再編を承認（この後の整理で実行）: {line}")
+    return (approved, skipped, failed, lines)
+
+
+def _maybe_launch_curation_batch(lifecycle: Any, persona: Any) -> None:
+    """pending の予約があれば、背景の daemon スレッドで記憶の手入れを実行する。
+
+    スルースの確定 (``_finalize``) が成功した後にだけ呼ぶ — 確定が破棄された回
+    (run_metabolism の検算で見送り) の予約は pending のまま残り、次の確定で
+    起動される。同じペルソナのバッチが走っている間は起動しない
+    (:data:`_CURATION_BATCH_RUNNING`)。失敗はスルースへ伝えない (WARNING)。
+    """
+    persona_id = getattr(persona, "persona_id", None)
+    try:
+        manager = getattr(lifecycle, "manager", None)
+        adapter = getattr(persona, "sai_memory", None)
+        conn = getattr(adapter, "conn", None) if adapter is not None else None
+        if manager is None or conn is None or not persona_id:
+            return
+        from sai_memory.curation_ops import list_pending, run_pending_plans
+
+        with adapter._db_lock:
+            pending = list_pending(conn)
+        if not pending:
+            return
+        with _CURATION_BATCH_LOCK:
+            if persona_id in _CURATION_BATCH_RUNNING:
+                LOGGER.info(
+                    "[sluice] curation batch already running (persona=%s); "
+                    "the pending plans wait for the next launch", persona_id,
+                )
+                return
+            _CURATION_BATCH_RUNNING.add(persona_id)
+
+        def _run() -> None:
+            try:
+                run_pending_plans(manager, persona_id)
+            except Exception:
+                LOGGER.warning(
+                    "[sluice] curation batch raised (persona=%s)", persona_id,
+                    exc_info=True,
+                )
+            finally:
+                with _CURATION_BATCH_LOCK:
+                    _CURATION_BATCH_RUNNING.discard(persona_id)
+
+        LOGGER.info(
+            "[sluice] launching the curation batch (persona=%s pending=%d)",
+            persona_id, len(pending),
+        )
+        try:
+            threading.Thread(
+                target=_run, name=f"CurationBatch-{persona_id[:8]}", daemon=True,
+            ).start()
+        except Exception:
+            with _CURATION_BATCH_LOCK:
+                _CURATION_BATCH_RUNNING.discard(persona_id)
+            raise
+    except Exception:
+        LOGGER.warning(
+            "[sluice] launching the curation batch failed (persona=%s)",
+            persona_id, exc_info=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # 永続化 (判断ターンをペルソナの記憶に残す)
 # ---------------------------------------------------------------------------
 
@@ -2421,6 +2834,7 @@ _FIELD_LABELS: Dict[str, str] = {
     "did_memos": "やったメモ",
     "promise_adds": "約束の追加",
     "promise_updates": "約束の変更",
+    _PAGE_REVIEW_FIELD: "記憶ページの再編への返答",
 }
 
 #: 各欄の要素が持ちうるフィールドの実行時型 (Codex 第八巡 修正 6)。
@@ -2444,6 +2858,7 @@ _ELEMENT_FIELD_TYPES: Dict[str, Dict[str, str]] = {
         "promise_ref": "string", "content": "string", "due": "string",
         "clear_due": "boolean",
     },
+    _PAGE_REVIEW_FIELD: {"op_id": "string", "verdict": "string"},
 }
 
 #: 各欄の要素の必須フィールド — :data:`_RESPONSE_SCHEMA` の items.required と
@@ -2457,6 +2872,7 @@ _ELEMENT_REQUIRED_FIELDS: Dict[str, tuple] = {
     "did_memos": ("text",),
     "promise_adds": ("content",),
     "promise_updates": ("promise_ref",),
+    _PAGE_REVIEW_FIELD: ("op_id", "verdict"),
 }
 
 _TYPE_LABELS: Dict[str, str] = {
@@ -2508,12 +2924,21 @@ def _first_type_error(field: str, item: Dict[str, Any]) -> Optional[str]:
 
 def _parse_structured_result(
     result: Any, persona_id: Optional[str],
+    *,
+    page_review_op_ids: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
     """LLM の構造化出力を検証済み dict へ正規化する。不適合は SluiceOutputError。
 
     Returns:
         ``(検証済みの応答, 棄却した要素の記録)``。棄却の記録は
         ``{"field": 欄名, "text": 判断ターンに残す一行}`` の列。
+
+    検査の基準は**その回に要求した欄の集合**: 常に要求する 8 欄に加えて、
+    記憶の手入れの候補を見せた回 (``page_review_op_ids`` が非空) は
+    ``page_reviews`` も必須の配列として同じ規則で検査する。要求していない回に
+    ``page_reviews`` が来たら WARNING を出して欄ごと落とす (応答全体は棄却
+    しない — 見せていない提案への返答には適用先が無いだけで、他の欄は正しい)。
+    op_id の値が候補にあるかは適用側 (:func:`_apply_page_reviews`) が見る。
 
     fail-closed の粒度: **全体の型** (dict でない / 必須欄 — reflection と
     7 つの操作列全部 — の欠落・null / 各欄が配列でない / 配列要素が object で
@@ -2558,7 +2983,16 @@ def _parse_structured_result(
         )
     sanitized: Dict[str, Any] = dict(result)
     rejections: List[Dict[str, str]] = []
-    for field in _LIST_FIELDS:
+    requested_fields: Tuple[str, ...] = _LIST_FIELDS
+    if page_review_op_ids:
+        requested_fields = (*_LIST_FIELDS, _PAGE_REVIEW_FIELD)
+    elif _PAGE_REVIEW_FIELD in result:
+        LOGGER.warning(
+            "[sluice] %s present although no page review was offered "
+            "(persona=%s); ignoring the field", _PAGE_REVIEW_FIELD, persona_id,
+        )
+        sanitized.pop(_PAGE_REVIEW_FIELD, None)
+    for field in requested_fields:
         value = result.get(field)
         if not isinstance(value, list):
             raise SluiceOutputError(
@@ -2656,7 +3090,11 @@ def _is_legacy_response(response: Any) -> bool:
     )
 
 
-def _recorded_response_unusable(response: Any, persona_id: Optional[str]) -> bool:
+def _recorded_response_unusable(
+    response: Any, persona_id: Optional[str],
+    *,
+    page_review_op_ids: Optional[List[str]] = None,
+) -> bool:
     """記録済み応答が再適用に使えない形か (旧世代、または凍結後の破損)。
 
     旧世代 (:func:`_is_legacy_response`) に加えて、現行の欄は揃っているのに
@@ -2674,11 +3112,18 @@ def _recorded_response_unusable(response: Any, persona_id: Optional[str]) -> boo
     ``.strip()`` 等が非文字列で例外化し、applied の行が残ったまま毎回同じ
     クラッシュを繰り返す (LLM 呼び出しの失敗処理の外なので mark_failed も
     走らない)。
+
+    ``page_review_op_ids`` はその記録の回に見せた記憶の手入れの候補の op_id
+    (記録の ``page_review_candidates``)。凍結時と同じ「要求した欄の集合」で
+    検査する — 候補を見せた回の記録は page_reviews 欄を持つはずで、無ければ
+    破損。候補の欄が無い旧記録 (2026-10-09 より前) は空 = 提案ゼロの回。
     """
     if _is_legacy_response(response):
         return True
     try:
-        _sanitized, rejections = _parse_structured_result(response, persona_id)
+        _sanitized, rejections = _parse_structured_result(
+            response, persona_id, page_review_op_ids=page_review_op_ids,
+        )
     except SluiceOutputError:
         return True
     return bool(rejections)
@@ -2697,9 +3142,16 @@ def _recorded_result_unusable(
     見た集合 ``seen_ids`` の欠落・空 (Codex 六巡目 — 定常・読み返しとも
     書き手は非空を凍結する。再適用の分岐で送出すると applied の行が残った
     まま毎回同じ例外になり自動回復しないので、ここで「使えない」に含めて
-    別キーの採り直しに乗せる) も同じ。
+    別キーの採り直しに乗せる) も同じ。記憶の手入れの候補 (欄があるのに
+    読めない ``page_review_candidates``) も同じ扱い。
     """
-    if _recorded_response_unusable(recorded.get("response"), persona_id):
+    page_review_candidates = recorded.get("page_review_candidates")
+    if page_review_candidates is None:
+        return True
+    if _recorded_response_unusable(
+        recorded.get("response"), persona_id,
+        page_review_op_ids=_page_review_op_ids(page_review_candidates),
+    ):
         return True
     if recorded.get("offered_tasks") is None:
         return True
@@ -2846,6 +3298,11 @@ def _find_recorded_result(ledger: Any, ledger_key: str) -> Optional[Dict[str, An
             "offered_tasks": offered_tasks,
             "core_snapshot": result.get("core_snapshot"),
             "prompt": result.get("prompt"),
+            # 欄の無い旧記録 (2026-10-09 より前・後から通す採取の記録) は
+            # 提案ゼロの回として再生する。欄があって読めなければ None (破損)。
+            "page_review_candidates": _restore_page_review_candidates(
+                result.get("page_review_candidates", [])
+            ),
         }
     return None
 
@@ -2870,7 +3327,8 @@ def _call_sluice_llm(
         "offered_tasks": {"N": {task_id, revision, due_at, content}}
         (:func:`_offered_task_map` — N は約束一覧の位置),
         "core_snapshot": {core_id: 本文ハッシュ (スナップショット時点)},
-        "prompt": 注入プロンプト}``
+        "prompt": 注入プロンプト,
+        "page_review_candidates": この回に見せた記憶の手入れの候補 (無ければ空)}``
 
     例外 (LLM エラー・出力不適合) はそのまま送出する — 呼び出し元が台帳の
     mark_failed とゲート失敗 (退場停止) に写像する。送る中身が実際に使う
@@ -2943,10 +3401,23 @@ def _call_sluice_llm(
     # 今日すでに手帳に書いたもの (本人がスペルで書いた分を含む) — 同じ日の
     # 再採取を減らすため、アクティビティ一覧と同じ読みの配下から一度で取る。
     today_memos = _list_today_memos(persona, activities)
-    prompt = _build_sluice_prompt(
-        persona, activities, open_tasks, core_memories, core_total_chars,
-        span_new_count=span_new_count, today_memos=today_memos,
-    )
+    # 記憶の手入れの候補 (業務日に一回だけ)。最後に提示した業務日の確認と
+    # 検知はここで行い、提示の記録は送る中身がモデルに入ると分かった後
+    # (下の _ensure_input_fits の後) に書く — 入らずに飛ばされた回は「提示した」
+    # に数えない。
+    page_review_candidates, page_review_day = _offer_page_reviews(lifecycle, persona)
+
+    def _compose(candidates: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
+        return (
+            _build_sluice_prompt(
+                persona, activities, open_tasks, core_memories, core_total_chars,
+                span_new_count=span_new_count, today_memos=today_memos,
+                page_review_candidates=candidates or None,
+            ),
+            _build_response_schema(_page_review_op_ids(candidates)),
+        )
+
+    prompt, response_schema = _compose(page_review_candidates)
 
     node_def = SimpleNamespace(id="sluice", memorize=None, speak=False)
     llm_client, _sluice_model = runtime.select_llm_client(
@@ -2968,14 +3439,39 @@ def _call_sluice_llm(
     # 応答の枠はそのクライアントが送る上限、答えの形の指定も入力に数える。
     # 入らなければ LLM を呼ばずに送出する — run_metabolism は量による飛ばしと
     # 同じ扱いにする (範囲を記録して畳みを進める)。
-    _ensure_input_fits(
-        messages, execution_context.model_key, persona_id=persona_id,
-        llm_client=llm_client, response_schema=_RESPONSE_SCHEMA,
-    )
+    try:
+        _ensure_input_fits(
+            messages, execution_context.model_key, persona_id=persona_id,
+            llm_client=llm_client, response_schema=response_schema,
+        )
+    except SluiceInputTooLargeError:
+        if not page_review_candidates:
+            raise
+        # 手入れの提案を足したせいで入らない回は、提案を外して採取を通す —
+        # 提案の同梱で採取の飛ばし (SluiceInputTooLargeError) を増やさない。
+        # 提示の記録は書かないので、提案は同じ業務日の後の回で見せられる。
+        LOGGER.info(
+            "[sluice] the page review offer does not fit the model context; "
+            "running without it (persona=%s)", persona_id,
+        )
+        page_review_candidates, page_review_day = [], None
+        prompt, response_schema = _compose(page_review_candidates)
+        messages = context_messages + [{"role": "user", "content": prompt}]
+        _ensure_input_fits(
+            messages, execution_context.model_key, persona_id=persona_id,
+            llm_client=llm_client, response_schema=response_schema,
+        )
+    if page_review_candidates and not _mark_page_reviews_offered(
+        persona, str(page_review_day),
+    ):
+        # 提示の記録が書けない回は見せない (業務日に一回だけを守る側に倒す)。
+        page_review_candidates = []
+        prompt, response_schema = _compose(page_review_candidates)
+        messages = context_messages + [{"role": "user", "content": prompt}]
     result = llm_client.generate(
         messages,
         tools=[],
-        response_schema=_RESPONSE_SCHEMA,
+        response_schema=response_schema,
         temperature=runtime._default_temperature(persona),
         # このコールだけの出力上限 (per-call)。対応していない
         # プロバイダのクライアントは generate の **kwargs が
@@ -3015,7 +3511,10 @@ def _call_sluice_llm(
     # 要素内フィールドの型検査もここ = **台帳への凍結より前**で行う
     # (Codex 第八巡 修正 6: 壊れた要素を凍結しないので、再適用が同じ例外を
     # 繰り返す縁ができない)。
-    parsed, rejections = _parse_structured_result(result, persona_id)
+    parsed, rejections = _parse_structured_result(
+        result, persona_id,
+        page_review_op_ids=_page_review_op_ids(page_review_candidates),
+    )
 
     # 見た集合 = 実入力の履歴 ID 列そのもの (後退方式の廃止で件数の引き算は
     # 無くなった)。退場側の包含検算 (_eviction_within_seen) の一次データ。
@@ -3039,6 +3538,7 @@ def _call_sluice_llm(
         "offered_tasks": offered_tasks,
         "core_snapshot": core_snapshot,
         "prompt": prompt,
+        "page_review_candidates": list(page_review_candidates),
     }
 
 
@@ -3101,8 +3601,12 @@ def run_sluice(
         {"ops_applied": int, "ops_failed": int,
          "memos_applied": int, "memos_failed": int,
          "promises_applied": int, "promises_failed": int,
+         "pages_approved": int, "pages_skipped": int, "pages_failed": int,
          "skipped": bool, "reason": str|None,
          "seen_span_end": str|None, "seen_ids": list[str]|None}
+
+        ``pages_*`` は記憶の手入れの返答 (承認して予約した数 / 見送った数 /
+        予約に失敗した数)。候補を見せていない回は全て 0。
 
         ``seen_ids`` は**このスルースが実際に LLM 入力に含めたメッセージ ID の
         集合** (記録済み結果の再適用ではその記録の集合)。呼び出し元
@@ -3125,6 +3629,7 @@ def run_sluice(
             "ops_applied": 0, "ops_failed": 0,
             "memos_applied": 0, "memos_failed": 0,
             "promises_applied": 0, "promises_failed": 0,
+            "pages_approved": 0, "pages_skipped": 0, "pages_failed": 0,
             "skipped": True, "reason": reason,
             "seen_span_end": None,
             "seen_ids": None,
@@ -3238,6 +3743,9 @@ def run_sluice(
         prompt_snapshot = str(
             recorded.get("prompt") or "(実行台帳の記録済み結果の再適用)"
         )
+        # 欄の無い旧記録は [] (提案ゼロの回)。破損 (None) は上の
+        # _recorded_result_unusable が採り直しへ回すので、ここでは list。
+        page_review_candidates = list(recorded.get("page_review_candidates") or [])
         LOGGER.info(
             "[sluice] reusing recorded result (execution=%s span=%s..%s "
             "persona=%s); no new LLM call — re-applying idempotently",
@@ -3290,6 +3798,7 @@ def run_sluice(
         offered_tasks = call["offered_tasks"]
         core_snapshot = call["core_snapshot"]
         prompt_snapshot = call["prompt"]
+        page_review_candidates = list(call.get("page_review_candidates") or [])
         if span_end_id is None:
             # 実際に見た範囲の末尾が特定できない (窓に id 付きの行が無い等)。
             # span 刻印もマーカー前進も行わず、適用だけ実施する。
@@ -3310,6 +3819,9 @@ def run_sluice(
                     "offered_tasks": offered_tasks,
                     "core_snapshot": core_snapshot,
                     "prompt": prompt_snapshot,
+                    # 見せた記憶の手入れの候補 (再適用で同じ候補から承認を
+                    # 引くため。提案ゼロの回も空配列で書く)。
+                    "page_review_candidates": page_review_candidates,
                 })
             except Exception as exc:
                 # 凍結そのものの失敗 (DB 障害・コミット失敗)。ここを素通しすると
@@ -3391,8 +3903,15 @@ def run_sluice(
             memos_failed += 1
         elif field in _PROMISE_FIELDS:
             promises_failed += 1
+    # 記憶の手入れの返答: approve は予約を積む (冪等)。実行は確定の後
+    # (_finalize の末尾)。候補を見せていない回は何もしない。
+    pages_approved, pages_skipped, pages_failed, page_lines = _apply_page_reviews(
+        persona, _as_list(_PAGE_REVIEW_FIELD), page_review_candidates,
+    )
     applied_total = ops_applied + memos_applied + promises_applied
-    result_lines = rejection_lines + ops_lines + memo_lines + promise_lines
+    result_lines = (
+        rejection_lines + ops_lines + memo_lines + promise_lines + page_lines
+    )
 
     # 5. 記録テキスト。event_message 形式のシステム通知として <system> に包む
     #    (ペルソナ発話ではなくナレーション。few-shot 汚染回避、2026-07-07 まはー指摘)。
@@ -3428,8 +3947,11 @@ def run_sluice(
         # 重複解釈する縁があった)。done は③まで成功した後にだけ立てる —
         # 途中失敗後の再呼びは頭から再実行される (①の再実行はナレーション重複の
         # 縁 — 大きさは run_sluice docstring ではなく報告に記す)。
+        # 記憶の手入れの承認も、本人の決定が永続の予約を生んだ記録なので
+        # 採取ありと同じく committed で残す (本人が承認したことを文脈に残す)。
         _persist_record(
-            persona, record_text, prompt_snapshot, applied_total=applied_total,
+            persona, record_text, prompt_snapshot,
+            applied_total=applied_total + pages_approved,
         )
         # pan マーカー: 次回の担当範囲の起点として、**実際に LLM に渡した範囲の
         # 末尾 id** (span_end_id) を記録する。永続 (memory.db) が先、属性は成功後
@@ -3453,20 +3975,27 @@ def run_sluice(
         LOGGER.info(
             "[sluice] finalized: persona=%s marker=%s", persona_id, span_end_id,
         )
+        # 記憶の手入れの実行 (確定の後だけ — 確定が検算で見送られた回は
+        # ここに来ないので、承認分は pending のまま次の確定を待つ)。この回に
+        # 候補が無くても、前の回の pending が残っていれば起動する。
+        _maybe_launch_curation_batch(lifecycle, persona)
 
     if finalize:
         _finalize()
 
     LOGGER.info(
         "[sluice] done: persona=%s core=%d/%d memos=%d/%d promises=%d/%d "
-        "(evict=%d, finalized=%s)",
+        "pages=%d approved/%d skipped/%d failed (evict=%d, finalized=%s)",
         persona_id, ops_applied, ops_failed, memos_applied, memos_failed,
-        promises_applied, promises_failed, evict_count, finalize,
+        promises_applied, promises_failed,
+        pages_approved, pages_skipped, pages_failed, evict_count, finalize,
     )
     return {
         "ops_applied": ops_applied, "ops_failed": ops_failed,
         "memos_applied": memos_applied, "memos_failed": memos_failed,
         "promises_applied": promises_applied, "promises_failed": promises_failed,
+        "pages_approved": pages_approved, "pages_skipped": pages_skipped,
+        "pages_failed": pages_failed,
         "skipped": False, "reason": None,
         "seen_span_end": span_end_id,
         "seen_ids": seen_ids,

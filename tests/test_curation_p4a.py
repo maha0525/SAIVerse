@@ -9,10 +9,14 @@
 - metabolizable 外カテゴリ (theme/core) は対象外
 - 最大 3 件
 - 決定論 (同入力 → 同出力)
-- build_day_close_schema: 候補ありで curation_reviews フィールドが出る
-- build_day_close_schema: 候補ゼロでフィールドが無い
-- judgment_finalize: approve → curation_plans に pending 行、skip → 行なし
-- judgment_finalize: 重複 approve → 行は 1 件のまま
+- 裁定の場は 2026-10-09 に就寝判断からスルースへ移設:
+  - 就寝判断のスキーマ・状況テキストに手入れの欄・節が出ない
+  - スルースのプロンプト: 候補がある回だけ「記憶ページの再編の提案」節が出る
+  - スルースの適用 (_apply_page_reviews): approve → curation_plans に pending 行、
+    skip → 行なし、重複 approve → 行は 1 件のまま、候補に無い op_id は無視
+  - 提示の記録 (curation_presentation) の読み書き
+  (業務日に一回・確定後のバッチ起動・台帳の再生は tests/test_sluice.py の
+  SluicePageReviewTest)
 - 閾値一元化: memopedia_health が curation.py の定数を参照
 """
 from __future__ import annotations
@@ -568,12 +572,12 @@ class TestDeterminism:
 
 
 # ---------------------------------------------------------------------------
-# build_day_close_schema の curation_reviews フィールド
+# 就寝判断からの切除 (2026-10-09 にスルースへ移設)
 # ---------------------------------------------------------------------------
 
 
-class TestDayCloseSchema:
-    """judgment_points.build_day_close_schema の curation_reviews テスト。"""
+class TestDayCloseNoLongerCarriesCuration:
+    """就寝判断のスキーマと状況テキストに記憶の手入れが残っていないこと。"""
 
     def _make_manager(self):
         from sqlalchemy import create_engine
@@ -595,55 +599,81 @@ class TestDayCloseSchema:
             buildings=[],
         )
 
-    def test_schema_has_curation_reviews_when_candidates_exist(self):
+    def test_就寝判断のスキーマに手入れの欄が無い(self):
         from saiverse import judgment_points as jp
 
-        manager = self._make_manager()
-        candidates = [
-            {
-                "op_id": "split:memopedia:1",
-                "kind": "split",
-                "refs": ["memopedia:1"],
-                "line": "[肥大] memopedia:1「大きいページ」 5,100字 — 子ページへの分割を提案",
-            }
-        ]
         schema = jp.build_day_close_schema(
-            manager=manager,
-            persona_id="alice",
-            curation_candidates=candidates,
-        )
-        assert "curation_reviews" in schema["properties"]
-        cr = schema["properties"]["curation_reviews"]
-        # op_id の enum に候補の op_id が含まれる
-        item_props = cr["items"]["properties"]
-        assert "split:memopedia:1" in item_props["op_id"]["enum"]
-        assert set(item_props["verdict"]["enum"]) == {"approve", "skip"}
-
-    def test_schema_has_no_curation_reviews_when_no_candidates(self):
-        from saiverse import judgment_points as jp
-
-        manager = self._make_manager()
-        schema = jp.build_day_close_schema(
-            manager=manager,
-            persona_id="alice",
-            curation_candidates=[],
+            manager=self._make_manager(), persona_id="alice",
         )
         assert "curation_reviews" not in schema["properties"]
+        assert "naming_reviews" not in schema["properties"]
 
-    def test_schema_has_no_curation_reviews_when_none(self):
+    def test_就寝判断の配線から手入れの関数が外れている(self):
+        from builtin_data.tools import judgment_finalize
+        from saiverse import curation
         from saiverse import judgment_points as jp
 
-        manager = self._make_manager()
-        schema = jp.build_day_close_schema(
-            manager=manager,
-            persona_id="alice",
-            curation_candidates=None,
-        )
-        assert "curation_reviews" not in schema["properties"]
+        for name in (
+            "_apply_curation_reviews", "_apply_naming_reviews",
+            "_maybe_launch_curation_batch",
+        ):
+            assert not hasattr(judgment_finalize, name), name
+        for name in ("_format_curation_candidates", "_format_naming_candidates"):
+            assert not hasattr(jp, name), name
+        # メモのページ化 (旧「テーマの芽」) の検知は休止。
+        assert not hasattr(curation, "detect_naming_candidates")
 
 
 # ---------------------------------------------------------------------------
-# judgment_finalize の curation_reviews 適用
+# スルースの提示 (プロンプトの節)
+# ---------------------------------------------------------------------------
+
+
+_SPLIT_CANDIDATE = {
+    "op_id": "split:memopedia:5",
+    "kind": "split",
+    "refs": ["memopedia:5"],
+    "line": "[肥大] memopedia:5「技術の記録」 5,100字 — 子ページへの分割を提案",
+}
+_MERGE_CANDIDATE = {
+    "op_id": "merge:memopedia:11+memopedia:12",
+    "kind": "merge",
+    "refs": ["memopedia:11", "memopedia:12"],
+    "line": "[類似] memopedia:11「週の記録」と memopedia:12「金曜日のメモ」 — 統合を提案",
+}
+
+
+def _prompt(candidates):
+    from sea import sluice
+
+    persona = SimpleNamespace(persona_id=None)
+    return sluice._build_sluice_prompt(
+        persona, [], [], [], 0, span_new_count=None,
+        page_review_candidates=candidates,
+    )
+
+
+class TestSluicePrompt:
+    def test_候補がある回だけ記憶ページの再編の提案の節が出る(self):
+        text = _prompt([_SPLIT_CANDIDATE, _MERGE_CANDIDATE])
+        assert "記憶ページの再編の提案 (page_reviews)" in text
+        assert f"[{_SPLIT_CANDIDATE['op_id']}] {_SPLIT_CANDIDATE['line']}" in text
+        assert f"[{_MERGE_CANDIDATE['op_id']}] {_MERGE_CANDIDATE['line']}" in text
+        assert "承認したものだけ、" in text
+        assert "この後の整理で実行されます。迷うものは skip してかまいません。" in text
+        assert "promise_updates / page_reviews)" in text
+        assert "採取しないのが普通です" in text
+        assert "棚の乱れ" not in text
+
+    def test_候補が無い回は節も欄名も出ない(self):
+        for candidates in (None, []):
+            text = _prompt(candidates)
+            assert "記憶ページの再編の提案" not in text
+            assert "page_reviews" not in text
+
+
+# ---------------------------------------------------------------------------
+# スルースの適用 (_apply_page_reviews)
 # ---------------------------------------------------------------------------
 
 
@@ -654,129 +684,95 @@ def mem_conn() -> sqlite3.Connection:
     return conn
 
 
-def _make_finalize_manager(conn: sqlite3.Connection):
-    """judgment_finalize の _apply_curation_reviews が触る最小スタブ。"""
-    fake_adapter = SimpleNamespace(conn=conn)
-    persona_obj = SimpleNamespace(sai_memory=fake_adapter)
+def _persona_for(conn: sqlite3.Connection):
+    """_apply_page_reviews が触る最小スタブ (memory.db の接続とロック)。"""
+    import threading
+
     return SimpleNamespace(
-        personas={"alice": persona_obj},
-        SessionLocal=None,
+        persona_id="alice",
+        sai_memory=SimpleNamespace(conn=conn, _db_lock=threading.RLock()),
     )
 
 
-class TestCurationReviewsFinalize:
-    def _run_finalize(self, mem_conn, output, curation_candidates):
-        """_apply_curation_reviews を直接呼ぶヘルパ。"""
-        from builtin_data.tools.judgment_finalize import _apply_curation_reviews
+class TestApplyPageReviews:
+    def _apply(self, mem_conn, reviews, candidates):
+        from sea import sluice
 
-        manager = _make_finalize_manager(mem_conn)
-        ctx = {"curation_candidates": curation_candidates}
-        lines: List[str] = []
-        warnings: List[str] = []
-        applied = _apply_curation_reviews(
-            manager=manager,
-            persona_id="alice",
-            output=output,
-            ctx=ctx,
-            lines=lines,
-            warnings=warnings,
+        return sluice._apply_page_reviews(_persona_for(mem_conn), reviews, candidates)
+
+    def test_approveでpendingの予約が積まれる(self, mem_conn):
+        approved, skipped, failed, lines = self._apply(
+            mem_conn,
+            [{"op_id": "split:memopedia:5", "verdict": "approve"}],
+            [_SPLIT_CANDIDATE],
         )
-        return applied, lines, warnings
-
-    def test_approve_creates_pending_plan(self, mem_conn):
-        candidates = [
-            {
-                "op_id": "split:memopedia:5",
-                "kind": "split",
-                "refs": ["memopedia:5"],
-                "line": "[肥大] memopedia:5「技術の記録」 5,100字 — 子ページへの分割を提案",
-            }
-        ]
-        output = {
-            "curation_reviews": [
-                {"op_id": "split:memopedia:5", "verdict": "approve"},
-            ]
-        }
-        applied, lines, warnings = self._run_finalize(mem_conn, output, candidates)
-        assert applied is True
-        assert warnings == []
+        assert (approved, skipped, failed) == (1, 0, 0)
         pending = list_pending(mem_conn)
         assert len(pending) == 1
         assert pending[0]["op_id"] == "split:memopedia:5"
         assert pending[0]["kind"] == "split"
-        # list_pending は WHERE status='pending' で絞り込み済みなので
-        # status キーは返さない設計。存在を確認するには件数で十分。
-
-    def test_skip_creates_no_plan(self, mem_conn):
-        candidates = [
-            {
-                "op_id": "merge:memopedia:11+memopedia:12",
-                "kind": "merge",
-                "refs": ["memopedia:11", "memopedia:12"],
-                "line": "[類似] memopedia:11「週の記録」と memopedia:12「金曜日のメモ」 — 統合を提案",
-            }
+        assert pending[0]["refs"] == ["memopedia:5"]
+        assert lines == [
+            f"記憶ページの再編を承認（この後の整理で実行）: {_SPLIT_CANDIDATE['line']}"
         ]
-        output = {
-            "curation_reviews": [
-                {"op_id": "merge:memopedia:11+memopedia:12", "verdict": "skip"},
-            ]
-        }
-        applied, lines, warnings = self._run_finalize(mem_conn, output, candidates)
-        assert applied is False
+
+    def test_skipは予約を積まない(self, mem_conn):
+        approved, skipped, failed, lines = self._apply(
+            mem_conn,
+            [{"op_id": _MERGE_CANDIDATE["op_id"], "verdict": "skip"}],
+            [_MERGE_CANDIDATE],
+        )
+        assert (approved, skipped, failed) == (0, 1, 0)
         assert list_pending(mem_conn) == []
+        assert lines == [f"記憶ページの再編を見送り: {_MERGE_CANDIDATE['line']}"]
 
-    def test_duplicate_approve_creates_one_plan(self, mem_conn):
-        """同じ op_id の approve を2度送っても pending 行は 1 件のまま。"""
-        candidates = [
-            {
-                "op_id": "merge:memopedia:1+memopedia:2",
-                "kind": "merge",
-                "refs": ["memopedia:1", "memopedia:2"],
-                "line": "[類似] ...",
-            }
-        ]
-        output = {
-            "curation_reviews": [
-                {"op_id": "merge:memopedia:1+memopedia:2", "verdict": "approve"},
-            ]
-        }
-        # 1 回目
-        self._run_finalize(mem_conn, output, candidates)
-        # 2 回目（同じ op_id で approve）
-        applied, lines, warnings = self._run_finalize(mem_conn, output, candidates)
-        # 2 回目は enqueue_plan が重複をスキップする（applied=True だが行は増えない）
+    def test_同じop_idのapproveを二度適用しても予約は一件のまま(self, mem_conn):
+        reviews = [{"op_id": _MERGE_CANDIDATE["op_id"], "verdict": "approve"}]
+        self._apply(mem_conn, reviews, [_MERGE_CANDIDATE])
+        self._apply(mem_conn, reviews, [_MERGE_CANDIDATE])
         pending = list_pending(mem_conn)
         assert len(pending) == 1
+        assert pending[0]["refs"] == ["memopedia:11", "memopedia:12"]
 
-    def test_invalid_op_id_rejected(self, mem_conn):
-        candidates = [
-            {
-                "op_id": "split:memopedia:5",
-                "kind": "split",
-                "refs": ["memopedia:5"],
-                "line": "...",
-            }
-        ]
-        output = {
-            "curation_reviews": [
-                {"op_id": "no_such_op", "verdict": "approve"},
-            ]
-        }
-        applied, lines, warnings = self._run_finalize(mem_conn, output, candidates)
-        assert applied is False
-        assert any("選択可能な" in w or "候補にありません" in w for w in warnings)
+    def test_候補に無いop_idは無視して記録行にも出さない(self, mem_conn, caplog):
+        with caplog.at_level("WARNING", logger="sea.sluice"):
+            approved, skipped, failed, lines = self._apply(
+                mem_conn,
+                [{"op_id": "no_such_op", "verdict": "approve"}],
+                [_SPLIT_CANDIDATE],
+            )
+        assert (approved, skipped, failed) == (0, 0, 0)
+        assert lines == []
+        assert list_pending(mem_conn) == []
+        assert "not an offered candidate" in caplog.text
+
+    def test_空の返答は何もしない(self, mem_conn):
+        assert self._apply(mem_conn, [], [_SPLIT_CANDIDATE]) == (0, 0, 0, [])
         assert list_pending(mem_conn) == []
 
-    def test_no_reviews_key_returns_false(self, mem_conn):
-        output = {}
-        applied, lines, warnings = self._run_finalize(mem_conn, output, [])
-        assert applied is False
 
-    def test_empty_reviews_list_returns_false(self, mem_conn):
-        output = {"curation_reviews": []}
-        candidates = [{"op_id": "split:memopedia:5", "kind": "split", "refs": ["memopedia:5"], "line": "..."}]
-        applied, lines, warnings = self._run_finalize(mem_conn, output, candidates)
-        assert applied is False
+class TestPresentationRecord:
+    def test_提示した業務日を一行だけ持ち上書きする(self, mem_conn):
+        from sai_memory.curation_ops import (
+            get_last_presented_day,
+            record_presented_day,
+        )
+
+        assert get_last_presented_day(mem_conn) is None
+        record_presented_day(mem_conn, "2026-10-09")
+        assert get_last_presented_day(mem_conn) == "2026-10-09"
+        record_presented_day(mem_conn, "2026-10-10")
+        assert get_last_presented_day(mem_conn) == "2026-10-10"
+        count = mem_conn.execute(
+            "SELECT COUNT(*) FROM curation_presentation"
+        ).fetchone()[0]
+        assert count == 1
+
+    def test_テーブルが無い古いDBでも読める(self):
+        conn = sqlite3.connect(":memory:")
+        from sai_memory.curation_ops import get_last_presented_day
+
+        assert get_last_presented_day(conn) is None
 
 
 # ---------------------------------------------------------------------------
