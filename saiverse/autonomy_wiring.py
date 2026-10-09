@@ -776,7 +776,10 @@ def handle_external_event(
     ``stimulus_id`` (刺激の永続 ID) は**必須**。None / 空なら ERROR を出して
     応対も判断も起動せずに :data:`ROUTE_NONE_MISSING_STIMULUS_ID` を返す
     (ID は供給源の義務で、ここで代理採番しない — fail-closed)。ID は on_event
-    判断の冪等キー (``{persona}:{stimulus_id}``) になる。
+    判断の冪等キー (``{persona}:{stimulus_id}``) になる。この検査は下の経路の
+    判断すべてに先行する — 自律 OFF の即応対 (``dispatch_direct``) も例外に
+    しない。ID を出さない供給源のイベントには、直るまで誰も応対しない
+    (2026-10-09 裁定①: 全供給にユニーク ID を義務化)。
 
     同じ刺激の再配送を止める受領の照合 (``saiverse.stimulus_receipt``) は
     この関数ではなく、呼び出し元の入口 ``inject_persona_event`` の先頭で行う —

@@ -257,14 +257,20 @@ def judgment_finalize(
 
     output = judgment_output if isinstance(judgment_output, dict) else {}
     monologue = (output.get("monologue") or "").strip()
-    try:
-        ctx = json.loads(judgment_context) if judgment_context else {}
-    except (TypeError, ValueError):
-        LOGGER.warning(
-            "[judgment_finalize] judgment_context is not valid JSON: %r",
-            judgment_context,
-        )
-        ctx = {}
+    if isinstance(judgment_context, dict):
+        # 正規の経路 (build_judgment_args) は JSON 文字列を渡すが、Playbook の
+        # args_input が解釈済みの dict を渡しても execution_id を落とさない —
+        # ここで ctx が {} に落ちると、実行台帳の冪等 (下) が黙って外れる。
+        ctx = judgment_context
+    else:
+        try:
+            ctx = json.loads(judgment_context) if judgment_context else {}
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "[judgment_finalize] judgment_context is not valid JSON: %r",
+                judgment_context,
+            )
+            ctx = {}
     if not isinstance(ctx, dict):
         ctx = {}
 

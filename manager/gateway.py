@@ -103,6 +103,12 @@ class GatewayMixin:
                     payload={
                         "channel_id": context.channel_id,
                         "content": text,
+                        # handle_user_input は発話者情報のないテキスト列を返す
+                        # ので、どのペルソナの発言かをここでは知れない (旧実装の
+                        # context.persona_id は ChannelContext に無い欄で、読んだ
+                        # 瞬間に落ちていた)。受け側 (MessageRouter.
+                        # send_post_message) は現状 persona_id を使わず
+                        # channel.send(content) だけなので、None で挙動は変わらない。
                         "persona_id": None,
                         "building_id": context.building_id,
                         "city_id": context.city_id,
