@@ -736,6 +736,11 @@ class ScheduleManager:
             # --- 台帳 claim (W3 D1/D3): 同一 occurrence の二重発火を dedup ---
             ledger = getattr(self.manager, "execution_ledger", None)
             exec_id: Optional[str] = None
+            occurrence_at = _occurrence_instant(occurrence_token)
+            # 起床・就寝の行だけ: 節目が属する営業日 (occurrence ごとに一度だけ
+            # 決めて台帳 payload に凍結した値)。台帳の無い構成と旧予約は None
+            # (帳簿処理側が occurrence_at から計算する)。
+            boundary_plan_date: Optional[str] = None
             if ledger is None:
                 if not self._ledger_missing_warned:
                     self._ledger_missing_warned = True
@@ -747,24 +752,30 @@ class ScheduleManager:
                 key = _occurrence_key(
                     schedule_id, instance_token, generation, occurrence_token
                 )
+                payload: Dict[str, Any] = {
+                    "schedule_id": schedule_id,
+                    "persona_id": schedule.PERSONA_ID,
+                    "schedule_type": schedule.SCHEDULE_TYPE,
+                    "instance_token": instance_token,
+                    "occurrence": occurrence_token,
+                    "generation": generation,
+                    "meta_playbook": schedule.META_PLAYBOOK,
+                    # 何回目の試行か (Codex W3 第九陣): failed 回収が
+                    # 「上限到達の意図的放棄」と「crash で retry を失った」を
+                    # 区別するための永続証跡 (予約の有無では再起動後に区別
+                    # できない — start() が翌回を先に登録するため)
+                    "attempt": attempt,
+                }
+                boundary_plan_date = self._freeze_life_boundary_plan_date(
+                    ledger, key, schedule, occurrence_at,
+                )
+                if boundary_plan_date is not None:
+                    payload["plan_date"] = boundary_plan_date
                 exec_id, runnable, existing_status = ledger.claim_execution(
                     SCHEDULE_DISPATCH_LEDGER_KIND,
                     key,
                     persona_id=schedule.PERSONA_ID,
-                    payload={
-                        "schedule_id": schedule_id,
-                        "persona_id": schedule.PERSONA_ID,
-                        "schedule_type": schedule.SCHEDULE_TYPE,
-                        "instance_token": instance_token,
-                        "occurrence": occurrence_token,
-                        "generation": generation,
-                        "meta_playbook": schedule.META_PLAYBOOK,
-                        # 何回目の試行か (Codex W3 第九陣): failed 回収が
-                        # 「上限到達の意図的放棄」と「crash で retry を失った」を
-                        # 区別するための永続証跡 (予約の有無では再起動後に区別
-                        # できない — start() が翌回を先に登録するため)
-                        "attempt": attempt,
-                    },
+                    payload=payload,
                 )
                 if not runnable:
                     # 二重発火 dedup。hot loop 防止: 次 occurrence がこの blocked
@@ -797,11 +808,13 @@ class ScheduleManager:
                     return
 
             # --- 実行 (型付き outcome、W3 D4) ---
-            # occurrence の時刻 (発火予定時刻) を渡す — 起床・就寝の帳簿処理が
-            # 営業日を決める基準。再試行・回収でも同じトークンから同じ時刻になる。
+            # occurrence の時刻 (発火予定時刻) と、凍結済みの営業日を渡す —
+            # 起床・就寝の帳簿処理が節目の営業日を決める基準。再試行・回収でも
+            # 同じトークン・同じ台帳キーから同じ値になる。
             outcome_class, detail = self._execute_schedule(
                 schedule, session,
-                occurrence_at=_occurrence_instant(occurrence_token),
+                occurrence_at=occurrence_at,
+                plan_date=boundary_plan_date,
             )
 
             # --- 精算 (W3 D3) ---
@@ -877,6 +890,61 @@ class ScheduleManager:
                 )
         finally:
             session.close()
+
+    def _freeze_life_boundary_plan_date(
+        self,
+        ledger: Any,
+        key: str,
+        schedule: PersonaSchedule,
+        occurrence_at: Optional[datetime],
+    ) -> Optional[str]:
+        """起床・就寝の行の occurrence が属する営業日を、occurrence ごとに一度だけ決める。
+
+        就寝の営業日は**現在の**起床・就寝設定に依存する
+        (``day_plan.life_boundary_plan_date``)。再試行のたびに引き直すと、
+        失敗〜再試行の間に起床設定だけが変わった就寝が別の日を選び、元の日の
+        ライフが終了の節目を永遠に失う (2026-10-10 Codex 敵対レビュー 3 巡目
+        修正 2)。そこで最初の claim の時点の答えを発火の実行台帳の payload
+        (``plan_date``) に凍結し、以後は同じ台帳キーの既存行から読み直す:
+
+        - backoff 再試行 / 再起動後の failed 回収: claim が failed 行を退避して
+          新しい行を作るので、その**前に**同じキーの既存行 (failed) の
+          ``plan_date`` を読み、新しい行の payload へ引き継ぐ
+        - prepared 回収: claim は既存行の payload を上書きしない (凍結値のまま)
+
+        既存行に ``plan_date`` が無い (この凍結を入れる前の旧予約) ときと初回は、
+        いまの設定で計算して凍結する。起床・就寝以外の行は None。計算に失敗した
+        (設定を読めない等) ときも None — 凍結せず、帳簿処理側の計算に委ねる
+        (そちらも失敗すれば failed → 再試行で、次の試行がまた決め直す)。
+        台帳の読み出しの例外は送出する (claim と同じ失敗の扱い)。
+        """
+        from saiverse.autonomy_wiring import LIFE_BOUNDARY_PLAYBOOKS
+
+        boundary = LIFE_BOUNDARY_PLAYBOOKS.get((schedule.META_PLAYBOOK or "").strip())
+        if boundary is None:
+            return None
+        prior = ledger.find_execution(SCHEDULE_DISPATCH_LEDGER_KIND, key)
+        prior_payload = (prior or {}).get("payload")
+        frozen = (
+            prior_payload.get("plan_date") if isinstance(prior_payload, dict) else None
+        )
+        if isinstance(frozen, str) and frozen:
+            return frozen
+        try:
+            from saiverse.day_plan import life_boundary_plan_date
+
+            return life_boundary_plan_date(
+                self.manager, schedule.PERSONA_ID, boundary, occurrence_at,
+            )
+        except Exception:
+            LOGGER.warning(
+                "[ScheduleManager] could not determine the business day of life "
+                "%s boundary schedule %d (persona=%s); not freezing it — the "
+                "bookkeeping computes it on this attempt",
+                boundary, schedule.SCHEDULE_ID, schedule.PERSONA_ID,
+                exc_info=True,
+            )
+            return None
 
     def _retry_or_give_up(
         self,
@@ -1103,12 +1171,16 @@ class ScheduleManager:
         session,
         *,
         occurrence_at: Optional[datetime] = None,
+        plan_date: Optional[str] = None,
     ) -> Tuple[str, str]:
         """スケジュールを実行し、型付き outcome を返す (W3 D4)。
 
         ``occurrence_at`` はこの発火の occurrence の時刻 (発火予定時刻、
         :func:`_occurrence_instant`)。起床・就寝の帳簿処理へだけ渡す — 営業日は
-        この時刻から決まる (None は現在時刻へ倒す互換)。
+        この時刻から決まる (None は現在時刻へ倒す互換)。``plan_date`` は
+        起床・就寝の行で occurrence ごとに凍結した営業日
+        (:meth:`_freeze_life_boundary_plan_date`)。渡されれば帳簿処理は
+        ``occurrence_at`` から計算し直さずにこれを使う (None は計算する互換)。
 
         META_PLAYBOOK が起床・就寝の行 (judgment_day_open / judgment_day_close
         — 名前は行の目印として残っている) の場合は、判断点ではなく機械の帳簿
@@ -1186,6 +1258,7 @@ class ScheduleManager:
                     self.manager, persona_id, boundary,
                     params=parsed_params if isinstance(parsed_params, dict) else None,
                     occurrence_at=occurrence_at,
+                    plan_date=plan_date,
                 )
             except Exception as e:
                 LOGGER.exception(

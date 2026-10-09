@@ -302,8 +302,15 @@ def _day_close_plan_date(
     (深夜跨ぎリズムでは 01:00 の就寝は前日が営業日)。
 
     ``at`` は :func:`_day_open_plan_date` と同じ — 節目の occurrence の時刻。
-    省略時は現在時刻。"""
-    sched = _find_day_schedules(manager, persona_id)
+    省略時は現在時刻。
+
+    **現在の**起床・就寝設定を読むので、同じ occurrence でも設定が変わると答えが
+    変わる。ScheduleManager はこの答えを occurrence ごとに一度だけ取り、発火の
+    実行台帳の payload (``plan_date``) に凍結して再試行・回収へ持ち回す
+    (2026-10-10 Codex 敵対レビュー 3 巡目 修正 2)。設定を読めなかったときは
+    送出する (``strict``) — 起床時刻なしの暦日へ黙って倒すと、深夜跨ぎリズムの
+    就寝が翌日を指し、その誤った日が凍結されてしまう。"""
+    sched = _find_day_schedules(manager, persona_id, strict=True)
     return effective_plan_date(
         at or clock.now(), sched.get("wake"), sched.get("close"),
     ).isoformat()
@@ -1394,8 +1401,15 @@ def refire_judgment_from_recovery(
 # ---------------------------------------------------------------------------
 
 
-def _find_day_schedules(manager: Any, persona_id: str) -> Dict[str, Any]:
+def _find_day_schedules(
+    manager: Any, persona_id: str, *, strict: bool = False,
+) -> Dict[str, Any]:
     """ペルソナの起床・就寝スケジュール (PersonaSchedule) を読む。
+
+    Args:
+        strict: True で読み出しの例外を送出する (既定は WARNING を出して
+            「未設定」と同じ空の答えへ縮退する)。読めなかったことを「未設定」と
+            区別しなければならない呼び出し側 (:func:`_day_close_plan_date`) 用。
 
     Returns:
         ``{"wake": "HH:MM"|None, "close": "HH:MM"|None,
@@ -1454,6 +1468,8 @@ def _find_day_schedules(manager: Any, persona_id: str) -> Dict[str, Any]:
         finally:
             db.close()
     except Exception:
+        if strict:
+            raise
         LOGGER.warning(
             "[watchdog] failed to read day schedules for %s", persona_id,
             exc_info=True,

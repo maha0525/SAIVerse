@@ -950,6 +950,136 @@ def _life_boundary_outbox_items(
     }]
 
 
+def _newer_confirmed_life_date(
+    manager: Any, persona_id: str, plan_date_str: str
+) -> Optional[str]:
+    """``plan_date_str`` より新しい営業日で、ライフが確定している最古の日 (無ければ None)。
+
+    ライフの確定は起床の帳簿処理 (:func:`confirm_life_for_today`) だけが行う
+    ので、新しい日のライフがある = 新しい一日が既に始まっている。persona_life の
+    行だけを見る (旧置き場 meta_json.lives は切り替え前の日付にしか無い)。
+    読み出しの例外は送出する (呼び出し側は「分からない」を現在の世代と
+    取り違えず、失敗として再試行に回す)。
+    """
+    from database.models import PersonaLife
+
+    db = manager.SessionLocal()
+    try:
+        rows = (
+            db.query(PersonaLife.PLAN_DATE, PersonaLife.LIVES_JSON)
+            .filter(
+                PersonaLife.PERSONA_ID == persona_id,
+                PersonaLife.PLAN_DATE > plan_date_str,
+            )
+            .order_by(PersonaLife.PLAN_DATE.asc())
+            .all()
+        )
+    finally:
+        db.close()
+    for newer_date, raw in rows:
+        lives = _parse_lives_payload(
+            raw, strict=False, persona_id=persona_id,
+            plan_date_str=newer_date, source="persona_life.LIVES_JSON",
+        )
+        if lives:
+            return str(newer_date)
+    return None
+
+
+def _life_boundary_staleness(
+    manager: Any,
+    persona_id: str,
+    plan_date_str: str,
+    index: int,
+    boundary: str,
+) -> Optional[str]:
+    """節目のライフが「現在の世代」でなければ、その理由を返す (現在の世代なら None)。
+
+    不変条件 (2026-10-10 Codex 敵対レビュー 3 巡目 修正 3):
+
+    1. 過去の節目の**帳簿の決着** (マーカー・実行台帳) は遅れてもやってよい —
+       再試行を止めるため
+    2. **ペルソナの現在状態** (TTL 同期・keep-alive の停止 / 予約・本人への通知)
+       に触ってよいのは、その節目のライフが現在の世代のときだけ。現在の世代 =
+       そのライフがまだ ended でなく、より新しい営業日のライフが確定していない
+    3. 開始の節目は、そのライフが ended 済み・またはライフの窓 (終了時刻) が
+       既に過ぎている場合、「開始」として扱わない
+
+    読むもの: より新しい営業日の persona_life (:func:`_newer_confirmed_life_date`)
+    と、開始では節目のライフ自身 (``ended`` マーカーと、営業日に錨を下ろした
+    区間の終端 :func:`_life_span_at` を ``clock.now()`` と比べる)。終了の節目の
+    ``ended`` はここでは見ない — 既に ended なら終了のマーカーが書けずに
+    no-op で閉じる (:func:`_life_mark_mutator`)。
+
+    Returns:
+        None = 現在の世代。文字列 = 古い理由 (``"superseded_by:<日付>"`` /
+        ``"ended"`` / ``"window_passed"``)。台帳の result の ``stale`` に残る。
+    """
+    newer = _newer_confirmed_life_date(manager, persona_id, plan_date_str)
+    if newer is not None:
+        return f"superseded_by:{newer}"
+    if boundary != LIFE_BOUNDARY_START:
+        return None
+    lives = get_lives(manager, persona_id, plan_date_str)
+    if index >= len(lives):
+        return None
+    life = lives[index]
+    if life.get("ended"):
+        return "ended"
+    span = _life_span_at(date.fromisoformat(plan_date_str), life)
+    if span is not None and span[1] <= clock.now():
+        return "window_passed"
+    return None
+
+
+def _settle_stale_life_start(
+    ledger: Any,
+    execution_id: str,
+    persona_id: str,
+    plan_date_str: str,
+    stale: str,
+) -> bool:
+    """古い開始の節目を「見送った」として台帳だけで決着させる (再試行を止める)。
+
+    started マーカー・開始通知・TTL 同期のどれも書かない。台帳は applied (result
+    に ``stale`` の印) → completed — 以後の同じ営業日の開始は claim の冪等で
+    「決着済み」になり、ScheduleManager の再試行も watchdog の撃ち直しも止まる。
+    """
+    LOGGER.info(
+        "[day_plan] life start boundary is stale (%s); not treating it as a "
+        "start — no marker, no notice, no TTL sync; settling the ledger only "
+        "(execution=%s persona=%s date=%s)",
+        stale, execution_id, persona_id, plan_date_str,
+    )
+    try:
+        ledger.mark_applied(
+            execution_id,
+            result={"boundary": LIFE_BOUNDARY_START, "stale": stale,
+                    "notified": False},
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to record stale life-start boundary "
+            "(execution=%s)", execution_id, exc_info=True,
+        )
+        try:
+            ledger.mark_failed(execution_id, "life-start stale settle failed")
+        except Exception:
+            LOGGER.error(
+                "[day_plan] failed to record life-start stale settle failure "
+                "(execution=%s)", execution_id, exc_info=True,
+            )
+        return False
+    try:
+        ledger.mark_completed(execution_id)
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to close stale life-start boundary execution "
+            "(execution=%s)", execution_id, exc_info=True,
+        )
+    return True
+
+
 def apply_life_boundary(
     manager: Any,
     persona_id: str,
@@ -1026,31 +1156,76 @@ def apply_life_boundary(
         # ほぼ同時の並走者が席を取った — 台帳へ書かず離脱 (敗者契約)
         return False
 
-    if boundary == "start":
-        steps_ok = _sync_cache_ttl_for_life_start(manager, persona_id, life)
-    else:
-        steps_ok = (
-            _cancel_keepalive_reservation(manager, persona_id)
-            and _sync_cache_ttl_for_life_end(manager, persona_id, life)
+    # 世代の検査 (2026-10-10 Codex 敵対レビュー 3 巡目 修正 3): 遅れて届いた
+    # 節目 (再試行・再起動後の回収) が、終わった日・次の世代のライフの「現在
+    # 状態」(TTL・keep-alive・本人への通知) を書き換えないように。
+    try:
+        stale = _life_boundary_staleness(
+            manager, persona_id, plan_date_str, index, boundary,
         )
-    if not steps_ok:
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] life %s boundary generation check failed (persona=%s "
+            "date=%s)", boundary, persona_id, plan_date_str, exc_info=True,
+        )
         try:
             ledger.mark_failed(
-                execution_id, f"life-{boundary} idempotent steps failed"
+                execution_id, f"life-{boundary} generation check failed"
             )
         except Exception:
             LOGGER.error(
-                "[day_plan] failed to record life-%s boundary failure "
+                "[day_plan] failed to record life-%s generation check failure "
                 "(execution=%s)", boundary, execution_id, exc_info=True,
             )
         return False
 
-    outbox_items = _life_boundary_outbox_items(manager, persona_id, notice)
+    if stale is not None and boundary == "start":
+        # 古い開始は「開始」として扱わない — started マーカーも通知も TTL 同期も
+        # 書かず、台帳だけ見送りとして決着させて再試行を止める。
+        return _settle_stale_life_start(
+            ledger, execution_id, persona_id, plan_date_str, stale,
+        )
+
+    if stale is None:
+        if boundary == "start":
+            steps_ok = _sync_cache_ttl_for_life_start(manager, persona_id, life)
+        else:
+            steps_ok = (
+                _cancel_keepalive_reservation(manager, persona_id)
+                and _sync_cache_ttl_for_life_end(manager, persona_id, life)
+            )
+        if not steps_ok:
+            try:
+                ledger.mark_failed(
+                    execution_id, f"life-{boundary} idempotent steps failed"
+                )
+            except Exception:
+                LOGGER.error(
+                    "[day_plan] failed to record life-%s boundary failure "
+                    "(execution=%s)", boundary, execution_id, exc_info=True,
+                )
+            return False
+        outbox_items = _life_boundary_outbox_items(manager, persona_id, notice)
+    else:
+        # 古い終了: 帳簿 (ended マーカー + 台帳) だけ決着させる。ペルソナの現在
+        # 状態 (keep-alive の cancel・TTL 解除の予約) には触らず、終了通知も
+        # 同梱しない — いま走っているのは新しい世代のライフなので。
+        LOGGER.info(
+            "[day_plan] life end boundary is stale (%s); settling the marker "
+            "and ledger only — current cache/keep-alive state and notices "
+            "untouched (persona=%s date=%s)", stale, persona_id, plan_date_str,
+        )
+        outbox_items = []
 
     def _extra(db: Any) -> None:
+        result: Dict[str, Any] = {
+            "boundary": boundary, "notified": bool(outbox_items),
+        }
+        if stale is not None:
+            result["stale"] = stale
         ledger.mark_applied(
             execution_id,
-            result={"boundary": boundary, "notified": bool(outbox_items)},
+            result=result,
             outbox_items=outbox_items,
             session=db,
         )
@@ -1089,6 +1264,18 @@ def apply_life_boundary(
         except Exception:
             LOGGER.warning(
                 "[day_plan] failed to close no-op life-%s boundary execution "
+                "(execution=%s)", boundary, execution_id, exc_info=True,
+            )
+        return True
+
+    if stale is not None:
+        # 通知を同梱していないので、配送を待たずに閉じる。閉じ損ねても applied
+        # (決着済み) なので再試行は止まる — 回復 tick の sweep が拾う。
+        try:
+            ledger.mark_completed(execution_id)
+        except Exception:
+            LOGGER.warning(
+                "[day_plan] failed to close stale life-%s boundary execution "
                 "(execution=%s)", boundary, execution_id, exc_info=True,
             )
         return True
@@ -1154,6 +1341,7 @@ def handle_scheduled_life_boundary(
     params: Optional[Dict[str, Any]] = None,
     *,
     occurrence_at: Optional[datetime] = None,
+    plan_date: Optional[str] = None,
 ) -> bool:
     """起床 / 就寝の時刻に、ライフの確定と節目処理を機械の帳簿処理として行う。
 
@@ -1178,6 +1366,16 @@ def handle_scheduled_life_boundary(
     しまい、翌日の正規の起床が「開始済み」として省略される (2026-10-10 Codex
     敵対レビュー 2 巡目 修正 2)。None (旧予約・直接呼び出しの互換) は現在時刻。
 
+    ``plan_date`` = この節目が属する営業日を**呼び出し側が凍結した値**
+    ("YYYY-MM-DD")。渡されればそれを使い、``occurrence_at`` からの計算はしない。
+    ScheduleManager は occurrence ごとに一度だけ :func:`life_boundary_plan_date`
+    で決め、発火の実行台帳の payload に凍結して再試行・再起動後の回収まで
+    持ち回す — 就寝の営業日は**現在の**起床設定に依存するので、再試行のたびに
+    引き直すと、間で起床設定が変わった就寝が別の日を選び、元の日のライフが
+    終了の節目を永遠に失う (2026-10-10 Codex 敵対レビュー 3 巡目 修正 2)。
+    None (plan_date を凍結していない旧予約・watchdog・直接呼び出し) は従来どおり
+    ``occurrence_at`` から計算する。
+
     自律 OFF のペルソナでは何もしない (確定も節目も行わない — 自律 OFF の世界に
     ライフは無い。アラームはライフと無関係に鳴る)。
 
@@ -1199,8 +1397,36 @@ def handle_scheduled_life_boundary(
     if boundary == LIFE_BOUNDARY_START:
         return _settle_life_start(
             manager, persona_id, params, occurrence_at=occurrence_at,
+            plan_date=plan_date,
         )
-    return _settle_life_end(manager, persona_id, occurrence_at=occurrence_at)
+    return _settle_life_end(
+        manager, persona_id, occurrence_at=occurrence_at, plan_date=plan_date,
+    )
+
+
+def life_boundary_plan_date(
+    manager: Any,
+    persona_id: str,
+    boundary: str,
+    occurrence_at: Optional[datetime] = None,
+) -> str:
+    """節目が属する営業日 ("YYYY-MM-DD") を ``occurrence_at`` から決める。
+
+    - 起床 (start): occurrence の暦日 (設定に依存しない)
+    - 就寝 (end): occurrence の時刻を**現在の**起床・就寝設定に当てた覚醒日
+      (深夜跨ぎリズムでは 01:00 の就寝は前日)。設定を読めなければ送出する
+
+    答えが現在の設定に依存するので、ScheduleManager は occurrence ごとに一度
+    だけ呼び、発火の実行台帳に凍結する (:func:`handle_scheduled_life_boundary`
+    の ``plan_date``)。
+    """
+    from saiverse.autonomy_wiring import _day_close_plan_date, _day_open_plan_date
+
+    if boundary == LIFE_BOUNDARY_START:
+        return _day_open_plan_date(occurrence_at)
+    if boundary == LIFE_BOUNDARY_END:
+        return _day_close_plan_date(manager, persona_id, occurrence_at)
+    raise ValueError(f"unknown life boundary: {boundary!r}")
 
 
 def _settle_life_start(
@@ -1209,17 +1435,21 @@ def _settle_life_start(
     params: Optional[Dict[str, Any]],
     *,
     occurrence_at: Optional[datetime] = None,
+    plan_date: Optional[str] = None,
 ) -> bool:
     """起床時刻の帳簿処理: 今日のライフを確定し、開始の節目を決着させる。
 
     確定は冪等 (:func:`confirm_life_for_today` が既存確定を保持する)。開始の
     節目の一度きり保証は lives[0] の ``started`` マーカー — 確定は済んだが節目が
     失敗した日は、再試行で節目だけをやり直せる (確認 → 適用 → マークの順)。
-    営業日は ``occurrence_at`` (節目の occurrence の時刻) の暦日。
+    営業日は凍結済みの ``plan_date``、無ければ ``occurrence_at`` (節目の
+    occurrence の時刻) の暦日。
     """
-    from saiverse.autonomy_wiring import _day_open_plan_date, _find_day_schedules
+    from saiverse.autonomy_wiring import _find_day_schedules
 
-    plan_date = _day_open_plan_date(occurrence_at)
+    plan_date = plan_date or life_boundary_plan_date(
+        manager, persona_id, LIFE_BOUNDARY_START, occurrence_at,
+    )
     settings = life_settings_from_params(params)
     try:
         existing = get_lives(manager, persona_id, plan_date)
@@ -1263,18 +1493,20 @@ def _settle_life_end(
     persona_id: str,
     *,
     occurrence_at: Optional[datetime] = None,
+    plan_date: Optional[str] = None,
 ) -> bool:
     """就寝時刻の帳簿処理: その営業日のライフに終了の節目を決着させる。
 
-    営業日 (覚醒日) は ``autonomy_wiring._day_close_plan_date`` を
-    ``occurrence_at`` (節目の occurrence の時刻) で引いたもの — 深夜跨ぎ
-    リズムでは 01:00 の就寝は前日が営業日。ライフの無い日は何もしない (決着)。
-    一度きり保証は lives[0] の ``ended`` マーカーと実行台帳の冪等キー。
+    営業日 (覚醒日) は凍結済みの ``plan_date``。無ければ (旧予約・直接呼び出し)
+    :func:`life_boundary_plan_date` を ``occurrence_at`` (節目の occurrence の
+    時刻) で引く — 深夜跨ぎリズムでは 01:00 の就寝は前日が営業日。ライフの無い
+    日は何もしない (決着)。一度きり保証は lives[0] の ``ended`` マーカーと
+    実行台帳の冪等キー。
     """
-    from saiverse.autonomy_wiring import _day_close_plan_date
-
     try:
-        plan_date = _day_close_plan_date(manager, persona_id, occurrence_at)
+        plan_date = plan_date or life_boundary_plan_date(
+            manager, persona_id, LIFE_BOUNDARY_END, occurrence_at,
+        )
         lives = get_lives(manager, persona_id, plan_date)
     except Exception:
         LOGGER.warning(

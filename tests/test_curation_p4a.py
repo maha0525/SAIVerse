@@ -855,7 +855,61 @@ class TestCurationOps:
         assert second == first
         assert self._row_count(conn) == 1
 
-    def test_source_key列の無い旧テーブルに初期化で列が足され旧行はNULLのまま(self):
+    def test_pendingに吸収された出どころも完了後の再適用で積み直さない(self):
+        # 2026-10-10 Codex 敵対レビュー 3 巡目 修正 1: 承認 A の pending に別の回の
+        # 承認 B が吸収されたとき、B の出どころの鍵が残らず、A が done へ進んだ後の
+        # B の再適用が新しい pending を積んでいた。
+        from sai_memory.curation_ops import _update_plan_status
+
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+        init_curation_tables(conn)
+        plan_a = enqueue_plan(
+            conn, "split", "split:memopedia:1", ["memopedia:1"],
+            source_key="exec-A:split:memopedia:1",
+        )
+        absorbed = enqueue_plan(
+            conn, "split", "split:memopedia:1", ["memopedia:1"],
+            source_key="exec-B:split:memopedia:1",
+        )
+        assert absorbed == plan_a
+        assert sorted(conn.execute(
+            "SELECT source_key, plan_id FROM curation_plan_sources"
+        ).fetchall()) == [
+            ("exec-A:split:memopedia:1", plan_a),
+            ("exec-B:split:memopedia:1", plan_a),
+        ]
+
+        _update_plan_status(conn, plan_a, "done", {"ok": True})
+        # B の凍結記録の再適用: 新しい予約を作らない。
+        again = enqueue_plan(
+            conn, "split", "split:memopedia:1", ["memopedia:1"],
+            source_key="exec-B:split:memopedia:1",
+        )
+        assert again == plan_a
+        assert list_pending(conn) == []
+        assert self._row_count(conn) == 1
+
+    def test_予約の書き込みが失敗したら対応表も残らない(self):
+        # 予約の行と対応表の行は同じトランザクション — 片方だけ残る分裂を作らない。
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+        init_curation_tables(conn)
+        # 対応表の INSERT が失敗する状況を、制約を足した対応表で再現する:
+        # 予約の行も rollback される。
+        conn.execute("DROP TABLE curation_plan_sources")
+        conn.execute(
+            "CREATE TABLE curation_plan_sources ("
+            " source_key TEXT PRIMARY KEY, plan_id TEXT NOT NULL,"
+            " CHECK (plan_id = 'never'))"
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            enqueue_plan(
+                conn, "split", "split:memopedia:10", ["memopedia:10"],
+                source_key="exec-Y:split:memopedia:10",
+            )
+        assert self._row_count(conn) == 0
+
+    def test_対応表の無い旧DBに初期化で対応表が足され旧行はそのまま(self):
         conn = sqlite3.connect(":memory:", check_same_thread=False)
         conn.execute(
             """
@@ -882,14 +936,25 @@ class TestCurationOps:
         conn.commit()
 
         init_curation_tables(conn)
-        init_curation_tables(conn)  # 2回目も例外なし (列の追加は冪等)
+        init_curation_tables(conn)  # 2回目も例外なし (対応表の作成は冪等)
 
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(curation_plans)")}
-        assert "source_key" in cols
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+        assert "curation_plan_sources" in tables
         assert [r[0] for r in conn.execute(
-            "SELECT source_key FROM curation_plans ORDER BY id"
-        )] == [None, None]
-        # source_key を渡さない予約 (NULL) は UNIQUE に当たらない。
+            "SELECT id FROM curation_plans ORDER BY id"
+        )] == ["old-1", "old-2"]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM curation_plan_sources"
+        ).fetchone()[0] == 0
+        # 出どころを渡さない予約は対応表に書かれない。
         enqueue_plan(conn, "split", "split:memopedia:3", ["memopedia:3"])
-        enqueue_plan(conn, "split", "split:memopedia:4", ["memopedia:4"])
+        enqueue_plan(
+            conn, "split", "split:memopedia:4", ["memopedia:4"],
+            source_key="exec-1:split:memopedia:4",
+        )
         assert len(list_pending(conn)) == 2
+        assert conn.execute(
+            "SELECT COUNT(*) FROM curation_plan_sources"
+        ).fetchone()[0] == 1

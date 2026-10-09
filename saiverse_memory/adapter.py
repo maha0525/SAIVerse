@@ -243,8 +243,9 @@ class SAIMemoryAdapter:
             from sai_memory.memopedia.vivid_to_desk_migration import migrate_vivid_pages_to_desk
             migrate_vivid_pages_to_desk(self.conn)
 
-            # P4-a: 記憶の手入れのテーブル（curation_plans と、提示の記録
-            # curation_presentation）の冪等初期化。スルースが承認分を積み、
+            # P4-a: 記憶の手入れのテーブル（curation_plans と、予約の出どころの
+            # 対応表 curation_plan_sources と、提示の記録 curation_presentation）
+            # の冪等初期化。スルースが承認分を積み、
             # 確定後の背景バッチが pending プランを読んで実行する。
             from sai_memory.curation_ops import init_curation_tables
             init_curation_tables(self.conn)

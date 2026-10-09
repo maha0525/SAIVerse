@@ -34,8 +34,14 @@ P4-a の三層（検知 → 裁定 → 実行）のうち「裁定から実行�
     status      TEXT DEFAULT 'pending'   -- "pending"|"done"|"failed"|"rejected"
     result_json TEXT NULL                -- 実行後の結果 JSON
     executed_at INTEGER NULL             -- 実行完了 epoch 秒
-    source_key  TEXT NULL UNIQUE         -- 予約の出どころの恒久 ID（後から追加の列。
-                                         -- 旧行は NULL。enqueue_plan の source_key 参照）
+
+予約の出どころの対応表（冪等、curation_plan_sources）:
+    source_key  TEXT PRIMARY KEY         -- 予約の出どころの恒久 ID（スルースは
+                                         -- 「実行台帳 ID + op_id」）
+    plan_id     TEXT NOT NULL            -- その出どころが予約した（または吸収
+                                         -- された既存 pending の）curation_plans.id
+    1 つの予約に複数の出どころが対応しうる（別の回の承認が同じ pending に
+    吸収される）ので、予約の行の列ではなく対応表で持つ。enqueue_plan 参照。
 """
 from __future__ import annotations
 
@@ -93,22 +99,34 @@ def init_curation_tables(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_curation_plans_status"
         " ON curation_plans(status)"
     )
-    # 予約の出どころの恒久 ID（2026-10-10 Codex 敵対レビュー 2 巡目 修正 1）。
-    # スルースは「その回の実行台帳の ID + op_id」を渡す。同じ凍結記録の再適用が、
-    # 完了済み (done / failed) の予約をもう一度 pending で積まないための鍵。
-    # 既存 DB 向けの追加系マイグレーション (perception_buffer と同方式)。
-    # UNIQUE 索引で DB 側に原子的な一意を強制する — SQLite の UNIQUE は NULL の
-    # 重複を許すので、旧行と source_key を渡さない予約 (NULL) には影響しない。
-    try:
-        conn.execute("ALTER TABLE curation_plans ADD COLUMN source_key TEXT")
-    except sqlite3.OperationalError:
-        pass  # 既に存在する
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_curation_plans_source_key"
-        " ON curation_plans(source_key)"
-    )
+    _create_sources_table(conn)
     _create_presentation_table(conn)
     conn.commit()
+
+
+def _create_sources_table(conn: sqlite3.Connection) -> None:
+    """予約の出どころの対応表 (source_key → plan_id) を冪等に作る。
+
+    スルースは「その回の実行台帳の ID + op_id」を出どころの鍵として渡す。同じ
+    凍結記録の再適用が、完了済み (done / failed) の予約をもう一度 pending で
+    積まないための鍵 (2026-10-10 Codex 敵対レビュー 2 巡目 修正 1)。
+
+    予約の行の列ではなく対応表にするのは、1 つの予約に複数の出どころが対応
+    しうるから — 承認 A の pending に別の回の承認 B が吸収されたとき、B の鍵も
+    残さないと、A が done へ進んだ後の B の再適用が新しい pending を積む
+    (2026-10-10 Codex 敵対レビュー 3 巡目 修正 1)。既存 DB へは追加系
+    (CREATE TABLE IF NOT EXISTS) で冪等に反映する。2 巡目で一時的に足した
+    ``curation_plans.source_key`` 列 (リリース前のブランチにだけ存在した) は
+    もう読み書きしない — その列を持つ開発中の DB に残っても無害。
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS curation_plan_sources (
+            source_key TEXT PRIMARY KEY,
+            plan_id    TEXT NOT NULL
+        )
+        """
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -181,11 +199,16 @@ def enqueue_plan(
 
     重複挿入しない条件は二つ（どちらかに当たれば既存行の id を返す）:
 
-    - ``source_key`` が渡され、同じ ``source_key`` の行が **status を問わず**
-      存在する — 同じ出どころ（スルースなら同じ凍結記録の同じ承認）は、予約が
-      done / failed へ進んだ後に再適用されても積み直さない。
+    - ``source_key`` が渡され、対応表 ``curation_plan_sources`` に同じ鍵がある
+      （予約の status を問わない）— 同じ出どころ（スルースなら同じ凍結記録の
+      同じ承認）は、予約が done / failed へ進んだ後に再適用されても積み直さない。
     - 同じ ``op_id`` の pending プランが存在する（approve を二度押しされても、
-      別の回の承認が重なっても、未実行の行は 1 件のまま）。
+      別の回の承認が重なっても、未実行の行は 1 件のまま）。このとき渡された
+      ``source_key`` は既存 pending の出どころとして対応表に書く — 吸収された
+      承認も、その予約が完了した後の再適用で積み直さない。
+
+    新規挿入でも吸収でも、予約の行と対応表の行は同じ接続の同じトランザクション
+    で commit する（片方だけ残る分裂を作らない。失敗は rollback して送出）。
 
     Args:
         conn:   per-persona memory.db の接続
@@ -212,48 +235,61 @@ def enqueue_plan(
         )
 
     if source_key is not None:
+        # 対応表の無い古い接続でも動くよう、読む前に冪等に作る
+        # (get_last_presented_day と同じ流儀)。
+        _create_sources_table(conn)
         row = conn.execute(
-            "SELECT id, status FROM curation_plans WHERE source_key = ?",
+            "SELECT plan_id FROM curation_plan_sources WHERE source_key = ?",
             (source_key,),
         ).fetchone()
         if row:
             LOGGER.debug(
-                "[curation_ops] source_key=%r already reserved as plan %s "
-                "(status=%s); skipping", source_key, row[0], row[1],
+                "[curation_ops] source_key=%r already reserved as plan %s; "
+                "skipping", source_key, row[0],
             )
             return row[0]
 
-    # 既存 pending を検索
-    cur = conn.execute(
-        "SELECT id FROM curation_plans WHERE op_id = ? AND status = ?",
-        (op_id, STATUS_PENDING),
-    )
-    existing = cur.fetchone()
-    if existing:
-        LOGGER.debug(
-            "[curation_ops] op_id=%r already has a pending plan (%s); skipping",
-            op_id, existing[0],
+    try:
+        # 既存 pending を検索 — あれば新しい行は積まず、出どころだけ吸収する
+        existing = conn.execute(
+            "SELECT id FROM curation_plans WHERE op_id = ? AND status = ?",
+            (op_id, STATUS_PENDING),
+        ).fetchone()
+        if existing:
+            plan_id = existing[0]
+            LOGGER.debug(
+                "[curation_ops] op_id=%r already has a pending plan (%s); "
+                "not enqueueing again (absorbing source_key=%r)",
+                op_id, plan_id, source_key,
+            )
+        else:
+            plan_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO curation_plans
+                    (id, created_at, kind, op_id, refs_json, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plan_id, int(time.time()), kind, op_id,
+                    json.dumps(refs, ensure_ascii=False), STATUS_PENDING,
+                ),
+            )
+        if source_key is not None:
+            conn.execute(
+                "INSERT INTO curation_plan_sources (source_key, plan_id)"
+                " VALUES (?, ?)",
+                (source_key, plan_id),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    if not existing:
+        LOGGER.info(
+            "[curation_ops] enqueued plan id=%s kind=%s op_id=%r refs=%r "
+            "source_key=%r", plan_id, kind, op_id, refs, source_key,
         )
-        return existing[0]
-
-    plan_id = str(uuid.uuid4())
-    now = int(time.time())
-    conn.execute(
-        """
-        INSERT INTO curation_plans
-            (id, created_at, kind, op_id, refs_json, status, source_key)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            plan_id, now, kind, op_id, json.dumps(refs, ensure_ascii=False),
-            STATUS_PENDING, source_key,
-        ),
-    )
-    conn.commit()
-    LOGGER.info(
-        "[curation_ops] enqueued plan id=%s kind=%s op_id=%r refs=%r source_key=%r",
-        plan_id, kind, op_id, refs, source_key,
-    )
     return plan_id
 
 

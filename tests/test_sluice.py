@@ -5733,10 +5733,13 @@ class SluicePageReviewTest(_AdapterTestBase):
         execution_id = self.ledger.find_execution(
             "sluice.pan", "tester:m0",
         )["execution_id"]
-        row = self.adapter.conn.execute(
-            "SELECT source_key FROM curation_plans WHERE id = ?", (pending[0]["id"],),
-        ).fetchone()
-        self.assertEqual(row[0], f"{execution_id}:{_PAGE_SPLIT['op_id']}")
+        rows = self.adapter.conn.execute(
+            "SELECT source_key FROM curation_plan_sources WHERE plan_id = ?",
+            (pending[0]["id"],),
+        ).fetchall()
+        self.assertEqual(
+            [r[0] for r in rows], [f"{execution_id}:{_PAGE_SPLIT['op_id']}"],
+        )
 
         # 予約は (別の確定の背景バッチで) 実行済みになった。
         with self.adapter._db_lock:
@@ -5769,6 +5772,61 @@ class SluicePageReviewTest(_AdapterTestBase):
         self.assertEqual(
             self.adapter.conn.execute("SELECT COUNT(*) FROM curation_plans").fetchone()[0],
             2,
+        )
+
+    def test_既存のpendingに吸収された承認の再適用は予約が完了した後も積み直さない(self):
+        # 2026-10-10 Codex 敵対レビュー 3 巡目 修正 1: 承認 A の pending に別の回の
+        # 承認 B が吸収されると、B の出どころの鍵がどこにも残らず、A が done へ
+        # 進んだ後の B の凍結記録の再適用が新しい pending を積んでいた。
+        from sai_memory.curation_ops import _update_plan_status
+
+        result = _sluice_result(page_reviews=[
+            {"op_id": _PAGE_SPLIT["op_id"], "verdict": "approve"},
+        ])
+        # 回 A: 承認して予約 P を積み、確定まで進む (バッチは偽物なので P は pending のまま)。
+        summary_a, _client_a = self._run(result, ledger=True)
+        self.assertEqual(summary_a["pages_approved"], 1)
+        pending = self._pending()
+        self.assertEqual(len(pending), 1)
+        plan_p = pending[0]["id"]
+
+        # 回 B (翌業務日・別の担当範囲): 同じ op_id を承認 → P に吸収される。
+        # 記録の永続化に失敗し、B の凍結記録は再適用待ちで残る。
+        self.day[0] = "2026-10-10"
+        messages_b = [*self._MSGS, {"id": "m5", "content": "x"}]
+        with patch.object(
+            sluice, "_persist_record", side_effect=RuntimeError("disk error"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._run(result, ledger=True, messages=messages_b)
+        self.assertEqual([p["id"] for p in self._pending()], [plan_p])
+        execution_b = self.ledger.find_execution(
+            "sluice.pan", "tester:m5",
+        )["execution_id"]
+        self.assertEqual(
+            self.adapter.conn.execute(
+                "SELECT plan_id FROM curation_plan_sources WHERE source_key = ?",
+                (f"{execution_b}:{_PAGE_SPLIT['op_id']}",),
+            ).fetchone()[0],
+            plan_p,
+        )
+
+        # 予約 P は (回 A の確定後の背景バッチで) 実行済みになった。
+        with self.adapter._db_lock:
+            _update_plan_status(self.adapter.conn, plan_p, "done", {"ok": True})
+
+        # 回 B の凍結記録の再適用 (LLM なし): 新しい予約を作らない。
+        summary_b, client_b = self._run(result, ledger=True, messages=messages_b)
+        self.assertEqual(client_b.calls, [])
+        self.assertEqual(summary_b["pages_approved"], 1)
+        self.assertEqual(self._pending(), [])
+        self.assertEqual(
+            self.adapter.conn.execute("SELECT COUNT(*) FROM curation_plans").fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.ledger.find_execution("sluice.pan", "tester:m5")["status"],
+            "completed",
         )
 
     def test_同じペルソナのバッチが走っている間は二本目を起動しない(self):
