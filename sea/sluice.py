@@ -2107,10 +2107,11 @@ def _offer_page_reviews(
     """この回に本人へ見せる記憶の手入れの候補と、その業務日。無ければ ``([], None)``。
 
     業務日に一回だけ: 最後に提示した業務日が今日なら検知もしない。提示の
-    記録はここでは書かない — 呼び出し側が、送る中身がモデルに入ると分かった
-    直後 (LLM を呼ぶ直前) に :func:`_mark_page_reviews_offered` で書く。
-    記録した後は、その回の応答が失敗しても同じ業務日には再提示しない
-    (見送られた候補は翌業務日の検知で、まだ条件を満たせば再提示される)。
+    記録はここでは書かない — 呼び出し側が、**応答が読めた後** (本人が候補を
+    見て答えた後) に :func:`_mark_page_reviews_offered` で書く。入力に入らず
+    外した回・LLM が失敗した回・応答が読めなかった回は記録されず、同じ業務日の
+    後のスルースでもう一度提示される。読めた回は、全部見送りでも記録され、
+    翌業務日の検知まで再提示されない。
 
     返す要素は ``{"op_id", "kind", "refs", "line"}`` だけに絞る (台帳に凍結
     して、記録の再適用で同じ候補を引くため)。どこで失敗しても空を返す。
@@ -2162,10 +2163,11 @@ def _offer_page_reviews(
 
 
 def _mark_page_reviews_offered(persona: Any, business_day: str) -> bool:
-    """候補を見せた業務日を記録する。書けなければ False (呼び出し側は見せない)。
+    """候補を見せた業務日を記録する。書けなければ False。
 
-    書けないまま見せると、同じ業務日の次のスルースでまた見せてしまう — 「業務日に
-    一回だけ」を守る側に倒す。
+    呼び出し側は応答が読めた後に呼ぶので、False でも応答は捨てない (WARNING を
+    出して進む)。その場合「業務日に一回だけ」は破れて同じ日にもう一度見せうるが、
+    承認の二重は予約の冪等で無害 — 見せ損ないより軽い側に倒す。
     """
     persona_id = getattr(persona, "persona_id", None)
     adapter = getattr(persona, "sai_memory", None)
@@ -2230,6 +2232,9 @@ def _apply_page_reviews(
     candidates: List[Dict[str, Any]],
 ) -> Tuple[int, int, int, List[str]]:
     """``page_reviews`` を適用する: approve は curation_plans に予約を積む。
+
+    承認と予約は同一回の応答でだけ結ばれる — この回の確定が検算で破棄されても
+    予約は残り、次の確定でまとめて実行される (取り消しの経路は無い)。
 
     Returns:
         ``(承認して予約した数, 見送った数, 予約に失敗した数, 記録行)``
@@ -3402,9 +3407,11 @@ def _call_sluice_llm(
     # 再採取を減らすため、アクティビティ一覧と同じ読みの配下から一度で取る。
     today_memos = _list_today_memos(persona, activities)
     # 記憶の手入れの候補 (業務日に一回だけ)。最後に提示した業務日の確認と
-    # 検知はここで行い、提示の記録は送る中身がモデルに入ると分かった後
-    # (下の _ensure_input_fits の後) に書く — 入らずに飛ばされた回は「提示した」
-    # に数えない。
+    # 検知はここで行い、提示の記録は**応答が読めた後** (下の
+    # _parse_structured_result の後) に書く — 入らずに飛ばされた回も、LLM が
+    # 失敗した回も、本人は候補を見ていないので「提示した」に数えない
+    # (2026-10-09 ローカルレビュー指摘 3: 見る前に記録が進むと、失敗した日の
+    # 候補が誰にも見られないまま翌業務日まで闇に落ちる)。
     page_review_candidates, page_review_day = _offer_page_reviews(lifecycle, persona)
 
     def _compose(candidates: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
@@ -3461,13 +3468,6 @@ def _call_sluice_llm(
             messages, execution_context.model_key, persona_id=persona_id,
             llm_client=llm_client, response_schema=response_schema,
         )
-    if page_review_candidates and not _mark_page_reviews_offered(
-        persona, str(page_review_day),
-    ):
-        # 提示の記録が書けない回は見せない (業務日に一回だけを守る側に倒す)。
-        page_review_candidates = []
-        prompt, response_schema = _compose(page_review_candidates)
-        messages = context_messages + [{"role": "user", "content": prompt}]
     result = llm_client.generate(
         messages,
         tools=[],
@@ -3515,6 +3515,17 @@ def _call_sluice_llm(
         result, persona_id,
         page_review_op_ids=_page_review_op_ids(page_review_candidates),
     )
+    # 応答が読めた = 本人が候補を見て答えた。ここで初めて「提示した」を記録する
+    # (台帳への凍結より前 — 凍結後の再適用の回は、最初の回が既に記録している)。
+    # 書けなかったときは WARNING だけ出して進む: 同じ業務日にもう一度見せて
+    # しまうことは許す (承認の二重は予約の冪等で無害。見せ損ないより軽い)。
+    if page_review_candidates and page_review_day is not None:
+        if not _mark_page_reviews_offered(persona, str(page_review_day)):
+            LOGGER.warning(
+                "[sluice] page review offer succeeded but the day could not be "
+                "recorded; the offer may repeat within the same business day "
+                "(persona=%s)", persona_id,
+            )
 
     # 見た集合 = 実入力の履歴 ID 列そのもの (後退方式の廃止で件数の引き算は
     # 無くなった)。退場側の包含検算 (_eviction_within_seen) の一次データ。

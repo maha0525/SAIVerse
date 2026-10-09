@@ -14,6 +14,12 @@
 - 古さの判定は実時間 (``time.time()``) で、``clock.now()`` の仮想時刻ではない。
 - 本文のハッシュでの同一視はしない。
 
+受領は応対の成否より**前**に確定する設計: 初回の応対が途中で失敗した場合、
+同じ ID の再送は保持期間のあいだ吸収される (再送で直らない)。これは意図した
+とりひき — 失敗の回収は再送頼みではなく、受領記録そのものを起点に拾い直す形で
+後の段が設計する (docs/issues/on_event_judgment_has_no_idempotency_key.md の
+「claim 失敗時の黙殺」の顔)。
+
 テーブル定義は ``database/models.py`` の :class:`StimulusReceipt`。
 """
 from __future__ import annotations

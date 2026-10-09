@@ -5486,12 +5486,15 @@ class SluicePageReviewTest(_AdapterTestBase):
         self.assertTrue(self._offered(client3.calls[0]))
         self.assertEqual(self._last_presented_day(), "2026-10-10")
 
-    def test_応答が失敗した回も同じ業務日には再提示しない(self):
+    def test_応答が読めなかった回は提示の記録が進まず同じ業務日にもう一度提示される(self):
         with self.assertRaises(sluice.SluiceOutputError):
             self._run({"reflection": "x"})  # 欄が足りない応答
+        # 本人は候補を見られていないので「提示した」に数えない。
+        self.assertIsNone(self._last_presented_day())
+        summary, client = self._run(_sluice_result(page_reviews=[]))
+        self.assertTrue(self._offered(client.calls[0]))
+        # 読めた回 (全部見送りでも) で初めて記録が進む。
         self.assertEqual(self._last_presented_day(), "2026-10-09")
-        _summary, client = self._run(_sluice_result())
-        self.assertFalse(self._offered(client.calls[0]))
 
     def test_候補を見せた回にpage_reviews欄が無い応答は他の欄の欠落と同じく棄却される(self):
         with self.assertRaises(sluice.SluiceOutputError):
