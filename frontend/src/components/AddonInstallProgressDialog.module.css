@@ -215,6 +215,7 @@
     display: flex;
     justify-content: flex-end;
     align-items: center;
+    gap: 12px;
     padding: 0.9rem 1.25rem;
     border-top: 1px solid rgba(0, 0, 0, 0.08);
 }
@@ -222,6 +223,43 @@
 .runningHint {
     font-size: 0.85rem;
     color: var(--text-secondary, #777);
+    flex: 1;
+}
+
+/* SSE が切れたあと、処理の終わりを問い合わせで待っている間の案内 */
+.lostNote {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    margin: 6px 1.25rem 0 1.25rem;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 5px;
+    color: #1e40af;
+    font-size: 0.85rem;
+}
+
+/* 終わったことは分かったが、成否は分からない */
+.resultUnknown {
+    background: #f1f5f9;
+    color: #334155;
+    border-top: 1px solid #cbd5e1;
+}
+
+.btnSecondary {
+    padding: 7px 16px;
+    background: none;
+    color: inherit;
+    border: 1px solid var(--border-color, #ccc);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.88rem;
+    flex-shrink: 0;
+}
+
+.btnSecondary:hover {
+    background: var(--bg-hover, rgba(0, 0, 0, 0.04));
 }
 
 .btnPrimary {
@@ -299,4 +337,24 @@
     background: #422006;
     border-color: #78350f;
     color: #fde68a;
+}
+
+:global([data-theme="dark"]) .lostNote {
+    background: #172554;
+    border-color: #1e3a8a;
+    color: #bfdbfe;
+}
+
+:global([data-theme="dark"]) .resultUnknown {
+    background: #1e293b;
+    color: #cbd5e1;
+    border-color: #475569;
+}
+
+:global([data-theme="dark"]) .btnSecondary {
+    border-color: #4b5563;
+}
+
+:global([data-theme="dark"]) .closeBtn:hover {
+    color: #e5e7eb;
 }

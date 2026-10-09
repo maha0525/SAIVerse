@@ -19,7 +19,7 @@
 """
 from __future__ import annotations
 
-import time
+import threading
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -36,6 +36,7 @@ from saiverse import clock
 from saiverse import day_plan
 from saiverse import execution_ledger as XL
 from saiverse.event_scheduler import EventScheduler
+from saiverse.meta_layer import MetaLayer
 
 PERSONA_ID = "alice"
 PLAN_DATE = "2026-07-04"
@@ -145,6 +146,9 @@ def _make_manager(session_factory, *, active=True, with_playbooks=True):
         pulse_controller=RecordingPulseController(),
         _autonomy_managers={},
     )
+    # 判断点の直列化 Lock は本番 manager が無条件に持つ MetaLayer から取る
+    # (autonomy_wiring._judgment_lock は無 Lock へ倒さない)。
+    manager.meta_layer = MetaLayer(manager)
     return manager, persona
 
 
@@ -1561,9 +1565,30 @@ def test_adapter_has_assistant_message_since(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_slots_fire_on_real_dispatch_thread(session_factory):
+def test_slots_fire_on_real_dispatch_thread(session_factory, monkeypatch):
     """day_plan の予約はシム専用ではない — 実時刻の dispatch スレッドで発火する。"""
+    # 発火の完了は DB を覗かずに知る。session_factory は全スレッドで一本の接続を
+    # 共有する (StaticPool) ため、dispatch スレッドの書き込み中に主スレッドが
+    # 読んで Session を閉じると、その返却時の ROLLBACK が dispatch スレッドの
+    # 未確定の予約 tx を巻き戻す — 旧実装の 20 秒ポーリングは、この巻き戻しで
+    # コマが done に届かず、並列のフルスイートで間欠的に落ちていた
+    # (2026-10-05 に特定。2026-07-07 に観測した「load_day_plan が一瞬 None」も
+    # 同じ共有接続の同時使用から来ていた可能性が高い)。
+    # 本番は接続を共有しないので、これはテスト土台だけの現象。
+    fired = threading.Event()
+    real_fire = day_plan._fire_slot_by_id
+
+    def _fire_and_signal(*args, **kwargs):
+        try:
+            return real_fire(*args, **kwargs)
+        finally:
+            fired.set()
+
+    # _push_slot の callback は呼び出し時にモジュール属性を引くので、差し替えが効く
+    monkeypatch.setattr(day_plan, "_fire_slot_by_id", _fire_and_signal)
+
     manager, _ = _make_manager(session_factory)
+    _attach_ledger(manager, session_factory)  # コマ発火は台帳経路一本
     today = datetime.now().date().isoformat()
     past = (datetime.now()).strftime("%H:%M")  # 過去/現在時刻 → 即時発火
     day_plan.save_day_plan(manager, PERSONA_ID, today, [
@@ -1575,27 +1600,17 @@ def test_slots_fire_on_real_dispatch_thread(session_factory):
 
     manager.event_scheduler.start()
     try:
-        # 通常 1 秒未満で発火する。上限は負荷時の余裕。
-        # NOTE: dispatch スレッドの書き込みと同時に読むと、共有 in-memory
-        # SQLite の癖で load_day_plan が一瞬 None を返すことがある
-        # (2026-07-07 に間欠観測)。「まだ読めない」は「まだ done でない」と
-        # 同じ扱いでポーリングを続け、最終 assert は締切後の再読で行う。
-        deadline = time.monotonic() + 20.0
-        status = None
-        while time.monotonic() < deadline:
-            slots = day_plan.load_day_plan(manager, PERSONA_ID, today)
-            if slots:
-                status = slots[0]["status"]
-                if status == "done":
-                    break
-            time.sleep(0.05)
-        slots = day_plan.load_day_plan(manager, PERSONA_ID, today)
-        assert slots, "day plan unreadable after polling deadline"
-        status = slots[0]["status"]
-        assert status == "done", f"slot did not fire on dispatch thread (status={status})"
-        assert slots[0]["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
+        # 通常 1 秒未満で発火し終わる。上限は発火しない故障を待ち続けないための
+        # もので、負荷で発火が遅れても完了の合図を待つだけなので落ちない。
+        assert fired.wait(timeout=60.0), "slot never fired on dispatch thread"
     finally:
         manager.event_scheduler.stop()
+    # dispatch スレッドが止まってから読む (共有接続を同時に触らない)
+    slots = day_plan.load_day_plan(manager, PERSONA_ID, today)
+    assert slots, "day plan unreadable after fire"
+    status = slots[0]["status"]
+    assert status == "done", f"slot did not fire on dispatch thread (status={status})"
+    assert slots[0]["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
 
 
 # ---------------------------------------------------------------------------

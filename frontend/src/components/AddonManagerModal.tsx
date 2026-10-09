@@ -6,13 +6,16 @@ import { useLocale } from '@/i18n/useLocale';
 import { resolveI18nText } from '@/i18n/resolve';
 
 import React, { useState, useEffect, useCallback, useRef, Suspense } from 'react';
-import { X, Package, ChevronDown, ChevronRight, Trash2, Plus, Store } from 'lucide-react';
+import { X, Package, ChevronDown, ChevronRight, Trash2, Plus, Store, ListPlus } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 import MCPSection from './MCPSection';
 import ActionsPanel from './ActionsPanel';
 import OAuthFlowSection, { OAuthFlow } from './OAuthFlowSection';
 import { ADDON_PANELS } from '../addon-panels.generated';
 import AddonCatalogPanel from './AddonCatalogPanel';
+import AddonActionConfirmDialog, { ConfirmProceedResult, SetupLoadState } from './AddonActionConfirmDialog';
+import AddonInstallProgressDialog from './AddonInstallProgressDialog';
+import type { SetupAnswers, SetupPlan, SetupQuestion, SetupStep } from './AddonSetupQuestions';
 import styles from './AddonManagerModal.module.css';
 
 // ---------------------------------------------------------------------------
@@ -975,6 +978,31 @@ function ParamsSection({
 }
 
 // ---------------------------------------------------------------------------
+// 導入時の質問をもう一度開く (GET /api/addon-catalog/installed/{id}/options)
+//
+// 保存済みの答えの選択肢には selected: true が付いて返る。質問を持たない
+// アドオン (Elyth・X・stackchan、手で入れたもの) は questions が空、または
+// 4xx になる — どちらも「選択肢を追加」の操作を出さない。
+// ---------------------------------------------------------------------------
+
+async function fetchSetupOptions(addonName: string): Promise<SetupPlan> {
+    const res = await apiFetch(`/api/addon-catalog/installed/${encodeURIComponent(addonName)}/options`);
+    if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        let detail = `HTTP ${res.status}${text ? `: ${text}` : ''}`;
+        try {
+            const parsed = JSON.parse(text);
+            if (parsed && typeof parsed.detail === 'string') detail = parsed.detail;
+        } catch {
+            // JSON でなければ本文をそのまま使う
+        }
+        throw new Error(detail);
+    }
+    const data: { questions?: SetupQuestion[]; steps?: SetupStep[] } = await res.json();
+    return { questions: data.questions ?? [], steps: data.steps ?? [] };
+}
+
+// ---------------------------------------------------------------------------
 // AddonCard — single addon row with expand/collapse
 // ---------------------------------------------------------------------------
 
@@ -993,6 +1021,59 @@ function AddonCard({
 }) {
     const currentLocale = useLocale();
     const [expanded, setExpanded] = useState(false);
+
+    // 導入時の質問を持つアドオンだけに「選択肢を追加」を出す
+    const [hasSetupOptions, setHasSetupOptions] = useState(false);
+    const [optionsConfirm, setOptionsConfirm] = useState<SetupLoadState | null>(null);
+    const [optionsProgress, setOptionsProgress] = useState<{ answers: SetupAnswers } | null>(null);
+    // 「選択肢を追加」を押すたびに番号を進める。閉じたあとに届いた応答を捨てるため。
+    const optionsSeqRef = useRef(0);
+
+    useEffect(() => {
+        let alive = true;
+        fetchSetupOptions(addon.addon_name)
+            .then((plan) => { if (alive) setHasSetupOptions(plan.questions.length > 0); })
+            .catch(() => { if (alive) setHasSetupOptions(false); });
+        return () => { alive = false; };
+    }, [addon.addon_name]);
+
+    const openSetupOptions = async () => {
+        const seq = ++optionsSeqRef.current;
+        setOptionsConfirm({ status: 'loading' });
+        try {
+            // 押した時点の保存済みの答えを取り直す (開いたままの画面の古い状態を使わない)
+            const plan = await fetchSetupOptions(addon.addon_name);
+            if (seq !== optionsSeqRef.current) return;
+            setOptionsConfirm({ status: 'ready', plan, needsSetup: true });
+        } catch (err) {
+            if (seq !== optionsSeqRef.current) return;
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error('[AddonManager] load setup options failed:', msg);
+            setOptionsConfirm({ status: 'error', message: msg });
+        }
+    };
+
+    const closeSetupOptions = () => {
+        optionsSeqRef.current++;
+        setOptionsConfirm(null);
+    };
+
+    const handleSetupOptionsProceed = ({ answers }: ConfirmProceedResult) => {
+        optionsSeqRef.current++;
+        setOptionsConfirm(null);
+        setOptionsProgress({ answers: answers ?? {} });
+    };
+
+    const handleSetupOptionsProgressClose = async () => {
+        setOptionsProgress(null);
+        try {
+            const plan = await fetchSetupOptions(addon.addon_name);
+            setHasSetupOptions(plan.questions.length > 0);
+        } catch {
+            // 取り直せなくても操作は出したままにする (次に押したときに理由が出る)
+        }
+        await onConfigChanged?.();
+    };
 
     const handleToggle = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const enabled = e.target.checked;
@@ -1037,6 +1118,15 @@ function AddonCard({
                         <span className={styles.addonDesc}>{descText}</span>
                     )}
                 </div>
+                {hasSetupOptions && (
+                    <button data-i18n="components.AddonManagerModal.text035 components.AddonManagerModal.text036"
+                        type="button"
+                        className={styles.setupOptionsBtn}
+                        onClick={(e) => { e.stopPropagation(); void openSetupOptions(); }}
+                        title={uiText("components.AddonManagerModal.text036")}
+                    >
+                        <ListPlus size={13} />{uiText("components.AddonManagerModal.text035")}</button>
+                )}
                 <label className={styles.enabledToggle} onClick={(e) => e.stopPropagation()}>
                     <input
                         type="checkbox"
@@ -1077,6 +1167,25 @@ function AddonCard({
                 <div className={styles.addonCardBody}>
                     <p data-i18n="components.AddonManagerModal.text027" className={styles.disabledNote}>{uiText("components.AddonManagerModal.text027")}</p>
                 </div>
+            )}
+            {optionsConfirm && (
+                <AddonActionConfirmDialog
+                    displayName={dispName}
+                    description={descText}
+                    operation="options"
+                    setup={optionsConfirm}
+                    onCancel={closeSetupOptions}
+                    onProceed={handleSetupOptionsProceed}
+                />
+            )}
+            {optionsProgress && (
+                <AddonInstallProgressDialog
+                    addonId={addon.addon_name}
+                    displayName={dispName}
+                    operation="options"
+                    answers={optionsProgress.answers}
+                    onClose={handleSetupOptionsProgressClose}
+                />
             )}
         </div>
     );

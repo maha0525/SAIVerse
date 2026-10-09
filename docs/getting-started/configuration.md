@@ -86,6 +86,7 @@ python main.py <city_id> [オプション]
 - `context_length`: コンテキスト長
 - `supports_images`: 画像入力対応
 - `supports_sampling_parameters`: `temperature` / `top_p` / `top_k` の送信対応（Gemini 3.6 Flash / 3.5 Flash-Lite 以降の非対応モデルでは `false`）
+- `supports_assistant_prefill`: Anthropic の assistant 発話で終わるコンテキストへの対応（Haiku 5.5 では `false`）。非対応時は履歴を書き換えず、送信前に `invalid_request` で停止
 - `supports_model_prefill`: 非空のモデル発話で終わるコンテキストへの対応（同モデル以降では `false`）
 - `base_url`: カスタムエンドポイント（互換API用）
 - `api_key_env`: APIキーの環境変数名

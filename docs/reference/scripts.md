@@ -86,11 +86,14 @@ python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saive
 
 | スクリプト | 用途 |
 |---|---|
-| `update_engine.py` | 全update入口の正典。clean Git fast-forward、更新前world snapshot、phase fail-stop、同一条件restart、health確認、失敗時rollback。依存更新を始める前にリポジトリ直下の `.update_complete` を消し、全段が成功したときだけ「VERSION + requirements.txt / requirements.lock / frontend/package-lock.json の sha256」を JSON で刻み直す (一時ファイル + `os.replace` で atomic)。途中で死ねば印は必ず無く、次回起動は実在照合を通る |
-| `update_engine.py --check-complete` | 起動前の「更新が仕上がっているか」検査 (start.bat / start.sh が呼ぶ)。コードも依存も書き換えない。終了コード 0=起動可 / 10=`--manual` で仕上げが必要 / 11=判定できなかったので警告して起動続行。詳細は [issue](../issues/v0229_update_bat_truncates_after_git_pull.md) |
+| `update_engine.py` | 全update入口の正典。clean Git fast-forward、更新前world snapshot、phase fail-stop、同一条件restart、health確認、失敗時rollback。依存更新を始める前にリポジトリ直下の `.update_complete` を消し、全段が成功したときだけ「VERSION + requirements.txt / requirements.lock / frontend/package-lock.json の sha256」を JSON で刻み直す (一時ファイル + `os.replace` で atomic)。途中で死ねば印は必ず無く、次回起動は実在照合を通る。画面の「Update」ボタンからの更新 (と チャンネル切り替え) では、バックエンドの終了後にこのフォルダの画面のサーバー (`frontend` で動く node と、start.bat の「SAIVerse Frontend」の窓) も止め、依存を入れ直したあと本番モード (`next start`) だったなら `npm run build` し、バックエンドの健全性確認のあとに同じモードで見える窓として立て直す。バックエンドも見える窓で再起動する。バックエンド停止後のどの段で失敗しても、(必要なら巻き戻して) 元のバージョンのバックエンドと画面を立ち上げ直してから失敗として終える。`--manual` (update.bat / update.sh / 起動時の仕上げ) は、このフォルダの画面のサーバーが動いていれば何も変えずに断る ([issue](../issues/archive/ui_update_fails_while_frontend_runs.md)) |
+| `update_engine.py --check-complete` | 起動前の「更新が仕上がっているか」検査 (start.bat / start.sh が呼ぶ)。コードも依存も書き換えない。終了コード 0=起動可 / 10=`--manual` で仕上げが必要 / 11=判定できなかったので警告して起動続行。完了の印が一致していても、`frontend/package.json` が宣言する部品 (dependencies。devDependencies は `NODE_ENV=production` の npm ci が入れないので数えない) が `node_modules` に一つでも欠けていれば 10 を返す。詳細は [issue](../issues/v0229_update_bat_truncates_after_git_pull.md) |
 | `self_update.py` | 旧セルフアップデート入口から `update_engine.py` への互換wrapper |
+| `init_git_repo.py` | ZIP を解凍したフォルダを、自動更新のために Git の管理下へ置く (setup.bat / setup.sh が呼ぶ)。Git の記録は「main の最新」ではなく、フォルダの中身と同じバージョン (`VERSION` と同じ名前のタグ。main の履歴に含まれるものだけ) に合わせ、合うタグが無いときだけ main の最新にする。最後にファイルと記録が一致しているかを確かめ、一致しなければその場で知らせる。フォルダの中のファイルは書き換えない。`git init` の直後で止まった導入は、もう一度実行すれば続きから仕上がる。終了コード 0=一致 / 1=Git の操作に失敗 / 2=ファイルと記録が一致しない ([issue](../issues/setup_from_older_zip_blocks_update.md)) |
 | `set_version.py` | バージョン刻印 |
 | `snapshot.py` | world snapshot format v2のsave/list/inspect/restore/delete。restoreは停止状態だけで実行 |
 | `run_discord_gateway_tests.py` | Discord Gateway テスト |
 | `check_in_flight.py` | in_flight 台帳の関所 — 次アクション欄の字数超過と過去形マーカー(日付・コミットハッシュ)混入を検査。台帳を触ったセッションの終わりに回す。2026-08-04 解体時の未移送3行のみ行指紋一致の間だけ警告扱い(exit 0=警告のみ可 / exit 1=免除外の違反・表構造不正) |
+| `install_vc_redist.ps1` | Windows に Microsoft Visual C++ 再頒布可能パッケージ (x64) が無いときに、Microsoft の配布元から取って入れる (setup.bat が呼ぶ)。記憶の検索に使う onnxruntime がこの部品を必要とし、無いと SAIVerse が起動時に落ちる。取ったファイルが Microsoft の署名つきであることを確かめてから実行する。入れられなかったときは手で入れる場所を知らせ、setup は止めない ([issue](../issues/archive/clean_windows_missing_vc_runtime_blocks_startup.md)) |
+| `ensure_searxng_version.py` | SearXNG を起動する直前に呼ばれる (run_searxng_server.ps1 / .sh)。`git` が見つからないときだけ、SearXNG のソースに `searx/version_frozen.py` を書く。SearXNG は起動のときに `git` で自分のバージョンを調べ、`git` が見つからないと落ちるため ([issue](../issues/archive/searxng_needs_git_on_path.md)) |
 | `download_searxng_source.py` / `merge_searxng_settings.py` | SearXNG セットアップ |

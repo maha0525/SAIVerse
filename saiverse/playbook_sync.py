@@ -111,17 +111,32 @@ def _build_db_record(
     source_rel: str,
     source_hash: str,
 ) -> dict:
-    """Playbook DB レコードのフィールド辞書を構築する。"""
+    """Playbook DB レコードのフィールド辞書を構築する。
+
+    description / display_name は JSON では文字列か言語辞書 ({ja, en}) のどちらも
+    許される (PlaybookSchema) が、DB 列は文字列なので、日本語を本体の列・英語を
+    ``_en`` 列へ分けて書く (import_all_playbooks.py と同じ約束)。
+    """
+    from saiverse.i18n_utils import split_i18n_columns
+
+    description, description_en = split_i18n_columns(
+        data.get("description"), alt_en=data.get("description_en"),
+    )
+    display_name, display_name_en = split_i18n_columns(
+        data.get("display_name"), alt_en=data.get("display_name_en"),
+    )
     schema_payload = {
         "name": name,
-        "description": data.get("description", ""),
+        "description": description or "",
         "input_schema": data.get("input_schema", []),
         "start_node": data.get("start_node"),
     }
     required_creds = data.get("required_credentials")
     return {
-        "description": data.get("description", ""),
-        "display_name": data.get("display_name"),
+        "description": description or "",
+        "description_en": description_en,
+        "display_name": display_name,
+        "display_name_en": display_name_en,
         "schema_json": json.dumps(schema_payload, ensure_ascii=False),
         "nodes_json": json.dumps(data, ensure_ascii=False),
         "router_callable": bool(data.get("router_callable", False)),

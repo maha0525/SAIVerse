@@ -113,6 +113,145 @@ def _get_all_arasuji_sorted(conn: sqlite3.Connection) -> List[ArasujiEntry]:
     return all_entries
 
 
+def _descend_around_excluded(
+    entries: List[ArasujiEntry],
+    exclude_entry_ids: Optional[Set[str]],
+) -> List[ArasujiEntry]:
+    """帯の降下規則: 窓が digest で見せているエントリを含む親は、子に降りる。
+
+    docs/intent/chronicle_consolidation_veto_removal.md 機構 B。候補エントリの
+    子孫 (``source_ids`` を entry id として辿った集合。level 1 の ``source_ids`` は
+    メッセージ id なので辿らない) に除外名簿のものが居るエントリは見せず、子に
+    降りる。降りた先でも同じ判定を繰り返し、除外名簿のもの自身と、その子孫は
+    落とす (窓が見せている期間そのもの)。子孫に除外が居ないエントリは従来どおり。
+
+    ``entries`` は全レベルのエントリを end_time 降順に並べた一覧なので、親の子は
+    最初から一覧の自分の時系列位置に居る。したがって「親の位置に子を置く」降下は、
+    **親を一覧から除くことで成立する** — 子は並べ替えなしでその場に立つ。
+    降りた先の子は ``is_consolidated`` が立っているが、走査・予算ガードはこの
+    印を見ないので、帯に載ってよい (降下はその区間だけ細かい粒度を強制する操作)。
+
+    返り値の一覧だけを走査と予算ガードに渡すことで、除外と交わる親が候補に
+    存在しなくなり、「予算圧縮で親が再導入されて二重提示が復活する」経路が
+    構造的に閉じる (予算ガード側に例外条件を足さない)。
+
+    除外名簿が空なら、入力をそのまま返す (現行と完全に同じ出力)。
+    """
+    if not exclude_entry_ids:
+        return entries
+    excluded = {str(x) for x in exclude_entry_ids}
+    by_id: Dict[str, ArasujiEntry] = {e.id: e for e in entries}
+
+    # 「子孫 (自身を含む) に除外名簿のものが居るか」= covers。逆辺 (子 id →
+    # それを source に持つ親たち) の索引を作り、除外名簿を種に親方向へ一度
+    # だけ伝播する (作業キュー)。再帰なし・反復なしの O(エントリ数 + 辺数) で、
+    # 深さの上限も収束の反復も要らない (2026-09-27 Codex 一〜三巡目の根治)。
+    # 辺にするのは「一覧に解決できる id」(レベル不問) と「一覧に居ないが
+    # 除外名簿に載っている id」(欠けた子 — 行が消えても親は降ろす)。
+    # 辺は source_ids (親→子) と parent_id (子→親) の両方から、**id だけの
+    # グラフ**として張る — 一覧に解決できない id (削除済み・フィルタ済みの
+    # 中間ノード、level 1 の正規のメッセージ id) も中継点として辺に残す。
+    # 正規のデータでは二重記帳の同じ関係だが、壊れたデータでは片方しか
+    # 残らない (source_ids が空の子、子を書き漏らした親) し、中間の行だけが
+    # 欠けた鎖もある — どの形でも血族の伝播と子孫の除去が欠けた id を
+    # 素通しで越えて届くようにする (2026-09-27 Codex 四〜六巡目)。
+    # メッセージ id が中継点に混ざるのは無害 (その先に辺は無く、帯の候補にも
+    # 居ない)。
+    parents_of: Dict[str, List[str]] = {}
+    children_ids: Dict[str, List[str]] = {}
+    broken_edges = 0
+    for e in entries:
+        for c in e.source_ids:
+            cid = str(c)
+            child = by_id.get(cid)
+            if e.level <= 1 and child is None:
+                # level 1 の source は正典上メッセージ id。一覧にあらすじ
+                # として実在する id (壊れた混入) だけを辺にし、それ以外は
+                # 中継点にもしない — 壊れた畳みがメッセージ id を除外名簿に
+                # 持ち込んだとき、無関係なあらすじが誤って降ろされる
+                # (2026-09-27 Codex 七巡目)。
+                continue
+            parents_of.setdefault(cid, []).append(e.id)
+            children_ids.setdefault(e.id, []).append(cid)
+            if child is not None and child.level >= e.level:
+                # 正規の木は子のレベル < 親のレベル。同レベル・上向きは
+                # 壊れた親子参照 (循環を含む) の印。辺としては通常どおり
+                # 伝播する (fail-open にしない)。
+                broken_edges += 1
+        if e.parent_id is not None:
+            pid = str(e.parent_id)
+            parents_of.setdefault(e.id, []).append(pid)
+            children_ids.setdefault(pid, []).append(e.id)
+            parent = by_id.get(pid)
+            if parent is not None and e.id not in {
+                str(c) for c in parent.source_ids
+            }:
+                # 子は parent_id で親を指すのに、親の source_ids に子が居ない
+                # — 片方だけの記帳 (壊れたデータ) の印。
+                broken_edges += 1
+    covers: Set[str] = {x for x in excluded if x in by_id}
+    queue: List[str] = list(excluded)
+    seen: Set[str] = set(queue)
+    while queue:
+        node = queue.pop()
+        for pid in parents_of.get(node, ()):
+            if pid not in covers:
+                covers.add(pid)
+            if pid not in seen:
+                seen.add(pid)
+                queue.append(pid)
+    if broken_edges:
+        LOGGER.warning(
+            "Chronicle band descent found %d same-level or upward "
+            "source_ids reference(s) (broken parent-child data); "
+            "propagation still treats them as edges",
+            broken_edges,
+        )
+
+    # 除外名簿のもの自身の子孫 (窓が見せている期間の内側) — 降りた先でも落とす。
+    # id だけのグラフを辿るので、除外の根や中間の行が一覧から欠けていても
+    # 子孫まで届く。
+    under_excluded: Set[str] = set()
+    work: List[str] = list(excluded)
+    while work:
+        node = work.pop()
+        for cid in children_ids.get(node, ()):
+            if cid not in under_excluded and cid not in excluded:
+                under_excluded.add(cid)
+                work.append(cid)
+
+    result: List[ArasujiEntry] = []
+    descended = 0
+    for entry in entries:
+        if entry.id in under_excluded:
+            continue
+        if entry.id in covers:
+            if entry.id not in excluded:
+                descended += 1
+            continue
+        result.append(entry)
+
+    missing = len(excluded) - sum(1 for x in excluded if x in by_id)
+    if missing:
+        # 除外名簿の id が一覧に居ない — 名簿の元 (窓の畳み) が指す先が
+        # 消えたか、一覧のフィルタ (Track 由来等) で落ちている。降下は
+        # その id については効かないので、無音にしない (2026-09-27
+        # ローカルレビュー指摘)。
+        LOGGER.warning(
+            "Chronicle band descent: %d of %d excluded entry id(s) are not "
+            "in the entry list; descent cannot apply to them",
+            missing, len(excluded),
+        )
+    if descended or under_excluded:
+        LOGGER.debug(
+            "Chronicle band descent: excluded=%d (present=%d), descended "
+            "ancestors=%d, dropped descendants of excluded=%d",
+            len(excluded), sum(1 for x in excluded if x in by_id),
+            descended, len(under_excluded),
+        )
+    return result
+
+
 def _find_arasuji_at_position(
     entries: List[ArasujiEntry],
     position_time: int,
@@ -557,14 +696,18 @@ def get_episode_context(
             置き換えて見せている範囲**を head の Chronicle 枠から外すために使う
             (docs/intent/chronicle_eviction.md §6)。同じあらすじが提示コンテキストの中と head
             の両方に出ると、体験が二重化して時系列の錯覚を招くため。
+            id の単純一致ではなく降下規則 (:func:`_descend_around_excluded`) で
+            効く: 除外エントリを子孫に含む親は見せず子に降り、除外エントリの
+            子孫も落とす (veto_removal intent 機構 B)。
 
     Returns:
         List of ContextEntry objects, ordered from oldest to newest
     """
     # Get all arasuji sorted by end_time descending
     all_arasuji = _get_all_arasuji_sorted(conn)
-    if exclude_entry_ids:
-        all_arasuji = [e for e in all_arasuji if e.id not in exclude_entry_ids]
+    # 降下後の一覧を先に作り、以降の走査・予算ガードにはこの一覧だけを渡す
+    # (除外と交わる親を候補から消す — veto_removal intent 機構 B)。
+    all_arasuji = _descend_around_excluded(all_arasuji, exclude_entry_ids)
 
     if not all_arasuji:
         # No arasuji yet, return empty

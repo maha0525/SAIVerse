@@ -160,7 +160,6 @@ class InterleavedConsolidationTest(unittest.TestCase):
                 self.conn, client,
                 persona_id=None,
                 cancel_check=None,
-                excluded_entry_ids=None,
                 batch_callback=None,
                 max_folds=budget - consolidated[0],
                 extraction_failures=failures,

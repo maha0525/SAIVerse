@@ -1043,6 +1043,147 @@ class TestGenerateChronicleWiring:
         assert breakdown["deferred_messages"] == 1
         assert breakdown["deferred_runs"] == 1
 
+    def test_absorption_keeps_receiving_the_presented_set_but_bands_do_not(
+        self, adapter, session_factory, monkeypatch,
+    ):
+        """退行防止 (chronicle_consolidation_veto_removal 第一段): 束ねから
+        提示中の除外を撤去しても、吸収の計画には全モデル集約の集合を従来どおり
+        渡し続ける (吸収の拒否権は第二段まで現状維持)。束ねの dry 予測には
+        除外を渡さない。"""
+        from types import SimpleNamespace
+
+        import sai_memory.arasuji.absorption as absorption_mod
+        import sai_memory.arasuji.bands as bands_mod
+        from sea.session_lifecycle import SessionLifecycle
+
+        monkeypatch.setenv("SAIVERSE_CHRONICLE_BAND_BUDGET", str(TARGET))
+        conn = adapter.conn
+        gap = _add_message(adapter, 0, 100)
+        n1 = _add_message(adapter, 10, 600)
+        entry = _entry(conn, [n1], start_min=10, end_min=10)
+        manager = SimpleNamespace(SessionLocal=session_factory, personas={})
+        lifecycle = SessionLifecycle(SimpleNamespace(), manager)
+        lifecycle.get_metabolism_watermarks = (
+            lambda persona, model_key=None: None
+        )
+        persona = SimpleNamespace(
+            persona_id=PERSONA_ID, persona_name="テスター", model="claude-x",
+            sai_memory=adapter,
+        )
+        absorption_kwargs = []
+        band_plan_kwargs = []
+        real_plan_absorption = absorption_mod.plan_absorption
+        real_plan_band = bands_mod.plan_band_overflow
+
+        def _spy_absorption(*a, **k):
+            absorption_kwargs.append(dict(k))
+            return real_plan_absorption(*a, **k)
+
+        def _spy_band(*a, **k):
+            band_plan_kwargs.append(dict(k))
+            return real_plan_band(*a, **k)
+
+        def _noop_executor(*a, **k):
+            from sai_memory.arasuji.executor import ExecutionResult
+            return ExecutionResult()
+
+        with patch(
+            "saiverse.model_configs.find_model_config",
+            return_value=(
+                "mock-model", {"provider": "mock", "context_length": 1000},
+            ),
+        ), patch(
+            "llm_clients.factory.get_llm_client", return_value=_Client(),
+        ), patch(
+            "sai_memory.arasuji.bands.backfill_coverage", lambda conn: 0,
+        ), patch(
+            "sea.session_lifecycle.collect_folded_chronicle_entry_ids",
+            return_value={entry.id},
+        ), patch(
+            "sai_memory.arasuji.absorption.plan_absorption", _spy_absorption,
+        ), patch(
+            "sai_memory.arasuji.bands.plan_band_overflow", _spy_band,
+        ), patch(
+            "sai_memory.arasuji.executor.execute_plan", _noop_executor,
+        ), patch(
+            "sai_memory.memory.entity_extractor.make_batch_callback",
+            side_effect=RuntimeError("skip entity extraction"),
+        ):
+            status = lifecycle.generate_chronicle(persona, force=True)
+        assert status == "ok"
+        # 吸収: 提示中の集合がそのまま届き、提示中の隣人は開かれない
+        assert len(absorption_kwargs) == 1
+        assert absorption_kwargs[0]["excluded_entry_ids"] == frozenset({entry.id})
+        # 提示中の隣人は開き直されない (本文も id もそのまま)
+        kept = get_entry(conn, entry.id)
+        assert kept is not None
+        assert gap not in kept.source_ids
+        # 束ね: dry 予測に除外は渡らない
+        assert band_plan_kwargs, "band dry plan was not consulted"
+        for kw in band_plan_kwargs:
+            assert "excluded_entry_ids" not in kw
+
+    def test_estimate_splits_band_and_absorption_exclusion(self, adapter):
+        """見積もり (arasuji_levels §16-2 — 表示と実走が同じ数): 束ねの
+        見積もりは実行と同じく除外なし、吸収の見積もりには提示中の集合を
+        従来どおり渡す (chronicle_consolidation_veto_removal 第一段)。"""
+        import sai_memory.arasuji.absorption as absorption_mod
+        import sai_memory.arasuji.bands as bands_mod
+        from sai_memory.arasuji.estimate import estimate_chronicle_generation_cost
+
+        conn = adapter.conn
+        # 束ねが発火する量の Lv1 (9 × 600 = 5,400 > 5,000)。一件を提示中にする。
+        presented = None
+        for i in range(9):
+            mid = _add_message(adapter, 100 + i * 10, 50)
+            e = create_entry(
+                conn, level=1, content="あ" * 600, source_ids=[mid],
+                start_time=_epoch(100 + i * 10), end_time=_epoch(100 + i * 10),
+                source_count=1, message_count=1,
+                extra_metadata={"coverage_chars": 1},
+            )
+            if i == 0:
+                presented = e
+        # 極小 run (吸収の計画が走る形)
+        _add_message(adapter, 0, 100)
+
+        absorption_kwargs = []
+        band_plan_kwargs = []
+        real_plan_absorption = absorption_mod.plan_absorption
+        real_plan_band = bands_mod.plan_band_overflow
+
+        def _spy_absorption(*a, **k):
+            absorption_kwargs.append(dict(k))
+            return real_plan_absorption(*a, **k)
+
+        def _spy_band(*a, **k):
+            band_plan_kwargs.append(dict(k))
+            return real_plan_band(*a, **k)
+
+        with patch(
+            "sai_memory.arasuji.absorption.plan_absorption", _spy_absorption,
+        ), patch(
+            "sai_memory.arasuji.bands.plan_band_overflow", _spy_band,
+        ):
+            est = estimate_chronicle_generation_cost(
+                conn, model_name="mock-model",
+                absorption_excluded_entry_ids=frozenset({presented.id}),
+            )
+            # 照会失敗 (None): 吸収は 0 と見積もるが、束ねは数え続ける。
+            est_unknown = estimate_chronicle_generation_cost(
+                conn, model_name="mock-model",
+                absorption_excluded_entry_ids=None,
+            )
+        assert absorption_kwargs
+        assert absorption_kwargs[0]["excluded_entry_ids"] == frozenset(
+            {presented.id}
+        )
+        for kw in band_plan_kwargs:
+            assert "excluded_entry_ids" not in kw
+        # 提示中の 1 件も勘定に入るので束ねは発火する (除外時代は 4,800 で 0)。
+        assert est.consolidation_calls >= 1
+        assert est_unknown.consolidation_calls == est.consolidation_calls
+
     def test_maintenance_check_exception_fails_the_full_plan(
         self, adapter, session_factory, monkeypatch,
     ):

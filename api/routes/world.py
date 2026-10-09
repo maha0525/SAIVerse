@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 from typing import List, Optional, Any
 import shutil
 from pathlib import Path
@@ -47,6 +47,8 @@ class CityUpdate(BaseModel):
     ui_port: int
     api_port: int
     timezone: str
+    # 画像を扱わない画面の保存では保持する。null / 空文字の明示だけ解除。
+    # 未送信との区別はルートで model_fields_set を使う (型は string | null のまま)。
     host_avatar_path: Optional[str] = None
     map_background_image: Optional[str] = None
     language: Optional[str] = None
@@ -79,6 +81,8 @@ class BuildingUpdate(BaseModel):
     # したとき「未送信 = null = 解除」にすると設定が黙って消えるので、
     # 未送信と null 明示の区別 (model_fields_set) は残す。
     item_display_limit: Optional[int] = None
+    # 入退室通知の画面表示。未送信は保持、null 明示は全体設定の継承へ戻す。
+    show_movement_notices: Optional[StrictBool] = None
 
 
 class RegionCreate(BaseModel):
@@ -204,7 +208,15 @@ def create_city(city: CityCreate, manager: SAIVerseManager = Depends(get_manager
 
 @router.put("/cities/{city_id}")
 def update_city(city_id: int, city: CityUpdate, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.update_city(city_id, city.name, city.description, city.online_mode, city.ui_port, city.api_port, city.timezone, city.host_avatar_path, None, city.map_background_image, language=city.language))
+    # 未送信を None に潰すと、チュートリアルなど画像を扱わない入口の保存で消える。
+    # 現在値の再送ではなく、保存側まで UNSET を渡して「触らない」を保証する。
+    return _check_result(manager.update_city(
+        city_id, city.name, city.description, city.online_mode,
+        city.ui_port, city.api_port, city.timezone,
+        host_avatar_path=city.host_avatar_path if "host_avatar_path" in city.model_fields_set else UNSET,
+        map_background_image=city.map_background_image if "map_background_image" in city.model_fields_set else UNSET,
+        language=city.language,
+    ))
 
 @router.patch("/cities/{city_id}/name")
 def update_city_display_name(city_id: int, req: CityDisplayNameUpdate, manager: SAIVerseManager = Depends(get_manager)):
@@ -308,11 +320,44 @@ def update_building(building_id: str, b: BuildingUpdate, manager: SAIVerseManage
                 status_code=400,
                 detail="部屋の様子に表示するアイテム数には 0 以上の数を入れてください（空欄で既定の 10 個）。",
             )
-    return _check_result(manager.update_building(building_id, b.name, b.capacity, b.description, b.system_instruction, b.city_id, b.tool_ids, b.auto_interval, b.image_path, b.extra_prompt_files, item_display_limit))
+    display_settings = {}
+    if "show_movement_notices" in b.model_fields_set:
+        display_settings["show_movement_notices"] = b.show_movement_notices
+    return _check_result(manager.update_building(
+        building_id, b.name, b.capacity, b.description, b.system_instruction,
+        b.city_id, b.tool_ids, b.auto_interval, b.image_path, b.extra_prompt_files,
+        item_display_limit, **display_settings,
+    ))
+
+@router.get("/buildings/{building_id}/deletion-preview")
+def get_building_deletion_preview(building_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """建物を消したら何が一緒に消え、何が残るかの数 (削除の確認ダイアログ用)。
+
+    中に直接置かれたアイテムの数と入れ物の中身の数、一緒に消える設置物の
+    数と名前、残る会話の記録の数を返す。何も変えない。
+    """
+    preview = manager.get_building_deletion_preview(building_id)
+    if preview is None:
+        raise HTTPException(status_code=404, detail="Building not found")
+    return preview
 
 @router.delete("/buildings/{building_id}")
-def delete_building(building_id: str, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.delete_building(building_id))
+def delete_building(
+    building_id: str,
+    items: str = "keep",
+    manager: SAIVerseManager = Depends(get_manager),
+):
+    """建物を消す。``items`` は中に直接置かれたアイテムの扱い。
+
+    ``keep`` (既定) = どこにも置かれていない状態で残す / ``delete`` = 入れ物の
+    中身ごと消す。設置物は常に一緒に消え、会話の記録は常に残る。
+    """
+    if items not in ("keep", "delete"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"items must be 'keep' or 'delete' (got '{items}').",
+        )
+    return _check_result(manager.delete_building(building_id, item_policy=items))
 
 
 # --- Regions ---
@@ -623,7 +668,13 @@ def get_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
 
 @router.delete("/items/{item_id}")
 def delete_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """アイテムを消す。入れ物なら、直接の中身は入れ物があった場所へ出される。"""
     return _check_result(manager.delete_item(item_id))
+
+@router.delete("/items/{item_id}/contents")
+def delete_bag_contents(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """入れ物の中身を、入れ子の中身まで含めてすべて消す (入れ物自身は残る)。"""
+    return _check_result(manager.delete_bag_contents(item_id))
 
 
 # --- Playbook ---

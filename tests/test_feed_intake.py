@@ -2126,6 +2126,366 @@ class FeedDeliveryTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 配信量の既定値とスタンドごとの設定 (2026-09-29 まはー裁定 —
+# docs/issues/feed_blocks_never_leave_presented_context.md)
+# ---------------------------------------------------------------------------
+
+_FEED_ENV_KEYS = (
+    "SAIVERSE_FEED_FETCH_INTERVAL_SEC",
+    "SAIVERSE_FEED_MAX_ITEMS_PER_PUSH",
+    "SAIVERSE_FEED_ITEM_KEEP",
+    "SAIVERSE_FEED_MAX_PENDING",
+)
+
+
+class FeedStandSettingsTest(unittest.TestCase):
+    """既定値・記事 1 件の整形・設定の解決順・取得間隔のゲート・剪定の
+    実効 keep・配送への反映・設定の更新 (null 戻し / 検証)。"""
+
+    PERSONA_ID = "tester"
+
+    def setUp(self):
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for key in _FEED_ENV_KEYS:
+            os.environ.pop(key, None)
+        self.engine, self.fake = _make_fake_manager()
+        self.addCleanup(self.engine.dispose)
+        self.fm = FeedManager(self.fake)
+        fixture = self.fm.create_feed_fixture(BUILDING_ID, "新聞スタンド")
+        self.fixture_id = fixture.FIXTURE_ID
+        sub = self.fm.add_subscription(
+            self.fixture_id, "https://example.com/feed.xml", title="テストフィード",
+        )
+        self.sub_id = sub.SUBSCRIPTION_ID
+
+    # --- helpers ---------------------------------------------------------
+
+    def _attach_persona(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+        def _cleanup():
+            import gc
+            gc.collect()
+            try:
+                self._tmp.cleanup()
+            except PermissionError:
+                pass
+
+        self.addCleanup(_cleanup)
+        persona_path = Path(self._tmp.name) / "personas" / self.PERSONA_ID
+        persona_path.mkdir(parents=True, exist_ok=True)
+        os.environ["SAIMEMORY_MEMORY"] = "1"
+        patcher = patch("saiverse_memory.adapter.Embedder", DummyEmbedder)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+        from saiverse_memory import SAIMemoryAdapter
+        self.adapter = SAIMemoryAdapter(
+            self.PERSONA_ID, persona_dir=persona_path, resource_id=self.PERSONA_ID,
+        )
+        self.addCleanup(self.adapter.close)
+        persona = SimpleNamespace(
+            persona_id=self.PERSONA_ID,
+            sai_memory=self.adapter, current_building_id=BUILDING_ID,
+        )
+        self.fake.personas = {self.PERSONA_ID: persona}
+        self.fake.occupants = {BUILDING_ID: [self.PERSONA_ID]}
+
+    def _pending(self):
+        from sai_memory.perception_buffer import list_pending
+        return list_pending(self.adapter.conn)
+
+    def _seed_items(self, count, *, title_len=0, summary_len=0):
+        db = self.fake.SessionLocal()
+        try:
+            for i in range(1, count + 1):
+                db.add(FeedItem(
+                    SUBSCRIPTION_ID=self.sub_id,
+                    GUID=f"g-{i}",
+                    TITLE=("見" * title_len) if title_len else f"記事{i}",
+                    SUMMARY=("要" * summary_len) if summary_len else f"概要{i}",
+                    LINK=f"https://example.com/a{i}",
+                    PUBLISHED_AT=datetime(2026, 7, 1, 9, i),
+                ))
+            db.commit()
+        finally:
+            db.close()
+
+    def _get_sub(self):
+        db = self.fake.SessionLocal()
+        try:
+            return db.query(FeedSubscription).filter(
+                FeedSubscription.SUBSCRIPTION_ID == self.sub_id
+            ).first()
+        finally:
+            db.close()
+
+    def _set_last_attempt(self, seconds_ago):
+        from saiverse.feed_manager import _utcnow_naive
+        from datetime import timedelta
+        db = self.fake.SessionLocal()
+        try:
+            sub = db.query(FeedSubscription).filter(
+                FeedSubscription.SUBSCRIPTION_ID == self.sub_id
+            ).first()
+            sub.LAST_ATTEMPT_AT = _utcnow_naive() - timedelta(seconds=seconds_ago)
+            db.commit()
+        finally:
+            db.close()
+
+    # --- 既定値と整形 ------------------------------------------------------
+
+    def test_builtin_defaults(self):
+        """既定: 取得間隔 3 時間 / 要約 100 字 / 見出し 120 字 / 1 回 3 件。"""
+        from saiverse import feed_manager as fm_mod
+        self.assertEqual(fm_mod.DEFAULT_FETCH_INTERVAL_SEC, 10800)
+        self.assertEqual(fm_mod.DEFAULT_MAX_PENDING_FEED, 10)
+        settings = self.fm.resolve_stand_settings(None)
+        self.assertEqual(settings.as_dict(), {
+            "fetch_interval_sec": 10800,
+            "summary_max_chars": 100,
+            "title_max_chars": 120,
+            "max_items_per_push": 3,
+        })
+
+    def test_format_clips_title_at_120_and_summary_at_100(self):
+        """見出しは 120 字、要約は 100 字で切り、切ったら末尾を「…」にする
+        (「…」込みで上限字数)。上限以内はそのまま。"""
+        item = {
+            "title": "見" * 300, "summary": "要" * 500,
+            "link": "https://example.com/x",
+        }
+        content = FeedManager._format_item_content("テストフィード", item)
+        lines = content.split("\n")
+        headline = lines[1].split("の新着記事: ", 1)[1]
+        self.assertEqual(len(headline), 120)
+        self.assertTrue(headline.endswith("…"))
+        self.assertEqual(headline, "見" * 119 + "…")
+        self.assertEqual(lines[2], "要" * 99 + "…")
+        self.assertEqual(len(lines[2]), 100)
+
+        short = FeedManager._format_item_content(
+            "テストフィード",
+            {"title": "見" * 120, "summary": "要" * 100, "link": ""},
+        )
+        self.assertIn("見" * 120 + "\n", short)
+        self.assertNotIn("…", short)
+
+    def test_format_summary_zero_omits_summary(self):
+        content = FeedManager._format_item_content(
+            "t", {"title": "見出し", "summary": "要約本文", "link": ""},
+            summary_max_chars=0,
+        )
+        self.assertNotIn("要約本文", content)
+
+    # --- 解決順 ------------------------------------------------------------
+
+    def test_resolution_order_stand_over_env_over_builtin(self):
+        os.environ["SAIVERSE_FEED_FETCH_INTERVAL_SEC"] = "7200"
+        os.environ["SAIVERSE_FEED_MAX_ITEMS_PER_PUSH"] = "5"
+        # スタンドの設定なし → env
+        _raw, eff = self.fm.get_stand_config(self.fixture_id)
+        self.assertEqual(eff.fetch_interval_sec, 7200)
+        self.assertEqual(eff.max_items_per_push, 5)
+        self.assertEqual(eff.summary_max_chars, 100)  # env を持たない欄は既定
+        self.assertEqual(eff.title_max_chars, 120)
+        # スタンドの設定値 → env と既定を上書き
+        raw, eff = self.fm.update_stand_config(self.fixture_id, {
+            "fetch_interval_sec": 3600,
+            "max_items_per_push": 1,
+            "summary_max_chars": 50,
+            "title_max_chars": 40,
+        })
+        self.assertEqual(raw, {
+            "fetch_interval_sec": 3600, "summary_max_chars": 50,
+            "title_max_chars": 40, "max_items_per_push": 1,
+        })
+        self.assertEqual(eff.as_dict(), raw)
+        # env を消すと、設定のない欄だけが組み込み既定へ戻る
+        self.fm.update_stand_config(self.fixture_id, {"max_items_per_push": None})
+        os.environ.pop("SAIVERSE_FEED_MAX_ITEMS_PER_PUSH")
+        _raw, eff = self.fm.get_stand_config(self.fixture_id)
+        self.assertEqual(eff.max_items_per_push, 3)
+        self.assertEqual(eff.fetch_interval_sec, 3600)
+
+    def test_env_interval_below_tick_raised_to_tick(self):
+        os.environ["SAIVERSE_FEED_FETCH_INTERVAL_SEC"] = "60"
+        self.assertEqual(FeedManager._read_interval_env(), 600)
+
+    def test_update_config_null_restores_default_and_keeps_other_fields(self):
+        self.fm.update_stand_config(self.fixture_id, {
+            "summary_max_chars": 30, "title_max_chars": 60,
+        })
+        raw, eff = self.fm.update_stand_config(
+            self.fixture_id, {"summary_max_chars": None},
+        )
+        self.assertIsNone(raw["summary_max_chars"])
+        self.assertEqual(raw["title_max_chars"], 60)  # 送らない欄は据え置き
+        self.assertEqual(eff.summary_max_chars, 100)
+
+    def test_update_config_validation(self):
+        for changes in (
+            {"fetch_interval_sec": 599},
+            {"fetch_interval_sec": 604801},
+            {"summary_max_chars": 1001},
+            {"title_max_chars": 19},
+            {"max_items_per_push": 11},
+            {"max_items_per_push": -1},
+            {"max_items_per_push": True},
+            {"unknown": 1},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    self.fm.update_stand_config(self.fixture_id, changes)
+        with self.assertRaises(LookupError):
+            self.fm.update_stand_config("no-such-fixture", {"title_max_chars": 50})
+
+    # --- 取得間隔のゲート --------------------------------------------------
+
+    def test_gate_failure_advances_last_attempt_and_waits_interval(self):
+        """失敗した購読も LAST_ATTEMPT_AT が進み、刻みごと (10 分) には
+        叩き直さない — スタンドの間隔が経過してから再試行する。"""
+        calls = []
+
+        def failing_fetch(url, **kw):
+            calls.append(url)
+            raise FeedFetchError("down", kind="network")
+
+        with patch("saiverse.feed_manager.fetch_feed", side_effect=failing_fetch):
+            self.fm._fetch_all()  # LAST_ATTEMPT_AT が NULL → 取得を試みる
+            self.assertEqual(len(calls), 1)
+            sub = self._get_sub()
+            self.assertEqual(sub.CONSECUTIVE_FAILURES, 1)
+            self.assertIsNotNone(sub.LAST_ATTEMPT_AT)
+
+            self.fm._fetch_all()  # 次の刻み: 間隔 (既定 3 時間) 未経過
+            self.assertEqual(len(calls), 1)
+
+            self._set_last_attempt(10800 - 60)  # まだ 1 分足りない
+            self.fm._fetch_all()
+            self.assertEqual(len(calls), 1)
+
+            self._set_last_attempt(10800)  # 経過した
+            self.fm._fetch_all()
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(self._get_sub().CONSECUTIVE_FAILURES, 2)
+
+    def test_gate_uses_stand_interval_and_success_advances(self):
+        self.fm.update_stand_config(self.fixture_id, {"fetch_interval_sec": 600})
+        calls = []
+
+        def ok_fetch(url, **kw):
+            calls.append(url)
+            return feed_fetch.FeedFetchResult(url=url, title="t", entries=[])
+
+        with patch("saiverse.feed_manager.fetch_feed", side_effect=ok_fetch):
+            self.fm._fetch_all()
+            self.assertEqual(len(calls), 1)
+            self.assertIsNotNone(self._get_sub().LAST_ATTEMPT_AT)
+            self._set_last_attempt(500)
+            self.fm._fetch_all()
+            self.assertEqual(len(calls), 1)  # スタンドの間隔 600 秒は未経過
+            self._set_last_attempt(600)
+            self.fm._fetch_all()
+            self.assertEqual(len(calls), 2)
+
+    def test_manual_fetch_bypasses_gate(self):
+        """手動取得 (fetch_now → force=True) は間隔のゲートを無視する。"""
+        self._set_last_attempt(0)
+        calls = []
+        with patch.object(
+            self.fm, "_fetch_one", side_effect=lambda sid: calls.append(sid),
+        ):
+            self.fm._fetch_all()
+            self.assertEqual(calls, [])
+            self.fm._fetch_all(force=True)
+            self.assertEqual(calls, [self.sub_id])
+
+    def test_start_registers_fixed_tick(self):
+        calls = []
+        self.fake.event_scheduler = SimpleNamespace(
+            schedule_periodic=lambda **kw: calls.append(kw),
+            cancel=lambda key: None,
+        )
+        os.environ["SAIVERSE_FEED_FETCH_INTERVAL_SEC"] = "86400"
+        FeedManager(self.fake).start()
+        # 刻みは env の既定間隔に関わらず固定 600 秒
+        self.assertEqual(calls[0]["interval_seconds"], 600)
+
+    # --- 剪定の実効 keep ---------------------------------------------------
+
+    def test_prune_keep_floor_follows_stand_push_size(self):
+        """KEEP < 配送 N 件のとき実効 keep は N まで引き上がる — N がスタンドの
+        設定値で決まっても同じ性質が保たれる。"""
+        os.environ["SAIVERSE_FEED_ITEM_KEEP"] = "1"
+        self.fm.update_stand_config(self.fixture_id, {"max_items_per_push": 4})
+        self._seed_items(6)
+        self.assertEqual(self.fm._prune_old_items(), 2)
+        db = self.fake.SessionLocal()
+        try:
+            remaining = [
+                it.GUID for it in db.query(FeedItem).order_by(FeedItem.id).all()
+            ]
+        finally:
+            db.close()
+        self.assertEqual(remaining, ["g-3", "g-4", "g-5", "g-6"])
+
+    # --- 配送への反映 ------------------------------------------------------
+
+    def test_delivery_uses_stand_items_and_char_limits(self):
+        self._attach_persona()
+        self._seed_items(5, title_len=200, summary_len=200)
+        self.fm.update_stand_config(self.fixture_id, {
+            "max_items_per_push": 2, "summary_max_chars": 10,
+            "title_max_chars": 20,
+        })
+        self.assertEqual(self.fm.deliver_new_items(), 2)
+        pending = self._pending()
+        self.assertEqual(len(pending), 2)
+        lines = pending[0].content.split("\n")
+        self.assertEqual(lines[1].split("の新着記事: ", 1)[1], "見" * 19 + "…")
+        self.assertEqual(lines[2], "要" * 9 + "…")
+
+    def test_delivery_default_limits_applied(self):
+        """設定なしのスタンドは組み込み既定 (見出し 120 / 要約 100) で届く。"""
+        self._attach_persona()
+        self._seed_items(1, title_len=500, summary_len=300)
+        self.assertEqual(self.fm.deliver_new_items(), 1)
+        lines = self._pending()[0].content.split("\n")
+        self.assertEqual(len(lines[1].split("の新着記事: ", 1)[1]), 120)
+        self.assertEqual(len(lines[2]), 100)
+
+    def test_stand_items_zero_disables_delivery_for_that_stand(self):
+        """スタンドの件数 0 はそのスタンドからの配送を止める — 知覚もカーソルも
+        動かない (定期サイクル・入室配送の両方)。"""
+        self._attach_persona()
+        self._seed_items(2)
+        self.fm.update_stand_config(self.fixture_id, {"max_items_per_push": 0})
+        self.assertEqual(self.fm.deliver_new_items(), 0)
+        persona = self.fake.personas[self.PERSONA_ID]
+        self.assertEqual(self.fm.deliver_unread_on_entry(persona, BUILDING_ID), 0)
+        self.assertEqual(len(self._pending()), 0)
+        db = self.fake.SessionLocal()
+        try:
+            self.assertEqual(db.query(FeedReadCursor).count(), 0)
+        finally:
+            db.close()
+        # 既定に戻すと配送が再開する
+        self.fm.update_stand_config(self.fixture_id, {"max_items_per_push": None})
+        self.assertEqual(self.fm.deliver_new_items(), 2)
+
+    def test_stand_items_override_env_zero(self):
+        """env が配送無効 (0) でも、スタンドの設定値が優先される。"""
+        self._attach_persona()
+        self._seed_items(2)
+        os.environ["SAIVERSE_FEED_MAX_ITEMS_PER_PUSH"] = "0"
+        self.assertEqual(self.fm.deliver_new_items(), 0)
+        self.fm.update_stand_config(self.fixture_id, {"max_items_per_push": 1})
+        self.assertEqual(self.fm.deliver_new_items(), 1)
+
+
+# ---------------------------------------------------------------------------
 # SAIVerseManager.shutdown との結線
 # ---------------------------------------------------------------------------
 
@@ -2216,7 +2576,7 @@ class FeedManagerLifecycleTest(unittest.TestCase):
         release_fetch = threading.Event()
         calls = []
 
-        def slow_fetch_all():
+        def slow_fetch_all(**_kw):  # fetch_now は force=True で呼ぶ
             fetch_started.set()
             release_fetch.wait(timeout=10)
 
@@ -2991,6 +3351,38 @@ class FeedMigrationIndexTest(unittest.TestCase):
         self.assertIn("uq_feed_sub_fixture_url", sub_idx)
         self.assertIn("uq_feed_item_sub_guid", item_idx)
         self.assertIn("uq_feed_cursor_persona_sub", cursor_idx)
+
+    def test_old_form_gains_last_attempt_and_stand_config_table(self):
+        """2026-09-29: 旧形 DB に feed_subscription.LAST_ATTEMPT_AT (取得間隔の
+        ゲートの基準) と feed_fixture_config (スタンドごとの配信設定) が
+        軽量パスで足される。既存の購読行は LAST_ATTEMPT_AT = NULL (次の刻みで
+        取得される) のまま残る。"""
+        from sqlalchemy import inspect, text
+        from database.migrate import _ensure_feed_tables
+        engine = self._make_engine()
+        with engine.begin() as conn:
+            self._create_old_form_tables(conn)
+            conn.execute(text(
+                'INSERT INTO feed_subscription '
+                '("SUBSCRIPTION_ID", "FIXTURE_ID", "FEED_URL") VALUES '
+                "('s1', 'f1', 'https://example.com/feed')"
+            ))
+        _ensure_feed_tables(engine)
+        _ensure_feed_tables(engine)  # 冪等
+        insp = inspect(engine)
+        sub_cols = {c["name"] for c in insp.get_columns("feed_subscription")}
+        self.assertIn("LAST_ATTEMPT_AT", sub_cols)
+        self.assertTrue(insp.has_table("feed_fixture_config"))
+        cfg_cols = {c["name"] for c in insp.get_columns("feed_fixture_config")}
+        self.assertEqual(cfg_cols, {
+            "FIXTURE_ID", "FETCH_INTERVAL_SEC", "SUMMARY_MAX_CHARS",
+            "TITLE_MAX_CHARS", "MAX_ITEMS_PER_PUSH", "CREATED_AT", "UPDATED_AT",
+        })
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                'SELECT "SUBSCRIPTION_ID", "LAST_ATTEMPT_AT" FROM feed_subscription'
+            )).fetchall()
+        self.assertEqual([tuple(r) for r in rows], [("s1", None)])
 
     def _feed_item_create_sql(self, engine):
         from sqlalchemy import text

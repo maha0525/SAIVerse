@@ -24,12 +24,13 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
+from uuid import uuid4
 
 import httpx
 from curl_cffi import requests as cffi_requests
 from filelock import FileLock, Timeout as FileLockTimeout
 
-from .base import LLMClient
+from .base import LLMClient, ToolSpecFormat
 from .openai_codex_auth import (
     CODEX_IMPERSONATE,
     CODEX_ORIGINATOR,
@@ -91,6 +92,107 @@ def _extract_json_object_candidate(text: str) -> str:
     return candidate
 
 
+def _join_message_texts(texts: List[str]) -> str:
+    """Join per-message texts the same way `_iter_chunks` streams them.
+
+    空のメッセージは飛ばし、前の本文が改行で終わっていない境目にだけ改行を
+    挟む。ストリームで流した chunk の結合と同じ文字列になる。
+    """
+    joined = ""
+    for text in texts:
+        if not text:
+            continue
+        if joined and not joined.endswith("\n"):
+            joined += "\n"
+        joined += text
+    return joined
+
+
+class _StreamDiagnostics:
+    """DEBUG-only, response-local shape/equality evidence; never log content.
+
+    References are local aliases, not provider IDs or hashes of private text.
+    This observes the existing aggregator without suppressing repeated output.
+    See docs/issues/codex_stream_diagnostics.md.
+    """
+
+    def __init__(self) -> None:
+        self.stream = uuid4().hex[:12]
+        self.refs: Dict[str, int] = {}
+        self.last_sequence: Optional[int] = None
+
+    def _ref(self, value: Any) -> Optional[int]:
+        if not isinstance(value, str) or not value:
+            return None
+        return self.refs.setdefault(value, len(self.refs) + 1)
+
+    def _text(self, value: Any) -> Dict[str, Any]:
+        return {"chars": len(value), "ref": self._ref(value)} if isinstance(value, str) else {}
+
+    def _item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"item_ref": self._ref(item.get("id"))}
+        item_type = item.get("type")
+        result["kind"] = item_type if item_type in ("message", "function_call", "reasoning") else "other"
+        if item_type == "message":
+            phase = item.get("phase")
+            result["phase"] = phase if phase in ("commentary", "final_answer") else None
+            content = item.get("content")
+            result["parts"] = [
+                self._text(part.get("text"))
+                for part in (content if isinstance(content, list) else [])
+                if isinstance(part, dict) and part.get("type") == "output_text"
+            ]
+        elif item_type == "function_call":
+            result.update(call_ref=self._ref(item.get("call_id")),
+                          name_ref=self._ref(item.get("name")),
+                          arguments=self._text(item.get("arguments")))
+        return result
+
+    def event(self, event: Dict[str, Any], part_streamed: str) -> None:
+        kind = event.get("type")
+        sequence = event.get("sequence_number")
+        nonincreasing = False
+        if type(sequence) is int:
+            nonincreasing = self.last_sequence is not None and sequence <= self.last_sequence
+            self.last_sequence = sequence
+        if kind not in (
+            "response.created", "response.output_item.added", "response.output_item.done",
+            "response.output_text.done", "response.completed", "response.failed",
+        ) and not nonincreasing:
+            return
+        # No arbitrary event fields, raw IDs, body, arguments, or error payloads.
+        record: Dict[str, Any] = {"stream": self.stream, "event": kind if kind in (
+            "response.created", "response.output_item.added", "response.output_item.done",
+            "response.output_text.done", "response.completed", "response.failed",
+            "response.output_text.delta", "response.function_call_arguments.delta",
+        ) else "other", "sequence_nonincreasing": nonincreasing}
+        for key in ("sequence_number", "output_index", "content_index"):
+            value = event.get(key)
+            if type(value) is int:
+                record[key] = value
+        record["item_ref"] = self._ref(event.get("item_id"))
+        if kind == "response.output_text.done":
+            done_text = event.get("text") or ""
+            record.update(done=self._text(done_text), streamed_part=self._text(part_streamed),
+                          recovered_chars=(len(done_text) - len(part_streamed)
+                                           if done_text.startswith(part_streamed) else 0))
+        if isinstance(event.get("item"), dict):
+            record["item"] = self._item(event["item"])
+        response = event.get("response")
+        if isinstance(response, dict):
+            record["response_ref"] = self._ref(response.get("id"))
+            output = response.get("output")
+            record["output"] = [self._item(item) for item in (output if isinstance(output, list) else [])
+                                if isinstance(item, dict)]
+        LOG.debug("Codex stream diagnostic %s", json.dumps(record, separators=(",", ":")))
+
+    def finish(self, text: str, function_calls: int) -> None:
+        LOG.debug("Codex stream diagnostic %s", json.dumps({
+            "stream": self.stream, "event": "assembled", "text": self._text(text),
+            "function_calls": function_calls,
+        }, separators=(",", ":")))
+
+
 class OpenAICodexClient(LLMClient):
     """OpenAI Codex backend client (ChatGPT subscription OAuth).
 
@@ -107,6 +209,9 @@ class OpenAICodexClient(LLMClient):
         * Auto refresh of expired OAuth tokens (401 → refresh_token grant →
           write-back to the store the tokens came from)
     """
+
+    def tool_spec_format(self) -> ToolSpecFormat:
+        return "openai"
 
     def __init__(
         self,
@@ -744,28 +849,88 @@ class OpenAICodexClient(LLMClient):
             * `("__done__", state_dict)` — sentinel emitted exactly once at the
               very end, with everything aggregators need:
                   text, function_calls, reasoning_summary_text,
-                  reasoning_full_text, usage_input, usage_output, usage_cached
+                  reasoning_full_text, usage_input, usage_output, usage_cached,
+                  message_texts (本文をメッセージごとに分けたもの)
+
+        Codex 系 (GPT-5.3-Codex 以降) は 1 回の応答を複数の出力メッセージ
+        (commentary / final_answer など) に分けて返すことがある。境目を潰して
+        連結すると、2 つ目のメッセージ先頭の ``/spell`` が前の文の直後に
+        くっつき、スペルの行頭判定 (``^/spell``) に掛からなくなる。そのため
+        メッセージの境目には改行を差し、ストリームで流す形と集約テキスト
+        (``text``) の形を一致させる。
+
+        不変条件: **ストリームとして yield した可視テキストの結合と、終端 state の
+        ``text`` は常に同じ文字列になる。** delta を流さず done / completed だけで
+        本文が届く応答では、まだ流していないぶんをその場で yield して埋める —
+        集約側だけが本文を知っている状態を作らない (ストリーミング経路の消費者は
+        chunk の結合を正とするため)。
         """
         delta_buffer: List[str] = []
-        final_text: Optional[str] = None
+        # output_text.done の本文をメッセージ (item_id) ごとに集める。
+        # 上書きすると複数メッセージの応答で最後のメッセージしか残らない。
+        done_texts: Dict[str, List[str]] = {}
+        completed_texts: List[str] = []
+        # done の text 欠落時のフォールバックが読む「まだ done に消費されていない
+        # delta」の先頭位置。メッセージ境界だけでなく done のたびに進める —
+        # 同一メッセージ内で part ごとに done が来る形で本文を二重計上しないため。
+        delta_consumed = 0
+        # item_id を持たない done を区別する鍵。message item が added されるたびに
+        # 進むので、id 欠落でも別メッセージが同じ鍵へ融合しない。
+        message_index = 0
+        # 直近の可視 delta の item_id (メッセージ境界の第二の信号)。
+        last_delta_item_id = ""
         pending_calls: Dict[str, Dict[str, str]] = {}
         reasoning_summaries: Dict[int, List[str]] = {}
         reasoning_full: List[str] = []
         usage_input = 0
         usage_output = 0
         usage_cached = 0
+        diagnostics = _StreamDiagnostics() if LOG.isEnabledFor(logging.DEBUG) else None
 
         for event in self._iter_sse_events(resp):
             event_type = event.get("type")
+            if diagnostics is not None:
+                try:
+                    diagnostics.event(event, "".join(delta_buffer[delta_consumed:])
+                                      if event_type == "response.output_text.done" else "")
+                except Exception:
+                    # Diagnostics must never interrupt the response. Do not log
+                    # the exception: it may contain private event content, and
+                    # the diagnostic logger itself may be what failed.
+                    diagnostics = None
 
             if event_type == "response.output_text.delta":
                 delta = event.get("delta") or ""
                 if delta:
+                    # 境界の信号は output_item.added だけに頼らない: delta の
+                    # item_id が切り替わったら、それも新しいメッセージの始まり
+                    # として同じ境界規則を適用する (added が届かない形への備え。
+                    # added 経由で改行を入れた直後は末尾が改行なので二重にならない)。
+                    item_id = event.get("item_id") or ""
+                    if item_id and last_delta_item_id and item_id != last_delta_item_id:
+                        if delta_buffer and not delta_buffer[-1].endswith("\n"):
+                            delta_buffer.append("\n")
+                            yield "\n"
+                        delta_consumed = len(delta_buffer)
+                    if item_id:
+                        last_delta_item_id = item_id
                     delta_buffer.append(delta)
                     yield delta
 
             elif event_type == "response.output_text.done":
-                final_text = event.get("text") or "".join(delta_buffer)
+                item_key = event.get("item_id") or f"msg#{message_index}"
+                part_streamed = "".join(delta_buffer[delta_consumed:])
+                done_text = event.get("text") or ""
+                # delta で流し切れていない本文が done に載っていたら、その差分を
+                # いま流す (delta 無しで done だけ届く応答でも、ストリームの
+                # 消費者に本文が届くように)。done と delta が食い違う異常形は
+                # 流した側 (delta) を正とし、二重には流さない。
+                if done_text.startswith(part_streamed) and len(done_text) > len(part_streamed):
+                    missing = done_text[len(part_streamed):]
+                    delta_buffer.append(missing)
+                    yield missing
+                done_texts.setdefault(item_key, []).append(done_text or part_streamed)
+                delta_consumed = len(delta_buffer)
 
             elif event_type == "response.reasoning_summary_text.delta":
                 delta = event.get("delta") or ""
@@ -782,7 +947,16 @@ class OpenAICodexClient(LLMClient):
 
             elif event_type == "response.output_item.added":
                 item = event.get("item") or {}
-                if item.get("type") == "function_call":
+                if item.get("type") == "message":
+                    # 2 つ目以降のメッセージの始まり。既に流した本文が改行で
+                    # 終わっていなければ区切りの改行を流す (先頭メッセージの
+                    # 前には入れない)。
+                    if delta_buffer and not delta_buffer[-1].endswith("\n"):
+                        delta_buffer.append("\n")
+                        yield "\n"
+                    delta_consumed = len(delta_buffer)
+                    message_index += 1
+                elif item.get("type") == "function_call":
                     item_id = item.get("id") or ""
                     pending_calls[item_id] = {
                         "call_id": item.get("call_id") or "",
@@ -814,26 +988,50 @@ class OpenAICodexClient(LLMClient):
                 usage_output = int(usage.get("output_tokens") or 0)
                 cached_details = usage.get("input_tokens_details") or {}
                 usage_cached = int(cached_details.get("cached_tokens") or 0)
-                if final_text is None:
+                # done イベントが来なかった時のフォールバック。同一 item 内の
+                # part は連結し、message item どうしの境目には改行を挟む。
+                for item in response_obj.get("output") or []:
                     parts: List[str] = []
-                    for item in response_obj.get("output") or []:
-                        for content_part in item.get("content") or []:
-                            if content_part.get("type") == "output_text":
-                                parts.append(content_part.get("text") or "")
-                    if parts:
-                        final_text = "".join(parts)
+                    has_text = False
+                    for content_part in item.get("content") or []:
+                        if content_part.get("type") == "output_text":
+                            parts.append(content_part.get("text") or "")
+                            has_text = True
+                    if has_text:
+                        completed_texts.append("".join(parts))
 
             elif event_type == "response.failed":
                 response_obj = event.get("response") or {}
                 error = response_obj.get("error") or {}
                 raise RuntimeError(f"Codex response failed: {error}")
 
-        if final_text is None:
-            final_text = "".join(delta_buffer)
+        # ストリームへ流した結合が正典 (SEA 側は chunk の結合を text として使う)。
+        # done が一部のメッセージで欠けても、流れた本文は捨てない。done /
+        # completed からの復元を final_text に使うのは delta が一切流れなかった
+        # 応答のときだけで、その場合はここで一度だけ流して不変条件を保つ。
+        stream_text = "".join(delta_buffer)
+        if done_texts:
+            message_texts = ["".join(parts) for parts in done_texts.values()]
+        elif completed_texts:
+            message_texts = list(completed_texts)
+        else:
+            message_texts = []
+        if stream_text:
+            final_text = stream_text
+        else:
+            final_text = _join_message_texts(message_texts)
+            if final_text:
+                yield final_text
 
         function_calls = [
             entry for entry in pending_calls.values() if entry.get("name")
         ]
+        if diagnostics is not None:
+            try:
+                diagnostics.finish(final_text, len(function_calls))
+            except Exception:
+                # Keep the terminal state even if diagnostics fail at EOF.
+                diagnostics = None
 
         summary_text = "\n\n".join(
             "".join(parts) for _, parts in sorted(reasoning_summaries.items())
@@ -850,6 +1048,7 @@ class OpenAICodexClient(LLMClient):
                 "usage_input": usage_input,
                 "usage_output": usage_output,
                 "usage_cached": usage_cached,
+                "message_texts": message_texts,
             },
         )
 
@@ -966,10 +1165,28 @@ class OpenAICodexClient(LLMClient):
             return detection
 
         if response_schema:
-            candidate = _extract_json_object_candidate(text)
-            try:
-                parsed = json.loads(candidate)
-            except json.JSONDecodeError as exc:
+            # 複数メッセージの応答では text が前置きのメッセージも含み、JSON の
+            # 切り出しを誤ることがある。JSON 本体は最後のメッセージにあるので、
+            # 全文で読めなければ最後のメッセージだけで読み直す (text が最後の
+            # メッセージだけだった以前の挙動と同じ結果になる)。
+            sources = [text]
+            message_texts = state.get("message_texts") or []
+            if len(message_texts) > 1:
+                sources.append(message_texts[-1])
+            parse_error: Optional[json.JSONDecodeError] = None
+            parsed: Any = None
+            candidate = ""
+            for source in sources:
+                candidate = _extract_json_object_candidate(source)
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError as exc:
+                    parse_error = exc
+                    continue
+                parse_error = None
+                break
+            if parse_error is not None:
+                exc = parse_error
                 preview = candidate.replace("\n", "\\n")[:300]
                 LOG.warning(
                     "failed to parse structured output from Codex response: %s (candidate=%r)",

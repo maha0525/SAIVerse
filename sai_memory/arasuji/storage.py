@@ -1457,17 +1457,17 @@ def regenerate_entry(
     # 逆順 (印 → Fragment) だと、Fragment 失敗時の取り下げ (unmark を通る削除)
     # が新 entry へ移した印を NULL に落とし、旧 entry の帰属が消えて同じ知覚が
     # 次回編纂で二重取り込みされる。
-    moved_fragment_ids: List[str] = []
+    attempted_fragment_ids: List[str] = []
 
     def _revert_fragments() -> None:
-        if not moved_fragment_ids:
+        if not attempted_fragment_ids:
             return
         try:
-            ph = ",".join("?" for _ in moved_fragment_ids)
+            ph = ",".join("?" for _ in attempted_fragment_ids)
             conn.execute(
                 f"UPDATE memopedia_fragments SET chronicle_entry_id = ? "
-                f"WHERE id IN ({ph})",
-                (entry_id, *moved_fragment_ids),
+                f"WHERE id IN ({ph}) AND chronicle_entry_id = ?",
+                (entry_id, *attempted_fragment_ids, new_entry.id),
             )
             conn.commit()
         except Exception:
@@ -1481,13 +1481,21 @@ def regenerate_entry(
             "SELECT id FROM memopedia_fragments WHERE chronicle_entry_id = ?",
             (entry_id,),
         ).fetchall()
-        moved_fragment_ids = [str(r[0]) for r in _rows]
-        if moved_fragment_ids:
+        attempted_fragment_ids = [str(r[0]) for r in _rows]
+        if attempted_fragment_ids:
+            ph = ",".join("?" for _ in attempted_fragment_ids)
             conn.execute(
                 "UPDATE memopedia_fragments SET chronicle_entry_id = ? "
-                "WHERE chronicle_entry_id = ?",
-                (new_entry.id, entry_id),
+                f"WHERE chronicle_entry_id = ? AND id IN ({ph})",
+                (new_entry.id, entry_id, *attempted_fragment_ids),
             )
+            # UPDATE と同じ書き込みトランザクションで、未記録の参照を確認。
+            # 取り残したまま旧 entry を消さず、条件付き復元・取り下げへ進む。
+            if conn.execute(
+                "SELECT 1 FROM memopedia_fragments WHERE chronicle_entry_id = ? LIMIT 1",
+                (entry_id,),
+            ).fetchone() is not None:
+                raise sqlite3.OperationalError("concurrent fragment remains on the old entry")
             conn.commit()
     except sqlite3.DatabaseError as exc:
         # 捕捉は DatabaseError の幅で (Codex 十二巡 Q2): OperationalError だけ
@@ -1516,7 +1524,41 @@ def regenerate_entry(
             )
             _withdraw_replacement()
             return None
-        moved_fragment_ids = []  # Fragment テーブルの無い DB (旧テスト等)
+        attempted_fragment_ids = []  # Fragment テーブルの無い DB (旧テスト等)
+
+    # 生成に渡した材料だけを対象にし、UPDATE / commit より先に控える。
+    attempted_batch_ids = [int(b.id) for b in old_batches]
+
+    def _revert_stamps() -> None:
+        """印を新→旧へ明示的に戻す (Codex 四巡 G3)。
+
+        取り下げ (_withdraw_replacement) の削除経路は unmark = NULL 落ちしか
+        持たないため、印を動かした後の失敗ではこれを**取り下げより前に**呼ぶ
+        — 呼ばないと旧 entry の帰属が消え、同じ知覚が次回編纂で二重取り込み
+        される。id 明示 + 現帰属の条件付き UPDATE (absorption._repoint_batches
+        と同じ可逆形)。
+        """
+        ids = attempted_batch_ids
+        if not ids:
+            return
+        try:
+            ph = ",".join("?" for _ in ids)
+            conn.execute(
+                f"UPDATE perception_batches SET annexed_entry_id = ? "
+                f"WHERE id IN ({ph}) AND annexed_entry_id = ?",
+                (entry_id, *ids, new_entry.id),
+            )
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logging.getLogger(__name__).warning(
+                "[arasuji] perception stamp rollback failed; batches may "
+                "return to the presentation via the withdraw unmark",
+                exc_info=True,
+            )
 
     # 旧材料バッチの印の付け替え (2026-08-19 Codex 第三巡 #3 → 2026-08-29 裁定で
     # 材料方式に改設計): 上で旧バッチを再生成 LLM の材料として渡したので、印
@@ -1531,7 +1573,16 @@ def regenerate_entry(
         stamps_moved = False
         stamp_error: Optional[BaseException] = None
         try:
-            moved = reassign_batches_annexed(conn, entry_id, new_entry.id)
+            # ID 限定にしても、材料の読み取り後に増減した印を見逃さない。
+            # 追加分は新本文の材料ではないので、旧を消さずにやり直す。
+            current_batch_ids = {
+                int(b.id) for b in list_batches_annexed_to(conn, entry_id)
+            }
+            if current_batch_ids != set(attempted_batch_ids):
+                raise RuntimeError("perception stamps changed during regeneration")
+            moved = reassign_batches_annexed(
+                conn, entry_id, new_entry.id, batch_ids=attempted_batch_ids,
+            )
             # 件数不一致 = 並行操作が印を動かした / 台帳テーブルの無い DB で
             # 0 が返った (reassign はテーブル不在のみ 0 に縮退し、ロック等は
             # raise する — Codex 三巡 F2)。一部だけ
@@ -1546,17 +1597,9 @@ def regenerate_entry(
                 conn.rollback()
             except Exception:
                 pass
-            # 保険: rollback が効かず一部の印が新 id を指したままの場合に
-            # 備え、逆向きに付け替えて旧 entry 宛てへ戻す (best-effort —
-            # 直後の取り下げの unmark 経路が最後の受け皿)。
-            try:
-                if reassign_batches_annexed(conn, new_entry.id, entry_id):
-                    conn.commit()
-            except Exception:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
+            # commit が確定済みでも、試行した id かつ現帰属 = 新 id の
+            # 印だけを戻す。並行操作や対象外の印は巻き込まない。
+            _revert_stamps()
             logging.getLogger(__name__).warning(
                 "[arasuji] failed to repoint perception stamps from %s to %s; "
                 "aborting the regeneration swap (old entry kept, replacement "
@@ -1566,33 +1609,6 @@ def regenerate_entry(
             _revert_fragments()
             _withdraw_replacement()
             return None
-
-    def _revert_stamps() -> None:
-        """印を新→旧へ明示的に戻す (Codex 四巡 G3)。
-
-        取り下げ (_withdraw_replacement) の削除経路は unmark = NULL 落ちしか
-        持たないため、印を動かした後の失敗ではこれを**取り下げより前に**呼ぶ
-        — 呼ばないと旧 entry の帰属が消え、同じ知覚が次回編纂で二重取り込み
-        される。id 明示 + 現帰属の条件付き UPDATE (absorption._repoint_batches
-        と同じ可逆形)。
-        """
-        ids = [int(b.id) for b in old_batches]
-        if not ids:
-            return
-        try:
-            ph = ",".join("?" for _ in ids)
-            conn.execute(
-                f"UPDATE perception_batches SET annexed_entry_id = ? "
-                f"WHERE id IN ({ph}) AND annexed_entry_id = ?",
-                (entry_id, *ids, new_entry.id),
-            )
-            conn.commit()
-        except Exception:
-            logging.getLogger(__name__).warning(
-                "[arasuji] perception stamp rollback failed; batches may "
-                "return to the presentation via the withdraw unmark",
-                exc_info=True,
-            )
 
     try:
         # 差し替えの途中では先祖を引き直さない (refresh_ancestors=False) —
@@ -1794,17 +1810,23 @@ def compare_message_positions(
 ) -> Optional[int]:
     """メッセージ 2 件の正典順 ((created_at, rowid) — W8 S7) を比較する。
 
+    NULL created_at は全ての実時刻より前、NULL 同士・同秒同士は rowid 順。
+    Python 側の順序は memory.storage の共有キーに委譲する。
+
     Returns:
         id_a が id_b より後なら 1、前なら -1、同一なら 0。
-        どちらかが messages に存在しなければ None (比較不能)。
+        どちらかが messages に存在しなければ None (同じ不在 ID 同士も比較不能)。
     """
-    if id_a == id_b:
-        return 0
+    from sai_memory.memory.storage import canonical_position_key
+
     cur = conn.execute(
         "SELECT id, created_at, rowid FROM messages WHERE id IN (?, ?)",
         (str(id_a), str(id_b)),
     )
-    positions = {str(row[0]): (row[1] or 0, row[2]) for row in cur.fetchall()}
+    positions = {
+        str(row[0]): canonical_position_key(row[1], row[2])
+        for row in cur.fetchall()
+    }
     pos_a = positions.get(str(id_a))
     pos_b = positions.get(str(id_b))
     if pos_a is None or pos_b is None:

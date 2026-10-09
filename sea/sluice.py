@@ -8,7 +8,7 @@ Metabolism の eviction 直前、メインラインの温まった prefix (head 
 
 - コア記憶 (core_adds / core_updates / core_removes) — 恒常知識
 - 手帳メモ (want_memos / did_memos) — アクティビティへの日付つき一行
-- 約束 (promises) — タスク帳への add / update
+- 約束 (promise_adds / promise_updates) — タスク帳への追加 / 変更
 
 旧名 gold_panning (砂金採り) から 2026-08-19 に世代交代した。名前の変化は性質の
 変化を運ぶ: 手作業の一掬いから「全ての水が通る構造物」へ — スルースが失敗したら
@@ -152,6 +152,8 @@ def get_max_span_chars() -> int:
 #: pan 全体が落ちる)。実物の ID はどちらも小さい。
 _CORE_REF_RE = re.compile(r"^core:([0-9]{1,9})$")
 _ACTIVITY_REF_RE = re.compile(r"^act:([0-9]{1,9})$")
+#: 約束の参照。N は同梱一覧の 1 始まりの位置 (その場の連番 — 永続 ID ではない)。
+_PROMISE_REF_RE = re.compile(r"^promise:([0-9]{1,9})$")
 
 #: 参照欄の description (コア記憶。三つの一覧で共用する)。
 _CORE_REF_DESCRIPTION = "同梱の「現在のコア記憶」一覧の core:N をそのまま写す (例: core:2)。"
@@ -258,16 +260,18 @@ _RESPONSE_SCHEMA: Dict[str, Any] = {
             "description": "この範囲で実際にやったこと。無ければ空配列。",
             "items": _MEMO_ITEM_SCHEMA,
         },
-        "promises": {
+        # 約束も種類別の二一覧 (2026-09-28、docs/issues/sluice_task_ref_prefix_rejected.md)。
+        # 旧 `promises` (op 一本だけ必須) は型の規律 2 の違反形で、変更内容の
+        # 無い update・参照欄 (UUID の丸写し) への本文の流れ込み・同じ update の
+        # 反復が本番で出た。参照は一覧の位置の写し (promise:N) で受ける —
+        # `task:N` は参照文法の正典 (docs/intent/reference_addressing.md) で
+        # 目的の木の short_id を指す別の語なので使わない。
+        "promise_adds": {
             "type": "array",
-            "description": "ユーザーとの約束・依頼のタスク帳への操作列。無ければ空配列。",
+            "description": "ユーザーとの新しい約束・依頼のタスク帳への追加。無ければ空配列。",
             "items": {
                 "type": "object",
                 "properties": {
-                    "op": {
-                        "type": "string",
-                        "enum": ["add", "update"],
-                    },
                     "content": {
                         "type": "string",
                         "description": "約束の中身。",
@@ -276,16 +280,38 @@ _RESPONSE_SCHEMA: Dict[str, Any] = {
                         "type": "string",
                         "description": "期限 (YYYY-MM-DD)。期限が明示されていない約束では省略する — 期限を発明しない。",
                     },
+                },
+                "required": ["content"],
+            },
+        },
+        "promise_updates": {
+            "type": "array",
+            "description": (
+                "既存の約束の変更。"
+                "promise_ref は同梱の「手帳の約束の欄」一覧の promise:N をそのまま写す。"
+                "無ければ空配列。"
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "promise_ref": {
+                        "type": "string",
+                        "description": "同梱の「手帳の約束の欄」一覧の promise:N をそのまま写す (例: promise:2)。",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "内容が変わったときだけ、変更後の中身 (全文)。期限だけの変更なら省略。",
+                    },
+                    "due": {
+                        "type": "string",
+                        "description": "新しい期限 (YYYY-MM-DD)。期限が変わっていなければ省略。",
+                    },
                     "clear_due": {
                         "type": "boolean",
-                        "description": "期限が撤回されたときだけ true (update で期限を外す)。省略 = 期限は変更しない。due と同時には指定しない。",
-                    },
-                    "task_ref": {
-                        "type": "string",
-                        "description": "update 対象の task_id。同梱の「開いているタスク帳」一覧から選ぶ。",
+                        "description": "期限が撤回されたときだけ true。due と同時には指定しない。",
                     },
                 },
-                "required": ["op"],
+                "required": ["promise_ref"],
             },
         },
     },
@@ -294,7 +320,7 @@ _RESPONSE_SCHEMA: Dict[str, Any] = {
     # ゲート (§13.3) が通ったことにされる。
     "required": [
         "reflection", "core_adds", "core_updates", "core_removes",
-        "want_memos", "did_memos", "promises",
+        "want_memos", "did_memos", "promise_adds", "promise_updates",
     ],
 }
 
@@ -924,8 +950,8 @@ def _list_open_tasks(lifecycle: Any, persona: Any) -> List[Dict[str, Any]]:
     """open なタスク帳の一件一覧 (task_id / content / due_at / revision)。
 
     アクティビティ一覧と同じ理由 (閉語彙・再提案防止) で同梱する: 一覧が無いと
-    update の task_ref が書けないだけでなく、会話で言及され続けている同じ約束を
-    次のスルースが再び add して重複する。
+    promise_updates の promise_ref が書けないだけでなく、会話で言及され続けて
+    いる同じ約束を次のスルースが再び add して重複する。
 
     fail-closed (Codex 第四巡 修正 2): 読み出しの例外は空一覧へ丸めず送出する —
     空へ丸めると、その回のスルースは既存の約束を知らずに再 add し (重複)、
@@ -938,11 +964,21 @@ def _list_open_tasks(lifecycle: Any, persona: Any) -> List[Dict[str, Any]]:
     if manager is None or not hasattr(manager, "SessionLocal") or not persona_id:
         return []
     from saiverse.task_book import list_open
-    return list_open(manager, persona_id)
+    # task_id の無い行はここで落とす — プロンプトの番号振り
+    # (_build_sluice_prompt) と対応表 (_offered_task_map) が同じ列を見る
+    # ことを、供給源の一箇所で保証する。片側だけで絞ると「見せた番号が
+    # 解決できない」非対称が生まれる (TASK_ID は主キーなので実際には
+    # 欠けないが、防御は対称でなければ防御にならない)。
+    return [t for t in list_open(manager, persona_id) if t.get("task_id")]
 
 
-def _format_task_line(task: Dict[str, Any]) -> str:
-    """タスク一件を ``[task:ID] 中身 (期限: …)`` の一行に整形する。
+def _format_task_line(position: int, task: Dict[str, Any]) -> str:
+    """タスク一件を ``[promise:N] 中身 (期限: …)`` の一行に整形する。
+
+    N は同梱一覧の 1 始まりの位置 (その場の連番)。UUID を見せない — 長い ID の
+    丸写しは参照欄へ本文が流れ込む崩れの温床だった
+    (docs/issues/sluice_task_ref_prefix_rejected.md)。N → task_id の対応は
+    :func:`_offered_task_map` が同じ並びから作り、台帳に凍結する。
 
     content は切り詰めない — ペルソナ名義のテキストではなく指示書 (確定情報)
     であり、機械的な省略は情報の改変になる。プロンプト肥大が実測で問題に
@@ -956,7 +992,34 @@ def _format_task_line(task: Dict[str, Any]) -> str:
             due_label = "期限: 不明"
     else:
         due_label = "期限なし"
-    return f"- [task:{task.get('task_id')}] {task.get('content')} ({due_label})"
+    return f"- [promise:{position}] {task.get('content')} ({due_label})"
+
+
+def _offered_task_map(open_tasks: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """同梱一覧の位置 N (文字列) → そのタスクのスナップショットの対応表。
+
+    値は ``{"task_id", "revision", "due_at", "content"}``。``revision`` は CAS
+    の照合値 (REVISION 列は NOT NULL なので常に int のはず。None は適用側が
+    破損として棄却する — update_entry の None は「省略 = 読み直し CAS」で、
+    スナップショット CAS にならないため)、
+    ``due_at`` はプロンプトに見せた時点の期限 (「期限の無い約束への
+    clear_due」を空振りとして扱う判定に使う — CAS が通る限りスナップショットの
+    値が現在値)、``content`` は判断ターン記録でどの約束かを言うための本文
+    (``promise:N`` はその場限りの番号なので、後から読む本人には意味を運ばない)。
+    番号は :func:`_build_sluice_prompt` と同じく ``open_tasks`` の並びの
+    1 始まり — 同じリストから両方を作るので、見せた番号と引く先がずれない。
+    鍵を文字列にするのは台帳 (JSON) に凍結しても同じ形で戻すため。
+    """
+    return {
+        str(position): {
+            "task_id": str(task.get("task_id")),
+            "revision": task.get("revision"),
+            "due_at": task.get("due_at"),
+            "content": task.get("content"),
+        }
+        for position, task in enumerate(open_tasks, start=1)
+        if task.get("task_id")
+    }
 
 
 def _read_core_state(persona: Any) -> tuple[List[Any], int]:
@@ -1059,7 +1122,11 @@ def _build_sluice_prompt(
         activity_block = "（まだアクティビティはありません）"
 
     if open_tasks:
-        task_block = "\n".join(_format_task_line(t) for t in open_tasks)
+        # 番号は _offered_task_map と同じ並びの 1 始まり (見せた番号 = 引く先)。
+        task_block = "\n".join(
+            _format_task_line(position, t)
+            for position, t in enumerate(open_tasks, start=1)
+        )
     else:
         task_block = "（開いている約束はありません）"
 
@@ -1093,19 +1160,22 @@ def _build_sluice_prompt(
         "  一行 (text) で。\n"
         f"{today_block}"
         "\n"
-        "3) 手帳の約束の欄 (promises):\n"
+        "3) 手帳の約束の欄 (promise_adds / promise_updates):\n"
         "- ユーザーとの約束や引き受けた依頼が生まれたり変わったりしていましたか?\n"
-        "  無ければ空で構いません。期限が明示されていないなら due は書かないで\n"
-        "  ください（期限を発明しない）。既に下の「手帳の約束の欄」にあるものを再び\n"
-        "  add する必要はありません — 内容や期限に変化があれば、その task の ID を\n"
-        "  task_ref にして update を使えます。期限が撤回されたときは clear_due で\n"
-        "  期限を外せます。\n"
+        "  無ければ空で構いません。新しい約束は promise_adds へ。期限が明示されて\n"
+        "  いないなら due は書かないでください（期限を発明しない）。\n"
+        "- 既に下の「手帳の約束の欄」にあるものを再び add しないでください —\n"
+        "  内容や期限に変化があれば promise_updates を使い、その一件の promise:N を\n"
+        "  promise_ref にそのまま写します (例: promise:2)。内容が変わったときだけ\n"
+        "  content に変更後の全文を書き、期限だけの変更なら content は省略します。\n"
+        "  期限が撤回されたときは clear_due で期限を外せます。\n"
         "\n"
         "姿勢:\n"
         "- **採取しないのが普通です。** ほとんどの記憶整理では何も採りません\n"
         "  （各欄は空配列）。無理に何かを刻もうとしないでください。\n"
         "- 応答には全ての欄 (reflection / core_adds / core_updates / core_removes /\n"
-        "  want_memos / did_memos / promises) を含めてください。採るものが無い欄は空配列で。\n"
+        "  want_memos / did_memos / promise_adds / promise_updates) を含めてください。\n"
+        "  採るものが無い欄は空配列で。\n"
         "- 既にコア記憶・手帳にあることは再度採らないでください。\n"
         "\n"
         f"### 現在のコア記憶（合計 {total_chars:,} 字 / 目安 {budget:,} 字）\n"
@@ -1548,6 +1618,12 @@ class _RevisionUnknown:
 #: 「スナップショット不明」の唯一の実体 (``is`` で判定する)。
 _REVISION_UNKNOWN = _RevisionUnknown()
 
+#: 復元した対応表で「期限のスナップショットが分からない」を表す番兵。
+#: None (= 一覧の時点で期限なし、clear_due の空振り成功の根拠になる) と
+#: 区別するために置く。台帳へ再直列化されることはない (凍結されるのは
+#: 新規コール側の :func:`_offered_task_map` の生の値だけ)。
+_DUE_AT_UNKNOWN = object()
+
 
 #: due の日付のみ形式 (YYYY-MM-DD)。\d でなく [0-9] 明記 (全角数字を通さない)。
 _DUE_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -1600,22 +1676,29 @@ def parse_due(raw: str) -> tuple[Optional[int], Optional[str]]:
 def _apply_promises(
     lifecycle: Any,
     persona: Any,
-    promises: List[Dict[str, Any]],
+    promise_adds: List[Dict[str, Any]],
+    promise_updates: List[Dict[str, Any]],
     *,
     idem_prefix: str,
     span_start_id: Optional[str],
     span_end_id: Optional[str],
     offered_tasks: Dict[str, Any],
 ) -> tuple[int, int, List[str]]:
-    """promises をタスク帳 (task_book) に適用する。(成功数, 失敗数, 結果行) を返す。
+    """約束の二一覧をタスク帳 (task_book) に適用する。(成功数, 失敗数, 結果行) を返す。
 
-    ``offered_tasks`` は ``{task_id: スナップショット時点の revision}``。値の
-    ``None`` は「revision 列が NULL の行」という正当な期待値で、
-    :data:`_REVISION_UNKNOWN` は「スナップショット不明」(旧形式の台帳記録) —
-    後者の update は棄却する。
+    順番は追加 → 変更 (応答スキーマの欄の並びと同じ)。
 
-    - add は origin='sluice'・安定 idem_key (span 由来プレフィックス + 操作番号)
-      で冪等化・origin_ref に span 由来の参照。同じ担当範囲の再適用で重複しない。
+    ``offered_tasks`` は :func:`_offered_task_map` の対応表
+    ``{"N": {"task_id", "revision", "due_at", "content"}}`` (N は同梱一覧の
+    1 始まりの位置)。``revision`` が :data:`_REVISION_UNKNOWN` (スナップ
+    ショット不明 = 記録の破損) と ``None`` (update_entry では「省略 = 読み直し
+    CAS」の意味になり、スナップショット CAS が外れる) の変更はどちらも
+    棄却する。
+
+    - 追加は content 必須 (空は要素棄却)。同じ本文の約束が既に生きていれば
+      追加しない (一覧にあるものの再 add の歯止め)。origin='sluice'・安定
+      idem_key (span 由来プレフィックス + 操作番号) で冪等化・origin_ref に
+      span 由来の参照。同じ担当範囲の再適用で重複しない。
     - counterpart は 'user' 固定 — 応答スキーマに相手欄が無いため実装上の既定。
       スルースの捕獲対象はユーザーとの会話から生まれる約束で、相手の既定は
       ユーザーが最も嘘が少ない。ペルソナ同士の約束を拾うと相手名義がユーザーに
@@ -1625,12 +1708,15 @@ def _apply_promises(
       タスク帳の芯は「失くすことが許されない」): add は期限なしで保存し、
       update は期限の変更だけを見送る (content 等の変更は適用)。どちらも
       判断ターン記録に明記する (発明しない・黙って落とさない・約束は失わない)。
-    - ``clear_due=True`` は update で期限を外す (期限の撤回)。due との同時指定は
-      矛盾なので入力不正として要素棄却する。
-    - update は task_ref をプロンプトに同梱した一覧 (``offered_tasks``) で検証し、
-      一覧に無い id はその要素だけ棄却してログに残す (activity_id と同じ閉語彙の
-      規律 — LLM の発明 id を書かせない)。
-    - update / clear_due は**スナップショット時点の revision で CAS** する
+    - ``clear_due=True`` は変更で期限を外す (期限の撤回)。due との同時指定は
+      矛盾なので入力不正として要素棄却する。期限の無い約束への clear_due は
+      無害な空振りとして「期限は変更しなかった」を記録する (棄却しない)。
+    - 変更は promise_ref を ``promise:N`` の完全一致だけ受け (:func:`_parse_ref`
+      の流儀)、N を同梱一覧 (``offered_tasks``) で引く。形の崩れた参照・一覧に
+      無い N はその要素だけ棄却してログに残す (activity_ref と同じ閉語彙の
+      規律 — LLM の発明参照を書かせない)。content / due / clear_due が全部
+      無い変更は「変更内容がありません」で棄却する。
+    - 変更は**スナップショット時点の revision で CAS** する
       (``offered_tasks`` の値を ``update_entry(expected_revision=...)`` へ渡す)。
       LLM 実行中にユーザーが同じ行を編集していたら CAS が外れ、その要素だけ
       棄却して「実行中に変更されたため適用しなかった」を判断ターン記録に明記
@@ -1641,15 +1727,18 @@ def _apply_promises(
       成功扱いのまま (情報は失われていない)。ストレージ自体の例外 (DB 接続断等)
       は送出してゲートに乗せる。
     """
-    if not promises:
+    promise_adds = list(promise_adds or [])
+    promise_updates = list(promise_updates or [])
+    total = len(promise_adds) + len(promise_updates)
+    if not total:
         return (0, 0, [])
 
     manager = getattr(lifecycle, "manager", None)
     persona_id = getattr(persona, "persona_id", None)
     if manager is None or not hasattr(manager, "SessionLocal") or not persona_id:
-        return (0, len(promises), ["タスク帳ストレージが利用できず、約束を書けませんでした。"])
+        return (0, total, ["タスク帳ストレージが利用できず、約束を書けませんでした。"])
 
-    from saiverse.task_book import TaskBookError, add_entry, update_entry
+    from saiverse.task_book import TaskBookError, add_entry, list_open, update_entry
 
     if span_start_id and span_end_id and span_start_id != span_end_id:
         origin_ref = f"{span_start_id}..{span_end_id}"
@@ -1660,27 +1749,130 @@ def _apply_promises(
     failed = 0
     lines: List[str] = []
 
-    for idx, promise in enumerate(promises):
-        if not isinstance(promise, dict):
+    # --- 追加 (promise_adds) ---
+    open_by_content: Optional[Dict[str, Optional[str]]] = None
+    for idx, item in enumerate(promise_adds):
+        if not isinstance(item, dict):
             failed += 1
-            lines.append(f"不正な約束形式のためスキップ: {promise!r}")
+            lines.append(f"不正な約束の追加形式のためスキップ: {item!r}")
             continue
-        op = promise.get("op")
-        content = (promise.get("content") or "").strip()
-        due_raw = (promise.get("due") or "").strip()
+        content = (item.get("content") or "").strip()
+        if not content:
+            failed += 1
+            lines.append("約束の追加をスキップ: content が空でした。")
+            continue
+        idem_key = f"{idem_prefix}:pa{idx}"
+        if open_by_content is None:
+            # 生きている約束の本文 → idem_key。読み出しの例外は送出する
+            # (fail-closed — 空へ丸めると重複の歯止めが黙って外れる)。
+            open_by_content = {
+                str(entry.get("content") or "").strip(): entry.get("idem_key")
+                for entry in list_open(manager, persona_id)
+            }
+        if content in open_by_content and open_by_content[content] != idem_key:
+            # 同じ本文の約束が既に生きている (一覧にあるものの再 add、または
+            # 別の担当範囲・別の形式世代で追加済み)。同じ idem_key の行は
+            # この要素自身の再適用なので、下の add_entry (get-or-create) に通す。
+            # 数え方は手帳メモ・コア記憶の同一内容スキップと揃えて成功扱い
+            # (約束は既に器にある = 情報は失われていない)。
+            applied += 1
+            lines.append(f"約束は既にタスク帳にあるため追加しませんでした: {content}")
+            continue
+        due_raw = (item.get("due") or "").strip()
         due_at, due_error = parse_due(due_raw)
         if due_error is not None:
             # 約束は失わない (まはー裁定): 期限だけを落とし、記録に明記する。
             LOGGER.warning(
                 "[sluice] unparsable due; keeping the promise without a "
-                "deadline (persona=%s, op=%s): %s",
-                persona_id, op, due_error,
+                "deadline (persona=%s, add): %s", persona_id, due_error,
             )
-        clear_due = promise.get("clear_due")
+        try:
+            add_entry(
+                manager, persona_id, content,
+                origin="sluice",
+                due_at=due_at,
+                counterpart="user",
+                origin_ref=origin_ref,
+                idem_key=idem_key,
+            )
+        except TaskBookError as exc:
+            # 受け入れ不変条件違反など。要素単位の失敗としてログと結果行に
+            # 残し、スルース全体は止めない。
+            failed += 1
+            lines.append(f"約束の追加に失敗: {exc}")
+            LOGGER.warning(
+                "[sluice] promise add failed (persona=%s): %s", persona_id, exc,
+            )
+            continue
+        open_by_content[content] = idem_key
+        applied += 1
+        suffix = f"（期限 {due_raw}）" if due_at is not None else "（期限なし）"
+        lines.append(f"タスク帳に約束を追加: {content}{suffix}")
+        if due_error is not None:
+            lines.append(
+                f"期限『{due_raw}』を解釈できなかったため期限なしで登録しました。"
+            )
+
+    # --- 変更 (promise_updates) ---
+    for item in promise_updates:
+        if not isinstance(item, dict):
+            failed += 1
+            lines.append(f"不正な約束の変更形式のためスキップ: {item!r}")
+            continue
+        raw_ref = item.get("promise_ref")
+        position = _parse_ref(raw_ref, _PROMISE_REF_RE)
+        if position is None:
+            failed += 1
+            lines.append(
+                f"約束の変更をスキップ: promise_ref={raw_ref!r} は promise:N の形ではありません。"
+            )
+            LOGGER.warning(
+                "[sluice] promise update rejected: malformed promise_ref %r "
+                "(persona=%s)", raw_ref, persona_id,
+            )
+            continue
+        ref = f"promise:{position}"
+        snapshot = offered_tasks.get(str(position))
+        if not isinstance(snapshot, dict) or not snapshot.get("task_id"):
+            failed += 1
+            lines.append(f"約束の変更をスキップ: {ref} は一覧にありません。")
+            LOGGER.warning(
+                "[sluice] promise update rejected: %s not in offered list "
+                "(persona=%s)", ref, persona_id,
+            )
+            continue
+        task_id = str(snapshot["task_id"])
+        snapshot_content = snapshot.get("content")
+        label = (
+            f"約束「{snapshot_content}」" if isinstance(snapshot_content, str)
+            and snapshot_content else f"約束 {ref}"
+        )
+        expected_revision = snapshot.get("revision", _REVISION_UNKNOWN)
+        if expected_revision is _REVISION_UNKNOWN or expected_revision is None:
+            # スナップショット時点の revision が分からない (記録の破損など —
+            # Codex 第八巡 修正 4)。None も同じ扱い — update_entry は
+            # expected_revision=None を「引数省略 = 現在値を読み直して CAS」と
+            # 解釈するので (saiverse/task_book.py)、None を渡すとスナップ
+            # ショット CAS が無効化され、古い判断が実行中のユーザー編集を
+            # 上書きできてしまう。REVISION 列は NOT NULL なので None の
+            # スナップショットは実質「破損」の一形。要素棄却にする。
+            failed += 1
+            lines.append(
+                f"{label}の変更をスキップ: スナップショット情報が無いため"
+                "適用しませんでした。"
+            )
+            LOGGER.warning(
+                "[sluice] promise update rejected: snapshot revision "
+                "unknown for task %s (persona=%s)", task_id, persona_id,
+            )
+            continue
+        content = (item.get("content") or "").strip()
+        due_raw = (item.get("due") or "").strip()
+        clear_due = item.get("clear_due")
         if clear_due is not None and not isinstance(clear_due, bool):
             failed += 1
             lines.append(
-                f"約束 {op} をスキップ: clear_due が真偽値ではありません ({clear_due!r})。"
+                f"{label}の変更をスキップ: clear_due が真偽値ではありません ({clear_due!r})。"
             )
             continue
         if clear_due and due_raw:
@@ -1688,135 +1880,89 @@ def _apply_promises(
             # 要素棄却 (どちらの意図か発明しない)。
             failed += 1
             lines.append(
-                f"約束 {op} をスキップ: due と clear_due は同時に指定できません。"
+                f"{label}の変更をスキップ: due と clear_due は同時に指定できません。"
             )
             continue
-        try:
-            if op == "add":
-                if not content:
-                    failed += 1
-                    lines.append("約束 add をスキップ: content が空でした。")
-                    continue
-                add_entry(
-                    manager, persona_id, content,
-                    origin="sluice",
-                    due_at=due_at,
-                    counterpart="user",
-                    origin_ref=origin_ref,
-                    idem_key=f"{idem_prefix}:p{idx}",
-                )
-                applied += 1
-                suffix = f"（期限 {due_raw}）" if due_at is not None else "（期限なし）"
-                lines.append(f"タスク帳に約束を追加: {content}{suffix}")
-                if due_error is not None:
-                    lines.append(
-                        f"期限『{due_raw}』を解釈できなかったため期限なしで登録しました。"
-                    )
-            elif op == "update":
-                task_ref = (promise.get("task_ref") or "").strip()
-                if not task_ref:
-                    failed += 1
-                    lines.append("約束 update をスキップ: task_ref がありません。")
-                    continue
-                if task_ref not in offered_tasks:
-                    failed += 1
-                    lines.append(
-                        f"約束 update をスキップ: task_ref={task_ref!r} は一覧にありません。"
-                    )
-                    LOGGER.warning(
-                        "[sluice] promise update rejected: task_ref %r not in "
-                        "offered list (persona=%s)", task_ref, persona_id,
-                    )
-                    continue
-                expected_revision = offered_tasks.get(task_ref)
-                if expected_revision is _REVISION_UNKNOWN:
-                    # 旧形式の台帳記録から復元した一覧 — スナップショット時点の
-                    # revision が分からない (Codex 第八巡 修正 4)。None で渡すと
-                    # CAS が無効化されて古い判断が現在値を上書きするので、
-                    # コア記憶のスナップショット欠落と同じく要素棄却にする。
-                    failed += 1
-                    lines.append(
-                        f"約束 update をスキップ: タスク {task_ref} の"
-                        "スナップショット情報が無いため適用しませんでした。"
-                    )
-                    LOGGER.warning(
-                        "[sluice] promise update rejected: snapshot revision "
-                        "unknown for task %s (persona=%s)", task_ref, persona_id,
-                    )
-                    continue
-                kwargs: Dict[str, Any] = {}
-                if content:
-                    kwargs["content"] = content
-                if clear_due:
-                    # 期限の撤回 (update_entry の明示 due_at=None)。promises 行は
-                    # counterpart='user' なので「期限も相手も無い行」の受け入れ
-                    # 不変条件には抵触しない。相手なしの既存行が対象だったときは
-                    # update_entry の TaskBookError が要素失敗として拾う。
-                    kwargs["due_at"] = None
-                elif due_at is not None:
-                    kwargs["due_at"] = due_at
-                if not kwargs:
-                    failed += 1
-                    lines.append(
-                        f"約束 update をスキップ: 変更内容がありません ({task_ref})。"
-                    )
-                    if due_error is not None:
-                        lines.append(
-                            f"期限『{due_raw}』を解釈できなかったため、"
-                            f"タスク {task_ref} の期限は変更しませんでした。"
-                        )
-                    continue
-                try:
-                    update_entry(
-                        manager, persona_id, task_ref,
-                        expected_revision=expected_revision,
-                        **kwargs,
-                    )
-                except TaskBookError as exc:
-                    # スナップショット時点の revision での CAS が外れた
-                    # (実行中のユーザー編集・クローズ・消失)。発明 ref は上の
-                    # 一覧検証で弾かれているため、ここへ来る TaskBookError は
-                    # ほぼ「実行中に行が変わった」— 古い判断で上書きせず、
-                    # 棄却を記録に明記する。受け入れ不変条件の拒否 (期限も
-                    # 相手も無い行になる更新) だけは文面をそのまま出す。
-                    failed += 1
-                    if "期限も相手もない" in str(exc):
-                        lines.append(f"約束 update の適用に失敗: {exc}")
-                    else:
-                        lines.append(
-                            f"タスク {task_ref} は実行中に変更されたため適用しませんでした。"
-                        )
-                    LOGGER.warning(
-                        "[sluice] promise update rejected (persona=%s, task=%s): %s",
-                        persona_id, task_ref, exc,
-                    )
-                    continue
-                applied += 1
-                if clear_due:
-                    lines.append(
-                        f"タスク帳の約束 {task_ref} を更新: {content or '(期限のみ)'}"
-                        "（期限を撤回）"
-                    )
-                else:
-                    lines.append(
-                        f"タスク帳の約束 {task_ref} を更新: {content or '(期限のみ)'}"
-                    )
-                if due_error is not None:
-                    lines.append(
-                        f"期限『{due_raw}』を解釈できなかったため、"
-                        f"タスク {task_ref} の期限は変更しませんでした。"
-                    )
-            else:
-                failed += 1
-                lines.append(f"未知の約束 op '{op}' をスキップしました。")
-        except TaskBookError as exc:
-            # revision 競合・LLM の発明 task_ref・受け入れ不変条件違反など。
-            # 要素単位の失敗としてログと結果行に残し、スルース全体は止めない。
-            failed += 1
-            lines.append(f"約束 {op} の適用に失敗: {exc}")
+        due_at, due_error = parse_due(due_raw)
+        if due_error is not None:
+            # 約束は失わない (まはー裁定): 期限の変更だけを見送り、記録に明記する。
             LOGGER.warning(
-                "[sluice] promise op failed (persona=%s, op=%s): %s",
-                persona_id, op, exc,
+                "[sluice] unparsable due; keeping the deadline unchanged "
+                "(persona=%s, task=%s): %s", persona_id, task_id, due_error,
+            )
+        # 期限の無い約束への clear_due は無害な空振り (実験で軽量モデルが稀に
+        # 余分に付けた)。要素棄却にはせず「期限は変更しなかった」と記録し、
+        # 併記された content は適用する。期限の有無は**一覧に見せた時点の
+        # スナップショット**で見る — 空振りだけの要素は update_entry を呼ばず
+        # CAS を通らないので、実行中にユーザーが期限を付けていた場合は
+        # その期限が残る (ユーザーの編集が勝つ。約束は失われない)。記録の
+        # 文言も「一覧の時点で」と現在形を避ける。
+        clear_due_noop = bool(clear_due) and snapshot.get("due_at") is None
+        kwargs: Dict[str, Any] = {}
+        if content:
+            kwargs["content"] = content
+        if clear_due and not clear_due_noop:
+            # 期限の撤回 (update_entry の明示 due_at=None)。スルースが足す行は
+            # counterpart='user' なので「期限も相手も無い行」の受け入れ
+            # 不変条件には抵触しない。相手なしの既存行が対象だったときは
+            # update_entry の TaskBookError が要素失敗として拾う。
+            kwargs["due_at"] = None
+        elif due_at is not None:
+            kwargs["due_at"] = due_at
+        if not kwargs:
+            if clear_due_noop:
+                # 空振りの成功 (望まれた状態 = 期限なし は一覧の時点で既に
+                # 成り立っている)。下の「変更内容がありません」(failed) と
+                # 扱いが違うのは意図的 — こちらは意味のある意図 (期限を外す)
+                # が既に満たされている形、あちらは意図そのものが空の形で、
+                # 後者は失敗として見えることが応答の欠陥の観測点になる。
+                applied += 1
+                lines.append(
+                    f"{label}は一覧の時点で期限が無いため、期限は変更しませんでした。"
+                )
+                continue
+            failed += 1
+            lines.append(f"{label}の変更をスキップ: 変更内容がありません ({ref})。")
+            if due_error is not None:
+                lines.append(
+                    f"期限『{due_raw}』を解釈できなかったため、"
+                    f"{label}の期限は変更しませんでした。"
+                )
+            continue
+        try:
+            update_entry(
+                manager, persona_id, task_id,
+                expected_revision=expected_revision,
+                **kwargs,
+            )
+        except TaskBookError as exc:
+            # スナップショット時点の revision での CAS が外れた
+            # (実行中のユーザー編集・クローズ・消失)。発明 ref は上の
+            # 一覧検証で弾かれているため、ここへ来る TaskBookError は
+            # ほぼ「実行中に行が変わった」— 古い判断で上書きせず、
+            # 棄却を記録に明記する。受け入れ不変条件の拒否 (期限も
+            # 相手も無い行になる更新) だけは文面をそのまま出す。
+            failed += 1
+            if "期限も相手もない" in str(exc):
+                lines.append(f"{label}の変更の適用に失敗: {exc}")
+            else:
+                lines.append(
+                    f"{label}は実行中に変更されたため適用しませんでした。"
+                )
+            LOGGER.warning(
+                "[sluice] promise update rejected (persona=%s, task=%s): %s",
+                persona_id, task_id, exc,
+            )
+            continue
+        applied += 1
+        suffix = "（期限を撤回）" if "due_at" in kwargs and kwargs["due_at"] is None else ""
+        lines.append(f"タスク帳の{label}を更新: {content or '(期限のみ)'}{suffix}")
+        if clear_due_noop:
+            lines.append(f"{label}は一覧の時点で期限が無いため、期限は変更しませんでした。")
+        if due_error is not None:
+            lines.append(
+                f"期限『{due_raw}』を解釈できなかったため、"
+                f"{label}の期限は変更しませんでした。"
             )
 
     return (applied, failed, lines)
@@ -2257,11 +2403,14 @@ class SluiceEmptySeenSetError(RuntimeError):
 
 _LIST_FIELDS = (
     "core_adds", "core_updates", "core_removes",
-    "want_memos", "did_memos", "promises",
+    "want_memos", "did_memos", "promise_adds", "promise_updates",
 )
 
 #: コア記憶の三一覧 (棄却の件数を「コア記憶の操作」へ束ねるときに使う)。
 _CORE_FIELDS = ("core_adds", "core_updates", "core_removes")
+
+#: 約束の二一覧 (棄却の件数を「約束」へ束ねるときと、旧世代判定に使う)。
+_PROMISE_FIELDS = ("promise_adds", "promise_updates")
 
 #: 判断ターン記録・ログ用の欄の呼び名 (まはーが読む面には実装名を出さない)。
 _FIELD_LABELS: Dict[str, str] = {
@@ -2270,7 +2419,8 @@ _FIELD_LABELS: Dict[str, str] = {
     "core_removes": "コア記憶の削除",
     "want_memos": "やりたいメモ",
     "did_memos": "やったメモ",
-    "promises": "約束",
+    "promise_adds": "約束の追加",
+    "promise_updates": "約束の変更",
 }
 
 #: 各欄の要素が持ちうるフィールドの実行時型 (Codex 第八巡 修正 6)。
@@ -2289,10 +2439,24 @@ _ELEMENT_FIELD_TYPES: Dict[str, Dict[str, str]] = {
     "did_memos": {
         "activity_ref": "string", "new_activity_name": "string", "text": "string",
     },
-    "promises": {
-        "op": "string", "content": "string", "due": "string",
-        "clear_due": "boolean", "task_ref": "string",
+    "promise_adds": {"content": "string", "due": "string"},
+    "promise_updates": {
+        "promise_ref": "string", "content": "string", "due": "string",
+        "clear_due": "boolean",
     },
+}
+
+#: 各欄の要素の必須フィールド — :data:`_RESPONSE_SCHEMA` の items.required と
+#: 同じ集合 (ずれると required の検査が嘘になる。形は schema の側が正)。
+#: 欠落・null は :func:`_first_type_error` が要素棄却にする (Codex 四巡目)。
+_ELEMENT_REQUIRED_FIELDS: Dict[str, tuple] = {
+    "core_adds": ("content",),
+    "core_updates": ("memory_ref", "content"),
+    "core_removes": ("memory_ref",),
+    "want_memos": ("text",),
+    "did_memos": ("text",),
+    "promise_adds": ("content",),
+    "promise_updates": ("promise_ref",),
 }
 
 _TYPE_LABELS: Dict[str, str] = {
@@ -2316,11 +2480,18 @@ def _type_matches(value: Any, expected: str) -> bool:
 
 
 def _first_type_error(field: str, item: Dict[str, Any]) -> Optional[str]:
-    """要素の中で最初に見つかった型不正の説明。問題が無ければ None。
+    """要素の中で最初に見つかった形の不正の説明。問題が無ければ None。
 
-    値の **省略と null は未指定**として通す (適用側が既定へ落とし、必要な欄が
-    無ければそこで要素棄却になる)。値があるのに型が違うものだけを拾う。
+    **必須欄** (応答スキーマの required と同じ集合) の欠落・null は要素の
+    形の不正として拾う (Codex 四巡目) — 「未指定」へ丸めて適用側の要素棄却に
+    落とすと、凍結後の破損検出 (:func:`_recorded_response_unusable` の
+    「再読で棄却が出る = 破損」) がこの形だけ素通りし、壊れた記録が採り直され
+    ないまま completed になる。**任意欄**の省略と null は従来どおり未指定として
+    通し、値があるのに型が違うものだけを拾う。
     """
+    for name in _ELEMENT_REQUIRED_FIELDS.get(field, ()):
+        if item.get(name) is None:
+            return f"必須欄 {name} がありません"
     for name, expected in _ELEMENT_FIELD_TYPES.get(field, {}).items():
         if name not in item:
             continue
@@ -2345,13 +2516,13 @@ def _parse_structured_result(
         ``{"field": 欄名, "text": 判断ターンに残す一行}`` の列。
 
     fail-closed の粒度: **全体の型** (dict でない / 必須欄 — reflection と
-    4 つの操作列全部 — の欠落・null / 各欄が配列でない / 配列要素が object で
+    7 つの操作列全部 — の欠落・null / 各欄が配列でない / 配列要素が object で
     ない / reflection が文字列でない) は送出。
     **要素内フィールドの型不正** (content や memory_ref が文字列でない等) は
     その要素だけ落として棄却の記録に残す (Codex 第八巡 修正 6)。
-    **中身の参照・値の不正** (空本文、``core:N`` / ``act:N`` の形でない参照、
-    一覧に無い参照、未知の promise op、解釈不能な due) は従来どおり適用側の
-    要素単位棄却に委ねる。
+    **中身の参照・値の不正** (空本文、``core:N`` / ``act:N`` / ``promise:N``
+    の形でない参照、一覧に無い参照、変更内容の無い約束の変更、解釈不能な
+    due) は従来どおり適用側の要素単位棄却に委ねる。
     """
     if isinstance(result, str):
         try:
@@ -2366,6 +2537,17 @@ def _parse_structured_result(
             f"structured output is not an object (persona={persona_id}): "
             f"{type(result).__name__}"
         )
+    # 旧世代の欄が混ざった応答は fail-closed で全体棄却する — 適用側は現行の
+    # 欄しか読まないので、旧欄に入った操作は黙って失われる (schema は
+    # 旧欄を含まないが、制約の緩いプロバイダは未知キーを出力しうる)。
+    # additionalProperties での禁止は Gemini が受け付けないため、関所は
+    # ここに置く。台帳の旧記録は :func:`_is_legacy_response` が別途弾く。
+    for legacy_field in ("ops", "promises"):
+        if legacy_field in result:
+            raise SluiceOutputError(
+                f"legacy field {legacy_field!r} present in structured output "
+                f"(persona={persona_id}); rejecting to avoid silent loss"
+            )
     # 全欄必須 (Codex 第七巡 修正 1): 欄の省略・null を「採取なし」へ丸めない。
     # 「空」と認めるのは明示的な空配列だけ。
     reflection = result.get("reflection")
@@ -2438,11 +2620,12 @@ def _parse_structured_result(
 _LEDGER_KIND = "sluice.pan"
 
 
-#: 応答形式の世代印。旧世代 (``ops`` 一本) の記録が同じ担当範囲に残っている
-#: 環境で、新しい実行を**別キー**に立てるために使う。台帳は applied → failed の
+#: 応答形式の世代印。旧世代の記録 (``ops`` 一本 = 2026-08-24 まで、
+#: ``promises`` 一本 = 2026-09-28 まで) が同じ担当範囲に残っている環境で、
+#: 新しい実行を**別キー**に立てるために使う。台帳は applied → failed の
 #: 遷移を許さない (状態機械の規約) ので、読めない旧行は退避も上書きもせず
 #: そのまま残し、こちらが別キーで走り直す。
-_RESPONSE_FORMAT_TAG = "core3"
+_RESPONSE_FORMAT_TAG = "promise2"
 
 
 def _get_ledger(lifecycle: Any) -> Optional[Any]:
@@ -2454,20 +2637,170 @@ def _get_ledger(lifecycle: Any) -> Optional[Any]:
 
 
 def _is_legacy_response(response: Any) -> bool:
-    """記録済み結果が旧世代 (``ops`` 一本) の応答形式か。
+    """記録済み結果が旧世代 (``ops`` 一本 / ``promises`` 一本) の応答形式か。
 
-    新形式はコア記憶の三一覧 (``core_adds`` / ``core_updates`` /
-    ``core_removes``) を必ず全部持つ — :func:`_parse_structured_result` が
-    凍結より前に全欄必須で検証しているため。旧形式をそのまま適用側へ渡すと
-    三一覧が空として読まれ、「コア記憶の採取ゼロ」で completed になる
-    (本人が指定した記憶操作が静かに消える)。だから再利用せず、新しい LLM
-    コールでやり直す (fail-closed)。
+    現行形式はコア記憶の三一覧 (``core_adds`` / ``core_updates`` /
+    ``core_removes``) と約束の二一覧 (``promise_adds`` / ``promise_updates``)
+    を必ず全部持つ — :func:`_parse_structured_result` が凍結より前に全欄必須で
+    検証しているため。旧形式をそのまま適用側へ渡すと欠けた一覧が空として
+    読まれ、「採取ゼロ」で completed になる (本人が指定したコア記憶や約束の
+    操作が静かに消える)。だから再利用せず、新しい LLM コールでやり直す
+    (fail-closed)。
     """
     if not isinstance(response, dict):
         return True
-    if "ops" in response:
+    if "ops" in response or "promises" in response:
         return True
-    return not all(field in response for field in _CORE_FIELDS)
+    return not all(
+        field in response for field in (*_CORE_FIELDS, *_PROMISE_FIELDS)
+    )
+
+
+def _recorded_response_unusable(response: Any, persona_id: Optional[str]) -> bool:
+    """記録済み応答が再適用に使えない形か (旧世代、または凍結後の破損)。
+
+    旧世代 (:func:`_is_legacy_response`) に加えて、現行の欄は揃っているのに
+    形が壊れている記録 (欄が null・配列でない等) も「使えない」と判定する —
+    凍結の前には :func:`_parse_structured_result` の検証があるので正規の書き手
+    からは生まれないが、凍結後の破損・版ずれの記録を再適用側の寛容な読み
+    (:code:`_as_list` は非配列を空へ丸める) に通すと、**採取ゼロのまま
+    completed になり、本人が指定した操作が静かに失われる** (Codex 二巡目)。
+    使えない記録は旧世代と同じ扱い — 再利用せず、別キーの新しい LLM コールで
+    採り直す。
+
+    要素単位の型不正 (content が int 等) も「使えない」と判定する (Codex
+    三巡目): 凍結されるのは検証済み (sanitized) の応答なので、再読で棄却が
+    一件でも出る = 凍結後の破損。生の記録をそのまま適用側へ流すと、適用側の
+    ``.strip()`` 等が非文字列で例外化し、applied の行が残ったまま毎回同じ
+    クラッシュを繰り返す (LLM 呼び出しの失敗処理の外なので mark_failed も
+    走らない)。
+    """
+    if _is_legacy_response(response):
+        return True
+    try:
+        _sanitized, rejections = _parse_structured_result(response, persona_id)
+    except SluiceOutputError:
+        return True
+    return bool(rejections)
+
+
+def _recorded_result_unusable(
+    recorded: Dict[str, Any], persona_id: Optional[str],
+) -> bool:
+    """記録済み結果 (:func:`_find_recorded_result` の返り値) が再適用に使えないか。
+
+    応答本体の検査 (:func:`_recorded_response_unusable`) に加えて、約束の
+    対応表の破損 (:func:`_restore_offered_tasks` が None を返した = 記録の
+    ``offered_tasks`` が読めない) も「使えない」に含める — 応答が正常でも
+    対応表が壊れていれば、凍結済みの約束の変更は要素棄却で失われたまま
+    completed になる (Codex 三巡目)。アクティビティ一覧 (三巡目の同族) と、
+    見た集合 ``seen_ids`` の欠落・空 (Codex 六巡目 — 定常・読み返しとも
+    書き手は非空を凍結する。再適用の分岐で送出すると applied の行が残った
+    まま毎回同じ例外になり自動回復しないので、ここで「使えない」に含めて
+    別キーの採り直しに乗せる) も同じ。
+    """
+    if _recorded_response_unusable(recorded.get("response"), persona_id):
+        return True
+    if recorded.get("offered_tasks") is None:
+        return True
+    if recorded.get("offered_activities") is None:
+        return True
+    seen_ids = recorded.get("seen_ids")
+    return not isinstance(seen_ids, list) or not seen_ids
+
+
+def _restore_offered_tasks(raw: Any) -> Optional[Dict[str, Dict[str, Any]]]:
+    """台帳に凍結した約束の対応表 (:func:`_offered_task_map` の形) を読み戻す。
+
+    読めるのは ``{"N": {"task_id": str, "revision": int, ...}}`` の形だけ。
+    それ以外は **None (= 対応表の破損)** を返す (Codex 三巡目): 破損した
+    対応表で再適用すると、応答に凍結済みの約束の変更が「一覧にありません」
+    「スナップショット情報が無い」の要素棄却で失われたまま completed になり、
+    採り直しの機会が二度と来ない。None を受けた呼び出し側は記録ごと
+    「使えない」として別キーの採り直しへ回す。破損と判定するもの:
+    dict でない / 要素が dict でない / ``task_id`` が非空文字列でない /
+    ``revision`` が int でない (欠落・None を含む — 正規の書き手は常に int を
+    凍結する。None は update_entry で「省略 = 読み直し CAS」に化けるため
+    受けない)。
+
+    ``due_at`` の欠落・不正だけは破損ではなく :data:`_DUE_AT_UNKNOWN` へ倒す —
+    None は「一覧の時点で期限なし」の主張で clear_due の空振り成功の根拠に
+    なるため丸めないが、「不明」でも変更自体は実際の update_entry + CAS へ
+    進めて完全に適用できる (失われる操作が無い) ので、記録ごと捨てる理由に
+    ならない。``content`` も同じ理由で不正は None (表示ラベルにしか使わない)。
+    """
+    if not isinstance(raw, dict):
+        return None
+    restored: Dict[str, Dict[str, Any]] = {}
+    for position, snapshot in raw.items():
+        # 鍵は正典の書き手 (enumerate 1 始まり) が作る十進表記そのもの。
+        # "01" のような別表記は、応答の promise:1 が引く "1" と一致せず
+        # 「一覧にありません」の静かな喪失になるので破損扱い (Codex 四巡目)。
+        # 桁数上限は参照 (_PROMISE_REF_RE) と同じ 9 桁。
+        if not isinstance(position, str) or not re.fullmatch(
+            r"[1-9][0-9]{0,8}", position,
+        ):
+            return None
+        if not isinstance(snapshot, dict):
+            return None
+        task_id = snapshot.get("task_id")
+        # 前後に空白の付いた ID はタスク帳の完全一致検索に当たらず、検査を
+        # 通したのに適用で失敗する — 正準 (strip 済みと同一) だけ受ける。
+        if (
+            not isinstance(task_id, str)
+            or not task_id
+            or task_id != task_id.strip()
+        ):
+            return None
+        revision = snapshot.get("revision")
+        # 保存側の不変条件は非負の int (REVISION は NOT NULL default 0)。
+        if not (
+            isinstance(revision, int)
+            and not isinstance(revision, bool)
+            and revision >= 0
+        ):
+            return None
+        due_at = snapshot.get("due_at", _DUE_AT_UNKNOWN)
+        if due_at is not None and not (
+            isinstance(due_at, int) and not isinstance(due_at, bool)
+        ):
+            due_at = _DUE_AT_UNKNOWN
+        content = snapshot.get("content")
+        restored[str(position)] = {
+            "task_id": task_id,
+            "revision": revision,
+            "due_at": due_at,
+            "content": content if isinstance(content, str) else None,
+        }
+    return restored
+
+
+def _restore_offered_activities(raw: Any) -> Optional[Dict[int, str]]:
+    """台帳に凍結したアクティビティ一覧 ``{id: name}`` を読み戻す。
+
+    鍵は凍結時に ``str(id)`` で書かれるので、十進の非負整数表記だけを int へ
+    戻す。それ以外の鍵・str でない名前は **None (= 記録の破損)** — 約束の
+    対応表 (:func:`_restore_offered_tasks`) と同じ理由で、破損した一覧で
+    再適用するとメモの採取が要素棄却で失われたまま completed になるか、
+    鍵の ``int()`` が例外化して applied の行が残ったまま毎回クラッシュする
+    (Codex 三巡目・四巡目の同族を自前で掃いた分)。
+    """
+    if not isinstance(raw, dict):
+        return None
+    restored: Dict[int, str] = {}
+    for key, name in raw.items():
+        # 凍結形式は str(id) の正準十進表記だけ。"01" のような別表記を int へ
+        # 正規化すると "1" と衝突して別の活動の名前を上書きできるため、
+        # 正準でない鍵は破損として記録ごと採り直す (Codex 五巡目)。正準性は
+        # パターンで判定する (先頭ゼロ無し + 桁数上限) — str(int(key)) の
+        # 比較は 4300 桁超の鍵で int() 自体が ValueError になり、None を
+        # 返せずクラッシュループに化ける (Codex 六巡目)。
+        if not (isinstance(key, str) and re.fullmatch(r"0|[1-9][0-9]{0,8}", key)):
+            return None
+        if not isinstance(name, str):
+            return None
+        restored[int(key)] = name
+    return restored
 
 
 def _find_recorded_result(ledger: Any, ledger_key: str) -> Optional[Dict[str, Any]]:
@@ -2475,7 +2808,9 @@ def _find_recorded_result(ledger: Any, ledger_key: str) -> Optional[Dict[str, An
 
     見つかれば ``{execution_id, status, response, span_start_id, span_end_id,
     seen_ids, rejections, offered_activities, offered_tasks, core_snapshot,
-    prompt}`` を返す。**記録が無ければ** None。
+    prompt}`` を返す。**記録が無ければ** None。``offered_tasks`` は
+    :func:`_restore_offered_tasks` の読み戻しで、**破損なら None** — 呼び出し
+    側は :func:`_recorded_result_unusable` で記録ごと採り直しへ回す。
 
     fail-closed (第八巡 修正 5 の同族): 台帳の読み出し例外は「記録なし」へ
     丸めず送出する。丸めると、記録があるのに無いものとして扱って新しい LLM
@@ -2489,29 +2824,7 @@ def _find_recorded_result(ledger: Any, ledger_key: str) -> Optional[Dict[str, An
     result = existing.get("result")
     if status in ("applied", "completed") and isinstance(result, dict) \
             and isinstance(result.get("response"), dict):
-        raw_offered_tasks = result.get("offered_tasks")
-        if isinstance(raw_offered_tasks, dict):
-            # 現行形式。値は revision (int) か None (REVISION 列が NULL の行)。
-            # それ以外の型 (記録の破損・別実装) は「不明」へ倒す — int でない値を
-            # update_entry へ渡すと TaskBookError の文面が競合と混ざる。
-            offered_tasks = {
-                str(task_id): (
-                    revision
-                    if revision is None
-                    or (isinstance(revision, int) and not isinstance(revision, bool))
-                    else _REVISION_UNKNOWN
-                )
-                for task_id, revision in raw_offered_tasks.items()
-            }
-        else:
-            # 旧形式 (offered_task_ids のみ — スナップショット時点の revision を
-            # 持たない)。Codex 第八巡 修正 4: 不明を None で表すと update_entry の
-            # 「現在値を読み直して CAS」に落ちて CAS が無効化されるので、
-            # _REVISION_UNKNOWN として持ち、update 要素は棄却させる。
-            offered_tasks = {
-                str(task_id): _REVISION_UNKNOWN
-                for task_id in (result.get("offered_task_ids") or [])
-            }
+        offered_tasks = _restore_offered_tasks(result.get("offered_tasks"))
         return {
             "execution_id": existing.get("execution_id"),
             "status": status,
@@ -2519,8 +2832,17 @@ def _find_recorded_result(ledger: Any, ledger_key: str) -> Optional[Dict[str, An
             "span_start_id": result.get("span_start_id"),
             "span_end_id": result.get("span_end_id"),
             "seen_ids": result.get("seen_ids"),
-            "rejections": result.get("rejections") or [],
-            "offered_activities": result.get("offered_activities") or {},
+            # list でない棄却記録 (破損) は空へ — 落ちるのは情報の行だけで
+            # 操作は失われないため、記録ごと捨てる理由にならない。int 等を
+            # そのまま返すと再適用側の内包表記が TypeError でクラッシュ
+            # ループになる (Codex 五巡目)。
+            "rejections": (
+                result["rejections"]
+                if isinstance(result.get("rejections"), list) else []
+            ),
+            "offered_activities": _restore_offered_activities(
+                result.get("offered_activities")
+            ),
             "offered_tasks": offered_tasks,
             "core_snapshot": result.get("core_snapshot"),
             "prompt": result.get("prompt"),
@@ -2545,7 +2867,8 @@ def _call_sluice_llm(
         特定不能), "seen_ids": 実際に LLM 入力に含めたメッセージ ID の列
         (**必ず 1 件以上** — 空なら SluiceEmptySeenSetError),
         "offered_activities": {id: name},
-        "offered_tasks": {task_id: スナップショット時点の revision},
+        "offered_tasks": {"N": {task_id, revision, due_at, content}}
+        (:func:`_offered_task_map` — N は約束一覧の位置),
         "core_snapshot": {core_id: 本文ハッシュ (スナップショット時点)},
         "prompt": 注入プロンプト}``
 
@@ -2608,12 +2931,9 @@ def _call_sluice_llm(
     activities = _list_open_activities(persona)
     offered_activities = dict(activities)
     open_tasks = _list_open_tasks(lifecycle, persona)
-    # タスクは id → スナップショット時点の revision (CAS 用 — 実行中のユーザー
-    # 編集へ黙って上書きしないための照合値)。
-    offered_tasks: Dict[str, Optional[int]] = {
-        str(t.get("task_id")): t.get("revision")
-        for t in open_tasks if t.get("task_id")
-    }
+    # 約束は一覧の位置 N → スナップショット (task_id と、CAS 用の revision —
+    # 実行中のユーザー編集へ黙って上書きしないための照合値)。
+    offered_tasks = _offered_task_map(open_tasks)
     # コア記憶の現況を一度読み、プロンプト同梱と CAS スナップショット
     # (id → 本文ハッシュ。Codex 第七巡 修正 2 — タスク帳 CAS の同族) の両方に使う。
     core_memories, core_total_chars = _read_core_state(persona)
@@ -2862,16 +3182,24 @@ def run_sluice(
     recorded = None
     if ledger is not None and ledger_key:
         recorded = _find_recorded_result(ledger, ledger_key)
-        if recorded is not None and _is_legacy_response(recorded.get("response")):
-            # 旧世代の応答形式は適用側が読めない — 再利用せず、別キーで新しい
-            # LLM コールを立てる (_RESPONSE_FORMAT_TAG の説明を参照)。
+        if recorded is not None and _recorded_result_unusable(recorded, persona_id):
+            # 旧世代・破損の記録は適用側が読めない — 再利用せず、別キーで
+            # 新しい LLM コールを立てる (_RESPONSE_FORMAT_TAG の説明を参照)。
             LOGGER.warning(
-                "[sluice] 記録の形式が古いため再利用しません "
+                "[sluice] 記録の形式が古いか壊れているため再利用しません "
                 "(execution=%s key=%s persona=%s) — 新しい実行として採り直します",
                 recorded.get("execution_id"), ledger_key, persona_id,
             )
             ledger_key = f"{ledger_key}#format-{_RESPONSE_FORMAT_TAG}"
             recorded = _find_recorded_result(ledger, ledger_key)
+            if recorded is not None and _recorded_result_unusable(recorded, persona_id):
+                # 採り直し用の別キーの記録まで使えない — さらに別のキーへ
+                # 逃がすとキーが無限に育つので、ここは fail-closed で送出する
+                # (退場停止 → 人の裁定)。静かに completed へ進めない。
+                raise SluiceOutputError(
+                    f"recorded result at {ledger_key} is unusable "
+                    f"(persona={persona_id}); refusing silent completion"
+                )
 
     execution_id: Optional[str] = None
     ledger_status: Optional[str] = None
@@ -2881,10 +3209,9 @@ def run_sluice(
         parsed_result = recorded["response"]
         span_start_id = recorded.get("span_start_id")
         span_end_id = recorded.get("span_end_id")
-        offered_activities = {
-            int(k): v
-            for k, v in dict(recorded.get("offered_activities") or {}).items()
-        }
+        # 対応表は _find_recorded_result が読み戻し済み (破損 = None は上の
+        # _recorded_result_unusable が採り直しへ回すので、ここでは dict)。
+        offered_activities = dict(recorded.get("offered_activities") or {})
         offered_tasks = dict(recorded.get("offered_tasks") or {})
         core_snapshot = recorded.get("core_snapshot")
         if not isinstance(core_snapshot, dict):
@@ -2892,10 +3219,13 @@ def run_sluice(
             # 同族)。None のまま渡し、update / remove は要素棄却になる。
             core_snapshot = None
         seen_ids = recorded.get("seen_ids")
-        if not isinstance(seen_ids, list):
+        if not isinstance(seen_ids, list) or not seen_ids:
             # fail-closed (Codex 第五巡 修正 1): seen_ids の無い記録を span から
             # 再構成するのは「別読みの近似」の同族 — 推定せず送出して退場を
-            # 止める。空リストは「何も見ていない正当な集合」として通す。
+            # 止める。空リストも同じ (Codex 五巡目): 書き手は空の見た集合を
+            # 凍結しない (SluiceEmptySeenSetError で failed にする) ので、空の
+            # 記録は破損 — 通すと、見ていない会話の上をマーカーが進んで
+            # 畳まれる。
             raise SluiceContextUnavailableError(
                 f"recorded result for {ledger_key} lacks seen_ids; refusing to "
                 "reconstruct the seen set from the span (fail-closed)"
@@ -3014,7 +3344,8 @@ def run_sluice(
     core_removes = _as_list("core_removes")
     want_memos = _as_list("want_memos")
     did_memos = _as_list("did_memos")
-    promises = _as_list("promises")
+    promise_adds = _as_list("promise_adds")
+    promise_updates = _as_list("promise_updates")
 
     # 冪等キーの安定プレフィックス: span 由来 (再適用で不変 — §13.3 のゲート化で
     # 「部分適用 → 失敗 → 再適用」が正規経路のため)。span が無いときは
@@ -3041,7 +3372,7 @@ def run_sluice(
         origin="live",
     )
     promises_applied, promises_failed, promise_lines = _apply_promises(
-        lifecycle, persona, promises,
+        lifecycle, persona, promise_adds, promise_updates,
         idem_prefix=idem_prefix, span_start_id=span_start_id, span_end_id=span_end_id,
         offered_tasks=offered_tasks,
     )
@@ -3058,7 +3389,7 @@ def run_sluice(
             ops_failed += 1
         elif field in ("want_memos", "did_memos"):
             memos_failed += 1
-        elif field == "promises":
+        elif field in _PROMISE_FIELDS:
             promises_failed += 1
     applied_total = ops_applied + memos_applied + promises_applied
     result_lines = rejection_lines + ops_lines + memo_lines + promise_lines
@@ -3561,7 +3892,8 @@ def _build_capture_instruction(
 
     Returns:
         ``{"prompt": str, "offered_activities": {id: name},
-        "offered_tasks": {task_id: revision}, "core_snapshot": {core_id: hash}}``
+        "offered_tasks": {"N": {task_id, revision, due_at, content}},
+        "core_snapshot": {core_id: hash}}``
     """
     activities = _list_open_activities(persona)
     open_tasks = _list_open_tasks(lifecycle, persona)
@@ -3575,10 +3907,7 @@ def _build_capture_instruction(
     return {
         "prompt": prompt,
         "offered_activities": dict(activities),
-        "offered_tasks": {
-            str(t.get("task_id")): t.get("revision")
-            for t in open_tasks if t.get("task_id")
-        },
+        "offered_tasks": _offered_task_map(open_tasks),
         "core_snapshot": {
             str(mem.id): _core_content_hash(mem.content) for mem in core_memories
         },
@@ -3712,14 +4041,20 @@ def _run_capture_chunk(
     recorded = None
     if ledger is not None and ledger_key:
         recorded = _find_recorded_result(ledger, ledger_key)
-        if recorded is not None and _is_legacy_response(recorded.get("response")):
+        if recorded is not None and _recorded_result_unusable(recorded, persona_id):
             LOGGER.warning(
-                "[sluice-capture] 記録の形式が古いため再利用しません "
+                "[sluice-capture] 記録の形式が古いか壊れているため再利用しません "
                 "(execution=%s key=%s persona=%s) — 新しい実行として採り直します",
                 recorded.get("execution_id"), ledger_key, persona_id,
             )
             ledger_key = f"{ledger_key}#format-{_RESPONSE_FORMAT_TAG}"
             recorded = _find_recorded_result(ledger, ledger_key)
+            if recorded is not None and _recorded_result_unusable(recorded, persona_id):
+                # 定常側と同じ fail-closed (キーを無限に育てない)。
+                raise SluiceOutputError(
+                    f"recorded capture result at {ledger_key} is unusable "
+                    f"(persona={persona_id}); refusing silent completion"
+                )
 
     execution_id: Optional[str] = None
     ledger_status: Optional[str] = None
@@ -3738,10 +4073,9 @@ def _run_capture_chunk(
             item for item in (recorded.get("rejections") or [])
             if isinstance(item, dict)
         ]
-        offered_activities = {
-            int(k): v
-            for k, v in dict(recorded.get("offered_activities") or {}).items()
-        }
+        # 対応表は _find_recorded_result が読み戻し済み (破損 = None は
+        # _recorded_result_unusable が採り直しへ回すので、ここでは dict)。
+        offered_activities = dict(recorded.get("offered_activities") or {})
         offered_tasks = dict(recorded.get("offered_tasks") or {})
         core_snapshot = recorded.get("core_snapshot")
         if not isinstance(core_snapshot, dict):
@@ -3850,7 +4184,7 @@ def _run_capture_chunk(
         origin="readback",
     )
     promises_applied, promises_failed, promise_lines = _apply_promises(
-        lifecycle, persona, _as_list("promises"),
+        lifecycle, persona, _as_list("promise_adds"), _as_list("promise_updates"),
         idem_prefix=idem_prefix,
         span_start_id=apply_span_start, span_end_id=apply_span_end,
         offered_tasks=offered_tasks,
@@ -3865,7 +4199,7 @@ def _run_capture_chunk(
             ops_failed += 1
         elif field in ("want_memos", "did_memos"):
             memos_failed += 1
-        elif field == "promises":
+        elif field in _PROMISE_FIELDS:
             promises_failed += 1
     applied_total = ops_applied + memos_applied + promises_applied
     result_lines = rejection_lines + ops_lines + memo_lines + promise_lines

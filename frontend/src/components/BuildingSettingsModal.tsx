@@ -8,6 +8,8 @@ import styles from './BuildingSettingsModal.module.css';
 import { X, Save, Loader2 } from 'lucide-react';
 import ImageUpload from './common/ImageUpload';
 import { fetchAllTableRows } from '../lib/dbTable';
+import { announceMovementNoticeChange } from '@/lib/movementNotices';
+import { pendingBuildingSettingsSave, saveBuildingSettings } from '@/lib/buildingSettingsSave';
 
 interface Tool {
     TOOLID: number;
@@ -41,10 +43,12 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
     const [name, setName] = useState('');
     const [description, setDescription] = useState('');
     const [capacity, setCapacity] = useState(10);
+    // Legacy API compatibility only; this value no longer drives autonomous behavior.
     const [autoInterval, setAutoInterval] = useState(10);
     // 部屋の様子に出すアイテムの個数の上限。null = 設定なし = 既定の 10 個。
     // 0 も有効な値 (アイテムを様子に出さない部屋) — docs/intent/room_item_display_cap.md 設計 4。
     const [itemDisplayLimit, setItemDisplayLimit] = useState<number | null>(null);
+    const [showMovementNotices, setShowMovementNotices] = useState<boolean | null>(null);
     const [systemInstruction, setSystemInstruction] = useState('');
     const [imagePath, setImagePath] = useState('');
     const [extraPromptFiles, setExtraPromptFiles] = useState<string[]>([]);
@@ -68,12 +72,36 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
     const [loadedBuildingId, setLoadedBuildingId] = useState<string | null>(null);
     const buildingIdRef = useRef<string>(buildingId);
     buildingIdRef.current = buildingId;
+    const isOpenRef = useRef(isOpen);
+    isOpenRef.current = isOpen;
+    const loadGeneration = useRef(0);
 
     useEffect(() => {
+        const version = loadGeneration;
         if (isOpen && buildingId) {
             setLoadedBuildingId(null);
-            loadData();
+            const pending = pendingBuildingSettingsSave(buildingId);
+            setSaving(Boolean(pending));
+            if (pending) {
+                const generation = ++loadGeneration.current;
+                setLoading(true);
+                const loadAfterSave = async (saved: boolean) => {
+                    if (generation !== loadGeneration.current || !isOpenRef.current) return;
+                    setSaving(false);
+                    const reload = loadData();
+                    const reloadGeneration = loadGeneration.current;
+                    await reload;
+                    if (!saved && reloadGeneration === loadGeneration.current && isOpenRef.current) {
+                        setError(uiText("components.BuildingSettingsModal.text007"));
+                    }
+                };
+                void pending.then(response => loadAfterSave(response.ok), () => loadAfterSave(false));
+            } else {
+                loadData();
+            }
         }
+        // Invalidates A → B → A, Close/reopen and unmount as well as a different ID.
+        return () => { ++version.current; };
     }, [isOpen, buildingId]);
 
     const loadData = async () => {
@@ -81,7 +109,9 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
         setError(null);
         // Race-condition guard: 非同期 fetch 中に buildingId が切り替わったら setter を打ち切る
         const targetBuildingId = buildingIdRef.current;
-        const isStale = () => targetBuildingId !== buildingIdRef.current;
+        const generation = ++loadGeneration.current;
+        const isStale = () => generation !== loadGeneration.current
+            || !isOpenRef.current || targetBuildingId !== buildingIdRef.current;
 
         try {
             // Load building data, tools, cities, and prompts in parallel。
@@ -108,9 +138,10 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                     setName(building.BUILDINGNAME || '');
                     setDescription(building.DESCRIPTION || '');
                     setCapacity(building.CAPACITY || 10);
-                    setAutoInterval(building.AUTO_INTERVAL_SEC || 10);
+                    setAutoInterval(building.AUTO_INTERVAL_SEC ?? 10);
                     // 0 も有効な値なので `||` で潰さない (WorldEditor 側と同じ扱い)
                     setItemDisplayLimit(building.ITEM_DISPLAY_LIMIT ?? null);
+                    setShowMovementNotices(building.SHOW_MOVEMENT_NOTICES ?? null);
                     setSystemInstruction(building.SYSTEM_INSTRUCTION || '');
                     setImagePath(building.IMAGE_PATH || '');
                     setCityId(building.CITYID || 1);
@@ -153,17 +184,24 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                     apiFetch('/api/people/realtime-spell-catalog'),
                 ]);
                 if (!isStale()) {
-                    if (spellRes.ok) setRealtimeSpells(await spellRes.json());
-                    if (catalogRes.ok) setSpellCatalog(await catalogRes.json());
+                    const spells = spellRes.ok ? await spellRes.json() : null;
+                    const catalog = catalogRes.ok ? await catalogRes.json() : null;
+                    if (isStale()) return;
+                    if (spells) setRealtimeSpells(spells);
+                    if (catalog) setSpellCatalog(catalog);
                 }
             } catch (e) { /* ignore */ }
 
             // building レコードが見つかった場合のみロード成功とみなす。
+            if (isStale()) return;
             if (buildingApplied) {
                 setLoadedBuildingId(targetBuildingId);
+            } else {
+                setError(uiText("components.BuildingSettingsModal.text001"));
             }
 
         } catch (err) {
+            if (isStale()) return;
             setError(uiText("components.BuildingSettingsModal.text001"));
             console.error(err);
         } finally {
@@ -174,6 +212,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
     };
 
     const handleSave = async () => {
+        if (pendingBuildingSettingsSave(buildingId) || !isOpenRef.current) return;
         // 整合性ガード (feedback_modal_id_integrity.md / エリス上書き事故 2026-04-30)
         if (loading) {
             alert(uiText("components.BuildingSettingsModal.text002"));
@@ -194,39 +233,43 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
 
         setSaving(true);
         setError(null);
+        const targetBuildingId = buildingId;
+        const generation = loadGeneration.current;
+        const isStale = () => generation !== loadGeneration.current
+            || !isOpenRef.current || targetBuildingId !== buildingIdRef.current;
         try {
-            const res = await apiFetch(`/api/world/buildings/${buildingId}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    name,
-                    description,
-                    capacity,
-                    auto_interval: autoInterval,
-                    // null を明示的に送ると「設定なし = 既定の 10 個」に戻る。
-                    // このモーダルは値を読み込んで表示しているので、空欄での保存は
-                    // ユーザーが見て納得した上での解除になる。
-                    item_display_limit: itemDisplayLimit,
-                    system_instruction: systemInstruction,
-                    image_path: imagePath,
-                    extra_prompt_files: extraPromptFiles,
-                    tool_ids: toolIds,
-                    city_id: cityId
-                })
+            const res = await saveBuildingSettings(targetBuildingId, {
+                name,
+                description,
+                capacity,
+                auto_interval: autoInterval,
+                // null を明示的に送ると「設定なし = 既定の 10 個」に戻る。
+                // このモーダルは値を読み込んで表示しているので、空欄での保存は
+                // ユーザーが見て納得した上での解除になる。
+                item_display_limit: itemDisplayLimit,
+                show_movement_notices: showMovementNotices,
+                system_instruction: systemInstruction,
+                image_path: imagePath,
+                extra_prompt_files: extraPromptFiles,
+                tool_ids: toolIds,
+                city_id: cityId
             });
 
             if (res.ok) {
+                announceMovementNoticeChange({ buildingId: targetBuildingId, value: showMovementNotices });
+                if (isStale()) return;
                 if (onSaved) onSaved();
                 onClose();
             } else {
-                const data = await res.json();
-                setError(data.detail || uiText("components.BuildingSettingsModal.text007"));
+                if (isStale()) return;
+                setError(res.error || uiText("components.BuildingSettingsModal.text007"));
             }
         } catch (err) {
+            if (isStale()) return;
             setError(uiText("components.BuildingSettingsModal.text008"));
             console.error(err);
         } finally {
-            setSaving(false);
+            if (!isStale()) setSaving(false);
         }
     };
 
@@ -271,7 +314,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                     </div>
                 ) : (
                     <div className={styles.content}>
-                        {error && <div className={styles.error}>{error}</div>}
+                        {error && <div className={styles.error} role="alert">{error}</div>}
 
                         <div className={styles.field}>
                             <label data-i18n="components.BuildingSettingsModal.text011">{uiText("components.BuildingSettingsModal.text011")}</label>
@@ -294,32 +337,26 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
 
                         <div className={styles.field}>
                             <label data-i18n="components.BuildingSettingsModal.text012">{uiText("components.BuildingSettingsModal.text012")}</label>
-                            <select value={cityId} onChange={e => setCityId(parseInt(e.target.value))}>
+                            {/* Existing Buildings cannot change City (W7 D5); keep the loaded
+                                city_id for ordinary saves, as WorldEditor already does. */}
+                            <select value={cityId} disabled className={styles.disabled} aria-describedby="building-city-immutable-hint">
                                 {cities.map(c => (
                                     <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME || c.CITY_SLUG}</option>
                                 ))}
                             </select>
+                            <span id="building-city-immutable-hint" className={styles.hint} data-i18n="components.BuildingSettingsModal.cityImmutableHint">
+                                {uiText("components.BuildingSettingsModal.cityImmutableHint")}
+                            </span>
                         </div>
 
-                        <div className={styles.row}>
-                            <div className={styles.field}>
-                                <label data-i18n="components.BuildingSettingsModal.text013">{uiText("components.BuildingSettingsModal.text013")}</label>
-                                <input
-                                    type="number"
-                                    value={capacity}
-                                    onChange={e => setCapacity(parseInt(e.target.value) || 1)}
-                                    min={1}
-                                />
-                            </div>
-                            <div className={styles.field}>
-                                <label data-i18n="components.BuildingSettingsModal.text014">{uiText("components.BuildingSettingsModal.text014")}</label>
-                                <input
-                                    type="number"
-                                    value={autoInterval}
-                                    onChange={e => setAutoInterval(parseInt(e.target.value) || 10)}
-                                    min={1}
-                                />
-                            </div>
+                        <div className={styles.field}>
+                            <label data-i18n="components.BuildingSettingsModal.text013">{uiText("components.BuildingSettingsModal.text013")}</label>
+                            <input
+                                type="number"
+                                value={capacity}
+                                onChange={e => setCapacity(parseInt(e.target.value) || 1)}
+                                min={1}
+                            />
                         </div>
 
                         <div className={styles.field}>
@@ -336,6 +373,22 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                 }}
                             />
                             <small data-i18n="components.BuildingSettingsModal.text036" className={styles.hint}>{uiText("components.BuildingSettingsModal.text036")}</small>
+                        </div>
+
+                        <div className={styles.field}>
+                            <label htmlFor="building-movement-notices" data-i18n="movementNotices.label">{uiText('movementNotices.label')}</label>
+                            <select
+                                id="building-movement-notices"
+                                aria-describedby="building-movement-notices-hint"
+                                value={showMovementNotices === null ? 'inherit' : showMovementNotices ? 'show' : 'hide'}
+                                disabled={saving || loading || loadedBuildingId !== buildingId}
+                                onChange={event => setShowMovementNotices(event.target.value === 'inherit' ? null : event.target.value === 'show')}
+                            >
+                                <option value="inherit" data-i18n="movementNotices.inherit">{uiText('movementNotices.inherit')}</option>
+                                <option value="show" data-i18n="movementNotices.show">{uiText('movementNotices.show')}</option>
+                                <option value="hide" data-i18n="movementNotices.hide">{uiText('movementNotices.hide')}</option>
+                            </select>
+                            <small id="building-movement-notices-hint" className={styles.hint} data-i18n="movementNotices.buildingHint">{uiText('movementNotices.buildingHint')}</small>
                         </div>
 
                         <div className={styles.field}>

@@ -57,7 +57,7 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 - **requirements.txt** は「本体が直接 import する部品」だけを、**下限 + 理由つきの上限**で書く。`==` は使わない (釘を打つのは lock の仕事)。上限を書くときは必ず一行の理由を添える (mcp<2 の書き方が手本)。
 - **requirements.lock** は `requirements.txt` から機械生成する。全部品 (間接依存も含む) が `==` で並び、プラットフォーム差 (Windows / macOS / Linux、Python 3.11〜3.13) は環境マーカーで一枚に収める。ユーザー側は素の pip で読める形式 (`pip install -r requirements.lock`) に限る — ユーザーに新しい道具を入れさせない。
 - 生成の道具は開発者だけが使う。`uv pip compile --universal` を第一候補とする (開発機に導入済み、pip 互換の出力、プラットフォーム横断の一枚を作れる)。ユーザーの手元では uv は不要。
-- **アドオンの pip install には lock を constraints として渡す** (`pip install -r <addon>/requirements.txt -c requirements.lock`)。アドオンは本体が固定した部品を動かせなくなり、動かす必要があるなら導入時に失敗して理由が出る (黙って壊れる代わりに)。2026-09-11 の時点で実際に渡しているのは、setup の `pip_install` の step だけ (§2-2 の数え漏れ)。
+- **アドオンの pip install には lock を constraints として渡す** (`pip install -r <addon>/requirements.txt -c requirements.lock`)。アドオンは本体が固定した部品を動かせなくなり、動かす必要があるなら導入時に失敗して理由が出る (黙って壊れる代わりに)。2026-09-11 の時点で実際に渡しているのは、setup の `pip_install` の step だけ (§2-2 の数え漏れ)。**例外 (2026-10-05)**: アドオン専用の Python 環境で実行する step (`env` の付いた step) には渡さない — 本体の venv に何も入れないので、本体の部品は動かない ([addon_catalog_management.md](addon_catalog_management.md) の不変条件 7)。
 
 ### 2-4. 不変条件と持ち主
 
@@ -66,7 +66,7 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 | ユーザーの手元に入る部品の版は lock と一致する | `requirements.lock` |
 | lock は requirements.txt の範囲の中にある | 生成の道具 (compile が保証) |
 | 止めている部品には理由がある | `requirements.txt` のコメント行 |
-| アドオンは本体の部品を動かせない | `addon_installer.py` が constraints を渡す。**2026-09-11 時点で渡しているのは `pip_install` の step だけで、`platform_script` / `python_script` の step で実行されるスクリプトの中の pip には渡っていない** ([addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md)) |
+| アドオンは本体の部品を動かせない | `addon_installer.py` が constraints を渡す。**2026-09-11 時点で渡しているのは `pip_install` の step だけで、`platform_script` / `python_script` の step で実行されるスクリプトの中の pip には渡っていない** ([addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md))。アドオン専用の Python 環境で実行する step (`env` 付き、2026-10-05) は constraints の対象外 — 本体の venv に入れないことを、専用の環境の Python・pip・環境変数で起動する形で守る ([addon_catalog_management.md](addon_catalog_management.md) の不変条件 7) |
 | 更新完了マーカーは lock の内容と結びつく | `update_engine.completion_fingerprint` (lock の sha256 を含める) |
 
 ### 2-5. 移行

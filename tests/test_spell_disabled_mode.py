@@ -966,7 +966,11 @@ def test_saving_the_same_spell_mode_does_not_dispatch(admin_with_persona):
 
 def test_saving_other_settings_does_not_dispatch(admin_with_persona):
     """spell_enabled を渡さない保存 (ワールドエディタ経路) では発火しない。"""
-    _update_ai(admin_with_persona, name="Air2", realtime_info_enabled=False)
+    _update_ai(
+        admin_with_persona, name="Air2",
+        realtime_current_time_enabled=False,
+        realtime_last_utterance_enabled=True,
+    )
     assert admin_with_persona.dispatched == []
 
 

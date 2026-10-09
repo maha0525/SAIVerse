@@ -9,12 +9,13 @@ from pathlib import Path
 _log = logging.getLogger(__name__)
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 from api.deps import get_manager
 from saiverse.model_defaults import is_reflex_only_model
 from saiverse.model_configs import (
     get_model_choices_with_display_names,
     get_model_config,
+    get_model_config_error,
     get_model_parameters,
     get_model_parameter_defaults,
     get_cache_config,
@@ -39,6 +40,8 @@ class ModelInfo(BaseModel):
     # 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない) の印。
     # 会話に使う選択欄はこの印の付いたモデルを出さない (一覧からは落とさない)。
     reflex_only: bool = False
+    available: bool = True
+    config_error: Optional[Dict[str, str]] = None
 
 class PlaybookParamInfo(BaseModel):
     """Parameter info for playbook input_schema."""
@@ -99,13 +102,14 @@ class ModelConfigResponse(BaseModel):
 def get_models():
     """List available LLM models.
 
-    Only models whose required API key is configured are returned.
+    Missing-key models are omitted; invalid-provider models remain visible as unavailable.
     Includes pricing info (USD per 1M tokens) when available.
     """
     choices = get_model_choices_with_display_names()
     result = []
     for mid, name in choices:
-        if not is_model_available(mid):
+        error = get_model_config_error(mid)
+        if not is_model_available(mid) and not error:
             continue
         cfg = get_model_config(mid)
         pricing = cfg.get("pricing", {})
@@ -118,6 +122,8 @@ def get_models():
             }
         result.append({
             "id": mid,
+            "available": is_model_available(mid),
+            "config_error": error,
             "name": name,
             "provider": cfg.get("provider"),
             "group": cfg.get("group") or cfg.get("provider_ref") or cfg.get("provider"),
@@ -1127,6 +1133,62 @@ def set_playbook_permission(req: SetPlaybookPermissionRequest, manager=Depends(g
             ))
         db.commit()
         return {"success": True, "playbook_name": req.playbook_name, "permission_level": req.permission_level}
+    finally:
+        db.close()
+
+
+# ── Movement Notice Display ──────────────────────────────────────
+
+class MovementNoticesRequest(BaseModel):
+    show_movement_notices: StrictBool
+
+
+def _movement_notices_payload(db):
+    from database.models import Building, UserSettings
+
+    settings = db.query(UserSettings).filter(UserSettings.USERID == 1).first()
+    overrides = db.query(Building.BUILDINGID, Building.SHOW_MOVEMENT_NOTICES).filter(
+        Building.SHOW_MOVEMENT_NOTICES.is_not(None),
+    ).all()
+    return {
+        "show_movement_notices": settings.SHOW_MOVEMENT_NOTICES if settings else True,
+        "building_overrides": {building_id: shown for building_id, shown in overrides},
+    }
+
+
+@router.get("/movement-notices")
+def get_movement_notices():
+    """Read presentation-only movement notice settings, including explicit room overrides."""
+    from database.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        return _movement_notices_payload(db)
+    finally:
+        db.close()
+
+
+@router.put("/movement-notices")
+def set_movement_notices(req: MovementNoticesRequest):
+    """Save the global display default without changing room overrides or stored history."""
+    from database.models import UserSettings
+    from database.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        settings = db.query(UserSettings).filter(UserSettings.USERID == 1).first()
+        if settings is None:
+            settings = UserSettings(USERID=1)
+            db.add(settings)
+        settings.SHOW_MOVEMENT_NOTICES = req.show_movement_notices
+        db.flush()
+        payload = _movement_notices_payload(db)
+        db.commit()
+        return payload
+    except Exception:
+        db.rollback()
+        _log.warning("Failed to save movement notice display settings", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to save movement notice display settings")
     finally:
         db.close()
 

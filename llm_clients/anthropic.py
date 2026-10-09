@@ -12,7 +12,7 @@ import httpx2
 from anthropic import Anthropic
 from anthropic.types import Message
 
-from .base import EmptyResponseError, LLMClient, get_llm_logger
+from .base import EmptyResponseError, LLMClient, ToolSpecFormat, get_llm_logger
 from .anthropic_request_builder import build_request_params
 from .anthropic_response_parser import (
     _extract_text_from_response,
@@ -58,6 +58,9 @@ DEFAULT_TIMEOUT_SECONDS = 1800.0  # 30 min; override via ANTHROPIC_TIMEOUT_SECON
 class AnthropicClient(LLMClient):
     """Native Anthropic Claude client with prompt caching support."""
 
+    def tool_spec_format(self) -> ToolSpecFormat:
+        return "openai"
+
     def __init__(
         self,
         model: str = "claude-sonnet-5",
@@ -92,6 +95,8 @@ class AnthropicClient(LLMClient):
         self.model = model
 
         cfg = config or {}
+        self._supports_sampling_parameters = bool(cfg.get("supports_sampling_parameters", True))
+        self._supports_assistant_prefill = bool(cfg.get("supports_assistant_prefill", True))
 
         # Anthropic has a 5MB limit for images (configurable via model config)
         self.max_image_bytes = cfg.get("max_image_bytes", 5 * 1024 * 1024)
@@ -101,14 +106,24 @@ class AnthropicClient(LLMClient):
 
         # Extended thinking configuration
         self._thinking_config: Optional[Dict[str, Any]] = None
-        self._thinking_effort: Optional[str] = None  # "low", "medium", "high", "max"
+        self._thinking_effort: Optional[str] = None  # "low", "medium", "high", "xhigh", "max"
         thinking_type = cfg.get("thinking_type") or os.getenv("ANTHROPIC_THINKING_TYPE")
         thinking_budget = cfg.get("thinking_budget") or os.getenv("ANTHROPIC_THINKING_BUDGET")
         thinking_effort = cfg.get("thinking_effort") or os.getenv("ANTHROPIC_THINKING_EFFORT")
         thinking_display = cfg.get("thinking_display") or os.getenv("ANTHROPIC_THINKING_DISPLAY")
 
-        # Validate and store thinking_effort
-        valid_efforts = ("low", "medium", "high", "max")
+        # The model catalog owns effort capabilities. Raw config/environment values
+        # and later UI overrides must pass the same per-model allowlist.
+        from saiverse.model_configs import find_model_config
+        _, catalog_config = find_model_config(model)
+        effort_config = cfg.get("parameters", catalog_config.get("parameters", {}))
+        effort_spec = effort_config.get("thinking_effort", {}) if isinstance(effort_config, dict) else {}
+        options = effort_spec.get("options", []) if isinstance(effort_spec, dict) else []
+        self._valid_efforts = tuple(
+            option for option in options
+            if isinstance(option, str) and option in ("low", "medium", "high", "xhigh", "max")
+        ) if isinstance(options, list) else ()
+        valid_efforts = self._valid_efforts
         if thinking_effort and thinking_effort in valid_efforts:
             self._thinking_effort = thinking_effort
 
@@ -154,7 +169,7 @@ class AnthropicClient(LLMClient):
                 pass
 
         # Ensure max_tokens > thinking_budget when manual thinking is enabled
-        if thinking_budget and self._max_tokens <= thinking_budget:
+        if thinking_type != "adaptive" and thinking_budget and self._max_tokens <= thinking_budget:
             # max_tokens must include both thinking budget and actual output
             self._max_tokens = thinking_budget + 4096
             logging.debug(
@@ -172,7 +187,7 @@ class AnthropicClient(LLMClient):
         if not isinstance(parameters, dict):
             return
         allowed_params = {"temperature", "top_p", "top_k", "max_tokens"}
-        valid_efforts = ("low", "medium", "high", "max")
+        valid_efforts = self._valid_efforts
         for key, value in parameters.items():
             # Handle thinking_effort specially (stored on instance, not in _extra_params)
             if key == "thinking_effort":
@@ -271,7 +286,7 @@ class AnthropicClient(LLMClient):
                     raise SafetyFilterError(
                         f"Anthropic {context} content policy violation: {e}",
                         e,
-                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
+                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。",
                     )
                 raise InvalidRequestError(f"Anthropic {context} error: {e}", e)
             except Exception as e:
@@ -397,6 +412,8 @@ class AnthropicClient(LLMClient):
             supports_images=self.supports_images,
             max_image_bytes=self.max_image_bytes,
             max_image_embeds=self.max_image_embeds,
+            supports_sampling_parameters=self._supports_sampling_parameters,
+            supports_assistant_prefill=self._supports_assistant_prefill,
         )
         request_params = build_result["request_params"]
         use_tools = bool(build_result["use_tools"])
@@ -486,6 +503,8 @@ class AnthropicClient(LLMClient):
             supports_images=self.supports_images,
             max_image_bytes=self.max_image_bytes,
             max_image_embeds=self.max_image_embeds,
+            supports_sampling_parameters=self._supports_sampling_parameters,
+            supports_assistant_prefill=self._supports_assistant_prefill,
         )
         request_params = build_result["request_params"]
         use_tools = bool(build_result["use_tools"])
@@ -513,7 +532,7 @@ class AnthropicClient(LLMClient):
                     raise SafetyFilterError(
                         f"Anthropic streaming API call content policy violation: {e}",
                         e,
-                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
+                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。",
                     )
                 raise InvalidRequestError(f"Anthropic streaming API call error: {e}", e)
             except Exception as e:

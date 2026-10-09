@@ -94,7 +94,8 @@ PERSISTENT_COLUMNS = [
     "CORE_MEMORY_CHAR_BUDGET",
     "CHRONICLE_CHAR_BUDGET",
     "SPELL_ENABLED",
-    "REALTIME_INFO_ENABLED",
+    "REALTIME_CURRENT_TIME_ENABLED",
+    "REALTIME_LAST_UTTERANCE_ENABLED",
     # ⚠️ legacy 列 (行分離後は常に NULL)。anchor 本体は session_anchor テーブル
     # 行として _clone_session_anchor_rows が対で複製する (anchor_id は memory.db
     # 内を指し、memory.db をバイト単位で複製するため複製先でも有効)

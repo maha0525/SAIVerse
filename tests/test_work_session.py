@@ -549,6 +549,36 @@ def test_error_returns_error_result(session_factory, persona, caplog):
     assert runtime.flushed
 
 
+def test_a_failed_continuation_after_a_spell_ends_in_error(session_factory, persona):
+    """スペルの後の続きの生成 (LLM 呼び出し) が失敗した回は、初回の生成が
+    失敗した回と同じくエラー終了で閉じる。黙って「完了」にしない
+    (2026-09-24)。それまでの周の記録と、実行済みのスペルの成果は残る。"""
+    from llm_clients.exceptions import RateLimitError
+
+    responses = [
+        _spell_line("草稿"),                         # round 1
+        RateLimitError("429 Too Many Requests"),     # 続きの生成が失敗
+    ]
+    manager, runtime, client = _make_env(session_factory, persona, responses)
+    created_ids: List[str] = []
+    p_names, p_exec = _patched_spell_env(session_factory, created_ids)
+
+    with p_names, p_exec:
+        result = _run(manager, budget=5)
+
+    assert result.ended_reason == ENDED_ERROR
+    assert result.error is not None and "RateLimitError" in result.error
+    # 失敗の前に唱えたスペルは実行済みで、その成果は artifacts に残る
+    assert len(created_ids) == 1
+    assert result.artifacts == created_ids
+    # round 1 の発言は生ログに残り、スペル系の内部エラーの注記は差し込まれない
+    assert any("よし、やるぞ。" in r["text"] for r in runtime.stored)
+    assert not any(
+        "[Spell System Error]" in str(m.get("content", ""))
+        for m in client.calls[-1]
+    )
+
+
 def test_manager_missing_returns_error(persona):
     """manager 未解決 (コンテキスト外呼び出し) も error 結果に落ちる。"""
     result = run_work_session("p1", "何か作って", 3, manager=None)

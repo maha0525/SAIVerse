@@ -224,8 +224,8 @@
     "en": "Wait a while and try sending again. If this keeps happening, check the server's service status."
   },
   "app.page.text050": {
-    "ja": "送信した内容が安全性フィルターに該当した可能性があります。内容を変更して再送信してください。",
-    "en": "The content may have triggered a safety filter. Change the content and try again."
+    "ja": "このモデルでは通らない内容でも、別のモデルなら通ることがあります。別のモデルに切り替えてから、あなたの発言の「再送」ボタンを押してください。",
+    "en": "Content one model rejects may pass on another. Switch to a different model, then press the \"Retry\" button on your message."
   },
   "app.page.text051": {
     "ja": "サーバーが混雑している可能性があります。しばらく時間を置いてから再送信してください。",
@@ -294,6 +294,90 @@
   "app.page.modelUnavailable": {
     "ja": "あなたの発言は記録に残っています。モデルを選び直したあと、発言の「再送」から応答をもう一度求められます。",
     "en": "Your message was saved. After selecting another model, use Retry on the message to request a reply again."
+  },
+  "app.page.continueSafetyFilter": {
+    "ja": "このモデルでは通らない内容でも、別のモデルなら通ることがあります。別のモデルに切り替えてから、ペルソナの発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "Content one model rejects may pass on another. Switch to a different model, then press the \"Continue reply\" button on the persona's message."
+  },
+  "app.page.continueTimeout": {
+    "ja": "サーバーが混雑している可能性があります。しばらく時間を置いてから、ペルソナの発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "The server may be busy. Wait a while, then press the \"Continue reply\" button on the persona's message."
+  },
+  "app.page.continueRateLimit": {
+    "ja": "API利用制限に達しています。しばらく時間を置いてから、ペルソナの発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "The API usage limit has been reached. Wait a while, then press the \"Continue reply\" button on the persona's message."
+  },
+  "app.page.continueServerError": {
+    "ja": "LLMサーバーで障害が発生している可能性があります。しばらく時間を置いてから、ペルソナの発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "The LLM server may be experiencing an issue. Wait a while, then press the \"Continue reply\" button on the persona's message."
+  },
+  "app.page.continueModelUnavailable": {
+    "ja": "ここまでの発言は記録に残っています。モデルを選び直したあと、ペルソナの発言の「続きの生成」から続きを求められます。",
+    "en": "The conversation so far was saved. After selecting another model, use Continue reply on the persona's message to request the rest."
+  },
+  "app.page.continuePayment": {
+    "ja": "APIキーの残高や支払い設定を確認してください。ここまでの発言は記録に残っています。設定を直したあと、ペルソナの発言の「続きの生成」から続きを求められます。",
+    "en": "Check the API key's balance and billing settings. The conversation so far was saved. After fixing the settings, use Continue reply on the persona's message to request the rest."
+  },
+  "app.page.continueAuthentication": {
+    "ja": "APIキーの設定を確認してください。ここまでの発言は記録に残っています。設定を直したあと、ペルソナの発言の「続きの生成」から続きを求められます。",
+    "en": "Check your API key settings. The conversation so far was saved. After fixing the settings, use Continue reply on the persona's message to request the rest."
+  },
+  "app.page.continueDefault": {
+    "ja": "ここまでの発言は記録に残っています。少し待ってから、ペルソナの発言に表示されている「続きの生成」ボタンを押してください。解決しない場合は開発者へ報告してください。",
+    "en": "The conversation so far was saved. Wait a little, then press the \"Continue reply\" button on the persona's message. If the problem persists, please report it to the developer."
+  },
+  "app.page.movedContinueSafetyFilter": {
+    "ja": "このモデルでは通らない内容でも、別のモデルなら通ることがあります。ペルソナは移動先の部屋「{p1}」で、途中まで話しています。別のモデルに切り替えてから「{p1}」へ行き、その発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "Content one model rejects may pass on another. The persona moved to \"{p1}\" and stopped partway through speaking there. Switch to a different model, go to \"{p1}\", and press the \"Continue reply\" button on that message."
+  },
+  "app.page.movedContinueTimeout": {
+    "ja": "サーバーが混雑している可能性があります。ペルソナは移動先の部屋「{p1}」で、途中まで話しています。しばらく時間を置いてから「{p1}」へ行き、その発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "The server may be busy. The persona moved to \"{p1}\" and stopped partway through speaking there. Wait a while, go to \"{p1}\", and press the \"Continue reply\" button on that message."
+  },
+  "app.page.movedContinueRateLimit": {
+    "ja": "API利用制限に達しています。ペルソナは移動先の部屋「{p1}」で、途中まで話しています。しばらく時間を置いてから「{p1}」へ行き、その発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "The API usage limit has been reached. The persona moved to \"{p1}\" and stopped partway through speaking there. Wait a while, go to \"{p1}\", and press the \"Continue reply\" button on that message."
+  },
+  "app.page.movedContinueServerError": {
+    "ja": "LLMサーバーで障害が発生している可能性があります。ペルソナは移動先の部屋「{p1}」で、途中まで話しています。しばらく時間を置いてから「{p1}」へ行き、その発言に表示されている「続きの生成」ボタンを押してください。",
+    "en": "The LLM server may be experiencing an issue. The persona moved to \"{p1}\" and stopped partway through speaking there. Wait a while, go to \"{p1}\", and press the \"Continue reply\" button on that message."
+  },
+  "app.page.movedContinueModelUnavailable": {
+    "ja": "ペルソナは移動先の部屋「{p1}」で、途中まで話しています。ここまでの発言は記録に残っています。モデルを選び直したあと「{p1}」へ行くと、その発言の「続きの生成」から続きを求められます。",
+    "en": "The persona moved to \"{p1}\" and stopped partway through speaking there. The conversation so far was saved. After selecting another model, go to \"{p1}\" and use Continue reply on that message to request the rest."
+  },
+  "app.page.movedContinuePayment": {
+    "ja": "APIキーの残高や支払い設定を確認してください。ペルソナは移動先の部屋「{p1}」で、途中まで話しています。設定を直したあと「{p1}」へ行くと、その発言の「続きの生成」から続きを求められます。",
+    "en": "Check the API key's balance and billing settings. The persona moved to \"{p1}\" and stopped partway through speaking there. After fixing the settings, go to \"{p1}\" and use Continue reply on that message to request the rest."
+  },
+  "app.page.movedContinueAuthentication": {
+    "ja": "APIキーの設定を確認してください。ペルソナは移動先の部屋「{p1}」で、途中まで話しています。設定を直したあと「{p1}」へ行くと、その発言の「続きの生成」から続きを求められます。",
+    "en": "Check your API key settings. The persona moved to \"{p1}\" and stopped partway through speaking there. After fixing the settings, go to \"{p1}\" and use Continue reply on that message to request the rest."
+  },
+  "app.page.movedContinueDefault": {
+    "ja": "ペルソナは移動先の部屋「{p1}」で、途中まで話しています。ここまでの発言は記録に残っています。少し待ってから「{p1}」へ行き、その発言に表示されている「続きの生成」ボタンを押してください。解決しない場合は開発者へ報告してください。",
+    "en": "The persona moved to \"{p1}\" and stopped partway through speaking there. The conversation so far was saved. Wait a little, go to \"{p1}\", and press the \"Continue reply\" button on that message. If the problem persists, please report it to the developer."
+  },
+  "app.page.returnToStableNotice": {
+    "ja": "安定版 v{p1} が出ました。アーリーアクセス版から安定版に戻れます (現在: v{p2})",
+    "en": "Stable version v{p1} is out. You can return from early access to stable (current: v{p2})"
+  },
+  "app.page.returnToStableButton": {
+    "ja": "安定版に戻る",
+    "en": "Return to stable"
+  },
+  "app.page.returnToStableConfirm": {
+    "ja": "安定版に戻しますか？\n\n安定版の最新 (v{p1}) に切り替わり、SAIVerse は自動で再起動します。数分かかることがあります。",
+    "en": "Return to the stable channel?\n\nSAIVerse will switch to the latest stable version (v{p1}) and restart automatically. This may take a few minutes."
+  },
+  "app.page.channelSwitchFailed": {
+    "ja": "切り替えを始められませんでした。バックエンドのログを確認してください。",
+    "en": "Could not start the switch. Check the backend logs."
+  },
+  "app.page.channelSwitchUnreachable": {
+    "ja": "切り替えを始められませんでした。バックエンドに接続できない可能性があります。",
+    "en": "Could not start the switch. The backend may be unreachable."
   },
   "app.page.text067": {
     "ja": "ふと浮かんだ記憶",
@@ -406,6 +490,18 @@
   "app.page.text094": {
     "ja": "記憶の想起の判定が時間内に終わらず、今回は従来の方式で想起しました（判定の費用は発生しています）。グローバル設定で待ち時間を延ばすか、より速いモデルを割り当てると直ります。",
     "en": "The memory-recall judgment did not finish in time, so this turn fell back to the previous recall method (the judgment was still billed). Increase the wait time in Global Settings, or assign a faster model."
+  },
+  "app.page.text095": {
+    "ja": "この世界には建物がひとつもありません。設定の「世界の編集」から建物を作成してください。",
+    "en": "This world has no buildings. Create one from the World Editor in Settings."
+  },
+  "app.page.text096": {
+    "ja": "表示していた建物は削除されました。サイドバーかマップから別の建物を選んでください。",
+    "en": "The building you were viewing has been deleted. Select another building from the sidebar or the map."
+  },
+  "app.page.text097": {
+    "ja": "建物が選ばれていません",
+    "en": "No building selected"
   },
   "app.phenomena.page.text001": {
     "ja": "編集内容が保存されていません。閉じてよろしいですか？",
@@ -825,7 +921,27 @@
   },
   "components.AddonActionConfirmDialog.text023": {
     "ja": "する",
-    "en": "Confirm"
+    "en": " Confirm"
+  },
+  "components.AddonActionConfirmDialog.text024": {
+    "ja": "選択肢を追加",
+    "en": "Add choices"
+  },
+  "components.AddonActionConfirmDialog.text025": {
+    "ja": "{p1} の導入時の選択肢を追加",
+    "en": "Add setup choices for {p1}"
+  },
+  "components.AddonActionConfirmDialog.text026": {
+    "ja": "導入時の質問を読み込んでいます…",
+    "en": "Loading setup questions..."
+  },
+  "components.AddonActionConfirmDialog.text027": {
+    "ja": "導入時の質問を読み込めませんでした",
+    "en": "Could not load the setup questions"
+  },
+  "components.AddonActionConfirmDialog.text028": {
+    "ja": "前に選んだ選択肢は外せません。新しく選んだ選択肢に必要な手順だけを実行します。",
+    "en": "Choices you selected before cannot be removed. Only the steps needed for the newly selected choices will run."
   },
   "components.AddonBubbleButtons.text001": {
     "ja": "音声の再生に失敗しました",
@@ -899,6 +1015,10 @@
     "ja": " 削除",
     "en": " Delete"
   },
+  "components.AddonCatalogPanel.text014": {
+    "ja": " 処理中",
+    "en": " In progress"
+  },
   "components.AddonInstallProgressDialog.text001": {
     "ja": "導入",
     "en": "Install"
@@ -944,12 +1064,36 @@
     "en": "Connection error"
   },
   "components.AddonInstallProgressDialog.text012": {
-    "ja": "実行中... 完了までお待ちください",
-    "en": "Running... Please wait"
+    "ja": "実行中です。この画面を閉じても、処理はサーバーで続きます",
+    "en": "Running. Closing this window does not stop the process on the server"
   },
   "components.AddonInstallProgressDialog.text013": {
     "ja": "閉じる",
     "en": "Close"
+  },
+  "components.AddonInstallProgressDialog.text014": {
+    "ja": "選択肢の追加",
+    "en": "Adding choices "
+  },
+  "components.AddonInstallProgressDialog.text015": {
+    "ja": "{p1} の選択肢を追加しています",
+    "en": "Adding choices to {p1}"
+  },
+  "components.AddonInstallProgressDialog.text016": {
+    "ja": "接続が切れましたが、処理はサーバーで続いています。終わるまで様子を確かめています…",
+    "en": "The connection was lost, but the process is still running on the server. Checking until it finishes…"
+  },
+  "components.AddonInstallProgressDialog.text017": {
+    "ja": "処理は終わりました",
+    "en": "The process has finished"
+  },
+  "components.AddonInstallProgressDialog.text018": {
+    "ja": "結果は一覧で確認してください。",
+    "en": "Please check the result in the list."
+  },
+  "components.AddonInstallProgressDialog.text019": {
+    "ja": "閉じる (処理は続きます)",
+    "en": "Close (keeps running)"
   },
   "components.AddonManagerModal.text001": {
     "ja": "（未対応の型: {p1}）",
@@ -1087,6 +1231,62 @@
     "ja": "「カタログ」タブから導入できます",
     "en": "Install addons from the Catalog tab"
   },
+  "components.AddonManagerModal.text035": {
+    "ja": "選択肢を追加",
+    "en": "Add choices"
+  },
+  "components.AddonManagerModal.text036": {
+    "ja": "導入時の質問をもう一度開いて、選択肢を追加します",
+    "en": "Reopen the setup questions to add choices"
+  },
+  "components.AddonSetupQuestions.text001": {
+    "ja": "導入時の質問",
+    "en": "Setup questions"
+  },
+  "components.AddonSetupQuestions.text002": {
+    "ja": "複数選べます",
+    "en": "Select all that apply"
+  },
+  "components.AddonSetupQuestions.text003": {
+    "ja": "一つ選んでください",
+    "en": "Choose one"
+  },
+  "components.AddonSetupQuestions.text004": {
+    "ja": "選択済み",
+    "en": "Selected"
+  },
+  "components.AddonSetupQuestions.text005": {
+    "ja": "一つだけ選ぶ質問の答えは、導入後には変えられません",
+    "en": "Single-choice answers cannot be changed after installation"
+  },
+  "components.AddonSetupQuestions.text006": {
+    "ja": "実行される手順",
+    "en": "Steps that will run"
+  },
+  "components.AddonSetupQuestions.text007": {
+    "ja": "新しく実行される手順",
+    "en": "Steps that will newly run"
+  },
+  "components.AddonSetupQuestions.text008": {
+    "ja": "実行される手順はありません",
+    "en": "No steps will run"
+  },
+  "components.AddonSetupQuestions.text009": {
+    "ja": "新しく実行される手順はありません。追加したい選択肢を選んでください。",
+    "en": "No new steps will run. Select the choices you want to add."
+  },
+  "components.AddonSetupQuestions.text010": {
+    "ja": "専用の Python 環境: {p1}",
+    "en": "Dedicated Python environment: {p1}"
+  },
+  "components.AddonSetupQuestions.text011": {
+    "ja": "前に選んだ答えしだいで実行",
+    "en": "Runs depending on your earlier answers"
+  },
+  "components.AddonSetupQuestions.text012": {
+    "ja": "この質問に答えてください",
+    "en": "Please answer this question"
+  },
   "components.BuildingSettingsModal.text001": {
     "ja": "Building データの読み込みに失敗しました",
     "en": "Failed to load building data"
@@ -1131,6 +1331,10 @@
     "ja": "名前",
     "en": "Name"
   },
+  "components.BuildingSettingsModal.cityImmutableHint": {
+    "ja": "既存の建物の都市は変更できません。",
+    "en": "The city of an existing building cannot be changed."
+  },
   "components.BuildingSettingsModal.text012": {
     "ja": "都市",
     "en": "City"
@@ -1138,10 +1342,6 @@
   "components.BuildingSettingsModal.text013": {
     "ja": "定員",
     "en": "Capacity"
-  },
-  "components.BuildingSettingsModal.text014": {
-    "ja": "自動インターバル（秒）",
-    "en": "Automatic interval (seconds)"
   },
   "components.BuildingSettingsModal.text015": {
     "ja": "説明",
@@ -1851,6 +2051,54 @@
     "ja": "Chronicle / Memopedia / Fragment の未生成分",
     "en": "Missing embeddings for Chronicle / Memopedia / Fragments"
   },
+  "components.FixtureMetaEditor.text001": {
+    "ja": "メタ情報を編集",
+    "en": "Edit metadata"
+  },
+  "components.FixtureMetaEditor.text002": {
+    "ja": "設置物名",
+    "en": "Fixture name"
+  },
+  "components.FixtureMetaEditor.text003": {
+    "ja": "説明",
+    "en": "Description"
+  },
+  "components.FixtureMetaEditor.text004": {
+    "ja": "保存中...",
+    "en": "Saving..."
+  },
+  "components.FixtureMetaEditor.text005": {
+    "ja": "保存",
+    "en": "Save"
+  },
+  "components.FixtureMetaEditor.text006": {
+    "ja": "キャンセル",
+    "en": "Cancel"
+  },
+  "components.FixtureMetaEditor.text007": {
+    "ja": "削除中...",
+    "en": "Deleting..."
+  },
+  "components.FixtureMetaEditor.text008": {
+    "ja": "削除",
+    "en": "Delete"
+  },
+  "components.FixtureMetaEditor.text009": {
+    "ja": "この設置物を削除しますか？",
+    "en": "Delete this fixture?"
+  },
+  "components.FixtureMetaEditor.text010": {
+    "ja": "この設置物を削除しますか？購読中のフィードと取得済みの記事もすべて削除されます。",
+    "en": "Delete this fixture? Its subscribed feeds and all fetched articles will also be deleted."
+  },
+  "components.FixtureMetaEditor.text011": {
+    "ja": "保存に失敗しました",
+    "en": "Failed to save"
+  },
+  "components.FixtureMetaEditor.text012": {
+    "ja": "削除に失敗しました",
+    "en": "Failed to delete"
+  },
   "components.GlobalSettingsModal.text001": {
     "ja": "保存できませんでした: {p1}",
     "en": "Could not save: {p1}"
@@ -2510,6 +2758,54 @@
   "components.ItemModal.text036": {
     "ja": "この部屋にしまえるアイテムはありません",
     "en": "No items in this room to stow"
+  },
+  "components.ItemModal.text037": {
+    "ja": "ペルソナが会話の中でこのアイテムを指すときに使う番号です",
+    "en": "The number personas use to refer to this item in conversation"
+  },
+  "components.ItemModal.text038": {
+    "ja": "削除中...",
+    "en": "Deleting..."
+  },
+  "components.ItemModal.text039": {
+    "ja": "削除",
+    "en": "Delete"
+  },
+  "components.ItemModal.text040": {
+    "ja": "このアイテムを削除しますか？",
+    "en": "Delete this item?"
+  },
+  "components.ItemModal.text041": {
+    "ja": "削除に失敗しました",
+    "en": "Failed to delete"
+  },
+  "components.ItemModal.text042": {
+    "ja": "「{p1}」には {p2} 個のアイテムが入っています。",
+    "en": "\"{p1}\" contains {p2} item(s)."
+  },
+  "components.ItemModal.text043": {
+    "ja": "中の入れ物に入っているものも含めると {p1} 個です。",
+    "en": "{p1} item(s) in total, including those inside nested bags."
+  },
+  "components.ItemModal.text044": {
+    "ja": "中身を出して削除",
+    "en": "Take out contents and delete"
+  },
+  "components.ItemModal.text045": {
+    "ja": "「中身を出して削除」では、中身はこのアイテムが置かれていた場所に出されます。",
+    "en": "With \"Take out contents and delete\", the contents are placed where this item was."
+  },
+  "components.ItemModal.text046": {
+    "ja": "中身ごと削除",
+    "en": "Delete with contents"
+  },
+  "components.ItemModal.text047": {
+    "ja": "やめる",
+    "en": "Cancel"
+  },
+  "components.ItemModal.text048": {
+    "ja": "中身は削除しましたが、入れ物の削除に失敗しました: {p1}",
+    "en": "The contents were deleted, but deleting the bag failed: {p1}"
   },
   "components.MCPSection.text001": {
     "ja": "必要なランタイムが見つからない",
@@ -5635,114 +5931,6 @@
     "ja": "ペルソナには使わせない",
     "en": "Never allow personas to use this"
   },
-  "components.QuarantineModal.text001": {
-    "ja": "バックアップを選択してください。",
-    "en": "Select a backup."
-  },
-  "components.QuarantineModal.text002": {
-    "ja": "「{p1}」を以下のバックアップから復元します。よろしいですか？\n\n{p2}",
-    "en": "Restore \"{p1}\" from this backup?\n\n{p2}"
-  },
-  "components.QuarantineModal.text003": {
-    "ja": "復元失敗",
-    "en": "Restore failed"
-  },
-  "components.QuarantineModal.text004": {
-    "ja": "「{p1}」を空履歴で再開します。\n\n破損ファイルは退避済みなので無事ですが、",
-    "en": "Restart \"{p1}\" with empty history.\n\nThe damaged file has been safely set aside, but "
-  },
-  "components.QuarantineModal.text005": {
-    "ja": "この操作後は新規会話のみ表示されます。本当に進めますか？",
-    "en": "only new conversations will appear after this operation. Really proceed?"
-  },
-  "components.QuarantineModal.text006": {
-    "ja": "リセット失敗",
-    "en": "Reset failed"
-  },
-  "components.QuarantineModal.text007": {
-    "ja": "破損ビルディングの管理",
-    "en": "Damaged building management"
-  },
-  "components.QuarantineModal.text008": {
-    "ja": "読み込み中...",
-    "en": "Loading..."
-  },
-  "components.QuarantineModal.text009": {
-    "ja": "✓ 隔離中のビルディングはありません。すべて正常です。",
-    "en": "✓ No quarantined buildings. All are healthy."
-  },
-  "components.QuarantineModal.text010": {
-    "ja": "異常理由:",
-    "en": "Reason:"
-  },
-  "components.QuarantineModal.text011": {
-    "ja": "退避先:",
-    "en": "Saved at:"
-  },
-  "components.QuarantineModal.text012": {
-    "ja": "（退避失敗）",
-    "en": "(failed to set aside)"
-  },
-  "components.QuarantineModal.text013": {
-    "ja": "退避エラー:",
-    "en": "Backup error:"
-  },
-  "components.QuarantineModal.text014": {
-    "ja": " バックアップから復元",
-    "en": " Restore from backup"
-  },
-  "components.QuarantineModal.text015": {
-    "ja": "利用可能なバックアップがありません。",
-    "en": "No backups available."
-  },
-  "components.QuarantineModal.text016": {
-    "ja": "選択したバックアップで復元",
-    "en": "Restore selected backup"
-  },
-  "components.QuarantineModal.text017": {
-    "ja": "または",
-    "en": "or"
-  },
-  "components.QuarantineModal.text018": {
-    "ja": " リセット（空履歴で再開）",
-    "en": " Reset (restart with empty history)"
-  },
-  "components.QuarantineModal.text019": {
-    "ja": "破損ファイルは退避先に保持されたまま、新規空履歴で再開します。 後から手動で復旧することも可能です。",
-    "en": "Start with an empty history while keeping the damaged file at its backup location. Manual recovery is still possible later."
-  },
-  "components.QuarantineModal.text020": {
-    "ja": "リセット",
-    "en": "Reset"
-  },
-  "components.QuarantineModal.text021": {
-    "ja": "手動対応する場合",
-    "en": "Manual recovery"
-  },
-  "components.QuarantineModal.text022": {
-    "ja": "上記の操作を使わず手動で対応したい場合は、SAIVerseを停止してから",
-    "en": "To recover manually instead of using these operations, stop SAIVerse and repair the "
-  },
-  "components.QuarantineModal.text023": {
-    "ja": " ファイルを修復し、元の",
-    "en": " file, then rename it back to "
-  },
-  "components.QuarantineModal.text024": {
-    "ja": "にリネームしてSAIVerseを再起動してください。",
-    "en": " and restart SAIVerse."
-  },
-  "components.QuarantineModal.text025": {
-    "ja": "JSONパース失敗（破損）",
-    "en": "JSON parsing failed (damaged)"
-  },
-  "components.QuarantineModal.text026": {
-    "ja": "0バイトファイル（書き込み中断の痕跡）",
-    "en": "Empty file (sign of an interrupted write)"
-  },
-  "components.QuarantineModal.text027": {
-    "ja": "構造異常（配列ではない）",
-    "en": "Invalid structure (not an array)"
-  },
   "components.RightSidebar.text001": {
     "ja": "現在地",
     "en": "Current location"
@@ -5818,6 +6006,114 @@
   "components.RightSidebar.text019": {
     "ja": "この部屋にアイテムを作る",
     "en": "Create item in this room"
+  },
+  "components.RightSidebar.text020": {
+    "ja": "購読中のフィード",
+    "en": "Subscribed feeds"
+  },
+  "components.RightSidebar.text021": {
+    "ja": "購読中のフィードはありません",
+    "en": "No subscribed feeds"
+  },
+  "components.RightSidebar.text022": {
+    "ja": "新着記事",
+    "en": "Latest articles"
+  },
+  "components.RightSidebar.text023": {
+    "ja": "まだ記事が届いていません",
+    "en": "No articles yet"
+  },
+  "components.RightSidebar.text024": {
+    "ja": "配信の設定",
+    "en": "Delivery settings"
+  },
+  "components.RightSidebar.text025": {
+    "ja": "このスタンドからペルソナに届く記事の量を調整できます。",
+    "en": "Adjust how much this stand delivers to personas."
+  },
+  "components.RightSidebar.text026": {
+    "ja": "取得間隔",
+    "en": "Fetch interval"
+  },
+  "components.RightSidebar.text027": {
+    "ja": "フィードを取りに行く間隔です。短いほど多くの記事が届きます。",
+    "en": "How often the feeds are fetched. Shorter intervals deliver more articles."
+  },
+  "components.RightSidebar.text028": {
+    "ja": "既定 ({p1})",
+    "en": "Default ({p1})"
+  },
+  "components.RightSidebar.text029": {
+    "ja": "{p1} 時間",
+    "en": "{p1} h"
+  },
+  "components.RightSidebar.text030": {
+    "ja": "{p1} 分",
+    "en": "{p1} min"
+  },
+  "components.RightSidebar.text031": {
+    "ja": "要約の長さ (字)",
+    "en": "Summary length (characters)"
+  },
+  "components.RightSidebar.text032": {
+    "ja": "記事 1 件につき、ペルソナへ届ける要約の字数です。0 にすると要約を載せません。",
+    "en": "Characters of summary delivered per article. 0 leaves the summary out."
+  },
+  "components.RightSidebar.text033": {
+    "ja": "見出しの上限 (字)",
+    "en": "Headline limit (characters)"
+  },
+  "components.RightSidebar.text034": {
+    "ja": "見出しがこれより長いときは、末尾を「…」にして切り詰めます。",
+    "en": "Longer headlines are shortened and end with \"…\"."
+  },
+  "components.RightSidebar.text035": {
+    "ja": "1 回に届く件数",
+    "en": "Articles per delivery"
+  },
+  "components.RightSidebar.text036": {
+    "ja": "1 回の配送で、購読しているフィード 1 つからペルソナへ届く記事の数です。0 にするとこのスタンドからは届きません。",
+    "en": "Number of articles each subscribed feed delivers to a persona at a time. 0 stops delivery from this stand."
+  },
+  "components.RightSidebar.text037": {
+    "ja": "既定値を使う ({p1})",
+    "en": "Use default ({p1})"
+  },
+  "components.RightSidebar.text038": {
+    "ja": "保存",
+    "en": "Save"
+  },
+  "components.RightSidebar.text039": {
+    "ja": "保存中...",
+    "en": "Saving..."
+  },
+  "components.RightSidebar.text040": {
+    "ja": "保存しました",
+    "en": "Saved"
+  },
+  "components.RightSidebar.text041": {
+    "ja": "保存に失敗しました: {p1}",
+    "en": "Failed to save: {p1}"
+  },
+  "components.RightSidebar.text042": {
+    "ja": "設定を読み込めませんでした: {p1}",
+    "en": "Could not load the settings: {p1}"
+  },
+  "components.RightSidebar.text043": {
+    "ja": "設定を読み込み中...",
+    "en": "Loading settings..."
+  },
+  "components.RightSidebar.text044": {
+    "ja": "「{p1}」は {p2} 以上 {p3} 以下の整数で入力してください",
+    "en": "\"{p1}\" must be a whole number from {p2} to {p3}"
+  },
+  "components.RightSidebar.text045": {
+    "ja": "{p1} 字",
+    "en": "{p1} chars"
+  },
+  "components.RightSidebar.text046": {
+    "ja": "{p1} 件",
+    "en": "{p1} items"
   },
   "components.ScheduleModal.text001": {
     "ja": "このアラームを削除しますか？",
@@ -6827,6 +7123,58 @@
     "ja": "保存しました。SAIVerse を起動してから既にこのプロバイダで喋ったペルソナは、再起動するまで変更前の接続を使い続けます。通常用と軽量用の接続は別々に作られるため、同じペルソナの中で新旧が混ざることもあります。",
     "en": "Saved. Personas that have already used this provider since SAIVerse started keep using the previous connection until restart. Standard and lightweight connections are created separately, so a persona may use a mix of old and new connections."
   },
+  "components.settings.ProviderManagementPanel.text028": {
+    "ja": " キー設定",
+    "en": " Set key"
+  },
+  "components.settings.ProviderManagementPanel.text029": {
+    "ja": "API キー",
+    "en": "API key"
+  },
+  "components.settings.ProviderManagementPanel.text030": {
+    "ja": "{p1} として保存",
+    "en": "Saved as {p1}"
+  },
+  "components.settings.ProviderManagementPanel.text031": {
+    "ja": " 取得方法",
+    "en": " How to get one"
+  },
+  "components.settings.ProviderManagementPanel.text032": {
+    "ja": "API キーの取得方法を見る",
+    "en": "How to get an API key"
+  },
+  "components.settings.ProviderManagementPanel.text033": {
+    "ja": "設定済み - 変更する場合のみ入力",
+    "en": "Already set - enter only to change"
+  },
+  "components.settings.ProviderManagementPanel.text034": {
+    "ja": "API キーを入力",
+    "en": "Enter API key"
+  },
+  "components.settings.ProviderManagementPanel.text035": {
+    "ja": "保存",
+    "en": "Save"
+  },
+  "components.settings.ProviderManagementPanel.text036": {
+    "ja": "API キーを保存しました。このキーを使うペルソナすべてに、次の返答から効きます (再起動は要りません)。書いている途中の返答は、書き始めたときのキーのまま最後まで書きます。",
+    "en": "API key saved. Every persona that uses this key picks it up from its next reply (no restart needed). A reply already being written finishes with the key it started with."
+  },
+  "components.settings.ProviderManagementPanel.text037": {
+    "ja": "API キーの保存に失敗しました: {p1}",
+    "en": "Failed to save the API key: {p1}"
+  },
+  "components.settings.ProviderManagementPanel.text038": {
+    "ja": "保存すると、このキーを使うペルソナすべてに次の返答から効きます。再起動は要りません。",
+    "en": "Once saved, every persona that uses this key picks it up from its next reply. No restart needed."
+  },
+  "components.settings.ProviderManagementPanel.text039": {
+    "ja": "無料枠",
+    "en": "Free tier"
+  },
+  "components.settings.ProviderManagementPanel.text040": {
+    "ja": "有料枠",
+    "en": "Paid tier"
+  },
   "components.settings.WorldEditor.text001": {
     "ja": "不明なエラー",
     "en": "Unknown error"
@@ -6886,10 +7234,6 @@
   "components.settings.WorldEditor.text015": {
     "ja": "この City を削除しますか？",
     "en": "Delete this City?"
-  },
-  "components.settings.WorldEditor.text016": {
-    "ja": "この Building を削除しますか？",
-    "en": "Delete this building?"
   },
   "components.settings.WorldEditor.text017": {
     "ja": "このペルソナを削除しますか？",
@@ -7042,10 +7386,6 @@
   "components.settings.WorldEditor.text053": {
     "ja": "定員",
     "en": "Capacity"
-  },
-  "components.settings.WorldEditor.text054": {
-    "ja": "インターバル（秒）",
-    "en": "Interval (seconds)"
   },
   "components.settings.WorldEditor.itemDisplayLimit": {
     "ja": "部屋の様子に表示するアイテム数（空欄で既定の 10 個）",
@@ -7431,6 +7771,54 @@
     "ja": "日本語 (Japanese)",
     "en": "Japanese"
   },
+  "components.settings.WorldEditor.text149": {
+    "ja": "「{p1}」を削除します。この操作は元に戻せません。",
+    "en": "You are about to delete \"{p1}\". This cannot be undone."
+  },
+  "components.settings.WorldEditor.text150": {
+    "ja": "この Building で交わされた会話の記録（{p1} 件）は、削除した後も残ります。",
+    "en": "The conversation held in this building ({p1} message(s)) will remain after the deletion."
+  },
+  "components.settings.WorldEditor.text151": {
+    "ja": "この Building に置かれている設置物 {p1} 個（{p2}）も一緒に削除されます。フィードの購読や取得した記事など、設置物に付いている記録も消えます。",
+    "en": "The {p1} fixture(s) in this building ({p2}) will also be deleted, together with their records such as feed subscriptions and fetched articles."
+  },
+  "components.settings.WorldEditor.text152": {
+    "ja": "、",
+    "en": ", "
+  },
+  "components.settings.WorldEditor.text153": {
+    "ja": "この Building にはアイテムが {p1} 個置かれています。",
+    "en": "{p1} item(s) are placed in this building."
+  },
+  "components.settings.WorldEditor.text154": {
+    "ja": "中の入れ物に入っているものも含めると {p1} 個です。",
+    "en": "{p1} item(s) in total, including those inside bags."
+  },
+  "components.settings.WorldEditor.text155": {
+    "ja": "これらのアイテムをどうしますか？",
+    "en": "What should happen to these items?"
+  },
+  "components.settings.WorldEditor.text156": {
+    "ja": "残す（どこにも置かれていない状態になります。ワールドエディタのアイテムの画面から置き直せます）",
+    "en": "Keep them (they will not be placed anywhere; you can place them again from the Items tab of the World Editor)"
+  },
+  "components.settings.WorldEditor.text157": {
+    "ja": "Building と一緒に削除する（入れ物の中身も削除されます。元に戻せません）",
+    "en": "Delete them with the building (the contents of bags are deleted too; this cannot be undone)"
+  },
+  "components.settings.WorldEditor.text158": {
+    "ja": "削除",
+    "en": "Delete"
+  },
+  "components.settings.WorldEditor.text159": {
+    "ja": "削除中...",
+    "en": "Deleting..."
+  },
+  "components.settings.WorldEditor.text160": {
+    "ja": "やめる",
+    "en": "Cancel"
+  },
   "components.SettingsModal.text001": {
     "ja": "読み込み中のため保存できません。少し待ってから再度お試しください。",
     "en": "Cannot save while loading. Wait a moment and try again."
@@ -7783,17 +8171,21 @@
     "ja": "リアルタイム情報",
     "en": "Real-time information"
   },
-  "components.SettingsModal.text086": {
-    "ja": "有効",
-    "en": "Enabled"
+  "components.SettingsModal.realtimeCurrentTimeLabel": {
+    "ja": "現在日時",
+    "en": "Current date and time"
   },
-  "components.SettingsModal.text087": {
-    "ja": "無効",
-    "en": "Disabled"
+  "components.SettingsModal.realtimeCurrentTimeDescription": {
+    "ja": "現在の日時をペルソナに知らせます。",
+    "en": "Tell the persona the current date and time."
   },
-  "components.SettingsModal.text088": {
-    "ja": "発言の直前に現在時刻・前回発言時刻・空間情報などの動的コンテキストを提供します。無効にすると、これらをこのペルソナには一切送りません（時刻を気にして会話が成立しなくなる場合などに）。",
-    "en": "Provide dynamic context such as the current time, previous reply time and spatial information immediately before a reply. Disable it to stop sending this information to this persona, for example if time awareness disrupts conversation."
+  "components.SettingsModal.realtimeLastUtteranceLabel": {
+    "ja": "前回発言日時",
+    "en": "Date and time of previous reply"
+  },
+  "components.SettingsModal.realtimeLastUtteranceDescription": {
+    "ja": "前回の発言からどれだけ時間が経ったか分かるよう、前回発言の日時を知らせます。",
+    "en": "Tell the persona when it last spoke, so it can tell how much time has passed since then."
   },
   "components.SettingsModal.text089": {
     "ja": "事前実行スペル",
@@ -7923,10 +8315,6 @@
     "ja": "作成",
     "en": "Create"
   },
-  "components.Sidebar.text006": {
-    "ja": "このビルディングは会話履歴ファイルが破損しているため隔離中です。アラートバナーから対応してください。",
-    "en": "This building is quarantined because its conversation history file is damaged. Use the alert banner to resolve it."
-  },
   "components.Sidebar.text007": {
     "ja": "折り畳む",
     "en": "Collapse"
@@ -8003,10 +8391,6 @@
     "ja": "移せませんでした。バックエンドに繋がっていない可能性があります。",
     "en": "Could not move it. The backend may be disconnected."
   },
-  "components.SystemAlertBanner.text006": {
-    "ja": "対応する",
-    "en": "Resolve"
-  },
   "components.SystemAlertBanner.text007": {
     "ja": "移しています…",
     "en": "Moving…"
@@ -8051,33 +8435,13 @@
     "ja": "退避先",
     "en": "Backup location"
   },
-  "components.SystemAlertBanner.text018": {
-    "ja": "退避先",
-    "en": "Backup location"
-  },
-  "components.SystemAlertBanner.text019": {
-    "ja": "元の場所",
-    "en": "Original location"
-  },
   "components.SystemAlertBanner.text020": {
     "ja": "パースエラー",
     "en": "Parse error"
   },
-  "components.SystemAlertBanner.text021": {
-    "ja": "退避エラー",
-    "en": "Backup error"
-  },
-  "components.SystemAlertBanner.text022": {
-    "ja": "復元手順",
-    "en": "Recovery steps"
-  },
   "components.SystemAlertBanner.text023": {
     "ja": "異常理由",
     "en": "Reason"
-  },
-  "components.SystemAlertBanner.text024": {
-    "ja": "利用可能なバックアップ",
-    "en": "Available backups"
   },
   "components.SystemAlertBanner.text025": {
     "ja": "状態",
@@ -9307,33 +9671,9 @@
     "ja": "Manager not ready",
     "en": "Manager not ready"
   },
-  "api.system.text003": {
-    "ja": "Building {p1} is not quarantined",
-    "en": "Building {p1} is not quarantined"
-  },
-  "api.system.text004": {
-    "ja": "Backup '{p1}' is not in the available backup list",
-    "en": "Backup '{p1}' is not in the available backup list"
-  },
-  "api.system.text005": {
-    "ja": "Backup file does not exist: {p1}",
-    "en": "Backup file does not exist: {p1}"
-  },
-  "api.system.text006": {
-    "ja": "復元完了: {p1}件のメッセージを読み込みました",
-    "en": "Restored: loaded {p1} messages"
-  },
   "api.system.text007": {
     "ja": "Manager not ready",
     "en": "Manager not ready"
-  },
-  "api.system.text008": {
-    "ja": "Building {p1} is not quarantined",
-    "en": "Building {p1} is not quarantined"
-  },
-  "api.system.text009": {
-    "ja": "リセット完了: 空履歴で再開。破損ファイルは {p1} に保持。",
-    "en": "Reset complete: restarted with empty history. Damaged file kept at {p1}."
   },
   "api.system.text010": {
     "ja": "Manager not ready",
@@ -9366,22 +9706,6 @@
   "api.system.text017": {
     "ja": "この環境には更新の安全確認に必要な部品 (psutil) がまだ入っていません。SAIVerse を終了してから update.bat (macOS / Linux は update.sh) を一度実行してください。それ以降はこのボタンから更新できます。",
     "en": "The psutil package required for update safety checks is missing. Exit SAIVerse and run update.bat (update.sh on macOS/Linux) once. After that, this button can perform updates."
-  },
-  "api.system.text018": {
-    "ja": "Backup is not a valid history (expected list, got {p1})",
-    "en": "Backup is not a valid history (expected list, got {p1})"
-  },
-  "api.system.text019": {
-    "ja": "Backup file is not valid JSON: {p1}",
-    "en": "Backup file is not valid JSON: {p1}"
-  },
-  "api.system.text020": {
-    "ja": "Failed to restore backup: {p1}",
-    "en": "Failed to restore backup: {p1}"
-  },
-  "api.system.text021": {
-    "ja": "Failed to reset: {p1}",
-    "en": "Failed to reset: {p1}"
   },
   "api.system.text022": {
     "ja": "退避に失敗しました: {p1}",
@@ -11051,18 +11375,6 @@
     "ja": "City",
     "en": "City"
   },
-  "components.QuarantineModal.label001": {
-    "ja": "Close",
-    "en": "Close"
-  },
-  "components.QuarantineModal.label002": {
-    "ja": " .corrupted_*",
-    "en": " .corrupted_*"
-  },
-  "components.QuarantineModal.label003": {
-    "ja": " log.json ",
-    "en": " log.json "
-  },
   "components.RightSidebar.label001": {
     "ja": "ID: ",
     "en": "ID: "
@@ -11455,6 +11767,98 @@
     "ja": "少ない",
     "en": "Low"
   },
+  "components.GlobalSettingsModal.channelTitle": {
+    "ja": "配布チャンネル",
+    "en": "Release channel"
+  },
+  "components.GlobalSettingsModal.channelDescription": {
+    "ja": "受け取る版の種類です。アーリーアクセス版は、大きな版を正式公開の前に試せる、試験中の版です。",
+    "en": "Which line of releases this SAIVerse receives. Early access lets you try major versions, still under testing, before their official release."
+  },
+  "components.GlobalSettingsModal.channelStable": {
+    "ja": "安定版",
+    "en": "Stable"
+  },
+  "components.GlobalSettingsModal.channelEarlyAccess": {
+    "ja": "アーリーアクセス版",
+    "en": "Early access"
+  },
+  "components.GlobalSettingsModal.channelLoading": {
+    "ja": "現在のチャンネルを確認しています...",
+    "en": "Checking the current channel..."
+  },
+  "components.GlobalSettingsModal.channelCurrentVersion": {
+    "ja": "使用中の版: v{p1}",
+    "en": "Installed version: v{p1}"
+  },
+  "components.GlobalSettingsModal.channelJoinOpen": {
+    "ja": "アーリーアクセス版に参加する...",
+    "en": "Join early access..."
+  },
+  "components.GlobalSettingsModal.channelConsentTitle": {
+    "ja": "参加する前に、次のことを確認してください",
+    "en": "Before joining, please confirm the following"
+  },
+  "components.GlobalSettingsModal.channelConsentTrial": {
+    "ja": "アーリーアクセス版は試験中の版です。不具合を先に踏む役になることがあります。",
+    "en": "Early-access versions are still being tested. You may be the first to run into their bugs."
+  },
+  "components.GlobalSettingsModal.channelConsentSnapshot": {
+    "ja": "参加の直前に、ワールド全体の復元ポイントが自動で保存されます。安定版が追いつく前に戻りたくなったときは、この復元ポイントに戻すことになります。",
+    "en": "Right before joining, a restore point of your whole world is saved automatically. If you want to go back before the stable version catches up, you will return to this restore point."
+  },
+  "components.GlobalSettingsModal.channelConsentNoReturn": {
+    "ja": "ワールドのデータは新しい形に進みます。次の安定版がこの版に追いつくまで、安定版には戻れません。",
+    "en": "Your world data moves forward to a newer format. You cannot return to the stable channel until the next stable version catches up."
+  },
+  "components.GlobalSettingsModal.channelConsentAgree": {
+    "ja": "上の内容を理解したうえで、アーリーアクセス版に参加します",
+    "en": "I understand the above and want to join early access"
+  },
+  "components.GlobalSettingsModal.channelCancel": {
+    "ja": "やめる",
+    "en": "Cancel"
+  },
+  "components.GlobalSettingsModal.channelJoinConfirm": {
+    "ja": "参加して再起動する",
+    "en": "Join and restart"
+  },
+  "components.GlobalSettingsModal.channelSwitching": {
+    "ja": "切り替えを始めています...",
+    "en": "Starting the switch..."
+  },
+  "components.GlobalSettingsModal.channelReturnAvailable": {
+    "ja": "安定版 v{p1} が出ています。安定版に戻れます。",
+    "en": "Stable version v{p1} is out. You can return to the stable channel."
+  },
+  "components.GlobalSettingsModal.channelReturnButton": {
+    "ja": "安定版に戻る",
+    "en": "Return to stable"
+  },
+  "components.GlobalSettingsModal.channelReturnConfirm": {
+    "ja": "安定版に戻しますか？\n\n安定版の最新 (v{p1}) に切り替わり、SAIVerse は自動で再起動します。数分かかることがあります。",
+    "en": "Return to the stable channel?\n\nSAIVerse will switch to the latest stable version (v{p1}) and restart automatically. This may take a few minutes."
+  },
+  "components.GlobalSettingsModal.channelReturnNotYet": {
+    "ja": "安定版に戻れるのは、次の安定版がこの版に追いついてからです。",
+    "en": "You can return to stable once the next stable version catches up with this one."
+  },
+  "components.GlobalSettingsModal.channelReturnUnknown": {
+    "ja": "安定版の最新を確認できなかったため、いま戻れるかどうかは分かりません。",
+    "en": "Could not check the latest stable version, so it is unknown whether you can return now."
+  },
+  "components.GlobalSettingsModal.channelSwitchFailed": {
+    "ja": "切り替えを始められませんでした。バックエンドのログを確認してください。",
+    "en": "Could not start the switch. Check the backend logs."
+  },
+  "components.GlobalSettingsModal.channelSwitchUnreachable": {
+    "ja": "切り替えを始められませんでした。バックエンドに接続できない可能性があります。",
+    "en": "Could not start the switch. The backend may be unreachable."
+  },
+  "components.GlobalSettingsModal.channelAboutStableCaughtUp": {
+    "ja": "安定版 v{p1} が出ています。「環境」の「配布チャンネル」から安定版に戻れます",
+    "en": "Stable version v{p1} is out. You can return to stable from \"Release channel\" under \"Environment\""
+  },
   "components.tutorial.steps.StepWelcome.text002Suffix": {
     "ja": "。",
     "en": "."
@@ -11470,5 +11874,77 @@
   "components.memory.MemopediaConversion.period": {
     "ja": "。",
     "en": "."
+  },
+  "providerConfig.invalid": {
+    "ja": "プロバイダ設定ファイルが壊れているため利用不可",
+    "en": "Unavailable: invalid provider configuration file"
+  },
+  "providerConfig.repair": {
+    "ja": "このファイルを修正し、プロバイダ設定を再読み込みしてください。接続先やキーは自動で切り替えません。",
+    "en": "Repair this file and reload provider settings. The connection and key will not be switched automatically."
+  },
+  "providerConfig.reloadFailed": {
+    "ja": "設定を再読み込みできませんでした。もう一度試してください。",
+    "en": "Could not reload settings. Please try again."
+  },
+  "components.ItemReferenceModal.close": {
+    "ja": "閉じる",
+    "en": "Close"
+  },
+  "components.ItemReferenceModal.loading": {
+    "ja": "アイテムを読み込み中...",
+    "en": "Loading item..."
+  },
+  "components.ItemReferenceModal.error": {
+    "ja": "アイテムを読み込めませんでした。削除されているか、接続に問題がある可能性があります。",
+    "en": "Could not load the item. It may have been deleted, or there may be a connection problem."
+  },
+  "components.InventoryModal.error": {
+    "ja": "インベントリを読み込めませんでした。更新して再試行してください。",
+    "en": "Could not load the inventory. Refresh to try again."
+  },
+  "movementNotices.label": {
+    "ja": "入退室ログ",
+    "en": "Entry and exit notices"
+  },
+  "movementNotices.globalHint": {
+    "ja": "チャットでユーザー・ペルソナの入退室通知を表示するかを設定します。Building ごとの設定が優先されます。記録やペルソナの認識は変わりません。",
+    "en": "Choose whether chat shows user and persona entry/exit notices. Each Building can override this setting. Records and persona awareness are unchanged."
+  },
+  "movementNotices.buildingHint": {
+    "ja": "この Building のチャットでユーザー・ペルソナの入退室通知を表示するかを設定します。記録やペルソナの認識は変わりません。",
+    "en": "Choose whether chat shows user and persona entry/exit notices from this Building. Records and persona awareness are unchanged."
+  },
+  "movementNotices.inherit": {
+    "ja": "グローバル設定に合わせる",
+    "en": "Use global setting"
+  },
+  "movementNotices.show": {
+    "ja": "表示",
+    "en": "Show"
+  },
+  "movementNotices.hide": {
+    "ja": "非表示",
+    "en": "Hide"
+  },
+  "movementNotices.saving": {
+    "ja": "保存中…",
+    "en": "Saving…"
+  },
+  "movementNotices.saveError": {
+    "ja": "保存できませんでした。もう一度選び直してください。",
+    "en": "Could not save. Please select the setting again."
+  },
+  "movementNotices.loadError": {
+    "ja": "入退室ログの設定を読み込めませんでした。",
+    "en": "Could not load entry and exit notice settings."
+  },
+  "movementNotices.retry": {
+    "ja": "再読み込み",
+    "en": "Retry"
+  },
+  "movementNotices.loadOlder": {
+    "ja": "以前のメッセージを読み込む",
+    "en": "Load older messages"
   }
 }

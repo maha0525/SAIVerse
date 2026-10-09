@@ -37,6 +37,19 @@ except Exception:  # pragma: no cover - absence is fine
 _sse_error_local: threading.local = threading.local()
 
 
+# 安全性フィルターでブロックされた回の見出し (チャットのエラー札の一行目に出る)。
+# 何が起きたかだけを書き、次の手立て (別モデルへ切り替えて発言の「再送」) は
+# 画面側の説明文 (i18n app.page.text050) に任せる。「入力内容を変更して」とは
+# 書かない — 発言は既に保存されていて、Gemini が拒んだ内容も別モデルなら
+# 通ることがあるから (2026-09-24 修正)。
+_RESPONSE_BLOCK_USER_MESSAGE = "Geminiの安全性フィルターにより、応答がブロックされました。"
+
+
+def _prompt_block_user_message(block_reason: str) -> str:
+    """プロンプト段階のブロック (prompt_feedback.block_reason) の見出し。"""
+    return f"Geminiの安全性フィルターにより、応答がブロックされました（{block_reason}）。"
+
+
 def _sdk_structured_parse_failure(exc: BaseException) -> Tuple[bool, Optional[str]]:
     """Detect a structured-output parse failure raised *inside* the google-genai SDK.
 
@@ -252,7 +265,7 @@ from saiverse.media_summary import (
 from tools import GEMINI_TOOLS_SPEC
 from saiverse.llm_router import route
 
-from .base import EmptyResponseError, IncompleteStreamError, LLMClient, get_llm_logger
+from .base import EmptyResponseError, IncompleteStreamError, LLMClient, ToolSpecFormat, get_llm_logger
 from saiverse.logging_config import log_timeout_event
 from .utils import content_to_text, is_truthy_flag, merge_reasoning_strings
 
@@ -391,6 +404,9 @@ def clamp_auto_cache_keep_seconds(value: Any) -> int:
 
 class GeminiClient(LLMClient):
     """Client for Google Gemini API."""
+
+    def tool_spec_format(self) -> ToolSpecFormat:
+        return "gemini"
 
     def __init__(
         self,
@@ -881,8 +897,69 @@ class GeminiClient(LLMClient):
         return _to_schema(js)
 
     @staticmethod
+    def _to_response_json_schema(node: Any) -> Any:
+        """Rewrite a raw JSON Schema into what ``response_json_schema`` accepts.
+
+        The raw path supports ``enum`` only for strings and numbers and has no
+        ``const`` at all (google-genai ``GenerateContentConfig.response_json_schema``
+        docstring). So a string/number ``const`` becomes a one-value ``enum``;
+        a ``const`` or ``enum`` holding booleans / null is dropped and written
+        into ``description`` so the model still sees the constraint.
+        Keys inside ``properties`` are property names, not keywords, and are
+        never rewritten.
+        """
+        if isinstance(node, list):
+            return [GeminiClient._to_response_json_schema(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+
+        def representable(value: Any) -> bool:
+            return isinstance(value, str) or (
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+            )
+
+        out: Dict[str, Any] = {}
+        notes: List[str] = []
+        for key, value in node.items():
+            if key in ("properties", "patternProperties", "$defs", "definitions") and isinstance(value, dict):
+                out[key] = {
+                    name: GeminiClient._to_response_json_schema(sub)
+                    for name, sub in value.items()
+                }
+            elif key in ("items", "prefixItems", "anyOf", "oneOf", "allOf", "additionalProperties"):
+                out[key] = GeminiClient._to_response_json_schema(value)
+            elif key == "enum" and isinstance(value, list):
+                if all(representable(v) for v in value):
+                    out[key] = value
+                else:
+                    notes.append(
+                        "Allowed values: "
+                        + ", ".join(json.dumps(v, ensure_ascii=False) for v in value)
+                        + "."
+                    )
+            elif key == "const":
+                if representable(value) and "enum" not in node:
+                    out["enum"] = [value]
+                else:
+                    notes.append(f"Must be {json.dumps(value, ensure_ascii=False)}.")
+            else:
+                out[key] = value
+        if notes:
+            base = out.get("description")
+            out["description"] = " ".join(([base] if isinstance(base, str) and base else []) + notes)
+        return out
+
+    @staticmethod
     def _requires_json_schema(node: Any) -> bool:
         if isinstance(node, dict):
+            # types.Schema.enum is list[str]; a non-string enum/const would
+            # make _schema_from_json raise, so send the raw JSON Schema instead
+            # (keeps the constraint rather than dropping it).
+            enum_val = node.get("enum")
+            if isinstance(enum_val, list) and any(not isinstance(v, str) for v in enum_val):
+                return True
+            if "const" in node and not isinstance(node["const"], str):
+                return True
             if "additionalProperties" in node:
                 ap_val = node.get("additionalProperties")
                 if ap_val not in (None, False):
@@ -1449,7 +1526,7 @@ class GeminiClient(LLMClient):
         if response_schema:
             cfg_kwargs["response_mime_type"] = "application/json"
             if isinstance(response_schema, dict) and self._requires_json_schema(response_schema):
-                cfg_kwargs["response_json_schema"] = response_schema
+                cfg_kwargs["response_json_schema"] = self._to_response_json_schema(response_schema)
             else:
                 schema_obj = self._schema_from_json(response_schema)
                 if schema_obj is not None:
@@ -1601,10 +1678,7 @@ class GeminiClient(LLMClient):
                         )
                         raise SafetyFilterError(
                             f"Prompt blocked by Gemini: {block_str}",
-                            user_message=(
-                                f"入力内容がGeminiの安全性フィルターによりブロックされました（{block_str}）。"
-                                "該当メッセージの内容を確認してください。"
-                            ),
+                            user_message=_prompt_block_user_message(block_str),
                         )
 
                     if not all_parts:
@@ -1627,7 +1701,7 @@ class GeminiClient(LLMClient):
                             ]
                             raise SafetyFilterError(
                                 f"Content blocked by safety filter (streaming). Blocked: {blocked}",
-                                user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+                                user_message=_RESPONSE_BLOCK_USER_MESSAGE,
                             )
                         raise EmptyResponseError(
                             f"No parts in stream response (finish_reason={last_finish_reason})"
@@ -1731,10 +1805,7 @@ class GeminiClient(LLMClient):
                         )
                         raise SafetyFilterError(
                             f"Prompt blocked by Gemini: {block_str}",
-                            user_message=(
-                                f"入力内容がGeminiの安全性フィルターによりブロックされました（{block_str}）。"
-                                "該当メッセージの内容を確認してください。"
-                            ),
+                            user_message=_prompt_block_user_message(block_str),
                         )
 
                 if not resp.candidates:
@@ -1758,7 +1829,7 @@ class GeminiClient(LLMClient):
                         logging.warning("[gemini] Response blocked by safety filter: %s", detail)
                         raise SafetyFilterError(
                             f"Content blocked by safety filter. {detail}",
-                            user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+                            user_message=_RESPONSE_BLOCK_USER_MESSAGE,
                         )
 
                 if not candidate.content or not candidate.content.parts:
@@ -2113,6 +2184,23 @@ class GeminiClient(LLMClient):
                 get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
                 if finish_reason_time is not None:
                     post_finish_chunk_count += 1
+                # プロンプト段階のブロック (PROHIBITED_CONTENT 等)。この時 candidates は
+                # None なので、下の candidates 判定より先に見ないと黙って読み飛ばされ、
+                # 空のストリームとして理由なく終わる (2026-09-24 修正)。
+                _pf = getattr(chunk, "prompt_feedback", None)
+                _br = getattr(_pf, "block_reason", None) if _pf else None
+                if _br is not None:
+                    block_str = str(_br)
+                    _block_usage = getattr(chunk, "usage_metadata", None)
+                    logging.warning(
+                        "[gemini_stream] Prompt blocked: block_reason=%s, prompt_tokens=%s",
+                        block_str,
+                        getattr(_block_usage, "prompt_token_count", None) if _block_usage else None,
+                    )
+                    raise SafetyFilterError(
+                        f"Prompt blocked by Gemini: {block_str}",
+                        user_message=_prompt_block_user_message(block_str),
+                    )
                 if not chunk.candidates:
                     continue
                 candidate = chunk.candidates[0]
@@ -2141,7 +2229,7 @@ class GeminiClient(LLMClient):
                         logging.warning("[gemini] Stream blocked by safety filter: %s", detail)
                         raise SafetyFilterError(
                             f"Content blocked by safety filter. {detail}",
-                            user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+                            user_message=_RESPONSE_BLOCK_USER_MESSAGE,
                         )
 
                 if not candidate.content or not candidate.content.parts:
@@ -2351,7 +2439,7 @@ class GeminiClient(LLMClient):
         if response_schema and not use_tools:
             cfg_kwargs["response_mime_type"] = "application/json"
             if isinstance(response_schema, dict) and self._requires_json_schema(response_schema):
-                cfg_kwargs["response_json_schema"] = response_schema
+                cfg_kwargs["response_json_schema"] = self._to_response_json_schema(response_schema)
             else:
                 schema_obj = self._schema_from_json(response_schema)
                 if schema_obj is not None:

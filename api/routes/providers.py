@@ -31,16 +31,22 @@ VALID_UI_PROTOCOLS = {"openai_compat", "ollama_compat"}
 
 # All known protocols accepted on update. Used to validate that update
 # requests don't introduce unknown protocol names by typo.
-ALL_PROTOCOLS = {
-    "openai_compat", "ollama_compat", "anthropic_native", "gemini_native",
-    "xai_native", "nvidia_nim", "openai_codex",
-    # 反射判断 (docs/intent/reflex_judgment.md) が話す System One 形式の宛先。
-    # llm_clients/ ではなく saiverse/reflex_judgment.py がコード実装を持つので、
-    # 他の native 系と同じく UI からは作れない (VALID_UI_PROTOCOLS に入れない)。
-    "jev_compat",
-}
+ALL_PROTOCOLS = provider_configs.SUPPORTED_PROVIDER_PROTOCOLS
 
 CONNECTION_TEST_TIMEOUT = 5.0
+
+
+class ApiKeyEnvInfo(BaseModel):
+    """One environment variable a provider's API key can be read from."""
+    name: str
+    # Whether this variable is set (non-empty) in the environment right now.
+    configured: bool
+
+
+class ProviderConfigError(BaseModel):
+    path: str
+    source: str
+    reason: str
 
 
 class ProviderInfo(BaseModel):
@@ -48,11 +54,22 @@ class ProviderInfo(BaseModel):
     id: str
     display_name: str
     protocol: str
+    available: bool = True
+    config_error: Optional[ProviderConfigError] = None
+    source: str = "unknown"
     base_url: Optional[str] = None
     api_key_env: Optional[str] = None
+    # Every environment variable this provider's key can be read from: the
+    # primary api_key_env first, then the definition's api_key_env_alternates
+    # (e.g. Gemini's free-tier key next to its paid-tier key). Empty when the
+    # provider names no api_key_env. The key panel in the UI shows one input
+    # per entry.
+    api_key_envs: list[ApiKeyEnvInfo] = []
     builtin: bool = False
-    # Whether the api_key_env variable is set in the environment.
-    # None means no api_key_env is configured (e.g., local Ollama).
+    # Whether ANY of the api_key_envs variables is set in the environment —
+    # the same "any one is enough" rule model availability uses
+    # (saiverse.model_configs.is_model_available), so the badge and the model
+    # list agree. None means no api_key_env is configured (e.g., local Ollama).
     api_key_configured: Optional[bool] = None
     # False for backends that accept any key (local servers such as LM Studio
     # or llama.cpp). Such providers stay usable with no key configured.
@@ -119,17 +136,51 @@ class InlineConnectionTestRequest(BaseModel):
     provider_id: Optional[str] = None
 
 
+def _api_key_env_names(cfg: dict) -> list[str]:
+    """Names of every environment variable this provider's key can be read from.
+
+    The primary ``api_key_env`` first, then ``api_key_env_alternates``. The
+    alternates follow the same rule as
+    ``saiverse.model_configs._get_required_env_vars``: read only when the field
+    is a list, keep only non-empty strings, and drop duplicates (including a
+    repeat of the primary name). A provider with no ``api_key_env`` has none.
+    """
+    primary = cfg.get("api_key_env")
+    if not primary:
+        return []
+    names = [primary]
+    alternates = cfg.get("api_key_env_alternates")
+    if isinstance(alternates, list):
+        for alt in alternates:
+            if isinstance(alt, str) and alt and alt not in names:
+                names.append(alt)
+    return names
+
+
 def _to_provider_info(pid: str, cfg: dict) -> ProviderInfo:
+    """Build the UI-facing info for a provider.
+
+    Every route that returns a provider (list, single get, create, update,
+    reload) goes through here, so they all report the same key variables.
+    """
     api_key_env = cfg.get("api_key_env")
+    api_key_envs = [
+        ApiKeyEnvInfo(name=name, configured=bool(os.environ.get(name)))
+        for name in _api_key_env_names(cfg)
+    ]
     api_key_configured: Optional[bool] = None
-    if api_key_env:
-        api_key_configured = bool(os.environ.get(api_key_env))
+    if api_key_envs:
+        api_key_configured = any(env.configured for env in api_key_envs)
     return ProviderInfo(
         id=pid,
+        available=not bool(cfg.get("config_error")),
+        config_error=cfg.get("config_error"),
+        source=cfg.get("source", "unknown"),
         display_name=cfg.get("display_name", pid),
         protocol=cfg.get("protocol", "unknown"),
         base_url=cfg.get("base_url"),
         api_key_env=api_key_env,
+        api_key_envs=api_key_envs,
         builtin=cfg.get("source") == provider_configs.SOURCE_BUILTIN,
         api_key_configured=api_key_configured,
         api_key_required=cfg.get("api_key_required"),
@@ -216,6 +267,9 @@ def update_provider(provider_id: str, req: ProviderUpdateRequest):
     if existing is None:
         raise HTTPException(status_code=404, detail=f"Provider not found: {provider_id}")
 
+    if existing.get("config_error"):
+        raise HTTPException(status_code=409, detail="Repair the invalid provider file before editing")
+
     # Merge the patch onto the existing config; unspecified fields keep their values
     merged = dict(existing)
     update_data = req.model_dump(exclude_none=True)
@@ -294,6 +348,33 @@ def reload_providers():
     ]
 
 
+def _connection_test_http_error(status_code: int) -> str:
+    """Build diagnostics from the status alone, never from upstream text.
+
+    Providers may reflect credentials in their body or reason phrase. Truncating
+    that text (or replacing just the key we know) is not a secrecy boundary.
+    """
+    if 300 <= status_code < 400:
+        explanation = "リダイレクト応答を受け取りました。自動追跡はしません。接続先 URL と http/https の設定を確認してください。"
+    elif status_code == 400:
+        explanation = "リクエストが拒否されました。リクエストまたは認証の形式を確認してください。"
+    elif status_code == 401:
+        explanation = "認証に失敗しました。API キーの設定を確認してください。"
+    elif status_code == 403:
+        explanation = "アクセスが拒否されました。API キーの権限とプロバイダの利用条件を確認してください。"
+    elif status_code == 404:
+        explanation = "接続先が見つかりません。base_url のパスと /v1 の有無を確認してください。"
+    elif status_code == 405:
+        explanation = "HTTP メソッドが許可されていません。プロトコルの設定を確認してください。"
+    elif status_code == 429:
+        explanation = "利用制限に達しました。時間をおいて再試行するか、利用枠を確認してください。"
+    elif 500 <= status_code < 600:
+        explanation = "プロバイダ側でエラーが発生しました。時間をおいて再試行してください。"
+    else:
+        explanation = "正常な応答を受け取れませんでした。URL とプロトコルの設定を確認してください。"
+    return f"HTTP {status_code}: {explanation}"
+
+
 def _run_connection_test(
     protocol: str,
     base_url: Optional[str],
@@ -329,6 +410,9 @@ def _run_connection_test(
             # as long as the probe carries no credential.
             validate_provider_url(base_url)
     except ValueError as exc:
+        # These diagnostics are owned by provider_security and describe local
+        # settings (host / credential variable names, never their values).
+        # Keep this catch separate from untrusted HTTP/transport/parser errors.
         return ConnectionTestResponse(success=False, error=str(exc))
 
     start = time.monotonic()
@@ -350,7 +434,7 @@ def _run_connection_test(
         else:
             return ConnectionTestResponse(
                 success=False,
-                error=f"このプロトコルは接続テスト未対応: {protocol}",
+                error="このプロトコルは接続テスト未対応です",
             )
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -359,7 +443,7 @@ def _run_connection_test(
             return ConnectionTestResponse(
                 success=False,
                 status_code=resp.status_code,
-                error=f"HTTP {resp.status_code}: {resp.text[:200]}",
+                error=_connection_test_http_error(resp.status_code),
                 elapsed_ms=elapsed_ms,
             )
 
@@ -373,8 +457,10 @@ def _run_connection_test(
             elif protocol == "ollama_compat":
                 # Ollama format: {"models": [{"name": "..."}, ...]}
                 models = [m["name"] for m in data.get("models", []) if isinstance(m, dict) and m.get("name")]
-        except Exception as exc:
-            LOGGER.warning("Failed to parse provider test response: %s", exc)
+        except Exception:
+            # Parser exceptions may quote upstream content; keep the event, not
+            # the exception, its traceback, or the response body.
+            LOGGER.warning("Failed to parse provider test response")
 
         return ConnectionTestResponse(
             success=True,
@@ -387,16 +473,23 @@ def _run_connection_test(
             success=False,
             error=f"接続タイムアウト ({CONNECTION_TEST_TIMEOUT}s)",
         )
-    except httpx.ConnectError as exc:
+    except httpx.ConnectError:
         return ConnectionTestResponse(
             success=False,
-            error=f"接続失敗: {exc}",
+            error="接続失敗: 接続先とネットワークの設定を確認してください。",
         )
-    except Exception as exc:
-        LOGGER.exception("Provider connection test failed")
+    except httpx.RequestError:
         return ConnectionTestResponse(
             success=False,
-            error=f"予期しないエラー: {exc}",
+            error="通信エラー: 接続先とネットワークの状態を確認してください。",
+        )
+    except Exception:
+        # A traceback includes the exception text, which may contain a URL,
+        # credential, or upstream response. Never log it for this probe.
+        LOGGER.error("Provider connection test failed")
+        return ConnectionTestResponse(
+            success=False,
+            error="予期しないエラー: 接続テストを完了できませんでした。",
         )
 
 
@@ -443,6 +536,10 @@ def test_provider_connection(provider_id: str):
     cfg = provider_configs.get_provider(provider_id)
     if cfg is None:
         raise HTTPException(status_code=404, detail=f"Provider not found: {provider_id}")
+    if cfg.get("config_error"):
+        return ConnectionTestResponse(
+            success=False, error=provider_configs.config_error_message(cfg["config_error"]),
+        )
     return _run_connection_test(
         protocol=cfg.get("protocol", ""),
         base_url=cfg.get("base_url"),

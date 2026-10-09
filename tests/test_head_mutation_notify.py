@@ -9,7 +9,8 @@ memory 系スペルの成功点結線。
 1. notify_head_mutation は section の capture→render と**同一の text** を outbox
    payload (target='perception.push', kind='head_mutation') に載せる (別文面禁止)。
 2. render が None の section (例: memopedia_index opt-in OFF) は通知しない。
-3. 台帳が無い環境は直接 push_perception へ degrade する。
+3. (欠番 — 台帳なし環境の直接 push への degrade は 2026-09-28 監査で撤去。
+   台帳は SAIVerseManager が無条件に持つ)
 4. push 確定後、B (last_notified) は該当 persona の**全 model 行**で前進し、
    backstop flush_diffs が同じ変化を再通知しない。
 5. ツール成功点 (memory_write → core_memory) から通知が発火する。
@@ -127,6 +128,7 @@ def manager(session_factory, ledger, persona):
         SessionLocal=session_factory,
         personas={PERSONA_ID: persona},
         execution_ledger=ledger,
+        sea_runtime=None,  # 本番 manager は無条件に持つ (未構築なら None)
     )
     return mgr
 
@@ -215,33 +217,8 @@ def test_notify_skips_unregistered_section(
 
 
 # ---------------------------------------------------------------------------
-# 3. 台帳なし環境の degrade (直接 push_perception + WARN)
+# 3. 台帳の故障でも raise しない
 # ---------------------------------------------------------------------------
-
-
-def test_notify_degrades_to_direct_push_without_ledger(pipeline, section, persona):
-    pushed: List[Any] = []
-    persona.sai_memory = SimpleNamespace(
-        is_ready=lambda: True,
-        push_perception=lambda kind, content, **kw: pushed.append((kind, content, kw)),
-    )
-    manager = SimpleNamespace(personas={PERSONA_ID: persona})  # execution_ledger 無し
-
-    pipeline.capture_all(_ctx(MODEL_A))
-    section.live_text = "degrade 経路の中身"
-
-    notify_head_mutation(
-        persona, manager, BUILDING, "core_memory",
-        operation_label="コア記憶を更新しました", pipeline=pipeline,
-    )
-
-    assert len(pushed) == 1
-    kind, content, kw = pushed[0]
-    assert kind == "head_mutation"
-    assert "degrade 経路の中身" in content
-    assert kw["reduce_key"] == "head_mutation:core_memory"
-    # degrade でも B は前進する → backstop が再通知しない
-    assert pipeline.flush_diffs(_ctx(MODEL_A), all_sections=True) == []
 
 
 def test_notify_never_raises_even_when_ledger_broken(pipeline, section, persona):
@@ -251,6 +228,7 @@ def test_notify_never_raises_even_when_ledger_broken(pipeline, section, persona)
 
     manager = SimpleNamespace(
         personas={PERSONA_ID: persona}, execution_ledger=_BrokenLedger(),
+        sea_runtime=None,
     )
     pipeline.capture_all(_ctx(MODEL_A))
     section.live_text = "失敗しても壊さない"
@@ -325,6 +303,7 @@ def _tool_manager(session_factory, ledger, persona):
         SessionLocal=session_factory,
         personas={PERSONA_ID: persona},
         execution_ledger=ledger,
+        sea_runtime=None,
     )
 
 
@@ -400,7 +379,7 @@ def test_diff_notify_b_advances_only_after_durable_queue(
     section.live_text = "配送保証のテスト"
 
     # 1) 配送予約に失敗 → False + B 据え置き
-    broken = SimpleNamespace(execution_ledger=_BrokenLedger())
+    broken = SimpleNamespace(execution_ledger=_BrokenLedger(), sea_runtime=None)
     assert inject_diff_notifications(
         persona, broken, BUILDING, pipeline=pipeline, model_key=MODEL_A,
     ) is False
@@ -409,6 +388,7 @@ def test_diff_notify_b_advances_only_after_durable_queue(
     # 2) 台帳が復旧 → 同じ差分が再検出されて outbox に載り、B が前進する
     working = SimpleNamespace(
         execution_ledger=ExecutionLedger(session_factory=session_factory),
+        sea_runtime=None,
     )
     assert inject_diff_notifications(
         persona, working, BUILDING, pipeline=pipeline, model_key=MODEL_A,
@@ -426,65 +406,3 @@ def test_diff_notify_b_advances_only_after_durable_queue(
         persona, working, BUILDING, pipeline=pipeline, model_key=MODEL_A,
     ) is False
     assert len(_outbox_rows(session_factory)) == 1
-
-
-def test_diff_notify_direct_path_defers_labels_until_memory_ready(
-    pipeline, section, persona,
-):
-    """degrade 経路も配送確定後にだけ B を進める (Codex 2026-08-17 medium)。
-
-    旧実装は flush_diffs (advance=True) で先に B を進めてから SAIMemory readiness
-    を確認していたため、未 ready のとき通知を捨てた後も B が進み、その差分は
-    永久に届かなかった。未 ready では B 据え置き → ready 後の再検出で届くこと。
-    """
-    pushed: List[Any] = []
-    ready = {"value": False}
-    persona.sai_memory = SimpleNamespace(
-        is_ready=lambda: ready["value"],
-        push_perception=lambda kind, content, **kw: pushed.append((kind, content)),
-    )
-    persona.history_manager = None
-    manager = SimpleNamespace(personas={PERSONA_ID: persona})
-
-    pipeline.capture_all(_ctx(MODEL_A))
-    section.live_text = "未readyの変化"
-
-    # 1) 未 ready → 捨てずに据え置き (False)
-    assert inject_diff_notifications(
-        persona, manager, BUILDING, pipeline=pipeline, model_key=MODEL_A,
-    ) is False
-    assert pushed == []
-
-    # 2) ready 復帰 → 同じ差分が再検出されて届き、B が前進する
-    ready["value"] = True
-    assert inject_diff_notifications(
-        persona, manager, BUILDING, pipeline=pipeline, model_key=MODEL_A,
-    ) is True
-    assert pushed and "未readyの変化" in pushed[0][1]
-
-    # 3) B 前進済み → 再通知なし
-    assert inject_diff_notifications(
-        persona, manager, BUILDING, pipeline=pipeline, model_key=MODEL_A,
-    ) is False
-
-
-def test_diff_notify_without_ledger_keeps_legacy_direct_push(pipeline, section, persona):
-    """degrade 経路 (manager に台帳なし) は従来どおり直接 push + B 前進。"""
-    pushed: List[Any] = []
-    persona.sai_memory = SimpleNamespace(
-        is_ready=lambda: True,
-        push_perception=lambda kind, content, **kw: pushed.append((kind, content)),
-    )
-    persona.history_manager = None
-    manager = SimpleNamespace(personas={PERSONA_ID: persona})
-
-    pipeline.capture_all(_ctx(MODEL_A))
-    section.live_text = "旧経路の変化"
-
-    assert inject_diff_notifications(
-        persona, manager, BUILDING, pipeline=pipeline, model_key=MODEL_A,
-    ) is True
-    assert pushed and pushed[0][0] == "world_state"
-    assert inject_diff_notifications(
-        persona, manager, BUILDING, pipeline=pipeline, model_key=MODEL_A,
-    ) is False

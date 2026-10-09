@@ -127,8 +127,6 @@ class PersonaCore(
         # Initialise SAIMemory bridge for long-term recall/summary
         self.sai_memory: Optional[SAIMemoryAdapter] = initialise_memory_adapter(self)
 
-        # Quarantine awareness (defense-in-depth)。
-        _quar_dict = getattr(manager_ref, "quarantined_buildings", None) if manager_ref else None
         # Building Memory は DB が source of truth。 manager.SessionLocal を渡す。
         _db_factory = getattr(manager_ref, "SessionLocal", None) if manager_ref else None
 
@@ -138,7 +136,6 @@ class PersonaCore(
             building_memory_paths=self.building_memory_paths,
             initial_persona_history=self.messages,
             memory_adapter=self.sai_memory,
-            quarantined_buildings=_quar_dict,
             db_session_factory=_db_factory,
         )
 
@@ -235,6 +232,17 @@ class PersonaCore(
     def get_execution_state(self) -> Dict[str, Any]:
         """Get the current playbook execution state for UI display."""
         return dict(self.execution_state)
+
+    @property
+    def persona_dir(self) -> Optional[Path]:
+        """ペルソナのファイル置き場 (``~/.saiverse/personas/<id>/`` など)。
+
+        実体は SAIMemoryAdapter が持つ (``SAIMemoryAdapter.persona_dir``)。
+        SAIMemory の初期化に失敗して adapter が無いときは None。
+        """
+        if self.sai_memory is None:
+            return None
+        return self.sai_memory.persona_dir
 
     # -- Lazy LLM client properties ------------------------------------------
     # Clients are created on first access rather than at startup, which avoids

@@ -51,6 +51,8 @@ from saiverse.day_scenario import (
     parse_scenario,
 )
 from saiverse.event_scheduler import EventScheduler
+from saiverse.execution_ledger import ExecutionLedger
+from saiverse.meta_layer import MetaLayer
 from saiverse.persona_task_manager import PersonaTaskManager
 
 PERSONA_ID = "alice"
@@ -284,7 +286,12 @@ def _make_manager(session_factory, tmp_path, judge_fn, session_responses):
         occupancy_manager=StubOccupancy(),
         sea_runtime=FakeWorkRuntime(llm, personas),
         _session_llm=llm,
+        # 本番 manager は実行台帳を無条件に持つ (コマ発火の台帳なし縮退経路は
+        # 2026-09-26 監査で撤去)
+        execution_ledger=ExecutionLedger(session_factory),
     )
+    # 判断点の直列化 Lock は本番 manager が無条件に持つ MetaLayer から取る。
+    manager.meta_layer = MetaLayer(manager)
     manager.pulse_controller = MockJudgmentPulseController(manager, judge_fn, tmp_path)
     return manager
 

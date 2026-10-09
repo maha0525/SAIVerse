@@ -59,6 +59,7 @@ SAIVerse/
 
 ```
 saiverse/
+├── provider_protocols.py   # provider 検査・会話 factory・反射判断が共有する対応 protocol 名
 ├── saiverse_manager.py     # 中央オーケストレーター（SAIVerseManager）
 ├── occupancy_manager.py    # 移動・占有管理（OccupancyManager）
 ├── conversation_manager.py # 自律会話駆動（旧プロトタイプ・実質 no-op）
@@ -98,6 +99,7 @@ saiverse/
 │                           #   設定ファイルの無いモデル名を保存しない検査と知らせの文面（persona_model_selection.md）
 ├── provider_security.py    # provider credentialと接続先URLの束縛・SSRF境界
 ├── file_policy.py          # persisted pathのmanaged root境界
+├── media_cleanup.py        # 未公開の新規文書ファイルの所有権と登録失敗時の後始末（commit 試行後は保持）
 ├── tls_trust.py            # HTTPS の信頼元を起動時に一度決める。OS の証明書ストアが空の環境
 │                           #   （macOS の Python）で同梱 certifi へ退避し、urllib 経由の通信を救う
 ├── runtime_marker.py       # City単位process identity marker（保守操作の停止判定）
@@ -106,7 +108,13 @@ saiverse/
 ├── buildings.py            # Building モデルヘルパ
 ├── building_id_repair.py   # 区切り記号（/ \）を含む古い部屋 ID を起動時に付け替える（DB の参照・フォルダ・
 │                           #   付け替えの記録 cities/<city>/building_id_renames.json）
+├── building_leftover_cleanup.py # 消えた建物を指して残ったアイテムの置き場所・設置物・建物のリアルタイム
+│                           #   スペルを起動時に片付ける（付け替えの後。アイテムは消さず、どこにも置かない状態へ）
+├── building_retirement.py  # 建物を消すとき、残る会話などを特殊な ID（deleted_<ID>_<日時>）へ付け替えて
+│                           #   元の ID を空ける（DB の参照・記憶の印・フォルダ。部品は building_id_repair と共有）。
+│                           #   済まなかった続きと、昔消した建物の残骸は起動時に付け替える
 ├── data_paths.py           # パス管理（user_data/builtin_data）
+├── playbook_scope.py       # 管理サービスと CLI が共有するパス→Playbook 公開範囲の推論（保存・CLI に非依存）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
 ├── observer_manager.py     # Observer（定期観測 Fixture）
 └── ...                     # その他コアモジュール
@@ -147,6 +155,12 @@ api/
 
 `people/pocketbook.py` の画面側の相方は `frontend/src/components/memory/PocketbookViewer.tsx`（メモリタブの「手帳」節）。v0.3 では両方とも読むだけで、訂正の口は持たない（[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §13.2.1）。
 
+### frontend/
+
+入退室ログの画面表示は `src/lib/movementNotices.ts` が全体・Building の優先順位を解決し、`src/hooks/useMovementNoticeSettings.ts` が設定変更を追随する。`useMovementNoticeAutoScroll.ts` は表示される新着だけでスクロールを追尾する。全体の操作欄は `src/components/settings/MovementNoticeSetting.tsx`、部屋別の操作欄は `BuildingSettingsModal.tsx`。`src/lib/buildingSettingsSave.ts` が部屋設定の保存待ちを持ち、閉じ直したフォームも保存前の値を読み直さない。`HistoryContinuation.tsx` は非表示の通知だけのページでも生の履歴カーソルで過去へ進める入口を残す。記録やペルソナの処理から分離した表示設定である（[intent](../intent/movement_notice_visibility.md)）。
+
+`next.config.ts` の通常 API rewrite と `src/app/api/{addon,mcp}/` の Route Handler は、`backend-origin.cjs` の共通関数でバックエンドの接続先を選ぶ。正式名・旧名・既定値の順序と不一致の警告はここに集約し、SSE やメディア転送は各 Route Handler が持つ。`scripts/test-backend-origin.cjs` が設定と全経路を fake fetch で検査し、`scripts/test-backend-origin-http.cjs` が実 Next.js から fake 18000 への中継を検査する（[intent](../intent/frontend_backend_origin.md)）。
+
 ### scripts/
 
 保守操作の実装。`update.bat` / `update.sh` / PowerShell / UI更新はいずれも同じupdate engineへ委譲する。`start.bat` / `start.sh` も起動前に `update_engine.py --check-complete` を呼び、更新が途中で死んでいれば同じ engine で仕上げてから起動する（[issue](../issues/v0229_update_bat_truncates_after_git_pull.md)）。
@@ -186,6 +200,7 @@ sea/
 ├── langgraph_runner.py   # LangGraph 統合
 ├── playbook_models.py    # ノード定義スキーマ（LLMNodeDef / ToolNodeDef 等）
 ├── pulse_controller.py   # PulseController（優先度制御・割り込み）
+├── reply_stop_exit.py    # 返事が途中で止まった回の後始末（最後に保存した発言へ印と中断の通告を一回だけ。reply_stop_exit intent）
 ├── pulse_context.py      # PulseContext（Aspect / line 階層）
 ├── mode_spell_permissions.py # モード別 Spell 許可
 ├── work_session.py       # 予算付き作業セッションランナー（自律行動 v2 §4.3）。**休眠** — v3 §8 で退役予定で、
@@ -302,6 +317,17 @@ builtin_data/
 ├── cities.json       # City 初期設定
 └── seed_data.json    # シード用データ
 ```
+
+## メモリー画面の表示
+
+Next.js の画面実装。`src/components/memory/PulseTimelineViewer.tsx` は Pulse の一覧・詳細・既存タグ編集を担い、同じディレクトリの `PulseTimelineViewer.module.css` がテーマ別の役割色と長文の折り返しを持つ。中立色の正典は `src/app/globals.css`。隔離した表示・操作の回帰確認は `scripts/test-pulse-timeline-theme.cjs`（[表示 intent](../intent/pulse_timeline_display.md)）。
+
+## アイテムの閲覧
+
+`frontend/src/components/ItemReferenceModal.tsx` は URI の短縮 ID とインベントリの
+UUID を詳細 API で解決し、正しい名前・種類を `ItemModal.tsx` へ渡す。
+`InventoryModal.tsx` のカードは閲覧専用でこれを開く。チャットリンクも同じ
+解決経路を使い、現在 Building の一覧や DOCUMENT の推測には依存しない。
 
 ## ユーザーデータ（`~/.saiverse/`）
 

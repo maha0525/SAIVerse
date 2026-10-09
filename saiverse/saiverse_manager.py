@@ -87,15 +87,9 @@ class SAIVerseManager(
         db_path: str,
         sds_url: str = os.getenv("SDS_URL", "http://127.0.0.1:8080"),
     ):
-        # --- Critical: startup_alerts and quarantine state must exist before
+        # --- Critical: startup_alerts must exist before
         # _init_building_histories so corruption events can be recorded.
         self.startup_alerts: List[Dict[str, Any]] = []
-        # Buildings whose log.json is corrupted/zero-byte. While quarantined:
-        #   - building_histories does NOT contain the key (treated as "no truth")
-        #   - save_building_histories refuses to write
-        #   - move_entity refuses entry
-        # Quarantine info: {building_id: {"reason", "corrupted_path", "available_backups"}}
-        self.quarantined_buildings: Dict[str, Dict[str, Any]] = {}
         # Buildings whose in-memory history was modified since last save.
         # Used to scope explicit save calls so we never iterate the full path map.
         self.modified_buildings: Set[str] = set()
@@ -110,6 +104,12 @@ class SAIVerseManager(
         self._init_city_config(city_name)
         # 部屋を読み込む前に、フォルダ名や URL を壊す文字を含む古い部屋 ID を付け替える
         self._repair_unsafe_building_ids()
+        # 消えた建物を指したまま残っているアイテムの置き場所・設置物などを片付ける
+        # (付け替えの後、アイテムと定期観測を読み込む前)
+        self._cleanup_deleted_building_leftovers()
+        # 消した建物を指して残る会話などを特殊な ID へ付け替え、元の ID を空ける
+        # (削除の場で済まなかった続きと、昔消した建物の残骸。記憶のファイルを開く前)
+        self._retire_deleted_building_ids()
         self._init_buildings()
         self._init_file_paths()
         self._init_avatars()
@@ -1721,15 +1721,16 @@ class SAIVerseManager(
         ui_port: int,
         api_port: int,
         timezone_name: str,
-        host_avatar_path: Optional[str] = None,
+        host_avatar_path: Any = UNSET,
         host_avatar_upload: Optional[str] = None,
-        map_background_image: Optional[str] = None,
+        map_background_image: Any = UNSET,
         language: Optional[str] = None,
     ) -> str:
         """ワールドエディタから City の設定を更新する。``name`` は表示名 (CITYNAME)。
 
         内部の識別子 (CITY_SLUG) は作成後に変更できないため、ここでは受け取らない
         (docs/intent/city_identity.md §4 不変条件 2)。
+        画像の UNSET は省略 (= 保持)、None / 空文字は明示的な解除として渡す。
         """
         return self.admin.update_city(
             city_id,
@@ -1829,11 +1830,20 @@ class SAIVerseManager(
             if building_id not in self.building_histories:
                 self.building_histories[building_id] = []
 
-    def delete_building(self, building_id: str) -> str:
-        """Deletes a building after checking for occupants."""
+    def get_building_deletion_preview(self, building_id: str) -> Optional[Dict[str, Any]]:
+        """建物を消したら何が一緒に消え、何が残るかの数 (確認ダイアログ用)。"""
+        return self.admin.get_building_deletion_preview(building_id)
+
+    def delete_building(self, building_id: str, item_policy: str = "keep") -> str:
+        """Deletes a building after checking for occupants.
+
+        ``item_policy``: 中に直接置かれたアイテムを ``keep`` (どこにも置かれて
+        いない状態で残す、既定) か ``delete`` (入れ物の中身ごと消す) か。
+        設置物は常に一緒に消え、会話の記録は常に残る (AdminService.delete_building)。
+        """
         # Check if building is in our city before deletion
         was_in_city = building_id in self.building_map
-        result = self.admin.delete_building(building_id)
+        result = self.admin.delete_building(building_id, item_policy=item_policy)
         # If deletion succeeded and it was in our city, reload buildings list
         if not result.startswith("Error") and was_in_city:
             self._reload_buildings()
@@ -1928,13 +1938,16 @@ class SAIVerseManager(
         # 依存する箇所は無い。
         ruler_stem = f"ruler_{region_id}"
         if not is_valid_identifier(ruler_stem):
+            from saiverse.building_retirement import BuildingIdAvailability
+
             db = self.SessionLocal()
             try:
+                building_ids = BuildingIdAvailability(db, self.saiverse_home)
                 ruler_stem = build_identifier(
                     ruler_stem,
                     stem="ruler",
                     ensure_unique=True,
-                    exists=lambda s: ai_stem_taken(db, s, self.city_name),
+                    exists=lambda s: ai_stem_taken(db, s, self.city_name, building_ids),
                 )
             finally:
                 db.close()
@@ -2032,7 +2045,8 @@ class SAIVerseManager(
         core_memory_char_budget: Optional[int] = None,
         chronicle_char_budget: Optional[int] = None,
         spell_enabled: Optional[bool] = None,
-        realtime_info_enabled: Optional[bool] = None,
+        realtime_current_time_enabled: Optional[bool] = None,
+        realtime_last_utterance_enabled: Optional[bool] = None,
         meta_judgment_config: Optional[Dict[str, Any]] = None,
         user_conv_timeout_minutes: Optional[int] = None,
         language: Optional[str] = None,
@@ -2064,7 +2078,8 @@ class SAIVerseManager(
             core_memory_char_budget=core_memory_char_budget,
             chronicle_char_budget=chronicle_char_budget,
             spell_enabled=spell_enabled,
-            realtime_info_enabled=realtime_info_enabled,
+            realtime_current_time_enabled=realtime_current_time_enabled,
+            realtime_last_utterance_enabled=realtime_last_utterance_enabled,
             meta_judgment_config=meta_judgment_config,
             user_conv_timeout_minutes=user_conv_timeout_minutes,
             language=language,
@@ -2091,13 +2106,20 @@ class SAIVerseManager(
         image_path: Optional[str] = None,
         extra_prompt_files: Optional[List[str]] = None,
         item_display_limit: Any = UNSET,
+        show_movement_notices: Any = UNSET,
     ) -> str:
         """ワールドエディタからBuildingの設定を更新する
 
         ``item_display_limit`` (部屋の様子に出す建物直下のアイテムの個数の上限)
         は :data:`~manager.admin.UNSET` なら触らない — 送ってこない画面の保存で
         設定が消えないようにするため (docs/intent/room_item_display_cap.md 設計 4)。
+
+        ``show_movement_notices`` は画面専用の設定として DB にだけ保存し、
+        ペルソナが読む Building の実行時状態には持ち込まない。
         """
+        display_settings = {}
+        if show_movement_notices is not UNSET:
+            display_settings["show_movement_notices"] = show_movement_notices
         result = self.admin.update_building(
             building_id,
             name,
@@ -2110,6 +2132,7 @@ class SAIVerseManager(
             image_path,
             extra_prompt_files,
             item_display_limit,
+            **display_settings,
         )
 
         # Update in-memory Building object if DB update succeeded
@@ -2167,6 +2190,9 @@ class SAIVerseManager(
 
     def delete_item(self, item_id: str) -> str:
         return self.admin.delete_item(item_id)
+
+    def delete_bag_contents(self, item_id: str) -> str:
+        return self.admin.delete_bag_contents(item_id)
 
     # --- Playbook Management ---
 

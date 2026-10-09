@@ -17,6 +17,7 @@ from sai_memory.arasuji.context import (
 from sai_memory.arasuji.storage import (
     create_entry,
     init_arasuji_tables,
+    mark_consolidated,
 )
 
 
@@ -796,6 +797,362 @@ class TestNoPresentationGap(unittest.TestCase):
             unrepresented, [],
             f"{len(unrepresented)} 件の一次あらすじが自身も祖先も提示されていない",
         )
+
+
+def _build_fixed_id_tree(conn: sqlite3.Connection) -> None:
+    """降下規則のテスト用の、id を固定した三階層の木。
+
+    - 一次あらすじ a00..a29 (各 ~100 字、時刻 100 刻み)
+    - 二次あらすじ b0 (a00..a09) / b1 (a10..a19)、各 ~200 字
+    - 三次あらすじ c0 (b0, b1)、~300 字
+    - a20..a29 は未統合 (最新側の細かい過去)
+
+    子には束ねと同じく統合済みの印を付ける (帯の組み立てがこの印を見ずに
+    降下先の子を載せられることの確認を兼ねる)。
+    """
+    for i in range(30):
+        s = (i + 1) * 100
+        create_entry(
+            conn, level=1, content=f"a{i:02d} " + "x" * 96, source_ids=[],
+            start_time=s, end_time=s + 99, source_count=1, message_count=20,
+            entry_id=f"a{i:02d}",
+        )
+    for b in range(2):
+        children = [f"a{k:02d}" for k in range(b * 10, b * 10 + 10)]
+        create_entry(
+            conn, level=2, content=f"b{b} " + "y" * 197, source_ids=children,
+            start_time=(b * 10 + 1) * 100, end_time=(b * 10 + 10) * 100 + 99,
+            source_count=10, message_count=200, entry_id=f"b{b}",
+        )
+        mark_consolidated(conn, children, f"b{b}")
+    create_entry(
+        conn, level=3, content="c0 " + "z" * 297, source_ids=["b0", "b1"],
+        start_time=100, end_time=2099, source_count=2, message_count=400,
+        entry_id="c0",
+    )
+    mark_consolidated(conn, ["b0", "b1"], "c0")
+
+
+_A = [f"a{i:02d}" for i in range(30)]
+_RECENT = _A[20:]
+
+# 除外名簿が空のときの出力 (降下規則の導入前の実装で採取した値を固定した golden)。
+_GOLDEN_NO_EXCLUDE = {
+    None: ["b0", "b1"] + _RECENT,
+    1_000_000: ["b0"] + _A[10:],
+    1500: ["b0", "b1"] + _RECENT,
+    800: ["c0"] + _RECENT,
+    1: ["c0"] + _RECENT,
+}
+
+
+class TestBandDescentAroundExcluded(unittest.TestCase):
+    """帯の降下規則 (docs/intent/chronicle_consolidation_veto_removal.md 機構 B)。
+
+    窓が digest で見せているエントリ (除外名簿) を子孫に含む親は帯に見せず、
+    子に降りる。除外名簿のもの自身とその子孫は落とす。同じ期間が窓と帯の
+    両方に出る二重提示を、予算ガード経由の再導入も含めて構造的に防ぐ。
+    """
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        init_arasuji_tables(self.conn)
+        _build_fixed_id_tree(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _ids(self, *, budget, exclude=None):
+        ctx = get_episode_context(
+            self.conn, max_entries=1000, char_budget=budget,
+            exclude_entry_ids=exclude,
+        )
+        return [e.source_id for e in ctx]
+
+    def test_empty_exclude_matches_golden(self):
+        """除外が空 (None / 空集合) なら降下は起きず、導入前と同一の出力。"""
+        for budget, expected in _GOLDEN_NO_EXCLUDE.items():
+            for exclude in (None, set()):
+                with self.subTest(budget=budget, exclude=exclude):
+                    self.assertEqual(
+                        self._ids(budget=budget, exclude=exclude), expected,
+                    )
+
+    def test_lv2_parent_descends_when_one_child_is_excluded(self):
+        """二次あらすじの子が一つ除外 → 親は消え、除外以外の子が並ぶ。
+
+        読み戻し経路の既存欠陥の回帰でもある: 統合済みの一次あらすじ a05 が
+        畳みに載ったとき、旧実装 (id の単純一致) は a05 だけを抜き、その親
+        b0 (と祖父 c0) を帯に出して同じ期間を二重に見せていた。
+        """
+        expected_children = _A[0:5] + _A[6:10]
+        # 件数ベース (予算なし): 走査は a29..a20 を読んでから粒度を上げて b1 を
+        # 選び、そのあと降下先の a00..a09 (a05 抜き) を読む。
+        self.assertEqual(
+            self._ids(budget=None, exclude={"a05"}),
+            expected_children + ["b1"] + _RECENT,
+        )
+        # 潤沢な予算: 粒度は質量ルールで細かいまま。
+        self.assertEqual(
+            self._ids(budget=1_000_000, exclude={"a05"}),
+            expected_children + _A[10:],
+        )
+
+    def test_three_levels_deepest_excluded(self):
+        """三階層の最深の子が除外 → Lv3 も Lv2 (b0) も降り、除外と交わらない
+        Lv2 (b1) は予算ガードの畳み先として残る。"""
+        ids = self._ids(budget=1500, exclude={"a05"})
+        self.assertEqual(ids, _A[0:5] + _A[6:10] + ["b1"] + _RECENT)
+        for gone in ("c0", "b0", "a05"):
+            self.assertNotIn(gone, ids)
+
+    def test_budget_guard_does_not_reintroduce_descended_parent(self):
+        """予算超過でも、除外と交わる親は予算ガード経由で再導入されない。
+
+        b0 に畳めば予算に近づくが、b0 は a05 を含むので候補に居ない。超過は
+        受け入れて WARNING で観測する (intent「帰結」)。
+        """
+        with self.assertLogs("sai_memory.arasuji.context", level="WARNING") as cm:
+            ids = self._ids(budget=1, exclude={"a05"})
+        self.assertEqual(ids, _A[0:5] + _A[6:10] + ["b1"] + _RECENT)
+        for gone in ("c0", "b0", "a05"):
+            self.assertNotIn(gone, ids)
+        self.assertTrue(any("char budget exceeded" in m for m in cm.output))
+
+    def test_excluded_parent_drops_its_descendants(self):
+        """除外名簿のもの自身の子孫は、窓が見せている期間なので落とす。
+        b0 の外側の期間は、予算に応じた粒度でそのまま残る。"""
+        for budget, expected in {
+            None: ["b1"] + _RECENT,
+            1_000_000: _A[10:],
+            1: ["b1"] + _RECENT,
+        }.items():
+            with self.subTest(budget=budget):
+                self.assertEqual(self._ids(budget=budget, exclude={"b0"}), expected)
+
+    def test_two_subtrees_excluded_at_once(self):
+        """除外が別々の部分木に同時にある場合、両方の親 (と共通の祖父) が降り、
+        除外以外の子が全期間を覆う。"""
+        expected = [x for x in _A if x not in ("a05", "a15")]
+        self.assertEqual(
+            self._ids(budget=1_000_000, exclude={"a05", "a15"}), expected,
+        )
+
+    def test_missing_excluded_id_warns(self):
+        """除外名簿の id が一覧に無いとき、降下は効かない — 無音にせず WARNING。"""
+        with self.assertLogs("sai_memory.arasuji.context", level="WARNING") as cm:
+            self._ids(budget=1_000_000, exclude={"gone-entry"})
+        self.assertTrue(any("not in the entry list" in m for m in cm.output))
+
+    def test_unknown_excluded_id_is_ignored(self):
+        """実在しない id が除外名簿にあっても無視し、従来どおりの出力。"""
+        for budget, expected in _GOLDEN_NO_EXCLUDE.items():
+            with self.subTest(budget=budget):
+                self.assertEqual(
+                    self._ids(budget=budget, exclude={"no-such-entry"}),
+                    expected,
+                )
+
+
+class TestBandDescentSafetyValves(unittest.TestCase):
+    """降下規則の安全弁 — 壊れた親子参照 (循環・自己参照) でも、除外の血族を
+    帯に漏らさない (2026-09-27 ローカルレビュー指摘の固定)。"""
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        init_arasuji_tables(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _make(self, entry_id, level, source_ids, start, end):
+        create_entry(
+            self.conn, level=level, content=entry_id + " " + "x" * 50,
+            source_ids=source_ids, start_time=start, end_time=end,
+            source_count=max(1, len(source_ids)), message_count=10,
+            entry_id=entry_id,
+        )
+
+    def test_cycle_does_not_leak_the_excluded_bloodline(self):
+        """a↔b の循環の先 (孫の位置) に除外 c が居ても、循環の両方と c の親が
+        帯から降りる。訪問順に依存しない (循環を踏んだ False はキャッシュに
+        固定しない)。除外は直接の子ではなく孫に置く — 直接の子なら id 一致の
+        検査が先に効いて、循環の安全弁まで到達しないため。"""
+        from sai_memory.arasuji.context import (
+            _descend_around_excluded,
+            _get_all_arasuji_sorted,
+        )
+        self._make("c", 1, [], 100, 199)
+        self._make("x", 2, ["c"], 100, 249)
+        self._make("a", 2, ["b"], 100, 399)   # a → b → a の循環
+        self._make("b", 2, ["a", "x"], 200, 299)
+        self._make("d", 1, [], 400, 499)  # 無関係 — 残るべき
+        entries = _get_all_arasuji_sorted(self.conn)
+        for ordering in (entries, list(reversed(entries))):
+            with self.subTest(first=ordering[0].id):
+                out = _descend_around_excluded(ordering, {"c"})
+                self.assertEqual({e.id for e in out}, {"d"})
+
+    def test_self_reference_does_not_crash_and_still_descends(self):
+        """自分自身を source_ids に持つ壊れた親も、除外の子を含むなら降りる。"""
+        from sai_memory.arasuji.context import (
+            _descend_around_excluded,
+            _get_all_arasuji_sorted,
+        )
+        self._make("x", 1, [], 100, 199)
+        self._make("p", 2, ["p", "x"], 100, 299)
+        self._make("d", 1, [], 300, 399)
+        out = _descend_around_excluded(
+            _get_all_arasuji_sorted(self.conn), {"x"},
+        )
+        self.assertEqual({e.id for e in out}, {"d"})
+
+    def test_missing_excluded_child_still_descends_the_parent(self):
+        """親の source_ids に除外 id が書かれているが、その子の行が一覧に
+        無い (削除済み・フィルタ済み) — 親は「除外を含む」と判定して降ろす
+        (fail-open の禁止、2026-09-27 Codex 指摘)。"""
+        from sai_memory.arasuji.context import (
+            _descend_around_excluded,
+            _get_all_arasuji_sorted,
+        )
+        self._make("kept", 1, [], 100, 199)
+        self._make("p", 2, ["kept", "ghost"], 100, 299)  # ghost の行は無い
+        self._make("d", 1, [], 300, 399)
+        out = _descend_around_excluded(
+            _get_all_arasuji_sorted(self.conn), {"ghost"},
+        )
+        self.assertEqual({e.id for e in out}, {"kept", "d"})
+
+    def test_over_deep_chain_descends_every_ancestor(self):
+        """異常に深い親子鎖 (壊れたデータ) でも落ちず、除外に到達できる祖先は
+        **一件も残らない** — 深さで判定が途切れて祖先が帯に漏れる fail-open を
+        禁止する (2026-09-27 Codex 二巡目指摘)。壊れた参照は収束までの反復
+        回数の WARNING で観測する。"""
+        from sai_memory.arasuji.context import (
+            _descend_around_excluded,
+            _get_all_arasuji_sorted,
+        )
+        depth = 120
+        self._make("leaf", 1, [], 100, 199)
+        prev = "leaf"
+        for i in range(depth):
+            node = f"n{i:03d}"
+            # 全部 level 2 の鎖 = 同レベル参照 (壊れたデータ) — 収束に反復が要る
+            self._make(node, 2, [prev], 100, 200 + i)
+            prev = node
+        self._make("d", 1, [], 900, 999)  # 無関係 — 残るべき
+        entries = _get_all_arasuji_sorted(self.conn)
+        with self.assertLogs("sai_memory.arasuji.context", level="WARNING") as cm:
+            out = _descend_around_excluded(entries, {"leaf"})
+        self.assertTrue(any("reference" in m for m in cm.output))
+        self.assertEqual({e.id for e in out}, {"d"})
+
+    def test_missing_excluded_root_still_drops_its_children(self):
+        """除外の根 (窓が見せている親) が一覧から欠けていても、その子は
+        parent_id のリンクで拾って落とす — 窓と同じ期間の子が帯に漏れない
+        (2026-09-27 Codex 四巡目指摘の固定)。"""
+        from sai_memory.arasuji.context import (
+            _descend_around_excluded,
+            _get_all_arasuji_sorted,
+        )
+        from sai_memory.arasuji.storage import mark_consolidated
+        self._make("c1", 1, [], 100, 199)
+        self._make("c2", 1, [], 200, 299)
+        # 親 P は作った後に一覧から消す (Track フィルタで欠ける形を模す)
+        self._make("P", 2, ["c1", "c2"], 100, 299)
+        mark_consolidated(self.conn, ["c1", "c2"], "P")
+        self.conn.execute(
+            "UPDATE memopedia_pages SET metadata = json_set(COALESCE(metadata,'{}'),"
+            " '$.origin_track_id', 'legacy-track') WHERE id = 'P'",
+        )
+        self.conn.commit()
+        self._make("d", 1, [], 300, 399)
+        entries = _get_all_arasuji_sorted(self.conn)
+        self.assertNotIn("P", {e.id for e in entries})  # 前提: 根が欠けている
+        with self.assertLogs("sai_memory.arasuji.context", level="WARNING") as cm:
+            out = _descend_around_excluded(entries, {"P"})
+        self.assertEqual({e.id for e in out}, {"d"})
+        self.assertTrue(any("not in the entry list" in m for m in cm.output))
+
+    def test_message_id_in_roster_does_not_drop_unrelated_entries(self):
+        """壊れた畳みがメッセージ id を除外名簿に持ち込んでも、その id を
+        source に持つ一次あらすじとその祖先は帯から消えない (2026-09-27
+        Codex 七巡目指摘の固定)。"""
+        from sai_memory.arasuji.context import (
+            _descend_around_excluded,
+            _get_all_arasuji_sorted,
+        )
+        from sai_memory.arasuji.storage import mark_consolidated
+        self._make("L1", 1, ["msg-raw-001"], 100, 199)  # 正規のメッセージ参照
+        self._make("P", 2, ["L1"], 100, 299)
+        mark_consolidated(self.conn, ["L1"], "P")
+        self._make("d", 1, [], 300, 399)
+        with self.assertLogs("sai_memory.arasuji.context", level="WARNING") as cm:
+            out = _descend_around_excluded(
+                _get_all_arasuji_sorted(self.conn), {"msg-raw-001"},
+            )
+        # 降下の関数は何も落とさない (統合済みの選別は後段の選定の仕事)。
+        self.assertEqual({e.id for e in out}, {"L1", "P", "d"})
+        self.assertTrue(any("not in the entry list" in m for m in cm.output))
+
+    def test_parent_id_only_chain_is_dropped_below_excluded_root(self):
+        """source_ids が空で parent_id だけで連なる壊れた鎖でも、除外の根の
+        子孫は最下層まで落ちる (2026-09-27 Codex 五巡目指摘の固定)。"""
+        from sai_memory.arasuji.context import (
+            _descend_around_excluded,
+            _get_all_arasuji_sorted,
+        )
+        self._make("P", 2, [], 100, 299)   # 除外の根 (子の記帳が欠けている)
+        self._make("C", 1, [], 100, 199)
+        self._make("G", 1, [], 200, 299)
+        self.conn.execute(
+            "UPDATE memopedia_pages SET parent_id = 'P' WHERE id = 'C'")
+        self.conn.execute(
+            "UPDATE memopedia_pages SET parent_id = 'C' WHERE id = 'G'")
+        self.conn.commit()
+        self._make("d", 1, [], 300, 399)
+        with self.assertLogs("sai_memory.arasuji.context", level="WARNING"):
+            out = _descend_around_excluded(
+                _get_all_arasuji_sorted(self.conn), {"P"},
+            )
+        self.assertEqual({e.id for e in out}, {"d"})
+
+    def test_missing_intermediate_node_does_not_break_the_chain(self):
+        """除外の根 P は居るが、中間の子 C の行だけが一覧から欠けている鎖
+        (P.source_ids=[C]、孫 G.parent_id=C) でも、G まで落ちる — 欠けた id を
+        中継点として辺に残す (2026-09-27 Codex 六巡目指摘の固定)。"""
+        from sai_memory.arasuji.context import (
+            _descend_around_excluded,
+            _get_all_arasuji_sorted,
+        )
+        self._make("P", 3, ["C"], 100, 299)  # C の行は作らない (欠落)
+        self._make("G", 1, [], 100, 199)
+        self.conn.execute(
+            "UPDATE memopedia_pages SET parent_id = 'C' WHERE id = 'G'")
+        self.conn.commit()
+        self._make("d", 1, [], 300, 399)
+        out = _descend_around_excluded(
+            _get_all_arasuji_sorted(self.conn), {"P"},
+        )
+        self.assertEqual({e.id for e in out}, {"d"})
+
+    def test_corrupted_lv1_entry_reference_still_propagates(self):
+        """一次あらすじの source_ids に Chronicle id が混入した壊れたデータでも、
+        血族の伝播が途切れず、除外の祖先が帯に残らない (2026-09-27 Codex
+        三巡目指摘の固定)。"""
+        from sai_memory.arasuji.context import (
+            _descend_around_excluded,
+            _get_all_arasuji_sorted,
+        )
+        self._make("h2", 2, [], 100, 199)
+        self._make("l1", 1, ["h2"], 100, 249)   # level 1 なのに entry を参照
+        self._make("p3", 3, ["l1"], 100, 299)
+        self._make("d", 1, [], 300, 399)
+        with self.assertLogs("sai_memory.arasuji.context", level="WARNING"):
+            out = _descend_around_excluded(
+                _get_all_arasuji_sorted(self.conn), {"h2"},
+            )
+        self.assertEqual({e.id for e in out}, {"d"})
 
 
 if __name__ == "__main__":

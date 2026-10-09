@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
@@ -27,6 +28,7 @@ from sea.runtime_engine import RuntimeEngine
 from sea.runtime_context import preview_context as preview_context_impl
 from sea.runtime_graph import compile_with_langgraph as compile_with_langgraph_impl
 from sea.runtime_llm import lg_llm_node as lg_llm_node_impl
+from sea.reply_stop_exit import settle_reply_stop
 from sea.runtime_runner import run_playbook
 from sea.runtime_nodes import (
     lg_exec_node as lg_exec_node_impl,
@@ -456,19 +458,52 @@ class SEARuntime:
             )
         except Exception:
             LOGGER.exception("[metabolism] Emergency pre-compaction failed")
-        result = self._run_playbook(
-            playbook, persona, building_id, user_input,
-            # auto_mode = 「応答ループにユーザーが居ない Pulse か」。run_meta_user は
-            # user / schedule / auto の共通入口なので pulse_type から導出する。
-            # None は PulseController を経ない直接呼び出し (レガシー) のみで、
-            # 確認ダイアログを黙って自動承認しない側 (=user 扱い) に倒す。
-            auto_mode=(pulse_type not in (None, "user")),
-            record_history=True, event_callback=event_callback,
-            cancellation_token=cancellation_token, pulse_type=pulse_type,
-            initial_params=effective_args if effective_args else None,
-            pulse_line_aspect=_root_aspect,
-            pre_spells=pre_spells,
-            model_binding=model_binding,
+        # 返事が途中で止まった回の後始末は、返事の実行の一番外側 (ここ) で
+        # 一回だけ行う (docs/intent/reply_stop_exit.md)。対象はこの時刻より後に
+        # 保存された発言だけ — 別の実行の発言を誤って印付けない時間窓。
+        # スペルの周回・サブライン・スペルループの内側は後始末を呼ばず、
+        # 失敗をそのまま上へ投げる。
+        # 時計は単調時計 — 記録の saved_at (sea/runtime_emitters.py) と同じ
+        # 時計で比べる (壁時計が戻ると時間窓が発言を読み飛ばす)。
+        _reply_started_at = time.monotonic()
+        try:
+            result = self._run_playbook(
+                playbook, persona, building_id, user_input,
+                # auto_mode = 「応答ループにユーザーが居ない Pulse か」。run_meta_user は
+                # user / schedule / auto の共通入口なので pulse_type から導出する。
+                # None は PulseController を経ない直接呼び出し (レガシー) のみで、
+                # 確認ダイアログを黙って自動承認しない側 (=user 扱い) に倒す。
+                auto_mode=(pulse_type not in (None, "user")),
+                record_history=True, event_callback=event_callback,
+                cancellation_token=cancellation_token, pulse_type=pulse_type,
+                initial_params=effective_args if effective_args else None,
+                pulse_line_aspect=_root_aspect,
+                pre_spells=pre_spells,
+                model_binding=model_binding,
+            )
+        except Exception as exc:
+            # エラー・取り消しで閉じた回。印と通告を置き、エラー札に案内の材料
+            # (続きの生成を出す発言の id、別の部屋ならその部屋) を載せてから、
+            # 元の例外をそのまま投げる。
+            settle_reply_stop(
+                self, persona,
+                reply_building_id=building_id,
+                started_at=_reply_started_at,
+                exc=exc,
+                cancellation_token=cancellation_token,
+                event_callback=event_callback,
+            )
+            raise
+        # 例外なしで閉じた回。発言の後で話が止まったことを保存した側が記録に
+        # 書き足していたとき (サーバーが締めの生成を切った・スペル無効の
+        # ペルソナが途中で止められた等) だけ働く。
+        settle_reply_stop(
+            self, persona,
+            reply_building_id=building_id,
+            started_at=_reply_started_at,
+            exc=None,
+            cancellation_token=cancellation_token,
+            event_callback=event_callback,
         )
 
         # Post-response metabolism check (DB ベースで件数比較)。
@@ -901,24 +936,17 @@ class SEARuntime:
         return client
 
     def _build_tools_spec(self, tool_names: List[str], llm_client: Any) -> List[Any]:
-        """Build tools spec for LLM based on available tool names and llm_client type."""
+        """Select tools using the input format declared by the client."""
         from tools import GEMINI_TOOLS_SPEC, OPENAI_TOOLS_SPEC
 
         LOGGER.info("[sea] _build_tools_spec called with tool_names: %s", tool_names)
 
-        # Determine provider from llm_client class name.
-        # 送る形式を決めるのは実際に HTTP を叩く client なので、facade
-        # (LlamaCachedClient) で包まれていたら中身の class 名で判定する。
-        # 包みの名前で判定すると、どの分岐にも当たらず Gemini 形式へ落ちて、
-        # OpenAI 互換のサーバーへ google.genai の Tool を送ることになる
-        # (docs/issues/llama_cached_client_state_delegation_missing.md)。
-        target_client = getattr(llm_client, "_inner", llm_client)
-        client_class_name = type(target_client).__name__
-        LOGGER.info("[sea] LLM client class: %s", client_class_name)
+        tool_format = llm_client.tool_spec_format()
+        LOGGER.info("[sea] LLM tool spec format: %s", tool_format)
 
-        if client_class_name in ("OpenAIClient", "AnthropicClient", "OllamaClient", "NvidiaNIMClient"):
+        if tool_format == "openai":
             # Filter OpenAI tools spec (OpenAI-compatible)
-            LOGGER.info("[sea] Using OpenAI-compatible tools format (client: %s)", client_class_name)
+            LOGGER.info("[sea] Using OpenAI-compatible tools format")
             LOGGER.info("[sea] Filtering from OPENAI_TOOLS_SPEC (total: %d)", len(OPENAI_TOOLS_SPEC))
             filtered = [
                 tool for tool in OPENAI_TOOLS_SPEC
@@ -929,9 +957,9 @@ class SEARuntime:
                 LOGGER.info("[sea] - OpenAI tool: %s", tool.get("function", {}).get("name"))
                 LOGGER.info("[sea]   Full spec: %s", tool)
             return filtered
-        else:
+        elif tool_format == "gemini":
             # Filter Gemini tools spec - combine all matching declarations into a single Tool
-            LOGGER.info("[sea] Using Gemini tools format (client: %s)", client_class_name)
+            LOGGER.info("[sea] Using Gemini tools format")
             from google.genai import types
             all_matching_decls = []
             for tool in GEMINI_TOOLS_SPEC:
@@ -953,6 +981,8 @@ class SEARuntime:
                 filtered = []
                 LOGGER.info("[sea] Built Gemini tools spec: 0 tools")
             return filtered
+
+        raise ValueError(f"Unsupported tool spec format: {tool_format!r}")
 
     def _dump_llm_io(
         self,
@@ -2422,16 +2452,35 @@ class SEARuntime:
         finally:
             db.close()
 
-    def _is_realtime_info_enabled_for_persona(self, persona) -> bool:
-        """Check per-persona realtime info injection toggle from DB."""
+    # 列既定 (database/models.py の AI.REALTIME_*_ENABLED) と同じ値。DB に
+    # 届かないときも、新規ペルソナと同じ見え方に倒す。
+    _REALTIME_FLAGS_FALLBACK = (True, False)
+
+    def _realtime_info_flags_for_persona(self, persona) -> Tuple[bool, bool]:
+        """Read the per-item realtime info toggles from DB in one query.
+
+        Returns ``(current_time_enabled, last_utterance_enabled)``
+        (docs/intent/realtime_info.md). Falls back to the column defaults
+        (current time ON, last utterance OFF) when the persona or DB row is
+        unavailable.
+        """
         persona_id = getattr(persona, "persona_id", None)
         if not persona_id or not self.manager:
-            return True  # fallback: enabled
+            return self._REALTIME_FLAGS_FALLBACK
         db = self.manager.SessionLocal()
         try:
             from database.models import AI as AIModel
-            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
-            return ai.REALTIME_INFO_ENABLED if ai else True
+            row = (
+                db.query(
+                    AIModel.REALTIME_CURRENT_TIME_ENABLED,
+                    AIModel.REALTIME_LAST_UTTERANCE_ENABLED,
+                )
+                .filter(AIModel.AIID == persona_id)
+                .first()
+            )
+            if row is None:
+                return self._REALTIME_FLAGS_FALLBACK
+            return bool(row[0]), bool(row[1])
         finally:
             db.close()
 
@@ -2517,6 +2566,55 @@ class SEARuntime:
 
         return enriched
 
+    @staticmethod
+    def _parse_history_timestamp(value: Any) -> Optional[datetime]:
+        """Read a history message's ``created_at`` / ``timestamp`` value.
+
+        Accepted forms (docs/intent/realtime_info.md「時刻の読み取りの修正」):
+        - ``datetime`` — returned as-is
+        - int / float, or a string of digits (optionally with a decimal part)
+          — epoch seconds in UTC (SAIMemory's ``created_at`` format)
+        - ISO 8601 string (``Z`` suffix accepted)
+
+        Returns None when the value cannot be read, and leaves a DEBUG log with
+        the value and its type — an unreadable timestamp must never be dropped
+        silently (the epoch-seconds bug went unnoticed for over a version
+        because the failure was silent).
+        """
+        if isinstance(value, datetime):
+            return value
+        try:
+            # bool is an int subclass but never a timestamp.
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                if not value:
+                    # epoch 0 は「時刻が記録されていない」— 1970 年を返さず、
+                    # 読めない値でもないのでログも出さない (intent「時刻の読み取り」)。
+                    return None
+                return datetime.fromtimestamp(value, tz=dt_timezone.utc)
+            if isinstance(value, str):
+                text_value = value.strip()
+                if text_value and text_value.replace(".", "", 1).isdigit():
+                    epoch_value = float(text_value)
+                    if not epoch_value:
+                        # 文字列の "0" / "0.0" / "00000000" も数値の 0 と同じく
+                        # 「未記録」— ゼロ判定は 8 桁の日付分岐より先
+                        return None
+                    # 8 桁の数字列は epoch 秒ではなく基本形式の ISO 日付
+                    # ("20260928")。epoch 秒として読むと 1970 年に化けたうえ、
+                    # 呼び出し側が break してそれ以上探さない。現実の epoch 秒は
+                    # 10 桁なので、この分岐で実値の挙動は変わらない。
+                    if len(text_value) == 8 and "." not in text_value:
+                        return datetime.fromisoformat(text_value)
+                    return datetime.fromtimestamp(epoch_value, tz=dt_timezone.utc)
+                return datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+        except (ValueError, TypeError, OverflowError, OSError):
+            pass
+        LOGGER.debug(
+            "[sea][realtime-context] Unreadable history timestamp skipped: value=%r type=%s",
+            value, type(value).__name__,
+        )
+        return None
+
     def _build_realtime_context(
         self,
         persona: Any,
@@ -2529,26 +2627,32 @@ class SEARuntime:
         to improve LLM context caching efficiency. Time-sensitive info here doesn't
         invalidate the cached prefix (system prompt, persona info, building info, etc.).
 
-        Contents:
+        Contents (each item toggled per persona, docs/intent/realtime_info.md):
         - Current timestamp (year/month/day, weekday, hour:minute)
+          — AI.REALTIME_CURRENT_TIME_ENABLED
         - Previous AI response timestamp (for time passage awareness)
-        - (Future) Auto-recalled memory content
+          — AI.REALTIME_LAST_UTTERANCE_ENABLED
+
+        There is deliberately no whole-section toggle: realtime spell results
+        are appended to this same message by ``_execute_realtime_spells``
+        (sea/runtime_llm.py), which creates the message itself when this
+        returns None — so user settings can never block spell delivery.
 
         Returns:
-            Message dict with role="user" and <system> wrapper, or None if no content.
+            Message dict with role="user" and <system> wrapper, or None if no
+            item is enabled / nothing could be rendered (the message is then
+            not sent at all).
         """
         from datetime import datetime
 
-        # Per-persona toggle: ペルソナ設定で OFF なら、リアルタイム情報セクション
-        # 自体を一切組み立てず送らない (現在時刻・前回発言時刻のどちらも送らない)。
-        if not self._is_realtime_info_enabled_for_persona(persona):
-            LOGGER.debug(
-                "[sea][realtime-context] Skipped: REALTIME_INFO_ENABLED is off for persona %s",
-                getattr(persona, "persona_id", None),
-            )
-            return None
+        current_time_enabled, last_utterance_enabled = (
+            self._realtime_info_flags_for_persona(persona)
+        )
+
+        from saiverse import clock
 
         sections: List[str] = []
+        weekday_names = ["月", "火", "水", "木", "金", "土", "日"]
 
         # 1. Current timestamp
         # 仮想クロック (一日シミュレータ) 有効時は仮想時刻を見せる。実時刻を
@@ -2556,43 +2660,48 @@ class SEARuntime:
         # 「現在時刻」が矛盾し、ペルソナの世界像が実時計に引っ張られる
         # (2026-07-05 実 LLM シム 異常 #3: 09:00 起床なのに時間割が 15:00 始まり)。
         # 実モードでは従来どおり persona.timezone の実時刻 (挙動不変)。
-        from saiverse import clock
-
-        if clock.is_virtual():
-            now = clock.now()  # naive ローカル (シナリオの仮想時刻)
-        else:
-            now = datetime.now(persona.timezone)
-        weekday_names = ["月", "火", "水", "木", "金", "土", "日"]
-        current_time_str = now.strftime(f"%Y年%m月%d日({weekday_names[now.weekday()]}) %H:%M")
-        sections.append(f"現在時刻: {current_time_str}")
+        if current_time_enabled:
+            if clock.is_virtual():
+                now = clock.now()  # naive ローカル (シナリオの仮想時刻)
+            else:
+                now = datetime.now(persona.timezone)
+            current_time_str = now.strftime(f"%Y年%m月%d日({weekday_names[now.weekday()]}) %H:%M")
+            sections.append(f"現在時刻: {current_time_str}")
 
         # 2. Previous AI response timestamp
-        # Find the last assistant/persona message in history with a timestamp
-        prev_ai_timestamp = None
-        persona_name = getattr(persona, "persona_name", None)
-        for msg in reversed(history_messages):
-            role = msg.get("role", "")
-            # Check if this is an assistant message or a message from this persona
-            if role == "assistant" or (persona_name and msg.get("sender") == persona_name):
-                # Try 'created_at' first (SAIMemory format), then 'timestamp' (fallback)
-                ts_str = msg.get("created_at") or msg.get("timestamp")
-                if ts_str:
-                    try:
-                        # Handle both ISO format and datetime objects
-                        if isinstance(ts_str, datetime):
-                            prev_ai_timestamp = ts_str
-                        else:
-                            prev_ai_timestamp = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+        # Find the last assistant/persona message in history with a readable timestamp
+        # 仮想クロック中は出さない — 履歴の created_at は実時刻なので、上の仮想の
+        # 「現在時刻」と並ぶと矛盾した時間が二つ見え、2026-07-05 と同じ型の
+        # 世界像の混乱を前回発言の行で再演する (docs/intent/realtime_info.md)。
+        if last_utterance_enabled and not clock.is_virtual():
+            prev_ai_timestamp = None
+            persona_name = getattr(persona, "persona_name", None)
+            for msg in reversed(history_messages):
+                role = msg.get("role", "")
+                # Check if this is an assistant message or a message from this persona
+                if role == "assistant" or (persona_name and msg.get("sender") == persona_name):
+                    # Try 'created_at' first (SAIMemory format), then 'timestamp'
+                    # (fallback) — キーごとに独立に試す。`or` で先に一本化すると、
+                    # created_at が読めない値のとき timestamp を試さずに諦める。
+                    # 0 / None / 空文字は「時刻が記録されていない」であって読めない
+                    # 値ではないので、ログ無しで飛ばす (epoch 0 = 1970 年を前回発言
+                    # として見せない)。
+                    for raw_ts in (msg.get("created_at"), msg.get("timestamp")):
+                        if not raw_ts:
+                            continue
+                        parsed = self._parse_history_timestamp(raw_ts)
+                        if parsed is not None:
+                            prev_ai_timestamp = parsed
+                            break
+                    if prev_ai_timestamp is not None:
                         break
-                    except (ValueError, TypeError):
-                        pass
 
-        if prev_ai_timestamp:
-            # Convert to persona's timezone for display
-            if prev_ai_timestamp.tzinfo is not None:
-                prev_ai_timestamp = prev_ai_timestamp.astimezone(persona.timezone)
-            prev_time_str = prev_ai_timestamp.strftime(f"%Y年%m月%d日({weekday_names[prev_ai_timestamp.weekday()]}) %H:%M")
-            sections.append(f"あなたの前回発言: {prev_time_str}")
+            if prev_ai_timestamp:
+                # Convert to persona's timezone for display
+                if prev_ai_timestamp.tzinfo is not None:
+                    prev_ai_timestamp = prev_ai_timestamp.astimezone(persona.timezone)
+                prev_time_str = prev_ai_timestamp.strftime(f"%Y年%m月%d日({weekday_names[prev_ai_timestamp.weekday()]}) %H:%M")
+                sections.append(f"あなたの前回発言: {prev_time_str}")
 
         if not sections:
             return None

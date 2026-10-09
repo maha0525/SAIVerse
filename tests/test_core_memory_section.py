@@ -136,7 +136,8 @@ class CoreMemoryComposedSystemPromptTest(unittest.TestCase):
             persona_id="tester", default_model="claude-opus-4-8",
             sai_memory=adapter2,
         )
-        manager = SimpleNamespace(SessionLocal=None)
+        # sea_runtime は本番 manager が無条件に持つ (未構築なら None)
+        manager = SimpleNamespace(SessionLocal=None, sea_runtime=None)
 
         registry = HeadSectionRegistry()
         register_default_sections(registry)

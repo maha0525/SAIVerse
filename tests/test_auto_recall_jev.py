@@ -282,6 +282,8 @@ def test_switch_on_with_an_ordinary_llm_role_model_works(monkeypatch):
     from saiverse import model_configs
 
     monkeypatch.setenv("SAIVERSE_REFLEX_JUDGMENT_MODEL", "some-llm")
+    # Availability needs a key even though _FakeJev owns the actual judgment.
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-gemini-key-for-auto-recall-test")
     monkeypatch.setattr(model_configs, "MODEL_CONFIGS", {
         "some-llm": {"model": "gemini-x", "protocol": "gemini_native", "provider": "gemini"},
     })

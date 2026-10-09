@@ -33,7 +33,11 @@ class MoveRequest(BaseModel):
 class MoveResponse(BaseModel):
     success: bool
     message: Optional[str] = None
-    current_building_id: Optional[str] = None  # CAS 失敗時にサーバの真の現在地を返す
+    current_building_id: Optional[str] = None  # サーバの真の現在地 (成功・失敗とも)
+    # Region 内部への直行が入口で止まった回 (docs/intent/region.md §2.5) は
+    # success=True + code="redirected_to_entrance"。current_building_id が
+    # 実際の到着地 (入口) なので、クライアントは依頼先でなくこちらへ同期する
+    code: Optional[str] = None
     
 class BuildingInfo(BaseModel):
     id: str
@@ -146,6 +150,7 @@ def move_user(req: MoveRequest, manager = Depends(get_manager)):
         "success": success,
         "message": message,
         "current_building_id": manager.state.user_current_building_id,
+        "code": getattr(message, "code", None),
     }
 
 @router.get("/buildings", response_model=BuildingsResponse)

@@ -28,9 +28,10 @@ from saiverse.data_paths import get_saiverse_home, migrate_legacy_user_data
 migrate_legacy_user_data()
 
 # Migrate legacy per-addon persistent data dirs to the new addon_data/ layout.
-# voice-tts is intentionally excluded until its v2 PR lands (its code still
-# references the legacy paths on the Nature109 shared repo); see
-# saiverse/addon_migrations.py ENABLED_ADDONS_FOR_STARTUP.
+# Addon-owned locations are gated by ENABLED_ADDONS_FOR_STARTUP; uploaded files
+# under user_data/addon_files/ are moved for every addon (the core upload API owns
+# that location). The absolute paths recorded in the DB are rewritten later, once
+# db_path is known (rewrite_addon_file_paths_in_db below).
 from saiverse.addon_migrations import migrate_addon_data_dirs, ENABLED_ADDONS_FOR_STARTUP
 migrate_addon_data_dirs(addon_ids=ENABLED_ADDONS_FOR_STARTUP)
 
@@ -55,6 +56,11 @@ try:
     import psutil  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
     psutil = None  # type: ignore
+
+# Windows で Visual C++ の部品が無いと、この先の import (記憶の検索の onnxruntime) が
+# 長いエラーで落ちる。その前に、読める案内を出して止める。
+from saiverse.windows_runtime_check import exit_if_vc_runtime_missing
+exit_if_vc_runtime_missing()
 
 from saiverse.saiverse_manager import SAIVerseManager
 from database.paths import default_db_path
@@ -232,58 +238,6 @@ api_server_process: Optional[subprocess.Popen] = None
 manager: Optional[SAIVerseManager] = None
 
 
-def _sync_builtin_playbook_flags(session_factory) -> None:
-    """Sync playbook metadata flags from builtin JSON files to DB.
-
-    Only updates flag fields (user_selectable, dev_only, display_name,
-    router_callable) without touching nodes_json or schema_json.
-    """
-    from database.models import Playbook
-
-    playbooks_dir = Path(__file__).parent / "builtin_data" / "playbooks" / "public"
-    if not playbooks_dir.exists():
-        return
-
-    db = session_factory()
-    try:
-        updated = 0
-        for json_path in playbooks_dir.glob("*.json"):
-            try:
-                data = json.loads(json_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            name = data.get("name")
-            if not name:
-                continue
-
-            pb = db.query(Playbook).filter(Playbook.name == name).first()
-            if not pb:
-                continue
-
-            changed = False
-            for field in ("user_selectable", "dev_only", "router_callable"):
-                json_val = data.get(field, False)
-                if getattr(pb, field) != json_val:
-                    setattr(pb, field, json_val)
-                    changed = True
-
-            json_display = data.get("display_name")
-            if pb.display_name != json_display:
-                pb.display_name = json_display
-                changed = True
-
-            if changed:
-                updated += 1
-
-        if updated:
-            db.commit()
-            logging.info("Synced %d builtin playbook flag(s)", updated)
-    except Exception:
-        logging.warning("Failed to sync builtin playbook flags", exc_info=True)
-    finally:
-        db.close()
-
-
 def main():
     parser = argparse.ArgumentParser(description="Run a SAIVerse City instance.")
     parser.add_argument("city_name", type=str, nargs='?', default='city_a', help="The name of the city to run (defaults to city_a).")
@@ -361,6 +315,13 @@ def main():
             logging.info("Database migration completed.")
         backfill_track_short_ids(str(db_path))
         backfill_item_short_ids(str(db_path))
+
+    # アップロード済みファイルの絶対パスの書き換え (saiverse/addon_migrations.py):
+    # 起動直後の migrate_addon_data_dirs が addon_files/<id>/ を addon_data/<id>/inputs/
+    # へ動かしたので、アドオン設定の params_json に記録されたパスも同じ規則で揃える。
+    # 書き換え後の値は addon_files/ を指さないので、起動ごとに無条件で呼んで問題ない。
+    from saiverse.addon_migrations import rewrite_addon_file_paths_in_db
+    rewrite_addon_file_paths_in_db(str(db_path))
 
     # 参照アドレッシング統一のデータ移行 (day_plan slots_json の desire:→task:) は
     # schema 変更を伴わないため needs_migration では拾えない。冪等かつ desire: を含む

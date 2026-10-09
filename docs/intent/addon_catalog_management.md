@@ -1,6 +1,6 @@
 # Intent: アドオンカタログ管理 (curated registry + ワンタッチ導入)
 
-**ステータス**: Phase 4 完了 (voice-tts 除く、2026-05-23)。voice-tts の Phase 4-E は未着手 (前提だった PR #4 は 2026-05-24 にマージ済み)。公開前に必要な作業と、まはーが決めることは、2026-09-11 に Phase 4-E の節へ洗い出してある
+**ステータス**: 完了 (2026-10-06)。「導入時の質問と、アドオン専用の Python 環境」は 2026-10-05 にまはーの GO で実装し、隔離環境の通し (Windows と Linux、導入から声が出るまで) と、まはーの実機での画面の実操作 (質問ダイアログ → voice-tts 0.6.0 への更新 → 再起動 → 本番のペルソナの声) まで確認した (2026-10-06)。実機の確認で見つけた不具合二つ (長い導入で進捗の小窓が完了を受け取れない / 消えた専用環境の作り直しの入口が無い) も同日に修正済み。voice-tts の公開カタログへの掲載だけが残っていて、それは v0.3.22 の発行と一緒に行う ([voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md))。Phase 4 は voice-tts を除いて完了 (2026-05-23)
 
 ## これは何か
 
@@ -110,6 +110,8 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 
 現状の `addon.json` (params_schema / ui_extensions など) に `setup` セクションを追加:
 
+> 下の例は 2026-05-22 当初の形で、step の書き方の見本としてだけ読む。voice-tts を実際に載せる形はこの例とは違う — `setup.bat` を `platform_script` の step で実行する案は 2026-10-05 に取り下げた ([voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md))。
+
 ```json
 {
   "name": "saiverse-voice-tts",
@@ -139,14 +141,15 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 }
 ```
 
-許可される `type` (allowlist):
-- `pip_install`: `requirements` ファイルを `python -m pip install -r` する
+許可される `type` (allowlist、実装は `saiverse/addon_manifest.py`):
+- `pip_install`: `requirements` ファイルを `python -m pip install -r` する (requirements.lock を constraints として渡す。例外は専用の Python 環境で実行する step — 「導入時の質問と、アドオン専用の Python 環境」の節)
 - `platform_script`: addon ディレクトリ内の指定スクリプトを実行 (パスは addon ディレクトリ相対で固定、`..` 不可)
 - `python_script`: addon ディレクトリ内の `.py` を `python` で実行
-- `remove_dir`: addon ディレクトリ配下の指定パスを削除 (アンインストール時のみ)
-- `download_file`: URL + 期待 SHA256 を指定して DL (将来用)
+- `git_clone`: サブリポジトリを取得 (40 桁の commit SHA 必須、HEAD 追従禁止)
+- `remove_dir`: addon ディレクトリ配下、または永続データ (`addon_data/<id>/`) 配下の指定パスを削除
+- `download_file`: URL + 期待 SHA256 を指定して永続データ配下に DL (stackchan v0.5.0 のファームウェア取得で使用中)
 
-**禁止**: 任意シェルコマンド、`curl | sh`、`exec`、addon ディレクトリ外への書き込み。
+**禁止**: 任意シェルコマンド、`curl | sh`、`exec`。書き込んでよい場所は次の三つだけ (2026-10-05 に「addon ディレクトリ外への書き込み禁止」から改めた): ① アドオンのフォルダ `expansion_data/<id>/` (git_clone の取得先など)、② 永続データ `~/.saiverse/user_data/addon_data/<id>/` (download_file の置き先)、③ 導入物 `~/.saiverse/addon_install/<id>/` (専用の Python 環境と答え)。
 
 `skip_if_exists` 指定があれば、そのパスが既存ならステップをスキップ (voice-tts 再 setup 回避用)。
 
@@ -159,6 +162,7 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
    - b. `git checkout <commit_sha>`
    - c. addon.json を読み込み、setup_version / setup.steps を取得
    - d. 各ステップを順次実行、進捗を UI に流す
+   - 進捗の接続が途中で切れても、処理は最後まで走る。同じアドオンへの別の操作を断る鍵 (per-addon lock) は、接続の終わりではなく処理の終わりで放す。画面は接続が切れたら `GET /api/addon-catalog/operations/{addon_id}` を問い合わせて処理の終わりを待ち、記録された結果を出す (記録が無ければ成否は言わない)。進捗の行が出ない間も、サーバーは 10 秒ごとに SSE のコメント行を送って接続を保つ — Next.js の中継は 30 秒間データが流れないと上流との接続を切る (2026-10-06、[addon_install_progress_dialog_stuck_on_long_installs.md](../issues/archive/addon_install_progress_dialog_stuck_on_long_installs.md))
 4. 完了後、SAIVerse のアドオンローダを reload (再起動なしで認識させる)
    - これは `saiverse/addon_loader.py` 側の reload 経路があるかを実装前に確認 (未調査)
 
@@ -212,6 +216,117 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 4. **setup_version の単調増加**: setup の再実行が必要な変更を入れたら setup_version をインクリメント。これを守らないとユーザーが古い external 資産のまま新しいコードを動かす事態が起きる。
 5. **setup 前に必ずユーザー承認**: 各 setup step の内容 (実行コマンド) をダイアログで提示してから実行する。
 
+## 導入時の質問と、アドオン専用の Python 環境 (2026-10-05 起草、同日まはー GO)
+
+この節は、メティスが 2026-10-05 に書いた設計案。まはーの GO は同日の会話で出た (要点 — 導入時にエンジンを選べる・重いパッケージは本体と別の箱に入る — を会話の問いで確認し、「それでいいよー」)。起点になったまはーの発言は「なんとかUI上でsetup.bat同様のウィザード動かす感じのシステム作れない？セットアップ中に何かを選ぶみたいなのは普通にあると思うのよ。」。同日に Fable のセッションで検収し、整合性の検査 (Opus のサブエージェント) も通して、矛盾と抜けを直した (アンインストール後の答えの扱い、step を OS で出し分ける `os`、`min_saiverse_version` の検査、手で入れたアドオンの更新の扱い — setup_version と取得元、文書の直しの作業化)。
+
+この仕組みを最初に使うのは voice-tts で、voice-tts をどう載せるかは [voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md) にある。
+
+### 要点
+
+アドオンは、導入するときに利用者へ質問を出せる。利用者の答えと、実行中の OS で、setup の step のうちどれを実行するかが決まる。重いパッケージは、SAIVerse 本体の venv ではなく、そのアドオン専用の Python 環境に入れられる。
+
+### なぜ要るか
+
+voice-tts をカタログに載せようとして、いまの仕組みでは次の三つが解けないと分かった (2026-10-05)。
+
+1. **利用者ごとに入れるものを変えられない。** setup の step は、導入した全員に同じように実行される。たとえば voice-tts では、クラウドの音声エンジンは API キーだけで動くが、GPU で動かす音声エンジンは NVIDIA の GPU と数 GB のダウンロードが要る。GPU の無い利用者も、数 GB をダウンロードすることになる。
+2. **アドオンが使うパッケージが、本体の requirements.lock と両立しないことがある。** 両立しないパッケージを本体の venv に入れると、本体のパッケージのバージョンが変わる。いまの仕組みでは、両立しないパッケージを要るアドオンは、カタログからは入れられない。
+3. **アドオンの既存の setup スクリプトは、カタログからは実行できないことがある。** たとえば voice-tts の setup.bat は、最後に `pause` で利用者がキーを押すまで終わらず、torch を `--force-reinstall` で本体の venv に入れ直す。
+
+1 は、導入時に質問を出せれば解ける。3 は、スクリプトの処理を manifest に書いた step に置き換えれば解ける。2 は、どちらでも解けない。両立しないパッケージを選んだ利用者の本体の venv は、結局書き換わるからだ。2 を解くのが、アドオン専用の Python 環境になる。
+
+### 利用者から見える流れ
+
+1. カタログでアドオンの「導入」を押す。
+2. 確認ダイアログに、そのアドオンが用意した質問が出る (例: voice-tts なら「使う音声エンジンを選んでください」)。
+3. 確認ダイアログには、選んだ答えに応じて実行される step の一覧が出る。利用者が承認してから実行する (不変条件 5 はそのまま)。
+4. 進み具合は、いまと同じ進捗ダイアログに出る。
+5. あとで選択肢を足したくなったら、「導入済み」タブのそのアドオンから、同じ質問をもう一度開く。この操作で足せるのは、複数選べる質問の選択肢だけで、一つだけ選ぶ質問の答えは導入後には変えられない (このたびは)。前に選んだ選択肢は選ばれた状態で出て、外すことはできない。新しく選んだ選択肢について、実行される step の一覧を確認ダイアログで見せ、承認されたら、答えの変化で新しく実行の条件を満たした step だけを実行する。`when` の無い step はやり直さない。
+
+### manifest に足すもの
+
+`setup` に `options` (質問の一覧) を足し、各 step に `when` (この答えのときだけ実行する)・`env` (この step を専用の Python 環境で実行する)・`os` (この OS でだけ実行する) を足す。下は形を示すための例。
+
+```json
+{
+  "setup_version": 1,
+  "setup": {
+    "options": [
+      {
+        "id": "engines",
+        "question": {"ja": "使う音声エンジンを選んでください", "en": "Choose the speech engines to use"},
+        "multiple": true,
+        "choices": [
+          {"id": "cloud", "label": {"ja": "OpenAI TTS / ElevenLabs (GPU 不要)", "en": "..."}, "default": true},
+          {"id": "gpt_sovits", "label": {"ja": "GPT-SoVITS (数 GB のダウンロード)", "en": "..."}}
+        ]
+      }
+    ],
+    "steps": [
+      {"name": "アドオンのパッケージ", "type": "pip_install", "requirements": "requirements.txt"},
+      {"name": "GPT-SoVITS 本体", "type": "git_clone", "url": "https://github.com/RVC-Boss/GPT-SoVITS.git",
+       "commit": "<40 桁の SHA>", "dest": "external/GPT-SoVITS", "when": {"engines": "gpt_sovits"}},
+      {"name": "GPT-SoVITS のパッケージ", "type": "pip_install", "requirements": "envs/gpt_sovits.txt",
+       "env": "gpt_sovits", "when": {"engines": "gpt_sovits"}},
+      {"name": "GPT-SoVITS のモデルの重み", "type": "python_script", "script": "scripts/download_weights.py",
+       "args": ["gpt_sovits"], "env": "gpt_sovits", "when": {"engines": "gpt_sovits"}}
+    ]
+  }
+}
+```
+
+- 質問の形は、選択肢から選ぶもの (一つ、または複数) だけにする。自由に文字を入力させる形は作らない。答えが step の引数やコマンドに入り込む経路を作らないためで、答えにできるのは「どの step を実行するか」の選択だけになる。
+- `when` の読み方: `{"engines": "gpt_sovits"}` は、質問 `engines` の答えに `gpt_sovits` が含まれるとき、という意味。一つだけ選ぶ質問では、答えがそれと等しいとき。`when` に質問を二つ以上書いたときは、全部が当てはまるときだけ実行する。
+- `when` の無い step は、これまでどおり全員に実行される。`options` を持たないアドオン (Elyth・X・stackchan) は、何も変わらない。
+- `os` の読み方: `{"os": ["windows", "linux"]}` のように、registry の `requires.os` と同じ語彙 (windows / linux / macos) の一覧で書く。実行中の OS が一覧に無い step は飛ばす。`when` と両方あるときは、両方が当てはまるときだけ実行する。最初に要るのは voice-tts で、Windows と Linux の専用の環境には CUDA に対応した torch を、Mac には普通の torch を入れるため、requirements のファイルを OS で分ける ([voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md))。
+- 答えは `~/.saiverse/addon_install/<addon_id>/setup_answers.json` に残す (置き場所の理由は次の小節)。更新で setup_version が上がって step をやり直すときは、この答えを使い、質問を出し直さない。新しいバージョンで、質問が増えたとき、または既にある質問に選択肢が増えたときは、その質問だけを、前の答えが選ばれた状態で出し直す。逆に、新しいバージョンに無くなった質問・選択肢の答えは、保存から捨てる (残すと、もう画面に出ない答えが `when` の判定に効き続ける)。質問や選択肢を増やす変更は、実行すべき step も増やす変更なので、setup_version も一緒に上げる — 上げない更新では setup は走らず、質問も出ない。保存された答えが無いまま step をやり直すことになったとき (手で入れたアドオンをカタログから更新したときが典型) は、全部の質問を最初から出す。
+- アンインストールでは、答えも一緒に消す (次の小節)。導入し直すときは、質問を最初から出す。
+- 一度選んだ選択肢を外す操作は、このたびは作らない。
+
+### アドオン専用の Python 環境と、答えの置き場所
+
+- 置き場所は `~/.saiverse/addon_install/<addon_id>/` にする。専用の環境は `envs/<env の名前>/`、答えは `setup_answers.json` として、この下に置く。
+- **`addon_data/` の下には置かない。** `addon_data/` は利用者のデータの置き場所で、更新前のスナップショットで毎回まるごと保存される (`scripts/snapshot.py` の `EXCLUDED_FROM_SNAPSHOT` の注記で、除外してはならないと定められている)。数 GB の環境を置くと更新のたびにそれが保存の対象になり、llama_cache (実測 15.8 GB) が対象に入っていたときと同じ形になる ([snapshot_timeout_is_fixed_while_world_grows.md](../issues/snapshot_timeout_is_fixed_while_world_grows.md))。専用の環境と答えは、アドオンのフォルダ (`expansion_data/<addon_id>/`) と同じく、世界の状態ではなく導入されたものなので、`addon_install` を `EXCLUDED_FROM_SNAPSHOT` に足す。答えも同じ場所に置くのは、スナップショットを戻したときに答えだけが過去に戻り、実際に入っている環境と食い違うのを避けるため。
+- 専用の環境が無ければ、step の前に本体の Python (`sys.executable`) の `-m venv` で作る。作るときに、使った Python のバージョンを環境の中に記録しておく。本体の Python のバージョンが変わっていたら、その環境は作り直しが要るものとして扱い、次に setup を実行するときに作り直す。作業 6 の関数も同じ照合を行い、食い違いを見つけたら古い環境の場所を黙って返さず、エラーで知らせる。本体の更新で Python のバージョンが変わった場合や、利用者が専用の環境を手で消した場合の作り直しの入口は、「導入済み」タブの選択肢の確定のやり直し — 答えを変えずに確定し直すと、消えた・壊れた環境を使う step が走って作り直される (答えも環境も健全なら何もしない。2026-10-05、隔離の通し確認で入口の不在を踏んで実装)。
+- `env` の付いた step は、専用の環境の Python で実行する。`pip_install` はその環境の pip で、`python_script` はその環境の Python で起動し、環境変数 `VIRTUAL_ENV` と `PATH` もその環境を指すようにする。スクリプトの中から `pip` や `python` を呼んでも、本体の venv ではなく専用の環境に入る。
+- `env` の付いた step には、requirements.lock を constraints として渡さない。その step は本体の venv にパッケージを入れないので、本体のパッケージのバージョンが変わることがない。`env` の付いていない step は、これまでどおり本体の venv で実行し、`pip_install` には constraints が渡る ([addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md) の直し方を入れるときも、constraints を渡すのは `env` の付いていない step だけにする)。
+- アドオンのコードは、本体の新しい関数 (例: `get_addon_env_python(addon_id, name)`) で、その環境の Python の場所を受け取る。専用の環境のパッケージを使う処理は、SAIVerse のプロセスの中では動かせないので、この Python で別のプロセスとして起動する。
+- アンインストールでは、`addon_install/<addon_id>/` を、アドオンのフォルダと一緒に必ず消す。作り直せるものなので、利用者のデータ (`addon_data/`) のように残すかどうかを選ばせない。
+
+### `git_clone` の step で、取得先のフォルダが既にあるときの扱い
+
+いまの導入の仕組み (`_exec_git_clone`) では、取得先のフォルダが既にあると、その step を何もせずに飛ばしている。これでは、更新で setup_version を上げて commit を変えても、古い commit のまま残る (不変条件 3・4 の趣旨に反する)。取得先が既にあるときは、指定された commit を取得してその commit に切り替えるように変える。
+
+### 守ること (不変条件に足す)
+
+6. **答えで変えられるのは、どの step を実行するかだけ。** step の中身 (URL・commit・スクリプト・引数) は manifest に書かれたもので、利用者の答えからは作らない。
+7. **`env` の付いた step は、本体の venv に何も入れない。** 導入の仕組み (`addon_installer.py`) が保証するのは起動の形 — `env` の付いた step を専用の環境の Python・pip・環境変数で起動すること — までで、スクリプトが本体の Python を絶対パスで名指しして呼ぶことまでは止められない。そこは、カタログに載せる前の審査で見る。requirements.lock の constraints を外してよいのは、この形で起動される step だけ。なお、`env` の付いていないスクリプトの中の pip は、いまは constraints なしで動く ([addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md)、未着手)。その直しが入るまでは、`env` の付いていないスクリプトで pip を呼ぶアドオンをカタログに載せない (voice-tts の `env` の付いていないスクリプトは設定ファイルのひな形の作成だけで、pip を呼ばない)。[dependency_management.md](dependency_management.md) §2-4 の表では、「アドオンは本体の部品を動かせない」を守る仕組みとして「`addon_installer.py` が constraints を渡す」が挙がっている。この設計が確定したら、そこにこの起動の形を足す。
+
+### この仕組みでやる本体の作業
+
+1. manifest に `options`・`when`・`env`・`os` を足し、検査を通す (`saiverse/addon_manifest.py`)。`env` の名前にはパスと同じ検査 (許される文字だけ、`..` 不可) を、`os` の値には決まった語彙 (windows / linux / macos) だけを許す検査を入れる。
+2. 導入の仕組みで、答えの保存、専用の環境の作成と作り直し、`env` の付いた step の起動、`when`・`os` による step の選択を行う (`saiverse/addon_installer.py`)。
+3. `git_clone` の step で、取得先のフォルダが既にあるときに、指定された commit に切り替える。
+4. アンインストールで `addon_install/<addon_id>/` を消す。
+5. `addon_install` を、更新前のスナップショットの対象から外す (`scripts/snapshot.py` の `EXCLUDED_FROM_SNAPSHOT`)。
+6. アドオンのコードが専用の環境の Python の場所を受け取る関数を足す。
+7. 画面: 確認ダイアログに質問を出し、答えに応じた step の一覧を出す。「導入済み」タブから質問をもう一度開けるようにする。
+8. registry の `min_saiverse_version` を、導入と更新の前に確かめ、足りなければ分かる言葉で断る。いまはどこでも読んでいない ([stackchan_firmware_not_distributed.md](../issues/stackchan_firmware_not_distributed.md) に記録のある宿題)。確かめるのは取得 (`git checkout`) の前 — 更新は、manifest の検証に失敗しても元の commit に戻さないので (`update_addon`、2026-10-05 にコードで確認)、後で止めても手遅れになる。なお、この検査を持たない古い SAIVerse が新しい欄の付いたアドオンを導入しようとした場合は、manifest の検証が知らない欄で失敗し、導入は取得したフォルダを消して終わる (壊れはしないが、理由の表示は分かりにくい)。更新は導入より悪い — 手で入れたアドオンを古い SAIVerse で新しい commit へ更新すると、取得のあとの検証で失敗して元の commit に戻らず、そのアドオンは画面の一覧から消えて操作できなくなる (直すには SAIVerse を更新するか、アドオンのフォルダを手で消して入れ直す)。
+9. 文書を設計の確定に合わせて直す: この文書の「禁止」の文を書いてよい場所の一覧の形に (下の小節)、[dependency_management.md](dependency_management.md) §2-3 の「アドオンの pip install には lock を constraints として渡す」の文と §2-4 の表に `env` の付いた step の例外を (上の「守ること」の 7)、それぞれ反映する。
+10. 更新の取得先を、導入時の origin ではなくカタログの `repo_url` にする (`update_addon`。下の「カタログが指す先を切り替えるとき」)。voice-tts には手で入れたもの (origin が Nature109 を指す) が既にあり、カタログはまはーのフォークを指すので、この修正は voice-tts を載せる本体のリリースまでに要る。
+11. 隔離した `SAIVERSE_HOME` と新しい venv で、質問・`when`・`env`・`os` の付いたアドオンを導入し、選んだ step だけが実行されること、`env` の付いた step の前後で本体の venv のパッケージが変わっていないことを確かめる。手で入れた形 (git clone 済みのフォルダ) をカタログから更新する経路も確かめる。
+
+(2026-10-05: 1〜10 は実装済み。11 のうち、導入 → 選択肢の追加 → アンインストールの通しは、隔離した `SAIVERSE_HOME` で本物の git・venv・pip を使って同日に確認した — 専用の環境にだけパッケージが入り、本体の venv は変わらず、アンインストールで専用の環境と答えが消える。画面の実表示と、手で入れた形の更新の実物での通しは、voice-tts の掲載のときに行う。)
+
+### カタログが指す先を切り替えるとき
+
+カタログの `repo_url` を別のリポジトリに書き換えても、いまの更新処理 (`update_addon`) は、導入したときの URL (アドオンのフォルダの git の origin に記録されている) から取得する。そのため、導入済みの利用者の更新は、古い URL から取得され続ける。この修正 (本体の作業 10) は、当初「切り替えの必要が出たら、その前のリリースで」としていたが、voice-tts では載せる時点から要ることが分かった (2026-10-05) — 手で git clone した既存のアドオンのフォルダは origin が Nature109 を指していて、フォークを指すカタログの commit を origin からは取得できないため。将来の切り替えの予定も voice-tts (まはーのフォークから Nature109 のリポジトリへ、[voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md))。
+
+### この文書の「禁止」の文との関係
+
+「インストールフロー」の前にある「addon ディレクトリ外への書き込み」の禁止は、`download_file` (`addon_data/` に書く) を入れた時点で実装と合わなくなっている。専用の環境は、さらに `addon_install/` へ書く。設計が確定したら、この禁止の文を、書いてよい場所の一覧の形に直す。
+
 ## Phase 計画
 
 ### Phase 1: manifest スキーマ確定 + Elyth で installer 基礎検証 ✅ (2026-05-22 完了)
@@ -249,71 +364,9 @@ voice-tts は `external/GPT-SoVITS/` (5.2GB) を `setup.bat` で初回 DL する
 - **4-F registry public 化**: github.com/maha0525/saiverse-addon-registry を public で作成 + push、 raw.githubusercontent.com 経由で env override なしで fetch できることを実機確認 ✅
 - **インシデント (2026-05-23)**: Phase 4-D で stackchan のコード path 変更を push したが migration 起動時呼び出しを「voice-tts 完了後」 と遅延、 結果まはー の SAIVerse 再起動でアバター画像 / ペアリング情報が UI から不可視に。 手動コピーで復旧後、 `ENABLED_ADDONS_FOR_STARTUP` フィルタを設けて voice-tts 以外を起動時 migration 有効化 (`c362b1e`)。 教訓: 「コード path 変更と migration はセット commit」、 詳細は memory `feedback_code_path_migration_coupling.md`
 
-### Phase 4-E: voice-tts v2 化 (未着手、2026-09-11 に公開前の作業を洗い出し)
+### Phase 4-E: voice-tts のカタログ掲載 (2026-10-05 に issue へ切り出した)
 
-voice-tts の upstream (元になっているリポジトリ) は `Nature109/saiverse-voice-tts` で、GitHub 上でそれを複製したフォーク `maha0525/saiverse-voice-tts` もある。PR #4〜#6 は maha0525 が作成し、#4 は Nature109 のアカウントがマージした。
-
-この節では、次の語をこの意味で使う。
-
-- **requirements.lock** は、本体が動作を確かめた版に全パッケージを固定した一覧 ([dependency_management.md](dependency_management.md))。
-- **constraints** は、pip の `-c` オプションで渡す「この一覧に書いてある版から動かすな」という指定。
-- **venv** は、SAIVerse が使う Python の仮想環境 (virtual environment)。本体とアドオンのパッケージは同じ venv に入る。
-- **衝突** は、パッケージ同士の版の条件が両立しないこと (pip check の警告文と同じ呼び方)。
-- **GIL** (Global Interpreter Lock) は、Python が一度に一つのスレッドにしか処理をさせない仕組み。
-
-#### 2026-09-11 時点の現状
-
-- 旧手順が前提にしていた PR #4 (音声の配信経路と再生キューの変更) は、2026-05-24 にマージ済み。upstream の main ブランチには、それ以降のコミットが無い。
-- `addon.json` に `manifest_version` も `setup` も無い。upstream の main ブランチ、フォークの main ブランチ、まはーの手元の `expansion_data/saiverse-voice-tts/` の三つで確認した。このままでは、アドオンカタログから GPT-SoVITS を入れられない。
-- 公開の registry.json に voice-tts は載っていない (載っているのは Elyth・X・stackchan)。
-- 合成した音声は、旧来の `~/.saiverse/user_data/voice/out/` に保存されている (`tools/speak/playback_worker.py` の `_OUT_DIR`)。
-- ペルソナごとの参照音声は、本体のアップロード処理 (`api/routes/addon.py` の `_resolve_file_dir`) によって `~/.saiverse/user_data/addon_files/saiverse-voice-tts/personas/<persona_id>/` に保存され、その絶対パスが DB の `AddonPersonaConfig.params_json` に記録される。voice-tts の合成では、記録された絶対パスがそのまま使われる (`tools/speak/profiles.py` の `_resolve_ref_audio`)。
-- 本体の `saiverse/addon_migrations.py` には、voice-tts の参照音声 (`addon_files/saiverse-voice-tts/` から `addon_data/saiverse-voice-tts/inputs/` へ) と合成音声 (`voice/out/` から `addon_data/saiverse-voice-tts/outputs/` へ) を移す処理がすでにある。`ENABLED_ADDONS_FOR_STARTUP` に voice-tts が入っていないので、起動時には実行されない。
-- upstream にまだマージされていない PR が 2 本ある。#5 は GPT-SoVITS の合成の別プロセス化 (2026-05-24 に作成)。#6 は、音声のストリームが止まったときに SAIVerse の終了処理が止まったままにならないよう、待ち時間に上限を付ける修正 (2026-08-27 に作成)。まはーの手元の `feature/tts-out-of-process` ブランチ (#5 のブランチ) には、`tools/speak/engine/gpt_sovits.py` と `tools/speak/playback_worker.py` にコミットされていない変更がある。
-- voice-tts には Windows 用の `setup.bat` しかなく、`setup.sh` は無い。voice-tts の requirements.txt のコメントには、どのプラットフォームでも使える導入コマンドとして `python scripts/install_backends.py gpt_sovits` が書かれている。
-
-#### 旧手順の 3 番が、いまのままでは成り立たない理由
-
-旧手順 (この節の最後に残してある) の 3 番は、「`setup.bat` を `platform_script` の step で登録する」としていた。これは requirements.lock の導入 (2026-09-02) より前に書かれたもので、いまは次の二つの理由で成り立たない。3 番を計画から外すかどうかは、まはーが決める。
-
-1. `setup.bat` は `scripts/install_backends.py` を通して、GPT-SoVITS の requirements.txt をそのまま `pip install -r` する。その中の `numpy<2.0` と `pydantic<=2.10.6` は、requirements.lock (numpy は Python 3.12 以上で 2.5.2、3.11 で 2.4.6。pydantic は 2.13.5) と両立しない。さらに、`gradio<5` で入る gradio 4.44.1 は `pillow<11` を、それが連れてくる gradio-client 1.3.0 は `websockets<13` を、`torchmetrics<=1.5` で入る torchmetrics 1.5.0 は `numpy<2.0` を要求していて、requirements.lock の pillow 11.3.0・websockets 16.1.1・numpy と衝突する。
-2. `saiverse/addon_installer.py` では、requirements.lock が constraints として pip に渡されるのは `pip_install` の step だけで、`platform_script` の step で実行されるスクリプトには渡されない ([addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md))。旧手順のまま実行すると、venv の本体のパッケージが requirements.lock の版から引き下げられる。
-
-#### 公開前にやること (2026-09-11 にメティスが洗い出した。進め方はまはー未決)
-
-1. **voice-tts 用の GPT-SoVITS の requirements を、voice-tts 側で持つ。** GPT-SoVITS の requirements.txt を元に、次を変える。
-   - `gradio` を外す。GPT-SoVITS の推論で読み込まれるコード (`GPT_SoVITS/TTS_infer_pack/TTS.py` から import を辿れる範囲) は、gradio を import していない。gradio を import しているのは、WebUI の 5 つ (`webui.py`、`GPT_SoVITS/inference_webui.py`、`GPT_SoVITS/inference_webui_fast.py`、`tools/uvr5/webui.py`、`tools/subfix_webui.py`) と `tools/my_utils.py` だった。`tools/my_utils.py` を import しているのは、WebUI、学習・データ準備・書き出し用のスクリプト、実験的なストリーミング推論のスクリプト (`GPT_SoVITS/stream_v2pro.py`) で、voice-tts の入口 (`tools/speak/engine/gpt_sovits.py` の `from TTS_infer_pack.TTS import TTS, TTS_Config`) から辿れる範囲には無い。これはコードを辿った確認で、gradio を外した venv で合成してはいない。
-   - `numpy<2.0` と `pydantic<=2.10.6` の上限を外す。2026-09-03 00:11 の再起動で、numpy 2.5.2 と pydantic 2.13.5 が入った venv (まはーの開発機、Windows、Python 3.13) のまま、voice-tts の合成は成功している ([dependency_management.md](dependency_management.md) §5 の 6)。
-   - `torchmetrics<=1.5` を `torchmetrics>=1.5.2` にする。torchmetrics は `GPT_SoVITS/AR/models/t2s_model.py` が import していて、推論で必要になる。1.5.0 は `numpy<2.0` を要求するが、1.5.2 以降は numpy の上限を持たない (PyPI で確認)。1.5.2 以降で推論が通るかは未確認。
-   - voice-tts の requirements.txt に、numba の版の条件を足す ([dependency_management.md](dependency_management.md) §3-3 に残っている宿題)。まはーの開発機の venv では 2026-09-02 20:47 に numba 0.67.0 へ上がっていて、9/3 の合成はその版で成功した。
-2. **`saiverse/addon_installer.py` で、`platform_script` / `python_script` の step で実行されるスクリプトの中の pip にも、requirements.lock が constraints として渡るようにする (本体側)。** [addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md)。
-3. **`addon.json` を manifest v2 にする。** `manifest_version`・`setup_version`・`data_subdirs`・`setup.steps` を書く。1 の requirements をどの step で入れるか (`pip_install` の step に分けるか、スクリプトの中に残すか) は未決。スクリプトを使うなら、`platform_script` の step の `unix` 側のスクリプトも要る。いまの `saiverse/addon_installer.py` は、実行中の OS 向けのスクリプトが無いとその step を失敗にせず飛ばして先へ進むので、`setup.sh` が無いまま載せると、macOS と Linux では GPT-SoVITS が入らないまま導入が成功したように見える。
-4. **参照音声と合成音声を、永続データの規約の場所へ移す。** 本体の `ENABLED_ADDONS_FOR_STARTUP` に voice-tts を加えると、起動時に参照音声のファイルが `addon_data/saiverse-voice-tts/inputs/` へ移る。しかし DB に記録された参照音声の絶対パスと、本体のアップロード処理の保存先は、古い `addon_files/` のまま残る。合成では記録された絶対パスがそのまま使われるので、参照音声のファイルが見つからずにエラーになる。移行を有効にするときは、同じリリースで次の三つを揃える (2026-05-23 のインシデントの教訓「コード path 変更と migration はセット commit」)。
-   - 本体: voice-tts の参照音声のアップロード先を、移行先の `addon_data/saiverse-voice-tts/inputs/` と揃える。ファイルを受け付ける他のアドオンの保存先をどう扱うかも、あわせて決める。
-   - 本体: DB の `AddonPersonaConfig.params_json` に記録された、古い場所の絶対パスを書き換える。
-   - voice-tts: 合成音声の保存先 (`_OUT_DIR`) を `get_addon_data_dir(...)/outputs/` に変える。
-5. **upstream に PR を出してマージし、registry.json に voice-tts を載せる。**
-6. **公開前の検証。** 隔離した `SAIVERSE_HOME` と、requirements.lock だけを入れた新しい venv に、アドオンカタログの導入経路で voice-tts を入れ、GPT-SoVITS で実際に声が出るところまで確かめる。[dependency_management.md](dependency_management.md) §5 の 4 で「voice-tts の実導入は本番 venv の同期のときに」と後に回していた検証にあたる。証拠は次の項目ごとに残す。2026-09-11 の時点では、すべて未検証。
-   - Windows で、カタログから入れて声が出る: 未検証。
-   - macOS で、カタログから入れて声が出る: 未検証 (`setup.sh` が無い)。
-   - Linux で、カタログから入れて声が出る: 未検証 (`setup.sh` が無い)。
-   - 参照音声を設定済みのペルソナがいる既存の環境に 4 の移行を当てて、そのペルソナの声が出る: 未検証。
-
-#### まはーが決めること (2026-09-11 時点で未決)
-
-- **旧手順の 3 番 (`setup.bat` を `platform_script` の step で実行する) を、計画から外すか。**
-- **upstream にまだマージされていない PR #5・#6 を、公開前にマージするか。** #5 は GPT-SoVITS の合成を別プロセスに移して、SAIVerse 本体のどのスレッドが GIL を握り続けても合成が遅くならないようにするもので、[mcp_cancel_scope_spin_gil_starvation.md](../issues/mcp_cancel_scope_spin_gil_starvation.md) の修正方針 B にあたる。GIL 飢餓の元になった本体側の不具合を直す修正方針 A は、2026-05-24 に回帰テストと一緒に実装済み。
-- **Irodori-TTS を公開に含めるか。** Irodori-TTS の pyproject.toml は `transformers>=5.12.1,<6`・`peft>=0.18.0`・`gradio>=5.0.0` を要求していて、GPT-SoVITS の requirements.txt の `transformers>=4.43,<=4.50`・`peft<0.18.0`・`gradio<5` と両立しない。同じ venv に両方は入らない。`addon.json` のエンジンの選択肢 (`engine`) には、今も `irodori` がある。
-
-#### 旧手順 (2026-05-23。3 番は、上に書いた理由でいまのままでは成り立たない)
-
-voice-tts repo は `origin = Nature109/saiverse-voice-tts` の共有 repo で、 現在 PR #4 (subscribe-before-open) がレビュー待ち。 v2 化は別 PR で出す方針:
-
-1. まはー: ナチュレに「manifest v2 化 PR を別途出す」連絡
-2. main 起点で `feature/manifest-v2` を切る
-3. addon.json v2 化 (manifest_version=2, setup_version, data_subdirs)、 `setup.bat` を `platform_script` step で登録 (skip_if_exists=`external/GPT-SoVITS`)、 永続データ参照を `get_addon_data_dir(...)/inputs/` と `get_addon_data_dir(...)/outputs/` に変更
-4. PR 提出 → ナチュレレビュー → マージ
-5. マージ後、 SAIVerse 本体の `ENABLED_ADDONS_FOR_STARTUP` に `saiverse-voice-tts` を追加、 registry.json に voice-tts エントリを追加
+voice-tts をカタログに載せる件は、アドオンカタログの仕組みの話ではなく voice-tts 一件の段取りなので、[voice_tts_catalog_listing.md](../issues/archive/voice_tts_catalog_listing.md) に移した。2026-09-11 の洗い出しと 2026-05-23 の旧手順も、そこの「経緯」にそのまま移してある。
 
 ## まはー回答 (2026-05-22 一次レビュー)
 
@@ -385,53 +438,21 @@ Phase 4 (既存アドオン整備) で各アドオンを更新:
 
 1. **Elyth (推奨第一候補)**: 大きな外部資産なし、API キー入力のみで動くアドオン → installer の git clone / manifest 検証 / 永続データ配置の一連を最短で検証可能
 2. **X**: OAuth フロー絡みで永続データの扱いが絡む → 規約適用の代表ケース
-3. **stackchan**: ESP32 firmware 関連の external 資産があるかどうか要調査
+3. **stackchan**: ESP32 firmware 関連の external 資産があるかどうか要調査 (その後解決 — firmware は GPL-3.0 で同梱不可。経緯は [stackchan_firmware_not_distributed.md](../issues/stackchan_firmware_not_distributed.md))
 4. **voice-tts (最後)**: 5GB の `external/GPT-SoVITS/` を伴う最大ケース。1〜3 で installer の安定性が確認できてから
 
 各段階で問題が出たら manifest スキーマや installer 実装を修正し、それまでの段で再検証。
 
-## stackchan addon の setup 要件 (2026-05-23 訂正: gateway 自動 fetch 経路の発見)
+## stackchan addon の setup 要件 (2026-10-05 に issue へ移した)
 
-### 実際の外部資産依存関係
+stackchan の gateway 取得と firmware 配布の話 (外部から取得する物の表、当初の誤認、firmware 配布の案 A〜D) は、カタログの仕組みの話ではなく stackchan 一件の段取りなので、[stackchan_firmware_not_distributed.md](../issues/stackchan_firmware_not_distributed.md) の「経緯」に移した (voice-tts の Phase 4-E と同じ扱い)。
 
-| 資産 | 用途 | 現状の取得経路 | addon installer 側の対応 |
-|---|---|---|---|
-| `stackchan-mcp` gateway | LCD/音声 I/O 等を MCP server として SAIVerse に提供 | mcp_servers.json で `uvx --from git+https://github.com/maha0525/stackchan-mcp.git@dev/integration#subdirectory=gateway` を pin、**SAIVerse 起動時に uvx が自動 fetch + cache**。ローカル clone は不要 | **不要**: addon 側は何もしなくて良い (uvx + mcp 経路が既に解決済み) |
-| `merged-binary.bin` (firmware) | ESP32-S3 device に flash する image | GPL-3.0 ライセンスのため addon repo 同梱不可。現状はまはー手元 ESP-IDF build を `<repo>/temp/stackchan-mcp/firmware/build/merged-binary.bin` で参照 | **当面手動配置、後追いで GitHub Releases 化** |
+## 当時の未確定事項の決着 (2026-10-05 整理)
 
-### 当初の誤認 (2026-05-22 → 5-23 訂正)
+2026-05-22 の一次レビュー時点で「二次レビュー待ち」としていた 5 件は、すべて決着している。
 
-最初の Intent Doc では「stackchan-mcp 本体も addon の setup で `git_clone` する」と書いていたが、これは事実誤認。実際は mcp_servers.json の `uvx --from git+...` が gateway を自動取得するため、addon の setup section に gateway clone step は不要。
-
-### firmware 配布の方針 (案 B → 後追いで A)
-
-| 案 | 配布手段 | 採否 |
-|---|---|---|
-| A | maha0525/stackchan-mcp の GitHub Releases に firmware を publish → addon.json に `download_file` step | **将来採用 (Phase 4-D')**: 新規ユーザー向け配布手段として整備 |
-| B | firmware は手動配置のまま、addon.json は `manifest_version: 2` 化のみ (setup section なし) | **当面採用 (Phase 4-D)**: まはー実機は既に flash 済み、新規ユーザー出現までの暫定 |
-| C | CI で自動 Releases 化 | 別タスク化、優先度低 |
-
-### Phase 4-D の setup.steps
-
-```json
-{
-  "manifest_version": 2,
-  "setup_version": 1
-  /* setup section なし — firmware は当面手動配置 */
-}
-```
-
-`_firmware_resolve_path()` (`api_routes.py:1345`) の 3 段階解決の (3) `user_default` パスは Phase 4 中に新規約 `~/.saiverse/user_data/addon_data/saiverse-stackchan-addon/firmware/merged-binary.bin` に揃える (永続データの統一規約に合わせるため)。
-
-### Phase 1 検証順序の更新 (再訂正)
-
-1. Elyth (永続データなし) → 2. X-addon (poll_state / reply_log の永続データあり) → 3. **stackchan の v2 化 (setup なし + 永続データ移行のみ)** → 4. voice-tts (最大)。stackchan の firmware Releases DL 経路は Phase 4-D' として別途。
-
-## 未確定事項 (二次レビュー待ち)
-
-1. **`addon_data/` 規約の名前**: `addon_data` / `addons` / `addon_storage` 等、好みあれば指定して欲しい。当面 `addon_data` で進める。
-2. **共通ヘルパの API 形**: `get_addon_data_dir(__name__)` のようにアドオン側から呼ぶ形で問題ないか? (アドオン id を毎回書かせるより `__name__` 由来で自動取得したい)
-3. **進捗ストリーミング方式**: SSE / WS / polling のどれを使うか。既存の SAIVerse API パターンに合わせたい (調査して提案する)。
-4. ~~**stackchan の external 資産有無**~~: 解決済み (上記「stackchan addon の setup 要件」節)。firmware は GPL-3.0 で同梱不可、Releases DL が筋。
-
-5. **stackchan-mcp の Releases 整備状況**: 現状の stackchan-mcp リポジトリで `merged-binary.bin` を Releases に上げる運用が確立しているか? Phase 1 段階では「まはーローカル build 参照」のままで installer の (1)(2) ステップだけ自動化、Releases 整備は別タスクとして後ろに回す方針で良いか?
+1. 規約の名前は `addon_data` を採用 (Phase 4 で実装)。
+2. 共通ヘルパは `get_addon_data_dir(addon_id)` として実装 (`saiverse/addon_paths.py`)。
+3. 進捗の送り方は SSE を採用 (Phase 2 で実装)。
+4. stackchan が外部から取得する物の有無は解決済み (firmware は GPL-3.0 で同梱不可)。経緯は [stackchan_firmware_not_distributed.md](../issues/stackchan_firmware_not_distributed.md) へ移した。
+5. stackchan-mcp の Releases 整備は、本家の配布物を直接使う形で決着 (アドオン v0.5.0〜v0.5.1、2026-10-04)。同上。

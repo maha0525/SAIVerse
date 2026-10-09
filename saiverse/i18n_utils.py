@@ -9,7 +9,7 @@ Follows the lingua-franca fallback chain:
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 
 def normalize_i18n_dict(
@@ -37,6 +37,22 @@ def normalize_i18n_dict(
         result["en"] = alt_en.strip()
 
     return result
+
+
+def split_i18n_columns(
+    value: Union[str, Dict[str, Any], None],
+    alt_en: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Split a multi-language value into ``(base, en)`` for a pair of DB string columns.
+
+    Tables such as ``playbooks`` store a localized field as two plain string
+    columns (e.g. ``display_name`` + ``display_name_en``): the base column holds
+    the Japanese text (or the plain string as-is), the ``_en`` column holds
+    English. Readers recombine them with :func:`normalize_i18n_dict`. A dict
+    must never reach the column itself — SQLite cannot bind it.
+    """
+    norm = normalize_i18n_dict(value, alt_en=alt_en)
+    return norm.get("ja"), norm.get("en")
 
 
 def resolve_i18n_text(

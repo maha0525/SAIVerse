@@ -17,7 +17,7 @@ from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 from tools import OPENAI_TOOLS_SPEC
 from saiverse.llm_router import route
 
-from .base import LLMClient, get_llm_logger
+from .base import LLMClient, ToolSpecFormat, get_llm_logger
 from .exceptions import (
     AuthenticationError,
     EmptyResponseError,
@@ -74,7 +74,7 @@ def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError
                 if any(kw in details for kw in ("content", "policy", "guideline", "safety", "violat")):
                     return SafetyFilterError(
                         f"xAI {context}: content policy violation", err,
-                        user_message="入力内容がxAIの利用ガイドラインによりブロックされました。入力内容を変更してお試しください。",
+                        user_message="入力内容がxAIの利用ガイドラインによりブロックされました。",
                     )
                 return AuthenticationError(f"xAI {context}: permission denied", err)
             if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
@@ -235,6 +235,9 @@ class XAIClient(LLMClient):
     Uses ``xai_sdk.Client`` for all API operations including text generation,
     streaming, tool calling, structured output, and image understanding.
     """
+
+    def tool_spec_format(self) -> ToolSpecFormat:
+        return "openai"
 
     def __init__(
         self,

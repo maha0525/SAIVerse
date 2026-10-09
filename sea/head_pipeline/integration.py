@@ -154,7 +154,7 @@ def _resolve_anchor_ttl_state(
     """
     if not manager or not model_key:
         return (None, None)
-    sea_runtime = getattr(manager, "sea_runtime", None) or getattr(manager, "runtime", None)
+    sea_runtime = manager.sea_runtime
     if sea_runtime is None:
         return (None, None)
 
@@ -246,14 +246,20 @@ def inject_diff_notifications(
     (persona, model) ごとに独立 (beat_execution_context.md §3.1)。
 
     【outbox 経由に変更 (2026-07-17, 統合工事 §6-4 / SEA 監査 S5・S3)】
-    manager が execution_ledger を持つ環境では、ラベル群を実行台帳の outbox
+    ラベル群は実行台帳 (``manager.execution_ledger``) の outbox
     (target='perception.push') で配送する — 知覚バッファの flush 失敗で通知が
     全消失する穴 (S5) を配達保証で塞ぐ。B (last_notified) の前進は outbox 積みの
     durable 確定 (mark_applied) **後** に行う (S3: 配送前に B を進めると配送失敗時に
     差分が永久に失われる)。B は persona の全 (persona, model) 行を前進させる —
     知覚バッファ → SAIMemory は persona 共有の履歴ストリームで、push は全 Session
-    の窓に届くため。台帳が無い環境 (旧テスト等) は従来どおり直接 push +
-    flush_diffs 内での B 前進に degrade する。
+    の窓に届くため。台帳は SAIVerseManager が無条件に構築するので、台帳なしの
+    直接 push 経路は持たない (2026-09-28 監査で撤去)。
+
+    【ペルソナ単位で並べる (2026-09-26)】「検出 → 積む → B 前進」は
+    ペルソナの通知ロックの内側で一続きに行い、即時配送はロックを離してから
+    行う。理由と順序の規約は :func:`_push_section_diffs` と
+    :meth:`HeadPipeline.notify_lock_for`
+    (docs/issues/head_diff_notification_duplicate_delivery.md ケース 1)。
 
     Returns:
         ラベルが 1 件以上 push された場合 True、差分なしなら False。
@@ -300,7 +306,7 @@ def preview_head_perceptions(
     読み取り専用の中身:
 
     - 基準 (last_notified) を進めない (``flush_diffs(..., advance=False)`` の
-      戻りを使うだけで :meth:`HeadPipeline.advance_last_notified` を呼ばない)。
+      戻りを使うだけで :meth:`HeadPipeline.advance_last_notified_many` を呼ばない)。
     - 知覚バッファに push しない / 実行台帳に行を作らない。
     - 部屋の様子は照合の計算 (:func:`_plan_room_state_change`) までで、置き直し
       (自己回復) は行わない — 置き直しは提示への書き込みで、しかも未消費の
@@ -422,13 +428,73 @@ def _push_section_diffs(
     *,
     only_sections: set[str] | None = None,
 ) -> bool:
-    """Section 群の diff ラベルを検知して知覚バッファ (or outbox) へ push する。"""
-    ledger = getattr(manager, "execution_ledger", None)
-    if ledger is None:
-        return _inject_diff_notifications_direct(
-            persona, pipeline, ctx, building_id, only_sections=only_sections,
+    """Section 群の diff ラベルを検知して知覚バッファ (or outbox) へ push する。
+
+    「検出 → 台帳 (outbox) に積む → B 前進」はペルソナの通知ロック
+    (:meth:`HeadPipeline.notify_lock_for`) の内側で一続きに行う。並べないと、
+    Pulse の頭 (Beat ロック保持) と別ペルソナの入室処理 (移動の配送ハンドラ、
+    Beat ロックは取らない — saiverse/dynamic_state.on_building_entered) が同じ
+    古い B から同じ変化を見つけ、outbox に二行積む
+    (docs/issues/head_diff_notification_duplicate_delivery.md ケース 1)。
+
+    即時配送 (``flush_pending_for_persona``) は**ロックを離してから**行う。
+    配送はプロセス全体で一本の非再入ロック (``ExecutionLedger._delivery_lock``)
+    を取り、入室処理はそのロックを握った配送ハンドラの中からこのペルソナの検知に
+    入ってくる。通知ロックを握ったまま配送に入ると「入室側の配送は通知ロックを
+    待ち、こちらは配送ロックを待つ」でデッドロックする。
+    """
+    ledger = manager.execution_ledger
+    try:
+        with pipeline.notify_lock_for(ctx.persona_id):
+            queued = _queue_section_diffs_locked(
+                ledger, pipeline, ctx, building_id, only_sections=only_sections,
+            )
+    except Exception:
+        # 台帳に積んだ後の B 前進で落ちた回も、積んだ分は即時配送してから
+        # 例外を返す — 旧実装 (mark_applied(deliver=True)) は B 前進より先に
+        # 配っていたので、ここで配送を飛ばすと退行になる。何も積んでいない回の
+        # 配送は pending を見て空振りするだけ。
+        _deliver_queued_notifications(ledger, ctx.persona_id)
+        raise
+
+    if queued:
+        _deliver_queued_notifications(ledger, ctx.persona_id)
+    return queued
+
+
+def _deliver_queued_notifications(ledger: Any, persona_id: str) -> None:
+    """通知ロックの外で、台帳に積んだ知らせを即時配送する。
+
+    適用は commit 済みなので、配送の失敗は pending に残って関所 / 回復 tick が
+    引き継ぐ (ExecutionLedger.mark_applied の deliver=True と同じ扱い)。配送
+    ハンドラの内側 (入室処理) から呼ばれた回は、ledger 側の再入検知が控えに
+    回して外側の配達の後に配る。
+    """
+    try:
+        ledger.flush_pending_for_persona(persona_id)
+    except Exception:
+        LOGGER.error(
+            "head_pipeline: immediate delivery of queued notifications "
+            "failed persona=%s; left pending", persona_id, exc_info=True,
         )
 
+
+def _queue_section_diffs_locked(
+    ledger: Any,
+    pipeline: HeadPipeline,
+    ctx: LineHeadInput,
+    building_id: str,
+    *,
+    only_sections: set[str] | None = None,
+) -> bool:
+    """通知ロックの内側で「検出 → outbox 積み (配送はしない) → B 前進」を行う。
+
+    呼び出し側 (:func:`_push_section_diffs`) が通知ロックを握っていること。
+    配送 (``deliver=True`` / ``flush_pending_for_persona``) はここでは行わない。
+
+    Returns:
+        outbox に 1 行以上積んだら True (呼び出し側が即時配送する)。
+    """
     labels, detected = pipeline.flush_diffs(
         ctx, all_sections=True, advance=False, only=only_sections,
     )
@@ -439,9 +505,9 @@ def _push_section_diffs(
     if not deliverable:
         # 検知だけのラベル (deliver=False) しか無い回。配送する文が無いので台帳は
         # 通さず、基準だけ新しい状態へ進める — 進めないと以後の差分が古い基準との
-        # 比較になって出なくなる (部屋替え時の同席者がこれ)。
-        for section_name, new_snapshot in detected.items():
-            pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+        # 比較になって出なくなる (部屋替え時の同席者がこれ)。検知した Section を
+        # まとめて一回で進める (Section ごとに DB を往復しない)。
+        pipeline.advance_last_notified_many(ctx.persona_id, detected)
         return False
 
     try:
@@ -474,11 +540,13 @@ def _push_section_diffs(
             }
             for label in deliverable
         ]
+        # deliver=False: 積むだけ。配送は呼び出し側が通知ロックを離してから
+        # 行う (_push_section_diffs の docstring — ロックの中で配るとデッドロック)。
         ledger.mark_applied(
             execution_id,
             result={"labels": len(deliverable), "sections": sorted(detected.keys())},
             outbox_items=outbox_items,
-            deliver=True,
+            deliver=False,
         )
     except Exception:
         # 配送予約に失敗 = 通知は届いていない。B は据え置き (次回 flush で再検出)。
@@ -492,8 +560,11 @@ def _push_section_diffs(
     # は一律に進める — deliver=False のラベルしか出さない Section (部屋替え時の
     # 同席者) も、もう後段の処理を持たない (再会の想起は Pulse 頭の同席チェックへ
     # 移った、2026-09-07) ので、基準だけ進めて次の差分に備えればよい。
-    for section_name, new_snapshot in detected.items():
-        pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
+    # 前進も通知ロックの内側 — ロックを離すのは B が進んだ後なので、次に来た
+    # 処理はこの変化を見つけない。検知した Section はまとめて一回で進める —
+    # 入室の配送ハンドラから来た回は台帳の配送ロックを握ったままなので、Section
+    # ごとに DB を往復すると他ペルソナの配送まで待たせる。
+    pipeline.advance_last_notified_many(ctx.persona_id, detected)
 
     LOGGER.info(
         "head_pipeline: queued %d world_state notification(s) via ledger "
@@ -501,80 +572,6 @@ def _push_section_diffs(
     )
 
     return True
-
-
-def _inject_diff_notifications_direct(
-    persona: Any,
-    pipeline: HeadPipeline,
-    ctx: LineHeadInput,
-    building_id: str,
-    *,
-    only_sections: set[str] | None = None,
-) -> bool:
-    """台帳が無い環境の degrade 経路 (配達保証なし)。
-
-    台帳経路と同じく「検出 (advance=False) → push → 成功後に B 前進」の順で行う。
-    旧実装は flush_diffs (advance=True) で先に B を進めてから SAIMemory readiness
-    と push を確認していたため、未 ready / push 失敗で通知を捨てた後も B だけが
-    進み、その差分は永久に再検出されなかった (Codex 2026-08-17 medium — C8 の
-    「配送確定後の前進」違反)。失敗時は B と dirty を据え置き、次回 flush の
-    再検出に委ねる (push 済みラベルの再通知はあり得る = at-least-once。台帳経路
-    の再配送と同じ倒し方)。
-
-    ``deliver=False`` のラベルは push の対象外 (基準の前進にだけ使う)。SAIMemory が
-    未 ready の回は、届ける文の有無にかかわらず何も進めない — push 先が無い以上、
-    次回の再検出でまとめてやり直す方が落としが無い。
-    """
-    labels, detected = pipeline.flush_diffs(
-        ctx, all_sections=True, advance=False, only=only_sections,
-    )
-    if not labels:
-        return False
-
-    sai_mem = getattr(persona, "sai_memory", None)
-    if sai_mem is None or not sai_mem.is_ready():
-        LOGGER.debug(
-            "head_pipeline: SAIMemory not ready, %d notification labels deferred "
-            "(baseline kept for re-detection)",
-            len(labels),
-        )
-        return False
-
-    deliverable = [label for label in labels if label.deliver]
-    push_failed = False
-    for label in deliverable:
-        try:
-            # 台帳経路と同じく、ラベルの型付け (label_kind 等) と添える画像を
-            # 知覚エントリへ写す (room_state_packages.md §11-3-2)。画像の無い
-            # ラベルは従来どおり media を渡さない。
-            push_kwargs: dict[str, Any] = {
-                "metadata": (
-                    json.dumps(label.metadata, ensure_ascii=False)
-                    if label.metadata else None
-                ),
-            }
-            label_media = _label_media_payload(label)
-            if label_media:
-                push_kwargs["media"] = label_media
-            sai_mem.push_perception("world_state", label.label, **push_kwargs)
-        except Exception:
-            push_failed = True
-            LOGGER.exception(
-                "head_pipeline: push_perception failed for world_state label",
-            )
-    if push_failed:
-        # 一部でも失敗したら B を進めない — 次回 flush で全ラベル再検出される。
-        return False
-
-    for section_name, new_snapshot in detected.items():
-        pipeline.advance_last_notified(ctx.persona_id, section_name, new_snapshot)
-
-    LOGGER.info(
-        "head_pipeline: pushed %d world_state perception(s) for persona=%s building=%s",
-        len(deliverable), ctx.persona_id, building_id,
-    )
-
-    return bool(deliverable)
 
 
 # 「不在から同席へ変わった一回だけ想起を試みる」ための、プロセス内の記憶。
@@ -941,7 +938,7 @@ def _plan_room_state_change(
     from tools.context import persona_context
 
     persona_id = getattr(persona, "persona_id", None)
-    persona_dir = getattr(persona, "persona_dir", None)
+    persona_dir = persona.persona_dir
     if not persona_id:
         return None
     with persona_context(persona_id, persona_dir, manager):
@@ -1046,10 +1043,7 @@ def _presentation_anchor_id(
     (keepalive / preview と同じ口) — 行は触らない。
     """
     try:
-        runtime = (
-            getattr(manager, "sea_runtime", None)
-            or getattr(manager, "runtime", None)
-        )
+        runtime = manager.sea_runtime
         lifecycle = getattr(runtime, "session_lifecycle", None)
         if lifecycle is None:
             return None
@@ -1094,10 +1088,7 @@ def _presentation_floor_chars(
     try:
         from sea.runtime_context import _minimal_load_chars
 
-        runtime = (
-            getattr(manager, "sea_runtime", None)
-            or getattr(manager, "runtime", None)
-        )
+        runtime = manager.sea_runtime
         chars = (
             int(_minimal_load_chars(runtime, persona, model_key))
             if runtime is not None else None

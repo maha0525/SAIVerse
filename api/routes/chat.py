@@ -10,6 +10,7 @@ import json
 import os
 
 from saiverse.data_paths import get_saiverse_home
+from saiverse.occupancy_manager import is_redirect_notice
 
 class ChatMessageImage(BaseModel):
     url: str  # URL to access the image
@@ -64,11 +65,13 @@ class ChatMessage(BaseModel):
     # 永続化は metadata["_interrupted"] (sea/runtime_llm.py INTERRUPTED_METADATA_KEY)。
     # 設計: docs/issues/user_utterance_path_failure_inventory.md
     interrupted: bool = False
+    # Presentation-only classification; never filters persisted/persona history.
+    is_movement_notice: bool = False
+    building_id: Optional[str] = None
 
 class ChatHistoryResponse(BaseModel):
     history: List[ChatMessage]
     has_more: bool = False  # Whether there are older messages available
-    quarantined: bool = False  # True if this building's log.json is corrupted/quarantined
 
 @router.get("/persona/{persona_id}/avatar")
 def get_persona_avatar(persona_id: str, manager = Depends(get_manager)):
@@ -92,7 +95,9 @@ import logging
 import hashlib
 
 
-def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> "ChatMessage":
+def serialize_history_message(
+    manager, msg: Dict[str, Any], message_id: str, building_id: Optional[str] = None,
+) -> "ChatMessage":
     """building_messages の dict 1 件を ChatMessage (API レスポンス形式) へ変換する。
 
     get_chat_history のループ本体を抽出したもの。ゲームセッションログビュー
@@ -248,6 +253,16 @@ def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> 
     if metadata and "activity_trace" in metadata:
         activity_trace_data = metadata["activity_trace"]
 
+    # Existing records already retain structured occupancy metadata. Do not infer
+    # movement from prose/HTML: ordinary conversation can quote the same notice.
+    event = metadata.get("event") if isinstance(metadata, dict) else None
+    is_movement_notice = (
+        role in ("host", "system")
+        and isinstance(event, dict)
+        and event.get("type") == "occupancy"
+        and event.get("action") in ("enter", "leave")
+    )
+
     return ChatMessage(
         id=message_id,
         role=role,
@@ -265,6 +280,8 @@ def serialize_history_message(manager, msg: Dict[str, Any], message_id: str) -> 
         llm_usage=llm_usage_data,
         llm_usage_total=llm_usage_total_data,
         interrupted=bool(metadata.get("_interrupted")) if metadata else False,
+        is_movement_notice=is_movement_notice,
+        building_id=building_id or msg.get("building_id"),
     )
 
 
@@ -281,21 +298,13 @@ def get_chat_history(
     
     if not current_bid:
         logging.warning("get_chat_history: No user_current_building_id")
-        return {"history": [], "has_more": False, "quarantined": False}
-
-    # Quarantine: building's log.json is corrupted. Return empty history but
-    # signal the UI so it can show the appropriate state instead of pretending
-    # the building is empty.
-    if hasattr(manager, "quarantined_buildings") and current_bid in manager.quarantined_buildings:
-        logging.info("[CHAT_HISTORY] Building %s is quarantined; returning empty history with flag", current_bid)
-        return {"history": [], "has_more": False, "quarantined": True}
+        return {"history": [], "has_more": False}
 
     raw_history = manager.get_building_history(current_bid)
 
-    # Filter out empty messages but KEEP note-box host events (移動 / item pickup
-    # 等)。 intent §D-2: 「移動が乱発しなくなる新ルール (= C-1 閲覧モード) の
-    # 下では、 移動メッセージはノイズではなく時系列の意味ある情報になる」
-    # 控えめなスタイル (globals.css の .note-box) で会話メッセージと区別される。
+    # Keep all nonempty records, including hidden movement notices. Visibility
+    # is a rendering preference; pagination/diff cursors and persona history
+    # must stay independent of it (movement_notice_visibility.md).
     raw_history = [
         msg for msg in raw_history
         if msg.get("content")
@@ -385,7 +394,7 @@ def get_chat_history(
                 current_bid, len(raw_history), limit, before, len(slice_history), has_more_old)
 
     final_response = [
-        serialize_history_message(manager, msg, msg["virtual_id"])
+        serialize_history_message(manager, msg, msg["virtual_id"], current_bid)
         for msg in slice_history
     ]
 
@@ -1347,6 +1356,9 @@ class UtterRequest(BaseModel):
       再送は current == target になるため move をスキップし、`client_message_id`
       の冪等キーで発言は一度だけ載る。
     - 並行デバイスの競合は expected_from_building_id の CAS (409) が検出する。
+    - Region 内部への直行が入口で止まったら (docs/intent/region.md §2.5)、
+      発言は送らずに 409 `redirected_to_entrance` (案内文 + 実際の現在地 =
+      入口) を返す。送り直せば入口→内部の一歩になる。
 
     See: docs/intent/building_memory_unified.md §C-2
     """
@@ -1417,6 +1429,29 @@ def utter_message(req: UtterRequest, manager = Depends(get_manager)):
                     "code": "move_failed",
                     "message": f"発言先への移動に失敗: {msg}",
                     "current_building_id": manager.state.user_current_building_id,
+                },
+            )
+        if is_redirect_notice(msg):
+            # Region 内部への直行は入口まで来て止まる (docs/intent/region.md §2.5)。
+            # 内部のつもりの発言を入口で言わせないため、発言は送らない。応答は
+            # 「現在地ではない建物への発言」の拒否と同じ 409 の形で、案内文と
+            # 実際の現在地 (入口) を運ぶ — クライアントは本文を入力欄へ戻し、
+            # 現在地を入口へ再同期する。送り直せば入口→内部の一歩になる。
+            arrived = (
+                getattr(msg, "current_building_id", None)
+                or manager.state.user_current_building_id
+            )
+            logging.info(
+                "[USER_UTTER] Auto-move stopped at entrance %s (requested %s) — "
+                "utterance not sent",
+                arrived, req.target_building_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "redirected_to_entrance",
+                    "message": str(msg),
+                    "current_building_id": arrived,
                 },
             )
 

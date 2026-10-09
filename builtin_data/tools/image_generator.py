@@ -1,13 +1,14 @@
 """Unified image generation tool supporting multiple backends.
 
 Supported models:
+- nano_banana_2_1: Gemini Nano Banana 2.1 (improved quality, aspect ratio + resolution control)
 - nano_banana_2: Gemini 3.1 Flash Image (fast, high quality, aspect ratio + resolution control)
 - nano_banana_pro: Gemini 3 Pro Image (highest quality, aspect ratio + resolution control)
 - gpt_image_1_5: OpenAI GPT Image 1.5 (legacy)
 - gpt_image_2: OpenAI GPT Image 2 (previous generation)
 - gpt_image_2_5_flare: OpenAI GPT Image 2.5 Flare (state of the art, fastest high-quality generation)
 - gpt_image_2_5_sunburst: OpenAI GPT Image 2.5 Sunburst (state of the art, best editing precision with reference images)
-- grok_imagine: xAI Grok Imagine Image Pro (can also create slightly NSFW images)
+- grok_imagine: xAI Grok Imagine Image 2.0 (can also create slightly NSFW images)
 
 Input image URI formats:
 - saiverse://image/<filename> - Generated image file
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 # Type definitions
 ModelType = Literal[
+    "nano_banana_2_1",
     "nano_banana_2",
     "nano_banana_pro",
     "gpt_image_1_5",
@@ -147,7 +149,7 @@ def _load_image_bytes(path: Path) -> Tuple[bytes, str]:
 
 
 def _quality_to_nano_banana_2_resolution(quality: str) -> str:
-    """Convert quality to Gemini 3.1 Flash image_size format."""
+    """Convert quality to Nano Banana 2 / 2.1 image_size format."""
     mapping = {
         "low": "1K",
         "medium": "2K",
@@ -164,8 +166,10 @@ def _generate_with_nano_banana_2(
     aspect_ratio: str = "1:1",
     quality: str = "high",
     input_image_paths: Optional[List[Path]] = None,
+    *,
+    model_id: str = "gemini-3.1-flash-image",
 ) -> Tuple[bytes, str]:
-    """Generate image using Gemini 3.1 Flash Image (nano banana 2)."""
+    """Generate image using Nano Banana 2 or an explicitly selected successor."""
     from llm_clients.gemini_utils import build_gemini_clients
     from google.genai import types
 
@@ -181,11 +185,11 @@ def _generate_with_nano_banana_2(
         for img_path in input_image_paths:
             img_bytes, img_mime = _load_image_bytes(img_path)
             contents.append(types.Part.from_bytes(data=img_bytes, mime_type=img_mime))
-            logger.info(f"[nano_banana_2] Added input image: {img_path.name}")
+            logger.info("[%s] Added input image: %s", model_id, img_path.name)
     contents.append(prompt)
 
     resp = _paid_client.models.generate_content(
-        model="gemini-3.1-flash-image-preview",
+        model=model_id,
         contents=contents,
         config=types.GenerateContentConfig(
             response_modalities=["TEXT", "IMAGE"],
@@ -242,7 +246,7 @@ def _generate_with_nano_banana_pro(
     contents.append(prompt)
 
     resp = _paid_client.models.generate_content(
-        model="gemini-3-pro-image-preview",
+        model="gemini-3-pro-image",
         contents=contents,
         config=types.GenerateContentConfig(
             response_modalities=["TEXT", "IMAGE"],
@@ -401,13 +405,29 @@ def _generate_with_gpt_image_2_5_sunburst(
     return _generate_with_gpt_image("gpt-image-2.5-sunburst", prompt, aspect_ratio, quality, input_image_paths, size)
 
 
+_XAI_IMAGINE_MODEL = "grok-imagine-image-2.0"
+
+
+def _xai_quality_params(quality: str) -> dict:
+    """Translate the tool-level quality into xAI image request parameters.
+
+    Imagine 2.0 prices by (quality, resolution) and only offers quality
+    low/medium, so the top tool levels map to medium at 2k.
+    """
+    if quality in ("high", "xhigh", "max", "auto"):
+        return {"quality": "medium", "resolution": "2k"}
+    if quality == "medium":
+        return {"quality": "medium", "resolution": "1k"}
+    return {"quality": "low", "resolution": "1k"}
+
+
 def _generate_with_grok_imagine(
     prompt: str,
     aspect_ratio: str = "1:1",
     quality: str = "high",
     input_image_paths: Optional[List[Path]] = None,
 ) -> Tuple[bytes, str]:
-    """Generate image using xAI Grok Imagine Image Pro."""
+    """Generate image using xAI Grok Imagine Image 2.0."""
     import xai_sdk
 
     api_key = os.getenv("XAI_API_KEY")
@@ -416,15 +436,14 @@ def _generate_with_grok_imagine(
 
     client = xai_sdk.Client(api_key=api_key)
 
-    # Map quality to resolution
-    resolution = "2k" if quality in ("high", "xhigh", "max", "auto") else "1k"
+    quality_params = _xai_quality_params(quality)
 
     kwargs: dict = {
         "prompt": prompt,
-        "model": "grok-imagine-image-pro",
+        "model": _XAI_IMAGINE_MODEL,
         "aspect_ratio": aspect_ratio,
-        "resolution": resolution,
         "image_format": "base64",
+        **quality_params,
     }
 
     # Input images for editing mode
@@ -438,8 +457,8 @@ def _generate_with_grok_imagine(
         kwargs["image_urls"] = image_urls
 
     logger.info(
-        f"[grok_imagine] Generating with aspect_ratio={aspect_ratio}, "
-        f"resolution={resolution}"
+        f"[grok_imagine] Generating with model={_XAI_IMAGINE_MODEL}, "
+        f"aspect_ratio={aspect_ratio}, {quality_params}"
     )
 
     response = client.image.sample(**kwargs)
@@ -452,7 +471,7 @@ def _generate_with_grok_imagine(
     if image_data is None:
         # Response might contain image bytes directly
         if hasattr(response, "image") and response.image:
-            return response.image, "image/png"
+            return response.image, _sniff_image_mime(response.image)
         raise RuntimeError(
             f"No image data in xAI response. Response attributes: "
             f"{[a for a in dir(response) if not a.startswith('_')]}"
@@ -466,7 +485,20 @@ def _generate_with_grok_imagine(
     else:
         raise RuntimeError(f"Unexpected image data type: {type(image_data)}")
 
-    return image_bytes, "image/png"
+    return image_bytes, _sniff_image_mime(image_bytes)
+
+
+def _sniff_image_mime(data: bytes) -> str:
+    """Return the MIME type of image bytes from their magic number (PNG if unknown).
+
+    xAI returns JPEG even when nothing asks for it; declaring PNG would store a
+    JPEG under a .png name with image/png metadata.
+    """
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
 
 
 def _log_gemini_response(resp) -> None:
@@ -507,6 +539,7 @@ def _get_model_api_key_env(model: str) -> Optional[str]:
     """
     mapping = {
         "nano_banana_2": "GEMINI_API_KEY",
+        "nano_banana_2_1": "GEMINI_API_KEY",
         "nano_banana_pro": "GEMINI_API_KEY",
         "gpt_image_1_5": "OPENAI_API_KEY",
         "gpt_image_2": "OPENAI_API_KEY",
@@ -529,6 +562,7 @@ def get_available_image_models() -> List[str]:
     """Return list of image model names whose API keys are configured."""
     all_models = [
         "nano_banana_2",
+        "nano_banana_2_1",
         "nano_banana_pro",
         "gpt_image_2_5_flare",
         "gpt_image_2_5_sunburst",
@@ -541,7 +575,7 @@ def get_available_image_models() -> List[str]:
 
 # Fallback priority order (most commonly available first)
 _FALLBACK_ORDER = [
-    "nano_banana_2",
+    "nano_banana_2_1",
     "nano_banana_pro",
     "gpt_image_2_5_flare",
     "gpt_image_2_5_sunburst",
@@ -553,7 +587,7 @@ _FALLBACK_ORDER = [
 
 def generate_image(
     prompt: str,
-    model: ModelType = "nano_banana_2",
+    model: ModelType = "nano_banana_2_1",
     aspect_ratio: AspectRatioType = "1:1",
     quality: QualityType = "auto",
     size: SizeType = "auto",
@@ -565,6 +599,7 @@ def generate_image(
     Args:
         prompt: Image generation prompt describing what to create.
         model: Which image generation model to use:
+            - nano_banana_2_1: Improved quality with aspect ratio + resolution control (Gemini Nano Banana 2.1)
             - nano_banana_2: Fast, high quality with aspect ratio + resolution control (Gemini 3.1 Flash)
             - nano_banana_pro: Highest quality with aspect ratio + resolution control (Gemini 3 Pro)
             - gpt_image_1_5: Legacy quality (OpenAI GPT Image 1.5)
@@ -573,7 +608,7 @@ def generate_image(
               (OpenAI GPT Image 2.5 Flare)
             - gpt_image_2_5_sunburst: State of the art, best editing precision with
               reference images (OpenAI GPT Image 2.5 Sunburst)
-            - grok_imagine: High quality image generation (xAI Grok Imagine Pro)
+            - grok_imagine: High quality image generation (xAI Grok Imagine Image 2.0)
         aspect_ratio: Image aspect ratio ("1:1", "16:9", "9:16", "4:3", "3:4")
         quality: Image quality level ("low", "medium", "high", "xhigh", "max", "auto").
             "auto" uses the global default quality setting.
@@ -607,7 +642,7 @@ def generate_image(
         else:
             quality = os.getenv("SAIVERSE_IMAGE_DEFAULT_QUALITY", "high")
     if not model:
-        model = "nano_banana_2"
+        model = "nano_banana_2_1"
     if not size:
         size = "auto"
 
@@ -677,7 +712,12 @@ def generate_image(
                 size, attempt_model,
             )
         try:
-            if attempt_model == "nano_banana_2":
+            if attempt_model == "nano_banana_2_1":
+                image_data, mime = _generate_with_nano_banana_2(
+                    prompt, aspect_ratio, quality, input_image_paths,
+                    model_id="gemini-nano-banana-2.1",
+                )
+            elif attempt_model == "nano_banana_2":
                 image_data, mime = _generate_with_nano_banana_2(
                     prompt, aspect_ratio, quality, input_image_paths
                 )
@@ -794,13 +834,14 @@ def schema() -> ToolSchema:
         description=(
             "Generate an image from a text prompt, optionally using reference images. "
             "Supports multiple AI models:\n"
+            "- nano_banana_2_1: Improved quality with aspect ratio + resolution control (Gemini Nano Banana 2.1)\n"
             "- nano_banana_2: Fast, high quality generation with aspect ratio + resolution control (Gemini 3.1 Flash)\n"
             "- nano_banana_pro: Highest quality with aspect ratio and resolution control (Gemini 3 Pro)\n"
             "- gpt_image_2_5_flare: State of the art, fastest high-quality generation (OpenAI GPT Image 2.5 Flare)\n"
             "- gpt_image_2_5_sunburst: State of the art, best editing precision with reference images (OpenAI GPT Image 2.5 Sunburst)\n"
             "- gpt_image_1_5: Legacy photorealistic quality (OpenAI)\n"
             "- gpt_image_2: Previous generation photorealistic quality (OpenAI)\n"
-            "- grok_imagine: High quality image generation (xAI Grok Imagine Pro)\n\n"
+            "- grok_imagine: High quality image generation (xAI Grok Imagine Image 2.0)\n\n"
             "Prompt tips:\n"
             "- Be specific and detailed about what you want\n"
             "- Include art style, lighting, mood, and composition\n"
@@ -823,6 +864,7 @@ def schema() -> ToolSchema:
                     "type": "string",
                     "enum": [
                         "nano_banana_2",
+                        "nano_banana_2_1",
                         "nano_banana_pro",
                         "gpt_image_1_5",
                         "gpt_image_2",
@@ -832,6 +874,7 @@ def schema() -> ToolSchema:
                     ],
                     "description": (
                         "Image generation model: "
+                        "nano_banana_2_1 (improved quality, Gemini Nano Banana 2.1), "
                         "nano_banana_2 (fast, high quality, Gemini 3.1 Flash), "
                         "nano_banana_pro (a bit higher quality, Gemini 3 Pro), "
                         "gpt_image_2_5_flare (state of the art, fastest high-quality generation, OpenAI GPT Image 2.5 Flare), "
@@ -839,7 +882,7 @@ def schema() -> ToolSchema:
                         "gpt_image_1_5 (legacy model), gpt_image_2 (previous generation), "
                         "grok_imagine (this can also create slightly NSFW images)"
                     ),
-                    "default": "nano_banana_2"
+                    "default": "nano_banana_2_1"
                 },
                 "aspect_ratio": {
                     "type": "string",

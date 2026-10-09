@@ -234,9 +234,10 @@ class MoveEntityCasTest(unittest.TestCase):
         self.persona = FakePersona("room_a")
         self.manager = SimpleNamespace(
             execution_ledger=self.ledger,
-            quarantined_buildings={},
             personas={self.MOVER: self.persona},
             state=SimpleNamespace(user_current_building_id="room_a"),
+            get_region=lambda region_id: None,
+            get_top_region_of_building=lambda building_id: None,
         )
         self.occupants = {
             "room_a": [self.MOVER],

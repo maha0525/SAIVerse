@@ -37,6 +37,16 @@
       "ENTRY_PROMPT": "",
       "AUTO_PROMPT": "",
       "AUTO_INTERVAL_SEC": 30
+    },
+    {
+      "BUILDINGID": "test_stub_room",
+      "BUILDINGNAME": "Stub Room",
+      "DESCRIPTION": "Room for the scripted fake-LLM persona (test_fixtures/scenarios/scripted_llm_server.py)",
+      "CAPACITY": 5,
+      "SYSTEM_INSTRUCTION": "Test room for scripted fake-LLM scenarios.",
+      "ENTRY_PROMPT": "",
+      "AUTO_PROMPT": "",
+      "AUTO_INTERVAL_SEC": 30
     }
   ],
   "personas": [
@@ -59,6 +69,18 @@
       "DEFAULT_MODEL": "gemini-2.5-flash-preview-09-2025",
       "LIGHTWEIGHT_MODEL": "gemini-3.1-flash-lite-preview",
       "start_building": "test_room_a"
+    },
+    {
+      "AIID": "test_persona_stub",
+      "AINAME": "Stub Persona",
+      "DESCRIPTION": "Synthetic persona whose every model points at the scripted fake LLM server (test_fixtures/scenarios/scripted_llm_server.py). Never calls a real LLM.",
+      "SYSTEMPROMPT": "You are Stub Persona, a synthetic persona for scripted tests. Your replies are produced by a fake LLM server.",
+      "AUTONOMY_ENABLED": false,
+      "SPELL_ENABLED": true,
+      "DEFAULT_MODEL": "scripted-llm",
+      "LIGHTWEIGHT_MODEL": "scripted-llm",
+      "REFLEX_JUDGMENT_MODEL": "scripted-llm",
+      "start_building": "test_stub_room"
     }
   ],
   "playbooks": [
@@ -69,5 +91,27 @@
     "judgment_post_session",
     "judgment_on_event",
     "judgment_day_close"
-  ]
+  ],
+  "llm_configs": {
+    "_comment": "Written by setup_test_env.py into test_data/user_data/{providers,models}/<name>.json. Only the isolated test environment reads them.",
+    "providers": {
+      "scripted-llm": {
+        "display_name": "Scripted fake LLM (test)",
+        "protocol": "openai_compat",
+        "base_url": "http://127.0.0.1:18097/v1",
+        "api_key_required": false,
+        "id": "scripted-llm"
+      }
+    },
+    "models": {
+      "scripted-llm": {
+        "model": "scripted-llm",
+        "display_name": "Scripted fake LLM (test)",
+        "provider_ref": "scripted-llm",
+        "supports_structured_output": true,
+        "context_length": 32768,
+        "timeout": 60
+      }
+    }
+  }
 }

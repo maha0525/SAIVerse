@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -2695,26 +2696,58 @@ class ChainIntegrityTest(RoomStateLedgerTestBase):
 
 
 class EntryPushWiringTest(_EnvTestBase):
-    """§6-1: 入室の push は束を組んで adapter へ渡す (末尾 = 出来事)。"""
+    """§6-1: 入室の push は束を組んで台帳に積み、配送ハンドラが adapter へ渡す
+    (末尾 = 出来事)。配送は本番と同じ perception.room_state の実ハンドラを通す。
+    """
 
     def test_on_building_entered_pushes_the_bundle(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+
+        from database.models import Base
         from saiverse.dynamic_state import DynamicStateManager
+        from saiverse.execution_ledger import ExecutionLedger
+        from saiverse.execution_ledger_wiring import (
+            TARGET_PERCEPTION_ROOM_STATE,
+            _make_perception_room_state_handler,
+        )
 
         pushed = []
+
+        def _push_ledger_room_state(
+            *, execution_id, outbox_id, building_id, bundle, allow_diff=True,
+        ):
+            pushed.append((building_id, bundle, allow_diff))
+            return True
+
         sai_mem = SimpleNamespace(
             is_ready=lambda: True,
-            push_room_state=lambda bid, bundle, allow_diff=True: pushed.append(
-                (bid, bundle, allow_diff),
-            ),
+            push_ledger_room_state=_push_ledger_room_state,
         )
         persona = SimpleNamespace(
             persona_id="p1", persona_dir=None, sai_memory=sai_mem,
             current_building_id="b1", buildings=self.env.persona.buildings,
             persona_name="アイフィ",
         )
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        self.addCleanup(engine.dispose)
+        ledger = ExecutionLedger(session_factory=sessionmaker(bind=engine))
         self.env.manager.all_personas["p1"] = persona
-        self.env.manager.personas = {}
+        # 配送ハンドラが届け先を引く台帳。在室者は p1 本人だけなので、
+        # 居合わせる側への検知は走らない。
+        self.env.manager.personas = {"p1": persona}
         self.env.manager.feed_manager = None
+        self.env.manager.execution_ledger = ledger
+        ledger.register_outbox_handler(
+            TARGET_PERCEPTION_ROOM_STATE,
+            _make_perception_room_state_handler(self.env.manager),
+        )
         bundle = self.env.bundle()
         with patch.object(gvc, "get_active_persona_id", return_value="p1"), \
                 patch.object(gvc, "get_active_manager", return_value=self.env.manager), \
@@ -2744,53 +2777,6 @@ class EntryPushWiringTest(_EnvTestBase):
             inject.call_args_list[0].kwargs.get("only_sections"),
             {"building", "building_occupants"},
         )
-
-
-class EntryPushDegradeReadinessTest(_EnvTestBase):
-    """台帳なし degrade は SAIMemory 未 ready を成功扱いしない。
-
-    push_room_state は未 ready を黙って return するので、degrade 分岐が
-    ready を検めずに呼ぶと ok=True のまま知覚が静かに失われる。台帳あり側
-    (perception.room_state handler) の「未 ready は例外で pending に残す」と
-    対称に、こちらは WARN + ok=False (全段成功の意味は変えない)。
-    """
-
-    def test_not_ready_memory_fails_the_entry_push_stage(self):
-        from saiverse.dynamic_state import DynamicStateManager
-
-        pushed = []
-        sai_mem = SimpleNamespace(
-            is_ready=lambda: False,
-            push_room_state=lambda bid, bundle, allow_diff=True: pushed.append(
-                bid,
-            ),
-        )
-        persona = SimpleNamespace(
-            persona_id="p1", persona_dir=None, sai_memory=sai_mem,
-            current_building_id="b1", buildings=self.env.persona.buildings,
-            persona_name="アイフィ",
-        )
-        self.env.manager.all_personas["p1"] = persona
-        self.env.manager.personas = {}
-        self.env.manager.feed_manager = None
-        with patch.object(gvc, "get_active_persona_id", return_value="p1"), \
-                patch.object(
-                    gvc, "get_active_manager", return_value=self.env.manager,
-                ), \
-                patch.object(
-                    gvc, "_get_persona_appearance_path", return_value=None,
-                ), \
-                patch.object(gvc, "_get_building_image_path", return_value=None), \
-                patch("sea.head_pipeline.inject_diff_notifications"), \
-                patch(
-                    "saiverse.dynamic_state._dispatch_head_event",
-                    return_value=True,
-                ):
-            ok = DynamicStateManager.on_building_entered(
-                persona, "b1", self.env.manager,
-            )
-        self.assertFalse(ok)
-        self.assertEqual(pushed, [])  # 未 ready なら push 自体を呼ばない
 
 
 class DetectionEntryModelKeyTest(unittest.TestCase):
@@ -3680,9 +3666,14 @@ class EntryDeliveryOrderTest(_EnvTestBase):
             physical_vessel_id=None,
         )
         labels = BuildingSection().diff_to_notifications(old, new)
+        # notify_lock_for: 本物の pipeline と同じく、検出〜登録を並べるペルソナ
+        # 単位の通知ロックを返す (HeadPipeline.notify_lock_for)。
+        notify_lock = threading.RLock()
         pipeline = SimpleNamespace(
             flush_diffs=lambda ctx, **kw: (labels, {}),
             advance_last_notified=lambda *a, **k: None,
+            advance_last_notified_many=lambda *a, **k: None,
+            notify_lock_for=lambda persona_id: notify_lock,
         )
         ctx = SimpleNamespace(persona_id=persona.persona_id)
         return hp._push_section_diffs(persona, manager, pipeline, ctx, building_id)

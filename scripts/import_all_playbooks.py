@@ -35,7 +35,7 @@ from sqlalchemy.orm import sessionmaker
 from database.paths import default_db_path
 from database.models import Base, Playbook, PlaybookPermission
 from database.schema_sync import ensure_table_columns_indexes
-from saiverse.i18n_utils import normalize_i18n_dict
+from saiverse.i18n_utils import split_i18n_columns
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,14 +99,13 @@ def import_playbooks_from_directory(
                     skipped_count += 1
                     continue
 
-                desc_norm = normalize_i18n_dict(data.get("description"), alt_en=data.get("description_en"))
-                disp_norm = normalize_i18n_dict(data.get("display_name"), alt_en=data.get("display_name_en"))
-
-                description = desc_norm.get("ja") or (data.get("description") if isinstance(data.get("description"), str) else "")
-                description_en = desc_norm.get("en") or data.get("description_en")
-
-                display_name = disp_norm.get("ja") or (data.get("display_name") if isinstance(data.get("display_name"), str) else None)
-                display_name_en = disp_norm.get("en") or data.get("display_name_en")
+                description, description_en = split_i18n_columns(
+                    data.get("description"), alt_en=data.get("description_en"),
+                )
+                description = description or ""
+                display_name, display_name_en = split_i18n_columns(
+                    data.get("display_name"), alt_en=data.get("display_name_en"),
+                )
 
                 router_callable = data.get("router_callable", False)
                 user_selectable = data.get("user_selectable", False)

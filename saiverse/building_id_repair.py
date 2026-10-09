@@ -42,6 +42,14 @@ v0.3.0 より前は部屋 ID に使える文字の制限が無く、名前に「
 **起動は止めない。** 見送り (多重起動・バックアップの失敗・安全な ID にできない) と
 失敗は、startup_alerts と同じ形の警告として戻り値で返す。付け替えが成功しただけの
 ときは警告を出さない (ログだけ)。
+
+**消した部屋の ID の付け替えとの共有 (2026-09-29)。** 部屋を消したときに、残る会話
+などを特殊な ID (``deleted_<旧ID>_<日時>``) へ移して元の ID を空ける仕組み
+(saiverse/building_retirement.py) は、ここの DB の書き換え (:func:`_rewrite_database`
+を部屋の行なしで)・記憶のファイルの印の書き換え (:class:`PersonaMemoryRewriter`、
+SAIVerse が動いている最中にも呼べる)・フォルダの移動 (:func:`_move_room_folders`)・
+記録ファイルを使う。記録ファイルには ``"kind": "retire"`` の要素が並ぶが、この
+モジュールの付け替えはそれを読み飛ばす (再開は building_retirement.py が持つ)。
 """
 from __future__ import annotations
 
@@ -73,6 +81,18 @@ STATUS_PLANNED = "planned"
 STATUS_DONE = "done"
 #: 記録の「予定」に対応する部屋が DB に無かった (付け替える前に部屋が削除された等)
 NOTE_ROOM_NOT_FOUND = "room_not_found"
+#: 記録の要素の種類。``kind`` の無い要素はこのモジュールの付け替え (安全でない ID の修復)。
+#: ``retire`` は消した部屋の ID を特殊な ID へ付け替えたもの
+#: (saiverse/building_retirement.py が書き、再開する)。このモジュールは触らない。
+#: ``retire`` の要素の状態は ``planned`` / ``done`` のほかに、付け替えを終えずに閉じた
+#: ``cancelled`` と ``abandoned`` がある (意味は building_retirement.py の冒頭)。この
+#: モジュールの読み手は ``retire`` の要素を状態によらず読み飛ばすので、どれも影響しない。
+ENTRY_KIND_RETIRE = "retire"
+
+
+def is_retire_entry(entry: Any) -> bool:
+    """記録の要素が、消した部屋の ID の付け替え (building_retirement.py の持ち物) か。"""
+    return isinstance(entry, dict) and entry.get("kind") == ENTRY_KIND_RETIRE
 
 #: Discord 連携の「チャンネルと部屋の対応表」を持つ環境変数 (discord_gateway/mapping.py)
 DISCORD_CHANNEL_MAP_ENV = "SAIVERSE_GATEWAY_CHANNEL_MAP"
@@ -685,7 +705,12 @@ def _rollback_quietly(db) -> None:
 
 
 def _rewrite_database(
-    db, schema: _Schema, plans: Sequence[_Plan], *, legacy_buildings_root: Path,
+    db,
+    schema: _Schema,
+    plans: Sequence[_Plan],
+    *,
+    legacy_buildings_root: Optional[Path],
+    rename_building_rows: bool = True,
 ) -> Tuple[Dict[str, Dict[str, int]], Dict[str, int]]:
     """付け替えを 1 つのトランザクションの中で書く。commit はしない (呼び出し側が持つ)。
 
@@ -696,14 +721,21 @@ def _rewrite_database(
     書き換える前と後で、``legacy_buildings_root`` (``cities/<city>/buildings``) の古い
     会話のファイルとの照合の欠けを部屋ごとに数え、増えた部屋があれば
     :class:`_LegacyMatchWorsened` を上げる (呼び出し側が巻き戻し、その部屋を外して
-    残りの部屋でもう一度呼ぶ)。
+    残りの部屋でもう一度呼ぶ)。``legacy_buildings_root`` が None なら照合の検査はしない。
+
+    ``rename_building_rows`` が False のときは部屋の行 (``building`` の主キー) を
+    書き換えない — 消した部屋の ID を付け替えるとき (saiverse/building_retirement.py)
+    は部屋の行がもう無く、残った参照だけを動かす。
     """
     # 外部キーの強制はこの DB ではオフだが、オンの環境でも主キーの書き換えを
     # commit 時点まで待たせる。
     db.execute(text("PRAGMA defer_foreign_keys = ON"))
 
     # 書き換える前 (旧 ID) の欠けの数。部屋の行を 1 つも動かさないうちに数える。
-    legacy_checks = _legacy_match_baseline(db, plans, legacy_buildings_root)
+    legacy_checks = (
+        _legacy_match_baseline(db, plans, legacy_buildings_root)
+        if legacy_buildings_root is not None else []
+    )
 
     direct_columns = _resolve_columns(schema, DIRECT_REFERENCE_COLUMNS)
     json_columns = _resolve_columns(schema, JSON_COLUMNS)
@@ -716,9 +748,9 @@ def _rewrite_database(
         schema, (("building_messages", "legacy_message_id", None),),
     )
     addon_cols = _resolve_columns(schema, (("addon_message_metadata", "message_id", None),))
-    if not building_pk:
+    if rename_building_rows and not building_pk:
         raise RuntimeError("building.BUILDINGID がこの DB にありません")
-    building_col = building_pk[0]
+    building_col = building_pk[0] if rename_building_rows else None
 
     per_plan: Dict[str, Dict[str, int]] = {}
     message_map: Dict[str, str] = {}
@@ -778,18 +810,19 @@ def _rewrite_database(
                 counts[legacy_col.label] = len(legacy_updates)
 
         # 部屋そのもの
-        result = db.execute(
-            text(
-                f"UPDATE {_quote(building_col.table)} SET {_quote(building_col.column)} = :new_id "
-                f"WHERE {_quote(building_col.column)} = :old_id"
-            ),
-            {"new_id": new_id, "old_id": old_id},
-        )
-        if result.rowcount != 1:
-            raise RuntimeError(
-                f"部屋 {old_id!r} の行を付け替えられませんでした (対象の行数 {result.rowcount})"
+        if building_col is not None:
+            result = db.execute(
+                text(
+                    f"UPDATE {_quote(building_col.table)} SET {_quote(building_col.column)} = :new_id "
+                    f"WHERE {_quote(building_col.column)} = :old_id"
+                ),
+                {"new_id": new_id, "old_id": old_id},
             )
-        counts[building_col.label] = result.rowcount
+            if result.rowcount != 1:
+                raise RuntimeError(
+                    f"部屋 {old_id!r} の行を付け替えられませんでした (対象の行数 {result.rowcount})"
+                )
+            counts[building_col.label] = result.rowcount
 
         # 部屋を指す欄
         for column in direct_columns:
@@ -1386,6 +1419,26 @@ def _memory_location_unsafe_alert(persona_id: str, name: str) -> dict:
     )
 
 
+#: :func:`_memory_location_skipped_alert` の details の reason
+REASON_MEMORY_LOCATION_SKIPPED = "memory_location_unsafe_skipped"
+
+
+def _memory_location_skipped_alert(persona_id: str, name: str) -> dict:
+    """場所を決められない記憶のファイルを、待たずに飛ばしたときの警告 (再試行しない)。"""
+    return _alert(
+        f"building_memory_location_skipped_{persona_id}",
+        f"ペルソナ「{name}」の記憶の中の部屋の名前を書き換えられませんでした",
+        "部屋の内部の名前を付け替えたので、ペルソナの記憶のファイルに記録されている"
+        "部屋の内部の名前も書き換える必要があります。このペルソナの内部の名前は、"
+        "記憶のファイルが入ったフォルダの場所を安全に決められない形をしています"
+        "（区切り記号が続いている、先頭や末尾にある など）。場所を決められないので、"
+        "次の起動でも書き換えられません。このペルソナの記憶は書き換えずに、残りの作業を"
+        "済ませました。このペルソナの記憶の中の部屋の印は、付け替える前の名前のまま残ります。"
+        "この警告の内容を添えて開発者に知らせてください。",
+        {"reason": REASON_MEMORY_LOCATION_SKIPPED, "persona_id": persona_id},
+    )
+
+
 def _memory_backup_failed_alert(persona_id: str, name: str, path: Path, exc: BaseException) -> dict:
     return _alert(
         f"building_id_repair_memory_backup_{persona_id}",
@@ -1498,7 +1551,8 @@ def discord_mapping_alerts(
         return []
     renamed: Dict[str, str] = {}
     for entry in record.get("renames", []):
-        if not isinstance(entry, dict) or not entry.get("db_renamed_at"):
+        # 消した部屋の付け替えは対象外 (対応表を特殊な ID へ書き換えてもらう理由が無い)
+        if not isinstance(entry, dict) or not entry.get("db_renamed_at") or is_retire_entry(entry):
             continue
         old_id, new_id = entry.get("old_id"), entry.get("new_id")
         if isinstance(old_id, str) and isinstance(new_id, str):
@@ -1536,6 +1590,208 @@ def discord_mapping_alerts(
 
 
 # ---------------------------------------------------------------------------
+# ペルソナの記憶のファイルの印の書き換え (付け替えと、消した部屋の ID の付け替えで共有)
+# ---------------------------------------------------------------------------
+
+class PersonaMemoryRewriter:
+    """DB に登録されている全ペルソナの記憶のファイルの、部屋 ID の印を書き換える。
+
+    書き換えるのは機械が読む印だけ (:func:`plan_memory_rewrite`)。ペルソナごとに、
+    書き換えが要るときだけ、先に記憶のファイルを丸ごと複製する
+    (``<ホーム>/backups/<backup_kind>/<日時>/<ペルソナ ID>_memory.db``)。
+
+    **SAIVerse が動いている最中にも呼べる。** 記憶のファイルは WAL で開かれていて、
+    同じプロセスの書き手は ``sai_memory.db_locks.lock_for_path`` の錠前 (adapter の
+    ``_db_lock``) を取ってから読み書きする。書き換えは、その同じ錠前を取ったうえで
+    読み直し、``BEGIN IMMEDIATE`` の中で 1 行ずつ「読んだときの値と同じなら」だけ
+    書く (:func:`apply_memory_rewrite`)。錠前を取るので、同じプロセスの書き手が
+    読んでから書き戻すまでの間に割り込まない。別のプロセスの書き込みとは SQLite の
+    書き込みの鍵と待ち時間 (5 秒) で順番を付け、待ちきれなければそのファイルの
+    書き換えをまるごと巻き戻して失敗を返す。
+
+    警告は ``alerts`` (呼び出し側の一覧) に積む。
+
+    ``unlocatable_blocks`` は、記憶のファイルの場所を安全に決められない ID
+    (空の段・``.``・``..``) のペルソナを「済まなかった」に数えるか。既定の True は
+    部屋 ID の付け替え (この場所を決められない形は、次の起動でも変わらないが、
+    付け替えの記録を「予定」のまま残して毎起動知らせる)。False は消した部屋の ID の
+    付け替え (saiverse/building_retirement.py) — 「予定」が残る間は元の ID を新しい
+    建物に使えないので、どの起動でも書き換えられないファイルを待つと、元の ID が
+    永遠に使えなくなる。False のときは警告 (:func:`_memory_location_skipped_alert`) を
+    出し、そのペルソナは書き換えずに済んだものとして数える。
+    """
+
+    def __init__(
+        self,
+        *,
+        session_factory,
+        saiverse_home: Path,
+        backup_kind: str,
+        alerts: List[dict],
+        unlocatable_blocks: bool = True,
+    ) -> None:
+        self.session_factory = session_factory
+        self.saiverse_home = Path(saiverse_home)
+        self.backup_kind = backup_kind
+        self.alerts = alerts
+        self.unlocatable_blocks = unlocatable_blocks
+        # 複製の置き場。最初に複製するときに決める (この書き換え器で一つ)。
+        self._backup_dir: Optional[Path] = None
+
+    def _load_personas(self) -> List[Tuple[str, Optional[str]]]:
+        db = self.session_factory()
+        try:
+            rows = db.execute(text('SELECT "AIID", "AINAME" FROM "ai"')).fetchall()
+        finally:
+            db.close()
+        return [(str(row[0]), row[1]) for row in rows if row[0] is not None]
+
+    def rewrite(self, renames: Mapping[str, str]) -> bool:
+        """全ペルソナの記憶のファイルの印を ``renames`` (旧 ID → 新 ID) で書き換える。
+
+        記憶のファイルの場所は、部屋のフォルダと同じ組み立て方で決める
+        (:func:`legacy_folder_parts`)。v0.2 のペルソナ ID の生成式は部屋と同じで、名前の
+        「/」が ID に残ったペルソナの記憶のファイルは入れ子の場所
+        (``personas/<a>/<b>/memory.db``) にある。
+
+        - 場所を安全に決められない ID (空の段・``.``・``..``) のペルソナは、警告を出して
+          False を返す — 呼び出し側は記録を「完了」にせず、次の起動でもう一度確かめる。
+          ``unlocatable_blocks`` が False なら、警告を出して書き換えずに済んだものとして
+          数える (戻り値を False にしない)。
+        - この OS のフォルダ名に使えない文字を含む ID のペルソナには、記憶のファイルが
+          作られていないので、処理済みとして扱う。
+
+        戻り値は、書き換えが要ったペルソナの全員について済んだか。
+        """
+        if not renames:
+            return True
+        try:
+            personas = self._load_personas()
+        except Exception as exc:
+            LOGGER.error(
+                "%s ペルソナの一覧を読めないので、記憶のファイルの印を書き換えられません",
+                _LOG_PREFIX, exc_info=True,
+            )
+            self.alerts.append(_memory_list_failed_alert(exc))
+            return False
+        all_done = True
+        personas_root = self.saiverse_home / "personas"
+        for persona_id, name in personas:
+            display_name = name or persona_id
+            parts = legacy_folder_parts(persona_id)
+            if parts is None and not self.unlocatable_blocks:
+                LOGGER.warning(
+                    "%s ペルソナ %r の記憶のファイルの場所を安全に決められないので、書き換えません。"
+                    "どの起動でも場所を決められないので、このペルソナは待たずに付け替えを済ませます",
+                    _LOG_PREFIX, persona_id,
+                )
+                self.alerts.append(_memory_location_skipped_alert(persona_id, display_name))
+                continue
+            if parts is None:
+                LOGGER.warning(
+                    "%s ペルソナ %r の記憶のファイルの場所を安全に決められないので、書き換えません。"
+                    "付け替えの記録は「予定」のまま残します",
+                    _LOG_PREFIX, persona_id,
+                )
+                self.alerts.append(_memory_location_unsafe_alert(persona_id, display_name))
+                all_done = False
+                continue
+            if not legacy_folder_can_exist(parts):
+                LOGGER.info(
+                    "%s ペルソナ ID %r にはこの OS のフォルダ名に使えない文字が含まれるので、"
+                    "記憶のファイルは作られていません",
+                    _LOG_PREFIX, persona_id,
+                )
+                continue
+            path = personas_root.joinpath(*parts) / "memory.db"
+            if not path.is_file():
+                continue
+            if not self._rewrite_one(persona_id, display_name, path, renames):
+                all_done = False
+        return all_done
+
+    def _rewrite_one(
+        self, persona_id: str, name: str, path: Path, renames: Mapping[str, str],
+    ) -> bool:
+        from sai_memory.db_locks import lock_for_path
+
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = sqlite3.connect(str(path), timeout=_MEMORY_BUSY_TIMEOUT_MS / 1000)
+            conn.execute(f"PRAGMA busy_timeout = {_MEMORY_BUSY_TIMEOUT_MS}")
+            # 錠前を取らずに下見する (読むだけ)。書き換えるものが無ければ複製もしない。
+            if not plan_memory_rewrite(conn, renames):
+                LOGGER.debug(
+                    "%s ペルソナ %r の記憶のファイルに書き換える印はありません", _LOG_PREFIX, persona_id,
+                )
+                return True
+            dest = self._backup_path(persona_id)
+            try:
+                _backup_memory_db(conn, dest)
+            except Exception as exc:
+                LOGGER.error(
+                    "%s ペルソナ %r の記憶のファイルの複製を作れなかったので、書き換えません: %s",
+                    _LOG_PREFIX, persona_id, dest, exc_info=True,
+                )
+                self.alerts.append(_memory_backup_failed_alert(persona_id, name, path, exc))
+                return False
+            LOGGER.info(
+                "%s ペルソナ %r の記憶のファイルを複製しました: %s", _LOG_PREFIX, persona_id, dest,
+            )
+            # 同じプロセスの書き手 (adapter の _db_lock) と同じ錠前の中で読み直して書く。
+            # 下見の後・複製の後に増えた行や変わった行も、ここで拾い直す。
+            with lock_for_path(str(path)):
+                updates = plan_memory_rewrite(conn, renames)
+                counts = apply_memory_rewrite(conn, updates)
+            LOGGER.info(
+                "%s ペルソナ %r の記憶のファイルの印を書き換えました。欄ごとの行数: %s",
+                _LOG_PREFIX, persona_id, counts,
+            )
+            return True
+        except Exception as exc:
+            LOGGER.error(
+                "%s ペルソナ %r の記憶のファイルの印を書き換えられませんでした: %s",
+                _LOG_PREFIX, persona_id, path, exc_info=True,
+            )
+            self.alerts.append(_memory_rewrite_failed_alert(persona_id, name, path, exc))
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _backup_path(self, persona_id: str) -> Path:
+        """``<ホーム>/backups/<backup_kind>/<日時>/<ペルソナ ID>_memory.db`` (既にあれば番号を足す)。
+
+        ペルソナ ID は区切り記号などを含みうる (v0.2 の ID)。複製が日時のフォルダの直下の
+        1 つのファイル名になるよう、ファイル名の ID には部屋 ID の付け替えと同じ置き換え
+        (:func:`repaired_building_id`) をする。
+        """
+        if self._backup_dir is None:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base = self.saiverse_home / "backups" / self.backup_kind
+            folder = base / stamp
+            for n in range(2, _MAX_SUFFIX + 2):
+                if not _path_exists(folder):
+                    break
+                folder = base / f"{stamp}_{n}"
+            self._backup_dir = folder
+        file_stem = repaired_building_id(persona_id)
+
+        def file_name(suffix: str) -> str:
+            name = f"{file_stem}_memory{suffix}.db"
+            # 「NUL.x_memory.db」のように Windows が装置として扱う名前だと、複製が
+            # ファイルに残らないまま「複製した」ことになるので、先頭をずらす
+            return name if is_safe_path_component(name) else "_" + name
+
+        dest = self._backup_dir / file_name("")
+        for n in range(2, _MAX_SUFFIX + 2):
+            if not _path_exists(dest):
+                break
+            dest = self._backup_dir / file_name(f"_{n}")
+        return dest
+
+
+# ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 
@@ -1565,8 +1821,13 @@ class _Repair:
         self.record_path = record_path
         self.renames: List[dict] = record["renames"]
         self.alerts: List[dict] = []
-        # 記憶のファイルの複製の置き場。最初に複製するときに決める (この回の起動で一つ)。
-        self._memory_backup_dir: Optional[Path] = None
+        # 記憶のファイルの印の書き換え。警告は self.alerts に積まれる。
+        self._memory = PersonaMemoryRewriter(
+            session_factory=session_factory,
+            saiverse_home=self.saiverse_home,
+            backup_kind="building_id_repair",
+            alerts=self.alerts,
+        )
 
     # -- 全体の流れ ----------------------------------------------------------
 
@@ -1635,6 +1896,8 @@ class _Repair:
         for entry in self.renames:
             if not isinstance(entry, dict) or entry.get("status") != STATUS_PLANNED:
                 continue
+            if is_retire_entry(entry):
+                continue  # 消した部屋の付け替え (building_retirement.py が再開する)
             old_id, new_id = entry.get("old_id"), entry.get("new_id")
             if (
                 not isinstance(old_id, str)
@@ -1878,6 +2141,7 @@ class _Repair:
         for entry in reversed(self.renames):
             if (
                 isinstance(entry, dict)
+                and not is_retire_entry(entry)
                 and entry.get("old_id") == old_id
                 and entry.get("status") == STATUS_DONE
                 and entry.get("note") != NOTE_ROOM_NOT_FOUND
@@ -1895,6 +2159,7 @@ class _Repair:
         """
         return any(
             isinstance(entry, dict)
+            and not is_retire_entry(entry)
             and entry.get("old_id") == old_id
             and entry.get("new_id") == new_id
             and entry.get("db_renamed_at")
@@ -1973,143 +2238,14 @@ class _Repair:
 
     # -- ペルソナの記憶のファイル ------------------------------------------
 
-    def _load_personas(self) -> List[Tuple[str, Optional[str]]]:
-        db = self.session_factory()
-        try:
-            rows = db.execute(text('SELECT "AIID", "AINAME" FROM "ai"')).fetchall()
-        finally:
-            db.close()
-        return [(str(row[0]), row[1]) for row in rows if row[0] is not None]
-
     def _rewrite_persona_memories(self, plans: Sequence[_Plan]) -> bool:
-        """DB に登録されている全ペルソナの記憶のファイルの印を書き換える。
-
-        記憶のファイルの場所は、部屋のフォルダと同じ組み立て方で決める
-        (:func:`legacy_folder_parts`)。v0.2 のペルソナ ID の生成式は部屋と同じで、名前の
-        「/」が ID に残ったペルソナの記憶のファイルは入れ子の場所
-        (``personas/<a>/<b>/memory.db``) にある。
-
-        - 場所を安全に決められない ID (空の段・``.``・``..``) のペルソナは、警告を出して
-          False を返す — 記録を「完了」にせず、次の起動でもう一度確かめる。
-        - この OS のフォルダ名に使えない文字を含む ID のペルソナには、記憶のファイルが
-          作られていないので、処理済みとして扱う。
+        """DB に登録されている全ペルソナの記憶のファイルの印を書き換える (:class:`PersonaMemoryRewriter`)。
 
         戻り値は、書き換えが要ったペルソナの全員について済んだか (失敗したペルソナ・
         場所を決められないペルソナがいれば False — 警告は self.alerts に載せてある)。
         """
         renames = {plan.old_id: plan.new_id for plan in plans if plan.new_id}
-        if not renames:
-            return True
-        try:
-            personas = self._load_personas()
-        except Exception as exc:
-            LOGGER.error(
-                "%s ペルソナの一覧を読めないので、記憶のファイルの印を書き換えられません",
-                _LOG_PREFIX, exc_info=True,
-            )
-            self.alerts.append(_memory_list_failed_alert(exc))
-            return False
-        all_done = True
-        personas_root = self.saiverse_home / "personas"
-        for persona_id, name in personas:
-            display_name = name or persona_id
-            parts = legacy_folder_parts(persona_id)
-            if parts is None:
-                LOGGER.warning(
-                    "%s ペルソナ %r の記憶のファイルの場所を安全に決められないので、書き換えません。"
-                    "付け替えの記録は「予定」のまま残します",
-                    _LOG_PREFIX, persona_id,
-                )
-                self.alerts.append(_memory_location_unsafe_alert(persona_id, display_name))
-                all_done = False
-                continue
-            if not legacy_folder_can_exist(parts):
-                LOGGER.info(
-                    "%s ペルソナ ID %r にはこの OS のフォルダ名に使えない文字が含まれるので、"
-                    "記憶のファイルは作られていません",
-                    _LOG_PREFIX, persona_id,
-                )
-                continue
-            path = personas_root.joinpath(*parts) / "memory.db"
-            if not path.is_file():
-                continue
-            if not self._rewrite_one_memory(persona_id, display_name, path, renames):
-                all_done = False
-        return all_done
-
-    def _rewrite_one_memory(
-        self, persona_id: str, name: str, path: Path, renames: Mapping[str, str],
-    ) -> bool:
-        conn: Optional[sqlite3.Connection] = None
-        try:
-            conn = sqlite3.connect(str(path), timeout=_MEMORY_BUSY_TIMEOUT_MS / 1000)
-            conn.execute(f"PRAGMA busy_timeout = {_MEMORY_BUSY_TIMEOUT_MS}")
-            updates = plan_memory_rewrite(conn, renames)
-            if not updates:
-                LOGGER.debug(
-                    "%s ペルソナ %r の記憶のファイルに書き換える印はありません", _LOG_PREFIX, persona_id,
-                )
-                return True
-            dest = self._memory_backup_path(persona_id)
-            try:
-                _backup_memory_db(conn, dest)
-            except Exception as exc:
-                LOGGER.error(
-                    "%s ペルソナ %r の記憶のファイルの複製を作れなかったので、書き換えません: %s",
-                    _LOG_PREFIX, persona_id, dest, exc_info=True,
-                )
-                self.alerts.append(_memory_backup_failed_alert(persona_id, name, path, exc))
-                return False
-            LOGGER.info(
-                "%s ペルソナ %r の記憶のファイルを複製しました: %s", _LOG_PREFIX, persona_id, dest,
-            )
-            counts = apply_memory_rewrite(conn, updates)
-            LOGGER.info(
-                "%s ペルソナ %r の記憶のファイルの印を書き換えました。欄ごとの行数: %s",
-                _LOG_PREFIX, persona_id, counts,
-            )
-            return True
-        except Exception as exc:
-            LOGGER.error(
-                "%s ペルソナ %r の記憶のファイルの印を書き換えられませんでした: %s",
-                _LOG_PREFIX, persona_id, path, exc_info=True,
-            )
-            self.alerts.append(_memory_rewrite_failed_alert(persona_id, name, path, exc))
-            return False
-        finally:
-            if conn is not None:
-                conn.close()
-
-    def _memory_backup_path(self, persona_id: str) -> Path:
-        """``<ホーム>/backups/building_id_repair/<日時>/<ペルソナ ID>_memory.db`` (既にあれば番号を足す)。
-
-        ペルソナ ID は区切り記号などを含みうる (v0.2 の ID)。複製が日時のフォルダの直下の
-        1 つのファイル名になるよう、ファイル名の ID には部屋 ID の付け替えと同じ置き換え
-        (:func:`repaired_building_id`) をする。
-        """
-        if self._memory_backup_dir is None:
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            base = self.saiverse_home / "backups" / "building_id_repair"
-            folder = base / stamp
-            for n in range(2, _MAX_SUFFIX + 2):
-                if not _path_exists(folder):
-                    break
-                folder = base / f"{stamp}_{n}"
-            self._memory_backup_dir = folder
-        file_stem = repaired_building_id(persona_id)
-
-        def file_name(suffix: str) -> str:
-            name = f"{file_stem}_memory{suffix}.db"
-            # 「NUL.x_memory.db」のように Windows が装置として扱う名前だと、複製が
-            # ファイルに残らないまま「複製した」ことになるので、先頭をずらす
-            return name if is_safe_path_component(name) else "_" + name
-
-        dest = self._memory_backup_dir / file_name("")
-        for n in range(2, _MAX_SUFFIX + 2):
-            if not _path_exists(dest):
-                break
-            dest = self._memory_backup_dir / file_name(f"_{n}")
-        return dest
+        return self._memory.rewrite(renames)
 
     def _save_record_best_effort(self) -> None:
         try:
@@ -2183,14 +2319,18 @@ def repair_unsafe_building_ids(
 
 __all__ = [
     "DIRECT_REFERENCE_COLUMNS",
+    "ENTRY_KIND_RETIRE",
     "JSON_COLUMNS",
     "MemoryUpdate",
+    "PersonaMemoryRewriter",
+    "REASON_MEMORY_LOCATION_SKIPPED",
     "RENAMES_FILENAME",
     "STATUS_DONE",
     "STATUS_PLANNED",
     "apply_memory_rewrite",
     "choose_new_building_id",
     "discord_mapping_alerts",
+    "is_retire_entry",
     "legacy_folder_can_exist",
     "legacy_folder_parts",
     "load_rename_record",

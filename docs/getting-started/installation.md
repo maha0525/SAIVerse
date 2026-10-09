@@ -9,6 +9,8 @@ SAIVerseの環境構築手順を説明します。
 - **Node.js 18以上** ([ダウンロード](https://nodejs.org/))（未導入の場合 `setup.bat` が自動導入）
 - **Git**
   - **Windows は `setup.bat` が自動導入する**（winget、無理ならポータブル版）ので事前準備は不要
+- **Microsoft Visual C++ 再頒布可能パッケージ**（Windows のみ。記憶の検索に使う部品が必要とする）
+  - 入っていない場合は `setup.bat` が Microsoft の配布元から取って自動導入する。途中で Windows が「このアプリが変更を加えることを許可しますか」と確認するので、「はい」を選ぶ
   - macOS / Linux は推奨（自動更新に必要）。未導入なら手動で入れる（`brew install git` / `sudo apt install git`）。`setup.sh` は Git がなくても続行するが警告を出す
 
 ## 簡単セットアップ (推奨)
@@ -29,8 +31,8 @@ SAIVerseの環境構築手順を説明します。
 ### Windows
 
 1. 入手した `SAIVerse` フォルダを開く
-2. `SAIVerse` フォルダ内の **`setup.bat`** をダブルクリック
-3. セットアップ完了後、**`start.bat`** をダブルクリック
+2. `SAIVerse` フォルダ内の **`setup.bat`** をダブルクリック（拡張子を表示していない場合は、歯車のアイコンの「setup」です。「setup.sh」ではありません）
+3. セットアップ完了後、**`start.bat`** をダブルクリック（拡張子を表示していない場合は、歯車のアイコンの「start」です。「start.sh」ではありません）
 4. ブラウザで http://localhost:3000 が自動的に開きます
 
 ### macOS / Linux

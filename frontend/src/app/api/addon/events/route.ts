@@ -11,7 +11,9 @@
  */
 import type { NextRequest } from "next/server";
 
-const BACKEND = process.env.SAIVERSE_BACKEND_URL ?? "http://127.0.0.1:8000";
+import { resolveBackendOrigin } from "../../../../../backend-origin.cjs";
+
+const BACKEND = resolveBackendOrigin();
 
 // このルートは常に動的。Next.js の静的最適化を避ける。
 export const dynamic = "force-dynamic";

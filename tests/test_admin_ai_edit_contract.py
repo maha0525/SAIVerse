@@ -131,7 +131,9 @@ class AdminAiEditContractTest(unittest.TestCase):
             core_memory_char_budget=1234,
             chronicle_char_budget=45000,
             spell_enabled=False,
-            realtime_info_enabled=False,
+            # 両方とも列既定の逆を送り、既定値のままでは通らないようにする
+            realtime_current_time_enabled=False,
+            realtime_last_utterance_enabled=True,
             meta_judgment_config={"max_retries": 5},
             user_conv_timeout_minutes=45,
         )
@@ -160,7 +162,8 @@ class AdminAiEditContractTest(unittest.TestCase):
         self.assertEqual(details["CORE_MEMORY_CHAR_BUDGET"], 1234)
         self.assertEqual(details["CHRONICLE_CHAR_BUDGET"], 45000)
         self.assertFalse(details["SPELL_ENABLED"])
-        self.assertFalse(details["REALTIME_INFO_ENABLED"])
+        self.assertFalse(details["REALTIME_CURRENT_TIME_ENABLED"])
+        self.assertTrue(details["REALTIME_LAST_UTTERANCE_ENABLED"])
         self.assertEqual(json.loads(details["META_JUDGMENT_CONFIG"]), {"max_retries": 5})
         self.assertEqual(details["USER_CONV_TIMEOUT_MINUTES"], 45)
 
@@ -204,7 +207,8 @@ class AdminAiEditContractTest(unittest.TestCase):
             memory_weave_context=False,
             memopedia_index_enabled=True,
             spell_enabled=False,
-            realtime_info_enabled=False,
+            realtime_current_time_enabled=False,
+            realtime_last_utterance_enabled=True,
             core_memory_char_budget=1234,
             meta_judgment_config={"max_retries": 5},
             user_conv_timeout_minutes=45,
@@ -220,7 +224,8 @@ class AdminAiEditContractTest(unittest.TestCase):
         self.assertFalse(row.MEMORY_WEAVE_CONTEXT)
         self.assertTrue(row.MEMOPEDIA_INDEX_ENABLED)
         self.assertFalse(row.SPELL_ENABLED)
-        self.assertFalse(row.REALTIME_INFO_ENABLED)
+        self.assertFalse(row.REALTIME_CURRENT_TIME_ENABLED)
+        self.assertTrue(row.REALTIME_LAST_UTTERANCE_ENABLED)
         self.assertEqual(row.CORE_MEMORY_CHAR_BUDGET, 1234)
         self.assertEqual(json.loads(row.META_JUDGMENT_CONFIG), {"max_retries": 5})
         self.assertEqual(row.USER_CONV_TIMEOUT_MINUTES, 45)

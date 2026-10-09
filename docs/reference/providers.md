@@ -21,6 +21,7 @@
 | `typesafe` | TypeSafe System One | `jev_compat` | `https://api.typesafe.ai` | `TYPESAFE_API_KEY` |
 | `openrouter_systemone` | OpenRouter (System One) | `jev_compat` | `https://openrouter.ai` | `OPENROUTER_API_KEY` |
 | `localjev` | localjev (local) | `jev_compat` | `http://127.0.0.1:8080` | —（不要） |
+| `openai_decisions` | OpenAI Decisions | `jev_compat` | `https://api.openai.com` | `OPENAI_API_KEY` |
 
 `gemini` だけは `api_key_env_alternates: ["GEMINI_FREE_API_KEY"]` を併せ持つ。**`GEMINI_API_KEY` と `GEMINI_FREE_API_KEY` のどちらか一方が設定されていればモデル一覧に出る**（無料枠だけの利用を想定）。判定は `saiverse/model_configs.py` の `_get_required_env_vars()`。
 
@@ -85,7 +86,7 @@
 | `xai_native` | xAI ネイティブ | ✗（builtin のみ） |
 | `nvidia_nim` | NVIDIA NIM | ✗（builtin のみ） |
 | `openai_codex` | OpenAI Codex（ChatGPT OAuth） | ✗（builtin のみ） |
-| `jev_compat` | 反射判断の宛先（System One 形式） | ✗（builtin のみ） |
+| `jev_compat` | 反射判断の宛先（System One 形式。`request_shape` の宣言で OpenAI Decisions の形にも変換する） | ✗（builtin のみ） |
 
 `*_native` / `nvidia_nim` / `openai_codex` は `llm_clients/` にコード実装が必要なため builtin のみ。UI（モデル管理 > プロバイダ）から作れるのは `openai_compat` / `ollama_compat` の2種。
 
@@ -93,18 +94,33 @@
 
 会話には使わない（`llm_clients/factory.py` は扱わないので、標準モデルや軽量モデルに割り当てるとクライアント生成で失敗する）。話し相手は [`saiverse/reflex_judgment.py`](../intent/reflex_judgment.md) だけで、「状況 + 型付きの質問」を送って確率・選択・数値を受け取る。
 
-「Jev 互換」を名乗る提供元は宛先の path・応答の欄の名前・対応する質問の型が揃っていないので、**その差は provider 設定の `reflex_judgment` 欄で宣言する**（コードに提供元ごとの分岐を置かない）。宣言できる項目:
+「Jev 互換」を名乗る提供元は宛先の path・応答の欄の名前・対応する質問の型が揃っていないので、**その差は provider 設定の `reflex_judgment` 欄で宣言する**（コードに提供元ごとの分岐を置かない）。
+
+全項目に共通の規則: 既定になるのはキーそのものが無いときだけ。キーがあって値が `null`・型違い（`path` / `answers_key` / `usage_key` が空でない文字列でない、`answer_fields` / `usage_fields` が中の項目まで空でない文字列の辞書でない、`supported_types` が文字列のリストでない）なら設定ミスとして、その宛先は「使えなかった」になる（WARNING に理由が出る）。モデル側に `null` を書くと provider の宣言がキー単位で消えるので、それを既定で埋めると違う宛先・違う欄名で毎回失敗するため。`reflex_judgment` 欄そのものが辞書でない（`"reflex_judgment": "typo"` など）ときも、宣言なしとは読まずに同じく「使えなかった」になる。宣言できる項目:
 
 | 項目 | 既定 | 意味 |
 |---|---|---|
+| `request_shape` | `system_one` | リクエストの組み立て方。`system_one` は System One の形（`state` + qid の辞書の `questions`）をそのまま送る。`openai_decisions` は OpenAI の Decisions API の形へ送る直前に変換し、答えも読み戻す（下の節）。既定の `system_one` になるのはキーそのものが無いときだけで、キーがあって値がこの 2 つ以外（`null` を含む）なら設定ミスとして、その宛先は「使えなかった」になる |
 | `path` | `/v1/systemone` | `base_url` の後ろに付ける宛先のパス |
-| `answers_key` | `answers` | 応答のどの欄に答えの辞書が載るか |
+| `answers_key` | `answers` | 応答のどの欄に答えが載るか（`system_one` は qid の辞書、`openai_decisions` は name 付きの配列） |
 | `usage_key` | `usage` | 応答のどの欄に使用量が載るか |
-| `answer_fields` | `{"noul": "noul", "choice": "choice", "score": "score"}` | 質問の型ごとに、答えの値が載る欄の名前 |
+| `answer_fields` | `{"noul": "noul", "choice": "choice", "score": "score"}`（`request_shape` が `openai_decisions` なら `{"noul": "probability", "choice": "choice", "score": "score"}`） | 質問の型ごとに、答えの値が載る欄の名前。書いたキーだけが既定を上書きする |
 | `usage_fields` | `{"input_tokens": "input_tokens", "output_tokens": "output_tokens"}` | 記帳する使用量の名前 → 応答の欄の名前 |
 | `supported_types` | 3 型すべて | この宛先が答えられる質問の型。対応しない型が混ざった質問は、ひとまとまりごと「使えなかった」になる |
 
-モデル側は `provider_ref` でこれを受け継ぐので、同梱の 3 つのモデル定義（`jev-latest` / `openrouter-jev-latest` / `localjev`）は宣言を持たない。使用量と費用はモデル設定キー名義で既存の記帳に載るので、単価は普通のモデルと同じく `pricing` に書く。
+モデル側は `provider_ref` でこれを受け継ぐので、同梱の 4 つのモデル定義（`jev-latest` / `openrouter-jev-latest` / `localjev` / `openai-decisions-gpt-6-luna`）は宣言を持たない（モデル側に書いた場合は、書いたキーだけが provider の宣言を上書きする）。使用量と費用はモデル設定キー名義で既存の記帳に載るので、単価は普通のモデルと同じく `pricing` に書く。
+
+#### `request_shape: "openai_decisions"` — OpenAI Decisions への変換
+
+OpenAI の [Decisions API](https://developers.openai.com/api/docs/guides/decisions)（public beta）は発想は System One と同じだが、組み立て方が違う。呼び出し側が組む質問と状況は System One の形のまま変えず、`saiverse/reflex_judgment.py` が送る直前に変換する。
+
+- **状況** は 1 本の文字列の `input` にする（文字列ならそのまま、それ以外は JSON）。
+- **質問** は qid を `name` にした配列にする。型名は noul → `predicate`、choice → `choice`、score → `score`。
+- **criteria** は Decisions に欄が無いので、構造の中に居場所があるものはそこへ写す。choice の選択肢の説明は `choices` の `description` へ（選択肢の値は `options` が空でないリストならその順で、要素が文字列でなければ文字列（JSON の 1 行）にする。無ければ criteria の辞書のキーの順。criteria のキーと選択肢の値の対応は、キーを文字列にしてから取る（`{1: "one"}` と `options: ["1"]` は対応する）。説明が無い・中身が無いときは値と同じ文字列）、score の段階の説明は `levels` へ（2 つ以上の段階の配列が要る。score の criteria は末尾の節には載せない）。「中身が無い」は null・空白だけの文字列・空の辞書・空のリストのことで、説明・節の行・段階・選択肢の値のすべてで同じ判定を使う。
+- **構造に居場所の無い基準** は、`input` の最後に 1 つの節として書き足す。載るのは noul の基準と、choice の基準のうち choices に入らなかったもの（criteria が辞書でなければ全体、辞書なら文字列にしたキーが送った選択肢の値のどれとも一致しないキーだけ。choices に入った説明は重ねない）。値に中身の無いキーは情報が無いので載せない。節は英語の見出し 1 行のあと、質問ごとに `[name] instructions` の見出し行（instructions が複数行ならそのまま）と、基準の行（辞書なら `key: value`、それ以外は文字列ならそのまま・それ以外は JSON の 1 行）が続く。OpenAI がモデルに `name` を見せるかは確かめられていないので、質問文でも基準と質問を結び付けている。載せる基準が 1 つも無ければ節ごと付けない。
+- **答え** は `name` 付きの配列で返るので、qid の辞書へ戻し、型名を SAIVerse 側へ写してから同じ検算に通す。型名が `predicate` / `choice` / `score` / `refusal` のどれでもない要素（型の欄が無い・`noul` のような System One の語彙・未知の語）、同じ `name` の重複、形の壊れた要素は不正応答にする。`type: "refusal"`（答えられなかった）はその質問の答えが無いものとして扱う。写した型と質問の型が食い違う答え（predicate を choice の質問へ返す等）も不成立。choice の答えは、実際に送った `choices` の値のどれかでなければ不成立（criteria の辞書だけから組んだ choice でも同じ）。
+
+次の質問は、この宛先では表せないので「使えなかった」になる: 選択肢を作れない choice、`options` がリストでない choice、中身の無い選択肢の値を持つ choice、文字列にした後で選択肢の値が重なる choice（`options` の重複、`{1: "a", "1": "b"}` のようなキー）、一つの選択肢に文字列にした後で同じになる criteria のキーが複数対応する choice、段階が 2 つ未満の score、中身の無い段階を持つ score（段階を黙って落とすと番号がずれて score の意味が変わる）。状況や基準を JSON にできない（文字列でないキーの辞書・循環参照など）ときも、送る前に「使えなかった」になる。送るものの組み立てで出た例外は、型を問わず「使えなかった」に正規化される（通常の LLM の道のプロンプトの組み立ても同じ）。同梱の `openai-decisions-gpt-6-luna`（API 上のモデル名は `gpt-6-luna`、単価は入力 $0.10/1M・出力は課金なし）は会話用の `gpt-6-luna` とは別のモデル定義で、protocol が `jev_compat` なので会話の選択欄には出ない。
 
 `localjev` の既定の宛先は `http://127.0.0.1:8080` (localjev 本体の既定 `LOCALJEV_HOST` / `LOCALJEV_PORT` に合わせた値。llama.cpp Server の既定ポートと同じなので、両方をローカルで動かすならどちらかのポートをずらす)。別のポートで動かしているなら、`~/.saiverse/user_data/providers/localjev.json` に同じ id で `base_url` を書いた上書きを置く。
 
@@ -139,3 +155,12 @@
 判定に使う層は、`saiverse/provider_configs.py: load_configs()` が**実際に辿ったディレクトリ**をそのまま `source` として刻む。あとからパスを解決し直して判定はしない（`expansion_data` に置いたシンボリックリンクやジャンクションが `user_data` を指していると、解決先の層で信用してしまうため）。**JSON の中に `"source"` や `"builtin"` を書いても読み込み時に捨てられる**ので、定義が自分で層を名乗ることもできない。検査は `saiverse/provider_security.py: validate_provider_config` の一箇所にあり、保存時とクライアント構築時（＝毎回の LLM 呼び出し）の両方が通る。
 
 **この仕組みが縛るのはアドオンの「宣言」であって、アドオンの「動作」ではない。** アドオンのツールは同一プロセスで Python として実行される（`tools/__init__.py` が `exec_module` で読み込む）ので、アドオンのコードは環境変数を直接読むことも、独自に通信することも、`user_data` に書き込むこともできる。ここはアドオンを隔離する仕組みではない。設計の経緯は `docs/intent/model_provider_management.md` の不変条件 11。
+
+
+## 壊れた設定ファイル
+
+上位層の provider JSON が壊れている場合、下位層へ自動で切り替えない。接続先・キー・モデルはそのまま利用停止し、API とプロバイダ／モデル管理画面にファイルのパス・層・理由を表示する（値は表示しない）。参照モデルも一覧に残る。ファイルを修復したあと、`POST /api/providers/reload` または再起動で読み直す。
+
+`GET /api/providers` は各行の `available`（設定の構造が有効か）と `config_error`（無ければ null）を返す。API キーの有無は従来の `api_key_configured` で別途確認する。モデルの2本の一覧 API も `available` と `config_error` を返し、壊れた provider を参照するモデルを黙って隠さない。
+
+`protocol` は実装が扱える値を必須とする。会話用 factory が扱える7種に加え、反射判断専用の `jev_compat` を受け付ける。`api_key_env_alternates` は省略か、非空文字列だけのリスト。`base_url` / `api_key_env` の null は従来のプロトコル既定動作を保ち、認証なしの宣言は `api_key_required: false` が担う。

@@ -164,6 +164,50 @@
     font-size: 0.88rem;
 }
 
+.btnPrimary:disabled,
+.btnDanger:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.loadingRow {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.85rem;
+    color: var(--text-secondary, #888);
+}
+
+.spin {
+    animation: addonConfirmSpin 1s linear infinite;
+}
+
+@keyframes addonConfirmSpin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.errorBox {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 8px 10px;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 5px;
+    color: #991b1b;
+    font-size: 0.82rem;
+    line-height: 1.5;
+}
+
+.errorDetail {
+    margin-top: 2px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
 :global([data-theme="dark"]) .dialog {
     background: #1f2937;
     color: #e5e7eb;
@@ -186,4 +230,14 @@
 
 :global([data-theme="dark"]) .list code {
     background: rgba(255, 255, 255, 0.1);
+}
+
+:global([data-theme="dark"]) .loadingRow {
+    color: #9ca3af;
+}
+
+:global([data-theme="dark"]) .errorBox {
+    background: #450a0a;
+    border-color: #7f1d1d;
+    color: #fecaca;
 }

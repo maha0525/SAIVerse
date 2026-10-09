@@ -7,7 +7,7 @@ import { useLocale } from '@/i18n/useLocale';
 
 import { useEffect, useState, useRef, type ReactNode } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, User, Bell, Package, AlertTriangle, ChevronRight, ChevronDown } from 'lucide-react';
+import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, User, Bell, Package, ChevronRight, ChevronDown } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 import PersonaWizard from './PersonaWizard';
@@ -75,7 +75,6 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
     // ⚠ 「できごと」とライフビューへの導線は v0.3 で隠した
     // (autonomous_behavior_v3.md §11「運転 UI は隠す」)。
     const [developerMode, setDeveloperMode] = useState(false);
-    const [quarantinedIds, setQuarantinedIds] = useState<Set<string>>(new Set());
     // システム欄の折り畳み。既定は閉 (低解像度端末で場所欄を圧迫しないため)。
     // 初期値を localStorage から直接読むと SSR とのハイドレーション不一致になる
     // ので、閉で描画してからマウント後の effect で復元する。
@@ -96,32 +95,6 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
             localStorage.setItem('saiverse_sidebar_system_open', next ? '1' : '0');
         } catch { /* 保存に失敗しても開閉自体は動く */ }
     };
-
-    useEffect(() => {
-        let cancelled = false;
-        async function fetchQuarantine() {
-            try {
-                const res = await apiFetch('/api/system/quarantine');
-                if (!res.ok || cancelled) return;
-                const data = await res.json();
-                const ids = new Set<string>(
-                    (data.quarantined || []).map((q: { building_id: string }) => q.building_id)
-                );
-                setQuarantinedIds(ids);
-            } catch {
-                // silent
-            }
-        }
-        fetchQuarantine();
-        // Listen for quarantine resolution events (restore/reset from modal)
-        // so the sidebar warning indicator clears immediately.
-        const handleResolved = () => fetchQuarantine();
-        window.addEventListener('quarantine-resolved', handleResolved);
-        return () => {
-            cancelled = true;
-            window.removeEventListener('quarantine-resolved', handleResolved);
-        };
-    }, [refreshTrigger]);
 
     // Swipe Logic for Control
     const startX = useRef<number | null>(null);
@@ -403,7 +376,6 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                             regions.filter(r => r.entrance_building_id).map(r => r.region_id)
                         );
                         const renderBuildingItem = (b: Building, depth: number): ReactNode => {
-                            const isQuarantined = quarantinedIds.has(b.id);
                             const childRegionId = b.entrance_of ?? null;
                             const isExpanded = !!childRegionId && expandedRegions.has(childRegionId);
                             const children = (childRegionId && isExpanded)
@@ -411,17 +383,15 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                                 : [];
                             return (
                                 <div key={b.id}>
-                                    <div data-i18n="components.Sidebar.text006"
+                                    <div
                                         // active hilight は 「閲覧中の building」 (= viewing)。
                                         // 「サーバ上の真の現在地」 は別途 D-1 マーカー (User
                                         // アイコン) で示す。 両者は閲覧モード中に乖離する。
                                         className={`${styles.buildingItem} ${(viewingBuildingId ?? status?.current_building_id) === b.id ? styles.active : ''}`}
-                                        onClick={() => isQuarantined ? null : handleMove(b.id)}
+                                        onClick={() => handleMove(b.id)}
                                         style={{
                                             ...(depth > 0 ? { marginLeft: `${depth * 14}px` } : {}),
-                                            ...(isQuarantined ? { opacity: 0.6, cursor: 'not-allowed' } : {}),
                                         }}
-                                        title={isQuarantined ? uiText("components.Sidebar.text006") : undefined}
                                     >
                                         {/* buildingItem は space-between なので子を「左=展開ボタン+名前 /
                                             右=マーク類」の 2 グループに束ねる。バラで並べると入口行
@@ -443,9 +413,6 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                                             <span>{b.name}</span>
                                         </span>
                                         <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                                            {isQuarantined && (
-                                                <AlertTriangle size={14} style={{ color: '#ff6666' }} />
-                                            )}
                                             {/* D-1 現在地マーカー: サーバ上の真の現在地に常に表示。
                                                 閲覧モード中 (= viewing != server-current) は
                                                 active hilight と乖離して、 「自分は今そこではなく

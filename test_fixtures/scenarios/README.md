@@ -54,3 +54,14 @@ mock シムの不変条件は回帰スイート `tests/test_day_sim_regression.p
 4. 施設を使いたい場合は Building にロールタグを付与（任意。無ければ own_room で全部進む）:
    `sqlite3 <db> "UPDATE building SET FACILITY_ROLES='[\"library\"]' WHERE BUILDINGID='<id>';"`
    語彙: `plaza`（話す/聞く）/ `workshop`（作る）/ `library`（知る）/ `park`（経験する）。複数可 `'["plaza","park"]'`
+
+## 台本つきの偽 LLM (一日シムとは別の道具)
+
+`scripted_llm_server.py` は openai 互換の偽 LLM サーバー (ポート 18097)。隔離テスト環境の合成ペルソナ
+`test_persona_stub` (部屋 `test_stub_room`) のモデルがこれを向いている (`test_fixtures/definitions/test_data.json`
+の `llm_configs` を `setup_test_env.py` が `test_data/user_data/{providers,models}/` へ書く)。台本は
+`scripted_llm_server.py preset <名前>` でサーバーを立て直さずに切り替えられる。実 LLM の鍵を無効にして
+テストバックエンドを立てる `start_scripted_backend.bat` と組で使う。
+
+- `reply_stop_exit_manual.md` — 返事が途中で止まった回の出口 (docs/intent/reply_stop_exit.md) をブラウザで確かめる手順
+- `check_reply_stop_exit.py` — 同じ場面をチャット API で踏むヘッドレス確認

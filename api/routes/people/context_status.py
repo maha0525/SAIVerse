@@ -302,7 +302,7 @@ def _band_budget_from_status(status: dict[str, Any]) -> int:
 
 def _resolve_lifecycle(manager: Any):
     """SessionLifecycle を manager からたどる (cache_status.py と同じ経路)。"""
-    runtime = getattr(manager, "sea_runtime", None) or getattr(manager, "runtime", None)
+    runtime = manager.sea_runtime
     if runtime is None:
         return None
     return getattr(runtime, "session_lifecycle", None)

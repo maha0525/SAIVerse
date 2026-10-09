@@ -822,11 +822,6 @@ _SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 _SYSTEM_MAX_SIZE_BYTES = 1024 * 1024 * 1024  # 1 GB
 
 
-def _addon_files_base() -> Path:
-    from saiverse.data_paths import get_saiverse_home
-    return get_saiverse_home() / "user_data" / "addon_files"
-
-
 def _validate_names(*names: str) -> None:
     for name in names:
         if not name or not _SAFE_NAME_RE.match(name):
@@ -856,7 +851,15 @@ def _get_file_param_schema(addon_name: str, param_key: str) -> AddonParamSchema:
 
 
 def _resolve_file_dir(addon_name: str, persona_id: Optional[str], param_key: str) -> Path:
-    base = _addon_files_base() / addon_name
+    """アップロードされたファイルの保存先 (全アドオン共通の一本の規則)。
+
+    ``~/.saiverse/user_data/addon_data/<addon_name>/inputs/`` の下に、ペルソナ別なら
+    ``personas/<persona_id>/``、そうでなければ ``global/`` を切る。旧規約の
+    ``user_data/addon_files/<addon_name>/`` に置かれていたファイルと、DB に記録された
+    その絶対パスは、起動時に ``saiverse/addon_migrations.py`` が同じ規則で移す。
+    """
+    from saiverse.addon_paths import get_addon_data_dir
+    base = get_addon_data_dir(addon_name) / "inputs"
     if persona_id:
         return base / "personas" / persona_id
     return base / "global"
@@ -893,8 +896,8 @@ async def upload_persona_file(
     """ペルソナ別のファイルパラメータをアップロードする。
 
     addon.json の params_schema で type="file" かつ persona_configurable=true の
-    パラメータにのみ使用可能。ファイルは ~/.saiverse/user_data/addon_files/ 配下に
-    保存され、AddonPersonaConfig.params_json に保存先パスが書き込まれる。
+    パラメータにのみ使用可能。ファイルは ~/.saiverse/user_data/addon_data/<addon>/inputs/
+    配下に保存され (``_resolve_file_dir``)、AddonPersonaConfig.params_json に保存先パスが書き込まれる。
     """
     _validate_names(addon_name, persona_id, param_key)
     schema = _get_file_param_schema(addon_name, param_key)

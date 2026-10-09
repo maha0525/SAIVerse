@@ -11,16 +11,91 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Full history: the wrong-branch gate below needs the ancestry between
+      # the tagged commit and the release branches.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Create ZIP archive
         run: git archive --format=zip --prefix=SAIVerse/ -o SAIVerse.zip HEAD
 
+      # An early-access tag (v0.4.0rc1) must become a *prerelease*: GitHub
+      # leaves prereleases out of `releases/latest`, which is what keeps them
+      # away from stable users' update notice and from the
+      # `releases/latest/download/` ZIP link. Without the flag, pushing such a
+      # tag would announce it to everyone (docs/intent/early_access_release.md
+      # §3-6). Which tags are prereleases is decided by the same version
+      # standard the app itself uses (PEP 440, packaging), not by string
+      # matching -- the earlier `*rc*` glob marked a stable `v1.2.3+src1` as a
+      # prerelease and let `v0.4.0alpha1` through as stable (adversarial
+      # review 2026-09-25). A tag whose version cannot be parsed, or that does
+      # not match the VERSION file in the tagged commit, fails the job before
+      # anything is published: "no release" beats announcing the wrong build
+      # to every stable install.
+      - name: Decide release kind from the tag
+        id: kind
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 -m pip install --quiet packaging
+          python3 - "$TAG" >> "$GITHUB_OUTPUT" <<'PY'
+          import pathlib
+          import sys
+
+          from packaging.version import InvalidVersion, Version
+
+          tag = sys.argv[1]
+          try:
+              tag_version = Version(tag.lstrip("v"))
+          except InvalidVersion:
+              sys.exit(f"Tag {tag!r} is not a valid PEP 440 version; refusing to publish a release for it.")
+          file_text = pathlib.Path("VERSION").read_text(encoding="utf-8").strip()
+          try:
+              file_version = Version(file_text)
+          except InvalidVersion:
+              sys.exit(f"VERSION file contains {file_text!r}, not a valid PEP 440 version; refusing to publish.")
+          if tag_version != file_version:
+              sys.exit(f"Tag {tag!r} does not match the VERSION file ({file_text}); refusing to publish.")
+          flag = "--prerelease" if tag_version.is_prerelease else ""
+          print(f"prerelease={flag}")
+          PY
+
+      # A stable tag must sit on main, an early-access (prerelease) tag on
+      # early-access. Without this, tagging any development commit v0.4.0
+      # would publish it to every stable install (adversarial review
+      # 2026-09-25, round 2). Fail-closed: a missing branch refuses too.
+      - name: Refuse a tag on the wrong branch
+        env:
+          TAG: ${{ github.ref_name }}
+          PRERELEASE_FLAG: ${{ steps.kind.outputs.prerelease }}
+        run: |
+          git fetch origin main || true
+          git fetch origin early-access || true
+          if [ -n "$PRERELEASE_FLAG" ]; then
+            branch="origin/early-access"
+          else
+            branch="origin/main"
+          fi
+          if ! git rev-parse --verify --quiet "$branch^{commit}" > /dev/null; then
+            echo "Branch $branch does not exist on origin; refusing to publish $TAG." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$TAG^{commit}" "$branch"; then
+            echo "Tag $TAG is not on $branch; refusing to publish." >&2
+            exit 1
+          fi
+          echo "Tag $TAG is on $branch."
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE_FLAG: ${{ steps.kind.outputs.prerelease }}
         run: |
-          gh release create "${{ github.ref_name }}" \
+          echo "Tag $TAG -> prerelease flag: '${PRERELEASE_FLAG}'"
+          gh release create "$TAG" \
             SAIVerse.zip \
-            --title "SAIVerse ${{ github.ref_name }}" \
-            --generate-notes
+            --title "SAIVerse $TAG" \
+            --generate-notes \
+            $PRERELEASE_FLAG

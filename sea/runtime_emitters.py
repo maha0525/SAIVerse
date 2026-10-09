@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional
 
 from saiverse.marker_parser import strip_marks
@@ -14,9 +16,147 @@ LOGGER = logging.getLogger(__name__)
 #: 「画面へ流れた」の合図で、保存の証拠ではない。このイベントは建物履歴の
 #: 行に本文が入った後にだけ流れ、保存された行の id を運ぶ。受け手
 #: (manager/runtime.py の続きの生成の印降ろし) は、この信号が来なかった回は
-#: 印を残す側へ倒れる。
+#: 印を残す側へ倒れる。画面も同じ信号で、流し込みの吹き出しに行の id を
+#: 持たせる (エラー札の「続きの生成」の案内がその id で吹き出しを探す)。
 #: 設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
 SPEAK_PERSISTED_EVENT_TYPE = "speak_persisted"
+
+
+# ---------------------------------------------------------------------------
+# 事実の記録 — 「このペルソナが最後に保存した発言」
+#
+# 返事が途中で止まった回の後始末 (sea/reply_stop_exit.py) は、止まった場所では
+# なく**この記録**を見て「続きの生成」を出す発言を決める。記録を書くのは保存の
+# 成功判定が一本化された :func:`notify_speak_persisted` だけ — 保存経路ごとに
+# 書き分けると必ず漏れる (同関数の docstring と同じ理由)。
+#
+# ペルソナ単位にするのは、``tell`` スペルが自分用の pulse_id で発言を書くため
+# (pulse_id で切ると取りこぼす)。メモリ内だけに持ち、DB には書かない。
+# 設計: docs/intent/reply_stop_exit.md §1
+# ---------------------------------------------------------------------------
+
+#: 保存した発言の形。後始末が中断の通告の文面を選ぶ材料になる
+#: (docs/intent/reply_stop_exit.md §通告の内容 の 4 分類)。
+#: - 言い切った発言 (④ の受け皿。既定)
+SAVED_FORM_COMPLETE = "complete"
+#: - 途中で切れた本文 (①)
+SAVED_FORM_CUT = "cut"
+#: - スペルの実行が終わる前に止まった周の本文 (②)。受け取り済みの結果は
+#:   行に残り、結果の来ていないスペルは唱えた行だけが残る。
+SAVED_FORM_SPELL_UNFINISHED = "spell_unfinished"
+#: - 唱えたスペルの結果を全部受け取った周の本文 (③)
+SAVED_FORM_SPELL_RESULTS = "spell_results"
+
+
+@dataclass(frozen=True)
+class SavedUtterance:
+    """「このペルソナが最後に保存した発言」1 件。
+
+    ``stopped``: この発言の後で話が止まったことを、保存した側が知っている
+    (途中で切れた本文を残した / 締めの生成がサーバーに切られた等)。返事が
+    例外なしで閉じた回の後始末は、この印が立っているときだけ働く。次の発言が
+    保存されると記録ごと置き換わるので、話が続いた回には残らない。
+
+    ``detail``: 画面への知らせに要る材料 (サーバーが切った回の
+    ``stream_error`` など)。ペルソナには渡さない。
+
+    ``settled``: 後始末がこの発言に印と通告を置き終えた。同じ発言に二枚目を
+    作らないための印 (要件 5)。
+    """
+
+    message_id: str
+    building_id: str
+    saved_at: float
+    form: str = SAVED_FORM_COMPLETE
+    stopped: bool = False
+    detail: Optional[Dict[str, Any]] = None
+    settled: bool = False
+
+
+_LAST_SAVED: Dict[str, SavedUtterance] = {}
+_LAST_SAVED_LOCK = threading.Lock()
+
+
+def record_saved_utterance(
+    persona_id: Optional[str], message_id: str, building_id: str,
+) -> None:
+    """保存できた発言を「最後に保存した発言」として上書きする。"""
+    if not persona_id or not message_id or not building_id:
+        return
+    with _LAST_SAVED_LOCK:
+        _LAST_SAVED[str(persona_id)] = SavedUtterance(
+            message_id=str(message_id),
+            building_id=str(building_id),
+            # 単調時計 — 返事の開始時刻 (sea/runtime.py の _reply_started_at)
+            # と同じ時計で比べる。壁時計は戻りうる (NTP 補正など) ので、
+            # 戻ると後始末の時間窓がこの返事の発言を読み飛ばす。
+            saved_at=time.monotonic(),
+        )
+
+
+def last_saved_utterance(persona_id: Optional[str]) -> Optional[SavedUtterance]:
+    """そのペルソナが最後に保存した発言。記録が無ければ None。"""
+    if not persona_id:
+        return None
+    with _LAST_SAVED_LOCK:
+        return _LAST_SAVED.get(str(persona_id))
+
+
+def note_saved_utterance(
+    persona_id: Optional[str],
+    *,
+    message_id: Optional[str] = None,
+    form: Optional[str] = None,
+    stopped: Optional[bool] = None,
+    detail: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """最後に保存した発言の記録に、保存した側だけが知る事実を書き足す。
+
+    ``message_id`` を渡すと、記録がその発言のときだけ書き足す (保存の直後に
+    別の発言が記録を置き換えていた回に、違う発言へ事実を付けない)。
+    省略すると「いま最後の発言」に書き足す — 話が止まったことを、直前の
+    発言に付ける回 (締めの生成が一文字も出ないうちに切られた等) に使う。
+    戻り値は書き足せたか。
+    """
+    if not persona_id:
+        return False
+    with _LAST_SAVED_LOCK:
+        current = _LAST_SAVED.get(str(persona_id))
+        if current is None:
+            return False
+        if message_id is not None and current.message_id != str(message_id):
+            return False
+        changes: Dict[str, Any] = {}
+        if form is not None:
+            changes["form"] = form
+        if stopped is not None:
+            changes["stopped"] = stopped
+        if detail is not None:
+            changes["detail"] = dict(detail)
+        _LAST_SAVED[str(persona_id)] = replace(current, **changes)
+        return True
+
+
+def claim_saved_utterance_for_settle(
+    persona_id: Optional[str], message_id: str,
+) -> bool:
+    """後始末がその発言を引き受ける。一度だけ True を返す (二枚目を作らない)。"""
+    if not persona_id:
+        return False
+    with _LAST_SAVED_LOCK:
+        current = _LAST_SAVED.get(str(persona_id))
+        if current is None or current.message_id != str(message_id):
+            return False
+        if current.settled:
+            return False
+        _LAST_SAVED[str(persona_id)] = replace(current, settled=True)
+        return True
+
+
+def forget_saved_utterances() -> None:
+    """記録を全部消す (テスト用)。"""
+    with _LAST_SAVED_LOCK:
+        _LAST_SAVED.clear()
 
 
 def notify_speak_persisted(
@@ -24,6 +164,8 @@ def notify_speak_persisted(
     building_msg: Optional[Dict[str, Any]],
     persona: Any,
     pulse_id: Optional[str],
+    *,
+    building_id: Optional[str] = None,
 ) -> None:
     """保存が成功した assistant 発言の、保存完了イベントの唯一の発火口。
 
@@ -37,20 +179,35 @@ def notify_speak_persisted(
     - **保存された本文** (正規化後に行へ入った content) が空でない。
       正規化前のテキストで判定すると、除去後に空で確定した行 (発言では
       ない) にまで「発言が保存された」の信号が流れる (Codex #6)。
+
+    同じ判定で「このペルソナが最後に保存した発言」の記録も書く
+    (:func:`record_saved_utterance`)。記録は画面に繋がっていない保存
+    (``event_callback`` が無い回) でも書く — 返事が止まった回の後始末は、
+    画面の有無と関係なくこの記録から「続きの生成」を出す発言を決める。
+    ``building_id`` はその行がある部屋 (記録と画面イベントに載る)。
     """
-    if event_callback is None or not isinstance(building_msg, dict):
+    if not isinstance(building_msg, dict):
         return
     message_id = building_msg.get("message_id")
     content = str(building_msg.get("content") or "")
     if not message_id or not content.strip():
         return
+    if building_id:
+        record_saved_utterance(
+            getattr(persona, "persona_id", None), str(message_id), building_id,
+        )
+    if event_callback is None:
+        return
+    event: Dict[str, Any] = {
+        "type": SPEAK_PERSISTED_EVENT_TYPE,
+        "message_id": str(message_id),
+        "persona_id": getattr(persona, "persona_id", None),
+        "pulse_id": pulse_id,
+    }
+    if building_id:
+        event["building_id"] = str(building_id)
     try:
-        event_callback({
-            "type": SPEAK_PERSISTED_EVENT_TYPE,
-            "message_id": str(message_id),
-            "persona_id": getattr(persona, "persona_id", None),
-            "pulse_id": pulse_id,
-        })
+        event_callback(event)
     except Exception:
         LOGGER.warning(
             "notify_speak_persisted: could not deliver the persistence signal "
@@ -176,7 +333,10 @@ class RuntimeEmitters:
                 LOGGER.exception("Failed to emit speak message")
         # 保存完了イベント: 建物の行に本文が入った回だけ流れる (判定は
         # notify_speak_persisted に一本化。message_id 無し = insert 失敗)。
-        notify_speak_persisted(event_callback, building_msg, persona, pulse_id)
+        notify_speak_persisted(
+            event_callback, building_msg, persona, pulse_id,
+            building_id=building_id,
+        )
         # アドオン向けサーバー側 hook (persona_speak イベント) を発火する。
         # ThreadPoolExecutor で隔離実行されるため本関数は即座に return する。
         # See docs/intent/addon_speak_hooks.md.
@@ -298,7 +458,10 @@ class RuntimeEmitters:
             LOGGER.exception("Failed to emit say message")
         # 保存完了イベント: 建物の行に本文が入った回だけ流れる (判定は
         # notify_speak_persisted に一本化。message_id 無し = insert 失敗)。
-        notify_speak_persisted(event_callback, building_msg, persona, pulse_id)
+        notify_speak_persisted(
+            event_callback, building_msg, persona, pulse_id,
+            building_id=building_id,
+        )
         # アドオン向けサーバー側 hook (persona_speak イベント) を発火する。
         # emit_speak と同一イベントに統合し、source="say" で区別する。
         # See docs/intent/addon_speak_hooks.md.
@@ -408,7 +571,7 @@ class RuntimeEmitters:
         音声 (voice-tts) のストリームはここでは閉じない — ストリームが開くのは
         最初の sub-speak が飛んだ瞬間で、本文が一つも無い回はそこへ到達して
         いない。呼び出し元は「部分文があるか」で確定と取り下げを分ける
-        (部分文がある回は確定側 = ``_settle_interrupted_utterance``)。
+        (部分文がある回は確定側 = sea/runtime_llm.py の ``_save_cut_utterance``)。
 
         Returns: 取り下げられたか。誰かが既に記憶へ転記していた行は消さない。
         """

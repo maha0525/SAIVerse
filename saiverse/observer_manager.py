@@ -19,7 +19,16 @@ from sqlalchemy import case, desc, func
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from database.models import Fixture, ObserverConfig, ObserverMetric
+from database.models import (
+    Building,
+    FeedFixtureConfig,
+    FeedItem,
+    FeedReadCursor,
+    FeedSubscription,
+    Fixture,
+    ObserverConfig,
+    ObserverMetric,
+)
 
 if TYPE_CHECKING:
     from saiverse.saiverse_manager import SAIVerseManager
@@ -49,6 +58,115 @@ STATE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 # STATE_JSON は metric 名がトップレベルにある既存契約で、名前空間を分ける
 # 変更は表示系全体の migration になるため、予約ガードで衝突だけを塞ぐ。
 RESERVED_STATE_KEYS = frozenset({"feed_stand"})
+
+#: Fixture 列の DB 宣言長 (database/models.py の Fixture.NAME / DESCRIPTION)。
+#: 名前・説明文の更新 (update_fixture_meta) はこれを超える値を拒否する。
+FIXTURE_NAME_MAX_CHARS = 255
+FIXTURE_DESCRIPTION_MAX_CHARS = 2048
+
+
+def city_fixture_ids(db: Session, city_id: int):
+    """City 所有権境界の共通述語 (設置物の全種別): 現 City の Building に
+    属する Fixture の FIXTURE_ID を返す subquery。
+
+    フィード施設に限った同形の述語が feed_manager.city_feed_fixture_ids に
+    ある (そちらは TYPE="feed_stand" でも絞る)。設置物の変更・削除
+    (update_fixture_meta / delete_fixture) は種別を問わないのでこちらを使う。
+    使い方は ``.filter(Fixture.FIXTURE_ID.in_(city_fixture_ids(db, city_id)))``。
+    条件は UPDATE / DELETE 文自身に載せる — 事前確認の SELECT を認可根拠に
+    しない理由は feed_manager.remove_subscription の docstring 参照。
+    """
+    return (
+        db.query(Fixture.FIXTURE_ID)
+        .join(Building, Fixture.BUILDING_ID == Building.BUILDINGID)
+        .filter(Building.CITYID == city_id)
+    )
+
+
+def delete_fixture_dependent_rows(db: Session, fixture_id: str) -> List[str]:
+    """設置物 1 つにぶら下がる行を、渡されたセッションの中で消す (設置物の行自体は消さない)。
+
+    道連れの対象 (fixture.FIXTURE_ID を参照する全テーブル):
+    - observer_config (同じ FIXTURE_ID) と、その子の observer_metrics
+      (OBSERVER_ID で紐づく)
+    - feed_subscription (同じ FIXTURE_ID) と、その子の feed_item /
+      feed_read_cursor (SUBSCRIPTION_ID で紐づく)
+    - feed_fixture_config (同じ FIXTURE_ID)
+
+    commit はしない (呼び出し側の transaction に載る)。所有権の確認もしない —
+    どの設置物を消してよいかは呼び出し側が決める (ObserverManager.delete_fixture
+    は City 境界の条件付き DELETE、建物の削除は消す建物に属する設置物)。
+
+    Returns: 消した観測設定の OBSERVER_ID の一覧。呼び出し側は commit の後に
+    EventScheduler の ``observer:<id>`` を取り消す (:func:`cancel_observer_jobs`)。
+    """
+    observer_ids = [
+        row[0]
+        for row in db.query(ObserverConfig.OBSERVER_ID)
+        .filter(ObserverConfig.FIXTURE_ID == fixture_id)
+        .all()
+    ]
+    if observer_ids:
+        db.query(ObserverMetric).filter(
+            ObserverMetric.OBSERVER_ID.in_(observer_ids)
+        ).delete(synchronize_session=False)
+    db.query(ObserverConfig).filter(
+        ObserverConfig.FIXTURE_ID == fixture_id
+    ).delete(synchronize_session=False)
+
+    def subscription_ids():
+        return db.query(FeedSubscription.SUBSCRIPTION_ID).filter(
+            FeedSubscription.FIXTURE_ID == fixture_id
+        )
+
+    # 購読の子 (記事・既読カーソル) を、購読本体より先に消す
+    # (子の特定に購読行を使うため)
+    db.query(FeedItem).filter(
+        FeedItem.SUBSCRIPTION_ID.in_(subscription_ids())
+    ).delete(synchronize_session=False)
+    db.query(FeedReadCursor).filter(
+        FeedReadCursor.SUBSCRIPTION_ID.in_(subscription_ids())
+    ).delete(synchronize_session=False)
+    db.query(FeedSubscription).filter(
+        FeedSubscription.FIXTURE_ID == fixture_id
+    ).delete(synchronize_session=False)
+    db.query(FeedFixtureConfig).filter(
+        FeedFixtureConfig.FIXTURE_ID == fixture_id
+    ).delete(synchronize_session=False)
+    return observer_ids
+
+
+def delete_fixture_rows(db: Session, fixture_ids: List[str]) -> List[str]:
+    """設置物の行と、それぞれにぶら下がる行を、渡されたセッションの中で消す。
+
+    所有権の確認はしない (呼び出し側が消してよい設置物だけを渡す)。commit も
+    しない。建物の削除 (manager/admin.py) と、起動時の残骸の片付け
+    (saiverse/building_leftover_cleanup.py) が使う。
+
+    Returns: 消した観測設定の OBSERVER_ID の一覧 (commit の後に
+    :func:`cancel_observer_jobs` へ渡す)。
+    """
+    observer_ids: List[str] = []
+    for fixture_id in fixture_ids:
+        observer_ids.extend(delete_fixture_dependent_rows(db, fixture_id))
+        db.query(Fixture).filter(Fixture.FIXTURE_ID == fixture_id).delete(
+            synchronize_session=False
+        )
+    return observer_ids
+
+
+def cancel_observer_jobs(manager: Any, observer_ids: List[str]) -> None:
+    """消した観測設定の定期実行 (EventScheduler の ``observer:<id>``) を取り消す。
+
+    commit の後に呼ぶ。取り消し前に一度発火しても、_execute_pull は設定行が
+    無ければ何もしない。予約されていない ID (push 型など) の取り消しは何もしない。
+    event_scheduler を持たない manager (テストなど) では何もしない。
+    """
+    scheduler = getattr(manager, "event_scheduler", None)
+    if scheduler is None:
+        return
+    for observer_id in observer_ids:
+        scheduler.cancel(f"observer:{observer_id}")
 
 
 #: 一時的なロック/スナップショット競合と判定する SQLite エラーメッセージ片。
@@ -275,6 +393,129 @@ class ObserverManager:
         finally:
             db.close()
 
+    def update_fixture_meta(
+        self,
+        fixture_id: str,
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Optional[Fixture]:
+        """設置物の名前・説明文を更新する (None の欄は変更しない)。
+
+        STATE_JSON には触れない — 複数の書き手がキー単位の json_set で共存
+        する列で、ここで丸ごと書くと他の書き手のキーを古い値で潰す
+        (create_fixture の docstring 参照)。UPDATE 文は NAME / DESCRIPTION
+        だけを SET する。
+
+        City 所有権境界 (現 City の Building に属する設置物) の条件は UPDATE
+        文自身が運ぶ。別 City の設置物は「該当なし」として None を返す。
+
+        検証: name は前後の空白を除いて空でなく、FIXTURE_NAME_MAX_CHARS 以下
+        (保存するのは空白を除いた形)。description は
+        FIXTURE_DESCRIPTION_MAX_CHARS 以下で、空は許す。違反と「変更する欄が
+        一つも無い」は ValueError (API 層は 422 に写像)。
+
+        Returns: 更新後の Fixture (detached)。該当が無ければ None。
+        """
+        values: Dict[Any, Any] = {}
+        if name is not None:
+            stripped = name.strip()
+            if not stripped:
+                raise ValueError("名前は空にできません。")
+            if len(stripped) > FIXTURE_NAME_MAX_CHARS:
+                raise ValueError(
+                    f"名前は {FIXTURE_NAME_MAX_CHARS} 文字以内で指定してください。"
+                )
+            values[Fixture.NAME] = stripped
+        if description is not None:
+            if len(description) > FIXTURE_DESCRIPTION_MAX_CHARS:
+                raise ValueError(
+                    f"説明は {FIXTURE_DESCRIPTION_MAX_CHARS} 文字以内で"
+                    "指定してください。"
+                )
+            values[Fixture.DESCRIPTION] = description
+        if not values:
+            raise ValueError("変更する項目がありません。")
+
+        db: Session = self.manager.SessionLocal()
+        try:
+            updated = (
+                db.query(Fixture)
+                .filter(
+                    Fixture.FIXTURE_ID == fixture_id,
+                    Fixture.FIXTURE_ID.in_(
+                        city_fixture_ids(db, self.manager.city_id)
+                    ),
+                )
+                .update(values, synchronize_session=False)
+            )
+            if not updated:
+                db.rollback()
+                return None
+            db.commit()
+            LOGGER.info(
+                "[observer] fixture meta updated: %s (%s)",
+                fixture_id, ", ".join(col.key for col in values),
+            )
+            return (
+                db.query(Fixture)
+                .filter(Fixture.FIXTURE_ID == fixture_id)
+                .first()
+            )
+        finally:
+            db.close()
+
+    def delete_fixture(self, fixture_id: str) -> bool:
+        """設置物を削除する。その設置物に属する行もすべて道連れにする。
+
+        道連れの対象と消し方は :func:`delete_fixture_dependent_rows` (建物の
+        削除と共有する一つの実装)。
+
+        City 所有権境界の条件は本体 (fixture 行) の DELETE 文自身が運ぶ。
+        道連れは本体の DELETE が行を消せた場合だけ、同一 transaction 内で
+        行う — 先に子を消すと、本体が 0 行 (別 City / 不在) だったとき所有して
+        いない設置物の子だけが消える (feed_manager.remove_subscription と
+        同じ順序の理由)。本体を子より先に消しても、この DB は
+        PRAGMA foreign_keys を有効にしていない (database/session.py /
+        manager/initialization.py) ので同一 transaction 内の順序で失敗しない。
+
+        pull 型 observer の定期実行 (EventScheduler の ``observer:<id>``) は
+        commit 後に取り消す。取り消し前に一度発火しても、_execute_pull は
+        設定行が無ければ何もしない。
+
+        Returns: 削除したら True、該当が無ければ (別 City を含む) False。
+        """
+        db: Session = self.manager.SessionLocal()
+        try:
+            deleted = (
+                db.query(Fixture)
+                .filter(
+                    Fixture.FIXTURE_ID == fixture_id,
+                    Fixture.FIXTURE_ID.in_(
+                        city_fixture_ids(db, self.manager.city_id)
+                    ),
+                )
+                .delete(synchronize_session=False)
+            )
+            if not deleted:
+                db.rollback()
+                return False
+
+            observer_ids = delete_fixture_dependent_rows(db, fixture_id)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+        cancel_observer_jobs(self.manager, observer_ids)
+        LOGGER.info(
+            "[observer] fixture deleted: %s (observers=%d)",
+            fixture_id, len(observer_ids),
+        )
+        return True
+
     # ------------------------------------------------------------------
     # Observer CRUD
     # ------------------------------------------------------------------
@@ -432,7 +673,7 @@ class ObserverManager:
                     db.add(metric)
                     recorded_batch.append(metric)
 
-                update_fixture_state_keys(
+                cached = update_fixture_state_keys(
                     db, (Fixture.FIXTURE_ID == fixture_id,),
                     {
                         metric_name: {
@@ -444,6 +685,21 @@ class ObserverManager:
                     },
                     context=f"record_metrics observer={observer_id}",
                 )
+                if not cached:
+                    # 設置物の行が無い = 設定確認の後に delete_fixture が
+                    # 設置物ごと消した (または元から親の無い設定)。履歴だけ
+                    # 書くと親の無い observer_metrics 行が残るので、この
+                    # transaction ごと捨てる。この UPDATE は書き込み
+                    # transaction の中で走るため、削除の commit と前後
+                    # どちらに並んでも判定が正しい (後なら削除側が道連れで
+                    # 消す)。
+                    db.rollback()
+                    LOGGER.warning(
+                        "[observer] record_metrics: fixture %s of observer %s "
+                        "no longer exists; metrics discarded",
+                        fixture_id, observer_id,
+                    )
+                    return None, []
 
                 db.commit()
                 return config, recorded_batch

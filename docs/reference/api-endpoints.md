@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 360（tag グループ: 26）
+**エンドポイント数**: 371（tag グループ: 26）
 
 ## addon
 
@@ -47,11 +47,19 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | メソッド | パス | 説明 |
 |---|---|---|
 | GET | `/api/addon-catalog/debug/registry-url` | 現在の registry URL と env 上書きの状態を返す。 |
-| POST | `/api/addon-catalog/install` | アドオンを registry 経由でインストール (SSE 進捗 stream)。 |
+| POST | `/api/addon-catalog/install/cancel` | 導入の prepare で作ったフォルダを消す。 |
+| POST | `/api/addon-catalog/install/confirm` | 導入の二段目: 答えで選んだ step を実行する (SSE 進捗 stream)。 |
+| POST | `/api/addon-catalog/install/prepare` | 導入の一段目: 取得して、質問と (この OS で当てはまる) step の一覧を返す。 |
 | GET | `/api/addon-catalog/installed` | expansion_data/ 配下にある全アドオンの現在状態を返す。 |
+| GET | `/api/addon-catalog/installed/{addon_id}/options` | 導入済みアドオンの質問 (保存済みの答えに selected: true) と、答えを足したときに |
+| POST | `/api/addon-catalog/installed/{addon_id}/options` | 選択肢を足して、新しく実行の条件を満たした step だけを実行する (SSE 進捗 stream)。 |
+| GET | `/api/addon-catalog/operations` | 実行中の操作 (install / update / options / uninstall) の一覧。 |
+| GET | `/api/addon-catalog/operations/{addon_id}` | アドオン 1 件の操作が実行中か、最後に終わった操作がどう終わったか。 |
 | GET | `/api/addon-catalog/registry` | registry.json を fetch (キャッシュ済み) して返す。 |
 | POST | `/api/addon-catalog/uninstall` | アドオンをアンインストール (SSE 進捗 stream)。 |
-| POST | `/api/addon-catalog/update` | インストール済みアドオンを registry 経由で更新 (SSE 進捗 stream)。 |
+| POST | `/api/addon-catalog/update/cancel` | 更新の prepare を取り消す (fetch しただけなので、記録を消すだけ)。 |
+| POST | `/api/addon-catalog/update/confirm` | 更新の二段目: checkout して、setup_version が上がっていれば setup をやり直す |
+| POST | `/api/addon-catalog/update/prepare` | 更新の一段目: カタログの repo_url から取得して、setup のやり直しの要否と、 |
 
 ## addon-events
 
@@ -133,6 +141,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | PUT | `/api/config/models/{key}` | Update a model. Builtin/expansion models get an automatic user_data copy. |
 | DELETE | `/api/config/models/{key}` | Delete a user_data model file. Builtin models are read-only. |
 | POST | `/api/config/models/{key}/clone` | Clone an existing model under a new key (always to user_data). |
+| GET | `/api/config/movement-notices` | Read presentation-only movement notice settings, including explicit room overrides. |
+| PUT | `/api/config/movement-notices` | Save the global display default without changing room overrides or stored history. |
 | POST | `/api/config/parameters` | Update global model parameter overrides. |
 | GET | `/api/config/playbook` | Get current playbook override and args. |
 | POST | `/api/config/playbook` | Set playbook override and args. |
@@ -155,8 +165,6 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 |---|---|---|
 | GET | `/api/db/tables` | List all available database tables and their schemas. |
 | GET | `/api/db/tables/{table_name}` | Get data from a specific table. |
-| POST | `/api/db/tables/{table_name}` | Insert or Update a row. |
-| DELETE | `/api/db/tables/{table_name}` | Delete a row by Primary Key(s). |
 
 ## feeds
 
@@ -164,7 +172,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 |---|---|---|
 | POST | `/api/feeds/fetch` | 全フィードの手動取得を起動する (完了は待たず 202 を返す)。 |
 | POST | `/api/feeds/fixtures` | フィード施設を作成する。プリセットから、または空の施設として。 |
-| GET | `/api/feeds/fixtures` | フィード施設の一覧 (購読と健康状態つき)。 |
+| GET | `/api/feeds/fixtures` | フィード施設の一覧 (購読と健康状態、配信設定つき)。 |
+| PATCH | `/api/feeds/fixtures/{fixture_id}/config` | スタンドの配信設定 (取得間隔 / 要約の長さ / 見出しの上限 / 1 回の |
 | GET | `/api/feeds/items` | フィード施設の取得済み記事一覧 (新しい順)。 |
 | GET | `/api/feeds/presets` | フィードプリセット (購読束 + 施設の見た目) の一覧。 |
 | POST | `/api/feeds/subscriptions` | 購読を追加する。 |
@@ -226,6 +235,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/observer/config` | Observer を作成 (upsert) する。 |
 | POST | `/api/observer/fixture` | Fixture を作成 (upsert) する。 |
 | GET | `/api/observer/fixture/{fixture_id}` | Fixture の情報を取得する。 |
+| PATCH | `/api/observer/fixture/{fixture_id}` | 設置物の名前・説明文を更新する (送った欄だけ)。 |
+| DELETE | `/api/observer/fixture/{fixture_id}` | 設置物を削除する (属する行もすべて道連れ)。 |
 | GET | `/api/observer/{observer_id}/history/{metric_name}` | Observer の指定メトリクスの履歴を取得する。 |
 | GET | `/api/observer/{observer_id}/latest` | Observer の最新メトリクス (STATE_JSON キャッシュ) を取得する。 |
 | POST | `/api/observer/{observer_id}/push` | 外部アプリから Observer にメトリクスを push する。 |
@@ -387,10 +398,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 |---|---|---|
 | GET | `/api/system/alerts` | Return system-level alerts populated during startup. |
 | GET | `/api/system/announcements` | Return announcements from the configured Gist. |
+| POST | `/api/system/channel` | Switch this install to the other release line, through the updater. |
 | POST | `/api/system/legacy-log/{building_id}/archive` | 読めなくなった旧形式の履歴ファイルを脇へ退避し、警告を閉じる。 |
-| GET | `/api/system/quarantine` | Return all buildings currently quarantined due to log corruption. |
-| POST | `/api/system/quarantine/{building_id}/reset` | Reset a quarantined building to empty history (fresh start). |
-| POST | `/api/system/quarantine/{building_id}/restore` | Restore a quarantined building from a chosen backup file. |
 | POST | `/api/system/update` | Trigger a self-update: spawn detached updater, then shutdown. |
 | GET | `/api/system/version` | Return current version and check for updates. |
 
@@ -459,7 +468,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/world/buildings` |  |
 | PUT | `/api/world/buildings/positions` | 街マップ編集モード用: 複数 Building の MAP_X/MAP_Y を一括更新する。 |
 | PUT | `/api/world/buildings/{building_id}` |  |
-| DELETE | `/api/world/buildings/{building_id}` |  |
+| DELETE | `/api/world/buildings/{building_id}` | 建物を消す。``items`` は中に直接置かれたアイテムの扱い。 |
+| GET | `/api/world/buildings/{building_id}/deletion-preview` | 建物を消したら何が一緒に消え、何が残るかの数 (削除の確認ダイアログ用)。 |
 | GET | `/api/world/buildings/{building_id}/realtime-spell` | Building に設定されたリアルタイムスペル一覧を取得する。 |
 | POST | `/api/world/buildings/{building_id}/realtime-spell` | Building にリアルタイムスペル binding を追加する。 |
 | DELETE | `/api/world/buildings/{building_id}/realtime-spell/{binding_id}` | Building のリアルタイムスペル binding を削除する。 |
@@ -472,7 +482,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/world/items` |  |
 | PUT | `/api/world/items/{item_id}` |  |
 | GET | `/api/world/items/{item_id}` | Get item details including owner information. |
-| DELETE | `/api/world/items/{item_id}` |  |
+| DELETE | `/api/world/items/{item_id}` | アイテムを消す。入れ物なら、直接の中身は入れ物があった場所へ出される。 |
+| DELETE | `/api/world/items/{item_id}/contents` | 入れ物の中身を、入れ子の中身まで含めてすべて消す (入れ物自身は残る)。 |
 | GET | `/api/world/playbooks` | List all playbooks. |
 | POST | `/api/world/playbooks` | Create a new playbook. |
 | POST | `/api/world/playbooks/import` | Import a playbook from JSON content. Creates new or updates existing based on name. |

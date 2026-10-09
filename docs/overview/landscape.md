@@ -78,7 +78,7 @@ SAIVerse を利用する人間（`User` テーブル、`CURRENT_CITYID` / `CURRE
 
 ### Building / City
 
-**Building** は会話・活動が生じる場（`Building` テーブル）であり、**ユーザーから見えるチャットUI そのもの**。ペルソナの発言（Beat の表示用、§4）もユーザーの発言も、すべて Building に積まれることで、そこに居る他者（他ペルソナ・ユーザー）に感知される——いわば**複数主体の共有メッセージ場（共有黒板）**である。各 occupant は Building の未読メッセージを自分の Session（短期記憶）に読み込む。これにより Building（公共の場）と Session（各自の私的な短期記憶）が対をなす。Building は所属 City、収容数（`CAPACITY`）、システムプロンプト（`SYSTEM_INSTRUCTION`）、自動 pulse 間隔（`AUTO_INTERVAL_SEC`）を持つ。
+**Building** は会話・活動が生じる場（`Building` テーブル）であり、**ユーザーから見えるチャットUI そのもの**。ペルソナの発言（Beat の表示用、§4）もユーザーの発言も、すべて Building に積まれることで、そこに居る他者（他ペルソナ・ユーザー）に感知される——いわば**複数主体の共有メッセージ場（共有黒板）**である。各 occupant は Building の未読メッセージを自分の Session（短期記憶）に読み込む。これにより Building（公共の場）と Session（各自の私的な短期記憶）が対をなす。Building は所属 City、収容数（`CAPACITY`）、システムプロンプト（`SYSTEM_INSTRUCTION`）を持つ。旧自動 pulse 間隔（`AUTO_INTERVAL_SEC`）は API・DB 互換のため残るが、現行の駆動には使わず、設定 UI にも出さない（§9）。
 
 **City** は User が運営する一つの「世界」（`City` テーブル）。複数の Building を束ね、UI / API を公開するポート（`UI_PORT` / `API_PORT`）を持つ。City・Persona の双方がバージョン認識機構（`LAST_KNOWN_VERSION`）を持ち、アップデート時の状態移行を追跡する。
 
@@ -165,7 +165,7 @@ PulseController は「起こされた Pulse を捌く」層だが、**いつ Pul
 
 **自由記述が要らない判断を、文章を組み立てるモデルではなく「状況と、基準付きの型付きの質問を渡すと、確率・選択・数値だけが返る」宛先に任せる層**（`saiverse/reflex_judgment.py`）。速く・安く・形が保証される代わりに文章は書けない。質問の型は 3 つ——はい/いいえの確率（noul）・選択肢と各確率（choice）・数値（score）。
 
-**答える側はモデルの役割「反射判断」への割り当てで決まる**（世界の既定は env `SAIVERSE_REFLEX_JUDGMENT_MODEL`、ペルソナ個別の上書きは DB 列 `AI.REFLEX_JUDGMENT_MODEL`）。答える側は 2 種類——**判断専用の宛先**（protocol `jev_compat`、組み込み限定。宛先の path・応答の欄の名前・対応する型は provider 設定の `reflex_judgment` 欄で宣言するので、TypeSafe 公式・OpenRouter・セルフホストのどれでも同じコードが話す）と、**手持ちの普通の LLM**（判断層が質問をプロンプトへ変換し、構造化出力で答えさせる。2026-09-20 の第 2 段から）。使用量と費用はどちらもモデル設定キー名義で普通のモデルと同じ記帳に載る。**役割が未割り当てのあいだは動かない**——黙って費用が発生する経路を作らないための約束。
+**答える側はモデルの役割「反射判断」への割り当てで決まる**（世界の既定は env `SAIVERSE_REFLEX_JUDGMENT_MODEL`、ペルソナ個別の上書きは DB 列 `AI.REFLEX_JUDGMENT_MODEL`）。答える側は 2 種類——**判断専用の宛先**（protocol `jev_compat`、組み込み限定。宛先の path・応答の欄の名前・対応する型は provider 設定の `reflex_judgment` 欄で宣言するので、TypeSafe 公式・OpenRouter・セルフホストのどれでも同じコードが話す。組み立て方そのものが違う OpenAI Decisions は、同じ欄の `request_shape` の宣言で、送る直前に変換して答えを読み戻す——2026-10-07 から）と、**手持ちの普通の LLM**（判断層が質問をプロンプトへ変換し、構造化出力で答えさせる。2026-09-20 の第 2 段から）。使用量と費用はどちらもモデル設定キー名義で普通のモデルと同じ記帳に載る。**役割が未割り当てのあいだは動かない**——黙って費用が発生する経路を作らないための約束。
 
 最初の利用者は自動想起の選別（§5、ペルソナ設定の「自動想起を強化する」が ON のときだけ）。使えなかったターンは WARNING 一行を出して、呼んだ機能がそれぞれのフォールバック（想起なら従来のしきい値方式）へ静かに戻る。→ [`reflex_judgment.md`](../intent/reflex_judgment.md)
 
@@ -427,6 +427,7 @@ graph TD
 | 概念 | 状態 |
 |---|---|
 | **Metabolism の強制クローズ** | 退場が手詰まりのとき最古の open episode を機構が閉じていた（旧 `chronicle_eviction.md` §5-5、`_force_close_episode`）。**2026-07-25 撤去** — U 未満の open も畳めるようになり手詰まりが消えた。そもそも「開きっぱなしの episode を閉じる」のは提示コンテキストの都合ではなく **episode 側がタイムアウトを検知して閉じる仕事**（まはー裁定）。場所が足りないという理由でペルソナの出来事に「終わった」と判定を下してはいけない。検知機構は未実装 |
+| **旧 Building ログの quarantine** | **撤去差分の PR レビュー待ち**（2026-10-02、[issue](../issues/quarantine_path_dead_code_removal.md)）。DB 化後、登録元の呼び手が無かった旧 log.json 隔離・復元・リセット API / UI と拒否分岐を撤去。旧ファイルの不足分を DB に取り込む検算と、読めないファイルを脇へ移す操作は現役のまま。既存ファイル・DB データはこの整理で変更しない |
 | **Blueprint** | `blueprint` テーブルは実在するが（ペルソナ生成テンプレート）、現状は運用されていない |
 | **Emotion** | PersonaCore の感情モジュールとして存在するが、実質未活用 |
 | **task (standalone tasks.db)** | per-persona `tasks.db` は統合 Task モデル（main DB `persona_task`）へ一本化され廃止。その `persona_task` 自体も目的の木として退役した（下記） |
@@ -441,7 +442,7 @@ graph TD
 | **note_extractor** | `note_extractor.py` は本番 Metabolism 経路から呼ばれない。現行は `entity_extractor`（移行の名残） |
 | **ActionHandler（`::act ... ::end`）／action priority** | pre-SEA 期の「LLM 出力に埋め込んだ JSON ブロックで move / think / emotion_shift を起こす」機構。2026-06-06 `f915bf2` で呼び出し側（旧 `PersonaCore._generate` 系）が消え、以後クラスは誰からも import されない完全 dead code だった。**2026-07-23 に撤去完了**（`saiverse/action_handler.py`・`builtin_data/action_priority.json` をファイルごと削除、`persona/bootstrap.py::load_action_priority`、PersonaCore の `action_priority_path` と callback 4本（move/dispatch/explore/create_persona）、構築3箇所の注入も同時削除）。後継は Playbook の TOOL ノードと Spell |
 | **旧 city exploration（`explore_city`）** | 上記 `::act` の `explore_city` アクション専用の入口を失った経路。他都市の `/inter-city/buildings` を GET して建物一覧を host メッセージで流し込む実装で、multi-city 凍結（2026-07-16）以前から呼び出し元ゼロ。**2026-07-23 に撤去完了**（`RuntimeService.explore_city`・`SAIVerseManager._explore_city`・`AdminService` の alias） |
-| **ConversationManager** | 旧自律会話駆動プロトタイプ。2026-05-01 の認知モデル移行で no-op 化（SubLineScheduler + track_autonomous に置換——その両者も 2026-07-06 に死亡、下記）。UI の「自律会話モード」トグルと `/api/config/global-auto`・`global_auto_enabled` 旗は 2026-09-01 に撤去済み（読む者ゼロの亡霊だった）。クラス削除は別タスク |
+| **ConversationManager** | 旧自律会話駆動プロトタイプ。2026-05-01 の認知モデル移行で no-op 化（SubLineScheduler + track_autonomous に置換——その両者も 2026-07-06 に死亡、下記）。UI の「自律会話モード」トグルと `/api/config/global-auto`・`global_auto_enabled` 旗は 2026-09-01 に撤去済み（読む者ゼロの亡霊だった）。Building の旧自動インターバル入力も撤去（[issue](../issues/building_auto_interval_setting_removal.md)）。`AUTO_INTERVAL_SEC` と更新 API の `auto_interval` は互換保持し、他項目の保存時は既存値をそのまま送る。クラス・DB 列の削除は別タスク |
 | **SubLineScheduler** | v1 自律駆動（track_autonomous への 30 秒連続 Pulse）。自律行動 v2 活性化（2026-07-06）で**モジュールごと削除**（`saiverse/pulse_scheduler.py`）。後継は時間割＋判断点（`saiverse/autonomy_wiring.py`、intent: `autonomous_behavior_v2.md` / `persona_cognition/life_concept_map.md`） |
 | **track_autonomous / meta_autonomy_decision playbook** | v1 自律 Pulse の中身と能力選択。**退役完了**（2026-07-11 P2c-3: public JSON 削除・DB prune・`SELECTED_META_PLAYBOOK`/`PersonaSchedule` の巻き取り＝upgrade handler v0.3.0.dev4）。autonomy_creation / autonomy_web_research は archive、autonomy_memory_organization / fragment_organize は P4 編纂へ転生予定で archive |
 | **max_consecutive_pulses** | 連続 Pulse 上限の概念。駆動源ごと廃止（セッション予算に置換） |
@@ -472,7 +473,7 @@ graph TD
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
 | **BuildingToolLink** | `BuildingToolLink` テーブルは実在するが数ヶ月触られておらず未使用。ツールがペルソナに届く経路は Spell（`spell=True`）と Playbook の TOOL ノードで、この紐付けテーブルではない（→ `stackchan_vessel.md` v0.5 でも「機能してない可能性」と記録） |
 | **Unity Gateway（`unity_gateway/`）と Unity 向けの身体制御ツール `control_body`** | **撤去**（2026-09-11、[issue](../issues/archive/unity_gateway_removal.md)）。Unity で作った 3D クライアントとつなぐ WebSocket サーバーで、SAIVerse を起動すると既定でポート 8765 が全ネットワークインターフェースに向けて認証なしで開いていた。繋いだ相手には全ペルソナの発言が `<in_heart>` の中身ごと送られ、ペルソナのプロンプトへ好きな「空間情報」を差し込めた。チャット送信のメッセージを受けた処理は存在しないメソッドを呼んでエラーになっており、残っていた本番ログの 129 セッションに接続は一度も無かった。Unity は [仮想身体 Godot](../intent/virtual_embodiment_godot.md) の計画から既に外れていた。サーバー、発言を送る処理、リアルタイム情報の空間情報、`control_body` ツールと会話の playbook 4 本の該当ノード、`body_control.txt` を削除した。3D の仮想身体の計画は Godot vessel アドオンで進めているが、削除した機能をそのまま引き継ぐものではない。旧設計書は [docs/old/unity-gateway.md](../old/unity-gateway.md) |
-| **旧 Gradio 画面の残骸（`database/db_manager.py` / `tools/utilities/memory_settings_ui.py`）** | **ファイルごと削除**（2026-09-15）。Next.js のフロントに移る前に使っていた Gradio 製の管理画面 2 枚で、片方は DB のテーブルを直接編集する画面、もう片方は記憶の設定画面（スレッド一覧・メッセージの編集と削除・チャットログの取り込み）だった。gradio は 2026-01-30（コミット `267a4e4f`）に本体の依存から外れ `requirements.lock` にも入っていないので、**gradio を別途持っていない環境ではこの 2 つを import した時点で落ちる**状態で残っていた。呼び出し元は Python の import にも動的 import にも起動スクリプトにも設定にも無い（ツールの自動探索が見るのは `~/.saiverse/user_data/<project>/tools/` と `builtin_data/tools/` だけで、`tools/utilities/` は探索対象ですらない。legacy `Tool` テーブルの `MODULE_PATH` 経由の動的 import も、`builtin_data/seed_data.json` の `default_tools` が空なので行が作られない）。後継は、DB 側が `/api/db/tables/*` ＋ World Editor、記憶側が記憶設定タブ（`api/routes/people/`）。**`api/routes/db_manager.py` は同名だが現役**（FastAPI ルート、`tests/test_db_manager_api.py` がテストしている）なので混同しないこと。接続リーク issue が数えていた 3 箇所のうち 1 つ（`_get_arasuji_connection`）はこれで消滅した（[issue](../issues/memory_db_connection_leak_on_init_failure.md)）。同じ便で、`start_dev.sh` の「Gradio at /gradio」と `api/routes/info.py` の `/gradio_api/file=` を前提にしたコメントも現況へ直した |
+| **旧 Gradio 画面の残骸（`database/db_manager.py` / `tools/utilities/memory_settings_ui.py`）** | **ファイルごと削除**（2026-09-15）。Next.js のフロントに移る前に使っていた Gradio 製の管理画面 2 枚で、片方は DB のテーブルを直接編集する画面、もう片方は記憶の設定画面（スレッド一覧・メッセージの編集と削除・チャットログの取り込み）だった。gradio は 2026-01-30（コミット `267a4e4f`）に本体の依存から外れ `requirements.lock` にも入っていないので、**gradio を別途持っていない環境ではこの 2 つを import した時点で落ちる**状態で残っていた。呼び出し元は Python の import にも動的 import にも起動スクリプトにも設定にも無い（ツールの自動探索が見るのは `~/.saiverse/user_data/<project>/tools/` と `builtin_data/tools/` だけで、`tools/utilities/` は探索対象ですらない。legacy `Tool` テーブルの `MODULE_PATH` 経由の動的 import も、`builtin_data/seed_data.json` の `default_tools` が空なので行が作られない）。後継は、DB 側が `/api/db/tables/*` ＋ World Editor、記憶側が記憶設定タブ（`api/routes/people/`）。**`api/routes/db_manager.py` は同名だが現役**（FastAPI ルート、`tests/test_db_manager_api.py` がテストしている）なので混同しないこと。接続リーク issue が数えていた 3 箇所のうち 1 つ（`_get_arasuji_connection`）はこれで消滅した（[issue](../issues/archive/memory_db_connection_leak_on_init_failure.md)）。同じ便で、`start_dev.sh` の「Gradio at /gradio」と `api/routes/info.py` の `/gradio_api/file=` を前提にしたコメントも現況へ直した |
 
 ---
 

@@ -446,34 +446,50 @@ def test_render_head_messages_targets_supplied_model_session():
 def test_inject_diff_notifications_uses_supplied_model_session():
     """inject_diff_notifications(model_key=...) の diff 既読が供給 model の
     Session に紐づくこと。"""
+    from saiverse.execution_ledger import ExecutionLedger
+    from saiverse.execution_ledger_wiring import TARGET_PERCEPTION_PUSH
     from sea.head_pipeline.integration import inject_diff_notifications
 
     registry = _registry()
     pipeline = HeadPipeline(registry=registry)
     section = registry.by_name("spell_list")
 
-    pushed: List[Any] = []
-    sai_memory = SimpleNamespace(
-        is_ready=lambda: True,
-        push_perception=lambda kind, label, **kw: pushed.append((kind, label)),
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
     )
+    Base.metadata.create_all(engine)
+    ledger = ExecutionLedger(session_factory=sessionmaker(bind=engine))
+    delivered: List[Any] = []
+    ledger.register_outbox_handler(
+        TARGET_PERCEPTION_PUSH,
+        lambda item: delivered.append(
+            (item["payload"]["kind"], item["payload"]["content"]),
+        ),
+    )
+    manager = SimpleNamespace(execution_ledger=ledger, sea_runtime=None)
     persona = SimpleNamespace(
-        persona_id=PERSONA_ID, model=MODEL_A, sai_memory=sai_memory,
-        history_manager=None,
+        persona_id=PERSONA_ID, model=MODEL_A, history_manager=None,
     )
 
-    # 初回 = capture (B=A リセット) → 差分なし
-    assert inject_diff_notifications(
-        persona, None, "b_lobby", pipeline=pipeline, model_key=MODEL_B,
-    ) is False
-    assert pipeline.has_snapshot(PERSONA_ID, MODEL_B)
+    try:
+        # 初回 = capture (B=A リセット) → 差分なし
+        assert inject_diff_notifications(
+            persona, manager, "b_lobby", pipeline=pipeline, model_key=MODEL_B,
+            detect_room=False,
+        ) is False
+        assert pipeline.has_snapshot(PERSONA_ID, MODEL_B)
 
-    # live 変化後は MODEL_B の Session として通知が出る
-    section.live_spells = ("spell_a", "spell_new")
-    assert inject_diff_notifications(
-        persona, None, "b_lobby", pipeline=pipeline, model_key=MODEL_B,
-    ) is True
-    assert pushed and pushed[0][0] == "world_state"
+        # live 変化後は MODEL_B の Session として通知が出る
+        section.live_spells = ("spell_a", "spell_new")
+        assert inject_diff_notifications(
+            persona, manager, "b_lobby", pipeline=pipeline, model_key=MODEL_B,
+            detect_room=False,
+        ) is True
+        assert delivered and delivered[0][0] == "world_state"
+    finally:
+        engine.dispose()
     # default model (MODEL_A) の Session には snapshot が作られていない
     assert not pipeline.has_snapshot(PERSONA_ID, MODEL_A)
 

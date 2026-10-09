@@ -1365,7 +1365,8 @@ class HeadCaptureFreshnessTest(PresentedReductionTestBase):
         registry = HeadSectionRegistry()
         registry.register(self.section)
         self.pipeline = HeadPipeline(registry=registry)
-        self.manager = SimpleNamespace(personas={})
+        # sea_runtime は本番 manager が無条件に持つ (未構築なら None)
+        self.manager = SimpleNamespace(personas={}, sea_runtime=None)
         self.lifecycle = SessionLifecycle(
             SimpleNamespace(run_cache_keepalive=lambda pid, mk=None: None),
             self.manager,

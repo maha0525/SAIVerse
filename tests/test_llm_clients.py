@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import os
 import json
+import pytest
 import httpx2  # anthropic 1.x / openai 3.x run on httpx2: their http_client, Timeout and exception Request/Response are httpx2 types
 from typing import List, Dict, Iterator
 from google.genai import types as genai_types
@@ -39,6 +40,18 @@ if not saiverse_tools.OPENAI_TOOLS_SPEC:
 if not saiverse_tools.GEMINI_TOOLS_SPEC:
     saiverse_tools.GEMINI_TOOLS_SPEC.append(genai_types.Tool(function_declarations=[]))
 
+@pytest.fixture
+def openrouter_test_network(mock_provider_network):
+    """Only the marked SDK-mocked or MockTransport header tests use this."""
+    mock_provider_network("openrouter.ai")
+
+
+@pytest.fixture
+def nim_factory_test_network(mock_provider_network):
+    """The marked factory test replaces the OpenAI SDK constructor."""
+    mock_provider_network("integrate.api.nvidia.com")
+
+
 class TestLLMClients(unittest.TestCase):
 
     def setUp(self):
@@ -74,6 +87,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(client.context_length, 1000)
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("nim_factory_test_network")
     def test_get_llm_client_custom_openai_base(self, mock_openai):
         os.environ['NVIDIA_API_KEY'] = 'test_nim_key'
         self.addCleanup(lambda: os.environ.pop('NVIDIA_API_KEY', None))
@@ -109,6 +123,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(kwargs["reasoning_passback_field"], "reasoning_details")
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_default_headers_reach_the_openai_sdk(self, mock_openai):
         """default_headers must land on the SDK client, not on request kwargs.
 
@@ -140,6 +155,7 @@ class TestLLMClients(unittest.TestCase):
         )
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_malformed_default_headers_do_not_break_the_call(self, mock_openai):
         """A broken header entry is dropped; the LLM call still goes through.
 
@@ -162,6 +178,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(kwargs["default_headers"], {"X-OpenRouter-Title": "SAIVerse"})
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_default_headers_of_wrong_type_are_ignored(self, mock_openai):
         self._set_env('OPENROUTER_API_KEY', 'test_or_key')
 
@@ -229,6 +246,7 @@ class TestLLMClients(unittest.TestCase):
         return captured[-1]
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_attribution_headers_reach_the_wire(self, mock_openai):
         self._set_env('OPENROUTER_API_KEY', 'test_or_key')
 
@@ -251,6 +269,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(sent.get("x-openrouter-categories"), "roleplay,general-chat")
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_default_headers_cannot_replace_the_credential(self, mock_openai):
         """A config file must not be able to swap the API key for another value.
 
@@ -284,6 +303,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(sent.get("http-referer"), "https://saiverse.net")
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_extra_headers_cannot_replace_the_credential(self, mock_openai):
         """The per-request door onto the credential passes the same gate.
 
@@ -312,6 +332,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(sent.get("x-trace"), "keep-me")
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_override_works_across_header_name_spellings(self, mock_openai):
         """Overriding must not depend on matching the shipped capitalisation.
 
@@ -336,6 +357,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertNotIn("saiverse.net", sent.get("http-referer", ""))
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_non_ascii_header_value_is_dropped_not_raised(self, mock_openai):
         """httpx encodes header values as ASCII, so a Japanese value would
         raise while building the request and stop the conversation — the exact
@@ -362,6 +384,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(sent.get("http-referer"), "https://saiverse.net")
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_header_shapes_h11_rejects_are_dropped(self, mock_openai):
         """Values that only fail on the way out still have to fail open.
 
@@ -399,6 +422,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(sent.get("http-referer"), "https://saiverse.net")
 
     @patch('llm_clients.openai.OpenAI')
+    @pytest.mark.usefixtures("openrouter_test_network")
     def test_extra_headers_of_wrong_shape_does_not_break_the_call(self, mock_openai):
         """A string where an object belongs must not reach the SDK.
 
@@ -1146,6 +1170,9 @@ class TestLLMClients(unittest.TestCase):
         ]
         cand1.index = 0
         mock_chunk1.candidates = [cand1]
+        # 実 SDK では、ブロックされていない chunk の prompt_feedback は None。
+        # MagicMock のままだと block_reason が「値あり」に見えてブロック扱いになる。
+        mock_chunk1.prompt_feedback = None
 
         mock_chunk2 = MagicMock()
         cand2 = MagicMock()
@@ -1154,6 +1181,7 @@ class TestLLMClients(unittest.TestCase):
         cand2.index = 0
         cand2.finish_reason = "STOP"
         mock_chunk2.candidates = [cand2]
+        mock_chunk2.prompt_feedback = None
 
         mock_start_stream.return_value = [mock_chunk1, mock_chunk2]
 
@@ -1166,6 +1194,40 @@ class TestLLMClients(unittest.TestCase):
         outputs = list(response_generator)
         mock_start_stream.assert_called_once()
         self.assertEqual(outputs, ["Stream test", "!"])
+
+    @patch('llm_clients.gemini.GeminiClient._start_stream')
+    @patch('llm_clients.gemini.genai')
+    def test_gemini_stream_prompt_block_raises_safety_filter(self, mock_genai, mock_start_stream):
+        """プロンプト段階のブロックは、ストリーム経路でも SafetyFilterError になる。
+
+        Gemini がプロンプトを拒むと、chunk は candidates=None で
+        prompt_feedback.block_reason=PROHIBITED_CONTENT だけを持つ (実機ログで確認)。
+        以前はこの chunk を candidates 無しとして読み飛ばし、空のストリームとして
+        理由なく終わっていた (2026-09-24)。
+        """
+        from types import SimpleNamespace
+        from llm_clients.exceptions import SafetyFilterError
+
+        mock_genai.Client.return_value = MagicMock()
+        block_chunk = SimpleNamespace(
+            candidates=None,
+            prompt_feedback=SimpleNamespace(block_reason="PROHIBITED_CONTENT"),
+            usage_metadata=SimpleNamespace(prompt_token_count=1234),
+        )
+        mock_start_stream.return_value = [block_chunk]
+
+        client = GeminiClient("gemini-1.5-flash")
+        with self.assertRaises(SafetyFilterError) as ctx:
+            list(client.generate_stream([{"role": "user", "content": "Hello"}], tools=[]))
+
+        event = ctx.exception.to_dict()
+        self.assertEqual(event["type"], "error")
+        self.assertEqual(event["error_code"], "safety_filter")
+        self.assertIn("PROHIBITED_CONTENT", event["technical_detail"])
+        self.assertIn("PROHIBITED_CONTENT", event["content"])
+        # 見出しは起きたことだけを書く。「入力内容を変更して」は勧めない —
+        # 発言は保存済みで、別モデルへ切り替えて「再送」する道がある。
+        self.assertNotIn("変更", event["content"])
 
     def test_anthropic_thinking_override(self):
         """Test manual thinking mode (legacy, for Sonnet 4.5 / Opus 4.5)."""

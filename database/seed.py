@@ -15,6 +15,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from models import Base, User, City, AI, Building, BuildingOccupancyLog, Blueprint, Tool, Playbook
+from saiverse.i18n_utils import split_i18n_columns
 
 try:  # pragma: no cover - supports running as script or module
     from .paths import default_db_path, ensure_data_dir
@@ -51,8 +52,15 @@ def import_initial_playbooks() -> None:
                     logging.info(f"Playbook '{name}' already exists, skipping.")
                     continue
 
-                description = data.get("description", "")
-                display_name = data.get("display_name")
+                # description / display_name may be a language dict ({ja, en});
+                # the DB columns are strings, so split into base + ``_en``.
+                description, description_en = split_i18n_columns(
+                    data.get("description"), alt_en=data.get("description_en"),
+                )
+                description = description or ""
+                display_name, display_name_en = split_i18n_columns(
+                    data.get("display_name"), alt_en=data.get("display_name_en"),
+                )
                 router_callable = data.get("router_callable", False)
                 user_selectable = data.get("user_selectable", False)
                 dev_only = data.get("dev_only", False)
@@ -68,7 +76,9 @@ def import_initial_playbooks() -> None:
                 record = Playbook(
                     name=name,
                     description=description,
+                    description_en=description_en,
                     display_name=display_name,
+                    display_name_en=display_name_en,
                     scope="public",
                     created_by_persona_id=None,
                     building_id=None,

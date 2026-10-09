@@ -175,6 +175,67 @@ class InitializationMixin:
             alerts = [unexpected_failure_alert(exc)]
         self.startup_alerts.extend(alerts)
 
+    def _cleanup_deleted_building_leftovers(self) -> None:
+        """Step 1a': 消えた建物を指したまま残っているアイテムの置き場所・設置物・
+        リアルタイムスペルを片付ける (saiverse/building_leftover_cleanup.py)。
+
+        部屋 ID の付け替え (_repair_unsafe_building_ids) の後に走らせる — 付け替えは
+        建物を指す行も新しい ID へ移すので、その前に走らせると付け替え待ちの行を
+        残骸と取り違える。アイテムと定期観測を読み込む前 (_init_buildings /
+        start_pull_observers) に済ませる。**起動は止めない。**
+        """
+        from saiverse.building_leftover_cleanup import cleanup_deleted_building_leftovers
+
+        try:
+            cleanup_deleted_building_leftovers(
+                session_factory=self.SessionLocal,
+                db_path=self.db_path,
+            )
+        except Exception:
+            LOGGER.error(
+                "[building-leftover-cleanup] 消えた建物の残骸の片付けが例外で止まりました"
+                " (起動は続けます。次の起動でもう一度試します)",
+                exc_info=True,
+            )
+
+    def _retire_deleted_building_ids(self) -> None:
+        """Step 1a'': 消した建物を指して残る会話などを特殊な ID へ付け替え、元の ID を空ける
+        (saiverse/building_retirement.py)。
+
+        建物の削除の場で済まなかった付け替え (ペルソナの記憶の印・フォルダ) の続きと、
+        この仕組みより前に消した建物の残骸の付け替えを行う。アイテム・設置物などの
+        片付け (_cleanup_deleted_building_leftovers) の後、部屋を読み込む前
+        (_init_buildings) に走らせる — ペルソナの記憶のファイルを開く前に済ませる。
+        **起動は止めない。** 済まなかったものは startup_alerts に載せる。
+        """
+        from saiverse.building_retirement import retire_deleted_buildings
+        from saiverse.data_paths import get_saiverse_home
+
+        try:
+            alerts = retire_deleted_buildings(
+                session_factory=self.SessionLocal,
+                db_path=self.db_path,
+                saiverse_home=get_saiverse_home(),
+                city_slug=self.city_name,
+            )
+        except Exception as exc:
+            LOGGER.error(
+                "[building-retirement] 消した建物の ID の付け替えが例外で止まりました"
+                " (起動は続けます。次の起動でもう一度試します)",
+                exc_info=True,
+            )
+            alerts = [{
+                "id": "building_retirement_failed",
+                "level": "warning",
+                "title": "消した Building の記録の片付けに失敗しました",
+                "message": (
+                    "消した Building に残っている会話などを別の名前へ移す処理が、途中で"
+                    "止まりました。起動は続けています。次の起動でもう一度試します。"
+                ),
+                "details": {"error": f"{type(exc).__name__}: {exc}"},
+            }]
+        self.startup_alerts.extend(alerts)
+
     def _init_buildings(self) -> None:
         """Step 1b: Load Static Assets from DB."""
         self.regions: Dict[str, Region] = self._load_regions_from_db()
@@ -313,9 +374,11 @@ class InitializationMixin:
         取り込んだ過去ログは 0 未満の seq を持ち、通常の発言 (1 以上) より必ず
         前に並ぶ。既存の行は 1 つも動かないので、行を指している他の記録
         (ペルソナ個人の記憶に残る転記元の目印、AddonMessageMetadata) もずれない。
-        例外は部屋 ID の付け替え (_repair_unsafe_building_ids) だけで、message_id を
-        新しい部屋 ID の形に動かす — 参照している側 (アドオンのメタデータ、ペルソナの
-        記憶の転記元の目印) も同じ付け替えで書き換える。
+        例外は部屋 ID の付け替え (_repair_unsafe_building_ids) と、消した部屋の ID の
+        付け替え (建物の削除と _retire_deleted_building_ids) で、message_id を新しい
+        ID の形に動かす — 参照している側 (アドオンのメタデータ、ペルソナの記憶の
+        転記元の目印) も同じ付け替えで書き換える。消した部屋の付け替え先 (deleted_…)
+        は建物にならないので、この確認の対象にはならない。
 
         直せなかったものだけ startup_alerts (UI バナー) に載せる。2026-08-16 の
         テスタロッサの部屋 (隔離マーカー残置で移行がスキップされ、2 ヶ月半誰も
@@ -432,101 +495,6 @@ class InitializationMixin:
             LOGGER.info(
                 "[legacy-log] %s: 古い会話 %d 件を移しました", b_id, stats.messages_inserted,
             )
-
-    def _quarantine_building(
-        self,
-        b_id: str,
-        path: "Path",
-        timestamp: str,
-        *,
-        reason: str,
-        title_suffix: str,
-        message_extra: str,
-    ) -> None:
-        """Move corrupted/invalid file to a backup name and mark building as quarantined.
-
-        Quarantined buildings:
-          - have NO key in self.building_histories (so save skips them)
-          - are listed in self.quarantined_buildings (with restore options)
-          - block movement (handled in OccupancyManager)
-          - are surfaced via self.startup_alerts (banner)
-        """
-        from manager.history import list_log_backups
-
-        backup_path = path.parent / f"{path.name}.corrupted_{timestamp}"
-        rescue_error: Optional[str] = None
-        rescued = False
-        try:
-            path.rename(backup_path)
-            rescued = True
-            LOGGER.error(
-                "Building history for %s is %s; rescued to %s",
-                b_id, reason, backup_path,
-            )
-        except OSError as rename_exc:
-            rescue_error = str(rename_exc)
-            LOGGER.error(
-                "Failed to rescue %s log for %s: %s",
-                reason, b_id, rename_exc,
-            )
-
-        available_backups = [str(p) for p in list_log_backups(path)]
-
-        # 隔離レコード — UI から復旧操作する時のソースオブトゥルース
-        self.quarantined_buildings[b_id] = {
-            "building_id": b_id,
-            "reason": reason,
-            "original_path": str(path),
-            "corrupted_path": str(backup_path) if rescued else None,
-            "rescue_error": rescue_error,
-            "available_backups": available_backups,
-            "detected_at": timestamp,
-        }
-
-        # アラート
-        if rescued:
-            alert = {
-                "id": f"quarantine_{b_id}_{timestamp}",
-                "level": "critical",
-                "title": f"会話履歴ファイルが{title_suffix}: {b_id}",
-                "message": (
-                    f"ビルディング「{b_id}」のチャット履歴ファイルが異常状態でした。"
-                    f"{message_extra} 破損ファイルを安全な場所に退避し、このビルディングは"
-                    "**隔離状態**にしました。新規会話・入室は制限されています。"
-                    f"利用可能なバックアップが{len(available_backups)}個あります。"
-                    "アラート横の「対応する」ボタンから復元・リセット等を選択してください。"
-                ),
-                "details": {
-                    "building_id": b_id,
-                    "reason": reason,
-                    "original_path": str(path),
-                    "corrupted_path": str(backup_path),
-                    "available_backups": available_backups,
-                    "recovery_instructions": (
-                        "1) アラート横の「対応する」ボタンから復元方法を選ぶ、"
-                        "2) または手動で退避ファイルを log.json にリネームして再起動する"
-                    ),
-                },
-            }
-        else:
-            alert = {
-                "id": f"quarantine_rescue_failed_{b_id}_{timestamp}",
-                "level": "critical",
-                "title": f"会話履歴ファイル{title_suffix} + 退避失敗: {b_id}",
-                "message": (
-                    "ビルディングのチャット履歴ファイルが異常で、さらに退避にも失敗しました。"
-                    "**システムは自動上書きを停止しました**ので、安全な場所にファイルをコピーして"
-                    "から手動で対応してください。"
-                ),
-                "details": {
-                    "building_id": b_id,
-                    "reason": reason,
-                    "original_path": str(path),
-                    "rescue_error": rescue_error,
-                    "available_backups": available_backups,
-                },
-            }
-        self.startup_alerts.append(alert)
 
     def _init_model_config(self) -> None:
         """Step 4a: Initialize model configuration.

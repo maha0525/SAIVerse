@@ -270,6 +270,89 @@
     color: white;
 }
 
+.dangerBtn:disabled,
+.cancelBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* 建物の削除の確認 (保存・削除ボタンの行と入れ替わりに出る)。
+   見た目は ItemModal の入れ物の削除の選択 (.deleteChoice) に揃える。 */
+.deleteConfirm {
+    margin-top: 2rem;
+    padding: 1rem;
+    background: rgba(220, 38, 38, 0.08);
+    border: 1px solid #7f1d1d;
+    border-radius: 8px;
+}
+
+.deleteConfirmTitle {
+    margin: 0 0 0.5rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #f1f5f9;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.deleteConfirmText {
+    margin: 0.35rem 0 0;
+    font-size: 0.9rem;
+    color: #cbd5e1;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.deleteConfirmItems {
+    margin-top: 0.75rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid rgba(127, 29, 29, 0.6);
+}
+
+.deleteConfirmOption {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    font-size: 0.9rem;
+    color: #e2e8f0;
+    line-height: 1.5;
+    cursor: pointer;
+}
+
+.deleteConfirmOption input {
+    margin-top: 0.25rem;
+    flex: none;
+}
+
+.deleteConfirmActions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin-top: 1rem;
+}
+
+/* 取り返しのつかない方は左端に置く (ItemModal と同じ配置) */
+.deleteConfirmActions .dangerBtn {
+    margin-left: 0;
+}
+
+.cancelBtn {
+    background: transparent;
+    color: #cbd5e1;
+    border: 1px solid #475569;
+    padding: 0.75rem 1.5rem;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.cancelBtn:hover:not(:disabled) {
+    background: #334155;
+    color: #f1f5f9;
+}
+
 /* Mobile Responsive */
 @media (max-width: 768px) {
     .container {
@@ -463,4 +546,35 @@
 :global([data-theme="light"]) .dangerBtn:hover {
     background: #fee2e2;
     color: #b91c1c;
+}
+
+:global([data-theme="light"]) .deleteConfirm {
+    background: #fef2f2;
+    border-color: #fca5a5;
+}
+
+:global([data-theme="light"]) .deleteConfirmTitle {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .deleteConfirmText {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .deleteConfirmItems {
+    border-top-color: #fecaca;
+}
+
+:global([data-theme="light"]) .deleteConfirmOption {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .cancelBtn {
+    border-color: #cbd5e1;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .cancelBtn:hover:not(:disabled) {
+    background: #f1f5f9;
+    color: #1f2937;
 }

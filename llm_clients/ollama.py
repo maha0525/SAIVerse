@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import requests
 
-from .base import LLMClient
+from .base import LLMClient, ToolSpecFormat
 from .exceptions import EmptyResponseError
 from .utils import positive_token_count
 
@@ -115,6 +115,9 @@ class OllamaClient(LLMClient):
     # Class-level probe cache: avoids re-probing on every instance creation
     _probe_cache: Optional[str] = None
     _probe_done: bool = False
+
+    def tool_spec_format(self) -> ToolSpecFormat:
+        return "openai"
 
     def __init__(
         self,

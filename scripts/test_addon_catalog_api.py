@@ -1,6 +1,7 @@
 """Phase 2-E: addon catalog API の E2E 検証スクリプト。
 
-起動中の SAIVerse に対して uninstall → install を叩いて SSE 進捗を表示する。
+起動中の SAIVerse に対して uninstall → install (prepare → confirm) を叩いて
+SSE 進捗を表示する。導入時の質問には答えず、既定の選択肢で進む。
 registry.json はローカルの ``temp/saiverse-addon-registry/registry.json`` を
 指す環境変数を SAIVerse 起動時に渡しておく必要がある:
 
@@ -33,6 +34,18 @@ def _http_get(base: str, path: str) -> dict:
     url = urljoin(base, path)
     req = urllib.request.Request(url)
     with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _http_post_json(base: str, path: str, body: dict) -> dict:
+    url = urljoin(base, path)
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=600) as resp:  # noqa: S310
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -120,9 +133,19 @@ def run_test(base: str, addon_id: str, do_uninstall: bool, do_install: bool) -> 
         print(f"  (skip uninstall: {addon_id} is not installed)\n")
 
     if do_install:
-        print(f"--- POST /api/addon-catalog/install {addon_id} ---")
-        for ev in _http_post_sse(base, "/api/addon-catalog/install",
-                                  {"addon_id": addon_id}):
+        print(f"--- POST /api/addon-catalog/install/prepare {addon_id} ---")
+        prepared = _http_post_json(base, "/api/addon-catalog/install/prepare",
+                                   {"addon_id": addon_id})
+        print(f"  version={prepared['version']} setup_version={prepared['setup_version']}")
+        for q in prepared["questions"]:
+            print(f"  question {q['id']}: {[c['id'] for c in q['choices']]}")
+        for s in prepared["steps"]:
+            print(f"  step {s['name']} when={s['when']} env={s['env']}")
+        print()
+        # 答えは渡さない = 全質問を既定の選択肢で進む
+        print(f"--- POST /api/addon-catalog/install/confirm {addon_id} ---")
+        for ev in _http_post_sse(base, "/api/addon-catalog/install/confirm",
+                                  {"addon_id": addon_id, "answers": {}}):
             _print_event(ev)
         time.sleep(0.5)
         print()

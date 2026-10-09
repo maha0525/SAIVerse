@@ -31,6 +31,7 @@ from saiverse import clock
 from saiverse import day_plan
 from saiverse.day_simulator import DaySimulator
 from saiverse.event_scheduler import EventScheduler
+from saiverse.execution_ledger import ExecutionLedger
 from saiverse.persona_task_manager import PersonaTaskManager
 from tool_loader import load_builtin_tool
 
@@ -111,6 +112,9 @@ def manager(session_factory):
         personas=personas,
         occupancy_manager=StubOccupancy(personas),
         event_scheduler=EventScheduler(),  # start() しない (シム前提)
+        # 本番 manager は実行台帳を無条件に持つ (コマ発火の台帳なし縮退経路は
+        # 2026-09-26 監査で撤去)
+        execution_ledger=ExecutionLedger(session_factory),
         buildings=[
             SimpleNamespace(building_id="library", name="図書館"),
             SimpleNamespace(building_id="workshop", name="工房"),

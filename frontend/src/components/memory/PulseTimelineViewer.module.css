@@ -1,0 +1,41 @@
+/* Neutral surfaces follow the shared theme; accents reuse the memory UI palette. */
+.viewer {
+    --timeline-main: #15803d;
+    --timeline-sub: #2563eb;
+    --timeline-warning: #b45309;
+    --timeline-gap: #b45309;
+    --timeline-discardable: #dc2626;
+    --timeline-spell: #7c3aed;
+    color: var(--text-primary);
+    padding: 0.5rem;
+    height: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+:global([data-theme="dark"]) .viewer {
+    --timeline-main: #69db7c;
+    --timeline-sub: #74c0fc;
+    --timeline-warning: #ffd43b;
+    --timeline-gap: #e0a060;
+    --timeline-discardable: #ff8787;
+    --timeline-spell: #c4a7e7;
+}
+
+.content {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    overflow-x: hidden;
+}
+
+.viewer select {
+    max-width: 100%;
+    color-scheme: inherit;
+}
+
+.viewer option {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}

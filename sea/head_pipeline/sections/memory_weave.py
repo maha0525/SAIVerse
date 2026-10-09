@@ -89,7 +89,7 @@ class MemoryWeaveSection:
         #  同じ出来事が二度あったかのような時系列の錯覚をペルソナに招く)。
         folded_entry_ids: list[str] = []
         try:
-            sea_runtime = getattr(manager, "sea_runtime", None) or getattr(manager, "runtime", None)
+            sea_runtime = manager.sea_runtime
             lifecycle = getattr(sea_runtime, "session_lifecycle", None)
             load_entry = getattr(lifecycle, "load_anchor_entry", None)
             model_key = getattr(ctx, "model_key", None)

@@ -114,6 +114,11 @@
 }
 
 .card {
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
     background: #111827;
     border: 1px solid #374151;
     border-radius: 8px;
@@ -122,6 +127,11 @@
     gap: 0.75rem;
     align-items: flex-start;
     transition: all 0.2s;
+}
+
+.card:focus-visible {
+    outline: 2px solid #60a5fa;
+    outline-offset: 2px;
 }
 
 .card:hover {

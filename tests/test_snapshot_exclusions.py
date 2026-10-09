@@ -20,6 +20,8 @@ restore のアーカイブメンバー拒否）が同じ集合を見てしまい
 from __future__ import annotations
 
 import argparse
+import json
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -90,6 +92,24 @@ def test_world_state_stays_in_snapshot_payload(tmp_path: Path, monkeypatch) -> N
     }
 
 
+def test_addon_install_is_not_snapshot_payload(tmp_path: Path, monkeypatch) -> None:
+    """アドオン専用の Python 環境と導入時の答え (addon_install/) はアーカイブに入らない。
+
+    数 GB の環境が更新のたびに保存されないように。並びの addon_data/ (利用者の
+    データ) は入ったままであること。
+    """
+    home = tmp_path / "home"
+    _populate_world(home)
+    _write(home / "addon_install" / "voice-tts" / "envs" / "gpt_sovits" / "pyvenv.cfg", "venv")
+    _write(home / "addon_install" / "voice-tts" / "setup_answers.json", "{}")
+    monkeypatch.setenv("SAIVERSE_HOME", str(home))
+
+    names = {entry.archive_path for entry in snapshot.collect_files_to_snapshot()}
+
+    assert not [n for n in names if n.startswith("addon_install/")]
+    assert "user_data/addon_data/stackchan/avatar_sets/mira.png" in names
+
+
 # ---- restore 側 1: アーカイブメンバーの受け入れと拒否 ----
 
 def test_old_archives_with_llama_cache_still_restore() -> None:
@@ -147,14 +167,42 @@ def test_root_anchored_member_cannot_land_inside_the_stage(tmp_path: Path) -> No
     Windows の ``Path`` はドライブの無い ``/etc/passwd`` を ``is_absolute()`` で
     True にしないので ``_safe_archive_member`` は通す。stage に繋いだ結果が stage の
     外を指すことを ``validate_and_extract_snapshot`` の側が捕まえる、という二段構え。
-    その二段目をここで固定する。
+    POSIX では入口の一段目で拒否する。どちらでも stage 内へは展開しない。
     """
     stage = tmp_path / "stage"
     stage.mkdir()
 
-    rel = snapshot._safe_archive_member("/etc/passwd")
+    member = "/etc/passwd"
+    if Path(member).is_absolute():
+        with pytest.raises(ValueError, match="Unsafe snapshot member"):
+            snapshot._safe_archive_member(member)
+    else:
+        rel = snapshot._safe_archive_member(member)
+        assert not (stage / rel).resolve().is_relative_to(stage.resolve())
 
-    assert not (stage / rel).resolve().is_relative_to(stage.resolve())
+
+def test_extraction_rejects_an_escape_even_if_the_member_check_accepts_it(tmp_path: Path) -> None:
+    """OS に依らず二段目の包含検査を通し、書き込みより前に止まること。"""
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    outside = tmp_path / "outside.txt"
+    archive = tmp_path / "escape.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("snapshot.json", json.dumps({
+            "format_version": snapshot.SNAPSHOT_FORMAT_VERSION,
+            "files": {"rooted.txt": {}},
+            "file_count": 1,
+        }))
+        zf.writestr("rooted.txt", "must not be written")
+
+    # Windows の rooted path のように、一段目を通る入力を明示的に作る。
+    # 実際の Path.resolve / is_relative_to と ZIP 展開経路は差し替えない。
+    with patch.object(snapshot, "_safe_archive_member", return_value=outside) as member_check:
+        with pytest.raises(ValueError, match="Snapshot member escapes staging: rooted.txt"):
+            snapshot.validate_and_extract_snapshot(archive, stage)
+    member_check.assert_called_once_with("rooted.txt")
+    assert not outside.exists()
+    assert list(stage.iterdir()) == []
 
 
 # ---- restore 側 2: 入れ替え単位 ----

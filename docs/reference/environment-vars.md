@@ -4,6 +4,22 @@
 
 **「既定」の欄はコードが未設定時に使う値**（`.env.example` が同梱している値とは一致しないことがある。差がある行にはその旨を書いてある）。**読み手のいない変数はこの表に載せない** — 設定しても何も起きない変数を一覧に残すと、効かない設定を書いて原因を探す時間が生まれるため。⚠ `.env.example` 側には読み手を失ったキーがまだ残っている（2026-08-22 時点で `SAIVERSE_LLM_CONTEXT_DUMP` / `MEMORY_WEAVE_MAINTAIN_INTERVAL` など）ので、**「.env.example に書いてある＝効く」ではない**。効くかどうかの正はこの表とコードの `os.getenv`。
 
+## フロントエンドのバックエンド接続先
+
+この節の変数は **Next.js を起動するシェル**または **`frontend/.env.local`** に設定する。リポジトリルートの `.env` だけでは Next.js に渡らない。`npm run build` と `npm start` は同じ値で実行し、変更時は再ビルド・再起動する（通常 API の rewrite は build 時、Route Handler はサーバーで読み込むときに解決する）。`npm run dev` も設定変更後は再起動する。
+
+| 変数 | 既定 | 説明 |
+|---|---|---|
+| `SAIVERSE_BACKEND_ORIGIN` | 旧名の値、なければ `http://127.0.0.1:8000` | 通常 API の rewrite とアドオンの設定・SSE・音声ファイル、MCP の HTTP 中継先（音声通話の WebSocket は別）。隔離テストは `http://127.0.0.1:18000` を明示する |
+| `SAIVERSE_BACKEND_URL` | 未設定 | 非推奨の互換名。正式名が未設定・空文字・空白のみのときだけ使う |
+| `NEXT_PUBLIC_SAIVERSE_BACKEND_WS_HOST` | ブラウザのホスト名 + `:8000` | 音声通話の直接 WebSocket 接続先。中継を通らず ORIGIN/URL からも導出しない。隔離時は `127.0.0.1:18000` を明示する（スキーム・パスなし、ブラウザから到達できる `host:port`） |
+
+両名とも前後の空白を除いて判定し、両方が非空で異なる場合は正式名を採用してサーバーに警告する。警告に設定値は含めない。**両方が空なら通常環境の 8000 を向く**ので、名前の統一だけで隔離されるわけではない。
+
+音声通話用の公開ホストは build 時にブラウザ用コードへ埋め込まれる。未設定・空白では通常環境の 8000 を向くため、隔離時は HTTP 用と WebSocket 用を両方設定し、変更時は再ビルド・再起動する。音声通話は画面のプロトコルに従い HTTP なら `ws`、HTTPS なら `wss` を使う。
+
+HTTP 中継の設定値は `http://host:port` のような origin とし、末尾 `/`・パス・クエリ・フラグメントを含めない。URL の結合は従来どおり（rewrite は文字列連結、Route Handler はルート相対 URL）で、たとえば末尾 `/` を付けると rewrite は `//api`、パスを付けると rewrite にだけ接頭辞が残る。共通の base path は未対応で、今回も URL の正規化はしない。詳細: [intent](../intent/frontend_backend_origin.md)。
+
 ## LLM API キー / 接続
 
 | 変数 | 説明 |
@@ -42,7 +58,7 @@
 | `SAIVERSE_CHRONICLE_CHAR_BUDGET` | `20000` | weave の General Chronicle 読み込みの文字数予算。超過時は年表を粗いレベルへ畳んで全期間をカバーする（最古を落とさない）。**この 1/4 が束ねの発火閾値 X を兼ねる** ([chronicle_consolidation](../intent/chronicle_consolidation.md) §3 — 発火と提示を同じノブに連動させる)。記憶アーキv2 §6.2 |
 | `SAIVERSE_SLUICE_ENABLED` | `1` | スルース（Metabolism 時のコア記憶・手帳メモ・約束の採取。旧 gold_panning）の全体トグル。`0` で無効（defer-to-hot ごと従来挙動に戻る。無効時は採取なしで退場が進む）。intent `gold_panning.md`（旧名のまま）+ `autonomous_behavior_v3.md` §13 |
 | `SAIVERSE_SLUICE_PENDING_CAP` | `1.5` | defer-to-hot 圧力弁。ウィンドウが high watermark のこの倍率を超えたらキャッシュが冷たくても Metabolism を実行する |
-| `SAIVERSE_SLUICE_MAX_SPAN_CHARS` | `100000` | 一発のスルースの呼び出しに入れてよい担当範囲（パンマーカーから窓の末尾まで）の上限字数。超えていたらスルースを走らせず、退場はそのまま進め、窓から出る未見の範囲を memory.db の `sluice_skipped_spans` に記録する（後から通せる）。この値とは別に、スルースが実際に送る中身がそのモデルのコンテキスト長に入らないときも同じように飛ばす（後から通すジョブの刻みもモデルに入る量に合わせる — [issue](../issues/sluice_skip_ignores_model_context.md)）。[sluice_coverage_gaps](../intent/sluice_coverage_gaps.md) 第一段 A |
+| `SAIVERSE_SLUICE_MAX_SPAN_CHARS` | `100000` | 一発のスルースの呼び出しに入れてよい担当範囲（パンマーカーから窓の末尾まで）の上限字数。超えていたらスルースを走らせず、退場はそのまま進め、窓から出る未見の範囲を memory.db の `sluice_skipped_spans` に記録する（後から通せる）。この値とは別に、スルースが実際に送る中身がそのモデルのコンテキスト長に入らないときも同じように飛ばす（後から通すジョブの刻みもモデルに入る量に合わせる — [issue](../issues/archive/sluice_skip_ignores_model_context.md)）。[sluice_coverage_gaps](../intent/sluice_coverage_gaps.md) 第一段 A |
 | `SAIVERSE_METABOLISM_RATE_LIMIT_COOLDOWN_S` | `600` | Metabolism 系の LLM 呼び出し（スルース・編纂・束ね）がレート制限 (429) で失敗したあと、その persona の Metabolism を見送る秒数。[sluice_coverage_gaps](../intent/sluice_coverage_gaps.md) 第一段 C-1 |
 | （旧 `SAIVERSE_GOLD_PANNING_*`） | — | **非推奨**（2026-08-19 の sluice 改名で置換）。上 2 つと同名対応（`ENABLED` / `PENDING_CAP`）の旧キーは、新キー未設定のときだけフォールバックとして読まれ、使用時に WARNING が出る（旧 `ENABLED=0` の環境が更新後に黙って採取を再開しないための設定移行）。優先順は 新キー > 旧キー > 既定。`SAIVERSE_SLUICE_*` へ移行すること |
 | `SAIVERSE_MEDIA_RECALL_ENABLED` | `false` | 添付メディア（画像/音声/動画）の概要を自動想起の検索クエリに使うか。ON 時は添付があると概要生成を同期実行するため数秒待ちが発生する。UI（グローバル設定 > 環境）からも切替可 |
@@ -75,11 +91,11 @@
 
 | 変数 | 既定 | 説明 |
 |---|---|---|
-| `SAIVERSE_FEED_FETCH_INTERVAL_SEC` | `1800` | フィード定期取得の間隔（秒）。起動時にも一度取得する |
+| `SAIVERSE_FEED_FETCH_INTERVAL_SEC` | `10800` | フィードスタンドの既定の取得間隔（秒）。スタンドごとの設定（設置物モーダルの「配信の設定」）が無いスタンドに使う。取得ワーカーは固定の 600 秒刻みで起き、前回の取得の試み（成功・失敗とも）からこの間隔が経った購読だけを取得する（起動直後にも一度刻む）。600 未満は 600 に引き上げ（警告を出す）、上限は 604800（7 日）。手動取得（`POST /api/feeds/fetch`）は間隔に関わらず全購読を取得する |
 | `SAIVERSE_FEED_FETCH_TIMEOUT` | `15` | 取得 1 リクエストのタイムアウト（秒）。不正値は既定へ |
 | `SAIVERSE_FEED_CYCLE_BUDGET_SEC` | `300` | 取得サイクル全体（全購読の逐次取得）の壁時計予算（秒）。超過で残り購読の取得を打ち切る（取得済みぶんの表示更新・配送・剪定は実行）。0 以下で無制限 |
 | `SAIVERSE_FEED_MAX_BYTES` | `10485760` | フィード応答の最大サイズ（バイト）。超過は取得失敗 |
-| `SAIVERSE_FEED_MAX_ITEMS_PER_PUSH` | `3` | 1 回の配送でペルソナの知覚に積む新着記事数の上限。0 以下で配送無効 |
+| `SAIVERSE_FEED_MAX_ITEMS_PER_PUSH` | `3` | 1 回の配送で購読 1 本からペルソナの知覚に積む新着記事数の上限の既定。スタンドごとの設定があればそちらが優先。0 以下で配送無効 |
 | `SAIVERSE_FEED_MAX_PENDING` | `10` | ペルソナの知覚バッファに未消化のまま溜められるフィード記事数の上限。到達中は配送を見送る |
 | `SAIVERSE_FEED_ITEM_KEEP` | `200` | 購読ごとに保存する記事数の上限（古い側から剪定）。0 以下で剪定無効 |
 | `SAIVERSE_FEED_MAX_SUBSCRIPTIONS_PER_FIXTURE` | `10` | 施設 1 つが持てる購読数の上限 |

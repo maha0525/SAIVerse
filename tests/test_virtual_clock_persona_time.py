@@ -37,7 +37,9 @@ def _build_realtime_context(persona):
     from sea.runtime import SEARuntime
 
     fake_self = SimpleNamespace(
-        _is_realtime_info_enabled_for_persona=lambda p: True,
+        # (現在時刻, 前回発言) — 現在時刻の行だけを見るテストなので前回発言は OFF
+        _realtime_info_flags_for_persona=lambda p: (True, False),
+        _parse_history_timestamp=SEARuntime._parse_history_timestamp,
     )
     return SEARuntime._build_realtime_context(fake_self, persona, "b1", [])
 

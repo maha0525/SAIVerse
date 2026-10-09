@@ -215,7 +215,7 @@ class RegenerateSwapTest(unittest.TestCase):
             created_ids.append(e.id)
             return e
 
-        def _fail_reassign(conn, old_id, new_id):
+        def _fail_reassign(conn, old_id, new_id, **kwargs):
             raise RuntimeError("stamp repoint down")
 
         with patch(
@@ -248,10 +248,7 @@ class RegenerateSwapTest(unittest.TestCase):
             get_entry,
             regenerate_entry,
         )
-        from sai_memory.perception_buffer import (
-            list_batches_annexed_to,
-            reassign_batches_annexed as real_reassign,
-        )
+        from sai_memory.perception_buffer import list_batches_annexed_to
         conn = self.adapter.conn
         batch_a = self._annex_batch_to_old_entry(text="知覚 A", at=10)
         batch_b = self._annex_batch_to_old_entry(text="知覚 B", at=20)
@@ -265,22 +262,17 @@ class RegenerateSwapTest(unittest.TestCase):
                 source_count=len(messages), message_count=len(messages),
             )
 
-        calls = []
-
-        def _partial_reassign(conn_, old_id, new_id):
-            calls.append((old_id, new_id))
-            if len(calls) == 1:
-                # 部分成功: 2 件中 1 件だけ新 id へ移し、即 commit して
-                # rollback で戻らない状態を作る (件数 1 != 2 で中止になる)
-                conn_.execute(
-                    "UPDATE perception_batches SET annexed_entry_id = ? "
-                    "WHERE id = ?",
-                    (new_id, batch_a),
-                )
-                conn_.commit()
-                return 1
-            # 2 回目以降 (保険の逆向き付け替え) は本物に委譲
-            return real_reassign(conn_, old_id, new_id)
+        def _partial_reassign(conn_, old_id, new_id, **kwargs):
+            # 部分成功: 2 件中 1 件だけ新 id へ移し、即 commit して
+            # rollback で戻らない状態を作る (件数 1 != 2 で中止になる)。
+            # 復元は regenerate_entry 内の条件付き UPDATE が受け持つ。
+            conn_.execute(
+                "UPDATE perception_batches SET annexed_entry_id = ? "
+                "WHERE id = ?",
+                (new_id, batch_a),
+            )
+            conn_.commit()
+            return 1
 
         with patch(
             "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",

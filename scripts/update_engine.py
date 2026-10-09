@@ -27,6 +27,13 @@ try:  # ``packaging`` ships with pip, so every SAIVerse venv has it.
 except Exception:  # pragma: no cover - exercised by the degraded-parser test
     _Requirement = None  # type: ignore[assignment]
 
+try:
+    from packaging.version import InvalidVersion as _InvalidVersion
+    from packaging.version import Version as _Version
+except Exception:  # pragma: no cover - packaging ships with pip
+    _Version = None  # type: ignore[assignment]
+    _InvalidVersion = ValueError  # type: ignore[assignment,misc]
+
 LOGGER = logging.getLogger("saiverse.update")
 
 # Written next to the other self-update state files (``.update_config.json``,
@@ -57,6 +64,28 @@ LEGACY_REQUIREMENTS = "requirements.txt"
 CHECK_READY = 0
 CHECK_NEEDS_FINISH = 10
 CHECK_INCONCLUSIVE = 11
+
+# Release channels (docs/intent/early_access_release.md §3-1). The branch the
+# checkout is on is the *only* place that decides which releases it receives
+# (invariant 4) -- there is no separate setting that could drift from it. Any
+# other branch (a developer's ``develop``, a detached HEAD) counts as stable
+# for update notices, and cannot be switched from.
+CHANNEL_STABLE = "stable"
+CHANNEL_EARLY_ACCESS = "early_access"
+CHANNEL_BRANCHES = {
+    CHANNEL_STABLE: "main",
+    CHANNEL_EARLY_ACCESS: "early-access",
+}
+# The remote every install tracks: ``git clone`` names it origin, and
+# setup.bat / setup.sh add it under that name for ZIP installs.
+UPDATE_REMOTE = "origin"
+# Snapshot name prefix per switch direction, so a restore point taken before
+# joining (or leaving) early access is told apart from a routine
+# ``auto_before_update_*`` one.
+SWITCH_SNAPSHOT_PREFIX = {
+    CHANNEL_EARLY_ACCESS: "ea_optin",
+    CHANNEL_STABLE: "ea_return",
+}
 
 
 class UpdateError(RuntimeError):
@@ -425,19 +454,69 @@ def missing_dependencies(project_dir: Path) -> DependencyReport | None:
     return DependencyReport(missing, unchecked, scan.degraded)
 
 
-def frontend_packages_installed(project_dir: Path) -> bool | None:
-    """Whether ``npm ci`` has populated the frontend.
+def missing_frontend_packages(project_dir: Path) -> list[str] | None:
+    """Packages ``frontend/package.json`` declares that ``node_modules`` lacks.
 
-    Existence only. Verifying the tree against package-lock.json is npm's job
-    and would cost more than the question is worth here; the failure this
-    guards against is the interrupted update that never ran npm at all.
+    Every name in ``dependencies`` (scoped names included) must have its own
+    ``node_modules/<name>/package.json``. ``devDependencies`` are left out on
+    purpose: ``npm ci`` skips them under ``NODE_ENV=production``, and counting
+    them would then send every start into the finishing pass forever. A
+    half-deleted ``node_modules`` loses the ``dependencies`` too, so they are
+    enough to catch what this guards against. Checking
+    only that the ``node_modules`` folder exists is not enough: a ``npm ci``
+    that fails half-way on Windows (a file held open by a running frontend
+    server) leaves the folder behind with almost nothing in it, and that
+    folder used to be read as a finished install
+    (docs/issues/archive/ui_update_fails_while_frontend_runs.md). Versions are not
+    compared -- that is npm's job and ``package-lock.json`` is already part of
+    the completion fingerprint; what this guards against is a package that is
+    simply not there.
 
-    Returns None when there is no frontend directory to judge.
+    Returns None when the answer cannot be determined: no frontend directory,
+    or a ``package.json`` that cannot be read or does not have the expected
+    shape.
     """
     frontend = project_dir / "frontend"
     if not frontend.is_dir():
         return None
-    return (frontend / "node_modules").is_dir()
+    try:
+        manifest = json.loads((frontend / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    names: list[str] = []
+    declared = manifest.get("dependencies")
+    if declared is not None:
+        if not isinstance(declared, dict):
+            return None
+        names.extend(name for name in declared if isinstance(name, str) and name)
+    node_modules = frontend / "node_modules"
+    missing: list[str] = []
+    for name in names:
+        if not (node_modules / name / "package.json").is_file():
+            missing.append(name)
+    return missing
+
+
+def frontend_packages_installed(project_dir: Path) -> bool | None:
+    """Whether every package the frontend declares is present in node_modules.
+
+    Returns None when that cannot be determined (see
+    ``missing_frontend_packages``).
+    """
+    missing = missing_frontend_packages(project_dir)
+    if missing is None:
+        return None
+    return not missing
+
+
+def _log_missing_frontend_packages(missing: list[str]) -> None:
+    LOGGER.warning(
+        "Update was interrupted: %d frontend package(s) are missing from frontend/node_modules (%s)",
+        len(missing),
+        ", ".join(missing[:5]),
+    )
 
 
 def check_update_complete(project_dir: Path) -> int:
@@ -463,6 +542,15 @@ def check_update_complete(project_dir: Path) -> int:
         )
     if recorded:
         if recorded == fingerprint:
+            # The marker says the last update finished, but a marker cannot see
+            # packages that were removed afterwards -- a failed button update
+            # whose ``npm ci`` emptied node_modules and whose rollback failed
+            # too, for instance. The package check is cheap, so it runs even
+            # here. None (cannot tell) keeps trusting the marker.
+            missing_frontend = missing_frontend_packages(project_dir)
+            if missing_frontend:
+                _log_missing_frontend_packages(missing_frontend)
+                return CHECK_NEEDS_FINISH
             return CHECK_READY
         if recorded.get("version") == fingerprint["version"]:
             LOGGER.warning(
@@ -484,9 +572,10 @@ def check_update_complete(project_dir: Path) -> int:
     # the file is in the old / unreadable format handled above. Decide on the
     # things that actually break a start: packages the new code needs. When
     # that verification passes, the marker is written in the current format.
-    frontend_ready = frontend_packages_installed(project_dir)
-    if frontend_ready is False:
-        LOGGER.warning("Update was interrupted: frontend/node_modules is not installed")
+    missing_frontend = missing_frontend_packages(project_dir)
+    frontend_ready = None if missing_frontend is None else not missing_frontend
+    if missing_frontend:
+        _log_missing_frontend_packages(missing_frontend)
         return CHECK_NEEDS_FINISH
 
     report = missing_dependencies(project_dir)
@@ -516,7 +605,10 @@ def check_update_complete(project_dir: Path) -> int:
             )
         return CHECK_INCONCLUSIVE
     if frontend_ready is None:
-        LOGGER.warning("No frontend directory to verify; starting without recording a version")
+        LOGGER.warning(
+            "The frontend packages could not be verified (no frontend directory, or an "
+            "unreadable frontend/package.json); starting without recording a version"
+        )
         return CHECK_INCONCLUSIVE
     write_completion_marker(project_dir)
     return CHECK_READY
@@ -570,7 +662,7 @@ def _process_alive(pid: int) -> bool:
 
     Fail closed: without psutil "cannot check" is indistinguishable from
     "already exited", and guessing "exited" once let the updater run beside a
-    live backend (docs/issues/self_update_unsafe_without_psutil.md), so the
+    live backend (docs/issues/archive/self_update_unsafe_without_psutil.md), so the
     honest answer is to abort the update instead of guessing.
     """
     try:
@@ -723,9 +815,13 @@ def _discard_command(status: str) -> str:
     return "git checkout -- ."
 
 
-def assert_git_update_ready(project_dir: Path) -> str:
+def assert_git_update_ready(project_dir: Path, *, switching: bool = False) -> str:
     """Refuse to update unless the checkout is a Git repo with no modified
     tracked files, and return the current ``HEAD`` revision.
+
+    ``switching`` words the refusal for a channel switch (the same check guards
+    it, docs/intent/early_access_release.md §3-2-3): the user is told to switch
+    again, not to run an update they never asked for.
 
     Only *tracked* files are inspected (``--untracked-files=no``). Untracked
     files (macOS ``.DS_Store``, a diagnostics script dropped into the folder,
@@ -739,6 +835,10 @@ def assert_git_update_ready(project_dir: Path) -> str:
     docs/issues/archive/update_refuses_on_tracked_local_changes_without_exit.md).
     """
     if not (project_dir / ".git").is_dir() or shutil.which("git") is None:
+        if switching:
+            raise UpdateError(
+                "Switching the release channel requires a Git checkout of SAIVerse."
+            )
         raise UpdateError(
             "Automatic update requires a Git checkout. The former ZIP overlay path is "
             "disabled because it cannot safely remove retired files without deleting "
@@ -752,6 +852,18 @@ def assert_git_update_ready(project_dir: Path) -> str:
         encoding="utf-8",
     ).stdout
     if status.strip("\0 \r\n"):
+        if switching:
+            raise UpdateError(
+                "Working tree has local changes. The channel switch was not started; "
+                "the updater never stashes or resets user work, and switching would "
+                "carry these changes onto the other release line.\n"
+                "Modified files:\n" + _format_local_changes(status) + "\n"
+                "If you do not need these changes, discard them by running this "
+                "command in the SAIVerse folder, then switch the channel again:\n"
+                "  " + _discard_command(status) + "\n"
+                "If you want to keep the changes, commit them first, then switch "
+                "the channel again."
+            )
         raise UpdateError(
             "Working tree has local changes. Update was not started; the updater "
             "never stashes or resets user work.\n"
@@ -812,8 +924,20 @@ def _remove_partial_snapshot_archive(tmp_archive: Path) -> None:
 SNAPSHOT_TIMEOUT_SECONDS = 3600
 
 
-def create_pre_update_snapshot(project_dir: Path, python: str) -> str:
-    name = datetime.now(timezone.utc).strftime("auto_before_update_%Y%m%d_%H%M%S_%f")
+def create_pre_update_snapshot(
+    project_dir: Path,
+    python: str,
+    *,
+    prefix: str = "auto_before_update",
+    note: str = "Automatic restore point before code update",
+) -> str:
+    """Save and validate a whole-world snapshot before any code moves.
+
+    ``prefix`` / ``note`` let a channel switch label its restore point
+    (``ea_optin_*`` / ``ea_return_*``) so it can be told apart from a routine
+    update's later.
+    """
+    name = datetime.now(timezone.utc).strftime(f"{prefix}_%Y%m%d_%H%M%S_%f")
     # snapshot.py は書き上がった ZIP を .zip.tmp から os.replace で publish する。
     # ここでタイムアウトすると _run が子プロセスを kill するので snapshot.py 側の
     # except 節は走らず、書きかけの .zip.tmp が数十 GB のまま残る。子を殺した
@@ -827,7 +951,7 @@ def create_pre_update_snapshot(project_dir: Path, python: str) -> str:
                 "save",
                 name,
                 "--note",
-                "Automatic restore point before code update",
+                note,
             ],
             cwd=project_dir,
             label="create and validate pre-update world snapshot",
@@ -865,6 +989,286 @@ def update_code(project_dir: Path) -> None:
         label="fast-forward code update",
         timeout=300,
     )
+
+
+# --- Release channels -------------------------------------------------------
+
+
+def read_checkout_branch(project_dir: Path) -> str | None:
+    """The branch ``HEAD`` points at, read from the git metadata files.
+
+    For callers that must stay cheap and must not depend on a ``git`` binary
+    (the version endpoint is polled, and a PortableGit-only install may not
+    have git on the server's PATH). Handles a normal ``.git`` directory and the
+    ``gitdir:`` pointer file of a linked worktree. Returns None for a detached
+    HEAD, a checkout that is not a git repo, or anything unreadable -- callers
+    treat that as the stable channel.
+    """
+    git_path = project_dir / ".git"
+    try:
+        if git_path.is_dir():
+            git_dir = git_path
+        elif git_path.is_file():
+            pointer = git_path.read_text(encoding="utf-8").strip()
+            if not pointer.startswith("gitdir:"):
+                return None
+            git_dir = Path(pointer[len("gitdir:"):].strip())
+            if not git_dir.is_absolute():
+                git_dir = project_dir / git_dir
+        else:
+            return None
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    prefix = "ref: refs/heads/"
+    if not head.startswith(prefix):
+        return None  # detached HEAD
+    branch = head[len(prefix):].strip()
+    return branch or None
+
+
+def channel_for_branch(branch: str | None) -> str:
+    """Which release channel a checkout on ``branch`` receives.
+
+    Only the early-access branch is early access; everything else -- main, a
+    development branch, a detached or unreadable HEAD -- keeps the stable
+    behaviour.
+    """
+    if branch == CHANNEL_BRANCHES[CHANNEL_EARLY_ACCESS]:
+        return CHANNEL_EARLY_ACCESS
+    return CHANNEL_STABLE
+
+
+def _current_branch(project_dir: Path) -> str | None:
+    """The checked-out branch according to git itself (None when detached)."""
+    result = _run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        cwd=project_dir,
+        label="record current branch",
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _git_ref_sha(project_dir: Path, ref: str) -> str | None:
+    """The commit ``ref`` names, or None when the ref does not exist."""
+    result = _run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+        cwd=project_dir,
+        label=f"resolve {ref}",
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _parse_version_text(text: str | None, what: str) -> Any:
+    """``packaging`` Version of ``text``; fail closed when it cannot be read.
+
+    The switch refuses rather than guesses: moving a world onto code whose
+    version cannot be compared is exactly the downgrade this check exists to
+    stop.
+    """
+    if _Version is None:
+        raise UpdateError(
+            "The packaging library is unavailable, so the versions of the two release "
+            "lines cannot be compared; the channel switch was not started"
+        )
+    if not text:
+        raise UpdateError(f"The version of {what} could not be read; the channel switch was not started")
+    try:
+        return _Version(text.strip())
+    except _InvalidVersion as exc:
+        raise UpdateError(
+            f"The version of {what} ({text.strip()!r}) is not a valid version; "
+            "the channel switch was not started"
+        ) from exc
+
+
+class SwitchPlan(NamedTuple):
+    """What ``preflight_switch`` verified, for the switch itself to act on."""
+
+    channel: str
+    target_branch: str
+    original_branch: str
+    old_revision: str
+
+
+def preflight_switch(project_dir: Path, channel: str) -> SwitchPlan:
+    """Verify a channel switch can be made, without touching the working tree.
+
+    Run twice: by the API before the backend shuts down (so the usual refusal
+    -- no early-access branch published yet -- costs the user nothing), and by
+    the engine after it, to close the race. Checks, in order:
+
+    1. the same clean-tree check an update uses (reworded for a switch);
+    2. the checkout is on the *other* channel's branch -- joining early access
+       starts from main and leaving it starts from early-access. A development
+       branch or a detached HEAD is refused rather than silently moved;
+    3. ``git fetch`` succeeds and the remote has the target branch. Until the
+       first early-access release there is no ``origin/early-access``, and this
+       is the normal refusal;
+    4. the target line's VERSION is not older than this checkout's. The world
+       only moves forward (startup refuses to open a newer world with older
+       code), so a switch onto an older version would leave SAIVerse unable to
+       start. For the return to stable this *is* the rule of
+       docs/intent/early_access_release.md §3-3; for joining it stops opting
+       into an early-access line the stable release has already overtaken.
+
+    Fetching updates remote-tracking refs only, never the working tree.
+    """
+    if channel not in CHANNEL_BRANCHES:
+        raise UpdateError(f"Unknown release channel {channel!r}")
+    old_revision = assert_git_update_ready(project_dir, switching=True)
+    target_branch = CHANNEL_BRANCHES[channel]
+    source_channel = CHANNEL_STABLE if channel == CHANNEL_EARLY_ACCESS else CHANNEL_EARLY_ACCESS
+    source_branch = CHANNEL_BRANCHES[source_channel]
+
+    original_branch = _current_branch(project_dir)
+    if original_branch == target_branch:
+        raise UpdateError(f"This SAIVerse is already on the {target_branch} branch; nothing to switch")
+    if original_branch != source_branch:
+        raise UpdateError(
+            f"Switching to the {target_branch} branch is only possible from the "
+            f"{source_branch} branch, but this checkout is on "
+            f"{original_branch or 'a detached HEAD'}. The channel switch was not started."
+        )
+
+    _run(
+        ["git", "fetch", UPDATE_REMOTE],
+        cwd=project_dir,
+        label="fetch release branches",
+        timeout=300,
+    )
+    remote_ref = f"refs/remotes/{UPDATE_REMOTE}/{target_branch}"
+    if _git_ref_sha(project_dir, remote_ref) is None:
+        raise UpdateError(
+            f"The {target_branch} branch has not been published on {UPDATE_REMOTE} yet, so "
+            "there is nothing to switch to. The channel switch was not started."
+        )
+
+    target_version_text = _run(
+        ["git", "show", f"{remote_ref}:VERSION"],
+        cwd=project_dir,
+        label=f"read the version of {target_branch}",
+        timeout=60,
+        check=False,
+        encoding="utf-8",
+    )
+    target_version = _parse_version_text(
+        target_version_text.stdout if target_version_text.returncode == 0 else None,
+        f"the {target_branch} branch",
+    )
+    current_version = _parse_version_text(read_version(project_dir), "this SAIVerse")
+    if target_version < current_version:
+        raise UpdateError(
+            f"The {target_branch} branch is at version {target_version}, older than this "
+            f"SAIVerse ({current_version}). The world data only moves forward, so switching "
+            "now would leave SAIVerse unable to start. The channel switch was not started; "
+            f"it becomes possible once {target_branch} reaches {current_version} or later."
+        )
+    return SwitchPlan(channel, target_branch, original_branch, old_revision)
+
+
+def prepare_switch_branch(project_dir: Path, target_branch: str) -> None:
+    """Point the local ``target_branch`` at the fetched remote head, with tracking.
+
+    Only refs change here, never the working tree, so a failure leaves nothing
+    to undo. A local branch that does not exist yet is created tracking the
+    remote one (so later updates fast-forward it through ``@{upstream}``). One
+    that exists -- ``main`` when returning from early access -- is
+    fast-forwarded to the remote head; if it has commits the remote lacks the
+    switch refuses, because moving the ref would drop them (the updater never
+    resets user work).
+    """
+    remote_branch = f"{UPDATE_REMOTE}/{target_branch}"
+    remote_sha = _git_ref_sha(project_dir, f"refs/remotes/{remote_branch}")
+    if remote_sha is None:
+        raise UpdateError(f"{remote_branch} disappeared after fetching; the channel switch was not started")
+    local_ref = f"refs/heads/{target_branch}"
+    local_sha = _git_ref_sha(project_dir, local_ref)
+    if local_sha is None:
+        _run(
+            ["git", "branch", "--track", target_branch, remote_branch],
+            cwd=project_dir,
+            label=f"create local {target_branch} tracking {remote_branch}",
+            timeout=60,
+        )
+        return
+    if local_sha != remote_sha:
+        is_ancestor = _run(
+            ["git", "merge-base", "--is-ancestor", local_sha, remote_sha],
+            cwd=project_dir,
+            label=f"check that {target_branch} can fast-forward",
+            timeout=60,
+            check=False,
+        )
+        if is_ancestor.returncode != 0:
+            raise UpdateError(
+                f"The local {target_branch} branch has commits that {remote_branch} does "
+                "not have, so it cannot be moved forward without dropping them. The "
+                "channel switch was not started."
+            )
+        _run(
+            ["git", "update-ref", local_ref, remote_sha, local_sha],
+            cwd=project_dir,
+            label=f"fast-forward local {target_branch}",
+            timeout=60,
+        )
+    _run(
+        ["git", "branch", f"--set-upstream-to={remote_branch}", target_branch],
+        cwd=project_dir,
+        label=f"track {remote_branch}",
+        timeout=60,
+    )
+
+
+def switch_code(project_dir: Path, target_branch: str) -> None:
+    """Check out ``target_branch`` -- the one step of a switch that moves code.
+
+    ``git switch`` is all-or-nothing: when it refuses, the checkout is left on
+    the original branch untouched. ``--no-overwrite-ignore`` is the same
+    protection ``update_code`` gets from merge: by default git silently
+    overwrites an *ignored* file when the other branch tracks that path, and
+    with the flag it refuses and names the file instead.
+    """
+    _run(
+        ["git", "switch", "--no-overwrite-ignore", target_branch],
+        cwd=project_dir,
+        label=f"switch code to {target_branch}",
+        timeout=300,
+    )
+
+
+def _checkout_untouched(project_dir: Path, original_branch: str, old_revision: str) -> bool:
+    """Whether a failed switch left the checkout exactly as it found it.
+
+    ``git switch`` normally refuses before writing anything, but on Windows a
+    file held open by another program can stop it half-way through writing the
+    tree. Rather than trust the refusal, look: same branch, same commit, no
+    modified tracked files. Anything else -- including not being able to tell
+    -- counts as touched, and the caller rolls back to the recorded branch.
+    """
+    try:
+        if _current_branch(project_dir) != original_branch:
+            return False
+        if _git_ref_sha(project_dir, "HEAD") != old_revision:
+            return False
+        status = _run(
+            ["git", "status", "--porcelain", "-z", "--untracked-files=no"],
+            cwd=project_dir,
+            label="verify the checkout after a failed switch",
+            timeout=60,
+            encoding="utf-8",
+        ).stdout
+    except UpdateError:
+        return False
+    return not status.strip("\0 \r\n")
 
 
 _PIP_CHECK_CLEAN = "No broken requirements found."
@@ -945,17 +1349,46 @@ def update_dependencies(
     frontend = project_dir / "frontend"
     if not frontend.is_dir():
         raise UpdateError("frontend directory is missing after code update")
+    npm = _find_npm(project_dir)
+    npm_command = "ci" if (frontend / "package-lock.json").is_file() else "install"
+    _run(
+        [npm, npm_command],
+        cwd=frontend,
+        label=f"npm {npm_command}",
+        # npm and next write UTF-8 whatever the console code page is; decoding
+        # with the Windows locale (cp932) crashed the output reader on the
+        # build's check marks (2026-09-30, found running the real build).
+        encoding="utf-8",
+    )
+
+
+def _find_npm(project_dir: Path) -> str:
+    """The npm to run: the one on PATH, else the portable one setup installed.
+
+    Shared by the package install, the frontend build and the frontend
+    restart, so all three use the same npm.
+    """
     npm = shutil.which("npm")
     portable_npm = project_dir / ".node" / ("npm.cmd" if sys.platform == "win32" else "npm")
     if npm is None and portable_npm.is_file():
         npm = str(portable_npm)
     if npm is None:
         raise UpdateError("npm is required to update the frontend")
-    npm_command = "ci" if (frontend / "package-lock.json").is_file() else "install"
+    return npm
+
+
+def build_frontend(project_dir: Path) -> None:
+    """``npm run build`` -- what ``next start`` serves has to match the new code.
+
+    Only run when the frontend that was stopped for the update was a
+    production server (``next start``, what start.bat / start.sh run); the
+    dev server compiles on demand and needs no build.
+    """
     _run(
-        [npm, npm_command],
-        cwd=frontend,
-        label=f"npm {npm_command}",
+        [_find_npm(project_dir), "run", "build"],
+        cwd=project_dir / "frontend",
+        label="npm run build",
+        encoding="utf-8",  # same reason as npm ci in update_dependencies
     )
 
 
@@ -963,8 +1396,25 @@ def _rollback_code_and_dependencies(
     project_dir: Path,
     python: str,
     old_revision: str,
+    *,
+    branch: str | None = None,
 ) -> None:
-    """Best-effort repair used only after the initial clean-tree invariant."""
+    """Best-effort repair used only after the initial clean-tree invariant.
+
+    ``branch`` is set only for a channel switch: the checkout is first put back
+    on the branch recorded before the switch, and only then reset to the old
+    revision. Without it the reset would land on the *new* branch and leave the
+    checkout on the other release line at the old code (intent
+    early_access_release.md §3-2-3).
+    """
+    if branch is not None:
+        LOGGER.error("Switching code back to the %s branch", branch)
+        _run(
+            ["git", "switch", "--discard-changes", branch],
+            cwd=project_dir,
+            label="rollback branch",
+            timeout=120,
+        )
     LOGGER.error("Rolling code back to %s", old_revision)
     _run(
         ["git", "reset", "--hard", old_revision],
@@ -991,6 +1441,13 @@ def _rollback_code_and_dependencies(
         LOGGER.exception("Dependency repair for the previous revision also failed")
 
 
+_CREATE_NEW_CONSOLE = 0x00000010
+
+
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
 def restart_application(config: dict[str, Any]) -> subprocess.Popen[Any]:
     project_dir = Path(config["project_dir"]).resolve()
     python = str(config["venv_python"])
@@ -1003,8 +1460,23 @@ def restart_application(config: dict[str, Any]) -> subprocess.Popen[Any]:
         "cwd": str(project_dir),
         "close_fds": True,
     }
-    if sys.platform == "win32":
-        kwargs["creationflags"] = 0x00000008 | 0x00000200
+    if _is_windows():
+        # A visible console window of its own, like the "SAIVerse Backend"
+        # window start.bat opens, so the user can see the backend and stop it
+        # by closing the window. It used to be DETACHED_PROCESS: no window, and
+        # no way to stop it short of the task manager.
+        #
+        # python is started directly, not wrapped in ``cmd /k``: the health
+        # check (``process.poll()``) and ``_terminate_spawned`` act on this
+        # Popen, and with a cmd wrapper they would watch and kill cmd.exe while
+        # python lived on.
+        #
+        # No stdin / stdout / stderr are passed on purpose. With none given,
+        # Popen neither sets STARTF_USESTDHANDLES nor (because close_fds=True)
+        # lets the child inherit handles, so the child writes to its own new
+        # console and holds nothing of this updater's. Redirecting them to
+        # pipes or DEVNULL would blank the window the change exists to show.
+        kwargs["creationflags"] = _CREATE_NEW_CONSOLE
     else:
         kwargs["start_new_session"] = True
     try:
@@ -1067,62 +1539,641 @@ def _terminate_spawned(process: subprocess.Popen[Any]) -> None:
         LOGGER.exception("Could not terminate failed restarted process PID %s", process.pid)
 
 
-def run_update(config: dict[str, Any] | None, project_dir: Path) -> None:
-    python = str(config.get("venv_python", sys.executable)) if config else sys.executable
-    _ensure_portable_git_on_path(project_dir)
-    old_revision = assert_git_update_ready(project_dir)
+# --- The frontend server ------------------------------------------------------
+#
+# The frontend (``next start`` from start.bat / start.sh, ``next dev`` from
+# start-dev.*) runs as its own node process, separate from the backend. On
+# Windows it keeps ``node_modules/@next/swc-*/next-swc.*.node`` loaded, so a
+# ``npm ci`` beside it fails with EPERM after deleting every other package
+# (docs/issues/archive/ui_update_fails_while_frontend_runs.md). A detached update
+# therefore stops this checkout's frontend before touching anything, and starts
+# it again -- in the mode it was running in -- once the backend is back.
 
-    if config:
-        wait_for_owned_process_exit(
-            int(config["main_pid"]),
-            config.get("main_process_created_at"),
+FRONTEND_MODE_START = "start"
+FRONTEND_MODE_DEV = "dev"
+# start.bat / start-dev.bat open the frontend in ``cmd /k "title SAIVerse
+# Frontend && ..."``. Only a cmd.exe carrying this text in its command line, and
+# only as an ancestor of a frontend node process, is stopped with it -- so the
+# window closes instead of being left at a prompt. Any other shell is the
+# user's and is never touched.
+FRONTEND_WINDOW_SIGNATURE = "title SAIVerse Frontend"
+_FRONTEND_WINDOW_TITLES = {
+    FRONTEND_MODE_START: "SAIVerse Frontend",
+    FRONTEND_MODE_DEV: "SAIVerse Frontend (Dev)",
+}
+_NODE_PROCESS_NAMES = frozenset({"node", "node.exe"})
+_WINDOW_SHELL_NAMES = frozenset({"cmd.exe"})
+FRONTEND_STOP_TIMEOUT_SECONDS = 15.0
+
+
+class FrontendCheckUnavailable(UpdateError):
+    """psutil is missing or broken, so running frontend servers cannot be listed."""
+
+
+class FrontendServers(NamedTuple):
+    """This checkout's frontend processes, and the mode they were serving in."""
+
+    # psutil.Process objects: node processes, plus their start.bat window.
+    processes: list[Any]
+    # FRONTEND_MODE_START / FRONTEND_MODE_DEV, or None when it could not be told.
+    mode: str | None
+
+
+def _import_psutil() -> Any:
+    try:
+        import psutil
+    except Exception as exc:  # a broken extension can fail with OSError, not ImportError
+        raise FrontendCheckUnavailable(f"psutil is unavailable or broken ({exc})") from exc
+    return psutil
+
+
+def _normalized_absolute(value: str) -> str | None:
+    """``value`` as a comparable absolute path, or None when it is not one."""
+    if not value or not os.path.isabs(value):
+        return None
+    try:
+        return os.path.normcase(os.path.normpath(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _frontend_roots(frontend: Path) -> set[str]:
+    """The ways this checkout's frontend directory can be spelled.
+
+    Both the path as given and its resolved form, so a checkout reached
+    through a junction or symlink is still recognised.
+    """
+    roots: set[str] = set()
+    candidates = [str(frontend)]
+    try:
+        candidates.append(os.path.realpath(frontend))
+    except (OSError, ValueError):
+        pass
+    for candidate in candidates:
+        normalized = _normalized_absolute(candidate)
+        if normalized:
+            roots.add(normalized)
+    return roots
+
+
+def _is_within(value: str, roots: set[str]) -> bool:
+    """Whether ``value`` is one of ``roots`` or a path below one of them.
+
+    Decided on path boundaries, never by substring: ``...\\SAIVerse\\frontend``
+    and ``...\\SAIVerse\\.worktrees\\x\\frontend`` are different frontends.
+    """
+    normalized = _normalized_absolute(value)
+    if normalized is None:
+        return False
+    for root in roots:
+        if normalized == root or normalized.startswith(root.rstrip("\\/") + os.sep):
+            return True
+    return False
+
+
+def _frontend_mode_from_cmdline(args: list[str]) -> str | None:
+    """"start" / "dev" when a command line shows which server it runs.
+
+    Recognises ``next start`` / ``next dev`` (the next bin script and the words
+    after it), ``npm start`` / ``npm run dev`` (npm-cli.js, npm, npm.cmd), and
+    the same words inside a start.bat window's ``cmd /k "..."``. Arguments are
+    split on whitespace first, because a window's whole ``/k`` string is one
+    argument and Linux shows a process title such as ``npm start`` as one.
+    """
+    tokens: list[str] = []
+    for arg in args:
+        tokens.extend(str(arg).replace('"', " ").split())
+    lowered = [token.lower() for token in tokens]
+    for index, token in enumerate(lowered):
+        base = re.split(r"[\\/]", token)[-1]
+        following = lowered[index + 1:index + 3]
+        if base == "next" and following and following[0] in (FRONTEND_MODE_START, FRONTEND_MODE_DEV):
+            return following[0]
+        if base in ("npm", "npm.cmd", "npm-cli.js") and following:
+            if following[0] == "start":
+                return FRONTEND_MODE_START
+            if (
+                len(following) == 2
+                and following[0] in ("run", "run-script")
+                and following[1] in (FRONTEND_MODE_START, FRONTEND_MODE_DEV)
+            ):
+                return following[1]
+    return None
+
+
+def _frontend_windows(process: Any, psutil: Any) -> list[tuple[Any, list[str]]]:
+    """start.bat / start-dev.bat windows among ``process``'s ancestors."""
+    try:
+        parents = process.parents()
+    except (psutil.Error, OSError):
+        return []
+    signature = FRONTEND_WINDOW_SIGNATURE.lower()
+    windows: list[tuple[Any, list[str]]] = []
+    for parent in parents:
+        try:
+            if (parent.name() or "").lower() not in _WINDOW_SHELL_NAMES:
+                continue
+            cmdline = list(parent.cmdline() or [])
+        except (psutil.Error, OSError):
+            continue
+        if signature in " ".join(cmdline).lower():
+            windows.append((parent, cmdline))
+    return windows
+
+
+def find_frontend_servers(
+    project_dir: Path,
+    *,
+    processes: Any | None = None,
+) -> FrontendServers:
+    """This checkout's running frontend server processes.
+
+    A process belongs to it when it is node and its working directory, or any
+    absolute path in its command line, lies inside ``<project>/frontend``
+    (path boundaries, not substrings). The start.bat window that runs it is
+    included through its ancestry (``FRONTEND_WINDOW_SIGNATURE``). Processes
+    that vanish or deny access while being inspected are skipped.
+
+    ``processes`` replaces ``psutil.process_iter()`` in tests.
+    """
+    frontend = project_dir / "frontend"
+    if not frontend.is_dir():
+        return FrontendServers([], None)
+    psutil = _import_psutil()
+    roots = _frontend_roots(frontend)
+    if processes is None:
+        try:
+            processes = list(psutil.process_iter())
+        except Exception as exc:
+            raise FrontendCheckUnavailable(f"running processes could not be listed ({exc})") from exc
+
+    matched: dict[int, Any] = {}
+    modes: set[str] = set()
+    for process in processes:
+        try:
+            if (process.name() or "").lower() not in _NODE_PROCESS_NAMES:
+                continue
+            try:
+                cmdline = list(process.cmdline() or [])
+            except psutil.AccessDenied:
+                cmdline = []
+            try:
+                cwd = process.cwd()
+            except psutil.AccessDenied:
+                cwd = None
+            pid = process.pid
+        except (psutil.Error, OSError):
+            continue  # gone, a zombie, or not ours to inspect
+        belongs = bool(cwd) and _is_within(cwd, roots)
+        if not belongs:
+            belongs = any(_is_within(arg, roots) for arg in cmdline)
+        if not belongs:
+            continue
+        matched[pid] = process
+        mode = _frontend_mode_from_cmdline(cmdline)
+        if mode:
+            modes.add(mode)
+        for window, window_cmdline in _frontend_windows(process, psutil):
+            try:
+                matched[window.pid] = window
+            except (psutil.Error, OSError):
+                continue
+            window_mode = _frontend_mode_from_cmdline(window_cmdline)
+            if window_mode:
+                modes.add(window_mode)
+
+    if len(modes) > 1:
+        LOGGER.warning(
+            "Frontend processes of this checkout run in more than one mode (%s); "
+            "the frontend will not be restarted automatically",
+            ", ".join(sorted(modes)),
         )
-    snapshot_name = create_pre_update_snapshot(project_dir, python)
+    mode = next(iter(modes)) if len(modes) == 1 else None
+    return FrontendServers(list(matched.values()), mode)
+
+
+def _describe_processes(processes: list[Any]) -> str:
+    parts: list[str] = []
+    for process in processes:
+        try:
+            parts.append(f"{process.name()} PID {process.pid}")
+        except Exception:
+            parts.append(f"PID {getattr(process, 'pid', '?')}")
+    return ", ".join(parts)
+
+
+def _terminate_processes(processes: list[Any], psutil: Any, timeout: float) -> list[Any]:
+    """terminate, wait, kill what is left, wait again. Returns the survivors."""
+    for process in processes:
+        try:
+            process.terminate()
+        except psutil.NoSuchProcess:
+            continue
+        except (psutil.Error, OSError) as exc:
+            LOGGER.warning("Could not ask PID %s to stop: %s", getattr(process, "pid", "?"), exc)
+    _, alive = psutil.wait_procs(processes, timeout=timeout)
+    if not alive:
+        return []
+    LOGGER.warning("Frontend process(es) did not stop in time; killing: %s", _describe_processes(alive))
+    for process in alive:
+        try:
+            process.kill()
+        except psutil.NoSuchProcess:
+            continue
+        except (psutil.Error, OSError) as exc:
+            LOGGER.warning("Could not kill PID %s: %s", getattr(process, "pid", "?"), exc)
+    _, alive = psutil.wait_procs(alive, timeout=5)
+    return list(alive)
+
+
+def stop_frontend_servers(
+    project_dir: Path,
+    *,
+    timeout: float = FRONTEND_STOP_TIMEOUT_SECONDS,
+) -> FrontendServers:
+    """Stop this checkout's frontend server; return what was stopped.
+
+    Raises UpdateError when a process survives being killed. Callers run this
+    before anything is changed, so a refusal here leaves the checkout as it
+    was. After stopping, the processes are listed once more and anything that
+    appeared meanwhile (a child the server started while it was being
+    collected) is stopped too.
+    """
+    found = find_frontend_servers(project_dir)
+    if not found.processes:
+        LOGGER.info("No frontend server of this checkout is running")
+        return found
+    psutil = _import_psutil()
+    LOGGER.info(
+        "Stopping the frontend server (mode=%s): %s",
+        found.mode or "unknown",
+        _describe_processes(found.processes),
+    )
+    if found.mode is None:
+        LOGGER.warning(
+            "Could not tell which frontend server these processes run; they are stopped so "
+            "the packages can be replaced, but will not be started again automatically"
+        )
+    survivors = _terminate_processes(found.processes, psutil, timeout)
+    if not survivors:
+        survivors = find_frontend_servers(project_dir).processes
+        if survivors:
+            survivors = _terminate_processes(survivors, psutil, timeout)
+    if survivors:
+        raise UpdateError(
+            "The frontend server could not be stopped (" + _describe_processes(survivors) + "). "
+            "Nothing was changed. Close the SAIVerse Frontend window and run the update again."
+        )
+    return found
+
+
+def refuse_while_frontend_runs(project_dir: Path) -> None:
+    """The manual-update entrance: refuse while this checkout's frontend runs.
+
+    A manual update (update.bat / update.sh / the start-time finishing pass)
+    must not stop the user's windows for them; it refuses before anything is
+    changed and tells them what to close. When psutil cannot be used the check
+    is skipped with a warning rather than blocking update.bat, which is the
+    path that installs psutil in the first place.
+    """
+    try:
+        found = find_frontend_servers(project_dir)
+    except FrontendCheckUnavailable as exc:
+        LOGGER.warning("Could not check whether the SAIVerse frontend is running: %s", exc)
+        return
+    if not found.processes:
+        return
+    raise UpdateError(
+        "The SAIVerse frontend of this folder is still running ("
+        + _describe_processes(found.processes)
+        + "). Nothing was changed: on Windows the frontend packages cannot be replaced while "
+        "it holds them open. Close the SAIVerse windows (Frontend) first, then run the update "
+        "again.\n"
+        "SAIVerse の画面のサーバーが動いています。何も変更していません。"
+        "SAIVerse の窓 (Frontend) を閉じてから、もう一度実行してください。"
+    )
+
+
+def _env_with_npm_on_path(npm: str) -> dict[str, str]:
+    """This environment, with npm's own directory on PATH.
+
+    The restarted frontend runs ``npm`` by name inside its window; a portable
+    npm found under ``.node`` is not on PATH by itself.
+    """
+    env = os.environ.copy()
+    if not os.path.isabs(npm):
+        return env
+    npm_dir = os.path.dirname(npm)
+    current = env.get("PATH", "")
+    known = {os.path.normcase(os.path.normpath(entry)) for entry in current.split(os.pathsep) if entry}
+    if npm_dir and os.path.normcase(os.path.normpath(npm_dir)) not in known:
+        env["PATH"] = npm_dir + (os.pathsep + current if current else "")
+    return env
+
+
+def start_frontend(project_dir: Path, mode: str) -> subprocess.Popen[Any]:
+    """Start the frontend server again, the way the start scripts do.
+
+    Windows: a new visible window, ``cmd /k "title SAIVerse Frontend && npm
+    start"`` (``(Dev)`` / ``npm run dev`` for the dev server), the same window
+    start.bat / start-dev.bat open, so the user can see it and stop it by
+    closing it. As with the backend, no standard handles are passed: the
+    window's own console is what the server writes to.
+
+    macOS / Linux: ``npm start`` / ``npm run dev`` in ``frontend`` in a new
+    session, the same way the backend is restarted.
+    """
+    if mode not in _FRONTEND_WINDOW_TITLES:
+        raise UpdateError(f"Unknown frontend mode {mode!r}")
+    frontend = project_dir / "frontend"
+    npm = _find_npm(project_dir)
+    script = ["start"] if mode == FRONTEND_MODE_START else ["run", "dev"]
+    kwargs: dict[str, Any] = {
+        "cwd": str(frontend),
+        "close_fds": True,
+        "env": _env_with_npm_on_path(npm),
+    }
+    if _is_windows():
+        shell = os.environ.get("COMSPEC") or "cmd.exe"
+        title = _FRONTEND_WINDOW_TITLES[mode]
+        command = [shell, "/k", f"title {title} && npm {' '.join(script)}"]
+        kwargs["creationflags"] = _CREATE_NEW_CONSOLE
+    else:
+        command = [npm, *script]
+        kwargs["start_new_session"] = True
+    LOGGER.info("Starting the frontend server again (mode=%s)", mode)
+    try:
+        return subprocess.Popen(command, **kwargs)
+    except OSError as exc:
+        raise UpdateError(f"Could not start the frontend server: {exc}") from exc
+
+
+def _restart_frontend(project_dir: Path, mode: str | None) -> None:
+    """Start the stopped frontend again; never raises (the update's outcome is
+    already decided when this runs)."""
+    if mode is None:
+        return
+    try:
+        process = start_frontend(project_dir, mode)
+    except Exception:
+        LOGGER.exception(
+            "The frontend server could not be started again; start SAIVerse with start.bat / "
+            "start.sh to bring the screen back"
+        )
+        return
+    LOGGER.info("Frontend server started again (mode=%s, PID %s)", mode, process.pid)
+
+
+# --- The update sequence ----------------------------------------------------
+
+
+class _UpdateProgress:
+    """How far an update got, so a failure knows what to undo."""
+
+    def __init__(self) -> None:
+        self.plan: SwitchPlan | None = None
+        self.old_revision: str | None = None
+        # The code phase began: for a switch, git may have written part of the
+        # tree even when it then refused.
+        self.code_phase_started = False
+        # The code moved to the new revision / branch.
+        self.code_moved = False
+
+
+def _apply_code_and_dependencies(project_dir: Path, python: str, progress: _UpdateProgress) -> None:
+    progress.code_phase_started = True
+    if progress.plan is None:
+        update_code(project_dir)
+    else:
+        # Ref-only preparation first: if it fails, nothing needs undoing.
+        prepare_switch_branch(project_dir, progress.plan.target_branch)
+        switch_code(project_dir, progress.plan.target_branch)
+    progress.code_moved = True
+    # The code moved, so whatever the marker recorded no longer holds. Drop
+    # it here -- before the first phase that can leave packages half
+    # installed -- so no failure path can end with a stale marker claiming
+    # this checkout is finished. Both the manual and the detached run reach
+    # the final write through this same function.
+    invalidate_completion_marker(project_dir)
+    update_dependencies(project_dir, python)
+
+
+def _needs_rollback(project_dir: Path, progress: _UpdateProgress) -> bool:
+    if progress.code_moved:
+        return True
+    plan = progress.plan
+    return (
+        plan is not None
+        and progress.code_phase_started
+        and progress.old_revision is not None
+        and not _checkout_untouched(project_dir, plan.original_branch, progress.old_revision)
+    )
+
+
+def _rollback(project_dir: Path, python: str, progress: _UpdateProgress) -> None:
+    if progress.old_revision is None:
+        raise UpdateError("The revision to roll back to was never recorded")
+    if progress.plan is None:
+        _rollback_code_and_dependencies(project_dir, python, progress.old_revision)
+    else:
+        _rollback_code_and_dependencies(
+            project_dir, python, progress.old_revision, branch=progress.plan.original_branch
+        )
+
+
+def _preflight(project_dir: Path, switch_channel: str | None, progress: _UpdateProgress) -> None:
+    if switch_channel is None:
+        progress.old_revision = assert_git_update_ready(project_dir)
+        return
+    progress.plan = preflight_switch(project_dir, switch_channel)
+    progress.old_revision = progress.plan.old_revision
+    LOGGER.info(
+        "Switching release channel to %s: %s -> %s",
+        progress.plan.channel,
+        progress.plan.original_branch,
+        progress.plan.target_branch,
+    )
+
+
+def _snapshot(project_dir: Path, python: str, progress: _UpdateProgress) -> None:
+    plan = progress.plan
+    if plan is None:
+        snapshot_name = create_pre_update_snapshot(project_dir, python)
+    else:
+        snapshot_name = create_pre_update_snapshot(
+            project_dir,
+            python,
+            prefix=SWITCH_SNAPSHOT_PREFIX[plan.channel],
+            note=f"Automatic restore point before switching to the {plan.target_branch} branch",
+        )
     LOGGER.info("Pre-update restore point: %s", snapshot_name)
 
-    code_changed = False
-    try:
-        update_code(project_dir)
-        code_changed = True
-        # The code moved, so whatever the marker recorded no longer holds. Drop
-        # it here -- before the first phase that can leave packages half
-        # installed -- so no failure path can end with a stale marker claiming
-        # this checkout is finished. Both the manual and the detached run reach
-        # the final write below through this same block.
-        invalidate_completion_marker(project_dir)
-        update_dependencies(project_dir, python)
-    except UpdateError:
-        if code_changed:
-            _rollback_code_and_dependencies(project_dir, python, old_revision)
-        raise
 
-    if not config:
-        write_completion_marker(project_dir)
-        LOGGER.info("Update applied. Start SAIVerse normally to run startup migrations.")
+def _restore_previous_version(
+    config: dict[str, Any],
+    project_dir: Path,
+    python: str,
+    progress: _UpdateProgress,
+    frontend_mode: str | None,
+) -> None:
+    """After a failure with the backend stopped: bring the previous version back.
+
+    Rolls back when the checkout moved, restarts the previous backend and
+    checks its health, then starts the stopped frontend again -- rebuilt first
+    when it is a production server and the code was rolled back, since the
+    build on disk may be the new version's or half-written. Never raises: the
+    caller re-raises the original failure afterwards.
+
+    When the code itself cannot be rolled back, nothing is started: the
+    checkout is in an unknown state, and starting it could migrate the world
+    with code that is neither version. The next start.bat / start.sh finds no
+    completion marker and finishes or verifies the update first.
+    """
+    rolled_back = False
+    try:
+        needs_rollback = _needs_rollback(project_dir, progress)
+    except Exception:
+        # Not knowing whether the checkout moved counts as moved: rolling back
+        # to the recorded revision is safe either way.
+        LOGGER.exception("Could not tell whether the checkout changed; rolling back to be safe")
+        needs_rollback = progress.old_revision is not None
+    if needs_rollback:
+        try:
+            _rollback(project_dir, python, progress)
+        except Exception:
+            LOGGER.exception(
+                "The code could not be rolled back; SAIVerse is left stopped. Start it with "
+                "start.bat / start.sh, which finishes or repairs the update first"
+            )
+            return
+        rolled_back = True
+
+    try:
+        backend = restart_application(config)
+        wait_for_healthy_restart(backend, config)
+        LOGGER.error("Previous revision was restored and restarted successfully")
+    except Exception:
+        LOGGER.exception("Previous revision also failed to restart")
+
+    if frontend_mode is None:
         return
+    if rolled_back and frontend_mode == FRONTEND_MODE_START:
+        try:
+            build_frontend(project_dir)
+        except Exception:
+            LOGGER.exception(
+                "The previous frontend could not be built again, so it was not started; "
+                "start SAIVerse with start.bat / start.sh"
+            )
+            return
+    _restart_frontend(project_dir, frontend_mode)
+
+
+def run_update(
+    config: dict[str, Any] | None,
+    project_dir: Path,
+    *,
+    switch_channel: str | None = None,
+) -> None:
+    """Update the checkout, or -- with ``switch_channel`` -- move it to the
+    other release line.
+
+    A channel switch rides the same sequence as an update (snapshot, code,
+    dependencies, completion marker, restart) so it inherits every safety net
+    the update has (docs/intent/early_access_release.md §3-2). The differences
+    are confined to the code step (check out the other branch instead of
+    fast-forwarding this one), the snapshot label, and the rollback, which puts
+    the checkout back on the branch recorded before the switch.
+    """
+    python = str(config.get("venv_python", sys.executable)) if config else sys.executable
+    _ensure_portable_git_on_path(project_dir)
+    if config:
+        _run_detached_update(config, project_dir, python, switch_channel)
+    else:
+        _run_manual_update(project_dir, python, switch_channel)
+
+
+def _run_manual_update(project_dir: Path, python: str, switch_channel: str | None) -> None:
+    """update.bat / update.sh / the start-time finishing pass: SAIVerse is
+    stopped, nothing is restarted afterwards."""
+    # Before anything else: with the frontend still running, npm ci would fail
+    # half-way and take most of node_modules with it.
+    refuse_while_frontend_runs(project_dir)
+    progress = _UpdateProgress()
+    _preflight(project_dir, switch_channel, progress)
+    _snapshot(project_dir, python, progress)
+    try:
+        _apply_code_and_dependencies(project_dir, python, progress)
+    except UpdateError:
+        if _needs_rollback(project_dir, progress):
+            _rollback(project_dir, python, progress)
+        raise
+    write_completion_marker(project_dir)
+    LOGGER.info("Update applied. Start SAIVerse normally to run startup migrations.")
+
+
+def _run_detached_update(
+    config: dict[str, Any],
+    project_dir: Path,
+    python: str,
+    switch_channel: str | None,
+) -> None:
+    """The UI's update / channel switch: the backend stops itself, this process
+    does the work, then starts the backend -- and the frontend, if it was
+    running -- again.
+
+    Once the old backend has exited, every failure ends with the previous
+    version running again (``_restore_previous_version``); before this, a
+    failed button update left SAIVerse stopped
+    (docs/issues/updater_failure_leaves_backend_stopped.md).
+    """
+    # Outside the recovery below: if the old backend cannot be confirmed gone,
+    # starting another one could run two over the same world.
+    wait_for_owned_process_exit(
+        int(config["main_pid"]),
+        config.get("main_process_created_at"),
+    )
+    progress = _UpdateProgress()
+    stopped_frontend_mode: str | None = None
+    try:
+        # The preflight runs *after* the old backend has fully exited:
+        # everything the dying process (or the user, in that window) still
+        # wrote to tracked files is seen by this check, not just by the
+        # API-side one that ran before shutdown (adversarial review
+        # 2026-09-25, TOCTOU finding). Nothing has been mutated yet.
+        _preflight(project_dir, switch_channel, progress)
+        # The frontend holds node_modules open on Windows; stop it before
+        # anything changes. A failure here also leaves everything untouched.
+        stopped_frontend_mode = stop_frontend_servers(project_dir).mode
+        _snapshot(project_dir, python, progress)
+        _apply_code_and_dependencies(project_dir, python, progress)
+        if stopped_frontend_mode == FRONTEND_MODE_START:
+            build_frontend(project_dir)
+    except Exception:
+        # Not only UpdateError: whatever stops the update here, the backend is
+        # already gone and must come back.
+        _restore_previous_version(config, project_dir, python, progress, stopped_frontend_mode)
+        raise
 
     process: subprocess.Popen[Any] | None = None
     try:
         process = restart_application(config)
         payload = wait_for_healthy_restart(process, config)
-        write_completion_marker(project_dir)
-        LOGGER.info(
-            "Update complete: City=%s version=%s PID=%s",
-            payload.get("city_name"),
-            payload.get("version"),
-            process.pid,
-        )
-    except UpdateError:
+    except Exception:
         if process is not None:
             _terminate_spawned(process)
-        _rollback_code_and_dependencies(project_dir, python, old_revision)
-        rollback_process = restart_application(config)
-        try:
-            wait_for_healthy_restart(rollback_process, config)
-            LOGGER.error("Previous revision was restored and restarted successfully")
-        except UpdateError:
-            LOGGER.exception("Previous revision also failed to restart")
+        _restore_previous_version(config, project_dir, python, progress, stopped_frontend_mode)
         raise
+    write_completion_marker(project_dir)
+    LOGGER.info(
+        "Update complete: City=%s version=%s PID=%s",
+        payload.get("city_name"),
+        payload.get("version"),
+        process.pid,
+    )
+    # After the backend is healthy, so the screen comes back to a backend that
+    # answers.
+    _restart_frontend(project_dir, stopped_frontend_mode)
 
 
 def _load_config(config_path: Path) -> dict[str, Any]:
@@ -1135,6 +2186,18 @@ def _load_config(config_path: Path) -> dict[str, Any]:
     if project_dir != expected:
         raise UpdateError(f"Update config project mismatch: {project_dir} != {expected}")
     return config
+
+
+def _config_switch_channel(config: dict[str, Any] | None) -> str | None:
+    """The channel a detached run was asked to switch to, or None for an update."""
+    if not config:
+        return None
+    channel = config.get("switch_channel")
+    if channel is None:
+        return None
+    if channel not in CHANNEL_BRANCHES:
+        raise UpdateError(f"Update config names an unknown release channel: {channel!r}")
+    return str(channel)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1150,6 +2213,16 @@ def main(argv: list[str] | None = None) -> int:
             f"Exit {CHECK_INCONCLUSIVE}: could not tell, start anyway."
         ),
     )
+    parser.add_argument(
+        "--switch-channel",
+        choices=sorted(CHANNEL_BRANCHES),
+        help=(
+            "With --manual: switch this checkout to the other release line "
+            f"({CHANNEL_EARLY_ACCESS} = the {CHANNEL_BRANCHES[CHANNEL_EARLY_ACCESS]} branch, "
+            f"{CHANNEL_STABLE} = {CHANNEL_BRANCHES[CHANNEL_STABLE]}) instead of updating it. "
+            "The UI passes the same request through the detached config."
+        ),
+    )
     args = parser.parse_args(argv)
 
     project_dir = Path(__file__).resolve().parent.parent
@@ -1160,8 +2233,14 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(project_dir)
     config_path = args.config or project_dir / ".update_config.json"
     try:
+        if args.switch_channel is not None and not args.manual:
+            raise UpdateError(
+                "--switch-channel is only accepted with --manual; the UI passes the "
+                "channel through the update config"
+            )
         config = None if args.manual else _load_config(config_path)
-        run_update(config, project_dir)
+        switch_channel = args.switch_channel if args.manual else _config_switch_channel(config)
+        run_update(config, project_dir, switch_channel=switch_channel)
     except UpdateError as exc:
         LOGGER.error("Update aborted: %s", exc)
         return 1

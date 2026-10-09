@@ -42,6 +42,24 @@ python test_fixtures/test_api.py         # フルテスト
 python test_fixtures/test_api.py --quick # クイックテスト（LLM除く）
 ```
 
+## 画面を隔離したバックエンドへつなぐ
+
+バックエンド (18000) を起動したあと、Windows では `test_fixtures\start_test_frontend.bat` を実行する。画面は 18010 で開き、スクリプトが HTTP 中継用の `SAIVERSE_BACKEND_ORIGIN=http://127.0.0.1:18000` と音声通話用の `NEXT_PUBLIC_SAIVERSE_BACKEND_WS_HOST=127.0.0.1:18000` を設定する。手動起動なら:
+
+```bash
+cd frontend
+SAIVERSE_BACKEND_ORIGIN=http://127.0.0.1:18000 \
+NEXT_PUBLIC_SAIVERSE_BACKEND_WS_HOST=127.0.0.1:18000 npm run dev -- --port 18010
+```
+
+通常 API、アドオンの設定変更・SSE・音声ファイル、MCP の HTTP 中継は同じ接続先の選択関数を使う。旧名 `SAIVERSE_BACKEND_URL` しかない環境も互換動作し、両方が非空で異なるなら正式名を優先して警告する。**両方を未設定・空白にすると既定の 8000 (通常は本番) へ向く**。隔離テストでは必ず 18000 を明示する。値は末尾 `/` やパスを付けない origin にする。
+
+**音声通話の WebSocket は別経路**で、ブラウザから直接バックエンドへ接続し、Next.js の中継も `SAIVERSE_BACKEND_ORIGIN` も使わない。隔離時は `NEXT_PUBLIC_SAIVERSE_BACKEND_WS_HOST=127.0.0.1:18000` も必須。未設定・空白ではブラウザのホスト名の 8000 へ接続するため、本番への音声入力・LLM 呼び出し・会話保存が起こりうる。値はスキームやパスのない `host:port`。HTTP の画面では `ws`、HTTPS では `wss` を使う。別端末から開く場合は、そのブラウザから届く隔離バックエンドのホストを指定する。
+
+Next.js へは起動シェルまたは `frontend/.env.local` から渡す（ルートの `.env` だけでは渡らない）。production build を使う場合は build と start の両方に同じ値を渡し、変更時は再ビルド・再起動する。
+
+接続先の回帰検査だけなら `cd frontend && npm run test:backend-origin`。実際の設定・Route Handler を読み込むが、fetch はすべて fake に置き換える。未設定の 8000 も含めて実サーバーには通信せず、DB・ペルソナ・LLM を使わない。
+
 ## 状態の検分 (inspect_world.py)
 
 本番・テスト環境どちらの状態も、読み取り専用の検分 CLI で確認できます
@@ -117,7 +135,7 @@ test_fixtures\start_test_server.bat
 - `SAIVERSE_USER_DATA_DIR=test_data/user_data`
 - Discord ゲートウェイの 4 つの変数（次の「外部連携の扱い」）
 
-⚠️ **`SAIVERSE_HOME` を倒すだけでは隔離になりません。** この PC の環境に `SAIVERSE_LOG_PATH` が設定されていると、一部の組み込みツールが**読み込まれた瞬間に**その先 (本番の `~/.saiverse/log.txt`) へログの口を開いて書き込みます (2026-09-11 実害 — [issue](issues/import_time_log_handlers_escape_isolation.md))。隔離環境を組むときは `SAIVERSE_LOG_PATH` も隔離先へ倒すか、空にしてください。
+⚠️ **`SAIVERSE_HOME` を倒すだけで、ほかの環境変数まで隔離されたとは限りません。** `SAIVERSE_USER_DATA_DIR` や外部連携の設定も確認してください。2026-09-11 には、引き継いだ `SAIVERSE_LOG_PATH` によってツールの import が本番ログを触る実害がありました ([issue](issues/import_time_log_handlers_escape_isolation.md))。calculator / read_url_content / send_email_to_user の独自 FileHandler は撤去し、この 3 本は同変数を参照せず、本体のログ設定へ合流します。古い版やアドオンも含む検証では、残存する独自の保存先変数を調べ、隔離先へ向けるか環境から外してください。
 
 ### 外部連携の扱い
 

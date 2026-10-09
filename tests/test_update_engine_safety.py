@@ -166,7 +166,7 @@ def test_process_alive_fails_closed_without_psutil(monkeypatch) -> None:  # type
     """Without psutil, "cannot check" must not be reported as "already exited".
 
     That lie once let the updater proceed beside a live backend
-    (docs/issues/self_update_unsafe_without_psutil.md).
+    (docs/issues/archive/self_update_unsafe_without_psutil.md).
     """
     monkeypatch.setitem(sys.modules, "psutil", None)  # makes `import psutil` fail
     with pytest.raises(update_engine.UpdateError, match="psutil"):
@@ -213,17 +213,23 @@ def test_unverified_pid_is_never_signalled() -> None:
             update_engine.wait_for_owned_process_exit(4242, None, timeout=0)
 
 
-def test_dependency_failure_rolls_back_and_stops_before_restart(tmp_path: Path) -> None:
+def test_dependency_failure_rolls_back_then_restarts_only_the_previous_version(tmp_path: Path) -> None:
+    """The new version is never started after a failed phase; the rolled-back
+    previous one is (docs/issues/updater_failure_leaves_backend_stopped.md --
+    before, the backend was simply left stopped)."""
     config = {
         "venv_python": "python",
         "main_pid": 10,
         "main_process_created_at": 1.0,
     }
+    order: list[str] = []
     with patch.object(
         update_engine,
         "assert_git_update_ready",
         return_value="old-head",
     ), patch.object(update_engine, "wait_for_owned_process_exit"), patch.object(
+        update_engine, "stop_frontend_servers", return_value=update_engine.FrontendServers([], None)
+    ), patch.object(
         update_engine,
         "create_pre_update_snapshot",
         return_value="snapshot",
@@ -231,15 +237,21 @@ def test_dependency_failure_rolls_back_and_stops_before_restart(tmp_path: Path) 
         update_engine,
         "update_dependencies",
         side_effect=update_engine.UpdateError("pip failed"),
-    ), patch.object(update_engine, "_rollback_code_and_dependencies") as rollback, patch.object(
+    ), patch.object(
+        update_engine,
+        "_rollback_code_and_dependencies",
+        side_effect=lambda *a, **k: order.append("rollback"),
+    ) as rollback, patch.object(
         update_engine,
         "restart_application",
-    ) as restart:
+        side_effect=lambda *a, **k: order.append("restart") or MagicMock(pid=1),
+    ) as restart, patch.object(update_engine, "wait_for_healthy_restart", return_value={}):
         with pytest.raises(update_engine.UpdateError, match="pip failed"):
             update_engine.run_update(config, tmp_path)
 
     rollback.assert_called_once_with(tmp_path, "python", "old-head")
-    restart.assert_not_called()
+    restart.assert_called_once_with(config)
+    assert order == ["rollback", "restart"]
 
 
 def _rollback_with_reset(project: Path, *, lock_after_reset: bool):  # type: ignore[no-untyped-def]

@@ -1113,7 +1113,7 @@ HANDLERS: List[UpgradeHandler] = [
         description="Empty release edge 0.3.11 -> 0.3.12 (column drops run in migrate.py; building-id repair runs at startup).",
     ),
     # ---- v0.3.13 ----
-    # この版の DB 変更は Building.ITEM_DISPLAY_LIMIT の追加 1 本だけ (additive)。
+    # このバージョンの DB 変更は Building.ITEM_DISPLAY_LIMIT の追加 1 本だけ (additive)。
     # 追加列は migrate.py が既存 DB に足すので、更新の鎖に移行は要らない。
     UpgradeHandler(
         name="city_noop_v0_3_13",
@@ -1132,7 +1132,7 @@ HANDLERS: List[UpgradeHandler] = [
         description="Empty release edge 0.3.12 -> 0.3.13 (only additive column Building.ITEM_DISPLAY_LIMIT; migrate.py adds it).",
     ),
     # ---- v0.3.14 ----
-    # この版の DB 変更は追加列のみ (言語設定 CITY.LANGUAGE / AI.LANGUAGE、
+    # このバージョンの DB 変更は追加列のみ (言語設定 CITY.LANGUAGE / AI.LANGUAGE、
     # 反射判断 AI.REFLEX_JUDGMENT_MODEL ほか)。追加列は migrate.py が既存 DB に
     # 足すので、更新の鎖に移行は要らない。
     UpgradeHandler(
@@ -1150,5 +1150,164 @@ HANDLERS: List[UpgradeHandler] = [
         to_version="0.3.14",
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.13 -> 0.3.14 (only additive columns; migrate.py adds them).",
+    ),
+    # ---- v0.3.15 ----
+    # このバージョンに DB 変更はない (models.py / migrate.py とも v0.3.14 から無変更)。
+    UpgradeHandler(
+        name="city_noop_v0_3_15",
+        scope="city",
+        from_version="0.3.14",
+        to_version="0.3.15",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.14 -> 0.3.15 (no DB changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_15",
+        scope="ai",
+        from_version="0.3.14",
+        to_version="0.3.15",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.14 -> 0.3.15 (no DB changes).",
+    ),
+    # ---- v0.3.16 ----
+    # このバージョンに DB 変更はない (models.py / migrate.py とも v0.3.15 から無変更)。
+    UpgradeHandler(
+        name="city_noop_v0_3_16",
+        scope="city",
+        from_version="0.3.15",
+        to_version="0.3.16",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.15 -> 0.3.16 (no DB changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_16",
+        scope="ai",
+        from_version="0.3.15",
+        to_version="0.3.16",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.15 -> 0.3.16 (no DB changes).",
+    ),
+    # ---- v0.3.17 ----
+    # このバージョンの DB 変更は migrate.py が起動時に当てる: フィードの追加 (新表
+    # feed_fixture_config と列 feed_subscription.LAST_ATTEMPT_AT) は軽量パス、
+    # リアルタイム情報の全体トグル AI.REALTIME_INFO_ENABLED を項目別の 2 列へ
+    # 分けた変更は全書換パス (_migrate_realtime_info_to_item_toggles が旧値を
+    # 引き継ぐ)。建物の削除の残骸の付け替えは起動時の片付けが行う。
+    # どれも更新の鎖で行う移行ではないので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_17",
+        scope="city",
+        from_version="0.3.16",
+        to_version="0.3.17",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.16 -> 0.3.17 (schema changes are applied by migrate.py at startup).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_17",
+        scope="ai",
+        from_version="0.3.16",
+        to_version="0.3.17",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.16 -> 0.3.17 (schema changes are applied by migrate.py at startup).",
+    ),
+    # ---- v0.3.18 ----
+    # このバージョンはモデル定義 (builtin_data/models/) と画像生成ツールの変更だけで、DB の
+    # 変更も更新の鎖で行う移行も無いので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_18",
+        scope="city",
+        from_version="0.3.17",
+        to_version="0.3.18",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.17 -> 0.3.18 (no DB changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_18",
+        scope="ai",
+        from_version="0.3.17",
+        to_version="0.3.18",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.17 -> 0.3.18 (no DB changes).",
+    ),
+    # ---- v0.3.19 ----
+    # このバージョンは更新プログラム (scripts/update_engine.py) と画面の修正、モデル定義の
+    # 追加 (GPT-6.1 Sol の Codex 版) だけで、DB の変更も更新の鎖で行う移行も無いので、
+    # このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_19",
+        scope="city",
+        from_version="0.3.18",
+        to_version="0.3.19",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.18 -> 0.3.19 (no DB changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_19",
+        scope="ai",
+        from_version="0.3.18",
+        to_version="0.3.19",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.18 -> 0.3.19 (no DB changes).",
+    ),
+    # ---- v0.3.20 ----
+    # このバージョンは導入まわり (setup.bat / setup.sh と、そこから呼ぶスクリプト) と起動時の
+    # 確認の修正だけで、DB の変更も更新の鎖で行う移行も無いので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_20",
+        scope="city",
+        from_version="0.3.19",
+        to_version="0.3.20",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.19 -> 0.3.20 (no DB changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_20",
+        scope="ai",
+        from_version="0.3.19",
+        to_version="0.3.20",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.19 -> 0.3.20 (no DB changes).",
+    ),
+    # ---- v0.3.21 ----
+    # このバージョンは不具合の修正と画面の調整、使われていない API の撤去だけで
+    # (PR #346〜#370 とアドオンのカタログの修正)、DB の変更も更新の鎖で行う移行も
+    # 無いので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_21",
+        scope="city",
+        from_version="0.3.20",
+        to_version="0.3.21",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.20 -> 0.3.21 (no DB changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_21",
+        scope="ai",
+        from_version="0.3.20",
+        to_version="0.3.21",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.20 -> 0.3.21 (no DB changes).",
+    ),
+    # ---- v0.3.22 ----
+    # このバージョンはアドオンカタログの「導入時の質問と、アドオン専用の Python 環境」
+    # 一式 (進捗の小窓の立て直し・専用環境の修復の入口・min_saiverse_version の検査を
+    # 含む)。DB の schema 変更は無い。アップロードされたファイルの置き場所の移行と、
+    # 記録された絶対パスの書き換えは、冪等な起動時の処理 (saiverse/addon_migrations.py)
+    # で毎回行う形なので、更新の鎖では行わない。よってこのバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_22",
+        scope="city",
+        from_version="0.3.21",
+        to_version="0.3.22",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.21 -> 0.3.22 (no DB changes).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_22",
+        scope="ai",
+        from_version="0.3.21",
+        to_version="0.3.22",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.21 -> 0.3.22 (no DB changes).",
     ),
 ]

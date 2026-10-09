@@ -1551,7 +1551,10 @@ def _post_a_provider(monkeypatch, tmp_path):
     return response.json()
 
 
-def test_saving_a_provider_names_the_personas_that_could_not_switch(world, monkeypatch, tmp_path):
+def test_saving_a_provider_names_the_personas_that_could_not_switch(
+    world, monkeypatch, tmp_path, mock_provider_network,
+):
+    mock_provider_network("api.moonshot.cn")
     _world_with_a_persona_that_cannot_switch(world, monkeypatch)
 
     body = _post_a_provider(monkeypatch, tmp_path)
@@ -1562,8 +1565,9 @@ def test_saving_a_provider_names_the_personas_that_could_not_switch(world, monke
 
 
 def test_saving_a_provider_does_not_name_a_persona_that_the_later_reload_switched(
-    world, monkeypatch, tmp_path,
+    world, monkeypatch, tmp_path, mock_provider_network,
 ):
+    mock_provider_network("api.moonshot.cn")
     broken = _world_with_a_persona_that_cannot_switch(world, monkeypatch)
     drops = []
 
