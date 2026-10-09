@@ -1,14 +1,14 @@
 # 自律行動 v2 — 実機初日で浮いた「前提レベル」の設計課題（棚卸し）
 
-**状態**: 実機再検証待ち (凍結前の台帳の次アクション「次 = 実機再検証 → 暮らし Pulse のプロンプト設計 → episode.md 実装 → B4」は末尾の「凍結」節に移送済み。episode.md は v3 §7 で退役済み)。**経緯**: 2026-08-23 凍結 (v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED = False` で判断点と時間割のコマが発火せず、実機検証が成立しなかった) → 2026-09-25 develop-v0.4 で封印解除 (止め具を定数ごと撤去、[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §11.1)。実機検証はこれから。
+**状態**: 決着 — 2026-10-09 v0.4 段 1 で v2 の運転ごと撤去され、ほぼ全項目が対象消滅 (末尾の「決着」に項目ごとの仕分け)。旧状態: 実機再検証待ち (凍結前の台帳の次アクション「次 = 実機再検証 → 暮らし Pulse のプロンプト設計 → episode.md 実装 → B4」は末尾の「凍結」節に移送済み。episode.md は v3 §7 で退役済み)。**経緯**: 2026-08-23 凍結 (v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED = False` で判断点と時間割のコマが発火せず、実機検証が成立しなかった) → 2026-09-25 develop-v0.4 で封印解除 (止め具を定数ごと撤去、[autonomous_behavior_v3.md](../../intent/autonomous_behavior_v3.md) §11.1)。実機検証はこれから。
 
 > **これは何**: 自律行動 v2 の実装と概念再編（⑥ Memory Atlas）が一通り終わり、**実機初日
 > (2026-07-12) に実際に動かして初めて見えた**、前提そのものを疑う設計課題の集合。
-> 個々のバグ修正（[fixes handoff](../handoff/2026-07-12_first_day_live_fixes_handoff.md) の §3/§6）
+> 個々のバグ修正（[fixes handoff](../../handoff/2026-07-12_first_day_live_fixes_handoff.md) の §3/§6）
 > とは層が違う——あちらは「実装が仕様どおりか」、こちらは **「そもそもこの仕様でいいのか」**。
 >
 > まはーの発散（前提の疑い）を、メティスが受けと調査で裏取りしながら並べたもの。
-> 共通根 **A / B** の2本で束ね、[概念再編](../intent/concept_consolidation.md)の残件と
+> 共通根 **A / B** の2本で束ね、[概念再編](../../intent/concept_consolidation.md)の残件と
 > 合流させるためのハブ。
 >
 > **状態**: 発散完了・ドキュメント化・概念再編残件の棚卸し＋合流完了。**2026-07-13 各節に
@@ -17,7 +17,7 @@
 > B3 神モードUI 待ち / B4 独立早め着手）。**束C「Track の意味論の再整理」が第3の根として浮上**。
 > **2026-07-13 Fable 検分＋パッケージング合意**: 先行独立2件（B4 / redundant 症状止め）＋
 > intent 二本（一本目=ライフ〔A3/A4＋束C〕/ 二本目=エピソードの記憶と見せ方〔A1/A2＋B1/X1〕）。
-> **intent 一本目 [life.md](../intent/life.md) v0.1 起草済 → まはーレビュー待ち**。
+> **intent 一本目 [life.md](../../intent/life.md) v0.1 起草済 → まはーレビュー待ち**。
 > 残る「未決の論点」（A1 監査の是非・危険マーク処遇等）は二本目に集約。**実装にはまだ入らない。**
 
 ---
@@ -54,7 +54,7 @@ B1（自律行動を世界＝チャットに見せる）で*出す情報の粒�
 
 - **現状**: 作業セッションは、生ログ（各ラウンドのやり取り）を volatile に、締めの
   ダイジェスト1件だけを committed（本記録）にする。設計理由は「記憶の誠実さ／接地原則」
-  （[autonomous_behavior_v2.md](../intent/autonomous_behavior_v2.md) §4.3・§8-5）——生ログには
+  （[autonomous_behavior_v2.md](../../intent/autonomous_behavior_v2.md) §4.3・§8-5）——生ログには
   下書き・やりかけ・「やったフリ」が混じるので、それを本記録にすると後でペルソナが未検証の
   主張を事実として想起してしまう、という懸念。
 - **疑ってる前提**: ダイジェストが正史である、という前提そのもの。
@@ -210,7 +210,7 @@ B1（自律行動を世界＝チャットに見せる）で*出す情報の粒�
   （現状 CityMap コンポーネントで居場所は見える）。
 - **疑ってる前提 / 論点（まはー）**: **ペルソナを指定して、そのペルソナがいる Building に
   飛べる仕組み**があってよい（現状は「マップで探す」止まりで、直接ジャンプ導線は無い）。
-- **裁定（まはー、2026-07-13）— 神モードUI 待ち**: これは[神モードUI](../overview/in_flight.md)
+- **裁定（まはー、2026-07-13）— 神モードUI 待ち**: これは[神モードUI](../../overview/in_flight.md)
   （住民/神モードの二層プラットフォーム、🔵設計中）で扱う。今じゃない。本設計の主線からは外す。
 - **束**: B（→ 神モードUI 案件へ委譲）。
 
@@ -290,11 +290,11 @@ A/B とは別に浮いた第3の根。まはーの整理から立った。
 - **まはーの整理（2026-07-13）**: **Track ＝ 目的の指し示し**。時間が過ぎたら勝手に pending
   されるべきものではない。時間が過ぎ、会話がひと段落し、「さあ時間割にある自分の行動をしよう、
   するぞ」となって**初めて Track が切り替わる可能性がある**、くらいのもの。
-- **既裁定との接続（Fable 検分 2026-07-13）**: この整理は [life_concept_map.md](../intent/persona_cognition/life_concept_map.md)
+- **既裁定との接続（Fable 検分 2026-07-13）**: この整理は [life_concept_map.md](../../intent/persona_cognition/life_concept_map.md)
   §10.1 の確定裁定「running / alert 状態は**廃止**——出来事（open）と呼びかけへ移管」（2026-07-06、
   まはーレビュー済み v1.0）と同じ結論。つまり束C はゼロからの新設計ではなく **§10.1 の実行計画**。
   wait_response 30 分タイムアウト自体は同 §11 で「出来事の運用境界としてそのまま残す」と裁定済み——
-  直すのはタイムアウトが Track の状態まで動かす越権の方。解決設計は [life.md](../intent/life.md) §7（案 Y）。
+  直すのはタイムアウトが Track の状態まで動かす越権の方。解決設計は [life.md](../../intent/life.md) §7（案 Y）。
 - **帰結・方向**:
   1. **wait_response の自動 pause の設計を、Track の新しい意味論に合わせて見直す**（時間で勝手に
      pending しない。切り替わりは「次の行動に移る」判断点で起きる）。
@@ -302,7 +302,7 @@ A/B とは別に浮いた第3の根。まはーの整理から立った。
      長期記憶に残っても大丈夫（→ [short_term_to_long_term_memory_filtering] = A1/A2 の
      「何を committed に残すか」と接続。ムダ通知を消せば通知そのものは残してよくなる）。
 - **配下 / 関連 issue**: redundant_track_switch_notification（表面化・早め）/
-  [user_utterance_forced_response_on_running_conflict](user_utterance_forced_response_on_running_conflict.md)
+  [user_utterance_forced_response_on_running_conflict](../user_utterance_forced_response_on_running_conflict.md)
   （同じ `on_user_utterance` 経路の別論点）。
 - **概念再編との関係**: Track 解体＝目的の木 は `persona_task` への*構造*分化を済ませたが、
   Track に残った「今の目的の指し示し」役割の**意味論（いつ切り替わるか）**がまだ整理されて
@@ -330,7 +330,7 @@ A/B とは別に浮いた第3の根。まはーの整理から立った。
 |---|---|---|---|
 | running→pending | 30分無応答（`AI.USER_CONV_TIMEOUT_MINUTES`） | **会話 Track 限定** | `track_manager._handle_wait_response_timeout`→`pause`、provider=`saiverse_manager._wait_response_timeout_provider` |
 | running→pending（displaced） | 別 Track が activate された副作用 | 既存 running 全部 | `activate()` L557-559 |
-| ~~pending/unstarted→alert~~ | ~~自律先制: Track param が閾値超過~~ | ~~自律 Track~~ | **撤去済み**（2026-08-11、[track_retirement](../intent/track_retirement.md) §5-B ②）。閾値の書き手が存在せず一度も発火しなかった |
+| ~~pending/unstarted→alert~~ | ~~自律先制: Track param が閾値超過~~ | ~~自律 Track~~ | **撤去済み**（2026-08-11、[track_retirement](../../intent/track_retirement.md) §5-B ②）。閾値の書き手が存在せず一度も発火しなかった |
 | pending→alert | ユーザー発話＋別 running と衝突→MetaLayer 仲裁 | 会話 Track | `user_conversation_handler:566` |
 | pending/unstarted→running | ユーザー発話＋running 衝突なし→直接 activate | 会話 Track | `user_conversation_handler:545` |
 
@@ -356,7 +356,7 @@ deferred な理由: Pulse 中の直接切替は LLM が次 Track 作業を今の
 > **追記 (2026-07-29)**: この「状態遷移ではない」という理由で案 Y の棚卸しから外したのが誤りだった。
 > ⑤ は running を**書く**側ではないが**読む**側であり、案 Y が running の意味を変えた（会話終了後も
 > running のまま残る）影響をまともに受ける。結果、再起動のたびに終わった会話へタイムアウトが発火し
-> post_conversation が空撃ちされていた（修正と実害は [life.md](../intent/life.md) §7.3 の表と改訂履歴）。
+> post_conversation が空撃ちされていた（修正と実害は [life.md](../../intent/life.md) §7.3 の表と改訂履歴）。
 > **教訓**: 状態の意味を変える改修の棚卸しは「その状態を書く箇所」ではなく「**読む箇所**」を数える。
 > 書き手は改修の当事者なので視界に入るが、読み手は無関係に見えて静かに壊れる。
 （`saiverse/day_scenario.py` の create/pause/complete は DaySimulator 上のシム専用・本番外。）
@@ -371,7 +371,7 @@ redundant issue の芯。自律 Track は既に「時間で勝手に pending し
 
 ## 概念再編（⑥）の残件との合流 — 棚卸し結果（2026-07-12）
 
-**⑥ umbrella の現況**: [concept_consolidation.md](../intent/concept_consolidation.md) は P4 まで
+**⑥ umbrella の現況**: [concept_consolidation.md](../../intent/concept_consolidation.md) は P4 まで
 実装完了・**まはー実機検証待ち**。Memory Atlas（土地＝生ログ / 地図帳＝編纂物 / クリップ＝統一参照）
 ＋目的の木（`persona_task`）＋Note→テーマノード移行は landed。**⑥ 本体の「残件」は実機検証で
 あって新規設計ではない**——A/B は⑥の *次* であって蒸し返しではない。
@@ -384,10 +384,10 @@ redundant issue の芯。自律 Track は既に「時間で勝手に pending し
 | issue | A のどれ | 中身 |
 |---|---|---|
 | [general_chronicle_metabolism_trigger](general_chronicle_metabolism_trigger.md) | **A2 の実装レバー** | 「Chronicle 生成 trigger を Metabolism 押し出し対象判定に変更。今コンテキストに残っているもののあらすじは不要（LLM が直接読める）」＝A2 の「近い＝詳細 / Metabolism で畳む / できごと単位 LoD」そのもの |
-| [short_term_to_long_term_memory_filtering](short_term_to_long_term_memory_filtering.md) | A1 / A2 | 短期記憶（Session）→長期記憶の選別（システム通知を入口で止める）。何を committed に残すか＝A1「何が正史か」の入口側 |
-| [spell_round_limit_redesign](spell_round_limit_redesign.md) | A3 / A4 | round 上限到達時の line 別挙動（main＝棄却 / sub＝残 spell 実行＋次 Pulse 継続）。まはー設計済。予算・ラウンドの意味論 |
-| [autonomous_work_single_pulse_completion](autonomous_work_single_pulse_completion.md) | A（単位） | 「1 Pulse で作業を完結したがる / 複数 Pulse にまたがる作業設計」。**実例が実機と同じ task:4「やりたいこと候補の洗い出しと desire プールへの蓄積」**＝この issue(2026-06-29) は実機挙動を予言していた |
-| [beat_concept_not_typed_in_implementation](beat_concept_not_typed_in_implementation.md) | A（単位） | 最小行動単位 Beat が実装に型として無い。単位の語彙整備 |
+| [short_term_to_long_term_memory_filtering](../short_term_to_long_term_memory_filtering.md) | A1 / A2 | 短期記憶（Session）→長期記憶の選別（システム通知を入口で止める）。何を committed に残すか＝A1「何が正史か」の入口側 |
+| [spell_round_limit_redesign](../spell_round_limit_redesign.md) | A3 / A4 | round 上限到達時の line 別挙動（main＝棄却 / sub＝残 spell 実行＋次 Pulse 継続）。まはー設計済。予算・ラウンドの意味論 |
+| [autonomous_work_single_pulse_completion](../autonomous_work_single_pulse_completion.md) | A（単位） | 「1 Pulse で作業を完結したがる / 複数 Pulse にまたがる作業設計」。**実例が実機と同じ task:4「やりたいこと候補の洗い出しと desire プールへの蓄積」**＝この issue(2026-06-29) は実機挙動を予言していた |
+| [beat_concept_not_typed_in_implementation](../beat_concept_not_typed_in_implementation.md) | A（単位） | 最小行動単位 Beat が実装に型として無い。単位の語彙整備 |
 | landscape §9: working_memory → Session | A（単位） | 短期記憶の単位＝Session 概念（working_memory テーブルは死亡） |
 
 → **A は「新規の思いつき」ではなく、優先度低で個別放置されてきた課題群の共通根**（Pulse→できごと
@@ -397,7 +397,7 @@ redundant issue の芯。自律 Track は既に「時間で勝手に pending し
 
 | issue | B のどれ | 中身 |
 |---|---|---|
-| [map_click_move_sidebar_not_updated](map_click_move_sidebar_not_updated.md) | B3（近縁） | 移動時の UI 同期。会話導線・居場所表示に隣接 |
+| [map_click_move_sidebar_not_updated](../map_click_move_sidebar_not_updated.md) | B3（近縁） | 移動時の UI 同期。会話導線・居場所表示に隣接 |
 | （B1 / B2 / B4 に直接対応する既存 issue は無い） | — | チャット可視化・Item Open 共有・型→施設は本書が初出。B4 の調査事実（resolve_facility 未配線・施設タグ0）はここが起点 |
 
 → **B は既存 issue が薄い＝盲点だった**。世界に向く last mile は「作ったが繋いでいない/そもそも
@@ -405,7 +405,7 @@ redundant issue の芯。自律 Track は既に「時間で勝手に pending し
 
 ### 横断（A/B どちらの束でもない負債）
 
-- [persona_memory_not_self_contained](persona_memory_not_self_contained.md)（**P3c 可搬性**）:
+- [persona_memory_not_self_contained](../persona_memory_not_self_contained.md)（**P3c 可搬性**）:
   ペルソナ記憶が main DB に散在し丸ごと持ち運べない。⑥ P3c X案裁定に伴う既知の後回し負債。
   A/B の再設計で記憶の単位・保存先を触るなら、可搬性も同時に視野に入る接点。
 
@@ -428,8 +428,8 @@ redundant issue の芯。自律 Track は既に「時間で勝手に pending し
 4. ~~パッケージング（Fable 検分 2026-07-13）~~ 完了 — 先行独立2件（B4 / redundant 症状止め）＋
    intent 二本（**一本目「ライフ」= A3/A4＋束C** / **二本目「エピソードの記憶と見せ方」= A1/A2＋B1/X1**）。
    未決の世界観判断は二本目に集約し、待ちの少ない一本目から進める。
-5. ~~intent 一本目の起草~~ 完了 — [life.md](../intent/life.md) v0.2（session.md 吸収・束C 案 Y・予算世代交代。**v0.1 レビュー済: 案 Y 承認＋裁定 3 件反映**）。
-6. ~~intent 二本目の起草~~ 完了 — [episode.md](../intent/episode.md) v0.1（三つの顔＝記憶 LoD / 世界への露出 / 監査。概要＝Lv1 Chronicle 共有部品化・AUTONOMOUS 化・監査役＋危険マーク・チャット三段露出・Beat 型化・既存 issue 6 本吸収）。
+5. ~~intent 一本目の起草~~ 完了 — [life.md](../../intent/life.md) v0.2（session.md 吸収・束C 案 Y・予算世代交代。**v0.1 レビュー済: 案 Y 承認＋裁定 3 件反映**）。
+6. ~~intent 二本目の起草~~ 完了 — [episode.md](../../intent/episode.md) v0.1（三つの顔＝記憶 LoD / 世界への露出 / 監査。概要＝Lv1 Chronicle 共有部品化・AUTONOMOUS 化・監査役＋危険マーク・チャット三段露出・Beat 型化・既存 issue 6 本吸収）。
 7. **（次）episode.md まはーレビュー → 両 intent の実装順確定 → 実装**。
 
 **現時点で実装には入らない。** 先行独立2件（B4 / redundant 症状止め）はレビューと並行して着手可。
@@ -447,10 +447,10 @@ A×B交差(X1=チャットUIでのBeat/Pulse/Beat見せ方)も記入。
 **2026-07-13 まはー詰め: 束A方向確定(頂点=新概念「ライフ」=ライフ→エピソード→パルス→ビート、A1外部監査役+危険マーク→AUTONOMOUSアスペクト化、A2できごと単位LoD+畳読スペル=memory_read統合、A3/4予算・キャッシュをライフに吸収・モデル別均等/自由モード)、束B裁定(B1+X1統合UX=エピソード枠投下→クリックで詳細→概要=Lv1 Chronicle・他ペルソナ冒頭通知のみ / B2スコープアウト / B3神モードUI待ち / B4独立早め)、そして第3の根 束C「Track意味論の再整理」浮上(Track=進行状態でなく目的の指し示し・時間で勝手にpendingするな、[redundant_track_switch]が症状・早め対応)**。
 **2026-07-13 Fable検分**: 束C=life_concept_map §10.1既裁定(running/alert→出来事へ移管)の実行と判明・Session×ライフは「制御プレーン/データプレーン」関係(育てる先ではない)・A1のAUTONOMOUS化はキャッシュ構造変更を伴う(二本目で数字検討)。
 **パッケージング合意: 先行独立2件(B4 / redundant症状止め) + intent二本(一本目=ライフ[A3/A4+束C] / 二本目=エピソードの記憶と見せ方[A1/A2+B1/X1、未決世界観判断はこちらに集約])**。
-**intent一本目 [life.md](../intent/life.md) v0.2 レビュー済(2026-07-13)**: 時間階層(ライフ→エピソード→パルス→ビート)・宣言(時刻+コマ予算+均等/自由モード)・session.md §6回答・束C=案Y(「いま」の読み出しを開いているエピソードへ一本化・wait_responseのpause除去→redundant構造的根治)・予算=コマ+ラウンド×κのライフ台帳。
+**intent一本目 [life.md](../../intent/life.md) v0.2 レビュー済(2026-07-13)**: 時間階層(ライフ→エピソード→パルス→ビート)・宣言(時刻+コマ予算+均等/自由モード)・session.md §6回答・束C=案Y(「いま」の読み出しを開いているエピソードへ一本化・wait_responseのpause除去→redundant構造的根治)・予算=コマ+ラウンド×κのライフ台帳。
 **まはー裁定: 案Y承認・keep-aliveライフ従属GO・動的ライフ自動生成なし・惜しい谷の猶予なし・ペルソナ提示はtailシステム通知**。
 Track Chronicle=head搭載のget_running参照を§7.3に記録(挙動不変)、読み込み側世代交代+書き込み側のLv1 Chronicle統合は二本目の主題。
-**intent二本目 [episode.md](../intent/episode.md) v0.1 起草済(2026-07-13)**: エピソードに三つの顔(記憶LoD/世界への露出/監査)、概要=エピソードLv1 Chronicle を共有部品化(close時即生成・件数triggerを世代交代)、作業セッションAUTONOMOUS化(生ログ正史化、A2畳みとセットで成立・WORKERは会話中の分身用に残す)、外部監査役+危険マーク(エピソードラベル→メッセージへJOINで降ろす+想起時定型文)、チャット三段露出(枠投下→ライブ詳細→概要)、Beat型化=runtime_llm分割Phase 1のBeatExecution採用、既存issue 6本吸収(各issueにポインタ済)、Track Chronicle書き込み/読み込み両側の世代交代を確定。
+**intent二本目 [episode.md](../../intent/episode.md) v0.1 起草済(2026-07-13)**: エピソードに三つの顔(記憶LoD/世界への露出/監査)、概要=エピソードLv1 Chronicle を共有部品化(close時即生成・件数triggerを世代交代)、作業セッションAUTONOMOUS化(生ログ正史化、A2畳みとセットで成立・WORKERは会話中の分身用に残す)、外部監査役+危険マーク(エピソードラベル→メッセージへJOINで降ろす+想起時定型文)、チャット三段露出(枠投下→ライブ詳細→概要)、Beat型化=runtime_llm分割Phase 1のBeatExecution採用、既存issue 6本吸収(各issueにポインタ済)、Track Chronicle書き込み/読み込み両側の世代交代を確定。
 **両intentレビュー済(2026-07-13 まはー)**: life=案Y承認+裁定3件 / episode=メッセージ単位マーク将来許可(X・外部有害対応へ転用視野)+枠投下語彙は型ベース確定(補完2件レビュー残)+§6.3にhead搭載退役の根拠明記。
 **実装開始(lifeから、4フェーズ)**: **Phase 1=案Y手術 完了(6257b6a)** — wait_response pause撤去・会話中判定エピソード移管・meta_layer自己ゲート例外(social救済)・redundant根治(回帰固定・194 passed)。
 使い捨て症状止めは不要化で作らず。
@@ -471,7 +471,7 @@ v1亡霊(SettingsModal間隔UI・LifeView間隔2種フォーム+`PUT /activity/i
 **実機二夜目(2026-07-14深夜)の破綻→即日修正(96062ce)**: aifi 01:00-02:00臨時ライフ・01:03発火でslot=01:00が3分のズレで時間割全体を保存拒否+リカバリ経路ゼロ(watchdogの再発火判定が「行なし」でライフ確定済みの行を編成済みと誤認)。
 修正=保存検証を**丸め+部分救済**に作り直し(過去開始→現在時刻へクランプ・衝突は順序保持・丸め先なしのみ個別除外・調整はエコーに日常語)+watchdog判定を「行なし or コマ0件」に。
 再現テスト固定・フル2316 passed。
-**掃除の追加裁定(2026-07-14)**: まはーの言った「タイマー停止」=DebugPanelの完全手動モードと判明→[issue起票](archive/debug_full_manual_mode_v1_ghost.md)(退役or実態縮退は実需確認後。2026-08-23 に UI と API を撤去して解決)。
+**掃除の追加裁定(2026-07-14)**: まはーの言った「タイマー停止」=DebugPanelの完全手動モードと判明→[issue起票](debug_full_manual_mode_v1_ghost.md)(退役or実態縮退は実需確認後。2026-08-23 に UI と API を撤去して解決)。
 SettingsModalのAutonomy start/stopボタン(ACTIVITY_STATE駆動と重複)も掃除候補のまま保留。
 **実機三夜目(2026-07-14朝)の不具合3件→同日修正**: ①**時間割が00:30〜00:35の6分間に潰れた**(air_city_a、ライフ07:00〜01:00)。
 真因は深夜跨ぎで**同じ"00:30"を前半と後半が正反対に解釈**していたこと——前半(day_openのLLM指示「開始時刻の厳密昇順」・`sanitize_timetable`の文字列ソート・`_validate_and_normalize_slots`の暦順検証)は就寝00:30を「一日の最初」、後半(96062ceの丸め=ライフ拡張分基準)は「一日の最後(ext=1050)」。
@@ -520,7 +520,7 @@ OFF時は二重ガード(chat.py が summary キー自体を載せない + `buil
 **同型の漏れをもう1件同日修正**: `judgment_points.build_on_event_situation_text` がイベント到着判断の「いまの活動」を running Track の種別で決めており、終了済み会話について「ユーザーと会話中です」をペルソナへ渡していた(判定を `day_plan.is_in_user_conversation` へ一本化、`_is_in_user_conversation` を公開名へ改称して実装を1つに保つ)。
 **Codex攻撃レビュー3件**: 判定不能(DB読取失敗)を「張らない」で終わらせると開いた会話が永久に閉じない件を同日修正(判定を`Optional[bool]`化、None は判断を撃たず読み取りのみ30/120/300秒でバックオフ再試行 — 当初あてにした「次のユーザー発話で張り直される」は別Track running時に発話がalert経路へ入るため常には成立しないと判明)。
 残り2件はまはー裁定でissue化=[孤児化した会話の出来事](open_conversation_orphaned_by_track_displacement.md)(high・押し出しでタイマーだけ消え出来事が閉じない→コマ繰り下げ上限で予定行動が消える。
-**この修正が作った欠陥ではなく既存**)と[再起動ごとの期限延長](wait_response_deadline_extends_on_every_restart.md)(medium)。
+**この修正が作った欠陥ではなく既存**)と[再起動ごとの期限延長](../wait_response_deadline_extends_on_every_restart.md)(medium)。
 **再レビューでさらに1件を同日修正**: その再試行が、待つ間にユーザー発話で張られたタイマーを同キーで上書きし期限を最大300秒後退させる競合を持ち込んでいた(当初「同じ家族の穴」として期限延長issueへ先送りしたが、あちらは案Y以前からの`base_time`の話=**別物を同じ箱に入れた誤った仕分け**)。
 `_wait_response_timer_already_armed`で「有効な予約が既にあるなら再確立しない」歯止め。
 当初テストが`None→True`の単純経路しか踏まず競合を検出できなかった点も指摘どおりでユーザー発話の割り込み筋を回帰に追加。
@@ -540,4 +540,24 @@ OFF時は二重ガード(chat.py が summary キー自体を載せない + `buil
 
 > 束A (単位の世代交代)・束B (last mile)・束C (Track 意味論) を intent 二本 (life.md / episode.md) へ束ねて設計、life.md は4フェーズ+改修A/B まで実装済み・実機で出た破綻や不具合も消し込み済み。次 = 実機再検証 → 暮らし Pulse のプロンプト設計 (私→まはーレビュー) → episode.md 実装 → B4。
 
-凍結の理由: 次の一手だった「実機再検証」は起床判断と時間割のコマが発火して初めて成立するもので、止め具の下では走らない。[episode.md](../intent/episode.md) は別途 v3 §7 で退役済み ([autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md))、[life.md](../intent/life.md) はライフの設計ごと v3 §5 のティック設計が引き取る形になっている。再開は v0.4 で運転を配線するときで、そのとき束A〜Cの積み残しを v3 の設計と突き合わせ直す。
+凍結の理由: 次の一手だった「実機再検証」は起床判断と時間割のコマが発火して初めて成立するもので、止め具の下では走らない。[episode.md](../../intent/episode.md) は別途 v3 §7 で退役済み ([autonomous_behavior_v3.md](../../intent/autonomous_behavior_v3.md))、[life.md](../../intent/life.md) はライフの設計ごと v3 §5 のティック設計が引き取る形になっている。再開は v0.4 で運転を配線するときで、そのとき束A〜Cの積み残しを v3 の設計と突き合わせ直す。
+
+## 決着 (2026-10-09) — v2 の運転の撤去による仕分け
+
+[v0.4 実装計画](../../intent/autonomous_behavior_v04_plan.md) 段 1 (コミット 869939bd ほか) で、時間割・コマ・予算ゲート・作業セッション・コマの締め・セッション終了判断・起床就寝の LLM 判断・目的の木・episodes の読み口が撤去された。本書は v2 の運転が前提の棚卸しなので、計画 §7 の予定どおり段 1 の後に項目ごとに仕分けた。
+
+| 項目 | 仕分け | 理由と行き先 |
+|---|---|---|
+| A1 ダイジェスト正史 / 生ログの扱い | 対象消滅 (段 1) | ダイジェストを書く作業セッションとセッション終了判断が撤去された。v3 では session_digest ごと消え、ティックがメインラインに書く本人の言葉がそのまま記憶になる (v3 §7.1) |
+| A2 volatile の畳み単位 / できごと単位の LoD | 対象消滅 (段 1) | 単位にしようとした「できごと」(episodes) は v3 §7 で専用の記録行を持たなくなり (書き込みは 2026-08-22、読み口は段 1 で撤去)、volatile の生ログを作る作業セッションも消えた。畳む時機を Metabolism に寄せる論点は、退場の設計 ([chronicle_eviction](../../intent/chronicle_eviction.md)・[arasuji_levels](../../intent/arasuji_levels.md)) が持つ |
+| A3 予算の単位 (ラウンド → コマ) | 対象消滅 (段 1) | ラウンドもコマも撤去された。予算 (回数) の設定そのものは v0.4 計画の段 3 で T (ティックの間隔) に置き換わる (v3 §5) |
+| A4 キャッシュ生存を保証する仕組み | 引き継ぎ (v3 §5) | 均等モードで T ≦ 50 分のティックが保温を担う設計が引き取った。実装は v0.4 計画の段 3 (ティックの運転・keep-alive の発火の見直し) |
+| B1 自律行動がチャットに出ない | 決定で上書き | 2026-10-09 まはー決定 1: ティックの出力はチャットに出さず、本人の記憶のメインラインにだけ書く。観察は Pulse タイムラインの表示の復活 (v0.4 計画の段 4)、行動全体の俯瞰は神モード UI と合わせて別途。街の一日を眺める面はできごと UI (v3 §9-9) |
+| B2 自律行動の成果物 Item が Open で作られ続ける | 生き残る (v2 と無関係) | 2026-07-13 の裁定どおり別の issue へ切り出した: [item_open_state_shared_between_personas.md](../item_open_state_shared_between_personas.md)。部屋の様子の量の側は [room_item_display_cap](../../intent/room_item_display_cap.md) で手当て済み |
+| B3 勝手な移動で会話導線が切れる / ペルソナ指定ジャンプ | 引き継ぎ (神モード UI) | 2026-07-13 の裁定どおり、台帳の「神モード UI」の行が持つ |
+| B4 型 → 公共施設への移動が休眠 | 対象消滅 (段 1) | コマの行き先を型から解く `resolve_facility` は時間割と一緒に撤去された。Building の施設タグ (`FACILITY_ROLES`) と head の「行ける場所」は残っている (`saiverse/facility_map.py`) |
+| X1 チャットでの Beat / Pulse の見せ方 | 解決済み (別件) | 「1 Beat = 1 吹き出し」は [pulse_beats_merge_into_single_record](pulse_beats_merge_into_single_record.md) (2026-09-13 完了) で入った。Beat の型化の残りは [beat_concept_not_typed_in_implementation](../beat_concept_not_typed_in_implementation.md) |
+| C1・C2 Track の意味論 | 対象消滅 (先行) | Track ランタイムは 2026-08-22 にモジュールごと削除された ([track_retirement.md](../../intent/track_retirement.md) §9)。段 1 より前に消えていた |
+| 合流した既存 issue (束A の 6 本ほか) | 各 issue が持つ | 本書は束ねのハブだっただけで、各 issue の状態はそれぞれの文書が持つ |
+
+本書は archive へ移した。経緯 (実機初日〜凍結) は上の節にそのまま残す。

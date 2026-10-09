@@ -1,6 +1,7 @@
 # Intent: 判断点の入出力仕様 (自律行動 v2)
 
 **ステータス**: 実装済み・実機検証待ち (2026-07-19、W1)。当時の 5 種 finalize と on_event 入口を実行台帳に載せ (A2/A7/A8/A9/A11)、§6 の digest 統合 (a') も実装完了 (コミット 3f76619 / 7b2436c / e0ee4ff)。工程は [完了計画書](../../overview/audit_remediation_plan.md) W1
+**⚠ 2026-10-09 (v0.4 段 1) — develop-v0.4 に残る判断点は on_event (イベント到着) の 1 種だけ**。起床 (day_open)・就寝 (day_close) は退役し、ライフの確定と節目は機械の帳簿処理になった。セッション終了 (post_session) は作業セッションごと撤去された。各節の見出しに退役の印を付け、中身は経緯として残す。on_event の選択肢は insert_slot が add_task に替わった (§7)。工程は [v0.4 実装計画](../autonomous_behavior_v04_plan.md) 段 1。v0.3 (develop) には 4 種のコードが残っているが、止め具で発火しない。
 **⚠ 2026-08-22 (束 6c) 時点の生存範囲**: 判断点は **4 種**（起床・セッション終了・イベント到着・就寝）。会話終了判断は退役し (§5)、欲求・Track・エピソードに依存していた欄は供給源ごと落ちた (§3.1・§3.2・§4・§6・§8)。**自律行動 v3 が本書全体の上位計画**で、判断点そのものの行き先はティック (v3 §5・§6) — 本書は「v0.4 で置き換わるまでの現行仕様」を記述する。経緯は末尾の[経緯](#経緯)。
 **親 Intent**: [`../autonomous_behavior_v2.md`](../autonomous_behavior_v2.md)（三本柱の骨格。本書はその §4.2 判断点の詳細仕様）/ [`../autonomous_behavior_v3.md`](../autonomous_behavior_v3.md)（上位の置き換え計画）
 **様式の継承元**: [`meta_judgment_structured.md`](meta_judgment_structured.md)（構造化出力＋finalize ツール＋メインキャッシュ JSON 非混入。v1 メタ判断そのものは 2026-08-14 に退役し、様式だけが判断点へ継承されている）
@@ -29,10 +30,12 @@ meta_judgment v2 で確立したパターンをそのまま継承する：
 
 | 判断点 | 発火 | 役割 |
 |---|---|---|
-| 起床 (day_open) | PersonaSchedule の起床時刻 | 時間割の編成＋予算配分 |
-| セッション終了 (post_session) | セッションランナーの終了 | タスクの裁定（接地検証つき）＋実績要約（digest）の生成＋次への接続 |
-| イベント到着 (on_event) | 来訪・alert・システムイベント | 反応の選択 |
-| 就寝 (day_close) | PersonaSchedule の就寝時刻 or 最終コマ終了 | 予定と実際のふりかえり＋明日の自分へのメモ |
+| ~~起床 (day_open)~~ | ~~PersonaSchedule の起床時刻~~ | ~~時間割の編成＋予算配分~~ — **退役 (2026-10-09 段 1 — ライフは機械の帳簿処理へ)** |
+| ~~セッション終了 (post_session)~~ | ~~セッションランナーの終了~~ | ~~タスクの裁定（接地検証つき）＋実績要約（digest）の生成＋次への接続~~ — **退役 (2026-10-09 段 1 — 作業セッションごと撤去)** |
+| イベント到着 (on_event) | 来訪・alert・システムイベント | 反応の選択 (engage_now / add_task / note_only / ignore) |
+| ~~就寝 (day_close)~~ | ~~PersonaSchedule の就寝時刻 or 最終コマ終了~~ | ~~予定と実際のふりかえり＋明日の自分へのメモ~~ — **退役 (2026-10-09 段 1 — ライフは機械の帳簿処理へ)** |
+
+**起床・就寝の時刻にいま走るもの (2026-10-09〜)**: 判断点ではなく、ライフの確定と開始・終了の節目と通知だけの機械の帳簿処理 (`saiverse/day_plan.py` の `handle_scheduled_life_boundary`、LLM なし、保存先は `persona_life` テーブル)。PersonaSchedule の起床・就寝の行の Playbook 名は行の目印として残っているだけで、ScheduleManager はその行を判断点ではなくこの帳簿処理へ回す。ペルソナのアラームのスペル (`schedule_add` / `schedule_delete`) は、起床・就寝の行と判断点 Playbook の行を作れず、消せない。
 
 kind ↔ Playbook 名の対応は `saiverse/judgment_points.py` の `JUDGMENT_PLAYBOOK_MAP`、発火は `saiverse/autonomy_wiring.py` の `fire_judgment_point` に一本化されている（**どれを走らせるかを LLM が選ぶ経路は無い**）。
 
@@ -40,7 +43,7 @@ kind ↔ Playbook 名の対応は `saiverse/judgment_points.py` の `JUDGMENT_PL
 
 > **用語（2026-07-05）**: 造語「机メモ」はユーザー／ペルソナに見える文言から全廃した。表示・プロンプトでは `desk_memo` を「作業メモ」、`tomorrow_memo` を「明日の自分へのメモ／昨日の自分からのメモ」と呼ぶ。内部フィールド名（`desk_memo` / `tomorrow_memo`）は変更しない。なお `desk_memo` の**保存先だった Track の状態メモは 2026-08-21 に退役**し、`save_desk_memo` も撤去された — 裁定の意味論（continue / blocked）は変わらず、作業メモの中身は独白の記録に残る。
 
-**コマ開始は判断点ではない**（設計原理 6 の帰結）。LLM を呼ばず、コードのみで処理する：ユーザー会話中なら繰り下げ → 施設へ移動（OccupancyManager）→ コマ種別の `execution_type`（`saiverse/slot_kind_catalog.py`）に応じてセッション起動 or 暮らしの Pulse 実行。「動くか、休むか」を問う場面を作らない。
+**コマ開始は判断点ではない**（設計原理 6 の帰結。→ 時間割のコマは 2026-10-09 の段 1 で時間割ごと撤去された。以下は経緯）。LLM を呼ばず、コードのみで処理する：ユーザー会話中なら繰り下げ → 施設へ移動（OccupancyManager）→ コマ種別の `execution_type`（`saiverse/slot_kind_catalog.py`）に応じてセッション起動 or 暮らしの Pulse 実行。「動くか、休むか」を問う場面を作らない。
 
 ### v1 状況分類 (A〜E) との関係 — 完了
 
@@ -62,7 +65,9 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
 
 **退役した共通フィールド**: `new_desires`（欲求の型付き変換、v2 §5.2）は 2026-08-21 に**欲求プールごと**消えた。「やりたいこと」は減衰する候補プールではなく、手帳のやりたいメモとして本人の言葉で残る形に置き換わっている（v3 §4.1 の「欲求とタスクの区別は廃止」）。会話の最中に main line が直接撃つ経路だった `desire_add` スペルも、実体ごと撤去済み（`tests/test_purpose_tools.py::test_old_names_no_longer_gated` が「名前が残っていないこと」を固定している）。
 
-### 3.2 時間割のコマ定義（共通スキーマ部品）
+> **2026-10-09 (段 1)**: `episode_purposes` を出していた post_session と day_close はどちらも退役した。§3.2・§3.3 の時間割のコマ定義と編集形式も、使っていた判断点 (day_open / post_session / on_event の insert_slot) ごと退役した。以下は経緯として残す。
+
+### 3.2 時間割のコマ定義（共通スキーマ部品）— 🪦 退役 (2026-10-09 段 1)
 
 ```json
 "slot": {
@@ -87,7 +92,7 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
 - `facility` は型からのデフォルト対応（v2 §6.1）を deterministic に提示し、LLM は上書きのみ
 - finalize の検証：時刻昇順・就寝時刻内・ref と kind の整合・予算合計が日次予算内
 
-### 3.3 時間割の編集形式
+### 3.3 時間割の編集形式 — 🪦 退役 (2026-10-09 段 1)
 
 差分オペ（insert / drop / defer …）は採らない。**`remaining_timetable`：残りコマの全置換（配列）または null（変更なし）**の二択。スキーマはコマ定義の再利用、検証は起床判断と同一で済む。
 
@@ -97,7 +102,9 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
 
 ---
 
-## 4. 起床判断 (day_open)
+## 4. 起床判断 (day_open) — 🪦 退役 (2026-10-09 段 1 — ライフは機械の帳簿処理へ)
+
+> Playbook `judgment_day_open.json` は削除され、`saiverse/judgment_points.py` に day_open の kind は無い。起床の時刻にはライフの確定と開始の節目だけが機械の帳簿処理として走る (§2 の表の下)。v3 §6 の「起床: 機械の帳簿処理のみ」の実装。以下は経緯として残す。
 
 ### 見るもの（tail 注入の状況テキスト）
 
@@ -159,7 +166,9 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
 
 ---
 
-## 6. セッション終了判断 (post_session)
+## 6. セッション終了判断 (post_session) — 🪦 退役 (2026-10-09 段 1 — 作業セッションごと撤去)
+
+> 作業セッション (`sea/work_session.py`) が撤去され、Playbook `judgment_post_session.json` も削除された (v3 §8)。§9-1 の「答案の原本を見られない」問題も対象ごと消えた。以下は経緯として残す。
 
 > **⚠ 2026-08-22 (束 6c): 出来事 (Episode) を経由していた後段が全部落ちた。**
 > digest 生成の post_session 統合 (下記) は生きているが、**digest を「出来事の
@@ -283,8 +292,8 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
 ### 見るもの
 
 1. イベント内容（来訪者・alert・システム通知）
-2. 現在の活動状態
-3. 残りの時間割
+2. 現在の活動状態（と現在時刻）
+3. ~~残りの時間割~~（**2026-10-09 段 1 で撤去** — 時間割ごと消えた）
 
 **「いまの活動」は 2026-08-22 (束 6c) に二値へ縮退した**: 「ユーザーと会話中です」か「手すきです」だけ。会話中かの正典は `day_plan.is_in_user_conversation`（実体は `saiverse/user_conversation.py` のメモリ内会話状態）で、**会話以外の活動を答えられる器が v0.3 には無い**——「いま何に取り組んでいるか」は開いている出来事の行が持っていて、その書き手が全滅したため（v3 §7）。
 
@@ -301,23 +310,26 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
     "reaction": {
       "anyOf": [
         {"type": "object", "properties": {"type": {"type": "string", "const": "engage_now"}}, "required": ["type"]},
-        {"type": "object", "properties": {"type": {"type": "string", "const": "insert_slot"}, "slot": {"$ref": "§3.2"}}, "required": ["type", "slot"]},
+        {"type": "object", "properties": {"type": {"type": "string", "const": "add_task"}, "task": {"type": "string"}}, "required": ["type", "task"]},
         {"type": "object", "properties": {"type": {"type": "string", "const": "note_only"}, "memo": {"type": "string"}}, "required": ["type", "memo"]},
         {"type": "object", "properties": {"type": {"type": "string", "const": "ignore"}}, "required": ["type"]}
       ]
-    },
-    "new_desires": {"$ref": "§3.1"}
+    }
   },
   "required": ["monologue", "reaction"]
 }
 ```
 
+- **選択肢の作り直し (2026-10-09 段 1)**: 時間割にコマを積む `insert_slot` は時間割ごと退役し、**`add_task`** (あとで取り組む一件をタスク帳に積む) に替わった。`task` 欄は「あとで読み返した自分が迷わず取りかかれる具体さで、何をするか」。適用はタスク帳 (`saiverse/task_book.py`) へのシステムタスクの追加で、期限なし・相手なし。中身は `task` ときっかけのイベントの本文の抜粋。引き当て順は締め切りの後 (v3 §5)。`note_only` の memo は判断の記録 (ペルソナの記憶に残る判断の行) に載るだけで、別の置き場には書かない。欲求プールの退役 (2026-08-21) で使われなくなっていた `new_desires` 欄はスキーマ図から外した
+- **冪等キーは刺激の永続 ID から作る (2026-10-09 段 1)**: `{persona}:{stimulus_id}`。外から届く刺激は供給源の永続 ID を必須で持ち (現象の封筒は `stimulus_id`、ユーザー発話は保存した行の `msg:<message_id>`。Discord の発言は `client_message_id = "discord:<id>"` で保存の段で再送を止めたうえで、ユーザー発話として同じ形で扱う)、同じ刺激の再配送は別の席を取らない。`add_task` も同じ ID から出どころ参照と冪等キー (`on_event:<stimulus_id>`) を作るので、finalize の再実行で同じ一件は増えない。詳細は [issue](../../issues/on_event_judgment_has_no_idempotency_key.md)
 - **alert イベントでは anyOf を `engage_now` のみに動的縮退**させる（v1 状況 B の「強制」の継承。無視の脱出口は v1 §12 と同じく将来検討）
-- ユーザー会話中の on_event は原則発火させない（会話の至上性。会話終了判断でまとめて処理）
+- ユーザー会話中の on_event は原則発火させない（会話の至上性。会話終了判断でまとめて処理 — 会話終了判断は 2026-08-16 に退役し、捕獲はスルースへ移った）
 
 ---
 
-## 8. 就寝判断 (day_close)
+## 8. 就寝判断 (day_close) — 🪦 退役 (2026-10-09 段 1 — ライフは機械の帳簿処理へ)
+
+> Playbook `judgment_day_close.json` は削除された。就寝の時刻にはライフの終了の節目だけが機械の帳簿処理として走る (v3 §6「就寝: 機械の帳簿処理のみ (ライフ終了・keep-alive 停止)」)。ふりかえりの独白・明日の自分へのメモ・一日新聞の種はどれも無くなった。**記憶の手入れの採否 (`curation_reviews`) はスルースへ移った** — 欄の形は [v3 §13.6](../autonomous_behavior_v3.md) の `page_reviews` (業務日に一回だけ提示、見送りは翌業務日まで再提示しない、承認分はスルースの確定後に背景で実行)。メモのページ化 (`naming_reviews`) は休止した (検知の材料だった目的の木の撤去のため)。以下は経緯として残す。
 
 ### 見るもの
 
@@ -363,11 +375,13 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
 
 ## 9. 未解決事項
 
-1. **post_session が答案の原本を見られない**（2026-08-22 に発生）：出来事の書き手が消えたことで、セッション原本を引く鍵（`origin_episode`）が新しいメッセージに刻まれなくなった。§6 の改定が解いた「採点者が答案の原本を見ない接地の弱さ」が、供給側の退役によって戻っている。作業セッション運転自体が v3 §8 で退役予定なので**この判断点ごと作り直す**のが本筋だが、それまでの間に走る post_session は自己申告だけを根拠に裁定する
-2. **`user_report_seeds` の接地検証**：ダイジェスト参照の機械検証は困難。運用観察して虚構が混じるなら ref 化（今日のダイジェスト ID の enum）に格上げ
-3. **記憶の手入れ（`curation_reviews` / `naming_reviews`）の置き場**：就寝判断への相乗りは、自律 OFF のペルソナに手入れの機会が一度も来ない形（§8）。v3 §6 の 2026-10-09 裁定でスルースへの相乗りに決定・具体の設計は v0.4 実装計画で
+> **2026-10-09 (段 1) の時点で**: 1 は post_session ごと対象消滅、2 は day_close ごと対象消滅、3 はスルースへの移設で解決、5 は on_event だけが残る形で実装された。残る未解決は 4 だけ。
+
+1. ~~**post_session が答案の原本を見られない**~~（**対象消滅 — 2026-10-09 段 1 で post_session ごと撤去**）（2026-08-22 に発生）：出来事の書き手が消えたことで、セッション原本を引く鍵（`origin_episode`）が新しいメッセージに刻まれなくなった。§6 の改定が解いた「採点者が答案の原本を見ない接地の弱さ」が、供給側の退役によって戻っている。作業セッション運転自体が v3 §8 で退役予定なので**この判断点ごと作り直す**のが本筋だが、それまでの間に走る post_session は自己申告だけを根拠に裁定する
+2. ~~**`user_report_seeds` の接地検証**~~（**対象消滅 — day_close ごと撤去**）：ダイジェスト参照の機械検証は困難。運用観察して虚構が混じるなら ref 化（今日のダイジェスト ID の enum）に格上げ
+3. ~~**記憶の手入れ（`curation_reviews` / `naming_reviews`）の置き場**~~（**解決 — 2026-10-09 段 1 でスルースへ移設。メモのページ化は休止**）：就寝判断への相乗りは、自律 OFF のペルソナに手入れの機会が一度も来ない形（§8）。v3 §6 の 2026-10-09 裁定でスルースへの相乗りに決定・具体の設計は v0.4 実装計画で
 4. **on_event のイベント種別の列挙**：どこまでを判断点に上げ、どこからをコード処理に留めるか
-5. **判断点そのものの行き先**：v3 では一日の縁（起床・就寝）から LLM の義務判断が消え、判断は実行の場（ティックと会話）へ寄る（v3 §6）。残る判断点はイベント到着ただ一つになる予定で、day_open / day_close / post_session は v0.4 で置き換わる
+5. ~~**判断点そのものの行き先**~~（**解決 — 2026-10-09 段 1 で on_event だけが残った**）：v3 では一日の縁（起床・就寝）から LLM の義務判断が消え、判断は実行の場（ティックと会話）へ寄る（v3 §6）。残る判断点はイベント到着ただ一つになる予定で、day_open / day_close / post_session は v0.4 で置き換わる
 
 > **解決済み**: 「v1 状況 C/D との完全統合」は v1 メタ判断の退役（2026-08-14）と wait_response タイマーの `user_conversation` 移管（2026-08-21）で問いごと消滅。「finalize ツールの構成」は `judgment_finalize(kind, payload)` の 1 ツール集約で確定（`builtin_data/tools/judgment_finalize.py`）。「promotions の閾値」は欄の退役で対象消滅。
 
@@ -390,3 +404,4 @@ v1 の periodic tick 駆動ディスパッチ（B〜E）のうち、**自律生�
 - **2026-08-16 (v3 §13.3)**: 会話終了判断が退役（§5）。捕獲はスルースへ、待ちを閉じる処理は機械の帳簿処理へ。
 - **2026-08-21 (v3 形の層・束 6)**: Track ランタイムの退役に連れて、`track:N` 参照・`track_op`・`desk_memo` の保存先・`promotions`・`new_desires`・`desire_reviews`・欲求の減衰処理が欄ごと落ちた。会話の器は `saiverse/user_conversation.py` へ。
 - **2026-08-22 (v3 形の層・束 6c)**: エピソードを書く手が全滅した（v3 §7）。本書に効いたのは三点 —— ①post_session のセッション原本が引けなくなった（§6・§9-1）②`episode_purposes` が旧データ専用になった（§3.1）③on_event の「いまの活動」が会話中か手すきかの二値へ縮退した（§7）。**どれも判断のスキーマや適用側を壊したのではなく、材料の供給源が上流で消えたことの帰結**である点が共通している。
+- **2026-10-09 (v0.4 段 1)**: 起床・就寝・セッション終了の判断点が退役し、残る判断点は on_event だけになった（[v0.4 実装計画](../autonomous_behavior_v04_plan.md) 段 1）。起床・就寝の時刻にはライフの確定と節目の機械の帳簿処理だけが走る。on_event の選択肢は insert_slot が add_task (タスク帳へ) に替わり、冪等キーは刺激の永続 ID から作る形になった。就寝判断に相乗りしていた記憶の手入れの採否はスルースへ移り、メモのページ化は休止した。本書の退役した節は経緯として残した。

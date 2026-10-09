@@ -271,7 +271,7 @@ v1.3 まで「エピソードコネクション」として残していた関係
 - [`track_retirement.md`](track_retirement.md) — 前提工事（目的参照の語彙・住人の行き先）
 - [`persona_cognition/recall_tags_and_track_reduction.md`](persona_cognition/recall_tags_and_track_reduction.md) — メッセージへの記録の親設計
 - [`life.md`](life.md) / [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md) — 時間の階層・哲学層
-- [`../issues/autonomous_v2_post_live_gaps.md`](../issues/autonomous_v2_post_live_gaps.md) — 経緯（A1/A2/B1/X1）
+- [`../issues/autonomous_v2_post_live_gaps.md`](../issues/archive/autonomous_v2_post_live_gaps.md) — 経緯（A1/A2/B1/X1）
 
 ---
 

@@ -34,4 +34,4 @@
 ## 関連
 
 - [timetable_redesign.md](../intent/timetable_redesign.md) §5.1 / [life.md](../intent/life.md) §9.2 (ライフ設定画面)
-- [timetable_template_kind_facility_consistency.md](timetable_template_kind_facility_consistency.md) (同じ検証で出た編集 UI の欠陥)
+- [timetable_template_kind_facility_consistency.md](archive/timetable_template_kind_facility_consistency.md) (同じ検証で出た編集 UI の欠陥)

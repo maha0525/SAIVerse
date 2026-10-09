@@ -1,8 +1,8 @@
 # 目的の木 (persona_task / task:N / purpose_* スペル) と手帳が、ペルソナから見て「やりたいことの置き場」として二つ並んでいる
 
-**状態**: 裁定済み (A、2026-08-23)。**一段目 実装済み / 二段目 v0.4** — 目的の木を退役させ、手帳を後継に確定した。ペルソナから見える口は塞いだので、この issue に残っているのは二段目 (内部の配線の撤去) だけ。v0.3 は自律 OFF でその配線は動かないため、v0.3 を止める理由にはならない。
+**状態**: 決着 — 二段目まで完了 (2026-10-09 develop-v0.4 段 1、末尾の「決着」)。旧状態: 裁定済み (A、2026-08-23)。**一段目 実装済み / 二段目 v0.4** — 目的の木を退役させ、手帳を後継に確定した。ペルソナから見える口は塞いだので、この issue に残っているのは二段目 (内部の配線の撤去) だけ。v0.3 は自律 OFF でその配線は動かないため、v0.3 を止める理由にはならない。
 
-関連: [`saiverse/persona_task_manager.py`](../../saiverse/persona_task_manager.py) / [`saiverse/memory_atlas.py`](../../saiverse/memory_atlas.py) (`task:N` の解決) / [`builtin_data/tools/memory_read.py`](../../builtin_data/tools/memory_read.py) / [`sai_memory/memory/pocketbook.py`](../../sai_memory/memory/pocketbook.py) / [`saiverse/task_book.py`](../../saiverse/task_book.py)
+関連: [`saiverse/persona_task_manager.py`](../../../saiverse/persona_task_manager.py) / [`saiverse/memory_atlas.py`](../../../saiverse/memory_atlas.py) (`task:N` の解決) / [`builtin_data/tools/memory_read.py`](../../../builtin_data/tools/memory_read.py) / [`sai_memory/memory/pocketbook.py`](../../../sai_memory/memory/pocketbook.py) / [`saiverse/task_book.py`](../../../saiverse/task_book.py)
 ※ `builtin_data/tools/purpose_close.py` / `purpose_decompose.py` / `purpose_step.py` は 2026-08-23 に削除済み (下の裁定)。
 出自: 2026-08-23、手帳のスペル (「手帳を開く」「手帳に書く」) を足すにあたり、記憶系スペル 16 本を洗い出して使い分けの材料を検めたとき。
 
@@ -63,3 +63,7 @@ v0.3 は自律 OFF なので、以下はどれも動かない。運転を作り�
 - `saiverse/persona_task_manager.py` と `persona_task` テーブル。
 
 この issue は二段目が残るため `docs/issues/` に置いたまま。
+
+## 決着 (2026-10-09) — 二段目の撤去
+
+二段目 (内部の配線の撤去) は [v0.4 実装計画](../../intent/autonomous_behavior_v04_plan.md) 段 1-4 (コミット 869939bd) で済んだ。`saiverse/persona_task_manager.py`・`persona/tasks/`・`saiverse/recall_walk.py`・`get_task_summary` ツールを削除し、Memory Atlas の `task` 分岐も外した。`memory_read task:N` も通らなくなり、机に残っていた `task:N` の行は次の机の取り直しで外れる。判断点の棚入れは、判断点 (起床・就寝・セッション終了) ごと退役した。`persona_task*` のテーブルと既存データは残置。v0.3 (develop) には一段目の状態のコードが残る。

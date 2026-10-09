@@ -13,16 +13,15 @@
 
 kind → Playbook 名の対応は `saiverse/judgment_points.py` の `JUDGMENT_PLAYBOOK_MAP` がコードで固定し、`saiverse/autonomy_wiring.py` の `fire_judgment_point` が起動する（→ [intent/persona_cognition/judgment_points.md](../intent/persona_cognition/judgment_points.md)）。**どれを走らせるかを LLM が選ぶ経路は無い** — 発火点と Playbook は 1 対 1 の決定論。
 
-様式は共通で、構造化出力（`response_schema`）+ 動的 enum 注入 + `judgment_finalize` ツールでの検証・適用（メインキャッシュへの JSON 非混入）。4 枚とも `rc=False` / `usel=False`（ユーザーにも `run_playbook` にも開いていない）。
+様式は共通で、構造化出力（`response_schema`）+ 動的 enum 注入 + `judgment_finalize` ツールでの検証・適用（メインキャッシュへの JSON 非混入）。判断 Playbook は `rc=False` / `usel=False`（ユーザーにも `run_playbook` にも開いていない）。develop-v0.4 に残るのは `judgment_on_event` の 1 枚だけ（v0.3 は 4 枚）。
 
 | Playbook | 表示名 | 用途 |
 |---|---|---|
-| `judgment_day_open` | 起床判断 (day_open) | 今日の時間割の編成（コマの `ref` は実在タスク `task:N`、`facility` は実在 Building の動的 enum）+ 作業ラウンドの日次予算の提示 |
-| `judgment_post_session` | セッション終了判断 (post_session) | 作業セッションの裁定。`done` は**このセッションが実際に作った成果物**の ref が必須（接地検証）+ セッションの実績要約（`digest` 欄）の生成 + 残り時間割の整え |
-| `judgment_on_event` | イベント到着判断 (on_event) | 反応の選択（engage_now / insert_slot / note_only / ignore）。alert イベントではスキーマが engage_now のみに縮退する |
-| `judgment_day_close` | 就寝判断 (day_close) | 予定 vs 実績のふりかえり + 明日の自分へのメモ + ユーザーへの報告種 + 記憶の編纂候補・命名候補のレビュー（候補ゼロなら欄ごと出さない） |
+| `judgment_on_event` | イベント到着判断 (on_event) | 反応の選択（engage_now / add_task / note_only / ignore）。add_task はタスク帳にシステムタスクを一件積む。alert イベントではスキーマが engage_now のみに縮退する。冪等キーは刺激の永続 ID から作る |
 
 **退役した判断点・スキーマ欄**（新しいコードから参照しないこと）:
+
+- **起床判断（`judgment_day_open`）・就寝判断（`judgment_day_close`）・セッション終了判断（`judgment_post_session`）** — develop-v0.4 で 2026-10-09 に JSON ごと削除（[v0.4 実装計画](../intent/autonomous_behavior_v04_plan.md) 段 1）。起床・就寝の時刻にはライフの確定と節目の機械の帳簿処理（LLM なし）だけが走り、セッション終了判断は作業セッションごと撤去された。就寝判断に相乗りしていた記憶の手入れの採否はスルースへ移った（[v3](../intent/autonomous_behavior_v3.md) §13.6）。on_event の `insert_slot` は時間割ごと退役し、`add_task` に替わった。
 
 - **会話終了判断（`judgment_post_conversation`）** — 2026-08-16 裁定で退役し、JSON も削除済み（[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §8 / §13.3）。会話に切れ目は定義できないため、約束・やりたいことの捕獲は Metabolism のスルースの一手へ一本化され、待ちを閉じる帳簿処理だけが `autonomy_wiring.handle_conversation_end` に残った。
 - **v1 メタ判断一式（`meta_judgment` / `meta_judgment_running` / `_idle_pending` / `_idle_empty` / `_alert` / `_life_purpose`）** — 2026-08-14 に Playbook・`_SITUATION_PLAYBOOK_MAP`・`meta_judgment_finalize` ツールごと削除（[track_retirement.md](../intent/track_retirement.md) §7.4）。生きる目的の初期設定（`meta_judgment_life_purpose`）は受け皿なしで撤去され、後継はシステムタスクの第一号として v3 §9-5 で設計中。

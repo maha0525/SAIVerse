@@ -1,7 +1,7 @@
 # Intent: ライフ — 活動区間と時間の階層
 
-**ステータス**: 検証待ち (v0.5, 2026-07-13)。**実機初日（2026-07-13 夜）で v0.4 の「ペルソナがライフを宣言する」設計が破綻**——過去起点・予算不整合のライフが宣言され、AI を呼ばない暮らしコマの発火が予算を食い潰した（「4 / 4」）。まはー裁定で**責任分界を全面改訂**: ライフ＝ユーザーが設定する起床・就寝の区間（PersonaSchedule が器）／予算＝ライフの長さに対する最低値制約付きでユーザー設定／ペルソナは時間割だけ／モードはモデルの物理から自動。§3・§4・§5.2-5.3・§8・§9.2・§11.2 を v0.5 で書き直し。**「改修A」(宣言の巻き戻し・システムによるライフ確定・消費点の作り直し・境界イベント統合・遅発 day_open 対策) 実装完了 (2026-07-13)、まはー実機検証待ち**（Phase 1 案 Y と Phase 3 物理層は無傷のまま活用。宣言まわりの巻き戻し明細は §11.2）。「改修B」のうち **UI 側 (§9.2 ライフ設定画面新設・v1 亡霊の掃除・判断点回数のフロント別枠表示) は実装完了 (2026-07-14)、まはー実機検証待ち**（明細は改訂履歴）。**暮らし Pulse の実体化 (§5.2-1) は 2026-08-08 に実装済み**——ただし [自律 Pulse の器統合](autonomous_pulse_vehicle.md) により、想定していた「標準モデルの一手」ではなく **WORKER アスペクト＝軽量モデルのセッション**（予算 1・締めなし）として実装された。予算の計上は 1 コマ 1 消費で維持（§5.3 の 2026-08-08 追補）。**標準モデルのキャッシュ延命という §5.2-1 のもう一つの役割は、この形では果たされない**（§5.2 の ⚠️ 注記、まはー裁定待ち）。v0.4 までの実装経緯は改訂履歴を参照。
-**経緯**: 2026-08-23 凍結 (v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED = False` で起床・就寝の判断点と時間割のコマが発火せず、実機検証が成立しなかった) → 2026-09-25 develop-v0.4 で封印解除 (止め具を定数ごと撤去、[autonomous_behavior_v3.md](autonomous_behavior_v3.md) §11.1)。実機検証はこれから。台帳から外した当時の文面は [autonomous_v2_post_live_gaps.md](../issues/autonomous_v2_post_live_gaps.md) の「凍結」節。再開にあたり、ライフの設計そのものは v3 §5 のティック設計と突き合わせ直す (凍結時の申し送り)。
+**ステータス**: 検証待ち (v0.5, 2026-07-13)。**2026-10-09 (develop-v0.4 段 1)**: ライフの確定と開始・終了の節目は、起床・就寝の判断点から切り離されて機械の帳簿処理 (LLM なし、`saiverse/day_plan.py` の `handle_scheduled_life_boundary`) になり、保存先は `persona_life` テーブルへ独立した (旧 `persona_day_plan.meta_json.lives` は前日分の互換のための読み取り専用)。時間割・コマ・予算ゲートは撤去された。予算 (回数) の設定と記録は残っており、段 3 で T (ティックの間隔) に置き換わる ([v0.4 実装計画](autonomous_behavior_v04_plan.md))。**実機初日（2026-07-13 夜）で v0.4 の「ペルソナがライフを宣言する」設計が破綻**——過去起点・予算不整合のライフが宣言され、AI を呼ばない暮らしコマの発火が予算を食い潰した（「4 / 4」）。まはー裁定で**責任分界を全面改訂**: ライフ＝ユーザーが設定する起床・就寝の区間（PersonaSchedule が器）／予算＝ライフの長さに対する最低値制約付きでユーザー設定／ペルソナは時間割だけ／モードはモデルの物理から自動。§3・§4・§5.2-5.3・§8・§9.2・§11.2 を v0.5 で書き直し。**「改修A」(宣言の巻き戻し・システムによるライフ確定・消費点の作り直し・境界イベント統合・遅発 day_open 対策) 実装完了 (2026-07-13)、まはー実機検証待ち**（Phase 1 案 Y と Phase 3 物理層は無傷のまま活用。宣言まわりの巻き戻し明細は §11.2）。「改修B」のうち **UI 側 (§9.2 ライフ設定画面新設・v1 亡霊の掃除・判断点回数のフロント別枠表示) は実装完了 (2026-07-14)、まはー実機検証待ち**（明細は改訂履歴）。**暮らし Pulse の実体化 (§5.2-1) は 2026-08-08 に実装済み**——ただし [自律 Pulse の器統合](autonomous_pulse_vehicle.md) により、想定していた「標準モデルの一手」ではなく **WORKER アスペクト＝軽量モデルのセッション**（予算 1・締めなし）として実装された。予算の計上は 1 コマ 1 消費で維持（§5.3 の 2026-08-08 追補）。**標準モデルのキャッシュ延命という §5.2-1 のもう一つの役割は、この形では果たされない**（§5.2 の ⚠️ 注記、まはー裁定待ち）。v0.4 までの実装経緯は改訂履歴を参照。
+**経緯**: 2026-08-23 凍結 (v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED = False` で起床・就寝の判断点と時間割のコマが発火せず、実機検証が成立しなかった) → 2026-09-25 develop-v0.4 で封印解除 (止め具を定数ごと撤去、[autonomous_behavior_v3.md](autonomous_behavior_v3.md) §11.1)。実機検証はこれから。台帳から外した当時の文面は [autonomous_v2_post_live_gaps.md](../issues/archive/autonomous_v2_post_live_gaps.md) の「凍結」節。再開にあたり、ライフの設計そのものは v3 §5 のティック設計と突き合わせ直す (凍結時の申し送り)。
 > ⚠ **2026-08-22 追記（束 6c）**: 本書が土台にしている二つの機構が退役した。
 > **① Track**（`saiverse/track_manager.py` をモジュールごと削除、
 > [track_retirement.md](track_retirement.md) §9）— §7 の「案 Y」が守ろうとした
@@ -16,7 +16,7 @@
 
 **親**: [`autonomous_behavior_v2.md`](autonomous_behavior_v2.md)（三本柱） / [`persona_cognition/life_concept_map.md`](persona_cognition/life_concept_map.md)（哲学層。§8 出来事・§10 Track 再解釈は本書の前提）
 **吸収対象**: [`session.md`](session.md)（v0.1 起草中のまま停滞。§6 未確定事項に本書が回答し、Session を「ライフが目標を与える機構層」として位置づけ直す）
-**経緯**: [実機初日の前提レベル設計課題](../issues/autonomous_v2_post_live_gaps.md) 束A（A3 予算・A4 キャッシュ生存）＋束C（Track の意味論）の解決設計。まはー裁定 2026-07-13。
+**経緯**: [実機初日の前提レベル設計課題](../issues/archive/autonomous_v2_post_live_gaps.md) 束A（A3 予算・A4 キャッシュ生存）＋束C（Track の意味論）の解決設計。まはー裁定 2026-07-13。
 **表面化症状（本書で根治）**: [redundant_track_switch_notification_on_reactivation](../issues/redundant_track_switch_notification_on_reactivation.md)
 
 > **用語注意**: 本書の「ライフ」は life_concept_map.md の "life"（暮らし＝人生の意味）とは**別の概念**。あちらは概念地図の名前、こちらは「ひとつの時間割でくくられる活動区間」という実装単位。ライフビュー UI が表示する単位はこちら。
@@ -351,7 +351,7 @@ v0.4 までの実装（Phase 1〜4、コミット 6257b6a / 072ea78 / d55c5f3 / 
 - [`session.md`](session.md) — 吸収対象（機構層としての Session）
 - [`cache_lifecycle_control.md`](cache_lifecycle_control.md) — TTL 戦略・モード（物理法則側）
 - [`persona_cognition/judgment_points.md`](persona_cognition/judgment_points.md) — 宣言の相乗り先
-- [`../issues/autonomous_v2_post_live_gaps.md`](../issues/autonomous_v2_post_live_gaps.md) — 経緯（束A/束C）
+- [`../issues/autonomous_v2_post_live_gaps.md`](../issues/archive/autonomous_v2_post_live_gaps.md) — 経緯（束A/束C）
 - 二本目 intent（起草予定）: エピソードの記憶と見せ方（A1 監査役・A2 LoD・B1/X1 可視化・Beat 型化）
 
 ---

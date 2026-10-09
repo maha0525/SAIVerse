@@ -7,7 +7,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 作り方は [開発者ガイド: ツールの追加](../developer-guide/adding-tools.md)、
 平文から呼ぶ Spell 化は [concepts/spell.md](../concepts/spell.md) を参照。
 
-**登録ツール数**: 120（うち Spell 化: 79）
+**登録ツール数**: 118（うち Spell 化: 78）
 
 - `*` 付きの引数は必須。
 - **Spell** 列に表示名があるものは、ペルソナが平文応答から `/spell <名> ...` で呼べる。
@@ -27,7 +27,6 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `document_edit` | Edit a document item. Three operations in one: (1) patch — give old_string (+new_string) to replace a single uniquely… | `item_id*`: string, `content`: string, `old_string`: string, `new_string`: string, `mode`: string | ドキュメント編集 |
 | `document_read` | Read specific lines from a document item. Useful for reading large documents section by section. Line numbers are 1-b… | `item_id*`: string, `start_line`: integer, `end_line`: integer, `limit`: integer | ドキュメント読み取り |
 | `document_search` | Search for a pattern in a document item using regex. Returns matching lines with context. Similar to grep with contex… | `item_id*`: string, `pattern*`: string, `case_sensitive`: boolean, `context_lines`: integer, `max_matches`: integer | ドキュメント検索 |
-| `episode_read` | 出来事の参照 (episode:N) から、その出来事の間に記録された内容（発話・スペルの実行と結果）の全文を読み返します。作業セッションの要約 (digest) の元になった原本を確認したいときに使ってください。 | `episode*`: string | 出来事の記録を読む |
 | `forget_recalled` | 想起した記憶をワーキングメモリから忘れます。source_idを指定すると特定の記憶だけ忘れます。省略するとすべての想起記憶をクリアします。 | `source_id`: string | — |
 | `game_create_building` | Create a building (shop, inn, plaza, dungeon room, etc.) inside the game Region you rule. The building becomes usable… | `name*`: string, `description*`: string, `system_instruction`: string, `subregion_id`: string, `capacity`: integer | 建物作成 (GM) |
 | `game_create_subregion` | Create a SubRegion (an area such as a town, dungeon, or wilderness zone) inside the game Region you rule. SubRegions … | `name*`: string, `description*`: string | エリア作成 (GM) |
@@ -39,13 +38,12 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `get_since_last_user_conversation` | Get summary and recent log of events since the last user conversation. Returns a summary with a UUID that can be used… | `include_raw_log`: boolean, `max_raw_messages`: integer | — |
 | `get_situation_snapshot` | Get current situation snapshot including time, location, and who is present. Optionally detect and record changes. | `building_id`: string, `detect_changes`: boolean | — |
 | `get_system_prompt` | Build and return the system prompt for the active persona, including world setting, persona info, and building context. | `building_id`: string, `include_inventory`: boolean, `include_building_items`: boolean, `include_available_playbooks`: boolean | — |
-| `get_task_summary` | Get a summary of the active persona's tasks including active and pending tasks. | `limit`: integer | — |
 | `get_visual_context` | Build visual context messages containing structured environment info for LLM context. | `building_id`: string, `include_self`: boolean, `include_building`: boolean, `include_other_personas`: boolean | — |
 | `invoke_phenomenon` | フェノメノン（現象）を直接呼び出して実行します。フェノメノンはSAIVerse世界で発生させることができる汎用的な処理単位です。 | `phenomenon_name*`: string, `arguments`: string | — |
 | `item_annotate` | Update an item's name and/or description (概要). Provide name, description, or both (at least one is required). Use thi… | `item_id*`: string, `name`: string, `description`: string | アイテム名・概要の編集 |
 | `item_move` | Move items to a building, your inventory, or inside a bag. Specify comma-separated item IDs and a destination. | `item_ids*`: string, `destination_type*`: string, `destination_id`: string | アイテム移動 |
 | `item_view` | View item details. For pictures: shows the image. For documents: shows full text. For bags: shows contents list. Supp… | `item_id`: string, `item_ids`: string | アイテム閲覧 |
-| `judgment_finalize` | Internal tool for judgment-point Playbooks only (judgment_day_open / judgment_post_session / judgment_on_event / judg… | `judgment_output*`: object, `kind*`: string, `judgment_context`: string, `situation_text`: string | — |
+| `judgment_finalize` | Internal tool for the judgment-point Playbook only (judgment_on_event). Receives the judge node's structured output (… | `judgment_output*`: object, `kind*`: string, `judgment_context`: string, `situation_text`: string | — |
 | `list_available_playbooks` | List playbooks available for router selection based on persona and building context. | `persona_id`: string, `building_id`: string | — |
 | `list_city_buildings` | List all buildings in the current city with their IDs and occupant personas. | (なし) | — |
 | `memopedia_delete_fragment` | Memopediaのフラグメント（断片知識）を1件削除します。memopedia_list_fragments で確認したIDを指定してください。 | `fragment_id*`: string | — |

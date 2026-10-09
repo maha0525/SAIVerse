@@ -3,7 +3,7 @@
 **ステータス**: 🟣 追補修正済・実機検証待ち (2026-07-16 — life.md §7 案 Y Phase 1 の実機追跡で、既存 running Track の直接応答経路が一回限りの wait_response タイマーを再装填していない回帰を確認・修正。二度目の会話 Episode が timeout で閉じる回帰テストを追加)
 **優先度**: medium（表面化しており早め対応をまはー希望）
 **作成日**: 2026-07-08
-**上位**: この症状の根は「Track が進行状態管理から目的の指し示しに変質したのに、時間経過での自動 pause が古い意味論を引きずっている」こと。設計の親は [autonomous_v2_post_live_gaps.md](autonomous_v2_post_live_gaps.md) の**束C（Track の意味論の再整理）** → 解決設計は **[life.md](../intent/life.md) §7（案 Y）**: wait_response タイムアウトから pause を抜き「いま」の読み出しを開いているエピソードへ一本化することで、同一 Track 再 activate という事象ごと消滅させる（通知の出し分け修正は不要になる）。
+**上位**: この症状の根は「Track が進行状態管理から目的の指し示しに変質したのに、時間経過での自動 pause が古い意味論を引きずっている」こと。設計の親は [autonomous_v2_post_live_gaps.md](archive/autonomous_v2_post_live_gaps.md) の**束C（Track の意味論の再整理）** → 解決設計は **[life.md](../intent/life.md) §7（案 Y）**: wait_response タイムアウトから pause を抜き「いま」の読み出しを開いているエピソードへ一本化することで、同一 Track 再 activate という事象ごと消滅させる（通知の出し分け修正は不要になる）。
 **先行症状止め**: life.md 実装を待たず「同一 Track 復帰では通知を出さない」最小ガード（下記 修正方向 第一候補）を先行投入してよい（まはー早め希望）。ただし life.md landed 時に撤去する使い捨てと明記する。
 **関連**: `saiverse/track_manager.py` `activate`、`saiverse/track_handlers/user_conversation_handler.py` `on_track_activated` / `_inject_track_context`、`docs/intent/persona_cognition/pulse_dispatch.md` §5
 

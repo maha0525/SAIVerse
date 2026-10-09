@@ -1,6 +1,6 @@
 # SAIVerse 俯瞰地図 (Landscape)
 
-> **ステータス**: v2.0 (2026-07-11 改訂 — Memory Atlas〔記憶概念の統合、§5〕と自律行動 v2〔時間割+判断点、§3〕を反映する大改訂。concept_consolidation.md / autonomous_behavior_v2.md の実装完了に伴う)
+> **ステータス**: v2.0 (2026-07-11 改訂 — Memory Atlas〔記憶概念の統合、§5〕と自律行動 v2〔時間割+判断点、§3〕を反映する大改訂。concept_consolidation.md / autonomous_behavior_v2.md の実装完了に伴う)。**develop-v0.4 では 2026-10-09 に v2 の時間割の運転を撤去した** — §3 の駆動と §9 はその後の姿で書いてある
 > **対象読者**: SAIVerse の全体像を把握したい人（まはー本人・エア・新規参加者）
 > **書くこと**: 概念どうしの関係性。「何があって、どうつながっているか」
 > **書かないこと**: 各概念の実装詳細（→ 個別 intent doc / 将来の `docs/concepts/` リファレンス）
@@ -19,9 +19,10 @@ graph TD
     Persona -->|回す| Pulse
     PulseController -->|"起動 (優先度・割り込み)"| Pulse
     Building -->|発言を検知| PulseController
-    DayPlan["時間割 (day plan) + 判断点"] -->|"コマ発火・判断"| PulseController
-    Watchdog["AutonomyManager (watchdog)"] -.->|途絶時のみ火入れ| DayPlan
-    JudgmentPoints["判断点 (起床/就寝/セッション終了/会話終了/on_event)"] -->|"裁定"| DayPlan
+    Alarm["アラーム (定時のスケジュール)"] -->|定時に発火| PulseController
+    Life["ライフ (起床〜就寝。確定と節目は機械の帳簿処理)"]
+    Watchdog["AutonomyManager (watchdog)"] -.->|ライフの張り直しだけ| Life
+    JudgmentPoints["判断点 (on_event のみ)"] -->|"engage_now のときだけ応対"| PulseController
     Pulse -->|内包| Beat
     Pulse -->|実行| Playbook
     Playbook -->|発話ノードが生成| Beat
@@ -34,7 +35,7 @@ graph TD
     Atlas["Memory Atlas (地図帳): 時間の地図=Chronicle / 意味の地図=Memopedia・コア記憶"]
     User((User))
     Land -->|末尾を供給| Session
-    Land -->|"編纂 (Metabolism・判断点)"| Atlas
+    Land -->|"編纂 (Metabolism・スルース)"| Atlas
     Atlas -->|"目次・机・コア記憶 (head)"| Session
     head -->|含まれる| Session
     Beat -->|自分の短期記憶へ| Session
@@ -53,7 +54,7 @@ graph TD
 ```
 
 **4つのハブ概念**（線が集中する中心）:
-- **Pulse** — 駆動の中心。時間割・Playbook・土地・Session すべてに接続する
+- **Pulse** — 駆動の中心。アラーム・判断点・Playbook・土地・Session すべてに接続する（develop-v0.4 では v2 の時間割が撤去済みで、一定間隔で本人を動かすティックは v0.4 実装計画の段 2〜3 で入る — §3）
 - **土地と Memory Atlas（§5）** — 記録の中心。**土地**＝生ログ（実際に起きたことの不変の地面）、**Memory Atlas（地図帳）**＝土地から編纂される二種の地図（時間＝Chronicle / 意味＝Memopedia・コア記憶）。土地参照は**クリップ**（clip:N）に統一
 - **Playbook** — 行動の中心。Beat が生成され、Spell を介して Tool やサブライン Playbook に繋がる
 - **Session（短期記憶）** — 認知の中心。土地の末尾・head（目次・机・コア記憶を含む）・進行中の Beat・外界入力を集約し、**すべての LLM 判断（判断点 / Beat 生成）に供給する**。継続不能になると Metabolism を発火し、新 Session が始まる
@@ -116,7 +117,7 @@ graph LR
 
 ### Pulse
 
-ペルソナの認知サイクル1回分（実行入口は `SAIVerseManager.run_sea_user` / `run_sea_auto`。`run_pulse` という名前のメソッドは無い）。思考・判断し、1つ以上の **Beat**（最小行動単位、§4）を生む。Pulse の起動源: **ユーザー発話**（chat API）/ **スケジュール**（EventScheduler — 時間割のコマ発火・起床/就寝の判断点を含む）/ **Phenomena**（外部イベント、§4）/ **文脈駆動の判断点**（セッション終了・会話終了・on_event）。これらを集約・制御するのが下記の PulseController。
+ペルソナの認知サイクル1回分（実行入口は `SAIVerseManager.run_sea_user` / `run_sea_auto`。`run_pulse` という名前のメソッドは無い）。思考・判断し、1つ以上の **Beat**（最小行動単位、§4）を生む。Pulse の起動源: **ユーザー発話**（chat API）/ **スケジュール**（EventScheduler — 定時のアラーム。起床・就寝の時刻にはライフの機械の帳簿処理が走るが、Pulse は起こさない）/ **Phenomena**（外部イベント、§4）/ **判断点**（実イベントへの on_event だけ）。これらを集約・制御するのが下記の PulseController。
 
 ### PulseController（Pulse 起動の制御層）
 
@@ -126,12 +127,16 @@ graph LR
 
 ### 駆動の時間機構（誰がいつ Pulse を起こすか）
 
-PulseController は「起こされた Pulse を捌く」層だが、**いつ Pulse を起こすか**を刻むのは別の時間機構である。自律稼働は**計画駆動＋出来事駆動**の二本（自律行動 v2、2026-07-10 完全移行）:
+PulseController は「起こされた Pulse を捌く」層だが、**いつ Pulse を起こすか**を刻むのは別の時間機構である。**develop-v0.4 は自律行動 v3 の運転の層へ作り替える途中**（[v0.4 実装計画](../intent/autonomous_behavior_v04_plan.md)）。段 1（2026-10-09）で v2 の時間割の運転を撤去し、段 3 でティックを回すまでの間の姿は次のとおり:
 
-- **時間割（day plan）**: 起床判断（`judgment_day_open`）でペルソナ自身が一日のコマを編成し、コマ開始が EventScheduler へ決定論で予約される（`saiverse/day_plan.py` / `saiverse/autonomy_wiring.py`）。コマ発火で**予算（ラウンド数）付きの作業セッション**が走る — 旧「数分刻みの連続 Pulse」の正当な後継（粒度が機械的な刻みからコマ＝意味の単位に変わった）
-- **判断点（judgment points）**: 起床・就寝はスケジュール駆動、セッション終了・会話終了・イベント到着（on_event）は文脈駆動で発火し、ふりかえり・タスク裁定・候補採取・時間割の組み替えを行う
-- **AutonomyManager**（`autonomy_manager.py`）: 定期 tick は **watchdog に縮退** — 正常時は何もせず、「Active・起床時間帯なのに時間割が無い／コマ予約が途絶」のときだけ火入れし直す
-- **EventScheduler / Phenomena**: スケジュール実行・外部イベントによる起動。呼びかけ（alert）の生きている発火元はユーザー発話ひとつで、周期ポーリングは持たない（旧 InternalAlertPoller は §9）
+- **ライフ**（起床〜就寝の区間）: 起床・就寝の時刻に、ライフの確定と開始・終了の節目だけが**機械の帳簿処理**として走る（LLM なし。`saiverse/day_plan.py` の `handle_scheduled_life_boundary`、保存先は `persona_life` テーブル）。ライフは keep-alive・話しかけやすさの表示・業務日の判定が読む
+- **アラーム**: 定時に鳴る（EventScheduler）。自律の ON/OFF と関係なく鳴る形にするのは段 4
+- **判断点**: 残っているのは実イベントへの **on_event** だけ（`saiverse/autonomy_wiring.py` → `saiverse/judgment_points.py`）。起床・就寝・セッション終了の判断は退役した（§9）
+- **ティック**（v3 §5 — ライフ中、最後に標準モデルを呼んでから T 分たつと本人が動く一枠）: 段 2〜3 で実装する。それまでの自律の活動は、アラームとイベントへの応対だけ
+- **AutonomyManager**（`autonomy_manager.py`）: 定期 tick は **watchdog に縮退** — 正常時は何もせず、「自律 ON・起床時間帯なのに今日のライフが無い」ときだけライフを張り直す
+- **EventScheduler / Phenomena**: スケジュール実行・外部イベントによる起動。外から届く刺激（現象の封筒・ユーザー発話・Discord）は供給源の永続 ID を必須で持ち、同じ刺激の再配送では二度反応しない（`saiverse/stimulus_receipt.py`）。呼びかけ（alert）の生きている発火元はユーザー発話ひとつで、周期ポーリングは持たない（旧 InternalAlertPoller は §9）
+
+段 1 の後に LLM を呼ぶのは、ユーザー起点の会話・会話に相乗りするスルース・定時のアラーム・実イベントへの on_event 判断の四つだけになっている。v0.3（develop）には v2 の時間割の運転のコードが残っているが、止め具（§3 判断点の注記）で発火しない。
 
 > 旧2層リズム（AutonomyManager 50分 tick ＋ SubLineScheduler 5秒ポーリング）は**廃止済み**（§9）。数分刻みの自律 Pulse は意味のある行動を生まない、という v1 失敗診断に基づく。
 
@@ -142,24 +147,24 @@ PulseController は「起こされた Pulse を捌く」層だが、**いつ Pul
 | Track が担っていた責務 | 分化先 |
 |---|---|
 | 目的の切り出し | **手帳**（メモ欄と約束の欄）。当初の分化先だった**目的の木**は 2026-08-23 に退役した（§9） |
-| 「いま」の容れ物 | **出来事**（episode テーブル） |
-| 文脈復元の鍵 | 目的タグ＋想起（purpose_tags / recall_walk） |
+| 「いま」の容れ物 | **出来事**（episode テーブル）。書き手は 2026-08-22、読み口は 2026-10-09（v0.4 段 1）に退役し、テーブルは既存データの残置（§9） |
+| 文脈復元の鍵 | 目的タグ＋想起（purpose_tags / recall_walk）。想起の歩き（`recall_walk`）は 2026-10-09 に撤去（§9） |
 | 世界の要求の受け口 | 呼びかけ（alert） |
-| 時間を受け取る順番 | 時間割＋判断点 |
+| 時間を受け取る順番 | 時間割＋判断点 → 時間割は 2026-10-09 に撤去。後継は v3 のティック（v0.4 計画の段 2〜3） |
 
 `action_track` の行データ（title・意図）は目的ノードとして `persona_task` に残っているが、これは読み取り専用の残置で、ペルソナが触る道具はもう無い。
 
-> **⚠️ 撤廃の途中**: 永続 Track（対ユーザー会話・交流）は **2026-08-21 に器ごと撤去された**（[Track 撤廃計画](../intent/track_retirement.md) §8）。ユーザーとの会話は Track を経由せず、`saiverse/user_conversation.py`（開いている会話の出来事 + main_line 起動 + 沈黙タイマー）が担う。いま Track に残っている仕事は時間割の `track:N` コマ・想起の歩き・経験の台帳の索引だけで、いずれも撤去順序④以降で引っ越す。**新しいコードから Track を参照しないこと。**
+> **⚠️ 撤廃の途中**: 永続 Track（対ユーザー会話・交流）は **2026-08-21 に器ごと撤去された**（[Track 撤廃計画](../intent/track_retirement.md) §8）。ユーザーとの会話は Track を経由せず、`saiverse/user_conversation.py`（開いている会話の出来事 + main_line 起動 + 沈黙タイマー）が担う。いま Track に残っている仕事は時間割の `track:N` コマ・想起の歩き・経験の台帳の索引だけで、いずれも撤去順序④以降で引っ越す（このうち時間割と想起の歩きは 2026-10-09 の v0.4 段 1 で読み手ごと撤去された）。**新しいコードから Track を参照しないこと。**
 
-> **継承 DAG（範囲ノード間の認識の連続性）**: 出来事（episode）は時系列に一列で並ぶだけでなく、**継承エッジ**（`episode_inheritance` テーブル、`saiverse/experience_inheritance.py`）で「どの範囲を元に続きを始めたか」を張れる第二の関係を持つ（[体験の構造](../intent/experience_structure.md) §3.3、W13 で器を実装）。エッジは層付き（`fact`＝スレッド継続・リプランティング・分岐再生成の直接の元 / `digest`＝メモリ・digest 経由で知っている非直接親）で、1 出来事は 0..n 親を持てる（DAG）。会話の分岐・再生成・並列体験の統合（γδ→ε）・SAIVerse Lite 帰還マージ・メティス取り込みを同一機構で表す。**継承 ≠ 時刻**（created_at を継承の代用にしていたことが時系列の嘘の根本原因）。記帳は `open_episode(predecessors=...)` で範囲が開いた瞬間に機械的（選択なし＝エッジ 0 本＝直列の縮退で既存データ無害）。継承チェーンに閉じた咀嚼生成・分岐再生成 UI・メティス取り込みの配線は後続 wave。
+> **継承 DAG（範囲ノード間の認識の連続性）**: 出来事（episode）は時系列に一列で並ぶだけでなく、**継承エッジ**（`episode_inheritance` テーブル、`saiverse/experience_inheritance.py`）で「どの範囲を元に続きを始めたか」を張れる第二の関係を持つ（[体験の構造](../intent/experience_structure.md) §3.3、W13 で器を実装）。エッジは層付き（`fact`＝スレッド継続・リプランティング・分岐再生成の直接の元 / `digest`＝メモリ・digest 経由で知っている非直接親）で、1 出来事は 0..n 親を持てる（DAG）。会話の分岐・再生成・並列体験の統合（γδ→ε）・SAIVerse Lite 帰還マージ・メティス取り込みを同一機構で表す。**継承 ≠ 時刻**（created_at を継承の代用にしていたことが時系列の嘘の根本原因）。記帳は `open_episode(predecessors=...)` で範囲が開いた瞬間に機械的（選択なし＝エッジ 0 本＝直列の縮退で既存データ無害）。継承チェーンに閉じた咀嚼生成・分岐再生成 UI・メティス取り込みの配線は後続 wave。**develop-v0.4 では 2026-10-09（段 1）に、呼び手の無いまま残っていた操作のモジュール（`saiverse/experience_inheritance.py`）を episodes の読み口と一緒に撤去した**。`episode_inheritance` テーブルと既存の行は残置。
 
 > **ペルソナ間会話の現状**: **未実装**。旧・交流（Social）Track とその Handler・常設作成は、入口（他ペルソナ発話イベントの受け口）が一度も実装されないまま 2026-08-21 に退役した。対ペルソナ社交は v0.4 の運転領域として設計し直す（→ [`roadmap_status.md`](roadmap_status.md) §2）。
 
 ### 判断点（旧 Meta-Judgment）
 
-「何をするか」をペルソナが決める上位視点。旧メタ判断（50分 tick の状況分類ディスパッチ）は**判断点5種に置換された**: 起床（`judgment_day_open`＝時間割の編成）・就寝（`judgment_day_close`＝ふりかえりと接ぎ直し）・セッション終了・会話終了・イベント到着（on_event）。いずれも**出来事の境界**（文脈の濃い場所）に置かれ、構造化出力でタスク裁定・時間割の組み替えを行う（`builtin_data/tools/judgment_finalize.py`）。判断点が退役した目的の木（§9）へ書く配線は残置で、撤去は v0.4 の運転設計と一緒に行う。**判断材料は Session（短期記憶、§6）から得る**。判断ログは `meta_judgment_log` に蓄積される。alert（呼びかけ）即応のみ旧経路が存続。
+「何をするか」をペルソナが決める上位視点。旧メタ判断（50分 tick の状況分類ディスパッチ）は判断点5種（起床・就寝・セッション終了・会話終了・イベント到着）に置換されたが、v3 で一日の縁から LLM の義務判断が消え、**develop-v0.4 に残る判断点はイベント到着（on_event）ただ一つ**になった（会話終了は 2026-08-16、起床・就寝・セッション終了は 2026-10-09 の v0.4 段 1 で退役 — §9）。on_event は実イベントの到着で発火し（別の活動中に届いたユーザー発話の仲裁にも使う配線だが、「別の活動中か」を答える器が今は無いので、仲裁としては発火しない）、構造化出力で反応を選ぶ: **engage_now**（今すぐ応対）/ **add_task**（タスク帳にシステムタスクとして一件積む）/ **note_only**（判断の記録に覚え書きを載せるだけ）/ **ignore**。適用は `builtin_data/tools/judgment_finalize.py`。冪等キーは刺激の永続 ID から作る。**判断材料は Session（短期記憶、§6）から得る**。判断ログは `meta_judgment_log` に蓄積される。alert（呼びかけ）は engage_now だけに縮退する。
 
-> **⚠️ 判断点が発火するかはブランチで違う**。v0.3 (develop) では判断点は一つも発火しない（2026-08-23）— `saiverse/autonomy_wiring.py` の定数 `AUTONOMOUS_DRIVING_SHIPPED=False` が全体の止め具で（自律ゲートの唯一の判定関数 `is_autonomy_on` が常に False を返す）、実イベントと仲裁は判断を経ない直接応答（v0.2 と同じ）。**develop-v0.4 では 2026-09-25 に定数ごと撤去した**ので、`is_autonomy_on` はペルソナごとの `AUTONOMY_ENABLED` だけで決まり、自律 ON のペルソナでは判断点・watchdog・コマの再予約・実イベントの判断経由が動く（実機検証はこれから）。→ [`autonomous_behavior_v3.md`](../intent/autonomous_behavior_v3.md) §11.1
+> **⚠️ 判断点が発火するかはブランチで違う**。v0.3 (develop) では判断点は一つも発火しない（2026-08-23）— `saiverse/autonomy_wiring.py` の定数 `AUTONOMOUS_DRIVING_SHIPPED=False` が全体の止め具で（自律ゲートの唯一の判定関数 `is_autonomy_on` が常に False を返す）、実イベントと仲裁は判断を経ない直接応答（v0.2 と同じ）。**develop-v0.4 では 2026-09-25 に定数ごと撤去した**ので、`is_autonomy_on` はペルソナごとの `AUTONOMY_ENABLED` だけで決まり、自律 ON のペルソナではライフの帳簿処理・watchdog・実イベントの判断経由が動く（実機検証はこれから。時間割のコマの再予約は 2026-10-09 に時間割ごと撤去された）。→ [`autonomous_behavior_v3.md`](../intent/autonomous_behavior_v3.md) §11.1
 
 ### 反射判断（型付きの質問に確率だけで答える判断）
 
@@ -183,13 +188,14 @@ Track 内の処理は複数の **line** に分かれ、3つの独立した軸で
 ```mermaid
 graph TD
     User((User)) -->|"発言 (Building→SAIVerseManager→submit_user)"| PulseController
-    DayPlan["時間割 (コマ予約 → EventScheduler)"] -->|コマ発火 submit_schedule| PulseController
-    JudgmentPoints["判断点 (起床/就寝/セッション終了/会話終了/on_event)"] -->|submit| PulseController
-    Watchdog["AutonomyManager (watchdog)"] -.->|途絶検知時のみ| DayPlan
-    Phenomena -->|submit_schedule| PulseController
+    Alarm["アラーム (EventScheduler)"] -->|定時に submit_schedule| PulseController
+    Life["ライフ (起床・就寝の機械の帳簿処理)"]
+    Watchdog["AutonomyManager (watchdog)"] -.->|ライフの張り直しだけ| Life
+    Phenomena -->|"実イベント (刺激の ID で再配送を照合)"| JudgmentPoints["判断点 (on_event のみ)"]
+    Phenomena -.->|"自律 OFF は判断を経ずに直接応対"| PulseController
+    JudgmentPoints -->|"engage_now のとき応対を submit"| PulseController
+    JudgmentPoints -.->|"add_task"| TaskBook["タスク帳"]
     Session["Session (短期記憶 §6)"] -->|判断材料| JudgmentPoints
-    JudgmentPoints -.->|"裁定・棚入れ (退役した目的の木への残置の配線。撤去は v0.4)"| PurposeTree["目的の木 (退役、§9)"]
-    PurposeTree -.->|"コマの対象 (task参照)"| DayPlan
     PulseController -->|"優先度 USER>SCHEDULE>AUTO + 割り込み"| Pulse
     Pulse -->|内包| Beat["Beat (§4)"]
     Pulse -->|複数の処理ライン| line
@@ -265,7 +271,7 @@ graph TD
 
 > 地図は 2026-08-23 まで三種あった。三つ目の**目的の地図（目的の木、`persona_task` / `task:N`）は退役**し、「やりたいこと・やること」の置き場は**手帳**（メモ欄と約束の欄）が引き取った（§9）。ペルソナが目的の木を操作するスペルは同日に削除され、`persona_task` の行は読み取り専用の残置として残っている。
 
-**両地図共通の法則**: **ノード状態が構造の代謝（分割・統合）を駆動する**。時間の地図は自動（Lv1→Lv2 統合）、意味の地図はペルソナの自己著者性を通す（判断点で提案 → 本人が裁定 → 睡眠中バッチで実行 ＝ **編纂**〔旧称・庭仕事、P4 設計 v0.2 で改名〕）。
+**両地図共通の法則**: **ノード状態が構造の代謝（分割・統合）を駆動する**。時間の地図は自動（Lv1→Lv2 統合）、意味の地図はペルソナの自己著者性を通す（機械が候補を検知 → スルースで本人が採否を返す → 承認分を背景で実行 ＝ **編纂**〔旧称・庭仕事、P4 設計 v0.2 で改名〕。develop-v0.4 は 2026-10-09 からこの形。v0.3（develop）では今も就寝判断で採否を返し、睡眠中のバッチで実行する）。
 
 格納先はどちらも per-persona の SQLite DB **SAIMemory**（`memory.db`）。
 
@@ -297,11 +303,11 @@ Metabolism で退役する Message は **episode 整列チャンク**（W4 = [�
 
 **Fragment の生成タイミング（検証済）**: Metabolism（§6）発火時に Chronicle 生成チャンク（W4 で `execute_plan` に世代交代）へ `entity_extractor` が `batch_callback` として相乗りする——**圧縮（時間の地図）と知識化（意味の地図）は Metabolism という同じ節目で連動する**。
 
-> **実装状況メモ**: 意味の地図の構造代謝は **編纂**（P4-a）として lifecycle 配線済み（検知 → 就寝裁定 → 睡眠中バッチ）。操作は**肥大ページの分割**と**類似ページの統合**の 2 つ——「小ページを親へ畳む」(fold) は 2026-08-05 に撤去（§9）。分割・統合が互いの入力を作る輪を塞ぐ健全性規則は [`concept_consolidation.md`](../intent/concept_consolidation.md) が正典。同じ操作の手動 CLI だった `scripts/maintain_memopedia.py` は 2026-08-05 に削除（§9）。vividness（鮮度減衰）は廃止確定（§9）。
+> **実装状況メモ**: 意味の地図の構造代謝は **編纂**（P4-a、正式名「記憶の手入れ」のうち記憶ページの再編）として lifecycle 配線済み。develop-v0.4 では 2026-10-09（段 1）に、検知 → **スルースでの採否**（業務日に一回だけ提示、見送りは翌業務日まで再提示しない）→ スルースの確定後に背景で実行、へ移した（同じペルソナの実行は二本並走しない。[v3](../intent/autonomous_behavior_v3.md) §13.6）。メモのページ化（P4-b 命名）は同日に休止 — 検知の材料だった目的の木が撤去されたため。v0.3（develop）は検知 → 就寝裁定 → 睡眠中バッチのまま。操作は**肥大ページの分割**と**類似ページの統合**の 2 つ——「小ページを親へ畳む」(fold) は 2026-08-05 に撤去（§9）。分割・統合が互いの入力を作る輪を塞ぐ健全性規則は [`concept_consolidation.md`](../intent/concept_consolidation.md) が正典。同じ操作の手動 CLI だった `scripts/maintain_memopedia.py` は 2026-08-05 に削除（§9）。vividness（鮮度減衰）は廃止確定（§9）。
 
 ### 目的の木（目的の地図）— 退役
 
-かつて三つ目の地図だった。意志の構造（life_concept_map.md）として、根＝在り方（LIFE_PURPOSE）、第一階層＝旧 Track、中間＝task、末端＝step の階層を持っていた。根（LIFE_PURPOSE 列）と第一階層（Track）が先に退役し、植える道具（`purpose_seed` / `purpose_adopt`）も消え、枝を操作する三本だけが残った状態で 2026-08-23 に**全体を退役**させた。後継は**手帳**（メモ欄と約束の欄）で、詳細は §9 と [`docs/issues/purpose_tree_vs_pocketbook_succession.md`](../issues/purpose_tree_vs_pocketbook_succession.md)。
+かつて三つ目の地図だった。意志の構造（life_concept_map.md）として、根＝在り方（LIFE_PURPOSE）、第一階層＝旧 Track、中間＝task、末端＝step の階層を持っていた。根（LIFE_PURPOSE 列）と第一階層（Track）が先に退役し、植える道具（`purpose_seed` / `purpose_adopt`）も消え、枝を操作する三本だけが残った状態で 2026-08-23 に**全体を退役**させた。後継は**手帳**（メモ欄と約束の欄）で、詳細は §9 と [`docs/issues/archive/purpose_tree_vs_pocketbook_succession.md`](../issues/archive/purpose_tree_vs_pocketbook_succession.md)。
 
 ```mermaid
 graph TD
@@ -430,7 +436,7 @@ graph TD
 | **旧 Building ログの quarantine** | **撤去差分の PR レビュー待ち**（2026-10-02、[issue](../issues/quarantine_path_dead_code_removal.md)）。DB 化後、登録元の呼び手が無かった旧 log.json 隔離・復元・リセット API / UI と拒否分岐を撤去。旧ファイルの不足分を DB に取り込む検算と、読めないファイルを脇へ移す操作は現役のまま。既存ファイル・DB データはこの整理で変更しない |
 | **Blueprint** | `blueprint` テーブルは実在するが（ペルソナ生成テンプレート）、現状は運用されていない |
 | **Emotion** | PersonaCore の感情モジュールとして存在するが、実質未活用 |
-| **task (standalone tasks.db)** | per-persona `tasks.db` は統合 Task モデル（main DB `persona_task`）へ一本化され廃止。その `persona_task` 自体も目的の木として退役した（下記） |
+| **task (standalone tasks.db)** | per-persona `tasks.db` は統合 Task モデル（main DB `persona_task`）へ一本化され廃止。その `persona_task` 自体も目的の木として退役した（下記）。`persona/tasks/`（`storage.py` ほか）は develop-v0.4 で 2026-10-09 にパッケージごと削除した |
 | **mark（観測点）** | **クリップ (clip) に一般化**（2026-07-10）。`marks` テーブルは `clips` へ移行済み（点クリップ＝旧 mark）。mark は「まだどの地図にも貼られていないクリップ」という状態の呼び名として残る |
 | **クリップ (photo)** | **クリップ (clip) に改名**（2026-07-15）。カメラで撮った画像と紛らわしく、`photo:3` のような参照をペルソナが打つと誤読を招くため。比喩を捨てたのではなく抽象化した — クリップは「地図に留める」行為と「切り出した一片」(video clip) の両義を持ち、クリップが担っていた意味を内包する。スペル `memory_clip` は 2026-07-11 に先にこの語を採っており（`memory_photo` は「画像系に見える」で却下済み）、名詞側が 4 日遅れて追いついた形。`photos` テーブル → `clips`、`p:N` → `clip:N`。**この語をペルソナに見える場所へ戻さないこと**（却下の射程はスペル名ではなく「ペルソナの目に触れる語」全体） |
 | **vividness（Memopedia 鮮度減衰）** | **廃止確定**（2026-07-10）。減衰の発動が観測されたことがなく（バグ疑い）、head 索引廃止で効果もなかった。「見えなくするだけで生産性がない」— 置換は構造状態（肥大/過小 → 分割/統合の代謝、P4） |
@@ -462,14 +468,23 @@ graph TD
 | **`save_desk_memo`（作業メモの Track 保存）** | **書き手ごと撤去**（2026-08-21、同 §8）。読み手（`day_plan._build_track_instruction`）は Track 撤廃で到達不能になっており、書き手（セッション終了判断の `task_verdict` の continue / blocked）だけが残っていた。作業メモは独白記録に残る（引っ越し先の中断中エピソードのしおりは §2 住人 4） |
 | **Tracks API（`/api/people/{id}/tracks*`）と `scripts/debug_track.py`** | **削除**（2026-08-21、同 §8）。フロントの消費はゼロで、残っていた読み手は debug スクリプトだけだった |
 | **Track ランタイム（`TrackManager` / `saiverse/track_manager.py`）** | **モジュールごと削除**（2026-08-22、[Track 撤廃計画](../intent/track_retirement.md) §9）。書き手が全て退去した後に残っていた 8 箇所の読み手（時間割の `track:N` 指示書・想起の歩き・`judgment_finalize` の表題解決・`info.py` と `activity.py` の「いま」表示・pulse timeline・一日シム・`stop_autonomy` の帳簿揃え）を同便で解消した結果、参照ゼロになった。**`ActionTrack` テーブルと既存データは読み取り専用の残置**（`storage_layers` の索引と v0.3 機械写しが読む）。関心の行き先は手帳のアクティビティ（[autonomous_behavior_v3](../intent/autonomous_behavior_v3.md) §13.1） |
-| **エピソード（`episodes` テーブル）の書き込み** | **書き手ごと退役**（2026-08-22、[autonomous_behavior_v3](../intent/autonomous_behavior_v3.md) §7）。「エピソードという専用の記録行は持たない」— v1.4 の行が持っていた情報は全て他所に既にある: どの件の実行かは**メッセージへの記録**、完了と成果物は**台帳の一件**、できごと UI の一行は**表示時にログから導出**、チャンクの切れ目の目印も表示時に導出。始まりと終わりは**どこにも記録しない**（2026-08-23 裁定 — 会話に区切りは保存しない = [episode.md](../intent/episode.md) §2-1 の不変条件。束 6c が入れた機構名義の「遷移の一行」はペルソナの記憶を汚したため機構ごと撤去し、代替の記録も作らない。できごと UI が区間を要るときは発言時刻と沈黙幅から導出する）。`open_episode` / `close_episode` / `set_digest_ref` / 会話ヘルパ二本と、8 系統の呼び手（会話の開閉・時間割のコマ・作業セッション・Metabolism の折り返し子・実行台帳の孤児掃除と digest 確定・`judgment_finalize`・一日シム）を削除。**新しいメッセージへの `origin_episode` 刻印も同時に停止**（既存の刻印は残置、読み手が無視する）。テーブルと既存行は読み取り専用の残置で、読む口は `saiverse/episodes.py` に残る（§9-8 ①「削除はいつでもできる」） |
+| **エピソード（`episodes` テーブル）の書き込み** | **書き手ごと退役**（2026-08-22、[autonomous_behavior_v3](../intent/autonomous_behavior_v3.md) §7）。「エピソードという専用の記録行は持たない」— v1.4 の行が持っていた情報は全て他所に既にある: どの件の実行かは**メッセージへの記録**、完了と成果物は**台帳の一件**、できごと UI の一行は**表示時にログから導出**、チャンクの切れ目の目印も表示時に導出。始まりと終わりは**どこにも記録しない**（2026-08-23 裁定 — 会話に区切りは保存しない = [episode.md](../intent/episode.md) §2-1 の不変条件。束 6c が入れた機構名義の「遷移の一行」はペルソナの記憶を汚したため機構ごと撤去し、代替の記録も作らない。できごと UI が区間を要るときは発言時刻と沈黙幅から導出する）。`open_episode` / `close_episode` / `set_digest_ref` / 会話ヘルパ二本と、8 系統の呼び手（会話の開閉・時間割のコマ・作業セッション・Metabolism の折り返し子・実行台帳の孤児掃除と digest 確定・`judgment_finalize`・一日シム）を削除。**新しいメッセージへの `origin_episode` 刻印も同時に停止**（既存の刻印は残置、読み手が無視する）。テーブルと既存行は読み取り専用の残置で、読む口は `saiverse/episodes.py` に残る（§9-8 ①「削除はいつでもできる」）。→ その読み口も develop-v0.4 で 2026-10-09 に撤去した（下の「episodes の読み口」の行） |
 | **「いま会話中か」の器としての出来事** | **メモリ内の会話状態へ世代交代**（2026-08-22、v3 §7）。正典は三代目 — Track の status（v1）→ 開いている会話の出来事（[life.md](../intent/life.md) §7 案 Y、2026-07-13）→ `saiverse/user_conversation.py` のプロセス内状態。**再起動で状態が消える = 「会話していない」に一貫して倒れる**のは設計（会話の束ねは表示時に `conversation` タグの範囲から導出するので記録は失われない）。旧実装は逆に、閉じ損ねた行が再起動を跨いで「永遠に会話中」として残る事故を持っていた |
 | **`post_conversation`（会話終了判断）** | **裁定ごと退役**（2026-08-16、v3 §13.3 / §8）。会話に切れ目は定義できず、「30 分沈黙 = 会話の終わり」という恣意的な仮定の上に判断の席を置いていた（まはー指摘）。約束・やりたいこと・コア記憶の捕獲は **Metabolism のスルースの一手**へ一本化（自律 OFF のペルソナでは捕獲が一度も走らない欠陥も構造ごと消える）。残るのは待ちを閉じる機械の帳簿処理だけ |
 | **欲求プール（desire）と purpose の木** | **概念ごと退役**（v3 §8 / §9-5）。「欲求とタスクの区別」は廃止 — どちらも「やること」で、差は時間属性（期限の有無）と**相手の有無**だけ。階層（ステップ分解）も持たない。行き先は手帳の**やりたいメモ**（自分だけの願い）と**タスク帳**（相手のいる約束・依頼、期限は省略可）。`persona_task` の desire 系列と `stage` の木は読み取り専用の残置で、生きた行は v0.3 起動時の機械写しが手帳へ複写する（§9-8） |
-| **目的の木（`persona_task` / `task:N` / `purpose_*` スペル）** | **退役**（2026-08-23、[issue](../issues/purpose_tree_vs_pocketbook_succession.md) 裁定 A）。後継は**手帳**（メモ欄 = やりたいこと・やったこと、約束の欄 = 相手のいる約束）。「やりたいこと・やること」の置き場が手帳と目的の木で二つ並び、名前まで衝突していた（参照 `task:N` と手帳の約束の欄 `task_book`）ため、片方を降ろした。**一段目（2026-08-23 実施）**＝ペルソナから見える口を閉じる: `purpose_close` / `purpose_decompose` / `purpose_step` の三本を削除し、地図帳スペル（`memory_read` / `memory_open` / `memory_close` / `memory_delete`）の説明文から `task:N` を外し、`memory_open task:N`（机に開く＝本人の文脈に常駐させる）を拒否に変えた。読む（`memory_read task:N`）と、既に机にある行を閉じる（`memory_close`）は残置——自動想起が古い参照を流したときに読めないと困るため。**二段目（v0.4 の運転設計と一緒）**＝Memory Atlas 内部の `task` 分岐・`recall_walk`・判断点の棚入れ・`saiverse/persona_task_manager.py` の撤去。v0.3 は自律 OFF でそれらは動かない。既存の目的ノードの中身を手帳へ機械写しは**しない**（ステップの進捗を写すには意味の解釈が要る＝§9-8 の規則） |
+| **目的の木（`persona_task` / `task:N` / `purpose_*` スペル）** | **退役**（2026-08-23、[issue](../issues/archive/purpose_tree_vs_pocketbook_succession.md) 裁定 A）。後継は**手帳**（メモ欄 = やりたいこと・やったこと、約束の欄 = 相手のいる約束）。「やりたいこと・やること」の置き場が手帳と目的の木で二つ並び、名前まで衝突していた（参照 `task:N` と手帳の約束の欄 `task_book`）ため、片方を降ろした。**一段目（2026-08-23 実施）**＝ペルソナから見える口を閉じる: `purpose_close` / `purpose_decompose` / `purpose_step` の三本を削除し、地図帳スペル（`memory_read` / `memory_open` / `memory_close` / `memory_delete`）の説明文から `task:N` を外し、`memory_open task:N`（机に開く＝本人の文脈に常駐させる）を拒否に変えた。読む（`memory_read task:N`）と、既に机にある行を閉じる（`memory_close`）は残置——自動想起が古い参照を流したときに読めないと困るため。**二段目（v0.4 の運転設計と一緒）**＝Memory Atlas 内部の `task` 分岐・`recall_walk`・判断点の棚入れ・`saiverse/persona_task_manager.py` の撤去。v0.3 は自律 OFF でそれらは動かない。→ 二段目は develop-v0.4 で 2026-10-09（段 1）に済んだ（下の「目的の木の内部の配線」の行）。既存の目的ノードの中身を手帳へ機械写しは**しない**（ステップの進捗を写すには意味の解釈が要る＝§9-8 の規則） |
 | **`AI.LIFE_PURPOSE` 列** | **列ごと退役**（v3 §9-5）。JSON `{purpose, interests, vocations}` の三欄は器が別々だった: `purpose` の一文は**コア記憶**へ（在り方であって活動ではない。常駐注入で全 Pulse から見える — 旧列は AUTONOMOUS/META にしか注入されず会話中は見えなかった）、`interests` / `vocations` は**手帳のアクティビティ**へ（そうしないと二重帳簿になる）。読み手・書き手・`life_purpose_set` スペルは 2026-08-21 に撤去済みで、**列は v0.3 起動時の機械写し（`saiverse/v3_shape_migration.py`）の入力としてだけ残る**。初回聞き取りの席はシステムタスクの第一号へ世代交代（v3 §9-5） |
 | **`track_*` スペル 7 種（ペルソナの Track 操作）と deferred track ops** | **語彙ごと退役**（2026-08-21〜22、Track 撤廃 §7.3 裁定 4）。`track_create` / `activate` / `pause` / `complete` / `abort` ほかは、ペルソナが自分の走路を作り替えるための動詞だった。v3 では「やること」の器が三つ（ルーチン / タスク帳 / 手帳）に分かれ、本人が触るのは手帳とタスク帳だけになる（ルーチンの変更経路はユーザーのみ）。後継のスペル語彙のうち**手帳の口だけは v0.3 で先行した** — `pocketbook_open`「手帳を開く」と `pocketbook_write`「手帳に書く」の 2 本で、約束（タスク帳）も手帳の一つの欄として同じ 2 本から読み書きする（[v3 §13.2.1](../intent/autonomous_behavior_v3.md)）。運転の層の語彙は v0.4 のまま |
 | **ライフビュー・できごと UI・タスク管理・ライフ設定・習慣テンプレートの画面** | **v0.3 では隠す**（2026-08-22、v3 §11「運転 UI は隠す」）。自律行動の**運転**を v0.3 のリリース要件から外したので、動いていない運転の状態を UI に出さない（根拠 = v1→v2→v2.5 の三世代連続で「動かすまで見えない病理」が出た帰納。運転の初回実装が正しいことにリリースを賭けない）。フロントは LifeView / EventsTimeline / EventsModal / TasksModal / LifeSettingsModal / TimetableTemplateModal / PersonaProfileModal と `/events` ページを削除し、対応するルート（`activity` / `autonomy` / `autonomous` / `life-settings` / `timetable-template` / `tasks` / `day-plan` / `/api/episodes`）も削除。**データと記憶の形は v0.3 に入っている**（v3 §11）— 隠したのは運転席だけ。作り直しは v0.4 の「暮らしの窓」（v3 §9-9） |
+| **時間割（日次編成・コマの予約と発火・繰り下げ・予算ゲート・習慣テンプレート・コマ種別カタログ）** | **撤去**（2026-10-09、develop-v0.4 の段 1 — [v0.4 実装計画](../intent/autonomous_behavior_v04_plan.md) / [v3](../intent/autonomous_behavior_v3.md) §8）。v2 の芯「実行の前にやることを決める」は残し、決め方を「毎朝 LLM が一日を編成する」から「やることの台帳 + 間隔で打たれるティック」へ作り替えるため。`saiverse/timetable_template.py`・`saiverse/slot_kind_catalog.py`・`builtin_data/slot_kinds/`・`GET /api/config/slot-kinds` を削除し、`saiverse/day_plan.py` はライフの帳簿だけに痩せた。テーブル（`persona_day_plan` ほか）は既存データの残置。後継のティックは段 2〜3。v0.3（develop）にはコードが残り、止め具で発火しない |
+| **作業セッション（`sea/work_session.py`）と暮らしプロファイル** | **撤去**（2026-10-09、同上）。コマの発火で予算（ラウンド数）付きで走っていた実行の器。暮らしコマを載せていたプロファイル（[autonomous_pulse_vehicle](../intent/autonomous_pulse_vehicle.md)）も一緒に消えた。暮らしは空きティックの営みに戻る（v3 §8）。tell スペルは生存 |
+| **コマの締め（`saiverse/slot_close.py`）** | **撤去**（2026-10-09、同上）。コマの終わりに経験値ノートを書いていた書き手。経験値ノートの新しい書く席は v0.4 計画の段 4 で決める（[experience_ledger](../intent/experience_ledger.md)） |
+| **セッション終了判断（`post_session` / `judgment_post_session`）** | **撤去**（2026-10-09、同上）。作業セッションの終わりにタスクの裁定と実績の要約（digest）を書いていた判断点。器の作業セッションごと消えた |
+| **起床・就寝の判断点（`judgment_day_open` / `judgment_day_close`）** | **撤去**（2026-10-09、同上）。起床・就寝の時刻に LLM を呼ばず、ライフの確定と節目だけを機械の帳簿処理で行う（`day_plan.handle_scheduled_life_boundary`、保存先は新テーブル `persona_life`）。ふりかえり・明日へのメモ・記憶の手入れの採否も就寝から消えた（記憶の手入れはスルースへ — §5）。ペルソナのアラームのスペル（`schedule_add` / `schedule_delete`）は起床・就寝の行と判断点 Playbook の行を作れず、消せない |
+| **目的の木の内部の配線（`saiverse/persona_task_manager.py`・`persona/tasks/`・`saiverse/recall_walk.py`・Memory Atlas の `task` 分岐・`get_task_summary` ツール）** | **撤去**（2026-10-09、同上 — 上の「目的の木」の行の二段目）。`memory_read task:N` も通らなくなり、机に残っていた `task:N` の行は次の机の取り直しで外れる。`persona_task*` のテーブルと既存データは残置 |
+| **episodes の読み口（`saiverse/episodes.py`・`episode_read` スペル・`saiverse/experience_inheritance.py`）** | **撤去**（2026-10-09、同上）。書き手が 2026-08-22 に消えた後、旧データを読むためだけに残っていた口。`episodes` / `episode_inheritance` のテーブルと既存行は残置 |
+| **一日シミュレータ（`saiverse/day_simulator.py`・`saiverse/day_scenario.py`・`scripts/run_day_sim.py`）** | **撤去**（2026-10-09、同上）。時間割を前提に一日を早回しで流す検証の道具だった。一日の早回しはティックの道具として段 3 で作り直す（v0.4 計画の段 3） |
+| **一日新聞（`saiverse/day_report.py`）** | **撤去**（2026-10-09、同上）。時間割の予定と実績を並べてユーザーに見せていた日報。読む元の時間割ごと消えた。街の一日を眺める面はできごと UI（v3 §9-9）が引き取る |
 | **Fixture** | `observer.md` で構想のみ。テーブル未実装 |
 | **BuildingToolLink** | `BuildingToolLink` テーブルは実在するが数ヶ月触られておらず未使用。ツールがペルソナに届く経路は Spell（`spell=True`）と Playbook の TOOL ノードで、この紐付けテーブルではない（→ `stackchan_vessel.md` v0.5 でも「機能してない可能性」と記録） |
 | **Unity Gateway（`unity_gateway/`）と Unity 向けの身体制御ツール `control_body`** | **撤去**（2026-09-11、[issue](../issues/archive/unity_gateway_removal.md)）。Unity で作った 3D クライアントとつなぐ WebSocket サーバーで、SAIVerse を起動すると既定でポート 8765 が全ネットワークインターフェースに向けて認証なしで開いていた。繋いだ相手には全ペルソナの発言が `<in_heart>` の中身ごと送られ、ペルソナのプロンプトへ好きな「空間情報」を差し込めた。チャット送信のメッセージを受けた処理は存在しないメソッドを呼んでエラーになっており、残っていた本番ログの 129 セッションに接続は一度も無かった。Unity は [仮想身体 Godot](../intent/virtual_embodiment_godot.md) の計画から既に外れていた。サーバー、発言を送る処理、リアルタイム情報の空間情報、`control_body` ツールと会話の playbook 4 本の該当ノード、`body_control.txt` を削除した。3D の仮想身体の計画は Godot vessel アドオンで進めているが、削除した機能をそのまま引き継ぐものではない。旧設計書は [docs/old/unity-gateway.md](../old/unity-gateway.md) |
@@ -492,12 +507,12 @@ graph TD
 | Persona | 回す | Pulse | run_sea_user / run_sea_auto で認知サイクル |
 | User発言/Schedule/Phenomena/判断点 | submit | PulseController | 起動源が制御層に集約 |
 | Building | 発言を検知（SAIVerseManager 経由） | PulseController | ユーザー発言が `submit_user` へ |
-| 時間割（day plan） | コマ発火を予約 | EventScheduler → PulseController | 起床判断が編成、コマで予算付き作業セッション |
-| 判断点 | 裁定・時間割の組み替え | 時間割 | 起床/就寝/セッション終了/会話終了/on_event。退役した目的の木への棚入れの配線が残置（撤去は v0.4） |
-| AutonomyManager | watchdog | 時間割 | 途絶検知時のみ火入れ（定期ディスパッチは廃止） |
+| アラーム | 定時の発火を予約 | EventScheduler → PulseController | Playbook または指示書を定時に走らせる（時間割は 2026-10-09 に撤去 — §9） |
+| ライフ | 起床・就寝の時刻に確定と節目 | （機械の帳簿処理、Pulse なし） | `persona_life` に保存。keep-alive・話しかけやすさの表示・業務日の判定が読む |
+| 判断点（on_event のみ） | 反応の選択 | PulseController / タスク帳 | engage_now なら応対を submit、add_task ならタスク帳にシステムタスクを一件積む |
+| AutonomyManager | watchdog | ライフ | 自律 ON・起床時間帯なのに今日のライフが無いときだけ張り直す（定期ディスパッチは廃止） |
 | PulseController | 起動 | Pulse | 優先度（USER>SCHEDULE>AUTO）+ 割り込み制御で実行 |
 | Session | 判断材料 | 判断点 | 短期記憶が判断の根拠 |
-| 目的の木（退役、§9） | コマの対象（task:N） | 時間割 | 残置の配線。時間割のコマが指す先の付け替えは v0.4 |
 | Pulse | 内包 | Beat | 1 Pulse に複数 Beat |
 | Pulse | 実行 | Playbook | Pulse が Playbook グラフを回す |
 | Playbook(発話ノード) | 生成 | Beat | LLM 出力が1 Beat になる |
@@ -530,16 +545,16 @@ graph TD
 | 通称 | 正式概念 | 実装 |
 |---|---|---|
 | 行動の線 | Track（退役、§9） | `action_track` テーブル（読み取り専用の残置） |
-| メタレイヤー / メタ判断 | 判断点（起床/就寝/セッション終了/会話終了/on_event） | `judgment_*.json` Playbook + `judgment_finalize` |
+| メタレイヤー / メタ判断 | 判断点（develop-v0.4 では on_event のみ。v0.3 は起床/就寝/セッション終了/on_event） | `judgment_on_event.json` Playbook + `judgment_finalize` |
 | 短期記憶 / ワーキングメモリ | Session | 統一制御は未実装（起草中） |
 | 土地 | 生ログ = Thread（⊃ Message） | `threads` / `messages` テーブル（memory.db） |
 | 地図帳 / 記憶の地図帳 | Memory Atlas（時間/意味の二地図） | `saiverse/memory_atlas.py` ファサード + `memory_*` スペル群（`purpose_*` は §9 で退役） |
 | クリップ | 土地参照の統一プリミティブ（旧 mark を包含） | `clips` テーブル（`clip:N`） |
 | 机 | head の開きっぱなし領域（memory_open の行き先） | `desk_items` テーブル + `DeskSection` |
 | コア記憶 | 意味の地図の常時開特殊ページ | `core_memories` テーブル（`core:N` / `core`） |
-| 目的の木 | 退役（§9）。後継は手帳（メモ欄と約束の欄） | `persona_task`（main DB、`task:N`）は読み取り専用の残置 |
+| 目的の木 | 退役（§9）。後継は手帳（メモ欄と約束の欄） | `persona_task`（main DB）のテーブルと既存データだけが残置。develop-v0.4 では `task:N` の読み口も撤去 |
 | 発言→Pulse のマネージャー | SAIVerseManager + PulseController | `run_sea_user` → `submit_user` |
-| 自律駆動 | 時間割 + 判断点（+ watchdog）。**v0.3 (develop) では止め具で発火しない。develop-v0.4 では止め具を撤去済みで、自律 ON のペルソナで動く** | `saiverse/day_plan.py` / `autonomy_wiring.py`（旧2層リズムは廃止 §9。v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED` は develop-v0.4 で撤去） |
+| 自律駆動 | **develop-v0.4**: ライフ（機械の帳簿処理）+ アラーム + on_event 判断（+ watchdog）。ティックは v0.4 計画の段 2〜3 で入る。**v0.3 (develop)**: 時間割 + 判断点のコードが止め具で発火しない | `saiverse/day_plan.py`（ライフ）/ `autonomy_wiring.py`（旧2層リズムは廃止 §9。v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED` は develop-v0.4 で撤去。時間割は develop-v0.4 で 2026-10-09 に撤去） |
 
 ### ドキュメント⇄実装の乖離（要追従）
 

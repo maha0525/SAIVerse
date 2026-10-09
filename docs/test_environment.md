@@ -85,10 +85,10 @@ python scripts/run_conversation.py --persona <id> --message "おはよう" --mes
 python scripts/run_conversation.py --script <台本.json>
 # 環境変数未設定なら自動で test_data/ を指す。
 # DB・SAIVERSE_HOME・SAIVERSE_USER_DATA_DIR・--out のどれかが本番 (~/.saiverse) を指すと起動拒否
-# (本番の場所は SAIVERSE_HOME の値に依らず判定する。一日シムと複製スクリプトも同じ)
+# (本番の場所は SAIVERSE_HOME の値に依らず判定する。複製スクリプトも同じ)
 ```
 
-Discord ゲートウェイの設定は、起動スクリプトと同じ「ゲートウェイを止める値」で上書きしてから `SAIVerseManager` を作ります（一日シム `scripts/run_day_sim.py --real` も同じです。理由は後述の「外部連携の扱い」）。
+Discord ゲートウェイの設定は、起動スクリプトと同じ「ゲートウェイを止める値」で上書きしてから `SAIVerseManager` を作ります（理由は後述の「外部連携の扱い」）。develop-v0.4 では一日シム (`scripts/run_day_sim.py`) は時間割と一緒に撤去されました。
 
 ## コマンド詳細
 
@@ -156,7 +156,7 @@ test_fixtures\start_test_server.bat
 
 #### 起動スクリプトが止めていないもの
 
-- **LLM の API キー**（`.env`）: そのまま使われます。テストのペルソナに会話を送ると実際の課金になります。**develop-v0.4 ブランチでは、立てて放置しただけでも LLM が動き、課金が発生します** — v0.3 (develop) にあった自律の駆動の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`) は develop-v0.4 で撤去済みです。自律 ON (`AUTONOMY_ENABLED`、既定 True) のペルソナは、起床・就寝の予定があれば起床と就寝の判断・見張り (watchdog)・時間割のコマで LLM を呼び、予定が無くても外から出来事が届けば (実イベント) 応じるかどうかの判断 (on_event) で LLM を呼びます。v0.3 (develop) では止め具が残っているので、放置しただけでは自律の駆動は動きません。会話・Metabolism など会話起点の経路はどちらのブランチでも止まっていないので、チャットを送るテストをするなら課金が発生します。課金を完全に封じたいときはキーを無効な値で上書きしてから起動してください。
+- **LLM の API キー**（`.env`）: そのまま使われます。テストのペルソナに会話を送ると実際の課金になります。**develop-v0.4 ブランチでは、立てて放置しただけでも LLM が動き、課金が発生します** — v0.3 (develop) にあった自律の駆動の止め具 (`saiverse/autonomy_wiring.py` の `AUTONOMOUS_DRIVING_SHIPPED = False`) は develop-v0.4 で撤去済みです。ただし v0.4 実装計画の段 1 (2026-10-09) で v2 の時間割の運転を撤去したので、develop-v0.4 で LLM を呼ぶのは**ユーザー起点の会話・会話に相乗りするスルース・定時のアラーム・実イベントへの on_event 判断の四つだけ**です。自律 ON (`AUTONOMY_ENABLED`、既定 True) のペルソナでも、起床・就寝の時刻に走るのはライフの確定と節目の機械の帳簿処理 (LLM なし) だけで、時間割の編成・コマ・作業セッション・起床就寝の判断はもう呼ばれません。放置して LLM が動くのは、アラームが鳴ったときと、外から出来事が届いて (実イベント) 応じるかどうかを判断するとき (on_event) です。ティック (一定間隔で本人が動く一枠) が入る段 3 からは、ライフ中は放置しても定期的に LLM が呼ばれるようになります。v0.3 (develop) では止め具が残っているので、放置しただけでは自律の駆動は動きません。会話・Metabolism など会話起点の経路はどちらのブランチでも止まっていないので、チャットを送るテストをするなら課金が発生します。課金を完全に封じたいときはキーを無効な値で上書きしてから起動してください。
 - **メール送信**（`.env` の `SMTP_*`）: スペル `send_email_to_user` は実行時に `.env` の SMTP 設定を読むので、SMTP 設定が入っていれば、テストのペルソナが使ったときに実際にメールが送られます。
 - **アドオン**（`expansion_data/`）: 本番と同じフォルダを読み、テスト DB にアドオン設定の行が無いものは有効として扱われます。SwitchBot・X・Elyth・stackchan の資格情報はテスト DB のアドオン設定と `test_data/user_data/addon_data/` 側にあるので、テスト環境で設定しない限り本番のアカウントや機体にはつながりません。本番の世界を丸ごと複製した場合は、`--keep-addons` を付けない限り複製スクリプトがアドオンを無効にします（`docs/intent/sandbox_world_clone.md` §3）。
 - **SDS**（`SDS_URL`）: テスト都市の定義はオフライン起動（`START_IN_ONLINE_MODE: false`）なので、起動時には登録しません。
@@ -265,6 +265,14 @@ python test_fixtures/test_api.py --base-url http://127.0.0.1:18000
 ```bash
 python test_fixtures/setup_test_env.py --reset-db
 ```
+
+### 別の作業ツリー (worktree) で消したモジュールの import が黙って通る
+
+develop-v0.4 を別の作業ツリー (例: `SAIVerse-v0.4`) で検証するとき、メインの作業ツリーの仮想環境 (`.venv`) を共有して使うと、**worktree で削除した `saiverse` パッケージのモジュールが、メインの作業ツリー (develop) のもので補われて import できてしまう**。共有の仮想環境には SAIVerse が editable install されていて、その import の仕掛けがメインの作業ツリーの `saiverse/` を指しているため。`saiverse` パッケージ本体は worktree のものが読まれるが、worktree に無いサブモジュールだけが、黙ってメインの作業ツリーから読み込まれる。
+
+- 2026-10-09 の実測: worktree で削除済みの `saiverse.episodes` を worktree から import すると、エラーにならずメインの作業ツリーの `saiverse/episodes.py` が読み込まれた。
+- この補いが効くのは `saiverse` パッケージだけ (editable install の対応表に載っているのが `saiverse` だけ)。`sea` や `persona` のサブモジュールは、消せば正しく `ModuleNotFoundError` になる。
+- そのため、**モジュールを削除した変更の検証では、テストや起動が通ったことを「もう誰も import していない」証拠にしない**。消したモジュールの名前で import の残存を grep で確かめる (例: `grep -rn "saiverse.episodes\|from saiverse import episodes" --include=*.py .`)。コメントや docstring に名前が残るのは害が無いが、import 文が残っていればそれは本番 (補いの無い環境) で落ちる。
 
 ## AIエージェント向け情報
 

@@ -4,6 +4,15 @@
 
 **経緯**: 2026-08-23 凍結 (v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED = False` で時間割のコマが発火せず、実機検証が成立しなかった) → 2026-09-25 develop-v0.4 で封印解除 (止め具を定数ごと撤去、[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §11.1)。実機検証はこれから。
 
+**v0.4 段 1 の後の仕分け (2026-10-09)**: 時間割・コマ・作業セッション (暮らしプロファイルを含む) が [v0.4 実装計画](../intent/autonomous_behavior_v04_plan.md) 段 1 で撤去された。本書の論点はこう分かれる。
+
+- **① 器の取り違え** — コマ開始の Pulse の経路 (`day_plan._dispatch_slot_pulse`) は撤去されたが、**同じ形がアラームに残っている**: アラームの発火は `PulseDispatcher.dispatch_schedule_fire` を通り、Playbook の指定が無ければ会話用の器で鳴って出力が建物への発話になる。**v0.4 計画の段 4-1 (アラームの器の修正) で閉じる予定**。
+- **①の方向裁定 (暮らしコマを作業セッションへ統合)** — 統合先の作業セッションごと撤去されたので対象消滅。v3 では暮らしは空きティックの営みに戻る (v3 §8)。
+- **② track_activate の特殊機構** — Track は 2026-08-22 に撤去済みで、先に対象消滅していた。発声の経路は tell スペルが引き継いでいる (引数式への作り直しは段 2)。
+- **③ 完走済みの Pulse への中断復帰の再配達** — 時間割に依存しない論点。アラームの器を直す段 4-1 で、再配達が起きるかを改めて見る。
+- **④ 席違いのフォールバックが無警告** — 時間割に依存しない。`sea/runtime.py` に機械検査が入っている (autonomous_pulse_vehicle.md §D)。アラームが Playbook 未指定で鳴る形を段 4-1 で直すときに、検査の結果も合わせて見る。
+- **残した論点のうち時間割・コマに依存するもの** (暮らしセッションの割り込み優先・ライフ予算の記帳失敗・暮らしコマが標準モデルのキャッシュを温めない・tell の予算計上・テストの実時刻依存 `test_day_plan.py`) — 対象 (暮らしコマ・予算ゲート・時間割の保存) ごと撤去されたので対象消滅。キャッシュの保温はティック (v3 §5) が担う。tell の配送の成否と記録の分裂は時間割に依存しないので残る。
+
 **用語注記 (まはー裁定 2026-08-08)**: 従来文書の「軽い一手 (Pulse)」という呼び名は廃止。本書では「**コマ開始の Pulse**」(コマが始まったときに一回だけ走る Pulse) と書く。旧称は既存の intent / コードコメントに残存しており、該当箇所を触る改修時に順次置き換える。
 
 ## 観測 (2026-08-08 16:59〜17:00、実ログで確認)
@@ -102,5 +111,5 @@ meta_playbook 未指定の Pulse は無言で `track_user_conversation` に落�
 ## 関連
 
 - [feed_arrival_pulse_cannot_see_articles.md](feed_arrival_pulse_cannot_see_articles.md) (この観測が出た検証) / [conversation_timeout_eats_short_life_window.md](conversation_timeout_eats_short_life_window.md) (②と同じ会話状態機構の隣接論点)
-- [autonomous_v2_post_live_gaps.md](autonomous_v2_post_live_gaps.md) 束C (Track 意味論) — 本件はその実例
+- [autonomous_v2_post_live_gaps.md](archive/autonomous_v2_post_live_gaps.md) 束C (Track 意味論) — 本件はその実例
 - `saiverse/day_plan.py` `_dispatch_slot_pulse` / user-conv-handler `on_track_activated`

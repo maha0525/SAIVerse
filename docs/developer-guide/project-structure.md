@@ -63,13 +63,11 @@ saiverse/
 ├── saiverse_manager.py     # 中央オーケストレーター（SAIVerseManager）
 ├── occupancy_manager.py    # 移動・占有管理（OccupancyManager）
 ├── conversation_manager.py # 自律会話駆動（旧プロトタイプ・実質 no-op）
-├── autonomy_manager.py     # 自律バイオリズムの大リズム（50分 tick）
+├── autonomy_manager.py     # 自律の定期 tick。中身は watchdog だけ（今日のライフが無いときに張り直す）
 ├── event_scheduler.py      # スケジュール実行
-├── clock.py                # 仮想クロック（時刻の一元供給源、一日シミュレータ用）
-├── day_simulator.py        # DES ドライバ（仮想時刻でイベントキューを早回し）
-├── day_plan.py             # 時間割の保存とコマ発火配線 + 日次予算台帳（自律行動 v2 §4.2/§4.5）
-├── episodes.py             # 出来事（episode）の**読み取り専用**の口。書き込み API は 2026-08-22 に退役し、
-│                           #   テーブルと既存行は旧データの残置として残る（v3 §7）
+├── clock.py                # 仮想クロック（時刻の一元供給源）
+├── day_plan.py             # ライフ（起床〜就寝）の帳簿: 確定・開始終了の節目・keep-alive の従属・業務日の判定
+│                           #   （保存先は persona_life。v0.4 段 1 で時間割の部分を撤去）
 ├── user_conversation.py    # ユーザーとの会話の入口。「いま会話中か」はメモリ内の会話状態、応答は main_line
 │                           #   Pulse、終わりは沈黙タイマー。始まり／終わりはどこにも記録しない（2026-08-23 裁定）
 ├── voice_call.py           # 通話モード。ユーザーが押したときだけ Gemini Live API へセッションを張り、
@@ -79,12 +77,9 @@ saiverse/
 ├── task_book.py            # タスク帳（相手のある一件・期限つきの一件。v3 §4.1）
 ├── v3_shape_migration.py   # v0.3「形の層」への機械写し（LIFE_PURPOSE / 旧 Track の関心 / desire 候補 →
 │                           #   コア記憶・手帳）。ペルソナ登録フックから一回だけ走る（v3 §9-8）
-├── experience_inheritance.py # 継承エッジ（範囲ノード間の認識連続性 DAG、experience_structure §3.3 / W13）
-├── day_scenario.py         # シナリオプレイヤー（一日シナリオの仮想時刻再生、自律行動 v2 §12）
-├── day_report.py           # 一日レポート「一日新聞」（予定 vs 実績・成果物・予算の日次まとめ）
-├── facility_map.py         # 型→公共施設の解決（Building ロールタグ、自律行動 v2 §6.1）
-├── slot_kind_catalog.py    # コマ種別カタログ（kind は固定列挙でなく資源 3 層で増減する）
-├── judgment_points.py      # 判断点コーディネータ（起床/セッション終了/イベント到着/就寝の動的スキーマ +
+├── facility_map.py         # 公共施設のロールタグ（Building.FACILITY_ROLES）の読み口と「行ける場所」の候補
+├── stimulus_receipt.py     # 刺激の受領記録（同じ刺激の再配送で二度反応しないための照合、保持 7 日）
+├── judgment_points.py      # 判断点コーディネータ（残るのはイベント到着 on_event だけ。動的スキーマ +
 │                           #   起動、judgment_points.md）
 ├── llm_router.py           # ツール呼び出し判定
 ├── reflex_judgment.py      # 反射判断 — 状況と型付きの質問 (noul / choice / score) を渡すと確率・選択・数値だけが返る層。
@@ -128,6 +123,17 @@ saiverse/
 | `saiverse/activity_view.py` | ライフビュー UI と同時に退役。「暮らしの窓」としての作り直しは v0.4（[autonomous_behavior_v3.md](../intent/autonomous_behavior_v3.md) §9-9） |
 | `api/routes/episodes.py` / `api/routes/people/{activity,autonomy,autonomous,life_settings,timetable_template,tasks}.py` | ルートごと削除。`people/life.py` に残るのは `/clips` だけ |
 | フロント: `LifeView` / `LifeSettingsModal` / `TimetableTemplateModal` / `TasksModal` / `EventsTimeline` / `EventsModal` / `PersonaProfileModal` / `app/events/` | 同上。自律行動の運転面は v0.3 では UI ごと隠す方針（v3 §11） |
+
+**2026-10-09 に develop-v0.4 で消えたモジュール**（v0.4 実装計画の段 1 — v2 の運転の撤去。新しいコードから参照しない）:
+
+| 消えたもの | いまの持ち主 |
+|---|---|
+| `sea/work_session.py` / `saiverse/slot_close.py` / `saiverse/timetable_template.py` / `saiverse/slot_kind_catalog.py` / `builtin_data/slot_kinds/` | 時間割・作業セッション・コマの締めごと撤去。後継はティック（v3 §5、v0.4 計画の段 2〜3）。`saiverse/day_plan.py` はライフの帳簿だけ残る |
+| `builtin_data/playbooks/public/judgment_{day_open,day_close,post_session}.json` | 起床・就寝はライフの機械の帳簿処理へ、セッション終了は作業セッションごと撤去。残る判断点は `judgment_on_event` だけ |
+| `saiverse/persona_task_manager.py` / `persona/tasks/` / `saiverse/recall_walk.py` / `builtin_data/tools/get_task_summary.py` | 目的の木の内部の配線。後継は手帳とタスク帳（`saiverse/task_book.py`）。`persona_task*` テーブルは残置 |
+| `saiverse/episodes.py` / `saiverse/experience_inheritance.py` / `builtin_data/tools/episode_read.py` | episodes の読み口。`episodes` / `episode_inheritance` テーブルは残置 |
+| `saiverse/day_simulator.py` / `saiverse/day_scenario.py` / `scripts/run_day_sim.py` / `test_fixtures/scenarios/day_*.json` | 時間割前提の一日シミュレータ。一日の早回しの道具はティック用に段 3 で作り直す |
+| `saiverse/day_report.py` | 一日新聞。読む元の時間割ごと撤去 |
 
 ### api/
 
@@ -185,7 +191,6 @@ persona/
 ├── emotion_module.py # 感情モジュール（実質未活用）
 ├── history.py / history_manager.py # 履歴
 ├── mixins/           # 機能別ミックスイン（emotion / generation / history / movement）
-└── tasks/            # タスク管理（storage.py / store.py。現状ほぼ未運用）
 ```
 
 ### sea/
@@ -203,8 +208,6 @@ sea/
 ├── reply_stop_exit.py    # 返事が途中で止まった回の後始末（最後に保存した発言へ印と中断の通告を一回だけ。reply_stop_exit intent）
 ├── pulse_context.py      # PulseContext（Aspect / line 階層）
 ├── mode_spell_permissions.py # モード別 Spell 許可
-├── work_session.py       # 予算付き作業セッションランナー（自律行動 v2 §4.3）。**休眠** — v3 §8 で退役予定で、
-│                         #   出来事を開く／閉じる処理は 2026-08-22 に no-op 化済み
 ├── mcp_tool_refresh.py   # 頭での per_persona MCP ツール一覧の取得（mcp_addon_integration §I）
 ├── session_lifecycle.py  # Anchor / Metabolism / Chronicle 生成（Session の節目管理）
 ├── sluice.py             # スルース（退場の関所での採取: コア記憶 / 手帳のメモ / 約束。旧 gold_panning）
@@ -307,7 +310,6 @@ builtin_data/
 ├── playbooks/        # 組み込み Playbook（同梱一覧は reference/playbook-catalog.md）
 │   ├── public/       #   稼働中の Playbook 群（判断点 / 会話メインライン / 能力 / サブ内部）
 │   └── archive/      #   退役済みの保管庫（読み込まれない）
-├── slot_kinds/       # 組み込みコマ種別カタログ（時間割の kind 語彙）
 ├── models/           # 組み込みモデル設定（1モデル1JSON）
 ├── providers/        # 組み込みプロバイダ設定（接続先定義）
 ├── phenomena/        # 組み込み Phenomena

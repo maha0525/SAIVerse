@@ -97,20 +97,20 @@ Full workflow, parameter rules, and dev tooltip usage: `docs/developer-guide/loc
 
 **OccupancyManager** (`saiverse/occupancy_manager.py`) — handles *all* entity movement and capacity limits. Do not call PersonaCore methods directly to move anything.
 
-**ConversationManager** (`saiverse/conversation_manager.py`) — **legacy / no-op** since the 2026-05-01 cognitive-model migration. Its v1 successors are gone too: `SubLineScheduler` was deleted 2026-07-06 and the `track_autonomous` playbook retired 2026-07-10. Current autonomous driving is the **time-table + judgment points** in `saiverse/autonomy_wiring.py`; `AutonomyManager` now runs a watchdog-only tick. Removing the `ConversationManager` class itself is still pending (landscape §9).
+**ConversationManager** (`saiverse/conversation_manager.py`) — **legacy / no-op** since the 2026-05-01 cognitive-model migration. Its v1 successors are gone too: `SubLineScheduler` was deleted 2026-07-06 and the `track_autonomous` playbook retired 2026-07-10. On develop-v0.4 the v2 time-table (daily plan, slots, work sessions, wake/sleep LLM judgments) was removed on 2026-10-09 (stage 1 of `docs/intent/autonomous_behavior_v04_plan.md`). Current autonomous driving is: the **life** window (wake → sleep), confirmed and opened/closed by machine bookkeeping with no LLM (`saiverse/day_plan.py` `handle_scheduled_life_boundary`, stored in `persona_life`); **alarms** firing on schedule; and the single remaining judgment point **`on_event`** for real events (`saiverse/autonomy_wiring.py`). The interval-driven **tick** (v3 §5) arrives in stages 2–3; until then autonomous activity is alarms and event responses only. `AutonomyManager` runs a watchdog-only tick that only re-establishes a missing life. Removing the `ConversationManager` class itself is still pending (landscape §9).
 
 **RemotePersonaProxy** (`saiverse/remote_persona_proxy.py`) — **frozen**. `/inter-city/*` and `/persona-proxy/{id}/think` return 503.
 
 ### Data Flow
 
 - **User interaction**: UI → SAIVerseManager → PulseController → SEARuntime → LLM + Tools/Spell → SAIMemory + BuildingHistory
-- **Autonomous pulse**: time-table + judgment points (`saiverse/autonomy_wiring.py`) / `AutonomyManager` watchdog → PulseController → SEARuntime → think/speak nodes → SAIMemory
+- **Autonomous pulse**: alarm (EventScheduler) → PulseController, or real event → `on_event` judgment (`saiverse/autonomy_wiring.py`; a response is started only on engage_now) → PulseController; then → SEARuntime → think/speak nodes → SAIMemory. Life boundaries (wake/sleep) are machine bookkeeping and start no Pulse; the tick (v3 §5) is not wired yet (v0.4 plan stages 2–3)
 - **Inter-city travel**: 🧊 **frozen 2026-07-16**. It was DB-mediated (VisitingAI table polling), never direct API calls. Revival re-designs from `docs/handoff/2026-07-15_persona_city_building_separation_audit.md` (landscape §8).
 
 ### Memory Stack
 
 - **SAIMemory** (`sai_memory/`, `saiverse_memory/adapter.py`) — per-persona SQLite at `~/.saiverse/personas/<id>/memory.db`, messages tagged conversation / internal / task / summary.
-- **Task storage** (`persona/tasks/storage.py`) — per-persona `tasks.db`.
+- **Task book** (`saiverse/task_book.py`) — promises, requests and system tasks in the central DB `task_book` table (`persona/tasks/` and the purpose tree were removed on develop-v0.4; `persona_task*` tables remain as read-only leftover data).
 
 ## Model & Provider Configuration
 
@@ -312,7 +312,7 @@ Full list: `docs/reference/environment-vars.md`. Set in `.env` (see `.env.exampl
 
 **Playbook design rules**:
 
-- **Judgment dispatch is deterministic — there is no LLM router.** Which judgment playbook runs is chosen in code: judgment points (`judgment_day_open` / `judgment_day_close` / `on_event` etc.) are mapped in `saiverse/judgment_points.py` and fired by `saiverse/autonomy_wiring.py`. Judgment playbooks use structured output: an LLM node with `response_schema` returns the decision, then the `judgment_finalize` tool applies it. ⚠️ The old v1 meta-judgment family (`MetaLayer._SITUATION_PLAYBOOK_MAP`, `meta_judgment_*` playbooks, `meta_judgment_finalize`) was retired 2026-08-14 (`docs/intent/track_retirement.md` §7.4) — do not reference it in new code.
+- **Judgment dispatch is deterministic — there is no LLM router.** Which judgment playbook runs is chosen in code: judgment points are mapped in `saiverse/judgment_points.py` and fired by `saiverse/autonomy_wiring.py`. On develop-v0.4 only `on_event` (`judgment_on_event`) remains — `judgment_day_open` / `judgment_day_close` / `judgment_post_session` were removed on 2026-10-09. Judgment playbooks use structured output: an LLM node with `response_schema` returns the decision, then the `judgment_finalize` tool applies it. ⚠️ The old v1 meta-judgment family (`MetaLayer._SITUATION_PLAYBOOK_MAP`, `meta_judgment_*` playbooks, `meta_judgment_finalize`) was retired 2026-08-14 (`docs/intent/track_retirement.md` §7.4) — do not reference it in new code.
 - **Decide tool arguments inside the playbook.** Include an LLM node that chooses arguments from available context. Canonical example: `builtin_data/playbooks/public/generate_image_playbook.json` — `decide_prompt` (LLM + `response_schema` → `output_key`) → `generate` (TOOL + `args_input`, `output_keys`) → `record` (MEMORIZE).
 - **`args_input` value types**: strings resolve as state variable paths (`"gen_params.title"`). Non-strings are literals. For a **literal string**, use `{"$literal": "Anima.json"}` — without it, `"Anima.json"` is looked up as a state key and resolves to `None`.
 - **Adding a new node field**: you **must** update the node definitions in `sea/playbook_models.py` (`LLMNodeDef`, `ToolNodeDef`, …) first. Otherwise `save_playbook` and `import_playbook.py` silently drop the field during Pydantic validation. Then re-import the affected playbooks and verify with `sqlite3 ~/.saiverse/user_data/database/saiverse.db "SELECT nodes_json FROM playbooks WHERE name='<name>'"`.
