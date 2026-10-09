@@ -1643,6 +1643,36 @@ CORRUPT_LIVES_JSON = '[{"start": "07:00"'
 CORRUPT_META_JSON = '{"lives": [{"start": "07:00"'
 
 
+def _corrupt_life(**overrides):
+    life = {
+        "start": "07:00", "end": "22:00", "budget_pulses": 18, "mode": "even",
+        "used_pulses": 0, "judgment_pulses": 0,
+    }
+    life.update(overrides)
+    return [life]
+
+
+def _corrupt_pair(lives):
+    """同じ壊れ方を persona_life の LIVES_JSON と旧 meta_json の両方の形で作る。"""
+    return json.dumps(lives), json.dumps({day_plan.META_LIVES: lives})
+
+
+#: 壊れ方 → (persona_life.LIVES_JSON の生文字列, 旧 meta_json の生文字列)。
+#: 構文の破損 (5 巡目) に加え、構文は正しいのに中身が読み手を誤動作させる形
+#: (2026-10-10 Codex 敵対レビュー 6 巡目): 記録があるのに空文字列・null /
+#: 境界マーカーが bool でない ("false" は truthy で「処理済み」に読まれる) /
+#: 時刻が "HH:MM" でない。
+CORRUPTIONS = {
+    "invalid_json": (CORRUPT_LIVES_JSON, CORRUPT_META_JSON),
+    "null": ("null", '{"lives": null}'),
+    "empty_string": ("", '{"lives": ""}'),
+    "marker_not_bool": _corrupt_pair(
+        _corrupt_life(started="false", ended="false"),
+    ),
+    "bad_time": _corrupt_pair(_corrupt_life(start="25:00")),
+}
+
+
 def _life_raw(manager, plan_date):
     """persona_life の LIVES_JSON を生のまま返す (行が無ければ None)。"""
     from database.models import PersonaLife
@@ -1705,14 +1735,16 @@ def _set_legacy_meta_raw(manager, plan_date, raw):
         db.close()
 
 
+@pytest.mark.parametrize("corruption", sorted(CORRUPTIONS))
 @pytest.mark.parametrize("place", ["persona_life", "legacy"])
 def test_recovered_close_with_a_corrupt_newer_life_changes_nothing_and_retries(
-    manager, session_factory, place,
+    manager, session_factory, place, corruption,
 ):
     """新しい日のライフの記録が壊れているとき、前日の就寝の回収は「新しい日は
     無い」と読まない — 現在のキャッシュ維持・TTL・終了通知・前日の記録・壊れた
     記録のどれも変えずに失敗し、記録を直した後の再試行で正しく世代検査される
     (新しい日が確定済み = 古い終了として帳簿だけ決着)。"""
+    bad_life_raw, bad_meta_raw = CORRUPTIONS[corruption]
     from unittest.mock import patch
 
     from saiverse.schedule_manager import ScheduleManager, _schedule_key
@@ -1745,11 +1777,11 @@ def test_recovered_close_with_a_corrupt_newer_life_changes_nothing_and_retries(
         )[0] == "executed"
         good_raw = _life_raw(manager, next_date)
         assert json.loads(good_raw)[0]["started"] is True
-        _set_life_raw(manager, next_date, CORRUPT_LIVES_JSON)
-        _set_legacy_meta_raw(manager, next_date, CORRUPT_META_JSON)
+        _set_life_raw(manager, next_date, bad_life_raw)
+        _set_legacy_meta_raw(manager, next_date, bad_meta_raw)
     else:
         # D+1 のライフは旧置き場にだけあり (開始済み)、その meta_json が壊れる。
-        _set_legacy_meta_raw(manager, next_date, CORRUPT_META_JSON)
+        _set_legacy_meta_raw(manager, next_date, bad_meta_raw)
         assert _life_raw(manager, next_date) is None
     keepalive_key = f"ttl:{PERSONA_ID}:claude-sonnet-5"
     manager.event_scheduler.schedule(
@@ -1770,10 +1802,10 @@ def test_recovered_close_with_a_corrupt_newer_life_changes_nothing_and_retries(
     assert overrides == overrides_before
     assert list(_messages(manager)) == messages_before  # 終了通知なし
     if place == "persona_life":
-        assert _life_raw(manager, next_date) == CORRUPT_LIVES_JSON
+        assert _life_raw(manager, next_date) == bad_life_raw
     else:
         assert _life_raw(manager, next_date) is None
-    assert _plan_meta_json(manager, next_date) == CORRUPT_META_JSON
+    assert _plan_meta_json(manager, next_date) == bad_meta_raw
     status, _result = _boundary_result(
         manager, day_plan.LIFE_BOUNDARY_KIND_END, PLAN_DATE,
     )
@@ -1807,12 +1839,14 @@ def test_recovered_close_with_a_corrupt_newer_life_changes_nothing_and_retries(
     assert [s for s, _p in _dispatch_payloads(manager)][-1] == "completed"
 
 
+@pytest.mark.parametrize("corruption", sorted(CORRUPTIONS))
 @pytest.mark.parametrize("place", ["persona_life", "legacy"])
 def test_close_of_a_day_with_a_corrupt_life_is_not_settled_and_is_retried(
-    manager, place,
+    manager, place, corruption,
 ):
     """終了対象の日のライフの記録が壊れているとき、就寝は「ライフの無い日」と
     して成功扱いにならず失敗する (記録は変えない)。直した後の再試行で終わる。"""
+    bad_life_raw, bad_meta_raw = CORRUPTIONS[corruption]
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"
     _install_cache_override(manager)
     good_lives = [{
@@ -1820,19 +1854,19 @@ def test_close_of_a_day_with_a_corrupt_life_is_not_settled_and_is_retried(
         "used_pulses": 0, "judgment_pulses": 0, "started": True,
     }]
     if place == "persona_life":
-        _set_life_raw(manager, PLAN_DATE, CORRUPT_LIVES_JSON)
+        _set_life_raw(manager, PLAN_DATE, bad_life_raw)
     else:
-        _set_legacy_meta_raw(manager, PLAN_DATE, CORRUPT_META_JSON)
+        _set_legacy_meta_raw(manager, PLAN_DATE, bad_meta_raw)
     clock.enable_virtual(BASE + timedelta(hours=22))
 
     assert day_plan.handle_scheduled_life_boundary(
         manager, PERSONA_ID, day_plan.LIFE_BOUNDARY_END, plan_date=PLAN_DATE,
     ) is False
     if place == "persona_life":
-        assert _life_raw(manager, PLAN_DATE) == CORRUPT_LIVES_JSON
+        assert _life_raw(manager, PLAN_DATE) == bad_life_raw
     else:
         assert _life_raw(manager, PLAN_DATE) is None
-        assert _plan_meta_json(manager, PLAN_DATE) == CORRUPT_META_JSON
+        assert _plan_meta_json(manager, PLAN_DATE) == bad_meta_raw
     assert not manager.event_scheduler.has_key(TTL_CLEAR_KEY)
     assert not any("活動終了" in t for t in _messages(manager))
 
@@ -1847,20 +1881,22 @@ def test_close_of_a_day_with_a_corrupt_life_is_not_settled_and_is_retried(
     assert sum("活動終了" in t for t in _messages(manager)) == 1
 
 
+@pytest.mark.parametrize("corruption", sorted(CORRUPTIONS))
 @pytest.mark.parametrize("place", ["persona_life", "legacy"])
 def test_wake_on_a_day_with_a_corrupt_life_does_not_overwrite_it(
-    manager, session_factory, place,
+    manager, session_factory, place, corruption,
 ):
     """起床の帳簿処理は、壊れたライフの記録を「未確定」と読んで新しいライフで
     上書きしない (破損を隠さない)・「ライフ無しの日」としても決着しない —
     失敗して再試行に回り、記録が直れば確定・開始する。"""
+    bad_life_raw, bad_meta_raw = CORRUPTIONS[corruption]
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"
     _add_day_schedule(session_factory, "judgment_day_open", "07:00")
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     if place == "persona_life":
-        _set_life_raw(manager, PLAN_DATE, CORRUPT_LIVES_JSON)
+        _set_life_raw(manager, PLAN_DATE, bad_life_raw)
     else:
-        _set_legacy_meta_raw(manager, PLAN_DATE, CORRUPT_META_JSON)
+        _set_legacy_meta_raw(manager, PLAN_DATE, bad_meta_raw)
     wake_at = BASE + timedelta(hours=7)
     clock.enable_virtual(wake_at)
 
@@ -1868,10 +1904,10 @@ def test_wake_on_a_day_with_a_corrupt_life_does_not_overwrite_it(
         manager, PERSONA_ID, day_plan.LIFE_BOUNDARY_START, occurrence_at=wake_at,
     ) is False
     if place == "persona_life":
-        assert _life_raw(manager, PLAN_DATE) == CORRUPT_LIVES_JSON
+        assert _life_raw(manager, PLAN_DATE) == bad_life_raw
     else:
         assert _life_raw(manager, PLAN_DATE) is None  # 新しい行で覆わない
-        assert _plan_meta_json(manager, PLAN_DATE) == CORRUPT_META_JSON
+        assert _plan_meta_json(manager, PLAN_DATE) == bad_meta_raw
     assert not any("活動開始" in t for t in _messages(manager))
 
     # 正常に空の記録へ直す → 再試行で確定・開始する。
@@ -1886,24 +1922,83 @@ def test_wake_on_a_day_with_a_corrupt_life_does_not_overwrite_it(
     assert len(lives) == 1 and lives[0]["started"] is True
 
 
+@pytest.mark.parametrize("corruption", sorted(CORRUPTIONS))
 @pytest.mark.parametrize("place", ["persona_life", "legacy"])
-def test_life_writer_refuses_to_write_over_a_corrupt_record(manager, place):
+def test_life_writer_refuses_to_write_over_a_corrupt_record(manager, place, corruption):
     """ライフの唯一の書き手 (_mutate_lives) は壊れた記録の上に書かない — 書き手が
     寛容に読むと、壊れた記録を空と数えて新しい内容で覆い、破損を隠す。"""
+    bad_life_raw, bad_meta_raw = CORRUPTIONS[corruption]
     if place == "persona_life":
-        _set_life_raw(manager, PLAN_DATE, CORRUPT_LIVES_JSON)
+        _set_life_raw(manager, PLAN_DATE, bad_life_raw)
     else:
-        _set_legacy_meta_raw(manager, PLAN_DATE, CORRUPT_META_JSON)
+        _set_legacy_meta_raw(manager, PLAN_DATE, bad_meta_raw)
 
     with pytest.raises(ValueError):
         day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
             {"start": "07:00", "end": "22:00", "budget_pulses": 5, "mode": "free"},
         ])
     if place == "persona_life":
-        assert _life_raw(manager, PLAN_DATE) == CORRUPT_LIVES_JSON
+        assert _life_raw(manager, PLAN_DATE) == bad_life_raw
     else:
         assert _life_raw(manager, PLAN_DATE) is None
-        assert _plan_meta_json(manager, PLAN_DATE) == CORRUPT_META_JSON
+        assert _plan_meta_json(manager, PLAN_DATE) == bad_meta_raw
+
+
+@pytest.mark.parametrize("place", ["persona_life", "legacy"])
+def test_strict_read_keeps_absent_empty_and_v03_shapes_readable(manager, place):
+    """strict の中身の検査は「読み手が誤動作する形」だけを弾く (2026-10-10 Codex
+    敵対レビュー 6 巡目)。記録が無い (行が無い・旧置き場に lives キーが無い)・
+    正常な空配列・v0.3 の実データが持ちうる形 (マーカーの欠落・null、旧欄
+    ``used_rounds`` などの余分な欄、未知の mode、予算の欠落) は従来どおり読める。
+    寛容な読み口の挙動も変えない。"""
+    # 記録が無い
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE, strict=True) == []
+    if place == "legacy":
+        _set_legacy_meta_raw(manager, PLAN_DATE, '{"other": 1}')
+        assert day_plan.get_lives(
+            manager, PERSONA_ID, PLAN_DATE, strict=True,
+        ) == []
+
+    def _put(lives):
+        if place == "persona_life":
+            _set_life_raw(manager, PLAN_DATE, json.dumps(lives))
+        else:
+            _set_legacy_meta_raw(
+                manager, PLAN_DATE, json.dumps({day_plan.META_LIVES: lives}),
+            )
+
+    # 正常な空配列 = ライフ無しの日
+    _put([])
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE, strict=True) == []
+
+    tolerated = [
+        {"start": "07:00", "end": "22:00", "budget_pulses": 18, "mode": "even"},
+        {"start": "23:00", "end": "01:00", "mode": "unknown", "used_rounds": 3,
+         "started": None, "ended": False, "future_field": {"x": 1}},
+        {"start": "05:00", "end": "05:00", "budget_pulses": 1, "mode": "free",
+         "started": True},
+    ]
+    _put(tolerated)
+    assert day_plan.get_lives(
+        manager, PERSONA_ID, PLAN_DATE, strict=True,
+    ) == tolerated
+
+    # 寛容な読み口は中身の破損を従来どおり縮退して読む (表示系の挙動は不変)。
+    bad_life_raw, bad_meta_raw = CORRUPTIONS["marker_not_bool"]
+    if place == "persona_life":
+        _set_life_raw(manager, PLAN_DATE, bad_life_raw)
+    else:
+        _set_legacy_meta_raw(manager, PLAN_DATE, bad_meta_raw)
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["started"] == "false"
+    for kind in ("null", "empty_string"):
+        bad_life_raw, bad_meta_raw = CORRUPTIONS[kind]
+        if place == "persona_life":
+            _set_life_raw(manager, PLAN_DATE, bad_life_raw)
+        else:
+            _set_legacy_meta_raw(manager, PLAN_DATE, bad_meta_raw)
+        assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE) == []
+        with pytest.raises(ValueError):
+            day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE, strict=True)
 
 
 # ---------------------------------------------------------------------------

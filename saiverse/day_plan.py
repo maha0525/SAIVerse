@@ -145,6 +145,40 @@ def _load_life_row(db: Session, persona_id: str, plan_date_str: str) -> Any:
     )
 
 
+def _strict_life_entry_problem(life: Dict[str, Any]) -> Optional[str]:
+    """strict の読みで、ライフ 1 件の中身が「読み手が誤動作する形」なら理由を返す。
+
+    検査するのは strict の読み手が実際に消費する欄だけ (2026-10-10 Codex 敵対
+    レビュー 6 巡目)。構文だけ見ていると、``started: "false"`` が truthy で
+    「処理済み」と読まれ、時刻の壊れたライフに開始の節目が書かれる:
+
+    - ``start`` / ``end``: 必須の "HH:MM"。:func:`_life_span_at` (営業日の区間・
+      世代検査の窓切れ)、:func:`get_life_for_time` (記帳先の解決)、
+      :func:`apply_life_boundary` の開始通知 (``life['start']``) が読む
+    - ``started`` / ``ended``: あれば bool (null は「未マーク」と同じ意味なので
+      許す)。:func:`_life_mark_mutator`・:func:`_life_boundary_staleness`・
+      起床 / 就寝の帳簿処理が truthy で「処理済み」を判定する
+
+    検査しない欄: ``mode`` (読み手 :func:`_sync_cache_ttl_for_life_start` /
+    :func:`_sync_cache_ttl_for_life_end` は ``!= "even"`` で比べるので、未知の値は
+    自由モードとして吸収される)、``budget_pulses`` (strict の読み手は消費しない —
+    書き手 :func:`_validate_and_normalize_lives` が作り直す)、``used_pulses`` /
+    ``judgment_pulses`` (``int(x or 0)`` で吸収するか、変換できなければ例外で
+    止まる)、未知・余分の欄 (旧 ``used_rounds`` など — 将来の互換のため許す)。
+    ``start == end`` も弾かない — :func:`_life_span_at` が「区間として成立しない」
+    (None) として読み飛ばす契約がある (Codex 十巡目 #2)。
+    """
+    for key in ("start", "end"):
+        value = life.get(key)
+        if not is_valid_hhmm(value):
+            return f"{key} is not 'HH:MM' (got {value!r})"
+    for key in ("started", "ended"):
+        value = life.get(key)
+        if value is not None and not isinstance(value, bool):
+            return f"{key} is not a bool (got {value!r})"
+    return None
+
+
 def _parse_lives_payload(
     raw: Any,
     *,
@@ -158,7 +192,20 @@ def _parse_lives_payload(
     ``strict`` は :func:`get_lives` と同じ意味: 壊れていたら例外。既定は空リスト /
     不正要素の除去へ縮退する。``raw`` が JSON 文字列でなく読み済みの値
     (旧 meta_json.lives) でもよい。
+
+    呼び出し元は「記録がある」ときだけ呼ぶ (persona_life の行がある / 旧置き場に
+    lives キーがある)。「記録が無い」(行が無い・キーが無い) の判定は呼び出し元の
+    責務で、ここへは来ない。だから strict では、記録があるのに値が空文字列・
+    null (JSON の null を含む) なのは破損 — 正常な「ライフ無しの日」は ``[]``
+    と書かれる (2026-10-10 Codex 敵対レビュー 6 巡目)。要素の中身も
+    :func:`_strict_life_entry_problem` で検査する。strict は直さない・切り
+    捨てない — 見つけたら送出するだけ (記録は呼び出し元が書き換えない)。
     """
+    if strict and (raw is None or (isinstance(raw, str) and not raw.strip())):
+        raise ValueError(
+            f"{source} is present but empty/null (persona={persona_id} "
+            f"date={plan_date_str} raw={raw!r})"
+        )
     lives = raw
     if isinstance(raw, str):
         try:
@@ -175,16 +222,25 @@ def _parse_lives_payload(
             )
             return []
     if not isinstance(lives, list):
-        if strict and lives is not None:
+        if strict:
             raise ValueError(
                 f"{source} is not a list (persona={persona_id} "
-                f"got={type(lives).__name__})"
+                f"date={plan_date_str} got={type(lives).__name__})"
             )
         return []
-    if strict and any(not isinstance(life, dict) for life in lives):
-        raise ValueError(
-            f"{source} contains non-object entries (persona={persona_id})"
-        )
+    if strict:
+        for i, life in enumerate(lives):
+            if not isinstance(life, dict):
+                raise ValueError(
+                    f"{source} contains non-object entries (persona={persona_id} "
+                    f"date={plan_date_str} index={i})"
+                )
+            problem = _strict_life_entry_problem(life)
+            if problem is not None:
+                raise ValueError(
+                    f"{source}[{i}] {problem} (persona={persona_id} "
+                    f"date={plan_date_str})"
+                )
     return [life for life in lives if isinstance(life, dict)]
 
 
@@ -219,8 +275,12 @@ def _legacy_lives_in_session(
                 f"date={plan_date_str} got={type(meta).__name__})"
             )
         return []
+    if META_LIVES not in meta:
+        # キーそのものが無い = 旧置き場にライフの記録が無い (「不存在」)。キーは
+        # あるのに null / 空文字列なのは破損で、strict では下の読みが送出する。
+        return []
     return _parse_lives_payload(
-        meta.get(META_LIVES), strict=strict, persona_id=persona_id,
+        meta[META_LIVES], strict=strict, persona_id=persona_id,
         plan_date_str=plan_date_str, source=f"meta_json.{META_LIVES}",
     )
 
@@ -376,8 +436,9 @@ def get_lives(
 
     Args:
         strict: True で「壊れていて読めない」を例外にする (LIVES_JSON / 旧
-            meta_json が不正 JSON、lives が list でない / 要素が dict でない)。
-            営業日の選択と、起床・就寝の節目 (ライフの確定・世代の検査・
+            meta_json が不正 JSON、記録があるのに空文字列 / null、lives が
+            list でない / 要素が dict でない、要素の消費される欄が壊れている —
+            :func:`_strict_life_entry_problem`)。営業日の選択と、起床・就寝の節目 (ライフの確定・世代の検査・
             終了対象の読み) が True で呼ぶ — 壊れた台帳を「ライフ未宣言の日」と
             読むと、現行スケジュール基準で別の営業日を駆動する・壊れた記録を
             新しいライフで覆う・「ライフ無しの日」で成功と封印する。既定
