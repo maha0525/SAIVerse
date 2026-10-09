@@ -378,10 +378,8 @@ def _print_summary(summary: Dict[str, Any]) -> None:
     LOGGER.info("-" * 64)
     LOGGER.info("次の手順:")
     LOGGER.info("  - 検分: python scripts/inspect_world.py personas --env test")
-    LOGGER.info("  - 一日シム: SAIVERSE_HOME=%s SAIVERSE_USER_DATA_DIR=%s \\",
-                summary["dest_home"], str(Path(summary["dest_db"]).parent.parent))
-    LOGGER.info("      python scripts/run_day_sim.py --scenario <file> --real"
-                " --city <CITY_SLUG> --db-file %s", summary["dest_db"])
+    LOGGER.info("  - 会話ランナー: python scripts/run_conversation.py --script <file>"
+                " (既定で test_data/ を指す。DB: %s)", summary["dest_db"])
     LOGGER.info("  - 判断点 playbook が本番 DB 未 import の場合のみ import_playbook.py を dest へ")
     LOGGER.info("=" * 64)
 

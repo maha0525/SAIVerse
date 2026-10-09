@@ -96,6 +96,11 @@ def manager(session_factory, adapter):
     return mgr
 
 
+#: 作業セッションのダイジェスト行のタグ (旧 ``sea.work_session.DIGEST_TAG``。
+#: モジュールは段 1-4 で撤去 — 値は sea.sluice._CAPTURE_DIGEST_TAG と同じ)。
+DIGEST_TAG = "session_digest"
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -257,6 +262,11 @@ class TestSaimemoryAppendDelivery:
 class TestSaimemoryAppendDigestDelivery:
     """作業セッション digest の配送 (target='saimemory.append_digest')。
 
+    積む側 (セッション終了判断) は v0.4 段 1-4 で作業セッションごと撤去した。
+    受け口は切り替え前に pending で残った分を流すために残っている (未登録の
+    target は配送の FIFO を詰まらせる)。ダイジェストを読む側 (就寝判断の
+    収集・一日新聞) も同じ段で撤去したので、その検査も消した。
+
     ⚠ 束 6c (2026-08-22、autonomous_behavior_v3.md §7) で、この handler の後段
     だった「出来事へ再訪の鍵を刻む」(``episodes.set_digest_ref``) が退役した —
     エピソードという専用の記録行を持たなくなったため。handler は冪等 append
@@ -267,7 +277,6 @@ class TestSaimemoryAppendDigestDelivery:
     """
 
     def _digest_payload(self):
-        from sea.work_session import DIGEST_TAG
         return {
             "message": {
                 "role": "assistant",
@@ -283,8 +292,6 @@ class TestSaimemoryAppendDigestDelivery:
         }
 
     def test_delivery_appends_digest(self, manager, adapter):
-        from sea.work_session import DIGEST_TAG
-
         ledger = manager.execution_ledger
         execution_id = _applied_with_outbox(
             ledger, target=wiring.TARGET_SAIMEMORY_APPEND_DIGEST,
@@ -324,81 +331,6 @@ class TestSaimemoryAppendDigestDelivery:
 
         assert ledger.flush_pending_for_persona(PERSONA_ID) is True
         assert len(_persona_messages(adapter)) == 1  # 二重にならない
-
-    def test_delivered_digest_is_read_by_day_close_collection(
-        self, manager, adapter,
-    ):
-        """day_close の _collect_today_session_digests が handler 経由の digest を
-        読める (DIGEST_TAG + committed の形の保存則)。"""
-        from saiverse.judgment_points import _collect_today_session_digests
-
-        ledger = manager.execution_ledger
-        payload = self._digest_payload()
-        # 「今日」の日付で書かれた digest (実配送は now の tz-aware ISO)
-        payload["message"]["timestamp"] = datetime.now().astimezone().isoformat()
-        _applied_with_outbox(
-            ledger, target=wiring.TARGET_SAIMEMORY_APPEND_DIGEST,
-            payload=payload,
-        )
-        assert ledger.flush_pending_for_persona(PERSONA_ID) is True
-
-        plan_date = datetime.now().date().isoformat()
-        digests = _collect_today_session_digests(manager, PERSONA_ID, plan_date)
-        assert digests == ["資料を 3 件読んで覚え書きにした。"]
-
-    def test_judgment_prompt_paired_text_does_not_leak_into_digests(
-        self, manager, adapter,
-    ):
-        """判断プロンプト (paired_action_text) がダイジェスト収集に化けない。
-
-        タグ絞り込みの legacy 救済 (タグ無し行は素通し) と paired_action 展開
-        (展開行はタグ無し) の相互作用で、過去の判断プロンプトが「今日の作業
-        セッションのダイジェスト」として就寝判断へ混入し、保存→翌日再混入の
-        日跨ぎ雪だるまになっていた (2026-07-29 実害: 就寝判断 21,369 字)。"""
-        from saiverse.judgment_points import _collect_today_session_digests
-
-        adapter.append_persona_message({
-            "role": "assistant",
-            "content": "おはよう。今日は作業を進めよう。",
-            "timestamp": datetime.now().astimezone().isoformat(),
-            "metadata": {"tags": ["meta_judgment", "judgment:day_open"]},
-            "line_role": "meta_judgment",
-            "scope": "committed",
-            "paired_action_text": "[起床判断]\n今日の時間割を編成してください。",
-        })
-        plan_date = datetime.now().date().isoformat()
-        digests = _collect_today_session_digests(manager, PERSONA_ID, plan_date)
-        assert digests == []  # 展開行も独白本文もダイジェストではない
-
-    def test_real_digest_survives_many_judgment_prompt_rows(
-        self, manager, adapter,
-    ):
-        """取得枠 (limit=12) より多い判断行が後から積もっても、本物の
-        ダイジェストが取得段階で押し出されない (strict_tags を取得側に
-        置いた理由 — 後段検査だけだと偽候補が枠を食い尽くす)。"""
-        from saiverse.judgment_points import _collect_today_session_digests
-
-        ledger = manager.execution_ledger
-        payload = self._digest_payload()
-        payload["message"]["timestamp"] = datetime.now().astimezone().isoformat()
-        _applied_with_outbox(
-            ledger, target=wiring.TARGET_SAIMEMORY_APPEND_DIGEST,
-            payload=payload,
-        )
-        assert ledger.flush_pending_for_persona(PERSONA_ID) is True
-        for i in range(13):  # 展開行 13 + 独白 13 > 枠 12
-            adapter.append_persona_message({
-                "role": "assistant",
-                "content": f"判断の独白 {i}",
-                "timestamp": datetime.now().astimezone().isoformat(),
-                "metadata": {"tags": ["meta_judgment"]},
-                "line_role": "meta_judgment",
-                "scope": "committed",
-                "paired_action_text": f"[セッション終了判断]\n状況テキスト {i}",
-            })
-        plan_date = datetime.now().date().isoformat()
-        digests = _collect_today_session_digests(manager, PERSONA_ID, plan_date)
-        assert digests == ["資料を 3 件読んで覚え書きにした。"]
 
     # test_missing_episode_is_delivery_failure は削除 (2026-08-22、束 6c / v3 §7):
     # 「payload の episode_ref が実在しなければ配送失敗」は、handler が後段で
@@ -819,7 +751,8 @@ class TestPreparedCollection:
             "context": payload, "resume_execution_id": eid,
         }]
 
-    def test_post_session_prepared_refired(self, manager, monkeypatch):
+    def test_post_session_prepared_expires_without_refire(self, manager, monkeypatch):
+        """セッション終了判断は段 1-4 で退役 — 旧席は refire せず期限で閉じる。"""
         clock.enable_virtual(self.BASE)
         ledger = manager.execution_ledger
         payload = {"task_ref": "task:1", "session_result": {"episode_ref": "episode:7"}}
@@ -827,9 +760,12 @@ class TestPreparedCollection:
         calls = self._patch_fire(monkeypatch)
         clock.advance_to(datetime(2026, 7, 19, 9, 3, 0))
         wiring._collect_prepared_judgments(manager)
-        assert len(calls) == 1
-        assert calls[0]["kind"] == "post_session"
-        assert calls[0]["resume_execution_id"] == eid
+        assert calls == []
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_PREPARED
+        clock.advance_to(datetime(2026, 7, 19, 9, 40, 0))
+        wiring._collect_prepared_judgments(manager)
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_FAILED
+        assert calls == []
 
     def test_day_open_prepared_expires_via_recovery_tick(self, manager, monkeypatch):
         """day_open は refire せず 1800 秒で expired 化 (watchdog が自然再発火する)。
@@ -853,7 +789,8 @@ class TestPreparedCollection:
         assert calls == []  # refire はされない
 
     def test_day_close_prepared_expires(self, manager, monkeypatch):
-        """回収対象は day_open / day_close の 2 kind。
+        """期限で閉じる対象は退役した判断点の旧席 (day_open / day_close /
+        post_session)。
 
         旧 judgment.post_conversation もここに載っていたが、会話終了判断の退役
         (2026-08-16) で kind ごと消えた。
@@ -1109,87 +1046,24 @@ class TestPreparedCollection:
 
 
 # ---------------------------------------------------------------------------
-# slot.fire の settle-close 回復 (#D5)
+# 旧 slot.fire (時間割のコマ発火) の running 残り
 # ---------------------------------------------------------------------------
 
 
-class TestSlotFireRecovery:
-    """running のまま残った slot.fire を回復 tick が settle-close する。
+class TestLegacySlotFireRows:
+    """slot.fire は段 1-4 で書き手ごと消えた。専用の settle-close は持たず、
+    切り替え前に running で残った行は汎用の running 期限監視で unknown 終端に
+    落ちる (締めるべき時間割も出来事も読む人がいない)。"""
 
-    plan 行 / episode を伴わない最小構成でも settle が完了する (欠損は防御的に
-    skip)。統合的な収束状態 (fired/open/running) からの回復は test_day_plan.py。
-    """
-
-    def _running_slot_fire(self, ledger, *, index=0, plan_date="2026-07-20"):
-        eid, _ = ledger.begin_execution(
-            wiring.SLOT_FIRE_KIND,
-            idempotency_key=f"{PERSONA_ID}:{plan_date}:{index}",
+    def test_startup_sweep_terminates_a_legacy_running_slot_fire(self, manager):
+        ledger = manager.execution_ledger
+        eid, runnable, _st = ledger.claim_execution(
+            "slot.fire", idempotency_key="alice:2026-07-04:s1",
             persona_id=PERSONA_ID,
-            payload={
-                "persona_id": PERSONA_ID, "plan_date": plan_date,
-                "index": index, "slot_kind": "知る", "reserved_rounds": 5,
-            },
+            payload={"persona_id": PERSONA_ID, "plan_date": "2026-07-04", "index": 0},
         )
-        ledger.mark_running(eid)
-        return eid
-
-    def _age(self, session_factory, execution_id, seconds):
-        db = session_factory()
-        try:
-            db.query(ExecutionLedgerEntry).filter(
-                ExecutionLedgerEntry.EXECUTION_ID == execution_id
-            ).update({"UPDATED_AT": ExecutionLedgerEntry.UPDATED_AT - int(seconds)})
-            db.commit()
-        finally:
-            db.close()
-
-    def test_stale_slot_fire_settled_and_not_unknown_swept(self, manager, session_factory):
-        """回復 tick: deadline 超過の slot.fire は settle-close (completed) され、
-        汎用 unknown sweep に掴まれない。並走の generic running は unknown 化される。"""
-        ledger = manager.execution_ledger
-        slot_id = self._running_slot_fire(ledger)
-        generic_id, _ = ledger.begin_execution("metabolism.run", persona_id=PERSONA_ID)
-        ledger.mark_running(generic_id)
-        # slot.fire を settle deadline 超過、generic を running deadline 超過へ
-        self._age(session_factory, slot_id, int(wiring.SLOT_SETTLE_DEADLINE_SECONDS) + 60)
-        self._age(session_factory, generic_id, int(wiring.RUNNING_DEADLINE_SECONDS) + 60)
-
-        wiring._recovery_tick(manager)
-
-        # slot.fire は settle-close 経路で completed (unknown ではない)
-        assert ledger.get_execution(slot_id)["status"] == XL.STATUS_COMPLETED
-        # generic は汎用 sweep で unknown
-        assert ledger.get_execution(generic_id)["status"] == XL.STATUS_UNKNOWN
-
-    def test_fresh_slot_fire_within_deadline_is_untouched(self, manager, session_factory):
-        """deadline 未満の running slot.fire は settle も unknown もされない。"""
-        ledger = manager.execution_ledger
-        slot_id = self._running_slot_fire(ledger)
-        wiring._recovery_tick(manager)
-        assert ledger.get_execution(slot_id)["status"] == XL.STATUS_RUNNING
-
-    def test_startup_recovery_settles_previous_generation_slot_fire(self, manager, session_factory):
-        """起動時: deadline を課さず全 running slot.fire を settle-close する
-        (前世代確定)。generic running は従来どおり unknown 化。"""
-        ledger = manager.execution_ledger
-        slot_id = self._running_slot_fire(ledger)  # aging しない (deadline 課さない)
-        generic_id, _ = ledger.begin_execution("judgment.day_open", persona_id=PERSONA_ID)
-        ledger.mark_running(generic_id)
+        assert runnable and ledger.try_mark_running(eid)
 
         wiring.run_startup_recovery(manager)
 
-        assert ledger.get_execution(slot_id)["status"] == XL.STATUS_COMPLETED
-        assert ledger.get_execution(generic_id)["status"] == XL.STATUS_UNKNOWN
-
-    def test_incomplete_payload_is_skipped(self, manager, session_factory):
-        """payload に座標が欠ける running slot.fire は skip (tick を殺さない)。"""
-        ledger = manager.execution_ledger
-        eid, _ = ledger.begin_execution(
-            wiring.SLOT_FIRE_KIND, idempotency_key="x", persona_id=PERSONA_ID,
-            payload={"persona_id": PERSONA_ID},  # plan_date / index 欠損
-        )
-        ledger.mark_running(eid)
-        self._age(session_factory, eid, int(wiring.SLOT_SETTLE_DEADLINE_SECONDS) + 60)
-        wiring._collect_stale_slot_executions(manager)
-        # settle されず running のまま (次段の裁定に委ねる)
-        assert ledger.get_execution(eid)["status"] == XL.STATUS_RUNNING
+        assert ledger.get_execution(eid)["status"] == XL.STATUS_UNKNOWN

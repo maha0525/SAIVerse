@@ -13,8 +13,8 @@
 - 機構名義の行の長さ規則 (generator.MECHANISM_TEXT_MAX_CHARS): 閾値以下は
   全文が材料に、超えたら決定論の一行に縮む。チャンクの字数勘定 (alignment)
   も圧縮後サイズで数える。
-- 直挿しの移送 (B4/B7): day_plan の移動失敗通知と upgrade_handlers の
-  アップデート通知が push_perception 経由になったこと。
+- 直挿しの移送 (B4/B7): upgrade_handlers のアップデート通知が
+  push_perception 経由になったこと (day_plan の移動失敗通知は時間割ごと撤去)。
 """
 from __future__ import annotations
 
@@ -1519,42 +1519,8 @@ class AnnexStampLifecycleTest(unittest.TestCase):
 class DirectInsertMigrationTest(unittest.TestCase):
     """B4/B7: event_message 直挿しの push_perception への移送 (§10.6)。"""
 
-    def test_move_failure_pushes_world_state_perception(self):
-        from saiverse.day_plan import _record_move_failure
-
-        pushed = []
-
-        def _push(kind, content, **kwargs):
-            pushed.append((kind, content))
-
-        persona = SimpleNamespace(
-            persona_id="p1",
-            sai_memory=SimpleNamespace(push_perception=_push),
-        )
-        # 表示名の解決は manager.buildings を引く (day_plan._building_display_name)
-        manager = SimpleNamespace(buildings=[
-            SimpleNamespace(building_id="b_target", name="工房"),
-            SimpleNamespace(building_id="b_current", name="自宅"),
-        ])
-        _record_move_failure(
-            manager, persona, {"title": "朝の制作"},
-            "b_current", "b_target", "満員",
-        )
-        self.assertEqual(len(pushed), 1)
-        kind, content = pushed[0]
-        self.assertEqual(kind, "world_state")
-        self.assertIn("朝の制作", content)
-        self.assertIn("工房", content)
-        self.assertIn("自宅", content)
-        self.assertIn("満員", content)
-        # 直挿し時代の <system> 包みは付けない (整形は flush / マージの仕事)。
-        self.assertNotIn("<system>", content)
-
-    def test_move_failure_without_adapter_is_noop(self):
-        from saiverse.day_plan import _record_move_failure
-        persona = SimpleNamespace(persona_id="p1", sai_memory=None)
-        manager = SimpleNamespace(buildings=[])
-        _record_move_failure(manager, persona, {}, "a", "b", "x")  # 例外なし
+    # 旧 test_move_failure_* (day_plan._record_move_failure — コマの施設移動の
+    # 失敗通知) は、時間割の撤去 (v0.4 段 1-4) で移送元ごと消えた。
 
     def test_upgrade_notification_is_idempotent_across_consumption(self):
         import os

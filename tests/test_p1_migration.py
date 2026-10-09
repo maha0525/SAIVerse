@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from database.migrate import needs_migration, try_additive_migration
 from database.models import Base
-from saiverse.persona_task_manager import PersonaTaskManager
+
 
 
 NEW_TASK_COLUMNS = ("stage", "nature", "promoted_from")
@@ -121,19 +121,25 @@ class P1AdditiveMigrationTests(unittest.TestCase):
 
         engine = create_engine(f"sqlite:///{self.db_path}")
         try:
-            SessionLocal = sessionmaker(bind=engine)
-            ptm = PersonaTaskManager(SessionLocal)
-            desire = ptm.get_task("a", persona_id="p1")
-            task = ptm.get_task("b", persona_id="p1")
+            # 目的の木の読み手 (PersonaTaskManager) は段 1-4 で撤去したので、
+            # 残置テーブルを生 SQL で直接確かめる。
+            with engine.connect() as conn:
+                rows = {
+                    r[0]: r for r in conn.execute(text(
+                        "SELECT id, title, stage, parent_kind, note_id "
+                        "FROM persona_task WHERE persona_id='p1'"
+                    )).fetchall()
+                }
+            desire, task = rows["a"], rows["b"]
             # データ保全
-            self.assertEqual(desire["title"], "古い欲求")
-            self.assertEqual(task["title"], "古いタスク")
+            self.assertEqual(desire[1], "古い欲求")
+            self.assertEqual(task[1], "古いタスク")
             # derive_stage() 相当の規則で物理刻印される
-            self.assertEqual(desire["stage"], "candidate")
-            self.assertEqual(task["stage"], "adopted")
+            self.assertEqual(desire[2], "candidate")
+            self.assertEqual(task[2], "adopted")
             # 候補は親なしへ正規化される (P3c-0)
-            self.assertIsNone(desire["parent_kind"])
-            self.assertIsNone(desire["note_id"])
+            self.assertIsNone(desire[3])
+            self.assertIsNone(desire[4])
             with engine.connect() as conn:
                 raw = conn.execute(text(
                     "SELECT stage, nature, promoted_from FROM persona_task WHERE id='a'"

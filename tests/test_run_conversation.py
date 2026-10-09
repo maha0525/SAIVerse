@@ -2,8 +2,8 @@
 
 ランナーのオーケストレーション (増分抽出 / transcript 組み立て / 台本検証 /
 本番ガード) を、LLM を呼ばないスタブドライバで検証する。
-実チャット経路そのもの (RealConversationUserEventDriver) は一日シム側で
-実証済みのため、ここでは対象にしない。
+実チャット経路そのもの (RealConversationUserEventDriver — 一日シムの撤去
+(v0.4 段 1-4) でこのランナーへ移した) は実 LLM を呼ぶため、ここでは対象にしない。
 """
 import os
 import shutil

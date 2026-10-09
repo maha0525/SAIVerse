@@ -3261,7 +3261,7 @@ async def _run_spell_loop(
         )
 
     # Beat 境界の材料 (beat_execution_context.md §2.2/§3.4)。取得 (hold) は
-    # 呼び出し元 (run_meta_user / run_work_session 等) で済んでいる前提で、
+    # 呼び出し元 (run_meta_user 等) で済んでいる前提で、
     # このループは「周の切れ目でロックを手放して別 Beat を挟ませる + cancel
     # 評価」だけを担う。gate が無い環境 (テスト) では boundary は skip され、
     # 周間の cancel チェックだけが効く。

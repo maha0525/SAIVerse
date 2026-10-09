@@ -66,9 +66,8 @@ KNOWN_NUMERIC_FIELDS: Dict[str, str] = {
         "Web 調査の件数",
 
     # ── 経路 B: Python 側で組み立てる型 ────────────────────────────────
-    # 追跡: 同ハンドオフ (起床判断は v0.4 の配線前、夜間編纂は編纂の再開前に直す)
-    "python:saiverse/judgment_points.py::_build_slot_schema $.budget_rounds":
-        "判断点の時間割のコマの作業ラウンド予算",
+    # 追跡: 同ハンドオフ (夜間編纂は編纂の再開前に直す)。起床判断の時間割の
+    # コマの budget_rounds は、起床判断ごと v0.4 段 1-4 で撤去した。
     "python:sai_memory/curation_ops.py::plan_split $.sections[].block_indices[]":
         "夜間編纂のページ分割のブロック番号 (整数の配列)",
 

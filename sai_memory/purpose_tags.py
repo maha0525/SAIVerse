@@ -7,8 +7,12 @@ life_concept_map.md §9「タグは多対多・後付け」/ §9.1「目的タ�
 保存先は clips (sai_memory/clips.py) と同じく **memory.db 相乗り**:
 タグの target の主流はSAIMemory メッセージであり、注釈は注釈対象と同じファイルに
 置く (アクセス・バックアップ・整合)。``init_purpose_tags_tables(conn)`` 冪等 +
-memopedia 流儀の migration スタイルに倣う。adapter への組み込みは P4 時点では
-行わない (ストア単体・休眠。呼び出し元は連想歩行 saiverse/recall_walk.py)。
+memopedia 流儀の migration スタイルに倣う。
+
+⚠ **v0.4 段 1-4 以降、書き手も読み手もいない (休眠)**。書き手 (判断点の棚入れ・
+コマ締め) と読み手 (連想歩行 recall_walk・経験の台帳の目的ノード統計) は目的の
+木ごと撤去された。adapter はテーブルの初期化 (:func:`init_purpose_tags_tables`)
+だけを続ける — 既存ユーザーの旧データの置き場として。
 
 行の設計 (§9.1):
 

@@ -31,7 +31,8 @@ per-persona Lock を取得してから submit_meta_judgment → run_meta_user �
 
 スレッドについて: RLock の再入と :meth:`boundary` の解放は「ロックを取得した
 スレッド」でのみ有効。graph 実行が executor スレッドへ逃げる経路
-(sea/runtime_graph.py / work_session._run_coro_sync の running-loop 分岐) では
+(sea/runtime_graph.py の running-loop 分岐。旧 work_session._run_coro_sync も
+同型だったが作業セッションごと撤去) では
 保持スレッドと実行スレッドが分かれ得るため、boundary は「このスレッドが最外周
 保持者 (depth==1) のとき」だけ動き、それ以外は no-op とする (安全側: 挟み込み
 機会を失うだけで、直列性・解放の正しさは壊れない)。

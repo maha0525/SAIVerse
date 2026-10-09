@@ -222,8 +222,8 @@ class PersonaVoiceWithoutHistoryError(RuntimeError):
 def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False, persist_anchor_advance: bool = True, pinned_anchor_id: Optional[str] = None) -> List[Dict[str, Any]]:
     # model_key: この context を届ける Session (persona, model) の実行 model
     # (beat_execution_context.md §3.1 — head は (persona, model) に一つ)。
-    # ExecutionContext が届いている呼び出し元 (work_session / sluice /
-    # keepalive / run_playbook の Pulse-root) が execution_context.model_key を
+    # ExecutionContext が届いている呼び出し元 (sluice / keepalive /
+    # run_playbook の Pulse-root) が execution_context.model_key を
     # 渡す。None なら persona の標準 model にフォールバック (preview 等)。
     #
     # context_meta: 呼び出し元が渡す out-param dict (§3.2 の call-local anchor)。

@@ -5,6 +5,10 @@
 
 ファイル名・関数名の ``schedule`` は互換のため残している (機能名としては
 「アラーム」に改名済み)。ユーザーと LLM に見える文言だけを「アラーム」に揃える。
+
+起床・就寝の行 (ライフの窓の節目) と判断点 Playbook の行はこのスペルでは
+消せない (autonomous_behavior_v04_plan.md 決定 4 / 段 1-5 — 作れないのと対)。
+ライフの窓を決めるのはユーザーで、REST API (ユーザーの口) はこの制限を受けない。
 """
 
 import logging
@@ -52,6 +56,20 @@ def schedule_delete(schedule_id: int) -> str:
 
         if not schedule:
             return f"エラー: アラームID {schedule_id} が見つかりません。または、他のペルソナのアラームです。"
+
+        from saiverse.autonomy_wiring import is_reserved_schedule_playbook
+
+        if is_reserved_schedule_playbook(schedule.META_PLAYBOOK):
+            LOGGER.warning(
+                "[schedule_delete] refused deleting a reserved schedule from a "
+                "persona spell (persona=%s schedule=%d playbook=%s)",
+                persona_id, schedule_id, schedule.META_PLAYBOOK,
+            )
+            return (
+                f"エラー: アラームID {schedule_id} は起床・就寝 (またはシステムの"
+                "判断) の行なので、スペルからは消せません。変えたいときは"
+                "ユーザーに頼んでください。"
+            )
 
         # アラーム情報を保存（削除前に）
         schedule_type = schedule.SCHEDULE_TYPE

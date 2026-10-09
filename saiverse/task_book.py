@@ -23,8 +23,7 @@ autonomous_behavior_v3.md §4.1-2「タスク帳」の永続化レイヤー。�
 - システムタスク (ORIGIN='system') は機械がペルソナに差し込む急ぎでない
   依頼の一件。引き当て順は 締め切り → システムタスク → プール (§5)。
 - 時刻刻印は必ず ``saiverse.clock.now()`` 経由 (仮想クロック尊重)。
-- DB access は ``manager.SessionLocal()`` → try/finally close の既存流儀
-  (saiverse/experience_inheritance.py と同じ)。
+- DB access は ``manager.SessionLocal()`` → try/finally close の既存流儀。
 """
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 """Memory Atlas ファサード saiverse/memory_atlas.py のテスト (concept_consolidation.md)。
 
 検証項目:
-- ref 解決 (memopedia:N / core / core:N / chronicle:N / clip:N / task:N stub / 不正形式)
+- ref 解決 (memopedia:N / core / core:N / chronicle:N / clip:N / 退役した task:N の拒否 / 不正形式)
 - read_page: Memopedia / コア記憶(全件・1件) / Chronicle の内容整形、貼られたクリップの表示
 - open_page/close_page: コア記憶は常時開で拒否、Memopedia/Chronicle は desk.py に委譲、
   机が溢れたときの LRU 追い出し通知
@@ -117,8 +117,10 @@ class RefParsingTests(unittest.TestCase):
         # "chronicle:" は "core:" と衝突しない (2 文字プレフィックスの境界)
         self.assertEqual(atlas._parse_ref("chronicle:7"), ("chronicle", "7"))
 
-    def test_parses_task_stub_ref(self):
-        self.assertEqual(atlas._parse_ref("task:2"), ("task", "2"))
+    def test_task_ref_is_not_an_atlas_page(self):
+        # 目的の木 (task:N) は退役し、読み取り専用の残置も v0.4 段 1-4 で撤去した
+        with self.assertRaises(atlas.AtlasRefError):
+            atlas._parse_ref("task:2")
 
     def test_parses_clip_ref(self):
         self.assertEqual(atlas._parse_ref("clip:4"), ("clip", "4"))
@@ -181,11 +183,10 @@ class ReadPageTests(_AtlasTestBase):
         result = atlas.read_page(self.adapter, "chronicle:999")
         self.assertIn("見つかりません", result)
 
-    def test_read_task_without_manager_reports_missing_context(self):
-        # task:N の read は P2c-1 で解決済み。ただし目的の木は main DB 在住
-        # なので manager (world 文脈) なしでは読めない — 丁寧に案内する
-        result = atlas.read_page(self.adapter, "task:1")
-        self.assertIn("world 文脈", result)
+    def test_read_task_is_rejected(self):
+        # 目的の木の読み口は v0.4 段 1-4 で撤去した
+        with self.assertRaises(atlas.AtlasRefError):
+            atlas.read_page(self.adapter, "task:1")
 
     def test_read_page_shows_pasted_clips(self):
         from sai_memory.core_memory import add_core_memory
@@ -253,13 +254,10 @@ class OpenClosePageTests(_AtlasTestBase):
         self.assertIn(f"chronicle:{entry.short_id}", self._desk_refs())
         self.assertIn("机に開きました", result)
 
-    def test_open_task_is_rejected_as_read_only(self):
-        # 目的の木の退役 (2026-08-23) 以後、task:N は机に開けない。実在確認より
-        # 前に断るので manager の有無に関わらず同じ文面が返る (manager 込みの
-        # 回帰は TaskDeskTests でカバーする)。
-        result = atlas.open_page(self.adapter, "task:1")
-        self.assertIn("机に開けません", result)
-        self.assertIn("memory_read task:1", result)
+    def test_open_task_is_rejected(self):
+        # 目的の木の退役 (2026-08-23) 以後、task:N は机に開けない
+        with self.assertRaises(atlas.AtlasRefError):
+            atlas.open_page(self.adapter, "task:1")
         self.assertEqual(self._desk_refs(), set())
 
     def test_open_clip_is_rejected_with_read_hint(self):
@@ -595,9 +593,9 @@ class WritePageTests(_AtlasTestBase):
         result = atlas.write_page(self.adapter, "clip:1", "内容")
         self.assertIn("書けません", result)
 
-    def test_write_task_returns_stub(self):
-        result = atlas.write_page(self.adapter, "task:1", "内容")
-        self.assertIn("今後対応予定", result)
+    def test_write_task_is_rejected(self):
+        with self.assertRaises(atlas.AtlasRefError):
+            atlas.write_page(self.adapter, "task:1", "内容")
 
     def test_write_empty_content_is_rejected(self):
         result = atlas.write_page(self.adapter, "core", "   ")
@@ -681,14 +679,14 @@ class MakeClipTests(_AtlasTestBase):
         self.assertIn("見つかりません", result)
         self.assertEqual(list_clips(self.adapter.conn), [])
 
-    def test_clip_paste_to_task_is_p2c_stub_without_saving(self):
+    def test_clip_paste_to_task_is_rejected_without_saving(self):
         from sai_memory.clips import list_clips
 
         ids = self._add_conversation(["発言", "返事"])
         result = atlas.make_clip(
             self.adapter, ids[0], quote="発言", paste_to="task:1",
         )
-        self.assertIn("今後対応予定", result)
+        self.assertIn("貼り先の形式を解釈できません", result)
         self.assertEqual(list_clips(self.adapter.conn), [])
 
     def test_clip_touches_open_paste_target(self):
@@ -790,12 +788,9 @@ class DeletePageTests(_AtlasTestBase):
         result = atlas.delete_page(self.adapter, "core")
         self.assertIn("消せません", result)
 
-    def test_delete_task_is_rejected_without_naming_a_retired_spell(self):
-        # 目的の木の退役 (2026-08-23) 前は purpose_close へ誘導していた文面。
-        # スペルが消えたので、消せないことだけを本人に返す。
-        result = atlas.delete_page(self.adapter, "task:1")
-        self.assertIn("消せません", result)
-        self.assertNotIn("purpose_close", result)
+    def test_delete_task_is_rejected(self):
+        with self.assertRaises(atlas.AtlasRefError):
+            atlas.delete_page(self.adapter, "task:1")
 
 
 class ClipTranscribeTests(_AtlasTestBase):
@@ -1014,166 +1009,25 @@ class WriteCreatePageTests(_AtlasTestBase):
         self.assertIn("Error", neither)
 
 
-class TaskReadTests(_AtlasTestBase):
-    """task:N (目的ノード) の read_page 解決 (P2c-1)。
+class LegacyTaskDeskRowTests(_AtlasTestBase):
+    """退役した目的の木の ``task:N`` 行が机に残っていた場合 (v0.4 段 1-4)。
 
-    目的の木は main DB (persona_task) 在住なので、adapter に加えて manager
-    (SessionLocal を持つ world 文脈の shim) を渡す。
+    目的の木の読み手を撤去したので、``task:N`` は地図帳のページではない。
+    退役前に机へ開かれていた行は、次の snapshot_desk で dropped として
+    机から下ろされる (本人が close できなくても机に居座らない)。
     """
 
-    def setUp(self):
-        super().setUp()
-        from types import SimpleNamespace
+    def test_snapshot_drops_a_legacy_task_row(self):
+        from sai_memory.desk import list_open, open_item
 
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
-        from sqlalchemy.pool import StaticPool
+        open_item(self.adapter.conn, "task:1")
 
-        from database.models import Base
+        pages, evicted, dropped = atlas.snapshot_desk(self.adapter)
 
-        self._engine = create_engine(
-            "sqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-        Base.metadata.create_all(self._engine)
-        self.manager = SimpleNamespace(SessionLocal=sessionmaker(bind=self._engine))
-        self.addCleanup(self._engine.dispose)
-
-    def _make_task(self, **kwargs):
-        from saiverse.persona_task_manager import PersonaTaskManager
-
-        ptm = PersonaTaskManager(self.manager.SessionLocal)
-        defaults = {
-            "persona_id": "tester",  # _AtlasTestBase の adapter.persona_id と揃える
-            "title": "語源メモをまとめる",
-            "goal": "一冊のノートに仕上げる",
-            "auto_activate": False,
-        }
-        defaults.update(kwargs)
-        return ptm.create_task(**defaults)
-
-    def test_read_task_renders_node(self):
-        task = self._make_task(
-            steps=[{"title": "下調べ"}, {"title": "清書"}],
-            desire_source="図書館で読んだ語源の記事",
-        )
-        result = atlas.read_page(
-            self.adapter, task["task_ref"], manager=self.manager,
-        )
-        self.assertIn("語源メモをまとめる", result)
-        self.assertIn(task["task_ref"], result)
-        self.assertIn("段階:", result)
-        self.assertIn("状態:", result)
-        self.assertIn("目標: 一冊のノートに仕上げる", result)
-        self.assertIn("由来: 図書館で読んだ語源の記事", result)  # 接地の証跡
-        self.assertIn("下調べ", result)
-        self.assertIn("清書", result)
-
-    def test_read_task_shows_pasted_clips(self):
-        from sai_memory.clips import add_clip
-
-        task = self._make_task()
-        add_clip(
-            self.adapter.conn, message_id="m1", quote="きっかけの一言",
-            pasted_to=task["task_ref"],
-        )
-        result = atlas.read_page(
-            self.adapter, task["task_ref"], manager=self.manager,
-        )
-        self.assertIn("[クリップ", result)
-        self.assertIn("きっかけの一言", result)
-
-    def test_read_task_not_found(self):
-        result = atlas.read_page(self.adapter, "task:999", manager=self.manager)
-        self.assertIn("見つかりません", result)
-
-class TaskDeskTests(TaskReadTests):
-    """task:N (目的ノード) と机 — 目的の木の退役 (2026-08-23) 後の姿。
-
-    新規に開く口は閉じた (open は断る) が、退役より前に机へ開かれた行を
-    本人が下ろせなくなると困るので、close と机の描画 (snapshot_desk) は
-    残置。したがって「既に机にある」状態は desk へ直接置いて作る。
-    setUp/_make_task は TaskReadTests から継承 (manager 込みの土台を共用)。
-    """
-
-    def _put_on_desk(self, ref: str):
-        """退役前に開かれた机の行を模す (open_page はもう task を受けない)。"""
-        from sai_memory.desk import open_item
-
-        open_item(self.adapter.conn, ref)
-
-    def test_open_task_is_rejected_even_when_node_exists(self):
-        # 実在する目的ノードでも机には開けない (読み取り専用の残置)。
-        task = self._make_task()
-        ref = task["task_ref"]
-        result = atlas.open_page(self.adapter, ref, manager=self.manager)
-        self.assertIn("机に開けません", result)
-        self.assertIn("memory_read", result)
-        self.assertEqual(self._desk_refs(), set())
-
-    def test_open_unknown_task_is_rejected_the_same_way(self):
-        # 実在確認より前に断るので、未知の番号でも文面は同じ (存在の漏洩もない)。
-        result = atlas.open_page(self.adapter, "task:999", manager=self.manager)
-        self.assertIn("机に開けません", result)
-        self.assertEqual(self._desk_refs(), set())
-
-    def test_close_task_removes_desk_item(self):
-        task = self._make_task()
-        ref = task["task_ref"]
-        self._put_on_desk(ref)
-        result = atlas.close_page(self.adapter, ref, manager=self.manager)
-        self.assertIn("机から閉じました", result)
-        self.assertEqual(self._desk_refs(), set())
-
-    def test_close_task_without_manager_reports_not_found(self):
-        # close は実在確認を通るので、manager が無いと task:N は解決できない
-        task = self._make_task()
-        self._put_on_desk(task["task_ref"])
-        result = atlas.close_page(self.adapter, task["task_ref"])
-        self.assertIn("見つかりません", result)
-
-    def test_snapshot_renders_open_task_like_read_task(self):
-        task = self._make_task(
-            steps=[{"title": "下調べ"}], desire_source="きっかけ",
-        )
-        ref = task["task_ref"]
-        self._put_on_desk(ref)
-
-        pages, evicted, dropped = atlas.snapshot_desk(self.adapter, manager=self.manager)
-
-        self.assertEqual(evicted, [])
-        self.assertEqual(dropped, [])
-        self.assertEqual(len(pages), 1)
-        self.assertEqual(pages[0].ref, ref)
-        self.assertIn("語源メモをまとめる", pages[0].text)
-        self.assertIn("下調べ", pages[0].text)
-
-    def test_snapshot_drops_terminal_task(self):
-        # 完了/中止 (TERMINAL_TASK_STATUSES) の目的ノードは soft-delete された
-        # Memopedia ページと同じ「無い」扱い — 机から自動で下ろされる
-        # (P3c①② 設計: 既存の存在チェックの仕組みに乗せる、新機構は作らない)。
-        from saiverse.persona_task_manager import PersonaTaskManager
-
-        task = self._make_task()
-        ref = task["task_ref"]
-        self._put_on_desk(ref)
-
-        ptm = PersonaTaskManager(self.manager.SessionLocal)
-        ptm.update_task_status(
-            task["id"], status="completed", actor=None, persona_id="tester",
-        )
-
-        pages, evicted, dropped = atlas.snapshot_desk(self.adapter, manager=self.manager)
         self.assertEqual(pages, [])
         self.assertEqual(evicted, [])
-        self.assertEqual(dropped, [ref])
-        self.assertEqual(self._desk_refs(), set())
-
-    def _desk_refs(self):
-        from sai_memory.desk import list_open
-
-        return {item.ref for item in list_open(self.adapter.conn)}
+        self.assertEqual(dropped, ["task:1"])
+        self.assertEqual(list_open(self.adapter.conn), [])
 
 
 class SnapshotDeskTests(_AtlasTestBase):

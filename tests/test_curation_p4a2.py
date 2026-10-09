@@ -1,4 +1,4 @@
-"""P4-a2 編纂実行部・実行後の報告・新聞窓集計のテスト。
+"""P4-a2 編纂実行部・実行後の報告のテスト。
 
 検証対象:
 - execute_merge: 逐語結合（両者の本文が結合後に含まれる）、キーワード和集合、
@@ -7,8 +7,9 @@
   LLM が不正な割当を返した時に棄却して ValueError になる（mock LLM 必須）
 - run_pending_plans: done/failed 遷移・一部失敗が他を止めない
 - event_message: タグ規約どおり（["internal", "event_message", "curation"]）に書かれる
-- 新聞「記憶ページの整理」節: 窓内の編纂編集が載る・ai_conversation が載らない・編集ゼロで「なし」
-- 窓時刻: save_day_report で保存、次回 generate_day_report で読まれる
+
+一日新聞 (saiverse/day_report.py) の「記憶ページの整理」節と窓時刻のテストは、
+新聞ごと撤去した v0.4 段 1-4 で消した。
 """
 from __future__ import annotations
 
@@ -900,109 +901,6 @@ class TestRunPendingPlans:
         assert result["done"] == []
         assert result["failed"] == []
         assert messages == []
-
-
-# ---------------------------------------------------------------------------
-# 新聞の「記憶ページの整理」節のテスト
-# ---------------------------------------------------------------------------
-
-
-def _make_persona_with_conn(conn: sqlite3.Connection) -> Any:
-    """_section_curation_edits が触る最小 persona スタブ。"""
-    adapter = SimpleNamespace(conn=conn)
-    return SimpleNamespace(sai_memory=adapter)
-
-
-class TestSectionCurationEdits:
-    def test_curation_edit_is_listed(self):
-        """窓内の curation 編集が節に載る。"""
-        from saiverse.day_report import _section_curation_edits
-
-        conn = _make_full_conn()
-        _insert_page(conn, page_id="p1", title="テストページ", short_id=1)
-        since = int(time.time()) - 60  # 1分前
-        _record_edit(conn, page_id="p1", edit_source="curation")
-
-        persona = _make_persona_with_conn(conn)
-        lines = _section_curation_edits(persona, since)
-        text = "\n".join(lines)
-
-        assert lines[0] == "## 記憶ページの整理"
-        assert "記憶の手入れ（分割・統合）" in text
-        assert "棚の整理" not in text
-        assert "なし" not in text
-
-    def test_ai_conversation_is_excluded(self):
-        """ai_conversation は載らない（セッションダイジェスト欄と重複するため）。"""
-        from saiverse.day_report import _section_curation_edits
-
-        conn = _make_full_conn()
-        _insert_page(conn, page_id="p1", title="会話ページ", short_id=1)
-        since = int(time.time()) - 60
-        # ai_conversation のみ
-        _record_edit(conn, page_id="p1", edit_source="ai_conversation")
-
-        persona = _make_persona_with_conn(conn)
-        lines = _section_curation_edits(persona, since)
-        text = "\n".join(lines)
-        # "なし" または空
-        assert "ai_conversation" not in text
-        # 実質コンテンツなし → "なし"
-        assert NONE_TEXT_FRAGMENT in text or "なし" in text
-
-    def test_zero_edits_shows_none(self):
-        """編集ゼロで「なし」が出る。"""
-        from saiverse.day_report import _section_curation_edits
-
-        conn = _make_full_conn()
-        since = int(time.time()) - 60
-
-        persona = _make_persona_with_conn(conn)
-        lines = _section_curation_edits(persona, since)
-        text = "\n".join(lines)
-        assert "なし" in text
-
-    def test_edits_before_window_are_excluded(self):
-        """窓より前の編集は載らない。"""
-        from saiverse.day_report import _section_curation_edits
-
-        conn = _make_full_conn()
-        _insert_page(conn, page_id="p1", title="古いページ", short_id=1)
-
-        old_time = int(time.time()) - 3600  # 1時間前
-        since = int(time.time()) - 60  # 1分前が窓の起点
-        _record_edit(conn, page_id="p1", edit_source="curation", edited_at=old_time)
-
-        persona = _make_persona_with_conn(conn)
-        lines = _section_curation_edits(persona, since)
-        text = "\n".join(lines)
-        assert "なし" in text
-
-
-NONE_TEXT_FRAGMENT = "なし"
-
-
-# ---------------------------------------------------------------------------
-# 窓時刻の永続化テスト
-# ---------------------------------------------------------------------------
-
-
-class TestWindowTimestamp:
-    def test_save_and_read_roundtrip(self, tmp_path: Path):
-        """save_last_generated_at → get_last_generated_at で値が戻る。"""
-        from saiverse.day_report import _get_last_generated_at, _save_last_generated_at
-
-        ts = int(time.time())
-        _save_last_generated_at("alice", ts, base_dir=tmp_path)
-        recovered = _get_last_generated_at("alice", base_dir=tmp_path)
-        assert recovered == ts
-
-    def test_missing_file_returns_none(self, tmp_path: Path):
-        """ファイルがなければ None。"""
-        from saiverse.day_report import _get_last_generated_at
-
-        result = _get_last_generated_at("nobody", base_dir=tmp_path)
-        assert result is None
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,8 @@ v2 の新コードと、v2 経路が通る時刻刻印点 (記憶書き込み・
   本番経路の挙動は仮想クロック導入前と完全に同一。
 - **仮想モード**: ``enable_virtual(start)`` で開始。``now()`` は固定の
   仮想時刻を返し、``advance_to(dt)`` で前進のみ許す (後退は ValueError)。
-  DES ドライバ (``saiverse.day_simulator``) がこの前進を駆動する。
+  前進を駆動していた DES ドライバ (旧 ``saiverse.day_simulator`` — 時間割前提の
+  一日シム) は v0.4 段 1-4 で撤去した。ティック用の早回しは段 3 で作り直す。
 
 時刻は naive datetime (ローカルタイム想定) で扱う。既存 EventScheduler の
 ``schedule(fire_at)`` と同じ慣習。

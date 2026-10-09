@@ -256,8 +256,70 @@ class ScheduleAddToolDefaultPlaybookTest(unittest.TestCase):
         self.assertEqual(self._only_playbook(), DEFAULT_META_PLAYBOOK)
 
     def test_surrounding_whitespace_is_stripped(self):
-        self._call(meta_playbook="  judgment_day_open  ")
-        self.assertEqual(self._only_playbook(), "judgment_day_open")
+        self._call(meta_playbook="  track_user_conversation  ")
+        self.assertEqual(self._only_playbook(), "track_user_conversation")
+
+    def _row_count(self) -> int:
+        db = self.Session()
+        try:
+            return db.query(PersonaSchedule).count()
+        finally:
+            db.close()
+
+    def test_spell_refuses_life_boundary_and_judgment_playbooks(self):
+        """ペルソナのスペルからは、起床・就寝の行 (ライフの窓) と判断点
+        Playbook の行を作れない (v04 計画 決定 4 / 段 1-5)。アラーム用途は通る。"""
+        for name in (
+            "judgment_day_open", "  judgment_day_close  ", "judgment_on_event",
+            "judgment_post_session",
+        ):
+            result = self._call(meta_playbook=name)
+            self.assertTrue(result.startswith("エラー"), (name, result))
+            self.assertIn("アラームに使えません", result)
+        self.assertEqual(self._row_count(), 0)
+        # アラーム用途 (既定 Playbook) はそのまま作れる
+        self.assertIn("追加しました", self._call())
+        self.assertEqual(self._row_count(), 1)
+
+    def _delete(self, schedule_id: int) -> str:
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from tool_loader import load_builtin_tool
+        from tools.context import persona_context
+
+        mod = load_builtin_tool("schedule_delete")
+        with persona_context(PERSONA_ID, Path(self._tmp.name), manager=self.manager):
+            return mod.schedule_delete(schedule_id=schedule_id)
+
+    def _insert_row(self, playbook: str) -> int:
+        db = self.Session()
+        try:
+            row = PersonaSchedule(
+                PERSONA_ID=PERSONA_ID, SCHEDULE_TYPE="periodic",
+                META_PLAYBOOK=playbook, TIME_OF_DAY="07:00", ENABLED=True,
+            )
+            db.add(row)
+            db.commit()
+            return row.SCHEDULE_ID
+        finally:
+            db.close()
+
+    def test_spell_cannot_delete_life_boundary_rows(self):
+        """起床・就寝の行 (ユーザーのライフ設定) はペルソナのスペルから消せない。
+        普通のアラームは消せる。"""
+        wake = self._insert_row("judgment_day_open")
+        close = self._insert_row("judgment_day_close")
+        alarm = self._insert_row(DEFAULT_META_PLAYBOOK)
+
+        for sid in (wake, close):
+            result = self._delete(sid)
+            self.assertTrue(result.startswith("エラー"), result)
+            self.assertIn("消せません", result)
+        self.assertEqual(self._row_count(), 3)
+
+        self.assertIn("削除しました", self._delete(alarm))
+        self.assertEqual(self._row_count(), 2)
 
 
 if __name__ == "__main__":

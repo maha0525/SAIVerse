@@ -178,7 +178,7 @@ def _prepare_context_call_kwargs(module_path: str) -> list[dict]:
 
 
 @pytest.mark.parametrize("module_path", [
-    "sea/work_session.py",
+    # sea/work_session.py は v0.4 段 1-4 で作業セッションごと撤去した
     "sea/sluice.py",
     "sea/runtime_runner.py",
 ])

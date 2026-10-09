@@ -8,11 +8,6 @@ Metabolism を跨いで head に残り続ける — 高価で明示的な行為�
 
 対応 ref: ``m:N`` (Memopedia) / ``ch:N`` (Chronicle)。コア記憶は常時開の
 システム常設ピンなので対象外 (``core`` / ``c:N`` は「既に開いています」を返す)。
-
-``task:N`` (目的ノード) は 2026-08-23 に机の対象から外れた — 目的の木が
-退役し、本人の文脈に常駐させる口を閉じたため
-(docs/issues/purpose_tree_vs_pocketbook_succession.md)。読むだけなら
-``memory_read task:N`` が今も通る。
 """
 from __future__ import annotations
 
@@ -20,7 +15,6 @@ from typing import Optional
 
 from saiverse import memory_atlas
 from tools.context import (
-    get_active_manager,
     get_active_persona_id,
     open_persona_memory,
 )
@@ -38,9 +32,6 @@ def memory_open(ref: str, purpose_ref: Optional[str] = None) -> str:
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    # manager は task:N の実在確認 (main DB 在住) にのみ使われる — open は
-    # task:N を拒むが、拒否の判定自体は memory_atlas 側で行う
-    manager = get_active_manager()
     with open_persona_memory() as adapter:
         if not adapter.is_ready():
             raise RuntimeError(f"SAIMemory not ready for {persona_id}")
@@ -48,7 +39,7 @@ def memory_open(ref: str, purpose_ref: Optional[str] = None) -> str:
             # open_page は生 conn を部分的に無ロックで読むため外側でロック
             with adapter._db_lock:
                 result = memory_atlas.open_page(
-                    adapter, ref, purpose_ref=purpose_ref, manager=manager
+                    adapter, ref, purpose_ref=purpose_ref
                 )
         except memory_atlas.AtlasRefError as exc:
             return f"Error: {exc}"

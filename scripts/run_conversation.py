@@ -30,7 +30,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -80,6 +80,243 @@ def normalize_script(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 実チャット経路のドライバと同期ディスパッチャ
+#
+# どちらも元は一日シム (saiverse/day_scenario.py) にあった。一日シムが時間割
+# ごと撤去された (autonomous_behavior_v04_plan.md 段 1-4) ので、唯一残った
+# 使い手のこのランナーへ移した。
+# ---------------------------------------------------------------------------
+
+
+class RealConversationUserEventDriver:
+    """ユーザー発話を本物の会話経路へ注入するドライバ。
+
+    実チャット経路 (``manager/runtime.py`` ``handle_user_input_stream`` の
+    backend_worker) と同じ順序で正規経路を叩く:
+
+    1. ユーザー発話を building_messages へ記録 (heard_by = ペルソナ + ユーザー)
+    2. 会話が開いていなければ ``saiverse.user_conversation.start_conversation``
+       — 会話状態を立て、main_line Pulse (``manager.run_sea_user``) を起動し、
+       沈黙タイマーを張る。Pulse 冒頭の auto_ingest が (1) の発話をペルソナ記憶
+       (memory.db) へ取り込む。Pulse は :class:`SyncJudgmentDispatcher` の
+       ``submit_user`` 経由で呼び出しスレッド上で同期実行される
+    3. 会話中の追加メッセージは実経路の「会話が開いている → 直接メインライン
+       起動」と同型に ``manager.run_sea_user`` を直接呼ぶ
+    4. Pulse 後にペルソナ応答が building_messages に実在するかを検査し、応答ゼロ
+       なら WARNING に残す (観察のみ)
+
+    前提: manager は実 SAIVerseManager (persona に history_manager がある)。
+    """
+
+    def begin_conversation(self, manager: Any, persona_id: str, text: str) -> None:
+        from saiverse.user_conversation import (
+            get_open_conversation,
+            start_conversation,
+        )
+
+        persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+        if persona is None:
+            raise RuntimeError(f"persona '{persona_id}' not found on manager")
+        building_id = getattr(persona, "current_building_id", None)
+        if not building_id:
+            raise RuntimeError(f"persona '{persona_id}' has no current building")
+
+        # (1) ユーザー発話を building_messages へ記録 (実チャット経路の pre-add)
+        seq_before = self._record_user_message(manager, persona, building_id, text)
+
+        if get_open_conversation(manager, persona_id) is not None:
+            # (3) 会話継続: 実経路の「会話が開いている → 直接メインライン起動」と同型
+            LOGGER.info(
+                "user message in ongoing conversation (persona=%s); invoking "
+                "main line directly", persona_id,
+            )
+            manager.run_sea_user(persona, building_id, text)
+        else:
+            # (2) 会話開始: 実経路と同じ入口 (会話状態 + main_line + タイマー)
+            start_conversation(manager, persona_id, str(getattr(manager, "user_id", "")))
+            LOGGER.info(
+                "conversation started via real path: persona=%s text=%r",
+                persona_id, text[:60],
+            )
+
+        # (4) 応答の実在検査 (building_messages の追記で確認 — 接地)
+        replied = self._persona_replied_after(manager, persona, building_id, seq_before)
+        if not replied:
+            LOGGER.warning(
+                "persona did not reply to user message (persona=%s text=%r) — "
+                "this conversation has no exchange yet", persona_id, text[:60],
+            )
+
+    def end_conversation(self, manager: Any, persona_id: str) -> bool:
+        """leave: 開いている会話状態を落とす (本番の沈黙タイマー経路に相当)。
+
+        Returns:
+            会話が実際に終了した (= 会話中だった) なら True。
+        """
+        from saiverse.autonomy_wiring import handle_conversation_end
+        from saiverse.user_conversation import get_open_conversation
+
+        if get_open_conversation(manager, persona_id) is None:
+            LOGGER.warning(
+                "leave but no conversation is open (persona=%s); ignoring",
+                persona_id,
+            )
+            return False
+        try:
+            handle_conversation_end(manager, persona_id)
+        except Exception:
+            LOGGER.warning(
+                "failed to close the conversation state (persona=%s)",
+                persona_id, exc_info=True,
+            )
+        LOGGER.info("conversation ended: persona=%s", persona_id)
+        return True
+
+    @staticmethod
+    def _canonical_building_id(manager: Any, building_id: str) -> str:
+        """実 manager の building_id 正規化 (無ければ素通し)。"""
+        runtime = getattr(manager, "runtime", None)
+        fn = getattr(runtime, "_canonical_building_id", None)
+        if callable(fn):
+            try:
+                return fn(building_id)
+            except Exception:
+                LOGGER.warning(
+                    "_canonical_building_id failed for %r; using it as-is",
+                    building_id, exc_info=True,
+                )
+        return building_id
+
+    def _record_user_message(
+        self, manager: Any, persona: Any, building_id: str, text: str
+    ) -> int:
+        """ユーザー発話を building_messages へ記録し、その seq を返す。
+
+        実チャット経路 (backend_worker) と同じ ``add_to_building_only`` +
+        heard_by。auto_ingest は heard_by にペルソナが居るメッセージだけを
+        取り込むため、heard_by は必須。
+        """
+        history_manager = getattr(persona, "history_manager", None)
+        if history_manager is None:
+            raise RuntimeError(
+                f"persona '{persona.persona_id}' has no history_manager — "
+                "RealConversationUserEventDriver は実 SAIVerseManager 専用です"
+            )
+        canonical_bid = self._canonical_building_id(manager, building_id)
+        heard = [persona.persona_id]
+        user_id = getattr(manager, "user_id", None)
+        if user_id is not None:
+            heard.append(str(user_id))
+        saved = history_manager.add_to_building_only(
+            canonical_bid, {"role": "user", "content": text}, heard_by=heard,
+        )
+        try:
+            return int((saved or {}).get("seq") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _persona_replied_after(
+        self, manager: Any, persona: Any, building_id: str, seq_before: int
+    ) -> bool:
+        """seq_before より後にペルソナの assistant 発言が実在するか (接地検査)。"""
+        canonical_bid = self._canonical_building_id(manager, building_id)
+        try:
+            hist = persona.history_manager.get_building_history(canonical_bid) or []
+        except Exception:
+            LOGGER.warning(
+                "failed to read building history for reply check "
+                "(persona=%s building=%s)",
+                persona.persona_id, canonical_bid, exc_info=True,
+            )
+            return False
+        for msg in hist:
+            try:
+                seq = int(msg.get("seq") or 0)
+            except (TypeError, ValueError):
+                seq = 0
+            if seq <= seq_before:
+                continue
+            if msg.get("role") == "assistant" and msg.get("persona_id") == persona.persona_id:
+                return True
+        return False
+
+
+class SyncJudgmentDispatcher:
+    """同期 Pulse ディスパッチャ (``manager.pulse_controller`` 互換)。
+
+    実 ``PulseController`` はレーン管理 (優先度・並列メタ判断レーン・キュー) を
+    持つ。本ディスパッチャは ``manager.sea_runtime.run_meta_user`` を呼び出し
+    スレッドでそのまま実行する (Playbook・finalize・SAIMemory 書き込みはすべて
+    正規経路)。ランナーの実行中だけ ``manager.pulse_controller`` を差し替える。
+
+    叩かれる入口は 2 つ:
+
+    - ``submit_user``: ユーザー会話 Pulse (``saiverse.user_conversation`` →
+      ``manager.run_sea_user``)。実 ``PulseController.submit_user`` と同シグネチャ
+    - ``submit_meta_judgment``: 判断点 (``run_judgment_point``) の起動経路
+    """
+
+    def __init__(self, manager: Any) -> None:
+        self.manager = manager
+
+    def _require_persona(self, persona_id: str) -> Any:
+        persona = (getattr(self.manager, "personas", None) or {}).get(persona_id)
+        if persona is None:
+            raise RuntimeError(f"persona '{persona_id}' not found on manager")
+        return persona
+
+    def submit_meta_judgment(
+        self,
+        persona_id: str,
+        building_id: str,
+        meta_playbook: str,
+        args: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Optional[List[str]]:
+        persona = self._require_persona(persona_id)
+        return self.manager.sea_runtime.run_meta_user(
+            persona,
+            user_input=None,
+            building_id=building_id,
+            meta_playbook=meta_playbook,
+            args=args,
+            event_callback=event_callback,
+            pulse_type="meta_judgment",
+        )
+
+    def submit_user(
+        self,
+        persona_id: str,
+        building_id: str,
+        user_input: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        meta_playbook: Optional[str] = None,
+        args: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        pre_spells: Optional[List[str]] = None,
+        pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
+    ) -> Optional[List[str]]:
+        """ユーザー会話 Pulse を呼び出しスレッドで同期実行する。
+
+        実 ``PulseController.submit_user`` → ``_do_execute`` と同じく
+        ``run_meta_user(pulse_type="user")`` (CONVERSATION アスペクト) を叩く。
+        """
+        persona = self._require_persona(persona_id)
+        return self.manager.sea_runtime.run_meta_user(
+            persona,
+            user_input=user_input,
+            building_id=building_id,
+            metadata=metadata,
+            meta_playbook=meta_playbook,
+            args=args,
+            event_callback=event_callback,
+            pre_spells=pre_spells,
+            pulse_type="user",
+            pre_generation_check=pre_generation_check,
+        )
+
+
+# ---------------------------------------------------------------------------
 # 実行
 # ---------------------------------------------------------------------------
 
@@ -117,7 +354,6 @@ def run_conversation(manager: Any, script: Dict[str, Any], *, driver: Any = None
     manager.pulse_controller は同期ディスパッチャ済みであること (呼び出し側の責務)。
     """
     if driver is None:
-        from saiverse.day_scenario import RealConversationUserEventDriver
         driver = RealConversationUserEventDriver()
 
     persona_id = script["persona_id"]
@@ -278,7 +514,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         from scripts._shared.gateway_isolation import force_discord_gateway_off
         force_discord_gateway_off()
 
-        from saiverse.day_scenario import SyncJudgmentDispatcher
         from saiverse.saiverse_manager import SAIVerseManager
 
         manager = SAIVerseManager(

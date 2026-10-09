@@ -371,10 +371,8 @@ class SEARuntime:
         # docs/issues/perception_state_pushed_at_event_time.md)。消費より前なのは
         # 検知フェーズと同じ理由 — 同じ Pulse で積んで同じ Pulse で読む。
         # 他の段とは独立の best-effort (落ちても Pulse は止めない)。
-        # もう一つの Pulse root (sea/work_session.py) には置かない: 作業セッション
-        # は建物発言の取り込みも世界状態の検知も持たない「指示書に向かうコマ」で、
-        # 門に見せる会話の文脈がそもそも組まれていない。同席の相手の想起は本人が
-        # 会話の Pulse を打つ回に出る。
+        # (旧: もう一つの Pulse root だった作業セッション sea/work_session.py には
+        # 置いていなかった。作業セッションは v0.4 段 1-4 で撤去済み。)
         try:
             from sea.head_pipeline import inject_copresence_recall
             inject_copresence_recall(persona, self.manager, building_id)
@@ -386,10 +384,10 @@ class SEARuntime:
         # を型別 reduce して 1 メッセージで SAIMemory へ書き出す。主観時間は Pulse でのみ
         # 進むので、ここが消費点。会話・schedule・auto の Pulse は全部 run_meta_user を
         # 通る (pulse_controller.py) ため、この 1 箇所でそれらの消費が成立する。
-        # ⚠️ 「全ての Pulse がここを通る」ではない — 作業セッション
-        # (sea/work_session.py) は自分の PulseContext を作る別の Pulse root で、
-        # 頭の処理 (知覚消費・MCP ツール取得) を自前で持っている。頭に一手
-        # 増やすときは両方に入れる (片方だけ直して素通しを作った実績あり)。
+        # ⚠️ 別の Pulse root を増やすとき (v0.4 のティック等) は、頭の処理 (知覚
+        # 消費・MCP ツール取得) をそちらにも入れること。旧作業セッション
+        # (sea/work_session.py、段 1-4 で撤去) は別 root で、片方だけ直して素通しを
+        # 作った実績がある。
         # 検知 (上) → 消費 (ここ) の順序が重要 (同 Pulse 内で検知分も消費するため)。
         try:
             sai_mem = getattr(persona, "sai_memory", None)

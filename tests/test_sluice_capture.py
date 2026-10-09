@@ -506,7 +506,7 @@ class CaptureApplyTest(_CaptureTestBase):
 
         # ダイジェスト一行 — 本線 (main_line / committed) に session_digest
         # タグで一行だけ立つ (作業セッションのダイジェスト行と同じ器)。
-        from sea.work_session import DIGEST_TAG
+        from sea.sluice import _CAPTURE_DIGEST_TAG as DIGEST_TAG
         digest_rows = self.adapter.conn.execute(
             "SELECT role, content, scope, line_role FROM messages "
             f"WHERE metadata LIKE '%{DIGEST_TAG}%'"
@@ -538,7 +538,7 @@ class CaptureApplyTest(_CaptureTestBase):
         }
 
     def _digest_rows(self):
-        from sea.work_session import DIGEST_TAG
+        from sea.sluice import _CAPTURE_DIGEST_TAG as DIGEST_TAG
         return self.adapter.conn.execute(
             "SELECT content FROM messages "
             f"WHERE metadata LIKE '%{DIGEST_TAG}%'"
@@ -653,7 +653,7 @@ class CaptureApplyTest(_CaptureTestBase):
         )
         self.assertEqual(summary["status"], "ok")
         self.assertEqual(summary["captures_applied"], 0)
-        from sea.work_session import DIGEST_TAG
+        from sea.sluice import _CAPTURE_DIGEST_TAG as DIGEST_TAG
         digest_rows = self.adapter.conn.execute(
             "SELECT id FROM messages "
             f"WHERE metadata LIKE '%{DIGEST_TAG}%'"

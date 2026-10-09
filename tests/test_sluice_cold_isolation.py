@@ -689,7 +689,7 @@ class ColdCaptureTest(_ColdWorldBase):
         self.assertGreater(len(set(event_dates)), 1)
 
         # (c) 本線に立つのはダイジェスト一行だけ (入口は一本)。
-        from sea.work_session import DIGEST_TAG
+        from sea.sluice import _CAPTURE_DIGEST_TAG as DIGEST_TAG
         digests = self.adapter.conn.execute(
             "SELECT content, scope, line_role FROM messages "
             f"WHERE metadata LIKE '%{DIGEST_TAG}%'"

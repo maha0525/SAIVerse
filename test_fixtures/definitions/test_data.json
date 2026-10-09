@@ -87,10 +87,7 @@
     "track_user_conversation",
     "sub_speak",
     "meta_simple_speak",
-    "judgment_day_open",
-    "judgment_post_session",
-    "judgment_on_event",
-    "judgment_day_close"
+    "judgment_on_event"
   ],
   "llm_configs": {
     "_comment": "Written by setup_test_env.py into test_data/user_data/{providers,models}/<name>.json. Only the isolated test environment reads them.",

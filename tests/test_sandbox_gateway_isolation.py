@@ -22,7 +22,7 @@ BAT = ROOT / "test_fixtures" / "start_test_server.bat"
 SH = ROOT / "test_fixtures" / "start_test_server.sh"
 RUNNERS = [
     ROOT / "scripts" / "run_conversation.py",
-    ROOT / "scripts" / "run_day_sim.py",
+    # scripts/run_day_sim.py (一日シム) は v0.4 段 1-4 で撤去した
 ]
 
 _PRODUCTION_LIKE_ENV = {

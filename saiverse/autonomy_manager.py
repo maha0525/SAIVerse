@@ -138,8 +138,8 @@ class AutonomyManager:
         """Start the periodic tick. Returns True if started, False if already running.
 
         旧実装と同じく **start 直後に最初の tick が即時走る** — v2 では
-        watchdog の即時チェックになる (Active 化した時点で今日の day_plan が
-        無ければ、起床時間帯なら day_open がその場で火入れされる)。
+        watchdog の即時チェックになる (Active 化した時点で今日のライフが
+        確定していなければ、起床時間帯なら起床の帳簿処理がその場で火入れされる)。
         次回以降は ``interval_minutes`` 待機。
         """
         with self._lock:

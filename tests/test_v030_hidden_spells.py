@@ -33,7 +33,7 @@ def test_hidden_spell_stays_executable_but_invisible(schema_fn):
     assert schema.spell_visible is False
 
 
-VISIBLE_NAME = "episode_read"
+VISIBLE_NAME = "memory_read"
 
 
 def _registry_with_hidden_and_one_visible():
@@ -42,7 +42,7 @@ def _registry_with_hidden_and_one_visible():
     可視の 1 件を混ぜておくのは、「全部消えている」のと「非表示だけ落ちている」
     のを区別するため — 一覧が空になるバグでも通ってしまう検査にしない。
     """
-    from builtin_data.tools.episode_read import schema as visible_schema
+    from builtin_data.tools.memory_read import schema as visible_schema
 
     registry = {fn().name: fn() for fn in HIDDEN_SCHEMAS}
     registry[VISIBLE_NAME] = visible_schema()

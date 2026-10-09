@@ -43,7 +43,6 @@ from sqlalchemy.pool import StaticPool
 from database.models import AI, Base, City, User
 from saiverse import clock
 from saiverse import day_plan
-from saiverse.day_simulator import DaySimulator
 from saiverse.event_scheduler import EventScheduler
 from saiverse.execution_ledger import ExecutionLedger
 from saiverse.execution_ledger_wiring import (
@@ -477,7 +476,7 @@ def test_keepalive_without_lives_declared_is_unaffected(_mock_cache, manager):
 
 
 # ---------------------------------------------------------------------------
-# 統合: DaySimulator でライフ境界を実発火させ、終端の全挙動を通しで確認
+# 統合: ライフ境界を実発火させ、終端の全挙動を通しで確認
 # ---------------------------------------------------------------------------
 
 
@@ -485,14 +484,14 @@ def test_life_boundary_simulation_end_behavior(manager):
     """even モードのライフ開始・終了処理を通しで確認:
     - 終端で anchor は不変 (惜しい谷でキャッシュヒット再開できる)
     - 終端直後は TTL override が残り、遅延解除予約がある
-    - 遅延経過後 (DaySimulator で予約を発火) に override が global 既定へ戻る
+    - 遅延経過後 (EventScheduler の予約を仮想時刻で発火) に override が
+      global 既定へ戻る
 
-    v0.5 (life.md §11.2): 専用のライフ境界イベント予約 (``schedule_lives``)
-    は廃止され、ライフ開始/終了処理は day_open/day_close の発火経路
-    (``autonomy_wiring.fire_judgment_point``) 直下で呼ばれる。ここではその
+    ライフ開始/終了処理は起床・就寝の帳簿処理
+    (``day_plan.handle_scheduled_life_boundary``) から呼ばれる。ここではその
     呼び出し方 (``apply_life_boundary`` を直接呼ぶ) を模して統合挙動を
-    確認する — TTL 遅延解除の予約だけは引き続き
-    EventScheduler 経由なので DaySimulator で発火させる。
+    確認する — TTL 遅延解除の予約だけは EventScheduler 経由なので、仮想時刻を
+    進めて ``run_due`` で発火させる (旧 DaySimulator は段 1-4 で撤去)。
     """
     persona = manager.personas[PERSONA_ID]
     lifecycle = manager.sea_runtime.session_lifecycle
@@ -514,10 +513,8 @@ def test_life_boundary_simulation_end_behavior(manager):
     assert manager.event_scheduler.has_key(TTL_CLEAR_KEY)
 
     # 遅延経過後 (一日の終わりまで) 進めると override は解除される
-    DaySimulator(
-        manager.event_scheduler,
-        start=BASE + timedelta(hours=9, minutes=40), end=BASE + timedelta(hours=24),
-    ).run()
+    clock.advance_to(BASE + timedelta(hours=24))
+    manager.event_scheduler.run_due(clock.now())
     assert manager.get_persona_cache_override(PERSONA_ID) is None
     # anchor は依然不変 (解除は override の話で、anchor には触らない)
     assert lifecycle.load_anchors(persona) == anchors

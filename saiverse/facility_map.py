@@ -1,20 +1,20 @@
-"""型 → 公共施設の解決 (自律行動 v2 §6.1)。
+"""公共施設のロールタグと「行ける場所」の候補集合 (自律行動 v2 §6.1 の残り)。
 
-欲求の六型が行き先 (公共 Building) を決めるためのマッピング層。Building の
-ロールタグ (``database/models.py`` Building.FACILITY_ROLES、JSON 配列) が
-「その Building が何の施設か」を表し、本モジュールが型からロール経由で
-実在の Building へ解決する。
+Building のロールタグ (``database/models.py`` Building.FACILITY_ROLES、JSON
+配列) が「その Building が何の施設か」を表す。本モジュールはタグの読み口と、
+head の「行ける場所」(``sea.head_pipeline.sections.facilities``) が提示する
+候補集合を一箇所で決める。
 
 ロール語彙 (``FACILITY_ROLE_VOCAB``):
 
-- ``plaza``    広場: 「話す」「聞く」(社交型の欲求を持つペルソナが集まる)
-- ``workshop`` 工房: 「作る」(成果物が公共空間に置かれ、他者の目に入る)
-- ``library``  図書館: 「知る」(Web 閲覧室 + 他ペルソナの document の書架)
-- ``park``     公園: 「経験する」(出来事との遭遇)
+- ``plaza``    広場
+- ``workshop`` 工房
+- ``library``  図書館
+- ``park``     公園
 
-「自分を更新する」だけは私的な営みであり、常に自室 (``own_room``) に解決する
-(Building タグでは表現しない)。該当施設が無い型は None を返し、呼び出し側が
-own_room へのフォールバック + WARN を行う。
+v2 の時間割では欲求の六型 (話す/聞く/作る/知る/経験する/自分を更新する) から
+ロール経由でコマの行き先を解決していた (``resolve_facility``)。時間割の撤去
+(autonomous_behavior_v04_plan.md 段 1-4) で型からの解決は読み手ごと消えた。
 
 タグ付けの UI/CLI は将来フェーズ。当面は手動 SQL で付与する::
 
@@ -28,25 +28,19 @@ own_room へのフォールバック + WARN を行う。
 
 Building はメモリにロードされるため、SQL での変更はアプリ再起動で反映される。
 既存ユーザーの Building 構成に勝手にタグを付けるシードはしない (v2 §10-6) —
-タグがゼロの DB では ``saiverse.judgment_points.collect_facility_ids`` が
-従来どおり全 Building を提示する後方互換にフォールバックする。
+タグがゼロの DB では :func:`candidate_buildings` が全 Building を提示する
+後方互換にフォールバックする。
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Optional
-
-from saiverse.day_plan import (
-    FACILITY_OWN_ROOM,
-    KIND_CREATE,
-    KIND_EXPERIENCE,
-    KIND_LEARN,
-    KIND_LISTEN,
-    KIND_SELF_UPDATE,
-    KIND_TALK,
-)
+from typing import Any, List
 
 LOGGER = logging.getLogger(__name__)
+
+#: 自室を指す施設 ID (Building ID ではない特別値)。head の「行ける場所」の
+#: 末尾に「自分の部屋」として常に載る。
+FACILITY_OWN_ROOM = "own_room"
 
 # ロール語彙 (Building.FACILITY_ROLES に入る値)
 ROLE_PLAZA = "plaza"
@@ -62,16 +56,6 @@ ROLE_LABELS = {
     ROLE_WORKSHOP: "工房",
     ROLE_LIBRARY: "図書館",
     ROLE_PARK: "公園",
-}
-
-#: 六型 → ロールの対応 (v2 §6.1 の表)。「自分を更新する」はロールを持たず
-#: 常に own_room (resolve_facility 内の特別扱い)。
-KIND_TO_ROLE = {
-    KIND_TALK: ROLE_PLAZA,
-    KIND_LISTEN: ROLE_PLAZA,
-    KIND_CREATE: ROLE_WORKSHOP,
-    KIND_LEARN: ROLE_LIBRARY,
-    KIND_EXPERIENCE: ROLE_PARK,
 }
 
 
@@ -104,11 +88,8 @@ def candidate_buildings(manager: Any) -> List[Any]:
     ゼロなら後方互換で全 Building (まだ誰もタグ付けしていない DB で従来挙動を
     壊さない — v2 §6.1)。
 
-    **供給先は 2 つあり、両方が同じ集合を見る必要がある**:
-    ``saiverse.judgment_points.collect_facility_ids`` (コマの facility enum =
-    選べる選択肢) と ``sea.head_pipeline.sections.facilities`` (head の
-    「行ける場所」= 読む情報)。片方だけ別実装にすると「head に無い場所が
-    enum にある / その逆」が起きるため、候補集合はここ 1 箇所で決める。
+    供給先は head の「行ける場所」(``sea.head_pipeline.sections.facilities``)。
+    候補集合はここ 1 箇所で決める。
 
     順序を building_id で固定するのは head の prefix キャッシュのため
     (同じ世界なら毎回同じ文字列が出ること)。
@@ -122,31 +103,3 @@ def candidate_buildings(manager: Any) -> List[Any]:
     ]
     all_buildings.sort(key=lambda b: b.building_id)
     return all_buildings
-
-
-def buildings_for_role(manager: Any, role: str) -> List[Any]:
-    """指定ロールを持つ Building の一覧 (building_id 昇順の決定論順)。"""
-    return [b for b in list_tagged_buildings(manager) if role in building_roles(b)]
-
-
-def resolve_facility(manager: Any, kind: str) -> Optional[str]:
-    """欲求の型 (六型) から行き先の Building ID を解決する。
-
-    - 「自分を更新する」 → 常に ``"own_room"`` (私的な営み)
-    - その他の六型 → ロール (``KIND_TO_ROLE``) を持つ Building のうち
-      building_id 昇順の先頭 (複数あれば決定論で先頭)
-    - 該当施設が無い型 / 六型でない kind (暮らし・休む等) → None。
-      呼び出し側が own_room フォールバック + WARN を行うこと。
-    """
-    if kind == KIND_SELF_UPDATE:
-        return FACILITY_OWN_ROOM
-    role = KIND_TO_ROLE.get(kind)
-    if role is None:
-        return None
-    candidates = buildings_for_role(manager, role)
-    if not candidates:
-        LOGGER.debug(
-            "[facility_map] no building tagged with role=%r for kind=%r", role, kind,
-        )
-        return None
-    return candidates[0].building_id

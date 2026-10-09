@@ -6,17 +6,11 @@ concept_consolidation.md「P2: 統一スペル動詞 v0.2」の read。中身が
 
 対応 ref: ``m:N`` (Memopedia) / ``core`` (コア記憶全件) / ``c:N`` (コア記憶1件)
 / ``ch:N`` (Chronicle) / ``p:N`` (クリップ — クリップが写す生ログの全文)。
-
-``task:N`` (目的ノード) の読み取りも通る — ただし目的の木は 2026-08-23 に
-退役したので、説明文からは降ろしてある (自動想起が古い参照を出したときに
-読めないと困るための読み取り専用の残置。
-docs/issues/purpose_tree_vs_pocketbook_succession.md)。
 """
 from __future__ import annotations
 
 from saiverse import memory_atlas
 from tools.context import (
-    get_active_manager,
     get_active_persona_id,
     open_persona_memory,
 )
@@ -32,8 +26,6 @@ def memory_read(ref: str) -> str:
         raise RuntimeError("Active persona is not set")
 
     persona_name = resolve_persona_display_name(persona_id)
-    # manager は task:N (目的ノード = main DB 在住) の解決にのみ使われる
-    manager = get_active_manager()
     with open_persona_memory() as adapter:
         if not adapter.is_ready():
             raise RuntimeError(f"SAIMemory not ready for {persona_id}")
@@ -42,7 +34,7 @@ def memory_read(ref: str) -> str:
             # では外側でロックを取る (RLock なので内部ロックと重ねて安全)
             with adapter._db_lock:
                 return memory_atlas.read_page(
-                    adapter, ref, persona_name=persona_name, manager=manager,
+                    adapter, ref, persona_name=persona_name,
                 )
         except memory_atlas.AtlasRefError as exc:
             return f"Error: {exc}"

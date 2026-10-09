@@ -46,20 +46,11 @@ RECOVERY_TICK_INTERVAL_SECONDS = 60.0
 #: 仮置き。長い作業セッションでも 1 時間更新が無い running は観測途絶とみなす。
 RUNNING_DEADLINE_SECONDS = 3600.0
 
-#: コマ発火 (:func:`saiverse.day_plan._fire_slot`) の台帳 KIND。
-SLOT_FIRE_KIND = "slot.fire"
-
-#: slot.fire の精算 settle-close deadline (W2 D5)。
-#: 根拠: EventScheduler は単一 dispatch スレッドで全 callback を直列実行する
-#: (saiverse/event_scheduler.py の _dispatch_loop / run_due)。コマ発火
-#: (_fire_slot) も回復 tick (schedule_periodic) も同じスレッドの callback なので、
-#: **同一プロセス内では tick とハンドラが同時に走らない** — tick が見る running
-#: slot.fire は「ハンドラは既に return したが精算 tx が転けた / プロセスが跨いだ」
-#: もので、稼働中ハンドラを誤 settle するリスクは構造的に低い。それでも
-#: 保守側に倒し、長い作業セッションの実行時間 (RUNNING_DEADLINE_SECONDS 未満)
-#: を十分に上回らない範囲で 15 分を置く — 万一ハンドラが別スレッドへ処理を逃がす
-#: 将来変更が入っても、稼働中ハンドラを settle しないための余裕。
-SLOT_SETTLE_DEADLINE_SECONDS = 900.0
+# 旧 kind ``slot.fire`` (時間割のコマ発火) は時間割の撤去
+# (autonomous_behavior_v04_plan.md 段 1-4) で書き手ごと消えた。切り替え前に
+# running のまま残った行は、専用の settle-close を経ずに汎用の running 期限監視
+# (起動時 sweep / RUNNING_DEADLINE_SECONDS) で unknown 終端に落ちる — 締める
+# べき出来事も時間割の行も、もう読む人がいない。
 
 # 送信トレイの TARGET 名 (intent §4 スキーマ例)。
 TARGET_SAIMEMORY_APPEND = "saimemory.append"
@@ -71,8 +62,12 @@ TARGET_PERCEPTION_PUSH = "perception.push"
 #: 「出来事は到着順・様子は組成の末尾」(§11-3 改訂 — 様子は回収 §11-2 が
 #: 末尾へ寄せる)。
 TARGET_PERCEPTION_ROOM_STATE = "perception.room_state"
-#: W1 Chunk C (D9-5): 作業セッション digest の配送。saimemory.append の変種で、
-#: 冪等 append 後に episode の digest_ref (再訪の鍵) を後段確定する。
+#: W1 Chunk C (D9-5): 作業セッション digest の配送。積む側 (セッション終了
+#: 判断の finalize) は作業セッションごと撤去された (段 1-4) が、配送の受け口は
+#: **残す** — 切り替え前に積まれて pending のまま残った digest があると、受け口の
+#: 無い target は配送が詰まって (ledger は未登録 target で FIFO をブロックする)
+#: 同じペルソナの後続の記憶の配送まで止めてしまうため。中身は本人の言葉の
+#: まとめなので、届けるのが正しい。
 TARGET_SAIMEMORY_APPEND_DIGEST = "saimemory.append_digest"
 #: W5/B1: 移動 (move.entity) の commit 後処理の配送。位置遷移 + building
 #: イベントは移動 tx に同居し、in-process の後処理 (dynamic state / addon
@@ -86,13 +81,11 @@ TARGET_MOVE_GAME_LIFECYCLE = "move.post_game_lifecycle"
 JUDGMENT_KIND_PREFIX = "judgment."
 
 #: prepared 回収 (#2、D5 の表): refire する kind と待機秒数。
-#: on_event / post_session はイベント/セッションの収穫が判断に依存するため
-#: 回収価値が高い。refire は一度 running に入れば terminal に落ちるので
-#: 試行回数の管理は不要。
+#: on_event はイベントへの反応が判断に依存するため回収価値が高い。refire は
+#: 一度 running に入れば terminal に落ちるので試行回数の管理は不要。
 PREPARED_REFIRE_AFTER_SECONDS = 120.0
 PREPARED_REFIRE_KINDS = (
     f"{JUDGMENT_KIND_PREFIX}on_event",
-    f"{JUDGMENT_KIND_PREFIX}post_session",
 )
 
 #: prepared 回収 (#2): refire kind の再試行を打ち切る窓 (裁定 B、2026-07-31 —
@@ -111,16 +104,21 @@ PREPARED_REFIRE_KINDS = (
 PREPARED_REFIRE_EXPIRE_AFTER_SECONDS = 1800.0
 
 #: prepared 回収 (#2): 期限切れで failed に落とす kind と期限秒数。
-#: day_open / day_close は 2026-10 (autonomous_behavior_v04_plan.md 段 1-2) で
-#: 判断点ではなくなった (起床・就寝は day_plan.handle_scheduled_life_boundary の
-#: 機械の帳簿処理) — 新しい席は作られず、ここに残るのは切り替え前の旧席だけ。
-#: 再発火はせず期限で閉じる (autonomy_wiring.refire_judgment_from_recovery も
-#: この 2 kind は撃たずに放棄する)。旧 post_conversation はここに載っていたが、
-#: 会話終了判断の退役 (2026-08-16) で kind ごと消えた。
+#: ここに並ぶのは退役した判断点の旧席だけ — 新しい席は作られず、切り替え前に
+#: prepared のまま残った行を再発火せず期限で閉じる:
+#:
+#: - day_open / day_close: 2026-10 (autonomous_behavior_v04_plan.md 段 1-2) で
+#:   判断点ではなくなった (起床・就寝は day_plan.handle_scheduled_life_boundary
+#:   の機械の帳簿処理)
+#: - post_session: 作業セッションごと撤去 (段 1-4)
+#:
+#: 旧 post_conversation はここに載っていたが、会話終了判断の退役 (2026-08-16)
+#: で kind ごと消えた。
 PREPARED_EXPIRE_AFTER_SECONDS = 1800.0
 PREPARED_EXPIRE_KINDS = (
     f"{JUDGMENT_KIND_PREFIX}day_open",
     f"{JUDGMENT_KIND_PREFIX}day_close",
+    f"{JUDGMENT_KIND_PREFIX}post_session",
 )
 
 #: schedule 発火の台帳 KIND (W3。ScheduleManager 側の定数と同値 — wiring は
@@ -193,11 +191,7 @@ def run_startup_recovery(manager: "SAIVerseManager") -> None:
     """
     ledger = manager.execution_ledger
     try:
-        # slot.fire は汎用 sweep から除外する (unknown 化すると episode が永久
-        # open のまま照合待ちになる) — 代わりに下の settle-close で拾う。
-        recovered = ledger.recover_stale_running(
-            all_running=True, exclude_kinds=(SLOT_FIRE_KIND,),
-        )
+        recovered = ledger.recover_stale_running(all_running=True)
         if recovered:
             LOGGER.warning(
                 "[ledger-wiring] startup sweep: %d 件の前世代 running を "
@@ -208,14 +202,6 @@ def run_startup_recovery(manager: "SAIVerseManager") -> None:
         # sweep 失敗でも起動は止めない (unknown 化は次の tick でも再試行される
         # 掃除)。ただし黙らせない。
         LOGGER.exception("[ledger-wiring] startup running-sweep failed")
-    # 前世代の running slot.fire を settle-close する。起動直後の running slot.fire は
-    # 定義上すべて前世代 (単一 dispatch スレッドのハンドラは起動前に途絶している)
-    # なので、deadline を課さず (older_than_seconds=None) 全件を掃除する — 稼働中
-    # ハンドラ誤 settle の懸念は起動時には存在しない (前世代確定)。
-    try:
-        _collect_stale_slot_executions(manager, older_than_seconds=None)
-    except Exception:
-        LOGGER.exception("[ledger-wiring] startup slot.fire settle-close failed")
     try:
         # applied 残留の照合掃除 (W3 Codex 第七陣 — tick と同じ)。
         ledger.sweep_applied()
@@ -245,17 +231,8 @@ def _recovery_tick(manager: "SAIVerseManager") -> None:
     一度の DB エラーで掃除が永久停止しないよう、ここで例外を吸収してログに残す。
     """
     ledger = manager.execution_ledger
-    # slot.fire の settle-close を汎用 sweep より前に行う (slot.fire は汎用 sweep
-    # から除外するので順序に依存はしないが、コマ回復を先に置く方が安全)。
     try:
-        _collect_stale_slot_executions(manager)
-    except Exception:
-        LOGGER.exception("[ledger-wiring] recovery tick: slot.fire settle-close failed")
-    try:
-        ledger.recover_stale_running(
-            max_age_seconds=RUNNING_DEADLINE_SECONDS,
-            exclude_kinds=(SLOT_FIRE_KIND,),
-        )
+        ledger.recover_stale_running(max_age_seconds=RUNNING_DEADLINE_SECONDS)
     except Exception:
         LOGGER.exception("[ledger-wiring] recovery tick: running-deadline sweep failed")
     try:
@@ -298,85 +275,6 @@ def _recovery_tick(manager: "SAIVerseManager") -> None:
         _flush_all_pending(manager)
     except Exception:
         LOGGER.exception("[ledger-wiring] recovery tick: pending flush failed")
-
-
-def _collect_stale_slot_executions(
-    manager: "SAIVerseManager", *, older_than_seconds: Any = SLOT_SETTLE_DEADLINE_SECONDS
-) -> None:
-    """回復: 精算が転けて running のまま残ったコマ発火を settle-close する (W2 D5)。
-
-    slot.fire は「行動を生む」判断点ではなく「実行した記録の締め」(episode close +
-    slot done + 台帳 applied) なので、LLM 再実行を伴わない掃除である (掃除は
-    自律行動ではない)。
-
-    Args:
-        older_than_seconds: :meth:`ExecutionLedger.list_running` に渡す deadline。
-            None (起動時) は前世代確定の全 running slot.fire を対象にする。
-            個別の例外は tick を殺さない (:func:`_collect_prepared_judgments` の
-            防御に倣う)。
-    """
-    ledger = manager.execution_ledger
-    try:
-        rows = ledger.list_running(SLOT_FIRE_KIND, older_than_seconds=older_than_seconds)
-    except Exception:
-        LOGGER.exception("[ledger-wiring] failed to list running slot.fire executions")
-        return
-    if not rows:
-        return
-    for row in rows:
-        try:
-            _settle_one_stale_slot(manager, row)
-        except Exception:
-            LOGGER.exception(
-                "[ledger-wiring] slot.fire settle-close failed (execution=%s)",
-                row.get("execution_id"),
-            )
-
-
-def _settle_one_stale_slot(manager: "SAIVerseManager", row: Dict[str, Any]) -> None:
-    """running な slot.fire 1 行を settle-close する (D5)。
-
-    台帳 payload の slot 座標 (persona/plan_date/index) から origin_ref を
-    再構成して開いている出来事を逆引きし、:func:`saiverse.day_plan.settle_stale_slot`
-    に委ねる (episode close + slot done + 台帳 applied/completed、予算は予約額のまま)。
-    """
-    # 遅延 import (wiring は day_plan から独立に import され得る)。
-    from saiverse import day_plan
-
-    ledger = manager.execution_ledger
-    execution_id = row.get("execution_id")
-    payload = row.get("payload")
-    if not execution_id or not isinstance(payload, dict):
-        LOGGER.warning(
-            "[ledger-wiring] stale slot.fire has no usable payload; skipping "
-            "(execution=%s)", execution_id,
-        )
-        return
-    persona_id = payload.get("persona_id")
-    plan_date = payload.get("plan_date")
-    index = payload.get("index")
-    if (
-        not persona_id
-        or not plan_date
-        or not isinstance(index, int)
-        or isinstance(index, bool)
-    ):
-        LOGGER.warning(
-            "[ledger-wiring] stale slot.fire payload incomplete "
-            "(execution=%s persona=%s date=%s index=%r); skipping",
-            execution_id, persona_id, plan_date, index,
-        )
-        return
-
-    # slot_id (不変 ID) は精算対象コマの特定に使う。この修正より前の payload には
-    # 無い (None) — その場合 settle 側は done 書き込みを省いて episode/台帳だけ締める。
-    slot_id = payload.get("slot_id")
-    # episode_ref は束 6c (2026-08-22) で常に None — 出来事の書き手が退役した
-    # (v3 §7) ので、逆引きすべき open な行がそもそも生まれない。
-    day_plan.settle_stale_slot(
-        manager, ledger, execution_id, persona_id, plan_date, index, slot_id,
-        None,
-    )
 
 
 def _refire_first_attempts(manager: "SAIVerseManager") -> Dict[str, int]:
@@ -883,7 +781,11 @@ def _make_saimemory_append_digest_handler(
 ) -> Callable[[Dict[str, Any]], None]:
     """target='saimemory.append_digest' — 作業セッション digest の配送 (D9-5)。
 
-    payload 契約 (積む側 = judgment_finalize の post_session):
+    ⚠ 積む側 (judgment_finalize の post_session) は段 1-4 で撤去済み。切り替え前に
+    pending で残った分を流すためだけの受け口 (:data:`TARGET_SAIMEMORY_APPEND_DIGEST`
+    の注記参照)。
+
+    payload 契約 (旧・積む側 = judgment_finalize の post_session):
         {"message": {...DIGEST_TAG / main_line / committed のダイジェスト行...}}
     冪等 append (adapter.append_ledger_message — 再配送は既存 message id を
     返す) だけを行う。

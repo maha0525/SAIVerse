@@ -54,7 +54,7 @@ class RefKind:
 _KIND_LIST = [
     RefKind("track", True, True),
     RefKind("task", True, True),        # desire は task に統合 (状態ラベル化)
-    RefKind("episode", True, True),     # 出来事 (life_concept_map.md §8.1。saiverse/episodes.py)
+    RefKind("episode", True, True),     # 出来事 (life_concept_map.md §8.1。読み口は v0.4 段 1-4 で撤去、旧データの参照の書式だけ残す)
     RefKind("memopedia", True, True, aliases=("m",)),
     RefKind("message", True, False),
     # P2a (2026-07-10): arasuji_entries に short_id を追加 (Memory Atlas の

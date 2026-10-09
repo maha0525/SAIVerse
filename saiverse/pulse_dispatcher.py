@@ -142,9 +142,9 @@ class PulseDispatcher:
             invoke_main_line()
 
     # NOTE: 旧 dispatch_subline_poll (SubLineScheduler の autonomous Track
-    # 連続 Pulse、経路 2a) は自律行動 v2 で廃止 (intent §9.3)。自律駆動は
-    # 時間割のコマ発火 (saiverse/day_plan.py) + 判断点
-    # (saiverse/autonomy_wiring.py) が担う。
+    # 連続 Pulse、経路 2a) は自律行動 v2 で廃止 (intent §9.3)。v2 の時間割の
+    # コマ発火も v0.4 段 1-4 で撤去され、自律の駆動は起床・就寝の帳簿処理と
+    # on_event 判断 (saiverse/autonomy_wiring.py) だけになった。
 
     # ------------------------------------------------------------------
     # スケジュール時刻到来 (3)
@@ -293,10 +293,10 @@ class PulseDispatcher:
         (intent §4.2)。
 
         旧: MetaLayer.on_periodic_tick (状況分類 → meta_judgment_* の定期
-        ディスパッチ)。この役割は判断点 5 種 (day_open / post_conversation /
-        post_session / on_event / day_close) が引き継いだため、定期経路は
-        「時間割の発火が途絶えたときだけ火を入れ直す見張り」
-        (saiverse.autonomy_wiring.watchdog_tick) になった。正常時は何もしない。
+        ディスパッチ)。この役割は v2 の判断点が引き継いだため、定期経路は
+        「今日のライフが確定していないときだけ起床の帳簿処理を火入れし直す
+        見張り」(saiverse.autonomy_wiring.watchdog_tick) になった。正常時は
+        何もしない。v2 の判断点のうち残っているのは on_event だけ (段 1-4)。
         (旧 v1 メタ判断は on_track_alert ごと退役 — track_retirement.md §7.4。
         別行動中のユーザー発話の仲裁は on_event 判断点への直結が後継。)
         """

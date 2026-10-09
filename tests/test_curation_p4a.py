@@ -579,34 +579,12 @@ class TestDeterminism:
 class TestDayCloseNoLongerCarriesCuration:
     """就寝判断のスキーマと状況テキストに記憶の手入れが残っていないこと。"""
 
-    def _make_manager(self):
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
-        from sqlalchemy.pool import StaticPool
-        from database.models import Base
-        engine = create_engine(
-            "sqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-        Base.metadata.create_all(engine)
-        Session = sessionmaker(bind=engine)
-        return SimpleNamespace(
-            SessionLocal=Session,
-            personas={},
-            event_scheduler=None,
-            track_manager=None,
-            buildings=[],
-        )
-
-    def test_就寝判断のスキーマに手入れの欄が無い(self):
+    def test_就寝判断そのものが退役している(self):
+        """手入れの欄を載せていた就寝判断は v0.4 段 1-4 で判断点ごと退役した。"""
         from saiverse import judgment_points as jp
 
-        schema = jp.build_day_close_schema(
-            manager=self._make_manager(), persona_id="alice",
-        )
-        assert "curation_reviews" not in schema["properties"]
-        assert "naming_reviews" not in schema["properties"]
+        assert not hasattr(jp, "build_day_close_schema")
+        assert "day_close" not in jp.JUDGMENT_PLAYBOOK_MAP
 
     def test_就寝判断の配線から手入れの関数が外れている(self):
         from builtin_data.tools import judgment_finalize

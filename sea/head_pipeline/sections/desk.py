@@ -86,7 +86,6 @@ class DeskSection:
             from saiverse.memory_atlas import snapshot_desk
             pages, evicted, dropped = snapshot_desk(
                 adapter, persona_name=getattr(persona, "persona_name", None),
-                manager=ctx.manager,
             )
         except Exception:
             LOGGER.warning(

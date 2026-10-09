@@ -83,6 +83,75 @@ def _build_directive(target_display: str, gist: str) -> str:
     )
 
 
+def _extract_text(result: Any) -> str:
+    """LLM client の generate 戻り値 (str または dict) から text を取り出す。"""
+    if isinstance(result, dict):
+        return str(result.get("content") or "")
+    if isinstance(result, str):
+        return result
+    return ""
+
+
+def _record_llm_usage(
+    runtime: Any,
+    state: Dict[str, Any],
+    llm_client: Any,
+    persona: Any,
+    building_id: str,
+    node_type: str,
+    playbook_name: str = _PLAYBOOK_NAME,
+) -> None:
+    """LLM 1 コール分の usage を計上する (usage_tracker + Pulse accumulator)。
+
+    sea/runtime_llm.py の spell-retry usage 計上と同じ形。usage が無い
+    (mock クライアント等) 場合は no-op。旧 ``sea.work_session`` (作業
+    セッション — v0.4 段 1-4 で撤去) と共有していた器を、唯一残った使い手の
+    ここへ移した。
+    """
+    from saiverse.usage_tracker import get_usage_tracker
+    from sea.message_stamp import record_call_tokens
+
+    usage = llm_client.consume_usage() if hasattr(llm_client, "consume_usage") else None
+    # トークン三つ組の刻印材料 (sea/message_stamp.py)。usage が取れなかった
+    # ときも通して、前のコールの値を state に残さない。
+    record_call_tokens(state, usage)
+    if not usage:
+        return
+    persona_id = getattr(persona, "persona_id", None)
+    get_usage_tracker().record_usage(
+        model_id=usage.model,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached_tokens=usage.cached_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+        cache_ttl=usage.cache_ttl,
+        persona_id=persona_id,
+        building_id=building_id,
+        node_type=node_type,
+        playbook_name=playbook_name,
+        category="persona_speak",
+    )
+    from sea.runtime_llm import _maybe_record_cache_storage
+    _maybe_record_cache_storage(usage, persona_id, building_id)
+    from saiverse.model_configs import calculate_cost
+    cost = calculate_cost(
+        usage.model, usage.input_tokens, usage.output_tokens,
+        usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl,
+    )
+    runtime._accumulate_usage(
+        state, usage.model, usage.input_tokens, usage.output_tokens, cost,
+        usage.cached_tokens, usage.cache_write_tokens,
+    )
+    try:
+        # anchor は call-local (§3.2)。呼び出し面は親 Beat の内側 — Beat 内
+        # touch は前進と直列化済みで CAS 不要。
+        runtime.session_lifecycle.touch_anchor_after_llm_call(
+            persona, usage, anchor_id=state.get("_prefix_anchor_id"),
+        )
+    except Exception:
+        LOGGER.debug("[tell] anchor touch failed (non-fatal)", exc_info=True)
+
+
 def tell(target: str, gist: str = "") -> str:
     """宛先を決めて声をかける。言葉は会話の声 (標準モデルの 1 Beat) が書く。"""
     manager = get_active_manager()
@@ -132,7 +201,6 @@ def tell(target: str, gist: str = "") -> str:
 
     from sea.message_stamp import record_presented_message_ids
     from sea.pulse_context import Aspect, PulseLogEntry, resolve_execution_context
-    from sea.work_session import _extract_text, _record_llm_usage
 
     pulse_id = str(uuid.uuid4())
     pulse_ctx = runtime._get_or_create_pulse_context(pulse_id)
@@ -156,13 +224,13 @@ def tell(target: str, gist: str = "") -> str:
         execution_context = resolve_execution_context(persona, pulse_ctx)
 
         # ---- Beat ロックは取らない (beat_execution_context.md §2.2/§3.4) ----
-        # スペルは定義上つねに親 Beat (会話 Pulse / 作業・暮らしセッション) の
-        # 内側で唱えられる。関所も直列化も親が済ませており、子ラインは別 Beat
-        # ではなく親 Beat の一部 — ここで取り直すのは設計上も冗長。
+        # スペルは定義上つねに親 Beat (会話 Pulse 等) の内側で唱えられる。
+        # 関所も直列化も親が済ませており、子ラインは別 Beat ではなく親 Beat の
+        # 一部 — ここで取り直すのは設計上も冗長。
         # さらに実害がある: 同期スペルは常に executor スレッドで実行される
-        # (sea/runtime_llm.py の ``run_in_executor(None, _run)``。作業・暮らし
-        # セッションではその手前の spell ループ自体も別スレッドへ逃げる —
-        # sea/work_session._run_coro_sync)。RLock の再入は取得したスレッドで
+        # (sea/runtime_llm.py の ``run_in_executor(None, _run)``。旧作業・暮らし
+        # セッション — v0.4 段 1-4 で撤去 — ではその手前の spell ループ自体も
+        # 別スレッドへ逃げていた)。RLock の再入は取得したスレッドで
         # しか効かないため、別スレッドから取り直すと「親スレッドは結果待ち・
         # ツールスレッドはロック待ち」で永久に固まる (Codex レビュー
         # 2026-08-08 critical)。知覚消費も最外 Beat の頭が担う。

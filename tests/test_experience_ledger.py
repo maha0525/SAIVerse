@@ -5,10 +5,10 @@
   削除・trunk 除外) と動的合成 (fragment 新しい順 / 関与あらすじの履歴 /
   共起エンティティ / 対象外は None)
 - api/routes/people/experience_ledger.py — 索引 + 合成ページの 2 本
-  (正常系と 404、目的ノード合流)
+  (正常系と 404。目的ノード合流は v0.4 段 1-4 で撤去)
 
-fixtures は tests/test_slot_close_note.py の流儀 (in-memory memopedia +
-main DB は必要なテストだけ)。本番データ (~/.saiverse) には触れない。
+fixtures は in-memory memopedia。本番データ (~/.saiverse) には触れない。
+(旧 tests/test_slot_close_note.py — コマ締めごと撤去 — と同じ流儀。)
 """
 from __future__ import annotations
 
@@ -316,8 +316,8 @@ class TestLedgerApi:
             c for c in data["categories"] if c["key"] == "people"
         )["pages"]
         assert people_pages[0]["stats"]["fragment_count"] == 3
-        # main DB の無い薄い manager → 目的ノードは空 (索引本体は独立して返る)
-        assert data["purposes"] == []
+        # 目的ノード (目的の木) の合流は v0.4 段 1-4 で撤去した — 欄ごと無い
+        assert "purposes" not in data
 
     def test_page_endpoint(self, client, seeded):
         res = client.get(
@@ -338,108 +338,3 @@ class TestLedgerApi:
     def test_unknown_persona_404(self, client):
         res = client.get("/api/people/nobody/experience-ledger")
         assert res.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# API: 目的ノードの合流 (main DB あり)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def session_factory():
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine)
-    yield Session
-    engine.dispose()
-
-
-@pytest.fixture
-def full_client(conn, seeded, session_factory):
-    """main DB (目的ノード) 込みの TestClient。fixtures は test_slot_close_note の流儀。"""
-    import uuid
-
-    from saiverse.persona_task_manager import (
-        PARENT_TRACK,
-        STAGE_CANDIDATE,
-        PersonaTaskManager,
-    )
-
-    from api.routes.people import experience_ledger as route
-
-    db = session_factory()
-    try:
-        db.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
-        db.flush()
-        city = City(USERID=1, CITY_SLUG="test_city", UI_PORT=3001, API_PORT=8001)
-        db.add(city)
-        db.flush()
-        db.add(AI(AIID=PERSONA_ID, HOME_CITYID=city.CITYID, AINAME="Alice"))
-        db.commit()
-    finally:
-        db.close()
-
-    # タスクの親になる Track 行。TrackManager は 2026-08-22 (束 6c) に退役したので、
-    # 旧データ相当の ActionTrack 行を ORM で直接置く。索引に出るのはタスク側だけで、
-    # この行自体は「親が実在する」以上の意味を持たない。
-    track_id = str(uuid.uuid4())
-    db = session_factory()
-    try:
-        db.add(ActionTrack(
-            track_id=track_id, persona_id=PERSONA_ID, short_id=1,
-            title="言葉の標本集", track_type="autonomous", status="running",
-        ))
-        db.commit()
-    finally:
-        db.close()
-
-    ptm = PersonaTaskManager(session_factory)
-    ptm.create_task(
-        persona_id=PERSONA_ID, title="序文の下書き", goal="書き出しを決める",
-        parent_kind=PARENT_TRACK, track_id=track_id, auto_activate=False,
-    )
-    ptm.create_task(
-        persona_id=PERSONA_ID, title="雲の写真を集めたい",
-        stage=STAGE_CANDIDATE, auto_activate=False,
-    )
-
-    manager = SimpleNamespace(
-        SessionLocal=session_factory,
-        personas={
-            PERSONA_ID: SimpleNamespace(sai_memory=StubMemoryAdapter(conn))
-        },
-    )
-    app = FastAPI()
-    app.include_router(route.router, prefix="/api/people")
-    app.dependency_overrides[get_manager] = lambda: manager
-    return TestClient(app)
-
-
-class TestPurposeRows:
-    def test_purposes_join_the_index_with_tag_stats(self, full_client, conn):
-        # task:1 (序文の下書き) に帰属タグ 2 件 (別々の出来事から)
-        add_tag(
-            conn, target_ref="episode:1", purpose_ref="task:1", layer=LAYER_SHELVE
-        )
-        add_tag(
-            conn, target_ref="episode:2", purpose_ref="task:1", layer=LAYER_SHELVE
-        )
-
-        res = full_client.get(f"/api/people/{PERSONA_ID}/experience-ledger")
-        assert res.status_code == 200
-        purposes = res.json()["purposes"]
-        by_ref = {p["ref"]: p for p in purposes}
-
-        assert by_ref["task:1"]["title"] == "序文の下書き"
-        assert by_ref["task:1"]["kind"] == "task"
-        assert by_ref["task:1"]["stats"]["record_count"] == 2
-        assert by_ref["task:1"]["stats"]["first_date"] is not None
-
-        # 欲求候補 (kind='desire') と関心 (kind='track') の索引行は 2026-08-21 に
-        # 供給源ごと退役した — 索引に残るのは生きたタスクだけ。
-        assert "task:2" not in by_ref
-        assert {p["kind"] for p in purposes} == {"task"}

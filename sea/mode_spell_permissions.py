@@ -16,7 +16,7 @@ Track 操作の列は 2026-08-21 に消えた — ``track_create`` 以下 7 種�
 2026-08-23 に中身を失った — 目的の木が手帳に後を譲って退役し、``purpose_*``
 三種が削除されたため (purpose_tree_vs_pocketbook_succession.md の裁定 A)。
 
-- 読み取り系 (``get_task_summary`` 等) と汎用スペル
+- 読み取り系 (``memory_read`` 等) と汎用スペル
   (recall / note / memopedia / image / web 等) は全モード無制限 (= ここに載せない)。
 - 生産手段の ``document_*`` スペル (create / read / edit / search) も汎用スペル
   扱いで全モード無制限。特に分身モード (WORKER) の

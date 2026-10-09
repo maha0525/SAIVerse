@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 """本番ペルソナをテスト環境へ複製するスクリプト。
 
-一日シミュレータの実 LLM モード (scripts/run_day_sim.py --real) を、本物の
-記憶・人格を持つペルソナの複製で「本番を汚さずに」試すためのツール。
+会話ランナー (scripts/run_conversation.py) 等の実 LLM の試しを、本物の
+記憶・人格を持つペルソナの複製で「本番を汚さずに」行うためのツール。
+(元の主用途だった一日シミュレータ scripts/run_day_sim.py は、時間割の撤去
+— autonomous_behavior_v04_plan.md 段 1-4 — で撤去した。)
 
 Usage:
     python scripts/clone_persona_to_test_env.py --persona <id> \\
@@ -729,12 +731,11 @@ def _print_summary(summary: Dict[str, Any]) -> None:
     LOGGER.info("-" * 64)
     LOGGER.info("次の手順:")
     LOGGER.info("  1. 判断点 playbook をテスト DB に import (未実施なら):")
-    LOGGER.info("     python scripts/import_playbook.py --file builtin_data/playbooks/public/judgment_day_open.json")
-    LOGGER.info("     (day_open / post_session / post_conversation / on_event / day_close の 5 ファイル)")
-    LOGGER.info("  2. シナリオの persona_id を '%s' に書き換えて実行:", summary["persona_id"])
+    LOGGER.info("     python scripts/import_playbook.py --file builtin_data/playbooks/public/judgment_on_event.json")
+    LOGGER.info("  2. 台本の persona_id を '%s' にして会話ランナーで試す:", summary["persona_id"])
     LOGGER.info("     SAIVERSE_HOME=%s SAIVERSE_USER_DATA_DIR=<dest user_data> \\", summary["dest_home"])
     LOGGER.info(
-        "     python scripts/run_day_sim.py --scenario <file> --real --db-file %s",
+        "     python scripts/run_conversation.py --script <file> (DB: %s)",
         summary["dest_db"],
     )
     LOGGER.info("=" * 64)

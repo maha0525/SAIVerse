@@ -1126,34 +1126,10 @@ class SAIMemoryAdapter:
                     )
         return saved
 
-    def add_purpose_tag(self, target_ref: str, purpose_ref: str, layer: int) -> bool:
-        """目的タグ 1 件を purpose_tags テーブルへ永続化する (upsert)。
-
-        層2 棚入れ (judgment_finalize) 等の書き込み口。同一 (target, purpose)
-        ペアは sai_memory/purpose_tags.py の add_tag が再訪として同じ行に
-        濃さを積む。失敗しても例外を上げず WARNING に落とす (タグは
-        メッセージ本体より優先度が低い — add_clips と同じ姿勢)。
-
-        Returns: 保存 (upsert) できたら True。
-        """
-        if not self._ready or not target_ref or not purpose_ref:
-            return False
-        from sai_memory.purpose_tags import add_tag
-        with self._db_lock:
-            try:
-                add_tag(
-                    self.conn,
-                    target_ref=str(target_ref),
-                    purpose_ref=str(purpose_ref),
-                    layer=int(layer),
-                )
-                return True
-            except Exception:
-                LOGGER.warning(
-                    "Failed to add purpose tag target=%r purpose=%r layer=%r",
-                    target_ref, purpose_ref, layer, exc_info=True,
-                )
-                return False
+    # NOTE: 旧 ``add_purpose_tag`` (purpose_tags への目的タグの書き口) は、書き手
+    # だった判断点の棚入れ (judgment_finalize) とコマ締め (slot_close) が目的の木
+    # ごと撤去された v0.4 段 1-4 で消えた。テーブル (purpose_tags) は旧データの
+    # 置き場として初期化だけ続ける。
 
     def recent_messages(self, building_id: str, max_chars: int) -> List[dict]:
         if not self._ready:
@@ -2816,60 +2792,10 @@ class SAIMemoryAdapter:
             return None
         return row is not None
 
-    def get_messages_by_origin_episode(self, episode_ref: str) -> List[Dict[str, Any]]:
-        """出来事 (``episode:N``) の原本行を時系列で返す (W1 Chunk C / D10)。
-
-        層0タグの専用列 ``messages.origin_episode`` で直接引く
-        (:meth:`has_track_assistant_message_since` と同じ直 SQL 流儀)。
-        episode 読み口 (post_session の原本注入 / episode_read スペル) の
-        原始関数。volatile も含む全行 — 原本は生ログそのもの。
-
-        Returns:
-            時系列 (created_at 昇順、同秒は挿入順 = rowid 昇順) の dict リスト。
-            各 dict は原本レンダリングに足る列 (role / content / created_at /
-            line_role / scope / metadata / spell 関連) を持つ。adapter 未 ready /
-            クエリ失敗は空リスト。
-        """
-        if not self._ready or not episode_ref:
-            return []
-        try:
-            with self._db_lock:
-                rows = self.conn.execute(
-                    "SELECT id, thread_id, role, content, created_at, metadata, "
-                    "line_role, scope, pulse_id, origin_track_id, "
-                    "paired_action_text, spell_origin_id, spell_seq "
-                    "FROM messages WHERE origin_episode = ? "
-                    "ORDER BY created_at ASC, rowid ASC",
-                    (str(episode_ref),),
-                ).fetchall()
-        except Exception as exc:
-            LOGGER.warning(
-                "Failed to query messages by origin_episode %s: %s",
-                episode_ref, exc,
-            )
-            return []
-        out: List[Dict[str, Any]] = []
-        for row in rows:
-            try:
-                metadata = json.loads(row[5]) if row[5] else None
-            except (TypeError, ValueError):
-                metadata = None
-            out.append({
-                "id": row[0],
-                "thread_id": row[1],
-                "role": row[2],
-                "content": row[3],
-                "created_at": int(row[4]) if row[4] is not None else None,
-                "metadata": metadata if isinstance(metadata, dict) else None,
-                "line_role": row[6],
-                "scope": row[7],
-                "pulse_id": row[8],
-                "origin_track_id": row[9],
-                "paired_action_text": row[10],
-                "spell_origin_id": row[11],
-                "spell_seq": row[12],
-            })
-        return out
+    # NOTE: 旧 ``get_messages_by_origin_episode`` (``messages.origin_episode`` で
+    # 出来事の原本行を引く読み手 — post_session の原本注入と episode_read スペル
+    # の原始関数) は、読み手が両方退役した v0.4 段 1-4 で撤去した。列そのものは
+    # 旧データの層0タグとして残る (sai_memory/memory/storage.py)。
 
     # NOTE: 旧 ``get_track_last_message_time`` / ``get_track_last_message_times``
     # (``messages.origin_track_id`` で MAX(created_at) を引く読み手) は

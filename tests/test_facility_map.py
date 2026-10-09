@@ -1,38 +1,23 @@
-"""公共施設タグと型→施設の解決 (saiverse/facility_map.py、自律行動 v2 §6.1)。
+"""公共施設タグと「行ける場所」の候補集合 (saiverse/facility_map.py、自律行動 v2 §6.1)。
 
-- resolve_facility: 六型それぞれのロール解決 / 「自分を更新する」は常に own_room /
-  該当施設が無い型・六型でない kind は None / 複数候補は building_id 昇順の先頭
-  (決定論) / 複数ロール Building
-- collect_facility_ids: ロールタグ付き Building があればそれのみ + own_room、
-  タグゼロの DB では全 Building にフォールバック (後方互換)
-- 状況テキストの施設一覧が enum と同じ候補集合 + ロールの日本語ラベルを出す
+- candidate_buildings: ロールタグ付き Building があればそれのみ、タグゼロの DB
+  では全 Building にフォールバック (後方互換)
+- head の「行ける場所」が同じ候補集合 + own_room + ロールの日本語ラベルを出す
 - runtime Building (saiverse/buildings.py) が facility_roles を保持する
+
+型 (六型) から施設への解決と、時間割の facility enum は時間割の撤去
+(v0.4 段 1-4) で消えた。
 """
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-from saiverse import judgment_points as jp
 from saiverse.buildings import Building
-from saiverse.day_plan import (
-    FACILITY_OWN_ROOM,
-    KIND_CREATE,
-    KIND_EXPERIENCE,
-    KIND_LEARN,
-    KIND_LISTEN,
-    KIND_LIVING,
-    KIND_REST,
-    KIND_SELF_UPDATE,
-    KIND_TALK,
-)
 from saiverse.facility_map import (
-    FACILITY_ROLE_VOCAB,
-    KIND_TO_ROLE,
-    ROLE_LIBRARY,
+    FACILITY_OWN_ROOM,
     building_roles,
-    buildings_for_role,
+    candidate_buildings,
     list_tagged_buildings,
-    resolve_facility,
 )
 
 
@@ -56,66 +41,6 @@ TAGGED = [
 
 
 # ---------------------------------------------------------------------------
-# resolve_facility: 型別解決
-# ---------------------------------------------------------------------------
-
-
-def test_resolve_facility_by_kind():
-    manager = _manager(TAGGED)
-    assert resolve_facility(manager, KIND_TALK) == "cafe"
-    assert resolve_facility(manager, KIND_LISTEN) == "cafe"  # 話す/聞く は同じ広場
-    assert resolve_facility(manager, KIND_CREATE) == "atelier"
-    assert resolve_facility(manager, KIND_LEARN) == "archive"
-    assert resolve_facility(manager, KIND_EXPERIENCE) == "green"
-
-
-def test_self_update_always_resolves_to_own_room():
-    # タグ付き Building がゼロでも own_room (私的な営みは Building タグで表現しない)
-    assert resolve_facility(_manager([]), KIND_SELF_UPDATE) == FACILITY_OWN_ROOM
-    assert resolve_facility(_manager(TAGGED), KIND_SELF_UPDATE) == FACILITY_OWN_ROOM
-
-
-def test_resolve_facility_none_when_role_untagged():
-    # park タグの Building が無い → 経験する は None (呼び出し側が own_room フォールバック)
-    manager = _manager([_b("archive", ["library"])])
-    assert resolve_facility(manager, KIND_EXPERIENCE) is None
-    assert resolve_facility(manager, KIND_CREATE) is None
-    assert resolve_facility(manager, KIND_LEARN) == "archive"
-
-
-def test_resolve_facility_non_six_kind_returns_none():
-    manager = _manager(TAGGED)
-    assert resolve_facility(manager, KIND_LIVING) is None
-    assert resolve_facility(manager, KIND_REST) is None
-    assert resolve_facility(manager, "未知の型") is None
-
-
-def test_resolve_facility_deterministic_first_by_building_id():
-    manager = _manager([
-        _b("lib_b", ["library"]),
-        _b("lib_a", ["library"]),
-        _b("lib_c", ["library"]),
-    ])
-    # manager.buildings の並び順に依らず building_id 昇順の先頭
-    assert resolve_facility(manager, KIND_LEARN) == "lib_a"
-
-
-def test_multi_role_building_serves_multiple_kinds():
-    manager = _manager([_b("commons", ["plaza", "park"])])
-    assert resolve_facility(manager, KIND_TALK) == "commons"
-    assert resolve_facility(manager, KIND_EXPERIENCE) == "commons"
-    assert resolve_facility(manager, KIND_CREATE) is None
-
-
-def test_kind_to_role_covers_five_kinds_with_known_vocab():
-    # 自分を更新する 以外の五型が語彙内のロールへ対応する
-    assert set(KIND_TO_ROLE) == {
-        KIND_TALK, KIND_LISTEN, KIND_CREATE, KIND_LEARN, KIND_EXPERIENCE,
-    }
-    assert set(KIND_TO_ROLE.values()) <= set(FACILITY_ROLE_VOCAB)
-
-
-# ---------------------------------------------------------------------------
 # building_roles / list_tagged_buildings の頑健性
 # ---------------------------------------------------------------------------
 
@@ -133,36 +58,34 @@ def test_list_tagged_and_role_filter_sorted():
         _b("plain"),
     ])
     assert [b.building_id for b in list_tagged_buildings(manager)] == ["a_plaza", "z_plaza"]
-    assert buildings_for_role(manager, ROLE_LIBRARY) == []
 
 
 # ---------------------------------------------------------------------------
-# collect_facility_ids: タグ優先 + タグ無し DB フォールバック (後方互換)
+# candidate_buildings: タグ優先 + タグ無し DB フォールバック (後方互換)
 # ---------------------------------------------------------------------------
 
 
-def test_collect_facility_ids_prefers_tagged_buildings():
+def test_candidate_buildings_prefers_tagged_buildings():
     manager = _manager(TAGGED)
-    ids = jp.collect_facility_ids(manager)
-    # タグ付きのみ (building_id 昇順) + own_room。タグ無し 'plain' は載らない
-    assert ids == ["archive", "atelier", "cafe", "green", FACILITY_OWN_ROOM]
+    ids = [b.building_id for b in candidate_buildings(manager)]
+    # タグ付きのみ (building_id 昇順)。タグ無し 'plain' は載らない
+    assert ids == ["archive", "atelier", "cafe", "green"]
 
 
-def test_collect_facility_ids_falls_back_to_all_when_untagged():
+def test_candidate_buildings_falls_back_to_all_when_untagged():
     # まだ誰もタグ付けしていない DB では従来どおり全 Building を提示する
     manager = _manager([
         SimpleNamespace(building_id="library", name="図書館"),  # facility_roles 属性なし
         _b("workshop", []),
     ])
-    assert jp.collect_facility_ids(manager) == ["library", "workshop", FACILITY_OWN_ROOM]
+    assert [b.building_id for b in candidate_buildings(manager)] == ["library", "workshop"]
 
 
 def test_head_facilities_section_matches_enum_and_labels_roles():
-    """head の「行ける場所」が enum (collect_facility_ids) と同じ候補集合を出す。
+    """head の「行ける場所」が candidate_buildings の候補集合 + own_room を出す。
 
     一覧は 2026-07-30 に判断プロンプトの tail から head へ移設した
-    (docs/issues/judgment_static_lists_to_head.md)。読む情報 (head) と
-    選べる選択肢 (enum) が同じ集合を見ることが移設の前提条件。
+    (docs/issues/judgment_static_lists_to_head.md)。
     """
     from sea.head_pipeline.sections.facilities import FacilitiesSection
 
@@ -172,13 +95,15 @@ def test_head_facilities_section_matches_enum_and_labels_roles():
     text = section.render(section.capture(ctx)).text
     assert "- archive: 図書館（図書館）" in text
     assert "- cafe: カフェ（広場）" in text
-    assert "plain" not in text  # enum と同じ候補集合 (タグ無しは載らない)
+    assert "plain" not in text  # 候補集合 (タグ無しは載らない)
     assert f"- {FACILITY_OWN_ROOM}: 自分の部屋" in text
-    # 一覧に出る id の集合が enum と一致する
+    # 一覧に出る id の集合が候補集合 + own_room と一致する
     listed = [
         line[2:].split(":")[0] for line in text.splitlines() if line.startswith("- ")
     ]
-    assert listed == jp.collect_facility_ids(manager)
+    assert listed == [
+        b.building_id for b in candidate_buildings(manager)
+    ] + [FACILITY_OWN_ROOM]
 
     untagged = _manager([SimpleNamespace(building_id="b1", name="部屋")])
     text2 = section.render(

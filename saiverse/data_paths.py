@@ -61,7 +61,6 @@ DATABASE_DIR = "database"
 PROMPTS_DIR = "prompts"
 ICONS_DIR = "icons"
 FEEDS_DIR = "feeds"
-SLOT_KINDS_DIR = "slot_kinds"
 
 
 def get_data_paths(subdir: str) -> list[Path]:
@@ -364,7 +363,7 @@ def get_user_database_dir() -> Path:
 
 def ensure_user_data_dirs() -> None:
     """Ensure all user_data subdirectories exist."""
-    for subdir in [TOOLS_DIR, PHENOMENA_DIR, PLAYBOOKS_DIR, MODELS_DIR, PROVIDERS_DIR, DATABASE_DIR, PROMPTS_DIR, ICONS_DIR, FEEDS_DIR, SLOT_KINDS_DIR]:
+    for subdir in [TOOLS_DIR, PHENOMENA_DIR, PLAYBOOKS_DIR, MODELS_DIR, PROVIDERS_DIR, DATABASE_DIR, PROMPTS_DIR, ICONS_DIR, FEEDS_DIR]:
         (USER_DATA_DIR / subdir).mkdir(parents=True, exist_ok=True)
 
 
@@ -487,7 +486,6 @@ __all__ = [
     "PROMPTS_DIR",
     "ICONS_DIR",
     "FEEDS_DIR",
-    "SLOT_KINDS_DIR",
     "get_saiverse_home",
     "get_data_paths",
     "get_all_data_paths",

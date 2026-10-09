@@ -249,8 +249,9 @@ class SAIVerseManager(
         # phenomena 系) は self.pulse_dispatcher 経由でイベントを発火させる。
         # 経路選択 (直接 / 熟慮) と実行先の振り分けはここで担う。
         # NOTE: 旧 SubLineScheduler (autonomous Track への 30 秒連続 Pulse) は
-        # 自律行動 v2 で廃止 (intent §9.3)。駆動は時間割のコマ発火
-        # (saiverse/day_plan.py) + 判断点 (saiverse/autonomy_wiring.py) が担う。
+        # 自律行動 v2 で廃止 (intent §9.3)。v2 の時間割のコマ発火も v0.4 段 1-4 で
+        # 撤去された。いまの自律の駆動は起床・就寝の帳簿処理と on_event 判断
+        # (saiverse/autonomy_wiring.py) だけ (ティックは v0.4 段 3)。
         self.pulse_dispatcher = PulseDispatcher(self)
         # NOTE: 旧 InternalAlertPoller (Track パラメータの閾値超過を 60 秒周期で
         # 判定し set_alert を撃つ機構 + Handler.tick() 拡張点) は Track 撤廃計画の
@@ -503,8 +504,8 @@ class SAIVerseManager(
         self.integration_manager.start()
 
         # NOTE: 旧 SubLineScheduler の起動は自律行動 v2 で廃止 (intent §9.3)。
-        # autonomous Track への 30 秒連続 Pulse は存在しない。自律駆動は
-        # 起床判断が編成する時間割のコマ発火 (EventScheduler 予約) が担う。
+        # autonomous Track への 30 秒連続 Pulse は存在しない (v2 の時間割の
+        # コマ発火も v0.4 段 1-4 で撤去済み)。
 
         # EventScheduler dispatcher loop。以降、push される予約 (TTL 接近 / interval /
         # schedule / db_polling / 会話の沈黙タイマー / SDS heartbeat 等) が発火する。
@@ -1208,28 +1209,8 @@ class SAIVerseManager(
                 "timeout: %s", persona_id,
             )
 
-        # 4. (自律行動 v2) 当日 day_plan のコマ予約を再確立 (冪等)。
-        #    コマの EventScheduler 予約はインメモリで、再起動で失われる。
-        #    自律 ON なペルソナの pending / deferred コマを同 key で再 push する
-        #    (同 key 上書きなので二重発火しない。過去時刻は即時扱い —
-        #    起床済みの一日を再起動後に続きから駆動する)。自律 OFF のペルソナは
-        #    再開 (自律 ON 化) 後の watchdog が拾う。
-        #    判定は autonomy_wiring.is_autonomy_on 一本 (AUTONOMY_ENABLED)。
-        try:
-            from saiverse.autonomy_wiring import is_autonomy_on
-
-            if is_autonomy_on(self, persona_id):
-                from saiverse.day_plan import reschedule_pending_slots
-
-                # downtime_recovery: ここはプロセス起動時の再確立 — サーバーが
-                # 落ちていた間に開始時刻を過ぎたコマは遅延実行せず「流れた」に
-                # 確定する (起床判断の途中起動と同じ意味論。Codex 一巡目 #2)。
-                reschedule_pending_slots(self, persona_id, downtime_recovery=True)
-        except Exception:
-            logging.exception(
-                "[on_persona_registered] Failed to reschedule day-plan slots: %s",
-                persona_id,
-            )
+        # 4. (欠番) v2 の時間割のコマ予約の再確立は、時間割の撤去
+        #    (autonomous_behavior_v04_plan.md 段 1-4) で消えた。
 
         # 5. (P3c①) Note → テーマノードページ移行 (main DB → per-persona
         #    memory.db)。ペルソナ単位の扇形移行で、呼ばれるたびにそのペルソナの

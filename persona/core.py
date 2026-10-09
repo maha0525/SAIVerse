@@ -22,7 +22,6 @@ from persona.constants import (
     RECALL_SNIPPET_PULSE_MAX_CHARS,
 )
 from persona.history import initialise_pulse_state
-from persona.tasks import PersonaTaskStore
 from persona.mixins import (
     PersonaGenerationMixin,
     PersonaHistoryMixin,
@@ -102,9 +101,9 @@ class PersonaCore(
         self.conscious_log_path = (
             self.saiverse_home / "personas" / self.persona_id / "conscious_log.json"
         )
-        # Task は統合 persona_task テーブル (main DB) へ一本化された。PersonaTaskStore は
-        # 旧 TaskStorage 互換 API を持つアダプタ (unified_task_model.md §5 step 4b)。
-        self.task_storage = PersonaTaskStore(self.persona_id)
+        # 旧 task_storage (persona_task = 目的の木を読む PersonaTaskStore) は、
+        # 目的の木の読み手の撤去 (autonomous_behavior_v04_plan.md 段 1-4) で消えた。
+        # 「やること」の器はタスク帳 (saiverse/task_book.py)。
         self.building_memory_paths: Dict[str, Path] = {
             b_id: self.saiverse_home / "buildings" / b_id / "log.json"
             for b_id in self.buildings

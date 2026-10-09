@@ -25,7 +25,8 @@ addon 由来のポーリング (X 監視等) は本 Phase ではスコープ外�
 - 時刻の読み出しは ``saiverse.clock.now()`` に一元化 (実モードでは挙動不変)
 - 仮想モード中は dispatch スレッドが発火せず、同期駆動 API
   (``next_fire_time`` / ``run_due``) のみが実行経路になる。
-  DES ドライバは ``saiverse.day_simulator.DaySimulator`` を参照。
+  旧 DES ドライバ (``saiverse.day_simulator``) は v0.4 段 1-4 で撤去 (ティック用の
+  早回しは段 3 で作り直す)。
 """
 from __future__ import annotations
 

@@ -1,11 +1,8 @@
-"""仮想クロック + EventScheduler シム駆動 + DaySimulator のテスト (自律行動 v2 §12)。
+"""仮想クロック + EventScheduler シム駆動のテスト (自律行動 v2 §12)。
 
 検証項目:
 - clock: 実モード/仮想モードの切替、advance_to の後退拒否、スレッドセーフの基本
 - EventScheduler.run_due / next_fire_time: 仮想モードでの同期駆動
-- DaySimulator: 複数イベントが期限順に、callback から見た clock.now() が
-  それぞれの仮想時刻で実行されること (実時間 1 秒未満)
-- callback 内から次イベントを push する連鎖 (時間割 → 就寝)
 - 仮想モード中は dispatch スレッドが発火しないこと
 - 実モードの既存挙動が壊れていないこと (最小スモーク; 全量は test_event_scheduler.py)
 """
@@ -17,7 +14,6 @@ import unittest
 from datetime import datetime, timedelta
 
 from saiverse import clock
-from saiverse.day_simulator import DaySimulator
 from saiverse.event_scheduler import EventScheduler
 
 
@@ -172,109 +168,6 @@ class EventSchedulerVirtualDriveTest(unittest.TestCase):
             self.assertTrue(fired.is_set())
         finally:
             scheduler.stop()
-
-
-class DaySimulatorTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.scheduler = EventScheduler()
-
-    def tearDown(self) -> None:
-        clock.disable_virtual()
-
-    def test_three_events_fire_in_order_at_virtual_times(self) -> None:
-        """9:00/12:00/21:00 が順に、callback から見た clock.now() が各仮想時刻で実行される。"""
-        base = datetime(2026, 7, 4, 0, 0, 0)
-        seen: list[tuple[str, datetime]] = []
-
-        def make_cb(name: str):
-            return lambda: seen.append((name, clock.now()))
-
-        self.scheduler.schedule(base + timedelta(hours=12), make_cb("noon"), key="noon")
-        self.scheduler.schedule(base + timedelta(hours=9), make_cb("morning"), key="morning")
-        self.scheduler.schedule(base + timedelta(hours=21), make_cb("night"), key="night")
-
-        wall_start = time.monotonic()
-        sim = DaySimulator(self.scheduler, start=base + timedelta(hours=8), end=base + timedelta(hours=24))
-        total = sim.run()
-        wall_elapsed = time.monotonic() - wall_start
-
-        self.assertEqual(total, 3)
-        self.assertEqual(
-            seen,
-            [
-                ("morning", base + timedelta(hours=9)),
-                ("noon", base + timedelta(hours=12)),
-                ("night", base + timedelta(hours=21)),
-            ],
-        )
-        # 終了時に end まで advance されている
-        self.assertEqual(clock.now(), base + timedelta(hours=24))
-        # 16 仮想時間が実時間 1 秒未満で完走する
-        self.assertLess(wall_elapsed, 1.0)
-
-    def test_chained_schedule_from_callback(self) -> None:
-        """時間割 → 就寝のような、callback 内から未来イベントを push する連鎖。"""
-        base = datetime(2026, 7, 4, 0, 0, 0)
-        seen: list[tuple[str, datetime]] = []
-
-        def bedtime() -> None:
-            seen.append(("bedtime", clock.now()))
-
-        def timetable() -> None:
-            seen.append(("timetable", clock.now()))
-            # 時間割が就寝 (21:00) を決めて push する
-            self.scheduler.schedule(base + timedelta(hours=21), bedtime, key="bedtime")
-
-        self.scheduler.schedule(base + timedelta(hours=9), timetable, key="timetable")
-
-        sim = DaySimulator(self.scheduler, start=base + timedelta(hours=8), end=base + timedelta(hours=24))
-        total = sim.run()
-
-        self.assertEqual(total, 2)
-        self.assertEqual(
-            seen,
-            [
-                ("timetable", base + timedelta(hours=9)),
-                ("bedtime", base + timedelta(hours=21)),
-            ],
-        )
-
-    def test_events_beyond_end_are_not_executed(self) -> None:
-        base = datetime(2026, 7, 4, 0, 0, 0)
-        fired: list[str] = []
-        self.scheduler.schedule(base + timedelta(hours=9), lambda: fired.append("in"), key="in")
-        self.scheduler.schedule(base + timedelta(hours=30), lambda: fired.append("out"), key="out")
-
-        sim = DaySimulator(self.scheduler, start=base + timedelta(hours=8), end=base + timedelta(hours=24))
-        total = sim.run()
-
-        self.assertEqual(total, 1)
-        self.assertEqual(fired, ["in"])
-        self.assertTrue(self.scheduler.has_key("out"))
-        self.assertEqual(clock.now(), base + timedelta(hours=24))
-
-    def test_empty_queue_advances_to_end(self) -> None:
-        base = datetime(2026, 7, 4, 8, 0, 0)
-        sim = DaySimulator(self.scheduler, start=base, end=base + timedelta(hours=16))
-        total = sim.run()
-        self.assertEqual(total, 0)
-        self.assertEqual(clock.now(), base + timedelta(hours=16))
-
-    def test_overdue_at_start_runs_at_start_time(self) -> None:
-        """start 以前が期限のイベントは start 時刻で実行される (時計は後退しない)。"""
-        base = datetime(2026, 7, 4, 8, 0, 0)
-        seen: list[datetime] = []
-        self.scheduler.schedule(base - timedelta(hours=1), lambda: seen.append(clock.now()), key="overdue")
-
-        sim = DaySimulator(self.scheduler, start=base, end=base + timedelta(hours=1))
-        total = sim.run()
-        self.assertEqual(total, 1)
-        self.assertEqual(seen, [base])
-
-    def test_end_before_start_raises(self) -> None:
-        base = datetime(2026, 7, 4, 8, 0, 0)
-        with self.assertRaises(ValueError):
-            DaySimulator(self.scheduler, start=base, end=base - timedelta(hours=1))
 
 
 class RealModeSmokeTest(unittest.TestCase):

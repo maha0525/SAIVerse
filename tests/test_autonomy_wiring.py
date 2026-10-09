@@ -1,22 +1,21 @@
-"""自律行動 v2 の本番配線 (saiverse/autonomy_wiring.py) のテスト。
+"""自律行動の本番配線 (saiverse/autonomy_wiring.py) のテスト。
 
 活性化配線の検証項目:
 
 - fire_judgment_point: 自律 ON ゲート / Playbook 欠如の WARNING スキップ /
-  precondition (Lock 下の再評価)
+  precondition (Lock 下の再評価) / 実行台帳の重複抑止 (on_event — 残る唯一の
+  判断点)
 - ScheduleManager の経路分岐: 起床・就寝の行は機械の帳簿処理
-  (day_plan.handle_scheduled_life_boundary) へ、その他の判断点名の行は
-  handle_scheduled_judgment の拒否へ (v04 段 1-2)
-- handle_wait_response_timeout / handle_conversation_end: 会話終了 →
-  会話の出来事を閉じる帳簿処理 / social Track は WARNING のみ
+  (day_plan.handle_scheduled_life_boundary) へ、判断点の名前空間の行は
+  handle_scheduled_judgment の拒否へ (v04 段 1-2 / 1-4)
+- handle_conversation_end: 会話終了 → 会話状態を落とす帳簿処理
   (会話終了判断は autonomous_behavior_v3.md §8/§13.3 で退役)
 - handle_external_event: on_event 判断の経路判断基準 (自律 ON / 会話中 /
   engage_now の応対起動 / フォールバック)
 - watchdog_tick: 正常時 no-op / 当日のライフ欠如時のみ起床の帳簿処理を
-  再発火 / コマ予約の途絶検知
+  再発火 (時間割のコマ予約の見張りは段 1-4 で撤去)
 - 旧経路の停止: pulse_scheduler モジュールと dispatch_subline_poll の不在、
   dispatch_autonomy_tick の watchdog 縮退
-- 本番プロセス (EventScheduler dispatch スレッド) でコマが発火すること
 """
 from __future__ import annotations
 
@@ -173,6 +172,33 @@ def _add_day_schedule(session_factory, playbook_name, time_of_day,
         db.close()
 
 
+def _write_legacy_lives(session_factory, plan_date, lives) -> None:
+    """旧置き場 persona_day_plan.meta_json.lives を直接書く (旧データの再現)。
+
+    時間割の書き手は段 1-4 で撤去したので、互換読みの検証用に行を直接作る。
+    """
+    import json as _json
+
+    from database.models import PersonaDayPlan
+
+    now = datetime(2026, 7, 4, 6, 0, 0)
+    db = session_factory()
+    try:
+        db.add(PersonaDayPlan(
+            persona_id=PERSONA_ID, plan_date=plan_date, slots_json="[]",
+            meta_json=_json.dumps({day_plan.META_LIVES: lives}),
+            created_at=now, updated_at=now,
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+
+#: fire_judgment_point の検査で撃つ判断点 (残る唯一の判断点 on_event)。同じ
+#: 刺激の ID なので、冪等キーも同じになる。
+_EVENT = {"event_text": "来客", "stimulus_id": "test:stimulus:1"}
+
+
 # ---------------------------------------------------------------------------
 # fire_judgment_point: 本番ゲート
 # ---------------------------------------------------------------------------
@@ -180,7 +206,7 @@ def _add_day_schedule(session_factory, playbook_name, time_of_day,
 
 def test_fire_judgment_point_skips_non_active_persona(session_factory):
     manager, _ = _make_manager(session_factory, active=False)
-    result = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
+    result = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
     assert result["submitted"] is False
     assert result["reason"] == "persona autonomy disabled"
     assert manager.pulse_controller.calls == []
@@ -189,7 +215,7 @@ def test_fire_judgment_point_skips_non_active_persona(session_factory):
 def test_fire_judgment_point_skips_when_playbook_missing(session_factory, caplog):
     manager, _ = _make_manager(session_factory, with_playbooks=False)
     with caplog.at_level("WARNING", logger="saiverse.autonomy_wiring"):
-        result = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
+        result = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
     assert result["submitted"] is False
     assert result["reason"] == "playbook not imported"
     assert manager.pulse_controller.calls == []
@@ -200,10 +226,10 @@ def test_fire_judgment_point_skips_when_playbook_missing(session_factory, caplog
 def test_fire_judgment_point_dispatches_when_gates_pass(session_factory):
     manager, _ = _make_manager(session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
-    result = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
+    result = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
     assert result["submitted"] is True
     assert [c["meta_playbook"] for c in manager.pulse_controller.calls] == [
-        "judgment_day_close",
+        "judgment_on_event",
     ]
     call = manager.pulse_controller.calls[0]
     assert call["persona_id"] == PERSONA_ID
@@ -215,7 +241,7 @@ def test_fire_judgment_point_dispatches_when_gates_pass(session_factory):
 def test_fire_judgment_point_precondition_rechecked(session_factory):
     manager, _ = _make_manager(session_factory)
     result = wiring.fire_judgment_point(
-        manager, PERSONA_ID, "day_close", precondition=lambda: False,
+        manager, PERSONA_ID, "on_event", _EVENT, precondition=lambda: False,
     )
     assert result["submitted"] is False
     assert result["reason"] == "precondition not met"
@@ -237,7 +263,7 @@ def test_fire_judgment_point_uses_meta_layer_lock(session_factory):
 
     manager.meta_layer = SimpleNamespace(_get_lock=lambda pid: _Lock())
     clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
-    result = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
+    result = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
     assert result["submitted"] is True
     assert acquired == ["enter", "exit"]
 
@@ -287,13 +313,12 @@ def _attach_finalizing_ledger(manager, session_factory):
     return ledger
 
 
-def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatch):
+def test_fire_on_event_dedup_without_then_with_precondition(session_factory, monkeypatch):
     """A2: 同じ冪等キーの判断点は 2 回目が duplicate になり submit は 1 回だけ。
 
     2 回目 (precondition 付き) は claim で duplicate になり、precondition の
-    評価に到達しない。判断点の汎用の重複抑止の検査で、day_open は乗り物として
-    使っている — v04 段 1-2 以降、本番で day_open をここへ撃つ経路は無く、
-    fire_judgment_point はライフ (確定・節目) に一切触れない。
+    評価に到達しない。冪等キーは刺激の ID から作られる。fire_judgment_point は
+    ライフ (確定・節目) に一切触れない。
     """
     manager, _ = _make_manager(session_factory)
     ledger = _attach_finalizing_ledger(manager, session_factory)
@@ -301,7 +326,7 @@ def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatc
     _add_day_schedule(session_factory, "judgment_day_open", "08:00")
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
 
-    first = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
+    first = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
     assert first["submitted"] is True
     assert first["execution_id"] is not None
     assert len(manager.pulse_controller.calls) == 1
@@ -317,7 +342,7 @@ def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatc
         return True
 
     second = wiring.fire_judgment_point(
-        manager, PERSONA_ID, "day_open", precondition=_precondition,
+        manager, PERSONA_ID, "on_event", _EVENT, precondition=_precondition,
     )
     assert second["submitted"] is False
     assert second["reason"] == f"duplicate:{XL.STATUS_APPLIED}"
@@ -327,19 +352,19 @@ def test_fire_day_open_dedup_scheduled_then_watchdog(session_factory, monkeypatc
     assert precondition_evals == []
 
 
-def test_fire_day_open_dedup_watchdog_then_scheduled(session_factory, monkeypatch):
+def test_fire_on_event_dedup_with_then_without_precondition(session_factory, monkeypatch):
     """A2: precondition 付き → 無しの逆順でも submit は 1 回だけ (汎用の重複抑止)。"""
     manager, _ = _make_manager(session_factory)
     _attach_finalizing_ledger(manager, session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
 
     first = wiring.fire_judgment_point(
-        manager, PERSONA_ID, "day_open", precondition=lambda: True,
+        manager, PERSONA_ID, "on_event", _EVENT, precondition=lambda: True,
     )
     assert first["submitted"] is True
     assert len(manager.pulse_controller.calls) == 1
 
-    second = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
+    second = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
     assert second["submitted"] is False
     assert second["reason"].startswith("duplicate:")
     assert len(manager.pulse_controller.calls) == 1
@@ -355,14 +380,14 @@ def test_fire_precondition_rejection_marks_failed_and_next_claim_runs(
     clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
 
     rejected = wiring.fire_judgment_point(
-        manager, PERSONA_ID, "day_open", precondition=lambda: False,
+        manager, PERSONA_ID, "on_event", _EVENT, precondition=lambda: False,
     )
     assert rejected["submitted"] is False
     assert rejected["reason"] == "precondition not met"
     assert ledger.get_execution(rejected["execution_id"])["status"] == XL.STATUS_FAILED
     assert manager.pulse_controller.calls == []
 
-    retried = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
+    retried = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
     assert retried["submitted"] is True
     assert retried["execution_id"] != rejected["execution_id"]
     assert len(manager.pulse_controller.calls) == 1
@@ -394,7 +419,7 @@ def test_fire_precondition_exit_does_not_break_a_running_winner(session_factory)
         return False
 
     result = wiring.fire_judgment_point(
-        manager, PERSONA_ID, "day_open", precondition=_steal_seat_then_reject,
+        manager, PERSONA_ID, "on_event", _EVENT, precondition=_steal_seat_then_reject,
     )
     assert result["submitted"] is False
     # 席を放棄できなかった = 結末不明 (呼び出し側は代替経路を走らせない)
@@ -409,9 +434,9 @@ def test_fire_force_bypasses_idempotency_key(session_factory):
     _attach_finalizing_ledger(manager, session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
 
-    first = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open")
+    first = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
     assert first["submitted"] is True
-    forced = wiring.fire_judgment_point(manager, PERSONA_ID, "day_open", force=True)
+    forced = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT, force=True)
     assert forced["submitted"] is True
     assert forced["execution_id"] != first["execution_id"]
     assert len(manager.pulse_controller.calls) == 2
@@ -423,8 +448,8 @@ def test_fire_without_ledger_degrades_with_single_warning(session_factory, caplo
     manager, _ = _make_manager(session_factory)
     clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
     with caplog.at_level("WARNING", logger="saiverse.autonomy_wiring"):
-        r1 = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
-        r2 = wiring.fire_judgment_point(manager, PERSONA_ID, "day_close")
+        r1 = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
+        r2 = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
     assert r1["submitted"] is True
     assert r2["submitted"] is True  # 台帳なし = dedup も無し (従来挙動)
     assert r1["execution_id"] is None
@@ -437,10 +462,10 @@ def test_fire_without_ledger_degrades_with_single_warning(session_factory, caplo
 # ---------------------------------------------------------------------------
 
 
-def test_scheduled_judgment_refuses_wake_and_close_names(session_factory, monkeypatch, caplog):
-    """起床・就寝の Playbook 名が判断点の入口へ届いたら、LLM の判断へ流さず
-    WARNING で拒否する (v04 段 1-2)。本番では ScheduleManager が先に機械の
-    帳簿処理へ振り分けるので、ここへ届くのは配線ミスだけ。"""
+def test_scheduled_judgment_refuses_retired_judgment_names(session_factory, monkeypatch, caplog):
+    """退役した判断点の名前 (起床・就寝・セッション終了) が拒否口へ届いても、
+    LLM の判断へ流さず WARNING で拒否する (v04 段 1-4)。起床・就寝の行は本番では
+    ScheduleManager が先に機械の帳簿処理へ振り分ける。"""
     manager, _ = _make_manager(session_factory)
     fired: List[Any] = []
     monkeypatch.setattr(
@@ -449,15 +474,17 @@ def test_scheduled_judgment_refuses_wake_and_close_names(session_factory, monkey
         or {"submitted": True},
     )
     with caplog.at_level("WARNING", logger="saiverse.autonomy_wiring"):
-        for name in ("judgment_day_open", "judgment_day_close"):
+        for name in (
+            "judgment_day_open", "judgment_day_close", "judgment_post_session",
+        ):
             result = wiring.handle_scheduled_judgment(
                 manager, PERSONA_ID, name, params={"daily_budget_pulses": 24},
             )
             assert result["submitted"] is False
-            assert result["reason"] == wiring.REASON_LIFE_BOUNDARY_MACHINE_ONLY
+            assert result["reason"] == "not a judgment playbook"
     assert fired == []
     assert manager.pulse_controller.calls == []
-    assert sum("machine-only" in m for m in caplog.messages) == 2
+    assert sum("retired or unknown" in m for m in caplog.messages) == 3
 
 
 def test_life_settings_from_params_picks_only_life_settings():
@@ -479,7 +506,7 @@ def test_scheduled_judgment_rejects_non_schedulable_kind(session_factory, caplog
     manager, _ = _make_manager(session_factory)
     with caplog.at_level("WARNING", logger="saiverse.autonomy_wiring"):
         result = wiring.handle_scheduled_judgment(
-            manager, PERSONA_ID, "judgment_post_session",
+            manager, PERSONA_ID, "judgment_on_event",
         )
     assert result["submitted"] is False
     assert result["reason"] == "kind not schedulable"
@@ -571,16 +598,21 @@ def test_schedule_manager_life_bookkeeping_failure_is_retryable(
 def test_schedule_manager_routes_other_judgment_names_to_the_refusal(
     session_factory, monkeypatch,
 ):
-    """起床・就寝以外の判断点 Playbook 名の行は拒否口へ流れ、settled_skip
-    (前進・再試行なし) になる。"""
+    """起床・就寝以外の判断点 Playbook の名前空間の行は拒否口へ流れ、
+    settled_skip (前進・再試行なし) になる。退役した名前 (judgment_post_session)
+    も汎用経路へ流さない — 流すと「Playbook が無い」失敗の再試行を繰り返す。"""
     from saiverse.schedule_manager import ScheduleManager
 
     manager, _ = _make_manager(session_factory)
     sm = ScheduleManager(saiverse_manager=manager)
     outcome = sm._execute_schedule(
-        _routing_schedule(3, "judgment_post_session", "08:00"), session=None,
+        _routing_schedule(3, "judgment_on_event", "08:00"), session=None,
     )
     assert outcome == ("settled_skip", "kind not schedulable")
+    retired = sm._execute_schedule(
+        _routing_schedule(4, "judgment_post_session", "08:00"), session=None,
+    )
+    assert retired == ("settled_skip", "not a judgment playbook")
     assert manager.pulse_controller.calls == []
 
 
@@ -1385,15 +1417,14 @@ def test_watchdog_refires_life_start_when_today_has_no_life(session_factory, mon
     assert calls == [("start", {"daily_budget_pulses": 16})]
 
 
-def test_watchdog_does_not_refire_once_the_life_is_confirmed_even_without_slots(
+def test_watchdog_does_not_refire_once_the_life_is_confirmed(
     session_factory, monkeypatch,
 ):
-    """ライフが確定済みなら、時間割のコマが 0 件でも撃ち直さない。
+    """ライフが確定済みなら撃ち直さない。
 
     旧 watchdog は「コマが無い」で day_open (時間割を編成する LLM 判断) を
     撃ち直していた (2026-07-14 実機の教訓)。v04 段 1-2 で watchdog が撃つのは
-    起床の帳簿処理だけになり、見る条件も「ライフが確定しているか」になった —
-    時間割の編成は watchdog の仕事ではない。"""
+    起床の帳簿処理だけになり、見る条件も「ライフが確定しているか」になった。"""
     manager, _ = _make_manager(session_factory)
     _add_day_schedule(session_factory, "judgment_day_open", "08:00")
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
@@ -1403,7 +1434,6 @@ def test_watchdog_does_not_refire_once_the_life_is_confirmed_even_without_slots(
         manager, PERSONA_ID, PLAN_DATE, "08:00", "22:00",
         requested_budget_pulses=10,
     )
-    assert day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE) is None
 
     calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
@@ -1466,102 +1496,6 @@ def test_watchdog_respects_days_of_week(session_factory, monkeypatch):
     assert calls == []
 
 
-def test_watchdog_noop_when_plan_and_reservations_intact(session_factory, monkeypatch):
-    manager, _ = _make_manager(session_factory)
-    _add_day_schedule(session_factory, "judgment_day_open", "08:00")
-    clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "11:00", "kind": "自室で過ごす", "ref": "none",
-         "facility": "own_room", "budget_rounds": 0, "note": ""},
-    ])
-    day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    calls = _fake_life_start(monkeypatch)
-    out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out == {"action": "none"}
-    assert calls == []
-
-
-def test_watchdog_reschedules_lost_slot_reservations(session_factory, monkeypatch):
-    manager, _ = _make_manager(session_factory)
-    _add_day_schedule(session_factory, "judgment_day_open", "08:00")
-    clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:30", "kind": "自室で過ごす", "ref": "none",
-         "facility": "own_room", "budget_rounds": 0, "note": "",
-         "status": "done"},
-        {"start": "11:00", "kind": "自室で過ごす", "ref": "none",
-         "facility": "own_room", "budget_rounds": 0, "note": ""},
-    ])
-    # 予約を積んでいない (= 再起動で失われた状態)。done コマは対象外。
-    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, PLAN_DATE) == [1]
-
-    rescheduled: List[str] = []
-    monkeypatch.setattr(
-        day_plan, "reschedule_pending_slots",
-        lambda mgr, pid, plan_d=None, **kw: rescheduled.append(pid) or 1,
-    )
-    out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out["action"] == "reschedule"
-    assert out["lost"] == [1]
-    assert rescheduled == [PERSONA_ID]
-
-
-# ---------------------------------------------------------------------------
-# post_session の恒久配線 (day_plan 組み込みハンドラ)
-# ---------------------------------------------------------------------------
-
-
-def test_builtin_worker_slot_handler_fires_post_session(session_factory, monkeypatch):
-    manager, _ = _make_manager(session_factory)
-    session_result = SimpleNamespace(
-        digest="やった", artifacts=["item-1"], rounds_used=3,
-        ended_reason="finished", task_ref="task:1",
-    )
-    monkeypatch.setattr(
-        day_plan, "run_worker_slot_session",
-        lambda mgr, pid, date_str, slot, index: session_result,
-    )
-    fired: List[Any] = []
-    monkeypatch.setattr(
-        wiring, "fire_judgment_point",
-        lambda mgr, pid, kind, context=None, **kw: fired.append((kind, context))
-        or {"submitted": True},
-    )
-    slot = {"start": "10:00", "kind": "随筆を書く", "ref": "task:1",
-            "facility": "own_room", "budget_rounds": 5, "note": ""}
-    used = day_plan._handle_worker_slot(manager, PERSONA_ID, PLAN_DATE, slot, 0)
-
-    assert used == 3
-    assert len(fired) == 1
-    kind, context = fired[0]
-    assert kind == "post_session"
-    assert context["session_result"] is session_result
-    assert context["task_ref"] == "task:1"
-    assert context["budget_rounds"] == 5
-
-
-def test_builtin_worker_slot_handler_survives_judgment_failure(
-    session_factory, monkeypatch,
-):
-    """判断の失敗はコマの帳簿 (rounds 返却) を壊さない。"""
-    manager, _ = _make_manager(session_factory)
-    session_result = SimpleNamespace(
-        digest="", artifacts=[], rounds_used=2, ended_reason="finished",
-        task_ref=None,
-    )
-    monkeypatch.setattr(
-        day_plan, "run_worker_slot_session",
-        lambda *a, **kw: session_result,
-    )
-
-    def _boom(*a, **kw):
-        raise RuntimeError("judgment down")
-
-    monkeypatch.setattr(wiring, "fire_judgment_point", _boom)
-    slot = {"start": "10:00", "kind": "調べる", "ref": "none",
-            "facility": "own_room", "budget_rounds": 3, "note": ""}
-    used = day_plan._handle_worker_slot(manager, PERSONA_ID, PLAN_DATE, slot, 0)
-    assert used == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1651,57 +1585,6 @@ def test_adapter_has_assistant_message_since(tmp_path, monkeypatch):
             adapter.close()
 
 
-# ---------------------------------------------------------------------------
-# 本番プロセスでのコマ発火 (EventScheduler dispatch スレッド)
-# ---------------------------------------------------------------------------
-
-
-def test_slots_fire_on_real_dispatch_thread(session_factory, monkeypatch):
-    """day_plan の予約はシム専用ではない — 実時刻の dispatch スレッドで発火する。"""
-    # 発火の完了は DB を覗かずに知る。session_factory は全スレッドで一本の接続を
-    # 共有する (StaticPool) ため、dispatch スレッドの書き込み中に主スレッドが
-    # 読んで Session を閉じると、その返却時の ROLLBACK が dispatch スレッドの
-    # 未確定の予約 tx を巻き戻す — 旧実装の 20 秒ポーリングは、この巻き戻しで
-    # コマが done に届かず、並列のフルスイートで間欠的に落ちていた
-    # (2026-10-05 に特定。2026-07-07 に観測した「load_day_plan が一瞬 None」も
-    # 同じ共有接続の同時使用から来ていた可能性が高い)。
-    # 本番は接続を共有しないので、これはテスト土台だけの現象。
-    fired = threading.Event()
-    real_fire = day_plan._fire_slot_by_id
-
-    def _fire_and_signal(*args, **kwargs):
-        try:
-            return real_fire(*args, **kwargs)
-        finally:
-            fired.set()
-
-    # _push_slot の callback は呼び出し時にモジュール属性を引くので、差し替えが効く
-    monkeypatch.setattr(day_plan, "_fire_slot_by_id", _fire_and_signal)
-
-    manager, _ = _make_manager(session_factory)
-    _attach_ledger(manager, session_factory)  # コマ発火は台帳経路一本
-    today = datetime.now().date().isoformat()
-    past = (datetime.now()).strftime("%H:%M")  # 過去/現在時刻 → 即時発火
-    day_plan.save_day_plan(manager, PERSONA_ID, today, [
-        {"start": past, "kind": "自室で過ごす", "ref": "none",
-         "facility": "own_room", "budget_rounds": 0, "note": ""},
-    ])
-    pushed = day_plan.schedule_day_plan(manager, PERSONA_ID, today)
-    assert pushed == 1
-
-    manager.event_scheduler.start()
-    try:
-        # 通常 1 秒未満で発火し終わる。上限は発火しない故障を待ち続けないための
-        # もので、負荷で発火が遅れても完了の合図を待つだけなので落ちない。
-        assert fired.wait(timeout=60.0), "slot never fired on dispatch thread"
-    finally:
-        manager.event_scheduler.stop()
-    # dispatch スレッドが止まってから読む (共有接続を同時に触らない)
-    slots = day_plan.load_day_plan(manager, PERSONA_ID, today)
-    assert slots, "day plan unreadable after fire"
-    status = slots[0]["status"]
-    assert status == "done", f"slot did not fire on dispatch thread (status={status})"
-    assert slots[0]["record_level"] == day_plan.RECORD_LEVEL_PRESENCE_ONLY
 
 
 # ---------------------------------------------------------------------------
@@ -1781,7 +1664,7 @@ def test_in_waking_window_no_close():
 
 
 def test_watchdog_overnight_daytime_no_plan_refires(session_factory, monkeypatch):
-    """跨ぎリズムで昼間 (12:00) に plan が無い → day_open を再発火する。"""
+    """跨ぎリズムで昼間 (12:00) にライフが無い → 起床の帳簿処理を再発火する。"""
     manager, _ = _make_manager(session_factory)
     _add_day_schedule(
         session_factory, "judgment_day_open", "07:00",
@@ -1796,11 +1679,11 @@ def test_watchdog_overnight_daytime_no_plan_refires(session_factory, monkeypatch
 
 
 def test_watchdog_overnight_midnight_no_plan_does_not_refire(session_factory, monkeypatch):
-    """跨ぎリズムで深夜帯 (00:30) に plan が無い → 再発火しない (深夜制約)。"""
+    """跨ぎリズムで深夜帯 (00:30) にライフが無い → 再発火しない (深夜制約)。"""
     manager, _ = _make_manager(session_factory)
     _add_day_schedule(session_factory, "judgment_day_open", "07:00")
     _add_day_schedule(session_factory, "judgment_day_close", "01:00")
-    # 00:30 は深夜帯 (前日リズムの尻尾)。plan が無くても撃たない。
+    # 00:30 は深夜帯 (前日リズムの尻尾)。ライフが無くても撃たない。
     clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
     calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
@@ -1809,150 +1692,13 @@ def test_watchdog_overnight_midnight_no_plan_does_not_refire(session_factory, mo
     assert calls == []
 
 
-def test_watchdog_overnight_midnight_with_plan_reschedules(session_factory, monkeypatch):
-    """跨ぎリズムで深夜帯 (00:30)、前日 plan がある + 予約消失 → re-push する。"""
-    manager, _ = _make_manager(session_factory)
-    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
-    _add_day_schedule(session_factory, "judgment_day_close", "01:00")
-    # 2026-07-05 00:30 は 2026-07-04 の営業日の深夜帯
-    clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
-
-    # 前日 (営業日) の plan を保存
-    yesterday = "2026-07-04"
-    day_plan.save_day_plan(manager, PERSONA_ID, yesterday, [
-        {"start": "00:30", "kind": "自室で過ごす", "ref": "none",
-         "facility": "own_room", "budget_rounds": 0, "note": ""},
-    ])
-    # 予約は push していない (= 消失状態)
-    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, yesterday) == [0]
-
-    rescheduled: List[str] = []
-    monkeypatch.setattr(
-        day_plan, "reschedule_pending_slots",
-        lambda mgr, pid, plan_d=None, **kw: rescheduled.append(pid) or 1,
-    )
-    out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out["action"] == "reschedule"
-    assert rescheduled == [PERSONA_ID]
-
-
-def test_watchdog_watches_the_business_day_of_the_running_life(
-    session_factory, monkeypatch,
-):
-    """見張る営業日は確定ライフ基準 (Codex八巡目 #1)。
-
-    確定ライフ 7/4 20:00〜10:00 が 7/5 08:00 の時点でまだ続いているとき、現行
-    スケジュール (07:00〜22:00) で営業日を選ぶと 7/5 を見て「plan が無い」と
-    判定し、走っているライフの最中に day_open を撃ち直してしまう。正しくは
-    7/4 の plan の予約途絶を見張る。
-    """
-    manager, _ = _make_manager(session_factory)
-    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
-    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
-    clock.enable_virtual(datetime(2026, 7, 5, 8, 0, 0))
-
-    yesterday = "2026-07-04"
-    day_plan.save_lives(manager, PERSONA_ID, yesterday, [
-        {"start": "20:00", "end": "10:00", "budget_pulses": 20, "mode": "free"},
-    ])
-    day_plan.save_day_plan(manager, PERSONA_ID, yesterday, [
-        {"start": "09:00", "kind": "自室で過ごす", "ref": "none",
-         "facility": "own_room", "budget_rounds": 0, "note": ""},
-    ])
-    # 予約は push していない (= 再起動で消失した状態)
-    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, yesterday) == [0]
-
-    calls = _fake_life_start(monkeypatch)
-    rescheduled: List[Any] = []
-    monkeypatch.setattr(
-        day_plan, "reschedule_pending_slots",
-        lambda mgr, pid, plan_d=None, **kw: rescheduled.append((plan_d, kw)) or 1,
-    )
-    out = wiring.watchdog_tick(manager, PERSONA_ID)
-
-    assert out["action"] == "reschedule"
-    assert calls == []                              # day_open は撃たない
-    assert rescheduled == [(yesterday, {"wake": "20:00"})]
-
-
-def test_watchdog_still_watches_a_life_that_the_new_schedule_window_excludes(
-    session_factory, monkeypatch,
-):
-    """走っている確定ライフは現行設定の窓ゲートで遮断しない (Codex九巡目 #1)。
-
-    確定ライフ 7/4 23:00〜7/5 06:00 の最中に起床設定を 07:00〜22:00 へ変えると、
-    深夜 00:30 は新しい窓の外に落ちる。ここで tick を打ち切ると、7/4 の予約途絶は
-    **二度と**検出されない — 次に窓が開く 07:00 にはライフが終わっていて、解決器も
-    当日 (7/5) へ退くため。
-    """
-    manager, _ = _make_manager(session_factory)
-    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
-    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
-    clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
-    assert not wiring.in_waking_window("00:30", "07:00", "22:00")  # 現行設定では窓外
-
-    yesterday = "2026-07-04"
-    day_plan.save_lives(manager, PERSONA_ID, yesterday, [
-        {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
-    ])
-    day_plan.save_day_plan(manager, PERSONA_ID, yesterday, [
-        {"start": "01:00", "kind": "自室で過ごす", "ref": "none",
-         "facility": "own_room", "budget_rounds": 0, "note": ""},
-    ])
-    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, yesterday) == [0]
-
-    calls = _fake_life_start(monkeypatch)
-    rescheduled: List[Any] = []
-    monkeypatch.setattr(
-        day_plan, "reschedule_pending_slots",
-        lambda mgr, pid, plan_d=None, **kw: rescheduled.append((plan_d, kw)) or 1,
-    )
-    out = wiring.watchdog_tick(manager, PERSONA_ID)
-
-    assert out["action"] == "reschedule"
-    assert calls == []                              # day_open は撃たない
-    assert rescheduled == [(yesterday, {"wake": "23:00"})]
-
-
-def test_watchdog_really_repushes_the_running_lifes_slots(session_factory, monkeypatch):
-    """窓の外の走行中ライフでも、実物の再 push が EventScheduler まで届く。
-
-    上のゲート回帰は reschedule を lambda に差し替えているため、押した「つもり」で
-    緑になりうる (Codex十巡目 #3)。ここは差し替えずに通し、途絶が実際に解消する
-    ところまで見る。
-    """
-    manager, _ = _make_manager(session_factory)
-    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
-    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
-    clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
-
-    yesterday = "2026-07-04"
-    day_plan.save_lives(manager, PERSONA_ID, yesterday, [
-        {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
-    ])
-    day_plan.save_day_plan(manager, PERSONA_ID, yesterday, [
-        {"start": "01:00", "kind": "自室で過ごす", "ref": "none",
-         "facility": "own_room", "budget_rounds": 0, "note": ""},
-    ])
-    calls = _fake_life_start(monkeypatch)
-
-    out = wiring.watchdog_tick(manager, PERSONA_ID)
-
-    assert out == {"action": "reschedule", "pushed": 1, "lost": [0]}
-    assert calls == []
-    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, yesterday) == []
-    # 深夜帯コマは起点 23:00 基準で翌暦日 (7/5 01:00) に張られる
-    entry = list(manager.event_scheduler._entries_by_key.values())[0]
-    assert entry.fire_at_ts == datetime(2026, 7, 5, 1, 0, 0).timestamp()
-
-
 def test_watchdog_does_not_open_a_new_day_while_a_life_is_running(
     session_factory, monkeypatch,
 ):
     """走行中ライフの営業日に plan が無くても day_open は撃たない。
 
     ゲートを外した先で最も危険な並び — 前営業日のライフが続いている最中に
-    新しい一日を開くと、時間割が即発火する (Codex十巡目 #3)。
+    新しい一日を開くと、前のライフと新しいライフが重なる (Codex十巡目 #3)。
     """
     manager, _ = _make_manager(session_factory)
     _add_day_schedule(session_factory, "judgment_day_open", "07:00")
@@ -1961,14 +1707,13 @@ def test_watchdog_does_not_open_a_new_day_while_a_life_is_running(
     day_plan.save_lives(manager, PERSONA_ID, "2026-07-04", [
         {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
     ])
-    # 時間割は 1 コマも無い (編成が全滅した日)
     calls = _fake_life_start(monkeypatch)
 
     out = wiring.watchdog_tick(manager, PERSONA_ID)
 
     assert out["action"] == "none"
     # 走っているライフがある (= その営業日のライフは確定済み) ので撃ち直しの
-    # 判定そのものに入らない — コマ予約の見張りだけをして何もしない
+    # 判定そのものに入らない
     assert out == {"action": "none"}
     assert calls == []
 
@@ -1988,15 +1733,13 @@ def test_watchdog_ignores_the_weekday_gate_while_a_life_is_running(
     day_plan.save_lives(manager, PERSONA_ID, yesterday, [
         {"start": "20:00", "end": "10:00", "budget_pulses": 20, "mode": "free"},
     ])
-    day_plan.save_day_plan(manager, PERSONA_ID, yesterday, [
-        {"start": "09:00", "kind": "自室で過ごす", "ref": "none",
-         "facility": "own_room", "budget_rounds": 0, "note": ""},
-    ])
     calls = _fake_life_start(monkeypatch)
 
     out = wiring.watchdog_tick(manager, PERSONA_ID)
 
-    assert out["action"] == "reschedule"    # 旧: "not a scheduled day"
+    # 走っているライフがある = 確定済み。曜日ゲートの理由 ("not a scheduled
+    # day") も出さずに何もしない
+    assert out == {"action": "none"}
     assert calls == []
 
 
@@ -2008,12 +1751,10 @@ def test_watchdog_keeps_the_window_gate_for_a_zero_length_life(
     _add_day_schedule(session_factory, "judgment_day_open", "07:00")
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     clock.enable_virtual(datetime(2026, 7, 4, 23, 30, 0))   # 現行設定では窓外
-    day_plan.update_plan_meta(manager, PERSONA_ID, "2026-07-04", {
-        day_plan.META_LIVES: [
-            {"start": "07:00", "end": "07:00", "budget_pulses": 20, "mode": "free",
-             "used_pulses": 0, "used_rounds": 0, "judgment_pulses": 0},
-        ],
-    })
+    _write_legacy_lives(session_factory, "2026-07-04", [
+        {"start": "07:00", "end": "07:00", "budget_pulses": 20, "mode": "free",
+         "used_pulses": 0, "judgment_pulses": 0},
+    ])
     calls = _fake_life_start(monkeypatch)
 
     out = wiring.watchdog_tick(manager, PERSONA_ID)
@@ -2054,8 +1795,8 @@ def test_watchdog_skips_the_tick_when_lives_are_unreadable(
 ):
     """ライフを読めない tick は何もしない (Codex八巡目 #2)。
 
-    どの営業日を見ているか分からないまま plan の有無を判定すると、day_open の
-    撃ち直しにも予約の再 push にも化けうる。次の tick へ委ねる。
+    どの営業日を見ているか分からないままライフの有無を判定すると、起床の
+    撃ち直しに化けうる。次の tick へ委ねる。
     """
     manager, _ = _make_manager(session_factory)
     _add_day_schedule(session_factory, "judgment_day_open", "07:00")
@@ -2070,117 +1811,8 @@ def test_watchdog_skips_the_tick_when_lives_are_unreadable(
     assert calls == []
 
 
-def test_watchdog_recovers_the_slots_that_unreadable_lives_left_unscheduled(
-    session_factory, monkeypatch,
-):
-    """「押さずに次の watchdog へ委ねる」の**委ね先が実在する**ことの回帰。
-
-    ライフ読取が失敗した瞬間の予約は 1 件も張られない (day_plan 側の fail-closed)。
-    その状態を回復するのは watchdog の予約途絶検出 — 読めるようになった次の
-    tick で拾い直せなければ、コマは永久に走らない。
-    """
-    manager, _ = _make_manager(session_factory)
-    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
-    _add_day_schedule(session_factory, "judgment_day_close", "22:00")
-    clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
-    # 今日のライフは確定済み (起床の帳簿処理は済んでいる — watchdog の撃ち直しの
-    # 対象ではなく、コマ予約の見張りだけが残る日)
-    day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
-    ])
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "11:00", "kind": "自室で過ごす", "ref": "none",
-         "facility": "own_room", "budget_rounds": 0, "note": ""},
-    ])
-
-    # ライフ読取が失敗している間の予約は 1 件も張られない
-    with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
-        assert day_plan.schedule_day_plan(manager, PERSONA_ID, PLAN_DATE) == 0
-    assert manager.event_scheduler.pending_count() == 0
-
-    # 読めるようになった次の tick が途絶として拾い直す (実物の再 push を通す)
-    calls = _fake_life_start(monkeypatch)
-    out = wiring.watchdog_tick(manager, PERSONA_ID)
-
-    assert out["action"] == "reschedule"
-    assert out["pushed"] == 1
-    assert calls == []
-    assert day_plan.find_lost_slot_reservations(manager, PERSONA_ID, PLAN_DATE) == []
 
 
-# ---------------------------------------------------------------------------
-# day_close: 就寝判断の plan_date が前日になる (深夜跨ぎ)
-# ---------------------------------------------------------------------------
-
-
-def test_day_close_judgment_plan_date_is_previous_day_at_midnight(
-    session_factory, monkeypatch
-):
-    """跨ぎリズムで 01:00 に発火した就寝判断は、judgment_context の
-    plan_date が前日の暦日になる。"""
-    from saiverse import judgment_points
-
-    manager, _ = _make_manager(session_factory)
-    # wake=07:00 / close=01:00 のスケジュールを DB に入れる
-    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
-    _add_day_schedule(session_factory, "judgment_day_close", "01:00")
-
-    # 2026-07-05 01:00 に発火 → 営業日は 2026-07-04
-    clock.enable_virtual(datetime(2026, 7, 5, 1, 0, 0))
-
-    captured_args: List[Any] = []
-
-    def _fake_submit(persona_id, building_id, meta_playbook, args=None, event_callback=None):
-        captured_args.append(args or {})
-
-    manager.pulse_controller.submit_meta_judgment = _fake_submit
-
-    from saiverse.judgment_points import run_judgment_point
-    run_judgment_point(manager, PERSONA_ID, "day_close")
-
-    assert captured_args, "submit_meta_judgment was not called"
-    import json as _json
-    jctx = _json.loads(captured_args[0].get("judgment_context", "{}"))
-    assert jctx.get("plan_date") == "2026-07-04", (
-        f"expected plan_date=2026-07-04 but got {jctx.get('plan_date')!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# day_plan: 深夜コマの発火時刻 (plan_date + 1 日)
-# ---------------------------------------------------------------------------
-
-
-def test_slot_fire_at_overnight_midnight_slot():
-    """wake=07:00, start=00:30 → plan_date+1日 の datetime を返す。"""
-    from datetime import datetime as _dt
-    fire = day_plan._slot_fire_at(
-        "2026-07-04",
-        {"start": "00:30"},
-        wake="07:00",
-    )
-    assert fire == _dt(2026, 7, 5, 0, 30, 0)
-
-
-def test_slot_fire_at_normal_slot():
-    """wake=07:00, start=09:00 → 同日の datetime を返す。"""
-    from datetime import datetime as _dt
-    fire = day_plan._slot_fire_at(
-        "2026-07-04",
-        {"start": "09:00"},
-        wake="07:00",
-    )
-    assert fire == _dt(2026, 7, 4, 9, 0, 0)
-
-
-def test_slot_fire_at_no_wake_is_same_day():
-    """wake=None → 従来どおり同日 combine (後方互換)。"""
-    from datetime import datetime as _dt
-    fire = day_plan._slot_fire_at(
-        "2026-07-04",
-        {"start": "00:30"},
-    )
-    assert fire == _dt(2026, 7, 4, 0, 30, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -2283,3 +1915,23 @@ def test_別行動中の発話の刺激IDが判断の文脈に同乗する(sessi
         engage=lambda: None, user_id="1", stimulus_id="msg:alice_room:3",
     )
     assert captured["context"]["stimulus_id"] == "msg:alice_room:3"
+
+
+def test_day_close_plan_date_is_previous_day_at_midnight(session_factory):
+    """跨ぎリズムで 01:00 の就寝の節目は前日が営業日 (ライフ終了の帳簿処理が使う)。"""
+    manager, _ = _make_manager(session_factory)
+    _add_day_schedule(session_factory, "judgment_day_open", "07:00")
+    _add_day_schedule(session_factory, "judgment_day_close", "01:00")
+    clock.enable_virtual(datetime(2026, 7, 5, 1, 0, 0))
+    assert wiring._day_close_plan_date(manager, PERSONA_ID) == "2026-07-04"
+
+
+def test_reserved_schedule_playbooks():
+    """ペルソナのスペルから触らせない名前 (判断点の名前空間 + 起床・就寝の行)。"""
+    for name in (
+        "judgment_day_open", "judgment_day_close", "judgment_on_event",
+        "judgment_post_session", "  judgment_day_open  ",
+    ):
+        assert wiring.is_reserved_schedule_playbook(name), name
+    for name in ("track_user_conversation", "", None, "my_judgment_helper"):
+        assert not wiring.is_reserved_schedule_playbook(name), name

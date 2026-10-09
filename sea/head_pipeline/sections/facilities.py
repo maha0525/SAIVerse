@@ -5,12 +5,11 @@
 どんな場所があるかは判断のたびに変わるものではないので、head に一度置いて
 凍結し、**増減・改名だけを差分通知で届ける**。
 
-「読む情報」と「選べる選択肢」の分離:
-    ここは読む情報 (どの場所が何なのか)。時間割のコマが選べる facility の
-    enum は判断側 (``saiverse.judgment_points.collect_facility_ids``) が
-    live state から供給し続ける — head が凍結して古くなっても、実在しない
-    場所は構造的に選べないままになる。両者が同じ候補集合を見るように、
-    候補の決定は ``saiverse.facility_map.candidate_buildings`` 1 箇所に置く。
+「読む情報」として:
+    ここは読む情報 (どの場所が何なのか)。候補の決定は
+    ``saiverse.facility_map.candidate_buildings`` 1 箇所に置く。時間割の
+    コマが選べる facility の enum (旧 ``judgment_points.collect_facility_ids``)
+    は時間割の撤去 (autonomous_behavior_v04_plan.md 段 1-4) で消えた。
 
 cache 安定性:
     ``refresh_on_events = frozenset()`` = Metabolism のみ再 capture。順序は
@@ -50,7 +49,7 @@ class FacilitiesSnapshot:
 
 
 def _own_room_item() -> FacilityItem:
-    from saiverse.day_plan import FACILITY_OWN_ROOM
+    from saiverse.facility_map import FACILITY_OWN_ROOM
 
     return FacilityItem(facility_id=FACILITY_OWN_ROOM, name="自分の部屋")
 

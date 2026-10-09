@@ -143,12 +143,13 @@ def create_theme_page(
 ) -> str:
     """新規テーマページを作成する（冪等）。
 
-    現在の呼び出し元はコマ締めの経験値ノートの lazy creation
-    (origin="slot_close"、experience_ledger.md §5「初経験がページを開く」—
-    命名由来ではないので content を明示で渡す) だけ。もう一系統だった
-    P4-b 命名 (メモのページ化、origin="naming"、content 省略 = member_refs
-    一覧と定型文) は 2026-10-09 に休止した (検知と適用を撤去。既定の
-    origin="naming" と content 省略の形は再開に備えて残している)。
+    ⚠ **現在の呼び出し元は無い**。最後の呼び手だったコマ締めの経験値ノートの
+    lazy creation (origin="slot_close"、experience_ledger.md §5「初経験がページを
+    開く」) は v0.4 段 1-4 でコマ締めごと撤去された (経験値ノートの新しい席は
+    未決)。もう一系統だった P4-b 命名 (メモのページ化、origin="naming"、
+    content 省略 = member_refs 一覧と定型文) は 2026-10-09 に休止した (検知と
+    適用を撤去。既定の origin="naming" と content 省略の形は再開に備えて残して
+    いる)。
 
     root_theme 配下に category='theme' のページを作成し、metadata に
     ``{"origin": origin, "member_refs": [...]}`` を刻む。
@@ -159,8 +160,7 @@ def create_theme_page(
 
     **呼び出し契約 (Codex 一巡目 #6 裁定)**: この冪等性は check-then-insert で
     実装されており、原子性は呼び出し側が保持するプロセス内ロック
-    (``adapter._db_lock``) が担う。全呼び出し元 (現在は slot_close) は
-    ロック下で呼ぶこと。DB の一意制約は
+    (``adapter._db_lock``) が担う。呼び出し元はロック下で呼ぶこと。DB の一意制約は
     張らない — Note 移行由来のページは旧 Note の同名を正当に持ちうるため、
     制約を入れるには先に同名ページの統合移行が必要になり、現時点では
     釣り合わない (memory.db は単一プロセスからのみ書かれる前提)。

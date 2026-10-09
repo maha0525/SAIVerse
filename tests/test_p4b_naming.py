@@ -5,8 +5,9 @@
 される予定のため、検知 (``detect_naming_candidates``) と就寝判断での適用
 (``_apply_naming_reviews``) は撤去し、そのテストも削除した。
 
-残るのはページを立てる関数 ``create_theme_page`` のテストだけ — コマ締めの
-経験値ノート (saiverse/slot_close.py) が現役で使っている。
+残るのはページを立てる関数 ``create_theme_page`` のテストだけ。最後の呼び手
+だったコマ締めの経験値ノート (旧 saiverse/slot_close.py) は v0.4 段 1-4 で
+撤去され、いまは呼び手が無い (経験値ノートの新しい席は未決)。
 
 all mocked — LLM コールなし、DB は sqlite3 インメモリ。
 """
@@ -119,8 +120,8 @@ class NamingPausedTest(unittest.TestCase):
         self.assertFalse(hasattr(curation, "detect_naming_candidates"))
         self.assertFalse(hasattr(curation, "NAMING_CLUSTER_MIN"))
         self.assertFalse(hasattr(judgment_finalize, "_apply_naming_reviews"))
-        schema = jp.build_day_close_schema(None, "test_persona")
-        self.assertNotIn("naming_reviews", schema["properties"])
+        # 適用先だった就寝判断そのものが段 1-4 で退役した
+        self.assertFalse(hasattr(jp, "build_day_close_schema"))
 
 
 if __name__ == "__main__":

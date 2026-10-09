@@ -100,8 +100,8 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
                     # state["_persona_obj"] を書くのは compile_with_langgraph の
                     # 1 箇所だけで、そこはノードを作るときと同じ persona を入れる
                     # (sea/runtime_graph.py の initial_state)。置かない経路
-                    # (sea/work_session.py) では or で persona に倒れるので、
-                    # 二つが別物になることはない。
+                    # では or で persona に倒れるので、二つが別物になることは
+                    # ない。
                     event_callback({"type": "activity", "action": "tool_call", "name": tool_name, "playbook": pb_display, "status": "completed", "persona_id": getattr(persona_obj, "persona_id", None), "persona_name": getattr(persona_obj, "persona_name", None), "pulse_id": state.get("_pulse_id"), "building_id": event_building_id(runtime, persona_obj)})
             state["last"] = result_str
             if output_key:

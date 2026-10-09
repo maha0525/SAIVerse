@@ -13,16 +13,16 @@ experience_ledger.md §1/§3 の「台帳 (索引)」と「ページを開く = 
   含む、新しい順) ②関与あらすじの履歴 (新しい順の見出し列 = 経験の年表)
   ③共起した題材エンティティ (同じあらすじ群に関与したページ)。
 
-目的ノード (生きた Track / task) は main DB 側の実体なので本モジュールの
-対象外 — 索引への合流は API 層 (api/routes/people/experience_ledger.py) が
-saiverse.judgment_points の供給関数 + purpose_tags 統計で行う。
+目的ノード (目的の木の task) を索引へ合流させる処理は API 層にあったが、
+目的の木の読み手を撤去した v0.4 段 1-4 で消えた。
 
 **辿れる範囲と辿れない範囲 (正直な現状、2026-08-03)**:
 
 - 辿れる: 代謝 (entity_extractor) 由来の fragment は ``chronicle_entry_id``
   で Chronicle エントリ (memopedia_pages category='chronicle') に繋がる。
   ②関与あらすじの履歴と③共起エンティティはこの辺だけから引く。
-- 辿れない: コマ締め (slot_close) の経験値ノート fragment は
+- 辿れない: コマ締め (旧 slot_close — v0.4 段 1-4 で書き手ごと撤去。新しい席は
+  未決) が書いた経験値ノート fragment は
   ``chronicle_entry_id`` を持たない (由来は本文末尾の注記 + source_date のみ)。
   そのためテーマページの②はふつう空になる。また purpose_tags は
   「episode → 目的ノード」の辺であり、memopedia ページへの関与タグ

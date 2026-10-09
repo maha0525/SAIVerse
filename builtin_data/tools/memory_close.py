@@ -7,15 +7,13 @@ concept_consolidation.md「開閉制御 — 机の物理」の実装。``memory_
 対応 ref: ``m:N`` (Memopedia) / ``ch:N`` (Chronicle)。コア記憶は常時開の
 システム常設ピンなので対象外 (``core`` / ``c:N`` は「閉じられません」を返す)。
 
-``task:N`` (目的ノード) を閉じる実装も残してある — 目的の木の退役
-(2026-08-23) 以前に机へ開かれたページを本人が下ろせなくなると困るため。
-新規に開く口は ``memory_open`` 側で閉じた。
+退役した目的の木の ``task:N`` 行が机に残っていた場合は、次の Metabolism の
+机の再描画 (``memory_atlas.snapshot_desk``) が自動で下ろす。
 """
 from __future__ import annotations
 
 from saiverse import memory_atlas
 from tools.context import (
-    get_active_manager,
     get_active_persona_id,
     open_persona_memory,
 )
@@ -28,15 +26,13 @@ def memory_close(ref: str) -> str:
     if not persona_id:
         raise RuntimeError("Active persona is not set")
 
-    # manager は task:N (目的ノード = main DB 在住) の解決にのみ使われる
-    manager = get_active_manager()
     with open_persona_memory() as adapter:
         if not adapter.is_ready():
             raise RuntimeError(f"SAIMemory not ready for {persona_id}")
         try:
             # close_page は ref 正規化で生 conn を読むため外側でロック
             with adapter._db_lock:
-                result = memory_atlas.close_page(adapter, ref, manager=manager)
+                result = memory_atlas.close_page(adapter, ref)
         except memory_atlas.AtlasRefError as exc:
             return f"Error: {exc}"
 

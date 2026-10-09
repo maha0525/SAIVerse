@@ -43,7 +43,7 @@ class TestSpellPermissionMatrix(unittest.TestCase):
                 self.assertIsNone(check_spell_permission(sp, asp))
 
     def test_read_and_generic_spells_unrestricted(self):
-        for sp in ("get_task_summary", "recall", "memopedia_note"):
+        for sp in ("memory_read", "recall", "memopedia_note"):
             for asp in Aspect:
                 self.assertIsNone(check_spell_permission(sp, asp))
 

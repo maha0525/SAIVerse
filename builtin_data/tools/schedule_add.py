@@ -5,6 +5,12 @@
 
 ファイル名・関数名の ``schedule`` は互換のため残している (機能名としては
 「アラーム」に改名済み)。ユーザーと LLM に見える文言だけを「アラーム」に揃える。
+
+ペルソナはこのスペルで判断点 Playbook (``judgment_*``) の行と、起床・就寝の行
+(ライフの窓の節目 — ScheduleManager が機械の帳簿処理へ振り分ける行) を作れない
+(autonomous_behavior_v04_plan.md 決定 4 / 段 1-5)。自分のライフの窓を決めるのは
+ユーザーで、REST API (ユーザーの口) はこの制限を受けない。判定は
+``saiverse.autonomy_wiring.is_reserved_schedule_playbook`` に一本化してある。
 """
 
 import json
@@ -83,6 +89,20 @@ def schedule_add(
     # 成立させる (Playbook 名の指定はもうペルソナに求めていない)。空白を
     # 残したまま保存すると発火時に Playbook を引けず、鳴らないアラームになる。
     meta_playbook = (meta_playbook or "").strip() or DEFAULT_META_PLAYBOOK
+
+    from saiverse.autonomy_wiring import is_reserved_schedule_playbook
+
+    if is_reserved_schedule_playbook(meta_playbook):
+        LOGGER.warning(
+            "[schedule_add] refused a reserved playbook from a persona spell "
+            "(persona=%s playbook=%s)", persona_id, meta_playbook,
+        )
+        return (
+            f"エラー: Playbook「{meta_playbook}」はアラームに使えません。"
+            "起床・就寝の時刻と判断の仕組みはシステムが管理していて、"
+            "スペルからは作れません。アラームとして鳴らしたいだけなら、"
+            "meta_playbook を省略してください。"
+        )
 
     session = manager.SessionLocal()
     try:

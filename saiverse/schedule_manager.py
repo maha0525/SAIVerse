@@ -988,10 +988,6 @@ class ScheduleManager:
         "playbook not imported",
         "not a judgment playbook",
         "kind not schedulable",
-        # 起床・就寝の名前が判断点の入口へ届いた配線ミス (autonomy_wiring.
-        # REASON_LIFE_BOUNDARY_MACHINE_ONLY と同値)。本来は _execute_schedule が
-        # 機械の帳簿処理へ先に振り分ける。
-        "life boundary is machine-only",
     })
 
     @classmethod
@@ -1137,9 +1133,9 @@ class ScheduleManager:
         # と実行台帳の冪等キーで一度きりに守られているので、再試行して安全 —
         # failed として backoff 再試行に乗せる。
         from saiverse.autonomy_wiring import (
-            JUDGMENT_PLAYBOOK_NAMES,
             LIFE_BOUNDARY_PLAYBOOKS,
             handle_scheduled_judgment,
+            is_reserved_schedule_playbook,
         )
         boundary = LIFE_BOUNDARY_PLAYBOOKS.get(meta_playbook)
         if boundary is not None:
@@ -1165,9 +1161,11 @@ class ScheduleManager:
                 return "executed", f"life {boundary} boundary settled"
             return "failed", f"life {boundary} boundary failed"
 
-        # 判断点 Playbook 名の行 (起床・就寝以外): 時刻駆動の判断点はもう無いので
+        # 判断点 Playbook の名前空間の行 (起床・就寝以外 — 現役の on_event と
+        # 退役した judgment_post_session 等): 時刻駆動の判断点はもう無いので
         # 拒否口 (handle_scheduled_judgment) が WARNING + settled_skip を返す。
-        if meta_playbook in JUDGMENT_PLAYBOOK_NAMES:
+        # 退役した名前を汎用経路へ流すと「Playbook が無い」失敗の再試行を繰り返す。
+        if is_reserved_schedule_playbook(meta_playbook):
             LOGGER.info(
                 "[ScheduleManager] Executing judgment schedule %d for persona %s "
                 "(playbook=%s)",

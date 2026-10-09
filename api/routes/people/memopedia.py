@@ -469,9 +469,9 @@ def set_memopedia_page_desk(
             from saiverse.memory_atlas import open_page, close_page, AtlasRefError
             try:
                 if request.open:
-                    result_text = open_page(adapter, ref, manager=manager)
+                    result_text = open_page(adapter, ref)
                 else:
-                    result_text = close_page(adapter, ref, manager=manager)
+                    result_text = close_page(adapter, ref)
             except AtlasRefError as e:
                 raise HTTPException(status_code=400, detail=str(e))
 

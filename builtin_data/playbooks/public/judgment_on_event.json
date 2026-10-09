@@ -3,9 +3,9 @@
   "display_name": "イベント到着判断 (on_event)",
   "description": "自律行動 v2 の判断点: イベント到着 (来訪・alert・システム通知)。反応を engage_now / add_task / note_only / ignore から選ぶ。alert イベントではスキーマが engage_now のみに縮退する (v1 状況 B の「強制」の継承)。ユーザー会話中は原則発火させない (呼び出し側の責務)。詳細は docs/intent/persona_cognition/judgment_points.md §7。",
   "input_schema": [
-    {"name": "situation_text", "description": "judgment_points が組み立てた状況テキスト (イベント内容 / 現在の活動状態 / 残りの時間割)。", "required": false, "default": ""},
-    {"name": "judgment_context", "description": "finalize の検証・適用に使う文脈 (JSON 文字列: plan_date / is_alert / event_text)。", "required": false, "default": "{}"},
-    {"name": "response_schema", "param_type": "object", "description": "judgment_points が動的に組み立てた JSON Schema (alert 時は reaction が engage_now のみ。slot の ref / facility は実在 enum 注入済み)。", "required": false, "default": null}
+    {"name": "situation_text", "description": "judgment_points が組み立てた状況テキスト (イベント内容 / 現在の活動状態)。", "required": false, "default": ""},
+    {"name": "judgment_context", "description": "finalize の検証・適用に使う文脈 (JSON 文字列: plan_date / is_alert / event_text / stimulus_id)。", "required": false, "default": "{}"},
+    {"name": "response_schema", "param_type": "object", "description": "judgment_points が動的に組み立てた JSON Schema (alert 時は reaction が engage_now のみ)。", "required": false, "default": null}
   ],
   "router_callable": false,
   "user_selectable": false,

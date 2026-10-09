@@ -167,7 +167,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     # origin_episode: 層0タグ (metadata.origin_episode = メッセージ生成時に開いて
     # いた出来事の episode_ref) の専用列昇格 (W1 Chunk C / D10, 2026-07-19)。
     # episode 読み口 (episode_read スペル / post_session の原本注入) が
-    # json_each スキャンなしで引けるようにする。書き込みは add_message が
+    # json_each スキャンなしで引けるようにする (読み口は v0.4 段 1-4 で両方
+    # 撤去 — 列と転記は旧データの層0タグとして残す)。書き込みは add_message が
     # metadata dict から転記する (書き手 = sea/runtime.py は不変)。
     # 列を新規追加したときだけ一度、既存 metadata からバックフィルする。
     _origin_episode_added = _ensure_column(conn, "messages", "origin_episode", "TEXT")

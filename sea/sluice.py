@@ -5239,6 +5239,13 @@ def _run_mechanism_chunk(
 CAPTURE_MODES = ("mechanism", "persona")
 
 
+#: 読み返しのダイジェスト一行のタグ。旧 ``sea.work_session.DIGEST_TAG`` と同値
+#: (作業セッションは段 1-4 で撤去)。Chronicle の編纂 (sai_memory/arasuji/
+#: generator.py の ``_message_kind_label``) がこのリテラルで「既に要約された
+#: まとめ」を見分けるので、値を変えないこと。
+_CAPTURE_DIGEST_TAG = "session_digest"
+
+
 def _capture_digest_exists(persona: Any, nonce: str) -> bool:
     """この nonce のダイジェスト一行が、既に本線に立っているか。
 
@@ -5265,11 +5272,12 @@ def _append_capture_digest(
 ) -> None:
     """読み返しのダイジェスト一行を本線へ立てる (長期記憶への入口は一本)。
 
-    器は作業セッションのダイジェスト行 (:data:`sea.work_session.DIGEST_TAG` /
-    main_line / committed) をそのまま使う — 一日新聞 (day_report) と就寝判断
-    (day_close の _collect_today_session_digests) がタグで拾う既存の読み手に、
-    「今日、過去の会話を読み返した」という事実がそのまま乗る。
-    role は作業セッションの digest (assistant = 本人の言葉) と違って
+    器は旧作業セッションのダイジェスト行と同じ形 (:data:`_CAPTURE_DIGEST_TAG`
+    / main_line / committed) を使う — Chronicle の編纂 (sai_memory/arasuji/
+    generator.py) がこのタグを「既に要約されたまとめ」として扱うので、生の会話
+    として再展開されない。旧来の読み手だった一日新聞 (day_report) と就寝判断
+    (day_close) は段 1-4 で撤去された。
+    role は旧作業セッションの digest (assistant = 本人の言葉) と違って
     user + ``<system>`` 包み — この一行は件数から機械が組んだ文で、機構の
     代筆を本人名義 (assistant) にしない (発話の尊厳の規律)。
     書き込みの失敗は送出する — 採取は適用済みなので、呼び出し元のジョブが
@@ -5278,14 +5286,12 @@ def _append_capture_digest(
     ``nonce`` は :func:`_capture_digest_exists` が照会する識別子で、metadata の
     ``capture_digest_nonce`` として一行に刻まれる (修正 C)。
     """
-    from sea.work_session import DIGEST_TAG
-
     adapter = getattr(persona, "sai_memory", None)
     if adapter is None:
         raise SluiceStorageUnavailableError(
             "sai_memory adapter is missing; cannot append the capture digest"
         )
-    metadata: Dict[str, Any] = {"tags": [DIGEST_TAG, "sluice"]}
+    metadata: Dict[str, Any] = {"tags": [_CAPTURE_DIGEST_TAG, "sluice"]}
     if nonce:
         metadata["capture_digest_nonce"] = nonce
     message_id = adapter.append_persona_message({

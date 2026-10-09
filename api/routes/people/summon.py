@@ -89,7 +89,7 @@ def list_meta_playbooks(
     等) に移ったため、name prefix での絞り込みは廃止。``user_selectable=true``
     フラグのみを判定軸にする。
 
-    判断点の Playbook (起床=judgment_day_open / 就寝=judgment_day_close 等) は
+    判断点の Playbook (イベント到着=judgment_on_event) は
     ``user_selectable=false`` で、ここには出さない。一日のリズムはライフ設定が
     所有し、判断点はコードが決定論的に発火させるため、ユーザーが一覧から選ぶ
     対象ではない (2026-09-01 裁定でアラーム管理の Playbook 選択欄も撤去した)。

@@ -1122,6 +1122,12 @@ class RealtimeSpellBinding(Base):
 class PersonaTask(Base):
     """統合 Task: ペルソナの「やること」最小単位。
 
+    ⚠ **残置テーブル (目的の木。書き手・読み手なし)**。目的の木の読み手
+    (saiverse/persona_task_manager.py ほか) は autonomous_behavior_v04_plan.md
+    段 1-4 で撤去した。既存ユーザーのデータが載ったまま上がってくるので定義は
+    残す。旧データの機械写し (saiverse/v3_shape_migration.py) だけが一回きりで
+    読む。「やること」の器はタスク帳 (TaskBookEntry)。以下は撤去前の記述。
+
     親バインド (parent_kind + note_id / track_id) で「候補」「Track 内小目標」
     「未所属」を区別する。standalone Task のリッチフィールド (goal / status /
     priority / steps / history) を踏襲する。
@@ -1241,6 +1247,12 @@ class PersonaTaskHistory(Base):
 class PersonaDayPlan(Base):
     """時間割 (day plan): 起床判断が編成した一日の駆動データ (自律行動 v2 §4.2)。
 
+    ⚠ **残置テーブル (書き手なし)**。v2 の時間割一式は autonomous_behavior_v04_plan.md
+    段 1-4 で撤去した。既存ユーザーのデータが載ったまま上がってくるので定義は
+    残す。読むのはライフの互換読み (saiverse/day_plan.py の
+    ``_legacy_lives_in_session`` が meta_json.lives を読み取り専用で参照) だけ。
+    以下は撤去前の記述。
+
     1 ペルソナ 1 日 1 行 (複合 PK)。slots_json はコマの配列 (JSON):
     [{start: "HH:MM", kind: コマ種別カタログの名前 (saiverse/slot_kind_catalog.py、
       builtin は 調べる/絵を描く/日記を書く/随筆を書く/出かける/自室で過ごす/自由時間),
@@ -1264,7 +1276,7 @@ class PersonaDayPlan(Base):
     # 日付に紐づく付帯情報 (JSON dict)。就寝判断 (day_close) が書く
     # {"tomorrow_memo": 明日の自分へのメモ, "day_theme": ...} 等を格納し、
     # 翌朝の起床判断 (day_open) が読む (judgment_points.md §4/§8)。
-    # 読み書きは saiverse/day_plan.py の load_plan_meta / update_plan_meta。
+    # 読み書きしていた load_plan_meta / update_plan_meta は段 1-4 で撤去。
     meta_json = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False)
     updated_at = Column(DateTime, nullable=False)
@@ -1275,8 +1287,10 @@ class PersonaLife(Base):
 
     LIVES_JSON はライフの配列 (JSON):
     [{start: "HH:MM", end: "HH:MM", budget_pulses: int, mode: "even"|"free",
-      used_pulses: int, used_rounds: int, judgment_pulses: int,
+      used_pulses: int, judgment_pulses: int,
       started: bool (開始の節目済み), ended: bool (終了の節目済み)}, ...]
+    (旧ラウンド台帳の ``used_rounds`` は段 1-4 で書き手ごと消えた。切り替え前の
+    行には残りうる。)
 
     起床時刻にシステムが機械の帳簿処理として確定し (LLM は関与しない —
     autonomous_behavior_v3.md §6)、keep-alive・営業日の判定・画面表示が読む。
@@ -1333,6 +1347,10 @@ class StimulusReceipt(Base):
 class PersonaTimetableTemplate(Base):
     """習慣テンプレート: 時間割の枠 (時間割改修 T2、timetable_redesign.md §5.1)。
 
+    ⚠ **残置テーブル (書き手・読み手なし)**。時間割と習慣テンプレート
+    (saiverse/timetable_template.py) は autonomous_behavior_v04_plan.md 段 1-4 で
+    撤去した。既存データのため定義だけ残す。以下は撤去前の記述。
+
     1 ペルソナ 1 行。SLOTS_JSON はコマ雛形の配列 (JSON):
     [{start: "HH:MM" (必須),
       kind: コマ種別カタログの名前 | 省略/null,
@@ -1360,6 +1378,11 @@ class PersonaTimetableTemplate(Base):
 
 class Episode(Base):
     """出来事 (Episode): 実際に時間を満たしたものの「薄い封筒」。
+
+    ⚠ **残置テーブル (書き手・読み手なし)**。書き手は束 6c (2026-08-22) で全て
+    退役し、残っていた読み口 (saiverse/episodes.py・episode_read スペル) も
+    autonomous_behavior_v04_plan.md 段 1-4 で撤去した。既存データのため定義だけ
+    残す。以下は撤去前の記述。
 
     life_concept_map.md §8/§8.1 の出来事テーブル。会話・作業セッション・コマ実績
     など既存の実体を置換せず、kind + 実体参照で包む共通エンベロープ。一日新聞・
@@ -1405,6 +1428,11 @@ class Episode(Base):
 
 class EpisodeInheritance(Base):
     """継承エッジ (継承 DAG): 範囲ノード (出来事) 間の認識の連続性を表す第二の関係。
+
+    ⚠ **残置テーブル (書き手・読み手なし)**。操作モジュール
+    (saiverse/experience_inheritance.py) は呼び手が無いまま episodes の読み口に
+    依存していたため、autonomous_behavior_v04_plan.md 段 1-4 で一緒に撤去した。
+    既存データのため定義だけ残す。以下は撤去前の記述。
 
     experience_structure.md §3.3 の「継承 DAG」の器。包含の木 (episodes の
     kind + occurrence による親子) とは**独立**な、体験の連続性 (どの範囲を

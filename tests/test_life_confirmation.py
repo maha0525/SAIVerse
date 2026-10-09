@@ -23,12 +23,12 @@ daily_budget_pulses) からシステムが確定する。宣言まわりの永�
   開始/終了の節目 (再発火での二重通知防止込み)、Playbook 未取り込みでも
   確定すること、自律 OFF では確定しないこと、判断点の LLM を呼ばないこと
 - 判断点の別枠カウント (used_pulses 不変、起床・就寝は数えない)
-- 遅発起床シナリオ: 21 時起動でもライフは窓どおり焼かれ、過去時刻の
-  コマは保存時に丸められる
+- 遅発起床シナリオ: 21 時起動でもライフは窓どおり焼かれる
 - watchdog: 当日のライフが無いときだけ起床の帳簿処理を撃ち直す
 - 置き場の独立: 旧 meta_json.lives の互換読み (読み取り専用)・旧経路で
   節目を済ませた日の二重通知防止・壊れた persona_life の扱い
-- 回復 tick: 旧 judgment.day_open / day_close の席は撃ち直さずに閉じる
+- 回復 tick: 旧 judgment.day_open / day_close / post_session の席は撃ち直さずに
+  期限で閉じる (段 1-4 で判断点ごと退役)
 
 teardown で engine.dispose() + clock.disable_virtual() を必ず行う。
 """
@@ -264,14 +264,14 @@ def test_confirm_life_for_today_is_idempotent(manager):
         manager, PERSONA_ID, PLAN_DATE, "07:00", "22:00",
         requested_budget_pulses=30,
     )
-    day_plan.consume_life_rounds(manager, PERSONA_ID, PLAN_DATE, 5, at_time="09:00")
+    day_plan.record_judgment_pulse(manager, PERSONA_ID, PLAN_DATE, at_time="09:00")
 
     second = day_plan.confirm_life_for_today(
         manager, PERSONA_ID, PLAN_DATE, "07:00", "22:00",
         requested_budget_pulses=99,  # 違う予算を渡しても無視される
     )
     assert second["budget_pulses"] == first["budget_pulses"] == 30
-    assert second["used_rounds"] == 5  # 消費済み帳簿は保持
+    assert second["judgment_pulses"] == 1  # 積算済みの帳簿は保持
     assert len(day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)) == 1
 
 
@@ -455,6 +455,34 @@ def _persona_life_row(manager, plan_date):
             .first()
         )
         return None if row is None else json.loads(row.LIVES_JSON)
+    finally:
+        db.close()
+
+
+def _write_legacy_meta(manager, plan_date, meta):
+    """旧置き場 persona_day_plan.meta_json を直接書く (旧データの再現)。
+
+    時間割の書き手 (update_plan_meta 等) は段 1-4 で撤去したので、互換読みの
+    検証用に行を直接作る / 上書きする。
+    """
+    from database.models import PersonaDayPlan
+
+    db = manager.SessionLocal()
+    try:
+        row = (
+            db.query(PersonaDayPlan)
+            .filter_by(persona_id=PERSONA_ID, plan_date=plan_date)
+            .first()
+        )
+        if row is None:
+            db.add(PersonaDayPlan(
+                persona_id=PERSONA_ID, plan_date=plan_date, slots_json="[]",
+                meta_json=json.dumps(meta, ensure_ascii=False),
+                created_at=BASE, updated_at=BASE,
+            ))
+        else:
+            row.meta_json = json.dumps(meta, ensure_ascii=False)
+        db.commit()
     finally:
         db.close()
 
@@ -687,11 +715,10 @@ def test_judgment_pulses_accumulate_separately_from_budget(manager, session_fact
 # ---------------------------------------------------------------------------
 
 
-def test_delayed_wake_confirms_full_window_and_rounds_past_slots(manager, session_factory):
-    """21 時起動の遅発でも、ライフは設定どおりの窓 (07:00〜22:00) で焼かれる。
-    過去時刻 (08:00) のコマは保存時に現在時刻へ丸められ、現在時刻以降 (21:30)
-    のコマはそのまま通る——「編成直後の過去コマ即時発火」が構造ごと消える
-    (v0.5 追補、2026-07-14: 拒否でなく丸めで全滅を防ぐ)。"""
+def test_delayed_wake_confirms_full_window(manager, session_factory):
+    """21 時起動の遅発でも、ライフは設定どおりの窓 (07:00〜22:00) で焼かれる
+    (今からの窓ではない)。旧版はこの後の時間割の過去コマの丸めも検査して
+    いたが、時間割は段 1-4 で撤去した。"""
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"
     _add_day_schedule(session_factory, "judgment_day_open", "07:00",
                       playbook_params={"daily_budget_pulses": 20})
@@ -706,21 +733,6 @@ def test_delayed_wake_confirms_full_window_and_rounds_past_slots(manager, sessio
     lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
     assert lives[0]["start"] == "07:00"
     assert lives[0]["end"] == "22:00"  # 起床からの窓そのまま (今からではない)
-
-    notes = day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "08:00", "kind": "自室で過ごす", "ref": "none", "facility": "own_room",
-         "budget_rounds": 0, "title": "", "note": ""},
-    ])
-    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert [s["start"] for s in slots] == ["21:00"]  # 過去時刻は現在時刻へ丸め
-    assert notes == ["（1番目の予定は開始時刻を21:00に調整しました）"]
-
-    day_plan.save_day_plan(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "21:30", "kind": "自室で過ごす", "ref": "none", "facility": "own_room",
-         "budget_rounds": 0, "title": "", "note": ""},
-    ])
-    slots = day_plan.load_day_plan(manager, PERSONA_ID, PLAN_DATE)
-    assert [s["start"] for s in slots] == ["21:30"]
 
 
 # ---------------------------------------------------------------------------
@@ -782,7 +794,7 @@ def test_get_lives_falls_back_to_legacy_meta_only_when_no_persona_life_row(manag
     legacy = [{"start": "23:00", "end": "06:00", "budget_pulses": 5, "mode": "free",
                "used_pulses": 0, "used_rounds": 0, "judgment_pulses": 0,
                "started": True}]
-    day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE, {
+    _write_legacy_meta(manager, PLAN_DATE, {
         day_plan.META_LIVES: legacy, "tomorrow_memo": "残す",
     })
     before = _plan_meta_json(manager, PLAN_DATE)
@@ -794,7 +806,7 @@ def test_get_lives_falls_back_to_legacy_meta_only_when_no_persona_life_row(manag
 
     # 別の日付に persona_life の行があれば、その日付は旧置き場を見ない
     other = "2026-07-05"
-    day_plan.update_plan_meta(manager, PERSONA_ID, other, {day_plan.META_LIVES: legacy})
+    _write_legacy_meta(manager, other, {day_plan.META_LIVES: legacy})
     day_plan.save_lives(manager, PERSONA_ID, other, [])
     assert _persona_life_row(manager, other) == []
     assert day_plan.get_lives(manager, PERSONA_ID, other) == []
@@ -806,7 +818,7 @@ def test_write_on_a_legacy_only_day_seeds_persona_life_and_leaves_meta_untouched
     legacy = [{"start": "07:00", "end": "22:00", "budget_pulses": 5, "mode": "free",
                "used_pulses": 0, "used_rounds": 2, "judgment_pulses": 0,
                "started": True}]
-    day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE, {day_plan.META_LIVES: legacy})
+    _write_legacy_meta(manager, PLAN_DATE, {day_plan.META_LIVES: legacy})
     before = _plan_meta_json(manager, PLAN_DATE)
 
     day_plan.record_judgment_pulse(manager, PERSONA_ID, PLAN_DATE, at_time="10:00")
@@ -830,7 +842,7 @@ def test_legacy_started_day_does_not_double_notify_via_ledger_key(manager, sessi
     _add_day_schedule(session_factory, "judgment_day_open", "07:00")
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     # 旧経路が残した状態: 旧置き場のライフ (マーカー欠落) + 台帳の済み行
-    day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE, {day_plan.META_LIVES: [
+    _write_legacy_meta(manager, PLAN_DATE, {day_plan.META_LIVES: [
         {"start": "07:00", "end": "22:00", "budget_pulses": 18, "mode": "even",
          "used_pulses": 0, "used_rounds": 0, "judgment_pulses": 0},
     ]})
@@ -859,7 +871,7 @@ def test_legacy_overnight_life_still_resolves_the_business_day_after_switch(mana
     """切り替えた当日の深夜、前日の跨ぎライフ (旧置き場) が営業日を決め続ける。"""
     _add_day_schedule(session_factory, "judgment_day_open", "23:00")
     _add_day_schedule(session_factory, "judgment_day_close", "06:00")
-    day_plan.update_plan_meta(manager, PERSONA_ID, "2026-07-03", {day_plan.META_LIVES: [
+    _write_legacy_meta(manager, "2026-07-03", {day_plan.META_LIVES: [
         {"start": "23:00", "end": "06:00", "budget_pulses": 5, "mode": "free",
          "used_pulses": 0, "used_rounds": 0, "judgment_pulses": 0, "started": True},
     ]})
@@ -882,7 +894,7 @@ def test_corrupt_persona_life_is_unreadable_not_missing(manager):
     営業日の選択 (strict) は「読めない」として止まる — 旧置き場へ落ちない。"""
     from database.models import PersonaLife
 
-    day_plan.update_plan_meta(manager, PERSONA_ID, PLAN_DATE, {day_plan.META_LIVES: [
+    _write_legacy_meta(manager, PLAN_DATE, {day_plan.META_LIVES: [
         {"start": "07:00", "end": "22:00", "budget_pulses": 5, "mode": "free"},
     ]})
     db = manager.SessionLocal()
@@ -903,33 +915,38 @@ def test_corrupt_persona_life_is_unreadable_not_missing(manager):
 
 
 # ---------------------------------------------------------------------------
-# 回復 tick: 旧 judgment.day_open / day_close の席は撃ち直さずに閉じる
+# 回復 tick: 旧 judgment.day_open / day_close / post_session の席は撃ち直さずに閉じる
 # ---------------------------------------------------------------------------
 
 
-def test_recovery_abandons_legacy_day_open_seat_without_refire(manager, session_factory):
-    """回復 tick が切り替え前の judgment.day_open の prepared を拾っても、LLM の
-    判断として撃ち直さず、席を放棄して閉じる (起床は機械の帳簿処理になった)。"""
+def test_recovery_expires_legacy_judgment_seats_without_refire(manager, session_factory):
+    """回復 tick が切り替え前の judgment.day_open / day_close / post_session の
+    prepared を拾っても、LLM の判断として撃ち直さず、期限で閉じる (起床・就寝は
+    機械の帳簿処理になり、セッション終了判断は作業セッションごと撤去された)。"""
     from saiverse import execution_ledger as XL
+    from saiverse import execution_ledger_wiring as xlw
 
     manager.pulse_controller = RecordingPulseController()
     _import_judgment_playbooks(session_factory)
     ledger = manager.execution_ledger
-    for kind in ("day_open", "day_close"):
+    eids = []
+    for kind in ("day_open", "day_close", "post_session"):
         eid, runnable, _ = ledger.claim_execution(
             f"judgment.{kind}", idempotency_key=f"{PERSONA_ID}:{PLAN_DATE}",
             persona_id=PERSONA_ID,
         )
         assert runnable
+        eids.append(eid)
 
-        result = wiring.refire_judgment_from_recovery(
-            manager, PERSONA_ID, kind, None, eid,
+    for row in ledger.list_prepared("judgment."):
+        xlw._collect_one_prepared(
+            manager, row,
+            row["created_at"] + int(xlw.PREPARED_EXPIRE_AFTER_SECONDS) + 1,
         )
 
-        assert result["submitted"] is False
-        assert result["reason"] == wiring.REASON_LIFE_BOUNDARY_MACHINE_ONLY
+    for eid in eids:
         entry = ledger.get_execution(eid)
         assert entry["status"] == XL.STATUS_FAILED
-        assert "machine-only" in entry["error"]
+        assert "expired" in entry["error"]
     assert manager.pulse_controller.calls == []
     assert ledger.list_prepared("judgment.") == []

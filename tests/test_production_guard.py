@@ -1,9 +1,9 @@
 """本番ホーム (~/.saiverse) への書き込みを拒否する番人のテスト。
 
-対象は ``scripts/_shared/production_guard.py`` と、それを使う一日シム
-(``scripts/run_day_sim.py``) の書き込み先の判定。会話ランナーと複製スクリプトの
+対象は ``scripts/_shared/production_guard.py``。会話ランナーと複製スクリプトの
 番人は、それぞれのテストファイル (test_run_conversation / test_clone_world /
-test_clone_persona) が確かめる。
+test_clone_persona) が確かめる。一日シム (scripts/run_day_sim.py) の番人の
+テストは、一日シムごと撤去した v0.4 段 1-4 で消した。
 
 ``Path.home()`` を一時ディレクトリへ差し替えるので、本物の ~/.saiverse には触れない。
 """
@@ -142,92 +142,3 @@ def test_link_into_production_is_refused(fake_home, sandbox):
 def test_case_difference_is_refused_on_windows(fake_home):
     upper = Path(str(fake_home / ".saiverse" / "user_data").upper())
     assert is_under_production(upper)
-
-
-# ---------------------------------------------------------------------------
-# 一日シム (scripts/run_day_sim.py)
-# ---------------------------------------------------------------------------
-
-
-def _day_sim_args(**overrides) -> argparse.Namespace:
-    values = dict(
-        scenario="scenario.json", db_file=None, real=False, city="city_a",
-        sds_url="http://127.0.0.1:8080", report_only=False, out=None,
-        no_raw_log=False, raw_log_out=None,
-    )
-    values.update(overrides)
-    return argparse.Namespace(**values)
-
-
-def test_day_sim_mock_without_out_is_refused_when_home_is_production(fake_home):
-    # --out 省略の mock は新聞と生成時刻の記録を ~/.saiverse/personas/<id>/ に書く
-    from scripts.run_day_sim import _guard_not_production
-
-    with pytest.raises(ProductionPathError, match="SAIVERSE_HOME="):
-        _guard_not_production(_day_sim_args())
-
-
-def test_day_sim_mock_with_out_passes_without_env(fake_home, tmp_path):
-    from scripts.run_day_sim import _guard_not_production
-
-    _guard_not_production(_day_sim_args(out=str(tmp_path / "report.md")))
-
-
-def test_day_sim_mock_with_sandbox_home_passes(fake_home, sandbox, monkeypatch):
-    from scripts.run_day_sim import _guard_not_production
-
-    monkeypatch.setenv("SAIVERSE_HOME", str(sandbox / ".saiverse"))
-    _guard_not_production(_day_sim_args())
-
-
-def test_day_sim_real_with_sandbox_env_passes(fake_home, sandbox, monkeypatch):
-    from scripts.run_day_sim import _guard_not_production
-
-    monkeypatch.setenv("SAIVERSE_HOME", str(sandbox / ".saiverse"))
-    _guard_not_production(_day_sim_args(
-        real=True, db_file=str(sandbox / "user_data" / "database" / "saiverse.db"),
-    ))
-
-
-def test_day_sim_real_without_env_is_refused_even_with_out(fake_home, tmp_path):
-    # --real の manager はペルソナの記憶と建物ログを SAIVERSE_HOME に書き、
-    # --db-file 省略時は ~/.saiverse/user_data の本番 DB を開く
-    from scripts.run_day_sim import _guard_not_production
-
-    with pytest.raises(ProductionPathError, match="SAIVERSE_USER_DATA_DIR="):
-        _guard_not_production(_day_sim_args(real=True, out=str(tmp_path / "report.md")))
-
-
-def test_day_sim_real_refuses_user_data_dir_in_production(fake_home, sandbox, monkeypatch):
-    from scripts.run_day_sim import _guard_not_production
-
-    monkeypatch.setenv("SAIVERSE_HOME", str(sandbox / ".saiverse"))
-    monkeypatch.setenv("SAIVERSE_USER_DATA_DIR", str(fake_home / ".saiverse" / "user_data"))
-    with pytest.raises(ProductionPathError, match="SAIVERSE_USER_DATA_DIR="):
-        _guard_not_production(_day_sim_args(real=True))
-
-
-@pytest.mark.parametrize("field", ["db_file", "out", "raw_log_out"])
-def test_day_sim_refuses_explicit_paths_in_production(fake_home, sandbox, monkeypatch, field):
-    from scripts.run_day_sim import _guard_not_production
-
-    monkeypatch.setenv("SAIVERSE_HOME", str(sandbox / ".saiverse"))
-    prod_path = str(fake_home / ".saiverse" / "personas" / "quon_city_a" / "x")
-    with pytest.raises(ProductionPathError) as excinfo:
-        _guard_not_production(_day_sim_args(**{field: prod_path}))
-    assert f"--{field.replace('_', '-')}=" in str(excinfo.value)
-    assert "SAIVERSE_HOME=" not in str(excinfo.value)
-
-
-def test_day_sim_main_refuses_before_loading_scenario(fake_home, sandbox, tmp_path, monkeypatch):
-    # シナリオファイルは存在しない。番人より先に読み込みが走れば FileNotFoundError になる
-    import scripts.run_day_sim as run_day_sim
-
-    monkeypatch.setenv("SAIVERSE_HOME", str(sandbox / ".saiverse"))
-    prod_db = fake_home / ".saiverse" / "user_data" / "database" / "saiverse.db"
-    monkeypatch.setattr(sys, "argv", [
-        "run_day_sim.py", "--scenario", str(tmp_path / "missing.json"),
-        "--real", "--db-file", str(prod_db),
-    ])
-    assert run_day_sim.main() == 1
-    assert not prod_db.exists()

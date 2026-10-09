@@ -278,9 +278,10 @@ _LABEL_PERCEPTION = "【知覚】"
 def _message_kind_label(msg: Message) -> str:
     """材料の種別ラベル (arasuji_levels.md §3-4 — 材料には種別を明示する)。
 
-    - 作業セッションのダイジェスト行 (tag 'session_digest' =
-      sea.work_session.DIGEST_TAG。sai_memory は sea に依存できないため
-      リテラル) は「既に要約されたまとめ」であることを LLM に明示する —
+    - ダイジェスト行 (tag 'session_digest' = sea.sluice._CAPTURE_DIGEST_TAG の
+      読み返しのまとめ、および段 1-4 で撤去された作業セッションの旧データ。
+      sai_memory は sea に依存できないためリテラル) は「既に要約された
+      まとめ」であることを LLM に明示する —
       生の会話と同じ扱いで再展開されたり、発言として引用されたりしないため。
     - 機構名義の行 (2026-08-29 裁定で編纂材料に入った): スペル・ツール結果は
       【スペル結果】、システム通知は【通知】。本文が ``[想起:`` で始まる行は

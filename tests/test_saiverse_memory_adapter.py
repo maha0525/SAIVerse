@@ -221,53 +221,9 @@ class OriginEpisodeColumnTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_adapter_get_messages_by_origin_episode(self) -> None:
-        """読み口: origin_episode 厳密フィルタ + 時系列順 + レンダリングに足る列。"""
-
-        class DummyEmbedder:
-            def __init__(self, model: str | None = None, **kwargs) -> None:
-                self.model_name = model
-
-            def embed(self, texts, **kwargs):
-                return [[0.0] * 3 for _ in texts]
-
-        with patch("saiverse_memory.adapter.Embedder", DummyEmbedder):
-            from saiverse_memory.adapter import SAIMemoryAdapter
-            adapter = SAIMemoryAdapter("tester", persona_dir=self.persona_dir)
-            try:
-                def _add(content, ep, ts, role="assistant"):
-                    adapter.append_persona_message({
-                        "role": role,
-                        "content": content,
-                        "timestamp": ts,
-                        "metadata": {"origin_episode": ep} if ep else {},
-                        "line_role": "sub_line",
-                        "scope": "volatile",
-                    })
-
-                _add("2 番目の発話", "episode:1", "2026-07-04T10:05:00+00:00")
-                _add("1 番目の発話", "episode:1", "2026-07-04T10:00:00+00:00")
-                _add("別の出来事の発話", "episode:2", "2026-07-04T10:02:00+00:00")
-                _add("出来事の外の発話", None, "2026-07-04T10:03:00+00:00")
-                _add("スペル結果", "episode:1", "2026-07-04T10:06:00+00:00",
-                     role="system")
-
-                rows = adapter.get_messages_by_origin_episode("episode:1")
-                self.assertEqual(
-                    [r["content"] for r in rows],
-                    ["1 番目の発話", "2 番目の発話", "スペル結果"],
-                )
-                self.assertEqual(rows[2]["role"], "system")
-                self.assertEqual(rows[0]["scope"], "volatile")
-                self.assertEqual(rows[0]["line_role"], "sub_line")
-                self.assertIsInstance(rows[0]["created_at"], int)
-                self.assertEqual(
-                    rows[0]["metadata"], {"origin_episode": "episode:1"},
-                )
-                self.assertEqual(adapter.get_messages_by_origin_episode("episode:9"), [])
-            finally:
-                adapter.close()
-
+    # 旧 test_adapter_get_messages_by_origin_episode は、読み口
+    # (SAIMemoryAdapter.get_messages_by_origin_episode) ごと v0.4 段 1-4 で撤去した。
+    # 列への転記 (層0タグ) は下の test が引き続き守る。
 
 class ThreadTitleAndStatsTest(unittest.TestCase):
     """スレッド一覧の題名・件数・期間 (2026-09-03、スレッド選択 UI が UUID しか出せなかった件)。"""
