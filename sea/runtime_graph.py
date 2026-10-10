@@ -214,13 +214,37 @@ def compile_with_langgraph(
             "[runtime_graph] Pushed Pulse-root line: aspect=%s pulse_id=%s",
             pulse_line_aspect, pulse_id,
         )
-    elif parent_pulse_ctx is not None and line == "sub":
-        # サブライン (run_playbook スペル / spell_args_decider 等, §10.4): WORKER
-        # アスペクトの frame を push する。これでサブ Playbook のノードは何も宣言
-        # しなくても sub_line / volatile / 軽量 になり、書き忘れによる main_line
-        # 汚染が原理的に起きない。pop は finally で行う。
+    elif line == "sub" or (
+        isolate_pulse_context and parent.get("_force_lightweight_model")
+    ):
+        # サブライン (run_playbook スペル / spell_args_decider / subplay line='sub'
+        # 等, §10.4): WORKER アスペクトの frame を push する。これでサブ Playbook
+        # のノードは何も宣言しなくても sub_line / volatile / 軽量 になり、書き
+        # 忘れによる main_line 汚染が原理的に起きない。pop は finally で行う。
+        #
+        # 親の PulseContext を共有するか分離するか (isolate_pulse_context) に
+        # 関係なく積む。2026-10-10 まで分離したサブラインはフレーム無しで走り、
+        # モデル選択は _force_lightweight_model で軽量を選ぶ一方、tell の発声
+        # ゲートや記憶の metadata は「フレーム無し = 標準」と読んでいた — 同じ
+        # 実行の身分を三者が別々に読む食い違い (Codex 敵対レビュー 2026-10-10
+        # high)。分離した実行でも、軽量を強制されている (WORKER の内側から
+        # 呼ばれた subagent 等) なら同じく WORKER を積む。分離した文脈は空の
+        # スタックで始まるので、系譜は親の現在ラインを parent_id に明示して残す。
         from sea.pulse_context import Aspect
-        _sub_frame = pulse_ctx.push_line(aspect=Aspect.WORKER)
+        _lineage_parent_id = None
+        if isolate_pulse_context:
+            _parent_ctx_for_lineage = parent.get("_pulse_context")
+            try:
+                _parent_frame = (
+                    _parent_ctx_for_lineage.current_line()
+                    if _parent_ctx_for_lineage is not None else None
+                )
+            except Exception:
+                _parent_frame = None
+            _lineage_parent_id = getattr(_parent_frame, "line_id", None)
+        _sub_frame = pulse_ctx.push_line(
+            aspect=Aspect.WORKER, parent_id=_lineage_parent_id,
+        )
         _pushed_sub_line = True
         LOGGER.debug(
             "[runtime_graph] Pushed sub-line (WORKER): line_id=%s parent=%s pulse_id=%s",

@@ -2735,8 +2735,15 @@ def _deliver_single_beat_spell_failures(
     *,
     pulse_id: Optional[str],
     playbook_name: str,
+    header: Optional[str] = None,
+    source: str = "single_beat_spell_failure",
 ) -> int:
     """一回で閉じた Beat で失敗したスペルを、知覚として本人へ届ける。
+
+    ``header`` / ``source``: 知覚の冒頭文と metadata の出自。既定は「唱えて
+    失敗した」回の文面。唱えたスペルが一つも実行されないまま Beat が区切られた
+    回 (生成の直後の割り込み — :func:`_run_spell_loop` の周の頭の取消評価) は
+    同じ器で別の文面を渡す。
 
     一回で閉じる Beat (LLM ノードの ``single_beat``、v0.4 のティック —
     autonomous_behavior_v3.md §5) はスペルの結果を続きの生成に回さない。
@@ -2761,8 +2768,10 @@ def _deliver_single_beat_spell_failures(
         )
         return 0
     lines = [
-        "直前に唱えたスペルのうち、次のものは失敗していました"
-        "（そのときは結果を確かめずに区切りました）。",
+        header or (
+            "直前に唱えたスペルのうち、次のものは失敗していました"
+            "（そのときは結果を確かめずに区切りました）。"
+        ),
     ]
     for rec in failed:
         lines.append("")
@@ -2770,7 +2779,7 @@ def _deliver_single_beat_spell_failures(
         lines.append(f"→ {rec.get('result') or '(結果の文面なし)'}")
     metadata = json.dumps(
         {
-            "source": "single_beat_spell_failure",
+            "source": source,
             "pulse_id": pulse_id,
             "playbook": playbook_name,
             "spells": [str(rec.get("name") or "") for rec in failed],
@@ -2993,6 +3002,11 @@ async def _run_spell_loop(
     保存がそれで下書き行を確定する。そうでない経路は戻り値のセグメントに積んで
     ``stop_error`` で返す。印と通告はどちらの経路でも置かない
     (docs/intent/reply_stop_exit.md — 置くのは返事の一番外側の後始末だけ)。
+
+    **周が始まる前の取消**: 最初の周の頭の取消評価で区切られる回 (生成の直後に
+    ユーザーが割り込んだ回) は、生成し終えた本文を記憶へ書いてから投げる —
+    記憶だけが行き先の器 (ティック等) で本文が消えないように
+    (``_keep_generated_body_before_first_round_stop``)。
     """
     from sea.pulse_context import PulseLogEntry
 
@@ -3141,6 +3155,140 @@ async def _run_spell_loop(
             closing_reasoning_details=pending_reasoning_details,
             stop_error=exc,
         )
+
+    def _keep_generated_body_before_first_round_stop() -> None:
+        """周が一つも始まる前に取消で区切られる回の、生成し終えた本文の保存。
+
+        ループに入った時点で ``text`` (呼び出し元が生成し終えた最初の本文) は
+        もう課金済みの生成物。周の頭の取消評価がここで投げると、本文の記憶
+        への書き込み (周の頭で行う) にも呼び出し元の memorize にも届かず、
+        本文も Pulse ログも消える (Codex 敵対レビュー 2026-10-10 high —
+        ティックは speak=false なので早期の吹き出しも無い)。Beat の規律
+        (生成が完走した Beat は記録まで終える) に従い、投げる前に本文を
+        記憶へ書く。席は従来どおり譲る (保存後に呼び出し側が投げる)。
+
+        書かない条件:
+
+        - **下書き行のある経路** (``pipeline_streaming_state`` 非 None =
+          speak=true のストリーミング): 止まった周の本文は ``_stop_open_round``
+          が器に置き、Beat の出口の下書き保存 (``_save_draft_on_beat_death`` →
+          ``_save_cut_utterance``) が行と記憶をまとめて書く。ここで書くと二重。
+        - **speak=true のノード** (会話の器)。発話の本文は建物の記録と記憶を
+          対で持つ器で、記憶だけ書くと「本人は言ったと覚えているのに、誰も
+          聞いていない」形になる。非ストリーミングの会話の器で同じ取消が
+          起きた回の扱いは別件 (この関数は記憶だけが行き先の器を守る)。
+        - 本文が空。
+        - スペル行の無い本文で、ノードが memorize を宣言していない / もう
+          書かれている (``_beat_memorized``)。スペル行の無い本文は普段
+          呼び出し元の memorize 節 (``_store_beat_memory``) が書くので、同じ
+          関数・同じ条件で書く。
+
+        スペル行を含む本文は、周の頭の書き込みと同じ形 (前の文 + 正規化した
+        スペル行 + 後ろの文・同じタグ) で書く。一回で閉じる Beat では、唱えた
+        スペルが一つも実行されなかったことを機構の名義の知覚で次の Pulse へ
+        届ける — 本人の記憶には「唱えた」とあるのに世界では何も起きていない
+        食い違いを黙らせないため。
+        """
+        nonlocal _spell_origin_id, _round_memorized
+        if pipeline_streaming_state is not None:
+            return
+        if node_def is not None and getattr(node_def, "speak", None) is True:
+            return
+        if not (isinstance(text, str) and text.strip()):
+            return
+        _pulse_id_now = state.get("_pulse_id")
+        _pulse_ctx_now = state.get("_pulse_context")
+        _node_id = getattr(node_def, "id", "llm") if node_def is not None else "llm"
+        malformed: List[Tuple[str, str, Any]] = []
+        parsed = _parse_spell_lines(text, quiet=True, malformed_out=malformed)
+        # Pulse ログ (pulse_logs) に残す本文。スペル行を含む回は記憶と同じ形。
+        _log_text = text
+        try:
+            if not parsed and not malformed:
+                memorize_cfg = (
+                    getattr(node_def, "memorize", None) if node_def is not None else None
+                )
+                _stored = None
+                if memorize_cfg and not state.get("_beat_memorized"):
+                    if isinstance(memorize_cfg, dict):
+                        _tags = list(memorize_cfg.get("tags") or [])
+                        _scope = memorize_cfg.get("scope")
+                        _line_role = memorize_cfg.get("line_role")
+                    else:
+                        _tags, _scope, _line_role = [], None, None
+                    _stored = _store_beat_memory(
+                        runtime, persona,
+                        text=text, tags=_tags, state=state,
+                        playbook_name=playbook.name, prompt=action_text,
+                        # 印は通常の確定と同じく必ず消費する (残すと次の Beat
+                        # に漏れる)。
+                        interrupted=bool(state.pop(INTERRUPTED_METADATA_KEY, None)),
+                        scope=_scope, line_role=_line_role,
+                        reasoning_text=pending_reasoning_text,
+                        reasoning_details=pending_reasoning_details,
+                    )
+            else:
+                composed = _compose_stopped_round(text, [])
+                memory_text = (composed or {}).get("memory_text") or ""
+                if not memory_text:
+                    return
+                _meta: Dict[str, Any] = {}
+                if pending_reasoning_text:
+                    _meta["reasoning"] = pending_reasoning_text
+                if pending_reasoning_details is not None:
+                    _meta["reasoning_details"] = pending_reasoning_details
+                _stored = runtime._store_memory(
+                    persona, memory_text, role="assistant",
+                    tags=_node_memorize_tags or ["conversation"],
+                    pulse_id=_pulse_id_now, playbook_name=playbook.name,
+                    metadata=_meta or None,
+                    pulse_context=_pulse_ctx_now,
+                    paired_action_text=action_text,
+                    spell_origin_id=None,
+                    spell_seq=1,
+                    return_message_id=True,
+                    beat_state=state,
+                )
+                if _stored:
+                    _round_memorized = True
+                    if isinstance(_stored, str):
+                        _spell_origin_id = _stored
+                        append_presented_message_id(state, _stored)
+                if _single_beat:
+                    _records: List[Dict[str, Any]] = [
+                        {"name": canonicalize_spell_name(p.name), "norm": p.norm,
+                         "result": "未実行", "success": False, "meta": None}
+                        for p in sorted(parsed, key=lambda s: s.m.start())
+                    ] + [
+                        {"name": name, "norm": text[m.start():m.end()],
+                         "result": "未実行", "success": False, "meta": None}
+                        for name, _args_raw, m in malformed
+                    ]
+                    _deliver_single_beat_spell_failures(
+                        persona, _records,
+                        pulse_id=_pulse_id_now, playbook_name=playbook.name,
+                        header=(
+                            "直前に唱えた次のスペルは、実行される前にその時間が"
+                            "区切られたため、どれも実行されていません。"
+                        ),
+                        source="single_beat_spells_not_run",
+                    )
+                _log_text = memory_text
+            if _pulse_ctx_now is not None:
+                _pulse_ctx_now.append(PulseLogEntry(
+                    role="assistant", content=_log_text,
+                    node_id=_node_id, playbook_name=playbook.name,
+                ))
+            LOGGER.info(
+                "[sea][spell] stop before the first round: kept the generated body "
+                "(len=%d, spell lines=%d, stored=%s) before yielding",
+                len(text), len(parsed) + len(malformed), bool(_stored),
+            )
+        except Exception:
+            # 保存の失敗で取消の例外をすり替えない。記録だけ残して席を譲る。
+            LOGGER.exception(
+                "[sea][spell] could not keep the generated body before the stop",
+            )
 
     def _close_streaming_beat(segment: BeatSegment, memory_text: str) -> None:
         """ストリーミング経路で、いま生きている下書き行をこの Beat の本文で確定する。
@@ -3413,6 +3561,11 @@ async def _run_spell_loop(
             # 走り切っていた。ExecutionCancelledException は下の包括 except で
             # 握り潰さず re-raise される (caller = PulseController が中断記録を書く)。
             if _beat_cancel_token is not None and _beat_cancel_token.is_cancelled():
+                if loop_count == 0:
+                    # 周がまだ一つも始まっていない = ``text`` は呼び出し元が
+                    # 生成し終えた最初の本文で、どこにも記録されていない。
+                    # 席を譲る前に記録まで終える (この関数の docstring)。
+                    _keep_generated_body_before_first_round_stop()
                 raise ExecutionCancelledException(
                     message="Execution interrupted between spell rounds",
                     interrupted_by=_beat_cancel_token.interrupted_by,

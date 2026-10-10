@@ -338,7 +338,8 @@ class _TextClient:
 
 def _run_node(monkeypatch, playbook: PlaybookSchema, text: str, *,
               streaming: bool, state_extra: Optional[Dict[str, Any]] = None,
-              spell_results: Optional[Dict[str, tuple]] = None):
+              spell_results: Optional[Dict[str, tuple]] = None,
+              client: Any = None, expect_exc: Any = None):
     runtime = MagicMock()
     runtime.manager.occupants = {"b1": ["p1"]}
     runtime._effective_building_id.return_value = "b1"
@@ -347,7 +348,7 @@ def _run_node(monkeypatch, playbook: PlaybookSchema, text: str, *,
     runtime._get_cache_kwargs.return_value = {}
     runtime._emit_say.return_value = {"message_id": "say-1"}
     runtime._emit_speak_start.return_value = "msg-1"
-    runtime.select_llm_client.return_value = (_TextClient(text), "model-a")
+    runtime.select_llm_client.return_value = (client or _TextClient(text), "model-a")
 
     monkeypatch.setattr(
         runtime_llm, "resolve_execution_context",
@@ -378,7 +379,11 @@ def _run_node(monkeypatch, playbook: PlaybookSchema, text: str, *,
     with patch.object(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_A}), \
          patch.object(runtime_llm, "_run_spell_tool_async",
                       new=_scripted_spell(spell_results or {}, order)):
-        asyncio.run(node(state))
+        if expect_exc is not None:
+            with pytest.raises(expect_exc):
+                asyncio.run(node(state))
+        else:
+            asyncio.run(node(state))
     state["_test_spell_order"] = order
     return runtime, events, state, adapter
 
@@ -454,15 +459,32 @@ def test_the_tick_playbook_declares_its_template_variable_and_free_default():
 # ---------------------------------------------------------------------------
 
 
-def _fake_manager():
+class _RecordingController:
+    """submit された ExecutionRequest を記録し、観測欄を台本どおりに書くフェイク。"""
+
+    def __init__(self, action="execute", outcome="completed", outputs=None, exc=None):
+        self.requests: List[Any] = []
+        self.action, self.outcome, self.outputs, self.exc = action, outcome, outputs, exc
+
+    def submit(self, request):
+        self.requests.append(request)
+        request.dispatch_action = self.action
+        request.runtime_outcome = self.outcome
+        if self.exc is not None:
+            raise self.exc
+        return self.outputs if self.outputs is not None else []
+
+
+def _fake_manager(controller=None):
     from saiverse.saiverse_manager import SAIVerseManager
 
     persona = SimpleNamespace(persona_id="p1", current_building_id="room-7")
     mgr = SimpleNamespace(
         personas={"p1": persona},
         occupants={"room-7": ["p1"]},
-        run_sea_auto=MagicMock(return_value=[]),
+        pulse_controller=controller or _RecordingController(),
     )
+    mgr._submit_tick = SAIVerseManager._submit_tick.__get__(mgr)
     mgr.fire_tick = SAIVerseManager.fire_tick.__get__(mgr)
     return mgr, persona
 
@@ -470,25 +492,50 @@ def _fake_manager():
 def test_fire_tick_runs_the_tick_playbook_as_an_auto_pulse_in_the_current_room():
     mgr, persona = _fake_manager()
     out = mgr.fire_tick("p1", assignment_text="  このティックは挿絵の続き。 ")
-    assert out == []
-    mgr.run_sea_auto.assert_called_once_with(
-        persona, "room-7", ["p1"],
-        meta_playbook="tick", args={"assignment": "このティックは挿絵の続き。"},
-    )
+    assert out == {
+        "action": "execute", "runtime_outcome": "completed", "error": None,
+        "outputs": [],
+    }
+    (request,) = mgr.pulse_controller.requests
+    assert request.type == "auto"
+    assert (request.persona_id, request.building_id) == ("p1", "room-7")
+    assert request.meta_playbook == "tick"
+    assert request.args == {"assignment": "このティックは挿絵の続き。"}
 
 
 @pytest.mark.parametrize("assignment", [None, "", "   "])
 def test_fire_tick_without_assignment_leaves_the_free_time_default(assignment):
     mgr, persona = _fake_manager()
     mgr.fire_tick("p1", assignment_text=assignment)
-    assert mgr.run_sea_auto.call_args.kwargs["args"] is None
+    assert mgr.pulse_controller.requests[0].args is None
 
 
 def test_fire_tick_rejects_an_unknown_persona():
     mgr, _ = _fake_manager()
     with pytest.raises(KeyError):
         mgr.fire_tick("nobody")
-    mgr.run_sea_auto.assert_not_called()
+    assert mgr.pulse_controller.requests == []
+
+
+def test_fire_tick_reports_an_exception_with_the_observed_outcome():
+    """submit が例外を投げても握って型付きで返す (受付の裁定は残す)。"""
+    from llm_clients.exceptions import LLMError
+
+    mgr, _ = _fake_manager(_RecordingController(
+        outcome="error", exc=LLMError("provider down"),
+    ))
+    out = mgr.fire_tick("p1")
+    assert out["action"] == "execute"
+    assert out["runtime_outcome"] == "error"
+    assert "provider down" in out["error"]
+
+
+def test_fire_tick_skips_a_discord_visitor_without_submitting():
+    mgr, persona = _fake_manager()
+    persona.is_discord_visitor = True
+    out = mgr.fire_tick("p1")
+    assert out["action"] == "unavailable" and out["runtime_outcome"] is None
+    assert mgr.pulse_controller.requests == []
 
 
 def test_run_sea_auto_returns_the_submit_result():
@@ -514,13 +561,21 @@ def test_run_sea_auto_returns_the_submit_result():
 def test_the_tick_route_calls_fire_tick():
     from api.routes.people.tick import TickRequest, fire_tick
 
-    mgr = SimpleNamespace(fire_tick=MagicMock(return_value=[]))
+    mgr = SimpleNamespace(fire_tick=MagicMock(return_value={
+        "action": "execute", "runtime_outcome": "completed", "error": None,
+        "outputs": [],
+    }))
     resp = fire_tick("p1", TickRequest(assignment="このティックは日記。"), manager=mgr)
     assert resp.executed is True and resp.persona_id == "p1"
+    assert resp.outcome == "completed"
     mgr.fire_tick.assert_called_once_with("p1", assignment_text="このティックは日記。")
 
-    mgr.fire_tick.return_value = None
-    assert fire_tick("p1", None, manager=mgr).executed is False
+    # 席が埋まって見送られた回: 顛末が無いので受付の裁定が outcome になる
+    mgr.fire_tick.return_value = {
+        "action": "skipped", "runtime_outcome": None, "error": None, "outputs": None,
+    }
+    resp = fire_tick("p1", None, manager=mgr)
+    assert resp.executed is False and resp.outcome == "skipped"
 
     from fastapi import HTTPException
 
@@ -528,3 +583,301 @@ def test_the_tick_route_calls_fire_tick():
     with pytest.raises(HTTPException) as exc_info:
         fire_tick("p1", None, manager=mgr)
     assert exc_info.value.status_code == 404
+
+
+def _real_controller_manager(behavior):
+    """本物の PulseController を通す manager (run_meta_user が behavior() を返す/投げる)。
+
+    構成は tests/test_schedule_dispatch_outcome.py の ``_make_controller`` と同型。
+    """
+    from saiverse.saiverse_manager import SAIVerseManager
+    from sea.pulse_controller import PulseController
+
+    persona = SimpleNamespace(persona_id="p1", current_building_id="room-7")
+
+    def run_meta_user(**kwargs):
+        return behavior()
+
+    sea_runtime = SimpleNamespace(
+        manager=SimpleNamespace(all_personas={"p1": persona}),
+        run_meta_user=run_meta_user,
+    )
+    mgr = SimpleNamespace(
+        personas={"p1": persona}, occupants={"room-7": ["p1"]},
+        pulse_controller=PulseController(sea_runtime),
+    )
+    mgr._submit_tick = SAIVerseManager._submit_tick.__get__(mgr)
+    mgr.fire_tick = SAIVerseManager.fire_tick.__get__(mgr)
+    return mgr
+
+
+def _raise(exc):
+    def _behavior():
+        raise exc
+    return _behavior
+
+
+@pytest.mark.parametrize("behavior,outcome,executed", [
+    # 正常に閉じた無発声のティック: 出力は空でも走りきっている
+    (lambda: [], "completed", True),
+    (lambda: ["ok"], "completed", True),
+    # 関所の閉鎖: Playbook は走っていない (PulseController は [] を返す)
+    ("gate_closed", "gate_closed", False),
+    # 文脈水位の不足: Playbook は走っていない (同じく [])
+    ("floor_unmet", "floor_unmet", False),
+    # 取消: 席を譲った (同じく [])
+    ("cancelled", "cancelled", False),
+])
+def test_the_tick_route_reports_whether_the_tick_ran_to_completion(
+    behavior, outcome, executed,
+):
+    """API の executed は「受付 execute かつ顛末 completed」のときだけ True。
+
+    PulseController は関所閉鎖・水位不足・取消のどれも空配列を返し、正常な
+    無発声のティックも空配列を返しうる — 配列の空判定では区別できない
+    (Codex 敵対レビュー 2026-10-10 medium)。
+    """
+    from api.routes.people.tick import fire_tick
+    from sea.beat_gate import BeatGateClosedError
+    from sea.cancellation import ExecutionCancelledException
+    from sea.runtime_context import WindowFloorUnmetError
+
+    if behavior == "gate_closed":
+        behavior = _raise(BeatGateClosedError("p1", "auto"))
+    elif behavior == "floor_unmet":
+        behavior = _raise(WindowFloorUnmetError("floor unmet"))
+    elif behavior == "cancelled":
+        behavior = _raise(ExecutionCancelledException(interrupted_by="user"))
+    mgr = _real_controller_manager(behavior)
+
+    resp = fire_tick("p1", None, manager=mgr)
+
+    assert resp.executed is executed
+    assert resp.outcome == outcome
+
+
+def test_the_tick_route_reports_a_runtime_error_as_not_executed():
+    from api.routes.people.tick import fire_tick
+    from llm_clients.exceptions import LLMError
+
+    mgr = _real_controller_manager(_raise(LLMError("provider down")))
+    resp = fire_tick("p1", None, manager=mgr)
+    assert resp.executed is False
+    assert resp.outcome == "error"
+    assert "provider down" in resp.error
+
+
+# ---------------------------------------------------------------------------
+# 6. 生成の直後の割り込み — 生成し終えた本文は消さずに席を譲る
+# ---------------------------------------------------------------------------
+
+TICK_NODE = dict(id="tick", memorize=True, speak=False, single_beat=True)
+ACTION_TEXT = "いまは自分の時間です。\n\nこのティックは水やり。"
+
+
+def _run_cancelled_loop(text: str, **node_fields):
+    """周の頭の取消評価で区切られる _run_spell_loop を走らせる。
+
+    取消は生成が終わった後 (ループに入る前) に届いている — 呼び出し元の
+    同期 generate の最中にユーザーが割り込んだ回と同じ形。
+    """
+    from sea.cancellation import CancellationToken, ExecutionCancelledException
+
+    runtime = _LoopRuntime()
+    adapter = _Adapter()
+    persona = SimpleNamespace(persona_id="p1", sai_memory=adapter)
+    pulse_ctx = PulseContext(pulse_id="pulse-1")
+    pulse_ctx.push_line(aspect=Aspect.AUTONOMOUS)
+    token = CancellationToken()
+    token.cancel(interrupted_by="user")
+    state = {"_pulse_id": "pulse-1", "_pulse_context": pulse_ctx,
+             "_cancellation_token": token}
+    order: List[str] = []
+    with patch.object(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_A, SPELL_B}), \
+         patch.object(runtime_llm, "_run_spell_tool_async",
+                      new=_scripted_spell({SPELL_A: ("ok", None, True),
+                                           SPELL_B: ("ok", None, True)}, order)):
+        with pytest.raises(ExecutionCancelledException):
+            asyncio.run(runtime_llm._run_spell_loop(
+                text=text, spell_enabled=True, llm_client=_NoCallClient(),
+                runtime=runtime, persona=persona, building_id="b1", state=state,
+                messages=[], playbook=SimpleNamespace(name="tick"),
+                event_callback=None,
+                node_def=SimpleNamespace(**{**TICK_NODE, **node_fields}),
+                action_text=ACTION_TEXT,
+            ))
+    return SimpleNamespace(
+        runtime=runtime, adapter=adapter, pulse_ctx=pulse_ctx, order=order,
+        state=state,
+    )
+
+
+def test_interrupt_after_generation_keeps_the_tick_body_and_reports_unrun_spells():
+    run = _run_cancelled_loop(TWO_SPELLS)
+
+    # スペルは一つも実行されない (席を譲る — ユーザー発話最優先は変えない)
+    assert run.order == []
+    # 本文は周の頭の書き込みと同じ形で一件だけ記憶に入る
+    assert [c["role"] for c in run.runtime.stored_calls] == ["assistant"]
+    stored = run.runtime.stored_calls[0]
+    assert "少し片付けよう。" in stored["text"] and "これで終わり。" in stored["text"]
+    assert f"name='{SPELL_A}'" in stored["text"]
+    assert f"name='{SPELL_B}'" in stored["text"]
+    assert stored["tags"] == ["conversation"]
+    assert stored["paired_action_text"] == ACTION_TEXT
+    # Pulse ログにも本文が残る
+    assert any(e.role == "assistant" and "少し片付けよう。" in e.content
+               for e in run.pulse_ctx.logs)
+    # 「唱えたのに起きていない」は機構の名義の知覚で次の Pulse へ届く
+    pending = run.adapter.pending()
+    assert len(pending) == 1
+    assert "どれも実行されていません" in pending[0].content
+    assert f"name='{SPELL_A}'" in pending[0].content
+    assert f"name='{SPELL_B}'" in pending[0].content
+    meta = json.loads(pending[0].metadata)
+    assert meta["source"] == "single_beat_spells_not_run"
+    assert meta["spells"] == [SPELL_A, SPELL_B]
+    assert format_perception_message(pending).startswith("[システム通知]\n")
+
+
+def test_interrupt_after_generation_keeps_a_tick_body_without_spells():
+    run = _run_cancelled_loop("今日は静かに過ごそう。")
+
+    assert [c["text"] for c in run.runtime.stored_calls] == ["今日は静かに過ごそう。"]
+    assert run.runtime.stored_calls[0]["paired_action_text"] == ACTION_TEXT
+    # 呼び出し元の memorize と同じ関数で書いた印 (二重書きの鍵)
+    assert run.state.get("_beat_memorized") is True
+    assert run.adapter.pending() == []
+
+
+def test_interrupt_after_generation_reports_nothing_extra_without_single_beat():
+    run = _run_cancelled_loop(TWO_SPELLS, single_beat=False)
+    assert [c["role"] for c in run.runtime.stored_calls] == ["assistant"]
+    assert run.adapter.pending() == []
+
+
+def test_interrupt_after_generation_leaves_the_conversation_vessel_to_its_owner():
+    """speak=true (会話の器) は建物の記録と記憶を対で持つ器。ここでは書かない。"""
+    run = _run_cancelled_loop(TWO_SPELLS, speak=True, single_beat=False)
+    assert run.runtime.stored_calls == []
+
+
+class _CancellingClient(_TextClient):
+    """生成し終えた瞬間にユーザーの割り込みが届くクライアント。"""
+
+    def __init__(self, text: str, token):
+        super().__init__(text)
+        self.token = token
+
+    def generate(self, messages, tools=None, temperature=None, **kwargs):
+        self.token.cancel(interrupted_by="user")
+        return self.text
+
+    def generate_stream(self, messages, tools=(), temperature=None, **kwargs):
+        yield self.text
+        # 最後の chunk を渡し終えた直後に割り込みが届く
+        self.token.cancel(interrupted_by="user")
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("text,expect_in_memory", [
+    (
+        "水をやろう。\n"
+        f"/spell name='{SPELL_A}' args={{\"text\": \"水やり\"}}\n"
+        "あとで様子を見る。",
+        "水をやろう。",
+    ),
+    ("今日は静かに過ごそう。", "今日は静かに過ごそう。"),
+])
+def test_the_tick_node_keeps_its_body_when_interrupted_during_generation(
+    monkeypatch, text, expect_in_memory, streaming,
+):
+    """本物のノード経路で、生成中の割り込みが本文を消さない (同期 / ストリーム)。"""
+    from sea.cancellation import CancellationToken
+
+    token = CancellationToken()
+    runtime, events, state, adapter = _run_node(
+        monkeypatch, _load_playbook("tick"), text, streaming=streaming,
+        state_extra={"_cancellation_token": token},
+        spell_results={SPELL_A: ("記録しました", None, True)},
+        client=_CancellingClient(text, token),
+        expect_exc=Exception,
+    )
+    stored = [c.args[1] for c in runtime._store_memory.call_args_list]
+    assert len(stored) == 1 and expect_in_memory in stored[0]
+    # 席は譲った — スペルは実行されず、建物にも何も出ない
+    assert state["_test_spell_order"] == []
+    assert _building_writes(runtime) == 0
+
+
+# ---------------------------------------------------------------------------
+# 7. tell の拒否・投函後の失敗が、本物のスペル経路を通って失敗の知覚に届く
+# ---------------------------------------------------------------------------
+
+
+def _run_tell_in_a_tick(tmp_path, spell_line: str, *, emit_result=None):
+    from builtin_data.tools.tell import tell
+
+    adapter = _Adapter()
+    tell_runtime = SimpleNamespace(
+        emitted=[],
+        _emit_say=lambda persona, building_id, text, **kw: (
+            tell_runtime.emitted.append(text) or emit_result
+        ),
+    )
+    manager = SimpleNamespace(occupants={"cafe": ["p1"]}, sea_runtime=tell_runtime)
+    persona = SimpleNamespace(
+        persona_id="p1", persona_name="アリス", current_building_id="cafe",
+        sai_memory=adapter, manager_ref=manager,
+        persona_log_path=tmp_path / "log.json",
+    )
+    manager.personas = {"p1": persona}
+    pulse_ctx = PulseContext(pulse_id="pulse-1")
+    pulse_ctx.push_line(aspect=Aspect.AUTONOMOUS)
+    state = {"_pulse_id": "pulse-1", "_pulse_context": pulse_ctx,
+             "_cancellation_token": None, "_persona_obj": persona}
+    with patch.object(runtime_llm, "SPELL_TOOL_NAMES", {"tell"}), \
+         patch.object(runtime_llm, "TOOL_REGISTRY", {"tell": tell}), \
+         patch("saiverse.day_plan.get_user_conversation_state", return_value=False):
+        asyncio.run(runtime_llm._run_spell_loop(
+            text=f"伝えよう。\n{spell_line}", spell_enabled=True,
+            llm_client=_NoCallClient(), runtime=_LoopRuntime(), persona=persona,
+            building_id="cafe", state=state, messages=[],
+            playbook=SimpleNamespace(name="tick"), event_callback=None,
+            node_def=SimpleNamespace(**TICK_NODE),
+        ))
+    return adapter, tell_runtime
+
+
+def test_a_refused_tell_reaches_the_persona_as_a_failure(tmp_path):
+    adapter, tell_runtime = _run_tell_in_a_tick(
+        tmp_path,
+        "/spell name='tell' args={\"target\": \"どこかの誰か\", \"message\": \"こんにちは\"}",
+    )
+    assert tell_runtime.emitted == []
+    pending = adapter.pending()
+    assert len(pending) == 1
+    assert "この場所にいません" in pending[0].content
+
+
+def test_a_tell_that_went_out_but_was_not_recorded_reaches_the_persona(tmp_path):
+    adapter, tell_runtime = _run_tell_in_a_tick(
+        tmp_path,
+        "/spell name='tell' args={\"target\": \"user\", \"message\": \"まはー、聞いて。\"}",
+        emit_result={"role": "assistant"},  # 採番されなかった = 記録に残らず
+    )
+    assert tell_runtime.emitted == ["まはー、聞いて。"]
+    pending = adapter.pending()
+    assert len(pending) == 1
+    assert "履歴に残せませんでした" in pending[0].content
+    assert "慎重に決めてください" in pending[0].content
+
+
+def test_a_successful_tell_sends_no_failure_notice(tmp_path):
+    adapter, tell_runtime = _run_tell_in_a_tick(
+        tmp_path,
+        "/spell name='tell' args={\"target\": \"user\", \"message\": \"まはー、聞いて。\"}",
+        emit_result={"role": "assistant", "message_id": "b:1"},
+    )
+    assert tell_runtime.emitted == ["まはー、聞いて。"]
+    assert adapter.pending() == []

@@ -658,8 +658,9 @@ class SAIVerseManager(
                 2026-05-01 の認知モデル移行以降は **必須**。None で呼ぶと
                 PulseController が ERROR ログを出して何もしない。
                 (旧 SubLineScheduler の track_autonomous 連続 Pulse は
-                自律行動 v2 で廃止 — intent §9.3。v0.4 ではティックの
-                入口 :meth:`fire_tick` がここを通る。)
+                自律行動 v2 で廃止 — intent §9.3。v0.4 のティックの入口
+                :meth:`fire_tick` は顛末を観測するためにここを通らず、
+                ExecutionRequest を自分で組んで submit する。)
             args: Playbook 起動時に渡す引数。
 
         Returns:
@@ -691,14 +692,22 @@ class SAIVerseManager(
 
     def fire_tick(
         self, persona_id: str, assignment_text: Optional[str] = None,
-    ) -> Optional[List[str]]:
+    ) -> Dict[str, Any]:
         """ティックを一発打つ (v0.4 計画 段 2 — 手で打つ入口)。
 
         ティック = ライフ中に間隔で打たれる、本人の自分の時間の 1 Pulse
         (autonomous_behavior_v3.md §5)。``tick`` Playbook を auto Pulse
         (``Aspect.AUTONOMOUS`` = 標準モデル・メインライン・committed) として
-        :meth:`run_sea_auto` へ流す。出力は本人の記憶にだけ残り、建物への
-        発話にはならない。間隔で自動に打つ運転は段 3 で、ここは同期の一発。
+        PulseController へ流す。出力は本人の記憶にだけ残り、建物への発話には
+        ならない。間隔で自動に打つ運転は段 3 で、ここは同期の一発。
+
+        顛末は ExecutionRequest の観測欄 (``dispatch_action`` /
+        ``runtime_outcome``) から読む — スケジュールの発火
+        (saiverse/pulse_dispatcher.py の ``dispatch_schedule_fire``) と同じ形。
+        PulseController の実行は関所の閉鎖・文脈水位の不足・取消・例外のどれも
+        空の list を返し、正常に閉じた無発声のティックも空の list を返しうる
+        ので、戻り値の list では「走ったか」を区別できない (Codex 敵対レビュー
+        2026-10-10 medium)。
 
         Args:
             persona_id: 対象のペルソナ (このプロセスに常駐していること)。
@@ -707,8 +716,18 @@ class SAIVerseManager(
                 (自分のための時間である旨) になる — 問いは渡さない。
 
         Returns:
-            :meth:`run_sea_auto` の戻り値 (実行されたら list、見送り・失敗は
-            None)。
+            ``{"action", "runtime_outcome", "error", "outputs"}``。
+
+            - action: 受付の裁定 "execute" / "queued" / "skipped"、または
+              "unavailable" (PulseController が無い・Discord の来訪者) /
+              "error_before_submit" (受付の裁定の前に例外)。
+            - runtime_outcome: 実行の顛末 "completed" / "gate_closed" /
+              "cancelled" / "floor_unmet" / "error"。実行に入らなかった回は None。
+            - error: 例外の回だけ文字列。
+            - outputs: PulseController の戻り値 (実行の出力 list、または None)。
+
+            ティックが走りきったのは ``action == "execute"`` かつ
+            ``runtime_outcome == "completed"`` の回だけ。
 
         Raises:
             KeyError: ペルソナがこのプロセスに居ない。
@@ -724,18 +743,58 @@ class SAIVerseManager(
             "[tick] firing a tick for persona=%s building=%s (assignment=%s)",
             persona_id, building_id, "given" if args else "free",
         )
-        result = self.run_sea_auto(
-            persona,
-            building_id,
-            self.occupants.get(building_id, []),
-            meta_playbook="tick",
-            args=args or None,
-        )
+        outcome = self._submit_tick(persona, building_id, args or None)
         logging.info(
-            "[tick] tick for persona=%s finished (executed=%s)",
-            persona_id, result is not None,
+            "[tick] tick for persona=%s finished (action=%s outcome=%s%s)",
+            persona_id, outcome["action"], outcome["runtime_outcome"],
+            f" error={outcome['error']}" if outcome["error"] else "",
         )
-        return result
+        return outcome
+
+    def _submit_tick(
+        self, persona, building_id: str, args: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """ティックの auto Pulse を submit し、観測欄から顛末を組む (:meth:`fire_tick`)。"""
+        # 遅延 import: saiverse → sea の import 循環を避ける
+        # (saiverse/pulse_dispatcher.py の dispatch_schedule_fire と同じ流儀)。
+        from sea.pulse_controller import ExecutionRequest
+
+        if getattr(persona, "is_discord_visitor", False):
+            # 来訪者の Pulse は DiscordConnector が扱う (:meth:`run_sea_auto` と
+            # 同じ見張り)。
+            return {"action": "unavailable", "runtime_outcome": None,
+                    "error": None, "outputs": None}
+        pulse_controller = getattr(self, "pulse_controller", None)
+        if pulse_controller is None:
+            return {"action": "unavailable", "runtime_outcome": None,
+                    "error": None, "outputs": None}
+        request = ExecutionRequest(
+            type="auto",
+            persona_id=persona.persona_id,
+            building_id=building_id,
+            meta_playbook="tick",
+            args=args,
+        )
+        try:
+            outputs = pulse_controller.submit(request)
+        except Exception as exc:
+            logging.exception("[tick] submitting the tick failed: %s", exc)
+            return {
+                "action": request.dispatch_action or "error_before_submit",
+                # 走りきった後の後処理で転んだ回は、完走の事実を優先する
+                # (dispatch_schedule_fire と同じ裁定)。
+                "runtime_outcome": (
+                    "completed" if request.runtime_outcome == "completed" else "error"
+                ),
+                "error": str(exc) or type(exc).__name__,
+                "outputs": None,
+            }
+        return {
+            "action": request.dispatch_action,
+            "runtime_outcome": request.runtime_outcome,
+            "error": None,
+            "outputs": outputs,
+        }
 
     def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, args: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, pre_spells: Optional[List[str]] = None, pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None) -> List[str]:
         """Run user input via PulseController.

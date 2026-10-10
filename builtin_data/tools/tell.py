@@ -30,7 +30,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 from tools.context import (
     get_active_manager,
@@ -86,15 +86,28 @@ def _lightweight_refusal(pulse_ctx: Any) -> Optional[str]:
     tier はアクティブなラインの aspect から引く (sea/pulse_context.py の
     ``LineFrame.model_tier``)。Pulse の外 / ラインの無い実行 / aspect の無い
     legacy フレームは標準扱い — ``tier_without_aspect`` が state の無いときに
-    標準を返すのと同じ向き。
+    標準を返すのと同じ向き。軽量で走る経路 (サブライン・分離したサブラインを
+    含む) は sea/runtime_graph.py が必ず WORKER フレームを積むので、ここで
+    フレームの有無を tier の代わりに読んでも食い違わない。
+
+    身分を **確かめられなかった** とき (current_line が例外を投げた) は発声を
+    見送る (fail-closed)。会話中確認と同じ理屈: 声は取り消せないが、見送りは
+    次の機会に唱え直せる。
     """
     frame = None
     if pulse_ctx is not None:
         try:
             frame = pulse_ctx.current_line()
         except Exception:
-            LOGGER.debug("[tell] current_line failed; treating as standard", exc_info=True)
-            frame = None
+            LOGGER.warning(
+                "[tell] current_line failed; refusing to speak (fail-closed)",
+                exc_info=True,
+            )
+            return (
+                "いまどのモードで動いているかを確認できませんでした。この声は"
+                "あなた本人の声としてそのまま相手に届くので、確かめられないまま"
+                "には出せません。今回は見送ります。時間をおいて試せます。"
+            )
     aspect = getattr(frame, "aspect", None)
     if aspect is None or aspect.model_tier != "lightweight":
         return None
@@ -105,8 +118,25 @@ def _lightweight_refusal(pulse_ctx: Any) -> Optional[str]:
     )
 
 
-def tell(target: str, message: str = "") -> str:
-    """宛先を決めて声をかける。``message`` に書いた言葉がそのまま届く。"""
+def _failure(text: str) -> Tuple[str, Dict[str, Any]]:
+    """拒否・失敗の返却形。``meta.error is True`` がツールの論理的失敗の印。
+
+    スペル経路 (sea/runtime_llm.py の ``_run_spell_tool_async`` →
+    ``tools.core.parse_tool_result``) は ``(str, dict)`` の dict を結果の
+    metadata として運び、失敗判定 (``_is_failed_spell_record`` / quick_spell の
+    終端判定) は ``success=False`` か ``meta.error is True`` しか見ない。素の
+    文字列で断ると「成功」に数えられ、一回で閉じる Beat (ティック) では失敗の
+    知覚が本人へ届かない (Codex 敵対レビュー 2026-10-10 medium)。
+    """
+    return text, {"error": True}
+
+
+def tell(target: str, message: str = "") -> Union[str, Tuple[str, Dict[str, Any]]]:
+    """宛先を決めて声をかける。``message`` に書いた言葉がそのまま届く。
+
+    戻り値: 届いて記録にも残った回だけ素の文字列。拒否・失敗 (投函後に記録へ
+    残らなかった回を含む) は ``(文字列, {"error": True})`` — :func:`_failure`。
+    """
     manager = get_active_manager()
     persona_id = get_active_persona_id()
     if manager is None or not persona_id:
@@ -122,21 +152,23 @@ def tell(target: str, message: str = "") -> str:
     refusal = _lightweight_refusal(pulse_ctx)
     if refusal is not None:
         LOGGER.info("[tell] refused from a lightweight line (persona=%s)", persona_id)
-        return refusal
+        return _failure(refusal)
 
     text = (message or "").strip()
     if not text:
-        return "伝える言葉が空です。届けたい言葉を message にそのまま書いてください。"
+        return _failure(
+            "伝える言葉が空です。届けたい言葉を message にそのまま書いてください。"
+        )
 
     building_id = getattr(persona, "current_building_id", None)
     if not building_id:
-        return "いまはどの場所にもいないため、声をかけられません。"
+        return _failure("いまはどの場所にもいないため、声をかけられません。")
 
     target_norm, target_display = _resolve_target(
         manager, persona_id, building_id, target,
     )
     if target_norm is None:
-        return target_display  # 理由文
+        return _failure(target_display)  # 理由文
 
     # 会話中の相手への tell は実行しない (返答との二重発話の防止)。
     # 会話中でも別の相手 (同席ペルソナ / all) への一言は正当なので許す。
@@ -150,19 +182,19 @@ def tell(target: str, message: str = "") -> str:
             LOGGER.warning("[tell] conversation check failed", exc_info=True)
             conversation_state = None
         if conversation_state is None:
-            return (
+            return _failure(
                 "いまユーザーと会話中かどうかを確認できませんでした。行き違いで"
                 "二重に話しかけないよう、今回は見送ります。時間をおいて試せます。"
             )
         if conversation_state:
-            return (
+            return _failure(
                 "ユーザーとはいま会話の最中です。伝えたいことは、"
                 "返答にそのまま書けば届きます。"
             )
 
     runtime = getattr(manager, "sea_runtime", None)
     if runtime is None:
-        return "声を出す仕組み (runtime) が利用できません。"
+        return _failure("声を出す仕組み (runtime) が利用できません。")
 
     pulse_id = getattr(pulse_ctx, "pulse_id", None) or None
 
@@ -226,7 +258,10 @@ def tell(target: str, message: str = "") -> str:
             # 外への配送 (gateway) は履歴と別経路で走るうえ、宛先が
             # 繋がっていない構成では黙って no-op になる — 「届いた」とも
             # 「届いていない」とも言えない。断定せず、判断の材料だけ返す。
-            return (
+            # 失敗の印 (error) を付ける — 一回で閉じる Beat (ティック) は結果を
+            # 続きの生成に回さないので、印が無いとこの文面は本人に届かず、
+            # 二重発話を避ける判断の材料ごと消える。
+            return _failure(
                 f"「{target_display}」への声は、この場の履歴に残せませんでした。"
                 "相手に届いたかどうかも確認できません。もう一度言うと二重に"
                 "聞こえるおそれがあるので、繰り返すかは慎重に決めてください。"
@@ -237,12 +272,12 @@ def tell(target: str, message: str = "") -> str:
         if delivered:
             # 投函の後で転んだ。声はもう出したあとなので「かけられません
             # でした」は嘘になる (届いた話をもう一度しに行かせてしまう)。
-            return (
+            return _failure(
                 f"「{target_display}」へ声を出したあと、記録の途中で内部エラーが"
                 "起きました。届いているかもしれないので、繰り返すかは慎重に"
                 "決めてください。"
             )
-        return "声をかけられませんでした (内部エラー)。時間をおいて試せます。"
+        return _failure("声をかけられませんでした (内部エラー)。時間をおいて試せます。")
 
 
 def schema() -> ToolSchema:

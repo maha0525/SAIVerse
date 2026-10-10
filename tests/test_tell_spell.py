@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -92,6 +92,20 @@ def _ctx(manager, pulse_ctx: Any = "default", event_callback=None):
         pulse_context=pulse_ctx, event_callback=event_callback,
     ):
         yield
+
+
+def _failure_text(result) -> str:
+    """拒否・失敗の返却形 ``(文字列, {"error": True})`` を検査して文字列を返す。
+
+    スペル経路の失敗判定 (``_is_failed_spell_record``) は ``meta.error is True``
+    しか見ないので、素の文字列で断ると「成功」に数えられる (Codex 敵対レビュー
+    2026-10-10 medium)。
+    """
+    assert isinstance(result, tuple) and len(result) == 2, result
+    text, meta = result
+    assert meta == {"error": True}
+    assert isinstance(text, str) and text
+    return text
 
 
 def _conversation_state(state):
@@ -165,7 +179,7 @@ def test_tell_rejects_an_empty_message(message):
 
     manager, runtime = _make_env()
     with _ctx(manager), _conversation_state(False):
-        result = tell(target="user", message=message)
+        result = _failure_text(tell(target="user", message=message))
 
     assert "伝える言葉が空です" in result
     assert runtime.emitted == []
@@ -183,12 +197,87 @@ def test_tell_is_refused_from_a_lightweight_line():
     pulse_ctx = _pulse(Aspect.CONVERSATION)
     pulse_ctx.push_line(aspect=Aspect.WORKER)  # run_playbook のサブライン
     with _ctx(manager, pulse_ctx), _conversation_state(False):
-        result = tell(target="user", message="まはー、聞いて。")
+        result = _failure_text(tell(target="user", message="まはー、聞いて。"))
 
     assert "分身モード" in result
     assert "本体の時間に唱えてください" in result
     assert runtime.emitted == []
     assert not [e for e in pulse_ctx.logs if e.node_id == "tell_speech"]
+
+
+def test_tell_is_withheld_when_the_line_cannot_be_confirmed():
+    """いまのラインを読めない (current_line が例外) ときは発声しない (fail-closed)。
+
+    身分を確かめられないまま本人の声を出すと、軽量文脈の言葉が届きうる。
+    声は取り消せないが、見送りは次の機会に唱え直せる。
+    """
+    from builtin_data.tools.tell import tell
+
+    manager, runtime = _make_env()
+
+    class _BrokenLines(PulseContext):
+        def current_line(self):
+            raise RuntimeError("line stack is broken")
+
+    pulse_ctx = _BrokenLines(pulse_id=PULSE_ID)
+    with _ctx(manager, pulse_ctx), _conversation_state(False):
+        result = _failure_text(tell(target="user", message="まはー、聞いて。"))
+
+    assert "確認できませんでした" in result
+    assert "見送" in result
+    assert runtime.emitted == []
+
+
+def test_tell_is_refused_from_an_isolated_sub_line():
+    """分離したサブライン (subplay line='sub' / isolate_pulse_context) からも投函しない。
+
+    2026-10-10 まで分離したサブラインはフレーム無しで走り、モデル選択は軽量を
+    選ぶのに tell は「フレーム無し = 標準」と読んで通していた (Codex 敵対
+    レビュー high)。所有者 (sea/runtime_graph.py) が分離した文脈にも WORKER
+    フレームを積むので、本物のグラフ入口を通した実行で tell が断る。
+    """
+    from builtin_data.tools.tell import tell
+    from sea import runtime_graph
+
+    manager, runtime = _make_env()
+    parent_ctx = _pulse(Aspect.AUTONOMOUS)
+    box: Dict[str, Any] = {}
+
+    async def compiled(state, config):
+        sub_ctx = state["_pulse_context"]
+        box["sub_ctx"] = sub_ctx
+        box["frame"] = sub_ctx.current_line()
+        with _ctx(manager, sub_ctx), _conversation_state(False):
+            box["result"] = tell(target="user", message="まはー、聞いて。")
+        return state
+
+    graph_runtime = MagicMock()
+    graph_runtime._is_spell_enabled_for_persona.return_value = False
+    playbook = SimpleNamespace(
+        name="sub", start_node="n", input_schema=[], output_schema=None,
+        report_template=None,
+    )
+    with patch.object(runtime_graph, "compile_playbook", lambda playbook, **kw: compiled):
+        runtime_graph.compile_with_langgraph(
+            graph_runtime, playbook, SimpleNamespace(persona_id=PERSONA_ID, sai_memory=None),
+            BUILDING, None, False, [], PULSE_ID,
+            parent_state={
+                "_pulse_context": parent_ctx, "_pulse_id": PULSE_ID,
+                "_force_lightweight_model": True,
+            },
+            isolate_pulse_context=True, line="sub",
+        )
+
+    # 分離した文脈 (親とは別の PulseContext) に WORKER フレームが積まれている
+    assert box["sub_ctx"] is not parent_ctx
+    assert box["frame"] is not None and box["frame"].aspect is Aspect.WORKER
+    # 系譜は親の現在ラインを指す
+    assert box["frame"].parent_id == parent_ctx.current_line().line_id
+    # 発声は断られ、建物へは何も出ない
+    assert "分身モード" in _failure_text(box["result"])
+    assert runtime.emitted == []
+    # 終了後は積んだフレームが下ろされている
+    assert box["sub_ctx"].current_line() is None
 
 
 @pytest.mark.parametrize("pulse_ctx", [None, "legacy"])
@@ -214,7 +303,7 @@ def test_tell_unknown_target_returns_reason_without_emitting():
 
     manager, runtime = _make_env()
     with _ctx(manager):
-        result = tell(target="どこかの誰か", message="こんにちは")
+        result = _failure_text(tell(target="どこかの誰か", message="こんにちは"))
 
     assert "この場所にいません" in result
     assert "ベル" in result  # 声をかけられる相手の提示
@@ -226,7 +315,7 @@ def test_tell_user_during_conversation_is_noop_with_guidance():
 
     manager, runtime = _make_env()
     with _ctx(manager), _conversation_state(True):
-        result = tell(target="user", message="まはー、聞いて。")
+        result = _failure_text(tell(target="user", message="まはー、聞いて。"))
 
     assert "会話の最中" in result
     assert "返答" in result
@@ -242,7 +331,7 @@ def test_tell_user_is_withheld_when_conversation_state_is_unknown():
 
     manager, runtime = _make_env()
     with _ctx(manager), _conversation_state(None):
-        result = tell(target="user", message="まはー、聞いて。")
+        result = _failure_text(tell(target="user", message="まはー、聞いて。"))
 
     assert "確認できませんでした" in result
     assert "見送" in result
@@ -279,7 +368,7 @@ def test_tell_reports_history_failure_without_claiming_silence(emit_result):
     manager, runtime = _make_env()
     runtime.emit_result = emit_result
     with _ctx(manager), _conversation_state(False):
-        result = tell(target="user", message="まはー、聞いて。")
+        result = _failure_text(tell(target="user", message="まはー、聞いて。"))
 
     assert "履歴に残せませんでした" in result
     # 届いたとも届いていないとも断定しない (外への配送は別経路で、宛先が
@@ -326,7 +415,7 @@ def test_tell_after_delivery_failure_does_not_claim_nothing_happened():
     pulse_ctx = _ExplodingPulse(pulse_id=PULSE_ID)
     pulse_ctx.push_line(aspect=Aspect.AUTONOMOUS)
     with _ctx(manager, pulse_ctx), _conversation_state(False):
-        result = tell(target="user", message="まはー、聞いて。")
+        result = _failure_text(tell(target="user", message="まはー、聞いて。"))
 
     assert "声を出したあと" in result
     assert "声をかけられませんでした" not in result

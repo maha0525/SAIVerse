@@ -33,9 +33,17 @@ class TickRequest(BaseModel):
 
 class TickResponse(BaseModel):
     persona_id: str
-    # True = Pulse が実行された (席が空いていて走った)。False = 席が埋まって
-    # いて見送られた・実行の前に失敗した (詳細は backend.log の [tick] 行)。
+    # True = ティックが受け付けられ、最後まで走りきった (受付 execute かつ
+    # 顛末 completed)。それ以外 (席が埋まって見送り・関所の閉鎖・文脈水位の
+    # 不足・取消・例外) は False。空の出力は判定に使わない — 正常に閉じた
+    # 無発声のティックも空を返すため。
     executed: bool
+    # 何が起きたかの一語。実行に入った回は顛末 ("completed" / "gate_closed" /
+    # "cancelled" / "floor_unmet" / "error")、入らなかった回は受付の裁定
+    # ("queued" / "skipped" / "unavailable" / "error_before_submit")。
+    outcome: str
+    # 例外の回だけ (詳細は backend.log の [tick] 行)。
+    error: Optional[str] = None
 
 
 @router.post("/{persona_id}/tick", response_model=TickResponse)
@@ -52,4 +60,11 @@ def fire_tick(
         raise HTTPException(
             status_code=404, detail=f"persona {persona_id} がロードされていません",
         )
-    return TickResponse(persona_id=persona_id, executed=result is not None)
+    action = result.get("action")
+    runtime_outcome = result.get("runtime_outcome")
+    return TickResponse(
+        persona_id=persona_id,
+        executed=(action == "execute" and runtime_outcome == "completed"),
+        outcome=str(runtime_outcome or action or "unknown"),
+        error=result.get("error"),
+    )
