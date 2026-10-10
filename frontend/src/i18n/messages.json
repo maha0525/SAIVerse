@@ -2220,12 +2220,12 @@
     "en": "When enabled, images, audio and videos are analyzed before being used to recall memories. This adds a few seconds to replies."
   },
   "components.GlobalSettingsModal.text031": {
-    "ja": "Gemini 自動キャッシュ（実験的）",
-    "en": "Gemini automatic caching (experimental)"
+    "ja": "Gemini キャッシュ（実験的）",
+    "en": "Gemini caching (experimental)"
   },
   "components.GlobalSettingsModal.text032": {
-    "ja": "全ての Gemini 呼び出しでキャッシュを自動作成し、入力トークンをキャッシュ価格にします。保持秒数が 0 のときは応答後すぐ削除します。",
-    "en": "Automatically create a cache for each Gemini call to use cached input pricing. With retention set to 0, the cache is deleted immediately after the reply."
+    "ja": "Gemini の呼び出しでキャッシュを使い、入力トークンをキャッシュ価格にします。下の三つから選びます。",
+    "en": "Use caches for Gemini calls so input tokens are billed at the cached price. Choose one of the three options below."
   },
   "components.GlobalSettingsModal.text033": {
     "ja": "応答後の保持秒数",
@@ -2510,6 +2510,38 @@
   "components.GlobalSettingsModal.text114": {
     "ja": "{p1}〜{p2} 秒。既定は 5 秒。保存すると次のターンから効きます。",
     "en": "{p1}-{p2} seconds. The default is 5. It takes effect from the next turn."
+  },
+  "components.GlobalSettingsModal.text115": {
+    "ja": "オフ",
+    "en": "Off"
+  },
+  "components.GlobalSettingsModal.text116": {
+    "ja": "自動キャッシュ",
+    "en": "Automatic caching"
+  },
+  "components.GlobalSettingsModal.text117": {
+    "ja": "継続キャッシュ（高速応答モード）",
+    "en": "Continuous caching (fast reply mode)"
+  },
+  "components.GlobalSettingsModal.text118": {
+    "ja": "キャッシュを使わない。入力は通常料金になる。",
+    "en": "No caching. Input is billed at the normal rate."
+  },
+  "components.GlobalSettingsModal.text119": {
+    "ja": "毎回キャッシュを作ってすぐ消す。料金が最安だが、作る時間だけ返事が遅れる。",
+    "en": "Creates a cache for every call and deletes it right away. Cheapest, but each reply waits while the cache is created."
+  },
+  "components.GlobalSettingsModal.text120": {
+    "ja": "会話の返事ではキャッシュを使い回し、作る時間を待たずに返事する。返事が速くなるが、キャッシュに入らない直近のやり取りの分は通常料金になる。",
+    "en": "Conversation replies reuse the cache, so they don't wait for a cache to be created. Replies come faster, but the most recent exchanges, which are not in the cache, are billed at the normal rate."
+  },
+  "components.GlobalSettingsModal.text121": {
+    "ja": "継続キャッシュの寿命（分）",
+    "en": "Continuous cache lifetime (minutes)"
+  },
+  "components.GlobalSettingsModal.text122": {
+    "ja": "{p1}〜{p2} 分。既定は 5 分。キャッシュは作ってからこの時間で消えます。会話の返事以外の呼び出しは自動キャッシュと同じ動きをします。",
+    "en": "{p1}-{p2} minutes. The default is 5. Each cache expires this long after it is created. Calls other than conversation replies behave as with automatic caching."
   },
   "components.InventoryModal.text001": {
     "ja": "インベントリ: ",

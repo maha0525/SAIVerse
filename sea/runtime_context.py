@@ -47,6 +47,39 @@ def _reframe_autonomous_messages(messages: List[Dict[str, Any]]) -> List[Dict[st
     return result
 
 
+def mark_cache_boundary(
+    history: List[Dict[str, Any]], pulse_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """履歴の中の最後の AI の返事に、キャッシュの境目の内部印を付ける。
+
+    継続キャッシュ (高速応答モード、docs/intent/cache_lifecycle_control.md §3.5) の
+    キャッシュの範囲は「head + 履歴の最後の AI の返事まで」。その後ろ (ユーザーの
+    発言・知覚・リアルタイム情報・自動想起・Pulse 内のスペルの往復) は回ごとに変わる。
+    境目は Pulse が始まる前の履歴で決まるので、同じ Pulse の中の何回目の呼び出しでも
+    同じ位置になる — そのため、この Pulse 自身が書いた AI の発言 (``pulse_id`` が
+    今の Pulse のもの) は境目にしない (Pulse の途中で組み直す入れ子の Playbook 用)。
+
+    印は ``metadata[CACHE_BOUNDARY_METADATA_KEY]``。元の dict は書き換えず、印を付ける
+    1 件だけ複製する (履歴の dict は他の経路と共有されうる)。各 LLM クライアントは
+    metadata を API へ送らないので、印が payload に載ることはない。
+    """
+    from llm_clients.utils import CACHE_BOUNDARY_METADATA_KEY
+
+    for idx in range(len(history) - 1, -1, -1):
+        msg = history[idx]
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        if pulse_id is not None and msg.get("pulse_id") == pulse_id:
+            continue
+        metadata = msg.get("metadata")
+        new_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        new_metadata[CACHE_BOUNDARY_METADATA_KEY] = True
+        marked = list(history)
+        marked[idx] = {**msg, "metadata": new_metadata}
+        return marked
+    return history
+
+
 #: head (前置き) に必ず並べる Section。**用途やラインで出し分けない。**
 #: head は (persona, model) の Session ごとに一つで固定するのが prefix キャッシュ
 #: 共有の土台で、章を出し入れすると同一モデルで head が変わってキャッシュが壊れる。
@@ -632,6 +665,11 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             )
 
                 enriched_recent = _reframe_autonomous_messages(enriched_recent)
+                # 継続キャッシュ (高速応答モード) の境目: ユーザーの発言への返事の
+                # Pulse では、履歴の中の最後の AI の返事に内部印を付ける
+                # (docs/intent/cache_lifecycle_control.md §3.5)。
+                if pulse_type == "user" and not preview_only:
+                    enriched_recent = mark_cache_boundary(enriched_recent, pulse_id)
                 messages.extend(enriched_recent)
 
                 # 実入力の履歴 ID 列 (2026-08-19, sluice の見た集合の一次情報):

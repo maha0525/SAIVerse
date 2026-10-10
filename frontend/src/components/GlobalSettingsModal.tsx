@@ -108,6 +108,13 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const [geminiAutoCacheKeepSeconds, setGeminiAutoCacheKeepSeconds] = useState(0);
     const [geminiAutoCacheKeepInput, setGeminiAutoCacheKeepInput] = useState('0');
     const [geminiAutoCacheKeepMax, setGeminiAutoCacheKeepMax] = useState(3600);
+    // 継続キャッシュ (高速応答モード)。自動キャッシュが ON のときだけ効く。
+    // 画面では「オフ / 自動 / 継続」の三択で、寿命は分単位で入力する (API は秒)。
+    const [geminiContinuousEnabled, setGeminiContinuousEnabled] = useState(false);
+    const [geminiContinuousTtlSeconds, setGeminiContinuousTtlSeconds] = useState(300);
+    const [geminiContinuousTtlInput, setGeminiContinuousTtlInput] = useState('5');
+    const [geminiContinuousTtlMinSeconds, setGeminiContinuousTtlMinSeconds] = useState(60);
+    const [geminiContinuousTtlMaxSeconds, setGeminiContinuousTtlMaxSeconds] = useState(1200);
 
     // ペルソナに送る量 — 全体既定 (GET/PUT /api/config/metabolism-defaults)。
     // 三層 (組み込み既定 < 全体設定 < モデル定義) の真ん中。2026-09-09 に
@@ -431,32 +438,88 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                 if (typeof data.keep_seconds_max === 'number') {
                     setGeminiAutoCacheKeepMax(data.keep_seconds_max);
                 }
+                setGeminiContinuousEnabled(!!data.continuous);
+                if (typeof data.continuous_ttl_seconds === 'number') {
+                    setGeminiContinuousTtlSeconds(data.continuous_ttl_seconds);
+                    setGeminiContinuousTtlInput(String(Math.round(data.continuous_ttl_seconds / 60)));
+                }
+                if (typeof data.continuous_ttl_seconds_min === 'number') {
+                    setGeminiContinuousTtlMinSeconds(data.continuous_ttl_seconds_min);
+                }
+                if (typeof data.continuous_ttl_seconds_max === 'number') {
+                    setGeminiContinuousTtlMaxSeconds(data.continuous_ttl_seconds_max);
+                }
             }
         } catch (e) {
             console.error("Failed to load Gemini auto cache state", e);
         }
     };
 
-    const saveGeminiAutoCache = async (enabled: boolean, keepSeconds: number) => {
+    const saveGeminiAutoCache = async (
+        enabled: boolean,
+        keepSeconds: number,
+        continuous: boolean,
+        continuousTtlSeconds: number,
+    ) => {
         try {
             const res = await apiFetch('/api/config/gemini-auto-cache', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ enabled, keep_seconds: keepSeconds })
+                body: JSON.stringify({
+                    enabled,
+                    keep_seconds: keepSeconds,
+                    continuous,
+                    continuous_ttl_seconds: continuousTtlSeconds,
+                })
             });
             if (res.ok) {
                 const data = await res.json();
                 setGeminiAutoCacheEnabled(!!data.enabled);
                 setGeminiAutoCacheKeepSeconds(data.keep_seconds);
                 setGeminiAutoCacheKeepInput(String(data.keep_seconds));
+                setGeminiContinuousEnabled(!!data.continuous);
+                if (typeof data.continuous_ttl_seconds === 'number') {
+                    setGeminiContinuousTtlSeconds(data.continuous_ttl_seconds);
+                    setGeminiContinuousTtlInput(String(Math.round(data.continuous_ttl_seconds / 60)));
+                }
             }
         } catch (e) {
             console.error("Failed to update Gemini auto cache", e);
         }
     };
 
-    const toggleGeminiAutoCache = () => {
-        saveGeminiAutoCache(!geminiAutoCacheEnabled, geminiAutoCacheKeepSeconds);
+    // 三択: オフ (auto=0, continuous=0) / 自動 (auto=1, continuous=0) / 継続 (auto=1, continuous=1)
+    type GeminiCacheMode = 'off' | 'auto' | 'continuous';
+    const geminiCacheMode: GeminiCacheMode = !geminiAutoCacheEnabled
+        ? 'off'
+        : (geminiContinuousEnabled ? 'continuous' : 'auto');
+
+    const selectGeminiCacheMode = (mode: GeminiCacheMode) => {
+        if (mode === geminiCacheMode) return;
+        saveGeminiAutoCache(
+            mode !== 'off',
+            geminiAutoCacheKeepSeconds,
+            mode === 'continuous',
+            geminiContinuousTtlSeconds,
+        );
+    };
+
+    const commitGeminiContinuousTtl = () => {
+        const minMinutes = Math.ceil(geminiContinuousTtlMinSeconds / 60);
+        const maxMinutes = Math.floor(geminiContinuousTtlMaxSeconds / 60);
+        const parsed = Number.parseInt(geminiContinuousTtlInput, 10);
+        const minutes = Number.isNaN(parsed)
+            ? Math.round(geminiContinuousTtlSeconds / 60)
+            : Math.min(Math.max(parsed, minMinutes), maxMinutes);
+        const nextSeconds = minutes * 60;
+        if (nextSeconds === geminiContinuousTtlSeconds) {
+            setGeminiContinuousTtlInput(String(minutes));
+            return;
+        }
+        saveGeminiAutoCache(
+            geminiAutoCacheEnabled, geminiAutoCacheKeepSeconds,
+            geminiContinuousEnabled, nextSeconds,
+        );
     };
 
     // 数値欄は入力中に勝手に丸めると打ちにくいので、確定 (フォーカスが外れる / Enter) のときだけ保存する
@@ -469,7 +532,10 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             setGeminiAutoCacheKeepInput(String(next));
             return;
         }
-        saveGeminiAutoCache(geminiAutoCacheEnabled, next);
+        saveGeminiAutoCache(
+            geminiAutoCacheEnabled, next,
+            geminiContinuousEnabled, geminiContinuousTtlSeconds,
+        );
     };
 
     // API の一組 {target, high}。global は設定値 (null = 未設定)、builtin は組み込み既定。
@@ -1168,18 +1234,74 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     />
                                 </div>
 
-                                {/* Gemini Auto Cache Toggle */}
+                                {/* Gemini Cache: オフ / 自動キャッシュ / 継続キャッシュ (高速応答モード) */}
                                 <div className={`${styles.toggleContainer} ${styles.toggleContainerStacked}`}>
-                                    <div className={styles.toggleRow}>
-                                        <div>
-                                            <div data-i18n="components.GlobalSettingsModal.text031" className={styles.toggleLabel}>{uiText("components.GlobalSettingsModal.text031")}</div>
-                                            <div data-i18n="components.GlobalSettingsModal.text032" className={styles.toggleDescription}>{uiText("components.GlobalSettingsModal.text032")}</div>
-                                        </div>
-                                        <div
-                                            className={`${styles.toggle} ${geminiAutoCacheEnabled ? styles.active : ''}`}
-                                            onClick={toggleGeminiAutoCache}
-                                        />
+                                    <div>
+                                        <div data-i18n="components.GlobalSettingsModal.text031" className={styles.toggleLabel}>{uiText("components.GlobalSettingsModal.text031")}</div>
+                                        <div data-i18n="components.GlobalSettingsModal.text032" className={styles.toggleDescription}>{uiText("components.GlobalSettingsModal.text032")}</div>
                                     </div>
+                                    <div className={styles.wmPresetArea}>
+                                        <div className={styles.wmPresetRow} role="radiogroup">
+                                            {([
+                                                {
+                                                    mode: 'off',
+                                                    labelKey: "components.GlobalSettingsModal.text115",
+                                                    label: uiText("components.GlobalSettingsModal.text115"),
+                                                    descKey: "components.GlobalSettingsModal.text118",
+                                                    desc: uiText("components.GlobalSettingsModal.text118"),
+                                                },
+                                                {
+                                                    mode: 'auto',
+                                                    labelKey: "components.GlobalSettingsModal.text116",
+                                                    label: uiText("components.GlobalSettingsModal.text116"),
+                                                    descKey: "components.GlobalSettingsModal.text119",
+                                                    desc: uiText("components.GlobalSettingsModal.text119"),
+                                                },
+                                                {
+                                                    mode: 'continuous',
+                                                    labelKey: "components.GlobalSettingsModal.text117",
+                                                    label: uiText("components.GlobalSettingsModal.text117"),
+                                                    descKey: "components.GlobalSettingsModal.text120",
+                                                    desc: uiText("components.GlobalSettingsModal.text120"),
+                                                },
+                                            ] as const).map(opt => (
+                                                <button
+                                                    key={opt.mode}
+                                                    type="button"
+                                                    role="radio"
+                                                    aria-checked={geminiCacheMode === opt.mode}
+                                                    className={`${styles.wmPresetBtn} ${geminiCacheMode === opt.mode ? styles.wmPresetBtnActive : ''}`}
+                                                    onClick={() => selectGeminiCacheMode(opt.mode)}
+                                                >
+                                                    <span data-i18n={opt.labelKey} className={styles.wmPresetLabel}>{opt.label}</span>
+                                                    <span data-i18n={opt.descKey} className={styles.wmPresetNums}>{opt.desc}</span>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    {geminiCacheMode === 'continuous' && (
+                                        <div className={styles.subSetting}>
+                                            <label data-i18n="components.GlobalSettingsModal.text121" className={styles.subSettingLabel} htmlFor="gemini-continuous-cache-ttl">{uiText("components.GlobalSettingsModal.text121")}</label>
+                                            <input
+                                                id="gemini-continuous-cache-ttl"
+                                                type="number"
+                                                min={Math.ceil(geminiContinuousTtlMinSeconds / 60)}
+                                                max={Math.floor(geminiContinuousTtlMaxSeconds / 60)}
+                                                step={1}
+                                                className={styles.subSettingInput}
+                                                value={geminiContinuousTtlInput}
+                                                onChange={e => setGeminiContinuousTtlInput(e.target.value)}
+                                                onBlur={commitGeminiContinuousTtl}
+                                                onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                            />
+                                            <div data-i18n="components.GlobalSettingsModal.text122" className={styles.subSettingHint}>
+                                                {uiText("components.GlobalSettingsModal.text122", {
+                                                    p1: Math.ceil(geminiContinuousTtlMinSeconds / 60),
+                                                    p2: Math.floor(geminiContinuousTtlMaxSeconds / 60),
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
                                     {geminiAutoCacheEnabled && (
                                         <div className={styles.subSetting}>
                                             <label data-i18n="components.GlobalSettingsModal.text033" className={styles.subSettingLabel} htmlFor="gemini-auto-cache-keep">{uiText("components.GlobalSettingsModal.text033")}</label>

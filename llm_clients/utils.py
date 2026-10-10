@@ -7,6 +7,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 _log = logging.getLogger(__name__)
 
+#: 履歴の中の「最後の AI の返事」に付ける内部印 (message の ``metadata`` のキー)。
+#: 継続キャッシュ (高速応答モード) のキャッシュの境目を、SEA から LLM クライアントへ
+#: 伝えるためのもの (docs/intent/cache_lifecycle_control.md §3.5)。各クライアントは
+#: metadata を API へ送らないので、この印が payload に載ることはない。印を読むのは
+#: Gemini クライアントだけで、他のクライアントは素通しする。
+CACHE_BOUNDARY_METADATA_KEY = "__cache_boundary__"
+
 
 def content_to_text(content: Any) -> str:
     """Extract plain text from SDK message payloads."""
