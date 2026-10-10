@@ -115,6 +115,15 @@ quick で撃たれる頻度が高い帳簿系（`core_memory_*` / `note_*` / `tr
 `task_*` / memopedia 編集系）から順次宣言を入れる。丁寧語で作り込まれた
 エラー文面を例外ダンプに置き換えずに済むのがこの形の利点。
 
+宣言はスペルの結果を周の記録へ写すところ（`_run_spell_loop` の
+`valid_results` と pre_spells の `results`、`_declares_logical_failure`）で
+`ok=False` に畳む（2026-10-10）。以前は終端判定だけが metadata を読み、
+`round_records.success` は真のままだったので、スペルの折りたたみ・
+`[Spell Result]` の札・activity_trace が論理的失敗を成功として出していた。
+今は表示・終端判定・一回で閉じる Beat の帰結の知覚が同じ `success` を読む。
+宣言を持つツールは 2026-10-10 時点で `tell` だけで、残りの棚卸しは
+`docs/issues/tool_logical_failures_lack_error_meta.md`。
+
 ### 3.4 失敗時の昇格
 
 **昇格条件**: 全 quick ラウンドでも、1つでも失敗（機械的 `ok=False` または

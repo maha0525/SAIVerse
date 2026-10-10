@@ -723,7 +723,9 @@ class SAIVerseManager(
               "error_before_submit" (受付の裁定の前に例外)。
             - runtime_outcome: 実行の顛末 "completed" / "gate_closed" /
               "cancelled" / "floor_unmet" / "error"。実行に入らなかった回は None。
-            - error: 例外の回だけ文字列。
+            - error: 失敗の回だけ原因の文字列 (submit が投げた例外、または
+              PulseController が握った失敗 — 器の ``tick`` Playbook が取れない等
+              — の ``ExecutionRequest.runtime_error``)。
             - outputs: PulseController の戻り値 (実行の出力 list、または None)。
 
             ティックが走りきったのは ``action == "execute"`` かつ
@@ -792,7 +794,8 @@ class SAIVerseManager(
         return {
             "action": request.dispatch_action,
             "runtime_outcome": request.runtime_outcome,
-            "error": None,
+            # 例外を投げずに失敗で閉じた回 (器の Playbook が取れない等) の原因。
+            "error": request.runtime_error,
             "outputs": outputs,
         }
 

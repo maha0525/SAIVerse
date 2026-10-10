@@ -123,10 +123,11 @@ def _failure(text: str) -> Tuple[str, Dict[str, Any]]:
 
     スペル経路 (sea/runtime_llm.py の ``_run_spell_tool_async`` →
     ``tools.core.parse_tool_result``) は ``(str, dict)`` の dict を結果の
-    metadata として運び、失敗判定 (``_is_failed_spell_record`` / quick_spell の
-    終端判定) は ``success=False`` か ``meta.error is True`` しか見ない。素の
-    文字列で断ると「成功」に数えられ、一回で閉じる Beat (ティック) では失敗の
-    知覚が本人へ届かない (Codex 敵対レビュー 2026-10-10 medium)。
+    metadata として運び、周の記録へ写すところ (``_declares_logical_failure``)
+    で ``meta.error is True`` を失敗 (``success=False``) に畳む。素の文字列で
+    断ると「成功」に数えられ、スペルの折りたたみ・quick_spell の終端判定・
+    一回で閉じる Beat (ティック) の帰結の知覚の失敗の印のどれにも失敗として
+    現れない (Codex 敵対レビュー 2026-10-10 medium)。
     """
     return text, {"error": True}
 
@@ -259,8 +260,8 @@ def tell(target: str, message: str = "") -> Union[str, Tuple[str, Dict[str, Any]
             # 繋がっていない構成では黙って no-op になる — 「届いた」とも
             # 「届いていない」とも言えない。断定せず、判断の材料だけ返す。
             # 失敗の印 (error) を付ける — 一回で閉じる Beat (ティック) は結果を
-            # 続きの生成に回さないので、印が無いとこの文面は本人に届かず、
-            # 二重発話を避ける判断の材料ごと消える。
+            # 続きの生成に回さず、帰結は次の Pulse の知覚で届く。印が無いと
+            # そこで成功として読まれ、二重発話を避ける判断の材料が埋もれる。
             return _failure(
                 f"「{target_display}」への声は、この場の履歴に残せませんでした。"
                 "相手に届いたかどうかも確認できません。もう一度言うと二重に"

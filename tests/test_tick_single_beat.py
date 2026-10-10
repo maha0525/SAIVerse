@@ -8,9 +8,11 @@ docs/intent/autonomous_behavior_v04_plan.md 段 2。
 1. 自律の Pulse (``Aspect.AUTONOMOUS``) は標準モデル・メインライン・committed。
 2. ``single_beat`` の LLM ノードは、生成に含まれたスペルをテキスト順に一度だけ
    実行し、結果を続きの生成に回さない (再呼び出しが起きない)。
-3. 成功の帰結には何もしない (記憶にも続きの材料にも結果を入れない)。失敗だけが
-   知覚 (``[システム通知]``) として次の Pulse の頭へ届く。スペル行と結果は
-   pulse_logs (PulseContext) には残る。
+3. 結果は記憶にも続きの材料にも入れない。帰結は成功も失敗も全部、一通の知覚
+   (``[システム通知]``) として次の Pulse の頭へ届く (失敗した行には印)。
+   スペル行と結果は pulse_logs (PulseContext) にも残る。
+3b. スペル行に挟まれた散文は、記憶・Pulse ログ・建物の記録の本文のどれからも
+   落ちない (通常の完走でも、割り込みでも)。
 4. ティックの器 (``tick`` Playbook) の出力は建物へ書かれない。会話の器
    (``track_user_conversation``) は従来どおり書く。
 5. ``fire_tick`` は ``tick`` を auto Pulse として ``run_sea_auto`` へ流す。
@@ -189,7 +191,7 @@ def test_single_beat_memorizes_the_body_once_and_keeps_results_out_of_memory():
     })
 
     # 本人の記憶に入るのは周の本文 (スペル行込み) の一件だけ。結果の要約
-    # (system 行) は書かれない — 成功の帰結は世界の記録が運ぶ。
+    # (system 行) は書かれない — 帰結は知覚で届く (下の検査)。
     assert [c["role"] for c in run.runtime.stored_calls] == ["assistant"]
     body = run.runtime.stored_calls[0]["text"]
     assert "少し片付けよう。" in body and "これで終わり。" in body
@@ -197,8 +199,42 @@ def test_single_beat_memorizes_the_body_once_and_keeps_results_out_of_memory():
     assert not any("記録しました" in c["text"] for c in run.runtime.stored_calls)
     # 続きの材料にも結果を積まない
     assert not any("[Spell Result" in str(m.get("content")) for m in run.messages)
-    # 成功だけなら知覚は届かない
-    assert run.adapter.pending() == []
+
+
+def test_single_beat_delivers_successful_outcomes_too():
+    """成功の帰結も知覚で届く — 帰結が戻り値にしか無い読む系スペルのため。
+
+    旧裁定「成功は世界の記録が運ぶ」は memory_read・検索・read_url_content の
+    ような読む系で破綻した (2026-10-10 Codex 敵対レビュー 2 巡目 high)。
+    """
+    run = _run_single_beat_loop(TWO_SPELLS, {
+        SPELL_A: ("一つ目を記録しました", None, True),
+        SPELL_B: ("読んだ中身: とても長い本文", None, True),
+    })
+    pending = run.adapter.pending()
+    assert len(pending) == 1
+    item = pending[0]
+    assert item.kind == runtime_llm.SINGLE_BEAT_SPELL_OUTCOMES_KIND
+    assert item.content.startswith("直前の自分の時間に唱えたスペルの帰結です。")
+    # 唱えた順に、正規化したスペル行 + 結果の文面
+    assert item.content.index(f"name='{SPELL_A}'") < item.content.index(f"name='{SPELL_B}'")
+    assert "→ 一つ目を記録しました" in item.content
+    assert "→ 読んだ中身: とても長い本文" in item.content
+    assert runtime_llm.SPELL_OUTCOME_FAILURE_MARK not in item.content
+    meta = json.loads(item.metadata)
+    assert meta["spells"] == [SPELL_A, SPELL_B]
+    assert meta["failed"] == [] and meta["not_run"] == []
+    assert format_perception_message(pending).startswith("[システム通知]\n")
+
+
+def test_single_beat_delivers_a_long_result_without_truncation():
+    long_result = "あ" * 20000
+    run = _run_single_beat_loop(TWO_SPELLS, {
+        SPELL_A: (long_result, None, True),
+        SPELL_B: ("ok", None, True),
+    })
+    (item,) = run.adapter.pending()
+    assert long_result in item.content
 
 
 def test_single_beat_keeps_spell_lines_and_results_in_pulse_logs():
@@ -254,8 +290,10 @@ def test_without_single_beat_the_loop_still_reinvokes():
 
 
 # ---------------------------------------------------------------------------
-# 3. 失敗だけが知覚で次の Pulse の頭へ届く
+# 3. 帰結は成功も失敗も一通の知覚で次の Pulse の頭へ届く (失敗には印)
 # ---------------------------------------------------------------------------
+
+FAIL_MARK = runtime_llm.SPELL_OUTCOME_FAILURE_MARK
 
 
 def test_a_failed_spell_reaches_the_next_pulse_as_a_system_notice():
@@ -267,13 +305,16 @@ def test_a_failed_spell_reaches_the_next_pulse_as_a_system_notice():
     pending = run.adapter.pending()
     assert len(pending) == 1
     item = pending[0]
-    assert item.kind == runtime_llm.SINGLE_BEAT_SPELL_FAILURE_KIND
-    # 失敗した行と失敗の文面だけ。成功した行は載らない。
+    assert item.kind == runtime_llm.SINGLE_BEAT_SPELL_OUTCOMES_KIND
+    # 両方の行が載り、失敗した行の結果にだけ印が付く
+    assert f"name='{SPELL_A}'" in item.content
+    assert "→ 一つ目を記録しました" in item.content
     assert f"name='{SPELL_B}'" in item.content
-    assert "ValueError: boom" in item.content
-    assert f"name='{SPELL_A}'" not in item.content
+    assert f"→ {FAIL_MARK}Spell error (memo_add): ValueError: boom" in item.content
+    assert item.content.count(FAIL_MARK) == 1
     meta = json.loads(item.metadata)
-    assert meta["spells"] == [SPELL_B]
+    assert meta["spells"] == [SPELL_A, SPELL_B]
+    assert meta["failed"] == [SPELL_B]
     assert meta["pulse_id"] == "pulse-1"
     # 本人に見える形は機構の名義 ([システム通知])
     rendered = format_perception_message(pending)
@@ -291,7 +332,24 @@ def test_a_logical_failure_declared_by_the_tool_also_reaches_the_persona():
     })
     pending = run.adapter.pending()
     assert len(pending) == 1
-    assert "該当なし" in pending[0].content
+    assert f"→ {FAIL_MARK}該当なし" in pending[0].content
+    assert json.loads(pending[0].metadata)["failed"] == [SPELL_A]
+
+
+def test_a_logical_failure_is_recorded_as_a_failure_in_the_round_record():
+    """meta.error の宣言は周の記録の success 欄に写る — 表示・activity_trace・
+    Pulse ログの札が同じ真実を読む (Codex 敵対レビュー 2 巡目 high)。"""
+    run = _run_single_beat_loop(TWO_SPELLS, {
+        SPELL_A: ("該当なし", {"error": True}, True),
+        SPELL_B: ("二つ目を記録しました", None, True),
+    })
+    # 建物の記録の本文: 失敗の装い (spellResultError) は A の一件だけ
+    seg_text = run.result.segments[0].text
+    assert seg_text.count("spellResultError") == 1
+    assert seg_text.index("spellResultError") < seg_text.index(f"name='{SPELL_B}'")
+    results_log = [e.content for e in run.pulse_ctx.logs if e.role == "system"]
+    assert f"[Spell Error: {SPELL_A}]" in results_log[0]
+    assert f"[Spell Result: {SPELL_B}]" in results_log[0]
 
 
 def test_an_unknown_spell_counts_as_a_failure():
@@ -301,7 +359,151 @@ def test_an_unknown_spell_counts_as_a_failure():
     pending = run.adapter.pending()
     assert len(pending) == 1
     assert "no_such_spell" in pending[0].content
+    assert FAIL_MARK in pending[0].content
     assert run.client.calls == 0
+
+
+# ---------------------------------------------------------------------------
+# 3b. スペル行に挟まれた散文を捨てない
+# ---------------------------------------------------------------------------
+
+PROSE_BETWEEN = (
+    "本文の頭。\n"
+    f"/spell name='{SPELL_A}' args={{\"text\": \"一つ目\"}}\n"
+    "あいだの散文。\n"
+    f"/spell name='{SPELL_B}' args={{\"text\": \"二つ目\"}}\n"
+    "末尾の散文。"
+)
+
+
+def _assert_prose_in_order(body: str):
+    keys = ["本文の頭。", f"name='{SPELL_A}'", "あいだの散文。",
+            f"name='{SPELL_B}'", "末尾の散文。"]
+    positions = [body.index(k) for k in keys]
+    assert positions == sorted(positions), body
+
+
+def test_prose_between_spells_survives_a_completed_single_beat_round():
+    run = _run_single_beat_loop(PROSE_BETWEEN, {
+        SPELL_A: ("ok-a", None, True), SPELL_B: ("ok-b", None, True),
+    })
+    # 記憶
+    assert [c["role"] for c in run.runtime.stored_calls] == ["assistant"]
+    _assert_prose_in_order(run.runtime.stored_calls[0]["text"])
+    # Pulse ログ
+    (assistant_log,) = [e.content for e in run.pulse_ctx.logs if e.role == "assistant"]
+    _assert_prose_in_order(assistant_log)
+    # 建物の記録になる本文 (Beat のセグメント)
+    _assert_prose_in_order(run.result.segments[0].text)
+
+
+def test_prose_between_spells_survives_a_completed_multi_round_loop():
+    """単発でない通常の周 (続きを生成する) でも、記憶・続きの材料・本文が全量を持つ。"""
+    runtime = _LoopRuntime()
+    persona = SimpleNamespace(persona_id="p1", sai_memory=_Adapter())
+    pulse_ctx = PulseContext(pulse_id="p")
+    pulse_ctx.push_line(aspect=Aspect.CONVERSATION)
+
+    class _Client:
+        def generate(self, messages, tools=None, temperature=None, **kwargs):
+            return "続きです。"
+
+        def consume_usage(self):
+            return None
+
+        def consume_reasoning(self):
+            return []
+
+        def consume_reasoning_details(self):
+            return None
+
+    messages: List[Dict[str, Any]] = []
+    with patch.object(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_A, SPELL_B}), \
+         patch.object(runtime_llm, "_run_spell_tool_async",
+                      new=_scripted_spell({SPELL_A: ("ok", None, True),
+                                           SPELL_B: ("ok", None, True)}, [])):
+        result = asyncio.run(runtime_llm._run_spell_loop(
+            text=PROSE_BETWEEN, spell_enabled=True, llm_client=_Client(),
+            runtime=runtime, persona=persona, building_id="b1",
+            state={"_pulse_id": "p", "_pulse_context": pulse_ctx,
+                   "_cancellation_token": None},
+            messages=messages, playbook=SimpleNamespace(name="pb"),
+            event_callback=None,
+            node_def=SimpleNamespace(id="llm", memorize=None, speak=False),
+        ))
+    _assert_prose_in_order(runtime.stored_calls[0]["text"])
+    _assert_prose_in_order(messages[0]["content"])
+    _assert_prose_in_order(result.segments[0].text)
+    (assistant_log,) = [
+        e.content for e in pulse_ctx.logs
+        if e.role == "assistant" and e.node_id == "spell_round_1"
+    ]
+    _assert_prose_in_order(assistant_log)
+
+
+def test_compose_stopped_round_keeps_prose_between_spells():
+    with patch.object(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_A, SPELL_B}):
+        composed = runtime_llm._compose_stopped_round(
+            PROSE_BETWEEN, [("ok-a", None, True)],
+        )
+    _assert_prose_in_order(composed["memory_text"])
+    _assert_prose_in_order(composed["text"])
+    assert composed["form"] == runtime_llm.SAVED_FORM_SPELL_UNFINISHED
+
+
+def test_prose_between_spells_survives_an_interrupt_after_generation():
+    """生成の直後の割り込み (周の頭の取消) でも、記憶と Pulse ログに全量が残る。"""
+    run = _run_cancelled_loop(PROSE_BETWEEN)
+    assert [c["role"] for c in run.runtime.stored_calls] == ["assistant"]
+    _assert_prose_in_order(run.runtime.stored_calls[0]["text"])
+    (assistant_log,) = [e.content for e in run.pulse_ctx.logs if e.role == "assistant"]
+    _assert_prose_in_order(assistant_log)
+
+
+def test_a_stop_in_the_middle_of_a_single_beat_round_keeps_prose_and_reports_outcomes():
+    """スペルの実行中に止まった周: 本文は全量残り、帰結は受け取った分 + 未着の事実。"""
+    from sea.cancellation import ExecutionCancelledException
+
+    runtime = _LoopRuntime()
+    adapter = _Adapter()
+    persona = SimpleNamespace(persona_id="p1", sai_memory=adapter)
+    pulse_ctx = PulseContext(pulse_id="pulse-1")
+    pulse_ctx.push_line(aspect=Aspect.AUTONOMOUS)
+    three = PROSE_BETWEEN + f"\n/spell name='{SPELL_A}' args={{\"text\": \"三つ目\"}}"
+    calls: List[str] = []
+
+    async def fake(tool_name, tool_args, persona, state, playbook_name,
+                   event_callback, messages=None):
+        calls.append(tool_name)
+        if tool_name == SPELL_B:
+            raise ExecutionCancelledException(interrupted_by="user")
+        return ("ok-a", None, True)
+
+    with patch.object(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_A, SPELL_B}), \
+         patch.object(runtime_llm, "_run_spell_tool_async", new=fake):
+        result = asyncio.run(runtime_llm._run_spell_loop(
+            text=three, spell_enabled=True, llm_client=_NoCallClient(),
+            runtime=runtime, persona=persona, building_id="b1",
+            state={"_pulse_id": "pulse-1", "_pulse_context": pulse_ctx,
+                   "_cancellation_token": None},
+            messages=[], playbook=SimpleNamespace(name="tick"),
+            event_callback=None, node_def=SimpleNamespace(**TICK_NODE),
+        ))
+    assert calls == [SPELL_A, SPELL_B]
+    assert isinstance(result.stop_error, ExecutionCancelledException)
+    # 記憶 (周の頭で書いた本文) と建物の記録の本文
+    _assert_prose_in_order(runtime.stored_calls[0]["text"])
+    _assert_prose_in_order(result.segments[-1].text)
+    # 帰結: A は結果、B は実行中に区切られた事実、3 行目は実行されていない事実
+    (item,) = adapter.pending()
+    assert "→ ok-a" in item.content
+    assert "結果を受け取る前にその時間が区切られました" in item.content
+    assert "その時間が区切られたため、実行されていません。" in item.content
+    assert FAIL_MARK not in item.content  # 来ていない結果を「失敗」と書かない
+    meta = json.loads(item.metadata)
+    assert meta["spells"] == [SPELL_A, SPELL_B, SPELL_A]
+    assert meta["not_run"] == [SPELL_B, SPELL_A]
+    assert meta["failed"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +869,111 @@ def test_the_tick_route_reports_a_runtime_error_as_not_executed():
     assert "provider down" in resp.error
 
 
+def _real_loader_world(tmp_path, rows: List[Dict[str, Any]]):
+    """本物の Playbook ローダー (SEARuntime._load_playbook_for → DB) と本物の
+    PulseController を通す manager。Playbook 表だけを持つ SQLite を使う。"""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from database.models import Base
+    from database.models import Playbook as PlaybookModel
+    from saiverse.saiverse_manager import SAIVerseManager
+    from sea.pulse_controller import PulseController
+    from sea.runtime import SEARuntime
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'playbooks.db'}")
+    Base.metadata.create_all(engine, tables=[PlaybookModel.__table__])
+    Session = sessionmaker(bind=engine)
+    with Session() as session:
+        for row in rows:
+            session.add(PlaybookModel(**row))
+        session.commit()
+
+    persona = SimpleNamespace(
+        persona_name="p", persona_id="p1", model="m", llm_client=object(),
+        current_building_id="room-7",
+        history_manager=SimpleNamespace(add_message=MagicMock(),
+                                        add_to_persona_only=MagicMock()),
+        execution_state={},
+    )
+    mgr = SimpleNamespace(
+        building_histories={"room-7": []}, SessionLocal=Session,
+        personas={"p1": persona}, all_personas={"p1": persona},
+        occupants={"room-7": ["p1"]},
+    )
+    runtime = SEARuntime(mgr)
+    # 窓の前処理は本件の外 (床・読み戻し・非常畳み・応答後の代謝)。
+    runtime.session_lifecycle.maybe_run_window_refill = MagicMock()
+    runtime.session_lifecycle.ensure_window_floor = MagicMock(return_value="skip")
+    runtime.session_lifecycle.maybe_run_emergency_precompaction = MagicMock()
+    runtime.session_lifecycle.maybe_run_metabolism = MagicMock()
+    mgr.sea_runtime = runtime
+    mgr.pulse_controller = PulseController(runtime)
+    mgr._submit_tick = SAIVerseManager._submit_tick.__get__(mgr)
+    mgr.fire_tick = SAIVerseManager.fire_tick.__get__(mgr)
+    return mgr, runtime, persona
+
+
+def _tick_row(**overrides) -> Dict[str, Any]:
+    path = REPO / "builtin_data" / "playbooks" / "public" / "tick.json"
+    nodes_json = path.read_text(encoding="utf-8")
+    row = dict(name="tick", description="", scope="public",
+               schema_json="{}", nodes_json=nodes_json)
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.parametrize("rows", [
+    [],                                                       # 未登録
+    [_tick_row(scope="personal", created_by_persona_id="someone-else")],  # 可視性で除外
+], ids=["unregistered", "not_visible"])
+def test_the_tick_route_reports_an_unavailable_tick_playbook_as_an_error(tmp_path, rows):
+    """器の Playbook が取れない回は completed ではなく error (原因つき)。
+
+    以前は SEARuntime がエラー文字列の list を正常に返し、PulseController が
+    completed と記帳 → API が executed=true を返していた (Codex 敵対レビュー
+    2 巡目 medium)。本物のローダー境界を通して確かめる。
+    """
+    from api.routes.people.tick import fire_tick
+
+    mgr, runtime, persona = _real_loader_world(tmp_path, rows)
+    # 境界が本物であることの確認: ローダーは None に畳む
+    assert runtime._load_playbook_for("tick", persona, "room-7") is None
+
+    resp = fire_tick("p1", None, manager=mgr)
+
+    assert resp.executed is False
+    assert resp.outcome == "error"
+    assert resp.error == "playbook 'tick' is unavailable (not found or not visible)"
+
+
+def test_the_real_loader_returns_a_visible_tick_playbook(tmp_path):
+    """上の二件の対照: 公開の行なら同じローダーが Playbook を返す。"""
+    _mgr, runtime, persona = _real_loader_world(tmp_path, [_tick_row()])
+    pb = runtime._load_playbook_for("tick", persona, "room-7")
+    assert pb is not None and pb.name == "tick"
+
+
+def test_an_unavailable_playbook_in_a_user_pulse_keeps_the_chat_error(tmp_path):
+    """会話の経路: ユーザーに届く形 (error イベント + 文面の戻り値) は従来どおり。
+    顛末だけが completed から error に正される。"""
+    from sea.pulse_controller import ExecutionRequest
+
+    mgr, _runtime, _persona = _real_loader_world(tmp_path, [])
+    events: List[Dict[str, Any]] = []
+    request = ExecutionRequest(
+        type="user", persona_id="p1", building_id="room-7", user_input="こんにちは",
+        meta_playbook="no_such_playbook", event_callback=events.append,
+    )
+    out = mgr.pulse_controller.submit(request)
+
+    assert out == ["指定されたプレイブック 'no_such_playbook' が見つかりません。プレイブックIDを確認してください。"]
+    assert {"type": "error", "code": "playbook_not_found",
+            "meta_playbook": "no_such_playbook"} in events
+    assert request.runtime_outcome == "error"
+    assert "no_such_playbook" in (request.runtime_error or "")
+
+
 # ---------------------------------------------------------------------------
 # 6. 生成の直後の割り込み — 生成し終えた本文は消さずに席を譲る
 # ---------------------------------------------------------------------------
@@ -858,6 +1165,8 @@ def test_a_refused_tell_reaches_the_persona_as_a_failure(tmp_path):
     pending = adapter.pending()
     assert len(pending) == 1
     assert "この場所にいません" in pending[0].content
+    assert FAIL_MARK in pending[0].content
+    assert json.loads(pending[0].metadata)["failed"] == ["tell"]
 
 
 def test_a_tell_that_went_out_but_was_not_recorded_reaches_the_persona(tmp_path):
@@ -873,11 +1182,15 @@ def test_a_tell_that_went_out_but_was_not_recorded_reaches_the_persona(tmp_path)
     assert "慎重に決めてください" in pending[0].content
 
 
-def test_a_successful_tell_sends_no_failure_notice(tmp_path):
+def test_a_successful_tell_reports_its_outcome_without_a_failure_mark(tmp_path):
+    """成功した tell の帰結も届く (冗長でも全部届ける一本の規則を優先)。"""
     adapter, tell_runtime = _run_tell_in_a_tick(
         tmp_path,
         "/spell name='tell' args={\"target\": \"user\", \"message\": \"まはー、聞いて。\"}",
         emit_result={"role": "assistant", "message_id": "b:1"},
     )
     assert tell_runtime.emitted == ["まはー、聞いて。"]
-    assert adapter.pending() == []
+    (item,) = adapter.pending()
+    assert "に声をかけました。" in item.content
+    assert FAIL_MARK not in item.content
+    assert json.loads(item.metadata)["failed"] == []

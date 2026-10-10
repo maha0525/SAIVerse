@@ -22,7 +22,7 @@ from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
 from sea.message_stamp import build_generation_stamp, stamp_generation_metadata
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 from sea.pulse_context import ExecutionContext, default_lightweight_model, resolve_execution_context
-from sea.runtime_context import WindowFloorUnmetError
+from sea.runtime_context import PlaybookUnavailableError, WindowFloorUnmetError
 from sea.runtime_context import prepare_context as prepare_context_impl
 from sea.runtime_engine import RuntimeEngine
 from sea.runtime_context import preview_context as preview_context_impl
@@ -429,7 +429,15 @@ class SEARuntime:
                         "code": "playbook_not_found",
                         "meta_playbook": meta_playbook,
                     })
-                return [f"指定されたプレイブック '{meta_playbook}' が見つかりません。プレイブックIDを確認してください。"]
+                # 器が取れない回は実行の失敗。文字列の list を正常に返すと
+                # PulseController が completed と記帳する (ティック API の
+                # executed=true・schedule の occurrence の消費) ので、型付き例外で
+                # 伝える。ユーザーに見せる文面は例外に載せ、会話の経路では
+                # PulseController がそれを従来どおり返す (PlaybookUnavailableError)。
+                raise PlaybookUnavailableError(
+                    meta_playbook,
+                    outputs=[f"指定されたプレイブック '{meta_playbook}' が見つかりません。プレイブックIDを確認してください。"],
+                )
         else:
             if pulse_type != "user":
                 # 席違いフォールバックの機械検査 (autonomous_pulse_vehicle.md §D)。

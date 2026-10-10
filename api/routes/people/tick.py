@@ -42,7 +42,8 @@ class TickResponse(BaseModel):
     # "cancelled" / "floor_unmet" / "error")、入らなかった回は受付の裁定
     # ("queued" / "skipped" / "unavailable" / "error_before_submit")。
     outcome: str
-    # 例外の回だけ (詳細は backend.log の [tick] 行)。
+    # 失敗の回だけ原因の文面 (例外・器の tick Playbook が取れない等。詳細は
+    # backend.log の [tick] 行)。
     error: Optional[str] = None
 
 

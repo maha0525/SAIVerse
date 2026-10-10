@@ -1329,9 +1329,9 @@ _KIND_HEADERS = {
     "feed": "[フィード]",                  # フィード施設の新着記事 (rss_feed_intake.md)
     "persona_recall": "",                     # 入室時の過去会話想起 (本文が自己完結)
     "surroundings": "",                       # 移動先の様子 (本文が <system> 見出し込みで自己完結)
-    # 一回で閉じる Beat (ティック) で失敗したスペルの知らせ
-    # (sea/runtime_llm.py の _deliver_single_beat_spell_failures)。
-    "spell_failure": "[システム通知]",
+    # 一回で閉じる Beat (ティック) で唱えたスペルの帰結 (成功も失敗も)
+    # (sea/runtime_llm.py の _deliver_single_beat_spell_outcomes)。
+    "spell_outcomes": "[システム通知]",
 }
 _DEFAULT_HEADER = "[システム通知]"
 

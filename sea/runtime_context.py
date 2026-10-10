@@ -188,6 +188,32 @@ class WindowFloorUnmetError(RuntimeError):
     """
 
 
+class PlaybookUnavailableError(RuntimeError):
+    """Pulse に指定された器の Playbook (``meta_playbook``) を取得できなかった。
+
+    DB に未登録・ローダーが可視性 (scope) で除外した・取得の失敗で None に
+    畳んだ回に ``run_meta_user`` が送出する — Playbook は走っていない (ただし
+    この判定は Pulse の頭の処理 — 知覚の消費・建物発言の取り込み・schedule
+    プロンプトの記録 — の後にあるので、それらは済んでいる)。エラーの文字列を
+    list で正常に返すと PulseController が "completed"
+    と記帳し、ティックの API は ``executed=true`` を返し、schedule の
+    occurrence は実行なしで消費される (2026-10-10 Codex 敵対レビュー 2 巡目
+    medium)。型付き例外で実行失敗として伝え、PulseController は
+    ``runtime_outcome="error"`` と原因 (``ExecutionRequest.runtime_error``) を
+    記帳する。
+
+    ``outputs`` は従来の戻り値 (ユーザーに見せる文面の list)。会話の経路
+    (user Pulse) では PulseController がこれをそのまま返し、チャットへの
+    error イベントは ``run_meta_user`` が送出前に一度だけ出す — ユーザーに
+    届く形は従来どおり。
+    """
+
+    def __init__(self, meta_playbook: str, outputs: Optional[List[str]] = None):
+        super().__init__(f"playbook '{meta_playbook}' is unavailable (not found or not visible)")
+        self.meta_playbook = meta_playbook
+        self.outputs: List[str] = list(outputs or [])
+
+
 class PersonaVoiceWithoutHistoryError(RuntimeError):
     """ペルソナ名義の稼働なのに会話履歴が無い状態で LLM を走らせようとした。
 

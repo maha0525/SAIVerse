@@ -621,6 +621,8 @@ def _runtime_failure_is_side_effect_free(exc: Exception) -> bool:
     """submit_meta_judgment の例外が「副作用ゼロ確定」か (A7、D4)。
 
     - BeatGateClosedError: 実行は始まっていない → 副作用ゼロ
+    - PlaybookUnavailableError: 判断 Playbook が取れず実行は始まっていない
+      → 副作用ゼロ (判断は適用されていない)
     - LLMError: 出力なし = 世界適用前 → 副作用ゼロ
     - ExecutionCancelledException / その他: LLM が動いたか不明 → 副作用不明
 
@@ -649,8 +651,9 @@ def _runtime_failure_is_side_effect_free(exc: Exception) -> bool:
     """
     from llm_clients.exceptions import LLMError
     from sea.beat_gate import BeatGateClosedError
+    from sea.runtime_context import PlaybookUnavailableError
 
-    return isinstance(exc, (BeatGateClosedError, LLMError))
+    return isinstance(exc, (BeatGateClosedError, PlaybookUnavailableError, LLMError))
 
 
 def _classify_runtime_failure(

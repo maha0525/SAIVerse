@@ -2712,95 +2712,147 @@ class SpellLoopResult:
     final_stream_error: Optional[Dict[str, Any]] = None
 
 
-#: 一回で閉じる Beat (``single_beat``) のスペルの失敗を本人へ届ける知覚の型。
+#: 一回で閉じる Beat (``single_beat``) で唱えたスペルの帰結を本人へ届ける知覚の型。
 #: 見出しは sai_memory/perception_buffer.py の ``_KIND_HEADERS`` が持つ。
-SINGLE_BEAT_SPELL_FAILURE_KIND = "spell_failure"
+SINGLE_BEAT_SPELL_OUTCOMES_KIND = "spell_outcomes"
+
+#: 帰結の知覚で、失敗した行の結果の頭に添える印。
+SPELL_OUTCOME_FAILURE_MARK = "（失敗）"
 
 
-def _is_failed_spell_record(rec: Dict[str, Any]) -> bool:
-    """スペル 1 行の記録が失敗か (機械的な失敗 / ツールが宣言した論理的な失敗)。
+def _declares_logical_failure(meta: Any) -> bool:
+    """ツールが戻り値の metadata で論理的な失敗を宣言しているか (``{"error": True}``)。
 
-    /quick_spell の終端判定 (quick_spell.md §3.3) と同じ定義 — 文字列の
-    ヒューリスティックは使わない。
+    quick_spell.md §3.3 (2) の規約。文字列のヒューリスティックは使わない。
+    スペルの実行結果を周の記録へ写すところ (``_run_spell_loop`` の
+    ``valid_results`` と pre_spells の ``results``) で ``ok`` に畳み込む —
+    表示 (折りたたみの成否・[Spell Error] の札・activity_trace)・
+    /quick_spell の終端判定・帰結の知覚の失敗の印が同じ一つの真実を読むため。
     """
-    if not rec.get("success"):
-        return True
-    meta = rec.get("meta")
     return isinstance(meta, dict) and meta.get("error") is True
 
 
-def _deliver_single_beat_spell_failures(
+def _splice_spell_spans(
+    text: str, replacements: List[Tuple[Any, str]],
+) -> List[str]:
+    """元本文の非スペル区間を全部残し、スペルの範囲だけを差し替えた部品の列を返す。
+
+    ``replacements`` は ``(スパン, 差し替える文字列)`` の列 (スパンは
+    ``start()`` / ``end()`` を持つ ``re.Match`` か :class:`_SpellSpan`)。
+    スペル行の前・スペル行どうしの間・最後のスペル行の後の散文を一つも捨てない
+    — 本人名義の本文を機構が切り詰めない (2026-10-10 Codex 敵対レビュー 2 巡目
+    high: 旧形は「最初のスペルより前 + 最後のスペルより後」だけを残し、スペル
+    の間の散文を記憶からも Pulse ログからも建物の記録からも落としていた)。
+
+    先頭の散文は末尾の空白だけを、それ以外の散文は前後の空白を落とし、空に
+    なった散文は部品にしない (スペル行の間の改行だけの区間は消える)。呼び出し
+    側が ``"\\n"`` で繋ぐ。周の本文の記憶の姿 (正規化したスペル行)・建物の記録の
+    姿 (スペルごとの ``<user_only>``)・止まった周の本文は、全部これ一つで組む。
+    """
+    parts: List[str] = []
+    cursor = 0
+    for span, replacement in sorted(replacements, key=lambda r: r[0].start()):
+        start = span.start()
+        if start > cursor:
+            prose = text[cursor:start]
+            prose = prose.rstrip() if cursor == 0 else prose.strip()
+            if prose:
+                parts.append(prose)
+        parts.append(replacement)
+        cursor = max(cursor, span.end())
+    tail = text[cursor:].strip() if replacements else text.rstrip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _deliver_single_beat_spell_outcomes(
     persona: Any,
     records: List[Dict[str, Any]],
     *,
     pulse_id: Optional[str],
     playbook_name: str,
     header: Optional[str] = None,
-    source: str = "single_beat_spell_failure",
+    source: str = "single_beat_spell_outcomes",
 ) -> int:
-    """一回で閉じた Beat で失敗したスペルを、知覚として本人へ届ける。
-
-    ``header`` / ``source``: 知覚の冒頭文と metadata の出自。既定は「唱えて
-    失敗した」回の文面。唱えたスペルが一つも実行されないまま Beat が区切られた
-    回 (生成の直後の割り込み — :func:`_run_spell_loop` の周の頭の取消評価) は
-    同じ器で別の文面を渡す。
+    """一回で閉じた Beat で唱えたスペルの帰結を、全部まとめて知覚として本人へ届ける。
 
     一回で閉じる Beat (LLM ノードの ``single_beat``、v0.4 のティック —
-    autonomous_behavior_v3.md §5) はスペルの結果を続きの生成に回さない。
-    成功の帰結は世界の記録 (建物ログ・台帳・生成物) が運ぶので何もしない。
-    失敗だけは本人が知る経路が他に無いので、知覚バッファへ積み、次の Pulse の
-    頭の消費で本人に届ける。文面は機構の名義 (``[システム通知]``) で、本人の
-    名義の文は書かない。
+    autonomous_behavior_v3.md §5) はスペルの結果を続きの生成に回さず、結果の
+    要約を記憶にも書かない。帰結は次の標準 Pulse の頭の知覚消費で本人に届ける
+    (v3 §5「帰結は次のティックの頭 (知覚消費・台帳・報告) が読む」の知覚消費)。
+    **成功も失敗も全部届ける一本の規則** — 旧裁定「成功の帰結は世界の記録が
+    運ぶ」は、帰結が戻り値にしか無い読む系のスペル (memory_read・検索・
+    read_url_content・run_playbook の報告) で破綻した (2026-10-10 Codex 敵対
+    レビュー 2 巡目 high)。どの結果が世界に記録されるかの分類は作らない
+    (成功した tell の「◯◯に声をかけました。」も届く — 冗長でも一本の規則を
+    優先する)。結果の文面は長くても切り詰めない。
 
-    ``records`` は周の記録 (``name`` / ``norm`` / ``result`` / ``success`` /
-    ``meta``)。戻り値は届けた失敗の件数 (積めなかった回は 0)。
+    文面は機構の名義 (``[システム通知]``) で、本人の名義の文は書かない。
+    各行は「正規化したスペル行」+「→ 結果の文面」。失敗した行 (``success``
+    が偽) は結果の頭に :data:`SPELL_OUTCOME_FAILURE_MARK` を添える。
+    ``pending`` が真の行 (結果を受け取る前に区切られた・実行されなかった) は
+    印を添えず、結果の欄にその事実の文を入れて渡す — 来ていない結果を
+    「失敗」とも「済んだ」とも書かない。
+
+    ``header`` / ``source``: 知覚の冒頭文と metadata の出自。唱えたスペルが
+    一つも実行されないまま Beat が区切られた回 (生成の直後の割り込み —
+    :func:`_run_spell_loop` の周の頭の取消評価) は同じ器で別の文面を渡す。
+
+    ``records`` は ``name`` / ``norm`` / ``result`` / ``success`` (/ ``pending``)
+    を持つ dict の列 (テキスト順)。戻り値は届けた行の件数 (積めなかった回は 0)。
     """
-    failed = [rec for rec in records if _is_failed_spell_record(rec)]
-    if not failed:
+    if not records:
         return 0
     adapter = getattr(persona, "sai_memory", None)
     push = getattr(adapter, "push_perception", None)
     if push is None:
         LOGGER.warning(
-            "[sea][spell] single-beat: %d failed spell(s) could not be delivered "
+            "[sea][spell] single-beat: %d spell outcome(s) could not be delivered "
             "(no SAIMemory adapter) persona=%s",
-            len(failed), getattr(persona, "persona_id", None),
+            len(records), getattr(persona, "persona_id", None),
         )
         return 0
-    lines = [
-        header or (
-            "直前に唱えたスペルのうち、次のものは失敗していました"
-            "（そのときは結果を確かめずに区切りました）。"
-        ),
-    ]
-    for rec in failed:
+    lines = [header or "直前の自分の時間に唱えたスペルの帰結です。"]
+    failed: List[str] = []
+    not_run: List[str] = []
+    for rec in records:
+        name = str(rec.get("name") or "")
+        result_text = rec.get("result") or "(結果の文面なし)"
+        if rec.get("pending"):
+            not_run.append(name)
+        elif not rec.get("success"):
+            failed.append(name)
+            result_text = f"{SPELL_OUTCOME_FAILURE_MARK}{result_text}"
         lines.append("")
-        lines.append(str(rec.get("norm") or rec.get("name") or ""))
-        lines.append(f"→ {rec.get('result') or '(結果の文面なし)'}")
+        lines.append(str(rec.get("norm") or name))
+        lines.append(f"→ {result_text}")
     metadata = json.dumps(
         {
             "source": source,
             "pulse_id": pulse_id,
             "playbook": playbook_name,
-            "spells": [str(rec.get("name") or "") for rec in failed],
+            "spells": [str(rec.get("name") or "") for rec in records],
+            "failed": failed,
+            "not_run": not_run,
         },
         ensure_ascii=False,
     )
     try:
-        push(SINGLE_BEAT_SPELL_FAILURE_KIND, "\n".join(lines), metadata=metadata)
+        push(SINGLE_BEAT_SPELL_OUTCOMES_KIND, "\n".join(lines), metadata=metadata)
     except Exception:
         LOGGER.warning(
-            "[sea][spell] single-beat: pushing the spell-failure perception failed "
+            "[sea][spell] single-beat: pushing the spell-outcome perception failed "
             "persona=%s", getattr(persona, "persona_id", None), exc_info=True,
         )
         return 0
     LOGGER.info(
-        "[sea][spell] single-beat: delivered %d failed spell(s) %s as a perception "
-        "for the next pulse (persona=%s)",
-        len(failed), [rec.get("name") for rec in failed],
+        "[sea][spell] single-beat: delivered %d spell outcome(s) %s (failed=%s "
+        "not_run=%s) as a perception for the next pulse (persona=%s)",
+        len(records), [rec.get("name") for rec in records], failed, not_run,
         getattr(persona, "persona_id", None),
     )
-    return len(failed)
+    return len(records)
 
 
 def _spell_display_name(name: str, success: bool) -> str:
@@ -2825,9 +2877,9 @@ def _compose_stopped_round(
 
     - スペル行を含まない本文は、そのまま (言い切った本文。サーバーに切られて
       いたら途中で切れた本文)。
-    - スペル行を含む本文は、周の本文と同じ組み方 (前の文 + スペルごとの
-      ``<user_only>`` + 後ろの文) で、**受け取り済みの結果だけ**を折りたたみに
-      入れる。結果の来ていないスペル (実行の途中で止まった・まだ始まって
+    - スペル行を含む本文は、周の本文と同じ組み方 (:func:`_splice_spell_spans`
+      — 散文は全部残し、スペル行だけをスペルごとの ``<user_only>`` に置き換える)
+      で、**受け取り済みの結果だけ**を折りたたみに入れる。結果の来ていないスペル (実行の途中で止まった・まだ始まって
       いない・名前が通らず結果を返す前に止まった) は、唱えた行だけを残す —
       来ていない結果を「済んだ」とも「起きていない」とも書かない。
     - 形は、結果の来ていないスペルが一つでもあれば「実行が終わる前に止まった
@@ -2855,26 +2907,20 @@ def _compose_stopped_round(
         (t for t in classified if t.name in SPELL_TOOL_NAMES),
         key=lambda s: s.m.start(),
     )
-    spans = sorted(
-        [p.m for p in all_parsed] + [m for _, _, m in malformed],
-        key=lambda s: s.start(),
-    )
-    text_before = text[:spans[0].start()].rstrip()
-    text_after = text[spans[-1].end():].strip()
 
     pending = False
-    blocks: List[Tuple[int, str]] = []
+    blocks: List[Tuple[Any, str]] = []
     for idx, spell in enumerate(valid):
         if idx < len(executed):
             result_text, _meta, ok = executed[idx]
-            blocks.append((spell.m.start(), _build_spell_user_only_block(
+            blocks.append((spell.m, _build_spell_user_only_block(
                 spell.name, spell.args, _spell_display_name(spell.name, ok),
                 result_text, success=ok, spell_line=spell.norm,
             )))
         else:
             pending = True
             # 結果の無い成功形のブロックは、唱えた行だけを出す (折りたたみ無し)。
-            blocks.append((spell.m.start(), _build_spell_user_only_block(
+            blocks.append((spell.m, _build_spell_user_only_block(
                 spell.name, spell.args, _spell_display_name(spell.name, True),
                 "", success=True, spell_line=spell.norm,
             )))
@@ -2882,36 +2928,24 @@ def _compose_stopped_round(
         if spell.name in SPELL_TOOL_NAMES:
             continue
         pending = True
-        blocks.append((spell.m.start(), _build_spell_user_only_block(
+        blocks.append((spell.m, _build_spell_user_only_block(
             spell.name, spell.args, spell.name, "", success=True,
             spell_line=spell.norm,
         )))
     for name, _args_raw, m in malformed:
         pending = True
-        blocks.append((m.start(), _build_spell_user_only_block(
+        blocks.append((m, _build_spell_user_only_block(
             name, {}, name, "", success=True,
             spell_line=text[m.start():m.end()],
         )))
-    blocks.sort(key=lambda b: b[0])
 
-    parts: List[str] = []
-    if text_before:
-        parts.append(text_before)
-    parts.extend(block for _, block in blocks)
-    if text_after:
-        parts.append(text_after)
-
-    spell_lines = sorted(
-        [(p.m.start(), p.norm) for p in all_parsed]
-        + [(m.start(), text[m.start():m.end()]) for _, _, m in malformed],
-        key=lambda t: t[0],
+    spell_lines: List[Tuple[Any, str]] = (
+        [(p.m, p.norm) for p in all_parsed]
+        + [(m, text[m.start():m.end()]) for _, _, m in malformed]
     )
-    memory_text = (
-        text_before + "\n" + "\n".join(line for _, line in spell_lines)
-        + ("\n" + text_after if text_after else "")
-    ).strip()
+    memory_text = "\n".join(_splice_spell_spans(text, spell_lines)).strip()
     return {
-        "text": "\n".join(parts),
+        "text": "\n".join(_splice_spell_spans(text, blocks)),
         "memory_text": memory_text,
         "form": SAVED_FORM_SPELL_UNFINISHED if pending else SAVED_FORM_SPELL_RESULTS,
     }
@@ -2972,9 +3006,9 @@ async def _run_spell_loop(
     含まれるスペルを従来どおりテキスト順に逐次実行したら、結果を続きの生成に
     回さずに閉じる (再呼び出しをしない)。周の本文は従来どおり記憶へ書き、
     スペル行と結果は PulseContext (pulse_logs) に残す。結果の要約は記憶へも
-    続きの生成の材料 (``messages``) へも入れない — 成功の帰結は世界の記録が
-    運ぶ。失敗だけを :func:`_deliver_single_beat_spell_failures` が知覚として
-    次の Pulse の頭へ届ける。
+    続きの生成の材料 (``messages``) へも入れない。帰結は成功も失敗も全部、
+    :func:`_deliver_single_beat_spell_outcomes` が一通の知覚にまとめて次の
+    Pulse の頭へ届ける。
 
     ``initial_building_id``: ラウンド 1 の記録先の部屋。ストリーミング経路では
     **下書き行を作った部屋** を渡す (確定時に引き直さない 2026-06-11 の不変条件を
@@ -3080,17 +3114,50 @@ async def _run_spell_loop(
         """
         executed = list(_round_progress.get("executed") or [])
         valid_spells_now = list(_round_progress.get("valid_spells") or [])
-        if _single_beat and executed and not _round_progress.get("results_memorized"):
-            # 一回で閉じる Beat は結果を記憶へ書かない。受け取り済みの結果の
-            # うち失敗だけを、周を閉じた回と同じく知覚で届ける。
+        unknown_now = list(_round_progress.get("unknown_spells") or [])
+        malformed_now = list(_round_progress.get("malformed_spells") or [])
+        if (
+            _single_beat
+            and (valid_spells_now or unknown_now or malformed_now)
+            and not _round_progress.get("results_memorized")
+        ):
+            # 一回で閉じる Beat は結果を記憶へ書かない。周を閉じた回と同じく、
+            # この周で唱えた全部の行の帰結を知覚で届ける — 受け取り済みの結果は
+            # そのまま、実行の途中で止まった行と、まだ始まっていなかった行は
+            # その事実を (失敗とも済んだとも書かずに)、名前・引数が通らなかった
+            # 行は通常の周と同じ誤りの文面を。
             _round_progress["results_memorized"] = True
-            _deliver_single_beat_spell_failures(
-                persona,
-                [
-                    {"name": spell.name, "norm": spell.norm, "result": result_text,
-                     "success": ok, "meta": meta}
-                    for spell, (result_text, meta, ok) in zip(valid_spells_now, executed)
-                ],
+            _stopped_records: List[Tuple[int, Dict[str, Any]]] = []
+            for idx, spell in enumerate(valid_spells_now):
+                if idx < len(executed):
+                    result_text, _meta, ok = executed[idx]
+                    rec = {"name": spell.name, "norm": spell.norm,
+                           "result": result_text, "success": ok}
+                elif idx == len(executed):
+                    rec = {"name": spell.name, "norm": spell.norm,
+                           "result": "結果を受け取る前にその時間が区切られました"
+                                     "（実行されたかどうかは確かめられていません）。",
+                           "success": False, "pending": True}
+                else:
+                    rec = {"name": spell.name, "norm": spell.norm,
+                           "result": "その時間が区切られたため、実行されていません。",
+                           "success": False, "pending": True}
+                _stopped_records.append((spell.m.start(), rec))
+            for spell in unknown_now:
+                _stopped_records.append((spell.m.start(), {
+                    "name": spell.name, "norm": spell.norm,
+                    "result": _build_unknown_spell_error(spell.name, persona, building_id),
+                    "success": False,
+                }))
+            for name, args_raw, m in malformed_now:
+                _stopped_records.append((m.start(), {
+                    "name": name, "norm": text[m.start():m.end()],
+                    "result": _build_malformed_args_error(name, args_raw),
+                    "success": False,
+                }))
+            _stopped_records.sort(key=lambda r: r[0])
+            _deliver_single_beat_spell_outcomes(
+                persona, [rec for _, rec in _stopped_records],
                 pulse_id=state.get("_pulse_id"), playbook_name=playbook.name,
             )
         if executed and not _round_progress.get("results_memorized"):
@@ -3255,17 +3322,22 @@ async def _run_spell_loop(
                         _spell_origin_id = _stored
                         append_presented_message_id(state, _stored)
                 if _single_beat:
-                    _records: List[Dict[str, Any]] = [
-                        {"name": canonicalize_spell_name(p.name), "norm": p.norm,
-                         "result": "未実行", "success": False, "meta": None}
-                        for p in sorted(parsed, key=lambda s: s.m.start())
+                    _records: List[Tuple[int, Dict[str, Any]]] = [
+                        (p.m.start(), {
+                            "name": canonicalize_spell_name(p.name), "norm": p.norm,
+                            "result": "未実行", "success": False, "pending": True,
+                        })
+                        for p in parsed
                     ] + [
-                        {"name": name, "norm": text[m.start():m.end()],
-                         "result": "未実行", "success": False, "meta": None}
+                        (m.start(), {
+                            "name": name, "norm": text[m.start():m.end()],
+                            "result": "未実行", "success": False, "pending": True,
+                        })
                         for name, _args_raw, m in malformed
                     ]
-                    _deliver_single_beat_spell_failures(
-                        persona, _records,
+                    _records.sort(key=lambda r: r[0])
+                    _deliver_single_beat_spell_outcomes(
+                        persona, [rec for _, rec in _records],
                         pulse_id=_pulse_id_now, playbook_name=playbook.name,
                         header=(
                             "直前に唱えた次のスペルは、実行される前にその時間が"
@@ -3623,41 +3695,24 @@ async def _run_spell_loop(
                 len(malformed_spells), [s[0] for s in malformed_spells],
             )
 
-            # Position-sorted spans of every spell-like line this round
-            # (valid + unknown + malformed) for text_before / text_after.
-            spell_spans = sorted(
-                [entry[2] for entry in all_parsed]
-                + [m for _, _, m in malformed_spells],
-                key=lambda s: s.start(),
-            )
-
-            # text_before = text preceding the FIRST spell of any kind, so a raw
-            # /spell line for an unknown/malformed spell does not leak into the
-            # bubble.
-            text_before = text[:spell_spans[0].start()].rstrip()
-
-            # text_after = text following the LAST spell line. The persona
-            # often writes a natural-language continuation after invoking a
-            # spell (e.g. explaining what it's about to do).  Dropping this
-            # text loses persona utterance from SAIMemory, Building history,
-            # and the retry-LLM context.
-            text_after = text[spell_spans[-1].end():].strip()
-
-            # Canonical assistant message: text_before + ALL spell lines
-            # (valid + unknown normalized, malformed raw, in textual order) +
-            # text_after so the persona's record shows exactly what it tried —
+            # Canonical assistant message: the persona's text with every
+            # spell-like line (valid + unknown normalized, malformed raw)
+            # replaced in place, so the record shows exactly what it tried —
             # including the misfired invocation, which the following
-            # [Spell Error: ...] user message corrects — and any surrounding
-            # prose.
-            _spell_line_entries = [
-                (entry[2].start(), entry[3]) for entry in all_parsed
+            # [Spell Error: ...] user message corrects. ALL prose survives:
+            # before the first spell, between spells, and after the last one
+            # (``_splice_spell_spans`` — the persona's own words are never
+            # trimmed by the mechanism; dropping them would lose utterance
+            # from SAIMemory, Building history, Pulse logs and the retry
+            # context alike).
+            _spell_line_entries: List[Tuple[Any, str]] = [
+                (entry[2], entry[3]) for entry in all_parsed
             ] + [
-                (m.start(), text[m.start():m.end()]) for _, _, m in malformed_spells
+                (m, text[m.start():m.end()]) for _, _, m in malformed_spells
             ]
-            _spell_line_entries.sort(key=lambda t: t[0])
-            all_spell_lines_normalized = "\n".join(line for _, line in _spell_line_entries)
-            assistant_content = (text_before + "\n" + all_spell_lines_normalized
-                                 + ("\n" + text_after if text_after else "")).strip()
+            assistant_content = "\n".join(
+                _splice_spell_spans(text, _spell_line_entries)
+            ).strip()
             messages.append({"role": "assistant", "content": assistant_content})
 
             # judgment (起動の意思決定) を spell 実行の「前」に SAIMemory へ記録する。
@@ -3753,6 +3808,10 @@ async def _run_spell_loop(
             # 結果だけを行に残す材料 (``_stop_open_round``)。
             _round_progress["valid_spells"] = valid_spells
             _round_progress["executed"] = valid_results
+            # 一回で閉じる Beat が止まった周の帰結を届ける材料 (名前・引数が
+            # 通らなかった行も、唱えた行として帰結に載せる)。
+            _round_progress["unknown_spells"] = unknown_spells
+            _round_progress["malformed_spells"] = malformed_spells
             for _spell in valid_spells:
                 _block_msg = check_spell_permission(_spell.name, _active_aspect)
                 if _block_msg is not None:
@@ -3764,10 +3823,16 @@ async def _run_spell_loop(
                     continue
                 # ok=False (実行中の例外 / レジストリ未登録) は success=False として
                 # round_records へ流れ、[Spell Error] + × ブロックになる (Phase 1)。
+                # ツールが metadata で宣言した論理的な失敗 (``{"error": True}``)
+                # もここで ok=False に畳む — 周の記録の success 欄が、表示・
+                # /quick_spell の終端判定・帰結の知覚の失敗の印の共通の真実
+                # (``_declares_logical_failure``)。
                 _rtext, _rmeta, _ok = await _run_spell_tool_async(
                     _spell.name, _spell.args, persona, state, playbook.name,
                     event_callback, messages=messages,
                 )
+                if _declares_logical_failure(_rmeta):
+                    _ok = False
                 valid_results.append((_rtext, _rmeta, _ok))
 
             # Unified, position-ordered record per spell line this round.
@@ -3808,15 +3873,12 @@ async def _run_spell_loop(
 
             # ---- /quick_spell の終端・昇格判定の材料 (quick_spell.md §3.2-3.4) ----
             # 全行 quick + 全成功 → 後段で LLM 再呼び出しをスキップして終端。
-            # 失敗 = 機械的 (success=False: 例外 / 未登録 / unknown / malformed /
-            # ゲート) または論理的 (metadata "error": true のツール宣言)。文字列
-            # ヒューリスティックは使わない (不変条件 4)。
+            # 失敗 = 機械的 (例外 / 未登録 / unknown / malformed / ゲート) または
+            # 論理的 (metadata "error": true のツール宣言)。どちらも上で
+            # success=False に畳んである。文字列ヒューリスティックは使わない
+            # (不変条件 4)。
             _all_quick = all(rec["quick"] for rec in round_records)
-            _round_has_failure = any(
-                (not rec["success"])
-                or (isinstance(rec["meta"], dict) and rec["meta"].get("error") is True)
-                for rec in round_records
-            )
+            _round_has_failure = any(not rec["success"] for rec in round_records)
 
             # メタ判断 Pulse の発動 spell + 結果をバッファに記録 (失敗も含む)
             if _is_meta_judgment_pulse:
@@ -3895,8 +3957,8 @@ async def _run_spell_loop(
             # pulse_id / pulse_context / node_memorize_tags は前倒しブロックで
             # 定義済みのものを再利用する。
             spell_tags = (node_memorize_tags + ["spell"]) if node_memorize_tags else ["conversation", "spell"]
-            # 一回で閉じる Beat は結果の要約を記憶へ書かない (成功は世界の記録が
-            # 運び、失敗は下の知覚で届ける — 書くと失敗が二重に届く)。
+            # 一回で閉じる Beat は結果の要約を記憶へ書かない (帰結は成功も失敗も
+            # 下の知覚で届ける — 書くと二重に届く)。
             if combined_results and not _single_beat:
                 runtime._store_memory(
                     persona, combined_results, role="system",
@@ -3917,30 +3979,22 @@ async def _run_spell_loop(
                     })
 
             # ---- この周 (= Beat) の本文を 1 セグメントに組む ----
-            # 中身は round-leading text_before (= この周の最初の /spell 行より
-            # 前の生テキスト) + spell ごとの ``<user_only>`` ブロック (成功は ☆、
-            # 失敗は ×) + text_after (spell 行の後にペルソナが書いた散文)。
+            # 中身は記憶の姿 (assistant_content) と同じ組み方で、ペルソナの散文を
+            # 全部残し (スペル行の前・間・後)、スペル行だけを spell ごとの
+            # ``<user_only>`` ブロック (成功は ☆、失敗は ×) に置き換えたもの
+            # (``_splice_spell_spans``)。
             # 記録先の部屋は **この周の生成が始まった時点** の部屋 —
             # 直前に実行したスペルで移動していても引き直さない。
-            _segment_parts: List[str] = []
-            if text_before:
-                _segment_parts.append(text_before)
-            for rec in round_records:
-                if rec["success"]:
-                    schema = SPELL_TOOL_SCHEMAS.get(rec["name"])
-                    display = (schema.spell_display_name if schema else "") or rec["name"]
-                else:
-                    display = rec["name"]
-                _segment_parts.append(
-                    _build_spell_user_only_block(
-                        rec["name"], rec["args"], display, rec["result"],
-                        success=rec["success"], spell_line=rec["norm"],
-                    )
-                )
-            if text_after:
-                _segment_parts.append(text_after)
+            _segment_blocks: List[Tuple[Any, str]] = [
+                (rec["m"], _build_spell_user_only_block(
+                    rec["name"], rec["args"],
+                    _spell_display_name(rec["name"], rec["success"]),
+                    rec["result"], success=rec["success"], spell_line=rec["norm"],
+                ))
+                for rec in round_records
+            ]
             _segment = BeatSegment(
-                text="\n".join(_segment_parts),
+                text="\n".join(_splice_spell_spans(text, _segment_blocks)),
                 building_id=current_building_id,
                 llm_usage=pending_llm_usage,
                 occupants=current_occupants,
@@ -3952,11 +4006,12 @@ async def _run_spell_loop(
             segments.append(_segment)
 
             # ---- 一回で閉じる Beat の終端 (autonomous_behavior_v3.md §5) ----
-            # 失敗の有無に関わらず再呼び出しをしない。失敗だけ知覚で次の Pulse の
-            # 頭へ届ける。下書き行の扱いは /quick_spell 終端と同じ — ここでは
-            # 確定させず、締めの Beat として呼び出し元が確定する。
+            # 失敗の有無に関わらず再呼び出しをしない。この周で唱えた全部の行の
+            # 帰結 (成功も失敗も) を一通の知覚で次の Pulse の頭へ届ける。下書き
+            # 行の扱いは /quick_spell 終端と同じ — ここでは確定させず、締めの
+            # Beat として呼び出し元が確定する。
             if _single_beat:
-                _deliver_single_beat_spell_failures(
+                _deliver_single_beat_spell_outcomes(
                     persona, round_records,
                     pulse_id=pulse_id, playbook_name=playbook.name,
                 )
@@ -4636,6 +4691,10 @@ async def _execute_pre_spells(
             name, args, persona, state, playbook.name, event_callback,
             messages=messages, user_configured=_user_written,
         )
+        # ツールが宣言した論理的な失敗も [Spell Error] にする (スペルループの
+        # 周の記録と同じ規則 — ``_declares_logical_failure``)。
+        if _declares_logical_failure(_rmeta):
+            _ok = False
         results.append((_rtext, _rmeta, _ok))
 
     triggered_lines = [norm for _, _, norm in valid_specs]

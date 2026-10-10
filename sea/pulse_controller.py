@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional
 from llm_clients.exceptions import LLMError
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import CancellationToken, ExecutionCancelledException
-from sea.runtime_context import WindowFloorUnmetError
+from sea.runtime_context import PlaybookUnavailableError, WindowFloorUnmetError
 
 if TYPE_CHECKING:
     from sea.runtime import SEARuntime
@@ -120,9 +120,12 @@ class ExecutionRequest:
     #   ("execute" / "queued" / "skipped")
     # - runtime_outcome: _execute_unlocked() が各経路で記入
     #   ("completed" / "gate_closed" / "cancelled" / "floor_unmet" / "error")
-    #   ("completed" / "gate_closed" / "cancelled" / "error")
+    # - runtime_error: runtime_outcome="error" の回の原因 (例外の文面)。
+    #   例外を呼び出し側へ投げない回 (器の Playbook が取れない・その他の例外)
+    #   でも、ティックの API などが原因を返せるようにする。
     dispatch_action: Optional[str] = None
     runtime_outcome: Optional[str] = None
+    runtime_error: Optional[str] = None
 
 
     @property
@@ -526,12 +529,28 @@ class PulseController:
                 "did not run: %s", request.type, persona_id, e,
             )
             return []
-        except LLMError:
+        except PlaybookUnavailableError as e:
+            # 器の Playbook が取れなかった (未登録・可視性で除外・取得失敗)。
+            # 実行は始まっていない — completed と記帳しない (ティック API の
+            # executed=true、schedule の occurrence の消費を防ぐ)。ユーザーへの
+            # error イベントは run_meta_user が送出前に一度だけ出しているので、
+            # ここでは従来の戻り値 (見せる文面の list) をそのまま返す — 会話の
+            # 経路でユーザーに届く形は変わらない。
+            request.runtime_outcome = "error"
+            request.runtime_error = str(e)
+            LOGGER.error(
+                "[PulseController] %s pulse for persona %s did not run: %s",
+                request.type, persona_id, e,
+            )
+            return list(e.outputs)
+        except LLMError as e:
             # Propagate LLM errors to the caller for frontend display
             request.runtime_outcome = "error"
+            request.runtime_error = str(e) or type(e).__name__
             raise
         except Exception as e:
             request.runtime_outcome = "error"
+            request.runtime_error = str(e) or type(e).__name__
             LOGGER.exception(
                 "[PulseController] Error executing %s for persona %s: %s",
                 request.type, persona_id, e

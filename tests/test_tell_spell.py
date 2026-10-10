@@ -97,9 +97,9 @@ def _ctx(manager, pulse_ctx: Any = "default", event_callback=None):
 def _failure_text(result) -> str:
     """拒否・失敗の返却形 ``(文字列, {"error": True})`` を検査して文字列を返す。
 
-    スペル経路の失敗判定 (``_is_failed_spell_record``) は ``meta.error is True``
-    しか見ないので、素の文字列で断ると「成功」に数えられる (Codex 敵対レビュー
-    2026-10-10 medium)。
+    スペル経路の論理的失敗の判定 (``_declares_logical_failure``) は
+    ``meta.error is True`` しか見ないので、素の文字列で断ると「成功」に数えられる
+    (Codex 敵対レビュー 2026-10-10 medium)。
     """
     assert isinstance(result, tuple) and len(result) == 2, result
     text, meta = result

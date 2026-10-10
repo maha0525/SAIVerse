@@ -81,9 +81,15 @@ def test_run_meta_user_returns_error_when_meta_playbook_unresolved() -> None:
     runtime._run_playbook = Mock()
     runtime.session_lifecycle.maybe_run_metabolism = Mock()
 
-    result = runtime.run_meta_user(persona, "hello", "b1", meta_playbook="not_found", event_callback=events.append)
+    # 器が取れない回は型付きの実行失敗 (正常返却すると PulseController が
+    # completed と記帳する)。ユーザーに見せる文面は例外が運び、PulseController
+    # が会話の経路でそのまま返す (tests/test_tick_single_beat.py)。
+    from sea.runtime_context import PlaybookUnavailableError
 
-    assert result == ["指定されたプレイブック 'not_found' が見つかりません。プレイブックIDを確認してください。"]
+    with pytest.raises(PlaybookUnavailableError) as exc_info:
+        runtime.run_meta_user(persona, "hello", "b1", meta_playbook="not_found", event_callback=events.append)
+
+    assert exc_info.value.outputs == ["指定されたプレイブック 'not_found' が見つかりません。プレイブックIDを確認してください。"]
     assert events == [{"type": "error", "code": "playbook_not_found", "meta_playbook": "not_found"}]
     runtime._choose_playbook.assert_not_called()
     runtime._run_playbook.assert_not_called()
