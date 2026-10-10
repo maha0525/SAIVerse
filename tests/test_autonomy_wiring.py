@@ -1010,7 +1010,7 @@ def test_recovered_response_dispatch_result_is_typed(session_factory):
             "action": "execute", "runtime_outcome": "gate_closed", "error": None,
         },
     )
-    assert wiring._dispatch_recovered_event_response(
+    assert wiring._dispatch_recovered_response(
         manager, PERSONA_ID, {"event_text": "x"},
     ) == wiring.RECOVERED_DISPATCH_SAFE_FAILURE
     # 実行中の例外 = LLM が動いたか不明 → 再試行禁止
@@ -1019,7 +1019,7 @@ def test_recovered_response_dispatch_result_is_typed(session_factory):
             "action": "execute", "runtime_outcome": "error", "error": "boom",
         },
     )
-    assert wiring._dispatch_recovered_event_response(
+    assert wiring._dispatch_recovered_response(
         manager, PERSONA_ID, {"event_text": "x"},
     ) == wiring.RECOVERED_DISPATCH_UNKNOWN
 
@@ -1031,7 +1031,7 @@ def test_recovered_response_dispatch_result_is_typed(session_factory):
     )
     envelope = {"user_input": "<system>原文</system>", "event_type": "sensor",
                 "meta_playbook": "track_user_conversation", "args": {"k": 1}}
-    assert wiring._dispatch_recovered_event_response(
+    assert wiring._dispatch_recovered_response(
         manager, PERSONA_ID,
         {"event_text": "x", "dispatch_envelope": envelope},
     ) == wiring.RECOVERED_DISPATCH_OK
@@ -1304,92 +1304,53 @@ def test_external_event_reaction_falls_back_to_ledger_result(
 
 
 # ---------------------------------------------------------------------------
-# handle_user_utterance_conflict: 別行動中のユーザー発話の仲裁
-# (track_retirement.md §7.4 の直結化。旧 set_alert → v1 メタ判断の後継)
+# ユーザー発話の仲裁の退役 (autonomous_behavior_v04_plan.md §8 決定 B)
 # ---------------------------------------------------------------------------
 
 
-def _conflict(manager, engaged: List[str]) -> str:
-    return wiring.handle_user_utterance_conflict(
-        manager, PERSONA_ID, "ちょっといい？",
-        engage=lambda: engaged.append("engage"),
-        user_id="1",
-        stimulus_id="msg:alice_room:1",
-    )
+def test_user_utterance_arbitration_entry_is_gone():
+    """仲裁口は退役した — ユーザー発話は常に直接応答する。"""
+    assert not hasattr(wiring, "handle_user_utterance_conflict")
+    assert not hasattr(wiring, "ROUTE_DIRECT_MISSING_STIMULUS_ID")
 
 
-def test_utterance_conflict_autonomy_off_engages_directly(session_factory):
-    manager, _ = _make_manager(session_factory, active=False)
-    engaged: List[str] = []
-    assert _conflict(manager, engaged) == wiring.ROUTE_DIRECT_AUTONOMY_DISABLED
-    assert engaged == ["engage"]
+def test_recovery_abandons_a_retired_utterance_arbitration_row(
+    session_factory, monkeypatch,
+):
+    """仲裁が生きていた頃に prepared のまま残った on_event 行は再発火しない。
 
-
-def test_utterance_conflict_playbook_missing_engages_directly(session_factory):
-    """機構の不備 (Playbook 未 import) でユーザーの呼びかけを黙殺しない。"""
-    manager, _ = _make_manager(session_factory, with_playbooks=False)
-    engaged: List[str] = []
-    assert _conflict(manager, engaged) == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
-    assert engaged == ["engage"]
-
-
-def test_utterance_conflict_runtime_error_does_not_engage(session_factory):
-    """F3 の本題: 判断が走った後に証跡なく落ちたら activate しない。
-
-    submit_meta_judgment の実行時例外は台帳 unknown = LLM が動いたか不明。
-    finalize が note_only を適用した後の例外だと、ここで会話を開始すると
-    「応答しない」という判断の決定を機構が上書きして応答してしまう。
+    再発火すると判断の LLM が今さら走り、engage_now なら古い発話が外部イベント
+    通知の形で流し込まれる (2026-08-14 F4 の帳簿の乖離)。判断を撃たず、応対も
+    起動せず、席を放棄する。
     """
     manager, _ = _make_manager(session_factory)
     ledger = _attach_ledger(manager, session_factory)
-    manager.pulse_controller = _BoomController(RuntimeError("meta lane down"))
+    eid, runnable, _ = ledger.claim_execution(
+        "judgment.on_event", idempotency_key=None, persona_id=PERSONA_ID,
+    )
+    assert runnable
+    calls = _fake_fire(monkeypatch, {"submitted": True})
+    dispatched: List[Dict[str, Any]] = []
+    manager.pulse_dispatcher = SimpleNamespace(
+        dispatch_schedule_fire=lambda **kw: dispatched.append(kw),
+    )
 
-    engaged: List[str] = []
-    assert _conflict(manager, engaged) == wiring.ROUTE_NONE_JUDGMENT_RAN
-    assert engaged == []
-    assert len(ledger.list_unknown()) == 1
+    result = wiring.refire_judgment_from_recovery(
+        manager, PERSONA_ID, "on_event",
+        {
+            "event_text": "ユーザーがあなたに話しかけました:\nちょっといい？",
+            "is_alert": False,
+            "utterance_conflict": True,
+            "conversation_user_id": "1",
+            "stimulus_id": "msg:alice_room:1",
+        },
+        eid,
+    )
 
-
-def test_utterance_conflict_side_effect_free_failure_engages(session_factory):
-    """副作用ゼロ確定の失敗 (LLM エラー) なら activate してよい (台帳は failed)。"""
-    from llm_clients.exceptions import LLMError
-
-    manager, _ = _make_manager(session_factory)
-    ledger = _attach_ledger(manager, session_factory)
-    manager.pulse_controller = _BoomController(LLMError("provider down"))
-
-    engaged: List[str] = []
-    assert _conflict(manager, engaged) == wiring.ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
-    assert engaged == ["engage"]
-    assert ledger.list_unknown() == []
-
-
-def test_utterance_conflict_engage_now_engages(session_factory, monkeypatch):
-    manager, _ = _make_manager(session_factory)
-    _fake_fire(monkeypatch, {
-        "submitted": True,
-        "applied_events": [{
-            "type": "judgment_applied", "kind": "on_event",
-            "extras": ["reaction=engage_now"],
-        }],
-    })
-    engaged: List[str] = []
-    assert _conflict(manager, engaged) == wiring.ROUTE_JUDGED_ENGAGE_NOW
-    assert engaged == ["engage"]
-
-
-def test_utterance_conflict_note_only_does_not_engage(session_factory, monkeypatch):
-    manager, _ = _make_manager(session_factory)
-    _fake_fire(monkeypatch, {
-        "submitted": True,
-        "applied_events": [{
-            "type": "judgment_applied", "kind": "on_event",
-            "extras": ["reaction=note_only"],
-        }],
-    })
-    engaged: List[str] = []
-    assert _conflict(manager, engaged) == "judged:note_only"
-    assert engaged == []
+    assert result["submitted"] is False
+    assert calls == []
+    assert dispatched == []
+    assert ledger.get_execution(eid)["status"] == XL.STATUS_FAILED
 
 
 # ---------------------------------------------------------------------------
@@ -1548,58 +1509,6 @@ def test_autonomy_tick_dispatches_watchdog_not_meta_judgment(monkeypatch):
     PulseDispatcher(manager).dispatch_autonomy_tick(PERSONA_ID)
     assert watched == [PERSONA_ID]
     assert ticks == []  # 旧: on_periodic_tick 直叩き — もう呼ばれない
-
-
-# ---------------------------------------------------------------------------
-# adapter: has_assistant_message_since (回収の重複判定の実 SQL)
-# ---------------------------------------------------------------------------
-
-
-class _DummyEmbedder:
-    def __init__(self, model=None, **kwargs):
-        self.model_name = model
-
-    def embed(self, texts, **kwargs):
-        return [[0.0] * 3 for _ in texts]
-
-
-def test_adapter_has_assistant_message_since(tmp_path, monkeypatch):
-    """実 SAIMemoryAdapter で重複判定 SQL (role / created_at) を検証。"""
-    from unittest.mock import patch as _patch
-    from datetime import timezone, timedelta
-
-    monkeypatch.setenv("SAIMEMORY_MEMORY", "1")
-    persona_dir = tmp_path / "personas" / "tester"
-    persona_dir.mkdir(parents=True, exist_ok=True)
-
-    with _patch("saiverse_memory.adapter.Embedder", _DummyEmbedder):
-        from saiverse_memory import SAIMemoryAdapter
-
-        adapter = SAIMemoryAdapter(
-            "tester", persona_dir=persona_dir, resource_id="tester",
-        )
-        try:
-            t0 = datetime.now(timezone.utc)
-            adapter.append_persona_message({
-                "role": "assistant",
-                "content": "おかえり",
-                "timestamp": (t0 - timedelta(seconds=100)).isoformat(),
-            })
-            adapter.append_persona_message({
-                "role": "user",
-                "content": "ただいま",
-                "timestamp": t0.isoformat(),
-            })
-            epoch = int(t0.timestamp())
-            # 会話区間に assistant 応答がある
-            assert adapter.has_assistant_message_since(epoch - 200) is True
-            # 区間開始が応答より後 → 今回の会話では応答していない
-            # (user 発話だけでは往復にならない)
-            assert adapter.has_assistant_message_since(epoch - 50) is False
-        finally:
-            adapter.close()
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -2011,40 +1920,6 @@ def test_刺激IDの無い外部イベントは応対も判断も起動せずERR
     assert dispatched == []
     assert calls == []
     assert any("without a stimulus_id" in r.message for r in caplog.records)
-
-
-def test_刺激IDの無い別行動中の発話は判断を経ず直接会話を始める(
-    session_factory, monkeypatch,
-):
-    """発話は黙殺しない — 判断を冪等にできないので仲裁を経ずに応答する。"""
-    manager, _ = _make_manager(session_factory)
-    calls = _fake_fire(monkeypatch, {"submitted": True})
-    engaged: List[str] = []
-    route = wiring.handle_user_utterance_conflict(
-        manager, PERSONA_ID, "ちょっといい？",
-        engage=lambda: engaged.append("engage"),
-        user_id="1",
-        stimulus_id=None,
-    )
-    assert route == wiring.ROUTE_DIRECT_MISSING_STIMULUS_ID
-    assert engaged == ["engage"]
-    assert calls == []
-
-
-def test_別行動中の発話の刺激IDが判断の文脈に同乗する(session_factory, monkeypatch):
-    manager, _ = _make_manager(session_factory)
-    captured: Dict[str, Any] = {}
-
-    def _fake(mgr, pid, kind, context=None, **kw):
-        captured["context"] = context
-        return {"submitted": True, "applied_events": []}
-
-    monkeypatch.setattr(wiring, "fire_judgment_point", _fake)
-    wiring.handle_user_utterance_conflict(
-        manager, PERSONA_ID, "ちょっといい？",
-        engage=lambda: None, user_id="1", stimulus_id="msg:alice_room:3",
-    )
-    assert captured["context"]["stimulus_id"] == "msg:alice_room:3"
 
 
 def test_day_close_plan_date_is_previous_day_at_midnight(session_factory):

@@ -84,7 +84,7 @@ SAIVerse に登録されている全ツールの一覧（自動生成）。概�
 | `searxng_search` | Search the web via SearXNG and return concise results. | `query*`: string, `max_results`: integer, `category`: string, `engines`: string, `language`: string, `safe`: integer | — |
 | `send_email_to_user` | Send an email to a user by USERID using SMTP settings from environment variables. Adds persona display name to From i… | `user_id*`: integer, `subject*`: string, `body*`: string | メール送信 |
 | `switch_active_thread` | Record a persona thread switch by inserting a system message that references messages from another thread, and update… | `target_thread*`: string, `summary`: string, `range_before`: integer | — |
-| `tell` | Speak out loud to someone here, in your own voice. Specify who it is for: 'user' (the user), 'all' (everyone in this … | `target*`: string, `gist`: string | 声をかける（非表示） |
+| `tell` | Say something out loud to someone here, in your own voice. Write the exact words you want to say in 'message' — they … | `target*`: string, `message*`: string | 声をかける（非表示） |
 | `update_working_memory` | Update a key in working memory. Working memory persists across pulses and server restarts. Use for short-term state l… | `key*`: string, `value*`: any | — |
 | `generate_image_local` | Generate an image using a local ComfyUI server. Supports customizable workflows with positive/negative prompts. The A… | `title*`: string, `positive_prompt*`: string, `negative_prompt`: string, `workflow_file`: string, `batch_count`: integer | — |
 | `body_gesture` | 仮想身体でその場の短いジェスチャーを実行する。action_instructionにはARDYへ渡す動作指示を英語で書く。未生成なら生成開始後すぐ戻り、完了は後から知覚する。空ならpresetのfriendly_waveを即時再生して… | `intent`: string, `action_instruction`: string, `expression_preset`: string, `expression_intensity`: number | 身体でジェスチャーする |

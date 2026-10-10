@@ -2764,34 +2764,9 @@ class SAIMemoryAdapter:
             LOGGER.warning("Failed to list active Stelis threads: %s", exc)
             return []
 
-    def has_assistant_message_since(self, since_epoch: int) -> Optional[bool]:
-        """``since_epoch`` 以降にこのペルソナの assistant メッセージがあるか。
-
-        ユーザー発話の仲裁の回収経路 (``saiverse/autonomy_wiring.py``) が「いまの
-        会話区間で既に応答が出ているか」を判定するのに使う。区間の切り口は会話の
-        出来事の ``started_at`` — adapter はペルソナ単位なので、追加の絞り込みは
-        要らない (旧実装は ``origin_track_id`` で絞っていたが、その刻印は Track
-        撤廃で書き手ごと退役した)。
-
-        Returns:
-            True / False。判定不能 (adapter 未 ready / クエリ失敗) は None —
-            呼び出し側がフォールバック (応答済みに倒す) を決める。
-        """
-        if not self._ready:
-            return None
-        try:
-            with self._db_lock:
-                row = self.conn.execute(
-                    "SELECT 1 FROM messages "
-                    "WHERE role = 'assistant' AND created_at >= ? LIMIT 1",
-                    (int(since_epoch),),
-                ).fetchone()
-        except Exception as exc:
-            LOGGER.warning(
-                "Failed to query assistant messages since %s: %s", since_epoch, exc,
-            )
-            return None
-        return row is not None
+    # NOTE: 旧 ``has_assistant_message_since`` (「いまの会話区間で既に応答が
+    # 出ているか」の読み手 — ユーザー発話の仲裁の回収経路の重複判定) は、仲裁の
+    # 退役 (autonomous_behavior_v04_plan.md §8 決定 B、2026-10-10) で撤去した。
 
     # NOTE: 旧 ``get_messages_by_origin_episode`` (``messages.origin_episode`` で
     # 出来事の原本行を引く読み手 — post_session の原本注入と episode_read スペル

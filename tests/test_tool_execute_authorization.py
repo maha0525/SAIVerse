@@ -124,7 +124,7 @@ def test_async_tools_use_the_same_execute_time_gate() -> None:
             return await wrapped()
 
     result = asyncio.run(run())
-    assert "自律制御モード" in result
+    assert "自律モード" in result
     assert called is False
 
 
@@ -185,5 +185,5 @@ def test_composite_action_does_not_unwrap_common_authorization_gate() -> None:
         else:
             TOOL_REGISTRY[name] = previous
 
-    assert "自律制御モード" in result
+    assert "自律モード" in result
     assert called is False

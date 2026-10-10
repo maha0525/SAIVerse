@@ -1140,12 +1140,12 @@ class ScheduleManager:
                 scheduled_time_str = f"{interval_sec}秒ごと"
 
         prompt = f"""<system>
-スケジュールの実行時刻です。
+アラームの時刻です。
 
 現在の日時: {local_now.strftime("%Y年%m月%d日 %H:%M")} ({persona_tz})
-スケジュールタイプ: {schedule.SCHEDULE_TYPE}
-スケジュール設定: {scheduled_time_str}
-スケジュールの説明: {schedule.DESCRIPTION or "（説明なし）"}
+アラームの種別: {schedule.SCHEDULE_TYPE}
+アラームの設定: {scheduled_time_str}
+アラームの説明: {schedule.DESCRIPTION or "（説明なし）"}
 </system>"""
         return prompt
 

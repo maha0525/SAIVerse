@@ -112,7 +112,7 @@ def get_situation_snapshot(
     pulse_type = getattr(persona, "_current_pulse_type", None)
     pulse_type_map = {
         "user": "ユーザー応答",
-        "schedule": "スケジュール実行",
+        "schedule": "アラーム",
         "auto": "自律稼働",
     }
     pulse_type_display = pulse_type_map.get(pulse_type, "不明")

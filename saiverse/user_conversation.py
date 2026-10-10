@@ -29,9 +29,11 @@ Track は「ペルソナがやっていること」を全部入れる器とし�
 - 会話の開始 (会話状態を立てる → main_line 起動 → 沈黙タイマー装填)
 - 沈黙タイマーの装填 / 解除 / 発火
 
+ユーザー発話は仲裁しない — 会話が開いていなければ常に会話を始めて応答する
+(autonomous_behavior_v04_plan.md §8 決定 B、2026-10-10 に仲裁口を退役)。
+ティック走行中に発話が届いたら、席の優先度 (user > auto) が取り消しで応える。
+
 責務外:
-- 仲裁の判断ロジックそのもの (on_event 判断点 = judgment_points /
-  ``autonomy_wiring.handle_user_utterance_conflict``)
 - メインライン LLM 呼び出しの実装 (SEARuntime)
 """
 from __future__ import annotations
@@ -316,23 +318,6 @@ def clear_open_conversation(
         ):
             return None
         return state.pop(persona_id, None)
-
-
-def _get_open_non_conversation_episode(
-    manager: Any, persona_id: str
-) -> Optional[Dict[str, Any]]:
-    """「別の活動中か」— v0.3 では常に None (仲裁は直接応答へ縮退)。
-
-    旧実装は「開いている会話以外の出来事」を引いていたが、束 6c で出来事の
-    書き手が全滅した (v3 §7) ので、**新しい活動の行はどこからも生まれない**。
-    既存 DB に残る旧 open 行を読むと、退役した機構の残骸を理由に仲裁が永久に
-    発火し続けるので、読みごと止める。
-
-    関数を残すのは、v0.4 のティック設計が「別の活動中か」の答えを作り直す口が
-    ここだから (autonomous_behavior_v3.md §9-3: 並走の組を数え上げて防ぐ / 耐える
-    を決める工事)。それまでは「活動なし」= 呼びかけには常に直接応答する。
-    """
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -784,33 +769,26 @@ def on_user_utterance(
 ) -> None:
     """ユーザー発話イベント。
 
-    経路は「会話が開いているか」で分かれる:
+    経路は「会話が開いているか」の二つだけ:
 
     - **開いている** (会話継続): 直接メインラインを起動する
       (``invoke_main_line``)。沈黙タイマーは応答の**前と後の両方**で張り直す —
       前で張るのは応答中に前回の予約が発火して会話を閉じるのを防ぐため、後で
       張るのは沈黙の起点を「やりとりが終わった時刻」に置くため。
-    - **開いていない かつ 別の活動中でない**: :func:`start_conversation` で
-      会話を開始する (ユーザーの呼びかけには常に即応答 — 2026-07-07 改訂)。
-    - **開いていない かつ 別の活動中**: on_event 判断点へ直結し仲裁を委ねる
-      (``autonomy_wiring.handle_user_utterance_conflict``)。判断が engage_now を
-      選べば :func:`start_conversation`、選ばなければ応答しない
-      (track_retirement.md §7.4 の直結化)。
+    - **開いていない**: :func:`start_conversation` で会話を開始する (ユーザーの
+      呼びかけには常に即応答 — 2026-07-07 改訂)。
 
-    ⚠ **v0.3 (束 6c) では 3 本目の経路に入らない** —
-    :func:`_get_open_non_conversation_episode` が常に None を返すため、判定は
-    実質「会話中か / そうでないか」の二分岐へ縮退する。活動の器を作り直すのは
-    v0.4 のティック設計 (v3 §9-3)。
-
-    旧実装は 1 段目の判定に「対ユーザー会話 Track が running か」を使っていた。
-    案 Y (life.md §7) 以降その running は会話が終わっても残るため、仲裁は事実上
-    「初回の発話」と「ゲーム参加で押し出された後」でしか発火しなかった。
+    かつては三本目の経路 (「開いていない かつ 別の活動中」なら on_event 判断点で
+    応答するかを仲裁する) があったが、v0.3 では「別の活動中か」の判定が常に
+    「いいえ」を返す死に枝だった。v0.4 で仲裁そのものを退役した
+    (autonomous_behavior_v04_plan.md §8 決定 B — ユーザー発話は最強・常に
+    最優先なので、応えるべきかを LLM に聞く席は要らない)。
 
     Args:
         event: 発話の dict。``content`` (本文) と ``message_id`` (発話を永続化
             した building_messages 行の ID、``"building_id:seq"``) を持つ。
-            ``message_id`` は ``"msg:<message_id>"`` の形で刺激の ID として仲裁
-            (on_event 判断の冪等キー) へ運ばれる。
+            仲裁の退役で、いまはこの関数の中に読み手がいない (受け口の入力の形
+            として受け取り続ける)。
         pulse_options: 会話開始経路で main_line Pulse へ転送する起動オプション
             (:data:`PULSE_OPTION_KEYS`)。``invoke_main_line`` の closure が抱えて
             いるものと同じ値を渡すこと — 初回発話だけオプションが落ちると、
@@ -856,62 +834,10 @@ def on_user_utterance(
             _arm_quietly(manager, persona_id)
         return
 
-    busy_episode = _get_open_non_conversation_episode(manager, persona_id)
-    if busy_episode is None:
-        LOGGER.info(
-            "[user-conv] no open conversation and no open activity for %s -> "
-            "starting the conversation directly", persona_id,
-        )
-        start_conversation(
-            manager, persona_id, user_id, pulse_options=pulse_options,
-        )
-        return
-
     LOGGER.info(
-        "[user-conv] no open conversation but activity %s (%s) is open for %s -> "
-        "firing the on_event judgment",
-        busy_episode.get("episode_ref") or busy_episode.get("episode_id"),
-        busy_episode.get("kind"), persona_id,
+        "[user-conv] no open conversation for %s -> starting the conversation",
+        persona_id,
     )
-    from saiverse.autonomy_wiring import handle_user_utterance_conflict
-
-    # 仲裁が engage_now を選んだ瞬間から「応答を起こした」側に回る。フラグは
-    # start_conversation の**手前**で立てる — 開始の途中で転んだ場合も、直接応答で
-    # 肩代わりすると二重に走りうるため。
-    engaged = {"started": False}
-
-    def _engage() -> None:
-        engaged["started"] = True
-        start_conversation(
-            manager, persona_id, user_id, pulse_options=pulse_options,
-        )
-
-    # 発話の永続 ID (building_messages の message_id) を刺激の ID にする。
-    # 発話の取り込み (manager/runtime.py) が永続化した行の message_id を
-    # event に載せて渡す。仲裁は今は v0.4 の活動の器が無いため発火しないが、
-    # 将来の仲裁の再設計が冪等キーに使うので配線だけ通す。
-    message_id = event.get("message_id")
-    stimulus_id = f"msg:{message_id}" if message_id else None
-
-    try:
-        route = handle_user_utterance_conflict(
-            manager,
-            persona_id,
-            str(event.get("content") or ""),
-            engage=_engage,
-            user_id=user_id,
-            stimulus_id=stimulus_id,
-        )
-    except UserUtteranceError:
-        # 会話開始側の分類 (台帳の開設失敗など) をそのまま上へ通す。
-        raise
-    except Exception as exc:
-        raise UserUtteranceError(
-            f"the utterance-conflict judgment failed for {persona_id}: {exc}",
-            stage="utterance_conflict",
-            side_effects_done=engaged["started"],
-            fallback_safe=not engaged["started"],
-        ) from exc
-    LOGGER.info(
-        "[user-conv] utterance-conflict route=%s for persona %s", route, persona_id,
+    start_conversation(
+        manager, persona_id, user_id, pulse_options=pulse_options,
     )

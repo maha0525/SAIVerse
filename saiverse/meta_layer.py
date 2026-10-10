@@ -6,8 +6,8 @@
 自律行動 v2 の判断点 (時間割・出来事駆動 — ``saiverse/judgment_points.py`` +
 ``saiverse/autonomy_wiring.py``) への世代交代を経て、2026-08-14 に v1 判断一式を
 退役した (docs/intent/track_retirement.md §7.4)。別行動中のユーザー発話の仲裁は
-on_event 判断点への直結 (``autonomy_wiring.handle_user_utterance_conflict``) が
-後継。
+一度 on_event 判断点への直結へ引き継がれた後、2026-10-10 に仲裁ごと退役した
+(autonomous_behavior_v04_plan.md §8 決定 B — ユーザー発話は常に直接応答する)。
 
 残る責務は判断系が共有する基盤のみ:
 

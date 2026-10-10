@@ -7,9 +7,17 @@
 | モード (aspect)        | Task 操作 |
 |------------------------|-----------|
 | メインモード (CONVERSATION) | ✅        |
-| 自律制御モード (META)       | ❌        |
-| 自律作業モード (AUTONOMOUS) | ✅        |
+| 自律モード (META)           | ❌        |
+| 自律モード (AUTONOMOUS)     | ✅        |
 | 分身モード (WORKER)         | ❌        |
+
+⚠ META と AUTONOMOUS は 2026-10-10 にペルソナ向けの名前が「自律モード」へ
+統一された (autonomous_behavior_v04_plan.md §4 決定 9)。ペルソナから見て同じ
+モードなのに権限が分かれると、同じ「自律モード」で唱えられたり断られたりする。
+上の表の食い違いは、Task 操作スペルが 0 件 (下の ``TASK_CONTROL_SPELLS`` が空)
+のため実害が無い状態で残っている。**この表にスペルを足すときは、二つの扱いを
+揃えてから足すこと** — tests/test_mode_spell_permissions.py の同名モード検査が
+揃っていない追加を落とす。
 
 Track 操作の列は 2026-08-21 に消えた — ``track_create`` 以下 7 種のスペルが
 機構ごと退役したため (track_retirement.md §7.2 ④群)。Task 操作の列も

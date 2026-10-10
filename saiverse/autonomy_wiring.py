@@ -24,9 +24,10 @@ Playbook 起動) を持つが、**自動起動の配線は持たない** (中間
   autonomous_behavior_v3.md §8/§13.3 で退役し、本人の声の捕獲は Metabolism の
   スルースへ一本化された)。発火の入口は
   ``saiverse.user_conversation.handle_conversation_timeout``
-- :func:`handle_user_utterance_conflict` — 別の活動中に届いたユーザー発話の
-  仲裁 (track_retirement.md §7.4 の直結化)。on_event 判断点を流用し、
-  engage_now のときだけ会話を開始する
+- ユーザー発話は仲裁しない — 常に直接応答する (autonomous_behavior_v04_plan.md
+  §8 決定 B。ティック走行中に発話が届いたら席の優先度 user > auto が取り消しで
+  応える)。かつての仲裁口 ``handle_user_utterance_conflict`` は 2026-10-10 に
+  退役した。on_event 判断は外から届く実イベント専用
 - :func:`handle_external_event` — 実イベント (inject_persona_event) の入口。
   自律 ON かつユーザー会話中でなければ **on_event** 判断を撃ち、判断が
   engage_now を選んだときだけ従来の応対 Pulse を起動する。自律 OFF のペルソナは
@@ -200,10 +201,6 @@ ROUTE_NONE_MISSING_STIMULUS_ID = "none:missing_stimulus_id"
 #: 直接応対も判断も起動しない。ラベルを返すのは入口の
 #: ``inject_persona_event`` (受領の照合はそこで行う)。
 ROUTE_NONE_DUPLICATE_STIMULUS = "none:duplicate_stimulus"
-#: 別行動中のユーザー発話に発話の ID (message_id 由来の stimulus_id) が
-#: 付いていなかった。判断を冪等にできないので仲裁を経ずに直接会話を始める
-#: (ユーザーの呼びかけを配線の不備で黙殺しない)。ERROR で表に出す。
-ROUTE_DIRECT_MISSING_STIMULUS_ID = "direct:missing_stimulus_id"
 
 
 # ---------------------------------------------------------------------------
@@ -326,11 +323,11 @@ def _judgment_idempotency_key(
 ) -> Optional[str]:
     """判断点 kind ごとの冪等キー (D1 の表)。None = 一意性なし (毎回新規行)。
 
-    - on_event: ``{persona}:{stimulus_id}`` — 刺激 (外部イベント / 別行動中の
-      ユーザー発話) の供給源が発行した永続 ID から作る。同じ刺激の再配送が
+    - on_event: ``{persona}:{stimulus_id}`` — 刺激 (外部イベント) の供給源が
+      発行した永続 ID から作る。同じ刺激の再配送が
       別の席を取って判断を二度走らせる穴を塞ぐ
       (docs/issues/on_event_judgment_has_no_idempotency_key.md)。入口
-      (:func:`handle_external_event` / :func:`handle_user_utterance_conflict`)
+      (:func:`handle_external_event`)
       が ID の無い刺激をここへ通さないので、None になるのは ID の義務化より
       前に作られた台帳行の再発火 (resume はキーを計算しない) か配線ミスだけ
       — 後者は WARNING で表に出して従来どおり一意性なしで走らせる。
@@ -920,133 +917,6 @@ def handle_external_event(
     return f"judged:{reaction}"
 
 
-def handle_user_utterance_conflict(
-    manager: Any,
-    persona_id: str,
-    utterance_text: str,
-    *,
-    engage: Callable[[], None],
-    user_id: str,
-    stimulus_id: Optional[str],
-) -> str:
-    """別の活動中に届いたユーザー発話の仲裁 (track_retirement.md §7.4 の直結化)。
-
-    旧経路 (set_alert → MetaLayer の v1 メタ判断) の置き換え。ユーザー発話を
-    「別行動中に外から届いた刺激」の一種として **on_event** 判断点へ直結し、
-    判断が engage_now を選んだときだけ ``engage()`` (会話の開始 = 会話の出来事を
-    開いて main_line を走らせる) を呼ぶ。engage_now 以外なら応答しない
-    (旧 alert 経路で activate されなかったときと同じ挙動)。
-
-    経路の判断基準 (:func:`handle_external_event` と同じ流儀):
-
-    - **自律 OFF のペルソナ**: 判断を経ず直接 ``engage()`` (常に応答)
-    - **判断が LLM へ渡る前に止まった / 副作用ゼロ確定で失敗した**
-      (Playbook 未 import・関所閉鎖・LLM エラー等): 直接 ``engage()``。
-      ユーザーの呼びかけを機構の不備で黙殺する方が害が大きい
-    - **判断は走ったが成功の証跡なく戻った** (ran): 応答しない。finalize が
-      note_only 等を適用済みかもしれず、応答すると決定を上書きする
-    - **判断は受け付けられたが席が未解決** (indeterminate): 応答しない。
-      回復 tick が同じ判断を後で走らせうるため、ここで応答すると二重になる
-    - **判断は走ったが reaction が読めなかった**: 応答しない (二重応対の回避)
-
-    「起動できなかった」かどうかは :func:`~saiverse.judgment_points.
-    direct_fallback_allowed` が結末 (``outcome``) から決める — **結末の無い結果は
-    拒否側に倒す**。この判定を呼び出し側でやり直さないこと (2026-08-14 F3)。
-
-    Args:
-        engage: 会話を開始する closure
-            (``saiverse.user_conversation.start_conversation``)。
-        user_id: 応対先のユーザー。``engage`` が閉じ込んでいるのと同じ相手を
-            **台帳 payload にも凍結する** — 判断が席を残したまま落ちて回復 tick が
-            後から engage_now を出したとき、回収側はこのユーザー相手の会話を
-            開いて応対する。凍結が無いと回収側は応対先を知らず、ユーザーの発話を
-            「外部イベント通知」の形で流し込むしかない (会話の出来事も開かない =
-            帳簿の乖離。2026-08-14 Codex 指摘 F4)。
-        stimulus_id: 発話の永続 ID (``"msg:<building_messages の message_id>"``)。
-            on_event 判断の冪等キーになる。**受領記録 (stimulus_receipt) は
-            取らない** — 発話の再送は building_messages の ``client_message_id``
-            UNIQUE が入口で止めるため、ここへ届く時点で再送ではない。ID が無い
-            (配線ミス) ときは判断を冪等にできないので、ERROR を出して仲裁を経ずに
-            直接 ``engage()`` する (ユーザーの呼びかけを黙殺しない)。
-
-    Returns:
-        経路ラベル (``direct:*`` / ``judged:*`` / ``none:*``)。ログ・テスト用。
-    """
-    if not is_autonomy_on(manager, persona_id):
-        engage()
-        return ROUTE_DIRECT_AUTONOMY_DISABLED
-
-    if not isinstance(stimulus_id, str) or not stimulus_id.strip():
-        LOGGER.error(
-            "[autonomy-wiring] utterance-conflict without a stimulus_id "
-            "(persona=%s); the judgment cannot be made idempotent — starting "
-            "the conversation directly", persona_id,
-        )
-        engage()
-        return ROUTE_DIRECT_MISSING_STIMULUS_ID
-
-    context: Dict[str, Any] = {
-        "event_text": f"ユーザーがあなたに話しかけました:\n{utterance_text}",
-        "is_alert": False,
-        # 回収側が「これは外部イベントではなくユーザー発話の仲裁」と判るための
-        # 種別と応対先。LLM へ渡る judgment_context には入らない
-        # (build_judgment_args の on_event は選別したキーだけ組む) — 台帳 payload
-        # に凍結して回復経路が読むためだけの同乗。
-        "utterance_conflict": True,
-        "conversation_user_id": user_id,
-        # 冪等キー (_judgment_idempotency_key) とタスク帳の出どころ参照に使う
-        "stimulus_id": stimulus_id,
-    }
-    result = fire_judgment_point(manager, persona_id, KIND_ON_EVENT, context)
-    if not result.get("submitted"):
-        if direct_fallback_allowed(result):
-            LOGGER.info(
-                "[autonomy-wiring] utterance-conflict judgment unavailable (%s); "
-                "starting the conversation directly (persona=%s)",
-                result.get("reason"), persona_id,
-            )
-            engage()
-            return ROUTE_DIRECT_JUDGMENT_UNAVAILABLE
-        if result.get("outcome") == OUTCOME_RAN:
-            LOGGER.warning(
-                "[autonomy-wiring] utterance-conflict judgment ran without "
-                "evidence of success (%s); not responding to avoid overriding "
-                "the judgment (persona=%s execution=%s)",
-                result.get("reason"), persona_id, result.get("execution_id"),
-            )
-            return ROUTE_NONE_JUDGMENT_RAN
-        LOGGER.warning(
-            "[autonomy-wiring] utterance-conflict judgment left an "
-            "unresolved execution (%s); not responding to avoid double "
-            "handling (persona=%s execution=%s)",
-            result.get("reason"), persona_id, result.get("execution_id"),
-        )
-        return ROUTE_NONE_INDETERMINATE
-
-    reaction = _extract_reaction(result)
-    if reaction is None:
-        reaction = _reaction_from_ledger(manager, result.get("execution_id"))
-    if reaction == "engage_now":
-        LOGGER.info(
-            "[autonomy-wiring] utterance-conflict judged engage_now; "
-            "starting the conversation (persona=%s)", persona_id,
-        )
-        engage()
-        return ROUTE_JUDGED_ENGAGE_NOW
-    if reaction is None:
-        LOGGER.warning(
-            "[autonomy-wiring] utterance-conflict judgment ran but reaction "
-            "could not be read; NOT responding to avoid double handling "
-            "(persona=%s)", persona_id,
-        )
-        return ROUTE_JUDGED_UNKNOWN
-    LOGGER.info(
-        "[autonomy-wiring] utterance-conflict judged %s (persona=%s); "
-        "no immediate response", reaction, persona_id,
-    )
-    return f"judged:{reaction}"
-
-
 #: 回収応対の結末。再試行してよいのは SAFE_FAILURE (副作用ゼロ確定) だけ —
 #: UNKNOWN (LLM が動いたか不明) を再試行すると、発話・記憶更新まで進んだ応対を
 #: もう一度走らせて二重応対になる (Codex 六巡目 high1。台帳の unknown =
@@ -1058,112 +928,18 @@ RECOVERED_DISPATCH_UNKNOWN = "unknown"
 RECOVERED_DISPATCH_UNROUTABLE = "unroutable"
 
 
-def _conversation_already_answered(manager: Any, persona_id: str) -> bool:
-    """いまの会話区間で、このペルソナの応答が既に出ているか。
-
-    証跡は「開いている会話の ``started_at`` 以降の assistant メッセージ」で、
-    これを回収の重複判定に使う。
-
-    倒し方に注意 (fail 方向が用途で決まる):
-
-    - **会話が開いていない** → 応答済みではない (False)。会話は生きていないので、
-      ここで会話を開いても二重にならない。
-    - **会話は開いているが証跡が読めない** → 応答済みに倒す (True)。ライブ経路が
-      既に応対している可能性があり、重ねて起動すると二重応対になる。
-    """
-    from saiverse.user_conversation import get_open_conversation
-
-    conv = get_open_conversation(manager, persona_id)
-    if conv is None:
-        return False
-
-    since = conv.get("started_at")
-    persona = _get_persona(manager, persona_id)
-    adapter = getattr(persona, "sai_memory", None) if persona is not None else None
-    checker = getattr(adapter, "has_assistant_message_since", None)
-    if not isinstance(since, int) or not callable(checker):
-        LOGGER.warning(
-            "[autonomy-wiring] cannot read the assistant-message evidence for "
-            "persona %s; assuming the conversation was answered", persona_id,
-        )
-        return True
-    try:
-        answered = checker(since)
-    except Exception:
-        LOGGER.warning(
-            "[autonomy-wiring] assistant-message lookup failed for persona %s; "
-            "assuming the conversation was answered", persona_id, exc_info=True,
-        )
-        return True
-    if answered is None:
-        return True
-    return bool(answered)
-
-
-def _engage_recovered_user_conversation(
-    manager: Any, persona_id: str, context: Dict[str, Any]
-) -> str:
-    """回収経路で engage_now と判断された**ユーザー発話の仲裁**に応対する。
-
-    応対は初回と同じ入口 —— :func:`saiverse.user_conversation.start_conversation`
-    が会話の出来事を開き、main_line Pulse を起動し、沈黙タイマーを張る。初回発火
-    (``handle_user_utterance_conflict`` の ``engage`` callback) と同じ手を通すので
-    帳簿が一致する。
-
-    外部イベント用の再構成 (:func:`_dispatch_recovered_event_response`) をここで
-    使ってはいけない —— ユーザーの発話が ``<system>[外部イベント通知]`` として
-    流し込まれ、応答は届くのに会話の出来事が開かない (2026-08-14 Codex 指摘 F4)。
-
-    **既にこの会話区間で応答が出ている**なら何もしない —— ライブ経路が先に応対
-    していれば、ここで起動すると main_line がもう一度走る。判定材料は「開いて
-    いる会話の出来事の開始以降に assistant メッセージが実在するか」
-    (:func:`_conversation_already_answered`)。⚠ **出来事が開いていることを
-    応答済みの根拠にしてはいけない** —— 「出来事は開いているが応答は無い」状態は
-    実在する (main_line が転んだ場合など。2026-08-14 Codex 指摘 — この誤認は
-    ユーザーの発話を捨てる)。
-    """
-    user_id = context.get("conversation_user_id")
-
-    if _conversation_already_answered(manager, persona_id):
-        LOGGER.info(
-            "[autonomy-wiring] the recovered utterance conflict was already "
-            "answered in this conversation episode; not engaging again "
-            "(persona=%s)", persona_id,
-        )
-        return RECOVERED_DISPATCH_OK
-
-    try:
-        from saiverse.user_conversation import start_conversation
-
-        start_conversation(manager, persona_id, user_id)
-    except Exception:
-        LOGGER.warning(
-            "[autonomy-wiring] recovered utterance-conflict engage failed "
-            "(persona=%s); safe to retry", persona_id, exc_info=True,
-        )
-        return RECOVERED_DISPATCH_SAFE_FAILURE
-    LOGGER.info(
-        "[autonomy-wiring] recovered utterance-conflict started the user "
-        "conversation (persona=%s user=%s)", persona_id, user_id,
-    )
-    return RECOVERED_DISPATCH_OK
+#: 退役したユーザー発話の仲裁 (autonomous_behavior_v04_plan.md §8 決定 B) が
+#: 台帳 payload に凍結していた種別の印。**読み手の互換のためだけに残す** —
+#: 仲裁が生きていた頃に prepared のまま残った on_event 行 (実際には v0.3 で
+#: 仲裁が発火しなくなった 2026-08-22 より前の行しかありえない) を回収 tick が
+#: 再発火すると、判断の LLM が今さら走り、engage_now なら古い発話が
+#: ``<system>[外部イベント通知]`` として流し込まれる (2026-08-14 F4 と同じ帳簿の
+#: 乖離)。この印の付いた行は判断を撃たずに席を放棄する
+#: (:func:`refire_judgment_from_recovery`)。
+_RETIRED_UTTERANCE_ARBITRATION_KEY = "utterance_conflict"
 
 
 def _dispatch_recovered_response(
-    manager: Any, persona_id: str, context: Dict[str, Any]
-) -> str:
-    """回収経路の応対 —— 台帳 payload に凍結された**種別**で入口を選ぶ。
-
-    ユーザー発話の仲裁は会話の開始、それ以外の外部イベントは応対 Pulse の
-    再構成。初回発火と同じ入口を通すのが原則で、種別を落として一律に外部
-    イベント形へ流すと帳簿が食い違う (F4)。
-    """
-    if context.get("utterance_conflict"):
-        return _engage_recovered_user_conversation(manager, persona_id, context)
-    return _dispatch_recovered_event_response(manager, persona_id, context)
-
-
-def _dispatch_recovered_event_response(
     manager: Any, persona_id: str, context: Dict[str, Any]
 ) -> str:
     """回収経路で engage_now と判断されたイベントの応対 Pulse を再構成して起動する。
@@ -1354,14 +1130,33 @@ def refire_judgment_from_recovery(
     reaction が読めなかった場合は応対を起動しない (handle_external_event の
     unknown_reaction と同じ裁定 — 二重応対の方が害が大きい)。
 
-    応対の入口は payload に凍結された種別で選ぶ (:func:`_dispatch_recovered_response`)
-    — ユーザー発話の仲裁は会話 Track の activate、外部イベントは応対 Pulse の
-    再構成 (同 ④、2026-08-14)。
+    応対は外部イベントの応対 Pulse の再構成 (:func:`_dispatch_recovered_response`)。
 
     退役した判断点の旧席 (day_open / day_close / post_session) は、回収側
     (``execution_ledger_wiring.PREPARED_EXPIRE_KINDS``) が再発火せずに期限で
-    閉じるので、ここへは届かない。
+    閉じるので、ここへは届かない。退役したユーザー発話の仲裁の行
+    (payload に :data:`_RETIRED_UTTERANCE_ARBITRATION_KEY`) は on_event と同じ
+    kind なのでここへ届く — 判断を撃たずに席を放棄する。
     """
+    if (
+        judgment_kind == KIND_ON_EVENT
+        and isinstance(context, dict)
+        and context.get(_RETIRED_UTTERANCE_ARBITRATION_KEY)
+    ):
+        abandoned = _abandon_seat(
+            getattr(manager, "execution_ledger", None), execution_id,
+            "retired: user-utterance arbitration",
+        )
+        LOGGER.warning(
+            "[autonomy-wiring] prepared on_event row %s is a retired "
+            "user-utterance arbitration; not re-firing (persona=%s abandoned=%s)",
+            execution_id, persona_id, abandoned,
+        )
+        return {
+            "submitted": False,
+            "reason": "retired: user-utterance arbitration",
+            "execution_id": execution_id,
+        }
     result = fire_judgment_point(
         manager, persona_id, judgment_kind,
         context=context, resume_execution_id=execution_id,
@@ -1369,7 +1164,7 @@ def refire_judgment_from_recovery(
     if judgment_kind != KIND_ON_EVENT:
         return result
     if not result.get("submitted"):
-        # 通常入口 (handle_external_event / handle_user_utterance_conflict) は
+        # 通常入口 (handle_external_event) は
         # 「LLM へ渡る前に止まった / 副作用ゼロ確定で失敗した」を代替応対へ落とす。
         # 回収入口だけ無条件に return すると、同じ失敗でイベントが消える —
         # しかも runtime exception で台帳が終端した行は prepared 回収にも戻らない

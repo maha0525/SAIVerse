@@ -62,6 +62,30 @@ class TestSpellPermissionMatrix(unittest.TestCase):
             for asp in Aspect:
                 self.assertIsNone(check_spell_permission(sp, asp))
 
+    def test_aspects_sharing_a_mode_name_share_permissions(self):
+        # ペルソナに同じ名前で見えるモード (META と AUTONOMOUS はどちらも
+        # 「自律モード」— v04 計画 §4 決定 9) は、ゲート表に載った実際の
+        # スペルについて同じ判定でなければならない。名前が同じなのに唱えられたり
+        # 断られたりすると、ペルソナは自分のモードを説明できなくなる。
+        # 表が空のいまは素通しで揃っている。表にスペルを足すとき、二つの扱いを
+        # 揃えずに足すとここで落ちる。
+        by_name: dict = {}
+        for asp in Aspect:
+            by_name.setdefault(asp.mode_display_name, []).append(asp)
+        for spell in msp.TASK_CONTROL_SPELLS:
+            for name, aspects in by_name.items():
+                verdicts = {check_spell_permission(spell, a) is None for a in aspects}
+                self.assertEqual(
+                    len(verdicts), 1,
+                    f"{spell}: 「{name}」の aspect {aspects} で判定が割れている",
+                )
+
+    def test_mode_display_names(self):
+        self.assertEqual(Aspect.CONVERSATION.mode_display_name, "メインモード")
+        self.assertEqual(Aspect.WORKER.mode_display_name, "分身モード")
+        self.assertEqual(Aspect.AUTONOMOUS.mode_display_name, "自律モード")
+        self.assertEqual(Aspect.META.mode_display_name, "自律モード")
+
     def test_none_aspect_never_restricts(self):
         # legacy frame / aspect 不明時は制限しない。
         with mock.patch.object(

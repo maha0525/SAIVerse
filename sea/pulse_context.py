@@ -93,10 +93,15 @@ _ASPECT_DERIVATION: Dict["Aspect", tuple] = {
 
 # Aspect → ペルソナ向け「モード」名 (mode_spell_permissions.md §3)。コード上は
 # aspect で扱い、ペルソナに見せる文字列でのみモード表記を使う。
+# META と AUTONOMOUS はどちらも「自律モード」(2026-10-10 まはー決定 —
+# autonomous_behavior_v04_plan.md §4 決定 9。退役した「自律制御モード」
+# 「自律作業モード」の統一後継)。**名前は一意ではない**ので、表示名から
+# aspect を逆引きしないこと。ペルソナから見て同じモードなので、モード別の
+# スペル権限も二つを同じに扱う (tests/test_mode_spell_permissions.py が検査)。
 _ASPECT_MODE_DISPLAY_NAME: Dict["Aspect", str] = {
     Aspect.CONVERSATION: "メインモード",
-    Aspect.META: "自律制御モード",
-    Aspect.AUTONOMOUS: "自律作業モード",
+    Aspect.META: "自律モード",
+    Aspect.AUTONOMOUS: "自律モード",
     Aspect.WORKER: "分身モード",
 }
 

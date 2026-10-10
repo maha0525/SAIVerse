@@ -49,9 +49,9 @@ class PulseDispatcher:
     ) -> None:
         """ユーザー発話イベントを会話経路 (``saiverse.user_conversation``) へ渡す。
 
-        経路判定 (会話継続 → 直接応答 / 会話が閉じていて別の活動中 → on_event
-        判断点での仲裁) は受け口側が行う。本メソッドは委譲 + 共通処理 + 例外時の
-        フォールバックを担う。
+        経路判定 (会話継続 → 直接応答 / 会話が閉じている → 会話を始めて応答) は
+        受け口側が行う。ユーザー発話は仲裁しない (autonomous_behavior_v04_plan.md
+        §8 決定 B)。本メソッドは委譲 + 共通処理 + 例外時のフォールバックを担う。
 
         **フォールバックは「まだ何もしていない失敗」に限る** (2026-08-21 Codex
         指摘 4)。旧実装は受け口の任意の例外で ``invoke_main_line()`` を呼び直して
@@ -79,22 +79,12 @@ class PulseDispatcher:
         Args:
             event: 発話の dict。``content`` と、発話を永続化した行の
                 ``message_id`` (building_messages の ``"building_id:seq"``) を
-                持つ。``message_id`` は受け口で刺激の ID (``"msg:<message_id>"``)
-                になり、別行動中の仲裁 (on_event 判断) の冪等キーへ運ばれる。
+                持つ。
             pulse_options: 会話開始経路で main_line Pulse へ転送する起動オプション
                 (metadata / meta_playbook / args / pre_spells / event_callback)。
                 ``invoke_main_line`` の closure が抱えているものと同じ値を渡す。
         """
         from saiverse.user_conversation import UserUtteranceError, on_user_utterance
-
-        if not event.get("message_id"):
-            # 発話の取り込みは永続化を前提条件にしている (manager/runtime.py)
-            # ので、ここで ID が無いのは配線ミス。応答は止めない (仲裁側が
-            # ID 無しを ERROR で扱う) が、入口で一度表に出しておく。
-            LOGGER.error(
-                "[dispatcher] user utterance without a message_id (persona=%s); "
-                "the stimulus ID cannot reach the arbitration", persona_id,
-            )
 
         try:
             on_user_utterance(

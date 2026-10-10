@@ -10,7 +10,8 @@ docs/intent/episode.md の不変条件)。
 - 会話が開いていれば直接メインライン起動 + 沈黙タイマーの張り直し
 - 会話が閉じていれば会話開始 (状態を立てる → main_line → タイマー)
 - 会話の開始でも終了でも Building ログに何も書かれない
-- 別の活動中の仲裁経路 (v0.3 では供給源ゼロ。routing だけ回帰で固定する)
+- ユーザー発話は仲裁しない — 自律 ON でも判断点を撃たずに会話を始める
+  (v04 計画 §8 決定 B で仲裁経路を退役)
 - 沈黙タイマーの対象外判定 (ペルソナ未ロード / タイムアウト 0 以下)
 - タイムアウト発火で会話状態が落ち、予約も解除される
 - 再起動 (状態が空) では張り直す待ちが構造上存在しない
@@ -135,18 +136,6 @@ def _reservation(mgr):
     return mgr.event_scheduler._entries_by_key.get(uc._timeout_key(PERSONA_ID))
 
 
-def _pretend_busy(monkeypatch, busy):
-    """「別の活動中」を差し込む。
-
-    v0.3 では :func:`uc._get_open_non_conversation_episode` が常に None を返す
-    (出来事の書き手が全滅したため — v3 §7)。仲裁経路そのものは v0.4 のティック
-    設計が作り直す口として残っているので、routing の正しさだけをここで固定する。
-    """
-    monkeypatch.setattr(
-        uc, "_get_open_non_conversation_episode", lambda *_a, **_kw: busy,
-    )
-
-
 # ---------------------------------------------------------------------------
 # on_user_utterance: 経路の分岐
 # ---------------------------------------------------------------------------
@@ -169,8 +158,8 @@ def test_open_conversation_answers_directly_and_rearms_the_timeout(manager):
     assert _building_log_writes(manager) == []
 
 
-def test_no_conversation_and_no_activity_starts_the_conversation(manager):
-    """会話が閉じていて別の活動もなければ、判断を経ずに会話を開始する。"""
+def test_no_conversation_starts_the_conversation(manager):
+    """会話が閉じていれば、判断を経ずに会話を開始する。"""
     invoke = MagicMock()
 
     uc.on_user_utterance(
@@ -212,18 +201,21 @@ def test_the_start_and_the_end_write_nothing_to_the_building_log(manager):
     manager.add_building_event.assert_not_called()
 
 
-def test_busy_with_another_activity_fires_the_on_event_judgment(manager, monkeypatch):
-    """会話が閉じていて別の活動中なら on_event 判断点へ直結する。"""
-    _pretend_busy(monkeypatch, {"kind": "work_session", "episode_ref": "episode:1"})
-    seen = {}
+def test_no_conversation_starts_it_directly_without_any_judgment(
+    manager, monkeypatch,
+):
+    """会話が閉じていれば、仲裁 (on_event 判断) を経ずに常に会話を始める。
 
-    def _fake_conflict(mgr, persona_id, text, *, engage, user_id, stimulus_id):
-        seen.update({"text": text, "user_id": user_id, "stimulus_id": stimulus_id})
-        return "none:judged"
+    ユーザー発話の仲裁は退役した (autonomous_behavior_v04_plan.md §8 決定 B)。
+    自律 ON のペルソナでも判断点は撃たれない — 撃たれたら落ちるフェイクで固定する。
+    """
+    import saiverse.autonomy_wiring as wiring
 
-    monkeypatch.setattr(
-        "saiverse.autonomy_wiring.handle_user_utterance_conflict", _fake_conflict,
-    )
+    def _must_not_fire(*_a, **_kw):
+        raise AssertionError("a judgment point was fired for a user utterance")
+
+    monkeypatch.setattr(wiring, "fire_judgment_point", _must_not_fire)
+    monkeypatch.setattr(wiring, "is_autonomy_on", lambda *_a, **_kw: True)
     invoke = MagicMock()
 
     uc.on_user_utterance(
@@ -231,45 +223,11 @@ def test_busy_with_another_activity_fires_the_on_event_judgment(manager, monkeyp
         {"content": "ちょっといい？", "message_id": "room:7"}, invoke,
     )
 
-    # 発話の永続 ID (building_messages の message_id) が刺激の ID として
-    # 仲裁の入口まで届く (on_event 判断の冪等キーの元)
-    assert seen == {
-        "text": "ちょっといい？", "user_id": USER_ID, "stimulus_id": "msg:room:7",
-    }
-    # 判断が engage_now を出さなければ応答しない
     invoke.assert_not_called()
-    manager.run_sea_user.assert_not_called()
-    assert _open_conversation(manager) is None
-
-
-def test_busy_and_engage_now_starts_the_conversation(manager, monkeypatch):
-    """仲裁が engage_now を選んだら、初回発火と同じ入口で会話が始まる。"""
-    _pretend_busy(monkeypatch, {"kind": "work_session", "episode_ref": "episode:1"})
-
-    def _fake_conflict(mgr, persona_id, text, *, engage, user_id, stimulus_id):
-        engage()
-        return "judged:engage_now"
-
-    monkeypatch.setattr(
-        "saiverse.autonomy_wiring.handle_user_utterance_conflict", _fake_conflict,
-    )
-
-    uc.on_user_utterance(
-        manager, PERSONA_ID, USER_ID, {"content": "ちょっといい？"}, MagicMock(),
-    )
-
     manager.run_sea_user.assert_called_once()
     assert _open_conversation(manager) is not None
     assert _armed(manager) is True
-
-
-def test_the_busy_lookup_is_degraded_to_none_in_v03(manager):
-    """v0.3 では「別の活動中」の供給源がゼロ — 仲裁は直接応答へ縮退する。
-
-    旧 DB に閉じ損ねた open な出来事が残っていても仲裁が永久発火しないことを
-    ここで固定する (読みごと止めた理由そのもの)。
-    """
-    assert uc._get_open_non_conversation_episode(manager, PERSONA_ID) is None
+    assert not hasattr(uc, "_get_open_non_conversation_episode")
 
 
 def test_main_line_failure_still_arms_the_timeout(manager):
@@ -705,28 +663,6 @@ def test_first_utterance_of_a_new_conversation_keeps_the_pulse_options(manager):
 
     uc.on_user_utterance(
         manager, PERSONA_ID, USER_ID, {"content": "はじめまして"}, MagicMock(),
-        pulse_options=options,
-    )
-
-    manager.run_sea_user.assert_called_once()
-    _assert_options_forwarded(manager, options)
-
-
-def test_the_arbitration_engage_closure_keeps_the_pulse_options(manager, monkeypatch):
-    """仲裁が engage_now を選んだ経路でも、初回と同じオプションが届く。"""
-    _pretend_busy(monkeypatch, {"kind": "work_session", "episode_ref": "episode:1"})
-
-    def _fake_conflict(mgr, persona_id, text, *, engage, user_id, stimulus_id):
-        engage()
-        return "judged:engage_now"
-
-    monkeypatch.setattr(
-        "saiverse.autonomy_wiring.handle_user_utterance_conflict", _fake_conflict,
-    )
-    options = _pulse_options()
-
-    uc.on_user_utterance(
-        manager, PERSONA_ID, USER_ID, {"content": "ちょっといい？"}, MagicMock(),
         pulse_options=options,
     )
 

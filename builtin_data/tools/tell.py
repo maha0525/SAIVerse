@@ -7,27 +7,37 @@
 - **宛先明示** (speak でなく tell): 「誰に伝える価値があるか」を毎回問わせる
   含意が乱発を構造的に防ぐ。宛先は metadata に残り、将来の通知・未読バッジ・
   ペルソナ間配送の器になる。
-- **1 Beat の分業**: 唱える側 (軽量モデルでありうる) は「いま・誰に・何を」の
-  判断だけを担う。実際の言葉は、このツールが起動する 1 Beat — CONVERSATION
-  aspect の実行文脈 = 標準モデルの 1 呼び出し — が書く。モデル階層は aspect
-  導出の既存規則で決まるため、「ユーザーに届く声は標準モデル」の鉄則が
-  禁止ルールなしで構造的に成立する。
-- **世界の状態に触らない**: 会話エピソードを開かない・Track に触らない・
-  無応答タイムアウトを装填しない。返事はユーザーの通常入力が既存機構で
-  会話を開く (「喋る」と「会話が始まる」は別の出来事)。
+- **引数式** (autonomous_behavior_v3.md §9-4 決着): 唱える側が言葉そのものを
+  ``message`` に書き、それがそのまま届く (メールと同型)。2026-10-10 まで tell は
+  要旨 (gist) だけを受けて別建ての標準モデル 1 呼び出しに言葉を書かせていた —
+  「唱える側が軽量かもしれない」前提の産物で、ティックが標準モデル・メイン
+  ラインになった v3 でその前提は消えた。唱える側がそのまま本人の声。
+- **標準文脈限定**: 軽量文脈 (分身モード = WORKER サブライン等) から唱えられたら
+  投函しない。引数式では唱えた側の言葉がそのまま届くので、開けておくと軽量
+  モデルが本人の声でユーザーに喋ってしまう。aspect の無い legacy 経路は標準扱い
+  (sea/pulse_context.py の ``tier_without_aspect`` と同じ向き)。
+- **唱えた Pulse の内側の仕事**: 投函は唱えた返事 (Pulse) の pulse_id で行い、
+  自前の Pulse・ライン・文脈は作らない。本人の記憶 (SAIMemory) にも別の行を
+  書かない — 言葉は唱えた本文のスペル行として既に本人の記憶に残っている。
+- **世界の状態に触らない**: 会話を開かない・無応答タイムアウトを装填しない。
+  返事はユーザーの通常入力が既存機構で会話を開く (「喋る」と「会話が始まる」は
+  別の出来事)。
 - **親 Beat の内側で走る**: スペルとして唱えられる以上、関所も Beat ロックも
-  親 (会話 Pulse / セッション) が済ませている。ここで ``hold_beat`` を取り
-  直してはいけない — 冗長なだけでなく、executor スレッドへ逃げた spell
-  ループから取ると永久ブロックする (:func:`tell` 内のコメント参照)。
+  親 (会話 Pulse / ティック) が済ませている。ここで ``hold_beat`` を取り
+  直してはいけない — 冗長なだけでなく、executor スレッドで走る同期スペルから
+  取ると永久ブロックする (:func:`tell` 内のコメント参照)。
 """
 from __future__ import annotations
 
 import logging
-import uuid
-from types import SimpleNamespace
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional, Tuple
 
-from tools.context import get_active_manager, get_active_persona_id, get_event_callback
+from tools.context import (
+    get_active_manager,
+    get_active_persona_id,
+    get_active_pulse_context,
+    get_event_callback,
+)
 from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
@@ -70,90 +80,33 @@ def _resolve_target(
     )
 
 
-def _build_directive(target_display: str, gist: str) -> str:
-    """言葉を書く 1 Beat への指示 (user role + <system> の統一形式)。"""
-    gist_line = f"伝えたいことのメモ: {gist}\n" if gist else ""
-    return (
-        "<system>\n"
-        f"あなたはいま、この場で「{target_display}」に向けて声をかけようとしています。\n"
-        f"{gist_line}"
-        "相手に届けたい言葉だけを、普段のあなたの声で書いてください。\n"
-        "スペルは使えません。\n"
-        "</system>"
-    )
+def _lightweight_refusal(pulse_ctx: Any) -> Optional[str]:
+    """いまのラインが軽量 tier なら断りの文を、標準なら None を返す。
 
-
-def _extract_text(result: Any) -> str:
-    """LLM client の generate 戻り値 (str または dict) から text を取り出す。"""
-    if isinstance(result, dict):
-        return str(result.get("content") or "")
-    if isinstance(result, str):
-        return result
-    return ""
-
-
-def _record_llm_usage(
-    runtime: Any,
-    state: Dict[str, Any],
-    llm_client: Any,
-    persona: Any,
-    building_id: str,
-    node_type: str,
-    playbook_name: str = _PLAYBOOK_NAME,
-) -> None:
-    """LLM 1 コール分の usage を計上する (usage_tracker + Pulse accumulator)。
-
-    sea/runtime_llm.py の spell-retry usage 計上と同じ形。usage が無い
-    (mock クライアント等) 場合は no-op。旧 ``sea.work_session`` (作業
-    セッション — v0.4 段 1-4 で撤去) と共有していた器を、唯一残った使い手の
-    ここへ移した。
+    tier はアクティブなラインの aspect から引く (sea/pulse_context.py の
+    ``LineFrame.model_tier``)。Pulse の外 / ラインの無い実行 / aspect の無い
+    legacy フレームは標準扱い — ``tier_without_aspect`` が state の無いときに
+    標準を返すのと同じ向き。
     """
-    from saiverse.usage_tracker import get_usage_tracker
-    from sea.message_stamp import record_call_tokens
-
-    usage = llm_client.consume_usage() if hasattr(llm_client, "consume_usage") else None
-    # トークン三つ組の刻印材料 (sea/message_stamp.py)。usage が取れなかった
-    # ときも通して、前のコールの値を state に残さない。
-    record_call_tokens(state, usage)
-    if not usage:
-        return
-    persona_id = getattr(persona, "persona_id", None)
-    get_usage_tracker().record_usage(
-        model_id=usage.model,
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        cached_tokens=usage.cached_tokens,
-        cache_write_tokens=usage.cache_write_tokens,
-        cache_ttl=usage.cache_ttl,
-        persona_id=persona_id,
-        building_id=building_id,
-        node_type=node_type,
-        playbook_name=playbook_name,
-        category="persona_speak",
+    frame = None
+    if pulse_ctx is not None:
+        try:
+            frame = pulse_ctx.current_line()
+        except Exception:
+            LOGGER.debug("[tell] current_line failed; treating as standard", exc_info=True)
+            frame = None
+    aspect = getattr(frame, "aspect", None)
+    if aspect is None or aspect.model_tier != "lightweight":
+        return None
+    return (
+        f"tellスペルは現在のモード（{aspect.mode_display_name}）では実行できません。"
+        "この声はあなた本人の声としてそのまま相手に届くので、分身の時間からは"
+        "唱えられません。本体の時間に唱えてください。"
     )
-    from sea.runtime_llm import _maybe_record_cache_storage
-    _maybe_record_cache_storage(usage, persona_id, building_id)
-    from saiverse.model_configs import calculate_cost
-    cost = calculate_cost(
-        usage.model, usage.input_tokens, usage.output_tokens,
-        usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl,
-    )
-    runtime._accumulate_usage(
-        state, usage.model, usage.input_tokens, usage.output_tokens, cost,
-        usage.cached_tokens, usage.cache_write_tokens,
-    )
-    try:
-        # anchor は call-local (§3.2)。呼び出し面は親 Beat の内側 — Beat 内
-        # touch は前進と直列化済みで CAS 不要。
-        runtime.session_lifecycle.touch_anchor_after_llm_call(
-            persona, usage, anchor_id=state.get("_prefix_anchor_id"),
-        )
-    except Exception:
-        LOGGER.debug("[tell] anchor touch failed (non-fatal)", exc_info=True)
 
 
-def tell(target: str, gist: str = "") -> str:
-    """宛先を決めて声をかける。言葉は会話の声 (標準モデルの 1 Beat) が書く。"""
+def tell(target: str, message: str = "") -> str:
+    """宛先を決めて声をかける。``message`` に書いた言葉がそのまま届く。"""
     manager = get_active_manager()
     persona_id = get_active_persona_id()
     if manager is None or not persona_id:
@@ -163,6 +116,18 @@ def tell(target: str, gist: str = "") -> str:
     persona = (getattr(manager, "personas", {}) or {}).get(persona_id)
     if persona is None:
         raise RuntimeError(f"persona '{persona_id}' not found on manager")
+
+    # この一言は唱えた返事 (Pulse) の中の仕事。pulse_id もラインもそこから引く。
+    pulse_ctx = get_active_pulse_context()
+    refusal = _lightweight_refusal(pulse_ctx)
+    if refusal is not None:
+        LOGGER.info("[tell] refused from a lightweight line (persona=%s)", persona_id)
+        return refusal
+
+    text = (message or "").strip()
+    if not text:
+        return "伝える言葉が空です。届けたい言葉を message にそのまま書いてください。"
+
     building_id = getattr(persona, "current_building_id", None)
     if not building_id:
         return "いまはどの場所にもいないため、声をかけられません。"
@@ -199,102 +164,29 @@ def tell(target: str, gist: str = "") -> str:
     if runtime is None:
         return "声を出す仕組み (runtime) が利用できません。"
 
-    from sea.message_stamp import record_presented_message_ids
-    from sea.pulse_context import Aspect, PulseLogEntry, resolve_execution_context
+    pulse_id = getattr(pulse_ctx, "pulse_id", None) or None
 
-    pulse_id = str(uuid.uuid4())
-    pulse_ctx = runtime._get_or_create_pulse_context(pulse_id)
-    # この一言は唱えた返事の中の仕事。返事の始まりに決めたモデルと接続を使う
-    # (saiverse/persona_model_selection.py の ReplyModelBinding)。
-    from saiverse.persona_model_selection import find_reply_binding
-    from tools.context import get_active_pulse_context
+    # ---- Beat ロックは取らない (beat_execution_context.md §2.2/§3.4) ----
+    # スペルは定義上つねに親 Beat (会話 Pulse / ティック) の内側で唱えられる。
+    # 関所も直列化も親が済ませており、この投函は親 Beat の一部 — ここで取り直す
+    # のは設計上も冗長。
+    # さらに実害がある: 同期スペルは常に executor スレッドで実行される
+    # (sea/runtime_llm.py の ``run_in_executor(None, _run)``)。RLock の再入は
+    # 取得したスレッドでしか効かないため、別スレッドから取り直すと「親スレッドは
+    # 結果待ち・ツールスレッドはロック待ち」で永久に固まる (Codex レビュー
+    # 2026-08-08 critical)。知覚消費も最外 Beat の頭が担う。
 
-    reply_binding = find_reply_binding(
-        pulse_context=get_active_pulse_context(), persona=persona,
-    )
-    if reply_binding is not None:
-        pulse_ctx.model_binding = reply_binding
-    pulse_ctx.push_line(aspect=Aspect.CONVERSATION)
-    # 投函が済んだ後の失敗を「何も起きなかった」と報告しないための印。
+    # 投函の後の失敗を「何も起きなかった」と報告しないための印。
     # 声は取り消せないので、届いた後のエラーは「届いた + 記録で失敗」と返す。
     delivered = False
     try:
-        # CONVERSATION フレームが active な状態で解決 → 標準モデルが導出される
-        # (aspect → tier の既存規則。ここが B 案の「構造で鉄則を守る」本体)。
-        execution_context = resolve_execution_context(persona, pulse_ctx)
-
-        # ---- Beat ロックは取らない (beat_execution_context.md §2.2/§3.4) ----
-        # スペルは定義上つねに親 Beat (会話 Pulse 等) の内側で唱えられる。
-        # 関所も直列化も親が済ませており、子ラインは別 Beat ではなく親 Beat の
-        # 一部 — ここで取り直すのは設計上も冗長。
-        # さらに実害がある: 同期スペルは常に executor スレッドで実行される
-        # (sea/runtime_llm.py の ``run_in_executor(None, _run)``。旧作業・暮らし
-        # セッション — v0.4 段 1-4 で撤去 — ではその手前の spell ループ自体も
-        # 別スレッドへ逃げていた)。RLock の再入は取得したスレッドで
-        # しか効かないため、別スレッドから取り直すと「親スレッドは結果待ち・
-        # ツールスレッドはロック待ち」で永久に固まる (Codex レビュー
-        # 2026-08-08 critical)。知覚消費も最外 Beat の頭が担う。
-        _context_meta: Dict[str, Any] = {}
-        messages = list(runtime._prepare_context(
-            persona, building_id, None, pulse_id=pulse_id,
-            model_key=execution_context.model_key,
-            context_meta=_context_meta,
-            persona_voiced=True,
-        ))
-        directive = _build_directive(target_display, (gist or "").strip())
-        messages.append({"role": "user", "content": directive})
-
-        state: Dict[str, Any] = {
-            "_pulse_id": pulse_id,
-            "_pulse_type": "tell",
-            "_pulse_context": pulse_ctx,
-            "_execution_context": execution_context,
-            "_model_binding": reply_binding,
-            "_messages": messages,
-        }
-        # 前駆刻印の材料 (sea/message_stamp.py): この発話が実際に見た履歴の
-        # ID 列。末尾がこの生成の前駆になる。
-        record_presented_message_ids(state, _context_meta)
-        node_def = SimpleNamespace(id="tell_speech", memorize=None, speak=True)
-        llm_client, selected_model = runtime.select_llm_client(
-            node_def, persona, execution_context=execution_context, state=state,
-        )
-        if selected_model != execution_context.model_key:
-            execution_context = execution_context.with_model(selected_model)
-            state["_execution_context"] = execution_context
-
-        pulse_ctx.append(PulseLogEntry(
-            role="user", content=directive,
-            node_id="tell_directive", playbook_name=_PLAYBOOK_NAME,
-        ))
-        result = llm_client.generate(
-            messages,
-            tools=[],
-            temperature=runtime._default_temperature(persona),
-            **runtime._get_cache_kwargs(persona_id),
-        )
-        _record_llm_usage(
-            runtime, state, llm_client, persona, building_id,
-            "llm_tell", playbook_name=_PLAYBOOK_NAME,
-        )
-        text = _extract_text(result).strip()
-        try:
-            runtime._dump_llm_io(_PLAYBOOK_NAME, "tell_speech", persona, messages, text)
-        except Exception:
-            LOGGER.warning("[tell] failed to dump LLM I/O", exc_info=True)
-        if not text:
-            return "言葉が出てきませんでした (生成が空)。もう一度試せます。"
-
-        tell_meta: Dict[str, Any] = {"tell_target": target_norm}
-        if gist and gist.strip():
-            tell_meta["tell_gist"] = gist.strip()
+        tell_meta = {"tell_target": target_norm}
         # 投函: Building 履歴 + UI + TTS (既存の発話経路がそのまま効く)。
         # **ここを呼んだ時点で「言ってしまった」**— `_emit_say` は履歴の保存に
         # 失敗しても gateway (Discord 等) へは送る (sea/runtime_emitters.py
         # の emit_say: gateway 送信は insert の成否を見ない)。
         # したがって戻り値から分かるのは「届いたか」ではなく **「この場の記録に
-        # 残ったか」**だけ。記録の成否によらず本人の記憶には残す — 自分が言った
-        # ことを知らないまま次を喋ると、同じ話を二度することになる。
+        # 残ったか」**だけ。
         # event_callback: 親 Beat の persona_context が contextvar で運んで
         # くる。渡しておくと、建物への保存が成功した回だけ保存完了イベント
         # (speak_persisted) が流れる (発火は emit_say 内の共通の口 —
@@ -311,38 +203,25 @@ def tell(target: str, gist: str = "") -> str:
         # 消費者 (sea/runtime.py の say イベント / sea/runtime_llm.py の
         # `_last_message_id`) も同じ印で判定している。
         emitted_id = emitted.get("message_id") if isinstance(emitted, dict) else None
+        if pulse_ctx is not None:
+            # 唱えた Pulse の監査記録 (pulse_logs) に、何を誰に言ったかを積む。
+            # flush は Pulse の終わりに親が行う。
+            from sea.pulse_context import PulseLogEntry
+
+            pulse_ctx.append(PulseLogEntry(
+                role="assistant", content=text,
+                node_id="tell_speech", playbook_name=_PLAYBOOK_NAME,
+            ))
+        LOGGER.info(
+            "[tell] spoken: persona=%s building=%s target=%s pulse=%s len=%d history=%s",
+            persona_id, building_id, target_norm, pulse_id, len(text), bool(emitted_id),
+        )
         if not emitted_id:
             LOGGER.error(
                 "[tell] utterance went out but was not persisted to the building "
                 "history (persona=%s building=%s target=%s)",
                 persona_id, building_id, target_norm,
             )
-        # Pulse ログ (監査記録) は記憶の保存より先に積む — 記憶の保存が例外を
-        # 投げると、後ろに置いた append は実行されず「何を言ったか」の記録だけが
-        # 欠ける (指示文だけが残る)。
-        pulse_ctx.append(PulseLogEntry(
-            role="assistant", content=text,
-            node_id="tell_speech", playbook_name=_PLAYBOOK_NAME,
-        ))
-        # 本人の記憶に発話として残す (CONVERSATION フレーム下 = committed)。
-        # ``return_message_id=True`` で受ける — 既定の bool 戻り値は例外が
-        # 出なければ True になり、SAIMemory adapter が None を返す静かな
-        # 挿入失敗 (sea/runtime.py `_store_memory` の insert 経路) を成功と
-        # 取り違える。id が返ったことだけが行の存在の証拠。
-        stored_id = runtime._store_memory(
-            persona, text, role="assistant",
-            pulse_id=pulse_id, metadata=dict(tell_meta),
-            playbook_name=_PLAYBOOK_NAME, pulse_context=pulse_ctx,
-            return_message_id=True,
-            beat_state=state,
-        )
-        LOGGER.info(
-            "[tell] spoken: persona=%s building=%s target=%s len=%d "
-            "history=%s memory=%s",
-            persona_id, building_id, target_norm, len(text),
-            bool(emitted_id), bool(stored_id),
-        )
-        if not emitted_id:
             # 記録に残らなかった = 相手に届いたかどうかも確かめられない。
             # 外への配送 (gateway) は履歴と別経路で走るうえ、宛先が
             # 繋がっていない構成では黙って no-op になる — 「届いた」とも
@@ -351,17 +230,6 @@ def tell(target: str, gist: str = "") -> str:
                 f"「{target_display}」への声は、この場の履歴に残せませんでした。"
                 "相手に届いたかどうかも確認できません。もう一度言うと二重に"
                 "聞こえるおそれがあるので、繰り返すかは慎重に決めてください。"
-            )
-        if not stored_id:
-            # 記録には残ったが本人の記憶に入らなかった。次の文脈に出てこない
-            # ので、繰り返さないよう本人に伝える。
-            LOGGER.error(
-                "[tell] spoken but not stored in SAIMemory "
-                "(persona=%s target=%s)", persona_id, target_norm,
-            )
-            return (
-                f"「{target_display}」に声は届きましたが、自分の記憶には"
-                "残せませんでした。同じ話を繰り返さないよう気をつけてください。"
             )
         return f"「{target_display}」に声をかけました。"
     except Exception:
@@ -375,26 +243,20 @@ def tell(target: str, gist: str = "") -> str:
                 "決めてください。"
             )
         return "声をかけられませんでした (内部エラー)。時間をおいて試せます。"
-    finally:
-        try:
-            pulse_ctx.pop_line()
-        except Exception:
-            LOGGER.warning("[tell] failed to pop line frame", exc_info=True)
-        try:
-            runtime._flush_pulse_logs(persona, pulse_ctx)
-        except Exception:
-            LOGGER.warning("[tell] failed to flush pulse logs", exc_info=True)
 
 
 def schema() -> ToolSchema:
     return ToolSchema(
         name="tell",
         description=(
-            "Speak out loud to someone here, in your own voice. Specify who it is "
-            "for: 'user' (the user), 'all' (everyone in this place), or the name of "
-            "a persona in the same place. The actual words are composed and spoken "
-            "as your normal conversational voice; this does not start a conversation "
-            "state — if the target replies, a conversation begins naturally."
+            "Say something out loud to someone here, in your own voice. Write the "
+            "exact words you want to say in 'message' — they are delivered as-is, "
+            "as your own speech; nothing is rewritten or composed for you. Specify "
+            "who it is for: 'user' (the user), 'all' (everyone in this place), or "
+            "the name of a persona in the same place. This does not start a "
+            "conversation — if the target replies, a conversation begins naturally. "
+            "While you are already talking with the user, just write it in your "
+            "reply instead."
         ),
         parameters={
             "type": "object",
@@ -406,16 +268,15 @@ def schema() -> ToolSchema:
                         "same place."
                     ),
                 },
-                "gist": {
+                "message": {
                     "type": "string",
                     "description": (
-                        "Optional: a short note of what you want to convey (your "
-                        "own memo; the spoken words are composed from it and the "
-                        "current context)."
+                        "The exact words to say, written in your own voice. "
+                        "Delivered to the target exactly as written."
                     ),
                 },
             },
-            "required": ["target"],
+            "required": ["target", "message"],
         },
         result_type="string",
         spell=True,
