@@ -282,7 +282,7 @@ v0.1 (§2, §4-C) は「Playbook ノード単位で `line_role` / `scope` を明
 |---|---|---|---|---|
 | `CONVERSATION` (①) | `main_line` | `committed` | 標準 | `run_meta_user` (user / social / external track) |
 | `WORKER` (②) | `sub_line` | `volatile` | 軽量 | `run_playbook` スペル |
-| `AUTONOMOUS` (③) | `main_line` | `committed` | 軽量 | 自律 track の Pulse |
+| `AUTONOMOUS` (③) | `main_line` | `committed` | 標準 (2026-10-10 に軽量から変更) | 自律の Pulse = v0.4 のティック (`fire_tick` → `run_sea_auto`) |
 | `META` (④) | `meta_judgment` | `discardable` (確定分は `committed` に昇格) | 標準 | `meta_layer` のメタ判断 |
 
 `line_role` だけでは ①③④ (全て `main_line`) を区別できないが、4分類なら区別できる。これが「scope を line_role に連動させる」案 (B) が成立しなかった理由 — **scope は line_role からではなく分類から導く**。

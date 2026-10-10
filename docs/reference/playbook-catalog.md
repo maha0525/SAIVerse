@@ -27,6 +27,12 @@ kind → Playbook 名の対応は `saiverse/judgment_points.py` の `JUDGMENT_PL
 - **v1 メタ判断一式（`meta_judgment` / `meta_judgment_running` / `_idle_pending` / `_idle_empty` / `_alert` / `_life_purpose`）** — 2026-08-14 に Playbook・`_SITUATION_PLAYBOOK_MAP`・`meta_judgment_finalize` ツールごと削除（[track_retirement.md](../intent/track_retirement.md) §7.4）。生きる目的の初期設定（`meta_judgment_life_purpose`）は受け皿なしで撤去され、後継はシステムタスクの第一号として v3 §9-5 で設計中。
 - **欲求・Track まわりの欄**（`promotions` / `new_desires` / `desire_reviews` / `track_op` / `episode_purposes` の一部）— 欲求プールと Track の供給源が機構ごと消えたため、スキーマから落ちている（v3 §8）。判断 Playbook の JSON 本文に退役欄名・退役 namespace（`desire:` / `track:`）が現れないことは `tests/test_judgment_playbook_prompt_contract.py` が機械検査する。
 
+## 自律（ティック）
+
+| Playbook | 表示名 | usel | 用途 |
+|---|---|:--:|---|
+| `tick` | ティック (自分の時間の 1 Pulse) | | 自律行動 v0.4 のティックの器（[v3](../intent/autonomous_behavior_v3.md) §5 / [v0.4 実装計画](../intent/autonomous_behavior_v04_plan.md) 段 2）。`pulse_type=auto`（`Aspect.AUTONOMOUS` = 標準モデル・メインライン・committed）で走り、出力は本人の記憶にだけ残る（`speak=false`）。`single_beat=true` で 1 Beat で閉じ、失敗したスペルだけが次の Pulse の頭に知覚で届く。引数 `assignment`（確定情報の文、省略時は自分のための時間である旨の既定文）。入口は `SAIVerseManager.fire_tick`（手で打つ口は `POST /api/people/{persona_id}/tick`）。間隔での自動の打鍵は段 3 |
+
 ## 会話メインライン
 
 | Playbook | 表示名 | usel | 用途 |

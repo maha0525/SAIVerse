@@ -135,10 +135,10 @@ def run_playbook(
         # head はこの Pulse を実行する model の Session (persona, model) に向けて
         # render する (beat_execution_context.md §3.1)。実行 model は LLM ノードが
         # resolve_execution_context で解決する値と同じ導出をここで先取りする —
-        # フレームはまだ push されていないため legacy フォールバック
-        # (_pulse_type=='auto' / _force_lightweight_model → lightweight) を通すが、
-        # これは Pulse-root aspect の tier (AUTONOMOUS=lightweight /
-        # CONVERSATION・META=standard) と一致する。
+        # フレームはまだ push されていないため aspect の無いときの規則
+        # (pulse_context.tier_without_aspect: _force_lightweight_model → 軽量、
+        # それ以外は _pulse_type の root aspect の tier) を通す。表から引くので
+        # Pulse-root aspect の tier と構造的に一致する。
         from sea.pulse_context import resolve_execution_context
         _ec_probe_state = dict(parent)
         if pulse_type is not None:

@@ -2712,6 +2712,88 @@ class SpellLoopResult:
     final_stream_error: Optional[Dict[str, Any]] = None
 
 
+#: 一回で閉じる Beat (``single_beat``) のスペルの失敗を本人へ届ける知覚の型。
+#: 見出しは sai_memory/perception_buffer.py の ``_KIND_HEADERS`` が持つ。
+SINGLE_BEAT_SPELL_FAILURE_KIND = "spell_failure"
+
+
+def _is_failed_spell_record(rec: Dict[str, Any]) -> bool:
+    """スペル 1 行の記録が失敗か (機械的な失敗 / ツールが宣言した論理的な失敗)。
+
+    /quick_spell の終端判定 (quick_spell.md §3.3) と同じ定義 — 文字列の
+    ヒューリスティックは使わない。
+    """
+    if not rec.get("success"):
+        return True
+    meta = rec.get("meta")
+    return isinstance(meta, dict) and meta.get("error") is True
+
+
+def _deliver_single_beat_spell_failures(
+    persona: Any,
+    records: List[Dict[str, Any]],
+    *,
+    pulse_id: Optional[str],
+    playbook_name: str,
+) -> int:
+    """一回で閉じた Beat で失敗したスペルを、知覚として本人へ届ける。
+
+    一回で閉じる Beat (LLM ノードの ``single_beat``、v0.4 のティック —
+    autonomous_behavior_v3.md §5) はスペルの結果を続きの生成に回さない。
+    成功の帰結は世界の記録 (建物ログ・台帳・生成物) が運ぶので何もしない。
+    失敗だけは本人が知る経路が他に無いので、知覚バッファへ積み、次の Pulse の
+    頭の消費で本人に届ける。文面は機構の名義 (``[システム通知]``) で、本人の
+    名義の文は書かない。
+
+    ``records`` は周の記録 (``name`` / ``norm`` / ``result`` / ``success`` /
+    ``meta``)。戻り値は届けた失敗の件数 (積めなかった回は 0)。
+    """
+    failed = [rec for rec in records if _is_failed_spell_record(rec)]
+    if not failed:
+        return 0
+    adapter = getattr(persona, "sai_memory", None)
+    push = getattr(adapter, "push_perception", None)
+    if push is None:
+        LOGGER.warning(
+            "[sea][spell] single-beat: %d failed spell(s) could not be delivered "
+            "(no SAIMemory adapter) persona=%s",
+            len(failed), getattr(persona, "persona_id", None),
+        )
+        return 0
+    lines = [
+        "直前に唱えたスペルのうち、次のものは失敗していました"
+        "（そのときは結果を確かめずに区切りました）。",
+    ]
+    for rec in failed:
+        lines.append("")
+        lines.append(str(rec.get("norm") or rec.get("name") or ""))
+        lines.append(f"→ {rec.get('result') or '(結果の文面なし)'}")
+    metadata = json.dumps(
+        {
+            "source": "single_beat_spell_failure",
+            "pulse_id": pulse_id,
+            "playbook": playbook_name,
+            "spells": [str(rec.get("name") or "") for rec in failed],
+        },
+        ensure_ascii=False,
+    )
+    try:
+        push(SINGLE_BEAT_SPELL_FAILURE_KIND, "\n".join(lines), metadata=metadata)
+    except Exception:
+        LOGGER.warning(
+            "[sea][spell] single-beat: pushing the spell-failure perception failed "
+            "persona=%s", getattr(persona, "persona_id", None), exc_info=True,
+        )
+        return 0
+    LOGGER.info(
+        "[sea][spell] single-beat: delivered %d failed spell(s) %s as a perception "
+        "for the next pulse (persona=%s)",
+        len(failed), [rec.get("name") for rec in failed],
+        getattr(persona, "persona_id", None),
+    )
+    return len(failed)
+
+
 def _spell_display_name(name: str, success: bool) -> str:
     """スペルの折りたたみに出す名前 (成功は表示名、失敗は登録名)。"""
     if success:
@@ -2876,6 +2958,15 @@ async def _run_spell_loop(
     ラウンド予算。正の int を渡すと env グローバル ``_MAX_SPELL_LOOPS`` の
     代わりに上限として使う。None (既定) では従来挙動のまま変わらない。
 
+    **一回で閉じる Beat** (``node_def.single_beat`` が True、v0.4 のティック —
+    autonomous_behavior_v3.md §5「ティックは 1 Beat で閉じる」): 最初の生成に
+    含まれるスペルを従来どおりテキスト順に逐次実行したら、結果を続きの生成に
+    回さずに閉じる (再呼び出しをしない)。周の本文は従来どおり記憶へ書き、
+    スペル行と結果は PulseContext (pulse_logs) に残す。結果の要約は記憶へも
+    続きの生成の材料 (``messages``) へも入れない — 成功の帰結は世界の記録が
+    運ぶ。失敗だけを :func:`_deliver_single_beat_spell_failures` が知覚として
+    次の Pulse の頭へ届ける。
+
     ``initial_building_id``: ラウンド 1 の記録先の部屋。ストリーミング経路では
     **下書き行を作った部屋** を渡す (確定時に引き直さない 2026-06-11 の不変条件を
     Beat 単位でも守るため)。None なら現在地を引いて使う。
@@ -2958,6 +3049,8 @@ async def _run_spell_loop(
         list(_node_memorize_cfg.get("tags") or [])
         if isinstance(_node_memorize_cfg, dict) else []
     )
+    # 一回で閉じる Beat (docstring 参照)。スペルの結果を続きの生成に回さない。
+    _single_beat = bool(getattr(node_def, "single_beat", False)) if node_def is not None else False
 
     def _stop_open_round(exc: BaseException) -> Optional[SpellLoopResult]:
         """返事を止める例外で周の途中から抜けるときの、まだ確定していない周の保存材料。
@@ -2973,6 +3066,19 @@ async def _run_spell_loop(
         """
         executed = list(_round_progress.get("executed") or [])
         valid_spells_now = list(_round_progress.get("valid_spells") or [])
+        if _single_beat and executed and not _round_progress.get("results_memorized"):
+            # 一回で閉じる Beat は結果を記憶へ書かない。受け取り済みの結果の
+            # うち失敗だけを、周を閉じた回と同じく知覚で届ける。
+            _round_progress["results_memorized"] = True
+            _deliver_single_beat_spell_failures(
+                persona,
+                [
+                    {"name": spell.name, "norm": spell.norm, "result": result_text,
+                     "success": ok, "meta": meta}
+                    for spell, (result_text, meta, ok) in zip(valid_spells_now, executed)
+                ],
+                pulse_id=state.get("_pulse_id"), playbook_name=playbook.name,
+            )
         if executed and not _round_progress.get("results_memorized"):
             try:
                 _partial_results = "\n".join(
@@ -3603,7 +3709,10 @@ async def _run_spell_loop(
                     "[sea][spell] Round %d: attached %d media item(s) from spell results",
                     loop_count, len(aggregated_media),
                 )
-            messages.append(spell_result_msg)
+            if not _single_beat:
+                # 一回で閉じる Beat は続きの生成をしないので、結果を続きの材料に
+                # 積まない (state["_messages"] 経由で後続ノードに結果が漏れない)。
+                messages.append(spell_result_msg)
 
             # Record to PulseContext
             pulse_ctx = state.get("_pulse_context")
@@ -3633,7 +3742,9 @@ async def _run_spell_loop(
             # pulse_id / pulse_context / node_memorize_tags は前倒しブロックで
             # 定義済みのものを再利用する。
             spell_tags = (node_memorize_tags + ["spell"]) if node_memorize_tags else ["conversation", "spell"]
-            if combined_results:
+            # 一回で閉じる Beat は結果の要約を記憶へ書かない (成功は世界の記録が
+            # 運び、失敗は下の知覚で届ける — 書くと失敗が二重に届く)。
+            if combined_results and not _single_beat:
                 runtime._store_memory(
                     persona, combined_results, role="system",
                     tags=spell_tags, pulse_id=pulse_id, playbook_name=playbook.name,
@@ -3686,6 +3797,23 @@ async def _run_spell_loop(
                 form=SAVED_FORM_SPELL_RESULTS,
             )
             segments.append(_segment)
+
+            # ---- 一回で閉じる Beat の終端 (autonomous_behavior_v3.md §5) ----
+            # 失敗の有無に関わらず再呼び出しをしない。失敗だけ知覚で次の Pulse の
+            # 頭へ届ける。下書き行の扱いは /quick_spell 終端と同じ — ここでは
+            # 確定させず、締めの Beat として呼び出し元が確定する。
+            if _single_beat:
+                _deliver_single_beat_spell_failures(
+                    persona, round_records,
+                    pulse_id=pulse_id, playbook_name=playbook.name,
+                )
+                LOGGER.info(
+                    "[sea][spell] Round %d: single-beat node; closing the beat "
+                    "without re-invoking the LLM (%d spell line(s))",
+                    loop_count, len(round_records),
+                )
+                text = ""
+                break
 
             # ---- /quick_spell 終端 (quick_spell.md §3.2) ----
             # ラウンドの全行が /quick_spell かつ失敗ゼロ = 「この発話で完了」の

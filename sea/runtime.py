@@ -177,7 +177,8 @@ class SEARuntime:
         docs/intent/persona_model_selection.md 決まったこと 10)。書いている途中で
         設定が変わっても、この返事は始めたときのモデルと接続で最後まで書く。
 
-        この返事の段 (自律は軽量、それ以外は標準) のモデルの設定ファイルが無ければ、
+        この返事の段 (Pulse-root の aspect の tier。今はどの種類の Pulse も標準)
+        のモデルの設定ファイルが無ければ、
         返事の前処理 (実行モデルの解決・読み戻し・床の確保) より前に
         ModelUnavailableError で止める。代わりのモデルでは動かさず、建物の記録にも
         ペルソナの記憶にも何も書かない (知らせはチャット画面のエラーだけ)。
@@ -189,8 +190,13 @@ class SEARuntime:
             reply_binding_scope,
         )
 
+        from sea.pulse_context import aspect_from_pulse_type
+
         model_binding = ReplyModelBinding.capture(persona)
-        model_binding.check_defined(TIER_LIGHTWEIGHT if pulse_type == "auto" else TIER_STANDARD)
+        _root_tier = aspect_from_pulse_type(pulse_type).model_tier
+        model_binding.check_defined(
+            TIER_LIGHTWEIGHT if _root_tier == "lightweight" else TIER_STANDARD
+        )
         with reply_binding_scope(model_binding):
             return self._run_meta_user_with_models(
                 persona,
@@ -265,7 +271,7 @@ class SEARuntime:
 
         # 実行 model の解決に失敗したら床未達として見送る (Codex 八巡目 #1):
         # None のまま進むと読み戻し・床は persona.model の窓を検証し、Playbook は
-        # 別の model (auto → 軽量) で走りうる — 検証した窓と喋る窓が食い違う。
+        # 別の model (サブラインの軽量など) で走りうる — 検証した窓と喋る窓が食い違う。
         _pre_model_key: Optional[str] = None
         try:
             _pre_probe_state: Dict[str, Any] = {"_model_binding": model_binding}
@@ -508,9 +514,9 @@ class SEARuntime:
         # model_key = この Pulse の実行 model (beat_execution_context.md §3.2 —
         # 閾値と退役は model ごと)。run_meta_user は ExecutionContext を保持しない
         # (解決は _run_playbook 内で完結する) ため、runtime_runner の probe と同じ
-        # 導出 (pulse_type → legacy tier フォールバック) をここで行う。root aspect
-        # の tier (AUTONOMOUS=lightweight / CONVERSATION・META=standard) と一致する
-        # ことは §6-3b 検収で照合済み。
+        # 導出 (pulse_type → root aspect の tier、pulse_context.tier_without_aspect)
+        # をここで行う。表 (_ASPECT_DERIVATION) から引くので root ラインの tier と
+        # 構造的に一致する (今はどの root も標準)。
         from database.building_messages import fetch_max_seq
         bh_before = fetch_max_seq(getattr(self.manager, "SessionLocal", None), building_id)
         try:
@@ -741,9 +747,9 @@ class SEARuntime:
         # 軽量モデル判定 (認知モデル v0.2 §10.3):
         # ExecutionContext があればその aspect、無ければ active LineFrame の
         # アスペクトから model tier を導出する。
-        # WORKER (run_playbook サブライン) / AUTONOMOUS (自律) → lightweight、
-        # CONVERSATION / META → standard。aspect の無い legacy frame では従来の
-        # _force_lightweight_model / pulse_type=='auto' フォールバックで判定する。
+        # WORKER (run_playbook サブライン) → lightweight、CONVERSATION / META /
+        # AUTONOMOUS (ティック) → standard。aspect の無いときは
+        # resolve_execution_context と同じ tier_without_aspect で判定する。
         _aspect_tier: Optional[str] = None
         if execution_context is not None:
             if execution_context.aspect is not None:
@@ -757,13 +763,10 @@ class SEARuntime:
                     _cur = None
                 if _cur is not None:
                     _aspect_tier = getattr(_cur, "model_tier", None)
-        if _aspect_tier is not None:
-            force_lightweight = (_aspect_tier == "lightweight")
-        else:
-            force_lightweight = bool(state and (
-                state.get("_force_lightweight_model")
-                or state.get("_pulse_type") == "auto"
-            ))
+        if _aspect_tier is None:
+            from sea.pulse_context import tier_without_aspect
+            _aspect_tier = tier_without_aspect(state)
+        force_lightweight = (_aspect_tier == "lightweight")
 
         from saiverse.persona_model_selection import (
             TIER_LIGHTWEIGHT,
@@ -879,8 +882,8 @@ class SEARuntime:
             persona: Persona object
             execution_context: Beat 開始点で解決した実行の身分証 (推奨経路)
             needs_structured_output: Whether this node requires structured output
-            state: Current execution state. legacy 経路の tier 導出
-                   (_force_lightweight_model / _pulse_type=='auto') に使う。
+            state: Current execution state. aspect の無いときの tier 導出
+                   (pulse_context.tier_without_aspect) に使う。
         """
         binding, tier, base_model, force_lightweight = self._decide_base_llm_model(
             persona, execution_context, state,

@@ -28,7 +28,7 @@ Track 内の処理は複数の **line** に分かれ、3つの独立した軸で
 |---|---|---|---|---|
 | **CONVERSATION** | main_line | committed | standard | 対ユーザー会話（メインキャッシュに残る） |
 | **WORKER** | sub_line | volatile | lightweight | サブラインの下調べ（このターン限り） |
-| **AUTONOMOUS** | main_line | committed | lightweight | 自律稼働（メインに残る・軽量） |
+| **AUTONOMOUS** | main_line | committed | standard | 自律稼働 = v0.4 のティック（メインに残る・標準。2026-10-10 に軽量から変更） |
 | **META** | meta_judgment | discardable | standard | メタ判断（使い捨て・重量級） |
 
 各呼び出しで aspect を指定すると、そのメッセージがメインキャッシュに残るか・このターン限りかが自動的に決まる。**v0.2 実装済・実機検証待ち**。

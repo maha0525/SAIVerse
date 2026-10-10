@@ -1109,20 +1109,37 @@ def test_a_persona_whose_default_model_is_gone_stops_before_the_reply_starts(sou
     assert err.to_dict()["content"] == message
 
 
-def test_an_autonomous_reply_stops_when_the_lightweight_model_is_gone(monkeypatch):
-    monkeypatch.setenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gone-lite")
+def test_an_autonomous_reply_stops_when_the_standard_model_is_gone():
+    # 自律の Pulse (v0.4 のティック) は標準モデルで走る (2026-10-10 に軽量から
+    # 変更)。始まりの検査も標準モデルの段を見る。
     runtime = _meta_runtime()
+    persona = _stub_persona(
+        model="gone-default",
+        speaking_model_choice=SpeakingModelChoice("gone-default", SOURCE_PERSONA, False),
+    )
 
-    with pytest.raises(ModelUnavailableError) as exc_info:
+    with pytest.raises(ModelUnavailableError):
         runtime.run_meta_user(
-            persona=_stub_persona(), user_input="", building_id="b1", pulse_type="auto",
+            persona=persona, user_input="", building_id="b1", pulse_type="auto",
         )
 
     runtime.session_lifecycle.maybe_run_window_refill.assert_not_called()
-    assert exc_info.value.user_message == (
-        "アオイの軽量モデル 'gone-lite' は SAIVerse にないため、返事の途中の作業ができませんでした。"
-        "グローバル設定の「モデルロール」で軽量モデルを選び直すと、再起動しなくても続けられます。"
+    runtime._run_playbook.assert_not_called()
+
+
+def test_an_autonomous_reply_does_not_need_the_lightweight_model(monkeypatch):
+    # 軽量モデルが無くても、自律の Pulse は標準モデルで始まる (以前は軽量の
+    # 段を見て止まっていた)。窓の手当ても標準モデルの窓で行う。
+    monkeypatch.setenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gone-lite")
+    runtime = _meta_runtime()
+
+    runtime.run_meta_user(
+        persona=_stub_persona(), user_input="", building_id="b1", pulse_type="auto",
+        meta_playbook=None,
     )
+
+    runtime._run_playbook.assert_called_once()
+    assert runtime.session_lifecycle.maybe_run_window_refill.call_args.kwargs["model_key"] == "m"
 
 
 def test_an_unreachable_lightweight_model_is_not_replaced_by_the_standard_model(monkeypatch):

@@ -104,6 +104,8 @@ LLM 呼び出しには性質の異なる二種類がある。
 
 つまり**自律的にタスクを操作する手段が一つも無い**。2026-07-23 の事故で 3 日連続で失敗していた Track（「task 関連スペルを順に使用して検証する」）は、どの自律経路からも原理的に達成できないものだった。権限表の見直しは Track 内の情報の流れの整理と併せて別途。
 
+**2026-10-10 追記 (v0.4 段 2)**: `Aspect.AUTONOMOUS` はティックの aspect として生き返った。tier は軽量から標準へ移り、入口は `SAIVerseManager.fire_tick` → `run_sea_auto` → `submit_auto` (手で打つ口は `POST /api/people/{persona_id}/tick`。T 分間隔の自動の打鍵は段 3)。
+
 ## 関連
 
 - `docs/issues/image_generation_api_usage_tracking.md` — 画像生成 API が Usage に載っていない件。本 issue の部分集合にあたる

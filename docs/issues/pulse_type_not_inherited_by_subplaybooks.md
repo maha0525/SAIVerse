@@ -14,6 +14,8 @@
 
 `sea/runtime_runner.py` の `_prepare_context` 前の probe は `resolve_execution_context(persona, None, state=...)` を PulseContext なしで呼ぶため、tier は legacy フォールバック (`_force_lightweight_model` / `_pulse_type == "auto"`) だけで決まる。auto Pulse の子 Playbook (line='main') は `_pulse_type` が None なので probe は **standard** を返すが、実際に走る LLM ノードは共有 PulseContext の root frame (aspect=AUTONOMOUS) から **lightweight** を選ぶ。head の render 対象 model と実行 model が食い違い、Metabolism の閾値も別 model の帳簿で数えられる。
 
+**2026-10-10 追記 (v0.4 段 2)**: `Aspect.AUTONOMOUS` を標準 tier へ移し、probe の `_pulse_type == "auto"` 直書きを「`_pulse_type` の root aspect の tier を表から引く」形 (`sea/pulse_context.py` の `tier_without_aspect`) に置き換えた。Pulse-root の aspect が全部標準になったので、上の **tier のずれは今は起きない** (子の probe も root frame も標準)。`_pulse_type` が子に継承されないこと自体と、メタ判断バッファの消費点 (下) は残る — root の aspect に軽量のものが戻ってきたら再発するので、本 issue は開いたままにする。
+
 ## なぜ W10 の消し込みで直さなかったか
 
 継承させる修正自体は `compile_with_langgraph` の 1 行 (`pulse_type if pulse_type is not None else parent.get("_pulse_type")`) で足りるが、`_pulse_type` の消費点は tier だけではない:

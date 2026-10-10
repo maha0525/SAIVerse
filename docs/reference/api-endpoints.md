@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 370（tag グループ: 26）
+**エンドポイント数**: 371（tag グループ: 26）
 
 ## addon
 
@@ -357,6 +357,7 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/people/{persona_id}/threads/{thread_id}/export-native` | Export a single thread as native SAIVerse JSON. |
 | GET | `/api/people/{persona_id}/threads/{thread_id}/messages` | List messages in a thread with pagination. |
 | POST | `/api/people/{persona_id}/threads/{thread_id}/messages` | Add a new message to a thread. |
+| POST | `/api/people/{persona_id}/tick` | ティックを一発打つ (``SAIVerseManager.fire_tick``)。 |
 | POST | `/api/people/{persona_id}/track-logs/bulk-delete` | Delete multiple track_local_log rows owned by persona's tracks. |
 | DELETE | `/api/people/{persona_id}/track-logs/{log_id}` | Delete a single track_local_log row. |
 | POST | `/api/people/{persona_id}/unified-recall` | Search across Chronicle and Memopedia using embeddings. |

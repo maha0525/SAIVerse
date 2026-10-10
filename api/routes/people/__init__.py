@@ -12,6 +12,7 @@ from . import realtime_spell, core_memory, life
 from . import experience_ledger
 from . import pocketbook
 from . import sluice
+from . import tick
 
 router = APIRouter()
 
@@ -66,3 +67,4 @@ router.include_router(life.router, tags=["people"])
 router.include_router(experience_ledger.router, tags=["people"])
 router.include_router(pocketbook.router, tags=["people"])
 router.include_router(sluice.router, tags=["people"])
+router.include_router(tick.router, tags=["people"])

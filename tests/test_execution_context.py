@@ -83,9 +83,10 @@ class TestResolveByAspect:
         ec = resolve_execution_context(_persona(), _pulse_ctx(Aspect.WORKER))
         assert ec.model_key == "lite-model"
 
-    def test_autonomous_uses_lightweight_model(self):
+    def test_autonomous_uses_standard_model(self):
+        # AUTONOMOUS = v0.4 のティック。標準モデル (2026-10-10 に軽量から変更)。
         ec = resolve_execution_context(_persona(), _pulse_ctx(Aspect.AUTONOMOUS))
-        assert ec.model_key == "lite-model"
+        assert ec.model_key == "standard-model"
 
     def test_lightweight_unset_falls_back_to_env(self, monkeypatch):
         monkeypatch.setenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "env-lite")
@@ -97,7 +98,7 @@ class TestResolveByAspect:
         monkeypatch.delenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", raising=False)
         from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
         persona = _persona(lightweight_model=None)
-        ec = resolve_execution_context(persona, _pulse_ctx(Aspect.AUTONOMOUS))
+        ec = resolve_execution_context(persona, _pulse_ctx(Aspect.WORKER))
         assert ec.model_key == BUILTIN_DEFAULT_LITE_MODEL
         assert ec.model_key == default_lightweight_model()
 
@@ -133,11 +134,37 @@ class TestResolveLegacyFallback:
         )
         assert ec.model_key == "lite-model"
 
-    def test_legacy_auto_pulse_type(self):
-        ec = resolve_execution_context(
-            _persona(), _pulse_ctx(aspect=None), state={"_pulse_type": "auto"},
-        )
-        assert ec.model_key == "lite-model"
+    def test_frameless_pulse_type_follows_the_root_aspect_tier(self):
+        # aspect の無いときの tier は _pulse_type の root aspect の tier を表から
+        # 引く (tier_without_aspect)。旧「auto なら軽量」の直書きは 2026-10-10 に
+        # 撤去 — AUTONOMOUS が標準になったので auto も標準。
+        for pulse_type in ("auto", "user", "schedule", "meta_judgment", None):
+            ec = resolve_execution_context(
+                _persona(), _pulse_ctx(aspect=None), state={"_pulse_type": pulse_type},
+            )
+            assert ec.model_key == "standard-model", pulse_type
+        # 先取り (frame 無し) も同じ規則。
+        ec = resolve_execution_context(_persona(), None, state={"_pulse_type": "auto"})
+        assert ec.model_key == "standard-model"
+
+    def test_frameless_tier_tracks_the_derivation_table(self):
+        # 表 (_ASPECT_DERIVATION) を変えれば frame 無しの規則も追従する
+        # (写しを持たない) ことの固定。
+        from unittest.mock import patch as _patch
+
+        from sea import pulse_context as pc
+
+        table = dict(pc._ASPECT_DERIVATION)
+        table[Aspect.AUTONOMOUS] = ("main_line", "committed", "lightweight")
+        with _patch.dict(pc._ASPECT_DERIVATION, table):
+            assert pc.tier_without_aspect({"_pulse_type": "auto"}) == "lightweight"
+            assert pc.tier_without_aspect({"_pulse_type": "user"}) == "standard"
+        assert pc.tier_without_aspect({"_pulse_type": "auto"}) == "standard"
+        assert pc.tier_without_aspect(None) == "standard"
+        assert pc.tier_without_aspect({}) == "standard"
+        assert pc.tier_without_aspect(
+            {"_pulse_type": "user", "_force_lightweight_model": True},
+        ) == "lightweight"
 
     def test_thread_id_empty_without_adapter(self):
         # PulseContext.thread_id (生成時固定の死に値) は廃止 — adapter が無い
@@ -218,11 +245,11 @@ class TestSelectLLMClientParity:
         assert legacy is persona.lightweight_llm_client
         assert model == ec.model_key == "lite-model"
 
-    def test_autonomous_selects_lightweight_client(self):
+    def test_autonomous_selects_normal_client(self):
         persona = _persona()
         ec, client, model, legacy = self._select_both(persona, _pulse_ctx(Aspect.AUTONOMOUS))
-        assert client is persona.lightweight_llm_client is legacy
-        assert model == "lite-model"
+        assert client is persona.llm_client is legacy
+        assert model == ec.model_key == "standard-model"
 
     def test_legacy_frame_selects_normal_client(self):
         persona = _persona()

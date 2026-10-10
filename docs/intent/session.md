@@ -109,7 +109,7 @@ aspect (v0.2: `line_tag_responsibility.md §10`) は (line_role, scope, model_ti
 | aspect | line_role | セッションへの影響 |
 |---|---|---|
 | CONVERSATION | main_line | 標準 tier — persona の標準 model のセッションに属する |
-| AUTONOMOUS | main_line | 軽量 tier — lightweight model のセッションに属する |
+| AUTONOMOUS | main_line | 標準 tier — 標準 model のセッションに属する (2026-10-10 に軽量から変更 — v0.4 のティック) |
 | META | meta_judgment | 標準 tier — 標準 model のセッションに属する |
 | WORKER | sub_line | 軽量 tier — 親に閉じる子セッション (§2.4)、head は同 model の Session と共有 |
 

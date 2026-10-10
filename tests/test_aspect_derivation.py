@@ -28,9 +28,11 @@ class TestAspectDerivation(unittest.TestCase):
             (Aspect.WORKER.line_role, Aspect.WORKER.scope, Aspect.WORKER.model_tier),
             ("sub_line", "volatile", "lightweight"),
         )
+        # AUTONOMOUS = v0.4 のティック。標準モデル (2026-10-10 に軽量から変更 —
+        # autonomous_behavior_v04_plan.md 段 2「標準モデル・メインライン」)。
         self.assertEqual(
             (Aspect.AUTONOMOUS.line_role, Aspect.AUTONOMOUS.scope, Aspect.AUTONOMOUS.model_tier),
-            ("main_line", "committed", "lightweight"),
+            ("main_line", "committed", "standard"),
         )
         self.assertEqual(
             (Aspect.META.line_role, Aspect.META.scope, Aspect.META.model_tier),

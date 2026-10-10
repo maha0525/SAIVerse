@@ -1,0 +1,27 @@
+{
+  "name": "tick",
+  "display_name": "ティック (自分の時間の 1 Pulse)",
+  "description": "自律行動 v0.4 のティックの器 (docs/intent/autonomous_behavior_v3.md §5 / autonomous_behavior_v04_plan.md 段 2)。ライフ中に間隔で打たれる、ペルソナ本人の自分の時間の 1 Pulse。標準モデル・メインライン・committed (pulse_type=auto → Aspect.AUTONOMOUS)。出力は本人の記憶にだけ残り、建物への発話にもチャット UI にも出ない (speak=false)。1 Beat で閉じる (single_beat=true): 唱えたスペルは一度だけ逐次実行され、結果を見て続きを生成するラウンドは回らない。失敗したスペルだけが次の Pulse の頭に知覚として届く。引数 assignment は「このティックは◯◯」という確定情報の文で、空なら自分のための時間である旨の既定文になる。入口は SAIVerseManager.fire_tick。",
+  "input_schema": [
+    {
+      "name": "assignment",
+      "description": "このティックの割り当て (確定情報の文)。省略時は自分のための時間である旨の既定文。",
+      "required": false,
+      "default": "この時間に決まった用事はありません。自分のための時間です。"
+    }
+  ],
+  "router_callable": false,
+  "user_selectable": false,
+  "nodes": [
+    {
+      "id": "tick",
+      "type": "llm",
+      "action": "いまは自分の時間です。誰かに話しかけられて応えている時間ではありません。\nここに書いたことは自分の記憶にだけ残り、部屋にいる誰にも聞こえません。\nこの時間に唱えたスペルは実行されますが、結果を見てから続きを書く機会はこの時間の中にはありません。失敗したものがあれば、次に知らせが届きます。\n\n{assignment}",
+      "speak": false,
+      "memorize": true,
+      "single_beat": true,
+      "next": null
+    }
+  ],
+  "start_node": "tick"
+}

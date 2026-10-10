@@ -101,6 +101,16 @@ class LLMNodeDef(BaseModel):
         description="If True, this node's output is considered important and will be "
                     "dual-written to both pulse_logs and messages (long-term memory)."
     )
+    single_beat: bool = Field(
+        default=False,
+        description="If True, the node closes in one Beat (one generation): spells cast "
+                    "in the generation are executed once, sequentially in text order, and "
+                    "their results are NOT fed back into a continuation generation. "
+                    "Successful results are carried by the world's own records; failures "
+                    "are delivered to the persona as a perception at the head of the next "
+                    "Pulse. Spell lines and results are still logged to pulse_logs. "
+                    "Used by the tick playbook (autonomous_behavior_v3.md §5)."
+    )
 
 
 class ToolNodeDef(BaseModel):

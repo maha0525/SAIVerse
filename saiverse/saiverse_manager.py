@@ -650,7 +650,7 @@ class SAIVerseManager(
         occupants: List[str],
         meta_playbook: Optional[str] = None,
         args: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> Optional[List[str]]:
         """Run autonomous pulse via PulseController.
 
         Args:
@@ -658,8 +658,13 @@ class SAIVerseManager(
                 2026-05-01 の認知モデル移行以降は **必須**。None で呼ぶと
                 PulseController が ERROR ログを出して何もしない。
                 (旧 SubLineScheduler の track_autonomous 連続 Pulse は
-                自律行動 v2 で廃止 — intent §9.3。)
+                自律行動 v2 で廃止 — intent §9.3。v0.4 ではティックの
+                入口 :meth:`fire_tick` がここを通る。)
             args: Playbook 起動時に渡す引数。
+
+        Returns:
+            ``submit_auto`` の戻り値 — 実行された回は出力の list (空でありうる)、
+            席が埋まっていて見送られた回・Discord visitor・例外の回は None。
 
         Discord visitors (DiscordVisitorStub) are handled by DiscordConnector,
         not by the local PulseController.
@@ -671,10 +676,10 @@ class SAIVerseManager(
                 "Skipping local run_sea_auto for Discord visitor: %s",
                 getattr(persona, "persona_id", "unknown"),
             )
-            return
+            return None
 
         try:
-            self.pulse_controller.submit_auto(
+            return self.pulse_controller.submit_auto(
                 persona_id=persona.persona_id,
                 building_id=building_id,
                 meta_playbook=meta_playbook,
@@ -682,6 +687,55 @@ class SAIVerseManager(
             )
         except Exception as exc:
             logging.exception("SEA auto run failed: %s", exc)
+            return None
+
+    def fire_tick(
+        self, persona_id: str, assignment_text: Optional[str] = None,
+    ) -> Optional[List[str]]:
+        """ティックを一発打つ (v0.4 計画 段 2 — 手で打つ入口)。
+
+        ティック = ライフ中に間隔で打たれる、本人の自分の時間の 1 Pulse
+        (autonomous_behavior_v3.md §5)。``tick`` Playbook を auto Pulse
+        (``Aspect.AUTONOMOUS`` = 標準モデル・メインライン・committed) として
+        :meth:`run_sea_auto` へ流す。出力は本人の記憶にだけ残り、建物への
+        発話にはならない。間隔で自動に打つ運転は段 3 で、ここは同期の一発。
+
+        Args:
+            persona_id: 対象のペルソナ (このプロセスに常駐していること)。
+            assignment_text: このティックの割り当て (「このティックは◯◯」と
+                いう確定情報の文)。None・空白だけなら Playbook の既定文
+                (自分のための時間である旨) になる — 問いは渡さない。
+
+        Returns:
+            :meth:`run_sea_auto` の戻り値 (実行されたら list、見送り・失敗は
+            None)。
+
+        Raises:
+            KeyError: ペルソナがこのプロセスに居ない。
+        """
+        persona = self.personas.get(persona_id)
+        if persona is None:
+            raise KeyError(persona_id)
+        building_id = persona.current_building_id
+        args: Dict[str, Any] = {}
+        if assignment_text is not None and assignment_text.strip():
+            args["assignment"] = assignment_text.strip()
+        logging.info(
+            "[tick] firing a tick for persona=%s building=%s (assignment=%s)",
+            persona_id, building_id, "given" if args else "free",
+        )
+        result = self.run_sea_auto(
+            persona,
+            building_id,
+            self.occupants.get(building_id, []),
+            meta_playbook="tick",
+            args=args or None,
+        )
+        logging.info(
+            "[tick] tick for persona=%s finished (executed=%s)",
+            persona_id, result is not None,
+        )
+        return result
 
     def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, args: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, pre_spells: Optional[List[str]] = None, pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None) -> List[str]:
         """Run user input via PulseController.

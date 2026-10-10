@@ -46,7 +46,9 @@ class Aspect(str, Enum):
 
     - ``CONVERSATION``: 通常会話 (対ユーザー / social / external)。main_line / committed / 標準
     - ``WORKER``: run_playbook スペルのサブライン処理。sub_line / volatile / 軽量
-    - ``AUTONOMOUS``: 自律行動。main_line / committed / 軽量
+    - ``AUTONOMOUS``: 自律行動 (v0.4 のティック)。main_line / committed / 標準
+      (2026-10-10 に軽量から標準へ。ティックは本人の自分の時間の 1 Pulse で、
+      標準モデルの呼び出しが保温を兼ねる — autonomous_behavior_v04_plan.md 段 2)
     - ``META``: メタ判断。meta_judgment / discardable (確定分は committed に昇格) / 標準
     """
 
@@ -85,7 +87,7 @@ class Aspect(str, Enum):
 _ASPECT_DERIVATION: Dict["Aspect", tuple] = {
     Aspect.CONVERSATION: ("main_line", "committed", "standard"),
     Aspect.WORKER: ("sub_line", "volatile", "lightweight"),
-    Aspect.AUTONOMOUS: ("main_line", "committed", "lightweight"),
+    Aspect.AUTONOMOUS: ("main_line", "committed", "standard"),
     Aspect.META: ("meta_judgment", "discardable", "standard"),
 }
 
@@ -102,7 +104,7 @@ _ASPECT_MODE_DISPLAY_NAME: Dict["Aspect", str] = {
 def aspect_from_pulse_type(pulse_type: Optional[str]) -> "Aspect":
     """Pulse-root のアスペクトを ``pulse_type`` から導出する (§10.2)。
 
-    - ``"auto"`` → ``AUTONOMOUS`` (自律 Track の Pulse)
+    - ``"auto"`` → ``AUTONOMOUS`` (自律の Pulse — v0.4 のティック)
     - ``"meta_judgment"`` → ``META`` (メタ判断ディスパッチ)
     - それ以外 (``"user"`` / ``"schedule"`` / None) → ``CONVERSATION``
 
@@ -209,6 +211,29 @@ class LineFrame:
         return self.parent_id is not None
 
 
+def tier_without_aspect(state: Optional[Dict[str, Any]]) -> str:
+    """aspect の付いたフレームが無いときのモデル tier (``"standard"`` / ``"lightweight"``)。
+
+    - ``_force_lightweight_model`` (親のいるサブラインの印) → 軽量。
+    - ``_pulse_type`` が載っていれば、その Pulse-root の aspect の tier
+      (:func:`aspect_from_pulse_type`)。フレームを積む前の先取り (run_meta_user /
+      runtime_runner の probe) がここを通り、root ラインの tier と必ず一致する。
+    - どちらも無い (keepalive / sluice 等の Pulse 外の呼び出し) → 標準。
+
+    2026-10-10 まで、ここは「``_pulse_type=='auto'`` なら軽量」という直書きだった
+    (AUTONOMOUS が軽量 tier だった頃の写し)。AUTONOMOUS を標準へ移したので
+    (v0.4 のティック)、表の写しをやめて表そのものから引く形にした — tier を
+    変えるときに直す場所が ``_ASPECT_DERIVATION`` 一箇所になる。
+    """
+    if not state:
+        return "standard"
+    if state.get("_force_lightweight_model"):
+        return "lightweight"
+    if "_pulse_type" in state:
+        return aspect_from_pulse_type(state.get("_pulse_type")).model_tier
+    return "standard"
+
+
 @dataclass(frozen=True)
 class ExecutionContext:
     """実行の身分証 — Beat 開始時に一度だけ解決する不変の器。
@@ -258,10 +283,9 @@ def resolve_execution_context(
 ) -> ExecutionContext:
     """Beat 開始点で ExecutionContext を解決する (beat_execution_context §2.1)。
 
-    挙動不変の原則: model_key の導出は ``sea/runtime.py`` の従来の LLM 選択
-    (aspect.model_tier → lightweight/standard、legacy frame では
-    ``_force_lightweight_model`` / ``_pulse_type=='auto'`` フォールバック) と
-    同じ結果になるように写している。値を変える変更は後続の段で行う。
+    model_key の導出は ``sea/runtime.py`` の LLM 選択
+    (``_decide_base_llm_model``: aspect.model_tier → lightweight/standard、
+    aspect の無いときは :func:`tier_without_aspect`) と同じ規則。
 
     Args:
         persona: PersonaCore (またはテスト用の互換オブジェクト)。
@@ -279,14 +303,10 @@ def resolve_execution_context(
             frame = None
     aspect = frame.aspect if frame is not None else None
 
-    # ── model tier: aspect が唯一の供給源。無ければ legacy フラグ (従来どおり) ──
+    # ── model tier: aspect が唯一の供給源。無ければ frame 無しの規則 ──
     tier = aspect.model_tier if aspect is not None else None
     if tier is None:
-        force_lightweight = bool(state and (
-            state.get("_force_lightweight_model")
-            or state.get("_pulse_type") == "auto"
-        ))
-        tier = "lightweight" if force_lightweight else "standard"
+        tier = tier_without_aspect(state)
 
     # 書いている途中の返事なら、返事の始まりに決めたモデルを使う
     # (docs/intent/persona_model_selection.md 決まったこと 10)。途中でペルソナの
