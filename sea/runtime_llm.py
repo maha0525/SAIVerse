@@ -2697,6 +2697,9 @@ class SpellLoopResult:
       それまでの周と、止まった周の途中まで (受け取り済みの結果と、結果の
       来ていないスペルの行) をセグメントにして返し、呼び出し元が建物へ書いて
       から投げる (docs/intent/reply_stop_exit.md 不変条件 5)。
+      一回で閉じる Beat で、周を閉じたあと帰結の知覚を積めなかった回
+      (:class:`SpellOutcomeDeliveryError`) もここに入る — 結果つきの周の
+      セグメントを書いてから投げ、Beat を失敗として閉じる。
     - ``final_stream_error``: 締めの発言 (``final_continuation``) を運んだ
       ストリームを、サーバーが途中で切った申告。スペルの周の途中の切断は
       次の周が発話を続けるので載せない — 載るのは発言が途切れたまま確定する
@@ -2718,6 +2721,23 @@ SINGLE_BEAT_SPELL_OUTCOMES_KIND = "spell_outcomes"
 
 #: 帰結の知覚で、失敗した行の結果の頭に添える印。
 SPELL_OUTCOME_FAILURE_MARK = "（失敗）"
+
+
+class SpellOutcomeDeliveryError(RuntimeError):
+    """一回で閉じる Beat の、スペルの帰結の知覚を積めなかった。
+
+    スペルはもう実行済みで、失敗したのは帰結を次の Pulse へ届ける配送だけ。
+    単発の Beat は結果を記憶にも続きの材料にも残さないので、配送の失敗を
+    黙って正常完了にすると、実行済みスペルの帰結がどこにも残らずに消える
+    (2026-10-10 Codex 敵対レビュー 3 巡目 high)。だから Beat を失敗として
+    閉じる — スペルは再実行しない (副作用は済んでいる)。
+
+    ``outcome_text``: 届けられなかった知覚の本文 (ログに残す控え)。
+    """
+
+    def __init__(self, message: str, *, outcome_text: str = "") -> None:
+        super().__init__(message)
+        self.outcome_text = outcome_text
 
 
 def _declares_logical_failure(meta: Any) -> bool:
@@ -2799,23 +2819,26 @@ def _deliver_single_beat_spell_outcomes(
     一つも実行されないまま Beat が区切られた回 (生成の直後の割り込み —
     :func:`_run_spell_loop` の周の頭の取消評価) は同じ器で別の文面を渡す。
 
-    ``records`` は ``name`` / ``norm`` / ``result`` / ``success`` (/ ``pending``)
-    を持つ dict の列 (テキスト順)。戻り値は届けた行の件数 (積めなかった回は 0)。
+    ``records`` は ``name`` / ``norm`` / ``result`` / ``success`` (/ ``pending``
+    / ``meta``) を持つ dict の列 (テキスト順)。``meta`` はスペルの戻り値の
+    metadata で、その ``media`` (画像等の添付 ``[{"path","mime_type",...}]``) を
+    全行ぶん集めて知覚の ``media`` に載せる — 通常の周が結果のメッセージの
+    ``metadata.media`` に載せて続きの生成へ渡すのと同じ集め方。知覚の消費
+    (``flush_perception_buffer_payload``) が消費バッチの media に移し、次の
+    Pulse の提示ブロックの ``metadata.media`` として LLM に届く。
+
+    戻り値は届けた行の件数。**積めなかった回 (SAIMemory が無い・使えない・
+    積む呼び出しが例外を投げた) は** :class:`SpellOutcomeDeliveryError` **を
+    投げる** — 帰結を黙って落とさない (呼び出し側が、完走なら Beat を失敗として
+    閉じ、中断なら ERROR を残して取消の例外を運び続ける)。
     """
     if not records:
         return 0
-    adapter = getattr(persona, "sai_memory", None)
-    push = getattr(adapter, "push_perception", None)
-    if push is None:
-        LOGGER.warning(
-            "[sea][spell] single-beat: %d spell outcome(s) could not be delivered "
-            "(no SAIMemory adapter) persona=%s",
-            len(records), getattr(persona, "persona_id", None),
-        )
-        return 0
+    persona_id = getattr(persona, "persona_id", None)
     lines = [header or "直前の自分の時間に唱えたスペルの帰結です。"]
     failed: List[str] = []
     not_run: List[str] = []
+    media: List[Dict[str, Any]] = []
     for rec in records:
         name = str(rec.get("name") or "")
         result_text = rec.get("result") or "(結果の文面なし)"
@@ -2827,6 +2850,12 @@ def _deliver_single_beat_spell_outcomes(
         lines.append("")
         lines.append(str(rec.get("norm") or name))
         lines.append(f"→ {result_text}")
+        rec_meta = rec.get("meta")
+        if isinstance(rec_meta, dict):
+            rec_media = rec_meta.get("media")
+            if isinstance(rec_media, list):
+                media.extend(rec_media)
+    content = "\n".join(lines)
     metadata = json.dumps(
         {
             "source": source,
@@ -2838,21 +2867,54 @@ def _deliver_single_beat_spell_outcomes(
         },
         ensure_ascii=False,
     )
+    def _failure(cause: str) -> SpellOutcomeDeliveryError:
+        if len(not_run) == len(records):
+            # 生成の直後に区切られた回 — どのスペルも実行されていない。
+            head = (
+                f"唱えたスペルは実行されていません。その事実 {len(records)} 件を"
+                "次の時間へ届ける配送が失敗しました"
+            )
+        else:
+            head = (
+                f"スペルは実行済みです (再実行はしません)。その帰結 {len(records)} 件を"
+                "次の時間へ届ける配送だけが失敗しました"
+            )
+        return SpellOutcomeDeliveryError(f"{head}: {cause}", outcome_text=content)
+
+    adapter = getattr(persona, "sai_memory", None)
+    push = getattr(adapter, "push_perception", None)
+    if push is None:
+        raise _failure("SAIMemory の知覚バッファがありません")
+    # 本物の adapter は DB 接続が無いと push_perception を黙って空振りする
+    # (例外も出さない)。積めない状態は積む前に配送の失敗として扱う。
+    is_ready = getattr(adapter, "is_ready", None)
+    if callable(is_ready) and not is_ready():
+        raise _failure("SAIMemory の DB に接続されていません")
     try:
-        push(SINGLE_BEAT_SPELL_OUTCOMES_KIND, "\n".join(lines), metadata=metadata)
-    except Exception:
-        LOGGER.warning(
-            "[sea][spell] single-beat: pushing the spell-outcome perception failed "
-            "persona=%s", getattr(persona, "persona_id", None), exc_info=True,
+        push(
+            SINGLE_BEAT_SPELL_OUTCOMES_KIND, content,
+            media=media or None, metadata=metadata,
         )
-        return 0
+    except Exception as exc:
+        raise _failure(f"{type(exc).__name__}: {exc}") from exc
     LOGGER.info(
         "[sea][spell] single-beat: delivered %d spell outcome(s) %s (failed=%s "
-        "not_run=%s) as a perception for the next pulse (persona=%s)",
+        "not_run=%s media=%d) as a perception for the next pulse (persona=%s)",
         len(records), [rec.get("name") for rec in records], failed, not_run,
-        getattr(persona, "persona_id", None),
+        len(media), persona_id,
     )
     return len(records)
+
+
+def _log_undelivered_spell_outcomes(
+    persona: Any, exc: SpellOutcomeDeliveryError, *, where: str,
+) -> None:
+    """届けられなかった帰結を、本文ごと ERROR で残す (人が拾える最後の控え)。"""
+    LOGGER.error(
+        "[sea][spell] single-beat (%s): %s persona=%s\n--- undelivered outcome ---\n%s",
+        where, exc, getattr(persona, "persona_id", None), exc.outcome_text,
+        exc_info=exc,
+    )
 
 
 def _spell_display_name(name: str, success: bool) -> str:
@@ -3008,7 +3070,9 @@ async def _run_spell_loop(
     スペル行と結果は PulseContext (pulse_logs) に残す。結果の要約は記憶へも
     続きの生成の材料 (``messages``) へも入れない。帰結は成功も失敗も全部、
     :func:`_deliver_single_beat_spell_outcomes` が一通の知覚にまとめて次の
-    Pulse の頭へ届ける。
+    Pulse の頭へ届ける。その配送に失敗した回は Beat を失敗として閉じる
+    (:class:`SpellOutcomeDeliveryError` — ストリーミング経路は投げ、そうでない
+    経路は ``stop_error`` に載せて返す。スペルは再実行しない)。
 
     ``initial_building_id``: ラウンド 1 の記録先の部屋。ストリーミング経路では
     **下書き行を作った部屋** を渡す (確定時に引き直さない 2026-06-11 の不変条件を
@@ -3125,14 +3189,20 @@ async def _run_spell_loop(
             # この周で唱えた全部の行の帰結を知覚で届ける — 受け取り済みの結果は
             # そのまま、実行の途中で止まった行と、まだ始まっていなかった行は
             # その事実を (失敗とも済んだとも書かずに)、名前・引数が通らなかった
-            # 行は通常の周と同じ誤りの文面を。
-            _round_progress["results_memorized"] = True
+            # 行は通常の周と同じ誤りの文面を。受け取り済みの結果は metadata
+            # (添付の media) ごと渡す。
+            #
+            # 「届けた」の印 (results_memorized) は配送が成功してから立てる。
+            # 失敗したら印を立てずに ERROR を残すだけで、新しい例外は投げない
+            # — ここは取消の例外を運んでいる途中で、すり替えると止まった理由が
+            # 届かない (2026-10-10 Codex 敵対レビュー 3 巡目 high)。
             _stopped_records: List[Tuple[int, Dict[str, Any]]] = []
             for idx, spell in enumerate(valid_spells_now):
                 if idx < len(executed):
-                    result_text, _meta, ok = executed[idx]
+                    result_text, result_meta, ok = executed[idx]
                     rec = {"name": spell.name, "norm": spell.norm,
-                           "result": result_text, "success": ok}
+                           "result": result_text, "success": ok,
+                           "meta": result_meta}
                 elif idx == len(executed):
                     rec = {"name": spell.name, "norm": spell.norm,
                            "result": "結果を受け取る前にその時間が区切られました"
@@ -3156,11 +3226,24 @@ async def _run_spell_loop(
                     "success": False,
                 }))
             _stopped_records.sort(key=lambda r: r[0])
-            _deliver_single_beat_spell_outcomes(
-                persona, [rec for _, rec in _stopped_records],
-                pulse_id=state.get("_pulse_id"), playbook_name=playbook.name,
-            )
-        if executed and not _round_progress.get("results_memorized"):
+            try:
+                _deliver_single_beat_spell_outcomes(
+                    persona, [rec for _, rec in _stopped_records],
+                    pulse_id=state.get("_pulse_id"), playbook_name=playbook.name,
+                )
+            except SpellOutcomeDeliveryError as delivery_exc:
+                _log_undelivered_spell_outcomes(
+                    persona, delivery_exc, where="stopped round",
+                )
+            else:
+                _round_progress["results_memorized"] = True
+        # 一回で閉じる Beat は、帰結の配送に失敗した回も結果を記憶へは書かない
+        # (完走側と同じく、記憶を帰結の行き先にしない)。
+        if (
+            executed
+            and not _single_beat
+            and not _round_progress.get("results_memorized")
+        ):
             try:
                 _partial_results = "\n".join(
                     f"[Spell {'Result' if ok else 'Error'}: {spell.name}]\n{result_text}"
@@ -3336,15 +3419,22 @@ async def _run_spell_loop(
                         for name, _args_raw, m in malformed
                     ]
                     _records.sort(key=lambda r: r[0])
-                    _deliver_single_beat_spell_outcomes(
-                        persona, [rec for _, rec in _records],
-                        pulse_id=_pulse_id_now, playbook_name=playbook.name,
-                        header=(
-                            "直前に唱えた次のスペルは、実行される前にその時間が"
-                            "区切られたため、どれも実行されていません。"
-                        ),
-                        source="single_beat_spells_not_run",
-                    )
+                    try:
+                        _deliver_single_beat_spell_outcomes(
+                            persona, [rec for _, rec in _records],
+                            pulse_id=_pulse_id_now, playbook_name=playbook.name,
+                            header=(
+                                "直前に唱えた次のスペルは、実行される前にその時間が"
+                                "区切られたため、どれも実行されていません。"
+                            ),
+                            source="single_beat_spells_not_run",
+                        )
+                    except SpellOutcomeDeliveryError as delivery_exc:
+                        # 取消の例外を運んでいる途中 — すり替えずに ERROR を残す
+                        # (止まった周の配送の失敗と同じ扱い)。
+                        _log_undelivered_spell_outcomes(
+                            persona, delivery_exc, where="stop before the first round",
+                        )
                 _log_text = memory_text
             if _pulse_ctx_now is not None:
                 _pulse_ctx_now.append(PulseLogEntry(
@@ -4011,10 +4101,41 @@ async def _run_spell_loop(
             # 行の扱いは /quick_spell 終端と同じ — ここでは確定させず、締めの
             # Beat として呼び出し元が確定する。
             if _single_beat:
-                _deliver_single_beat_spell_outcomes(
-                    persona, round_records,
-                    pulse_id=pulse_id, playbook_name=playbook.name,
-                )
+                # 配送を先に、閉じるのは配送の成否を見てから。帰結の行き先は
+                # この知覚だけなので、積めなかった回を正常完了にすると実行済み
+                # スペルの帰結が消える (2026-10-10 Codex 敵対レビュー 3 巡目
+                # high)。失敗は Beat の失敗として呼び出し元へ届ける — スペルは
+                # 再実行しない。周の本文はもう記憶にあり、この周のセグメント
+                # (結果つき) は建物の記録の材料として残す:
+                # - ストリーミング経路: 共有の器に置いて投げる (Beat の出口の
+                #   保存がその本文で下書き行を確定する — 止まった周と同じ口)。
+                # - それ以外: stop_error に載せて返す (呼び出し元が建物へ書いて
+                #   から投げる — SpellLoopResult.stop_error の契約)。
+                try:
+                    _deliver_single_beat_spell_outcomes(
+                        persona, round_records,
+                        pulse_id=pulse_id, playbook_name=playbook.name,
+                    )
+                except SpellOutcomeDeliveryError as delivery_exc:
+                    _log_undelivered_spell_outcomes(
+                        persona, delivery_exc, where="completed round",
+                    )
+                    if pipeline_streaming_state is not None:
+                        pipeline_streaming_state["salvage"] = {
+                            "msg_id": pipeline_streaming_state.get("msg_id"),
+                            "text": _segment.text,
+                            "memory_text": "" if _round_memorized else assistant_content,
+                            "form": _segment.form,
+                        }
+                        raise
+                    return SpellLoopResult(
+                        segments=segments,
+                        final_continuation="",
+                        loop_count=loop_count,
+                        closing_reasoning_text=pending_reasoning_text,
+                        closing_reasoning_details=pending_reasoning_details,
+                        stop_error=delivery_exc,
+                    )
                 LOGGER.info(
                     "[sea][spell] Round %d: single-beat node; closing the beat "
                     "without re-invoking the LLM (%d spell line(s))",
@@ -4413,6 +4534,11 @@ async def _run_spell_loop(
         # タスクの取り消し (サーバー停止等)。下書き行を確定するのは Beat の
         # 出口なので、ストリーミング経路の止まった周の本文だけ器に置いて投げる。
         _stop_open_round(exc)
+        raise
+    except SpellOutcomeDeliveryError:
+        # 一回で閉じる Beat の帰結の配送の失敗 (ストリーミング経路 — 止まった
+        # 周の本文は器に置き済み)。下の「スペル系の内部エラー」へ降格すると、
+        # 部分保存の正常終了に化けて帰結が黙って消えるので、そのまま投げる。
         raise
     except Exception as exc:
         if exc is _continuation_error:

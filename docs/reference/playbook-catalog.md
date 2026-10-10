@@ -31,7 +31,7 @@ kind → Playbook 名の対応は `saiverse/judgment_points.py` の `JUDGMENT_PL
 
 | Playbook | 表示名 | usel | 用途 |
 |---|---|:--:|---|
-| `tick` | ティック (自分の時間の 1 Pulse) | | 自律行動 v0.4 のティックの器（[v3](../intent/autonomous_behavior_v3.md) §5 / [v0.4 実装計画](../intent/autonomous_behavior_v04_plan.md) 段 2）。`pulse_type=auto`（`Aspect.AUTONOMOUS` = 標準モデル・メインライン・committed）で走り、出力は本人の記憶にだけ残る（`speak=false`）。`single_beat=true` で 1 Beat で閉じ、失敗したスペルだけが次の Pulse の頭に知覚で届く。引数 `assignment`（確定情報の文、省略時は自分のための時間である旨の既定文）。入口は `SAIVerseManager.fire_tick`（手で打つ口は `POST /api/people/{persona_id}/tick`）。間隔での自動の打鍵は段 3 |
+| `tick` | ティック (自分の時間の 1 Pulse) | | 自律行動 v0.4 のティックの器（[v3](../intent/autonomous_behavior_v3.md) §5 / [v0.4 実装計画](../intent/autonomous_behavior_v04_plan.md) 段 2）。`pulse_type=auto`（`Aspect.AUTONOMOUS` = 標準モデル・メインライン・committed）で走り、出力は本人の記憶にだけ残る（`speak=false`）。`single_beat=true` で 1 Beat で閉じ、唱えたスペルの帰結は成功も失敗も次の Pulse の頭に知覚で届く。引数 `assignment`（確定情報の文、省略時は自分のための時間である旨の既定文）。入口は `SAIVerseManager.fire_tick`（手で打つ口は `POST /api/people/{persona_id}/tick`）。間隔での自動の打鍵は段 3 |
 
 ## 会話メインライン
 

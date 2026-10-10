@@ -74,7 +74,7 @@ builtin_data/playbooks/public/     # 組み込み
 | `memorize` | `true` か dict で prompt/response を SAIMemory 保存 |
 | `speak` | `true` で応答を Building（UI）へ出力（既定でストリーミング） |
 | `important` | `true` で pulse_logs と messages に二重書き込み |
-| `single_beat` | `true` で 1 Beat（一生成）で閉じる。生成に含まれたスペルは一度だけテキスト順に逐次実行され、結果を続きの生成に回さない（再呼び出しなし）。結果の要約は記憶にも書かず、帰結は成功も失敗も一通の知覚（`[システム通知]`、失敗した行には印）として次の Pulse の頭に届く。スペル行と結果は pulse_logs にも残る。ティック（`tick`）用 |
+| `single_beat` | `true` で 1 Beat（一生成）で閉じる。生成に含まれたスペルは一度だけテキスト順に逐次実行され、結果を続きの生成に回さない（再呼び出しなし）。結果の要約は記憶にも書かず、帰結は成功も失敗も一通の知覚（`[システム通知]`、失敗した行には印。結果の添付 `meta.media` も載る）として次の Pulse の頭に届く。この知覚を積めなかった回は Beat を失敗として閉じる（スペルは再実行しない）。スペル行と結果は pulse_logs にも残る。ティック（`tick`）用 |
 
 ### tool — ツールの固定実行
 

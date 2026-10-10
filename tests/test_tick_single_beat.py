@@ -13,6 +13,12 @@ docs/intent/autonomous_behavior_v04_plan.md 段 2。
    スペル行と結果は pulse_logs (PulseContext) にも残る。
 3b. スペル行に挟まれた散文は、記憶・Pulse ログ・建物の記録の本文のどれからも
    落ちない (通常の完走でも、割り込みでも)。
+3c. 帰結の知覚を積めなかった回は黙って正常完了にしない。完走した周は Beat を
+   失敗 (``SpellOutcomeDeliveryError`` → PulseController の error) として
+   閉じ、スペルは再実行しない。止まった周は取消の例外をすり替えずに ERROR を
+   残し、「届けた」の印を立てない。
+3d. スペルの結果の添付 (``meta.media``) は、完走でも中断でも帰結の知覚に
+   載り、次の Pulse の頭の知覚消費の media まで届く。
 4. ティックの器 (``tick`` Playbook) の出力は建物へ書かれない。会話の器
    (``track_user_conversation``) は従来どおり書く。
 5. ``fire_tick`` は ``tick`` を auto Pulse として ``run_sea_auto`` へ流す。
@@ -118,9 +124,25 @@ def _scripted_spell(results: Dict[str, tuple], order: List[str]):
     return fake
 
 
-def _run_single_beat_loop(text: str, results: Dict[str, tuple]):
+class _FailingAdapter(_Adapter):
+    """知覚を積む呼び出しが例外を投げる SAIMemory (配送の失敗の注入)。"""
+
+    def push_perception(self, *args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+
+class _NotReadyAdapter(_Adapter):
+    """DB に繋がっていない SAIMemory (本物は push を黙って空振りする)。"""
+
+    def is_ready(self):
+        return False
+
+
+def _run_single_beat_loop(text: str, results: Dict[str, tuple], *,
+                          adapter: Any = ...):
     runtime = _LoopRuntime()
-    adapter = _Adapter()
+    if adapter is ...:
+        adapter = _Adapter()
     persona = SimpleNamespace(persona_id="p1", sai_memory=adapter)
     pulse_ctx = PulseContext(pulse_id="pulse-1")
     pulse_ctx.push_line(aspect=Aspect.AUTONOMOUS)
@@ -541,7 +563,8 @@ class _TextClient:
 def _run_node(monkeypatch, playbook: PlaybookSchema, text: str, *,
               streaming: bool, state_extra: Optional[Dict[str, Any]] = None,
               spell_results: Optional[Dict[str, tuple]] = None,
-              client: Any = None, expect_exc: Any = None):
+              client: Any = None, expect_exc: Any = None,
+              adapter: Any = None):
     runtime = MagicMock()
     runtime.manager.occupants = {"b1": ["p1"]}
     runtime._effective_building_id.return_value = "b1"
@@ -560,7 +583,8 @@ def _run_node(monkeypatch, playbook: PlaybookSchema, text: str, *,
     monkeypatch.setattr(runtime_llm, "_record_llm_usage", lambda *a, **k: None)
     monkeypatch.setattr(runtime_llm, "_consume_reasoning", lambda *a, **k: ("", None))
 
-    adapter = _Adapter()
+    if adapter is None:
+        adapter = _Adapter()
     persona = SimpleNamespace(
         persona_id=None, persona_name="p", history_manager=MagicMock(),
         sai_memory=adapter,
@@ -982,7 +1006,7 @@ TICK_NODE = dict(id="tick", memorize=True, speak=False, single_beat=True)
 ACTION_TEXT = "いまは自分の時間です。\n\nこのティックは水やり。"
 
 
-def _run_cancelled_loop(text: str, **node_fields):
+def _run_cancelled_loop(text: str, *, adapter: Any = None, **node_fields):
     """周の頭の取消評価で区切られる _run_spell_loop を走らせる。
 
     取消は生成が終わった後 (ループに入る前) に届いている — 呼び出し元の
@@ -991,7 +1015,8 @@ def _run_cancelled_loop(text: str, **node_fields):
     from sea.cancellation import CancellationToken, ExecutionCancelledException
 
     runtime = _LoopRuntime()
-    adapter = _Adapter()
+    if adapter is None:
+        adapter = _Adapter()
     persona = SimpleNamespace(persona_id="p1", sai_memory=adapter)
     pulse_ctx = PulseContext(pulse_id="pulse-1")
     pulse_ctx.push_line(aspect=Aspect.AUTONOMOUS)
@@ -1194,3 +1219,264 @@ def test_a_successful_tell_reports_its_outcome_without_a_failure_mark(tmp_path):
     assert "に声をかけました。" in item.content
     assert FAIL_MARK not in item.content
     assert json.loads(item.metadata)["failed"] == []
+
+
+# ---------------------------------------------------------------------------
+# 7. 帰結の配送の失敗 — 黙って正常完了にしない (Codex 敵対レビュー 3 巡目 high)
+# ---------------------------------------------------------------------------
+
+
+OK_RESULTS = {
+    SPELL_A: ("一つ目を記録しました", None, True),
+    SPELL_B: ("二つ目を記録しました", None, True),
+}
+
+
+def test_a_delivery_failure_after_a_completed_round_fails_the_beat():
+    """積む呼び出しが例外を投げたら、配送の失敗を stop_error で返す (再実行しない)。"""
+    run = _run_single_beat_loop(TWO_SPELLS, OK_RESULTS, adapter=_FailingAdapter())
+
+    assert run.order == [SPELL_A, SPELL_B]  # スペルは一度ずつだけ
+    assert run.client.calls == 0
+    err = run.result.stop_error
+    assert isinstance(err, runtime_llm.SpellOutcomeDeliveryError)
+    assert "スペルは実行済み" in str(err)
+    assert "配送だけが失敗" in str(err)
+    assert "database is locked" in str(err)
+    assert isinstance(err.__cause__, sqlite3.OperationalError)
+    # 届かなかった帰結の本文は例外が控えとして持つ
+    assert "→ 一つ目を記録しました" in err.outcome_text
+    assert "→ 二つ目を記録しました" in err.outcome_text
+    # 結果つきの周のセグメントは呼び出し元が建物へ書く材料として残る
+    (segment,) = run.result.segments
+    assert "一つ目を記録しました" in segment.text
+    assert segment.form == runtime_llm.SAVED_FORM_SPELL_RESULTS
+    # 記憶は周の本文だけ (配送の失敗の回も結果を記憶へは書かない)
+    assert [c["role"] for c in run.runtime.stored_calls] == ["assistant"]
+
+
+@pytest.mark.parametrize("adapter,cause", [
+    (None, "知覚バッファがありません"),
+    (_NotReadyAdapter(), "接続されていません"),
+])
+def test_a_missing_or_unready_adapter_is_a_delivery_failure(adapter, cause):
+    run = _run_single_beat_loop(TWO_SPELLS, OK_RESULTS, adapter=adapter)
+    err = run.result.stop_error
+    assert isinstance(err, runtime_llm.SpellOutcomeDeliveryError)
+    assert cause in str(err)
+    assert run.order == [SPELL_A, SPELL_B]
+
+
+def test_a_streaming_delivery_failure_raises_after_leaving_the_round_body():
+    """下書き行のある経路: 結果つきの周の本文を器に置いてから投げる。
+
+    Beat の出口の保存 (``_save_draft_on_beat_death``) がその本文で下書き行を
+    確定する — 止まった周と同じ口。周の本文はもう記憶にあるので記憶の本文は空。
+    """
+    runtime = _LoopRuntime()
+    persona = SimpleNamespace(persona_id="p1", sai_memory=_FailingAdapter())
+    pulse_ctx = PulseContext(pulse_id="pulse-1")
+    pulse_ctx.push_line(aspect=Aspect.AUTONOMOUS)
+    streaming_state: Dict[str, Any] = {
+        "msg_id": "msg-1", "building_id": "b1", "sub_seq": 0,
+        "finalized": False, "placeholder_round": 1, "cancellation_token": None,
+    }
+    order: List[str] = []
+    with patch.object(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_A, SPELL_B}), \
+         patch.object(runtime_llm, "_run_spell_tool_async",
+                      new=_scripted_spell(OK_RESULTS, order)):
+        with pytest.raises(runtime_llm.SpellOutcomeDeliveryError):
+            asyncio.run(runtime_llm._run_spell_loop(
+                text=TWO_SPELLS, spell_enabled=True, llm_client=_NoCallClient(),
+                runtime=runtime, persona=persona, building_id="b1",
+                state={"_pulse_id": "pulse-1", "_pulse_context": pulse_ctx,
+                       "_cancellation_token": None},
+                messages=[], playbook=SimpleNamespace(name="tick"),
+                event_callback=None, node_def=SimpleNamespace(**TICK_NODE),
+                pipeline_streaming_state=streaming_state,
+            ))
+    assert order == [SPELL_A, SPELL_B]
+    salvage = streaming_state["salvage"]
+    assert salvage["msg_id"] == "msg-1"
+    assert "一つ目を記録しました" in salvage["text"]
+    assert salvage["form"] == runtime_llm.SAVED_FORM_SPELL_RESULTS
+    assert salvage["memory_text"] == ""
+
+
+def test_a_successful_delivery_still_closes_the_beat_normally():
+    run = _run_single_beat_loop(TWO_SPELLS, OK_RESULTS)
+    assert run.result.stop_error is None
+    assert len(run.adapter.pending()) == 1
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_the_tick_node_fails_when_the_outcome_cannot_be_delivered(
+    monkeypatch, streaming,
+):
+    """本物のノード経路: 配送の失敗は LLMError に包まれてノードから上がる。"""
+    from llm_clients.exceptions import LLMError
+
+    tick = _load_playbook("tick")
+    text = f"水をやろう。\n/spell name='{SPELL_A}' args={{\"text\": \"水やり\"}}"
+    runtime, events, state, adapter = _run_node(
+        monkeypatch, tick, text, streaming=streaming,
+        spell_results={SPELL_A: ("記録しました", None, True)},
+        adapter=_FailingAdapter(), expect_exc=LLMError,
+    )
+    assert state["_test_spell_order"] == [SPELL_A]  # 再実行しない
+    assert _building_writes(runtime) == 0
+
+
+def test_the_tick_route_reports_an_undelivered_outcome_as_an_error(monkeypatch):
+    """本物の PulseController を通すと runtime_outcome="error" + 理由の文面になる。"""
+    from api.routes.people.tick import fire_tick
+
+    tick = _load_playbook("tick")
+    text = f"水をやろう。\n/spell name='{SPELL_A}' args={{\"text\": \"水やり\"}}"
+
+    def behavior():
+        _run_node(
+            monkeypatch, tick, text, streaming=False,
+            spell_results={SPELL_A: ("記録しました", None, True)},
+            adapter=_FailingAdapter(),
+        )
+        return []
+
+    resp = fire_tick("p1", None, manager=_real_controller_manager(behavior))
+    assert resp.executed is False
+    assert resp.outcome == "error"
+    assert "SpellOutcomeDeliveryError" in resp.error
+    assert "スペルは実行済み" in resp.error
+
+
+def _run_stopped_mid_round(adapter, a_result: tuple):
+    """SPELL_A を実行し終え、SPELL_B の実行中に取り消される単発の周を走らせる。"""
+    from sea.cancellation import ExecutionCancelledException
+
+    runtime = _LoopRuntime()
+    persona = SimpleNamespace(persona_id="p1", sai_memory=adapter)
+    pulse_ctx = PulseContext(pulse_id="pulse-1")
+    pulse_ctx.push_line(aspect=Aspect.AUTONOMOUS)
+    calls: List[str] = []
+
+    async def fake(tool_name, tool_args, persona, state, playbook_name,
+                   event_callback, messages=None):
+        calls.append(tool_name)
+        if tool_name == SPELL_B:
+            raise ExecutionCancelledException(interrupted_by="user")
+        return a_result
+
+    with patch.object(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_A, SPELL_B}), \
+         patch.object(runtime_llm, "_run_spell_tool_async", new=fake):
+        result = asyncio.run(runtime_llm._run_spell_loop(
+            text=PROSE_BETWEEN, spell_enabled=True, llm_client=_NoCallClient(),
+            runtime=runtime, persona=persona, building_id="b1",
+            state={"_pulse_id": "pulse-1", "_pulse_context": pulse_ctx,
+                   "_cancellation_token": None},
+            messages=[], playbook=SimpleNamespace(name="tick"),
+            event_callback=None, node_def=SimpleNamespace(**TICK_NODE),
+        ))
+    return SimpleNamespace(result=result, runtime=runtime, calls=calls)
+
+
+def test_a_delivery_failure_in_a_stopped_round_keeps_the_stop_and_logs_an_error(caplog):
+    """止まった周: 取消の例外はすり替わらず、ERROR が残り、結果は記憶へ逃がさない。"""
+    import logging
+
+    from sea.cancellation import ExecutionCancelledException
+
+    with caplog.at_level(logging.ERROR, logger=runtime_llm.LOGGER.name):
+        run = _run_stopped_mid_round(_FailingAdapter(), ("ok-a", None, True))
+
+    assert run.calls == [SPELL_A, SPELL_B]
+    assert isinstance(run.result.stop_error, ExecutionCancelledException)
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any(
+        "stopped round" in r.getMessage() and "→ ok-a" in r.getMessage()
+        for r in errors
+    )
+    # 「届けた」の印が立たなかった回でも、単発の Beat は結果を記憶へ書かない
+    # (旧形は印を配送の前に立てていたので、失敗しても届けた扱いになっていた)。
+    assert [c["role"] for c in run.runtime.stored_calls] == ["assistant"]
+
+
+def test_a_delivery_failure_before_the_first_round_keeps_the_stop(caplog):
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger=runtime_llm.LOGGER.name):
+        run = _run_cancelled_loop(PROSE_BETWEEN, adapter=_FailingAdapter())
+
+    # 本文は記憶に入り、取消の例外は _run_cancelled_loop の raises が受けている
+    assert [c["role"] for c in run.runtime.stored_calls] == ["assistant"]
+    assert any(
+        "stop before the first round" in r.getMessage()
+        and "実行されていません" in r.getMessage()
+        for r in caplog.records if r.levelno >= logging.ERROR
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8. 帰結の知覚にスペル結果の添付 (media) を引き継ぐ (同 3 巡目 medium)
+# ---------------------------------------------------------------------------
+
+
+IMG_A = {"path": "/tmp/garden.png", "mime_type": "image/png"}
+IMG_B = {"path": "/tmp/notes.png", "mime_type": "image/png"}
+
+
+def test_a_completed_round_carries_the_result_media_into_the_perception():
+    run = _run_single_beat_loop(TWO_SPELLS, {
+        SPELL_A: ("画像を作りました", {"media": [IMG_A]}, True),
+        SPELL_B: ("メモを貼りました", {"media": [IMG_B]}, True),
+    })
+    (item,) = run.adapter.pending()
+    assert item.media_list() == [IMG_A, IMG_B]
+
+
+def test_a_round_without_media_pushes_no_media():
+    run = _run_single_beat_loop(TWO_SPELLS, OK_RESULTS)
+    (item,) = run.adapter.pending()
+    assert item.media is None
+
+
+def test_a_stopped_round_carries_the_received_result_media_into_the_perception():
+    adapter = _Adapter()
+    run = _run_stopped_mid_round(adapter, ("画像を作りました", {"media": [IMG_A]}, True))
+    assert run.calls == [SPELL_A, SPELL_B]
+    (item,) = adapter.pending()
+    assert "→ 画像を作りました" in item.content
+    assert item.media_list() == [IMG_A]
+
+
+class _DummyEmbedder:
+    def __init__(self, model=None, **kwargs):
+        self.model_name = model
+
+    def embed(self, texts, **kwargs):
+        return [[0.0] * 3 for _ in texts]
+
+
+def test_the_next_pulse_head_consumes_the_outcome_with_its_media(tmp_path):
+    """消費の側 (次の Pulse の頭の知覚消費) まで media が同じ形で届く。
+
+    本物の SAIMemoryAdapter の ``flush_perception_buffer_payload`` が返す
+    ``media`` は、提示ブロックの ``metadata.media`` (LLM クライアントが添付と
+    して読む形) にそのまま入る。
+    """
+    persona_dir = tmp_path / "personas" / "p1"
+    persona_dir.mkdir(parents=True)
+    with patch("saiverse_memory.adapter.Embedder", _DummyEmbedder):
+        from saiverse_memory import SAIMemoryAdapter
+        adapter = SAIMemoryAdapter("p1", persona_dir=persona_dir, resource_id="p1")
+        try:
+            run = _run_single_beat_loop(TWO_SPELLS, {
+                SPELL_A: ("画像を作りました", {"media": [IMG_A]}, True),
+                SPELL_B: ("ok", None, True),
+            }, adapter=adapter)
+            assert run.result.stop_error is None
+            payload = adapter.flush_perception_buffer_payload(pulse_id="pulse-2")
+        finally:
+            adapter.close()
+    assert payload is not None
+    assert "→ 画像を作りました" in payload["content"]
+    assert payload["media"] == [IMG_A]
