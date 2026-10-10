@@ -36,6 +36,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
+from llm_clients.base import usage_event_time
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -2996,6 +2998,7 @@ def _call_sluice_llm(
                 cached_tokens=usage.cached_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
                 cache_ttl=usage.cache_ttl,
+                timestamp=usage_event_time(usage),
                 persona_id=persona_id,
                 building_id=building_id,
                 node_type="sluice",
@@ -3990,6 +3993,7 @@ def _call_capture_llm(
                 cached_tokens=usage.cached_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
                 cache_ttl=usage.cache_ttl,
+                timestamp=usage_event_time(usage),
                 persona_id=persona_id,
                 building_id=getattr(persona, "current_building_id", None),
                 node_type="sluice",
@@ -4519,6 +4523,7 @@ def _call_mechanism_llm(
                 cached_tokens=usage.cached_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
                 cache_ttl=usage.cache_ttl,
+                timestamp=usage_event_time(usage),
                 persona_id=persona_id,
                 building_id=getattr(persona, "current_building_id", None),
                 node_type="sluice",

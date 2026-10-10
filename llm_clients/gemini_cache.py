@@ -26,6 +26,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 LOGGER = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ class CacheEnsureResult:
     created: bool = False     # このコールで新規作成したか (reuse 時 False)
     cached_tokens: int = 0    # create 時の total_token_count (storage 計上用)
     ttl_seconds: int = 0      # 設定した TTL 秒数
+    timestamp: Optional[float] = None  # cache creation epoch (not response completion)
 
 
 @dataclass
@@ -180,6 +182,7 @@ class GeminiCacheController:
                 model=model,
                 config=types.CreateCachedContentConfig(**cfg_kwargs),
             )
+            created_at = time.time()
         except Exception as exc:
             status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
             if status == 404:
@@ -199,6 +202,12 @@ class GeminiCacheController:
         # create 時の cached token 数を取得 (storage 計上用)
         um = getattr(cache, "usage_metadata", None)
         cached_tokens = getattr(um, "total_token_count", 0) or 0 if um else 0
+        # The SDK's provider creation time owns the storage start. A slow create
+        # can cross a price boundary; its request-start time is not the event.
+        # If unavailable/ambiguous (including legacy test doubles), use receipt.
+        create_time = getattr(cache, "create_time", None)
+        if isinstance(create_time, datetime) and create_time.utcoffset() is not None:
+            created_at = create_time.timestamp()
 
         entry = _CacheEntry(
             name=name,
@@ -214,7 +223,7 @@ class GeminiCacheController:
         )
         return CacheEnsureResult(
             name=name, created=True,
-            cached_tokens=cached_tokens, ttl_seconds=int(ttl_seconds),
+            cached_tokens=cached_tokens, ttl_seconds=int(ttl_seconds), timestamp=created_at,
         )
 
     def delete(self, client: Any, cache_name: str) -> bool:

@@ -113,6 +113,21 @@ function harness({ extra = {}, watermarks = {}, mode = 'create', fail = false } 
     };
 }
 (async () => {
+    // The editor receives raw settings, never a current-price snapshot. Loading,
+    // duplicating and repeated saves must keep both the base and dated prices.
+    for (const flow of ['edit', 'duplicate']) {
+        const pricing = {
+            input_per_1m_tokens: 1.5, output_per_1m_tokens: 9, pricing_note: 'Conservative app cutoff',
+            periods: [{ starts_at: '2026-10-10T00:00:00Z', ends_at: '2026-12-31T10:00:00Z', rates: { input_per_1m_tokens: 0.75 } }],
+        };
+        const h = harness();
+        await h.open(flow, { model: 'dated-api-model', pricing });
+        assert.deepEqual(JSON.parse(h.state.extraJson).pricing, pricing);
+        await h.save();
+        await h.save();
+        assert.equal(h.requests.length, 2);
+        for (const request of h.requests) assert.deepEqual(request.body.config.pricing, pricing);
+    }
     for (const flow of ['edit', 'duplicate']) {
         for (const field of [HIGH, TARGET]) {
             // Strings can be accepted by runtime int(value), but cannot be

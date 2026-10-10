@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from llm_clients.base import usage_event_time
 from saiverse import clock
 from saiverse.usage_tracker import get_usage_tracker
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
@@ -793,6 +794,7 @@ def _record_llm_usage(
     if not usage:
         return
     persona_id = getattr(persona, "persona_id", None)
+    event_time = usage_event_time(usage)
     get_usage_tracker().record_usage(
         model_id=usage.model,
         input_tokens=usage.input_tokens,
@@ -800,6 +802,7 @@ def _record_llm_usage(
         cached_tokens=usage.cached_tokens,
         cache_write_tokens=usage.cache_write_tokens,
         cache_ttl=usage.cache_ttl,
+        timestamp=event_time,
         persona_id=persona_id,
         building_id=building_id,
         node_type=node_type,
@@ -812,6 +815,7 @@ def _record_llm_usage(
     cost = calculate_cost(
         usage.model, usage.input_tokens, usage.output_tokens,
         usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl,
+        at=event_time,
     )
     runtime._accumulate_usage(
         state, usage.model, usage.input_tokens, usage.output_tokens, cost,

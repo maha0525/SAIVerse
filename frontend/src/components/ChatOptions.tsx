@@ -25,6 +25,7 @@ interface ModelInfo {
     input_price?: number | null;
     output_price?: number | null;
     currency?: string;
+    pricing_note?: string | null;
     rate_limit?: RateLimitInfo | null;
     /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
      *  チャットのモデル一時上書きは会話に使うので、選択肢には出さない。 */
@@ -109,11 +110,53 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
     const [selectedCachePersonaId, setSelectedCachePersonaId] = useState<string>('');
     const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
     const [nowMs, setNowMs] = useState<number>(() => Date.now());
+    const modelListSeqRef = useRef(0);
 
     useEffect(() => {
         if (isOpen) {
             fetchData();
         }
+    }, [isOpen]);
+
+    // Only refresh model metadata/prices: a price boundary must not reset the
+    // selected model or parameter edits. Hidden tabs catch up when visible.
+    useEffect(() => {
+        if (!isOpen) return;
+        let cancelled = false;
+        let controller: AbortController | null = null;
+        const pollPrices = async () => {
+            if (document.visibilityState !== 'visible') return;
+            controller?.abort();
+            const request = new AbortController();
+            controller = request;
+            const seq = ++modelListSeqRef.current;
+            const timeout = window.setTimeout(() => request.abort(), 10000);
+            try {
+                const res = await apiFetch('/api/config/models', { signal: request.signal });
+                if (!res.ok) return;
+                const data: ModelInfo[] = await res.json();
+                if (!cancelled && !request.signal.aborted && seq === modelListSeqRef.current) {
+                    setModels(data);
+                }
+            } catch {
+                // Keep the last snapshot on failure and retry at the next tick.
+            } finally {
+                window.clearTimeout(timeout);
+            }
+        };
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') pollPrices();
+            else controller?.abort();
+        };
+        const interval = window.setInterval(pollPrices, 60000);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+            cancelled = true;
+            controller?.abort();
+            modelListSeqRef.current += 1;
+            window.clearInterval(interval);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
     }, [isOpen]);
 
     // Cache timer: load building occupants (persona switcher source) on open
@@ -218,6 +261,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         // Abort after 10 seconds to prevent infinite hang
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 10000);
+        const modelListSeq = ++modelListSeqRef.current;
 
         try {
             const results = await Promise.allSettled([
@@ -236,7 +280,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 try {
                     fetchedModels = await results[0].value.json();
                     if (!isStillValid()) return; // json() の await 中の追い越しも捨てる
-                    setModels(fetchedModels);
+                    if (modelListSeq === modelListSeqRef.current) setModels(fetchedModels);
                 } catch (e) { console.error("Failed to parse models response", e); failures.push('models'); }
             } else {
                 const reason = results[0].status === 'rejected' ? results[0].reason : `HTTP ${results[0].value.status}`;
@@ -571,8 +615,12 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             const saved = await res.json().catch(() => null);
             const notices: string[] = Array.isArray(saved?.notices) ? saved.notices : [];
             // Refresh model list so the new model appears in the dropdown
+            const modelListSeq = ++modelListSeqRef.current;
             const modelsRes = await apiFetch('/api/config/models');
-            if (modelsRes.ok) setModels(await modelsRes.json());
+            if (modelsRes.ok) {
+                const refreshedModels: ModelInfo[] = await modelsRes.json();
+                if (modelListSeq === modelListSeqRef.current) setModels(refreshedModels);
+            }
             const saveMsg = uiText("components.ChatOptions.text010");
             alert(notices.length > 0
                 ? `${saveMsg}\n\n${notices.join('\n\n')}`
@@ -742,14 +790,19 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                     </div>
                                     {(() => {
                                         const sel = models.find(m => m.id === currentModel);
-                                        if (!sel || (sel.input_price == null && sel.output_price == null)) return null;
+                                        if (!sel) return null;
                                         const cur = sel.currency ?? 'USD';
                                         return (
-                                            <span data-i18n="components.ChatOptions.text041 components.ChatOptions.text042 components.ChatOptions.text043" className={styles.hint}>
-                                                {sel.input_price != null && uiText("components.ChatOptions.text041", { p1: formatCost(sel.input_price, cur) })}
-                                                {sel.input_price != null && sel.output_price != null && uiText("components.ChatOptions.text042")}
-                                                {sel.output_price != null && uiText("components.ChatOptions.text043", { p1: formatCost(sel.output_price, cur) })}
-                                            </span>
+                                            <>
+                                                {(sel.input_price != null || sel.output_price != null) && (
+                                                    <span data-i18n="components.ChatOptions.text041 components.ChatOptions.text042 components.ChatOptions.text043" className={styles.hint}>
+                                                        {sel.input_price != null && uiText("components.ChatOptions.text041", { p1: formatCost(sel.input_price, cur) })}
+                                                        {sel.input_price != null && sel.output_price != null && uiText("components.ChatOptions.text042")}
+                                                        {sel.output_price != null && uiText("components.ChatOptions.text043", { p1: formatCost(sel.output_price, cur) })}
+                                                    </span>
+                                                )}
+                                                {sel.pricing_note && <span className={styles.hint}>{sel.pricing_note}</span>}
+                                            </>
                                         );
                                     })()}
                                 </div>

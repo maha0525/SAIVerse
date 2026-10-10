@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
+from llm_clients.base import usage_event_time
 from llm_clients.exceptions import EmptyResponseError, LLMError, ModelUnavailableError
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import ExecutionCancelledException
@@ -233,6 +234,7 @@ def _maybe_record_cache_storage(usage, persona_id: str | None, building_id: str 
         model_id=usage.model,
         cached_tokens=usage.cache_storage_tokens,
         ttl_seconds=usage.cache_storage_ttl_seconds,
+        timestamp=usage_event_time(usage, cache_storage=True),
         persona_id=persona_id,
         building_id=building_id,
     )
@@ -362,6 +364,7 @@ def _record_llm_usage(
         return None
 
     persona_id = getattr(persona, "persona_id", None)
+    event_time = usage_event_time(usage)
     get_usage_tracker().record_usage(
         model_id=usage.model,
         input_tokens=usage.input_tokens,
@@ -369,6 +372,7 @@ def _record_llm_usage(
         cached_tokens=usage.cached_tokens,
         cache_write_tokens=usage.cache_write_tokens,
         cache_ttl=usage.cache_ttl,
+        timestamp=event_time,
         persona_id=persona_id,
         building_id=building_id,
         node_type=node_type,
@@ -387,6 +391,7 @@ def _record_llm_usage(
     cost = calculate_cost(
         usage.model, usage.input_tokens, usage.output_tokens,
         usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl,
+        at=event_time,
     )
     llm_usage_metadata: Dict[str, Any] = {
         "model": usage.model,
@@ -4025,6 +4030,7 @@ async def _run_spell_loop(
             # セグメントへ引き渡す (Beat ごとの帰属、契約 4)。
             pending_llm_usage = None
             if retry_usage:
+                retry_event_time = usage_event_time(retry_usage)
                 get_usage_tracker().record_usage(
                     model_id=retry_usage.model,
                     input_tokens=retry_usage.input_tokens,
@@ -4032,6 +4038,7 @@ async def _run_spell_loop(
                     cached_tokens=retry_usage.cached_tokens,
                     cache_write_tokens=retry_usage.cache_write_tokens,
                     cache_ttl=retry_usage.cache_ttl,
+                    timestamp=retry_event_time,
                     persona_id=getattr(persona, "persona_id", None),
                     building_id=building_id,
                     node_type="llm_spell_retry",
@@ -4043,6 +4050,7 @@ async def _run_spell_loop(
                 retry_cost = calculate_cost(
                     retry_usage.model, retry_usage.input_tokens, retry_usage.output_tokens,
                     retry_usage.cached_tokens, retry_usage.cache_write_tokens, cache_ttl=retry_usage.cache_ttl,
+                    at=retry_event_time,
                 )
                 runtime._accumulate_usage(
                     state, retry_usage.model, retry_usage.input_tokens,

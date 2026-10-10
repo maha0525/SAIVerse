@@ -23,7 +23,20 @@
     "cached_input_per_1m_tokens": 0.15,
     "output_per_1m_tokens": 7.5,
     "cache_storage_per_1m_tokens_per_hour": 1.0,
-    "currency": "USD"
+    "currency": "USD",
+    "pricing_note": "割引は確認日2026-10-10 00:00 UTC以降の見積もりに適用。公式の終了時刻・時間帯は未公表のため、アプリでは安全側に2026-12-31 10:00 UTC（UTC+14の1月1日）で通常料金へ戻します。公式の開始日・切替時刻を示すものではありません。",
+    "periods": [
+      {
+        "starts_at": "2026-10-10T00:00:00Z",
+        "ends_at": "2026-12-31T10:00:00Z",
+        "rates": {
+          "input_per_1m_tokens": 0.75,
+          "cached_input_per_1m_tokens": 0.075,
+          "output_per_1m_tokens": 3.75,
+          "cache_storage_per_1m_tokens_per_hour": 0.5
+        }
+      }
+    ]
   },
   "parameters": {
     "thinking_level": {

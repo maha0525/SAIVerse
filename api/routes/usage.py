@@ -52,6 +52,7 @@ class ModelInfo(BaseModel):
     input_per_1m_tokens: Optional[float] = None
     output_per_1m_tokens: Optional[float] = None
     currency: str = "USD"
+    pricing_note: Optional[str] = None
 
 
 @router.get("/summary", response_model=UsageSummary)
@@ -249,8 +250,9 @@ def get_usage_by_persona(
 def get_model_pricing_info():
     """モデル一覧と料金情報を取得"""
     result = []
+    pricing_at = datetime.now(timezone.utc)
     for model_id, config in MODEL_CONFIGS.items():
-        pricing = config.get("pricing", {})
+        pricing = get_model_pricing(model_id, at=pricing_at) or {}
         result.append(ModelInfo(
             model_id=model_id,
             display_name=config.get("display_name", model_id),
@@ -258,6 +260,7 @@ def get_model_pricing_info():
             input_per_1m_tokens=pricing.get("input_per_1m_tokens"),
             output_per_1m_tokens=pricing.get("output_per_1m_tokens"),
             currency=pricing.get("currency", "USD"),
+            pricing_note=pricing.get("pricing_note"),
         ))
     return result
 
