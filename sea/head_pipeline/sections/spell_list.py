@@ -511,37 +511,28 @@ class SpellListSection:
             parameters = {}
         props = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
         required_list = parameters.get("required", []) if isinstance(parameters, dict) else []
-        example_args = {
-            pname: _example_arg_value(props[pname])
+        # 例は書式だけを示す。<引数名> は JSON として読めないので、写しても
+        # 実行されず書式エラーで差し戻される (送信・削除系の誤射を防ぐ)。
+        placeholders = ", ".join(
+            f"{json.dumps(pname, ensure_ascii=False)}: <{pname}>"
             for pname in required_list
             if pname in props and isinstance(props[pname], dict)
-        }
+        )
         lines.append(
-            f"  - 呼び出し例（引数の値は用途に合わせて変更）: "
-            f"/spell name='{entry.name}' args={json.dumps(example_args, ensure_ascii=False)}"
+            f"  - 書式（<…> を実際の値に置き換える）: "
+            f"/spell name='{entry.name}' args={{{placeholders}}}"
         )
         for pname, pdef in props.items():
             req_mark = "必須" if pname in required_list else "省略可"
             if not isinstance(pdef, dict):
                 continue
+            choices = ""
+            if isinstance(pdef.get("enum"), list) and pdef["enum"]:
+                choices = "（選択肢: " + " / ".join(
+                    json.dumps(v, ensure_ascii=False) for v in pdef["enum"]
+                ) + "）"
             lines.append(
-                f"  - {pname} ({pdef.get('type', '?')}, {req_mark}): {pdef.get('description', '')}"
+                f"  - {pname} ({pdef.get('type', '?')}, {req_mark}): "
+                f"{pdef.get('description', '')}{choices}"
             )
 
-
-def _example_arg_value(definition: dict) -> Any:
-    """Illustrative values only; the caller labels them as replaceable examples."""
-    if isinstance(definition.get("enum"), list) and definition["enum"]:
-        return definition["enum"][0]
-    if "default" in definition:
-        return definition["default"]
-    examples = definition.get("examples")
-    if isinstance(examples, list) and examples:
-        return examples[0]
-    value_type = definition.get("type")
-    if isinstance(value_type, list):
-        value_type = next((t for t in value_type if t != "null"), "null")
-    return {
-        "integer": 1, "number": 1.0, "boolean": True,
-        "array": [], "object": {}, "null": None,
-    }.get(value_type, "値")

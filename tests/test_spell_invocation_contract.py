@@ -87,7 +87,7 @@ def _render_examples():
     new = SpellListSnapshot(enabled=True, entries=(_entry(),), addon_manifests=(), registered_names=frozenset({NAME}))
     head = section.render(new).text
     notification = section.diff_to_notifications(old, new)[0].label
-    marker = "呼び出し例（引数の値は用途に合わせて変更）: "
+    marker = "書式（<…> を実際の値に置き換える）: "
     examples = []
     for rendered in (head, notification):
         examples.append(next(line.split(marker, 1)[1] for line in rendered.splitlines() if marker in line))
@@ -141,7 +141,7 @@ def test_saved_spell_list_gets_current_examples_without_changing_its_entries(mon
                                  registered_names=frozenset({NAME}))
     restored = section.deserialize_snapshot(section.serialize_snapshot(snapshot))
     assert restored.entries == snapshot.entries
-    assert GOOD in section.render(restored).text
+    assert f"/spell name='{NAME}' args={{\"intent\": <intent>}}" in section.render(restored).text
 
 
 def test_hidden_spell_help_is_also_shown_in_canonical_form():
@@ -157,13 +157,30 @@ def test_hidden_spell_help_is_also_shown_in_canonical_form():
 
 
 @pytest.mark.parametrize("origin", ["head", "notification"])
-def test_supplied_qualified_example_reaches_the_tool(origin):
+def test_supplied_example_reaches_the_tool_once_the_placeholder_is_filled(origin):
     text = _render_examples()[origin == "notification"]
-    result, runtime, client, calls, messages, state = _loop(text, ["完了"])
+    filled = text.replace("<intent>", '"friendly_wave"')
+    result, runtime, client, calls, messages, state = _loop(filled, ["完了"])
     assert result.loop_count == 1
     assert calls == [(NAME, {"intent": "friendly_wave"})]
     assert len(client.calls) == 1
     assert not any("[Spell Error:" in m.get("content", "") for m in messages)
+
+
+@pytest.mark.parametrize("origin", ["head", "notification"])
+def test_supplied_example_copied_verbatim_never_runs_the_tool(origin):
+    # 例の値は置換用 — 写しただけの呼び出しで送信・削除系のツールが動いてはならない
+    text = _render_examples()[origin == "notification"]
+    result, runtime, client, calls, messages, state = _loop(text, ["了解"])
+    assert calls == []
+    assert "[Spell Error:" in client.calls[0][-1]["content"]
+
+
+def test_enum_choices_are_listed_beside_the_parameter():
+    rendered = SpellListSection().render(SpellListSnapshot(
+        enabled=True, entries=(_entry(),), addon_manifests=(), registered_names=frozenset({NAME}),
+    )).text
+    assert '（選択肢: "friendly_wave"）' in rendered
 
 
 def _loop(text, responses):
@@ -228,3 +245,29 @@ def test_multiline_args_containing_unreadable_spell_text_are_not_executed():
     assert len(parsed) == 1
     assert parsed[0].args["intent"] == "例\n/spell\n終わり"
     assert malformed == []
+
+
+def test_unrescued_multiline_args_body_is_not_parsed_again():
+    # 閉じ忘れた args の本文に /spell 行が含まれても、別の呼び出しとして
+    # 実行・報告しない (失敗した 1 回の唱えに、エラーは 1 件だけ)
+    text = "\n".join([
+        f"/spell name='{NAME}' args={{\"intent\": \"1行目",
+        "/spell これは本文",
+        f"/spell name='{NAME}' args={{}}",
+        "閉じない",
+    ])
+    malformed = []
+    parsed = runtime_llm._parse_spell_lines(text, malformed_out=malformed)
+    assert parsed == []
+    assert [name for name, _, _ in malformed] == [NAME]
+
+
+def test_unrescued_args_closed_by_brace_hide_only_their_own_body():
+    text = "\n".join([
+        f"/spell name='{NAME}' args={{\"intent\": \"a\" bad}}",
+        f"/spell name='{NAME}' args={{}}",
+    ])
+    malformed = []
+    parsed = runtime_llm._parse_spell_lines(text, malformed_out=malformed)
+    assert [(p.name, p.args) for p in parsed] == [(NAME, {})]
+    assert [name for name, _, _ in malformed] == [NAME]

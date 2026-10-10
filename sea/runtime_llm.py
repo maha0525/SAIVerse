@@ -1446,7 +1446,9 @@ class _SpellSpan:
         return (self._start, self._end)
 
 
-def _rescue_multiline_args(text: str, m: Any) -> Optional[Tuple[dict, "_SpellSpan"]]:
+def _rescue_multiline_args(
+    text: str, m: Any, *, consumed_end_out: Optional[List[int]] = None,
+) -> Optional[Tuple[dict, "_SpellSpan"]]:
     """canonical /spell 行の args が 1 行で parse できなかったときの救済パース。
 
     ``_SPELL_PATTERN`` は MULTILINE の行単位マッチ (``.`` は改行を跨がない) の
@@ -1462,6 +1464,13 @@ def _rescue_multiline_args(text: str, m: Any) -> Optional[Tuple[dict, "_SpellSpa
 
     Returns:
         ``(tool_args, span)``。span は ``/spell`` 行頭から閉じ ``}`` まで。
+
+    ``consumed_end_out`` を渡すと、救済に失敗したときに「args の本文として
+    読んだ範囲の終端」を入れて返す。brace が閉じたが parse できなかった場合は
+    閉じ ``}`` の直後、文字列が閉じないまま本文が尽きた場合は本文の末尾。
+    呼び出し側はこの範囲を後続の認識から除外し、壊れた args の本文に含まれる
+    ``/spell`` 行を別の呼び出しとして実行・報告しない (spell_invocation_contract.md)。
+    文字列の外で brace だけが閉じない場合は範囲が曖昧なので何も入れない。
     """
     pos = m.start(2)
     end_limit = len(text)
@@ -1512,10 +1521,14 @@ def _rescue_multiline_args(text: str, m: Any) -> Optional[Tuple[dict, "_SpellSpa
                     parsed = _parse_spell_args(candidate, silent=True, mute=True)
                     if isinstance(parsed, dict):
                         return parsed, _SpellSpan(m.start(), i + 1)
+                    if consumed_end_out is not None:
+                        consumed_end_out.append(i + 1)
                     return None
             else:
                 out.append(ch)
         i += 1
+    if in_string and consumed_end_out is not None:
+        consumed_end_out.append(end_limit)
     return None
 
 
@@ -1570,7 +1583,8 @@ def _parse_spell_lines(
             matched_spans.append(m.span())
             continue
         # 1 行で読めない args: 文字列値に生改行を含む複数行 JSON/dict を救済
-        rescued = _rescue_multiline_args(text, m)
+        consumed_end: List[int] = []
+        rescued = _rescue_multiline_args(text, m, consumed_end_out=consumed_end)
         if rescued is not None:
             tool_args, span = rescued
             normalized = _normalize_spell_line(m.group(1), tool_args, quick=quick)
@@ -1582,7 +1596,8 @@ def _parse_spell_lines(
             found.append(ParsedSpell(m.group(1), tool_args, span, normalized, quick))
             matched_spans.append(span.span())
             continue
-        matched_spans.append(m.span())
+        # 救済に失敗しても、args の本文として読んだ範囲は後続の認識から外す
+        matched_spans.append((m.start(), max([m.end(), *consumed_end])))
         if malformed_out is not None:
             malformed_out.append((m.group(1), args_raw, m))
 
