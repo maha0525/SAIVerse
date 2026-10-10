@@ -20,31 +20,14 @@ from tools import SPELL_TOOL_SCHEMAS, TOOL_REGISTRY
 LOGGER = logging.getLogger(__name__)
 
 
-def _reframe_autonomous_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """AUTONOMOUS アスペクトの assistant 発言を user+<system> 形式に変換する。
-
-    軽量モデルで生成された自律行動の口調が、後続パルスのコンテキストに
-    assistant ロールとして残ると口調ブレの感染源になる。コンテキスト組み立て
-    時のみ変換し、SAIMemory の保存データは変えない。
-    """
-    result: List[Dict[str, Any]] = []
-    for msg in messages:
-        aspect = (msg.get("metadata") or {}).get("aspect")
-        if aspect == "autonomous" and msg.get("role") == "assistant":
-            content = msg.get("content", "")
-            reframed_content = (
-                "<system>[自律行動の記録]\n"
-                "あなたは自律的に以下の行動を取りました：\n"
-                f"```\n{content}\n```\n"
-                "</system>"
-            )
-            reframed = {k: v for k, v in msg.items() if k not in ("role", "content")}
-            reframed["role"] = "user"
-            reframed["content"] = reframed_content
-            result.append(reframed)
-        else:
-            result.append(msg)
-    return result
+#  (2026-10-10 撤去) _reframe_autonomous_messages: AUTONOMOUS アスペクトの
+#  assistant 発言を user+<system> の「自律行動の記録」に包み直す処理がここに
+#  あった。目的は軽量モデルの口調の感染防止で、AUTONOMOUS が標準 tier に
+#  なった (v0.4 ティック、sea/pulse_context.py) ことで前提が消えた。ティックの
+#  言葉は本人の一人称の記憶であり、機構の報告文に変換して本人に読ませる形は
+#  v3 の「本人の言葉があるところでは本人の言葉を出す」に反するため、例外なく
+#  撤去した。提示列に旧 autonomous 行が残るペルソナは、その最古の行の位置で
+#  prefix キャッシュが一度割れる (追記は無料 — 一度きりの受容)。
 
 
 #: head (前置き) に必ず並べる Section。**用途やラインで出し分けない。**
@@ -631,7 +614,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 oldest_ts,
                             )
 
-                enriched_recent = _reframe_autonomous_messages(enriched_recent)
                 messages.extend(enriched_recent)
 
                 # 実入力の履歴 ID 列 (2026-08-19, sluice の見た集合の一次情報):
