@@ -2575,6 +2575,8 @@ def _note_stream_cut(
     切断の申告はここで消費する。スペルの周回の途中の切断 (次の周が発話を
     続けるので自己回復する) では呼ばない — 呼ぶのは発言が途切れたまま確定する
     締めの周だけ (docs/issues/spell_round_stream_cut_is_not_detected.md)。
+    続きの生成をせずに閉じるスペルの周 (一回で閉じる Beat・全行成功の
+    /quick_spell 終端) は締めの周に当たる。
     """
     persona_id = getattr(persona, "persona_id", None)
     detail = {"stream_error": dict(stream_error)}
@@ -2704,6 +2706,10 @@ class SpellLoopResult:
       ストリームを、サーバーが途中で切った申告。スペルの周の途中の切断は
       次の周が発話を続けるので載せない — 載るのは発言が途切れたまま確定する
       締めの周だけ (docs/issues/spell_round_stream_cut_is_not_detected.md)。
+      続きの生成をせずに閉じる周 (一回で閉じる Beat・全行成功の /quick_spell
+      終端) は、スペル行を含んでいてもその周の本文が締めの発言なので、その周の
+      切断が載る (``final_continuation`` は空で、切れた本文は最後のセグメント —
+      形は ``SAVED_FORM_CUT``)。
     """
 
     segments: List[BeatSegment]
@@ -3091,7 +3097,9 @@ async def _run_spell_loop(
     途中で切った申告 (呼び出し元が消費したもの)。周ごとの再ストリームの申告は
     このループが自分で消費する。どちらも、その本文が締めの発言として確定する
     ときだけ ``SpellLoopResult.final_stream_error`` へ渡す — スペル行を含む本文の
-    切断は、次の周が発話を続けるので載せない。
+    切断は、次の周が発話を続けるので載せない。ただし続きの生成をせずに閉じる周
+    (一回で閉じる Beat・全行成功の /quick_spell 終端) は、スペル行を含む本文が
+    そのまま締めの発言になるので載せる。
 
     **止まった周の本文**: 返事を止める例外 (取り消し・関所の閉鎖・使うモデルが
     無い回、タスクの取り消し) で周の途中から抜けるとき、まだ確定していない
@@ -3765,16 +3773,23 @@ async def _run_spell_loop(
                 break
 
             loop_count += 1
-            if text_stream_error:
-                # スペル行を含む本文をサーバーが切った回。この周のスペルを
-                # 実行して次の周の生成が発話を続けるので、発言が途切れたまま
-                # 確定することはない (自己回復する側)。印も通告も要らない。
+            # スペル行を含む本文をサーバーが切った回の申告は、この周の本文を
+            # 運んだものとして手元に移す。続きの生成へ進む周では捨てる — 次の
+            # 周が発話を続けるので、発言が途切れたまま確定することはない
+            # (自己回復する側。印も通告も要らない)。続きの生成をせずに閉じる
+            # 周 (一回で閉じる Beat・全行成功の /quick_spell) では、この周の
+            # 本文が締めの発言として途切れたまま確定するので、申告を締めの
+            # 切断として呼び出し元へ返す (下の二つの終端。2026-10-10 Codex
+            # 敵対レビュー 4 巡目 medium — 旧形は周の頭で無条件に捨てていて、
+            # 再生成の無い終端で切断が通知も記録の形も無しに確定した)。
+            _round_stream_error: Optional[Dict[str, Any]] = text_stream_error
+            text_stream_error = None
+            if _round_stream_error:
                 LOGGER.info(
                     "[sea][spell] Round %d: the stream carrying this round was cut "
-                    "by the server (code=%s); the next round continues the speech",
-                    loop_count, text_stream_error.get("code"),
+                    "by the server (code=%s)",
+                    loop_count, _round_stream_error.get("code"),
                 )
-                text_stream_error = None
             text_cancelled_midway = False
             LOGGER.info(
                 "[sea][spell] Round %d: %d valid spell(s) %s, %d unknown spell(s) %s, "
@@ -4083,6 +4098,12 @@ async def _run_spell_loop(
                 ))
                 for rec in round_records
             ]
+            # この周で続きの生成をせずに閉じるか (一回で閉じる Beat / 全行成功の
+            # /quick_spell — 下の二つの終端と同じ条件)。
+            _round_closes_beat = _single_beat or (_all_quick and not _round_has_failure)
+            # 締めの切断: 続きの生成をせずに閉じる周の本文がサーバーに切られて
+            # いた回。その本文は途切れたまま確定する。
+            _closing_cut = bool(_round_stream_error) and _round_closes_beat
             _segment = BeatSegment(
                 text="\n".join(_splice_spell_spans(text, _segment_blocks)),
                 building_id=current_building_id,
@@ -4090,8 +4111,11 @@ async def _run_spell_loop(
                 occupants=current_occupants,
                 reasoning_text=pending_reasoning_text,
                 reasoning_details=pending_reasoning_details,
-                # 唱えたスペルの結果を全部受け取った周の本文。
-                form=SAVED_FORM_SPELL_RESULTS,
+                # 唱えたスペルの結果を全部受け取った周の本文。続きの生成をせずに
+                # 閉じる周がサーバーに切られていた回は「途中で切れた本文」 —
+                # 続きの発言は来ないので、「結果を受け取った後、続きの前に
+                # 止まった」(③) ではなく発言の途中で切れた (①) が事実。
+                form=SAVED_FORM_CUT if _closing_cut else SAVED_FORM_SPELL_RESULTS,
             )
             segments.append(_segment)
 
@@ -4142,6 +4166,9 @@ async def _run_spell_loop(
                     loop_count, len(round_records),
                 )
                 text = ""
+                # この周の本文が締めの発言。サーバーに切られていたら、その
+                # 申告を締めの切断として返す (周の頭の注記)。
+                text_stream_error = _round_stream_error
                 break
 
             # ---- /quick_spell 終端 (quick_spell.md §3.2) ----
@@ -4161,7 +4188,15 @@ async def _run_spell_loop(
                     "skipping LLM re-invocation (declared complete)", loop_count,
                 )
                 text = ""
+                # 一回で閉じる Beat の終端と同じく、この周の本文が締めの発言。
+                text_stream_error = _round_stream_error
                 break
+
+            if _round_stream_error:
+                LOGGER.info(
+                    "[sea][spell] Round %d: the cut round continues in the next "
+                    "round's generation; dropping the cut report", loop_count,
+                )
 
             # 次の Beat が続くので、この Beat の下書き行はここで確定する
             # (ストリーミング経路のみ。他の経路は呼び出し元がまとめて emit する)。

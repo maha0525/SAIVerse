@@ -2189,6 +2189,124 @@ def test_a_closing_round_cut_before_any_word_marks_the_spell_utterance(monkeypat
     assert infos and infos[0]["interrupted_message_id"] == "msg-1"
 
 
+QUICK_SPELL_LINE = f"/quick_spell name='{SPELL_NAME}' args={{}}"
+
+
+def _single_beat_speak_node_def():
+    """発話する一回で閉じる Beat (single_beat は公開されたノード欄なので、
+    speak=true でも成り立たなければならない)。"""
+    node_def = _node_def()
+    node_def.single_beat = True
+    return node_def
+
+
+def _build_closing_round_node(monkeypatch, *, kind, calls, cuts, spell_ok=True):
+    """続きの生成をせずに閉じる周 (kind="single_beat" / "quick") を通す node。
+
+    single_beat の帰結の配送は記録するだけにする (配送の成否はこの検査の外)。
+    """
+    client = _ScriptedCutStreamClient(calls, cuts)
+    runtime, persona, node, events = _build_node(
+        monkeypatch, client=client, spell_loop=runtime_llm._run_spell_loop,
+        node_def=_single_beat_speak_node_def() if kind == "single_beat" else None,
+    )
+    runtime._emit_speak_start.side_effect = ["msg-1", "msg-2", "msg-3"]
+    monkeypatch.setattr(runtime_llm, "SPELL_TOOL_NAMES", {SPELL_NAME})
+
+    async def _spell(tool_name, tool_args, persona, state, playbook_name,
+                     event_callback, messages=None):
+        return ("やりました", None, True) if spell_ok else ("だめでした", None, False)
+
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _spell)
+    delivered: list = []
+    monkeypatch.setattr(
+        runtime_llm, "_deliver_single_beat_spell_outcomes",
+        lambda persona, records, **kw: delivered.append(list(records)) or 1,
+    )
+    return runtime, persona, node, events, client, delivered
+
+
+_CLOSING_ROUND_CASES = [
+    pytest.param("single_beat", f"やるね。\n{SPELL_LINE}\nそれで、あとは", id="single_beat"),
+    pytest.param("quick", f"やるね。\n{QUICK_SPELL_LINE}\nそれで、あとは", id="all_quick"),
+]
+
+
+@pytest.mark.parametrize("kind,body", _CLOSING_ROUND_CASES)
+def test_a_cut_on_a_closing_spell_round_marks_the_cut_utterance(monkeypatch, kind, body):
+    """続きの生成をせずに閉じるスペルの周 (一回で閉じる Beat・全行成功の
+    /quick_spell 終端) をサーバーが切った回 — その周の本文が締めの発言として
+    途切れたまま確定するので、行に印と ① の通告が付き、知らせにその行の id が
+    載る (2026-10-10 Codex 敵対レビュー 4 巡目 medium: 旧形は周の頭で申告を
+    捨て、通告 0 回・印なしで確定した)。スペルは一度だけ実行し、再生成しない。"""
+    runtime, persona, node, events, client, delivered = _build_closing_round_node(
+        monkeypatch, kind=kind, calls=[[body]], cuts=[dict(_CUT)],
+    )
+    _run_reply(node, _spell_state(), runtime, persona, events)
+
+    # 再生成していない (台本の呼び出しは最初の 1 回だけで使い切った)
+    assert client._calls == []
+    assert runtime._emit_speak_finalize.call_count == 1
+    closing = runtime._emit_speak_finalize.call_args_list[0]
+    assert closing.args[2] == "msg-1"
+    assert "やりました" in closing.args[3]  # 受け取った結果が行にある
+    assert "それで、あとは" in closing.args[3]  # 切れた本文も行にある
+    assert _marked(persona) == [("b1", "msg-1")]
+    assert _notices(persona) == [("b1", "(ここで発言が中断されました)")]
+    infos = [e for e in events if e.get("type") == "info"]
+    assert len(infos) == 1
+    assert infos[0]["interrupted_message_id"] == "msg-1"
+    record = last_saved_utterance("p1")
+    assert record.message_id == "msg-1"
+    assert record.form == SAVED_FORM_CUT
+    assert record.detail == {"stream_error": dict(_CUT)}
+    if kind == "single_beat":
+        assert len(delivered) == 1  # 帰結の配送は従来どおり一回
+
+
+@pytest.mark.parametrize("kind,body", _CLOSING_ROUND_CASES)
+def test_an_uncut_closing_spell_round_carries_no_mark(monkeypatch, kind, body):
+    """切られていない閉じる周は従来どおり — 印も通告も知らせも無く、行の形は
+    「結果を受け取った周の本文」のまま。"""
+    runtime, persona, node, events, client, _delivered = _build_closing_round_node(
+        monkeypatch, kind=kind, calls=[[body]], cuts=[None],
+    )
+    state = _spell_state()
+    _run_reply(node, state, runtime, persona, events)
+
+    assert client._calls == []
+    assert runtime._emit_speak_finalize.call_count == 1
+    assert _marked(persona) == []
+    assert _notices(persona) == []
+    assert [e for e in events if e.get("type") == "info"] == []
+    assert INTERRUPTED_METADATA_KEY not in state
+    record = last_saved_utterance("p1")
+    assert record.message_id == "msg-1"
+    assert record.form == SAVED_FORM_SPELL_RESULTS
+    assert record.stopped is False
+
+
+def test_a_cut_all_quick_round_with_a_failure_continues_without_a_mark(monkeypatch):
+    """/quick_spell の周でも失敗があれば続きの生成へ昇格する — 続きが発話を
+    続けるので、その周の切断には印も通告も付かない (捨てるのは続きへ進む周だけ)。"""
+    runtime, persona, node, events, client, _delivered = _build_closing_round_node(
+        monkeypatch, kind="quick",
+        calls=[[f"やるね。\n{QUICK_SPELL_LINE}\nそれで"], ["失敗したね。"]],
+        cuts=[dict(_CUT), None],
+        spell_ok=False,
+    )
+    state = _spell_state()
+    _run_reply(node, state, runtime, persona, events)
+
+    assert client._calls == []
+    assert runtime._emit_speak_finalize.call_count == 2
+    assert runtime._emit_speak_finalize.call_args_list[1].args[3] == "失敗したね。"
+    assert _marked(persona) == []
+    assert _notices(persona) == []
+    assert [e for e in events if e.get("type") == "info"] == []
+    assert INTERRUPTED_METADATA_KEY not in state
+
+
 def test_a_gemini_prompt_block_reaches_the_caller_as_a_safety_filter_error(monkeypatch):
     """Gemini がプロンプトを拒んだ回 — 本物の GeminiClient.generate_stream から
     node() の外まで、SafetyFilterError のまま届く (汎用の LLMError に包まれない)。
