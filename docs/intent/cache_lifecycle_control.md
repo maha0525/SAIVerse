@@ -476,3 +476,10 @@ context が 1024 tokens に満たない場合、create が失敗する。標準�
 - v0.6 (2026-05-24): まはー指摘で Phase 2 UI を是正。当初 per-persona TTL セレクタを既存 global cache UI に**併設**したため「TTL を決める口が 2 箇所」になり混乱 (「グローバル既定」表記も不可解)。→ cache 設定を **per-persona 1 箇所** (「キャッシュ: オフ/5分/1時間」) に統合、「データ送信量の管理」の重複 cache UI を削除。backend は per-persona を `{enabled, ttl}` に拡張し解決を `manager.resolve_persona_cache` に集約。§7 Phase 2 を更新。
 - v0.5 (2026-05-24): Phase 1 (read-only タイマー UI) + Phase 2 (per-persona TTL 基盤 + §5.4 配線付け替え) 実装完了を反映。まはー判断で Phase 2 から 3 モード UI / `CacheLifecycleState` を外し Phase 3 へ移動 (Anthropic 単独ではモードが 5m/1h の言い換えに潰れ、behavioral 差は Gemini で出るため)。Phase 2 は `manager._persona_cache_ttl` override + `SEARuntime._resolve_cache_ttl_str` を単一解決点に、3 消費者 a/b/c を per-persona 化。UI はタイマーに per-persona TTL セレクタを追加。§7 Phase 2/3 を再構成。
 - v0.4 (2026-05-24): まはー指摘でタイマー UI の scope を是正。**累計ヒット / 節約額はタイマーに載せない** (即時性がない → Usage ページの領分、`/api/usage/*` + `LLMUsageLog` に既存)。タイマーは「効いてるか / 残り時間」のみ。これに伴い Phase 1 を read-only (anchor から算出、state なし) に縮小、`CacheLifecycleState` 導入は Phase 2 へ移動。Phase 1 では extend/delete ボタンも出さない (Anthropic では no-op)。§1 / P3 / §4.1 / §4.3 / §4.6 / §7 / §8.1 を更新。
+
+### 日付別料金と保管費の見積もり（2026-10-10）
+
+TTL 前払いは維持し、作成時刻から終了までに料金境界があれば各区間を時間按分する。
+共通の期間解決・Gemini 割引の保守的終了時刻・過去記録を再計算しない方針は
+[モデル料金の契約](model_provider_management.md#日付による料金切替2026-10-10)を参照。
+早期削除の返金は未実装であり、この変更で実請求との一致を保証するものではない。

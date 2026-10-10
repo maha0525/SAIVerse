@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from database.models import Playbook as PlaybookModel
+from llm_clients.base import usage_event_time
 from llm_clients.exceptions import LLMError
 from saiverse.logging_config import log_sea_trace
 from saiverse.model_configs import get_model_parameter_defaults
@@ -2341,6 +2342,7 @@ class SEARuntime:
                     cached_tokens=usage.cached_tokens,
                     cache_write_tokens=usage.cache_write_tokens,
                     cache_ttl=usage.cache_ttl,
+                    timestamp=usage_event_time(usage),
                     persona_id=persona_id,
                     building_id=building_id,
                     node_type="cache_keepalive",

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
+from llm_clients.base import usage_event_time
 from sai_memory.memory.storage import (
     Message,
     get_message,
@@ -334,6 +335,7 @@ def _record_llm_usage(client, persona_id: str, node_type: str) -> None:
                 cached_tokens=usage.cached_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
                 cache_ttl=usage.cache_ttl,
+                timestamp=usage_event_time(usage),
                 persona_id=persona_id,
                 node_type=node_type,
                 category="memory_weave_generate",

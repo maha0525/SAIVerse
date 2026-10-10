@@ -1,6 +1,8 @@
 import json
 import logging
+import math
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Dict, Mapping
@@ -682,35 +684,81 @@ def find_model_config(query: str) -> tuple[str, Dict]:
 
 
 
-def get_model_pricing(model: str) -> Dict[str, Any] | None:
-    """Get pricing information for a model.
+def _pricing_instant(at: datetime | None = None) -> datetime:
+    """Normalize to UTC; legacy naive usage timestamps mean host-local time."""
+    return (at or datetime.now(timezone.utc)).astimezone(timezone.utc)
 
-    Uses find_model_config to search by both config key and model ID.
 
-    Returns:
-        Dict with keys:
-            - input_per_1m_tokens: float (USD per 1M input tokens)
-            - output_per_1m_tokens: float (USD per 1M output tokens)
-            - cached_input_per_1m_tokens: float (optional cache-read rate)
-            - long_context_threshold_tokens: int (optional, exclusive threshold)
-            - long_context_*_per_1m_tokens: float (optional rates above threshold)
-            - currency: str (e.g., "USD")
-        Or None if pricing not configured.
-    """
-    # First try direct lookup
+def _raw_model_pricing(model: str) -> Dict[str, Any] | None:
     config = get_model_config(model)
     pricing = config.get("pricing")
     if isinstance(pricing, dict):
         return pricing
-
-    # Fall back to find_model_config which searches by model ID too
     _, config = find_model_config(model)
-    if config:
-        pricing = config.get("pricing")
-        if isinstance(pricing, dict):
-            return pricing
+    pricing = config.get("pricing") if config else None
+    return pricing if isinstance(pricing, dict) else None
 
-    return None
+
+def _pricing_periods(pricing: Dict[str, Any]) -> list[tuple[datetime, datetime, dict]]:
+    """Validate the whole schedule: ambiguous/broken schedules use base prices."""
+    periods = pricing.get("periods", [])
+    try:
+        if not isinstance(periods, list):
+            raise ValueError
+        result = []
+        for period in periods:
+            if not isinstance(period, dict):
+                raise ValueError
+            start = datetime.fromisoformat(period["starts_at"])
+            end = datetime.fromisoformat(period["ends_at"])
+            if start.tzinfo is None or end.tzinfo is None or start >= end:
+                raise ValueError
+            rates = period["rates"]
+            if not isinstance(rates, dict) or not rates:
+                raise ValueError
+            for key, value in rates.items():
+                # Currency cannot change across a storage reservation or a tier.
+                if key == "long_context_threshold_tokens":
+                    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                        raise ValueError
+                elif key.endswith("_per_1m_tokens") or key == "cache_storage_per_1m_tokens_per_hour":
+                    if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                            or not math.isfinite(value) or value < 0):
+                        raise ValueError
+                else:
+                    raise ValueError
+            result.append((start.astimezone(timezone.utc), end.astimezone(timezone.utc), rates))
+        result.sort(key=lambda period: period[0])
+        if any(left[1] > right[0] for left, right in zip(result, result[1:])):
+            raise ValueError
+        return result
+    except (KeyError, TypeError, ValueError, OverflowError):
+        LOGGER.warning("Invalid pricing periods; using unchanged base pricing")
+        return []
+
+
+def _resolve_pricing(pricing: Dict[str, Any], periods: list, at: datetime) -> Dict[str, Any]:
+    resolved = {key: value for key, value in pricing.items() if key != "periods"}
+    for start, end, rates in periods:
+        if start <= at < end:
+            resolved.update(rates)
+            break
+    return resolved
+
+
+def get_model_pricing(model: str, *, at: datetime | None = None) -> Dict[str, Any] | None:
+    """Return a fresh effective price snapshot, without changing model settings.
+
+    Optional pricing.periods override base rates on [starts_at, ends_at).
+    Bounds require ISO-8601 offsets. Missing, expired or malformed schedules
+    fall back to base rates. Omitted ``at`` uses now; naive legacy event times
+    use the host's local timezone, matching UsageTracker's existing timestamps.
+    Input-length tiers are selected by calculate_cost after date resolution.
+    """
+    pricing = _raw_model_pricing(model)
+    if pricing is None:
+        return None
+    return _resolve_pricing(pricing, _pricing_periods(pricing), _pricing_instant(at))
 
 
 def calculate_cost(
@@ -722,6 +770,7 @@ def calculate_cost(
     cache_ttl: str = "",
     *,
     log_details: bool = True,
+    at: datetime | None = None,
 ) -> float:
     """Calculate cost in USD for a given token usage.
 
@@ -733,6 +782,7 @@ def calculate_cost(
         cache_write_tokens: Number of tokens written TO cache
         cache_ttl: Cache TTL used ("5m" or "1h"). Affects write cost for Anthropic.
         log_details: Emit per-call DEBUG details. Estimates may disable this.
+        at: Event timestamp; omitted for a current-price estimate.
 
     Returns:
         Cost in USD. Returns 0.0 if pricing not configured (e.g., local models).
@@ -747,7 +797,7 @@ def calculate_cost(
         - cached_tokens: Read from cache (discounted rate)
         - cache_write_tokens: 0 (no explicit write cost)
     """
-    pricing = get_model_pricing(model)
+    pricing = get_model_pricing(model, at=at)
     if log_details:
         LOGGER.debug("[DEBUG] calculate_cost: model=%s, pricing=%s", model, pricing)
     if not pricing:
@@ -808,25 +858,34 @@ def calculate_cost(
     return total
 
 
-def calculate_cache_storage_cost(model: str, cached_tokens: int, ttl_seconds: int) -> float:
-    """Calculate explicit-cache storage cost in USD.
+def calculate_cache_storage_cost(
+    model: str, cached_tokens: int, ttl_seconds: int, *, at: datetime | None = None,
+) -> float:
+    """Estimate the full reserved TTL, prorating each effective price interval.
 
-    Gemini explicit cache bills storage as an hourly rate per 1M cached tokens,
-    prorated. We adopt a "reserved seat" model: at create time we charge the
-    FULL TTL window up front (cached_tokens x rate x ttl_hours). If a delete
-    mechanism later frees the cache early, the unused remainder is refunded as a
-    negative record. Returns 0.0 when pricing or the storage rate is absent
-    (e.g. free-tier models without a pricing block).
-
-    See docs/intent/cache_lifecycle_control.md (storage accounting).
+    ``at`` is the reservation start (now when omitted). This keeps the existing
+    up-front accounting, without applying a promotional rate beyond its expiry.
+    Early-delete refunds remain unimplemented; stored charges are never repriced.
+    See docs/intent/cache_lifecycle_control.md.
     """
-    pricing = get_model_pricing(model)
+    if cached_tokens <= 0 or ttl_seconds <= 0:
+        return 0.0
+    pricing = _raw_model_pricing(model)
     if not pricing:
         return 0.0
-    rate = pricing.get("cache_storage_per_1m_tokens_per_hour", 0.0)
-    if rate <= 0 or cached_tokens <= 0 or ttl_seconds <= 0:
-        return 0.0
-    return (cached_tokens / 1_000_000) * rate * (ttl_seconds / 3600.0)
+    start = _pricing_instant(at)
+    end = start + timedelta(seconds=ttl_seconds)
+    periods = _pricing_periods(pricing)
+    boundaries = sorted({start, end} | {
+        bound for pstart, pend, _ in periods for bound in (pstart, pend)
+        if start < bound < end
+    })
+    total = 0.0
+    for left, right in zip(boundaries, boundaries[1:]):
+        rate = _resolve_pricing(pricing, periods, left).get("cache_storage_per_1m_tokens_per_hour", 0.0)
+        if rate > 0:
+            total += (cached_tokens / 1_000_000) * rate * ((right - left).total_seconds() / 3600.0)
+    return total
 
 
 def _get_required_env_vars(model: str) -> list[str]:

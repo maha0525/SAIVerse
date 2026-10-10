@@ -11,6 +11,7 @@ reasoning を載せない経路など）。Phase 1 以降の分割で経路が�
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +27,7 @@ from sea.runtime_llm import (
 def _fake_usage(**overrides):
     base = dict(
         model="test-model",
+        timestamp=1798700000.0,
         input_tokens=100,
         output_tokens=20,
         cached_tokens=5,
@@ -213,7 +215,7 @@ class RecordLlmUsageTest(unittest.TestCase):
     def test_records_accumulates_and_touches_anchor(self):
         usage = _fake_usage()
         with patch("sea.runtime_llm.get_usage_tracker") as get_tracker, \
-                patch("saiverse.model_configs.calculate_cost", return_value=0.25), \
+                patch("saiverse.model_configs.calculate_cost", return_value=0.25) as calculate_cost, \
                 patch("saiverse.model_configs.get_model_display_name", return_value="Test Model"):
             tracker = get_tracker.return_value
             meta = _record_llm_usage(
@@ -228,6 +230,8 @@ class RecordLlmUsageTest(unittest.TestCase):
         self.assertEqual(kwargs["persona_id"], "p1")
         self.assertEqual(kwargs["building_id"], "b1")
         self.assertEqual(kwargs["category"], "persona_speak")
+        self.assertEqual(kwargs["timestamp"], datetime.fromtimestamp(usage.timestamp))
+        self.assertIs(calculate_cost.call_args.kwargs["at"], kwargs["timestamp"])
 
         self.assertEqual(meta, {
             "model": "test-model",
@@ -267,7 +271,10 @@ class RecordLlmUsageTest(unittest.TestCase):
         self.assertEqual(calls, ["record", "accumulate", "touch"])
 
     def test_cache_storage_recorded_when_present(self):
-        usage = _fake_usage(cache_storage_tokens=1000, cache_storage_ttl_seconds=3600)
+        usage = _fake_usage(
+            cache_storage_tokens=1000, cache_storage_ttl_seconds=3600,
+            cache_storage_timestamp=1798699900.0,
+        )
         with patch("sea.runtime_llm.get_usage_tracker") as get_tracker, \
                 patch("saiverse.model_configs.calculate_cost", return_value=0.0), \
                 patch("saiverse.model_configs.get_model_display_name", return_value="m"):
@@ -280,6 +287,7 @@ class RecordLlmUsageTest(unittest.TestCase):
             model_id="test-model",
             cached_tokens=1000,
             ttl_seconds=3600,
+            timestamp=datetime.fromtimestamp(usage.cache_storage_timestamp),
             persona_id="p1",
             building_id="b1",
         )

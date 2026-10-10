@@ -82,16 +82,17 @@ class UsageTracker:
             category: Usage category (persona_speak, memory_weave_generate, etc.)
             timestamp: Optional timestamp (defaults to now)
         """
-        # Calculate cost (with cache discount and write premium if applicable)
+        timestamp = datetime.fromtimestamp((timestamp or datetime.now()).timestamp())
+        # Use one event time for both the persisted record and effective pricing.
         cost = calculate_cost(
             model_id, input_tokens, output_tokens, cached_tokens, cache_write_tokens,
-            cache_ttl=cache_ttl,
+            cache_ttl=cache_ttl, at=timestamp,
         )
-        pricing = get_model_pricing(model_id)
+        pricing = get_model_pricing(model_id, at=timestamp)
         currency = pricing.get("currency", "USD") if pricing else "USD"
 
         record = {
-            "timestamp": timestamp or datetime.now(),
+            "timestamp": timestamp,
             "persona_id": persona_id,
             "building_id": building_id,
             "model_id": model_id,
@@ -194,16 +195,19 @@ class UsageTracker:
         """Record explicit cache storage cost as a separate usage record.
 
         Uses the "reserved seat" model: charges the full TTL window at create
-        time. If a delete mechanism later frees the cache early, record a
-        negative entry for the unused remainder.
+        time, prorated across effective-price boundaries. Early-delete refunds
+        remain a future feature; existing records are never repriced.
         """
         from .model_configs import calculate_cache_storage_cost
-        cost_usd = calculate_cache_storage_cost(model_id, cached_tokens, ttl_seconds)
+        timestamp = datetime.fromtimestamp((timestamp or datetime.now()).timestamp())
+        cost_usd = calculate_cache_storage_cost(model_id, cached_tokens, ttl_seconds, at=timestamp)
         if cost_usd <= 0:
             return
 
+        pricing = get_model_pricing(model_id, at=timestamp)
         record = {
-            "timestamp": timestamp or datetime.now(),
+            "timestamp": timestamp,
+            "currency": pricing.get("currency", "USD") if pricing else "USD",
             "persona_id": persona_id,
             "building_id": building_id,
             "model_id": model_id,

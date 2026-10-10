@@ -4,6 +4,7 @@ import os
 import json
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 _log = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ from saiverse.model_configs import (
     get_model_config_error,
     get_model_parameters,
     get_model_parameter_defaults,
+    get_model_pricing,
     get_cache_config,
     is_model_available,
 )
@@ -36,6 +38,7 @@ class ModelInfo(BaseModel):
     input_price: Optional[float] = None
     output_price: Optional[float] = None
     currency: str = "USD"
+    pricing_note: Optional[str] = None
     rate_limit: Optional[RateLimitInfo] = None
     # 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない) の印。
     # 会話に使う選択欄はこの印の付いたモデルを出さない (一覧からは落とさない)。
@@ -106,13 +109,14 @@ def get_models():
     Includes pricing info (USD per 1M tokens) when available.
     """
     choices = get_model_choices_with_display_names()
+    pricing_at = datetime.now(timezone.utc)
     result = []
     for mid, name in choices:
         error = get_model_config_error(mid)
         if not is_model_available(mid) and not error:
             continue
         cfg = get_model_config(mid)
-        pricing = cfg.get("pricing", {})
+        pricing = get_model_pricing(mid, at=pricing_at) or {}
         rate_limit_raw = cfg.get("rate_limit")
         rate_limit = None
         if isinstance(rate_limit_raw, dict) and rate_limit_raw.get("rpd"):
@@ -130,6 +134,7 @@ def get_models():
             "input_price": pricing.get("input_per_1m_tokens"),
             "output_price": pricing.get("output_per_1m_tokens"),
             "currency": pricing.get("currency", "USD"),
+            "pricing_note": pricing.get("pricing_note"),
             "rate_limit": rate_limit,
             "reflex_only": is_reflex_only_model(mid),
         })

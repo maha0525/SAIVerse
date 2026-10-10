@@ -44,7 +44,7 @@ interface PersonaPreview {
     cache_enabled: boolean;
     cache_ttl: string | null;
     cache_type: string | null;
-    pricing: { currency?: string; output_per_1m_tokens?: number; [key: string]: unknown };
+    pricing: { currency?: string; output_per_1m_tokens?: number; pricing_note?: string; [key: string]: unknown };
     messages: AnnotatedMessage[];
 }
 
@@ -187,6 +187,9 @@ function PersonaPreviewView({ persona }: { persona: PersonaPreview }) {
                 )}
                 {outputRate != null && outputRate > 0 && (
                     <div data-i18n="components.ContextPreviewModal.text010 components.ContextPreviewModal.text011" className={styles.costNote}>{uiText("components.ContextPreviewModal.text010")}{formatCost(outputRate, String(persona.pricing?.currency ?? 'USD'))}{uiText("components.ContextPreviewModal.text011")}</div>
+                )}
+                {persona.pricing?.pricing_note && (
+                    <div className={styles.costNote}>{persona.pricing.pricing_note}</div>
                 )}
             </div>
 

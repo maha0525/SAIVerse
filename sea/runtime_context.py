@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from sai_memory.perception_buffer import PERCEPTION_OMISSION_HEADER
@@ -1668,7 +1669,8 @@ def preview_context(
 
     total_input_tokens = sum(section_tokens.values())
     context_length = get_context_length(persona_model)
-    pricing = get_model_pricing(persona_model)
+    pricing_at = datetime.now(timezone.utc)
+    pricing = get_model_pricing(persona_model, at=pricing_at)
 
     # Cost range: best case (all cached) to worst case (all cache-write)
     cache_kwargs = runtime._get_cache_kwargs()
@@ -1684,17 +1686,17 @@ def preview_context(
         # Best case: everything is a cache hit
         cost_best = calculate_cost(
             persona_model, total_input_tokens, 0,
-            cached_tokens=total_input_tokens, cache_write_tokens=0,
+            cached_tokens=total_input_tokens, cache_write_tokens=0, at=pricing_at,
         )
         # Worst case: everything is a cache write
         cost_worst = calculate_cost(
             persona_model, total_input_tokens, 0,
             cached_tokens=0, cache_write_tokens=total_input_tokens,
-            cache_ttl=cache_ttl,
+            cache_ttl=cache_ttl, at=pricing_at,
         )
     else:
         # No cache: single estimate
-        cost_best = calculate_cost(persona_model, total_input_tokens, 0)
+        cost_best = calculate_cost(persona_model, total_input_tokens, 0, at=pricing_at)
         cost_worst = cost_best
 
     # Build sections summary
