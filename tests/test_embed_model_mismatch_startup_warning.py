@@ -15,6 +15,7 @@ SAIMemory も本物は作らない。DB はメモリ上の SQLite。LLM は呼�
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,8 @@ from sqlalchemy.pool import StaticPool
 
 from database.models import AI as AIModel, Base, City as CityModel
 from manager.persona import PersonaMixin
+from sai_memory.config import load_settings
+from saiverse_memory.adapter import SAIMemoryAdapter
 
 
 class _Manager(PersonaMixin):
@@ -100,5 +103,17 @@ def test_no_warning_when_unchanged_or_adapter_missing(session_factory):
         "air_city_a": SimpleNamespace(embed_model_changed=False),
         "miku_city_a": None,
     })
+
+    assert svc.startup_warnings == []
+
+
+def test_disabled_adapter_does_not_break_startup_check(session_factory, tmp_path):
+    """SAIMEMORY_MEMORY=0 の adapter は早期 return するが、旗は持っている。"""
+    settings = replace(load_settings(), memory_enabled=False)
+    adapter = SAIMemoryAdapter("air_city_a", persona_dir=tmp_path, settings=settings)
+    assert adapter.conn is None
+    assert adapter.embed_model_changed is False
+
+    svc = _start(session_factory, {"air_city_a": adapter})
 
     assert svc.startup_warnings == []
