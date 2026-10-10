@@ -909,7 +909,9 @@ def build_post_session_situation_text(
         if episode_ref:
             record_lines = [
                 f"セッションの記録: {episode_ref} "
-                "(原本は /spell episode_read で読めます)",
+                f"(原本は /spell name='episode_read' "
+                f"args={json.dumps({'episode': episode_ref}, ensure_ascii=False)} "
+                "で読めます)",
             ]
         else:
             record_lines = ["セッションの記録: (出来事参照なし)"]

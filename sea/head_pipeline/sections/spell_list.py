@@ -215,6 +215,7 @@ class SpellListSection:
             "",
             "### 使い方",
             "/spell name='ツール名' args={'引数名': '値'}",
+            "名前は一覧の登録名をそのまま使い、args は1つのオブジェクトで指定してください。引数がなくても args={} を付けてください。",
             "",
             "結果を見て発言を続ける必要がない記録・整理系の操作には /quick_spell が使えます（構文は /spell と同じ）。",
             "quick_spell は成功するとその発言で完了し、結果はあなたの記憶に記録されます（次の機会に確認できます）。",
@@ -262,7 +263,11 @@ class SpellListSection:
             if desc:
                 header += f" — {desc}"
             if hidden > 0:
-                header += f"（追加スペル{hidden}個あり、`addon_spell_help(addon=\"{addon_key}\")`で確認）"
+                help_args = json.dumps({"addon": addon_key}, ensure_ascii=False)
+                header += (
+                    f"（追加スペル{hidden}個あり、"
+                    f"`/spell name='addon_spell_help' args={help_args}`で確認）"
+                )
             lines.append("")
             lines.append(header)
             for entry in group["visible"]:
@@ -506,10 +511,28 @@ class SpellListSection:
             parameters = {}
         props = parameters.get("properties", {}) if isinstance(parameters, dict) else {}
         required_list = parameters.get("required", []) if isinstance(parameters, dict) else []
+        # 例は書式だけを示す。<引数名> は JSON として読めないので、写しても
+        # 実行されず書式エラーで差し戻される (送信・削除系の誤射を防ぐ)。
+        placeholders = ", ".join(
+            f"{json.dumps(pname, ensure_ascii=False)}: <{pname}>"
+            for pname in required_list
+            if pname in props and isinstance(props[pname], dict)
+        )
+        lines.append(
+            f"  - 書式（<…> を実際の値に置き換える）: "
+            f"/spell name='{entry.name}' args={{{placeholders}}}"
+        )
         for pname, pdef in props.items():
             req_mark = "必須" if pname in required_list else "省略可"
             if not isinstance(pdef, dict):
                 continue
+            choices = ""
+            if isinstance(pdef.get("enum"), list) and pdef["enum"]:
+                choices = "（選択肢: " + " / ".join(
+                    json.dumps(v, ensure_ascii=False) for v in pdef["enum"]
+                ) + "）"
             lines.append(
-                f"  - {pname} ({pdef.get('type', '?')}, {req_mark}): {pdef.get('description', '')}"
+                f"  - {pname} ({pdef.get('type', '?')}, {req_mark}): "
+                f"{pdef.get('description', '')}{choices}"
             )
+

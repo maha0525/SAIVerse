@@ -1055,7 +1055,14 @@ _SPELL_PATTERN_NO_ARGS = re.compile(
 )
 # Fuzzy form: /spell tool_name key='value' key2='value2' ...
 _SPELL_PATTERN_FUZZY = re.compile(
-    r"^/(?:quick_)?spell\s+(\w+)\s+(.+)$",
+    r"^/(?:quick_)?spell\s+([\w.-]+)\s+(.+)$",
+    re.MULTILINE,
+)
+
+# Every explicit invocation line must be parsed or reported as malformed.
+# Token boundary avoids treating ordinary words such as /spelling as commands.
+_SPELL_LINE_PATTERN = re.compile(
+    r"^[ \t]*/(?:quick_)?spell\b[^\r\n]*",
     re.MULTILINE,
 )
 
@@ -1063,7 +1070,7 @@ _SPELL_PATTERN_FUZZY = re.compile(
 def _is_quick_match(m: Any) -> bool:
     """この spell マッチが /quick_spell 動詞で唱えられたか (quick_spell.md §3.1)。"""
     try:
-        return m.group(0).startswith("/quick_")
+        return m.group(0).lstrip().startswith("/quick_")
     except (AttributeError, IndexError):
         return False
 # key=value pair within fuzzy args (value may be single/double-quoted, dict literal, or bare word)
@@ -1319,20 +1326,35 @@ def _parse_fuzzy_spell_args(args_raw: str, *, mute: bool = False) -> Optional[di
     the log — fuzzy KV parsing recovers without user-visible noise. ``mute``
     fully suppresses that DEBUG too (display paths re-parsing stored text).
     """
+    # In the hybrid shorthand, args= wraps the complete object, not a tool
+    # argument called "args". Never fall back to partial KV parsing if it fails.
+    wrapper = re.match(r"^args\s*=\s*(.*)$", args_raw.strip(), re.DOTALL)
+    if wrapper is not None:
+        return _parse_spell_args(wrapper.group(1), silent=mute, mute=mute)
     result = _parse_spell_args(args_raw, silent=True, mute=mute)
     if result is not None:
         return result
     pairs = {}
+    end = 0
     for m in _KV_PATTERN.finditer(args_raw):
+        if args_raw[end:m.start()].strip(" \t,"):
+            return None
+        end = m.end()
         key = m.group(1)
         # Groups 2-5 correspond to: single-quoted, double-quoted, dict-literal, bare-word
         value_raw = next(v for v in m.groups()[1:] if v is not None)
         # dict literals: try to parse as proper dict
         if value_raw.startswith("{"):
-            parsed = _parse_spell_args(value_raw)
-            pairs[key] = parsed if parsed is not None else value_raw
+            parsed = _parse_spell_args(value_raw, silent=mute, mute=mute)
+            if parsed is None:
+                return None
+            pairs[key] = parsed
         else:
+            if m.group(5) is not None and value_raw.startswith(("'", '"')):
+                return None
             pairs[key] = value_raw
+    if args_raw[end:].strip(" \t,"):
+        return None
     if pairs:
         return pairs
     return None
@@ -1424,7 +1446,9 @@ class _SpellSpan:
         return (self._start, self._end)
 
 
-def _rescue_multiline_args(text: str, m: Any) -> Optional[Tuple[dict, "_SpellSpan"]]:
+def _rescue_multiline_args(
+    text: str, m: Any, *, consumed_end_out: Optional[List[int]] = None,
+) -> Optional[Tuple[dict, "_SpellSpan"]]:
     """canonical /spell 行の args が 1 行で parse できなかったときの救済パース。
 
     ``_SPELL_PATTERN`` は MULTILINE の行単位マッチ (``.`` は改行を跨がない) の
@@ -1440,6 +1464,13 @@ def _rescue_multiline_args(text: str, m: Any) -> Optional[Tuple[dict, "_SpellSpa
 
     Returns:
         ``(tool_args, span)``。span は ``/spell`` 行頭から閉じ ``}`` まで。
+
+    ``consumed_end_out`` を渡すと、救済に失敗したときに「args の本文として
+    読んだ範囲の終端」を入れて返す。brace が閉じたが parse できなかった場合は
+    閉じ ``}`` の直後、文字列が閉じないまま本文が尽きた場合は本文の末尾。
+    呼び出し側はこの範囲を後続の認識から除外し、壊れた args の本文に含まれる
+    ``/spell`` 行を別の呼び出しとして実行・報告しない (spell_invocation_contract.md)。
+    文字列の外で brace だけが閉じない場合は範囲が曖昧なので何も入れない。
     """
     pos = m.start(2)
     end_limit = len(text)
@@ -1490,10 +1521,14 @@ def _rescue_multiline_args(text: str, m: Any) -> Optional[Tuple[dict, "_SpellSpa
                     parsed = _parse_spell_args(candidate, silent=True, mute=True)
                     if isinstance(parsed, dict):
                         return parsed, _SpellSpan(m.start(), i + 1)
+                    if consumed_end_out is not None:
+                        consumed_end_out.append(i + 1)
                     return None
             else:
                 out.append(ch)
         i += 1
+    if in_string and consumed_end_out is not None:
+        consumed_end_out.append(end_limit)
     return None
 
 
@@ -1520,8 +1555,8 @@ def _parse_spell_lines(
       which is used in SAIMemory storage so the persona learns correct syntax.
     - ``quick`` = ``/quick_spell`` 動詞で唱えられた行 (quick_spell.md)。fuzzy
       救済・複数行 args 救済を通っても保持される。
-    Unparseable entries are skipped from the return value; canonical-form
-    entries whose args failed to parse (after the multiline rescue) are
+    Unparseable entries are skipped from the return value, but every explicit
+    /spell or /quick_spell line outside an already-consumed args span is
     reported via ``malformed_out`` when the caller passes a list — the spell
     loop uses this to feed a corrective error back to the persona instead of
     silently dropping the invocation (2026-07-05 実 LLM シム 異常 #2).
@@ -1548,7 +1583,8 @@ def _parse_spell_lines(
             matched_spans.append(m.span())
             continue
         # 1 行で読めない args: 文字列値に生改行を含む複数行 JSON/dict を救済
-        rescued = _rescue_multiline_args(text, m)
+        consumed_end: List[int] = []
+        rescued = _rescue_multiline_args(text, m, consumed_end_out=consumed_end)
         if rescued is not None:
             tool_args, span = rescued
             normalized = _normalize_spell_line(m.group(1), tool_args, quick=quick)
@@ -1560,6 +1596,8 @@ def _parse_spell_lines(
             found.append(ParsedSpell(m.group(1), tool_args, span, normalized, quick))
             matched_spans.append(span.span())
             continue
+        # 救済に失敗しても、args の本文として読んだ範囲は後続の認識から外す
+        matched_spans.append((m.start(), max([m.end(), *consumed_end])))
         if malformed_out is not None:
             malformed_out.append((m.group(1), args_raw, m))
 
@@ -1577,6 +1615,22 @@ def _parse_spell_lines(
                 LOGGER.info("[sea][spell] Fuzzy-parsed spell '%s' → %s", tool_name, normalized)
             found.append(ParsedSpell(tool_name, tool_args, m, normalized, quick))
             matched_spans.append(span)
+        else:
+            matched_spans.append(span)
+            if malformed_out is not None:
+                malformed_out.append((tool_name, m.group(2).strip(), m))
+
+    # Pass 3: recognition failures must reach the same feedback/retry boundary
+    # as malformed args. Skip spans consumed by canonical/multiline/fuzzy forms.
+    if malformed_out is not None:
+        for m in _SPELL_LINE_PATTERN.finditer(text):
+            if any(s <= m.start() < e for s, e in matched_spans):
+                continue
+            body = re.sub(r"^/(?:quick_)?spell\s*", "", m.group(0).lstrip())
+            name_body = re.sub(r"^name\s*=\s*", "", body)
+            name_match = re.match(r"['\"]?([\w.-]+)", name_body)
+            name = name_match.group(1) if name_match else "ツール名"
+            malformed_out.append((name, body, m))
 
     # Sort by position in text so rounds process spells in order
     found.sort(key=lambda x: x.m.start())
@@ -1797,16 +1851,30 @@ def _build_malformed_args_error(spell_name: str, args_raw: str) -> str:
     消える (2026-07-05 実 LLM シム 異常 #2)。
     """
     preview = args_raw if len(args_raw) <= 120 else args_raw[:120] + "…"
-    example = f"/spell name='{spell_name}' args={{\"content\": \"1行目\\n2行目\"}}"
+    example = f"/spell name='{spell_name}' args={{}}"
     return (
         f"スペル「{spell_name}」の args を JSON として読み取れなかったため、"
         "実行されませんでした。\n"
         f"読み取れなかった args (先頭部分): {preview}\n"
-        "args は 1 つの JSON オブジェクトとして書いてください。"
+        "args はスペルの説明にある引数を、1つのJSONオブジェクトとして書いてください。"
         "文字列値の中の改行は \\n とエスケープしてください"
         "（生の改行を含めると途中で途切れます）。\n"
         f"書式例: {example}\n"
         "同じ内容で args を書き直して、もう一度スペルを発動してください。"
+    )
+
+
+def _build_malformed_spell_error(spell_name: str, spell_line: str) -> str:
+    """Unreadable invocation syntax is an error, never ordinary speech."""
+    preview = spell_line if len(spell_line) <= 120 else spell_line[:120] + "…"
+    verb = "/quick_spell" if spell_line.lstrip().startswith("/quick_spell") else "/spell"
+    return (
+        "スペル行の書式を読み取れなかったため、実行されませんでした。\n"
+        f"読み取れなかった行 (先頭部分): {preview}\n"
+        "行頭から、名前と引数を次の書式で指定してください。"
+        "引数がない場合も args={} を付けてください。\n"
+        f"書式: {verb} name='{spell_name}' args={{}}\n"
+        "args 内にはスペルの説明にある引数を指定し、もう一度発動してください。"
     )
 
 
@@ -3534,9 +3602,13 @@ async def _run_spell_loop(
                     "result": error_text, "meta": None, "success": False,
                 })
             for name, args_raw, m in malformed_spells:
-                error_text = _build_malformed_args_error(name, args_raw)
+                raw_line = text[m.start():m.end()]
+                if _SPELL_PATTERN.match(raw_line) or _SPELL_PATTERN_FUZZY.match(raw_line):
+                    error_text = _build_malformed_args_error(name, args_raw)
+                else:
+                    error_text = _build_malformed_spell_error(name, raw_line)
                 LOGGER.warning(
-                    "[sea][spell] Malformed args for spell '%s' → returning error "
+                    "[sea][spell] Malformed invocation for spell '%s' → returning error "
                     "to persona for retry",
                     name,
                 )
