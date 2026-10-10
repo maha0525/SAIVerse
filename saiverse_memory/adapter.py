@@ -156,6 +156,10 @@ class SAIMemoryAdapter:
         from sai_memory.db_locks import lock_for_path
         self._db_lock = lock_for_path(str(db_path))
 
+        # 起動時の集計 (manager/persona.py) が全ペルソナで読むので、
+        # 無効化で早期 return する経路でも必ず持たせる。
+        self.embed_model_changed = False
+
         if not self.settings.memory_enabled:
             LOGGER.warning("SAIMemory disabled via settings; adapter will no-op")
             self.conn = None
@@ -277,7 +281,6 @@ class SAIMemoryAdapter:
             self.embedder = None
 
         # Detect embedding model changes
-        self.embed_model_changed = False
         if self.conn and self.embedder:
             self._check_embed_model_change()
 

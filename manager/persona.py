@@ -147,11 +147,13 @@ class PersonaMixin:
                 "Loaded %d personas from database (%d failed).",
                 len(self.personas), failed_count,
             )
-            # Check for embedding model changes across all loaded personas
+            # Check for embedding model changes across all loaded personas.
+            # Read the adapter directly (no getattr default) so a renamed
+            # attribute fails loudly instead of silencing this warning.
             changed_personas = [
                 pid
                 for pid, p in self.personas.items()
-                if getattr(getattr(p, "memory", None), "embed_model_changed", False)
+                if p.sai_memory is not None and p.sai_memory.embed_model_changed
             ]
             if changed_personas:
                 names = ", ".join(changed_personas)
