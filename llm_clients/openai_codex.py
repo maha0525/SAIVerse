@@ -50,6 +50,7 @@ from .openai_codex_auth import (
     build_user_agent as _build_user_agent,
     is_siwc_record,
     is_usable_token,
+    redact_secrets,
     resolve_siwc_client_id,
     revoke_siwc_refresh_token,
     siwc_scope_grants_direct_use,
@@ -330,6 +331,16 @@ class OpenAICodexClient(LLMClient):
         if not access_token:
             raise RuntimeError(
                 f"認証ファイルに tokens.access_token がありません。{NO_AUTH_HINT}"
+            )
+        # Stored tokens (older records, Codex CLI's auth.json, past refreshes)
+        # never went through today's checks. One that cannot travel in a
+        # header would inject headers or be quoted whole in the HTTP library's
+        # error, so refuse it here without echoing the value.
+        if not is_usable_token(access_token) or (
+            account_id and not is_usable_token(account_id)
+        ):
+            raise RuntimeError(
+                f"認証ファイルの鍵の形式が正しくありません。{NO_AUTH_HINT}"
             )
         is_siwc = is_siwc_record(auth)
         if is_siwc:
@@ -767,7 +778,9 @@ class OpenAICodexClient(LLMClient):
             )
 
         if not resp.ok:
-            err_text = self._drain_error_body(resp)
+            # The body goes into CodexHTTPError, logs and the UI: strip the
+            # token we just sent (an error page could echo it) and any others.
+            err_text = redact_secrets(self._drain_error_body(resp), access_token_for_log)
             status = resp.status_code
             try:
                 resp.close()
@@ -865,6 +878,17 @@ class OpenAICodexClient(LLMClient):
                         raise
                 else:
                     refreshed = self._request_refresh(latest_refresh)
+                    # Same shape check as SIWC before anything overwrites the
+                    # store (it may be Codex CLI's own auth.json).
+                    if not isinstance(refreshed, dict) or not is_usable_token(
+                        refreshed.get("access_token")
+                    ) or (
+                        refreshed.get("refresh_token") is not None
+                        and not is_usable_token(refreshed.get("refresh_token"))
+                    ):
+                        raise RuntimeError(
+                            f"鍵の更新応答に使える鍵がありませんでした。{NO_AUTH_HINT}"
+                        )
                     self._persist_refreshed_tokens(store.path, latest, refreshed)
         except FileLockTimeout as exc:
             raise RuntimeError(
@@ -949,7 +973,7 @@ class OpenAICodexClient(LLMClient):
                 json=payload,
             )
             if resp.status_code != 200:
-                err = resp.text or ""
+                err = redact_secrets(resp.text or "", refresh_token)
                 raise RuntimeError(
                     f"refresh_token grant failed status={resp.status_code}: {err[:600]}"
                 )
@@ -976,7 +1000,7 @@ class OpenAICodexClient(LLMClient):
                 },
             )
             if resp.status_code != 200:
-                err = resp.text or ""
+                err = redact_secrets(resp.text or "", refresh_token)
                 raise RuntimeError(
                     f"SIWC refresh_token grant failed status={resp.status_code}: {err[:600]}"
                 )

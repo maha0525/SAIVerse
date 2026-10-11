@@ -1360,6 +1360,100 @@ def test_unsendable_bearer_header_error_never_carries_the_token(isolated_stores,
     assert excinfo.value.__suppress_context__ is True
 
 
+def test_redact_secrets_blanks_tokens_but_keeps_error_reasons():
+    jwt = _siwc_access_token()
+    body = (
+        '{"access_token": "at-SECRET-1", "refresh_token":"rt-SECRET-2", '
+        '"error": {"code": "deviceauth_authorization_pending"}} '
+        f"refresh_token=rt-SECRET-3&x=1 bearer {jwt} echoed sent-SECRET-4"
+    )
+    out = oca.redact_secrets(body, "sent-SECRET-4")
+    for secret in ("at-SECRET-1", "rt-SECRET-2", "rt-SECRET-3", jwt, "sent-SECRET-4"):
+        assert secret not in out
+    assert "deviceauth_authorization_pending" in out
+
+
+def test_describe_response_redacts_before_truncating():
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        text = '{"access_token": "' + "A" * 300 + '", "refresh_token": "rt-SECRET"'
+
+    out = oca._describe_response(_Resp())
+    assert "AAAA" not in out
+    assert "rt-SECRET" not in out
+
+
+def test_stored_token_with_line_break_is_refused_without_echo(isolated_stores):
+    secret = "stored-SECRET\r\nX-Injected: 1"
+    _write_json(
+        isolated_stores["saiverse"],
+        {"source": "saiverse_device_login", "tokens": {"access_token": secret, "refresh_token": "rt"}},
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        OpenAICodexClient(model="gpt-6.1-sol")._resolve_connection_params()
+    assert "stored-SECRET" not in str(excinfo.value)
+
+
+def test_cli_store_token_with_line_break_is_refused(isolated_stores):
+    _write_json(isolated_stores["cli"], {"tokens": {"access_token": "cli tok", "refresh_token": "rt"}})
+    with pytest.raises(RuntimeError):
+        OpenAICodexClient(model="gpt-6.1-sol")._resolve_connection_params()
+
+
+def test_legacy_refresh_with_unusable_token_never_overwrites_the_store(isolated_stores, monkeypatch):
+    original = {
+        "source": "saiverse_device_login",
+        "tokens": {"access_token": _legacy_access_token(expires_in_seconds=-60), "refresh_token": "rt-old"},
+    }
+    _write_json(isolated_stores["saiverse"], original)
+    client = OpenAICodexClient(model="gpt-6.1-sol")
+    monkeypatch.setattr(
+        client, "_request_refresh", lambda rt: {"access_token": "bad\ntoken", "refresh_token": "rt-new"}
+    )
+    with pytest.raises(RuntimeError):
+        client._refresh_or_pickup_latest(None)
+    assert _read_json(isolated_stores["saiverse"])["tokens"] == original["tokens"]
+
+
+def test_http_error_body_echoing_the_sent_token_is_redacted(isolated_stores, monkeypatch):
+    secret = "SENT-TOKEN-VALUE-123"
+    _write_json(
+        isolated_stores["saiverse"],
+        {
+            "source": oca.SIWC_SOURCE,
+            "tokens": {"access_token": secret, "refresh_token": "rt", "client_id": "oaiapp_c",
+                       "scope": oca.SIWC_SCOPE},
+        },
+    )
+
+    class _ErrResp:
+        status_code = 401
+        ok = False
+        headers = {}
+
+        def iter_content(self):
+            yield f"invalid token {secret}".encode()
+
+        def close(self):
+            pass
+
+    class _Session:
+        def build_request(self, method, url, **kwargs):
+            return object()
+
+        def send(self, request, stream=False):
+            return object()
+
+    client = OpenAICodexClient(model="gpt-6.1-sol")
+    monkeypatch.setattr(client, "_ensure_session", lambda is_siwc=False: _Session())
+    monkeypatch.setattr(codex_mod, "_HttpxResponseAdapter", lambda raw: _ErrResp())
+    with pytest.raises(codex_mod.CodexHTTPError) as excinfo:
+        client._post_responses({"model": "m", "input": [], "stream": True, "store": False})
+    assert secret not in str(excinfo.value)
+    assert secret not in excinfo.value.body
+
+
 def test_id_token_aud_must_contain_issued_client_id():
     data = _exchange_payload("n1", "oaiapp_someone_else")
     with pytest.raises(oca.SiwcOAuthError, match="aud"):

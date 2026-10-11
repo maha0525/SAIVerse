@@ -745,11 +745,40 @@ def _auth_headers() -> Dict[str, str]:
     }
 
 
-def _describe_response(resp: Any) -> str:
-    """status + content-type + short body preview, for diagnosing bad responses.
+_REDACTED = "[REDACTED]"
+# Token-bearing fields in JSON ("access_token": "...") or form/query
+# (refresh_token=...) bodies, and bare JWTs anywhere in the text. A plain
+# "code" key is deliberately not listed: error bodies use it for the error
+# reason (e.g. deviceauth_authorization_pending), which diagnostics need.
+_TOKEN_FIELD_NAMES = r"(?:access_token|refresh_token|id_token|authorization_code|code_verifier)"
+_JSON_TOKEN_FIELD = re.compile(r'("' + _TOKEN_FIELD_NAMES + r'"\s*:\s*")[^"]*(")')
+_FORM_TOKEN_FIELD = re.compile(r"\b(" + _TOKEN_FIELD_NAMES + r"=)[^&\s\"']+")
+_BARE_JWT = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*)?")
 
-    Never includes request credentials; the response body may echo an error
-    message but device-auth error bodies carry no secrets.
+
+def redact_secrets(text: Any, *known_secrets: Any) -> str:
+    """Blank out credentials before a response body reaches logs, errors or the UI.
+
+    Replaces the given known secrets (e.g. the token just sent) wherever they
+    appear, token-bearing JSON / form fields, and bare JWTs. Upstream bodies
+    are untrusted: an error page could echo what we sent, and a malformed
+    token response still carries freshly minted tokens. Redact the whole text
+    first and truncate afterwards, so a cut never leaves part of a secret.
+    """
+    out = text if isinstance(text, str) else str(text)
+    for secret in known_secrets:
+        if isinstance(secret, str) and len(secret) >= 8:
+            out = out.replace(secret, _REDACTED)
+    out = _JSON_TOKEN_FIELD.sub(lambda m: f"{m.group(1)}{_REDACTED}{m.group(2)}", out)
+    out = _FORM_TOKEN_FIELD.sub(lambda m: f"{m.group(1)}{_REDACTED}", out)
+    return _BARE_JWT.sub(_REDACTED, out)
+
+
+def _describe_response(resp: Any) -> str:
+    """status + content-type + short redacted body preview, for diagnosing bad responses.
+
+    Never includes request credentials. The body is redacted before it is
+    cut: a token response that failed to parse still carries minted tokens.
     """
     try:
         ctype = resp.headers.get("content-type", "?")
@@ -759,7 +788,8 @@ def _describe_response(resp: Any) -> str:
         body = resp.text
     except Exception:  # noqa: BLE001
         body = "<unreadable>"
-    return f"status={resp.status_code} content-type={ctype!r} body[:200]={body[:200]!r}"
+    preview = redact_secrets(body)[:200]
+    return f"status={resp.status_code} content-type={ctype!r} body[:200]={preview!r}"
 
 
 class _LoginAttemptManager:
@@ -2417,6 +2447,7 @@ __all__ = [
     "is_siwc_token",
     "is_siwc_record",
     "is_usable_token",
+    "redact_secrets",
     "resolve_siwc_client_id",
     "siwc_scope_grants_direct_use",
     "get_siwc_client_record_path",
