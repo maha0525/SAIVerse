@@ -180,7 +180,13 @@ class _ContinuousEntry:
     digests: List[str] = field(default_factory=list, repr=False)  # prefix_digests(...)[:k+1]
     client: Any = field(default=None, repr=False)  # 削除に使う genai クライアント
     in_use: int = 0         # いまこのキャッシュを参照している要求の数
-    retired: bool = False   # 新しいキャッシュに置き換えられた (参照が 0 になったら消す)
+    retired: bool = False   # 新しいキャッシュに置き換えられた / 使えないと分かった (参照が 0 になったら消す)
+    # 保存料金の返金 (TTL 前に消したときの残り) に使う、作成時の計上と同じ値。
+    # account_model が空なら作成時の計上もしていない扱いで、返金もしない。
+    cached_tokens: int = 0
+    account_model: str = ""
+    persona_id: Optional[str] = None
+    building_id: Optional[str] = None
 
 
 class GeminiCacheController:
@@ -338,12 +344,20 @@ class GeminiCacheController:
         except Exception:
             LOGGER.warning("[gemini_cache] caches.delete failed name=%s", cache_name, exc_info=True)
             return False
+        self.forget(cache_name)
+        LOGGER.info("[gemini_cache] deleted cache name=%s", cache_name)
+        return True
+
+    def forget(self, cache_name: str) -> None:
+        """内部エントリだけを除去する (API は叩かない)。
+
+        使おうとしたら Gemini に拒まれた (消えている・失効した等) キャッシュを、
+        :meth:`ensure` が二度と再利用しないようにするため。
+        """
         with self._lock:
             to_remove = [k for k, v in self._entries.items() if v.name == cache_name]
             for k in to_remove:
                 del self._entries[k]
-        LOGGER.info("[gemini_cache] deleted cache name=%s", cache_name)
-        return True
 
     # ── 継続キャッシュ (高速応答モード) ──
     # docs/intent/cache_lifecycle_control.md §3.5。キャッシュごとに「先頭から何件を
@@ -411,6 +425,32 @@ class GeminiCacheController:
         if doomed is not None:
             self._delete_continuous(doomed, reason="superseded, released after use")
 
+    def continuous_discard(self, name: str, *, reason: str) -> None:
+        """使おうとしたら Gemini に拒まれたキャッシュを、二度と選ばれないようにする。
+
+        呼び出し元が確保していた参照を 1 つ返す (:meth:`continuous_release` の
+        代わりに呼ぶ — 両方呼ぶと参照を二重に返す)。retired にするので、以後の
+        一致の検索・予約・同期作成の対象から外れる。他の要求がまだ参照していれば
+        その参照が全部返った時点で、いなければここで台帳から外して削除を試みる
+        (削除が成功したときだけ TTL の残りを返金する、:meth:`_delete_continuous`)。
+        """
+        doomed: Optional[_ContinuousEntry] = None
+        with self._lock:
+            ent = self._continuous.get(name)
+            if ent is None:
+                return
+            ent.retired = True
+            ent.in_use = max(0, ent.in_use - 1)
+            if ent.in_use == 0:
+                del self._continuous[name]
+                doomed = ent
+        LOGGER.info(
+            "[gemini][continuous_cache] discarded unusable name=%s (%s)%s",
+            name, reason, "" if doomed is not None else " — deleted when the other users release it",
+        )
+        if doomed is not None:
+            self._delete_continuous(doomed, reason=f"unusable: {reason}")
+
     def continuous_chain_size(self, model: str, chain: str) -> int:
         """その会話 (chain) の生きた継続キャッシュの本数 (ログの理由づけ用)。"""
         now = time.time()
@@ -447,12 +487,18 @@ class GeminiCacheController:
         ttl_seconds: int,
         *,
         min_tokens: int = DEFAULT_MIN_TOKENS,
+        account_model: str = "",
+        persona_id: Optional[str] = None,
+        building_id: Optional[str] = None,
     ) -> CacheEnsureResult:
         """一致するキャッシュが無い回の同期作成。
 
         同じ範囲を別の呼び出しが作成中ならその完了を待つ (二重に作らない)。
         戻り値の name は参照を 1 つ確保済み (使い終わったら :meth:`continuous_release`)。
         この会話の古い継続キャッシュは、もう一致しないので出来た時点で整理する。
+
+        ``account_model`` / ``persona_id`` / ``building_id`` は、呼び出し元が作成時に
+        計上する保存料金と同じ値。TTL 前に消したときの返金に使う。
         """
         k = len(contents)
         sig = digests[k]
@@ -482,6 +528,7 @@ class GeminiCacheController:
             client, model, chain, system_instruction, contents, digests,
             ttl_seconds, reservation,
             mode="sync", acquire=True, retire_all_older=True, min_tokens=min_tokens,
+            account_model=account_model, persona_id=persona_id, building_id=building_id,
         )
 
     def continuous_create_reserved(
@@ -496,15 +543,20 @@ class GeminiCacheController:
         reservation: threading.Event,
         *,
         min_tokens: int = DEFAULT_MIN_TOKENS,
+        account_model: str = "",
+        persona_id: Optional[str] = None,
+        building_id: Optional[str] = None,
     ) -> CacheEnsureResult:
         """:meth:`continuous_reserve` で予約した範囲を作る (裏での作成用)。
 
         参照は確保しない。出来たら、それが延長した古いキャッシュを整理する。
+        計上用の引数は :meth:`continuous_create_sync` と同じ。
         """
         return self._create_reserved(
             client, model, chain, system_instruction, contents, digests,
             ttl_seconds, reservation,
             mode="bg", acquire=False, retire_all_older=False, min_tokens=min_tokens,
+            account_model=account_model, persona_id=persona_id, building_id=building_id,
         )
 
     def _create_reserved(
@@ -522,6 +574,9 @@ class GeminiCacheController:
         acquire: bool,
         retire_all_older: bool,
         min_tokens: int,
+        account_model: str = "",
+        persona_id: Optional[str] = None,
+        building_id: Optional[str] = None,
     ) -> CacheEnsureResult:
         k = len(contents)
         sig = digests[k]
@@ -590,6 +645,10 @@ class GeminiCacheController:
                     digests=list(digests[: k + 1]),
                     client=client,
                     in_use=1 if acquire else 0,
+                    cached_tokens=int(cached_tokens),
+                    account_model=account_model or "",
+                    persona_id=persona_id,
+                    building_id=building_id,
                 )
                 born_superseded = False
                 for other in list(self._continuous.values()):
@@ -638,6 +697,14 @@ class GeminiCacheController:
             reservation.set()
 
     def _delete_continuous(self, entry: _ContinuousEntry, *, reason: str) -> None:
+        """継続キャッシュを消す。継続キャッシュを消す経路はすべてここを通る。
+
+        保存料金は作成時に TTL の全額を計上している (予約席の約束、
+        ``UsageTracker.record_cache_storage``) ので、削除が成功したらここで残りの
+        秒数分を返金する。削除が失敗したキャッシュは TTL まで残るので返金しない。
+        失効して台帳から外れるだけのもの (:meth:`_purge_expired_continuous_locked`) は
+        ここを通らず、返金も無い。
+        """
         client = entry.client
         if client is None:
             return
@@ -649,10 +716,30 @@ class GeminiCacheController:
                 entry.name, reason, exc_info=True,
             )
             return
+        remaining = max(0.0, min(float(entry.ttl_seconds), entry.expire_at - time.time()))
         LOGGER.info(
-            "[gemini][continuous_cache] deleted superseded name=%s prefix=%d msgs (%s)",
-            entry.name, entry.prefix_count, reason,
+            "[gemini][continuous_cache] deleted name=%s prefix=%d msgs remaining=%.0fs (%s)",
+            entry.name, entry.prefix_count, remaining, reason,
         )
+        self._refund_continuous_storage(entry, remaining)
+
+    @staticmethod
+    def _refund_continuous_storage(entry: _ContinuousEntry, remaining_seconds: float) -> None:
+        if remaining_seconds <= 0 or not entry.cached_tokens or not entry.account_model:
+            return
+        try:
+            from saiverse.usage_tracker import get_usage_tracker
+            get_usage_tracker().record_cache_storage_refund(
+                model_id=entry.account_model,
+                cached_tokens=entry.cached_tokens,
+                remaining_seconds=remaining_seconds,
+                persona_id=entry.persona_id,
+                building_id=entry.building_id,
+            )
+        except Exception:
+            LOGGER.warning(
+                "[gemini][continuous_cache] storage refund failed name=%s", entry.name, exc_info=True,
+            )
 
     def spawn_background(
         self, target: Callable[[], None], *, name: str = "gemini-continuous-cache",

@@ -83,6 +83,30 @@ def _sdk_structured_parse_failure(exc: BaseException) -> Tuple[bool, Optional[st
     return matched, raw_text
 
 
+class _AttemptCounter:
+    """``for attempt in _AttemptCounter(n)`` — ``range(n)`` に「今の番号をもう一度」を足したもの。
+
+    キャッシュを外した送り直しのように、再試行の回数として数えたくない
+    やり直しのために使う (:meth:`repeat_current` を呼んでから ``continue``)。
+    """
+
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self._repeat = False
+
+    def __iter__(self) -> Iterator[int]:
+        attempt = 0
+        while attempt < self.total:
+            yield attempt
+            if self._repeat:
+                self._repeat = False
+                continue
+            attempt += 1
+
+    def repeat_current(self) -> None:
+        self._repeat = True
+
+
 def _install_gemini_stream_patch() -> None:
     disable_flag = os.getenv("SAIVERSE_DISABLE_GEMINI_SSE_PATCH")
     if disable_flag and disable_flag.lower() not in {"0", "false", "off"}:
@@ -622,7 +646,85 @@ class GeminiClient(LLMClient):
         if not cache_name:
             return
         from llm_clients.gemini_cache import get_gemini_cache_controller
+        # NOTE: 継続キャッシュと同じ穴が残っている — 作成時に TTL の全額を計上して
+        # いるのに、ここで早く消しても残りを返金していない (この経路はどのペルソナの
+        # 要求かを知らない)。docs/issues/gemini_auto_cache_storage_accounting_gaps.md
         get_gemini_cache_controller().delete(self.client, cache_name)
+
+    # ── キャッシュを使えなかった回の作り直し ──
+    # cached_content を付けた要求が、そのキャッシュのせいで拒まれる (サーバー側で
+    # 消えた・長い生成の途中で失効した・cachedContents が見つからない / 権限が無い・
+    # 中身が不正) と、キャッシュは任意の高速化なのに返事そのものが失敗していた。
+    # その回だけ、キャッシュを外して (contents 全部 + system_instruction を戻して)
+    # 1 回だけ送り直す。継続キャッシュ・自動キャッシュ・モデル設定の explicit cache の
+    # どれでも同じ失敗の形なので、三つとも同じ経路で扱う。
+
+    _CACHE_ERROR_CODES = (400, 403, 404)
+    _CACHE_ERROR_STATUSES = ("INVALID_ARGUMENT", "PERMISSION_DENIED", "NOT_FOUND")
+
+    @classmethod
+    def _cache_use_error_reason(cls, exc: BaseException) -> Optional[str]:
+        """``exc`` が「付けたキャッシュが使えない」ことによる失敗なら理由の短い文字列。
+
+        保守的に判定する: google-genai の ``errors.APIError`` (4xx は ``ClientError``)
+        で、``code`` が 400/403/404 か ``status`` が INVALID_ARGUMENT /
+        PERMISSION_DENIED / NOT_FOUND、かつメッセージがキャッシュ (cached content /
+        cachedContents) に触れているときだけ。レート制限・安全性フィルター等は
+        対象外で、従来どおりの扱いに任せる。
+        """
+        try:
+            from google.genai import errors as genai_errors
+        except Exception:  # pragma: no cover - SDK は必ずある
+            return None
+        if not isinstance(exc, genai_errors.APIError):
+            return None
+        code = getattr(exc, "code", None)
+        status = str(getattr(exc, "status", None) or "").upper()
+        if code not in cls._CACHE_ERROR_CODES and status not in cls._CACHE_ERROR_STATUSES:
+            return None
+        text = " ".join(
+            str(part) for part in (getattr(exc, "message", None), exc) if part
+        ).lower()
+        if "cached" not in text:
+            return None
+        message =str(getattr(exc, "message", None) or "").strip()
+        return f"{code} {status or '-'}: {message[:160]}" if message else f"{code} {status or '-'}"
+
+    def _drop_unusable_cache(self, cache_name: str, reason: str, held: List[str]) -> None:
+        """使えなかったキャッシュを、二度と選ばれないように台帳から外す。
+
+        - 継続キャッシュ (この要求が参照を ``held`` に持っている): 参照を 1 つ返し
+          ながら retired にする (参照が 0 になったら削除、成功すれば残りを返金)。
+        - 自動キャッシュ / explicit cache: 再利用の台帳 (``_entries``) から外す。
+          自動キャッシュの「応答後に消す」予約がこの name なら、作り直しの要求の
+          使用量の記録 (無関係な後続の要求のこともある) を待たずに、ここで消す。
+        """
+        from llm_clients.gemini_cache import get_gemini_cache_controller
+        controller = get_gemini_cache_controller()
+        if cache_name in held:
+            held.remove(cache_name)
+            controller.continuous_discard(cache_name, reason=reason)
+            return
+        controller.forget(cache_name)
+        if getattr(self, "_auto_cache_pending_cleanup", None) == cache_name:
+            self._auto_cache_pending_cleanup = None
+            self._auto_cache_cleanup(cache_name)
+
+    def _uncached_retry_config(
+        self, cfg_kwargs: Dict[str, Any], sys_msg: str, reason: str, held: List[str],
+    ) -> Dict[str, Any]:
+        """キャッシュを外した送り直し用の cfg を返す (台帳からの除去とログも行う)。"""
+        cache_name = cfg_kwargs.get("cached_content")
+        logging.warning(
+            "[gemini] cached_content=%s unusable (%s) -> retrying once without cache",
+            cache_name, reason,
+        )
+        if cache_name:
+            self._drop_unusable_cache(cache_name, reason, held)
+        retry_cfg = dict(cfg_kwargs)
+        retry_cfg.pop("cached_content", None)
+        retry_cfg["system_instruction"] = sys_msg
+        return retry_cfg
 
     def _apply_request_cache(
         self,
@@ -745,20 +847,25 @@ class GeminiClient(LLMClient):
             "[gemini][continuous_cache] no match -> sync create (%s) prefix=%d msgs",
             reason, len(prefix),
         )
+        account_model = self.config_key or self.model
+        persona_id = cc_info.get("persona_id")
+        building_id = cc_info.get("building_id")
         result = controller.continuous_create_sync(
             self.client, self.model, chain, sys_msg, prefix, digests, ttl_seconds,
             min_tokens=self._AUTO_CACHE_MIN_TOKENS,
+            account_model=account_model, persona_id=persona_id, building_id=building_id,
         )
         if not result or not result.name:
             logging.info("[gemini][continuous_cache] sync create failed -> auto cache")
             return None
         held.append(result.name)
         if result.created:
-            # 同期作成はこの呼び出しの usage レコードに相乗りする (自動キャッシュと同じ)。
-            self._pending_cache_storage = (
-                self.config_key or self.model,
-                result.cached_tokens,
-                ttl_seconds,
+            # 作った瞬間に、この要求のペルソナ・建物で計上する (裏での作成と同じ)。
+            # クライアント全体で一つの _pending_cache_storage に置くと、生成が失敗した
+            # 回に漏れ、要求が重なると別の要求の記録にくっつくため。
+            self._record_continuous_cache_storage(
+                account_model, result.cached_tokens, result.ttl_seconds,
+                persona_id=persona_id, building_id=building_id,
             )
         send = contents[len(prefix):]
         logging.info(
@@ -797,11 +904,13 @@ class GeminiClient(LLMClient):
                 result = controller.continuous_create_reserved(
                     client, model, chain, sys_msg, prefix, digests, ttl_seconds,
                     reservation, min_tokens=min_tokens,
+                    account_model=account_model, persona_id=persona_id,
+                    building_id=building_id,
                 )
                 if result and result.created:
                     # 裏での作成はどの呼び出しの usage レコードにも相乗りできない
                     # (完了が応答の前か後か決まらない) ので、同じ区分で単独に計上する。
-                    self._record_background_cache_storage(
+                    self._record_continuous_cache_storage(
                         account_model, result.cached_tokens, result.ttl_seconds,
                         persona_id=persona_id, building_id=building_id,
                     )
@@ -813,7 +922,7 @@ class GeminiClient(LLMClient):
         controller.spawn_background(_run)
 
     @staticmethod
-    def _record_background_cache_storage(
+    def _record_continuous_cache_storage(
         model_id: str,
         cached_tokens: int,
         ttl_seconds: int,
@@ -821,7 +930,11 @@ class GeminiClient(LLMClient):
         persona_id: Optional[str],
         building_id: Optional[str],
     ) -> None:
-        """裏で作った継続キャッシュの保存料金を計上する (区分は cache_storage)。"""
+        """作った継続キャッシュ (同期・裏とも) の保存料金を、作った時点で計上する。
+
+        区分は cache_storage。TTL 前に消したときの残りの返金は、削除の経路
+        (``GeminiCacheController._delete_continuous``) が同じ値で記録する。
+        """
         if not cached_tokens:
             return
         from saiverse.usage_tracker import get_usage_tracker
@@ -1870,9 +1983,11 @@ class GeminiClient(LLMClient):
         # Auto cache mode: 全呼び出しで create→use→delete を自動適用。
         # ON なら B 戦略 (_resolve_explicit_cache) をバイパスする。返事の呼び出しで
         # 継続キャッシュが ON なら継続キャッシュ (_apply_request_cache の docstring)。
+        cc_held: List[str] = _cc_held if _cc_held is not None else []
+        uncached_contents = contents  # キャッシュが使えなかった回の送り直し用
         _cache_name, contents, _auto_cleanup_name = self._apply_request_cache(
             sys_msg, contents, _boundary_idx, enable_cache, cache_ttl,
-            continuous_cache, _cc_held if _cc_held is not None else [],
+            continuous_cache, cc_held,
         )
         if _cache_name:
             cfg_kwargs["cached_content"] = _cache_name
@@ -1900,7 +2015,10 @@ class GeminiClient(LLMClient):
         # — no chunks arrive until the full JSON is ready, so streaming offers
         # no latency benefit and previously triggered spurious timeouts.
         use_non_streaming = use_tools or response_schema is not None
-        for attempt in range(max_retries):
+        # キャッシュを外した送り直し (1 回だけ) は、再試行の回数を消費しない。
+        attempts = _AttemptCounter(max_retries)
+        cache_fallback_done = False
+        for attempt in attempts:
             try:
                 if use_non_streaming:
                     try:
@@ -2284,6 +2402,18 @@ class GeminiClient(LLMClient):
                 # correct error_code and user_message — propagate as-is.
                 raise
             except Exception as exc:
+                # 付けたキャッシュが使えない (403/404 等) — 認証エラーやモデル無しと
+                # 誤判定される前に見る。キャッシュを外して 1 回だけ送り直す。
+                if cfg_kwargs.get("cached_content") and not cache_fallback_done:
+                    cache_reason = self._cache_use_error_reason(exc)
+                    if cache_reason is not None:
+                        cache_fallback_done = True
+                        cfg_kwargs = self._uncached_retry_config(
+                            cfg_kwargs, sys_msg, cache_reason, cc_held,
+                        )
+                        contents = uncached_contents
+                        attempts.repeat_current()
+                        continue
                 if self._is_timeout_error(exc):
                     logging.warning(
                         "Gemini timeout (attempt %d/%d): %s",
@@ -2494,8 +2624,10 @@ class GeminiClient(LLMClient):
             tool_cfg = None
 
         active_client = self.client
+        # 利用者へ何か yield したら立てる (キャッシュが使えなかった回の送り直しの可否)。
+        stream_state: Dict[str, Any] = {"emitted": False}
         try:
-            stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens, continuous_cache=continuous_cache, cc_held=cc_held)
+            stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens, continuous_cache=continuous_cache, cc_held=cc_held, stream_state=stream_state)
         except Exception as exc:
             if self._is_payment_error(exc) or self._is_authentication_error(exc):
                 raise self._convert_to_llm_error(exc, "streaming")
@@ -2503,7 +2635,7 @@ class GeminiClient(LLMClient):
                 if active_client is self.free_client and self.paid_client:
                     logging.info("Retrying with paid Gemini API key due to rate limit")
                     active_client = self.paid_client
-                    stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens, continuous_cache=continuous_cache, cc_held=cc_held)
+                    stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens, continuous_cache=continuous_cache, cc_held=cc_held, stream_state=stream_state)
                 else:
                     retry_delay = self._extract_retry_delay(exc)
                     if retry_delay:
@@ -2513,7 +2645,7 @@ class GeminiClient(LLMClient):
                             self.model, capped_delay,
                         )
                         time.sleep(capped_delay)
-                        stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens, continuous_cache=continuous_cache, cc_held=cc_held)
+                        stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema, enable_cache=enable_cache, cache_ttl=cache_ttl, max_output_tokens=max_output_tokens, continuous_cache=continuous_cache, cc_held=cc_held, stream_state=stream_state)
                     else:
                         logging.warning("Rate limit exceeded for model=%s", self.model)
                         raise self._convert_to_llm_error(exc, "streaming")
@@ -2619,10 +2751,12 @@ class GeminiClient(LLMClient):
                                 if delta:
                                     reasoning_chunks.append(delta)
                                     thought_seen[candidate_index] = previous + delta
+                                    stream_state["emitted"] = True
                                     yield {"type": "thinking", "content": delta}
                             else:
                                 reasoning_chunks.append(text_val)
                                 thought_seen[candidate_index] = previous + text_val
+                                stream_state["emitted"] = True
                                 yield {"type": "thinking", "content": text_val}
                     else:
                         # 2026-05-20: text part (function_call なし thought なし) の signature 取得。
@@ -2662,6 +2796,7 @@ class GeminiClient(LLMClient):
                 last_text_chunk_time = now
 
                 get_llm_logger().debug("Gemini text delta: %s", new_text)
+                stream_state["emitted"] = True
                 if not prefix_yielded and history_snippets:
                     yield "\n".join(history_snippets) + "\n"
                     prefix_yielded = True
@@ -2794,7 +2929,16 @@ class GeminiClient(LLMClient):
         max_output_tokens: int | None = None,
         continuous_cache: Optional[Dict[str, Any]] = None,
         cc_held: Optional[List[str]] = None,
+        stream_state: Optional[Dict[str, Any]] = None,
     ):
+        """要求を組み立ててストリームを開く。
+
+        ``stream_state`` は呼び出し元と共有する dict で、呼び出し元が chunk の中身を
+        利用者へ yield したら ``emitted=True`` を立てる。キャッシュが使えなかった回の
+        送り直しは、まだ何も yield していないときだけ行う
+        (:meth:`_stream_with_cache_fallback`)。
+        """
+        held: List[str] = cc_held if cc_held is not None else []
         sys_msg, contents, _boundary_idx = self._convert_messages_with_boundary(messages)
         self._validate_contents(contents)
         cfg_kwargs: Dict[str, Any] = {
@@ -2824,9 +2968,10 @@ class GeminiClient(LLMClient):
         )
 
         # Auto cache mode / 継続キャッシュ / B 戦略 (_apply_request_cache の docstring)
+        uncached_contents = contents  # キャッシュが使えなかった回の送り直し用
         _cache_name, contents, _auto_cleanup_name = self._apply_request_cache(
             sys_msg, contents, _boundary_idx, enable_cache, cache_ttl,
-            continuous_cache, cc_held if cc_held is not None else [],
+            continuous_cache, held,
         )
         if _cache_name:
             cfg_kwargs["cached_content"] = _cache_name
@@ -2848,10 +2993,73 @@ class GeminiClient(LLMClient):
         )
         if use_tools:
             cfg_kwargs.setdefault("tool_config", tool_cfg)
-        return client.models.generate_content_stream(
+        if not cfg_kwargs.get("cached_content"):
+            return client.models.generate_content_stream(
+                model=self.model,
+                contents=contents,
+                config=types.GenerateContentConfig(**cfg_kwargs),
+            )
+        try:
+            stream = client.models.generate_content_stream(
+                model=self.model,
+                contents=contents,
+                config=types.GenerateContentConfig(**cfg_kwargs),
+            )
+        except Exception as exc:
+            # 要求を開いた時点で拒まれた (SDK が先に送る場合)。まだ何も返していない。
+            reason = self._cache_use_error_reason(exc)
+            if reason is None:
+                raise
+            retry_cfg = self._uncached_retry_config(cfg_kwargs, sys_msg, reason, held)
+            return client.models.generate_content_stream(
+                model=self.model,
+                contents=uncached_contents,
+                config=types.GenerateContentConfig(**retry_cfg),
+            )
+        return self._stream_with_cache_fallback(
+            stream, client, cfg_kwargs, sys_msg, uncached_contents, held, stream_state,
+        )
+
+    def _stream_with_cache_fallback(
+        self,
+        stream: Any,
+        client: genai.Client,
+        cfg_kwargs: Dict[str, Any],
+        sys_msg: str,
+        uncached_contents: list,
+        held: List[str],
+        stream_state: Optional[Dict[str, Any]],
+    ) -> Iterator[Any]:
+        """キャッシュ付きのストリームを読み、キャッシュのせいで拒まれたら 1 回だけ送り直す。
+
+        google-genai のストリームは最初の chunk を読むときに要求を送るので、
+        キャッシュの失敗もそこで出る。送り直してよいのは、呼び出し元がまだ利用者へ
+        何も yield していないとき (``stream_state["emitted"]`` が立っていない) だけ。
+        既に出していたら従来どおり例外を上げる (キャッシュは台帳から外す)。
+        """
+        try:
+            for chunk in stream:
+                yield chunk
+            return
+        except Exception as exc:
+            reason = self._cache_use_error_reason(exc)
+            if reason is None:
+                raise
+            if stream_state is not None and stream_state.get("emitted"):
+                cache_name = cfg_kwargs.get("cached_content")
+                logging.warning(
+                    "[gemini] cached_content=%s unusable (%s) after output was already "
+                    "emitted -> not retrying",
+                    cache_name, reason,
+                )
+                if cache_name:
+                    self._drop_unusable_cache(cache_name, reason, held)
+                raise
+            retry_cfg = self._uncached_retry_config(cfg_kwargs, sys_msg, reason, held)
+        yield from client.models.generate_content_stream(
             model=self.model,
-            contents=contents,
-            config=types.GenerateContentConfig(**cfg_kwargs),
+            contents=uncached_contents,
+            config=types.GenerateContentConfig(**retry_cfg),
         )
 
     def generate_with_tool_detection(

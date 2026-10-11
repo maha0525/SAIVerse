@@ -36,6 +36,8 @@ class FakeCaches:
         self._lock = threading.Lock()
         # 裏での作成 (スレッド名で判別) をこの合図まで止める。None なら止めない。
         self.bg_gate: Optional[threading.Event] = None
+        # True なら delete が失敗する (Gemini 側の削除エラー)。
+        self.fail_delete = False
 
     def create(self, model: str, config: Any) -> Any:
         if self.bg_gate is not None and threading.current_thread().name.startswith(
@@ -57,8 +59,22 @@ class FakeCaches:
         )
 
     def delete(self, name: str) -> None:
+        if self.fail_delete:
+            raise RuntimeError("delete failed")
         with self._lock:
             self.deleted.append(name)
+
+
+def _cache_error(
+    code: int = 403,
+    status: str = "PERMISSION_DENIED",
+    message: str = "CachedContent not found (or permission denied)",
+) -> Exception:
+    """google-genai がキャッシュを使えなかったときに上げる形の例外 (4xx = ClientError)。"""
+    from google.genai import errors as genai_errors
+    return genai_errors.ClientError(
+        code, {"error": {"code": code, "message": message, "status": status}},
+    )
 
 
 def _response(text: str = "ok") -> types.GenerateContentResponse:
@@ -76,14 +92,41 @@ def _response(text: str = "ok") -> types.GenerateContentResponse:
 class FakeModels:
     def __init__(self) -> None:
         self.calls: List[Dict[str, Any]] = []
+        # cached_content 付きの要求に、先頭から順に上げる例外 (実 SDK と同じく
+        # ストリームは最初の chunk を読むときに上げる)。
+        self.errors_when_cached: List[BaseException] = []
+        # cached_content 付きのストリームで、text を 1 つ出してから上げる例外。
+        self.emit_then_raise: Optional[BaseException] = None
+        self.text = "ok"
+
+    def _pop_error(self, config: Any) -> Optional[BaseException]:
+        if config.cached_content and self.errors_when_cached:
+            return self.errors_when_cached.pop(0)
+        return None
 
     def generate_content_stream(self, model: str, contents: list, config: Any):
         self.calls.append({"contents": list(contents), "config": config})
-        return iter([_response()])
+        err = self._pop_error(config)
+        if err is not None:
+            def _fail():
+                raise err
+                yield  # pragma: no cover - generator にするため
+            return _fail()
+        if self.emit_then_raise is not None and config.cached_content:
+            late = self.emit_then_raise
+
+            def _emit_then_fail():
+                yield _response("partial")
+                raise late
+            return _emit_then_fail()
+        return iter([_response(self.text)])
 
     def generate_content(self, model: str, contents: list, config: Any):
         self.calls.append({"contents": list(contents), "config": config})
-        return _response()
+        err = self._pop_error(config)
+        if err is not None:
+            raise err
+        return _response(self.text)
 
 
 class FakeGenai:
@@ -131,8 +174,22 @@ def storage_records(monkeypatch):
         records.append((model_id, cached_tokens, ttl_seconds, persona_id, building_id))
 
     monkeypatch.setattr(
-        GeminiClient, "_record_background_cache_storage", staticmethod(_fake),
+        GeminiClient, "_record_continuous_cache_storage", staticmethod(_fake),
     )
+    return records
+
+
+@pytest.fixture(autouse=True)
+def refund_records(monkeypatch):
+    """TTL 前の削除で記録される返金 (UsageTracker.record_cache_storage_refund)。"""
+    from saiverse.usage_tracker import UsageTracker
+
+    records: List[tuple] = []
+
+    def _fake(self, model_id, cached_tokens, remaining_seconds, *, persona_id=None, building_id=None):
+        records.append((model_id, cached_tokens, remaining_seconds, persona_id, building_id))
+
+    monkeypatch.setattr(UsageTracker, "record_cache_storage_refund", _fake)
     return records
 
 
@@ -225,10 +282,10 @@ def test_first_reply_creates_boundary_prefix_synchronously(gemini, fake, control
     assert call["config"].cached_content == "cachedContents/c1"
     assert call["config"].system_instruction is None
     assert _texts(call["contents"]) == ["<system>realtime 0</system>", "u0"]
-    # 同期作成はこの呼び出しの usage に相乗りする (裏の計上は無い)
-    assert gemini._latest_usage.cache_storage_tokens == 1000
-    assert gemini._latest_usage.cache_storage_ttl_seconds == 300
-    assert storage_records == []
+    # 同期作成も作った瞬間に、この要求のペルソナ・建物で計上する (usage への相乗りはしない)
+    assert storage_records == [(MODEL, 1000, 300, "air", "room")]
+    assert gemini._latest_usage.cache_storage_tokens == 0
+    assert gemini._pending_cache_storage is None
     # 応答直後に消す自動キャッシュの動きはしない
     assert fake.caches.deleted == []
 
@@ -269,7 +326,10 @@ def test_next_turn_reuses_previous_cache_and_supersedes_it(gemini, fake, control
     assert _texts(bg["contents"])[-2:] == ["u0", "a0"]  # 今回の境目まで
     assert len(bg["contents"]) == 4
     assert fake.caches.deleted == ["cachedContents/c1"]
-    assert storage_records == [(MODEL, 2000, 300, "air", "room")]
+    assert storage_records == [
+        (MODEL, 1000, 300, "air", "room"),   # c1 (同期)
+        (MODEL, 2000, 300, "air", "room"),   # c2 (裏)
+    ]
 
     # 3 往復目は裏で作った c2 を使う
     _run(gemini, _turn(2))
@@ -454,6 +514,286 @@ def test_non_streaming_generate_also_uses_continuous_cache(gemini, fake, control
     ]
     assert fake.caches.deleted == ["cachedContents/c1"]
     assert controller._continuous["cachedContents/c2"].in_use == 0
+
+
+# ── 10. キャッシュを使えなかった回: キャッシュを外して 1 回だけ送り直す ──
+
+def _uncached_texts(gemini: GeminiClient, messages: List[Any]) -> List[str]:
+    """キャッシュを使わない要求が送る contents (変換後の全部)。"""
+    return _texts(gemini._convert_messages(messages)[1])
+
+
+def _assert_no_leaked_refs(controller: GeminiCacheController) -> None:
+    assert all(ent.in_use == 0 for ent in controller._continuous.values())
+
+
+def _gen_stream(gemini, messages):
+    return _run(gemini, messages)
+
+
+def _gen_generate(gemini, messages):
+    return gemini.generate(messages, tools=[], continuous_cache=CC)
+
+
+@pytest.mark.parametrize("runner", [_gen_generate, _gen_stream], ids=["generate", "stream"])
+def test_unusable_continuous_cache_retries_once_without_cache(
+    gemini, fake, controller, storage_records, refund_records, runner,
+):
+    _run(gemini, _turn(0))                         # c1 (同期)
+    fake.caches.bg_gate = threading.Event()        # c2 (裏) は送り直しの後に出来上がる
+    fake.models.errors_when_cached = [_cache_error()]
+    n_before = len(fake.models.calls)
+
+    msgs = _turn(1)
+    assert runner(gemini, msgs) == "ok"
+
+    calls = fake.models.calls[n_before:]
+    assert len(calls) == 2
+    assert calls[0]["config"].cached_content == "cachedContents/c1"
+    retry = calls[1]
+    assert retry["config"].cached_content is None
+    assert retry["config"].system_instruction == SYS
+    assert _texts(retry["contents"]) == _uncached_texts(gemini, msgs)
+    # 使えなかった c1 は台帳から外れ、削除されて残りを返金する
+    assert "cachedContents/c1" not in controller._continuous
+    assert fake.caches.deleted == ["cachedContents/c1"]
+    assert len(refund_records) == 1
+    model_id, tokens, remaining, persona, building = refund_records[0]
+    assert (model_id, tokens, persona, building) == (MODEL, 1000, "air", "room")
+    assert 250 < remaining <= 300
+
+    fake.caches.bg_gate.set()
+    controller.join_background(5)
+    _assert_no_leaked_refs(controller)
+
+    # 次の往復では c1 を二度と選ばない
+    _run(gemini, _turn(2))
+    later = [c["config"].cached_content for c in fake.models.calls[n_before + 2:]]
+    assert "cachedContents/c1" not in later
+    assert later[-1] == "cachedContents/c2"
+    controller.join_background(5)
+    _assert_no_leaked_refs(controller)
+
+
+def test_unusable_cache_in_structured_call_retries_without_cache(gemini, fake, controller, storage_records):
+    """generate_content (非ストリーム) を使う経路でも同じ。"""
+    _run(gemini, _turn(0))
+    fake.models.text = '{"a": "x"}'
+    fake.models.errors_when_cached = [_cache_error(404, "NOT_FOUND", "cachedContents/c1 not found")]
+    n_before = len(fake.models.calls)
+
+    msgs = _turn(1)
+    result = gemini.generate(
+        msgs, tools=[], continuous_cache=CC,
+        response_schema={"type": "object", "properties": {"a": {"type": "string"}}},
+    )
+    assert result == {"a": "x"}
+    calls = fake.models.calls[n_before:]
+    assert [c["config"].cached_content for c in calls] == ["cachedContents/c1", None]
+    assert calls[1]["config"].system_instruction == SYS
+    assert _texts(calls[1]["contents"]) == _uncached_texts(gemini, msgs)
+    controller.join_background(5)
+    _assert_no_leaked_refs(controller)
+
+
+def test_stream_cache_error_after_output_is_raised(gemini, fake, controller, storage_records):
+    from llm_clients.exceptions import LLMError
+
+    _run(gemini, _turn(0))
+    fake.models.emit_then_raise = _cache_error()
+    fake.caches.bg_gate = threading.Event()   # 裏の c2 が c1 を置き換える前に見る
+    n_before = len(fake.models.calls)
+
+    got: List[str] = []
+    with pytest.raises(LLMError):
+        for chunk in gemini.generate_stream(_turn(1), tools=[], continuous_cache=CC):
+            if isinstance(chunk, str):
+                got.append(chunk)
+    assert got == ["partial"]
+    assert len(fake.models.calls) == n_before + 1  # 送り直さない
+    # 送り直しはしないが、使えないキャッシュは台帳から外す
+    assert "cachedContents/c1" not in controller._continuous
+    assert fake.caches.deleted == ["cachedContents/c1"]
+    fake.caches.bg_gate.set()
+    controller.join_background(5)
+    _assert_no_leaked_refs(controller)
+
+
+@pytest.mark.parametrize("runner", ["generate", "stream"])
+def test_unusable_auto_cache_retries_once_without_cache(gemini, fake, controller, storage_records, runner):
+    msgs = _turn(0)
+    fake.models.errors_when_cached = [_cache_error()]
+    if runner == "stream":
+        assert _run(gemini, msgs, cc=None) == "ok"
+    else:
+        assert gemini.generate(msgs, tools=[]) == "ok"
+
+    calls = fake.models.calls
+    assert [c["config"].cached_content for c in calls] == ["cachedContents/c1", None]
+    assert calls[1]["config"].system_instruction == SYS
+    assert _texts(calls[1]["contents"]) == _uncached_texts(gemini, msgs)
+    # 再利用の台帳から外れ、応答後に消す予約はその場で済ませる (二重に消さない)
+    assert controller._entries == {}
+    assert fake.caches.deleted == ["cachedContents/c1"]
+    assert gemini._auto_cache_pending_cleanup is None
+
+
+def test_unusable_explicit_cache_retries_once_without_cache(gemini, fake, controller, monkeypatch):
+    GeminiClient._AUTO_CACHE_ENABLED = False
+    monkeypatch.setenv("SAIVERSE_GEMINI_EXPLICIT_CACHE", "1")
+    gemini._cache_config = {"type": "gemini_explicit", "min_tokens": 1024}
+    msgs = _turn(0)
+    fake.models.errors_when_cached = [_cache_error(400, "INVALID_ARGUMENT", "Invalid CachedContent name")]
+
+    assert gemini.generate(msgs, tools=[], enable_cache=True, cache_ttl="5m") == "ok"
+    calls = fake.models.calls
+    assert [c["config"].cached_content for c in calls] == ["cachedContents/c1", None]
+    assert calls[1]["config"].system_instruction == SYS
+    assert controller._entries == {}
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (_cache_error(429, "RESOURCE_EXHAUSTED", "Resource has been exhausted (e.g. check quota)."),
+         "RateLimitError"),
+        (_cache_error(404, "NOT_FOUND", "models/gemini-x is not found for API version v1beta"),
+         "ModelNotFoundError"),
+    ],
+    ids=["429", "404-model"],
+)
+@pytest.mark.parametrize("runner", ["generate", "stream"])
+def test_unrelated_error_with_cache_attached_is_not_a_cache_failure(
+    gemini, fake, controller, storage_records, error, expected, runner,
+):
+    _run(gemini, _turn(0))
+    fake.models.errors_when_cached = [error]
+    fake.caches.bg_gate = threading.Event()   # 裏の c2 が c1 を置き換える前に見る
+    n_before = len(fake.models.calls)
+
+    with pytest.raises(Exception) as excinfo:
+        if runner == "stream":
+            _run(gemini, _turn(1))
+        else:
+            gemini.generate(_turn(1), tools=[], continuous_cache=CC)
+    assert type(excinfo.value).__name__ == expected
+    calls = fake.models.calls[n_before:]
+    assert len(calls) == 1 and calls[0]["config"].cached_content == "cachedContents/c1"
+    c1 = controller._continuous["cachedContents/c1"]   # 外さない
+    assert not c1.retired and c1.in_use == 0
+    assert fake.caches.deleted == []
+    fake.caches.bg_gate.set()
+    controller.join_background(5)
+    _assert_no_leaked_refs(controller)
+
+
+def test_cache_use_error_reason_is_conservative():
+    reason = GeminiClient._cache_use_error_reason
+    assert reason(_cache_error()) is not None
+    assert reason(_cache_error(404, "NOT_FOUND", "cachedContents/abc not found"))
+    assert reason(_cache_error(400, "INVALID_ARGUMENT", "Cached content is too old"))
+    # キャッシュに触れていない / 対象外の状態コード / SDK の例外でない
+    assert reason(_cache_error(403, "PERMISSION_DENIED", "API key not valid")) is None
+    assert reason(_cache_error(429, "RESOURCE_EXHAUSTED", "cached content quota")) is None
+    assert reason(RuntimeError("cachedContent not found")) is None
+
+
+# ── 11. 同期作成の保存料金: 作った瞬間に 1 回だけ ──
+
+def test_sync_create_storage_is_recorded_at_creation_even_if_generation_fails(
+    gemini, fake, controller, storage_records,
+):
+    from llm_clients.exceptions import LLMError
+
+    fake.models.errors_when_cached = [RuntimeError("boom")]
+    with pytest.raises(LLMError):
+        _run(gemini, _turn(0))
+    assert storage_records == [(MODEL, 1000, 300, "air", "room")]
+    assert gemini._pending_cache_storage is None
+    _assert_no_leaked_refs(controller)
+
+    # 同じ範囲を次に使う回は作らないので、計上も増えない
+    _run(gemini, _turn(0))
+    assert len(fake.caches.created) == 1
+    assert storage_records == [(MODEL, 1000, 300, "air", "room")]
+
+
+# ── 12. TTL 前の削除: 残りの秒数分を返金する ──
+
+def test_superseded_cache_is_refunded_for_the_remainder(gemini, fake, controller, storage_records, refund_records):
+    _run(gemini, _turn(0))
+    _run(gemini, _turn(1))
+    controller.join_background(5)
+
+    assert fake.caches.deleted == ["cachedContents/c1"]
+    assert len(refund_records) == 1
+    model_id, tokens, remaining, persona, building = refund_records[0]
+    assert (model_id, tokens, persona, building) == (MODEL, 1000, "air", "room")
+    assert 250 < remaining <= 300
+
+
+def _contents(n: int) -> List[Any]:
+    return [
+        types.Content(role="user" if i % 2 == 0 else "model", parts=[types.Part(text=f"m{i} " * 50)])
+        for i in range(n)
+    ]
+
+
+def _account():
+    return {"account_model": MODEL, "persona_id": "air", "building_id": "room"}
+
+
+def test_born_superseded_cache_is_refunded(fake, controller, refund_records):
+    longer = _contents(4)
+    digests = prefix_digests(SYS, longer)
+    long_res = controller.continuous_create_sync(
+        fake, MODEL, "air", SYS, longer, digests, 300, **_account(),
+    )
+    controller.continuous_release(long_res.name)
+
+    shorter = longer[:2]
+    short_digests = prefix_digests(SYS, shorter)
+    reservation = threading.Event()
+    short_res = controller.continuous_create_reserved(
+        fake, MODEL, "air", SYS, shorter, short_digests, 300, reservation, **_account(),
+    )
+    assert short_res.created
+    assert fake.caches.deleted == [short_res.name]          # 誰にも使われないので即削除
+    assert short_res.name not in controller._continuous
+    assert len(refund_records) == 1
+    model_id, tokens, remaining, persona, building = refund_records[0]
+    assert (model_id, tokens, persona, building) == (MODEL, short_res.cached_tokens, "air", "room")
+    assert 250 < remaining <= 300
+
+
+def test_failed_delete_is_not_refunded(fake, controller, refund_records):
+    first = _contents(2)
+    res1 = controller.continuous_create_sync(
+        fake, MODEL, "air", SYS, first, prefix_digests(SYS, first), 300, **_account(),
+    )
+    controller.continuous_release(res1.name)
+    fake.caches.fail_delete = True
+    second = _contents(4)
+    controller.continuous_create_sync(
+        fake, MODEL, "air", SYS, second, prefix_digests(SYS, second), 300, **_account(),
+    )
+    assert res1.name not in controller._continuous
+    assert fake.caches.deleted == []
+    assert refund_records == []
+
+
+def test_expired_cache_is_not_refunded(fake, controller, refund_records):
+    first = _contents(2)
+    digests = prefix_digests(SYS, first)
+    res = controller.continuous_create_sync(
+        fake, MODEL, "air", SYS, first, digests, 300, **_account(),
+    )
+    controller.continuous_release(res.name)
+    controller._continuous[res.name].expire_at = 0.0     # TTL が過ぎた
+    assert controller.continuous_acquire(MODEL, "air", digests) is None
+    assert controller._continuous == {}
+    assert fake.caches.deleted == []
+    assert refund_records == []
 
 
 # ── 境目の位置 (変換で system が抜け、中身の無い tool_calls が落ちる) ──
