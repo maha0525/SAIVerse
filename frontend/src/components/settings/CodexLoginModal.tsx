@@ -129,14 +129,15 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
         if (mySeq !== openSeqRef.current) return;
         if (next.attempt_id !== undefined && myAttempt !== undefined
             && next.attempt_id !== myAttempt) return;
-        if (next.ok === false && next.state === 'idle') {
-            // 貼り付けたアドレスは処理されたが、試行がもう生きていなかった
-            // (取り下げ・ログアウト)。idle のまま映すと「準備中」のくるくるで
-            // 止まってやり直しようがないので、理由とやり直しボタンを出す。
+        if (next.state === 'idle' && (next.ok === false || myAttempt !== undefined)) {
+            // この画面が見ていた試行が、成功も失敗もせずに消えた (取り下げ・
+            // 同じ SAIVerse の別の画面でのログアウト、または貼り付けたアドレスの
+            // 処理時に試行がもう生きていなかった)。idle のまま映すと「準備中」の
+            // くるくるで止まってやり直しようがないので、理由とやり直しボタンを出す。
             setStatus(prev => ({
                 ...prev,
                 state: 'error',
-                error: next.message || next.error,
+                error: next.message || next.error || uiText("components.settings.CodexLoginModal.text029"),
             }));
             return;
         }
@@ -183,6 +184,12 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
                 }
                 if (data.attempt_id && data.lease_id) {
                     leasesRef.current.push({ flow: nextFlow, attempt_id: data.attempt_id, lease_id: data.lease_id });
+                }
+                if (data.state === 'idle') {
+                    // 準備中に取り下げ・ログアウトで無効になった試行。くるくるで
+                    // 止めず、やり直しボタンを出す。
+                    setStatus({ ...data, state: 'error', error: uiText("components.settings.CodexLoginModal.text029") });
+                    return;
                 }
                 setStatus(data);
             } catch (e) {

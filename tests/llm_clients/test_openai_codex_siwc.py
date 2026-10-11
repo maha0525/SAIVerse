@@ -687,6 +687,114 @@ def test_invalid_client_clears_saved_client_id_so_next_sign_in_registers_afresh(
     assert again["ext_agent_host_id"] == host_id
 
 
+def test_authorize_invalid_client_callback_clears_saved_client_id(
+    isolated_stores, fake_auth_http, siwc_manager, revocations
+):
+    """承認ページで保存済みの登録が拒否されたら、その id を忘れて次は新規登録する。"""
+    oca.save_siwc_issued_client_id("oaiapp_dead")
+    started = siwc_manager.start()
+    q = _query(started["auth_url"])
+    host_id = q["ext_agent_host_id"]
+    out = siwc_manager.complete(
+        started["attempt_id"],
+        _callback_url(started, error="unauthorized_client", state=q["state"]),
+    )
+    assert out["ok"] is False
+    assert out["state"] == oca.SIWC_STATE_ERROR
+    assert "新しく登録し直します" in out["error"]
+    assert fake_auth_http.calls == []
+    assert oca.read_siwc_client_record() == {"ext_agent_host_id": host_id}
+
+    again = _query(siwc_manager.start()["auth_url"])
+    assert again["client_id"] == oca.SIWC_DYNAMIC_CLIENT_ID
+
+
+def test_first_registration_aud_mismatch_forgets_the_contradicted_client_id(
+    isolated_stores, fake_auth_http, siwc_manager, revocations
+):
+    """ID トークンの aud が戻りの client_id と食い違ったら、先に覚えた id を捨てる。"""
+    started = siwc_manager.start()
+    q = _query(started["auth_url"])
+    host_id = q["ext_agent_host_id"]
+    nonce = q["nonce"]
+
+    def handler(url, kwargs):
+        payload = _exchange_payload(nonce, "oaiapp_claimed")
+        payload["id_token"] = _jwt({"nonce": nonce, "aud": ["oaiapp_real"]})
+        return FakeResponse(200, payload)
+
+    fake_auth_http.post_handler = handler
+    out = siwc_manager.complete(
+        started["attempt_id"],
+        _callback_url(started, code="c", state=q["state"], client_id="oaiapp_claimed"),
+    )
+    assert out["ok"] is False
+    assert out["state"] == oca.SIWC_STATE_ERROR
+    assert not isolated_stores["saiverse"].exists()
+    assert oca.read_siwc_client_record() == {"ext_agent_host_id": host_id}
+    assert revocations == [("rt-siwc", "oaiapp_claimed")]
+
+
+def test_commit_error_after_write_does_not_revoke_saved_tokens(
+    isolated_stores, fake_auth_http, siwc_manager, revocations, monkeypatch
+):
+    """保存は済んだのに例外が上がった (ロック解放の失敗など) とき、保存済みの鍵を失効させない。"""
+    real_persist = oca.persist_saiverse_login
+
+    def persist_then_fail(tokens, expected_logout_marker=None):
+        real_persist(tokens, expected_logout_marker=expected_logout_marker)
+        raise OSError("lock release failed after the write")
+
+    monkeypatch.setattr(oca, "persist_saiverse_login", persist_then_fail)
+    started = siwc_manager.start()
+    q = _query(started["auth_url"])
+    fake_auth_http.post_handler = _exchange_handler(started, "oaiapp_c")
+    siwc_manager.complete(
+        started["attempt_id"],
+        _callback_url(started, code="c", state=q["state"], client_id="oaiapp_c"),
+    )
+    assert _read_json(isolated_stores["saiverse"])["tokens"]["refresh_token"] == "rt-siwc"
+    assert revocations == []
+
+
+def test_commit_error_before_write_revokes_the_minted_tokens(
+    isolated_stores, fake_auth_http, siwc_manager, revocations, monkeypatch
+):
+    def fail_before_write(tokens, expected_logout_marker=None):
+        raise OSError("store lock timed out")
+
+    monkeypatch.setattr(oca, "persist_saiverse_login", fail_before_write)
+    started = siwc_manager.start()
+    q = _query(started["auth_url"])
+    fake_auth_http.post_handler = _exchange_handler(started, "oaiapp_c")
+    siwc_manager.complete(
+        started["attempt_id"],
+        _callback_url(started, code="c", state=q["state"], client_id="oaiapp_c"),
+    )
+    assert not isolated_stores["saiverse"].exists()
+    assert revocations == [("rt-siwc", "oaiapp_c")]
+
+
+def test_device_marked_record_is_never_guessed_into_siwc(isolated_stores):
+    """デバイスコード方式の印がある記録は、鍵の中身が公式方式に見えても旧方式のまま。"""
+    record = {
+        "source": "saiverse_device_login",
+        "tokens": {
+            "access_token": _siwc_access_token(client_id="oaiapp_lookalike"),
+            "refresh_token": "rt-device",
+            "scope": "openid chatgpt.tokens.use.direct",
+            "client_id": "oaiapp_lookalike",
+        },
+    }
+    assert oca.is_siwc_record(record) is False
+    _write_json(isolated_stores["saiverse"], record)
+    _url, _headers, is_siwc = OpenAICodexClient(model="gpt-6.1-sol")._resolve_connection_params()
+    assert is_siwc is False
+    assert oca.auth_status()["is_siwc"] is False
+    # Codex CLI's auth.json has no marker and is still judged by its tokens.
+    assert oca.is_siwc_record({"tokens": record["tokens"]}) is True
+
+
 def test_clear_issued_client_id_leaves_a_different_id_alone(isolated_stores):
     oca.save_siwc_issued_client_id("oaiapp_newer")
     assert oca.clear_siwc_issued_client_id("oaiapp_older") is False

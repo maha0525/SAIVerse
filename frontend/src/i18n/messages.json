@@ -6463,6 +6463,10 @@
     "ja": "ブラウザで承認する方式に戻る",
     "en": "Back to approving in the browser"
   },
+  "components.settings.CodexLoginModal.text029": {
+    "ja": "ログインが途中で取り消されました (別の画面でのログアウトなど)。もう一度ログインしてください。",
+    "en": "The sign-in was cancelled partway (for example by a sign-out elsewhere). Please sign in again."
+  },
   "components.settings.FeedManagementPanel.text001": {
     "ja": "設置先の Building を選んでください。",
     "en": "Select a building for the facility."

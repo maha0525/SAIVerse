@@ -417,17 +417,20 @@ def is_siwc_record(auth: Optional[Dict[str, Any]]) -> bool:
     The explicit marker wins: SIWC logins are written with top-level
     `"source": "saiverse_siwc"`, and such a record is SIWC no matter what its
     scope / client_id / JWT look like — a SIWC refresh token must never reach
-    the legacy refresh endpoint. Records without the marker (older SIWC
-    records, device-code logins, Codex CLI's auth.json) fall back to the
-    token heuristics of `is_siwc_token`.
+    the legacy refresh endpoint. Any other marker (SAIVerse's device-code
+    login writes `"saiverse_device_login"`) is equally decisive the other way:
+    such a record is never guessed into SIWC from what its tokens look like.
+    Only records without a `source` (in practice Codex CLI's auth.json) fall
+    back to the token heuristics of `is_siwc_token`.
 
     This is the single routing decision for the inference endpoint, the
     refresh endpoint, scope rotation, logout revocation and the UI badge.
     """
     if not isinstance(auth, dict):
         return False
-    if auth.get("source") == SIWC_SOURCE:
-        return True
+    source = auth.get("source")
+    if source:
+        return source == SIWC_SOURCE
     return is_siwc_token(auth.get("tokens"))
 
 
@@ -1265,6 +1268,10 @@ class SiwcInvalidClient(SiwcOAuthError):
     """The token endpoint answered OAuth `invalid_client` for the issued client id."""
 
 
+class SiwcAudienceMismatch(SiwcOAuthError):
+    """The ID token's `aud` does not contain the client id the callback named."""
+
+
 class SiwcCallbackRejected(SiwcOAuthError):
     """A callback was refused without touching the attempt (stale, wrong state, ...)."""
 
@@ -1436,7 +1443,7 @@ def _validate_siwc_exchange(
     aud = claims.get("aud")
     audiences = [aud] if isinstance(aud, str) else (aud if isinstance(aud, list) else [])
     if issued_client_id not in audiences:
-        raise SiwcOAuthError(
+        raise SiwcAudienceMismatch(
             "ID トークンの宛先 (aud) が SAIVerse の client_id と一致しません。"
         )
 
@@ -1722,6 +1729,16 @@ class SiwcOAuthManager(_LoginAttemptManager):
         error = params.get("error")
         if error:
             # access_denied (or any other error): stop, never exchange.
+            if error in ("invalid_client", "unauthorized_client") and attempt.saved_client_id:
+                # The issuer rejected the saved registration at the authorize
+                # step. Forget it (the host id stays) so the next sign-in
+                # registers afresh instead of reusing a dead id forever.
+                self._forget_client_id(attempt.saved_client_id)
+                return fail(
+                    "OpenAI が保存済みのアプリ登録 (client_id) を受け付けませんでした "
+                    f"({error})。保存していた登録を消したので、次のログインでは"
+                    "新しく登録し直します。もう一度ログインしてください。"
+                )
             if error == "access_denied":
                 return fail("ChatGPT でのサインインが拒否またはキャンセルされました。")
             return fail(f"OpenAI 認証エラー: {params.get('error_description') or error}")
@@ -1761,10 +1778,7 @@ class SiwcOAuthManager(_LoginAttemptManager):
         except SiwcInvalidClient:
             # The issuer no longer accepts this registration. Forget it (the
             # host id stays) so the next sign-in registers afresh.
-            try:
-                clear_siwc_issued_client_id(issued_client_id)
-            except OSError as exc:
-                LOG.warning("could not clear the rejected SIWC client id: %s", exc)
+            self._forget_client_id(issued_client_id)
             return fail(
                 "OpenAI がこの SAIVerse のアプリ登録 (client_id) を受け付けませんでした "
                 "(invalid_client)。保存していた登録を消したので、次のログインでは"
@@ -1778,6 +1792,14 @@ class SiwcOAuthManager(_LoginAttemptManager):
         # nobody holds and the user cannot see.
         try:
             tokens = _validate_siwc_exchange(data, issued_client_id, attempt.nonce)
+        except SiwcAudienceMismatch as exc:
+            if not attempt.saved_client_id:
+                # First registration: the ID token says the real client is not
+                # the one the callback named, so the id saved above is wrong.
+                self._forget_client_id(issued_client_id)
+            result = fail(str(exc))
+            self._revoke_unpersisted(data, issued_client_id)
+            return result
         except SiwcOAuthError as exc:
             result = fail(str(exc))
             self._revoke_unpersisted(data, issued_client_id)
@@ -1807,8 +1829,12 @@ class SiwcOAuthManager(_LoginAttemptManager):
                 },
             )
         except Exception:
-            # e.g. the store lock timed out: nothing was written.
-            self._revoke_unpersisted(tokens, issued_client_id)
+            # Usually the store lock timed out and nothing was written. But an
+            # error can also surface after the file was replaced (e.g. while
+            # releasing the lock), so revoke only if the store does not hold
+            # this token set — revoking saved tokens would kill the login.
+            if not self._store_holds_refresh_token(tokens.get("refresh_token")):
+                self._revoke_unpersisted(tokens, issued_client_id)
             raise
         if not committed:
             # Cancelled, superseded or logged out: revoke outside every lock.
@@ -1825,6 +1851,34 @@ class SiwcOAuthManager(_LoginAttemptManager):
             # Tokens carry the client id, so refresh still works; only the
             # next sign-in falls back to a fresh registration.
             LOG.warning("could not save the issued SIWC client id: %s", exc)
+
+    @staticmethod
+    def _store_holds_refresh_token(refresh_token: Any) -> bool:
+        """Whether the SAIVerse store currently holds this refresh token.
+
+        Unlocked read: only used to decide whether a failed commit had in fact
+        written. When the store cannot be read we answer True, so an
+        unreadable store never leads to revoking tokens that may be saved.
+        """
+        if not isinstance(refresh_token, str) or not refresh_token:
+            return False
+        path = get_saiverse_store_path()
+        if not path.exists():
+            return False
+        try:
+            stored = (read_auth_store(path).get("tokens") or {}).get("refresh_token")
+        except Exception:  # noqa: BLE001
+            return True
+        return isinstance(stored, str) and secrets.compare_digest(
+            stored.encode("utf-8"), refresh_token.encode("utf-8")
+        )
+
+    @staticmethod
+    def _forget_client_id(client_id: str) -> None:
+        try:
+            clear_siwc_issued_client_id(client_id)
+        except OSError as exc:
+            LOG.warning("could not clear the rejected SIWC client id: %s", exc)
 
     @staticmethod
     def _revoke_unpersisted(data: Any, client_id: str) -> None:
@@ -2042,6 +2096,7 @@ __all__ = [
     "SiwcOAuthError",
     "SiwcCallbackRejected",
     "SiwcInvalidClient",
+    "SiwcAudienceMismatch",
     "SiwcOAuthManager",
     "SIWC_LOGIN_MANAGER",
     "logout_all_and_delete_store",
