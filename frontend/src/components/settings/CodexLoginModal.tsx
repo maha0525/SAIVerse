@@ -124,29 +124,62 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
     }, [sendCancel]);
 
     // 現世代・現試行の状態応答を画面へ反映する (poll と complete の共通出口)。
-    // 世代か attempt が食い違う応答は捨てる。
+    // 旧世代の応答は黙って捨てる。判断は必ず setStatus の中で、その時点の
+    // 最新の画面状態 (prev) に対して行う — poll と complete の応答は前後して
+    // 届くので、応答を出した時点の status で判断すると古い応答が新しい結果を
+    // 上書きする。
     const applyStatus = useCallback((next: LoginStatus, mySeq: number, myAttempt: number | undefined) => {
         if (mySeq !== openSeqRef.current) return;
-        if (next.attempt_id !== undefined && myAttempt !== undefined
-            && next.attempt_id !== myAttempt) return;
-        if (next.state === 'idle' && (next.ok === false || myAttempt !== undefined)) {
-            // この画面が見ていた試行が、成功も失敗もせずに消えた (取り下げ・
-            // 同じ SAIVerse の別の画面でのログアウト、または貼り付けたアドレスの
-            // 処理時に試行がもう生きていなかった)。idle のまま映すと「準備中」の
-            // くるくるで止まってやり直しようがないので、理由とやり直しボタンを出す。
-            setStatus(prev => ({
-                ...prev,
-                state: 'error',
-                error: next.message || next.error || uiText("components.settings.CodexLoginModal.text029"),
-            }));
-            return;
-        }
-        setStatus(prev => ({ ...prev, ...next }));
-        if (next.state === 'success' && !successNotifiedRef.current) {
+        setStatus(prev => {
+            // 同じ試行の結果 (success / error) は確定。後から届いた途中経過
+            // (waiting / starting / idle) で覆さず、success の後の error も無視する。
+            const prevIsThisAttempt = myAttempt === undefined || prev.attempt_id === myAttempt;
+            if (prevIsThisAttempt && prev.state === 'success') return prev;
+            if (prevIsThisAttempt && prev.state === 'error' && next.state !== 'success') return prev;
+
+            if (next.attempt_id !== undefined && myAttempt !== undefined
+                && next.attempt_id !== myAttempt) {
+                // サーバーの試行が別のものに入れ替わった (別の画面が新しい
+                // ログインを始めた・別のプロセスでのログアウトの後に開き直された)。
+                // この画面が待っていた試行はもう結果を出さないので、やり直しを
+                // 案内する。別の試行の中身 (承認ページのリンクやコード) は
+                // この画面に取り込まない。
+                if (prev.state !== 'waiting' || prev.attempt_id !== myAttempt) return prev;
+                return {
+                    ...prev,
+                    state: 'error',
+                    error: uiText("components.settings.CodexLoginModal.text030"),
+                };
+            }
+            if (next.state === 'idle' && (next.ok === false || myAttempt !== undefined)) {
+                // この画面が見ていた試行が、成功も失敗もせずに消えた (取り下げ・
+                // 同じ SAIVerse の別の画面でのログアウト、または貼り付けたアドレスの
+                // 処理時に試行がもう生きていなかった)。idle のまま映すと「準備中」の
+                // くるくるで止まってやり直しようがないので、理由とやり直しボタンを出す。
+                // message は complete の応答が失敗 (ok === false) を伝えるときだけ使う。
+                return {
+                    ...prev,
+                    state: 'error',
+                    error: (next.ok === false ? next.message : undefined)
+                        || next.error
+                        || uiText("components.settings.CodexLoginModal.text029"),
+                };
+            }
+            return { ...prev, ...next };
+        });
+    }, []);
+
+    // 成功の通知は画面状態が success になったときに一度だけ行う (setStatus の
+    // 中では副作用を起こさない)。この effect は開いたときの effect より前に
+    // 宣言しておく — 開き直した最初の描画では status がまだ前回の success の
+    // ままなので、先に開いたときの effect が通知済みの印を戻すと、ここで
+    // 前回の成功をもう一度通知してしまう。
+    useEffect(() => {
+        if (status.state === 'success' && !successNotifiedRef.current) {
             successNotifiedRef.current = true;
             onSuccess();
         }
-    }, [onSuccess]);
+    }, [status.state, onSuccess]);
 
     const startLogin = useCallback((nextFlow: LoginFlow) => {
         setFlow(nextFlow);

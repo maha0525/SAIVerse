@@ -545,12 +545,15 @@ def clear_siwc_issued_client_id(expected_client_id: Optional[str] = None) -> boo
 def revoke_siwc_refresh_token(refresh_token: str, client_id: str) -> bool:
     """Best-effort revocation at the issuer's `revocation_endpoint`.
 
-    Returns True on the spec's success response (HTTP 200). Never raises:
-    sign-out must clear local tokens whether or not revocation worked, so
-    failures are logged as warnings and reported as False.
+    Returns True on the spec's success response (HTTP 200). Never raises —
+    not even when the HTTP client itself cannot be created: sign-out and the
+    "minted but not saved" cleanups must finish whether or not revocation
+    worked, so every failure is logged as a warning (never with token values)
+    and reported as False.
     """
-    session = _http_session()
+    session = None
     try:
+        session = _http_session()
         resp = session.get(SIWC_OPENID_CONFIGURATION_URL, timeout=10)
         if resp.status_code != 200:
             LOG.warning(
@@ -577,21 +580,29 @@ def revoke_siwc_refresh_token(refresh_token: str, client_id: str) -> bool:
         LOG.warning("SIWC refresh-token revocation failed: status=%s", resp.status_code)
         return False
     except Exception as exc:  # noqa: BLE001
-        LOG.warning("SIWC refresh-token revocation failed: %s", exc)
+        # The type only: an exception message could echo request data.
+        LOG.warning("SIWC refresh-token revocation failed: %s", type(exc).__name__)
         return False
     finally:
-        try:
-            session.close()
-        except Exception:  # noqa: BLE001
-            pass
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ---------------------------------------------------------------------------
 # JWT helpers (payload decode without signature verification)
 # ---------------------------------------------------------------------------
 
-def decode_jwt_payload(token: str) -> Optional[Dict[str, Any]]:
-    if not token:
+def decode_jwt_payload(token: Any) -> Optional[Dict[str, Any]]:
+    """Payload claims of a JWT, or None for anything that is not a readable JWT.
+
+    Token responses are untrusted JSON, so a "token" may be a number, a list
+    or None; those are answered with None like a malformed string, never with
+    a TypeError.
+    """
+    if not isinstance(token, str) or not token:
         return None
     parts = token.split(".")
     if len(parts) != 3:
@@ -731,6 +742,12 @@ class _LoginAttemptManager:
         self._generation = 0
         self._current_cancel: Optional[threading.Event] = None
         self._leases: set[str] = set()
+        # The logout marker the current WAITING attempt snapshotted at its
+        # start. A join compares it with the marker now: a logout in another
+        # process renews the marker without touching this process's memory,
+        # so without this comparison a later start() would join an attempt
+        # whose commit is already doomed to be refused.
+        self._attempt_logout_marker: Optional[str] = None
         # The logout marker itself is persistent (read_logout_marker): every
         # logout renews it under the store lock. start() snapshots it before
         # queueing on the start lock and re-checks after acquiring: a start
@@ -777,7 +794,14 @@ class _LoginAttemptManager:
 
         While an attempt is waiting for the browser step, further start()
         calls join it: same attempt_id (and user_code / auth_url), new
-        lease_id. Raises the flow's error type when a logout raced this start.
+        lease_id — unless a logout (typically in another process sharing this
+        ~/.saiverse) renewed the logout marker after that attempt started.
+        Such an attempt can never commit, so it is aborted and a fresh one is
+        opened instead of handing out a lease on it.
+
+        Raises the flow's error type when a logout raced this start, and when
+        the worker thread cannot be started (the attempt then ends as an
+        error with its attempt_id and its prepared resources are released).
         """
         # Snapshot before queueing on the start lock, outside the manager lock.
         # It reads the persistent marker file (initializing it under the store
@@ -795,9 +819,21 @@ class _LoginAttemptManager:
                         "もう一度お試しください。"
                     )
                 if self._state.get("state") == LOGIN_STATE_WAITING:
-                    lease_id = uuid.uuid4().hex
-                    self._leases.add(lease_id)
-                    return {**self._state, "lease_id": lease_id}
+                    if self._attempt_logout_marker == marker_before_queueing:
+                        lease_id = uuid.uuid4().hex
+                        self._leases.add(lease_id)
+                        return {**self._state, "lease_id": lease_id}
+                    # A logout happened since that attempt started: abort it
+                    # (its worker exits, a SIWC listener closes) and open a
+                    # fresh attempt below.
+                    LOG.info(
+                        "login attempt %d predates a logout; opening a new attempt "
+                        "instead of joining it",
+                        self._generation,
+                    )
+                    if self._current_cancel is not None:
+                        self._current_cancel.set()
+                    self._on_attempt_aborted_locked()
                 self._generation += 1
                 generation = self._generation
                 cancel_event = threading.Event()
@@ -830,21 +866,43 @@ class _LoginAttemptManager:
                     "attempt_id": generation,
                     **self._waiting_fields(prepared),
                 }
+                self._attempt_logout_marker = marker_before_queueing
                 self._on_attempt_waiting_locked(
                     generation, cancel_event, marker_before_queueing, prepared
                 )
-                thread = threading.Thread(
-                    target=self._run,
-                    args=(
-                        generation,
-                        cancel_event,
-                        marker_before_queueing,
-                        *self._worker_args(prepared),
-                    ),
-                    name=f"{self._thread_name_prefix}-{generation}",
-                    daemon=True,
-                )
-                thread.start()
+                try:
+                    thread = threading.Thread(
+                        target=self._run,
+                        args=(
+                            generation,
+                            cancel_event,
+                            marker_before_queueing,
+                            *self._worker_args(prepared),
+                        ),
+                        name=f"{self._thread_name_prefix}-{generation}",
+                        daemon=True,
+                    )
+                    thread.start()
+                except Exception as exc:  # noqa: BLE001
+                    # No worker will ever serve this attempt. Release what was
+                    # prepared (a SIWC listener keeps its port bound otherwise),
+                    # kill the generation so nothing can commit for it, and end
+                    # it as an error the waiting UI can match by attempt_id —
+                    # never a phantom WAITING that nobody drives.
+                    LOG.exception("could not start the login worker thread")
+                    cancel_event.set()
+                    self._leases = set()
+                    self._discard_prepared(prepared)
+                    message = (
+                        "ログインの待ち受けを開始できませんでした。"
+                        f"もう一度お試しください。({type(exc).__name__})"
+                    )
+                    self._state = {
+                        "state": LOGIN_STATE_ERROR,
+                        "attempt_id": generation,
+                        "error": message,
+                    }
+                    raise self._flow_error(message) from exc
                 return {**self._state, "lease_id": lease_id}
 
     def status(self) -> Dict[str, Any]:
@@ -884,7 +942,8 @@ class _LoginAttemptManager:
         the other flow, in the fixed device → SIWC lock order. A logout
         started from either manager therefore always invalidates both flows,
         renews the logout marker and revokes a SIWC refresh token — there is
-        no logout entry point that skips any of these.
+        no logout entry point that skips any of these. A store-lock timeout
+        propagates exactly as from `logout_all_and_delete_store`.
         """
         if isinstance(self, SiwcOAuthManager):
             managers: Tuple[_LoginAttemptManager, ...] = (LOGIN_MANAGER, self)
@@ -904,6 +963,7 @@ class _LoginAttemptManager:
         if self._current_cancel is not None:
             self._current_cancel.set()
         self._leases = set()
+        self._attempt_logout_marker = None
         self._on_attempt_aborted_locked()
         self._state = {"state": LOGIN_STATE_IDLE}
 
@@ -1288,7 +1348,26 @@ def _flatten_query(query: str) -> Dict[str, str]:
     return {k: v[0] for k, v in urllib.parse.parse_qs(query).items() if v}
 
 
+def _shutdown_socket(conn: Any) -> None:
+    """Wake any thread blocked on `conn` (recv returns EOF) — never raises."""
+    try:
+        conn.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
 def _close_server(server: Any) -> None:
+    """End a loopback listener: the connection it is waiting on, then the socket.
+
+    Idempotent and safe from any thread. Closing only the listening socket is
+    not enough — the listener serves one connection at a time on the worker
+    thread, and a client that never finishes its request line would keep the
+    worker (and so the attempt) alive past cancel / logout / the deadline.
+    """
+    close_all = getattr(server, "close_all", None)
+    if close_all is not None:
+        close_all()
+        return
     try:
         server.server_close()
     except Exception:  # noqa: BLE001
@@ -1348,8 +1427,25 @@ class _SiwcCallbackHandler(BaseHTTPRequestHandler):
     """Serves /auth/callback. Any other path is a 404 that leaves the attempt alone."""
 
     # A connection that never sends a request line (a port probe) must not
-    # pin the listener loop for long.
+    # pin the listener loop for long. This only bounds silence; a client
+    # trickling bytes is ended by the attempt abort / deadline instead
+    # (`_SiwcCallbackServer.close_all`).
     timeout = 5
+
+    def setup(self) -> None:
+        super().setup()
+        register = getattr(self.server, "register_connection", None)
+        if register is not None and not register(self.connection):
+            # The attempt ended between accept() and here: serve nothing.
+            _shutdown_socket(self.connection)
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        finally:
+            release = getattr(self.server, "release_connection", None)
+            if release is not None:
+                release(self.connection)
 
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
@@ -1358,6 +1454,13 @@ class _SiwcCallbackHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        # The whole request has arrived. From here on the connection carries
+        # a callback being processed (a bounded exchange plus the result
+        # page), so an abort no longer cuts it: the commit re-checks the
+        # attempt itself, and the browser still gets the real outcome page.
+        release = getattr(self.server, "release_connection", None)
+        if release is not None:
+            release(self.connection)
         on_callback = getattr(self.server, "on_callback", None)
         if on_callback is None:
             outcome = _CallbackOutcome(False, False, "ログイン試行の準備ができていません。", 503)
@@ -1385,6 +1488,57 @@ class _SiwcCallbackServer(HTTPServer):
     allow_reuse_address = sys.platform != "win32"
     on_callback: Optional[Callable[[Dict[str, str]], _CallbackOutcome]] = None
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # Before super().__init__: a failed bind calls server_close() there.
+        self._conn_lock = threading.Lock()
+        # The accepted connection whose request has not fully arrived yet —
+        # the one an abort must cut. None while idle or while a callback is
+        # being processed.
+        self.active_connection: Optional[socket.socket] = None
+        self.closed = False
+        super().__init__(*args, **kwargs)
+
+    def register_connection(self, conn: socket.socket) -> bool:
+        """Track a freshly accepted connection; False if the listener is closed."""
+        with self._conn_lock:
+            if self.closed:
+                return False
+            self.active_connection = conn
+            return True
+
+    def release_connection(self, conn: socket.socket) -> None:
+        """Stop tracking `conn` (request complete, or the handler finished)."""
+        with self._conn_lock:
+            if self.active_connection is conn:
+                self.active_connection = None
+
+    def close_all(self) -> None:
+        """Close the listener and cut the connection still sending its request."""
+        with self._conn_lock:
+            self.closed = True
+            conn, self.active_connection = self.active_connection, None
+        if conn is not None:
+            _shutdown_socket(conn)
+            try:
+                if sys.platform == "win32":
+                    # On Windows shutdown() does not wake a thread already
+                    # blocked waiting on this socket when no more bytes come
+                    # (a silent client), and socket.close() is deferred while
+                    # the handler's makefile() stream still references it.
+                    # Close the OS handle now: the blocked wait then fails at
+                    # once and the handler ends. (On POSIX shutdown() wakes
+                    # it, and closing an fd another thread waits on would
+                    # risk fd reuse, so it is left to the normal close.)
+                    super(socket.socket, conn).close()
+                else:
+                    conn.close()
+            except OSError:
+                pass
+        try:
+            self.server_close()
+        except Exception:  # noqa: BLE001
+            pass
+
     def server_bind(self) -> None:
         if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
@@ -1396,6 +1550,10 @@ class _SiwcCallbackServer(HTTPServer):
         self.server_port = port
 
     def handle_error(self, request: Any, client_address: Any) -> None:
+        if self.closed:
+            # A connection cut by an abort fails mid-read/write; expected.
+            LOG.debug("SIWC callback connection ended by the attempt closing")
+            return
         LOG.exception("SIWC callback handler error")
 
 
@@ -1422,7 +1580,7 @@ def _validate_siwc_exchange(
     if isinstance(scope, (list, tuple)):
         scope = " ".join(str(s) for s in scope)
     if not isinstance(scope, str) or not scope.strip():
-        claim_scope = (decode_jwt_payload(data.get("access_token") or "") or {}).get("scope")
+        claim_scope = (decode_jwt_payload(data.get("access_token")) or {}).get("scope")
         scope = claim_scope if isinstance(claim_scope, str) else ""
     scope = scope.strip()
     if not siwc_scope_grants_direct_use(scope):
@@ -1432,9 +1590,11 @@ def _validate_siwc_exchange(
             "もう一度お試しください。"
         )
 
-    claims = decode_jwt_payload(data.get("id_token") or "")
+    # decode_jwt_payload answers None for a missing, non-string or malformed
+    # token, so every one of those ends here as a SiwcOAuthError.
+    claims = decode_jwt_payload(data.get("id_token"))
     if not claims:
-        raise SiwcOAuthError("トークン交換の応答に ID トークンがありません。")
+        raise SiwcOAuthError("トークン交換の応答に読める ID トークンがありません。")
     claim_nonce = claims.get("nonce")
     if not isinstance(claim_nonce, str) or not secrets.compare_digest(
         claim_nonce.encode("utf-8"), nonce.encode("utf-8")
@@ -1627,10 +1787,19 @@ class SiwcOAuthManager(_LoginAttemptManager):
 
         Requests to other paths (favicon, port probes) and callbacks with the
         wrong state are answered without ending the attempt.
+
+        The deadline is enforced by a timer of its own, not only by this
+        loop: while the loop is inside handle_request() serving a client that
+        trickles its request, the loop cannot look at the clock. The timer
+        expires the attempt and cuts that connection, which returns the loop.
         """
         server = attempt.server
         deadline = time.monotonic() + self._max_wait_seconds
+        deadline_timer = threading.Timer(self._max_wait_seconds, self._expire, args=(attempt,))
+        deadline_timer.daemon = True
+        deadline_timer.name = f"{self._thread_name_prefix}-{generation}-deadline"
         try:
+            deadline_timer.start()
             while not attempt.done.is_set() and not self._is_stale(generation, cancel_event):
                 if attempt.claimed:
                     # A pasted callback URL is being exchanged; wait for it.
@@ -1654,10 +1823,15 @@ class SiwcOAuthManager(_LoginAttemptManager):
             LOG.exception("SIWC login worker crashed")
             self._fail(generation, cancel_event, f"予期しないエラー: {exc}")
         finally:
+            deadline_timer.cancel()
             _close_server(server)
 
     def _expire(self, attempt: _SiwcAttempt) -> None:
-        """Timeout: end the attempt unless a callback is already being processed."""
+        """Timeout: end the attempt unless a callback is already being processed.
+
+        Called from the deadline timer and from the worker loop (whichever
+        sees the deadline first; the `claimed` flag makes it happen once).
+        """
         with self._lock:
             if attempt.claimed:
                 return
@@ -1672,6 +1846,9 @@ class SiwcOAuthManager(_LoginAttemptManager):
                     ),
                 }
         attempt.done.set()
+        # Cut a connection still sending its request and close the listener,
+        # so a worker blocked in handle_request() returns now.
+        _close_server(attempt.server)
 
     def _process_callback(
         self, attempt: _SiwcAttempt, params: Dict[str, str]
@@ -1729,10 +1906,14 @@ class SiwcOAuthManager(_LoginAttemptManager):
         error = params.get("error")
         if error:
             # access_denied (or any other error): stop, never exchange.
-            if error in ("invalid_client", "unauthorized_client") and attempt.saved_client_id:
+            if error == "invalid_client" and attempt.saved_client_id:
                 # The issuer rejected the saved registration at the authorize
                 # step. Forget it (the host id stays) so the next sign-in
                 # registers afresh instead of reusing a dead id forever.
+                # Only `invalid_client` says the registration itself is dead;
+                # `unauthorized_client` may be an account policy, and
+                # forgetting the id on it would pile up duplicate
+                # registrations for the same host.
                 self._forget_client_id(attempt.saved_client_id)
                 return fail(
                     "OpenAI が保存済みのアプリ登録 (client_id) を受け付けませんでした "
@@ -1802,6 +1983,20 @@ class SiwcOAuthManager(_LoginAttemptManager):
             return result
         except SiwcOAuthError as exc:
             result = fail(str(exc))
+            self._revoke_unpersisted(data, issued_client_id)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            # Validation must never be the path that leaves a minted grant
+            # behind: a malformed response that trips anything else is
+            # failed and revoked exactly like a rejected one. Only the type
+            # is reported — the message could echo response content.
+            LOG.warning(
+                "SIWC exchange response could not be validated: %s", type(exc).__name__
+            )
+            result = fail(
+                "トークン交換の応答を確認できませんでした "
+                f"({type(exc).__name__})。もう一度お試しください。"
+            )
             self._revoke_unpersisted(data, issued_client_id)
             return result
 
@@ -1938,6 +2133,9 @@ class SiwcOAuthManager(_LoginAttemptManager):
         except Exception as exc:  # noqa: BLE001
             raise SiwcOAuthError("トークン交換の応答が JSON ではありませんでした。") from exc
         if not isinstance(data, dict) or not data.get("access_token"):
+            # The endpoint answered 200, so a refresh token it did mint is a
+            # live grant nobody will hold: revoke it before giving up.
+            SiwcOAuthManager._revoke_unpersisted(data, client_id)
             raise SiwcOAuthError("トークン交換の応答に access_token がありません。")
         return data
 
@@ -1954,21 +2152,38 @@ def logout_all_and_delete_store(
 ) -> Dict[str, Any]:
     """Logout: stop every in-flight login, delete the store, revoke SIWC tokens.
 
-    1. Under the managers' locks (always taken in the same order: device,
-       then SIWC — no other path holds two manager locks) every in-flight
-       attempt is invalidated. Then, under the store lock, the persistent
-       logout marker is renewed, the store record is read and the store file
-       is deleted. Renewing the marker kills queued start()s and attempts in
-       OTHER processes sharing this ~/.saiverse too (their commits re-check
-       the marker under the store lock).
-    2. Every lock is released, and only then is a SIWC refresh token revoked
-       best-effort at the issuer's revocation endpoint — network I/O never
-       holds the cross-process store lock (other processes' refresh and
-       login would stall on it) or a manager lock (status polling would).
-       Revoking after the deletion is safe: refresh re-reads the store file
-       under the store lock, so once the file is gone no refresher can rotate
-       the captured token again — the token we revoke is the live one.
-       Revocation failure is logged and reported as revoked=False.
+    Three phases, and no phase holds the locks of another:
+
+    1. Under the managers' locks only (always taken in the same order:
+       device, then SIWC — no other path holds two manager locks) every
+       in-flight attempt is invalidated: generation bumped, cancel event set,
+       leases cleared, a SIWC listener (and the connection it is serving)
+       closed. The manager locks are then RELEASED.
+    2. Under the store lock only, the persistent logout marker is renewed,
+       the store record is read and the store file is deleted. Renewing the
+       marker kills attempts in OTHER processes sharing this ~/.saiverse too
+       (their commits re-check the marker under the store lock).
+    3. Outside every lock, a SIWC refresh token is revoked best-effort at the
+       issuer's revocation endpoint (failure is logged and reported as
+       revoked=False). Revoking after the deletion is safe: refresh re-reads
+       the store file under the store lock, so once the file is gone no
+       refresher can rotate the captured token again — the token we revoke
+       is the live one.
+
+    Why phase 2 does not need the manager locks: the in-process attempts are
+    already dead after phase 1 (their commits re-check the generation under
+    the manager lock). A start() that slips in between phase 1 and phase 2
+    snapshots the OLD marker, so its commit is refused by the renewed marker
+    and the attempt ends in the logout error state; a start() after phase 2
+    is a legitimate new login. And since the manager locks are free while
+    phase 2 waits for the store lock — which a refresh deliberately holds
+    across its network round-trip (rotating refresh tokens must not be spent
+    by two processes) — status polling and cancel never block behind a slow
+    refresh.
+
+    If the store lock cannot be acquired in time, filelock's Timeout
+    propagates to the caller; the attempts were already invalidated in
+    phase 1, and the store is left as it was (the API maps this to 503).
 
     Returns {removed: bool, revoked: True | False | None}; None means there
     was no SIWC token to revoke. Never touches ~/.codex. The SIWC client
@@ -1977,17 +2192,20 @@ def logout_all_and_delete_store(
     """
     if managers is None:
         managers = (LOGIN_MANAGER, SIWC_LOGIN_MANAGER)
+    # Phase 1: manager locks only.
     with contextlib.ExitStack() as manager_locks:
         for manager in managers:
             manager_locks.enter_context(manager._lock)
         for manager in managers:
             manager._invalidate_locked()
-        with saiverse_store_lock():
-            _renew_logout_marker_locked()
-            record = _read_store_record_locked()
-            removed = _delete_store_file_locked()
 
-    # Outside every lock from here on.
+    # Phase 2: store lock only.
+    with saiverse_store_lock():
+        _renew_logout_marker_locked()
+        record = _read_store_record_locked()
+        removed = _delete_store_file_locked()
+
+    # Phase 3: outside every lock from here on.
     revoked: Optional[bool] = None
     if is_siwc_record(record):
         tokens = record.get("tokens")

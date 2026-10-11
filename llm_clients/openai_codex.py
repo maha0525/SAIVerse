@@ -50,6 +50,7 @@ from .openai_codex_auth import (
     build_user_agent as _build_user_agent,
     is_siwc_record,
     resolve_siwc_client_id,
+    revoke_siwc_refresh_token,
     siwc_scope_grants_direct_use,
     read_auth_store,
     resolve_active_store,
@@ -254,8 +255,8 @@ class OpenAICodexClient(LLMClient):
            * Target: https://api.openai.com/v1/responses
            * Plain HTTP (httpx), standard Bearer authorization header
            * Active whenever `is_siwc_record()` recognizes the stored record
-             (explicit `source: saiverse_siwc` marker first, token heuristics
-             for older records)
+             (explicit `source: saiverse_siwc` marker first; token heuristics
+             only for records without any `source`, i.e. Codex CLI auth.json)
            * Body omits the parameters SIWC rejects (see `_SIWC_UNSUPPORTED_BODY_KEYS`)
         2. Legacy Codex CLI backend:
            * Target: https://chatgpt.com/backend-api/codex/responses
@@ -778,7 +779,14 @@ class OpenAICodexClient(LLMClient):
              cross-writing would break whichever process reads the other file).
 
         This avoids the `refresh_token_reused` failure mode where Codex CLI and
-        SAIVerse race to spend the same one-shot refresh token.
+        SAIVerse race to spend the same one-shot refresh token. The store lock
+        is held across the refresh request on purpose: that serialization is
+        what keeps two processes from spending one rotating refresh token.
+
+        SIWC only: if the refresh succeeded but writing the rotated tokens
+        failed, the old refresh token is already spent and the new one would
+        be a live grant nobody holds — it is revoked best-effort (after the
+        store lock is released) and the error is re-raised.
         """
         store = self._resolve_store()
         try:
@@ -786,6 +794,8 @@ class OpenAICodexClient(LLMClient):
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"could not initialize auth store lock: {exc}") from exc
 
+        # (refresh_token, client_id) of a SIWC refresh whose write-back failed.
+        unsaved_siwc_refresh: Optional[Tuple[str, str]] = None
         try:
             with lock:
                 latest = read_auth_store(store.path)
@@ -826,14 +836,51 @@ class OpenAICodexClient(LLMClient):
                             "ログインし直してください。"
                         )
                     refreshed = self._request_siwc_refresh(latest_refresh, client_id)
+                    try:
+                        self._persist_refreshed_tokens(store.path, latest, refreshed)
+                    except Exception:
+                        new_refresh = (
+                            refreshed.get("refresh_token")
+                            if isinstance(refreshed, dict) else None
+                        )
+                        if isinstance(new_refresh, str) and new_refresh:
+                            unsaved_siwc_refresh = (new_refresh, client_id)
+                        raise
                 else:
                     refreshed = self._request_refresh(latest_refresh)
-                self._persist_refreshed_tokens(store.path, latest, refreshed)
+                    self._persist_refreshed_tokens(store.path, latest, refreshed)
         except FileLockTimeout as exc:
             raise RuntimeError(
                 "could not acquire auth store lock within 30s; another process "
                 "may be refreshing concurrently"
             ) from exc
+        finally:
+            # Runs after `with lock` has exited: no network I/O under the lock.
+            if unsaved_siwc_refresh is not None and not self._store_holds_refresh_token(
+                store.path, unsaved_siwc_refresh[0]
+            ):
+                if not revoke_siwc_refresh_token(*unsaved_siwc_refresh):
+                    LOG.warning(
+                        "SIWC refresh: rotated tokens could not be saved and revoking "
+                        "the new refresh token failed; it stays valid at OpenAI until "
+                        "it expires or is unlinked from the ChatGPT settings"
+                    )
+
+    @staticmethod
+    def _store_holds_refresh_token(store_path: Path, refresh_token: str) -> bool:
+        """Whether the store file currently holds `refresh_token` (unlocked read).
+
+        Only used after a failed SIWC write-back, to never revoke a token that
+        did reach the file. An unreadable file answers True (do not revoke
+        what may be saved); a missing file answers False (nothing holds it).
+        """
+        try:
+            stored = (read_auth_store(store_path).get("tokens") or {}).get("refresh_token")
+        except FileNotFoundError:
+            return False
+        except Exception:  # noqa: BLE001
+            return True
+        return stored == refresh_token
 
     def _request_refresh(self, refresh_token: str) -> Dict[str, Any]:
         """POST to https://auth.openai.com/oauth/token with refresh_token grant.

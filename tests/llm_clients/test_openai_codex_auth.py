@@ -680,6 +680,137 @@ def test_logout_serializes_on_store_lock(isolated_stores, monkeypatch):
     assert oca.logout_all_and_delete_store([manager])["removed"] is True
 
 
+def test_logout_releases_manager_locks_while_waiting_for_store_lock(isolated_stores, monkeypatch):
+    """refresh がストアのロックを握っている間も、状態確認と取り下げは止まらない。
+
+    logout は試行の無効化 (manager ロック) を済ませて手放してから、ストアの
+    ロックを待つ。待っている間に status() が即答し、manager ロックが空いている。
+    """
+    monkeypatch.setattr(oca, "STORE_LOCK_TIMEOUT_SECONDS", 10.0)
+    _write_json(isolated_stores["saiverse"], {"tokens": {"access_token": "a"}})
+    manager = oca.CodexDeviceLoginManager()
+    gen, event, _lease = _open_attempt(manager)
+    manager._state = {"state": oca.LOGIN_STATE_WAITING, "attempt_id": gen}
+
+    holder = oca.saiverse_store_lock(timeout=5)  # a refresh in flight
+    holder.acquire()
+    result: dict = {}
+    t = threading.Thread(
+        target=lambda: result.update(out=oca.logout_all_and_delete_store([manager])),
+        daemon=True,
+    )
+    try:
+        t.start()
+        deadline = time.monotonic() + 5
+        while not event.is_set() and time.monotonic() < deadline:
+            threading.Event().wait(0.01)
+        assert event.is_set(), "phase 1 (invalidation) did not run"
+        assert manager._lock.acquire(timeout=0.5), "logout kept the manager lock"
+        manager._lock.release()
+        asked_at = time.monotonic()
+        assert manager.status() == {"state": oca.LOGIN_STATE_IDLE}
+        assert time.monotonic() - asked_at < 0.5
+        assert t.is_alive()  # still waiting for the store lock
+        assert isolated_stores["saiverse"].exists()
+    finally:
+        holder.release()
+    t.join(10)
+    assert not t.is_alive()
+    assert result["out"]["removed"] is True
+    assert not isolated_stores["saiverse"].exists()
+
+
+def test_start_slipping_in_before_marker_renewal_is_refused_at_commit(
+    isolated_stores, monkeypatch
+):
+    """logout の無効化と印の更新の間に入った start は、更新後の印で保存を拒否される。"""
+    manager = oca.CodexDeviceLoginManager()
+    monkeypatch.setattr(oca.CodexDeviceLoginManager, "_run", lambda self, *a: None)
+    monkeypatch.setattr(
+        oca.CodexDeviceLoginManager, "_request_usercode",
+        lambda self: {"user_code": "SLIP-0001", "device_auth_id": "dev-s", "interval": 3},
+    )
+    manager._snapshot_logout_marker()  # the marker exists: start needs no store lock
+    real_renew = oca._renew_logout_marker_locked
+    slipped: dict = {}
+
+    def start_then_renew():
+        # Runs inside logout phase 2, before the marker is renewed. The manager
+        # lock must already be free here, or this start() would deadlock.
+        slipped["started"] = manager.start()
+        slipped["cancel_event"] = manager._current_cancel
+        slipped["marker"] = manager._attempt_logout_marker
+        real_renew()
+
+    monkeypatch.setattr(oca, "_renew_logout_marker_locked", start_then_renew)
+    t = threading.Thread(
+        target=lambda: oca.logout_all_and_delete_store([manager]), daemon=True
+    )
+    t.start()
+    t.join(10)
+    assert not t.is_alive(), "logout held the manager lock while taking the store lock"
+
+    started = slipped["started"]
+    assert started["state"] == oca.LOGIN_STATE_WAITING
+    manager._commit_login(
+        started["attempt_id"], slipped["cancel_event"], slipped["marker"],
+        {"access_token": _access_token(), "refresh_token": "rt"},
+    )
+    assert not isolated_stores["saiverse"].exists()
+    assert manager.status() == {
+        "state": oca.LOGIN_STATE_ERROR,
+        "attempt_id": started["attempt_id"],
+        "error": oca.LOGIN_REFUSED_BY_LOGOUT_MESSAGE,
+    }
+
+
+def test_device_start_after_logout_elsewhere_does_not_join_the_old_attempt(
+    isolated_stores, fake_http, monkeypatch
+):
+    monkeypatch.setattr(oca.CodexDeviceLoginManager, "_run", lambda self, *a: None)
+    fake_http["queue"].extend([
+        FakeResponse(200, {"user_code": "OLD0-0000", "device_auth_id": "dev-old", "interval": 3}),
+        FakeResponse(200, {"user_code": "NEW0-0000", "device_auth_id": "dev-new", "interval": 3}),
+    ])
+    manager = oca.CodexDeviceLoginManager()
+    first = manager.start()
+    old_event = manager._current_cancel
+    # another process sharing this ~/.saiverse logged out
+    oca.CodexDeviceLoginManager().logout_and_delete_store()
+
+    second = manager.start()
+    assert second["attempt_id"] != first["attempt_id"]
+    assert second["user_code"] == "NEW0-0000"
+    assert old_event.is_set()
+    assert manager.cancel(first["attempt_id"], first["lease_id"]) is False
+    assert manager.status()["attempt_id"] == second["attempt_id"]
+    third = manager.start()  # joins the fresh attempt (no extra usercode request)
+    assert third["attempt_id"] == second["attempt_id"]
+    assert len(fake_http["session"].calls) == 2
+
+
+def test_device_worker_start_failure_ends_as_error(isolated_stores, fake_http, monkeypatch):
+    fake_http["queue"].append(
+        FakeResponse(200, {"user_code": "FAIL-0000", "device_auth_id": "dev-f", "interval": 3})
+    )
+    real_start = threading.Thread.start
+
+    def start_or_fail(self):
+        if self.name.startswith("codex-device-login-"):
+            raise RuntimeError("can't start new thread")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start_or_fail)
+    manager = oca.CodexDeviceLoginManager()
+    with pytest.raises(oca.CodexDeviceLoginError, match="待ち受け"):
+        manager.start()
+    status = manager.status()
+    assert status["state"] == oca.LOGIN_STATE_ERROR
+    assert status["attempt_id"] == manager._generation
+    assert manager._leases == set()
+    assert manager._current_cancel.is_set()
+
+
 def test_login_persist_serializes_on_store_lock(isolated_stores, monkeypatch):
     _assert_blocks_under_held_lock(
         isolated_stores, monkeypatch,
@@ -892,6 +1023,22 @@ def test_route_status_and_logout(api_client, isolated_stores):
     assert body["removed"] is True
     assert body["logged_in"] is False
     assert not isolated_stores["saiverse"].exists()
+
+
+def test_route_logout_maps_store_lock_timeout_to_503(api_client, monkeypatch):
+    from filelock import Timeout as FileLockTimeout
+
+    client, routes = api_client
+
+    def _lock_busy(managers=None):
+        raise FileLockTimeout("codex_auth.json.lock")
+
+    monkeypatch.setattr(routes, "logout_all_and_delete_store", _lock_busy)
+    res = client.post("/codex-auth/logout")
+    assert res.status_code == 503
+    assert res.json()["detail"] == (
+        "鍵の更新中のためログアウトできませんでした。少し待ってもう一度お試しください。"
+    )
 
 
 def test_route_login_start_maps_flow_error_to_502(api_client, monkeypatch):

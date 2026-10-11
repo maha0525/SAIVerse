@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, HTTPException
+from filelock import Timeout as FileLockTimeout
 from pydantic import BaseModel
 
 from llm_clients.openai_codex_auth import (
@@ -156,16 +157,25 @@ def codex_auth_status():
 def codex_logout():
     """SAIVerse 自前のトークンストアを削除する。
 
-    両方式の進行中のログイン試行の無効化とストア削除を一続きのクリティカル
-    セクションで行う — 別々にやると、ブラウザ側の認証が logout とすれ違いで
-    完了したとき、ワーカーがストアを再生成して「ログアウトしたのに認証が
-    復活」する。SIWC のトークンなら、ストアを消してロックを全部外した後に
-    refresh_token を OpenAI で失効させる (ネットワーク待ちでストアのロックを
-    握らないため。失敗しても警告を残すだけで、revoked=false で返す)。
+    まず両方式の進行中のログイン試行を無効化し (以後その試行は保存できない)、
+    次にストアのロックの下でログアウトの印を更新してストアを消し、最後に
+    ロックの外で SIWC の refresh_token を OpenAI で失効させる (失敗しても警告を
+    残すだけで、revoked=false で返す)。順序と理由は
+    `logout_all_and_delete_store` の docstring にある。
+    鍵の更新 (refresh) がストアのロックを握ったまま 30 秒以上終わらないときは
+    ロックを取れずに 503 を返す。このとき進行中の試行は既に無効になっているが、
+    ストアは消えていないので、少し待ってもう一度ログアウトしてもらう。
     Codex CLI の ~/.codex/auth.json には決して触れない。自前ストアが無い
     (CLI 相乗り中 or 未ログイン) 場合は removed=false。
     """
-    result = logout_all_and_delete_store()
+    try:
+        result = logout_all_and_delete_store()
+    except FileLockTimeout as exc:
+        LOGGER.warning("codex-auth: logout could not acquire the store lock in time")
+        raise HTTPException(
+            status_code=503,
+            detail="鍵の更新中のためログアウトできませんでした。少し待ってもう一度お試しください。",
+        ) from exc
     status = auth_status()
     LOGGER.info(
         "codex-auth: logout removed=%s revoked=%s now store=%s",

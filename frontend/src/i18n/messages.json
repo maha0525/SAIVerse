@@ -6467,6 +6467,10 @@
     "ja": "ログインが途中で取り消されました (別の画面でのログアウトなど)。もう一度ログインしてください。",
     "en": "The sign-in was cancelled partway (for example by a sign-out elsewhere). Please sign in again."
   },
+  "components.settings.CodexLoginModal.text030": {
+    "ja": "このログインは別の画面のログインに置き換えられました。もう一度ログインしてください。",
+    "en": "This sign-in was replaced by a sign-in started from another screen. Please sign in again."
+  },
   "components.settings.FeedManagementPanel.text001": {
     "ja": "設置先の Building を選んでください。",
     "en": "Select a building for the facility."
