@@ -172,8 +172,9 @@ def _server_expire_epoch(cache: Any, started: float, ttl_seconds: int) -> float:
     Gemini が返す ``expire_time`` を使う — 作成の開始時刻から数えると、作成に
     かかった時間 (音声会話の実測で十数秒) の分だけ実際より早く見切って使える
     時間が縮み、早く消したときの返金も少なく出るため。``expire_time`` が無い・
-    読めない・ありえない値 (開始より前、または開始 + TTL を 10 分以上超える) の
-    ときは、開始 + TTL (安全側) に落とす。
+    読めない・ありえない値のときは、開始 + TTL (安全側) に落とす。ありえない値とは、
+    開始 + TTL より 60 秒以上早い (時計のずれの許容を超えて、頼んだ寿命より短い) か、
+    開始 + TTL を 10 分以上超える (作成の待ち時間と時計のずれの許容を超える) もの。
     """
     fallback = started + ttl_seconds
     raw = getattr(cache, "expire_time", None)
@@ -186,7 +187,7 @@ def _server_expire_epoch(cache: Any, started: float, ttl_seconds: int) -> float:
         server = float(raw.timestamp())
     except Exception:
         return fallback
-    if server < started or server > fallback + 600:
+    if server < fallback - 60 or server > fallback + 600:
         return fallback
     return server
 

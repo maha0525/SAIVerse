@@ -1024,6 +1024,16 @@ def test_expire_at_uses_server_expire_time_and_falls_back_safely():
     assert gemini_cache._server_expire_epoch(
         SimpleNamespace(expire_time=before), started, ttl,
     ) == started + ttl
+    # 開始より後でも、頼んだ寿命より 60 秒以上短い期限は信じない
+    too_early = datetime.fromtimestamp(started + 10, tz=timezone.utc)
+    assert gemini_cache._server_expire_epoch(
+        SimpleNamespace(expire_time=too_early), started, ttl,
+    ) == started + ttl
+    # 時計のずれの範囲 (60 秒以内に早い) は受け入れる
+    slightly_early = datetime.fromtimestamp(started + ttl - 30, tz=timezone.utc)
+    assert gemini_cache._server_expire_epoch(
+        SimpleNamespace(expire_time=slightly_early), started, ttl,
+    ) == pytest.approx(started + ttl - 30)
     far = datetime.fromtimestamp(started + ttl + 3600, tz=timezone.utc)
     assert gemini_cache._server_expire_epoch(
         SimpleNamespace(expire_time=far), started, ttl,
