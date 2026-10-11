@@ -1,6 +1,8 @@
 import base64
 import logging
 import mimetypes
+import threading
+from collections import OrderedDict
 from datetime import datetime
 from functools import lru_cache
 from io import BytesIO
@@ -24,6 +26,15 @@ ITEM_IMAGE_URI_PREFIX = "saiverse://item/"  # also covers /audio, /video suffixe
 PERSONA_URI_PREFIX = "saiverse://persona/"
 BUILDING_URI_PREFIX = "saiverse://building/"
 SUPPORTED_LLM_IMAGE_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+# Send-time cap on an image's long edge (pixels). Stored originals keep full
+# resolution for display; only the copy sent to the LLM is shrunk. Pixels beyond
+# this give the models we use nothing: Gemini 3 spends a fixed token budget per
+# image (media_resolution), Anthropic downsizes anything over 1568px server-side,
+# and OpenAI high-detail fits images into 2048x2048.
+LLM_IMAGE_MAX_LONG_EDGE = 2048
+# Formats the long-edge cap applies to. GIF is excluded so animations survive.
+_LLM_IMAGE_CAP_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/bmp"}
+_LLM_IMAGE_CAP_FORMATS = {"PNG", "JPEG", "WEBP", "BMP"}
 SUPPORTED_LLM_AUDIO_MIME = {
     "audio/wav", "audio/mp3", "audio/mpeg", "audio/aiff",
     "audio/aac", "audio/ogg", "audio/flac",
@@ -918,10 +929,115 @@ def store_video_bytes(
     return metadata, dest_path
 
 
+def _cap_image_long_edge_for_llm(
+    data: bytes, mime_type: str, path: Path,
+) -> Tuple[bytes, str]:
+    """Shrink an image whose long edge exceeds LLM_IMAGE_MAX_LONG_EDGE.
+
+    Images within the cap (and non-capped formats such as GIF) are returned
+    unchanged, byte for byte. The output is deterministic for a given input
+    (no timestamps or metadata are embedded), because prompt caching compares
+    message content and the same image must look identical on every turn.
+    Images with real transparency stay PNG with alpha; everything else becomes
+    JPEG quality 90.
+    """
+    if Image is None or mime_type not in _LLM_IMAGE_CAP_MIME:
+        return data, mime_type
+    try:
+        from PIL import ImageOps  # type: ignore
+
+        with Image.open(BytesIO(data)) as img:
+            # Animated WebP / APNG would lose their frames, like GIF would.
+            if img.format not in _LLM_IMAGE_CAP_FORMATS or getattr(img, "is_animated", False):
+                return data, mime_type
+            width, height = img.size
+            long_edge = max(width, height)
+            if long_edge <= LLM_IMAGE_MAX_LONG_EDGE:
+                return data, mime_type
+
+            # The original's EXIF is not carried over, so apply its orientation
+            # to the pixels to keep what the user saw in the chat.
+            img = ImageOps.exif_transpose(img)
+            width, height = img.size
+
+            has_alpha = img.mode in ("RGBA", "LA") or (
+                img.mode == "P" and "transparency" in img.info
+            )
+            if has_alpha:
+                img = img.convert("RGBA")
+                # A screenshot is often RGBA with a fully opaque alpha channel;
+                # that carries no transparency and is cheaper as JPEG.
+                alpha_min, _ = img.getchannel("A").getextrema()
+                if alpha_min >= 255:
+                    has_alpha = False
+            img = img.convert("RGBA" if has_alpha else "RGB")
+
+            scale = LLM_IMAGE_MAX_LONG_EDGE / long_edge
+            if width >= height:
+                new_size = (LLM_IMAGE_MAX_LONG_EDGE, max(1, round(height * scale)))
+            else:
+                new_size = (max(1, round(width * scale)), LLM_IMAGE_MAX_LONG_EDGE)
+            resized = img.resize(new_size, Image.Resampling.LANCZOS)
+
+            buf = BytesIO()
+            if has_alpha:
+                resized.save(buf, format="PNG")
+                output_mime = "image/png"
+            else:
+                resized.save(buf, format="JPEG", quality=90)
+                output_mime = "image/jpeg"
+            result = buf.getvalue()
+
+        LOGGER.info(
+            "Capped image long edge for LLM: %s %dx%d (%d bytes, %s) -> %dx%d (%d bytes, %s)",
+            path, width, height, len(data), mime_type,
+            new_size[0], new_size[1], len(result), output_mime,
+        )
+        return result, output_mime
+    except Exception:
+        LOGGER.warning(
+            "Failed to cap image long edge for LLM: %s; using unresized bytes",
+            path, exc_info=True,
+        )
+        return data, mime_type
+
+
+# Decoding and re-encoding a large image costs ~0.3s, and the same images are
+# re-sent on every turn, so the capped copy is remembered per file version.
+# Only shrunk results are stored; images within the cap are cheap to re-check.
+_LLM_IMAGE_CAP_CACHE: "OrderedDict[Tuple[str, int, int, str], Tuple[bytes, str]]" = OrderedDict()
+_LLM_IMAGE_CAP_CACHE_MAX = 32
+_LLM_IMAGE_CAP_CACHE_LOCK = threading.Lock()
+
+
+def _cap_image_long_edge_cached(
+    data: bytes, mime_type: str, path: Path,
+) -> Tuple[bytes, str]:
+    try:
+        st = Path(path).stat()
+        key = (str(path), st.st_mtime_ns, st.st_size, mime_type)
+    except OSError:
+        return _cap_image_long_edge_for_llm(data, mime_type, path)
+    with _LLM_IMAGE_CAP_CACHE_LOCK:
+        hit = _LLM_IMAGE_CAP_CACHE.get(key)
+        if hit is not None:
+            _LLM_IMAGE_CAP_CACHE.move_to_end(key)
+            return hit
+    result = _cap_image_long_edge_for_llm(data, mime_type, path)
+    if result[0] is not data:
+        with _LLM_IMAGE_CAP_CACHE_LOCK:
+            _LLM_IMAGE_CAP_CACHE[key] = result
+            while len(_LLM_IMAGE_CAP_CACHE) > _LLM_IMAGE_CAP_CACHE_MAX:
+                _LLM_IMAGE_CAP_CACHE.popitem(last=False)
+    return result
+
+
 def load_image_bytes_for_llm(path: Path, mime_type: str, max_bytes: Optional[int] = None) -> Tuple[Optional[bytes], Optional[str]]:
     """
     Return (bytes, effective_mime) for LLM consumption.
     Converts unsupported formats to PNG when Pillow is available.
+    Images whose long edge exceeds LLM_IMAGE_MAX_LONG_EDGE are shrunk to it
+    (GIF is left untouched); smaller images are returned byte-identical.
     If max_bytes is specified, resizes image to fit within that limit (accounting for base64 encoding).
     """
     target_mime = mime_type.lower()
@@ -968,6 +1084,12 @@ def load_image_bytes_for_llm(path: Path, mime_type: str, max_bytes: Optional[int
 
     if effective_mime not in SUPPORTED_LLM_IMAGE_MIME:
         LOGGER.warning("Using raw bytes for potentially unsupported mime '%s'", mime_type)
+
+    # Shrink images beyond the send-time long-edge cap (originals stay on disk).
+    # Gated on the declared source format too: a GIF has already been flattened
+    # to PNG above, and must not be re-encoded again here.
+    if target_mime in _LLM_IMAGE_CAP_MIME:
+        data, effective_mime = _cap_image_long_edge_cached(data, effective_mime, path)
 
     # Resize if max_bytes is specified and image is too large
     if max_bytes is not None:

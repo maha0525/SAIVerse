@@ -895,49 +895,97 @@ def set_reflex_timeout_setting(req: ReflexTimeoutRequest):
 class GeminiAutoCacheRequest(BaseModel):
     enabled: bool
     keep_seconds: int = 0
+    # 継続キャッシュ (高速応答モード)。None (送られてこない) は「変更しない」。
+    continuous: Optional[bool] = None
+    continuous_ttl_seconds: Optional[int] = None
 
 
 @router.get("/gemini-auto-cache")
 def get_gemini_auto_cache():
-    """Get the Gemini auto-cache switch and how long a cache is kept after the reply."""
-    from llm_clients.gemini import AUTO_CACHE_KEEP_SECONDS_MAX, GeminiClient
+    """Get the Gemini auto-cache settings.
+
+    ``enabled`` / ``keep_seconds`` は自動キャッシュ、``continuous`` /
+    ``continuous_ttl_seconds`` は継続キャッシュ (高速応答モード) の設定。継続キャッシュは
+    自動キャッシュが ON のときだけ効く — 画面の三択は enabled=False → オフ、
+    enabled=True かつ continuous=False → 自動、両方 True → 継続。
+    """
+    from llm_clients.gemini import (
+        AUTO_CACHE_KEEP_SECONDS_MAX,
+        CONTINUOUS_CACHE_TTL_MAX,
+        CONTINUOUS_CACHE_TTL_MIN,
+        GeminiClient,
+    )
 
     return {
         "enabled": bool(GeminiClient._AUTO_CACHE_ENABLED),
         "keep_seconds": GeminiClient.auto_cache_keep_seconds(),
         "keep_seconds_max": AUTO_CACHE_KEEP_SECONDS_MAX,
+        "continuous": bool(GeminiClient._CONTINUOUS_CACHE_ENABLED),
+        "continuous_ttl_seconds": GeminiClient.continuous_cache_ttl_seconds(),
+        "continuous_ttl_seconds_min": CONTINUOUS_CACHE_TTL_MIN,
+        "continuous_ttl_seconds_max": CONTINUOUS_CACHE_TTL_MAX,
     }
 
 
 @router.post("/gemini-auto-cache")
 def set_gemini_auto_cache(req: GeminiAutoCacheRequest):
-    """Toggle Gemini auto-cache and persist to .env.
+    """Set Gemini auto-cache / continuous-cache and persist to .env.
 
     ON にすると全ての Gemini 呼び出しで explicit cache を自動作成し、入力トークンを
     キャッシュ価格 (1/10) にする。keep_seconds が 0 なら応答直後にキャッシュを削除し
     (従来挙動)、1 以上ならその秒数を TTL にして作成し、手動削除はせず Gemini 側の
     失効に任せる。
 
+    ``continuous`` は継続キャッシュ (高速応答モード、docs/intent/cache_lifecycle_control.md
+    §3.5)。自動キャッシュが ON のときだけ効き、ユーザーの発言への返事の呼び出しで
+    キャッシュを使い回す。``continuous_ttl_seconds`` はその寿命 (120〜1200 秒に丸める)。
+
+    後方互換: ``continuous`` / ``continuous_ttl_seconds`` を送らない古いクライアント
+    (enabled / keep_seconds だけ) は、継続キャッシュの設定を**変更しない** (勝手に
+    オフにしない)。そのとき ``.env`` にも継続キャッシュのキーは書かない。enabled=False
+    を送った場合も continuous の保存値は残るが、自動キャッシュが OFF なので効かない。
+
     クラス属性を書き換えるので、既に生きている GeminiClient インスタンスにも
     即座に効く (再起動不要)。
     """
-    from llm_clients.gemini import GeminiClient, clamp_auto_cache_keep_seconds
+    from llm_clients.gemini import (
+        GeminiClient,
+        clamp_auto_cache_keep_seconds,
+        clamp_continuous_cache_ttl_seconds,
+    )
 
     keep_seconds = clamp_auto_cache_keep_seconds(req.keep_seconds)
 
     GeminiClient._AUTO_CACHE_ENABLED = bool(req.enabled)
     GeminiClient._AUTO_CACHE_KEEP_SECONDS = keep_seconds
 
-    from api.routes.admin import write_env_updates
-    write_env_updates({
+    env_updates = {
         "SAIVERSE_GEMINI_AUTO_CACHE": "1" if req.enabled else "0",
         "SAIVERSE_GEMINI_AUTO_CACHE_KEEP_SECONDS": str(keep_seconds),
-    })
+    }
+    if req.continuous is not None:
+        GeminiClient._CONTINUOUS_CACHE_ENABLED = bool(req.continuous)
+        env_updates["SAIVERSE_GEMINI_CONTINUOUS_CACHE"] = "1" if req.continuous else "0"
+    if req.continuous_ttl_seconds is not None:
+        ttl = clamp_continuous_cache_ttl_seconds(req.continuous_ttl_seconds)
+        GeminiClient._CONTINUOUS_CACHE_TTL_SECONDS = ttl
+        env_updates["SAIVERSE_GEMINI_CONTINUOUS_CACHE_TTL_SECONDS"] = str(ttl)
+
+    from api.routes.admin import write_env_updates
+    write_env_updates(env_updates)
+    continuous = bool(GeminiClient._CONTINUOUS_CACHE_ENABLED)
+    continuous_ttl = GeminiClient.continuous_cache_ttl_seconds()
     _log.info(
-        "Gemini auto cache: enabled=%s keep_seconds=%s",
-        bool(req.enabled), keep_seconds,
+        "Gemini auto cache: enabled=%s keep_seconds=%s continuous=%s continuous_ttl=%s",
+        bool(req.enabled), keep_seconds, continuous, continuous_ttl,
     )
-    return {"success": True, "enabled": bool(req.enabled), "keep_seconds": keep_seconds}
+    return {
+        "success": True,
+        "enabled": bool(req.enabled),
+        "keep_seconds": keep_seconds,
+        "continuous": continuous,
+        "continuous_ttl_seconds": continuous_ttl,
+    }
 
 
 class MaxImageEmbedsRequest(BaseModel):

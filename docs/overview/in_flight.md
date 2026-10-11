@@ -114,4 +114,5 @@
 | 🟣 検証待ち | 反射判断 — 型付き質問で確率を返す判断層と答える側の差し替え | 第 1 段・第 2 段は v0.3.14 に載っていて既定は OFF。OpenAI Decisions を答える側に足す変更も develop に入った。次 = まはーが実機で軽量モデルや OpenAI Decisions の割り当て・ペルソナ個別の上書き・注記の出方を評価する。 | まはー (実機評価) | [intent](../intent/reflex_judgment.md) | 2026-10-09 |
 | 🟣 検証待ち | Stack-chan のファームウェアが一般ユーザーに届かない (導入した人が「ファームウェア書き込み」を使えない) | SAIVerse v0.3.21 とアドオン v0.5.1 を出し、公開カタログにも署名して載せた。次 = まはーの手元カタログの設定を外し、最初の報告者に更新を案内する。 | まはー (`.env` の行の削除・報告者への連絡) | [issue](../issues/stackchan_firmware_not_distributed.md) | 2026-10-04 |
 | 🟣 検証待ち | モデル編集の追加 JSON に書いた水位の引き取り | JSON の水位を専用欄へ引き取る修正は develop に入った。次 = モデル編集画面で追加設定の JSON に水位を書いて保存し、開き直すと専用欄に入っていることを実機で見る。 | まはー (実機確認) | [issue](../issues/model_editor_drops_watermark_keys_from_json.md) | 2026-10-03 |
+| 🟣 検証待ち | Gemini の継続キャッシュ (高速応答モード) | 実装と敵対レビューは済み、PR をまはーが確認する段階。次 = マージ後、まはーの音声会話で継続キャッシュを選び、返事までの待ち時間をログで測る。 | まはー (PR の確認・実機) | [intent](../intent/cache_lifecycle_control.md) §3.5 | 2026-10-11 |
 <!-- 構想止まり(当分動かない)は台帳外。intent draft で管理: observer/Fixture, Social Track 入口(Phase 5) など -->
