@@ -60,6 +60,7 @@ import json
 import logging
 import os
 import platform
+import re
 import secrets
 import socket
 import socketserver
@@ -531,9 +532,18 @@ def _valid_issued_client_id(value: Any) -> bool:
     return isinstance(value, str) and bool(value) and value != SIWC_DYNAMIC_CLIENT_ID
 
 
-def _is_nonempty_str(value: Any) -> bool:
-    """A token field from an untrusted token response that is actually usable."""
-    return isinstance(value, str) and bool(value)
+_TOKEN_CHARS = re.compile(r"[\x21-\x7e]+")
+
+
+def is_usable_token(value: Any) -> bool:
+    """A token field from an untrusted token response that is actually usable.
+
+    A non-empty string of visible ASCII only: no spaces, CR/LF or other
+    control characters. Anything else could not travel in an
+    `Authorization: Bearer` header, and the HTTP library's error for such a
+    header quotes the whole value — a token would leak into logs.
+    """
+    return isinstance(value, str) and _TOKEN_CHARS.fullmatch(value) is not None
 
 
 def ensure_siwc_client_record() -> Tuple[str, Optional[str]]:
@@ -1374,9 +1384,9 @@ class CodexDeviceLoginManager(_LoginAttemptManager):
         # Untrusted JSON: a token that is not a string must never reach the
         # store (same rule as the SIWC exchange). The device flow has no
         # revocation path, so an unusable response is simply not saved.
-        if not isinstance(tokens, dict) or not _is_nonempty_str(tokens.get("access_token")):
+        if not isinstance(tokens, dict) or not is_usable_token(tokens.get("access_token")):
             raise CodexDeviceLoginError("トークン交換の応答に access_token がありません。")
-        if tokens.get("refresh_token") is not None and not _is_nonempty_str(
+        if tokens.get("refresh_token") is not None and not is_usable_token(
             tokens.get("refresh_token")
         ):
             raise CodexDeviceLoginError("トークン交換の応答の refresh_token が不正です。")
@@ -1657,9 +1667,9 @@ def _validate_siwc_exchange(
     (OIDC Core 3.1.3.7 permits TLS server validation in place of signature
     checks for tokens received this way).
     """
-    if not _is_nonempty_str(data.get("access_token")):
+    if not is_usable_token(data.get("access_token")):
         raise SiwcOAuthError("トークン交換の応答に使える access_token がありません。")
-    if not _is_nonempty_str(data.get("refresh_token")):
+    if not is_usable_token(data.get("refresh_token")):
         raise SiwcOAuthError(
             "トークン交換の応答に使える refresh_token がありません。"
             "このままではログインを維持できないため保存しませんでした。もう一度お試しください。"
@@ -2237,7 +2247,7 @@ class SiwcOAuthManager(_LoginAttemptManager):
             data = resp.json()
         except Exception as exc:  # noqa: BLE001
             raise SiwcOAuthError("トークン交換の応答が JSON ではありませんでした。") from exc
-        if not isinstance(data, dict) or not _is_nonempty_str(data.get("access_token")):
+        if not isinstance(data, dict) or not is_usable_token(data.get("access_token")):
             # The endpoint answered 200, so a refresh token it did mint is a
             # live grant nobody will hold: revoke it before giving up (only a
             # usable string is sent; `_revoke_unpersisted` skips anything else).
@@ -2406,6 +2416,7 @@ __all__ = [
     "access_token_expiry",
     "is_siwc_token",
     "is_siwc_record",
+    "is_usable_token",
     "resolve_siwc_client_id",
     "siwc_scope_grants_direct_use",
     "get_siwc_client_record_path",

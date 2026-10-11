@@ -49,6 +49,7 @@ from .openai_codex_auth import (
     access_token_expiry,
     build_user_agent as _build_user_agent,
     is_siwc_record,
+    is_usable_token,
     resolve_siwc_client_id,
     revoke_siwc_refresh_token,
     siwc_scope_grants_direct_use,
@@ -742,8 +743,18 @@ class OpenAICodexClient(LLMClient):
 
         if is_siwc:
             session = self._ensure_session(is_siwc=True)
-            req = session.build_request("POST", url, headers=headers, json=body)
-            raw_resp = session.send(req, stream=True)
+            try:
+                req = session.build_request("POST", url, headers=headers, json=body)
+                raw_resp = session.send(req, stream=True)
+            except httpx.LocalProtocolError as exc:
+                # The protocol error for an unsendable header quotes the whole
+                # header — the Bearer token — so never let its text propagate
+                # into logs or the UI. Name the type only.
+                raise RuntimeError(
+                    "Sign in with ChatGPT の鍵を送信できませんでした "
+                    f"({type(exc).__name__})。SAIVerse の設定画面から ChatGPT に"
+                    "ログインし直してください。"
+                ) from None
             resp: Any = _HttpxResponseAdapter(raw_resp)
         else:
             session = self._ensure_session(is_siwc=False)
@@ -887,13 +898,12 @@ class OpenAICodexClient(LLMClient):
             raise RuntimeError(
                 f"Sign in with ChatGPT の鍵の更新応答が読めませんでした。{relogin}"
             )
-        access = refreshed.get("access_token")
-        if not isinstance(access, str) or not access:
+        if not is_usable_token(refreshed.get("access_token")):
             raise RuntimeError(
                 f"Sign in with ChatGPT の鍵の更新応答に使える access_token がありませんでした。{relogin}"
             )
         new_refresh = refreshed.get("refresh_token")
-        if new_refresh is not None and (not isinstance(new_refresh, str) or not new_refresh):
+        if new_refresh is not None and not is_usable_token(new_refresh):
             raise RuntimeError(
                 f"Sign in with ChatGPT の鍵の更新応答の refresh_token が不正でした。{relogin}"
             )

@@ -1286,6 +1286,80 @@ def test_id_token_nonce_mismatch_is_rejected(
     assert revocations == [("rt-siwc", "oaiapp_n")]
 
 
+@pytest.mark.parametrize(
+    "value, usable",
+    [
+        ("eyJ.abc-_~+/=.sig", True),
+        ("tok\n", False),
+        ("tok\r\nX-Injected: 1", False),
+        ("has space", False),
+        ("tab\there", False),
+        ("ünicode", False),
+        ("", False),
+        (123, False),
+        (None, False),
+    ],
+)
+def test_is_usable_token_accepts_only_header_safe_strings(value, usable):
+    assert oca.is_usable_token(value) is usable
+
+
+@pytest.mark.parametrize("field", ["access_token", "refresh_token"])
+def test_validation_rejects_tokens_with_line_breaks(field):
+    nonce = "n-1"
+    data = _exchange_payload(nonce, "oaiapp_c")
+    data[field] = data[field] + "\r\n"
+    with pytest.raises(oca.SiwcOAuthError):
+        oca._validate_siwc_exchange(data, "oaiapp_c", nonce)
+
+
+@pytest.mark.parametrize(
+    "refreshed",
+    [
+        {"access_token": "ok-token\n", "refresh_token": "rt-new"},
+        {"access_token": "ok-token", "refresh_token": "rt new"},
+    ],
+)
+def test_siwc_refresh_response_with_line_breaks_is_refused(refreshed):
+    with pytest.raises(RuntimeError) as excinfo:
+        OpenAICodexClient._check_siwc_refresh_response(refreshed)
+    assert "ok-token" not in str(excinfo.value)
+    assert "rt-new" not in str(excinfo.value)
+
+
+def test_unsendable_bearer_header_error_never_carries_the_token(isolated_stores, monkeypatch):
+    """httpx の送信エラーはヘッダー全文を含むので、その文面を外へ出さない。"""
+    secret = "SECRET-TOKEN-VALUE"
+    _write_json(
+        isolated_stores["saiverse"],
+        {
+            "source": oca.SIWC_SOURCE,
+            "tokens": {
+                "access_token": secret,
+                "refresh_token": "rt-siwc",
+                "client_id": "oaiapp_c",
+                "scope": oca.SIWC_SCOPE,
+            },
+        },
+    )
+
+    class _ExplodingSession:
+        def build_request(self, method, url, **kwargs):
+            return object()
+
+        def send(self, request, stream=False):
+            raise httpx.LocalProtocolError(f"Illegal header value b'Bearer {secret}'")
+
+    client = OpenAICodexClient(model="gpt-6.1-sol")
+    monkeypatch.setattr(client, "_ensure_session", lambda is_siwc=False: _ExplodingSession())
+    body = {"model": "gpt-6.1-sol", "input": [], "stream": True, "store": False}
+    with pytest.raises(RuntimeError) as excinfo:
+        client._post_responses(body)
+    assert secret not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
+
+
 def test_id_token_aud_must_contain_issued_client_id():
     data = _exchange_payload("n1", "oaiapp_someone_else")
     with pytest.raises(oca.SiwcOAuthError, match="aud"):
