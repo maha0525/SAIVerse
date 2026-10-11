@@ -226,6 +226,43 @@ def _withdraw_if_nothing_was_said(
     )
 
 
+def _continuous_cache_kwargs(state: Any, persona: Any, building_id: Optional[str]) -> Dict[str, Any]:
+    """継続キャッシュ (高速応答モード) の対象の呼び出しなら、その印の kwarg を返す。
+
+    対象は「ユーザーの発言に返事をする Pulse (``_pulse_type == "user"``) の、会話の
+    ライン上の LLM 呼び出し」だけ (docs/intent/cache_lifecycle_control.md §3.5)。
+    schedule / ペルソナ同士 / 自律 / メタ判断の Pulse、サブライン (WORKER) は含めない
+    — CONVERSATION アスペクトは schedule も含むので、アスペクトだけでは判定しない。
+
+    LLM クライアントの側では、その呼び出しが何のためのものかを判別できないので、
+    SEA から ``continuous_cache={"persona_id", "building_id"}`` で伝える (境目の位置は
+    履歴のメッセージの内部印で伝わる。``runtime_context.mark_cache_boundary``)。
+    Gemini 以外のクライアントは未知の kwarg として無視する。
+    """
+    if not isinstance(state, dict) or state.get("_pulse_type") != "user":
+        return {}
+    if state.get("_force_lightweight_model"):
+        # サブライン (run_playbook line='sub') は返事の本体ではない。
+        return {}
+    from sea.pulse_context import Aspect
+    pulse_ctx = state.get("_pulse_context")
+    current_line = None
+    if pulse_ctx is not None and hasattr(pulse_ctx, "current_line"):
+        try:
+            current_line = pulse_ctx.current_line()
+        except Exception:
+            current_line = None
+    aspect = getattr(current_line, "aspect", None) if current_line is not None else None
+    if aspect is not None and aspect != Aspect.CONVERSATION:
+        return {}
+    return {
+        "continuous_cache": {
+            "persona_id": getattr(persona, "persona_id", None),
+            "building_id": building_id,
+        }
+    }
+
+
 def _maybe_record_cache_storage(usage, persona_id: str | None, building_id: str | None) -> None:
     """UsageInfo に cache_storage 情報があれば独立レコードで計上する。"""
     if not usage or not getattr(usage, "cache_storage_tokens", 0):
@@ -3925,6 +3962,7 @@ async def _run_spell_loop(
                         tools=[],
                         temperature=runtime._default_temperature(persona),
                         **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                        **_continuous_cache_kwargs(state, persona, building_id),
                     )
                     # progress に spell 側の器そのものを渡す — retry ストリームの
                     # 途中で死んでも、発火済みの sub-speak 連番と受信済みの chunk が
@@ -3976,6 +4014,7 @@ async def _run_spell_loop(
                         tools=[],
                         temperature=runtime._default_temperature(persona),
                         **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                        **_continuous_cache_kwargs(state, persona, building_id),
                     )
             except EmptyResponseError:
                 # スペルの後に何も言わないのは正常な終わり方。ストリーミング経路は
@@ -5232,6 +5271,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             tools=tools_spec,
                             temperature=runtime._default_temperature(persona),
                             **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                            **_continuous_cache_kwargs(state, persona, building_id),
                         )
                         try:
                             for chunk in stream_iter:
@@ -5418,6 +5458,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         tools=tools_spec,
                         temperature=runtime._default_temperature(persona),
                         **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                        **_continuous_cache_kwargs(state, persona, building_id),
                     )
 
                     # Consume reasoning (thinking) from tool-mode LLM call
@@ -5755,6 +5796,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             tools=[],
                             temperature=runtime._default_temperature(persona),
                             **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                            **_continuous_cache_kwargs(state, persona, building_id),
                         )
                         _initial_text, pipeline_sub_seq, _initial_spell_detected, _initial_cancelled = await _consume_pipeline_stream(
                             stream_iter,
@@ -6456,6 +6498,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         temperature=runtime._default_temperature(persona),
                         response_schema=response_schema,
                         **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                        **_continuous_cache_kwargs(state, persona, building_id),
                     )
                     LOGGER.debug("[sea][llm] llm_client.generate() returned: type=%s, len=%s, repr=%s", type(text).__name__, len(text) if isinstance(text, str) else "(not str)", repr(text)[:200] if isinstance(text, str) else text)
 

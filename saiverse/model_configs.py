@@ -859,13 +859,14 @@ def calculate_cost(
 
 
 def calculate_cache_storage_cost(
-    model: str, cached_tokens: int, ttl_seconds: int, *, at: datetime | None = None,
+    model: str, cached_tokens: int, ttl_seconds: float, *, at: datetime | None = None,
 ) -> float:
     """Estimate the full reserved TTL, prorating each effective price interval.
 
     ``at`` is the reservation start (now when omitted). This keeps the existing
     up-front accounting, without applying a promotional rate beyond its expiry.
-    Early-delete refunds remain unimplemented; stored charges are never repriced.
+    Continuous-cache refunds apply this same calculation to the unused interval.
+    Auto-cache refunds remain unimplemented; stored charges are never repriced.
     See docs/intent/cache_lifecycle_control.md.
     """
     if cached_tokens <= 0 or ttl_seconds <= 0:

@@ -47,6 +47,52 @@ class TestRecordUsage(unittest.TestCase):
         self.tracker._flush_to_db.assert_called()
 
 
+class TestCacheStorageRefund(unittest.TestCase):
+    """TTL 前に消したキャッシュの残りを、同じ区分の負の記録で返金する。"""
+
+    def setUp(self):
+        self.tracker = get_usage_tracker()
+        self._orig_flush = self.tracker._flush_to_db
+        self.tracker._flush_to_db = MagicMock()
+        with self.tracker._pending_lock:
+            self.tracker._pending_records.clear()
+
+    def tearDown(self):
+        self.tracker._flush_to_db = self._orig_flush
+        with self.tracker._pending_lock:
+            self.tracker._pending_records.clear()
+
+    def test_refund_is_a_negative_cache_storage_record(self):
+        with patch(
+            "saiverse.model_configs.calculate_cache_storage_cost", return_value=0.25,
+        ) as calc:
+            self.tracker.record_cache_storage_refund(
+                "gem", 4000, 120.5, persona_id="air", building_id="room",
+            )
+        record = self.tracker._pending_records[-1]
+        calc.assert_called_once_with("gem", 4000, 120.5, at=record["timestamp"])
+        self.assertEqual(record["cost_usd"], -0.25)
+        self.assertEqual(record["category"], "cache_storage")
+        self.assertEqual(record["model_id"], "gem")
+        self.assertEqual(record["cached_tokens"], 4000)
+        self.assertEqual((record["input_tokens"], record["output_tokens"]), (0, 0))
+        self.assertEqual((record["persona_id"], record["building_id"]), ("air", "room"))
+        # 作成時の計上 (record_cache_storage) と同じ通貨へ返金する
+        self.assertEqual(record["currency"], "USD")
+
+    def test_refund_nets_against_the_charge(self):
+        with patch("saiverse.model_configs.calculate_cache_storage_cost", side_effect=[0.3, 0.2]):
+            self.tracker.record_cache_storage("gem", 4000, 300, persona_id="air")
+            self.tracker.record_cache_storage_refund("gem", 4000, 200, persona_id="air")
+        costs = [r["cost_usd"] for r in self.tracker._pending_records]
+        self.assertAlmostEqual(sum(costs), 0.1)
+
+    def test_zero_refund_writes_nothing(self):
+        with patch("saiverse.model_configs.calculate_cache_storage_cost", return_value=0.0):
+            self.tracker.record_cache_storage_refund("gem", 4000, 0, persona_id="air")
+        self.assertEqual(self.tracker._pending_records, [])
+
+
 class TestConfigure(unittest.TestCase):
     def test_configure_sets_session_factory(self):
         tracker = get_usage_tracker()

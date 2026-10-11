@@ -19,9 +19,13 @@ def restore_class_attrs():
     """クラス属性を書き換えるテストなので、必ず元へ戻す。"""
     enabled = GeminiClient._AUTO_CACHE_ENABLED
     keep = GeminiClient._AUTO_CACHE_KEEP_SECONDS
+    continuous = GeminiClient._CONTINUOUS_CACHE_ENABLED
+    continuous_ttl = GeminiClient._CONTINUOUS_CACHE_TTL_SECONDS
     yield
     GeminiClient._AUTO_CACHE_ENABLED = enabled
     GeminiClient._AUTO_CACHE_KEEP_SECONDS = keep
+    GeminiClient._CONTINUOUS_CACHE_ENABLED = continuous
+    GeminiClient._CONTINUOUS_CACHE_TTL_SECONDS = continuous_ttl
 
 
 @pytest.fixture
@@ -223,12 +227,17 @@ def test_api_updates_class_attributes_and_persists_to_env(monkeypatch):
 
     GeminiClient._AUTO_CACHE_ENABLED = False
     GeminiClient._AUTO_CACHE_KEEP_SECONDS = 0
+    GeminiClient._CONTINUOUS_CACHE_ENABLED = False
+    GeminiClient._CONTINUOUS_CACHE_TTL_SECONDS = 300
 
     result = config_routes.set_gemini_auto_cache(
         config_routes.GeminiAutoCacheRequest(enabled=True, keep_seconds=99999)
     )
 
-    assert result == {"success": True, "enabled": True, "keep_seconds": AUTO_CACHE_KEEP_SECONDS_MAX}
+    assert result == {
+        "success": True, "enabled": True, "keep_seconds": AUTO_CACHE_KEEP_SECONDS_MAX,
+        "continuous": False, "continuous_ttl_seconds": 300,
+    }
     assert GeminiClient._AUTO_CACHE_ENABLED is True
     assert GeminiClient._AUTO_CACHE_KEEP_SECONDS == AUTO_CACHE_KEEP_SECONDS_MAX
     assert written == {
@@ -240,6 +249,10 @@ def test_api_updates_class_attributes_and_persists_to_env(monkeypatch):
         "enabled": True,
         "keep_seconds": AUTO_CACHE_KEEP_SECONDS_MAX,
         "keep_seconds_max": AUTO_CACHE_KEEP_SECONDS_MAX,
+        "continuous": False,
+        "continuous_ttl_seconds": 300,
+        "continuous_ttl_seconds_min": 120,
+        "continuous_ttl_seconds_max": 1200,
     }
 
 
@@ -251,12 +264,17 @@ def test_api_off_writes_zero_flag(monkeypatch):
 
     GeminiClient._AUTO_CACHE_ENABLED = True
     GeminiClient._AUTO_CACHE_KEEP_SECONDS = 300
+    GeminiClient._CONTINUOUS_CACHE_ENABLED = False
+    GeminiClient._CONTINUOUS_CACHE_TTL_SECONDS = 300
 
     result = config_routes.set_gemini_auto_cache(
         config_routes.GeminiAutoCacheRequest(enabled=False, keep_seconds=-1)
     )
 
-    assert result == {"success": True, "enabled": False, "keep_seconds": 0}
+    assert result == {
+        "success": True, "enabled": False, "keep_seconds": 0,
+        "continuous": False, "continuous_ttl_seconds": 300,
+    }
     assert GeminiClient._AUTO_CACHE_ENABLED is False
     assert GeminiClient._AUTO_CACHE_KEEP_SECONDS == 0
     assert written["SAIVERSE_GEMINI_AUTO_CACHE"] == "0"

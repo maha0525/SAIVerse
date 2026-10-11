@@ -430,7 +430,11 @@ def get_llm_client(model: str, provider: str, context_length: int, config: dict 
 - キャッシュ保管は既存の TTL 全体の前払い見積もりを維持し、作成時刻から TTL 終了までを
   料金境界で分割して時間按分する。作成時刻は provider の `create_time` を優先し、
   欠落時は create API 完了時刻を使う。生成終了後の記帳時刻から TTL を開始し直さない。
-  早期削除時の返金は従来どおり未実装で、本変更では過去の予約料金を修正しない。
+  継続キャッシュ（#385）は provider の失効時刻を使うため、前払いする予約区間を
+  `[expire_at − TTL, expire_at)` に統一する。削除成功時からその区間の終わりまでを
+  同じ日付料金で時間按分して負の記録を追加する（予約開始より前なら開始へ丸める）。
+  削除イベントの日時と返金区間の開始は別に保持し、記帳が遅れても区間をずらさない。
+  自動キャッシュの早期削除返金は未実装のまま。過去の予約料金自体は書き換えない。
 - Gemini 3.6 / 3.8 Flash paid の標準料金について、2026-10-10 に
   [公式料金表](https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash)の
   2026-12-31 までの割引を確認した。入力 / 出力 / cache read は 1M tokens あたり

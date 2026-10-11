@@ -303,6 +303,9 @@ def _messages(warnings):
 class _StubPersonaCore:
     """PersonaCore の代わり。受け取った引数をそのまま属性として持ち、当てはめを受け付ける。"""
 
+    #: 本物の PersonaCore と同じく常に持つ。SAIMemory は作らないので None。
+    sai_memory = None
+
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
 
