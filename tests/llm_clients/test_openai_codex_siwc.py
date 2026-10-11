@@ -1384,6 +1384,90 @@ def test_describe_response_redacts_before_truncating():
     assert "rt-SECRET" not in out
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"refresh_token":"rt-SECRET-truncated',  # cut mid-string
+        '{"detail": "{\\"access_token\\": \\"at-SECRET-escaped\\"}"}',  # escaped field
+        '{"error": "invalid_grant", "error_description": "opaque-SECRET-echo"}',
+        "<html>opaque-SECRET-page</html>",
+    ],
+)
+def test_auth_server_bodies_never_leave_more_than_an_error_code(body):
+    class _Resp:
+        status_code = 400
+        headers = {"content-type": "application/json"}
+        text = body
+
+    out = oca._describe_response(_Resp())
+    assert "SECRET" not in out
+    assert "SECRET" not in oca.summarize_error_body(body)
+
+
+def test_summarize_error_body_keeps_identifier_codes():
+    assert "error=invalid_grant" in oca.summarize_error_body('{"error": "invalid_grant"}')
+    assert "error=deviceauth_authorization_pending" in oca.summarize_error_body(
+        '{"error": {"code": "deviceauth_authorization_pending", "message": "x"}}'
+    )
+    assert "error=?" in oca.summarize_error_body('{"error": "has space SECRET"}')
+
+
+def test_callback_error_description_is_not_reflected(isolated_stores, fake_auth_http, siwc_manager):
+    started = siwc_manager.start()
+    q = _query(started["auth_url"])
+    out = siwc_manager.complete(
+        started["attempt_id"],
+        _callback_url(
+            started, error="server_error", error_description="desc-SECRET-jwt", state=q["state"]
+        ),
+    )
+    assert out["ok"] is False
+    assert "desc-SECRET" not in out["error"]
+    assert "desc-SECRET" not in out["message"]
+    assert "server_error" in out["error"]
+
+
+def test_exchange_transport_error_does_not_carry_code_or_verifier(
+    isolated_stores, fake_auth_http, siwc_manager
+):
+    started = siwc_manager.start()
+    q = _query(started["auth_url"])
+
+    def boom(url, kwargs):
+        data = kwargs["data"]
+        raise httpx.ConnectError(f"failed with {data['code']} {data['code_verifier']}")
+
+    fake_auth_http.post_handler = boom
+    verifier = siwc_manager._attempt.verifier
+    out = siwc_manager.complete(
+        started["attempt_id"],
+        _callback_url(started, code="code-SECRET-1", state=q["state"], client_id="oaiapp_c"),
+    )
+    assert out["ok"] is False
+    assert "code-SECRET-1" not in out["error"]
+    assert verifier not in out["error"]
+
+
+def test_stream_failure_event_is_scrubbed_of_the_sent_token():
+    client = OpenAICodexClient(model="gpt-6.1-sol")
+    client._last_sent_token = "SENT-TOKEN-SECRET-9"
+    failed = {
+        "type": "response.failed",
+        "response": {"error": {"code": "server_error", "message": "echo SENT-TOKEN-SECRET-9 " + _siwc_access_token()}},
+    }
+
+    class _Resp:
+        def iter_content(self):
+            yield ("data: " + json.dumps(failed) + "\n\n").encode()
+
+    with pytest.raises(RuntimeError) as excinfo:
+        list(client._iter_chunks(_Resp()))
+    text = str(excinfo.value)
+    assert "SENT-TOKEN-SECRET-9" not in text
+    assert "eyJ" not in text
+    assert "server_error" in text
+
+
 def test_stored_token_with_line_break_is_refused_without_echo(isolated_stores):
     secret = "stored-SECRET\r\nX-Injected: 1"
     _write_json(

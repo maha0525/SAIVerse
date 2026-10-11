@@ -774,11 +774,42 @@ def redact_secrets(text: Any, *known_secrets: Any) -> str:
     return _BARE_JWT.sub(_REDACTED, out)
 
 
-def _describe_response(resp: Any) -> str:
-    """status + content-type + short redacted body preview, for diagnosing bad responses.
+_ERROR_CODE_CHARS = re.compile(r"[A-Za-z0-9_.:\-]{1,64}")
 
-    Never includes request credentials. The body is redacted before it is
-    cut: a token response that failed to parse still carries minted tokens.
+
+def summarize_error_body(text: Any) -> str:
+    """The machine-readable error code of an auth-server body — never its text.
+
+    Auth-server bodies (auth.openai.com: token exchange, refresh, device
+    login) may carry freshly minted tokens or echo what was sent, in shapes
+    no redaction pattern can enumerate (truncated JSON, escaped fields,
+    opaque tokens). So nothing of the body travels to logs, errors or the
+    UI except a short code from a well-formed JSON body (`error`,
+    `error.code`, `error.type`, `code`) that consists only of
+    identifier characters, plus the body length.
+    """
+    raw = text if isinstance(text, str) else ""
+    code = None
+    try:
+        data = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        data = None
+    if isinstance(data, dict):
+        candidates = [data.get("error"), data.get("code")]
+        err = data.get("error")
+        if isinstance(err, dict):
+            candidates = [err.get("code"), err.get("type"), data.get("code")]
+        for value in candidates:
+            if isinstance(value, str) and _ERROR_CODE_CHARS.fullmatch(value):
+                code = value
+                break
+    return f"error={code or '?'} body_len={len(raw)}"
+
+
+def _describe_response(resp: Any) -> str:
+    """status + content-type + error code, for diagnosing bad auth-server responses.
+
+    Deliberately carries no body text (see `summarize_error_body`).
     """
     try:
         ctype = resp.headers.get("content-type", "?")
@@ -787,9 +818,13 @@ def _describe_response(resp: Any) -> str:
     try:
         body = resp.text
     except Exception:  # noqa: BLE001
-        body = "<unreadable>"
-    preview = redact_secrets(body)[:200]
-    return f"status={resp.status_code} content-type={ctype!r} body[:200]={preview!r}"
+        body = ""
+    return f"status={resp.status_code} content-type={ctype!r} {summarize_error_body(body)}"
+
+
+def describe_exception(exc: BaseException, *known_secrets: Any) -> str:
+    """Exception type plus a redacted, short message — for transport failures."""
+    return f"{type(exc).__name__}: {redact_secrets(str(exc), *known_secrets)[:200]}"
 
 
 class _LoginAttemptManager:
@@ -1395,7 +1430,9 @@ class CodexDeviceLoginManager(_LoginAttemptManager):
                 timeout=30,
             )
         except Exception as exc:  # noqa: BLE001
-            raise CodexDeviceLoginError(f"トークン交換に失敗しました: {exc}") from exc
+            raise CodexDeviceLoginError(
+                f"トークン交換に失敗しました: {describe_exception(exc, code_verifier)}"
+            ) from None
         finally:
             try:
                 session.close()
@@ -2067,7 +2104,10 @@ class SiwcOAuthManager(_LoginAttemptManager):
                 )
             if error == "access_denied":
                 return fail("ChatGPT でのサインインが拒否またはキャンセルされました。")
-            return fail(f"OpenAI 認証エラー: {params.get('error_description') or error}")
+            # The callback's free text is untrusted and reaches the log, the
+            # status API and the browser page: keep the error code only.
+            safe_error = error if _ERROR_CODE_CHARS.fullmatch(error) else "不明なエラー"
+            return fail(f"OpenAI 認証エラー: {safe_error}")
         code = params.get("code")
         if not code:
             return fail("認可コードが返ってきませんでした。")
@@ -2256,7 +2296,9 @@ class SiwcOAuthManager(_LoginAttemptManager):
                 timeout=30,
             )
         except Exception as exc:  # noqa: BLE001
-            raise SiwcOAuthError(f"トークン交換に失敗しました: {exc}") from exc
+            raise SiwcOAuthError(
+                f"トークン交換に失敗しました: {describe_exception(exc, code, verifier)}"
+            ) from None
         finally:
             try:
                 session.close()
@@ -2448,6 +2490,8 @@ __all__ = [
     "is_siwc_record",
     "is_usable_token",
     "redact_secrets",
+    "summarize_error_body",
+    "describe_exception",
     "resolve_siwc_client_id",
     "siwc_scope_grants_direct_use",
     "get_siwc_client_record_path",

@@ -52,6 +52,7 @@ from .openai_codex_auth import (
     is_usable_token,
     redact_secrets,
     resolve_siwc_client_id,
+    summarize_error_body,
     revoke_siwc_refresh_token,
     siwc_scope_grants_direct_use,
     read_auth_store,
@@ -284,6 +285,9 @@ class OpenAICodexClient(LLMClient):
         self._params: Dict[str, Any] = {}
         self._session: Optional[Any] = None
         self._httpx_session: Optional[httpx.Client] = None
+        # The bearer token of the latest request, kept only so diagnostics of
+        # that response (error bodies, response.failed events) can be scrubbed.
+        self._last_sent_token: Optional[str] = None
         # Reuse OpenAIClient's defaults: 5 MB cap on image bytes for OpenAI-style
         # vision endpoints. SAIVerse normally provides image attachments via
         # `metadata.attachments` rather than expanded content lists, so we run
@@ -721,6 +725,7 @@ class OpenAICodexClient(LLMClient):
             body = self._to_siwc_body(body)
         # Best-effort expiry warning on the token we're about to send.
         access_token_for_log = headers.get("Authorization", "").removeprefix("Bearer ")
+        self._last_sent_token = access_token_for_log or None
         if access_token_for_log:
             self._warn_if_expiring_soon(access_token_for_log)
 
@@ -973,9 +978,11 @@ class OpenAICodexClient(LLMClient):
                 json=payload,
             )
             if resp.status_code != 200:
-                err = redact_secrets(resp.text or "", refresh_token)
+                # Auth-server body: only its error code travels (see
+                # summarize_error_body) — it may carry or echo tokens.
                 raise RuntimeError(
-                    f"refresh_token grant failed status={resp.status_code}: {err[:600]}"
+                    f"refresh_token grant failed status={resp.status_code}: "
+                    f"{summarize_error_body(resp.text or '')}"
                 )
             try:
                 return resp.json()
@@ -1000,9 +1007,9 @@ class OpenAICodexClient(LLMClient):
                 },
             )
             if resp.status_code != 200:
-                err = redact_secrets(resp.text or "", refresh_token)
                 raise RuntimeError(
-                    f"SIWC refresh_token grant failed status={resp.status_code}: {err[:600]}"
+                    f"SIWC refresh_token grant failed status={resp.status_code}: "
+                    f"{summarize_error_body(resp.text or '')}"
                 )
             try:
                 return resp.json()
@@ -1094,7 +1101,7 @@ class OpenAICodexClient(LLMClient):
             try:
                 return json.loads(data_str)
             except json.JSONDecodeError:
-                LOG.debug("could not parse SSE payload: %s", data_str[:200])
+                LOG.debug("could not parse SSE payload: %s", redact_secrets(data_str)[:200])
                 return None
 
         for chunk in resp.iter_content():
@@ -1284,7 +1291,10 @@ class OpenAICodexClient(LLMClient):
             elif event_type == "response.failed":
                 response_obj = event.get("response") or {}
                 error = response_obj.get("error") or {}
-                raise RuntimeError(f"Codex response failed: {error}")
+                # The error object comes from the stream of a request that
+                # carried our token; scrub before it becomes exception text.
+                safe_error = redact_secrets(str(error), self._last_sent_token)[:1000]
+                raise RuntimeError(f"Codex response failed: {safe_error}")
 
         # ストリームへ流した結合が正典 (SEA 側は chunk の結合を text として使う)。
         # done が一部のメッセージで欠けても、流れた本文は捨てない。done /
