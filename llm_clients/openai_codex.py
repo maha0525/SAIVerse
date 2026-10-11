@@ -48,7 +48,7 @@ from .openai_codex_auth import (
     AuthStore,
     access_token_expiry,
     build_user_agent as _build_user_agent,
-    is_siwc_token,
+    is_siwc_record,
     resolve_siwc_client_id,
     siwc_scope_grants_direct_use,
     read_auth_store,
@@ -231,12 +231,9 @@ class _HttpxResponseAdapter:
         # is an unfollowed redirect, not a usable response.
         self.ok = 200 <= resp.status_code < 300
         self.headers = resp.headers
-        self._text: Optional[str] = None
 
     @property
     def text(self) -> str:
-        if self._text is not None:
-            return self._text
         try:
             return self._resp.text
         except Exception:  # noqa: BLE001
@@ -256,7 +253,9 @@ class OpenAICodexClient(LLMClient):
         1. Official Sign in with ChatGPT (Token Sharing):
            * Target: https://api.openai.com/v1/responses
            * Plain HTTP (httpx), standard Bearer authorization header
-           * Active whenever `is_siwc_token()` recognizes the stored token set
+           * Active whenever `is_siwc_record()` recognizes the stored record
+             (explicit `source: saiverse_siwc` marker first, token heuristics
+             for older records)
            * Body omits the parameters SIWC rejects (see `_SIWC_UNSUPPORTED_BODY_KEYS`)
         2. Legacy Codex CLI backend:
            * Target: https://chatgpt.com/backend-api/codex/responses
@@ -330,7 +329,7 @@ class OpenAICodexClient(LLMClient):
             raise RuntimeError(
                 f"認証ファイルに tokens.access_token がありません。{NO_AUTH_HINT}"
             )
-        is_siwc = is_siwc_token(tokens)
+        is_siwc = is_siwc_record(auth)
         if is_siwc:
             # The spec requires the granted scope to include direct plan use
             # before the tokens are used for inference. A record without a
@@ -793,7 +792,7 @@ class OpenAICodexClient(LLMClient):
                 latest_tokens = latest.get("tokens") or {}
                 latest_access = latest_tokens.get("access_token")
                 latest_refresh = latest_tokens.get("refresh_token")
-                is_siwc = is_siwc_token(latest_tokens)
+                is_siwc = is_siwc_record(latest)
 
                 if latest_access and latest_access != prior_access_token:
                     seconds = self._seconds_until_expiry(latest_access)
@@ -908,9 +907,11 @@ class OpenAICodexClient(LLMClient):
         SIWC refresh tokens rotate together with the granted scope, so a SIWC
         record also takes the refreshed `scope`. Legacy records (which may be
         Codex CLI's own ~/.codex/auth.json) never gain a field they did not have.
+        The record's top-level fields — `source` included, which routes a
+        SIWC record — are written back unchanged.
         """
         tokens = dict(existing_auth.get("tokens") or {})
-        replace_scope = is_siwc_token(tokens)
+        replace_scope = is_siwc_record(existing_auth)
         new_id = refreshed.get("id_token")
         new_access = refreshed.get("access_token")
         new_refresh = refreshed.get("refresh_token")

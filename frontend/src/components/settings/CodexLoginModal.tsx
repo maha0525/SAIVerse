@@ -38,6 +38,9 @@ interface LoginStatus {
     redirect_uri?: string;
     error?: string;
     account_id?: string | null;
+    // complete (貼り付けたアドレスの処理) の応答だけが持つ
+    ok?: boolean;
+    message?: string;
 }
 
 interface LoginLease {
@@ -77,15 +80,18 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
     // Poll timer + "did we already fire onSuccess" guard survive re-renders.
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const successNotifiedRef = useRef(false);
-    // この modal の UI 世代番号と、現世代が受け取った lease 群。閉じる
+    // この modal の UI 世代番号と、この modal が記録した lease 群。閉じる
     // (= returnAllLeases) たびに加えて「やり直す」「方式の切り替え」を含む
     // start のたびにも世代を進める。遅れて settle した旧世代の応答 (start 応答・
     // poll 応答・complete 応答) は、自分の世代が死んでいると分かったら画面に
-    // 触らず、lease を持っていれば自分で即返却する — 現世代の lease 群には
-    // 決して混ざらない。旧世代の cleanup が新世代の lease を巻き込む事故 (R4-①) と、
+    // 触らず、start 応答で lease を受け取っていればその場で返却する — 記録には
+    // 加えない。旧世代の cleanup が新世代の lease を巻き込む事故 (R4-①) と、
     // リトライ前の試行の遅延 poll がリトライ後の画面を上書きする事故 (R6-②) を、
-    // 同じ一つの番号で塞ぐ。方式の切り替えも世代を進めるので、切り替え前の
-    // 方式の応答が切り替え後の画面に触ることもない。
+    // 同じ一つの番号で塞ぐ。
+    // 返却の時期は経路で違う: 方式の切り替えと閉じる操作は記録済みの lease を
+    // その場で全部返すが、「やり直す」は世代を進めるだけで、それまでに記録した
+    // lease は返さずに持ち続ける (閉じるときにまとめて返す)。遅れて返る旧試行の
+    // lease は attempt_id が古いので、バックエンドは新しい試行に触れずに無視する。
     // lease はそれぞれ自分の方式を覚えていて、返却はその方式の cancel へ送る。
     const openSeqRef = useRef(0);
     const leasesRef = useRef<LoginLease[]>([]);
@@ -123,6 +129,17 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
         if (mySeq !== openSeqRef.current) return;
         if (next.attempt_id !== undefined && myAttempt !== undefined
             && next.attempt_id !== myAttempt) return;
+        if (next.ok === false && next.state === 'idle') {
+            // 貼り付けたアドレスは処理されたが、試行がもう生きていなかった
+            // (取り下げ・ログアウト)。idle のまま映すと「準備中」のくるくるで
+            // 止まってやり直しようがないので、理由とやり直しボタンを出す。
+            setStatus(prev => ({
+                ...prev,
+                state: 'error',
+                error: next.message || next.error,
+            }));
+            return;
+        }
         setStatus(prev => ({ ...prev, ...next }));
         if (next.state === 'success' && !successNotifiedRef.current) {
             successNotifiedRef.current = true;
@@ -141,6 +158,8 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
         successNotifiedRef.current = false;
         // start のたびに世代を進める: リトライ前の試行の飛行中応答は、settle
         // した時点で世代不一致となり、この start が作る新しい画面状態に触れない。
+        // 記録済みの lease はここでは返さない (閉じるときにまとめて返す。古い
+        // attempt_id の返却はバックエンドが無視する)。
         openSeqRef.current += 1;
         const mySeq = openSeqRef.current;
         (async () => {

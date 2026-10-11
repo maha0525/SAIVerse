@@ -158,6 +158,19 @@ def siwc_manager():
         manager._invalidate_locked()
 
 
+@pytest.fixture
+def revocations(monkeypatch):
+    """Records every best-effort revocation instead of calling the issuer."""
+    calls: list = []
+
+    def fake_revoke(refresh_token, client_id):
+        calls.append((refresh_token, client_id))
+        return True
+
+    monkeypatch.setattr(oca, "revoke_siwc_refresh_token", fake_revoke)
+    return calls
+
+
 def _query(url: str) -> dict:
     return {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(url).query).items()}
 
@@ -444,7 +457,9 @@ def test_access_denied_yields_error_and_failure_page(
     assert not isolated_stores["saiverse"].exists()
 
 
-def test_cancel_during_exchange_does_not_persist(isolated_stores, fake_auth_http, siwc_manager):
+def test_cancel_during_exchange_does_not_persist(
+    isolated_stores, fake_auth_http, siwc_manager, revocations
+):
     started = siwc_manager.start()
     q = _query(started["auth_url"])
     entered, gate = threading.Event(), threading.Event()
@@ -473,7 +488,11 @@ def test_cancel_during_exchange_does_not_persist(isolated_stores, fake_auth_http
     assert "サインインできませんでした" in body
     assert not isolated_stores["saiverse"].exists()
     assert siwc_manager.status()["state"] == oca.SIWC_STATE_IDLE
-    assert "client_id" not in oca.read_siwc_client_record()
+    # The issued id passed the state check, so it is kept for the next sign-in
+    # (spec: a failed attempt re-authorizes with the id retained for it).
+    assert oca.read_siwc_client_record()["client_id"] == "oaiapp_c"
+    # The minted grant was not saved, so it was revoked (with the issued id).
+    assert revocations == [("rt-siwc", "oaiapp_c")]
 
 
 def test_cancelled_attempt_cannot_be_revived_by_new_start(
@@ -509,7 +528,7 @@ def test_cancelled_attempt_cannot_be_revived_by_new_start(
 
 
 def test_logout_during_inflight_exchange_prevents_persistence(
-    isolated_stores, fake_auth_http, siwc_manager
+    isolated_stores, fake_auth_http, siwc_manager, revocations
 ):
     started = siwc_manager.start()
     q = _query(started["auth_url"])
@@ -530,15 +549,19 @@ def test_logout_during_inflight_exchange_prevents_persistence(
     t.start()
     assert entered.wait(10)
     result = oca.logout_all_and_delete_store([siwc_manager])
-    assert result["removed"] is False
+    assert result == {"removed": False, "revoked": None}
     gate.set()
     t.join(20)
 
     assert not isolated_stores["saiverse"].exists()
+    # logged out in this process: the generation moved on, state stays idle
     assert siwc_manager.status()["state"] == oca.SIWC_STATE_IDLE
+    assert revocations == [("rt-siwc", "oaiapp_l")]
 
 
-def test_logout_in_another_process_blocks_siwc_commit(isolated_stores, fake_auth_http, siwc_manager):
+def test_logout_in_another_process_blocks_siwc_commit(
+    isolated_stores, fake_auth_http, siwc_manager, revocations
+):
     """別プロセスの logout (= 別インスタンス、共有は marker ファイルだけ) も効く。"""
     started = siwc_manager.start()
     q = _query(started["auth_url"])
@@ -552,7 +575,16 @@ def test_logout_in_another_process_blocks_siwc_commit(isolated_stores, fake_auth
     )
     assert out["ok"] is False
     assert not isolated_stores["saiverse"].exists()
-    assert siwc_manager.status()["state"] == oca.SIWC_STATE_IDLE
+    # The attempt is still this manager's current one, so it ends as an error
+    # the modal can show (with a retry), never as an anonymous idle.
+    expected = {
+        "state": oca.SIWC_STATE_ERROR,
+        "attempt_id": started["attempt_id"],
+        "error": oca.LOGIN_REFUSED_BY_LOGOUT_MESSAGE,
+    }
+    assert siwc_manager.status() == expected
+    assert {k: out[k] for k in expected} == expected
+    assert revocations == [("rt-siwc", "oaiapp_p")]
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +635,66 @@ def test_first_registration_callback_without_client_id_is_an_error(
     assert fake_auth_http.calls == []
 
 
+def test_failed_exchange_keeps_issued_client_id_and_revokes_nothing(
+    isolated_stores, fake_auth_http, siwc_manager, revocations
+):
+    """invalid_grant など交換の失敗: 発行済みの id は次の試行へ引き継がれ、失効は不要。"""
+    started = siwc_manager.start()
+    host_id = _query(started["auth_url"])["ext_agent_host_id"]
+    q = _query(started["auth_url"])
+    fake_auth_http.post_handler = lambda url, kw: FakeResponse(400, {"error": "invalid_grant"})
+    out = siwc_manager.complete(
+        started["attempt_id"],
+        _callback_url(started, code="c", state=q["state"], client_id="oaiapp_kept"),
+    )
+    assert out["ok"] is False
+    assert out["state"] == oca.SIWC_STATE_ERROR
+    assert not isolated_stores["saiverse"].exists()
+    assert oca.read_siwc_client_record() == {
+        "ext_agent_host_id": host_id, "client_id": "oaiapp_kept",
+    }
+    assert revocations == []  # nothing was minted
+
+    again = _query(siwc_manager.start()["auth_url"])
+    assert again["client_id"] == "oaiapp_kept"
+    assert "agent_name_hint" not in again
+    assert again["ext_agent_host_id"] == host_id
+
+
+def test_invalid_client_clears_saved_client_id_so_next_sign_in_registers_afresh(
+    isolated_stores, fake_auth_http, siwc_manager, revocations
+):
+    oca.save_siwc_issued_client_id("oaiapp_dead")
+    started = siwc_manager.start()
+    q = _query(started["auth_url"])
+    host_id = q["ext_agent_host_id"]
+    assert q["client_id"] == "oaiapp_dead"
+    fake_auth_http.post_handler = lambda url, kw: FakeResponse(
+        401, {"error": "invalid_client", "error_description": "unknown client"}
+    )
+    out = siwc_manager.complete(started["attempt_id"], _callback_url(started, code="c", state=q["state"]))
+    assert out["ok"] is False
+    assert out["state"] == oca.SIWC_STATE_ERROR
+    assert "invalid_client" in out["error"]
+    assert "新しく登録し直します" in out["error"]
+    # the host id stays; only the rejected registration is forgotten
+    assert oca.read_siwc_client_record() == {"ext_agent_host_id": host_id}
+    assert revocations == []
+
+    again = _query(siwc_manager.start()["auth_url"])
+    assert again["client_id"] == oca.SIWC_DYNAMIC_CLIENT_ID
+    assert again["agent_name_hint"] == oca.SIWC_APP_NAME_HINT
+    assert again["ext_agent_host_id"] == host_id
+
+
+def test_clear_issued_client_id_leaves_a_different_id_alone(isolated_stores):
+    oca.save_siwc_issued_client_id("oaiapp_newer")
+    assert oca.clear_siwc_issued_client_id("oaiapp_older") is False
+    assert oca.read_siwc_client_record()["client_id"] == "oaiapp_newer"
+    assert oca.clear_siwc_issued_client_id("oaiapp_newer") is True
+    assert "client_id" not in oca.read_siwc_client_record()
+
+
 # ---------------------------------------------------------------------------
 # manual completion (pasted callback URL)
 # ---------------------------------------------------------------------------
@@ -647,7 +739,9 @@ def test_manual_complete_commits_and_rejects_stale_attempt(
 # exchange validation
 # ---------------------------------------------------------------------------
 
-def test_missing_direct_scope_is_rejected(isolated_stores, fake_auth_http, siwc_manager):
+def test_missing_direct_scope_is_rejected(
+    isolated_stores, fake_auth_http, siwc_manager, revocations
+):
     started = siwc_manager.start()
     q = _query(started["auth_url"])
     fake_auth_http.post_handler = _exchange_handler(
@@ -660,10 +754,13 @@ def test_missing_direct_scope_is_rejected(isolated_stores, fake_auth_http, siwc_
     assert out["state"] == oca.SIWC_STATE_ERROR
     assert "chatgpt.tokens.use.direct" in out["error"]
     assert not isolated_stores["saiverse"].exists()
-    assert "client_id" not in oca.read_siwc_client_record()
+    assert oca.read_siwc_client_record()["client_id"] == "oaiapp_s"
+    assert revocations == [("rt-siwc", "oaiapp_s")]
 
 
-def test_id_token_nonce_mismatch_is_rejected(isolated_stores, fake_auth_http, siwc_manager):
+def test_id_token_nonce_mismatch_is_rejected(
+    isolated_stores, fake_auth_http, siwc_manager, revocations
+):
     started = siwc_manager.start()
     q = _query(started["auth_url"])
     fake_auth_http.post_handler = _exchange_handler(started, "oaiapp_n", nonce="other-nonce")
@@ -673,6 +770,7 @@ def test_id_token_nonce_mismatch_is_rejected(isolated_stores, fake_auth_http, si
     assert out["ok"] is False
     assert "nonce" in out["error"]
     assert not isolated_stores["saiverse"].exists()
+    assert revocations == [("rt-siwc", "oaiapp_n")]
 
 
 def test_id_token_aud_must_contain_issued_client_id():
@@ -717,12 +815,27 @@ def _siwc_store(path: Path) -> None:
     )
 
 
-def test_logout_revokes_siwc_refresh_token_before_deleting(
+def test_logout_revokes_siwc_refresh_token_after_deleting_outside_locks(
     isolated_stores, fake_auth_http, siwc_manager
 ):
     _siwc_store(isolated_stores["saiverse"])
     revoke_url = "https://auth.openai.com/oauth/revoke"
     store_present_at_revoke: list = []
+    locks_free_at_revoke: list = []
+
+    def locks_are_free() -> bool:
+        # The cross-process store lock must be acquirable right now ...
+        probe = oca.saiverse_store_lock(timeout=0)
+        try:
+            probe.acquire()
+        except Exception:  # noqa: BLE001
+            return False
+        probe.release()
+        # ... and so must the manager lock (status polling never waits on I/O).
+        if not siwc_manager._lock.acquire(blocking=False):
+            return False
+        siwc_manager._lock.release()
+        return True
 
     fake_auth_http.get_handler = lambda url, kw: (
         FakeResponse(200, {"revocation_endpoint": revoke_url})
@@ -732,12 +845,17 @@ def test_logout_revokes_siwc_refresh_token_before_deleting(
     def revoke(url, kwargs):
         assert url == revoke_url
         store_present_at_revoke.append(isolated_stores["saiverse"].exists())
+        locks_free_at_revoke.append(locks_are_free())
         return FakeResponse(200, None)
 
     fake_auth_http.post_handler = revoke
     result = oca.logout_all_and_delete_store([siwc_manager])
     assert result == {"removed": True, "revoked": True}
-    assert store_present_at_revoke == [True]
+    # Revocation runs after the file is gone (no refresher can rotate the token
+    # again) and while no lock is held (network I/O never blocks other
+    # processes' refresh / login on the store lock).
+    assert store_present_at_revoke == [False]
+    assert locks_free_at_revoke == [True]
     assert not isolated_stores["saiverse"].exists()
     _m, _url, kwargs = fake_auth_http.calls[-1]
     assert kwargs["data"] == {
@@ -766,6 +884,31 @@ def test_logout_never_revokes_or_touches_codex_cli_store(isolated_stores, fake_a
     assert result == {"removed": False, "revoked": None}
     assert isolated_stores["cli"].exists()
     assert fake_auth_http.calls == []
+
+
+def test_no_logout_entry_point_skips_marker_or_revocation(isolated_stores, revocations):
+    """F: 印も失効も飛ばす削除口は存在せず、どの manager からのログアウトも両方式を止める。"""
+    assert not hasattr(oca, "delete_saiverse_store")
+    assert "delete_saiverse_store" not in oca.__all__
+
+    # from a device manager: itself + the module-level SIWC manager
+    device = oca.CodexDeviceLoginManager()
+    device_gen, siwc_gen = device._generation, oca.SIWC_LOGIN_MANAGER._generation
+    marker_before = oca.read_logout_marker()
+    _siwc_store(isolated_stores["saiverse"])
+    assert device.logout_and_delete_store() is True
+    assert device._generation == device_gen + 1
+    assert oca.SIWC_LOGIN_MANAGER._generation == siwc_gen + 1
+    assert oca.read_logout_marker() != marker_before
+    assert revocations == [("rt-to-revoke", "oaiapp_rv")]
+    assert not isolated_stores["saiverse"].exists()
+
+    # from a SIWC manager: the module-level device manager + itself
+    siwc = oca.SiwcOAuthManager(callback_port=0)
+    login_gen, own_gen = oca.LOGIN_MANAGER._generation, siwc._generation
+    assert siwc.logout_and_delete_store() is False
+    assert oca.LOGIN_MANAGER._generation == login_gen + 1
+    assert siwc._generation == own_gen + 1
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +995,58 @@ def test_legacy_refresh_does_not_add_scope_to_cli_store(isolated_stores, monkeyp
     tokens = _read_json(isolated_stores["cli"])["tokens"]
     assert tokens["refresh_token"] == "rt-new"
     assert "scope" not in tokens
+
+
+def _source_marked_siwc_store(path: Path, expires_in_seconds: int = 3600) -> str:
+    """A record written by the SIWC login whose tokens no longer look like SIWC."""
+    access = _legacy_access_token(expires_in_seconds=expires_in_seconds)
+    _write_json(
+        path,
+        {
+            "source": oca.SIWC_SOURCE,
+            "tokens": {
+                "access_token": access,
+                "refresh_token": "rt-marked",
+                "client_id": "app_issued_unprefixed",
+            },
+        },
+    )
+    return access
+
+
+def test_source_marker_routes_to_siwc_even_if_tokens_look_legacy(isolated_stores, monkeypatch):
+    access = _source_marked_siwc_store(isolated_stores["saiverse"], expires_in_seconds=-100)
+    record = _read_json(isolated_stores["saiverse"])
+    assert oca.is_siwc_token(record["tokens"]) is False  # heuristics alone say legacy
+    assert oca.is_siwc_record(record) is True
+
+    assert oca.auth_status()["is_siwc"] is True
+    url, headers, is_siwc = OpenAICodexClient(model="m")._resolve_connection_params()
+    assert is_siwc is True
+    assert url == oca.SIWC_RESPONSES_URL
+    assert "originator" not in headers
+
+    new_scope = "openid offline_access chatgpt.tokens.use.direct"
+    captured = _capture_httpx_post(
+        monkeypatch,
+        {"access_token": _legacy_access_token(), "refresh_token": "rt-rotated", "scope": new_scope},
+    )
+    OpenAICodexClient(model="m")._refresh_or_pickup_latest(prior_access_token=access)
+    assert captured["url"] == oca.SIWC_TOKEN_URL  # never the legacy endpoint
+    assert captured["data"]["client_id"] == "app_issued_unprefixed"
+    assert captured["data"]["refresh_token"] == "rt-marked"
+
+    stored = _read_json(isolated_stores["saiverse"])
+    assert stored["source"] == oca.SIWC_SOURCE  # the marker survives the refresh
+    assert stored["tokens"]["refresh_token"] == "rt-rotated"
+    assert stored["tokens"]["scope"] == new_scope  # SIWC scope rotation applies
+
+
+def test_logout_revokes_a_source_marked_record(isolated_stores, revocations):
+    _source_marked_siwc_store(isolated_stores["saiverse"])
+    result = oca.logout_all_and_delete_store([oca.SiwcOAuthManager(callback_port=0)])
+    assert result == {"removed": True, "revoked": True}
+    assert revocations == [("rt-marked", "app_issued_unprefixed")]
 
 
 # ---------------------------------------------------------------------------

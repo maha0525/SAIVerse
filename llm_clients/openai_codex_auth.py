@@ -109,6 +109,9 @@ SIWC_LISTENER_POLL_SECONDS = 0.25
 # by logout: the spec wants the same host id forever and the issued client id
 # reused for re-authorization.
 SIWC_CLIENT_FILENAME = "codex_siwc_client.json"
+# Top-level `source` of a store record written by the SIWC login. Routing
+# (inference endpoint, refresh endpoint, revocation) trusts this marker first.
+SIWC_SOURCE = "saiverse_siwc"
 
 DEVICE_USERCODE_URL = f"{CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/usercode"
 DEVICE_POLL_URL = f"{CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/token"
@@ -408,8 +411,33 @@ def siwc_scope_grants_direct_use(scope: Any) -> bool:
     return False
 
 
+def is_siwc_record(auth: Optional[Dict[str, Any]]) -> bool:
+    """Whether a whole auth-store record holds Sign in with ChatGPT tokens.
+
+    The explicit marker wins: SIWC logins are written with top-level
+    `"source": "saiverse_siwc"`, and such a record is SIWC no matter what its
+    scope / client_id / JWT look like — a SIWC refresh token must never reach
+    the legacy refresh endpoint. Records without the marker (older SIWC
+    records, device-code logins, Codex CLI's auth.json) fall back to the
+    token heuristics of `is_siwc_token`.
+
+    This is the single routing decision for the inference endpoint, the
+    refresh endpoint, scope rotation, logout revocation and the UI badge.
+    """
+    if not isinstance(auth, dict):
+        return False
+    if auth.get("source") == SIWC_SOURCE:
+        return True
+    return is_siwc_token(auth.get("tokens"))
+
+
 def _delete_store_file_locked() -> bool:
-    """Remove the store file. Caller must hold the store lock."""
+    """Remove the store file. Caller must hold the store lock.
+
+    The lock file itself is deliberately kept — unlinking a held lock file
+    lets a second process acquire a lock on a new inode and breaks mutual
+    exclusion on POSIX.
+    """
     path = get_saiverse_store_path()
     if path.exists():
         path.unlink()
@@ -417,22 +445,8 @@ def _delete_store_file_locked() -> bool:
     return False
 
 
-def delete_saiverse_store() -> bool:
-    """Logout: remove SAIVerse's own store (never touches ~/.codex).
-
-    Serializes on the store lock so a concurrent refresh cannot resurrect the
-    file after we delete it. The lock file itself is deliberately kept —
-    unlinking a held lock file lets a second process acquire a lock on a new
-    inode and breaks mutual exclusion on POSIX.
-
-    Returns True if a store file was actually removed.
-    """
-    with saiverse_store_lock():
-        return _delete_store_file_locked()
-
-
-def _read_store_tokens_locked() -> Dict[str, Any]:
-    """Token dict of the SAIVerse store, {} when absent or unreadable.
+def _read_store_record_locked() -> Dict[str, Any]:
+    """The whole SAIVerse store record, {} when absent or unreadable.
 
     Caller must hold the store lock.
     """
@@ -440,11 +454,11 @@ def _read_store_tokens_locked() -> Dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        tokens = read_auth_store(path).get("tokens")
+        record = read_auth_store(path)
     except Exception as exc:  # noqa: BLE001
         LOG.warning("could not read SAIVerse auth store before logout: %s", exc)
         return {}
-    return tokens if isinstance(tokens, dict) else {}
+    return record if isinstance(record, dict) else {}
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +517,26 @@ def save_siwc_issued_client_id(client_id: str) -> None:
             record["ext_agent_host_id"] = f"urn:uuid:{uuid.uuid4()}"
         record["client_id"] = client_id
         write_auth_store(get_siwc_client_record_path(), record)
+
+
+def clear_siwc_issued_client_id(expected_client_id: Optional[str] = None) -> bool:
+    """Forget the saved issued client id (the host id is kept).
+
+    Used when the issuer rejects the saved registration (`invalid_client`),
+    so the next sign-in registers afresh with `dynamic_agent_client`. With
+    `expected_client_id`, only that id is cleared — an id another process
+    saved in the meantime is left alone. Returns True if an id was removed.
+    """
+    with saiverse_store_lock():
+        record = read_siwc_client_record()
+        current = record.get("client_id")
+        if current is None:
+            return False
+        if expected_client_id is not None and current != expected_client_id:
+            return False
+        del record["client_id"]
+        write_auth_store(get_siwc_client_record_path(), record)
+        return True
 
 
 def revoke_siwc_refresh_token(refresh_token: str, client_id: str) -> bool:
@@ -608,6 +642,11 @@ LOGIN_STATE_STARTING = "starting"  # usercode request in flight
 LOGIN_STATE_WAITING = "waiting"  # user_code issued, waiting for browser step
 LOGIN_STATE_SUCCESS = "success"
 LOGIN_STATE_ERROR = "error"
+
+
+LOGIN_REFUSED_BY_LOGOUT_MESSAGE = (
+    "ログアウトされたため、このログインは取り消されました。もう一度ログインしてください。"
+)
 
 
 class CodexDeviceLoginError(RuntimeError):
@@ -737,7 +776,13 @@ class _LoginAttemptManager:
         calls join it: same attempt_id (and user_code / auth_url), new
         lease_id. Raises the flow's error type when a logout raced this start.
         """
-        # Snapshot outside any lock (single int read is atomic under the GIL).
+        # Snapshot before queueing on the start lock, outside the manager lock.
+        # It reads the persistent marker file (initializing it under the store
+        # lock on a pristine install); logout replaces that file atomically
+        # (tmp + os.replace) under the store lock, so this read sees either
+        # the old or the new nonce, never a torn value. The re-check below,
+        # after the start lock is acquired, is what catches a logout that
+        # landed while this start was queued.
         marker_before_queueing = self._snapshot_logout_marker()
         with self._start_lock:
             with self._lock:
@@ -829,12 +874,20 @@ class _LoginAttemptManager:
             return True
 
     def logout_and_delete_store(self) -> bool:
-        """Logout as one critical section: invalidate any login, then delete.
+        """Logout of BOTH flows; returns True if a store file was removed.
 
-        Thin wrapper over `logout_all_and_delete_store([self])` — see there.
-        Returns True if a store file was actually removed.
+        Delegates to `logout_all_and_delete_store` with one manager per flow:
+        this manager in its own flow's slot and the module-level manager of
+        the other flow, in the fixed device → SIWC lock order. A logout
+        started from either manager therefore always invalidates both flows,
+        renews the logout marker and revokes a SIWC refresh token — there is
+        no logout entry point that skips any of these.
         """
-        return logout_all_and_delete_store([self])["removed"]
+        if isinstance(self, SiwcOAuthManager):
+            managers: Tuple[_LoginAttemptManager, ...] = (LOGIN_MANAGER, self)
+        else:
+            managers = (self, SIWC_LOGIN_MANAGER)
+        return logout_all_and_delete_store(managers)["removed"]
 
     def _invalidate_locked(self) -> None:
         """Kill the current attempt (logout). Caller holds the manager lock.
@@ -888,7 +941,6 @@ class _LoginAttemptManager:
         logout_marker: str,
         tokens: Dict[str, Any],
         success_state: Dict[str, Any],
-        after_persist: Optional[Callable[[], None]] = None,
     ) -> bool:
         """Persist tokens and flip to success — only as the current generation.
 
@@ -898,6 +950,15 @@ class _LoginAttemptManager:
         the store file lock inside and re-verifies the persistent logout marker
         there (the cross-process guard); lock order is always manager → store,
         and no path takes them in the reverse order, so this cannot deadlock.
+
+        Refusals:
+          * stale / cancelled generation — the state belongs to someone else
+            (idle after cancel, or a newer attempt), so it is not touched;
+          * current generation, but a logout happened after the attempt
+            started (typically in another process sharing this ~/.saiverse)
+            — this attempt still owns the state, so it ends as an ERROR with
+            its attempt_id: the UI watching it gets a message and a retry
+            button instead of an anonymous idle it cannot match.
 
         Returns True only when the tokens were written.
         """
@@ -910,17 +971,17 @@ class _LoginAttemptManager:
             try:
                 persist_saiverse_login(tokens, expected_logout_marker=logout_marker)
             except LoginInvalidatedByLogout:
-                # A logout (possibly in another SAIVerse process sharing this
-                # ~/.saiverse) happened after this attempt started — honor it.
                 LOG.info(
                     "discarding tokens from login attempt %d: logout happened "
                     "after it started",
                     generation,
                 )
-                self._state = {"state": LOGIN_STATE_IDLE}
+                self._state = {
+                    "state": LOGIN_STATE_ERROR,
+                    "attempt_id": generation,
+                    "error": LOGIN_REFUSED_BY_LOGOUT_MESSAGE,
+                }
                 return False
-            if after_persist is not None:
-                after_persist()
             self._state = success_state
         return True
 
@@ -1198,6 +1259,10 @@ SIWC_STATE_ERROR = LOGIN_STATE_ERROR
 
 class SiwcOAuthError(RuntimeError):
     pass
+
+
+class SiwcInvalidClient(SiwcOAuthError):
+    """The token endpoint answered OAuth `invalid_client` for the issued client id."""
 
 
 class SiwcCallbackRejected(SiwcOAuthError):
@@ -1680,6 +1745,12 @@ class SiwcOAuthManager(_LoginAttemptManager):
                     "(client_id が返ってきませんでした)。もう一度お試しください。"
                 )
             issued_client_id = callback_client_id
+            # First registration: the callback passed the state check, so this
+            # issued id is the registration OpenAI made for this host. Keep it
+            # now, before the exchange — per the spec, an attempt that fails
+            # after this point (e.g. invalid_grant) re-authorizes with the
+            # same issued id rather than registering again.
+            self._remember_client_id(issued_client_id)
 
         if self._is_stale(generation, cancel_event):
             return False, "このログイン試行は取り消されました。"
@@ -1687,34 +1758,61 @@ class SiwcOAuthManager(_LoginAttemptManager):
             data = self._exchange_code(
                 issued_client_id, code, attempt.verifier, attempt.redirect_uri
             )
-            tokens = _validate_siwc_exchange(data, issued_client_id, attempt.nonce)
+        except SiwcInvalidClient:
+            # The issuer no longer accepts this registration. Forget it (the
+            # host id stays) so the next sign-in registers afresh.
+            try:
+                clear_siwc_issued_client_id(issued_client_id)
+            except OSError as exc:
+                LOG.warning("could not clear the rejected SIWC client id: %s", exc)
+            return fail(
+                "OpenAI がこの SAIVerse のアプリ登録 (client_id) を受け付けませんでした "
+                "(invalid_client)。保存していた登録を消したので、次のログインでは"
+                "新しく登録し直します。もう一度ログインしてください。"
+            )
         except SiwcOAuthError as exc:
             return fail(str(exc))
+
+        # From here on OpenAI has minted a token set. Any path that does not
+        # persist it must revoke it, or a live grant is left behind that
+        # nobody holds and the user cannot see.
+        try:
+            tokens = _validate_siwc_exchange(data, issued_client_id, attempt.nonce)
+        except SiwcOAuthError as exc:
+            result = fail(str(exc))
+            self._revoke_unpersisted(data, issued_client_id)
+            return result
 
         tokens.update(
             {
                 "client_id": issued_client_id,
                 "ext_agent_host_id": attempt.host_id,
                 "resource": SIWC_RESOURCE,
-                "source": "saiverse_siwc",
+                "source": SIWC_SOURCE,
             }
         )
         account_id = extract_account_id(
             tokens.get("access_token", ""), tokens.get("id_token", "")
         )
-        committed = self._commit(
-            generation,
-            cancel_event,
-            attempt.logout_marker,
-            tokens,
-            success_state={
-                "state": LOGIN_STATE_SUCCESS,
-                "attempt_id": generation,
-                "account_id": account_id,
-            },
-            after_persist=lambda: self._remember_client_id(issued_client_id),
-        )
+        try:
+            committed = self._commit(
+                generation,
+                cancel_event,
+                attempt.logout_marker,
+                tokens,
+                success_state={
+                    "state": LOGIN_STATE_SUCCESS,
+                    "attempt_id": generation,
+                    "account_id": account_id,
+                },
+            )
+        except Exception:
+            # e.g. the store lock timed out: nothing was written.
+            self._revoke_unpersisted(tokens, issued_client_id)
+            raise
         if not committed:
+            # Cancelled, superseded or logged out: revoke outside every lock.
+            self._revoke_unpersisted(tokens, issued_client_id)
             return False, "このログイン試行は取り消されたため、トークンは保存しませんでした。"
         LOG.info("SIWC login succeeded; tokens written to SAIVerse store")
         return True, "サインインが完了しました。"
@@ -1724,9 +1822,25 @@ class SiwcOAuthManager(_LoginAttemptManager):
         try:
             save_siwc_issued_client_id(client_id)
         except OSError as exc:
-            # Tokens already carry the client id, so refresh still works; only
-            # the next sign-in falls back to a fresh registration.
+            # Tokens carry the client id, so refresh still works; only the
+            # next sign-in falls back to a fresh registration.
             LOG.warning("could not save the issued SIWC client id: %s", exc)
+
+    @staticmethod
+    def _revoke_unpersisted(data: Any, client_id: str) -> None:
+        """Best-effort revocation of a minted token set that will not be saved.
+
+        Called outside every lock. Never logs token values.
+        """
+        refresh_token = data.get("refresh_token") if isinstance(data, dict) else None
+        if not isinstance(refresh_token, str) or not refresh_token:
+            return
+        if not revoke_siwc_refresh_token(refresh_token, client_id):
+            LOG.warning(
+                "SIWC login: a token set was issued but not saved, and revoking it "
+                "failed; it stays valid at OpenAI until it expires or is unlinked "
+                "from the ChatGPT settings"
+            )
 
     @staticmethod
     def _exchange_code(
@@ -1756,6 +1870,14 @@ class SiwcOAuthManager(_LoginAttemptManager):
                 pass
         if resp.status_code != 200:
             LOG.warning("SIWC token exchange failed: %s", _describe_response(resp))
+            try:
+                error_body = resp.json()
+            except Exception:  # noqa: BLE001
+                error_body = None
+            if isinstance(error_body, dict) and error_body.get("error") == "invalid_client":
+                raise SiwcInvalidClient(
+                    f"トークン交換が invalid_client (status={resp.status_code}) で拒否されました。"
+                )
             raise SiwcOAuthError(f"トークン交換が status={resp.status_code} で失敗しました。")
         try:
             data = resp.json()
@@ -1776,56 +1898,57 @@ SIWC_LOGIN_MANAGER = SiwcOAuthManager()
 def logout_all_and_delete_store(
     managers: Optional[Sequence[_LoginAttemptManager]] = None,
 ) -> Dict[str, Any]:
-    """Logout: stop every in-flight login, revoke a SIWC refresh token, delete.
+    """Logout: stop every in-flight login, delete the store, revoke SIWC tokens.
 
     1. Under the managers' locks (always taken in the same order: device,
        then SIWC — no other path holds two manager locks) every in-flight
-       attempt is invalidated, and under the store lock the persistent logout
-       marker is renewed. That kills queued start()s and attempts in OTHER
-       processes sharing this ~/.saiverse too (their commits re-check the
-       marker under the store lock).
-    2. The manager locks are released (status polling must not wait on the
-       network) but the store lock is kept: a SIWC refresh token is revoked
-       best-effort at the issuer's revocation endpoint, and only then is the
-       store file deleted. Holding the store lock throughout means no
-       concurrent refresh can rotate the token between reading and revoking.
-       Revocation failure is logged and never prevents the deletion.
+       attempt is invalidated. Then, under the store lock, the persistent
+       logout marker is renewed, the store record is read and the store file
+       is deleted. Renewing the marker kills queued start()s and attempts in
+       OTHER processes sharing this ~/.saiverse too (their commits re-check
+       the marker under the store lock).
+    2. Every lock is released, and only then is a SIWC refresh token revoked
+       best-effort at the issuer's revocation endpoint — network I/O never
+       holds the cross-process store lock (other processes' refresh and
+       login would stall on it) or a manager lock (status polling would).
+       Revoking after the deletion is safe: refresh re-reads the store file
+       under the store lock, so once the file is gone no refresher can rotate
+       the captured token again — the token we revoke is the live one.
+       Revocation failure is logged and reported as revoked=False.
 
-    Never touches ~/.codex. The SIWC client record (host id + issued client
-    id) is deliberately kept for the next sign-in.
+    Returns {removed: bool, revoked: True | False | None}; None means there
+    was no SIWC token to revoke. Never touches ~/.codex. The SIWC client
+    record (host id + issued client id) is deliberately kept for the next
+    sign-in.
     """
     if managers is None:
         managers = (LOGIN_MANAGER, SIWC_LOGIN_MANAGER)
-    store_lock = saiverse_store_lock()
     with contextlib.ExitStack() as manager_locks:
         for manager in managers:
             manager_locks.enter_context(manager._lock)
         for manager in managers:
             manager._invalidate_locked()
-        store_lock.acquire()
-        try:
+        with saiverse_store_lock():
             _renew_logout_marker_locked()
-            tokens = _read_store_tokens_locked()
-        except BaseException:
-            store_lock.release()
-            raise
-    try:
-        revoked: Optional[bool] = None
-        if is_siwc_token(tokens):
-            refresh_token = tokens.get("refresh_token")
-            client_id = resolve_siwc_client_id(tokens)
-            if isinstance(refresh_token, str) and refresh_token and client_id:
-                revoked = revoke_siwc_refresh_token(refresh_token, client_id)
-            else:
-                revoked = False
-            if not revoked:
-                LOG.warning(
-                    "SIWC sign-out: the refresh token was not revoked at OpenAI; "
-                    "local tokens are cleared anyway"
-                )
-        removed = _delete_store_file_locked()
-    finally:
-        store_lock.release()
+            record = _read_store_record_locked()
+            removed = _delete_store_file_locked()
+
+    # Outside every lock from here on.
+    revoked: Optional[bool] = None
+    if is_siwc_record(record):
+        tokens = record.get("tokens")
+        tokens = tokens if isinstance(tokens, dict) else {}
+        refresh_token = tokens.get("refresh_token")
+        client_id = resolve_siwc_client_id(tokens)
+        if isinstance(refresh_token, str) and refresh_token and client_id:
+            revoked = revoke_siwc_refresh_token(refresh_token, client_id)
+        else:
+            revoked = False
+        if not revoked:
+            LOG.warning(
+                "SIWC sign-out: the refresh token was not revoked at OpenAI; "
+                "local tokens were cleared anyway"
+            )
     return {"removed": removed, "revoked": revoked}
 
 
@@ -1857,7 +1980,7 @@ def auth_status() -> Dict[str, Any]:
     return {
         "logged_in": bool(access_token),
         "store": store.kind,
-        "is_siwc": is_siwc_token(tokens),
+        "is_siwc": is_siwc_record(data),
         "cli_available": cli_available,
         "account_id": tokens.get("account_id")
         or extract_account_id(access_token, tokens.get("id_token") or ""),
@@ -1885,6 +2008,7 @@ __all__ = [
     "SIWC_RESPONSES_URL",
     "SIWC_OPENID_CONFIGURATION_URL",
     "SIWC_CLIENT_FILENAME",
+    "SIWC_SOURCE",
     "NO_AUTH_HINT",
     "AuthStore",
     "STORE_KIND_SAIVERSE",
@@ -1899,23 +2023,25 @@ __all__ = [
     "persist_saiverse_login",
     "read_logout_marker",
     "LoginInvalidatedByLogout",
-    "delete_saiverse_store",
     "decode_jwt_payload",
     "extract_account_id",
     "access_token_expiry",
     "is_siwc_token",
+    "is_siwc_record",
     "resolve_siwc_client_id",
     "siwc_scope_grants_direct_use",
     "get_siwc_client_record_path",
     "read_siwc_client_record",
     "ensure_siwc_client_record",
     "save_siwc_issued_client_id",
+    "clear_siwc_issued_client_id",
     "revoke_siwc_refresh_token",
     "CodexDeviceLoginError",
     "CodexDeviceLoginManager",
     "LOGIN_MANAGER",
     "SiwcOAuthError",
     "SiwcCallbackRejected",
+    "SiwcInvalidClient",
     "SiwcOAuthManager",
     "SIWC_LOGIN_MANAGER",
     "logout_all_and_delete_store",

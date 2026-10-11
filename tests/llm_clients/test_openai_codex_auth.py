@@ -138,11 +138,12 @@ def test_saiverse_store_wins_even_if_broken(isolated_stores):
 def test_logout_deletes_only_saiverse_store(isolated_stores):
     _write_json(isolated_stores["saiverse"], {"tokens": {}})
     _write_json(isolated_stores["cli"], {"tokens": {"access_token": "cli"}})
-    assert oca.delete_saiverse_store() is True
+    manager = oca.CodexDeviceLoginManager()
+    assert oca.logout_all_and_delete_store([manager])["removed"] is True
     assert not isolated_stores["saiverse"].exists()
     assert isolated_stores["cli"].exists()
     # 2 回目は消すものがない
-    assert oca.delete_saiverse_store() is False
+    assert oca.logout_all_and_delete_store([manager])["removed"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +551,13 @@ def test_logout_in_another_process_blocks_this_process_commit(isolated_stores):
         {"access_token": _access_token(), "refresh_token": "rt"},
     )
     assert not isolated_stores["saiverse"].exists()
-    assert manager_a.status()["state"] == oca.LOGIN_STATE_IDLE
+    # 現行世代の試行なので、画面が拾える形 (attempt_id 付きのエラー) で終わる。
+    # 無名の idle だと、見守っている画面が自分の試行の結末だと判別できない。
+    assert manager_a.status() == {
+        "state": oca.LOGIN_STATE_ERROR,
+        "attempt_id": gen,
+        "error": oca.LOGIN_REFUSED_BY_LOGOUT_MESSAGE,
+    }
 
 
 def test_persist_refuses_on_logout_marker_mismatch(isolated_stores):
@@ -665,9 +672,12 @@ def _assert_blocks_under_held_lock(isolated_stores, monkeypatch, operation):
 
 def test_logout_serializes_on_store_lock(isolated_stores, monkeypatch):
     _write_json(isolated_stores["saiverse"], {"tokens": {"access_token": "a"}})
-    _assert_blocks_under_held_lock(isolated_stores, monkeypatch, oca.delete_saiverse_store)
+    manager = oca.CodexDeviceLoginManager()
+    _assert_blocks_under_held_lock(
+        isolated_stores, monkeypatch, lambda: oca.logout_all_and_delete_store([manager])
+    )
     # ロック解放後は普通に消せる
-    assert oca.delete_saiverse_store() is True
+    assert oca.logout_all_and_delete_store([manager])["removed"] is True
 
 
 def test_login_persist_serializes_on_store_lock(isolated_stores, monkeypatch):
@@ -697,7 +707,7 @@ def test_logout_does_not_unlink_held_lock_file(isolated_stores, monkeypatch):
 
         def _worker():
             try:
-                oca.delete_saiverse_store()
+                oca.logout_all_and_delete_store([oca.CodexDeviceLoginManager()])
                 result["outcome"] = "completed"
             except FileLockTimeout:
                 result["outcome"] = "timeout"

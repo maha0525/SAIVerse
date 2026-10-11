@@ -165,6 +165,12 @@ export default function ProviderManagementPanel() {
                 alert(uiText("components.settings.ProviderManagementPanel.text002", { p1: res.status }));
                 return;
             }
+            const body = await res.json().catch(() => null);
+            // revoked: true = OpenAI 側でも失効済み / null = 失効させる鍵が無かった /
+            // false = 失効を確認できなかった (ローカルの鍵は消えている)。
+            if (body?.revoked === false) {
+                setNotice(uiText("components.settings.ProviderManagementPanel.text042"));
+            }
             loadCodexStatus();
         } catch (e) {
             alert(uiText("components.settings.ProviderManagementPanel.text003", { p1: e }));

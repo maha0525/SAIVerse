@@ -7227,6 +7227,10 @@
     "ja": "ログイン済み（Sign in with ChatGPT）",
     "en": "Signed in (Sign in with ChatGPT)"
   },
+  "components.settings.ProviderManagementPanel.text042": {
+    "ja": "ログアウトしました。ただし OpenAI 側での鍵の失効は確認できませんでした。必要なら ChatGPT の設定画面から SAIVerse の連携を解除してください。",
+    "en": "Signed out. However, SAIVerse could not confirm that the key was revoked on OpenAI's side. If needed, disconnect SAIVerse from the ChatGPT settings page."
+  },
   "components.settings.WorldEditor.text001": {
     "ja": "不明なエラー",
     "en": "Unknown error"
