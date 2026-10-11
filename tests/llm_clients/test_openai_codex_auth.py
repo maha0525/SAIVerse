@@ -720,6 +720,99 @@ def test_logout_releases_manager_locks_while_waiting_for_store_lock(isolated_sto
     assert not isolated_stores["saiverse"].exists()
 
 
+def _commit_while_store_lock_is_held(manager, gen, event, marker, monkeypatch):
+    """Start a device commit in a thread while the store lock is held elsewhere.
+
+    Returns (holder, thread, result); the caller releases `holder`.
+    """
+    monkeypatch.setattr(oca, "STORE_LOCK_TIMEOUT_SECONDS", 10.0)
+    holder = oca.saiverse_store_lock(timeout=5)  # a refresh in flight
+    holder.acquire()
+    real_lock = oca.saiverse_store_lock
+    asked = threading.Event()
+
+    def watched(timeout=None):
+        asked.set()
+        return real_lock(timeout)
+
+    monkeypatch.setattr(oca, "saiverse_store_lock", watched)
+    result: dict = {}
+
+    def _commit():
+        result["committed"] = manager._commit(
+            gen, event, marker,
+            {"access_token": _access_token(), "refresh_token": "rt"},
+            success_state={"state": oca.LOGIN_STATE_SUCCESS, "attempt_id": gen},
+        )
+
+    t = threading.Thread(target=_commit, daemon=True)
+    t.start()
+    assert asked.wait(10), "the commit never asked for the store lock"
+    threading.Event().wait(0.2)  # let it settle into waiting
+    assert t.is_alive()
+    return holder, t, result
+
+
+def test_device_commit_waiting_for_store_lock_keeps_status_and_cancel_responsive(
+    isolated_stores, monkeypatch
+):
+    """保存がストアのロックを待つ間も、状態確認と取り下げは即答し、取り下げが勝つ。"""
+    manager = oca.CodexDeviceLoginManager()
+    gen, event, lease = _open_attempt(manager)
+    marker = manager._snapshot_logout_marker()
+    manager._state = {"state": oca.LOGIN_STATE_WAITING, "attempt_id": gen}
+
+    holder, t, result = _commit_while_store_lock_is_held(
+        manager, gen, event, marker, monkeypatch
+    )
+    try:
+        asked_at = time.monotonic()
+        assert manager.status()["state"] == oca.LOGIN_STATE_WAITING
+        assert time.monotonic() - asked_at < 1.0, "status() blocked behind the store lock"
+        asked_at = time.monotonic()
+        assert manager.cancel(gen, lease) is True
+        assert time.monotonic() - asked_at < 1.0, "cancel() blocked behind the store lock"
+        assert t.is_alive()
+    finally:
+        holder.release()
+    t.join(10)
+    assert not t.is_alive()
+    assert result["committed"] is False
+    assert not isolated_stores["saiverse"].exists()
+    assert manager.status() == {"state": oca.LOGIN_STATE_IDLE}
+
+
+def test_device_commit_proceeds_once_the_store_lock_is_free(isolated_stores, monkeypatch):
+    manager = oca.CodexDeviceLoginManager()
+    gen, event, _lease = _open_attempt(manager)
+    marker = manager._snapshot_logout_marker()
+    manager._state = {"state": oca.LOGIN_STATE_WAITING, "attempt_id": gen}
+
+    holder, t, result = _commit_while_store_lock_is_held(
+        manager, gen, event, marker, monkeypatch
+    )
+    holder.release()
+    t.join(10)
+    assert not t.is_alive()
+    assert result["committed"] is True
+    assert manager.status() == {"state": oca.LOGIN_STATE_SUCCESS, "attempt_id": gen}
+    stored = json.loads(isolated_stores["saiverse"].read_text(encoding="utf-8"))
+    assert stored["tokens"]["refresh_token"] == "rt"
+
+
+def test_device_exchange_rejects_non_string_tokens(fake_http):
+    manager = oca.CodexDeviceLoginManager()
+    code_resp = {"authorization_code": "ac", "code_verifier": "cv"}
+    for payload in (
+        {"access_token": 123, "refresh_token": "rt"},
+        {"access_token": "", "refresh_token": "rt"},
+        {"access_token": _access_token(), "refresh_token": 456},
+    ):
+        fake_http["queue"].append(FakeResponse(200, payload))
+        with pytest.raises(oca.CodexDeviceLoginError):
+            manager._exchange_code(code_resp)
+
+
 def test_start_slipping_in_before_marker_renewal_is_refused_at_commit(
     isolated_stores, monkeypatch
 ):

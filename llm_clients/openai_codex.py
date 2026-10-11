@@ -783,10 +783,12 @@ class OpenAICodexClient(LLMClient):
         is held across the refresh request on purpose: that serialization is
         what keeps two processes from spending one rotating refresh token.
 
-        SIWC only: if the refresh succeeded but writing the rotated tokens
-        failed, the old refresh token is already spent and the new one would
-        be a live grant nobody holds — it is revoked best-effort (after the
-        store lock is released) and the error is re-raised.
+        SIWC only: if the refresh succeeded but its response is unusable (an
+        `access_token` that is not a non-empty string — the store is then not
+        written) or writing the rotated tokens failed, the old refresh token
+        is already spent and the new one would be a live grant nobody holds —
+        it is revoked best-effort (after the store lock is released) and the
+        error is re-raised.
         """
         store = self._resolve_store()
         try:
@@ -837,6 +839,10 @@ class OpenAICodexClient(LLMClient):
                         )
                     refreshed = self._request_siwc_refresh(latest_refresh, client_id)
                     try:
+                        # Inside this try: a rejected response's new refresh
+                        # token (if it is a usable string) is revoked below,
+                        # like one whose write-back failed.
+                        self._check_siwc_refresh_response(refreshed)
                         self._persist_refreshed_tokens(store.path, latest, refreshed)
                     except Exception:
                         new_refresh = (
@@ -865,6 +871,32 @@ class OpenAICodexClient(LLMClient):
                         "the new refresh token failed; it stays valid at OpenAI until "
                         "it expires or is unlinked from the ChatGPT settings"
                     )
+
+    @staticmethod
+    def _check_siwc_refresh_response(refreshed: Any) -> None:
+        """Refuse a SIWC refresh response that must not overwrite the store.
+
+        The response is untrusted JSON: `access_token` has to be a non-empty
+        string, and a `refresh_token`, when present, too (a rotated token that
+        is not a usable string would replace the spent one with garbage).
+        Raising here leaves the store untouched; the caller revokes a usable
+        new refresh token after the store lock is released.
+        """
+        relogin = "SAIVerse の設定画面から ChatGPT にログインし直してください。"
+        if not isinstance(refreshed, dict):
+            raise RuntimeError(
+                f"Sign in with ChatGPT の鍵の更新応答が読めませんでした。{relogin}"
+            )
+        access = refreshed.get("access_token")
+        if not isinstance(access, str) or not access:
+            raise RuntimeError(
+                f"Sign in with ChatGPT の鍵の更新応答に使える access_token がありませんでした。{relogin}"
+            )
+        new_refresh = refreshed.get("refresh_token")
+        if new_refresh is not None and (not isinstance(new_refresh, str) or not new_refresh):
+            raise RuntimeError(
+                f"Sign in with ChatGPT の鍵の更新応答の refresh_token が不正でした。{relogin}"
+            )
 
     @staticmethod
     def _store_holds_refresh_token(store_path: Path, refresh_token: str) -> bool:

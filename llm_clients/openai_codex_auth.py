@@ -231,6 +231,34 @@ def write_auth_store(path: Path, data: Dict[str, Any]) -> None:
 # logout) serialize on this one lock. The path matches AuthStore.lock_path for
 # the SAIVerse store, so the refresh path in openai_codex.py takes the same
 # lock without knowing about this helper.
+#
+# Lock order (the single statement of it; every path below follows it):
+#
+#     store lock  →  manager lock (`_LoginAttemptManager._lock`)
+#
+# The store lock may be held while a manager lock is taken (the login commit
+# does exactly that), but a manager lock is NEVER held while acquiring the
+# store lock. The store lock can be held for a long time by a refresh in
+# openai_codex.py, which deliberately keeps it across its network round-trip
+# (two processes must not spend one rotating refresh token); waiting for it
+# under a manager lock would freeze status() / cancel() / logout of that flow
+# for up to STORE_LOCK_TIMEOUT_SECONDS. Where the paths stand:
+#
+#   * `_LoginAttemptManager._commit`: store lock first, then the manager lock
+#     for the re-checks, the write and the success state.
+#   * `start()`: the logout-marker snapshots (which may initialize the marker
+#     under the store lock) are taken outside the manager lock; the SIWC
+#     `_prepare_attempt` (`ensure_siwc_client_record`, store lock) runs
+#     outside the manager lock too. Both run under the per-manager START lock,
+#     which only serializes start() calls — status / cancel / logout / commit
+#     never take it, so waiting for the store lock under it blocks only other
+#     start() calls, which would wait for that start anyway.
+#   * `save_siwc_issued_client_id` / `clear_siwc_issued_client_id`: called
+#     from the SIWC callback outside the manager lock.
+#   * `logout_all_and_delete_store`: manager locks (device → SIWC, the only
+#     place two manager locks nest) are released before the store lock.
+#   * `cancel` / `complete` / `_expire` / `_fail` / `_is_stale` / `status`:
+#     manager lock only, never the store lock.
 STORE_LOCK_TIMEOUT_SECONDS = 30.0
 
 
@@ -303,6 +331,24 @@ def persist_saiverse_login(
     The re-check happens under the store lock — the same lock logout renews
     the marker under — so the two cannot interleave.
     """
+    with saiverse_store_lock():
+        if (
+            expected_logout_marker is not None
+            and read_logout_marker() != expected_logout_marker
+        ):
+            raise LoginInvalidatedByLogout(
+                "logout happened after this login attempt started; tokens discarded"
+            )
+        _persist_saiverse_login_locked(tokens)
+
+
+def _persist_saiverse_login_locked(tokens: Dict[str, Any]) -> None:
+    """Write a fresh login's tokens to the SAIVerse store. Caller holds the store lock.
+
+    The logout-marker check is the caller's: `persist_saiverse_login` does it
+    for direct callers, `_LoginAttemptManager._commit` does it together with
+    the attempt re-checks.
+    """
     account_id = extract_account_id(
         tokens.get("access_token", ""), tokens.get("id_token", "")
     )
@@ -324,24 +370,16 @@ def persist_saiverse_login(
         store_tokens["resource"] = tokens["resource"]
 
     source = tokens.get("source", "saiverse_device_login")
-    with saiverse_store_lock():
-        if (
-            expected_logout_marker is not None
-            and read_logout_marker() != expected_logout_marker
-        ):
-            raise LoginInvalidatedByLogout(
-                "logout happened after this login attempt started; tokens discarded"
-            )
-        write_auth_store(
-            get_saiverse_store_path(),
-            {
-                "tokens": store_tokens,
-                "last_refresh": datetime.now(tz=timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z"),
-                "source": source,
-            },
-        )
+    write_auth_store(
+        get_saiverse_store_path(),
+        {
+            "tokens": store_tokens,
+            "last_refresh": datetime.now(tz=timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "source": source,
+        },
+    )
 
 
 def is_siwc_token(tokens: Optional[Dict[str, Any]]) -> bool:
@@ -491,6 +529,11 @@ def _valid_host_id(value: Any) -> bool:
 
 def _valid_issued_client_id(value: Any) -> bool:
     return isinstance(value, str) and bool(value) and value != SIWC_DYNAMIC_CLIENT_ID
+
+
+def _is_nonempty_str(value: Any) -> bool:
+    """A token field from an untrusted token response that is actually usable."""
+    return isinstance(value, str) and bool(value)
 
 
 def ensure_siwc_client_record() -> Tuple[str, Optional[str]]:
@@ -729,7 +772,8 @@ class _LoginAttemptManager:
     persist tokens lives here, once, so the two flows cannot drift apart:
     generation bumps, per-attempt cancel events, leases, the persistent logout
     marker snapshot, and the commit that re-checks all of them under the
-    manager lock (and the marker again under the store lock).
+    store lock and the manager lock together (lock order: see
+    `saiverse_store_lock`).
     """
 
     _flow_error: type = RuntimeError
@@ -812,8 +856,14 @@ class _LoginAttemptManager:
         # landed while this start was queued.
         marker_before_queueing = self._snapshot_logout_marker()
         with self._start_lock:
+            # Also outside the manager lock: the snapshot may take the store
+            # lock (see the lock order at `saiverse_store_lock`). Reading it
+            # before rather than under the manager lock changes nothing: logout
+            # renews the marker outside the manager locks anyway, and a renewal
+            # landing after this read is caught by the commit's re-check.
+            marker_after_queueing = self._snapshot_logout_marker()
             with self._lock:
-                if self._snapshot_logout_marker() != marker_before_queueing:
+                if marker_after_queueing != marker_before_queueing:
                     raise self._flow_error(
                         "ログアウトと重なったためログインを中断しました。"
                         "もう一度お試しください。"
@@ -1007,12 +1057,24 @@ class _LoginAttemptManager:
     ) -> bool:
         """Persist tokens and flip to success — only as the current generation.
 
-        The generation check and the store write happen under the manager lock
-        as one unit, so a cancel() (or a newer start()) can never slip between
-        "check passed" and "tokens written". The store write additionally takes
-        the store file lock inside and re-verifies the persistent logout marker
-        there (the cross-process guard); lock order is always manager → store,
-        and no path takes them in the reverse order, so this cannot deadlock.
+        Lock order is store → manager (see `saiverse_store_lock`): the store
+        lock is acquired FIRST, with no manager lock held, because a refresh
+        may hold it across a network round-trip; status() / cancel() / logout
+        of this flow stay responsive while the commit waits for it. Only once
+        the store lock is held is the manager lock taken, and then, as one
+        unit under both locks:
+
+          1. the generation and the cancel event are re-checked (a cancel,
+             newer start() or logout that landed while we waited wins);
+          2. the persistent logout marker is re-checked (the cross-process
+             guard — logout renews it under the same store lock);
+          3. the store is written (`_persist_saiverse_login_locked`, which
+             does not re-acquire the store lock);
+          4. the success state is set.
+
+        So a cancel() can never slip between "check passed" and "tokens
+        written", and nothing ever waits for the store lock under a manager
+        lock, so this cannot deadlock with logout or start().
 
         Refusals:
           * stale / cancelled generation — the state belongs to someone else
@@ -1023,29 +1085,37 @@ class _LoginAttemptManager:
             its attempt_id: the UI watching it gets a message and a retry
             button instead of an anonymous idle it cannot match.
 
+        A store-lock timeout propagates (filelock's Timeout) without touching
+        the state, exactly like any other store-write failure.
+
         Returns True only when the tokens were written.
         """
-        with self._lock:
-            if generation != self._generation or cancel_event.is_set():
-                LOG.info(
-                    "discarding tokens from stale/cancelled login attempt %d", generation
-                )
-                return False
-            try:
-                persist_saiverse_login(tokens, expected_logout_marker=logout_marker)
-            except LoginInvalidatedByLogout:
-                LOG.info(
-                    "discarding tokens from login attempt %d: logout happened "
-                    "after it started",
-                    generation,
-                )
-                self._state = {
-                    "state": LOGIN_STATE_ERROR,
-                    "attempt_id": generation,
-                    "error": LOGIN_REFUSED_BY_LOGOUT_MESSAGE,
-                }
-                return False
-            self._state = success_state
+        if self._is_stale(generation, cancel_event):
+            # Already dead: do not queue behind a refresh for nothing.
+            LOG.info("discarding tokens from stale/cancelled login attempt %d", generation)
+            return False
+        with saiverse_store_lock():
+            with self._lock:
+                if generation != self._generation or cancel_event.is_set():
+                    LOG.info(
+                        "discarding tokens from stale/cancelled login attempt %d",
+                        generation,
+                    )
+                    return False
+                if read_logout_marker() != logout_marker:
+                    LOG.info(
+                        "discarding tokens from login attempt %d: logout happened "
+                        "after it started",
+                        generation,
+                    )
+                    self._state = {
+                        "state": LOGIN_STATE_ERROR,
+                        "attempt_id": generation,
+                        "error": LOGIN_REFUSED_BY_LOGOUT_MESSAGE,
+                    }
+                    return False
+                _persist_saiverse_login_locked(tokens)
+                self._state = success_state
         return True
 
     def _fail(self, generation: int, cancel_event: threading.Event, message: str) -> None:
@@ -1301,8 +1371,15 @@ class CodexDeviceLoginManager(_LoginAttemptManager):
         except Exception as exc:  # noqa: BLE001
             LOG.warning("token exchange response was not JSON: %s", _describe_response(resp))
             raise CodexDeviceLoginError("トークン交換の応答が JSON ではありませんでした。") from exc
-        if not tokens.get("access_token"):
+        # Untrusted JSON: a token that is not a string must never reach the
+        # store (same rule as the SIWC exchange). The device flow has no
+        # revocation path, so an unusable response is simply not saved.
+        if not isinstance(tokens, dict) or not _is_nonempty_str(tokens.get("access_token")):
             raise CodexDeviceLoginError("トークン交換の応答に access_token がありません。")
+        if tokens.get("refresh_token") is not None and not _is_nonempty_str(
+            tokens.get("refresh_token")
+        ):
+            raise CodexDeviceLoginError("トークン交換の応答の refresh_token が不正です。")
         return tokens
 
 # Single manager shared by the API layer.
@@ -1562,6 +1639,10 @@ def _validate_siwc_exchange(
 ) -> Dict[str, Any]:
     """Check an exchange response before anything is persisted.
 
+    0. `access_token` and `refresh_token` must both be non-empty strings. The
+       store and every later request assume strings; and SIWC always asks for
+       `offline_access`, so a response without a usable refresh token cannot
+       keep the login past the access token's lifetime.
     1. The granted scope must include `chatgpt.tokens.use.direct` — without it
        the tokens cannot be used for inference (the user did not grant plan
        usage). The response `scope` is authoritative; when absent we fall back
@@ -1576,6 +1657,13 @@ def _validate_siwc_exchange(
     (OIDC Core 3.1.3.7 permits TLS server validation in place of signature
     checks for tokens received this way).
     """
+    if not _is_nonempty_str(data.get("access_token")):
+        raise SiwcOAuthError("トークン交換の応答に使える access_token がありません。")
+    if not _is_nonempty_str(data.get("refresh_token")):
+        raise SiwcOAuthError(
+            "トークン交換の応答に使える refresh_token がありません。"
+            "このままではログインを維持できないため保存しませんでした。もう一度お試しください。"
+        )
     scope = data.get("scope")
     if isinstance(scope, (list, tuple)):
         scope = " ".join(str(s) for s in scope)
@@ -1831,9 +1919,16 @@ class SiwcOAuthManager(_LoginAttemptManager):
 
         Called from the deadline timer and from the worker loop (whichever
         sees the deadline first; the `claimed` flag makes it happen once).
+
+        When a callback already claimed the attempt, the state is left to it.
+        If that callback has finished, the listener is still closed here (an
+        idempotent backstop to `_process_callback`'s own close), so a
+        finished attempt never keeps its port or worker past the deadline.
         """
         with self._lock:
             if attempt.claimed:
+                if attempt.done.is_set():
+                    _close_server(attempt.server)
                 return
             attempt.claimed = True
             if attempt.generation == self._generation and not attempt.cancel_event.is_set():
@@ -1890,7 +1985,17 @@ class SiwcOAuthManager(_LoginAttemptManager):
             self._fail(generation, cancel_event, message)
             ok = False
         finally:
+            # `done` first: a worker woken by the close below must see the
+            # attempt as finished, never as "listener closed under us".
             attempt.done.set()
+            # The attempt is over whichever path delivered the callback. Close
+            # the listener and cut a connection still sending its request —
+            # with a pasted URL the worker may be blocked in handle_request()
+            # on such a connection (a trickling client), and nothing else
+            # would end it. A loopback callback's own connection was released
+            # from tracking once its request arrived, so it is not cut and
+            # still receives the result page.
+            _close_server(attempt.server)
         return _CallbackOutcome(True, ok, message, 200 if ok else 400)
 
     def _authorize_from_callback(
@@ -2132,9 +2237,10 @@ class SiwcOAuthManager(_LoginAttemptManager):
             data = resp.json()
         except Exception as exc:  # noqa: BLE001
             raise SiwcOAuthError("トークン交換の応答が JSON ではありませんでした。") from exc
-        if not isinstance(data, dict) or not data.get("access_token"):
+        if not isinstance(data, dict) or not _is_nonempty_str(data.get("access_token")):
             # The endpoint answered 200, so a refresh token it did mint is a
-            # live grant nobody will hold: revoke it before giving up.
+            # live grant nobody will hold: revoke it before giving up (only a
+            # usable string is sent; `_revoke_unpersisted` skips anything else).
             SiwcOAuthManager._revoke_unpersisted(data, client_id)
             raise SiwcOAuthError("トークン交換の応答に access_token がありません。")
         return data

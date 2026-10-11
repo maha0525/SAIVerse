@@ -725,6 +725,57 @@ def test_callback_being_processed_is_not_cut_by_cancel(
     assert revocations == [("rt-siwc", "oaiapp_k")]
 
 
+def test_manual_completion_cuts_a_trickling_connection_and_ends_the_worker(
+    isolated_stores, fake_auth_http, siwc_manager, revocations
+):
+    """貼り付けで試行が終わったら、要求を送り終えていない別の接続も切り、受け口とワーカーを残さない。"""
+    started = siwc_manager.start()
+    q = _query(started["auth_url"])
+    worker = _worker_thread(started["attempt_id"])
+    assert worker is not None and worker.is_alive()
+    server = siwc_manager._attempt.server
+    port = urllib.parse.urlparse(started["redirect_uri"]).port
+    client = _Trickler(port)
+    try:
+        # The worker is now inside handle_request() on the trickling connection.
+        assert _wait_for(lambda: server.active_connection is not None, 5)
+        fake_auth_http.post_handler = _exchange_handler(started, "oaiapp_tr")
+        out = siwc_manager.complete(
+            started["attempt_id"],
+            _callback_url(started, code="c", state=q["state"], client_id="oaiapp_tr"),
+        )
+        assert out["ok"] is True
+        assert out["state"] == oca.SIWC_STATE_SUCCESS
+        worker.join(2.0)
+        assert not worker.is_alive(), "worker stayed blocked on the trickling connection"
+        assert server.closed
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(("127.0.0.1", port))  # the listener's port is free again
+        finally:
+            probe.close()
+    finally:
+        client.close()
+    assert _read_json(isolated_stores["saiverse"])["tokens"]["refresh_token"] == "rt-siwc"
+    assert revocations == []
+
+
+def test_deadline_closes_the_listener_of_an_attempt_a_callback_already_finished(
+    isolated_stores, siwc_manager
+):
+    """打ち切り時刻の処理は、戻りの処理が終わった試行でも受け口を閉じる (後始末の二重化)。"""
+    started = siwc_manager.start()
+    attempt = siwc_manager._attempt
+    with siwc_manager._lock:
+        attempt.claimed = True  # a callback took the attempt ...
+    attempt.done.set()  # ... and finished, without closing anything
+    siwc_manager._expire(attempt)
+    assert attempt.server.closed
+    # The state stays the callback's (the deadline does not overwrite it).
+    assert siwc_manager.status()["attempt_id"] == started["attempt_id"]
+    assert siwc_manager.status()["state"] == oca.SIWC_STATE_WAITING
+
+
 def test_worker_start_failure_releases_the_port_and_ends_as_error(
     isolated_stores, siwc_manager, monkeypatch
 ):
@@ -988,13 +1039,15 @@ def test_commit_error_after_write_does_not_revoke_saved_tokens(
     isolated_stores, fake_auth_http, siwc_manager, revocations, monkeypatch
 ):
     """保存は済んだのに例外が上がった (ロック解放の失敗など) とき、保存済みの鍵を失効させない。"""
-    real_persist = oca.persist_saiverse_login
+    # _commit writes through the store-lock-held helper (it already holds the
+    # store lock), so that is the write to wrap.
+    real_persist = oca._persist_saiverse_login_locked
 
-    def persist_then_fail(tokens, expected_logout_marker=None):
-        real_persist(tokens, expected_logout_marker=expected_logout_marker)
+    def persist_then_fail(tokens):
+        real_persist(tokens)
         raise OSError("lock release failed after the write")
 
-    monkeypatch.setattr(oca, "persist_saiverse_login", persist_then_fail)
+    monkeypatch.setattr(oca, "_persist_saiverse_login_locked", persist_then_fail)
     started = siwc_manager.start()
     q = _query(started["auth_url"])
     fake_auth_http.post_handler = _exchange_handler(started, "oaiapp_c")
@@ -1009,10 +1062,10 @@ def test_commit_error_after_write_does_not_revoke_saved_tokens(
 def test_commit_error_before_write_revokes_the_minted_tokens(
     isolated_stores, fake_auth_http, siwc_manager, revocations, monkeypatch
 ):
-    def fail_before_write(tokens, expected_logout_marker=None):
-        raise OSError("store lock timed out")
+    def fail_before_write(tokens):
+        raise OSError("disk full")
 
-    monkeypatch.setattr(oca, "persist_saiverse_login", fail_before_write)
+    monkeypatch.setattr(oca, "_persist_saiverse_login_locked", fail_before_write)
     started = siwc_manager.start()
     q = _query(started["auth_url"])
     fake_auth_http.post_handler = _exchange_handler(started, "oaiapp_c")
@@ -1022,6 +1075,109 @@ def test_commit_error_before_write_revokes_the_minted_tokens(
     )
     assert not isolated_stores["saiverse"].exists()
     assert revocations == [("rt-siwc", "oaiapp_c")]
+
+
+def test_commit_store_lock_timeout_fails_and_revokes_the_minted_tokens(
+    isolated_stores, fake_auth_http, siwc_manager, revocations, monkeypatch
+):
+    """保存がストアのロックを時間内に取れない: 何も書かず、発行された鍵を失効させて失敗で終わる。"""
+    monkeypatch.setattr(oca, "STORE_LOCK_TIMEOUT_SECONDS", 0.3)
+    # Re-authorization, so nothing but the commit takes the store lock.
+    oca.save_siwc_issued_client_id("oaiapp_to")
+    started = siwc_manager.start()
+    q = _query(started["auth_url"])
+    fake_auth_http.post_handler = _exchange_handler(started, "oaiapp_to")
+    holder = oca.saiverse_store_lock(timeout=5)  # a refresh that never ends in time
+    holder.acquire()
+    result: dict = {}
+    t = threading.Thread(
+        target=lambda: result.update(
+            out=siwc_manager.complete(
+                started["attempt_id"],
+                _callback_url(started, code="c", state=q["state"], client_id="oaiapp_to"),
+            )
+        ),
+        daemon=True,
+    )
+    try:
+        t.start()
+        t.join(10)
+    finally:
+        holder.release()
+    assert not t.is_alive()
+    assert result["out"]["ok"] is False
+    st = siwc_manager.status()
+    assert st["state"] == oca.SIWC_STATE_ERROR
+    assert st["attempt_id"] == started["attempt_id"]
+    assert not isolated_stores["saiverse"].exists()
+    assert revocations == [("rt-siwc", "oaiapp_to")]
+
+
+def _watch_store_lock_requests(monkeypatch) -> threading.Event:
+    """Patch oca.saiverse_store_lock so the test sees when someone asks for it."""
+    real_lock = oca.saiverse_store_lock
+    asked = threading.Event()
+
+    def watched(timeout=None):
+        asked.set()
+        return real_lock(timeout)
+
+    monkeypatch.setattr(oca, "saiverse_store_lock", watched)
+    return asked
+
+
+def test_commit_waiting_for_the_store_lock_keeps_status_and_cancel_responsive(
+    isolated_stores, fake_auth_http, siwc_manager, revocations, monkeypatch
+):
+    """refresh がストアのロックを握っている間に戻りが保存へ進んでも、状態確認と取り下げは止まらない。
+
+    保存はログイン管理のロックを握ったままストアのロックを待たない。待っている
+    間に届いた取り下げが勝ち、ロックが空いた後も鍵は保存されず失効される。
+    """
+    monkeypatch.setattr(oca, "STORE_LOCK_TIMEOUT_SECONDS", 10.0)
+    oca.save_siwc_issued_client_id("oaiapp_wt")  # only the commit takes the store lock
+    started = siwc_manager.start()
+    q = _query(started["auth_url"])
+    fake_auth_http.post_handler = _exchange_handler(started, "oaiapp_wt")
+
+    holder = oca.saiverse_store_lock(timeout=5)  # a refresh in flight
+    holder.acquire()
+    asked = _watch_store_lock_requests(monkeypatch)
+    result: dict = {}
+    t = threading.Thread(
+        target=lambda: result.update(
+            out=siwc_manager.complete(
+                started["attempt_id"],
+                _callback_url(started, code="c", state=q["state"], client_id="oaiapp_wt"),
+            )
+        ),
+        daemon=True,
+    )
+    try:
+        t.start()
+        assert asked.wait(10), "the commit never asked for the store lock"
+        threading.Event().wait(0.2)  # let it settle into waiting
+        assert t.is_alive()
+
+        asked_at = time.monotonic()
+        st = siwc_manager.status()
+        assert time.monotonic() - asked_at < 1.0, "status() blocked behind the store lock"
+        assert st["state"] == oca.SIWC_STATE_WAITING
+
+        asked_at = time.monotonic()
+        assert siwc_manager.cancel(started["attempt_id"], started["lease_id"]) is True
+        assert time.monotonic() - asked_at < 1.0, "cancel() blocked behind the store lock"
+        assert t.is_alive()  # the commit is still waiting for the store lock
+        assert not isolated_stores["saiverse"].exists()
+    finally:
+        holder.release()
+    t.join(10)
+    assert not t.is_alive()
+    # The cancel issued during the wait wins once the lock is free.
+    assert result["out"]["ok"] is False
+    assert not isolated_stores["saiverse"].exists()
+    assert siwc_manager.status()["state"] == oca.SIWC_STATE_IDLE
+    assert revocations == [("rt-siwc", "oaiapp_wt")]
 
 
 def test_device_marked_record_is_never_guessed_into_siwc(isolated_stores):
@@ -1147,9 +1303,99 @@ def test_non_string_tokens_are_rejected_as_oauth_errors_not_type_errors():
 
     data = _exchange_payload("n1", "oaiapp_me")
     data["scope"] = None
-    data["access_token"] = 42  # no usable scope claim either
+    data["access_token"] = _jwt({"scope": 42})  # no usable scope claim either
     with pytest.raises(oca.SiwcOAuthError, match="chatgpt.tokens.use.direct"):
         oca._validate_siwc_exchange(data, "oaiapp_me", "n1")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("access_token", 123),
+        ("access_token", ""),
+        ("access_token", None),
+        ("refresh_token", None),
+        ("refresh_token", 123),
+        ("refresh_token", ""),
+        ("refresh_token", ["rt"]),
+    ],
+)
+def test_validation_requires_string_access_and_refresh_tokens(field, value):
+    data = _exchange_payload("n1", "oaiapp_me")
+    if value is None:
+        del data[field]
+    else:
+        data[field] = value
+    with pytest.raises(oca.SiwcOAuthError, match=field):
+        oca._validate_siwc_exchange(data, "oaiapp_me", "n1")
+
+
+def _existing_siwc_login(path: Path) -> dict:
+    record = {
+        "source": oca.SIWC_SOURCE,
+        "tokens": {
+            "access_token": _siwc_access_token(client_id="oaiapp_old"),
+            "refresh_token": "rt-existing",
+            "client_id": "oaiapp_old",
+            "scope": oca.SIWC_SCOPE,
+        },
+    }
+    _write_json(path, record)
+    return record
+
+
+def test_exchange_with_non_string_access_token_keeps_the_store_and_revokes(
+    isolated_stores, fake_auth_http, siwc_manager, revocations
+):
+    existing = _existing_siwc_login(isolated_stores["saiverse"])
+    started = siwc_manager.start()
+    q = _query(started["auth_url"])
+    nonce = q["nonce"]
+
+    def handler(url, kwargs):
+        payload = _exchange_payload(nonce, "oaiapp_x")
+        payload["access_token"] = 123
+        return FakeResponse(200, payload)
+
+    fake_auth_http.post_handler = handler
+    out = siwc_manager.complete(
+        started["attempt_id"],
+        _callback_url(started, code="c", state=q["state"], client_id="oaiapp_x"),
+    )
+    assert out["ok"] is False
+    assert out["state"] == oca.SIWC_STATE_ERROR
+    assert "access_token" in out["error"]
+    assert _read_json(isolated_stores["saiverse"]) == existing
+    assert revocations == [("rt-siwc", "oaiapp_x")]
+
+
+@pytest.mark.parametrize("refresh_token", [None, 123, ""])
+def test_exchange_without_a_usable_refresh_token_keeps_the_store(
+    isolated_stores, fake_auth_http, siwc_manager, revocations, refresh_token
+):
+    existing = _existing_siwc_login(isolated_stores["saiverse"])
+    started = siwc_manager.start()
+    q = _query(started["auth_url"])
+    nonce = q["nonce"]
+
+    def handler(url, kwargs):
+        payload = _exchange_payload(nonce, "oaiapp_y")
+        if refresh_token is None:
+            del payload["refresh_token"]
+        else:
+            payload["refresh_token"] = refresh_token
+        return FakeResponse(200, payload)
+
+    fake_auth_http.post_handler = handler
+    out = siwc_manager.complete(
+        started["attempt_id"],
+        _callback_url(started, code="c", state=q["state"], client_id="oaiapp_y"),
+    )
+    assert out["ok"] is False
+    assert out["state"] == oca.SIWC_STATE_ERROR
+    assert "refresh_token" in out["error"]
+    assert _read_json(isolated_stores["saiverse"]) == existing
+    assert revocations == []  # no usable refresh token to revoke
 
 
 def test_exchange_200_without_access_token_revokes_the_minted_refresh_token(
@@ -1475,6 +1721,39 @@ def test_siwc_refresh_write_failure_revokes_the_new_refresh_token_after_the_lock
         OpenAICodexClient(model="m")._refresh_or_pickup_latest(prior_access_token=old_access)
     assert revoked == [("rt-new", "oaiapp_w")]
     assert _read_json(isolated_stores["saiverse"])["tokens"]["refresh_token"] == "rt-old"
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_revoked"),
+    [
+        ({"access_token": 123, "refresh_token": "rt-new"}, [("rt-new", "oaiapp_r")]),
+        ({"access_token": "", "refresh_token": "rt-new"}, [("rt-new", "oaiapp_r")]),
+        ({"refresh_token": "rt-new"}, [("rt-new", "oaiapp_r")]),
+        ({"access_token": 123, "refresh_token": 456}, []),
+        ({"access_token": "a.b.c", "refresh_token": 456}, []),
+        (["not", "a", "dict"], []),
+    ],
+)
+def test_siwc_refresh_with_unusable_tokens_never_overwrites_the_store(
+    isolated_stores, monkeypatch, response, expected_revoked
+):
+    """再発行の応答の鍵が文字列でなければ、ストアを書き換えず、使える新しい鍵だけ失効させる。"""
+    old_access = _siwc_access_token(client_id="oaiapp_r", expires_in_seconds=-100)
+    record = {
+        "source": oca.SIWC_SOURCE,
+        "tokens": {"access_token": old_access, "refresh_token": "rt-old", "client_id": "oaiapp_r"},
+    }
+    _write_json(isolated_stores["saiverse"], record)
+    _capture_httpx_post(monkeypatch, response)
+    revoked: list = []
+    monkeypatch.setattr(
+        codex_mod, "revoke_siwc_refresh_token",
+        lambda rt, cid: revoked.append((rt, cid)) or True,
+    )
+    with pytest.raises(RuntimeError, match="ログインし直して"):
+        OpenAICodexClient(model="m")._refresh_or_pickup_latest(prior_access_token=old_access)
+    assert _read_json(isolated_stores["saiverse"]) == record
+    assert revoked == expected_revoked
 
 
 def test_legacy_refresh_write_failure_revokes_nothing(isolated_stores, monkeypatch):
