@@ -32,15 +32,20 @@ Intent doc: docs/intent/codex_subscription_auth.md
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
 import platform
+import secrets
 import threading
 import time
+import urllib.parse
 import uuid
+import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -59,6 +64,19 @@ CODEX_REFRESH_TOKEN_URL = f"{CODEX_OAUTH_ISSUER}/oauth/token"
 CODEX_ORIGINATOR = "codex_cli_rs"
 CODEX_CLI_VERSION = "0.45.0"
 CODEX_IMPERSONATE = "chrome124"
+
+# Sign in with ChatGPT (SIWC) official open-source token-sharing constants
+SIWC_AUTHORIZE_URL = f"{CODEX_OAUTH_ISSUER}/api/accounts/authorize"
+SIWC_TOKEN_URL = f"{CODEX_OAUTH_ISSUER}/api/accounts/oauth/token"
+SIWC_DYNAMIC_CLIENT_ID = "dynamic_agent_client"
+SIWC_APP_NAME_HINT = "SAIVerse"
+SIWC_DEFAULT_CALLBACK_PORT = 1455
+SIWC_CALLBACK_PATH = "/auth/callback"
+SIWC_SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
+SIWC_RESOURCE = "https://api.openai.com/v1"
+SIWC_DIRECT_SCOPE = "chatgpt.tokens.use.direct"
+SIWC_RESPONSES_URL = "https://api.openai.com/v1/responses"
+SIWC_MODELS_URL = "https://api.openai.com/v1/models"
 
 DEVICE_USERCODE_URL = f"{CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/usercode"
 DEVICE_POLL_URL = f"{CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/token"
@@ -261,6 +279,16 @@ def persist_saiverse_login(
         store_tokens["id_token"] = tokens["id_token"]
     if account_id:
         store_tokens["account_id"] = account_id
+    if tokens.get("client_id"):
+        store_tokens["client_id"] = tokens["client_id"]
+    if tokens.get("ext_agent_host_id"):
+        store_tokens["ext_agent_host_id"] = tokens["ext_agent_host_id"]
+    if tokens.get("scope"):
+        store_tokens["scope"] = tokens["scope"]
+    if tokens.get("resource"):
+        store_tokens["resource"] = tokens["resource"]
+
+    source = tokens.get("source", "saiverse_device_login")
     with saiverse_store_lock():
         if (
             expected_logout_marker is not None
@@ -276,9 +304,42 @@ def persist_saiverse_login(
                 "last_refresh": datetime.now(tz=timezone.utc)
                 .isoformat()
                 .replace("+00:00", "Z"),
-                "source": "saiverse_device_login",
+                "source": source,
             },
         )
+
+
+def is_siwc_token(tokens: Optional[Dict[str, Any]]) -> bool:
+    """Check if the token record was issued via Sign in with ChatGPT (token sharing).
+
+    Detection checks (any match qualifies):
+        1. Explicit granted scope contains `chatgpt.tokens.use.direct`
+        2. Issued `client_id` starts with `oaiapp_`
+        3. Decoded JWT `scp` / `scope` claims contain `chatgpt.tokens.use.direct`
+        4. Decoded JWT `client_id` starts with `oaiapp_`
+    """
+    if not isinstance(tokens, dict):
+        return False
+    scope = tokens.get("scope") or ""
+    if SIWC_DIRECT_SCOPE in scope:
+        return True
+    client_id = tokens.get("client_id") or ""
+    if isinstance(client_id, str) and client_id.startswith("oaiapp_"):
+        return True
+    access_token = tokens.get("access_token")
+    if isinstance(access_token, str) and access_token:
+        payload = decode_jwt_payload(access_token)
+        if isinstance(payload, dict):
+            scp = payload.get("scp") or []
+            if isinstance(scp, list) and SIWC_DIRECT_SCOPE in scp:
+                return True
+            scope_str = payload.get("scope") or ""
+            if isinstance(scope_str, str) and SIWC_DIRECT_SCOPE in scope_str:
+                return True
+            cid = payload.get("client_id") or ""
+            if isinstance(cid, str) and cid.startswith("oaiapp_"):
+                return True
+    return False
 
 
 def _delete_store_file_locked() -> bool:
@@ -842,6 +903,294 @@ LOGIN_MANAGER = CodexDeviceLoginManager()
 
 
 # ---------------------------------------------------------------------------
+# Sign in with ChatGPT (SIWC) OAuth Manager (Dynamic Registration + PKCE Loopback)
+# ---------------------------------------------------------------------------
+
+SIWC_STATE_IDLE = "idle"
+SIWC_STATE_WAITING = "waiting"
+SIWC_STATE_SUCCESS = "success"
+SIWC_STATE_ERROR = "error"
+
+
+class SiwcOAuthError(RuntimeError):
+    pass
+
+
+def _base64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+class _SiwcCallbackHandler(BaseHTTPRequestHandler):
+    """Loopback callback handler on 127.0.0.1 for OpenAI authorization redirects."""
+
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == SIWC_CALLBACK_PATH:
+            params = urllib.parse.parse_qs(parsed.query)
+            server = getattr(self, "server", None)
+            if server is not None:
+                server.callback_result = {  # type: ignore[attr-defined]
+                    "code": params.get("code", [None])[0],
+                    "state": params.get("state", [None])[0],
+                    "client_id": params.get("client_id", [None])[0],
+                    "error": params.get("error", [None])[0],
+                    "error_description": params.get("error_description", [None])[0],
+                }
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            html = (
+                "<!DOCTYPE html><html><body style='font-family:sans-serif;"
+                "text-align:center;padding:50px;background:#f9fafb;color:#111827;'>"
+                "<div style='max-width:480px;margin:auto;padding:32px;background:#fff;"
+                "border-radius:12px;box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);'>"
+                "<h2 style='color:#10a37f;margin-bottom:12px;'>Sign in with ChatGPT 認証完了！</h2>"
+                "<p style='color:#4b5563;font-size:15px;'>このタブを閉じて、SAIVerse の画面に戻ってください。</p>"
+                "</div></body></html>"
+            )
+            self.wfile.write(html.encode("utf-8"))
+            if server is not None and hasattr(server, "auth_event"):
+                server.auth_event.set()  # type: ignore[attr-defined]
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass
+
+
+class SiwcOAuthManager:
+    """Manages Sign in with ChatGPT authorization via dynamic registration and PKCE.
+
+    The official OpenAI flow for open-source / local desktop tools:
+      1. Generates PKCE verifier + S256 challenge, state, nonce, and a persistent host ID.
+      2. Starts a loopback HTTP listener on 127.0.0.1:1455 (or next available port).
+      3. Launches the browser at https://auth.openai.com/api/accounts/authorize.
+      4. Captures the issued client_id (oaiapp_...) and code at /auth/callback.
+      5. Exchanges the authorization code via POST /api/accounts/oauth/token.
+      6. Writes the validated tokens into SAIVerse's auth store under the store lock.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state: Dict[str, Any] = {"state": SIWC_STATE_IDLE}
+        self._server: Optional[HTTPServer] = None
+        self._thread: Optional[threading.Thread] = None
+        self._cancel_event = threading.Event()
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._state)
+
+    def cancel(self) -> bool:
+        with self._lock:
+            if self._state.get("state") != SIWC_STATE_WAITING:
+                return False
+            self._cancel_event.set()
+            if self._server:
+                try:
+                    self._server.server_close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._server = None
+            self._state = {"state": SIWC_STATE_IDLE}
+            return True
+
+    def start(
+        self,
+        open_browser: bool = True,
+        preferred_port: int = SIWC_DEFAULT_CALLBACK_PORT,
+        timeout_seconds: float = 600.0,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            if self._state.get("state") == SIWC_STATE_WAITING:
+                return dict(self._state)
+
+            verifier = secrets.token_urlsafe(64)
+            challenge = _base64url_encode(
+                hashlib.sha256(verifier.encode("ascii")).digest()
+            )
+            state = secrets.token_hex(16)
+            nonce = secrets.token_hex(16)
+
+            # Resolve host ID (reuse existing if present in current store, else fresh UUIDv4)
+            host_id = self._resolve_or_create_host_id()
+
+            server: Optional[HTTPServer] = None
+            port = preferred_port
+            try:
+                server = HTTPServer(("127.0.0.1", port), _SiwcCallbackHandler)
+            except OSError:
+                server = HTTPServer(("127.0.0.1", 0), _SiwcCallbackHandler)
+                port = server.server_port
+
+            redirect_uri = f"http://127.0.0.1:{port}{SIWC_CALLBACK_PATH}"
+            auth_url_params = {
+                "client_id": SIWC_DYNAMIC_CLIENT_ID,
+                "agent_name_hint": SIWC_APP_NAME_HINT,
+                "ext_agent_host_id": host_id,
+                "response_type": "code",
+                "redirect_uri": redirect_uri,
+                "scope": SIWC_SCOPE,
+                "resource": SIWC_RESOURCE,
+                "state": state,
+                "nonce": nonce,
+                "code_challenge_method": "S256",
+                "code_challenge": challenge,
+            }
+            auth_url = f"{SIWC_AUTHORIZE_URL}?" + urllib.parse.urlencode(auth_url_params)
+
+            auth_event = threading.Event()
+            setattr(server, "callback_result", {})
+            setattr(server, "auth_event", auth_event)
+
+            self._server = server
+            self._cancel_event.clear()
+            self._state = {
+                "state": SIWC_STATE_WAITING,
+                "auth_url": auth_url,
+                "redirect_uri": redirect_uri,
+                "port": port,
+                "host_id": host_id,
+                "started_at": datetime.now(tz=timezone.utc).isoformat(),
+            }
+
+            thread = threading.Thread(
+                target=self._run_loopback,
+                args=(server, auth_event, verifier, state, redirect_uri, host_id, timeout_seconds),
+                name="saiverse-siwc-oauth",
+                daemon=True,
+            )
+            self._thread = thread
+            thread.start()
+
+            if open_browser:
+                try:
+                    webbrowser.open(auth_url)
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning("could not auto-open browser for SIWC: %s", exc)
+
+            return dict(self._state)
+
+    def _resolve_or_create_host_id(self) -> str:
+        store = resolve_active_store()
+        if store is not None and store.path.exists():
+            try:
+                data = read_auth_store(store.path)
+                existing_host = (data.get("tokens") or {}).get("ext_agent_host_id")
+                if existing_host and isinstance(existing_host, str) and existing_host.startswith("urn:uuid:"):
+                    return existing_host
+            except Exception:  # noqa: BLE001
+                pass
+        return f"urn:uuid:{uuid.uuid4()}"
+
+    def _run_loopback(
+        self,
+        server: HTTPServer,
+        auth_event: threading.Event,
+        verifier: str,
+        expected_state: str,
+        redirect_uri: str,
+        host_id: str,
+        timeout_seconds: float,
+    ) -> None:
+        try:
+            # Handle one incoming HTTP request in background
+            server_thread = threading.Thread(target=server.handle_request, daemon=True)
+            server_thread.start()
+
+            # Wait for callback or cancel
+            start_time = time.monotonic()
+            while not auth_event.is_set():
+                if self._cancel_event.is_set():
+                    return
+                if time.monotonic() - start_time > timeout_seconds:
+                    with self._lock:
+                        self._state = {"state": SIWC_STATE_ERROR, "error": "認証がタイムアウトしました。"}
+                    return
+                time.sleep(0.2)
+
+            cb: Dict[str, Any] = getattr(server, "callback_result", {})
+            if cb.get("error"):
+                desc = cb.get("error_description") or cb["error"]
+                with self._lock:
+                    self._state = {"state": SIWC_STATE_ERROR, "error": f"OpenAI 認証エラー: {desc}"}
+                return
+
+            if cb.get("state") != expected_state:
+                with self._lock:
+                    self._state = {"state": SIWC_STATE_ERROR, "error": "OAuth state が一致しません。"}
+                return
+
+            code = cb.get("code")
+            issued_client_id = cb.get("client_id")
+            if not code or not issued_client_id:
+                with self._lock:
+                    self._state = {"state": SIWC_STATE_ERROR, "error": "認可コードまたは client_id が取得できませんでした。"}
+                return
+
+            # Code exchange
+            LOG.info("exchanging SIWC authorization code with client_id=%s", issued_client_id)
+            tokens = self._exchange_code(issued_client_id, code, verifier, redirect_uri)
+            tokens["client_id"] = issued_client_id
+            tokens["ext_agent_host_id"] = host_id
+            tokens["source"] = "saiverse_siwc"
+            tokens["resource"] = SIWC_RESOURCE
+
+            persist_saiverse_login(tokens)
+            LOG.info("SIWC login tokens persisted successfully to SAIVerse store")
+
+            with self._lock:
+                self._state = {
+                    "state": SIWC_STATE_SUCCESS,
+                    "client_id": issued_client_id,
+                    "scope": tokens.get("scope"),
+                    "completed_at": datetime.now(tz=timezone.utc).isoformat(),
+                }
+        except Exception as exc:  # noqa: BLE001
+            LOG.exception("error in SIWC loopback authorization: %s", exc)
+            with self._lock:
+                self._state = {"state": SIWC_STATE_ERROR, "error": str(exc)}
+        finally:
+            try:
+                server.server_close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _exchange_code(
+        client_id: str, code: str, verifier: str, redirect_uri: str
+    ) -> Dict[str, Any]:
+        with httpx.Client(timeout=30.0, follow_redirects=False) as session:
+            resp = session.post(
+                SIWC_TOKEN_URL,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "grant_type": "authorization_code",
+                    "client_id": client_id,
+                    "code": code,
+                    "code_verifier": verifier,
+                    "redirect_uri": redirect_uri,
+                    "resource": SIWC_RESOURCE,
+                },
+            )
+            if resp.status_code != 200:
+                raise SiwcOAuthError(
+                    f"トークン交換に失敗しました (status={resp.status_code}): {resp.text[:400]}"
+                )
+            try:
+                data = resp.json()
+            except Exception as exc:  # noqa: BLE001
+                raise SiwcOAuthError("トークン交換の応答が JSON ではありませんでした。") from exc
+            if not data.get("access_token"):
+                raise SiwcOAuthError("トークン交換の応答に access_token がありません。")
+            return data
+
+
+SIWC_LOGIN_MANAGER = SiwcOAuthManager()
+
+
+# ---------------------------------------------------------------------------
 # Status for the UI
 # ---------------------------------------------------------------------------
 
@@ -869,6 +1218,7 @@ def auth_status() -> Dict[str, Any]:
     return {
         "logged_in": bool(access_token),
         "store": store.kind,
+        "is_siwc": is_siwc_token(tokens),
         "cli_available": cli_available,
         "account_id": tokens.get("account_id")
         or extract_account_id(access_token, tokens.get("id_token") or ""),
@@ -884,6 +1234,17 @@ __all__ = [
     "CODEX_ORIGINATOR",
     "CODEX_CLI_VERSION",
     "CODEX_IMPERSONATE",
+    "SIWC_AUTHORIZE_URL",
+    "SIWC_TOKEN_URL",
+    "SIWC_DYNAMIC_CLIENT_ID",
+    "SIWC_APP_NAME_HINT",
+    "SIWC_DEFAULT_CALLBACK_PORT",
+    "SIWC_CALLBACK_PATH",
+    "SIWC_SCOPE",
+    "SIWC_RESOURCE",
+    "SIWC_DIRECT_SCOPE",
+    "SIWC_RESPONSES_URL",
+    "SIWC_MODELS_URL",
     "NO_AUTH_HINT",
     "AuthStore",
     "STORE_KIND_SAIVERSE",
@@ -902,8 +1263,12 @@ __all__ = [
     "decode_jwt_payload",
     "extract_account_id",
     "access_token_expiry",
+    "is_siwc_token",
     "CodexDeviceLoginError",
     "CodexDeviceLoginManager",
     "LOGIN_MANAGER",
+    "SiwcOAuthError",
+    "SiwcOAuthManager",
+    "SIWC_LOGIN_MANAGER",
     "auth_status",
 ]
