@@ -1,6 +1,6 @@
 # Intent Document: Cache Lifecycle Control
 
-**ステータス**: Phase 1-2 実装済み (v0.5, 2026-05-24)。Phase 3 は M1 実装済み (v0.10〜v0.13)。§3.5 Gemini の継続キャッシュ (高速応答モード) は**実装中** (v0.14, 2026-10-11)
+**ステータス**: Phase 1-2 実装済み (v0.5, 2026-05-24)。Phase 3 は M1 実装済み (v0.10〜v0.13)。§3.5 Gemini の継続キャッシュ (高速応答モード) は**検証待ち** (v0.14, 2026-10-11 実装・レビュー済み、実機での待ち時間の計測待ち)
 **位置付け**: prompt cache の **lifecycle 制御層**。`cached_head_architecture.md` が「head 内容の安定性」を保証するのに対し、本機構はその安定した head に対して「キャッシュを **いつ書き** / **いつまで保持** / **いつ捨てる**」かを制御する。Anthropic / Gemini 両プロバイダの cache 機構を統一 UI で扱う。
 **前提**: `cached_head_architecture.md` (head 安定性が成立している前提で TTL 戦略を組む。**実装済み**: `sea/head_pipeline/` — registry/store/pipeline + sections 11 種) / Gemini explicit cache の実測結果 (`temp/verify_gemini_cache_billing.py`、書き込み無料 + storage 課金 + extend 可能)
 
@@ -157,7 +157,7 @@ pulse を跨いで cache を保持することで、連続発話の 2 回目以�
 
 ChatOptions モーダル内に「キャッシュモード」セクションを追加、ラジオボタン or セグメントコントロールで標準 / 連続 / マニュアルを選択。マニュアル選択時のみ TTL 選択 UI が露出。
 
-### 3.5. (3 モードの外) Gemini の継続キャッシュ (高速応答モード) — 実装中 (2026-10-11 設計確定)
+### 3.5. (3 モードの外) Gemini の継続キャッシュ (高速応答モード) — 検証待ち (2026-10-11 実装)
 
 この節の仕組みは、§3.1〜§3.4 の 3 モード (chat タブ単位で選び、永続化しない) の一つではない。グローバル設定 (環境タブ) の「Gemini 自動キャッシュ」(`SAIVERSE_GEMINI_AUTO_CACHE`、`.env` に保存される) と同じ層にある、Gemini 専用の選択肢である。そのため §2 の P2 / P4 / P6 (UI 統一・永続化しない) と §6 の C1 / C2 (session 寿命・自動で消さない) は、自動キャッシュと同じくこの節には及ばない。§3.2 で「Gemini における連続モードの意味」とした「create の遅延を避ける」という役を、Gemini で具体化するのがこの節である。
 
