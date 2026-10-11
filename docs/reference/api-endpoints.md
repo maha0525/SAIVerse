@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 371（tag グループ: 26）
+**エンドポイント数**: 375（tag グループ: 26）
 
 ## addon
 
@@ -108,6 +108,10 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/codex-auth/login/start` | デバイスコードを申請し、ユーザーに見せる user_code を返す。 |
 | GET | `/api/codex-auth/login/status` | ログイン試行の進行状態を返す。フロントはこれをポーリングする。 |
 | POST | `/api/codex-auth/logout` | SAIVerse 自前のトークンストアを削除する。 |
+| POST | `/api/codex-auth/siwc/cancel` | 自分の lease を返却する。意味論はデバイスコード方式の cancel と同じ。 |
+| POST | `/api/codex-auth/siwc/complete` | 貼り付けられた転送先 URL を、受け口に届いた場合と同じ検証・保存の経路へ流す。 |
+| POST | `/api/codex-auth/siwc/start` | Sign in with ChatGPT の試行を開き、{state, attempt_id, lease_id, auth_url, |
+| GET | `/api/codex-auth/siwc/status` | SIWC 試行の進行状態 {state, attempt_id, auth_url?, error?} を返す。 |
 | GET | `/api/codex-auth/status` | どのトークンストアが認証源か・その健康状態を返す。 |
 
 ## config

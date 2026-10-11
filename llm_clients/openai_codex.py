@@ -15,6 +15,11 @@ See docs/intent/codex_subscription_auth.md.
 Cloudflare in front of chatgpt.com fingerprints clients by their TLS handshake.
 Plain `requests` / `httpx` get challenged; we use `curl_cffi` to impersonate
 Chrome's TLS fingerprint, the same way Codex CLI's reqwest client gets through.
+
+Tokens issued through "Sign in with ChatGPT" (SIWC, see openai_codex_auth)
+take a different route: plain httpx to https://api.openai.com/v1/responses,
+refresh at the SIWC token endpoint with the issued client id, and a request
+body stripped of the parameters SIWC rejects (max_output_tokens etc.).
 """
 from __future__ import annotations
 
@@ -37,7 +42,6 @@ from .openai_codex_auth import (
     CODEX_OAUTH_CLIENT_ID,
     CODEX_REFRESH_TOKEN_URL,
     SIWC_RESPONSES_URL,
-    SIWC_MODELS_URL,
     SIWC_TOKEN_URL,
     SIWC_RESOURCE,
     NO_AUTH_HINT,
@@ -45,6 +49,8 @@ from .openai_codex_auth import (
     access_token_expiry,
     build_user_agent as _build_user_agent,
     is_siwc_token,
+    resolve_siwc_client_id,
+    siwc_scope_grants_direct_use,
     read_auth_store,
     resolve_active_store,
     write_auth_store,
@@ -59,6 +65,19 @@ CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 SUPPORTED_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 # Pre-emptively refresh when access_token has less than this many seconds left
 TOKEN_REFRESH_LEEWAY_SECONDS = 60.0
+# Responses API parameters that SIWC token sharing rejects over HTTP. Only
+# max_output_tokens can currently come out of _build_body (temperature is
+# already dropped there); the rest are listed so a future builder change cannot
+# leak them onto the SIWC route.
+_SIWC_UNSUPPORTED_BODY_KEYS = (
+    "max_output_tokens",
+    "temperature",
+    "top_p",
+    "metadata",
+    "user",
+    "truncation",
+    "previous_response_id",
+)
 
 
 class CodexHTTPError(RuntimeError):
@@ -208,7 +227,9 @@ class _HttpxResponseAdapter:
     def __init__(self, resp: httpx.Response) -> None:
         self._resp = resp
         self.status_code = resp.status_code
-        self.ok = 200 <= resp.status_code < 400
+        # 2xx only: requests are sent with follow_redirects=False, so a 3xx
+        # is an unfollowed redirect, not a usable response.
+        self.ok = 200 <= resp.status_code < 300
         self.headers = resp.headers
         self._text: Optional[str] = None
 
@@ -235,7 +256,8 @@ class OpenAICodexClient(LLMClient):
         1. Official Sign in with ChatGPT (Token Sharing):
            * Target: https://api.openai.com/v1/responses
            * Plain HTTP (httpx), standard Bearer authorization header
-           * Active whenever the token record contains `chatgpt.tokens.use.direct` scope
+           * Active whenever `is_siwc_token()` recognizes the stored token set
+           * Body omits the parameters SIWC rejects (see `_SIWC_UNSUPPORTED_BODY_KEYS`)
         2. Legacy Codex CLI backend:
            * Target: https://chatgpt.com/backend-api/codex/responses
            * Chrome TLS impersonation (curl_cffi), originator + account-id headers
@@ -310,6 +332,16 @@ class OpenAICodexClient(LLMClient):
             )
         is_siwc = is_siwc_token(tokens)
         if is_siwc:
+            # The spec requires the granted scope to include direct plan use
+            # before the tokens are used for inference. A record without a
+            # stored scope (older record) is judged at the API instead.
+            granted_scope = tokens.get("scope")
+            if granted_scope and not siwc_scope_grants_direct_use(granted_scope):
+                raise RuntimeError(
+                    "Sign in with ChatGPT のトークンに ChatGPT プランでの利用許可 "
+                    "(chatgpt.tokens.use.direct) がありません。SAIVerse の設定画面から "
+                    "ChatGPT にログインし直してください。"
+                )
             url = SIWC_RESPONSES_URL
             headers = {
                 "Authorization": f"Bearer {access_token}",
@@ -651,11 +683,30 @@ class OpenAICodexClient(LLMClient):
         elif seconds < 5 * 60:
             LOG.info("Codex access_token expires in %.0fs", seconds)
 
+    @staticmethod
+    def _to_siwc_body(body: Dict[str, Any]) -> Dict[str, Any]:
+        """Copy of `body` fit for the SIWC route (the legacy body is untouched).
+
+        SIWC requires `store: false` + `stream: true` and rejects the keys in
+        `_SIWC_UNSUPPORTED_BODY_KEYS`. System instructions already travel in
+        `instructions` (_build_input never emits a system-role item).
+        """
+        siwc_body = dict(body)
+        for key in _SIWC_UNSUPPORTED_BODY_KEYS:
+            if key in siwc_body:
+                LOG.debug("dropping %s=%r for Sign in with ChatGPT request", key, siwc_body[key])
+                del siwc_body[key]
+        siwc_body["store"] = False
+        siwc_body["stream"] = True
+        return siwc_body
+
     def _post_responses(
         self,
         body: Dict[str, Any],
     ) -> Any:
         url, headers, is_siwc = self._resolve_connection_params()
+        if is_siwc:
+            body = self._to_siwc_body(body)
         # Best-effort expiry warning on the token we're about to send.
         access_token_for_log = headers.get("Authorization", "").removeprefix("Bearer ")
         if access_token_for_log:
@@ -742,7 +793,6 @@ class OpenAICodexClient(LLMClient):
                 latest_tokens = latest.get("tokens") or {}
                 latest_access = latest_tokens.get("access_token")
                 latest_refresh = latest_tokens.get("refresh_token")
-                latest_client_id = latest_tokens.get("client_id")
                 is_siwc = is_siwc_token(latest_tokens)
 
                 if latest_access and latest_access != prior_access_token:
@@ -765,12 +815,19 @@ class OpenAICodexClient(LLMClient):
                     "refreshing Codex access_token via refresh_token grant (siwc=%s)",
                     is_siwc,
                 )
-                try:
-                    refreshed = self._request_refresh(
-                        latest_refresh, client_id=latest_client_id, is_siwc=is_siwc
-                    )
-                except TypeError:
-                    # Backwards compatibility with test mocks that only accept 1 argument
+                if is_siwc:
+                    # A SIWC refresh token must never reach the legacy Codex
+                    # endpoint (it would always fail there): without an
+                    # issued client id the only way forward is a new sign-in.
+                    client_id = resolve_siwc_client_id(latest_tokens)
+                    if not client_id:
+                        raise RuntimeError(
+                            "Sign in with ChatGPT のトークンに client_id が見つからないため"
+                            "更新できません。SAIVerse の設定画面から ChatGPT に"
+                            "ログインし直してください。"
+                        )
+                    refreshed = self._request_siwc_refresh(latest_refresh, client_id)
+                else:
                     refreshed = self._request_refresh(latest_refresh)
                 self._persist_refreshed_tokens(store.path, latest, refreshed)
         except FileLockTimeout as exc:
@@ -779,98 +836,66 @@ class OpenAICodexClient(LLMClient):
                 "may be refreshing concurrently"
             ) from exc
 
-    def _request_refresh(
-        self,
-        refresh_token: str,
-        client_id: Optional[str] = None,
-        is_siwc: bool = False,
-    ) -> Dict[str, Any]:
-        """POST to OpenAI's refresh endpoint with refresh_token grant.
+    def _request_refresh(self, refresh_token: str) -> Dict[str, Any]:
+        """POST to https://auth.openai.com/oauth/token with refresh_token grant.
 
-        Supports both the official SIWC endpoint (/api/accounts/oauth/token)
-        when issued via dynamic registration, and the legacy Codex CLI endpoint
-        (/oauth/token).
+        Legacy Codex CLI tokens only (SIWC tokens go through
+        `_request_siwc_refresh`). Plain httpx, NOT curl_cffi: the auth host
+        serves the browser HTML page to TLS-impersonating clients instead of
+        the JSON token response (same trap the device-code poll hit). Only the
+        chatgpt.com inference host needs the Chrome impersonation.
         """
-        if is_siwc and client_id:
-            with httpx.Client(timeout=30.0, follow_redirects=False) as session:
-                resp = session.post(
-                    SIWC_TOKEN_URL,
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    data={
-                        "grant_type": "refresh_token",
-                        "client_id": client_id,
-                        "refresh_token": refresh_token,
-                        "resource": SIWC_RESOURCE,
-                    },
+        with httpx.Client(timeout=30.0, follow_redirects=False) as session:
+            payload = {
+                "client_id": CODEX_OAUTH_CLIENT_ID,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            }
+            resp = session.post(
+                CODEX_REFRESH_TOKEN_URL,
+                headers={
+                    "Content-Type": "application/json",
+                    "originator": CODEX_ORIGINATOR,
+                    "User-Agent": _build_user_agent(),
+                },
+                json=payload,
+            )
+            if resp.status_code != 200:
+                err = resp.text or ""
+                raise RuntimeError(
+                    f"refresh_token grant failed status={resp.status_code}: {err[:600]}"
                 )
-                if resp.status_code != 200:
-                    err = resp.text or ""
-                    raise RuntimeError(
-                        f"SIWC refresh_token grant failed status={resp.status_code}: {err[:600]}"
-                    )
-                try:
-                    return resp.json()
-                except Exception as exc:  # noqa: BLE001
-                    raise RuntimeError(f"refresh response was not JSON: {exc}") from exc
-        else:
-            with httpx.Client(timeout=30.0, follow_redirects=False) as session:
-                payload = {
-                    "client_id": CODEX_OAUTH_CLIENT_ID,
+            try:
+                return resp.json()
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"refresh response was not JSON: {exc}") from exc
+
+    def _request_siwc_refresh(self, refresh_token: str, client_id: str) -> Dict[str, Any]:
+        """SIWC refresh: form POST to the SIWC token endpoint.
+
+        `client_id` is the ISSUED client id saved with this token set (never
+        dynamic_agent_client). `scope` is deliberately not sent.
+        """
+        with httpx.Client(timeout=30.0, follow_redirects=False) as session:
+            resp = session.post(
+                SIWC_TOKEN_URL,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
                     "grant_type": "refresh_token",
+                    "client_id": client_id,
                     "refresh_token": refresh_token,
-                }
-                resp = session.post(
-                    CODEX_REFRESH_TOKEN_URL,
-                    headers={
-                        "Content-Type": "application/json",
-                        "originator": CODEX_ORIGINATOR,
-                        "User-Agent": _build_user_agent(),
-                    },
-                    json=payload,
+                    "resource": SIWC_RESOURCE,
+                },
+            )
+            if resp.status_code != 200:
+                err = resp.text or ""
+                raise RuntimeError(
+                    f"SIWC refresh_token grant failed status={resp.status_code}: {err[:600]}"
                 )
-                if resp.status_code != 200:
-                    err = resp.text or ""
-                    raise RuntimeError(
-                        f"refresh_token grant failed status={resp.status_code}: {err[:600]}"
-                    )
-                try:
-                    return resp.json()
-                except Exception as exc:  # noqa: BLE001
-                    raise RuntimeError(f"refresh response was not JSON: {exc}") from exc
-
-    @classmethod
-    def fetch_available_models(cls, access_token: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Fetch model choices from GET https://api.openai.com/v1/models.
-
-        Returns list-visible models with slug and display_name for UI selection.
-        """
-        token = access_token
-        if not token:
-            store = resolve_active_store()
-            if store is not None and store.path.exists():
-                try:
-                    auth = read_auth_store(store.path)
-                    token = (auth.get("tokens") or {}).get("access_token")
-                except Exception:  # noqa: BLE001
-                    pass
-        if not token:
-            return []
-
-        try:
-            with httpx.Client(timeout=15.0) as client:
-                resp = client.get(
-                    SIWC_MODELS_URL,
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-                if resp.status_code != 200:
-                    LOG.warning("failed to fetch models from %s: status=%d", SIWC_MODELS_URL, resp.status_code)
-                    return []
-                data = resp.json()
-                models = data.get("models") or []
-                return [m for m in models if m.get("visibility") == "list"]
-        except Exception as exc:  # noqa: BLE001
-            LOG.warning("error fetching models from %s: %s", SIWC_MODELS_URL, exc)
-            return []
+            try:
+                return resp.json()
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"refresh response was not JSON: {exc}") from exc
 
     @staticmethod
     def _persist_refreshed_tokens(
@@ -878,17 +903,28 @@ class OpenAICodexClient(LLMClient):
         existing_auth: Dict[str, Any],
         refreshed: Dict[str, Any],
     ) -> None:
-        """Atomically write the refreshed tokens back to the store they came from."""
+        """Atomically write the refreshed tokens back to the store they came from.
+
+        SIWC refresh tokens rotate together with the granted scope, so a SIWC
+        record also takes the refreshed `scope`. Legacy records (which may be
+        Codex CLI's own ~/.codex/auth.json) never gain a field they did not have.
+        """
         tokens = dict(existing_auth.get("tokens") or {})
+        replace_scope = is_siwc_token(tokens)
         new_id = refreshed.get("id_token")
         new_access = refreshed.get("access_token")
         new_refresh = refreshed.get("refresh_token")
+        new_scope = refreshed.get("scope")
         if new_id:
             tokens["id_token"] = new_id
         if new_access:
             tokens["access_token"] = new_access
         if new_refresh:
             tokens["refresh_token"] = new_refresh
+        if replace_scope and new_scope:
+            if isinstance(new_scope, (list, tuple)):
+                new_scope = " ".join(str(s) for s in new_scope)
+            tokens["scope"] = new_scope
         existing_auth["tokens"] = tokens
         existing_auth["last_refresh"] = datetime.now(tz=timezone.utc).isoformat()
 

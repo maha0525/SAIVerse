@@ -6415,6 +6415,54 @@
     "ja": " 準備中…",
     "en": " Preparing…"
   },
+  "components.settings.CodexLoginModal.text017": {
+    "ja": "ブラウザで OpenAI のログインページを開き、SAIVerse からの接続を承認してください。承認が済むと、この画面は自動で切り替わります。",
+    "en": "Open the OpenAI sign-in page in your browser and approve the connection from SAIVerse. This screen updates automatically once you approve."
+  },
+  "components.settings.CodexLoginModal.text018": {
+    "ja": "OpenAI のログインページを開く",
+    "en": "Open the OpenAI sign-in page"
+  },
+  "components.settings.CodexLoginModal.text019": {
+    "ja": "ブラウザでの承認を待っています…",
+    "en": "Waiting for approval in your browser…"
+  },
+  "components.settings.CodexLoginModal.text020": {
+    "ja": "別の端末のブラウザで承認した場合",
+    "en": "If you approved in a browser on another device"
+  },
+  "components.settings.CodexLoginModal.text021": {
+    "ja": "SAIVerse を動かしている PC 以外のブラウザで承認した場合、最後に表示が失敗したページのアドレスを丸ごと貼り付けてください。",
+    "en": "If you approved in a browser on a device other than the PC running SAIVerse, paste the full address of the last page, the one that failed to load."
+  },
+  "components.settings.CodexLoginModal.text022": {
+    "ja": "送信",
+    "en": "Submit"
+  },
+  "components.settings.CodexLoginModal.text023": {
+    "ja": "アドレスの受け付けに失敗しました (HTTP {p1})",
+    "en": "Could not accept the address (HTTP {p1})"
+  },
+  "components.settings.CodexLoginModal.text024": {
+    "ja": "アドレスの送信に失敗しました: {p1}",
+    "en": "Failed to send the address: {p1}"
+  },
+  "components.settings.CodexLoginModal.text025": {
+    "ja": "送信中…",
+    "en": "Submitting…"
+  },
+  "components.settings.CodexLoginModal.text026": {
+    "ja": "コード入力方式（従来）でログインする",
+    "en": "Sign in by entering a code instead (legacy)"
+  },
+  "components.settings.CodexLoginModal.text027": {
+    "ja": "表示に失敗したページのアドレス",
+    "en": "Address of the page that failed to load"
+  },
+  "components.settings.CodexLoginModal.text028": {
+    "ja": "ブラウザで承認する方式に戻る",
+    "en": "Back to approving in the browser"
+  },
   "components.settings.FeedManagementPanel.text001": {
     "ja": "設置先の Building を選んでください。",
     "en": "Select a building for the facility."
@@ -7028,8 +7076,8 @@
     "en": "Failed to log out: {p1}"
   },
   "components.settings.ProviderManagementPanel.text004": {
-    "ja": "ログイン済み",
-    "en": "Signed in"
+    "ja": "ログイン済み（コード入力方式）",
+    "en": "Signed in (code sign-in)"
   },
   "components.settings.ProviderManagementPanel.text005": {
     "ja": "Codex CLI の認証を利用中",
@@ -7174,6 +7222,10 @@
   "components.settings.ProviderManagementPanel.text040": {
     "ja": "有料枠",
     "en": "Paid tier"
+  },
+  "components.settings.ProviderManagementPanel.text041": {
+    "ja": "ログイン済み（Sign in with ChatGPT）",
+    "en": "Signed in (Sign in with ChatGPT)"
   },
   "components.settings.WorldEditor.text001": {
     "ja": "不明なエラー",

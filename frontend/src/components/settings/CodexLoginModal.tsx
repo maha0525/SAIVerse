@@ -10,17 +10,38 @@ import { X, Copy, CheckCircle, XCircle, Loader, ExternalLink } from 'lucide-reac
 import styles from './CodexLoginModal.module.css';
 import ModalOverlay from '../common/ModalOverlay';
 
+/**
+ * ログイン方式。
+ * - siwc: 公式の Sign in with ChatGPT。ブラウザで OpenAI の承認ページを開き、
+ *   承認後にブラウザが SAIVerse の 127.0.0.1 コールバックへ戻ってくる。
+ * - device: 従来のデバイスコード方式。表示したコードを OpenAI のページで入力する。
+ *
+ * 二つの方式は lease / 世代番号 / ポーリングの規則を共有し、違うのは
+ * エンドポイントの接頭辞と待機画面の中身だけ。
+ */
+type LoginFlow = 'siwc' | 'device';
+
+const FLOW_PREFIX: Record<LoginFlow, string> = {
+    siwc: '/api/codex-auth/siwc',
+    device: '/api/codex-auth/login',
+};
+
 interface LoginStatus {
     state: 'idle' | 'starting' | 'waiting' | 'success' | 'error';
     attempt_id?: number;
     lease_id?: string;
+    // device flow
     user_code?: string;
     verification_url?: string;
+    // siwc flow
+    auth_url?: string;
+    redirect_uri?: string;
     error?: string;
     account_id?: string | null;
 }
 
 interface LoginLease {
+    flow: LoginFlow;
     attempt_id: number;
     lease_id: string;
 }
@@ -35,27 +56,37 @@ interface Props {
 const POLL_INTERVAL_MS = 2000;
 
 /**
- * ChatGPT アカウントへのデバイスコードログイン。
+ * ChatGPT アカウントへのログイン。既定は公式の Sign in with ChatGPT で、
+ * 従来のデバイスコード方式へ切り替えられる。
  *
- * バックエンドがコードの申請とポーリングを担い、このモーダルは
- * 「コードを見せる」「進行状態を映す」だけを行う。トークンはブラウザに来ない。
+ * バックエンドが認可の受け取りとトークン保存を担い、このモーダルは
+ * 「承認ページ (またはコード) を見せる」「進行状態を映す」だけを行う。
+ * トークンはブラウザに来ない。
  */
 export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
     useLocale();
+    const [flow, setFlow] = useState<LoginFlow>('siwc');
     const [status, setStatus] = useState<LoginStatus>({ state: 'idle' });
     const [startError, setStartError] = useState<string | null>(null);
     const [copied, setCopied] = useState(false);
+    // 別端末で承認した場合に貼り付ける、コールバック先のアドレス。
+    const [callbackUrl, setCallbackUrl] = useState('');
+    const [completeError, setCompleteError] = useState<string | null>(null);
+    const [completeSubmitting, setCompleteSubmitting] = useState(false);
+    const completeSubmittingRef = useRef(false);
     // Poll timer + "did we already fire onSuccess" guard survive re-renders.
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const successNotifiedRef = useRef(false);
     // この modal の UI 世代番号と、現世代が受け取った lease 群。閉じる
-    // (= returnAllLeases) たびに加えて「やり直す」を含む start のたびにも
-    // 世代を進める。遅れて settle した旧世代の応答 (start 応答も poll 応答も)
-    // は、自分の世代が死んでいると分かったら画面に触らず、lease を持って
-    // いれば自分で即返却する — 現世代の lease 群には決して混ざらない。
-    // 旧世代の cleanup が新世代の lease を巻き込む事故 (R4-①) と、リトライ
-    // 前の試行の遅延 poll がリトライ後の画面を上書きする事故 (R6-②) を、
-    // 同じ一つの番号で塞ぐ。
+    // (= returnAllLeases) たびに加えて「やり直す」「方式の切り替え」を含む
+    // start のたびにも世代を進める。遅れて settle した旧世代の応答 (start 応答・
+    // poll 応答・complete 応答) は、自分の世代が死んでいると分かったら画面に
+    // 触らず、lease を持っていれば自分で即返却する — 現世代の lease 群には
+    // 決して混ざらない。旧世代の cleanup が新世代の lease を巻き込む事故 (R4-①) と、
+    // リトライ前の試行の遅延 poll がリトライ後の画面を上書きする事故 (R6-②) を、
+    // 同じ一つの番号で塞ぐ。方式の切り替えも世代を進めるので、切り替え前の
+    // 方式の応答が切り替え後の画面に触ることもない。
+    // lease はそれぞれ自分の方式を覚えていて、返却はその方式の cancel へ送る。
     const openSeqRef = useRef(0);
     const leasesRef = useRef<LoginLease[]>([]);
 
@@ -67,16 +98,16 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
     }, []);
 
     const sendCancel = useCallback((lease: LoginLease) => {
-        apiFetch('/api/codex-auth/login/cancel', {
+        apiFetch(`${FLOW_PREFIX[lease.flow]}/cancel`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(lease),
+            body: JSON.stringify({ attempt_id: lease.attempt_id, lease_id: lease.lease_id }),
         }).catch(() => {});
     }, []);
 
     // 現世代を閉じる: 世代番号を進めて (以後の遅延応答は自力返却に回る)、
-    // この世代が記録済みの lease を全部返す。冪等 — handleClose と unmount
-    // cleanup の両方から呼んでよい。
+    // この世代が記録済みの lease を全部返す。冪等 — handleClose・方式の切り替え・
+    // unmount cleanup のどこから呼んでもよい。
     const returnAllLeases = useCallback(() => {
         openSeqRef.current += 1;
         const leases = [...leasesRef.current];
@@ -86,9 +117,27 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
         }
     }, [sendCancel]);
 
-    const startLogin = useCallback(() => {
+    // 現世代・現試行の状態応答を画面へ反映する (poll と complete の共通出口)。
+    // 世代か attempt が食い違う応答は捨てる。
+    const applyStatus = useCallback((next: LoginStatus, mySeq: number, myAttempt: number | undefined) => {
+        if (mySeq !== openSeqRef.current) return;
+        if (next.attempt_id !== undefined && myAttempt !== undefined
+            && next.attempt_id !== myAttempt) return;
+        setStatus(prev => ({ ...prev, ...next }));
+        if (next.state === 'success' && !successNotifiedRef.current) {
+            successNotifiedRef.current = true;
+            onSuccess();
+        }
+    }, [onSuccess]);
+
+    const startLogin = useCallback((nextFlow: LoginFlow) => {
+        setFlow(nextFlow);
         setStartError(null);
         setCopied(false);
+        setCallbackUrl('');
+        setCompleteError(null);
+        completeSubmittingRef.current = false;
+        setCompleteSubmitting(false);
         successNotifiedRef.current = false;
         // start のたびに世代を進める: リトライ前の試行の飛行中応答は、settle
         // した時点で世代不一致となり、この start が作る新しい画面状態に触れない。
@@ -96,7 +145,7 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
         const mySeq = openSeqRef.current;
         (async () => {
             try {
-                const res = await apiFetch('/api/codex-auth/login/start', { method: 'POST' });
+                const res = await apiFetch(`${FLOW_PREFIX[nextFlow]}/start`, { method: 'POST' });
                 if (!res.ok) {
                     const body = await res.json().catch(() => null);
                     if (mySeq === openSeqRef.current) {
@@ -109,12 +158,12 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
                     // この応答が属する世代はもう閉じられた — 受け取った lease を
                     // その場で返し、画面には何も反映しない。
                     if (data.attempt_id && data.lease_id) {
-                        sendCancel({ attempt_id: data.attempt_id, lease_id: data.lease_id });
+                        sendCancel({ flow: nextFlow, attempt_id: data.attempt_id, lease_id: data.lease_id });
                     }
                     return;
                 }
                 if (data.attempt_id && data.lease_id) {
-                    leasesRef.current.push({ attempt_id: data.attempt_id, lease_id: data.lease_id });
+                    leasesRef.current.push({ flow: nextFlow, attempt_id: data.attempt_id, lease_id: data.lease_id });
                 }
                 setStatus(data);
             } catch (e) {
@@ -125,12 +174,21 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
         })();
     }, [sendCancel]);
 
-    // Open → start the flow; close (isOpen=false) → stop polling. lease の
-    // 返却は handleClose が行う (下の unmount effect が最後の受け皿)。
+    // 方式の切り替え: いまの方式で受け取った lease を全部返して (世代も進む)
+    // から、もう一方の方式を始める。
+    const switchFlow = useCallback((nextFlow: LoginFlow) => {
+        stopPolling();
+        returnAllLeases();
+        setStatus({ state: 'idle' });
+        startLogin(nextFlow);
+    }, [stopPolling, returnAllLeases, startLogin]);
+
+    // Open → start the default (SIWC) flow; close (isOpen=false) → stop polling.
+    // lease の返却は handleClose が行う (下の unmount effect が最後の受け皿)。
     useEffect(() => {
         if (!isOpen) return;
         setStatus({ state: 'idle' });
-        startLogin();
+        startLogin('siwc');
         return () => {
             stopPolling();
         };
@@ -138,8 +196,8 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
 
     // unmount の受け皿: 設定画面ごと閉じられた・タブが切り替わったなど、
     // handleClose を通らずにこのコンポーネントが消える経路でも lease を返す。
-    // 返さないと、サーバー側のログイン試行が最大 15 分生き続け、その間に
-    // ブラウザ側の認証を完了するとトークンが保存されてしまう。
+    // 返さないと、サーバー側のログイン試行が生き続け、その間にブラウザ側の
+    // 承認を完了するとトークンが保存されてしまう。
     useEffect(() => {
         return () => {
             stopPolling();
@@ -148,38 +206,72 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    // While waiting, poll the backend for progress. 応答が返る頃には世代が
-    // 変わっている (閉じた・開き直した) ことがあるので、start 応答と同じく
-    // 世代と attempt を照合してから画面へ反映する — 旧世代の飛行中応答が
-    // 新しい画面の waiting を上書きしてポーリングを止めてしまわないように。
+    // While waiting, poll the active flow's status endpoint. 応答が返る頃には
+    // 世代が変わっている (閉じた・開き直した・方式を切り替えた) ことがあるので、
+    // start 応答と同じく世代と attempt を照合してから画面へ反映する — 旧世代の
+    // 飛行中応答が新しい画面の waiting を上書きしてポーリングを止めてしまわないように。
     useEffect(() => {
         if (!isOpen || status.state !== 'waiting') return;
         const mySeq = openSeqRef.current;
         const myAttempt = status.attempt_id;
+        const prefix = FLOW_PREFIX[flow];
         timerRef.current = setInterval(async () => {
             try {
-                const res = await apiFetch('/api/codex-auth/login/status');
+                const res = await apiFetch(`${prefix}/status`);
                 if (mySeq !== openSeqRef.current) return;
                 if (!res.ok) return;
                 const next: LoginStatus = await res.json();
-                if (mySeq !== openSeqRef.current) return;
-                if (next.attempt_id !== undefined && myAttempt !== undefined
-                    && next.attempt_id !== myAttempt) return;
-                setStatus(prev => ({ ...prev, ...next }));
-                if (next.state === 'success' && !successNotifiedRef.current) {
-                    successNotifiedRef.current = true;
-                    onSuccess();
-                }
+                applyStatus(next, mySeq, myAttempt);
             } catch {
                 // 一時的な取得失敗は次のポーリングに任せる
             }
         }, POLL_INTERVAL_MS);
         return () => stopPolling();
-    }, [isOpen, status.state, status.attempt_id, onSuccess, stopPolling]);
+    }, [isOpen, flow, status.state, status.attempt_id, applyStatus, stopPolling]);
+
+    // 別端末で承認した場合: 表示に失敗したコールバック先のアドレスを
+    // バックエンドへ渡して、認可の受け取りを代行してもらう。失敗は待機画面の
+    // まま、入力欄の下に表示する。
+    const submitCallbackUrl = useCallback(async () => {
+        const url = callbackUrl.trim();
+        if (!url || status.attempt_id === undefined) return;
+        if (completeSubmittingRef.current) return;
+        completeSubmittingRef.current = true;
+        setCompleteSubmitting(true);
+        setCompleteError(null);
+        const mySeq = openSeqRef.current;
+        const myAttempt = status.attempt_id;
+        try {
+            const res = await apiFetch(`${FLOW_PREFIX.siwc}/complete`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ attempt_id: myAttempt, callback_url: url }),
+            });
+            if (mySeq !== openSeqRef.current) return;
+            if (!res.ok) {
+                const body = await res.json().catch(() => null);
+                if (mySeq !== openSeqRef.current) return;
+                setCompleteError(body?.detail || uiText("components.settings.CodexLoginModal.text023", { p1: res.status }));
+                return;
+            }
+            const next: LoginStatus = await res.json();
+            applyStatus(next, mySeq, myAttempt);
+        } catch (e) {
+            if (mySeq === openSeqRef.current) {
+                setCompleteError(uiText("components.settings.CodexLoginModal.text024", { p1: e }));
+            }
+        } finally {
+            // 世代が変わっていたら、新しい世代の start が送信中フラグを既に戻している。
+            if (mySeq === openSeqRef.current) {
+                completeSubmittingRef.current = false;
+                setCompleteSubmitting(false);
+            }
+        }
+    }, [callbackUrl, status.attempt_id, applyStatus]);
 
     const handleClose = useCallback(() => {
         stopPolling();
-        // どの状態で閉じても、この modal が受け取った lease を全部返却する
+        // どの状態・どの方式で閉じても、この modal が受け取った lease を全部返却する
         // (成功・失敗の確定後や、他のモーダルが lease を持つ間の cancel は
         // バックエンドが無視する)。
         returnAllLeases();
@@ -199,6 +291,93 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
 
     if (!isOpen) return null;
 
+    const siwcWaiting = (
+        <>
+            <p data-i18n="components.settings.CodexLoginModal.text017" className={styles.lead}>{uiText("components.settings.CodexLoginModal.text017")}</p>
+            {status.auth_url && (
+                <a
+                    data-i18n="components.settings.CodexLoginModal.text018"
+                    className={styles.primaryLink}
+                    href={status.auth_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >
+                    {uiText("components.settings.CodexLoginModal.text018")} <ExternalLink size={14} />
+                </a>
+            )}
+            <div data-i18n="components.settings.CodexLoginModal.text019" className={styles.waitingRow}>
+                <Loader size={14} className={styles.spinner} />{uiText("components.settings.CodexLoginModal.text019")}</div>
+            <details className={styles.otherDevice}>
+                <summary data-i18n="components.settings.CodexLoginModal.text020">{uiText("components.settings.CodexLoginModal.text020")}</summary>
+                <p data-i18n="components.settings.CodexLoginModal.text021" className={styles.hint}>{uiText("components.settings.CodexLoginModal.text021")}</p>
+                <form
+                    className={styles.callbackRow}
+                    onSubmit={e => {
+                        e.preventDefault();
+                        submitCallbackUrl();
+                    }}
+                >
+                    <input
+                        data-i18n="components.settings.CodexLoginModal.text027"
+                        className={styles.callbackInput}
+                        type="text"
+                        inputMode="url"
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder="http://127.0.0.1:.../auth/callback?code=..."
+                        aria-label={uiText("components.settings.CodexLoginModal.text027")}
+                        value={callbackUrl}
+                        onChange={e => setCallbackUrl(e.target.value)}
+                    />
+                    <button
+                        data-i18n="components.settings.CodexLoginModal.text022 components.settings.CodexLoginModal.text025"
+                        className={styles.copyBtn}
+                        type="submit"
+                        disabled={completeSubmitting || !callbackUrl.trim()}
+                    >
+                        {completeSubmitting
+                            ? uiText("components.settings.CodexLoginModal.text025")
+                            : uiText("components.settings.CodexLoginModal.text022")}
+                    </button>
+                </form>
+                {completeError && (
+                    <div className={styles.inlineError}>
+                        <XCircle size={14} /> {completeError}
+                    </div>
+                )}
+            </details>
+        </>
+    );
+
+    const deviceWaiting = (
+        <>
+            <ol className={styles.steps}>
+                <li data-i18n="components.settings.CodexLoginModal.text010">{uiText("components.settings.CodexLoginModal.text010")}<div>
+                        <a
+                            className={styles.verifyLink}
+                            href={status.verification_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >
+                            {status.verification_url} <ExternalLink size={12} />
+                        </a>
+                    </div>
+                </li>
+                <li data-i18n="components.settings.CodexLoginModal.text011">{uiText("components.settings.CodexLoginModal.text011")}<div className={styles.codeRow}>
+                        <span className={styles.userCode}>{status.user_code}</span>
+                        <button data-i18n="components.settings.CodexLoginModal.text012 components.settings.CodexLoginModal.text013" className={styles.copyBtn} onClick={copyCode}>
+                            {copied ? <CheckCircle size={14} /> : <Copy size={14} />}
+                            {copied ? uiText("components.settings.CodexLoginModal.text012") : uiText("components.settings.CodexLoginModal.text013")}
+                        </button>
+                    </div>
+                </li>
+                <li data-i18n="components.settings.CodexLoginModal.text014">{uiText("components.settings.CodexLoginModal.text014")}</li>
+            </ol>
+            <div data-i18n="components.settings.CodexLoginModal.text015" className={styles.waitingRow}>
+                <Loader size={14} className={styles.spinner} />{uiText("components.settings.CodexLoginModal.text015")}</div>
+        </>
+    );
+
     return (
         <ModalOverlay onClose={handleClose}>
             <div className={styles.modal}>
@@ -212,7 +391,7 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
                     {startError ? (
                         <div className={styles.errorBox}>
                             <XCircle size={16} /> {startError}
-                            <button data-i18n="components.settings.CodexLoginModal.text005" className={styles.retryBtn} onClick={startLogin}>{uiText("components.settings.CodexLoginModal.text005")}</button>
+                            <button data-i18n="components.settings.CodexLoginModal.text005" className={styles.retryBtn} onClick={() => startLogin(flow)}>{uiText("components.settings.CodexLoginModal.text005")}</button>
                         </div>
                     ) : status.state === 'success' ? (
                         <div className={styles.successBox}>
@@ -225,38 +404,26 @@ export default function CodexLoginModal({ isOpen, onClose, onSuccess }: Props) {
                     ) : status.state === 'error' ? (
                         <div data-i18n="components.settings.CodexLoginModal.text008" className={styles.errorBox}>
                             <XCircle size={16} /> {status.error || uiText("components.settings.CodexLoginModal.text008")}
-                            <button data-i18n="components.settings.CodexLoginModal.text009" className={styles.retryBtn} onClick={startLogin}>{uiText("components.settings.CodexLoginModal.text009")}</button>
+                            <button data-i18n="components.settings.CodexLoginModal.text009" className={styles.retryBtn} onClick={() => startLogin(flow)}>{uiText("components.settings.CodexLoginModal.text009")}</button>
                         </div>
                     ) : status.state === 'waiting' ? (
-                        <>
-                            <ol className={styles.steps}>
-                                <li data-i18n="components.settings.CodexLoginModal.text010">{uiText("components.settings.CodexLoginModal.text010")}<div>
-                                        <a
-                                            className={styles.verifyLink}
-                                            href={status.verification_url}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                        >
-                                            {status.verification_url} <ExternalLink size={12} />
-                                        </a>
-                                    </div>
-                                </li>
-                                <li data-i18n="components.settings.CodexLoginModal.text011">{uiText("components.settings.CodexLoginModal.text011")}<div className={styles.codeRow}>
-                                        <span className={styles.userCode}>{status.user_code}</span>
-                                        <button data-i18n="components.settings.CodexLoginModal.text012 components.settings.CodexLoginModal.text013" className={styles.copyBtn} onClick={copyCode}>
-                                            {copied ? <CheckCircle size={14} /> : <Copy size={14} />}
-                                            {copied ? uiText("components.settings.CodexLoginModal.text012") : uiText("components.settings.CodexLoginModal.text013")}
-                                        </button>
-                                    </div>
-                                </li>
-                                <li data-i18n="components.settings.CodexLoginModal.text014">{uiText("components.settings.CodexLoginModal.text014")}</li>
-                            </ol>
-                            <div data-i18n="components.settings.CodexLoginModal.text015" className={styles.waitingRow}>
-                                <Loader size={14} className={styles.spinner} />{uiText("components.settings.CodexLoginModal.text015")}</div>
-                        </>
+                        flow === 'siwc' ? siwcWaiting : deviceWaiting
                     ) : (
                         <div data-i18n="components.settings.CodexLoginModal.text016" className={styles.waitingRow}>
                             <Loader size={14} className={styles.spinner} />{uiText("components.settings.CodexLoginModal.text016")}</div>
+                    )}
+                    {status.state !== 'success' && (
+                        <div className={styles.switchRow}>
+                            {flow === 'siwc' ? (
+                                <button data-i18n="components.settings.CodexLoginModal.text026" type="button" className={styles.switchLink} onClick={() => switchFlow('device')}>
+                                    {uiText("components.settings.CodexLoginModal.text026")}
+                                </button>
+                            ) : (
+                                <button data-i18n="components.settings.CodexLoginModal.text028" type="button" className={styles.switchLink} onClick={() => switchFlow('siwc')}>
+                                    {uiText("components.settings.CodexLoginModal.text028")}
+                                </button>
+                            )}
+                        </div>
                     )}
                 </div>
             </div>

@@ -27,27 +27,52 @@ The device-code flow (verified against Hermes Agent's working implementation,
 These endpoints are undocumented; if OpenAI changes them the CLI-store
 fallback (`codex login`) remains the escape hatch.
 
+The second login path is OpenAI's official "Sign in with ChatGPT" token
+sharing for open-source apps (SIWC, developers.openai.com/siwc):
+
+    browser → {issuer}/api/accounts/authorize   (PKCE S256, state, nonce,
+              client_id=dynamic_agent_client on first registration, else the
+              issued oaiapp_... id; ext_agent_host_id = stable per host)
+    browser → http://127.0.0.1:<port>/auth/callback?code&state&client_id
+              (loopback listener here, or the user pastes that URL into the
+              UI when the browser runs on another device)
+    POST {issuer}/api/accounts/oauth/token  (form, authorization_code grant)
+        -> {access_token, refresh_token, id_token, scope, ...}
+
+SIWC tokens are used against https://api.openai.com/v1/responses. The host id
+and the issued client id live in their own small file
+(`codex_siwc_client.json`) that survives logout, so re-authorization reuses
+the same registration.
+
+Both login managers share one attempt-generation / lease / logout-marker
+discipline (`_LoginAttemptManager`), so a cancelled, superseded or logged-out
+attempt can never persist tokens, whichever flow it belongs to.
+
 Intent doc: docs/intent/codex_subscription_auth.md
 """
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
+import html
 import json
 import logging
 import os
 import platform
 import secrets
+import socket
+import socketserver
+import sys
 import threading
 import time
 import urllib.parse
 import uuid
-import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import httpx
 from filelock import FileLock
@@ -76,7 +101,14 @@ SIWC_SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens
 SIWC_RESOURCE = "https://api.openai.com/v1"
 SIWC_DIRECT_SCOPE = "chatgpt.tokens.use.direct"
 SIWC_RESPONSES_URL = "https://api.openai.com/v1/responses"
-SIWC_MODELS_URL = "https://api.openai.com/v1/models"
+SIWC_OPENID_CONFIGURATION_URL = f"{CODEX_OAUTH_ISSUER}/.well-known/openid-configuration"
+SIWC_LOGIN_MAX_WAIT_SECONDS = 10 * 60
+# How often the loopback listener wakes up to notice cancel / logout / timeout.
+SIWC_LISTENER_POLL_SECONDS = 0.25
+# Host id + issued client id. Lives next to the token store but is NOT removed
+# by logout: the spec wants the same host id forever and the issued client id
+# reused for re-authorization.
+SIWC_CLIENT_FILENAME = "codex_siwc_client.json"
 
 DEVICE_USERCODE_URL = f"{CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/usercode"
 DEVICE_POLL_URL = f"{CODEX_OAUTH_ISSUER}/api/accounts/deviceauth/token"
@@ -342,6 +374,40 @@ def is_siwc_token(tokens: Optional[Dict[str, Any]]) -> bool:
     return False
 
 
+def resolve_siwc_client_id(tokens: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The issued client id a SIWC token set must be refreshed / revoked with.
+
+    The stored `client_id` wins; records written before it was persisted fall
+    back to the access-token JWT `client_id` claim (the spec puts the issued id
+    there). `dynamic_agent_client` is a registration placeholder, never a
+    usable client id, so it is never returned. None means "cannot refresh —
+    the user has to sign in again".
+    """
+    if not isinstance(tokens, dict):
+        return None
+    candidates = [tokens.get("client_id")]
+    access_token = tokens.get("access_token")
+    if isinstance(access_token, str) and access_token:
+        candidates.append((decode_jwt_payload(access_token) or {}).get("client_id"))
+    for candidate in candidates:
+        if (
+            isinstance(candidate, str)
+            and candidate
+            and candidate != SIWC_DYNAMIC_CLIENT_ID
+        ):
+            return candidate
+    return None
+
+
+def siwc_scope_grants_direct_use(scope: Any) -> bool:
+    """Whether a granted scope (space-separated string or list) allows inference."""
+    if isinstance(scope, str):
+        return SIWC_DIRECT_SCOPE in scope.split()
+    if isinstance(scope, (list, tuple)):
+        return SIWC_DIRECT_SCOPE in scope
+    return False
+
+
 def _delete_store_file_locked() -> bool:
     """Remove the store file. Caller must hold the store lock."""
     path = get_saiverse_store_path()
@@ -363,6 +429,124 @@ def delete_saiverse_store() -> bool:
     """
     with saiverse_store_lock():
         return _delete_store_file_locked()
+
+
+def _read_store_tokens_locked() -> Dict[str, Any]:
+    """Token dict of the SAIVerse store, {} when absent or unreadable.
+
+    Caller must hold the store lock.
+    """
+    path = get_saiverse_store_path()
+    if not path.exists():
+        return {}
+    try:
+        tokens = read_auth_store(path).get("tokens")
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("could not read SAIVerse auth store before logout: %s", exc)
+        return {}
+    return tokens if isinstance(tokens, dict) else {}
+
+
+# ---------------------------------------------------------------------------
+# SIWC client record (host id + issued client id; survives logout)
+# ---------------------------------------------------------------------------
+
+def get_siwc_client_record_path() -> Path:
+    return get_saiverse_store_path().with_name(SIWC_CLIENT_FILENAME)
+
+
+def read_siwc_client_record() -> Dict[str, Any]:
+    """{ext_agent_host_id, client_id} — {} when absent or unreadable."""
+    path = get_siwc_client_record_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        LOG.warning("SIWC client record %s is unreadable (%s); treating as empty", path, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _valid_host_id(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith("urn:uuid:") and len(value) > 9
+
+
+def _valid_issued_client_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(value) and value != SIWC_DYNAMIC_CLIENT_ID
+
+
+def ensure_siwc_client_record() -> Tuple[str, Optional[str]]:
+    """Return (ext_agent_host_id, saved issued client id or None).
+
+    The host id is created and persisted here, i.e. BEFORE the first
+    authorize request leaves this machine (the spec requires the id to be
+    stable per host from the very first sign-in). Serialized on the store lock
+    so two processes sharing ~/.saiverse cannot mint two different host ids.
+    """
+    with saiverse_store_lock():
+        record = read_siwc_client_record()
+        host_id = record.get("ext_agent_host_id")
+        if not _valid_host_id(host_id):
+            host_id = f"urn:uuid:{uuid.uuid4()}"
+            record["ext_agent_host_id"] = host_id
+            write_auth_store(get_siwc_client_record_path(), record)
+        client_id = record.get("client_id")
+    return host_id, (client_id if _valid_issued_client_id(client_id) else None)
+
+
+def save_siwc_issued_client_id(client_id: str) -> None:
+    """Remember the issued client id for the next (re-)authorization."""
+    with saiverse_store_lock():
+        record = read_siwc_client_record()
+        if not _valid_host_id(record.get("ext_agent_host_id")):
+            record["ext_agent_host_id"] = f"urn:uuid:{uuid.uuid4()}"
+        record["client_id"] = client_id
+        write_auth_store(get_siwc_client_record_path(), record)
+
+
+def revoke_siwc_refresh_token(refresh_token: str, client_id: str) -> bool:
+    """Best-effort revocation at the issuer's `revocation_endpoint`.
+
+    Returns True on the spec's success response (HTTP 200). Never raises:
+    sign-out must clear local tokens whether or not revocation worked, so
+    failures are logged as warnings and reported as False.
+    """
+    session = _http_session()
+    try:
+        resp = session.get(SIWC_OPENID_CONFIGURATION_URL, timeout=10)
+        if resp.status_code != 200:
+            LOG.warning(
+                "SIWC revocation skipped: openid-configuration returned status=%s",
+                resp.status_code,
+            )
+            return False
+        endpoint = (resp.json() or {}).get("revocation_endpoint")
+        if not isinstance(endpoint, str) or not endpoint.startswith("https://"):
+            LOG.warning("SIWC revocation skipped: no usable revocation_endpoint")
+            return False
+        resp = session.post(
+            endpoint,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "token": refresh_token,
+                "token_type_hint": "refresh_token",
+                "client_id": client_id,
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return True
+        LOG.warning("SIWC refresh-token revocation failed: status=%s", resp.status_code)
+        return False
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("SIWC refresh-token revocation failed: %s", exc)
+        return False
+    finally:
+        try:
+            session.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -472,32 +656,31 @@ def _describe_response(resp: Any) -> str:
     return f"status={resp.status_code} content-type={ctype!r} body[:200]={body[:200]!r}"
 
 
-class CodexDeviceLoginManager:
-    """Runs at most one device-code login at a time, in a background thread.
+class _LoginAttemptManager:
+    """Attempt-generation / lease / logout-marker discipline shared by both flows.
 
-    The API layer calls `start()` (returns the user_code to display) and then
-    polls `status()`. Tokens never appear in any status payload.
+    Subclasses supply the flow itself through four hooks:
 
-    Every start() call either opens a new *attempt generation* (an increasing
-    `attempt_id` plus a per-attempt cancel event) or joins the attempt already
-    waiting for the browser step. Each start() — including joins — is handed
-    its own *lease*: an opaque token identifying that client's interest in the
-    attempt. cancel() releases one lease; the attempt is only aborted when its
-    last lease is released. This is what makes a delayed cancel from a closed
-    modal harmless to a reopened modal that joined the same attempt — the two
-    hold different leases even though they share an attempt_id.
+        _prepare_attempt()                   start-time work outside the manager
+                                             lock (device: usercode request;
+                                             SIWC: host id + loopback listener)
+        _waiting_fields(prepared)            extra fields of the WAITING state
+        _worker_args(prepared)               extra args for the worker thread
+        _run(generation, cancel_event, logout_marker, *worker_args)
 
-    The worker thread re-checks "am I still the current, un-cancelled
-    generation" before every state update and before persisting tokens, so a
-    cancelled, superseded, or logged-out attempt can never resurrect itself,
-    overwrite a newer attempt, or write the auth store. A shared boolean cannot
-    give this guarantee: a new start() would reset it and revive the old
-    thread.
+    and may override `_discard_prepared` (a prepared attempt that went stale
+    before it opened), `_on_attempt_waiting_locked` and
+    `_on_attempt_aborted_locked` (cancel / logout / supersession).
 
-    start() calls are additionally serialized on a dedicated start lock (held
-    across the usercode round-trip), so two concurrent starts can never race
-    two usercode requests: the second waits, then joins the first's attempt.
+    Everything that decides whether an attempt may still change state or
+    persist tokens lives here, once, so the two flows cannot drift apart:
+    generation bumps, per-attempt cancel events, leases, the persistent logout
+    marker snapshot, and the commit that re-checks all of them under the
+    manager lock (and the marker again under the store lock).
     """
+
+    _flow_error: type = RuntimeError
+    _thread_name_prefix = "codex-login"
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -518,21 +701,48 @@ class CodexDeviceLoginManager:
         # lock at commit, which is what makes a logout in ANOTHER process
         # sharing this ~/.saiverse kill this process's in-flight login too.
 
+    # -- flow hooks ------------------------------------------------------------
+
+    def _prepare_attempt(self) -> Any:
+        raise NotImplementedError
+
+    def _waiting_fields(self, prepared: Any) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def _worker_args(self, prepared: Any) -> Tuple[Any, ...]:
+        raise NotImplementedError
+
+    def _run(self, generation: int, cancel_event: threading.Event,
+             logout_marker: str, *worker_args: Any) -> None:
+        raise NotImplementedError
+
+    def _discard_prepared(self, prepared: Any) -> None:
+        """A prepared attempt went stale before opening. Caller holds the lock."""
+
+    def _on_attempt_waiting_locked(
+        self, generation: int, cancel_event: threading.Event,
+        logout_marker: str, prepared: Any,
+    ) -> None:
+        """The attempt is now WAITING. Caller holds the manager lock."""
+
+    def _on_attempt_aborted_locked(self) -> None:
+        """The current attempt was cancelled or invalidated. Caller holds the lock."""
+
     # -- public API ---------------------------------------------------------
 
     def start(self) -> Dict[str, Any]:
         """Open (or join) a login attempt and return it with a fresh lease.
 
         While an attempt is waiting for the browser step, further start()
-        calls join it: same attempt_id and user_code, new lease_id.
-        Raises CodexDeviceLoginError when a logout raced this start.
+        calls join it: same attempt_id (and user_code / auth_url), new
+        lease_id. Raises the flow's error type when a logout raced this start.
         """
         # Snapshot outside any lock (single int read is atomic under the GIL).
         marker_before_queueing = self._snapshot_logout_marker()
         with self._start_lock:
             with self._lock:
                 if self._snapshot_logout_marker() != marker_before_queueing:
-                    raise CodexDeviceLoginError(
+                    raise self._flow_error(
                         "ログアウトと重なったためログインを中断しました。"
                         "もう一度お試しください。"
                     )
@@ -548,12 +758,12 @@ class CodexDeviceLoginManager:
                 self._leases = {lease_id}
                 self._state = {"state": LOGIN_STATE_STARTING, "attempt_id": generation}
 
-            # Network round-trip outside the manager lock so status() and
-            # cancel() stay responsive while OpenAI is slow. The start lock is
-            # still held: no second usercode request can race this one.
+            # Preparation (network round-trip / socket bind) outside the
+            # manager lock so status() and cancel() stay responsive. The start
+            # lock is still held: no second preparation can race this one.
             try:
-                device = self._request_usercode()
-            except CodexDeviceLoginError:
+                prepared = self._prepare_attempt()
+            except self._flow_error:
                 with self._lock:
                     if generation == self._generation:
                         self._state = {"state": LOGIN_STATE_IDLE}
@@ -561,30 +771,29 @@ class CodexDeviceLoginManager:
 
             with self._lock:
                 if generation != self._generation or cancel_event.is_set():
-                    # Cancelled (or invalidated by logout) while the code was
-                    # being issued — never spawn the poll thread. The
-                    # user_code expires unused on OpenAI's side.
+                    # Cancelled (or invalidated by logout) while preparing —
+                    # never spawn the worker thread.
                     if generation == self._generation:
                         self._state = {"state": LOGIN_STATE_IDLE}
+                    self._discard_prepared(prepared)
                     return {"state": LOGIN_STATE_IDLE, "attempt_id": generation}
                 self._state = {
                     "state": LOGIN_STATE_WAITING,
                     "attempt_id": generation,
-                    "user_code": device["user_code"],
-                    "verification_url": DEVICE_VERIFICATION_URL,
-                    "started_at": datetime.now(tz=timezone.utc).isoformat(),
+                    **self._waiting_fields(prepared),
                 }
+                self._on_attempt_waiting_locked(
+                    generation, cancel_event, marker_before_queueing, prepared
+                )
                 thread = threading.Thread(
                     target=self._run,
                     args=(
                         generation,
                         cancel_event,
                         marker_before_queueing,
-                        device["device_auth_id"],
-                        device["user_code"],
-                        device["interval"],
+                        *self._worker_args(prepared),
                     ),
-                    name=f"codex-device-login-{generation}",
+                    name=f"{self._thread_name_prefix}-{generation}",
                     daemon=True,
                 )
                 thread.start()
@@ -615,36 +824,32 @@ class CodexDeviceLoginManager:
                 return False  # other clients still watching this attempt
             if self._current_cancel is not None:
                 self._current_cancel.set()
+            self._on_attempt_aborted_locked()
             self._state = {"state": LOGIN_STATE_IDLE}
             return True
 
     def logout_and_delete_store(self) -> bool:
         """Logout as one critical section: invalidate any login, then delete.
 
-        Bumping the generation (and setting the cancel event) under the
-        manager lock stops any in-flight worker from committing after we
-        delete — without this, a login that completes the browser step during
-        logout would recreate the store right after it was removed. The store
-        deletion happens while still holding the manager lock, in the same
-        manager → store lock order the commit path uses, so the two cannot
-        deadlock and cannot interleave.
-
-        Renewing the persistent logout marker (under the store lock, together
-        with the deletion) additionally kills every start() that was queued on
-        the start lock when the logout happened — they re-check the marker
-        after acquiring and abort — and every in-flight login attempt in OTHER
-        processes sharing this ~/.saiverse, whose commits re-verify the marker
-        under the store lock before persisting.
+        Thin wrapper over `logout_all_and_delete_store([self])` — see there.
+        Returns True if a store file was actually removed.
         """
-        with self._lock:
-            self._generation += 1
-            if self._current_cancel is not None:
-                self._current_cancel.set()
-            self._leases = set()
-            self._state = {"state": LOGIN_STATE_IDLE}
-            with saiverse_store_lock():
-                _renew_logout_marker_locked()
-                return _delete_store_file_locked()
+        return logout_all_and_delete_store([self])["removed"]
+
+    def _invalidate_locked(self) -> None:
+        """Kill the current attempt (logout). Caller holds the manager lock.
+
+        Bumping the generation (and setting the cancel event) stops any
+        in-flight worker from committing afterwards — without this, a login
+        that completes the browser step during logout would recreate the store
+        right after it was removed.
+        """
+        self._generation += 1
+        if self._current_cancel is not None:
+            self._current_cancel.set()
+        self._leases = set()
+        self._on_attempt_aborted_locked()
+        self._state = {"state": LOGIN_STATE_IDLE}
 
     # -- generation guards ---------------------------------------------------
 
@@ -675,6 +880,110 @@ class CodexDeviceLoginManager:
     def _is_stale(self, generation: int, cancel_event: threading.Event) -> bool:
         with self._lock:
             return generation != self._generation or cancel_event.is_set()
+
+    def _commit(
+        self,
+        generation: int,
+        cancel_event: threading.Event,
+        logout_marker: str,
+        tokens: Dict[str, Any],
+        success_state: Dict[str, Any],
+        after_persist: Optional[Callable[[], None]] = None,
+    ) -> bool:
+        """Persist tokens and flip to success — only as the current generation.
+
+        The generation check and the store write happen under the manager lock
+        as one unit, so a cancel() (or a newer start()) can never slip between
+        "check passed" and "tokens written". The store write additionally takes
+        the store file lock inside and re-verifies the persistent logout marker
+        there (the cross-process guard); lock order is always manager → store,
+        and no path takes them in the reverse order, so this cannot deadlock.
+
+        Returns True only when the tokens were written.
+        """
+        with self._lock:
+            if generation != self._generation or cancel_event.is_set():
+                LOG.info(
+                    "discarding tokens from stale/cancelled login attempt %d", generation
+                )
+                return False
+            try:
+                persist_saiverse_login(tokens, expected_logout_marker=logout_marker)
+            except LoginInvalidatedByLogout:
+                # A logout (possibly in another SAIVerse process sharing this
+                # ~/.saiverse) happened after this attempt started — honor it.
+                LOG.info(
+                    "discarding tokens from login attempt %d: logout happened "
+                    "after it started",
+                    generation,
+                )
+                self._state = {"state": LOGIN_STATE_IDLE}
+                return False
+            if after_persist is not None:
+                after_persist()
+            self._state = success_state
+        return True
+
+    def _fail(self, generation: int, cancel_event: threading.Event, message: str) -> None:
+        with self._lock:
+            if generation != self._generation or cancel_event.is_set():
+                return
+            self._state = {
+                "state": LOGIN_STATE_ERROR,
+                "attempt_id": generation,
+                "error": message,
+            }
+
+
+class CodexDeviceLoginManager(_LoginAttemptManager):
+    """Runs at most one device-code login at a time, in a background thread.
+
+    The API layer calls `start()` (returns the user_code to display) and then
+    polls `status()`. Tokens never appear in any status payload.
+
+    Every start() call either opens a new *attempt generation* (an increasing
+    `attempt_id` plus a per-attempt cancel event) or joins the attempt already
+    waiting for the browser step. Each start() — including joins — is handed
+    its own *lease*: an opaque token identifying that client's interest in the
+    attempt. cancel() releases one lease; the attempt is only aborted when its
+    last lease is released. This is what makes a delayed cancel from a closed
+    modal harmless to a reopened modal that joined the same attempt — the two
+    hold different leases even though they share an attempt_id.
+
+    The worker thread re-checks "am I still the current, un-cancelled
+    generation" before every state update and before persisting tokens, so a
+    cancelled, superseded, or logged-out attempt can never resurrect itself,
+    overwrite a newer attempt, or write the auth store. A shared boolean cannot
+    give this guarantee: a new start() would reset it and revive the old
+    thread.
+
+    start() calls are additionally serialized on a dedicated start lock (held
+    across the usercode round-trip), so two concurrent starts can never race
+    two usercode requests: the second waits, then joins the first's attempt.
+
+    The attempt / lease / logout-marker machinery lives in
+    `_LoginAttemptManager`; this class only supplies the device-code steps.
+    """
+
+    _flow_error = CodexDeviceLoginError
+    _thread_name_prefix = "codex-device-login"
+
+    # -- flow hooks ------------------------------------------------------------
+
+    def _prepare_attempt(self) -> Dict[str, Any]:
+        # A user_code issued for an attempt that goes stale before opening
+        # simply expires unused on OpenAI's side — nothing to discard.
+        return self._request_usercode()
+
+    def _waiting_fields(self, prepared: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "user_code": prepared["user_code"],
+            "verification_url": DEVICE_VERIFICATION_URL,
+            "started_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+
+    def _worker_args(self, prepared: Dict[str, Any]) -> Tuple[Any, ...]:
+        return (prepared["device_auth_id"], prepared["user_code"], prepared["interval"])
 
     # -- flow steps ---------------------------------------------------------
 
@@ -757,50 +1066,24 @@ class CodexDeviceLoginManager:
     ) -> None:
         """Persist tokens and flip to success — only as the current generation.
 
-        The generation check and the store write happen under the manager lock
-        as one unit, so a cancel() (or a newer start()) can never slip between
-        "check passed" and "tokens written". The store write additionally takes
-        the store file lock inside and re-verifies the persistent logout marker
-        there (the cross-process guard); lock order is always manager → store,
-        and no path takes them in the reverse order, so this cannot deadlock.
+        See `_LoginAttemptManager._commit` for the locking contract.
         """
         account_id = extract_account_id(
             tokens.get("access_token", ""), tokens.get("id_token", "")
         )
-        with self._lock:
-            if generation != self._generation or cancel_event.is_set():
-                LOG.info(
-                    "discarding tokens from stale/cancelled login attempt %d", generation
-                )
-                return
-            try:
-                persist_saiverse_login(tokens, expected_logout_marker=logout_marker)
-            except LoginInvalidatedByLogout:
-                # A logout (possibly in another SAIVerse process sharing this
-                # ~/.saiverse) happened after this attempt started — honor it.
-                LOG.info(
-                    "discarding tokens from login attempt %d: logout happened "
-                    "after it started",
-                    generation,
-                )
-                self._state = {"state": LOGIN_STATE_IDLE}
-                return
-            self._state = {
+        committed = self._commit(
+            generation,
+            cancel_event,
+            logout_marker,
+            tokens,
+            success_state={
                 "state": LOGIN_STATE_SUCCESS,
                 "attempt_id": generation,
                 "account_id": account_id,
-            }
-        LOG.info("Codex device login succeeded; tokens written to SAIVerse store")
-
-    def _fail(self, generation: int, cancel_event: threading.Event, message: str) -> None:
-        with self._lock:
-            if generation != self._generation or cancel_event.is_set():
-                return
-            self._state = {
-                "state": LOGIN_STATE_ERROR,
-                "attempt_id": generation,
-                "error": message,
-            }
+            },
+        )
+        if committed:
+            LOG.info("Codex device login succeeded; tokens written to SAIVerse store")
 
     def _poll_for_authorization(
         self,
@@ -903,131 +1186,253 @@ LOGIN_MANAGER = CodexDeviceLoginManager()
 
 
 # ---------------------------------------------------------------------------
-# Sign in with ChatGPT (SIWC) OAuth Manager (Dynamic Registration + PKCE Loopback)
+# Sign in with ChatGPT (SIWC): PKCE authorize + loopback (or pasted) callback
 # ---------------------------------------------------------------------------
 
-SIWC_STATE_IDLE = "idle"
-SIWC_STATE_WAITING = "waiting"
-SIWC_STATE_SUCCESS = "success"
-SIWC_STATE_ERROR = "error"
+# SIWC shares the device flow's state vocabulary (same strings on the wire).
+SIWC_STATE_IDLE = LOGIN_STATE_IDLE
+SIWC_STATE_WAITING = LOGIN_STATE_WAITING
+SIWC_STATE_SUCCESS = LOGIN_STATE_SUCCESS
+SIWC_STATE_ERROR = LOGIN_STATE_ERROR
 
 
 class SiwcOAuthError(RuntimeError):
     pass
 
 
+class SiwcCallbackRejected(SiwcOAuthError):
+    """A callback was refused without touching the attempt (stale, wrong state, ...)."""
+
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def _base64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
-class _SiwcCallbackHandler(BaseHTTPRequestHandler):
-    """Loopback callback handler on 127.0.0.1 for OpenAI authorization redirects."""
+def _flatten_query(query: str) -> Dict[str, str]:
+    return {k: v[0] for k, v in urllib.parse.parse_qs(query).items() if v}
 
-    def do_GET(self) -> None:
-        parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == SIWC_CALLBACK_PATH:
-            params = urllib.parse.parse_qs(parsed.query)
-            server = getattr(self, "server", None)
-            if server is not None:
-                server.callback_result = {  # type: ignore[attr-defined]
-                    "code": params.get("code", [None])[0],
-                    "state": params.get("state", [None])[0],
-                    "client_id": params.get("client_id", [None])[0],
-                    "error": params.get("error", [None])[0],
-                    "error_description": params.get("error_description", [None])[0],
-                }
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            html = (
-                "<!DOCTYPE html><html><body style='font-family:sans-serif;"
-                "text-align:center;padding:50px;background:#f9fafb;color:#111827;'>"
-                "<div style='max-width:480px;margin:auto;padding:32px;background:#fff;"
-                "border-radius:12px;box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);'>"
-                "<h2 style='color:#10a37f;margin-bottom:12px;'>Sign in with ChatGPT 認証完了！</h2>"
-                "<p style='color:#4b5563;font-size:15px;'>このタブを閉じて、SAIVerse の画面に戻ってください。</p>"
-                "</div></body></html>"
-            )
-            self.wfile.write(html.encode("utf-8"))
-            if server is not None and hasattr(server, "auth_event"):
-                server.auth_event.set()  # type: ignore[attr-defined]
-        else:
-            self.send_response(404)
-            self.end_headers()
 
-    def log_message(self, format: str, *args: Any) -> None:
+def _close_server(server: Any) -> None:
+    try:
+        server.server_close()
+    except Exception:  # noqa: BLE001
         pass
 
 
-class SiwcOAuthManager:
-    """Manages Sign in with ChatGPT authorization via dynamic registration and PKCE.
+@dataclass
+class _SiwcAttempt:
+    """Everything one SIWC authorization attempt needs, bound to its generation."""
 
-    The official OpenAI flow for open-source / local desktop tools:
-      1. Generates PKCE verifier + S256 challenge, state, nonce, and a persistent host ID.
-      2. Starts a loopback HTTP listener on 127.0.0.1:1455 (or next available port).
-      3. Launches the browser at https://auth.openai.com/api/accounts/authorize.
-      4. Captures the issued client_id (oaiapp_...) and code at /auth/callback.
-      5. Exchanges the authorization code via POST /api/accounts/oauth/token.
-      6. Writes the validated tokens into SAIVerse's auth store under the store lock.
+    server: Any
+    verifier: str
+    state: str
+    nonce: str
+    redirect_uri: str
+    auth_url: str
+    host_id: str
+    saved_client_id: Optional[str]
+    generation: int = 0
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    logout_marker: str = ""
+    # Set (under the manager lock) when one callback has been accepted for
+    # exchange or the attempt timed out — at most one callback per attempt is
+    # ever processed, whether it came through the loopback or a pasted URL.
+    claimed: bool = False
+    done: threading.Event = field(default_factory=threading.Event)
+
+
+@dataclass(frozen=True)
+class _CallbackOutcome:
+    processed: bool  # False = refused without changing the attempt
+    ok: bool  # tokens were committed
+    message: str
+    http_status: int
+
+
+def _callback_page(ok: bool, message: str) -> bytes:
+    title = "サインインが完了しました" if ok else "サインインできませんでした"
+    color = "#10a37f" if ok else "#b42318"
+    hint = (
+        "このタブを閉じて、SAIVerse の画面に戻ってください。"
+        if ok
+        else "SAIVerse の画面に戻って結果を確認してください。"
+    )
+    detail = "" if ok else f"<p>{html.escape(message)}</p>"
+    page = (
+        "<!DOCTYPE html><html lang='ja'><head><meta charset='utf-8'>"
+        f"<title>{title}</title></head>"
+        "<body style='font-family:sans-serif;text-align:center;padding:48px;'>"
+        f"<h2 style='color:{color};'>{title}</h2>{detail}<p>{hint}</p>"
+        "</body></html>"
+    )
+    return page.encode("utf-8")
+
+
+class _SiwcCallbackHandler(BaseHTTPRequestHandler):
+    """Serves /auth/callback. Any other path is a 404 that leaves the attempt alone."""
+
+    # A connection that never sends a request line (a port probe) must not
+    # pin the listener loop for long.
+    timeout = 5
+
+    def do_GET(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != SIWC_CALLBACK_PATH:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        on_callback = getattr(self.server, "on_callback", None)
+        if on_callback is None:
+            outcome = _CallbackOutcome(False, False, "ログイン試行の準備ができていません。", 503)
+        else:
+            # Runs the exchange synchronously, so the page below reflects the
+            # real outcome (committed or not), not just "callback received".
+            outcome = on_callback(_flatten_query(parsed.query))
+        body = _callback_page(outcome.ok, outcome.message)
+        self.send_response(outcome.http_status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        pass  # never log request lines: the callback URL carries the code
+
+
+class _SiwcCallbackServer(HTTPServer):
+    # On Windows SO_REUSEADDR lets a second socket bind a port that is already
+    # listening (e.g. Codex CLI's own login server on 1455), which would split
+    # callbacks between the two processes. Bind exclusively there; on POSIX
+    # REUSEADDR only affects TIME_WAIT, so keep it for quick port reuse.
+    allow_reuse_address = sys.platform != "win32"
+    on_callback: Optional[Callable[[Dict[str, str]], _CallbackOutcome]] = None
+
+    def server_bind(self) -> None:
+        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        # Skip HTTPServer.server_bind: its socket.getfqdn() reverse lookup can
+        # stall for seconds on Windows.
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = port
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        LOG.exception("SIWC callback handler error")
+
+
+def _validate_siwc_exchange(
+    data: Dict[str, Any], issued_client_id: str, nonce: str
+) -> Dict[str, Any]:
+    """Check an exchange response before anything is persisted.
+
+    1. The granted scope must include `chatgpt.tokens.use.direct` — without it
+       the tokens cannot be used for inference (the user did not grant plan
+       usage). The response `scope` is authoritative; when absent we fall back
+       to the access-token JWT `scope` claim.
+    2. ID token `nonce` must equal this attempt's nonce and `aud` must contain
+       the issued client id.
+
+    Gap (deliberate, no JWT library in this codebase): the ID token's
+    signature is NOT verified — only its claims are read. The token arrives
+    directly from the issuer's token endpoint over TLS, in exchange for this
+    attempt's PKCE verifier, which is what makes claim checks meaningful here
+    (OIDC Core 3.1.3.7 permits TLS server validation in place of signature
+    checks for tokens received this way).
+    """
+    scope = data.get("scope")
+    if isinstance(scope, (list, tuple)):
+        scope = " ".join(str(s) for s in scope)
+    if not isinstance(scope, str) or not scope.strip():
+        claim_scope = (decode_jwt_payload(data.get("access_token") or "") or {}).get("scope")
+        scope = claim_scope if isinstance(claim_scope, str) else ""
+    scope = scope.strip()
+    if not siwc_scope_grants_direct_use(scope):
+        raise SiwcOAuthError(
+            "ChatGPT プランでの利用 (chatgpt.tokens.use.direct) が許可されませんでした。"
+            "サインイン画面で SAIVerse にプランの利用を許可したか確認して、"
+            "もう一度お試しください。"
+        )
+
+    claims = decode_jwt_payload(data.get("id_token") or "")
+    if not claims:
+        raise SiwcOAuthError("トークン交換の応答に ID トークンがありません。")
+    claim_nonce = claims.get("nonce")
+    if not isinstance(claim_nonce, str) or not secrets.compare_digest(
+        claim_nonce.encode("utf-8"), nonce.encode("utf-8")
+    ):
+        raise SiwcOAuthError("ID トークンの nonce がこのログイン試行のものと一致しません。")
+    aud = claims.get("aud")
+    audiences = [aud] if isinstance(aud, str) else (aud if isinstance(aud, list) else [])
+    if issued_client_id not in audiences:
+        raise SiwcOAuthError(
+            "ID トークンの宛先 (aud) が SAIVerse の client_id と一致しません。"
+        )
+
+    tokens = dict(data)
+    tokens["scope"] = scope
+    return tokens
+
+
+class SiwcOAuthManager(_LoginAttemptManager):
+    """Sign in with ChatGPT login: authorize URL + callback + code exchange.
+
+    The backend never opens a browser: start() returns `auth_url` and the UI
+    shows it as a link (the user's browser may be on another device). The
+    redirect lands either on the loopback listener this manager runs on
+    127.0.0.1, or — when that browser is elsewhere — the user pastes the URL
+    it landed on into the UI, which calls complete(). Both feed the same
+    `_process_callback`, which processes at most one callback per attempt and
+    commits through `_LoginAttemptManager._commit` (generation, cancel event
+    and logout marker re-checked under the locks), so cancel / supersession /
+    logout always win over a late callback or exchange.
     """
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._state: Dict[str, Any] = {"state": SIWC_STATE_IDLE}
-        self._server: Optional[HTTPServer] = None
-        self._thread: Optional[threading.Thread] = None
-        self._cancel_event = threading.Event()
+    _flow_error = SiwcOAuthError
+    _thread_name_prefix = "saiverse-siwc-login"
 
-    def status(self) -> Dict[str, Any]:
-        with self._lock:
-            return dict(self._state)
-
-    def cancel(self) -> bool:
-        with self._lock:
-            if self._state.get("state") != SIWC_STATE_WAITING:
-                return False
-            self._cancel_event.set()
-            if self._server:
-                try:
-                    self._server.server_close()
-                except Exception:  # noqa: BLE001
-                    pass
-                self._server = None
-            self._state = {"state": SIWC_STATE_IDLE}
-            return True
-
-    def start(
+    def __init__(
         self,
-        open_browser: bool = True,
-        preferred_port: int = SIWC_DEFAULT_CALLBACK_PORT,
-        timeout_seconds: float = 600.0,
-    ) -> Dict[str, Any]:
-        with self._lock:
-            if self._state.get("state") == SIWC_STATE_WAITING:
-                return dict(self._state)
+        callback_port: int = SIWC_DEFAULT_CALLBACK_PORT,
+        max_wait_seconds: float = SIWC_LOGIN_MAX_WAIT_SECONDS,
+    ) -> None:
+        super().__init__()
+        self._callback_port = callback_port
+        self._max_wait_seconds = float(max_wait_seconds)
+        self._attempt: Optional[_SiwcAttempt] = None
 
-            verifier = secrets.token_urlsafe(64)
-            challenge = _base64url_encode(
-                hashlib.sha256(verifier.encode("ascii")).digest()
-            )
-            state = secrets.token_hex(16)
-            nonce = secrets.token_hex(16)
+    # -- flow hooks ------------------------------------------------------------
 
-            # Resolve host ID (reuse existing if present in current store, else fresh UUIDv4)
-            host_id = self._resolve_or_create_host_id()
+    def _prepare_attempt(self) -> _SiwcAttempt:
+        try:
+            host_id, saved_client_id = ensure_siwc_client_record()
+        except OSError as exc:
+            raise SiwcOAuthError(
+                f"Sign in with ChatGPT のクライアント情報を保存できませんでした: {exc}"
+            ) from exc
 
-            server: Optional[HTTPServer] = None
-            port = preferred_port
-            try:
-                server = HTTPServer(("127.0.0.1", port), _SiwcCallbackHandler)
-            except OSError:
-                server = HTTPServer(("127.0.0.1", 0), _SiwcCallbackHandler)
-                port = server.server_port
+        verifier = secrets.token_urlsafe(64)
+        challenge = _base64url_encode(hashlib.sha256(verifier.encode("ascii")).digest())
+        state = secrets.token_urlsafe(32)
+        nonce = secrets.token_urlsafe(32)
 
-            redirect_uri = f"http://127.0.0.1:{port}{SIWC_CALLBACK_PATH}"
-            auth_url_params = {
-                "client_id": SIWC_DYNAMIC_CLIENT_ID,
-                "agent_name_hint": SIWC_APP_NAME_HINT,
+        server = self._bind_listener()
+        port = server.server_address[1]
+        redirect_uri = f"http://127.0.0.1:{port}{SIWC_CALLBACK_PATH}"
+
+        # First registration: dynamic_agent_client + agent_name_hint.
+        # Re-authorization: the issued client id, and no name hint.
+        params: Dict[str, str] = {"client_id": saved_client_id or SIWC_DYNAMIC_CLIENT_ID}
+        if not saved_client_id:
+            params["agent_name_hint"] = SIWC_APP_NAME_HINT
+        params.update(
+            {
                 "ext_agent_host_id": host_id,
                 "response_type": "code",
                 "redirect_uri": redirect_uri,
@@ -1038,130 +1443,297 @@ class SiwcOAuthManager:
                 "code_challenge_method": "S256",
                 "code_challenge": challenge,
             }
-            auth_url = f"{SIWC_AUTHORIZE_URL}?" + urllib.parse.urlencode(auth_url_params)
+        )
+        auth_url = (
+            f"{SIWC_AUTHORIZE_URL}?"
+            f"{urllib.parse.urlencode(params, quote_via=urllib.parse.quote)}"
+        )
+        return _SiwcAttempt(
+            server=server,
+            verifier=verifier,
+            state=state,
+            nonce=nonce,
+            redirect_uri=redirect_uri,
+            auth_url=auth_url,
+            host_id=host_id,
+            saved_client_id=saved_client_id,
+        )
 
-            auth_event = threading.Event()
-            setattr(server, "callback_result", {})
-            setattr(server, "auth_event", auth_event)
-
-            self._server = server
-            self._cancel_event.clear()
-            self._state = {
-                "state": SIWC_STATE_WAITING,
-                "auth_url": auth_url,
-                "redirect_uri": redirect_uri,
-                "port": port,
-                "host_id": host_id,
-                "started_at": datetime.now(tz=timezone.utc).isoformat(),
-            }
-
-            thread = threading.Thread(
-                target=self._run_loopback,
-                args=(server, auth_event, verifier, state, redirect_uri, host_id, timeout_seconds),
-                name="saiverse-siwc-oauth",
-                daemon=True,
-            )
-            self._thread = thread
-            thread.start()
-
-            if open_browser:
-                try:
-                    webbrowser.open(auth_url)
-                except Exception as exc:  # noqa: BLE001
-                    LOG.warning("could not auto-open browser for SIWC: %s", exc)
-
-            return dict(self._state)
-
-    def _resolve_or_create_host_id(self) -> str:
-        store = resolve_active_store()
-        if store is not None and store.path.exists():
+    def _bind_listener(self) -> _SiwcCallbackServer:
+        # Only the port may vary (spec); never `localhost`.
+        ports = [self._callback_port] if self._callback_port == 0 else [self._callback_port, 0]
+        last_exc: Optional[OSError] = None
+        for port in ports:
             try:
-                data = read_auth_store(store.path)
-                existing_host = (data.get("tokens") or {}).get("ext_agent_host_id")
-                if existing_host and isinstance(existing_host, str) and existing_host.startswith("urn:uuid:"):
-                    return existing_host
-            except Exception:  # noqa: BLE001
-                pass
-        return f"urn:uuid:{uuid.uuid4()}"
+                server = _SiwcCallbackServer(("127.0.0.1", port), _SiwcCallbackHandler)
+            except OSError as exc:
+                last_exc = exc
+                continue
+            server.timeout = SIWC_LISTENER_POLL_SECONDS
+            return server
+        raise SiwcOAuthError(
+            f"ログインの受け口 (127.0.0.1) を開けませんでした: {last_exc}"
+        )
 
-    def _run_loopback(
+    def _waiting_fields(self, attempt: _SiwcAttempt) -> Dict[str, Any]:
+        return {
+            "auth_url": attempt.auth_url,
+            "redirect_uri": attempt.redirect_uri,
+            "started_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+
+    def _worker_args(self, attempt: _SiwcAttempt) -> Tuple[Any, ...]:
+        return (attempt,)
+
+    def _discard_prepared(self, attempt: _SiwcAttempt) -> None:
+        _close_server(attempt.server)
+
+    def _on_attempt_waiting_locked(
         self,
-        server: HTTPServer,
-        auth_event: threading.Event,
-        verifier: str,
-        expected_state: str,
-        redirect_uri: str,
-        host_id: str,
-        timeout_seconds: float,
+        generation: int,
+        cancel_event: threading.Event,
+        logout_marker: str,
+        attempt: _SiwcAttempt,
     ) -> None:
+        attempt.generation = generation
+        attempt.cancel_event = cancel_event
+        attempt.logout_marker = logout_marker
+        attempt.server.on_callback = lambda params: self._process_callback(attempt, params)
+        self._attempt = attempt
+
+    def _on_attempt_aborted_locked(self) -> None:
+        # Close the listener right away (cancel / logout / supersession); the
+        # worker notices on its next poll and exits.
+        if self._attempt is not None:
+            _close_server(self._attempt.server)
+
+    # -- public API ---------------------------------------------------------
+
+    def complete(self, attempt_id: int, callback_url: str) -> Dict[str, Any]:
+        """Manual fallback: the URL the user's browser landed on, pasted into the UI.
+
+        Feeds the exact same validation + commit path as the loopback.
+        Raises SiwcCallbackRejected (with an HTTP status) when the callback is
+        refused without being processed: stale attempt_id, not a callback URL,
+        state mismatch, or another callback already being processed.
+        """
+        with self._lock:
+            attempt = self._attempt
+            if (
+                attempt is None
+                or attempt_id != self._generation
+                or attempt.generation != attempt_id
+                or self._state.get("state") != LOGIN_STATE_WAITING
+            ):
+                raise SiwcCallbackRejected(
+                    "このログイン試行は既に終了しているか、新しい試行に置き換えられています。"
+                    "ログインをやり直してください。",
+                    409,
+                )
+        parsed = urllib.parse.urlparse((callback_url or "").strip())
+        if parsed.path.rstrip("/") != SIWC_CALLBACK_PATH or not parsed.query:
+            raise SiwcCallbackRejected(
+                "貼り付けた URL がサインイン後の転送先 (…/auth/callback?code=…) ではありません。"
+                "ブラウザのアドレス欄の URL を丸ごと貼り付けてください。",
+                400,
+            )
+        outcome = self._process_callback(attempt, _flatten_query(parsed.query))
+        if not outcome.processed:
+            raise SiwcCallbackRejected(outcome.message, outcome.http_status)
+        return {"ok": outcome.ok, "message": outcome.message, **self.status()}
+
+    # -- flow steps ---------------------------------------------------------
+
+    def _run(
+        self,
+        generation: int,
+        cancel_event: threading.Event,
+        logout_marker: str,
+        attempt: _SiwcAttempt,
+    ) -> None:
+        """Serve the loopback listener until a callback is processed or the attempt ends.
+
+        Requests to other paths (favicon, port probes) and callbacks with the
+        wrong state are answered without ending the attempt.
+        """
+        server = attempt.server
+        deadline = time.monotonic() + self._max_wait_seconds
         try:
-            # Handle one incoming HTTP request in background
-            server_thread = threading.Thread(target=server.handle_request, daemon=True)
-            server_thread.start()
-
-            # Wait for callback or cancel
-            start_time = time.monotonic()
-            while not auth_event.is_set():
-                if self._cancel_event.is_set():
-                    return
-                if time.monotonic() - start_time > timeout_seconds:
-                    with self._lock:
-                        self._state = {"state": SIWC_STATE_ERROR, "error": "認証がタイムアウトしました。"}
-                    return
-                time.sleep(0.2)
-
-            cb: Dict[str, Any] = getattr(server, "callback_result", {})
-            if cb.get("error"):
-                desc = cb.get("error_description") or cb["error"]
-                with self._lock:
-                    self._state = {"state": SIWC_STATE_ERROR, "error": f"OpenAI 認証エラー: {desc}"}
-                return
-
-            if cb.get("state") != expected_state:
-                with self._lock:
-                    self._state = {"state": SIWC_STATE_ERROR, "error": "OAuth state が一致しません。"}
-                return
-
-            code = cb.get("code")
-            issued_client_id = cb.get("client_id")
-            if not code or not issued_client_id:
-                with self._lock:
-                    self._state = {"state": SIWC_STATE_ERROR, "error": "認可コードまたは client_id が取得できませんでした。"}
-                return
-
-            # Code exchange
-            LOG.info("exchanging SIWC authorization code with client_id=%s", issued_client_id)
-            tokens = self._exchange_code(issued_client_id, code, verifier, redirect_uri)
-            tokens["client_id"] = issued_client_id
-            tokens["ext_agent_host_id"] = host_id
-            tokens["source"] = "saiverse_siwc"
-            tokens["resource"] = SIWC_RESOURCE
-
-            persist_saiverse_login(tokens)
-            LOG.info("SIWC login tokens persisted successfully to SAIVerse store")
-
-            with self._lock:
-                self._state = {
-                    "state": SIWC_STATE_SUCCESS,
-                    "client_id": issued_client_id,
-                    "scope": tokens.get("scope"),
-                    "completed_at": datetime.now(tz=timezone.utc).isoformat(),
-                }
+            while not attempt.done.is_set() and not self._is_stale(generation, cancel_event):
+                if attempt.claimed:
+                    # A pasted callback URL is being exchanged; wait for it.
+                    attempt.done.wait(SIWC_LISTENER_POLL_SECONDS)
+                    continue
+                if time.monotonic() >= deadline:
+                    self._expire(attempt)
+                    continue
+                try:
+                    server.handle_request()  # returns after server.timeout when idle
+                except (OSError, ValueError) as exc:
+                    # The listening socket was closed under us — expected on
+                    # cancel / logout, an error otherwise.
+                    if attempt.done.is_set() or self._is_stale(generation, cancel_event):
+                        return
+                    raise SiwcOAuthError(f"ログインの受け口が閉じられました: {exc}") from exc
+        except SiwcOAuthError as exc:
+            LOG.warning("SIWC login failed: %s", exc)
+            self._fail(generation, cancel_event, str(exc))
         except Exception as exc:  # noqa: BLE001
-            LOG.exception("error in SIWC loopback authorization: %s", exc)
-            with self._lock:
-                self._state = {"state": SIWC_STATE_ERROR, "error": str(exc)}
+            LOG.exception("SIWC login worker crashed")
+            self._fail(generation, cancel_event, f"予期しないエラー: {exc}")
         finally:
-            try:
-                server.server_close()
-            except Exception:  # noqa: BLE001
-                pass
+            _close_server(server)
+
+    def _expire(self, attempt: _SiwcAttempt) -> None:
+        """Timeout: end the attempt unless a callback is already being processed."""
+        with self._lock:
+            if attempt.claimed:
+                return
+            attempt.claimed = True
+            if attempt.generation == self._generation and not attempt.cancel_event.is_set():
+                self._state = {
+                    "state": LOGIN_STATE_ERROR,
+                    "attempt_id": attempt.generation,
+                    "error": (
+                        f"{int(self._max_wait_seconds // 60)} 分以内にサインインが完了しなかったため"
+                        "打ち切りました。もう一度ログインをやり直してください。"
+                    ),
+                }
+        attempt.done.set()
+
+    def _process_callback(
+        self, attempt: _SiwcAttempt, params: Dict[str, str]
+    ) -> _CallbackOutcome:
+        """Single entry for loopback and pasted callbacks."""
+        generation, cancel_event = attempt.generation, attempt.cancel_event
+        with self._lock:
+            if (
+                generation != self._generation
+                or cancel_event.is_set()
+                or attempt.done.is_set()
+            ):
+                return _CallbackOutcome(
+                    False, False,
+                    "このログイン試行は既に終了しています。SAIVerse の画面からやり直してください。",
+                    409,
+                )
+            received_state = params.get("state") or ""
+            if not secrets.compare_digest(
+                received_state.encode("utf-8"), attempt.state.encode("utf-8")
+            ):
+                return _CallbackOutcome(
+                    False, False,
+                    "state が一致しません。別のログイン試行のリンクか、改ざんされた URL の可能性があります。",
+                    400,
+                )
+            if attempt.claimed:
+                return _CallbackOutcome(
+                    False, False,
+                    "このログインは既に処理中です。SAIVerse の画面で結果を確認してください。",
+                    409,
+                )
+            attempt.claimed = True
+        try:
+            ok, message = self._authorize_from_callback(attempt, params)
+        except Exception as exc:  # noqa: BLE001
+            LOG.exception("SIWC callback processing crashed")
+            message = f"予期しないエラー: {exc}"
+            self._fail(generation, cancel_event, message)
+            ok = False
+        finally:
+            attempt.done.set()
+        return _CallbackOutcome(True, ok, message, 200 if ok else 400)
+
+    def _authorize_from_callback(
+        self, attempt: _SiwcAttempt, params: Dict[str, str]
+    ) -> Tuple[bool, str]:
+        generation, cancel_event = attempt.generation, attempt.cancel_event
+
+        def fail(message: str) -> Tuple[bool, str]:
+            LOG.warning("SIWC login failed: %s", message)
+            self._fail(generation, cancel_event, message)
+            return False, message
+
+        error = params.get("error")
+        if error:
+            # access_denied (or any other error): stop, never exchange.
+            if error == "access_denied":
+                return fail("ChatGPT でのサインインが拒否またはキャンセルされました。")
+            return fail(f"OpenAI 認証エラー: {params.get('error_description') or error}")
+        code = params.get("code")
+        if not code:
+            return fail("認可コードが返ってきませんでした。")
+
+        callback_client_id = params.get("client_id") or None
+        if attempt.saved_client_id:
+            # Re-authorization: the client id stays the one tied to this
+            # request; the callback may omit it but must not change it.
+            if callback_client_id and callback_client_id != attempt.saved_client_id:
+                return fail(
+                    "OpenAI が返した client_id が、この SAIVerse に登録済みのものと一致しません。"
+                )
+            issued_client_id = attempt.saved_client_id
+        else:
+            if not callback_client_id:
+                return fail(
+                    "SAIVerse のクライアント登録が完了しませんでした "
+                    "(client_id が返ってきませんでした)。もう一度お試しください。"
+                )
+            issued_client_id = callback_client_id
+
+        if self._is_stale(generation, cancel_event):
+            return False, "このログイン試行は取り消されました。"
+        try:
+            data = self._exchange_code(
+                issued_client_id, code, attempt.verifier, attempt.redirect_uri
+            )
+            tokens = _validate_siwc_exchange(data, issued_client_id, attempt.nonce)
+        except SiwcOAuthError as exc:
+            return fail(str(exc))
+
+        tokens.update(
+            {
+                "client_id": issued_client_id,
+                "ext_agent_host_id": attempt.host_id,
+                "resource": SIWC_RESOURCE,
+                "source": "saiverse_siwc",
+            }
+        )
+        account_id = extract_account_id(
+            tokens.get("access_token", ""), tokens.get("id_token", "")
+        )
+        committed = self._commit(
+            generation,
+            cancel_event,
+            attempt.logout_marker,
+            tokens,
+            success_state={
+                "state": LOGIN_STATE_SUCCESS,
+                "attempt_id": generation,
+                "account_id": account_id,
+            },
+            after_persist=lambda: self._remember_client_id(issued_client_id),
+        )
+        if not committed:
+            return False, "このログイン試行は取り消されたため、トークンは保存しませんでした。"
+        LOG.info("SIWC login succeeded; tokens written to SAIVerse store")
+        return True, "サインインが完了しました。"
+
+    @staticmethod
+    def _remember_client_id(client_id: str) -> None:
+        try:
+            save_siwc_issued_client_id(client_id)
+        except OSError as exc:
+            # Tokens already carry the client id, so refresh still works; only
+            # the next sign-in falls back to a fresh registration.
+            LOG.warning("could not save the issued SIWC client id: %s", exc)
 
     @staticmethod
     def _exchange_code(
         client_id: str, code: str, verifier: str, redirect_uri: str
     ) -> Dict[str, Any]:
-        with httpx.Client(timeout=30.0, follow_redirects=False) as session:
+        session = _http_session()
+        try:
             resp = session.post(
                 SIWC_TOKEN_URL,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -1173,21 +1745,88 @@ class SiwcOAuthManager:
                     "redirect_uri": redirect_uri,
                     "resource": SIWC_RESOURCE,
                 },
+                timeout=30,
             )
-            if resp.status_code != 200:
-                raise SiwcOAuthError(
-                    f"トークン交換に失敗しました (status={resp.status_code}): {resp.text[:400]}"
-                )
+        except Exception as exc:  # noqa: BLE001
+            raise SiwcOAuthError(f"トークン交換に失敗しました: {exc}") from exc
+        finally:
             try:
-                data = resp.json()
-            except Exception as exc:  # noqa: BLE001
-                raise SiwcOAuthError("トークン交換の応答が JSON ではありませんでした。") from exc
-            if not data.get("access_token"):
-                raise SiwcOAuthError("トークン交換の応答に access_token がありません。")
-            return data
+                session.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if resp.status_code != 200:
+            LOG.warning("SIWC token exchange failed: %s", _describe_response(resp))
+            raise SiwcOAuthError(f"トークン交換が status={resp.status_code} で失敗しました。")
+        try:
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            raise SiwcOAuthError("トークン交換の応答が JSON ではありませんでした。") from exc
+        if not isinstance(data, dict) or not data.get("access_token"):
+            raise SiwcOAuthError("トークン交換の応答に access_token がありません。")
+        return data
 
 
 SIWC_LOGIN_MANAGER = SiwcOAuthManager()
+
+
+# ---------------------------------------------------------------------------
+# Logout (both flows)
+# ---------------------------------------------------------------------------
+
+def logout_all_and_delete_store(
+    managers: Optional[Sequence[_LoginAttemptManager]] = None,
+) -> Dict[str, Any]:
+    """Logout: stop every in-flight login, revoke a SIWC refresh token, delete.
+
+    1. Under the managers' locks (always taken in the same order: device,
+       then SIWC — no other path holds two manager locks) every in-flight
+       attempt is invalidated, and under the store lock the persistent logout
+       marker is renewed. That kills queued start()s and attempts in OTHER
+       processes sharing this ~/.saiverse too (their commits re-check the
+       marker under the store lock).
+    2. The manager locks are released (status polling must not wait on the
+       network) but the store lock is kept: a SIWC refresh token is revoked
+       best-effort at the issuer's revocation endpoint, and only then is the
+       store file deleted. Holding the store lock throughout means no
+       concurrent refresh can rotate the token between reading and revoking.
+       Revocation failure is logged and never prevents the deletion.
+
+    Never touches ~/.codex. The SIWC client record (host id + issued client
+    id) is deliberately kept for the next sign-in.
+    """
+    if managers is None:
+        managers = (LOGIN_MANAGER, SIWC_LOGIN_MANAGER)
+    store_lock = saiverse_store_lock()
+    with contextlib.ExitStack() as manager_locks:
+        for manager in managers:
+            manager_locks.enter_context(manager._lock)
+        for manager in managers:
+            manager._invalidate_locked()
+        store_lock.acquire()
+        try:
+            _renew_logout_marker_locked()
+            tokens = _read_store_tokens_locked()
+        except BaseException:
+            store_lock.release()
+            raise
+    try:
+        revoked: Optional[bool] = None
+        if is_siwc_token(tokens):
+            refresh_token = tokens.get("refresh_token")
+            client_id = resolve_siwc_client_id(tokens)
+            if isinstance(refresh_token, str) and refresh_token and client_id:
+                revoked = revoke_siwc_refresh_token(refresh_token, client_id)
+            else:
+                revoked = False
+            if not revoked:
+                LOG.warning(
+                    "SIWC sign-out: the refresh token was not revoked at OpenAI; "
+                    "local tokens are cleared anyway"
+                )
+        removed = _delete_store_file_locked()
+    finally:
+        store_lock.release()
+    return {"removed": removed, "revoked": revoked}
 
 
 # ---------------------------------------------------------------------------
@@ -1244,7 +1883,8 @@ __all__ = [
     "SIWC_RESOURCE",
     "SIWC_DIRECT_SCOPE",
     "SIWC_RESPONSES_URL",
-    "SIWC_MODELS_URL",
+    "SIWC_OPENID_CONFIGURATION_URL",
+    "SIWC_CLIENT_FILENAME",
     "NO_AUTH_HINT",
     "AuthStore",
     "STORE_KIND_SAIVERSE",
@@ -1264,11 +1904,20 @@ __all__ = [
     "extract_account_id",
     "access_token_expiry",
     "is_siwc_token",
+    "resolve_siwc_client_id",
+    "siwc_scope_grants_direct_use",
+    "get_siwc_client_record_path",
+    "read_siwc_client_record",
+    "ensure_siwc_client_record",
+    "save_siwc_issued_client_id",
+    "revoke_siwc_refresh_token",
     "CodexDeviceLoginError",
     "CodexDeviceLoginManager",
     "LOGIN_MANAGER",
     "SiwcOAuthError",
+    "SiwcCallbackRejected",
     "SiwcOAuthManager",
     "SIWC_LOGIN_MANAGER",
+    "logout_all_and_delete_store",
     "auth_status",
 ]

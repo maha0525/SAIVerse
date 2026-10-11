@@ -74,6 +74,8 @@ const openApiKeyDocs = (filename: string) => {
 interface CodexAuthStatus {
     logged_in: boolean;
     store: 'saiverse' | 'codex_cli' | null;
+    /** true when the SAIVerse store holds an official Sign in with ChatGPT login. */
+    is_siwc?: boolean;
     cli_available?: boolean;
     account_id?: string | null;
     access_token_expires_at?: string | null;
@@ -171,6 +173,9 @@ export default function ProviderManagementPanel() {
 
     const codexBadge = (status: CodexAuthStatus | null) => {
         if (!status) return null;
+        if (status.logged_in && status.store === 'saiverse' && status.is_siwc) {
+            return <span data-i18n="components.settings.ProviderManagementPanel.text041" className={`${styles.badge} ${styles.badgeKeyOk}`}>{uiText("components.settings.ProviderManagementPanel.text041")}</span>;
+        }
         if (status.logged_in && status.store === 'saiverse') {
             return <span data-i18n="components.settings.ProviderManagementPanel.text004" className={`${styles.badge} ${styles.badgeKeyOk}`}>{uiText("components.settings.ProviderManagementPanel.text004")}</span>;
         }
