@@ -221,6 +221,23 @@ class _StreamDiagnostics:
         }, separators=(",", ":")))
 
 
+# Attribute that carries the bearer token a response was requested with, so
+# that response's own diagnostics can scrub it (bound per response, never
+# shared across concurrent requests on one client).
+_SENT_TOKEN_ATTR = "_saiverse_sent_token"
+
+
+class _SentTokenResponse:
+    """Fallback wrapper for a response object that refuses new attributes."""
+
+    def __init__(self, inner: Any, token: Optional[str]) -> None:
+        self._inner = inner
+        setattr(self, _SENT_TOKEN_ATTR, token)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class _HttpxResponseAdapter:
     """Adapts an httpx.Response stream to match the curl_cffi response interface.
 
@@ -285,9 +302,6 @@ class OpenAICodexClient(LLMClient):
         self._params: Dict[str, Any] = {}
         self._session: Optional[Any] = None
         self._httpx_session: Optional[httpx.Client] = None
-        # The bearer token of the latest request, kept only so diagnostics of
-        # that response (error bodies, response.failed events) can be scrubbed.
-        self._last_sent_token: Optional[str] = None
         # Reuse OpenAIClient's defaults: 5 MB cap on image bytes for OpenAI-style
         # vision endpoints. SAIVerse normally provides image attachments via
         # `metadata.attachments` rather than expanded content lists, so we run
@@ -725,7 +739,6 @@ class OpenAICodexClient(LLMClient):
             body = self._to_siwc_body(body)
         # Best-effort expiry warning on the token we're about to send.
         access_token_for_log = headers.get("Authorization", "").removeprefix("Bearer ")
-        self._last_sent_token = access_token_for_log or None
         if access_token_for_log:
             self._warn_if_expiring_soon(access_token_for_log)
 
@@ -792,6 +805,13 @@ class OpenAICodexClient(LLMClient):
             except Exception:
                 pass
             raise CodexHTTPError(status, err_text)
+        # Bind the token to THIS response, so the stream diagnostics of this
+        # response scrub this request's token even when other requests run
+        # concurrently on the same client.
+        try:
+            setattr(resp, _SENT_TOKEN_ATTR, access_token_for_log or None)
+        except Exception:  # noqa: BLE001
+            resp = _SentTokenResponse(resp, access_token_for_log or None)
         return resp
 
     def _refresh_or_pickup_latest(self, prior_access_token: Optional[str]) -> None:
@@ -1101,7 +1121,10 @@ class OpenAICodexClient(LLMClient):
             try:
                 return json.loads(data_str)
             except json.JSONDecodeError:
-                LOG.debug("could not parse SSE payload: %s", redact_secrets(data_str)[:200])
+                LOG.debug(
+                    "could not parse SSE payload: %s",
+                    redact_secrets(data_str, getattr(resp, _SENT_TOKEN_ATTR, None))[:200],
+                )
                 return None
 
         for chunk in resp.iter_content():
@@ -1293,7 +1316,7 @@ class OpenAICodexClient(LLMClient):
                 error = response_obj.get("error") or {}
                 # The error object comes from the stream of a request that
                 # carried our token; scrub before it becomes exception text.
-                safe_error = redact_secrets(str(error), self._last_sent_token)[:1000]
+                safe_error = redact_secrets(str(error), getattr(resp, _SENT_TOKEN_ATTR, None))[:1000]
                 raise RuntimeError(f"Codex response failed: {safe_error}")
 
         # ストリームへ流した結合が正典 (SEA 側は chunk の結合を text として使う)。

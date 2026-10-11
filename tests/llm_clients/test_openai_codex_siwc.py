@@ -1448,24 +1448,54 @@ def test_exchange_transport_error_does_not_carry_code_or_verifier(
     assert verifier not in out["error"]
 
 
-def test_stream_failure_event_is_scrubbed_of_the_sent_token():
-    client = OpenAICodexClient(model="gpt-6.1-sol")
-    client._last_sent_token = "SENT-TOKEN-SECRET-9"
-    failed = {
-        "type": "response.failed",
-        "response": {"error": {"code": "server_error", "message": "echo SENT-TOKEN-SECRET-9 " + _siwc_access_token()}},
-    }
-
+def _sse_resp(lines: list[str], sent_token: str):
     class _Resp:
         def iter_content(self):
-            yield ("data: " + json.dumps(failed) + "\n\n").encode()
+            for line in lines:
+                yield (line + "\n\n").encode()
 
+    resp = _Resp()
+    setattr(resp, codex_mod._SENT_TOKEN_ATTR, sent_token)
+    return resp
+
+
+def _failed_line(token: str) -> str:
+    failed = {
+        "type": "response.failed",
+        "response": {"error": {"code": "server_error", "message": f"echo {token} " + _siwc_access_token()}},
+    }
+    return "data: " + json.dumps(failed)
+
+
+def test_stream_failure_event_is_scrubbed_of_the_sent_token():
+    client = OpenAICodexClient(model="gpt-6.1-sol")
     with pytest.raises(RuntimeError) as excinfo:
-        list(client._iter_chunks(_Resp()))
+        list(client._iter_chunks(_sse_resp([_failed_line("SENT-TOKEN-SECRET-9")], "SENT-TOKEN-SECRET-9")))
     text = str(excinfo.value)
     assert "SENT-TOKEN-SECRET-9" not in text
     assert "eyJ" not in text
     assert "server_error" in text
+
+
+def test_concurrent_streams_each_scrub_their_own_token():
+    """同じクライアントで鍵の違う要求が並んでも、各応答は自分の送った鍵で伏字にする。"""
+    client = OpenAICodexClient(model="gpt-6.1-sol")
+    resp_a = _sse_resp([_failed_line("TOKEN-A-SECRET")], "TOKEN-A-SECRET")
+    resp_b = _sse_resp([_failed_line("TOKEN-B-SECRET")], "TOKEN-B-SECRET")
+    with pytest.raises(RuntimeError) as err_b:
+        list(client._iter_chunks(resp_b))
+    with pytest.raises(RuntimeError) as err_a:
+        list(client._iter_chunks(resp_a))
+    assert "TOKEN-A-SECRET" not in str(err_a.value)
+    assert "TOKEN-B-SECRET" not in str(err_b.value)
+
+
+def test_unparseable_sse_debug_log_is_scrubbed_of_the_sent_token(caplog):
+    resp = _sse_resp(["data: {broken error: invalid token TOKEN-C-SECRET"], "TOKEN-C-SECRET")
+    with caplog.at_level("DEBUG", logger="saiverse.llm_clients.openai_codex"):
+        list(OpenAICodexClient._iter_sse_events(resp))
+    assert "could not parse SSE payload" in caplog.text
+    assert "TOKEN-C-SECRET" not in caplog.text
 
 
 def test_stored_token_with_line_break_is_refused_without_echo(isolated_stores):
