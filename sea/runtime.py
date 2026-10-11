@@ -2632,6 +2632,8 @@ class SEARuntime:
           — AI.REALTIME_CURRENT_TIME_ENABLED
         - Previous AI response timestamp (for time passage awareness)
           — AI.REALTIME_LAST_UTTERANCE_ENABLED
+        - Read-only guidance from enabled addon context providers, independent
+          of the two timestamp toggles (e.g. current-room body emote syntax).
 
         There is deliberately no whole-section toggle: realtime spell results
         are appended to this same message by ``_execute_realtime_spells``
@@ -2640,7 +2642,7 @@ class SEARuntime:
 
         Returns:
             Message dict with role="user" and <system> wrapper, or None if no
-            item is enabled / nothing could be rendered (the message is then
+            time or addon item could be rendered (the message is then
             not sent at all).
         """
         from datetime import datetime
@@ -2703,6 +2705,9 @@ class SEARuntime:
                 prev_time_str = prev_ai_timestamp.strftime(f"%Y年%m月%d日({weekday_names[prev_ai_timestamp.weekday()]}) %H:%M")
                 sections.append(f"あなたの前回発言: {prev_time_str}")
 
+        from saiverse.addon_context import context_sections
+
+        sections.extend(context_sections(persona, building_id))
         if not sections:
             return None
 

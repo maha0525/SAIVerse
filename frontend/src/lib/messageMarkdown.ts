@@ -1,6 +1,18 @@
 const SPELL_RESULT_BLOCK_RE =
     /<details\b[^>]*class="[^"]*\bspellResult\b[^"]*"[^>]*>[\s\S]*?<\/details>/g;
 
+const BODY_EMOTE_RE = /\{\s*"body_emote"\s*:\s*"(?:\\.|[^"\\])*"\s*\}/g;
+const BODY_EMOTES = new Set(['smile', 'nod', 'joy', 'hug', 'happy', 'wave', 'think', 'surprised', 'laugh']);
+
+function displayBodyEmote(marker: string): string {
+    try {
+        const name = JSON.parse(marker).body_emote;
+        return BODY_EMOTES.has(name) ? `<span class="body-emote">(${name})</span>` : marker;
+    } catch {
+        return marker;
+    }
+}
+
 /**
  * Prepare persisted chat content for the shared ReactMarkdown renderer.
  *
@@ -22,6 +34,7 @@ export function prepareMessageMarkdown(text: string): string {
     );
 
     return withLegacyBoundaries
+        .replace(BODY_EMOTE_RE, displayBodyEmote)
         .replace(/<user_only(?:\s[^>]*)?>/g, '')
         .replace(/<\/user_only>/g, '');
 }

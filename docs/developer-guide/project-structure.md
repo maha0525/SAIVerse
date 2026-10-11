@@ -116,6 +116,7 @@ saiverse/
 ├── data_paths.py           # パス管理（user_data/builtin_data）
 ├── playbook_scope.py       # 管理サービスと CLI が共有するパス→Playbook 公開範囲の推論（保存・CLI に非依存）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
+├── addon_context.py        # 有効アドオンの揮発性realtime context提供口（固定head・記憶へは保存しない）
 ├── observer_manager.py     # Observer（定期観測 Fixture）
 └── ...                     # その他コアモジュール
 ```

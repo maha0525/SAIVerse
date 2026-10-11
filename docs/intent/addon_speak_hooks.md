@@ -4,6 +4,12 @@
 
 ## これは何か
 
+### 2026-10-11: 揮発性コンテキストの提供口
+
+有効アドオンは `addon.json` に `"context_provider": "module:function"` を指定できる。発話hookと同じ起動・再有効化時に登録し、無効化時に解除する。関数は `provider(persona=..., building_id=...) -> str` の読み取り専用契約で、返り値をリアルタイム情報の末尾へ添える。空文字なら何も出さない。失敗はその提供口だけをログ付きで隔離する。
+
+最初の利用者はGodotアドオンの `persona_speech:emote_context`。設定したBuildingにいる間だけ9種類の身体エモート記法を案内する。登録先は `saiverse/addon_context.py`、消費先は `SEARuntime._build_realtime_context`。固定head・記憶・知覚バッファを更新せず、現在時刻の表示設定がOFFでも、身体案内の有無を独立に判定する。
+
 ペルソナの発話 (`emit_speak` / `emit_say`) が Building history に記録されたタイミングで、宣言的に登録された **アドオンの Python 関数** をサーバー側で呼び出す汎用拡張点を本体に追加する。
 
 アドオンは `addon.json` の `server_hooks` セクションで `event` と `handler` (`module:function` 形式) を宣言するだけで、SEA Playbook の構造に依存せずに発話イベントを購読できる。

@@ -379,6 +379,15 @@ def _register_addon_server_hooks_for(addon_dir: Path) -> int:
 
     manifest = _load_addon_manifest(addon_dir)
     hooks_spec = manifest.get("server_hooks") or []
+    from saiverse.addon_context import register_provider, unregister_provider
+
+    unregister_provider(addon_dir.name)
+    provider_spec = manifest.get("context_provider")
+    if provider_spec:
+        try:
+            register_provider(addon_dir.name, _resolve_hook_handler(addon_dir, provider_spec))
+        except Exception:
+            LOGGER.exception("addon_loader: context provider failed addon=%s", addon_dir.name)
     if not isinstance(hooks_spec, list):
         LOGGER.warning(
             "addon_loader: server_hooks for addon '%s' is not a list, skipping",
@@ -532,6 +541,9 @@ def unregister_addon_server_hooks(addon_name: str) -> int:
         解除した hook の数
     """
     from saiverse.addon_hooks import unregister_hook
+    from saiverse.addon_context import unregister_provider
+
+    unregister_provider(addon_name)
 
     pairs = _addon_server_hooks_registry.pop(addon_name, [])
     removed = 0
