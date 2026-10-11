@@ -1001,3 +1001,30 @@ def test_prepare_context_does_not_mark_other_pulses(monkeypatch, pulse_type):
 
 def test_prepare_context_does_not_mark_preview(monkeypatch):
     assert _marked_ids(_prepare(monkeypatch, "user", preview_only=True)) == []
+
+
+def test_expire_at_uses_server_expire_time_and_falls_back_safely():
+    """失効時刻は Gemini が返す expire_time。無い・ありえない値なら開始 + TTL。"""
+    from datetime import datetime, timezone
+
+    started = 1_800_000_000.0
+    ttl = 300
+    server = datetime.fromtimestamp(started + 20 + ttl, tz=timezone.utc)
+    assert gemini_cache._server_expire_epoch(
+        SimpleNamespace(expire_time=server), started, ttl,
+    ) == pytest.approx(started + 20 + ttl)
+
+    naive = server.replace(tzinfo=None)  # tz 無しは UTC として読む
+    assert gemini_cache._server_expire_epoch(
+        SimpleNamespace(expire_time=naive), started, ttl,
+    ) == pytest.approx(started + 20 + ttl)
+
+    assert gemini_cache._server_expire_epoch(SimpleNamespace(), started, ttl) == started + ttl
+    before = datetime.fromtimestamp(started - 5, tz=timezone.utc)
+    assert gemini_cache._server_expire_epoch(
+        SimpleNamespace(expire_time=before), started, ttl,
+    ) == started + ttl
+    far = datetime.fromtimestamp(started + ttl + 3600, tz=timezone.utc)
+    assert gemini_cache._server_expire_epoch(
+        SimpleNamespace(expire_time=far), started, ttl,
+    ) == started + ttl

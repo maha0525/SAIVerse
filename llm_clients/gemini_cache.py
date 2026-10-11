@@ -166,6 +166,31 @@ def prefix_digests(system_instruction: str, contents: Optional[list]) -> List[st
     return out
 
 
+def _server_expire_epoch(cache: Any, started: float, ttl_seconds: int) -> float:
+    """作ったキャッシュの失効時刻 (epoch 秒)。
+
+    Gemini が返す ``expire_time`` を使う — 作成の開始時刻から数えると、作成に
+    かかった時間 (音声会話の実測で十数秒) の分だけ実際より早く見切って使える
+    時間が縮み、早く消したときの返金も少なく出るため。``expire_time`` が無い・
+    読めない・ありえない値 (開始より前、または開始 + TTL を 10 分以上超える) の
+    ときは、開始 + TTL (安全側) に落とす。
+    """
+    fallback = started + ttl_seconds
+    raw = getattr(cache, "expire_time", None)
+    if raw is None:
+        return fallback
+    try:
+        from datetime import timezone
+        if getattr(raw, "tzinfo", None) is None:
+            raw = raw.replace(tzinfo=timezone.utc)
+        server = float(raw.timestamp())
+    except Exception:
+        return fallback
+    if server < started or server > fallback + 600:
+        return fallback
+    return server
+
+
 @dataclass
 class _ContinuousEntry:
     """継続キャッシュ 1 本。"""
@@ -592,7 +617,8 @@ class GeminiCacheController:
                     mode, model,
                 )
                 return _none
-            # 失効時刻は作成の開始時刻から数える (完了時刻から数えるより早めに見切る、安全側)。
+            # 失効時刻は Gemini が返す実際の expire_time を使う (_server_expire_epoch)。
+            # 返らなかったときだけ、作成の開始時刻から数える (早めに見切る、安全側)。
             started = time.time()
             t0 = time.monotonic()
             try:
@@ -629,6 +655,7 @@ class GeminiCacheController:
                 return _none
             um = getattr(cache, "usage_metadata", None)
             cached_tokens = (getattr(um, "total_token_count", 0) or 0) if um else 0
+            expire_at = _server_expire_epoch(cache, started, int(ttl_seconds))
 
             doomed: List[_ContinuousEntry] = []
             with self._lock:
@@ -639,7 +666,7 @@ class GeminiCacheController:
                     chain=chain,
                     prefix_count=k,
                     prefix_sig=sig,
-                    expire_at=started + int(ttl_seconds),
+                    expire_at=expire_at,
                     ttl_seconds=int(ttl_seconds),
                     seq=self._continuous_seq,
                     digests=list(digests[: k + 1]),
