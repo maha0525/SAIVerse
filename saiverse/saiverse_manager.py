@@ -1719,15 +1719,27 @@ class SAIVerseManager(
 
         Returns:
             {"autonomy_running": bool}
+
+        Raises:
+            KeyError: ペルソナの行が無い。
+            DB に書けなかった場合はそのまま送出する。**このとき
+            ``persona.autonomy_enabled`` は書き換えない** (DB は ON のまま —
+            メモリだけ OFF にすると、画面は止まって見えるのに再起動で ON に戻る)。
+            ステップ 1 で止めた AutonomyManager は止めたままにする (課金を止める側に
+            倒す。DB の値どおりの状態には、次の ``ensure_autonomy_for`` で戻る)。
         """
         from saiverse.autonomy_manager import AutonomyManager
-        from saiverse.autonomy_wiring import autonomy_setting_lock
-
-        persona = self.personas.get(persona_id)
+        from saiverse.autonomy_wiring import (
+            autonomy_setting_lock,
+            sync_autonomy_after_setting_change,
+            write_persona_autonomy_enabled,
+        )
 
         # 自律の設定の更新は autonomy_wiring の更新ロックで直列化する
         # (set_persona_autonomy_enabled / set_autonomy_all_stop と同じ区間の契約 —
-        # 並行する ON の保存と公開順が入れ替わらない)。
+        # 並行する ON の保存と公開順が入れ替わらない)。ステップ 1 の停止と
+        # ステップ 2 の書き込みを同じ区間に置くため外側でも取る (RLock なので、
+        # write_persona_autonomy_enabled の中の取得は再入になる)。
         with autonomy_setting_lock():
             # 1. 定期 tick 停止
             if not hasattr(self, "_autonomy_managers"):
@@ -1738,23 +1750,20 @@ class SAIVerseManager(
                 self._autonomy_managers[persona_id] = am
             am.stop()
 
-            # 2. AUTONOMY_ENABLED → False（DB + in-memory）
-            db = self.SessionLocal()
+            # 2. AUTONOMY_ENABLED → False（DB + in-memory）。自律の設定の書き手
+            # 全員が通る一本を使う — DB の commit が成功してから in-memory へ
+            # 公開する (失敗したら例外を返し、公開しない)。
             try:
-                from database.models import AI as AIModel
-                ai = db.query(AIModel).filter(AIModel.AIID == persona_id).first()
-                if ai is not None:
-                    ai.AUTONOMY_ENABLED = False
-                    db.commit()
-            except Exception:
-                db.rollback()
-                logging.exception(
-                    "[stop-autonomy] failed to set AUTONOMY_ENABLED=False for %s", persona_id,
+                write_persona_autonomy_enabled(
+                    self.SessionLocal, self.personas, persona_id, False,
+                    on_changed=lambda: sync_autonomy_after_setting_change(self, persona_id),
                 )
-            finally:
-                db.close()
-            if persona is not None:
-                persona.autonomy_enabled = False
+            except Exception:
+                logging.exception(
+                    "[stop-autonomy] failed to set AUTONOMY_ENABLED=False for %s "
+                    "(not published to memory)", persona_id,
+                )
+                raise
 
         logging.info("[stop-autonomy] persona=%s", persona_id)
         return {"autonomy_running": am.is_running}
@@ -2209,7 +2218,9 @@ class SAIVerseManager(
         home_city_id: int,
         default_model: Optional[str],
         lightweight_model: Optional[str] = None,
-        autonomy_enabled: bool = True,
+        # 既定は「触らない」(UNSET)。True を既定にすると、この欄を渡さない
+        # 呼び手の保存が停止ボタンの OFF を黙って ON へ戻す。
+        autonomy_enabled: Any = UNSET,
         avatar_path: Optional[str] = None,
         avatar_upload: Optional[str] = None,
         appearance_image_path: Optional[str] = None,

@@ -316,6 +316,10 @@ export default function WorldEditor() {
 
     // Form & Action State
     const [formData, setFormData] = useState<any>({});
+    // ペルソナの自律トグルを利用者が触ったか。触っていない保存では自律の欄を送らない
+    // — 開いたときの値を常に送ると、開いた後に停止ボタンやライフ設定が OFF にした
+    // 自律を古い ON で書き戻す (2026-10-12 段 3 敵対レビュー)。
+    const [aiAutonomyTouched, setAiAutonomyTouched] = useState(false);
 
     // Playbook import D&D
     const [isPlaybookDragOver, setIsPlaybookDragOver] = useState(false);
@@ -532,6 +536,7 @@ export default function WorldEditor() {
     // --- AI Handlers ---
     const handleAISelect = (ai: AI) => {
         setSelectedAI(ai);
+        setAiAutonomyTouched(false);
         setFormData({
             name: ai.AINAME, description: ai.DESCRIPTION, system_prompt: ai.SYSTEMPROMPT,
             home_city_id: ai.HOME_CITYID, default_model: ai.DEFAULT_MODEL, lightweight_model: ai.LIGHTWEIGHT_MODEL,
@@ -541,8 +546,13 @@ export default function WorldEditor() {
     };
     const handleCreateAI = async () => { if (await apiCall('/api/world/ais', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, system_prompt: formData.system_prompt, home_city_id: formData.home_city_id }) })) { aiList.load(); setFormData({}); } };
     const handleUpdateAI = async () => {
-        const result = await apiCall(`/api/world/ais/${selectedAI!.AIID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) });
+        // 自律の欄は利用者がトグルを触った回だけ送る (省略 = サーバーは自律に書かない)
+        const body = { ...formData };
+        if (!aiAutonomyTouched) delete body.autonomy_enabled;
+        const result = await apiCall(`/api/world/ais/${selectedAI!.AIID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         if (!result) return;
+        // 送った値は保存済み。次の保存は、また触るまで自律を送らない
+        setAiAutonomyTouched(false);
         // 保存しなかったモデル設定や、新しい設定に切り替えられなかったことの知らせ (ペルソナ設定の画面と同じ文面)
         if (typeof result === 'object' && typeof result.warning === 'string' && result.warning) {
             alert(uiText("components.settings.WorldEditor.text147", { p1: result.warning }));
@@ -837,7 +847,7 @@ export default function WorldEditor() {
                                         <input
                                             type="checkbox"
                                             checked={formData.autonomy_enabled ?? true}
-                                            onChange={(e: any) => setFormData({ ...formData, autonomy_enabled: e.target.checked })}
+                                            onChange={(e: any) => { setAiAutonomyTouched(true); setFormData({ ...formData, autonomy_enabled: e.target.checked }); }}
                                         />
                                         {(formData.autonomy_enabled ?? true) ? uiText("components.settings.WorldEditor.text078") : uiText("components.settings.WorldEditor.text079")}
                                     </label>

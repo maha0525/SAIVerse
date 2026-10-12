@@ -148,7 +148,10 @@ class AIUpdate(BaseModel):
     home_city_id: int
     default_model: Optional[str]
     lightweight_model: Optional[str]
-    autonomy_enabled: bool
+    # 省略 (None) = 自律に書かない。世界エディタは利用者がトグルを触った回だけ
+    # 送る — 開いたときの値を常に送ると、開いた後の停止ボタンやライフ設定の OFF を
+    # 古い ON で巻き戻す (PATCH /config と同じ形の穴。2026-10-12 段 3 敵対レビュー)。
+    autonomy_enabled: Optional[bool] = None
     avatar_path: Optional[str]
     appearance_image_path: Optional[str] = None  # Persona appearance image for LLM visual context
     chronicle_enabled: Optional[bool] = None
@@ -541,7 +544,9 @@ def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_m
     # 触らない」(UNSET の印) を保証する。ここで現在値を読んで詰め直す形にすると、
     # 読みと書きの間に挟まった別の画面の保存を古い値で巻き戻す (経緯:
     # docs/issues/archive/world_editor_save_wipes_persona_model_overrides.md)。
-    response = _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.autonomy_enabled, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled, autonomous_chronicle_enabled=ai.autonomous_chronicle_enabled, auto_recall_enabled=ai.auto_recall_enabled, auto_recall_enhanced=ai.auto_recall_enhanced, memopedia_index_enabled=ai.memopedia_index_enabled, spell_enabled=ai.spell_enabled, language=ai.language))
+    # 自律の欄も同じ — 省略されたら UNSET (= 自律に書かない)。
+    autonomy_enabled = ai.autonomy_enabled if ai.autonomy_enabled is not None else UNSET
+    response = _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, autonomy_enabled, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled, autonomous_chronicle_enabled=ai.autonomous_chronicle_enabled, auto_recall_enabled=ai.auto_recall_enabled, auto_recall_enhanced=ai.auto_recall_enhanced, memopedia_index_enabled=ai.memopedia_index_enabled, spell_enabled=ai.spell_enabled, language=ai.language))
     message = response["message"]
     if "[WARNING:LLM]" in message:
         base, warning = message.split("[WARNING:LLM]", 1)

@@ -651,6 +651,82 @@ class AdminAutonomyWriterSerializationTest(unittest.TestCase):
         self.assertFalse(self.persona.autonomy_enabled)
         self.assertEqual(self.synced, [])
 
+    # --- 世界エディタの PUT (同じ形の穴、段 3 の消し込み) ---
+
+    def _world_put(self, **fields):
+        """世界エディタの PUT /api/world/ais/{id} を、実物の AdminService まで通す。"""
+        from api.routes import world as world_routes
+
+        admin = self.admin
+
+        class _Manager:
+            def update_ai(self, *args, **kwargs):
+                return admin.update_ai(*args, **kwargs)
+
+        request = world_routes.AIUpdate(
+            name="Air", description=fields.pop("description", "d"), system_prompt="",
+            home_city_id=1, default_model="gemini-2.0-flash",
+            lightweight_model="gemini-2.0-flash-lite", avatar_path=None, **fields,
+        )
+        return world_routes.update_ai(AI_ID, request, manager=_Manager())
+
+    def test_world_put_without_the_autonomy_field_writes_no_autonomy(self):
+        """① 自律の欄を省いた PUT は自律を書かない。送った PUT は書く。"""
+        response = self._world_put(description="省いた回")
+        self.assertNotIn("Autonomy changed", response["message"])
+        self.assertFalse(self._db_value())
+        self.assertFalse(self.persona.autonomy_enabled)
+        self.assertEqual(self.synced, [])
+        self.assertEqual(self._description_in_db(), "省いた回")
+
+        response = self._world_put(autonomy_enabled=True)
+        self.assertIn("Autonomy changed from False to True", response["message"])
+        self.assertTrue(self._db_value())
+        self.assertTrue(self.persona.autonomy_enabled)
+        self.assertEqual(self.synced, [(AI_ID, True)])
+
+    def test_world_put_without_the_autonomy_field_does_not_undo_a_stop_button(self):
+        """② エディタを開いた (自律 ON を表示) 後に停止ボタンが OFF にしても、
+        自律の欄を送らない保存が ON へ戻さない。停止ボタンは実物
+        (SAIVerseManager.stop_autonomy) を通す。"""
+        from saiverse import autonomy_wiring
+        from saiverse.saiverse_manager import SAIVerseManager
+
+        autonomy_wiring.set_persona_autonomy_enabled(self.admin.manager, AI_ID, True)
+        opened_with = self.admin.get_ai_details(AI_ID)["AUTONOMY_ENABLED"]
+        self.assertTrue(opened_with)  # エディタを開いた時点では ON
+        self.synced.clear()
+
+        stopped = []
+        self.admin.manager._autonomy_managers = {
+            AI_ID: SimpleNamespace(stop=lambda: stopped.append(AI_ID), is_running=False),
+        }
+        SAIVerseManager.stop_autonomy(self.admin.manager, AI_ID)
+        self.assertEqual(stopped, [AI_ID])
+        self.assertFalse(self._db_value())
+
+        # エディタの保存 (自律トグルは触っていないので欄を送らない)
+        response = self._world_put(description="停止の後の保存")
+        self.assertNotIn("Autonomy changed", response["message"])
+        self.assertFalse(self._db_value())
+        self.assertFalse(self.persona.autonomy_enabled)
+        self.assertEqual(self._description_in_db(), "停止の後の保存")
+        # 再同期は停止ボタンの OFF の一回だけ
+        self.assertEqual(self.synced, [(AI_ID, False)])
+
+    def test_saiverse_manager_update_ai_default_does_not_write_autonomy(self):
+        """委譲側 (SAIVerseManager.update_ai) の自律の既定も「触らない」。
+        True を既定にすると、欄を渡さない呼び手が停止を黙って ON へ戻す。"""
+        import inspect
+
+        from manager.admin import UNSET
+        from saiverse.saiverse_manager import SAIVerseManager
+
+        default = inspect.signature(SAIVerseManager.update_ai).parameters[
+            "autonomy_enabled"
+        ].default
+        self.assertIs(default, UNSET)
+
 
 if __name__ == "__main__":
     unittest.main()
