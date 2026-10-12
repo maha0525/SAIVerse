@@ -52,7 +52,7 @@ class ModelInfo(BaseModel):
     input_per_1m_tokens: Optional[float] = None
     output_per_1m_tokens: Optional[float] = None
     currency: str = "USD"
-    pricing_note: Optional[str] = None
+    price_period_ends_at: Optional[str] = None
 
 
 @router.get("/summary", response_model=UsageSummary)
@@ -260,7 +260,7 @@ def get_model_pricing_info():
             input_per_1m_tokens=pricing.get("input_per_1m_tokens"),
             output_per_1m_tokens=pricing.get("output_per_1m_tokens"),
             currency=pricing.get("currency", "USD"),
-            pricing_note=pricing.get("pricing_note"),
+            price_period_ends_at=pricing.get("period_ends_at"),
         ))
     return result
 

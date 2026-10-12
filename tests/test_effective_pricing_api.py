@@ -30,7 +30,6 @@ def pricing_api(monkeypatch, tmp_path):
             "currency": "USD",
             "input_per_1m_tokens": 1.5,
             "output_per_1m_tokens": 9.0,
-            "pricing_note": "Estimate uses a conservative cutoff; provider timezone unspecified.",
             "periods": [{
                 "starts_at": "2026-10-10T00:00:00Z",
                 "ends_at": "2026-12-31T10:00:00Z",
@@ -64,15 +63,18 @@ def _freeze_route(monkeypatch, route, instant):
     return calls
 
 
+PERIOD_END = "2026-12-31T10:00:00+00:00"
+
+
 @pytest.mark.parametrize("route_name", ["config", "usage"])
-@pytest.mark.parametrize(("instant", "input_rate", "output_rate"), [
-    ("2026-10-09T23:59:59+00:00", 1.5, 9.0),
-    ("2026-10-10T00:00:00+00:00", 0.75, 4.5),
-    ("2026-12-31T09:59:59+00:00", 0.75, 4.5),
-    ("2026-12-31T10:00:00+00:00", 1.5, 9.0),
+@pytest.mark.parametrize(("instant", "input_rate", "output_rate", "period_end"), [
+    ("2026-10-09T23:59:59+00:00", 1.5, 9.0, None),
+    ("2026-10-10T00:00:00+00:00", 0.75, 4.5, PERIOD_END),
+    ("2026-12-31T09:59:59+00:00", 0.75, 4.5, PERIOD_END),
+    ("2026-12-31T10:00:00+00:00", 1.5, 9.0, None),
 ])
 def test_model_lists_resolve_effective_prices(
-    pricing_api, monkeypatch, route_name, instant, input_rate, output_rate,
+    pricing_api, monkeypatch, route_name, instant, input_rate, output_rate, period_end,
 ):
     original = copy.deepcopy(pricing_api.raw)
     calls = _freeze_route(monkeypatch, getattr(pricing_api, route_name), datetime.fromisoformat(instant))
@@ -86,11 +88,12 @@ def test_model_lists_resolve_effective_prices(
         assert models[key][input_key] == input_rate
         assert models[key][output_key] == output_rate
         assert models[key]["currency"] == "USD"
-        assert models[key]["pricing_note"] == original["pricing"]["pricing_note"]
+        # The limited-time label exists only while the period applies.
+        assert models[key]["price_period_ends_at"] == period_end
         assert "periods" not in models[key]
     assert models["unpriced"][input_key] is None
     assert models["unpriced"][output_key] is None
-    assert models["unpriced"]["pricing_note"] is None
+    assert models["unpriced"]["price_period_ends_at"] is None
     assert len(calls) == 1, "all models must share one UTC snapshot per request"
     assert pricing_api.raw == original, "display resolution must not mutate editable settings"
 

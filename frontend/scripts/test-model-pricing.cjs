@@ -74,19 +74,23 @@ function renderPricing(file, props, models = [], selected = '') {
     const Component = loadPricingComponent(file, react);
     return renderToStaticMarkup(React.createElement(Component, props));
 }
-const note = '2026-10-10 confirmed. Discount ends 2026-12-31 10:00 UTC. <App estimate>, provider timezone unspecified.';
+const periodEnd = '2026-12-31T10:00:00+00:00';
+const shownEnd = new Date(periodEnd).toLocaleString('ja-JP', { dateStyle: 'medium', timeStyle: 'short' });
+const chatLabel = messages['components.ChatOptions.text065'].ja.replace('{p1}', shownEnd);
+const previewLabel = messages['components.ContextPreviewModal.text016'].ja.replace('{p1}', shownEnd);
+assert.equal(mod.exports.formatPricePeriodEnd(undefined, 'ja-JP'), null);
+assert.equal(mod.exports.formatPricePeriodEnd('not a date', 'ja-JP'), null);
 const chatProps = { isOpen: true, onClose: () => {}, currentModel: 'dated', onModelChange: () => {} };
 for (const [input, output] of [[0.75, 4.5], [1.5, 9]]) {
-    const dated = { id: 'dated', name: 'Dated model', input_price: input, output_price: output, currency: 'USD', pricing_note: note };
+    const dated = { id: 'dated', name: 'Dated model', input_price: input, output_price: output, currency: 'USD', price_period_ends_at: periodEnd };
     const plain = { id: 'plain', name: 'Plain model', input_price: 0, output_price: 0, currency: 'USD' };
     const chat = renderPricing('ChatOptions.tsx', chatProps, [dated, plain], 'dated');
     assert.ok(chat.includes(`$${input.toFixed(3)}`));
     assert.ok(chat.includes(`$${output.toFixed(3)}`));
-    assert.ok(chat.includes('&lt;App estimate&gt;'));
-    assert.ok(chat.includes('2026-12-31 10:00 UTC'));
+    assert.ok(chat.includes(chatLabel));
     const switched = renderPricing('ChatOptions.tsx', chatProps, [dated, plain], 'plain');
     assert.ok(switched.includes('$0'));
-    assert.ok(!switched.includes('App estimate'), 'the previous model note must disappear after selection changes');
+    assert.ok(!switched.includes(shownEnd), 'the previous model period label must disappear after selection changes');
     assert.equal(renderPricing('ChatOptions.tsx', { ...chatProps, isOpen: false }, [dated], 'dated'), '');
 
     const persona = {
@@ -94,19 +98,18 @@ for (const [input, output] of [[0.75, 4.5], [1.5, 9]]) {
         model_display_name: 'Dated model', provider: 'synthetic', context_length: 100000,
         sections: [], total_input_tokens: 1000, estimated_cost_best_usd: 0.01,
         estimated_cost_worst_usd: 0.02, cache_enabled: false, cache_ttl: null,
-        cache_type: null, pricing: { currency: 'USD', output_per_1m_tokens: output, pricing_note: note }, messages: [],
+        cache_type: null, pricing: { currency: 'USD', output_per_1m_tokens: output, period_ends_at: periodEnd }, messages: [],
     };
     const previewProps = { isOpen: true, isLoading: false, onClose: () => {}, data: { personas: [persona] } };
     const preview = renderPricing('ContextPreviewModal.tsx', previewProps);
     assert.ok(preview.includes(`$${output.toFixed(3)}`));
-    assert.ok(preview.includes('&lt;App estimate&gt;'));
-    assert.ok(preview.includes('2026-12-31 10:00 UTC'));
-    const withoutNote = structuredClone(persona);
-    delete withoutNote.pricing.pricing_note;
-    assert.ok(!renderPricing('ContextPreviewModal.tsx', { ...previewProps, data: { personas: [withoutNote] } }).includes('App estimate'));
+    assert.ok(preview.includes(previewLabel));
+    const outsidePeriod = structuredClone(persona);
+    delete outsidePeriod.pricing.period_ends_at;
+    assert.ok(!renderPricing('ContextPreviewModal.tsx', { ...previewProps, data: { personas: [outsidePeriod] } }).includes(shownEnd));
     assert.equal(renderPricing('ContextPreviewModal.tsx', { ...previewProps, isOpen: false }), '');
 }
-console.log('Effective pricing and optional notes render in chat options and context previews; model changes and dismissal clear them.');
+console.log('Effective pricing and localized limited-time labels render in chat options and context previews; model changes and dismissal clear them.');
 
 const response = (data, ok = true) => ({ ok, status: ok ? 200 : 500, json: async () => data });
 const deferred = () => {
@@ -114,7 +117,7 @@ const deferred = () => {
     const promise = new Promise(done => { resolve = done; });
     return { promise, resolve };
 };
-const snapshot = input => [{ id: 'dated', name: 'Dated model', input_price: input, output_price: input * 6, currency: 'USD', pricing_note: note }];
+const snapshot = input => [{ id: 'dated', name: 'Dated model', input_price: input, output_price: input * 6, currency: 'USD', price_period_ends_at: periodEnd }];
 function mountPriceRefresh(initialModelResponse) {
     const states = [], refs = [], effects = [], requests = [], queued = [];
     const timers = new Map();

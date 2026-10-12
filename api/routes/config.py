@@ -38,7 +38,7 @@ class ModelInfo(BaseModel):
     input_price: Optional[float] = None
     output_price: Optional[float] = None
     currency: str = "USD"
-    pricing_note: Optional[str] = None
+    price_period_ends_at: Optional[str] = None
     rate_limit: Optional[RateLimitInfo] = None
     # 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない) の印。
     # 会話に使う選択欄はこの印の付いたモデルを出さない (一覧からは落とさない)。
@@ -134,7 +134,7 @@ def get_models():
             "input_price": pricing.get("input_per_1m_tokens"),
             "output_price": pricing.get("output_per_1m_tokens"),
             "currency": pricing.get("currency", "USD"),
-            "pricing_note": pricing.get("pricing_note"),
+            "price_period_ends_at": pricing.get("period_ends_at"),
             "rate_limit": rate_limit,
             "reflex_only": is_reflex_only_model(mid),
         })

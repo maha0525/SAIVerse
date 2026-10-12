@@ -47,6 +47,12 @@ def test_exact_half_open_boundaries(pricing, at, expected):
     assert model_configs.calculate_cost("dated", 1_000_000, 0, at=at) == expected
 
 
+def test_period_end_is_reported_only_inside_the_period(pricing):
+    assert model_configs.get_model_pricing("dated", at=START)["period_ends_at"] == END.isoformat()
+    assert "period_ends_at" not in model_configs.get_model_pricing("dated", at=END)
+    assert "period_ends_at" not in model_configs.get_model_pricing("dated", at=START - timedelta(seconds=1))
+
+
 def test_offset_equivalence_and_fresh_copy(pricing):
     original = copy.deepcopy(pricing)
     at = END.astimezone(timezone(timedelta(hours=9)))

@@ -11,3 +11,11 @@ export function outputRateForInput(
     }
     return pricing?.output_per_1m_tokens;
 }
+
+/** Format the end of a limited-time price in the viewer's locale and time zone. */
+export function formatPricePeriodEnd(endsAt: unknown, locale: string): string | null {
+    if (typeof endsAt !== 'string') return null;
+    const end = new Date(endsAt);
+    if (Number.isNaN(end.getTime())) return null;
+    return end.toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' });
+}

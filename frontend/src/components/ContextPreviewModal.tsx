@@ -9,7 +9,7 @@ import React, { useEffect, useState } from 'react';
 import { X, ChevronDown, ChevronRight } from 'lucide-react';
 import ModalOverlay from '@/components/common/ModalOverlay';
 import { formatCost } from '@/lib/formatCost';
-import { outputRateForInput } from '@/lib/modelPricing';
+import { formatPricePeriodEnd, outputRateForInput } from '@/lib/modelPricing';
 import styles from './ContextPreviewModal.module.css';
 
 interface SectionInfo {
@@ -44,7 +44,7 @@ interface PersonaPreview {
     cache_enabled: boolean;
     cache_ttl: string | null;
     cache_type: string | null;
-    pricing: { currency?: string; output_per_1m_tokens?: number; pricing_note?: string; [key: string]: unknown };
+    pricing: { currency?: string; output_per_1m_tokens?: number; period_ends_at?: string; [key: string]: unknown };
     messages: AnnotatedMessage[];
 }
 
@@ -153,6 +153,7 @@ function PersonaPreviewView({ persona }: { persona: PersonaPreview }) {
     };
 
     const outputRate = outputRateForInput(persona.pricing, persona.total_input_tokens);
+    const periodEnd = formatPricePeriodEnd(persona.pricing?.period_ends_at, getFormatLocale());
 
     return (
         <div className={styles.personaPreview}>
@@ -188,8 +189,8 @@ function PersonaPreviewView({ persona }: { persona: PersonaPreview }) {
                 {outputRate != null && outputRate > 0 && (
                     <div data-i18n="components.ContextPreviewModal.text010 components.ContextPreviewModal.text011" className={styles.costNote}>{uiText("components.ContextPreviewModal.text010")}{formatCost(outputRate, String(persona.pricing?.currency ?? 'USD'))}{uiText("components.ContextPreviewModal.text011")}</div>
                 )}
-                {persona.pricing?.pricing_note && (
-                    <div className={styles.costNote}>{persona.pricing.pricing_note}</div>
+                {periodEnd && (
+                    <div data-i18n="components.ContextPreviewModal.text016" className={styles.costNote}>{uiText("components.ContextPreviewModal.text016", { p1: periodEnd })}</div>
                 )}
             </div>
 

@@ -117,7 +117,7 @@ function harness({ extra = {}, watermarks = {}, mode = 'create', fail = false } 
     // duplicating and repeated saves must keep both the base and dated prices.
     for (const flow of ['edit', 'duplicate']) {
         const pricing = {
-            input_per_1m_tokens: 1.5, output_per_1m_tokens: 9, pricing_note: 'Conservative app cutoff',
+            input_per_1m_tokens: 1.5, output_per_1m_tokens: 9,
             periods: [{ starts_at: '2026-10-10T00:00:00Z', ends_at: '2026-12-31T10:00:00Z', rates: { input_per_1m_tokens: 0.75 } }],
         };
         const h = harness();

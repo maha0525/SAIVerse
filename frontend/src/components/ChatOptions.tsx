@@ -9,6 +9,7 @@ import React, { useEffect, useState, useMemo, useRef } from 'react';
 import styles from './ChatOptions.module.css';
 import { X, ChevronDown, Star } from 'lucide-react';
 import { formatCost } from '@/lib/formatCost';
+import { formatPricePeriodEnd } from '@/lib/modelPricing';
 import ModelEditorModal from './settings/ModelEditorModal';
 import ContextVolumeBar, { ContextStatus, canDrawContextVolumeBar } from './common/ContextVolumeBar';
 
@@ -25,7 +26,7 @@ interface ModelInfo {
     input_price?: number | null;
     output_price?: number | null;
     currency?: string;
-    pricing_note?: string | null;
+    price_period_ends_at?: string | null;
     rate_limit?: RateLimitInfo | null;
     /** 反射判断専用の宛先 (型付きの質問に確率で答えるだけで、文章を書けない)。
      *  チャットのモデル一時上書きは会話に使うので、選択肢には出さない。 */
@@ -792,6 +793,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                         const sel = models.find(m => m.id === currentModel);
                                         if (!sel) return null;
                                         const cur = sel.currency ?? 'USD';
+                                        const periodEnd = formatPricePeriodEnd(sel.price_period_ends_at, getFormatLocale());
                                         return (
                                             <>
                                                 {(sel.input_price != null || sel.output_price != null) && (
@@ -801,7 +803,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                                         {sel.output_price != null && uiText("components.ChatOptions.text043", { p1: formatCost(sel.output_price, cur) })}
                                                     </span>
                                                 )}
-                                                {sel.pricing_note && <span className={styles.hint}>{sel.pricing_note}</span>}
+                                                {periodEnd && <span data-i18n="components.ChatOptions.text065" className={styles.hint}>{uiText("components.ChatOptions.text065", { p1: periodEnd })}</span>}
                                             </>
                                         );
                                     })()}

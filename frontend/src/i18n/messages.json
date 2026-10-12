@@ -1687,6 +1687,10 @@
     "ja": "設定を適用",
     "en": "Apply settings"
   },
+  "components.ChatOptions.text065": {
+    "ja": "期間限定の料金 ({p1} まで)",
+    "en": "Limited-time price (until {p1})"
+  },
   "components.ChronicleConfirmDialog.text001": {
     "ja": "Chronicle生成の確認",
     "en": "Confirm Chronicle generation"
@@ -2030,6 +2034,10 @@
   "components.ContextPreviewModal.text015": {
     "ja": "応答可能なペルソナがこのBuildingにいません。",
     "en": "No persona in this building can reply."
+  },
+  "components.ContextPreviewModal.text016": {
+    "ja": "期間限定の料金で見積もっています ({p1} まで)",
+    "en": "Estimated with a limited-time price (until {p1})"
   },
   "components.DebugPanel.text001": {
     "ja": "エラー ({p1})",

@@ -742,6 +742,8 @@ def _resolve_pricing(pricing: Dict[str, Any], periods: list, at: datetime) -> Di
     for start, end, rates in periods:
         if start <= at < end:
             resolved.update(rates)
+            # The UI states when this limited-time price stops applying.
+            resolved["period_ends_at"] = end.isoformat()
             break
     return resolved
 
@@ -750,6 +752,7 @@ def get_model_pricing(model: str, *, at: datetime | None = None) -> Dict[str, An
     """Return a fresh effective price snapshot, without changing model settings.
 
     Optional pricing.periods override base rates on [starts_at, ends_at).
+    While a period applies, ``period_ends_at`` (UTC ISO-8601) names its end.
     Bounds require ISO-8601 offsets. Missing, expired or malformed schedules
     fall back to base rates. Omitted ``at`` uses now; naive legacy event times
     use the host's local timezone, matching UsageTracker's existing timestamps.
