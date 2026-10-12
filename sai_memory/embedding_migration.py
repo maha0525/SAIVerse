@@ -105,6 +105,26 @@ def sample_stale_vector_tables(
     return stale
 
 
+def scan_stale_vector_tables(conn: sqlite3.Connection, expected_dim: int) -> List[str]:
+    """Return the vector tables that hold at least one stale row (full scan).
+
+    Unlike :func:`sample_stale_vector_tables`, every row of the four tables is
+    parsed. The final check of a re-embed (:func:`finish_reembed`) runs only
+    once per job and decides whether the startup warning is lifted, so it
+    must not miss a stale row in the middle of a table; the cost of one full
+    pass is acceptable there, unlike at every startup.
+    """
+    stale: List[str] = []
+    for table in VECTOR_TABLES:
+        if not _relation_exists(conn, table):
+            continue
+        for (vec_json,) in conn.execute(f"SELECT vector FROM {table}"):
+            if is_stale_vector(vec_json, expected_dim):
+                stale.append(table)
+                break
+    return stale
+
+
 def purge_stale_legacy_embeddings(conn: sqlite3.Connection, expected_dim: int) -> int:
     """Delete stale rows from the legacy ``embeddings`` table.
 
@@ -194,8 +214,14 @@ def reembed_messages(
     rows deleted instead: they can only be stale or unreachable, and leaving
     them would keep the startup check firing.
 
+    The text is read again after embedding and the vectors are stored only
+    when it is unchanged: a message edited while its vectors were being
+    computed is skipped (counted in ``changed``) instead of getting vectors
+    of its old text. Its current rows stay as they were, so a later run (or
+    the startup check) still sees it.
+
     ``progress(done, total)`` is called every 10 targets and at the end.
-    Returns ``{"embedded": n, "dropped": n, "total": n}``.
+    Returns ``{"embedded": n, "dropped": n, "changed": n, "total": n}``.
     """
     from sai_memory.memory.chunking import chunk_text
     from sai_memory.memory.storage import get_message, replace_message_embeddings
@@ -204,6 +230,7 @@ def reembed_messages(
     total = len(targets)
     embedded = 0
     dropped = 0
+    changed = 0
     for i, mid in enumerate(targets, start=1):
         msg = get_message(conn, mid)
         content = (msg.content or "").strip() if msg is not None else ""
@@ -216,27 +243,36 @@ def reembed_messages(
             chunks = chunk_text(msg.content, min_chars=chunk_min, max_chars=chunk_max)
             payload = [c.strip() for c in chunks if c and c.strip()] or [content]
             vectors = embedder.embed(payload, is_query=False)
-            replace_message_embeddings(conn, mid, vectors)
-            embedded += 1
+            latest = get_message(conn, mid)
+            if latest is None or latest.content != msg.content:
+                changed += 1
+                LOGGER.info("Re-embed: message %s changed while embedding; skipped", mid)
+            else:
+                replace_message_embeddings(conn, mid, vectors)
+                embedded += 1
         if progress is not None and (i % 10 == 0 or i == total):
             progress(i, total)
-    return {"embedded": embedded, "dropped": dropped, "total": total}
+    return {"embedded": embedded, "dropped": dropped, "changed": changed, "total": total}
 
 
 def finish_reembed(conn: sqlite3.Connection, embedder: Any, model_id: str) -> List[str]:
-    """Record the model in ``embed_metadata`` and re-run the startup check.
+    """Record the model in ``embed_metadata`` and check every vector once more.
 
     Writes only the ``embed_model`` key (the table also holds other
-    subsystems' markers). Returns the tables in which the startup sample
-    still finds stale vectors — empty means the startup warning for this
-    persona can be lifted.
+    subsystems' markers). Returns the tables that still hold a stale vector
+    — empty means the startup warning for this persona can be lifted.
+
+    The final check is a full scan (:func:`scan_stale_vector_tables`), not
+    the startup sample: it runs only once per re-embed, and lifting the
+    warning while a stale row is left in the middle of a table would hide
+    that memory from recall with nothing left to report it.
     """
     from sai_memory.memory.storage import set_embed_metadata
 
     expected_dim = int(embedder.embedding_size)
     purge_stale_legacy_embeddings(conn, expected_dim)
     set_embed_metadata(conn, "embed_model", model_id)
-    return sample_stale_vector_tables(conn, expected_dim)
+    return scan_stale_vector_tables(conn, expected_dim)
 
 
 # ---------------------------------------------------------------------------
@@ -324,8 +360,10 @@ def rebuild_recall_source_embeddings(
     ``progress(source, done, total)`` is called when a source starts
     (``done=0``) and after every stored batch.
 
-    Returns ``{source: {"deleted": n, "total": n, "done": n}}``. A source whose
-    tables do not exist in this memory.db is reported with zeros.
+    Returns ``{source: {"deleted": n, "total": n, "done": n, "skipped": n}}``
+    (``skipped``: rows left unembedded because their text changed during the
+    run). A source whose tables do not exist in this memory.db is reported
+    with zeros.
     """
     from sai_memory.unified_recall import (
         embed_chronicle_entries,
@@ -358,7 +396,7 @@ def rebuild_recall_source_embeddings(
     for source in RECALL_SOURCES:
         table, _, readers, _ = _SOURCES[source]
         if not all(_relation_exists(conn, name) for name in (table, *readers)):
-            result[source] = {"deleted": 0, "total": 0, "done": 0}
+            result[source] = {"deleted": 0, "total": 0, "done": 0, "skipped": 0}
             continue
         deleted = _delete_source_vectors(conn, source, expected_dim, force=force)
         total = len(pending[source]())
@@ -370,9 +408,13 @@ def rebuild_recall_source_embeddings(
                 progress(_source, done, _total)
 
         done = generate[source](_cb) if total else 0
-        result[source] = {"deleted": deleted, "total": total, "done": done}
+        # Rows the generator skipped because their text changed (or the row
+        # went away) while it was embedding them; they keep no vector and the
+        # next generation pass embeds the new text.
+        skipped = max(total - done, 0)
+        result[source] = {"deleted": deleted, "total": total, "done": done, "skipped": skipped}
         LOGGER.info(
-            "Re-embed %s: deleted %d stale/forced vectors, embedded %d/%d",
-            source, deleted, done, total,
+            "Re-embed %s: deleted %d stale/forced vectors, embedded %d/%d (skipped %d changed)",
+            source, deleted, done, total, skipped,
         )
     return result

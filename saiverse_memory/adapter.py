@@ -2071,6 +2071,38 @@ class SAIMemoryAdapter:
         """Check if the adapter can perform semantic search (requires DB + embedding model)."""
         return self.conn is not None and self.embedder is not None
 
+    def ensure_embedder(self) -> bool:
+        """Load the embedding model now if it failed to load when this adapter opened.
+
+        The adapter loads the model once in ``__init__``; when that fails
+        (download not finished, broken files, ...) ``embedder`` stays ``None``
+        and recall stays off until the persona is reloaded. The re-embed job
+        calls this before lifting the re-embed warning, so the warning is not
+        lowered while the running persona still cannot embed queries.
+
+        Returns True when an embedder is available (already loaded, or loaded
+        now); False when the retry failed (logged as a WARNING).
+        """
+        if self.embedder is not None:
+            return True
+        try:
+            self.embedder = Embedder(local_model_path=self.settings.embed_model_path)
+        except Exception:
+            LOGGER.warning(
+                "Persona %s: retrying the embedding model '%s' failed; "
+                "semantic search/recall stays unavailable.",
+                self.persona_id,
+                self.settings.embed_model,
+                exc_info=True,
+            )
+            self.embedder = None
+            return False
+        LOGGER.info(
+            "Persona %s: embedding model '%s' loaded on retry",
+            self.persona_id, self.settings.embed_model,
+        )
+        return True
+
     @property
     def _ready(self) -> bool:
         return self.is_ready()

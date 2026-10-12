@@ -254,6 +254,9 @@ class OfficialImportStatusResponse(BaseModel):
     embedding_running: Optional[bool] = None
     embedding_progress: Optional[int] = None
     embedding_total: Optional[int] = None
+    embedding_failed: Optional[int] = None
+    # One line on why embedding stopped or left messages without vectors.
+    embedding_error: Optional[str] = None
 
 class ExtensionImportStatusResponse(BaseModel):
     running: bool
@@ -266,6 +269,9 @@ class ExtensionImportStatusResponse(BaseModel):
     embedding_running: Optional[bool] = None
     embedding_progress: Optional[int] = None
     embedding_total: Optional[int] = None
+    embedding_failed: Optional[int] = None
+    # One line on why embedding stopped or left messages without vectors.
+    embedding_error: Optional[str] = None
 
 class NativeImportStatusResponse(BaseModel):
     running: bool

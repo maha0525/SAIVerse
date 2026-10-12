@@ -15,6 +15,10 @@
 使い方 (作業ツリーのルートから):
     python -X utf8 experiments/embeddinggemma2_bench/threshold/measure.py --out results/run1.json
     python -X utf8 experiments/embeddinggemma2_bench/threshold/measure.py --compare results/run1.json results/run2.json
+
+既定は gemma だけを測る。e5 の較正は任意で、fastembed (本体の依存からは外れた) と
+sbert/multilingual-e5-small が要る: ``--models gemma,e5`` (場所は ``--e5-dir``)。
+derive.py は e5 の結果を使うので、e5 込みで測った結果に対して回す。
 """
 
 from __future__ import annotations
@@ -42,7 +46,9 @@ N_SUMMARIES = 100
 MSG_MIN, MSG_MAX = 120, 480
 SUM_MIN, SUM_MAX = 30, 120
 TOPK = 8  # sea/auto_recall.py get_topk() の既定
-E5_DIR_DEFAULT = Path(r"C:\Users\shuhe\workspace\SAIVerse\sbert\multilingual-e5-small")
+# 移行前のモデルの置き場 (リポジトリの sbert/ 直下)。移行後のリポジトリには
+# 無いので、e5 の較正を回すときは置き直すか --e5-dir で指す。
+E5_DIR_DEFAULT = REPO / "sbert" / "multilingual-e5-small"
 E5_THREADS = 4
 
 
@@ -296,7 +302,11 @@ def compare(a_path: Path, b_path: Path) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, help="結果 JSON (threshold/ からの相対パス可)")
-    ap.add_argument("--models", default="gemma,e5")
+    ap.add_argument(
+        "--models", default="gemma",
+        help="カンマ区切り。既定は gemma だけ。e5 (較正用) は fastembed と "
+             "sbert/multilingual-e5-small が要る任意の測定で、derive.py はその結果を使う",
+    )
     ap.add_argument("--e5-dir", type=Path, default=E5_DIR_DEFAULT)
     ap.add_argument("--compare", nargs=2, type=Path)
     args = ap.parse_args()

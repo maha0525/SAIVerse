@@ -87,6 +87,7 @@ def _reembed_persona(
             print(
                 f"[{source}] {persona_id}: deleted {counts['deleted']}, "
                 f"embedded {counts['done']}/{counts['total']}"
+                f" (skipped {counts['skipped']} changed while embedding)"
             )
 
         target_ids = message_reembed_targets(
@@ -97,7 +98,8 @@ def _reembed_persona(
         )
         print(
             f"[messages] {persona_id}: re-embedded {result['embedded']} messages, "
-            f"dropped vectors of {result['dropped']} without text (expected dim {expected_dim})."
+            f"dropped vectors of {result['dropped']} without text, "
+            f"skipped {result['changed']} changed while embedding (expected dim {expected_dim})."
         )
 
         still_stale = finish_reembed(conn, embedder, model_id)

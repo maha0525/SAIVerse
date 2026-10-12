@@ -15,6 +15,22 @@ _reembed_lock = threading.Lock()
 _SOURCE_LABELS = {"chronicle": "Chronicle", "memopedia": "Memopedia", "fragment": "Fragment"}
 
 
+def _live_embedder_ready(manager, persona_id: str) -> bool:
+    """True when the loaded persona can embed queries after the re-embed.
+
+    The re-embed job uses its own Embedder, so a persona whose adapter failed
+    to load the model at startup would get fresh vectors it still cannot
+    search. Retry the load on that adapter (``ensure_embedder``). A persona
+    that is not loaded (or has no memory adapter) reads the model on its next
+    load, so it counts as ready.
+    """
+    persona = manager.personas.get(persona_id)
+    adapter = persona.sai_memory if persona is not None else None
+    if adapter is None:
+        return True
+    return bool(adapter.ensure_embedder())
+
+
 def _run_reembed_task(persona_id: str, force: bool, manager=None):
     """Background task: rebuild every recall vector of one persona.
 
@@ -68,7 +84,7 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
                     message=f"{_SOURCE_LABELS[source]} {done}/{total}...",
                 )
 
-            rebuild_recall_source_embeddings(
+            source_result = rebuild_recall_source_embeddings(
                 conn, embedder, force=force, progress=_source_progress,
             )
 
@@ -99,6 +115,12 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
             f"Re-embedded {result['embedded']} messages and "
             f"{source_done} Chronicle/Memopedia/Fragment entries."
         )
+        # Rows edited while their vectors were being computed were not stored.
+        changed = result.get("changed", 0) + sum(
+            counts.get("skipped", 0) for counts in source_result.values()
+        )
+        if changed:
+            summary += f" Skipped {changed} entries edited during the re-embed."
         if still_stale:
             LOGGER.warning(
                 "Re-embed for %s finished but stale vectors remain in %s; "
@@ -107,7 +129,19 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
             )
             summary += f" Stale vectors remain in: {', '.join(still_stale)}."
         elif manager is not None:
-            manager.clear_embed_model_mismatch(persona_id)
+            if _live_embedder_ready(manager, persona_id):
+                manager.clear_embed_model_mismatch(persona_id)
+            else:
+                LOGGER.warning(
+                    "Re-embed for %s finished, but the running persona's embedding "
+                    "model could not be loaded; keeping the startup warning "
+                    "(recall stays unavailable until it loads).",
+                    persona_id,
+                )
+                summary += (
+                    " The running persona's embedding model could not be loaded, "
+                    "so recall is still unavailable; the warning is kept."
+                )
 
         _set(running=False, progress=result["embedded"], total=total, message=summary)
 
@@ -124,16 +158,20 @@ def reembed_persona_memory(
     manager = Depends(get_manager)
 ):
     """Start re-embedding every recall vector of the persona in the background."""
-    # Check if already running
-    with _reembed_lock:
-        status = _reembed_status.get(persona_id, {})
-        if status.get("running"):
-            return {"success": False, "message": "Re-embed already in progress.", "status": status}
-
     # Verify database exists
     db_path = get_persona_memory_db(persona_id)
     if not db_path.exists():
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    # Check and reserve in one step: the "running" mark is written here, under
+    # the lock, so a second request arriving before the background task has
+    # started is refused instead of starting a second job.
+    reserved = {"running": True, "progress": 0, "total": 0, "message": "Starting..."}
+    with _reembed_lock:
+        status = _reembed_status.get(persona_id, {})
+        if status.get("running"):
+            return {"success": False, "message": "Re-embed already in progress.", "status": status}
+        _reembed_status[persona_id] = dict(reserved)
 
     # Start background task
     background_tasks.add_task(_run_reembed_task, persona_id, request.force, manager)
@@ -141,7 +179,7 @@ def reembed_persona_memory(
     return {
         "success": True,
         "message": "Re-embed task started. Check status endpoint for progress.",
-        "status": {"running": True, "progress": 0, "total": 0, "message": "Starting..."}
+        "status": reserved,
     }
 
 @router.get("/{persona_id}/reembed/status", response_model=ReembedStatusResponse)

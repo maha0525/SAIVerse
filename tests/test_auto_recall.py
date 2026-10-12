@@ -370,8 +370,13 @@ class TestMessageThresholdOffset(AutoRecallBase):
     # env で入れられるので、下の 3 本は env で 0.02 を入れて仕組みを確かめる。
 
     def _set_offset(self, value):
-        import os
-        os.environ["SAIVERSE_AUTO_RECALL_MSG_THRESHOLD_OFFSET"] = value
+        # pytest の monkeypatch と同じ後始末 (テスト終了で元に戻す)。このファイルは
+        # unittest ランナーでも回るので、fixture ではなく MonkeyPatch を直接使う。
+        import pytest
+
+        mp = pytest.MonkeyPatch()
+        self.addCleanup(mp.undo)
+        mp.setenv("SAIVERSE_AUTO_RECALL_MSG_THRESHOLD_OFFSET", value)
 
     def test_default_offset_is_zero(self):
         # 既定では message も素のしきい値で判定される (しきい値ちょうど上で採用)。

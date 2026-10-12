@@ -53,26 +53,74 @@ def _embed_imported_messages(persona_id: str, adapter, message_ids: List[str]) -
     _progress(0, total)
     LOGGER.info("Import embedding started for %s (%d messages)", persona_id, total)
     result: dict = {}
+    error: Optional[str] = None
     try:
         result = adapter.backfill_missing_message_embeddings(
             progress_callback=_progress, message_ids=message_ids,
         )
-    except Exception:
+        error = _embedding_result_error(adapter, result)
+    except Exception as exc:
         LOGGER.exception("Import embedding failed for %s", persona_id)
+        error = f"{type(exc).__name__}: {exc}".splitlines()[0]
     finally:
         try:
             adapter.close()
         finally:
+            final = {
+                "embedding_running": False,
+                "embedding_progress": result.get("embedded", 0),
+                "embedding_total": total,
+                "embedding_failed": result.get("failed", 0),
+            }
+            if error:
+                final["embedding_error"] = error
             with _import_embedding_lock:
-                _import_embedding_status[persona_id] = {
-                    "embedding_running": False,
-                    "embedding_progress": result.get("embedded", 0),
-                    "embedding_total": total,
-                }
+                _import_embedding_status[persona_id] = final
+    if error:
+        LOGGER.warning("Import embedding for %s ended with a problem: %s", persona_id, error)
     LOGGER.info(
         "Import embedding finished for %s: embedded=%d failed=%d (of %d)",
         persona_id, result.get("embedded", 0), result.get("failed", 0), total,
     )
+
+
+def _embedding_result_error(adapter, result: dict) -> Optional[str]:
+    """One line describing why a finished backfill left messages unembedded.
+
+    ``None`` when nothing was left behind. Covers the two quiet outcomes of
+    ``backfill_missing_message_embeddings``: some messages failed, or none
+    could be embedded at all (the embedding model is not loaded).
+    """
+    failed = int(result.get("failed", 0) or 0)
+    embedded = int(result.get("embedded", 0) or 0)
+    missing = int(result.get("total_missing", 0) or 0)
+    if failed > 0:
+        return f"{failed} message(s) could not be embedded."
+    if missing > 0 and embedded == 0:
+        if adapter.embedder is None:
+            return (
+                f"Embedding model is not available; {missing} message(s) were "
+                "left without embeddings."
+            )
+        return f"None of {missing} message(s) could be embedded."
+    return None
+
+
+def _reset_import_embedding(persona_id: str) -> None:
+    """Prepare for a new import of ``persona_id``.
+
+    Waits for the previous import's embedding thread (if still running) so
+    two threads never write this persona's embedding status at once, then
+    clears that status so the new import does not show the previous numbers.
+    """
+    previous = _import_embedding_threads.get(persona_id)
+    if previous is not None and previous.is_alive():
+        LOGGER.info(
+            "Waiting for the previous import embedding of %s to finish", persona_id,
+        )
+        previous.join()
+    with _import_embedding_lock:
+        _import_embedding_status.pop(persona_id, None)
 
 
 def _start_import_embedding(persona_id: str, adapter, message_ids: List[str]) -> bool:
@@ -83,6 +131,11 @@ def _start_import_embedding(persona_id: str, adapter, message_ids: List[str]) ->
     """
     if not message_ids:
         return False
+    # Another import of the same persona may have handed off its thread while
+    # this one was storing text: never run two embedding threads per persona.
+    previous = _import_embedding_threads.get(persona_id)
+    if previous is not None and previous.is_alive():
+        previous.join()
     thread = threading.Thread(
         target=_embed_imported_messages,
         args=(persona_id, adapter, list(message_ids)),
@@ -130,6 +183,9 @@ def _run_extension_import_task(
         }
     
     try:
+        # 0. Let the previous import's embedding finish and forget its numbers.
+        _reset_import_embedding(persona_id)
+
         # 1. Parse file
         from tools.utilities.chatlog_exporter_importer import parse_exporter_file
         conversation = parse_exporter_file(tmp_path)
@@ -217,6 +273,9 @@ def _run_official_import_task(
         }
     
     try:
+        # 0. Let the previous import's embedding finish and forget its numbers.
+        _reset_import_embedding(persona_id)
+
         # 1. Retrieve cached export
         cached = _chatgpt_export_cache.get(cache_key)
         if not cached:

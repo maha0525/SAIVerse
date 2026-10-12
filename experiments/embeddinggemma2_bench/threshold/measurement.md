@@ -154,10 +154,10 @@ e5 では message 層のノイズが要約層より高く出た (現行の +0.02
 作業ツリーのルートから:
 
 ```
-python -X utf8 experiments/embeddinggemma2_bench/threshold/measure.py --out results/run1.json
-python -X utf8 experiments/embeddinggemma2_bench/threshold/measure.py --out results/run2.json
+python -X utf8 experiments/embeddinggemma2_bench/threshold/measure.py --models gemma,e5 --out results/run1.json
+python -X utf8 experiments/embeddinggemma2_bench/threshold/measure.py --models gemma,e5 --out results/run2.json
 python -X utf8 experiments/embeddinggemma2_bench/threshold/measure.py --compare results/run1.json results/run2.json
 python -X utf8 experiments/embeddinggemma2_bench/threshold/derive.py results/run1.json
 ```
 
-e5 の較正には fastembed と sbert/multilingual-e5-small が要る (`--e5-dir` で場所を指定。移行後のリポジトリには無いので、gemma だけなら `--models gemma`)。
+`--models` の既定は gemma だけ。e5 の較正は任意の測定で、fastembed (移行で本体の依存から外れた) と sbert/multilingual-e5-small が要る (既定の置き場はリポジトリの `sbert/multilingual-e5-small`、別の場所なら `--e5-dir` で指す。移行後のリポジトリには無い)。derive.py は e5 の結果を使うので、上の手順は e5 込みで測っている。gemma の分布だけを見るなら `--models` を付けずに回せばよい。
