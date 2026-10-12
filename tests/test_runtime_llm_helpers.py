@@ -243,17 +243,19 @@ class RecordLlmUsageTest(unittest.TestCase):
             self.state, "test-model", 100, 20, 0.25, 5, 3,
         )
         # 不変条件 9: anchor touch は LLM 成功後、anchor は call-local。
+        self.runtime.session_lifecycle.touch_anchor_after_llm_call.assert_called_once_with(
+            self.persona, usage, anchor_id="msg-42",
+        )
         # 標準 tier の印 (lg_llm_node が書く) が無い呼び出しはティックの押し直しに
         # 数えない (分からない呼び出しは数えない側)。
-        self.runtime.session_lifecycle.touch_anchor_after_llm_call.assert_called_once_with(
-            self.persona, usage, anchor_id="msg-42", counts_as_standard_call=False,
-        )
+        self.runtime.session_lifecycle.notify_standard_call.assert_not_called()
 
-    def test_standard_tier_mark_is_passed_to_the_touch(self):
-        """lg_llm_node が「標準 tier の生成」と印を付けた呼び出しだけを数える
-        (モデル名の一致ではなく実行 tier — 2026-10-12 Codex 敵対レビュー)。"""
-        for mark, expected in ((True, True), (False, False)):
-            self.runtime.session_lifecycle.touch_anchor_after_llm_call.reset_mock()
+    def test_standard_tier_mark_counts_the_call_once(self):
+        """lg_llm_node が「標準 tier の生成」と印を付けた呼び出しだけを、一度だけ
+        数える (モデル名の一致ではなく実行 tier — 2026-10-12 Codex 敵対レビュー)。
+        usage がある回でも二重に数えない (通知は touch と別の口で一度)。"""
+        for mark, expected in ((True, 1), (False, 0)):
+            self.runtime.session_lifecycle.notify_standard_call.reset_mock()
             state = dict(self.state, _standard_tier_call=mark)
             with patch("sea.runtime_llm.get_usage_tracker"), \
                     patch("saiverse.model_configs.calculate_cost", return_value=0.0), \
@@ -262,8 +264,56 @@ class RecordLlmUsageTest(unittest.TestCase):
                     self.runtime, self._client(_fake_usage()), self.persona, "b1",
                     "pb", "llm", state,
                 )
-            kwargs = self.runtime.session_lifecycle.touch_anchor_after_llm_call.call_args.kwargs
-            self.assertIs(kwargs["counts_as_standard_call"], expected)
+            notify = self.runtime.session_lifecycle.notify_standard_call
+            self.assertEqual(notify.call_count, expected)
+            if expected:
+                notify.assert_called_once_with(self.persona)
+
+    def test_a_standard_call_without_usage_is_still_counted_once(self):
+        """③ 段 3 4 巡目 medium: usage を返さないプロバイダの成功した標準生成も
+        「最後の標準呼び出し」に数える (旧実装は usage の早期 return の後ろで
+        通知していて、0 回だった)。記帳と touch は従来どおり行わない。"""
+        state = dict(self.state, _standard_tier_call=True)
+        result = _record_llm_usage(
+            self.runtime, self._client(None), self.persona, "b1", "pb", "llm", state,
+        )
+        self.assertIsNone(result)
+        self.runtime.session_lifecycle.notify_standard_call.assert_called_once_with(
+            self.persona,
+        )
+        self.runtime._accumulate_usage.assert_not_called()
+        self.runtime.session_lifecycle.touch_anchor_after_llm_call.assert_not_called()
+
+    def test_the_count_comes_before_the_touch(self):
+        """通知は touch より先 — touch が張る保温の判定が押し直し後のティックを読む。"""
+        calls = []
+        lifecycle = self.runtime.session_lifecycle
+        lifecycle.notify_standard_call.side_effect = lambda *a, **k: calls.append("notify")
+        lifecycle.touch_anchor_after_llm_call.side_effect = (
+            lambda *a, **k: calls.append("touch")
+        )
+        state = dict(self.state, _standard_tier_call=True)
+        with patch("sea.runtime_llm.get_usage_tracker"), \
+                patch("saiverse.model_configs.calculate_cost", return_value=0.0), \
+                patch("saiverse.model_configs.get_model_display_name", return_value="m"):
+            _record_llm_usage(
+                self.runtime, self._client(_fake_usage()), self.persona, "b1",
+                "pb", "llm", state,
+            )
+        self.assertEqual(calls, ["notify", "touch"])
+
+    def test_a_failing_count_does_not_stop_the_usage_record(self):
+        self.runtime.session_lifecycle.notify_standard_call.side_effect = RuntimeError("x")
+        state = dict(self.state, _standard_tier_call=True)
+        with patch("sea.runtime_llm.get_usage_tracker"), \
+                patch("saiverse.model_configs.calculate_cost", return_value=0.0), \
+                patch("saiverse.model_configs.get_model_display_name", return_value="m"):
+            meta = _record_llm_usage(
+                self.runtime, self._client(_fake_usage()), self.persona, "b1",
+                "pb", "llm", state,
+            )
+        self.assertIsNotNone(meta)
+        self.runtime.session_lifecycle.touch_anchor_after_llm_call.assert_called_once()
 
     def test_anchor_touch_happens_after_usage_record(self):
         """記帳より先に anchor を進めない（prepare_context 側の先行 touch に戻さない）。"""

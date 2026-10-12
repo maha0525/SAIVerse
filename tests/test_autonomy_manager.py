@@ -1168,23 +1168,62 @@ def test_a_standard_call_while_waiting_for_the_beat_lock_skips_the_tick(
 def test_life_end_while_waiting_for_the_beat_lock_cancels_the_tick(
     manager, session_factory,
 ):
-    """③ Beat を待っている間に終了の節目が走った (ended を保存して予約を消した)。
-    その後に予約が張り直されていても、Beat 内の再検査が生成を止めて予約を消す。"""
+    """③ Beat を待っている間に終了の節目が走った (ended を保存した)。終了の節目の
+    取り消しがこの発火の張り直しより先に済んでいて、発火が張り直した自分の予約が
+    生き残っている並び (手渡し中の張り直しとの交差) でも、Beat 内の再検査が生成を
+    止めて自分の予約 (札の一致する予約) を消す。"""
     am = _running_life(manager, session_factory)
+    scheduler = manager.event_scheduler
 
     def _life_ends_while_waiting():
-        _end_life(manager)
-        # 終了の節目の後に予約が生き返った並び (手渡し中の張り直しとの交差)
-        manager.event_scheduler.schedule(
-            fire_at=clock.now() + timedelta(minutes=30), callback=am._handle_tick,
-            key=tick_reservation_key(PERSONA_ID),
-        )
+        # 終了の節目の取り消しは、この発火の張り直しより前に済んでいた — ここでの
+        # 取り消しは空振りさせ、発火が張り直した自分の予約を残す。
+        real_cancel = scheduler.cancel
+        scheduler.cancel = lambda key: False
+        try:
+            _end_life(manager)
+        finally:
+            scheduler.cancel = real_cancel
+        assert _tick_at(manager) is not None  # 自分の予約が生き残っている
 
     manager.fire_tick = FakeTicks(manager, beat_wait=_life_ends_while_waiting)
     _fire_tick_reservation(manager)
     assert manager.fire_tick.calls == []
     assert am.last_report.reason == "outside life before start"
     assert _tick_at(manager) is None
+
+
+def test_a_reservation_rearmed_at_the_same_time_survives_the_old_cleanup(
+    manager, session_factory,
+):
+    """④ ABA (段 3 4 巡目 medium): 発火したワーカーが全停止を観測してから自分の
+    予約を消すまでの間に、全停止が解除されて再同期がティックを張り直した。
+    仮想時計が止まっているので新しい予約は古い予約と**同じ時刻**になる —
+    古いワーカーの後始末は、札の違う新しい予約を消さない。"""
+    am = _running_life(manager, session_factory)
+    fire_at = _tick_at(manager)
+    clock.advance_to(fire_at)
+    manager._autonomy_all_stop = True
+    rearmed: list = []
+    original_gate = am._check_gate
+
+    def _gate_then_resume(now, **kwargs):
+        verdict = original_gate(now, **kwargs)
+        if verdict[0] is not None and not rearmed:
+            # 判断の後・取り消しの前に、全停止の解除と再同期が割り込む
+            manager._autonomy_all_stop = False
+            assert am.arm_tick() is True
+            rearmed.append(_tick_at(manager))
+        return verdict
+
+    am._check_gate = _gate_then_resume
+    manager.event_scheduler.run_due(clock.now())
+
+    assert am.last_report.status == "skipped"
+    assert am.last_report.reason == "autonomy all-stop"
+    # 再同期の予約は古いワーカーの張り直しと同じ時刻 (= ABA の並び)
+    assert rearmed == [fire_at + timedelta(minutes=30)]
+    assert _tick_at(manager) == rearmed[0]  # 消えずに残る
 
 
 def test_rearming_the_tick_after_a_resume_reconciles_the_keepalive(
@@ -1292,6 +1331,62 @@ def test_an_on_event_system_task_is_resolved_the_same_way(manager, session_facto
         "この時間は、システムからの依頼「届いた手紙に目を通す」に使います。"
     )
     assert _entry(manager, entry["task_id"])["status"] == task_book.STATUS_DONE
+
+
+def test_a_system_task_edited_after_it_was_drawn_stays_open(manager, session_factory):
+    """① 段 3 4 巡目 high: 引き当ての後 (生成の最中) に中身を書き換えられた
+    システムタスクは、ティックが走りきっても済にしない — このティックが実行した
+    のは古い内容。次のティックが新しい内容で引き直し、それが走りきったら済になる。"""
+    _mark_self_defined(session_factory)
+    am = _running_life(manager, session_factory)
+    entry = task_book.add_system_task(
+        manager, PERSONA_ID, "届いた手紙に目を通す", idem_key="on_event:edit-1",
+    )
+
+    def _edited_while_running():
+        task_book.update_entry(
+            manager, PERSONA_ID, entry["task_id"], content="届いた手紙に返事を書く",
+        )
+
+    manager.fire_tick = FakeTicks(manager, beat_wait=_edited_while_running)
+    _fire_tick_reservation(manager)
+    assert am.last_report.status == "completed"
+    assert manager.fire_tick.calls[0]["assignment"] == (
+        "この時間は、システムからの依頼「届いた手紙に目を通す」に使います。"
+    )
+    edited = _entry(manager, entry["task_id"])
+    assert edited["status"] == task_book.STATUS_OPEN
+    assert edited["content"] == "届いた手紙に返事を書く"
+
+    manager.fire_tick = FakeTicks(manager)
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls[0]["assignment"] == (
+        "この時間は、システムからの依頼「届いた手紙に返事を書く」に使います。"
+    )
+    assert _entry(manager, entry["task_id"])["status"] == task_book.STATUS_DONE
+
+
+def test_a_system_task_given_a_deadline_after_it_was_drawn_stays_open(
+    manager, session_factory,
+):
+    """① 段 3 4 巡目 high の同族: 引き当て後に期限が付いた一件も済にしない
+    (済にしてよいのは「期限の無い」一件だけで、その前提が引き当て後に崩れた)。"""
+    _mark_self_defined(session_factory)
+    am = _running_life(manager, session_factory)
+    entry = task_book.add_system_task(
+        manager, PERSONA_ID, "棚の本を並べ直す", idem_key="on_event:due-1",
+    )
+    due = _epoch(BASE + timedelta(days=2))
+
+    def _given_a_deadline_while_running():
+        task_book.update_entry(manager, PERSONA_ID, entry["task_id"], due_at=due)
+
+    manager.fire_tick = FakeTicks(manager, beat_wait=_given_a_deadline_while_running)
+    _fire_tick_reservation(manager)
+    assert am.last_report.status == "completed"
+    after = _entry(manager, entry["task_id"])
+    assert after["status"] == task_book.STATUS_OPEN
+    assert after["due_at"] == due
 
 
 def test_deadline_tasks_are_not_resolved_by_the_tick(manager, session_factory):

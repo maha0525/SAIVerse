@@ -768,17 +768,37 @@ class SluiceRunTest(_AdapterTestBase):
         )
         client = FakeLLMClient(result, usage=usage)
         runtime = FakeRuntime(client)
+        counted = []
         lifecycle = SimpleNamespace(
             runtime=runtime,
             touch_anchor_after_llm_call=runtime.touch_anchor_after_llm_call,
+            notify_standard_call=counted.append,
         )
         with patch("saiverse.usage_tracker.get_usage_tracker") as get_tracker:
             sluice.run_sluice(lifecycle, self._persona(), "b", [], 0)
         get_tracker.return_value.record_usage.assert_called_once()
         self.assertEqual(len(runtime.touched), 1)
         # 標準モデルの Session を標準モデルのまま呼んだので、ティックの押し直しに
-        # 数える (v0.4 計画 決定 10)。
-        self.assertIs(runtime.touch_kwargs[0].get("counts_as_standard_call"), True)
+        # 一度だけ数える (v0.4 計画 決定 10)。通知は touch とは別の口。
+        self.assertEqual(len(counted), 1)
+        self.assertNotIn("counts_as_standard_call", runtime.touch_kwargs[0])
+
+    def test_a_standard_call_without_usage_is_still_counted(self):
+        """③ 段 3 4 巡目 medium: usage を返さないプロバイダの成功した整理も
+        「最後の標準呼び出し」に数える (記帳と touch は従来どおり行わない)。"""
+        client = FakeLLMClient(_sluice_result(), usage=None)
+        runtime = FakeRuntime(client)
+        counted = []
+        lifecycle = SimpleNamespace(
+            runtime=runtime,
+            touch_anchor_after_llm_call=runtime.touch_anchor_after_llm_call,
+            notify_standard_call=counted.append,
+        )
+        with patch("saiverse.usage_tracker.get_usage_tracker") as get_tracker:
+            sluice.run_sluice(lifecycle, self._persona(), "b", [], 0)
+        get_tracker.return_value.record_usage.assert_not_called()
+        self.assertEqual(runtime.touched, [])
+        self.assertEqual(len(counted), 1)
 
     # -- case: disabled toggle -------------------------------------------
 
@@ -4935,6 +4955,8 @@ class CacheTtlPulseScheduleTest(unittest.TestCase):
         scheduler = SimpleNamespace(
             schedule=lambda fire_at, callback, key: scheduled.append((fire_at, callback, key)),
             cancel=lambda key: scheduled.append(("cancel", key)),
+            token_of=lambda key: None,
+            cancel_if_token=lambda key, token: scheduled.append(("cancel_if_token", key)),
         )
         meta_layer = SimpleNamespace(
             _load_judgment_config=lambda persona: {

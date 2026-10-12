@@ -459,36 +459,89 @@ class ScheduleIfPresentTest(unittest.TestCase):
         self.assertIsNone(self.scheduler.fire_time_of("k1"))
 
 
-class CancelIfFireAtTest(unittest.TestCase):
-    """cancel_if_fire_at の契約 (v0.4 計画 段 3、3 巡目 medium)。
+class CancelIfTokenTest(unittest.TestCase):
+    """予約の札と cancel_if_token の契約 (v0.4 計画 段 3、3・4 巡目 medium)。
 
-    発火したワーカーの後始末は、自分が張った予約 (その発火時刻) だけを消す —
-    判断から取り消しまでの間に別の経路が張り直した予約は残す。
+    「読んでから判断し、判断の後で消す」後始末は、札を持っている予約だけを
+    消す — 判断から取り消しまでの間に別の経路が張り直した予約は、**同じ時刻
+    でも**残す (発火時刻の一致で見分けると ABA で取り違える、4 巡目)。
     """
 
     def setUp(self) -> None:
         self.scheduler = EventScheduler()  # start() しない
 
-    def test_cancels_a_reservation_at_the_expected_time(self) -> None:
+    def test_every_registration_returns_a_distinct_truthy_token(self) -> None:
         at = datetime.now() + timedelta(minutes=30)
-        self.scheduler.schedule(fire_at=at, callback=lambda: None, key="tick:a")
-        self.assertTrue(self.scheduler.cancel_if_fire_at("tick:a", at))
+        first = self.scheduler.schedule(fire_at=at, callback=lambda: None, key="k")
+        second = self.scheduler.schedule(fire_at=at, callback=lambda: None, key="k")
+        moved = self.scheduler.schedule_if_present(
+            fire_at=at, callback=lambda: None, key="k",
+        )
+        self.scheduler.cancel("k")
+        absent = self.scheduler.schedule_if_absent(
+            fire_at=at, callback=lambda: None, key="k",
+        )
+        tokens = [first, second, moved, absent]
+        self.assertTrue(all(isinstance(t, int) and t for t in tokens), tokens)
+        self.assertEqual(len(set(tokens)), 4)
+        self.assertEqual(self.scheduler.token_of("k"), absent)
+        # 何もしなかった回は None (札を返さない)
+        self.assertIsNone(self.scheduler.schedule_if_absent(
+            fire_at=at, callback=lambda: None, key="k",
+        ))
+        self.assertIsNone(self.scheduler.schedule_if_present(
+            fire_at=at, callback=lambda: None, key="other",
+        ))
+
+    def test_cancels_the_reservation_holding_the_token(self) -> None:
+        at = datetime.now() + timedelta(minutes=30)
+        token = self.scheduler.schedule(fire_at=at, callback=lambda: None, key="tick:a")
+        self.assertTrue(self.scheduler.cancel_if_token("tick:a", token))
         self.assertIsNone(self.scheduler.fire_time_of("tick:a"))
+        self.assertIsNone(self.scheduler.token_of("tick:a"))
         self.assertFalse(self.scheduler.has_key("tick:a"))
 
     def test_keeps_a_reservation_rearmed_at_another_time(self) -> None:
         own = datetime.now() + timedelta(minutes=30)
-        self.scheduler.schedule(fire_at=own, callback=lambda: None, key="tick:a")
+        token = self.scheduler.schedule(fire_at=own, callback=lambda: None, key="tick:a")
         newer = own + timedelta(minutes=1)
         self.scheduler.schedule(fire_at=newer, callback=lambda: None, key="tick:a")
-        self.assertFalse(self.scheduler.cancel_if_fire_at("tick:a", own))
+        self.assertFalse(self.scheduler.cancel_if_token("tick:a", token))
         self.assertEqual(
             self.scheduler.fire_time_of("tick:a"),
             datetime.fromtimestamp(newer.timestamp()),
         )
 
-    def test_does_nothing_when_absent(self) -> None:
-        self.assertFalse(self.scheduler.cancel_if_fire_at("tick:a", datetime.now()))
+    def test_keeps_a_reservation_rearmed_at_the_same_time(self) -> None:
+        """④ ABA: 同じ時刻に張り直された別の予約を、古い札では消さない
+        (仮想時計を止めたままの停止→再開で、新しいティックの予約が古い
+        ワーカーの後始末に消されていた — 4 巡目 medium)。"""
+        at = datetime.now() + timedelta(minutes=30)
+        old = self.scheduler.schedule(fire_at=at, callback=lambda: None, key="tick:a")
+        self.scheduler.cancel("tick:a")  # 停止
+        new = self.scheduler.schedule(fire_at=at, callback=lambda: None, key="tick:a")
+        self.assertFalse(self.scheduler.cancel_if_token("tick:a", old))
+        self.assertEqual(self.scheduler.token_of("tick:a"), new)
+        self.assertEqual(
+            self.scheduler.fire_time_of("tick:a"), datetime.fromtimestamp(at.timestamp()),
+        )
+
+    def test_a_replaced_reservation_keeps_the_new_token_only(self) -> None:
+        """schedule_if_present の置き換えは新しい札 — 置き換え前の札では消えない。"""
+        at = datetime.now() + timedelta(minutes=30)
+        old = self.scheduler.schedule(fire_at=at, callback=lambda: None, key="ttl:a")
+        new = self.scheduler.schedule_if_present(
+            fire_at=at, callback=lambda: None, key="ttl:a",
+        )
+        self.assertFalse(self.scheduler.cancel_if_token("ttl:a", old))
+        self.assertTrue(self.scheduler.cancel_if_token("ttl:a", new))
+
+    def test_does_nothing_when_absent_or_without_a_token(self) -> None:
+        self.assertFalse(self.scheduler.cancel_if_token("tick:a", 1))
+        at = datetime.now() + timedelta(minutes=30)
+        self.scheduler.schedule(fire_at=at, callback=lambda: None, key="tick:a")
+        self.assertFalse(self.scheduler.cancel_if_token("tick:a", None))
+        self.assertTrue(self.scheduler.has_key("tick:a"))
 
 
 class WorkerStartFailureTest(unittest.TestCase):

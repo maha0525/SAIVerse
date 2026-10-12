@@ -193,6 +193,45 @@ class TaskBookTests(unittest.TestCase):
         fetched = TB.get_entry(self.manager, "p1", entry["task_id"])
         self.assertEqual(fetched["content"], "中身")  # 拒否後も無傷
 
+    def test_complete_entry_expected_revision_cas(self):
+        """読んだ時点の版で閉じる口 (段 3 4 巡目 high — 引き当て後に編集された
+        システムタスクを、古い内容を実行したティックが済にしない)。
+
+        古い版を渡した完了は拒否され、行は open のまま新しい内容を保つ。版が
+        一致すれば閉じる。省略は従来どおり読み直した現在値で閉じる。
+        """
+        drawn = TB.add_system_task(self.manager, "p1", "依頼", idem_key="k-cas")
+        self.assertEqual(drawn["revision"], 0)
+        TB.update_entry(self.manager, "p1", drawn["task_id"], content="書き換えた依頼")
+        with self.assertRaises(TB.TaskBookError):
+            TB.complete_entry(
+                self.manager, "p1", drawn["task_id"], expected_revision=0,
+            )
+        fetched = TB.get_entry(self.manager, "p1", drawn["task_id"])
+        self.assertEqual(fetched["status"], TB.STATUS_OPEN)
+        self.assertEqual(fetched["content"], "書き換えた依頼")
+        closed = TB.complete_entry(
+            self.manager, "p1", drawn["task_id"], expected_revision=1,
+        )
+        self.assertEqual(closed["status"], TB.STATUS_DONE)
+        # 省略は従来どおり (読み直した現在値で閉じる)
+        other = TB.add_system_task(self.manager, "p1", "別の依頼", idem_key="k-cas-2")
+        TB.update_entry(self.manager, "p1", other["task_id"], content="編集済み")
+        self.assertEqual(
+            TB.complete_entry(self.manager, "p1", other["task_id"])["status"],
+            TB.STATUS_DONE,
+        )
+
+    def test_complete_entry_expected_revision_rejects_non_int(self):
+        entry = TB.add_system_task(self.manager, "p1", "依頼", idem_key="k-bad")
+        for bad in (True, "0", 1.5):
+            with self.assertRaises(TB.TaskBookError):
+                TB.complete_entry(
+                    self.manager, "p1", entry["task_id"], expected_revision=bad,
+                )
+        fetched = TB.get_entry(self.manager, "p1", entry["task_id"])
+        self.assertEqual(fetched["status"], TB.STATUS_OPEN)
+
     def test_raw_sql_string_due_at_is_rejected_by_check_constraint(self):
         """DB 境界の最終保証 — アプリ層を通らない生 SQL でも、文字列の DUE_AT
         は CHECK (ck_task_book_due_at_integer) が拒否する。"""

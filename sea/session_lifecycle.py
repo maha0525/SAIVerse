@@ -61,25 +61,31 @@ def _autonomy_manager_of(manager: Any, persona_id: Optional[str]) -> Any:
     return managers.get(persona_id)
 
 
-def _notify_tick_of_standard_call(manager: Any, persona: Any, usage: Any) -> None:
+def _notify_tick_of_standard_call(manager: Any, persona: Any) -> None:
     """本人の標準モデルの呼び出しが成功した — ティックの予約を押し直す (決定 10)。
 
     **主判定は呼び出し元** — その呼び出しが標準 tier (軽量でない) の本人の生成
-    だったかを、呼び出し時に確定している実行 tier から決めて
-    ``counts_as_standard_call`` で渡す (``sea.runtime_llm`` の LLM ノードは
-    ``pulse_context.execution_model_tier``、スルースは標準 tier の解決値との一致)。
-    ここに来るのはそれが True の呼び出しだけで、**印が立っていれば数える**。
+    だったかを、呼び出し時に確定している実行 tier から決める (``sea.runtime_llm``
+    の LLM ノードは ``pulse_context.execution_model_tier``、スルースは標準 tier の
+    解決値との一致)。ここに来るのは標準 tier と判定された呼び出しだけで、
+    **来たら数える**。
 
-    完了時のモデル名 (usage.model) を、いまの ``persona.model`` と照らし合わせる
-    防御は置かない — 返答は開始時の標準モデルで完走する (ReplyModelBinding) ので、
-    返答の途中でモデル設定が変わると、正当な標準呼び出しの通知が捨てられて
-    「最後の標準呼び出しから T 分」が外れる (2026-10-12 Codex 敵対レビュー 段 3
-    3 巡目 medium)。tier は呼び出し時に確定した印が持つ。``usage`` は受け取るが
-    判定には使わない (呼び口の形を保つため)。押し直しの実体は AutonomyManager で、
-    時刻は予約の有無に関係なく記録し、予約が現に有るときだけ動かす (ライフ外では
-    生やさない)。失敗は握る — LLM の呼び出し後の後処理を止めない。
+    **使用量 (usage) とは独立** — usage を返さないプロバイダの成功した生成も
+    数える (2026-10-12 Codex 敵対レビュー 段 3 4 巡目 medium: 通知が usage の
+    記録の後ろにあり、usage の無い成功が「最後の標準呼び出し」から漏れていた)。
+    呼び手は生成の成功ごとに一度だけ :meth:`SessionLifecycle.notify_standard_call`
+    を呼ぶ (anchor の touch は通知しない — 二重に数えないため)。
+
+    完了時のモデル名を、いまの ``persona.model`` と照らし合わせる防御は置かない
+    — 返答は開始時の標準モデルで完走する (ReplyModelBinding) ので、返答の途中で
+    モデル設定が変わると、正当な標準呼び出しの通知が捨てられて「最後の標準
+    呼び出しから T 分」が外れる (2026-10-12 Codex 敵対レビュー 段 3 3 巡目
+    medium)。押し直しの実体は AutonomyManager で、時刻は予約の有無に関係なく
+    記録し、予約が現に有るときだけ動かす (ライフ外では生やさない)。失敗は握る
+    — LLM の呼び出し後の後処理を止めない。
     """
-    del usage  # 判定に使わない (上の docstring)
+    if persona is None:
+        return
     am = _autonomy_manager_of(manager, getattr(persona, "persona_id", None))
     if am is None:
         return
@@ -1816,10 +1822,28 @@ class SessionLifecycle:
             return int(stored)
         return self.get_anchor_validity_seconds(model_key, persona_id)
 
+    def notify_standard_call(self, persona) -> None:
+        """本人の標準 tier の生成が成功した — 「最後の標準呼び出し」に数える。
+
+        ティックの予約を「最後の標準呼び出し + T」へ押し直す (v0.4 計画 段 3、
+        決定 10 — 実体は :func:`_notify_tick_of_standard_call`)。**呼び出し元が実行
+        tier から決めて、生成の成功ごとに一度だけ呼ぶ** — 標準 tier (軽量でない)
+        の本人の生成だけ。分からない呼び出しは呼ばない側へ倒す (数え損ねは次の
+        標準呼び出しが拾うが、誤って数えるとティックを永遠に先送りしうる)。
+        **keep-alive の保温は呼ばない** — 保温を数えると、T をキャッシュ寿命より
+        長くした設定で「保温がティックを永遠に先送りする」組が生まれる (C6)。
+
+        usage・anchor の有無・キャッシュの当たり外れとは独立 — 呼び出しが成功した
+        事実だけで数える (4 巡目 medium: usage を返さないプロバイダの成功が漏れて
+        いた)。anchor の touch (:meth:`touch_anchor_after_llm_call`) は usage が
+        要るので別の口。呼び手は通知を touch より**先**に行う — touch が張る
+        保温の判定 (:meth:`schedule_cache_ttl_pulse`) が押し直し後のティックを読む。
+        """
+        _notify_tick_of_standard_call(getattr(self, "manager", None), persona)
+
     def touch_anchor_after_llm_call(
         self, persona, usage, anchor_id: Optional[str] = None,
         only_if_anchor_unchanged: bool = False,
-        counts_as_standard_call: bool = False,
     ) -> None:
         """LLM 呼び出し成功後に session_anchor 行の updated_at を touch する (Phase 4-e)。
 
@@ -1862,20 +1886,12 @@ class SessionLifecycle:
         「別 anchor の既存行」で誤棄却される。書き込みが棄却されたら見張り
         予約も更新しない (stale touch が正当な予約を後ろへずらさないため)。
 
-        ``counts_as_standard_call`` (v0.4 計画 段 3、決定 10): この成功した呼び出しを
-        「最後の標準呼び出し」として数え、ティックの予約を押し直すか
-        (:func:`_notify_tick_of_standard_call`)。**呼び出し元が実行 tier から決めて
-        渡す** — 標準 tier (軽量でない) の本人の生成だけが True。既定は False
-        (分からない呼び出しは数えない側へ倒す — 数え損ねは次の標準呼び出しが
-        拾うが、誤って数えるとティックを永遠に先送りしうる)。**keep-alive の
-        保温は False** — 保温を数えると、T をキャッシュ寿命より長くした設定で
-        「保温がティックを永遠に先送りする」組が生まれる (C6)。押し直しは anchor の
-        有無・キャッシュの当たり外れに関係なく、呼び出しが成功した事実だけで行う。
+        「最後の標準呼び出し」の通知 (ティックの押し直し) はここではしない —
+        usage を返さない成功も数えるため、呼び手が :meth:`notify_standard_call` を
+        別に (この touch より先に) 呼ぶ (v0.4 計画 段 3、4 巡目 medium)。
         """
         if persona is None or usage is None:
             return
-        if counts_as_standard_call:
-            _notify_tick_of_standard_call(getattr(self, "manager", None), persona, usage)
         if not anchor_id:
             return
         persona_model = getattr(persona, "model", None)
@@ -2057,10 +2073,15 @@ class SessionLifecycle:
         # 早すぎる — どちらにしてもティックの方が先に温める)。
         # ティックが温めるのは標準モデルの Session (persona.model) だけなので、
         # 抑制もその model の予約に限る。
+        # 消す相手は「ティックの時刻を読む前に有った保温の予約」だけ (札の CAS)
+        # — 読んでから消すまでの間に、並行する標準呼び出しがティックを失効の後ろへ
+        # 押し直し、その touch が必要な保温を張り直していたら、それは消さない
+        # (2026-10-12 Codex 敵対レビュー 段 3 4 巡目 medium、TOCTOU)。
         if str(model_key) == str(getattr(persona, "model", "") or ""):
+            stale_token = scheduler.token_of(key)
             tick_at = _tick_fire_at(manager, persona_id)
             if tick_at is not None and tick_at < now + timedelta(seconds=ttl_seconds):
-                scheduler.cancel(key)
+                scheduler.cancel_if_token(key, stale_token)
                 LOGGER.debug(
                     "[metabolism] cache TTL keep-alive not scheduled: the tick at %s "
                     "warms the cache before it expires (persona=%s model=%s ttl=%ds)",
@@ -2098,7 +2119,9 @@ class SessionLifecycle:
         - 次のティックが失効より前なら新しく張らず、**既存の keep-alive の予約が
           あれば消す** (次のティックが温める — :meth:`schedule_cache_ttl_pulse` の
           抑制と同じ向き。消さないと、ティックで間に合うのに保温が先に課金される
-          組が残る。2026-10-12 Codex 敵対レビュー 段 3 3 巡目 medium)
+          組が残る。2026-10-12 Codex 敵対レビュー 段 3 3 巡目 medium)。消すのは
+          判定の前に札を読んだ予約だけで、判定の間に張り直された新しい予約は
+          残す (4 巡目 medium)
         - それ以外は「キャッシュ寿命の threshold_ratio 分が残る時刻」に予約する
           (過ぎていれば今すぐ)。**生きている予約は上書きしない**
           (``schedule_if_absent`` — 後から touch された予約の方が正しい時刻を持つ)
@@ -2141,6 +2164,13 @@ class SessionLifecycle:
         keep_cache_alive, threshold_ratio = _keepalive_settings(meta_layer, persona)
         if not keep_cache_alive:
             return False
+        key = f"ttl:{persona_id}:{model_key}"
+        # 判定 (anchor の寿命とティックの時刻を読む) の**前**に、いまの保温の
+        # 予約の札を読む。下で消すのはその予約だけ — 判定の間に標準呼び出しが
+        # ティックを失効の後ろへ押し直し、その touch が新しい保温を張っていたら、
+        # 札が違うので消さない (2026-10-12 Codex 敵対レビュー 段 3 4 巡目 medium、
+        # TOCTOU)。
+        stale_token = scheduler.token_of(key)
         entry = self.load_anchor_entry(persona_id, model_key)
         if not entry or not entry.get("updated_at"):
             return False
@@ -2159,9 +2189,8 @@ class SessionLifecycle:
         now = clock.now()
         expires_at = now + remaining
         tick_at = _tick_fire_at(manager, persona_id)
-        key = f"ttl:{persona_id}:{model_key}"
         if tick_at is not None and tick_at < expires_at:
-            if scheduler.cancel(key):
+            if scheduler.cancel_if_token(key, stale_token):
                 LOGGER.info(
                     "[keepalive] cancelled the keep-alive: the tick at %s warms the "
                     "cache before it expires at %s (persona=%s model=%s)",
@@ -2174,7 +2203,7 @@ class SessionLifecycle:
             fire_at=fire_at,
             callback=_keepalive_callback(self, persona_id, model_key),
             key=key,
-        )
+        ) is not None
         if armed:
             LOGGER.info(
                 "[keepalive] re-armed after a tick that did not warm the cache: "

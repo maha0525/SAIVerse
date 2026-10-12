@@ -482,6 +482,7 @@ def complete_entry(
     *,
     artifact_ref: Optional[str] = None,
     outcome: Optional[str] = None,
+    expected_revision: Any = _UNSET,
 ) -> Dict[str, Any]:
     """一件を完了 (done) にする。
 
@@ -492,9 +493,24 @@ def complete_entry(
     接地をすり抜けさせない。str 以外 (True や 123) も "True"/"123" の顔で
     証跡ガードを通過させない (暗黙 str() 変換なし、TaskBookError)。
     保存されるのは strip 済みの文字列。
+
+    ``expected_revision`` を与えると、行の読み直しではなく**その値**を楽観ロック
+    (:func:`_guarded_transition` の WHERE) に使う — 「読んだ時点の姿」に対して
+    閉じる口。読んだ後に中身や期限が書き換えられていれば revision mismatch の
+    TaskBookError になり、閉じない。用途はティックが引き当てたシステムタスクの
+    済化 — 引き当て後に編集された一件を、古い内容を実行したティックが済に
+    しない (2026-10-12 Codex 敵対レビュー 段 3 4 巡目 high)。省略は従来どおり
+    読み直した現在値で CAS する。None は「REVISION が NULL の行 (未 backfill)」
+    という正当な期待値なので、省略の印は None ではなく番兵 (``_UNSET``)。
     """
     _validate_id("persona_id", persona_id)
     _validate_id("task_id", task_id)
+    if expected_revision is not _UNSET and expected_revision is not None and (
+        isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
+    ):
+        raise TaskBookError(
+            f"expected_revision must be an int or None: {expected_revision!r}"
+        )
     artifact_ref = _strip_or_none("artifact_ref", artifact_ref)
     outcome = _strip_or_none("outcome", outcome)
     db = manager.SessionLocal()
@@ -515,7 +531,7 @@ def complete_entry(
                 TaskBookEntry.OUTCOME: outcome,
                 TaskBookEntry.CLOSED_AT: _now_epoch(),
             },
-            entry.REVISION,
+            entry.REVISION if expected_revision is _UNSET else expected_revision,
         )
         return _reload_dict(db, persona_id, task_id)
     finally:

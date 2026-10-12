@@ -3570,6 +3570,23 @@ def _call_sluice_llm(
         **runtime._get_cache_kwargs(persona_id),
     )
 
+    # 「最後の標準呼び出し」の通知 — 標準モデルの Session で、標準モデルのまま
+    # 生成した呼び出しだけを数える。軽量 Session の整理や構造化出力の都合で
+    # 軽量モデルへ差し替わった呼び出しは数えない (v0.4 計画 決定 10、
+    # 2026-10-12 Codex 敵対レビュー 段 3 1 巡目 medium)。usage の有無に関係なく
+    # 生成の成功で一度だけ (4 巡目 medium — usage を返さないプロバイダの成功が
+    # 漏れていた)。touch より先 — touch が張る保温の判定が押し直し後のティックを
+    # 読む。失敗は握る。
+    notify_standard_call = getattr(lifecycle, "notify_standard_call", None)
+    if execution_context.model_key == standard_model_key and callable(notify_standard_call):
+        try:
+            notify_standard_call(persona)
+        except Exception:
+            LOGGER.warning(
+                "[sluice] failed to count a standard call (persona=%s)",
+                persona_id, exc_info=True,
+            )
+
     # usage 記録 + anchor touch (keepalive の後処理と同じ)。
     usage = llm_client.consume_usage() if hasattr(llm_client, "consume_usage") else None
     if usage is not None:
@@ -3591,15 +3608,8 @@ def _call_sluice_llm(
         except Exception:
             LOGGER.warning("[sluice] usage tracking failed (persona=%s)", persona_id, exc_info=True)
         try:
-            # 標準モデルの Session で、標準モデルのまま生成した呼び出しだけを
-            # 「最後の標準呼び出し」に数える — 軽量 Session の整理や構造化出力の
-            # 都合で軽量モデルへ差し替わった呼び出しは数えない (v0.4 計画
-            # 決定 10、2026-10-12 Codex 敵対レビュー 段 3 1 巡目 medium)。
             lifecycle.touch_anchor_after_llm_call(
                 persona, usage, anchor_id=context_meta.get("prefix_anchor_id"),
-                counts_as_standard_call=(
-                    execution_context.model_key == standard_model_key
-                ),
             )
         except Exception:
             LOGGER.warning("[sluice] anchor touch failed (persona=%s)", persona_id, exc_info=True)

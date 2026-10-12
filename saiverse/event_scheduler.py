@@ -49,6 +49,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Dict, Optional
 
+#: 予約の札 — 登録した予約一件ごとに一意な整数 (1 始まり、真偽値として常に真)。
+#: :meth:`EventScheduler.schedule` 系が返し、:meth:`EventScheduler.cancel_if_token`
+#: が「自分が張った予約だけ」を見分けるのに使う。発火時刻は予約の同一性に
+#: ならない — 同じ時刻に張り直された別の予約と取り違える (ABA)。
+ReservationToken = int
+
 from saiverse import clock
 
 LOGGER = logging.getLogger(__name__)
@@ -60,6 +66,7 @@ class _Entry:
 
     fire_at_ts (epoch float) で大小比較する。同時刻は seq で安定化。
     callback と key は比較対象から除外 (dataclass の order=True 用に compare=False)。
+    ``seq`` は予約の札 (:data:`ReservationToken`) を兼ねる — 登録ごとに一意。
     """
     fire_at_ts: float
     seq: int
@@ -104,8 +111,9 @@ class EventScheduler:
         self._cond = threading.Condition(self._lock)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        # heap 内エントリの順序を安定化させるための単調増加カウンタ
-        self._seq_counter = itertools.count()
+        # heap 内エントリの順序を安定化させるための単調増加カウンタ。予約の札
+        # (ReservationToken) を兼ねるので 1 始まり (札 0 が偽として読まれないため)。
+        self._seq_counter = itertools.count(1)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -147,7 +155,7 @@ class EventScheduler:
         fire_at: datetime,
         callback: Callable[[], None],
         key: str,
-    ) -> bool:
+    ) -> Optional[ReservationToken]:
         """有効な予約が **無いときだけ** 登録する (既にあれば何もしない)。
 
         :meth:`schedule` との違いは上書きしないことだけで、判定と登録を同じロック
@@ -157,7 +165,8 @@ class EventScheduler:
         あって、現に生きている予約を置き換える仕事ではない。
 
         Returns:
-            登録したら True、既存の有効な予約があって何もしなかったら False。
+            登録したらその予約の札 (真)、既存の有効な予約があって何もしなかったら
+            None。
         """
         fire_ts = fire_at.timestamp()
         with self._cond:
@@ -167,7 +176,7 @@ class EventScheduler:
                     "[event_scheduler] schedule_if_absent key=%s skipped "
                     "(already armed)", key,
                 )
-                return False
+                return None
 
             entry = _Entry(
                 fire_at_ts=fire_ts,
@@ -183,14 +192,14 @@ class EventScheduler:
                 fire_ts - clock.now().timestamp(),
             )
             self._cond.notify()
-            return True
+            return entry.seq
 
     def schedule_if_present(
         self,
         fire_at: datetime,
         callback: Callable[[], None],
         key: str,
-    ) -> bool:
+    ) -> Optional[ReservationToken]:
         """有効な予約が **あるときだけ** 時刻を置き換える (無ければ何もしない)。
 
         :meth:`schedule_if_absent` の対。判定と置き換えを同じロック区間で行う —
@@ -199,14 +208,18 @@ class EventScheduler:
         いる予約だけを後ろへずらす」操作 (例: ティックの予約を最後の標準呼び出し
         から T 分へ押し直す — 予約が無い = ライフ外では生やさない)。
 
+        置き換えた予約は新しい札を持つ (古い札の持ち主の :meth:`cancel_if_token`
+        は、置き換え後の予約を消さない)。
+
         Returns:
-            置き換えたら True、有効な予約が無くて何もしなかったら False。
+            置き換えたら新しい予約の札 (真)、有効な予約が無くて何もしなかったら
+            None。
         """
         fire_ts = fire_at.timestamp()
         with self._cond:
             existing = self._entries_by_key.get(key)
             if existing is None or existing.cancelled:
-                return False
+                return None
             existing.cancelled = True
             entry = _Entry(
                 fire_at_ts=fire_ts,
@@ -222,7 +235,7 @@ class EventScheduler:
                 fire_ts - clock.now().timestamp(),
             )
             self._cond.notify()
-            return True
+            return entry.seq
 
     def fire_time_of(self, key: str) -> Optional[datetime]:
         """指定 key の有効な予約の発火時刻 (無ければ None)。"""
@@ -232,12 +245,25 @@ class EventScheduler:
                 return None
             return datetime.fromtimestamp(entry.fire_at_ts)
 
+    def token_of(self, key: str) -> Optional[ReservationToken]:
+        """指定 key の有効な予約の札 (無ければ None)。
+
+        「読んでから判断し、判断の後で消す」呼び手が、判断の**前**に読んでおく値。
+        消すときは :meth:`cancel_if_token` にこの札を渡す — 判断の間に同じ key へ
+        張り直された新しい予約は札が違うので消えない。
+        """
+        with self._cond:
+            entry = self._entries_by_key.get(key)
+            if entry is None or entry.cancelled:
+                return None
+            return entry.seq
+
     def schedule(
         self,
         fire_at: datetime,
         callback: Callable[[], None],
         key: str,
-    ) -> None:
+    ) -> ReservationToken:
         """指定時刻に callback を発火する予約を入れる。
 
         Args:
@@ -251,6 +277,10 @@ class EventScheduler:
             key: 予約識別子。同じ key で再 schedule すると古い予約は cancel される。
                 慣習: ``"<source>:<id>"`` (例 ``"ttl:air_city_a"``)。
                 **既存を残したい場合は** :meth:`schedule_if_absent` を使う。
+
+        Returns:
+            登録した予約の札 (:meth:`cancel_if_token` で自分の予約だけを消すため)。
+            使わない呼び手は捨ててよい。
         """
         fire_ts = fire_at.timestamp()
         with self._cond:
@@ -277,6 +307,7 @@ class EventScheduler:
 
             # heap の先頭が変わった可能性があるので dispatch ループを起こす。
             self._cond.notify()
+            return entry.seq
 
     def cancel(self, key: str) -> bool:
         """予約をキャンセルする。
@@ -295,34 +326,40 @@ class EventScheduler:
             # 起きてからスキップして次のエントリを見るだけなので問題なし。
             return True
 
-    def cancel_if_fire_at(self, key: str, expected_fire_at: datetime) -> bool:
-        """有効な予約の発火時刻が ``expected_fire_at`` と一致するときだけ消す (CAS)。
+    def cancel_if_token(self, key: str, token: Optional[ReservationToken]) -> bool:
+        """有効な予約の札が ``token`` と一致するときだけ消す (CAS)。
 
         :meth:`cancel` との違いは、判定と取り消しを同じロック区間で行い、
-        **自分が張った予約だけ**を消すこと。用途は発火したワーカーの後始末 —
-        ワーカーが「この予約はもう要らない」と判断してから消すまでの間に、
-        別の経路 (自律の再開の再同期・ライフ開始の節目) が同じ key に新しい予約を
-        張っていたら、それは消さない (2026-10-12 Codex 敵対レビュー 段 3 3 巡目
-        medium — 古い拒否の後始末が、再開後の新しいティックの予約を消していた)。
+        **札の持ち主が張った (または判断の前に読んだ) 予約だけ**を消すこと。
+        用途は「読んでから判断し、判断の後で消す」後始末 — 発火したワーカーが
+        自分の予約を片付ける・保温の抑制が古い保温の予約を消す。判断の間に別の
+        経路 (自律の再開の再同期・ライフ開始の節目・標準呼び出しの張り直し) が
+        同じ key へ新しい予約を張っていたら、札が違うので消さない (2026-10-12
+        Codex 敵対レビュー 段 3 3 巡目 medium / 4 巡目 medium)。
+
+        発火時刻の一致では見分けない — 同じ時刻に張り直された別の予約 (仮想時計を
+        止めたままの停止→再開など) と取り違える (ABA、4 巡目 medium)。
         「全部消す」が正しい場面 (停止・ライフ終了の節目) は :meth:`cancel` を使う。
 
         Returns:
-            一致する有効な予約があって消したら True。無い・時刻が違うなら False。
+            札の一致する有効な予約があって消したら True。無い・札が違う・
+            ``token`` が None なら False。
         """
-        expected_ts = expected_fire_at.timestamp()
+        if token is None:
+            return False
         with self._cond:
             entry = self._entries_by_key.get(key)
             if entry is None or entry.cancelled:
                 return False
-            if abs(entry.fire_at_ts - expected_ts) > 1e-6:
+            if entry.seq != token:
                 LOGGER.debug(
-                    "[event_scheduler] cancel_if_fire_at key=%s skipped "
-                    "(armed at a different time)", key,
+                    "[event_scheduler] cancel_if_token key=%s skipped "
+                    "(re-armed since the token was taken)", key,
                 )
                 return False
             self._entries_by_key.pop(key, None)
             entry.cancelled = True
-            LOGGER.debug("[event_scheduler] cancel_if_fire_at key=%s", key)
+            LOGGER.debug("[event_scheduler] cancel_if_token key=%s", key)
             return True
 
     def cancel_prefix(self, prefix: str) -> list[str]:
@@ -507,7 +544,9 @@ class EventScheduler:
         """ワーカーを起こせなかった entry を同じ key で少し後へ積み直す。
 
         その key に既に新しい有効な予約があれば積み直さない — 取り出した後に
-        誰かが張り直した予約の方が新しい (古い発火で上書きしない)。積み直し自体が
+        誰かが張り直した予約の方が新しい (古い発火で上書きしない)。積み直しは
+        同じ予約の再試行なので札 (``seq``) を引き継ぐ — 札の持ち主の
+        :meth:`cancel_if_token` が積み直し後も効く。積み直し自体が
         失敗したときだけ、最後の手段として諦めて ERROR を残す (その回の予約は
         消える — 周期の呼び手の再開に委ねる)。
         """
@@ -522,7 +561,7 @@ class EventScheduler:
                     return
                 retry = _Entry(
                     fire_at_ts=clock.now().timestamp() + self.WORKER_START_RETRY_SECONDS,
-                    seq=next(self._seq_counter),
+                    seq=entry.seq,
                     key=entry.key,
                     callback=entry.callback,
                 )

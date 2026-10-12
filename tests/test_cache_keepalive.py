@@ -25,16 +25,35 @@ from sea.runtime import SEARuntime
 
 
 class FakeScheduler:
+    """EventScheduler の予約の口だけを持つ偽物 (予約ごとに札を振る)。"""
+
     def __init__(self):
         self.scheduled: Dict[str, Any] = {}
         self.cancelled: List[str] = []
+        self._last_token = 0
 
     def schedule(self, fire_at, callback, key):
-        self.scheduled[key] = {"fire_at": fire_at, "callback": callback}
+        self._last_token += 1
+        self.scheduled[key] = {
+            "fire_at": fire_at, "callback": callback, "token": self._last_token,
+        }
+        return self._last_token
 
     def cancel(self, key):
         self.cancelled.append(key)
         return self.scheduled.pop(key, None) is not None
+
+    def token_of(self, key):
+        entry = self.scheduled.get(key)
+        return entry.get("token") if entry else None
+
+    def cancel_if_token(self, key, token):
+        entry = self.scheduled.get(key)
+        if token is None or entry is None or entry.get("token") != token:
+            return False
+        self.cancelled.append(key)
+        del self.scheduled[key]
+        return True
 
 
 class FakeMetaLayer:
@@ -367,30 +386,24 @@ def _usage(model):
     )
 
 
-def test_a_standard_model_call_pushes_the_tick_and_others_do_not():
-    """呼び出し元が「標準 tier の本人の生成」と印を付けた (counts_as_standard_call
-    =True) 成功した呼び出しだけがティックの予約を押し直す。印の無い呼び出し
-    (既定 False — 分からない呼び出しは数えない)・keep-alive の保温は押さない。
-    判定は印だけで、完了時のモデル名 (usage.model) と今の persona.model の照合は
-    しない (2026-10-12 Codex 敵対レビュー 段 3 3 巡目 medium)。anchor の有無には
-    依らない。"""
+def test_a_standard_model_call_pushes_the_tick_and_the_touch_does_not():
+    """「最後の標準呼び出し」の通知は ``notify_standard_call`` の一つの口だけ —
+    anchor の touch は (usage・モデルに関係なく) 通知しない。通知と touch を
+    分けたのは、usage を返さない成功も数えるため・usage がある回に二重に
+    数えないため (2026-10-12 Codex 敵対レビュー 段 3 4 巡目 medium)。判定は
+    呼び出し元の印だけで、完了時のモデル名と今の persona.model の照合はしない
+    (3 巡目 medium)。anchor の有無には依らない。"""
     persona = _persona(lightweight_model="light-x")
     runtime, manager = _make_runtime(persona)
     am = FakeTickAutonomy()
     manager._autonomy_managers = {"air": am}
     lc = runtime.session_lifecycle
 
-    lc.touch_anchor_after_llm_call(
-        persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=True,
-    )
+    lc.notify_standard_call(persona)
     assert am.notified == 1
     lc.touch_anchor_after_llm_call(persona, _usage("claude-x"), anchor_id=None)
-    lc.touch_anchor_after_llm_call(
-        persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=False,
-    )
-    lc.touch_anchor_after_llm_call(
-        persona, _usage("light-x"), anchor_id=None, counts_as_standard_call=False,
-    )
+    lc.touch_anchor_after_llm_call(persona, _usage("light-x"), anchor_id=None)
+    lc.touch_anchor_after_llm_call(persona, _usage("claude-x"), anchor_id="a1")
     assert am.notified == 1
 
 
@@ -407,28 +420,24 @@ def test_a_standard_call_counts_even_if_the_model_setting_changed_mid_reply():
     lc = runtime.session_lifecycle
 
     persona.model = "claude-y"  # 返答の途中でモデル設定が変わった
-    lc.touch_anchor_after_llm_call(
-        persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=True,
-    )
+    lc.notify_standard_call(persona)
     assert am.notified == 1
 
 
 def test_a_lightweight_call_with_the_standard_model_name_does_not_push_the_tick():
     """⑧ 標準と軽量に同じモデルを設定したペルソナ: 呼び出し元が軽量 tier と
-    判定した呼び出し (counts_as_standard_call=False) は、モデル名が標準と一致
-    しても押し直さない (2026-10-12 Codex 敵対レビュー 段 3 1 巡目 medium)。"""
+    判定した呼び出し (標準 tier の印なし) は、モデル名が標準と一致しても
+    押し直さない (2026-10-12 Codex 敵対レビュー 段 3 1 巡目 medium)。"""
+    from sea.runtime_llm import _STANDARD_TIER_CALL_KEY, _notify_standard_call_if_marked
+
     persona = _persona(model="same-model", lightweight_model="same-model")
     runtime, manager = _make_runtime(persona)
     am = FakeTickAutonomy()
     manager._autonomy_managers = {"air": am}
-    lc = runtime.session_lifecycle
-    lc.touch_anchor_after_llm_call(
-        persona, _usage("same-model"), anchor_id=None, counts_as_standard_call=False,
-    )
+    _notify_standard_call_if_marked(runtime, persona, {})
+    _notify_standard_call_if_marked(runtime, persona, {_STANDARD_TIER_CALL_KEY: False})
     assert am.notified == 0
-    lc.touch_anchor_after_llm_call(
-        persona, _usage("same-model"), anchor_id=None, counts_as_standard_call=True,
-    )
+    _notify_standard_call_if_marked(runtime, persona, {_STANDARD_TIER_CALL_KEY: True})
     assert am.notified == 1
 
 
@@ -449,16 +458,12 @@ def test_a_standard_call_moves_a_real_tick_reservation_only_when_it_exists():
     try:
         am.start()
         key = tick_reservation_key("air")
-        runtime.session_lifecycle.touch_anchor_after_llm_call(
-            persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=True,
-        )
+        runtime.session_lifecycle.notify_standard_call(persona)
         assert scheduler.fire_time_of(key) is None  # 生やさない
 
         scheduler.schedule(fire_at=now + timedelta(minutes=5), callback=lambda: None, key=key)
         clock.advance_to(now + timedelta(minutes=2))
-        runtime.session_lifecycle.touch_anchor_after_llm_call(
-            persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=True,
-        )
+        runtime.session_lifecycle.notify_standard_call(persona)
         # T は既定の 30 分 (この最小の manager には設定もライフも無い)
         assert scheduler.fire_time_of(key) == now + timedelta(minutes=32)
     finally:
@@ -475,11 +480,14 @@ def test_keepalive_warm_is_not_counted_as_a_standard_call(_mock_cache):
     client = FakeLLMClient()
     _wire_keepalive(runtime, persona, client)
     seen: List[Dict[str, Any]] = []
+    counted: List[Any] = []
     runtime.session_lifecycle.touch_anchor_after_llm_call = (
         lambda p, usage, anchor_id=None, **kwargs: seen.append(kwargs)
     )
+    runtime.session_lifecycle.notify_standard_call = lambda p: counted.append(p)
     assert runtime.run_cache_keepalive("air") is True
-    assert seen and seen[0].get("counts_as_standard_call") is False
+    assert seen  # 保温は touch する (連鎖の再予約)
+    assert counted == []  # が、「最後の標準呼び出し」には数えない
 
 
 def test_keepalive_is_not_reserved_when_the_tick_warms_the_cache_first():
@@ -497,7 +505,7 @@ def test_keepalive_is_not_reserved_when_the_tick_warms_the_cache_first():
     clock.enable_virtual(now)
     try:
         # ティックが 10 分後 (TTL 20 分より前) → keep-alive は予約しない
-        scheduler.scheduled["ttl:air:claude-x"] = {"fire_at": now, "callback": None}
+        scheduler.schedule(fire_at=now, callback=None, key="ttl:air:claude-x")
         am.tick_at = now + timedelta(minutes=10)
         runtime.session_lifecycle.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
         assert "ttl:air:claude-x" not in scheduler.scheduled
@@ -608,6 +616,84 @@ def test_a_tick_in_time_cancels_an_existing_keepalive_reservation(_mock_cache):
         assert scheduler.fire_time_of("ttl:air:claude-x") is None
     finally:
         clock.disable_virtual()
+
+
+class _RaceTickAutonomy(FakeTickAutonomy):
+    """ティックの時刻を読まれた瞬間に、並行する標準呼び出しが割り込む偽物。
+
+    割り込みは「ティックを失効の後ろへ押し直し、その touch が新しい保温を
+    張り直した」並び。読んだ側には割り込み前の (古い) ティックの時刻を返す。
+    """
+
+    def __init__(self, tick_at, on_read):
+        super().__init__(tick_at=tick_at)
+        self._on_read = on_read
+
+    def tick_fire_at(self):
+        stale = self.tick_at
+        if self._on_read is not None:
+            on_read, self._on_read = self._on_read, None
+            on_read()
+        return stale
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_reconcile_does_not_cancel_a_keepalive_rearmed_during_its_decision(_mock_cache):
+    """② 段 3 4 巡目 medium (TOCTOU): 再照合がティックの時刻を読んでから保温を
+    消すまでの間に、標準呼び出しがティックを失効の後ろへ押し直して新しい保温を
+    張った。古い判断 (ティックが失効より前) で、その新しい保温を消さない —
+    消すのは判定の前に札を読んだ古い予約だけ。"""
+    from saiverse import clock
+
+    runtime, manager, scheduler, _am, now = _reconcile_setup(tick_at_minutes=15)
+    try:
+        scheduler.schedule(
+            fire_at=now + timedelta(minutes=13), callback=lambda: None,
+            key="ttl:air:claude-x",
+        )
+        fresh = now + timedelta(minutes=14)
+
+        def _standard_call_rearms_the_keepalive():
+            scheduler.schedule(fire_at=fresh, callback=lambda: None, key="ttl:air:claude-x")
+
+        manager._autonomy_managers = {"air": _RaceTickAutonomy(
+            now + timedelta(minutes=15), _standard_call_rearms_the_keepalive,
+        )}
+        assert runtime.session_lifecycle.reconcile_keepalive_after_tick("air") is False
+        assert scheduler.fire_time_of("ttl:air:claude-x") == fresh  # 新しい保温は残る
+    finally:
+        clock.disable_virtual()
+
+
+def test_ttl_pulse_suppression_does_not_cancel_a_keepalive_rearmed_meanwhile():
+    """② の同族 (schedule_cache_ttl_pulse の抑制側): ティックの時刻を読んでから
+    古い保温を消すまでの間に、並行する touch が張り直した新しい保温は消さない。"""
+    from saiverse import clock
+
+    persona = _persona()
+    scheduler = FakeScheduler()
+    runtime, manager = _make_runtime(persona, scheduler=scheduler)
+    runtime.session_lifecycle.get_anchor_validity_seconds = lambda model, persona_id=None: 1200
+    now = datetime(2020, 1, 1, 12, 0, 0)
+    key = "ttl:air:claude-x"
+    scheduler.schedule(fire_at=now, callback=None, key=key)
+    fresh: List[int] = []
+
+    def _concurrent_touch_rearms_the_keepalive():
+        fresh.append(scheduler.schedule(
+            fire_at=now + timedelta(minutes=14), callback=None, key=key,
+        ))
+
+    manager._autonomy_managers = {"air": _RaceTickAutonomy(
+        now + timedelta(minutes=10), _concurrent_touch_rearms_the_keepalive,
+    )}
+    clock.enable_virtual(now)
+    try:
+        runtime.session_lifecycle.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
+    finally:
+        clock.disable_virtual()
+    assert scheduler.token_of(key) == fresh[0]  # 新しい保温は残る
+    assert key not in scheduler.cancelled
 
 
 @patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})

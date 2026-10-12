@@ -2414,13 +2414,12 @@ class SEARuntime:
             # LLM 呼び出し中に anchor 前進 (§14-2 / 退場) が起きていたら、この
             # touch は捨てられた提示ウィンドウの主張であり棄却される
             # (Codex 3〜4巡目 2026-07-30)。
-            # counts_as_standard_call=False: 保温は「最後の標準呼び出し」に数えない
-            # (v0.4 計画 段 3-4 — 数えると、T をキャッシュ寿命より長くした設定で
-            # 保温がティックを永遠に先送りする)。
+            # 保温は「最後の標準呼び出し」に数えない — notify_standard_call を
+            # 呼ばない (v0.4 計画 段 3-4 — 数えると、T をキャッシュ寿命より長く
+            # した設定で保温がティックを永遠に先送りする)。
             self.session_lifecycle.touch_anchor_after_llm_call(
                 persona, usage, anchor_id=entry.get("anchor_id"),
                 only_if_anchor_unchanged=True,
-                counts_as_standard_call=False,
             )
         LOGGER.info(
             "[keepalive] cache keep-alive completed (persona=%s model=%s "

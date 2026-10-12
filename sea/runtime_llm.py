@@ -362,6 +362,30 @@ def _counts_as_standard_call(state: Optional[dict]) -> bool:
     return isinstance(state, dict) and state.get(_STANDARD_TIER_CALL_KEY) is True
 
 
+def _notify_standard_call_if_marked(runtime, persona, state: Optional[dict]) -> None:
+    """成功した生成が標準 tier の印つきなら「最後の標準呼び出し」に数える。
+
+    生成の成功ごとに**一度だけ**、usage の有無に関係なく呼ぶ (2026-10-12 Codex
+    敵対レビュー 段 3 4 巡目 medium — 通知が usage の記録の後ろにあり、usage を
+    返さないプロバイダの成功した生成がティックの時計から漏れていた)。anchor の
+    touch は通知しないので二重には数えない。touch より**先**に呼ぶ — touch が
+    張る保温の判定が押し直し後のティックを読む。失敗は握る (後処理を止めない)。
+    """
+    if not _counts_as_standard_call(state):
+        return
+    lifecycle = getattr(runtime, "session_lifecycle", None)
+    notify = getattr(lifecycle, "notify_standard_call", None)
+    if not callable(notify):
+        return
+    try:
+        notify(persona)
+    except Exception:
+        LOGGER.warning(
+            "[tick] failed to count a standard call (persona=%s)",
+            getattr(persona, "persona_id", "?"), exc_info=True,
+        )
+
+
 def _record_llm_usage(
     runtime,
     llm_client,
@@ -393,6 +417,9 @@ def _record_llm_usage(
     # 必ず通す — usage が無いときに前のコールの値が state に残ると、この生成の
     # メッセージに別のコールの数字が乗る。
     record_call_tokens(state, usage)
+    # 「最後の標準呼び出し」の通知は usage の有無に関係なく、ここで一度だけ
+    # (usage を返さないプロバイダの成功も数える — 段 3 4 巡目 medium)。
+    _notify_standard_call_if_marked(runtime, persona, state)
     if not usage:
         if debug_log:
             LOGGER.warning("[DEBUG] No usage data from LLM client")
@@ -441,7 +468,6 @@ def _record_llm_usage(
     )
     runtime.session_lifecycle.touch_anchor_after_llm_call(
         persona, usage, anchor_id=state.get("_prefix_anchor_id"),
-        counts_as_standard_call=_counts_as_standard_call(state),
     )
     return llm_usage_metadata
 
@@ -4479,6 +4505,10 @@ async def _run_spell_loop(
             # このラウンドの生成を作ったコールの三つ組 (sea/message_stamp.py)。
             # 直後の _store_memory がラウンドの発言を刻むので、ここで更新する。
             record_call_tokens(state, retry_usage)
+            # 「最後の標準呼び出し」の通知は usage の有無に関係なく一度だけ
+            # (段 3 4 巡目 medium)。touch より先 — 保温の判定が押し直し後の
+            # ティックを読む。
+            _notify_standard_call_if_marked(runtime, persona, state)
             # この retry が作るのは **次の** Beat の本文なので、使用量も次の
             # セグメントへ引き渡す (Beat ごとの帰属、契約 4)。
             pending_llm_usage = None
@@ -4511,7 +4541,6 @@ async def _run_spell_loop(
                 # anchor は call-local (state["_prefix_anchor_id"]、§3.2)。
                 runtime.session_lifecycle.touch_anchor_after_llm_call(
                     persona, retry_usage, anchor_id=state.get("_prefix_anchor_id"),
-                    counts_as_standard_call=_counts_as_standard_call(state),
                 )
                 from saiverse.model_configs import get_model_display_name
                 pending_llm_usage = {

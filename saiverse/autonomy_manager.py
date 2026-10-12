@@ -14,7 +14,8 @@ autonomous_behavior_v3.md §5) で、旧「50 分間隔の watchdog タイマー
    - 本人の標準モデルが呼ばれるたびに時刻を記録し (予約の有無に関係なく)、
      予約が有れば「最後の標準呼び出し + T」へ押し直す
      (:meth:`AutonomyManager.notify_standard_call` — 呼び口は
-     ``sea.session_lifecycle.SessionLifecycle.touch_anchor_after_llm_call``)。
+     ``sea.session_lifecycle.SessionLifecycle.notify_standard_call``。生成の
+     成功ごとに usage の有無に関係なく一度)。
      予約が無いとき (ライフ外) は生やさない
    - 発火したら、まず記録された最後の標準呼び出しに追い越されていないかを
      見て (追い越されていれば正しい期限へ張り直して見送る)、次回を
@@ -135,11 +136,15 @@ class TickAssignment:
       :data:`ASSIGNMENT_FREE`
     - ``task_id``: 引いた一件 (自由時間は None)
     - ``due_at``: 引いた一件の期限 (epoch 秒。期限なしは None)
+    - ``revision``: 引いた時点の一件の版 (task_book の REVISION)。済にするときに
+      これと一致する行だけを閉じる — 引き当て後に中身や期限が書き換えられた
+      一件を、古い内容を実行したティックが済にしない (段 3 4 巡目 high)
     """
     text: Optional[str]
     kind: str
     task_id: Optional[str] = None
     due_at: Optional[int] = None
+    revision: Optional[int] = None
 
     @property
     def is_deadline(self) -> bool:
@@ -213,6 +218,7 @@ def build_tick_assignment(
             return TickAssignment(
                 text=text, kind=ASSIGNMENT_DEADLINE,
                 task_id=nearest.get("task_id"), due_at=due_at,
+                revision=nearest.get("revision"),
             )
     system_tasks = _read(task_book.list_open_system_tasks)
     if system_tasks:
@@ -224,6 +230,7 @@ def build_tick_assignment(
             kind=ASSIGNMENT_SYSTEM,
             task_id=first.get("task_id"),
             due_at=due_at if isinstance(due_at, int) else None,
+            revision=first.get("revision"),
         )
     return TickAssignment(text=None, kind=ASSIGNMENT_FREE)
 
@@ -365,7 +372,7 @@ class AutonomyManager:
             armed = scheduler.schedule_if_absent(
                 fire_at=fire_at, callback=self._handle_tick,
                 key=tick_reservation_key(self.persona_id),
-            )
+            ) is not None
         if armed:
             self._reconcile_keepalive()
         return armed
@@ -392,8 +399,9 @@ class AutonomyManager:
         無い (ライフ外・自律 OFF) なら生やさない。ライフ外の会話でティックを生やさ
         ないため。期限はロックの中で記録の最新値から計算する — 呼び出しが前後して
         届いても、古い呼び出しの期限で新しい期限を巻き戻さない。呼び手は
-        ``SessionLifecycle.touch_anchor_after_llm_call`` (keep-alive の保温は
-        呼ばない — 保温がティックを永遠に先送りするのを防ぐ)。
+        ``SessionLifecycle.notify_standard_call`` (生成の成功ごとに usage の有無に
+        関係なく一度。keep-alive の保温は呼ばない — 保温がティックを永遠に
+        先送りするのを防ぐ)。
 
         Returns:
             押し直したか。
@@ -416,7 +424,7 @@ class AutonomyManager:
             fire_at = self._last_standard_call + timedelta(minutes=minutes)
             moved = scheduler.schedule_if_present(
                 fire_at=fire_at, callback=self._handle_tick, key=key,
-            )
+            ) is not None
         if moved:
             LOGGER.debug(
                 "[Autonomy:%s] tick pushed back to %s by a standard call (T=%d min)",
@@ -651,20 +659,25 @@ class AutonomyManager:
             return None
         return "in conversation" if conversation else "conversation unknown"
 
-    def _cancel_own_tick(self, armed_at: datetime) -> bool:
-        """この発火が自分で張った予約 (発火時刻 ``armed_at``) だけを消す。
+    def _cancel_own_tick(self, own_token: Optional[int]) -> bool:
+        """この発火が自分で張った予約 (札 ``own_token``) だけを消す。
 
         発火したワーカーの後始末用 (:meth:`_run_tick` のゲート・:meth:`_start_fence`)。
         「打つべきでない」と判断してから消すまでの間に、再開の再同期や節目が同じ
         key に新しい予約を張っていたら、それは残す (2026-10-12 Codex 敵対レビュー
-        段 3 3 巡目 medium)。停止 (:meth:`stop`) とライフ終了の節目
-        (:meth:`cancel_tick`) は無条件に消す — そこは「全部消す」が正しい。
+        段 3 3 巡目 medium)。見分けは予約の札 (EventScheduler の登録ごとに一意な
+        値) で行う — 発火時刻の一致では、同じ時刻に張り直された新しい予約
+        (仮想時計を止めたままの停止→再開) を取り違えて消す (4 巡目 medium、ABA)。
+        停止 (:meth:`stop`) とライフ終了の節目 (:meth:`cancel_tick`) は無条件に
+        消す — そこは「全部消す」が正しい。
         """
+        if own_token is None:
+            return False
         scheduler = self._scheduler()
         if scheduler is None:
             return False
-        cancelled = scheduler.cancel_if_fire_at(
-            tick_reservation_key(self.persona_id), armed_at,
+        cancelled = scheduler.cancel_if_token(
+            tick_reservation_key(self.persona_id), own_token,
         )
         if cancelled:
             LOGGER.info("[Autonomy:%s] tick reservation cancelled", self.persona_id)
@@ -675,7 +688,7 @@ class AutonomyManager:
         interval: timedelta,
         refusals: list,
         *,
-        armed_at: Optional[datetime] = None,
+        own_token: Optional[int] = None,
         deadline: bool = False,
     ) -> Optional[str]:
         """生成開始の直前の再検査 — ``fire_tick`` が **Beat ロックの内側**で呼ぶ。
@@ -692,8 +705,8 @@ class AutonomyManager:
         締め切りの回は会話中でも打つ (v0.4 計画 §5 段 3-5)。全停止・自律 OFF・
         ライフ終了・標準呼び出しの追い越しの検査はそのまま。
 
-        予約を消すのは、この発火が自分で張った予約 (``armed_at``) だけ
-        (:meth:`_cancel_own_tick`)。``armed_at`` が無ければ消さない。
+        予約を消すのは、この発火が自分で張った予約 (札 ``own_token``) だけ
+        (:meth:`_cancel_own_tick`)。``own_token`` が無ければ消さない。
 
         **開始済みの生成は完走する** (課金と生成の保護の既存裁定) — このフェンスは
         開始の直前までで、走り出した Pulse は止めない。
@@ -710,8 +723,8 @@ class AutonomyManager:
                 reason = "superseded by a standard call"
         if reason is None:
             return None
-        if cancel and armed_at is not None:
-            self._cancel_own_tick(armed_at)
+        if cancel and own_token is not None:
+            self._cancel_own_tick(own_token)
         refusals.append(reason)
         return reason
 
@@ -753,7 +766,9 @@ class AutonomyManager:
             else:
                 base = fired_at if last is None or last < fired_at else last
                 next_at = base + interval
-            self._schedule_locked(
+            # 張り直した予約の札 — この発火の後始末 (_cancel_own_tick) が
+            # 「自分が張った予約だけ」を見分けるのに使う。
+            own_token = self._schedule_locked(
                 tick_reservation_key(persona_id), next_at, self._handle_tick,
             )
         if superseded_until is not None:
@@ -766,13 +781,13 @@ class AutonomyManager:
             return ("skipped", "superseded by a standard call")
 
         # 2. ゲート — 会話以外 (全停止・自律 OFF・ライフ)。通らない回は何もしない。
-        #    消すのはこの発火が自分で張った予約 (next_at) だけ — ゲートの判断から
-        #    取り消しまでの間に、再開の再同期が張った新しい予約は残す (段 3
-        #    3 巡目 medium)。
+        #    消すのはこの発火が自分で張った予約 (札 own_token) だけ — ゲートの
+        #    判断から取り消しまでの間に、再開の再同期が張った新しい予約は (同じ
+        #    時刻でも) 残す (段 3 3・4 巡目 medium)。
         reason, cancel, basis = self._check_gate(fired_at, check_conversation=False)
         if reason is not None:
             if cancel:
-                self._cancel_own_tick(next_at)
+                self._cancel_own_tick(own_token)
             return ("skipped", reason)
 
         # 3. 引き当て: 締め切り → システムタスク → 自由。会話の判定より**先**に
@@ -806,7 +821,7 @@ class AutonomyManager:
         outcome = manager.fire_tick(
             persona_id, assignment.text,
             pre_generation_check=lambda: self._start_fence(
-                interval, refusals, armed_at=next_at,
+                interval, refusals, own_token=own_token,
                 deadline=assignment.is_deadline,
             ),
         )
@@ -850,8 +865,14 @@ class AutonomyManager:
         締め切りのある件は閉じない (呼び手が :attr:`TickAssignment.resolves_on_completion`
         で選ぶ — 未完なら次の空きティックが同じ件を引く、v3 §5)。
 
-        顛末 (OUTCOME) に「ティックで消化した」と残す。失敗 (並行して閉じられた
-        など) は WARN で握る — 閉じられなければ次のティックが同じ件をまた引くだけ。
+        閉じるのは**引き当てた時点の版のまま**の一件だけ (``expected_revision``
+        — 引き当て後に中身が書き換えられた・期限が付いた一件は、このティックが
+        実行したのは古い内容なので閉じない。次のティックが新しい内容で引き直す。
+        2026-10-12 Codex 敵対レビュー 段 3 4 巡目 high)。
+
+        顛末 (OUTCOME) に「ティックで消化した」と残す。失敗 (編集された・並行して
+        閉じられたなど) は WARN で握る — 閉じられなければ次のティックが同じ件を
+        また引くだけ。
         """
         from saiverse import task_book
 
@@ -859,12 +880,15 @@ class AutonomyManager:
             task_book.complete_entry(
                 self.manager, self.persona_id, assignment.task_id,
                 outcome=self.SYSTEM_TASK_TICK_OUTCOME,
+                expected_revision=assignment.revision,
             )
         except Exception:
             LOGGER.warning(
-                "[Autonomy:%s] failed to resolve the system task %s after the tick; "
-                "the next tick will draw it again",
-                self.persona_id, assignment.task_id, exc_info=True,
+                "[Autonomy:%s] did not resolve the system task %s after the tick "
+                "(edited since it was drawn at revision %s, closed concurrently, "
+                "or unwritable); the next tick will draw it again",
+                self.persona_id, assignment.task_id, assignment.revision,
+                exc_info=True,
             )
             return
         LOGGER.info(
@@ -884,13 +908,19 @@ class AutonomyManager:
             )
         return scheduler
 
-    def _schedule_locked(self, key: str, fire_at: datetime, callback) -> None:
-        """``self._lock`` を持った状態で予約を張る (上書き)。"""
+    def _schedule_locked(self, key: str, fire_at: datetime, callback) -> Optional[int]:
+        """``self._lock`` を持った状態で予約を張る (上書き)。
+
+        Returns:
+            張った予約の札 (EventScheduler の ``ReservationToken``)。スケジューラが
+            無ければ None。
+        """
         scheduler = self._scheduler()
         if scheduler is None:
-            return
-        scheduler.schedule(fire_at=fire_at, callback=callback, key=key)
+            return None
+        token = scheduler.schedule(fire_at=fire_at, callback=callback, key=key)
         LOGGER.debug(
             "[Autonomy:%s] scheduled %s at %s",
             self.persona_id, key, fire_at.isoformat(timespec="seconds"),
         )
+        return token
