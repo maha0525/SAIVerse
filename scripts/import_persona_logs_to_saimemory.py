@@ -369,10 +369,17 @@ def migrate_persona(
 
     elapsed = time.monotonic() - started_at
 
-    from sai_memory.memory.storage import count_messages, count_message_embeddings
+    from sai_memory.memory.storage import (
+        count_deferred_message_embeddings,
+        count_messages,
+        count_message_embeddings,
+    )
     with adapter._db_lock:  # type: ignore[attr-defined]
         total_messages = count_messages(adapter.conn)
-        total_embedded = count_message_embeddings(adapter.conn)
+        # distinct message_id の数は「空のベクトル行」(後回し・失敗の印) も
+        # 含んでしまうので、その分を差し引いて実際に想起に使える数にする。
+        total_deferred = count_deferred_message_embeddings(adapter.conn)
+        total_embedded = count_message_embeddings(adapter.conn) - total_deferred
         total_nonempty = adapter.conn.execute(
             "SELECT COUNT(*) FROM messages WHERE TRIM(COALESCE(content, '')) != ''"
         ).fetchone()[0]
@@ -383,6 +390,7 @@ def migrate_persona(
         total_messages=total_messages,
         total_nonempty=total_nonempty,
         total_embedded=total_embedded,
+        total_deferred=total_deferred,
         backfill_result=backfill_result,
         elapsed_seconds=elapsed,
         embed_available=adapter.can_embed(),
@@ -396,6 +404,7 @@ def _print_import_summary(
     total_messages: int,
     total_nonempty: int,
     total_embedded: int,
+    total_deferred: int,
     backfill_result: dict,
     elapsed_seconds: float,
     embed_available: bool,
@@ -426,12 +435,13 @@ def _print_import_summary(
             "を確認したうえで、このスクリプトを再実行するか "
             "scripts/embed_recall_sources.py で埋め込みを埋めてください。"
         )
-    elif total_embedded < total_nonempty:
+    elif total_embedded < total_nonempty or total_deferred > 0:
+        shortfall = max(total_nonempty - total_embedded, total_deferred)
         print(
             "注意: 一部のメッセージで埋め込みが完了していません "
-            f"(不足 {total_nonempty - total_embedded} 件)。"
-            "バックフィルを再実行するか scripts/embed_recall_sources.py で"
-            "状況を確認してください。"
+            f"(不足 {shortfall} 件、うち失敗・編集で持ち越した分 {total_deferred} 件)。"
+            "そのままでも次回起動時に警告が出て回復できますが、今すぐ埋めるなら "
+            "python scripts/reembed_memory.py <persona_id> を実行してください。"
         )
     else:
         print(
