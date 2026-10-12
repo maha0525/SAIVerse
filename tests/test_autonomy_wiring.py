@@ -67,13 +67,31 @@ def _reset_clock():
 
 
 class RecordingPulseController:
-    """submit_meta_judgment の呼び出しを記録するだけのフェイク。"""
+    """submit_meta_judgment の呼び出しを記録するだけのフェイク。
+
+    本物 (run_meta_user) と同じく ``pre_generation_check`` を Beat ロックの
+    内側 = 生成の前に呼び、イベントが返ったら生成せずに ``[]`` で返る
+    (``calls`` には積まず ``refused`` に積む)。``beat_wait`` は Beat ロックを
+    待っている間に起きる出来事を差し込むフック。
+    """
 
     def __init__(self):
         self.calls: List[Dict[str, Any]] = []
+        self.refused: List[Dict[str, Any]] = []
+        self.beat_wait = None
 
     def submit_meta_judgment(self, persona_id, building_id, meta_playbook,
-                             args=None, event_callback=None):
+                             args=None, event_callback=None,
+                             pre_generation_check=None):
+        if self.beat_wait is not None:
+            self.beat_wait()
+        if pre_generation_check is not None:
+            blocked = pre_generation_check()
+            if blocked is not None:
+                self.refused.append(blocked)
+                if event_callback is not None:
+                    event_callback(blocked)
+                return []
         self.calls.append({
             "persona_id": persona_id,
             "building_id": building_id,
@@ -252,7 +270,8 @@ def test_fire_judgment_point_rechecks_autonomy_after_waiting_for_the_lock(
     session_factory,
 ):
     """② 生成開始の直前の再検査 (2026-10-12 Codex 敵対レビュー 段 3 1 巡目
-    high): Lock を待つ間に全停止が入ったら、判断を始めない (LLM へ進まない)。"""
+    high): Lock を待つ間に全停止が入ったら、判断を始めない (LLM へ進まない)。
+    再検査は Beat ロックの内側 (pre_generation_check) で行う (2 巡目)。"""
     manager, _ = _make_manager(session_factory)
 
     class _StopWhileWaiting:
@@ -266,7 +285,8 @@ def test_fire_judgment_point_rechecks_autonomy_after_waiting_for_the_lock(
     clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
     result = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
     assert result["submitted"] is False
-    assert result["reason"] == "persona autonomy disabled"
+    assert result["reason"] == "start refused: autonomy all-stop"
+    assert result["outcome"] == wiring.OUTCOME_ABORTED
     assert manager.pulse_controller.calls == []
 
 
@@ -314,11 +334,15 @@ class FinalizingPulseController(RecordingPulseController):
         self._ledger = ledger
 
     def submit_meta_judgment(self, persona_id, building_id, meta_playbook,
-                             args=None, event_callback=None):
-        super().submit_meta_judgment(
+                             args=None, event_callback=None,
+                             pre_generation_check=None):
+        refused = super().submit_meta_judgment(
             persona_id, building_id, meta_playbook,
             args=args, event_callback=event_callback,
+            pre_generation_check=pre_generation_check,
         )
+        if refused == []:
+            return refused
         import json as _json
 
         ctx = _json.loads((args or {}).get("judgment_context") or "{}")
@@ -1236,10 +1260,12 @@ def test_runtime_exception_after_finalize_is_indeterminate(session_factory):
 
     class _ApplyThenBoom(FinalizingPulseController):
         def submit_meta_judgment(self, persona_id, building_id, meta_playbook,
-                                 args=None, event_callback=None):
+                                 args=None, event_callback=None,
+                                 pre_generation_check=None):
             super().submit_meta_judgment(
                 persona_id, building_id, meta_playbook,
                 args=args, event_callback=event_callback,
+                pre_generation_check=pre_generation_check,
             )  # finalize 相当 (mark_applied) まで進む
             # 汎用ラッパーと同じ形 — 中身は何であれ LLMError で届く
             raise LLMError("wrapped failure after finalize")
@@ -1974,3 +2000,211 @@ def test_reserved_schedule_playbooks():
         assert wiring.is_reserved_schedule_playbook(name), name
     for name in ("track_user_conversation", "", None, "my_judgment_helper"):
         assert not wiring.is_reserved_schedule_playbook(name), name
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 2 巡目: 判断の生成開始フェンスを Beat の
+# 内側へ (①)、停止中の prepared 回収の精算 (④)、未キャッシュの全停止の読みの
+# 直列化 (⑧)
+# ---------------------------------------------------------------------------
+
+
+def _wire_real_meta_lane(manager):
+    """本物の PulseController (メタ判断レーン) → SEARuntime.run_meta_user (Beat
+    ロック + pre_generation_check) を通す。生成の本体だけ記録係。"""
+    from sea.beat_gate import BeatGate
+    from sea.pulse_controller import PulseController
+    from sea.runtime import SEARuntime
+
+    gate = BeatGate(manager)
+    manager.beat_gate = gate
+    manager.all_personas = manager.personas
+    generated: List[str] = []
+    runtime = SEARuntime.__new__(SEARuntime)
+    runtime.manager = manager
+    runtime._run_meta_user_locked = (
+        lambda *a, **k: generated.append(k.get("pulse_type")) or []
+    )
+    manager.pulse_controller = PulseController(runtime)
+
+    reached_beat = threading.Event()
+    holder = threading.current_thread()
+    original_get_lock = gate._get_lock
+
+    def _get_lock(persona_id):
+        if threading.current_thread() is not holder:
+            reached_beat.set()
+        return original_get_lock(persona_id)
+
+    gate._get_lock = _get_lock
+    return gate, generated, reached_beat
+
+
+def test_all_stop_while_waiting_for_the_beat_lock_does_not_start_the_judgment(
+    session_factory,
+):
+    """① 本物の Beat ロック: 判断が Beat 待ちに入った後で全停止された。Beat を
+    取った後の再検査で生成を始めず、台帳を副作用ゼロの終端 (failed) へ移して
+    席を解放する — 結末は aborted (代替応対してよい)。"""
+    manager, _ = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+    gate, generated, reached_beat = _wire_real_meta_lane(manager)
+    clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
+
+    results: List[Dict[str, Any]] = []
+    with gate.hold(PERSONA_ID, purpose="conversation", check_gate=False):
+        worker = threading.Thread(target=lambda: results.append(
+            wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
+        ))
+        worker.start()
+        assert reached_beat.wait(timeout=5)
+        manager._autonomy_all_stop = True  # Beat 待ちの間に全停止された
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+
+    (result,) = results
+    assert generated == []
+    assert result["submitted"] is False
+    assert result["reason"] == "start refused: autonomy all-stop"
+    assert result["outcome"] == wiring.OUTCOME_ABORTED
+    assert ledger.get_execution(result["execution_id"])["status"] == XL.STATUS_FAILED
+    assert manager.pulse_controller._current_meta == {}
+
+
+def test_the_real_meta_lane_still_generates_when_nothing_changed(session_factory):
+    """① の対照: 何も変わらなければ同じ配線で判断の生成まで進む。"""
+    manager, _ = _make_manager(session_factory)
+    _gate, generated, _reached = _wire_real_meta_lane(manager)
+    clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
+    wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
+    assert generated == ["meta_judgment"]
+
+
+def test_autonomy_off_while_waiting_for_the_beat_lock_is_refused_inside_the_beat(
+    session_factory,
+):
+    """① 自律 OFF も同じ口で止まる (フェイクの Beat 待ちフック)。台帳は failed。"""
+    manager, persona = _make_manager(session_factory)
+    ledger = _attach_ledger(manager, session_factory)
+    manager.pulse_controller = FinalizingPulseController(ledger)
+    manager.pulse_controller.beat_wait = lambda: setattr(persona, "autonomy_enabled", False)
+    clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
+    result = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
+    assert manager.pulse_controller.calls == []
+    assert result["reason"] == "start refused: autonomy off"
+    assert result["outcome"] == wiring.OUTCOME_ABORTED
+    assert ledger.get_execution(result["execution_id"])["status"] == XL.STATUS_FAILED
+
+
+def _prepared_on_event_row(ledger, stimulus_id="ev-resume"):
+    context = {"event_text": "来客", "stimulus_id": stimulus_id}
+    execution_id, runnable, _status = ledger.claim_execution(
+        "judgment.on_event",
+        idempotency_key=f"test:{stimulus_id}",
+        persona_id=PERSONA_ID,
+        payload=dict(context),
+    )
+    assert runnable
+    return execution_id, context
+
+
+@pytest.mark.parametrize("stopped_by", ["all_stop", "autonomy_off", "no_playbook"])
+def test_a_prepared_recovery_while_stopped_responds_only_once(
+    session_factory, monkeypatch, stopped_by,
+):
+    """④ 停止中 (全停止・自律 OFF・判断 Playbook 不在) の prepared 回収は、持ち
+    込んだ行を放棄してから代替応対を許す。同じ行を二度回収しても応対は一度だけ
+    (二度目は放棄できない = indeterminate で代替応対しない)。"""
+    manager, persona = _make_manager(
+        session_factory, with_playbooks=(stopped_by != "no_playbook"),
+    )
+    ledger = _attach_ledger(manager, session_factory)
+    execution_id, context = _prepared_on_event_row(ledger)
+    if stopped_by == "all_stop":
+        manager._autonomy_all_stop = True
+    elif stopped_by == "autonomy_off":
+        persona.autonomy_enabled = False
+    responded: List[str] = []
+    monkeypatch.setattr(
+        wiring, "_dispatch_recovered_response_with_retry",
+        lambda mgr, pid, ctx, eid: responded.append(eid),
+    )
+
+    first = wiring.refire_judgment_from_recovery(
+        manager, PERSONA_ID, "on_event", context, execution_id,
+    )
+    assert first["outcome"] == wiring.OUTCOME_ABORTED
+    assert ledger.get_execution(execution_id)["status"] == XL.STATUS_FAILED
+    assert responded == [execution_id]
+
+    second = wiring.refire_judgment_from_recovery(
+        manager, PERSONA_ID, "on_event", context, execution_id,
+    )
+    assert second["outcome"] == wiring.OUTCOME_INDETERMINATE
+    assert responded == [execution_id]  # 二度目は応対しない
+    assert manager.pulse_controller.calls == []
+
+
+def test_an_uncached_all_stop_read_does_not_overwrite_a_newer_stop(session_factory):
+    """⑧ キャッシュの無い読み手が DB から「解除」を読んだ後、公開する前に
+    停止の setter が commit・公開しても、読み手の古い値で上書きしない
+    (DB と実効ゲートが一致する)。"""
+    manager, _ = _make_manager(session_factory)
+    assert getattr(manager, "_autonomy_all_stop", None) is None
+    reading = threading.Event()
+    go_on = threading.Event()
+    first_call = {"done": False}
+
+    def _slow_first_session():
+        session = session_factory()
+        if not first_call["done"]:
+            first_call["done"] = True
+            reading.set()
+            go_on.wait(timeout=5)
+        return session
+
+    manager.SessionLocal = _slow_first_session
+    observed: List[bool] = []
+    reader = threading.Thread(
+        target=lambda: observed.append(wiring.is_autonomy_all_stopped(manager)),
+    )
+    reader.start()
+    assert reading.wait(timeout=5)
+    setter = threading.Thread(target=wiring.set_autonomy_all_stop, args=(manager, True))
+    setter.start()
+    # 読み手が公開し終えるまで、停止の commit・公開は始まらない
+    setter.join(timeout=0.3)
+    assert setter.is_alive()
+    go_on.set()
+    reader.join(timeout=5)
+    setter.join(timeout=5)
+
+    assert observed == [False]  # 読み手はその時点の値を返す
+    assert manager._autonomy_all_stop is True  # 停止が最後に公開されている
+    del manager._autonomy_all_stop
+    assert wiring.load_autonomy_all_stop(manager) is True  # DB と一致
+
+
+def test_an_uncached_reader_rechecks_the_cache_after_taking_the_lock(session_factory):
+    """⑧ ロックを待っている間に setter が公開した値は、DB を読み直さずにそのまま
+    使う (読みの古い値で上書きしない)。"""
+    manager, _ = _make_manager(session_factory)
+    sessions = {"n": 0}
+
+    def _counting_session():
+        sessions["n"] += 1
+        return session_factory()
+
+    manager.SessionLocal = _counting_session
+    observed: List[bool] = []
+    with wiring.autonomy_setting_lock():
+        reader = threading.Thread(
+            target=lambda: observed.append(wiring.is_autonomy_all_stopped(manager)),
+        )
+        reader.start()
+        reader.join(timeout=0.3)
+        assert reader.is_alive()  # ロック待ち
+        manager._autonomy_all_stop = True  # setter の公開に相当
+    reader.join(timeout=5)
+    assert observed == [True]
+    assert sessions["n"] == 0

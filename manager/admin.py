@@ -1833,11 +1833,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     "reflex_judgment_model", reflex_judgment_model, ai.REFLEX_JUDGMENT_MODEL,
                 )
 
-                original_autonomy = ai.AUTONOMY_ENABLED
-                state_changed = original_autonomy != autonomy_enabled
-
-                if state_changed:
-                    ai.AUTONOMY_ENABLED = autonomy_enabled
+                # AUTONOMY_ENABLED はここでは書かない — 下の自律の設定ロックの
+                # 区間で、ほかの書き手 (ライフ設定・停止ボタン・全停止) と同じ
+                # 一本 (autonomy_wiring.write_persona_autonomy_enabled) を通して
+                # 読み直し・commit・公開・再同期する。
 
                 ai.AINAME = name
                 ai.DESCRIPTION = description
@@ -1919,14 +1918,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     else:
                         from saiverse.persona_language import validate_language
                         ai.LANGUAGE = validate_language(clean_lang)
-                autonomy_now = ai.AUTONOMY_ENABLED
                 db.commit()
                 committed = True
 
                 if persona is not None:
                     persona.persona_name = name
                     persona.persona_system_instruction = system_prompt
-                    persona.autonomy_enabled = autonomy_now
                     if language is not None:
                         persona.language = ai.LANGUAGE
                     persona.vision_model = vision_model
@@ -1961,15 +1958,25 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                         "the next metabolism.", ai_id,
                     )
 
-            # Phase C-2: AUTONOMY_ENABLED 変更を AutonomyManager に反映
-            # (True なら起動、False なら停止)。ライフ設定の保存
-            # (autonomy_wiring.set_persona_autonomy_enabled) と同じ後段を共有する。
-            # ``ensure_autonomy_for`` は SAIVerseManager のメソッドのため、
-            # AdminService からは ``self.manager`` 経由で渡す。
-            if persona is not None and state_changed:
-                from saiverse.autonomy_wiring import sync_autonomy_after_setting_change
+            # AUTONOMY_ENABLED の保存と AutonomyManager への反映 (True なら起動、
+            # False なら停止)。ほかの欄とは分けて、自律の設定の書き手全員が通る
+            # 一本 (autonomy_wiring.write_persona_autonomy_enabled) で行う — DB の
+            # 行の読み直し・commit・persona.autonomy_enabled への公開・再同期を
+            # 自律の設定ロックの同じ区間に置き、ライフ設定の保存や停止ボタンと
+            # 公開の順が入れ替わらない (2026-10-12 Codex 敵対レビュー 段 3 2 巡目
+            # high)。モデルの設定ロックの**外**で取るので、二つのロックは入れ子に
+            # ならない。``ensure_autonomy_for`` は SAIVerseManager のメソッドのため、
+            # 再同期は ``self.manager`` 経由 (ペルソナが読み込まれているときだけ)。
+            from saiverse.autonomy_wiring import (
+                sync_autonomy_after_setting_change,
+                write_persona_autonomy_enabled,
+            )
 
-                sync_autonomy_after_setting_change(self.manager, ai_id)
+            state_changed = write_persona_autonomy_enabled(
+                self.SessionLocal, self.personas, ai_id, autonomy_enabled,
+                on_changed=lambda: sync_autonomy_after_setting_change(self.manager, ai_id),
+            )
+            original_autonomy = (not bool(autonomy_enabled)) if state_changed else bool(autonomy_enabled)
 
             # 記憶の整理の見張りは「前回と同じ状態なら結果も同じ」で素通しする。Memory
             # Weave モデルを選び直しても会話が動くまで整理が再試行されないと

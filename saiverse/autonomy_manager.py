@@ -20,8 +20,9 @@ autonomous_behavior_v3.md §5) で、旧「50 分間隔の watchdog タイマー
      見て (追い越されていれば正しい期限へ張り直して見送る)、次回を
      max(発火時刻, 最後の標準呼び出し) + T で張り直し、ゲート (全停止・自律
      OFF・ライフ外・会話中) を見て、通ればタスク帳から割り当てを引き当て、
-     生成開始の直前にゲートをもう一度見てから ``SAIVerseManager.fire_tick``
-     を呼ぶ。温めずに終わった回は keep-alive の見張りを再照合する
+     ``SAIVerseManager.fire_tick`` を呼ぶ。生成開始の直前 (Beat ロックの内側)
+     にゲートと標準呼び出しの追い越しをもう一度見る。温めずに終わった回と、
+     予約を張り直した回は keep-alive の見張りを再照合する
 
 2. **見張り** (key ``autonomy-watchdog:{persona_id}``、固定間隔
    :data:`WATCHDOG_INTERVAL_MINUTES`)。中身は ``PulseDispatcher.dispatch_autonomy_tick``
@@ -286,12 +287,15 @@ class AutonomyManager:
             "[Autonomy:%s] tick armed at %s (T=%d min)",
             self.persona_id, fire_at.isoformat(timespec="seconds"), minutes,
         )
+        self._reconcile_keepalive()
         return True
 
     def arm_tick_if_absent(self, *, life_mode: Optional[str] = None) -> bool:
         """ティックの予約が無いときだけ now + T に張る (生きている予約は触らない)。
 
-        呼び手は見張り (再起動からの回復)。Returns: 今回張ったか。
+        呼び手は見張り (再起動・全停止の解除・自律 OFF→ON からの回復)。張れた
+        回は keep-alive を再照合する (:meth:`_reconcile_keepalive`)。
+        Returns: 今回張ったか。
         """
         scheduler = self._scheduler()
         if scheduler is None:
@@ -301,10 +305,13 @@ class AutonomyManager:
         with self._lock:
             if self._state == AutonomyState.STOPPED:
                 return False
-            return scheduler.schedule_if_absent(
+            armed = scheduler.schedule_if_absent(
                 fire_at=fire_at, callback=self._handle_tick,
                 key=tick_reservation_key(self.persona_id),
             )
+        if armed:
+            self._reconcile_keepalive()
+        return armed
 
     def cancel_tick(self) -> bool:
         """ティックの予約を消す。Returns: 予約があって消したか。"""
@@ -485,14 +492,25 @@ class AutonomyManager:
         with self._lock:
             last = self._last_standard_call
         if last is None or last < started_at:
-            self._reconcile_keepalive_after_unwarmed_tick()
+            self._reconcile_keepalive()
 
-    def _reconcile_keepalive_after_unwarmed_tick(self) -> None:
-        """ティックが温めずに終わった回の後、標準モデルの keep-alive を再照合する。
+    def _reconcile_keepalive(self) -> None:
+        """標準モデルの keep-alive を、いまのティックの予約に照らして再照合する。
+
+        keep-alive は「次のティックがキャッシュの失効より前に温める」前提で
+        取り消されていることがある (``sea.session_lifecycle.schedule_cache_ttl_pulse``)。
+        その前提が崩れる場面で呼ぶ:
+
+        - ティックが温めずに終わった回の後 (:meth:`_handle_tick`)
+        - ティックの予約を張り直した回 (:meth:`arm_tick` / :meth:`arm_tick_if_absent`
+          — 全停止の解除・自律 OFF→ON・再起動からの回復で、予約が now + T へ
+          後ろ倒しになり、失効に間に合わなくなることがある。2026-10-12 Codex
+          敵対レビュー 段 3 2 巡目 medium)
 
         実体は ``sea.session_lifecycle.SessionLifecycle.reconcile_keepalive_after_tick``
-        (manager 経由 — saiverse → sea の直接 import を避ける)。全停止・自律 OFF・
-        ライフ外では復活させない判定は向こう側が持つ。失敗は WARN で握る。
+        (manager 経由 — saiverse → sea の直接 import を避ける)。次のティックが
+        失効より前なら何もしない・全停止・自律 OFF・ライフ外では復活させない
+        判定は向こう側が持つ。失敗は WARN で握る。
         """
         lifecycle = getattr(
             getattr(self.manager, "sea_runtime", None), "session_lifecycle", None,
@@ -504,8 +522,8 @@ class AutonomyManager:
             reconcile(self.persona_id)
         except Exception:
             LOGGER.warning(
-                "[Autonomy:%s] failed to reconcile the cache keep-alive after a "
-                "tick that did not warm the cache", self.persona_id, exc_info=True,
+                "[Autonomy:%s] failed to reconcile the cache keep-alive",
+                self.persona_id, exc_info=True,
             )
 
     #: 古い発火の見送りの猶予。「最後の標準呼び出し + T」がこの発火の時刻より
@@ -513,17 +531,93 @@ class AutonomyManager:
     #: 猶予は時計の揺れと、正しい期限ちょうどの発火を誤って見送らないため。
     _SUPERSEDE_GRACE = timedelta(seconds=5)
 
+    def _check_gate(self, now: datetime) -> Tuple[Optional[str], bool, Any]:
+        """ティックを打ってよいかのゲート (発火の冒頭と、生成開始の直前の両方)。
+
+        Returns:
+            ``(拒否の理由, 予約を消すか, 営業日の basis)``。通すときは理由が None。
+            予約を消すのは「次の自然な張り直し (ライフ開始の節目・全停止の解除の
+            再同期) まで打つべきでない」とき — 全停止・自律 OFF・ライフが走って
+            いない (終了済みを含む)。会話中・ライフが読めない・止められた
+            AutonomyManager は予約を残す (止められた側は stop() が予約を消す)。
+        """
+        from saiverse import day_plan
+        from saiverse.autonomy_wiring import autonomy_start_refusal
+
+        manager = self.manager
+        persona_id = self.persona_id
+        with self._lock:
+            if self._state == AutonomyState.STOPPED:
+                return ("stopped", False, None)
+        refusal = autonomy_start_refusal(manager, persona_id)
+        if refusal is not None:
+            # 解除時の復帰は ensure_autonomy_for の一斉再同期と見張りの張り直し。
+            return (refusal, True, None)
+        basis = day_plan.resolve_business_day(manager, persona_id, now=now)
+        if basis is None:
+            # ライフを読めない — どの日を生きているか分からない。予約は残して
+            # 次の回に委ねる (一時的な読み取り失敗で連鎖を切らない)。
+            return ("lives unreadable", False, None)
+        first = basis.lives[0] if basis.lives else None
+        if (
+            basis.source != "life"
+            or not isinstance(first, dict)
+            or not first.get("started")
+            or first.get("ended")
+        ):
+            # ライフが現に走っていない (終了の節目が済んだ回を含む) — 次の
+            # ライフ開始の節目が張り直す。
+            return ("outside life", True, basis)
+        conversation = day_plan.get_user_conversation_state(manager, persona_id)
+        if conversation is not False:
+            # 会話が開いている (または分からない) 間は空のティックを打たない
+            # (v3 §5 — 保温は会話自身がしている)。予約は張り直しのまま残る。
+            return (
+                "in conversation" if conversation else "conversation unknown",
+                False, basis,
+            )
+        return (None, False, basis)
+
+    def _start_fence(self, interval: timedelta, refusals: list) -> Optional[str]:
+        """生成開始の直前の再検査 — ``fire_tick`` が **Beat ロックの内側**で呼ぶ。
+
+        発火の冒頭のゲートから生成の開始までの間 (引き当てのタスク帳の読み・
+        Beat ロックの待ち) に、全停止・自律 OFF・ライフ終了・会話の開始・標準
+        呼び出しの追い越しが入りうる (2026-10-12 Codex 敵対レビュー 段 3 1・2
+        巡目)。生成を直列化している Beat ロックを取った後で :meth:`_check_gate`
+        をもう一度通し、加えて「最新の標準呼び出し + T がいまより後ろ」なら
+        見送る (この間に本人の標準モデルが呼ばれた = キャッシュは温まっていて、
+        予約は notify_standard_call が押し直し済み — 予約は残す)。
+
+        **開始済みの生成は完走する** (課金と生成の保護の既存裁定) — このフェンスは
+        開始の直前までで、走り出した Pulse は止めない。
+
+        Returns:
+            拒否の理由 (None なら通す)。拒否した理由は ``refusals`` にも積む。
+        """
+        now = clock.now()
+        reason, cancel, _basis = self._check_gate(now)
+        if reason is None:
+            with self._lock:
+                last = self._last_standard_call
+            if last is not None and last + interval > now + self._SUPERSEDE_GRACE:
+                reason = "superseded by a standard call"
+        if reason is None:
+            return None
+        if cancel:
+            self.cancel_tick()
+        refusals.append(reason)
+        return reason
+
     def _run_tick(self) -> Tuple[str, Optional[str]]:
         """ティック 1 回の本体。``(status, reason)`` を返す。
 
-        生成開始のフェンス: 引き当ての後・``fire_tick`` の直前に、全停止・
-        自律ゲート・会話状態をもう一度見る (冒頭のゲートからここまでの読み
-        — ライフ・会話・タスク帳 — の間に止められた発火を新しく始めない)。
-        **開始済みの生成は完走する** (課金と生成の保護の既存裁定)。このフェンスは
-        開始の直前までで、``fire_tick`` の中の Pulse は止めない。
+        生成開始のフェンス: ``fire_tick`` に :meth:`_start_fence` を渡し、Beat
+        ロックの内側・生成の直前でゲートをもう一度見る (冒頭のゲートからそこまで
+        — 引き当て・Beat ロックの待ち — の間に止められた発火を新しく始めない)。
+        **開始済みの生成は完走する** (課金と生成の保護の既存裁定)。
         """
         from saiverse import day_plan
-        from saiverse.autonomy_wiring import is_autonomy_all_stopped, is_autonomy_on
 
         manager = self.manager
         persona_id = self.persona_id
@@ -566,33 +660,11 @@ class AutonomyManager:
             return ("skipped", "superseded by a standard call")
 
         # 2. ゲート (通らない回は何もしない)
-        if is_autonomy_all_stopped(manager):
-            # 解除時の復帰は ensure_autonomy_for の一斉再同期と見張りの張り直し。
-            self.cancel_tick()
-            return ("skipped", "autonomy all-stop")
-        if not is_autonomy_on(manager, persona_id):
-            self.cancel_tick()
-            return ("skipped", "autonomy off")
-        basis = day_plan.resolve_business_day(manager, persona_id, now=fired_at)
-        if basis is None:
-            # ライフを読めない — どの日を生きているか分からない。予約は残して
-            # 次の回に委ねる (一時的な読み取り失敗で連鎖を切らない)。
-            return ("skipped", "lives unreadable")
-        first = basis.lives[0] if basis.lives else None
-        if (
-            basis.source != "life"
-            or not isinstance(first, dict)
-            or not first.get("started")
-            or first.get("ended")
-        ):
-            # ライフが現に走っていない — 次のライフ開始の節目が張り直す。
-            self.cancel_tick()
-            return ("skipped", "outside life")
-        conversation = day_plan.get_user_conversation_state(manager, persona_id)
-        if conversation is not False:
-            # 会話が開いている (または分からない) 間は空のティックを打たない
-            # (v3 §5 — 保温は会話自身がしている)。予約は 1 の張り直しのまま残る。
-            return ("skipped", "in conversation" if conversation else "conversation unknown")
+        reason, cancel, basis = self._check_gate(fired_at)
+        if reason is not None:
+            if cancel:
+                self.cancel_tick()
+            return ("skipped", reason)
 
         # 3. 引き当て: 締め切り → システムタスク → 自由
         try:
@@ -608,30 +680,18 @@ class AutonomyManager:
             )
             return ("skipped", "task book unreadable")
 
-        # 4. 生成開始の直前の再検査 (2026-10-12 Codex 敵対レビュー 段 3 1 巡目
-        #    high: ゲート通過後に全停止されても新規 LLM 実行へ進んだ)。
-        #    冒頭のゲートと同じ判定をもう一度通す — ライフ・会話・タスク帳を
-        #    読んでいる間に止められた発火を始めない。
-        with self._lock:
-            stopped = self._state == AutonomyState.STOPPED
-        if stopped:
-            return ("skipped", "stopped before start")
-        if is_autonomy_all_stopped(manager):
-            self.cancel_tick()
-            return ("skipped", "autonomy all-stop before start")
-        if not is_autonomy_on(manager, persona_id):
-            self.cancel_tick()
-            return ("skipped", "autonomy off before start")
-        conversation = day_plan.get_user_conversation_state(manager, persona_id)
-        if conversation is not False:
-            return (
-                "skipped",
-                "in conversation before start" if conversation
-                else "conversation unknown before start",
-            )
-
-        # 5. ティックを打つ
-        outcome = manager.fire_tick(persona_id, assignment)
+        # 4. ティックを打つ。生成開始の直前の再検査 (:meth:`_start_fence`) は
+        #    fire_tick → run_meta_user の pre_generation_check として Beat
+        #    ロックの内側で走る (2026-10-12 Codex 敵対レビュー 段 3 2 巡目 high:
+        #    Beat の外の再検査は、Beat ロック待ちの間の全停止をすり抜けた)。
+        refusals: list = []
+        outcome = manager.fire_tick(
+            persona_id, assignment,
+            pre_generation_check=lambda: self._start_fence(interval, refusals),
+        )
+        if outcome.get("runtime_outcome") == "refused" or refusals:
+            refused = outcome.get("refusal") or (refusals[0] if refusals else "refused")
+            return ("skipped", f"{refused} before start")
         if (
             outcome.get("action") == "execute"
             and outcome.get("runtime_outcome") == "completed"

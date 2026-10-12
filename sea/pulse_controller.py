@@ -104,7 +104,8 @@ class ExecutionRequest:
     pre_spells: Optional[List[str]] = None
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
     # 生成の開始前に Beat ロックの内側で走る再検査 (run_meta_user が実行)。
-    # イベント dict を返したら Pulse を開始しない。retry の門番が使う。
+    # イベント dict を返したら Pulse を開始しない。retry の門番と、自律の
+    # 駆動 (ティック・判断点) の生成開始直前の自律ゲートの再検査が使う。
     pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None
     pulse_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     cancellation_token: CancellationToken = field(default_factory=CancellationToken)
@@ -788,6 +789,7 @@ class PulseController:
         meta_playbook: str,
         args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
     ) -> Optional[List[str]]:
         """メタ判断 Pulse をメタ判断レーンで起動する。
 
@@ -795,6 +797,9 @@ class PulseController:
         実行は run_meta_user 内の Beat ロックで直列化され、main の Beat 境界に
         挟まる (beat_execution_context.md §2.2)。MetaLayer から呼ばれる前提
         (pulse_dispatch.md §6.3 案 A: PulseController 経由で統一)。
+
+        ``pre_generation_check``: 生成の開始前に Beat ロックの内側で走る再検査
+        (:meth:`submit_user` と同じ口)。判断点の自律ゲートの再検査が使う。
         """
         request = ExecutionRequest(
             type="meta_judgment",
@@ -804,6 +809,7 @@ class PulseController:
             meta_playbook=meta_playbook,
             args=args,
             event_callback=event_callback,
+            pre_generation_check=pre_generation_check,
         )
         return self.submit(request)
 

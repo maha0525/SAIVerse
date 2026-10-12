@@ -633,3 +633,53 @@ def test_keepalive_does_not_send_when_all_stop_lands_during_composition(_mock_ca
     assert runtime.run_cache_keepalive("air") is False
     assert client.calls == []
     assert touched == []
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 2 巡目 ⑥: 実行中の保温と再照合の保温が
+# 二重に走らない
+# ---------------------------------------------------------------------------
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_a_keepalive_does_not_start_while_the_same_session_is_being_warmed(_mock_cache):
+    """⑥ EventScheduler は手渡しの時点で予約を辞書から外すので、保温の LLM が
+    遅い間に再照合が同じ Session の予約を張り直せる。その予約が走っても、実行中の
+    保温がある間は LLM を呼ばない (二重課金・consume_usage の取り合いを防ぐ)。
+    走り終えたら次の保温は普通に走る。"""
+    import threading
+
+    persona = _persona()
+    runtime, _manager = _make_runtime(persona)
+    in_generate = threading.Event()
+    release = threading.Event()
+
+    class _SlowClient(FakeLLMClient):
+        def generate(self, messages, tools=None, response_schema=None, *,
+                     temperature=None, **kwargs):
+            out = super().generate(
+                messages, tools, response_schema, temperature=temperature, **kwargs,
+            )
+            if len(self.calls) == 1:
+                in_generate.set()
+                release.wait(timeout=5)
+            return out
+
+    client = _SlowClient()
+    touched = _wire_keepalive(runtime, persona, client)
+
+    first: List[bool] = []
+    worker = threading.Thread(target=lambda: first.append(runtime.run_cache_keepalive("air")))
+    worker.start()
+    assert in_generate.wait(timeout=5)
+    # 実行中に、再照合が張り直した同じ Session の保温が発火した
+    assert runtime.run_cache_keepalive("air", "claude-x") is False
+    assert len(client.calls) == 1
+    release.set()
+    worker.join(timeout=5)
+    assert first == [True]
+    assert len(touched) == 1
+
+    # 走り終えたらガードは外れている
+    assert runtime.run_cache_keepalive("air") is True
+    assert len(client.calls) == 2

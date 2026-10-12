@@ -105,18 +105,36 @@ class FakeTicks:
 
     ``standard_call=True`` なら、本物のティックと同じく本人の標準モデルの
     呼び出しが成功したことを AutonomyManager に知らせる (touch の hook 相当)。
+
+    本物の ``SAIVerseManager.fire_tick`` と同じく、``pre_generation_check``
+    (Beat ロックの内側の再検査) を生成の前に呼び、拒否されたら生成せずに
+    ``runtime_outcome="refused"`` を返す (``calls`` には積まない)。
+    ``beat_wait`` は Beat ロックを待っている間に起きる出来事 (全停止・ライフ
+    終了・標準呼び出しなど) を差し込むフック — 再検査の直前に一度呼ぶ。
     """
 
-    def __init__(self, manager, outcome=None, standard_call=True):
+    def __init__(self, manager, outcome=None, standard_call=True, beat_wait=None):
         self.manager = manager
         self.calls: List[Dict[str, Any]] = []
+        self.refused: List[str] = []
         self.outcome = outcome or {
             "action": "execute", "runtime_outcome": "completed",
             "error": None, "outputs": [],
         }
         self.standard_call = standard_call
+        self.beat_wait = beat_wait
 
-    def __call__(self, persona_id, assignment_text=None):
+    def __call__(self, persona_id, assignment_text=None, *, pre_generation_check=None):
+        if self.beat_wait is not None:
+            self.beat_wait()
+        if pre_generation_check is not None:
+            reason = pre_generation_check()
+            if reason is not None:
+                self.refused.append(reason)
+                return {
+                    "action": "execute", "runtime_outcome": "refused",
+                    "error": None, "outputs": [], "refusal": reason,
+                }
         self.calls.append({
             "at": clock.now(), "persona_id": persona_id,
             "assignment": assignment_text,
@@ -982,6 +1000,9 @@ def test_a_tick_that_did_not_warm_reconciles_the_keepalive(manager, session_fact
     lifecycle = _RecordingLifecycle()
     manager.sea_runtime = SimpleNamespace(session_lifecycle=lifecycle)
     am = _running_life(manager, session_factory)
+    # ライフ開始の節目がティックの予約を張った回も再照合する (2 巡目 ⑤)
+    assert lifecycle.reconciled == [PERSONA_ID]
+    lifecycle.reconciled.clear()
 
     _fire_tick_reservation(manager)  # 走りきって標準呼び出しが起きた
     assert am.last_report.status == "completed"
@@ -1003,3 +1024,157 @@ def test_a_tick_that_did_not_warm_reconciles_the_keepalive(manager, session_fact
     _fire_tick_reservation(manager)  # 走ったが標準呼び出しまで届かなかった
     assert am.last_report.status == "not_completed"
     assert lifecycle.reconciled == [PERSONA_ID, PERSONA_ID]
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 2 巡目: 生成開始のフェンスを Beat ロックの
+# 内側へ (①②③)、ティックの予約の張り直しで保温を再照合 (⑤)
+# ---------------------------------------------------------------------------
+
+
+def _wire_real_beat(manager):
+    """本物の fire_tick → PulseController → SEARuntime.run_meta_user (Beat ロック
+    + pre_generation_check) を通す。生成の本体 (_run_meta_user_locked) だけ記録係。
+
+    Returns:
+        (gate, generated, reached_beat) — reached_beat はティックのスレッドが
+        Beat ロックの取得に入ったことを知らせる Event。
+    """
+    import threading
+
+    from saiverse.saiverse_manager import SAIVerseManager
+    from sea.beat_gate import BeatGate
+    from sea.pulse_controller import PulseController
+    from sea.runtime import SEARuntime
+
+    gate = BeatGate(manager)
+    manager.beat_gate = gate
+    generated: List[str] = []
+    runtime = SEARuntime.__new__(SEARuntime)
+    runtime.manager = manager
+    runtime._run_meta_user_locked = (
+        lambda *a, **k: generated.append(k.get("pulse_type")) or []
+    )
+    manager.pulse_controller = PulseController(runtime)
+    manager._submit_tick = SAIVerseManager._submit_tick.__get__(manager)
+    manager.fire_tick = SAIVerseManager.fire_tick.__get__(manager)
+
+    reached_beat = threading.Event()
+    holder = threading.current_thread()
+    original_get_lock = gate._get_lock
+
+    def _get_lock(persona_id):
+        if threading.current_thread() is not holder:
+            reached_beat.set()
+        return original_get_lock(persona_id)
+
+    gate._get_lock = _get_lock
+    return gate, generated, reached_beat
+
+
+def test_all_stop_while_waiting_for_the_beat_lock_does_not_start_the_tick(
+    manager, session_factory,
+):
+    """① 本物の Beat ロック: 会話が Beat を握っている間にティックが Beat 待ちに
+    入り、その間に全停止された。Beat を取った後の再検査で生成を始めない —
+    席 (PulseController の _current) は空き、予約は消える。"""
+    import threading
+
+    am = _running_life(manager, session_factory)
+    gate, generated, reached_beat = _wire_real_beat(manager)
+    clock.advance_to(_tick_at(manager))
+
+    with gate.hold(PERSONA_ID, purpose="conversation", check_gate=False):
+        worker = threading.Thread(target=am._handle_tick)
+        worker.start()
+        assert reached_beat.wait(timeout=5)
+        manager._autonomy_all_stop = True  # Beat 待ちの間に全停止された
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+
+    assert generated == []
+    assert am.last_report.status == "skipped"
+    assert am.last_report.reason == "autonomy all-stop before start"
+    assert _tick_at(manager) is None
+    assert manager.pulse_controller._current == {}
+
+
+def test_the_real_beat_path_still_generates_when_nothing_changed(
+    manager, session_factory,
+):
+    """① の対照: 何も変わらなければ同じ配線で生成まで進み、走りきった扱いになる。"""
+    am = _running_life(manager, session_factory)
+    _gate, generated, _reached = _wire_real_beat(manager)
+    _fire_tick_reservation(manager)
+    assert generated == ["auto"]
+    assert am.last_report.status == "completed"
+
+
+def test_a_standard_call_while_waiting_for_the_beat_lock_skips_the_tick(
+    manager, session_factory,
+):
+    """② 07:30 の発火が Beat を待っている間 (07:31) に会話の標準呼び出しが
+    成功した。予約は 08:01 へ押し直され、この発火は生成せずに見送る
+    (予約は維持)。"""
+    am = _running_life(manager, session_factory)
+
+    def _conversation_call_while_waiting():
+        clock.advance_to(BASE + timedelta(hours=7, minutes=31))
+        am.notify_standard_call()
+
+    manager.fire_tick = FakeTicks(manager, beat_wait=_conversation_call_while_waiting)
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls == []
+    assert manager.fire_tick.refused == ["superseded by a standard call"]
+    assert am.last_report.status == "skipped"
+    assert am.last_report.reason == "superseded by a standard call before start"
+    assert _tick_at(manager) == BASE + timedelta(hours=8, minutes=1)
+
+
+def test_life_end_while_waiting_for_the_beat_lock_cancels_the_tick(
+    manager, session_factory,
+):
+    """③ Beat を待っている間に終了の節目が走った (ended を保存して予約を消した)。
+    その後に予約が張り直されていても、Beat 内の再検査が生成を止めて予約を消す。"""
+    am = _running_life(manager, session_factory)
+
+    def _life_ends_while_waiting():
+        _end_life(manager)
+        # 終了の節目の後に予約が生き返った並び (手渡し中の張り直しとの交差)
+        manager.event_scheduler.schedule(
+            fire_at=clock.now() + timedelta(minutes=30), callback=am._handle_tick,
+            key=tick_reservation_key(PERSONA_ID),
+        )
+
+    manager.fire_tick = FakeTicks(manager, beat_wait=_life_ends_while_waiting)
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls == []
+    assert am.last_report.reason == "outside life before start"
+    assert _tick_at(manager) is None
+
+
+def test_rearming_the_tick_after_a_resume_reconciles_the_keepalive(
+    manager, session_factory,
+):
+    """⑤ 全停止の解除・自律 OFF→ON・再起動の回復で、見張りがティックの予約を
+    張り直した回は keep-alive を再照合する (予約が now + T へ後ろ倒しになって
+    キャッシュの失効に間に合わないことがあるため)。生きている予約がある回
+    (張らなかった回) は再照合しない。"""
+    lifecycle = _RecordingLifecycle()
+    manager.sea_runtime = SimpleNamespace(session_lifecycle=lifecycle)
+    am = _running_life(manager, session_factory)
+    assert lifecycle.reconciled == [PERSONA_ID]  # ライフ開始の arm_tick
+    lifecycle.reconciled.clear()
+
+    # 停止 (予約が消える) → 再開 → 見張りが走っているライフに予約を張り直す
+    am.stop()
+    assert _tick_at(manager) is None
+    clock.advance_to(BASE + timedelta(hours=7, minutes=25))
+    assert am.start() is True
+    result = wiring.watchdog_tick(manager, PERSONA_ID)
+    assert _tick_at(manager) == BASE + timedelta(hours=7, minutes=55)
+    assert lifecycle.reconciled == [PERSONA_ID], result
+
+    # 予約が生きている間の見張りは張らない = 再照合もしない
+    wiring.watchdog_tick(manager, PERSONA_ID)
+    assert lifecycle.reconciled == [PERSONA_ID]

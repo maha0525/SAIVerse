@@ -229,7 +229,22 @@ def _recovery_tick(manager: "SAIVerseManager") -> None:
 
     EventScheduler.schedule_periodic は callback 例外で周期を止める契約なので、
     一度の DB エラーで掃除が永久停止しないよう、ここで例外を吸収してログに残す。
+
+    もう一手、自律の全停止の読み失敗からの回復を受け持つ — 回復巡回は自律
+    ゲートの外で回る唯一の定期処理なので、全停止を読めずに fail-closed で
+    止まった AutonomyManager を、読めるようになった後で立て直せるのはここ
+    (``autonomy_wiring.resync_autonomy_after_unread_all_stop``。読めている間は
+    manager の属性を見るだけで DB を読まない)。
     """
+    try:
+        from saiverse.autonomy_wiring import resync_autonomy_after_unread_all_stop
+
+        resync_autonomy_after_unread_all_stop(manager)
+    except Exception:
+        LOGGER.exception(
+            "[ledger-wiring] recovery tick: autonomy resync after an unread "
+            "all-stop failed"
+        )
     ledger = manager.execution_ledger
     try:
         ledger.recover_stale_running(max_age_seconds=RUNNING_DEADLINE_SECONDS)

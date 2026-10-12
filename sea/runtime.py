@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -55,6 +56,12 @@ from .session_lifecycle import SessionLifecycle
 from .runtime_utils import _format, _is_llm_streaming_enabled
 LOGGER = logging.getLogger(__name__)
 
+#: 走っている最中の keep-alive の (persona_id, model_key)。予約の有無とは別に、
+#: 同じ Session の保温を二重に走らせないための実行中ガード
+#: (:meth:`SEARuntime.run_cache_keepalive`)。
+_KEEPALIVE_INFLIGHT: set = set()
+_KEEPALIVE_INFLIGHT_LOCK = threading.Lock()
+
 
 def _get_default_lightweight_model() -> str:
     """Get the default lightweight model from environment or fallback.
@@ -105,7 +112,8 @@ class SEARuntime:
 
         ``pre_generation_check``: 生成の開始前に **Beat ロックの内側**で走る
         再検査。イベント dict を返したら Pulse を開始せず、そのイベントを
-        流して空で返る (None なら通す)。retry の門番が使う — 入口 (API route)
+        流して空で返る (None なら通す)。retry の門番と、自律の駆動 (ティック・
+        判断点) の自律ゲートの再検査が使う。retry の門番では — 入口 (API route)
         の検査から生成の開始までの間に、別の生成が応答を保存し終えている
         競合の窓を、生成を直列化している既存の排他の内側で塞ぐ
         (docs/issues/archive/retry_api_has_no_server_side_eligibility_check.md)。
@@ -2129,6 +2137,40 @@ class SEARuntime:
     )
 
     def run_cache_keepalive(self, persona_id: str, model_key: Optional[str] = None) -> bool:
+        """keep-alive の入口 — (persona, model) ごとの実行中ガードを掛けて本体を走らせる。
+
+        EventScheduler は手渡しの時点で予約を辞書から外すので、予約の有無
+        (``schedule_if_absent``) だけでは**走っている最中の**保温を検出できない。
+        保温の LLM が遅い間にティックの後の再照合
+        (``SessionLifecycle.reconcile_keepalive_after_tick``) が同じ Session の
+        予約を張り直すと、同じ anchor の保温が二重に走り、二重課金と共有 client の
+        ``consume_usage`` の取り合いになる (2026-10-12 Codex 敵対レビュー 段 3
+        2 巡目 medium)。予約の有無と実行中の有無の二段で重複を止める — 実行中
+        なら新しい保温は始めない (INFO で skip)。
+
+        本体は :meth:`_run_cache_keepalive_once`。
+        """
+        guard_model = model_key
+        if not guard_model:
+            persona = (getattr(self.manager, "personas", None) or {}).get(persona_id)
+            guard_model = getattr(persona, "model", None) if persona is not None else None
+        guard_key = (str(persona_id), str(guard_model or ""))
+        with _KEEPALIVE_INFLIGHT_LOCK:
+            if guard_key in _KEEPALIVE_INFLIGHT:
+                LOGGER.info(
+                    "[keepalive] skipped: a keep-alive for the same session is "
+                    "already running (persona=%s model=%s)",
+                    persona_id, guard_model,
+                )
+                return False
+            _KEEPALIVE_INFLIGHT.add(guard_key)
+        try:
+            return self._run_cache_keepalive_once(persona_id, model_key)
+        finally:
+            with _KEEPALIVE_INFLIGHT_LOCK:
+                _KEEPALIVE_INFLIGHT.discard(guard_key)
+
+    def _run_cache_keepalive_once(self, persona_id: str, model_key: Optional[str] = None) -> bool:
         """メインキャッシュの keep-alive: 意味的に不活性な極小 LLM コール 1 回。
 
         TTL 接近時 (:meth:`SessionLifecycle.schedule_cache_ttl_pulse` の予約) に呼ばれる。

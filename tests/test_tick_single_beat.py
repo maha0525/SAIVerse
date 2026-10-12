@@ -720,7 +720,7 @@ def test_fire_tick_runs_the_tick_playbook_as_an_auto_pulse_in_the_current_room()
     out = mgr.fire_tick("p1", assignment_text="  このティックは挿絵の続き。 ")
     assert out == {
         "action": "execute", "runtime_outcome": "completed", "error": None,
-        "outputs": [],
+        "outputs": [], "refusal": None,
     }
     (request,) = mgr.pulse_controller.requests
     assert request.type == "auto"

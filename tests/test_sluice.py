@@ -5003,6 +5003,8 @@ class KeepaliveEarlyReturnTest(unittest.TestCase):
         persona = SimpleNamespace(autonomy_enabled=False, model="gem")
         rt = SimpleNamespace(manager=SimpleNamespace(personas={"air": persona}))
         rt.run_cache_keepalive = SEARuntime.run_cache_keepalive.__get__(rt)
+        # 入口 (実行中ガード) は本体を self 経由で呼ぶ
+        rt._run_cache_keepalive_once = SEARuntime._run_cache_keepalive_once.__get__(rt)
 
         # rt に session_lifecycle も _prepare_context も与えていないので、この
         # 分岐より先へ進んだら AttributeError で顕在化する。
@@ -5023,6 +5025,8 @@ class KeepaliveEarlyReturnTest(unittest.TestCase):
             session_lifecycle=session_lifecycle,
         )
         rt.run_cache_keepalive = SEARuntime.run_cache_keepalive.__get__(rt)
+        # 入口 (実行中ガード) は本体を self 経由で呼ぶ
+        rt._run_cache_keepalive_once = SEARuntime._run_cache_keepalive_once.__get__(rt)
 
         # get_cache_config を gemini_explicit にすると LLM 経路 (_prepare_context 等)
         # に入らず return False するはず。rt にそれらのメソッドを与えていないので、

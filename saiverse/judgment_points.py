@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from saiverse import clock
 from saiverse.day_plan import is_in_user_conversation
@@ -326,6 +326,7 @@ def run_judgment_point(
     kind: str,
     context: Optional[Dict[str, Any]] = None,
     execution_id: Optional[str] = None,
+    start_check: Optional[Callable[[], Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """判断点を 1 回起動する (状況テキスト組み立て → 動的スキーマ → Playbook 起動)。
 
@@ -348,6 +349,13 @@ def run_judgment_point(
             ``stimulus_id``。**ユーザー会話中は原則発火させないこと** — 会話の
             至上性 (judgment_points.md §7)。その抑止は呼び出し側の責務であり、
             本モジュールは判定しない (会話中の収穫はスルースが担う)
+        start_check: 生成の開始直前に **Beat ロックの内側**で呼ぶ再検査
+            (run_meta_user の pre_generation_check — retry の門番と同じ口)。
+            拒否の理由 (str) を返したら Pulse を開始せず、台帳を副作用ゼロの
+            終端 (running → failed) へ移して ``submitted=False`` /
+            ``outcome=aborted`` で返す (席は残らないので代替応対してよい。
+            failed へ移せなかった回は indeterminate)。発火側
+            (``autonomy_wiring.fire_judgment_point``) が自律ゲートを渡す。
 
     Returns:
         ``{"kind", "playbook", "args", "submitted": bool, "errors": [...],
@@ -479,6 +487,22 @@ def run_judgment_point(
                     "outcome": OUTCOME_INDETERMINATE,
                     "errors": errors, "applied_events": applied_events,
                     "execution_id": execution_id}
+    #: Beat ロックの内側の再検査が拒否した理由 (拒否しなければ空のまま)。
+    start_refusal: List[str] = []
+    submit_kwargs: Dict[str, Any] = {}
+    if start_check is not None:
+        def _pre_generation_check() -> Optional[Dict[str, Any]]:
+            reason = start_check()
+            if reason is None:
+                return None
+            start_refusal.append(str(reason))
+            return {
+                "type": "judgment_start_refused",
+                "error_code": "autonomy_start_refused",
+                "reason": str(reason),
+            }
+
+        submit_kwargs["pre_generation_check"] = _pre_generation_check
     try:
         pulse_controller.submit_meta_judgment(
             persona_id=persona_id,
@@ -486,6 +510,7 @@ def run_judgment_point(
             meta_playbook=playbook_name,
             args=args,
             event_callback=_capture_event,
+            **submit_kwargs,
         )
     except Exception as exc:
         LOGGER.warning(
@@ -508,6 +533,32 @@ def run_judgment_point(
         return {"kind": kind, "playbook": playbook_name, "args": args,
                 "submitted": False, "reason": f"runtime exception: {exc!r}",
                 "outcome": outcome,
+                "errors": errors, "applied_events": applied_events,
+                "execution_id": execution_id}
+
+    if start_refusal:
+        # Beat ロックの内側の再検査が拒否した: Pulse は始まっておらず副作用
+        # ゼロ。台帳は running (席取り済み) なので、prepared 限定の放棄ではなく
+        # running → failed で終端させ、席を解放する (precondition の不成立と
+        # 同じ「副作用ゼロの離脱」— 結末は aborted、代替応対してよい)。
+        reason = f"start refused: {start_refusal[0]}"
+        LOGGER.info(
+            "[judgment] %s refused before generation inside the Beat lock: %s "
+            "(persona=%s execution=%s)",
+            kind, start_refusal[0], persona_id, execution_id,
+        )
+        outcome = OUTCOME_ABORTED
+        if tracked:
+            try:
+                ledger.mark_failed(execution_id, reason)
+            except Exception:
+                LOGGER.warning(
+                    "[judgment] failed to close the refused seat (execution=%s)",
+                    execution_id, exc_info=True,
+                )
+                outcome = OUTCOME_INDETERMINATE
+        return {"kind": kind, "playbook": playbook_name, "args": args,
+                "submitted": False, "reason": reason, "outcome": outcome,
                 "errors": errors, "applied_events": applied_events,
                 "execution_id": execution_id}
 

@@ -293,7 +293,9 @@ class SAIVerseManager(
         _all_stop = load_autonomy_all_stop(self)
         if _all_stop is None:
             # 読めなかった — 停止扱い (fail-closed)。キャッシュしないので、
-            # 自律ゲートは読めるようになるまで毎回読み直す。
+            # 自律ゲートは読めるようになるまで毎回読み直す。読めるようになったら
+            # 実行台帳の回復巡回が全ペルソナの AutonomyManager を立て直す
+            # (autonomy_wiring.resync_autonomy_after_unread_all_stop)。
             logging.error(
                 "Global autonomy all-stop setting could not be read: autonomy is "
                 "treated as stopped until it can be read (alarms still ring)."
@@ -712,6 +714,8 @@ class SAIVerseManager(
 
     def fire_tick(
         self, persona_id: str, assignment_text: Optional[str] = None,
+        *,
+        pre_generation_check: Optional[Callable[[], Optional[str]]] = None,
     ) -> Dict[str, Any]:
         """ティックを一発打つ (v0.4 計画 段 2 — 手で打つ入口)。
 
@@ -734,15 +738,25 @@ class SAIVerseManager(
             assignment_text: このティックの割り当て (「このティックは◯◯」と
                 いう確定情報の文)。None・空白だけなら Playbook の既定文
                 (自分のための時間である旨) になる — 問いは渡さない。
+            pre_generation_check: 生成の開始直前に **Beat ロックの内側**で
+                呼ぶ再検査 (run_meta_user の pre_generation_check — retry の
+                門番と同じ口)。拒否の理由 (str) を返したら Pulse を始めない。
+                自律の運転 (``AutonomyManager._run_tick``) が、Beat ロックを
+                待っている間に入った全停止・自律 OFF・ライフ終了・会話・
+                標準呼び出しの追い越しを見るために渡す。手で打つ入口 (API)
+                は渡さない。
 
         Returns:
-            ``{"action", "runtime_outcome", "error", "outputs"}``。
+            ``{"action", "runtime_outcome", "error", "outputs", "refusal"}``。
 
             - action: 受付の裁定 "execute" / "queued" / "skipped"、または
               "unavailable" (PulseController が無い・Discord の来訪者) /
               "error_before_submit" (受付の裁定の前に例外)。
-            - runtime_outcome: 実行の顛末 "completed" / "gate_closed" /
-              "cancelled" / "floor_unmet" / "error"。実行に入らなかった回は None。
+            - runtime_outcome: 実行の顛末 "completed" / "refused" /
+              "gate_closed" / "cancelled" / "floor_unmet" / "error"。実行に
+              入らなかった回は None。"refused" は ``pre_generation_check`` が
+              Beat ロックの内側で拒否した回 (Pulse は始まっていない)。
+            - refusal: "refused" の回の拒否の理由 (それ以外は None)。
             - error: 失敗の回だけ原因の文字列 (submit が投げた例外、または
               PulseController が握った失敗 — 器の ``tick`` Playbook が取れない等
               — の ``ExecutionRequest.runtime_error``)。
@@ -765,7 +779,10 @@ class SAIVerseManager(
             "[tick] firing a tick for persona=%s building=%s (assignment=%s)",
             persona_id, building_id, "given" if args else "free",
         )
-        outcome = self._submit_tick(persona, building_id, args or None)
+        outcome = self._submit_tick(
+            persona, building_id, args or None,
+            pre_generation_check=pre_generation_check,
+        )
         logging.info(
             "[tick] tick for persona=%s finished (action=%s outcome=%s%s)",
             persona_id, outcome["action"], outcome["runtime_outcome"],
@@ -775,6 +792,8 @@ class SAIVerseManager(
 
     def _submit_tick(
         self, persona, building_id: str, args: Optional[Dict[str, Any]],
+        *,
+        pre_generation_check: Optional[Callable[[], Optional[str]]] = None,
     ) -> Dict[str, Any]:
         """ティックの auto Pulse を submit し、観測欄から顛末を組む (:meth:`fire_tick`)。"""
         # 遅延 import: saiverse → sea の import 循環を避ける
@@ -785,17 +804,35 @@ class SAIVerseManager(
             # 来訪者の Pulse は DiscordConnector が扱う (:meth:`run_sea_auto` と
             # 同じ見張り)。
             return {"action": "unavailable", "runtime_outcome": None,
-                    "error": None, "outputs": None}
+                    "error": None, "outputs": None, "refusal": None}
         pulse_controller = getattr(self, "pulse_controller", None)
         if pulse_controller is None:
             return {"action": "unavailable", "runtime_outcome": None,
-                    "error": None, "outputs": None}
+                    "error": None, "outputs": None, "refusal": None}
+        # Beat ロックの内側の再検査 (run_meta_user の pre_generation_check)。
+        # 拒否したら run_meta_user は Pulse を始めずに空で返り、PulseController
+        # はそれを "completed" と記帳する — 拒否の事実はここで記録して、顛末を
+        # "refused" に読み替える (「走りきった」と区別する)。
+        refusals: List[str] = []
+        request_check = None
+        if pre_generation_check is not None:
+            def request_check() -> Optional[Dict[str, Any]]:
+                reason = pre_generation_check()
+                if reason is None:
+                    return None
+                refusals.append(str(reason))
+                return {
+                    "type": "tick_start_refused",
+                    "error_code": "autonomy_start_refused",
+                    "reason": str(reason),
+                }
         request = ExecutionRequest(
             type="auto",
             persona_id=persona.persona_id,
             building_id=building_id,
             meta_playbook="tick",
             args=args,
+            pre_generation_check=request_check,
         )
         try:
             outputs = pulse_controller.submit(request)
@@ -810,13 +847,18 @@ class SAIVerseManager(
                 ),
                 "error": str(exc) or type(exc).__name__,
                 "outputs": None,
+                "refusal": None,
             }
+        runtime_outcome = request.runtime_outcome
+        if refusals and runtime_outcome == "completed":
+            runtime_outcome = "refused"
         return {
             "action": request.dispatch_action,
-            "runtime_outcome": request.runtime_outcome,
+            "runtime_outcome": runtime_outcome,
             # 例外を投げずに失敗で閉じた回 (器の Playbook が取れない等) の原因。
             "error": request.runtime_error,
             "outputs": outputs,
+            "refusal": refusals[0] if refusals else None,
         }
 
     def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, args: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, pre_spells: Optional[List[str]] = None, pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None) -> List[str]:

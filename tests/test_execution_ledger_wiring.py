@@ -1067,3 +1067,72 @@ class TestLegacySlotFireRows:
         wiring.run_startup_recovery(manager)
 
         assert ledger.get_execution(eid)["status"] == XL.STATUS_UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 2 巡目 ⑦: 起動時の全停止の読み失敗 →
+# DB 回復 → 回復巡回でティックの運転 (AutonomyManager) が戻る
+# ---------------------------------------------------------------------------
+
+
+class _FlakySessions:
+    """broken の間は session の生成で落ちる session factory (DB 障害の代役)。"""
+
+    def __init__(self, factory):
+        self._factory = factory
+        self.broken = True
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.broken:
+            raise RuntimeError("database is locked")
+        return self._factory()
+
+
+def _autonomy_ready_manager(manager):
+    from saiverse.saiverse_manager import SAIVerseManager
+
+    manager.personas[PERSONA_ID].autonomy_enabled = True
+    manager._started = True
+    manager._autonomy_managers = {}
+    manager.ensure_autonomy_for = SAIVerseManager.ensure_autonomy_for.__get__(manager)
+    return manager
+
+
+@pytest.mark.parametrize("first_reader", ["recovery_tick", "api_get"])
+def test_recovery_tick_restores_autonomy_after_an_unreadable_all_stop(
+    manager, session_factory, first_reader,
+):
+    from saiverse import autonomy_wiring as aw
+
+    _autonomy_ready_manager(manager)
+    flaky = _FlakySessions(session_factory)
+    manager.SessionLocal = flaky
+
+    # 起動時の読みが失敗: fail-closed で見張りが立たない
+    assert aw.load_autonomy_all_stop(manager) is None
+    manager.ensure_autonomy_for(PERSONA_ID)
+    assert PERSONA_ID not in manager._autonomy_managers
+
+    # DB がまだ落ちている間の巡回は何も立てない (次の巡回で再試行)
+    wiring._recovery_tick(manager)
+    assert PERSONA_ID not in manager._autonomy_managers
+
+    flaky.broken = False
+    if first_reader == "api_get":
+        # 画面の GET が先に読み直してキャッシュが載っても、運転は戻らない —
+        # 戻すのは回復巡回の再同期
+        assert aw.is_autonomy_all_stopped(manager) is False
+        assert PERSONA_ID not in manager._autonomy_managers
+    wiring._recovery_tick(manager)
+    am = manager._autonomy_managers[PERSONA_ID]
+    assert am.is_running
+    assert manager._autonomy_all_stop is False
+
+    # 読めている間の巡回は全停止の DB を読まない (属性を見るだけ)
+    am.stop()
+    calls_before = flaky.calls
+    aw.resync_autonomy_after_unread_all_stop(manager)
+    assert flaky.calls == calls_before
+    assert not am.is_running  # 再同期もしない

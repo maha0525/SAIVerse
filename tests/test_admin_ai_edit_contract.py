@@ -459,5 +459,116 @@ class AdminAiEditContractTest(unittest.TestCase):
             )
 
 
+
+class AdminAutonomyWriterSerializationTest(unittest.TestCase):
+    """`update_ai` の AUTONOMY_ENABLED は、ほかの自律の設定の書き手 (ライフ設定・
+    停止ボタン・全停止) と同じ自律の設定ロックの区間で、DB の読み直し・commit・
+    公開・再同期を行う (2026-10-12 Codex 敵対レビュー 段 3 2 巡目 high)。
+
+    旧実装はモデルの設定ロックだけで commit・公開していたので、「エディタの ON
+    commit → ライフ設定の OFF commit・公開 → エディタの古い ON 公開」の並びで
+    DB=OFF・実効ゲート=ON が残った。
+    """
+
+    def setUp(self):
+        from unittest.mock import patch
+
+        from saiverse import model_configs, persona_model_selection
+
+        definitions = patch.dict(model_configs.MODEL_CONFIGS, _MODEL_DEFINITIONS)
+        definitions.start()
+        self.addCleanup(definitions.stop)
+        reapply = patch.object(
+            persona_model_selection, "reapply_speaking_models",
+            lambda *a, **k: SimpleNamespace(notices=lambda: []),
+        )
+        reapply.start()
+        self.addCleanup(reapply.stop)
+
+        self.engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(self.engine)
+        self.SessionLocal = sessionmaker(bind=self.engine)
+        self.addCleanup(self.engine.dispose)
+        db = self.SessionLocal()
+        try:
+            db.add(User(USERID=1, PASSWORD="x", USERNAME="u"))
+            db.flush()
+            db.add(City(CITYID=1, USERID=1, CITY_SLUG="city_a", UI_PORT=3000, API_PORT=8000))
+            db.add(AI(AIID=AI_ID, HOME_CITYID=1, AINAME="Air", AUTONOMY_ENABLED=False))
+            db.commit()
+        finally:
+            db.close()
+
+        self.persona = SimpleNamespace(persona_id=AI_ID, autonomy_enabled=False, model=None)
+        self.admin = _make_admin(self.SessionLocal)
+        self.admin.personas[AI_ID] = self.persona
+        self.synced = []
+        self.admin.manager = SimpleNamespace(
+            SessionLocal=self.SessionLocal,
+            personas=self.admin.personas,
+            ensure_autonomy_for=lambda pid: self.synced.append(
+                (pid, self.persona.autonomy_enabled)
+            ),
+        )
+
+    def _db_value(self):
+        db = self.SessionLocal()
+        try:
+            return bool(db.query(AI).filter(AI.AIID == AI_ID).one().AUTONOMY_ENABLED)
+        finally:
+            db.close()
+
+    def test_editor_save_waits_for_the_autonomy_lock_and_db_matches_memory(self):
+        import threading
+
+        from saiverse import autonomy_wiring
+
+        results = []
+        editor = threading.Thread(target=lambda: results.append(self.admin.update_ai(
+            AI_ID, name="Air", description="", system_prompt="", home_city_id=1,
+            default_model="gemini-2.0-flash", lightweight_model="gemini-2.0-flash-lite",
+            autonomy_enabled=True, avatar_path=None, avatar_upload=None,
+        )))
+        with autonomy_wiring.autonomy_setting_lock():
+            editor.start()
+            editor.join(timeout=0.3)
+            # 自律の欄の書きは、ほかの書き手が区間を持っている間は始まらない
+            self.assertTrue(editor.is_alive())
+            self.assertFalse(self._db_value())
+            # その区間の中で、ライフ設定の保存が OFF を書いた (もとから OFF)
+            autonomy_wiring.set_persona_autonomy_enabled(
+                self.admin.manager, AI_ID, False,
+            )
+        editor.join(timeout=5)
+        self.assertFalse(editor.is_alive())
+
+        # エディタの ON が最後に書かれ、DB とメモリと再同期が同じ値を見ている
+        self.assertTrue(self._db_value())
+        self.assertTrue(self.persona.autonomy_enabled)
+        self.assertEqual(self.synced, [(AI_ID, True)])
+        self.assertIn("Autonomy changed from False to True", results[0])
+
+    def test_editor_save_rereads_the_row_inside_the_lock(self):
+        """エディタが古い OFF を送っても、ロックの中で行を読み直して比較するので、
+        その間にライフ設定が ON にした値との差分として正しく書く。"""
+        from saiverse import autonomy_wiring
+
+        autonomy_wiring.set_persona_autonomy_enabled(self.admin.manager, AI_ID, True)
+        self.synced.clear()
+        result = self.admin.update_ai(
+            AI_ID, name="Air", description="", system_prompt="", home_city_id=1,
+            default_model="gemini-2.0-flash", lightweight_model="gemini-2.0-flash-lite",
+            autonomy_enabled=False, avatar_path=None, avatar_upload=None,
+        )
+        self.assertFalse(self._db_value())
+        self.assertFalse(self.persona.autonomy_enabled)
+        self.assertEqual(self.synced, [(AI_ID, False)])
+        self.assertIn("Autonomy changed from True to False", result)
+
+
 if __name__ == "__main__":
     unittest.main()

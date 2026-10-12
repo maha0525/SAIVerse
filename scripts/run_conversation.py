@@ -272,6 +272,7 @@ class SyncJudgmentDispatcher:
         meta_playbook: str,
         args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        pre_generation_check: Optional[Callable[[], Optional[Dict[str, Any]]]] = None,
     ) -> Optional[List[str]]:
         persona = self._require_persona(persona_id)
         return self.manager.sea_runtime.run_meta_user(
@@ -282,6 +283,7 @@ class SyncJudgmentDispatcher:
             args=args,
             event_callback=event_callback,
             pulse_type="meta_judgment",
+            pre_generation_check=pre_generation_check,
         )
 
     def submit_user(
