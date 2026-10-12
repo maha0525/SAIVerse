@@ -449,9 +449,10 @@ def _print_import_summary(
         if shortfall > total_deferred:
             # ベクトル行ごと無い欠落 (バックフィル失敗など) は、起動時警告にも
             # 通常の再計算にも掛からない。このスクリプトの再実行か --force で埋める。
+            # 「このスクリプトの再実行」は案内しない — 既定では既存メッセージを
+            # 検出してバックフィル前に終了するため、回復にならない。
             print(
                 f"  残りの {shortfall - total_deferred} 件はベクトル行ごと欠けています。"
-                "このスクリプトを再実行するか、"
                 "python scripts/reembed_memory.py <persona_id> --force で埋めてください。"
             )
     else:
