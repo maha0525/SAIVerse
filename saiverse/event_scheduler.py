@@ -295,6 +295,36 @@ class EventScheduler:
             # 起きてからスキップして次のエントリを見るだけなので問題なし。
             return True
 
+    def cancel_if_fire_at(self, key: str, expected_fire_at: datetime) -> bool:
+        """有効な予約の発火時刻が ``expected_fire_at`` と一致するときだけ消す (CAS)。
+
+        :meth:`cancel` との違いは、判定と取り消しを同じロック区間で行い、
+        **自分が張った予約だけ**を消すこと。用途は発火したワーカーの後始末 —
+        ワーカーが「この予約はもう要らない」と判断してから消すまでの間に、
+        別の経路 (自律の再開の再同期・ライフ開始の節目) が同じ key に新しい予約を
+        張っていたら、それは消さない (2026-10-12 Codex 敵対レビュー 段 3 3 巡目
+        medium — 古い拒否の後始末が、再開後の新しいティックの予約を消していた)。
+        「全部消す」が正しい場面 (停止・ライフ終了の節目) は :meth:`cancel` を使う。
+
+        Returns:
+            一致する有効な予約があって消したら True。無い・時刻が違うなら False。
+        """
+        expected_ts = expected_fire_at.timestamp()
+        with self._cond:
+            entry = self._entries_by_key.get(key)
+            if entry is None or entry.cancelled:
+                return False
+            if abs(entry.fire_at_ts - expected_ts) > 1e-6:
+                LOGGER.debug(
+                    "[event_scheduler] cancel_if_fire_at key=%s skipped "
+                    "(armed at a different time)", key,
+                )
+                return False
+            self._entries_by_key.pop(key, None)
+            entry.cancelled = True
+            LOGGER.debug("[event_scheduler] cancel_if_fire_at key=%s", key)
+            return True
+
     def cancel_prefix(self, prefix: str) -> list[str]:
         """key が prefix で始まる有効な予約を全てキャンセルし、key のリストを返す。
 

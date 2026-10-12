@@ -55,7 +55,10 @@ LOGGER = logging.getLogger(__name__)
 #: 設定の書き換えと決め直しを一件ずつ順番に処理するロック (決まったこと 5)。
 #: 再入可能: .env の書き換えやペルソナ設定の保存、モデルやプロバイダの設定の読み直しの
 #: 中から決め直しを呼ぶ。取る順番はこのロックが先で、ペルソナの接続のロック
-#: (``_model_client_lock``) が後。
+#: (``_model_client_lock``) が後。自律の設定ロック
+#: (``saiverse.autonomy_wiring._AUTONOMY_SETTING_LOCK``) とも、このロックが先で
+#: 自律の設定ロックが後 (ペルソナ設定の保存が自律の値を同じ commit に畳むため。
+#: 約束の本文は autonomy_wiring 側の定義にある)。
 MODEL_SETTINGS_LOCK = threading.RLock()
 
 #: 話す標準モデルをどの設定から決めたか

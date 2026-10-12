@@ -100,7 +100,11 @@ def update_persona_config(
     new_video_model = req.video_model if req.video_model is not None else UNSET
     new_memory_weave_model = req.memory_weave_model if req.memory_weave_model is not None else UNSET
     new_reflex_judgment_model = req.reflex_judgment_model if req.reflex_judgment_model is not None else UNSET
-    new_autonomy_enabled = req.autonomy_enabled if req.autonomy_enabled is not None else current["AUTONOMY_ENABLED"]
+    # 自律の欄もモデル欄と同じく、省かれたら UNSET (= 触らない — 書き込み自体を
+    # しない)。現在値で詰め直すと、この読みと保存の間に入った停止ボタンや
+    # ライフ設定の OFF を古い ON で巻き戻す (2026-10-12 Codex 敵対レビュー
+    # 段 3 3 巡目 high)。
+    new_autonomy_enabled = req.autonomy_enabled if req.autonomy_enabled is not None else UNSET
     new_avatar = req.avatar_path if req.avatar_path is not None else current.get("AVATAR_IMAGE")
     new_appearance = req.appearance_image_path if req.appearance_image_path is not None else current.get("APPEARANCE_IMAGE_PATH")
     

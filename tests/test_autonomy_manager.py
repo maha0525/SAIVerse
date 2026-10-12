@@ -39,10 +39,14 @@ from saiverse import autonomy_wiring as wiring
 from saiverse import clock, day_plan, task_book
 from saiverse import user_conversation as uc
 from saiverse.autonomy_manager import (
+    ASSIGNMENT_DEADLINE,
+    ASSIGNMENT_FREE,
+    ASSIGNMENT_SYSTEM,
     WATCHDOG_INTERVAL_MINUTES,
     AutonomyManager,
     AutonomyState,
     TaskBookUnreadable,
+    TickAssignment,
     build_tick_assignment,
     tick_reservation_key,
     watchdog_reservation_key,
@@ -493,13 +497,18 @@ def test_assignment_takes_the_deadline_first_then_system_task_then_free(manager)
     now = BASE + timedelta(hours=10)
     horizon = now + timedelta(minutes=30)
     clock.enable_virtual(now)
-    assert build_tick_assignment(manager, PERSONA_ID, now=now, horizon=horizon) is None
+    free = build_tick_assignment(manager, PERSONA_ID, now=now, horizon=horizon)
+    assert free == TickAssignment(text=None, kind=ASSIGNMENT_FREE)
 
-    task_book.add_entry(
+    system_entry = task_book.add_entry(
         manager, PERSONA_ID, "自己定義の聞き取りに答える", origin=task_book.ORIGIN_SYSTEM,
     )
-    text = build_tick_assignment(manager, PERSONA_ID, now=now, horizon=horizon)
-    assert text == "この時間は、システムからの依頼「自己定義の聞き取りに答える」に使います。"
+    got = build_tick_assignment(manager, PERSONA_ID, now=now, horizon=horizon)
+    assert got.text == "この時間は、システムからの依頼「自己定義の聞き取りに答える」に使います。"
+    assert got.kind == ASSIGNMENT_SYSTEM
+    assert got.task_id == system_entry["task_id"]
+    assert got.resolves_on_completion is True
+    assert got.is_deadline is False
 
     # 期限が次のティックより先の一件は引かない (システムタスクのまま)
     task_book.add_entry(
@@ -508,29 +517,33 @@ def test_assignment_takes_the_deadline_first_then_system_task_then_free(manager)
     )
     assert "システムからの依頼" in build_tick_assignment(
         manager, PERSONA_ID, now=now, horizon=horizon,
-    )
+    ).text
 
     # 次のティックまでに期限が来る一件は、システムタスクより先に引く
-    task_book.add_entry(
+    diary = task_book.add_entry(
         manager, PERSONA_ID, "日記の返事を書く", origin="user", counterpart="user",
         due_at=_epoch(now + timedelta(minutes=20)),
     )
-    text = build_tick_assignment(manager, PERSONA_ID, now=now, horizon=horizon)
-    assert text == (
+    got = build_tick_assignment(manager, PERSONA_ID, now=now, horizon=horizon)
+    assert got.text == (
         "この時間は、タスク帳の一件「日記の返事を書く」に使います。"
         "期限は 2026-07-04 10:20 です。"
     )
+    assert got.kind == ASSIGNMENT_DEADLINE and got.is_deadline
+    assert got.task_id == diary["task_id"]
+    assert got.resolves_on_completion is False
 
     # 期限を過ぎた一件が最優先 (最も期限の早い一件)
     task_book.add_entry(
         manager, PERSONA_ID, "請求書をまとめる", origin="user", counterpart="user",
         due_at=_epoch(now - timedelta(hours=1)),
     )
-    text = build_tick_assignment(manager, PERSONA_ID, now=now, horizon=horizon)
-    assert text == (
+    got = build_tick_assignment(manager, PERSONA_ID, now=now, horizon=horizon)
+    assert got.text == (
         "この時間は、タスク帳の一件「請求書をまとめる」に使います。"
         "期限の 2026-07-04 09:00 はもう過ぎています。"
     )
+    assert got.is_deadline
 
 
 def test_assignment_reaches_fire_tick(manager, session_factory):
@@ -894,7 +907,7 @@ def test_all_stop_after_the_gate_does_not_start_the_tick(
 
     def _assign_then_stop(mgr, persona_id, *, now, horizon):
         mgr._autonomy_all_stop = True  # 引き当ての最中に全停止された
-        return None
+        return TickAssignment(text=None, kind=ASSIGNMENT_FREE)
 
     monkeypatch.setattr(am_module, "build_tick_assignment", _assign_then_stop)
     _fire_tick_reservation(manager)
@@ -907,7 +920,8 @@ def test_all_stop_after_the_gate_does_not_start_the_tick(
 def test_conversation_opened_after_the_gate_does_not_start_the_tick(
     manager, session_factory, monkeypatch,
 ):
-    """② 引き当ての最中に会話が開いたら fire_tick を呼ばない (予約は残る)。"""
+    """② 引き当ての最中に会話が開いたら fire_tick を呼ばない (予約は残る)。
+    会話の検査は引き当ての後に行う (3 巡目 — 締め切りの回は会話中でも打つため)。"""
     am = _running_life(manager, session_factory)
     from saiverse import autonomy_manager as am_module
 
@@ -915,9 +929,29 @@ def test_conversation_opened_after_the_gate_does_not_start_the_tick(
         uc._set_open_conversation(
             mgr, persona_id, building_id="alice_room", participants=["user"],
         )
-        return None
+        return TickAssignment(text=None, kind=ASSIGNMENT_FREE)
 
     monkeypatch.setattr(am_module, "build_tick_assignment", _assign_then_talk)
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls == []
+    assert am.last_report.reason == "in conversation"
+    assert _tick_at(manager) == clock.now() + timedelta(minutes=30)
+
+
+def test_conversation_opened_while_waiting_for_the_beat_does_not_start_the_tick(
+    manager, session_factory,
+):
+    """② Beat ロックを待つ間に会話が開いたら、Beat 内の再検査が生成を止める
+    (締め切りの無い回)。予約は残る。"""
+    _mark_self_defined(session_factory)
+    am = _running_life(manager, session_factory)
+
+    def _talk_while_waiting():
+        uc._set_open_conversation(
+            manager, PERSONA_ID, building_id="alice_room", participants=["user"],
+        )
+
+    manager.fire_tick = FakeTicks(manager, beat_wait=_talk_while_waiting)
     _fire_tick_reservation(manager)
     assert manager.fire_tick.calls == []
     assert am.last_report.reason == "in conversation before start"
@@ -1178,3 +1212,203 @@ def test_rearming_the_tick_after_a_resume_reconciles_the_keepalive(
     # 予約が生きている間の見張りは張らない = 再照合もしない
     wiring.watchdog_tick(manager, PERSONA_ID)
     assert lifecycle.reconciled == [PERSONA_ID]
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 3 巡目: システムタスクの機械的な解消 (high 2)、
+# 会話ゲートは締め切りの無い回だけ (medium 1)、予約の取り消しを CAS に (medium 3)
+# ---------------------------------------------------------------------------
+
+
+def _entry(manager, task_id):
+    return task_book.get_entry(manager, PERSONA_ID, task_id)
+
+
+def test_a_completed_tick_resolves_the_self_definition_task_and_frees_the_next(
+    manager, session_factory,
+):
+    """high 2: 自己定義の聞き取り (システムタスク第一号) は、割り当てられた
+    ティックが走りきったら機械が済にする。次のティックは自由時間になる (旧実装は
+    同じ依頼を永久に割り当て続けた)。"""
+    _running_life(manager, session_factory)
+    (entry,) = _self_definition_tasks(manager)
+
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls[0]["assignment"] == (
+        f"この時間は、システムからの依頼「{day_plan.SELF_DEFINITION_TASK_CONTENT}」に使います。"
+    )
+    closed = _entry(manager, entry["task_id"])
+    assert closed["status"] == task_book.STATUS_DONE
+    assert closed["outcome"] == AutonomyManager.SYSTEM_TASK_TICK_OUTCOME
+
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls[1]["assignment"] is None
+    assert manager._autonomy_managers[PERSONA_ID].last_report.reason == "free"
+
+
+def test_a_tick_that_did_not_run_through_keeps_the_system_task(
+    manager, session_factory,
+):
+    """high 2: 走りきらなかった回 (not_completed・生成前の拒否) はシステムタスクを
+    閉じない — 次のティックが同じ件をまた引く。"""
+    am = _running_life(manager, session_factory)
+    (entry,) = _self_definition_tasks(manager)
+
+    manager.fire_tick = FakeTicks(
+        manager, outcome={"action": "execute", "runtime_outcome": "error",
+                          "error": "boom", "outputs": None},
+        standard_call=False,
+    )
+    _fire_tick_reservation(manager)
+    assert am.last_report.status == "not_completed"
+    assert _entry(manager, entry["task_id"])["status"] == task_book.STATUS_OPEN
+
+    def _conversation_call_while_waiting():
+        am.notify_standard_call()  # Beat 待ちの間に標準呼び出し = 見送り
+
+    manager.fire_tick = FakeTicks(manager, beat_wait=_conversation_call_while_waiting)
+    _fire_tick_reservation(manager)
+    assert am.last_report.reason == "superseded by a standard call before start"
+    assert _entry(manager, entry["task_id"])["status"] == task_book.STATUS_OPEN
+
+    manager.fire_tick = FakeTicks(manager)
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls[0]["assignment"] == (
+        f"この時間は、システムからの依頼「{day_plan.SELF_DEFINITION_TASK_CONTENT}」に使います。"
+    )
+    assert _entry(manager, entry["task_id"])["status"] == task_book.STATUS_DONE
+
+
+def test_an_on_event_system_task_is_resolved_the_same_way(manager, session_factory):
+    """high 2: on_event 由来のシステムタスク (判断の結果として機械が積んだ依頼) も
+    同じく、割り当てたティックが走りきったら済になる。"""
+    _mark_self_defined(session_factory)
+    _running_life(manager, session_factory)
+    entry = task_book.add_system_task(
+        manager, PERSONA_ID, "届いた手紙に目を通す", idem_key="on_event:test-1",
+    )
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls[0]["assignment"] == (
+        "この時間は、システムからの依頼「届いた手紙に目を通す」に使います。"
+    )
+    assert _entry(manager, entry["task_id"])["status"] == task_book.STATUS_DONE
+
+
+def test_deadline_tasks_are_not_resolved_by_the_tick(manager, session_factory):
+    """締め切りのある件は済にしない — 未完なら台帳に残り、次の空きティックが
+    自然に同じ件を引く (v3 §5)。期限つきのシステムタスクも同じ。"""
+    _mark_self_defined(session_factory)
+    _running_life(manager, session_factory)  # 07:00、ティックは 07:30
+    due_soon = task_book.add_entry(
+        manager, PERSONA_ID, "日記の返事を書く", origin="user", counterpart="user",
+        due_at=_epoch(BASE + timedelta(hours=7, minutes=45)),
+    )
+    dated_system = task_book.add_entry(
+        manager, PERSONA_ID, "月末の整理", origin=task_book.ORIGIN_SYSTEM,
+        due_at=_epoch(BASE + timedelta(days=3)),
+    )
+    _fire_tick_reservation(manager)
+    assert "日記の返事を書く" in manager.fire_tick.calls[0]["assignment"]
+    assert _entry(manager, due_soon["task_id"])["status"] == task_book.STATUS_OPEN
+
+    task_book.withdraw_entry(manager, PERSONA_ID, due_soon["task_id"])
+    _fire_tick_reservation(manager)
+    assert "月末の整理" in manager.fire_tick.calls[1]["assignment"]
+    assert _entry(manager, dated_system["task_id"])["status"] == task_book.STATUS_OPEN
+
+
+def test_a_deadline_tick_runs_during_an_open_conversation(manager, session_factory):
+    """medium 1: 会話中に打たないのは締め切りの無い回だけ (計画 §5 段 3-5)。
+    期限の迫った一件を引いた回は、会話が開いていても打つ。Beat 待ちの間に会話が
+    開いても止めない。"""
+    _mark_self_defined(session_factory)
+    am = _running_life(manager, session_factory)  # ティックは 07:30
+    task_book.add_entry(
+        manager, PERSONA_ID, "日記の返事を書く", origin="user", counterpart="user",
+        due_at=_epoch(BASE + timedelta(hours=7, minutes=45)),
+    )
+    uc._set_open_conversation(
+        manager, PERSONA_ID, building_id="alice_room", participants=["user"],
+    )
+    _fire_tick_reservation(manager)
+    assert am.last_report.status == "completed"
+    assert "日記の返事を書く" in manager.fire_tick.calls[0]["assignment"]
+
+    # Beat 待ちの間に会話が開いても、締め切りの回は止めない
+    uc.clear_open_conversation(manager, PERSONA_ID)
+
+    def _talk_while_waiting():
+        uc._set_open_conversation(
+            manager, PERSONA_ID, building_id="alice_room", participants=["user"],
+        )
+
+    manager.fire_tick = FakeTicks(manager, beat_wait=_talk_while_waiting)
+    _fire_tick_reservation(manager)  # 08:00 — 期限 07:45 を過ぎた一件
+    assert manager.fire_tick.refused == []
+    assert "もう過ぎています" in manager.fire_tick.calls[0]["assignment"]
+    assert am.last_report.status == "completed"
+
+
+def test_a_free_tick_during_an_open_conversation_is_still_skipped(
+    manager, session_factory,
+):
+    """medium 1 の対照: 締め切りの無い回 (自由時間) は会話中は見送る。期限が
+    次のティックより先の一件は締め切りの回にならない。"""
+    _mark_self_defined(session_factory)
+    am = _running_life(manager, session_factory)
+    task_book.add_entry(
+        manager, PERSONA_ID, "挿絵を仕上げる", origin="user", counterpart="user",
+        due_at=_epoch(BASE + timedelta(hours=12)),
+    )
+    uc._set_open_conversation(
+        manager, PERSONA_ID, building_id="alice_room", participants=["user"],
+    )
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls == []
+    assert am.last_report.reason == "in conversation"
+    assert _tick_at(manager) == clock.now() + timedelta(minutes=30)
+
+
+def test_an_old_refusal_does_not_cancel_the_reservation_armed_by_a_resume(
+    manager, session_factory,
+):
+    """medium 3 (レビューの再現): ゲートが自律 OFF を観測して返った後、取り消しの
+    前に別スレッドが OFF→ON を保存し、再同期 (stop → start) と見張りが新しい
+    予約を張った。古い発火の後始末は自分が張った予約だけを消すので、新しい
+    予約は生き残る (旧実装は同じ key を無条件に消し、再開の時刻が後退した)。"""
+    am = _running_life(manager, session_factory)  # ティックは 07:30
+    persona = manager.personas[PERSONA_ID]
+    persona.autonomy_enabled = False
+    original_gate = am._check_gate
+    resumed: Dict[str, Any] = {}
+
+    def _gate_then_resume(now, **kwargs):
+        result = original_gate(now, **kwargs)
+        if result[0] == "autonomy off" and not resumed:
+            persona.autonomy_enabled = True
+            am.stop()
+            assert am.start() is True
+            clock.advance_to(clock.now() + timedelta(minutes=1))
+            assert am.arm_tick_if_absent() is True
+            resumed["at"] = _tick_at(manager)
+        return result
+
+    am._check_gate = _gate_then_resume
+    # 07:30 の発火がワーカーへ手渡された (予約は辞書から外れている)。run_due で
+    # 回すと再開で即時に張られた見張りまで同じ回で走るので、ワーカーを直接呼ぶ。
+    clock.advance_to(_tick_at(manager))
+    manager.event_scheduler.cancel(tick_reservation_key(PERSONA_ID))
+    am._handle_tick()
+    assert am.last_report.reason == "autonomy off"
+    assert resumed["at"] == BASE + timedelta(hours=8, minutes=1)
+    assert _tick_at(manager) == resumed["at"]
+
+
+def test_a_refusal_still_cancels_its_own_reservation(manager, session_factory):
+    """medium 3 の対照: 割り込みが無ければ、拒否した発火は自分が張った予約を
+    従来どおり消す。"""
+    am = _running_life(manager, session_factory)
+    manager.personas[PERSONA_ID].autonomy_enabled = False
+    _fire_tick_reservation(manager)
+    assert am.last_report.reason == "autonomy off"
+    assert _tick_at(manager) is None

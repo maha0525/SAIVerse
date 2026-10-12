@@ -440,6 +440,39 @@ class LifeSettingsApiTest(unittest.TestCase):
             wake_row.params, {"tick_interval_minutes": 45, "life_mode_override": "even"},
         )
 
+    def test_autonomy_save_failure_saves_nothing_else(self):
+        """自律の値は起床・就寝の行と同じ一回の commit で確定する — 自律の書きが
+        失敗したら起床・就寝も保存されず、予約も公開も起きない (2026-10-12 Codex
+        敵対レビュー 段 3 3 巡目 medium: 旧実装は起床・就寝を先に commit して
+        から自律を別保存し、500 を返しながら起床だけが確定していた)。"""
+        from saiverse import autonomy_wiring
+
+        def _boom(db, persona_id, enabled):
+            raise RuntimeError("autonomy write failed")
+
+        original = autonomy_wiring.stage_persona_autonomy_enabled
+        autonomy_wiring.stage_persona_autonomy_enabled = _boom
+        try:
+            resp = self.client.put(
+                self._url(), json={"wake": "07:00", "close": "22:00", "autonomy_enabled": True},
+            )
+        finally:
+            autonomy_wiring.stage_persona_autonomy_enabled = original
+        self.assertEqual(resp.status_code, 500, resp.text)
+        self.assertEqual(self._rows(LIFE_START_SCHEDULE_PLAYBOOK), [])
+        self.assertEqual(self._rows(LIFE_END_SCHEDULE_PLAYBOOK), [])
+        self.assertIs(self._autonomy_in_db(), False)
+        self.assertIs(self.persona.autonomy_enabled, False)
+        self.assertEqual(self.ensure_calls, [])
+
+    def test_autonomy_and_wake_are_saved_together(self):
+        body = self._put({"wake": "07:00", "close": "22:00", "autonomy_enabled": True})
+        self.assertIs(body["autonomy_enabled"], True)
+        self.assertEqual(len(self._rows(LIFE_START_SCHEDULE_PLAYBOOK)), 1)
+        self.assertIs(self._autonomy_in_db(), True)
+        self.assertIs(self.persona.autonomy_enabled, True)
+        self.assertEqual(self.ensure_calls, [PERSONA_ID])
+
     def test_autonomy_setting_is_shown_as_set_even_under_the_global_all_stop(self):
         """表示するのは設定値 (全停止の門は通さない)。"""
         self.manager._autonomy_all_stop = True

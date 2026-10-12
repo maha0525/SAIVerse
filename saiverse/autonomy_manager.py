@@ -19,10 +19,13 @@ autonomous_behavior_v3.md §5) で、旧「50 分間隔の watchdog タイマー
    - 発火したら、まず記録された最後の標準呼び出しに追い越されていないかを
      見て (追い越されていれば正しい期限へ張り直して見送る)、次回を
      max(発火時刻, 最後の標準呼び出し) + T で張り直し、ゲート (全停止・自律
-     OFF・ライフ外・会話中) を見て、通ればタスク帳から割り当てを引き当て、
-     ``SAIVerseManager.fire_tick`` を呼ぶ。生成開始の直前 (Beat ロックの内側)
-     にゲートと標準呼び出しの追い越しをもう一度見る。温めずに終わった回と、
-     予約を張り直した回は keep-alive の見張りを再照合する
+     OFF・ライフ外) を見て、通ればタスク帳から割り当てを引き当て、締め切りの
+     一件を引いた回でなければ会話中かを見て (会話中に打たないのは締め切りの
+     無い回だけ — 計画 §5 段 3-5)、``SAIVerseManager.fire_tick`` を呼ぶ。
+     生成開始の直前 (Beat ロックの内側) にゲートと標準呼び出しの追い越しを
+     もう一度見る。走りきった回が期限の無いシステムタスクを引いていたら、
+     そのタスクを機械が済にする。温めずに終わった回と、予約を張り直した回は
+     keep-alive の見張りを再照合する
 
 2. **見張り** (key ``autonomy-watchdog:{persona_id}``、固定間隔
    :data:`WATCHDOG_INTERVAL_MINUTES`)。中身は ``PulseDispatcher.dispatch_autonomy_tick``
@@ -117,20 +120,62 @@ class TaskBookUnreadable(Exception):
     """タスク帳が読めなかった (引き当ての結果が分からない)。"""
 
 
+#: 引き当ての種類 — 締め切りの迫った一件 / システムタスク / 自由時間。
+ASSIGNMENT_DEADLINE = "deadline"
+ASSIGNMENT_SYSTEM = "system"
+ASSIGNMENT_FREE = "free"
+
+
+@dataclass(frozen=True)
+class TickAssignment:
+    """ティック 1 回の引き当ての結果。
+
+    - ``text``: 割り当て文 (自由時間は None — Playbook の既定文)
+    - ``kind``: :data:`ASSIGNMENT_DEADLINE` / :data:`ASSIGNMENT_SYSTEM` /
+      :data:`ASSIGNMENT_FREE`
+    - ``task_id``: 引いた一件 (自由時間は None)
+    - ``due_at``: 引いた一件の期限 (epoch 秒。期限なしは None)
+    """
+    text: Optional[str]
+    kind: str
+    task_id: Optional[str] = None
+    due_at: Optional[int] = None
+
+    @property
+    def is_deadline(self) -> bool:
+        """締め切りの迫った (過ぎた) 一件を引いた回か — 会話中でも打つ回。"""
+        return self.kind == ASSIGNMENT_DEADLINE
+
+    @property
+    def resolves_on_completion(self) -> bool:
+        """ティックが走りきったら機械が「済」にする一件か。
+
+        期限の無いシステムタスクだけ。締め切りのある件は済にしない — 未完なら
+        台帳に残り、次の空きティックが自然に同じ件を引く (v3 §5)。
+        """
+        return (
+            self.kind == ASSIGNMENT_SYSTEM
+            and self.task_id is not None
+            and self.due_at is None
+        )
+
+
 def build_tick_assignment(
     manager: Any, persona_id: str, *, now: datetime, horizon: datetime,
-) -> Optional[str]:
-    """このティックの割り当て文を、タスク帳から機械的に引き当てる。
+) -> TickAssignment:
+    """このティックの割り当てを、タスク帳から機械的に引き当てる。
 
-    順序 (決定論、v3 §5): **締め切り** → **システムタスク** → 無ければ None
-    (自由時間 — Playbook の既定文)。
+    順序 (決定論、v3 §5): **締め切り** → **システムタスク** → 無ければ自由時間
+    (``text`` は None — Playbook の既定文)。
 
     - 締め切り: 期限のある open な一件のうち、期限が既に過ぎているか、次の
       ティックまで (``horizon`` = now + T) に期限が来るもの。最も期限の早い一件
     - システムタスク: 機械からの急ぎでない依頼 (ORIGIN='system') の先頭 (作成順)
 
     割り当て文は確定情報の文 (「この時間は〜に使います」) で、問いは渡さない
-    (v3 §5 — v1 の病因 2 を踏まない)。
+    (v3 §5 — v1 の病因 2 を踏まない)。引いた一件の素性 (task_id・種類・期限) も
+    返す — 会話中に打つか (締め切りの回だけ) と、走りきった後に機械が済にするか
+    (期限の無いシステムタスクだけ) を呼び手が決めるため。
 
     Raises:
         TaskBookUnreadable: タスク帳を読めなかった (テーブルが無いのは空として
@@ -156,19 +201,31 @@ def build_tick_assignment(
         if isinstance(due_at, int) and due_at <= horizon_epoch:
             content = str(nearest.get("content") or "").strip()
             if due_at <= now_epoch:
-                return (
+                text = (
                     f"この時間は、タスク帳の一件「{content}」に使います。"
                     f"期限の {_format_due(due_at)} はもう過ぎています。"
                 )
-            return (
-                f"この時間は、タスク帳の一件「{content}」に使います。"
-                f"期限は {_format_due(due_at)} です。"
+            else:
+                text = (
+                    f"この時間は、タスク帳の一件「{content}」に使います。"
+                    f"期限は {_format_due(due_at)} です。"
+                )
+            return TickAssignment(
+                text=text, kind=ASSIGNMENT_DEADLINE,
+                task_id=nearest.get("task_id"), due_at=due_at,
             )
     system_tasks = _read(task_book.list_open_system_tasks)
     if system_tasks:
-        content = str(system_tasks[0].get("content") or "").strip()
-        return f"この時間は、システムからの依頼「{content}」に使います。"
-    return None
+        first = system_tasks[0]
+        content = str(first.get("content") or "").strip()
+        due_at = first.get("due_at")
+        return TickAssignment(
+            text=f"この時間は、システムからの依頼「{content}」に使います。",
+            kind=ASSIGNMENT_SYSTEM,
+            task_id=first.get("task_id"),
+            due_at=due_at if isinstance(due_at, int) else None,
+        )
+    return TickAssignment(text=None, kind=ASSIGNMENT_FREE)
 
 
 # ---------------------------------------------------------------------------
@@ -531,8 +588,15 @@ class AutonomyManager:
     #: 猶予は時計の揺れと、正しい期限ちょうどの発火を誤って見送らないため。
     _SUPERSEDE_GRACE = timedelta(seconds=5)
 
-    def _check_gate(self, now: datetime) -> Tuple[Optional[str], bool, Any]:
+    def _check_gate(
+        self, now: datetime, *, check_conversation: bool = True,
+    ) -> Tuple[Optional[str], bool, Any]:
         """ティックを打ってよいかのゲート (発火の冒頭と、生成開始の直前の両方)。
+
+        ``check_conversation=False`` は会話の検査を飛ばす — 会話中に打たないのは
+        「アラームも締め切りも無い回」だけ (v0.4 計画 §5 段 3-5) なので、発火の
+        冒頭は引き当ての**前**に会話以外を見て、会話は引き当ての結果
+        (締め切りの回か) を見てから :meth:`_conversation_refusal` で見る。
 
         Returns:
             ``(拒否の理由, 予約を消すか, 営業日の basis)``。通すときは理由が None。
@@ -568,17 +632,52 @@ class AutonomyManager:
             # ライフが現に走っていない (終了の節目が済んだ回を含む) — 次の
             # ライフ開始の節目が張り直す。
             return ("outside life", True, basis)
-        conversation = day_plan.get_user_conversation_state(manager, persona_id)
-        if conversation is not False:
-            # 会話が開いている (または分からない) 間は空のティックを打たない
-            # (v3 §5 — 保温は会話自身がしている)。予約は張り直しのまま残る。
-            return (
-                "in conversation" if conversation else "conversation unknown",
-                False, basis,
-            )
+        if check_conversation:
+            refusal = self._conversation_refusal()
+            if refusal is not None:
+                return (refusal, False, basis)
         return (None, False, basis)
 
-    def _start_fence(self, interval: timedelta, refusals: list) -> Optional[str]:
+    def _conversation_refusal(self) -> Optional[str]:
+        """会話が開いている (または分からない) なら見送りの理由を返す。
+
+        会話中は空きティック (締め切りの無い回) を打たない (v3 §5 — 保温は
+        会話自身がしている)。予約は張り直しのまま残る (呼び手は消さない)。
+        """
+        from saiverse import day_plan
+
+        conversation = day_plan.get_user_conversation_state(self.manager, self.persona_id)
+        if conversation is False:
+            return None
+        return "in conversation" if conversation else "conversation unknown"
+
+    def _cancel_own_tick(self, armed_at: datetime) -> bool:
+        """この発火が自分で張った予約 (発火時刻 ``armed_at``) だけを消す。
+
+        発火したワーカーの後始末用 (:meth:`_run_tick` のゲート・:meth:`_start_fence`)。
+        「打つべきでない」と判断してから消すまでの間に、再開の再同期や節目が同じ
+        key に新しい予約を張っていたら、それは残す (2026-10-12 Codex 敵対レビュー
+        段 3 3 巡目 medium)。停止 (:meth:`stop`) とライフ終了の節目
+        (:meth:`cancel_tick`) は無条件に消す — そこは「全部消す」が正しい。
+        """
+        scheduler = self._scheduler()
+        if scheduler is None:
+            return False
+        cancelled = scheduler.cancel_if_fire_at(
+            tick_reservation_key(self.persona_id), armed_at,
+        )
+        if cancelled:
+            LOGGER.info("[Autonomy:%s] tick reservation cancelled", self.persona_id)
+        return cancelled
+
+    def _start_fence(
+        self,
+        interval: timedelta,
+        refusals: list,
+        *,
+        armed_at: Optional[datetime] = None,
+        deadline: bool = False,
+    ) -> Optional[str]:
         """生成開始の直前の再検査 — ``fire_tick`` が **Beat ロックの内側**で呼ぶ。
 
         発火の冒頭のゲートから生成の開始までの間 (引き当てのタスク帳の読み・
@@ -589,6 +688,13 @@ class AutonomyManager:
         見送る (この間に本人の標準モデルが呼ばれた = キャッシュは温まっていて、
         予約は notify_standard_call が押し直し済み — 予約は残す)。
 
+        ``deadline=True`` (締め切りの一件を引いた回) は会話の検査を飛ばす —
+        締め切りの回は会話中でも打つ (v0.4 計画 §5 段 3-5)。全停止・自律 OFF・
+        ライフ終了・標準呼び出しの追い越しの検査はそのまま。
+
+        予約を消すのは、この発火が自分で張った予約 (``armed_at``) だけ
+        (:meth:`_cancel_own_tick`)。``armed_at`` が無ければ消さない。
+
         **開始済みの生成は完走する** (課金と生成の保護の既存裁定) — このフェンスは
         開始の直前までで、走り出した Pulse は止めない。
 
@@ -596,7 +702,7 @@ class AutonomyManager:
             拒否の理由 (None なら通す)。拒否した理由は ``refusals`` にも積む。
         """
         now = clock.now()
-        reason, cancel, _basis = self._check_gate(now)
+        reason, cancel, _basis = self._check_gate(now, check_conversation=not deadline)
         if reason is None:
             with self._lock:
                 last = self._last_standard_call
@@ -604,8 +710,8 @@ class AutonomyManager:
                 reason = "superseded by a standard call"
         if reason is None:
             return None
-        if cancel:
-            self.cancel_tick()
+        if cancel and armed_at is not None:
+            self._cancel_own_tick(armed_at)
         refusals.append(reason)
         return reason
 
@@ -659,14 +765,19 @@ class AutonomyManager:
             )
             return ("skipped", "superseded by a standard call")
 
-        # 2. ゲート (通らない回は何もしない)
-        reason, cancel, basis = self._check_gate(fired_at)
+        # 2. ゲート — 会話以外 (全停止・自律 OFF・ライフ)。通らない回は何もしない。
+        #    消すのはこの発火が自分で張った予約 (next_at) だけ — ゲートの判断から
+        #    取り消しまでの間に、再開の再同期が張った新しい予約は残す (段 3
+        #    3 巡目 medium)。
+        reason, cancel, basis = self._check_gate(fired_at, check_conversation=False)
         if reason is not None:
             if cancel:
-                self.cancel_tick()
+                self._cancel_own_tick(next_at)
             return ("skipped", reason)
 
-        # 3. 引き当て: 締め切り → システムタスク → 自由
+        # 3. 引き当て: 締め切り → システムタスク → 自由。会話の判定より**先**に
+        #    行う — 会話中に打たないのは締め切りの無い回だけ (v0.4 計画 §5 段 3-5)
+        #    なので、引いたものを見てから会話を見る。
         try:
             assignment = build_tick_assignment(
                 manager, persona_id, now=fired_at,
@@ -680,14 +791,24 @@ class AutonomyManager:
             )
             return ("skipped", "task book unreadable")
 
-        # 4. ティックを打つ。生成開始の直前の再検査 (:meth:`_start_fence`) は
+        # 4. 会話の検査 — 締め切りの一件を引いた回は会話中でも打つ。それ以外
+        #    (システムタスク・自由時間) は会話中は見送る (予約は張り直しのまま残る)。
+        if not assignment.is_deadline:
+            refusal = self._conversation_refusal()
+            if refusal is not None:
+                return ("skipped", refusal)
+
+        # 5. ティックを打つ。生成開始の直前の再検査 (:meth:`_start_fence`) は
         #    fire_tick → run_meta_user の pre_generation_check として Beat
         #    ロックの内側で走る (2026-10-12 Codex 敵対レビュー 段 3 2 巡目 high:
         #    Beat の外の再検査は、Beat ロック待ちの間の全停止をすり抜けた)。
         refusals: list = []
         outcome = manager.fire_tick(
-            persona_id, assignment,
-            pre_generation_check=lambda: self._start_fence(interval, refusals),
+            persona_id, assignment.text,
+            pre_generation_check=lambda: self._start_fence(
+                interval, refusals, armed_at=next_at,
+                deadline=assignment.is_deadline,
+            ),
         )
         if outcome.get("runtime_outcome") == "refused" or refusals:
             refused = outcome.get("refusal") or (refusals[0] if refusals else "refused")
@@ -706,10 +827,49 @@ class AutonomyManager:
                     "[Autonomy:%s] failed to record the tick in the life ledger",
                     persona_id, exc_info=True,
                 )
-            return ("completed", "assigned" if assignment else "free")
+            if assignment.resolves_on_completion:
+                self._resolve_system_task(assignment)
+            return (
+                "completed",
+                "free" if assignment.kind == ASSIGNMENT_FREE else "assigned",
+            )
         return (
             "not_completed",
             f"action={outcome.get('action')} outcome={outcome.get('runtime_outcome')}",
+        )
+
+    #: ティックが消化したシステムタスクの顛末 (task_book の OUTCOME)。
+    SYSTEM_TASK_TICK_OUTCOME = "割り当てられたティックが走りきったので、機械が済にした"
+
+    def _resolve_system_task(self, assignment: TickAssignment) -> None:
+        """割り当てたシステムタスク (期限なし) を「済」にする。
+
+        システムタスクはペルソナに時間を一回渡せば役目を果たす依頼 — 割り当てた
+        ティックが走りきったら機械が閉じる。閉じないと、締め切りの無い回が同じ
+        依頼に永久に塞がれる (2026-10-12 Codex 敵対レビュー 段 3 3 巡目 high)。
+        締め切りのある件は閉じない (呼び手が :attr:`TickAssignment.resolves_on_completion`
+        で選ぶ — 未完なら次の空きティックが同じ件を引く、v3 §5)。
+
+        顛末 (OUTCOME) に「ティックで消化した」と残す。失敗 (並行して閉じられた
+        など) は WARN で握る — 閉じられなければ次のティックが同じ件をまた引くだけ。
+        """
+        from saiverse import task_book
+
+        try:
+            task_book.complete_entry(
+                self.manager, self.persona_id, assignment.task_id,
+                outcome=self.SYSTEM_TASK_TICK_OUTCOME,
+            )
+        except Exception:
+            LOGGER.warning(
+                "[Autonomy:%s] failed to resolve the system task %s after the tick; "
+                "the next tick will draw it again",
+                self.persona_id, assignment.task_id, exc_info=True,
+            )
+            return
+        LOGGER.info(
+            "[Autonomy:%s] system task %s resolved by the tick that ran it",
+            self.persona_id, assignment.task_id,
         )
 
     # ------------------------------------------------------------------

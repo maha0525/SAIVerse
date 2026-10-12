@@ -96,6 +96,11 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const [autonomyAllStop, setAutonomyAllStop] = useState<boolean | null>(null);
     const [autonomyAllStopSaving, setAutonomyAllStopSaving] = useState(false);
     const [autonomyAllStopError, setAutonomyAllStopError] = useState<string | null>(null);
+    // 全停止の読み込みの世代。切り替え (POST) の開始と終了で進める — 切り替えより
+    // 前や最中に始まった読み込みの結果は捨てる (遅れて戻った GET が、切り替えた
+    // 後の表示を古い値へ巻き戻さないように。LifeSettingsSection の読み込み
+    // ガードと同じ流儀)。
+    const autonomyAllStopGenRef = useRef(0);
 
     // Monitoring toggles
     const [updateCheckEnabled, setUpdateCheckEnabled] = useState(true);
@@ -628,13 +633,17 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     };
 
     const loadAutonomyAllStop = async () => {
+        const generation = autonomyAllStopGenRef.current;
         setAutonomyAllStopError(null);
         try {
             const res = await apiFetch('/api/config/autonomy-all-stop');
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
+            // 読み込みの間に切り替えが始まっていたら、この結果は古い
+            if (autonomyAllStopGenRef.current !== generation) return;
             setAutonomyAllStop(!!data.enabled);
         } catch (e) {
+            if (autonomyAllStopGenRef.current !== generation) return;
             console.error("Failed to load the global autonomy all-stop", e);
             setAutonomyAllStopError(uiText("autonomyAllStop.loadFailed", { detail: String(e) }));
         }
@@ -643,6 +652,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const toggleAutonomyAllStop = async () => {
         if (autonomyAllStop === null || autonomyAllStopSaving) return;
         const newState = !autonomyAllStop;
+        // 切り替えより前に始まった読み込みの結果を捨てる
+        autonomyAllStopGenRef.current += 1;
         setAutonomyAllStopSaving(true);
         setAutonomyAllStopError(null);
         try {
@@ -666,6 +677,8 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             console.error("Failed to set the global autonomy all-stop", e);
             setAutonomyAllStopError(uiText("autonomyAllStop.saveFailed", { detail: e instanceof Error ? e.message : String(e) }));
         } finally {
+            // 切り替えの最中に始まった読み込み (書く前の値を読んだかもしれない) も捨てる
+            autonomyAllStopGenRef.current += 1;
             setAutonomyAllStopSaving(false);
         }
     };

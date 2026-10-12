@@ -371,8 +371,9 @@ def test_a_standard_model_call_pushes_the_tick_and_others_do_not():
     """呼び出し元が「標準 tier の本人の生成」と印を付けた (counts_as_standard_call
     =True) 成功した呼び出しだけがティックの予約を押し直す。印の無い呼び出し
     (既定 False — 分からない呼び出しは数えない)・keep-alive の保温は押さない。
-    印があっても、防御のモデル名の一致 (usage.model == persona.model) が外れる
-    呼び出し (軽量モデル・model 不明) は押さない。anchor の有無には依らない。"""
+    判定は印だけで、完了時のモデル名 (usage.model) と今の persona.model の照合は
+    しない (2026-10-12 Codex 敵対レビュー 段 3 3 巡目 medium)。anchor の有無には
+    依らない。"""
     persona = _persona(lightweight_model="light-x")
     runtime, manager = _make_runtime(persona)
     am = FakeTickAutonomy()
@@ -383,15 +384,31 @@ def test_a_standard_model_call_pushes_the_tick_and_others_do_not():
         persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=True,
     )
     assert am.notified == 1
-    lc.touch_anchor_after_llm_call(
-        persona, _usage("light-x"), anchor_id=None, counts_as_standard_call=True,
-    )
-    lc.touch_anchor_after_llm_call(
-        persona, _usage(""), anchor_id=None, counts_as_standard_call=True,
-    )
     lc.touch_anchor_after_llm_call(persona, _usage("claude-x"), anchor_id=None)
     lc.touch_anchor_after_llm_call(
         persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=False,
+    )
+    lc.touch_anchor_after_llm_call(
+        persona, _usage("light-x"), anchor_id=None, counts_as_standard_call=False,
+    )
+    assert am.notified == 1
+
+
+def test_a_standard_call_counts_even_if_the_model_setting_changed_mid_reply():
+    """返答は開始時の標準モデルで完走する (ReplyModelBinding)。返答の途中で
+    persona.model が別のモデルへ変わっても、開始時のモデルで完走した標準
+    呼び出し (印あり) は数える — 旧実装はモデル名の不一致で通知を捨て、
+    「最後の標準呼び出しから T 分」が外れていた (2026-10-12 Codex 敵対レビュー
+    段 3 3 巡目 medium)。"""
+    persona = _persona(model="claude-x")
+    runtime, manager = _make_runtime(persona)
+    am = FakeTickAutonomy()
+    manager._autonomy_managers = {"air": am}
+    lc = runtime.session_lifecycle
+
+    persona.model = "claude-y"  # 返答の途中でモデル設定が変わった
+    lc.touch_anchor_after_llm_call(
+        persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=True,
     )
     assert am.notified == 1
 
@@ -567,6 +584,26 @@ def test_keepalive_is_not_rearmed_when_the_next_tick_warms_first(_mock_cache):
 
     runtime, _manager, scheduler, _am, _now = _reconcile_setup(tick_at_minutes=10)
     try:
+        assert runtime.session_lifecycle.reconcile_keepalive_after_tick("air") is False
+        assert scheduler.fire_time_of("ttl:air:claude-x") is None
+    finally:
+        clock.disable_virtual()
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_a_tick_in_time_cancels_an_existing_keepalive_reservation(_mock_cache):
+    """次のティックが失効より前に来るなら、復旧前から残っていた keep-alive の
+    予約も消す (TTL 1200 秒・経過 60 秒 → 失効は 19 分後。既存の保温は 13 分後、
+    ティックは 15 分後 — ティックが温めるのに保温が先に課金される組を塞ぐ。
+    2026-10-12 Codex 敵対レビュー 段 3 3 巡目 medium)。"""
+    from saiverse import clock
+
+    runtime, _manager, scheduler, _am, now = _reconcile_setup(tick_at_minutes=15)
+    try:
+        scheduler.schedule(
+            fire_at=now + timedelta(minutes=13), callback=lambda: None,
+            key="ttl:air:claude-x",
+        )
         assert runtime.session_lifecycle.reconcile_keepalive_after_tick("air") is False
         assert scheduler.fire_time_of("ttl:air:claude-x") is None
     finally:

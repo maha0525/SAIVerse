@@ -569,6 +569,88 @@ class AdminAutonomyWriterSerializationTest(unittest.TestCase):
         self.assertEqual(self.synced, [(AI_ID, False)])
         self.assertIn("Autonomy changed from True to False", result)
 
+    # --- 2026-10-12 Codex 敵対レビュー 段 3 3 巡目 ---
+
+    def _description_in_db(self):
+        db = self.SessionLocal()
+        try:
+            return db.query(AI).filter(AI.AIID == AI_ID).one().DESCRIPTION
+        finally:
+            db.close()
+
+    def test_patch_without_the_autonomy_field_does_not_undo_a_stop(self):
+        """high 1: ペルソナ設定の PATCH が自律の欄を省いた回は、自律を書かない。
+        読み (get_ai_details) と保存の間に停止ボタンが入っても、古い ON で
+        巻き戻さない (旧実装は省略を読んだ現在値で埋めて書き戻していた)。"""
+        from api.routes.people import config as people_config
+        from saiverse import autonomy_wiring
+
+        autonomy_wiring.set_persona_autonomy_enabled(self.admin.manager, AI_ID, True)
+        self.synced.clear()
+        admin = self.admin
+
+        class _Manager:
+            personas = admin.personas
+
+            def get_ai_details(self, ai_id):
+                details = admin.get_ai_details(ai_id)
+                assert details["AUTONOMY_ENABLED"] is True  # 読んだ時点では ON
+                return details
+
+            def update_ai(self, **kwargs):
+                # 読みと保存の間に停止ボタンが押された
+                autonomy_wiring.set_persona_autonomy_enabled(admin.manager, AI_ID, False)
+                return admin.update_ai(**kwargs)
+
+        request = people_config.UpdateAIConfigRequest(description="新しい説明")
+        people_config.update_persona_config(AI_ID, request, manager=_Manager())
+
+        self.assertFalse(self._db_value())
+        self.assertFalse(self.persona.autonomy_enabled)
+        self.assertEqual(self._description_in_db(), "新しい説明")
+        # 停止ボタンの OFF の再同期だけで、PATCH は自律を触っていない
+        self.assertEqual(self.synced, [(AI_ID, False)])
+
+    def test_unset_autonomy_writes_nothing_and_reports_no_change(self):
+        from manager.admin import UNSET
+
+        result = self.admin.update_ai(
+            AI_ID, name="Air", description="d2", system_prompt="", home_city_id=1,
+            default_model="gemini-2.0-flash", lightweight_model="gemini-2.0-flash-lite",
+            autonomy_enabled=UNSET, avatar_path=None, avatar_upload=None,
+        )
+        self.assertNotIn("Error", result)
+        self.assertNotIn("Autonomy changed", result)
+        self.assertFalse(self._db_value())
+        self.assertEqual(self.synced, [])
+        self.assertEqual(self._description_in_db(), "d2")
+
+    def test_autonomy_save_failure_saves_none_of_the_other_fields(self):
+        """medium 2: 自律の値はほかの欄と同じ一回の commit で確定する — 自律の
+        書きが失敗したら説明も保存されず、公開・再同期も起きない (旧実装は他の欄を
+        先に commit してから自律を別保存していた)。"""
+        from saiverse import autonomy_wiring
+
+        def _boom(db, persona_id, enabled):
+            raise RuntimeError("autonomy write failed")
+
+        original = autonomy_wiring.stage_persona_autonomy_enabled
+        autonomy_wiring.stage_persona_autonomy_enabled = _boom
+        try:
+            result = self.admin.update_ai(
+                AI_ID, name="Air", description="変えたはずの説明", system_prompt="",
+                home_city_id=1, default_model="gemini-2.0-flash",
+                lightweight_model="gemini-2.0-flash-lite",
+                autonomy_enabled=True, avatar_path=None, avatar_upload=None,
+            )
+        finally:
+            autonomy_wiring.stage_persona_autonomy_enabled = original
+        self.assertTrue(result.startswith("Error:"), result)
+        self.assertNotEqual(self._description_in_db(), "変えたはずの説明")
+        self.assertFalse(self._db_value())
+        self.assertFalse(self.persona.autonomy_enabled)
+        self.assertEqual(self.synced, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -236,6 +236,18 @@ _GLOBAL_SETTINGS_USERID = 1
 #: 入れ替わって「DB は停止・実効ゲートは開」になる食い違いを防ぐ (2026-10-12
 #: Codex 敵対レビュー 段 3 1 巡目 high)。読み (is_autonomy_*) は bool の読みで
 #: 原子的なので取らない。再入しうる (再同期の中から設定を読む) ので RLock。
+#:
+#: **ロックの順序** (デッドロック防止の約束): ほかのロックと入れ子にするときは、
+#: このロックを**内側**で取る —
+#:
+#: - ``persona_model_selection.MODEL_SETTINGS_LOCK`` → このロック
+#:   (``AdminService.update_ai`` — ほかの欄と同じ commit に自律を畳むため)
+#: - ``api.routes.people.life._LIFE_SETTINGS_SAVE_LOCK`` → このロック
+#:   (ライフ設定の保存 — 起床・就寝の行と同じ commit に自律を畳むため)
+#:
+#: このロックを持ったまま上の二つを取る経路を作ってはいけない。区間の中で
+#: 呼ぶのは DB の読み書き・in-memory への公開・``ensure_autonomy_for``
+#: (AutonomyManager の start/stop — EventScheduler の予約の出し入れだけ) に限る。
 _AUTONOMY_SETTING_LOCK = threading.RLock()
 
 
@@ -513,10 +525,13 @@ def write_persona_autonomy_enabled(
     commit し、読み込まれているペルソナの ``autonomy_enabled`` へ公開し、値が
     変わったら (ペルソナが読み込まれていれば) ``on_changed`` (AutonomyManager の
     再同期) を呼ぶ — ここまでを一つのロック区間に置く。
-    呼び手は :func:`set_persona_autonomy_enabled` (ライフ設定の保存) と
-    ``AdminService.update_ai`` (ペルソナ設定・世界エディタの保存)。二つの口が
+    呼び手は :func:`set_persona_autonomy_enabled` (自律の値だけを書く口)。二つの口が
     別々に commit・公開すると、公開の順が commit の順と入れ替わって「DB は OFF・
     実効ゲートは ON」が残る (2026-10-12 Codex 敵対レビュー 段 3 2 巡目 high)。
+    ほかの欄と同じ commit に自律を畳む書き手 (``AdminService.update_ai``・ライフ
+    設定の保存) は、同じ区間を :func:`stage_persona_autonomy_enabled` と
+    :func:`publish_persona_autonomy_enabled` に分けて使う (段 3 3 巡目 medium —
+    自律の保存だけが失敗して他の欄だけが確定する部分保存を塞ぐ)。中身は同じ二つ。
 
     Returns:
         値が変わったか。
@@ -526,33 +541,86 @@ def write_persona_autonomy_enabled(
         DB に書けなかった場合はそのまま送出する (in-memory は書き換えない)。
     """
     value = bool(enabled)
-    from database.models import AI
 
     with _AUTONOMY_SETTING_LOCK:
         db = session_factory()
         try:
-            row = db.query(AI).filter(AI.AIID == persona_id).first()
-            if row is None:
-                raise KeyError(persona_id)
-            changed = bool(row.AUTONOMY_ENABLED) != value
+            changed = stage_persona_autonomy_enabled(db, persona_id, value)
             if changed:
-                row.AUTONOMY_ENABLED = value
                 db.commit()
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
-        persona = (personas or {}).get(persona_id)
-        if persona is not None:
-            persona.autonomy_enabled = value
-        if changed:
-            LOGGER.info(
-                "[autonomy-wiring] AUTONOMY_ENABLED of %s set to %s", persona_id, value,
-            )
-            if persona is not None and on_changed is not None:
-                on_changed()
+        publish_persona_autonomy_enabled(
+            personas, persona_id, value, changed=changed, on_changed=on_changed,
+        )
     return changed
+
+
+def stage_persona_autonomy_enabled(db: Any, persona_id: str, enabled: bool) -> bool:
+    """呼び手の DB セッションに AUTONOMY_ENABLED の変更を載せる (commit しない)。
+
+    ほかの欄と同じ一回の commit に自律の値を畳みたい書き手 (``AdminService.update_ai``
+    ・ライフ設定の保存) のための前半。比較は **DB の今の値** (列の直接の読み —
+    セッションに読み込み済みの行の古い値ではなく) と行う。変わるときだけ行に書いて
+    flush する。
+
+    呼び手の約束:
+
+    - :data:`_AUTONOMY_SETTING_LOCK` を**この呼び出しの前に取り、commit と
+      :func:`publish_persona_autonomy_enabled` が済むまで持ち続ける** — 比較から
+      公開までを一つの区間に置かないと、並行する書き手の公開順が commit 順と
+      入れ替わる
+    - commit が成功してから :func:`publish_persona_autonomy_enabled` を呼ぶ。
+      失敗したら rollback して公開しない (保存も公開も起きなかったことになる)
+
+    Returns:
+        値が変わるか (= commit したら DB が変わるか)。
+
+    Raises:
+        KeyError: ペルソナの行が無い。
+    """
+    from database.models import AI
+
+    value = bool(enabled)
+    current = db.query(AI.AUTONOMY_ENABLED).filter(AI.AIID == persona_id).first()
+    if current is None:
+        raise KeyError(persona_id)
+    changed = bool(current[0]) != value
+    if changed:
+        row = db.query(AI).filter(AI.AIID == persona_id).first()
+        row.AUTONOMY_ENABLED = value
+        db.flush()
+    return changed
+
+
+def publish_persona_autonomy_enabled(
+    personas: Any,
+    persona_id: str,
+    enabled: bool,
+    *,
+    changed: bool,
+    on_changed: Optional[Callable[[], None]] = None,
+) -> None:
+    """commit 済みの AUTONOMY_ENABLED を in-memory へ公開し、変わっていれば再同期する。
+
+    :func:`stage_persona_autonomy_enabled` の後半 — 呼び手は commit の**成功の
+    後**に、同じ :data:`_AUTONOMY_SETTING_LOCK` の区間の中で呼ぶ。読み込まれて
+    いるペルソナの ``autonomy_enabled`` を書き、値が変わったら (ペルソナが読み
+    込まれていれば) ``on_changed`` (AutonomyManager の再同期) を呼ぶ。
+    """
+    value = bool(enabled)
+    persona = (personas or {}).get(persona_id)
+    if persona is not None:
+        persona.autonomy_enabled = value
+    if changed:
+        LOGGER.info(
+            "[autonomy-wiring] AUTONOMY_ENABLED of %s set to %s", persona_id, value,
+        )
+        if persona is not None and on_changed is not None:
+            on_changed()
 
 
 def is_autonomy_on(manager: Any, persona_id: str) -> bool:

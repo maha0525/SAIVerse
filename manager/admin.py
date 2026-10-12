@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 import re
@@ -1692,7 +1693,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         home_city_id: int,
         default_model: Optional[str],
         lightweight_model: Optional[str],
-        autonomy_enabled: bool,
+        # 自律の欄は必須引数だが、UNSET を値として渡せば「触らない」(書き込み
+        # 自体をしない)。ペルソナ設定の PATCH が欄を省いた回にこの形で渡す。
+        autonomy_enabled: Any,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         appearance_image_path: Optional[str] = None,
@@ -1766,12 +1769,35 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 save_rejection_reason,
             )
 
+            from saiverse.autonomy_wiring import (
+                autonomy_setting_lock,
+                publish_persona_autonomy_enabled,
+                stage_persona_autonomy_enabled,
+                sync_autonomy_after_setting_change,
+            )
+
+            # 自律の欄は UNSET (= 送られてこなかった) なら触らない — 書き込み自体を
+            # しない。入口が現在値を読んで詰め直す形は、読みと保存の間に入った停止
+            # ボタン・ライフ設定の OFF を古い ON で巻き戻す (2026-10-12 Codex 敵対
+            # レビュー 段 3 3 巡目 high)。
+            autonomy_requested = autonomy_enabled is not UNSET
+            autonomy_changed = False
+            # 自律の値は、ほかの欄と**同じ一回の commit** で確定する (段 3 3 巡目
+            # medium — 別々の commit だと、自律の保存だけが失敗したときに他の欄
+            # だけが確定する)。自律の設定ロックは、行の読み直し (refresh) から
+            # commit・公開・再同期までの区間で取る。ロックの順序は
+            # MODEL_SETTINGS_LOCK → 自律の設定ロック (autonomy_wiring の
+            # _AUTONOMY_SETTING_LOCK の定義に記録した約束 — 逆順の経路は無い)。
+            autonomy_section = (
+                autonomy_setting_lock() if autonomy_requested else contextlib.nullcontext()
+            )
+
             llm_warnings: List[str] = []
             # モデルの欄の検査・保存・当てはめは、設定のロックの中で一件ずつ行う
             # (docs/intent/persona_model_selection.md 決まったこと 5)。ロックの中で
-            # 行うのは DB の読み書きと値の書き換えだけ — 自律の起動停止とアバターの
-            # 反映はロックの外で行う。
-            with MODEL_SETTINGS_LOCK:
+            # 行うのは DB の読み書きと値の書き換え (と、自律の値の公開・再同期 —
+            # 予約の出し入れだけ) — アバターの反映はロックの外で行う。
+            with MODEL_SETTINGS_LOCK, autonomy_section:
                 db.refresh(ai)
 
                 def _checked(role: str, requested: Optional[str], stored: Optional[str]) -> Optional[str]:
@@ -1832,11 +1858,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 reflex_judgment_model = _checked(
                     "reflex_judgment_model", reflex_judgment_model, ai.REFLEX_JUDGMENT_MODEL,
                 )
-
-                # AUTONOMY_ENABLED はここでは書かない — 下の自律の設定ロックの
-                # 区間で、ほかの書き手 (ライフ設定・停止ボタン・全停止) と同じ
-                # 一本 (autonomy_wiring.write_persona_autonomy_enabled) を通して
-                # 読み直し・commit・公開・再同期する。
 
                 ai.AINAME = name
                 ai.DESCRIPTION = description
@@ -1918,8 +1939,28 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     else:
                         from saiverse.persona_language import validate_language
                         ai.LANGUAGE = validate_language(clean_lang)
+                # AUTONOMY_ENABLED も同じセッションに載せる (commit しない — 下の
+                # 一回の commit で他の欄と一緒に確定する)。比較は DB の今の値と
+                # 行う (自律の設定ロックの中なので、ほかの書き手の commit は済んで
+                # いる)。
+                if autonomy_requested:
+                    autonomy_changed = stage_persona_autonomy_enabled(
+                        db, ai_id, autonomy_enabled,
+                    )
                 db.commit()
                 committed = True
+                # 自律の値の公開と再同期は commit の成功の後、同じ自律の設定ロックの
+                # 区間で行う (失敗したら上の commit ごと巻き戻り、公開もしない)。
+                # モデルの当てはめより先に行う — 当てはめが転んでも、確定した
+                # 自律の値が in-memory に届かないまま残らないように。
+                if autonomy_requested:
+                    publish_persona_autonomy_enabled(
+                        self.personas, ai_id, autonomy_enabled,
+                        changed=autonomy_changed,
+                        on_changed=lambda: sync_autonomy_after_setting_change(
+                            self.manager, ai_id,
+                        ),
+                    )
 
                 if persona is not None:
                     persona.persona_name = name
@@ -1958,26 +1999,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                         "the next metabolism.", ai_id,
                     )
 
-            # AUTONOMY_ENABLED の保存と AutonomyManager への反映 (True なら起動、
-            # False なら停止)。ほかの欄とは分けて、自律の設定の書き手全員が通る
-            # 一本 (autonomy_wiring.write_persona_autonomy_enabled) で行う — DB の
-            # 行の読み直し・commit・persona.autonomy_enabled への公開・再同期を
-            # 自律の設定ロックの同じ区間に置き、ライフ設定の保存や停止ボタンと
-            # 公開の順が入れ替わらない (2026-10-12 Codex 敵対レビュー 段 3 2 巡目
-            # high)。モデルの設定ロックの**外**で取るので、二つのロックは入れ子に
-            # ならない。``ensure_autonomy_for`` は SAIVerseManager のメソッドのため、
-            # 再同期は ``self.manager`` 経由 (ペルソナが読み込まれているときだけ)。
-            from saiverse.autonomy_wiring import (
-                sync_autonomy_after_setting_change,
-                write_persona_autonomy_enabled,
-            )
-
-            state_changed = write_persona_autonomy_enabled(
-                self.SessionLocal, self.personas, ai_id, autonomy_enabled,
-                on_changed=lambda: sync_autonomy_after_setting_change(self.manager, ai_id),
-            )
-            original_autonomy = (not bool(autonomy_enabled)) if state_changed else bool(autonomy_enabled)
-
             # 記憶の整理の見張りは「前回と同じ状態なら結果も同じ」で素通しする。Memory
             # Weave モデルを選び直しても会話が動くまで整理が再試行されないと
             # 「再起動しなくても」が偽になるので、記録を捨てる (読み込んでいないペルソナの
@@ -1990,9 +2011,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             status_message = f"AI '{name}' updated successfully."
             if llm_warnings:
                 status_message += " [WARNING:LLM] " + "\n".join(llm_warnings)
-            if state_changed:
+            if autonomy_changed:
                 status_message += (
-                    f" Autonomy changed from {original_autonomy} to {autonomy_enabled}."
+                    f" Autonomy changed from {not bool(autonomy_enabled)}"
+                    f" to {bool(autonomy_enabled)}."
                 )
             return status_message
         except Exception as exc:

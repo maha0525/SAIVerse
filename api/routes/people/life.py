@@ -17,6 +17,7 @@
   唯一の読み手だったライフビュー・できごと UI を v0.3 で隠したため
   (v3 §11「運転 UI は隠す」)。時間割そのものは v0.4 でルーチンへ世代交代する。
 """
+import contextlib
 import json
 import logging
 import threading
@@ -374,13 +375,15 @@ def update_life_settings(
     - ``tick_interval_minutes`` / ``life_mode_override``: 起床の行の
       PLAYBOOK_PARAMS に**設定値のまま**保存する (床 10 分・均等 50 分の丸めは
       読み時の実効値の計算で掛ける)。起床が未設定のときは置き場が無いので 400
-    - ``autonomy_enabled``: ペルソナ設定の保存と同じ経路
-      (:func:`saiverse.autonomy_wiring.set_persona_autonomy_enabled`)
+    - ``autonomy_enabled``: ペルソナ設定の保存と同じ書きの本体
+      (:func:`saiverse.autonomy_wiring.stage_persona_autonomy_enabled` /
+      ``publish_persona_autonomy_enabled``)。起床・就寝の行と同じ一回の commit で
+      確定する — どちらかが失敗したら両方とも保存されない
 
     返り値は GET と同じ形 (保存後の現況) に ``scheduler_synced`` を足したもの。
 
-    保存全体 (読み → 書き → commit → 予約の再照合 → 自律の保存 → 現況の読み)
-    は :data:`_LIFE_SETTINGS_SAVE_LOCK` で直列化する。
+    保存全体 (読み → 書き → commit → 予約の再照合 → 自律の公開・再同期 → 現況の
+    読み) は :data:`_LIFE_SETTINGS_SAVE_LOCK` で直列化する。
     """
     with _LIFE_SETTINGS_SAVE_LOCK:
         return _update_life_settings_locked(persona_id, req, manager)
@@ -389,12 +392,39 @@ def update_life_settings(
 def _update_life_settings_locked(
     persona_id: str, req: LifeSettingsUpdateRequest, manager: Any,
 ) -> LifeSettingsResponse:
-    """:func:`update_life_settings` の本体 (保存ロックの内側で呼ぶ)。"""
+    """:func:`update_life_settings` の本体 (保存ロックの内側で呼ぶ)。
+
+    自律の欄 (``autonomy_enabled``) があるときは、自律の設定ロックを DB の書きの
+    前に取り、起床・就寝の行と**同じ一回の commit** で自律の値も確定する
+    (2026-10-12 Codex 敵対レビュー 段 3 3 巡目 medium — 別々の commit だと、
+    自律の保存だけが失敗したときに起床・就寝だけが確定して 500 を返していた)。
+    公開と再同期は commit の成功の後、予約の再照合の後に、同じ区間で行う。
+    ロックの順序は ``_LIFE_SETTINGS_SAVE_LOCK`` → 自律の設定ロック
+    (``saiverse.autonomy_wiring._AUTONOMY_SETTING_LOCK`` の定義に記録した約束)。
+    """
+    from saiverse.autonomy_wiring import autonomy_setting_lock
+
+    autonomy_section = (
+        autonomy_setting_lock()
+        if "autonomy_enabled" in req.model_fields_set
+        else contextlib.nullcontext()
+    )
+    with autonomy_section:
+        return _update_life_settings_body(persona_id, req, manager)
+
+
+def _update_life_settings_body(
+    persona_id: str, req: LifeSettingsUpdateRequest, manager: Any,
+) -> LifeSettingsResponse:
+    """:func:`_update_life_settings_locked` の中身 (自律の欄があれば自律の設定
+    ロックの内側で呼ぶ)。"""
     from saiverse import day_plan
     from saiverse.autonomy_wiring import (
         LIFE_END_SCHEDULE_PLAYBOOK,
         LIFE_START_SCHEDULE_PLAYBOOK,
-        set_persona_autonomy_enabled,
+        publish_persona_autonomy_enabled,
+        stage_persona_autonomy_enabled,
+        sync_autonomy_after_setting_change,
     )
 
     _require_persona(manager, persona_id)
@@ -428,59 +458,69 @@ def _update_life_settings_locked(
         name for name in ("tick_interval_minutes", "life_mode_override") if name in fields
     ]
 
-    # --- 起床・就寝の行 ---
+    # --- 起床・就寝の行 (と自律の値 — 同じ一回の commit) ---
     touched: List[Any] = []
-    if {"wake", "close"} & fields or params_fields:
+    autonomy_requested = "autonomy_enabled" in fields
+    autonomy_changed = False
+    schedule_requested = bool({"wake", "close"} & fields or params_fields)
+    if schedule_requested or autonomy_requested:
         db = manager.SessionLocal()
         try:
-            open_rows = _life_rows(db, persona_id, LIFE_START_SCHEDULE_PLAYBOOK)
-            close_rows = _life_rows(db, persona_id, LIFE_END_SCHEDULE_PLAYBOOK)
-            open_row = _pick_life_row(open_rows, earliest=True)
-            close_row = _pick_life_row(close_rows, earliest=False)
+            if schedule_requested:
+                open_rows = _life_rows(db, persona_id, LIFE_START_SCHEDULE_PLAYBOOK)
+                close_rows = _life_rows(db, persona_id, LIFE_END_SCHEDULE_PLAYBOOK)
+                open_row = _pick_life_row(open_rows, earliest=True)
+                close_row = _pick_life_row(close_rows, earliest=False)
 
-            def _current(row: Optional[Any]) -> Optional[str]:
-                if row is None or not row.ENABLED:
-                    return None
-                return (row.TIME_OF_DAY or "").strip() or None
+                def _current(row: Optional[Any]) -> Optional[str]:
+                    if row is None or not row.ENABLED:
+                        return None
+                    return (row.TIME_OF_DAY or "").strip() or None
 
-            new_wake = req.wake if "wake" in fields else _current(open_row)
-            new_close = req.close if "close" in fields else _current(close_row)
-            if new_wake and new_close and new_wake == new_close:
-                raise _bad_request(
-                    "起床と就寝が同時刻です。活動時間が 0 分になるため設定できません"
-                )
-
-            if "wake" in fields:
-                open_row = _apply_time(
-                    db, persona_id, LIFE_START_SCHEDULE_PLAYBOOK, open_rows, req.wake,
-                    earliest=True, description="起床 (ライフ設定)", touched=touched,
-                )
-            if "close" in fields:
-                _apply_time(
-                    db, persona_id, LIFE_END_SCHEDULE_PLAYBOOK, close_rows, req.close,
-                    earliest=False, description="就寝 (ライフ設定)", touched=touched,
-                )
-
-            if params_fields:
-                if open_row is None or not open_row.ENABLED:
+                new_wake = req.wake if "wake" in fields else _current(open_row)
+                new_close = req.close if "close" in fields else _current(close_row)
+                if new_wake and new_close and new_wake == new_close:
                     raise _bad_request(
-                        "起床が未設定のあいだは tick_interval_minutes / "
-                        "life_mode_override を保存できません (起床の行に保存するため)"
+                        "起床と就寝が同時刻です。活動時間が 0 分になるため設定できません"
                     )
-                params = _parse_params(open_row.PLAYBOOK_PARAMS)
-                for name in params_fields:
-                    value = getattr(req, name)
-                    if value is None:
-                        params.pop(name, None)
-                    else:
-                        params[name] = value
-                open_row.PLAYBOOK_PARAMS = (
-                    json.dumps(params, ensure_ascii=False) if params else None
+
+                if "wake" in fields:
+                    open_row = _apply_time(
+                        db, persona_id, LIFE_START_SCHEDULE_PLAYBOOK, open_rows, req.wake,
+                        earliest=True, description="起床 (ライフ設定)", touched=touched,
+                    )
+                if "close" in fields:
+                    _apply_time(
+                        db, persona_id, LIFE_END_SCHEDULE_PLAYBOOK, close_rows, req.close,
+                        earliest=False, description="就寝 (ライフ設定)", touched=touched,
+                    )
+
+                if params_fields:
+                    if open_row is None or not open_row.ENABLED:
+                        raise _bad_request(
+                            "起床が未設定のあいだは tick_interval_minutes / "
+                            "life_mode_override を保存できません (起床の行に保存するため)"
+                        )
+                    params = _parse_params(open_row.PLAYBOOK_PARAMS)
+                    for name in params_fields:
+                        value = getattr(req, name)
+                        if value is None:
+                            params.pop(name, None)
+                        else:
+                            params[name] = value
+                    open_row.PLAYBOOK_PARAMS = (
+                        json.dumps(params, ensure_ascii=False) if params else None
+                    )
+                    if open_row not in touched:
+                        if open_row.SCHEDULE_ID is not None:
+                            _bump_generation(open_row)
+                        touched.append(open_row)
+            # 自律の値もこのセッションに載せる (commit は下の一回だけ)。自律の
+            # 設定ロックは呼び手が持っている。
+            if autonomy_requested:
+                autonomy_changed = stage_persona_autonomy_enabled(
+                    db, persona_id, req.autonomy_enabled,
                 )
-                if open_row not in touched:
-                    if open_row.SCHEDULE_ID is not None:
-                        _bump_generation(open_row)
-                    touched.append(open_row)
             db.flush()
             touched_ids = [
                 (row.SCHEDULE_ID, bool(row.ENABLED)) for row in touched
@@ -523,16 +563,15 @@ def _update_life_settings_locked(
                 schedule_id,
             )
 
-    # --- 自律 ON/OFF (ペルソナ設定の保存と同じ経路・同じ副作用) ---
-    # 起床・就寝の保存の後に行う — ON で立ち上がる見張りが新しい窓を読むように。
-    if "autonomy_enabled" in fields:
-        try:
-            set_persona_autonomy_enabled(manager, persona_id, req.autonomy_enabled)
-        except Exception as exc:
-            LOGGER.exception("[life-settings] failed to save AUTONOMY_ENABLED for %s", persona_id)
-            raise HTTPException(
-                status_code=500, detail=f"Failed to save autonomy setting: {exc}",
-            )
+    # --- 自律 ON/OFF の公開と再同期 (ペルソナ設定の保存と同じ副作用) ---
+    # 値は上の commit で確定済み。公開・再同期は予約の再照合の後に行う — ON で
+    # 立ち上がる見張りが新しい窓を読むように。自律の設定ロックの区間の中。
+    if autonomy_requested:
+        publish_persona_autonomy_enabled(
+            getattr(manager, "personas", None) or {}, persona_id,
+            req.autonomy_enabled, changed=autonomy_changed,
+            on_changed=lambda: sync_autonomy_after_setting_change(manager, persona_id),
+        )
 
     LOGGER.info(
         "[life-settings] saved: persona=%s fields=%s", persona_id, sorted(fields),

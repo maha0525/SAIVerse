@@ -459,6 +459,38 @@ class ScheduleIfPresentTest(unittest.TestCase):
         self.assertIsNone(self.scheduler.fire_time_of("k1"))
 
 
+class CancelIfFireAtTest(unittest.TestCase):
+    """cancel_if_fire_at の契約 (v0.4 計画 段 3、3 巡目 medium)。
+
+    発火したワーカーの後始末は、自分が張った予約 (その発火時刻) だけを消す —
+    判断から取り消しまでの間に別の経路が張り直した予約は残す。
+    """
+
+    def setUp(self) -> None:
+        self.scheduler = EventScheduler()  # start() しない
+
+    def test_cancels_a_reservation_at_the_expected_time(self) -> None:
+        at = datetime.now() + timedelta(minutes=30)
+        self.scheduler.schedule(fire_at=at, callback=lambda: None, key="tick:a")
+        self.assertTrue(self.scheduler.cancel_if_fire_at("tick:a", at))
+        self.assertIsNone(self.scheduler.fire_time_of("tick:a"))
+        self.assertFalse(self.scheduler.has_key("tick:a"))
+
+    def test_keeps_a_reservation_rearmed_at_another_time(self) -> None:
+        own = datetime.now() + timedelta(minutes=30)
+        self.scheduler.schedule(fire_at=own, callback=lambda: None, key="tick:a")
+        newer = own + timedelta(minutes=1)
+        self.scheduler.schedule(fire_at=newer, callback=lambda: None, key="tick:a")
+        self.assertFalse(self.scheduler.cancel_if_fire_at("tick:a", own))
+        self.assertEqual(
+            self.scheduler.fire_time_of("tick:a"),
+            datetime.fromtimestamp(newer.timestamp()),
+        )
+
+    def test_does_nothing_when_absent(self) -> None:
+        self.assertFalse(self.scheduler.cancel_if_fire_at("tick:a", datetime.now()))
+
+
 class WorkerStartFailureTest(unittest.TestCase):
     """ワーカーを起こせない (Thread.start の RuntimeError) とき、dispatch スレッド
     上で callback を走らせず、5 秒後へ積み直す (2026-10-12 Codex 敵対レビュー

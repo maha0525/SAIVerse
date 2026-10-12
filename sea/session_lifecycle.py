@@ -68,21 +68,18 @@ def _notify_tick_of_standard_call(manager: Any, persona: Any, usage: Any) -> Non
     だったかを、呼び出し時に確定している実行 tier から決めて
     ``counts_as_standard_call`` で渡す (``sea.runtime_llm`` の LLM ノードは
     ``pulse_context.execution_model_tier``、スルースは標準 tier の解決値との一致)。
-    ここに来るのはそれが True の呼び出しだけ。
+    ここに来るのはそれが True の呼び出しだけで、**印が立っていれば数える**。
 
-    ここで見るモデル名の一致 (usage.model == ``persona.model``) は防御として
-    残している — モデル名だけでは標準と軽量を区別できない (同じモデルを両方に
-    設定したペルソナ) ので主判定には使わない (2026-10-12 Codex 敵対レビュー
-    段 3 1 巡目 medium) が、呼び出し元の印が誤っていても別モデルの呼び出しを
-    数えない網にはなる。usage.model が空の呼び出しも数えない。押し直しの実体は
-    AutonomyManager で、時刻は予約の有無に関係なく記録し、予約が現に有るときだけ
-    動かす (ライフ外では生やさない)。失敗は握る — LLM の呼び出し後の後処理を
-    止めない。
+    完了時のモデル名 (usage.model) を、いまの ``persona.model`` と照らし合わせる
+    防御は置かない — 返答は開始時の標準モデルで完走する (ReplyModelBinding) ので、
+    返答の途中でモデル設定が変わると、正当な標準呼び出しの通知が捨てられて
+    「最後の標準呼び出しから T 分」が外れる (2026-10-12 Codex 敵対レビュー 段 3
+    3 巡目 medium)。tier は呼び出し時に確定した印が持つ。``usage`` は受け取るが
+    判定には使わない (呼び口の形を保つため)。押し直しの実体は AutonomyManager で、
+    時刻は予約の有無に関係なく記録し、予約が現に有るときだけ動かす (ライフ外では
+    生やさない)。失敗は握る — LLM の呼び出し後の後処理を止めない。
     """
-    usage_model = getattr(usage, "model", None)
-    persona_model = getattr(persona, "model", None)
-    if not usage_model or not persona_model or str(usage_model) != str(persona_model):
-        return
+    del usage  # 判定に使わない (上の docstring)
     am = _autonomy_manager_of(manager, getattr(persona, "persona_id", None))
     if am is None:
         return
@@ -2098,7 +2095,10 @@ class SessionLifecycle:
           (``day_plan.is_keepalive_allowed``) なら復活させない
         - キャッシュ種別が explicit でなければ何もしない (温め直す先が無い)
         - anchor がもう失効していれば何もしない (温め直しても全額の書き直し)
-        - 次のティックが失効より前なら何もしない (次のティックが温める)
+        - 次のティックが失効より前なら新しく張らず、**既存の keep-alive の予約が
+          あれば消す** (次のティックが温める — :meth:`schedule_cache_ttl_pulse` の
+          抑制と同じ向き。消さないと、ティックで間に合うのに保温が先に課金される
+          組が残る。2026-10-12 Codex 敵対レビュー 段 3 3 巡目 medium)
         - それ以外は「キャッシュ寿命の threshold_ratio 分が残る時刻」に予約する
           (過ぎていれば今すぐ)。**生きている予約は上書きしない**
           (``schedule_if_absent`` — 後から touch された予約の方が正しい時刻を持つ)
@@ -2159,10 +2159,17 @@ class SessionLifecycle:
         now = clock.now()
         expires_at = now + remaining
         tick_at = _tick_fire_at(manager, persona_id)
+        key = f"ttl:{persona_id}:{model_key}"
         if tick_at is not None and tick_at < expires_at:
+            if scheduler.cancel(key):
+                LOGGER.info(
+                    "[keepalive] cancelled the keep-alive: the tick at %s warms the "
+                    "cache before it expires at %s (persona=%s model=%s)",
+                    tick_at.isoformat(timespec="seconds"),
+                    expires_at.isoformat(timespec="seconds"), persona_id, model_key,
+                )
             return False
         fire_at = max(now, expires_at - timedelta(seconds=ttl_seconds * threshold_ratio))
-        key = f"ttl:{persona_id}:{model_key}"
         armed = scheduler.schedule_if_absent(
             fire_at=fire_at,
             callback=_keepalive_callback(self, persona_id, model_key),
