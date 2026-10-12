@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import datetime
 
 # -----------------------------------------------------------------------------
@@ -250,6 +250,10 @@ class OfficialImportStatusResponse(BaseModel):
     success: Optional[bool] = None
     conversations: Optional[int] = None
     messages: Optional[int] = None
+    # Background embedding of the imported messages (runs after the import).
+    embedding_running: Optional[bool] = None
+    embedding_progress: Optional[int] = None
+    embedding_total: Optional[int] = None
 
 class ExtensionImportStatusResponse(BaseModel):
     running: bool
@@ -258,6 +262,10 @@ class ExtensionImportStatusResponse(BaseModel):
     message: Optional[str] = None
     success: Optional[bool] = None
     title: Optional[str] = None
+    # Background embedding of the imported messages (runs after the import).
+    embedding_running: Optional[bool] = None
+    embedding_progress: Optional[int] = None
+    embedding_total: Optional[int] = None
 
 class NativeImportStatusResponse(BaseModel):
     running: bool
@@ -274,13 +282,20 @@ class NativeImportStatusResponse(BaseModel):
 # -----------------------------------------------------------------------------
 
 class ReembedRequest(BaseModel):
-    force: bool = False  # If true, re-embed all messages regardless of current status
+    force: bool = False  # If true, rebuild every recall vector regardless of current status
+
+class ReembedSourceProgress(BaseModel):
+    total: int = 0
+    done: int = 0
 
 class ReembedStatusResponse(BaseModel):
     running: bool
-    progress: Optional[int] = None
-    total: Optional[int] = None
+    progress: Optional[int] = None  # messages
+    total: Optional[int] = None  # messages
     message: Optional[str] = None
+    # Chronicle / Memopedia page / fragment progress, keyed by
+    # "chronicle" / "memopedia" / "fragment".
+    sources: Optional[Dict[str, ReembedSourceProgress]] = None
 
 
 # -----------------------------------------------------------------------------

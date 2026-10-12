@@ -27,6 +27,79 @@ _extension_import_lock = threading.Lock()
 _official_import_status: dict = {}
 _official_import_lock = threading.Lock()
 
+# Embeddings of imported messages are made after the import has finished
+# (docs/intent/embedding_gemma2_migration.md §2): the text is stored first and
+# the import reports success, then a background thread embeds what it stored.
+_import_embedding_status: dict = {}
+_import_embedding_lock = threading.Lock()
+# Latest embedding thread per persona (tests join it).
+_import_embedding_threads: dict = {}
+
+
+def _embed_imported_messages(persona_id: str, adapter, message_ids: List[str]) -> None:
+    """Embed the messages one import stored, then close that import's adapter.
+
+    Uses ``backfill_missing_message_embeddings`` limited to ``message_ids``, so
+    messages stored without embeddings on purpose elsewhere (an earlier import
+    with "skip", thread-switch notes, ...) stay as they are.
+    """
+    def _progress(done: int, total: int) -> None:
+        with _import_embedding_lock:
+            _import_embedding_status[persona_id] = {
+                "embedding_running": True, "embedding_progress": done, "embedding_total": total,
+            }
+
+    total = len(message_ids)
+    _progress(0, total)
+    LOGGER.info("Import embedding started for %s (%d messages)", persona_id, total)
+    result: dict = {}
+    try:
+        result = adapter.backfill_missing_message_embeddings(
+            progress_callback=_progress, message_ids=message_ids,
+        )
+    except Exception:
+        LOGGER.exception("Import embedding failed for %s", persona_id)
+    finally:
+        try:
+            adapter.close()
+        finally:
+            with _import_embedding_lock:
+                _import_embedding_status[persona_id] = {
+                    "embedding_running": False,
+                    "embedding_progress": result.get("embedded", 0),
+                    "embedding_total": total,
+                }
+    LOGGER.info(
+        "Import embedding finished for %s: embedded=%d failed=%d (of %d)",
+        persona_id, result.get("embedded", 0), result.get("failed", 0), total,
+    )
+
+
+def _start_import_embedding(persona_id: str, adapter, message_ids: List[str]) -> bool:
+    """Hand ``adapter`` to a background thread that embeds ``message_ids``.
+
+    Returns True when the thread took the adapter over (the thread closes
+    it); False when there is nothing to embed and the caller closes it.
+    """
+    if not message_ids:
+        return False
+    thread = threading.Thread(
+        target=_embed_imported_messages,
+        args=(persona_id, adapter, list(message_ids)),
+        name=f"import-embedding-{persona_id}",
+        daemon=True,
+    )
+    _import_embedding_threads[persona_id] = thread
+    thread.start()
+    return True
+
+
+def _with_embedding_status(persona_id: str, status: dict) -> dict:
+    """Import status plus the progress of the background embedding, if any."""
+    with _import_embedding_lock:
+        embedding = dict(_import_embedding_status.get(persona_id, {}))
+    return {**status, **embedding}
+
 def _is_placeholder_title(title: Optional[str]) -> bool:
     """取り込み元のパーサーが「題名なし」の印として入れる既定値か。
 
@@ -74,13 +147,19 @@ def _run_extension_import_task(
         # 2. Acquire adapter
         from saiverse_memory import SAIMemoryAdapter
         adapter = SAIMemoryAdapter(persona_id)
-        
+        handed_off = False
+
         try:
             msg_count = 0
+            imported_ids: List[str] = []
             for i, payload in enumerate(payloads):
-                if skip_embedding:
-                    payload["embedding_chunks"] = 0
-                adapter.append_persona_message(payload, thread_suffix=thread_suffix)
+                # Never embed while importing: with skip_embedding the
+                # messages stay unembedded, otherwise they are embedded in
+                # the background after the import has finished.
+                payload["embedding_chunks"] = 0
+                mid = adapter.append_persona_message(payload, thread_suffix=thread_suffix)
+                if mid:
+                    imported_ids.append(mid)
                 msg_count += 1
 
                 # Update progress every 10 messages
@@ -103,8 +182,11 @@ def _run_extension_import_task(
                     "message": f"Imported '{conversation.title}' ({msg_count} messages).",
                     "success": True, "title": conversation.title
                 }
+            if not skip_embedding:
+                handed_off = _start_import_embedding(persona_id, adapter, imported_ids)
         finally:
-            adapter.close()
+            if not handed_off:
+                adapter.close()
             
     except Exception as e:
         logging.exception("Extension import failed for %s", persona_id)
@@ -174,11 +256,13 @@ def _run_official_import_task(
         # 3. Acquire adapter
         from saiverse_memory import SAIMemoryAdapter
         adapter = SAIMemoryAdapter(persona_id)
-        
+        handed_off = False
+
         try:
             total_conversations = len(selected_records)
             imported_count = 0
             msg_count = 0
+            imported_ids: List[str] = []
             
             for conv_idx, record in enumerate(selected_records):
                 payloads = list(record.iter_memory_payloads(include_roles=["user", "assistant"]))
@@ -190,11 +274,13 @@ def _run_official_import_task(
                     if "conversation" not in tags:
                         tags.append("conversation")
                     meta["tags"] = tags
-                    if skip_embedding:
-                        payload["embedding_chunks"] = 0
+                    # Never embed while importing (see the extension task).
+                    payload["embedding_chunks"] = 0
                     payload["metadata"] = meta
-                    
-                    adapter.append_persona_message(payload, thread_suffix=thread_suffix)
+
+                    mid = adapter.append_persona_message(payload, thread_suffix=thread_suffix)
+                    if mid:
+                        imported_ids.append(mid)
                     msg_count += 1
 
                 # 会話タイトルをスレッド名として保存。パーサーの既定値 (題名の
@@ -216,8 +302,11 @@ def _run_official_import_task(
                     "message": f"Imported {imported_count} conversations ({msg_count} messages).",
                     "success": True, "conversations": imported_count, "messages": msg_count
                 }
+            if not skip_embedding:
+                handed_off = _start_import_embedding(persona_id, adapter, imported_ids)
         finally:
-            adapter.close()
+            if not handed_off:
+                adapter.close()
             
     except Exception as e:
         import logging
@@ -374,7 +463,7 @@ def get_official_import_status(persona_id: str, manager = Depends(get_manager)):
     """Get the status of official import task."""
     with _official_import_lock:
         status = _official_import_status.get(persona_id, {"running": False, "message": "No import task has been run."})
-    return OfficialImportStatusResponse(**status)
+    return OfficialImportStatusResponse(**_with_embedding_status(persona_id, status))
 
 @router.post("/{persona_id}/import/extension")
 async def import_extension_export(
@@ -434,4 +523,4 @@ def get_extension_import_status(persona_id: str, manager = Depends(get_manager))
     """Get the status of extension import task."""
     with _extension_import_lock:
         status = _extension_import_status.get(persona_id, {"running": False, "message": "No import task has been run."})
-    return ExtensionImportStatusResponse(**status)
+    return ExtensionImportStatusResponse(**_with_embedding_status(persona_id, status))

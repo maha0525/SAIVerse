@@ -12,7 +12,7 @@ import logging
 import sqlite3
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -348,6 +348,7 @@ def embed_chronicle_entries(
     level: int = 1,
     batch_size: int = 64,
     db_lock: Optional[Any] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> int:
     """Generate and store embeddings for Chronicle entries that don't have them.
 
@@ -356,6 +357,8 @@ def embed_chronicle_entries(
         embedder: Embedder instance with embed() method.
         level: Chronicle level to embed (default: 1 = あらすじ).
         batch_size: Batch size for embedding generation.
+        progress_callback: Called after each stored batch with the cumulative
+            number of rows embedded so far (used by the re-embed job's progress).
 
     Returns:
         Number of entries embedded.
@@ -380,6 +383,8 @@ def embed_chronicle_entries(
             for (entry_id, _), vec in zip(batch, vectors):
                 store_chronicle_embedding(conn, entry_id, list(vec))
                 total += 1
+        if progress_callback is not None:
+            progress_callback(total)
 
     LOGGER.info("Embedded %d Chronicle entries", total)
     return total
@@ -391,6 +396,7 @@ def embed_memopedia_pages(
     *,
     batch_size: int = 64,
     db_lock: Optional[Any] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> int:
     """Generate and store embeddings for Memopedia pages that don't have them.
 
@@ -400,6 +406,8 @@ def embed_memopedia_pages(
         conn: Database connection.
         embedder: Embedder instance with embed() method.
         batch_size: Batch size for embedding generation.
+        progress_callback: Called after each stored batch with the cumulative
+            number of rows embedded so far (used by the re-embed job's progress).
 
     Returns:
         Number of pages embedded.
@@ -422,6 +430,8 @@ def embed_memopedia_pages(
             for (page_id, _, _), vec in zip(batch, vectors):
                 store_memopedia_embedding(conn, page_id, list(vec))
                 total += 1
+        if progress_callback is not None:
+            progress_callback(total)
 
     LOGGER.info("Embedded %d Memopedia pages", total)
     return total
@@ -433,6 +443,7 @@ def embed_memopedia_fragments(
     *,
     batch_size: int = 64,
     db_lock: Optional[Any] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> int:
     """Generate and store embeddings for Memopedia fragments that don't have them.
 
@@ -440,6 +451,8 @@ def embed_memopedia_fragments(
         conn: Database connection.
         embedder: Embedder instance with embed() method.
         batch_size: Batch size for embedding generation.
+        progress_callback: Called after each stored batch with the cumulative
+            number of rows embedded so far (used by the re-embed job's progress).
 
     Returns:
         Number of fragments embedded.
@@ -466,6 +479,8 @@ def embed_memopedia_fragments(
             for (frag_id, _, _), vec in zip(batch, vectors):
                 store_fragment_embedding(conn, frag_id, list(vec))
                 total += 1
+        if progress_callback is not None:
+            progress_callback(total)
 
     LOGGER.info("Embedded %d Memopedia fragments", total)
     return total

@@ -341,7 +341,7 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | DELETE | `/api/people/{persona_id}/realtime-spell/{binding_id}` | ペルソナのリアルタイムスペル binding を削除する。 |
 | POST | `/api/people/{persona_id}/recall` | Execute memory recall, similar to the memory_recall tool. |
 | POST | `/api/people/{persona_id}/recall-debug` | Debug-friendly recall: returns raw search results with scores, no context expansion. |
-| POST | `/api/people/{persona_id}/reembed` | Start re-embedding messages in the background. |
+| POST | `/api/people/{persona_id}/reembed` | Start re-embedding every recall vector of the persona in the background. |
 | GET | `/api/people/{persona_id}/reembed/status` | Get the status of the re-embed task. |
 | POST | `/api/people/{persona_id}/rescue-stelis-thread` | Convert the current active Stelis thread to a normal thread. |
 | GET | `/api/people/{persona_id}/schedules` | List schedules for a persona. |

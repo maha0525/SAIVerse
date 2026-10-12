@@ -294,18 +294,43 @@ class SAIMemoryAdapter:
     # Embedding model change detection
     # ------------------------------------------------------------------
     def _check_embed_model_change(self) -> None:
-        """Detect if the embedding model has changed since the last reembed."""
+        """Detect vectors that the current embedding model cannot compare with.
+
+        Sets ``embed_model_changed`` (collected by the manager into the
+        ``embed_model_mismatch`` startup warning) when any of the four vector
+        tables (messages / Chronicle / Memopedia pages / fragments) has rows
+        and either:
+
+        - ``embed_metadata.embed_model`` is missing or differs from the
+          current model identity (``settings.embed_model``, the same value as
+          ``Embedder.model_name``), or
+        - a sampled vector's length differs from the stored dimension
+          (``EMBED_DIM``, the value ``Embedder.embedding_size`` returns).
+          This is a sample, not a full scan: only the oldest and newest rows
+          of each table are parsed (``sample_stale_vector_tables``), to keep
+          startup cheap.
+
+        A memory.db with no vectors at all has nothing to migrate: no flag,
+        and the current model is recorded.
+        """
+        from sai_memory.config import EMBED_DIM
+        from sai_memory.embedding_migration import (
+            has_any_vectors,
+            sample_stale_vector_tables,
+        )
         from sai_memory.memory.storage import get_embed_metadata, set_embed_metadata
 
         recorded_model = get_embed_metadata(self.conn, "embed_model")
         current_model = self.settings.embed_model
 
-        row = self.conn.execute(
-            "SELECT EXISTS(SELECT 1 FROM message_embeddings LIMIT 1)"
-        ).fetchone()
-        has_embeddings = bool(row and row[0])
+        if not has_any_vectors(self.conn):
+            if recorded_model != current_model:
+                set_embed_metadata(self.conn, "embed_model", current_model)
+            return
 
-        if recorded_model is None and has_embeddings:
+        stale_tables = sample_stale_vector_tables(self.conn, EMBED_DIM)
+
+        if recorded_model is None:
             # Upgraded from old version: no metadata recorded but embeddings exist
             self.embed_model_changed = True
             LOGGER.warning(
@@ -313,7 +338,7 @@ class SAIMemoryAdapter:
                 "Likely upgraded from old version. Reembed recommended.",
                 self.persona_id,
             )
-        elif recorded_model and recorded_model != current_model:
+        elif recorded_model != current_model:
             # Model explicitly changed
             self.embed_model_changed = True
             LOGGER.warning(
@@ -322,9 +347,15 @@ class SAIMemoryAdapter:
                 recorded_model,
                 current_model,
             )
-        elif not has_embeddings:
-            # Fresh database — record current model immediately
-            set_embed_metadata(self.conn, "embed_model", current_model)
+        elif stale_tables:
+            self.embed_model_changed = True
+            LOGGER.warning(
+                "Persona %s: vectors whose length differs from %d found in %s. "
+                "Reembed recommended.",
+                self.persona_id,
+                EMBED_DIM,
+                ", ".join(stale_tables),
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -1954,6 +1985,7 @@ class SAIMemoryAdapter:
         self,
         *,
         progress_callback: Optional[Any] = None,
+        message_ids: Optional[Iterable[str]] = None,
     ) -> Dict[str, int]:
         """埋め込みが欠落しているメッセージ (message_embeddings に無い) を一括生成する。
 
@@ -1961,6 +1993,11 @@ class SAIMemoryAdapter:
         (LLM 不使用)。ここが必要になるのは、書き込み時に embedder が未初期化だった場合
         (embedding モデルのロード失敗・初回起動時のダウンロード未完了等) や、大量インポート
         直後の検証・保険としてまとめて埋めたい場合。
+
+        ``message_ids`` を渡すと、その中で欠落しているものだけを埋める。会話ログの
+        インポートが「本文の取り込み → 取り込んだ分の埋め込みを後から」の順で使う
+        (api/routes/people/import_chatlog.py)。指定が無いと全メッセージが対象で、
+        書き込み時に意図して埋め込みを外した行 (``embedding_chunks=0``) も埋める。
 
         Returns:
             {"total_missing": N, "embedded": M, "failed": K} の集計。
@@ -1979,6 +2016,10 @@ class SAIMemoryAdapter:
         except Exception as exc:
             LOGGER.warning("Failed to list messages without embeddings: %s", exc)
             return result
+
+        if message_ids is not None:
+            wanted = set(message_ids)
+            missing = [msg for msg in missing if msg.id in wanted]
 
         result["total_missing"] = len(missing)
         if not missing or self.embedder is None:

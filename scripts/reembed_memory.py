@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""Re-embed SAIMemory messages whose vectors have an unexpected dimension."""
+"""Rebuild SAIMemory recall vectors made by another embedding model.
+
+Covers all four vector systems (messages, Chronicle, Memopedia pages,
+fragments; docs/intent/embedding_gemma2_migration.md §2) and records the
+current model in ``embed_metadata.embed_model`` at the end, so the next
+startup does not warn again.
+"""
 
 from __future__ import annotations
 
 import os
 
 import argparse
-import json
 import sys
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -20,13 +25,15 @@ from dotenv import load_dotenv
 load_dotenv(PROJECT_ROOT / ".env")
 
 from sai_memory.config import load_settings
-from sai_memory.memory.chunking import chunk_text
-from sai_memory.memory.recall import Embedder
-from sai_memory.memory.storage import (
-    get_message,
-    init_db,
-    replace_message_embeddings,
+from sai_memory.embedding_migration import (
+    finish_reembed,
+    highest_vector_dim,
+    message_reembed_targets,
+    rebuild_recall_source_embeddings,
+    reembed_messages,
 )
+from sai_memory.memory.recall import Embedder
+from sai_memory.memory.storage import init_db
 
 
 def _build_embedder() -> Tuple[Embedder, int]:
@@ -43,6 +50,7 @@ def _reembed_persona(
     expected_dim: int,
     chunk_min: int,
     chunk_max: int,
+    model_id: str,
     force: bool = False,
 ) -> None:
     db_path = Path(os.getenv("SAIVERSE_HOME") or Path.home() / ".saiverse") / "personas" / persona_id / "memory.db"
@@ -61,82 +69,59 @@ def _reembed_persona(
         return
 
     try:
-        # Collect target message IDs
-        if force:
-            # Force mode: re-embed all messages
-            all_ids: set[str] = set()
-            for (mid,) in conn.execute("SELECT DISTINCT id FROM messages"):
-                all_ids.add(mid)
-            target_ids = all_ids
-            if not target_ids:
-                print(f"[ok] {persona_id}: no messages found.")
-                return
-            print(f"[force] {persona_id}: re-embedding all {len(target_ids)} messages...")
-        else:
-            # Normal mode: only re-embed mismatched dimensions
-            bad_ids: set[str] = set()
-            highest_dim = 0
-            for mid, _, vec_json in conn.execute(
-                "SELECT message_id, chunk_index, vector FROM message_embeddings"
-            ):
-                try:
-                    vec = json.loads(vec_json)
-                except json.JSONDecodeError:
-                    bad_ids.add(mid)
-                    continue
-                vec_len = len(vec)
-                if vec_len > highest_dim:
-                    highest_dim = vec_len
-                if vec_len != expected_dim:
-                    bad_ids.add(mid)
-
-            if bad_ids and highest_dim > expected_dim:
+        if not force:
+            highest_dim = highest_vector_dim(conn)
+            if highest_dim > expected_dim:
                 print(
                     f"[error] {persona_id}: existing embeddings up to dimension {highest_dim}, "
-                    f"but the selected model provides dimension {expected_dim}. "
-                    "Refusing to re-embed to a smaller dimension.",
+                    f"but the current model provides dimension {expected_dim}. "
+                    "Refusing to re-embed to a smaller dimension (use --force to override).",
                     file=sys.stderr,
                 )
                 return
+        else:
+            print(f"[force] {persona_id}: rebuilding every recall vector...")
 
-            if not bad_ids:
-                print(f"[ok] {persona_id}: no mismatched embeddings detected.")
-                return
-            target_ids = bad_ids
-
-        fixed = 0
-        for mid in target_ids:
-            msg = get_message(conn, mid)
-            if msg is None or not msg.content:
-                continue
-            chunks = chunk_text(
-                msg.content,
-                min_chars=chunk_min,
-                max_chars=chunk_max,
+        sources = rebuild_recall_source_embeddings(conn, embedder, force=force)
+        for source, counts in sources.items():
+            print(
+                f"[{source}] {persona_id}: deleted {counts['deleted']}, "
+                f"embedded {counts['done']}/{counts['total']}"
             )
-            payload: List[str] = [c.strip() for c in chunks if c and c.strip()]
-            if not payload:
-                payload = [msg.content.strip()]
-            if not payload:
-                continue
-            vectors = embedder.embed(payload, is_query=False)
-            replace_message_embeddings(conn, mid, vectors)
-            fixed += 1
 
-        print(f"[done] {persona_id}: re-embedded {fixed} messages (expected dim {expected_dim}).")
+        target_ids = message_reembed_targets(
+            conn, expected_dim, force=force, include_missing=False,
+        )
+        result = reembed_messages(
+            conn, embedder, target_ids, chunk_min=chunk_min, chunk_max=chunk_max,
+        )
+        print(
+            f"[messages] {persona_id}: re-embedded {result['embedded']} messages, "
+            f"dropped vectors of {result['dropped']} without text (expected dim {expected_dim})."
+        )
+
+        still_stale = finish_reembed(conn, embedder, model_id)
+        if still_stale:
+            print(
+                f"[warn] {persona_id}: stale vectors remain in {', '.join(still_stale)}.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"[done] {persona_id}: recorded embed_model={model_id}.")
     finally:
         conn.close()
 
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Re-embed SAIMemory messages with mismatched vector dimensions."
+        description="Rebuild SAIMemory recall vectors (messages, Chronicle, Memopedia pages, "
+        "fragments) whose dimension does not match the current embedding model."
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Force re-embed all messages regardless of dimension match. "
-        "Use this when changing embedding prefixes or model settings.",
+        help="Rebuild every recall vector regardless of dimension match. "
+        "Use this when changing embedding prompts or model settings.",
     )
     parser.add_argument(
         "personas",
@@ -155,6 +140,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             expected_dim=expected_dim,
             chunk_min=settings.chunk_min_chars,
             chunk_max=settings.chunk_max_chars,
+            model_id=settings.embed_model,
             force=args.force,
         )
     return 0

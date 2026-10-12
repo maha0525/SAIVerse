@@ -257,6 +257,7 @@ sai_memory/
 │                     #   下ろす／現在地でない部屋の様子を一行へ。提示だけ・台帳は無傷）
 ├── clips.py / purpose_tags.py # クリップ（土地参照の統一プリミティブ、旧 marks）・目的タグ（memory.db 同居）
 ├── unified_recall.py # 統合想起
+├── embedding_migration.py # 埋め込みモデル移行（古い長さのベクトルの検出と 4 系統の作り直し。起動時判定・reembed API・CLI が共有）
 ├── backup.py         # rdiff-backup
 ├── config.py / cli.py / logging_utils.py
 └── README.md
