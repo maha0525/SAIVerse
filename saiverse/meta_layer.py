@@ -65,15 +65,18 @@ class MetaLayer:
 
     # AI.META_JUDGMENT_CONFIG の既定値。NULL カラム / 不正 JSON / キー欠落の
     # フォールバック先。v1 メタ判断の退役 (track_retirement.md §7.4) 後も
-    # キーは全て残している — UI (ライフビュー等) が読み書きする永続語彙のため。
+    # キーは残している — UI (ライフビュー等) が読み書きする永続語彙のため。
     # リトライ系 (max_retries / retry_backoff_seconds / max_consecutive_failures /
     # force_fail) は旧 v1 リトライ機構の読み手を失った休眠キー。
+    # 旧 ``periodic_interval_minutes`` (watchdog の間隔) は v0.4 段 3 で読み手が
+    # 消えたので外した — ティックの間隔 T は起床スケジュール行の
+    # ``tick_interval_minutes`` (saiverse/day_plan.py) が持つ。保存済みの行に
+    # 残っていても、下のマージは既定に無いキーを拾わないので無害。
     _DEFAULT_JUDGMENT_CONFIG: Dict[str, Any] = {
         "cache_threshold_ratio": 0.3,     # キャッシュ TTL 残り 30% で keepalive 発火
         "max_retries": 1,                 # (休眠) 旧 v1: Pulse 失敗時の即時リトライ最大回数
         "retry_backoff_seconds": 5,       # (休眠) 旧 v1: リトライ間の待機秒数
         "max_consecutive_failures": 3,    # (休眠) 旧 v1: 連続失敗で Idle 降格 + 通知 (案C)
-        "periodic_interval_minutes": 50,  # watchdog 系の間隔 (旧 AutonomyManager.interval_minutes)
         "keep_cache_alive": True,         # True: cache TTL 接近で keepalive / False: TTL 無視
         # 自律 Track の Pulse 間隔 (秒) のペルソナ単位デフォルト。Track metadata
         # の pulse_interval_seconds が個別上書き (優先順: Track metadata > ここ >

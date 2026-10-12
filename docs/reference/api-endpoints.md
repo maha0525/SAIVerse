@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 371（tag グループ: 26）
+**エンドポイント数**: 375（tag グループ: 26）
 
 ## addon
 
@@ -116,11 +116,13 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 |---|---|---|
 | GET | `/api/config/announcements-monitor` | Get announcements monitoring status. |
 | POST | `/api/config/announcements-monitor` | Toggle announcements monitoring on/off. |
+| GET | `/api/config/autonomy-all-stop` | グローバル自律全停止の現在値 (v0.4 計画 決定 12)。 |
+| POST | `/api/config/autonomy-all-stop` | グローバル自律全停止を設定する (v0.4 計画 決定 12)。 |
 | GET | `/api/config/cache` | Get current cache settings and model cache support info. |
 | POST | `/api/config/cache` | Update cache settings. |
 | GET | `/api/config/config` | Get current model and parameter configuration. |
 | GET | `/api/config/developer-mode` | Get developer mode status. |
-| POST | `/api/config/developer-mode` | Set developer mode status. |
+| POST | `/api/config/developer-mode` | Set developer mode status (表示の切り替えだけ)。 |
 | GET | `/api/config/favorite-models` | Get user's favorite model IDs. |
 | POST | `/api/config/favorite-models` | Set user's favorite model IDs. |
 | GET | `/api/config/gemini-auto-cache` | Get the Gemini auto-cache switch and how long a cache is kept after the reply. |
@@ -298,6 +300,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/people/{persona_id}/import/official/preview` | Preview ChatGPT export file and return conversation list for selection. |
 | GET | `/api/people/{persona_id}/import/official/status` | Get the status of official import task. |
 | GET | `/api/people/{persona_id}/items` | List items held by a persona. |
+| GET | `/api/people/{persona_id}/life-settings` | ライフ設定の現況 (起床・就寝・自律・T・モード・一日の目安) をまとめて返す。 |
+| PUT | `/api/people/{persona_id}/life-settings` | ライフ設定を保存する。渡された欄だけを変え、null は「未設定に戻す」。 |
 | POST | `/api/people/{persona_id}/memopedia/build-from-logs` | Start building Memopedia pages from chat logs as a background job. |
 | GET | `/api/people/{persona_id}/memopedia/export` | Export all Memopedia pages as JSON. |
 | POST | `/api/people/{persona_id}/memopedia/generate` | Start Memopedia page generation as a background job. |

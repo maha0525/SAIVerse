@@ -130,11 +130,16 @@ class MetaJudgmentConfig(BaseModel):
     混ざっている (max_retries / retry_backoff_seconds / force_fail)。既存行が
     round-trip で消えないよう受け口は残すが、**編集 UI は 2026-08-14 に削除した**
     — 新しい読み手を生やす前に、そのキーが何を意味するかを決め直すこと。
+
+    旧 ``periodic_interval_minutes`` (watchdog の間隔) は v0.4 段 3 で読み手が
+    消えたので欄を外した。pydantic の既定 (extra='ignore') で、保存済みの
+    META_JUDGMENT_CONFIG に残っていても GET は落ちず、PATCH で送られてきても
+    無視される (保存時は送られてきた欄だけで置き換えるので、古いキーは次の
+    保存で行から消える)。
     """
     cache_threshold_ratio: Optional[float] = None    # 0.0–1.0, default 0.3
     max_retries: Optional[int] = None                # (休眠) 旧 v1 リトライ回数
     retry_backoff_seconds: Optional[int] = None      # (休眠) 旧 v1 リトライ待機秒数
-    periodic_interval_minutes: Optional[int] = None  # default 50 (watchdog の間隔)
     keep_cache_alive: Optional[bool] = None          # default True (TTL 接近で温め直す)
     # ライフビュー「作業のテンポ」: 自律 Track の Pulse 間隔 (秒) のペルソナ既定値。
     # update_ai は META_JUDGMENT_CONFIG を丸ごと置換するため、ここに定義しないと

@@ -337,6 +337,73 @@ def set_autonomy_all_stop(manager: Any, value: bool) -> bool:
     return value
 
 
+def sync_autonomy_after_setting_change(manager: Any, persona_id: str) -> None:
+    """ペルソナの AUTONOMY_ENABLED を書き換えた後、AutonomyManager を門に同期する。
+
+    設定の書き手 (ペルソナ設定の保存 ``AdminService.update_ai`` とライフ設定の
+    保存 :func:`set_persona_autonomy_enabled`) が共有する後段。ON なら見張りと
+    ティックの予約が立ち上がり、OFF なら止まる (``manager.ensure_autonomy_for``)。
+    同期の失敗は保存を失敗にしない (DB が正典 — 次の起動や全停止の切り替えで
+    揃う) — WARN で握る。
+    """
+    ensure = getattr(manager, "ensure_autonomy_for", None)
+    if not callable(ensure):
+        return
+    try:
+        ensure(persona_id)
+    except Exception:
+        LOGGER.warning(
+            "[autonomy-wiring] failed to sync AutonomyManager state for '%s'",
+            persona_id, exc_info=True,
+        )
+
+
+def set_persona_autonomy_enabled(
+    manager: Any, persona_id: str, enabled: bool,
+) -> bool:
+    """ペルソナの AUTONOMY_ENABLED (設定値) だけを書き換える。
+
+    DB の行と、読み込まれているペルソナの ``autonomy_enabled`` を揃え、値が
+    変わったときだけ :func:`sync_autonomy_after_setting_change` を呼ぶ —
+    ``AdminService.update_ai`` の自律の欄と同じ副作用。グローバル自律全停止は
+    触らない (全停止中に ON にしても、解除されるまで駆動はしない)。
+
+    Returns:
+        値が変わったか。
+
+    Raises:
+        KeyError: ペルソナの行が無い。
+        DB に書けなかった場合はそのまま送出する (in-memory は書き換えない)。
+    """
+    value = bool(enabled)
+    from database.models import AI
+
+    db = manager.SessionLocal()
+    try:
+        row = db.query(AI).filter(AI.AIID == persona_id).first()
+        if row is None:
+            raise KeyError(persona_id)
+        changed = bool(row.AUTONOMY_ENABLED) != value
+        if changed:
+            row.AUTONOMY_ENABLED = value
+            db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+    persona = _get_persona(manager, persona_id)
+    if persona is not None:
+        persona.autonomy_enabled = value
+    if changed:
+        LOGGER.info(
+            "[autonomy-wiring] AUTONOMY_ENABLED of %s set to %s", persona_id, value,
+        )
+        if persona is not None:
+            sync_autonomy_after_setting_change(manager, persona_id)
+    return changed
+
+
 def is_autonomy_on(manager: Any, persona_id: str) -> bool:
     """このペルソナの自律の駆動を回してよいか — **自律ゲートの唯一の判定**。
 

@@ -82,7 +82,7 @@ def _add_event_task(
     対する finalize の再実行で同じ一件が増えない。刺激の ID が無い (義務化
     以前の台帳行の再発火) ときは冪等キーなしで積む。
     """
-    from saiverse.task_book import ORIGIN_SYSTEM, add_entry
+    from saiverse.task_book import add_system_task
 
     event_excerpt = str(event_text or "").strip()
     content = task_text
@@ -92,11 +92,10 @@ def _add_event_task(
     if event_excerpt:
         meta["event_text"] = event_excerpt
     sid = stimulus_id if isinstance(stimulus_id, str) and stimulus_id.strip() else None
-    return add_entry(
+    return add_system_task(
         manager,
         persona_id,
         content,
-        origin=ORIGIN_SYSTEM,
         origin_ref=sid,
         meta=meta,
         idem_key=f"on_event:{sid}" if sid else None,

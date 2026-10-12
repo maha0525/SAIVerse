@@ -1962,21 +1962,14 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     )
 
             # Phase C-2: AUTONOMY_ENABLED 変更を AutonomyManager に反映
-            # (True なら起動、False なら停止)。
+            # (True なら起動、False なら停止)。ライフ設定の保存
+            # (autonomy_wiring.set_persona_autonomy_enabled) と同じ後段を共有する。
             # ``ensure_autonomy_for`` は SAIVerseManager のメソッドのため、
-            # AdminService からは ``self.manager`` 経由で呼び出す。
+            # AdminService からは ``self.manager`` 経由で渡す。
             if persona is not None and state_changed:
-                try:
-                    ensure_autonomy = getattr(
-                        self.manager, "ensure_autonomy_for", None
-                    )
-                    if callable(ensure_autonomy):
-                        ensure_autonomy(ai_id)
-                except Exception:
-                    logging.warning(
-                        "Failed to sync AutonomyManager state for '%s'",
-                        ai_id, exc_info=True,
-                    )
+                from saiverse.autonomy_wiring import sync_autonomy_after_setting_change
+
+                sync_autonomy_after_setting_change(self.manager, ai_id)
 
             # 記憶の整理の見張りは「前回と同じ状態なら結果も同じ」で素通しする。Memory
             # Weave モデルを選び直しても会話が動くまで整理が再試行されないと

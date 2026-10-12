@@ -372,6 +372,39 @@ def add_entry(
         db.close()
 
 
+def add_system_task(
+    manager: Any,
+    persona_id: str,
+    content: str,
+    *,
+    idem_key: Optional[str],
+    origin_ref: Optional[str] = None,
+    meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """機械がペルソナに急ぎでない依頼を一件積む — システムタスクの書き手 (v3 §9-5)。
+
+    :func:`add_entry` を ``origin=ORIGIN_SYSTEM`` (期限なし・相手なし) で包む。
+    積んだ一件はティックの引き当て (``autonomy_manager.build_tick_assignment``)
+    が、締め切りの迫る一件が無い回に作成順の先頭から引く。
+
+    ``idem_key`` は必須の名前つき引数 (呼び手が冪等性を考えた印)。与えると
+    ``(persona_id, idem_key)`` の get-or-create で、**状態を問わず**既存の行を
+    返す — 完了 (done) や取り下げ (withdrawn) 済みの行と同じキーで積み直しても
+    新しい一件は増えない (閉じた行は再オープンしない)。だから「一度だけ聞く」
+    依頼は固定のキーを渡せば、ペルソナが済ませた後に再び積まれることはない。
+    冪等にできない呼び手 (刺激の ID が無い判断の再発火など) だけが None を渡す。
+    """
+    return add_entry(
+        manager,
+        persona_id,
+        content,
+        origin=ORIGIN_SYSTEM,
+        origin_ref=origin_ref,
+        meta=meta,
+        idem_key=idem_key,
+    )
+
+
 def update_entry(
     manager: Any,
     persona_id: str,

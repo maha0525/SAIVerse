@@ -191,6 +191,16 @@ def _set_life_window(session_factory, wake="07:00", close="22:00", params=None):
     _add_day_schedule(session_factory, wiring.LIFE_END_SCHEDULE_PLAYBOOK, close)
 
 
+def _mark_self_defined(session_factory, value='{"purpose": "live"}'):
+    """旧 LIFE_PURPOSE 列を書く (v2 時代に聞き取りを済ませたペルソナ)。"""
+    db = session_factory()
+    try:
+        db.query(AI).filter(AI.AIID == PERSONA_ID).update({AI.LIFE_PURPOSE: value})
+        db.commit()
+    finally:
+        db.close()
+
+
 def _start_am(manager) -> AutonomyManager:
     am = AutonomyManager(PERSONA_ID, manager)
     manager._autonomy_managers[PERSONA_ID] = am
@@ -352,6 +362,9 @@ def _running_life(manager, session_factory, params=None):
 def test_tick_fires_with_the_free_default_when_nothing_is_assigned(
     manager, session_factory,
 ):
+    # 聞き取り済みのペルソナ (自己定義のシステムタスクが積まれない) — 引き当て
+    # るものが本当に何も無い回
+    _mark_self_defined(session_factory)
     am = _running_life(manager, session_factory)
     _fire_tick_reservation(manager)
 
@@ -503,6 +516,8 @@ def test_assignment_takes_the_deadline_first_then_system_task_then_free(manager)
 
 
 def test_assignment_reaches_fire_tick(manager, session_factory):
+    # 聞き取り済み — 自己定義のシステムタスクと作成時刻が同じ秒で並ばないように
+    _mark_self_defined(session_factory)
     _running_life(manager, session_factory)
     task_book.add_entry(
         manager, PERSONA_ID, "自己定義の聞き取りに答える", origin=task_book.ORIGIN_SYSTEM,
@@ -531,6 +546,94 @@ def test_unreadable_task_book_skips_the_tick_instead_of_running_free(
     _fire_tick_reservation(manager)
     assert manager.fire_tick.calls == []
     assert am.last_report.reason == "task book unreadable"
+    assert _tick_at(manager) is not None
+
+
+# ---------------------------------------------------------------------------
+# システムタスク第一号: 自己定義の聞き取り (v3 §9-5、段 3-6)
+# ---------------------------------------------------------------------------
+
+
+def _self_definition_tasks(manager):
+    key = day_plan.self_definition_task_idem_key(PERSONA_ID)
+    return [
+        e for e in task_book.list_open_system_tasks(manager, PERSONA_ID)
+        if e["idem_key"] == key
+    ]
+
+
+def test_life_start_queues_the_self_definition_task_once(manager, session_factory):
+    """LIFE_PURPOSE が空のペルソナは、ライフ開始で自己定義の聞き取りが一件積まれ、
+    最初のティックがそれを引く。"""
+    _running_life(manager, session_factory)
+    entries = _self_definition_tasks(manager)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["origin"] == task_book.ORIGIN_SYSTEM
+    assert entry["due_at"] is None and entry["counterpart"] is None
+    assert entry["content"] == day_plan.SELF_DEFINITION_TASK_CONTENT
+
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls[0]["assignment"] == (
+        f"この時間は、システムからの依頼「{day_plan.SELF_DEFINITION_TASK_CONTENT}」に使います。"
+    )
+
+
+def test_self_definition_task_is_not_queued_again_on_the_next_life_start(
+    manager, session_factory,
+):
+    """二度目の節目 (翌日のライフ開始) でも、完了後でも、積み直されない。"""
+    _running_life(manager, session_factory)
+    assert len(_self_definition_tasks(manager)) == 1
+    _end_life(manager)
+
+    # 翌日のライフ開始 — まだ open のまま: 一件のまま
+    clock.advance_to(BASE + timedelta(days=1, hours=7))
+    _start_life(manager)
+    assert len(_self_definition_tasks(manager)) == 1
+
+    # 本人が済ませた後のライフ開始 — 閉じた行は積み直さない
+    task_id = _self_definition_tasks(manager)[0]["task_id"]
+    task_book.complete_entry(manager, PERSONA_ID, task_id, outcome="書いた")
+    _end_life(manager)
+    clock.advance_to(BASE + timedelta(days=2, hours=7))
+    _start_life(manager)
+    assert _self_definition_tasks(manager) == []
+    db = session_factory()
+    try:
+        from database.models import TaskBookEntry
+
+        assert db.query(TaskBookEntry).filter(
+            TaskBookEntry.IDEM_KEY == day_plan.self_definition_task_idem_key(PERSONA_ID),
+        ).count() == 1
+    finally:
+        db.close()
+
+
+def test_self_definition_task_skips_a_persona_with_life_purpose(
+    manager, session_factory,
+):
+    """v2 時代に聞き取りを済ませたペルソナ (LIFE_PURPOSE あり) には積まない。"""
+    _mark_self_defined(session_factory)
+    _running_life(manager, session_factory)
+    assert task_book.list_open_system_tasks(manager, PERSONA_ID) == []
+
+
+def test_self_definition_failure_does_not_fail_the_life_start(
+    manager, session_factory, monkeypatch, caplog,
+):
+    """積み込みの失敗は節目を失敗にしない (WARN で握る)。"""
+    def _boom(*args, **kwargs):
+        raise RuntimeError("task book down")
+
+    monkeypatch.setattr(task_book, "add_system_task", _boom)
+    _set_life_window(session_factory)
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    _start_am(manager)
+    with caplog.at_level("WARNING"):
+        _start_life(manager)  # True を返す (内部で assert)
+    assert any("self-definition" in r.message for r in caplog.records)
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["started"] is True
     assert _tick_at(manager) is not None
 
 

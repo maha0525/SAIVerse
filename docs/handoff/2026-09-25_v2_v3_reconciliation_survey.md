@@ -146,7 +146,7 @@
 17. **スルースの「帳簿の重ね」の形式と、目的参照のメッセージ上の欄の形**。
 18. **本人がアクティビティを閉じる口、手帳の訂正 API とタスク帳の楽観ロックの整合** (§13.2.1)。
 19. **移行**: 既存の習慣テンプレートをルーチンへ写すか (§9-8 の移行一覧に無い) / 起床・就寝の行の `daily_budget_*` の扱い / `persona_day_plan` / `persona_timetable_template` / `persona_task*` を落とす時期 / 退役 kind の台帳の行 (`slot.fire` / `judgment.post_session` / `saimemory.append_digest`) の扱い。
-20. **開発者モードを OFF にすると全ペルソナの自律が OFF になる件の裁定** ([issue](../issues/developer_mode_off_mass_disables_autonomy.md)、未決のまま)。
+20. **開発者モードを OFF にすると全ペルソナの自律が OFF になる件の裁定** ([issue](../issues/archive/developer_mode_off_mass_disables_autonomy.md)、未決のまま)。
 21. **夜の日記用の漏れ検知プリセットの中身** (v3 §6 は「用意する」とだけ)。
 
 ---

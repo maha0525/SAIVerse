@@ -286,6 +286,32 @@ class TaskBookTests(unittest.TestCase):
         listed = TB.list_open_system_tasks(self.manager, "p1")
         self.assertEqual([e["task_id"] for e in listed], [sys_task["task_id"]])
 
+    def test_add_system_task_is_idempotent_even_after_completion(self):
+        """add_system_task は ORIGIN='system' (期限なし・相手なし) で積み、同じ
+        idem_key の積み直しは状態を問わず既存の行を返す — 完了済みでも増えない。"""
+        first = TB.add_system_task(
+            self.manager, "p1", "自己定義の聞き取り", idem_key="system:x:p1",
+            meta={"source": "test"},
+        )
+        self.assertEqual(first["origin"], TB.ORIGIN_SYSTEM)
+        self.assertIsNone(first["due_at"])
+        self.assertIsNone(first["counterpart"])
+        self.assertEqual(first["meta"], {"source": "test"})
+
+        again = TB.add_system_task(
+            self.manager, "p1", "別の文面", idem_key="system:x:p1",
+        )
+        self.assertEqual(again["task_id"], first["task_id"])
+        self.assertEqual(again["content"], "自己定義の聞き取り")
+
+        TB.complete_entry(self.manager, "p1", first["task_id"], outcome="書いた")
+        after_done = TB.add_system_task(
+            self.manager, "p1", "自己定義の聞き取り", idem_key="system:x:p1",
+        )
+        self.assertEqual(after_done["task_id"], first["task_id"])
+        self.assertEqual(after_done["status"], TB.STATUS_DONE)
+        self.assertEqual(TB.list_open_system_tasks(self.manager, "p1"), [])
+
     # ---- 更新 ----
 
     def test_update_content_and_due(self):

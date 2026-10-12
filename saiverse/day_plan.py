@@ -1273,7 +1273,9 @@ def apply_life_boundary(
     ``_handle_life_end`` の直接通知は 2026-09-28 監査で撤去)。
 
     冪等段の中身: 開始は TTL override (均等モードの 1h 運転) とティックの予約
-    (now + T、:func:`_arm_tick_reservation`)。終了は keep-alive 予約とティックの
+    (now + T、:func:`_arm_tick_reservation`)、それに自己定義の聞き取りの
+    システムタスクの積み込み (:func:`_offer_self_definition_task` — 冪等キーで
+    一度きり、失敗しても節目は失敗にしない)。終了は keep-alive 予約とティックの
     予約の cancel、TTL override の遅延解除予約だけで、anchor は**触らない**
     (life.md §6.2 v0.4 — 失効は TTL に任せ、惜しい谷の生きたキャッシュを
     捨てない、§8.3)。
@@ -1355,6 +1357,10 @@ def apply_life_boundary(
                 _sync_cache_ttl_for_life_start(manager, persona_id, life)
                 and _arm_tick_reservation(manager, persona_id, life)
             )
+            if steps_ok:
+                # 失敗しても節目は失敗にしない (中で WARN して握る)。冪等キーで
+                # 一度きり — 節目の再試行・翌日のライフ開始で増えない。
+                _offer_self_definition_task(manager, persona_id)
         else:
             steps_ok = (
                 _cancel_keepalive_reservation(manager, persona_id)
@@ -2000,6 +2006,67 @@ def _arm_tick_reservation(manager: Any, persona_id: str, life: Dict[str, Any]) -
             "(persona=%s)", persona_id, exc_info=True,
         )
         return False
+
+
+#: システムタスク第一号 (自己定義の聞き取り) の本文 — ペルソナが読む (v3 §9-5)。
+SELF_DEFINITION_TASK_CONTENT = (
+    "自分がどんな存在でありたいか、何に関心があり、何をやっていきたいかを、"
+    "自分の言葉で書き留めてください。急ぎではありません。"
+)
+
+
+def self_definition_task_idem_key(persona_id: str) -> str:
+    """自己定義の聞き取りの冪等キー。ペルソナにつき一件きり (完了後も積み直さない)。"""
+    return f"system:self-definition:{persona_id}"
+
+
+def _offer_self_definition_task(manager: Any, persona_id: str) -> None:
+    """ライフ開始で、自己定義の聞き取りをシステムタスクとして一度だけ積む。
+
+    v3 §9-5 の「初回聞き取りの席」の後継 (システムタスクの第一号)。旧
+    ``LIFE_PURPOSE`` 列 (退役済み・機械写しの写し元として残置) が空のペルソナ
+    だけが対象 — 列が書かれているペルソナは v2 時代に聞き取りを済ませていて、
+    その一文は v3 の機械写しでコア記憶へ移っている。
+
+    冪等キー (:func:`self_definition_task_idem_key`) の get-or-create なので、
+    節目の再試行・翌日以降のライフ開始では増えず、ペルソナが完了した後に
+    積み直されることもない (:func:`saiverse.task_book.add_system_task`)。
+
+    積み込みの失敗は節目を失敗にしない — WARN で握り、次のライフ開始が
+    また試す。
+    """
+    try:
+        from database.models import AI
+
+        db = manager.SessionLocal()
+        try:
+            row = db.query(AI.LIFE_PURPOSE).filter(AI.AIID == persona_id).first()
+        finally:
+            db.close()
+        if row is None:
+            return
+        if str(row[0] or "").strip():
+            return
+        from saiverse.task_book import add_system_task
+
+        entry = add_system_task(
+            manager,
+            persona_id,
+            SELF_DEFINITION_TASK_CONTENT,
+            idem_key=self_definition_task_idem_key(persona_id),
+            meta={"source": "self_definition"},
+        )
+        LOGGER.debug(
+            "[day_plan] self-definition system task present (persona=%s "
+            "task=%s status=%s)", persona_id, entry.get("task_id"),
+            entry.get("status"),
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to queue the self-definition system task "
+            "(persona=%s); the next life start will retry", persona_id,
+            exc_info=True,
+        )
 
 
 def _cancel_tick_reservation(manager: Any, persona_id: str) -> bool:

@@ -523,43 +523,49 @@ def get_developer_mode(manager=Depends(get_manager)):
 
 @router.post("/developer-mode")
 def set_developer_mode(req: DeveloperModeRequest, manager=Depends(get_manager)):
-    """Set developer mode status.
+    """Set developer mode status (表示の切り替えだけ)。
 
-    When turning OFF, also disables all personas' AUTONOMY_ENABLED
-    (自発的な自律行動を停止)。
+    以前は OFF にすると全ペルソナの AUTONOMY_ENABLED を不可逆に False へ
+    書き換える副作用があったが、v0.4 計画 決定 12 で撤去した。自律を一括で
+    止めたいときはグローバル自律全停止 (``/autonomy-all-stop``) を使う
+    (docs/issues/archive/developer_mode_off_mass_disables_autonomy.md)。
     """
     manager.state.developer_mode = req.enabled
-
-    if not req.enabled:
-        # 全ペルソナの自律行動を OFF (自発的な自律行動を停止)
-        from database.session import SessionLocal
-        from database.models import AI
-        db = SessionLocal()
-        try:
-            db.query(AI).update({AI.AUTONOMY_ENABLED: False})
-            db.commit()
-        except Exception:
-            _log.warning("Failed to reset autonomy states", exc_info=True)
-            db.rollback()
-        finally:
-            db.close()
-
-        # Update in-memory persona objects + sync AutonomyManager (stop running ones)
-        for persona in manager.state.personas.values():
-            if hasattr(persona, "autonomy_enabled"):
-                persona.autonomy_enabled = False
-        ensure_autonomy = getattr(manager, "ensure_autonomy_for", None)
-        if callable(ensure_autonomy):
-            for persona_id in list(manager.state.personas.keys()):
-                try:
-                    ensure_autonomy(persona_id)
-                except Exception:
-                    _log.warning(
-                        "Failed to sync AutonomyManager for '%s'",
-                        persona_id, exc_info=True,
-                    )
-
     return {"success": True, "enabled": req.enabled}
+
+
+class AutonomyAllStopRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/autonomy-all-stop")
+def get_autonomy_all_stop(manager=Depends(get_manager)):
+    """グローバル自律全停止の現在値 (v0.4 計画 決定 12)。"""
+    from saiverse.autonomy_wiring import is_autonomy_all_stopped
+
+    return {"enabled": is_autonomy_all_stopped(manager)}
+
+
+@router.post("/autonomy-all-stop")
+def set_autonomy_all_stop(req: AutonomyAllStopRequest, manager=Depends(get_manager)):
+    """グローバル自律全停止を設定する (v0.4 計画 決定 12)。
+
+    全ペルソナのティック・判断点・watchdog などの自発の駆動を一括で止める
+    非常ブレーキ。ペルソナごとの AUTONOMY_ENABLED は書き換えないので、解除
+    すれば元の設定で再開する。DB に書けなかったら 500 (表示と実際の状態を
+    食い違わせない — 書けなかった回はキャッシュも変わらない)。
+    """
+    from saiverse.autonomy_wiring import set_autonomy_all_stop as _set_all_stop
+
+    try:
+        value = _set_all_stop(manager, req.enabled)
+    except Exception as exc:
+        _log.exception("Failed to set the global autonomy all-stop to %s", req.enabled)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save the global autonomy all-stop: {exc}",
+        )
+    return {"success": True, "enabled": value}
 
 
 class MonitoringToggleRequest(BaseModel):

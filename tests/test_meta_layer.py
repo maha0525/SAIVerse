@@ -87,12 +87,12 @@ def test_config_defaults_when_column_null(session_factory):
 
 def test_config_override_merges_and_keeps_defaults(session_factory):
     _seed_ai(session_factory, config_json=json.dumps(
-        {"periodic_interval_minutes": 10, "keep_cache_alive": False}
+        {"max_retries": 4, "keep_cache_alive": False}
     ))
     layer = _make_layer(session_factory)
     persona = SimpleNamespace(persona_id=PERSONA_ID)
     config = layer._load_judgment_config(persona)
-    assert config["periodic_interval_minutes"] == 10
+    assert config["max_retries"] == 4
     assert config["keep_cache_alive"] is False
     # 触っていないキーは既定値のまま
     assert config["autonomous_pulse_interval_seconds"] == (
@@ -103,15 +103,30 @@ def test_config_override_merges_and_keeps_defaults(session_factory):
 def test_config_wrong_type_falls_back_to_default(session_factory):
     # bool は int の subclass — int キーに bool が来ても既定値へ落とす型検査
     _seed_ai(session_factory, config_json=json.dumps(
-        {"periodic_interval_minutes": True, "keep_cache_alive": "yes"}
+        {"max_retries": True, "keep_cache_alive": "yes"}
     ))
     layer = _make_layer(session_factory)
     persona = SimpleNamespace(persona_id=PERSONA_ID)
     config = layer._load_judgment_config(persona)
-    assert config["periodic_interval_minutes"] == (
-        MetaLayer._DEFAULT_JUDGMENT_CONFIG["periodic_interval_minutes"]
+    assert config["max_retries"] == (
+        MetaLayer._DEFAULT_JUDGMENT_CONFIG["max_retries"]
     )
     assert config["keep_cache_alive"] is True
+
+
+def test_config_retired_periodic_interval_key_is_ignored(session_factory):
+    """読み手の消えた旧キー periodic_interval_minutes (v0.4 段 3 で既定から外した)
+    が保存済みの行に残っていても、読み出しは壊れず、結果にも出てこない。"""
+    assert "periodic_interval_minutes" not in MetaLayer._DEFAULT_JUDGMENT_CONFIG
+    _seed_ai(session_factory, config_json=json.dumps(
+        {"periodic_interval_minutes": 10, "keep_cache_alive": False}
+    ))
+    layer = _make_layer(session_factory)
+    persona = SimpleNamespace(persona_id=PERSONA_ID)
+    config = layer._load_judgment_config(persona)
+    assert "periodic_interval_minutes" not in config
+    assert config["keep_cache_alive"] is False
+    assert set(config) == set(MetaLayer._DEFAULT_JUDGMENT_CONFIG)
 
 
 def test_config_invalid_json_falls_back(session_factory):

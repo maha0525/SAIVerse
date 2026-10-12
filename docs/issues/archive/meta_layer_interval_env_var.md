@@ -1,19 +1,36 @@
 # Issue: `SAIVERSE_META_LAYER_INTERVAL_SECONDS` env で interval 上書きが効くか確認
 
-**ステータス**: 保留（旧 v1 定期メタ判断向けの提案は失効。後継の実機検証を完了扱いにしない）
+**ステータス**: 解決 (2026-10-12 — 対象消滅。env も `periodic_interval_minutes` も読み手が無くなり、両方を撤去した)
 **優先度**: low
 **作成日**: 2026-05-08
 
-## 現行仕様（2026-10-02 確認）
+## 決着 (2026-10-12)
+
+v0.4 段 3 (ティックの運転、[v0.4 計画](../../intent/autonomous_behavior_v04_plan.md) §4 決定 11) で
+`AutonomyManager` の間隔の決め方が置き換わり、この issue の対象が両方とも消えた。
+
+- `AutonomyManager` はもう `SAIVERSE_META_LAYER_INTERVAL_SECONDS` も
+  `META_JUDGMENT_CONFIG.periodic_interval_minutes` も読まない。ティックの間隔 T は
+  起床スケジュール行の `PLAYBOOK_PARAMS.tick_interval_minutes` を
+  `saiverse.day_plan.resolve_tick_interval_minutes` が解決する (既定 30 分・床 10 分・
+  均等モードは 50 分が上限)。watchdog の見回り間隔は固定値 (`WATCHDOG_INTERVAL_MINUTES`)。
+- 読み手の消えた `periodic_interval_minutes` は `MetaLayer._DEFAULT_JUDGMENT_CONFIG` と
+  API の `MetaJudgmentConfig` から外した。保存済みの行に残っていても読み出しは
+  無視するだけで壊れない (`tests/test_meta_layer.py` が固定)。
+- env `SAIVERSE_META_LAYER_INTERVAL_SECONDS` はコードのどこからも読まれていない。
+  `docs/reference/environment-vars.md` と `.env.example` には元から載っていなかった。
+  古い intent 文書 (persona_action_tracks.md 等) の記述は経過の記録として残す。
+
+## 経過: 2026-10-02 時点の現行仕様（以下は段 3 以前の記録）
 
 **旧メタ判断の interval 読み出しを `MetaLayer` に追加する作業は不要**。
-[Track 撤廃計画 §7.3–7.4](../intent/track_retirement.md) で v1 メタ判断の退役が裁定・実装され、
-[`MetaLayer`](../../saiverse/meta_layer.py) に `on_periodic_tick` / `on_track_alert` /
+[Track 撤廃計画 §7.3–7.4](../../intent/track_retirement.md) で v1 メタ判断の退役が裁定・実装され、
+[`MetaLayer`](../../../saiverse/meta_layer.py) に `on_periodic_tick` / `on_track_alert` /
 `_classify_situation` は存在しない。残るのは判断系の共有基盤（ロック・設定・ログ）。
 同計画にある「実機検証は v0.4 送り」という留保は維持する。
 
 一方、**`SAIVERSE_META_LAYER_INTERVAL_SECONDS` という env 自体は廃止されていない**。
-現在の読み手は [`AutonomyManager.__init__`](../../saiverse/autonomy_manager.py) で、
+現在の読み手は [`AutonomyManager.__init__`](../../../saiverse/autonomy_manager.py) で、
 定期メタ判断から縮退した watchdog の間隔を決めるフォールバックとして残っている。
 
 - 優先順位はコンストラクタ引数 → `MetaLayer._load_judgment_config` が返す
@@ -25,13 +42,13 @@
 - v0.3 (develop) の自律駆動は止め具 (`AUTONOMOUS_DRIVING_SHIPPED=False`) で止まって
   いたため、env の変更だけで判断点や watchdog が動き出すことはなかった。develop-v0.4
   では止め具を 2026-09-25 に撤去済みで、watchdog は自律を ON にしたペルソナについて
-  実際に回る。出荷範囲と後続設計は [自律行動 v3 §11](../intent/autonomous_behavior_v3.md) を参照する。
+  実際に回る。出荷範囲と後続設計は [自律行動 v3 §11](../../intent/autonomous_behavior_v3.md) を参照する。
 
 **検証範囲（2026-10-02 の実行記録）**:
 
 - **リポジトリの既存自動テスト**: 隔離環境・LLM なしで
-  [`test_meta_layer.py`](../../tests/test_meta_layer.py)、
-  [`test_autonomy_manager.py`](../../tests/test_autonomy_manager.py)、
+  [`test_meta_layer.py`](../../../tests/test_meta_layer.py)、
+  [`test_autonomy_manager.py`](../../../tests/test_autonomy_manager.py)、
   `test_v03_autonomy_gate.py` (v0.3 の止め具の検査。develop-v0.4 では止め具ごと削除済み) を実行した。
   これらは MetaLayer の共有基盤、watchdog、v0.3 の停止を扱うが、
   **env の読み出しと上記の優先順位を検証するテストではない**。
@@ -53,7 +70,7 @@
 **起票時のステータス**: 🔲 未着手
 **優先度**: low
 **作成日**: 2026-05-08
-**関連**: `saiverse/meta_layer.py`, [docs/intent/persona_cognition/README.md](../intent/persona_cognition/README.md) Phase 4 進捗表
+**関連**: `saiverse/meta_layer.py`, [docs/intent/persona_cognition/README.md](../../intent/persona_cognition/README.md) Phase 4 進捗表
 
 ### 背景
 
@@ -90,7 +107,7 @@ DEFAULT_INTERVAL_SECONDS = int(os.environ.get("SAIVERSE_META_LAYER_INTERVAL_SECO
 
 - `saiverse/meta_layer.py` — メタレイヤー実装
 - `saiverse/autonomy_manager.py` — メタレイヤー定期 tick タイマー (現状の interval 管理場所候補)
-- [docs/intent/persona_cognition/README.md](../intent/persona_cognition/README.md) Phase 4 進捗表
+- [docs/intent/persona_cognition/README.md](../../intent/persona_cognition/README.md) Phase 4 進捗表
 
 ### ログ
 
