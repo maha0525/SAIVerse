@@ -1805,6 +1805,34 @@ def _life_ttl_owners(manager: Any) -> Dict[str, LifeKey]:
     return owners
 
 
+def apply_user_cache_override(
+    manager: Any, persona_id: str, *, enabled: bool, ttl: str,
+) -> None:
+    """利用者が人設定タブで明示した cache 設定を保存する (利用者の書き手の入口)。
+
+    保存と同じ :data:`_LIFE_TTL_LOCK` の区間で、そのペルソナの override の
+    持ち主の記録 (:func:`_life_ttl_owners`) を消す — 利用者が明示した設定は、
+    もはやライフの持ち分ではない。これで、ライフ終了の遅延解除が古い 1h を
+    読んだ後に利用者が別の値を保存しても、解除は持ち主の不一致で何もしない
+    (判定と解除は同じロックの区間なので、保存はその前か後のどちらかに並ぶ。
+    2026-10-12 Codex 敵対レビュー 段 3 6 巡目 medium)。利用者が 1h を選んだ
+    場合も持ち主は消える (ライフの解除はそれを外さない)。
+
+    ライフ自身の設定・解除 (:func:`_sync_cache_ttl_for_life_start` /
+    :func:`_clear_life_ttl_override`) はこの入口を通らない — ロックの中から
+    ``manager.set_persona_cache_override`` / ``clear_persona_cache_override`` を
+    直接呼ぶ (このロックは再入できない)。
+    """
+    with _LIFE_TTL_LOCK:
+        released = _life_ttl_owners(manager).pop(persona_id, None)
+        manager.set_persona_cache_override(persona_id, enabled=enabled, ttl=ttl)
+    if released is not None:
+        LOGGER.info(
+            "[day_plan] user cache setting saved; the life no longer owns the "
+            "override (persona=%s released_from=%s)", persona_id, released,
+        )
+
+
 def _resolve_ttl_clear_delay_seconds(manager: Any, persona_id: str) -> int:
     """TTL override 遅延解除の待ち秒数 (= anchor validity 秒) を解決する。
 
@@ -1901,6 +1929,12 @@ def _sync_cache_ttl_for_life_start(
     ``life_key`` へ付け替える — 前のライフの遅延解除は持ち主の照合で外すので、
     EventScheduler が既にワーカーへ手渡した (下の cancel が届かない) 古い解除も
     これで無効になる (2026-10-12 Codex 敵対レビュー 段 3 5 巡目 medium)。
+    **例外**: 既存の override があって持ち主の記録が無い (= 利用者が人設定タブで
+    明示した値) ときは付け替えない — 付け替えると、利用者がライフの前に明示した
+    1h を、ライフ終了の解除が「自分の持ち分」として消してしまう (同 6 巡目の
+    消し込みで実装側が発見した残骸)。持ち主の記録が残っている (= 前のライフの
+    1h) ときは従来どおり付け替える — 連続するライフで、前のライフの手渡し済みの
+    古い解除から次のライフを守る側が優先。
 
     続けて前のライフの遅延解除予約 (:func:`_sync_cache_ttl_for_life_end`) が
     残っていれば cancel する — TTL 経過前に次のライフが始まったケースで、
@@ -1915,8 +1949,19 @@ def _sync_cache_ttl_for_life_start(
     """
     if life.get("mode") != LIFE_MODE_EVEN:
         return True
+    get_override = getattr(manager, "get_persona_cache_override", None)
     with _LIFE_TTL_LOCK:
-        _life_ttl_owners(manager)[persona_id] = life_key
+        owners = _life_ttl_owners(manager)
+        has_life_owner = persona_id in owners
+        existing_at_claim = get_override(persona_id) if callable(get_override) else None
+        user_owned = existing_at_claim is not None and not has_life_owner
+        if not user_owned:
+            owners[persona_id] = life_key
+    if user_owned:
+        LOGGER.debug(
+            "[day_plan] life start (mode=even): the existing override belongs to "
+            "the user (no life owner); not claiming it (persona=%s)", persona_id,
+        )
     scheduler = getattr(manager, "event_scheduler", None)
     if scheduler is not None:
         try:
@@ -1963,6 +2008,51 @@ def _sync_cache_ttl_for_life_start(
             persona_id, exc_info=True,
         )
         return False
+
+
+def restore_cache_ttl_for_running_life(
+    manager: Any, persona_id: str, life: Dict[str, Any], *, life_key: LifeKey,
+) -> bool:
+    """走っている均等モードのライフの 1h override と持ち主を建て直す (再起動の回復)。
+
+    override と持ち主の記録は in-memory なので、ライフの途中で再起動すると
+    両方が消え、開始の節目は ``started`` マーカーで決着済みのため撃ち直されない
+    — 実効 TTL が全体既定 (5m) のまま運転される (2026-10-12 Codex 敵対レビュー
+    段 3 6 巡目 medium)。見張り (``autonomy_wiring.watchdog_tick``) が走行中の
+    ライフを見るたびに呼ぶ。
+
+    :func:`_sync_cache_ttl_for_life_start` の TTL の部分だけを冪等に行う —
+    開始の通知・started マーカー・遅延解除の取り消しはしない。触らない場合:
+
+    - 自由モードのライフ (TTL を強制する理由がない)
+    - 持ち主がこのライフ (建て直す必要がない — 毎回の見張りで空振りする)
+    - override が既にある (利用者が人設定タブで明示した値。持ち主の無い
+      override は利用者のもの — :func:`apply_user_cache_override` が持ち主を
+      消している)
+
+    Returns:
+        今回建て直したか。
+    """
+    if life.get("mode") != LIFE_MODE_EVEN:
+        return False
+    get_override = getattr(manager, "get_persona_cache_override", None)
+    set_override = getattr(manager, "set_persona_cache_override", None)
+    if get_override is None or set_override is None:
+        return False
+    with _LIFE_TTL_LOCK:
+        owners = _life_ttl_owners(manager)
+        if owners.get(persona_id) == life_key:
+            return False
+        if get_override(persona_id) is not None:
+            return False
+        set_override(persona_id, enabled=True, ttl=_EVEN_MODE_CACHE_TTL)
+        owners[persona_id] = life_key
+    LOGGER.info(
+        "[day_plan] running even-mode life had no cache TTL override (restart); "
+        "restored TTL=%s (persona=%s life=%s)",
+        _EVEN_MODE_CACHE_TTL, persona_id, life_key,
+    )
+    return True
 
 
 def _sync_cache_ttl_for_life_end(

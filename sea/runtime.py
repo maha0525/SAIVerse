@@ -2205,6 +2205,7 @@ class SEARuntime:
         # 判定は自律ゲートの唯一の口 (is_autonomy_on) を通す — 全停止は「自発の
         # 課金を一括で止める非常ブレーキ」(v0.4 計画 決定 12) で、保温も自発の課金。
         from saiverse.autonomy_wiring import is_autonomy_on
+        from saiverse.day_plan import is_keepalive_allowed
 
         if not is_autonomy_on(manager, persona_id):
             LOGGER.debug(
@@ -2221,7 +2222,6 @@ class SEARuntime:
         # 判定失敗時は許可側にフォールバックする (安全側は「温め続ける」— 谷
         # 判定の誤りで温もりを止めてしまう方が実害が大きい)。
         try:
-            from saiverse.day_plan import is_keepalive_allowed
             if not is_keepalive_allowed(manager, persona_id):
                 LOGGER.debug(
                     "[keepalive] skipped (persona=%s outside declared life; valley)",
@@ -2368,6 +2368,25 @@ class SEARuntime:
                     "[keepalive] skipped before sending: autonomy turned off or "
                     "all-stop during composition (persona=%s model=%s)",
                     persona_id, model_key,
+                )
+                return False
+            # 送信の直前にライフの生存も見直す (2026-10-12 Codex 敵対レビュー
+            # 段 3 6 巡目 medium): 組成の間にライフが終了していたら、谷で送らない
+            # (touch しないので連鎖はここで止まる)。終了の節目はティックの予約を
+            # 消すので、下のティックの検査はこの回を止めない。判定の失敗は冒頭の
+            # ライフのゲートと同じ裁定で許可側へ倒す。
+            try:
+                life_allows = is_keepalive_allowed(manager, persona_id)
+            except Exception:
+                LOGGER.warning(
+                    "[keepalive] life gate re-check failed before sending "
+                    "(persona=%s); defaulting to allow", persona_id, exc_info=True,
+                )
+                life_allows = True
+            if not life_allows:
+                LOGGER.info(
+                    "[keepalive] skipped before sending: the life ended during "
+                    "composition (persona=%s model=%s)", persona_id, model_key,
                 )
                 return False
             # 同じく送信の直前に、最新の anchor の失効とティックの予約を読み直す

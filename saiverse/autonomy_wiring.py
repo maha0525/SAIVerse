@@ -1797,6 +1797,34 @@ def _resume_life_start(
     return {"action": "life_start_resume", "settled": settled}
 
 
+def _ensure_life_cache_ttl(
+    manager: Any, persona_id: str, basis: Any, life: Dict[str, Any],
+) -> bool:
+    """走っている均等モードのライフの 1h override が揮発していたら建て直す。
+
+    再起動で override と持ち主の記録 (in-memory) が消えても、開始の節目は
+    ``started`` マーカーで決着済みなので撃ち直されない (2026-10-12 Codex 敵対
+    レビュー 段 3 6 巡目 medium)。実体は :func:`day_plan.restore_cache_ttl_for_running_life`
+    (利用者の明示設定があれば触らない・冪等)。ライフの印は開始の節目と同じ
+    (営業日, 0) — v0.5 のライフは一日一つ。失敗は WARN で握り、次の見張りに委ねる。
+
+    Returns:
+        今回建て直したか。
+    """
+    from saiverse import day_plan
+
+    try:
+        return day_plan.restore_cache_ttl_for_running_life(
+            manager, persona_id, life, life_key=(basis.plan_date, 0),
+        )
+    except Exception:
+        LOGGER.warning(
+            "[watchdog] failed to restore the running life's cache TTL "
+            "(persona=%s)", persona_id, exc_info=True,
+        )
+        return False
+
+
 def _ensure_tick_reservation(
     manager: Any, persona_id: str, life: Dict[str, Any],
 ) -> bool:
@@ -1907,6 +1935,11 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
             and first.get("started")
             and not first.get("ended")
         ):
+            # TTL を先に建て直す — ティックの予約を張った回は保温を再照合し、
+            # その判定は実効 TTL を読む。
+            result["ttl_restored"] = _ensure_life_cache_ttl(
+                manager, persona_id, basis, first,
+            )
             result["tick_armed"] = _ensure_tick_reservation(manager, persona_id, first)
         return result
 

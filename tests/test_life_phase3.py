@@ -350,6 +350,31 @@ def test_life_ttl_clear_fire_respects_user_change(manager):
     assert manager.get_persona_cache_override(PERSONA_ID) == {"enabled": True, "ttl": "5m"}
 
 
+def test_a_user_override_set_before_the_life_survives_the_life_end_clear(manager):
+    """ライフの**前**に利用者が明示した 1h は、ライフ終了の遅延解除で消えない。
+
+    ライフ開始は、既存の override に持ち主の記録が無い (= 利用者の明示設定) とき
+    持ち主を自分に付け替えない — 付け替えると、値がライフの 1h と同じなので
+    終了の解除が「自分の持ち分」として消してしまう (2026-10-12 段 3 敵対レビュー
+    6 巡目の消し込みで実装側が発見した残骸)。
+    """
+    clock.enable_virtual(BASE + timedelta(hours=8, minutes=50))
+    # 利用者がライフの前に、ライフと同じ値 (有効・1h) を明示設定する
+    from saiverse.day_plan import apply_user_cache_override
+    apply_user_cache_override(manager, PERSONA_ID, enabled=True, ttl="1h")
+    assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
+
+    clock.advance_to(BASE + timedelta(hours=9))
+    lives = _save_life(manager, start="09:00", end="09:40", mode="even")
+    _life_start(manager, lives[0])
+    clock.advance_to(BASE + timedelta(hours=9, minutes=40))
+    _life_end(manager, lives[0])
+
+    # 遅延解除が発火しても、利用者の 1h は残る (持ち主が付いていないので no-op)
+    _fire_ttl_clear(manager)
+    assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
+
+
 def test_next_life_start_cancels_pending_ttl_clear(manager):
     """次のライフが TTL 経過前に始まったら、前のライフの遅延解除予約を cancel
     する — ライフの最中に解除が発火して override が外れる事故を防ぐ。
@@ -585,3 +610,102 @@ def test_life_boundary_simulation_end_behavior(manager):
     assert manager.get_persona_cache_override(PERSONA_ID) is None
     # anchor は依然不変 (解除は override の話で、anchor には触らない)
     assert lifecycle.load_anchors(persona) == anchors
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 6 巡目: 利用者のキャッシュ設定の保存が
+# ライフの持ち分を引き取る (medium 2)・保温の送信直前のライフの再検査 (medium 4)
+# ---------------------------------------------------------------------------
+
+
+def _even_life_ended_with_held_clear(manager):
+    """均等モードのライフを開始→終了し、遅延解除を手渡し済みにして返す。"""
+    clock.enable_virtual(BASE + timedelta(hours=9))
+    lives = _save_life(manager, start="09:00", end="09:40", mode="even")
+    _life_start(manager, lives[0])
+    clock.advance_to(BASE + timedelta(hours=9, minutes=40))
+    _life_end(manager, lives[0])
+    return _take_handed_off_ttl_clear(manager)
+
+
+def test_a_user_save_while_the_ttl_clear_is_held_is_not_erased(manager):
+    """medium 2 の再現順序: 解除の発火を保留 → 利用者が人設定タブで保存 → 解除の
+    再開。利用者の保存は持ち主の記録を消す (ライフの持ち分ではなくなる) ので、
+    解除は持ち主の不一致で何もしない — 利用者が 1h を選んでも、OFF を選んでも残る。"""
+    held_clear = _even_life_ended_with_held_clear(manager)
+    day_plan.apply_user_cache_override(manager, PERSONA_ID, enabled=True, ttl="1h")
+    held_clear()
+    assert manager.get_persona_cache_override(PERSONA_ID) == {"enabled": True, "ttl": "1h"}
+
+    manager._persona_cache_overrides.clear()
+    manager._life_ttl_owners.clear()
+    # 次の営業日のライフで、利用者が OFF を選ぶ並び
+    next_date = "2026-07-05"
+    day_plan.save_lives(manager, PERSONA_ID, next_date, [
+        {"start": "10:00", "end": "10:40", "mode": "even"},
+    ])
+    next_life = day_plan.get_lives(manager, PERSONA_ID, next_date)[0]
+    clock.advance_to(BASE + timedelta(days=1, hours=10))
+    _life_start(manager, next_life, plan_date=next_date)
+    clock.advance_to(BASE + timedelta(days=1, hours=10, minutes=40))
+    _life_end(manager, next_life, plan_date=next_date)
+    held_clear_2 = _take_handed_off_ttl_clear(manager)
+    day_plan.apply_user_cache_override(manager, PERSONA_ID, enabled=False, ttl="5m")
+    held_clear_2()
+    assert manager.get_persona_cache_override(PERSONA_ID) == {"enabled": False, "ttl": "5m"}
+
+
+def test_a_user_save_racing_inside_the_ttl_clear_is_not_erased(manager):
+    """medium 2 (Codex の再現): 解除が旧 1h を読んだ**後**・消す前に利用者が OFF を
+    保存した。利用者の保存は解除と同じロックに並ぶので、解除が終わってから
+    書かれる — OFF が残る (ロックを取らない保存は、解除の clear に消されていた)。"""
+    import threading
+
+    held_clear = _even_life_ended_with_held_clear(manager)
+    real_get = manager.get_persona_cache_override
+    user = {}
+
+    def _read_then_user_saves(persona_id):
+        value = real_get(persona_id)
+        if "thread" not in user:
+            user["thread"] = threading.Thread(
+                target=day_plan.apply_user_cache_override,
+                args=(manager, PERSONA_ID), kwargs={"enabled": False, "ttl": "5m"},
+            )
+            user["thread"].start()
+            # ロックを取らない保存なら、ここで書き終わる
+            user["thread"].join(timeout=0.3)
+        return value
+
+    manager.get_persona_cache_override = _read_then_user_saves
+    try:
+        held_clear()
+    finally:
+        manager.get_persona_cache_override = real_get
+    user["thread"].join(timeout=5)
+    assert not user["thread"].is_alive()
+    assert manager.get_persona_cache_override(PERSONA_ID) == {"enabled": False, "ttl": "5m"}
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_does_not_send_when_the_life_ends_during_composition(_mock_cache, manager):
+    """medium 4 の再現順序: 冒頭のライフのゲートは通った (10:59:59) が、文脈の組成中に
+    ライフが終わった (11:00:01)。送信の直前のライフの再検査で送らない — LLM を
+    呼ばず、touch もしない (連鎖はここで止まる)。"""
+    persona = manager.personas[PERSONA_ID]
+    _save_life(manager, start="09:00", end="11:00", mode="free")
+    clock.enable_virtual(BASE + timedelta(hours=10, minutes=59, seconds=59))
+
+    client = FakeLLMClient()
+    touched = _wire_keepalive(manager.sea_runtime, persona, client)
+    composed = manager.sea_runtime._prepare_context
+
+    def _compose_across_the_life_end(*a, **k):
+        messages = composed(*a, **k)
+        clock.advance_to(BASE + timedelta(hours=11, seconds=1))
+        return messages
+
+    manager.sea_runtime._prepare_context = _compose_across_the_life_end
+    assert manager.sea_runtime.run_cache_keepalive(PERSONA_ID) is False
+    assert client.calls == []
+    assert touched == []

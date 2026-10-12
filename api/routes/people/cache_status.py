@@ -121,10 +121,14 @@ def set_cache_config(persona_id: str, req: CacheSettingRequest, manager=Depends(
         raise HTTPException(status_code=404, detail="Persona not found")
     if req.setting not in ("off", "5m", "1h"):
         raise HTTPException(status_code=400, detail="Invalid setting. Must be 'off', '5m', or '1h'")
+    # 利用者の明示設定はライフの 1h の持ち分を引き取る (ライフ終了の遅延解除が
+    # この設定を消さない) — 保存は day_plan の入口を通す。
+    from saiverse.day_plan import apply_user_cache_override
+
     if req.setting == "off":
-        manager.set_persona_cache_override(persona_id, enabled=False, ttl="5m")
+        apply_user_cache_override(manager, persona_id, enabled=False, ttl="5m")
     else:
-        manager.set_persona_cache_override(persona_id, enabled=True, ttl=req.setting)
+        apply_user_cache_override(manager, persona_id, enabled=True, ttl=req.setting)
     return {"success": True, "persona_id": persona_id, "cache_setting": _resolve_cache_setting(manager, persona_id)}
 
 

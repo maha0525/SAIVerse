@@ -358,13 +358,13 @@ def test_watchdog_restores_a_missing_tick_for_a_running_life(manager, session_fa
     clock.advance_to(BASE + timedelta(hours=9))
     _start_am(manager)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out == {"action": "none", "tick_armed": True}
+    assert out == {"action": "none", "ttl_restored": False, "tick_armed": True}
     armed_at = _tick_at(manager)
     assert armed_at == clock.now() + timedelta(minutes=30)
 
     clock.advance_to(BASE + timedelta(hours=9, minutes=5))
     out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out == {"action": "none", "tick_armed": False}
+    assert out == {"action": "none", "ttl_restored": False, "tick_armed": False}
     assert _tick_at(manager) == armed_at  # 上書きしない
 
 
@@ -1507,3 +1507,142 @@ def test_a_refusal_still_cancels_its_own_reservation(manager, session_factory):
     _fire_tick_reservation(manager)
     assert am.last_report.reason == "autonomy off"
     assert _tick_at(manager) is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 6 巡目: 停止・再開の世代 (medium 1)、
+# 再起動の回復が均等モードの 1h を建て直す (medium 3)
+# ---------------------------------------------------------------------------
+
+
+def _hand_off_tick(manager):
+    """ティックの予約を EventScheduler がワーカーへ手渡した状態にして callback を返す
+    (辞書と heap から外れ、stop() の取り消しが届かない)。"""
+    entry = manager.event_scheduler._entries_by_key.pop(tick_reservation_key(PERSONA_ID))
+    entry.cancelled = True  # heap からも外れた扱い (run_due が二度拾わない)
+    return entry.callback
+
+
+def test_a_tick_handed_off_before_stop_does_not_run_after_restart(
+    manager, session_factory,
+):
+    """medium 1 の再現順序: 07:30 の発火を手渡しで保留 → 停止 → 07:31 に再開 →
+    保留していた発火が再開。状態は RUNNING に戻っているが、停止を跨いだ古い
+    世代の発火なので何もしない (生成しない・再開後の予約を上書きしない)。
+    再開後に張った新しい予約は正常に発火する。"""
+    am = _running_life(manager, session_factory)
+    fire_at = _tick_at(manager)
+    clock.advance_to(fire_at)
+    stale_fire = _hand_off_tick(manager)
+
+    assert am.stop() is True
+    clock.advance_to(fire_at + timedelta(minutes=1))
+    assert am.start() is True
+    wiring.watchdog_tick(manager, PERSONA_ID)  # 再開の見張りが新しい予約を張る
+    new_at = _tick_at(manager)
+    assert new_at == clock.now() + timedelta(minutes=30)
+
+    stale_fire()
+    assert manager.fire_tick.calls == []
+    assert _tick_at(manager) == new_at
+
+    _fire_tick_reservation(manager)
+    assert len(manager.fire_tick.calls) == 1
+    assert am.last_report.status == "completed"
+
+
+def test_a_stop_and_restart_while_waiting_for_the_beat_lock_does_not_start_the_tick(
+    manager, session_factory,
+):
+    """medium 1 (生成直前のフェンス): 発火の入口を通った後、Beat を待っている間に
+    停止→再開が挟まった。いまの状態は RUNNING でも、生成の直前の世代の照合で
+    見送る。"""
+    am = _running_life(manager, session_factory)
+
+    def _stop_and_restart_while_waiting():
+        am.stop()
+        am.start()
+
+    manager.fire_tick = FakeTicks(manager, beat_wait=_stop_and_restart_while_waiting)
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls == []
+    assert manager.fire_tick.refused == ["stopped"]
+
+
+def _wire_cache_overrides(manager):
+    """本物の SAIVerseManager の cache override の読み書きを生やす。"""
+    from saiverse.saiverse_manager import SAIVerseManager
+
+    manager._persona_cache_overrides = {}
+    for name in (
+        "get_persona_cache_override", "set_persona_cache_override",
+        "clear_persona_cache_override",
+    ):
+        setattr(manager, name, getattr(SAIVerseManager, name).__get__(manager))
+
+
+EVEN_LIFE = {"life_mode_override": "even"}
+LIFE_TTL = {"enabled": True, "ttl": "1h"}
+
+
+def _running_even_life(manager, session_factory):
+    """均等モードのライフを走らせる (起床の帳簿処理に設定の params を渡す)。"""
+    _set_life_window(session_factory, params=EVEN_LIFE)
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    am = _start_am(manager)
+    assert day_plan.handle_scheduled_life_boundary(
+        manager, PERSONA_ID, day_plan.LIFE_BOUNDARY_START, params=EVEN_LIFE,
+    ) is True
+    assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]["mode"] == "even"
+    return am
+
+
+def _restart_in_memory(manager, am):
+    """再起動: in-memory の override・持ち主の記録と、予約が消える。"""
+    am.stop()
+    manager._persona_cache_overrides.clear()
+    manager._life_ttl_owners.clear()
+
+
+def test_watchdog_restores_the_even_life_ttl_after_a_restart(manager, session_factory):
+    """medium 3 の再現順序: 均等モードのライフの途中で再起動 (override と持ち主が
+    消える。開始の節目は started で決着済みなので撃ち直されない) → 見張りが
+    ティックと一緒に 1h と持ち主を建て直す。二度目の見張りは何もしない。"""
+    _wire_cache_overrides(manager)
+    am = _running_even_life(manager, session_factory)
+    assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_TTL
+
+    _restart_in_memory(manager, am)
+    clock.advance_to(BASE + timedelta(hours=7, minutes=10))
+    assert am.start() is True
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+    assert out == {"action": "none", "ttl_restored": True, "tick_armed": True}
+    assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_TTL
+    assert manager._life_ttl_owners[PERSONA_ID] == (PLAN_DATE, 0)
+
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+    assert out == {"action": "none", "ttl_restored": False, "tick_armed": False}
+
+    # 建て直した持ち主で、ライフ終了の遅延解除が普通に外せる
+    clock.advance_to(BASE + timedelta(hours=22))
+    _end_life(manager)
+    key = f"life_ttl_clear:{PERSONA_ID}"
+    entry = manager.event_scheduler._entries_by_key.pop(key)
+    entry.callback()
+    assert manager.get_persona_cache_override(PERSONA_ID) is None
+
+
+def test_watchdog_restore_leaves_a_user_cache_setting_alone(manager, session_factory):
+    """medium 3 の対照: 再起動の後、見張りより先に利用者が人設定タブで明示した
+    設定は触らない (持ち主の無い override は利用者のもの)。"""
+    _wire_cache_overrides(manager)
+    am = _running_even_life(manager, session_factory)
+    _restart_in_memory(manager, am)
+    day_plan.apply_user_cache_override(manager, PERSONA_ID, enabled=False, ttl="5m")
+
+    clock.advance_to(BASE + timedelta(hours=7, minutes=10))
+    assert am.start() is True
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+    assert out["ttl_restored"] is False
+    assert manager.get_persona_cache_override(PERSONA_ID) == {"enabled": False, "ttl": "5m"}
+    assert PERSONA_ID not in manager._life_ttl_owners

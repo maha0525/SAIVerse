@@ -636,7 +636,14 @@ class SAIVerseManager(
         return self._persona_cache_overrides.get(persona_id)
 
     def set_persona_cache_override(self, persona_id: str, enabled: bool, ttl: str) -> None:
-        """persona の cache override を設定する (in-memory only、DB 非永続)。"""
+        """persona の cache override を設定する (in-memory only、DB 非永続)。
+
+        生の書き込み。利用者の明示設定 (人設定タブ) は
+        ``day_plan.apply_user_cache_override`` を通す — 同じロックの中で
+        均等モードのライフの持ち主の記録を消し、ライフ終了の遅延解除が利用者の
+        設定を消さないようにする。ここでロックを取らないのは、ライフ自身の
+        設定・解除がそのロックの中からこのメソッドを呼ぶため (再入できない)。
+        """
         if not persona_id:
             return
         self._persona_cache_overrides[persona_id] = {"enabled": bool(enabled), "ttl": ttl or "5m"}

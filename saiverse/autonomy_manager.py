@@ -45,6 +45,7 @@ start / stop は自律ゲート (``autonomy_wiring.is_autonomy_on``) への同�
 
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 import time
@@ -259,6 +260,14 @@ class AutonomyManager:
         # 状態にすると、その間に成功した標準呼び出しを取りこぼし、遅れて走る
         # 発火が延ばした予約を巻き戻す (2026-10-12 Codex 敵対レビュー 段 3 1 巡目)。
         self._last_standard_call: Optional[datetime] = None
+        # 運転の世代 (self._lock で守る)。stop() のたびに +1 する。予約の
+        # callback は張った時点の世代を閉じ込め (:meth:`_tick_callback` /
+        # :meth:`_watchdog_callback`)、発火の入口と生成の直前で照合する —
+        # EventScheduler がワーカーへ手渡し済みで stop() の取り消しが届かなかった
+        # 古い発火を、再開 (start) の後に走らせない (2026-10-12 Codex 敵対
+        # レビュー 段 3 6 巡目 medium)。状態 (STOPPED か) だけの検査では、停止→
+        # 再開を跨いだ古い発火を見分けられない。
+        self._generation = 0
 
     # ------------------------------------------------------------------
     # Properties
@@ -300,7 +309,7 @@ class AutonomyManager:
             # autonomy_manager_tick_uses_wall_clock)
             self._schedule_locked(
                 watchdog_reservation_key(self.persona_id), clock.now(),
-                self._handle_watchdog,
+                self._watchdog_callback(),
             )
         LOGGER.info(
             "[Autonomy:%s] Started (watchdog every %d min, tick by the life)",
@@ -314,6 +323,8 @@ class AutonomyManager:
             if self._state == AutonomyState.STOPPED:
                 return False
             self._state = AutonomyState.STOPPED
+            # 手渡し済みで取り消しの届かない発火を、再開の後も拒否させる。
+            self._generation += 1
             scheduler = self._scheduler()
             if scheduler is not None:
                 scheduler.cancel(watchdog_reservation_key(self.persona_id))
@@ -345,7 +356,7 @@ class AutonomyManager:
             if self._state == AutonomyState.STOPPED:
                 return False
             self._schedule_locked(
-                tick_reservation_key(self.persona_id), fire_at, self._handle_tick,
+                tick_reservation_key(self.persona_id), fire_at, self._tick_callback(),
             )
         LOGGER.info(
             "[Autonomy:%s] tick armed at %s (T=%d min)",
@@ -370,7 +381,7 @@ class AutonomyManager:
             if self._state == AutonomyState.STOPPED:
                 return False
             armed = scheduler.schedule_if_absent(
-                fire_at=fire_at, callback=self._handle_tick,
+                fire_at=fire_at, callback=self._tick_callback(),
                 key=tick_reservation_key(self.persona_id),
             ) is not None
         if armed:
@@ -423,7 +434,7 @@ class AutonomyManager:
                 return False
             fire_at = self._last_standard_call + timedelta(minutes=minutes)
             moved = scheduler.schedule_if_present(
-                fire_at=fire_at, callback=self._handle_tick, key=key,
+                fire_at=fire_at, callback=self._tick_callback(), key=key,
             ) is not None
         if moved:
             LOGGER.debug(
@@ -482,11 +493,30 @@ class AutonomyManager:
     # 発火
     # ------------------------------------------------------------------
 
-    def _handle_watchdog(self) -> None:
+    def _tick_callback(self):
+        """いまの世代を閉じ込めたティックの callback。``self._lock`` を持って呼ぶ。"""
+        return functools.partial(self._handle_tick, self._generation)
+
+    def _watchdog_callback(self):
+        """いまの世代を閉じ込めた見張りの callback。``self._lock`` を持って呼ぶ。"""
+        return functools.partial(self._handle_watchdog, self._generation)
+
+    def _stale_locked(self, generation: Optional[int]) -> bool:
+        """この発火が止まっている・停止を跨いだ古い世代のものか。``self._lock`` を持って呼ぶ。
+
+        ``generation`` が None (世代を閉じ込めずに直接呼ばれた — テストの直接
+        駆動) は状態だけを見る。
+        """
+        if self._state == AutonomyState.STOPPED:
+            return True
+        return generation is not None and generation != self._generation
+
+    def _handle_watchdog(self, generation: Optional[int] = None) -> None:
         """見張りの発火: watchdog_tick を回し、次回を固定間隔で張り直す。"""
         with self._lock:
-            if self._state == AutonomyState.STOPPED:
+            if self._stale_locked(generation):
                 return
+            generation = self._generation
         report = CycleReport(
             cycle_id=str(uuid.uuid4())[:8], kind="watchdog", started_at=time.time(),
         )
@@ -515,26 +545,34 @@ class AutonomyManager:
         report.completed_at = time.time()
         self._last_report = report
         with self._lock:
-            if self._state == AutonomyState.STOPPED:
+            # 走っている間に停止→再開された古い見張りは張り直さない (再開の
+            # start() が新しい世代の見張りを張っている)。
+            if self._stale_locked(generation):
                 return
             self._schedule_locked(
                 watchdog_reservation_key(self.persona_id),
                 clock.now() + timedelta(minutes=WATCHDOG_INTERVAL_MINUTES),
-                self._handle_watchdog,
+                self._watchdog_callback(),
             )
 
-    def _handle_tick(self) -> None:
-        """ティックの予約の発火 (ワーカースレッド上で走る — LLM を呼んでよい)。"""
+    def _handle_tick(self, generation: Optional[int] = None) -> None:
+        """ティックの予約の発火 (ワーカースレッド上で走る — LLM を呼んでよい)。
+
+        ``generation`` は予約を張った時点の運転の世代 (:meth:`_tick_callback`)。
+        停止を跨いだ古い発火 (手渡し済みで stop() の取り消しが届かなかったもの)
+        は、再開の後でも何もしない。
+        """
         with self._lock:
-            if self._state == AutonomyState.STOPPED:
+            if self._stale_locked(generation):
                 return
+            generation = self._generation
         report = CycleReport(
             cycle_id=str(uuid.uuid4())[:8], kind="tick", started_at=time.time(),
         )
         self._current_cycle_id = report.cycle_id
         started_at = clock.now()
         try:
-            report.status, report.reason = self._run_tick()
+            report.status, report.reason = self._run_tick(generation)
         except Exception as exc:
             LOGGER.exception("[Autonomy:%s] tick error: %s", self.persona_id, exc)
             report.status = "error"
@@ -690,6 +728,7 @@ class AutonomyManager:
         *,
         own_token: Optional[int] = None,
         deadline: bool = False,
+        generation: Optional[int] = None,
     ) -> Optional[str]:
         """生成開始の直前の再検査 — ``fire_tick`` が **Beat ロックの内側**で呼ぶ。
 
@@ -708,12 +747,21 @@ class AutonomyManager:
         予約を消すのは、この発火が自分で張った予約 (札 ``own_token``) だけ
         (:meth:`_cancel_own_tick`)。``own_token`` が無ければ消さない。
 
+        ``generation`` はこの発火の運転の世代 — 発火の後に停止→再開が挟まった
+        なら (いまの状態が RUNNING でも) 見送る。予約は消さない (停止が消し、
+        再開後の予約は新しい世代のもの)。
+
         **開始済みの生成は完走する** (課金と生成の保護の既存裁定) — このフェンスは
         開始の直前までで、走り出した Pulse は止めない。
 
         Returns:
             拒否の理由 (None なら通す)。拒否した理由は ``refusals`` にも積む。
         """
+        with self._lock:
+            stale = self._stale_locked(generation)
+        if stale:
+            refusals.append("stopped")
+            return "stopped"
         now = clock.now()
         reason, cancel, _basis = self._check_gate(now, check_conversation=not deadline)
         if reason is None:
@@ -728,7 +776,7 @@ class AutonomyManager:
         refusals.append(reason)
         return reason
 
-    def _run_tick(self) -> Tuple[str, Optional[str]]:
+    def _run_tick(self, generation: Optional[int] = None) -> Tuple[str, Optional[str]]:
         """ティック 1 回の本体。``(status, reason)`` を返す。
 
         生成開始のフェンス: ``fire_tick`` に :meth:`_start_fence` を渡し、Beat
@@ -756,7 +804,9 @@ class AutonomyManager:
         #    切れないため。中で標準呼び出しが成功すれば notify_standard_call が
         #    もう少し後ろへ押し直す。
         with self._lock:
-            if self._state == AutonomyState.STOPPED:
+            # 世代も照合する — 入口の後に停止→再開が挟まった古い発火が、再開後の
+            # 予約を上書きしない。
+            if self._stale_locked(generation):
                 return ("skipped", "stopped")
             last = self._last_standard_call
             superseded_until: Optional[datetime] = None
@@ -769,7 +819,7 @@ class AutonomyManager:
             # 張り直した予約の札 — この発火の後始末 (_cancel_own_tick) が
             # 「自分が張った予約だけ」を見分けるのに使う。
             own_token = self._schedule_locked(
-                tick_reservation_key(persona_id), next_at, self._handle_tick,
+                tick_reservation_key(persona_id), next_at, self._tick_callback(),
             )
         if superseded_until is not None:
             LOGGER.info(
@@ -822,7 +872,7 @@ class AutonomyManager:
             persona_id, assignment.text,
             pre_generation_check=lambda: self._start_fence(
                 interval, refusals, own_token=own_token,
-                deadline=assignment.is_deadline,
+                deadline=assignment.is_deadline, generation=generation,
             ),
         )
         if outcome.get("runtime_outcome") == "refused" or refusals:

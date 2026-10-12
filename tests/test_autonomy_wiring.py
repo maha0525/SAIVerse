@@ -1473,7 +1473,7 @@ def test_watchdog_does_not_refire_once_the_life_is_confirmed(
     out = wiring.watchdog_tick(manager, PERSONA_ID)
     # 走っているライフにはティックの予約の回復が掛かるが、この最小の manager には
     # 予約を張る AutonomyManager が居ないので張らない (段 3-7)。
-    assert out == {"action": "none", "tick_armed": False}
+    assert out == {"action": "none", "ttl_restored": False, "tick_armed": False}
     assert calls == []
 
 
@@ -1699,7 +1699,7 @@ def test_watchdog_does_not_open_a_new_day_while_a_life_is_running(
     assert out["action"] == "none"
     # 走っているライフがある (= その営業日のライフは確定済み) ので撃ち直しの
     # 判定そのものに入らない (ティックの予約を張る AutonomyManager は居ない)
-    assert out == {"action": "none", "tick_armed": False}
+    assert out == {"action": "none", "ttl_restored": False, "tick_armed": False}
     assert calls == []
 
 
@@ -1725,7 +1725,7 @@ def test_watchdog_ignores_the_weekday_gate_while_a_life_is_running(
 
     # 走っているライフがある = 確定済み。曜日ゲートの理由 ("not a scheduled
     # day") も出さずに何もしない
-    assert out == {"action": "none", "tick_armed": False}
+    assert out == {"action": "none", "ttl_restored": False, "tick_armed": False}
     assert calls == []
 
 
@@ -1775,7 +1775,7 @@ def test_watchdog_settles_the_life_start_left_unapplied_after_confirmation(
 
     # その次の watchdog は何もしない (済印を見て撃たない)。
     out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out == {"action": "none", "tick_armed": False}
+    assert out == {"action": "none", "ttl_restored": False, "tick_armed": False}
 
 
 def test_watchdog_life_start_resume_is_idempotent_against_a_settled_ledger(
