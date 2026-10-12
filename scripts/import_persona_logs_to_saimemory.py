@@ -335,7 +335,12 @@ def migrate_persona(
     else:
         LOGGER.info("Verifying embeddings for %s (backfilling any gaps)...", persona_id)
         backfill_result = adapter.backfill_missing_message_embeddings()
-        if backfill_result["total_missing"] == 0:
+        if backfill_result.get("aborted"):
+            LOGGER.warning(
+                "Persona %s: embedding backfill could not run: %s",
+                persona_id, backfill_result.get("error"),
+            )
+        elif backfill_result["total_missing"] == 0:
             LOGGER.info("Persona %s: all messages already embedded at write time.", persona_id)
         else:
             LOGGER.info(
@@ -345,13 +350,36 @@ def migrate_persona(
                 backfill_result["total_missing"],
                 backfill_result["failed"],
             )
+        if not backfill_result.get("aborted"):
+            # 書き込み時に埋め込みを作れなかった分は「空のベクトル行」として
+            # 残っている (ベクトル行ゼロの欠落とは別勘定)。ここで一緒に埋める。
+            try:
+                stale_result = adapter.reembed_stale_messages()
+                if stale_result.get("total", 0):
+                    LOGGER.info(
+                        "Persona %s: re-embedded %d/%d deferred/stale vectors.",
+                        persona_id, stale_result.get("embedded", 0), stale_result.get("total", 0),
+                    )
+            except Exception as exc:
+                LOGGER.warning(
+                    "Persona %s: deferred-vector re-embed could not run: %s "
+                    "(the startup check will flag the leftovers)",
+                    persona_id, exc,
+                )
 
     elapsed = time.monotonic() - started_at
 
-    from sai_memory.memory.storage import count_messages, count_message_embeddings
+    from sai_memory.memory.storage import (
+        count_deferred_message_embeddings,
+        count_messages,
+        count_message_embeddings,
+    )
     with adapter._db_lock:  # type: ignore[attr-defined]
         total_messages = count_messages(adapter.conn)
-        total_embedded = count_message_embeddings(adapter.conn)
+        # distinct message_id の数は「空のベクトル行」(後回し・失敗の印) も
+        # 含んでしまうので、その分を差し引いて実際に想起に使える数にする。
+        total_deferred = count_deferred_message_embeddings(adapter.conn)
+        total_embedded = count_message_embeddings(adapter.conn) - total_deferred
         total_nonempty = adapter.conn.execute(
             "SELECT COUNT(*) FROM messages WHERE TRIM(COALESCE(content, '')) != ''"
         ).fetchone()[0]
@@ -362,6 +390,7 @@ def migrate_persona(
         total_messages=total_messages,
         total_nonempty=total_nonempty,
         total_embedded=total_embedded,
+        total_deferred=total_deferred,
         backfill_result=backfill_result,
         elapsed_seconds=elapsed,
         embed_available=adapter.can_embed(),
@@ -375,6 +404,7 @@ def _print_import_summary(
     total_messages: int,
     total_nonempty: int,
     total_embedded: int,
+    total_deferred: int,
     backfill_result: dict,
     elapsed_seconds: float,
     embed_available: bool,
@@ -405,13 +435,26 @@ def _print_import_summary(
             "を確認したうえで、このスクリプトを再実行するか "
             "scripts/embed_recall_sources.py で埋め込みを埋めてください。"
         )
-    elif total_embedded < total_nonempty:
+    elif total_embedded < total_nonempty or total_deferred > 0:
+        shortfall = max(total_nonempty - total_embedded, total_deferred)
         print(
             "注意: 一部のメッセージで埋め込みが完了していません "
-            f"(不足 {total_nonempty - total_embedded} 件)。"
-            "バックフィルを再実行するか scripts/embed_recall_sources.py で"
-            "状況を確認してください。"
+            f"(不足 {shortfall} 件、うち失敗・編集で持ち越した分 {total_deferred} 件)。"
         )
+        if total_deferred:
+            print(
+                "  持ち越した分は次回起動時に警告が出て回復できます。今すぐ埋めるなら "
+                "python scripts/reembed_memory.py <persona_id> を実行してください。"
+            )
+        if shortfall > total_deferred:
+            # ベクトル行ごと無い欠落 (バックフィル失敗など) は、起動時警告にも
+            # 通常の再計算にも掛からない。このスクリプトの再実行か --force で埋める。
+            # 「このスクリプトの再実行」は案内しない — 既定では既存メッセージを
+            # 検出してバックフィル前に終了するため、回復にならない。
+            print(
+                f"  残りの {shortfall - total_deferred} 件はベクトル行ごと欠けています。"
+                "python scripts/reembed_memory.py <persona_id> --force で埋めてください。"
+            )
     else:
         print(
             "自動想起はこの時点から機能します。\n"

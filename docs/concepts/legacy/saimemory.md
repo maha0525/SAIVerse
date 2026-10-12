@@ -87,27 +87,21 @@ tree_md = memopedia.get_tree_markdown(thread_id="main")
 
 ## 埋め込みモデル
 
-デフォルトでは `intfloat/multilingual-e5-small` を使用（384次元、日本語を含む100言語対応）。
-
-### 設定
-
-```env
-SAIMEMORY_EMBED_MODEL=intfloat/multilingual-e5-small
-SAIMEMORY_EMBED_MODEL_PATH=/path/to/local/model
-```
+EmbeddingGemma 2 (`google/embeddinggemma-2`) のテキスト部を 4bit 量子化した ONNX 版 (`onnx-community/embeddinggemma-2-ONNX` の `model_q4`、revision 固定) を使う。768 次元、CPU で動作。モデルは固定で、選ぶ設定は無い (2026-10-12 に multilingual-e5-small 384 次元から移行。経緯は [embedding_gemma2_migration](../../intent/embedding_gemma2_migration.md))。
 
 ### オフライン利用
 
-`sbert/` ディレクトリにモデルを配置すると、ネットワーク接続なしで利用可能：
+モデルはセットアップ時 (または初回起動時) に `sbert/embeddinggemma-2-q4/` へダウンロードされる。ファイルが揃っていれば、以後はネットワーク接続なしで動く：
 
 ```
 sbert/
-└── multilingual-e5-small/
+└── embeddinggemma-2-q4/
     ├── onnx/
-    │   └── model.onnx
+    │   ├── model_q4.onnx
+    │   └── model_q4.onnx_data
     ├── config.json
     ├── tokenizer.json
-    └── ...
+    └── tokenizer_config.json
 ```
 
 ## 保守スクリプト

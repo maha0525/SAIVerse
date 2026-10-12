@@ -1,0 +1,98 @@
+{
+  "role": "e5",
+  "info": {
+    "model": "intfloat/multilingual-e5-small",
+    "source": "local snapshot C:\\Users\\shuhe\\workspace\\SAIVerse\\sbert\\multilingual-e5-small",
+    "runtime": "fastembed / onnxruntime 1.23.2 (CPUExecutionProvider)",
+    "prefix_query": "query: ",
+    "prefix_document": "passage: ",
+    "dim": 384
+  },
+  "import_s": 1.8018691000761464,
+  "load_s": 1.0858328000176698,
+  "query_count": 30,
+  "query_len_chars": [
+    21,
+    28
+  ],
+  "query_warmup": 3,
+  "first_query_ms": 10.856300010345876,
+  "query_ms_all": [
+    10.856300010345876,
+    6.14290009252727,
+    8.515800000168383,
+    6.218699971213937,
+    7.344300043769181,
+    7.092200103215873,
+    6.5611000172793865,
+    5.572100053541362,
+    7.064200006425381,
+    7.15770001988858,
+    5.583800026215613,
+    7.793800090439618,
+    7.758500054478645,
+    5.885199992917478,
+    6.487199920229614,
+    5.819600075483322,
+    6.2673999927937984,
+    6.6769999684765935,
+    5.877000046893954,
+    7.490399992093444,
+    5.966799915768206,
+    5.810000002384186,
+    6.24779995996505,
+    6.371599971316755,
+    6.605500006116927,
+    6.236899993382394,
+    6.220299983397126,
+    6.794799934141338,
+    6.270500016398728,
+    5.731799989007413
+  ],
+  "query_median_ms": 6.270500016398728,
+  "query_p95_ms": 7.678070035763085,
+  "query_mean_ms": 6.4780074128605145,
+  "query_min_ms": 5.572100053541362,
+  "query_max_ms": 7.793800090439618,
+  "batch_count": 200,
+  "batch_len_chars": [
+    159,
+    400
+  ],
+  "batch_mean_chars": 287.28,
+  "batch_s": 5.906010299921036,
+  "batch_texts_per_s": 33.8638081959786,
+  "emb_dim": 384,
+  "memory": {
+    "start": {
+      "rss_mb": 22.0078125,
+      "peak_wset_mb": 22.0078125,
+      "private_mb": 11.78515625,
+      "method": "psutil"
+    },
+    "after_import": {
+      "rss_mb": 93.76953125,
+      "peak_wset_mb": 93.76953125,
+      "private_mb": 806.50390625,
+      "method": "psutil"
+    },
+    "after_load": {
+      "rss_mb": 804.59765625,
+      "peak_wset_mb": 920.23828125,
+      "private_mb": 1521.2890625,
+      "method": "psutil"
+    },
+    "after_queries": {
+      "rss_mb": 809.87109375,
+      "peak_wset_mb": 920.23828125,
+      "private_mb": 1525.4921875,
+      "method": "psutil"
+    },
+    "after_batch": {
+      "rss_mb": 2211.78125,
+      "peak_wset_mb": 2481.80078125,
+      "private_mb": 3663.5859375,
+      "method": "psutil"
+    }
+  }
+}

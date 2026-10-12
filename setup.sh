@@ -148,10 +148,12 @@ fi
 # --- 12. Pre-download embedding model ---
 echo ""
 echo "[SETUP] 埋め込みモデルをダウンロード中 (初回のみ、数分かかります)..."
-python -c "from huggingface_hub import snapshot_download; snapshot_download('intfloat/multilingual-e5-small', local_dir='sbert/multilingual-e5-small', ignore_patterns=['*.bin', '*.safetensors', '*.h5', 'openvino/*', '*.ot'])" || {
+# 初回起動時と同じダウンロード (sai_memory/config.py の固定ファイル一式) をして、試しに読み込む。
+if python -c "from sai_memory.memory.recall import Embedder; Embedder()"; then
+    echo "[OK] 埋め込みモデルのダウンロード完了"
+else
     echo "[WARN] 埋め込みモデルのダウンロードに失敗しましたが、初回起動時に再試行されます。"
-}
-echo "[OK] 埋め込みモデルのダウンロード完了"
+fi
 
 # --- 13. Complete ---
 echo ""

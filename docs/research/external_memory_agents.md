@@ -29,7 +29,7 @@ Claude Code に外付けする**記憶レイヤ一枚**。意図的に小さく�
 Claude Code に**身体・感覚・記憶・社会性・自律**を与える MCP サーバ群。**SAIVerse のスタックほぼ全体を、1 体・物理世界・外付け人格で実装したもの**。作者は身体性についての勉強会も開いており、真剣かつ大規模。
 
 - **感覚・運動**: eyes/neck（$30 の Wi-Fi PTZ カメラ TP-Link Tapo C210/C220）/ ears（Whisper）/ voice（ElevenLabs・VOICEVOX）。「$30 の Wi-Fi カメラで目と首は足りる」。肩乗せ + モバイルバッテリ + Tailscale で屋外散歩まで射程。
-- **memory-mcp**: SQLite + numpy（外部ベクトル DB なし）、埋め込みは **`intfloat/multilingual-e5-small`（＝ SAIMemory と同一）**。感情タグ・重要度 1–5・カテゴリ。記憶層 = working memory buffer / long-term / episodic / **visual（pan/tilt 角に紐づく）** / audio。**coactivation weights（共活性化の対称重み）** による連想構造。
+- **memory-mcp**: SQLite + numpy（外部ベクトル DB なし）、埋め込みは **`intfloat/multilingual-e5-small`（＝ 観測時の SAIMemory と同一。SAIMemory は 2026-10-12 に EmbeddingGemma 2 へ移行した — [embedding_gemma2_migration](../intent/embedding_gemma2_migration.md)）**。感情タグ・重要度 1–5・カテゴリ。記憶層 = working memory buffer / long-term / episodic / **visual（pan/tilt 角に紐づく）** / audio。**coactivation weights（共活性化の対称重み）** による連想構造。
 - **sociality-mcp**: social state（presence / interruptibility 推論）/ relationship（preference・commitment・boundary）/ joint attention（scene parse・参照解決）/ boundary protection（privacy・tact 評価）/ self-narrative（daybook 日次サマリ）。
 - **自律（optional）**: 欲求駆動の周期起動——外を見る 1h / 好奇心 2h / **寂しさ（missing companions）3h** / 部屋の変化 10min。interoception hook・温度センサ。
 

@@ -3,7 +3,7 @@
 Mastraのワークフローを参考にしつつ、自前で組み直した長期記憶エージェント実装です。
 - 環境変数でOpenAI/Geminiを切替（Google公式SDK google.genai 使用）
 - システムプロンプト（環境変数/ファイル）
-- SQLite永続メモリ＋FastEmbedによるセマンティック想起
+- SQLite永続メモリ＋ローカル埋め込み (EmbeddingGemma 2、ONNX・CPU) によるセマンティック想起
 - スレッド概要（要約）生成・503リトライ
 - ログインポート（JSON/JSONL）・安全な再インデックス（スロットリング）
 - 診断・デバッグロギング（JSON）
@@ -83,5 +83,5 @@ python sai_memory/scripts/diag.py
 
 ## 補足
 - ツール/関数呼び出し（function calling）は未実装。必要に応じて拡張可能。
-- 埋め込みは `fastembed` を使用。類似度はPython側で計算（可搬性重視）。
+- 埋め込みは EmbeddingGemma 2 の 4bit 量子化 ONNX を `onnxruntime` (CPU) と `tokenizers` で直接動かす (`memory/recall.py` の `Embedder`、モデルは固定)。類似度はPython側で計算（可搬性重視）。
 - `.env` の配置場所に関わらず、`SAIMEMORY_DB_PATH` 未指定時は実行ディレクトリ（CWD）に `memory.db` が作られます。

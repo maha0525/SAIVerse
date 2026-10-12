@@ -10,9 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -58,13 +57,16 @@ def store_chronicle_embedding(
     conn: sqlite3.Connection,
     entry_id: str,
     vector: List[float],
+    *,
+    commit: bool = True,
 ) -> None:
     """Store or replace an embedding for a Chronicle entry."""
     conn.execute(
         "INSERT OR REPLACE INTO arasuji_embeddings (entry_id, vector) VALUES (?, ?)",
         (entry_id, json.dumps(vector)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_chronicle_embeddings(
@@ -139,13 +141,16 @@ def store_memopedia_embedding(
     conn: sqlite3.Connection,
     page_id: str,
     vector: List[float],
+    *,
+    commit: bool = True,
 ) -> None:
     """Store or replace an embedding for a Memopedia page."""
     conn.execute(
         "INSERT OR REPLACE INTO memopedia_embeddings (page_id, vector) VALUES (?, ?)",
         (page_id, json.dumps(vector)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_memopedia_embeddings(conn: sqlite3.Connection) -> List[tuple]:
@@ -228,13 +233,16 @@ def store_fragment_embedding(
     conn: sqlite3.Connection,
     fragment_id: str,
     vector: List[float],
+    *,
+    commit: bool = True,
 ) -> None:
     """Store or replace an embedding for a Memopedia fragment."""
     conn.execute(
         "INSERT OR REPLACE INTO memopedia_fragment_embeddings (fragment_id, vector) VALUES (?, ?)",
         (fragment_id, json.dumps(vector)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_fragment_embeddings(conn: sqlite3.Connection) -> List[tuple]:
@@ -341,6 +349,85 @@ def get_message_embeddings(conn: sqlite3.Connection) -> List[tuple]:
 # Batch embedding generation
 # ---------------------------------------------------------------------------
 
+# The text each generator embeds, built in one place so that the text read
+# again just before storing (below) is built exactly like the text that was
+# embedded.
+
+def _page_embed_text(title: Optional[str], summary: Optional[str]) -> str:
+    return f"{title}: {summary}" if summary else title
+
+
+def _fragment_embed_text(content: Optional[str], entity_title: Optional[str]) -> str:
+    # entity_title は親ページ消失 (孤児 Fragment) で None になりうる。
+    # 孤児でも Fragment 本文単体で検索可能にする (LEFT JOIN 化, 2026-07-04)。
+    return f"{entity_title}: {content}" if entity_title else content
+
+
+def _current_chronicle_text(conn: sqlite3.Connection, entry_id: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT content FROM arasuji_entries WHERE id = ?", (entry_id,)
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+def _current_page_text(conn: sqlite3.Connection, page_id: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT title, summary FROM memopedia_pages WHERE id = ?", (page_id,)
+    ).fetchone()
+    return None if row is None else _page_embed_text(row[0], row[1])
+
+
+def _current_fragment_text(conn: sqlite3.Connection, fragment_id: str) -> Optional[str]:
+    row = conn.execute(
+        """
+        SELECT f.content, p.title
+        FROM memopedia_fragments f
+        LEFT JOIN memopedia_pages p ON f.entity_id = p.id
+        WHERE f.id = ?
+        """,
+        (fragment_id,),
+    ).fetchone()
+    return None if row is None else _fragment_embed_text(row[0], row[1])
+
+
+def _store_unchanged(
+    conn: sqlite3.Connection,
+    ids: List[str],
+    texts: List[str],
+    vectors,
+    current_text: Callable[[sqlite3.Connection, str], Optional[str]],
+    store: Callable[..., None],
+    *,
+    db_lock: Optional[Any] = None,
+) -> tuple:
+    """Store each vector only when its row still has the text it was made from.
+
+    The embedding runs outside the DB lock, so a row can be edited or deleted
+    between reading its text and storing its vector. Such a row is skipped:
+    it keeps no vector row, and the next generation pass (which picks up rows
+    without a vector) embeds its current text.
+
+    The text is read again and the vectors stored inside one
+    ``immediate_transaction`` (the process lock ``db_lock`` plus SQLite's
+    write lock): once it is taken, no other connection can change a row
+    between the comparison and the INSERT.
+
+    Returns ``(stored, skipped)``.
+    """
+    from sai_memory.db_locks import immediate_transaction
+
+    stored = 0
+    skipped = 0
+    with immediate_transaction(conn, db_lock):
+        for row_id, text, vec in zip(ids, texts, vectors):
+            if current_text(conn, row_id) != text:
+                skipped += 1
+                continue
+            store(conn, row_id, list(vec), commit=False)
+            stored += 1
+    return stored, skipped
+
+
 def embed_chronicle_entries(
     conn: sqlite3.Connection,
     embedder,
@@ -348,6 +435,7 @@ def embed_chronicle_entries(
     level: int = 1,
     batch_size: int = 64,
     db_lock: Optional[Any] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> int:
     """Generate and store embeddings for Chronicle entries that don't have them.
 
@@ -356,9 +444,12 @@ def embed_chronicle_entries(
         embedder: Embedder instance with embed() method.
         level: Chronicle level to embed (default: 1 = あらすじ).
         batch_size: Batch size for embedding generation.
+        progress_callback: Called after each stored batch with the cumulative
+            number of rows embedded so far (used by the re-embed job's progress).
 
     Returns:
-        Number of entries embedded.
+        Number of entries embedded. Entries whose text changed (or that were
+        deleted) while being embedded are skipped and not counted.
     """
     entries = get_chronicle_entries_without_embeddings(conn, level=level)
     if not entries:
@@ -367,20 +458,28 @@ def embed_chronicle_entries(
 
     LOGGER.info("Embedding %d Chronicle Lv%d entries", len(entries), level)
     total = 0
+    skipped = 0
 
     for i in range(0, len(entries), batch_size):
         batch = entries[i:i + batch_size]
+        ids = [entry_id for entry_id, _ in batch]
         texts = [content for _, content in batch]
         vectors = embedder.embed(texts, is_query=False)
 
-        # 埋め込みの計算は錠の外 (重い)。DB への書き込みと commit だけを
-        # adapter の錠前の内側で行う —— 共有接続なので、錠外の commit は
+        # 埋め込みの計算は錠の外 (重い)。本文の読み直しと書き込み・commit だけを
+        # 錠前と書き込みロックの内側で行う —— 共有接続なので、錠外の commit は
         # 他所の開いたトランザクションを途中で確定させる (Codex 八巡 #1)
-        with (db_lock or nullcontext()):
-            for (entry_id, _), vec in zip(batch, vectors):
-                store_chronicle_embedding(conn, entry_id, list(vec))
-                total += 1
+        stored, n_skip = _store_unchanged(
+            conn, ids, texts, vectors, _current_chronicle_text, store_chronicle_embedding,
+            db_lock=db_lock,
+        )
+        total += stored
+        skipped += n_skip
+        if progress_callback is not None:
+            progress_callback(total)
 
+    if skipped:
+        LOGGER.info("Skipped %d Chronicle entries changed while embedding", skipped)
     LOGGER.info("Embedded %d Chronicle entries", total)
     return total
 
@@ -391,6 +490,7 @@ def embed_memopedia_pages(
     *,
     batch_size: int = 64,
     db_lock: Optional[Any] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> int:
     """Generate and store embeddings for Memopedia pages that don't have them.
 
@@ -400,9 +500,12 @@ def embed_memopedia_pages(
         conn: Database connection.
         embedder: Embedder instance with embed() method.
         batch_size: Batch size for embedding generation.
+        progress_callback: Called after each stored batch with the cumulative
+            number of rows embedded so far (used by the re-embed job's progress).
 
     Returns:
-        Number of pages embedded.
+        Number of pages embedded. Pages whose title or summary changed (or
+        that were deleted) while being embedded are skipped and not counted.
     """
     pages = get_memopedia_pages_without_embeddings(conn)
     if not pages:
@@ -411,18 +514,25 @@ def embed_memopedia_pages(
 
     LOGGER.info("Embedding %d Memopedia pages", len(pages))
     total = 0
+    skipped = 0
 
     for i in range(0, len(pages), batch_size):
         batch = pages[i:i + batch_size]
-        texts = [f"{title}: {summary}" if summary else title
-                 for _, title, summary in batch]
+        ids = [page_id for page_id, _, _ in batch]
+        texts = [_page_embed_text(title, summary) for _, title, summary in batch]
         vectors = embedder.embed(texts, is_query=False)
 
-        with (db_lock or nullcontext()):
-            for (page_id, _, _), vec in zip(batch, vectors):
-                store_memopedia_embedding(conn, page_id, list(vec))
-                total += 1
+        stored, n_skip = _store_unchanged(
+            conn, ids, texts, vectors, _current_page_text, store_memopedia_embedding,
+            db_lock=db_lock,
+        )
+        total += stored
+        skipped += n_skip
+        if progress_callback is not None:
+            progress_callback(total)
 
+    if skipped:
+        LOGGER.info("Skipped %d Memopedia pages changed while embedding", skipped)
     LOGGER.info("Embedded %d Memopedia pages", total)
     return total
 
@@ -433,6 +543,7 @@ def embed_memopedia_fragments(
     *,
     batch_size: int = 64,
     db_lock: Optional[Any] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> int:
     """Generate and store embeddings for Memopedia fragments that don't have them.
 
@@ -440,9 +551,13 @@ def embed_memopedia_fragments(
         conn: Database connection.
         embedder: Embedder instance with embed() method.
         batch_size: Batch size for embedding generation.
+        progress_callback: Called after each stored batch with the cumulative
+            number of rows embedded so far (used by the re-embed job's progress).
 
     Returns:
-        Number of fragments embedded.
+        Number of fragments embedded. Fragments whose text (or parent page
+        title) changed, or that were deleted, while being embedded are
+        skipped and not counted.
     """
     fragments = get_fragments_without_embeddings(conn)
     if not fragments:
@@ -451,22 +566,28 @@ def embed_memopedia_fragments(
 
     LOGGER.info("Embedding %d Memopedia fragments", len(fragments))
     total = 0
+    skipped = 0
 
     for i in range(0, len(fragments), batch_size):
         batch = fragments[i:i + batch_size]
-        # entity_title は親ページ消失 (孤児 Fragment) で None になりうる。
-        # 孤児でも Fragment 本文単体で検索可能にする (LEFT JOIN 化, 2026-07-04)。
+        ids = [frag_id for frag_id, _, _ in batch]
         texts = [
-            f"{entity_title}: {content}" if entity_title else content
+            _fragment_embed_text(content, entity_title)
             for _, content, entity_title in batch
         ]
         vectors = embedder.embed(texts, is_query=False)
 
-        with (db_lock or nullcontext()):
-            for (frag_id, _, _), vec in zip(batch, vectors):
-                store_fragment_embedding(conn, frag_id, list(vec))
-                total += 1
+        stored, n_skip = _store_unchanged(
+            conn, ids, texts, vectors, _current_fragment_text, store_fragment_embedding,
+            db_lock=db_lock,
+        )
+        total += stored
+        skipped += n_skip
+        if progress_callback is not None:
+            progress_callback(total)
 
+    if skipped:
+        LOGGER.info("Skipped %d Memopedia fragments changed while embedding", skipped)
     LOGGER.info("Embedded %d Memopedia fragments", total)
     return total
 

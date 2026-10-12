@@ -47,15 +47,21 @@ tzdata
 # without it, so it is a hard requirement, not an optional accelerator.
 psutil>=7.0.0
 
-# SAIMemory embeddings
-fastembed>=0.7.3
-# onnxruntime is imported directly by sai_memory (deep recall) and pulled in by
-# fastembed. The upper bound is mandatory: from 1.24 onnxruntime ships no macOS
-# x86_64 (Intel Mac) wheel and no macOS 13 wheel, and publishes no sdist, so a
-# universal lock pinned to 1.24+ cannot be installed on an Intel Mac at all
-# (fastembed 0.8 also excludes 1.24.0/1.24.1 on Python 3.13). Lift it when
-# onnxruntime publishes Intel Mac wheels again or Intel Mac support is dropped.
-onnxruntime>=1.17,<1.24
+# SAIMemory embeddings: EmbeddingGemma 2 (4-bit ONNX) run through onnxruntime
+# directly (sai_memory/memory/recall.py). tokenizers reads the model's
+# tokenizer.json; huggingface-hub downloads the pinned model files on first
+# start (sbert/embeddinggemma-2-q4).
+tokenizers>=0.21.4
+huggingface-hub>=0.36.2
+# onnxruntime is imported directly by sai_memory (embeddings). The lower bound
+# is the version the pinned model is verified on: the model is ONNX IR 10 /
+# opset 21 with the 4-bit MatMulNBits and GatherBlockQuantized operators, and
+# runs on 1.23.2; 1.19 was confirmed to fail to load it. The upper bound is
+# mandatory: from 1.24 onnxruntime ships no macOS x86_64 (Intel Mac) wheel and
+# no macOS 13 wheel, and publishes no sdist, so a universal lock pinned to
+# 1.24+ cannot be installed on an Intel Mac at all. Lift it when onnxruntime
+# publishes Intel Mac wheels again or Intel Mac support is dropped.
+onnxruntime>=1.23.2,<1.24
 numpy>=1.26.0
 
 # Image processing

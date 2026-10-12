@@ -12,106 +12,190 @@ router = APIRouter()
 _reembed_status: dict = {}
 _reembed_lock = threading.Lock()
 
-def _run_reembed_task(persona_id: str, force: bool):
-    """Background task to run re-embedding."""
-    from pathlib import Path
+_SOURCE_LABELS = {"chronicle": "Chronicle", "memopedia": "Memopedia", "fragment": "Fragment"}
+
+
+def _live_embedder_ready(manager, persona_id: str) -> bool:
+    """True when the loaded persona can embed queries after the re-embed.
+
+    The re-embed job uses its own Embedder, so a persona whose adapter failed
+    to load the model at startup would get fresh vectors it still cannot
+    search. Retry the load on that adapter (``ensure_embedder``). A persona
+    that is not loaded (or has no memory adapter) reads the model on its next
+    load, so it counts as ready.
+    """
+    persona = manager.personas.get(persona_id)
+    adapter = persona.sai_memory if persona is not None else None
+    if adapter is None:
+        return True
+    return bool(adapter.ensure_embedder())
+
+
+def _run_reembed_task(persona_id: str, force: bool, manager=None):
+    """Background task: rebuild every recall vector of one persona.
+
+    Covers all four vector systems (docs/intent/embedding_gemma2_migration.md
+    §2): Chronicle / Memopedia page / fragment vectors that are stale (or all
+    of them with ``force``) are deleted and regenerated on the spot, then
+    the messages are re-embedded: those with a stale vector (including the
+    empty row of an import whose background embedding did not finish) and
+    those with no vector at all. At the end ``finish_reembed`` checks that no
+    vector of another space is left; only then is ``embed_metadata.embed_model``
+    updated, the in-progress mark removed and the persona's startup warning
+    lifted through ``manager`` so the banner does not come back on reload.
+    When something is left (stale vectors, messages that kept their old
+    vector because they were edited during the job, or another re-embed that
+    took the mark over), the warning and the mark stay and the summary names
+    what is left; running the job again then rebuilds everything. Chronicle /
+    page / fragment rows the job skipped because of an edit are left without
+    a vector for the next Metabolism to embed; they do not hold completion
+    back.
+
+    A recorded model label that differs from the current one (or is missing
+    while vectors exist) runs the job as ``force`` whatever the dimensions:
+    the label is what tells two models of the same dimension apart. The
+    memory.db is marked as being re-embedded before anything is deleted
+    (``begin_reembed``, which returns this job's token) and the mark is
+    removed by ``finish_reembed`` only when the job is complete and the mark
+    still carries that token, so a job that dies half way (or ends with work
+    left) is warned about at the next startup.
+    """
     from sai_memory.config import load_settings
-    from sai_memory.memory.chunking import chunk_text
+    from sai_memory.embedding_migration import (
+        RECALL_SOURCES,
+        begin_reembed,
+        finish_reembed,
+        message_reembed_targets,
+        model_label_changed,
+        rebuild_recall_source_embeddings,
+        reembed_in_progress,
+        reembed_messages,
+    )
     from sai_memory.memory.recall import Embedder
-    from sai_memory.memory.storage import get_message, init_db, replace_message_embeddings
-    import json
-    import logging
-    
-    with _reembed_lock:
-        _reembed_status[persona_id] = {"running": True, "progress": 0, "total": 0, "message": "Starting..."}
-    
+    from sai_memory.memory.storage import init_db
+
+    sources = {s: {"total": 0, "done": 0} for s in RECALL_SOURCES}
+
+    def _set(**fields):
+        with _reembed_lock:
+            _reembed_status[persona_id] = {**fields, "sources": {k: dict(v) for k, v in sources.items()}}
+
+    _set(running=True, progress=0, total=0, message="Starting...")
+
     try:
         db_path = get_persona_memory_db(persona_id)
         if not db_path.exists():
             with _reembed_lock:
                 _reembed_status[persona_id] = {"running": False, "message": "Database not found"}
             return
-        
-        settings = load_settings()
-        embedder = Embedder(
-            model=settings.embed_model or "",
-            local_model_path=str(Path(settings.embed_model_path).expanduser().resolve()) if settings.embed_model_path else None,
-            model_dim=settings.embed_model_dim,
-        )
-        expected_dim = embedder.model.embedding_size
-        
-        conn = init_db(str(db_path), check_same_thread=False)
-        
-        try:
-            if force:
-                target_ids = set()
-                for (mid,) in conn.execute("SELECT DISTINCT id FROM messages"):
-                    target_ids.add(mid)
-            else:
-                all_message_ids = set()
-                for (mid,) in conn.execute("SELECT DISTINCT id FROM messages"):
-                    all_message_ids.add(mid)
-                
-                embedded_ids = set()
-                bad_ids = set()
-                for mid, _, vec_json in conn.execute(
-                    "SELECT message_id, chunk_index, vector FROM message_embeddings"
-                ):
-                    embedded_ids.add(mid)
-                    try:
-                        vec = json.loads(vec_json)
-                        if len(vec) != expected_dim:
-                            bad_ids.add(mid)
-                    except json.JSONDecodeError:
-                        bad_ids.add(mid)
-                
-                missing_ids = all_message_ids - embedded_ids
-                target_ids = missing_ids | bad_ids
-            
-            if not target_ids:
-                with _reembed_lock:
-                    _reembed_status[persona_id] = {"running": False, "progress": 0, "total": 0, "message": "No messages need re-embedding."}
-                return
-            
-            target_list = list(target_ids)
-            total = len(target_list)
-            with _reembed_lock:
-                _reembed_status[persona_id] = {"running": True, "progress": 0, "total": total, "message": f"Processing 0/{total}..."}
-            
-            fixed = 0
-            for i, mid in enumerate(target_list):
-                msg = get_message(conn, mid)
-                if msg is None or not msg.content:
-                    continue
-                chunks = chunk_text(
-                    msg.content,
-                    min_chars=settings.chunk_min_chars,
-                    max_chars=settings.chunk_max_chars,
-                )
-                payload = [c.strip() for c in chunks if c and c.strip()]
-                if not payload:
-                    payload = [msg.content.strip()]
-                if not payload:
-                    continue
-                vectors = embedder.embed(payload, is_query=False)
-                replace_message_embeddings(conn, mid, vectors)
-                fixed += 1
-                
-                # Update progress every 10 messages
-                if fixed % 10 == 0:
-                    with _reembed_lock:
-                        _reembed_status[persona_id] = {"running": True, "progress": fixed, "total": total, "message": f"Processing {fixed}/{total}..."}
-            
-            # Record the current embed model name so future startups know
-            # that embeddings match the current model.
-            from sai_memory.memory.storage import set_embed_metadata
-            set_embed_metadata(conn, "embed_model", settings.embed_model)
 
-            with _reembed_lock:
-                _reembed_status[persona_id] = {"running": False, "progress": fixed, "total": total, "message": f"Re-embedded {fixed} messages."}
+        settings = load_settings()
+        embedder = Embedder(local_model_path=settings.embed_model_path)
+        expected_dim = embedder.embedding_size
+
+        conn = init_db(str(db_path), check_same_thread=False)
+
+        try:
+            # 0. A changed model label, or an in-progress mark left by a job
+            #    that died half way, rebuilds everything; then mark the
+            #    memory.db before the first deletion.
+            if not force and model_label_changed(conn, settings.embed_model):
+                LOGGER.info(
+                    "Re-embed for %s: recorded embed_model differs from '%s'; "
+                    "rebuilding every vector.",
+                    persona_id, settings.embed_model,
+                )
+                force = True
+            if not force and reembed_in_progress(conn):
+                LOGGER.info(
+                    "Re-embed for %s: a previous re-embed did not finish; "
+                    "rebuilding every vector.",
+                    persona_id,
+                )
+                force = True
+            token = begin_reembed(conn, settings.embed_model)
+
+            # 1. Chronicle / Memopedia pages / fragments (small; done first so
+            #    those memories come back to recall early).
+            def _source_progress(source: str, done: int, total: int) -> None:
+                sources[source] = {"total": total, "done": done}
+                _set(
+                    running=True, progress=0, total=0,
+                    message=f"{_SOURCE_LABELS[source]} {done}/{total}...",
+                )
+
+            source_result = rebuild_recall_source_embeddings(
+                conn, embedder, force=force, progress=_source_progress,
+            )
+
+            # 2. Messages: stale vectors (the empty rows of a deferred import
+            #    embedding among them) and messages without any vector.
+            target_ids = message_reembed_targets(
+                conn, expected_dim, force=force, include_missing=True,
+            )
+            total = len(target_ids)
+            _set(running=True, progress=0, total=total, message=f"Processing 0/{total}...")
+
+            def _message_progress(done: int, total_: int) -> None:
+                _set(running=True, progress=done, total=total_, message=f"Processing {done}/{total_}...")
+
+            result = reembed_messages(
+                conn, embedder, target_ids,
+                chunk_min=settings.chunk_min_chars,
+                chunk_max=settings.chunk_max_chars,
+                progress=_message_progress,
+            )
+
+            # 3. Record the model and lift the warning only if no vector of
+            #    another space is left. A message edited while being embedded
+            #    keeps its old vector, so it makes the job incomplete; a
+            #    Chronicle / page / fragment row skipped that way has no
+            #    vector, and the next Metabolism embeds it.
+            outcome = finish_reembed(
+                conn, embedder, settings.embed_model,
+                token=token, force=force, skipped=result.get("changed", 0),
+            )
+            source_skipped = sum(
+                counts.get("skipped", 0) for counts in source_result.values()
+            )
         finally:
             conn.close()
-            
+
+        source_done = sum(v["done"] for v in sources.values())
+        summary = (
+            f"Re-embedded {result['embedded']} messages and "
+            f"{source_done} Chronicle/Memopedia/Fragment entries."
+        )
+        if source_skipped:
+            summary += (
+                f" {source_skipped} Chronicle/Memopedia/Fragment entries edited during "
+                "the job were left for the next memory maintenance to embed."
+            )
+        if not outcome.complete:
+            reason = outcome.describe()
+            LOGGER.warning(
+                "Re-embed for %s did not complete (%s); keeping the startup warning. "
+                "Running it again rebuilds every vector.",
+                persona_id, reason,
+            )
+            summary += f" {reason} Run the re-embed again to finish."
+        elif manager is not None:
+            if _live_embedder_ready(manager, persona_id):
+                manager.clear_embed_model_mismatch(persona_id)
+            else:
+                LOGGER.warning(
+                    "Re-embed for %s finished, but the running persona's embedding "
+                    "model could not be loaded; keeping the startup warning "
+                    "(recall stays unavailable until it loads).",
+                    persona_id,
+                )
+                summary += (
+                    " The running persona's embedding model could not be loaded, "
+                    "so recall is still unavailable; the warning is kept."
+                )
+
+        _set(running=False, progress=result["embedded"], total=total, message=summary)
+
     except Exception as e:
         logging.exception("Re-embed task failed for %s", persona_id)
         with _reembed_lock:
@@ -124,27 +208,29 @@ def reembed_persona_memory(
     background_tasks: BackgroundTasks,
     manager = Depends(get_manager)
 ):
-    """Start re-embedding messages in the background."""
-    from pathlib import Path
-    
-    # Check if already running
-    with _reembed_lock:
-        status = _reembed_status.get(persona_id, {})
-        if status.get("running"):
-            return {"success": False, "message": "Re-embed already in progress.", "status": status}
-    
+    """Start re-embedding every recall vector of the persona in the background."""
     # Verify database exists
     db_path = get_persona_memory_db(persona_id)
     if not db_path.exists():
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
-    
+
+    # Check and reserve in one step: the "running" mark is written here, under
+    # the lock, so a second request arriving before the background task has
+    # started is refused instead of starting a second job.
+    reserved = {"running": True, "progress": 0, "total": 0, "message": "Starting..."}
+    with _reembed_lock:
+        status = _reembed_status.get(persona_id, {})
+        if status.get("running"):
+            return {"success": False, "message": "Re-embed already in progress.", "status": status}
+        _reembed_status[persona_id] = dict(reserved)
+
     # Start background task
-    background_tasks.add_task(_run_reembed_task, persona_id, request.force)
-    
+    background_tasks.add_task(_run_reembed_task, persona_id, request.force, manager)
+
     return {
-        "success": True, 
+        "success": True,
         "message": "Re-embed task started. Check status endpoint for progress.",
-        "status": {"running": True, "progress": 0, "total": 0, "message": "Starting..."}
+        "status": reserved,
     }
 
 @router.get("/{persona_id}/reembed/status", response_model=ReembedStatusResponse)

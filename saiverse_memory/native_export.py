@@ -17,7 +17,11 @@ Import の意味論 (記憶・人格境界監査 2026-07-12 第5片、まはー�
   target は行単位で不変 (旧「message 単位 commit で部分適用が残る」の根治)。
 - **embedding は commit 後の派生工程**: 再構築可能なデータなので import の
   成否には関与しない。persona ID を thread ID から推測せず、embedder だけを
-  非生成的に構築する (別 persona の memory.db を作らない)。
+  非生成的に構築する (別 persona の memory.db を作らない)。埋め込みを作る
+  import では、本文のある message は同じトランザクションで空のベクトル行
+  (``storage.DEFERRED_VECTOR``) を持って入り、生成がそれを置き換える —
+  生成に失敗しても空の行が残り、起動時の検査と再計算が拾う
+  (docs/intent/embedding_gemma2_migration.md §2 の規則)。
 """
 from __future__ import annotations
 
@@ -33,6 +37,7 @@ from saiverse.data_paths import get_persona_memory_db
 from sai_memory.memory.storage import (
     get_stelis_thread,
     init_db,
+    write_deferred_message_embedding,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -713,6 +718,13 @@ def import_threads_native(
                         imported, total_messages,
                         f"Staged {imported}/{total_messages} messages",
                     )
+            # The empty vector rows go in with the messages, so a failed or
+            # interrupted generation below still leaves them in the
+            # re-embed's reach. skip_embed writes none.
+            if not skip_embed:
+                for msg_id, content in written_messages:
+                    if content and content.strip():
+                        write_deferred_message_embedding(conn, msg_id, commit=False)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -754,7 +766,8 @@ def _regenerate_embeddings(
     embedder は設定から**非生成的に**構築し、書き込み先は呼び出し元が開いた
     target conn だけに閉じる。
 
-    Returns: 全件成功で True。失敗は WARNING に落として False (再構築可能)。
+    Returns: 全件成功で True。失敗は WARNING に落として False (再構築可能 —
+    埋まらなかった message には import と一緒に書いた空のベクトル行が残る)。
     """
     try:
         from sai_memory.config import load_settings
@@ -764,11 +777,7 @@ def _regenerate_embeddings(
 
         settings = load_settings()
         try:
-            embedder = Embedder(
-                model=settings.embed_model,
-                local_model_path=settings.embed_model_path,
-                model_dim=settings.embed_model_dim,
-            )
+            embedder = Embedder(local_model_path=settings.embed_model_path)
         except Exception:
             LOGGER.warning(
                 "Embedder not available, skipping embedding generation",

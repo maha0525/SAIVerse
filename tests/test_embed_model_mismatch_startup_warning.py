@@ -1,14 +1,20 @@
 """Embedding モデル変更の起動時警告のテスト。
 
 SAIMemoryAdapter は起動時に、記録された embedding モデルといまのモデルを比べ、
-違えば ``embed_model_changed`` を立てる (saiverse_memory/adapter.py)。
-ペルソナの読み込みが終わったら、manager はその旗が立っているペルソナを集めて
-``embed_model_mismatch`` の警告を積む (manager/persona.py ``_load_personas_from_db``)。
+さらに 4 系統のベクトルの長さを標本で確かめて、合わなければ ``embed_model_changed``
+を立てる (saiverse_memory/adapter.py。判定そのもののテストは
+tests/test_embedding_migration.py)。ペルソナの読み込みが終わったら、manager は
+その旗が立っているペルソナを集めて ``embed_model_mismatch`` の警告を積む
+(manager/persona.py ``_load_personas_from_db``)。再計算が成功したペルソナは
+``clear_embed_model_mismatch`` で警告から外れる。
 
 ここで押さえること:
 
 - adapter は PersonaCore の ``sai_memory`` から読む。旗が立っている人だけが警告に載る
 - adapter を持たない (``sai_memory`` が None の) ペルソナは警告の対象にならない
+- 再計算を終えたペルソナは旗が下り、警告から外れる。最後の一人が外れたら警告ごと消える
+- 前回の再計算が途中で死んで「移行中」の印が残った memory.db は、ベクトルが
+  一つも無くても本物の adapter が旗を立て、警告に載る
 
 ペルソナの読み込み (_load_single_persona) はスタブに差し替え、PersonaCore も
 SAIMemory も本物は作らない。DB はメモリ上の SQLite。LLM は呼ばない。
@@ -17,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -25,7 +32,7 @@ from sqlalchemy.pool import StaticPool
 
 from database.models import AI as AIModel, Base, City as CityModel
 from manager.persona import PersonaMixin
-from sai_memory.config import load_settings
+from sai_memory.config import EMBED_DIM, EMBED_MODEL_ID, load_settings
 from saiverse_memory.adapter import SAIMemoryAdapter
 
 
@@ -117,3 +124,58 @@ def test_disabled_adapter_does_not_break_startup_check(session_factory, tmp_path
     svc = _start(session_factory, {"air_city_a": adapter})
 
     assert svc.startup_warnings == []
+
+
+class _FakeEmbedder:
+    """本物のモデルを読まずに adapter を初期化するための偽物。"""
+
+    embedding_size = EMBED_DIM
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def embed(self, texts, *, is_query=False):
+        return [[0.0] * EMBED_DIM for _ in texts]
+
+
+def test_unfinished_reembed_mark_warns_even_without_vectors(session_factory, tmp_path):
+    from sai_memory.embedding_migration import begin_reembed, has_any_vectors
+    from sai_memory.memory.storage import init_db
+
+    conn = init_db(str(tmp_path / "memory.db"), check_same_thread=False)
+    try:
+        begin_reembed(conn, EMBED_MODEL_ID)
+        assert has_any_vectors(conn) is False
+    finally:
+        conn.close()
+
+    settings = replace(load_settings(), memory_enabled=True)
+    with patch("saiverse_memory.adapter.Embedder", _FakeEmbedder):
+        adapter = SAIMemoryAdapter("air_city_a", persona_dir=tmp_path, settings=settings)
+    try:
+        assert adapter.embed_model_changed is True
+        svc = _start(session_factory, {"air_city_a": adapter})
+        assert [w["persona_ids"] for w in _mismatch_warnings(svc)] == [["air_city_a"]]
+    finally:
+        adapter.close()
+
+
+def test_clear_after_reembed_lifts_the_warning(session_factory):
+    air = SimpleNamespace(embed_model_changed=True)
+    miku = SimpleNamespace(embed_model_changed=True)
+    svc = _start(session_factory, {"air_city_a": air, "miku_city_a": miku})
+    shared = svc.startup_warnings
+
+    svc.clear_embed_model_mismatch("air_city_a")
+
+    assert air.embed_model_changed is False
+    assert miku.embed_model_changed is True
+    warnings = _mismatch_warnings(svc)
+    assert [w["persona_ids"] for w in warnings] == [["miku_city_a"]]
+    assert "air_city_a" not in warnings[0]["message"]
+
+    svc.clear_embed_model_mismatch("miku_city_a")
+
+    assert svc.startup_warnings == []
+    # AdminService と共有しているリストを差し替えずに中身だけ変える
+    assert svc.startup_warnings is shared

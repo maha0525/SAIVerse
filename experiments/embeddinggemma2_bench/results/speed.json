@@ -1,0 +1,1285 @@
+{
+  "e5": [
+    {
+      "role": "e5",
+      "info": {
+        "model": "intfloat/multilingual-e5-small",
+        "source": "local snapshot C:\\Users\\shuhe\\workspace\\SAIVerse\\sbert\\multilingual-e5-small",
+        "runtime": "fastembed / onnxruntime 1.23.2 (CPUExecutionProvider)",
+        "prefix_query": "query: ",
+        "prefix_document": "passage: ",
+        "dim": 384
+      },
+      "import_s": 1.8018691000761464,
+      "load_s": 1.0858328000176698,
+      "query_count": 30,
+      "query_len_chars": [
+        21,
+        28
+      ],
+      "query_warmup": 3,
+      "first_query_ms": 10.856300010345876,
+      "query_ms_all": [
+        10.856300010345876,
+        6.14290009252727,
+        8.515800000168383,
+        6.218699971213937,
+        7.344300043769181,
+        7.092200103215873,
+        6.5611000172793865,
+        5.572100053541362,
+        7.064200006425381,
+        7.15770001988858,
+        5.583800026215613,
+        7.793800090439618,
+        7.758500054478645,
+        5.885199992917478,
+        6.487199920229614,
+        5.819600075483322,
+        6.2673999927937984,
+        6.6769999684765935,
+        5.877000046893954,
+        7.490399992093444,
+        5.966799915768206,
+        5.810000002384186,
+        6.24779995996505,
+        6.371599971316755,
+        6.605500006116927,
+        6.236899993382394,
+        6.220299983397126,
+        6.794799934141338,
+        6.270500016398728,
+        5.731799989007413
+      ],
+      "query_median_ms": 6.270500016398728,
+      "query_p95_ms": 7.678070035763085,
+      "query_mean_ms": 6.4780074128605145,
+      "query_min_ms": 5.572100053541362,
+      "query_max_ms": 7.793800090439618,
+      "batch_count": 200,
+      "batch_len_chars": [
+        159,
+        400
+      ],
+      "batch_mean_chars": 287.28,
+      "batch_s": 5.906010299921036,
+      "batch_texts_per_s": 33.8638081959786,
+      "emb_dim": 384,
+      "memory": {
+        "start": {
+          "rss_mb": 22.0078125,
+          "peak_wset_mb": 22.0078125,
+          "private_mb": 11.78515625,
+          "method": "psutil"
+        },
+        "after_import": {
+          "rss_mb": 93.76953125,
+          "peak_wset_mb": 93.76953125,
+          "private_mb": 806.50390625,
+          "method": "psutil"
+        },
+        "after_load": {
+          "rss_mb": 804.59765625,
+          "peak_wset_mb": 920.23828125,
+          "private_mb": 1521.2890625,
+          "method": "psutil"
+        },
+        "after_queries": {
+          "rss_mb": 809.87109375,
+          "peak_wset_mb": 920.23828125,
+          "private_mb": 1525.4921875,
+          "method": "psutil"
+        },
+        "after_batch": {
+          "rss_mb": 2211.78125,
+          "peak_wset_mb": 2481.80078125,
+          "private_mb": 3663.5859375,
+          "method": "psutil"
+        }
+      }
+    },
+    {
+      "role": "e5",
+      "info": {
+        "model": "intfloat/multilingual-e5-small",
+        "source": "local snapshot C:\\Users\\shuhe\\workspace\\SAIVerse\\sbert\\multilingual-e5-small",
+        "runtime": "fastembed / onnxruntime 1.23.2 (CPUExecutionProvider)",
+        "prefix_query": "query: ",
+        "prefix_document": "passage: ",
+        "dim": 384
+      },
+      "import_s": 1.7711431999923661,
+      "load_s": 1.2567718999926,
+      "query_count": 30,
+      "query_len_chars": [
+        21,
+        28
+      ],
+      "query_warmup": 3,
+      "first_query_ms": 10.01720002386719,
+      "query_ms_all": [
+        10.01720002386719,
+        7.097800029441714,
+        8.076499914750457,
+        5.7212000247091055,
+        6.119399913586676,
+        7.542000035755336,
+        6.059099920094013,
+        7.145600044168532,
+        6.0400000074878335,
+        6.221599993295968,
+        6.602999987080693,
+        7.073399960063398,
+        7.167200092226267,
+        6.183300050906837,
+        6.007799995131791,
+        6.996900076046586,
+        5.6813000701367855,
+        7.324500009417534,
+        5.593100097030401,
+        5.8391999918967485,
+        7.293300004675984,
+        5.493400036357343,
+        6.107599940150976,
+        7.241799961775541,
+        5.769200040958822,
+        7.260200101882219,
+        5.620600073598325,
+        7.384500000625849,
+        6.12360006198287,
+        6.7662999499589205
+      ],
+      "query_median_ms": 6.183300050906837,
+      "query_p95_ms": 7.366500003263354,
+      "query_mean_ms": 6.4584852015185685,
+      "query_min_ms": 5.493400036357343,
+      "query_max_ms": 7.542000035755336,
+      "batch_count": 200,
+      "batch_len_chars": [
+        159,
+        400
+      ],
+      "batch_mean_chars": 287.28,
+      "batch_s": 5.846609100000933,
+      "batch_texts_per_s": 34.20786246851497,
+      "emb_dim": 384,
+      "memory": {
+        "start": {
+          "rss_mb": 21.765625,
+          "peak_wset_mb": 21.765625,
+          "private_mb": 11.5546875,
+          "method": "psutil"
+        },
+        "after_import": {
+          "rss_mb": 94.0703125,
+          "peak_wset_mb": 94.0703125,
+          "private_mb": 806.3046875,
+          "method": "psutil"
+        },
+        "after_load": {
+          "rss_mb": 804.9921875,
+          "peak_wset_mb": 920.4921875,
+          "private_mb": 1521.58984375,
+          "method": "psutil"
+        },
+        "after_queries": {
+          "rss_mb": 809.43359375,
+          "peak_wset_mb": 920.4921875,
+          "private_mb": 1524.95703125,
+          "method": "psutil"
+        },
+        "after_batch": {
+          "rss_mb": 2210.03125,
+          "peak_wset_mb": 2479.75390625,
+          "private_mb": 3662.1015625,
+          "method": "psutil"
+        }
+      }
+    },
+    {
+      "role": "e5",
+      "info": {
+        "model": "intfloat/multilingual-e5-small",
+        "source": "local snapshot C:\\Users\\shuhe\\workspace\\SAIVerse\\sbert\\multilingual-e5-small",
+        "runtime": "fastembed / onnxruntime 1.23.2 (CPUExecutionProvider)",
+        "prefix_query": "query: ",
+        "prefix_document": "passage: ",
+        "dim": 384
+      },
+      "import_s": 1.40197080001235,
+      "load_s": 1.1265302000101656,
+      "query_count": 30,
+      "query_len_chars": [
+        21,
+        28
+      ],
+      "query_warmup": 3,
+      "first_query_ms": 9.86300001386553,
+      "query_ms_all": [
+        9.86300001386553,
+        5.673500010743737,
+        6.736999959684908,
+        6.185100064612925,
+        6.170600070618093,
+        6.686599925160408,
+        5.2489000372588634,
+        5.445699905976653,
+        6.17250008508563,
+        5.1693000132218,
+        5.52350003272295,
+        8.233299944549799,
+        6.480899988673627,
+        6.069199997000396,
+        5.2174999145790935,
+        6.270500016398728,
+        6.993399932980537,
+        6.227000034414232,
+        6.217799964360893,
+        7.0177000015974045,
+        5.0475000170990825,
+        5.797199904918671,
+        6.266199983656406,
+        5.835399962961674,
+        7.39909999538213,
+        6.134000024758279,
+        5.128999939188361,
+        7.640199968591332,
+        5.663599935360253,
+        7.695800042711198
+      ],
+      "query_median_ms": 6.17250008508563,
+      "query_p95_ms": 7.679120020475239,
+      "query_mean_ms": 6.219907396438497,
+      "query_min_ms": 5.0475000170990825,
+      "query_max_ms": 8.233299944549799,
+      "batch_count": 200,
+      "batch_len_chars": [
+        159,
+        400
+      ],
+      "batch_mean_chars": 287.28,
+      "batch_s": 5.956279399921186,
+      "batch_texts_per_s": 33.57800844645508,
+      "emb_dim": 384,
+      "memory": {
+        "start": {
+          "rss_mb": 22.0625,
+          "peak_wset_mb": 22.0625,
+          "private_mb": 11.8671875,
+          "method": "psutil"
+        },
+        "after_import": {
+          "rss_mb": 93.84765625,
+          "peak_wset_mb": 93.84765625,
+          "private_mb": 805.14453125,
+          "method": "psutil"
+        },
+        "after_load": {
+          "rss_mb": 804.49609375,
+          "peak_wset_mb": 920.09765625,
+          "private_mb": 1521.0625,
+          "method": "psutil"
+        },
+        "after_queries": {
+          "rss_mb": 809.12109375,
+          "peak_wset_mb": 920.09765625,
+          "private_mb": 1524.40625,
+          "method": "psutil"
+        },
+        "after_batch": {
+          "rss_mb": 2209.15234375,
+          "peak_wset_mb": 2478.63671875,
+          "private_mb": 3660.15234375,
+          "method": "psutil"
+        }
+      }
+    }
+  ],
+  "gemma": [
+    {
+      "role": "gemma",
+      "info": {
+        "model": "google/embeddinggemma-2",
+        "runtime": "sentence-transformers 6.1.0 / transformers 5.19.0 / torch 2.14.1+cpu (CPU, 12 threads)",
+        "dtype": "torch.bfloat16",
+        "prompt_query": "task: search result | query: ",
+        "prompt_document": "title: none | text: ",
+        "prompt_sts": "task: sentence similarity | query: ",
+        "batch_size": 32,
+        "dim": 768,
+        "n_params_loaded_now": 744371488,
+        "param_breakdown_at_load": {
+          "vision_tower": 167364608,
+          "language_model": 271002624,
+          "audio_tower": 304824608,
+          "embed_vision": 393216,
+          "embed_audio": 786432
+        },
+        "text_only_hack": false
+      },
+      "import_s": 12.637759399949573,
+      "load_s": 4.801206800038926,
+      "query_count": 30,
+      "query_len_chars": [
+        21,
+        28
+      ],
+      "query_warmup": 3,
+      "first_query_ms": 132.03790003899485,
+      "query_ms_all": [
+        132.03790003899485,
+        98.82920002564788,
+        93.13910000491887,
+        92.87839999888092,
+        104.14330009371042,
+        101.2035000603646,
+        97.92580001521856,
+        96.46669996436685,
+        96.42219997476786,
+        84.34549998492002,
+        87.55559998098761,
+        90.64479998778552,
+        84.29210004396737,
+        82.11610000580549,
+        91.61550004500896,
+        93.35029998328537,
+        93.01079995930195,
+        91.80649998597801,
+        89.16950004640967,
+        79.83039994724095,
+        78.46560003235936,
+        99.9515000730753,
+        93.47620001062751,
+        88.85920001193881,
+        90.09009995497763,
+        89.10670003388077,
+        102.6486000046134,
+        94.88119999878109,
+        90.77249991241843,
+        101.36239998973906
+      ],
+      "query_median_ms": 91.80649998597801,
+      "query_p95_ms": 102.2627400001511,
+      "query_mean_ms": 92.0885555592745,
+      "query_min_ms": 78.46560003235936,
+      "query_max_ms": 104.14330009371042,
+      "batch_count": 200,
+      "batch_len_chars": [
+        159,
+        400
+      ],
+      "batch_mean_chars": 287.28,
+      "batch_s": 22.297158700064756,
+      "batch_texts_per_s": 8.969752724566613,
+      "emb_dim": 768,
+      "memory": {
+        "start": {
+          "rss_mb": 22.10546875,
+          "peak_wset_mb": 22.10546875,
+          "private_mb": 11.9453125,
+          "method": "psutil"
+        },
+        "after_import": {
+          "rss_mb": 423.33984375,
+          "peak_wset_mb": 423.33984375,
+          "private_mb": 1857.90234375,
+          "method": "psutil"
+        },
+        "after_load": {
+          "rss_mb": 2116.77734375,
+          "peak_wset_mb": 2278.94140625,
+          "private_mb": 3584.71875,
+          "method": "psutil"
+        },
+        "after_queries": {
+          "rss_mb": 2142.30859375,
+          "peak_wset_mb": 2278.94140625,
+          "private_mb": 3597.671875,
+          "method": "psutil"
+        },
+        "after_batch": {
+          "rss_mb": 2255.76171875,
+          "peak_wset_mb": 3232.49609375,
+          "private_mb": 3772.046875,
+          "method": "psutil"
+        }
+      }
+    },
+    {
+      "role": "gemma",
+      "info": {
+        "model": "google/embeddinggemma-2",
+        "runtime": "sentence-transformers 6.1.0 / transformers 5.19.0 / torch 2.14.1+cpu (CPU, 12 threads)",
+        "dtype": "torch.bfloat16",
+        "prompt_query": "task: search result | query: ",
+        "prompt_document": "title: none | text: ",
+        "prompt_sts": "task: sentence similarity | query: ",
+        "batch_size": 32,
+        "dim": 768,
+        "n_params_loaded_now": 744371488,
+        "param_breakdown_at_load": {
+          "vision_tower": 167364608,
+          "language_model": 271002624,
+          "audio_tower": 304824608,
+          "embed_vision": 393216,
+          "embed_audio": 786432
+        },
+        "text_only_hack": false
+      },
+      "import_s": 14.006870899931528,
+      "load_s": 5.0729228999698535,
+      "query_count": 30,
+      "query_len_chars": [
+        21,
+        28
+      ],
+      "query_warmup": 3,
+      "first_query_ms": 134.79529996402562,
+      "query_ms_all": [
+        134.79529996402562,
+        100.2704999409616,
+        108.41700003948063,
+        98.90179999638349,
+        105.92030000407249,
+        93.29290001187474,
+        95.10620008222759,
+        88.00450002308935,
+        106.46439995616674,
+        99.69149995595217,
+        104.31299998890609,
+        102.67399996519089,
+        99.8486999887973,
+        102.64729999471456,
+        100.75119999237359,
+        106.89069994259626,
+        101.08589997980744,
+        102.95590001624078,
+        97.11819991935045,
+        92.25270000752062,
+        90.95330000855029,
+        96.46280005108565,
+        106.37339996173978,
+        111.72679997980595,
+        105.85920000448823,
+        102.77909995056689,
+        95.88510007597506,
+        88.7358000036329,
+        92.88430004380643,
+        89.46260006632656
+      ],
+      "query_median_ms": 99.8486999887973,
+      "query_p95_ms": 106.7628099466674,
+      "query_mean_ms": 99.22376296189786,
+      "query_min_ms": 88.00450002308935,
+      "query_max_ms": 111.72679997980595,
+      "batch_count": 200,
+      "batch_len_chars": [
+        159,
+        400
+      ],
+      "batch_mean_chars": 287.28,
+      "batch_s": 22.868540800060146,
+      "batch_texts_per_s": 8.745638899683271,
+      "emb_dim": 768,
+      "memory": {
+        "start": {
+          "rss_mb": 22.015625,
+          "peak_wset_mb": 22.015625,
+          "private_mb": 11.80078125,
+          "method": "psutil"
+        },
+        "after_import": {
+          "rss_mb": 423.9140625,
+          "peak_wset_mb": 423.9140625,
+          "private_mb": 1858.48046875,
+          "method": "psutil"
+        },
+        "after_load": {
+          "rss_mb": 2103.671875,
+          "peak_wset_mb": 2276.87890625,
+          "private_mb": 3572.6796875,
+          "method": "psutil"
+        },
+        "after_queries": {
+          "rss_mb": 2134.09765625,
+          "peak_wset_mb": 2276.87890625,
+          "private_mb": 3593.7890625,
+          "method": "psutil"
+        },
+        "after_batch": {
+          "rss_mb": 2249.921875,
+          "peak_wset_mb": 3229.69140625,
+          "private_mb": 3745.40234375,
+          "method": "psutil"
+        }
+      }
+    },
+    {
+      "role": "gemma",
+      "info": {
+        "model": "google/embeddinggemma-2",
+        "runtime": "sentence-transformers 6.1.0 / transformers 5.19.0 / torch 2.14.1+cpu (CPU, 12 threads)",
+        "dtype": "torch.bfloat16",
+        "prompt_query": "task: search result | query: ",
+        "prompt_document": "title: none | text: ",
+        "prompt_sts": "task: sentence similarity | query: ",
+        "batch_size": 32,
+        "dim": 768,
+        "n_params_loaded_now": 744371488,
+        "param_breakdown_at_load": {
+          "vision_tower": 167364608,
+          "language_model": 271002624,
+          "audio_tower": 304824608,
+          "embed_vision": 393216,
+          "embed_audio": 786432
+        },
+        "text_only_hack": false
+      },
+      "import_s": 13.692157199955545,
+      "load_s": 4.948841099976562,
+      "query_count": 30,
+      "query_len_chars": [
+        21,
+        28
+      ],
+      "query_warmup": 3,
+      "first_query_ms": 126.99100002646446,
+      "query_ms_all": [
+        126.99100002646446,
+        93.47409999463707,
+        92.8513000253588,
+        85.40710003580898,
+        91.01149998605251,
+        89.46970000397414,
+        85.14919993467629,
+        78.47790000960231,
+        89.5078000612557,
+        79.07749991863966,
+        83.99910002481192,
+        84.53370002098382,
+        87.7549999859184,
+        95.10399994906038,
+        99.17860000859946,
+        100.23250000085682,
+        99.1300999885425,
+        91.14690008573234,
+        97.4174999864772,
+        84.00479995179921,
+        91.82940004393458,
+        83.46670004539192,
+        89.93549994193017,
+        92.12829999160022,
+        95.84409999661148,
+        101.05880000628531,
+        97.42100001312792,
+        89.69980000983924,
+        89.36579991132021,
+        91.68479999061674
+      ],
+      "query_median_ms": 89.93549994193017,
+      "query_p95_ms": 99.91633000317961,
+      "query_mean_ms": 90.48285555197961,
+      "query_min_ms": 78.47790000960231,
+      "query_max_ms": 101.05880000628531,
+      "batch_count": 200,
+      "batch_len_chars": [
+        159,
+        400
+      ],
+      "batch_mean_chars": 287.28,
+      "batch_s": 22.75217390002217,
+      "batch_texts_per_s": 8.79036881833103,
+      "emb_dim": 768,
+      "memory": {
+        "start": {
+          "rss_mb": 22.00390625,
+          "peak_wset_mb": 22.00390625,
+          "private_mb": 11.84375,
+          "method": "psutil"
+        },
+        "after_import": {
+          "rss_mb": 424.4140625,
+          "peak_wset_mb": 424.4140625,
+          "private_mb": 1859.27734375,
+          "method": "psutil"
+        },
+        "after_load": {
+          "rss_mb": 2114.62109375,
+          "peak_wset_mb": 2277.86328125,
+          "private_mb": 3582.53515625,
+          "method": "psutil"
+        },
+        "after_queries": {
+          "rss_mb": 2139.29296875,
+          "peak_wset_mb": 2277.86328125,
+          "private_mb": 3594.32421875,
+          "method": "psutil"
+        },
+        "after_batch": {
+          "rss_mb": 2253.4765625,
+          "peak_wset_mb": 3234.59765625,
+          "private_mb": 3744.55859375,
+          "method": "psutil"
+        }
+      }
+    }
+  ],
+  "gemma_fp32": [
+    {
+      "role": "gemma_fp32",
+      "info": {
+        "model": "google/embeddinggemma-2",
+        "runtime": "sentence-transformers 6.1.0 / transformers 5.19.0 / torch 2.14.1+cpu (CPU, 12 threads)",
+        "dtype": "torch.float32",
+        "prompt_query": "task: search result | query: ",
+        "prompt_document": "title: none | text: ",
+        "prompt_sts": "task: sentence similarity | query: ",
+        "batch_size": 32,
+        "dim": 768,
+        "n_params_loaded_now": 744371488,
+        "param_breakdown_at_load": {
+          "vision_tower": 167364608,
+          "language_model": 271002624,
+          "audio_tower": 304824608,
+          "embed_vision": 393216,
+          "embed_audio": 786432
+        },
+        "text_only_hack": false
+      },
+      "import_s": 12.790699600009248,
+      "load_s": 5.281915600062348,
+      "query_count": 30,
+      "query_len_chars": [
+        21,
+        28
+      ],
+      "query_warmup": 3,
+      "first_query_ms": 152.84110000357032,
+      "query_ms_all": [
+        152.84110000357032,
+        123.40240005869418,
+        118.08829999063164,
+        122.00470000971109,
+        120.74319995008409,
+        126.2410000199452,
+        117.55620001349598,
+        124.61810000240803,
+        122.88849998731166,
+        125.297199934721,
+        132.86399992648512,
+        160.32969998195767,
+        138.95039993803948,
+        123.00250004045665,
+        120.23309990763664,
+        120.74210005812347,
+        130.66500006243587,
+        132.75609991978854,
+        132.98450002912432,
+        131.2806000933051,
+        123.69370006490499,
+        120.08880008943379,
+        115.24359998293221,
+        120.73049996979535,
+        115.83140003494918,
+        126.13680004142225,
+        134.73099994007498,
+        138.40539997909218,
+        142.87939993664622,
+        135.37789997644722
+      ],
+      "query_median_ms": 125.297199934721,
+      "query_p95_ms": 141.7006999370642,
+      "query_mean_ms": 128.0101999959529,
+      "query_min_ms": 115.24359998293221,
+      "query_max_ms": 160.32969998195767,
+      "batch_count": 200,
+      "batch_len_chars": [
+        159,
+        400
+      ],
+      "batch_mean_chars": 287.28,
+      "batch_s": 38.40960480005015,
+      "batch_texts_per_s": 5.207030924716489,
+      "emb_dim": 768,
+      "memory": {
+        "start": {
+          "rss_mb": 21.96484375,
+          "peak_wset_mb": 21.96484375,
+          "private_mb": 11.765625,
+          "method": "psutil"
+        },
+        "after_import": {
+          "rss_mb": 424.1796875,
+          "peak_wset_mb": 424.1796875,
+          "private_mb": 1858.8515625,
+          "method": "psutil"
+        },
+        "after_load": {
+          "rss_mb": 3531.796875,
+          "peak_wset_mb": 3694.5234375,
+          "private_mb": 6190.58203125,
+          "method": "psutil"
+        },
+        "after_queries": {
+          "rss_mb": 3580.53125,
+          "peak_wset_mb": 3694.5234375,
+          "private_mb": 6235.49609375,
+          "method": "psutil"
+        },
+        "after_batch": {
+          "rss_mb": 3649.94921875,
+          "peak_wset_mb": 4907.6015625,
+          "private_mb": 6202.96875,
+          "method": "psutil"
+        }
+      }
+    },
+    {
+      "role": "gemma_fp32",
+      "info": {
+        "model": "google/embeddinggemma-2",
+        "runtime": "sentence-transformers 6.1.0 / transformers 5.19.0 / torch 2.14.1+cpu (CPU, 12 threads)",
+        "dtype": "torch.float32",
+        "prompt_query": "task: search result | query: ",
+        "prompt_document": "title: none | text: ",
+        "prompt_sts": "task: sentence similarity | query: ",
+        "batch_size": 32,
+        "dim": 768,
+        "n_params_loaded_now": 744371488,
+        "param_breakdown_at_load": {
+          "vision_tower": 167364608,
+          "language_model": 271002624,
+          "audio_tower": 304824608,
+          "embed_vision": 393216,
+          "embed_audio": 786432
+        },
+        "text_only_hack": false
+      },
+      "import_s": 13.198335899971426,
+      "load_s": 6.160080100060441,
+      "query_count": 30,
+      "query_len_chars": [
+        21,
+        28
+      ],
+      "query_warmup": 3,
+      "first_query_ms": 158.62540004309267,
+      "query_ms_all": [
+        158.62540004309267,
+        124.30229992605746,
+        141.3759000133723,
+        144.65259993448853,
+        147.89269992616028,
+        142.32960005756468,
+        129.27340005990118,
+        129.92859992664307,
+        132.90630001574755,
+        148.5074000665918,
+        142.65870000235736,
+        147.5713000399992,
+        140.58959996327758,
+        128.98389995098114,
+        137.71439995616674,
+        139.21960000880063,
+        141.03609998710454,
+        167.29570005554706,
+        174.11090002860874,
+        176.29110009875149,
+        151.00519999396056,
+        131.6033999901265,
+        145.7225999329239,
+        143.2889000279829,
+        161.93470009602606,
+        145.88039997033775,
+        141.42460003495216,
+        141.90619997680187,
+        136.93909998983145,
+        141.28750003874302
+      ],
+      "query_median_ms": 142.32960005756468,
+      "query_p95_ms": 172.06634003669024,
+      "query_mean_ms": 144.8872037085325,
+      "query_min_ms": 128.98389995098114,
+      "query_max_ms": 176.29110009875149,
+      "batch_count": 200,
+      "batch_len_chars": [
+        159,
+        400
+      ],
+      "batch_mean_chars": 287.28,
+      "batch_s": 38.9246412999928,
+      "batch_texts_per_s": 5.138133411650398,
+      "emb_dim": 768,
+      "memory": {
+        "start": {
+          "rss_mb": 22.046875,
+          "peak_wset_mb": 22.046875,
+          "private_mb": 11.875,
+          "method": "psutil"
+        },
+        "after_import": {
+          "rss_mb": 424.04296875,
+          "peak_wset_mb": 424.04296875,
+          "private_mb": 1858.734375,
+          "method": "psutil"
+        },
+        "after_load": {
+          "rss_mb": 3532.484375,
+          "peak_wset_mb": 3694.88671875,
+          "private_mb": 6189.94140625,
+          "method": "psutil"
+        },
+        "after_queries": {
+          "rss_mb": 3580.61328125,
+          "peak_wset_mb": 3694.88671875,
+          "private_mb": 6229.00390625,
+          "method": "psutil"
+        },
+        "after_batch": {
+          "rss_mb": 3672.60546875,
+          "peak_wset_mb": 4910.30859375,
+          "private_mb": 6228.66796875,
+          "method": "psutil"
+        }
+      }
+    },
+    {
+      "role": "gemma_fp32",
+      "info": {
+        "model": "google/embeddinggemma-2",
+        "runtime": "sentence-transformers 6.1.0 / transformers 5.19.0 / torch 2.14.1+cpu (CPU, 12 threads)",
+        "dtype": "torch.float32",
+        "prompt_query": "task: search result | query: ",
+        "prompt_document": "title: none | text: ",
+        "prompt_sts": "task: sentence similarity | query: ",
+        "batch_size": 32,
+        "dim": 768,
+        "n_params_loaded_now": 744371488,
+        "param_breakdown_at_load": {
+          "vision_tower": 167364608,
+          "language_model": 271002624,
+          "audio_tower": 304824608,
+          "embed_vision": 393216,
+          "embed_audio": 786432
+        },
+        "text_only_hack": false
+      },
+      "import_s": 13.864345800015144,
+      "load_s": 5.863810700015165,
+      "query_count": 30,
+      "query_len_chars": [
+        21,
+        28
+      ],
+      "query_warmup": 3,
+      "first_query_ms": 164.07669999171048,
+      "query_ms_all": [
+        164.07669999171048,
+        130.78060001134872,
+        134.41130006685853,
+        135.38249989505857,
+        130.74429996777326,
+        142.17979996465147,
+        132.95690005179495,
+        130.38139999844134,
+        131.97400001809,
+        130.75730006676167,
+        136.98270008899271,
+        120.67030009347945,
+        125.3042999887839,
+        125.92160003259778,
+        125.71809999644756,
+        132.03360000625253,
+        136.26799988560379,
+        144.88150004763156,
+        127.38540000282228,
+        126.89339998178184,
+        126.21320004109293,
+        122.48470005579293,
+        128.29009990673512,
+        125.0418999698013,
+        126.52739998884499,
+        125.6006999174133,
+        120.7490999950096,
+        117.77929996605963,
+        121.05889990925789,
+        125.55400002747774
+      ],
+      "query_median_ms": 126.89339998178184,
+      "query_p95_ms": 140.62067000195384,
+      "query_mean_ms": 128.73090369868333,
+      "query_min_ms": 117.77929996605963,
+      "query_max_ms": 144.88150004763156,
+      "batch_count": 200,
+      "batch_len_chars": [
+        159,
+        400
+      ],
+      "batch_mean_chars": 287.28,
+      "batch_s": 39.14568999991752,
+      "batch_texts_per_s": 5.109119292581671,
+      "emb_dim": 768,
+      "memory": {
+        "start": {
+          "rss_mb": 22.11328125,
+          "peak_wset_mb": 22.11328125,
+          "private_mb": 11.94140625,
+          "method": "psutil"
+        },
+        "after_import": {
+          "rss_mb": 424.04296875,
+          "peak_wset_mb": 424.04296875,
+          "private_mb": 1858.41796875,
+          "method": "psutil"
+        },
+        "after_load": {
+          "rss_mb": 3532.890625,
+          "peak_wset_mb": 3694.234375,
+          "private_mb": 6193.4765625,
+          "method": "psutil"
+        },
+        "after_queries": {
+          "rss_mb": 3581.53125,
+          "peak_wset_mb": 3694.234375,
+          "private_mb": 6235.015625,
+          "method": "psutil"
+        },
+        "after_batch": {
+          "rss_mb": 3695.39453125,
+          "peak_wset_mb": 4936.72265625,
+          "private_mb": 6246.4765625,
+          "method": "psutil"
+        }
+      }
+    }
+  ],
+  "gemma_textonly": [
+    {
+      "role": "gemma_textonly",
+      "info": {
+        "model": "google/embeddinggemma-2",
+        "runtime": "sentence-transformers 6.1.0 / transformers 5.19.0 / torch 2.14.1+cpu (CPU, 12 threads)",
+        "dtype": "torch.bfloat16",
+        "prompt_query": "task: search result | query: ",
+        "prompt_document": "title: none | text: ",
+        "prompt_sts": "task: sentence similarity | query: ",
+        "batch_size": 32,
+        "dim": 768,
+        "n_params_loaded_now": 271002624,
+        "param_breakdown_at_load": {
+          "vision_tower": 167364608,
+          "language_model": 271002624,
+          "audio_tower": 304824608,
+          "embed_vision": 393216,
+          "embed_audio": 786432
+        },
+        "text_only_hack": true
+      },
+      "import_s": 12.789197799982503,
+      "load_s": 5.272834699950181,
+      "query_count": 30,
+      "query_len_chars": [
+        21,
+        28
+      ],
+      "query_warmup": 3,
+      "first_query_ms": 126.65959994774312,
+      "query_ms_all": [
+        126.65959994774312,
+        89.74149997811764,
+        91.16949990857393,
+        86.576999980025,
+        79.70560004469007,
+        80.29400010127574,
+        75.38410008419305,
+        73.65899998694658,
+        88.22080004028976,
+        87.56970008835196,
+        95.30250006355345,
+        96.55310004018247,
+        96.62059997208416,
+        90.92289989348501,
+        78.330900054425,
+        79.0248999837786,
+        76.08370005618781,
+        77.4793999735266,
+        94.89599999506027,
+        91.99340001214296,
+        97.86109998822212,
+        98.36730000097305,
+        89.47710006032139,
+        82.91809994261712,
+        93.39799999725074,
+        101.24519991222769,
+        101.93759994581342,
+        87.92339998763055,
+        97.13519993238151,
+        86.13029995467514
+      ],
+      "query_median_ms": 88.22080004028976,
+      "query_p95_ms": 100.3818299388513,
+      "query_mean_ms": 88.33373704045597,
+      "query_min_ms": 73.65899998694658,
+      "query_max_ms": 101.93759994581342,
+      "batch_count": 200,
+      "batch_len_chars": [
+        159,
+        400
+      ],
+      "batch_mean_chars": 287.28,
+      "batch_s": 21.78506409993861,
+      "batch_texts_per_s": 9.180601860178305,
+      "emb_dim": 768,
+      "memory": {
+        "start": {
+          "rss_mb": 22.07421875,
+          "peak_wset_mb": 22.07421875,
+          "private_mb": 11.890625,
+          "method": "psutil"
+        },
+        "after_import": {
+          "rss_mb": 423.63671875,
+          "peak_wset_mb": 423.63671875,
+          "private_mb": 1858.1953125,
+          "method": "psutil"
+        },
+        "after_load": {
+          "rss_mb": 1201.27734375,
+          "peak_wset_mb": 2276.265625,
+          "private_mb": 2668.640625,
+          "method": "psutil"
+        },
+        "after_queries": {
+          "rss_mb": 1235.33203125,
+          "peak_wset_mb": 2276.265625,
+          "private_mb": 2715.12890625,
+          "method": "psutil"
+        },
+        "after_batch": {
+          "rss_mb": 1353.37890625,
+          "peak_wset_mb": 2335.6875,
+          "private_mb": 2870.515625,
+          "method": "psutil"
+        }
+      }
+    },
+    {
+      "role": "gemma_textonly",
+      "info": {
+        "model": "google/embeddinggemma-2",
+        "runtime": "sentence-transformers 6.1.0 / transformers 5.19.0 / torch 2.14.1+cpu (CPU, 12 threads)",
+        "dtype": "torch.bfloat16",
+        "prompt_query": "task: search result | query: ",
+        "prompt_document": "title: none | text: ",
+        "prompt_sts": "task: sentence similarity | query: ",
+        "batch_size": 32,
+        "dim": 768,
+        "n_params_loaded_now": 271002624,
+        "param_breakdown_at_load": {
+          "vision_tower": 167364608,
+          "language_model": 271002624,
+          "audio_tower": 304824608,
+          "embed_vision": 393216,
+          "embed_audio": 786432
+        },
+        "text_only_hack": true
+      },
+      "import_s": 14.515021599945612,
+      "load_s": 4.6561660000588745,
+      "query_count": 30,
+      "query_len_chars": [
+        21,
+        28
+      ],
+      "query_warmup": 3,
+      "first_query_ms": 159.6772000193596,
+      "query_ms_all": [
+        159.6772000193596,
+        103.93400001339614,
+        101.76730004604906,
+        94.52300006523728,
+        87.16890006326139,
+        88.72609992977232,
+        88.70319998823106,
+        82.05399999860674,
+        85.71300003677607,
+        81.04979991912842,
+        82.57049997337162,
+        77.89439999032766,
+        88.58290000353009,
+        91.67280001565814,
+        78.73900001868606,
+        95.80260002985597,
+        100.64910002984107,
+        78.4296999918297,
+        88.03429990075529,
+        80.27719997335225,
+        85.45809995848686,
+        84.5487000187859,
+        86.20229992084205,
+        82.31149998027831,
+        82.94650004245341,
+        83.41600000858307,
+        86.32000000216067,
+        87.25199999753386,
+        78.20480002555996,
+        78.93929991405457
+      ],
+      "query_median_ms": 85.45809995848686,
+      "query_p95_ms": 95.41872004047036,
+      "query_mean_ms": 85.41443332581332,
+      "query_min_ms": 77.89439999032766,
+      "query_max_ms": 100.64910002984107,
+      "batch_count": 200,
+      "batch_len_chars": [
+        159,
+        400
+      ],
+      "batch_mean_chars": 287.28,
+      "batch_s": 22.04868849995546,
+      "batch_texts_per_s": 9.07083430383644,
+      "emb_dim": 768,
+      "memory": {
+        "start": {
+          "rss_mb": 22.078125,
+          "peak_wset_mb": 22.078125,
+          "private_mb": 11.91796875,
+          "method": "psutil"
+        },
+        "after_import": {
+          "rss_mb": 422.859375,
+          "peak_wset_mb": 422.859375,
+          "private_mb": 1857.62109375,
+          "method": "psutil"
+        },
+        "after_load": {
+          "rss_mb": 1201.14453125,
+          "peak_wset_mb": 2276.37109375,
+          "private_mb": 2666.9609375,
+          "method": "psutil"
+        },
+        "after_queries": {
+          "rss_mb": 1235.33203125,
+          "peak_wset_mb": 2276.37109375,
+          "private_mb": 2719.84765625,
+          "method": "psutil"
+        },
+        "after_batch": {
+          "rss_mb": 1346.56640625,
+          "peak_wset_mb": 2327.94921875,
+          "private_mb": 2841.96875,
+          "method": "psutil"
+        }
+      }
+    },
+    {
+      "role": "gemma_textonly",
+      "info": {
+        "model": "google/embeddinggemma-2",
+        "runtime": "sentence-transformers 6.1.0 / transformers 5.19.0 / torch 2.14.1+cpu (CPU, 12 threads)",
+        "dtype": "torch.bfloat16",
+        "prompt_query": "task: search result | query: ",
+        "prompt_document": "title: none | text: ",
+        "prompt_sts": "task: sentence similarity | query: ",
+        "batch_size": 32,
+        "dim": 768,
+        "n_params_loaded_now": 271002624,
+        "param_breakdown_at_load": {
+          "vision_tower": 167364608,
+          "language_model": 271002624,
+          "audio_tower": 304824608,
+          "embed_vision": 393216,
+          "embed_audio": 786432
+        },
+        "text_only_hack": true
+      },
+      "import_s": 13.463009299943224,
+      "load_s": 5.164984100032598,
+      "query_count": 30,
+      "query_len_chars": [
+        21,
+        28
+      ],
+      "query_warmup": 3,
+      "first_query_ms": 114.31350000202656,
+      "query_ms_all": [
+        114.31350000202656,
+        95.53120005875826,
+        98.02879998460412,
+        94.29440007079393,
+        94.51109997462481,
+        84.96859995648265,
+        98.0557999573648,
+        90.04699997603893,
+        90.77229991089553,
+        82.30919996276498,
+        80.31930006109178,
+        82.60690001770854,
+        84.05609999317676,
+        99.09269993659109,
+        90.4374000383541,
+        91.67730004992336,
+        92.27189992088825,
+        82.7491000527516,
+        80.62350004911423,
+        81.24420000240207,
+        95.54120001848787,
+        90.21029993891716,
+        91.35370003059506,
+        102.0326999714598,
+        95.69070010911673,
+        103.96490001585335,
+        102.17620001640171,
+        105.69590004161,
+        99.27590005099773,
+        86.34449995588511
+      ],
+      "query_median_ms": 91.35370003059506,
+      "query_p95_ms": 103.42829001601785,
+      "query_mean_ms": 91.56751111408488,
+      "query_min_ms": 80.31930006109178,
+      "query_max_ms": 105.69590004161,
+      "batch_count": 200,
+      "batch_len_chars": [
+        159,
+        400
+      ],
+      "batch_mean_chars": 287.28,
+      "batch_s": 21.984976399922743,
+      "batch_texts_per_s": 9.097121432466164,
+      "emb_dim": 768,
+      "memory": {
+        "start": {
+          "rss_mb": 21.6953125,
+          "peak_wset_mb": 21.6953125,
+          "private_mb": 11.42578125,
+          "method": "psutil"
+        },
+        "after_import": {
+          "rss_mb": 424.21875,
+          "peak_wset_mb": 424.21875,
+          "private_mb": 1859.0703125,
+          "method": "psutil"
+        },
+        "after_load": {
+          "rss_mb": 1201.6015625,
+          "peak_wset_mb": 2277.015625,
+          "private_mb": 2670.3203125,
+          "method": "psutil"
+        },
+        "after_queries": {
+          "rss_mb": 1235.5703125,
+          "peak_wset_mb": 2277.015625,
+          "private_mb": 2720.21875,
+          "method": "psutil"
+        },
+        "after_batch": {
+          "rss_mb": 1351.1328125,
+          "peak_wset_mb": 2335.51171875,
+          "private_mb": 2873.8203125,
+          "method": "psutil"
+        }
+      }
+    }
+  ]
+}
