@@ -429,6 +429,11 @@ class SAIVerseManager(
         # global manager.state (cache_enabled / cache_ttl) を既定として使う。
         # docs/intent/cache_lifecycle_control.md §5.4 (global TTL の per-persona 付け替え)。
         self._persona_cache_overrides: Dict[str, Dict[str, Any]] = {}
+        # 均等モードのライフが設定した 1h override の持ち主 (persona_id ->
+        # (営業日, ライフの番号))。ライフ終了の遅延解除は持ち主が自分のライフの
+        # ときだけ外す — 読み書きは day_plan._LIFE_TTL_LOCK の下 (day_plan.
+        # _life_ttl_owners)。override と同じく in-memory。
+        self._life_ttl_owners: Dict[str, Tuple[str, int]] = {}
         gateway_enabled = os.getenv("SAIVERSE_GATEWAY_ENABLED", "0").lower() in {
             "1",
             "true",
@@ -644,7 +649,8 @@ class SAIVerseManager(
         外すために使う (即時に外すと anchor の生存評価が実キャッシュの寿命と
         ズレる)。ユーザーが人設定タブから明示設定した override も同じ辞書に
         入るため、呼び出し側は「自分が設定したものかどうか」を確認してから
-        呼ぶこと (day_plan._clear_life_ttl_override の厳密一致チェック)。
+        呼ぶこと (day_plan._clear_life_ttl_override の持ち主の照合と厳密一致
+        チェック)。
         """
         if not persona_id:
             return

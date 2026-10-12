@@ -2100,6 +2100,56 @@ class SessionLifecycle:
             persona_id, model_key, wait_seconds, ttl_seconds, threshold_ratio,
         )
 
+    def tick_warms_before_cache_expires(
+        self, persona_id: str, model_key: str,
+    ) -> Optional[Tuple[datetime, datetime]]:
+        """最新の anchor とティックの予約を読み直し、ティックが失効より前に来るか。
+
+        発火した keep-alive が送信の直前に呼ぶ (:meth:`SEARuntime._run_cache_keepalive_once`)。
+        予約を張る側 (:meth:`schedule_cache_ttl_pulse` / :meth:`reconcile_keepalive_after_tick`)
+        の判断は、判断の後に別の標準呼び出しが anchor を更新してティックを押し直すと
+        古くなる — 古い判断で張られた予約が「ティックが温めるのに保温も走る」余分な
+        一回を生む (2026-10-12 Codex 敵対レビュー 段 3 5 巡目 medium)。張る側を
+        精密化する代わりに、発火した保温が最新の状態で再検査して閉じる。
+
+        ティックが温めるのは標準モデルの Session (``persona.model``) だけなので、
+        それ以外の model では常に None。anchor が読めない・失効済み・ティックの予約が
+        無い・ティックが失効より後・読み取り失敗のときも None (= 従来どおり送る)。
+        失効時刻は :meth:`reconcile_keepalive_after_tick` と同じ読み方 (壁時計で
+        残り寿命を測って ``clock.now()`` の時刻へ写す)。
+
+        Returns:
+            ティックが先に温めるなら ``(tick_at, expires_at)``、それ以外は None。
+        """
+        try:
+            manager = self.manager
+            persona = (getattr(manager, "personas", None) or {}).get(persona_id) if manager else None
+            if persona is None:
+                return None
+            if str(model_key) != str(getattr(persona, "model", "") or ""):
+                return None
+            entry = self.load_anchor_entry(persona_id, model_key)
+            if not entry or not entry.get("updated_at"):
+                return None
+            updated_at = datetime.fromisoformat(entry["updated_at"])
+            ttl_seconds = self.anchor_entry_ttl_seconds(entry, model_key, persona_id)
+            remaining = (updated_at + timedelta(seconds=ttl_seconds)) - datetime.now()
+            if remaining.total_seconds() <= 0:
+                return None
+            from saiverse import clock
+
+            expires_at = clock.now() + remaining
+            tick_at = _tick_fire_at(manager, persona_id)
+            if tick_at is not None and tick_at < expires_at:
+                return tick_at, expires_at
+        except Exception:
+            LOGGER.warning(
+                "[keepalive] failed to re-check the tick against the cache expiry "
+                "(persona=%s model=%s); sending as before",
+                persona_id, model_key, exc_info=True,
+            )
+        return None
+
     def reconcile_keepalive_after_tick(self, persona_id: str) -> bool:
         """ティックが温めずに終わった回の後、標準モデルの keep-alive を再照合する。
 

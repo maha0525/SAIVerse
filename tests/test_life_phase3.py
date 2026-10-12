@@ -168,6 +168,21 @@ def _life_end(manager, life, *, index=0, plan_date=PLAN_DATE):
     ) is True
 
 
+def _take_handed_off_ttl_clear(manager):
+    """遅延解除の予約を、EventScheduler が手渡す時と同じく辞書から外して返す。
+
+    手渡し済みの callback には次のライフの開始の cancel が届かない (2026-10-12
+    Codex 敵対レビュー 段 3 5 巡目 medium の再現の前提)。
+    """
+    entry = manager.event_scheduler._entries_by_key.pop(TTL_CLEAR_KEY)
+    return entry.callback
+
+
+def _fire_ttl_clear(manager):
+    """予約された遅延解除 (終了したライフの印を焼き込んだ callback) を発火する。"""
+    _take_handed_off_ttl_clear(manager)()
+
+
 def _save_life(manager, *, start="09:00", end="11:00", mode="free"):
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
         {"start": start, "end": end, "mode": mode},
@@ -317,7 +332,7 @@ def test_even_mode_life_end_schedules_delayed_clear_not_immediate(manager):
     assert manager.event_scheduler.has_key(TTL_CLEAR_KEY)
 
     # 発火体: 厳密一致するので clear される
-    day_plan._clear_life_ttl_override(manager, PERSONA_ID)
+    _fire_ttl_clear(manager)
     assert manager.get_persona_cache_override(PERSONA_ID) is None
 
 
@@ -331,7 +346,7 @@ def test_life_ttl_clear_fire_respects_user_change(manager):
 
     # 発火前にユーザーが人設定タブで明示変更
     manager.set_persona_cache_override(PERSONA_ID, enabled=True, ttl="5m")
-    day_plan._clear_life_ttl_override(manager, PERSONA_ID)
+    _fire_ttl_clear(manager)
     assert manager.get_persona_cache_override(PERSONA_ID) == {"enabled": True, "ttl": "5m"}
 
 
@@ -369,6 +384,42 @@ def test_next_life_start_cancels_pending_ttl_clear(manager):
     assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
 
 
+def test_a_handed_off_ttl_clear_of_the_previous_life_does_not_clear_the_next_life(manager):
+    """段 3 5 巡目 medium の再現順序: 前のライフの遅延解除がワーカーへ手渡された
+    (辞書から外れて次のライフの開始の cancel が届かない) まま保留 → 次のライフの
+    開始の TTL 同期 (既存の 1h を見て成功) → 古い解除が再開。古い解除は値の一致
+    だけで外していたので新しいライフの 1h を消していた — 解除に焼き込んだ
+    終了したライフの印と、override の持ち主 (次のライフの開始が付け替えた) が
+    一致しないので何もしない。次のライフの終了の解除は普通に外す。"""
+    next_date = "2026-07-05"
+    clock.enable_virtual(BASE + timedelta(hours=9))
+    lives = _save_life(manager, start="09:00", end="09:40", mode="even")
+    _life_start(manager, lives[0])
+    clock.advance_to(BASE + timedelta(hours=9, minutes=40))
+    _life_end(manager, lives[0])
+
+    # 旧解除を手渡し済みにして保留する
+    stale_clear = _take_handed_off_ttl_clear(manager)
+
+    day_plan.save_lives(manager, PERSONA_ID, next_date, [
+        {"start": "10:00", "end": "10:40", "mode": "even"},
+    ])
+    next_lives = day_plan.get_lives(manager, PERSONA_ID, next_date)
+    clock.advance_to(BASE + timedelta(days=1, hours=10))
+    _life_start(manager, next_lives[0], plan_date=next_date)
+    assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
+
+    # 旧解除が再開しても、新しいライフの 1h は消えない
+    stale_clear()
+    assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
+
+    # 次のライフの終了の解除は、持ち主が自分なので外す
+    clock.advance_to(BASE + timedelta(days=1, hours=10, minutes=40))
+    _life_end(manager, next_lives[0], plan_date=next_date)
+    _fire_ttl_clear(manager)
+    assert manager.get_persona_cache_override(PERSONA_ID) is None
+
+
 def test_free_mode_life_does_not_touch_cache_ttl(manager):
     clock.enable_virtual(BASE + timedelta(hours=9))
     lives = _save_life(manager, start="09:00", end="11:00", mode="free")
@@ -392,7 +443,7 @@ def test_even_mode_life_respects_existing_explicit_override(manager):
 
     clock.advance_to(BASE + timedelta(hours=9, minutes=40))
     _life_end(manager, lives[0])
-    day_plan._clear_life_ttl_override(manager, PERSONA_ID)
+    _fire_ttl_clear(manager)
     # ライフが設定した値 (1h) と一致しないので clear されず、明示設定のまま残る
     assert manager.get_persona_cache_override(PERSONA_ID) == {"enabled": True, "ttl": "5m"}
 

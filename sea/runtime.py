@@ -2370,6 +2370,23 @@ class SEARuntime:
                     persona_id, model_key,
                 )
                 return False
+            # 同じく送信の直前に、最新の anchor の失効とティックの予約を読み直す
+            # (2026-10-12 Codex 敵対レビュー 段 3 5 巡目 medium): この予約を張った
+            # 判断の後に別の標準呼び出しが anchor を更新してティックを押し直して
+            # いたら、ティックが失効より前に温める — 送らない (touch もしないので
+            # 連鎖はここで止まり、ティックの標準呼び出しの touch が次を判定し直す)。
+            tick_first = self.session_lifecycle.tick_warms_before_cache_expires(
+                persona_id, model_key,
+            )
+            if tick_first is not None:
+                tick_at, expires_at = tick_first
+                LOGGER.info(
+                    "[keepalive] skipped before sending: the tick at %s warms the "
+                    "cache before it expires at %s (persona=%s model=%s)",
+                    tick_at.isoformat(timespec="seconds"),
+                    expires_at.isoformat(timespec="seconds"), persona_id, model_key,
+                )
+                return False
             llm_client.generate(
                 messages,
                 tools=[],

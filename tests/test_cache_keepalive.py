@@ -806,3 +806,98 @@ def test_a_keepalive_does_not_start_while_the_same_session_is_being_warmed(_mock
     # 走り終えたらガードは外れている
     assert runtime.run_cache_keepalive("air") is True
     assert len(client.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 5 巡目 medium: 古い判断で張られた保温は、
+# 発火した側が送信の直前に最新の anchor とティックで再検査して止める
+# ---------------------------------------------------------------------------
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_a_keepalive_armed_on_a_stale_decision_does_not_send_when_the_tick_warms_first(
+    _mock_cache,
+):
+    """レビューの再現順序: TTL 60 分・古い anchor の経過 50 分・次のティック 30 分後。
+    再照合が古い anchor を読んだ (ティックは失効の後ろ → 保温が要る) 直後に、
+    並行する標準呼び出しが anchor を更新し、その touch は保温を張らなかった
+    (ティックが失効より前)。再照合は古い判断で即時の保温を新設する — その保温が
+    発火しても、送信の直前に最新の anchor とティックを読み直して LLM を呼ばない。"""
+    from saiverse import clock
+    from saiverse.event_scheduler import EventScheduler
+
+    persona = _persona()
+    scheduler = EventScheduler()  # start しない
+    runtime, manager = _make_runtime(persona, scheduler=scheduler)
+    anchors = {"claude-x": _live_anchor_entry(ttl_seconds=3600, age_seconds=3000)}
+    client = FakeLLMClient()
+    touched = _wire_keepalive(runtime, persona, client, anchors=anchors)
+    now = datetime(2020, 1, 1, 12, 0, 0)
+
+    def _fresh_standard_call_touches_the_anchor():
+        # 新しい touch: anchor の寿命が延び、ティック (30 分後) が失効 (60 分後)
+        # より前になったので保温は張らない (予約なし)。
+        anchors["claude-x"] = dict(
+            anchors["claude-x"], updated_at=datetime.now().isoformat(),
+        )
+
+    clock.enable_virtual(now)
+    try:
+        manager._autonomy_managers = {"air": _RaceTickAutonomy(
+            now + timedelta(minutes=30), _fresh_standard_call_touches_the_anchor,
+        )}
+        # 古い判断 (経過 50 分の anchor → 失効は 10 分後、ティックは 30 分後) で
+        # 即時の保温が新設される — 張る側の判断はここでは精密化しない。
+        assert runtime.session_lifecycle.reconcile_keepalive_after_tick("air") is True
+        assert scheduler.fire_time_of("ttl:air:claude-x") is not None
+
+        # 発火: 最新の anchor (失効 60 分後) とティック (30 分後) を読み直して送らない
+        assert runtime.run_cache_keepalive("air", "claude-x") is False
+        assert client.calls == []
+        assert touched == []
+    finally:
+        clock.disable_virtual()
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_a_keepalive_still_sends_when_no_tick_or_the_tick_is_after_the_expiry(_mock_cache):
+    """送信直前の再検査が止めるのは「ティックが失効より前」の回だけ — ティックの
+    予約が無い回・ティックが失効より後の回・anchor が読み直せない回は従来どおり送る。"""
+    from saiverse import clock
+
+    persona = _persona()
+    runtime, manager = _make_runtime(persona)
+    anchors = {"claude-x": _live_anchor_entry(ttl_seconds=1200, age_seconds=60)}
+    client = FakeLLMClient()
+    touched = _wire_keepalive(runtime, persona, client, anchors=anchors)
+    now = datetime(2020, 1, 1, 12, 0, 0)
+    am = FakeTickAutonomy()
+    manager._autonomy_managers = {"air": am}
+    clock.enable_virtual(now)
+    try:
+        am.tick_at = None  # ティックの予約が無い (ライフ外)
+        assert runtime.run_cache_keepalive("air", "claude-x") is True
+        am.tick_at = now + timedelta(minutes=30)  # 失効 (19 分後) より後
+        assert runtime.run_cache_keepalive("air", "claude-x") is True
+        assert len(client.calls) == 2
+
+        am.tick_at = now + timedelta(minutes=10)  # 失効より前 → 送らない
+        assert runtime.run_cache_keepalive("air", "claude-x") is False
+        assert len(client.calls) == 2
+
+        # 送信直前の読み直しが失敗した回は従来どおり送る (生存確認は冒頭で済んでいる)
+        reads = {"n": 0}
+        original_load = runtime.session_lifecycle.load_anchor_entry
+
+        def _load_then_fail(pid, mk):
+            reads["n"] += 1
+            if reads["n"] > 1:
+                raise RuntimeError("db down")
+            return original_load(pid, mk)
+
+        runtime.session_lifecycle.load_anchor_entry = _load_then_fail
+        assert runtime.run_cache_keepalive("air", "claude-x") is True
+        assert len(client.calls) == 3
+        assert len(touched) == 3
+    finally:
+        clock.disable_virtual()

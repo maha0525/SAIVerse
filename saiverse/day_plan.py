@@ -32,6 +32,7 @@ import json
 import logging
 import math
 import re
+import threading
 from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
@@ -1358,7 +1359,9 @@ def apply_life_boundary(
         # (2026-10-12 ローカルレビュー採用)。各ステップは冪等なので、節目の
         # 再試行で成功済みの分が二重に効くことはない。
         if boundary == "start":
-            ttl_ok = _sync_cache_ttl_for_life_start(manager, persona_id, life)
+            ttl_ok = _sync_cache_ttl_for_life_start(
+                manager, persona_id, life, life_key=(plan_date_str, index),
+            )
             tick_ok = _arm_tick_reservation(manager, persona_id, life)
             steps_ok = ttl_ok and tick_ok
             if steps_ok:
@@ -1368,7 +1371,9 @@ def apply_life_boundary(
         else:
             keepalive_ok = _cancel_keepalive_reservation(manager, persona_id)
             tick_ok = _cancel_tick_reservation(manager, persona_id)
-            ttl_ok = _sync_cache_ttl_for_life_end(manager, persona_id, life)
+            ttl_ok = _sync_cache_ttl_for_life_end(
+                manager, persona_id, life, life_key=(plan_date_str, index),
+            )
             steps_ok = keepalive_ok and tick_ok and ttl_ok
         if not steps_ok:
             try:
@@ -1776,6 +1781,30 @@ def _life_ttl_clear_key(persona_id: str) -> str:
     return f"life_ttl_clear:{persona_id}"
 
 
+#: ライフの印 — (営業日の文字列, その日のライフの番号)。TTL override の持ち主を
+#: 表す (:func:`_life_ttl_owners`)。
+LifeKey = Tuple[str, int]
+
+#: TTL override の持ち主の判定と、override の設定・解除を一つの区間にまとめる
+#: ロック。区間は辞書の読み書きだけで、scheduler の呼び出しは外で行う
+#: (EventScheduler のロックとの入れ子を作らない)。
+_LIFE_TTL_LOCK = threading.Lock()
+
+
+def _life_ttl_owners(manager: Any) -> Dict[str, LifeKey]:
+    """ペルソナごとの「いまの 1h override をどのライフの開始が持っているか」。
+
+    呼び手は :data:`_LIFE_TTL_LOCK` を持っていること。持ち主の記録は override
+    と同じく manager の in-memory (SAIVerseManager が ``_life_ttl_owners`` を
+    初期化する)。持たない manager (テストの部分構築) にはここで生やす。
+    """
+    owners = getattr(manager, "_life_ttl_owners", None)
+    if not isinstance(owners, dict):
+        owners = {}
+        setattr(manager, "_life_ttl_owners", owners)
+    return owners
+
+
 def _resolve_ttl_clear_delay_seconds(manager: Any, persona_id: str) -> int:
     """TTL override 遅延解除の待ち秒数 (= anchor validity 秒) を解決する。
 
@@ -1804,24 +1833,50 @@ def _resolve_ttl_clear_delay_seconds(manager: Any, persona_id: str) -> int:
         return default
 
 
-def _clear_life_ttl_override(manager: Any, persona_id: str) -> None:
-    """遅延解除の発火体: ライフが設定した TTL override を厳密一致チェック付きで外す。
+def _clear_life_ttl_override(manager: Any, persona_id: str, life_key: LifeKey) -> None:
+    """遅延解除の発火体: ライフが設定した TTL override を世代と値の照合付きで外す。
 
-    現在の override が「ライフが設定した値」({"enabled": True, "ttl": "1h"}) と
-    厳密一致するときだけ clear する — 予約〜発火の間にユーザーが人設定タブで
-    別の値へ明示的に変更していた場合はそれを尊重して触らない。
+    外すのは二つが揃ったときだけ (判定と解除は :data:`_LIFE_TTL_LOCK` の同じ区間):
+
+    - **世代**: override の持ち主 (:func:`_life_ttl_owners`) が、この解除を予約
+      した終了のライフ ``life_key`` のまま。次のライフの開始が持ち主を自分に
+      付け替えていたら、古い解除は何もしない — EventScheduler は手渡しの時点で
+      予約を辞書から外すので、次のライフの開始の cancel は手渡し済みの古い解除
+      に届かず、値の一致だけで外すと新しいライフの 1h を消していた
+      (2026-10-12 Codex 敵対レビュー 段 3 5 巡目 medium)。
+    - **値**: 現在の override が「ライフが設定した値」({"enabled": True,
+      "ttl": "1h"}) と厳密一致 — 予約〜発火の間にユーザーが人設定タブで別の値へ
+      明示的に変更していた場合はそれを尊重して触らない。
+
+    持ち主が一致した回は、外した・外さなかったに関わらず持ち主の記録を消す
+    (そのライフの持ち分はこの解除で終わる)。
     """
     get_override = getattr(manager, "get_persona_cache_override", None)
     clear_override = getattr(manager, "clear_persona_cache_override", None)
     if get_override is None or clear_override is None:
         return
     try:
-        current = get_override(persona_id)
-        if current == {"enabled": True, "ttl": _EVEN_MODE_CACHE_TTL}:
-            clear_override(persona_id)
+        with _LIFE_TTL_LOCK:
+            owners = _life_ttl_owners(manager)
+            owner = owners.get(persona_id)
+            if owner != life_key:
+                LOGGER.info(
+                    "[day_plan] life TTL clear fired for a past life; the override "
+                    "now belongs to another life — leaving as-is (persona=%s "
+                    "clear_for=%s owner=%s)", persona_id, life_key, owner,
+                )
+                return
+            owners.pop(persona_id, None)
+            current = get_override(persona_id)
+            if current == {"enabled": True, "ttl": _EVEN_MODE_CACHE_TTL}:
+                clear_override(persona_id)
+                cleared = True
+            else:
+                cleared = False
+        if cleared:
             LOGGER.info(
-                "[day_plan] life TTL override cleared (delayed, persona=%s)",
-                persona_id,
+                "[day_plan] life TTL override cleared (delayed, persona=%s life=%s)",
+                persona_id, life_key,
             )
         else:
             LOGGER.debug(
@@ -1836,12 +1891,19 @@ def _clear_life_ttl_override(manager: Any, persona_id: str) -> None:
         )
 
 
-def _sync_cache_ttl_for_life_start(manager: Any, persona_id: str, life: Dict[str, Any]) -> bool:
+def _sync_cache_ttl_for_life_start(
+    manager: Any, persona_id: str, life: Dict[str, Any], *, life_key: LifeKey,
+) -> bool:
     """life.md §5.1: 均等モードのライフ中は persona の explicit cache TTL を
     1h override する。
 
-    前のライフの遅延解除予約 (:func:`_sync_cache_ttl_for_life_end`) が残って
-    いれば先に cancel する — TTL 経過前に次のライフが始まったケースで、
+    最初に override の持ち主 (:func:`_life_ttl_owners`) をこのライフ
+    ``life_key`` へ付け替える — 前のライフの遅延解除は持ち主の照合で外すので、
+    EventScheduler が既にワーカーへ手渡した (下の cancel が届かない) 古い解除も
+    これで無効になる (2026-10-12 Codex 敵対レビュー 段 3 5 巡目 medium)。
+
+    続けて前のライフの遅延解除予約 (:func:`_sync_cache_ttl_for_life_end`) が
+    残っていれば cancel する — TTL 経過前に次のライフが始まったケースで、
     ライフの最中に解除が発火して override が外れる事故を防ぐ。
 
     persona に既存の cache override (人設定タブでユーザーが明示設定したもの、
@@ -1853,6 +1915,8 @@ def _sync_cache_ttl_for_life_start(manager: Any, persona_id: str, life: Dict[str
     """
     if life.get("mode") != LIFE_MODE_EVEN:
         return True
+    with _LIFE_TTL_LOCK:
+        _life_ttl_owners(manager)[persona_id] = life_key
     scheduler = getattr(manager, "event_scheduler", None)
     if scheduler is not None:
         try:
@@ -1876,14 +1940,18 @@ def _sync_cache_ttl_for_life_start(manager: Any, persona_id: str, life: Dict[str
     if get_override is None or set_override is None:
         return True
     try:
-        if get_override(persona_id) is not None:
+        # 判定と設定は解除と同じ区間で — 古い解除の判定と交差させない。
+        with _LIFE_TTL_LOCK:
+            existing = get_override(persona_id)
+            if existing is None:
+                set_override(persona_id, enabled=True, ttl=_EVEN_MODE_CACHE_TTL)
+        if existing is not None:
             LOGGER.debug(
                 "[day_plan] life start (mode=even): existing cache override "
                 "present; not forcing TTL=%s (persona=%s)",
                 _EVEN_MODE_CACHE_TTL, persona_id,
             )
             return True
-        set_override(persona_id, enabled=True, ttl=_EVEN_MODE_CACHE_TTL)
         LOGGER.info(
             "[day_plan] life start (mode=even): cache TTL set to %s (persona=%s)",
             _EVEN_MODE_CACHE_TTL, persona_id,
@@ -1897,7 +1965,9 @@ def _sync_cache_ttl_for_life_start(manager: Any, persona_id: str, life: Dict[str
         return False
 
 
-def _sync_cache_ttl_for_life_end(manager: Any, persona_id: str, life: Dict[str, Any]) -> bool:
+def _sync_cache_ttl_for_life_end(
+    manager: Any, persona_id: str, life: Dict[str, Any], *, life_key: LifeKey,
+) -> bool:
     """ライフ終端で TTL override の**遅延**解除を予約する (life.md §6.2 v0.4)。
 
     即時に clear してはいけない: anchor の生存判定
@@ -1909,7 +1979,9 @@ def _sync_cache_ttl_for_life_end(manager: Any, persona_id: str, life: Dict[str, 
     (:func:`_clear_life_ttl_override`) が厳密一致チェック付きで clear する。
 
     次のライフが TTL 経過前に始まる場合は :func:`_sync_cache_ttl_for_life_start`
-    が同 key の予約を cancel する。
+    が同 key の予約を cancel し、override の持ち主を自分へ付け替える。解除の
+    callback には終了したライフの印 ``life_key`` を焼き込む — 手渡し済みで
+    cancel が届かなかった解除も、持ち主の不一致で何もしない。
 
     Returns:
         予約に成功したか (Codex W3 第四陣 P2)。予約が不要なケース (均等モード
@@ -1925,7 +1997,7 @@ def _sync_cache_ttl_for_life_end(manager: Any, persona_id: str, life: Dict[str, 
         fire_at = clock.now() + timedelta(seconds=delay)
         scheduler.schedule(
             fire_at=fire_at,
-            callback=lambda: _clear_life_ttl_override(manager, persona_id),
+            callback=lambda: _clear_life_ttl_override(manager, persona_id, life_key),
             key=_life_ttl_clear_key(persona_id),
         )
         LOGGER.info(
