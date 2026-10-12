@@ -156,6 +156,19 @@ def _with_embedding_status(persona_id: str, status: dict) -> dict:
         embedding = dict(_import_embedding_status.get(persona_id, {}))
     return {**shown, **embedding}
 
+def _saved_summary(attempted: int, saved: int) -> Optional[str]:
+    """One line naming the messages that could not be saved (None when all were).
+
+    ``append_persona_message`` returns None when the message row did not go
+    in, so the message's text is lost from the import; the import must not
+    report success then.
+    """
+    failed = attempted - saved
+    if failed <= 0:
+        return None
+    return f"Saved {saved} of {attempted} messages; {failed} failed to save."
+
+
 def _is_placeholder_title(title: Optional[str]) -> bool:
     """取り込み元のパーサーが「題名なし」の印として入れる既定値か。
 
@@ -239,11 +252,20 @@ def _run_extension_import_task(
             embedding = not skip_embedding and bool(imported_ids)
             if embedding:
                 handed_off = _launch_import_embedding(persona_id, adapter, len(imported_ids))
+            save_failure = _saved_summary(msg_count, len(imported_ids))
+            if save_failure:
+                LOGGER.warning(
+                    "Extension import for %s: %s", persona_id, save_failure,
+                )
             with _extension_import_lock:
                 _extension_import_status[persona_id] = {
                     "running": False, "progress": msg_count, "total": total,
-                    "message": f"Imported '{conversation.title}' ({msg_count} messages).",
-                    "success": True, "title": conversation.title,
+                    "message": (
+                        f"Imported '{conversation.title}': {save_failure}"
+                        if save_failure
+                        else f"Imported '{conversation.title}' ({msg_count} messages)."
+                    ),
+                    "success": save_failure is None, "title": conversation.title,
                     "embedding": embedding,
                 }
         finally:
@@ -364,11 +386,21 @@ def _run_official_import_task(
             embedding = not skip_embedding and bool(imported_ids)
             if embedding:
                 handed_off = _launch_import_embedding(persona_id, adapter, len(imported_ids))
+            save_failure = _saved_summary(msg_count, len(imported_ids))
+            if save_failure:
+                LOGGER.warning(
+                    "Official import for %s: %s", persona_id, save_failure,
+                )
             with _official_import_lock:
                 _official_import_status[persona_id] = {
                     "running": False, "progress": imported_count, "total": total_conversations,
-                    "message": f"Imported {imported_count} conversations ({msg_count} messages).",
-                    "success": True, "conversations": imported_count, "messages": msg_count,
+                    "message": (
+                        f"Imported {imported_count} conversations: {save_failure}"
+                        if save_failure
+                        else f"Imported {imported_count} conversations ({msg_count} messages)."
+                    ),
+                    "success": save_failure is None,
+                    "conversations": imported_count, "messages": len(imported_ids),
                     "embedding": embedding,
                 }
         finally:

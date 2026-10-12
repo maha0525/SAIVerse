@@ -31,8 +31,9 @@ Rules on top of the dimension check:
   left.** :func:`begin_reembed` writes
   ``embed_metadata.embed_migration_in_progress`` (with a token naming the
   job) before anything is deleted. :func:`finish_reembed` removes it (and
-  records the model) only when a full scan finds no stale vector and no
-  message kept its old vector because it was edited during the job, and
+  records the model) only when a full scan finds no stale vector, no
+  message kept its old vector because it was edited during the job, no
+  empty vector row is left (counted inside the closing transaction), and
   only if the mark is still this job's. Otherwise the mark stays: the
   startup check warns on it, and the next re-embed sees it and rebuilds
   everything (``force``), which is how an unfinished job converges.
@@ -43,7 +44,9 @@ Rules on top of the dimension check:
   The migration only has to leave no vector of another space behind.
 - **Deferred embeddings are stale vectors.** A chat-log import stores each
   message with an empty vector row (``storage.DEFERRED_VECTOR``) and embeds
-  in the background. The empty row is caught by the same stale-vector
+  in the background; every other message write or edit whose vectors could
+  not be made leaves the same row (saiverse_memory/adapter.py,
+  ``EMBEDDING_DEFERRED``). The empty row is caught by the same stale-vector
   checks as an old model's vector, so a background job that never finishes
   is warned about at startup and finished by the banner's re-embed, with no
   bookkeeping of its own.
@@ -399,17 +402,25 @@ class ReembedOutcome:
     ``complete`` is True only when the memory.db holds no vector of another
     space and the job's mark was closed: no stale vector in any of the four
     tables (``stale_tables``), no message that kept its old vector because
-    it was edited while being embedded (``skipped``), and the in-progress
-    mark not taken over by another re-embed (``other_job``).
+    it was edited while being embedded (``skipped``), no empty vector row
+    written after the scan (``deferred``, counted inside the closing
+    transaction), and the in-progress mark not taken over by another
+    re-embed (``other_job``).
     """
 
     stale_tables: List[str] = field(default_factory=list)
     skipped: int = 0
     other_job: bool = False
+    deferred: int = 0
 
     @property
     def complete(self) -> bool:
-        return not self.stale_tables and self.skipped == 0 and not self.other_job
+        return (
+            not self.stale_tables
+            and self.skipped == 0
+            and self.deferred == 0
+            and not self.other_job
+        )
 
     def describe(self) -> str:
         """One line naming why the job is not complete ("" when it is)."""
@@ -418,6 +429,11 @@ class ReembedOutcome:
             parts.append(f"Stale vectors remain in: {', '.join(self.stale_tables)}.")
         if self.skipped:
             parts.append(f"Skipped {self.skipped} messages edited during the re-embed.")
+        if self.deferred:
+            parts.append(
+                f"{self.deferred} messages written during the re-embed still wait "
+                "for their embeddings."
+            )
         if self.other_job:
             parts.append("Another re-embed started during this one; its mark is kept.")
         return " ".join(parts)
@@ -449,8 +465,17 @@ def finish_reembed(
       :func:`reembed_messages`), is zero. After a ``force`` rebuild those old
       vectors may have the current length, so only this count tells they are
       there;
+    - no message holds an empty vector row (``storage.DEFERRED_VECTOR``),
+      counted inside the write transaction (``deferred``);
     - the in-progress mark is still the one this job wrote (``token`` from
       :func:`begin_reembed`), checked inside the write transaction.
+
+    The full scan runs outside the write transaction, so it can miss rows
+    written after it. A non-empty vector written then comes from the
+    current model at the current dimension, so missing it is harmless; the
+    only row that breaks completion is an empty one (a message stored or
+    edited without its vectors), and that is what the count inside the
+    lock is for (it uses the partial index, so it is instant).
 
     Rows without a vector (Chronicle / page / fragment rows the generators
     skipped because of an edit, rows written after the job's pass) do not
@@ -465,12 +490,17 @@ def finish_reembed(
     neither the label nor the mark is touched. Only the keys named here are
     written (the table also holds other subsystems' markers).
     """
-    from sai_memory.memory.storage import get_embed_metadata, set_embed_metadata
+    from sai_memory.memory.storage import (
+        count_deferred_message_embeddings,
+        get_embed_metadata,
+        set_embed_metadata,
+    )
 
     expected_dim = int(embedder.embedding_size)
     purge_stale_legacy_embeddings(conn, expected_dim, everything=force)
     # The scan runs before the transaction: a full scan holds no write lock.
-    # Rows written after it come from the current model and are not stale.
+    # Non-empty rows written after it come from the current model and are
+    # not stale; empty rows written after it are counted inside the lock.
     outcome = ReembedOutcome(
         stale_tables=scan_stale_vector_tables(conn, expected_dim),
         skipped=int(skipped),
@@ -478,6 +508,9 @@ def finish_reembed(
     if not outcome.complete:
         return outcome
     with immediate_transaction(conn, db_lock):
+        outcome.deferred = count_deferred_message_embeddings(conn)
+        if outcome.deferred:
+            return outcome
         mark = get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY)
         if mark is not None and _mark_token(mark) != token:
             outcome.other_job = True

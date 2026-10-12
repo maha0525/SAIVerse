@@ -12,9 +12,13 @@
   と同じトランザクションで保存する (skip は何も書かない)。空の行は「古いベクトル」
   なので、裏の埋め込みはペルソナの古いベクトルを作り直すだけで埋まり、裏が死ん
   でも起動時の検査が旗を立て、再計算が埋める。取り込み自体は前回の埋め込みを
-  待たず、待つのは裏の埋め込みのスレッドだけ。失敗は状態に残す。
+  待たず、待つのは裏の埋め込みのスレッドだけ。失敗は状態に残す。保存できなかった
+  メッセージがあれば取り込みは成功と言わない。
+- 本文があるのにベクトルを作れなかったメッセージ (embedder が無い・計算や保存の
+  失敗、追加・編集・手動追加のどれでも) は空の行を残し、起動時の検査と再計算が拾う。
 - 再計算の最終確認は全行を見る。完了 (古い行なし・編集で古いベクトルのまま
-  残ったメッセージなし・印が自分のもの) のときだけ名札と印を同じトランザクション
+  残ったメッセージなし・確定の錠の中で数えた空の行なし・印が自分のもの) の
+  ときだけ名札と印を同じトランザクション
   で確定し、未完了なら両方そのままで、次の実行が全再計算に昇格して収束する。
   ベクトルの無い Chronicle 等の行は完了を妨げない (次の Metabolism が埋める)。
 - force は 3 系統の表を全行消す (再生成されない幹ページ等の旧ベクトルも残さない)。
@@ -1983,3 +1987,290 @@ def test_adapter_flags_when_the_embedding_model_fails_to_load(tmp_path, caplog):
         assert get_embed_metadata(adapter.conn, "embed_model") == EMBED_MODEL_ID
     finally:
         adapter.close()
+
+
+
+# ---------------------------------------------------------------------------
+# 取り込みで保存できなかったメッセージは失敗として数える
+# ---------------------------------------------------------------------------
+
+def _fail_nth_empty_row(n):
+    """n 回目の空の行の INSERT だけを失敗させる (それ以外は本物に通す)。"""
+    from sai_memory.memory import storage
+
+    real = storage.write_deferred_message_embedding
+    calls = {"n": 0}
+
+    def _write(conn, message_id, *, commit=True):
+        calls["n"] += 1
+        if calls["n"] == n:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(conn, message_id, commit=commit)
+
+    return patch("saiverse_memory.adapter.write_deferred_message_embedding", _write)
+
+
+def test_extension_import_counts_a_message_that_could_not_be_saved(tmp_path):
+    _reset_import_embedding_state()
+    try:
+        with _fail_nth_empty_row(2):
+            status = _run_real_extension_import(tmp_path, skip_embedding=False)
+        assert status.success is False
+        assert "Saved 2 of 3 messages; 1 failed" in status.message
+        conn = _open(tmp_path / "memory.db")
+        try:
+            # 失敗した一件はメッセージごと入っていない (空の行と一体の書き込み)
+            assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
+        finally:
+            conn.close()
+    finally:
+        _reset_import_embedding_state()
+
+
+def _run_real_official_import(tmp_path):
+    from api.routes.people import import_chatlog
+    from saiverse_memory.adapter import SAIMemoryAdapter
+
+    record = SimpleNamespace(
+        conversation_id="c1", identifier="c1", title="(untitled)",
+        iter_memory_payloads=lambda include_roles=None: iter(
+            [dict(p, metadata={}) for p in _IMPORT_PAYLOADS]),
+    )
+    import_chatlog._chatgpt_export_cache["k"] = {
+        "export": SimpleNamespace(conversations=[record]), "tmp_path": None, "persona_id": "p",
+    }
+    settings = replace(load_settings(), memory_enabled=True)
+
+    def _adapter(pid, **kwargs):
+        return SAIMemoryAdapter(pid, persona_dir=tmp_path, settings=settings)
+
+    with patch("saiverse_memory.SAIMemoryAdapter", _adapter), \
+            patch("saiverse_memory.adapter.Embedder", FakeEmbedder):
+        import_chatlog._run_official_import_task("p", "k", ["0"], False)
+        thread = import_chatlog._import_embedding_threads.get("p")
+        if thread is not None:
+            thread.join(timeout=10)
+    return import_chatlog.get_official_import_status("p", manager=None)
+
+
+def test_official_import_counts_a_message_that_could_not_be_saved(tmp_path):
+    _reset_import_embedding_state()
+    try:
+        with _fail_nth_empty_row(3):
+            status = _run_real_official_import(tmp_path)
+        assert status.success is False
+        assert "Saved 2 of 3 messages; 1 failed" in status.message
+        assert status.messages == 2
+    finally:
+        _reset_import_embedding_state()
+
+
+def test_official_import_with_every_message_saved_succeeds(tmp_path):
+    _reset_import_embedding_state()
+    try:
+        status = _run_real_official_import(tmp_path)
+        assert status.success is True and status.messages == 3
+        assert _deferred_count(tmp_path / "memory.db") == 0  # 裏の埋め込みが埋めた
+    finally:
+        _reset_import_embedding_state()
+
+
+# ---------------------------------------------------------------------------
+# 本文があるのにベクトルを作れなかったら、どの経路でも空の行を残す
+# ---------------------------------------------------------------------------
+
+def _assert_flagged_then_filled(tmp_path, mid):
+    """空の行で起動時の検査が旗を立て、背景の埋め込みが埋めると旗が下りる。"""
+    from sai_memory.memory.storage import DEFERRED_VECTOR
+
+    adapter = _real_adapter(tmp_path)
+    try:
+        assert _vector_rows(adapter.conn, mid) == [DEFERRED_VECTOR]
+        assert adapter.embed_model_changed is True
+        result = adapter.reembed_stale_messages()
+        assert result["embedded"] == 1
+        assert [len(json.loads(v)) for v in _vector_rows(adapter.conn, mid)] == [EMBED_DIM]
+    finally:
+        adapter.close()
+    assert _flag_on_open(tmp_path) is False
+
+
+def test_append_without_embedder_writes_an_empty_row(tmp_path):
+    from sai_memory.memory.storage import DEFERRED_VECTOR
+
+    adapter = _real_adapter(tmp_path, embedder_cls=_BrokenEmbedder)
+    try:
+        assert adapter.embedder is None
+        mid = adapter.append_persona_message({"role": "user", "content": "読み込み失敗中の会話"})
+        skipped = adapter.append_persona_message(
+            {"role": "user", "content": "埋めない本文", "embedding_chunks": 0})
+        assert mid is not None
+        assert _vector_rows(adapter.conn, mid) == [DEFERRED_VECTOR]
+        assert _vector_rows(adapter.conn, skipped) == []  # スキップ指定は何も書かない
+        assert adapter.conn.in_transaction is False
+    finally:
+        adapter.close()
+    _assert_flagged_then_filled(tmp_path, mid)
+
+
+def test_append_with_failing_embed_keeps_the_empty_row(tmp_path):
+    adapter = _real_adapter(tmp_path, embedder_cls=_FailingEmbedder)
+    try:
+        mid = adapter.append_persona_message({"role": "user", "content": "計算に失敗する会話"})
+        assert mid is not None  # 行は入ったので id は返す
+        assert adapter.conn.in_transaction is False
+    finally:
+        adapter.close()
+    _assert_flagged_then_filled(tmp_path, mid)
+
+
+def test_append_whose_vector_store_fails_keeps_the_empty_row(tmp_path):
+    """ベクトルの保存が途中で失敗しても巻き戻り、空の行は消えない。"""
+    from sai_memory.memory.storage import DEFERRED_VECTOR
+
+    adapter = _real_adapter(tmp_path)
+    try:
+        with patch("saiverse_memory.adapter.replace_message_embeddings",
+                   side_effect=sqlite3.OperationalError("disk I/O error")):
+            mid = adapter.append_persona_message({"role": "user", "content": "保存に失敗する会話"})
+        assert mid is not None
+        assert _vector_rows(adapter.conn, mid) == [DEFERRED_VECTOR]
+        assert adapter.conn.in_transaction is False
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize("broken", ["no_embedder", "embed_raises"])
+def test_update_message_without_vectors_writes_an_empty_row(tmp_path, broken):
+    adapter = _real_adapter(tmp_path)
+    try:
+        mid = adapter.append_persona_message({"role": "user", "content": "元の本文"})
+        assert [len(json.loads(v)) for v in _vector_rows(adapter.conn, mid)] == [EMBED_DIM]
+        adapter.embedder = None if broken == "no_embedder" else _FailingEmbedder()
+        assert adapter.update_message(mid, new_content="書き換えた本文") is True
+        assert adapter.conn.execute(
+            "SELECT content FROM messages WHERE id = ?", (mid,)).fetchone()[0] == "書き換えた本文"
+        assert adapter.conn.in_transaction is False
+    finally:
+        adapter.close()
+    _assert_flagged_then_filled(tmp_path, mid)
+
+
+def test_update_message_to_blank_text_leaves_no_row(tmp_path):
+    adapter = _real_adapter(tmp_path)
+    try:
+        mid = adapter.append_persona_message({"role": "user", "content": "元の本文"})
+        adapter.embedder = None
+        assert adapter.update_message(mid, new_content="   ") is True
+        assert _vector_rows(adapter.conn, mid) == []  # 本文の無い行は埋め込みの対象外
+    finally:
+        adapter.close()
+
+
+def test_update_message_failure_rolls_the_edit_back(tmp_path):
+    adapter = _real_adapter(tmp_path)
+    try:
+        mid = adapter.append_persona_message({"role": "user", "content": "元の本文"})
+        before = _vector_rows(adapter.conn, mid)
+        with patch("saiverse_memory.adapter.replace_message_embeddings",
+                   side_effect=sqlite3.OperationalError("disk I/O error")):
+            assert adapter.update_message(mid, new_content="書き換えた本文") is False
+        assert adapter.conn.execute(
+            "SELECT content FROM messages WHERE id = ?", (mid,)).fetchone()[0] == "元の本文"
+        assert _vector_rows(adapter.conn, mid) == before
+        assert adapter.conn.in_transaction is False
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize("broken", ["no_embedder", "embed_raises"])
+def test_manual_message_add_without_vectors_writes_an_empty_row(tmp_path, broken):
+    """記憶画面からの手動追加 (adapter を通らない経路) も同じ規則に従う。"""
+    from api.routes.people import memory as memory_routes
+    from api.routes.people.models import CreateMessageRequest
+
+    adapter = _real_adapter(tmp_path)
+    try:
+        adapter.embedder = None if broken == "no_embedder" else _FailingEmbedder()
+        manager = SimpleNamespace(personas={"p": SimpleNamespace(sai_memory=adapter)})
+        item = memory_routes.create_message(
+            "p", "p:__persona__",
+            CreateMessageRequest(role="user", content="手で足した会話"), manager=manager,
+        )
+        mid = item.id
+        assert adapter.conn.in_transaction is False
+    finally:
+        adapter.close()
+    _assert_flagged_then_filled(tmp_path, mid)
+
+
+def test_manual_message_add_embeds_on_the_spot(tmp_path):
+    from api.routes.people import memory as memory_routes
+    from api.routes.people.models import CreateMessageRequest
+
+    adapter = _real_adapter(tmp_path)
+    try:
+        manager = SimpleNamespace(personas={"p": SimpleNamespace(sai_memory=adapter)})
+        item = memory_routes.create_message(
+            "p", "p:__persona__",
+            CreateMessageRequest(role="user", content="手で足した会話"), manager=manager,
+        )
+        assert [len(json.loads(v)) for v in _vector_rows(adapter.conn, item.id)] == [EMBED_DIM]
+    finally:
+        adapter.close()
+
+
+# ---------------------------------------------------------------------------
+# 完了確定は錠の中で空の行の件数を見る
+# ---------------------------------------------------------------------------
+
+def test_finish_reembed_incomplete_when_an_empty_row_appears_after_the_scan(tmp_path):
+    """走査の後・確定の前に別の接続が空の行を足したら、名札も印も触らない。"""
+    from sai_memory import embedding_migration
+    from sai_memory.embedding_migration import begin_reembed, finish_reembed
+    from sai_memory.memory.storage import write_deferred_message_embedding
+
+    db_path = tmp_path / "memory.db"
+    conn = _open(db_path)
+    try:
+        ids = _seed(conn, EMBED_DIM)
+        set_embed_metadata(conn, "embed_model", "old-label")
+        token = begin_reembed(conn, EMBED_MODEL_ID)
+        real_scan = embedding_migration.scan_stale_vector_tables
+
+        def _scan_then_other_writer(c, dim):
+            found = real_scan(c, dim)
+            other = _open(db_path)
+            try:
+                write_deferred_message_embedding(other, ids["messages"][0])
+            finally:
+                other.close()
+            return found
+
+        with patch.object(embedding_migration, "scan_stale_vector_tables",
+                          _scan_then_other_writer):
+            outcome = finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=token)
+        assert outcome.stale_tables == []  # 走査の時点では見えていなかった
+        assert outcome.complete is False and outcome.deferred == 1
+        assert "wait for their embeddings" in outcome.describe()
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is not None
+        assert get_embed_metadata(conn, "embed_model") == "old-label"
+        assert conn.in_transaction is False
+    finally:
+        conn.close()
+
+
+def test_finish_reembed_without_empty_rows_completes(tmp_path):
+    from sai_memory.embedding_migration import begin_reembed, finish_reembed
+
+    conn = _open(tmp_path / "memory.db")
+    try:
+        _seed(conn, EMBED_DIM)
+        set_embed_metadata(conn, "embed_model", "old-label")
+        token = begin_reembed(conn, EMBED_MODEL_ID)
+        outcome = finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=token)
+        assert outcome.complete is True and outcome.deferred == 0
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
+        assert get_embed_metadata(conn, "embed_model") == EMBED_MODEL_ID
+    finally:
+        conn.close()

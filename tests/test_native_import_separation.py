@@ -540,3 +540,8 @@ def test_embedding_failure_import_still_succeeds(memory_root, monkeypatch):
     db_path = memory_root / "alice" / "memory.db"
     msgs = thread_messages(db_path, "alice:main")
     assert [(m[0], m[1]) for m in msgs] == [("m1", "hello")]
+    # ...and keep the empty vector row written with them, so the startup
+    # check and the re-embed still find the message.
+    assert query(
+        db_path, "SELECT vector FROM message_embeddings WHERE message_id = 'm1'"
+    ) == [("[]",)]
