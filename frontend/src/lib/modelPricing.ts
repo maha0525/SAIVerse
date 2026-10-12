@@ -19,3 +19,10 @@ export function formatPricePeriodEnd(endsAt: unknown, locale: string): string | 
     if (Number.isNaN(end.getTime())) return null;
     return end.toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' });
 }
+
+/** True when a snapshot's limited-time price has already ended at ``nowMs``. */
+export function isPricePeriodOver(endsAt: unknown, nowMs: number): boolean {
+    if (typeof endsAt !== 'string') return false;
+    const end = Date.parse(endsAt);
+    return Number.isFinite(end) && end <= nowMs;
+}

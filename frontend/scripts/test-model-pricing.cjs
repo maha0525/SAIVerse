@@ -259,5 +259,25 @@ function mountPriceRefresh(initialModelResponse) {
     assert.ok(opening.html.includes('$1.500'), 'the original opening fetch shares the stale-response guard');
     opening.unmount();
     assert.equal(opening.timers.size, 0);
-    console.log('Open chat pricing refresh: boundary tick, tab resume, retry, stale reads, close/reopen, and cleanup passed.');
+
+    // The period ends while the panel is open and the next refresh fails: the
+    // discounted price and its label must not stay on screen as if still valid.
+    const endsSoon = new Date(Date.now() + 150).toISOString();
+    const ending = mountPriceRefresh(response([{ ...snapshot(0.75)[0], price_period_ends_at: endsSoon }]));
+    await ending.settle();
+    assert.ok(ending.html.includes('$0.750'));
+    assert.ok(ending.html.includes('期間限定'));
+    await new Promise(done => setTimeout(done, 200));
+    ending.queued.push(response(null, false));
+    ending.poll();
+    await ending.settle();
+    assert.ok(!ending.html.includes('$0.750'), 'an ended limited-time price must not be shown after a failed refresh');
+    assert.ok(!ending.html.includes('期間限定'));
+    ending.queued.push(response([{ id: 'dated', name: 'Dated model', input_price: 1.5, output_price: 9, currency: 'USD' }]));
+    ending.poll();
+    await ending.settle();
+    assert.ok(ending.html.includes('$1.500'), 'the next successful refresh shows the regular price');
+    assert.ok(!ending.html.includes('期間限定'));
+    ending.unmount();
+    console.log('Open chat pricing refresh: boundary tick, tab resume, retry, stale reads, close/reopen, expired snapshot, and cleanup passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

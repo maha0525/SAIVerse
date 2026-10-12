@@ -9,7 +9,7 @@ import React, { useEffect, useState, useMemo, useRef } from 'react';
 import styles from './ChatOptions.module.css';
 import { X, ChevronDown, Star } from 'lucide-react';
 import { formatCost } from '@/lib/formatCost';
-import { formatPricePeriodEnd } from '@/lib/modelPricing';
+import { formatPricePeriodEnd, isPricePeriodOver } from '@/lib/modelPricing';
 import ModelEditorModal from './settings/ModelEditorModal';
 import ContextVolumeBar, { ContextStatus, canDrawContextVolumeBar } from './common/ContextVolumeBar';
 
@@ -127,6 +127,8 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         let controller: AbortController | null = null;
         const pollPrices = async () => {
             if (document.visibilityState !== 'visible') return;
+            // A limited-time price whose end has passed is hidden until a refresh succeeds.
+            setNowMs(Date.now());
             controller?.abort();
             const request = new AbortController();
             controller = request;
@@ -149,6 +151,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             if (document.visibilityState === 'visible') pollPrices();
             else controller?.abort();
         };
+        setNowMs(Date.now());
         const interval = window.setInterval(pollPrices, 60000);
         document.addEventListener('visibilitychange', onVisibilityChange);
         return () => {
@@ -792,6 +795,9 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                     {(() => {
                                         const sel = models.find(m => m.id === currentModel);
                                         if (!sel) return null;
+                                        // The snapshot's limited-time price has ended and no fresh
+                                        // price has arrived yet: show no price rather than a stale one.
+                                        if (isPricePeriodOver(sel.price_period_ends_at, nowMs)) return null;
                                         const cur = sel.currency ?? 'USD';
                                         const periodEnd = formatPricePeriodEnd(sel.price_period_ends_at, getFormatLocale());
                                         return (
