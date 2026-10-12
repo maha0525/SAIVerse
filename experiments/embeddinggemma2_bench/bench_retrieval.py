@@ -11,7 +11,10 @@ JSQuAD retrieval: every unique paragraph context is a document; every
 answerable question is a query; documents are ranked by cosine similarity.
 Context strings are "title [SEP] body"; they are fed as "title\\nbody".
 
-Writes results/retrieval.json and prints markdown tables.
+Writes results/retrieval.json (or --out <name>) and prints markdown tables.
+
+ONNX variants (does not touch the existing retrieval.json):
+    ... bench_retrieval.py --models gemma_onnx_q8,gemma_onnx_q4 --out retrieval_onnx.json
 """
 from __future__ import annotations
 
@@ -130,6 +133,9 @@ def count_over_512_tokens(key: str, model, docs: list[str]) -> dict:
             tok = Tokenizer.from_file(str(common.E5_LOCAL_PATH / "tokenizer.json"))
             lens = [len(e.ids) for e in tok.encode_batch(["passage: " + d for d in docs])]
             limit = 512  # fastembed default max_length for this model
+        elif key in common.GEMMA_ONNX_VARIANTS:
+            lens = [len(x) for x in model.tokenize([common.GEMMA_PROMPTS["Document"] + d for d in docs])]
+            limit = 512
         else:
             prompt = model.model.prompts["Document"]
             tk = model.model.tokenizer
@@ -164,7 +170,7 @@ def run_model(key: str, docs, queries, gold, pairs) -> dict:
     out["encode_queries_s"] = time.perf_counter() - t
 
     jsq = {}
-    if key == "gemma":
+    if common.is_gemma(key):
         for dim in GEMMA_TRUNC_DIMS:
             jsq[str(dim)] = retrieval_metrics(
                 common.truncate_renorm(q_emb, dim), common.truncate_renorm(d_emb, dim), gold
@@ -192,7 +198,7 @@ def run_model(key: str, docs, queries, gold, pairs) -> dict:
         t = time.perf_counter()
         e = model.encode_symmetric(uniq, side=side)
         el = time.perf_counter() - t
-        if key == "gemma":
+        if common.is_gemma(key):
             for dim in GEMMA_TRUNC_DIMS:
                 ed = common.truncate_renorm(e, dim)
                 r = sts_metrics(ed[i1], ed[i2], labels)
@@ -211,17 +217,13 @@ def print_tables(res: dict) -> None:
     print("\n### JSQuAD retrieval")
     print("| model | dim | R@1 | R@5 | R@10 | MRR@10 |")
     print("|---|---|---|---|---|---|")
-    for key in common.MODEL_KEYS:
-        if key not in res["models"]:
-            continue
+    for key in res["models"]:
         for dim, m in res["models"][key]["jsquad"].items():
             print(f"| {key} | {dim} | {m['recall@1']:.4f} | {m['recall@5']:.4f} | {m['recall@10']:.4f} | {m['mrr@10']:.4f} |")
     print("\n### JSQuAD similarity distributions")
     print("| model | dim | series | mean | p10 | p50 | p90 |")
     print("|---|---|---|---|---|---|---|")
-    for key in common.MODEL_KEYS:
-        if key not in res["models"]:
-            continue
+    for key in res["models"]:
         for dim, m in res["models"][key]["jsquad"].items():
             for series in ("gold_sim", "best_nongold_sim", "margin_gold_minus_best_other"):
                 s = m[series]
@@ -229,9 +231,7 @@ def print_tables(res: dict) -> None:
     print("\n### JSTS")
     print("| model | config | Spearman | Pearson |")
     print("|---|---|---|---|")
-    for key in common.MODEL_KEYS:
-        if key not in res["models"]:
-            continue
+    for key in res["models"]:
         for cfg, m in res["models"][key]["jsts"].items():
             print(f"| {key} | {cfg} | {m['spearman']:.4f} | {m['pearson']:.4f} |")
 
@@ -241,6 +241,7 @@ def main() -> None:
     ap.add_argument("--models", default="e5,gemma")
     ap.add_argument("--max-questions", type=int, default=0, help="0 = use all questions")
     ap.add_argument("--seed", type=int, default=20261012)
+    ap.add_argument("--out", default="retrieval.json", help="file name under results/")
     args = ap.parse_args()
 
     docs, queries, gold, meta = load_jsquad(args.max_questions or None, args.seed)
@@ -250,7 +251,7 @@ def main() -> None:
     for key in args.models.split(","):
         res["models"][key] = run_model(key, docs, queries, gold, pairs)
     common.RESULTS_DIR.mkdir(exist_ok=True)
-    (common.RESULTS_DIR / "retrieval.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
+    (common.RESULTS_DIR / args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
     print_tables(res)
     for key, m in res["models"].items():
         print(f"\n[{key}] load {m['load_s']:.1f}s, docs {m['encode_docs_s']:.1f}s, queries {m['encode_queries_s']:.1f}s, tokens {m['doc_token_stats']}")

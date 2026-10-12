@@ -1,0 +1,106 @@
+{
+  "role": "gemma_onnx_q8",
+  "info": {
+    "model": "onnx-community/embeddinggemma-2-ONNX@daa72c512439 onnx/model_quantized.onnx",
+    "runtime": "onnxruntime 1.23.2 (CPUExecutionProvider, intra_op threads = default) / tokenizers 0.23.3",
+    "file_bytes": {
+      "model": 495165,
+      "data": 313724928,
+      "tokenizer": 32170510
+    },
+    "output_used": "sentence_embedding (in-graph projection + mean pooling + L2)",
+    "prompt_query": "task: search result | query: ",
+    "prompt_document": "title: none | text: ",
+    "prompt_sts": "task: sentence similarity | query: ",
+    "batch_size": 32,
+    "max_length": null,
+    "dim": 768
+  },
+  "import_s": 0.6953782000346109,
+  "load_s": 1.8260629000142217,
+  "query_count": 30,
+  "query_len_chars": [
+    21,
+    28
+  ],
+  "query_warmup": 3,
+  "first_query_ms": 404.47060007136315,
+  "query_ms_all": [
+    404.47060007136315,
+    406.2656000023708,
+    369.54720003996044,
+    364.1835000598803,
+    339.81709997169673,
+    552.1255999337882,
+    689.1594999469817,
+    728.1558000249788,
+    464.96469993144274,
+    438.7952999677509,
+    534.246199997142,
+    496.5586999896914,
+    466.4572000037879,
+    445.94210002105683,
+    480.6603000033647,
+    378.0094999819994,
+    363.2272999966517,
+    517.8700999822468,
+    497.02500004787,
+    1854.1037999093533,
+    514.6011000033468,
+    424.00849994737655,
+    373.9728999789804,
+    427.8154999483377,
+    771.7271000146866,
+    570.1311000157148,
+    393.31139996647835,
+    367.69929993897676,
+    461.1795999808237,
+    371.9143000198528
+  ],
+  "query_median_ms": 464.96469993144274,
+  "query_p95_ms": 758.6557100177743,
+  "query_mean_ms": 529.1726851697873,
+  "query_min_ms": 339.81709997169673,
+  "query_max_ms": 1854.1037999093533,
+  "batch_count": 200,
+  "batch_len_chars": [
+    159,
+    400
+  ],
+  "batch_mean_chars": 287.28,
+  "batch_s": 28.971434500068426,
+  "batch_texts_per_s": 6.903351644514793,
+  "emb_dim": 768,
+  "memory": {
+    "start": {
+      "rss_mb": 22.09765625,
+      "peak_wset_mb": 22.09765625,
+      "private_mb": 11.90234375,
+      "method": "psutil"
+    },
+    "after_import": {
+      "rss_mb": 55.36328125,
+      "peak_wset_mb": 55.36328125,
+      "private_mb": 770.96484375,
+      "method": "psutil"
+    },
+    "after_load": {
+      "rss_mb": 157.68359375,
+      "peak_wset_mb": 413.3828125,
+      "private_mb": 873.32421875,
+      "method": "psutil"
+    },
+    "after_queries": {
+      "rss_mb": 323.3984375,
+      "peak_wset_mb": 413.3828125,
+      "private_mb": 890.2421875,
+      "method": "psutil"
+    },
+    "after_batch": {
+      "rss_mb": 2393.71484375,
+      "peak_wset_mb": 2417.0703125,
+      "private_mb": 3003.50390625,
+      "method": "psutil"
+    }
+  }
+}

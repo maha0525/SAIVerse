@@ -4,10 +4,13 @@ Usage (from the worktree root):
     .venv-exp\\Scripts\\python.exe -X utf8 experiments\\embeddinggemma2_bench\\bench_speed.py
 
 The parent process spawns one child process per model
-(`bench_speed.py --role e5|gemma|gemma_fp32|gemma_textonly`, see common.load_model)
+(`bench_speed.py --role <key>`, keys = common.SPEED_ROLES, see common.load_model)
 so each model's RSS is measured in a clean
 process. The child writes a JSON blob; the parent collects them into
-results/speed.json and prints a markdown table.
+results/speed.json (or --summary <name>) and prints a markdown table.
+
+ONNX variants only (does not touch the existing speed.json):
+    ... bench_speed.py --roles gemma_onnx_fp16,gemma_onnx_q8,gemma_onnx_q4 --repeat 3 --summary speed_onnx.json
 """
 from __future__ import annotations
 
@@ -200,6 +203,10 @@ def run_role(role: str, out_path: Path) -> None:
     if role == "e5":
         import fastembed  # noqa: F401
         from sai_memory.memory import recall  # noqa: F401
+    elif role in common.GEMMA_ONNX_VARIANTS:
+        import onnxruntime  # noqa: F401
+        import tokenizers  # noqa: F401
+        import huggingface_hub  # noqa: F401
     else:
         import sentence_transformers  # noqa: F401
         import torch  # noqa: F401
@@ -288,6 +295,7 @@ def main() -> None:
     ap.add_argument("--roles", default="e5,gemma,gemma_fp32,gemma_textonly")
     ap.add_argument("--out")
     ap.add_argument("--repeat", type=int, default=1, help="child runs per model")
+    ap.add_argument("--summary", default="speed.json", help="file name (under results/) for the collected runs")
     args = ap.parse_args()
     if args.role:
         run_role(args.role, Path(args.out))
@@ -307,7 +315,7 @@ def main() -> None:
             print(f"[run {rep}] {role} ...", flush=True)
             subprocess.run(cmd, check=True, env=env, cwd=str(common.REPO_ROOT))
             all_runs.setdefault(role, []).append(json.loads(out.read_text(encoding="utf-8")))
-    (common.RESULTS_DIR / "speed.json").write_text(json.dumps(all_runs, ensure_ascii=False, indent=2), encoding="utf-8")
+    (common.RESULTS_DIR / args.summary).write_text(json.dumps(all_runs, ensure_ascii=False, indent=2), encoding="utf-8")
     for rep in range(args.repeat):
         print(f"\n## run {rep}")
         print(fmt_table([all_runs[r][rep] for r in roles]))

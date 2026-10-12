@@ -169,6 +169,145 @@ class GemmaWrapper:
         }
 
 
+# ---------------------------------------------------------------- ONNX (onnx-community export)
+GEMMA_ONNX_REPO = "onnx-community/embeddinggemma-2-ONNX"
+# Snapshot downloaded on 2026-10-12; pinned so later re-uploads cannot silently change the numbers.
+GEMMA_ONNX_REVISION = "daa72c51243991dfcaf9f9137d2c573d8f7790c0"
+# role key -> ONNX file stem under onnx/ (text model only; vision/audio encoders are not used)
+GEMMA_ONNX_VARIANTS = {
+    "gemma_onnx_fp16": "model_fp16",
+    "gemma_onnx_q8": "model_quantized",
+    "gemma_onnx_q4": "model_q4",
+}
+# Same strings as config_sentence_transformers.json of google/embeddinggemma-2
+# (identical in the ONNX repo's copy).
+GEMMA_PROMPTS = {
+    "SearchQuery": "task: search result | query: ",
+    "Document": "title: none | text: ",
+    "STS": "task: sentence similarity | query: ",
+}
+
+
+def gemma_onnx_files(stem: str) -> dict:
+    """Return local paths of the cached ONNX text model + tokenizer (no network)."""
+    from huggingface_hub import hf_hub_download
+
+    def get(name: str) -> Path:
+        return Path(hf_hub_download(GEMMA_ONNX_REPO, name, revision=GEMMA_ONNX_REVISION, local_files_only=True))
+
+    model = get(f"onnx/{stem}.onnx")
+    data = get(f"onnx/{stem}.onnx_data")
+    tok = get("tokenizer.json")
+    return {"model": model, "data": data, "tokenizer": tok}
+
+
+class GemmaOnnxWrapper:
+    """embeddinggemma-2 through onnxruntime directly (CPUExecutionProvider, default threads).
+
+    The exported graph already contains the whole post-processing chain: the text
+    backbone's `embedding_projection` (last_hidden_state is taken *after* it), masked
+    mean pooling over attention_mask, and L2 normalisation, exposed as the
+    `sentence_embedding` output [batch, 768]. sentence-transformers' module list for
+    google/embeddinggemma-2 is Transformer -> Pooling(mean, include_prompt) -> Normalize
+    (no Dense), so `sentence_embedding` is used as-is (re-normalised once more in fp32).
+
+    The graph also declares image_features / video_features / audio_features inputs
+    ([N, 512] float); text-only calls feed them as empty [0, 512] tensors.
+
+    Batching mirrors SentenceTransformer.encode: inputs are sorted by length
+    (longest first), split into batches of `batch_size`, right-padded with <pad>,
+    and the results are put back in input order.
+    """
+
+    def __init__(self, role: str, batch_size: int = 32, max_length: int | None = None) -> None:
+        prepare_env()
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
+
+        self.role = role
+        self.stem = GEMMA_ONNX_VARIANTS[role]
+        self.files = gemma_onnx_files(self.stem)
+        self.tokenizer = Tokenizer.from_file(str(self.files["tokenizer"]))
+        self.tokenizer.no_padding()
+        self.max_length = max_length
+        if max_length:
+            self.tokenizer.enable_truncation(max_length)
+        else:
+            self.tokenizer.no_truncation()
+        self.pad_id = self.tokenizer.token_to_id("<pad>")
+        so = ort.SessionOptions()
+        self.session = ort.InferenceSession(str(self.files["model"]), sess_options=so, providers=["CPUExecutionProvider"])
+        self.input_names = [i.name for i in self.session.get_inputs()]
+        self.batch_size = batch_size
+        self.dim = 768
+
+    def tokenize(self, texts):
+        return [e.ids for e in self.tokenizer.encode_batch(list(texts))]
+
+    def _run(self, ids_list):
+        import numpy as np
+
+        n = len(ids_list)
+        L = max(len(x) for x in ids_list)
+        ids = np.full((n, L), self.pad_id, dtype=np.int64)
+        mask = np.zeros((n, L), dtype=np.int64)
+        for i, x in enumerate(ids_list):
+            ids[i, : len(x)] = x
+            mask[i, : len(x)] = 1
+        feeds = {"input_ids": ids, "attention_mask": mask}
+        empty = np.zeros((0, 512), dtype=np.float32)
+        for name in ("image_features", "video_features", "audio_features"):
+            if name in self.input_names:
+                feeds[name] = empty
+        (emb,) = self.session.run(["sentence_embedding"], feeds)
+        return emb
+
+    def _enc(self, texts, prompt_name: str):
+        import numpy as np
+
+        prompt = GEMMA_PROMPTS[prompt_name]
+        ids_list = self.tokenize([prompt + t for t in texts])
+        order = sorted(range(len(ids_list)), key=lambda i: -len(ids_list[i]))
+        out = np.zeros((len(ids_list), self.dim), dtype=np.float32)
+        for s in range(0, len(order), self.batch_size):
+            idx = order[s : s + self.batch_size]
+            out[idx] = self._run([ids_list[i] for i in idx])
+        return _l2(out)
+
+    def encode_queries(self, texts):
+        return self._enc(texts, "SearchQuery")
+
+    def encode_documents(self, texts):
+        return self._enc(texts, "Document")
+
+    def encode_symmetric(self, texts, side: str = "STS"):
+        return self._enc(texts, side)
+
+    def info(self) -> dict:
+        import onnxruntime as ort
+        import tokenizers
+
+        return {
+            "model": f"{GEMMA_ONNX_REPO}@{GEMMA_ONNX_REVISION[:12]} onnx/{self.stem}.onnx",
+            "runtime": (
+                f"onnxruntime {ort.__version__} (CPUExecutionProvider, intra_op threads = default) / "
+                f"tokenizers {tokenizers.__version__}"
+            ),
+            "file_bytes": {k: v.stat().st_size for k, v in self.files.items()},
+            "output_used": "sentence_embedding (in-graph projection + mean pooling + L2)",
+            "prompt_query": GEMMA_PROMPTS["SearchQuery"],
+            "prompt_document": GEMMA_PROMPTS["Document"],
+            "prompt_sts": GEMMA_PROMPTS["STS"],
+            "batch_size": self.batch_size,
+            "max_length": self.max_length,
+            "dim": self.dim,
+        }
+
+
+def is_gemma(key: str) -> bool:
+    return key.startswith("gemma")
+
+
 def load_model(key: str):
     if key == "e5":
         return E5Wrapper()
@@ -178,10 +317,12 @@ def load_model(key: str):
         return GemmaWrapper(fp32=True)
     if key == "gemma_textonly":
         return GemmaWrapper(text_only=True)
+    if key in GEMMA_ONNX_VARIANTS:
+        return GemmaOnnxWrapper(key)
     raise ValueError(key)
 
 
-SPEED_ROLES = ("e5", "gemma", "gemma_fp32", "gemma_textonly")
+SPEED_ROLES = ("e5", "gemma", "gemma_fp32", "gemma_textonly", *GEMMA_ONNX_VARIANTS)
 
 
 def truncate_renorm(emb, dim: int):
