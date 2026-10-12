@@ -254,3 +254,21 @@ def test_normal_spell_round_unchanged():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])
+
+
+def test_spell_retry_uses_response_event_time_for_record_and_cost():
+    from datetime import datetime
+    from llm_clients.base import UsageInfo
+
+    usage = UsageInfo("synthetic-model", 100, 20, timestamp=1798711199.0)
+    client = ScriptedClient(["Done."])
+    client.consume_usage = lambda: usage
+    with patch("sea.runtime_llm.get_usage_tracker") as get_tracker, \
+         patch("saiverse.model_configs.calculate_cost", return_value=0.25) as calculate_cost, \
+         patch("saiverse.model_configs.get_model_display_name", return_value="Synthetic Model"):
+        result = _run_loop('/spell name="note_add" args={"text": "synthetic"}', client, _ok_spell())
+    assert result[2] == 1
+    kwargs = get_tracker.return_value.record_usage.call_args.kwargs
+    assert kwargs["node_type"] == "llm_spell_retry"
+    assert kwargs["timestamp"] == datetime.fromtimestamp(usage.timestamp)
+    assert calculate_cost.call_args.kwargs["at"] is kwargs["timestamp"]

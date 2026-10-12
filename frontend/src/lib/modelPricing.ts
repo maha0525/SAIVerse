@@ -11,3 +11,18 @@ export function outputRateForInput(
     }
     return pricing?.output_per_1m_tokens;
 }
+
+/** Format the end of a limited-time price in the viewer's locale and time zone. */
+export function formatPricePeriodEnd(endsAt: unknown, locale: string): string | null {
+    if (typeof endsAt !== 'string') return null;
+    const end = new Date(endsAt);
+    if (Number.isNaN(end.getTime())) return null;
+    return end.toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/** True when a snapshot's limited-time price has already ended at ``nowMs``. */
+export function isPricePeriodOver(endsAt: unknown, nowMs: number): boolean {
+    if (typeof endsAt !== 'string') return false;
+    const end = Date.parse(endsAt);
+    return Number.isFinite(end) && end <= nowMs;
+}

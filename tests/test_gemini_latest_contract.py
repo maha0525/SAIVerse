@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -65,7 +66,10 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
             9.0,
         )
         self.assertAlmostEqual(
-            model_configs.calculate_cost("gemini-3.6-flash-paid", 1_000_000, 1_000_000),
+            model_configs.calculate_cost(
+                "gemini-3.6-flash-paid", 1_000_000, 1_000_000,
+                at=datetime(2027, 1, 1, tzinfo=timezone.utc),
+            ),
             9.0,
         )
         self.assertAlmostEqual(

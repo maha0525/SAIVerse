@@ -69,16 +69,16 @@ class TestCacheStorageRefund(unittest.TestCase):
             self.tracker.record_cache_storage_refund(
                 "gem", 4000, 120.5, persona_id="air", building_id="room",
             )
-        calc.assert_called_once_with("gem", 4000, 120.5)
         record = self.tracker._pending_records[-1]
+        calc.assert_called_once_with("gem", 4000, 120.5, at=record["timestamp"])
         self.assertEqual(record["cost_usd"], -0.25)
         self.assertEqual(record["category"], "cache_storage")
         self.assertEqual(record["model_id"], "gem")
         self.assertEqual(record["cached_tokens"], 4000)
         self.assertEqual((record["input_tokens"], record["output_tokens"]), (0, 0))
         self.assertEqual((record["persona_id"], record["building_id"]), ("air", "room"))
-        # 作成時の計上 (record_cache_storage) と同じく通貨を明示しない
-        self.assertNotIn("currency", record)
+        # 作成時の計上 (record_cache_storage) と同じ通貨へ返金する
+        self.assertEqual(record["currency"], "USD")
 
     def test_refund_nets_against_the_charge(self):
         with patch("saiverse.model_configs.calculate_cache_storage_cost", side_effect=[0.3, 0.2]):

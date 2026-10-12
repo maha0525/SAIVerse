@@ -170,7 +170,7 @@ def controller(monkeypatch):
 def storage_records(monkeypatch):
     records: List[tuple] = []
 
-    def _fake(model_id, cached_tokens, ttl_seconds, *, persona_id, building_id):
+    def _fake(model_id, cached_tokens, ttl_seconds, *, persona_id, building_id, timestamp=None):
         records.append((model_id, cached_tokens, ttl_seconds, persona_id, building_id))
 
     monkeypatch.setattr(
@@ -186,7 +186,8 @@ def refund_records(monkeypatch):
 
     records: List[tuple] = []
 
-    def _fake(self, model_id, cached_tokens, remaining_seconds, *, persona_id=None, building_id=None):
+    def _fake(self, model_id, cached_tokens, remaining_seconds, *, persona_id=None, building_id=None,
+              timestamp=None, storage_start=None):
         records.append((model_id, cached_tokens, remaining_seconds, persona_id, building_id))
 
     monkeypatch.setattr(UsageTracker, "record_cache_storage_refund", _fake)
@@ -1038,3 +1039,20 @@ def test_expire_at_uses_server_expire_time_and_falls_back_safely():
     assert gemini_cache._server_expire_epoch(
         SimpleNamespace(expire_time=far), started, ttl,
     ) == started + ttl
+
+
+def test_sync_and_background_forward_reservation_start(gemini, fake, controller, monkeypatch):
+    """Both real client paths forward the controller's exact dated charge start."""
+    timestamps = {}
+
+    def capture(model_id, cached_tokens, ttl_seconds, *, persona_id, building_id, timestamp=None):
+        timestamps[cached_tokens] = timestamp
+
+    monkeypatch.setattr(GeminiClient, "_record_continuous_cache_storage", staticmethod(capture))
+    _run(gemini, _turn(0))
+    first = controller._continuous["cachedContents/c1"]
+    assert timestamps[1000] == first.expire_at - first.ttl_seconds
+    _run(gemini, _turn(1))
+    controller.join_background(5)
+    second = controller._continuous["cachedContents/c2"]
+    assert timestamps[2000] == second.expire_at - second.ttl_seconds

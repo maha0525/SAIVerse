@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Iterator, List, Literal, Optional
 
 
@@ -24,6 +26,26 @@ class UsageInfo:
     cache_ttl: str = ""  # Cache TTL used for this request ("5m", "1h", or "" if no cache)
     cache_storage_tokens: int = 0  # Gemini explicit cache: tokens stored (for storage cost)
     cache_storage_ttl_seconds: int = 0  # Gemini explicit cache: TTL in seconds
+    cache_storage_timestamp: Optional[float] = None  # Cache creation epoch, distinct from response time
+
+
+def usage_event_time(usage: UsageInfo, *, cache_storage: bool = False) -> datetime:
+    """Return the recorded event time in the usage DB's existing local-naive form.
+
+    Cache storage begins when the cache was created, before the LLM response.
+    Older clients/test doubles without an epoch retain the previous "now" fallback.
+    """
+    timestamp = getattr(usage, "cache_storage_timestamp", None) if cache_storage else None
+    if timestamp is None:
+        timestamp = getattr(usage, "timestamp", None)
+    if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
+        try:
+            if math.isfinite(timestamp):
+                return datetime.fromtimestamp(timestamp)
+        except (OverflowError, OSError, ValueError):
+            pass
+    return datetime.now()
+
 
 # LLM logging is now handled by logging_config module
 # Import convenience functions for backward compatibility
@@ -339,4 +361,4 @@ class EmptyResponseError(RuntimeError):
     """Raised when LLM returns an empty response (no text or function call)."""
 
 
-__all__ = ["LLMClient", "ToolSpecFormat", "UsageInfo", "log_llm_request", "log_llm_response", "get_llm_logger", "IncompleteStreamError", "EmptyResponseError"]
+__all__ = ["LLMClient", "ToolSpecFormat", "UsageInfo", "usage_event_time", "log_llm_request", "log_llm_response", "get_llm_logger", "IncompleteStreamError", "EmptyResponseError"]

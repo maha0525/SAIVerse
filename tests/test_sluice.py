@@ -763,6 +763,7 @@ class SluiceRunTest(_AdapterTestBase):
         usage = FakeUsage(
             model="claude-x", input_tokens=100, output_tokens=5,
             cached_tokens=90, cache_write_tokens=10, cache_ttl="5m",
+            timestamp=1798711199.0,
         )
         client = FakeLLMClient(result, usage=usage)
         runtime = FakeRuntime(client)
@@ -773,6 +774,10 @@ class SluiceRunTest(_AdapterTestBase):
         with patch("saiverse.usage_tracker.get_usage_tracker") as get_tracker:
             sluice.run_sluice(lifecycle, self._persona(), "b", [], 0)
         get_tracker.return_value.record_usage.assert_called_once()
+        self.assertEqual(
+            get_tracker.return_value.record_usage.call_args.kwargs["timestamp"],
+            datetime.fromtimestamp(usage.timestamp),
+        )
         self.assertEqual(len(runtime.touched), 1)
 
     # -- case: disabled toggle -------------------------------------------

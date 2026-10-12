@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+from llm_clients.base import usage_event_time
 from llm_clients.exceptions import EmptyResponseError
 from sai_memory.memory.storage import MECHANISM_TAGS, Message
 from sai_memory.arasuji.storage import (
@@ -50,6 +51,7 @@ def _record_llm_usage(client, persona_id: Optional[str], node_type: str) -> None
                 cached_tokens=usage.cached_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
                 cache_ttl=usage.cache_ttl,
+                timestamp=usage_event_time(usage),
                 persona_id=persona_id,
                 node_type=node_type,
                 category="memory_weave_generate",

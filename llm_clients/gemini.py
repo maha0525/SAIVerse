@@ -520,7 +520,7 @@ class GeminiClient(LLMClient):
         self._last_stream_error: Optional[Dict[str, Any]] = None
 
         # Pending cache storage info for usage tracking (set by _resolve_explicit_cache on create)
-        self._pending_cache_storage: Optional[Tuple[str, int, int]] = None  # (model, tokens, ttl_s)
+        self._pending_cache_storage: Optional[Tuple[str, int, int, Optional[float]]] = None  # (model, tokens, ttl_s, created_at)
         # Auto cache mode: generate 完了後に delete する cache name
         self._auto_cache_pending_cleanup: Optional[str] = None
 
@@ -533,6 +533,7 @@ class GeminiClient(LLMClient):
         if pending and self._latest_usage:
             self._latest_usage.cache_storage_tokens = pending[1]
             self._latest_usage.cache_storage_ttl_seconds = pending[2]
+            self._latest_usage.cache_storage_timestamp = pending[3]
             self._pending_cache_storage = None
         # Auto cache mode: usage 記録完了後に cache を即削除
         cleanup_name = getattr(self, "_auto_cache_pending_cleanup", None)
@@ -631,6 +632,7 @@ class GeminiClient(LLMClient):
                 self.config_key or self.model,
                 result.cached_tokens,
                 ttl_seconds,
+                result.timestamp,
             )
 
         logging.info(
@@ -865,6 +867,7 @@ class GeminiClient(LLMClient):
             # 回に漏れ、要求が重なると別の要求の記録にくっつくため。
             self._record_continuous_cache_storage(
                 account_model, result.cached_tokens, result.ttl_seconds,
+                timestamp=result.timestamp,
                 persona_id=persona_id, building_id=building_id,
             )
         send = contents[len(prefix):]
@@ -912,6 +915,7 @@ class GeminiClient(LLMClient):
                     # (完了が応答の前か後か決まらない) ので、同じ区分で単独に計上する。
                     self._record_continuous_cache_storage(
                         account_model, result.cached_tokens, result.ttl_seconds,
+                        timestamp=result.timestamp,
                         persona_id=persona_id, building_id=building_id,
                     )
             except Exception:
@@ -927,6 +931,7 @@ class GeminiClient(LLMClient):
         cached_tokens: int,
         ttl_seconds: int,
         *,
+        timestamp: Optional[float] = None,
         persona_id: Optional[str],
         building_id: Optional[str],
     ) -> None:
@@ -937,11 +942,13 @@ class GeminiClient(LLMClient):
         """
         if not cached_tokens:
             return
+        from datetime import datetime
         from saiverse.usage_tracker import get_usage_tracker
         get_usage_tracker().record_cache_storage(
             model_id=model_id,
             cached_tokens=cached_tokens,
             ttl_seconds=ttl_seconds,
+            timestamp=datetime.fromtimestamp(timestamp) if timestamp is not None else None,
             persona_id=persona_id,
             building_id=building_id,
         )
@@ -1023,6 +1030,7 @@ class GeminiClient(LLMClient):
                 self.config_key or self.model,
                 result.cached_tokens,
                 result.ttl_seconds,
+                result.timestamp,
             )
         if name:
             # backend.log に出す ([gemini_cache] created と同じ場所に揃える。
