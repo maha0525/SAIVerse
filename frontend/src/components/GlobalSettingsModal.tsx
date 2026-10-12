@@ -5,7 +5,7 @@ import { resolveI18nText } from '@/i18n/resolve';
 import LocaleControls from '@/i18n/LocaleControls';
 import { getModelRoleLabel, getModelRoleDescription, getProviderPresetDisplayName, getWatermarkPresetLabel } from '@/i18n/modelRoles';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss, GitBranch } from 'lucide-react';
+import { X, Settings, Globe, Layers, Save, RefreshCw, Power, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader, Boxes, Rss, GitBranch, OctagonPause } from 'lucide-react';
 import { VersionInfo, announceUpdateStarted, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
@@ -92,6 +92,10 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     // Developer Mode
     const [developerMode, setDeveloperMode] = useState(false);
+    // グローバル自律全停止 (v0.4 計画 決定 12)。null = 未取得
+    const [autonomyAllStop, setAutonomyAllStop] = useState<boolean | null>(null);
+    const [autonomyAllStopSaving, setAutonomyAllStopSaving] = useState(false);
+    const [autonomyAllStopError, setAutonomyAllStopError] = useState<string | null>(null);
 
     // Monitoring toggles
     const [updateCheckEnabled, setUpdateCheckEnabled] = useState(true);
@@ -226,6 +230,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     useEffect(() => {
         if (isOpen && activeTab === 'env') {
             loadDeveloperModeState();
+            loadAutonomyAllStop();
             loadUpdateCheckState();
             loadAnnouncementsState();
             loadImageDefaultQuality();
@@ -622,6 +627,49 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         }
     };
 
+    const loadAutonomyAllStop = async () => {
+        setAutonomyAllStopError(null);
+        try {
+            const res = await apiFetch('/api/config/autonomy-all-stop');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            setAutonomyAllStop(!!data.enabled);
+        } catch (e) {
+            console.error("Failed to load the global autonomy all-stop", e);
+            setAutonomyAllStopError(uiText("autonomyAllStop.loadFailed", { detail: String(e) }));
+        }
+    };
+
+    const toggleAutonomyAllStop = async () => {
+        if (autonomyAllStop === null || autonomyAllStopSaving) return;
+        const newState = !autonomyAllStop;
+        setAutonomyAllStopSaving(true);
+        setAutonomyAllStopError(null);
+        try {
+            const res = await apiFetch('/api/config/autonomy-all-stop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: newState })
+            });
+            if (!res.ok) {
+                let detail = `HTTP ${res.status}`;
+                try {
+                    const body = await res.json();
+                    if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+                } catch { /* keep the status */ }
+                throw new Error(detail);
+            }
+            const data = await res.json();
+            // サーバーが返した実際の値で表示する (書けなかった回は 500 で上に落ちる)
+            setAutonomyAllStop(!!data.enabled);
+        } catch (e) {
+            console.error("Failed to set the global autonomy all-stop", e);
+            setAutonomyAllStopError(uiText("autonomyAllStop.saveFailed", { detail: e instanceof Error ? e.message : String(e) }));
+        } finally {
+            setAutonomyAllStopSaving(false);
+        }
+    };
+
     const loadUpdateCheckState = async () => {
         try {
             const res = await apiFetch('/api/config/update-check');
@@ -971,6 +1019,31 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                         >
                                             {uiText("components.GlobalSettingsModal.label006")}</button>
                                     </div>
+                                </div>
+
+                                {/* 自律の全停止 (全ペルソナの自発の行動と、それに伴う課金を止める) */}
+                                <div className={`${styles.toggleContainer} ${styles.toggleContainerStacked} ${autonomyAllStop ? styles.allStopActive : ''}`}>
+                                    <div className={styles.toggleRow}>
+                                        <div>
+                                            <div data-i18n="autonomyAllStop.label" className={styles.toggleLabel}>
+                                                <OctagonPause size={18} />{uiText("autonomyAllStop.label")}
+                                                {autonomyAllStop && (
+                                                    <span data-i18n="autonomyAllStop.activeBadge" className={styles.allStopBadge}>{uiText("autonomyAllStop.activeBadge")}</span>
+                                                )}
+                                            </div>
+                                            <div data-i18n="autonomyAllStop.description" className={styles.toggleDescription}>{uiText("autonomyAllStop.description")}</div>
+                                        </div>
+                                        <div
+                                            role="switch"
+                                            aria-checked={!!autonomyAllStop}
+                                            aria-disabled={autonomyAllStop === null || autonomyAllStopSaving}
+                                            className={`${styles.toggle} ${autonomyAllStop ? `${styles.active} ${styles.toggleDanger}` : ''} ${autonomyAllStop === null || autonomyAllStopSaving ? styles.toggleDisabled : ''}`}
+                                            onClick={toggleAutonomyAllStop}
+                                        />
+                                    </div>
+                                    {autonomyAllStopError && (
+                                        <div role="alert" className={styles.allStopError}>{autonomyAllStopError}</div>
+                                    )}
                                 </div>
 
                                 <div

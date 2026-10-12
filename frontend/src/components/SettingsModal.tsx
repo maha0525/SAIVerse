@@ -11,6 +11,7 @@ import styles from './SettingsModal.module.css';
 import ImageUpload from './common/ImageUpload';
 import ModalOverlay from './common/ModalOverlay';
 import DebugPanel from './DebugPanel';
+import LifeSettingsSection, { LifeSettingsSectionHandle } from './LifeSettingsSection';
 import { formatCost } from '@/lib/formatCost';
 
 interface SettingsModalProps {
@@ -21,7 +22,6 @@ interface SettingsModalProps {
 
 interface MetaJudgmentConfig {
     cache_threshold_ratio: number | null;
-    periodic_interval_minutes: number | null;
     keep_cache_alive: boolean | null;
     // ライフビュー「作業のテンポ」(persona_activity_view.md §7)。
     // 本モーダルでは編集しないが、保存時に消さないよう保持が必要。
@@ -67,7 +67,6 @@ interface AIConfig {
 //  失った休眠キー。編集 UI は 2026-08-14 に削除した — track_retirement.md §7.4)
 const META_JUDGMENT_DEFAULTS = {
     cache_threshold_ratio: 0.3,
-    periodic_interval_minutes: 50,
     keep_cache_alive: true,
 };
 
@@ -121,10 +120,11 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     // モデル設定を、ここに残った古い値で巻き戻してしまう。受け側 (PATCH) は
     // 「送られてこなかった欄は触らない」を保証している (manager/admin.py の UNSET)。
     const loadedModelsRef = useRef<Record<string, string>>({});
-    // ⚠ 自律行動の ON/OFF は v0.3 で UI から隠した (autonomous_behavior_v3.md
-    // §11「運転 UI は隠す」)。state だけ残すのは、ロードした値をそのまま保存へ
-    // 往復させるため — 送らないと PATCH が既存の設定を既定値で塗り潰す。
-    const [autonomyEnabled, setAutonomyEnabled] = useState<boolean>(true);
+    // 自律の ON/OFF・起床就寝・自律の間隔はライフ設定の節 (LifeSettingsSection) が
+    // 自分の API (PUT /life-settings) で保存する。本体の PATCH は autonomy_enabled を
+    // 送らない (欄が無ければ受け側は現在値を保つ) — 送ると節で変えた値を、開いた
+    // ときの古い値で巻き戻す。フッターの保存は、節に未保存の変更があれば先に流す。
+    const lifeSectionRef = useRef<LifeSettingsSectionHandle>(null);
     const [chronicleEnabled, setChronicleEnabled] = useState(true);
     const [autonomousChronicleEnabled, setAutonomousChronicleEnabled] = useState(true);
     const [autoRecallEnabled, setAutoRecallEnabled] = useState(true);
@@ -143,13 +143,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [newSpellLabel, setNewSpellLabel] = useState('');
     // Phase 4-e: empty string = use built-in default (NULL in DB)
     const [metaCacheThresholdRatio, setMetaCacheThresholdRatio] = useState<string>('');
-    // 自動発話間隔は「自律行動マネージャー」の interval 入力に統合済 (Phase 4-e)。
-    // META_JUDGMENT_CONFIG.periodic_interval_minutes は autonomy API 経由で永続化される。
     const [metaKeepCacheAlive, setMetaKeepCacheAlive] = useState<TriState>('default');
     // ロード時の META_JUDGMENT_CONFIG 全体。update_ai は config を丸ごと置換するため、
-    // 本モーダルが編集しないキー (periodic_interval_minutes /
-    // autonomous_pulse_interval_seconds 等、autonomy / activity API が永続化したもの)
-    // を保存時に巻き込んで消さないよう、ここからマージして送る。
+    // 本モーダルが編集しないキー (autonomous_pulse_interval_seconds 等、activity API が
+    // 永続化したもの) を保存時に巻き込んで消さないよう、ここからマージして送る。
     const [loadedMetaConfig, setLoadedMetaConfig] = useState<Record<string, unknown> | null>(null);
     // 2026-05-09: ユーザー会話 Track の wait_response 自動 pause 閾値 (分)。
     // 空文字列 = 既定値 (30 分) を使う (DB は NULL)。
@@ -261,7 +258,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     memory_weave_model: data.memory_weave_model || '',
                     reflex_judgment_model: data.reflex_judgment_model || '',
                 };
-                setAutonomyEnabled(data.autonomy_enabled ?? true);
                 setChronicleEnabled(data.chronicle_enabled ?? true);
                 setAutonomousChronicleEnabled(data.autonomous_chronicle_enabled ?? true);
                 setAutoRecallEnabled(data.auto_recall_enabled ?? true);
@@ -377,6 +373,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
         setIsSaving(true);
         try {
+            // ライフ設定の節に未保存の変更があれば先に保存する。失敗したら
+            // (エラーは節の中に出ている) モーダルを閉じずに止める。
+            const lifeOk = await (lifeSectionRef.current?.saveIfDirty() ?? Promise.resolve(true));
+            if (!lifeOk) return;
             const res = await apiFetch(`/api/people/${personaId}/config`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
@@ -395,7 +395,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     video_model: modelFieldIfChanged('video_model', videoModel),
                     memory_weave_model: modelFieldIfChanged('memory_weave_model', memoryWeaveModel),
                     reflex_judgment_model: modelFieldIfChanged('reflex_judgment_model', reflexJudgmentModel),
-                    autonomy_enabled: autonomyEnabled,
+                    // autonomy_enabled は送らない (ライフ設定の節が保存する — 上の lifeSectionRef の注記)
                     chronicle_enabled: chronicleEnabled,
                     autonomous_chronicle_enabled: autonomousChronicleEnabled,
                     auto_recall_enabled: autoRecallEnabled,
@@ -425,10 +425,10 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     appearance_image_path: appearanceImagePath || null,
                     linked_user_id: linkedUserId ? parseInt(linkedUserId) : 0,  // 0 = clear link
                     // Phase 4-e: 各値が空文字列なら null = 既定値使用。
-                    // 本モーダルが編集しないキー (periodic_interval_minutes 等) は
-                    // ロード時の値からマージして保持する (update_ai は丸ごと置換のため、
-                    // フォーム項目だけで再構築すると autonomy / activity API が永続化した
-                    // 値が消える)。結果が空オブジェクトなら null で DB 側を NULL に戻す。
+                    // 本モーダルが編集しないキーはロード時の値からマージして保持する
+                    // (update_ai は丸ごと置換のため、フォーム項目だけで再構築すると
+                    // activity API が永続化した値が消える)。結果が空オブジェクトなら
+                    // null で DB 側を NULL に戻す。
                     meta_judgment_config: (() => {
                         const obj: Record<string, unknown> = { ...(loadedMetaConfig ?? {}) };
                         // null 値 (既定値使用) のキーは落とす
@@ -626,6 +626,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                 </select>
                                 <div data-i18n="components.SettingsModal.reflexJudgmentModelDescription" className={styles.description}>{uiText("components.SettingsModal.reflexJudgmentModelDescription")}</div>
                             </div>
+
+                            <LifeSettingsSection ref={lifeSectionRef} personaId={personaId} />
 
                             <DebugPanel personaId={personaId} />
 

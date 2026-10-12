@@ -11946,5 +11946,165 @@
   "movementNotices.loadOlder": {
     "ja": "以前のメッセージを読み込む",
     "en": "Load older messages"
+  },
+  "lifeSettings.title": {
+    "ja": "自律",
+    "en": "Autonomy"
+  },
+  "lifeSettings.autonomyLabel": {
+    "ja": "自律の ON/OFF",
+    "en": "Autonomy on/off"
+  },
+  "lifeSettings.autonomyOn": {
+    "ja": "有効",
+    "en": "On"
+  },
+  "lifeSettings.autonomyOff": {
+    "ja": "無効",
+    "en": "Off"
+  },
+  "lifeSettings.autonomyDescription": {
+    "ja": "OFF にすると、ペルソナは自分の時間を過ごさなくなります。会話への返事とアラームはそのまま動きます。",
+    "en": "When off, the persona no longer spends time on its own. Replies in conversation and alarms keep working."
+  },
+  "lifeSettings.wakeLabel": {
+    "ja": "起床時刻",
+    "en": "Wake time"
+  },
+  "lifeSettings.closeLabel": {
+    "ja": "就寝時刻",
+    "en": "Bedtime"
+  },
+  "lifeSettings.timeDescription": {
+    "ja": "起床から就寝までのあいだ、ペルソナは自分の時間を過ごします。就寝が起床より早い時刻なら日をまたぎます。両方を空にすると、自分の時間を過ごす時間帯がなくなります。",
+    "en": "Between wake time and bedtime, the persona spends time on its own. A bedtime earlier than the wake time crosses midnight. Leave both empty to give the persona no such hours."
+  },
+  "lifeSettings.sameTime": {
+    "ja": "起床と就寝が同じ時刻です。過ごす時間が 0 分になるため保存できません。",
+    "en": "Wake time and bedtime are the same. That leaves 0 minutes, so it cannot be saved."
+  },
+  "lifeSettings.intervalLabel": {
+    "ja": "自律の間隔",
+    "en": "Autonomy interval"
+  },
+  "lifeSettings.minutesUnit": {
+    "ja": "分",
+    "en": "min"
+  },
+  "lifeSettings.intervalDefaultHint": {
+    "ja": "空欄 = 既定 ({minutes} 分)",
+    "en": "Empty = default ({minutes} min)"
+  },
+  "lifeSettings.intervalDescription": {
+    "ja": "会話や応答が止まってからこの時間がたつと、ペルソナが自分の時間を過ごします。",
+    "en": "Once this much time has passed after conversation or replies stop, the persona spends time on its own."
+  },
+  "lifeSettings.intervalInvalid": {
+    "ja": "自律の間隔は 1 以上の整数で入力してください (空欄なら既定値)。",
+    "en": "Enter a whole number of 1 or more for the autonomy interval (leave it empty for the default)."
+  },
+  "lifeSettings.modeLabel": {
+    "ja": "モード",
+    "en": "Mode"
+  },
+  "lifeSettings.modeAuto": {
+    "ja": "自動 (いまは{mode})",
+    "en": "Automatic (currently {mode})"
+  },
+  "lifeSettings.modeEven": {
+    "ja": "均等",
+    "en": "Even"
+  },
+  "lifeSettings.modeFree": {
+    "ja": "自由",
+    "en": "Free"
+  },
+  "lifeSettings.modeDescription": {
+    "ja": "均等は、プロンプトのキャッシュが切れないよう間隔を {minutes} 分以内に収めます。自由は間隔に上限を設けません。自動は、使っているモデルの提供元に合わせてどちらかを選びます。",
+    "en": "Even keeps the interval within {minutes} minutes so the prompt cache does not expire. Free sets no upper limit. Automatic picks one based on the provider of the model in use."
+  },
+  "lifeSettings.needsWake": {
+    "ja": "自律の間隔とモードは、起床時刻を設定すると変更できます。",
+    "en": "Set a wake time to change the autonomy interval and mode."
+  },
+  "lifeSettings.estimate": {
+    "ja": "一日およそ {count} 回 (間隔 {minutes} 分)",
+    "en": "About {count} times a day (every {minutes} min)"
+  },
+  "lifeSettings.intervalAdjusted": {
+    "ja": "{requested} 分 → 実際は {actual} 分。",
+    "en": "{requested} min → actually {actual} min."
+  },
+  "lifeSettings.intervalFloorReason": {
+    "ja": "{minutes} 分より短くはできません。",
+    "en": "It cannot be shorter than {minutes} minutes."
+  },
+  "lifeSettings.intervalEvenCapReason": {
+    "ja": "均等モードでは {minutes} 分が上限です。",
+    "en": "In Even mode the limit is {minutes} minutes."
+  },
+  "lifeSettings.estimateNote": {
+    "ja": "目安です。会話している間は自分の時間を過ごさないため、実際はこれより少なくなることがあります。",
+    "en": "This is an estimate. The persona does not spend time on its own during conversations, so the actual number can be lower."
+  },
+  "lifeSettings.estimateUnavailable": {
+    "ja": "起床時刻と就寝時刻を両方設定すると、一日の回数の目安が出ます。",
+    "en": "Set both a wake time and a bedtime to see the estimated number of times per day."
+  },
+  "lifeSettings.allStopNotice": {
+    "ja": "全体設定で「自律の全停止」が有効になっています。解除するまで、どのペルソナも自分の時間を過ごしません。",
+    "en": "\"Stop all autonomy\" is on in the global settings. No persona spends time on its own until it is turned off."
+  },
+  "lifeSettings.saved": {
+    "ja": "保存しました。",
+    "en": "Saved."
+  },
+  "lifeSettings.savedUnsynced": {
+    "ja": "保存しましたが、予約への反映に失敗しました。しばらくすると自動で反映されます。",
+    "en": "Saved, but applying it to the schedule failed. It will be applied automatically shortly."
+  },
+  "lifeSettings.saveFailed": {
+    "ja": "自律の設定を保存できませんでした: {detail}",
+    "en": "Could not save the autonomy settings: {detail}"
+  },
+  "lifeSettings.loadFailed": {
+    "ja": "自律の設定を読み込めませんでした: {detail}",
+    "en": "Could not load the autonomy settings: {detail}"
+  },
+  "lifeSettings.retry": {
+    "ja": "再読み込み",
+    "en": "Retry"
+  },
+  "lifeSettings.notLoaded": {
+    "ja": "設定の読み込みが終わっていないため保存できません。",
+    "en": "The settings have not finished loading, so they cannot be saved."
+  },
+  "lifeSettings.unsaved": {
+    "ja": "未保存の変更があります",
+    "en": "Unsaved changes"
+  },
+  "lifeSettings.save": {
+    "ja": "自律の設定を保存",
+    "en": "Save autonomy settings"
+  },
+  "autonomyAllStop.label": {
+    "ja": "自律の全停止",
+    "en": "Stop all autonomy"
+  },
+  "autonomyAllStop.description": {
+    "ja": "すべてのペルソナの自発の行動と、それに伴う API 課金を一時的に止めます。ペルソナごとの自律の設定は変わらず、解除すると元の設定で再開します。アラームは鳴り続けます。",
+    "en": "Temporarily stops every persona's self-initiated activity and the API charges that come with it. Each persona's autonomy setting stays as it is, and turning this off resumes with those settings. Alarms keep ringing."
+  },
+  "autonomyAllStop.activeBadge": {
+    "ja": "停止中",
+    "en": "Stopped"
+  },
+  "autonomyAllStop.loadFailed": {
+    "ja": "自律の全停止の状態を読み込めませんでした: {detail}",
+    "en": "Could not load the \"Stop all autonomy\" state: {detail}"
+  },
+  "autonomyAllStop.saveFailed": {
+    "ja": "自律の全停止を切り替えられませんでした: {detail}",
+    "en": "Could not switch \"Stop all autonomy\": {detail}"
   }
 }

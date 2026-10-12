@@ -1,0 +1,201 @@
+/* ペルソナ設定モーダルの「自律」節 (LifeSettingsSection)。
+   入力欄・ラベル・説明文は SettingsModal.module.css のクラスを共用し、
+   ここには節の枠と、この節にしか無い部品だけを置く。 */
+
+.section {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 1rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background: #f8fafc;
+    color: #1e293b;
+}
+
+.title {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #1e293b;
+}
+
+.loading {
+    display: flex;
+    justify-content: center;
+    padding: 0.5rem;
+}
+
+.checkRow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+}
+
+.timeRow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+}
+
+.timeField {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    flex: 1 1 10rem;
+}
+
+.inlineRow {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+}
+
+.numberInput {
+    width: 7rem;
+}
+
+.hint {
+    font-size: 0.85em;
+    color: #475569;
+}
+
+.estimate {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.75rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    background: white;
+}
+
+.estimateMain {
+    font-weight: 600;
+    color: #1e293b;
+}
+
+.estimateNote {
+    font-size: 0.8rem;
+    color: #475569;
+}
+
+.inlineError {
+    font-size: 0.8rem;
+    color: #b91c1c;
+}
+
+.error {
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    background: #fee2e2;
+    color: #b91c1c;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.warning {
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    border: 1px solid #fcd34d;
+    background: #fffbeb;
+    color: #b45309;
+    font-size: 0.85rem;
+}
+
+.success {
+    font-size: 0.85rem;
+    color: #15803d;
+}
+
+.actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.75rem;
+}
+
+.saveBtn {
+    padding: 0.4rem 1rem;
+    background: #2563eb;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.saveBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.retryBtn {
+    padding: 0.2rem 0.6rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    background: white;
+    color: #1e293b;
+    cursor: pointer;
+}
+
+.retryBtn:hover {
+    background: #f1f5f9;
+}
+
+/* --- Dark mode -------------------------------------------------------- */
+
+:global([data-theme="dark"]) .section {
+    background: #0f172a;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .title,
+:global([data-theme="dark"]) .estimateMain {
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .hint,
+:global([data-theme="dark"]) .estimateNote {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .estimate {
+    background: #0f172a;
+    border-color: #334155;
+}
+
+:global([data-theme="dark"]) .inlineError {
+    color: #fca5a5;
+}
+
+:global([data-theme="dark"]) .error {
+    background: rgba(127, 29, 29, 0.25);
+    color: #fca5a5;
+}
+
+:global([data-theme="dark"]) .warning {
+    border-color: #92400e;
+    background: rgba(251, 191, 36, 0.12);
+    color: #fbbf24;
+}
+
+:global([data-theme="dark"]) .success {
+    color: #86efac;
+}
+
+:global([data-theme="dark"]) .retryBtn {
+    background: #0f172a;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .retryBtn:hover {
+    background: rgba(255, 255, 255, 0.06);
+}

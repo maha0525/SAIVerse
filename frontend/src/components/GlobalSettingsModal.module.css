@@ -1920,3 +1920,61 @@
 :global([data-theme="light"]) .aboutChannel {
     color: #b45309;
 }
+
+/* ── 自律の全停止 (autonomyAllStop) ──
+   このファイルは暗色が既定で、明色は [data-theme="light"] で上書きする流儀。
+   ON 中は枠・バッジ・トグルを警告色にして、止まっていることを見落とさせない。 */
+.allStopActive {
+    border-color: #b91c1c;
+    background: rgba(127, 29, 29, 0.18);
+}
+
+.allStopBadge {
+    padding: 0.15rem 0.6rem;
+    border-radius: 999px;
+    border: 1px solid #b91c1c;
+    background: rgba(239, 68, 68, 0.18);
+    color: #fca5a5;
+    font-size: 0.75rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.toggle.active.toggleDanger {
+    background: #dc2626;
+}
+
+.toggleDisabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.allStopError {
+    margin-top: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    background: rgba(127, 29, 29, 0.25);
+    color: #fca5a5;
+    font-size: 0.85rem;
+    overflow-wrap: anywhere;
+}
+
+:global([data-theme="light"]) .allStopActive {
+    border-color: #fca5a5;
+    background: #fef2f2;
+}
+
+:global([data-theme="light"]) .allStopBadge {
+    border-color: #fca5a5;
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+:global([data-theme="light"]) .toggle.active.toggleDanger {
+    background: #dc2626;
+}
+
+:global([data-theme="light"]) .allStopError {
+    background: #fee2e2;
+    color: #b91c1c;
+}
