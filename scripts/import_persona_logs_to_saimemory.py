@@ -440,9 +440,20 @@ def _print_import_summary(
         print(
             "注意: 一部のメッセージで埋め込みが完了していません "
             f"(不足 {shortfall} 件、うち失敗・編集で持ち越した分 {total_deferred} 件)。"
-            "そのままでも次回起動時に警告が出て回復できますが、今すぐ埋めるなら "
-            "python scripts/reembed_memory.py <persona_id> を実行してください。"
         )
+        if total_deferred:
+            print(
+                "  持ち越した分は次回起動時に警告が出て回復できます。今すぐ埋めるなら "
+                "python scripts/reembed_memory.py <persona_id> を実行してください。"
+            )
+        if shortfall > total_deferred:
+            # ベクトル行ごと無い欠落 (バックフィル失敗など) は、起動時警告にも
+            # 通常の再計算にも掛からない。このスクリプトの再実行か --force で埋める。
+            print(
+                f"  残りの {shortfall - total_deferred} 件はベクトル行ごと欠けています。"
+                "このスクリプトを再実行するか、"
+                "python scripts/reembed_memory.py <persona_id> --force で埋めてください。"
+            )
     else:
         print(
             "自動想起はこの時点から機能します。\n"
