@@ -89,10 +89,17 @@ def immediate_transaction(
         conn.execute("BEGIN IMMEDIATE")
         try:
             yield
+            # commit の失敗も巻き戻しの対象 — try の外に置くと、失敗した
+            # トランザクションが開いたまま残り、次の immediate_transaction が
+            # 「呼び手のトランザクションへの相乗り」と誤認して commit を
+            # 発行しなくなる (保存成功の通知と永続化が食い違う)。
+            conn.commit()
         except BaseException:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                LOGGER.warning("rollback after a failed transaction also failed", exc_info=True)
             raise
-        conn.commit()
 
 
 def _lock_for_key(key: str) -> threading.RLock:

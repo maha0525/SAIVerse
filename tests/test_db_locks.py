@@ -115,6 +115,46 @@ class TestDbLocks(unittest.TestCase):
         self.assertEqual(len(seen), 8)
         self.assertEqual(len({id(lock) for lock in seen}), 1)
 
+    def test_a_failed_commit_rolls_back_and_later_writes_stand_alone(self):
+        """確定 (commit) の失敗も巻き戻し、次の書き込みを道連れにしない。
+
+        確定が try の外にあった頃は、失敗したトランザクションが開いたまま残り、
+        次の immediate_transaction が「呼び手のトランザクションへの相乗り」と
+        誤認して確定を発行しなかった (保存成功の通知と永続化が食い違う)。
+        """
+        from sai_memory.db_locks import immediate_transaction
+
+        class _FailsOnce(sqlite3.Connection):
+            fail_next_commit = False
+
+            def commit(self):
+                if self.fail_next_commit:
+                    self.fail_next_commit = False
+                    raise sqlite3.OperationalError("injected commit failure")
+                super().commit()
+
+        db = self.db_path.parent / "commit_failure.db"
+        conn = sqlite3.connect(str(db), factory=_FailsOnce)
+        try:
+            conn.execute("CREATE TABLE t (v TEXT)")
+            conn.commit()
+
+            conn.fail_next_commit = True
+            with self.assertRaises(sqlite3.OperationalError):
+                with immediate_transaction(conn):
+                    conn.execute("INSERT INTO t VALUES ('lost')")
+
+            # 失敗したトランザクションは巻き戻っていて、開いたまま残らない。
+            self.assertFalse(conn.in_transaction)
+
+            # 次の書き込みは独立して確定される (相乗り誤認で素通りしない)。
+            with immediate_transaction(conn):
+                conn.execute("INSERT INTO t VALUES ('kept')")
+            rows = [r[0] for r in conn.execute("SELECT v FROM t")]
+            self.assertEqual(rows, ["kept"])
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

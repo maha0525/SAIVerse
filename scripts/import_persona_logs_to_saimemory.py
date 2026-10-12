@@ -350,6 +350,22 @@ def migrate_persona(
                 backfill_result["total_missing"],
                 backfill_result["failed"],
             )
+        if not backfill_result.get("aborted"):
+            # 書き込み時に埋め込みを作れなかった分は「空のベクトル行」として
+            # 残っている (ベクトル行ゼロの欠落とは別勘定)。ここで一緒に埋める。
+            try:
+                stale_result = adapter.reembed_stale_messages()
+                if stale_result.get("total", 0):
+                    LOGGER.info(
+                        "Persona %s: re-embedded %d/%d deferred/stale vectors.",
+                        persona_id, stale_result.get("embedded", 0), stale_result.get("total", 0),
+                    )
+            except Exception as exc:
+                LOGGER.warning(
+                    "Persona %s: deferred-vector re-embed could not run: %s "
+                    "(the startup check will flag the leftovers)",
+                    persona_id, exc,
+                )
 
     elapsed = time.monotonic() - started_at
 

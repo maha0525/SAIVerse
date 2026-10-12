@@ -222,8 +222,13 @@ def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> None:
                 stats = adapter.backfill_missing_message_embeddings()
                 if stats.get("aborted"):
                     raise RuntimeError(stats.get("error"))
-                backfilled = stats.get("embedded", 0)
-                still_missing = stats.get("total_missing", 0) - backfilled
+                # 書き込み時に埋め込みを作れなかった分は「空のベクトル行」として
+                # 残っている (ベクトル行ゼロの欠落とは別勘定)。ここで一緒に埋める。
+                stale_stats = adapter.reembed_stale_messages()
+                backfilled = stats.get("embedded", 0) + stale_stats.get("embedded", 0)
+                still_missing = (
+                    stats.get("total_missing", 0) - stats.get("embedded", 0)
+                ) + (stale_stats.get("total", 0) - stale_stats.get("embedded", 0))
                 total_imported = sum(
                     int(item.get("messages_imported", 0)) for item in results
                     if item.get("status") == "imported"
