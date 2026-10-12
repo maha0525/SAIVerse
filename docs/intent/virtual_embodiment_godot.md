@@ -649,3 +649,11 @@ SkyrimのEnergyVad / PushToTalkVadをそのまま移植し、Godotマイク選�
 更新前のin_flight行:
 
 | 🟠 実装中 | Godot / ARDY 仮想身体デモ | デスクトップFPS操作・複数アバター表示・VR左スティック移動が利用可能。次 = Quest 2で表示・頭部追跡・等速移動を確認する。残 = player歩行アニメーション、瞬き・視線、/emote、Idle scheduler。 | まはー(Quest 2の装着・操作確認) / 私(実機ログ確認と残りの実装) | [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md) | 2026-10-10 |
+
+### 2026-10-12 発話の音声・字幕と全身エモート (PR #387)
+
+Gemini が実装した PR #387 をレビューし、エモート記法の案内をリアルタイム情報から head の案内セクションと知覚の差分通知へ移した (まはーの指摘: リアルタイム情報では案内が消えたことが出来事として残らず、記法を使い続ける恐れがある)。経緯は [addon_speak_hooks.md](addon_speak_hooks.md)。
+
+更新前のin_flight行:
+
+| 🟠 実装中 | Godot / ARDY 仮想身体デモ | FPS操作・複数アバター・VR左スティック移動・音声入力(音量閾値/PTT)を実装。次 = Quest 2で表示・頭部追跡・等速移動・マイク入力を確認。残 = player歩行アニメーション、瞬き・視線、/emote、Idle scheduler。 | まはー(Quest 2の装着・操作確認) / 私(実機ログ確認と残りの実装) | [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md) | 2026-10-10 |
