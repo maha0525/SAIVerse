@@ -47,6 +47,17 @@ def test_exact_half_open_boundaries(pricing, at, expected):
     assert model_configs.calculate_cost("dated", 1_000_000, 0, at=at) == expected
 
 
+def test_long_context_1h_write_rate_without_a_base_1h_rate(pricing):
+    del pricing["cache_write_1h_per_1m_tokens"]
+    pricing["periods"][0]["rates"].update(long_context_threshold_tokens=100_000,
+                                          long_context_cache_write_1h_per_1m_tokens=6.0)
+    assert model_configs.calculate_cost("dated", 1_000_000, 0, cache_write_tokens=1_000_000,
+                                        cache_ttl="1h", at=START) == pytest.approx(6.0)
+    # Below the threshold the standard tier has no 1h rate, so the 5m rate applies.
+    assert model_configs.calculate_cost("dated", 100_000, 0, cache_write_tokens=100_000,
+                                        cache_ttl="1h", at=START) == pytest.approx(0.25)
+
+
 def test_period_end_is_reported_only_inside_the_period(pricing):
     assert model_configs.get_model_pricing("dated", at=START)["period_ends_at"] == END.isoformat()
     assert "period_ends_at" not in model_configs.get_model_pricing("dated", at=END)
