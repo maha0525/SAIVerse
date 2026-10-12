@@ -28,6 +28,18 @@ const prepare = moduleObject.exports.prepareMessageMarkdown;
     assert(original.includes('body_emote')); // render-only transformation
   }
   assert.equal(prepare('普通の文'), '普通の文');
+  // A persona explaining the syntax in code keeps it verbatim (no literal <span> in code).
+  const inline = '書き方は `{"body_emote": "smile"}` だよ {"body_emote": "nod"}';
+  const inlineHtml = renderToStaticMarkup(React.createElement(Markdown, {
+    rehypePlugins: [raw, [sanitize, schema]], children: prepare(inline),
+  }));
+  assert(inlineHtml.includes('<code>{&quot;body_emote&quot;: &quot;smile&quot;}</code>'), inlineHtml);
+  assert(inlineHtml.includes('<span class="body-emote">(nod)</span>'), inlineHtml);
+  assert(!inlineHtml.includes('&lt;span'), inlineHtml);
+  const fenced = '```\n{"body_emote": "wave"}\n```\n\n後 {"body_emote": "joy"}';
+  const fencedPrepared = prepare(fenced);
+  assert(fencedPrepared.includes('```\n{"body_emote": "wave"}\n```'), fencedPrepared);
+  assert(fencedPrepared.includes('<span class="body-emote">(joy)</span>'), fencedPrepared);
   assert(prepare('{"body_emote":"\\u006e\\u006f\\u0064"}').includes('(nod)'));
   const attack = prepare('{"body_emote":"<script>alert(1)</script>"}');
   const html = renderToStaticMarkup(React.createElement(Markdown, { rehypePlugins: [raw, [sanitize, schema]], children: attack }));

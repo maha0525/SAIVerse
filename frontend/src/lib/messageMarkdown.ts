@@ -1,8 +1,16 @@
 const SPELL_RESULT_BLOCK_RE =
     /<details\b[^>]*class="[^"]*\bspellResult\b[^"]*"[^>]*>[\s\S]*?<\/details>/g;
 
-const BODY_EMOTE_RE = /\{\s*"body_emote"\s*:\s*"(?:\\.|[^"\\])*"\s*\}/g;
+// Code spans and fenced blocks are matched first and kept verbatim: a persona
+// explaining the syntax itself (`{"body_emote": "smile"}`) must not get a raw
+// <span> tag, which Markdown would show literally inside the code.
+const BODY_EMOTE_OR_CODE_RE =
+    /(`{3,}[\s\S]*?`{3,}|~{3,}[\s\S]*?~{3,}|`[^`\n]+`)|(\{\s*"body_emote"\s*:\s*"(?:\\.|[^"\\])*"\s*\})/g;
 const BODY_EMOTES = new Set(['smile', 'nod', 'joy', 'hug', 'happy', 'wave', 'think', 'surprised', 'laugh']);
+
+function replaceBodyEmote(match: string, code: string | undefined, marker: string | undefined): string {
+    return code !== undefined || marker === undefined ? match : displayBodyEmote(marker);
+}
 
 function displayBodyEmote(marker: string): string {
     try {
@@ -34,7 +42,7 @@ export function prepareMessageMarkdown(text: string): string {
     );
 
     return withLegacyBoundaries
-        .replace(BODY_EMOTE_RE, displayBodyEmote)
+        .replace(BODY_EMOTE_OR_CODE_RE, replaceBodyEmote)
         .replace(/<user_only(?:\s[^>]*)?>/g, '')
         .replace(/<\/user_only>/g, '');
 }
