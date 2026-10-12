@@ -281,7 +281,8 @@ def _refire_first_attempts(manager: "SAIVerseManager") -> Dict[str, int]:
     """execution_id → このプロセスで最初に refire を試みた epoch 秒 (in-memory)。
 
     再試行窓 (:data:`PREPARED_REFIRE_EXPIRE_AFTER_SECONDS`) の起点。manager に
-    持たせるのは、回復 tick が単一 dispatch スレッドで直列に走るため排他が
+    持たせるのは、回復 tick が周期予約 (schedule_periodic — 前回の callback の
+    完了後に次回を積む) で自分自身と重ならず、ここ以外から触られないため排他が
     不要なのと、プロセス再起動で自然に窓がやり直しになるため (停止を跨いだ
     prepared は復旧後に新しい窓をもらう — durable recovery の意味論)。
     """

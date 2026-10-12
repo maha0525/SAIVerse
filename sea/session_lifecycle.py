@@ -1934,7 +1934,11 @@ class SessionLifecycle:
             threshold_ratio = 0.3
 
         wait_seconds = ttl_seconds * (1.0 - threshold_ratio)
-        fire_at = datetime.now() + timedelta(seconds=wait_seconds)
+        # 期限は EventScheduler と同じ clock.now() で刻む (datetime.now() では
+        # 仮想クロックのシム中に期限がシム終了後へ飛ぶ)
+        from saiverse import clock
+
+        fire_at = clock.now() + timedelta(seconds=wait_seconds)
         # (persona, model) ごとに独立予約 (beat_execution_context.md §3.1 —
         # Session ごとに独立監視)。旧 key f"ttl:{persona_id}" の 1 ペルソナ 1 予約
         # 上書きは廃止した。
@@ -4656,8 +4660,10 @@ class SessionLifecycle:
         scheduler = getattr(self.manager, "event_scheduler", None) if self.manager else None
         if scheduler is None:
             return
+        from saiverse import clock
+
         scheduler.schedule(
-            fire_at=datetime.now() + timedelta(seconds=self.COLD_SWEEP_INTERVAL_SECONDS),
+            fire_at=clock.now() + timedelta(seconds=self.COLD_SWEEP_INTERVAL_SECONDS),
             callback=self._cold_window_sweep_tick,
             key=self._COLD_SWEEP_KEY,
         )
@@ -4665,10 +4671,11 @@ class SessionLifecycle:
     def _cold_window_sweep_tick(self) -> None:
         """全 persona を巡回して先回り畳み (§14-4) の条件を検査する。
 
-        検査は読みだけ (安い・LLM なし)。畳みが要る persona だけ daemon
-        スレッドへ逃がす — EventScheduler の dispatch スレッドで重い LLM 処理を
-        同期実行すると後続の予約が滞るため (saiverse/event_scheduler.py の
-        docstring: 重い処理は別 thread に投げる)。
+        検査は読みだけ (安い・LLM なし)。畳みが要る persona だけ persona ごとの
+        daemon スレッドへ逃がす — 巡回の中で一人の重い LLM 処理を同期実行すると、
+        後ろに並んだ persona の検査と次回の巡回の予約がその分遅れるため
+        (EventScheduler 自体は callback をワーカースレッドで走らせるので、他の
+        予約は止まらない)。
 
         "due" でも、前回の試行から状態が動いていない persona は素通しする
         (:meth:`_cold_sweep_fingerprint`)。指紋が取れない (None) ときは素通し

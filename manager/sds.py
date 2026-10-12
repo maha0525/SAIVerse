@@ -75,7 +75,9 @@ class SDSMixin:
         ``schedule_periodic`` だと固定 interval しか持てないので、ここは
         ``schedule()`` を毎回呼ぶ手動再 register 方式を採用。
         """
-        from datetime import datetime, timedelta
+        from datetime import timedelta
+
+        from saiverse import clock
         try:
             success = self._send_heartbeat()
             self._update_cities_from_sds()
@@ -101,7 +103,7 @@ class SDSMixin:
         if scheduler is None or getattr(self, "sds_stop_event", None) is None or self.sds_stop_event.is_set():
             return
         scheduler.schedule(
-            fire_at=datetime.now() + timedelta(seconds=interval),
+            fire_at=clock.now() + timedelta(seconds=interval),
             callback=self._sds_tick_and_reschedule,
             key=self._SDS_SCHEDULER_KEY,
         )

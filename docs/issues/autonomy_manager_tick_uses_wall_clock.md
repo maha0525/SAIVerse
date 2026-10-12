@@ -1,6 +1,6 @@
 # AutonomyManager の watchdog tick が実時刻で刻まれる (仮想クロックを見ない)
 
-**ステータス**: 未解決 (低優先 — 現物は休眠機構)
+**ステータス**: 検証待ち (2026-10-12、v0.4 段 3 の前提工事として修正 — 下の「経緯」)
 **作成日**: 2026-08-22
 **関連**: `saiverse/autonomy_manager.py` / `saiverse/clock.py` / `saiverse/event_scheduler.py` / [沈黙タイマーの同型修正](../intent/track_retirement.md) §8.5 穴 1
 
@@ -56,3 +56,26 @@ tick はシムの中で一度も発火しない。
 その間ずっと後ろへずれる。いま実際に待つものが無くなっただけで、構造は残っている
 (次に誰かがロック内で重い処理を書けば再発する)。v3 §5 のティックスケジューラの設計で
 「callback は何を待ってよいか」を明示的に決めること。
+
+## 経緯
+
+- **2026-10-12 修正 (v0.4 段 3 の前提工事、`autonomous_behavior_v04_plan.md` §8.2 決定 A と同じ便)**:
+  - 時計: `AutonomyManager` の `start()` の即時予約・`_schedule_next_tick()`・
+    `get_next_tick_eta_seconds()` を `saiverse.clock.now()` 基準へ統一した。既知だった
+    cache keep-alive の予約 (`sea/session_lifecycle.py` `schedule_cache_ttl_pulse`) に
+    加え、全数掃討で同族が他に 5 箇所見つかり、同じ修正を当てた — 先回り畳みの見張り
+    (`schedule_cold_window_sweep`)、SDS heartbeat の初回と再予約
+    (`saiverse/saiverse_manager.py` / `manager/sds.py`)、ペルソナスケジュールの次回発火の
+    計算 (`saiverse/schedule_manager.py` `_compute_next_fire_at`) と interval の起点に
+    なる `LAST_EXECUTED_AT` の刻印。実モードでは `clock.now()` == `datetime.now()` なので
+    挙動は変わらない。
+  - 発火スレッドの要件 (上の「同じ机で扱う要件」): EventScheduler の dispatch スレッドは
+    期限の来た callback を発火ごとのワーカースレッド (daemon) へ手渡すだけになった。
+    callback はブロックしてよく、他の予約を遅らせない。仮想クロックの同期駆動
+    (`run_due`) だけは呼び出しスレッド上で同期実行のまま。
+  - 回帰テスト: `tests/test_event_scheduler.py` (ブロックする callback が他 key を
+    遅らせない / 例外がワーカーで吸収される / run_due は同期)、
+    `tests/test_autonomy_manager.py::TestTickDeadlineFollowsVirtualClock`、
+    `tests/test_cache_keepalive.py::test_ttl_schedule_deadline_follows_virtual_clock`。
+  - 残る検証: 段 3 のティックスケジューラを早回しのシムで回したときに、tick が仮想時刻で
+    発火すること (この issue の「先に直すべき条件」そのもの)。

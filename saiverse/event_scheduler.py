@@ -16,6 +16,17 @@ Intent A v0.10 / Intent B v0.7 の「メタレイヤーの定期実行入口」�
 addon 由来のポーリング (X 監視等) は本 Phase ではスコープ外。
 詳細: ``docs/issues/addon_event_scheduler_integration.md``。
 
+スレッドの形 (v0.4 自律運転 §8.2 決定 A、2026-10-12):
+- dispatch スレッドは「時刻が来たら手渡す」だけをする。callback は発火ごとに
+  起こす専用ワーカースレッド (daemon) で実行する。callback がロック待ち・DB
+  書き込み・LLM 呼び出しで数分ブロックしても、他の予約 (全ペルソナのアラーム・
+  keep-alive・会話の沈黙タイマー・回復の見回り) の発火を遅らせない。
+- 同時刻の別 key の callback の実行順序は保証しない (別々のワーカーで並走しうる)。
+  ペルソナ内の直列性は席 (PulseController) と Beat ロックが、同じ発火の二重実行は
+  実行台帳の claim が持つ — 発火装置の単一スレッドに直列性を頼らないこと。
+- 仮想クロックの同期駆動 (:meth:`EventScheduler.run_due`) だけは従来どおり
+  呼び出しスレッド上で同期実行する (シミュレーションの決定性が目的の API)。
+
 責務外:
 - リトライポリシー (callback 側のドメイン責務)
 - callback の例外による再試行 (WARN ログ + 該当予約消去のみ)
@@ -64,7 +75,7 @@ class EventScheduler:
         scheduler = EventScheduler()
         scheduler.start()
         scheduler.schedule(
-            fire_at=datetime.now() + timedelta(seconds=30),
+            fire_at=clock.now() + timedelta(seconds=30),
             callback=lambda: print("fired"),
             key="my_event",
         )
@@ -72,8 +83,17 @@ class EventScheduler:
         scheduler.stop()
 
     同じ key で再 schedule すると古い予約は cancel される (上書き)。
-    callback は EventScheduler の dispatch スレッドで同期実行される。
-    重い処理は callback 内で別 thread / queue に投げること。
+    ``fire_at`` は ``saiverse.clock.now()`` 基準で計算すること (期限の比較が
+    clock.now() で行われるため。``datetime.now()`` で刻むと仮想クロックの
+    シミュレーション中に期限がシム終了後へ飛ぶ)。
+
+    callback の実行スレッドの契約 (実モード = dispatch スレッド経由):
+    - callback は発火ごとの専用ワーカースレッド (daemon) で実行される。
+      ブロックしてよく、他の予約の発火を遅らせない。
+    - 同時刻の別 key の callback の実行順序は保証しない。
+    - 例外は WARN ログで吸収され、他の予約に影響しない。
+    - :meth:`stop` は走行中のワーカーを join しない (daemon のまま放置)。
+    仮想クロックの同期駆動 (:meth:`run_due`) では呼び出しスレッド上で同期実行される。
     """
 
     def __init__(self) -> None:
@@ -106,7 +126,11 @@ class EventScheduler:
         LOGGER.info("[event_scheduler] started")
 
     def stop(self) -> None:
-        """dispatch スレッドを停止する。pending callback は破棄される。"""
+        """dispatch スレッドを停止する。pending callback は破棄される。
+
+        既にワーカースレッドへ手渡された (走行中の) callback は join しない —
+        daemon スレッドとして走り切るか、プロセス終了とともに消える。
+        """
         self._stop_event.set()
         with self._cond:
             self._cond.notify_all()
@@ -171,8 +195,11 @@ class EventScheduler:
 
         Args:
             fire_at: 発火時刻 (naive datetime, ローカルタイム想定)。
-                過去時刻を渡すと即座に発火対象になる。
+                過去時刻を渡すと即座に発火対象になる。``saiverse.clock.now()``
+                基準で計算すること (``datetime.now()`` は仮想クロックとずれる)。
             callback: 発火時に呼ばれる関数。引数なし、戻り値無視。
+                実モードでは発火ごとの専用ワーカースレッドで実行される
+                (ブロックしてよい。他の予約を遅らせない)。
                 例外を投げてもよい (WARN ログ + 該当予約消去で吸収)。
             key: 予約識別子。同じ key で再 schedule すると古い予約は cancel される。
                 慣習: ``"<source>:<id>"`` (例 ``"ttl:air_city_a"``)。
@@ -284,6 +311,9 @@ class EventScheduler:
         callback が例外を投げた場合は **周期処理を停止する** (再 schedule しない)。
         無限ログ汚染防止のため。再開したければ呼び出し側で再度 schedule_periodic を呼ぶ。
 
+        再 schedule は callback の完了後に行うので、同じ key の周期 callback が
+        ワーカースレッド上で重なって走ることはない (前回が終わるまで次回は積まれない)。
+
         Args:
             interval_seconds: 呼び出し間隔 (秒)。callback の実行時間は含まない。
             callback: 周期的に呼ぶ関数。
@@ -354,13 +384,45 @@ class EventScheduler:
                 if self._entries_by_key.get(next_entry.key) is next_entry:
                     self._entries_by_key.pop(next_entry.key, None)
 
-            # Lock を抜けた状態で callback を実行 (callback 内で再 schedule 可能にする)
-            self._fire(next_entry)
+            # Lock を抜けた状態で、callback をワーカースレッドへ手渡す。
+            # dispatch スレッド上で callback を実行すると、callback が LLM 呼び出し
+            # 等でブロックしている間、全ペルソナの全予約が発火できない (§8.1 の欠陥)。
+            self._hand_off(next_entry)
 
         LOGGER.info("[event_scheduler] dispatch loop ended")
 
+    def _hand_off(self, entry: _Entry) -> None:
+        """期限の来た entry を発火ごとの専用ワーカースレッドへ手渡す (実モード経路)。
+
+        ワーカーは daemon で、``stop()`` は join しない。例外の吸収は ``_fire`` が
+        ワーカー上で行う。
+        """
+        if entry.cancelled:
+            # 取り出した直後にキャンセルされたケース。スレッドを起こすまでもない。
+            return
+        worker = threading.Thread(
+            target=self._fire,
+            args=(entry,),
+            name=f"evt-fire:{entry.key}",
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except RuntimeError:
+            # スレッドを起こせない (資源枯渇)。予約を黙って失うより、従来の
+            # 同期実行で発火させる方を取る — この発火のあいだ dispatch は止まるが、
+            # 周期予約 (schedule_periodic) の連鎖が切れるよりは被害が小さい。
+            LOGGER.exception(
+                "[event_scheduler] failed to start worker thread; firing key=%s "
+                "synchronously on the dispatch thread", entry.key,
+            )
+            self._fire(entry)
+
     def _fire(self, entry: _Entry) -> None:
-        """callback を呼び、例外を WARN ログで吸収する。"""
+        """callback を呼び、例外を WARN ログで吸収する。
+
+        実モードではワーカースレッド上で、``run_due`` では呼び出しスレッド上で走る。
+        """
         if entry.cancelled:
             # 取り出した直後にキャンセルされたケース。callback は呼ばない。
             return

@@ -142,6 +142,30 @@ def test_ttl_callback_does_not_fire_v1_meta_judgment():
     assert keepalive_calls == [("air", "claude-x")]
 
 
+def test_ttl_schedule_deadline_follows_virtual_clock():
+    """期限は EventScheduler と同じ saiverse.clock.now() 基準で刻む
+    (issue autonomy_manager_tick_uses_wall_clock の同族)。datetime.now() で刻むと
+    仮想クロックのシム中に期限が実時刻 (シム終了後) へ飛ぶ。"""
+    from saiverse import clock
+
+    persona = _persona()
+    scheduler = FakeScheduler()
+    runtime, _ = _make_runtime(persona, scheduler=scheduler)
+    runtime.session_lifecycle.get_anchor_validity_seconds = lambda model, persona_id=None: 1200
+
+    virtual_now = datetime(2020, 1, 1, 12, 0, 0)
+    clock.enable_virtual(virtual_now)
+    try:
+        runtime.session_lifecycle.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
+    finally:
+        clock.disable_virtual()
+
+    # threshold 0.3 → TTL 1200 秒の 70% = 840 秒後
+    assert scheduler.scheduled["ttl:air:claude-x"]["fire_at"] == (
+        virtual_now + timedelta(seconds=840)
+    )
+
+
 def test_ttl_schedule_respects_keep_cache_alive_off():
     persona = _persona()
     scheduler = FakeScheduler()

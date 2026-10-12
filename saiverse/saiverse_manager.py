@@ -387,10 +387,12 @@ class SAIVerseManager(
             self._update_cities_from_sds()
 
             # Phase 4-e: SDS heartbeat を EventScheduler に push (旧: 専用 thread)
-            from datetime import datetime, timedelta
+            from datetime import timedelta
+
+            from saiverse import clock
             self._sds_consecutive_failures = 0
             self.event_scheduler.schedule(
-                fire_at=datetime.now() + timedelta(seconds=self._SDS_BASE_INTERVAL),
+                fire_at=clock.now() + timedelta(seconds=self._SDS_BASE_INTERVAL),
                 callback=self._sds_tick_and_reschedule,
                 key=self._SDS_SCHEDULER_KEY,
             )

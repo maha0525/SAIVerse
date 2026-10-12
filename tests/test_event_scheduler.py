@@ -5,6 +5,8 @@
 - 同じ key で再 schedule すると古い予約は cancel される
 - cancel(key) で予約が消える
 - 例外を投げる callback は WARN ログ + 該当予約のみ消去 (loop は止まらない)
+- callback は発火ごとのワーカースレッドで走り、ブロックしても他の予約を遅らせない
+- run_due (仮想クロックの同期駆動) は呼び出しスレッド上で同期実行する
 - schedule_periodic は callback 完了ごとに再 schedule される
 - schedule_periodic は callback 例外で停止する
 - start/stop が複数回呼ばれても安全
@@ -175,6 +177,75 @@ class EventSchedulerTest(unittest.TestCase):
             self.assertEqual(call_count, 1)
         self.assertFalse(self.scheduler.has_key("periodic_fail"))
 
+    def test_blocking_callback_does_not_delay_other_keys(self) -> None:
+        """長くブロックする callback が走っていても、別 key の予約が時刻どおり発火する
+        (v0.4 自律運転 §8.2 決定 A — 発火装置は手渡すだけ)。
+
+        旧実装 (dispatch スレッドで同期実行) では、blocker が release されるまで
+        "on_time" が発火できず、このテストは timeout で落ちる。
+        """
+        release = threading.Event()
+        blocker_started = threading.Event()
+        on_time_log: list[float] = []
+        on_time_fired = threading.Event()
+        blocker_thread_names: list[str] = []
+
+        def blocker() -> None:
+            blocker_thread_names.append(threading.current_thread().name)
+            blocker_started.set()
+            release.wait(timeout=10.0)  # LLM 呼び出し等の長いブロックを模す
+
+        def on_time() -> None:
+            on_time_log.append(time.time())
+            on_time_fired.set()
+
+        try:
+            self.scheduler.schedule(datetime.now(), blocker, key="blocker")
+            self.assertTrue(blocker_started.wait(timeout=2.0), "blocker did not start")
+
+            target = datetime.now() + timedelta(milliseconds=200)
+            self.scheduler.schedule(target, on_time, key="on_time")
+
+            self.assertTrue(
+                on_time_fired.wait(timeout=2.0),
+                "a blocking callback must not hold back other reservations",
+            )
+            self.assertFalse(release.is_set())  # blocker はまだ走行中
+            elapsed = on_time_log[0] - target.timestamp()
+            self.assertGreaterEqual(elapsed, -0.05)
+            self.assertLess(elapsed, 1.0)
+            # callback は dispatch スレッドではなく発火ごとのワーカーで走る
+            self.assertEqual(blocker_thread_names, ["evt-fire:blocker"])
+        finally:
+            release.set()
+
+    def test_raising_callback_on_worker_does_not_affect_others(self) -> None:
+        """例外を投げる callback はワーカー上で吸収され、同時刻の予約・後続の予約・
+        dispatch ループのどれにも影響しない。"""
+        good_same_time = threading.Event()
+        good_later = threading.Event()
+        raised_on: list[str] = []
+
+        def boom() -> None:
+            raised_on.append(threading.current_thread().name)
+            raise RuntimeError("boom on worker")
+
+        now = datetime.now()
+        self.scheduler.schedule(now, boom, key="bad")
+        self.scheduler.schedule(now, good_same_time.set, key="good_same_time")
+        self.scheduler.schedule(
+            now + timedelta(milliseconds=300), good_later.set, key="good_later",
+        )
+
+        self.assertTrue(good_same_time.wait(timeout=2.0))
+        self.assertTrue(good_later.wait(timeout=2.0))
+        self.assertEqual(raised_on, ["evt-fire:bad"])
+        self.assertFalse(self.scheduler.has_key("bad"))
+        # dispatch ループは生きている (例外がワーカーの外へ漏れていない)
+        after = threading.Event()
+        self.scheduler.schedule(datetime.now(), after.set, key="after")
+        self.assertTrue(after.wait(timeout=2.0))
+
     def test_pending_count(self) -> None:
         """有効な予約数を返す。"""
         self.assertEqual(self.scheduler.pending_count(), 0)
@@ -206,6 +277,23 @@ class EventSchedulerLifecycleTest(unittest.TestCase):
     def test_stop_without_start_is_safe(self) -> None:
         sched = EventScheduler()
         sched.stop()  # 起動してなくても例外にならない
+
+
+class RunDueSynchronousTest(unittest.TestCase):
+    """run_due (仮想クロックの同期駆動) はワーカーへ手渡さず、呼び出しスレッド上で
+    callback を実行し終えてから返る — シミュレーションの決定性のための契約。"""
+
+    def test_run_due_executes_on_calling_thread_before_returning(self) -> None:
+        scheduler = EventScheduler()  # start() しない
+        ran_on: list[str] = []
+        scheduler.schedule(
+            datetime.now() - timedelta(seconds=1),
+            lambda: ran_on.append(threading.current_thread().name),
+            key="sync",
+        )
+        self.assertEqual(scheduler.run_due(datetime.now()), 1)
+        # 返った時点で実行済み (ワーカーに投げていれば空のことがある)
+        self.assertEqual(ran_on, [threading.current_thread().name])
 
 
 class ScheduleIfAbsentTest(unittest.TestCase):

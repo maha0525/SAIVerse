@@ -1595,7 +1595,7 @@ class ExecutionLedger:
             newer_than_seconds: 指定時、UPDATED_AT (mark_failed が刻む = 失敗
                 時刻) がこの秒数以内の行だけを DB 側で絞る (Codex W3 第九・十陣
                 — failed 履歴は再試行のたびに増えるため、無制限ロードは回復
-                tick (単一 dispatch スレッド) を劣化させる。UPDATED_AT を使う
+                tick を劣化させる。UPDATED_AT を使う
                 のは既存の複合索引 (STATUS, UPDATED_AT) に乗せるためでもある —
                 CREATED_AT には索引が無く、履歴総量に比例する走査になる)。
         """

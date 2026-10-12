@@ -246,5 +246,44 @@ class TestPeriodicTick(_BaseAutonomyTest):
             am.stop()
 
 
+class TestTickDeadlineFollowsVirtualClock(_BaseAutonomyTest):
+    """tick の期限は EventScheduler と同じ saiverse.clock.now() で刻む
+    (issue autonomy_manager_tick_uses_wall_clock)。datetime.now() で刻むと、
+    仮想クロックのシム中に期限がシム終了後 (実時刻) へ飛び、一度も発火しない。"""
+
+    def test_start_and_next_tick_are_due_in_virtual_time(self):
+        from datetime import datetime, timedelta
+
+        from saiverse import clock
+
+        # dispatch スレッドを使わず run_due で同期駆動する (シムの実行経路)
+        self.manager.event_scheduler.stop()
+        scheduler = EventScheduler()
+        self.manager.event_scheduler = scheduler
+
+        virtual_now = datetime(2020, 1, 1, 9, 0, 0)  # 実時刻よりずっと過去
+        clock.enable_virtual(virtual_now)
+        am = AutonomyManager("test_persona", self.manager, interval_minutes=10)
+        try:
+            self.assertTrue(am.start())
+            # 即時 tick は仮想時刻の「いま」が期限 → 仮想時刻で消化できる
+            self.assertEqual(scheduler.run_due(clock.now()), 1)
+            self.assertEqual(
+                self.manager.pulse_dispatcher.dispatch_autonomy_tick.call_count, 1,
+            )
+            # 次回は仮想時刻 + interval
+            next_fire = scheduler.next_fire_time()
+            self.assertEqual(
+                next_fire, virtual_now + timedelta(minutes=am.interval_minutes),
+            )
+            # 残り秒数も仮想時刻基準 (実時刻基準だと 0 に潰れる)
+            self.assertEqual(
+                am.get_next_tick_eta_seconds(), int(am.interval_minutes * 60),
+            )
+        finally:
+            am.stop()
+            clock.disable_virtual()
+
+
 if __name__ == "__main__":
     unittest.main()

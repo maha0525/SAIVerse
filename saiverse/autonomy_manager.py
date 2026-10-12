@@ -32,6 +32,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
+from saiverse import clock
+
 if TYPE_CHECKING:
     from saiverse.saiverse_manager import SAIVerseManager
     from persona.core import PersonaCore  # noqa: F401
@@ -151,8 +153,10 @@ class AutonomyManager:
                 return False
             self._state = AutonomyState.RUNNING
 
-        # 即時 fire (fire_at=now で EventScheduler に積む)
-        self._schedule_tick_at(datetime.now())
+        # 即時 fire (fire_at=now で EventScheduler に積む)。期限は EventScheduler と
+        # 同じ clock.now() で刻む (datetime.now() では仮想クロックのシム中に期限が
+        # シム終了後へ飛ぶ — issue autonomy_manager_tick_uses_wall_clock)
+        self._schedule_tick_at(clock.now())
         LOGGER.info(
             "[Autonomy:%s] Started (interval=%.1f min, push-driven)",
             self.persona_id, self.interval_minutes,
@@ -265,7 +269,7 @@ class AutonomyManager:
         entry = scheduler._entries_by_key.get(key)
         if entry is None or entry.cancelled:
             return None
-        remaining = entry.fire_at_ts - time.time()
+        remaining = entry.fire_at_ts - clock.now().timestamp()
         return max(0, int(remaining))
 
     # ------------------------------------------------------------------
@@ -274,7 +278,7 @@ class AutonomyManager:
 
     def _schedule_next_tick(self) -> None:
         """Push the next tick (interval_minutes 後) to the EventScheduler."""
-        fire_at = datetime.now() + timedelta(seconds=self.interval_minutes * 60)
+        fire_at = clock.now() + timedelta(seconds=self.interval_minutes * 60)
         self._schedule_tick_at(fire_at)
 
     def _schedule_tick_at(self, fire_at: datetime) -> None:

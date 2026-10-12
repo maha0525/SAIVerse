@@ -522,8 +522,15 @@ class ScheduleManager:
         EventScheduler は naive datetime (ローカルタイム) を受けるので、
         計算は UTC で行うが返り値は ``datetime.now()`` と同じ naive ローカル時刻に
         変換する。
+
+        「いま」は EventScheduler と同じ ``saiverse.clock.now()`` から取る
+        (naive ローカル → UTC aware)。``datetime.now()`` で刻むと仮想クロックの
+        シム中に次回発火が実時刻の日付で計算され、シムの外へ飛ぶ。
+        実モードでは ``clock.now()`` == ``datetime.now()`` なので挙動不変。
         """
-        now_utc = datetime.now(timezone.utc)
+        from saiverse import clock
+
+        now_utc = clock.now().astimezone(timezone.utc)
         schedule_type = schedule.SCHEDULE_TYPE
 
         if schedule_type == "periodic":
@@ -1456,7 +1463,12 @@ class ScheduleManager:
         if schedule_type == "oneshot":
             values = {PersonaSchedule.COMPLETED: True}
         elif schedule_type == "interval":
-            values = {PersonaSchedule.LAST_EXECUTED_AT: datetime.now(timezone.utc)}
+            # interval の次回発火の起点になる刻印なので、発火判定と同じ clock で刻む
+            from saiverse import clock
+
+            values = {
+                PersonaSchedule.LAST_EXECUTED_AT: clock.now().astimezone(timezone.utc)
+            }
         else:
             # periodic は前進すべき状態を持たない (次回発火は曜日+時刻で計算) が、
             # 行・世代フェンスの照合だけは行う (Codex W3 第八陣) — 実行中に行が
