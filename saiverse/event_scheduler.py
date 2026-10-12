@@ -185,6 +185,53 @@ class EventScheduler:
             self._cond.notify()
             return True
 
+    def schedule_if_present(
+        self,
+        fire_at: datetime,
+        callback: Callable[[], None],
+        key: str,
+    ) -> bool:
+        """有効な予約が **あるときだけ** 時刻を置き換える (無ければ何もしない)。
+
+        :meth:`schedule_if_absent` の対。判定と置き換えを同じロック区間で行う —
+        ``has_key`` で確かめてから ``schedule`` を呼ぶ形 (check-then-act) では、
+        その隙間に別スレッドが消した予約を生き返らせてしまう。用途は「生きて
+        いる予約だけを後ろへずらす」操作 (例: ティックの予約を最後の標準呼び出し
+        から T 分へ押し直す — 予約が無い = ライフ外では生やさない)。
+
+        Returns:
+            置き換えたら True、有効な予約が無くて何もしなかったら False。
+        """
+        fire_ts = fire_at.timestamp()
+        with self._cond:
+            existing = self._entries_by_key.get(key)
+            if existing is None or existing.cancelled:
+                return False
+            existing.cancelled = True
+            entry = _Entry(
+                fire_at_ts=fire_ts,
+                seq=next(self._seq_counter),
+                key=key,
+                callback=callback,
+            )
+            self._entries_by_key[key] = entry
+            heapq.heappush(self._heap, entry)
+            LOGGER.debug(
+                "[event_scheduler] schedule_if_present key=%s fire_at=%s (in %.1fs)",
+                key, fire_at.isoformat(timespec="seconds"),
+                fire_ts - clock.now().timestamp(),
+            )
+            self._cond.notify()
+            return True
+
+    def fire_time_of(self, key: str) -> Optional[datetime]:
+        """指定 key の有効な予約の発火時刻 (無ければ None)。"""
+        with self._cond:
+            entry = self._entries_by_key.get(key)
+            if entry is None or entry.cancelled:
+                return None
+            return datetime.fromtimestamp(entry.fire_at_ts)
+
     def schedule(
         self,
         fire_at: datetime,

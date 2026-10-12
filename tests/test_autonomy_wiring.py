@@ -478,7 +478,7 @@ def test_scheduled_judgment_refuses_retired_judgment_names(session_factory, monk
             "judgment_day_open", "judgment_day_close", "judgment_post_session",
         ):
             result = wiring.handle_scheduled_judgment(
-                manager, PERSONA_ID, name, params={"daily_budget_pulses": 24},
+                manager, PERSONA_ID, name, params={"tick_interval_minutes": 20},
             )
             assert result["submitted"] is False
             assert result["reason"] == "not a judgment playbook"
@@ -488,17 +488,19 @@ def test_scheduled_judgment_refuses_retired_judgment_names(session_factory, monk
 
 
 def test_life_settings_from_params_picks_only_life_settings():
-    """起床行の PLAYBOOK_PARAMS からライフ確定に効く値だけを拾う
-    (daily_budget_pulses / life_mode_override)。LIFE_MODES 外の値・非正の予算・
-    時間割用の daily_budget_rounds は落とす (書ける口をなくす、life.md v0.5 §3)。"""
+    """起床行の PLAYBOOK_PARAMS からライフの運転に効く値だけを拾う
+    (tick_interval_minutes / life_mode_override)。LIFE_MODES 外の値・非正の T・
+    退役した予算 (daily_budget_pulses — 段 3) と時間割用の daily_budget_rounds は
+    落とす (書ける口をなくす、life.md v0.5 §3)。"""
     assert day_plan.life_settings_from_params({
-        "daily_budget_pulses": 24, "life_mode_override": "even",
-        "daily_budget_rounds": 30, "other": "x",
-    }) == {"daily_budget_pulses": 24, "life_mode_override": "even"}
+        "tick_interval_minutes": 20, "life_mode_override": "even",
+        "daily_budget_pulses": 24, "daily_budget_rounds": 30, "other": "x",
+    }) == {"tick_interval_minutes": 20, "life_mode_override": "even"}
     assert day_plan.life_settings_from_params({
-        "daily_budget_pulses": 0, "life_mode_override": "bogus",
+        "tick_interval_minutes": 0, "life_mode_override": "bogus",
     }) == {}
-    assert day_plan.life_settings_from_params({"daily_budget_pulses": True}) == {}
+    assert day_plan.life_settings_from_params({"tick_interval_minutes": True}) == {}
+    assert day_plan.life_settings_from_params({"tick_interval_minutes": "30"}) == {}
     assert day_plan.life_settings_from_params(None) == {}
 
 
@@ -556,7 +558,7 @@ def test_schedule_manager_routes_wake_and_close_to_life_bookkeeping(
 
     sm = ScheduleManager(saiverse_manager=manager)
     opened = sm._execute_schedule(
-        _routing_schedule(1, "judgment_day_open", "08:00", {"daily_budget_pulses": 30}),
+        _routing_schedule(1, "judgment_day_open", "08:00", {"tick_interval_minutes": 20}),
         session=None,
     )
     closed = sm._execute_schedule(
@@ -564,7 +566,7 @@ def test_schedule_manager_routes_wake_and_close_to_life_bookkeeping(
     )
 
     assert routed == [
-        (PERSONA_ID, "start", {"daily_budget_pulses": 30}),
+        (PERSONA_ID, "start", {"tick_interval_minutes": 20}),
         (PERSONA_ID, "end", None),
     ]
     assert judged == []
@@ -732,9 +734,16 @@ def test_conversation_end_cancels_the_silence_timeout(session_factory):
     assert entry is None or entry.cancelled
 
 
-def test_conversation_timeout_defers_the_watchdog_tick(session_factory, monkeypatch):
-    """沈黙タイマーの発火は帳簿処理のあと watchdog の次回 tick を押し戻す。"""
+def test_conversation_timeout_leaves_the_tick_reservation_alone(
+    session_factory, monkeypatch,
+):
+    """沈黙タイマーの発火は帳簿処理だけで、ティックの予約には触らない (v0.4 段 3)。
+
+    会話の最後の標準呼び出しが予約を「そこから T 分」へ押し直しているので、
+    会話が終わると最後の標準呼び出しから T 分でティックが再開する (v3 §5)。
+    かつての見張りの押し戻し (defer_next_tick) は退役した。"""
     from saiverse import user_conversation as uc
+    from saiverse.autonomy_manager import tick_reservation_key
 
     manager, _persona = _make_manager(session_factory)
     conv_ends: List[Any] = []
@@ -742,15 +751,17 @@ def test_conversation_timeout_defers_the_watchdog_tick(session_factory, monkeypa
         wiring, "handle_conversation_end",
         lambda mgr, pid, **kw: conv_ends.append(pid) or {"closed": True},
     )
-    defers: List[str] = []
-    manager._autonomy_managers = {
-        PERSONA_ID: SimpleNamespace(defer_next_tick=lambda: defers.append("defer")),
-    }
+    tick_at = datetime(2026, 7, 4, 15, 30, 0)
+    manager.event_scheduler.schedule(
+        fire_at=tick_at, callback=lambda: None, key=tick_reservation_key(PERSONA_ID),
+    )
 
     uc.handle_conversation_timeout(manager, PERSONA_ID)
 
     assert conv_ends == [PERSONA_ID]
-    assert defers == ["defer"]
+    assert manager.event_scheduler.fire_time_of(
+        tick_reservation_key(PERSONA_ID),
+    ) == tick_at
 
 
 # ---------------------------------------------------------------------------
@@ -1382,14 +1393,14 @@ def test_watchdog_refires_life_start_when_today_has_no_life(session_factory, mon
     manager, _ = _make_manager(session_factory)
     _add_day_schedule(
         session_factory, "judgment_day_open", "08:00",
-        params={"daily_budget_pulses": 16},
+        params={"tick_interval_minutes": 20},
     )
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     clock.enable_virtual(datetime(2026, 7, 4, 10, 0, 0))
     calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
     assert out == {"action": "life_start_refire", "settled": True}
-    assert calls == [("start", {"daily_budget_pulses": 16})]
+    assert calls == [("start", {"tick_interval_minutes": 20})]
 
 
 def test_watchdog_does_not_refire_once_the_life_is_confirmed(
@@ -1407,13 +1418,14 @@ def test_watchdog_does_not_refire_once_the_life_is_confirmed(
 
     day_plan.confirm_life_for_today(
         manager, PERSONA_ID, PLAN_DATE, "08:00", "22:00",
-        requested_budget_pulses=10,
     )
     _mark_life_started(manager, PLAN_DATE)
 
     calls = _fake_life_start(monkeypatch)
     out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out == {"action": "none"}
+    # 走っているライフにはティックの予約の回復が掛かるが、この最小の manager には
+    # 予約を張る AutonomyManager が居ないので張らない (段 3-7)。
+    assert out == {"action": "none", "tick_armed": False}
     assert calls == []
 
 
@@ -1629,7 +1641,7 @@ def test_watchdog_does_not_open_a_new_day_while_a_life_is_running(
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
     day_plan.save_lives(manager, PERSONA_ID, "2026-07-04", [
-        {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
+        {"start": "23:00", "end": "06:00", "mode": "free"},
     ])
     _mark_life_started(manager, "2026-07-04")
     calls = _fake_life_start(monkeypatch)
@@ -1638,8 +1650,8 @@ def test_watchdog_does_not_open_a_new_day_while_a_life_is_running(
 
     assert out["action"] == "none"
     # 走っているライフがある (= その営業日のライフは確定済み) ので撃ち直しの
-    # 判定そのものに入らない
-    assert out == {"action": "none"}
+    # 判定そのものに入らない (ティックの予約を張る AutonomyManager は居ない)
+    assert out == {"action": "none", "tick_armed": False}
     assert calls == []
 
 
@@ -1656,7 +1668,7 @@ def test_watchdog_ignores_the_weekday_gate_while_a_life_is_running(
 
     yesterday = "2026-07-04"
     day_plan.save_lives(manager, PERSONA_ID, yesterday, [
-        {"start": "20:00", "end": "10:00", "budget_pulses": 20, "mode": "free"},
+        {"start": "20:00", "end": "10:00", "mode": "free"},
     ])
     _mark_life_started(manager, yesterday)
     calls = _fake_life_start(monkeypatch)
@@ -1665,7 +1677,7 @@ def test_watchdog_ignores_the_weekday_gate_while_a_life_is_running(
 
     # 走っているライフがある = 確定済み。曜日ゲートの理由 ("not a scheduled
     # day") も出さずに何もしない
-    assert out == {"action": "none"}
+    assert out == {"action": "none", "tick_armed": False}
     assert calls == []
 
 
@@ -1715,7 +1727,7 @@ def test_watchdog_settles_the_life_start_left_unapplied_after_confirmation(
 
     # その次の watchdog は何もしない (済印を見て撃たない)。
     out = wiring.watchdog_tick(manager, PERSONA_ID)
-    assert out == {"action": "none"}
+    assert out == {"action": "none", "tick_armed": False}
 
 
 def test_watchdog_life_start_resume_is_idempotent_against_a_settled_ledger(
@@ -1733,7 +1745,7 @@ def test_watchdog_life_start_resume_is_idempotent_against_a_settled_ledger(
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     clock.enable_virtual(datetime(2026, 7, 4, 9, 0, 0))
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "08:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+        {"start": "08:00", "end": "22:00", "mode": "free"},
     ])
     execution_id, runnable, _ = ledger.claim_execution(
         day_plan.LIFE_BOUNDARY_KIND_START,
@@ -1767,7 +1779,7 @@ def test_watchdog_settles_the_start_of_an_overnight_life_on_its_own_business_day
     _add_day_schedule(session_factory, "judgment_day_close", "06:00")
     clock.enable_virtual(datetime(2026, 7, 5, 0, 30, 0))
     day_plan.save_lives(manager, PERSONA_ID, "2026-07-04", [
-        {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
+        {"start": "23:00", "end": "06:00", "mode": "free"},
     ])
     calls = _fake_life_start(monkeypatch)
 
@@ -1791,7 +1803,7 @@ def test_watchdog_keeps_the_window_gate_for_a_zero_length_life(
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     clock.enable_virtual(datetime(2026, 7, 4, 23, 30, 0))   # 現行設定では窓外
     _write_legacy_lives(session_factory, "2026-07-04", [
-        {"start": "07:00", "end": "07:00", "budget_pulses": 20, "mode": "free",
+        {"start": "07:00", "end": "07:00", "mode": "free",
          "used_pulses": 0, "judgment_pulses": 0},
     ])
     calls = _fake_life_start(monkeypatch)
@@ -1818,7 +1830,7 @@ def test_watchdog_opens_the_new_day_even_after_yesterdays_life_ended(
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
     clock.enable_virtual(datetime(2026, 7, 4, 8, 0, 0))
     day_plan.save_lives(manager, PERSONA_ID, "2026-07-04", [
-        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+        {"start": "07:00", "end": "22:00", "mode": "free"},
     ])
 
     clock.enable_virtual(datetime(2026, 7, 5, 8, 0, 0))

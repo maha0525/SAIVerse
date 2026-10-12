@@ -411,5 +411,53 @@ class ScheduleIfAbsentTest(unittest.TestCase):
             scheduler.stop()
 
 
+class ScheduleIfPresentTest(unittest.TestCase):
+    """schedule_if_present / fire_time_of の契約 (v0.4 計画 段 3)。
+
+    用途はティックの予約を「最後の標準呼び出しから T 分」へ押し直すこと。予約が
+    無い (ライフ外) なら生やさない — 判定と置き換えを同じロック区間で行い、
+    消された予約を check-then-act の隙間で生き返らせない。
+    """
+
+    def setUp(self) -> None:
+        self.scheduler = EventScheduler()  # start() しない (run_due で同期実行)
+        self.fired: list[str] = []
+
+    def _at(self, seconds: float) -> datetime:
+        return datetime.now() + timedelta(seconds=seconds)
+
+    def test_does_nothing_when_absent(self) -> None:
+        moved = self.scheduler.schedule_if_present(
+            fire_at=self._at(-1), callback=lambda: self.fired.append("new"), key="k1",
+        )
+        self.assertFalse(moved)
+        self.assertIsNone(self.scheduler.fire_time_of("k1"))
+        self.assertEqual(self.scheduler.run_due(datetime.now()), 0)
+
+    def test_does_nothing_after_cancel(self) -> None:
+        self.scheduler.schedule(fire_at=self._at(60), callback=lambda: None, key="k1")
+        self.scheduler.cancel("k1")
+        self.assertFalse(self.scheduler.schedule_if_present(
+            fire_at=self._at(-1), callback=lambda: self.fired.append("revived"), key="k1",
+        ))
+        self.assertEqual(self.scheduler.run_due(datetime.now()), 0)
+        self.assertEqual(self.fired, [])
+
+    def test_replaces_the_time_and_callback_of_a_live_reservation(self) -> None:
+        self.scheduler.schedule(
+            fire_at=self._at(-1), callback=lambda: self.fired.append("old"), key="k1",
+        )
+        target = self._at(600)
+        self.assertTrue(self.scheduler.schedule_if_present(
+            fire_at=target, callback=lambda: self.fired.append("new"), key="k1",
+        ))
+        self.assertEqual(self.scheduler.fire_time_of("k1"), datetime.fromtimestamp(target.timestamp()))
+        # 元の期限 (過去) では発火しない
+        self.assertEqual(self.scheduler.run_due(datetime.now()), 0)
+        self.assertEqual(self.scheduler.run_due(target), 1)
+        self.assertEqual(self.fired, ["new"])
+        self.assertIsNone(self.scheduler.fire_time_of("k1"))
+
+
 if __name__ == "__main__":
     unittest.main()

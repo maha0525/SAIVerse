@@ -565,18 +565,11 @@ def handle_conversation_timeout(
         LOGGER.exception(
             "[user-conv] conversation-end bookkeeping failed: persona=%s", persona_id,
         )
-
-    # watchdog (AutonomyManager) の次回 tick を押し戻す (直後の watchdog と
-    # 重ならないように)。
-    try:
-        autonomy_managers = getattr(manager, "_autonomy_managers", None) or {}
-        am = autonomy_managers.get(persona_id)
-        if am is not None:
-            am.defer_next_tick()
-    except Exception:
-        LOGGER.exception(
-            "[user-conv] defer_next_tick failed: persona=%s", persona_id,
-        )
+    # ティックの予約には触らない (v0.4 計画 段 3): 会話中のティックは発火しても
+    # 空のまま予約し直すだけで、会話の最後の標準呼び出しが予約を「そこから T 分」
+    # へ押し直している — 会話が終わると、最後の標準呼び出しから T 分でティックが
+    # 再開する (v3 §5)。かつてここにあった見張りの押し戻し (defer_next_tick) は、
+    # 見張りが固定間隔の LLM なしの見回りになって役目が消えた。
 
 
 # ---------------------------------------------------------------------------

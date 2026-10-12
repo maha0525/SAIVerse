@@ -42,6 +42,69 @@ LOGGER = logging.getLogger(__name__)
 _WEAVE_INSPECT_FAILED = object()
 
 
+# ---------------------------------------------------------------------------
+# ティックの予約との接点 (v0.4 計画 段 3 — 決定 10 / C6)
+#
+# sea → saiverse の直接 import を避け、manager が持つ AutonomyManager の辞書
+# (``manager._autonomy_managers``) から引く。manager だけを読む関数にしてあるのは、
+# SessionLifecycle のメソッドを別の器に束ねて使う呼び出し (テスト) でも動くように。
+# ---------------------------------------------------------------------------
+
+
+def _autonomy_manager_of(manager: Any, persona_id: Optional[str]) -> Any:
+    """ペルソナの AutonomyManager (無ければ None)。"""
+    if manager is None or not persona_id:
+        return None
+    managers = getattr(manager, "_autonomy_managers", None)
+    if not isinstance(managers, dict):
+        return None
+    return managers.get(persona_id)
+
+
+def _notify_tick_of_standard_call(manager: Any, persona: Any, usage: Any) -> None:
+    """本人の標準モデルの呼び出しが成功した — ティックの予約を押し直す (決定 10)。
+
+    判定は usage.model (実際に応答した model) が ``persona.model`` (標準 tier の
+    解決値 — チャット UI の上書き > DEFAULT_MODEL > env > 既定、
+    ``saiverse.persona_model_selection``) と一致すること。軽量モデル (分身・
+    下請け) は一致しないので数えない。usage.model が空の呼び出しは本人の標準
+    モデルだという証拠が無いので数えない。押し直しの実体は AutonomyManager で、
+    予約が現に有るときだけ動く (ライフ外では生やさない)。失敗は握る — LLM の
+    呼び出し後の後処理を止めない。
+    """
+    usage_model = getattr(usage, "model", None)
+    persona_model = getattr(persona, "model", None)
+    if not usage_model or not persona_model or str(usage_model) != str(persona_model):
+        return
+    am = _autonomy_manager_of(manager, getattr(persona, "persona_id", None))
+    if am is None:
+        return
+    try:
+        am.notify_standard_call()
+    except Exception:
+        LOGGER.warning(
+            "[tick] failed to push back the tick reservation after a standard "
+            "call (persona=%s)", getattr(persona, "persona_id", "?"),
+            exc_info=True,
+        )
+
+
+def _tick_fire_at(manager: Any, persona_id: Optional[str]) -> Optional[datetime]:
+    """ティックの予約の発火時刻 (無い・読めなければ None)。keep-alive の抑制が読む。"""
+    am = _autonomy_manager_of(manager, persona_id)
+    if am is None:
+        return None
+    try:
+        fire_at = am.tick_fire_at()
+    except Exception:
+        LOGGER.warning(
+            "[keepalive] failed to read the tick reservation (persona=%s)",
+            persona_id, exc_info=True,
+        )
+        return None
+    return fire_at if isinstance(fire_at, datetime) else None
+
+
 def _rows_content_digest(rows: Sequence[Dict[str, Any]]) -> str:
     """保存行の (id, 本文) を順序込みで畳んだダイジェスト (sha256 の hex)。
 
@@ -1718,6 +1781,7 @@ class SessionLifecycle:
     def touch_anchor_after_llm_call(
         self, persona, usage, anchor_id: Optional[str] = None,
         only_if_anchor_unchanged: bool = False,
+        counts_as_standard_call: bool = True,
     ) -> None:
         """LLM 呼び出し成功後に session_anchor 行の updated_at を touch する (Phase 4-e)。
 
@@ -1759,9 +1823,20 @@ class SessionLifecycle:
         実行 model が組成 model と違う正当な touch (usage.model 記帳、S1) が
         「別 anchor の既存行」で誤棄却される。書き込みが棄却されたら見張り
         予約も更新しない (stale touch が正当な予約を後ろへずらさないため)。
+
+        ``counts_as_standard_call`` (v0.4 計画 段 3、決定 10): この成功した呼び出しを
+        「最後の標準呼び出し」として数え、ティックの予約を now + T へ押し直すか
+        (:func:`_notify_tick_of_standard_call`)。数えるのは本人の標準モデル (usage.model が
+        ``persona.model`` と一致) の呼び出しだけで、軽量モデル (分身・下請け) は
+        一致しないので自然に数えない。**keep-alive の保温だけは False で呼ぶ** —
+        保温を数えると、T をキャッシュ寿命より長くした設定で「保温がティックを
+        永遠に先送りする」組が生まれる (C6)。押し直しは anchor の有無・キャッシュの
+        当たり外れに関係なく、呼び出しが成功した事実だけで行う。
         """
         if persona is None or usage is None:
             return
+        if counts_as_standard_call:
+            _notify_tick_of_standard_call(getattr(self, "manager", None), persona, usage)
         if not anchor_id:
             return
         persona_model = getattr(persona, "model", None)
@@ -1938,11 +2013,33 @@ class SessionLifecycle:
         # 仮想クロックのシム中に期限がシム終了後へ飛ぶ)
         from saiverse import clock
 
-        fire_at = clock.now() + timedelta(seconds=wait_seconds)
+        now = clock.now()
+        fire_at = now + timedelta(seconds=wait_seconds)
         # (persona, model) ごとに独立予約 (beat_execution_context.md §3.1 —
         # Session ごとに独立監視)。旧 key f"ttl:{persona_id}" の 1 ペルソナ 1 予約
         # 上書きは廃止した。
         key = f"ttl:{persona_id}:{model_key}"
+
+        # ティックが保温を兼ねる (v0.4 計画 段 3-4、C6): このペルソナのティックの
+        # 予約がキャッシュの失効 (now + TTL) より前に発火するなら、keep-alive は
+        # 予約しない — keep-alive は「最後の保険」で、ティックより先に発火して
+        # 保温の主役になってはいけない (v3 §1)。ティック自身の標準呼び出しが
+        # touch でここへ戻り、次の判定をやり直す。古い keep-alive 予約が残って
+        # いれば消す (この touch で寿命が延びたので、その予約の時刻はもう遅い/
+        # 早すぎる — どちらにしてもティックの方が先に温める)。
+        # ティックが温めるのは標準モデルの Session (persona.model) だけなので、
+        # 抑制もその model の予約に限る。
+        if str(model_key) == str(getattr(persona, "model", "") or ""):
+            tick_at = _tick_fire_at(manager, persona_id)
+            if tick_at is not None and tick_at < now + timedelta(seconds=ttl_seconds):
+                scheduler.cancel(key)
+                LOGGER.debug(
+                    "[metabolism] cache TTL keep-alive not scheduled: the tick at %s "
+                    "warms the cache before it expires (persona=%s model=%s ttl=%ds)",
+                    tick_at.isoformat(timespec="seconds"), persona_id, model_key,
+                    ttl_seconds,
+                )
+                return
 
         def _fire_callback() -> None:
             try:

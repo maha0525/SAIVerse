@@ -32,15 +32,20 @@ Playbook 起動) を持つが、**自動起動の配線は持たない** (中間
   自律 ON かつユーザー会話中でなければ **on_event** 判断を撃ち、判断が
   engage_now を選んだときだけ従来の応対 Pulse を起動する。自律 OFF のペルソナは
   従来どおり直接応対 (非自律ペルソナのイベント応答を壊さない)
-- :func:`watchdog_tick` — AutonomyManager の定期 tick の縮退先 (v2 §4.2)。
+- :func:`watchdog_tick` — AutonomyManager の見張り (固定間隔の予約)。
   正常時は何もしない。「自律 ON・起床時間帯・今日のライフが無い」ときだけ
-  起床の帳簿処理を火入れ直す保守的な見張り (コマ予約の途絶の見張りは時間割の
-  撤去 — autonomous_behavior_v04_plan.md 段 1-4 — で消えた)
+  起床の帳簿処理を火入れ直し、走っているライフにティックの予約が無ければ張る
+  保守的な見張り (コマ予約の途絶の見張りは時間割の撤去 —
+  autonomous_behavior_v04_plan.md 段 1-4 — で消えた。ティックそのものの運転は
+  ``saiverse.autonomy_manager`` — 段 3)
+- :func:`is_autonomy_on` — 自律ゲートの唯一の判定。グローバル自律全停止
+  (:func:`is_autonomy_all_stopped` / :func:`set_autonomy_all_stop`、v0.4 計画
+  決定 12) もここで効く
 
 時刻はすべて ``saiverse.clock.now()`` を読む (v2 §12 の不変条件)。
 
-駆動するかどうかは :func:`is_autonomy_on` 一箇所で、ペルソナごとの
-``AUTONOMY_ENABLED`` だけで決まる。v0.3 (develop) にはこの判定を常に False に
+駆動するかどうかは :func:`is_autonomy_on` 一箇所で、グローバル自律全停止と
+ペルソナごとの ``AUTONOMY_ENABLED`` で決まる。v0.3 (develop) にはこの判定を常に False に
 する全体の止め具 (定数 ``AUTONOMOUS_DRIVING_SHIPPED``) があるが、develop-v0.4
 では 2026-09-25 に定数ごと撤去した (正典は
 ``docs/intent/autonomous_behavior_v3.md`` §11.1)。
@@ -212,21 +217,145 @@ def _get_persona(manager: Any, persona_id: str) -> Optional[Any]:
     return (getattr(manager, "personas", None) or {}).get(persona_id)
 
 
+#: グローバル自律全停止の in-memory キャッシュを manager に載せる属性名。
+_ALL_STOP_ATTR = "_autonomy_all_stop"
+
+#: 全体設定の行 (user_settings) の USERID。全体設定は USERID=1 の行に置く流儀
+#: (api/routes/config.py の入退室通知・水位の全体既定と同じ)。
+_GLOBAL_SETTINGS_USERID = 1
+
+
+def load_autonomy_all_stop(manager: Any) -> bool:
+    """DB (user_settings.AUTONOMY_ALL_STOP) からグローバル自律全停止を読み、
+    manager の in-memory キャッシュへ載せて返す。SAIVerseManager の起動時に一度呼ぶ。
+
+    読めなかったとき (SessionLocal が無い・行が無い・例外) は False (停止して
+    いない) — 全停止は v0.4 段 3 で新設した非常ブレーキで、読めない DB に対して
+    全ペルソナの自律を黙って止めるより、ERROR を残して従来どおり動かす方を取る。
+    行が無い (一度も設定していない) のは正常な False。
+    """
+    value = False
+    session_factory = getattr(manager, "SessionLocal", None)
+    if session_factory is not None:
+        try:
+            from database.models import UserSettings
+
+            db = session_factory()
+            try:
+                row = (
+                    db.query(UserSettings)
+                    .filter(UserSettings.USERID == _GLOBAL_SETTINGS_USERID)
+                    .first()
+                )
+                value = row is not None and getattr(row, "AUTONOMY_ALL_STOP", None) is True
+            finally:
+                db.close()
+        except Exception:
+            LOGGER.error(
+                "[autonomy-wiring] failed to read the global autonomy all-stop "
+                "setting; treating it as off", exc_info=True,
+            )
+            value = False
+    try:
+        setattr(manager, _ALL_STOP_ATTR, value)
+    except Exception:
+        pass
+    return value
+
+
+def is_autonomy_all_stopped(manager: Any) -> bool:
+    """グローバル自律全停止が ON か (v0.4 計画 決定 12)。
+
+    毎回 DB を読まない — manager の in-memory キャッシュ
+    (:func:`load_autonomy_all_stop` が起動時に載せ、:func:`set_autonomy_all_stop`
+    が書き換える) を読む。キャッシュが無い manager (テストの最小 manager 等) は
+    初回だけ DB から読んで載せる。
+    """
+    cached = getattr(manager, _ALL_STOP_ATTR, None)
+    if isinstance(cached, bool):
+        return cached
+    return load_autonomy_all_stop(manager)
+
+
+def set_autonomy_all_stop(manager: Any, value: bool) -> bool:
+    """グローバル自律全停止を設定する (DB と in-memory キャッシュの両方)。
+
+    全停止は「誰が動いているか分からない場面で、自発の課金を一括で止める」
+    非常ブレーキ (決定 12)。**ペルソナごとの AUTONOMY_ENABLED は書き換えない**
+    — 解除すれば元の設定で再開する。止める範囲は :func:`is_autonomy_on` を通る
+    もの全部 (ティック・判断点・watchdog・ライフの節目・keep-alive)。アラーム
+    (ScheduleManager の定時発火) はこの門を通らないので鳴り続ける (決定 2 と
+    同じ線引き)。
+
+    書いたあと、全ペルソナの AutonomyManager を門に同期し直す
+    (``manager.ensure_autonomy_for``) — ON なら止まり (ティックと watchdog の
+    予約が消える)、OFF なら立ち上がる (watchdog の即時の見回りが、走っている
+    ライフのティックの予約を張り直す)。
+
+    Returns:
+        設定後の値。
+
+    Raises:
+        DB に書けなかった場合はそのまま送出する (キャッシュは書き換えない —
+        画面と実際の状態を食い違わせない)。
+    """
+    value = bool(value)
+    from database.models import UserSettings
+
+    db = manager.SessionLocal()
+    try:
+        row = (
+            db.query(UserSettings)
+            .filter(UserSettings.USERID == _GLOBAL_SETTINGS_USERID)
+            .first()
+        )
+        if row is None:
+            row = UserSettings(USERID=_GLOBAL_SETTINGS_USERID)
+            db.add(row)
+        row.AUTONOMY_ALL_STOP = value
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+    setattr(manager, _ALL_STOP_ATTR, value)
+    LOGGER.info(
+        "[autonomy-wiring] global autonomy all-stop set to %s "
+        "(per-persona AUTONOMY_ENABLED untouched)", value,
+    )
+    ensure = getattr(manager, "ensure_autonomy_for", None)
+    if callable(ensure):
+        for persona_id in list((getattr(manager, "personas", None) or {}).keys()):
+            try:
+                ensure(persona_id)
+            except Exception:
+                LOGGER.exception(
+                    "[autonomy-wiring] failed to resync autonomy after the "
+                    "all-stop change (persona=%s)", persona_id,
+                )
+    return value
+
+
 def is_autonomy_on(manager: Any, persona_id: str) -> bool:
     """このペルソナの自律の駆動を回してよいか — **自律ゲートの唯一の判定**。
 
-    判断点・watchdog・起床就寝の帳簿処理・実イベントの判断経由は、すべてこの
-    関数を通ってから駆動する。
+    ティック・判断点・watchdog・起床就寝の帳簿処理・実イベントの判断経由・
+    keep-alive は、すべてこの関数を通ってから駆動する。
 
     判定:
 
-    1. ペルソナが manager に居なければ False
-    2. ペルソナの ``AUTONOMY_ENABLED`` (属性欠落は False 扱い)
+    1. グローバル自律全停止 (:func:`is_autonomy_all_stopped`) が ON なら False
+       (全ペルソナ。ペルソナごとの設定値は書き換えない — 決定 12)
+    2. ペルソナが manager に居なければ False
+    3. ペルソナの ``AUTONOMY_ENABLED`` (属性欠落は False 扱い)
 
     ⚠️ 設定値を読んで表示・保存するだけの場所 (設定 API・inspect_world・clone
     スクリプト) はこの関数を通さないこと — ここは「駆動するか」の判定の口で、
     設定値そのものの読み書きの口ではない。
     """
+    if is_autonomy_all_stopped(manager):
+        return False
     persona = _get_persona(manager, persona_id)
     if persona is None:
         return False
@@ -1327,6 +1456,37 @@ def _resume_life_start(
     return {"action": "life_start_resume", "settled": settled}
 
 
+def _ensure_tick_reservation(
+    manager: Any, persona_id: str, life: Dict[str, Any],
+) -> bool:
+    """走っているライフにティックの予約が無ければ now + T で張る (無ければ張る)。
+
+    生きている予約は上書きしない (``schedule_if_absent`` — v0.4 計画 §8.3 の
+    「ティック × ティック」行)。張る主体の AutonomyManager が無ければ何もしない。
+
+    Returns:
+        今回新しく張ったか。
+    """
+    managers = getattr(manager, "_autonomy_managers", None)
+    am = managers.get(persona_id) if isinstance(managers, dict) else None
+    if am is None:
+        return False
+    try:
+        armed = am.arm_tick_if_absent(life_mode=life.get("mode"))
+    except Exception:
+        LOGGER.warning(
+            "[watchdog] failed to restore the tick reservation (persona=%s)",
+            persona_id, exc_info=True,
+        )
+        return False
+    if armed:
+        LOGGER.info(
+            "[watchdog] the running life had no tick reservation; armed one "
+            "(persona=%s)", persona_id,
+        )
+    return armed
+
+
 def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
     """自律稼働の watchdog (旧 50 分メタ判断 tick の縮退形、v2 §4.2)。
 
@@ -1349,6 +1509,9 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
       (lives[0] に ``started`` マーカーが無い — 確定と開始の節目の間で失敗した
       日) → 開始の節目だけを、解決済みの営業日で決着させる
       (:func:`_resume_life_start`)。新しい一日は開かない
+    - 開始の節目が済んで走っているライフに**ティックの予約が無い** (再起動・
+      自律 ON への切り替え・全停止の解除の直後) → now + T で張る
+      (:func:`_ensure_tick_reservation`、生きている予約は上書きしない)
 
     見張る対象の営業日は :func:`day_plan.resolve_business_day` が決める (現在
     時刻を含む確定ライフ優先。ライフを読めなければ ``skip`` して次の tick へ
@@ -1392,7 +1555,19 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
         # (TTL 同期・「（活動開始）」通知・started マーカー) は別の段で、
         # 間で失敗すると「確定済みだが開始が済んでいない」ライフが残る。
         # 開始が未決着ならここで決着させる (2026-10-10 Codex 指摘)。
-        return _resume_life_start(manager, persona_id, basis)
+        result = _resume_life_start(manager, persona_id, basis)
+        # 開始の節目が済んで走っているライフに、ティックの予約が無ければ張る
+        # (再起動・自律 ON への切り替え・全停止の解除からの回復 — v0.4 計画
+        # 段 3-7)。開始の節目を今決着させた回は、節目自身が張っている。
+        first = basis.lives[0] if basis.lives else None
+        if (
+            result.get("action") == "none"
+            and isinstance(first, dict)
+            and first.get("started")
+            and not first.get("ended")
+        ):
+            result["tick_armed"] = _ensure_tick_reservation(manager, persona_id, first)
+        return result
 
     if not in_waking_window(hhmm, wake, close):
         # 起きていない時間帯 — before wake か after close か

@@ -139,7 +139,7 @@ def _seed_overnight_life(manager, session_factory):
     07:00〜22:00 (跨がないリズム) へ変えた状況を作る。"""
     clock.enable_virtual(BASE + timedelta(hours=23, minutes=10))
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
+        {"start": "23:00", "end": "06:00", "mode": "free"},
     ])
     # 日中に起床設定を変更 (跨ぎリズムをやめた)
     _add_day_open_schedule(session_factory, "07:00", close="22:00")
@@ -186,12 +186,12 @@ def test_zero_length_life_is_not_a_business_day_candidate(manager, session_facto
     """
     with pytest.raises(ValueError):   # 書ける口は閉じている
         day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "07:00", "end": "07:00", "budget_pulses": 20, "mode": "free"},
+            {"start": "07:00", "end": "07:00", "mode": "free"},
         ])
     # 旧置き場の台帳を直接壊す (手編集・旧データの再現 — 互換読みが拾う)
     _write_legacy_plan_meta(session_factory, json.dumps({
         day_plan.META_LIVES: [
-            {"start": "07:00", "end": "07:00", "budget_pulses": 20, "mode": "free",
+            {"start": "07:00", "end": "07:00", "mode": "free",
              "used_pulses": 0, "judgment_pulses": 0},
         ],
     }))
@@ -226,7 +226,7 @@ def test_business_day_is_none_when_lives_are_unreadable(manager):
     """ライフ読取の一時失敗は「ライフなし」に畳まず None (呼び出し元は待つ)。"""
     clock.enable_virtual(BASE + timedelta(hours=8))
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+        {"start": "07:00", "end": "22:00", "mode": "free"},
     ])
     assert day_plan.resolve_business_day(manager, PERSONA_ID) is not None
     with patch.object(day_plan, "get_lives", side_effect=RuntimeError("db locked")):
@@ -246,7 +246,7 @@ def test_record_judgment_pulse_concurrent_increments_both_count(manager):
     移したことで、競合のたびに最新の lives の上へ積み直される。
     """
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+        {"start": "07:00", "end": "22:00", "mode": "free"},
     ])
     real_load = day_plan._load_life_row
     state = {"fired": False}
@@ -274,7 +274,7 @@ def test_record_judgment_pulse_concurrent_increments_both_count(manager):
 def test_save_lives_no_longer_writes_the_round_ledger(manager):
     """旧ラウンド台帳 (used_rounds) は段 1-4 で書き手ごと消えた。"""
     saved = day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "07:00", "end": "22:00", "budget_pulses": 20, "mode": "free"},
+        {"start": "07:00", "end": "22:00", "mode": "free"},
     ])
     assert "used_rounds" not in saved[0]
     assert saved[0]["used_pulses"] == 0

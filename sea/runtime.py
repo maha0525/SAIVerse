@@ -2170,11 +2170,16 @@ class SEARuntime:
         if persona is None:
             LOGGER.debug("[keepalive] persona not found: %s", persona_id)
             return False
-        # 自律行動が OFF のペルソナは温め直さない — keep-alive 連鎖はここで
-        # 自然に止まり、次の本物の呼び出しまで走らない。
-        if not bool(getattr(persona, "autonomy_enabled", False)):
+        # 自律行動が OFF のペルソナ・グローバル自律全停止中は温め直さない —
+        # keep-alive 連鎖はここで自然に止まり、次の本物の呼び出しまで走らない。
+        # 判定は自律ゲートの唯一の口 (is_autonomy_on) を通す — 全停止は「自発の
+        # 課金を一括で止める非常ブレーキ」(v0.4 計画 決定 12) で、保温も自発の課金。
+        from saiverse.autonomy_wiring import is_autonomy_on
+
+        if not is_autonomy_on(manager, persona_id):
             LOGGER.debug(
-                "[keepalive] skipped (persona=%s autonomy disabled)", persona_id,
+                "[keepalive] skipped (persona=%s autonomy disabled or all-stop)",
+                persona_id,
             )
             return False
 
@@ -2367,9 +2372,13 @@ class SEARuntime:
             # LLM 呼び出し中に anchor 前進 (§14-2 / 退場) が起きていたら、この
             # touch は捨てられた提示ウィンドウの主張であり棄却される
             # (Codex 3〜4巡目 2026-07-30)。
+            # counts_as_standard_call=False: 保温は「最後の標準呼び出し」に数えない
+            # (v0.4 計画 段 3-4 — 数えると、T をキャッシュ寿命より長くした設定で
+            # 保温がティックを永遠に先送りする)。
             self.session_lifecycle.touch_anchor_after_llm_call(
                 persona, usage, anchor_id=entry.get("anchor_id"),
                 only_if_anchor_unchanged=True,
+                counts_as_standard_call=False,
             )
         LOGGER.info(
             "[keepalive] cache keep-alive completed (persona=%s model=%s "

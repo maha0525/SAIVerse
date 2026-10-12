@@ -98,7 +98,7 @@ doc: [`building_id_no_charset_constraint.md`](../issues/building_id_no_charset_c
 **13. 会話タイムアウトと活動窓の比率設計**
 現状: 未解決・設計論点 (30 分固定のタイムアウトが 25 分の窓を丸ごと食った実例あり)。
 理由 (裁定): その日の自律行動が一言の挨拶で全部繰り下がる = その日の経験が消える。窓とタイムアウトに比率の概念を入れる。会話の至上性そのものは壊さない。
-doc: [`conversation_timeout_eats_short_life_window.md`](../issues/conversation_timeout_eats_short_life_window.md)
+doc: [`conversation_timeout_eats_short_life_window.md`](../issues/archive/conversation_timeout_eats_short_life_window.md)
 
 **14. 記憶の連続性グラフ (前駆エッジ)**
 現状: **設計決着 (2026-08-19 まはー裁定)** — データモデルは二段: ①メッセージへの前駆刻印 (生成が実際に見ていた最後のメッセージ ID を metadata に機械刻印 — 同一メインライン内の割り込み用・再生成/分岐の土台) ②memory.db の新テーブル `thread_edges` (分岐・再生成・取り込み用。意味論は W13 の episode_inheritance から写し、旧テーブルは episodes と残置 — 宿題①の改名はこれで果たされ、宿題②のノード語彙も確定)。v0.3 (形の層) に刻印と器、消費は後続。詳細は issue doc の「決着」節。

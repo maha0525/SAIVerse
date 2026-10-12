@@ -14,7 +14,9 @@ v2 の時間割一式 — 日次編成・コマの予約/発火/繰り下げ/精
   watchdog が同じ解決器を見る)
 - **keep-alive のライフ従属ゲート** — :func:`is_keepalive_allowed`
 - **ライフの帳簿への記帳** — :func:`record_judgment_pulse` (判断点の別枠) /
-  :func:`consume_life_pulse` (自発活動の回数)
+  :func:`consume_life_pulse` (走りきったティックの回数)
+- **ティックの間隔 T の解決** — :func:`resolve_tick_interval_minutes` /
+  :func:`effective_tick_interval_minutes` (v0.4 計画 決定 11)
 - **「ユーザー会話中か」の唯一の判定** — :func:`is_in_user_conversation` /
   :func:`get_user_conversation_state`
 
@@ -53,9 +55,12 @@ LOGGER = logging.getLogger(__name__)
 # 帳簿処理のみ」): 確定と起床・就寝の節目処理は判断点 (fire_judgment_point) から
 # 切り出され、:func:`handle_scheduled_life_boundary` が LLM なしで行う。置き場も
 # persona_day_plan.meta_json から persona_life テーブルへ独立した。段 1-4 で
-# 時間割 (コマ・予算ゲート・ラウンド台帳と κ 減衰) が撤去され、ライフの帳簿に
-# 残るのは予算 (budget_pulses)・自発活動の回数 (used_pulses)・判断点の別枠
-# (judgment_pulses)・節目のマーカー (started / ended)。
+# 時間割 (コマ・予算ゲート・ラウンド台帳と κ 減衰) が撤去された。段 3 で予算
+# (回数、budget_pulses) も退役し、ティックの間隔 T の設定に置き換わった
+# (autonomous_behavior_v3.md §5「予算 (回数) 設定は T (間隔) 設定に置き換える」)。
+# ライフの帳簿に残るのは、走りきったティックの回数 (used_pulses — 観察用)・判断点の
+# 別枠 (judgment_pulses)・節目のマーカー (started / ended)。古い行に残っている
+# budget_pulses は読み手がいない (無視して通す)。
 # ---------------------------------------------------------------------------
 
 #: ライフのモード (life.md §5.1): 均等 = 標準パルスの間隔を TTL 内に保つ
@@ -66,8 +71,17 @@ LIFE_MODES = (LIFE_MODE_EVEN, LIFE_MODE_FREE)
 
 #: 均等モードで許容するパルス間隔の上限 (分)。TTL (Anthropic 1h) ちょうどは
 #: 遅延で割れるため安全マージンを引いた初期値 (life.md §12-2)。均等モードの
-#: 最低予算 (:func:`_min_life_budget`) の基準値として使う (life.md §4.2)。
+#: ティックの間隔 T の上限として強制する (:func:`effective_tick_interval_minutes`、
+#: v0.4 計画 決定 11 — キャッシュの物理)。
 LIFE_EVEN_MAX_GAP_MINUTES = 50
+
+#: ティックの間隔 T (分) の既定値 (v0.4 計画 決定 11 — 45 分案より分かりやすさを
+#: 優先)。起床スケジュール行の PLAYBOOK_PARAMS.tick_interval_minutes が未設定・
+#: 不正なときに使う。
+DEFAULT_TICK_INTERVAL_MINUTES = 30
+
+#: ティックの間隔 T の床 (分)。これ未満の設定は床へ切り上げる (決定 11)。
+TICK_INTERVAL_FLOOR_MINUTES = 10
 
 #: 旧置き場 persona_day_plan.meta_json の lives 配列のキー (life.md §11.2)。
 #: ライフの正の置き場は persona_life テーブル (autonomous_behavior_v04_plan.md
@@ -161,8 +175,8 @@ def _strict_life_entry_problem(life: Dict[str, Any]) -> Optional[str]:
 
     検査しない欄: ``mode`` (読み手 :func:`_sync_cache_ttl_for_life_start` /
     :func:`_sync_cache_ttl_for_life_end` は ``!= "even"`` で比べるので、未知の値は
-    自由モードとして吸収される)、``budget_pulses`` (strict の読み手は消費しない —
-    書き手 :func:`_validate_and_normalize_lives` が作り直す)、``used_pulses`` /
+    自由モードとして吸収される)、``budget_pulses`` (段 3 で退役した旧予算 —
+    読み手がいない)、``used_pulses`` /
     ``judgment_pulses`` (``int(x or 0)`` で吸収するか、変換できなければ例外で
     止まる)、未知・余分の欄 (旧 ``used_rounds`` など — 将来の互換のため許す)。
     ``start == end`` も弾かない — :func:`_life_span_at` が「区間として成立しない」
@@ -600,8 +614,10 @@ def _validate_and_normalize_lives(lives: Any) -> List[Dict[str, Any]]:
     検証項目 (フォーマットのみ):
     - start/end は "HH:MM"
     - start と end が同一でない (長さ 0 のライフは無効)
-    - budget_pulses は正の int
     - mode は "even" / "free" のみ
+
+    旧予算 ``budget_pulses`` は段 3 で退役した (T の設定に置き換え) — 渡されても
+    検査せず、保存する行にも載せない。
 
     深夜跨ぎ (end <= start、例 07:00〜01:00) はここでは**正常形として許容**
     する (:func:`autonomy_wiring.in_waking_window` と同じ意味論)。
@@ -628,15 +644,10 @@ def _validate_and_normalize_lives(lives: Any) -> List[Dict[str, Any]]:
             raise ValueError(
                 f"lives[{i}]: start と end が同一です ({start!r}) — 長さ 0 のライフは無効です"
             )
-        budget = life.get("budget_pulses")
-        if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
-            raise ValueError(
-                f"lives[{i}].budget_pulses must be a positive int (got {budget!r})"
-            )
         mode = life.get("mode")
         if mode not in LIFE_MODES:
             raise ValueError(f"lives[{i}].mode must be one of {LIFE_MODES} (got {mode!r})")
-        normalized.append({"start": start, "end": end, "budget_pulses": budget, "mode": mode})
+        normalized.append({"start": start, "end": end, "mode": mode})
     return normalized
 
 
@@ -716,54 +727,114 @@ def _life_window_minutes(wake: str, close: str) -> int:
     return end_min - start_min
 
 
-def _min_life_budget(mode: str, window_minutes: int) -> int:
-    """ライフの最低予算 (life.md v0.5 §4.2)。
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
 
-    均等モード: キャッシュを繋ぐには :data:`LIFE_EVEN_MAX_GAP_MINUTES`
-    (既定 50 分) に 1 回のパルスが物理的に必要 → ``ceil(窓の長さ ÷ 50分)``。
-    自由モード: キャッシュ制約は無いが、1 回も動けない予算は無意味
-    なので最低 1。
+
+def effective_tick_interval_minutes(requested: Any, mode: Optional[str]) -> int:
+    """ティックの間隔 T (分) の実効値 (v0.4 計画 決定 11)。
+
+    - ``requested`` (ユーザー設定) が正の int ならそれ、未設定・不正なら
+      :data:`DEFAULT_TICK_INTERVAL_MINUTES` (30)
+    - 床 :data:`TICK_INTERVAL_FLOOR_MINUTES` (10) 未満は床へ切り上げる
+    - 均等モードは :data:`LIFE_EVEN_MAX_GAP_MINUTES` (50) へ切り下げる
+      (キャッシュの物理 — TTL 1h の運転を割らない)
     """
+    minutes = requested if _is_positive_int(requested) else DEFAULT_TICK_INTERVAL_MINUTES
+    minutes = max(TICK_INTERVAL_FLOOR_MINUTES, minutes)
     if mode == LIFE_MODE_EVEN:
-        return max(1, math.ceil(window_minutes / LIFE_EVEN_MAX_GAP_MINUTES))
-    return 1
+        minutes = min(minutes, LIFE_EVEN_MAX_GAP_MINUTES)
+    return minutes
 
 
-def life_mode_and_min_budget(
+def resolve_tick_interval_minutes(
+    manager: Any, persona_id: str, *, life_mode: Optional[str] = None,
+) -> int:
+    """このペルソナのいまのティックの間隔 T (分) を、現在の設定から解決する。
+
+    T はライフに焼き込まない — 予約を張るたびにここを呼ぶ (ユーザーが日中に
+    変えたら次の張り直しから効く)。読むもの:
+
+    - 起床スケジュール行の PLAYBOOK_PARAMS の ``tick_interval_minutes``
+      (:func:`life_settings_from_params`)
+    - モード: ``life_mode`` が渡ればそれ。無ければ走っているライフの mode、
+      走っていなければ設定の上書き (``life_mode_override``)、それも無ければ
+      標準モデルの provider からの導出 (:func:`derive_default_life_mode`)
+
+    読み出しに失敗したら既定値 (モードは導出) で答える — T の解決は予約の張り
+    直しの途中で呼ばれるので、ここで止めると連鎖が切れる。
+    """
+    try:
+        from saiverse.autonomy_wiring import _find_day_schedules
+
+        settings = life_settings_from_params(
+            _find_day_schedules(manager, persona_id).get("day_open_params")
+        )
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to read the tick interval setting (persona=%s); "
+            "using the default", persona_id, exc_info=True,
+        )
+        settings = {}
+    mode = life_mode
+    if mode is None:
+        try:
+            basis = resolve_business_day(manager, persona_id)
+            if basis is not None and basis.source == "life" and basis.lives:
+                mode = basis.lives[0].get("mode")
+        except Exception:
+            LOGGER.warning(
+                "[day_plan] failed to read the running life's mode (persona=%s)",
+                persona_id, exc_info=True,
+            )
+        if mode is None:
+            mode = settings.get("life_mode_override") or derive_default_life_mode(
+                manager, persona_id,
+            )
+    return effective_tick_interval_minutes(settings.get("tick_interval_minutes"), mode)
+
+
+def life_mode_and_tick_estimate(
     manager: Any,
     persona_id: str,
     wake: Optional[str],
     close: Optional[str],
     mode_override: Optional[str] = None,
+    tick_interval_minutes: Any = None,
 ) -> Dict[str, Any]:
-    """ライフ設定 UI (life.md v0.5 §9.2-1) 向け: 実効モードと最低予算をまとめて
-    計算する副作用なしの読み取り専用ヘルパ。
+    """ライフ設定画面向け: 実効モード・実効 T・「一日およそ N 回」の目安を
+    まとめて計算する副作用なしの読み取り専用ヘルパ (v0.4 計画 決定 11)。
 
-    :func:`confirm_life_for_today` と同じ「モード決定」「最低予算」ロジックを
-    共有するが、DB へは何も書かない (プレビュー・バリデーション専用)。
+    旧 ``life_mode_and_min_budget`` (最低予算) の後継。予算 (回数) は退役し、
+    一日の手数はライフの長さと T から機械的に決まる (v3 §5) — ここが出すのは
+    その目安 ``ceil(窓の分数 ÷ 実効 T)`` で、上限でも保証でもない (会話中は空の
+    ティックが打たれないので、実際の回数はこれより少なくなりうる)。
 
     Args:
-        wake/close: "HH:MM"。どちらか欠けていれば窓長・最低予算は計算できない
-            ( ``window_minutes`` / ``min_budget_pulses`` は None)。
+        wake/close: "HH:MM"。どちらか欠けていれば窓長・目安は計算できない
+            (``window_minutes`` / ``estimated_ticks_per_day`` は None)。
         mode_override: ユーザーによる明示上書き ("even"/"free")。
-            :data:`LIFE_MODES` に無い値は無視して自動判定にフォールバックする
-            (life.md §5.1: 上書きは設定 UI からの脱出口のみ)。
+            :data:`LIFE_MODES` に無い値は無視して自動判定にフォールバックする。
+        tick_interval_minutes: ユーザーが設定しようとしている T (未設定は既定)。
 
     Returns:
-        ``{"derived_mode", "effective_mode", "window_minutes", "min_budget_pulses"}``
+        ``{"derived_mode", "effective_mode", "window_minutes",
+        "tick_interval_minutes", "estimated_ticks_per_day"}``
     """
     derived = derive_default_life_mode(manager, persona_id)
     effective = mode_override if mode_override in LIFE_MODES else derived
+    interval = effective_tick_interval_minutes(tick_interval_minutes, effective)
     window_minutes: Optional[int] = None
-    min_budget: Optional[int] = None
+    estimate: Optional[int] = None
     if wake and close and is_valid_hhmm(wake) and is_valid_hhmm(close):
         window_minutes = _life_window_minutes(wake, close)
-        min_budget = _min_life_budget(effective, window_minutes)
+        estimate = math.ceil(window_minutes / interval)
     return {
         "derived_mode": derived,
         "effective_mode": effective,
         "window_minutes": window_minutes,
-        "min_budget_pulses": min_budget,
+        "tick_interval_minutes": interval,
+        "estimated_ticks_per_day": estimate,
     }
 
 
@@ -773,10 +844,9 @@ def confirm_life_for_today(
     plan_date: Any,
     wake: Optional[str],
     close: Optional[str],
-    requested_budget_pulses: Optional[int] = None,
     mode_override: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """起床時刻に、ユーザー設定 (PersonaSchedule の起床・就寝 + 予算) から今日の
+    """起床時刻に、ユーザー設定 (PersonaSchedule の起床・就寝) から今日の
     ライフを確定して persona_life に焼く (life.md v0.5 §3/§4/§8.1)。呼び出し元は
     :func:`handle_scheduled_life_boundary` (機械の帳簿処理 — LLM なし)。
 
@@ -786,10 +856,10 @@ def confirm_life_for_today(
       :func:`derive_default_life_mode` (provider 導出) を使う。上書きは
       ライフ設定 UI からの明示的な脱出口のみ (life.md §5.1) —
       ペルソナ自身は選ばない
-    - **予算**: ``requested_budget_pulses`` (ユーザー設定、PersonaSchedule の
-      PLAYBOOK_PARAMS.daily_budget_pulses 由来) が最低値
-      (:func:`_min_life_budget`) 以上ならそれを、未設定/最低値未満なら
-      最低値へ切り上げる (INFO ログ)
+
+    旧予算 (回数、``requested_budget_pulses``) は段 3 で退役した — 一日の手数は
+    ライフの長さとティックの間隔 T から機械的に決まる (v3 §5)。T はライフに
+    焼き込まず、予約を張るたびに設定から読む (:func:`resolve_tick_interval_minutes`)。
 
     **冪等**: 当日すでにライフが焼かれていれば (:func:`get_lives` が非空)
     何もせず既存の 1 件目をそのまま返す — 再起動での watchdog 再発火等で
@@ -830,32 +900,14 @@ def confirm_life_for_today(
         )
     else:
         mode = derive_default_life_mode(manager, persona_id)
-    window_minutes = _life_window_minutes(wake, close)
-    min_budget = _min_life_budget(mode, window_minutes)
-
-    budget = requested_budget_pulses
-    if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
-        budget = min_budget
-        LOGGER.info(
-            "[day_plan] no valid budget configured; using minimum %dパルス "
-            "(persona=%s mode=%s window=%d分)",
-            min_budget, persona_id, mode, window_minutes,
-        )
-    elif budget < min_budget:
-        LOGGER.info(
-            "[day_plan] configured budget %dパルス below minimum %d; "
-            "clamped up (persona=%s mode=%s window=%d分)",
-            budget, min_budget, persona_id, mode, window_minutes,
-        )
-        budget = min_budget
 
     saved = save_lives(manager, persona_id, plan_date_str, [
-        {"start": wake, "end": close, "budget_pulses": budget, "mode": mode},
+        {"start": wake, "end": close, "mode": mode},
     ])
     life = saved[0]
     LOGGER.info(
-        "[day_plan] life confirmed: persona=%s date=%s %s-%s budget=%dパルス mode=%s",
-        persona_id, plan_date_str, wake, close, budget, mode,
+        "[day_plan] life confirmed: persona=%s date=%s %s-%s mode=%s",
+        persona_id, plan_date_str, wake, close, mode,
     )
     return life
 
@@ -889,16 +941,13 @@ def consume_life_pulse(
     *,
     at_time: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """自発活動 1 回をその時刻が属するライフの予算へ積算する
-    (life.md §5.3/§8.2、2026-08-08 追補で単位を改訂)。
+    """走りきったティック 1 回を、その時刻が属するライフの帳簿 ``used_pulses`` へ
+    積算する (観察用の帳簿 — 上限ではない)。
 
-    予算が数えるのは **ペルソナが自分から動いた 1 回** — 利用者向けの意味は
-    「その日の自発活動の回数 (used / budget)」。
-
-    ⚠ **現在この関数を呼ぶ実体は無い**。唯一の呼び手だった暮らしコマ
-    (出かける / 自室で過ごす) が時間割ごと撤去された (autonomous_behavior_v04_plan.md
-    段 1-4)。記帳の器は残す — 次の呼び手は v0.4 のティック (v3 §5) で、自発の
-    一手を数える単位はそちらで決める。
+    呼び手はティックの運転 (``saiverse.autonomy_manager`` の発火) で、ティックが
+    走りきった回 (``fire_tick`` の action=execute かつ runtime_outcome=completed)
+    だけを数える。旧予算 (budget_pulses) は段 3 で退役したので、この数は何も
+    止めない — 一日の手数を見るための記録。
 
     数えないもの: keep-alive と、判断点 (イベント到着) の発火 — 判断点の回数は
     別枠 (:func:`record_judgment_pulse`) で観測する。
@@ -1223,8 +1272,9 @@ def apply_life_boundary(
     するので、台帳なしの縮退経路は持たない (旧 ``_handle_life_start`` /
     ``_handle_life_end`` の直接通知は 2026-09-28 監査で撤去)。
 
-    冪等段の中身: 開始は TTL override (均等モードの 1h 運転)。終了は keep-alive
-    予約の cancel と TTL override の遅延解除予約だけで、anchor は**触らない**
+    冪等段の中身: 開始は TTL override (均等モードの 1h 運転) とティックの予約
+    (now + T、:func:`_arm_tick_reservation`)。終了は keep-alive 予約とティックの
+    予約の cancel、TTL override の遅延解除予約だけで、anchor は**触らない**
     (life.md §6.2 v0.4 — 失効は TTL に任せ、惜しい谷の生きたキャッシュを
     捨てない、§8.3)。
 
@@ -1301,10 +1351,14 @@ def apply_life_boundary(
 
     if stale is None:
         if boundary == "start":
-            steps_ok = _sync_cache_ttl_for_life_start(manager, persona_id, life)
+            steps_ok = (
+                _sync_cache_ttl_for_life_start(manager, persona_id, life)
+                and _arm_tick_reservation(manager, persona_id, life)
+            )
         else:
             steps_ok = (
                 _cancel_keepalive_reservation(manager, persona_id)
+                and _cancel_tick_reservation(manager, persona_id)
                 and _sync_cache_ttl_for_life_end(manager, persona_id, life)
             )
         if not steps_ok:
@@ -1427,20 +1481,23 @@ LIFE_BOUNDARY_END = "end"
 
 
 def life_settings_from_params(params: Any) -> Dict[str, Any]:
-    """起床スケジュール行の PLAYBOOK_PARAMS から、ライフ確定に効く設定を拾う。
+    """起床スケジュール行の PLAYBOOK_PARAMS から、ライフの運転に効く設定を拾う。
 
-    - ``daily_budget_pulses`` (正の int): ライフの標準パルス予算 (未設定 /
-      最低値未満は :func:`confirm_life_for_today` が最低値へ切り上げる)
+    - ``tick_interval_minutes`` (正の int): ティックの間隔 T (分)。床・均等
+      モードの上限の適用は :func:`effective_tick_interval_minutes` が行う。
+      不正な値は拾わない (既定値になる)
     - ``life_mode_override`` ("even"/"free"): モードの明示上書き (それ以外の
       値は無視して自動判定へ — life.md §5.1)
+
+    旧予算 ``daily_budget_pulses`` は段 3 で退役した — 古い行に残っていても
+    拾わない (読み手がいない)。
     """
     out: Dict[str, Any] = {}
     if not isinstance(params, dict):
         return out
-    budget_pulses = params.get("daily_budget_pulses")
-    if isinstance(budget_pulses, int) and not isinstance(budget_pulses, bool) \
-            and budget_pulses >= 1:
-        out["daily_budget_pulses"] = budget_pulses
+    tick_interval = params.get("tick_interval_minutes")
+    if _is_positive_int(tick_interval):
+        out["tick_interval_minutes"] = tick_interval
     mode_override = params.get("life_mode_override")
     if isinstance(mode_override, str) and mode_override in LIFE_MODES:
         out["life_mode_override"] = mode_override
@@ -1580,7 +1637,6 @@ def _settle_life_start(
         life = confirm_life_for_today(
             manager, persona_id, plan_date,
             sched.get("wake"), sched.get("close"),
-            requested_budget_pulses=settings.get("daily_budget_pulses"),
             mode_override=settings.get("life_mode_override"),
         )
     except Exception:
@@ -1670,7 +1726,7 @@ def record_judgment_pulse(
     """判断点の発火 1 回をその時刻が属するライフへ「別枠」で記帳する
     (life.md v0.5 §5.3/§8.2)。
 
-    予算 (budget_pulses / used_pulses) には一切触れない。判断点 (いまは
+    ティックの帳簿 (used_pulses) には一切触れない。判断点 (いまは
     イベント到着の on_event だけ) はペルソナがコントロールできない発火 (いつ
     イベントが届くかはペルソナ次第ではない) であり、同じ財布に入れると構造
     矛盾が生じる (v2 実機初日の教訓)。判断点の回数はライフビューに別枠で
@@ -1904,6 +1960,78 @@ def _cancel_keepalive_reservation(manager: Any, persona_id: str) -> bool:
         LOGGER.warning(
             "[day_plan] failed to cancel keep-alive reservation at life end (persona=%s)",
             persona_id, exc_info=True,
+        )
+        return False
+
+
+def _autonomy_manager_for(manager: Any, persona_id: str) -> Any:
+    """このペルソナの AutonomyManager (無ければ None)。"""
+    managers = getattr(manager, "_autonomy_managers", None)
+    if not isinstance(managers, dict):
+        return None
+    return managers.get(persona_id)
+
+
+def _arm_tick_reservation(manager: Any, persona_id: str, life: Dict[str, Any]) -> bool:
+    """ライフ開始で、ティックの予約を now + T に張る (v0.4 計画 段 3)。
+
+    予約の実体は AutonomyManager が持つ (:meth:`AutonomyManager.arm_tick`)。
+    AutonomyManager が立っていない (サーバーの起動前・テストの最小 manager) なら
+    張らずに成功とする — 起動後の watchdog が「ライフが走っているのに予約が
+    無い」を見て張る (段 3-7 の回復)。T はライフのモードで均等の上限を掛けて
+    いまの設定から読む (ライフに焼き込まない)。
+
+    Returns:
+        張れたか (または張る主体がいない)。False = 例外 — 節目は失敗として再試行。
+    """
+    am = _autonomy_manager_for(manager, persona_id)
+    if am is None:
+        LOGGER.debug(
+            "[day_plan] no AutonomyManager for persona=%s; the tick reservation "
+            "is left to the watchdog", persona_id,
+        )
+        return True
+    try:
+        am.arm_tick(life_mode=life.get("mode"))
+        return True
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to arm the tick reservation at life start "
+            "(persona=%s)", persona_id, exc_info=True,
+        )
+        return False
+
+
+def _cancel_tick_reservation(manager: Any, persona_id: str) -> bool:
+    """ライフ終了で、ティックの予約を消す (谷ではティックを打たない)。
+
+    AutonomyManager があればその口で、無ければ予約 key で直接消す (誰が張った
+    予約でも終了の節目では残さない)。発火時のゲート (ライフが走っていなければ
+    skip して予約を消す) は二重の安全網。
+
+    Returns:
+        消せたか。scheduler の無い構成は True。
+    """
+    am = _autonomy_manager_for(manager, persona_id)
+    try:
+        if am is not None:
+            am.cancel_tick()
+            return True
+        scheduler = getattr(manager, "event_scheduler", None)
+        if scheduler is None:
+            return True
+        from saiverse.autonomy_manager import tick_reservation_key
+
+        if scheduler.cancel(tick_reservation_key(persona_id)):
+            LOGGER.info(
+                "[day_plan] tick reservation cancelled at life end (persona=%s)",
+                persona_id,
+            )
+        return True
+    except Exception:
+        LOGGER.warning(
+            "[day_plan] failed to cancel the tick reservation at life end "
+            "(persona=%s)", persona_id, exc_info=True,
         )
         return False
 

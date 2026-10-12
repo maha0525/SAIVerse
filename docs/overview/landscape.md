@@ -21,7 +21,8 @@ graph TD
     Building -->|発言を検知| PulseController
     Alarm["アラーム (定時のスケジュール)"] -->|定時に発火| PulseController
     Life["ライフ (起床〜就寝。確定と節目は機械の帳簿処理)"]
-    Watchdog["AutonomyManager (watchdog)"] -.->|ライフの張り直しだけ| Life
+    Watchdog["AutonomyManager (watchdog)"] -.->|ライフとティックの予約の張り直し| Life
+    Tick["ティック (ライフ中、最後の標準呼び出しから T 分)"] -->|"fire_tick (auto)"| PulseController
     JudgmentPoints["判断点 (on_event のみ)"] -->|"engage_now のときだけ応対"| PulseController
     Pulse -->|内包| Beat
     Pulse -->|実行| Playbook
@@ -127,16 +128,17 @@ graph LR
 
 ### 駆動の時間機構（誰がいつ Pulse を起こすか）
 
-PulseController は「起こされた Pulse を捌く」層だが、**いつ Pulse を起こすか**を刻むのは別の時間機構である。**develop-v0.4 は自律行動 v3 の運転の層へ作り替える途中**（[v0.4 実装計画](../intent/autonomous_behavior_v04_plan.md)）。段 1（2026-10-09）で v2 の時間割の運転を撤去し、段 3 でティックを回すまでの間の姿は次のとおり:
+PulseController は「起こされた Pulse を捌く」層だが、**いつ Pulse を起こすか**を刻むのは別の時間機構である。**develop-v0.4 は自律行動 v3 の運転の層へ作り替える途中**（[v0.4 実装計画](../intent/autonomous_behavior_v04_plan.md)）。段 1（2026-10-09）で v2 の時間割の運転を撤去し、段 3（2026-10-12）でティックを回し始めた。いまの姿は次のとおり:
 
 - **ライフ**（起床〜就寝の区間）: 起床・就寝の時刻に、ライフの確定と開始・終了の節目だけが**機械の帳簿処理**として走る（LLM なし。`saiverse/day_plan.py` の `handle_scheduled_life_boundary`、保存先は `persona_life` テーブル）。ライフは keep-alive・話しかけやすさの表示・業務日の判定が読む
 - **アラーム**: 定時に鳴る（EventScheduler）。自律の ON/OFF と関係なく鳴る形にするのは段 4
 - **判断点**: 残っているのは実イベントへの **on_event** だけ（`saiverse/autonomy_wiring.py` → `saiverse/judgment_points.py`）。起床・就寝・セッション終了の判断は退役した（§9）
-- **ティック**（v3 §5 — ライフ中、最後に標準モデルを呼んでから T 分たつと本人が動く一枠）: 段 2〜3 で実装する。それまでの自律の活動は、アラームとイベントへの応対だけ
-- **AutonomyManager**（`autonomy_manager.py`）: 定期 tick は **watchdog に縮退** — 正常時は何もせず、「自律 ON・起床時間帯なのに今日のライフが無い」ときだけライフを張り直す
+- **ティック**（v3 §5 — ライフ中、最後に標準モデルを呼んでから T 分たつと本人が動く一枠）: `autonomy_manager.py` のティックの予約（1 ペルソナ 1 枚）。ライフ開始の節目が now + T に張り、終了の節目が消す。本人の標準モデルの呼び出し（会話・ティック自身・アラームへの応対・判断・スルース — keep-alive の保温と軽量モデルは数えない）が予約を「そこから T 分」へ押し直す。発火すると、会話中なら空のまま予約し直し、そうでなければタスク帳から締め切り → システムタスク → 自由の順に割り当てを引いて `SAIVerseManager.fire_tick` を呼ぶ。T は起床スケジュール行の `tick_interval_minutes`（既定 30・床 10・均等モードは 50 上限）で、予約を張るたびに設定から読む。予算（回数）の設定は T に置き換わって退役した
+- **AutonomyManager**（`autonomy_manager.py`）: ティックの予約と、固定 10 分間隔の **watchdog** — 正常時は何もせず、「自律 ON・起床時間帯なのに今日のライフが無い」ときライフを張り直し、走っているライフにティックの予約が無ければ張る（再起動からの回復）
+- **グローバル自律全停止**（`user_settings.AUTONOMY_ALL_STOP`、`autonomy_wiring.set_autonomy_all_stop`）: 自律ゲート `is_autonomy_on` の先頭で効く非常ブレーキ。ON の間は全ペルソナのティック・判断・watchdog・ライフの節目・keep-alive が止まる。ペルソナごとの設定値は書き換えない。アラームは門を通らないので鳴る
 - **EventScheduler / Phenomena**: スケジュール実行・外部イベントによる起動。外から届く刺激（現象の封筒・ユーザー発話・Discord）は供給源の永続 ID を必須で持ち、同じ刺激の再配送では二度反応しない（`saiverse/stimulus_receipt.py`）。呼びかけ（alert）の生きている発火元はユーザー発話ひとつで、周期ポーリングは持たない（旧 InternalAlertPoller は §9）
 
-段 1 の後に LLM を呼ぶのは、ユーザー起点の会話・会話に相乗りするスルース・定時のアラーム・実イベントへの on_event 判断の四つだけになっている。v0.3（develop）には v2 の時間割の運転のコードが残っているが、止め具（§3 判断点の注記）で発火しない。
+LLM を呼ぶのは、ユーザー起点の会話・会話に相乗りするスルース・定時のアラーム・実イベントへの on_event 判断・ライフ中のティック・キャッシュの keep-alive（ティックがキャッシュの失効より前に来るときは予約しない）。v0.3（develop）には v2 の時間割の運転のコードが残っているが、止め具（§3 判断点の注記）で発火しない。
 
 > 旧2層リズム（AutonomyManager 50分 tick ＋ SubLineScheduler 5秒ポーリング）は**廃止済み**（§9）。数分刻みの自律 Pulse は意味のある行動を生まない、という v1 失敗診断に基づく。
 
@@ -190,7 +192,8 @@ graph TD
     User((User)) -->|"発言 (Building→SAIVerseManager→submit_user)"| PulseController
     Alarm["アラーム (EventScheduler)"] -->|定時に submit_schedule| PulseController
     Life["ライフ (起床・就寝の機械の帳簿処理)"]
-    Watchdog["AutonomyManager (watchdog)"] -.->|ライフの張り直しだけ| Life
+    Watchdog["AutonomyManager (watchdog)"] -.->|ライフとティックの予約の張り直し| Life
+    Tick["ティック (AutonomyManager の予約)"] -->|"fire_tick (auto)"| PulseController
     Phenomena -->|"実イベント (刺激の ID で再配送を照合)"| JudgmentPoints["判断点 (on_event のみ)"]
     Phenomena -.->|"自律 OFF は判断を経ずに直接応対"| PulseController
     JudgmentPoints -->|"engage_now のとき応対を submit"| PulseController
@@ -510,7 +513,7 @@ graph TD
 | アラーム | 定時の発火を予約 | EventScheduler → PulseController | Playbook または指示書を定時に走らせる（時間割は 2026-10-09 に撤去 — §9） |
 | ライフ | 起床・就寝の時刻に確定と節目 | （機械の帳簿処理、Pulse なし） | `persona_life` に保存。keep-alive・話しかけやすさの表示・業務日の判定が読む |
 | 判断点（on_event のみ） | 反応の選択 | PulseController / タスク帳 | engage_now なら応対を submit、add_task ならタスク帳にシステムタスクを一件積む |
-| AutonomyManager | watchdog | ライフ | 自律 ON・起床時間帯なのに今日のライフが無いときだけ張り直す（定期ディスパッチは廃止） |
+| AutonomyManager | ティックの予約 + watchdog | PulseController（fire_tick）/ ライフ | ライフ中、最後の標準呼び出しから T 分でティックを打つ。watchdog はライフとティックの予約の張り直しだけ |
 | PulseController | 起動 | Pulse | 優先度（USER>SCHEDULE>AUTO）+ 割り込み制御で実行 |
 | Session | 判断材料 | 判断点 | 短期記憶が判断の根拠 |
 | Pulse | 内包 | Beat | 1 Pulse に複数 Beat |
@@ -554,7 +557,7 @@ graph TD
 | コア記憶 | 意味の地図の常時開特殊ページ | `core_memories` テーブル（`core:N` / `core`） |
 | 目的の木 | 退役（§9）。後継は手帳（メモ欄と約束の欄） | `persona_task`（main DB）のテーブルと既存データだけが残置。develop-v0.4 では `task:N` の読み口も撤去 |
 | 発言→Pulse のマネージャー | SAIVerseManager + PulseController | `run_sea_user` → `submit_user` |
-| 自律駆動 | **develop-v0.4**: ライフ（機械の帳簿処理）+ アラーム + on_event 判断（+ watchdog）。ティックは v0.4 計画の段 2〜3 で入る。**v0.3 (develop)**: 時間割 + 判断点のコードが止め具で発火しない | `saiverse/day_plan.py`（ライフ）/ `autonomy_wiring.py`（旧2層リズムは廃止 §9。v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED` は develop-v0.4 で撤去。時間割は develop-v0.4 で 2026-10-09 に撤去） |
+| 自律駆動 | **develop-v0.4**: ライフ（機械の帳簿処理）+ ティック（ライフ中、最後の標準呼び出しから T 分 — 段 3）+ アラーム + on_event 判断（+ watchdog）。**v0.3 (develop)**: 時間割 + 判断点のコードが止め具で発火しない | `saiverse/day_plan.py`（ライフ）/ `autonomy_wiring.py`（旧2層リズムは廃止 §9。v0.3 の止め具 `AUTONOMOUS_DRIVING_SHIPPED` は develop-v0.4 で撤去。時間割は develop-v0.4 で 2026-10-09 に撤去） |
 
 ### ドキュメント⇄実装の乖離（要追従）
 

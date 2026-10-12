@@ -286,6 +286,16 @@ class SAIVerseManager(
         self._load_personas_from_db()
         self._load_user_state_from_db()
 
+        # グローバル自律全停止 (v0.4 計画 決定 12) を in-memory キャッシュへ載せる。
+        # 自律ゲート (autonomy_wiring.is_autonomy_on) が毎回 DB を読まずに済むよう、
+        # ゲートを最初に通るペルソナ登録後の初期化より前に読む。
+        from saiverse.autonomy_wiring import load_autonomy_all_stop
+        if load_autonomy_all_stop(self):
+            logging.warning(
+                "Global autonomy all-stop is ON: no persona runs ticks, judgments "
+                "or keep-alive until it is released (alarms still ring)."
+            )
+
         # --- ペルソナ登録後の共通初期化 ---
         # 全ペルソナに対して AutonomyManager 同期と各種予約の再確立を実行する。
         # _on_persona_registered は動的作成/Blueprint からも呼ばれる統一フック。
@@ -1591,8 +1601,9 @@ class SAIVerseManager(
         """指定ペルソナの AutonomyManager を自律ゲートに同期する。
 
         自律ゲート (``autonomy_wiring.is_autonomy_on``) が True のときだけ
-        watchdog tick を起動する。False なら起動せず、既に起動中なら停止する。
-        ゲートはペルソナごとの AUTONOMY_ENABLED だけで決まる (v0.3 の止め具は
+        AutonomyManager (見張りとティックの予約) を起動する。False なら起動せず、
+        既に起動中なら停止する (ティックの予約も消える)。ゲートはグローバル自律
+        全停止とペルソナごとの AUTONOMY_ENABLED で決まる (v0.3 の止め具は
         develop-v0.4 で撤去済み — autonomous_behavior_v3.md §11.1)。
         """
         from saiverse.autonomy_manager import AutonomyManager
@@ -1642,7 +1653,7 @@ class SAIVerseManager(
         との共用経路だったが、v1 は退役した（track_retirement.md §7.4）。
         停止の挙動はここ 1 箇所に集約されたまま。
 
-          1. AutonomyManager.stop() — watchdog tick の予約 cancel
+          1. AutonomyManager.stop() — 見張りとティックの予約を cancel
           2. AUTONOMY_ENABLED → False（DB + in-memory）— 判断点・watchdog の
              ゲートが全て閉じる
 

@@ -3,8 +3,9 @@
 
 v0.4 までペルソナ (LLM) が起床判断でライフを宣言していたが、実機初日
 (2026-07-13) の破綻を受けて全面改訂した。ライフは**ユーザーが設定する
-起床・就寝の区間** (PersonaSchedule) と**予算** (PLAYBOOK_PARAMS の
-daily_budget_pulses) からシステムが確定する。宣言まわりの永続化・検証・
+起床・就寝の区間** (PersonaSchedule) からシステムが確定する (当初は**予算**
+— PLAYBOOK_PARAMS の daily_budget_pulses — も焼いていたが、v0.4 段 3 で
+ティックの間隔 T の設定に置き換わって退役した)。宣言まわりの永続化・検証・
 台帳・keep-alive 連動そのもの (Phase 2/3) は ``test_life_phase2.py`` /
 ``test_life_phase3.py`` を参照——本ファイルは v0.5 で新設された確定ロジック
 (``day_plan.confirm_life_for_today``) と、その呼び出し経路のテスト。
@@ -17,8 +18,9 @@ daily_budget_pulses) からシステムが確定する。宣言まわりの永�
 対象:
 
 - :func:`saiverse.day_plan.confirm_life_for_today` の単体テスト:
-  基本確定・最低予算の切り上げ (均等/自由)・ユーザー設定予算の尊重・
+  基本確定 (行に旧予算が載らない)・モード (均等/自由/上書き)・
   冪等性・スケジュール未設定時の no-op・深夜跨ぎ窓
+- :func:`saiverse.day_plan.life_mode_and_tick_estimate`: 「一日およそ N 回」の目安
 - ScheduleManager → 起床・就寝の帳簿処理: PersonaSchedule からのライフ確定、
   開始/終了の節目 (再発火での二重通知防止込み)、Playbook 未取り込みでも
   確定すること、自律 OFF では確定しないこと、判断点の LLM を呼ばないこと
@@ -204,57 +206,28 @@ def _messages(manager):
 
 
 def test_confirm_life_for_today_basic(manager):
+    """ライフの行は {start, end, mode} + 帳簿 (used_pulses / judgment_pulses)。
+    旧予算 budget_pulses は段 3 で退役した (T の設定に置き換え)。"""
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"  # 均等モード
     life = day_plan.confirm_life_for_today(
         manager, PERSONA_ID, PLAN_DATE, "07:00", "22:00",
-        requested_budget_pulses=30,
     )
     assert life["start"] == "07:00"
     assert life["end"] == "22:00"
     assert life["mode"] == day_plan.LIFE_MODE_EVEN
-    assert life["budget_pulses"] == 30
+    assert "budget_pulses" not in life
     assert life["used_pulses"] == 0
     assert life["judgment_pulses"] == 0
     assert day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE) == [life]
 
 
-def test_confirm_life_for_today_clamps_to_minimum_even_mode(manager):
-    """均等モード: 最低予算 = ceil(窓の長さ ÷ 50分) (life.md §4.2)。"""
-    manager.personas[PERSONA_ID].model = "claude-sonnet-5"
-    # 07:00-13:00 = 360 分 → ceil(360/50) = 8
-    life = day_plan.confirm_life_for_today(
-        manager, PERSONA_ID, PLAN_DATE, "07:00", "13:00",
-        requested_budget_pulses=3,  # 最低値未満
-    )
-    assert life["budget_pulses"] == 8
-
-
-def test_confirm_life_for_today_no_budget_configured_uses_minimum(manager):
-    manager.personas[PERSONA_ID].model = "claude-sonnet-5"
-    life = day_plan.confirm_life_for_today(
-        manager, PERSONA_ID, PLAN_DATE, "07:00", "13:00",
-        requested_budget_pulses=None,
-    )
-    assert life["budget_pulses"] == 8
-
-
-def test_confirm_life_for_today_free_mode_minimum_is_one(manager):
+def test_confirm_life_for_today_free_mode(manager):
     manager.personas[PERSONA_ID].model = "gemini-2.5-flash"  # 自由モード
     life = day_plan.confirm_life_for_today(
         manager, PERSONA_ID, PLAN_DATE, "07:00", "22:00",
-        requested_budget_pulses=None,
     )
     assert life["mode"] == day_plan.LIFE_MODE_FREE
-    assert life["budget_pulses"] == 1
-
-
-def test_confirm_life_for_today_respects_valid_user_budget(manager):
-    manager.personas[PERSONA_ID].model = "claude-sonnet-5"
-    life = day_plan.confirm_life_for_today(
-        manager, PERSONA_ID, PLAN_DATE, "07:00", "13:00",
-        requested_budget_pulses=50,  # 最低値 (8) より十分大きい
-    )
-    assert life["budget_pulses"] == 50
+    assert "budget_pulses" not in life
 
 
 def test_confirm_life_for_today_is_idempotent(manager):
@@ -262,15 +235,13 @@ def test_confirm_life_for_today_is_idempotent(manager):
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"
     first = day_plan.confirm_life_for_today(
         manager, PERSONA_ID, PLAN_DATE, "07:00", "22:00",
-        requested_budget_pulses=30,
     )
     day_plan.record_judgment_pulse(manager, PERSONA_ID, PLAN_DATE, at_time="09:00")
 
     second = day_plan.confirm_life_for_today(
-        manager, PERSONA_ID, PLAN_DATE, "07:00", "22:00",
-        requested_budget_pulses=99,  # 違う予算を渡しても無視される
+        manager, PERSONA_ID, PLAN_DATE, "08:00", "23:00",  # 違う窓を渡しても無視される
     )
-    assert second["budget_pulses"] == first["budget_pulses"] == 30
+    assert (second["start"], second["end"]) == (first["start"], first["end"])
     assert second["judgment_pulses"] == 1  # 積算済みの帳簿は保持
     assert len(day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)) == 1
 
@@ -293,17 +264,13 @@ def test_confirm_life_for_today_none_without_wake_schedule(manager):
 
 
 def test_confirm_life_for_today_overnight_window(manager):
-    """深夜跨ぎ (close < wake) は正常形 (life.md §4.1)。均等モードの最低予算は
-    窓の長さ (跨ぎ込み) から計算する。"""
+    """深夜跨ぎ (close < wake) は正常形 (life.md §4.1)。"""
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"
     life = day_plan.confirm_life_for_today(
         manager, PERSONA_ID, PLAN_DATE, "07:00", "01:00",
-        requested_budget_pulses=None,
     )
     assert life["start"] == "07:00"
     assert life["end"] == "01:00"
-    # 07:00〜01:00 = 18h = 1080分 → ceil(1080/50) = 22
-    assert life["budget_pulses"] == 22
     lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
     assert day_plan.get_life_for_time(lives, "23:30") == 0
     assert day_plan.get_life_for_time(lives, "03:00") is None
@@ -313,53 +280,64 @@ def test_confirm_life_for_today_mode_override_wins_over_provider(manager):
     """life.md v0.5 §5.1: mode_override (ユーザー設定) は provider 自動判定より優先。"""
     manager.personas[PERSONA_ID].model = "gemini-2.5-flash"  # 自由モードのはず
     life = day_plan.confirm_life_for_today(
-        manager, PERSONA_ID, PLAN_DATE, "07:00", "13:00",
-        requested_budget_pulses=None, mode_override="even",
+        manager, PERSONA_ID, PLAN_DATE, "07:00", "13:00", mode_override="even",
     )
     assert life["mode"] == day_plan.LIFE_MODE_EVEN
-    # 均等モードの最低値 (ceil(360/50)=8) が適用される (自由モードの1でない)
-    assert life["budget_pulses"] == 8
 
 
 def test_confirm_life_for_today_invalid_mode_override_falls_back_to_auto(manager):
     """LIFE_MODES 外の値は無視して自動判定にフォールバックする (書ける口をなくす)。"""
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"  # 均等モードのはず
     life = day_plan.confirm_life_for_today(
-        manager, PERSONA_ID, PLAN_DATE, "07:00", "22:00",
-        requested_budget_pulses=None, mode_override="bogus",
+        manager, PERSONA_ID, PLAN_DATE, "07:00", "22:00", mode_override="bogus",
     )
     assert life["mode"] == day_plan.LIFE_MODE_EVEN
 
 
 # ---------------------------------------------------------------------------
-# life_mode_and_min_budget: ライフ設定 API 向けプレビュー計算 (副作用なし)
+# life_mode_and_tick_estimate: ライフ設定画面向けの目安計算 (副作用なし)
+# 旧 life_mode_and_min_budget (最低予算) の後継 (v0.4 計画 決定 11)
 # ---------------------------------------------------------------------------
 
 
-def test_life_mode_and_min_budget_even_mode(manager):
+def test_life_mode_and_tick_estimate_default_interval(manager):
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"
-    info = day_plan.life_mode_and_min_budget(manager, PERSONA_ID, "07:00", "13:00")
+    info = day_plan.life_mode_and_tick_estimate(manager, PERSONA_ID, "07:00", "13:00")
     assert info["derived_mode"] == day_plan.LIFE_MODE_EVEN
     assert info["effective_mode"] == day_plan.LIFE_MODE_EVEN
     assert info["window_minutes"] == 360
-    assert info["min_budget_pulses"] == 8  # ceil(360/50)
+    assert info["tick_interval_minutes"] == 30  # 既定
+    assert info["estimated_ticks_per_day"] == 12  # ceil(360/30)
 
 
-def test_life_mode_and_min_budget_override(manager):
+def test_life_mode_and_tick_estimate_even_mode_caps_the_interval(manager):
+    """均等モードは T を 50 分へ切り下げてから目安を出す (キャッシュの物理)。"""
     manager.personas[PERSONA_ID].model = "gemini-2.5-flash"  # 自由が自動判定
-    info = day_plan.life_mode_and_min_budget(
+    info = day_plan.life_mode_and_tick_estimate(
         manager, PERSONA_ID, "07:00", "13:00", mode_override="even",
+        tick_interval_minutes=120,
     )
     assert info["derived_mode"] == day_plan.LIFE_MODE_FREE
     assert info["effective_mode"] == day_plan.LIFE_MODE_EVEN
-    assert info["min_budget_pulses"] == 8
+    assert info["tick_interval_minutes"] == 50
+    assert info["estimated_ticks_per_day"] == 8  # ceil(360/50)
 
 
-def test_life_mode_and_min_budget_no_window_without_wake_or_close(manager):
+def test_life_mode_and_tick_estimate_free_mode_keeps_a_long_interval(manager):
+    manager.personas[PERSONA_ID].model = "gemini-2.5-flash"
+    info = day_plan.life_mode_and_tick_estimate(
+        manager, PERSONA_ID, "07:00", "01:00", tick_interval_minutes=120,
+    )
+    assert info["tick_interval_minutes"] == 120
+    assert info["estimated_ticks_per_day"] == 9  # 1080 分 / 120 分
+
+
+def test_life_mode_and_tick_estimate_no_window_without_wake_or_close(manager):
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"
-    info = day_plan.life_mode_and_min_budget(manager, PERSONA_ID, "07:00", None)
+    info = day_plan.life_mode_and_tick_estimate(manager, PERSONA_ID, "07:00", None)
     assert info["window_minutes"] is None
-    assert info["min_budget_pulses"] is None
+    assert info["estimated_ticks_per_day"] is None
+    assert info["tick_interval_minutes"] == 30
 
 
 # ---------------------------------------------------------------------------
@@ -503,18 +481,18 @@ def _plan_meta_json(manager, plan_date):
 
 
 def test_wake_schedule_confirms_life_from_persona_schedule(manager, session_factory):
-    """起床スケジュールの発火で、ライフがユーザー設定 (起床・就寝・予算) から
+    """起床スケジュールの発火で、ライフがユーザー設定 (起床・就寝) から
     確定し、開始の節目 (「（活動開始）」通知) が走る。判断点の LLM は呼ばれない。"""
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"
     manager.pulse_controller = RecordingPulseController()
     _import_judgment_playbooks(session_factory)
     _add_day_schedule(session_factory, "judgment_day_open", "07:00",
-                      playbook_params={"daily_budget_pulses": 25})
+                      playbook_params={"tick_interval_minutes": 20})
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
 
     clock.enable_virtual(BASE + timedelta(hours=7))
     outcome = _fire_schedule(
-        manager, "judgment_day_open", "07:00", {"daily_budget_pulses": 25},
+        manager, "judgment_day_open", "07:00", {"tick_interval_minutes": 20},
     )
     assert outcome[0] == "executed"
 
@@ -522,7 +500,9 @@ def test_wake_schedule_confirms_life_from_persona_schedule(manager, session_fact
     assert len(lives) == 1
     assert lives[0]["start"] == "07:00"
     assert lives[0]["end"] == "22:00"
-    assert lives[0]["budget_pulses"] == 25  # 07:00-22:00 の最低値 (18) より大きいので素通り
+    # T はライフに焼き込まない (予約を張るたびに設定から読む)。旧予算も載らない
+    assert "budget_pulses" not in lives[0]
+    assert "tick_interval_minutes" not in lives[0]
     assert lives[0]["mode"] == day_plan.LIFE_MODE_EVEN
     assert lives[0]["started"] is True
     # ライフ開始の節目処理 (tail 通知) も行われている。TTL override 設定は
@@ -551,8 +531,6 @@ def test_wake_schedule_confirms_life_with_mode_override_end_to_end(manager, sess
     lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
     assert len(lives) == 1
     assert lives[0]["mode"] == day_plan.LIFE_MODE_EVEN
-    # 均等モードの最低値 (07:00-22:00 = 900分 → ceil(900/50)=18) が適用される
-    assert lives[0]["budget_pulses"] == 18
 
 
 def test_life_is_confirmed_and_started_even_with_no_playbooks_imported(
@@ -588,20 +566,19 @@ def test_wake_life_start_fires_only_once_across_refires(manager, session_factory
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
 
     clock.enable_virtual(BASE + timedelta(hours=7))
-    _fire_schedule(manager, "judgment_day_open", "07:00", {"daily_budget_pulses": 25})
+    _fire_schedule(manager, "judgment_day_open", "07:00")
     assert sum("活動開始" in t for t in _messages(manager)) == 1
+    day_plan.consume_life_pulse(manager, PERSONA_ID, PLAN_DATE, at_time="08:00")
 
     # サーバー再起動等で同日中に起床が再発火 (backoff 再試行・watchdog 相当)
     clock.advance_to(BASE + timedelta(hours=9))
-    outcome = _fire_schedule(
-        manager, "judgment_day_open", "07:00", {"daily_budget_pulses": 99},
-    )
+    outcome = _fire_schedule(manager, "judgment_day_open", "07:00")
     assert outcome[0] == "executed"
     assert sum("活動開始" in t for t in _messages(manager)) == 1  # 増えない
 
     lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
     assert len(lives) == 1
-    assert lives[0]["budget_pulses"] == 25  # 帳簿は保持 (99 に焼き直されない)
+    assert lives[0]["used_pulses"] == 1  # 帳簿は保持 (焼き直されない)
 
 
 def test_close_schedule_ends_life_and_cancels_keepalive(manager, session_factory):
@@ -1401,7 +1378,7 @@ def test_life_start_after_the_window_is_settled_without_starting(manager):
 # ---------------------------------------------------------------------------
 
 
-def test_judgment_pulses_accumulate_separately_from_budget(manager, session_factory):
+def test_judgment_pulses_accumulate_separately_from_tick_pulses(manager, session_factory):
     """判断点の発火は judgment_pulses だけを積む (used_pulses は不変)。
 
     起床・就寝は v04 段 1-2 で判断点でなくなった — ライフ確定・終了の帳簿処理は
@@ -1410,7 +1387,7 @@ def test_judgment_pulses_accumulate_separately_from_budget(manager, session_fact
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"
     _import_judgment_playbooks(session_factory)
     _add_day_schedule(session_factory, "judgment_day_open", "07:00",
-                      playbook_params={"daily_budget_pulses": 10})
+                      playbook_params={"tick_interval_minutes": 20})
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
 
     clock.enable_virtual(BASE + timedelta(hours=7))
@@ -1427,7 +1404,9 @@ def test_judgment_pulses_accumulate_separately_from_budget(manager, session_fact
     lives = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
     assert len(lives) == 1
     assert lives[0]["judgment_pulses"] == 1  # on_event の 1 回だけ
-    assert lives[0]["used_pulses"] == 0  # 実パルスを撃つ実体はまだ無い
+    # ティックの帳簿 (used_pulses) は走りきったティックだけが積む — このテストに
+    # ティックの運転 (AutonomyManager) は居ない
+    assert lives[0]["used_pulses"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1441,12 +1420,12 @@ def test_delayed_wake_confirms_full_window(manager, session_factory):
     いたが、時間割は段 1-4 で撤去した。"""
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"
     _add_day_schedule(session_factory, "judgment_day_open", "07:00",
-                      playbook_params={"daily_budget_pulses": 20})
+                      playbook_params={"tick_interval_minutes": 20})
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
 
     clock.enable_virtual(BASE + timedelta(hours=21))  # サーバー障害明けの遅発起動
     outcome = _fire_schedule(
-        manager, "judgment_day_open", "07:00", {"daily_budget_pulses": 20},
+        manager, "judgment_day_open", "07:00", {"tick_interval_minutes": 20},
     )
     assert outcome[0] == "executed"
 
@@ -1463,12 +1442,12 @@ def test_delayed_wake_confirms_full_window(manager, session_factory):
 def test_watchdog_refires_life_start_only_while_today_has_no_life(manager, session_factory):
     """watchdog は「当日のライフ無し」で起床の帳簿処理を撃ち直し、
     PersonaSchedule.PLAYBOOK_PARAMS を :func:`_find_day_schedules` 経由で自己
-    解決する (07:00-22:00 窓の最低予算 18 より大きい 30 が素通り)。確定済みの
-    次の tick では撃たない。判断点の LLM は一度も呼ばれない。"""
+    解決する (life_mode_override が素通り)。確定済みの次の tick では撃たない。
+    判断点の LLM は一度も呼ばれない。"""
     manager.personas[PERSONA_ID].model = "claude-sonnet-5"
     manager.pulse_controller = RecordingPulseController()
     _add_day_schedule(session_factory, "judgment_day_open", "07:00",
-                      playbook_params={"daily_budget_pulses": 30})
+                      playbook_params={"life_mode_override": "free"})
     _add_day_schedule(session_factory, "judgment_day_close", "22:00")
 
     clock.enable_virtual(BASE + timedelta(hours=9))  # 起床時間帯・ライフ未確定
@@ -1479,7 +1458,7 @@ def test_watchdog_refires_life_start_only_while_today_has_no_life(manager, sessi
     assert len(lives) == 1
     assert lives[0]["start"] == "07:00"
     assert lives[0]["end"] == "22:00"
-    assert lives[0]["budget_pulses"] == 30
+    assert lives[0]["mode"] == day_plan.LIFE_MODE_FREE  # 設定が素通り
     assert lives[0]["started"] is True
 
     clock.advance_to(BASE + timedelta(hours=10))

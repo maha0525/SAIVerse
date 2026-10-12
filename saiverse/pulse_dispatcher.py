@@ -279,8 +279,11 @@ class PulseDispatcher:
         persona_id: str,
         context: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """AutonomyManager の定期 tick。自律行動 v2 で **watchdog** に縮退した
-        (intent §4.2)。
+        """AutonomyManager の見張り (固定間隔の予約)。自律行動 v2 で **watchdog** に
+        縮退した (intent §4.2)。v0.4 段 3 以降、ティックそのものはここを通らない
+        (``saiverse.autonomy_manager`` のティックの予約が ``fire_tick`` を直接呼ぶ)。
+        見張りの中身は、ライフの張り直しと、走っているライフにティックの予約が
+        無いときの張り直し。
 
         旧: MetaLayer.on_periodic_tick (状況分類 → meta_judgment_* の定期
         ディスパッチ)。この役割は v2 の判断点が引き継いだため、定期経路は

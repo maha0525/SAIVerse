@@ -68,7 +68,7 @@ meta_playbook 未指定の Pulse は無言で `track_user_conversation` に落�
     - **B 案: tell は 1 Beat の Playbook 起動** (`tell target=<相手> gist=<要旨>`) — 軽量が「いま・誰に・何を」の判断を担い、起動された Playbook の LLM ノード (会話 aspect) が実際の言葉を書く。**モデル階層は aspect 導出の既存規則で標準に決まる — 禁止ルールなしで鉄則が構造的に破れない**。届く声も会話ラインの声になる (声の同一性)。コスト = tell 1 回につき標準呼び出し 1 回 (妥当)。Beat の意味論と一致 (正確に 1 Beat、Beat 頭の知覚消費も効く)
     - **裁定 (2026-08-08 まはー): B 案採用**。gist は文脈継承 (起動された Playbook は呼び出し元の文脈を引き継ぐ) があるため言葉の材料としては必須ではないが、「軽量側が何を伝えたくてこの Beat を起動したか」の意図の記録として残す (あったほうがいい)
   - **スペル一発の実測連鎖 (2026-08-08)**: Track running 化 → 会話エピソード開き (機構上「まはーと会話中」に) → 30 分タイムアウト装填 → 会話 Pulse 起動 (LLM 1 回、③の衝突も誘発) → 30 分後にタイムアウトがエピソードを閉じて会話終了判断 (LLM もう 1 回)。まはーには何も届いていないのに世界だけが会話 1 往復ぶんの状態を持った
-  - 30 分待機の問題も半分溶ける: 「ペルソナが自分で開いた会話の返事待ち 30 分」は発生しなくなり、残るのは「実際の会話をいつ閉じるか」= [conversation_timeout_eats_short_life_window.md](conversation_timeout_eats_short_life_window.md) の本来の問いだけに純化される
+  - 30 分待機の問題も半分溶ける: 「ペルソナが自分で開いた会話の返事待ち 30 分」は発生しなくなり、残るのは「実際の会話をいつ閉じるか」= [conversation_timeout_eats_short_life_window.md](archive/conversation_timeout_eats_short_life_window.md) の本来の問いだけに純化される
 - 統合の設計詳細 (プロファイルの持ち方 = カタログの execution_type 統合か別フィールドか、記録の tag、発話の有無) は intent 起こしで詰める
 
 ## レビュー消し込み (2026-08-09)
@@ -110,6 +110,6 @@ meta_playbook 未指定の Pulse は無言で `track_user_conversation` に落�
 
 ## 関連
 
-- [feed_arrival_pulse_cannot_see_articles.md](feed_arrival_pulse_cannot_see_articles.md) (この観測が出た検証) / [conversation_timeout_eats_short_life_window.md](conversation_timeout_eats_short_life_window.md) (②と同じ会話状態機構の隣接論点)
+- [feed_arrival_pulse_cannot_see_articles.md](feed_arrival_pulse_cannot_see_articles.md) (この観測が出た検証) / [conversation_timeout_eats_short_life_window.md](archive/conversation_timeout_eats_short_life_window.md) (②と同じ会話状態機構の隣接論点)
 - [autonomous_v2_post_live_gaps.md](archive/autonomous_v2_post_live_gaps.md) 束C (Track 意味論) — 本件はその実例
 - `saiverse/day_plan.py` `_dispatch_slot_pulse` / user-conv-handler `on_track_activated`

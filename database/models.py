@@ -14,6 +14,7 @@ from sqlalchemy import (
     event,
     select,
     true,
+    false,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -612,6 +613,13 @@ class UserSettings(Base):
     # extra 列を運ばないので、どちらの経路でも消える)。
     METABOLISM_TARGET_CHARS = Column(Integer, nullable=True)
     METABOLISM_HIGH_CHARS = Column(Integer, nullable=True)
+    # グローバル自律全停止 (v0.4 計画 決定 12、2026-10-12)。ON の間は全ペルソナの
+    # ティック・自発の判断・keep-alive を一括で止める非常ブレーキ。ペルソナごとの
+    # AI.AUTONOMY_ENABLED は書き換えない (解除すれば元の設定で再開)。読み書きの口は
+    # saiverse/autonomy_wiring.py の is_autonomy_all_stopped / set_autonomy_all_stop
+    # (manager の in-memory キャッシュ経由 — 毎回 DB を読まない)。全体設定なので
+    # USERID=1 の行に置く。
+    AUTONOMY_ALL_STOP = Column(Boolean, default=False, server_default=false(), nullable=False)
 
 
 class AddonConfig(Base):
@@ -1286,11 +1294,12 @@ class PersonaLife(Base):
     """ライフ (その日の活動時間帯) の置き場 — 1 ペルソナ 1 日 1 行 (複合 PK)。
 
     LIVES_JSON はライフの配列 (JSON):
-    [{start: "HH:MM", end: "HH:MM", budget_pulses: int, mode: "even"|"free",
-      used_pulses: int, judgment_pulses: int,
+    [{start: "HH:MM", end: "HH:MM", mode: "even"|"free",
+      used_pulses: int (走りきったティックの回数 — 観察用), judgment_pulses: int,
       started: bool (開始の節目済み), ended: bool (終了の節目済み)}, ...]
-    (旧ラウンド台帳の ``used_rounds`` は段 1-4 で書き手ごと消えた。切り替え前の
-    行には残りうる。)
+    (旧ラウンド台帳の ``used_rounds`` は段 1-4 で、旧予算 ``budget_pulses`` は
+    段 3 で書き手ごと消えた — ティックの間隔 T の設定に置き換わった。切り替え前の
+    行には残りうるが、読み手はいない。)
 
     起床時刻にシステムが機械の帳簿処理として確定し (LLM は関与しない —
     autonomous_behavior_v3.md §6)、keep-alive・営業日の判定・画面表示が読む。

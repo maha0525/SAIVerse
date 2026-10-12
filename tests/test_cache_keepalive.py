@@ -338,3 +338,152 @@ def test_keepalive_non_explicit_does_nothing(_mock_cache):
     assert client.calls == []
     # 再予約もしない (次の本物の呼び出しが改めて予約する)
     assert "ttl:air:claude-x" not in scheduler.scheduled
+
+
+# ---------------------------------------------------------------------------
+# v0.4 計画 段 3: 最後の標準呼び出し (決定 10) と、ティックが保温を兼ねる (C6)
+# ---------------------------------------------------------------------------
+
+
+class FakeTickAutonomy:
+    """AutonomyManager のティックの口だけを持つ偽物 (呼ばれた回数を数える)。"""
+
+    def __init__(self, tick_at=None):
+        self.notified = 0
+        self.tick_at = tick_at
+
+    def notify_standard_call(self):
+        self.notified += 1
+        return True
+
+    def tick_fire_at(self):
+        return self.tick_at
+
+
+def _usage(model):
+    return FakeUsage(
+        model=model, input_tokens=10, output_tokens=1, cached_tokens=0,
+        cache_write_tokens=0, cache_ttl="5m",
+    )
+
+
+def test_a_standard_model_call_pushes_the_tick_and_others_do_not():
+    """本人の標準モデル (usage.model == persona.model) の成功した呼び出しだけが
+    ティックの予約を押し直す。軽量モデル・model 不明・keep-alive の保温は
+    押さない。anchor の有無には依らない (呼び出しの成功だけで数える)。"""
+    persona = _persona(lightweight_model="light-x")
+    runtime, manager = _make_runtime(persona)
+    am = FakeTickAutonomy()
+    manager._autonomy_managers = {"air": am}
+    lc = runtime.session_lifecycle
+
+    lc.touch_anchor_after_llm_call(persona, _usage("claude-x"), anchor_id=None)
+    assert am.notified == 1
+    lc.touch_anchor_after_llm_call(persona, _usage("light-x"), anchor_id=None)
+    lc.touch_anchor_after_llm_call(persona, _usage(""), anchor_id=None)
+    lc.touch_anchor_after_llm_call(
+        persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=False,
+    )
+    assert am.notified == 1
+
+
+def test_a_standard_call_moves_a_real_tick_reservation_only_when_it_exists():
+    """本物の AutonomyManager + EventScheduler: 予約があれば now + T へ押し直し、
+    無ければ生やさない (ライフ外の会話でティックを生やさない)。"""
+    from saiverse import clock
+    from saiverse.autonomy_manager import AutonomyManager, tick_reservation_key
+    from saiverse.event_scheduler import EventScheduler
+
+    persona = _persona()
+    scheduler = EventScheduler()
+    runtime, manager = _make_runtime(persona, scheduler=scheduler)
+    am = AutonomyManager("air", manager)
+    manager._autonomy_managers = {"air": am}
+    now = datetime(2020, 1, 1, 9, 0, 0)
+    clock.enable_virtual(now)
+    try:
+        am.start()
+        key = tick_reservation_key("air")
+        runtime.session_lifecycle.touch_anchor_after_llm_call(
+            persona, _usage("claude-x"), anchor_id=None,
+        )
+        assert scheduler.fire_time_of(key) is None  # 生やさない
+
+        scheduler.schedule(fire_at=now + timedelta(minutes=5), callback=lambda: None, key=key)
+        clock.advance_to(now + timedelta(minutes=2))
+        runtime.session_lifecycle.touch_anchor_after_llm_call(
+            persona, _usage("claude-x"), anchor_id=None,
+        )
+        # T は既定の 30 分 (この最小の manager には設定もライフも無い)
+        assert scheduler.fire_time_of(key) == now + timedelta(minutes=32)
+    finally:
+        am.stop()
+        clock.disable_virtual()
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_warm_is_not_counted_as_a_standard_call(_mock_cache):
+    """keep-alive の保温は「最後の標準呼び出し」に数えない (保温がティックを
+    永遠に先送りしないため)。"""
+    persona = _persona()
+    runtime, _ = _make_runtime(persona)
+    client = FakeLLMClient()
+    _wire_keepalive(runtime, persona, client)
+    seen: List[Dict[str, Any]] = []
+    runtime.session_lifecycle.touch_anchor_after_llm_call = (
+        lambda p, usage, anchor_id=None, **kwargs: seen.append(kwargs)
+    )
+    assert runtime.run_cache_keepalive("air") is True
+    assert seen and seen[0].get("counts_as_standard_call") is False
+
+
+def test_keepalive_is_not_reserved_when_the_tick_warms_the_cache_first():
+    """ティックの予約がキャッシュの失効より前に発火するなら keep-alive は予約
+    しない (古い予約も消す)。失効より後なら従来どおり予約する。"""
+    from saiverse import clock
+
+    persona = _persona()
+    scheduler = FakeScheduler()
+    runtime, manager = _make_runtime(persona, scheduler=scheduler)
+    runtime.session_lifecycle.get_anchor_validity_seconds = lambda model, persona_id=None: 1200
+    now = datetime(2020, 1, 1, 12, 0, 0)
+    am = FakeTickAutonomy()
+    manager._autonomy_managers = {"air": am}
+    clock.enable_virtual(now)
+    try:
+        # ティックが 10 分後 (TTL 20 分より前) → keep-alive は予約しない
+        scheduler.scheduled["ttl:air:claude-x"] = {"fire_at": now, "callback": None}
+        am.tick_at = now + timedelta(minutes=10)
+        runtime.session_lifecycle.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
+        assert "ttl:air:claude-x" not in scheduler.scheduled
+        assert "ttl:air:claude-x" in scheduler.cancelled
+
+        # ティックが 30 分後 (TTL 20 分より後) → 従来どおり予約する
+        am.tick_at = now + timedelta(minutes=30)
+        runtime.session_lifecycle.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
+        assert scheduler.scheduled["ttl:air:claude-x"]["fire_at"] == now + timedelta(seconds=840)
+
+        # ティックの予約が無い (ライフ外) → 従来どおり予約する
+        scheduler.scheduled.clear()
+        am.tick_at = None
+        runtime.session_lifecycle.schedule_cache_ttl_pulse(persona, "claude-x", "explicit")
+        assert "ttl:air:claude-x" in scheduler.scheduled
+
+        # ティックが温めるのは標準モデルの Session だけ — 別 model の予約は抑えない
+        am.tick_at = now + timedelta(minutes=10)
+        runtime.session_lifecycle.schedule_cache_ttl_pulse(persona, "light-x", "explicit")
+        assert "ttl:air:light-x" in scheduler.scheduled
+    finally:
+        clock.disable_virtual()
+
+
+def test_keepalive_skips_under_the_global_all_stop():
+    """グローバル自律全停止中は keep-alive も温め直さない (自発の課金を一括で
+    止める非常ブレーキ — v0.4 計画 決定 12)。"""
+    persona = _persona()
+    runtime, manager = _make_runtime(persona)
+    manager._autonomy_all_stop = True
+    client = FakeLLMClient()
+    _wire_keepalive(runtime, persona, client)
+    assert runtime.run_cache_keepalive("air") is False
+    assert client.calls == []

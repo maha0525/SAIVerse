@@ -145,8 +145,8 @@ def manager(session_factory):
 def _default_lives():
     # mode は両方 "free" にしておく (round trip / 重なり無しの共存だけが関心事)。
     return [
-        {"start": "08:00", "end": "12:00", "budget_pulses": 6, "mode": "free"},
-        {"start": "14:00", "end": "20:00", "budget_pulses": 8, "mode": "free"},
+        {"start": "08:00", "end": "12:00", "mode": "free"},
+        {"start": "14:00", "end": "20:00", "mode": "free"},
     ]
 
 
@@ -230,7 +230,7 @@ def test_save_lives_redeclare_preserves_bookkeeping_by_start_end(manager):
 
     # 時刻が変わったライフは別物 (0 から)
     changed = [
-        {"start": "08:00", "end": "13:00", "budget_pulses": 6, "mode": "free"},
+        {"start": "08:00", "end": "13:00", "mode": "free"},
     ]
     resaved2 = day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, changed)
     assert resaved2[0]["used_pulses"] == 0
@@ -248,8 +248,6 @@ def test_save_lives_redeclare_preserves_bookkeeping_by_start_end(manager):
         (lambda l: l.__setitem__(0, {**l[0], "start": "8:00"}), "HH:MM"),
         (lambda l: l.__setitem__(0, {**l[0], "start": "08:00", "end": "08:00"}),
          "start と end が同一"),
-        (lambda l: l.__setitem__(0, {**l[0], "budget_pulses": 0}), "budget_pulses"),
-        (lambda l: l.__setitem__(0, {**l[0], "budget_pulses": -1}), "budget_pulses"),
         (lambda l: l.__setitem__(0, {**l[0], "mode": "chaotic"}), "mode"),
     ],
 )
@@ -264,8 +262,8 @@ def test_save_lives_accepts_overlapping_lives(manager):
     """v0.5: ライフ同士の重なり検証は廃止 (システムが 1 日 1 窓を確定するため
     通常は起きないが、書ける口として禁止する理由も無くなった)。"""
     lives = [
-        {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
-        {"start": "11:00", "end": "15:00", "budget_pulses": 4, "mode": "free"},
+        {"start": "08:00", "end": "12:00", "mode": "free"},
+        {"start": "11:00", "end": "15:00", "mode": "free"},
     ]
     saved = day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, lives)
     assert len(saved) == 2
@@ -274,7 +272,7 @@ def test_save_lives_accepts_overlapping_lives(manager):
 def test_save_lives_accepts_overnight_life(manager):
     """v0.5: 深夜跨ぎ (end <= start) は異常ではなく正常形 (life.md §4.1)。"""
     saved = day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "07:00", "end": "01:00", "budget_pulses": 20, "mode": "even"},
+        {"start": "07:00", "end": "01:00", "mode": "even"},
     ])
     assert saved[0]["start"] == "07:00"
     assert saved[0]["end"] == "01:00"
@@ -311,18 +309,17 @@ def test_derive_default_life_mode(manager, model, expected):
 
 def test_consume_life_pulse_accumulates(manager):
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "08:00", "end": "12:00", "budget_pulses": 10, "mode": "free"},
+        {"start": "08:00", "end": "12:00", "mode": "free"},
     ])
     life = day_plan.consume_life_pulse(manager, PERSONA_ID, PLAN_DATE, at_time="09:00")
     assert life["used_pulses"] == 1
     life = day_plan.consume_life_pulse(manager, PERSONA_ID, PLAN_DATE, at_time="10:00")
     assert life["used_pulses"] == 2
-    assert life["budget_pulses"] == 10
 
 
 def test_consume_life_pulse_outside_any_life_is_noop(manager):
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "08:00", "end": "12:00", "budget_pulses": 4, "mode": "free"},
+        {"start": "08:00", "end": "12:00", "mode": "free"},
     ])
     assert day_plan.consume_life_pulse(
         manager, PERSONA_ID, PLAN_DATE, at_time="20:00",
@@ -370,7 +367,7 @@ def test_fire_judgment_point_records_judgment_pulse_separately(manager, session_
     manager.pulse_controller = _finalizing_controller(ledger)
     clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "20:00", "end": "23:00", "budget_pulses": 5, "mode": "free"},
+        {"start": "20:00", "end": "23:00", "mode": "free"},
     ])
 
     result = wiring.fire_judgment_point(
@@ -411,7 +408,7 @@ def test_fire_judgment_point_noop_life_bookkeeping_without_lives(manager, sessio
 
 def _end_test_lives(manager):
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "20:00", "end": "23:00", "budget_pulses": 5, "mode": "free"},
+        {"start": "20:00", "end": "23:00", "mode": "free"},
     ])
 
 
@@ -694,7 +691,7 @@ def test_life_status_now_undeclared(manager):
 
 def test_life_status_now_in_life(manager):
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+        {"start": "09:00", "end": "11:00", "mode": "free"},
     ])
     clock.enable_virtual(BASE + timedelta(hours=9, minutes=30))
     status = day_plan.get_life_status_now(manager, PERSONA_ID)
@@ -708,7 +705,7 @@ def test_life_status_now_in_life(manager):
 def test_life_status_now_in_valley(manager):
     """宣言はあるが区間外 (谷) は in_life=False で「未宣言」と区別される。"""
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+        {"start": "09:00", "end": "11:00", "mode": "free"},
     ])
     clock.enable_virtual(BASE + timedelta(hours=12))
     status = day_plan.get_life_status_now(manager, PERSONA_ID)
@@ -718,16 +715,17 @@ def test_life_status_now_in_valley(manager):
     assert status["life"] is None
 
 
-def test_life_status_now_reflects_budget_consumption(manager):
-    """予算値 (budget_pulses/used_pulses) がライフ状態にそのまま乗る。"""
+def test_life_status_now_reflects_tick_consumption(manager):
+    """ティックの帳簿 (used_pulses) がライフ状態にそのまま乗る。旧予算
+    (budget_pulses) は段 3 で退役し、行に載らない。"""
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+        {"start": "09:00", "end": "11:00", "mode": "free"},
     ])
     day_plan.consume_life_pulse(manager, PERSONA_ID, PLAN_DATE, at_time="09:30")
     clock.enable_virtual(BASE + timedelta(hours=9, minutes=45))
     status = day_plan.get_life_status_now(manager, PERSONA_ID)
     assert status["life"]["used_pulses"] == 1
-    assert status["life"]["budget_pulses"] == 4
+    assert "budget_pulses" not in status["life"]
 
 
 def test_life_status_now_defaults_undeclared_on_lookup_failure():
@@ -756,7 +754,7 @@ def _life_running_past_a_changed_wake(manager, session_factory):
     """
     clock.enable_virtual(BASE + timedelta(hours=23, minutes=10))
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "23:00", "end": "06:00", "budget_pulses": 20, "mode": "free"},
+        {"start": "23:00", "end": "06:00", "mode": "free"},
     ])
     _set_day_schedules(manager, session_factory, wake="07:00", close="22:00")
     clock.enable_virtual(BASE + timedelta(days=1, minutes=30))   # 7/5 00:30
@@ -779,7 +777,7 @@ def test_life_status_now_follows_the_running_life_after_wake_change(
 def test_life_status_now_undeclared_when_lives_are_unreadable(manager):
     """読めない = 判定不能。嘘の「話しかけやすい」を出さない側へ倒す。"""
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+        {"start": "09:00", "end": "11:00", "mode": "free"},
     ])
     clock.enable_virtual(BASE + timedelta(hours=9, minutes=30))
 
@@ -805,7 +803,7 @@ def test_judgment_pulse_lands_on_the_running_lifes_day(manager, session_factory)
 def test_judgment_pulse_is_not_recorded_when_lives_are_unreadable(manager):
     """どの日か分からないまま積まない (他人の帳簿に乗った数字は追えない)。"""
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+        {"start": "09:00", "end": "11:00", "mode": "free"},
     ])
     clock.enable_virtual(BASE + timedelta(hours=9, minutes=30))
 
@@ -828,7 +826,7 @@ def test_keepalive_stops_in_the_valley_after_switching_to_an_overnight_rhythm(
     """
     clock.enable_virtual(BASE + timedelta(hours=8))
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "07:00", "end": "10:00", "budget_pulses": 4, "mode": "free"},
+        {"start": "07:00", "end": "10:00", "mode": "free"},
     ])
     _set_day_schedules(manager, session_factory, wake="23:00", close="06:00")
 
@@ -846,7 +844,7 @@ def test_keepalive_stops_in_the_valley_after_switching_to_an_overnight_rhythm(
 def test_keepalive_allows_when_lives_are_unreadable(manager):
     """読めないときは温め続ける側 (延命を止める方に倒さない — docstring の方針)。"""
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+        {"start": "09:00", "end": "11:00", "mode": "free"},
     ])
     clock.enable_virtual(BASE + timedelta(hours=12))   # 谷 (通常なら False)
     assert day_plan.is_keepalive_allowed(manager, PERSONA_ID) is False
@@ -869,7 +867,7 @@ def test_life_pulse_lands_on_the_running_lifes_day(manager, session_factory):
 def test_life_pulse_is_not_recorded_when_lives_are_unreadable(manager):
     """どの日か分からないまま予算を減らさない。"""
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": "09:00", "end": "11:00", "budget_pulses": 4, "mode": "free"},
+        {"start": "09:00", "end": "11:00", "mode": "free"},
     ])
     clock.enable_virtual(BASE + timedelta(hours=9, minutes=30))
 

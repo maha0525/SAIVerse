@@ -695,6 +695,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `SHOW_MOVEMENT_NOTICES` | BOOLEAN | NOT NULL, default=True |  |
 | `METABOLISM_TARGET_CHARS` | INTEGER | — |  |
 | `METABOLISM_HIGH_CHARS` | INTEGER | — |  |
+| `AUTONOMY_ALL_STOP` | BOOLEAN | NOT NULL, default=False |  |
 
 ## feed_item
 

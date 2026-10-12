@@ -168,9 +168,9 @@ def _life_end(manager, life, *, index=0, plan_date=PLAN_DATE):
     ) is True
 
 
-def _save_life(manager, *, start="09:00", end="11:00", budget=4, mode="free"):
+def _save_life(manager, *, start="09:00", end="11:00", mode="free"):
     day_plan.save_lives(manager, PERSONA_ID, PLAN_DATE, [
-        {"start": start, "end": end, "budget_pulses": budget, "mode": mode},
+        {"start": start, "end": end, "mode": mode},
     ])
     return day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)
 
@@ -277,7 +277,7 @@ def test_life_end_without_session_lifecycle_does_not_crash(manager):
     既定 (3600s) にフォールバックして予約され、通知も正常に記録される。"""
     manager.sea_runtime = None
     clock.enable_virtual(BASE + timedelta(hours=9, minutes=40))
-    lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
+    lives = _save_life(manager, start="09:00", end="09:40", mode="even")
     _life_end(manager, lives[0])
     texts = [m["content"] for m in manager.personas[PERSONA_ID].sai_memory.messages]
     assert any("活動終了" in t for t in texts)
@@ -293,7 +293,7 @@ def test_even_mode_life_start_sets_ttl_override(manager):
     # 開始はライフの窓の中で撃つ (窓が過ぎた開始は「開始」として扱わない —
     # 2026-10-10 Codex 敵対レビュー 3 巡目 修正 3)。
     clock.enable_virtual(BASE + timedelta(hours=9))
-    lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
+    lives = _save_life(manager, start="09:00", end="09:40", mode="even")
     assert manager.get_persona_cache_override(PERSONA_ID) is None
     _life_start(manager, lives[0])
     assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
@@ -305,7 +305,7 @@ def test_even_mode_life_end_schedules_delayed_clear_not_immediate(manager):
     # 開始はライフの窓の中で撃つ (窓が過ぎた開始は「開始」として扱わない —
     # 2026-10-10 Codex 敵対レビュー 3 巡目 修正 3)。
     clock.enable_virtual(BASE + timedelta(hours=9))
-    lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
+    lives = _save_life(manager, start="09:00", end="09:40", mode="even")
     _life_start(manager, lives[0])
     assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
 
@@ -324,7 +324,7 @@ def test_even_mode_life_end_schedules_delayed_clear_not_immediate(manager):
 def test_life_ttl_clear_fire_respects_user_change(manager):
     """予約〜発火の間にユーザーが override を変更していたら、発火体は触らない。"""
     clock.enable_virtual(BASE + timedelta(hours=9))
-    lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
+    lives = _save_life(manager, start="09:00", end="09:40", mode="even")
     _life_start(manager, lives[0])
     clock.advance_to(BASE + timedelta(hours=9, minutes=40))
     _life_end(manager, lives[0])
@@ -349,7 +349,7 @@ def test_next_life_start_cancels_pending_ttl_clear(manager):
     """
     next_date = "2026-07-05"
     clock.enable_virtual(BASE + timedelta(hours=9))
-    lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
+    lives = _save_life(manager, start="09:00", end="09:40", mode="even")
 
     _life_start(manager, lives[0])
     clock.advance_to(BASE + timedelta(hours=9, minutes=40))
@@ -357,7 +357,7 @@ def test_next_life_start_cancels_pending_ttl_clear(manager):
     assert manager.event_scheduler.has_key(TTL_CLEAR_KEY)
 
     day_plan.save_lives(manager, PERSONA_ID, next_date, [
-        {"start": "10:00", "end": "10:40", "budget_pulses": 2, "mode": "even"},
+        {"start": "10:00", "end": "10:40", "mode": "even"},
     ])
     next_lives = day_plan.get_lives(manager, PERSONA_ID, next_date)
 
@@ -385,7 +385,7 @@ def test_even_mode_life_respects_existing_explicit_override(manager):
     しないし、遅延解除の発火でも clear されない (厳密一致しないため)。"""
     manager.set_persona_cache_override(PERSONA_ID, enabled=True, ttl="5m")
     clock.enable_virtual(BASE + timedelta(hours=9))
-    lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
+    lives = _save_life(manager, start="09:00", end="09:40", mode="even")
 
     _life_start(manager, lives[0])
     assert manager.get_persona_cache_override(PERSONA_ID) == {"enabled": True, "ttl": "5m"}
@@ -515,7 +515,7 @@ def test_life_boundary_simulation_end_behavior(manager):
     _save_anchor_rows(lifecycle, anchors)
 
     clock.enable_virtual(BASE + timedelta(hours=9))
-    lives = _save_life(manager, start="09:00", end="09:40", budget=2, mode="even")
+    lives = _save_life(manager, start="09:00", end="09:40", mode="even")
     _life_start(manager, lives[0])
     assert manager.get_persona_cache_override(PERSONA_ID) == LIFE_SET_OVERRIDE
 

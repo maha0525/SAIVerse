@@ -103,7 +103,7 @@ class InfoOccupantFieldsTest(unittest.TestCase):
     def test_the_life_fields_are_gone_even_while_a_life_is_declared(self):
         """ライフを宣言していても暮らし系の欄は返さない (運転 UI は隠す)。"""
         day_plan.save_lives(self.manager, PERSONA_ID, PLAN_DATE, [
-            {"start": "07:00", "end": "12:00", "budget_pulses": 6, "mode": "free"},
+            {"start": "07:00", "end": "12:00", "mode": "free"},
         ])
         clock.enable_virtual(datetime(2026, 7, 6, 9, 30))
         occupant = self._occupant()
