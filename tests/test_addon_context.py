@@ -104,14 +104,13 @@ def test_provider_replacement_empty_values_and_unregister():
     assert addon_context.collect_guidance(_persona("room"), "room") == []
 
 
-def test_failure_without_record_is_unknown_not_empty():
-    # 使える前回の結果が無い失敗 (再起動直後など) は「案内なし」ではなく
-    # 「分からない」— 例外で集める処理全体を撮れなかったことにする。
+def test_failure_without_record_affects_only_that_addon():
+    # 使える前回の結果が無い失敗 (再起動直後など) は、そのアドオンだけ案内なし。
+    # 他のアドオンの案内は今までどおり集まる。
     addon_context.register_provider("fixture", lambda **_kw: "案内")
     addon_context.register_provider("broken", lambda **_kw: 1 / 0)
     for persona in (None, _persona("room")):
-        with pytest.raises(addon_context.GuidanceUnavailable):
-            addon_context.collect_guidance(persona, "room")
+        assert addon_context.collect_guidance(persona, "room") == [("fixture", "案内")]
 
 
 def test_temporary_failure_keeps_the_last_guidance():
@@ -128,8 +127,7 @@ def test_temporary_failure_keeps_the_last_guidance():
     ]
     # 記録はペルソナごと — 一度も成功していない別のペルソナには使わない。
     other_persona = SimpleNamespace(persona_id="someone_else", current_building_id="room")
-    with pytest.raises(addon_context.GuidanceUnavailable):
-        addon_context.collect_guidance(other_persona, "room")
+    assert addon_context.collect_guidance(other_persona, "room") == [("other", "他の案内")]
 
 
 def test_temporary_failure_after_no_guidance_stays_without_guidance():
@@ -145,11 +143,10 @@ def test_temporary_failure_after_no_guidance_stays_without_guidance():
 def test_failure_without_persona_id_has_no_record():
     flaky = _Flaky("案内")
     addon_context.register_provider("flaky", flaky)
-    # persona_id が取れないときは記録しないので、成功の後の失敗も「分からない」。
+    # persona_id が取れないときは記録しないので、成功の後の失敗は案内なし。
     assert addon_context.collect_guidance(None, "room") == [("flaky", "案内")]
     flaky.fail = True
-    with pytest.raises(addon_context.GuidanceUnavailable):
-        addon_context.collect_guidance(None, "room")
+    assert addon_context.collect_guidance(None, "room") == []
     assert addon_context._last_results == {}
 
 
@@ -181,8 +178,31 @@ def test_unregister_forgets_the_last_results_but_replacement_keeps_them():
     addon_context.unregister_provider("flaky")
     assert ("fixture", "flaky") not in addon_context._last_results
     addon_context.register_provider("flaky", replacement)
-    with pytest.raises(addon_context.GuidanceUnavailable):
-        addon_context.collect_guidance(persona, "room")
+    assert addon_context.collect_guidance(persona, "room") == []
+
+
+def test_old_provider_returning_after_replacement_cannot_roll_back_the_record():
+    # 旧提供口の呼び出し中に置き換えが起き、新提供口が先に成功して記録した後で
+    # 旧呼び出しが戻っても、記録を旧値へ巻き戻さず、旧値も返さない。
+    persona = _persona("room")
+    new_provider = _Flaky("新しい案内")
+
+    def old_provider(**_kw):
+        addon_context.register_provider("swap", new_provider)
+        assert addon_context.collect_guidance(persona, "room") == [("swap", "新しい案内")]
+        return "古い案内"
+
+    addon_context.register_provider("swap", old_provider)
+    assert addon_context.collect_guidance(persona, "room") == [("swap", "新しい案内")]
+    assert addon_context._last_results[("fixture", "swap")] == "新しい案内"
+
+    # 置き換えの最中で、まだ記録が無ければ旧値は返さない (案内なし)。
+    addon_context.unregister_provider("swap")
+    addon_context.register_provider("swap", lambda **_kw: addon_context.register_provider(
+        "swap", lambda **_kw2: "後任",
+    ) or "前任")
+    assert addon_context.collect_guidance(persona, "room") == []
+    assert addon_context.collect_guidance(persona, "room") == [("swap", "後任")]
 
 
 def test_collect_guidance_is_sorted_by_addon_name():
@@ -458,36 +478,33 @@ def test_pipeline_temporary_provider_failure_produces_no_false_notifications(tmp
         assert pipeline.flush_diffs(_ctx(VESSEL_ROOM), all_sections=True) == []
 
 
-def test_pipeline_failure_right_after_restart_keeps_head_and_sends_nothing(tmp_path):
-    """再起動直後 (前回の結果の記録が空) に提供口が失敗しても、届けた案内に
-    「当てはまらなくなりました」は出ず、撮り直しは古い head を据え置いて
-    「撮り直せていない」と記録する (届けた通知を提示から下ろさせない)。"""
+def test_pipeline_broken_provider_does_not_block_a_healthy_addon(tmp_path):
+    """一度も成功していない (再起動直後など) 壊れた提供口があっても、そのアドオン
+    だけが案内なしになり、正常なアドオンの「当てはまらなくなりました」は届き、
+    セクションは撮り直せた扱いのまま (通知の提示の節約を止めない)。"""
     from sea.head_pipeline import HeadPipeline, HeadSectionRegistry
 
     _write_manifest(tmp_path, "godot-vessel", {"ja": "Godot Virtual Vessel"})
     registry = HeadSectionRegistry()
     registry.register(AddonGuidanceSection())
     pipeline = HeadPipeline(registry=registry)
-    flaky = _Flaky(GUIDE_TEXT)
+    broken = _Flaky("壊れた案内")
+    broken.fail = True
 
     with patch("saiverse.data_paths.EXPANSION_DATA_DIR", tmp_path):
-        addon_context.register_provider("godot-vessel", flaky)
-        pipeline.capture_all(_ctx(VESSEL_ROOM))
-
-        # 再起動相当: メモリの記録だけが消え、head と既読は残っている。
-        addon_context._last_results.clear()
-        flaky.fail = True
-        assert pipeline.flush_diffs(_ctx(VESSEL_ROOM), all_sections=True) == []
-        redrawn = pipeline.capture_all(_ctx(VESSEL_ROOM))
-        assert redrawn.sections["addon_guidance"] == _snap(
+        addon_context.register_provider("godot-vessel", _room_guide)
+        addon_context.register_provider("zz-broken", broken)
+        snapshot = pipeline.capture_all(_ctx(VESSEL_ROOM))
+        assert snapshot.sections["addon_guidance"] == _snap(
             ("godot-vessel", "Godot Virtual Vessel", GUIDE_TEXT),
         )
         assert pipeline.sections_not_freshly_captured(
             "fixture", "fixture-model", ["addon_guidance"],
-        ) == {"addon_guidance"}
+        ) == set()
 
-        flaky.fail = False
-        assert pipeline.flush_diffs(_ctx(VESSEL_ROOM), all_sections=True) == []
+        left = pipeline.flush_diffs(_ctx("lobby"), all_sections=True)
+        assert [label.kind for label in left] == ["addon_guidance_removed"]
+        assert "Godot Virtual Vessel" in left[0].label
 
 
 # ---------------------------------------------------------------------------

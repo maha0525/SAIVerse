@@ -25,18 +25,26 @@
 
 一時的な失敗では前回の結果を使う: 提供口が例外を出したとき、そのペルソナと
 アドオンの組で最後に成功した結果 (「案内なし」だった結果も含む) が記録されて
-いれば、それを今回の結果として使う。記録が無ければ (再起動直後など)
-:class:`GuidanceUnavailable` を送出して、案内を集める処理全体を「撮れなかった」
-ことにする。head の撮り直しは古い値を据え置いて「撮り直せていない」と記録し
-(届けた通知は提示から下ろされない)、差分検知はこのセクションを飛ばす。
-失敗を「案内なし」として扱うと、失敗した回の差分検知で「当てはまらなくなり
-ました」の偽通知が出て、復旧後に「届きました」の偽通知がもう一度出る。
-さらに head の撮り直しだけが失敗すると、head から案内が消えたのに撮り直しは
-成功した扱いになり、届けた案内の通知も提示から下ろされ、復旧しても前回
-知らせた状態と一致するので通知が出ない — ペルソナは次の撮り直しまで案内を
-見失う。記録はプロセス内メモリだけに持ち、``unregister_provider`` (アドオンの
-無効化・manifest から提供口が消えた・解決に失敗した) で消す。同じアドオンの
-提供口の置き換え (``register_provider``) では消さない。
+いれば、それを今回の結果として使う。失敗を「案内なし」として扱うと、失敗した
+回の差分検知で「当てはまらなくなりました」の偽通知が出て、復旧後に「届き
+ました」の偽通知がもう一度出る。さらに head の撮り直しだけが失敗すると、head
+から案内が消えたのに撮り直しは成功した扱いになり、届けた案内の通知も提示から
+下ろされ、復旧しても前回知らせた状態と一致するので通知が出ない — ペルソナは
+次の撮り直しまで案内を見失う。記録はプロセス内メモリだけに持ち、
+``unregister_provider`` (アドオンの無効化・manifest から提供口が消えた・解決に
+失敗した) で消す。同じアドオンの提供口の置き換え (``register_provider``) では
+消さない。
+
+使える記録が無い失敗 (再起動の直後など) は、そのアドオンだけ「案内なし」として
+扱う (エラーログを残す)。2026-10-12 に一度、この場合は案内を集める処理全体を
+「撮れなかった」ことにしたが、一つの壊れた提供口が他のアドオンの通知と、
+スペル一覧などを含む通知の提示の節約まで止めた。影響を壊れたアドオンだけに
+閉じる方を選び、受け入れる残りは「再起動直後の一時的な失敗で、そのアドオンの
+案内に限り『当てはまらなくなりました』→『届きました』が一往復出うる」こと。
+
+呼び出しの最中に解除・置き換えされたアドオンの結果は記録も返却もしない
+(解除・置き換えの後の世界に、前の提供口の案内を持ち込まない)。置き換えなら、
+記録が残っていればそれを使う。
 """
 from __future__ import annotations
 
@@ -72,15 +80,6 @@ def unregister_provider(addon_name: str) -> None:
             del _last_results[key]
 
 
-class GuidanceUnavailable(RuntimeError):
-    """提供口が失敗し、使える前回の結果も無い — 今回の案内は「分からない」。
-
-    「案内なし」とは別物として扱わせるための例外。案内を集める側 (head の
-    addon_guidance セクションの capture) はこれをそのまま上へ流し、head の
-    撮り直しは古い値の据え置き、差分検知はこのセクションの見送りになる。
-    """
-
-
 def _normalize(text: Any) -> str:
     return text.strip() if isinstance(text, str) else ""
 
@@ -91,10 +90,10 @@ def collect_guidance(persona: Any, building_id: Any) -> list[tuple[str, str]]:
     順序を addon 名で固定するのは、同じ世界なら head に毎回同じ文字列が出る
     ことが prefix キャッシュの前提だから。案内を返さなかった提供口は列に
     含めない。提供口が例外を出したときは、モジュールの docstring の規則どおり
-    前回の結果を使い、使える記録が無ければ :class:`GuidanceUnavailable` を
-    送出する。``persona`` から ``persona_id`` が取れないときは結果を記録しない
-    (失敗時に使える前回の結果も無い)。呼び出しの最中に解除されたアドオンの
-    結果は捨てる (解除後の世界に、解除前の案内を持ち込まない)。
+    前回の結果を使い、使える記録が無ければそのアドオンだけ案内なしとする。
+    ``persona`` から ``persona_id`` が取れないときは結果を記録しない (失敗時に
+    使える前回の結果も無い)。呼び出しの最中に解除・置き換えされたアドオンの
+    結果は記録も返却もしない。
     """
     persona_id: Optional[str] = getattr(persona, "persona_id", None) if persona is not None else None
     if not isinstance(persona_id, str) or not persona_id:
@@ -106,33 +105,41 @@ def collect_guidance(persona: Any, building_id: Any) -> list[tuple[str, str]]:
         ]
     guidance: list[tuple[str, str]] = []
     for name, provider, generation in providers:
+        failed = False
+        text = ""
         try:
             text = _normalize(provider(persona=persona, building_id=building_id))
-        except Exception as exc:
+        except Exception:
+            failed = True
             LOGGER.warning("addon context provider failed addon=%s", name, exc_info=True)
-            previous = None
-            if persona_id is not None:
-                with _lock:
-                    previous = _last_results.get((persona_id, name))
-            if previous is None:
-                raise GuidanceUnavailable(
-                    f"addon context provider failed without a usable last result: {name}"
-                ) from exc
-            LOGGER.info(
-                "addon context provider: using the last successful result "
-                "addon=%s persona=%s has_guidance=%s",
-                name, persona_id, bool(previous),
-            )
-            text = previous
-        else:
-            with _lock:
-                still_registered = (
-                    _generations.get(name, 0) == generation and name in _providers
-                )
-                if still_registered and persona_id is not None:
-                    _last_results[(persona_id, name)] = text
-            if not still_registered:
+        with _lock:
+            if _generations.get(name, 0) != generation or name not in _providers:
+                # 呼び出しの最中に解除された — 解除後の世界に持ち込まない。
                 continue
+            current = _providers[name] is provider
+            if current and not failed and persona_id is not None:
+                _last_results[(persona_id, name)] = text
+            previous = (
+                _last_results.get((persona_id, name)) if persona_id is not None else None
+            )
+        if not current or failed:
+            # 置き換えの最中の古い提供口の結果か、失敗。どちらも今回の結果は
+            # 使わず、記録があればそれを使う。
+            if previous is None:
+                if failed:
+                    LOGGER.error(
+                        "addon context provider failed without a usable last result; "
+                        "treating as no guidance for this addon only addon=%s persona=%s",
+                        name, persona_id,
+                    )
+                continue
+            if failed:
+                LOGGER.info(
+                    "addon context provider: using the last successful result "
+                    "addon=%s persona=%s has_guidance=%s",
+                    name, persona_id, bool(previous),
+                )
+            text = previous
         if text:
             guidance.append((name, text))
     return guidance
