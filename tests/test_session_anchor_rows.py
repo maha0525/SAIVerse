@@ -1944,6 +1944,38 @@ def test_cold_sweep_tick_spawns_on_first_pass(session_factory):
         assert run.call_count == 1
 
 
+def test_cold_sweep_does_not_start_under_the_global_all_stop(session_factory):
+    """時計が起こす先回り畳み (LLM 処理) はグローバル自律全停止の対象
+    (2026-10-12 Codex 敵対レビュー 段 3 1 巡目 high)。巡回は spawn せず、
+    Beat ロックの内側でも始めない。解除すれば次の巡回から戻る。"""
+    lc, persona, state = _cold_sweep_setup(session_factory)
+
+    with _cold_sweep_env(lc, state) as run:
+        lc.manager._autonomy_all_stop = True
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 0
+        # 巡回の門を抜けた後に全停止が入った回も、Beat ロックの内側で引き返す
+        assert lc.run_cold_precompaction(persona) == "all_stop"
+
+        lc.manager._autonomy_all_stop = False
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.results[-1] == "ok"
+
+
+def test_cold_sweep_is_not_stopped_by_per_persona_autonomy_off(session_factory):
+    """ペルソナごとの自律 OFF では止めない — 記憶の手入れは自律と無関係に
+    全員へ届く既存設計 (止めるのはグローバル全停止だけ)。"""
+    lc, persona, state = _cold_sweep_setup(session_factory)
+    persona.autonomy_enabled = False
+
+    with _cold_sweep_env(lc, state) as run:
+        lc._cold_window_sweep_tick()
+        _wait_cold_sweep_idle(lc)
+        assert run.call_count == 1
+
+
 def test_cold_sweep_tick_skips_when_state_unchanged(session_factory):
     """試行が完了したあと状態が動かなければ、次の tick は素通しする。
 

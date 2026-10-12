@@ -325,6 +325,43 @@ class BeatExecution:
         )
 
 
+#: state のキー: 現在の LLM ノードの呼び出しが本人の標準 tier の生成か
+#: (lg_llm_node が select_llm_client の直後に毎回書く)。
+_STANDARD_TIER_CALL_KEY = "_standard_tier_call"
+
+
+def _is_standard_tier_call(
+    execution_context: Any, selected_model: Optional[str], state: Optional[dict],
+) -> bool:
+    """LLM ノードの呼び出しが「本人の標準 tier の生成」か (v0.4 計画 決定 10)。
+
+    選択と同じ規則 (``pulse_context.execution_model_tier``) で標準 tier と決まり、
+    構造化出力の都合で軽量モデルへ差し替わっていない (``selected_model`` が
+    ``execution_context.model_key`` のまま) 呼び出しだけが True。モデル名の一致で
+    判定すると、標準と軽量に同じモデルを設定したペルソナで下請け (軽量 tier) の
+    呼び出しがティックを先送りし続ける (2026-10-12 Codex 敵対レビュー 段 3
+    1 巡目 medium)。``execution_context`` は差し替え前のものを渡すこと。
+    """
+    if execution_context is None:
+        return False
+    from sea.pulse_context import execution_model_tier
+
+    return (
+        execution_model_tier(execution_context, state) == "standard"
+        and selected_model == execution_context.model_key
+    )
+
+
+def _counts_as_standard_call(state: Optional[dict]) -> bool:
+    """この呼び出しを「最後の標準呼び出し」に数えるか (ティックの押し直し)。
+
+    lg_llm_node が書いた印 (:data:`_STANDARD_TIER_CALL_KEY`) が True のときだけ。
+    印が無い呼び出しは数えない側へ倒す — 数え損ねは次の標準呼び出しが拾うが、
+    誤って数えるとティックを永遠に先送りしうる。
+    """
+    return isinstance(state, dict) and state.get(_STANDARD_TIER_CALL_KEY) is True
+
+
 def _record_llm_usage(
     runtime,
     llm_client,
@@ -404,6 +441,7 @@ def _record_llm_usage(
     )
     runtime.session_lifecycle.touch_anchor_after_llm_call(
         persona, usage, anchor_id=state.get("_prefix_anchor_id"),
+        counts_as_standard_call=_counts_as_standard_call(state),
     )
     return llm_usage_metadata
 
@@ -4473,6 +4511,7 @@ async def _run_spell_loop(
                 # anchor は call-local (state["_prefix_anchor_id"]、§3.2)。
                 runtime.session_lifecycle.touch_anchor_after_llm_call(
                     persona, retry_usage, anchor_id=state.get("_prefix_anchor_id"),
+                    counts_as_standard_call=_counts_as_standard_call(state),
                 )
                 from saiverse.model_configs import get_model_display_name
                 pending_llm_usage = {
@@ -5585,6 +5624,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             llm_client, _selected_model = runtime.select_llm_client(
                 node_def, persona, execution_context=execution_context,
                 needs_structured_output=needs_structured_output, state=state,
+            )
+            # このノードの呼び出しが「本人の標準 tier の生成」か (ティックの
+            # 押し直しの判定材料)。差し替え (with_model) の前に決める。
+            state[_STANDARD_TIER_CALL_KEY] = _is_standard_tier_call(
+                execution_context, _selected_model, state,
             )
             if _selected_model != execution_context.model_key:
                 # structured-output fallback 等で実 model が変わった → 差し替え

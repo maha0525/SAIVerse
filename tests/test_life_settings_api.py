@@ -346,6 +346,100 @@ class LifeSettingsApiTest(unittest.TestCase):
         self.assertIs(self.persona.autonomy_enabled, False)
         self.assertEqual(self.ensure_calls, [PERSONA_ID, PERSONA_ID])
 
+    # ------------------------------------------------------------------
+    # 2026-10-12 Codex 敵対レビュー 段 3 1 巡目
+    # ------------------------------------------------------------------
+
+    def _add_row(self, meta_playbook, time_of_day, params=None):
+        db = self.Session()
+        try:
+            row = PersonaSchedule(
+                PERSONA_ID=PERSONA_ID, SCHEDULE_TYPE="periodic",
+                META_PLAYBOOK=meta_playbook, ENABLED=True, TIME_OF_DAY=time_of_day,
+                PLAYBOOK_PARAMS=json.dumps(params) if params is not None else None,
+                SYNC_GENERATION=1,
+            )
+            db.add(row)
+            db.commit()
+            return row.SCHEDULE_ID
+        finally:
+            db.close()
+
+    def test_saving_a_wake_time_unifies_multiple_enabled_wake_rows(self):
+        """⑥ 07:00 (T=30) と 08:00 (T=10) の起床の行があるところへ 09:00 を
+        保存すると、書いた行が読み手の採る行になる (他の有効な行は無効化され、
+        予約も取り消される)。以前は 07:00 のまま走っていた。"""
+        from saiverse.schedule_manager import _schedule_key
+
+        first = self._add_row(LIFE_START_SCHEDULE_PLAYBOOK, "07:00", {"tick_interval_minutes": 30})
+        second = self._add_row(LIFE_START_SCHEDULE_PLAYBOOK, "08:00", {"tick_interval_minutes": 10})
+        self._add_row(LIFE_END_SCHEDULE_PLAYBOOK, "22:00")
+        self.manager.schedule_manager.register_schedule(second)
+        self.assertTrue(self.manager.event_scheduler.has_key(_schedule_key(second)))
+
+        body = self._put({"wake": "09:00"})
+        self.assertEqual(body["wake"], "09:00")
+        self.assertEqual(body["tick_interval_minutes"], 30)  # 書いた行の T
+        rows = {r.id: r for r in self._rows(LIFE_START_SCHEDULE_PLAYBOOK)}
+        self.assertEqual((rows[first].time, rows[first].enabled), ("09:00", True))
+        self.assertFalse(rows[second].enabled)
+        self.assertEqual(rows[second].generation, 2)  # 世代 +1
+        self.assertFalse(self.manager.event_scheduler.has_key(_schedule_key(second)))
+        self._assert_reserved_at_current_generation(rows[first])
+        # 読み手 (GET) も 09:00 を採る
+        self.assertEqual(self.client.get(self._url()).json()["wake"], "09:00")
+
+    def test_concurrent_saves_of_t_and_mode_do_not_lose_either(self):
+        """⑦ T とモード上書きの並行保存: 片方の読み → 書きの間にもう片方が
+        割り込んでも、両方の設定が残る (保存全体を直列化している)。"""
+        import threading
+
+        from api.routes.people import life as life_route
+
+        self._put({"wake": "07:00", "close": "22:00"})
+        entered = threading.Event()
+        release = threading.Event()
+        original_parse = life_route._parse_params
+        calls = []
+
+        def _slow_parse(raw):
+            calls.append(raw)
+            if len(calls) == 1:
+                entered.set()
+                release.wait(timeout=5)
+            return original_parse(raw)
+
+        errors = []
+
+        def _save(**fields):
+            try:
+                life_route.update_life_settings(
+                    PERSONA_ID, life_route.LifeSettingsUpdateRequest(**fields),
+                    self.manager,
+                )
+            except Exception as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        life_route._parse_params = _slow_parse
+        try:
+            t1 = threading.Thread(target=_save, kwargs={"tick_interval_minutes": 45})
+            t1.start()
+            self.assertTrue(entered.wait(timeout=5))
+            t2 = threading.Thread(target=_save, kwargs={"life_mode_override": "even"})
+            t2.start()
+            t2.join(timeout=0.3)
+            self.assertTrue(t2.is_alive())  # 1 本目の保存が終わるまで待つ
+            release.set()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+        finally:
+            life_route._parse_params = original_parse
+        self.assertEqual(errors, [])
+        (wake_row,) = self._rows(LIFE_START_SCHEDULE_PLAYBOOK)
+        self.assertEqual(
+            wake_row.params, {"tick_interval_minutes": 45, "life_mode_override": "even"},
+        )
+
     def test_autonomy_setting_is_shown_as_set_even_under_the_global_all_stop(self):
         """表示するのは設定値 (全停止の門は通さない)。"""
         self.manager._autonomy_all_stop = True

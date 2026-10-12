@@ -290,7 +290,15 @@ class SAIVerseManager(
         # 自律ゲート (autonomy_wiring.is_autonomy_on) が毎回 DB を読まずに済むよう、
         # ゲートを最初に通るペルソナ登録後の初期化より前に読む。
         from saiverse.autonomy_wiring import load_autonomy_all_stop
-        if load_autonomy_all_stop(self):
+        _all_stop = load_autonomy_all_stop(self)
+        if _all_stop is None:
+            # 読めなかった — 停止扱い (fail-closed)。キャッシュしないので、
+            # 自律ゲートは読めるようになるまで毎回読み直す。
+            logging.error(
+                "Global autonomy all-stop setting could not be read: autonomy is "
+                "treated as stopped until it can be read (alarms still ring)."
+            )
+        elif _all_stop:
             logging.warning(
                 "Global autonomy all-stop is ON: no persona runs ticks, judgments "
                 "or keep-alive until it is released (alarms still ring)."
@@ -1671,35 +1679,40 @@ class SAIVerseManager(
             {"autonomy_running": bool}
         """
         from saiverse.autonomy_manager import AutonomyManager
+        from saiverse.autonomy_wiring import autonomy_setting_lock
 
         persona = self.personas.get(persona_id)
 
-        # 1. 定期 tick 停止
-        if not hasattr(self, "_autonomy_managers"):
-            self._autonomy_managers = {}
-        am = self._autonomy_managers.get(persona_id)
-        if am is None:
-            am = AutonomyManager(persona_id=persona_id, manager=self)
-            self._autonomy_managers[persona_id] = am
-        am.stop()
+        # 自律の設定の更新は autonomy_wiring の更新ロックで直列化する
+        # (set_persona_autonomy_enabled / set_autonomy_all_stop と同じ区間の契約 —
+        # 並行する ON の保存と公開順が入れ替わらない)。
+        with autonomy_setting_lock():
+            # 1. 定期 tick 停止
+            if not hasattr(self, "_autonomy_managers"):
+                self._autonomy_managers = {}
+            am = self._autonomy_managers.get(persona_id)
+            if am is None:
+                am = AutonomyManager(persona_id=persona_id, manager=self)
+                self._autonomy_managers[persona_id] = am
+            am.stop()
 
-        # 2. AUTONOMY_ENABLED → False（DB + in-memory）
-        db = self.SessionLocal()
-        try:
-            from database.models import AI as AIModel
-            ai = db.query(AIModel).filter(AIModel.AIID == persona_id).first()
-            if ai is not None:
-                ai.AUTONOMY_ENABLED = False
-                db.commit()
-        except Exception:
-            db.rollback()
-            logging.exception(
-                "[stop-autonomy] failed to set AUTONOMY_ENABLED=False for %s", persona_id,
-            )
-        finally:
-            db.close()
-        if persona is not None:
-            persona.autonomy_enabled = False
+            # 2. AUTONOMY_ENABLED → False（DB + in-memory）
+            db = self.SessionLocal()
+            try:
+                from database.models import AI as AIModel
+                ai = db.query(AIModel).filter(AIModel.AIID == persona_id).first()
+                if ai is not None:
+                    ai.AUTONOMY_ENABLED = False
+                    db.commit()
+            except Exception:
+                db.rollback()
+                logging.exception(
+                    "[stop-autonomy] failed to set AUTONOMY_ENABLED=False for %s", persona_id,
+                )
+            finally:
+                db.close()
+            if persona is not None:
+                persona.autonomy_enabled = False
 
         logging.info("[stop-autonomy] persona=%s", persona_id)
         return {"autonomy_running": am.is_running}

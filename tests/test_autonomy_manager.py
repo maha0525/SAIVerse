@@ -783,3 +783,223 @@ def test_a_day_fast_forward_ticks_every_t_and_stops_at_life_end(
     life = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]
     assert life["used_pulses"] == len(fired)
     assert life["ended"] is True
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 1 巡目の消し込み
+# ---------------------------------------------------------------------------
+
+
+def test_all_stop_read_failure_is_treated_as_stopped_and_not_cached(
+    manager, session_factory,
+):
+    """① 全停止の読み失敗は停止扱い (fail-closed)。キャッシュせず、DB が回復
+    したら読み直して本当の値 (ここでは解除) に戻る。"""
+    def _broken_session():
+        raise RuntimeError("db is down")
+
+    manager.SessionLocal = _broken_session
+    assert wiring.load_autonomy_all_stop(manager) is None
+    assert not hasattr(manager, "_autonomy_all_stop")
+    assert wiring.is_autonomy_all_stopped(manager) is True
+    assert wiring.is_autonomy_on(manager, PERSONA_ID) is False
+    assert not hasattr(manager, "_autonomy_all_stop")  # 読み失敗は載せない
+
+    manager.SessionLocal = session_factory  # 障害が直った
+    assert wiring.is_autonomy_all_stopped(manager) is False
+    assert manager._autonomy_all_stop is False
+    assert wiring.is_autonomy_on(manager, PERSONA_ID) is True
+
+
+def test_all_stop_read_failure_keeps_a_saved_stop_once_the_db_recovers(
+    manager, session_factory,
+):
+    """① 保存済みの停止は、起動時の読み失敗の後も DB の回復で効く (解除として
+    永久にキャッシュされない)。"""
+    wiring.set_autonomy_all_stop(manager, True)
+    del manager._autonomy_all_stop  # 再起動相当
+    original = manager.SessionLocal
+
+    def _broken_session():
+        raise RuntimeError("db is down")
+
+    manager.SessionLocal = _broken_session
+    assert wiring.is_autonomy_all_stopped(manager) is True
+    manager.SessionLocal = original
+    assert wiring.is_autonomy_all_stopped(manager) is True
+    assert manager._autonomy_all_stop is True
+
+
+def test_setting_updates_publish_in_commit_order(manager, session_factory):
+    """② 全停止の更新は commit → 公開 → 再同期を一つのロック区間で行う —
+    先に始めた更新の区間が終わるまで、後の更新の commit・公開は始まらない。"""
+    import threading
+
+    order: List[str] = []
+    first_in_resync = threading.Event()
+    release_first = threading.Event()
+
+    def _ensure(persona_id):
+        value = manager._autonomy_all_stop
+        order.append(f"resync:{value}")
+        if value is False and not first_in_resync.is_set():
+            first_in_resync.set()
+            release_first.wait(timeout=5)
+
+    manager.ensure_autonomy_for = _ensure
+    t1 = threading.Thread(target=wiring.set_autonomy_all_stop, args=(manager, False))
+    t1.start()
+    assert first_in_resync.wait(timeout=5)
+    t2 = threading.Thread(target=wiring.set_autonomy_all_stop, args=(manager, True))
+    t2.start()
+    # 解除の区間が終わるまで、停止の commit・公開は始まらない
+    t2.join(timeout=0.3)
+    assert t2.is_alive()
+    assert manager._autonomy_all_stop is False
+    release_first.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert order == ["resync:False", "resync:True"]
+    # DB と実効ゲートが一致している
+    assert manager._autonomy_all_stop is True
+    del manager._autonomy_all_stop
+    assert wiring.load_autonomy_all_stop(manager) is True
+
+
+def test_all_stop_after_the_gate_does_not_start_the_tick(
+    manager, session_factory, monkeypatch,
+):
+    """② 生成開始の直前の再検査: 引き当て (タスク帳の読み) の最中に全停止が
+    入ったら fire_tick を呼ばない。予約は消える。"""
+    am = _running_life(manager, session_factory)
+    from saiverse import autonomy_manager as am_module
+
+    def _assign_then_stop(mgr, persona_id, *, now, horizon):
+        mgr._autonomy_all_stop = True  # 引き当ての最中に全停止された
+        return None
+
+    monkeypatch.setattr(am_module, "build_tick_assignment", _assign_then_stop)
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls == []
+    assert am.last_report.status == "skipped"
+    assert am.last_report.reason == "autonomy all-stop before start"
+    assert _tick_at(manager) is None
+
+
+def test_conversation_opened_after_the_gate_does_not_start_the_tick(
+    manager, session_factory, monkeypatch,
+):
+    """② 引き当ての最中に会話が開いたら fire_tick を呼ばない (予約は残る)。"""
+    am = _running_life(manager, session_factory)
+    from saiverse import autonomy_manager as am_module
+
+    def _assign_then_talk(mgr, persona_id, *, now, horizon):
+        uc._set_open_conversation(
+            mgr, persona_id, building_id="alice_room", participants=["user"],
+        )
+        return None
+
+    monkeypatch.setattr(am_module, "build_tick_assignment", _assign_then_talk)
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls == []
+    assert am.last_report.reason == "in conversation before start"
+    assert _tick_at(manager) == clock.now() + timedelta(minutes=30)
+
+
+def test_a_late_tick_does_not_roll_back_a_reservation_pushed_by_a_standard_call(
+    manager, session_factory,
+):
+    """③ 07:30 の発火が手渡された後、07:20 の標準呼び出しが予約を 07:50 へ
+    押した。遅れて走る 07:30 の発火は LLM へ進まず、07:50 のまま (巻き戻さない)。"""
+    am = _running_life(manager, session_factory)
+    assert _tick_at(manager) == BASE + timedelta(hours=7, minutes=30)
+    clock.advance_to(BASE + timedelta(hours=7, minutes=20))
+    assert am.notify_standard_call() is True
+    assert _tick_at(manager) == BASE + timedelta(hours=7, minutes=50)
+
+    # 押し直しの前に手渡されていた古い発火が、07:30 に走る
+    clock.advance_to(BASE + timedelta(hours=7, minutes=30))
+    am._handle_tick()
+    assert manager.fire_tick.calls == []
+    assert am.last_report.status == "skipped"
+    assert am.last_report.reason == "superseded by a standard call"
+    assert _tick_at(manager) == BASE + timedelta(hours=7, minutes=50)
+
+    # 正しい期限の発火は普通に走る
+    _fire_tick_reservation(manager)
+    assert [c["at"] for c in manager.fire_tick.calls] == [
+        BASE + timedelta(hours=7, minutes=50),
+    ]
+
+
+def test_a_standard_call_during_the_hand_off_is_not_lost(manager, session_factory):
+    """④ EventScheduler が予約を辞書から外してワーカーが走るまでの間に成功した
+    標準呼び出しは、予約を押せない (予約が無い) が時刻は記録され、発火した
+    ワーカーが自分で見送って「その呼び出し + T」に張り直す。"""
+    am = _running_life(manager, session_factory)
+    key = tick_reservation_key(PERSONA_ID)
+    # 07:30 の発火が手渡された (予約は辞書から消えている)
+    manager.event_scheduler.cancel(key)
+    clock.advance_to(BASE + timedelta(hours=7, minutes=29, seconds=50))
+    assert am.notify_standard_call() is False  # 押せる予約は無い
+    assert _tick_at(manager) is None
+
+    clock.advance_to(BASE + timedelta(hours=7, minutes=30))
+    am._handle_tick()
+    assert manager.fire_tick.calls == []
+    assert am.last_report.reason == "superseded by a standard call"
+    assert _tick_at(manager) == BASE + timedelta(hours=7, minutes=59, seconds=50)
+
+
+def test_a_standard_call_just_before_the_due_time_does_not_skip_the_tick(
+    manager, session_factory,
+):
+    """③ 見送りの猶予 (5 秒): 期限が発火時刻の 5 秒以内 (時計の揺れ) なら
+    見送らずに走る。次回はこの発火から T。"""
+    am = _running_life(manager, session_factory)
+    manager.fire_tick = FakeTicks(manager, standard_call=False)
+    clock.advance_to(BASE + timedelta(hours=7, minutes=0, seconds=3))
+    am.notify_standard_call()  # 07:00:03 → 期限 07:30:03 (発火の 3 秒後)
+    clock.advance_to(BASE + timedelta(hours=7, minutes=30))
+    am._handle_tick()
+    assert len(manager.fire_tick.calls) == 1
+    assert am.last_report.status == "completed"
+    assert _tick_at(manager) == BASE + timedelta(hours=8)
+
+
+class _RecordingLifecycle:
+    def __init__(self):
+        self.reconciled: List[str] = []
+
+    def reconcile_keepalive_after_tick(self, persona_id):
+        self.reconciled.append(persona_id)
+        return True
+
+
+def test_a_tick_that_did_not_warm_reconciles_the_keepalive(manager, session_factory):
+    """⑤ 温めずに終わった回 (skip・not_completed) の後は keep-alive の見張りを
+    再照合する。走りきって標準呼び出しが起きた回は再照合しない。"""
+    lifecycle = _RecordingLifecycle()
+    manager.sea_runtime = SimpleNamespace(session_lifecycle=lifecycle)
+    am = _running_life(manager, session_factory)
+
+    _fire_tick_reservation(manager)  # 走りきって標準呼び出しが起きた
+    assert am.last_report.status == "completed"
+    assert lifecycle.reconciled == []
+
+    uc._set_open_conversation(
+        manager, PERSONA_ID, building_id="alice_room", participants=["user"],
+    )
+    _fire_tick_reservation(manager)  # 会話中で見送り
+    assert am.last_report.reason == "in conversation"
+    assert lifecycle.reconciled == [PERSONA_ID]
+    uc.clear_open_conversation(manager, PERSONA_ID)
+
+    manager.fire_tick = FakeTicks(
+        manager, outcome={"action": "execute", "runtime_outcome": "error",
+                          "error": "boom", "outputs": None},
+        standard_call=False,
+    )
+    _fire_tick_reservation(manager)  # 走ったが標準呼び出しまで届かなかった
+    assert am.last_report.status == "not_completed"
+    assert lifecycle.reconciled == [PERSONA_ID, PERSONA_ID]

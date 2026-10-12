@@ -368,21 +368,49 @@ def _usage(model):
 
 
 def test_a_standard_model_call_pushes_the_tick_and_others_do_not():
-    """本人の標準モデル (usage.model == persona.model) の成功した呼び出しだけが
-    ティックの予約を押し直す。軽量モデル・model 不明・keep-alive の保温は
-    押さない。anchor の有無には依らない (呼び出しの成功だけで数える)。"""
+    """呼び出し元が「標準 tier の本人の生成」と印を付けた (counts_as_standard_call
+    =True) 成功した呼び出しだけがティックの予約を押し直す。印の無い呼び出し
+    (既定 False — 分からない呼び出しは数えない)・keep-alive の保温は押さない。
+    印があっても、防御のモデル名の一致 (usage.model == persona.model) が外れる
+    呼び出し (軽量モデル・model 不明) は押さない。anchor の有無には依らない。"""
     persona = _persona(lightweight_model="light-x")
     runtime, manager = _make_runtime(persona)
     am = FakeTickAutonomy()
     manager._autonomy_managers = {"air": am}
     lc = runtime.session_lifecycle
 
-    lc.touch_anchor_after_llm_call(persona, _usage("claude-x"), anchor_id=None)
+    lc.touch_anchor_after_llm_call(
+        persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=True,
+    )
     assert am.notified == 1
-    lc.touch_anchor_after_llm_call(persona, _usage("light-x"), anchor_id=None)
-    lc.touch_anchor_after_llm_call(persona, _usage(""), anchor_id=None)
+    lc.touch_anchor_after_llm_call(
+        persona, _usage("light-x"), anchor_id=None, counts_as_standard_call=True,
+    )
+    lc.touch_anchor_after_llm_call(
+        persona, _usage(""), anchor_id=None, counts_as_standard_call=True,
+    )
+    lc.touch_anchor_after_llm_call(persona, _usage("claude-x"), anchor_id=None)
     lc.touch_anchor_after_llm_call(
         persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=False,
+    )
+    assert am.notified == 1
+
+
+def test_a_lightweight_call_with_the_standard_model_name_does_not_push_the_tick():
+    """⑧ 標準と軽量に同じモデルを設定したペルソナ: 呼び出し元が軽量 tier と
+    判定した呼び出し (counts_as_standard_call=False) は、モデル名が標準と一致
+    しても押し直さない (2026-10-12 Codex 敵対レビュー 段 3 1 巡目 medium)。"""
+    persona = _persona(model="same-model", lightweight_model="same-model")
+    runtime, manager = _make_runtime(persona)
+    am = FakeTickAutonomy()
+    manager._autonomy_managers = {"air": am}
+    lc = runtime.session_lifecycle
+    lc.touch_anchor_after_llm_call(
+        persona, _usage("same-model"), anchor_id=None, counts_as_standard_call=False,
+    )
+    assert am.notified == 0
+    lc.touch_anchor_after_llm_call(
+        persona, _usage("same-model"), anchor_id=None, counts_as_standard_call=True,
     )
     assert am.notified == 1
 
@@ -405,14 +433,14 @@ def test_a_standard_call_moves_a_real_tick_reservation_only_when_it_exists():
         am.start()
         key = tick_reservation_key("air")
         runtime.session_lifecycle.touch_anchor_after_llm_call(
-            persona, _usage("claude-x"), anchor_id=None,
+            persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=True,
         )
         assert scheduler.fire_time_of(key) is None  # 生やさない
 
         scheduler.schedule(fire_at=now + timedelta(minutes=5), callback=lambda: None, key=key)
         clock.advance_to(now + timedelta(minutes=2))
         runtime.session_lifecycle.touch_anchor_after_llm_call(
-            persona, _usage("claude-x"), anchor_id=None,
+            persona, _usage("claude-x"), anchor_id=None, counts_as_standard_call=True,
         )
         # T は既定の 30 分 (この最小の manager には設定もライフも無い)
         assert scheduler.fire_time_of(key) == now + timedelta(minutes=32)
@@ -487,3 +515,121 @@ def test_keepalive_skips_under_the_global_all_stop():
     _wire_keepalive(runtime, persona, client)
     assert runtime.run_cache_keepalive("air") is False
     assert client.calls == []
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 1 巡目: 温めなかったティックの後の保温の
+# 復旧 (⑤) と、送信直前の再検査
+# ---------------------------------------------------------------------------
+
+
+def _reconcile_setup(persona=None, tick_at_minutes=30, ttl_seconds=1200, age_seconds=60):
+    """標準モデルの anchor が生きていて、ティックが失効より後にある状態。"""
+    from saiverse import clock
+    from saiverse.event_scheduler import EventScheduler
+
+    persona = persona or _persona()
+    scheduler = EventScheduler()  # start しない (予約の時刻だけを見る)
+    runtime, manager = _make_runtime(persona, scheduler=scheduler)
+    entry = _live_anchor_entry(ttl_seconds=ttl_seconds, age_seconds=age_seconds)
+    runtime.session_lifecycle.load_anchor_entry = (
+        lambda pid, mk: entry if mk == "claude-x" else None
+    )
+    now = datetime(2020, 1, 1, 12, 0, 0)
+    clock.enable_virtual(now)
+    am = FakeTickAutonomy(
+        tick_at=None if tick_at_minutes is None else now + timedelta(minutes=tick_at_minutes),
+    )
+    manager._autonomy_managers = {"air": am}
+    return runtime, manager, scheduler, am, now
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_is_rearmed_after_a_tick_that_did_not_warm(_mock_cache):
+    """⑤ 次のティックが失効より後なら、キャッシュ寿命の threshold_ratio 分が
+    残る時刻に keep-alive を張り直す (TTL 1200 秒・経過 60 秒・ratio 0.3 →
+    残り 1140 秒の 360 秒前 = 780 秒後)。"""
+    from saiverse import clock
+
+    runtime, _manager, scheduler, _am, now = _reconcile_setup()
+    try:
+        assert runtime.session_lifecycle.reconcile_keepalive_after_tick("air") is True
+        fire_at = scheduler.fire_time_of("ttl:air:claude-x")
+        assert fire_at is not None
+        assert abs((fire_at - (now + timedelta(seconds=780))).total_seconds()) < 5
+    finally:
+        clock.disable_virtual()
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_is_not_rearmed_when_the_next_tick_warms_first(_mock_cache):
+    from saiverse import clock
+
+    runtime, _manager, scheduler, _am, _now = _reconcile_setup(tick_at_minutes=10)
+    try:
+        assert runtime.session_lifecycle.reconcile_keepalive_after_tick("air") is False
+        assert scheduler.fire_time_of("ttl:air:claude-x") is None
+    finally:
+        clock.disable_virtual()
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_is_not_revived_under_all_stop_or_autonomy_off(_mock_cache):
+    """⑤ 全停止・自律 OFF の間は保温を復活させない。"""
+    from saiverse import clock
+
+    runtime, manager, scheduler, _am, _now = _reconcile_setup()
+    try:
+        manager._autonomy_all_stop = True
+        assert runtime.session_lifecycle.reconcile_keepalive_after_tick("air") is False
+        manager._autonomy_all_stop = False
+        manager.personas["air"].autonomy_enabled = False
+        assert runtime.session_lifecycle.reconcile_keepalive_after_tick("air") is False
+        assert scheduler.fire_time_of("ttl:air:claude-x") is None
+    finally:
+        clock.disable_virtual()
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_reconcile_keeps_a_live_reservation_and_skips_an_expired_cache(
+    _mock_cache,
+):
+    from saiverse import clock
+
+    runtime, _manager, scheduler, _am, now = _reconcile_setup()
+    try:
+        later = now + timedelta(minutes=19)
+        scheduler.schedule(fire_at=later, callback=lambda: None, key="ttl:air:claude-x")
+        assert runtime.session_lifecycle.reconcile_keepalive_after_tick("air") is False
+        assert scheduler.fire_time_of("ttl:air:claude-x") == later  # 上書きしない
+    finally:
+        clock.disable_virtual()
+
+    runtime, _manager, scheduler, _am, _now = _reconcile_setup(
+        ttl_seconds=300, age_seconds=600,
+    )
+    try:
+        assert runtime.session_lifecycle.reconcile_keepalive_after_tick("air") is False
+        assert scheduler.fire_time_of("ttl:air:claude-x") is None
+    finally:
+        clock.disable_virtual()
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_does_not_send_when_all_stop_lands_during_composition(_mock_cache):
+    """生成開始の直前の再検査: 文脈の組成中に全停止が入ったら送らない
+    (touch もしない — 連鎖はここで止まる)。"""
+    persona = _persona()
+    runtime, manager = _make_runtime(persona)
+    client = FakeLLMClient()
+    touched = _wire_keepalive(runtime, persona, client)
+    original_prepare = runtime._prepare_context
+
+    def _prepare_then_stop(*a, **k):
+        manager._autonomy_all_stop = True
+        return original_prepare(*a, **k)
+
+    runtime._prepare_context = _prepare_then_stop
+    assert runtime.run_cache_keepalive("air") is False
+    assert client.calls == []
+    assert touched == []

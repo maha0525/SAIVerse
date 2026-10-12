@@ -239,6 +239,37 @@ def tier_without_aspect(state: Optional[Dict[str, Any]]) -> str:
     return "standard"
 
 
+def execution_model_tier(
+    execution_context: Optional["ExecutionContext"],
+    state: Optional[Dict[str, Any]],
+) -> str:
+    """この呼び出しの実行 tier (``"standard"`` / ``"lightweight"``)。
+
+    LLM 選択 (``SEARuntime._decide_base_llm_model``) が使う規則そのもの —
+    ExecutionContext があればその aspect、無ければ state の PulseContext の
+    現在ラインの tier、どちらでも決まらなければ :func:`tier_without_aspect`。
+    選択と「この呼び出しは標準 tier だったか」の判定 (ティックの押し直し、
+    v0.4 計画 決定 10) が同じ一つの規則を読むための口。
+    """
+    tier: Optional[str] = None
+    if execution_context is not None:
+        aspect = getattr(execution_context, "aspect", None)
+        if aspect is not None:
+            tier = aspect.model_tier
+    elif state:
+        pulse_context = state.get("_pulse_context")
+        if pulse_context is not None:
+            try:
+                current = pulse_context.current_line()
+            except Exception:
+                current = None
+            if current is not None:
+                tier = getattr(current, "model_tier", None)
+    if tier is None:
+        tier = tier_without_aspect(state)
+    return tier
+
+
 @dataclass(frozen=True)
 class ExecutionContext:
     """実行の身分証 — Beat 開始時に一度だけ解決する不変の器。

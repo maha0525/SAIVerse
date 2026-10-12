@@ -47,7 +47,7 @@ class SpellLoopRuntime:
         self._msg_seq = 0
         self.manager = SimpleNamespace(occupants=occupants or {"b1": ["p1"]})
         self.session_lifecycle = SimpleNamespace(
-            touch_anchor_after_llm_call=lambda persona, usage, anchor_id=None: None,
+            touch_anchor_after_llm_call=lambda persona, usage, anchor_id=None, **_kw: None,
         )
 
     # --- 現在地 -----------------------------------------------------------

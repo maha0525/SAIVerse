@@ -248,6 +248,28 @@ def test_fire_judgment_point_precondition_rechecked(session_factory):
     assert manager.pulse_controller.calls == []
 
 
+def test_fire_judgment_point_rechecks_autonomy_after_waiting_for_the_lock(
+    session_factory,
+):
+    """② 生成開始の直前の再検査 (2026-10-12 Codex 敵対レビュー 段 3 1 巡目
+    high): Lock を待つ間に全停止が入ったら、判断を始めない (LLM へ進まない)。"""
+    manager, _ = _make_manager(session_factory)
+
+    class _StopWhileWaiting:
+        def __enter__(self):
+            manager._autonomy_all_stop = True  # Lock 待ちの間に全停止された
+
+        def __exit__(self, *exc):
+            return False
+
+    manager.meta_layer = SimpleNamespace(_get_lock=lambda pid: _StopWhileWaiting())
+    clock.enable_virtual(datetime(2026, 7, 4, 22, 0, 0))
+    result = wiring.fire_judgment_point(manager, PERSONA_ID, "on_event", _EVENT)
+    assert result["submitted"] is False
+    assert result["reason"] == "persona autonomy disabled"
+    assert manager.pulse_controller.calls == []
+
+
 def test_fire_judgment_point_uses_meta_layer_lock(session_factory):
     """MetaLayer の per-persona Lock を共有して直列化する (取得の証跡)。"""
     manager, _ = _make_manager(session_factory)

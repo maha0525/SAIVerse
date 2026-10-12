@@ -11,13 +11,17 @@ autonomous_behavior_v3.md §5) で、旧「50 分間隔の watchdog タイマー
 
    - ライフ開始の節目が now + T に張り (``day_plan.apply_life_boundary``)、終了の
      節目が消す
-   - 本人の標準モデルが呼ばれるたびに now + T へ押し直す
+   - 本人の標準モデルが呼ばれるたびに時刻を記録し (予約の有無に関係なく)、
+     予約が有れば「最後の標準呼び出し + T」へ押し直す
      (:meth:`AutonomyManager.notify_standard_call` — 呼び口は
      ``sea.session_lifecycle.SessionLifecycle.touch_anchor_after_llm_call``)。
      予約が無いとき (ライフ外) は生やさない
-   - 発火したら、先に次回を now + T で張り直し、ゲート (全停止・自律 OFF・
-     ライフ外・会話中) を見て、通ればタスク帳から割り当てを引き当てて
-     ``SAIVerseManager.fire_tick`` を呼ぶ
+   - 発火したら、まず記録された最後の標準呼び出しに追い越されていないかを
+     見て (追い越されていれば正しい期限へ張り直して見送る)、次回を
+     max(発火時刻, 最後の標準呼び出し) + T で張り直し、ゲート (全停止・自律
+     OFF・ライフ外・会話中) を見て、通ればタスク帳から割り当てを引き当て、
+     生成開始の直前にゲートをもう一度見てから ``SAIVerseManager.fire_tick``
+     を呼ぶ。温めずに終わった回は keep-alive の見張りを再照合する
 
 2. **見張り** (key ``autonomy-watchdog:{persona_id}``、固定間隔
    :data:`WATCHDOG_INTERVAL_MINUTES`)。中身は ``PulseDispatcher.dispatch_autonomy_tick``
@@ -183,6 +187,13 @@ class AutonomyManager:
         # 状態の遷移と、予約の張り直し (状態を見てから張る) を同じ区間に置く —
         # stop() と発火中の張り直しが交差して、止めた後に予約が生き返らないように。
         self._lock = threading.Lock()
+        # 最後の標準呼び出しの時刻 (clock.now() 基準、self._lock で守る)。
+        # 「最後の標準呼び出しから T 分」(決定 10) の一次情報 — 予約の有無とは
+        # 独立に記録する。予約は手渡しの最中 (EventScheduler が key を辞書から
+        # 消してからワーカーが次回を張るまで) に存在しないので、予約だけを
+        # 状態にすると、その間に成功した標準呼び出しを取りこぼし、遅れて走る
+        # 発火が延ばした予約を巻き戻す (2026-10-12 Codex 敵対レビュー 段 3 1 巡目)。
+        self._last_standard_call: Optional[datetime] = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -306,16 +317,27 @@ class AutonomyManager:
         return cancelled
 
     def notify_standard_call(self) -> bool:
-        """本人の標準モデルが呼ばれた — ティックの予約を now + T へ押し直す (決定 10)。
+        """本人の標準モデルが呼ばれた — ティックの予約を「最後の標準呼び出し + T」へ
+        押し直す (決定 10)。
 
-        **予約が現に有るときだけ**動かす (``schedule_if_present``) — 予約が無い
-        (ライフ外・自律 OFF) なら何もしない。ライフ外の会話でティックを生やさ
-        ないため。呼び手は ``SessionLifecycle.touch_anchor_after_llm_call``
-        (keep-alive の保温は呼ばない — 保温がティックを永遠に先送りするのを防ぐ)。
+        まず**予約の有無に関係なく**時刻を記録する (:attr:`_last_standard_call`)。
+        予約が手渡しの最中で辞書に無い瞬間の呼び出しも、この記録を発火した
+        ワーカー (:meth:`_run_tick`) が読んで自分で見送る。
+
+        押し直しは**予約が現に有るときだけ** (``schedule_if_present``) — 予約が
+        無い (ライフ外・自律 OFF) なら生やさない。ライフ外の会話でティックを生やさ
+        ないため。期限はロックの中で記録の最新値から計算する — 呼び出しが前後して
+        届いても、古い呼び出しの期限で新しい期限を巻き戻さない。呼び手は
+        ``SessionLifecycle.touch_anchor_after_llm_call`` (keep-alive の保温は
+        呼ばない — 保温がティックを永遠に先送りするのを防ぐ)。
 
         Returns:
             押し直したか。
         """
+        called_at = clock.now()
+        with self._lock:
+            if self._last_standard_call is None or called_at > self._last_standard_call:
+                self._last_standard_call = called_at
         scheduler = self._scheduler()
         if scheduler is None:
             return False
@@ -324,10 +346,10 @@ class AutonomyManager:
         if not scheduler.has_key(key):
             return False
         minutes = self.resolve_interval_minutes()
-        fire_at = clock.now() + timedelta(minutes=minutes)
         with self._lock:
             if self._state == AutonomyState.STOPPED:
                 return False
+            fire_at = self._last_standard_call + timedelta(minutes=minutes)
             moved = scheduler.schedule_if_present(
                 fire_at=fire_at, callback=self._handle_tick, key=key,
             )
@@ -438,6 +460,7 @@ class AutonomyManager:
             cycle_id=str(uuid.uuid4())[:8], kind="tick", started_at=time.time(),
         )
         self._current_cycle_id = report.cycle_id
+        started_at = clock.now()
         try:
             report.status, report.reason = self._run_tick()
         except Exception as exc:
@@ -453,28 +476,94 @@ class AutonomyManager:
             f" ({report.reason})" if report.reason else "",
             report.completed_at - report.started_at,
         )
+        # 温めなかった回 (skip の各種・not_completed・例外) の後の保温の復旧
+        # (2026-10-12 Codex 敵対レビュー 段 3 1 巡目 medium)。keep-alive は
+        # 「このティックがキャッシュの失効より前に温める」前提で取り消されている
+        # ことがある (sea.session_lifecycle.schedule_cache_ttl_pulse) — ティックが
+        # 標準呼び出しまで届かなかったら、その前提が崩れたので見張りを再照合する。
+        # 届いたかは最後の標準呼び出しの記録がこの発火の開始より後かで見る。
+        with self._lock:
+            last = self._last_standard_call
+        if last is None or last < started_at:
+            self._reconcile_keepalive_after_unwarmed_tick()
+
+    def _reconcile_keepalive_after_unwarmed_tick(self) -> None:
+        """ティックが温めずに終わった回の後、標準モデルの keep-alive を再照合する。
+
+        実体は ``sea.session_lifecycle.SessionLifecycle.reconcile_keepalive_after_tick``
+        (manager 経由 — saiverse → sea の直接 import を避ける)。全停止・自律 OFF・
+        ライフ外では復活させない判定は向こう側が持つ。失敗は WARN で握る。
+        """
+        lifecycle = getattr(
+            getattr(self.manager, "sea_runtime", None), "session_lifecycle", None,
+        )
+        reconcile = getattr(lifecycle, "reconcile_keepalive_after_tick", None)
+        if not callable(reconcile):
+            return
+        try:
+            reconcile(self.persona_id)
+        except Exception:
+            LOGGER.warning(
+                "[Autonomy:%s] failed to reconcile the cache keep-alive after a "
+                "tick that did not warm the cache", self.persona_id, exc_info=True,
+            )
+
+    #: 古い発火の見送りの猶予。「最後の標準呼び出し + T」がこの発火の時刻より
+    #: これ以上後ろなら、この発火は標準呼び出しに追い越された古い (早すぎる) もの。
+    #: 猶予は時計の揺れと、正しい期限ちょうどの発火を誤って見送らないため。
+    _SUPERSEDE_GRACE = timedelta(seconds=5)
 
     def _run_tick(self) -> Tuple[str, Optional[str]]:
-        """ティック 1 回の本体。``(status, reason)`` を返す。"""
+        """ティック 1 回の本体。``(status, reason)`` を返す。
+
+        生成開始のフェンス: 引き当ての後・``fire_tick`` の直前に、全停止・
+        自律ゲート・会話状態をもう一度見る (冒頭のゲートからここまでの読み
+        — ライフ・会話・タスク帳 — の間に止められた発火を新しく始めない)。
+        **開始済みの生成は完走する** (課金と生成の保護の既存裁定)。このフェンスは
+        開始の直前までで、``fire_tick`` の中の Pulse は止めない。
+        """
         from saiverse import day_plan
         from saiverse.autonomy_wiring import is_autonomy_all_stopped, is_autonomy_on
 
         manager = self.manager
         persona_id = self.persona_id
         fired_at = clock.now()
-
-        # 1. 先に次回を now + T で張り直す — この発火の途中 (LLM の失敗・例外) で
-        #    連鎖が切れないため。中で標準呼び出しが成功すれば notify_standard_call
-        #    がもう少し後ろへ押し直す。
         minutes = self.resolve_interval_minutes()
+        interval = timedelta(minutes=minutes)
+
+        # 0. 古い発火の見送り + 1. 先に次回を張り直す (同じロック区間)。
+        #    「最後の標準呼び出しから T 分」(決定 10) の一次情報は
+        #    _last_standard_call。手渡しの最中に成功した標準呼び出しは予約を
+        #    押し直せない (予約が辞書に無い) ので、この発火が自分で見送り、
+        #    正しい期限に張り直す。張り直しの期限は max(fired_at, 最後の標準
+        #    呼び出し) + T — 遅れて走る発火が、標準呼び出しが延ばした予約を
+        #    巻き戻さない。ロックの中で記録を読むので、notify_standard_call と
+        #    前後しても最新の記録が勝つ。
+        #    張り直しを先にするのは、この発火の途中 (LLM の失敗・例外) で連鎖が
+        #    切れないため。中で標準呼び出しが成功すれば notify_standard_call が
+        #    もう少し後ろへ押し直す。
         with self._lock:
             if self._state == AutonomyState.STOPPED:
                 return ("skipped", "stopped")
+            last = self._last_standard_call
+            superseded_until: Optional[datetime] = None
+            if last is not None and last + interval > fired_at + self._SUPERSEDE_GRACE:
+                superseded_until = last + interval
+                next_at = superseded_until
+            else:
+                base = fired_at if last is None or last < fired_at else last
+                next_at = base + interval
             self._schedule_locked(
-                tick_reservation_key(persona_id),
-                fired_at + timedelta(minutes=minutes),
-                self._handle_tick,
+                tick_reservation_key(persona_id), next_at, self._handle_tick,
             )
+        if superseded_until is not None:
+            LOGGER.info(
+                "[Autonomy:%s] tick fired at %s is older than the last standard "
+                "call; re-armed at %s without running",
+                persona_id, fired_at.isoformat(timespec="seconds"),
+                superseded_until.isoformat(timespec="seconds"),
+            )
+            return ("skipped", "superseded by a standard call")
 
         # 2. ゲート (通らない回は何もしない)
         if is_autonomy_all_stopped(manager):
@@ -509,7 +598,7 @@ class AutonomyManager:
         try:
             assignment = build_tick_assignment(
                 manager, persona_id, now=fired_at,
-                horizon=fired_at + timedelta(minutes=minutes),
+                horizon=fired_at + interval,
             )
         except TaskBookUnreadable as exc:
             LOGGER.warning(
@@ -519,7 +608,29 @@ class AutonomyManager:
             )
             return ("skipped", "task book unreadable")
 
-        # 4. ティックを打つ
+        # 4. 生成開始の直前の再検査 (2026-10-12 Codex 敵対レビュー 段 3 1 巡目
+        #    high: ゲート通過後に全停止されても新規 LLM 実行へ進んだ)。
+        #    冒頭のゲートと同じ判定をもう一度通す — ライフ・会話・タスク帳を
+        #    読んでいる間に止められた発火を始めない。
+        with self._lock:
+            stopped = self._state == AutonomyState.STOPPED
+        if stopped:
+            return ("skipped", "stopped before start")
+        if is_autonomy_all_stopped(manager):
+            self.cancel_tick()
+            return ("skipped", "autonomy all-stop before start")
+        if not is_autonomy_on(manager, persona_id):
+            self.cancel_tick()
+            return ("skipped", "autonomy off before start")
+        conversation = day_plan.get_user_conversation_state(manager, persona_id)
+        if conversation is not False:
+            return (
+                "skipped",
+                "in conversation before start" if conversation
+                else "conversation unknown before start",
+            )
+
+        # 5. ティックを打つ
         outcome = manager.fire_tick(persona_id, assignment)
         if (
             outcome.get("action") == "execute"

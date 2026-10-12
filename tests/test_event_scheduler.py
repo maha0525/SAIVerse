@@ -459,5 +459,57 @@ class ScheduleIfPresentTest(unittest.TestCase):
         self.assertIsNone(self.scheduler.fire_time_of("k1"))
 
 
+class WorkerStartFailureTest(unittest.TestCase):
+    """ワーカーを起こせない (Thread.start の RuntimeError) とき、dispatch スレッド
+    上で callback を走らせず、5 秒後へ積み直す (2026-10-12 Codex 敵対レビュー
+    段 3 1 巡目 medium)。"""
+
+    def _entry(self, scheduler, key, callback):
+        from saiverse.event_scheduler import _Entry
+
+        return _Entry(fire_at_ts=time.time(), seq=0, key=key, callback=callback)
+
+    def test_start_failure_requeues_instead_of_firing_on_the_dispatch_thread(self) -> None:
+        from unittest.mock import patch
+
+        scheduler = EventScheduler()  # start() しない
+        fired: list[str] = []
+        entry = self._entry(scheduler, "k1", lambda: fired.append("fired"))
+        before = datetime.now()
+        with patch(
+            "saiverse.event_scheduler.threading.Thread.start",
+            side_effect=RuntimeError("can't start new thread"),
+        ):
+            scheduler._hand_off(entry)
+        self.assertEqual(fired, [])  # この場 (dispatch スレッド) では走らない
+        fire_at = scheduler.fire_time_of("k1")
+        self.assertIsNotNone(fire_at)
+        delay = (fire_at - before).total_seconds()
+        self.assertGreaterEqual(delay, EventScheduler.WORKER_START_RETRY_SECONDS - 1)
+        self.assertLessEqual(delay, EventScheduler.WORKER_START_RETRY_SECONDS + 1)
+        # 積み直した予約は、時刻が来れば普通に発火する
+        self.assertEqual(scheduler.run_due(fire_at), 1)
+        self.assertEqual(fired, ["fired"])
+
+    def test_start_failure_keeps_a_newer_reservation_of_the_same_key(self) -> None:
+        from unittest.mock import patch
+
+        scheduler = EventScheduler()
+        fired: list[str] = []
+        entry = self._entry(scheduler, "k1", lambda: fired.append("old"))
+        newer = datetime.now() + timedelta(minutes=10)
+        scheduler.schedule(fire_at=newer, callback=lambda: fired.append("new"), key="k1")
+        with patch(
+            "saiverse.event_scheduler.threading.Thread.start",
+            side_effect=RuntimeError("can't start new thread"),
+        ):
+            scheduler._hand_off(entry)
+        self.assertEqual(
+            scheduler.fire_time_of("k1"), datetime.fromtimestamp(newer.timestamp()),
+        )
+        self.assertEqual(scheduler.pending_count(), 1)
+        self.assertEqual(fired, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -64,13 +64,20 @@ def _autonomy_manager_of(manager: Any, persona_id: Optional[str]) -> Any:
 def _notify_tick_of_standard_call(manager: Any, persona: Any, usage: Any) -> None:
     """本人の標準モデルの呼び出しが成功した — ティックの予約を押し直す (決定 10)。
 
-    判定は usage.model (実際に応答した model) が ``persona.model`` (標準 tier の
-    解決値 — チャット UI の上書き > DEFAULT_MODEL > env > 既定、
-    ``saiverse.persona_model_selection``) と一致すること。軽量モデル (分身・
-    下請け) は一致しないので数えない。usage.model が空の呼び出しは本人の標準
-    モデルだという証拠が無いので数えない。押し直しの実体は AutonomyManager で、
-    予約が現に有るときだけ動く (ライフ外では生やさない)。失敗は握る — LLM の
-    呼び出し後の後処理を止めない。
+    **主判定は呼び出し元** — その呼び出しが標準 tier (軽量でない) の本人の生成
+    だったかを、呼び出し時に確定している実行 tier から決めて
+    ``counts_as_standard_call`` で渡す (``sea.runtime_llm`` の LLM ノードは
+    ``pulse_context.execution_model_tier``、スルースは標準 tier の解決値との一致)。
+    ここに来るのはそれが True の呼び出しだけ。
+
+    ここで見るモデル名の一致 (usage.model == ``persona.model``) は防御として
+    残している — モデル名だけでは標準と軽量を区別できない (同じモデルを両方に
+    設定したペルソナ) ので主判定には使わない (2026-10-12 Codex 敵対レビュー
+    段 3 1 巡目 medium) が、呼び出し元の印が誤っていても別モデルの呼び出しを
+    数えない網にはなる。usage.model が空の呼び出しも数えない。押し直しの実体は
+    AutonomyManager で、時刻は予約の有無に関係なく記録し、予約が現に有るときだけ
+    動かす (ライフ外では生やさない)。失敗は握る — LLM の呼び出し後の後処理を
+    止めない。
     """
     usage_model = getattr(usage, "model", None)
     persona_model = getattr(persona, "model", None)
@@ -103,6 +110,40 @@ def _tick_fire_at(manager: Any, persona_id: Optional[str]) -> Optional[datetime]
         )
         return None
     return fire_at if isinstance(fire_at, datetime) else None
+
+
+def _keepalive_settings(meta_layer: Any, persona: Any) -> Tuple[bool, float]:
+    """keep-alive の設定 ``(keep_cache_alive, cache_threshold_ratio)`` を読む。
+
+    出所はペルソナの ``META_JUDGMENT_CONFIG`` (meta_layer は読み口としてだけ
+    使う)。読めなければ既定 (True, 0.3)。ratio が (0, 1) の外なら 0.3。
+    SessionLifecycle のメソッドを別の器に束ねて使う呼び出し (テスト) でも動く
+    ように、モジュールの関数にしてある。
+    """
+    try:
+        judgment_config = meta_layer._load_judgment_config(persona)
+        keep_cache_alive = bool(judgment_config.get("keep_cache_alive", True))
+        threshold_ratio = float(judgment_config.get("cache_threshold_ratio", 0.3))
+    except Exception:
+        keep_cache_alive = True
+        threshold_ratio = 0.3
+    if not (0.0 < threshold_ratio < 1.0):
+        threshold_ratio = 0.3
+    return keep_cache_alive, threshold_ratio
+
+
+def _keepalive_callback(lifecycle: Any, persona_id: str, model_key: str) -> Callable[[], None]:
+    """keep-alive 予約の callback (``lifecycle.runtime.run_cache_keepalive`` を一回呼ぶ)。"""
+    def _fire_callback() -> None:
+        try:
+            lifecycle.runtime.run_cache_keepalive(persona_id, model_key)
+        except Exception:
+            LOGGER.exception(
+                "[keepalive] cache keep-alive raised: persona=%s model=%s",
+                persona_id, model_key,
+            )
+
+    return _fire_callback
 
 
 def _rows_content_digest(rows: Sequence[Dict[str, Any]]) -> str:
@@ -1781,7 +1822,7 @@ class SessionLifecycle:
     def touch_anchor_after_llm_call(
         self, persona, usage, anchor_id: Optional[str] = None,
         only_if_anchor_unchanged: bool = False,
-        counts_as_standard_call: bool = True,
+        counts_as_standard_call: bool = False,
     ) -> None:
         """LLM 呼び出し成功後に session_anchor 行の updated_at を touch する (Phase 4-e)。
 
@@ -1825,13 +1866,14 @@ class SessionLifecycle:
         予約も更新しない (stale touch が正当な予約を後ろへずらさないため)。
 
         ``counts_as_standard_call`` (v0.4 計画 段 3、決定 10): この成功した呼び出しを
-        「最後の標準呼び出し」として数え、ティックの予約を now + T へ押し直すか
-        (:func:`_notify_tick_of_standard_call`)。数えるのは本人の標準モデル (usage.model が
-        ``persona.model`` と一致) の呼び出しだけで、軽量モデル (分身・下請け) は
-        一致しないので自然に数えない。**keep-alive の保温だけは False で呼ぶ** —
-        保温を数えると、T をキャッシュ寿命より長くした設定で「保温がティックを
-        永遠に先送りする」組が生まれる (C6)。押し直しは anchor の有無・キャッシュの
-        当たり外れに関係なく、呼び出しが成功した事実だけで行う。
+        「最後の標準呼び出し」として数え、ティックの予約を押し直すか
+        (:func:`_notify_tick_of_standard_call`)。**呼び出し元が実行 tier から決めて
+        渡す** — 標準 tier (軽量でない) の本人の生成だけが True。既定は False
+        (分からない呼び出しは数えない側へ倒す — 数え損ねは次の標準呼び出しが
+        拾うが、誤って数えるとティックを永遠に先送りしうる)。**keep-alive の
+        保温は False** — 保温を数えると、T をキャッシュ寿命より長くした設定で
+        「保温がティックを永遠に先送りする」組が生まれる (C6)。押し直しは anchor の
+        有無・キャッシュの当たり外れに関係なく、呼び出しが成功した事実だけで行う。
         """
         if persona is None or usage is None:
             return
@@ -1985,14 +2027,7 @@ class SessionLifecycle:
         if ttl_seconds <= 0:
             return
 
-        # ペルソナの judgment config から cache 関連の設定を取得
-        try:
-            judgment_config = meta_layer._load_judgment_config(persona)
-            keep_cache_alive = bool(judgment_config.get("keep_cache_alive", True))
-            threshold_ratio = float(judgment_config.get("cache_threshold_ratio", 0.3))
-        except Exception:
-            keep_cache_alive = True
-            threshold_ratio = 0.3
+        keep_cache_alive, threshold_ratio = _keepalive_settings(meta_layer, persona)
 
         # keep_cache_alive=False のペルソナは TTL 接近の前倒しを行わない。
         # 念のため既存予約があれば cancel する (設定変更で OFF になったケース対応)。
@@ -2003,10 +2038,6 @@ class SessionLifecycle:
                 persona_id, model_key,
             )
             return
-
-        # threshold_ratio が範囲外なら既定値で防御
-        if not (0.0 < threshold_ratio < 1.0):
-            threshold_ratio = 0.3
 
         wait_seconds = ttl_seconds * (1.0 - threshold_ratio)
         # 期限は EventScheduler と同じ clock.now() で刻む (datetime.now() では
@@ -2041,20 +2072,111 @@ class SessionLifecycle:
                 )
                 return
 
-        def _fire_callback() -> None:
-            try:
-                self.runtime.run_cache_keepalive(persona_id, model_key)
-            except Exception:
-                LOGGER.exception(
-                    "[keepalive] cache keep-alive raised: persona=%s model=%s",
-                    persona_id, model_key,
-                )
-
-        scheduler.schedule(fire_at=fire_at, callback=_fire_callback, key=key)
+        scheduler.schedule(
+            fire_at=fire_at,
+            callback=_keepalive_callback(self, persona_id, model_key),
+            key=key,
+        )
         LOGGER.debug(
             "[metabolism] scheduled cache TTL keep-alive: persona=%s model=%s in %.0fs (ttl=%ds, threshold=%.2f)",
             persona_id, model_key, wait_seconds, ttl_seconds, threshold_ratio,
         )
+
+    def reconcile_keepalive_after_tick(self, persona_id: str) -> bool:
+        """ティックが温めずに終わった回の後、標準モデルの keep-alive を再照合する。
+
+        :meth:`schedule_cache_ttl_pulse` は「ティックがキャッシュの失効より前に
+        発火するなら keep-alive は予約しない」— 温めるのはティックの役だから。
+        そのティックが skip・失敗・例外で標準呼び出しまで届かなかったら、前提が
+        崩れて保温の保険が無いまま失効する (2026-10-12 Codex 敵対レビュー 段 3
+        1 巡目 medium)。呼び手は ``AutonomyManager._handle_tick`` (manager 経由)。
+
+        判定 (標準モデル ``persona.model`` の Session だけ — ティックが温めるのは
+        その Session だけなので、抑制も復旧もそれに限る):
+
+        - 全停止・自律 OFF (``is_autonomy_on``)・ライフ外
+          (``day_plan.is_keepalive_allowed``) なら復活させない
+        - キャッシュ種別が explicit でなければ何もしない (温め直す先が無い)
+        - anchor がもう失効していれば何もしない (温め直しても全額の書き直し)
+        - 次のティックが失効より前なら何もしない (次のティックが温める)
+        - それ以外は「キャッシュ寿命の threshold_ratio 分が残る時刻」に予約する
+          (過ぎていれば今すぐ)。**生きている予約は上書きしない**
+          (``schedule_if_absent`` — 後から touch された予約の方が正しい時刻を持つ)
+
+        Returns:
+            予約を張ったか。
+        """
+        manager = self.manager
+        persona = (getattr(manager, "personas", None) or {}).get(persona_id) if manager else None
+        scheduler = getattr(manager, "event_scheduler", None) if manager else None
+        meta_layer = getattr(manager, "meta_layer", None) if manager else None
+        if persona is None or scheduler is None or meta_layer is None:
+            return False
+        # sea → saiverse の import は関数内 (run_cache_keepalive と同じ流儀)。
+        from saiverse.autonomy_wiring import is_autonomy_on
+
+        if not is_autonomy_on(manager, persona_id):
+            return False
+        try:
+            from saiverse.day_plan import is_keepalive_allowed
+            if not is_keepalive_allowed(manager, persona_id):
+                return False
+        except Exception:
+            # run_cache_keepalive と同じ裁定 (判定失敗は許可側) — 発火時に
+            # run_cache_keepalive がもう一度ライフを見る。
+            LOGGER.warning(
+                "[keepalive] life gate check failed during the reconcile "
+                "(persona=%s); defaulting to allow", persona_id, exc_info=True,
+            )
+        model_key = str(getattr(persona, "model", "") or "")
+        if not model_key:
+            return False
+        try:
+            from saiverse.model_configs import get_cache_config
+            cache_type = (get_cache_config(model_key) or {}).get("type", "implicit")
+        except Exception:
+            cache_type = "implicit"
+        if cache_type != "explicit":
+            return False
+        keep_cache_alive, threshold_ratio = _keepalive_settings(meta_layer, persona)
+        if not keep_cache_alive:
+            return False
+        entry = self.load_anchor_entry(persona_id, model_key)
+        if not entry or not entry.get("updated_at"):
+            return False
+        try:
+            updated_at = datetime.fromisoformat(entry["updated_at"])
+            ttl_seconds = self.anchor_entry_ttl_seconds(entry, model_key, persona_id)
+        except (KeyError, ValueError, TypeError):
+            return False
+        # anchor の時刻は壁時計 (UPDATED_AT の epoch)、予約は clock.now() 基準 —
+        # 残り寿命を壁時計で測ってから clock の時刻へ写す。
+        remaining = (updated_at + timedelta(seconds=ttl_seconds)) - datetime.now()
+        if remaining.total_seconds() <= 0:
+            return False
+        from saiverse import clock
+
+        now = clock.now()
+        expires_at = now + remaining
+        tick_at = _tick_fire_at(manager, persona_id)
+        if tick_at is not None and tick_at < expires_at:
+            return False
+        fire_at = max(now, expires_at - timedelta(seconds=ttl_seconds * threshold_ratio))
+        key = f"ttl:{persona_id}:{model_key}"
+        armed = scheduler.schedule_if_absent(
+            fire_at=fire_at,
+            callback=_keepalive_callback(self, persona_id, model_key),
+            key=key,
+        )
+        if armed:
+            LOGGER.info(
+                "[keepalive] re-armed after a tick that did not warm the cache: "
+                "persona=%s model=%s at %s (cache expires %s, next tick %s)",
+                persona_id, model_key, fire_at.isoformat(timespec="seconds"),
+                expires_at.isoformat(timespec="seconds"),
+                tick_at.isoformat(timespec="seconds") if tick_at else "none",
+            )
+        return armed
 
     def maybe_run_metabolism(
         self,
@@ -4777,8 +4899,21 @@ class SessionLifecycle:
         "due" でも、前回の試行から状態が動いていない persona は素通しする
         (:meth:`_cold_sweep_fingerprint`)。指紋が取れない (None) ときは素通し
         させず従来どおり試行する — ゲートは節約であって門ではない。
+
+        **グローバル自律全停止の間は起動しない** (巡回の入口・ペルソナごとの
+        起動直前・Beat ロックの内側の三か所で見る — :meth:`_cold_sweep_all_stopped`)。
+        先回り畳みは時計が起こす自発の LLM 処理 (編纂・スルース) で、会話や
+        アラームに付随しないので、課金の非常ブレーキの対象 (2026-10-12 Codex
+        敵対レビュー 段 3 1 巡目 high)。**ペルソナごとの自律 OFF では止めない** —
+        記憶の手入れは自律と無関係に全員へ届く既存設計。会話・アラームに
+        相乗りする Metabolism はこの巡回を通らないので止まらない。
         """
         try:
+            if self._cold_sweep_all_stopped():
+                LOGGER.debug(
+                    "[metabolism] cold sweep paused: global autonomy all-stop is on",
+                )
+                return
             personas = dict(getattr(self.manager, "personas", None) or {})
             with self._cold_sweep_lock:
                 # 削除・退場した persona の指紋は自然には消えないので、巡回の
@@ -4797,6 +4932,14 @@ class SessionLifecycle:
                             getattr(persona, "persona_id", "?"),
                         )
                         continue
+                    # 状態検査は DB を読むので、巡回の入口から時間が経っている。
+                    # 起動の直前にもう一度見る。
+                    if self._cold_sweep_all_stopped():
+                        LOGGER.debug(
+                            "[metabolism] cold sweep stopped mid-round: global "
+                            "autonomy all-stop turned on",
+                        )
+                        return
                     self._spawn_cold_precompaction(persona)
                 except Exception:
                     LOGGER.exception(
@@ -4805,6 +4948,18 @@ class SessionLifecycle:
                     )
         finally:
             self.schedule_cold_window_sweep()
+
+    def _cold_sweep_all_stopped(self) -> bool:
+        """グローバル自律全停止が ON か (先回り畳みの門)。
+
+        判定は ``saiverse.autonomy_wiring.is_autonomy_all_stopped`` (読めなければ
+        停止扱い — fail-closed)。manager の無い器 (テスト) は止めない。
+        """
+        if self.manager is None:
+            return False
+        from saiverse.autonomy_wiring import is_autonomy_all_stopped
+
+        return is_autonomy_all_stopped(self.manager)
 
     def _cold_sweep_fingerprint(self, persona) -> Optional[tuple]:
         """見張りが「前回の試行から状態が動いたか」を見るための指紋。
@@ -5061,6 +5216,7 @@ class SessionLifecycle:
         読み直されたら、この回の指紋は捨てて次の tick へ再検査を譲る。
 
         Returns:
+            "all_stop" (グローバル自律全停止中 — 始めない)、
             :meth:`cold_precompaction_status` の値 (条件不成立時)、"skip"
             (会話の行が残す量以下で畳めるものが無い)、または run_metabolism の
             結果 ("ok"/"nothing"/"failed"/"deferred"/"deferred_sluice_unseen")。
@@ -5070,6 +5226,14 @@ class SessionLifecycle:
         persona_id = getattr(persona, "persona_id", None)
         try:
             with hold_beat(self.manager, persona_id, purpose="metabolism"):
+                # Beat ロックを待つ間に全停止が入っていたら始めない
+                # (_cold_window_sweep_tick の門の最後の一か所)。
+                if self._cold_sweep_all_stopped():
+                    LOGGER.info(
+                        "[metabolism] cold pre-compaction not started: global "
+                        "autonomy all-stop is on (persona=%s)", persona_id,
+                    )
+                    return "all_stop"
                 status = self.cold_precompaction_status(persona)
                 if status != "due":
                     return status

@@ -758,22 +758,10 @@ class SEARuntime:
         # WORKER (run_playbook サブライン) → lightweight、CONVERSATION / META /
         # AUTONOMOUS (ティック) → standard。aspect の無いときは
         # resolve_execution_context と同じ tier_without_aspect で判定する。
-        _aspect_tier: Optional[str] = None
-        if execution_context is not None:
-            if execution_context.aspect is not None:
-                _aspect_tier = execution_context.aspect.model_tier
-        elif state:
-            _pc = state.get("_pulse_context")
-            if _pc is not None:
-                try:
-                    _cur = _pc.current_line()
-                except Exception:
-                    _cur = None
-                if _cur is not None:
-                    _aspect_tier = getattr(_cur, "model_tier", None)
-        if _aspect_tier is None:
-            from sea.pulse_context import tier_without_aspect
-            _aspect_tier = tier_without_aspect(state)
+        # 規則の実体は pulse_context.execution_model_tier (「標準 tier の呼び出し
+        # だったか」の判定 — ティックの押し直し — と同じ口を読む)。
+        from sea.pulse_context import execution_model_tier
+        _aspect_tier = execution_model_tier(execution_context, state)
         force_lightweight = (_aspect_tier == "lightweight")
 
         from saiverse.persona_model_selection import (
@@ -2328,6 +2316,18 @@ class SEARuntime:
                     "[keepalive] warming non-default model session (persona=%s model=%s)",
                     persona_id, model_key,
                 )
+            # 生成開始の直前の再検査 (2026-10-12 Codex 敵対レビュー 段 3 1 巡目
+            # high): 冒頭のゲートから文脈の組成までの間に全停止・自律 OFF が
+            # 入っていたら送らない (連鎖はここで自然停止 — touch しないので
+            # 再予約もされない)。開始済みの生成は完走する (課金と生成の保護の
+            # 既存裁定) — このフェンスは送信の直前まで。
+            if not is_autonomy_on(manager, persona_id):
+                LOGGER.info(
+                    "[keepalive] skipped before sending: autonomy turned off or "
+                    "all-stop during composition (persona=%s model=%s)",
+                    persona_id, model_key,
+                )
+                return False
             llm_client.generate(
                 messages,
                 tools=[],

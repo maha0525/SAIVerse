@@ -55,6 +55,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import threading
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, Optional
 
@@ -225,18 +226,38 @@ _ALL_STOP_ATTR = "_autonomy_all_stop"
 _GLOBAL_SETTINGS_USERID = 1
 
 
-def load_autonomy_all_stop(manager: Any) -> bool:
-    """DB (user_settings.AUTONOMY_ALL_STOP) からグローバル自律全停止を読み、
-    manager の in-memory キャッシュへ載せて返す。SAIVerseManager の起動時に一度呼ぶ。
+#: 自律の設定 (グローバル全停止・ペルソナごとの AUTONOMY_ENABLED) の更新を
+#: 直列化するロック。DB の commit → in-memory への公開 → AutonomyManager の
+#: 再同期までを一つの区間に置き、並行する二つの更新の公開順が commit 順と
+#: 入れ替わって「DB は停止・実効ゲートは開」になる食い違いを防ぐ (2026-10-12
+#: Codex 敵対レビュー 段 3 1 巡目 high)。読み (is_autonomy_*) は bool の読みで
+#: 原子的なので取らない。再入しうる (再同期の中から設定を読む) ので RLock。
+_AUTONOMY_SETTING_LOCK = threading.RLock()
 
-    読めなかったとき (SessionLocal が無い・行が無い・例外) は False (停止して
-    いない) — 全停止は v0.4 段 3 で新設した非常ブレーキで、読めない DB に対して
-    全ペルソナの自律を黙って止めるより、ERROR を残して従来どおり動かす方を取る。
-    行が無い (一度も設定していない) のは正常な False。
+
+def autonomy_setting_lock() -> "threading.RLock":
+    """自律の設定の更新ロック (同じ設定を書く別の口 — 停止ボタン等 — が共有する)。"""
+    return _AUTONOMY_SETTING_LOCK
+
+
+def load_autonomy_all_stop(manager: Any) -> Optional[bool]:
+    """DB (user_settings.AUTONOMY_ALL_STOP) からグローバル自律全停止を読み、
+    読めたときだけ manager の in-memory キャッシュへ載せて返す。SAIVerseManager の
+    起動時に一度呼ぶ。
+
+    - 行が正常に読めた: その値 (行が無い = 一度も設定していない = False)。キャッシュする
+    - SessionLocal が無い manager (設定の置き場の無いテストの最小 manager): False。
+      キャッシュする (読み失敗ではなく、置き場が無い)
+    - **読みが失敗した (例外): None を返し、キャッシュしない** — 全停止は課金の
+      非常ブレーキなので fail-closed。読めなかったことを「解除」として載せると、
+      保存済みの停止が DB の回復後も永久に無視される (2026-10-12 Codex 敵対
+      レビュー 段 3 1 巡目 high)。:func:`is_autonomy_all_stopped` は None を停止
+      扱いにし、次の呼び出しで読み直す (障害が直れば自然に回復する)。
     """
-    value = False
     session_factory = getattr(manager, "SessionLocal", None)
-    if session_factory is not None:
+    if session_factory is None:
+        value = False
+    else:
         try:
             from database.models import UserSettings
 
@@ -255,9 +276,10 @@ def load_autonomy_all_stop(manager: Any) -> bool:
         except Exception:
             LOGGER.error(
                 "[autonomy-wiring] failed to read the global autonomy all-stop "
-                "setting; treating it as off", exc_info=True,
+                "setting; treating autonomy as stopped until it can be read "
+                "(fail-closed, not cached)", exc_info=True,
             )
-            value = False
+            return None
     try:
         setattr(manager, _ALL_STOP_ATTR, value)
     except Exception:
@@ -270,13 +292,17 @@ def is_autonomy_all_stopped(manager: Any) -> bool:
 
     毎回 DB を読まない — manager の in-memory キャッシュ
     (:func:`load_autonomy_all_stop` が起動時に載せ、:func:`set_autonomy_all_stop`
-    が書き換える) を読む。キャッシュが無い manager (テストの最小 manager 等) は
-    初回だけ DB から読んで載せる。
+    が書き換える) を読む。キャッシュが無い manager (テストの最小 manager・起動時の
+    読み失敗の後) は DB から読んで載せる。**読めなかったときは停止扱い (True)** で、
+    キャッシュしないので次の呼び出しで読み直す (fail-closed)。
     """
     cached = getattr(manager, _ALL_STOP_ATTR, None)
     if isinstance(cached, bool):
         return cached
-    return load_autonomy_all_stop(manager)
+    loaded = load_autonomy_all_stop(manager)
+    if loaded is None:
+        return True
+    return loaded
 
 
 def set_autonomy_all_stop(manager: Any, value: bool) -> bool:
@@ -300,42 +326,47 @@ def set_autonomy_all_stop(manager: Any, value: bool) -> bool:
     Raises:
         DB に書けなかった場合はそのまま送出する (キャッシュは書き換えない —
         画面と実際の状態を食い違わせない)。
+
+    DB の commit・キャッシュへの公開・全ペルソナの再同期は
+    :data:`_AUTONOMY_SETTING_LOCK` の同じ区間で行う — 並行する停止と解除の
+    公開順が commit 順と入れ替わらない。
     """
     value = bool(value)
     from database.models import UserSettings
 
-    db = manager.SessionLocal()
-    try:
-        row = (
-            db.query(UserSettings)
-            .filter(UserSettings.USERID == _GLOBAL_SETTINGS_USERID)
-            .first()
+    with _AUTONOMY_SETTING_LOCK:
+        db = manager.SessionLocal()
+        try:
+            row = (
+                db.query(UserSettings)
+                .filter(UserSettings.USERID == _GLOBAL_SETTINGS_USERID)
+                .first()
+            )
+            if row is None:
+                row = UserSettings(USERID=_GLOBAL_SETTINGS_USERID)
+                db.add(row)
+            row.AUTONOMY_ALL_STOP = value
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        setattr(manager, _ALL_STOP_ATTR, value)
+        LOGGER.info(
+            "[autonomy-wiring] global autonomy all-stop set to %s "
+            "(per-persona AUTONOMY_ENABLED untouched)", value,
         )
-        if row is None:
-            row = UserSettings(USERID=_GLOBAL_SETTINGS_USERID)
-            db.add(row)
-        row.AUTONOMY_ALL_STOP = value
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
-    setattr(manager, _ALL_STOP_ATTR, value)
-    LOGGER.info(
-        "[autonomy-wiring] global autonomy all-stop set to %s "
-        "(per-persona AUTONOMY_ENABLED untouched)", value,
-    )
-    ensure = getattr(manager, "ensure_autonomy_for", None)
-    if callable(ensure):
-        for persona_id in list((getattr(manager, "personas", None) or {}).keys()):
-            try:
-                ensure(persona_id)
-            except Exception:
-                LOGGER.exception(
-                    "[autonomy-wiring] failed to resync autonomy after the "
-                    "all-stop change (persona=%s)", persona_id,
-                )
+        ensure = getattr(manager, "ensure_autonomy_for", None)
+        if callable(ensure):
+            for persona_id in list((getattr(manager, "personas", None) or {}).keys()):
+                try:
+                    ensure(persona_id)
+                except Exception:
+                    LOGGER.exception(
+                        "[autonomy-wiring] failed to resync autonomy after the "
+                        "all-stop change (persona=%s)", persona_id,
+                    )
     return value
 
 
@@ -376,33 +407,37 @@ def set_persona_autonomy_enabled(
     Raises:
         KeyError: ペルソナの行が無い。
         DB に書けなかった場合はそのまま送出する (in-memory は書き換えない)。
+
+    DB の commit・``persona.autonomy_enabled`` への公開・再同期は
+    :data:`_AUTONOMY_SETTING_LOCK` の同じ区間で行う (全停止の更新と同じ契約)。
     """
     value = bool(enabled)
     from database.models import AI
 
-    db = manager.SessionLocal()
-    try:
-        row = db.query(AI).filter(AI.AIID == persona_id).first()
-        if row is None:
-            raise KeyError(persona_id)
-        changed = bool(row.AUTONOMY_ENABLED) != value
-        if changed:
-            row.AUTONOMY_ENABLED = value
-            db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
-    persona = _get_persona(manager, persona_id)
-    if persona is not None:
-        persona.autonomy_enabled = value
-    if changed:
-        LOGGER.info(
-            "[autonomy-wiring] AUTONOMY_ENABLED of %s set to %s", persona_id, value,
-        )
+    with _AUTONOMY_SETTING_LOCK:
+        db = manager.SessionLocal()
+        try:
+            row = db.query(AI).filter(AI.AIID == persona_id).first()
+            if row is None:
+                raise KeyError(persona_id)
+            changed = bool(row.AUTONOMY_ENABLED) != value
+            if changed:
+                row.AUTONOMY_ENABLED = value
+                db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+        persona = _get_persona(manager, persona_id)
         if persona is not None:
-            sync_autonomy_after_setting_change(manager, persona_id)
+            persona.autonomy_enabled = value
+        if changed:
+            LOGGER.info(
+                "[autonomy-wiring] AUTONOMY_ENABLED of %s set to %s", persona_id, value,
+            )
+            if persona is not None:
+                sync_autonomy_after_setting_change(manager, persona_id)
     return changed
 
 
@@ -619,6 +654,9 @@ def fire_judgment_point(
        失敗時は claim 済みの席を放棄する (prepared 限定 CAS — 別 claimant が
        既に走らせている running 台帳は壊さない。放棄できなければ結果の
        ``outcome`` が indeterminate になり、呼び出し側は代替経路を走らせない)
+    6. **LLM へ進む直前に自律ゲートをもう一度見る** — Lock 待ちの間に全停止・
+       自律 OFF が入った発火を新しく始めない (席は 5 と同じく放棄)。開始済みの
+       生成は完走する (課金と生成の保護の既存裁定) — フェンスは開始の直前まで
 
     ライフ (活動区間) の確定と起床・就寝の節目処理はここでは行わない —
     2026-10 (autonomous_behavior_v04_plan.md 段 1-2) に
@@ -778,6 +816,24 @@ def fire_judgment_point(
                 return {"kind": kind, "playbook": playbook_name,
                         "submitted": False, "reason": "precondition not met",
                         "outcome": outcome, "execution_id": execution_id}
+
+        # 生成開始の直前の再検査 (2026-10-12 Codex 敵対レビュー 段 3 1 巡目 high):
+        # 冒頭のゲートからここまでの間 (Lock 待ち・claim) に全停止や自律 OFF が
+        # 入っていたら、新しい LLM 実行を始めない。席は precondition の不成立と
+        # 同じく放棄する。開始済みの生成は完走する (課金と生成の保護の既存裁定)
+        # — このフェンスは開始の直前までで、run_judgment_point の内側は止めない。
+        if not is_autonomy_on(manager, persona_id):
+            LOGGER.info(
+                "[autonomy-wiring] %s aborted before the LLM: autonomy turned "
+                "off or all-stop while waiting (persona=%s)", kind, persona_id,
+            )
+            outcome = _release_claimed_seat(
+                ledger, execution_id, "autonomy turned off before start"
+            )
+            return {"kind": kind, "playbook": playbook_name,
+                    "submitted": False,
+                    "reason": "persona autonomy disabled",
+                    "outcome": outcome, "execution_id": execution_id}
 
         result = run_judgment_point(
             manager, persona_id, kind, context, execution_id=execution_id,

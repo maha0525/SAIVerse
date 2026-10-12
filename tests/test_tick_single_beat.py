@@ -78,7 +78,7 @@ class _LoopRuntime:
         self.stored_calls: List[Dict[str, Any]] = []
         self.manager = SimpleNamespace()
         self.session_lifecycle = SimpleNamespace(
-            touch_anchor_after_llm_call=lambda persona, usage, anchor_id=None: None,
+            touch_anchor_after_llm_call=lambda persona, usage, anchor_id=None, **_kw: None,
         )
 
     def _effective_building_id(self, persona, fallback):

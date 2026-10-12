@@ -241,8 +241,10 @@ class FakeRuntime:
     def _get_cache_kwargs(self, persona_id=None):
         return {"enable_cache": True, "cache_ttl": "5m"}
 
-    def touch_anchor_after_llm_call(self, persona, usage, anchor_id=None):
+    def touch_anchor_after_llm_call(self, persona, usage, anchor_id=None, **kwargs):
         self.touched.append(usage)
+        self.touch_kwargs = getattr(self, "touch_kwargs", [])
+        self.touch_kwargs.append(kwargs)
 
 
 def _read_sluice_record(adapter):
@@ -774,6 +776,9 @@ class SluiceRunTest(_AdapterTestBase):
             sluice.run_sluice(lifecycle, self._persona(), "b", [], 0)
         get_tracker.return_value.record_usage.assert_called_once()
         self.assertEqual(len(runtime.touched), 1)
+        # 標準モデルの Session を標準モデルのまま呼んだので、ティックの押し直しに
+        # 数える (v0.4 計画 決定 10)。
+        self.assertIs(runtime.touch_kwargs[0].get("counts_as_standard_call"), True)
 
     # -- case: disabled toggle -------------------------------------------
 

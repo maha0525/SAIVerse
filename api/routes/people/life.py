@@ -19,6 +19,7 @@
 """
 import json
 import logging
+import threading
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -36,6 +37,13 @@ router = APIRouter()
 
 #: /clips の message_ids 一括指定の上限 (チャット 1 画面分を想定)
 CLIPS_BATCH_LIMIT = 100
+
+#: ライフ設定の保存 (PUT) を直列化するロック。読み → 書き → commit → 予約の
+#: 再照合を一つの区間に置き、並行する保存の read-modify-write で片方の設定
+#: (T とモード上書き — 同じ PLAYBOOK_PARAMS の JSON) が消える食い違いと、
+#: 起床・就寝の行の並行新設を防ぐ (2026-10-12 Codex 敵対レビュー 段 3 1 巡目
+#: medium)。API は単一プロセスで動くので、プロセス内のロックで閉じる。
+_LIFE_SETTINGS_SAVE_LOCK = threading.Lock()
 
 
 def _require_persona(manager: Any, persona_id: str) -> None:
@@ -306,6 +314,14 @@ def _apply_time(
     ので「行が無い = 未設定」と同じに読まれ、起床の行の PLAYBOOK_PARAMS (T・
     モード上書き) は次に起床を設定し直したときに戻ってくる。
 
+    時刻を書くときは、**同じ種類 (起床/就寝) の他の有効な行を無効化する**
+    (ENABLED=False + 世代 +1 + touched に積む — 呼び出し側の再照合が予約を
+    取り消す)。読み手は有効な行のうち起床は最早・就寝は最遅を採るので、他の行が
+    残っていると、書いた時刻が早すぎ/遅すぎの側に負けて運転に採用されない
+    (2026-10-12 Codex 敵対レビュー 段 3 1 巡目 medium — 07:00 と 08:00 の起床が
+    ある状態で 09:00 を保存すると 07:00 のまま走った)。書いた行が必ず読み手の
+    採る行になる。
+
     Returns:
         書いた後の、この API の対象の行 (無ければ None)。
     """
@@ -326,11 +342,16 @@ def _apply_time(
     row.ENABLED = True
     touched.append(row)
     others = [r for r in _active_rows(rows) if r is not row]
+    for other in others:
+        other.ENABLED = False
+        _bump_generation(other)
+        touched.append(other)
     if others:
-        LOGGER.warning(
-            "[life-settings] persona %s has %d other enabled %s row(s) (ids=%s); "
-            "they still count for the life window", persona_id, len(others),
-            meta_playbook, [r.SCHEDULE_ID for r in others],
+        LOGGER.info(
+            "[life-settings] persona %s: disabled %d other enabled %s row(s) "
+            "(ids=%s) so the saved time is the one the life window uses",
+            persona_id, len(others), meta_playbook,
+            [r.SCHEDULE_ID for r in others],
         )
     return row
 
@@ -357,7 +378,18 @@ def update_life_settings(
       (:func:`saiverse.autonomy_wiring.set_persona_autonomy_enabled`)
 
     返り値は GET と同じ形 (保存後の現況) に ``scheduler_synced`` を足したもの。
+
+    保存全体 (読み → 書き → commit → 予約の再照合 → 自律の保存 → 現況の読み)
+    は :data:`_LIFE_SETTINGS_SAVE_LOCK` で直列化する。
     """
+    with _LIFE_SETTINGS_SAVE_LOCK:
+        return _update_life_settings_locked(persona_id, req, manager)
+
+
+def _update_life_settings_locked(
+    persona_id: str, req: LifeSettingsUpdateRequest, manager: Any,
+) -> LifeSettingsResponse:
+    """:func:`update_life_settings` の本体 (保存ロックの内側で呼ぶ)。"""
     from saiverse import day_plan
     from saiverse.autonomy_wiring import (
         LIFE_END_SCHEDULE_PLAYBOOK,

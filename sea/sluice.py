@@ -3444,6 +3444,9 @@ def _call_sluice_llm(
     # (persona, model) に向けて render するため (§3.1)。
     from sea.pulse_context import resolve_execution_context
     execution_context = resolve_execution_context(persona, None)
+    # 標準 tier の解決値 (Pulse 外 = 標準 tier)。この呼び出しがティックの
+    # 押し直しに数えるか (本人の標準モデルの生成か) の判定に使う。
+    standard_model_key = execution_context.model_key
     if model_key and execution_context.model_key != model_key:
         execution_context = execution_context.with_model(model_key)
 
@@ -3588,8 +3591,15 @@ def _call_sluice_llm(
         except Exception:
             LOGGER.warning("[sluice] usage tracking failed (persona=%s)", persona_id, exc_info=True)
         try:
+            # 標準モデルの Session で、標準モデルのまま生成した呼び出しだけを
+            # 「最後の標準呼び出し」に数える — 軽量 Session の整理や構造化出力の
+            # 都合で軽量モデルへ差し替わった呼び出しは数えない (v0.4 計画
+            # 決定 10、2026-10-12 Codex 敵対レビュー 段 3 1 巡目 medium)。
             lifecycle.touch_anchor_after_llm_call(
                 persona, usage, anchor_id=context_meta.get("prefix_anchor_id"),
+                counts_as_standard_call=(
+                    execution_context.model_key == standard_model_key
+                ),
             )
         except Exception:
             LOGGER.warning("[sluice] anchor touch failed (persona=%s)", persona_id, exc_info=True)

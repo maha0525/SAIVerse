@@ -242,10 +242,28 @@ class RecordLlmUsageTest(unittest.TestCase):
         self.runtime._accumulate_usage.assert_called_once_with(
             self.state, "test-model", 100, 20, 0.25, 5, 3,
         )
-        # 不変条件 9: anchor touch は LLM 成功後、anchor は call-local
+        # 不変条件 9: anchor touch は LLM 成功後、anchor は call-local。
+        # 標準 tier の印 (lg_llm_node が書く) が無い呼び出しはティックの押し直しに
+        # 数えない (分からない呼び出しは数えない側)。
         self.runtime.session_lifecycle.touch_anchor_after_llm_call.assert_called_once_with(
-            self.persona, usage, anchor_id="msg-42",
+            self.persona, usage, anchor_id="msg-42", counts_as_standard_call=False,
         )
+
+    def test_standard_tier_mark_is_passed_to_the_touch(self):
+        """lg_llm_node が「標準 tier の生成」と印を付けた呼び出しだけを数える
+        (モデル名の一致ではなく実行 tier — 2026-10-12 Codex 敵対レビュー)。"""
+        for mark, expected in ((True, True), (False, False)):
+            self.runtime.session_lifecycle.touch_anchor_after_llm_call.reset_mock()
+            state = dict(self.state, _standard_tier_call=mark)
+            with patch("sea.runtime_llm.get_usage_tracker"), \
+                    patch("saiverse.model_configs.calculate_cost", return_value=0.0), \
+                    patch("saiverse.model_configs.get_model_display_name", return_value="m"):
+                _record_llm_usage(
+                    self.runtime, self._client(_fake_usage()), self.persona, "b1",
+                    "pb", "llm", state,
+                )
+            kwargs = self.runtime.session_lifecycle.touch_anchor_after_llm_call.call_args.kwargs
+            self.assertIs(kwargs["counts_as_standard_call"], expected)
 
     def test_anchor_touch_happens_after_usage_record(self):
         """記帳より先に anchor を進めない（prepare_context 側の先行 touch に戻さない）。"""
@@ -283,6 +301,50 @@ class RecordLlmUsageTest(unittest.TestCase):
             persona_id="p1",
             building_id="b1",
         )
+
+
+class StandardTierCallMarkTest(unittest.TestCase):
+    """ティックの押し直しに数える呼び出しの判定 (v0.4 計画 決定 10)。
+
+    判定は実行 tier — モデル名ではない。標準と軽量に同じモデルを設定した
+    ペルソナでも、軽量 tier (下請け) の呼び出しは数えない (2026-10-12 Codex
+    敵対レビュー 段 3 1 巡目 medium)。
+    """
+
+    def _ctx(self, aspect, model_key="same-model"):
+        from sea.pulse_context import ExecutionContext
+
+        return ExecutionContext(
+            persona_id="p1", thread_id="", line_id="", aspect=aspect,
+            model_key=model_key, pulse_id="",
+        )
+
+    def test_lightweight_tier_with_the_same_model_name_is_not_counted(self):
+        from sea.pulse_context import Aspect
+        from sea.runtime_llm import _is_standard_tier_call
+
+        # WORKER (サブライン) は軽量 tier。モデル名は標準と同じでも数えない。
+        self.assertFalse(_is_standard_tier_call(
+            self._ctx(Aspect.WORKER), "same-model", {},
+        ))
+        # aspect の無い経路でも、軽量の印 (_force_lightweight_model) は数えない
+        self.assertFalse(_is_standard_tier_call(
+            self._ctx(None), "same-model", {"_force_lightweight_model": True},
+        ))
+
+    def test_standard_tier_is_counted_unless_swapped_for_structured_output(self):
+        from sea.pulse_context import Aspect
+        from sea.runtime_llm import _is_standard_tier_call
+
+        for aspect in (Aspect.CONVERSATION, Aspect.AUTONOMOUS, Aspect.META):
+            self.assertTrue(_is_standard_tier_call(
+                self._ctx(aspect), "same-model", {},
+            ))
+        # 構造化出力の都合で軽量モデルへ差し替わった呼び出しは数えない
+        self.assertFalse(_is_standard_tier_call(
+            self._ctx(Aspect.CONVERSATION), "light-model", {},
+        ))
+        self.assertFalse(_is_standard_tier_call(None, "same-model", {}))
 
 
 class EmitSayAndCaptureTest(unittest.TestCase):

@@ -438,11 +438,21 @@ class EventScheduler:
 
         LOGGER.info("[event_scheduler] dispatch loop ended")
 
+    #: ワーカーを起こせなかった発火を積み直すまでの秒数。
+    WORKER_START_RETRY_SECONDS = 5.0
+
     def _hand_off(self, entry: _Entry) -> None:
         """期限の来た entry を発火ごとの専用ワーカースレッドへ手渡す (実モード経路)。
 
         ワーカーは daemon で、``stop()`` は join しない。例外の吸収は ``_fire`` が
         ワーカー上で行う。
+
+        ワーカーを起こせない (``Thread.start`` の RuntimeError — 資源枯渇) ときは、
+        dispatch スレッド上で callback を走らせない — callback は LLM を呼んで
+        ブロックしうるので、その間すべての予約 (停止タイマー・回復の見回りを含む)
+        が止まる (2026-10-12 Codex 敵対レビュー 段 3 1 巡目 medium)。代わりに
+        :data:`WORKER_START_RETRY_SECONDS` 秒後へ積み直す
+        (:meth:`_requeue_after_start_failure`)。
         """
         if entry.cancelled:
             # 取り出した直後にキャンセルされたケース。スレッドを起こすまでもない。
@@ -456,14 +466,44 @@ class EventScheduler:
         try:
             worker.start()
         except RuntimeError:
-            # スレッドを起こせない (資源枯渇)。予約を黙って失うより、従来の
-            # 同期実行で発火させる方を取る — この発火のあいだ dispatch は止まるが、
-            # 周期予約 (schedule_periodic) の連鎖が切れるよりは被害が小さい。
-            LOGGER.exception(
-                "[event_scheduler] failed to start worker thread; firing key=%s "
-                "synchronously on the dispatch thread", entry.key,
+            LOGGER.error(
+                "[event_scheduler] failed to start a worker thread for key=%s; "
+                "re-queueing it in %.0fs (not firing on the dispatch thread)",
+                entry.key, self.WORKER_START_RETRY_SECONDS, exc_info=True,
             )
-            self._fire(entry)
+            self._requeue_after_start_failure(entry)
+
+    def _requeue_after_start_failure(self, entry: _Entry) -> None:
+        """ワーカーを起こせなかった entry を同じ key で少し後へ積み直す。
+
+        その key に既に新しい有効な予約があれば積み直さない — 取り出した後に
+        誰かが張り直した予約の方が新しい (古い発火で上書きしない)。積み直し自体が
+        失敗したときだけ、最後の手段として諦めて ERROR を残す (その回の予約は
+        消える — 周期の呼び手の再開に委ねる)。
+        """
+        try:
+            with self._cond:
+                existing = self._entries_by_key.get(entry.key)
+                if existing is not None and not existing.cancelled:
+                    LOGGER.warning(
+                        "[event_scheduler] key=%s was re-armed while its worker "
+                        "failed to start; keeping the newer reservation", entry.key,
+                    )
+                    return
+                retry = _Entry(
+                    fire_at_ts=clock.now().timestamp() + self.WORKER_START_RETRY_SECONDS,
+                    seq=next(self._seq_counter),
+                    key=entry.key,
+                    callback=entry.callback,
+                )
+                self._entries_by_key[entry.key] = retry
+                heapq.heappush(self._heap, retry)
+                self._cond.notify()
+        except Exception:
+            LOGGER.error(
+                "[event_scheduler] failed to re-queue key=%s after a worker start "
+                "failure; this firing is dropped", entry.key, exc_info=True,
+            )
 
     def _fire(self, entry: _Entry) -> None:
         """callback を呼び、例外を WARN ログで吸収する。
