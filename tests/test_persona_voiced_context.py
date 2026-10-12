@@ -145,6 +145,9 @@ def test_persona_head_sections_are_fixed():
         # 2026-09-25: 自分の外見とインベントリ (部屋の描画の退役で一緒に
         # 消えていた二つ。docs/issues/inventory_and_appearance_dropped_from_context.md)。
         "self_view",
+        # 2026-10-12: アドオンからの案内 (一度リアルタイム情報に載せたが、
+        # スペル一覧と同じ head + 差分通知の道へ移した。docs/intent/addon_speak_hooks.md)。
+        "addon_guidance",
     }
 
 

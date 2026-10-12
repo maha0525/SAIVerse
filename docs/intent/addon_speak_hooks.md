@@ -4,11 +4,15 @@
 
 ## これは何か
 
-### 2026-10-11: 揮発性コンテキストの提供口
+### アドオンからの案内の提供口 (2026-10-11 追加、2026-10-12 改訂)
 
-有効アドオンは `addon.json` に `"context_provider": "module:function"` を指定できる。発話hookと同じ起動・再有効化時に登録し、無効化時に解除する。関数は `provider(persona=..., building_id=...) -> str` の読み取り専用契約で、返り値をリアルタイム情報の末尾へ添える。空文字なら何も出さない。失敗はその提供口だけをログ付きで隔離する。
+有効アドオンは `addon.json` に `"context_provider": "module:function"` を指定できる。発話hookと同じ起動・再有効化時に登録し、無効化時に解除する。関数は `provider(persona=..., building_id=...) -> str` の読み取り専用契約で、いまこのペルソナに伝えたい案内を返す。空文字なら案内は無い。失敗はその提供口だけをログ付きで隔離し、案内が無いものとして扱う。登録先は `saiverse/addon_context.py`。
 
-最初の利用者はGodotアドオンの `persona_speech:emote_context`。設定したBuildingにいる間だけ9種類の身体エモート記法を案内する。登録先は `saiverse/addon_context.py`、消費先は `SEARuntime._build_realtime_context`。固定head・記憶・知覚バッファを更新せず、現在時刻の表示設定がOFFでも、身体案内の有無を独立に判定する。
+案内の読み手は head の `addon_guidance` セクション (`sea/head_pipeline/sections/addon_guidance.py`) で、スペル一覧の直後に「## アドオンからの案内」として載る。Building 固有のスペルと同じく head は Metabolism まで凍結し、部屋の移動・アドオンの有効化と無効化・設定の変更で案内が増えた・消えた・変わったときは、差分通知が「[システム通知]」としてペルソナの知覚に届ける。案内が現れたときと変わったときの通知には案内の本文を同梱し、消えたときの通知は「この案内にあった書き方は使わないでください」と伝える。これらの通知は、head が描き直された後は重複になるので、スペル一覧の通知と同じく提示の節約で下ろす ([presented_context_reduction.md](presented_context_reduction.md))。
+
+最初の利用者はGodotアドオンの `persona_speech:emote_context`。設定したBuildingにいる間だけ9種類の身体エモート記法を案内する。
+
+**経緯**: 2026-10-11 の初版は、案内をリアルタイム情報 (`SEARuntime._build_realtime_context`、毎ターン差し替わる末尾メッセージ) に載せた。2026-10-12 にまはーが、それではペルソナが部屋を出て案内が消えても「使えなくなった」という出来事が知覚にも記憶にも残らず、履歴には自分が過去に書いた記法だけが残るので一度使ったら使い続けてしまう恐れがある、と指摘した。そのため消費先を head の `addon_guidance` セクションと差分通知に改め、リアルタイム情報からは取り除いた。
 
 ペルソナの発話 (`emit_speak` / `emit_say`) が Building history に記録されたタイミングで、宣言的に登録された **アドオンの Python 関数** をサーバー側で呼び出す汎用拡張点を本体に追加する。
 

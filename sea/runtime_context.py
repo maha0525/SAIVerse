@@ -110,6 +110,10 @@ PERSONA_HEAD_SECTIONS: frozenset[str] = frozenset({
     # メッセージとして置かれる (sea/head_pipeline/sections/self_view.py、
     # docs/issues/inventory_and_appearance_dropped_from_context.md)。
     "self_view",
+    # 2026-10-12: アドオンからの案内 (sea/head_pipeline/sections/addon_guidance.py)。
+    # 一度リアルタイム情報に載せたが、部屋を出て消えたことが出来事として残らない
+    # ので、スペル一覧と同じ head + 差分通知の道へ移した。
+    "addon_guidance",
 })
 
 
