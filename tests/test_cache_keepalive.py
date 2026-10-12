@@ -901,3 +901,118 @@ def test_a_keepalive_still_sends_when_no_tick_or_the_tick_is_after_the_expiry(_m
         assert len(touched) == 3
     finally:
         clock.disable_virtual()
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 8 巡目 medium: 送信直前の DB の読み
+# (anchor とティック・ライフ) を終えた後の最後の一手は、安い公開値の照合
+# (全停止・自律 OFF・ライフの世代)
+# ---------------------------------------------------------------------------
+
+
+class _LifeTickAutonomy(FakeTickAutonomy):
+    """ライフの世代を持つ AutonomyManager の偽物 (ティックの予約は無い)。"""
+
+    def __init__(self):
+        super().__init__(tick_at=None)
+        self.life_generation = 0
+
+
+def _land_during_the_last_anchor_read(runtime, event):
+    """送信直前の anchor の読み直し (2 回目の load_anchor_entry) の最中に event を起こす。"""
+    reads = {"n": 0}
+    original_load = runtime.session_lifecycle.load_anchor_entry
+
+    def _load(pid, mk):
+        reads["n"] += 1
+        entry = original_load(pid, mk)
+        if reads["n"] == 2:
+            event()
+        return entry
+
+    runtime.session_lifecycle.load_anchor_entry = _load
+    return reads
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_does_not_send_when_all_stop_lands_during_the_last_anchor_read(
+    _mock_cache,
+):
+    """再現順序: 冒頭と組成後の全停止の検査を通った後、送信直前の anchor の読み
+    (DB) の最中に全停止が成立した。読み終えた後の最後の照合で送らない。"""
+    persona = _persona()
+    runtime, manager = _make_runtime(persona)
+    client = FakeLLMClient()
+    touched = _wire_keepalive(runtime, persona, client)
+    manager._autonomy_all_stop = False
+    manager._autonomy_managers = {"air": _LifeTickAutonomy()}
+    reads = _land_during_the_last_anchor_read(
+        runtime, lambda: setattr(manager, "_autonomy_all_stop", True),
+    )
+
+    assert runtime.run_cache_keepalive("air", "claude-x") is False
+    assert reads["n"] == 2
+    assert client.calls == []
+    assert touched == []
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_does_not_send_when_the_life_ends_during_the_last_anchor_read(
+    _mock_cache,
+):
+    """再現順序: 送信直前の anchor の読みの最中に、ライフ終了の節目が済んだ
+    (ティックの予約が消えて ended が立った)。ティックの検査は予約が無いので
+    止めない — その後のライフの読み直しと世代の照合で送らない。"""
+    persona = _persona()
+    runtime, manager = _make_runtime(persona)
+    client = FakeLLMClient()
+    touched = _wire_keepalive(runtime, persona, client)
+    am = _LifeTickAutonomy()
+    manager._autonomy_managers = {"air": am}
+    life = {"ended": False}
+
+    def _life_end():
+        am.life_generation += 1  # cancel_tick (世代を進める)
+        life["ended"] = True  # ended の書き込み
+
+    _land_during_the_last_anchor_read(runtime, _life_end)
+    with patch(
+        "saiverse.day_plan.is_keepalive_allowed",
+        side_effect=lambda _m, _p: not life["ended"],
+    ):
+        assert runtime.run_cache_keepalive("air", "claude-x") is False
+    assert client.calls == []
+    assert touched == []
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_does_not_send_when_a_life_end_begins_during_the_last_life_read(
+    _mock_cache,
+):
+    """ライフの読み直し (DB) の最中にライフ終了の節目が始まり、その読みは ended
+    の書き込みより前の状態を見た。読みの結果は「許可」でも、最後の照合が
+    ライフの世代の変化を見て送らない。"""
+    persona = _persona()
+    runtime, manager = _make_runtime(persona)
+    client = FakeLLMClient()
+    touched = _wire_keepalive(runtime, persona, client)
+    am = _LifeTickAutonomy()
+    manager._autonomy_managers = {"air": am}
+    calls = {"n": 0}
+
+    def _life_read(_m, _p):
+        calls["n"] += 1
+        if calls["n"] == 2:  # 送信直前の読み直し
+            am.life_generation += 1  # 終了の節目が始まった (ended はまだ見えない)
+        return True
+
+    with patch("saiverse.day_plan.is_keepalive_allowed", side_effect=_life_read):
+        assert runtime.run_cache_keepalive("air", "claude-x") is False
+        assert calls["n"] == 2
+    assert client.calls == []
+    assert touched == []
+
+    # 対照: 何も起きなければ同じ配線で送る
+    with patch("saiverse.day_plan.is_keepalive_allowed", return_value=True):
+        assert runtime.run_cache_keepalive("air", "claude-x") is True
+    assert len(client.calls) == 1

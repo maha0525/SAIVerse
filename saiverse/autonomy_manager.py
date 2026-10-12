@@ -294,6 +294,17 @@ class AutonomyManager:
     def last_report(self) -> Optional[CycleReport]:
         return self._last_report
 
+    @property
+    def life_generation(self) -> int:
+        """ライフの世代 (:meth:`cancel_tick` — ライフ終了の節目のたびに +1)。
+
+        保温の送信直前の照合 (``SEARuntime._run_cache_keepalive_once``) が、
+        冒頭で控えた値と最後に見比べる — ライフを DB から読んでいる最中に終了の
+        節目が始まっても、その読みの結果に頼らず止める (2026-10-12 Codex 敵対
+        レビュー 段 3 8 巡目 medium)。int の読みは原子的なのでロックは取らない。
+        """
+        return self._life_generation
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -808,6 +819,10 @@ class AutonomyManager:
         行う。:meth:`_check_gate` はライフを DB から読むので、その読みの間に
         停止→再開やライフの切り替わりが完了しうる — 冒頭の照合は早期の節約で、
         正は最後の照合 (2026-10-12 Codex 敵対レビュー 段 3 7 巡目 medium)。
+        最後の照合の締めは、公開済みの全停止の値と自律 OFF の値の読み直し
+        (:func:`~saiverse.autonomy_wiring.autonomy_start_refusal` — どちらも
+        in-memory の安い読み)。全停止は値の公開から各ペルソナの stop() までに
+        隙間があり、状態と世代だけではその区間をすり抜ける (8 巡目 medium)。
 
         **開始済みの生成は完走する** (課金と生成の保護の既存裁定) — このフェンスは
         開始の直前までで、走り出した Pulse は止めない。
@@ -815,6 +830,8 @@ class AutonomyManager:
         Returns:
             拒否の理由 (None なら通す)。拒否した理由は ``refusals`` にも積む。
         """
+        from saiverse.autonomy_wiring import autonomy_start_refusal
+
         with self._lock:
             reason = self._tick_stale_reason_locked(generation, life_generation)
         cancel = reason == "outside life"
@@ -838,6 +855,16 @@ class AutonomyManager:
                     and last + interval > now + self._SUPERSEDE_GRACE
                 ):
                     reason = "superseded by a standard call"
+                if reason is None:
+                    # 最後の一手 — 公開済みの全停止と自律 OFF の値 (どちらも
+                    # in-memory の安い読み) をもう一度見る (2026-10-12 Codex
+                    # 敵対レビュー 段 3 8 巡目 medium)。全停止は「値の公開 →
+                    # 全ペルソナを順に停止同期」の順で効くので、公開は済んだが
+                    # このペルソナの stop() がまだの区間では、上の状態と世代の
+                    # 照合は通ってしまう。予約の扱いは _check_gate の同じ拒否と
+                    # 揃える (消す — 解除時の復帰は一斉再同期と見張りの張り直し)。
+                    reason = autonomy_start_refusal(self.manager, self.persona_id)
+                    cancel = reason is not None
         if reason is None:
             return None
         if cancel and own_token is not None:

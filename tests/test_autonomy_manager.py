@@ -1676,6 +1676,49 @@ def test_a_stop_and_restart_during_the_final_gate_read_does_not_start_the_tick(
     assert manager.fire_tick.refused == ["stopped"]
 
 
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 8 巡目 medium: 生成直前のフェンスの最後の
+# 照合は、公開済みの全停止の値と自律 OFF の値を読み直す
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "publish, expected",
+    [
+        (lambda manager: setattr(manager, "_autonomy_all_stop", True), "autonomy all-stop"),
+        (
+            lambda manager: setattr(manager.personas[PERSONA_ID], "autonomy_enabled", False),
+            "autonomy off",
+        ),
+    ],
+    ids=["all-stop", "autonomy-off"],
+)
+def test_a_stop_published_during_the_final_gate_read_does_not_start_the_tick(
+    manager, session_factory, publish, expected,
+):
+    """再現順序: 生成直前のフェンスのゲートが全停止・自律 OFF の検査を通った後、
+    ライフの読み (DB) の最中に全停止の値 (または自律 OFF) が公開された。この
+    ペルソナの stop() はまだ届いていない (全停止は「公開 → 全ペルソナを順に
+    停止同期」の順) ので、状態と世代の照合は通る — 最後の照合が公開値を読み直して
+    見送り、自分の予約も消す。"""
+    am = _running_life(manager, session_factory)
+    original_gate = am._check_gate
+
+    def _gate_with_a_stop_published_inside(now, *, check_conversation=True):
+        verdict = original_gate(now, check_conversation=check_conversation)
+        if check_conversation:  # 生成直前のフェンスの読み (冒頭のゲートは会話を見ない)
+            publish(manager)
+        return verdict
+
+    am._check_gate = _gate_with_a_stop_published_inside
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls == []
+    assert manager.fire_tick.refused == [expected]
+    assert am.state != AutonomyState.STOPPED  # stop() はまだ届いていない
+    assert am.last_report.reason == f"{expected} before start"
+    assert _tick_at(manager) is None
+
+
 def _set_overnight_life_window(session_factory):
     """07:00〜翌 06:59 のライフ (終了の直後に次のライフが始まる並び)。"""
     _add_day_schedule(session_factory, wiring.LIFE_START_SCHEDULE_PLAYBOOK, "07:00")

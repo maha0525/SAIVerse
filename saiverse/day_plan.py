@@ -1462,6 +1462,15 @@ def apply_life_boundary(
             )
         return True
 
+    if boundary == LIFE_BOUNDARY_END and stale is None:
+        # ended の commit が済んだ後に、もう一度ライフの世代を進める (予約は
+        # もう無いので取り消しは no-op)。冪等段の取り消し (上の
+        # _cancel_tick_reservation) と ended の commit の間に手渡しで走り始めた
+        # 保温は、世代をその区間の値で控えて ended の無い lives を読みうる —
+        # commit 後の世代の前進が、その保温の最後の照合を外す (2026-10-12 段 3
+        # 敵対レビュー 8 巡目の消し込みで実装側が発見した残骸)。
+        _cancel_tick_reservation(manager, persona_id)
+
     if stale is not None:
         # 通知を同梱していないので、配送を待たずに閉じる。閉じ損ねても applied
         # (決着済み) なので再試行は止まる — 回復 tick の sweep が拾う。

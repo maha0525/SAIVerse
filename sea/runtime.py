@@ -2206,6 +2206,12 @@ class SEARuntime:
         # 課金を一括で止める非常ブレーキ」(v0.4 計画 決定 12) で、保温も自発の課金。
         from saiverse.autonomy_wiring import is_autonomy_on
         from saiverse.day_plan import is_keepalive_allowed
+        from sea.session_lifecycle import tick_life_generation
+
+        # ライフの世代を最初に控える — 送信直前の最後の照合で見比べ、この回の
+        # 途中でライフ終了の節目が始まっていたら (DB の読みの結果に頼らず) 送らない
+        # (2026-10-12 Codex 敵対レビュー 段 3 8 巡目 medium)。
+        life_generation_at_start = tick_life_generation(manager, persona_id)
 
         if not is_autonomy_on(manager, persona_id):
             LOGGER.debug(
@@ -2358,23 +2364,35 @@ class SEARuntime:
                     "[keepalive] warming non-default model session (persona=%s model=%s)",
                     persona_id, model_key,
                 )
-            # 生成開始の直前の再検査 (2026-10-12 Codex 敵対レビュー 段 3 1 巡目
-            # high): 冒頭のゲートから文脈の組成までの間に全停止・自律 OFF が
-            # 入っていたら送らない (連鎖はここで自然停止 — touch しないので
-            # 再予約もされない)。開始済みの生成は完走する (課金と生成の保護の
-            # 既存裁定) — このフェンスは送信の直前まで。
-            if not is_autonomy_on(manager, persona_id):
+            # 送信直前の検査の順序 (2026-10-12 Codex 敵対レビュー 段 3 8 巡目
+            # medium): DB を読む検査 (anchor とティック → ライフ) を先に済ませ、
+            # **最後の一手は安い公開値の照合** (全停止・自律 OFF・ライフの世代)
+            # で締める。DB の読みの最中に成立した停止・ライフ終了を、読み終えた
+            # 後で見直さずに課金へ進まないため。開始済みの生成は完走する (課金と
+            # 生成の保護の既存裁定) — このフェンスは送信の直前まで。
+            #
+            # (1) 最新の anchor の失効とティックの予約を読み直す (5 巡目
+            # medium): この予約を張った判断の後に別の標準呼び出しが anchor を
+            # 更新してティックを押し直していたら、ティックが失効より前に温める
+            # — 送らない (touch もしないので連鎖はここで止まり、ティックの標準
+            # 呼び出しの touch が次を判定し直す)。
+            tick_first = self.session_lifecycle.tick_warms_before_cache_expires(
+                persona_id, model_key,
+            )
+            if tick_first is not None:
+                tick_at, expires_at = tick_first
                 LOGGER.info(
-                    "[keepalive] skipped before sending: autonomy turned off or "
-                    "all-stop during composition (persona=%s model=%s)",
-                    persona_id, model_key,
+                    "[keepalive] skipped before sending: the tick at %s warms the "
+                    "cache before it expires at %s (persona=%s model=%s)",
+                    tick_at.isoformat(timespec="seconds"),
+                    expires_at.isoformat(timespec="seconds"), persona_id, model_key,
                 )
                 return False
-            # 送信の直前にライフの生存も見直す (2026-10-12 Codex 敵対レビュー
-            # 段 3 6 巡目 medium): 組成の間にライフが終了していたら、谷で送らない
-            # (touch しないので連鎖はここで止まる)。終了の節目はティックの予約を
-            # 消すので、下のティックの検査はこの回を止めない。判定の失敗は冒頭の
-            # ライフのゲートと同じ裁定で許可側へ倒す。
+            # (2) ライフの生存を見直す (6 巡目 medium): 組成の間にライフが
+            # 終了していたら、谷で送らない (touch しないので連鎖はここで止まる)。
+            # 終了の節目はティックの予約を消すので、(1) のティックの検査は
+            # この回を止めない。判定の失敗は冒頭のライフのゲートと同じ裁定で
+            # 許可側へ倒す。
             try:
                 life_allows = is_keepalive_allowed(manager, persona_id)
             except Exception:
@@ -2389,21 +2407,26 @@ class SEARuntime:
                     "composition (persona=%s model=%s)", persona_id, model_key,
                 )
                 return False
-            # 同じく送信の直前に、最新の anchor の失効とティックの予約を読み直す
-            # (2026-10-12 Codex 敵対レビュー 段 3 5 巡目 medium): この予約を張った
-            # 判断の後に別の標準呼び出しが anchor を更新してティックを押し直して
-            # いたら、ティックが失効より前に温める — 送らない (touch もしないので
-            # 連鎖はここで止まり、ティックの標準呼び出しの touch が次を判定し直す)。
-            tick_first = self.session_lifecycle.tick_warms_before_cache_expires(
-                persona_id, model_key,
-            )
-            if tick_first is not None:
-                tick_at, expires_at = tick_first
+            # (3) 最後の一手 — 安い公開値の照合 (1 巡目 high / 8 巡目 medium)。
+            # 冒頭のゲートから (1)(2) の DB の読みが終わるまでの間に全停止・
+            # 自律 OFF が入っていたら送らない (連鎖はここで自然停止 — touch
+            # しないので再予約もされない)。ライフの世代が冒頭から進んでいたら、
+            # この回の途中でライフ終了の節目が始まった — (2) の読みがその書き込み
+            # より前の状態を見ていても送らない。
+            if not is_autonomy_on(manager, persona_id):
                 LOGGER.info(
-                    "[keepalive] skipped before sending: the tick at %s warms the "
-                    "cache before it expires at %s (persona=%s model=%s)",
-                    tick_at.isoformat(timespec="seconds"),
-                    expires_at.isoformat(timespec="seconds"), persona_id, model_key,
+                    "[keepalive] skipped before sending: autonomy turned off or "
+                    "all-stop before sending (persona=%s model=%s)",
+                    persona_id, model_key,
+                )
+                return False
+            if (
+                life_generation_at_start is not None
+                and tick_life_generation(manager, persona_id) != life_generation_at_start
+            ):
+                LOGGER.info(
+                    "[keepalive] skipped before sending: a life end began during "
+                    "this keep-alive (persona=%s model=%s)", persona_id, model_key,
                 )
                 return False
             llm_client.generate(

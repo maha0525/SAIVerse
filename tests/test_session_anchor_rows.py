@@ -1806,6 +1806,46 @@ def test_run_cold_precompaction_rechecks_under_beat_lock(session_factory):
     run.assert_not_called()
 
 
+def test_run_cold_precompaction_rechecks_all_stop_after_reading_the_conditions(
+    session_factory,
+):
+    """2026-10-12 Codex 敵対レビュー 段 3 8 巡目 medium の再現順序: Beat ロック内の
+    全停止の検査を通った後、条件の読み (提示窓の読み) の最中に全停止が成立する。
+    読み終えた後の最後の照合で引き返し、run_metabolism (抽出の滞留の回収・編纂
+    — LLM 課金) へ進まない。"""
+    from sea.eviction_plan import Watermarks
+
+    lc = _cold_ready_lifecycle(session_factory)
+    persona = SimpleNamespace(
+        persona_id=PERSONA_ID, model="model-a", current_building_id="room",
+    )
+    stale = _now() - timedelta(days=3)
+    lc.upsert_anchor_entry(PERSONA_ID, "model-a", {
+        "anchor_id": "m1", "updated_at": stale.isoformat(), "ttl_seconds": 300,
+    })
+    wm = Watermarks(target=2000, high=4000)
+    big = [{"id": "m1", "content": "x" * 3500}]
+    lc.manager._autonomy_all_stop = False
+
+    def _read_window_while_all_stop_lands(*_a, **_k):
+        # 条件の読みの最中に、全停止の値が公開される
+        lc.manager._autonomy_all_stop = True
+        return _window("m1", big)
+
+    try:
+        with patch.object(lc, "is_chronicle_enabled_for_persona", return_value=True), \
+                patch.object(lc, "is_autonomous_chronicle_enabled_for_persona",
+                             return_value=True), \
+                patch.object(lc, "get_metabolism_watermarks", return_value=wm), \
+                patch.object(lc, "get_presented_window",
+                             side_effect=_read_window_while_all_stop_lands), \
+                patch.object(lc, "run_metabolism", return_value="ok") as run:
+            assert lc.run_cold_precompaction(persona) == "all_stop"
+        run.assert_not_called()
+    finally:
+        lc.manager._autonomy_all_stop = False
+
+
 def test_run_cold_precompaction_skips_when_only_perception_over_budget(
     session_factory, caplog,
 ):

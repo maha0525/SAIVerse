@@ -115,6 +115,23 @@ def _tick_fire_at(manager: Any, persona_id: Optional[str]) -> Optional[datetime]
     return fire_at if isinstance(fire_at, datetime) else None
 
 
+def tick_life_generation(manager: Any, persona_id: Optional[str]) -> Optional[int]:
+    """ペルソナの AutonomyManager のライフの世代 (無い・読めなければ None)。
+
+    保温の送信直前の照合が、冒頭で控えた値と最後に見比べる
+    (``SEARuntime._run_cache_keepalive_once``)。ライフ終了の節目は世代を進めて
+    から ended を書くので、世代の変化は「終了の節目が始まった」印になる。
+    """
+    am = _autonomy_manager_of(manager, persona_id)
+    if am is None:
+        return None
+    try:
+        value = am.life_generation
+    except Exception:
+        return None
+    return value if isinstance(value, int) else None
+
+
 def _keepalive_settings(meta_layer: Any, persona: Any) -> Tuple[bool, float]:
     """keep-alive の設定 ``(keep_cache_alive, cache_threshold_ratio)`` を読む。
 
@@ -4987,7 +5004,8 @@ class SessionLifecycle:
         させず従来どおり試行する — ゲートは節約であって門ではない。
 
         **グローバル自律全停止の間は起動しない** (巡回の入口・ペルソナごとの
-        起動直前・Beat ロックの内側の三か所で見る — :meth:`_cold_sweep_all_stopped`)。
+        起動直前・Beat ロックの内側の条件の読みの前と後の四か所で見る —
+        :meth:`_cold_sweep_all_stopped`)。
         先回り畳みは時計が起こす自発の LLM 処理 (編纂・スルース) で、会話や
         アラームに付随しないので、課金の非常ブレーキの対象 (2026-10-12 Codex
         敵対レビュー 段 3 1 巡目 high)。**ペルソナごとの自律 OFF では止めない** —
@@ -5313,7 +5331,7 @@ class SessionLifecycle:
         try:
             with hold_beat(self.manager, persona_id, purpose="metabolism"):
                 # Beat ロックを待つ間に全停止が入っていたら始めない
-                # (_cold_window_sweep_tick の門の最後の一か所)。
+                # (早期の節約。最後の照合は条件の読みの後 — run_metabolism の直前)。
                 if self._cold_sweep_all_stopped():
                     LOGGER.info(
                         "[metabolism] cold pre-compaction not started: global "
@@ -5364,6 +5382,19 @@ class SessionLifecycle:
                     persona_id, model_key, current_chars,
                     watermarks.target, watermarks.high,
                 )
+                # 最後の一手 — 条件の読み (水位・提示窓・字数は DB を読む) を
+                # 終えた後に、公開済みの全停止の値 (in-memory の安い読み) を
+                # もう一度見る (2026-10-12 Codex 敵対レビュー 段 3 8 巡目
+                # medium)。上の全停止の検査は読みより前なので、読みの最中に
+                # 入った全停止をすり抜け、本体の抽出の滞留の回収 (LLM 課金) や
+                # 編纂へ進んでいた。止めた回は指紋を記録しない (解除後に再検査)。
+                if self._cold_sweep_all_stopped():
+                    LOGGER.info(
+                        "[metabolism] cold pre-compaction not started: global "
+                        "autonomy all-stop turned on while reading the "
+                        "conditions (persona=%s)", persona_id,
+                    )
+                    return "all_stop"
                 building_id = getattr(persona, "current_building_id", None) or ""
                 result = self.run_metabolism(
                     persona, building_id, window, watermarks, None,
