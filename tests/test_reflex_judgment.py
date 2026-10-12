@@ -20,6 +20,7 @@ API キーは monkeypatch で偽値を入れ、モデル設定は偽の MODEL_CO
 import json
 import threading
 import time
+from datetime import datetime
 from unittest.mock import patch
 
 import httpx
@@ -1400,11 +1401,11 @@ class _FakeLLMClient:
 def _usage_info(input_tokens, output_tokens, **overrides):
     from llm_clients.base import UsageInfo
 
+    overrides.setdefault("timestamp", time.time())
     return UsageInfo(
         model="vendor/judge-lite",
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        timestamp=time.time(),
         **overrides,
     )
 
@@ -1546,9 +1547,11 @@ def test_llm_call_abandoned_at_the_deadline_records_only_its_usage(llm_role, mon
 
     答えは読まない (メインはもう会話を先へ進めている)。記帳は 1 回だけ。
     """
+    # 応答の時刻は記帳より前。料金は記帳の時刻ではなく、応答の時刻で決まる。
+    answered_at = time.time() - 3600
     client = _FakeLLMClient(
         {"answers": [{"qid": "m0", "noul": 0.5}, {"qid": "m1", "noul": 0.5}]},
-        usage=_usage_info(77, 5), delay=0.8,
+        usage=_usage_info(77, 5, timestamp=answered_at), delay=0.8,
     )
     _install_llm_client(monkeypatch, client)
 
@@ -1563,6 +1566,7 @@ def test_llm_call_abandoned_at_the_deadline_records_only_its_usage(llm_role, mon
     assert usage_calls[0]["input_tokens"] == 77
     assert usage_calls[0]["output_tokens"] == 5
     assert usage_calls[0]["category"] == reflex_judgment.USAGE_CATEGORY
+    assert usage_calls[0]["timestamp"] == datetime.fromtimestamp(answered_at)
 
 
 def test_llm_failure_is_normalized_and_masked(llm_role, monkeypatch, caplog):

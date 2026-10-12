@@ -746,6 +746,12 @@ def _usage_from_client(info: Any) -> Dict[str, Any]:
     cleaned = _clean_usage(raw, {name: name for name in _CLIENT_USAGE_FIELDS})
     if isinstance(ttl, str) and ttl:
         cleaned["cache_ttl"] = ttl
+    # 応答を受け取った時刻を運ぶ。締切で見切った応答は後から記帳されるので、
+    # 記帳の時刻で料金を決めると、料金の切り替わりをまたいだときに別の単価になる。
+    event_time = getattr(info, "timestamp", None)
+    if (cleaned and isinstance(event_time, (int, float)) and not isinstance(event_time, bool)
+            and math.isfinite(event_time)):
+        cleaned["timestamp"] = float(event_time)
     return cleaned
 
 
@@ -914,6 +920,10 @@ def _record_usage(backend: ReflexBackend, usage: Mapping[str, Any], persona_id: 
         ttl = usage.get("cache_ttl")
         if isinstance(ttl, str) and ttl:
             extra["cache_ttl"] = ttl
+        event_time = usage.get("timestamp")
+        if isinstance(event_time, float):
+            from datetime import datetime
+            extra["timestamp"] = datetime.fromtimestamp(event_time)
 
         get_usage_tracker().record_usage(
             model_id=backend.model_key,
