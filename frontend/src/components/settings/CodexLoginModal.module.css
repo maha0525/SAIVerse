@@ -156,6 +156,101 @@
     color: var(--text-secondary, #777);
 }
 
+/* Sign in with ChatGPT の待機画面 */
+.lead {
+    margin: 0 0 0.9rem;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
+.primaryLink {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 0.9rem;
+    padding: 8px 16px;
+    border-radius: 6px;
+    background: var(--primary, #4a7eb5);
+    color: var(--primary-foreground, #ffffff);
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.primaryLink:hover {
+    filter: brightness(1.08);
+}
+
+.otherDevice {
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border-color, #ddd);
+    font-size: 0.85rem;
+}
+
+.otherDevice summary {
+    cursor: pointer;
+    color: var(--text-secondary, #777);
+}
+
+.otherDevice .hint {
+    margin: 0.5rem 0;
+    line-height: 1.5;
+}
+
+.callbackRow {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.callbackInput {
+    flex: 1;
+    min-width: 0;
+    padding: 5px 8px;
+    border: 1px solid var(--border-color, #ccc);
+    border-radius: 4px;
+    background: var(--bg-secondary, #fafafa);
+    color: inherit;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.8rem;
+}
+
+.copyBtn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.inlineError {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin-top: 0.5rem;
+    color: #b91c1c;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.switchRow {
+    margin-top: 1rem;
+    text-align: right;
+}
+
+.switchLink {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: var(--text-secondary, #777);
+    font-size: 0.78rem;
+    text-decoration: underline;
+}
+
+.switchLink:hover {
+    color: inherit;
+}
+
 /* Dark mode — hardcoded pastels flip to their deep variants */
 :global([data-theme="dark"]) .modal {
     background: #1f1f1f;
@@ -174,4 +269,8 @@
 :global([data-theme="dark"]) .errorBox {
     background: #7f1d1d;
     color: #fecaca;
+}
+
+:global([data-theme="dark"]) .inlineError {
+    color: #fca5a5;
 }
