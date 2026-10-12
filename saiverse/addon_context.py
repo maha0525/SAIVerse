@@ -23,8 +23,8 @@
 - 空文字や文字列でない値は「案内なし」として扱う。
 - 例外はその提供口だけ警告ログに残し、他のアドオンの案内には波及させない。
 
-一時的な失敗では前回の結果を使う: 提供口が例外を出したとき、そのペルソナと
-アドオンの組で最後に成功した結果 (「案内なし」だった結果も含む) が記録されて
+一時的な失敗では前回の結果を使う: 提供口が例外を出したとき、そのペルソナ・
+部屋・アドオンの組で最後に成功した結果 (「案内なし」だった結果も含む) が記録されて
 いれば、それを今回の結果として使う。失敗を「案内なし」として扱うと、失敗した
 回の差分検知で「当てはまらなくなりました」の偽通知が出て、復旧後に「届き
 ました」の偽通知がもう一度出る。さらに head の撮り直しだけが失敗すると、head
@@ -55,8 +55,11 @@ from typing import Any, Callable, Optional
 
 LOGGER = logging.getLogger(__name__)
 _providers: dict[str, Callable[..., str]] = {}
-# (persona_id, addon_name) -> 最後に成功した提供口の結果 (正規化済み、"" = 案内なし)
-_last_results: dict[tuple[str, str], str] = {}
+# (persona_id, building_id, addon_name) -> 最後に成功した提供口の結果
+# (正規化済み、"" = 案内なし)。部屋を鍵に含めるのは、部屋限定の案内を別の部屋で
+# 失敗したときに使い回さないため (退室の瞬間の失敗で、退室先の head に元の部屋の
+# 案内が残り、「当てはまらなくなりました」も届かなくなる)。
+_last_results: dict[tuple[str, str, str], str] = {}
 # addon_name -> 解除の回数。解除と並行して走った呼び出しが、解除の後に古い
 # 結果を記録し直さないための目印。
 _generations: dict[str, int] = {}
@@ -76,7 +79,7 @@ def unregister_provider(addon_name: str) -> None:
     with _lock:
         _providers.pop(addon_name, None)
         _generations[addon_name] = _generations.get(addon_name, 0) + 1
-        for key in [key for key in _last_results if key[1] == addon_name]:
+        for key in [key for key in _last_results if key[2] == addon_name]:
             del _last_results[key]
 
 
@@ -91,13 +94,19 @@ def collect_guidance(persona: Any, building_id: Any) -> list[tuple[str, str]]:
     ことが prefix キャッシュの前提だから。案内を返さなかった提供口は列に
     含めない。提供口が例外を出したときは、モジュールの docstring の規則どおり
     前回の結果を使い、使える記録が無ければそのアドオンだけ案内なしとする。
-    ``persona`` から ``persona_id`` が取れないときは結果を記録しない (失敗時に
-    使える前回の結果も無い)。呼び出しの最中に解除・置き換えされたアドオンの
+    ``persona`` から ``persona_id`` が取れないとき・部屋が分からないときは結果を
+    記録しない (失敗時に使える前回の結果も無い)。記録はペルソナと部屋の組ごとで、
+    別の部屋の記録は使わない。呼び出しの最中に解除・置き換えされたアドオンの
     結果は記録も返却もしない。
     """
     persona_id: Optional[str] = getattr(persona, "persona_id", None) if persona is not None else None
     if not isinstance(persona_id, str) or not persona_id:
         persona_id = None
+    # 記録の鍵の前半。ペルソナか部屋が分からないときは記録しない。
+    record_scope: Optional[tuple[str, str]] = (
+        (persona_id, str(building_id))
+        if persona_id is not None and building_id is not None else None
+    )
     with _lock:
         providers = [
             (name, provider, _generations.get(name, 0))
@@ -117,10 +126,10 @@ def collect_guidance(persona: Any, building_id: Any) -> list[tuple[str, str]]:
                 # 呼び出しの最中に解除された — 解除後の世界に持ち込まない。
                 continue
             current = _providers[name] is provider
-            if current and not failed and persona_id is not None:
-                _last_results[(persona_id, name)] = text
+            if current and not failed and record_scope is not None:
+                _last_results[(*record_scope, name)] = text
             previous = (
-                _last_results.get((persona_id, name)) if persona_id is not None else None
+                _last_results.get((*record_scope, name)) if record_scope is not None else None
             )
         if not current or failed:
             # 置き換えの最中の古い提供口の結果か、失敗。どちらも今回の結果は

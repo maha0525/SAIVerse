@@ -159,7 +159,7 @@ def test_result_of_a_provider_unregistered_mid_call_is_dropped():
     addon_context.register_provider("leaving", unregister_while_running)
     persona = _persona("room")
     assert addon_context.collect_guidance(persona, "room") == []
-    assert ("fixture", "leaving") not in addon_context._last_results
+    assert ("fixture", "room", "leaving") not in addon_context._last_results
 
 
 def test_unregister_forgets_the_last_results_but_replacement_keeps_them():
@@ -176,7 +176,7 @@ def test_unregister_forgets_the_last_results_but_replacement_keeps_them():
 
     # 解除で記録は消え、再登録した提供口が失敗しても古い案内は戻らない
     addon_context.unregister_provider("flaky")
-    assert ("fixture", "flaky") not in addon_context._last_results
+    assert ("fixture", "room", "flaky") not in addon_context._last_results
     addon_context.register_provider("flaky", replacement)
     assert addon_context.collect_guidance(persona, "room") == []
 
@@ -194,7 +194,7 @@ def test_old_provider_returning_after_replacement_cannot_roll_back_the_record():
 
     addon_context.register_provider("swap", old_provider)
     assert addon_context.collect_guidance(persona, "room") == [("swap", "新しい案内")]
-    assert addon_context._last_results[("fixture", "swap")] == "新しい案内"
+    assert addon_context._last_results[("fixture", "room", "swap")] == "新しい案内"
 
     # 置き換えの最中で、まだ記録が無ければ旧値は返さない (案内なし)。
     addon_context.unregister_provider("swap")
@@ -505,6 +505,35 @@ def test_pipeline_broken_provider_does_not_block_a_healthy_addon(tmp_path):
         left = pipeline.flush_diffs(_ctx("lobby"), all_sections=True)
         assert [label.kind for label in left] == ["addon_guidance_removed"]
         assert "Godot Virtual Vessel" in left[0].label
+
+
+def test_pipeline_leaving_the_room_while_the_provider_fails_still_removes(tmp_path):
+    """部屋で案内を取得した後、退室先で提供口が失敗しても、元の部屋の案内を
+    使い回さない — 「当てはまらなくなりました」が届き、撮り直した head に
+    元の部屋の案内は残らない。"""
+    from sea.head_pipeline import HeadPipeline, HeadSectionRegistry
+
+    _write_manifest(tmp_path, "godot-vessel", {"ja": "Godot Virtual Vessel"})
+    registry = HeadSectionRegistry()
+    registry.register(AddonGuidanceSection())
+    pipeline = HeadPipeline(registry=registry)
+
+    calls = {"fail": False}
+
+    def room_guide_that_can_fail(*, persona, building_id):
+        if calls["fail"]:
+            raise RuntimeError("temporary failure")
+        return _room_guide(persona=persona, building_id=building_id)
+
+    with patch("saiverse.data_paths.EXPANSION_DATA_DIR", tmp_path):
+        addon_context.register_provider("godot-vessel", room_guide_that_can_fail)
+        pipeline.capture_all(_ctx(VESSEL_ROOM))
+
+        calls["fail"] = True
+        left = pipeline.flush_diffs(_ctx("lobby"), all_sections=True)
+        assert [label.kind for label in left] == ["addon_guidance_removed"]
+        redrawn = pipeline.capture_all(_ctx("lobby"))
+        assert redrawn.sections["addon_guidance"] == _snap()
 
 
 # ---------------------------------------------------------------------------
