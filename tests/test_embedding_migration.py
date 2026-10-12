@@ -8,14 +8,15 @@
 - 再計算 API のジョブが 3 系統の古いベクトルを消してその場で作り直し、
   メッセージも作り直し、``embed_model`` を記録し、そのペルソナの警告を下ろす。
 - CLI も同じ範囲を直し、``embed_model`` を記録する。小さい次元への再計算は拒む。
-- 会話ログのインポートは、取り込み中は埋め込まず、取り込みの完了を報告して
-  から裏で取り込んだ分だけを埋める。取り込み自体は前回の埋め込みを待たず、
-  待つのは裏の埋め込みのスレッドだけ。状態は取り込みごとのジョブ番号で分け、
-  失敗は状態に残す。裏へ回す直前に memory.db へ消えない印を付け、失敗ゼロで
-  完走したら消す (残った印は起動時の旗になり、再計算が消す)。
-- 再計算の最終確認は全行を見る。完了 (古い行なし・ベクトル待ちの行なし・
-  編集で飛ばした行なし) のときだけ名札と印を同じトランザクションで確定し、
-  未完了なら両方そのままで、次の実行が全再計算に昇格して収束する。
+- 会話ログのインポートは、取り込み中は埋め込まず、各メッセージを空のベクトル行
+  と同じトランザクションで保存する (skip は何も書かない)。空の行は「古いベクトル」
+  なので、裏の埋め込みはペルソナの古いベクトルを作り直すだけで埋まり、裏が死ん
+  でも起動時の検査が旗を立て、再計算が埋める。取り込み自体は前回の埋め込みを
+  待たず、待つのは裏の埋め込みのスレッドだけ。失敗は状態に残す。
+- 再計算の最終確認は全行を見る。完了 (古い行なし・編集で古いベクトルのまま
+  残ったメッセージなし・印が自分のもの) のときだけ名札と印を同じトランザクション
+  で確定し、未完了なら両方そのままで、次の実行が全再計算に昇格して収束する。
+  ベクトルの無い Chronicle 等の行は完了を妨げない (次の Metabolism が埋める)。
 - force は 3 系統の表を全行消す (再生成されない幹ページ等の旧ベクトルも残さない)。
 - 埋め込みの計算中に本文が変わった行は保存しない。本文の読み直しと保存は
   BEGIN IMMEDIATE の中で一体に行い、別の接続は割り込めない。
@@ -32,6 +33,7 @@ DB は一時ディレクトリの SQLite。LLM は呼ばない。
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from dataclasses import replace
@@ -439,35 +441,12 @@ def test_cli_refuses_smaller_dimension_without_force(tmp_path, monkeypatch):
 # 会話ログのインポート
 # ---------------------------------------------------------------------------
 
-def test_backfill_limited_to_given_message_ids(tmp_path):
-    from saiverse_memory.adapter import SAIMemoryAdapter
-
-    settings = replace(load_settings(), memory_enabled=True)
-    with patch("saiverse_memory.adapter.Embedder", FakeEmbedder):
-        adapter = SAIMemoryAdapter("p", persona_dir=tmp_path, settings=settings)
-    try:
-        skipped = adapter.append_persona_message(
-            {"role": "user", "content": "前回スキップした取り込み", "embedding_chunks": 0})
-        mine = adapter.append_persona_message(
-            {"role": "user", "content": "今回の取り込み", "embedding_chunks": 0})
-        result = adapter.backfill_missing_message_embeddings(message_ids=[mine])
-        assert result["embedded"] == 1
-        embedded = {r[0] for r in adapter.conn.execute(
-            "SELECT DISTINCT message_id FROM message_embeddings")}
-        assert embedded == {mine}
-        assert skipped not in embedded
-    finally:
-        adapter.close()
-
-
 def _reset_import_embedding_state():
     from api.routes.people import import_chatlog
 
     with import_chatlog._import_embedding_lock:
-        import_chatlog._import_embedding_jobs.clear()
+        import_chatlog._import_embedding_status.clear()
         import_chatlog._import_embedding_threads.clear()
-        import_chatlog._import_embedding_latest.clear()
-        import_chatlog._import_embedding_dirty.clear()
     import_chatlog._extension_import_status.pop("p", None)
     import_chatlog._official_import_status.pop("p", None)
 
@@ -479,25 +458,9 @@ class _FakeImportAdapter:
 
     def __init__(self, persona_id, **kwargs):
         self.payloads = []
-        self.backfill_calls = []
+        self.reembed_calls = 0
         self.closed = 0
-        self.status_at_backfill = None
-        self.embedder = object()
-        # 印の書き込み (begin の件数) と削除の回数、begin 時点の取り込み状態
-        self.marks_begun = []
-        self.marks_finished = 0
-        self.status_at_begin = None
         _FakeImportAdapter.instances.append(self)
-
-    def begin_embedding_backfill(self, count):
-        from api.routes.people import import_chatlog
-
-        self.status_at_begin = dict(import_chatlog._extension_import_status.get("p", {}))
-        self.marks_begun.append(count)
-        return True
-
-    def finish_embedding_backfill(self):
-        self.marks_finished += 1
 
     def append_persona_message(self, payload, thread_suffix=None):
         self.payloads.append(dict(payload))
@@ -506,15 +469,12 @@ class _FakeImportAdapter:
     def set_thread_title(self, *args):
         pass
 
-    def backfill_missing_message_embeddings(self, *, progress_callback=None, message_ids=None):
-        from api.routes.people import import_chatlog
-
-        self.status_at_backfill = dict(import_chatlog._extension_import_status.get("p", {}))
-        self.backfill_calls.append(list(message_ids))
+    def reembed_stale_messages(self, *, progress_callback=None):
+        self.reembed_calls += 1
+        n = len(self.payloads)
         if progress_callback:
-            progress_callback(len(message_ids), len(message_ids))
-        return {"total_missing": len(message_ids), "embedded": len(message_ids),
-                "failed": 0, "changed": 0}
+            progress_callback(n, n)
+        return {"embedded": n, "dropped": 0, "changed": 0, "total": n}
 
     def close(self):
         self.closed += 1
@@ -523,6 +483,7 @@ class _FakeImportAdapter:
 @pytest.mark.parametrize("skip_embedding", [False, True])
 def test_extension_import_embeds_after_import_in_background(tmp_path, skip_embedding):
     from api.routes.people import import_chatlog
+    from saiverse_memory.adapter import EMBEDDING_DEFERRED
 
     conversation = SimpleNamespace(
         identifier="conv1",
@@ -547,34 +508,27 @@ def test_extension_import_embeds_after_import_in_background(tmp_path, skip_embed
                 thread.join(timeout=10)
 
         (adapter,) = _FakeImportAdapter.instances
-        # 取り込み中はどちらの選択でも埋め込まない
-        assert [p["embedding_chunks"] for p in adapter.payloads] == [0, 0]
         assert import_chatlog._extension_import_status["p"]["success"] is True
         assert adapter.closed == 1
         status = import_chatlog.get_extension_import_status("p", manager=None)
         if skip_embedding:
-            assert thread is None
-            assert adapter.backfill_calls == []
-            # skip の取り込みは消えない印を書かない
-            assert adapter.marks_begun == [] and adapter.marks_finished == 0
+            # skip は空の行も書かせない (取り込み中はどちらの選択でも埋め込まない)
+            assert [p["embedding_chunks"] for p in adapter.payloads] == [0, 0]
+            assert thread is None and adapter.reembed_calls == 0
             assert status.embedding_running is None
         else:
-            assert adapter.backfill_calls == [["m1", "m2"]]
-            # 印は「取り込み完了」の報告より前に書き、埋め込みはその報告の後に始まる
-            assert adapter.marks_begun == [2]
-            assert adapter.status_at_begin.get("running") is True
-            assert adapter.status_at_backfill.get("success") is True
-            assert adapter.status_at_backfill.get("running") is False
-            # 失敗ゼロで完走したので印を消す
-            assert adapter.marks_finished == 1
+            assert [p["embedding_chunks"] for p in adapter.payloads] == [EMBEDDING_DEFERRED] * 2
+            assert adapter.reembed_calls == 1
             assert status.embedding_running is False
             assert status.embedding_progress == 2 and status.embedding_total == 2
+            assert status.embedding_error is None
     finally:
         _reset_import_embedding_state()
 
 
 def test_official_import_embeds_after_import_in_background():
     from api.routes.people import import_chatlog
+    from saiverse_memory.adapter import EMBEDDING_DEFERRED
 
     record = SimpleNamespace(
         conversation_id="c1", identifier="c1", title="(untitled)",
@@ -594,11 +548,9 @@ def test_official_import_embeds_after_import_in_background():
             import_chatlog._import_embedding_threads["p"].join(timeout=10)
 
         (adapter,) = _FakeImportAdapter.instances
-        assert [p["embedding_chunks"] for p in adapter.payloads] == [0]
+        assert [p["embedding_chunks"] for p in adapter.payloads] == [EMBEDDING_DEFERRED]
         assert import_chatlog._official_import_status["p"]["success"] is True
-        assert adapter.backfill_calls == [["m1"]]
-        assert adapter.marks_begun == [1] and adapter.marks_finished == 1
-        assert adapter.closed == 1
+        assert adapter.reembed_calls == 1 and adapter.closed == 1
         assert "k" not in import_chatlog._chatgpt_export_cache
         status = import_chatlog.get_official_import_status("p", manager=None)
         assert status.embedding_running is False and status.embedding_progress == 1
@@ -620,7 +572,7 @@ def test_finish_reembed_finds_stale_row_in_the_middle(tmp_path):
             store_chronicle_embedding(conn, f"e{i:02d}", _vec(dim))
         # 標本 (両端 8 件ずつ) には入らない位置
         assert sample_stale_vector_tables(conn, EMBED_DIM) == []
-        outcome = finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID)
+        outcome = finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=None)
         assert outcome.stale_tables == ["arasuji_embeddings"]
         assert outcome.complete is False
     finally:
@@ -756,7 +708,7 @@ def test_rebuild_reports_skipped_rows(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# インポートと再計算のジョブ衛生
+# インポートの裏の埋め込み (状態は表示だけ。正しさは DB の空の行が持つ)
 # ---------------------------------------------------------------------------
 
 def _run_extension_import(tmp_path, skip_embedding):
@@ -774,29 +726,29 @@ def _run_extension_import(tmp_path, skip_embedding):
         import_chatlog._run_extension_import_task("p", str(src), skip_embedding)
 
 
-def test_skip_import_does_not_show_or_reset_another_jobs_numbers(tmp_path):
-    """skip の取り込みは埋め込みの列に関わらず、別の取り込みの数字も見せない・消さない。"""
+def test_skip_import_does_not_show_or_reset_the_embedding_status(tmp_path):
+    """skip の取り込みは裏の埋め込みを見せず、そのペルソナの状態も消さない。"""
     from api.routes.people import import_chatlog
 
     _FakeImportAdapter.instances = []
     _reset_import_embedding_state()
     earlier = {
         "embedding_running": False, "embedding_progress": 99, "embedding_total": 99,
-        "embedding_failed": 3, "embedding_error": "old",
+        "embedding_failed": 0, "embedding_error": "old",
     }
-    import_chatlog._import_embedding_jobs[7] = dict(earlier)
+    import_chatlog._import_embedding_status["p"] = dict(earlier)
     import_chatlog._official_import_status["p"] = {
-        "running": False, "success": True, "message": "x", "embedding_job": 7,
+        "running": False, "success": True, "message": "x", "embedding": True,
     }
     try:
         _run_extension_import(tmp_path, skip_embedding=True)
         status = import_chatlog.get_extension_import_status("p", manager=None)
         assert status.success is True
         assert status.embedding_progress is None and status.embedding_error is None
-        # 別の取り込み (公式) の状態は、その取り込みのジョブの結果のまま
+        # 埋め込みを裏へ回した取り込み (公式) は、そのペルソナの状態を見せる
         official = import_chatlog.get_official_import_status("p", manager=None)
         assert official.embedding_error == "old" and official.embedding_progress == 99
-        assert import_chatlog._import_embedding_jobs[7] == earlier
+        assert import_chatlog._import_embedding_status["p"] == earlier
     finally:
         _reset_import_embedding_state()
 
@@ -821,14 +773,14 @@ def test_import_does_not_wait_for_previous_embedding(tmp_path):
         mine = import_chatlog._import_embedding_threads["p"]
         assert mine is not previous and mine.is_alive()
         # 裏の埋め込みは前回の終了を待っていて、まだ始まっていない
-        assert adapter.backfill_calls == []
+        assert adapter.reembed_calls == 0
         status = import_chatlog.get_extension_import_status("p", manager=None)
         assert status.embedding_running is True
         assert status.embedding_progress == 0 and status.embedding_total == 1
 
         release.set()
         mine.join(timeout=10)
-        assert adapter.backfill_calls == [["m1"]]
+        assert adapter.reembed_calls == 1
         status = import_chatlog.get_extension_import_status("p", manager=None)
         assert status.embedding_running is False and status.embedding_progress == 1
     finally:
@@ -836,11 +788,8 @@ def test_import_does_not_wait_for_previous_embedding(tmp_path):
         _reset_import_embedding_state()
 
 
-def test_import_embedding_jobs_queue_per_persona_and_keep_their_own_status(tmp_path):
-    """二つの取り込みの埋め込みは一本の列で順に走り、状態はジョブごとに分かれる。
-
-    印を消すのは列の最後のジョブだけ (前のジョブの完走で、後ろに並んだ分の印を消さない)。
-    """
+def test_import_embeddings_of_one_persona_run_one_at_a_time(tmp_path):
+    """二つの取り込みの埋め込みは一本の列で順に走り、状態を書くのは最後のスレッドだけ。"""
     import threading
 
     from api.routes.people import import_chatlog
@@ -850,86 +799,102 @@ def test_import_embedding_jobs_queue_per_persona_and_keep_their_own_status(tmp_p
     gate = threading.Event()
 
     class _SlowAdapter(_FakeImportAdapter):
-        def backfill_missing_message_embeddings(self, *, progress_callback=None, message_ids=None):
-            if message_ids == ["a1"]:
-                gate.wait(10)
-            order.append(list(message_ids))
-            return {"total_missing": len(message_ids), "embedded": len(message_ids),
-                    "failed": 0, "changed": 0}
+        def __init__(self, name):
+            super().__init__("p")
+            self.name = name
 
-    first, second = _SlowAdapter("p"), _SlowAdapter("p")
+        def reembed_stale_messages(self, *, progress_callback=None):
+            if self.name == "first":
+                gate.wait(10)
+            order.append(self.name)
+            if progress_callback:
+                progress_callback(7, 7)
+            return {"embedded": 7, "dropped": 0, "changed": 0, "total": 7}
+
+    first, second = _SlowAdapter("first"), _SlowAdapter("second")
     try:
-        job1 = import_chatlog._reserve_import_embedding("p", first, 1)
-        assert import_chatlog._launch_import_embedding("p", job1, first, ["a1"]) is True
-        job2 = import_chatlog._reserve_import_embedding("p", second, 2)
-        assert import_chatlog._launch_import_embedding("p", job2, second, ["b1", "b2"]) is True
-        assert job2 != job1
+        assert import_chatlog._launch_import_embedding("p", first, 1) is True
+        assert import_chatlog._launch_import_embedding("p", second, 2) is True
         t2 = import_chatlog._import_embedding_threads["p"]
-        assert import_chatlog._import_embedding_jobs[job1]["embedding_running"] is True
-        assert import_chatlog._import_embedding_jobs[job2]["embedding_total"] == 2
+        assert import_chatlog._import_embedding_status["p"] == {
+            "embedding_running": True, "embedding_progress": 0, "embedding_total": 2,
+        }
 
         gate.set()
         t2.join(timeout=10)
-        assert order == [["a1"], ["b1", "b2"]]  # 同じペルソナでは二本同時に走らない
-        assert import_chatlog._import_embedding_jobs[job1]["embedding_progress"] == 1
-        assert import_chatlog._import_embedding_jobs[job2]["embedding_progress"] == 2
-        # 前のジョブは後ろが並んでいたので印を消さず、最後のジョブが消す
-        assert first.marks_finished == 0 and second.marks_finished == 1
+        assert order == ["first", "second"]  # 同じペルソナでは二本同時に走らない
+        assert first.closed == 1 and second.closed == 1
+        status = import_chatlog._import_embedding_status["p"]
+        assert status["embedding_running"] is False and status["embedding_progress"] == 7
     finally:
         gate.set()
         _reset_import_embedding_state()
 
 
-class _BackfillAdapter:
-    def __init__(self, *, result=None, error=None, embedder=object()):
+class _ReembedAdapter:
+    def __init__(self, *, result=None, error=None):
         self._result = result
         self._error = error
-        self.embedder = embedder
         self.closed = 0
-        self.marks_finished = 0
 
-    def backfill_missing_message_embeddings(self, *, progress_callback=None, message_ids=None):
+    def reembed_stale_messages(self, *, progress_callback=None):
         if self._error is not None:
             raise self._error
         return self._result
-
-    def finish_embedding_backfill(self):
-        self.marks_finished += 1
 
     def close(self):
         self.closed += 1
 
 
-@pytest.mark.parametrize("make_adapter, expected_failed, error_part", [
-    (lambda: _BackfillAdapter(error=RuntimeError("disk full\nsecond line")), 0,
+@pytest.mark.parametrize("make_adapter, error_part", [
+    (lambda: _ReembedAdapter(error=RuntimeError("disk full\nsecond line")),
      "RuntimeError: disk full"),
-    (lambda: _BackfillAdapter(result={"total_missing": 2, "embedded": 1, "failed": 1}), 1,
-     "1 message(s)"),
-    (lambda: _BackfillAdapter(result={"total_missing": 2, "embedded": 0, "failed": 0},
-                              embedder=None), 0, "not available"),
-    (lambda: _BackfillAdapter(result={"total_missing": 2, "embedded": 2, "failed": 0}), 0, None),
+    (lambda: _ReembedAdapter(error=RuntimeError("Embedding model is not available; 2 ...")),
+     "not available"),
+    (lambda: _ReembedAdapter(result={"embedded": 1, "dropped": 0, "changed": 1, "total": 2}),
+     "1 message(s) were edited"),
+    (lambda: _ReembedAdapter(result={"embedded": 2, "dropped": 0, "changed": 0, "total": 2}),
+     None),
 ])
-def test_import_embedding_keeps_failures_in_status(make_adapter, expected_failed, error_part):
+def test_import_embedding_keeps_failures_in_status(make_adapter, error_part):
+    import threading
+
     from api.routes.people import import_chatlog
 
     _reset_import_embedding_state()
     adapter = make_adapter()
     try:
-        import_chatlog._import_embedding_latest["p"] = 1
-        import_chatlog._embed_imported_messages("p", 1, adapter, ["m1", "m2"])
-        status = import_chatlog._import_embedding_jobs[1]
+        import_chatlog._import_embedding_threads["p"] = threading.current_thread()
+        import_chatlog._embed_imported_messages("p", adapter)
+        status = import_chatlog._import_embedding_status["p"]
         assert status["embedding_running"] is False
-        assert status["embedding_total"] == 2
-        assert status["embedding_failed"] == expected_failed
         if error_part is None:
             assert "embedding_error" not in status
-            assert adapter.marks_finished == 1  # 失敗ゼロで完走 → 印を消す
+            assert status["embedding_progress"] == 2 and status["embedding_total"] == 2
         else:
             assert error_part in status["embedding_error"]
             assert "\n" not in status["embedding_error"]
-            assert adapter.marks_finished == 0  # 失敗が残れば印も残す
-            assert import_chatlog._import_embedding_dirty["p"] is True
         assert adapter.closed == 1
+    finally:
+        _reset_import_embedding_state()
+
+
+def test_import_embedding_shows_error_when_listing_targets_fails(tmp_path):
+    """古いベクトルの一覧づくりが失敗したら、綺麗に完了したことにせず状態に出す。"""
+    import threading
+
+    from api.routes.people import import_chatlog
+
+    _reset_import_embedding_state()
+    adapter = _real_adapter(tmp_path)
+    try:
+        import_chatlog._import_embedding_threads["p"] = threading.current_thread()
+        with patch("sai_memory.embedding_migration.message_reembed_targets",
+                   side_effect=sqlite3.OperationalError("database disk image is malformed")):
+            import_chatlog._embed_imported_messages("p", adapter)
+        status = import_chatlog._import_embedding_status["p"]
+        assert status["embedding_running"] is False
+        assert "malformed" in status["embedding_error"]
     finally:
         _reset_import_embedding_state()
 
@@ -1181,7 +1146,7 @@ def test_unfinished_mark_flags_even_when_every_vector_is_gone(tmp_path):
     try:
         set_embed_metadata(conn, "embed_model", "intfloat/multilingual-e5-small")
         set_embed_metadata(conn, "sluice_pan_marker", "keep-me")
-        begin_reembed(conn, EMBED_MODEL_ID)
+        token = begin_reembed(conn, EMBED_MODEL_ID)
         assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY).startswith(EMBED_MODEL_ID)
 
         assert _check(conn) is True
@@ -1189,7 +1154,7 @@ def test_unfinished_mark_flags_even_when_every_vector_is_gone(tmp_path):
         assert get_embed_metadata(conn, "embed_model") == "intfloat/multilingual-e5-small"
 
         # ジョブが最後まで走れば印は消え、旗も立たない
-        assert finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID).complete is True
+        assert finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=token).complete is True
         assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
         assert get_embed_metadata(conn, "sluice_pan_marker") == "keep-me"
         assert _check(conn) is False
@@ -1218,8 +1183,8 @@ def test_finish_reembed_keeps_label_and_mark_when_stale_rows_remain(tmp_path):
     try:
         set_embed_metadata(conn, "embed_model", "intfloat/multilingual-e5-small")
         store_chronicle_embedding(conn, "e1", _vec(OLD_DIM))
-        begin_reembed(conn, EMBED_MODEL_ID)
-        outcome = finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID)
+        token = begin_reembed(conn, EMBED_MODEL_ID)
+        outcome = finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=token)
         assert outcome.complete is False
         assert outcome.stale_tables == ["arasuji_embeddings"]
         assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is not None
@@ -1228,32 +1193,69 @@ def test_finish_reembed_keeps_label_and_mark_when_stale_rows_remain(tmp_path):
         conn.close()
 
 
-@pytest.mark.parametrize("left", ["pending", "skipped"])
-def test_finish_reembed_incomplete_when_rows_wait_or_were_skipped(tmp_path, left):
-    """ベクトル待ちの行 / 編集で飛ばした行が残れば、名札も印も動かさない。"""
+def test_finish_reembed_completes_with_rows_waiting_for_a_vector(tmp_path):
+    """ベクトルの無い Chronicle 等の行は完了を妨げない (次の Metabolism が埋める)。"""
     from sai_memory.embedding_migration import begin_reembed, finish_reembed
 
     conn = _open(tmp_path / "memory.db")
     try:
         _seed(conn, EMBED_DIM)
         set_embed_metadata(conn, "embed_model", "old-label")
-        begin_reembed(conn, EMBED_MODEL_ID)
-        skipped = 0
-        if left == "pending":
-            conn.execute("DELETE FROM arasuji_embeddings")  # Chronicle Lv1 がベクトル待ち
-            conn.commit()
-        else:
-            skipped = 1
-        outcome = finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, skipped=skipped)
+        token = begin_reembed(conn, EMBED_MODEL_ID)
+        conn.execute("DELETE FROM arasuji_embeddings")  # Chronicle Lv1 がベクトル待ち
+        conn.commit()
+        outcome = finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=token)
+        assert outcome.complete is True
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
+        assert get_embed_metadata(conn, "embed_model") == EMBED_MODEL_ID
+    finally:
+        conn.close()
+
+
+def test_finish_reembed_incomplete_when_a_message_kept_its_old_vector(tmp_path):
+    """編集で古いベクトルのまま残ったメッセージがあれば、名札も印も動かさない。"""
+    from sai_memory.embedding_migration import begin_reembed, finish_reembed
+
+    conn = _open(tmp_path / "memory.db")
+    try:
+        _seed(conn, EMBED_DIM)
+        set_embed_metadata(conn, "embed_model", "old-label")
+        token = begin_reembed(conn, EMBED_MODEL_ID)
+        outcome = finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=token, skipped=1)
         assert outcome.complete is False
-        if left == "pending":
-            assert outcome.pending == {"chronicle": 1}
-            assert "chronicle 1" in outcome.describe()
-        else:
-            assert outcome.skipped == 1 and "Skipped 1" in outcome.describe()
+        assert outcome.skipped == 1 and "Skipped 1" in outcome.describe()
         assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is not None
         assert get_embed_metadata(conn, "embed_model") == "old-label"
         assert _check(conn) is True
+    finally:
+        conn.close()
+
+
+def test_finish_reembed_does_not_remove_another_jobs_mark(tmp_path):
+    """並走した二つの再計算: 先に終わった方は、後から始まった方の印を消さない。"""
+    from sai_memory.embedding_migration import begin_reembed, finish_reembed
+
+    conn = _open(tmp_path / "memory.db")
+    try:
+        _seed(conn, EMBED_DIM)
+        set_embed_metadata(conn, "embed_model", "old-label")
+        first = begin_reembed(conn, EMBED_MODEL_ID)
+        second = begin_reembed(conn, EMBED_MODEL_ID)  # 別のプロセス (CLI) が始めた
+        assert first != second
+
+        outcome = finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=first)
+        assert outcome.complete is False and outcome.other_job is True
+        assert "Another re-embed" in outcome.describe()
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY).endswith(second)
+        assert get_embed_metadata(conn, "embed_model") == "old-label"
+        assert conn.in_transaction is False
+
+        # 後の方は自分の印を消して確定する
+        assert finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=second).complete is True
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
+        assert get_embed_metadata(conn, "embed_model") == EMBED_MODEL_ID
+        # 印がもう無ければ、遅れて終わった方も閉じたものとして扱う
+        assert finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=first).complete is True
     finally:
         conn.close()
 
@@ -1265,7 +1267,7 @@ def test_finish_reembed_commits_label_and_mark_in_one_transaction(tmp_path):
     conn = _open(tmp_path / "memory.db")
     try:
         set_embed_metadata(conn, "embed_model", "old-label")
-        begin_reembed(conn, EMBED_MODEL_ID)
+        token = begin_reembed(conn, EMBED_MODEL_ID)
         conn.execute(
             f"""
             CREATE TRIGGER refuse_mark_delete BEFORE DELETE ON embed_metadata
@@ -1275,14 +1277,14 @@ def test_finish_reembed_commits_label_and_mark_in_one_transaction(tmp_path):
         )
         conn.commit()
         with pytest.raises(sqlite3.IntegrityError):
-            finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID)
+            finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=token)
         assert conn.in_transaction is False
         assert get_embed_metadata(conn, "embed_model") == "old-label"
         assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is not None
 
         conn.execute("DROP TRIGGER refuse_mark_delete")
         conn.commit()
-        assert finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID).complete is True
+        assert finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID, token=token).complete is True
         assert get_embed_metadata(conn, "embed_model") == EMBED_MODEL_ID
         assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
     finally:
@@ -1290,13 +1292,14 @@ def test_finish_reembed_commits_label_and_mark_in_one_transaction(tmp_path):
 
 
 class _EditOnceEmbedder(FakeEmbedder):
-    """API のジョブが作る Embedder の代役。最初の embed の最中に別の接続で編集する。"""
+    """API のジョブが作る Embedder の代役。trigger を含む本文の embed の最中に別の接続で編集する。"""
 
-    edit = None  # (db_path, sql, params) を入れると 1 回だけ実行する
+    edit = None  # (db_path, sql, params, trigger) を入れると 1 回だけ実行する
 
     def embed(self, texts, *, is_query=False):
-        if _EditOnceEmbedder.edit is not None:
-            (db_path, sql, params), _EditOnceEmbedder.edit = _EditOnceEmbedder.edit, None
+        pending = _EditOnceEmbedder.edit
+        if pending is not None and any(pending[3] in t for t in texts):
+            (db_path, sql, params, _), _EditOnceEmbedder.edit = pending, None
             other = sqlite3.connect(str(db_path))
             try:
                 other.execute(sql, params)
@@ -1307,20 +1310,24 @@ class _EditOnceEmbedder(FakeEmbedder):
 
 
 def test_api_job_with_skipped_row_stays_incomplete_then_converges(tmp_path):
-    """編集で飛ばした行があると名札・印は動かず警告も残る。再実行は全再計算に昇格して収束する。"""
+    """編集で古いベクトルのまま残ったメッセージがあると名札・印は動かず警告も残る。
+
+    再実行は全再計算に昇格して収束する。
+    """
     from api.routes.people import reembed
 
     db_path = tmp_path / "memory.db"
     conn = _open(db_path)
     try:
-        _seed(conn, OLD_DIM)
+        ids = _seed(conn, OLD_DIM)
         set_embed_metadata(conn, "embed_model", "intfloat/multilingual-e5-small")
     finally:
         conn.close()
     mgr = _manager_with_warning(["p"])
 
     _EditOnceEmbedder.edit = (
-        db_path, "UPDATE memopedia_pages SET content = ? WHERE id = ?", ("書き換えた", "chr1"),
+        db_path, "UPDATE messages SET content = ? WHERE id = ?",
+        ("書き換えた", ids["messages"][0]), "猫ロボットの話をしよう",
     )
     try:
         with patch.object(reembed, "get_persona_memory_db", lambda _pid: db_path), \
@@ -1605,7 +1612,7 @@ def test_backfill_recheck_runs_inside_the_write_lock_and_skips_edits(tmp_path):
     try:
         create_entry(adapter.conn, level=1, content="あらすじ", source_ids=[], start_time=1,
                      end_time=2, source_count=1, message_count=1, entry_id="chr1")
-        mid = adapter.append_persona_message(
+        adapter.append_persona_message(
             {"role": "user", "content": "取り込んだ本文", "embedding_chunks": 0})
         from sai_memory.memory import storage
 
@@ -1618,7 +1625,7 @@ def test_backfill_recheck_runs_inside_the_write_lock_and_skips_edits(tmp_path):
             return real(c, message_id)
 
         with patch.object(storage, "get_message", _probe):
-            result = adapter.backfill_missing_message_embeddings(message_ids=[mid])
+            result = adapter.backfill_missing_message_embeddings()
         assert result["embedded"] == 1 and result["changed"] == 0
         assert len(seen) == 1 and "locked" in seen[0]
 
@@ -1634,7 +1641,7 @@ def test_backfill_recheck_runs_inside_the_write_lock_and_skips_edits(tmp_path):
                 return super().embed(texts, is_query=is_query)
 
         adapter.embedder = _Editing()
-        result = adapter.backfill_missing_message_embeddings(message_ids=[mid2])
+        result = adapter.backfill_missing_message_embeddings()
         assert result["changed"] == 1 and result["embedded"] == 0
         assert adapter.conn.execute(
             "SELECT COUNT(*) FROM message_embeddings WHERE message_id = ?", (mid2,)
@@ -1644,37 +1651,51 @@ def test_backfill_recheck_runs_inside_the_write_lock_and_skips_edits(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# インポートの背景埋め込みの消えない印
+# インポートの後回しの埋め込み: 空のベクトル行
 # ---------------------------------------------------------------------------
 
-def test_backfill_mark_begin_extends_and_finish_removes(tmp_path):
-    from sai_memory.embedding_migration import (
-        BACKFILL_PENDING_KEY,
-        backfill_pending,
-        begin_backfill,
-        finish_backfill,
-    )
+def _vector_rows(conn, message_id):
+    return [v for (v,) in conn.execute(
+        "SELECT vector FROM message_embeddings WHERE message_id = ?", (message_id,))]
 
-    conn = _open(tmp_path / "memory.db")
+
+def test_deferred_append_writes_an_empty_row_and_skip_writes_nothing(tmp_path):
+    from sai_memory.memory.storage import DEFERRED_VECTOR
+    from saiverse_memory.adapter import EMBEDDING_DEFERRED
+
+    adapter = _real_adapter(tmp_path)
     try:
-        set_embed_metadata(conn, "sluice_pan_marker", "keep-me")
-        assert backfill_pending(conn) is None
-        assert begin_backfill(conn, 3) is True
-        first = backfill_pending(conn)
-        since, count = first.rsplit(" ", 1)
-        assert count == "3"
-        # 既にある印には件数を足し、時刻は古いまま (最も古い未完の仕事を指す)
-        assert begin_backfill(conn, 2) is False
-        assert backfill_pending(conn) == f"{since} 5"
-        assert conn.in_transaction is False
-
-        assert _check(conn) is True  # 残っている印は起動時の旗になる
-        finish_backfill(conn)
-        assert get_embed_metadata(conn, BACKFILL_PENDING_KEY) is None
-        assert get_embed_metadata(conn, "sluice_pan_marker") == "keep-me"
-        assert _check(conn) is False
+        deferred = adapter.append_persona_message(
+            {"role": "user", "content": "あとで埋める本文", "embedding_chunks": EMBEDDING_DEFERRED})
+        skipped = adapter.append_persona_message(
+            {"role": "user", "content": "埋めない本文", "embedding_chunks": 0})
+        blank = adapter.append_persona_message(
+            {"role": "user", "content": "   ", "embedding_chunks": EMBEDDING_DEFERRED})
+        normal = adapter.append_persona_message({"role": "user", "content": "その場で埋める本文"})
+        assert _vector_rows(adapter.conn, deferred) == [DEFERRED_VECTOR]
+        assert _vector_rows(adapter.conn, skipped) == []
+        assert _vector_rows(adapter.conn, blank) == []  # 本文の無い行は埋め込みの対象外
+        assert [len(json.loads(v)) for v in _vector_rows(adapter.conn, normal)] == [EMBED_DIM]
+        assert adapter.conn.in_transaction is False
     finally:
-        conn.close()
+        adapter.close()
+
+
+def test_deferred_append_stores_message_and_empty_row_as_one_write(tmp_path):
+    """空の行が書けなければメッセージも入らない (後で誰も埋めない行を作らない)。"""
+    from saiverse_memory.adapter import EMBEDDING_DEFERRED
+
+    adapter = _real_adapter(tmp_path)
+    try:
+        with patch("saiverse_memory.adapter.write_deferred_message_embedding",
+                   side_effect=sqlite3.OperationalError("disk I/O error")):
+            mid = adapter.append_persona_message(
+                {"role": "user", "content": "取り込む本文", "embedding_chunks": EMBEDDING_DEFERRED})
+        assert mid is None
+        assert adapter.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+        assert adapter.conn.in_transaction is False
+    finally:
+        adapter.close()
 
 
 class _FailingEmbedder(FakeEmbedder):
@@ -1682,28 +1703,54 @@ class _FailingEmbedder(FakeEmbedder):
         raise RuntimeError("embedding failed")
 
 
-def _run_real_extension_import(tmp_path, *, skip_embedding, embedder_cls=FakeEmbedder):
+_IMPORT_PAYLOADS = (
+    {"role": "user", "content": "耳はどうする？"},
+    {"role": "assistant", "content": "三角にしよう"},
+    {"role": "user", "content": "しっぽは？"},
+)
+
+
+def _run_real_extension_import(tmp_path, *, skip_embedding, embedder_cls=FakeEmbedder,
+                               fail_on_append=None, launch=True):
     from api.routes.people import import_chatlog
     from saiverse_memory.adapter import SAIMemoryAdapter
 
     conversation = SimpleNamespace(
         identifier="conv1", title="猫ロボットの相談",
-        iter_memory_payloads=lambda: iter([
-            {"role": "user", "content": "耳はどうする？"},
-            {"role": "assistant", "content": "三角にしよう"},
-        ]),
+        iter_memory_payloads=lambda: iter([dict(p) for p in _IMPORT_PAYLOADS]),
     )
     src = tmp_path / "export.json"
     src.write_text("{}", encoding="utf-8")
     settings = replace(load_settings(), memory_enabled=True)
 
     def _adapter(pid, **kwargs):
-        return SAIMemoryAdapter(pid, persona_dir=tmp_path, settings=settings)
+        adapter = SAIMemoryAdapter(pid, persona_dir=tmp_path, settings=settings)
+        if fail_on_append is not None:
+            real_append = adapter.append_persona_message
+            calls = {"n": 0}
 
-    with patch("tools.utilities.chatlog_exporter_importer.parse_exporter_file",
-               lambda _p: conversation), \
-            patch("saiverse_memory.SAIMemoryAdapter", _adapter), \
-            patch("saiverse_memory.adapter.Embedder", embedder_cls):
+            def _append(payload, thread_suffix=None):
+                calls["n"] += 1
+                if calls["n"] == fail_on_append:
+                    raise RuntimeError("import interrupted")
+                return real_append(payload, thread_suffix=thread_suffix)
+
+            adapter.append_persona_message = _append
+        return adapter
+
+    patches = [
+        patch("tools.utilities.chatlog_exporter_importer.parse_exporter_file",
+              lambda _p: conversation),
+        patch("saiverse_memory.SAIMemoryAdapter", _adapter),
+        patch("saiverse_memory.adapter.Embedder", embedder_cls),
+    ]
+    if not launch:
+        # 裏の埋め込みが走らないまま終わる (プロセスが死んだ状態の再現)
+        patches.append(patch.object(import_chatlog, "_launch_import_embedding",
+                                    lambda *a, **k: False))
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
         import_chatlog._run_extension_import_task("p", str(src), skip_embedding)
         thread = import_chatlog._import_embedding_threads.get("p")
         if thread is not None:
@@ -1711,59 +1758,152 @@ def _run_real_extension_import(tmp_path, *, skip_embedding, embedder_cls=FakeEmb
     return import_chatlog.get_extension_import_status("p", manager=None)
 
 
-@pytest.mark.parametrize("case", ["success", "failure", "skip"])
-def test_import_backfill_mark_lifecycle_with_real_adapter(tmp_path, case):
-    from sai_memory.embedding_migration import backfill_pending
+def _deferred_count(db_path):
+    from sai_memory.memory.storage import count_deferred_message_embeddings
 
+    conn = _open(db_path)
+    try:
+        return count_deferred_message_embeddings(conn)
+    finally:
+        conn.close()
+
+
+def _flag_on_open(tmp_path) -> bool:
+    adapter = _real_adapter(tmp_path)
+    try:
+        return adapter.embed_model_changed
+    finally:
+        adapter.close()
+
+
+def test_background_embedding_fills_the_empty_rows(tmp_path):
     _reset_import_embedding_state()
     try:
-        status = _run_real_extension_import(
-            tmp_path, skip_embedding=(case == "skip"),
-            embedder_cls=_FailingEmbedder if case == "failure" else FakeEmbedder,
-        )
-        assert status.success is True
-        conn = _open(tmp_path / "memory.db")
+        status = _run_real_extension_import(tmp_path, skip_embedding=False)
+        assert status.success is True and status.embedding_error is None
+        assert status.embedding_progress == 3
+        db_path = tmp_path / "memory.db"
+        assert _deferred_count(db_path) == 0
+        conn = _open(db_path)
         try:
-            embedded = conn.execute(
-                "SELECT COUNT(DISTINCT message_id) FROM message_embeddings").fetchone()[0]
-            if case == "success":
-                assert embedded == 2
-                assert backfill_pending(conn) is None
-                assert status.embedding_error is None
-            elif case == "failure":
-                assert embedded == 0
-                assert backfill_pending(conn) is not None  # 失敗が残れば印も残る
-                assert "2 message(s)" in status.embedding_error
-            else:
-                assert embedded == 0
-                assert backfill_pending(conn) is None  # skip は印を書かない
+            assert _dims(conn, "message_embeddings") == {EMBED_DIM}
+            assert conn.execute(
+                "SELECT COUNT(DISTINCT message_id) FROM message_embeddings").fetchone()[0] == 3
         finally:
             conn.close()
-
-        if case == "failure":
-            # 次の起動で adapter の検査が旗を立てる
-            adapter = _real_adapter(tmp_path)
-            try:
-                assert adapter.embed_model_changed is True
-            finally:
-                adapter.close()
+        assert _flag_on_open(tmp_path) is False
     finally:
         _reset_import_embedding_state()
 
 
-def test_api_reembed_fills_imported_messages_and_removes_backfill_mark(tmp_path):
-    """残った印からの回復: バナーの再計算がベクトルの無いメッセージを埋め、印を消す。"""
+def test_skip_import_leaves_no_rows_and_no_flag(tmp_path):
+    _reset_import_embedding_state()
+    try:
+        status = _run_real_extension_import(tmp_path, skip_embedding=True)
+        assert status.success is True and status.embedding_running is None
+        conn = _open(tmp_path / "memory.db")
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM message_embeddings").fetchone()[0] == 0
+        finally:
+            conn.close()
+        assert _flag_on_open(tmp_path) is False
+    finally:
+        _reset_import_embedding_state()
+
+
+def test_failed_background_embedding_leaves_rows_that_flag_at_startup(tmp_path):
+    _reset_import_embedding_state()
+    try:
+        status = _run_real_extension_import(
+            tmp_path, skip_embedding=False, embedder_cls=_FailingEmbedder,
+        )
+        assert status.success is True
+        assert "embedding failed" in status.embedding_error
+        assert _deferred_count(tmp_path / "memory.db") == 3
+        assert _flag_on_open(tmp_path) is True
+    finally:
+        _reset_import_embedding_state()
+
+
+def test_import_interrupted_midway_keeps_an_empty_row_per_saved_message(tmp_path):
+    _reset_import_embedding_state()
+    try:
+        status = _run_real_extension_import(tmp_path, skip_embedding=False, fail_on_append=3)
+        assert status.success is False
+        conn = _open(tmp_path / "memory.db")
+        try:
+            saved = [r[0] for r in conn.execute("SELECT id FROM messages")]
+            assert len(saved) == 2
+            for mid in saved:
+                assert _vector_rows(conn, mid) == ["[]"]
+        finally:
+            conn.close()
+        assert _flag_on_open(tmp_path) is True
+    finally:
+        _reset_import_embedding_state()
+
+
+def test_empty_rows_in_the_middle_still_flag_at_startup(tmp_path):
+    """裏が走らずに終わり、空の行が表の真ん中に埋もれても起動時の検査は旗を立てる。"""
+    from sai_memory.embedding_migration import sample_stale_vector_tables
+
+    _reset_import_embedding_state()
+    try:
+        adapter = _real_adapter(tmp_path)
+        try:
+            for i in range(10):
+                adapter.append_persona_message({"role": "user", "content": f"前の会話 {i}"})
+        finally:
+            adapter.close()
+        status = _run_real_extension_import(tmp_path, skip_embedding=False, launch=False)
+        assert status.success is True
+        adapter = _real_adapter(tmp_path)
+        try:
+            for i in range(10):
+                adapter.append_persona_message({"role": "user", "content": f"後の会話 {i}"})
+        finally:
+            adapter.close()
+
+        conn = _open(tmp_path / "memory.db")
+        try:
+            assert sample_stale_vector_tables(conn, EMBED_DIM) == []  # 標本では見えない位置
+        finally:
+            conn.close()
+        assert _deferred_count(tmp_path / "memory.db") == 3
+        assert _flag_on_open(tmp_path) is True
+    finally:
+        _reset_import_embedding_state()
+
+
+def test_reembed_without_include_missing_fills_empty_rows(tmp_path):
+    from sai_memory.embedding_migration import message_reembed_targets, reembed_messages
+    from sai_memory.memory.storage import write_deferred_message_embedding
+
+    conn = _open(tmp_path / "memory.db")
+    try:
+        ids = _seed(conn, EMBED_DIM)
+        m1 = ids["messages"][0]
+        write_deferred_message_embedding(conn, m1)
+        assert message_reembed_targets(
+            conn, EMBED_DIM, force=False, include_missing=False) == {m1}
+        result = reembed_messages(conn, FakeEmbedder(), [m1], chunk_min=120, chunk_max=480)
+        assert result["embedded"] == 1
+        assert [len(json.loads(v)) for v in _vector_rows(conn, m1)] == [EMBED_DIM]
+    finally:
+        conn.close()
+
+
+def test_api_reembed_fills_empty_rows_and_lifts_the_warning(tmp_path):
+    """裏が終わらなかった取り込みからの回復: バナーの再計算が空の行を埋める。"""
     from api.routes.people import reembed
-    from sai_memory.embedding_migration import backfill_pending, begin_backfill
+    from sai_memory.memory.storage import write_deferred_message_embedding
 
     db_path = tmp_path / "memory.db"
     conn = _open(db_path)
     try:
         ids = _seed(conn, EMBED_DIM)
         set_embed_metadata(conn, "embed_model", EMBED_MODEL_ID)
-        conn.execute("DELETE FROM message_embeddings WHERE message_id = ?", (ids["messages"][0],))
-        conn.commit()
-        begin_backfill(conn, 1)
+        write_deferred_message_embedding(conn, ids["messages"][0])
         assert _check(conn) is True
     finally:
         conn.close()
@@ -1772,12 +1912,10 @@ def test_api_reembed_fills_imported_messages_and_removes_backfill_mark(tmp_path)
     status = _run_api_job(db_path, force=False, manager=mgr)
 
     assert status["progress"] == 1 and status["total"] == 1
+    assert _deferred_count(db_path) == 0
     conn = _open(db_path)
     try:
-        assert backfill_pending(conn) is None
-        assert conn.execute(
-            "SELECT COUNT(*) FROM message_embeddings WHERE message_id = ?", (ids["messages"][0],)
-        ).fetchone()[0] == 1
+        assert _dims(conn, "message_embeddings") == {EMBED_DIM}
         assert _check(conn) is False
     finally:
         conn.close()
@@ -1785,25 +1923,42 @@ def test_api_reembed_fills_imported_messages_and_removes_backfill_mark(tmp_path)
     reembed._reembed_status.pop("p", None)
 
 
-def test_finish_reembed_keeps_backfill_mark_that_changed_during_the_job(tmp_path):
-    from sai_memory.embedding_migration import backfill_pending, begin_backfill, finish_reembed
+def test_semantic_recall_skips_empty_rows_without_a_warning(tmp_path, caplog):
+    import logging
+
+    from sai_memory.memory.recall import semantic_recall, semantic_recall_groups
+    from sai_memory.memory.storage import write_deferred_message_embedding
 
     conn = _open(tmp_path / "memory.db")
     try:
-        begin_backfill(conn, 1)
-        seen_at_start = backfill_pending(conn)
-        begin_backfill(conn, 4)  # ジョブの途中で別の取り込みが仕事を足した
-        assert finish_reembed(
-            conn, FakeEmbedder(), EMBED_MODEL_ID, backfill_mark=seen_at_start,
-        ).complete is True
-        assert backfill_pending(conn) is not None
-        # 値が変わっていなければ消す
-        assert finish_reembed(
-            conn, FakeEmbedder(), EMBED_MODEL_ID, backfill_mark=backfill_pending(conn),
-        ).complete is True
-        assert backfill_pending(conn) is None
+        ids = _seed(conn, EMBED_DIM)
+        m1, m2 = ids["messages"]
+        write_deferred_message_embedding(conn, m1)  # 埋め込み待ち
+        replace_message_embeddings(conn, m2, [_vec(OLD_DIM)])  # 古いモデルの行
+        kwargs = dict(thread_id="p:__persona__", resource_id=None, topk=5,
+                      range_before=0, range_after=0, scope="thread")
+        for fn in (semantic_recall, semantic_recall_groups):
+            caplog.clear()
+            with caplog.at_level(logging.DEBUG):
+                fn(conn, FakeEmbedder(), "猫", **kwargs)
+            warned = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+            assert len(warned) == 1 and m2 in warned[0]  # 古い行だけ警告する
+            assert any("1 message(s) still waiting" in r.getMessage()
+                       for r in caplog.records if r.levelno == logging.DEBUG)
     finally:
         conn.close()
+
+
+def test_backfill_reports_a_failed_listing_instead_of_nothing_missing(tmp_path):
+    adapter = _real_adapter(tmp_path)
+    try:
+        with patch("sai_memory.memory.storage.get_messages_without_embeddings",
+                   side_effect=sqlite3.OperationalError("database disk image is malformed")):
+            result = adapter.backfill_missing_message_embeddings()
+        assert result["aborted"] is True
+        assert "malformed" in result["error"]
+    finally:
+        adapter.close()
 
 
 # ---------------------------------------------------------------------------

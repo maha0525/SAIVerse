@@ -225,10 +225,16 @@ def semantic_recall(
         corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags, exclude_tags=exclude_tags)
 
     scored_map: dict[str, Tuple[Message, float, int]] = {}
+    deferred = 0
     for msg, vec, chunk_index in corpus:
         if exclude_message_ids and msg.id in exclude_message_ids:
             continue
         if len(vec) != vector_dim:
+            if not vec:
+                # The empty row of a deferred embedding (an import still being
+                # embedded): expected for a while, so no warning per row.
+                deferred += 1
+                continue
             logging.warning(
                 "semantic_recall: skipping message %s due to embedding dim mismatch (expected %s, got %s)",
                 msg.id,
@@ -241,6 +247,8 @@ def semantic_recall(
         current = scored_map.get(msg.id)
         if current is None or s > current[1]:
             scored_map[msg.id] = (msg, s, chunk_index)
+    if deferred:
+        LOGGER.debug("semantic_recall: skipped %d message(s) still waiting for their embeddings", deferred)
 
     scored = list(scored_map.values())
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -303,10 +311,16 @@ def semantic_recall_groups(
         corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags, exclude_tags=exclude_tags)
 
     scored_map: dict[str, Tuple[Message, float, int]] = {}
+    deferred = 0
     for msg, vec, chunk_index in corpus:
         if exclude_message_ids and msg.id in exclude_message_ids:
             continue
         if len(vec) != vector_dim:
+            if not vec:
+                # The empty row of a deferred embedding (an import still being
+                # embedded): expected for a while, so no warning per row.
+                deferred += 1
+                continue
             logging.warning(
                 "semantic_recall_groups: skipping message %s due to embedding dim mismatch (expected %s, got %s)",
                 msg.id,
@@ -319,6 +333,8 @@ def semantic_recall_groups(
         current = scored_map.get(msg.id)
         if current is None or s > current[1]:
             scored_map[msg.id] = (msg, s, chunk_index)
+    if deferred:
+        LOGGER.debug("semantic_recall_groups: skipped %d message(s) still waiting for their embeddings", deferred)
 
     scored = list(scored_map.values())
     scored.sort(key=lambda x: x[1], reverse=True)

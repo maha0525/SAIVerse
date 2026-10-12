@@ -335,7 +335,12 @@ def migrate_persona(
     else:
         LOGGER.info("Verifying embeddings for %s (backfilling any gaps)...", persona_id)
         backfill_result = adapter.backfill_missing_message_embeddings()
-        if backfill_result["total_missing"] == 0:
+        if backfill_result.get("aborted"):
+            LOGGER.warning(
+                "Persona %s: embedding backfill could not run: %s",
+                persona_id, backfill_result.get("error"),
+            )
+        elif backfill_result["total_missing"] == 0:
             LOGGER.info("Persona %s: all messages already embedded at write time.", persona_id)
         else:
             LOGGER.info(

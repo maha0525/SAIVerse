@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 from sai_memory.config import Settings, load_settings
+from sai_memory.db_locks import immediate_transaction
 from sai_memory.memory.chunking import chunk_text
 from sai_memory.memory.recall import (
     Embedder,
@@ -30,6 +32,7 @@ from sai_memory.memory.storage import (
     init_db,
     compose_message_content,
     replace_message_embeddings,
+    write_deferred_message_embedding,
     get_messages_with_persona_in_audience,
     # Stelis thread management
     StelisThread,
@@ -66,6 +69,13 @@ from sai_memory.memory.storage import (
 from sai_memory.backup import BackupError, run_backup_auto
 
 LOGGER = logging.getLogger(__name__)
+
+#: ``message["embedding_chunks"]`` value asking ``_append_message`` to defer
+#: the embedding: the message is stored with an empty vector row
+#: (``sai_memory.memory.storage.DEFERRED_VECTOR``) in the same transaction,
+#: and the stale-vector machinery fills it in later. ``0`` still means "no
+#: embedding at all"; any other value embeds on the spot.
+EMBEDDING_DEFERRED = "deferred"
 
 
 def _auto_backup_enabled() -> bool:
@@ -332,29 +342,36 @@ class SAIMemoryAdapter:
         even when no vector is left — such a memory.db must not pass for a
         fresh one — and the model label is not touched.
 
-        Also flagged: the mark of a chat-log import whose background
-        embedding has not finished (``embed_metadata.embed_backfill_pending``,
-        written by ``begin_backfill``). The re-embed the banner starts fills
-        messages without a vector and then removes that mark.
+        Also flagged: messages still holding the empty vector row of a
+        deferred embedding (``storage.DEFERRED_VECTOR``, written by a
+        chat-log import). Such a row is a stale vector like any other, but
+        once part of an import has been embedded the empty rows sit in the
+        middle of the table, out of reach of the sample, so they are counted
+        exactly (a partial index keeps that cheap). The re-embed the banner
+        starts fills them in. A background embedding still running at this
+        moment also raises the flag; running the re-embed then is only
+        redundant work.
         """
         from sai_memory.config import EMBED_DIM
         from sai_memory.embedding_migration import (
-            backfill_pending,
             has_any_vectors,
             reembed_in_progress,
             sample_stale_vector_tables,
         )
-        from sai_memory.memory.storage import get_embed_metadata, set_embed_metadata
+        from sai_memory.memory.storage import (
+            count_deferred_message_embeddings,
+            get_embed_metadata,
+            set_embed_metadata,
+        )
 
-        pending_import = backfill_pending(self.conn)
-        if pending_import is not None:
+        deferred = count_deferred_message_embeddings(self.conn)
+        if deferred:
             self.embed_model_changed = True
             LOGGER.warning(
-                "Persona %s: embedding the memories of a chat-log import did not "
-                "finish (pending: %s); those memories are not searchable yet. "
-                "Reembed recommended.",
+                "Persona %s: %d imported message(s) still wait for their embeddings; "
+                "those memories are not searchable yet. Reembed recommended.",
                 self.persona_id,
-                pending_import,
+                deferred,
             )
 
         unfinished = reembed_in_progress(self.conn)
@@ -2033,19 +2050,15 @@ class SAIMemoryAdapter:
         self,
         *,
         progress_callback: Optional[Any] = None,
-        message_ids: Optional[Iterable[str]] = None,
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         """埋め込みが欠落しているメッセージ (message_embeddings に無い) を一括生成する。
 
         通常は書き込み時 (``_append_message``) にローカル embedder でその場埋め込まれる
         (LLM 不使用)。ここが必要になるのは、書き込み時に embedder が未初期化だった場合
         (embedding モデルのロード失敗・初回起動時のダウンロード未完了等) や、大量インポート
-        直後の検証・保険としてまとめて埋めたい場合。
-
-        ``message_ids`` を渡すと、その中で欠落しているものだけを埋める。会話ログの
-        インポートが「本文の取り込み → 取り込んだ分の埋め込みを後から」の順で使う
-        (api/routes/people/import_chatlog.py)。指定が無いと全メッセージが対象で、
-        書き込み時に意図して埋め込みを外した行 (``embedding_chunks=0``) も埋める。
+        直後の検証・保険としてまとめて埋めたい場合。書き込み時に意図して埋め込みを外した行
+        (``embedding_chunks=0``) も埋める。会話ログのインポートの「後回し」は空のベクトル行を
+        持つので、ここではなく :meth:`reembed_stale_messages` が埋める。
 
         埋め込みの計算は錠の外で行い、本文の読み直しと保存だけを
         ``immediate_transaction`` (この adapter の錠前 + SQLite の書き込みロック)
@@ -2055,27 +2068,26 @@ class SAIMemoryAdapter:
         Returns:
             {"total_missing": N, "embedded": M, "failed": K, "changed": C} の集計。
             can_embed() が False の場合は total_missing のみ数えて embedded=0 で返す
-            (embedder が無いので埋められない)。
+            (embedder が無いので埋められない)。対象の一覧づくりに失敗したときは
+            ``"error"`` (一行の理由) と ``"aborted": True`` を加えて返す — 何も
+            調べられなかった結果を「欠落ゼロ」に見せないため。
         """
-        from sai_memory.db_locks import immediate_transaction
-        from sai_memory.memory.storage import get_message
+        from sai_memory.memory.storage import get_message, get_messages_without_embeddings
 
-        result = {"total_missing": 0, "embedded": 0, "failed": 0, "changed": 0}
+        result: Dict[str, Any] = {"total_missing": 0, "embedded": 0, "failed": 0, "changed": 0}
         if not self._ready:
             return result
-
-        from sai_memory.memory.storage import get_messages_without_embeddings
 
         try:
             with self._db_lock:
                 missing = get_messages_without_embeddings(self.conn)
         except Exception as exc:
             LOGGER.warning("Failed to list messages without embeddings: %s", exc)
+            result["error"] = (
+                f"Could not list messages without embeddings: {type(exc).__name__}: {exc}"
+            ).splitlines()[0]
+            result["aborted"] = True
             return result
-
-        if message_ids is not None:
-            wanted = set(message_ids)
-            missing = [msg for msg in missing if msg.id in wanted]
 
         result["total_missing"] = len(missing)
         if not missing or self.embedder is None:
@@ -2118,23 +2130,53 @@ class SAIMemoryAdapter:
 
         return result
 
-    def begin_embedding_backfill(self, count: int) -> bool:
-        """会話ログのインポートが埋め込みを裏へ回す直前に、消えない印を付ける。
+    def reembed_stale_messages(
+        self,
+        *,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> Dict[str, int]:
+        """古いベクトル (長さが現行の次元と違う行) を持つメッセージを作り直す。
 
-        ``embed_metadata.embed_backfill_pending`` に書く
-        (``sai_memory.embedding_migration.begin_backfill``)。途中でプロセスが死ぬと
-        印が残り、次の起動時の検査 (``_check_embed_model_change``) が旗を立てる。
-        新しく印を書いたら True、既にあった印に件数を足したら False。
+        会話ログのインポートが後回しにした埋め込み (空のベクトル行、
+        ``storage.DEFERRED_VECTOR``) を埋める背景処理が使う。対象は DB 自身が
+        持っている「古いベクトル」で選び (``message_reembed_targets`` に
+        ``force=False, include_missing=False``)、どの取り込みが書いたかは
+        持ち回らない — 何度走らせても、二本同時に走っても結果は同じ (無駄が
+        出るだけ)。古いモデルのベクトルが残っているペルソナでは、それらの
+        メッセージも現行モデルで作り直す (Chronicle 等と名札は再計算の仕事)。
+
+        対象の一覧づくりや埋め込みの例外はそのまま投げる (呼び出し側が状態に
+        残す)。埋め込みモデルが無いときは RuntimeError。空のベクトル行は
+        残るので、次の起動時の検査と警告バナーの再計算が拾う。
+
+        Returns:
+            ``reembed_messages`` の集計 {"embedded", "dropped", "changed", "total"}。
         """
-        from sai_memory.embedding_migration import begin_backfill
+        from sai_memory.config import EMBED_DIM
+        from sai_memory.embedding_migration import message_reembed_targets, reembed_messages
 
-        return begin_backfill(self.conn, count, db_lock=self._db_lock)
-
-    def finish_embedding_backfill(self) -> None:
-        """``begin_embedding_backfill`` の印を消す (失敗ゼロで完走したときだけ呼ぶ)。"""
-        from sai_memory.embedding_migration import finish_backfill
-
-        finish_backfill(self.conn, db_lock=self._db_lock)
+        if not self._ready:
+            raise RuntimeError("SAIMemory is not ready")
+        with self._db_lock:
+            targets = message_reembed_targets(
+                self.conn, EMBED_DIM, force=False, include_missing=False,
+            )
+        if targets and self.embedder is None:
+            raise RuntimeError(
+                f"Embedding model is not available; {len(targets)} message(s) "
+                "wait for their embeddings."
+            )
+        if not targets:
+            if progress_callback:
+                progress_callback(0, 0)
+            return {"embedded": 0, "dropped": 0, "changed": 0, "total": 0}
+        return reembed_messages(
+            self.conn, self.embedder, sorted(targets),
+            chunk_min=self.settings.chunk_min_chars,
+            chunk_max=self.settings.chunk_max_chars,
+            progress=progress_callback,
+            db_lock=self._db_lock,
+        )
 
     def close(self) -> None:
         if self.conn is not None:
@@ -3124,8 +3166,9 @@ class SAIMemoryAdapter:
             spell_origin_id = message.get("spell_origin_id")
             spell_seq = message.get("spell_seq")
             embedding_chunks = message.get("embedding_chunks")
-            skip_embedding = False
-            if embedding_chunks is not None:
+            defer_embedding = embedding_chunks == EMBEDDING_DEFERRED
+            skip_embedding = defer_embedding
+            if embedding_chunks is not None and not defer_embedding:
                 try:
                     skip_embedding = int(embedding_chunks) == 0
                 except (TypeError, ValueError):
@@ -3138,24 +3181,35 @@ class SAIMemoryAdapter:
 
             with self._db_lock:
                 get_or_create_thread(self.conn, thread_id, resource_id)  # type: ignore[arg-type]
-                mid = add_message(
-                    self.conn,
-                    thread_id=thread_id,
-                    role=role,
-                    content=content,
-                    resource_id=resource_id,
-                    created_at=created_at,
-                    metadata=metadata,
-                    origin_track_id=origin_track_id,
-                    line_role=line_role,
-                    line_id=line_id,
-                    scope=scope,
-                    paired_action_text=paired_action_text,
-                    pulse_id=pulse_id_val,
-                    thought_signature=thought_signature,
-                    spell_origin_id=spell_origin_id,
-                    spell_seq=spell_seq,
+                # A deferred embedding stores the message and its empty vector
+                # row as one write: a failure between the two cannot leave a
+                # message that nothing will ever embed.
+                txn = (
+                    immediate_transaction(self.conn, self._db_lock)
+                    if defer_embedding else contextlib.nullcontext()
                 )
+                with txn:
+                    mid = add_message(
+                        self.conn,
+                        thread_id=thread_id,
+                        role=role,
+                        content=content,
+                        resource_id=resource_id,
+                        created_at=created_at,
+                        metadata=metadata,
+                        origin_track_id=origin_track_id,
+                        line_role=line_role,
+                        line_id=line_id,
+                        scope=scope,
+                        paired_action_text=paired_action_text,
+                        pulse_id=pulse_id_val,
+                        thought_signature=thought_signature,
+                        spell_origin_id=spell_origin_id,
+                        spell_seq=spell_seq,
+                        commit=not defer_embedding,
+                    )
+                    if defer_embedding and content and content.strip():
+                        write_deferred_message_embedding(self.conn, mid, commit=False)
                 if (not skip_embedding) and content and content.strip() and self.embedder is not None:
                     # 埋め込みは**行の commit 後に作る派生物**。ここの失敗を
                     # 「メッセージを保存できなかった」として None で返すと、

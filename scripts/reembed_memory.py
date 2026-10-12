@@ -109,7 +109,7 @@ def _reembed_persona(
             )
             force = True
         # Mark the memory.db before the first deletion; finish_reembed removes it.
-        begin_reembed(conn, model_id)
+        token = begin_reembed(conn, model_id)
 
         sources = rebuild_recall_source_embeddings(conn, embedder, force=force)
         for source, counts in sources.items():
@@ -125,14 +125,18 @@ def _reembed_persona(
         result = reembed_messages(
             conn, embedder, target_ids, chunk_min=chunk_min, chunk_max=chunk_max,
         )
-        skipped = result["changed"] + sum(c["skipped"] for c in sources.values())
         print(
             f"[messages] {persona_id}: re-embedded {result['embedded']} messages, "
             f"dropped vectors of {result['dropped']} without text, "
             f"skipped {result['changed']} changed while embedding (expected dim {expected_dim})."
         )
 
-        outcome = finish_reembed(conn, embedder, model_id, force=force, skipped=skipped)
+        # Messages edited during the job keep their old vector, so they hold
+        # completion back. Chronicle / page / fragment rows skipped the same
+        # way have no vector; the next Metabolism embeds them.
+        outcome = finish_reembed(
+            conn, embedder, model_id, token=token, force=force, skipped=result["changed"],
+        )
         if not outcome.complete:
             print(
                 f"[warn] {persona_id}: not complete; embed_model and the in-progress mark "

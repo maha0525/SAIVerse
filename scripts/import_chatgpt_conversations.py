@@ -220,6 +220,8 @@ def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> None:
         if adapter is not None and not args.dry_run:
             try:
                 stats = adapter.backfill_missing_message_embeddings()
+                if stats.get("aborted"):
+                    raise RuntimeError(stats.get("error"))
                 backfilled = stats.get("embedded", 0)
                 still_missing = stats.get("total_missing", 0) - backfilled
                 total_imported = sum(

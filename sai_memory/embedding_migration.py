@@ -27,21 +27,26 @@ Rules on top of the dimension check:
   pages, rows of deleted entries) are rows that should hold no vector, so
   they are right to go. Search does not filter those rows out, so leaving
   them would keep old-model vectors in recall.
-- **A re-embed marks the memory.db until every vector that should exist is
-  there.** :func:`begin_reembed` writes
-  ``embed_metadata.embed_migration_in_progress`` before anything is deleted.
-  :func:`finish_reembed` removes it (and records the model) only when no
-  stale vector is left, no Chronicle / page / fragment row is waiting for a
-  vector, and the job skipped nothing because of an edit. Otherwise the mark
-  stays: the startup check warns on it, and the next re-embed sees it and
-  rebuilds everything (``force``), which is how an unfinished job converges.
-- **Background embedding of imported messages leaves a mark of its own.**
-  :func:`begin_backfill` writes ``embed_metadata.embed_backfill_pending``
-  when the import hands its messages to the background thread, and
-  :func:`finish_backfill` removes it when that work ended without a
-  failure. A process that dies in between leaves the mark; the startup check
-  warns, and the banner's re-embed (which also fills messages without a
-  vector) removes it.
+- **A re-embed marks the memory.db until no vector of another space is
+  left.** :func:`begin_reembed` writes
+  ``embed_metadata.embed_migration_in_progress`` (with a token naming the
+  job) before anything is deleted. :func:`finish_reembed` removes it (and
+  records the model) only when a full scan finds no stale vector and no
+  message kept its old vector because it was edited during the job, and
+  only if the mark is still this job's. Otherwise the mark stays: the
+  startup check warns on it, and the next re-embed sees it and rebuilds
+  everything (``force``), which is how an unfinished job converges.
+- **Rows without a vector are not the migration's business.** A Chronicle /
+  page / fragment row left without a vector (skipped because it was edited
+  while being embedded, or written after the job's pass) is embedded with
+  the current model by the next Metabolism (``ensure_recall_embeddings``).
+  The migration only has to leave no vector of another space behind.
+- **Deferred embeddings are stale vectors.** A chat-log import stores each
+  message with an empty vector row (``storage.DEFERRED_VECTOR``) and embeds
+  in the background. The empty row is caught by the same stale-vector
+  checks as an old model's vector, so a background job that never finishes
+  is warned about at startup and finished by the banner's re-embed, with no
+  bookkeeping of its own.
 
 Every "read the text again, then store the vector" step runs inside
 ``sai_memory.db_locks.immediate_transaction``, so no other connection can
@@ -53,6 +58,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -65,13 +71,9 @@ LOGGER = logging.getLogger(__name__)
 EMBED_MODEL_KEY = "embed_model"
 
 #: ``embed_metadata`` key present while a re-embed job is between its first
-#: deletion and its final check. Its value is ``"<model id> <ISO time>"``.
+#: deletion and its final check. Its value is
+#: ``"<model id> <ISO time> <job token>"``.
 MIGRATION_IN_PROGRESS_KEY = "embed_migration_in_progress"
-
-#: ``embed_metadata`` key present while messages stored by a chat-log import
-#: are waiting for (or being given) their vectors in the background. Its value
-#: is ``"<ISO time of the oldest unfinished import> <message count>"``.
-BACKFILL_PENDING_KEY = "embed_backfill_pending"
 
 #: The four tables that hold recall vectors (one per source system).
 VECTOR_TABLES = (
@@ -149,17 +151,29 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def begin_reembed(conn: sqlite3.Connection, model_id: str) -> None:
+def begin_reembed(conn: sqlite3.Connection, model_id: str) -> str:
     """Mark the memory.db as being re-embedded (call before deleting anything).
 
-    The mark stays until :func:`finish_reembed` finds the job complete, so a
-    job that dies in between, or ends with vectors still missing, is reported
-    at the next startup and rebuilt in full by the next re-embed. Only the
+    Returns the job's token, to be given to :func:`finish_reembed`. The mark
+    stays until that job's :func:`finish_reembed` finds it complete, so a job
+    that dies in between, or ends with work left, is reported at the next
+    startup and rebuilt in full by the next re-embed. A second job started
+    meanwhile (the API and the CLI are separate processes) overwrites the
+    mark with its own token, so the first job's finish does not remove the
+    mark of a job that may still be deleting vectors. Only the
     :data:`MIGRATION_IN_PROGRESS_KEY` key is written.
     """
     from sai_memory.memory.storage import set_embed_metadata
 
-    set_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY, f"{model_id} {_now_iso()}")
+    token = uuid.uuid4().hex
+    set_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY, f"{model_id} {_now_iso()} {token}")
+    return token
+
+
+def _mark_token(mark: Optional[str]) -> Optional[str]:
+    if not mark:
+        return None
+    return mark.rsplit(" ", 1)[-1]
 
 
 def reembed_in_progress(conn: sqlite3.Connection) -> Optional[str]:
@@ -167,58 +181,6 @@ def reembed_in_progress(conn: sqlite3.Connection) -> Optional[str]:
     from sai_memory.memory.storage import get_embed_metadata
 
     return get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY)
-
-
-# ---------------------------------------------------------------------------
-# Background embedding of imported messages
-# ---------------------------------------------------------------------------
-
-def begin_backfill(
-    conn: sqlite3.Connection, count: int, *, db_lock: Optional[Any] = None,
-) -> bool:
-    """Mark that ``count`` imported messages are waiting for their vectors.
-
-    Called when a chat-log import hands its messages to the background
-    embedding thread, before the import reports success. When a mark is
-    already there (an earlier import still running, or one that did not
-    finish), its time is kept and the count is added, so the mark keeps
-    pointing at the oldest unfinished work.
-
-    Returns True when a new mark was written, False when an existing one was
-    extended.
-    """
-    from sai_memory.memory.storage import get_embed_metadata, set_embed_metadata
-
-    with immediate_transaction(conn, db_lock):
-        existing = get_embed_metadata(conn, BACKFILL_PENDING_KEY)
-        if existing is None:
-            set_embed_metadata(conn, BACKFILL_PENDING_KEY, f"{_now_iso()} {int(count)}", commit=False)
-            return True
-        since, _, old_count = existing.rpartition(" ")
-        try:
-            total = int(old_count) + int(count)
-        except ValueError:
-            since, total = existing, int(count)
-        set_embed_metadata(conn, BACKFILL_PENDING_KEY, f"{since or existing} {total}", commit=False)
-        return False
-
-
-def backfill_pending(conn: sqlite3.Connection) -> Optional[str]:
-    """The mark written by :func:`begin_backfill`, or None when there is none."""
-    from sai_memory.memory.storage import get_embed_metadata
-
-    return get_embed_metadata(conn, BACKFILL_PENDING_KEY)
-
-
-def finish_backfill(conn: sqlite3.Connection, *, db_lock: Optional[Any] = None) -> None:
-    """Remove the mark of :func:`begin_backfill`.
-
-    The caller decides when: only after the background embedding ended with
-    nothing left behind (no failure, nothing skipped) and no later import is
-    queued behind it (api/routes/people/import_chatlog.py).
-    """
-    with immediate_transaction(conn, db_lock):
-        conn.execute("DELETE FROM embed_metadata WHERE key = ?", (BACKFILL_PENDING_KEY,))
 
 
 def sample_stale_vector_tables(
@@ -381,9 +343,10 @@ def reembed_messages(
     ``immediate_transaction`` with the store, and the vectors are stored only
     when it is unchanged: a message edited while its vectors were being
     computed is skipped (counted in ``changed``) instead of getting vectors
-    of its old text. Its current rows stay as they were; the caller passes
+    of its old text. Its current rows stay as they were; a re-embed passes
     the count to :func:`finish_reembed`, which then keeps the in-progress
-    mark so the next run rebuilds it. A target that gained text while being
+    mark so the next run rebuilds it (for the background embedding of an
+    import, the row left is the empty one, which stays stale). A target that gained text while being
     looked at is counted in ``changed`` the same way instead of losing its
     vectors.
 
@@ -433,56 +396,31 @@ def reembed_messages(
 class ReembedOutcome:
     """What :func:`finish_reembed` found at the end of a re-embed.
 
-    ``complete`` is True only when nothing is left to do: no stale vector in
-    any of the four tables (``stale_tables``), no Chronicle / page /
-    fragment row still waiting for a vector (``pending``, per source, only
-    sources with a count above zero), and nothing skipped by the job because
-    its text was edited while being embedded (``skipped``).
+    ``complete`` is True only when the memory.db holds no vector of another
+    space and the job's mark was closed: no stale vector in any of the four
+    tables (``stale_tables``), no message that kept its old vector because
+    it was edited while being embedded (``skipped``), and the in-progress
+    mark not taken over by another re-embed (``other_job``).
     """
 
     stale_tables: List[str] = field(default_factory=list)
-    pending: Dict[str, int] = field(default_factory=dict)
     skipped: int = 0
+    other_job: bool = False
 
     @property
     def complete(self) -> bool:
-        return not self.stale_tables and not self.pending and self.skipped == 0
+        return not self.stale_tables and self.skipped == 0 and not self.other_job
 
     def describe(self) -> str:
         """One line naming why the job is not complete ("" when it is)."""
         parts = []
         if self.stale_tables:
             parts.append(f"Stale vectors remain in: {', '.join(self.stale_tables)}.")
-        if self.pending:
-            counts = ", ".join(f"{source} {n}" for source, n in self.pending.items())
-            parts.append(f"Entries still without a vector: {counts}.")
         if self.skipped:
-            parts.append(f"Skipped {self.skipped} entries edited during the re-embed.")
+            parts.append(f"Skipped {self.skipped} messages edited during the re-embed.")
+        if self.other_job:
+            parts.append("Another re-embed started during this one; its mark is kept.")
         return " ".join(parts)
-
-
-def _pending_counts(conn: sqlite3.Connection) -> Dict[str, int]:
-    """Rows of the three recall sources that should hold a vector and have none."""
-    from sai_memory.unified_recall import (
-        get_chronicle_entries_without_embeddings,
-        get_fragments_without_embeddings,
-        get_memopedia_pages_without_embeddings,
-    )
-
-    getters = {
-        "chronicle": lambda: get_chronicle_entries_without_embeddings(conn, level=1),
-        "memopedia": lambda: get_memopedia_pages_without_embeddings(conn),
-        "fragment": lambda: get_fragments_without_embeddings(conn),
-    }
-    pending: Dict[str, int] = {}
-    for source in RECALL_SOURCES:
-        table, _, readers = _SOURCES[source]
-        if not all(_relation_exists(conn, name) for name in (table, *readers)):
-            continue
-        n = len(getters[source]())
-        if n:
-            pending[source] = n
-    return pending
 
 
 def finish_reembed(
@@ -490,64 +428,62 @@ def finish_reembed(
     embedder: Any,
     model_id: str,
     *,
+    token: Optional[str],
     force: bool = False,
     skipped: int = 0,
-    backfill_mark: Optional[str] = None,
     db_lock: Optional[Any] = None,
 ) -> ReembedOutcome:
-    """Check that every vector that should exist is there, and only then close the job.
+    """Close the job when no vector of another space is left.
 
     ``force=True`` (including the escalations: changed model label, leftover
-    in-progress mark) first empties the legacy ``embeddings`` table — see
+    in-progress mark) first empties the legacy ``embeddings`` table; see
     :func:`purge_stale_legacy_embeddings`.
 
-    The job is complete when all of these hold (:class:`ReembedOutcome`):
+    The job is complete when (:class:`ReembedOutcome`):
 
     - a full scan (:func:`scan_stale_vector_tables`, not the startup sample)
-      finds no stale vector in the four tables;
-    - the "without embeddings" getters of the three recall sources
-      (Chronicle level 1, pages, fragments) return nothing;
-    - ``skipped`` — the rows the caller's job skipped because their text was
-      edited while being embedded (generator skips plus the messages'
-      ``changed``) — is zero.
+      finds no stale vector in the four tables (the empty row of a deferred
+      embedding is stale too);
+    - ``skipped``, the messages the job left with their old vector because
+      their text was edited while being embedded (``changed`` of
+      :func:`reembed_messages`), is zero. After a ``force`` rebuild those old
+      vectors may have the current length, so only this count tells they are
+      there;
+    - the in-progress mark is still the one this job wrote (``token`` from
+      :func:`begin_reembed`), checked inside the write transaction.
 
-    Messages without a vector are not part of the check: some are left
-    without one on purpose (``embedding_chunks=0``), so they are judged by
-    the stale scan only.
+    Rows without a vector (Chronicle / page / fragment rows the generators
+    skipped because of an edit, rows written after the job's pass) do not
+    hold completion back: the next Metabolism embeds them with the current
+    model.
 
-    When complete, the model label is recorded and the in-progress mark of
-    :func:`begin_reembed` removed in one transaction. ``backfill_mark`` is the
-    value of the import's backfill mark (:func:`backfill_pending`) read just
-    before the job listed the messages to embed, given when that pass also
-    filled messages without a vector; if the mark still has that value it is
-    removed in the same transaction (the job has embedded those messages; a
-    changed value means an import queued more work during the job, which
-    keeps its mark).
-
-    When not complete, neither the label nor the mark is touched: the
-    startup check keeps warning, and the next re-embed finds the mark and
-    rebuilds everything, which is how a job cut short converges. Only the
-    keys named here are written (the table also holds other subsystems'
-    markers).
+    When complete, the model label is recorded and the mark removed in one
+    ``BEGIN IMMEDIATE`` transaction. When the mark carries another job's
+    token, neither is touched and ``other_job`` is set (that job's own finish
+    closes the memory.db; if it died, its mark makes the next run rebuild in
+    full). A mark that is already gone counts as closed. When not complete,
+    neither the label nor the mark is touched. Only the keys named here are
+    written (the table also holds other subsystems' markers).
     """
     from sai_memory.memory.storage import get_embed_metadata, set_embed_metadata
 
     expected_dim = int(embedder.embedding_size)
     purge_stale_legacy_embeddings(conn, expected_dim, everything=force)
-    # The checks run before the transaction: a full scan holds no write lock.
+    # The scan runs before the transaction: a full scan holds no write lock.
     # Rows written after it come from the current model and are not stale.
     outcome = ReembedOutcome(
         stale_tables=scan_stale_vector_tables(conn, expected_dim),
-        pending=_pending_counts(conn),
         skipped=int(skipped),
     )
     if not outcome.complete:
         return outcome
     with immediate_transaction(conn, db_lock):
+        mark = get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY)
+        if mark is not None and _mark_token(mark) != token:
+            outcome.other_job = True
+            return outcome
         set_embed_metadata(conn, EMBED_MODEL_KEY, model_id, commit=False)
         conn.execute("DELETE FROM embed_metadata WHERE key = ?", (MIGRATION_IN_PROGRESS_KEY,))
-        if backfill_mark is not None and get_embed_metadata(conn, BACKFILL_PENDING_KEY) == backfill_mark:
-            conn.execute("DELETE FROM embed_metadata WHERE key = ?", (BACKFILL_PENDING_KEY,))
     return outcome
 
 

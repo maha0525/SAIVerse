@@ -37,29 +37,32 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
     Covers all four vector systems (docs/intent/embedding_gemma2_migration.md
     §2): Chronicle / Memopedia page / fragment vectors that are stale (or all
     of them with ``force``) are deleted and regenerated on the spot, then
-    the messages are re-embedded (including messages that have no vector yet,
-    which is also how an import whose background embedding did not finish is
-    recovered). At the end ``finish_reembed`` checks that every vector that
-    should exist is there; only then is ``embed_metadata.embed_model``
+    the messages are re-embedded: those with a stale vector (including the
+    empty row of an import whose background embedding did not finish) and
+    those with no vector at all. At the end ``finish_reembed`` checks that no
+    vector of another space is left; only then is ``embed_metadata.embed_model``
     updated, the in-progress mark removed and the persona's startup warning
     lifted through ``manager`` so the banner does not come back on reload.
-    When something is left (stale vectors, rows still without a vector, rows
-    skipped because they were edited during the job), the warning and the
-    mark stay and the summary names what is left; running the job again then
-    rebuilds everything.
+    When something is left (stale vectors, messages that kept their old
+    vector because they were edited during the job, or another re-embed that
+    took the mark over), the warning and the mark stay and the summary names
+    what is left; running the job again then rebuilds everything. Chronicle /
+    page / fragment rows the job skipped because of an edit are left without
+    a vector for the next Metabolism to embed; they do not hold completion
+    back.
 
     A recorded model label that differs from the current one (or is missing
     while vectors exist) runs the job as ``force`` whatever the dimensions:
     the label is what tells two models of the same dimension apart. The
     memory.db is marked as being re-embedded before anything is deleted
-    (``begin_reembed``) and the mark is removed by ``finish_reembed`` only
-    when the job is complete, so a job that dies half way (or ends with work
+    (``begin_reembed``, which returns this job's token) and the mark is
+    removed by ``finish_reembed`` only when the job is complete and the mark
+    still carries that token, so a job that dies half way (or ends with work
     left) is warned about at the next startup.
     """
     from sai_memory.config import load_settings
     from sai_memory.embedding_migration import (
         RECALL_SOURCES,
-        backfill_pending,
         begin_reembed,
         finish_reembed,
         message_reembed_targets,
@@ -110,7 +113,7 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
                     persona_id,
                 )
                 force = True
-            begin_reembed(conn, settings.embed_model)
+            token = begin_reembed(conn, settings.embed_model)
 
             # 1. Chronicle / Memopedia pages / fragments (small; done first so
             #    those memories come back to recall early).
@@ -125,10 +128,8 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
                 conn, embedder, force=force, progress=_source_progress,
             )
 
-            # 2. Messages (also those without a vector). The backfill mark of
-            #    an import is read before listing them: finish_reembed removes
-            #    it only if no import added work in the meantime.
-            backfill_mark = backfill_pending(conn)
+            # 2. Messages: stale vectors (the empty rows of a deferred import
+            #    embedding among them) and messages without any vector.
             target_ids = message_reembed_targets(
                 conn, expected_dim, force=force, include_missing=True,
             )
@@ -145,15 +146,17 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
                 progress=_message_progress,
             )
 
-            # 3. Rows edited while their vectors were being computed were not
-            #    stored; they make the job incomplete.
-            skipped = result.get("changed", 0) + sum(
-                counts.get("skipped", 0) for counts in source_result.values()
-            )
-            # 4. Record the model and lift the warning only if nothing is left.
+            # 3. Record the model and lift the warning only if no vector of
+            #    another space is left. A message edited while being embedded
+            #    keeps its old vector, so it makes the job incomplete; a
+            #    Chronicle / page / fragment row skipped that way has no
+            #    vector, and the next Metabolism embeds it.
             outcome = finish_reembed(
                 conn, embedder, settings.embed_model,
-                force=force, skipped=skipped, backfill_mark=backfill_mark,
+                token=token, force=force, skipped=result.get("changed", 0),
+            )
+            source_skipped = sum(
+                counts.get("skipped", 0) for counts in source_result.values()
             )
         finally:
             conn.close()
@@ -163,6 +166,11 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
             f"Re-embedded {result['embedded']} messages and "
             f"{source_done} Chronicle/Memopedia/Fragment entries."
         )
+        if source_skipped:
+            summary += (
+                f" {source_skipped} Chronicle/Memopedia/Fragment entries edited during "
+                "the job were left for the next memory maintenance to embed."
+            )
         if not outcome.complete:
             reason = outcome.describe()
             LOGGER.warning(

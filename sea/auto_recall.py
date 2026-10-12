@@ -912,6 +912,8 @@ def _vivid_source_messages(
             vec = json.loads(vec_json)
         except (ValueError, TypeError):
             continue
+        if not vec:
+            continue  # empty row of a deferred embedding: nothing to compare yet
         score = _cosine(frag_vec, vec)
         prev = best_by_message.get(mid)
         if prev is None or score > prev[0]:
