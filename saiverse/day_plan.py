@@ -1375,7 +1375,9 @@ def apply_life_boundary(
             ttl_ok = _sync_cache_ttl_for_life_start(
                 manager, persona_id, life, life_key=(plan_date_str, index),
             )
-            tick_ok = _arm_tick_reservation(manager, persona_id, life)
+            tick_ok = _arm_tick_reservation(
+                manager, persona_id, life, life_key=(plan_date_str, index),
+            )
             steps_ok = ttl_ok and tick_ok
             if steps_ok:
                 # 失敗しても節目は失敗にしない (中で WARN して握る)。冪等キーで
@@ -1383,7 +1385,9 @@ def apply_life_boundary(
                 _offer_self_definition_task(manager, persona_id)
         else:
             keepalive_ok = _cancel_keepalive_reservation(manager, persona_id)
-            tick_ok = _cancel_tick_reservation(manager, persona_id)
+            tick_ok = _cancel_tick_reservation(
+                manager, persona_id, life_key=(plan_date_str, index),
+            )
             ttl_ok = _sync_cache_ttl_for_life_end(
                 manager, persona_id, life, life_key=(plan_date_str, index),
             )
@@ -1469,7 +1473,12 @@ def apply_life_boundary(
         # 保温は、世代をその区間の値で控えて ended の無い lives を読みうる —
         # commit 後の世代の前進が、その保温の最後の照合を外す (2026-10-12 段 3
         # 敵対レビュー 8 巡目の消し込みで実装側が発見した残骸)。
-        _cancel_tick_reservation(manager, persona_id)
+        # 持ち主つき — この終了処理が DB の区間で遅れている間に次のライフが
+        # 開始していたら、ティックの持ち主は次のライフに替わっているので、この
+        # 取り消しは次のライフの予約も世代も触らない (9 巡目 medium)。
+        _cancel_tick_reservation(
+            manager, persona_id, life_key=(plan_date_str, index),
+        )
 
     if stale is not None:
         # 通知を同梱していないので、配送を待たずに閉じる。閉じ損ねても applied
@@ -2165,10 +2174,15 @@ def _autonomy_manager_for(manager: Any, persona_id: str) -> Any:
     return managers.get(persona_id)
 
 
-def _arm_tick_reservation(manager: Any, persona_id: str, life: Dict[str, Any]) -> bool:
+def _arm_tick_reservation(
+    manager: Any, persona_id: str, life: Dict[str, Any], *, life_key: LifeKey,
+) -> bool:
     """ライフ開始で、ティックの予約を now + T に張る (v0.4 計画 段 3)。
 
     予約の実体は AutonomyManager が持つ (:meth:`AutonomyManager.arm_tick`)。
+    ``life_key`` (開始したライフ) をティックの持ち主として渡す — 前のライフの
+    遅れた終了の取り消し (:func:`_cancel_tick_reservation`) が、このライフの
+    予約と世代を触らないように。
     AutonomyManager が立っていない (サーバーの起動前・テストの最小 manager) なら
     張らずに成功とする — 起動後の watchdog が「ライフが走っているのに予約が
     無い」を見て張る (段 3-7 の回復)。T はライフのモードで均等の上限を掛けて
@@ -2185,7 +2199,7 @@ def _arm_tick_reservation(manager: Any, persona_id: str, life: Dict[str, Any]) -
         )
         return True
     try:
-        am.arm_tick(life_mode=life.get("mode"))
+        am.arm_tick(life_mode=life.get("mode"), life_owner=life_key)
         return True
     except Exception:
         LOGGER.warning(
@@ -2256,12 +2270,16 @@ def _offer_self_definition_task(manager: Any, persona_id: str) -> None:
         )
 
 
-def _cancel_tick_reservation(manager: Any, persona_id: str) -> bool:
+def _cancel_tick_reservation(
+    manager: Any, persona_id: str, *, life_key: LifeKey,
+) -> bool:
     """ライフ終了で、ティックの予約を消す (谷ではティックを打たない)。
 
-    AutonomyManager があればその口で、無ければ予約 key で直接消す (誰が張った
-    予約でも終了の節目では残さない)。発火時のゲート (ライフが走っていなければ
-    skip して予約を消す) は二重の安全網。
+    AutonomyManager があれば持ち主つきの口 (:meth:`AutonomyManager.cancel_tick_for_life`
+    — ティックの持ち主が終わるライフ ``life_key`` 自身のときだけ、世代を進めて
+    予約を消す。次のライフが既に開始して持ち主が替わっていたら何もしない)、
+    無ければ予約 key で直接消す (世代も持ち主も無い構成)。発火時のゲート
+    (ライフが走っていなければ skip して予約を消す) は二重の安全網。
 
     Returns:
         消せたか。scheduler の無い構成は True。
@@ -2269,7 +2287,7 @@ def _cancel_tick_reservation(manager: Any, persona_id: str) -> bool:
     am = _autonomy_manager_for(manager, persona_id)
     try:
         if am is not None:
-            am.cancel_tick()
+            am.cancel_tick_for_life(life_key)
             return True
         scheduler = getattr(manager, "event_scheduler", None)
         if scheduler is None:

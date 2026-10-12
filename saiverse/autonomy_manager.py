@@ -268,8 +268,9 @@ class AutonomyManager:
         # レビュー 段 3 6 巡目 medium)。状態 (STOPPED か) だけの検査では、停止→
         # 再開を跨いだ古い発火を見分けられない。
         self._generation = 0
-        # ライフの世代 (self._lock で守る)。ティックの予約の無条件の取り消し
-        # (:meth:`cancel_tick` — ライフ終了の節目) のたびに +1 する。ティックの
+        # ライフの世代 (self._lock で守る)。ライフ終了の節目のティックの取り消し
+        # (:meth:`cancel_tick_for_life` — 持ち主のライフの終了だけが効く) の
+        # たびに +1 する。ティックの
         # callback だけが閉じ込め (見張りは閉じ込めない — 見張りの連鎖はライフを
         # 跨いで続く)、発火の入口・張り直し・生成の直前で照合する。前のライフで
         # 手渡し済みになった発火が、終了と次のライフの開始を跨いで走っても、次の
@@ -277,6 +278,14 @@ class AutonomyManager:
         # 段 3 7 巡目 medium)。運転の世代とは別に持つのは、見張りの callback を
         # ライフ終了で無効にしないため。
         self._life_generation = 0
+        # ティックの持ち主 (self._lock で守る) — いまのティックの予約とライフの
+        # 世代を持っているライフ (営業日 "YYYY-MM-DD", その日のライフの番号)。
+        # ライフ開始の節目と見張りの回復が張るときに記録し、ライフ終了の節目の
+        # 取り消し (:meth:`cancel_tick_for_life`) は持ち主が終わるライフ自身
+        # (または持ち主の記録が無い) ときだけ効く。終了処理が DB の区間で遅れて
+        # いる間に次のライフが始まっていたら、遅れた取り消しは次のライフの予約も
+        # 世代も触らない (2026-10-12 Codex 敵対レビュー 段 3 9 巡目 medium)。
+        self._tick_life_owner: Optional[Tuple[str, int]] = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -296,7 +305,7 @@ class AutonomyManager:
 
     @property
     def life_generation(self) -> int:
-        """ライフの世代 (:meth:`cancel_tick` — ライフ終了の節目のたびに +1)。
+        """ライフの世代 (:meth:`cancel_tick_for_life` — ライフ終了の節目のたびに +1)。
 
         保温の送信直前の照合 (``SEARuntime._run_cache_keepalive_once``) が、
         冒頭で控えた値と最後に見比べる — ライフを DB から読んでいる最中に終了の
@@ -364,15 +373,28 @@ class AutonomyManager:
             self.manager, self.persona_id, life_mode=life_mode,
         )
 
-    def arm_tick(self, *, life_mode: Optional[str] = None) -> bool:
+    def arm_tick(
+        self,
+        *,
+        life_mode: Optional[str] = None,
+        life_owner: Optional[Tuple[str, int]] = None,
+    ) -> bool:
         """ティックの予約を now + T に張る (既存の予約は上書き)。
 
         呼び手はライフ開始の節目 (``day_plan._arm_tick_reservation``)。止まって
         いれば張らない (False)。
+
+        ``life_owner`` (開始したライフの ``(営業日, 番号)``) はティックの持ち主
+        (:attr:`_tick_life_owner`) として同じロック区間で記録する。止まっていて
+        予約を張らない回も記録する — ライフが始まったという事実は止まっていても
+        変わらず、前のライフの遅れた終了の取り消し (:meth:`cancel_tick_for_life`)
+        に、このライフの世代を進めさせないため。None なら記録を更新しない。
         """
         minutes = self.resolve_interval_minutes(life_mode=life_mode)
         fire_at = clock.now() + timedelta(minutes=minutes)
         with self._lock:
+            if life_owner is not None:
+                self._tick_life_owner = life_owner
             if self._state == AutonomyState.STOPPED:
                 return False
             self._schedule_locked(
@@ -385,11 +407,18 @@ class AutonomyManager:
         self._reconcile_keepalive()
         return True
 
-    def arm_tick_if_absent(self, *, life_mode: Optional[str] = None) -> bool:
+    def arm_tick_if_absent(
+        self,
+        *,
+        life_mode: Optional[str] = None,
+        life_owner: Optional[Tuple[str, int]] = None,
+    ) -> bool:
         """ティックの予約が無いときだけ now + T に張る (生きている予約は触らない)。
 
         呼び手は見張り (再起動・全停止の解除・自律 OFF→ON からの回復)。張れた
         回は keep-alive を再照合する (:meth:`_reconcile_keepalive`)。
+        ``life_owner`` (走っているライフの ``(営業日, 番号)``) は、張れた回だけ
+        ティックの持ち主として同じロック区間で記録する (None なら更新しない)。
         Returns: 今回張ったか。
         """
         scheduler = self._scheduler()
@@ -404,12 +433,17 @@ class AutonomyManager:
                 fire_at=fire_at, callback=self._tick_callback(),
                 key=tick_reservation_key(self.persona_id),
             ) is not None
+            if armed and life_owner is not None:
+                self._tick_life_owner = life_owner
         if armed:
             self._reconcile_keepalive()
         return armed
 
     def cancel_tick(self) -> bool:
-        """ティックの予約を消す (ライフ終了の節目の無条件の取り消し)。
+        """ティックの予約を消す (持ち主を問わない無条件の取り消し)。
+
+        ライフ終了の節目は持ち主つきの :meth:`cancel_tick_for_life` を使う —
+        こちらは持ち主の照合を飛ばす口として残している (中身は同じ)。
 
         ライフの世代 (:attr:`_life_generation`) を同じロック区間で +1 する —
         手渡し済みで取り消しの届かない前のライフの発火を、次のライフの開始の
@@ -425,11 +459,63 @@ class AutonomyManager:
         if scheduler is None:
             return False
         with self._lock:
-            self._life_generation += 1
-            cancelled = scheduler.cancel(tick_reservation_key(self.persona_id))
+            cancelled = self._cancel_tick_locked(scheduler)
         if cancelled:
             LOGGER.info("[Autonomy:%s] tick reservation cancelled", self.persona_id)
         return cancelled
+
+    def cancel_tick_for_life(self, life_key: Tuple[str, int]) -> bool:
+        """ライフ ``life_key`` の終了の節目の取り消し — 持ち主のときだけ効く。
+
+        ティックの持ち主 (:attr:`_tick_life_owner`) が ``life_key`` 自身か、
+        持ち主の記録が無いときだけ、同じロック区間で :meth:`cancel_tick` と同じ
+        こと (ライフの世代 +1・予約の取り消し) をして持ち主の記録を消す。
+        持ち主が別のライフ (= 終了処理が遅れている間に次のライフが開始して
+        張り直した) なら何もしない — 次のライフの予約も、その予約の手渡し済みの
+        発火も (世代を進めないので) 生かす (2026-10-12 Codex 敵対レビュー 段 3
+        9 巡目 medium)。
+
+        持ち主の記録が無いときに効かせるのは二つの場面のため:
+
+        - 終了の節目の二度目の取り消し (ended の commit の後、``day_plan`` の
+          ``apply_life_boundary``) — 一度目の取り消しが持ち主を消しているので、
+          次のライフが始まっていなければ記録は無い。この回が世代を進めて、
+          区間の中で走り始めた保温の最後の照合を外す (8 巡目の残骸の手当て)。
+        - 再起動の後、まだ誰も張っていない — 次のライフが始まっていれば、その
+          開始の節目 (:meth:`arm_tick`) が必ず持ち主を記録しているので、記録が
+          無いことは「別のライフが持っている」ことを意味しない。
+
+        Returns: 予約があって消したか (持ち主が違って何もしなかった回は False)。
+        """
+        scheduler = self._scheduler()
+        if scheduler is None:
+            return False
+        with self._lock:
+            owner = self._tick_life_owner
+            if owner is not None and owner != life_key:
+                skipped_for = owner
+                cancelled = False
+            else:
+                skipped_for = None
+                cancelled = self._cancel_tick_locked(scheduler)
+        if skipped_for is not None:
+            LOGGER.info(
+                "[Autonomy:%s] tick cancel for the ended life %s skipped: the "
+                "tick now belongs to the life %s",
+                self.persona_id, life_key, skipped_for,
+            )
+        elif cancelled:
+            LOGGER.info("[Autonomy:%s] tick reservation cancelled", self.persona_id)
+        return cancelled
+
+    def _cancel_tick_locked(self, scheduler: Any) -> bool:
+        """ライフの世代 +1・ティックの予約の取り消し・持ち主の記録の消去。
+
+        ``self._lock`` を持って呼ぶ (:meth:`cancel_tick` / :meth:`cancel_tick_for_life`)。
+        """
+        self._life_generation += 1
+        self._tick_life_owner = None
+        return scheduler.cancel(tick_reservation_key(self.persona_id))
 
     def notify_standard_call(self) -> bool:
         """本人の標準モデルが呼ばれた — ティックの予約を「最後の標準呼び出し + T」へ
@@ -553,7 +639,7 @@ class AutonomyManager:
         """ティックの発火が古いなら理由を返す (いまのものなら None)。``self._lock`` を持って呼ぶ。
 
         - ``"stopped"`` — 止まっている、または停止を跨いだ古い運転の世代
-        - ``"outside life"`` — ライフ終了の節目 (:meth:`cancel_tick`) を跨いだ
+        - ``"outside life"`` — ライフ終了の節目 (:meth:`cancel_tick_for_life`) を跨いだ
           古いライフの世代 (次のライフが始まっていても)
 
         世代が None (閉じ込めずに直接呼ばれた — テストの直接駆動) はその照合を
@@ -766,8 +852,9 @@ class AutonomyManager:
         段 3 3 巡目 medium)。見分けは予約の札 (EventScheduler の登録ごとに一意な
         値) で行う — 発火時刻の一致では、同じ時刻に張り直された新しい予約
         (仮想時計を止めたままの停止→再開) を取り違えて消す (4 巡目 medium、ABA)。
-        停止 (:meth:`stop`) とライフ終了の節目 (:meth:`cancel_tick`) は無条件に
-        消す — そこは「全部消す」が正しい。
+        停止 (:meth:`stop`) は無条件に消す — そこは「全部消す」が正しい。
+        ライフ終了の節目 (:meth:`cancel_tick_for_life`) は札ではなくティックの
+        持ち主 (ライフ) で照合して消す。
         """
         if own_token is None:
             return False

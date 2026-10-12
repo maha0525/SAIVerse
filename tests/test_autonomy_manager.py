@@ -1786,3 +1786,150 @@ def test_a_life_switch_while_waiting_for_the_beat_lock_does_not_start_the_tick(
     assert manager.fire_tick.refused == ["outside life"]
     assert switched["at"] == BASE + timedelta(days=1, hours=7, minutes=30)
     assert _tick_at(manager) == switched["at"]
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 9 巡目 medium: ライフ終了の取り消しは
+# ティックの持ち主 (ライフ) のときだけ効く — 終了処理が遅れている間に次の
+# ライフが開始していたら、次のライフの予約も世代も触らない
+# ---------------------------------------------------------------------------
+
+
+def _start_the_next_life_inside_the_end(monkeypatch, manager, *, hand_off=False):
+    """前のライフの終了処理の「最初の取り消し」と「ended の commit」の間 (TTL の
+    遅延解除の予約の段) に、翌 07:00 の次のライフを開始させる。
+
+    ``hand_off=True`` なら、開始した次のライフの予約を、終了処理が終わる前に
+    ワーカーへ手渡した状態にする (取り消しの届かない発火)。
+    """
+    seen: Dict[str, Any] = {}
+    original = day_plan._sync_cache_ttl_for_life_end
+
+    def _sync_with_the_next_life_started(mgr, persona_id, life, *, life_key):
+        if not seen:
+            clock.advance_to(BASE + timedelta(days=1, hours=7))
+            _start_life(manager)
+            seen["next_at"] = _tick_at(manager)
+            if hand_off:
+                seen["handed_off"] = _hand_off_tick(manager)
+        return original(mgr, persona_id, life, life_key=life_key)
+
+    monkeypatch.setattr(
+        day_plan, "_sync_cache_ttl_for_life_end", _sync_with_the_next_life_started,
+    )
+    return seen
+
+
+def test_a_late_life_end_does_not_cancel_the_next_lifes_tick(
+    manager, session_factory, monkeypatch,
+):
+    """再現順序: 翌 06:59 の就寝の終了処理が、最初の取り消しの後の DB の区間で
+    遅れ、その間に 07:00 起床の次のライフが開始した (07:30 の予約)。ended の
+    commit の後の二度目の取り消しは、持ち主が次のライフに替わっているので何も
+    しない — 07:30 の予約が残り、見張りの回復 (07:39) を待たずに 07:30 で打つ。"""
+    _set_overnight_life_window(session_factory)
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    am = _start_am(manager)
+    _start_life(manager)  # 07-04 07:00〜翌 06:59
+    seen = _start_the_next_life_inside_the_end(monkeypatch, manager)
+
+    clock.advance_to(BASE + timedelta(days=1, hours=6, minutes=59))
+    generation_before = am.life_generation
+    _end_life(manager)
+
+    next_at = BASE + timedelta(days=1, hours=7, minutes=30)
+    assert seen["next_at"] == next_at
+    assert _tick_at(manager) == next_at
+    # 最初の取り消し (前のライフが持ち主) の一回だけ進む
+    assert am.life_generation == generation_before + 1
+    assert am._tick_life_owner == ("2026-07-05", 0)
+
+    _fire_tick_reservation(manager)
+    assert clock.now() == next_at
+    assert len(manager.fire_tick.calls) == 1
+    assert am.last_report.status == "completed"
+
+
+def test_a_late_life_end_does_not_invalidate_the_next_lifes_handed_off_tick(
+    manager, session_factory, monkeypatch,
+):
+    """同じ順序で、次のライフの予約が終了処理の終わる前にワーカーへ手渡されて
+    いた。二度目の取り消しは世代を進めないので、手渡し済みの発火は次のライフの
+    ものとして走る。"""
+    _set_overnight_life_window(session_factory)
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    am = _start_am(manager)
+    _start_life(manager)
+    seen = _start_the_next_life_inside_the_end(monkeypatch, manager, hand_off=True)
+
+    clock.advance_to(BASE + timedelta(days=1, hours=6, minutes=59))
+    _end_life(manager)
+
+    clock.advance_to(BASE + timedelta(days=1, hours=7, minutes=30))
+    seen["handed_off"]()
+    assert len(manager.fire_tick.calls) == 1
+    assert am.last_report.status == "completed"
+
+
+def test_a_normal_life_end_still_advances_the_generation_after_the_commit(
+    manager, session_factory,
+):
+    """対照: 次のライフが始まっていない普通の終了では、ended の commit の後の
+    二度目の取り消しも世代を進める (8 巡目 — 取り消しと commit の間に走り始めた
+    保温の最後の照合を外す)。予約は残らず、持ち主の記録も消える。"""
+    am = _running_life(manager, session_factory)
+    stale_fire = _hand_off_tick(manager)
+    generation_before = am.life_generation
+
+    clock.advance_to(BASE + timedelta(hours=22))
+    _end_life(manager)
+    assert am.life_generation == generation_before + 2
+    assert _tick_at(manager) is None
+    assert am._tick_life_owner is None
+
+    stale_fire()
+    assert manager.fire_tick.calls == []
+
+
+def test_the_life_end_cancel_ignores_a_life_that_does_not_own_the_tick(
+    manager, session_factory,
+):
+    """持ち主つきの取り消しの単体: 持ち主でないライフの終了は予約も世代も触らず、
+    持ち主のライフの終了は両方を進める。持ち主の記録が無い (再起動の後に誰も
+    張っていない) ときは効く。"""
+    am = _running_life(manager, session_factory)
+    owner = am._tick_life_owner
+    assert owner == (PLAN_DATE, 0)
+    at = _tick_at(manager)
+    generation = am.life_generation
+
+    assert am.cancel_tick_for_life(("2026-07-03", 0)) is False
+    assert _tick_at(manager) == at
+    assert am.life_generation == generation
+
+    assert am.cancel_tick_for_life(owner) is True
+    assert _tick_at(manager) is None
+    assert am.life_generation == generation + 1
+    assert am._tick_life_owner is None
+
+    assert am.cancel_tick_for_life(("2026-07-03", 0)) is False  # 予約は無い
+    assert am.life_generation == generation + 2  # 記録が無いので効く
+
+
+def test_the_watchdog_restore_records_the_running_life_as_the_owner(
+    manager, session_factory,
+):
+    """見張りの回復で張った予約も、走っているライフが持ち主になる — その
+    ライフの終了の取り消しが効く。"""
+    am = _running_life(manager, session_factory)
+    am.stop()
+    am._tick_life_owner = None  # 再起動 (in-memory の記録が消える)
+    assert am.start() is True
+    clock.advance_to(clock.now() + timedelta(minutes=10))
+    out = wiring.watchdog_tick(manager, PERSONA_ID)
+    assert out["tick_armed"] is True
+    assert am._tick_life_owner == (PLAN_DATE, 0)
+
+    clock.advance_to(BASE + timedelta(hours=22))
+    _end_life(manager)
+    assert _tick_at(manager) is None

@@ -1826,12 +1826,15 @@ def _ensure_life_cache_ttl(
 
 
 def _ensure_tick_reservation(
-    manager: Any, persona_id: str, life: Dict[str, Any],
+    manager: Any, persona_id: str, life: Dict[str, Any], *, life_key: Any,
 ) -> bool:
     """走っているライフにティックの予約が無ければ now + T で張る (無ければ張る)。
 
     生きている予約は上書きしない (``schedule_if_absent`` — v0.4 計画 §8.3 の
     「ティック × ティック」行)。張る主体の AutonomyManager が無ければ何もしない。
+    ``life_key`` (走っているライフの ``(営業日, 番号)``) は、張れた回のティックの
+    持ち主として渡す — そのライフの終了の節目の取り消しが効くように
+    (``AutonomyManager.cancel_tick_for_life``)。
 
     Returns:
         今回新しく張ったか。
@@ -1841,7 +1844,9 @@ def _ensure_tick_reservation(
     if am is None:
         return False
     try:
-        armed = am.arm_tick_if_absent(life_mode=life.get("mode"))
+        armed = am.arm_tick_if_absent(
+            life_mode=life.get("mode"), life_owner=life_key,
+        )
     except Exception:
         LOGGER.warning(
             "[watchdog] failed to restore the tick reservation (persona=%s)",
@@ -1940,7 +1945,10 @@ def watchdog_tick(manager: Any, persona_id: str) -> Dict[str, Any]:
             result["ttl_restored"] = _ensure_life_cache_ttl(
                 manager, persona_id, basis, first,
             )
-            result["tick_armed"] = _ensure_tick_reservation(manager, persona_id, first)
+            # 持ち主は lives[0] — 番号 0 (_ensure_life_cache_ttl と同じ印)。
+            result["tick_armed"] = _ensure_tick_reservation(
+                manager, persona_id, first, life_key=(basis.plan_date, 0),
+            )
         return result
 
     if not in_waking_window(hhmm, wake, close):
