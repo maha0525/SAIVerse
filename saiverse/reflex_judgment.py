@@ -746,13 +746,16 @@ def _usage_from_client(info: Any) -> Dict[str, Any]:
     cleaned = _clean_usage(raw, {name: name for name in _CLIENT_USAGE_FIELDS})
     if isinstance(ttl, str) and ttl:
         cleaned["cache_ttl"] = ttl
-    # 応答を受け取った時刻を運ぶ。締切で見切った応答は後から記帳されるので、
-    # 記帳の時刻で料金を決めると、料金の切り替わりをまたいだときに別の単価になる。
-    event_time = getattr(info, "timestamp", None)
-    if (cleaned and isinstance(event_time, (int, float)) and not isinstance(event_time, bool)
-            and math.isfinite(event_time)):
-        cleaned["timestamp"] = float(event_time)
     return cleaned
+
+
+def _client_event_time(info: Any) -> Optional[float]:
+    """LLM クライアントが応答を受け取った時刻 (epoch 秒)。読めなければ None。"""
+    event_time = getattr(info, "timestamp", None)
+    if (isinstance(event_time, (int, float)) and not isinstance(event_time, bool)
+            and math.isfinite(event_time)):
+        return float(event_time)
+    return None
 
 
 def _request_question(qid: str, question: Mapping[str, Any], backend: ReflexBackend) -> Dict[str, Any]:
@@ -899,7 +902,12 @@ def _read_all_answers(
     return resolved
 
 
-def _record_usage(backend: ReflexBackend, usage: Mapping[str, Any], persona_id: Optional[str]) -> None:
+def _record_usage(
+    backend: ReflexBackend,
+    usage: Mapping[str, Any],
+    persona_id: Optional[str],
+    event_time: Optional[float] = None,
+) -> None:
     """使用量を既存の記帳 (saiverse/usage_tracker.py) へモデル設定キー名義で載せる。
 
     LLM クライアントが通る道と同じ入口を使うので、モデル設定ファイルに ``pricing``
@@ -907,6 +915,9 @@ def _record_usage(backend: ReflexBackend, usage: Mapping[str, Any], persona_id: 
 
     キャッシュの欄は、値が入っているときだけ渡す — jev 互換の道は input/output しか
     持たないので、そちらの記帳は今までどおりの形のまま。
+
+    ``event_time`` は応答を受け取った時刻 (epoch 秒)。締切で見切った応答は後から
+    記帳されるので、料金はこの時刻で決める (無ければ記帳の時刻)。
     """
     if not usage:
         return
@@ -920,8 +931,7 @@ def _record_usage(backend: ReflexBackend, usage: Mapping[str, Any], persona_id: 
         ttl = usage.get("cache_ttl")
         if isinstance(ttl, str) and ttl:
             extra["cache_ttl"] = ttl
-        event_time = usage.get("timestamp")
-        if isinstance(event_time, float):
+        if event_time is not None:
             from datetime import datetime
             extra["timestamp"] = datetime.fromtimestamp(event_time)
 
@@ -1288,6 +1298,8 @@ class _JevCall:
         self.timeout = timeout
         self.transport = transport
         self._client: Optional[httpx.Client] = None
+        # 応答を受け取った時刻。料金はこの時刻で決める (記帳は後になりうる)。
+        self._received_at: Optional[float] = None
 
     def describe(self) -> str:
         return f"POST {self.backend.url}"
@@ -1298,7 +1310,10 @@ class _JevCall:
         self._client = httpx.Client(timeout=self.timeout, transport=self.transport)
 
     def perform(self) -> Any:
-        return self._client.post(self.backend.url, json=self.payload, headers=self.headers)
+        response = self._client.post(self.backend.url, json=self.payload, headers=self.headers)
+        self._received_at = time.time()
+        return response
+
 
     def abort(self) -> None:
         """締切で見切ったときに通信を切る (ワーカーの post が例外で戻る)。"""
@@ -1326,7 +1341,7 @@ class _JevCall:
             "arrive; recording its usage only: %s",
             self.backend.model_key, usage,
         )
-        _record_usage(self.backend, usage, persona_id)
+        _record_usage(self.backend, usage, persona_id, self._received_at)
 
     def read(
         self,
@@ -1356,7 +1371,7 @@ class _JevCall:
 
         # 使用量の記帳は、答えを読む**前**に済ませる (理由は evaluate の Note)。
         usage = _clean_usage(data.get(backend.usage_key), backend.usage_fields)
-        _record_usage(backend, usage, persona_id)
+        _record_usage(backend, usage, persona_id, self._received_at)
 
         answers = data.get(backend.answers_key)
         if backend.request_shape == REQUEST_SHAPE_OPENAI_DECISIONS:
@@ -1520,7 +1535,7 @@ class _LLMCall:
             "arrive; recording its usage only: %s",
             self.backend.model_key, usage,
         )
-        _record_usage(self.backend, usage, persona_id)
+        _record_usage(self.backend, usage, persona_id, _client_event_time(info))
 
     def read(
         self,
@@ -1533,7 +1548,7 @@ class _LLMCall:
         raw, info = result
         # 答えを読む**前**に記帳する (理由は evaluate の Note)。
         usage = _usage_from_client(info)
-        _record_usage(self.backend, usage, persona_id)
+        _record_usage(self.backend, usage, persona_id, _client_event_time(info))
 
         data: Any = raw
         if isinstance(data, str):

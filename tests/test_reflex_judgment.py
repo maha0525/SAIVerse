@@ -1140,6 +1140,38 @@ def test_abandoned_call_still_records_its_usage(usage_calls):
     assert usage_calls[0]["output_tokens"] == 5
     assert usage_calls[0]["persona_id"] == "air_city_a"
     assert usage_calls[0]["category"] == reflex_judgment.USAGE_CATEGORY
+    assert isinstance(usage_calls[0]["timestamp"], datetime)
+
+
+def test_http_usage_is_priced_at_receipt_not_at_recording(usage_calls, monkeypatch):
+    """HTTP の応答も、受け取った時刻で記帳する (記帳が遅れても料金の時刻はずれない)。"""
+    received = []
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "answers": {qid: {"type": "noul", "noul": 0.5} for qid in ("m0", "m1")},
+            "usage": {"input_tokens": 7, "output_tokens": 1},
+        })
+
+    original_perform = reflex_judgment._JevCall.perform
+    original_read = reflex_judgment._JevCall.read
+
+    def perform(self):
+        response = original_perform(self)
+        received.append(self._received_at)
+        return response
+
+    def late_read(self, *args, **kwargs):
+        time.sleep(0.3)  # 受け取ってから記帳までの遅れ
+        return original_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(reflex_judgment._JevCall, "perform", perform)
+    monkeypatch.setattr(reflex_judgment._JevCall, "read", late_read)
+    evaluate(STATE, QUESTIONS, timeout=2.5, transport=_transport(handler))
+
+    assert len(usage_calls) == 1 and len(received) == 1
+    assert usage_calls[0]["timestamp"] == datetime.fromtimestamp(received[0])
+    assert (datetime.now() - usage_calls[0]["timestamp"]).total_seconds() >= 0.25
 
 
 def test_deadline_racing_with_completion_records_the_usage_once(usage_calls):
