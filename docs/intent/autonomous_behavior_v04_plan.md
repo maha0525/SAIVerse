@@ -91,16 +91,17 @@
 2. **T 設定と予算の退役** (C5)。既定 30 分・床 10 分・目安表示 (決定 11)。保存先・均等モードの上限 50 分の強制場所は私が決める。
    → **済 (API/画面の露出は 8 で)**。保存先 = 起床スケジュール行の PLAYBOOK_PARAMS の `tick_interval_minutes` (旧 `daily_budget_pulses` と同じ席)。床と均等 50 分上限の強制は `day_plan.effective_tick_interval_minutes` (予約を張るたびに現在の設定から読む — ライフに焼き込まない)。予算は退役: ライフの行から budget_pulses が消え (used_pulses は観察用に残る)、`life_mode_and_min_budget` は「一日およそ N 回」の目安を返す `life_mode_and_tick_estimate` に世代交代。
 3. **開発者モードの連動の撤去とグローバル自律全停止** (決定 12)。issue `developer_mode_off_mass_disables_autonomy` をこれで閉じる。
-   → 土台は済: `user_settings.AUTONOMY_ALL_STOP` + `autonomy_wiring.is_autonomy_all_stopped / set_autonomy_all_stop` (in-memory キャッシュ、ペルソナ設定は書き換えない)。全停止は自律ゲートの唯一の口 `is_autonomy_on` の先頭で効く — ティック・判断・watchdog・ライフの節目・keep-alive が一括で止まり、アラームは鳴り続ける。**残り**: 連動の撤去 (api/routes/config.py) と全停止の API。
+   → **済**。土台 = `user_settings.AUTONOMY_ALL_STOP` + `autonomy_wiring.is_autonomy_all_stopped / set_autonomy_all_stop` (in-memory キャッシュ、ペルソナ設定は書き換えない)。全停止は自律ゲートの唯一の口 `is_autonomy_on` の先頭で効く — ティック・判断・watchdog・ライフの節目・keep-alive が一括で止まり、アラームは鳴り続ける (外から届いた実イベントへの直接応対は止まらない — 自律 OFF と同じ線引き)。連動の撤去と `GET/POST /api/config/autonomy-all-stop` も入り、issue は決着して archive へ。
 4. **keep-alive の発火タイミングの見直し** (C6 — ティックより先に keep-alive が発火して「最後の保険」の役でなくなる件。依存 14)。
    → **済**。ティックの予約がキャッシュ失効より前に発火するなら keep-alive を予約しない (ティックが保温を兼ねる — 標準モデルの Session に限る)。1 の「保温は数えない」と対で、保温が主役に立つ組を塞いだ。
 5. **会話との関係**: 空きティック (アラームも締め切りも無い回) は会話中に走らない (既存の会話中判定を流用)。`conversation_timeout_eats_short_life_window` の issue もここで見る。
    → **済**。発火のゲートが `get_user_conversation_state` を見て skip (分からないも skip。予約は残る — 会話の標準呼び出しが押し直す)。issue は対象消滅 (コマ繰り下げが前提) として決着し archive へ。
 6. **引き当て**: 締め切り → システムタスク → プールの順で機械的に選ぶ (タスク帳の API は実装済み・流用)。システムタスクの書き手と第一号 (自己定義の聞き取り) もここ。
-   → 引き当ては**済** (`build_tick_assignment` — 期限が過ぎた/next tick までに来る一件 → ORIGIN=system の先頭 → 自由。タスク帳が読めない回は skip — 締め切りを黙って自由時間に置き換えない)。**残り**: システムタスクの書き手と第一号 (自己定義の聞き取り)。
+   → **済**。引き当て = `build_tick_assignment` (期限が過ぎた/next tick までに来る一件 → ORIGIN=system の先頭 → 自由。タスク帳が読めない回は skip — 締め切りを黙って自由時間に置き換えない)。書き手 = `task_book.add_system_task` (冪等キー必須の名前つき引数)。第一号 = 自己定義の聞き取り (`day_plan._offer_self_definition_task` — 旧 LIFE_PURPOSE が空のペルソナにライフ開始で一度だけ。完了後は積み直さない)。
 7. **再起動からの回復**: T の予約の張り直しと、watchdog のティック用の作り直し (未決 14)。
    → **済**。見張り (watchdog、固定 10 分・LLM なし) がライフの張り直しに加えて「走っているライフにティックの予約が無ければ `schedule_if_absent` で張る」(再起動・自律 ON 切り替え・全停止の解除からの回復)。
 8. **管理画面の最小形**: 起床・就寝の時刻・自律 ON/OFF・T の設定とグローバル自律全停止だけの画面 (依存 10 — これが無いと新しい環境で実機検証が始められない)。
+   → **済** (実機の目視は段の検証で)。ペルソナ設定に「自律」の節 (`LifeSettingsSection` — ON/OFF・起床・就寝・間隔・モード・一日の目安。土台は `GET/PUT /api/people/{id}/life-settings`)、全体設定の環境タブに「自律の全停止」トグル。自律 ON/OFF の画面の書き手はこの節に一本化 (ペルソナ設定本体の PATCH は欄を送らない)。WorldEditor に残る別のトグルは既存のまま (書き手 2 つの状態 — 実害は無いが統合は別途)。
 
 検証: 隔離環境で短いライフ (例: 2 時間) を実時間で回し、ティックが T 間隔で打たれ・会話で止まり・会話後 T 分で再開することをログで確認。そのあとまはーの実機で一日。
 
