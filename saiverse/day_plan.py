@@ -513,13 +513,16 @@ def get_life_for_time(lives: List[Dict[str, Any]], hhmm: str) -> Optional[int]:
 def is_keepalive_allowed(manager: Any, persona_id: str) -> bool:
     """keep-alive 連鎖のライフ従属ゲート (life.md §5.2)。
 
-    その日 lives が宣言されていれば、現在時刻がいずれかのライフ区間内のときだけ
-    True (谷では False = keep-alive を止める)。lives 未宣言の日 / ペルソナは
+    その日 lives が宣言されていれば、現在時刻がいずれかのライフ区間内で、かつ
+    そのライフの終了の節目が済んでいない (``ended`` が立っていない) ときだけ
+    True (谷・終了済みでは False = keep-alive を止める)。lives 未宣言の日 / ペルソナは
     常に True (旧挙動のまま — 完全後方互換)。判定失敗時は True にフォールバック
     する (安全側は「温め続ける」— keep-alive を止める方向に倒さない)。
 
-    ``sea.runtime.SEARuntime.run_cache_keepalive`` が唯一の呼び出し元
-    (keep-alive 連鎖の判定を 1 箇所に集約する設計、life.md Phase3)。
+    呼び出し元は keep-alive 連鎖の判定の集約点 (life.md Phase3) の三箇所:
+    ``sea.runtime.SEARuntime.run_cache_keepalive`` の冒頭と送信直前の再検査、
+    ``sea.session_lifecycle.SessionLifecycle.reconcile_keepalive_after_tick``
+    (ティックが温めなかった回・予約の張り直しの後の再照合)。
 
     見る営業日は :func:`resolve_business_day` — 予約・watchdog と同じ解決器
     (現在時刻を含む確定ライフ優先)。ここだけ現行 PersonaSchedule で日を決めると、
@@ -530,7 +533,17 @@ def is_keepalive_allowed(manager: Any, persona_id: str) -> bool:
         if basis is None or not basis.lives:
             return True
         hhmm = clock.now().strftime("%H:%M")
-        return get_life_for_time(basis.lives, hhmm) is not None
+        index = get_life_for_time(basis.lives, hhmm)
+        if index is None:
+            return False
+        # 終了の節目が済んだライフは、保存された区間の内側でも許可しない —
+        # 就寝設定を前倒しして終了の節目が走った後、保存された end までの間に
+        # 保温が続いていた (2026-10-12 Codex 敵対レビュー 段 3 7 巡目 medium)。
+        # started は要求しない: 開始の節目は冪等段 (ティックの予約 → 保温の
+        # 再照合) を started マーカーの commit より**前**に走らせるので、
+        # started を要求すると開始の節目自身の再照合が必ず拒否される。開始前の
+        # 区間内は従来どおり許可側 (温め続ける側) に倒す。
+        return not basis.lives[index].get("ended")
     except Exception:
         LOGGER.warning(
             "[day_plan] is_keepalive_allowed failed (persona=%s); defaulting to allow",

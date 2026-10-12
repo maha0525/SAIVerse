@@ -709,3 +709,85 @@ def test_keepalive_does_not_send_when_the_life_ends_during_composition(_mock_cac
     assert manager.sea_runtime.run_cache_keepalive(PERSONA_ID) is False
     assert client.calls == []
     assert touched == []
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 7 巡目 medium 3: 保温のライフ生存の判定は
+# 終了の節目 (ended) を見る
+# ---------------------------------------------------------------------------
+
+
+def _life_ended_early(manager):
+    """07:00〜22:00 で確定・開始したライフを、就寝設定の前倒しで 12:00 に終えた
+    (ended は立つが、保存された end は 22:00 のまま)。"""
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    lives = _save_life(manager, start="07:00", end="22:00", mode="free")
+    _life_start(manager, lives[0])
+    clock.advance_to(BASE + timedelta(hours=12))
+    _life_end(manager, lives[0])
+    life = day_plan.get_lives(manager, PERSONA_ID, PLAN_DATE)[0]
+    assert life["ended"] and life["end"] == "22:00"
+
+
+def test_keepalive_is_not_allowed_after_an_early_life_end(manager):
+    """medium 3 の再現: 終了の節目が済んだ後、保存された end (22:00) より前の
+    時刻 (12:30) でも許可しない。開始済み・未終了の区間内は従来どおり許可。"""
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    lives = _save_life(manager, start="07:00", end="22:00", mode="free")
+    _life_start(manager, lives[0])
+    clock.advance_to(BASE + timedelta(hours=11))
+    assert day_plan.is_keepalive_allowed(manager, PERSONA_ID) is True
+
+    clock.advance_to(BASE + timedelta(hours=12))
+    _life_end(manager, lives[0])
+    clock.advance_to(BASE + timedelta(hours=12, minutes=30))
+    assert day_plan.is_keepalive_allowed(manager, PERSONA_ID) is False
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_after_an_early_life_end_neither_sends_nor_rearms(_mock_cache, manager):
+    """medium 3: 終了の節目の後に届いた保温 (手渡し済みで取り消しが届かなかった
+    もの) は、保存された区間の内側でも送らない — LLM を呼ばず、touch (= 次の保温の
+    再予約の入口) もしない。"""
+    persona = manager.personas[PERSONA_ID]
+    _life_ended_early(manager)
+    clock.advance_to(BASE + timedelta(hours=12, minutes=30))
+
+    client = FakeLLMClient()
+    touched = _wire_keepalive(manager.sea_runtime, persona, client)
+    assert manager.sea_runtime.run_cache_keepalive(PERSONA_ID) is False
+    assert client.calls == []
+    assert touched == []
+    assert not any(
+        key.startswith(f"ttl:{PERSONA_ID}")
+        for key in manager.event_scheduler._entries_by_key
+    )
+
+
+@patch("saiverse.model_configs.get_cache_config", return_value={"type": "explicit"})
+def test_keepalive_does_not_send_when_an_early_life_end_lands_during_composition(
+    _mock_cache, manager,
+):
+    """medium 3 (レビューの再現順序): 冒頭のライフのゲートは通った (11:59、区間内・
+    未終了)。保温の組成の最中に、前倒しした就寝設定で終了の節目が走った (ended が
+    立つ。保存された end は 22:00 のまま)。送信の直前の再検査で送らない。"""
+    persona = manager.personas[PERSONA_ID]
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    lives = _save_life(manager, start="07:00", end="22:00", mode="free")
+    _life_start(manager, lives[0])
+    clock.advance_to(BASE + timedelta(hours=11, minutes=59))
+
+    client = FakeLLMClient()
+    touched = _wire_keepalive(manager.sea_runtime, persona, client)
+    composed = manager.sea_runtime._prepare_context
+
+    def _compose_across_the_early_life_end(*a, **k):
+        messages = composed(*a, **k)
+        clock.advance_to(BASE + timedelta(hours=12))
+        _life_end(manager, lives[0])
+        return messages
+
+    manager.sea_runtime._prepare_context = _compose_across_the_early_life_end
+    assert manager.sea_runtime.run_cache_keepalive(PERSONA_ID) is False
+    assert client.calls == []
+    assert touched == []

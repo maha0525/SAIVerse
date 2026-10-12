@@ -1646,3 +1646,100 @@ def test_watchdog_restore_leaves_a_user_cache_setting_alone(manager, session_fac
     assert out["ttl_restored"] is False
     assert manager.get_persona_cache_override(PERSONA_ID) == {"enabled": False, "ttl": "5m"}
     assert PERSONA_ID not in manager._life_ttl_owners
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-12 Codex 敵対レビュー 段 3 7 巡目: 最終ゲートの後の世代の再照合
+# (medium 1)、ライフの切り替わりでティックの世代を進める (medium 2)
+# ---------------------------------------------------------------------------
+
+
+def test_a_stop_and_restart_during_the_final_gate_read_does_not_start_the_tick(
+    manager, session_factory,
+):
+    """medium 1 の再現順序: 生成直前のフェンスが冒頭の世代の照合を通った後、
+    ゲートのライフの読み (DB) の最中に停止→再開が完了した。いまの状態は
+    RUNNING でライフも走っているが、許可を返す直前の最後の照合で見送る。"""
+    am = _running_life(manager, session_factory)
+    original_gate = am._check_gate
+
+    def _gate_with_stop_and_restart_inside(now, *, check_conversation=True):
+        verdict = original_gate(now, check_conversation=check_conversation)
+        if check_conversation:  # 生成直前のフェンスの読み (冒頭のゲートは会話を見ない)
+            assert am.stop() is True
+            assert am.start() is True
+        return verdict
+
+    am._check_gate = _gate_with_stop_and_restart_inside
+    _fire_tick_reservation(manager)
+    assert manager.fire_tick.calls == []
+    assert manager.fire_tick.refused == ["stopped"]
+
+
+def _set_overnight_life_window(session_factory):
+    """07:00〜翌 06:59 のライフ (終了の直後に次のライフが始まる並び)。"""
+    _add_day_schedule(session_factory, wiring.LIFE_START_SCHEDULE_PLAYBOOK, "07:00")
+    _add_day_schedule(session_factory, wiring.LIFE_END_SCHEDULE_PLAYBOOK, "06:59")
+
+
+def test_a_tick_handed_off_in_the_previous_life_does_not_run_in_the_next(
+    manager, session_factory,
+):
+    """medium 2 の再現順序: 前のライフのティックの発火を手渡しで保留 → ライフ
+    終了 → 次のライフの開始 (新しい予約は 07:30) → 07:02 に保留していた発火が
+    再開。停止は挟まっていない (運転の世代は同じ) が、ライフ終了を跨いだ古い
+    発火なので何もしない — 次のライフの予約を上書きせず、生成もしない。次の
+    ライフの予約は正常に発火する。"""
+    _set_overnight_life_window(session_factory)
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    am = _start_am(manager)
+    _start_life(manager)
+    stale_fire = _hand_off_tick(manager)  # 前のライフの 07:30 の発火
+
+    clock.advance_to(BASE + timedelta(days=1, hours=6, minutes=59))
+    _end_life(manager)
+    assert _tick_at(manager) is None
+    clock.advance_to(BASE + timedelta(days=1, hours=7))
+    _start_life(manager)
+    new_at = _tick_at(manager)
+    assert new_at == BASE + timedelta(days=1, hours=7, minutes=30)
+
+    clock.advance_to(BASE + timedelta(days=1, hours=7, minutes=2))
+    stale_fire()
+    assert manager.fire_tick.calls == []
+    assert _tick_at(manager) == new_at
+
+    _fire_tick_reservation(manager)
+    assert len(manager.fire_tick.calls) == 1
+    assert am.last_report.status == "completed"
+
+
+def test_a_life_switch_while_waiting_for_the_beat_lock_does_not_start_the_tick(
+    manager, session_factory,
+):
+    """medium 2 (生成直前のフェンス): 前のライフの発火が Beat を待っている間に、
+    ライフ終了と次のライフの開始が済んだ。次のライフは走っているのでゲートは
+    通るが、ライフの世代の照合で見送る。次のライフの予約は残る。"""
+    _set_overnight_life_window(session_factory)
+    clock.enable_virtual(BASE + timedelta(hours=7))
+    _start_am(manager)
+    _start_life(manager)  # 前日 (07-04) 07:00〜翌 06:59 のライフ
+    switched: Dict[str, Any] = {}
+
+    def _life_switch_while_waiting():
+        clock.advance_to(BASE + timedelta(days=1, hours=6, minutes=59))
+        _end_life(manager)
+        clock.advance_to(BASE + timedelta(days=1, hours=7))
+        _start_life(manager)
+        switched["at"] = _tick_at(manager)
+
+    manager.fire_tick = FakeTicks(manager, beat_wait=_life_switch_while_waiting)
+    # ライフの尻尾 (翌 06:58) で前のライフの予約が発火し、ゲートを通って Beat
+    # 待ちに入る。
+    stale_fire = _hand_off_tick(manager)
+    clock.advance_to(BASE + timedelta(days=1, hours=6, minutes=58))
+    stale_fire()
+    assert manager.fire_tick.calls == []
+    assert manager.fire_tick.refused == ["outside life"]
+    assert switched["at"] == BASE + timedelta(days=1, hours=7, minutes=30)
+    assert _tick_at(manager) == switched["at"]
