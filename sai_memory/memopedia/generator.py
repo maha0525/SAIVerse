@@ -197,11 +197,7 @@ def recall_with_snippets(
 
         # 2. Semantic search
         if query and query.strip():
-            embedder = Embedder(
-                model=settings.embed_model,
-                local_model_path=settings.embed_model_path,
-                model_dim=settings.embed_model_dim,
-            )
+            embedder = Embedder(local_model_path=settings.embed_model_path)
 
             groups = semantic_recall_groups(
                 conn,

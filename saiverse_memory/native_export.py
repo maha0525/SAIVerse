@@ -764,11 +764,7 @@ def _regenerate_embeddings(
 
         settings = load_settings()
         try:
-            embedder = Embedder(
-                model=settings.embed_model,
-                local_model_path=settings.embed_model_path,
-                model_dim=settings.embed_model_dim,
-            )
+            embedder = Embedder(local_model_path=settings.embed_model_path)
         except Exception:
             LOGGER.warning(
                 "Embedder not available, skipping embedding generation",

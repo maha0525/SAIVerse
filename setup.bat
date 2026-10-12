@@ -290,7 +290,8 @@ if %errorlevel% neq 0 (
 REM --- 12. Pre-download embedding model ---
 echo.
 echo [SETUP] Downloading embedding model (first time only, may take a few minutes)...
-python -c "from huggingface_hub import snapshot_download; snapshot_download('intfloat/multilingual-e5-small', local_dir='sbert/multilingual-e5-small', ignore_patterns=['*.bin', '*.safetensors', '*.h5', 'openvino/*', '*.ot'])"
+REM Same download as the first launch (pinned files of sai_memory/config.py), then a test load.
+python -c "from sai_memory.memory.recall import Embedder; Embedder()"
 if %errorlevel% neq 0 (
     echo [WARN] Embedding model download failed. It will retry on first launch.
 ) else (

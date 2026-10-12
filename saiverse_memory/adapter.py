@@ -266,11 +266,7 @@ class SAIMemoryAdapter:
             raise exc
 
         try:
-            self.embedder = Embedder(
-                model=self.settings.embed_model,
-                local_model_path=self.settings.embed_model_path,
-                model_dim=self.settings.embed_model_dim,
-            )
+            self.embedder = Embedder(local_model_path=self.settings.embed_model_path)
         except Exception:
             LOGGER.warning(
                 "Failed to load embedding model '%s'. "

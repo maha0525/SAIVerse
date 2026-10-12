@@ -9,11 +9,9 @@
 #   - cuDNN 9.x installed
 #
 # See docs/getting-started/gpu-setup.md for detailed instructions.
-
-# Replace CPU-only onnxruntime with GPU version
-# Note: You may need to uninstall onnxruntime first:
-#   pip uninstall onnxruntime -y
-onnxruntime-gpu>=1.21.0
+#
+# The SAIMemory embeddings run on CPU only (docs/intent/embedding_gemma2_migration.md),
+# so onnxruntime-gpu is no longer needed (the CPU onnxruntime from the lock is used).
 
 # Optional: PyTorch with CUDA support
 # Uncomment if you need PyTorch GPU acceleration

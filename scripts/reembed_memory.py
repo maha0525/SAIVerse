@@ -29,29 +29,10 @@ from sai_memory.memory.storage import (
 )
 
 
-def _normalize_path(value: Optional[str]) -> Optional[str]:
-    if not value:
-        return None
-    return str(Path(value).expanduser().resolve())
-
-
-def _build_embedder(
-    *,
-    model_override: Optional[str],
-    model_path_override: Optional[str],
-    model_dim_override: Optional[int],
-) -> Tuple[Embedder, int]:
+def _build_embedder() -> Tuple[Embedder, int]:
     settings = load_settings()
-    model_name = (model_override or settings.embed_model or "").strip()
-    model_path = _normalize_path(model_path_override or settings.embed_model_path)
-    model_dim = model_dim_override or settings.embed_model_dim
-
-    embedder = Embedder(
-        model=model_name,
-        local_model_path=model_path,
-        model_dim=model_dim,
-    )
-    expected_dim = embedder.model.embedding_size
+    embedder = Embedder(local_model_path=settings.embed_model_path)
+    expected_dim = embedder.embedding_size
     return embedder, expected_dim
 
 
@@ -152,20 +133,6 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         description="Re-embed SAIMemory messages with mismatched vector dimensions."
     )
     parser.add_argument(
-        "--model",
-        help="Override embedding model name (e.g., intfloat/multilingual-e5-large). "
-        "Defaults to SAIMEMORY_EMBED_MODEL or config.",
-    )
-    parser.add_argument(
-        "--model-path",
-        help="Override local model directory. Defaults to SAIMEMORY_EMBED_MODEL_PATH or config.",
-    )
-    parser.add_argument(
-        "--model-dim",
-        type=int,
-        help="Explicit embedding dimension override if the model metadata is unavailable.",
-    )
-    parser.add_argument(
         "--force",
         action="store_true",
         help="Force re-embed all messages regardless of dimension match. "
@@ -178,11 +145,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    embedder, expected_dim = _build_embedder(
-        model_override=args.model,
-        model_path_override=args.model_path,
-        model_dim_override=args.model_dim,
-    )
+    embedder, expected_dim = _build_embedder()
     settings = load_settings()
 
     for persona_id in args.personas:

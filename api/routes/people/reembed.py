@@ -14,7 +14,6 @@ _reembed_lock = threading.Lock()
 
 def _run_reembed_task(persona_id: str, force: bool):
     """Background task to run re-embedding."""
-    from pathlib import Path
     from sai_memory.config import load_settings
     from sai_memory.memory.chunking import chunk_text
     from sai_memory.memory.recall import Embedder
@@ -33,12 +32,8 @@ def _run_reembed_task(persona_id: str, force: bool):
             return
         
         settings = load_settings()
-        embedder = Embedder(
-            model=settings.embed_model or "",
-            local_model_path=str(Path(settings.embed_model_path).expanduser().resolve()) if settings.embed_model_path else None,
-            model_dim=settings.embed_model_dim,
-        )
-        expected_dim = embedder.model.embedding_size
+        embedder = Embedder(local_model_path=settings.embed_model_path)
+        expected_dim = embedder.embedding_size
         
         conn = init_db(str(db_path), check_same_thread=False)
         
