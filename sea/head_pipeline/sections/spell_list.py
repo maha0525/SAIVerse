@@ -486,8 +486,15 @@ class SpellListSection:
                 with open(manifest_path, encoding="utf-8") as f:
                     raw = json.load(f)
                 if isinstance(raw, dict):
-                    display_name = raw.get("display_name") or ""
-                    description = raw.get("spell_description") or raw.get("description") or ""
+                    # display_name / description は {"ja": ..., "en": ...} の
+                    # 多言語辞書で書かれることが多い。そのまま渡すと head に
+                    # 辞書の repr が出る (2026-10-12 に全アドオンで発覚)。
+                    from saiverse.i18n_utils import resolve_i18n_text
+
+                    display_name = resolve_i18n_text(raw.get("display_name"))
+                    description = resolve_i18n_text(
+                        raw.get("spell_description") or raw.get("description")
+                    )
             except FileNotFoundError:
                 pass
             except Exception:

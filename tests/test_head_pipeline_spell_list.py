@@ -166,6 +166,37 @@ def test_capture_respects_availability_check(ctx, fake_spell_registry):
     assert names == ["open"]
 
 
+def test_manifest_with_localized_dicts_renders_plain_text(tmp_path):
+    """addon.json の display_name / description が多言語辞書でも、head には
+    日本語の文字列だけが出る (辞書の repr を出さない)。"""
+    import json as _json
+
+    addon_dir = tmp_path / "addonX"
+    addon_dir.mkdir()
+    (addon_dir / "addon.json").write_text(_json.dumps({
+        "display_name": {"ja": "アドオンX", "en": "Addon X"},
+        "description": {"ja": "日本語の説明", "en": "English description"},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    with patch("saiverse.data_paths.EXPANSION_DATA_DIR", tmp_path):
+        manifests = SpellListSection()._collect_manifests({"addonX"})
+
+    assert manifests == [AddonManifest(
+        addon_key="addonX", display_name="アドオンX", description="日本語の説明",
+    )]
+    snap = SpellListSnapshot(
+        enabled=True,
+        entries=(SpellEntry(
+            name="addonX__t", display_name="t", description="d",
+            parameters_json="{}", addon_key="addonX", visible=True,
+        ),),
+        addon_manifests=tuple(manifests),
+    )
+    text = SpellListSection().render(snap).text
+    assert "**アドオンX** (`addonX`) — 日本語の説明" in text
+    assert "{'ja'" not in text
+
+
 def test_render_disabled_snapshot():
     snap = SpellListSnapshot(enabled=False, entries=(), addon_manifests=())
     rendered = SpellListSection().render(snap)
