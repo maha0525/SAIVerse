@@ -93,17 +93,25 @@ def _snap(*items):
 # ---------------------------------------------------------------------------
 
 
-def test_provider_replacement_failure_isolation_and_unregister():
-    # 記録の無い提供口の失敗は「今回は返さない」で、他のアドオンには波及しない。
+def test_provider_replacement_empty_values_and_unregister():
     addon_context.register_provider("fixture", lambda **_kw: "first")
     addon_context.register_provider("fixture", lambda **_kw: "second")
-    addon_context.register_provider("broken", lambda **_kw: 1 / 0)
     addon_context.register_provider("silent", lambda **_kw: "")
     addon_context.register_provider("non_str", lambda **_kw: 42)
     for persona in (None, _persona("room")):
         assert addon_context.collect_guidance(persona, "room") == [("fixture", "second")]
     addon_context.unregister_provider("fixture")
     assert addon_context.collect_guidance(_persona("room"), "room") == []
+
+
+def test_failure_without_record_is_unknown_not_empty():
+    # 使える前回の結果が無い失敗 (再起動直後など) は「案内なし」ではなく
+    # 「分からない」— 例外で集める処理全体を撮れなかったことにする。
+    addon_context.register_provider("fixture", lambda **_kw: "案内")
+    addon_context.register_provider("broken", lambda **_kw: 1 / 0)
+    for persona in (None, _persona("room")):
+        with pytest.raises(addon_context.GuidanceUnavailable):
+            addon_context.collect_guidance(persona, "room")
 
 
 def test_temporary_failure_keeps_the_last_guidance():
@@ -120,7 +128,8 @@ def test_temporary_failure_keeps_the_last_guidance():
     ]
     # 記録はペルソナごと — 一度も成功していない別のペルソナには使わない。
     other_persona = SimpleNamespace(persona_id="someone_else", current_building_id="room")
-    assert addon_context.collect_guidance(other_persona, "room") == [("other", "他の案内")]
+    with pytest.raises(addon_context.GuidanceUnavailable):
+        addon_context.collect_guidance(other_persona, "room")
 
 
 def test_temporary_failure_after_no_guidance_stays_without_guidance():
@@ -133,17 +142,27 @@ def test_temporary_failure_after_no_guidance_stays_without_guidance():
     assert addon_context.collect_guidance(persona, "room") == []
 
 
-def test_failure_without_record_returns_nothing():
+def test_failure_without_persona_id_has_no_record():
     flaky = _Flaky("案内")
-    flaky.fail = True
     addon_context.register_provider("flaky", flaky)
-    assert addon_context.collect_guidance(_persona("room"), "room") == []
-    # persona_id が取れないときは記録しないので、成功の後の失敗でも返さない。
-    flaky.fail = False
+    # persona_id が取れないときは記録しないので、成功の後の失敗も「分からない」。
     assert addon_context.collect_guidance(None, "room") == [("flaky", "案内")]
     flaky.fail = True
-    assert addon_context.collect_guidance(None, "room") == []
+    with pytest.raises(addon_context.GuidanceUnavailable):
+        addon_context.collect_guidance(None, "room")
     assert addon_context._last_results == {}
+
+
+def test_result_of_a_provider_unregistered_mid_call_is_dropped():
+    # 呼び出しの最中に解除されたアドオンの案内は、解除後の世界に持ち込まない。
+    def unregister_while_running(**_kw):
+        addon_context.unregister_provider("leaving")
+        return "解除前の案内"
+
+    addon_context.register_provider("leaving", unregister_while_running)
+    persona = _persona("room")
+    assert addon_context.collect_guidance(persona, "room") == []
+    assert ("fixture", "leaving") not in addon_context._last_results
 
 
 def test_unregister_forgets_the_last_results_but_replacement_keeps_them():
@@ -162,7 +181,8 @@ def test_unregister_forgets_the_last_results_but_replacement_keeps_them():
     addon_context.unregister_provider("flaky")
     assert ("fixture", "flaky") not in addon_context._last_results
     addon_context.register_provider("flaky", replacement)
-    assert addon_context.collect_guidance(persona, "room") == []
+    with pytest.raises(addon_context.GuidanceUnavailable):
+        addon_context.collect_guidance(persona, "room")
 
 
 def test_collect_guidance_is_sorted_by_addon_name():
@@ -433,6 +453,38 @@ def test_pipeline_temporary_provider_failure_produces_no_false_notifications(tmp
         assert redrawn.sections["addon_guidance"] == _snap(
             ("godot-vessel", "Godot Virtual Vessel", GUIDE_TEXT),
         )
+
+        flaky.fail = False
+        assert pipeline.flush_diffs(_ctx(VESSEL_ROOM), all_sections=True) == []
+
+
+def test_pipeline_failure_right_after_restart_keeps_head_and_sends_nothing(tmp_path):
+    """再起動直後 (前回の結果の記録が空) に提供口が失敗しても、届けた案内に
+    「当てはまらなくなりました」は出ず、撮り直しは古い head を据え置いて
+    「撮り直せていない」と記録する (届けた通知を提示から下ろさせない)。"""
+    from sea.head_pipeline import HeadPipeline, HeadSectionRegistry
+
+    _write_manifest(tmp_path, "godot-vessel", {"ja": "Godot Virtual Vessel"})
+    registry = HeadSectionRegistry()
+    registry.register(AddonGuidanceSection())
+    pipeline = HeadPipeline(registry=registry)
+    flaky = _Flaky(GUIDE_TEXT)
+
+    with patch("saiverse.data_paths.EXPANSION_DATA_DIR", tmp_path):
+        addon_context.register_provider("godot-vessel", flaky)
+        pipeline.capture_all(_ctx(VESSEL_ROOM))
+
+        # 再起動相当: メモリの記録だけが消え、head と既読は残っている。
+        addon_context._last_results.clear()
+        flaky.fail = True
+        assert pipeline.flush_diffs(_ctx(VESSEL_ROOM), all_sections=True) == []
+        redrawn = pipeline.capture_all(_ctx(VESSEL_ROOM))
+        assert redrawn.sections["addon_guidance"] == _snap(
+            ("godot-vessel", "Godot Virtual Vessel", GUIDE_TEXT),
+        )
+        assert pipeline.sections_not_freshly_captured(
+            "fixture", "fixture-model", ["addon_guidance"],
+        ) == {"addon_guidance"}
 
         flaky.fail = False
         assert pipeline.flush_diffs(_ctx(VESSEL_ROOM), all_sections=True) == []

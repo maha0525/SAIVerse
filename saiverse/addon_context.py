@@ -25,7 +25,10 @@
 
 一時的な失敗では前回の結果を使う: 提供口が例外を出したとき、そのペルソナと
 アドオンの組で最後に成功した結果 (「案内なし」だった結果も含む) が記録されて
-いれば、それを今回の結果として使う。記録が無ければ今回は案内を返さない。
+いれば、それを今回の結果として使う。記録が無ければ (再起動直後など)
+:class:`GuidanceUnavailable` を送出して、案内を集める処理全体を「撮れなかった」
+ことにする。head の撮り直しは古い値を据え置いて「撮り直せていない」と記録し
+(届けた通知は提示から下ろされない)、差分検知はこのセクションを飛ばす。
 失敗を「案内なし」として扱うと、失敗した回の差分検知で「当てはまらなくなり
 ました」の偽通知が出て、復旧後に「届きました」の偽通知がもう一度出る。
 さらに head の撮り直しだけが失敗すると、head から案内が消えたのに撮り直しは
@@ -69,6 +72,15 @@ def unregister_provider(addon_name: str) -> None:
             del _last_results[key]
 
 
+class GuidanceUnavailable(RuntimeError):
+    """提供口が失敗し、使える前回の結果も無い — 今回の案内は「分からない」。
+
+    「案内なし」とは別物として扱わせるための例外。案内を集める側 (head の
+    addon_guidance セクションの capture) はこれをそのまま上へ流し、head の
+    撮り直しは古い値の据え置き、差分検知はこのセクションの見送りになる。
+    """
+
+
 def _normalize(text: Any) -> str:
     return text.strip() if isinstance(text, str) else ""
 
@@ -79,8 +91,10 @@ def collect_guidance(persona: Any, building_id: Any) -> list[tuple[str, str]]:
     順序を addon 名で固定するのは、同じ世界なら head に毎回同じ文字列が出る
     ことが prefix キャッシュの前提だから。案内を返さなかった提供口は列に
     含めない。提供口が例外を出したときは、モジュールの docstring の規則どおり
-    前回の結果を使う。``persona`` から ``persona_id`` が取れないときは結果を
-    記録しない (失敗時に使える前回の結果も無い)。
+    前回の結果を使い、使える記録が無ければ :class:`GuidanceUnavailable` を
+    送出する。``persona`` から ``persona_id`` が取れないときは結果を記録しない
+    (失敗時に使える前回の結果も無い)。呼び出しの最中に解除されたアドオンの
+    結果は捨てる (解除後の世界に、解除前の案内を持ち込まない)。
     """
     persona_id: Optional[str] = getattr(persona, "persona_id", None) if persona is not None else None
     if not isinstance(persona_id, str) or not persona_id:
@@ -94,14 +108,16 @@ def collect_guidance(persona: Any, building_id: Any) -> list[tuple[str, str]]:
     for name, provider, generation in providers:
         try:
             text = _normalize(provider(persona=persona, building_id=building_id))
-        except Exception:
+        except Exception as exc:
             LOGGER.warning("addon context provider failed addon=%s", name, exc_info=True)
-            if persona_id is None:
-                continue
-            with _lock:
-                previous = _last_results.get((persona_id, name))
+            previous = None
+            if persona_id is not None:
+                with _lock:
+                    previous = _last_results.get((persona_id, name))
             if previous is None:
-                continue
+                raise GuidanceUnavailable(
+                    f"addon context provider failed without a usable last result: {name}"
+                ) from exc
             LOGGER.info(
                 "addon context provider: using the last successful result "
                 "addon=%s persona=%s has_guidance=%s",
@@ -109,10 +125,14 @@ def collect_guidance(persona: Any, building_id: Any) -> list[tuple[str, str]]:
             )
             text = previous
         else:
-            if persona_id is not None:
-                with _lock:
-                    if _generations.get(name, 0) == generation and name in _providers:
-                        _last_results[(persona_id, name)] = text
+            with _lock:
+                still_registered = (
+                    _generations.get(name, 0) == generation and name in _providers
+                )
+                if still_registered and persona_id is not None:
+                    _last_results[(persona_id, name)] = text
+            if not still_registered:
+                continue
         if text:
             guidance.append((name, text))
     return guidance
