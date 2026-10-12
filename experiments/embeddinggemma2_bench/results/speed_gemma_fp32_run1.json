@@ -1,0 +1,109 @@
+{
+  "role": "gemma_fp32",
+  "info": {
+    "model": "google/embeddinggemma-2",
+    "runtime": "sentence-transformers 6.1.0 / transformers 5.19.0 / torch 2.14.1+cpu (CPU, 12 threads)",
+    "dtype": "torch.float32",
+    "prompt_query": "task: search result | query: ",
+    "prompt_document": "title: none | text: ",
+    "prompt_sts": "task: sentence similarity | query: ",
+    "batch_size": 32,
+    "dim": 768,
+    "n_params_loaded_now": 744371488,
+    "param_breakdown_at_load": {
+      "vision_tower": 167364608,
+      "language_model": 271002624,
+      "audio_tower": 304824608,
+      "embed_vision": 393216,
+      "embed_audio": 786432
+    },
+    "text_only_hack": false
+  },
+  "import_s": 13.198335899971426,
+  "load_s": 6.160080100060441,
+  "query_count": 30,
+  "query_len_chars": [
+    21,
+    28
+  ],
+  "query_warmup": 3,
+  "first_query_ms": 158.62540004309267,
+  "query_ms_all": [
+    158.62540004309267,
+    124.30229992605746,
+    141.3759000133723,
+    144.65259993448853,
+    147.89269992616028,
+    142.32960005756468,
+    129.27340005990118,
+    129.92859992664307,
+    132.90630001574755,
+    148.5074000665918,
+    142.65870000235736,
+    147.5713000399992,
+    140.58959996327758,
+    128.98389995098114,
+    137.71439995616674,
+    139.21960000880063,
+    141.03609998710454,
+    167.29570005554706,
+    174.11090002860874,
+    176.29110009875149,
+    151.00519999396056,
+    131.6033999901265,
+    145.7225999329239,
+    143.2889000279829,
+    161.93470009602606,
+    145.88039997033775,
+    141.42460003495216,
+    141.90619997680187,
+    136.93909998983145,
+    141.28750003874302
+  ],
+  "query_median_ms": 142.32960005756468,
+  "query_p95_ms": 172.06634003669024,
+  "query_mean_ms": 144.8872037085325,
+  "query_min_ms": 128.98389995098114,
+  "query_max_ms": 176.29110009875149,
+  "batch_count": 200,
+  "batch_len_chars": [
+    159,
+    400
+  ],
+  "batch_mean_chars": 287.28,
+  "batch_s": 38.9246412999928,
+  "batch_texts_per_s": 5.138133411650398,
+  "emb_dim": 768,
+  "memory": {
+    "start": {
+      "rss_mb": 22.046875,
+      "peak_wset_mb": 22.046875,
+      "private_mb": 11.875,
+      "method": "psutil"
+    },
+    "after_import": {
+      "rss_mb": 424.04296875,
+      "peak_wset_mb": 424.04296875,
+      "private_mb": 1858.734375,
+      "method": "psutil"
+    },
+    "after_load": {
+      "rss_mb": 3532.484375,
+      "peak_wset_mb": 3694.88671875,
+      "private_mb": 6189.94140625,
+      "method": "psutil"
+    },
+    "after_queries": {
+      "rss_mb": 3580.61328125,
+      "peak_wset_mb": 3694.88671875,
+      "private_mb": 6229.00390625,
+      "method": "psutil"
+    },
+    "after_batch": {
+      "rss_mb": 3672.60546875,
+      "peak_wset_mb": 4910.30859375,
+      "private_mb": 6228.66796875,
+      "method": "psutil"
+    }
+  }
+}
