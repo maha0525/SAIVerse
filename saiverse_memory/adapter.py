@@ -276,9 +276,21 @@ class SAIMemoryAdapter:
             )
             self.embedder = None
 
-        # Detect embedding model changes
-        if self.conn and self.embedder:
+        # Detect embedding model changes. The check needs only the DB and the
+        # stored dimension (EMBED_DIM), so it runs whether or not the model
+        # loaded.
+        if self.conn is not None:
             self._check_embed_model_change()
+            if self.embedder is None:
+                # Recall stays off until the model loads. Raising the flag puts
+                # the persona on the re-embed banner; running the re-embed
+                # retries the load (ensure_embedder) before lifting it.
+                self.embed_model_changed = True
+                LOGGER.warning(
+                    "Persona %s: the embedding model is not loaded; "
+                    "running the re-embed retries loading it.",
+                    self.persona_id,
+                )
 
         LOGGER.info(
             "SAIMemory adapter initialised for persona=%s db=%s (resource=%s)",
@@ -319,14 +331,31 @@ class SAIMemoryAdapter:
         behind means a job died after deleting vectors, so the flag is set
         even when no vector is left — such a memory.db must not pass for a
         fresh one — and the model label is not touched.
+
+        Also flagged: the mark of a chat-log import whose background
+        embedding has not finished (``embed_metadata.embed_backfill_pending``,
+        written by ``begin_backfill``). The re-embed the banner starts fills
+        messages without a vector and then removes that mark.
         """
         from sai_memory.config import EMBED_DIM
         from sai_memory.embedding_migration import (
+            backfill_pending,
             has_any_vectors,
             reembed_in_progress,
             sample_stale_vector_tables,
         )
         from sai_memory.memory.storage import get_embed_metadata, set_embed_metadata
+
+        pending_import = backfill_pending(self.conn)
+        if pending_import is not None:
+            self.embed_model_changed = True
+            LOGGER.warning(
+                "Persona %s: embedding the memories of a chat-log import did not "
+                "finish (pending: %s); those memories are not searchable yet. "
+                "Reembed recommended.",
+                self.persona_id,
+                pending_import,
+            )
 
         unfinished = reembed_in_progress(self.conn)
         if unfinished is not None:
@@ -2018,12 +2047,20 @@ class SAIMemoryAdapter:
         (api/routes/people/import_chatlog.py)。指定が無いと全メッセージが対象で、
         書き込み時に意図して埋め込みを外した行 (``embedding_chunks=0``) も埋める。
 
+        埋め込みの計算は錠の外で行い、本文の読み直しと保存だけを
+        ``immediate_transaction`` (この adapter の錠前 + SQLite の書き込みロック)
+        の中で一体に行う。計算中に本文が変わった (または消えた) メッセージは
+        古い本文のベクトルを書かずに飛ばし、``changed`` に数える。
+
         Returns:
-            {"total_missing": N, "embedded": M, "failed": K} の集計。
+            {"total_missing": N, "embedded": M, "failed": K, "changed": C} の集計。
             can_embed() が False の場合は total_missing のみ数えて embedded=0 で返す
             (embedder が無いので埋められない)。
         """
-        result = {"total_missing": 0, "embedded": 0, "failed": 0}
+        from sai_memory.db_locks import immediate_transaction
+        from sai_memory.memory.storage import get_message
+
+        result = {"total_missing": 0, "embedded": 0, "failed": 0, "changed": 0}
         if not self._ready:
             return result
 
@@ -2057,10 +2094,19 @@ class SAIMemoryAdapter:
                 payload = [c.strip() for c in chunks if c and c.strip()]
                 if not payload:
                     continue
-                with self._db_lock:
-                    vectors = self.embedder.embed(payload, is_query=False)
-                    replace_message_embeddings(self.conn, msg.id, vectors)
-                result["embedded"] += 1
+                vectors = self.embedder.embed(payload, is_query=False)
+                with immediate_transaction(self.conn, self._db_lock):
+                    latest = get_message(self.conn, msg.id)
+                    unchanged = latest is not None and latest.content == msg.content
+                    if unchanged:
+                        replace_message_embeddings(self.conn, msg.id, vectors, commit=False)
+                if unchanged:
+                    result["embedded"] += 1
+                else:
+                    result["changed"] += 1
+                    LOGGER.info(
+                        "Backfill: message %s changed while embedding; skipped", msg.id,
+                    )
             except Exception as exc:
                 result["failed"] += 1
                 LOGGER.warning("Failed to backfill embedding for message %s: %s", msg.id, exc)
@@ -2071,6 +2117,24 @@ class SAIMemoryAdapter:
                     LOGGER.debug("progress_callback raised during embedding backfill", exc_info=True)
 
         return result
+
+    def begin_embedding_backfill(self, count: int) -> bool:
+        """会話ログのインポートが埋め込みを裏へ回す直前に、消えない印を付ける。
+
+        ``embed_metadata.embed_backfill_pending`` に書く
+        (``sai_memory.embedding_migration.begin_backfill``)。途中でプロセスが死ぬと
+        印が残り、次の起動時の検査 (``_check_embed_model_change``) が旗を立てる。
+        新しく印を書いたら True、既にあった印に件数を足したら False。
+        """
+        from sai_memory.embedding_migration import begin_backfill
+
+        return begin_backfill(self.conn, count, db_lock=self._db_lock)
+
+    def finish_embedding_backfill(self) -> None:
+        """``begin_embedding_backfill`` の印を消す (失敗ゼロで完走したときだけ呼ぶ)。"""
+        from sai_memory.embedding_migration import finish_backfill
+
+        finish_backfill(self.conn, db_lock=self._db_lock)
 
     def close(self) -> None:
         if self.conn is not None:

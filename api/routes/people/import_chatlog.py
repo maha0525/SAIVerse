@@ -30,28 +30,70 @@ _official_import_lock = threading.Lock()
 # Embeddings of imported messages are made after the import has finished
 # (docs/intent/embedding_gemma2_migration.md §2): the text is stored first and
 # the import reports success, then a background thread embeds what it stored.
-_import_embedding_status: dict = {}
+#
+# Each import that hands messages over gets a job number. The import's own
+# status carries that number ("embedding_job"), and the status endpoints show
+# the embedding state of that job only, so an import never shows the numbers
+# of another import's embedding (a "skip" import has no job and shows none).
+# The jobs of one persona form a queue: each job's thread first waits for the
+# previous job's thread, in the background — the import itself never waits.
+#
+# Everything below is read and changed only under ``_import_embedding_lock``:
+# the job table, the latest thread and job number per persona, and the
+# "dirty" flag. The persistent mark in the persona's memory.db
+# (``embed_backfill_pending``) is also written and removed under this lock,
+# so "is a later job queued?" and "remove the mark" cannot interleave.
 _import_embedding_lock = threading.Lock()
+# job number -> {"embedding_running", "embedding_progress", "embedding_total",
+#                "embedding_failed", "embedding_error"}
+_import_embedding_jobs: dict = {}
 # Latest embedding thread per persona (tests join it).
 _import_embedding_threads: dict = {}
+# Latest job number handed out per persona.
+_import_embedding_latest: dict = {}
+# Per persona: True once a job since the mark was written left work behind.
+# Such a mark is removed only by the re-embed (or by a later job that finds
+# no mark and writes a fresh one).
+_import_embedding_dirty: dict = {}
+_import_embedding_seq = 0
+# Finished jobs kept for the status endpoints (older ones are dropped).
+_KEEP_FINISHED_JOBS = 32
 
 
-def _embed_imported_messages(persona_id: str, adapter, message_ids: List[str]) -> None:
+def _embed_imported_messages(
+    persona_id: str,
+    job: int,
+    adapter,
+    message_ids: List[str],
+    previous: Optional[threading.Thread] = None,
+) -> None:
     """Embed the messages one import stored, then close that import's adapter.
 
-    Uses ``backfill_missing_message_embeddings`` limited to ``message_ids``, so
-    messages stored without embeddings on purpose elsewhere (an earlier import
-    with "skip", thread-switch notes, ...) stay as they are.
+    Waits first for ``previous`` (the persona's earlier embedding job), so
+    the jobs of one persona run one at a time without making the import
+    wait. Uses ``backfill_missing_message_embeddings`` limited to
+    ``message_ids``, so messages stored without embeddings on purpose
+    elsewhere (an earlier import with "skip", thread-switch notes, ...) stay
+    as they are.
+
+    At the end the persistent mark (``embed_backfill_pending``) is removed
+    only when this job left nothing behind, no job since the mark was written
+    left anything behind, and no later job is queued.
     """
-    def _progress(done: int, total: int) -> None:
-        with _import_embedding_lock:
-            _import_embedding_status[persona_id] = {
-                "embedding_running": True, "embedding_progress": done, "embedding_total": total,
-            }
+    if previous is not None and previous.is_alive():
+        LOGGER.info("Import embedding %d for %s waits for the previous one", job, persona_id)
+        previous.join()
 
     total = len(message_ids)
+
+    def _progress(done: int, total_: int) -> None:
+        with _import_embedding_lock:
+            _import_embedding_jobs[job] = {
+                "embedding_running": True, "embedding_progress": done, "embedding_total": total_,
+            }
+
     _progress(0, total)
-    LOGGER.info("Import embedding started for %s (%d messages)", persona_id, total)
+    LOGGER.info("Import embedding %d started for %s (%d messages)", job, persona_id, total)
     result: dict = {}
     error: Optional[str] = None
     try:
@@ -64,24 +106,60 @@ def _embed_imported_messages(persona_id: str, adapter, message_ids: List[str]) -
         error = f"{type(exc).__name__}: {exc}".splitlines()[0]
     finally:
         try:
-            adapter.close()
+            clean = error is None and int(result.get("changed", 0) or 0) == 0
+            _settle_backfill_mark(persona_id, job, adapter, clean)
         finally:
-            final = {
-                "embedding_running": False,
-                "embedding_progress": result.get("embedded", 0),
-                "embedding_total": total,
-                "embedding_failed": result.get("failed", 0),
-            }
-            if error:
-                final["embedding_error"] = error
-            with _import_embedding_lock:
-                _import_embedding_status[persona_id] = final
+            try:
+                adapter.close()
+            finally:
+                final = {
+                    "embedding_running": False,
+                    "embedding_progress": result.get("embedded", 0),
+                    "embedding_total": total,
+                    "embedding_failed": result.get("failed", 0),
+                }
+                if error:
+                    final["embedding_error"] = error
+                _finish_job(job, final)
     if error:
         LOGGER.warning("Import embedding for %s ended with a problem: %s", persona_id, error)
     LOGGER.info(
-        "Import embedding finished for %s: embedded=%d failed=%d (of %d)",
-        persona_id, result.get("embedded", 0), result.get("failed", 0), total,
+        "Import embedding %d finished for %s: embedded=%d failed=%d changed=%d (of %d)",
+        job, persona_id, result.get("embedded", 0), result.get("failed", 0),
+        result.get("changed", 0), total,
     )
+
+
+def _settle_backfill_mark(persona_id: str, job: int, adapter, clean: bool) -> None:
+    """Remove the persistent mark when nothing is left behind (see the module notes)."""
+    with _import_embedding_lock:
+        if not clean:
+            _import_embedding_dirty[persona_id] = True
+            LOGGER.warning(
+                "Import embedding %d for %s left messages without vectors; keeping "
+                "the pending mark (the re-embed fills them).", job, persona_id,
+            )
+            return
+        if _import_embedding_latest.get(persona_id) != job:
+            return  # a later job is queued; it settles the mark
+        if _import_embedding_dirty.get(persona_id):
+            return
+        try:
+            adapter.finish_embedding_backfill()
+        except Exception:
+            LOGGER.warning(
+                "Failed to remove the import embedding mark for %s", persona_id, exc_info=True,
+            )
+
+
+def _finish_job(job: int, final: dict) -> None:
+    with _import_embedding_lock:
+        _import_embedding_jobs[job] = final
+        finished = [
+            k for k, v in _import_embedding_jobs.items() if not v.get("embedding_running")
+        ]
+        for k in sorted(finished)[:-_KEEP_FINISHED_JOBS]:
+            _import_embedding_jobs.pop(k, None)
 
 
 def _embedding_result_error(adapter, result: dict) -> Optional[str]:
@@ -106,52 +184,67 @@ def _embedding_result_error(adapter, result: dict) -> Optional[str]:
     return None
 
 
-def _reset_import_embedding(persona_id: str) -> None:
-    """Prepare for a new import of ``persona_id``.
+def _reserve_import_embedding(persona_id: str, adapter, total: int) -> int:
+    """Write the persistent mark and register a job, before the import reports success.
 
-    Waits for the previous import's embedding thread (if still running) so
-    two threads never write this persona's embedding status at once, then
-    clears that status so the new import does not show the previous numbers.
+    The job is registered as running (0/``total``) so a status poll that sees
+    the import finished also sees its embedding still to come. Returns the
+    job number to put in the import's status (``"embedding_job"``).
     """
-    previous = _import_embedding_threads.get(persona_id)
-    if previous is not None and previous.is_alive():
-        LOGGER.info(
-            "Waiting for the previous import embedding of %s to finish", persona_id,
-        )
-        previous.join()
+    global _import_embedding_seq
     with _import_embedding_lock:
-        _import_embedding_status.pop(persona_id, None)
+        if adapter.begin_embedding_backfill(total):
+            # No mark was there: nothing earlier is left behind.
+            _import_embedding_dirty[persona_id] = False
+        _import_embedding_seq += 1
+        job = _import_embedding_seq
+        _import_embedding_latest[persona_id] = job
+        _import_embedding_jobs[job] = {
+            "embedding_running": True, "embedding_progress": 0, "embedding_total": total,
+        }
+        return job
 
 
-def _start_import_embedding(persona_id: str, adapter, message_ids: List[str]) -> bool:
-    """Hand ``adapter`` to a background thread that embeds ``message_ids``.
+def _launch_import_embedding(persona_id: str, job: int, adapter, message_ids: List[str]) -> bool:
+    """Start the background thread of ``job``; it takes ``adapter`` over and closes it.
 
-    Returns True when the thread took the adapter over (the thread closes
-    it); False when there is nothing to embed and the caller closes it.
+    The thread is created, registered as the persona's latest and started in
+    one step under the lock, so two imports finishing at once cannot both
+    miss each other's thread. Returns False (and records the job as failed)
+    when the thread could not be started; the caller then closes the adapter.
     """
-    if not message_ids:
-        return False
-    # Another import of the same persona may have handed off its thread while
-    # this one was storing text: never run two embedding threads per persona.
-    previous = _import_embedding_threads.get(persona_id)
-    if previous is not None and previous.is_alive():
-        previous.join()
-    thread = threading.Thread(
-        target=_embed_imported_messages,
-        args=(persona_id, adapter, list(message_ids)),
-        name=f"import-embedding-{persona_id}",
-        daemon=True,
-    )
-    _import_embedding_threads[persona_id] = thread
-    thread.start()
-    return True
+    with _import_embedding_lock:
+        previous = _import_embedding_threads.get(persona_id)
+        thread = threading.Thread(
+            target=_embed_imported_messages,
+            args=(persona_id, job, adapter, list(message_ids), previous),
+            name=f"import-embedding-{persona_id}-{job}",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except Exception as exc:
+            LOGGER.exception("Could not start the import embedding for %s", persona_id)
+            _import_embedding_dirty[persona_id] = True
+            _import_embedding_jobs[job] = {
+                "embedding_running": False, "embedding_progress": 0,
+                "embedding_total": len(message_ids), "embedding_failed": 0,
+                "embedding_error": f"{type(exc).__name__}: {exc}".splitlines()[0],
+            }
+            return False
+        _import_embedding_threads[persona_id] = thread
+        return True
 
 
 def _with_embedding_status(persona_id: str, status: dict) -> dict:
-    """Import status plus the progress of the background embedding, if any."""
+    """Import status plus the state of that import's own embedding job, if any."""
+    job = status.get("embedding_job")
+    shown = {k: v for k, v in status.items() if k != "embedding_job"}
+    if job is None:
+        return shown
     with _import_embedding_lock:
-        embedding = dict(_import_embedding_status.get(persona_id, {}))
-    return {**status, **embedding}
+        embedding = dict(_import_embedding_jobs.get(job, {}))
+    return {**shown, **embedding}
 
 def _is_placeholder_title(title: Optional[str]) -> bool:
     """取り込み元のパーサーが「題名なし」の印として入れる既定値か。
@@ -183,10 +276,8 @@ def _run_extension_import_task(
         }
     
     try:
-        # 0. Let the previous import's embedding finish and forget its numbers.
-        _reset_import_embedding(persona_id)
-
-        # 1. Parse file
+        # 1. Parse file (never waits for an earlier import's embedding: that
+        #    queue lives in the background threads)
         from tools.utilities.chatlog_exporter_importer import parse_exporter_file
         conversation = parse_exporter_file(tmp_path)
         
@@ -232,14 +323,20 @@ def _run_extension_import_task(
             if not _is_placeholder_title(conversation.title):
                 adapter.set_thread_title(thread_suffix, conversation.title)
 
+            # The embedding job is registered (and its persistent mark
+            # written) before the import reports success, then started.
+            job = None
+            if not skip_embedding and imported_ids:
+                job = _reserve_import_embedding(persona_id, adapter, len(imported_ids))
             with _extension_import_lock:
                 _extension_import_status[persona_id] = {
                     "running": False, "progress": msg_count, "total": total,
                     "message": f"Imported '{conversation.title}' ({msg_count} messages).",
-                    "success": True, "title": conversation.title
+                    "success": True, "title": conversation.title,
+                    "embedding_job": job,
                 }
-            if not skip_embedding:
-                handed_off = _start_import_embedding(persona_id, adapter, imported_ids)
+            if job is not None:
+                handed_off = _launch_import_embedding(persona_id, job, adapter, imported_ids)
         finally:
             if not handed_off:
                 adapter.close()
@@ -273,10 +370,8 @@ def _run_official_import_task(
         }
     
     try:
-        # 0. Let the previous import's embedding finish and forget its numbers.
-        _reset_import_embedding(persona_id)
-
-        # 1. Retrieve cached export
+        # 1. Retrieve cached export (never waits for an earlier import's
+        #    embedding: that queue lives in the background threads)
         cached = _chatgpt_export_cache.get(cache_key)
         if not cached:
             with _official_import_lock:
@@ -355,14 +450,19 @@ def _run_official_import_task(
                         "message": f"Imported {imported_count}/{total_conversations} conversations ({msg_count} messages)..."
                     }
             
+            # Registered (with its persistent mark) before reporting success.
+            job = None
+            if not skip_embedding and imported_ids:
+                job = _reserve_import_embedding(persona_id, adapter, len(imported_ids))
             with _official_import_lock:
                 _official_import_status[persona_id] = {
                     "running": False, "progress": imported_count, "total": total_conversations,
                     "message": f"Imported {imported_count} conversations ({msg_count} messages).",
-                    "success": True, "conversations": imported_count, "messages": msg_count
+                    "success": True, "conversations": imported_count, "messages": msg_count,
+                    "embedding_job": job,
                 }
-            if not skip_embedding:
-                handed_off = _start_import_embedding(persona_id, adapter, imported_ids)
+            if job is not None:
+                handed_off = _launch_import_embedding(persona_id, job, adapter, imported_ids)
         finally:
             if not handed_off:
                 adapter.close()

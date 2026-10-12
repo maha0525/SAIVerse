@@ -70,6 +70,12 @@ export interface MemoryImportProgress {
   message?: string;
   progress?: number;
   total?: number;
+  // Background embedding of the messages this import stored (chat-log imports only).
+  embedding_running?: boolean | null;
+  embedding_progress?: number | null;
+  embedding_total?: number | null;
+  embedding_failed?: number | null;
+  embedding_error?: string | null;
 }
 
 export interface MemoryImportResult {

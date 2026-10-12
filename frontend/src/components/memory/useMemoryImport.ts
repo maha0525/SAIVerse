@@ -16,7 +16,7 @@ import {
 } from '@/lib/memory/importClient';
 
 import { formatProgress } from './formatters';
-import { ImportSubTab, MemoryImportStep, MemoryImportUiResult, NativePreviewData, PreviewData, ThreadSummary } from './types';
+import { ImportSubTab, MemoryImportProgress, MemoryImportStep, MemoryImportUiResult, NativePreviewData, PreviewData, ThreadSummary } from './types';
 
 export function useMemoryImport(personaId: string, onImportComplete?: () => void) {
   const [activeSubTab, setActiveSubTab] = useState<ImportSubTab>('official');
@@ -75,10 +75,25 @@ export function useMemoryImport(personaId: string, onImportComplete?: () => void
       } else {
         await handleImportSuccess(data.message || 'Import successful');
       }
+      // The text is in; its embeddings may still be made in the background.
+      // Keep polling until that ends, without holding the screen.
+      handleImportEmbedding(type, data);
       return;
     }
     setStep(type === 'official' ? 'select' : 'upload');
     setResult({ type: 'error', message: data.message || 'Import failed' });
+  };
+
+  // Polls until the background embedding of the finished import is no longer
+  // running, then shows its error (the API's text as is) if it left one.
+  const handleImportEmbedding = (type: 'extension' | 'official' | 'native', data: MemoryImportProgress) => {
+    if (data.embedding_running === true) {
+      setTimeout(() => {
+        void getImportStatus(personaId, type).then((next) => handleImportEmbedding(type, next));
+      }, 1000);
+      return;
+    }
+    if (data.embedding_error) setResult({ type: 'error', message: data.embedding_error });
   };
 
   const handleFileSelect = async (file: File) => {

@@ -697,7 +697,15 @@ def replace_message_embeddings(
     conn: sqlite3.Connection,
     message_id: str,
     vectors: Iterable[Iterable[float]],
+    *,
+    commit: bool = True,
 ) -> None:
+    """Replace every vector row of ``message_id`` (one row per chunk).
+
+    ``commit=False`` leaves the commit to the caller (used inside
+    ``sai_memory.db_locks.immediate_transaction``, where the text is read
+    again and the vectors stored without letting another writer in between).
+    """
     conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))
     payload: List[Tuple[str, int, str]] = []
     for idx, vec in enumerate(vectors):
@@ -707,7 +715,8 @@ def replace_message_embeddings(
             "INSERT INTO message_embeddings(message_id, chunk_index, vector) VALUES(?, ?, ?)",
             payload,
         )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def upsert_embedding(conn: sqlite3.Connection, message_id: str, vector: Iterable[float]) -> None:
@@ -1797,8 +1806,14 @@ def get_embed_metadata_strict(conn: sqlite3.Connection, key: str) -> str | None:
         raise
 
 
-def set_embed_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
-    """Upsert *key*/*value* into the embed_metadata table."""
+def set_embed_metadata(
+    conn: sqlite3.Connection, key: str, value: str, *, commit: bool = True,
+) -> None:
+    """Upsert *key*/*value* into the embed_metadata table.
+
+    ``commit=False`` leaves the commit to the caller (to write several keys
+    in one transaction).
+    """
     now = datetime.utcnow().isoformat()
     conn.execute(
         """
@@ -1808,7 +1823,8 @@ def set_embed_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
         """,
         (key, value, now),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------

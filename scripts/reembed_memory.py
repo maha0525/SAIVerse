@@ -4,7 +4,10 @@
 Covers all four vector systems (messages, Chronicle, Memopedia pages,
 fragments; docs/intent/embedding_gemma2_migration.md §2) and records the
 current model in ``embed_metadata.embed_model`` at the end, so the next
-startup does not warn again.
+startup does not warn again -- but only when the run is complete (no stale
+vector, no Chronicle / page / fragment row left without a vector, nothing
+skipped because it was edited during the run). An incomplete run keeps the
+in-progress mark, and the next run rebuilds everything.
 
 A recorded model label that differs from the current one rebuilds every
 vector, whatever the dimensions (the label is what tells two models of the
@@ -122,16 +125,19 @@ def _reembed_persona(
         result = reembed_messages(
             conn, embedder, target_ids, chunk_min=chunk_min, chunk_max=chunk_max,
         )
+        skipped = result["changed"] + sum(c["skipped"] for c in sources.values())
         print(
             f"[messages] {persona_id}: re-embedded {result['embedded']} messages, "
             f"dropped vectors of {result['dropped']} without text, "
             f"skipped {result['changed']} changed while embedding (expected dim {expected_dim})."
         )
 
-        still_stale = finish_reembed(conn, embedder, model_id, force=force)
-        if still_stale:
+        outcome = finish_reembed(conn, embedder, model_id, force=force, skipped=skipped)
+        if not outcome.complete:
             print(
-                f"[warn] {persona_id}: stale vectors remain in {', '.join(still_stale)}.",
+                f"[warn] {persona_id}: not complete; embed_model and the in-progress mark "
+                f"are left as they are. {outcome.describe()} "
+                "Run again to rebuild every vector.",
                 file=sys.stderr,
             )
         else:

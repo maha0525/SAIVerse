@@ -36,22 +36,30 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
 
     Covers all four vector systems (docs/intent/embedding_gemma2_migration.md
     §2): Chronicle / Memopedia page / fragment vectors that are stale (or all
-    of them with ``force``) are deleted and regenerated on the spot, then the
-    messages are re-embedded. At the end ``embed_metadata.embed_model`` is
-    updated and, if the startup sample finds no stale vector any more, the
-    persona's startup warning is lifted through ``manager`` so the banner does
-    not come back on reload.
+    of them with ``force``) are deleted and regenerated on the spot, then
+    the messages are re-embedded (including messages that have no vector yet,
+    which is also how an import whose background embedding did not finish is
+    recovered). At the end ``finish_reembed`` checks that every vector that
+    should exist is there; only then is ``embed_metadata.embed_model``
+    updated, the in-progress mark removed and the persona's startup warning
+    lifted through ``manager`` so the banner does not come back on reload.
+    When something is left (stale vectors, rows still without a vector, rows
+    skipped because they were edited during the job), the warning and the
+    mark stay and the summary names what is left; running the job again then
+    rebuilds everything.
 
     A recorded model label that differs from the current one (or is missing
     while vectors exist) runs the job as ``force`` whatever the dimensions:
     the label is what tells two models of the same dimension apart. The
     memory.db is marked as being re-embedded before anything is deleted
-    (``begin_reembed``) and the mark is removed by ``finish_reembed``, so a
-    job that dies half way is warned about at the next startup.
+    (``begin_reembed``) and the mark is removed by ``finish_reembed`` only
+    when the job is complete, so a job that dies half way (or ends with work
+    left) is warned about at the next startup.
     """
     from sai_memory.config import load_settings
     from sai_memory.embedding_migration import (
         RECALL_SOURCES,
+        backfill_pending,
         begin_reembed,
         finish_reembed,
         message_reembed_targets,
@@ -117,7 +125,10 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
                 conn, embedder, force=force, progress=_source_progress,
             )
 
-            # 2. Messages.
+            # 2. Messages (also those without a vector). The backfill mark of
+            #    an import is read before listing them: finish_reembed removes
+            #    it only if no import added work in the meantime.
+            backfill_mark = backfill_pending(conn)
             target_ids = message_reembed_targets(
                 conn, expected_dim, force=force, include_missing=True,
             )
@@ -134,8 +145,16 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
                 progress=_message_progress,
             )
 
-            # 3. Record the model and lift the warning if nothing stale is left.
-            still_stale = finish_reembed(conn, embedder, settings.embed_model, force=force)
+            # 3. Rows edited while their vectors were being computed were not
+            #    stored; they make the job incomplete.
+            skipped = result.get("changed", 0) + sum(
+                counts.get("skipped", 0) for counts in source_result.values()
+            )
+            # 4. Record the model and lift the warning only if nothing is left.
+            outcome = finish_reembed(
+                conn, embedder, settings.embed_model,
+                force=force, skipped=skipped, backfill_mark=backfill_mark,
+            )
         finally:
             conn.close()
 
@@ -144,19 +163,14 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
             f"Re-embedded {result['embedded']} messages and "
             f"{source_done} Chronicle/Memopedia/Fragment entries."
         )
-        # Rows edited while their vectors were being computed were not stored.
-        changed = result.get("changed", 0) + sum(
-            counts.get("skipped", 0) for counts in source_result.values()
-        )
-        if changed:
-            summary += f" Skipped {changed} entries edited during the re-embed."
-        if still_stale:
+        if not outcome.complete:
+            reason = outcome.describe()
             LOGGER.warning(
-                "Re-embed for %s finished but stale vectors remain in %s; "
-                "keeping the startup warning.",
-                persona_id, ", ".join(still_stale),
+                "Re-embed for %s did not complete (%s); keeping the startup warning. "
+                "Running it again rebuilds every vector.",
+                persona_id, reason,
             )
-            summary += f" Stale vectors remain in: {', '.join(still_stale)}."
+            summary += f" {reason} Run the re-embed again to finish."
         elif manager is not None:
             if _live_embedder_ready(manager, persona_id):
                 manager.clear_embed_model_mismatch(persona_id)

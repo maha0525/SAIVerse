@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -58,13 +57,16 @@ def store_chronicle_embedding(
     conn: sqlite3.Connection,
     entry_id: str,
     vector: List[float],
+    *,
+    commit: bool = True,
 ) -> None:
     """Store or replace an embedding for a Chronicle entry."""
     conn.execute(
         "INSERT OR REPLACE INTO arasuji_embeddings (entry_id, vector) VALUES (?, ?)",
         (entry_id, json.dumps(vector)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_chronicle_embeddings(
@@ -139,13 +141,16 @@ def store_memopedia_embedding(
     conn: sqlite3.Connection,
     page_id: str,
     vector: List[float],
+    *,
+    commit: bool = True,
 ) -> None:
     """Store or replace an embedding for a Memopedia page."""
     conn.execute(
         "INSERT OR REPLACE INTO memopedia_embeddings (page_id, vector) VALUES (?, ?)",
         (page_id, json.dumps(vector)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_memopedia_embeddings(conn: sqlite3.Connection) -> List[tuple]:
@@ -228,13 +233,16 @@ def store_fragment_embedding(
     conn: sqlite3.Connection,
     fragment_id: str,
     vector: List[float],
+    *,
+    commit: bool = True,
 ) -> None:
     """Store or replace an embedding for a Memopedia fragment."""
     conn.execute(
         "INSERT OR REPLACE INTO memopedia_fragment_embeddings (fragment_id, vector) VALUES (?, ?)",
         (fragment_id, json.dumps(vector)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_fragment_embeddings(conn: sqlite3.Connection) -> List[tuple]:
@@ -388,25 +396,35 @@ def _store_unchanged(
     texts: List[str],
     vectors,
     current_text: Callable[[sqlite3.Connection, str], Optional[str]],
-    store: Callable[[sqlite3.Connection, str, List[float]], None],
+    store: Callable[..., None],
+    *,
+    db_lock: Optional[Any] = None,
 ) -> tuple:
     """Store each vector only when its row still has the text it was made from.
 
     The embedding runs outside the DB lock, so a row can be edited or deleted
     between reading its text and storing its vector. Such a row is skipped:
     it keeps no vector row, and the next generation pass (which picks up rows
-    without a vector) embeds its current text. Call inside the DB lock.
+    without a vector) embeds its current text.
+
+    The text is read again and the vectors stored inside one
+    ``immediate_transaction`` (the process lock ``db_lock`` plus SQLite's
+    write lock): once it is taken, no other connection can change a row
+    between the comparison and the INSERT.
 
     Returns ``(stored, skipped)``.
     """
+    from sai_memory.db_locks import immediate_transaction
+
     stored = 0
     skipped = 0
-    for row_id, text, vec in zip(ids, texts, vectors):
-        if current_text(conn, row_id) != text:
-            skipped += 1
-            continue
-        store(conn, row_id, list(vec))
-        stored += 1
+    with immediate_transaction(conn, db_lock):
+        for row_id, text, vec in zip(ids, texts, vectors):
+            if current_text(conn, row_id) != text:
+                skipped += 1
+                continue
+            store(conn, row_id, list(vec), commit=False)
+            stored += 1
     return stored, skipped
 
 
@@ -448,13 +466,13 @@ def embed_chronicle_entries(
         texts = [content for _, content in batch]
         vectors = embedder.embed(texts, is_query=False)
 
-        # 埋め込みの計算は錠の外 (重い)。DB への書き込みと commit だけを
-        # adapter の錠前の内側で行う —— 共有接続なので、錠外の commit は
+        # 埋め込みの計算は錠の外 (重い)。本文の読み直しと書き込み・commit だけを
+        # 錠前と書き込みロックの内側で行う —— 共有接続なので、錠外の commit は
         # 他所の開いたトランザクションを途中で確定させる (Codex 八巡 #1)
-        with (db_lock or nullcontext()):
-            stored, n_skip = _store_unchanged(
-                conn, ids, texts, vectors, _current_chronicle_text, store_chronicle_embedding,
-            )
+        stored, n_skip = _store_unchanged(
+            conn, ids, texts, vectors, _current_chronicle_text, store_chronicle_embedding,
+            db_lock=db_lock,
+        )
         total += stored
         skipped += n_skip
         if progress_callback is not None:
@@ -504,10 +522,10 @@ def embed_memopedia_pages(
         texts = [_page_embed_text(title, summary) for _, title, summary in batch]
         vectors = embedder.embed(texts, is_query=False)
 
-        with (db_lock or nullcontext()):
-            stored, n_skip = _store_unchanged(
-                conn, ids, texts, vectors, _current_page_text, store_memopedia_embedding,
-            )
+        stored, n_skip = _store_unchanged(
+            conn, ids, texts, vectors, _current_page_text, store_memopedia_embedding,
+            db_lock=db_lock,
+        )
         total += stored
         skipped += n_skip
         if progress_callback is not None:
@@ -559,10 +577,10 @@ def embed_memopedia_fragments(
         ]
         vectors = embedder.embed(texts, is_query=False)
 
-        with (db_lock or nullcontext()):
-            stored, n_skip = _store_unchanged(
-                conn, ids, texts, vectors, _current_fragment_text, store_fragment_embedding,
-            )
+        stored, n_skip = _store_unchanged(
+            conn, ids, texts, vectors, _current_fragment_text, store_fragment_embedding,
+            db_lock=db_lock,
+        )
         total += stored
         skipped += n_skip
         if progress_callback is not None:
