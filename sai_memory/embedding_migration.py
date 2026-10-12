@@ -11,6 +11,20 @@ and the CLI (scripts/reembed_memory.py) so that all three agree on what
 
 Only vectors are touched here. The texts the vectors are made from (messages,
 Chronicle, Memopedia pages, fragments) are never modified (invariant 1).
+
+Two rules sit on top of the dimension check:
+
+- **A changed model label means a full rebuild, whatever the dimensions.**
+  When ``embed_metadata.embed_model`` differs from the current model id (or
+  is missing while vectors exist), a re-embed rebuilds every vector as if
+  ``force`` had been given (:func:`model_label_changed`). Comparing lengths
+  alone would treat an old model of the same dimension (another
+  quantisation, say) as already migrated.
+- **A re-embed marks the memory.db while it runs.** :func:`begin_reembed`
+  writes ``embed_metadata.embed_migration_in_progress`` before anything is
+  deleted, and :func:`finish_reembed` removes it at the end. A job that dies
+  in between leaves the mark, and the startup check warns on it even when
+  every vector is gone (which would otherwise look like a fresh database).
 """
 
 from __future__ import annotations
@@ -18,9 +32,17 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 LOGGER = logging.getLogger(__name__)
+
+#: ``embed_metadata`` key holding the current model identity.
+EMBED_MODEL_KEY = "embed_model"
+
+#: ``embed_metadata`` key present while a re-embed job is between its first
+#: deletion and its final check. Its value is ``"<model id> <ISO time>"``.
+MIGRATION_IN_PROGRESS_KEY = "embed_migration_in_progress"
 
 #: The four tables that hold recall vectors (one per source system).
 VECTOR_TABLES = (
@@ -47,6 +69,10 @@ def is_stale_vector(vec_json: Any, expected_dim: int) -> bool:
     always rebuilt those). The legacy "list of vectors" message format also
     counts as stale: its outer length is the chunk count, not the dimension,
     and re-embedding rewrites it as one row per chunk.
+
+    Only the length is looked at, so a vector of another model with the same
+    dimension is not stale here; a re-embed catches that case through the
+    model label (:func:`model_label_changed`), which rebuilds everything.
     """
     try:
         vec = json.loads(vec_json)
@@ -72,6 +98,47 @@ def has_any_vectors(conn: sqlite3.Connection) -> bool:
         if row and row[0]:
             return True
     return False
+
+
+def model_label_changed(conn: sqlite3.Connection, model_id: str) -> bool:
+    """True when the recorded model is not ``model_id`` and vectors exist.
+
+    A re-embed treats this as ``force``: the label is the only thing that
+    tells two models of the same dimension apart, so a changed label rebuilds
+    every vector regardless of their lengths. A missing label counts as
+    changed. A memory.db with no vectors at all has nothing to rebuild, so
+    the label alone does not promote it.
+    """
+    from sai_memory.memory.storage import get_embed_metadata
+
+    if get_embed_metadata(conn, EMBED_MODEL_KEY) == model_id:
+        return False
+    return has_any_vectors(conn)
+
+
+def begin_reembed(conn: sqlite3.Connection, model_id: str) -> None:
+    """Mark the memory.db as being re-embedded (call before deleting anything).
+
+    The mark stays until :func:`finish_reembed` removes it, so a job that
+    dies in between is reported at the next startup. Only the
+    :data:`MIGRATION_IN_PROGRESS_KEY` key is written.
+    """
+    from sai_memory.memory.storage import set_embed_metadata
+
+    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    set_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY, f"{model_id} {started}")
+
+
+def reembed_in_progress(conn: sqlite3.Connection) -> Optional[str]:
+    """The mark left by :func:`begin_reembed`, or None when there is none."""
+    from sai_memory.memory.storage import get_embed_metadata
+
+    return get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY)
+
+
+def _clear_reembed_mark(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM embed_metadata WHERE key = ?", (MIGRATION_IN_PROGRESS_KEY,))
+    conn.commit()
 
 
 def sample_stale_vector_tables(
@@ -125,7 +192,12 @@ def scan_stale_vector_tables(conn: sqlite3.Connection, expected_dim: int) -> Lis
     return stale
 
 
-def purge_stale_legacy_embeddings(conn: sqlite3.Connection, expected_dim: int) -> int:
+def purge_stale_legacy_embeddings(
+    conn: sqlite3.Connection,
+    expected_dim: int,
+    *,
+    everything: bool = False,
+) -> int:
     """Delete stale rows from the legacy ``embeddings`` table.
 
     ``init_db`` copies that table into ``message_embeddings`` (as chunk 0,
@@ -133,9 +205,19 @@ def purge_stale_legacy_embeddings(conn: sqlite3.Connection, expected_dim: int) -
     dropped (no text left, or the message itself is gone) would otherwise get
     its old-model vector copied back on the next open and keep tripping the
     startup check.
+
+    ``everything=True`` (a ``force``-grade re-embed, which includes a changed
+    model label) empties the table: a same-dimension model change cannot be
+    told apart by length, and after a full rebuild ``message_embeddings`` is
+    authoritative — rows left here would only be copied back as vectors of
+    the old model.
     """
     if not _relation_exists(conn, "embeddings"):
         return 0
+    if everything:
+        cur = conn.execute("DELETE FROM embeddings")
+        conn.commit()
+        return cur.rowcount
     stale_ids = [
         mid
         for mid, vec_json in conn.execute("SELECT message_id, vector FROM embeddings")
@@ -255,24 +337,41 @@ def reembed_messages(
     return {"embedded": embedded, "dropped": dropped, "changed": changed, "total": total}
 
 
-def finish_reembed(conn: sqlite3.Connection, embedder: Any, model_id: str) -> List[str]:
+def finish_reembed(
+    conn: sqlite3.Connection,
+    embedder: Any,
+    model_id: str,
+    *,
+    force: bool = False,
+) -> List[str]:
     """Record the model in ``embed_metadata`` and check every vector once more.
 
-    Writes only the ``embed_model`` key (the table also holds other
-    subsystems' markers). Returns the tables that still hold a stale vector
-    — empty means the startup warning for this persona can be lifted.
+    ``force=True`` (including the escalations: changed model label, leftover
+    in-progress mark) also empties the legacy ``embeddings`` table — see
+    :func:`purge_stale_legacy_embeddings`.
+
+    Writes only the ``embed_model`` key and removes only the in-progress mark
+    of :func:`begin_reembed` (the table also holds other subsystems'
+    markers). Returns the tables that still hold a stale vector — empty means
+    the startup warning for this persona can be lifted.
 
     The final check is a full scan (:func:`scan_stale_vector_tables`), not
     the startup sample: it runs only once per re-embed, and lifting the
     warning while a stale row is left in the middle of a table would hide
     that memory from recall with nothing left to report it.
+
+    The in-progress mark is removed after the scan whatever it finds: the job
+    reached its end, so no vector is left deleted-but-not-regenerated. Stale
+    rows the scan reports are the caller's to report.
     """
     from sai_memory.memory.storage import set_embed_metadata
 
     expected_dim = int(embedder.embedding_size)
-    purge_stale_legacy_embeddings(conn, expected_dim)
-    set_embed_metadata(conn, "embed_model", model_id)
-    return scan_stale_vector_tables(conn, expected_dim)
+    purge_stale_legacy_embeddings(conn, expected_dim, everything=force)
+    set_embed_metadata(conn, EMBED_MODEL_KEY, model_id)
+    still_stale = scan_stale_vector_tables(conn, expected_dim)
+    _clear_reembed_mark(conn)
+    return still_stale
 
 
 # ---------------------------------------------------------------------------

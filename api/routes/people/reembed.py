@@ -41,13 +41,23 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
     updated and, if the startup sample finds no stale vector any more, the
     persona's startup warning is lifted through ``manager`` so the banner does
     not come back on reload.
+
+    A recorded model label that differs from the current one (or is missing
+    while vectors exist) runs the job as ``force`` whatever the dimensions:
+    the label is what tells two models of the same dimension apart. The
+    memory.db is marked as being re-embedded before anything is deleted
+    (``begin_reembed``) and the mark is removed by ``finish_reembed``, so a
+    job that dies half way is warned about at the next startup.
     """
     from sai_memory.config import load_settings
     from sai_memory.embedding_migration import (
         RECALL_SOURCES,
+        begin_reembed,
         finish_reembed,
         message_reembed_targets,
+        model_label_changed,
         rebuild_recall_source_embeddings,
+        reembed_in_progress,
         reembed_messages,
     )
     from sai_memory.memory.recall import Embedder
@@ -75,6 +85,25 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
         conn = init_db(str(db_path), check_same_thread=False)
 
         try:
+            # 0. A changed model label, or an in-progress mark left by a job
+            #    that died half way, rebuilds everything; then mark the
+            #    memory.db before the first deletion.
+            if not force and model_label_changed(conn, settings.embed_model):
+                LOGGER.info(
+                    "Re-embed for %s: recorded embed_model differs from '%s'; "
+                    "rebuilding every vector.",
+                    persona_id, settings.embed_model,
+                )
+                force = True
+            if not force and reembed_in_progress(conn):
+                LOGGER.info(
+                    "Re-embed for %s: a previous re-embed did not finish; "
+                    "rebuilding every vector.",
+                    persona_id,
+                )
+                force = True
+            begin_reembed(conn, settings.embed_model)
+
             # 1. Chronicle / Memopedia pages / fragments (small; done first so
             #    those memories come back to recall early).
             def _source_progress(source: str, done: int, total: int) -> None:
@@ -106,7 +135,7 @@ def _run_reembed_task(persona_id: str, force: bool, manager=None):
             )
 
             # 3. Record the model and lift the warning if nothing stale is left.
-            still_stale = finish_reembed(conn, embedder, settings.embed_model)
+            still_stale = finish_reembed(conn, embedder, settings.embed_model, force=force)
         finally:
             conn.close()
 

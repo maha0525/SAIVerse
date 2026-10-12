@@ -312,13 +312,32 @@ class SAIMemoryAdapter:
 
         A memory.db with no vectors at all has nothing to migrate: no flag,
         and the current model is recorded.
+
+        Checked first: the in-progress mark of a re-embed
+        (``embed_metadata.embed_migration_in_progress``, written by
+        ``begin_reembed`` and removed by ``finish_reembed``). A mark left
+        behind means a job died after deleting vectors, so the flag is set
+        even when no vector is left — such a memory.db must not pass for a
+        fresh one — and the model label is not touched.
         """
         from sai_memory.config import EMBED_DIM
         from sai_memory.embedding_migration import (
             has_any_vectors,
+            reembed_in_progress,
             sample_stale_vector_tables,
         )
         from sai_memory.memory.storage import get_embed_metadata, set_embed_metadata
+
+        unfinished = reembed_in_progress(self.conn)
+        if unfinished is not None:
+            self.embed_model_changed = True
+            LOGGER.warning(
+                "Persona %s: the previous re-embed did not finish (started: %s); "
+                "some vectors may be missing. Reembed recommended.",
+                self.persona_id,
+                unfinished,
+            )
+            return
 
         recorded_model = get_embed_metadata(self.conn, "embed_model")
         current_model = self.settings.embed_model

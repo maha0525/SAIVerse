@@ -5,6 +5,11 @@ Covers all four vector systems (messages, Chronicle, Memopedia pages,
 fragments; docs/intent/embedding_gemma2_migration.md §2) and records the
 current model in ``embed_metadata.embed_model`` at the end, so the next
 startup does not warn again.
+
+A recorded model label that differs from the current one rebuilds every
+vector, whatever the dimensions (the label is what tells two models of the
+same dimension apart). The memory.db is marked while the job runs, so a run
+that dies half way is warned about at the next startup.
 """
 
 from __future__ import annotations
@@ -26,9 +31,12 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 from sai_memory.config import load_settings
 from sai_memory.embedding_migration import (
+    begin_reembed,
     finish_reembed,
     highest_vector_dim,
     message_reembed_targets,
+    model_label_changed,
+    reembed_in_progress,
     rebuild_recall_source_embeddings,
     reembed_messages,
 )
@@ -82,6 +90,24 @@ def _reembed_persona(
         else:
             print(f"[force] {persona_id}: rebuilding every recall vector...")
 
+        # A changed model label rebuilds everything regardless of dimensions
+        # (checked after the smaller-dimension guard above). So does an
+        # in-progress mark left by a run that died half way.
+        if not force and model_label_changed(conn, model_id):
+            print(
+                f"[force] {persona_id}: recorded embed_model differs from {model_id}; "
+                "rebuilding every recall vector..."
+            )
+            force = True
+        if not force and reembed_in_progress(conn):
+            print(
+                f"[force] {persona_id}: a previous re-embed did not finish; "
+                "rebuilding every recall vector..."
+            )
+            force = True
+        # Mark the memory.db before the first deletion; finish_reembed removes it.
+        begin_reembed(conn, model_id)
+
         sources = rebuild_recall_source_embeddings(conn, embedder, force=force)
         for source, counts in sources.items():
             print(
@@ -102,7 +128,7 @@ def _reembed_persona(
             f"skipped {result['changed']} changed while embedding (expected dim {expected_dim})."
         )
 
-        still_stale = finish_reembed(conn, embedder, model_id)
+        still_stale = finish_reembed(conn, embedder, model_id, force=force)
         if still_stale:
             print(
                 f"[warn] {persona_id}: stale vectors remain in {', '.join(still_stale)}.",
@@ -117,7 +143,8 @@ def _reembed_persona(
 def main(argv: Optional[Iterable[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Rebuild SAIMemory recall vectors (messages, Chronicle, Memopedia pages, "
-        "fragments) whose dimension does not match the current embedding model."
+        "fragments) whose dimension does not match the current embedding model. "
+        "If the recorded model differs from the current one, every vector is rebuilt."
     )
     parser.add_argument(
         "--force",

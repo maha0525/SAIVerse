@@ -14,6 +14,10 @@
 - 再計算の最終確認は全行を見る。埋め込みの計算中に本文が変わった行は保存しない。
 - 再計算の受付は印をその場で付けて二重受付を断る。読み込みに失敗していた
   埋め込み器は立て直してから警告を下ろし、立て直せなければ警告を残す。
+- 記録されたモデルの名札が現行と違えば、次元が同じでも全行を作り直す
+  (API も CLI も)。名札が同じなら従来どおり古い長さの行だけを直す。
+- 再計算は消す前に「移行中」の印を置き、完走で消す。途中で死んで印が残った
+  memory.db は、ベクトルが一つも無くても起動時に旗を立てる。
 
 Embedder は本物を使わず、決まった長さのベクトルを返す偽物に差し替える。
 DB は一時ディレクトリの SQLite。LLM は呼ばない。
@@ -32,6 +36,7 @@ import pytest
 from sai_memory.arasuji import init_arasuji_tables
 from sai_memory.arasuji.storage import create_entry
 from sai_memory.config import EMBED_DIM, EMBED_MODEL_ID, load_settings
+from sai_memory.embedding_migration import MIGRATION_IN_PROGRESS_KEY
 from sai_memory.memopedia import init_memopedia_tables
 from sai_memory.memopedia.storage import create_fragment, create_page
 from sai_memory.memory.storage import (
@@ -279,6 +284,7 @@ def test_api_job_rebuilds_all_four_systems_and_lifts_warning(tmp_path, force):
             assert _dims(conn, table) == {EMBED_DIM}, table
         assert get_embed_metadata(conn, "embed_model") == EMBED_MODEL_ID
         assert get_embed_metadata(conn, "sluice_pan_marker") == "keep-me"
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
         assert _texts(conn) == texts_before  # 原文は一字も変わらない
         assert _check(conn) is False
     finally:
@@ -334,11 +340,12 @@ def test_api_job_keeps_warning_when_stale_vectors_remain(tmp_path):
 
 
 def test_api_job_without_force_keeps_current_vectors(tmp_path):
-    """force なしでは、すでに現行の長さのベクトルは消さない (作り直さない)。"""
+    """force なしで名札も現行なら、すでに現行の長さのベクトルは消さない (作り直さない)。"""
     db_path = tmp_path / "memory.db"
     conn = _open(db_path)
     try:
         ids = _seed(conn, EMBED_DIM)
+        set_embed_metadata(conn, "embed_model", EMBED_MODEL_ID)
         marker = json.dumps([0.5] * EMBED_DIM)
         conn.execute("UPDATE memopedia_embeddings SET vector = ? WHERE page_id = ?",
                      (marker, ids["page"]))
@@ -914,3 +921,272 @@ def test_api_job_lifts_warning_for_persona_not_loaded(tmp_path):
     _run_api_job(db_path, force=False, manager=mgr)
 
     assert mgr.startup_warnings == []
+
+
+# ---------------------------------------------------------------------------
+# 名札の変更は次元に関係なく全再計算 (同じ次元の旧モデルからの移行)
+# ---------------------------------------------------------------------------
+
+SAME_DIM_OLD_MODEL = "embeddinggemma-2-q8@old"
+_OLD_SPACE_VEC = json.dumps([0.5] * EMBED_DIM)
+
+
+def _seed_same_dim_old_space(conn: sqlite3.Connection, label: str) -> None:
+    """長さは現行と同じだが、別のモデルが作った (という体の) ベクトルを 4 系統に置く。"""
+    _seed(conn, EMBED_DIM)
+    for table in TABLES:
+        conn.execute(f"UPDATE {table} SET vector = ?", (_OLD_SPACE_VEC,))
+    conn.commit()
+    set_embed_metadata(conn, "embed_model", label)
+
+
+def _old_space_left(conn: sqlite3.Connection) -> dict:
+    return {
+        table: conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE vector = ?", (_OLD_SPACE_VEC,)
+        ).fetchone()[0]
+        for table in TABLES
+    }
+
+
+def test_api_job_rebuilds_everything_when_label_changed_with_same_dim(tmp_path):
+    db_path = tmp_path / "memory.db"
+    conn = _open(db_path)
+    try:
+        _seed_same_dim_old_space(conn, SAME_DIM_OLD_MODEL)
+        assert _check(conn) is True
+    finally:
+        conn.close()
+
+    status = _run_api_job(db_path, force=False, manager=None)
+
+    assert status["running"] is False, status
+    assert status["sources"] == {
+        "chronicle": {"total": 1, "done": 1},
+        "memopedia": {"total": 1, "done": 1},
+        "fragment": {"total": 1, "done": 1},
+    }
+    assert status["progress"] == 2 and status["total"] == 2
+    conn = _open(db_path)
+    try:
+        assert _old_space_left(conn) == {t: 0 for t in TABLES}
+        for table in TABLES:
+            assert _dims(conn, table) == {EMBED_DIM}, table
+        assert get_embed_metadata(conn, "embed_model") == EMBED_MODEL_ID
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
+        assert _check(conn) is False
+    finally:
+        conn.close()
+
+
+def test_api_job_with_current_label_and_same_dim_rebuilds_nothing(tmp_path):
+    db_path = tmp_path / "memory.db"
+    conn = _open(db_path)
+    try:
+        _seed_same_dim_old_space(conn, EMBED_MODEL_ID)
+        before = _old_space_left(conn)
+    finally:
+        conn.close()
+
+    status = _run_api_job(db_path, force=False, manager=None)
+
+    assert status["sources"] == {
+        s: {"total": 0, "done": 0} for s in ("chronicle", "memopedia", "fragment")
+    }
+    assert status["progress"] == 0 and status["total"] == 0
+    conn = _open(db_path)
+    try:
+        assert before == {
+            "message_embeddings": 3, "arasuji_embeddings": 1,
+            "memopedia_embeddings": 1, "memopedia_fragment_embeddings": 1,
+        }
+        assert _old_space_left(conn) == before
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("label, rebuilds", [
+    (SAME_DIM_OLD_MODEL, True),
+    (EMBED_MODEL_ID, False),
+])
+def test_cli_label_change_rebuilds_everything_with_same_dim(tmp_path, monkeypatch,
+                                                            label, rebuilds):
+    db_path = _cli_db(tmp_path)
+    conn = _open(db_path)
+    try:
+        _seed_same_dim_old_space(conn, label)
+        before = _old_space_left(conn)
+    finally:
+        conn.close()
+
+    _run_cli(tmp_path, monkeypatch)
+
+    conn = _open(db_path)
+    try:
+        if rebuilds:
+            assert _old_space_left(conn) == {t: 0 for t in TABLES}
+        else:
+            assert _old_space_left(conn) == before  # 名札が同じなら従来どおり何もしない
+        assert get_embed_metadata(conn, "embed_model") == EMBED_MODEL_ID
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
+    finally:
+        conn.close()
+
+
+def test_label_change_without_vectors_is_not_promoted(tmp_path):
+    from sai_memory.embedding_migration import model_label_changed
+
+    conn = _open(tmp_path / "memory.db")
+    try:
+        set_embed_metadata(conn, "embed_model", SAME_DIM_OLD_MODEL)
+        assert model_label_changed(conn, EMBED_MODEL_ID) is False
+        _seed(conn, EMBED_DIM)
+        assert model_label_changed(conn, EMBED_MODEL_ID) is True
+        conn.execute("DELETE FROM embed_metadata WHERE key = 'embed_model'")
+        conn.commit()
+        assert model_label_changed(conn, EMBED_MODEL_ID) is True  # 名札が無いのも「違う」
+        set_embed_metadata(conn, "embed_model", EMBED_MODEL_ID)
+        assert model_label_changed(conn, EMBED_MODEL_ID) is False
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 「移行中」の印: 途中で死んだ再計算は、ベクトルが全部消えていても起動時に警告する
+# ---------------------------------------------------------------------------
+
+def test_unfinished_mark_flags_even_when_every_vector_is_gone(tmp_path):
+    from sai_memory.embedding_migration import begin_reembed, finish_reembed
+
+    conn = _open(tmp_path / "memory.db")
+    try:
+        set_embed_metadata(conn, "embed_model", "intfloat/multilingual-e5-small")
+        set_embed_metadata(conn, "sluice_pan_marker", "keep-me")
+        begin_reembed(conn, EMBED_MODEL_ID)
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY).startswith(EMBED_MODEL_ID)
+
+        assert _check(conn) is True
+        # 新品と誤認して名札を書き換えない
+        assert get_embed_metadata(conn, "embed_model") == "intfloat/multilingual-e5-small"
+
+        # ジョブが最後まで走れば印は消え、旗も立たない
+        assert finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID) == []
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
+        assert get_embed_metadata(conn, "sluice_pan_marker") == "keep-me"
+        assert _check(conn) is False
+    finally:
+        conn.close()
+
+
+def test_unfinished_mark_flags_with_current_label_and_dims(tmp_path):
+    from sai_memory.embedding_migration import begin_reembed
+
+    conn = _open(tmp_path / "memory.db")
+    try:
+        _seed(conn, EMBED_DIM)
+        set_embed_metadata(conn, "embed_model", EMBED_MODEL_ID)
+        assert _check(conn) is False
+        begin_reembed(conn, EMBED_MODEL_ID)
+        assert _check(conn) is True
+    finally:
+        conn.close()
+
+
+def test_finish_reembed_clears_mark_even_when_stale_rows_remain(tmp_path):
+    from sai_memory.embedding_migration import begin_reembed, finish_reembed
+
+    conn = _open(tmp_path / "memory.db")
+    try:
+        store_chronicle_embedding(conn, "e1", _vec(OLD_DIM))
+        begin_reembed(conn, EMBED_MODEL_ID)
+        assert finish_reembed(conn, FakeEmbedder(), EMBED_MODEL_ID) == ["arasuji_embeddings"]
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
+    finally:
+        conn.close()
+
+
+def test_api_job_that_dies_half_way_leaves_the_mark(tmp_path):
+    from api.routes.people import reembed
+    from sai_memory.embedding_migration import has_any_vectors
+
+    db_path = tmp_path / "memory.db"
+    conn = _open(db_path)
+    try:
+        _seed(conn, OLD_DIM)
+        set_embed_metadata(conn, "embed_model", "intfloat/multilingual-e5-small")
+    finally:
+        conn.close()
+
+    with patch("sai_memory.embedding_migration.reembed_messages",
+               side_effect=RuntimeError("process died")):
+        status = _run_api_job(db_path, force=False, manager=None)
+
+    assert status["running"] is False
+    assert "process died" in status["message"]
+    conn = _open(db_path)
+    try:
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is not None
+        assert get_embed_metadata(conn, "embed_model") == "intfloat/multilingual-e5-small"
+        # 削除を確定した直後に死んだ状態 (全ベクトル消失) を再現する
+        for table in TABLES:
+            conn.execute(f"DELETE FROM {table}")
+        conn.commit()
+        assert has_any_vectors(conn) is False
+        assert _check(conn) is True
+    finally:
+        conn.close()
+    reembed._reembed_status.pop("p", None)
+
+    # 再実行が完走すれば印は消える
+    _run_api_job(db_path, force=False, manager=None)
+    conn = _open(db_path)
+    try:
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
+        for table in TABLES:
+            assert _dims(conn, table) == {EMBED_DIM}, table
+        assert _check(conn) is False
+    finally:
+        conn.close()
+    reembed._reembed_status.pop("p", None)
+
+
+def test_cli_that_dies_half_way_leaves_the_mark(tmp_path, monkeypatch):
+    from scripts import reembed_memory
+
+    db_path = _cli_db(tmp_path)
+    conn = _open(db_path)
+    try:
+        _seed(conn, OLD_DIM)
+    finally:
+        conn.close()
+
+    with patch.object(reembed_memory, "reembed_messages",
+                      side_effect=RuntimeError("process died")), \
+            pytest.raises(RuntimeError):
+        _run_cli(tmp_path, monkeypatch)
+
+    conn = _open(db_path)
+    try:
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is not None
+        assert _check(conn) is True
+    finally:
+        conn.close()
+
+
+def test_cli_refusing_smaller_dimension_does_not_mark(tmp_path, monkeypatch):
+    db_path = _cli_db(tmp_path)
+    conn = _open(db_path)
+    try:
+        _seed(conn, 1024)
+        set_embed_metadata(conn, "embed_model", "bigger-model")
+    finally:
+        conn.close()
+
+    _run_cli(tmp_path, monkeypatch)
+
+    conn = _open(db_path)
+    try:
+        assert get_embed_metadata(conn, MIGRATION_IN_PROGRESS_KEY) is None
+    finally:
+        conn.close()
