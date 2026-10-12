@@ -1352,21 +1352,24 @@ def apply_life_boundary(
         )
 
     if stale is None:
+        # 各ステップは個別に実行してから成否をまとめる — and の直列だと先頭の
+        # 失敗が後続 (ティックの予約の張り/消し・TTL の解除) を巻き添えにし、
+        # 再試行までの間、谷のティックの空撃ちや予約の欠けが残る
+        # (2026-10-12 ローカルレビュー採用)。各ステップは冪等なので、節目の
+        # 再試行で成功済みの分が二重に効くことはない。
         if boundary == "start":
-            steps_ok = (
-                _sync_cache_ttl_for_life_start(manager, persona_id, life)
-                and _arm_tick_reservation(manager, persona_id, life)
-            )
+            ttl_ok = _sync_cache_ttl_for_life_start(manager, persona_id, life)
+            tick_ok = _arm_tick_reservation(manager, persona_id, life)
+            steps_ok = ttl_ok and tick_ok
             if steps_ok:
                 # 失敗しても節目は失敗にしない (中で WARN して握る)。冪等キーで
                 # 一度きり — 節目の再試行・翌日のライフ開始で増えない。
                 _offer_self_definition_task(manager, persona_id)
         else:
-            steps_ok = (
-                _cancel_keepalive_reservation(manager, persona_id)
-                and _cancel_tick_reservation(manager, persona_id)
-                and _sync_cache_ttl_for_life_end(manager, persona_id, life)
-            )
+            keepalive_ok = _cancel_keepalive_reservation(manager, persona_id)
+            tick_ok = _cancel_tick_reservation(manager, persona_id)
+            ttl_ok = _sync_cache_ttl_for_life_end(manager, persona_id, life)
+            steps_ok = keepalive_ok and tick_ok and ttl_ok
         if not steps_ok:
             try:
                 ledger.mark_failed(

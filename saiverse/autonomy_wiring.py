@@ -247,7 +247,9 @@ def load_autonomy_all_stop(manager: Any) -> bool:
                     .filter(UserSettings.USERID == _GLOBAL_SETTINGS_USERID)
                     .first()
                 )
-                value = row is not None and getattr(row, "AUTONOMY_ALL_STOP", None) is True
+                # bool(...) で読む — ORM の型変換を経ない経路 (生 SQL・古い行) が
+                # 1/0 を返しても取りこぼさない (2026-10-12 ローカルレビュー採用)。
+                value = row is not None and bool(getattr(row, "AUTONOMY_ALL_STOP", False))
             finally:
                 db.close()
         except Exception:
