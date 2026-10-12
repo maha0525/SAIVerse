@@ -116,6 +116,7 @@ saiverse/
 ├── data_paths.py           # パス管理（user_data/builtin_data）
 ├── playbook_scope.py       # 管理サービスと CLI が共有するパス→Playbook 公開範囲の推論（保存・CLI に非依存）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
+├── addon_context.py        # アドオンの案内（context_provider）の登録簿。読み手は head の addon_guidance セクション
 ├── observer_manager.py     # Observer（定期観測 Fixture）
 └── ...                     # その他コアモジュール
 ```
@@ -215,7 +216,8 @@ sea/
 └── head_pipeline/        # head（キャッシュの効く安定領域）の構築
     ├── pipeline.py / registry.py / store.py / types.py / integration.py
     └── sections/         #   各 Section（common_prompt / persona_self / building 等。
-                          #   self_view = 自分の外見とインベントリ、独立した user メッセージ）
+                          #   self_view = 自分の外見とインベントリ、独立した user メッセージ。
+                          #   addon_guidance = アドオンからの案内、増減は差分通知で届く）
 ```
 
 ### manager/

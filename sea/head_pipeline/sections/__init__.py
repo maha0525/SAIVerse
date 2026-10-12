@@ -16,6 +16,7 @@
 どこからも届かなくなっていた。``SelfViewSection`` がこの二つを運ぶ (部屋の描画は
 戻さない)。
 """
+from sea.head_pipeline.sections.addon_guidance import AddonGuidanceSection
 from sea.head_pipeline.sections.autonomy_modes import AutonomyModesSection
 from sea.head_pipeline.sections.available_playbooks import AvailablePlaybooksSection
 from sea.head_pipeline.sections.building import BuildingSection
@@ -47,6 +48,8 @@ def register_default_sections(registry) -> None:
     registry.register(AutonomyModesSection())
     registry.register(SelfImageSection())
     registry.register(SpellListSection())
+    # アドオンからの案内 (2026-10-12、spell_list と同じく head + 差分通知)
+    registry.register(AddonGuidanceSection())
     registry.register(MemoryWeaveSection())
     registry.register(DeskSection())
     # 自分の外見とインベントリ (独立した user メッセージ、_compose_messages が置く)
@@ -58,6 +61,7 @@ def register_default_sections(registry) -> None:
 
 
 __all__ = [
+    "AddonGuidanceSection",
     "AutonomyModesSection",
     "AvailablePlaybooksSection",
     "BuildingOccupantsSection",

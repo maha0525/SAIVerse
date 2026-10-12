@@ -5585,7 +5585,8 @@ class SessionLifecycle:
         その Section を head から落とすだけなので、dispatch の成立だけでは
         「今の状態を見せている」と言えない。**通知を出す Section**
         (:data:`~saiverse.dynamic_state.NOTICE_SOURCE_SECTIONS` — コア記憶・机・
-        Memopedia 目次・スペル一覧) が全部撮り直せた回にだけ通知を下ろす。
+        Memopedia 目次・スペル一覧・アドオンからの案内) が全部撮り直せた回にだけ
+        通知を下ろす。
         境界は一方向なので、古い head のまま下ろすと、そのペルソナはその変化を
         知る手段を恒久的に失う。失敗が続く限り通知が残るのは安全側で正しい。
 

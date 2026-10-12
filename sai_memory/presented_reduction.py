@@ -76,7 +76,7 @@ NOTICE_KINDS = frozenset({"head_mutation"})
 #: 提示から下ろす ``world_state`` 通知のラベル型
 #: (:data:`sai_memory.room_state.LABEL_KIND_META_KEY` に載る値)。
 #:
-#: スペル一覧の増減だけを対象にする — head のスペル一覧セクションが今の一覧を
+#: スペル一覧の増減を対象にする — head のスペル一覧セクションが今の一覧を
 #: そのまま見せるので、Metabolism 後は重複になる (付与通知はスキーマ込みで数千字
 #: 級になりうる、2026-09-04 裁定の実装)。
 #:
@@ -89,11 +89,18 @@ NOTICE_KINDS = frozenset({"head_mutation"})
 #: ``persona_system_prompt_changed``) と Playbook の増減 (``playbook_*``) は
 #: 構造としてはスペル一覧と同じ形だが、intent が名指ししていないので今回は
 #: 触らない (どれも一行から数行で、縮めても得るものが小さい)。
+#:
+#: 2026-10-12 にアドオンからの案内の増減・変化 (``addon_guidance_*``、
+#: sea/head_pipeline/sections/addon_guidance.py) を加えた。スペル一覧と同じ形で、
+#: head の案内セクションが今の案内をそのまま見せるので、Metabolism 後は重複になる。
 NOTICE_LABEL_KINDS = frozenset({
     "spell_added",
     "spell_removed",
     "spell_system_enabled",
     "spell_system_disabled",
+    "addon_guidance_added",
+    "addon_guidance_removed",
+    "addon_guidance_changed",
 })
 
 #: 部屋の記帳に打つ「縮めた」印と、その相棒のフィールド。

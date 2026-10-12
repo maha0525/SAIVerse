@@ -6,7 +6,7 @@ message dict 列 (system + user / media 含む) に composition する。
 
 Section 群と message role / metadata の対応はこの層で握る:
 - ``common_prompt`` / ``persona_self`` / ``building`` / ``available_playbooks`` /
-  ``spell_list``: text-only、まとめて 1 つの system message にする
+  ``spell_list`` / ``addon_guidance``: text-only、まとめて 1 つの system message にする
 - ``memory_weave``: text-only、独立した user role message にする (旧 get_memory_weave_context 経路と互換)
 - ``self_view``: text + media、Memory Weave の後ろに独立した user role message +
   ``metadata.media`` (自分の外見とインベントリ。システムプロンプトには入れない —
@@ -54,7 +54,7 @@ LOGGER = logging.getLogger(__name__)
 # 並び順 = system メッセージ内の出力順。各 Section の order 属性に合わせる
 # (common_prompt < persona_self < core_memory(250) < building(300) < facilities(310) <
 #  available_playbooks(400) < autonomy_modes(550) < self_image(560) <
-#  spell_list(600) < desk(730))。
+#  spell_list(600) < addon_guidance(610) < desk(730))。
 # 旧 open_notes(720) は P3c① (concept_consolidation.md「Note → テーマノード移行」)
 # で退役し、後継の desk (机の物理) に置き換わった。
 SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
@@ -73,6 +73,10 @@ SYSTEM_PROMPT_SECTION_NAMES: tuple[str, ...] = (
     "autonomy_modes",
     "self_image",
     "spell_list",
+    # 2026-10-12: アドオンからの案内 (例: 仮想身体の部屋の全身エモート記法)。
+    # 増減・変化は差分通知で届く (sections/addon_guidance.py)。案内が無ければ
+    # None render なので、ここは無条件で列挙してよい。
+    "addon_guidance",
     "desk",
     # P4-d: Memopedia 目次 (opt-in 実験。per-persona フラグ MEMOPEDIA_INDEX_ENABLED
     # が render 内でゲートするので、ここは無条件で列挙してよい — OFF なら None render)

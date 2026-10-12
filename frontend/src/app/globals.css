@@ -60,6 +60,13 @@ body {
   color: var(--text-primary);
 }
 
+.body-emote {
+  color: var(--text-secondary);
+  font-size: 0.8em;
+  font-weight: 400;
+  opacity: 0.65;
+}
+
 /* note-box 内のリンク (移動イベントの行き先の部屋名など)。 box 全体が
    opacity 0.85 + 0.85em で沈むので、 SaiverseLink の既定色のままだと
    ライトテーマでコントラストが足りない (背景 #f1f5f9 上で約 3.6:1)。
