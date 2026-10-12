@@ -37,11 +37,10 @@ HTTP 中継の設定値は `http://host:port` のような origin とし、末�
 
 ## SAIMemory / 記憶
 
+想起用の埋め込みモデルは EmbeddingGemma 2 の 4bit 量子化 ONNX (768 次元) に固定で、CPU で動く。モデルや演算デバイスを選ぶ env は無い (2026-10-12 に `SAIMEMORY_EMBED_MODEL` / `_PATH` / `_DIM` / `_CUDA` を廃止し、設定されていても読まれない。経緯は [embedding_gemma2_migration](../intent/embedding_gemma2_migration.md))。
+
 | 変数 | 既定 | 説明 |
 |---|---|---|
-| `SAIMEMORY_EMBED_MODEL` | `intfloat/multilingual-e5-small` | 埋め込みモデル |
-| `SAIMEMORY_EMBED_MODEL_PATH` | - | ローカル埋め込みモデルのパス |
-| `SAIMEMORY_EMBED_CUDA` | 自動 | `1`=GPU 強制 / `0`=CPU 強制 / 未設定=自動 |
 | `SAIMEMORY_MEMORY` | `on` | 記憶機能の ON/OFF |
 | `SAIMEMORY_MEMORY_LAST_MESSAGES` | `8` | 直近何件を文脈に載せるか（`.env.example` は `40` を同梱） |
 | `SAIMEMORY_MEMORY_SEMANTIC_RECALL` | `true` | セマンティック想起 |

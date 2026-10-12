@@ -38,7 +38,7 @@ python scripts/import_persona_logs_to_saimemory.py --persona air --reset
 
 # 古いエントリを整理 / 埋め込み再生成 / タグ付与
 python scripts/prune_sai_memory.py air --days 365
-python scripts/reembed_memory.py air
+python scripts/reembed_memory.py air   # 次元が合わないベクトルを 4 系統 (メッセージ / Chronicle / ページ / Fragment) とも作り直す。--force で全件
 python scripts/tag_conversation_messages.py air --auto
 ```
 

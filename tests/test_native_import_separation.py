@@ -471,12 +471,15 @@ def test_import_without_seq_falls_back_to_archive_order(memory_root):
 class DummyEmbedder:
     """Non-loading stand-in for sai_memory.memory.recall.Embedder."""
 
-    def __init__(self, model="dummy", *, local_model_path=None,
-                 model_dim=None, cuda=None):
+    def __init__(self, *, local_model_path=None):
         pass
 
-    def embed(self, payload, is_query=False):
-        return [[0.1, 0.2, 0.3] for _ in payload]
+    @property
+    def embedding_size(self):
+        return 3
+
+    def embed(self, texts, *, is_query=False):
+        return [[0.1, 0.2, 0.3] for _ in texts]
 
 
 def test_transplant_does_not_touch_source_persona(memory_root, monkeypatch):

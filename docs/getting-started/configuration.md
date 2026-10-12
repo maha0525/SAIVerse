@@ -22,9 +22,9 @@ SAIVerseの設定オプションを説明します。
 
 | 変数名 | デフォルト | 説明 |
 |--------|-----------|------|
-| `SAIMEMORY_EMBED_MODEL` | `intfloat/multilingual-e5-small` | 埋め込みモデル |
-| `SAIMEMORY_EMBED_MODEL_PATH` | - | ローカルモデルのパス |
 | `SAIMEMORY_MEMORY_LAST_MESSAGES` | 40 | 文脈に載せる直近メッセージ数 |
+
+想起に使う埋め込みモデル (EmbeddingGemma 2、CPU で動作) は固定で、設定項目はありません。セットアップ時 (失敗した場合は初回起動時) に `sbert/embeddinggemma-2-q4/` へ自動でダウンロードされます。
 
 ### ネットワーク
 

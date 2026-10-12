@@ -28,7 +28,7 @@
    Chronicle 生成はユーザー Pulse 時のみ確認ダイアログを経て実行され、自律/schedule Pulse では確認手段がなくスキップされる（`sea/runtime.py:2194` 付近）。自律稼働が長く続くほど長期記憶に残らない期間が伸びる。v0.3.0 自律稼働ロードマップと正面衝突する構造欠陥。
 
 5. **外部ログのインポートで、記憶が機能するまでのイニシャルコストが高すぎる。**
-   メッセージ挿入と埋め込み生成は無料（ローカル e5-small）だが、記憶が「効く」には Chronicle 一括生成（LLM コスト・時間）を待つ必要がある。ChatGPT からの引っ越しの障壁。
+   メッセージ挿入と埋め込み生成は無料（ローカル e5-small。2026-10-12 にローカルの EmbeddingGemma 2 へ移行 — 無料のまま、計算は約 4 倍遅い。[embedding_gemma2_migration](embedding_gemma2_migration.md)）だが、記憶が「効く」には Chronicle 一括生成（LLM コスト・時間）を待つ必要がある。ChatGPT からの引っ越しの障壁。
 
 6. **Chronicle の読み込み上限（50エントリ）は超過時に最古が黙って落ちる。**
    `get_episode_context` はループが `max_entries` に達した時点で終了し、それより古い過去は読まれない（`sai_memory/arasuji/context.py:182`）。20万メッセージ級のユーザーでは人生の冒頭（ChatGPT 時代）が weave から消える。
@@ -288,6 +288,7 @@ v0.1 の未決事項のうち UI 露出（→§4.5）・コア記憶容量（→
 
 1. §4 の初期パラメータ: 類似度しきい値 / sticky ターン数 / クエリに含める直近メッセージ数。（注入文字数上限は 2026-07-08 に撤廃 →§4.3 実装ノート。「浮かぶ数」の抑制は取り込み側の上限で扱う。）
    - **Phase 1 実装時の実測決定 (2026-07-04)**: 類似度しきい値の既定は **0.86**（doc 本文の暫定 0.78 から引き上げ）。air_city_a の実 memory.db で測定したところ、E5 (multilingual-e5-small) は `query:`/`passage:` プレフィックス方式のため cosine が 0.8〜0.9 に圧縮され、無関係クエリでも top ヒットが 0.83〜0.84 に達した（0.78 では毎ターン全件注入になる）。実測分布: オントピック top クラスタ 0.86〜0.89 / 無関係 top max 0.842 / 汎用短文「うん」top max 0.837。0.86 でオントピック上位のみを拾える。全パラメータは `SAIVERSE_AUTO_RECALL_*` env で調整可（`sea/auto_recall.py`）。他既定値: sticky 3 ターン / クエリ直近 1 件（rev2 で 4→1、固有名詞が長文クエリに埋没するのを防ぐ）/ topk 8。（注入文字数上限は 2026-07-08 に撤廃 →§4.3。）
+   - **2026-10-12 の埋め込み移行での変更**: 埋め込みモデルが EmbeddingGemma 2 (768 次元) に変わり、cosine の分布が広がったため、上の 0.86 / message +0.02 は合成データでの再測定により 0.78 / +0 に差し替えた（上の記述は e5 時代の実測として残す）。測定は `experiments/embeddinggemma2_bench/threshold/measurement.md`、経緯は [embedding_gemma2_migration](embedding_gemma2_migration.md) §3。
 2. §6.2 の予算の具体値（文字数/トークン数）と、モデルごとの context_length 連動の要否。
    - **Phase 3 実装時の決定 (2026-07-04)**: 予算は **文字数** で既定 **20,000 字**、env `SAIVERSE_CHRONICLE_CHAR_BUDGET` で調整可（`sai_memory/arasuji/context.py`）。現行の実質 13〜20k 字相当（air_city_a 実 DB で 32 entries ≒ 13k 字）に合わせ、既定で既存ユーザーの weave が痩せないようにした。モデル `context_length` 連動は v1 では **しない**（複雑化に見合う利得が不明なため。将来、極端に短い context のモデルで問題が出たら予算を context_length から導出する層を足す）。
 

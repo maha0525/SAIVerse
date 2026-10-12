@@ -36,7 +36,7 @@ SAIVerse/
 ├── scripts/                # 保守スクリプト
 ├── tests/                  # テストスイート
 ├── test_fixtures/          # 隔離テスト環境
-├── sbert/                  # 埋め込みモデル（存在すれば利用、なければ自動DL）
+├── sbert/                  # 埋め込みモデル（embeddinggemma-2-q4/。存在すれば利用、なければ自動DL）
 └── assets/                 # ロゴ・ガイド画像
 ```
 

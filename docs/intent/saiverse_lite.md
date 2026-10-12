@@ -69,6 +69,9 @@ Lite はそのための、スマホ単体で完結する軽量アプリである
 ### v1.x（順次）
 - 埋め込みによる意味想起（transformers.js + multilingual-e5-small =
   本体 SAIMemory と同モデルを WASM で端末内実行）
+  （2026-10-12 注: 本体は EmbeddingGemma 2 の 4bit ONNX (768 次元) へ移行したので、
+  「本体と同モデル」の前提はずれた。Lite 側の対応は未着手の別件 —
+  [embedding_gemma2_migration](embedding_gemma2_migration.md)「範囲外」）
 - **端末内モデル**: 鍵も通信も要らない選択肢として、Gemma 4 E2B / E4B を
   ブラウザの WebGPU で動かす。BYOK とは別の柱で、「API キーを持たない人」と
   「会話を一切外へ出したくない人」の両方への入口になる。

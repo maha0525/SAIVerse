@@ -76,7 +76,7 @@ Full workflow, parameter rules, and dev tooltip usage: `docs/developer-guide/loc
 
 ### Other setups
 
-- **GPU / embeddings** (`SAIMEMORY_EMBED_CUDA=1|0`, unset = auto-detect): `docs/getting-started/gpu-setup.md`
+- **Embeddings**: fixed to EmbeddingGemma 2 (4-bit ONNX, 768 dims), **CPU only** — no env to pick the model or the device. Files live in `sbert/embeddinggemma-2-q4/` (auto-downloaded). A model change is migrated by re-embedding all 4 vector tables: `docs/intent/embedding_gemma2_migration.md`
 - **Isolated test environment** (port 18000, `test_data/`): `docs/test_environment.md`. Use `python test_fixtures/test_api.py --quick` for fast verification without LLM costs. The chat API returns streaming NDJSON; the user must have `CURRENT_BUILDINGID` set and personas need `LIGHTWEIGHT_MODEL` for router nodes.
 - **Backup / recovery scripts**: `docs/reference/scripts.md`. Automatic backups on startup are controlled by `SAIVERSE_DB_BACKUP_ON_START`, `SAIVERSE_DB_BACKUP_KEEP`, `SAIMEMORY_BACKUP_ON_START`.
 - **Test setup and scenarios**: `docs/developer-guide/testing.md`
@@ -285,7 +285,7 @@ These groups **must** stay in sync — changing one requires changing the others
 
 ## Environment Variables
 
-Full list: `docs/reference/environment-vars.md`. Set in `.env` (see `.env.example`). The ones you will actually reach for: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `CLAUDE_API_KEY`, `OLLAMA_BASE_URL`, `SAIVERSE_LOG_LEVEL`, `SAIVERSE_SEA_TRACE`, `SAIMEMORY_EMBED_MODEL`, `SAIVERSE_DB_BACKUP_ON_START`, `SAIVERSE_GATEWAY_WS_URL`.
+Full list: `docs/reference/environment-vars.md`. Set in `.env` (see `.env.example`). The ones you will actually reach for: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `CLAUDE_API_KEY`, `OLLAMA_BASE_URL`, `SAIVERSE_LOG_LEVEL`, `SAIVERSE_SEA_TRACE`, `SAIVERSE_DB_BACKUP_ON_START`, `SAIVERSE_GATEWAY_WS_URL`.
 
 ## Documentation Map
 
