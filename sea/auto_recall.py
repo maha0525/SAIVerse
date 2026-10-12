@@ -67,16 +67,26 @@ def _env_int(name: str, default: int) -> int:
 
 # 埋め込みヒットの採用しきい値 (raw cosine similarity)。下回れば注入しない。
 #
-# 既定 0.86 は air_city_a の実 memory.db で測定して決めた (intent doc §4 は暫定
-# 0.78 だったが、E5 (multilingual-e5-small) は query:/passage: プレフィックス方式
-# ゆえ cosine レンジが 0.8〜0.9 に圧縮され、無関係クエリでも top ヒットが 0.83〜0.84
-# に達する。0.78 では毎ターン全件注入になってしまう)。実測分布:
-#   - オントピック: top クラスタ 0.86〜0.89
-#   - 無関係/gibberish: top max 0.842
-#   - 汎用短文「うん」: top max 0.837
-# 0.86 でオントピックの上位ヒットを拾いつつノイズを落とせる。env で調整可。
+# 既定 0.78 は EmbeddingGemma 2 (4bit ONNX、768 次元) の cosine 分布を合成データで
+# 測って決めた (2026-10-12、測定一式と導出は
+# experiments/embeddinggemma2_bench/threshold/measurement.md)。データは日本語の
+# 合成コーパス (会話メッセージ風 300 本 + 要約風 100 本) で、実在のペルソナの記憶は
+# 使っていない。決め方は e5 時代の 0.86 と同じ — 無関係なクエリと相づちの top の最大
+# より上、話題に沿ったクエリの top の帯の下端。実測分布 (クエリ各群の top):
+#   - 話題に沿ったクエリ 30 本: 要約層の top は 0.784〜0.882 (外れ 1 本 0.720)
+#   - 無関係/意味のない文字列 20 本: top max 0.705
+#   - 相づち 10 本 (「わかった」等): top max 0.761
+# 0.78 で正解の記憶は 29/30 本が通り、無関係・相づちは 0/30 本 (余裕 0.019 は、
+# e5 の 0.86 が実データのノイズ最大 0.842 に対して持っていた余裕 0.018 とほぼ同じ)。
+# 合成データの代表性は、同じデータの上で e5 を測ると元の実測 (ノイズ最大 0.84 前後、
+# 話題の帯 0.86〜0.89) をほぼ再現する (ノイズ最大 0.853〜0.860) ことで確かめた。
+# 実会話での採否の確認は移行の検証フェーズ (隔離環境) に残っている。env で調整可。
+#
+# 経緯: e5 (multilingual-e5-small) 時代の既定は 0.86 だった。e5 は cosine が
+# 0.8〜0.9 に密集し、無関係クエリでも top が 0.83〜0.84 に達したため
+# (air_city_a の実 memory.db で測定)。
 def get_similarity_threshold() -> float:
-    return _env_float("SAIVERSE_AUTO_RECALL_THRESHOLD", 0.86)
+    return _env_float("SAIVERSE_AUTO_RECALL_THRESHOLD", 0.78)
 
 
 # 粘着ウィンドウ: しきい値を割ってから台帳に残すターン数。
@@ -86,7 +96,7 @@ def get_sticky_turns() -> int:
 
 # クエリに含める直近メッセージ数 (user/assistant 両ロール)。
 #
-# rev2: 既定を 4 → 1 に変更。air_city_a の実 memory.db で測定した結果、直近4件
+# rev2: 既定を 4 → 1 に変更。air_city_a の実 memory.db で (e5 時代に) 測定した結果、直近4件
 # (210字超) を連結すると会話の主成分 (実装の話など) にクエリベクトルが支配され、
 # 発話に含まれる固有名詞 (例:「アイフィ」) が埋没して無関係な記憶が 0.87〜0.91 で
 # threshold 0.86 を通過してしまう。クエリを最新発話 1 件だけに絞ると、固有名詞への
@@ -112,12 +122,18 @@ def is_media_recall_enabled() -> bool:
 
 # message ソースのヒットに加算するしきい値オフセット (raw cosine similarity)。
 #
-# 実測: message ソースは長文同士の類似度インフレが起きやすく、無関係な組み合わせ
-# でも 0.89〜0.91 のジャンクヒットが出る (chronicle/memopedia/fragment は短めの
-# 要約文なのでこのインフレが起きにくい)。message ヒットだけ threshold を底上げして
-# ジャンクを落とす。既定 0.02 (= 実効しきい値 0.88)。
+# 既定 0 (= message も要約系と同じしきい値)。EmbeddingGemma 2 では、この底上げが
+# 対処していた「長文同士の類似度インフレ」が起きていない — 同じ合成データの上で、
+# 無関係クエリ・相づちの top の最大は message 層の方が要約層より低かった
+# (-0.014 / -0.022。e5 では逆に message 層が +0.014 / +0.005 高かった)。底上げを
+# 残しても落とせるノイズは無く (しきい値だけで 0/30 本)、正解の message ヒットだけが
+# 12/30 → 9/30 本に減る。測定と導出は
+# experiments/embeddinggemma2_bench/threshold/measurement.md。env で戻せる。
+#
+# 経緯: e5 時代の既定は 0.02 (実効しきい値 0.88)。e5 では message ソースに無関係な
+# 組み合わせでも 0.89〜0.91 のジャンクヒットが出たため。
 def get_message_threshold_offset() -> float:
-    return _env_float("SAIVERSE_AUTO_RECALL_MSG_THRESHOLD_OFFSET", 0.02)
+    return _env_float("SAIVERSE_AUTO_RECALL_MSG_THRESHOLD_OFFSET", 0.0)
 
 
 # エンティティトリガーの ambient 抑制: 直近ウィンドウ (最新発話を除く) でこの回数
@@ -185,9 +201,21 @@ def is_enhanced_recall_available(model_key: Optional[str] = None) -> bool:
     return is_available(model_key=model_key, required_type=FIRST_STAGE_QUESTION_TYPE)
 
 
-# 反射判断に渡す候補の embed_score 下限。cosine 単独の採用しきい値 (0.86) より広く
-# 取り、0.78〜0.86 帯の「拾えなかった正解」を判定に回す。
-_REFLEX_FLOOR = 0.78
+# 反射判断に渡す候補の embed_score 下限。cosine 単独の採用しきい値 (0.78) より広く
+# 取り、0.62〜0.78 帯の「拾えなかった正解」を判定に回す。
+#
+# **暫定値** (2026-10-12、EmbeddingGemma 2 への移行で据え直し)。元の 0.78 は e5 の
+# 上で Jev の実験 (2026-09) によって調整した値で、分布の測定だけでは決められない。
+# そこで「e5 の帯 (0.78〜0.86) の幅が、正解ヒットの分布の p10〜p90 幅の何倍だったか」
+# を新しい分布の上で保存して導いた: 合成データの正解分布で e5 の幅 0.037 に対して
+# 帯 0.08 は約 2.16 倍、EmbeddingGemma 2 の幅 0.076 に掛けると 0.165 →
+# 0.78 - 0.165 ≈ 0.62。照合として、JSQuAD の分布で同じ計算をすると 0.65、
+# 上位 8 件のうち判断に回る件数を e5 の 0.78 と揃えると 0.60 になる。導出の全文は
+# experiments/embeddinggemma2_bench/threshold/measurement.md。
+# 反射判断込みの採否が Jev の合格時と同等であることの確認
+# (docs/intent/auto_recall_jev_rerank.md の合否手順の縮小再実行) は、移行の
+# 隔離検証フェーズに残っている。
+_REFLEX_FLOOR = 0.62
 
 # 採用に必要な Noul 確率 (0〜1)。
 _REFLEX_THRESHOLD = 0.5

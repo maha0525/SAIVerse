@@ -365,26 +365,50 @@ class TestEntityTrigger(AutoRecallBase):
 
 class TestMessageThresholdOffset(AutoRecallBase):
 
-    def test_message_hit_between_threshold_and_offset_dropped(self):
-        # threshold=0.86 (既定), offset=0.02 → message の実効しきい値は 0.88。
-        # embed_score=0.87 は threshold は超えるが実効しきい値未満なので落ちる。
+    # 既定の底上げは 0 (EmbeddingGemma 2 では message 層のインフレが起きないため。
+    # sea/auto_recall.py get_message_threshold_offset のコメント)。底上げの仕組み自体は
+    # env で入れられるので、下の 3 本は env で 0.02 を入れて仕組みを確かめる。
+
+    def _set_offset(self, value):
+        import os
+        os.environ["SAIVERSE_AUTO_RECALL_MSG_THRESHOLD_OFFSET"] = value
+
+    def test_default_offset_is_zero(self):
+        # 既定では message も素のしきい値で判定される (しきい値ちょうど上で採用)。
+        self.assertEqual(auto_recall.get_message_threshold_offset(), 0.0)
         messages = _msgs(("user", "こんにちは", "m1"))
-        hits = [_hit("message", "m999", embed_score=0.87, title="user @ 2024-01-01")]
+        score = auto_recall.get_similarity_threshold() + 0.01
+        hits = [_hit("message", "m999", embed_score=score, title="user @ 2024-01-01")]
+        with patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]):
+            res = self._run(hits, messages)
+        self.assertTrue(res.injected)
+
+    def test_message_hit_between_threshold_and_offset_dropped(self):
+        # offset=0.02 → message の実効しきい値は threshold + 0.02。
+        # threshold + 0.01 は threshold は超えるが実効しきい値未満なので落ちる。
+        self._set_offset("0.02")
+        messages = _msgs(("user", "こんにちは", "m1"))
+        score = auto_recall.get_similarity_threshold() + 0.01
+        hits = [_hit("message", "m999", embed_score=score, title="user @ 2024-01-01")]
         with patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]):
             res = self._run(hits, messages)
         self.assertFalse(res.injected)
 
     def test_message_hit_above_offset_kept(self):
+        self._set_offset("0.02")
         messages = _msgs(("user", "こんにちは", "m1"))
-        hits = [_hit("message", "m999", embed_score=0.89, title="user @ 2024-01-01")]
+        score = auto_recall.get_similarity_threshold() + 0.03
+        hits = [_hit("message", "m999", embed_score=score, title="user @ 2024-01-01")]
         with patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]):
             res = self._run(hits, messages)
         self.assertTrue(res.injected)
 
     def test_non_message_hit_uses_plain_threshold(self):
         # chronicle/memopedia/fragment はオフセットなしの素の threshold で判定される。
+        self._set_offset("0.02")
         messages = _msgs(("user", "こんにちは"))
-        hits = [_hit("chronicle", "c1", embed_score=0.87)]
+        score = auto_recall.get_similarity_threshold() + 0.01
+        hits = [_hit("chronicle", "c1", embed_score=score)]
         with patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]):
             res = self._run(hits, messages)
         self.assertTrue(res.injected)
