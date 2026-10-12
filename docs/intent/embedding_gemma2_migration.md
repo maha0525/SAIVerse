@@ -1,6 +1,6 @@
 # 想起用埋め込みの EmbeddingGemma 2 への移行
 
-**ステータス: 設計中 (2026-10-12 起草)**
+**ステータス: 実装中 (2026-10-12 起草、同日設計確定 — 768 次元で保存・CPU 固定)**
 
 ## これは何か
 
@@ -58,7 +58,7 @@ e5 と新モデルを選べるようにはしない (2026-10-12 まはー裁定�
 - ONNX グラフは文埋め込み (`sentence_embedding`、768 次元、プーリング・射影・正規化込み) を出力するので、後処理の自前実装は不要。トークナイズは tokenizers で `tokenizer.json` を直接読む。画像・音声用の必須入力 3 つには空テンソルを渡す (ベンチで確認済みの作法)。入力の長さの上限は現行同等 (512 トークンで切り詰め) を既定とし、Chronicle 本文の実際の長さ分布を実装時に測って見直す (ベクトルを作る入力の切り詰めであり、記憶の原文は切らない)。
 - プロンプト: クエリ側 `task: search result | query: `、文書側 `title: none | text: `。e5 のモデル名分岐は削除する。
 - **モデルの指定口は撤去する** (切り替え不要の裁定に従う): env `SAIMEMORY_EMBED_MODEL` / `_PATH` / `_DIM`、CLI の `--model` / `--model-path` / `--model-dim`、e5-base への自動フォールバック。モデルの同一性は「名前 + 量子化 + revision」を一体で `embed_metadata.embed_model` に記録する (例: `embeddinggemma-2-q4@daa72c51`) — 名前だけの比較では量子化の変更を検出できないため。ローカルのファイル探索 (今は `onnx/model.onnx` 等の決め打ち) も新しいファイル名に合わせて更新する。
-- GPU: 現行と同じく providers に CUDA があれば使う。**4bit 量子化の演算 (MatMulNBits) が CUDA の provider で動くかは実装時に実測する (未確認)。** 動かなければ CPU 固定とし、`SAIMEMORY_EMBED_CUDA` と docs/getting-started/gpu-setup.md を実測の結果に合わせて書き換える。
+- **埋め込みは CPU 固定にする** (2026-10-12 まはー裁定)。GPU のある環境ほどローカル LLM が GPU を使っていることが普通にあり、埋め込みが取り合いに行く設計を避ける。q4 の CPU 速度 (29.8ms) は GPU なしで実用域。`SAIMEMORY_EMBED_CUDA` は廃止し、docs/getting-started/gpu-setup.md (埋め込みの GPU 利用の手順書) は整理する。
 - モデルファイルは `sbert/embeddinggemma-2-q4/` に置く。中身は `model_q4.onnx` + `model_q4.onnx_data` + `tokenizer.json` + `tokenizer_config.json` + `config.json` (revision `daa72c51…` に固定)。setup (bat/sh) と起動時の自動ダウンロードを差し替える。
 - **依存の下限を実測して requirements を更新する**: ベンチは tokenizers 0.23.3 / onnxruntime 1.23.2 で通したが、lock の tokenizers は 0.21.4 で、この tokenizer.json が読めるか未確認。MatMulNBits の必要下限も onnxruntime `>=1.17` のままでは保証できない。huggingface-hub (自動ダウンロードに使用) は fastembed を外した後も直接の依存として明示する。
 
@@ -82,24 +82,25 @@ e5 と新モデルを選べるようにはしない (2026-10-12 まはー裁定�
 
 同じ変更で直す一覧 (調査 §8 + レビューの補完): docs/reference/environment-vars.md、docs/getting-started/configuration.md、docs/getting-started/gpu-setup.md、.env.example、docs/concepts/legacy/saimemory.md、docs/developer-guide/project-structure.md、docs/third_party_licenses.md (fastembed を外し EmbeddingGemma 2 のライセンスを足す)、sai_memory/README.md、requirements.txt / requirements-gpu.txt / lock、CLAUDE.md (SAIMEMORY_EMBED_MODEL への言及 2 箇所)、docs/intent/dependency_management.md、docs/issues/python_314_support_verification.md、docs/intent/memory_architecture_v2.md と ultramemory.md と auto_recall_jev_rerank.md の e5 前提の節、saiverse/recall_walk.py 冒頭の fastembed への言及、docs/issues/autonomous_v2_post_live_gaps.md の「e5-small がテキスト専用」の記述、docs/intent/saiverse_lite.md (「本体と同モデル」の記述に相違の注記を入れる — Lite 本体の対応は「範囲外」)。
 
-## 分岐 (まはー判断待ち)
+## 保存する次元 — 768 で決着 (2026-10-12 まはー裁定)
 
-**保存する次元 — 768 のまま入れるか、512 に切り詰めて入れるか。** EmbeddingGemma 2 は「768 個の数字の先頭 512 個だけ残しても意味が保たれる」性質 (Matryoshka) を持つ。
+EmbeddingGemma 2 は「768 個の数字の先頭 512 個だけ残しても意味が保たれる」性質 (Matryoshka) を持つが、**768 のまま保存する**。判断の材料:
 
-| | 768 で保存 | 512 で保存 |
+| | 768 で保存 | 512 で保存 (不採用) |
 |---|---|---|
 | JSQuAD R@5 / R@1 (q4) | 0.9579 / 0.8330 | 0.9550 / 0.8242 |
 | JSTS (q4、STS プロンプト) | 0.8553 | 0.8561 |
 | memory.db のベクトル部の大きさ | 今の約 2 倍 | 今の約 1.33 倍 |
 | 検索 1 回あたりの照合計算 | 今の約 2 倍 | 今の約 1.33 倍 |
 
-検索の照合は毎回全ベクトルを読み直して計算する作りなので、この差は記憶が大きいペルソナほど毎回の想起に効く。精度は 512 だと上位 1 件 (e5 比 -0.019) に加えて上位 5 件も僅かに e5 を下回る (0.9550 対 0.9563)。将来の画像・音声のベクトルにも同じ切り詰めが効くかは**未検証** (公式ページは 128 次元まで切り詰めると多モーダルの品質が目立って落ちると記しており、512 での劣化幅の計測は無い)。
+採用の理由: 移行の目的は想起の質で、512 は上位 1 件 (e5 比 -0.019) に加えて上位 5 件も僅かに e5 を下回る (0.9550 対 0.9563)。容量・照合計算の差は記憶の索引として許容し、照合の高速化は別の宿題 (「範囲外」)。また、埋め込みの計算時間は保存次元に依存しないため、速度は判断材料にならない。将来の画像・音声のベクトルに 512 への切り詰めが効くかは未検証 (公式ページは 128 次元で多モーダル品質が目立って落ちると記す) だった点も 768 側の材料。
 
 ## 範囲外 (次の段)
 
 - **画像・音声の直接埋め込み** (メディアを LLM 要約で文字にする現行機構の置き換え)。ONNX の配布はテキスト・画像・音声が別ファイルで、**テキスト部だけで動くことはベンチで確認済み**。画像・音声の部を追加したときの組み合わせ動作は未計測で、クエリが「1 本の文字列」から「ベクトルの組」になる設計変更も伴うため、本移行が済んでから別 intent で設計する。
 - **SAIVerse Lite への反映。** Lite の intent は「本体と同モデル (transformers.js + e5)」と記しており、互換契約 (saiverse_lite.md §5「どちらかが形式を変えるときは同じ変更の中で両側を更新する」) がある。ただし Native エクスポートにはベクトルが含まれず、エクスポート形式が埋め込みモデルを前提にしているかは**未確認** — **実装に入る前に Lite のエクスポート形式を確認し、ベクトルやモデル前提が入っているなら本移行の範囲に引き込む。** 入っていなければ Lite の対応は次の段。
 - 検索の照合が毎回全件を JSON から読み直す作りの高速化 (次元増で倍になる費用の緩和策)。本移行では手を付けない。
+- **次元・演算デバイスを利用者が選べる拡張** (まはー 2026-10-12)。優先は「本移行の完了 → 画像・音声の直接埋め込み → その後」で、当分着手しない。アイディア帳に記録。
 
 ## 検証手順
 
@@ -111,3 +112,4 @@ e5 と新モデルを選べるようにはしない (2026-10-12 まはー裁定�
 
 - 2026-10-10: アイディア帳に起案 (まはー)。論点 4 つのうち「品質と CPU 速度の検証が先」が入口だった。
 - 2026-10-12: ワークツリー experiment/embeddinggemma2-bench でベンチ実施 (量子化していない元のモデル → ONNX 量子化 3 種)。4bit 版が「精度ほぼ無傷・ダウンロードと常駐メモリは e5 の半分以下・クエリ 30ms」と判明。まはーの GO (チャット原文「OK！4bit圧縮を前提に移行設計に進もう！切り替え不要！！」)。同日、埋め込みを使っている全箇所の調査を実施して本 intent を起草し、言葉づかいと整合性のレビューを通した (0.78 の出自の誤り、メモリ・JSTS の数字の読み方、モデル指定口の扱いなどを修正)。
+- 2026-10-12 (続き): 設計確定の裁定 — 保存次元は 768、埋め込みは CPU 固定 (「GPUは極力使いたくない…とりあえずCPUでやる形でやっといて」)。インポートの埋め込みを取り込みの待ちから外す手当てを追加。実装着手。
