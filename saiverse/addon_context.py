@@ -15,30 +15,62 @@
 (docs/intent/addon_speak_hooks.md)。
 
 提供口の呼び出し契約: ``provider(persona=..., building_id=...) -> str``。
-読み取り専用で、記憶・知覚・世界の状態に書いてはならない。空文字や文字列で
-ない値は「案内なし」として扱う。例外はその提供口だけ警告ログに残して
-「案内なし」として扱い、他のアドオンの案内には波及させない。
+
+- 読み取り専用で、記憶・知覚・世界の状態に書いてはならない。
+- すぐ返すこと。提供口は head の撮り直しと差分検知の中 (他のペルソナとも
+  共有している処理のロックの内側) で呼ばれるので、ネットワークや待ちのある
+  処理をしてはならない (アドオンのスペルの可否判定と同じ制約)。
+- 空文字や文字列でない値は「案内なし」として扱う。
+- 例外はその提供口だけ警告ログに残し、他のアドオンの案内には波及させない。
+
+一時的な失敗では前回の結果を使う: 提供口が例外を出したとき、そのペルソナと
+アドオンの組で最後に成功した結果 (「案内なし」だった結果も含む) が記録されて
+いれば、それを今回の結果として使う。記録が無ければ今回は案内を返さない。
+失敗を「案内なし」として扱うと、失敗した回の差分検知で「当てはまらなくなり
+ました」の偽通知が出て、復旧後に「届きました」の偽通知がもう一度出る。
+さらに head の撮り直しだけが失敗すると、head から案内が消えたのに撮り直しは
+成功した扱いになり、届けた案内の通知も提示から下ろされ、復旧しても前回
+知らせた状態と一致するので通知が出ない — ペルソナは次の撮り直しまで案内を
+見失う。記録はプロセス内メモリだけに持ち、``unregister_provider`` (アドオンの
+無効化・manifest から提供口が消えた・解決に失敗した) で消す。同じアドオンの
+提供口の置き換え (``register_provider``) では消さない。
 """
 from __future__ import annotations
 
 import json
 import logging
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 LOGGER = logging.getLogger(__name__)
 _providers: dict[str, Callable[..., str]] = {}
+# (persona_id, addon_name) -> 最後に成功した提供口の結果 (正規化済み、"" = 案内なし)
+_last_results: dict[tuple[str, str], str] = {}
+# addon_name -> 解除の回数。解除と並行して走った呼び出しが、解除の後に古い
+# 結果を記録し直さないための目印。
+_generations: dict[str, int] = {}
 _lock = threading.Lock()
 
 
 def register_provider(addon_name: str, provider: Callable[..., str]) -> None:
+    """提供口を登録する。同じアドオンの既存の提供口は一度の代入で置き換わる
+    (置き換えの途中で登録簿からアドオンが消える瞬間は無い)。前回の結果の記録は
+    消さない。"""
     with _lock:
         _providers[addon_name] = provider
 
 
 def unregister_provider(addon_name: str) -> None:
+    """提供口を解除し、そのアドオンの前回の結果の記録をすべて消す。"""
     with _lock:
         _providers.pop(addon_name, None)
+        _generations[addon_name] = _generations.get(addon_name, 0) + 1
+        for key in [key for key in _last_results if key[1] == addon_name]:
+            del _last_results[key]
+
+
+def _normalize(text: Any) -> str:
+    return text.strip() if isinstance(text, str) else ""
 
 
 def collect_guidance(persona: Any, building_id: Any) -> list[tuple[str, str]]:
@@ -46,19 +78,43 @@ def collect_guidance(persona: Any, building_id: Any) -> list[tuple[str, str]]:
 
     順序を addon 名で固定するのは、同じ世界なら head に毎回同じ文字列が出る
     ことが prefix キャッシュの前提だから。案内を返さなかった提供口は列に
-    含めない。
+    含めない。提供口が例外を出したときは、モジュールの docstring の規則どおり
+    前回の結果を使う。``persona`` から ``persona_id`` が取れないときは結果を
+    記録しない (失敗時に使える前回の結果も無い)。
     """
+    persona_id: Optional[str] = getattr(persona, "persona_id", None) if persona is not None else None
+    if not isinstance(persona_id, str) or not persona_id:
+        persona_id = None
     with _lock:
-        providers = sorted(_providers.items())
+        providers = [
+            (name, provider, _generations.get(name, 0))
+            for name, provider in sorted(_providers.items())
+        ]
     guidance: list[tuple[str, str]] = []
-    for name, provider in providers:
+    for name, provider, generation in providers:
         try:
-            text = provider(persona=persona, building_id=building_id)
+            text = _normalize(provider(persona=persona, building_id=building_id))
         except Exception:
             LOGGER.warning("addon context provider failed addon=%s", name, exc_info=True)
-            continue
-        if isinstance(text, str) and text.strip():
-            guidance.append((name, text.strip()))
+            if persona_id is None:
+                continue
+            with _lock:
+                previous = _last_results.get((persona_id, name))
+            if previous is None:
+                continue
+            LOGGER.info(
+                "addon context provider: using the last successful result "
+                "addon=%s persona=%s has_guidance=%s",
+                name, persona_id, bool(previous),
+            )
+            text = previous
+        else:
+            if persona_id is not None:
+                with _lock:
+                    if _generations.get(name, 0) == generation and name in _providers:
+                        _last_results[(persona_id, name)] = text
+        if text:
+            guidance.append((name, text))
     return guidance
 
 

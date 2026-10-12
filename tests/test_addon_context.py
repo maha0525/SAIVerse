@@ -9,6 +9,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from sai_memory.presented_reduction import is_droppable_notice
 from sai_memory.room_state import LABEL_KIND_META_KEY
 from saiverse import addon_context, addon_loader
@@ -25,6 +27,29 @@ GUIDE_TEXT = (
     'この部屋には仮想身体があります。発話中の動作を始めたい位置へ '
     '{"body_emote": "smile"} のように書けます。'
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_registry():
+    """登録簿と「前回の結果」の記録をテストごとに空から始める (プロセス内の
+    共有状態がテスト間で漏れないように)。"""
+    with patch.object(addon_context, "_providers", {}), patch.object(
+        addon_context, "_last_results", {},
+    ), patch.object(addon_context, "_generations", {}):
+        yield
+
+
+class _Flaky:
+    """呼ぶたびの振る舞いを外から切り替えられる提供口 (一時的な失敗の再現用)。"""
+
+    def __init__(self, text):
+        self.text = text
+        self.fail = False
+
+    def __call__(self, *, persona, building_id):
+        if self.fail:
+            raise RuntimeError("temporary failure")
+        return self.text
 
 
 def _room_guide(*, persona, building_id):
@@ -69,15 +94,75 @@ def _snap(*items):
 
 
 def test_provider_replacement_failure_isolation_and_unregister():
-    with patch.object(addon_context, "_providers", {}):
-        addon_context.register_provider("fixture", lambda **_kw: "first")
-        addon_context.register_provider("fixture", lambda **_kw: "second")
-        addon_context.register_provider("broken", lambda **_kw: 1 / 0)
-        addon_context.register_provider("silent", lambda **_kw: "")
-        addon_context.register_provider("non_str", lambda **_kw: 42)
-        assert addon_context.collect_guidance(None, "room") == [("fixture", "second")]
-        addon_context.unregister_provider("fixture")
-        assert addon_context.collect_guidance(None, "room") == []
+    # 記録の無い提供口の失敗は「今回は返さない」で、他のアドオンには波及しない。
+    addon_context.register_provider("fixture", lambda **_kw: "first")
+    addon_context.register_provider("fixture", lambda **_kw: "second")
+    addon_context.register_provider("broken", lambda **_kw: 1 / 0)
+    addon_context.register_provider("silent", lambda **_kw: "")
+    addon_context.register_provider("non_str", lambda **_kw: 42)
+    for persona in (None, _persona("room")):
+        assert addon_context.collect_guidance(persona, "room") == [("fixture", "second")]
+    addon_context.unregister_provider("fixture")
+    assert addon_context.collect_guidance(_persona("room"), "room") == []
+
+
+def test_temporary_failure_keeps_the_last_guidance():
+    flaky = _Flaky("案内")
+    addon_context.register_provider("flaky", flaky)
+    addon_context.register_provider("other", lambda **_kw: "他の案内")
+    persona = _persona("room")
+    assert addon_context.collect_guidance(persona, "room") == [
+        ("flaky", "案内"), ("other", "他の案内"),
+    ]
+    flaky.fail = True
+    assert addon_context.collect_guidance(persona, "room") == [
+        ("flaky", "案内"), ("other", "他の案内"),
+    ]
+    # 記録はペルソナごと — 一度も成功していない別のペルソナには使わない。
+    other_persona = SimpleNamespace(persona_id="someone_else", current_building_id="room")
+    assert addon_context.collect_guidance(other_persona, "room") == [("other", "他の案内")]
+
+
+def test_temporary_failure_after_no_guidance_stays_without_guidance():
+    flaky = _Flaky("")
+    addon_context.register_provider("flaky", flaky)
+    persona = _persona("room")
+    assert addon_context.collect_guidance(persona, "room") == []
+    flaky.text = "案内"
+    flaky.fail = True
+    assert addon_context.collect_guidance(persona, "room") == []
+
+
+def test_failure_without_record_returns_nothing():
+    flaky = _Flaky("案内")
+    flaky.fail = True
+    addon_context.register_provider("flaky", flaky)
+    assert addon_context.collect_guidance(_persona("room"), "room") == []
+    # persona_id が取れないときは記録しないので、成功の後の失敗でも返さない。
+    flaky.fail = False
+    assert addon_context.collect_guidance(None, "room") == [("flaky", "案内")]
+    flaky.fail = True
+    assert addon_context.collect_guidance(None, "room") == []
+    assert addon_context._last_results == {}
+
+
+def test_unregister_forgets_the_last_results_but_replacement_keeps_them():
+    flaky = _Flaky("案内")
+    addon_context.register_provider("flaky", flaky)
+    persona = _persona("room")
+    addon_context.collect_guidance(persona, "room")
+
+    # 同じアドオンの置き換えでは記録は残る (置き換え直後の失敗でも案内は消えない)
+    replacement = _Flaky("案内")
+    replacement.fail = True
+    addon_context.register_provider("flaky", replacement)
+    assert addon_context.collect_guidance(persona, "room") == [("flaky", "案内")]
+
+    # 解除で記録は消え、再登録した提供口が失敗しても古い案内は戻らない
+    addon_context.unregister_provider("flaky")
+    assert ("fixture", "flaky") not in addon_context._last_results
+    addon_context.register_provider("flaky", replacement)
+    assert addon_context.collect_guidance(persona, "room") == []
 
 
 def test_collect_guidance_is_sorted_by_addon_name():
@@ -103,6 +188,65 @@ def test_manifest_provider_lifecycle(tmp_path):
         assert addon_context.collect_guidance(_persona("other"), "other") == []
         addon_loader.unregister_addon_server_hooks("fixture-addon")
         assert addon_context.collect_guidance(_persona("room"), "room") == []
+
+
+def _provider_addon(tmp_path, name, text, *, with_provider=True):
+    directory = tmp_path / name
+    directory.mkdir(exist_ok=True)
+    manifest = {"context_provider": "guide_mod:guide"} if with_provider else {}
+    (directory / "addon.json").write_text(json.dumps(manifest), encoding="utf8")
+    (directory / "guide_mod.py").write_text(
+        f'def guide(*, persona, building_id):\n    return {text!r}\n', encoding="utf8",
+    )
+    return directory
+
+
+def test_reregistering_replaces_the_provider_without_a_gap(tmp_path, monkeypatch):
+    """解決の最中も旧提供口が登録簿に残る (消えた瞬間に差分検知が走ると偽通知)。"""
+    directory = _provider_addon(tmp_path, "swap-addon", "新しい案内")
+    addon_context.register_provider("swap-addon", lambda **_kw: "古い案内")
+    real_resolve = addon_loader._resolve_hook_handler
+    seen_during_resolve = []
+
+    def resolve_while_observing(addon_dir, spec):
+        seen_during_resolve.append(addon_context.collect_guidance(_persona("room"), "room"))
+        return real_resolve(addon_dir, spec)
+
+    monkeypatch.setattr(addon_loader, "_resolve_hook_handler", resolve_while_observing)
+    addon_loader._register_addon_server_hooks_for(directory)
+
+    assert seen_during_resolve == [[("swap-addon", "古い案内")]]
+    assert addon_context.collect_guidance(_persona("room"), "room") == [
+        ("swap-addon", "新しい案内"),
+    ]
+
+
+def test_reregistering_without_context_provider_unregisters(tmp_path):
+    directory = _provider_addon(tmp_path, "dropped-addon", "案内")
+    addon_loader._register_addon_server_hooks_for(directory)
+    persona = _persona("room")
+    assert addon_context.collect_guidance(persona, "room") == [("dropped-addon", "案内")]
+
+    _provider_addon(tmp_path, "dropped-addon", "案内", with_provider=False)
+    addon_loader._register_addon_server_hooks_for(directory)
+    assert "dropped-addon" not in addon_context._providers
+    assert addon_context._last_results == {}
+    assert addon_context.collect_guidance(persona, "room") == []
+
+
+def test_resolution_failure_unregisters_the_old_provider(tmp_path):
+    directory = _provider_addon(tmp_path, "broken-addon", "案内")
+    addon_loader._register_addon_server_hooks_for(directory)
+    persona = _persona("room")
+    assert addon_context.collect_guidance(persona, "room") == [("broken-addon", "案内")]
+
+    (directory / "addon.json").write_text(
+        '{"context_provider": "guide_mod:missing_function"}', encoding="utf8",
+    )
+    addon_loader._register_addon_server_hooks_for(directory)
+    assert "broken-addon" not in addon_context._providers
+    assert addon_context._last_results == {}
+    assert addon_context.collect_guidance(persona, "room") == []
 
 
 def test_display_name_prefers_japanese_from_localized_manifest(tmp_path):
@@ -263,6 +407,35 @@ def test_pipeline_flush_diffs_reports_entering_and_leaving_the_room(tmp_path):
         addon_context.unregister_provider("godot-vessel")
         disabled = pipeline.flush_diffs(_ctx(VESSEL_ROOM), all_sections=True)
         assert [label.kind for label in disabled] == ["addon_guidance_removed"]
+
+
+def test_pipeline_temporary_provider_failure_produces_no_false_notifications(tmp_path):
+    """提供口が一時的に失敗しても「当てはまらなくなりました」→「届きました」の
+    偽通知は出ず、撮り直し (capture_all) だけが失敗しても head の案内は残る。"""
+    from sea.head_pipeline import HeadPipeline, HeadSectionRegistry
+
+    _write_manifest(tmp_path, "godot-vessel", {"ja": "Godot Virtual Vessel"})
+    registry = HeadSectionRegistry()
+    registry.register(AddonGuidanceSection())
+    pipeline = HeadPipeline(registry=registry)
+    flaky = _Flaky("")
+
+    with patch("saiverse.data_paths.EXPANSION_DATA_DIR", tmp_path):
+        addon_context.register_provider("godot-vessel", flaky)
+        pipeline.capture_all(_ctx("lobby"))
+        flaky.text = GUIDE_TEXT
+        entered = pipeline.flush_diffs(_ctx(VESSEL_ROOM), all_sections=True)
+        assert [label.kind for label in entered] == ["addon_guidance_added"]
+
+        flaky.fail = True
+        assert pipeline.flush_diffs(_ctx(VESSEL_ROOM), all_sections=True) == []
+        redrawn = pipeline.capture_all(_ctx(VESSEL_ROOM))
+        assert redrawn.sections["addon_guidance"] == _snap(
+            ("godot-vessel", "Godot Virtual Vessel", GUIDE_TEXT),
+        )
+
+        flaky.fail = False
+        assert pipeline.flush_diffs(_ctx(VESSEL_ROOM), all_sections=True) == []
 
 
 # ---------------------------------------------------------------------------

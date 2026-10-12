@@ -21,6 +21,7 @@ import ToolModeSelector, { TOOL_MODE_SELECTED } from '@/components/ToolModeSelec
 import { buildPreSpellsFromUI } from '@/lib/preSpells';
 import { formatCost } from '@/lib/formatCost';
 import { prepareMessageMarkdown } from '@/lib/messageMarkdown';
+import { rehypeBodyEmote } from '@/lib/rehypeBodyEmote';
 import { fetchAllTableRows } from '@/lib/dbTable';
 import { UPDATE_STARTED_EVENT, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
 import RightSidebar from '@/components/RightSidebar';
@@ -93,7 +94,9 @@ function resolveSaiverseImageSrc(src: string): string {
 // Stable module-level constants — passing fresh arrays/functions to ReactMarkdown each render
 // causes it to remount its rendered tree, which makes <img> tags re-fetch on every keystroke.
 const MARKDOWN_REMARK_PLUGINS: PluggableList = [remarkGfm, remarkBreaks];
-const MARKDOWN_REHYPE_PLUGINS: PluggableList = [rehypeRaw, [rehypeSanitize, sanitizeSchema]];
+// rehypeBodyEmote runs after sanitizing on the HTML tree so code stays verbatim;
+// the span it adds only ever contains one of its fixed allowlisted names.
+const MARKDOWN_REHYPE_PLUGINS: PluggableList = [rehypeRaw, [rehypeSanitize, sanitizeSchema], rehypeBodyEmote];
 const markdownUrlTransform = (url: string) =>
     url.startsWith('saiverse://') ? url : defaultUrlTransform(url);
 

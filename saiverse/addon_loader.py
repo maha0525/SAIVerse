@@ -381,13 +381,23 @@ def _register_addon_server_hooks_for(addon_dir: Path) -> int:
     hooks_spec = manifest.get("server_hooks") or []
     from saiverse.addon_context import register_provider, unregister_provider
 
-    unregister_provider(addon_dir.name)
+    # 提供口は「解決してから置き換える」。先に解除すると、解決している間に
+    # 登録簿からアドオンが消え、その間に走った差分検知が偽の「当てはまらなく
+    # なりました」→「届きました」を出す (同じアドオンの再有効化でも起きる)。
+    # register_provider は dict の代入なので置き換えは一瞬で、前回の結果の
+    # 記録も消さない。解除 (記録も消える) は manifest から提供口が消えたときと、
+    # 解決に失敗したとき (壊れた古い提供口を残さない) だけ。
     provider_spec = manifest.get("context_provider")
     if provider_spec:
         try:
-            register_provider(addon_dir.name, _resolve_hook_handler(addon_dir, provider_spec))
+            provider = _resolve_hook_handler(addon_dir, provider_spec)
         except Exception:
+            unregister_provider(addon_dir.name)
             LOGGER.exception("addon_loader: context provider failed addon=%s", addon_dir.name)
+        else:
+            register_provider(addon_dir.name, provider)
+    else:
+        unregister_provider(addon_dir.name)
     if not isinstance(hooks_spec, list):
         LOGGER.warning(
             "addon_loader: server_hooks for addon '%s' is not a list, skipping",
