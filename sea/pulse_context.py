@@ -372,6 +372,15 @@ class PulseContext:
     # PulseContext を作るサブプレイブックや、別スレッドで走るスペルにも届くよう
     # ここにも載せる。返事の外で作った PulseContext では None。
     model_binding: Optional[Any] = None
+    # リアルタイムスペルの器 ({"executed": bool, "result": {"content", "media"} | None})。
+    # リアルタイム情報と自動想起を残すモデルの列だけが使い、同じ Pulse の中で
+    # 一度だけ実行して、実行しなかった Playbook の列にも同じ結果を届ける
+    # (docs/intent/persist_realtime_and_recall.md §4.1)。SUBPLAY・run_playbook
+    # スペル・spell_args_decider・TOOL ノードからの起動など、子の入口がどれでも
+    # 同じ Pulse の器に届くよう、ここに一つだけ置く (分離した PulseContext を作る
+    # 子にも sea/runtime_graph.compile_with_langgraph が載せ替える)。OFF のモデル
+    # だけの Pulse では None。
+    realtime_spells_once: Optional[Dict[str, Any]] = None
 
     def append(self, entry: PulseLogEntry) -> None:
         """Append a log entry to this Pulse's log list."""

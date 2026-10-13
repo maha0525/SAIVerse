@@ -162,18 +162,27 @@ def compile_with_langgraph(
 
     # リアルタイムスペルの実行済みの状態と、その結果 (本文と画像) の器
     # (docs/intent/persist_realtime_and_recall.md §4.1)。**リアルタイム情報と
-    # 自動想起を残すモデルの列だけ**で使う。accumulator と同じく器を参照のまま
-    # 子へ引き継ぎ、同じ Pulse の中で一度だけ実行する。実行していない側 (親・子、
-    # line='main' / 'sub'、実行順は問わない) の最初の LLM ノードは、器の結果を
-    # 自分の列のそのターンのまとまりに入れて届ける (sea/runtime_llm の
-    # _deliver_realtime_spell_result) — 実行済みの印だけを共有すると、実行して
-    # いない側の送信から結果が消える (Codex 二巡目 #3)。
-    # OFF のモデルの列は器を持たず、実行の仕方は今までどおり (Playbook ごとに
+    # 自動想起を残すモデルの列だけ**で使う。器は Pulse に一つで、PulseContext
+    # (``realtime_spells_once``) に置く — 子の入口 (SUBPLAY ノード・run_playbook
+    # スペル・spell_args_decider・TOOL ノードからの run_playbook) がどれでも、
+    # 親の state にある PulseContext から同じ器に届く。同じ Pulse の中で一度だけ
+    # 実行し、実行していない側 (親・子、line='main' / 'sub'、実行順は問わない) の
+    # 最初の LLM ノードは、器の結果を自分の列のそのターンのまとまりに入れて
+    # 届ける (sea/runtime_llm の _deliver_realtime_spell_result) — 実行済みの印
+    # だけを共有すると、実行していない側の送信から結果が消える (Codex 二巡目 #3)。
+    # 列ごとの状態 (残すモデルの列か・結果をもう持っているか) は、呼び出し元の
+    # 列から parent の ``_persist_realtime_and_recall`` / ``_realtime_spells_executed``
+    # で受け取る (sea/runtime_context.realtime_spell_handover)。
+    # OFF のモデルの列は器を使わず、実行の仕方は今までどおり (Playbook ごとに
     # 自分で実行する)。
     persists_turn_block = bool(parent.get("_persist_realtime_and_recall", False))
     realtime_spells_once: Optional[Dict[str, Any]] = None
     if persists_turn_block:
-        realtime_spells_once = parent.get("_realtime_spells_once")
+        realtime_spells_once = getattr(
+            parent.get("_pulse_context"), "realtime_spells_once", None,
+        )
+        if not isinstance(realtime_spells_once, dict):
+            realtime_spells_once = parent.get("_realtime_spells_once")
         if not isinstance(realtime_spells_once, dict):
             realtime_spells_once = {"executed": False, "result": None}
     # 親の列をそのまま写して動くサブライン (line='sub' の分岐 —
@@ -210,6 +219,14 @@ def compile_with_langgraph(
         pulse_ctx.model_binding = _model_binding
     if _model_binding is None:
         _model_binding = getattr(pulse_ctx, "model_binding", None)
+    # リアルタイムスペルの器 (上) も、この実行の PulseContext に載せる。分離した
+    # PulseContext を作る子 (subagent / line='sub' の SUBPLAY) の中から唱える
+    # run_playbook にも、同じ Pulse の器が届くようにする (model_binding と同じ形)。
+    if (
+        realtime_spells_once is not None
+        and getattr(pulse_ctx, "realtime_spells_once", None) is None
+    ):
+        pulse_ctx.realtime_spells_once = realtime_spells_once
 
     # S4 (thread push/pop): この graph 実行の入口での thread スタック深さを記録。
     # 実行中に push された Stelis/subagent 切替は正常系ではノード自身が pop する。

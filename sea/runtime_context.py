@@ -258,6 +258,39 @@ def freeze_turn_realtime_and_recall_for_send(
     info["sent"] = True
 
 
+def realtime_spell_handover(caller_state: Any) -> Dict[str, Any]:
+    """子の Playbook へ渡す、呼び出し元の列のリアルタイムスペルの状態。
+
+    persist_realtime_and_recall.md §4.1。子の Playbook の state を新しく組む
+    入口 (run_playbook スペル・spell_args_decider) は、ここで作った辞書を子の
+    parent_state に足す。SUBPLAY ノードは呼び出し元の state そのものを渡すので、
+    同じ二つの値がそのまま届く。受け取るのは sea/runtime_graph の
+    compile_with_langgraph だけ。
+
+    - ``_persist_realtime_and_recall``: 呼び出し元の列が、リアルタイム情報と
+      自動想起を残すモデルの列か。親の列を写す子 (line='sub') は、写した列の
+      作られ方 (並び・まとまり) をそのまま引き継ぐ。
+    - ``_realtime_spells_executed``: 呼び出し元の列が、リアルタイムスペルの結果を
+      もう持っているか (実行したか届けを受けた後か)。親の列を写す子は、ON の
+      ときだけこれを引き継いで二度届けない。
+
+    器 (実行済みの状態と結果) はここでは渡さない — PulseContext に一つだけ置き、
+    どの入口からも同じ Pulse の器に届く (sea/pulse_context.PulseContext の
+    ``realtime_spells_once``)。OFF のモデルの列では両方 False 相当で、子は今までと
+    同じく自分で実行する。
+    """
+    if not isinstance(caller_state, dict):
+        return {}
+    return {
+        "_persist_realtime_and_recall": bool(
+            caller_state.get("_persist_realtime_and_recall", False)
+        ),
+        "_realtime_spells_executed": bool(
+            caller_state.get("_realtime_spells_executed", False)
+        ),
+    }
+
+
 def copy_turn_realtime_and_recall_for_child(
     messages: Sequence[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:

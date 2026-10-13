@@ -495,7 +495,10 @@ def _round_message_for_next_call(state: Any, assistant_content: str) -> Dict[str
     _reframe_autonomous_messages` — 自律の発言を user ロールの自律記録に変える)
     と同じロール・本文に正規化する (Codex 二巡目 #4)。そうしないと、このターンの
     最後の呼び出しの列と次のターンの最初の呼び出しの列で、この周の発言の形が
-    違い、そこから先の前方一致が割れる (不変条件 1)。
+    違い、そこから先の前方一致が割れる。これは往復の分の一致を増やす直しで、
+    不変条件 1 (ターンの最初の呼び出しどうしの一致) の外 — 自律の通常のノード間や
+    native tool の往復は揃えていない (docs/issues/
+    in_pulse_message_forms_differ_from_restored_history.md)。
 
     記録に保存する元の発言は変えない (_store_memory には assistant_content を
     そのまま渡す)。アスペクトは _store_memory が記録に刻むのと同じ出所
@@ -2305,15 +2308,21 @@ async def _run_spell_tool_async(
         # (thread stack / logs / meta judgment buffer).
         pulse_ctx = state.get("_pulse_context")
         auto_mode = bool(state.get("_auto_mode", False))
+        # その messages の列のリアルタイムスペルの状態。run_playbook がこの列を
+        # 写して子を起動するとき、子へ引き継ぐ (docs/intent/
+        # persist_realtime_and_recall.md §4.1 — 引き継がないと ON のモデルで
+        # 子がリアルタイムスペルを再実行し、結果が二重に載る。Codex 三巡目)。
+        from sea.runtime_context import realtime_spell_handover
+        rt_handover = realtime_spell_handover(state)
 
         def _run():
             # ``llm_messages=messages`` snapshot lets spells like ``run_playbook``
             # fork their sub-line from the parent LLM node's actual messages.
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured, realtime_spell_handover=rt_handover):
                 return tool_func(**tool_args)
 
         if inspect.iscoroutinefunction(tool_func):
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured, realtime_spell_handover=rt_handover):
                 raw_result = await tool_func(**tool_args)
         else:
             raw_result = await asyncio.get_event_loop().run_in_executor(None, _run)
@@ -4519,17 +4528,15 @@ async def _decide_spell_args_via_playbook(
         "_pulse_id": outer_state.get("_pulse_id"),
         # 同じ返事の中の仕事なので、返事の始まりに決めたモデルと接続を引き継ぐ
         "_model_binding": outer_state.get("_model_binding"),
-        # リアルタイム情報と自動想起を残すモデルの列なら、リアルタイムスペルの
-        # 器 (実行済みの状態と結果) を引き継ぐ (同じ Pulse の中で一度だけ実行し、
-        # 実行しなかった側にも同じ結果を届ける — docs/intent/
-        # persist_realtime_and_recall.md §4.1)。OFF のモデルでは器が無く、
-        # 今までどおり (子が自分で実行する)。
-        "_persist_realtime_and_recall": bool(
-            outer_state.get("_persist_realtime_and_recall", False)
-        ),
-        "_realtime_spells_once": outer_state.get("_realtime_spells_once"),
-        "_realtime_spells_executed": bool(outer_state.get("_realtime_spells_executed")),
     }
+    # 呼び出し元の列のリアルタイムスペルの状態を引き継ぐ (run_playbook スペルと
+    # 同じ口 — sea/runtime_context.realtime_spell_handover)。器 (実行済みの状態と
+    # 結果) は上の PulseContext に載っている。ON のモデルでは同じ Pulse の中で
+    # 一度だけ実行し、OFF では今までどおり子が自分で実行する (docs/intent/
+    # persist_realtime_and_recall.md §4.1)。
+    from sea.runtime_context import realtime_spell_handover
+
+    decider_parent_state.update(realtime_spell_handover(outer_state))
 
     try:
         await asyncio.to_thread(
@@ -5124,8 +5131,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         # when the persona's spell system is enabled — SPELL_ENABLED=false must stop
         # this auto-execution path too, not just LLM-invoked spells (Spell 監査 P1).
         # リアルタイム情報と自動想起を残すモデルの列では、実行済みの状態と結果を
-        # 子の Playbook と器 (``_realtime_spells_once`` — Pulse の頭で作られ、子へ
-        # 参照のまま引き継がれる。sea/runtime_graph.compile_with_langgraph) で
+        # 子の Playbook と器 (``_realtime_spells_once`` — Pulse に一つで PulseContext
+        # に置かれ、どの子の入口からも同じ器に届く。sea/runtime_graph.
+        # compile_with_langgraph) で
         # 共有する: 同じ Pulse の中で一度だけ実行し、実行しなかった側 (親・子、
         # 実行順は問わない) には同じ結果をそのターンのまとまりに入れて届ける
         # (docs/intent/persist_realtime_and_recall.md §4.1)。OFF のモデルの列には

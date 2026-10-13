@@ -2,9 +2,10 @@
 
 正典: docs/intent/persist_realtime_and_recall.md
 
-最も重く見るのは不変条件 1 — 「ON のモデルで、あるターンに送った列は、返事を
-挟んだ次のターンの列の先頭と一字一句同じになる」。ここでは組み立て関数の単体
-比較ではなく、実際の経路を通して LLM クライアントに渡った列を捕まえて比べる:
+最も重く見るのは不変条件 1 — 「ON のモデルで、あるターンの最初の LLM 呼び出しで
+送った列は、返事を挟んだ次のターンの最初の呼び出しの列の先頭と一字一句同じに
+なる」。ここでは組み立て関数の単体比較ではなく、実際の経路を通して LLM
+クライアントに渡った列を捕まえて比べる:
 
     ユーザー発言の保存 (HistoryManager → 実 SAIMemoryAdapter)
       → Pulse 頭の知覚の消費 (adapter.flush_perception_buffer)
@@ -266,6 +267,9 @@ def env(request, tmp_path, monkeypatch):
                 }, True)
             return ("記録しました", None, True)
 
+        # 本物のスペル実行 (persona_context を張ってツールを呼ぶ) は、実際の
+        # run_playbook スペルの入口を通すテストが使う。
+        real_run_spell = runtime_llm._run_spell_tool_async
         monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _fake_spell)
         monkeypatch.setattr(
             runtime_llm, "SPELL_TOOL_NAMES",
@@ -278,7 +282,8 @@ def env(request, tmp_path, monkeypatch):
             yield SimpleNamespace(
                 runtime=runtime, persona=persona, adapter=adapter, llm=llm,
                 recall=recall, flags=flags, SessionLocal=SessionLocal,
-                image_path=str(image_path),
+                image_path=str(image_path), manager=manager,
+                real_run_spell=real_run_spell,
             )
         finally:
             reset_ledger(PERSONA_ID)
@@ -386,10 +391,29 @@ def _assert_prefix(first: List[Dict[str, Any]], second: List[Dict[str, Any]]) ->
 def _assert_turn_prefix(
     prev_turn: List[List[Dict[str, Any]]], next_turn: List[List[Dict[str, Any]]],
 ) -> None:
-    """不変条件 1: あるターンの最後の LLM 呼び出しの列 (と最初の呼び出しの列) が、
-    次のターンの最初の呼び出しの列の先頭と一字一句同じ。"""
-    _assert_prefix(prev_turn[0], next_turn[0])
+    """不変条件 1 と、ターン内の往復の一致の回帰をまとめて確かめる。
+
+    - 不変条件 1 (この設計の主張): あるターンの**最初の** LLM 呼び出しの列が、
+      次のターンの最初の呼び出しの列の先頭と一字一句同じ。
+    - 回帰 (不変条件 1 の外): 最後の呼び出し (スペルの繰り返しの周) の列も
+      次のターンの先頭と一致する。ターン内の二回目以降の呼び出しの形は不変条件の
+      範囲外 (2026-10-14 の Argon の実測で、最初の呼び出しで保持された範囲は
+      二回目を挟んでも次のターンに効いた — intent §2)。ここで見ているのは、
+      スペルの結果の文面を復元形に揃えた直しと、ON の自律パルスの周内の発言を
+      復元形で送る直しが、往復の分の一致を保っていること。native tool の往復と
+      自律の通常ノード間は揃えていない (issue
+      ``in_pulse_message_forms_differ_from_restored_history.md``)。
+    """
+    _assert_first_call_prefix(prev_turn, next_turn)
     _assert_prefix(prev_turn[-1], next_turn[0])
+
+
+def _assert_first_call_prefix(
+    prev_turn: List[List[Dict[str, Any]]], next_turn: List[List[Dict[str, Any]]],
+) -> None:
+    """不変条件 1: あるターンの最初の LLM 呼び出しの列が、次のターンの最初の
+    呼び出しの列の先頭と一字一句同じ。"""
+    _assert_prefix(prev_turn[0], next_turn[0])
 
 
 def _gemini_dump(messages: List[Dict[str, Any]]):
@@ -521,17 +545,21 @@ class TestPrefixInvariantOnTheRealPath:
 
         turn2 = _run_turn(env, "ありがとう。")
         turn3 = _run_turn(env, "またね。")
+        # 不変条件 1 は最初の呼び出しどうし (_assert_turn_prefix の前半)。加えて、
         # 一ターン目の最後の呼び出し (スペルの結果を受けた周) の列も、二ターン目の
-        # 最初の呼び出しの列の先頭と一致する (スペルの結果は復元形で送る)
+        # 最初の呼び出しの列の先頭と一致する (スペルの結果は復元形で送る —
+        # 往復の一致を増やした直しの回帰)
         _assert_turn_prefix(turn1, turn2)
         _assert_turn_prefix(turn2, turn3)
         assert len(_kept_rows(env)) == 3
 
     def test_last_call_with_image_spell_loop_matches_next_turn(self, env):
-        """スペルの繰り返しあり・画像付きのスペル結果あり — 最後の呼び出しの列が
-        次のターンの最初の呼び出しの列の先頭と一致する (SAIVerse の列と Gemini の
-        送信形式の両方)。スペルの結果の本文は復元形 (``<system>\\n…\\n</system>``)
-        で送られ、画像も記録に残って次のターンに同じく付く。"""
+        """スペルの繰り返しあり・画像付きのスペル結果あり — 不変条件 1 (最初の
+        呼び出しどうし) に加え、最後の呼び出しの列も次のターンの最初の呼び出しの
+        列の先頭と一致する (SAIVerse の列と Gemini の送信形式の両方。往復の一致を
+        増やした直しの回帰で、不変条件 1 の外)。スペルの結果の本文は復元形
+        (``<system>\\n…\\n</system>``) で送られ、画像も記録に残って次のターンに
+        同じく付く。"""
         _bind_realtime_spell(env)
         env.recall.hits = [_hit("page-a", "海辺の町")]
         env.llm.script = [
@@ -651,9 +679,11 @@ class TestPrefixInvariantOnTheRealPath:
 
     def test_auto_pulse_with_spell_loop(self, env):
         """自律パルスのスペルの繰り返し — 周内の発言は、次のターンの履歴の復元
-        (自律の発言を user ロールの自律記録にする) と同じ形で送る。最後の呼び出しの
-        列が次のターンの最初の呼び出しの列の先頭と一致する (SAIVerse の列と Gemini
-        の送信形式の両方。Codex 二巡目 #4)。保存する元の発言は assistant のまま。"""
+        (自律の発言を user ロールの自律記録にする) と同じ形で送る。不変条件 1
+        (最初の呼び出しどうし) に加え、最後の呼び出しの列も次のターンの最初の
+        呼び出しの列の先頭と一致する (SAIVerse の列と Gemini の送信形式の両方。
+        Codex 二巡目 #4 の直しの回帰で、不変条件 1 の外)。保存する元の発言は
+        assistant のまま。"""
         turn0 = _run_turn(env, "こんにちは。")
         env.llm.script = [
             f"散歩のメモを残そう。\n/spell name='{LOOP_SPELL}' args={{}}",
@@ -1105,6 +1135,128 @@ def test_off_child_playbooks_run_realtime_spells_as_before(env, monkeypatch, ord
         # 今までどおり最新の発言の直前 (OFF の並び)
         idx = call.index(carriers[0])
         assert call[idx + 1]["content"] == "外の様子はどう?"
+
+
+def _run_parent_with_run_playbook_spell(env, monkeypatch):
+    """親 (会話の既定の Playbook) が実際の ``/run_playbook`` スペルで子を起動する
+    一ターンを走らせ、(親の一回目, 子, 親の二回目の送信, スペルの実行回数) を返す。
+
+    スペルの入口は本物 — スペルループ → ``_run_spell_tool_async`` (persona_context
+    を張る) → ``builtin_data/tools/run_playbook.py`` → ``_run_playbook(line='sub')``。
+    替え玉にしているのは、子の Playbook の読み込みと、許可の判定だけ。
+    """
+    import importlib.util
+
+    from sea import runtime_llm
+    from tools import TOOL_REGISTRY
+
+    _bind_realtime_spell(env)
+    spec = importlib.util.spec_from_file_location(
+        "run_playbook_tool_for_persist_test",
+        str(Path("builtin_data/tools/run_playbook.py").resolve()),
+    )
+    tool_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool_module)
+    monkeypatch.setattr(tool_module, "_check_playbook_permission", lambda *a, **k: None)
+    monkeypatch.setitem(TOOL_REGISTRY, "run_playbook", tool_module.run_playbook)
+    monkeypatch.setattr(
+        runtime_llm, "SPELL_TOOL_NAMES",
+        set(runtime_llm.SPELL_TOOL_NAMES) | {"run_playbook"},
+    )
+    env.manager.sea_runtime = env.runtime
+    env.manager.personas = {PERSONA_ID: env.persona}
+    env.persona.manager_ref = env.manager
+
+    fake_spell = runtime_llm._run_spell_tool_async
+    spell_calls: List[str] = []
+
+    async def _spell(tool_name, tool_args, persona, state, playbook_name,
+                     event_callback, messages=None, **kwargs):
+        spell_calls.append(tool_name)
+        if tool_name == "run_playbook":
+            return await env.real_run_spell(
+                tool_name, tool_args, persona, state, playbook_name,
+                event_callback, messages=messages, **kwargs,
+            )
+        return await fake_spell(
+            tool_name, tool_args, persona, state, playbook_name,
+            event_callback, messages=messages,
+        )
+
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _spell)
+    child = _child_playbook()
+    child.router_callable = True
+    real_load = env.runtime._load_playbook_for
+    monkeypatch.setattr(
+        env.runtime, "_load_playbook_for",
+        lambda name, persona, building_id: (
+            child if name == "child_pb" else real_load(name, persona, building_id)
+        ),
+    )
+    env.llm.script = [
+        "外を調べてくる。\n/spell name='run_playbook' args={\"name\": \"child_pb\"}",
+        "子の調べ。",
+        "調べ終わった。",
+    ]
+    turn1 = _run_turn(env, "外の様子はどう?")
+    assert spell_calls.count("run_playbook") == 1
+    assert len(turn1) == 3  # 親の一回目 → 子 → 親の二回目 (スペルの結果を受けた周)
+    parent_first, child_call, parent_last = turn1
+    return parent_first, child_call, parent_last, spell_calls.count(REALTIME_SPELL)
+
+
+def test_on_run_playbook_spell_does_not_rerun_realtime_spells(env, monkeypatch):
+    """ON のモデル: 実際の ``/run_playbook`` スペルで起動した子 (親の列を写す
+    サブライン) は、親が実行済みのリアルタイムスペルを再実行せず、結果を二度
+    載せない。パルスの各送信で結果を運ぶまとまりは一つで、保存した一行と同じ
+    文面・画像 (Codex 三巡目 — 旧コードでは子が再実行し、子の送信に結果が二件
+    載っていた)。"""
+    parent_first, child_call, parent_last, spell_count = (
+        _run_parent_with_run_playbook_spell(env, monkeypatch)
+    )
+    assert spell_count == 1
+    rows = _kept_rows(env)
+    assert len(rows) == 1
+    saved_text = rows[0][2]
+    saved_media = [m.get("path") for m in json.loads(rows[0][3])]
+    assert _SPELL_LINE in saved_text
+    assert saved_media == [env.image_path]
+    for call in (parent_first, child_call, parent_last):
+        carriers = _carriers(call)
+        assert len(carriers) == 1, [m.get("content") for m in carriers]
+        assert carriers[0]["content"] == saved_text
+        assert carriers[0]["content"].count(_SPELL_LINE) == 1
+        assert [
+            m.get("path") for m in (carriers[0].get("metadata") or {}).get("media") or []
+        ] == saved_media
+    # 親の一回目の送信のまとまりは列の一番後ろ (残した一行そのもの)
+    assert parent_first[-1]["content"] == saved_text
+    # 不変条件 1: このターンの最初の呼び出しの列は、次のターンの最初の呼び出しの
+    # 列の先頭と一字一句同じ
+    turn2 = _run_turn(env, "ありがとう。")
+    _assert_prefix(parent_first, turn2[0])
+
+
+def test_off_run_playbook_spell_runs_realtime_spells_as_before(env, monkeypatch):
+    """OFF のモデル: 実際の ``/run_playbook`` スペルでも、実行の仕方は 9c8314cc と
+    同じ — 子は自分でリアルタイムスペルを実行する (不変条件 2)。何も残さない。
+
+    期待値は 9c8314cc の実装で同じ手順を走らせて取った形。子の列は親の列の
+    浅い写しなので、リアルタイム情報のメッセージの辞書を親と共有し、子の実行で
+    足した行は親の二回目の送信にも出る (既存の形)。
+    """
+    env.persona.model = OFF_MODEL
+    env.persona.lightweight_model = OFF_MODEL
+    parent_first, child_call, parent_last, spell_count = (
+        _run_parent_with_run_playbook_spell(env, monkeypatch)
+    )
+    assert spell_count == 2
+    assert _kept_rows(env) == []
+    for call, expected_lines in ((parent_first, 1), (child_call, 2), (parent_last, 2)):
+        carriers = _carriers(call)
+        assert len(carriers) == 1
+        assert carriers[0]["metadata"].get("__realtime_context__")
+        assert carriers[0]["content"].count(_SPELL_LINE) == expected_lines
 
 
 # ---------------------------------------------------------------------------
