@@ -218,7 +218,52 @@ function ParamControl({
 // 親 state を確定させる。
 // ---------------------------------------------------------------------------
 
-function NumberParamControl({
+export interface NumberParamCommitResult {
+    text: string;
+    value: number;
+}
+
+export function formatNumberInitial(schema: AddonParamSchema, v: unknown): string {
+    const fallbackValue = typeof schema.default === 'number'
+        ? schema.default
+        : (schema.min ?? 0);
+    if (typeof v === 'number' && !isNaN(v)) return String(v);
+    if (v !== undefined && v !== null && v !== '') {
+        const n = Number(v);
+        if (!isNaN(n)) return String(n);
+    }
+    return String(fallbackValue);
+}
+
+export function resolveNumberParamCommit(schema: AddonParamSchema, raw: string): NumberParamCommitResult {
+    const fallbackValue = typeof schema.default === 'number'
+        ? schema.default
+        : (schema.min ?? 0);
+
+    const trimmed = raw.trim();
+    if (trimmed === '') {
+        return { text: String(fallbackValue), value: fallbackValue };
+    }
+
+    let parsed = schema.value_type === 'int'
+        ? parseInt(trimmed, 10)
+        : parseFloat(trimmed);
+
+    if (isNaN(parsed)) {
+        return { text: String(fallbackValue), value: fallbackValue };
+    }
+
+    if (schema.min !== undefined && parsed < schema.min) {
+        parsed = schema.min;
+    }
+    if (schema.max !== undefined && parsed > schema.max) {
+        parsed = schema.max;
+    }
+
+    return { text: String(parsed), value: parsed };
+}
+
+export function NumberParamControl({
     schema,
     value,
     onChange,
@@ -231,51 +276,19 @@ function NumberParamControl({
         ? schema.default
         : (schema.min ?? 0);
 
-    const formatInitial = (v: unknown): string => {
-        if (typeof v === 'number' && !isNaN(v)) return String(v);
-        if (v !== undefined && v !== null && v !== '') {
-            const n = Number(v);
-            if (!isNaN(n)) return String(n);
-        }
-        return String(fallbackValue);
-    };
-
-    const [textValue, setTextValue] = useState<string>(() => formatInitial(value));
+    const [textValue, setTextValue] = useState<string>(() => formatNumberInitial(schema, value));
     const isFocusedRef = useRef(false);
 
     useEffect(() => {
         if (!isFocusedRef.current) {
-            setTextValue(formatInitial(value));
+            setTextValue(formatNumberInitial(schema, value));
         }
     }, [value, fallbackValue]);
 
     const commitValue = (raw: string) => {
-        const trimmed = raw.trim();
-        if (trimmed === '') {
-            setTextValue(String(fallbackValue));
-            onChange(schema.key, fallbackValue);
-            return;
-        }
-
-        let parsed = schema.value_type === 'int'
-            ? parseInt(trimmed, 10)
-            : parseFloat(trimmed);
-
-        if (isNaN(parsed)) {
-            setTextValue(String(fallbackValue));
-            onChange(schema.key, fallbackValue);
-            return;
-        }
-
-        if (schema.min !== undefined && parsed < schema.min) {
-            parsed = schema.min;
-        }
-        if (schema.max !== undefined && parsed > schema.max) {
-            parsed = schema.max;
-        }
-
-        setTextValue(String(parsed));
-        onChange(schema.key, parsed);
+        const result = resolveNumberParamCommit(schema, raw);
+        setTextValue(result.text);
+        onChange(schema.key, result.value);
     };
 
     return (
