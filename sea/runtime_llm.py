@@ -464,17 +464,80 @@ def _record_llm_usage(
 PERSIST_REALTIME_AND_RECALL_PULSE_TYPES = frozenset({"user", "auto", "schedule"})
 
 
-def _freeze_turn_block_before_send(messages: Any) -> None:
+#: state の印: この列でターンの最初の LLM 呼び出しをもう送ったか (リアルタイム
+#: 情報と自動想起を残すモデルの、残すパルスの列だけで立てる)。
+TURN_FIRST_SEND_DONE_KEY = "_turn_first_send_done"
+
+
+def records_additions_before_first_send(state: Any) -> bool:
+    """送る列に足すメッセージを、記録に残る形で足すべき時点か。
+
+    リアルタイム情報と自動想起を残すモデルの、残すパルス (user / auto /
+    schedule) の列で、ターンの最初の LLM 呼び出しをまだ送っていない間だけ真
+    (docs/intent/persist_realtime_and_recall.md 不変条件 1)。この間に送る列へ
+    足したものは最初の呼び出しで送られ、次のターンには記録から組み直される
+    ので、記録に残さないとその位置が返事に置き換わって前方一致が割れる。
+    最初の呼び出しより後に足すもの (ターン内の往復) は不変条件 1 の外。
+    事前スペルの結果は全モデル・全パルスで記録に残る (それ以前からの扱い)。
+    これを使うのは、それ以外に最初の呼び出しの前に足しうるもの (TOOL ノードの
+    結果 — sea/runtime_engine.lg_tool_node)。OFF のモデルの列では常に偽。
+    """
+    return (
+        isinstance(state, dict)
+        and bool(state.get("_persist_realtime_and_recall"))
+        and state.get("_pulse_type") in PERSIST_REALTIME_AND_RECALL_PULSE_TYPES
+        and not state.get(TURN_FIRST_SEND_DONE_KEY)
+    )
+
+
+def _check_first_send_is_recorded(messages: List[Any], state: Any) -> None:
+    """ターンの最初の LLM 呼び出しを送る直前に、記録に残らないメッセージを探す。
+
+    不変条件 1 の機械検査 (docs/intent/persist_realtime_and_recall.md)。
+    :func:`records_additions_before_first_send` が真の列 (ON のモデルの残す
+    パルスで、まだ最初の呼び出しを送っていない) でだけ、一度だけ行い、
+    以後は送った印を立てる。見つかったら役割と先頭の文字を WARN で出す
+    (送信は止めない)。判定は :func:`sea.runtime_context.find_unrecorded_messages`
+    — 送る列に新しい差し込み口が足されたとき、印や記録の付け漏れをここで
+    見つける。
+    """
+    if not records_additions_before_first_send(state):
+        return
+    state[TURN_FIRST_SEND_DONE_KEY] = True
+    try:
+        from sea.runtime_context import find_unrecorded_messages
+
+        unrecorded = find_unrecorded_messages(messages)
+    except Exception:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] could not check the first send "
+            "for unrecorded messages", exc_info=True,
+        )
+        return
+    for msg in unrecorded:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] the first send of this turn "
+            "carries a message that is not kept, so the next turn's list will "
+            "not start with this one (role=%s head=%r pulse=%s)",
+            msg.get("role"), str(msg.get("content") or "")[:80],
+            state.get("_pulse_id"),
+        )
+
+
+def _freeze_turn_block_before_send(messages: Any, state: Any = None) -> None:
     """LLM へ送る直前の一点: そのターンのまとまりを固定して「保存待ち」にする。
 
     生成の全経路 (全文一括・ストリーミング・tools 付き・構造化出力・スペルの
     繰り返し) の送信の直前で呼ぶ。中身は
     :func:`sea.runtime_context.freeze_turn_realtime_and_recall_for_send`
     (初めて送るときだけ文面・画像・境界を写し取り、以後まとまりは不変)。
+    ターンの最初の送信では、記録に残らないメッセージの検査
+    (:func:`_check_first_send_is_recorded`) もここで行う。
     失敗で LLM の経路を止めない。
     """
     if not isinstance(messages, list):
         return
+    _check_first_send_is_recorded(messages, state)
     try:
         from sea.runtime_context import freeze_turn_realtime_and_recall_for_send
 
@@ -660,26 +723,6 @@ def _persist_turn_realtime_and_recall(runtime: Any, persona: Any, state: Any) ->
             exc_info=True,
         )
 
-
-
-def _spell_result_media_metadata(
-    media: List[Dict[str, Any]], state: Any,
-) -> Dict[str, Any]:
-    """スペルの結果 (繰り返しの周・事前スペル) の画像を運ぶ metadata。
-
-    リアルタイム情報と自動想起を残すモデル (docs/intent/persist_realtime_and_recall.md)
-    では、結果の画像は履歴に残って次のターン以降も送られる。それを画像の枚数の
-    上限に数えると、残した画像が増えるたびに一番古い画像が文字に置き換わり、
-    前回の送信と先頭が一致しなくなる (Codex 四巡目)。そこで送るときと保存する
-    ときの両方に、上限の数に入れない印を付ける (残したリアルタイム情報の画像と
-    同じ扱い)。OFF のモデルは今までどおり印を付けない。
-    """
-    metadata: Dict[str, Any] = {"media": [dict(m) for m in media]}
-    if isinstance(state, dict) and state.get("_persist_realtime_and_recall"):
-        from llm_clients.utils import ATTACHMENT_LIMIT_EXEMPT_KEY
-
-        metadata[ATTACHMENT_LIMIT_EXEMPT_KEY] = True
-    return metadata
 
 def _store_reasoning_in_state(state: dict, reasoning_text: str, reasoning_details: Any) -> None:
     """reasoning を後段の speak/say/memorize ノード向けに state へ残す。
@@ -3947,9 +3990,7 @@ async def _run_spell_loop(
                 "content": presented_system_record_content(combined_results),
             }
             if aggregated_media:
-                spell_result_msg["metadata"] = _spell_result_media_metadata(
-                    aggregated_media, state,
-                )
+                spell_result_msg["metadata"] = {"media": aggregated_media}
                 LOGGER.info(
                     "[sea][spell] Round %d: attached %d media item(s) from spell results",
                     loop_count, len(aggregated_media),
@@ -4008,7 +4049,7 @@ async def _run_spell_loop(
                     # (OFF のモデルの履歴は今までどおり画像を持たない —
                     # persist_realtime_and_recall.md 不変条件 2)。
                     metadata=(
-                        _spell_result_media_metadata(aggregated_media, state)
+                        {"media": [dict(m) for m in aggregated_media]}
                         if aggregated_media and state.get("_persist_realtime_and_recall")
                         else None
                     ),
@@ -4216,7 +4257,7 @@ async def _run_spell_loop(
             LOGGER.info("[sea][spell] Re-invoking LLM after round %d (%d spell(s))", loop_count, len(valid_spells))
             _retry_stream_error: Optional[Dict[str, Any]] = None
             _retry_cancelled = False
-            _freeze_turn_block_before_send(messages)
+            _freeze_turn_block_before_send(messages, state)
             try:
                 if pipeline_streaming_state is not None:
                     _retry_stream = llm_client.generate_stream(
@@ -4780,9 +4821,7 @@ async def _execute_pre_spells(
             if isinstance(media_list, list):
                 aggregated_media.extend(media_list)
     if aggregated_media:
-        spell_result_msg["metadata"] = _spell_result_media_metadata(
-            aggregated_media, state,
-        )
+        spell_result_msg["metadata"] = {"media": aggregated_media}
         LOGGER.info(
             "[sea][pre_spells] Attached %d media item(s) from pre-spell results",
             len(aggregated_media),
@@ -4804,7 +4843,7 @@ async def _execute_pre_spells(
             # 画像を残すのはリアルタイム情報と自動想起を残すモデルだけ
             # (persist_realtime_and_recall.md 不変条件 2)。
             metadata=(
-                _spell_result_media_metadata(aggregated_media, state)
+                {"media": [dict(m) for m in aggregated_media]}
                 if aggregated_media and state.get("_persist_realtime_and_recall")
                 else None
             ),
@@ -5693,7 +5732,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # 画面イベントに載せる部屋 (契約 5)。この経路は下書き行を
                     # 使わないので、生成を始めた時点の現在地が吹き出しの居場所。
                     _tool_stream_bid = runtime._effective_building_id(persona, building_id)
-                    _freeze_turn_block_before_send(messages)
+                    _freeze_turn_block_before_send(messages, state)
                     for stream_attempt in range(max_stream_retries):
                         text_chunks: list[str] = []
                         stream_iter = llm_client.generate_stream(
@@ -5893,7 +5932,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
                 else:
                     # ── Synchronous tool mode (original) ──
-                    _freeze_turn_block_before_send(messages)
+                    _freeze_turn_block_before_send(messages, state)
                     result = llm_client.generate(
                         messages,
                         tools=tools_spec,
@@ -6236,7 +6275,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "downstream finalize will be skipped — placeholder leak risk",
                         )
 
-                    _freeze_turn_block_before_send(messages)
+                    _freeze_turn_block_before_send(messages, state)
                     for stream_attempt in range(max_stream_retries):
                         stream_iter = llm_client.generate_stream(
                             messages,
@@ -6946,7 +6985,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 else:
                     # Non-streaming mode
                     LOGGER.debug("[sea][llm] Calling llm_client.generate() with response_schema=%s", response_schema is not None)
-                    _freeze_turn_block_before_send(messages)
+                    _freeze_turn_block_before_send(messages, state)
                     text = llm_client.generate(
                         messages,
                         tools=[],

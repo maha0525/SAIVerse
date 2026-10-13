@@ -440,11 +440,11 @@ class _MediaRules(NamedTuple):
     """
 
     #: 直近の画像を何枚まで埋め込むか (None = 無制限)。枠は新しいメッセージから
-    #: 順に埋まる。``__visual_context__`` のメッセージ (と、残したリアルタイム
-    #: 情報と自動想起の行 — llm_clients/utils.is_attachment_limit_exempt) の画像は
-    #: 枠を使わず、常に枠の内側 (llm_clients/utils.py の
-    #: compute_allowed_attachment_keys と、同じ規則を持つ gemini.py の
-    #: _convert_messages)。
+    #: 順に埋まる。``__visual_context__`` のメッセージの画像は枠を使わず、常に
+    #: 枠の内側 (llm_clients/utils.py の compute_allowed_attachment_keys と、同じ
+    #: 規則を持つ gemini.py の _convert_messages)。列が「上限を使わない」の印
+    #: (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY) を持つときは、クライアントと
+    #: 同じく枠そのものが無い (:func:`_estimate_input_tokens`)。
     image_limit: Optional[int]
     #: 画像が枠を使う役割。
     image_limit_roles: FrozenSet[str]
@@ -711,7 +711,12 @@ def _estimate_input_tokens(
         str(get_model_config(model).get("provider", "ollama")),
     )
     rules = _media_rules(model)
-    remaining_slots = rules.image_limit  # 枠の残り (None = 無制限)
+    # 枠の残り (None = 無制限)。リアルタイム情報と自動想起を残すモデルの列は、
+    # どのクライアントも上限を使わない (llm_clients/utils.attachment_limit_is_off
+    # — クライアントと同じ一枚で判定する)。
+    from llm_clients.utils import attachment_limit_is_off
+
+    remaining_slots = None if attachment_limit_is_off(messages) else rules.image_limit
     # 画像を埋め込みにも注記にもしないクライアント (Ollama・画像非対応の Gemini と
     # xAI) では、画像の項目を集めない — 枠がどう埋まっても数える量は 0。
     counts_images = bool(rules.image_embed_roles or rules.image_note_roles)
@@ -738,12 +743,9 @@ def _estimate_input_tokens(
         if not isinstance(metadata, dict):
             continue
         role = _role_class(msg.get("role"))
-        # 枠を使わないメッセージの判定はクライアントと同じ一枚
-        # (``__visual_context__`` と、残したリアルタイム情報と自動想起の行)。
-        from llm_clients.utils import is_attachment_limit_exempt
         uses_slots = (
             role in rules.image_limit_roles
-            and not is_attachment_limit_exempt(metadata)
+            and not metadata.get("__visual_context__")
         )
         images = _metadata_media_items(metadata, "image") if counts_images else []
         for item in images:

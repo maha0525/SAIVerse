@@ -88,30 +88,51 @@ def merge_reasoning_strings(chunks: List[str]) -> List[Dict[str, str]]:
 
 DEFAULT_ATTACHMENT_LIMIT = 4
 
-#: このメッセージの画像は、送る画像の枚数の上限の数に入れない (常に埋め込む)
-#: という印 (metadata のキー)。``__visual_context__`` (head の視覚メッセージ)
-#: とは意味が別なので印も別にしてある — ``__visual_context__`` はプレビューの
-#: 節分けや自動想起の除外にも使われる「head の視覚」という意味を持つ。
-#: こちらを付けるのは、リアルタイム情報と自動想起を残して送り続けるモデル
-#: (docs/intent/persist_realtime_and_recall.md §4.2) の、残した行とそのターンの
-#: まとまり。数に入れると、残した画像が増えるたびに一番古い画像が文字に
-#: 置き換わり、そこから後ろが毎ターン前回の送信と一致しなくなる。
-ATTACHMENT_LIMIT_EXEMPT_KEY = "__attachment_limit_exempt__"
+#: この列には画像の枚数の上限を使わない、という列ごとの印 (metadata のキー)。
+#: 列の中のどれか一つのメッセージが持てば、その列の画像はすべて画像のまま送る。
+#: 付けるのは、リアルタイム情報と自動想起を残して送り続けるモデルの列
+#: (docs/intent/persist_realtime_and_recall.md §4.2 — sea/runtime_context.
+#: prepare_context が、組んだときのモデルで判定して列の先頭のメッセージに付ける)。
+#: 上限があると、新しい画像が来るたびに一番古い画像が文字に置き換わって前回の
+#: 送信の中身が書き換わり、「送る中身は毎ターン後ろに足されるだけ」という
+#: その設定の約束と根本でぶつかる。印はメッセージ一つ一つではなく列に付ける —
+#: 画像を運ぶメッセージ (ユーザー・知覚・ツール・スペル…) ごとに印を付ける形は、
+#: 印の付け漏れが同じ型の欠陥として何度も出たため。
+ATTACHMENT_LIMIT_OFF_KEY = "__attachment_limit_off__"
 
 
-def is_attachment_limit_exempt(metadata: Any) -> bool:
-    """このメッセージの画像が枚数の上限の数から外れるか (全プロバイダ共通の判定)。
+def attachment_limit_is_off(messages: Any) -> bool:
+    """この列で画像の枚数の上限を使わないか (全プロバイダと送る量の見積もりで共通)。
 
-    ``__visual_context__`` (head の視覚メッセージ) と
-    :data:`ATTACHMENT_LIMIT_EXEMPT_KEY` の付いたメッセージが対象。各クライアント
-    と送る量の見積もり (sea/sluice.py) はこの一枚で判定する。
+    列のどれか一つのメッセージが :data:`ATTACHMENT_LIMIT_OFF_KEY` を持てば真。
+    各クライアントは system のメッセージを抜き出す**前の**列でこれを判定する
+    (印は列の先頭 = たいてい system のメッセージにあるため)。
     """
-    if not isinstance(metadata, dict):
+    if not isinstance(messages, (list, tuple)):
         return False
-    return bool(
-        metadata.get("__visual_context__")
-        or metadata.get(ATTACHMENT_LIMIT_EXEMPT_KEY)
-    )
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        metadata = msg.get("metadata")
+        if isinstance(metadata, dict) and metadata.get(ATTACHMENT_LIMIT_OFF_KEY):
+            return True
+    return False
+
+
+def mark_attachment_limit_off(messages: List[Dict[str, Any]]) -> None:
+    """列に「画像の枚数の上限を使わない」の印を付ける (先頭のメッセージに、写しで)。
+
+    元の dict は書き換えず、先頭の 1 件だけを複製して差し替える (履歴の dict は
+    他の経路と共有されうる — mark_cache_boundary と同じ扱い)。空の列には何もしない。
+    印は metadata にあるだけで、どのクライアントも API へは送らない。
+    """
+    if not messages or not isinstance(messages[0], dict):
+        return
+    first = messages[0]
+    metadata = first.get("metadata")
+    new_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    new_metadata[ATTACHMENT_LIMIT_OFF_KEY] = True
+    messages[0] = {**first, "metadata": new_metadata}
 
 
 def parse_attachment_limit(provider: str = "") -> int:

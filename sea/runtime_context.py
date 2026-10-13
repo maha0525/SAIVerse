@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from llm_clients.utils import ATTACHMENT_LIMIT_EXEMPT_KEY
+from llm_clients.utils import mark_attachment_limit_off
 from sai_memory.perception_buffer import PERCEPTION_OMISSION_HEADER
 from sea.eviction_plan import (
     CONSUMED_PERCEPTION_KEY,
@@ -108,6 +108,64 @@ REALTIME_AND_RECALL_RECALLED_KEY = "__realtime_and_recall_recalled__"
 #: スペルの結果を含む) を既に見ているかを判定する
 #: (sea/runtime_llm._deliver_realtime_spell_result — 結果を二度並べない)。
 REALTIME_AND_RECALL_PULSE_ID_KEY = "__realtime_and_recall_pulse_id__"
+#: 履歴の最古の発言の直前に置く時刻の目安 (「以下、… 以降のやり取りです」) の印。
+#: 記録には残らないが、同じ履歴からは毎ターン同じ文面で組み直される。
+HISTORY_TIME_ANCHOR_KEY = "__history_time_anchor__"
+
+
+def find_unrecorded_messages(
+    messages: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """送る列のうち、記録に残らないメッセージ (次のターンの列に戻ってこないもの)。
+
+    persist_realtime_and_recall.md 不変条件 1 の機械検査
+    (sea/runtime_llm._check_first_send_is_recorded が、ON のモデルのターンの
+    最初の LLM 呼び出しを送る直前に呼ぶ)。ターンの最初の呼び出しで送った列は、
+    次のターンでは記録から組み直される — 記録に残らないメッセージが一つでも
+    あると、次のターンではその位置が別のもの (返事など) に置き換わり、そこから
+    後ろの前方一致が割れる。差し込み口を足すたびに印を一つずつ足す形では
+    付け漏れが繰り返し出た (Codex 四巡目・五巡目) ので、型ごと見つける。
+
+    次のターンにも同じ形で戻ってくる (= ここでは返さない) のは:
+
+    - ``id`` を持つもの — 記録に残ったメッセージ (履歴の発言・事前スペルや
+      最初の呼び出し前の TOOL の結果の記録)。
+    - head 由来 — system ロール (システムプロンプト・モデルごとの追加の指示)、
+      Memory Weave (``__memory_weave_context__``)、head の視覚
+      (``__visual_context__``)。
+    - 履歴の時刻の目安 (:data:`HISTORY_TIME_ANCHOR_KEY`)。
+    - 知覚のまとめ (``CONSUMED_PERCEPTION_KEY`` — 省略の印・部屋の様子の
+      置き直し・残したリアルタイム情報と自動想起の行を含む) と、残した行の印
+      (``PERSISTED_REALTIME_AND_RECALL_KEY``)。
+    - そのターンのまとまり (``TURN_REALTIME_AND_RECALL_KEY`` — 生成の完了後に
+      残る)。
+
+    それ以外 (id も上の印も持たないもの) を、列の順に返す。
+    """
+    from sea.head_pipeline.integration import (
+        _MEMORY_WEAVE_CONTEXT_MARKER,
+        _VISUAL_CONTEXT_MARKER,
+    )
+
+    stable_marks = (
+        _MEMORY_WEAVE_CONTEXT_MARKER,
+        _VISUAL_CONTEXT_MARKER,
+        HISTORY_TIME_ANCHOR_KEY,
+        CONSUMED_PERCEPTION_KEY,
+        PERSISTED_REALTIME_AND_RECALL_KEY,
+        TURN_REALTIME_AND_RECALL_KEY,
+    )
+    unrecorded: List[Dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("id") or msg.get("role") == "system":
+            continue
+        metadata = msg.get("metadata")
+        if isinstance(metadata, dict) and any(metadata.get(k) for k in stable_marks):
+            continue
+        unrecorded.append(msg)
+    return unrecorded
 
 
 def persists_realtime_and_recall(persona: Any, model_key: Optional[str]) -> bool:
@@ -155,15 +213,15 @@ def build_turn_realtime_and_recall_message(
     一致しない。出すものが何も無いターンは None (まとまり自体を作らない —
     realtime_info.md 不変条件 3 と同じ)。
 
-    印は三つ:
+    印は二つ:
 
     - ``__realtime_context__`` — リアルタイムスペルの結果の追記先
       (sea/runtime_llm._execute_realtime_spells が先頭から見て最初の印付きを
       探す)。プレビューの節分けもこれを見る。
     - :data:`TURN_REALTIME_AND_RECALL_KEY` — 組み直しと保存の材料。
-    - ``ATTACHMENT_LIMIT_EXEMPT_KEY`` — スペルの画像を枚数の上限の数に入れない
-      (残した行と同じ扱いにしないと、次のターンで数え方が変わって古い画像の
-      埋め込み/文字化が入れ替わる)。
+
+    画像の枚数の上限は、このモデルの列ではそもそも使わない (列ごとの印 —
+    :func:`prepare_context` が付ける ``llm_clients.utils.ATTACHMENT_LIMIT_OFF_KEY``)。
     """
     realtime_text = (
         str(realtime_msg.get("content") or "") if realtime_msg else ""
@@ -183,7 +241,6 @@ def build_turn_realtime_and_recall_message(
     metadata: Dict[str, Any] = {
         "__realtime_context__": True,
         TURN_REALTIME_AND_RECALL_KEY: info,
-        ATTACHMENT_LIMIT_EXEMPT_KEY: True,
     }
     realtime_meta = realtime_msg.get("metadata") if realtime_msg else None
     if isinstance(realtime_meta, dict) and isinstance(realtime_meta.get("media"), list):
@@ -925,6 +982,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             anchor_msg = {
                                 "role": "user",
                                 "content": f"<system>以下、{ts_str} 以降のやり取りです</system>",
+                                # 記録に残らないが、同じ履歴からは毎ターン同じ
+                                # 文面で組み直される (find_unrecorded_messages)。
+                                "metadata": {HISTORY_TIME_ANCHOR_KEY: True},
                             }
                             messages.append(anchor_msg)
                             LOGGER.debug(
@@ -1052,6 +1112,14 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 "auto recall at the end (persist_realtime_and_recall, %d chars)",
                 len(turn_msg["content"]),
             )
+        # 残すモデルの列では、画像の枚数の上限を使わない (§4.2)。上限があると、
+        # 新しい画像 (ユーザー・知覚・ツール・スペルの区別なく) が来るたびに一番
+        # 古い画像が文字に置き換わり、前回の送信の中身が書き換わる — 「後ろに
+        # 足すだけ」の約束と根本でぶつかる。印は列に一つ (先頭のメッセージ) で、
+        # 各クライアントと送る量の見積もりが llm_clients.utils.
+        # attachment_limit_is_off で読む。組んだときのモデルの判定に従う (§3) —
+        # 子が写す列 (line='sub') にも、スペルの繰り返しで後ろに積む列にも残る。
+        mark_attachment_limit_off(messages)
 
     # ---- Token budget check ----
     return messages
@@ -1581,8 +1649,8 @@ def _realtime_and_recall_block(
     知覚と同じに参加する) に加えて、知覚とは別の
     :data:`PERSISTED_REALTIME_AND_RECALL_KEY` (自動想起のきっかけと反射判断の
     観察から外す — §4.5)。``__realtime_context__`` は付けない (リアルタイム
-    スペルの結果の追記先にならないように)。画像は枚数の上限の数に入れない
-    (§4.2)。位置を決める発言の id が無いものは出さない。
+    スペルの結果の追記先にならないように)。位置を決める発言の id が無いものは
+    出さない。
     """
     if not boundary_message_id:
         return None
@@ -1594,7 +1662,6 @@ def _realtime_and_recall_block(
         "tags": ["internal", "event_message", "realtime_and_recall"],
         CONSUMED_PERCEPTION_KEY: True,
         PERSISTED_REALTIME_AND_RECALL_KEY: True,
-        ATTACHMENT_LIMIT_EXEMPT_KEY: True,
         "__perception_batch_id__": int(batch.id),
         BOUNDARY_ANCHOR_ID_KEY: str(boundary_message_id),
         REALTIME_AND_RECALL_RECALLED_KEY: [

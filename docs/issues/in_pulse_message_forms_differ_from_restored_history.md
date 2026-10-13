@@ -30,6 +30,15 @@ Codex の敵対レビュー三巡目（`persist_realtime_and_recall` の実装�
 
 ON のモデルでは、スペルの繰り返しの周（スペルの結果の文面と、自律パルスの周内の発言）は、二巡目までの修正で次のターンの復元形に揃えてある。スペルの結果の文面は全モデル共通で揃えてある。この issue は、それ以外の往復の残り。
 
+## 最初の呼び出しの前に足される、記録に残らない差し込み（2026-10-14 追記）
+
+ON のモデル（`persist_realtime_and_recall`）では、ターンの最初の呼び出しに記録に残らないメッセージが載ると、次のターンの最初の呼び出しと先頭が一致しなくなる（不変条件 1 そのものの破れ）。最初の呼び出しの前に足す TOOL の結果とエラーは、Codex 五巡目の修正で記録に残る形にした。そのとき入れた機械検査（`sea/runtime_context.find_unrecorded_messages`、送る直前に WARN を出す）が、まだ直していない二つを見つけている。
+
+- トップレベルの Playbook の最初の LLM ノードに action の指示文がある場合（例: `building_move_playbook` の TOOL→LLM）。
+- SUBPLAY の `report_to_parent` が、最初の呼び出しの前に親の列へ足される場合（`sea/runtime_nodes.py` の `lg_subplay_node`）。
+
+会話の既定の Playbook（`track_user_conversation`）には当てはまらない。起きても、そのターンのキャッシュが外れるだけで、ペルソナに届く中身は変わらない。本番で起きたかどうかは、WARN（`[sea][persist_realtime_and_recall] the first send of this turn carries a message that is not kept` で始まる行）で分かる。直すなら、これらも記録に残る形で送るか、記録に残らないなら最初の呼び出しの列の一番後ろ（そのターンのまとまりより後ろ）に置く。
+
 ## 直し方の方向（未決）
 
 - ターン内で積む形を、次のターンの復元形に揃える（スペルの繰り返しで行ったのと同じ方向）。native tool では、プロバイダが要求する tool 呼び出しと結果の対応（`tool_calls` と tool 行の組）を崩せないかを先に確かめる必要がある。

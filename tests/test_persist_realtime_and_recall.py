@@ -159,6 +159,20 @@ class _Lifecycle:
         return True
 
 
+@pytest.fixture(autouse=True)
+def _no_image_summary_llm(monkeypatch):
+    """画像の要約 (saiverse/media_summary.ensure_image_summary) を固定の文字にする。
+
+    Gemini の送信形式への変換 (_gemini_dump) は画像ごとに要約を引き、無ければ
+    要約用の LLM を呼ぶ。テストから実 LLM に触らないよう、固定の文字を返す。
+    """
+    def _summary(path, mime_type):
+        return "画像の要約"
+
+    monkeypatch.setattr("saiverse.media_summary.ensure_image_summary", _summary)
+    monkeypatch.setattr("llm_clients.gemini.ensure_image_summary", _summary)
+
+
 @pytest.fixture
 def env(request, tmp_path, monkeypatch):
     """実 SAIMemoryAdapter + 実 HistoryManager + 実 SEARuntime。
@@ -314,9 +328,14 @@ def _playbook():
 
 def _run_turn(
     env, user_text: Optional[str], *, pulse_type: str = "user", playbook=None,
-    cancellation_token=None,
+    cancellation_token=None, user_metadata: Optional[Dict[str, Any]] = None,
+    pre_spells: Optional[List[str]] = None,
 ) -> List[List[Dict[str, Any]]]:
-    """ユーザー発言を保存して 1 Pulse を実際の経路で走らせ、この Pulse の呼び出し列を返す。"""
+    """ユーザー発言を保存して 1 Pulse を実際の経路で走らせ、この Pulse の呼び出し列を返す。
+
+    ``user_metadata`` は発言に付ける metadata (画像など)、``pre_spells`` は
+    チャット画面の「ツール指定」で渡る事前スペル。
+    """
     from sea.pulse_context import aspect_from_pulse_type
 
     if user_text is not None:
@@ -327,9 +346,10 @@ def _run_turn(
         # 発言だけが実時計のまま進むと、次の発言がその返事より新しい秒を持つ
         # (返事が発言の前に並ぶ) という本番では起きない並びができてしまう。
         stamp = datetime.fromtimestamp(time.time(), timezone.utc).isoformat()
-        env.persona.history_manager.add_to_persona_only(
-            {"role": "user", "content": user_text, "timestamp": stamp},
-        )
+        user_msg: Dict[str, Any] = {"role": "user", "content": user_text, "timestamp": stamp}
+        if user_metadata is not None:
+            user_msg["metadata"] = user_metadata
+        env.persona.history_manager.add_to_persona_only(user_msg)
     env.adapter.flush_perception_buffer()
     before = len(env.llm.calls)
     env.runtime._run_playbook(
@@ -338,6 +358,7 @@ def _run_turn(
         pulse_type=pulse_type,
         pulse_line_aspect=aspect_from_pulse_type(pulse_type),
         cancellation_token=cancellation_token,
+        pre_spells=pre_spells,
     )
     return env.llm.calls[before:]
 
@@ -1945,51 +1966,79 @@ _PNG_B64 = (
 
 
 class TestAttachmentLimit:
-    def _messages(self, tmp_path, *, exempt: bool):
+    """ON のモデルの列には画像の枚数の上限を使わない (列ごとの印、Codex 五巡目 #1)。
+
+    印は列の先頭 (たいてい system のメッセージ) に一つ。どのクライアントも、
+    system を抜き出す前の列で判定し、印があれば全部の画像を画像のまま送る。
+    印の無い列 (OFF のモデル) は今までどおり上限で古い画像を文字に置き換える。
+    """
+
+    def _messages(self, tmp_path, *, off: bool, n_images: int = 3):
         import base64
 
-        from llm_clients.utils import ATTACHMENT_LIMIT_EXEMPT_KEY
+        from llm_clients.utils import mark_attachment_limit_off
 
-        old = tmp_path / "old.png"
-        new = tmp_path / "new.png"
-        old.write_bytes(base64.b64decode(_PNG_B64))
-        new.write_bytes(base64.b64decode(_PNG_B64))
-        kept_meta: Dict[str, Any] = {
-            "media": [{"path": str(new), "mime_type": "image/png", "type": "image"}],
-            "__skip_image_summary__": True,
-        }
-        if exempt:
-            kept_meta[ATTACHMENT_LIMIT_EXEMPT_KEY] = True
-        return [
-            {"role": "user", "content": "古い写真", "metadata": {
-                "media": [{"path": str(old), "mime_type": "image/png", "type": "image"}],
+        msgs: List[Dict[str, Any]] = [{"role": "system", "content": "HEAD"}]
+        for i in range(n_images):
+            path = tmp_path / f"img{i}.png"
+            path.write_bytes(base64.b64decode(_PNG_B64))
+            msgs.append({"role": "user", "content": f"写真{i}", "metadata": {
+                "media": [{"path": str(path), "mime_type": "image/png", "type": "image"}],
                 "__skip_image_summary__": True,
-            }},
-            {"role": "assistant", "content": "見たよ"},
-            {"role": "user", "content": "<system>残した行</system>", "metadata": kept_meta},
-        ]
+            }})
+            msgs.append({"role": "assistant", "content": f"見たよ{i}"})
+        if off:
+            mark_attachment_limit_off(msgs)
+        return msgs
 
     def test_shared_predicate(self):
-        from llm_clients.utils import ATTACHMENT_LIMIT_EXEMPT_KEY, is_attachment_limit_exempt
+        from llm_clients.utils import (
+            ATTACHMENT_LIMIT_OFF_KEY,
+            attachment_limit_is_off,
+            mark_attachment_limit_off,
+        )
 
-        assert is_attachment_limit_exempt({"__visual_context__": True})
-        assert is_attachment_limit_exempt({ATTACHMENT_LIMIT_EXEMPT_KEY: True})
-        assert not is_attachment_limit_exempt({"media": []})
-        assert not is_attachment_limit_exempt(None)
+        original = {"role": "system", "content": "HEAD"}
+        msgs = [original, {"role": "user", "content": "x"}]
+        assert not attachment_limit_is_off(msgs)
+        mark_attachment_limit_off(msgs)
+        assert attachment_limit_is_off(msgs)
+        assert msgs[0]["metadata"] == {ATTACHMENT_LIMIT_OFF_KEY: True}
+        assert "metadata" not in original  # 元の dict は書き換えない
+        assert not attachment_limit_is_off([])
+        assert not attachment_limit_is_off(None)
 
-    @pytest.mark.parametrize("exempt,expected", [(True, {0, 2}), (False, {2})])
-    def test_openai_and_anthropic(self, tmp_path, exempt, expected):
-        from llm_clients.anthropic_request_builder import _collect_attachment_state
+    @pytest.mark.parametrize("off,expected", [(True, {1, 3, 5}), (False, {5})])
+    def test_openai(self, tmp_path, off, expected):
         from llm_clients.openai_message_preparer import scan_message_metadata
 
-        msgs = self._messages(tmp_path, exempt=exempt)
+        msgs = self._messages(tmp_path, off=off)
         *_rest, allowed = scan_message_metadata(msgs, max_image_embeds_override=1)
-        assert {m for m, _ in allowed} == expected
-        *_rest, allowed_a = _collect_attachment_state(msgs, max_image_embeds=1)
-        assert {m for m, _ in allowed_a} == expected
+        assert (allowed is None) == off
+        if allowed is not None:
+            assert {m for m, _ in allowed} == expected
 
-    @pytest.mark.parametrize("exempt,expected", [(True, 2), (False, 1)])
-    def test_gemini(self, tmp_path, monkeypatch, exempt, expected):
+    @pytest.mark.parametrize("off,expected", [(True, 3), (False, 1)])
+    def test_anthropic_reads_the_mark_before_dropping_system(self, tmp_path, off, expected):
+        """Anthropic は system を抜いた列で画像を数えるので、印は抜く前に読む。"""
+        from llm_clients.anthropic_request_builder import build_request_params
+
+        built = build_request_params(
+            self._messages(tmp_path, off=off), tools=None, response_schema=None,
+            temperature=None, enable_cache=False, cache_ttl="5m",
+            model="claude-test", max_tokens=100, extra_params={},
+            thinking_config=None, thinking_effort=None, supports_images=True,
+            max_image_bytes=None, max_image_embeds=1,
+        )
+        images = [
+            block for msg in built["request_params"]["messages"]
+            for block in (msg["content"] if isinstance(msg["content"], list) else [])
+            if isinstance(block, dict) and block.get("type") == "image"
+        ]
+        assert len(images) == expected
+
+    @pytest.mark.parametrize("off,expected", [(True, 3), (False, 1)])
+    def test_gemini(self, tmp_path, monkeypatch, off, expected):
         from unittest.mock import MagicMock
 
         from llm_clients.gemini import GeminiClient
@@ -2001,14 +2050,25 @@ class TestAttachmentLimit:
         ):
             client = GeminiClient("gemini-4-argon", config={"supports_images": True})
         client.supports_images = True
-        _, contents = client._convert_messages(self._messages(tmp_path, exempt=exempt))
+        _, contents = client._convert_messages(self._messages(tmp_path, off=off))
         inline = [
             p for c in contents for p in (c.parts or [])
             if getattr(p, "inline_data", None) is not None
         ]
         assert len(inline) == expected
 
-    def test_sluice_estimate_uses_the_same_predicate(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("off,expected", [(True, 3), (False, 1)])
+    def test_xai(self, tmp_path, monkeypatch, off, expected):
+        from llm_clients.xai import _build_xai_messages
+
+        monkeypatch.setenv("SAIVERSE_XAI_ATTACHMENT_LIMIT", "1")
+        built = _build_xai_messages(
+            self._messages(tmp_path, off=off), supports_images=True,
+        )
+        dumped = "\n".join(str(m) for m in built)
+        assert dumped.count("data:image/") == expected
+
+    def test_sluice_estimate_follows_the_same_mark(self, tmp_path, monkeypatch):
         from sea import sluice
 
         monkeypatch.setattr(
@@ -2023,10 +2083,17 @@ class TestAttachmentLimit:
             ),
         )
         estimate = sluice._estimate_input_tokens
-        exempt_total = estimate(self._messages(tmp_path, exempt=True), "gemini-4-argon")
-        counted_total = estimate(self._messages(tmp_path, exempt=False), "gemini-4-argon")
-        # 枠を使わない画像が一枚増えて埋め込まれる分だけ多い
-        assert exempt_total > counted_total
+        off_total = estimate(self._messages(tmp_path, off=True), "gemini-4-argon")
+        on_total = estimate(self._messages(tmp_path, off=False), "gemini-4-argon")
+        # 上限を使わない列では、枠の外だった 2 枚も埋め込みとして数える
+        from saiverse.token_estimator import estimate_image_tokens
+
+        from saiverse.model_configs import get_model_config
+
+        per_image = estimate_image_tokens(
+            str(get_model_config("gemini-4-argon").get("provider", "ollama")),
+        )
+        assert off_total - on_total == 2 * per_image
 
 
 @pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
@@ -2130,3 +2197,285 @@ def test_same_pulse_is_kept_only_once_even_without_the_message_mark(env):
     rows = _kept_rows(env)
     assert len(rows) == 1
     assert "現在時刻: x" in rows[0][2]
+
+
+# ---------------------------------------------------------------------------
+# ON のモデルの列には画像の枚数の上限を使わない (実際の経路、Codex 五巡目 #1)
+# ---------------------------------------------------------------------------
+
+CAMERA_TOOL = "fake_camera"
+
+
+def _image(env) -> Dict[str, Any]:
+    return {"type": "image", "path": env.image_path, "mime_type": "image/png"}
+
+
+def _register_camera(env, monkeypatch, *, fail: bool = False) -> None:
+    """TOOL ノードから呼ぶ偽のツール (画像付きの結果、または例外)。"""
+    from tools import TOOL_REGISTRY
+
+    def fake_camera(**kwargs):
+        if fail:
+            raise RuntimeError("カメラが壊れた")
+        return ("写真を撮った", None, None, {"media": [_image(env)]})
+
+    monkeypatch.setitem(TOOL_REGISTRY, CAMERA_TOOL, fake_camera)
+
+
+def _tool_then_llm_playbook(*, memorize_image: bool = False):
+    """TOOL → (MEMORIZE) → LLM のトップレベルの Playbook。
+
+    ``memorize_image`` なら、ツールの結果の metadata (画像) を MEMORIZE で
+    そのまま記録に残す (sea/runtime_engine.lg_memorize_node の metadata_key)。
+    """
+    talk = {
+        "id": "talk", "type": "llm", "action": None, "speak": True,
+        "memorize": True, "metadata_key": "metadata",
+        "output_keys": [{"text": "speak_content"}], "next": None,
+    }
+    look = {
+        "id": "look", "type": "tool", "action": CAMERA_TOOL,
+        "output_keys": ["camera_text", "camera_snippet", "camera_file", "camera_meta"],
+        "next": "keep" if memorize_image else "talk",
+    }
+    nodes = [look]
+    if memorize_image:
+        nodes.append({
+            "id": "keep", "type": "memorize", "action": "{camera_text}",
+            "metadata_key": "camera_meta", "next": "talk",
+        })
+    nodes.append(talk)
+    return _custom_playbook(nodes, name="camera_pb")
+
+
+def _gemini_image_parts(messages: List[Dict[str, Any]]) -> tuple:
+    """Gemini の送信形式での (画像のまま届いた枚数, 文字に置き換わった枚数)。"""
+    _, dumped = _gemini_dump(messages)
+    inline = sum(
+        1 for c in dumped for p in (c.get("parts") or []) if p.get("inline_data")
+    )
+    notes = sum(
+        str(p.get("text") or "").count("[画像参照のみ:")
+        for c in dumped for p in (c.get("parts") or [])
+    )
+    return inline, notes
+
+
+def _images_in(messages: List[Dict[str, Any]]) -> int:
+    from saiverse.media_utils import iter_image_media
+
+    return sum(
+        len(iter_image_media(m.get("metadata"))) for m in messages
+        if isinstance(m, dict) and m.get("role") != "system"
+    )
+
+
+@pytest.mark.parametrize("env", [True, False], indirect=True, ids=["stream", "sync"])
+class TestNoImageLimitOnTheRealPath:
+    def test_perception_tool_and_spell_images_over_the_limit(self, env, monkeypatch):
+        """ユーザーの画像を一枚も使わず、知覚の画像・ツールの画像 (MEMORIZE で
+        記録に残したもの)・リアルタイムスペルの画像だけで上限 (既定 4 枚) を
+        超える。ON のモデルでは、二ターン目の最初の呼び出しの先頭が一ターン目の
+        最初の呼び出しと Gemini の送信形式でも一致し、画像は一枚も文字に
+        置き換わらない。"""
+        from sai_memory.perception_buffer import push_perception
+
+        _bind_realtime_spell(env)
+        _register_camera(env, monkeypatch)
+        # ツールの画像は、比べる二ターンより前のターンで記録に残しておく
+        # (比べる二ターンの差が画像の上限の扱いだけになるように)。
+        _run_turn(
+            env, "写真を撮って。", playbook=_tool_then_llm_playbook(memorize_image=True),
+        )
+        # 知覚の画像は別々のファイルにする (同じ場所の画像は一枚にまとまる)
+        media = []
+        for i in range(5):
+            path = Path(env.image_path).with_name(f"perception{i}.png")
+            path.write_bytes(Path(env.image_path).read_bytes())
+            media.append({"path": str(path), "mime_type": "image/png", "role": "image"})
+        with env.adapter._db_lock:
+            push_perception(
+                env.adapter.conn, "world_state", "窓の外を見た", media=media[:4],
+            )
+        turn1 = _run_turn(env, "外はどう?")
+        with env.adapter._db_lock:
+            push_perception(
+                env.adapter.conn, "world_state", "鳥が飛んだ", media=media[4:],
+            )
+        turn2 = _run_turn(env, "どうだった?")
+
+        _assert_first_call_prefix(turn1, turn2)
+        _assert_gemini_prefix(turn1[0], turn2[0])
+        assert _images_in(turn1[0]) > 4
+        assert _images_in(turn2[0]) > _images_in(turn1[0])
+        inline2, notes2 = _gemini_image_parts(turn2[0])
+        assert notes2 == 0
+        assert inline2 == _images_in(turn2[0])
+
+    def test_fifth_user_image(self, env):
+        """ユーザーの画像が 5 枚目に達しても、ON のモデルでは一番古い画像が
+        文字に置き換わらず、前回の最初の呼び出しと先頭が一致する。"""
+        for i in range(4):
+            env.persona.history_manager.add_to_persona_only({
+                "role": "user", "content": f"写真{i}です。",
+                "metadata": {"media": [_image(env)]},
+            })
+            env.persona.history_manager.add_to_persona_only(
+                {"role": "assistant", "content": f"写真{i}、見たよ。"},
+            )
+        turn1 = _run_turn(env, "どれが好き?")
+        turn2 = _run_turn(env, "これも見て。", user_metadata={"media": [_image(env)]})
+
+        _assert_first_call_prefix(turn1, turn2)
+        _assert_gemini_prefix(turn1[0], turn2[0])
+        inline2, notes2 = _gemini_image_parts(turn2[0])
+        assert (inline2, notes2) == (5, 0)
+
+    def test_off_model_keeps_the_limit(self, env):
+        """OFF のモデルは今までどおり: 5 枚目のユーザーの画像で一番古い画像が
+        文字に置き換わる (不変条件 2)。"""
+        env.persona.model = OFF_MODEL
+        env.persona.lightweight_model = OFF_MODEL
+        for i in range(4):
+            env.persona.history_manager.add_to_persona_only({
+                "role": "user", "content": f"写真{i}です。",
+                "metadata": {"media": [_image(env)]},
+            })
+            env.persona.history_manager.add_to_persona_only(
+                {"role": "assistant", "content": f"写真{i}、見たよ。"},
+            )
+        turn = _run_turn(env, "これも見て。", user_metadata={"media": [_image(env)]})
+        assert _gemini_image_parts(turn[0]) == (4, 1)
+
+
+# ---------------------------------------------------------------------------
+# 最初の LLM 呼び出しの前の TOOL の結果 (Codex 五巡目 #2) と、記録に残らない
+# メッセージの機械検査
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("env", [True, False], indirect=True, ids=["stream", "sync"])
+class TestToolResultBeforeTheFirstCall:
+    @pytest.mark.parametrize("fail", [False, True], ids=["result", "error"])
+    def test_tool_then_llm_and_next_turn(self, env, monkeypatch, fail):
+        """ON のトップレベルの user パルスで TOOL → LLM。ツールの結果 (エラーの
+        結果も) は記録に残る形 (id 付き・復元形の文面) で送られ、次のターンの
+        最初の呼び出しの先頭と一致する (Gemini の送信形式でも)。"""
+        _register_camera(env, monkeypatch, fail=fail)
+        turn1 = _run_turn(env, "写真を撮って。", playbook=_tool_then_llm_playbook())
+        turn2 = _run_turn(env, "どうだった?")
+
+        _assert_first_call_prefix(turn1, turn2)
+        _assert_gemini_prefix(turn1[0], turn2[0])
+        word = "error" if fail else "result"
+        tool_msgs = [
+            m for m in turn1[0] if f"tool '{CAMERA_TOOL}' {word}:" in str(m.get("content"))
+        ]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0]["id"]
+        assert tool_msgs[0]["content"].startswith(f"<system>\ntool '{CAMERA_TOOL}' {word}:")
+        assert tool_msgs[0]["content"].endswith("\n</system>")
+        with env.adapter._db_lock:
+            stored = env.adapter.conn.execute(
+                "SELECT role FROM messages WHERE id = ?", (tool_msgs[0]["id"],),
+            ).fetchall()
+        assert [r[0] for r in stored] == ["system"]
+
+    def test_off_model_tool_result_is_not_kept(self, env, monkeypatch):
+        """OFF のモデルは今までどおり: 記録に残さず、今までの文面で送る。"""
+        env.persona.model = OFF_MODEL
+        env.persona.lightweight_model = OFF_MODEL
+        _register_camera(env, monkeypatch)
+        turn1 = _run_turn(env, "写真を撮って。", playbook=_tool_then_llm_playbook())
+        tool_msgs = [
+            m for m in turn1[0] if f"tool '{CAMERA_TOOL}' result:" in str(m.get("content"))
+        ]
+        assert tool_msgs == [{
+            "role": "user",
+            "content": f"<system>tool '{CAMERA_TOOL}' result:\n写真を撮った</system>",
+        }]
+        with env.adapter._db_lock:
+            stored = env.adapter.conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE content LIKE 'tool %'"
+            ).fetchone()[0]
+        assert stored == 0
+
+
+_UNRECORDED_WARNING = "carries a message that is not kept"
+
+
+@pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
+@pytest.mark.parametrize(
+    "scene",
+    ["plain", "pre_spell", "tool", "realtime_spell", "auto_recall", "perception", "auto"],
+)
+def test_first_send_has_nothing_unrecorded(env, monkeypatch, caplog, scene):
+    """ON のモデルで、ターンの最初の呼び出しで送る列に「記録に残らない
+    メッセージ」が無い (sea/runtime_context.find_unrecorded_messages)。送る
+    直前の検査 (sea/runtime_llm._check_first_send_is_recorded) も WARN を出さない。
+    二ターン目 (前のターンの残した行・知覚・記録が並ぶ列) で確かめる。"""
+    import logging
+
+    from sea.runtime_context import find_unrecorded_messages
+
+    _run_turn(env, "こんにちは。")
+    kwargs: Dict[str, Any] = {}
+    pulse_type = "user"
+    if scene == "pre_spell":
+        from sea import runtime_llm
+
+        async def _pre_spell(tool_name, tool_args, persona, state, playbook_name,
+                             event_callback, messages=None, **kw):
+            return ("記録しました", None, True)
+
+        monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _pre_spell)
+        kwargs["pre_spells"] = [f"/spell name='{LOOP_SPELL}' args={{}}"]
+    elif scene == "tool":
+        _register_camera(env, monkeypatch)
+        kwargs["playbook"] = _tool_then_llm_playbook()
+    elif scene == "realtime_spell":
+        _bind_realtime_spell(env)
+    elif scene == "auto_recall":
+        env.recall.hits = [_hit("page-a", "海辺の町")]
+    elif scene == "perception":
+        _push_perception(env, "雨が降ってきた")
+    elif scene == "auto":
+        pulse_type = "auto"
+    with caplog.at_level(logging.WARNING, logger="sea.runtime_llm"):
+        turn = _run_turn(
+            env, None if scene == "auto" else "続き。", pulse_type=pulse_type, **kwargs,
+        )
+    # その場面の差し込みが実際に最初の呼び出しに載っている
+    expected = {
+        "pre_spell": "[Triggered by user]",
+        "tool": f"tool '{CAMERA_TOOL}' result:",
+        "realtime_spell": _SPELL_LINE,
+        "auto_recall": "海辺の町",
+        "perception": "雨が降ってきた",
+    }.get(scene)
+    if expected:
+        assert any(expected in str(m.get("content")) for m in turn[0])
+    assert find_unrecorded_messages(turn[0]) == []
+    assert _UNRECORDED_WARNING not in caplog.text
+
+
+@pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
+def test_first_send_check_reports_an_unrecorded_message(env, caplog):
+    """記録に残らない差し込み (ここでは LLM ノードの action の指示文) があると、
+    送る直前の検査が役割と先頭の文字を WARN で出す (送信は止めない)。"""
+    import logging
+
+    from sea.runtime_context import find_unrecorded_messages
+
+    playbook = _custom_playbook([{
+        "id": "talk", "type": "llm", "action": "手短に答えて。", "speak": True,
+        "memorize": True, "metadata_key": "metadata",
+        "output_keys": [{"text": "speak_content"}], "next": None,
+    }], name="action_pb")
+    with caplog.at_level(logging.WARNING, logger="sea.runtime_llm"):
+        turn = _run_turn(env, "こんにちは。", playbook=playbook)
+    assert [m["content"] for m in find_unrecorded_messages(turn[0])] == [
+        "<system>手短に答えて。</system>",
+    ]
+    assert _UNRECORDED_WARNING in caplog.text
+    assert "手短に答えて。" in caplog.text

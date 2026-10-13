@@ -9,10 +9,10 @@ from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 
 from .exceptions import InvalidRequestError
 from .utils import (
+    attachment_limit_is_off,
     compute_allowed_attachment_keys,
     content_to_text,
     image_summary_note,
-    is_attachment_limit_exempt,
     parse_attachment_limit,
 )
 
@@ -75,10 +75,19 @@ def _prepare_anthropic_system(
 def _collect_attachment_state(
     messages: List[Dict[str, Any]],
     max_image_embeds: Optional[int] = None,
-) -> Tuple[Dict[int, List[Dict[str, Any]]], Set[int], int, Optional[Set[Tuple[int, int]]]]:
+    attachment_limit_off: bool = False,
+) -> Tuple[Dict[int, List[Dict[str, Any]]], Set[int], Optional[int], Optional[Set[Tuple[int, int]]]]:
     # Use caller-supplied value (from client config / session override) if provided,
     # otherwise fall back to env var / default (DEFAULT_ATTACHMENT_LIMIT=4).
-    effective_limit = max_image_embeds if max_image_embeds is not None else parse_attachment_limit("ANTHROPIC")
+    # リアルタイム情報と自動想起を残すモデルの列では上限を使わない (None = 無制限。
+    # llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY)。印は system のメッセージに
+    # 付いていることが多く、ここへ来る列からは system が抜かれているので、
+    # 判定は抜く前の列で呼び出し元 (build_request_params) が行う。
+    effective_limit: Optional[int] = (
+        None if attachment_limit_off
+        else max_image_embeds if max_image_embeds is not None
+        else parse_attachment_limit("ANTHROPIC")
+    )
     attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
     skip_summary_indices: Set[int] = set()
     exempt_indices: Set[int] = set()
@@ -90,7 +99,7 @@ def _collect_attachment_state(
         if isinstance(metadata, dict):
             if metadata.get("__skip_image_summary__"):
                 skip_summary_indices.add(idx)
-            if is_attachment_limit_exempt(metadata):
+            if metadata.get("__visual_context__"):
                 exempt_indices.add(idx)
         media_items = iter_image_media(metadata) if metadata else []
         if media_items:
@@ -174,13 +183,15 @@ def _prepare_anthropic_messages(
     max_image_embeds: Optional[int] = None,
     enable_cache: bool = True,
     cache_ttl: str = "5m",
+    attachment_limit_off: bool = False,
 ) -> List[Dict[str, Any]]:
     attachment_cache, skip_summary_indices, effective_limit, allowed_attachment_keys = _collect_attachment_state(
-        messages, max_image_embeds=max_image_embeds
+        messages, max_image_embeds=max_image_embeds,
+        attachment_limit_off=attachment_limit_off,
     )
     logging.debug(
         "[anthropic] attachment limit=%s, cached=%d msgs with images",
-        effective_limit,
+        "∞" if effective_limit is None else effective_limit,
         len(attachment_cache),
     )
 
@@ -271,6 +282,9 @@ def build_request_params(
         max_image_embeds=max_image_embeds,
         enable_cache=enable_cache,
         cache_ttl=cache_ttl,
+        # 上限を使わない印は system を抜く前の列で判定する (印は列の先頭 =
+        # たいてい system のメッセージに付く)。
+        attachment_limit_off=attachment_limit_is_off(messages),
     )
 
     if not supports_assistant_prefill and prepared_messages and prepared_messages[-1]["role"] == "assistant":
