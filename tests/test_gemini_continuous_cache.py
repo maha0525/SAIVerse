@@ -1056,3 +1056,60 @@ def test_sync_and_background_forward_reservation_start(gemini, fake, controller,
     controller.join_background(5)
     second = controller._continuous["cachedContents/c2"]
     assert timestamps[2000] == second.expire_at - second.ttl_seconds
+
+
+# ── 明示キャッシュ非対応のモデル (cache.explicit_supported: false、Gemini 4 Argon) ──
+
+def _no_explicit_cache_client(cache_config: Dict[str, Any]) -> GeminiClient:
+    client = GeminiClient(MODEL, {"cache": cache_config})
+    client.config_key = MODEL
+    return client
+
+
+@pytest.mark.parametrize("runner", ["generate", "stream"])
+@pytest.mark.parametrize("continuous", [True, False], ids=["continuous", "auto"])
+def test_explicit_unsupported_model_never_creates_a_cache(
+    fake, controller, storage_records, runner, continuous,
+):
+    """自動キャッシュ ON・継続キャッシュ ON でも caches.create を試みず、全部を送る。"""
+    gemini = _no_explicit_cache_client({"type": "implicit", "explicit_supported": False})
+    msgs = _turn(0)
+    cc = CC if continuous else None
+    for _ in range(2):  # 二往復目 (継続キャッシュの裏での作成が走る回) も含める
+        if runner == "stream":
+            assert _run(gemini, msgs, cc=cc) == "ok"
+        else:
+            assert gemini.generate(msgs, tools=[], continuous_cache=cc) == "ok"
+    controller.join_background(5)
+
+    assert fake.caches.created == []
+    assert fake.caches.deleted == []
+    assert storage_records == []
+    for call in fake.models.calls:
+        assert call["config"].cached_content is None
+        assert call["config"].system_instruction == SYS
+        assert _texts(call["contents"]) == _uncached_texts(gemini, msgs)
+    _assert_no_leaked_refs(controller)
+
+
+def test_explicit_unsupported_model_skips_the_model_config_explicit_cache(
+    fake, controller, monkeypatch,
+):
+    GeminiClient._AUTO_CACHE_ENABLED = False
+    monkeypatch.setenv("SAIVERSE_GEMINI_EXPLICIT_CACHE", "1")
+    gemini = _no_explicit_cache_client(
+        {"type": "gemini_explicit", "min_tokens": 1024, "explicit_supported": False},
+    )
+
+    assert gemini.generate(_turn(0), tools=[], enable_cache=True, cache_ttl="5m") == "ok"
+    assert fake.caches.created == []
+    assert fake.models.calls[0]["config"].cached_content is None
+
+
+@pytest.mark.parametrize("cache_config", [{}, {"explicit_supported": True}], ids=["omitted", "true"])
+def test_explicit_supported_default_still_creates_caches(fake, controller, cache_config):
+    """省略時 (True) は従来どおり自動キャッシュが caches.create を呼ぶ。"""
+    gemini = _no_explicit_cache_client(cache_config)
+    assert gemini.generate(_turn(0), tools=[]) == "ok"
+    assert [c["name"] for c in fake.caches.created] == ["cachedContents/c1"]
+    assert fake.models.calls[0]["config"].cached_content == "cachedContents/c1"

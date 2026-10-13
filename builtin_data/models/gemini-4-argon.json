@@ -1,0 +1,77 @@
+{
+  "model": "gemini-4-argon",
+  "system_prompt": "",
+  "display_name": "Gemini 4 Argon(有料Tier)",
+  "provider_ref": "gemini",
+  "context_length": 1048576,
+  "supports_images": true,
+  "supports_audio": true,
+  "supports_video": true,
+  "supports_sampling_parameters": false,
+  "supports_model_prefill": false,
+  "prefer_paid": true,
+  "timeout": 900,
+  "cache": {
+    "supported": true,
+    "type": "implicit",
+    "explicit_supported": false,
+    "min_tokens": 4096
+  },
+  "pricing": {
+    "input_per_1m_tokens": 4.0,
+    "cached_input_per_1m_tokens": 0.2,
+    "output_per_1m_tokens": 20.0,
+    "currency": "USD",
+    "periods": [
+      {
+        "starts_at": "2026-10-13T00:00:00Z",
+        "ends_at": "2026-11-30T10:00:00Z",
+        "rates": {
+          "input_per_1m_tokens": 2.0,
+          "cached_input_per_1m_tokens": 0.1,
+          "output_per_1m_tokens": 10.0
+        }
+      }
+    ]
+  },
+  "parameters": {
+    "thinking_level": {
+      "type": "dropdown",
+      "options": ["low", "medium", "high"],
+      "default": "medium",
+      "label": "Thinking Level",
+      "description": "思考の深さ。mediumが公式既定。highで複雑な推論 (難しい問いでは数分かかる)、lowで応答速度を優先。"
+    },
+    "multi_turn_thinking": {
+      "type": "dropdown",
+      "options": ["on", "off"],
+      "default": "off",
+      "label": "Multi-turn Thinking",
+      "description": "マルチターン推論。onで思考状態を次ターンに引き継ぐ。offでキャッシュ効率を優先。"
+    },
+    "safety_harassment": {
+      "type": "dropdown",
+      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "default": "BLOCK_NONE",
+      "label": "Safety: Harassment"
+    },
+    "safety_hate_speech": {
+      "type": "dropdown",
+      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "default": "BLOCK_ONLY_HIGH",
+      "label": "Safety: Hate Speech"
+    },
+    "safety_sexually_explicit": {
+      "type": "dropdown",
+      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "default": "BLOCK_NONE",
+      "label": "Safety: Sexually Explicit"
+    },
+    "safety_dangerous_content": {
+      "type": "dropdown",
+      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "default": "BLOCK_ONLY_HIGH",
+      "label": "Safety: Dangerous Content"
+    }
+  }
+}
