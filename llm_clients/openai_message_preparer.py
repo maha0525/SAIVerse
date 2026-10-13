@@ -11,6 +11,7 @@ from .utils import (
     compute_allowed_attachment_keys,
     content_to_text,
     image_summary_note,
+    is_attachment_limit_exempt,
     parse_attachment_limit,
 )
 
@@ -48,7 +49,7 @@ def scan_message_metadata(
         if isinstance(metadata, dict):
             if metadata.get("__skip_image_summary__"):
                 skip_summary_indices.add(idx)
-            if metadata.get("__visual_context__"):
+            if is_attachment_limit_exempt(metadata):
                 exempt_indices.add(idx)
         media_items = iter_image_media(metadata)
         if media_items:

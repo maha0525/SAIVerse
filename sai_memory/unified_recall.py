@@ -823,6 +823,7 @@ def unified_recall(
     keywords: Optional[List[str]] = None,
     exclude_message_ids: Optional[set] = None,
     source_allocations: Optional[Dict[str, int]] = None,
+    exclude_keys: Optional[set] = None,
 ) -> List[RecallHit]:
     """Search across Chronicle, Memopedia, Fragments, and Messages using hybrid search.
 
@@ -862,6 +863,12 @@ def unified_recall(
         source_allocations: ソース種別ごとの枠の上書き。``None`` (既定) なら
             ``SOURCE_ALLOCATIONS``。キーが無いソースはグローバルへフォールバック
             する。``focus`` の倍率はこの値に対して掛かる。
+        exclude_keys: ``(source_type, source_id)`` の集合。どのソースでも
+            **収集段階**で除外する (``exclude_message_ids`` と同じ理由 — 選抜後に
+            捨てると枠を食い潰したまま件数だけ減る)。``None`` / 空 (既定) なら
+            何も除外せず、従来の呼び出しと 1 ビットも変わらない。使い手は
+            リアルタイム情報と自動想起を残すモデルの自動想起 (送る列に既に出て
+            いる記憶を外す — docs/intent/persist_realtime_and_recall.md §4.4)。
 
     Returns:
         List of RecallHit sorted by fused score descending.
@@ -894,6 +901,15 @@ def unified_recall(
     excluded_msg_ids: set = (
         {str(m) for m in exclude_message_ids} if exclude_message_ids else set()
     )
+    # どのソースにも効く収集段階の除外 ((source_type, source_id) の名前空間)。
+    excluded_keys: set = (
+        {(str(k[0]), str(k[1])) for k in exclude_keys} if exclude_keys else set()
+    )
+
+    def _not_excluded(source_type: str, ids: set) -> set:
+        if not excluded_keys:
+            return ids
+        return {i for i in ids if (source_type, str(i)) not in excluded_keys}
 
     # 拡張引数がひとつでも渡された呼び出しか。embed_score の全件補完はこの経路で
     # だけ効かせる — 従来の呼び出し (全引数が既定) では返り値も 1 ビット変えない
@@ -932,7 +948,9 @@ def unified_recall(
                 f"SELECT id FROM arasuji_entries WHERE content LIKE ?{like_escape} AND level = ?",
                 (pattern, chronicle_level),
             )
-            kw_id_sets.append({row[0] for row in cur.fetchall()})
+            kw_id_sets.append(
+                _not_excluded("chronicle", {row[0] for row in cur.fetchall()})
+            )
 
         # Collect all matched IDs and count per-entry matches
         all_chronicle_ids: set[str] = set()
@@ -980,7 +998,9 @@ def unified_recall(
                 "AND (category IS NULL OR category != 'chronicle')",
                 (pattern, pattern, pattern),
             )
-            kw_id_sets.append({row[0] for row in cur.fetchall()})
+            kw_id_sets.append(
+                _not_excluded("memopedia", {row[0] for row in cur.fetchall()})
+            )
 
         all_memopedia_ids: set[str] = set()
         for ids in kw_id_sets:
@@ -1016,7 +1036,9 @@ def unified_recall(
                 f"WHERE f.content LIKE ?{like_escape} AND {_FRAGMENT_VISIBILITY_WHERE}",
                 (pattern,),
             )
-            kw_id_sets.append({row[0] for row in cur.fetchall()})
+            kw_id_sets.append(
+                _not_excluded("fragment", {row[0] for row in cur.fetchall()})
+            )
 
         all_fragment_ids: set[str] = set()
         for ids in kw_id_sets:
@@ -1068,7 +1090,7 @@ def unified_recall(
             # 収集段階で除外する (選抜前に外さないと message 枠を食い潰す)。
             if excluded_msg_ids:
                 ids = {i for i in ids if str(i) not in excluded_msg_ids}
-            kw_id_sets.append(ids)
+            kw_id_sets.append(_not_excluded("message", ids))
 
         all_message_ids: set[str] = set()
         for ids in kw_id_sets:
@@ -1110,12 +1132,16 @@ def unified_recall(
         # ソース id は "perception:{id}" に接頭辞化する (バッチ id は小さい整数
         # で、素のままだと参照として紛らわしい)。map キーの衝突自体は
         # (source_type, source_id) の名前空間化が防ぐ。
+        # 対象は知覚のまとめだけ — 同じ表に同居する「リアルタイム情報と自動
+        # 想起を残した行」(kind='realtime_and_recall') は知覚ではなく、想起の
+        # 文面は過去の記憶の再提示なので検索結果に出さない
+        # (docs/intent/persist_realtime_and_recall.md §4.3)。
         kw_id_sets = []
         try:
             for pattern in like_patterns:
                 cur = conn.execute(
                     "SELECT id FROM perception_batches WHERE rendered_text LIKE ?"
-                    f"{like_escape}",
+                    f"{like_escape} AND kind = 'perception'",
                     (pattern,),
                 )
                 kw_id_sets.append({f"perception:{row[0]}" for row in cur.fetchall()})
@@ -1178,6 +1204,8 @@ def unified_recall(
         for entry_id, vec, level, content, start_time, end_time, msg_count in corpus:
             if len(vec) != vector_dim:
                 continue
+            if excluded_keys and ("chronicle", str(entry_id)) in excluded_keys:
+                continue
             v = np.array(vec, dtype=np.float32)
             score = _cosine_sim(q, v)
             embed_all_scores[("chronicle", entry_id)] = score
@@ -1205,6 +1233,8 @@ def unified_recall(
         for page_id, vec, title, summary, category, short_id in corpus:
             if len(vec) != vector_dim:
                 continue
+            if excluded_keys and ("memopedia", str(page_id)) in excluded_keys:
+                continue
             v = np.array(vec, dtype=np.float32)
             score = _cosine_sim(q, v)
             embed_all_scores[("memopedia", page_id)] = score
@@ -1228,6 +1258,8 @@ def unified_recall(
         scored = []
         for frag_id, vec, content, entity_id, chronicle_entry_id, source_date, etitle, ecat, eshort in corpus:
             if len(vec) != vector_dim:
+                continue
+            if excluded_keys and ("fragment", str(frag_id)) in excluded_keys:
                 continue
             v = np.array(vec, dtype=np.float32)
             score = _cosine_sim(q, v)
@@ -1260,6 +1292,8 @@ def unified_recall(
                 continue
             # 収集段階で除外する (キーワード経路と同じ境界)。
             if excluded_msg_ids and str(msg_id) in excluded_msg_ids:
+                continue
+            if excluded_keys and ("message", str(msg_id)) in excluded_keys:
                 continue
             v = np.array(vec, dtype=np.float32)
             score = _cosine_sim(q, v)

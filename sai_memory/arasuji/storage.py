@@ -1389,12 +1389,15 @@ def regenerate_entry(
     # は、再生成でも**材料**として LLM に渡す (2026-08-29 裁定 — digest 本文への
     # 機械的な付記は廃止)。印の新 id への付け替えは swap 成立後 (下)。
     from sai_memory.perception_buffer import (
+        batch_material_item,
         list_batches_annexed_to,
         reassign_batches_annexed,
     )
     old_batches = list_batches_annexed_to(conn, entry_id)
+    # 材料の形は付記 (executor.collect_annex_items) と同じ一枚を通す。
     extra_items = [
-        {"at": int(b.consumed_at), "text": b.rendered_text} for b in old_batches
+        item for item in (batch_material_item(b) for b in old_batches)
+        if item is not None
     ]
 
     # 4. Generate the replacement first (LLM call — the old entry stays alive)

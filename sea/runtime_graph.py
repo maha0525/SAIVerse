@@ -264,6 +264,12 @@ def compile_with_langgraph(
         # この値だけを使う (persona 属性フォールバックは廃止)。サブライン
         # (line='sub') は親の prefix をコピーするため親の値をそのまま継承する。
         "_prefix_anchor_id": parent.get("_prefix_anchor_id"),
+        # リアルタイム情報と自動想起を残すモデルの送る列か (_prepare_context が
+        # 組んだときのモデルで判定した値。docs/intent/persist_realtime_and_recall.md)。
+        # サブライン (line='sub') は親の列をコピーするので親の値をそのまま継承する。
+        "_persist_realtime_and_recall": bool(
+            parent.get("_persist_realtime_and_recall", False)
+        ),
         # 前駆刻印の材料 (sea/message_stamp.py): _prepare_context が実際に
         # プロンプトへ組み込んだ履歴メッセージの ID 列。生成メッセージの
         # metadata へ「見ていた最後のメッセージ」として刻む。サブライン

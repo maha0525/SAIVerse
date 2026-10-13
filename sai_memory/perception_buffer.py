@@ -103,6 +103,16 @@ class PerceptionBatch:
     (sai_memory/room_state.py)。再訪の差分がどの全文を土台にしているかと、
     確定文面の中のどこにその文面が居るかを持つ。移管 (土台が付記で下りたとき
     最古の差分を全文へ差し替える) がこの記帳を読み書きする。
+
+    ``kind``: 行の種類。``"perception"`` (知覚のまとめ — 既存の行はすべてこれ)
+    か ``"realtime_and_recall"`` (リアルタイム情報と自動想起を、送った文面の
+    まま残した行。docs/intent/persist_realtime_and_recall.md)。後者は知覚の
+    消費を伴わない (台帳の項目に印を打たない)。
+
+    ``recalled_json``: ``"realtime_and_recall"`` の行で、その文面に入っている
+    自動想起の記憶の識別子 (``[[source_type, source_id], ...]`` の JSON)。次の
+    ターンの自動想起が、送る列に既に出ている記憶を候補の段階で外すのに使う
+    (同 §4.4)。知覚の行では NULL。
     """
     id: int
     consumed_at: int
@@ -114,9 +124,57 @@ class PerceptionBatch:
     boundary_created_at: Optional[int] = None
     boundary_rowid: Optional[int] = None
     room_state_json: Optional[str] = None
+    kind: str = "perception"
+    recalled_json: Optional[str] = None
 
     def media_list(self) -> list:
         return _decode_media(self.media)
+
+    @property
+    def is_realtime_and_recall(self) -> bool:
+        """リアルタイム情報と自動想起を残した行か (知覚のまとめではない)。"""
+        return self.kind == BATCH_KIND_REALTIME_AND_RECALL
+
+    def recalled_keys(self) -> List[tuple]:
+        """この行の文面に入っている自動想起の ``(source_type, source_id)`` の列。"""
+        return decode_recalled_keys(self.recalled_json)
+
+
+#: ``perception_batches.kind`` の値。知覚のまとめ (既存の行の既定値)。
+BATCH_KIND_PERCEPTION = "perception"
+#: ``perception_batches.kind`` の値。リアルタイム情報と自動想起を、送った文面の
+#: まま残した行 (docs/intent/persist_realtime_and_recall.md §4.2)。
+BATCH_KIND_REALTIME_AND_RECALL = "realtime_and_recall"
+
+
+def encode_recalled_keys(keys: Optional[Sequence[Sequence[str]]]) -> Optional[str]:
+    """自動想起の識別子の列を ``recalled_json`` の JSON にする (空なら None)。"""
+    if not keys:
+        return None
+    import json
+    pairs = [
+        [str(k[0]), str(k[1])] for k in keys
+        if isinstance(k, (list, tuple)) and len(k) == 2
+    ]
+    return json.dumps(pairs, ensure_ascii=False) if pairs else None
+
+
+def decode_recalled_keys(raw: Optional[str]) -> List[tuple]:
+    """``recalled_json`` を ``(source_type, source_id)`` の列に戻す (読めなければ空)。"""
+    if not raw:
+        return []
+    try:
+        import json
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    out: List[tuple] = []
+    for item in data:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            out.append((str(item[0]), str(item[1])))
+    return out
 
 
 def init_perception_buffer_table(
@@ -206,16 +264,23 @@ def init_perception_buffer_table(
             annexed_entry_id TEXT,
             boundary_created_at INTEGER,
             boundary_rowid INTEGER,
-            room_state_json TEXT
+            room_state_json TEXT,
+            kind TEXT NOT NULL DEFAULT 'perception',
+            recalled_json TEXT
         )
         """
     )
     # 既存 DB の追従 (境界キー列 = 本ワークツリー内の先行世代、
-    # room_state_json = 部屋の様子の差分+移管を入れた 2026-09-05 より前の世代)。
+    # room_state_json = 部屋の様子の差分+移管を入れた 2026-09-05 より前の世代、
+    # kind / recalled_json = リアルタイム情報と自動想起を残す行を入れた
+    # 2026-10-14 より前の世代 — 既存の行は kind の既定値で「知覚」になる)。
     for ddl in (
         "ALTER TABLE perception_batches ADD COLUMN boundary_created_at INTEGER",
         "ALTER TABLE perception_batches ADD COLUMN boundary_rowid INTEGER",
         "ALTER TABLE perception_batches ADD COLUMN room_state_json TEXT",
+        "ALTER TABLE perception_batches ADD COLUMN kind TEXT NOT NULL "
+        "DEFAULT 'perception'",
+        "ALTER TABLE perception_batches ADD COLUMN recalled_json TEXT",
     ):
         try:
             conn.execute(ddl)
@@ -436,7 +501,8 @@ def _row_to_item(row) -> PerceptionItem:
 
 _BATCH_SELECT_COLUMNS = (
     "id, consumed_at, pulse_id, episode_id, rendered_text, media, "
-    "annexed_entry_id, boundary_created_at, boundary_rowid, room_state_json"
+    "annexed_entry_id, boundary_created_at, boundary_rowid, room_state_json, "
+    "kind, recalled_json"
 )
 
 
@@ -455,6 +521,13 @@ def _row_to_batch(row) -> PerceptionBatch:
         boundary_rowid=int(row[8]) if len(row) > 8 and row[8] is not None else None,
         room_state_json=(
             row[9] if len(row) > 9 and row[9] is not None else None
+        ),
+        kind=(
+            str(row[10]) if len(row) > 10 and row[10] is not None
+            else BATCH_KIND_PERCEPTION
+        ),
+        recalled_json=(
+            row[11] if len(row) > 11 and row[11] is not None else None
         ),
     )
 
@@ -818,6 +891,102 @@ def insert_presentation_batch(
         ),
     )
     return int(cur.lastrowid)
+
+
+def insert_realtime_and_recall_batch(
+    conn: sqlite3.Connection,
+    *,
+    consumed_at: int,
+    rendered_text: str,
+    media: Optional[list] = None,
+    recalled_keys: Optional[Sequence[Sequence[str]]] = None,
+    pulse_id: Optional[str] = None,
+    boundary_created_at: Optional[int] = None,
+    boundary_rowid: Optional[int] = None,
+) -> int:
+    """リアルタイム情報と自動想起を、送った文面のまま一行残す。**commit する**。
+
+    docs/intent/persist_realtime_and_recall.md §4.2。知覚の消費とは別の
+    トランザクションで、台帳の項目には触れない (消費を伴わない種類)。
+
+    - ``rendered_text`` は LLM へ送ったメッセージの ``content`` そのもの
+      (``<system>`` の包みを含む)。提示はこれを包み直さずにそのまま出す —
+      一字でも変わると、次のターンの送信の先頭が前回の送信と一致しなくなる。
+    - ``media`` はそのメッセージに付いていた画像 (リアルタイムスペルの結果)。
+    - ``recalled_keys`` は文面に入っている自動想起の ``(source_type,
+      source_id)``。次のターンの自動想起が候補の段階で外すのに使う (§4.4)。
+    - ``boundary_created_at`` / ``boundary_rowid`` は、この差し込みを送った
+      列で直前にあった発言の正典順序キー。次のターン以降、この行はその発言
+      (とその発言の後ろに並ぶ、この行より古い知覚のまとめ) の直後に置かれ、
+      その発言が送る列に無いときは送られない (§4.3)。
+    """
+    cur = conn.execute(
+        "INSERT INTO perception_batches "
+        "(consumed_at, pulse_id, episode_id, rendered_text, media, "
+        "annexed_entry_id, boundary_created_at, boundary_rowid, room_state_json, "
+        "kind, recalled_json) "
+        "VALUES (?, ?, NULL, ?, ?, NULL, ?, ?, NULL, ?, ?)",
+        (
+            int(consumed_at),
+            pulse_id,
+            rendered_text,
+            _encode_media(media),
+            int(boundary_created_at) if boundary_created_at is not None else None,
+            int(boundary_rowid) if boundary_rowid is not None else None,
+            BATCH_KIND_REALTIME_AND_RECALL,
+            encode_recalled_keys(recalled_keys),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def _strip_system_tags(text: str) -> str:
+    """``<system>`` / ``</system>`` の包みを全部外す (材料の読みやすさのため)。"""
+    import re
+    return re.sub(r"</?system>", "", text or "").strip()
+
+
+#: あらすじの材料の種類 (:func:`batch_material_item` の ``label``)。
+#: sai_memory/arasuji/generator.py がプロンプトのラベルへ写す。
+MATERIAL_LABEL_RECALL = "recall"
+MATERIAL_LABEL_NOTICE = "notice"
+
+
+def batch_material_item(batch: PerceptionBatch) -> Optional[dict]:
+    """このバッチをあらすじの材料にするときの一項目 (材料にしないなら None)。
+
+    材料の読み手は三つ — 付記 (sai_memory/arasuji/executor.collect_annex_items)・
+    再生成 (sai_memory/arasuji/storage.regenerate_entry)・吸収
+    (sai_memory/arasuji/absorption) — で、どれもここを通す (規則を三枚に
+    書かない)。
+
+    - 「部屋の様子」の機構の置き直し (room_state_packages.md §6-4) は出来事では
+      ないので材料にしない (付記印だけ受ける)。
+    - リアルタイム情報と自動想起を残した行 (persist_realtime_and_recall.md
+      §4.3) は材料に入れる (arasuji_levels.md §7-1 のまはー裁定 — 本人の提示に
+      立った行はすべて材料に入る)。想起を含む行は ``label="recall"``
+      (【想起 (過去の再提示)】)、含まない行は ``label="notice"`` (【通知】)。
+      文面は ``<system>`` の包みを外したもの。長さの規則は材料の整形側
+      (generator._format_messages_for_prompt) が他の材料と同じに当てる。
+    - それ以外 (知覚のまとめ) は従来どおり確定文面そのまま (ラベルは整形側が
+      本文から決める)。
+
+    戻りは ``{"at": epoch, "text": str}`` (+ 必要なら ``"label"``)。
+    """
+    from sai_memory.room_state import batch_is_room_reseat
+    if batch_is_room_reseat(batch.room_state_json):
+        return None
+    if batch.is_realtime_and_recall:
+        return {
+            "at": int(batch.consumed_at),
+            "text": _strip_system_tags(batch.rendered_text),
+            "label": (
+                MATERIAL_LABEL_RECALL if batch.recalled_keys()
+                else MATERIAL_LABEL_NOTICE
+            ),
+        }
+    return {"at": int(batch.consumed_at), "text": batch.rendered_text}
 
 
 def _encode_media(media: Optional[list]) -> Optional[str]:

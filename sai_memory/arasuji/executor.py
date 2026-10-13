@@ -144,16 +144,16 @@ def collect_annex_items(
             )
     except sqlite3.OperationalError:
         batches = []  # 台帳の無い DB (旧テスト等)
-    from sai_memory.room_state import batch_is_room_reseat
+    from sai_memory.perception_buffer import batch_material_item
     for batch in batches:
-        # 機構の置き直し (部屋の全文の再配置 — room_state_packages.md §6-4) は
-        # 出来事ではないので材料には載せない。付記印だけ受けて提示から下りる
-        # (印を打たないと提示に残り続け、毎回の編纂で同じ全文が材料に並ぶ)。
-        if not batch_is_room_reseat(batch.room_state_json):
-            items.append({
-                "at": int(batch.consumed_at),
-                "text": batch.rendered_text,
-            })
+        # 材料にするかどうか・どんな形で渡すかは batch_material_item の一枚
+        # (再生成・吸収も同じ関数を通る)。機構の置き直し (部屋の全文の再配置 —
+        # room_state_packages.md §6-4) は出来事ではないので材料には載せないが、
+        # 付記印だけは受けて提示から下りる (印を打たないと提示に残り続け、
+        # 毎回の編纂で同じ全文が材料に並ぶ)。
+        item = batch_material_item(batch)
+        if item is not None:
+            items.append(item)
         batch_ids.append(batch.id)
     return items, batch_ids
 

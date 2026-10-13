@@ -166,6 +166,13 @@ def run_playbook(
             persona_voiced=True,
         )
         parent["_prefix_anchor_id"] = _context_meta.get("prefix_anchor_id")
+        # リアルタイム情報と自動想起を残すモデルか (組んだときのモデルの判定 —
+        # docs/intent/persist_realtime_and_recall.md §3)。リアルタイムスペルが
+        # まとまりを自前で作る経路 (sea/runtime_llm._execute_realtime_spells) が
+        # 置き場所をこれで決める。
+        parent["_persist_realtime_and_recall"] = bool(
+            _context_meta.get("persist_realtime_and_recall", False)
+        )
         # 前駆刻印の材料 (sea/message_stamp.py): 今回の生成が実際に見た履歴の
         # ID 列。末尾が「この生成が見ていた最後のメッセージ」になる。
         record_presented_message_ids(parent, _context_meta)

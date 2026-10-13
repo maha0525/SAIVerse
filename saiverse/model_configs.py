@@ -1030,6 +1030,12 @@ def get_cache_config(model: str) -> Dict[str, Any]:
             - ttl_options: list[str] (available TTL options)
             - type: str ("explicit" or "implicit")
             - min_tokens: int (minimum tokens for caching)
+            - persist_realtime_and_recall: bool (default False) — リアルタイム
+              情報と自動想起を、送った時点でペルソナのデータに残し、次の
+              ターン以降も同じ位置に同じ文面で送るか
+              (docs/intent/persist_realtime_and_recall.md §3)。ON にするのは
+              キャッシュの境目をこちらから指定できず、キャッシュの割引が大きい
+              モデル (2026-10 時点の組み込みでは Gemini 4 Argon)。
     """
     config = get_model_config(model)
     cache = config.get("cache", {})
@@ -1046,6 +1052,9 @@ def get_cache_config(model: str) -> Dict[str, Any]:
         "ttl_options": cache.get("ttl_options", ["5m"]),
         "type": cache.get("type", "explicit" if provider == "anthropic" else "implicit"),
         "min_tokens": cache.get("min_tokens", 1024),
+        "persist_realtime_and_recall": bool(
+            cache.get("persist_realtime_and_recall", False)
+        ),
     }
 
 

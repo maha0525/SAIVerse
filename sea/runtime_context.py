@@ -6,8 +6,15 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from llm_clients.utils import ATTACHMENT_LIMIT_EXEMPT_KEY
 from sai_memory.perception_buffer import PERCEPTION_OMISSION_HEADER
-from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
+from sea.eviction_plan import (
+    CONSUMED_PERCEPTION_KEY,
+    PERSISTED_REALTIME_AND_RECALL_KEY,
+    TURN_REALTIME_AND_RECALL_KEY,
+    is_injected_perception,
+    is_persisted_realtime_and_recall,
+)
 from sea.runtime_utils import event_building_id
 from saiverse.model_configs import (
     calculate_cost,
@@ -79,6 +86,145 @@ def mark_cache_boundary(
         marked[idx] = {**msg, "metadata": new_metadata}
         return marked
     return history
+
+
+# ---------------------------------------------------------------------------
+# リアルタイム情報と自動想起を残して送り続ける運用 (モデルごとの設定)
+# docs/intent/persist_realtime_and_recall.md
+# ---------------------------------------------------------------------------
+
+#: 送る列に出す「残した行」のブロックが持つ、位置を決める発言の id
+#: (``merge_perception_blocks`` がこの発言の直後に置く)。
+REALTIME_AND_RECALL_BOUNDARY_ID_KEY = "__realtime_and_recall_boundary_id__"
+#: 送る列に出す「残した行」のブロックが持つ、文面に入っている自動想起の
+#: ``[[source_type, source_id], ...]`` (次のターンの候補から外すのに使う)。
+REALTIME_AND_RECALL_RECALLED_KEY = "__realtime_and_recall_recalled__"
+
+
+def persists_realtime_and_recall(persona: Any, model_key: Optional[str]) -> bool:
+    """この送る列を組むモデルが「リアルタイム情報と自動想起を残す」設定か。
+
+    判定の一点 (docs/intent/persist_realtime_and_recall.md §3)。送る並び
+    (:func:`prepare_context`)・残した行を送るかどうか
+    (:func:`list_presented_perception_blocks`)・自動想起の出し方
+    (:func:`_maybe_inject_auto_recall`) は、どれもこの関数で決める。
+
+    モデルは ``model_key`` (送る列を組むときのモデル)。無ければ head と同じ
+    解決 (:func:`sea.head_pipeline.integration.resolve_default_model_key` —
+    ペルソナの標準モデル) に落ちる。組んだ後で別のモデルへ切り替わる経路は、
+    組んだときのこの判定に従う。設定が読めないときは OFF (今までどおり) に倒す。
+    """
+    try:
+        from saiverse.model_configs import get_cache_config
+        from sea.head_pipeline.integration import resolve_default_model_key
+
+        key = str(model_key) if model_key else resolve_default_model_key(persona)
+        return bool(get_cache_config(key).get("persist_realtime_and_recall", False))
+    except Exception:
+        LOGGER.warning(
+            "[sea][prepare-context] could not read persist_realtime_and_recall "
+            "(model=%s); treating it as off", model_key, exc_info=True,
+        )
+        return False
+
+
+def compose_turn_realtime_and_recall_content(info: Dict[str, Any]) -> str:
+    """そのターンのまとまりの文面 (リアルタイム情報 → 自動想起の順に改行で繋ぐ)。"""
+    parts = [p for p in (info.get("realtime"), info.get("recall")) if p]
+    return "\n".join(parts)
+
+
+def build_turn_realtime_and_recall_message(
+    realtime_msg: Optional[Dict[str, Any]],
+    recall_block: Optional[str],
+    recalled_keys: Optional[Sequence[Sequence[str]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """残すモデルへ送る、そのターンのリアルタイム情報と自動想起のまとまり。
+
+    一つのメッセージにする (docs/intent/persist_realtime_and_recall.md §4.1) —
+    残すのは一行なので、送るときに二つに分けると次のターンの列 (一行) と
+    一致しない。出すものが何も無いターンは None (まとまり自体を作らない —
+    realtime_info.md 不変条件 3 と同じ)。
+
+    印は三つ:
+
+    - ``__realtime_context__`` — リアルタイムスペルの結果の追記先
+      (sea/runtime_llm._execute_realtime_spells が先頭から見て最初の印付きを
+      探す)。プレビューの節分けもこれを見る。
+    - :data:`TURN_REALTIME_AND_RECALL_KEY` — 組み直しと保存の材料。
+    - ``ATTACHMENT_LIMIT_EXEMPT_KEY`` — スペルの画像を枚数の上限の数に入れない
+      (残した行と同じ扱いにしないと、次のターンで数え方が変わって古い画像の
+      埋め込み/文字化が入れ替わる)。
+    """
+    realtime_text = (
+        str(realtime_msg.get("content") or "") if realtime_msg else ""
+    ) or None
+    recall_text = recall_block or None
+    if not realtime_text and not recall_text:
+        return None
+    info: Dict[str, Any] = {
+        "realtime": realtime_text,
+        "recall": recall_text,
+        "recalled": [
+            [str(k[0]), str(k[1])] for k in (recalled_keys or [])
+            if isinstance(k, (list, tuple)) and len(k) == 2
+        ] if recall_text else [],
+        "persisted": False,
+    }
+    metadata: Dict[str, Any] = {
+        "__realtime_context__": True,
+        TURN_REALTIME_AND_RECALL_KEY: info,
+        ATTACHMENT_LIMIT_EXEMPT_KEY: True,
+    }
+    realtime_meta = realtime_msg.get("metadata") if realtime_msg else None
+    if isinstance(realtime_meta, dict) and isinstance(realtime_meta.get("media"), list):
+        metadata["media"] = list(realtime_meta["media"])
+    return {
+        "role": "user",
+        "content": compose_turn_realtime_and_recall_content(info),
+        "metadata": metadata,
+    }
+
+
+def find_turn_realtime_and_recall_index(
+    messages: Sequence[Dict[str, Any]],
+) -> Optional[int]:
+    """送る列の中の、そのターンのまとまり (残すモデル) の位置。無ければ None。"""
+    for idx, msg in enumerate(messages):
+        meta = msg.get("metadata") if isinstance(msg, dict) else None
+        if isinstance(meta, dict) and isinstance(
+            meta.get(TURN_REALTIME_AND_RECALL_KEY), dict
+        ):
+            return idx
+    return None
+
+
+def add_realtime_spell_lines_to_turn_message(
+    turn_msg: Dict[str, Any], new_content: str,
+) -> None:
+    """リアルタイムスペルの結果の行を、そのターンのまとまりのリアルタイム情報に足す。
+
+    足し方は今までの追記 (リアルタイム情報の ``</system>`` の直前に入れる) と
+    同じ。リアルタイム情報がまだ無い (時刻の項目が両方 OFF) なら、スペルの
+    結果だけのリアルタイム情報を作る。自動想起の文面には触れない — 文面全体の
+    ``</system>`` を置換すると、想起の閉じタグの前にも結果が入ってしまう。
+    """
+    if not new_content:
+        return
+    info = (turn_msg.get("metadata") or {}).get(TURN_REALTIME_AND_RECALL_KEY)
+    if not isinstance(info, dict):
+        return
+    realtime = info.get("realtime")
+    if realtime:
+        if "</system>" in realtime:
+            head, sep, tail = realtime.rpartition("</system>")
+            realtime = head + "\n" + new_content + "\n" + sep + tail
+        else:
+            realtime = realtime + "\n" + new_content
+    else:
+        realtime = f"<system>\n## リアルタイム情報\n{new_content}\n</system>"
+    info["realtime"] = realtime
+    turn_msg["content"] = compose_turn_realtime_and_recall_content(info)
 
 
 #: head (前置き) に必ず並べる Section。**用途やラインで出し分けない。**
@@ -702,13 +848,30 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # recalled_ids はシステムプロンプトへの注入から廃止。
     # recall_entry / recall_navigate ツールが想起時に直接会話履歴へ内容を追記する。
 
+    # ---- リアルタイム情報と自動想起を残すモデルか (モデルごとの設定) ----
+    # docs/intent/persist_realtime_and_recall.md。ON のモデルへ送るときは、
+    # そのターンのリアルタイム情報と自動想起を一つのまとまりにして送る列の
+    # 一番後ろに置き (下)、最初の LLM 呼び出しが成功した後に送った文面のまま
+    # 残す (sea/runtime_llm._persist_turn_realtime_and_recall)。OFF のモデルは
+    # 今までどおり (最新の発言の直前に置き、次のターンには消える)。
+    # 判定は組むときのモデルで行い、呼び出し元へ返す (リアルタイムスペルが
+    # まとまりを自前で作る経路が同じ判定に従うため — runtime_runner が state
+    # に載せる)。
+    persist_mode = persists_realtime_and_recall(persona, model_key)
+    if context_meta is not None:
+        context_meta["persist_realtime_and_recall"] = persist_mode
+    persist_realtime_msg: Optional[Dict[str, Any]] = None
+
     # ---- Realtime Context ----
     # Time-sensitive info placed just BEFORE the last user message to improve LLM caching.
     # This ensures LLM responds to user input, not the realtime context.
+    # (残すモデルでは差し込まずに取っておき、下で自動想起とまとめて一番後ろに置く。)
     if reqs.realtime_context:
         try:
             realtime_msg = runtime._build_realtime_context(persona, building_id, messages)
-            if realtime_msg:
+            if realtime_msg and persist_mode:
+                persist_realtime_msg = realtime_msg
+            elif realtime_msg:
                 # Find the last user message and insert realtime context before it
                 last_user_idx = None
                 for i in range(len(messages) - 1, -1, -1):
@@ -734,15 +897,39 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # 例外は既定 OFF の Jev 選別層 — ON のときだけ判定専用の外部 API へ 1 往復する。
     # docs/intent/auto_recall_jev_rerank.md)。
     # サブライン (line='sub') はそもそも _prepare_context を通らないので自然に除外。
+    recall_result = None
     if not preview_only:
         try:
-            _maybe_inject_auto_recall(
+            recall_result = _maybe_inject_auto_recall(
                 runtime, persona, messages,
                 pulse_type=pulse_type,
                 event_callback=event_callback,
+                persist_mode=persist_mode,
             )
         except Exception:
             LOGGER.exception("[sea][prepare-context] auto_recall injection failed (non-fatal)")
+
+    # ---- 残すモデル: そのターンのリアルタイム情報と自動想起を一番後ろへ ----
+    # 位置は最新の発言と、そのターンの知覚のまとめの後ろ。次のターンにこの
+    # まとまりが出る位置 (= 残した時点で最後にあった発言とそのターンの知覚の
+    # 直後) と一致させるため (persist_realtime_and_recall.md §4.1)。出すものが
+    # 何も無いターンはまとまり自体を作らない。
+    if persist_mode:
+        recall_injected = bool(
+            recall_result is not None and recall_result.injected and recall_result.block
+        )
+        turn_msg = build_turn_realtime_and_recall_message(
+            persist_realtime_msg,
+            recall_result.block if recall_injected else None,
+            recall_result.recalled_keys if recall_injected else None,
+        )
+        if turn_msg is not None:
+            messages.append(turn_msg)
+            LOGGER.debug(
+                "[sea][prepare-context] appended this turn's realtime info / "
+                "auto recall at the end (persist_realtime_and_recall, %d chars)",
+                len(turn_msg["content"]),
+            )
 
     # ---- Token budget check ----
     return messages
@@ -907,6 +1094,12 @@ def list_presented_perception_blocks(
       なるので、提示が呼び出しごとに揺れることはない。台帳も確定文面も触らない。
       開き直した全文には束のメディアも添える (「絵がある」と読める全文に絵が
       付く — room_state_packages.md §5)。
+    - **残したリアルタイム情報と自動想起の行** (同じ表の ``kind =
+      'realtime_and_recall'`` — docs/intent/persist_realtime_and_recall.md
+      §4.3) は、``model_key`` のモデルが残す設定のときだけ、位置を決める発言が
+      ``recent`` にあるものだけを出す。文面は残したまま (縮み・開き直しを
+      当てない)、並びは :func:`merge_perception_blocks` が発言の直後に決める。
+      付記で下りるのは知覚のまとめと同じ。
     - **この関数は台帳へ一切書かない** (2026-09-09 以降)。読み取り専用の画面
       (context-status)・仮定の窓の下見 (読み戻し / 引き戻しのプレビュー)・
       コンテキストプレビューと、実際に送る側が同じ一枚を通る — 測る列と送る列が
@@ -934,6 +1127,11 @@ def list_presented_perception_blocks(
         from sai_memory.room_state import reopen_lost_bases
         from sea.head_pipeline.integration import resolve_default_model_key
         chronicle_enabled = _chronicle_enabled_for(runtime, persona)
+        # 残したリアルタイム情報と自動想起の行を送るのは、送り先のモデルが
+        # 残す設定のときだけ (persist_realtime_and_recall.md §4.3)。
+        persist_mode = persists_realtime_and_recall(persona, model_key)
+        # 残した行の id → 位置を決める発言の id (この列にあるものだけ)。
+        realtime_and_recall_anchors: Dict[int, str] = {}
         # 操作通知を下ろした境界は (persona, model) ごと — head と同じ単位で
         # 持つ (docs/intent/presented_context_reduction.md 設計 1)。だから
         # 同定キーは head と**同じ解決**を通す: 引数が無い呼び出し (プレビュー
@@ -992,12 +1190,19 @@ def list_presented_perception_blocks(
             found = list_unannexed_batches(sai_mem.conn)
             if not found:
                 return found
+            found = _select_realtime_and_recall_locked(found)
+            if not found:
+                return found
             predicate = _window_predicate_locked()
             if predicate is not None:
                 found = [b for b in found if predicate(b)]
+            # 縮み (操作通知・部屋の様子) は知覚のまとめにだけ当てる。残した
+            # リアルタイム情報と自動想起の行は送った文面のまま出す — 一字でも
+            # 変わると前回の送信と先頭が一致しなくなる。
+            perceptions = [b for b in found if not b.is_realtime_and_recall]
             try:
-                return reduce_presented_batches(
-                    sai_mem.conn, found, head_model_key,
+                reduced = reduce_presented_batches(
+                    sai_mem.conn, perceptions, head_model_key,
                 )
             except Exception:
                 # 縮みの適用の失敗は「縮めない」へ倒す。ここで送出すると外側の
@@ -1009,7 +1214,49 @@ def list_presented_perception_blocks(
                     "presenting the batches at full size this round",
                     exc_info=True,
                 )
+                reduced = perceptions
+            reduced_iter = iter(reduced)
+            return [
+                b if b.is_realtime_and_recall else next(reduced_iter)
+                for b in found
+            ]
+
+        def _select_realtime_and_recall_locked(found: List[Any]) -> List[Any]:
+            """残した行のうち、この列で送るものだけを残す (知覚のまとめは素通し)。
+
+            - 送り先のモデルが残す設定でなければ、残した行は一つも送らない。
+            - 位置を決める発言 (``boundary_created_at`` / ``boundary_rowid``) が
+              この列 (``recent``) に無ければ送らない — 別のスレッドで残した行、
+              窓の外の行を出さない (persist_realtime_and_recall.md §4.3)。
+              発言の id はここで台帳から引き、ブロックに載せて並べる側
+              (:func:`merge_perception_blocks`) へ渡す。
+
+            **呼び出し側が ``sai_mem._db_lock`` を保持している前提**。
+            """
+            if not any(b.is_realtime_and_recall for b in found):
                 return found
+            if not persist_mode:
+                return [b for b in found if not b.is_realtime_and_recall]
+            recent_ids = {
+                str(m.get("id")) for m in recent
+                if isinstance(m, dict) and m.get("id")
+            }
+            kept: List[Any] = []
+            for b in found:
+                if not b.is_realtime_and_recall:
+                    kept.append(b)
+                    continue
+                if b.boundary_created_at is None or b.boundary_rowid is None:
+                    continue
+                row = sai_mem.conn.execute(
+                    "SELECT id FROM messages WHERE rowid = ? AND created_at = ?",
+                    (int(b.boundary_rowid), int(b.boundary_created_at)),
+                ).fetchone()
+                if row is None or str(row[0]) not in recent_ids:
+                    continue
+                realtime_and_recall_anchors[int(b.id)] = str(row[0])
+                kept.append(b)
+            return kept
 
         # 候補・境界・省略件数の数え上げは**一つのロック区間**で完結させる
         # (2026-09-05 Codex 第二巡 high)。ここを二区間に割ると、別スレッドの
@@ -1034,8 +1281,11 @@ def list_presented_perception_blocks(
         # 窓絞り (Chronicle 無効) の境界は台帳へ書けないので、そこで土台が抜けた
         # 差分はここで全文へ開き直す (純関数・決定論)。台帳側の回復 (付記と同一
         # tx の restore_room_state_bases) が済んでいる回は空。
-        # 値は (開き直し後の文面, 添え直すメディア)。
-        reopened = reopen_lost_bases(presented)
+        # 値は (開き直し後の文面, 添え直すメディア)。残した行は部屋の様子を
+        # 持たないので渡さない。
+        reopened = reopen_lost_bases(
+            [b for b in presented if not b.is_realtime_and_recall]
+        )
 
         blocks: List[Dict[str, Any]] = []
         if dropped:
@@ -1050,6 +1300,13 @@ def list_presented_perception_blocks(
                 records=sum(record_counts.get(b.id, 1) for b in dropped),
             ))
         for batch in presented:
+            if batch.is_realtime_and_recall:
+                block = _realtime_and_recall_block(
+                    batch, realtime_and_recall_anchors.get(int(batch.id)),
+                )
+                if block is not None:
+                    blocks.append(block)
+                continue
             metadata: Dict[str, Any] = {
                 # 旧 flush の event_message 行と同型のタグ + マージ由来の目印。
                 "tags": ["internal", "event_message", "perception"],
@@ -1108,6 +1365,98 @@ def list_presented_perception_blocks(
         return []
 
 
+def _realtime_and_recall_block(
+    batch: Any, boundary_message_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """残したリアルタイム情報と自動想起の行を、送る列のブロックにする。
+
+    文面は残した ``rendered_text`` を**包み直さずそのまま**出す — 送ったときの
+    ``content`` そのものなので、一字でも変えると前回の送信と先頭が一致しなく
+    なる (persist_realtime_and_recall.md 不変条件 1)。
+
+    目印は知覚のブロックと同じ ``CONSUMED_PERCEPTION_KEY`` (勘定と退場計画には
+    知覚と同じに参加する) に加えて、知覚とは別の
+    :data:`PERSISTED_REALTIME_AND_RECALL_KEY` (自動想起のきっかけと反射判断の
+    観察から外す — §4.5)。``__realtime_context__`` は付けない (リアルタイム
+    スペルの結果の追記先にならないように)。画像は枚数の上限の数に入れない
+    (§4.2)。位置を決める発言の id が無いものは出さない。
+    """
+    if not boundary_message_id:
+        return None
+    media = batch.media_list()
+    content = batch.rendered_text or ""
+    if not content.strip() and not media:
+        return None
+    metadata: Dict[str, Any] = {
+        "tags": ["internal", "event_message", "realtime_and_recall"],
+        CONSUMED_PERCEPTION_KEY: True,
+        PERSISTED_REALTIME_AND_RECALL_KEY: True,
+        ATTACHMENT_LIMIT_EXEMPT_KEY: True,
+        "__perception_batch_id__": int(batch.id),
+        REALTIME_AND_RECALL_BOUNDARY_ID_KEY: str(boundary_message_id),
+        REALTIME_AND_RECALL_RECALLED_KEY: [
+            [st, sid] for st, sid in batch.recalled_keys()
+        ],
+    }
+    if media:
+        metadata["media"] = media
+    return {
+        "role": "user",
+        "content": content,
+        "created_at": batch.consumed_at,
+        "metadata": metadata,
+    }
+
+
+def _block_batch_id(msg: Dict[str, Any]) -> int:
+    """ブロックの台帳 id (省略の印など id を持たないものは 0)。"""
+    meta = msg.get("metadata") if isinstance(msg, dict) else None
+    try:
+        return int((meta or {}).get("__perception_batch_id__") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _place_realtime_and_recall_blocks(
+    merged: List[Dict[str, Any]], anchored: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """残した行を、位置を決める発言の直後に置く (merge_perception_blocks の後段)。
+
+    位置は時刻の秒ではなく発言で決める (persist_realtime_and_recall.md §4.3 —
+    最新の発言と返事のすき間という狭い位置に入るので、秒の丸めで前後が
+    入れ替わる余地がある)。発言の直後に既に並んでいるブロックのうち、自分より
+    台帳 id の小さいもの (その発言の後ろに並ぶ、自分より先に確定した知覚の
+    まとめや残した行) の後ろに入る — 同じ発言の直後に並ぶもの同士は表の id の
+    順。発言が列に無ければ置かない (送らない)。
+    """
+    out = list(merged)
+    for block in sorted(anchored, key=_block_batch_id):
+        boundary_id = str(
+            (block.get("metadata") or {}).get(REALTIME_AND_RECALL_BOUNDARY_ID_KEY) or ""
+        )
+        if not boundary_id:
+            continue
+        idx = None
+        for i, msg in enumerate(out):
+            if is_injected_perception(msg):
+                continue
+            if str(msg.get("id") or "") == boundary_id:
+                idx = i
+                break
+        if idx is None:
+            continue
+        own = _block_batch_id(block)
+        pos = idx + 1
+        while (
+            pos < len(out)
+            and is_injected_perception(out[pos])
+            and _block_batch_id(out[pos]) < own
+        ):
+            pos += 1
+        out.insert(pos, block)
+    return out
+
+
 def merge_perception_blocks(
     recent: Sequence[Dict[str, Any]], blocks: Sequence[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -1116,20 +1465,28 @@ def merge_perception_blocks(
     ブロックは「自分の ``consumed_at`` 以下の生ログ」の直後に入る (同時刻なら
     生ログが先 — 消費は書き込みの後に起きた事実)。送る側と測る側が**同じ並び**
     を見るための一点。
+
+    残したリアルタイム情報と自動想起の行
+    (:data:`PERSISTED_REALTIME_AND_RECALL_KEY`) だけは時刻ではなく位置を決める
+    発言で並べる (:func:`_place_realtime_and_recall_blocks`)。
     """
+    epoch_blocks = [b for b in blocks if not is_persisted_realtime_and_recall(b)]
+    anchored = [b for b in blocks if is_persisted_realtime_and_recall(b)]
     merged: List[Dict[str, Any]] = []
     bi = 0
     for msg in recent:
         epoch = _payload_epoch(msg)
         while (
-            bi < len(blocks)
+            bi < len(epoch_blocks)
             and epoch is not None
-            and blocks[bi]["created_at"] < epoch
+            and epoch_blocks[bi]["created_at"] < epoch
         ):
-            merged.append(blocks[bi])
+            merged.append(epoch_blocks[bi])
             bi += 1
         merged.append(msg)
-    merged.extend(blocks[bi:])
+    merged.extend(epoch_blocks[bi:])
+    if anchored:
+        merged = _place_realtime_and_recall_blocks(merged, anchored)
     return merged
 
 
@@ -1167,7 +1524,8 @@ def _maybe_inject_auto_recall(
     *,
     pulse_type: Optional[str],
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-) -> None:
+    persist_mode: bool = False,
+) -> Optional[Any]:
     """自動想起ブロックを組み立て、履歴末尾 (最新 user 入力の直前) に注入する。
 
     記憶アーキv2 §4。スコープは CONVERSATION アスペクトのみ (§4.6)。注入発生時は
@@ -1176,6 +1534,18 @@ def _maybe_inject_auto_recall(
     反射判断が時間内に答えず従来方式へ戻ったターンでは、同じ event_callback へ
     ``reflex_fallback`` イベントを 1 回流す。こちらは**画面に出すだけ**で、どこにも
     保存しない (docs/intent/reflex_judgment.md 経緯 2026-09-21)。
+
+    ``persist_mode`` (リアルタイム情報と自動想起を残すモデル —
+    docs/intent/persist_realtime_and_recall.md §4.4) のときは:
+
+    - いま送る列にある残した行に入っている記憶を、候補を集める段階で外す
+      (``run_auto_recall`` の ``exclude_keys``)。
+    - 出すのは新しく浮かんだ記憶だけ (``new_only``)。粘着の台帳から出し直さない。
+    - ここでは差し込まない。呼び出し元 (:func:`prepare_context`) がリアルタイム
+      情報とまとめて送る列の一番後ろに置く。画面のイベントと state への持ち帰り
+      は、差し込んだのと同じ「新しく浮かんだ分」で流す。
+
+    Returns: 実行した回の ``AutoRecallResult`` (走らなかった回は None)。
     """
     from sea.pulse_context import Aspect, aspect_from_pulse_type
 
@@ -1185,7 +1555,7 @@ def _maybe_inject_auto_recall(
             "[sea][auto_recall] skip: aspect=%s (pulse_type=%s) is not CONVERSATION",
             aspect.value, pulse_type,
         )
-        return
+        return None
 
     # ペルソナ単位 ON/OFF トグル (AUTO_RECALL_ENABLED)。OFF のときは注入せず、
     # 粘着台帳もリセットする (再度 ON にしたとき古い記憶を引きずらないため)。
@@ -1198,7 +1568,7 @@ def _maybe_inject_auto_recall(
         if persona_id_for_gate:
             from sea.auto_recall import reset_ledger
             reset_ledger(persona_id_for_gate)
-        return
+        return None
 
     sai_mem = getattr(persona, "sai_memory", None)
     conn = getattr(sai_mem, "conn", None) if sai_mem else None
@@ -1209,7 +1579,7 @@ def _maybe_inject_auto_recall(
             "[sea][auto_recall] skip: persona_id/conn/embedder unavailable (persona=%s)",
             persona_id,
         )
-        return
+        return None
 
     # 粘着台帳のキー用 canonical thread_id (2026-07-12 監査 P1: thread 跨ぎ防止)。
     # メインライン履歴の読み書きと同じ解決 (_thread_id(None) = active thread または
@@ -1230,7 +1600,7 @@ def _maybe_inject_auto_recall(
             "[sea][auto_recall] skip: canonical thread_id unavailable (persona=%s)",
             persona_id,
         )
-        return
+        return None
 
     # ペルソナ単位の「自動想起を強化する」スイッチ (AUTO_RECALL_ENHANCED)。
     # run_auto_recall は persona_id 文字列しか受けないので、persona オブジェクトを
@@ -1263,10 +1633,21 @@ def _maybe_inject_auto_recall(
 
     from sea.auto_recall import run_auto_recall
 
+    # 残すモデル: いま送る列にある残した行に入っている記憶を、候補を集める段階で
+    # 外す (persist_realtime_and_recall.md §4.4)。OFF では引数を渡さない
+    # (従来の呼び出しのまま)。
+    persist_kwargs: Dict[str, Any] = {}
+    if persist_mode:
+        persist_kwargs = {
+            "exclude_keys": _presented_recalled_keys(messages),
+            "new_only": True,
+        }
+
     result = run_auto_recall(
         conn, embedder, messages,
         persona_id=persona_id, thread_id=thread_id, enhanced=enhanced,
         reflex_model_key=reflex_model_key,
+        **persist_kwargs,
     )
 
     # 反射判断が時間内に答えず従来方式へ戻ったターンは、そのことを画面に出す。
@@ -1288,37 +1669,44 @@ def _maybe_inject_auto_recall(
             LOGGER.debug("[sea][auto_recall] reflex_fallback event_callback failed", exc_info=True)
 
     if not result.injected or not result.block:
-        return
+        return result
 
-    recall_msg = {
-        "role": "user",
-        "content": result.block,
-        "metadata": {"__auto_recall__": True},
-    }
-
-    # realtime_context と同じ挿入面: 最新 user メッセージの直前に入れる
-    # (cached_head_architecture C5 と同じ末尾注入面)。auto_recall メタ付きの
-    # 自己メッセージは対象外にして冪等にする。
-    last_user_idx = None
-    for i in range(len(messages) - 1, -1, -1):
-        m = messages[i]
-        if m.get("role") != "user":
-            continue
-        meta = m.get("metadata") or {}
-        if meta.get("__auto_recall__") or meta.get("__realtime_context__"):
-            continue
-        last_user_idx = i
-        break
-
-    if last_user_idx is not None:
-        messages.insert(last_user_idx, recall_msg)
+    if persist_mode:
+        # 差し込みは呼び出し元がリアルタイム情報とまとめて一番後ろに置く。
+        LOGGER.debug(
+            "[sea][auto_recall] newly surfaced %d memory(ies) for the persisted "
+            "turn block (%d chars)", len(result.recalled_keys), result.char_count,
+        )
     else:
-        messages.append(recall_msg)
+        recall_msg = {
+            "role": "user",
+            "content": result.block,
+            "metadata": {"__auto_recall__": True},
+        }
 
-    LOGGER.debug(
-        "[sea][auto_recall] injected block before last user (idx=%s, %d chars)",
-        last_user_idx, result.char_count,
-    )
+        # realtime_context と同じ挿入面: 最新 user メッセージの直前に入れる
+        # (cached_head_architecture C5 と同じ末尾注入面)。auto_recall メタ付きの
+        # 自己メッセージは対象外にして冪等にする。
+        last_user_idx = None
+        for i in range(len(messages) - 1, -1, -1):
+            m = messages[i]
+            if m.get("role") != "user":
+                continue
+            meta = m.get("metadata") or {}
+            if meta.get("__auto_recall__") or meta.get("__realtime_context__"):
+                continue
+            last_user_idx = i
+            break
+
+        if last_user_idx is not None:
+            messages.insert(last_user_idx, recall_msg)
+        else:
+            messages.append(recall_msg)
+
+        LOGGER.debug(
+            "[sea][auto_recall] injected block before last user (idx=%s, %d chars)",
+            last_user_idx, result.char_count,
+        )
 
     if event_callback:
         try:
@@ -1343,6 +1731,26 @@ def _maybe_inject_auto_recall(
     # LLM コンテキストには載らない (推論と同じ扱い。metadata は llm_clients 側で
     # 読まれるのは media 系キーのみ)。
     persona._pending_auto_recall_text = result.plain_text
+    return result
+
+
+def _presented_recalled_keys(messages: Sequence[Dict[str, Any]]) -> set:
+    """送る列にある「残した行」に入っている自動想起の ``(source_type, source_id)``。
+
+    残すモデルの自動想起が候補を集める段階で外す集合
+    (docs/intent/persist_realtime_and_recall.md §4.4)。列に無い (Chronicle の
+    付記で外れた・位置を決める発言が無い) 残した行の記憶は含まない — その
+    記憶はペルソナの目に入っていないので、また浮かんでよい。
+    """
+    keys: set = set()
+    for msg in messages:
+        if not isinstance(msg, dict) or not is_persisted_realtime_and_recall(msg):
+            continue
+        recalled = (msg.get("metadata") or {}).get(REALTIME_AND_RECALL_RECALLED_KEY)
+        for item in recalled or []:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                keys.add((str(item[0]), str(item[1])))
+    return keys
 
 
 def _expand_recalled_ids(

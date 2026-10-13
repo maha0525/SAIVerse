@@ -1519,7 +1519,7 @@ class GeminiClient(LLMClient):
         boundary_msg_idx: Optional[int] = None
         content_starts: List[int] = []
         contents: List[types.Content] = []
-        from .utils import parse_attachment_limit
+        from .utils import is_attachment_limit_exempt, parse_attachment_limit
         max_image_embeds = parse_attachment_limit("GEMINI")
         logging.debug(
             "[gemini] attachment limit=%s",
@@ -1545,7 +1545,9 @@ class GeminiClient(LLMClient):
             if metadata.get(CACHE_BOUNDARY_METADATA_KEY):
                 boundary_msg_idx = idx
             # Check for visual context marker - these are exempt from limits
-            if metadata.get("__visual_context__"):
+            # (同じく枚数の上限から外れる、残したリアルタイム情報と自動想起の
+            # 行も含む — llm_clients/utils.is_attachment_limit_exempt)
+            if is_attachment_limit_exempt(metadata):
                 exempt_message_indices.add(idx)
             # Per-media skip flags (set by media_summary module to avoid recursion)
             if metadata.get("__skip_image_summary__"):

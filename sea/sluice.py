@@ -440,9 +440,11 @@ class _MediaRules(NamedTuple):
     """
 
     #: 直近の画像を何枚まで埋め込むか (None = 無制限)。枠は新しいメッセージから
-    #: 順に埋まる。``__visual_context__`` のメッセージの画像は枠を使わず、常に
-    #: 枠の内側 (llm_clients/utils.py の compute_allowed_attachment_keys と、同じ
-    #: 規則を持つ gemini.py の _convert_messages)。
+    #: 順に埋まる。``__visual_context__`` のメッセージ (と、残したリアルタイム
+    #: 情報と自動想起の行 — llm_clients/utils.is_attachment_limit_exempt) の画像は
+    #: 枠を使わず、常に枠の内側 (llm_clients/utils.py の
+    #: compute_allowed_attachment_keys と、同じ規則を持つ gemini.py の
+    #: _convert_messages)。
     image_limit: Optional[int]
     #: 画像が枠を使う役割。
     image_limit_roles: FrozenSet[str]
@@ -736,9 +738,12 @@ def _estimate_input_tokens(
         if not isinstance(metadata, dict):
             continue
         role = _role_class(msg.get("role"))
+        # 枠を使わないメッセージの判定はクライアントと同じ一枚
+        # (``__visual_context__`` と、残したリアルタイム情報と自動想起の行)。
+        from llm_clients.utils import is_attachment_limit_exempt
         uses_slots = (
             role in rules.image_limit_roles
-            and not metadata.get("__visual_context__")
+            and not is_attachment_limit_exempt(metadata)
         )
         images = _metadata_media_items(metadata, "image") if counts_images else []
         for item in images:

@@ -1241,7 +1241,10 @@ def run_absorption(
     壊れていることに誰も気づけない)。
     """
     from sai_memory.arasuji.generator import generate_level1_arasuji
-    from sai_memory.perception_buffer import list_batches_annexed_to
+    from sai_memory.perception_buffer import (
+        batch_material_item,
+        list_batches_annexed_to,
+    )
 
     result = AbsorptionResult()
     items = list(plan.items) if plan is not None else []
@@ -1346,9 +1349,11 @@ def run_absorption(
                             raise  # ロック等は fail-closed (Codex 二巡 R3)
                         batches = []  # 知覚台帳の無い DB (旧テスト等)
                     old_batches[entry.id] = batches
+                    # 材料の形は付記 (executor.collect_annex_items) と同じ
+                    # 一枚を通す。
                     extra_items.extend(
-                        {"at": int(b.consumed_at), "text": b.rendered_text}
-                        for b in batches
+                        item for item in (batch_material_item(b) for b in batches)
+                        if item is not None
                     )
                 extra_items.sort(key=lambda x: x["at"])
         if missing:

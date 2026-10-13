@@ -555,6 +555,47 @@ class TestRunAbsorption:
         # 完了 — 未完了の印は立っていない
         assert not is_repair_incomplete(conn)
 
+    def test_kept_realtime_and_recall_rows_reach_the_merge_prompt_with_labels(
+        self, adapter,
+    ):
+        """隣人の材料だった「残したリアルタイム情報と自動想起の行」は、付記と
+        同じラベル付きで合体の材料になる (docs/intent/persist_realtime_and_recall.md
+        §4.3 — 三つの読み手は batch_material_item の一枚を通る)。"""
+        from sai_memory.perception_buffer import (
+            insert_realtime_and_recall_batch,
+            mark_batches_annexed,
+        )
+
+        conn = adapter.conn
+        _add_message(adapter, 0, 100)
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        entry = _entry(conn, [n1, n2], start_min=10, end_min=11)
+        recall_id = insert_realtime_and_recall_batch(
+            conn, consumed_at=_epoch(10),
+            rendered_text="<system>ふと浮かんだ記憶:\n- 灯台の思い出</system>",
+            recalled_keys=[("memopedia", "p1")],
+        )
+        notice_id = insert_realtime_and_recall_batch(
+            conn, consumed_at=_epoch(11),
+            rendered_text="<system>\n## リアルタイム情報\n- 現在時刻: 10:11\n</system>",
+        )
+        mark_batches_annexed(conn, [recall_id, notice_id], entry.id)
+        conn.commit()
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        plan = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        client = _Client()
+        result = run_absorption(conn, client, plan)
+
+        assert len(result.merged_entries) == 1
+        merge_prompt = next(p for p in client.prompts if "統合対象の材料" not in p)
+        assert "【想起 (過去の再提示)】: ふと浮かんだ記憶:" in merge_prompt
+        assert "【通知】: ## リアルタイム情報" in merge_prompt
+        assert "<system>" not in merge_prompt
+
     def test_multiple_holes_in_one_neighbor_merge_in_one_pass(self, adapter):
         """span 内に穴が複数ある隣人は、1 回の run_absorption で 1 個の合体
         エントリになる (再実行の繰り返しと同範囲の LLM 作り直しを出さない)。"""

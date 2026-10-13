@@ -88,6 +88,31 @@ def merge_reasoning_strings(chunks: List[str]) -> List[Dict[str, str]]:
 
 DEFAULT_ATTACHMENT_LIMIT = 4
 
+#: このメッセージの画像は、送る画像の枚数の上限の数に入れない (常に埋め込む)
+#: という印 (metadata のキー)。``__visual_context__`` (head の視覚メッセージ)
+#: とは意味が別なので印も別にしてある — ``__visual_context__`` はプレビューの
+#: 節分けや自動想起の除外にも使われる「head の視覚」という意味を持つ。
+#: こちらを付けるのは、リアルタイム情報と自動想起を残して送り続けるモデル
+#: (docs/intent/persist_realtime_and_recall.md §4.2) の、残した行とそのターンの
+#: まとまり。数に入れると、残した画像が増えるたびに一番古い画像が文字に
+#: 置き換わり、そこから後ろが毎ターン前回の送信と一致しなくなる。
+ATTACHMENT_LIMIT_EXEMPT_KEY = "__attachment_limit_exempt__"
+
+
+def is_attachment_limit_exempt(metadata: Any) -> bool:
+    """このメッセージの画像が枚数の上限の数から外れるか (全プロバイダ共通の判定)。
+
+    ``__visual_context__`` (head の視覚メッセージ) と
+    :data:`ATTACHMENT_LIMIT_EXEMPT_KEY` の付いたメッセージが対象。各クライアント
+    と送る量の見積もり (sea/sluice.py) はこの一枚で判定する。
+    """
+    if not isinstance(metadata, dict):
+        return False
+    return bool(
+        metadata.get("__visual_context__")
+        or metadata.get(ATTACHMENT_LIMIT_EXEMPT_KEY)
+    )
+
 
 def parse_attachment_limit(provider: str = "") -> int:
     """Parse image attachment embed limit from environment variables.

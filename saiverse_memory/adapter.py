@@ -937,6 +937,80 @@ class SAIMemoryAdapter:
             return None
         return {"content": f"<system>{text}</system>", "media": media}
 
+    def record_realtime_and_recall(
+        self,
+        *,
+        content: str,
+        media: Optional[list] = None,
+        recalled_keys: Optional[list] = None,
+        boundary_message_ids: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """そのターンのリアルタイム情報と自動想起を、送った文面のまま一行残す。
+
+        docs/intent/persist_realtime_and_recall.md §4.2。書き先は知覚のまとめと
+        同じ ``perception_batches`` (種類 ``realtime_and_recall``)。知覚の消費とは
+        別のトランザクションで、台帳の項目には触れない。
+
+        ``boundary_message_ids`` は、送った列でこのまとまりより前にあった発言の
+        id を**新しい順**に並べたもの。台帳に実在する最初の一件の正典順序キー
+        ``(created_at, rowid)`` を位置の境界として記帳する — 次のターン以降、
+        この行はその発言の直後に出て、その発言が送る列に無いときは送られない
+        (§4.3)。境界は「送った列の最後の発言」で決める: 書く時点で台帳の最後に
+        ある行 (判断のパルスの捨てられる記録・別のスレッドの行など、送る列に
+        出ない行) を境界にすると、次のターンにその行が列に無いので、残した行が
+        二度と送られなくなる。
+
+        Returns: 書いた行の id (書けなかったら None)。
+        """
+        if not self._ready:
+            return None
+        from sai_memory.perception_buffer import insert_realtime_and_recall_batch
+        try:
+            with self._db_lock:
+                # 一ターン一行の二重の守り: 呼び出し側はまとまりの印で二度目を
+                # 止めているが、印の付いた辞書が写しに置き換わる経路があっても、
+                # 同じパルスの行が既にあれば書かない。
+                if pulse_id:
+                    existing = self.conn.execute(
+                        "SELECT id FROM perception_batches "
+                        "WHERE kind = 'realtime_and_recall' AND pulse_id = ? "
+                        "ORDER BY id LIMIT 1",
+                        (str(pulse_id),),
+                    ).fetchone()
+                    if existing is not None:
+                        return int(existing[0])
+                boundary_created_at: Optional[int] = None
+                boundary_rowid: Optional[int] = None
+                for mid in boundary_message_ids or []:
+                    row = self.conn.execute(
+                        "SELECT created_at, rowid FROM messages WHERE id = ?",
+                        (str(mid),),
+                    ).fetchone()
+                    if row is not None and row[0] is not None:
+                        boundary_created_at, boundary_rowid = int(row[0]), int(row[1])
+                        break
+                return insert_realtime_and_recall_batch(
+                    self.conn,
+                    consumed_at=int(time.time()),
+                    rendered_text=content,
+                    media=media,
+                    recalled_keys=recalled_keys,
+                    pulse_id=pulse_id,
+                    boundary_created_at=boundary_created_at,
+                    boundary_rowid=boundary_rowid,
+                )
+        except Exception:
+            LOGGER.warning(
+                "[perception_buffer] could not record this turn's realtime info / "
+                "auto recall (persona=%s)", self.persona_id, exc_info=True,
+            )
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            return None
+
     # ------------------------------------------------------------------
     # 実行台帳の配送口 (Execution Ledger outbox delivery)
     # docs/intent/execution_ledger.md §2.2 / 不変条件 3 —

@@ -33,6 +33,7 @@ from .utils import (
     compute_allowed_attachment_keys,
     content_to_text,
     image_summary_note,
+    is_attachment_limit_exempt,
     merge_reasoning_strings,
     parse_attachment_limit,
 )
@@ -141,7 +142,7 @@ def _build_xai_messages(
         if not isinstance(msg, dict):
             continue
         metadata = msg.get("metadata")
-        if isinstance(metadata, dict) and metadata.get("__visual_context__"):
+        if is_attachment_limit_exempt(metadata):
             exempt_indices.add(idx)
         media_items = iter_image_media(metadata)
         if media_items:

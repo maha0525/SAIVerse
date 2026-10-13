@@ -300,6 +300,27 @@ def _message_kind_label(msg: Message) -> str:
     return ""
 
 
+def _extra_item_label(item: dict, text: str) -> str:
+    """追加材料 (知覚のバッチ等) 1 項目のラベル。
+
+    項目が ``label`` を持っていればそれに従う — リアルタイム情報と自動想起を
+    残した行 (sai_memory/perception_buffer.batch_material_item) は、想起を
+    含むものが ``"recall"``、含まないものが ``"notice"`` で来る
+    (docs/intent/persist_realtime_and_recall.md §4.3)。無ければ従来どおり
+    本文から決める (``[想起:`` で始まれば想起、それ以外は知覚)。
+    """
+    from sai_memory.perception_buffer import (
+        MATERIAL_LABEL_NOTICE,
+        MATERIAL_LABEL_RECALL,
+    )
+    label = item.get("label")
+    if label == MATERIAL_LABEL_RECALL:
+        return _LABEL_RECALL
+    if label == MATERIAL_LABEL_NOTICE:
+        return _LABEL_NOTICE
+    return _LABEL_RECALL if _is_recall_text(text) else _LABEL_PERCEPTION
+
+
 def has_recall_material(
     messages: List[Message],
     extra_items: Optional[List[dict]] = None,
@@ -309,7 +330,8 @@ def has_recall_material(
         if _is_recall_text(msg.content or ""):
             return True
     for item in extra_items or []:
-        if _is_recall_text(str(item.get("text") or "")):
+        text = str(item.get("text") or "")
+        if _extra_item_label(item, text) == _LABEL_RECALL:
             return True
     return False
 
@@ -339,6 +361,7 @@ def _format_messages_for_prompt(
             差し込む (同秒はメッセージが先 — 消費は書き込みの後に起きた事実)。
             本文が ``[想起:`` で始まる項目は【想起 (過去の再提示)】、それ以外は
             【知覚】とラベルし、長さ規則 (MECHANISM_TEXT_MAX_CHARS) を適用する。
+            項目が ``label`` を持つときはそれに従う (:func:`_extra_item_label`)。
     """
     entries: List[tuple] = []  # (at, tie, seq, line)
     for seq, msg in enumerate(messages):
@@ -359,7 +382,7 @@ def _format_messages_for_prompt(
         text = str(item.get("text") or "").strip()
         if not text:
             continue
-        label = _LABEL_RECALL if _is_recall_text(text) else _LABEL_PERCEPTION
+        label = _extra_item_label(item, text)
         if len(text) > MECHANISM_TEXT_MAX_CHARS:
             text = condense_mechanism_text(text)
         at = int(item.get("at") or 0)
