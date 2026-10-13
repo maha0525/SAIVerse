@@ -138,26 +138,14 @@ function ParamControl({
                 />
             );
 
-        case 'number': {
-            const num = typeof current === 'number' ? current : Number(current ?? schema.min ?? 0);
+        case 'number':
             return (
-                <input
-                    type="number"
-                    className={styles.numberInput}
-                    value={num}
-                    min={schema.min}
-                    max={schema.max}
-                    step={schema.step ?? 1}
-                    placeholder={schema.placeholder ?? ''}
-                    onChange={(e) => {
-                        const v = schema.value_type === 'int'
-                            ? parseInt(e.target.value, 10)
-                            : parseFloat(e.target.value);
-                        onChange(schema.key, isNaN(v) ? schema.default : v);
-                    }}
+                <NumberParamControl
+                    schema={schema}
+                    value={current}
+                    onChange={onChange}
                 />
             );
-        }
 
         case 'dropdown':
             return (
@@ -218,6 +206,104 @@ function ParamControl({
         default:
             return <span data-i18n="components.AddonManagerModal.text001" className={styles.unsupported}>{uiText("components.AddonManagerModal.text001", { p1: schema.type })}</span>;
     }
+}
+
+// ---------------------------------------------------------------------------
+// NumberParamControl — 数値入力 (int / float)
+//
+// 入力中に即座に親 state を更新して NaN を default に戻してしまうと、
+// "1" を消して "2" を打とうとした瞬間に空欄が禁止されて "1" が復活する
+// (文字が消せない) バグになる。編集中はローカルの文字列状態を保持し、
+// フォーカスが離れたとき (onBlur) や Enter 押下時にパースと clamp を行い、
+// 親 state を確定させる。
+// ---------------------------------------------------------------------------
+
+function NumberParamControl({
+    schema,
+    value,
+    onChange,
+}: {
+    schema: AddonParamSchema;
+    value: unknown;
+    onChange: (key: string, val: unknown) => void;
+}) {
+    const fallbackValue = typeof schema.default === 'number'
+        ? schema.default
+        : (schema.min ?? 0);
+
+    const formatInitial = (v: unknown): string => {
+        if (typeof v === 'number' && !isNaN(v)) return String(v);
+        if (v !== undefined && v !== null && v !== '') {
+            const n = Number(v);
+            if (!isNaN(n)) return String(n);
+        }
+        return String(fallbackValue);
+    };
+
+    const [textValue, setTextValue] = useState<string>(() => formatInitial(value));
+    const isFocusedRef = useRef(false);
+
+    useEffect(() => {
+        if (!isFocusedRef.current) {
+            setTextValue(formatInitial(value));
+        }
+    }, [value, fallbackValue]);
+
+    const commitValue = (raw: string) => {
+        const trimmed = raw.trim();
+        if (trimmed === '') {
+            setTextValue(String(fallbackValue));
+            onChange(schema.key, fallbackValue);
+            return;
+        }
+
+        let parsed = schema.value_type === 'int'
+            ? parseInt(trimmed, 10)
+            : parseFloat(trimmed);
+
+        if (isNaN(parsed)) {
+            setTextValue(String(fallbackValue));
+            onChange(schema.key, fallbackValue);
+            return;
+        }
+
+        if (schema.min !== undefined && parsed < schema.min) {
+            parsed = schema.min;
+        }
+        if (schema.max !== undefined && parsed > schema.max) {
+            parsed = schema.max;
+        }
+
+        setTextValue(String(parsed));
+        onChange(schema.key, parsed);
+    };
+
+    return (
+        <input
+            type="number"
+            className={styles.numberInput}
+            value={textValue}
+            min={schema.min}
+            max={schema.max}
+            step={schema.step ?? (schema.value_type === 'int' ? 1 : 0.05)}
+            placeholder={schema.placeholder ?? String(fallbackValue)}
+            onFocus={() => {
+                isFocusedRef.current = true;
+            }}
+            onChange={(e) => {
+                setTextValue(e.target.value);
+            }}
+            onBlur={(e) => {
+                isFocusedRef.current = false;
+                commitValue(e.target.value);
+            }}
+            onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                    e.currentTarget.blur();
+                }
+            }}
+        />
+    );
 }
 
 // ---------------------------------------------------------------------------
