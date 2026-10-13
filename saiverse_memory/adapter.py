@@ -712,8 +712,11 @@ class SAIMemoryAdapter:
             return None
         from sai_memory.perception_buffer import batch_in_window
         from sai_memory.room_state import reseat_current_room
-        try:
-            with self._db_lock:
+        # rollback まで錠前の内側 (record_realtime_and_recall と同じ理由 —
+        # 錠前の外の rollback は、共有接続で別のスレッドが始めた未確定の
+        # 書き込みを巻き戻す)。
+        with self._db_lock:
+            try:
                 window_key = self._window_key_locked(anchor_id, floor_chars)
                 in_window = (
                     (lambda b: batch_in_window(b, window_key))
@@ -725,16 +728,16 @@ class SAIMemoryAdapter:
                 if batch_id is not None:
                     self.conn.commit()
                 return batch_id
-        except Exception:
-            try:
-                self.conn.rollback()
             except Exception:
-                pass
-            LOGGER.warning(
-                "[room_state] could not reseat the current room; the next "
-                "detection will retry", exc_info=True,
-            )
-            return None
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                LOGGER.warning(
+                    "[room_state] could not reseat the current room; the next "
+                    "detection will retry", exc_info=True,
+                )
+                return None
 
     def count_pending_perceptions(self, kind: str) -> Optional[int]:
         """未消費の知覚バッファにある指定 kind の件数。
@@ -967,8 +970,11 @@ class SAIMemoryAdapter:
         if not self._ready:
             return None
         from sai_memory.perception_buffer import insert_realtime_and_recall_batch
-        try:
-            with self._db_lock:
+        # 失敗時の rollback まで同じ錠前の内側で行う (Codex 二巡目 #1)。錠前を
+        # 手放してから共有接続を rollback すると、その間に別のスレッドが同じ
+        # 接続で始めた未確定の書き込みまで巻き戻して消してしまう。
+        with self._db_lock:
+            try:
                 # 一ターン一行の二重の守り: 呼び出し側はまとまりの印で二度目を
                 # 止めているが、印の付いた辞書が写しに置き換わる経路があっても、
                 # 同じパルスの行が既にあれば書かない。
@@ -1001,16 +1007,17 @@ class SAIMemoryAdapter:
                     boundary_created_at=boundary_created_at,
                     boundary_rowid=boundary_rowid,
                 )
-        except Exception:
-            LOGGER.warning(
-                "[perception_buffer] could not record this turn's realtime info / "
-                "auto recall (persona=%s)", self.persona_id, exc_info=True,
-            )
-            try:
-                self.conn.rollback()
             except Exception:
-                pass
-            return None
+                LOGGER.warning(
+                    "[perception_buffer] could not record this turn's realtime "
+                    "info / auto recall (persona=%s)", self.persona_id,
+                    exc_info=True,
+                )
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                return None
 
     # ------------------------------------------------------------------
     # 実行台帳の配送口 (Execution Ledger outbox delivery)

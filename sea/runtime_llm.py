@@ -486,6 +486,38 @@ def _freeze_turn_block_before_send(messages: Any) -> None:
         )
 
 
+def _round_message_for_next_call(state: Any, assistant_content: str) -> Dict[str, Any]:
+    """スペルの繰り返しで、この周の発言を次の呼び出しの列へ積む形。
+
+    既定は今までどおり assistant ロールの発言のまま。リアルタイム情報と自動想起を
+    残すモデルの列で、この周の発言が自律 (AUTONOMOUS アスペクト) のラインの
+    ものなら、次のターンの履歴の復元 (:func:`sea.runtime_context.
+    _reframe_autonomous_messages` — 自律の発言を user ロールの自律記録に変える)
+    と同じロール・本文に正規化する (Codex 二巡目 #4)。そうしないと、このターンの
+    最後の呼び出しの列と次のターンの最初の呼び出しの列で、この周の発言の形が
+    違い、そこから先の前方一致が割れる (不変条件 1)。
+
+    記録に保存する元の発言は変えない (_store_memory には assistant_content を
+    そのまま渡す)。アスペクトは _store_memory が記録に刻むのと同じ出所
+    (PulseContext の今のライン) から読む。OFF のモデルの列は変えない
+    (不変条件 2)。
+    """
+    message: Dict[str, Any] = {"role": "assistant", "content": assistant_content}
+    if not isinstance(state, dict) or not state.get("_persist_realtime_and_recall"):
+        return message
+    pulse_ctx = state.get("_pulse_context")
+    try:
+        aspect = pulse_ctx.current_line_metadata().get("aspect") if pulse_ctx else None
+    except AttributeError:
+        aspect = None
+    if aspect != "autonomous":
+        return message
+    from sea.runtime_context import _reframe_autonomous_messages
+
+    message["metadata"] = {"aspect": aspect}
+    return _reframe_autonomous_messages([message])[0]
+
+
 def _note_generation_completed(runtime: Any, persona: Any, state: Any) -> None:
     """生成が正常に完了した (本文または tool call を得た) と確かめた地点の一点。
 
@@ -497,8 +529,32 @@ def _note_generation_completed(runtime: Any, persona: Any, state: Any) -> None:
 
     いまここで行うのは、そのターンのリアルタイム情報と自動想起の保存
     (docs/intent/persist_realtime_and_recall.md §4.2)。
+
+    停止の確認もこの一点で行う (Codex 二巡目 #2)。全文一括の経路
+    (通常・tools 付き・構造化出力・スペルの繰り返し) は、生成の途中で止められても
+    応答を受け取り終えてから戻ってくるので、本文があることだけでは「止められて
+    いない」ことにならない。ユーザーが止めていたら (その経路が参照する停止の印 =
+    ``state["_cancellation_token"]``。ストリーミングの経路の停止もこの印から
+    読む) 正常な完了とは数えず、保存も保存の書き直しもしない
+    (:func:`_generation_was_stopped`)。印を読むのは、保存待ちのまとまりがあって
+    実際に書く直前だけ — 書くものが無い生成 (OFF のモデル・保存済みのターン) で
+    停止の印を読みに行くと、停止の評価点が増えて OFF のモデルの止まり方まで
+    変わる (不変条件 2)。
     """
     _persist_turn_realtime_and_recall(runtime, persona, state)
+
+
+def _generation_was_stopped(persona: Any, state: Any) -> bool:
+    """この生成の間にユーザーが止めたか (:func:`_note_generation_completed` の確認)。"""
+    token = state.get("_cancellation_token") if isinstance(state, dict) else None
+    if token is None or not token.is_cancelled():
+        return False
+    LOGGER.info(
+        "[sea][persist_realtime_and_recall] generation finished after the user "
+        "stopped it; not keeping this turn's block (persona=%s pulse=%s)",
+        getattr(persona, "persona_id", None), state.get("_pulse_id"),
+    )
+    return True
 
 
 def _persist_turn_realtime_and_recall(runtime: Any, persona: Any, state: Any) -> None:
@@ -557,6 +613,11 @@ def _persist_turn_realtime_and_recall(runtime: Any, persona: Any, state: Any) ->
         media = pending.get("media") if isinstance(pending.get("media"), list) else None
         if not content.strip() and not media:
             info["persisted"] = True
+            return
+        if _generation_was_stopped(persona, state):
+            # 止められた生成は正常な完了ではない — 保存も書き直しもしない
+            # (停止の印はパルスの終わりまで立ったままなので、このパルスでは
+            # 以後も書かない)。
             return
         sai_mem = getattr(persona, "sai_memory", None)
         recorder = getattr(sai_mem, "record_realtime_and_recall", None)
@@ -3656,7 +3717,9 @@ async def _run_spell_loop(
             all_spell_lines_normalized = "\n".join(line for _, line in _spell_line_entries)
             assistant_content = (text_before + "\n" + all_spell_lines_normalized
                                  + ("\n" + text_after if text_after else "")).strip()
-            messages.append({"role": "assistant", "content": assistant_content})
+            messages.append(
+                _round_message_for_next_call(state, assistant_content)
+            )
 
             # judgment (起動の意思決定) を spell 実行の「前」に SAIMemory へ記録する。
             # run_playbook 等の spell は子ラインを同期実行し、子ラインの各ノードが
@@ -4456,8 +4519,14 @@ async def _decide_spell_args_via_playbook(
         "_pulse_id": outer_state.get("_pulse_id"),
         # 同じ返事の中の仕事なので、返事の始まりに決めたモデルと接続を引き継ぐ
         "_model_binding": outer_state.get("_model_binding"),
-        # リアルタイムスペルの実行済みの印も引き継ぐ (同じ Pulse の中で二度
-        # 実行しない — docs/intent/persist_realtime_and_recall.md §4.1)。
+        # リアルタイム情報と自動想起を残すモデルの列なら、リアルタイムスペルの
+        # 器 (実行済みの状態と結果) を引き継ぐ (同じ Pulse の中で一度だけ実行し、
+        # 実行しなかった側にも同じ結果を届ける — docs/intent/
+        # persist_realtime_and_recall.md §4.1)。OFF のモデルでは器が無く、
+        # 今までどおり (子が自分で実行する)。
+        "_persist_realtime_and_recall": bool(
+            outer_state.get("_persist_realtime_and_recall", False)
+        ),
         "_realtime_spells_once": outer_state.get("_realtime_spells_once"),
         "_realtime_spells_executed": bool(outer_state.get("_realtime_spells_executed")),
     }
@@ -4749,8 +4818,10 @@ async def _execute_realtime_spells(
     (:func:`_persist_turn_realtime_and_recall`)。このとき結果は SAIMemory の
     ``perception_batches`` に入り、次のターン以降も同じ位置に送られる。もう
     送ったまとまりには足さない (別の末尾のメッセージに置き、保存しない)。
-    実行は同じ Pulse の中で一度だけ (子の Playbook と実行済みの印を共有する —
-    lg_llm_node の ``_realtime_spells_once``)。
+    実行は同じ Pulse の中で一度だけで、結果 (本文と画像) を器
+    (``state["_realtime_spells_once"]``) に残す — 実行しなかった親・子の列には
+    lg_llm_node が :func:`_deliver_realtime_spell_result` で同じ結果を届ける。
+    OFF のモデルの列には器が無く、今までどおり Playbook ごとに実行する。
     """
     messages = state.get("_messages")
     if not isinstance(messages, list):
@@ -4838,7 +4909,78 @@ async def _execute_realtime_spells(
         return
 
     new_content = "\n".join(f"- {s}" for s in result_sections)
+    # 器へ結果を残す (残すモデルの列だけ — 器は OFF の列には無い)。実行しなかった
+    # 側へ届ける写しなので、ここで置く辞書とは共有しない。
+    once = state.get("_realtime_spells_once")
+    if isinstance(once, dict):
+        once["result"] = {
+            "content": new_content,
+            "media": [dict(m) if isinstance(m, dict) else m for m in aggregated_media],
+        }
+    _place_realtime_spell_result(state, messages, new_content, aggregated_media)
+    LOGGER.debug("[sea][realtime_spells] Injected %d result(s) into realtime context", len(result_sections))
 
+
+def _deliver_realtime_spell_result(state: dict) -> None:
+    """同じ Pulse の別の Playbook が実行したリアルタイムスペルの結果を、この列に届ける。
+
+    docs/intent/persist_realtime_and_recall.md §4.1。残すモデルの列だけで呼ぶ
+    (器 ``state["_realtime_spells_once"]`` を持つのはその列だけ)。置き方は
+    実行した側と同じ一枚 (:func:`_place_realtime_spell_result`) — そのターンの
+    まとまりに入れ、まとまりが無ければ一番後ろに作り、もう送ったまとまりには
+    足さない。
+
+    この Pulse が残した行 (実行した側が先に生成を終えて保存したもの) が既に
+    この列にあるときは届けない — 結果はその行に入っていて、二度並べることになる
+    (文脈を組み直す子が、親の保存の後に走ったとき)。
+    """
+    messages = state.get("_messages")
+    if not isinstance(messages, list):
+        return
+    once = state.get("_realtime_spells_once")
+    result = once.get("result") if isinstance(once, dict) else None
+    if not isinstance(result, dict):
+        return
+    new_content = str(result.get("content") or "")
+    media = [
+        dict(m) if isinstance(m, dict) else m for m in (result.get("media") or [])
+    ]
+    if not new_content and not media:
+        return
+    pulse_id = state.get("_pulse_id")
+    if pulse_id:
+        from sea.runtime_context import REALTIME_AND_RECALL_PULSE_ID_KEY
+
+        for msg in messages:
+            meta = msg.get("metadata") if isinstance(msg, dict) else None
+            if isinstance(meta, dict) and meta.get(
+                REALTIME_AND_RECALL_PULSE_ID_KEY
+            ) == str(pulse_id):
+                LOGGER.debug(
+                    "[sea][realtime_spells] this pulse's kept block is already in "
+                    "the list; not delivering the realtime spell results again",
+                )
+                return
+    _place_realtime_spell_result(state, messages, new_content, media)
+    LOGGER.debug(
+        "[sea][realtime_spells] delivered the realtime spell results of this pulse "
+        "(executed by another playbook) into this list",
+    )
+
+
+def _place_realtime_spell_result(
+    state: dict,
+    messages: List[Dict[str, Any]],
+    new_content: str,
+    aggregated_media: List[Dict[str, Any]],
+) -> None:
+    """リアルタイムスペルの結果 (本文の行と画像) を送る列に置く。
+
+    実行した側 (:func:`_execute_realtime_spells`) と、届けを受ける側
+    (:func:`_deliver_realtime_spell_result`) が同じこの一枚を通る — 置き方が
+    二通りあると、同じ結果が送信ごとに違う文面になる。
+    """
+    persona_id = getattr(state.get("_persona_obj"), "persona_id", None)
     # リアルタイム情報と自動想起を残すモデル (docs/intent/persist_realtime_and_recall.md
     # §4.1): 結果はそのターンのまとまりに足す。まとまりが無ければ送る列の
     # 一番後ろに作る (最新の発言の直前ではない)。
@@ -4854,10 +4996,11 @@ async def _execute_realtime_spells(
         if add_realtime_spell_lines_to_turn_message(messages[turn_idx], new_content):
             target_msg = messages[turn_idx]
         else:
-            # もう LLM へ送ったまとまりは不変 (§4.1)。ここへ来るのは、実行済みの
-            # 印を引き継がない経路でスペルが二度目に走ったときだけのはず —
-            # 結果は別の末尾のメッセージに置き、保存しない (まとまりの印を
-            # 付けないので、保存の対象にも次の追記先にもならない)。
+            # もう LLM へ送ったまとまりは不変 (§4.1)。実行と届けは列の最初の
+            # LLM ノードの送信より前に済むので、ここへ来るのは器を引き継がない
+            # 経路でスペルが送信の後に走ったときだけのはず — 結果は別の末尾の
+            # メッセージに置き、保存しない (まとまりの印を付けないので、保存の
+            # 対象にも次の追記先にもならない)。
             LOGGER.warning(
                 "[sea][realtime_spells] this turn's block was already sent; "
                 "placing the results in a separate trailing message that is "
@@ -4932,8 +5075,6 @@ async def _execute_realtime_spells(
             len(aggregated_media),
         )
 
-    LOGGER.debug("[sea][realtime_spells] Injected %d result(s) into realtime context", len(result_sections))
-
 
 def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
     async def node(state: dict):
@@ -4982,22 +5123,25 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         # Runs at most once per Pulse (gated by _realtime_spells_executed), and only
         # when the persona's spell system is enabled — SPELL_ENABLED=false must stop
         # this auto-execution path too, not just LLM-invoked spells (Spell 監査 P1).
-        # 実行済みの印は子の Playbook と共有する (同じ Pulse の中で二度実行しない —
-        # docs/intent/persist_realtime_and_recall.md §4.1)。``_realtime_spells_once``
-        # は Pulse の頭で作られ、子へ参照のまま引き継がれる器
-        # (sea/runtime_graph.compile_with_langgraph)。
-        _rt_once = state.get("_realtime_spells_once")
-        _rt_done = bool(state.get("_realtime_spells_executed")) or (
-            isinstance(_rt_once, dict) and bool(_rt_once.get("executed"))
-        )
-        if state.get("_spell_enabled") and not _rt_done:
+        # リアルタイム情報と自動想起を残すモデルの列では、実行済みの状態と結果を
+        # 子の Playbook と器 (``_realtime_spells_once`` — Pulse の頭で作られ、子へ
+        # 参照のまま引き継がれる。sea/runtime_graph.compile_with_langgraph) で
+        # 共有する: 同じ Pulse の中で一度だけ実行し、実行しなかった側 (親・子、
+        # 実行順は問わない) には同じ結果をそのターンのまとまりに入れて届ける
+        # (docs/intent/persist_realtime_and_recall.md §4.1)。OFF のモデルの列には
+        # 器が無く、今までどおり Playbook ごとに実行する。
+        if state.get("_spell_enabled") and not state.get("_realtime_spells_executed"):
             state["_realtime_spells_executed"] = True
-            if isinstance(_rt_once, dict):
-                _rt_once["executed"] = True
+            _rt_once = state.get("_realtime_spells_once")
             try:
-                await _execute_realtime_spells(
-                    runtime, persona, building_id, state, event_callback,
-                )
+                if isinstance(_rt_once, dict) and _rt_once.get("executed"):
+                    _deliver_realtime_spell_result(state)
+                else:
+                    if isinstance(_rt_once, dict):
+                        _rt_once["executed"] = True
+                    await _execute_realtime_spells(
+                        runtime, persona, building_id, state, event_callback,
+                    )
             except Exception:
                 LOGGER.exception("[sea][realtime_spells] Realtime spell execution failed; continuing")
 

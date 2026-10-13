@@ -23,6 +23,7 @@ from __future__ import annotations
 import copy
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -71,8 +72,11 @@ class _FakeLLM(LLMClient):
         self.tool_dict = False
         #: 次のストリームの後に一度だけ返す「サーバーが切った」申告 (504 等)。
         self.stream_error: Optional[Dict[str, Any]] = None
-        #: ストリームの最初の chunk の後でユーザーが止める (CancellationToken)。
+        #: ユーザーが止める (CancellationToken)。ストリームでは最初の chunk の後、
+        #: 全文一括では応答を返す直前 (生成の途中で止められた) に止める。
         self.cancel_token = None
+        #: 何回目の呼び出しで止めるか (1 始まり。スペルの繰り返しの周で止める用)。
+        self.cancel_at_call = 1
 
     def _next_text(self, messages) -> str:
         self.calls.append(copy.deepcopy(list(messages)))
@@ -83,8 +87,17 @@ class _FakeLLM(LLMClient):
             return self.script.pop(0)
         return f"返事{len(self.calls)}です。"
 
+    def _maybe_cancel(self) -> None:
+        if self.cancel_token is not None and len(self.calls) >= self.cancel_at_call:
+            self.cancel_token.cancel()
+
     def generate(self, messages, tools=None, temperature=None, response_schema=None, **kwargs):
         text = self._next_text(messages)
+        # 全文一括の経路でも、生成の途中でユーザーが止めることはある — 応答は
+        # 受け取り終えてから戻ってくる。
+        self._maybe_cancel()
+        if response_schema is not None:
+            return {"answer": text}
         if self.tool_dict:
             return {"type": "text", "content": text}
         return text
@@ -95,8 +108,7 @@ class _FakeLLM(LLMClient):
             return
         half = max(1, len(text) // 2)
         yield text[:half]
-        if self.cancel_token is not None:
-            self.cancel_token.cancel()
+        self._maybe_cancel()
         yield text[half:]
 
     def consume_stream_error(self):
@@ -210,7 +222,7 @@ def env(request, tmp_path, monkeypatch):
             model=ON_MODEL,
             lightweight_model=ON_MODEL,
             context_length=200_000,
-            timezone=__import__("datetime").timezone.utc,
+            timezone=timezone.utc,
             execution_state={},
         )
 
@@ -303,8 +315,15 @@ def _run_turn(
     from sea.pulse_context import aspect_from_pulse_type
 
     if user_text is not None:
+        # 発言の時刻は ``time.time()`` から刻む。本番では HistoryManager が
+        # ``datetime.now()`` で刻み、返事などの他の行は ``time.time()`` で刻む —
+        # どちらも同じ実時計なので、後から保存した行が前の行より古い時刻を
+        # 持つことはない。テストが ``patch("time.time")`` で時計を止めたとき、
+        # 発言だけが実時計のまま進むと、次の発言がその返事より新しい秒を持つ
+        # (返事が発言の前に並ぶ) という本番では起きない並びができてしまう。
+        stamp = datetime.fromtimestamp(time.time(), timezone.utc).isoformat()
         env.persona.history_manager.add_to_persona_only(
-            {"role": "user", "content": user_text},
+            {"role": "user", "content": user_text, "timestamp": stamp},
         )
     env.adapter.flush_perception_buffer()
     before = len(env.llm.calls)
@@ -572,6 +591,56 @@ class TestPrefixInvariantOnTheRealPath:
         sent_history = turn2[0][2:-1]
         assert _sent(measured)[: len(sent_history)] == _sent(sent_history)
 
+    def test_room_reseat_stays_at_the_front(self, env):
+        """部屋の様子の機構の置き直しは、境界 (可視性の判定用) ではなく最古に
+        した consumed_at で先頭に置く — ON のモデルの送る側でも測る側でも、
+        最新の発言の直後へ移らない (Codex 二巡目 #5)。"""
+        from sea.session_lifecycle import SessionLifecycle
+
+        bundle = {
+            "building_id": BUILDING_ID, "building_name": "工房",
+            "packages": [{
+                "key": "item:1", "family": "item", "label": "[item:1] 覚え書き",
+                "lines": ["[item:1] 覚え書き"], "media": [], "state": "open",
+            }],
+        }
+        base = time.time()
+        with patch("time.time", return_value=base):
+            _run_turn(env, "一つ目。")
+        with patch("time.time", return_value=base + 100):
+            _run_turn(env, "二つ目。")
+        with patch("time.time", return_value=base + 200):
+            assert env.adapter.reseat_room_state(bundle) is not None
+        with patch("time.time", return_value=base + 300):
+            turn3 = _run_turn(env, "三つ目。")
+
+        def _reseat_index(msgs):
+            idx = [
+                i for i, m in enumerate(msgs)
+                if (m.get("metadata") or {}).get("__room_state__")
+            ]
+            assert len(idx) == 1
+            return idx[0]
+
+        sent = turn3[0]
+        contents = [m.get("content") for m in sent]
+        i_reseat = _reseat_index(sent)
+        assert "工房" in sent[i_reseat]["content"]
+        assert i_reseat < contents.index("一つ目。")
+
+        recent = env.persona.history_manager.get_recent_history(
+            100_000, required_line_roles=["main_line"], required_scopes=["committed"],
+        )
+        lifecycle = SessionLifecycle(runtime=env.runtime, manager_ref=env.runtime.manager)
+        measured = lifecycle.presented_with_perceptions(
+            env.persona, recent, model_key=ON_MODEL,
+        )
+        measured_contents = [m.get("content") for m in measured]
+        assert _reseat_index(measured) < measured_contents.index("一つ目。")
+        # 測る側と送る側は同じ並び (送った列の履歴部分が測った列の先頭)
+        sent_history = sent[2:-1]
+        assert _sent(measured)[: len(sent_history)] == _sent(sent_history)
+
     def test_auto_pulse_without_user_utterance(self, env):
         turn0 = _run_turn(env, "こんにちは。")
         turn1 = _run_turn(env, None, pulse_type="auto")
@@ -579,6 +648,34 @@ class TestPrefixInvariantOnTheRealPath:
         _assert_turn_prefix(turn0, turn1)
         _assert_turn_prefix(turn1, turn2)
         assert len(_kept_rows(env)) == 3
+
+    def test_auto_pulse_with_spell_loop(self, env):
+        """自律パルスのスペルの繰り返し — 周内の発言は、次のターンの履歴の復元
+        (自律の発言を user ロールの自律記録にする) と同じ形で送る。最後の呼び出しの
+        列が次のターンの最初の呼び出しの列の先頭と一致する (SAIVerse の列と Gemini
+        の送信形式の両方。Codex 二巡目 #4)。保存する元の発言は assistant のまま。"""
+        turn0 = _run_turn(env, "こんにちは。")
+        env.llm.script = [
+            f"散歩のメモを残そう。\n/spell name='{LOOP_SPELL}' args={{}}",
+            "メモした。",
+        ]
+        turn1 = _run_turn(env, None, pulse_type="auto")
+        assert len(turn1) == 2
+        round_msg = next(
+            m for m in turn1[-1] if "散歩のメモを残そう。" in str(m.get("content"))
+        )
+        assert round_msg["role"] == "user"
+        assert round_msg["content"].startswith("<system>[自律行動の記録]")
+        turn2 = _run_turn(env, "おかえり。")
+        _assert_turn_prefix(turn0, turn1)
+        _assert_turn_prefix(turn1, turn2)
+        _assert_gemini_prefix(turn1[-1], turn2[0])
+        # 記録に残る元の発言は assistant ロールのまま (変換は送るときだけ)
+        with env.adapter._db_lock:
+            stored = env.adapter.conn.execute(
+                "SELECT role FROM messages WHERE content LIKE '散歩のメモを残そう。%'"
+            ).fetchall()
+        assert [r[0] for r in stored] == ["assistant"]
 
 
 # ---------------------------------------------------------------------------
@@ -680,13 +777,14 @@ class TestNotKeptWithoutCompletedGeneration:
         assert _kept_rows(env) == []
 
     def test_user_stop(self, env, node, monkeypatch):
+        """ストリームの途中・全文一括の生成の途中で止められたターン (全文一括は
+        Codex 二巡目 #2 — 本文を得たことだけを成功と見ていた)。"""
         from sea.cancellation import CancellationToken
 
-        if not _is_streaming(env):
-            pytest.skip("全文一括の経路には、送ってから返事を受け取るまでの停止が無い")
         playbook = self._setup(env, node, monkeypatch)
         token = CancellationToken()
-        env.llm.cancel_token = token  # ストリームの最初の chunk の後で止める
+        # ストリームは最初の chunk の後、全文一括は応答が戻る直前に止める
+        env.llm.cancel_token = token
         env.llm.script = ["止められた返事の途中までです。"]
         self._run(env, playbook, cancellation_token=token)
         assert len(env.llm.calls) == 1  # 送ってから止まった
@@ -699,6 +797,75 @@ class TestNotKeptWithoutCompletedGeneration:
         rows = _kept_rows(env)
         assert len(rows) == 1
         assert rows[0][2] == turn[0][-1]["content"]
+
+
+def _structured_playbook():
+    return _custom_playbook([{
+        "id": "main_line_response", "type": "llm", "action": None,
+        "speak": False, "memorize": False,
+        "response_schema": {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        },
+        "output_key": "decision", "next": None,
+    }], name="track_user_conversation_structured")
+
+
+class TestStopDuringFullTextGeneration:
+    """全文一括の経路で生成の途中に止められたら、保存も保存の書き直しもしない
+    (Codex 二巡目 #2)。通常・tools 付きは TestNotKeptWithoutCompletedGeneration
+    の test_user_stop (sync) が受け持つ。ここは構造化出力とスペルの繰り返し。"""
+
+    @pytest.mark.parametrize("env", [True, False], indirect=True, ids=["stream", "sync"])
+    def test_structured_output(self, env):
+        from sea.cancellation import CancellationToken
+
+        token = CancellationToken()
+        env.llm.cancel_token = token
+        try:
+            _run_turn(env, "決めて。", playbook=_structured_playbook(),
+                      cancellation_token=token)
+        except Exception:
+            pass
+        assert len(env.llm.calls) == 1  # 構造化出力は全文一括で送った
+        assert _kept_rows(env) == []
+
+    @pytest.mark.parametrize("env", [True, False], indirect=True, ids=["stream", "sync"])
+    def test_structured_output_completed_is_kept(self, env):
+        """対照: 止められなかった構造化出力のターンは残す。"""
+        turn = _run_turn(env, "決めて。", playbook=_structured_playbook())
+        rows = _kept_rows(env)
+        assert len(rows) == 1
+        assert rows[0][2] == turn[0][-1]["content"]
+
+    @pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
+    def test_spell_retry_stopped_does_not_rewrite(self, env, monkeypatch):
+        """最初の周の保存が失敗し、スペルの後の続き (全文一括) が止められた —
+        書き直しは止められた後に走らない。"""
+        from sea.cancellation import CancellationToken
+
+        attempts: List[Dict[str, Any]] = []
+
+        def _failing(**kwargs):
+            attempts.append(kwargs)
+            return None
+
+        monkeypatch.setattr(env.adapter, "record_realtime_and_recall", _failing)
+        token = CancellationToken()
+        env.llm.cancel_token = token
+        env.llm.cancel_at_call = 2  # 続きの生成の途中で止める
+        env.llm.script = [
+            f"メモしておく。\n/spell name='{LOOP_SPELL}' args={{}}",
+            "メモしたよ。",
+        ]
+        try:
+            _run_turn(env, "これ覚えておいて。", cancellation_token=token)
+        except Exception:
+            pass
+        assert len(env.llm.calls) == 2
+        assert len(attempts) == 1  # 最初の周の完了での一回だけ
+        assert _kept_rows(env) == []
 
 
 def _is_streaming(env) -> bool:
@@ -821,14 +988,14 @@ def _child_playbook():
     }], name="child_pb")
 
 
-def _parent_with_child(order: str):
+def _parent_with_child(order: str, line: str = "sub"):
     talk = {
         "id": "talk", "type": "llm", "action": None, "speak": True,
         "memorize": True, "metadata_key": "metadata",
         "output_keys": [{"text": "speak_content"}], "next": None,
     }
     child = {
-        "id": "child", "type": "subplay", "playbook": "child_pb", "line": "sub",
+        "id": "child", "type": "subplay", "playbook": "child_pb", "line": line,
         "next": None,
     }
     if order == "parent_first":
@@ -838,11 +1005,12 @@ def _parent_with_child(order: str):
     return _custom_playbook([child, talk], name="parent_pb")
 
 
-@pytest.mark.parametrize("order", ["parent_first", "child_first"])
-def test_child_playbook_does_not_rerun_or_mutate_the_parent_block(env, monkeypatch, order):
-    """子 Playbook (親の列を写して動くサブライン) は、リアルタイムスペルを
-    二度実行せず、親が送ったまとまり (と保存待ちの写し) を書き換えない
-    (Codex 一巡目 #2)。"""
+#: リアルタイムスペルの結果の行 (送る列の中で、結果を運んでいるメッセージの目印)。
+_SPELL_LINE = "視界: 目の前の光景を見た。"
+
+
+def _run_parent_with_child(env, monkeypatch, order: str, line: str):
+    """親と子の Playbook を一ターン走らせ、(親の送信, 子の送信, スペルの実行回数) を返す。"""
     from sea import runtime_llm
 
     _bind_realtime_spell(env)
@@ -861,28 +1029,82 @@ def test_child_playbook_does_not_rerun_or_mutate_the_parent_block(env, monkeypat
             _child_playbook() if name == "child_pb" else real_load(name, persona, building_id)
         ),
     )
-    turn1 = _run_turn(env, "外の様子はどう?", playbook=_parent_with_child(order))
-
-    assert spell_calls.count(REALTIME_SPELL) == 1
+    turn1 = _run_turn(env, "外の様子はどう?", playbook=_parent_with_child(order, line))
     assert len(turn1) == 2
     parent_call = turn1[0] if order == "parent_first" else turn1[1]
     child_call = turn1[1] if order == "parent_first" else turn1[0]
-    parent_block = parent_call[-1]
-    assert parent_block["content"].count("視界: 目の前の光景を見た。") == 1
-    child_blocks = [
-        m for m in child_call if "## リアルタイム情報" in str(m.get("content"))
-    ]
-    assert len(child_blocks) == 1
-    if order == "parent_first":
-        # 子は親が送ったままのまとまりを見る (追記なし)
-        assert child_blocks[0]["content"] == parent_block["content"]
-    else:
-        # 親の列を写した子は自分では実行しない — 親の本体の返事が結果を受ける
-        assert "視界:" not in child_blocks[0]["content"]
+    return parent_call, child_call, spell_calls.count(REALTIME_SPELL)
+
+
+def _carriers(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """送る列の中で、リアルタイムスペルの結果を運んでいるメッセージ。"""
+    return [m for m in messages if _SPELL_LINE in str(m.get("content"))]
+
+
+@pytest.mark.parametrize("line", ["main", "sub"])
+@pytest.mark.parametrize("order", ["parent_first", "child_first"])
+def test_on_child_playbooks_get_the_same_realtime_spell_result(env, monkeypatch, order, line):
+    """ON のモデル: リアルタイムスペルは同じ Pulse の中で一度だけ実行し、その
+    結果 (本文と画像) を、文脈を組み直す子 (line='main') にも親の列を写す子
+    (line='sub') にも、親が先でも子が先でも、そのターンのまとまりに入れて届ける。
+    保存される一行と、パルスの中の各送信で結果を運ぶまとまりは同じ文面・画像
+    (Codex 二巡目 #3 — 一巡目の修正は実行済みの印だけを共有し、結果を渡して
+    いなかった)。"""
+    parent_call, child_call, spell_count = _run_parent_with_child(
+        env, monkeypatch, order, line,
+    )
+    assert spell_count == 1
     rows = _kept_rows(env)
-    assert [r[2] for r in rows] == [parent_block["content"]]
+    assert len(rows) == 1
+    saved_text = rows[0][2]
+    saved_media = [m.get("path") for m in json.loads(rows[0][3])]
+    assert _SPELL_LINE in saved_text
+    assert saved_media == [env.image_path]
+    for call in (parent_call, child_call):
+        carriers = _carriers(call)
+        assert len(carriers) == 1, [m.get("content") for m in carriers]
+        assert carriers[0]["content"] == saved_text
+        assert [
+            m.get("path") for m in (carriers[0].get("metadata") or {}).get("media") or []
+        ] == saved_media
+    # 親の送信のまとまりは列の一番後ろ (残した一行そのもの)
+    assert parent_call[-1]["content"] == saved_text
     turn2 = _run_turn(env, "ありがとう。")
     _assert_prefix(parent_call, turn2[0])
+
+
+@pytest.mark.parametrize("line", ["main", "sub"])
+@pytest.mark.parametrize("order", ["parent_first", "child_first"])
+def test_off_child_playbooks_run_realtime_spells_as_before(env, monkeypatch, order, line):
+    """OFF のモデル: 実行の仕方は一巡目の修正前 (9c8314cc) と同じ — 器を共有せず、
+    親も子も自分で実行する (不変条件 2)。各送信にはリアルタイムスペルの結果が
+    載り、何も残さない。
+
+    期待値は 9c8314cc の実装で同じ手順を走らせて取った送信の形 (結果を運ぶ
+    メッセージの数と、その中の結果の行の数):
+
+    - 親の列を写す子 (line='sub') は、リアルタイム情報のメッセージの辞書を親と
+      共有するので、後から実行した側の送信では結果の行が二つになる (既存の形)。
+    - 文脈を組み直す子 (line='main') は自分のメッセージを組むので、各一つ。
+    """
+    env.persona.model = OFF_MODEL
+    env.persona.lightweight_model = OFF_MODEL
+    parent_call, child_call, spell_count = _run_parent_with_child(
+        env, monkeypatch, order, line,
+    )
+    assert spell_count == 2
+    assert _kept_rows(env) == []
+    first_call, second_call = (
+        (parent_call, child_call) if order == "parent_first" else (child_call, parent_call)
+    )
+    for call, expected_lines in ((first_call, 1), (second_call, 1 if line == "main" else 2)):
+        carriers = _carriers(call)
+        assert len(carriers) == 1
+        assert carriers[0]["metadata"].get("__realtime_context__")
+        assert carriers[0]["content"].count(_SPELL_LINE) == expected_lines
+        # 今までどおり最新の発言の直前 (OFF の並び)
+        idx = call.index(carriers[0])
+        assert call[idx + 1]["content"] == "外の様子はどう?"
 
 
 # ---------------------------------------------------------------------------
@@ -906,6 +1128,26 @@ class TestOffModelAndSwitching:
         env.recall.hits = []
         turn2 = _run_turn(env, "続き。")
         assert any("海辺の町" in str(m.get("content")) for m in turn2[0])
+
+    def test_off_model_auto_spell_loop_keeps_the_assistant_line(self, env):
+        """OFF のモデルの自律パルスのスペルの繰り返しは今までどおり — 周内の
+        発言は assistant ロールのまま次の呼び出しへ積む (不変条件 2)。"""
+        env.persona.model = OFF_MODEL
+        env.persona.lightweight_model = OFF_MODEL
+        _run_turn(env, "こんにちは。")
+        env.llm.script = [
+            f"散歩のメモを残そう。\n/spell name='{LOOP_SPELL}' args={{}}",
+            "メモした。",
+        ]
+        turn1 = _run_turn(env, None, pulse_type="auto")
+        assert len(turn1) == 2
+        round_msg = next(
+            m for m in turn1[-1] if "散歩のメモを残そう。" in str(m.get("content"))
+        )
+        assert round_msg == {
+            "role": "assistant",
+            "content": f"散歩のメモを残そう。\n/spell name='{LOOP_SPELL}' args={{}}",
+        }
 
     def test_off_model_perceptions_stay_in_seconds_order(self, env):
         """知覚のまとめを境界の発言で並べるのは ON のモデルの送る列だけ。OFF の
@@ -1595,6 +1837,91 @@ class TestAttachmentLimit:
         counted_total = estimate(self._messages(tmp_path, exempt=False), "gemini-4-argon")
         # 枠を使わない画像が一枚増えて埋め込まれる分だけ多い
         assert exempt_total > counted_total
+
+
+@pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
+@pytest.mark.parametrize("writer", ["record_realtime_and_recall", "reseat_room_state"])
+def test_failed_write_rolls_back_inside_the_lock(env, monkeypatch, writer):
+    """保存に失敗したときの rollback は錠前の内側で行う — 錠前を手放した後に
+    共有接続を rollback すると、その隙に別のスレッドが同じ接続で始めた書き込み
+    (まだ commit していない) を消す (Codex 二巡目 #1)。
+
+    失敗の後始末の rollback の直前で別のスレッドに書き込みを始めさせ、rollback
+    の後に commit させる。錠前の内側で rollback していれば、別のスレッドは
+    錠前を待ってから書くので、その書き込みは生き残る。"""
+    import threading
+
+    if writer == "record_realtime_and_recall":
+        def _boom(*a, **k):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(
+            "sai_memory.perception_buffer.insert_realtime_and_recall_batch", _boom,
+        )
+
+        def _call():
+            return env.adapter.record_realtime_and_recall(
+                content="<system>x</system>", pulse_id="pulse-fail",
+            )
+    else:
+        def _boom(*a, **k):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr("sai_memory.room_state.reseat_current_room", _boom)
+
+        def _call():
+            return env.adapter.reseat_room_state({"building_id": BUILDING_ID})
+
+    real_conn = env.adapter.conn
+    started = threading.Event()
+    release = threading.Event()
+    other_errors: List[BaseException] = []
+
+    def _other_writer():
+        try:
+            with env.adapter._db_lock:
+                real_conn.execute(
+                    "INSERT INTO working_memory (persona_id, data, updated_at) "
+                    "VALUES ('other-writer', 'survives', 0)"
+                )
+                started.set()
+                release.wait(5)
+                real_conn.commit()
+        except BaseException as exc:  # pragma: no cover - 失敗の報告用
+            other_errors.append(exc)
+            started.set()
+
+    threads: List[threading.Thread] = []
+
+    class _ConnWithRollbackHook:
+        """共有接続そのもの。rollback の直前にだけ、別のスレッドを走らせる。"""
+
+        def __getattr__(self, name):
+            return getattr(real_conn, name)
+
+        def rollback(self):
+            if not threads:
+                t = threading.Thread(target=_other_writer)
+                threads.append(t)
+                t.start()
+                # 錠前を持ったままなら別のスレッドは書き始められない (待つだけ)。
+                # 錠前の外なら、ここで別のスレッドの未確定の書き込みが始まる。
+                started.wait(0.5)
+            return real_conn.rollback()
+
+    monkeypatch.setattr(env.adapter, "conn", _ConnWithRollbackHook())
+    assert _call() is None
+    monkeypatch.setattr(env.adapter, "conn", real_conn)
+    release.set()
+    for t in threads:
+        t.join(5)
+    assert threads, "失敗の後始末 (rollback) を通っていない"
+    assert not other_errors
+    with env.adapter._db_lock:
+        rows = env.adapter.conn.execute(
+            "SELECT data FROM working_memory WHERE persona_id = 'other-writer'"
+        ).fetchall()
+    assert rows == [("survives",)]
 
 
 @pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])

@@ -103,6 +103,11 @@ BOUNDARY_ANCHOR_ID_KEY = "__boundary_anchor_id__"
 #: 送る列に出す「残した行」のブロックが持つ、文面に入っている自動想起の
 #: ``[[source_type, source_id], ...]`` (次のターンの候補から外すのに使う)。
 REALTIME_AND_RECALL_RECALLED_KEY = "__realtime_and_recall_recalled__"
+#: 送る列に出す「残した行」のブロックが持つ、その行を残した Pulse の id。
+#: 同じ Pulse の中で文脈を組み直す子の Playbook が、親の残した行 (リアルタイム
+#: スペルの結果を含む) を既に見ているかを判定する
+#: (sea/runtime_llm._deliver_realtime_spell_result — 結果を二度並べない)。
+REALTIME_AND_RECALL_PULSE_ID_KEY = "__realtime_and_recall_pulse_id__"
 
 
 def persists_realtime_and_recall(persona: Any, model_key: Optional[str]) -> bool:
@@ -1480,12 +1485,21 @@ def _resolve_perception_anchors_locked(
     境界が NULL の古い行、境界より前に ``recent`` の発言が無い行は含めない
     (呼び出し側で従来の秒の比較に落ちる)。返り値はバッチ id → 発言の id。
 
+    部屋の様子の機構の置き直し (:func:`sai_memory.room_state.reseat_current_room`)
+    も含めない — その境界は窓の判定 (可視性) のための記帳で、位置は意図的に
+    最古にした ``consumed_at`` が決める (提示の先頭に置く)。境界で並べると、
+    背景が最新の発言の直後へ移ってしまう (Codex 二巡目 #5)。送る側と測る側は
+    この同じ関数を通るので、どちらでも先頭に残る。
+
     **呼び出し側が ``sai_mem._db_lock`` を保持している前提**。
     """
+    from sai_memory.room_state import batch_is_room_reseat
+
     targets = [
         b for b in presented
         if not b.is_realtime_and_recall and b.id is not None
         and b.boundary_created_at is not None and b.boundary_rowid is not None
+        and not batch_is_room_reseat(b.room_state_json)
     ]
     if not targets:
         return {}
@@ -1554,6 +1568,8 @@ def _realtime_and_recall_block(
             [st, sid] for st, sid in batch.recalled_keys()
         ],
     }
+    if batch.pulse_id:
+        metadata[REALTIME_AND_RECALL_PULSE_ID_KEY] = str(batch.pulse_id)
     if media:
         metadata["media"] = media
     return {
