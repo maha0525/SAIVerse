@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -113,59 +115,273 @@ REALTIME_AND_RECALL_PULSE_ID_KEY = "__realtime_and_recall_pulse_id__"
 HISTORY_TIME_ANCHOR_KEY = "__history_time_anchor__"
 
 
-def find_unrecorded_messages(
-    messages: Sequence[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """送る列のうち、記録に残らないメッセージ (次のターンの列に戻ってこないもの)。
+#: ``prepare_context`` が ``context_meta`` に置き、``run_playbook`` が state の
+#: :data:`FIRST_SEND_RECORD_SOURCE_KEY` へ移す、「ターンの最初の LLM 呼び出しの
+#: 直前に、送る列の後ろ側を記録から読み直す」ための材料
+#: (:class:`FirstSendRecordSource`)。リアルタイム情報と自動想起を残すモデルの
+#: 列でだけ置く (persist_realtime_and_recall.md §5「最初の呼び出しの前に足すもの」)。
+FIRST_SEND_RECORD_SOURCE_META_KEY = "first_send_record_source"
+#: state のキー (上の材料の運び先)。読むのは sea/runtime_llm の
+#: ``_align_first_send_with_record`` だけ。
+FIRST_SEND_RECORD_SOURCE_KEY = "_first_send_record_source"
 
-    persist_realtime_and_recall.md 不変条件 1 の機械検査
-    (sea/runtime_llm._check_first_send_is_recorded が、ON のモデルのターンの
-    最初の LLM 呼び出しを送る直前に呼ぶ)。ターンの最初の呼び出しで送った列は、
-    次のターンでは記録から組み直される — 記録に残らないメッセージが一つでも
-    あると、次のターンではその位置が別のもの (返事など) に置き換わり、そこから
-    後ろの前方一致が割れる。差し込み口を足すたびに印を一つずつ足す形では
-    付け漏れが繰り返し出た (Codex 四巡目・五巡目) ので、型ごと見つける。
 
-    次のターンにも同じ形で戻ってくる (= ここでは返さない) のは:
+@dataclass(frozen=True)
+class FirstSendRecordSource:
+    """送る列の「最後の記録済みの発言より後ろ」を記録から読み直す材料。
 
-    - ``id`` を持つもの — 記録に残ったメッセージ (履歴の発言・事前スペルや
-      最初の呼び出し前の TOOL の結果の記録)。
-    - head 由来 — system ロール (システムプロンプト・モデルごとの追加の指示)、
-      Memory Weave (``__memory_weave_context__``)、head の視覚
-      (``__visual_context__``)。
-    - 履歴の時刻の目安 (:data:`HISTORY_TIME_ANCHOR_KEY`)。
-    - 知覚のまとめ (``CONSUMED_PERCEPTION_KEY`` — 省略の印・部屋の様子の
-      置き直し・残したリアルタイム情報と自動想起の行を含む) と、残した行の印
-      (``PERSISTED_REALTIME_AND_RECALL_KEY``)。
-    - そのターンのまとまり (``TURN_REALTIME_AND_RECALL_KEY`` — 生成の完了後に
-      残る)。
-
-    それ以外 (id も上の印も持たないもの) を、列の順に返す。
+    - ``reread``: 次のターンの ``prepare_context`` が履歴を復元するのと同じ
+      取り出し・同じ変換 (:func:`_append_history`) で、いまの記録から履歴の
+      部分を組み直す (:func:`reread_recorded_history` を、組んだときの
+      建物・指定・モデルで束ねたもの)。失敗したら None。
+    - ``boundary_id``: ``prepare_context`` が組んだ履歴の部分で、最後に id を
+      持つ発言 (境界)。履歴に id を持つ発言が無ければ None。
+    - ``history_len``: ``prepare_context`` が組んだ履歴の部分の件数 (時刻の目安・
+      知覚のまとめを含む)。境界が None のとき、履歴の部分が空だったかを見分ける。
     """
+
+    reread: Callable[[], Optional[List[Dict[str, Any]]]]
+    boundary_id: Optional[str]
+    history_len: int
+
+
+def reread_recorded_history(
+    runtime: Any, persona: Any, building_id: str, reqs: Any,
+    model_key: Optional[str],
+) -> Optional[List[Dict[str, Any]]]:
+    """いまの記録から、次のターンの列の履歴の部分を組み直す (読むだけ)。
+
+    次のターンの ``prepare_context`` と同じ関数 (:func:`_append_history`) を
+    通す。次のターンと揃える点:
+
+    - ``pulse_id=None`` — 次のターンは別の Pulse なので、このパルスの行が
+      「同じ Pulse の行は線・範囲の篩を素通りする」上書き
+      (``_payload_passes_context_filter``) で入ることはない。
+    - ``pulse_type=None`` — 継続キャッシュの境目の内部印 (``mark_cache_boundary``)
+      を付けない。印は metadata だけで送る中身を変えず、次のターンに付くのは
+      このターンの返事以降の発言なので、読み直す範囲には現れない。
+    - 起点の前進を永続化しない (``persist_anchor_advance=False``)・
+      out-param を書かない (``context_meta=None``)・プレビューの下見を通らない。
+
+    リアルタイム情報・自動想起・head は組まない (読み直すのは履歴と知覚だけ —
+    自動想起を二度走らせない)。組み立てに失敗したら None。
+    """
+    out: List[Dict[str, Any]] = []
+    ok = _append_history(
+        runtime, persona, building_id, reqs, out,
+        pulse_id=None, preview_only=False, model_key=model_key,
+        context_meta=None, persist_anchor_advance=False,
+        pinned_anchor_id=None, pulse_type=None,
+    )
+    return out if ok else None
+
+
+def _is_head_message(msg: Any) -> bool:
+    """head 由来のメッセージ (システムプロンプト・Memory Weave・自分の外見)。"""
     from sea.head_pipeline.integration import (
         _MEMORY_WEAVE_CONTEXT_MARKER,
+        _SELF_VIEW_MARKER,
         _VISUAL_CONTEXT_MARKER,
     )
 
-    stable_marks = (
-        _MEMORY_WEAVE_CONTEXT_MARKER,
-        _VISUAL_CONTEXT_MARKER,
-        HISTORY_TIME_ANCHOR_KEY,
-        CONSUMED_PERCEPTION_KEY,
-        PERSISTED_REALTIME_AND_RECALL_KEY,
-        TURN_REALTIME_AND_RECALL_KEY,
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("role") == "system":
+        return True
+    meta = msg.get("metadata")
+    return isinstance(meta, dict) and any(
+        meta.get(k) for k in (
+            _MEMORY_WEAVE_CONTEXT_MARKER, _SELF_VIEW_MARKER, _VISUAL_CONTEXT_MARKER,
+        )
     )
-    unrecorded: List[Dict[str, Any]] = []
-    for msg in messages:
-        if not isinstance(msg, dict):
+
+
+def _record_key(msg: Any) -> Optional[tuple]:
+    """記録の同じ行を指す鍵 (発言の id / 知覚のまとめ・残した行の台帳 id)。"""
+    if not isinstance(msg, dict):
+        return None
+    if msg.get("id"):
+        return ("id", str(msg["id"]))
+    batch_id = _block_batch_id(msg)
+    if batch_id:
+        return ("batch", batch_id)
+    return None
+
+
+def _is_history_form(msg: Any) -> bool:
+    """履歴の組み立てだけが作る形 (知覚のまとめ・省略の印・残した行・時刻の目安)。"""
+    meta = msg.get("metadata") if isinstance(msg, dict) else None
+    return isinstance(meta, dict) and any(
+        meta.get(k) for k in (
+            CONSUMED_PERCEPTION_KEY, PERSISTED_REALTIME_AND_RECALL_KEY,
+            HISTORY_TIME_ANCHOR_KEY,
+        )
+    )
+
+
+def _recorded_region_start(
+    messages: Sequence[Dict[str, Any]], source: FirstSendRecordSource,
+) -> Optional[int]:
+    """送る列で、記録から読み直した並びに揃える部分 (境界の直後) の位置。
+
+    境界 (``prepare_context`` が組んだ履歴の最後の id を持つ発言) が列に無ければ
+    None。履歴の部分が空だった列は、head の直後から揃える。履歴の部分はあるのに
+    id を持つ発言が一つも無い列 (畳みの跡地だけ等) は、どこまでが組み直される
+    部分か決められないので None。
+    """
+    if source.boundary_id:
+        for idx, msg in enumerate(messages):
+            if is_injected_perception(msg):
+                continue
+            if isinstance(msg, dict) and str(msg.get("id") or "") == source.boundary_id:
+                return idx + 1
+        return None
+    if source.history_len:
+        return None
+    for idx, msg in enumerate(messages):
+        if not _is_head_message(msg):
+            return idx
+    return len(messages)
+
+
+def _recorded_tail(
+    recorded: Sequence[Dict[str, Any]], source: FirstSendRecordSource,
+) -> Optional[List[Dict[str, Any]]]:
+    """読み直した履歴のうち、境界より後ろ (境界が列に無ければ None)。"""
+    if not source.boundary_id:
+        return list(recorded)
+    for idx, msg in enumerate(recorded):
+        if is_injected_perception(msg):
             continue
-        if msg.get("id") or msg.get("role") == "system":
+        if isinstance(msg, dict) and str(msg.get("id") or "") == source.boundary_id:
+            return list(recorded[idx + 1:])
+    return None
+
+
+def _align_with_record(
+    messages: List[Dict[str, Any]], start: int, tail: Sequence[Dict[str, Any]],
+) -> None:
+    """``messages[start:]`` の記録済みの行を、読み直した並び ``tail`` に置き換える。
+
+    置き換えるのは、``tail`` に同じ行 (同じ発言の id・同じ台帳 id) があるものと、
+    履歴の組み立てだけが作る形 (知覚のまとめ・省略の印・時刻の目安 — 読み直しで
+    同じものが組み直される)。それ以外 (そのターンのまとまり、記録に残らない
+    差し込み、記録に書いたのに読み直しに出ない行) は、元の順のまま ``tail`` の
+    後ろに置く — そのターンのまとまりは記録済みの行より後ろ (列の一番後ろ側) に
+    なり、送った直前の固定 (:func:`freeze_turn_realtime_and_recall_for_send`)
+    が、その直前の記録済みの行を位置を決める発言にする。
+    """
+    tail_keys = {k for k in (_record_key(m) for m in tail) if k is not None}
+    keep = [
+        m for m in messages[start:]
+        if not (_is_history_form(m) or _record_key(m) in tail_keys)
+    ]
+    messages[start:] = list(tail) + keep
+
+
+def _sent_payload_key(msg: Dict[str, Any]) -> tuple:
+    """LLM へ届く中身の比較用の写し (役割・本文・画像・tool call)。"""
+    meta = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+    media = meta.get("media") if isinstance(meta.get("media"), list) else []
+    tool_calls = msg.get("tool_calls")
+    return (
+        msg.get("role"),
+        str(msg.get("content") or ""),
+        tuple(
+            (m.get("path"), m.get("mime_type")) for m in media if isinstance(m, dict)
+        ),
+        json.dumps(tool_calls, sort_keys=True, default=str) if tool_calls else None,
+    )
+
+
+#: :func:`find_unrecorded_messages` が返す食い違いの種類。
+NOT_KEPT = "not_kept"   # 送るのに、次のターンには記録から戻ってこない
+NOT_SENT = "not_sent"   # 記録にはあり次のターンに出るのに、送る列のその位置に無い
+
+
+def find_unrecorded_messages(
+    sent_after_boundary: Sequence[Dict[str, Any]],
+    recorded_after_boundary: Sequence[Dict[str, Any]],
+) -> List[tuple]:
+    """送る列の境界より後ろと、記録から読み直した並びの食い違い。
+
+    persist_realtime_and_recall.md 不変条件 1 の機械検査
+    (sea/runtime_llm._align_first_send_with_record が、ON のモデルのターンの
+    最初の LLM 呼び出しを送る直前に、記録に揃えた後で呼ぶ)。ターンの最初の
+    呼び出しで送った列の境界より後ろは、次のターンでは記録から組み直される。
+    だから、そのターンのまとまり (生成の完了後に残り、次のターンには同じ位置に
+    出る) を除いた並びが、読み直した並びと順序も文面も同じでなければならない。
+
+    返り値は ``(種類, メッセージ)`` の列。種類は :data:`NOT_KEPT` (送る列にだけ
+    ある — 記録に残らない差し込み) と :data:`NOT_SENT` (読み直した並びにだけ
+    ある — 記録に書かれたのに送る列のその位置に無い行)。空なら一致。
+    比べるのは LLM へ届く中身 (役割・本文・画像・tool call) で、metadata の
+    内部印は比べない。
+    """
+    import difflib
+
+    sent = [
+        m for m in sent_after_boundary
+        if isinstance(m, dict) and _turn_info(m) is None
+    ]
+    recorded = [m for m in recorded_after_boundary if isinstance(m, dict)]
+    matcher = difflib.SequenceMatcher(
+        a=[_sent_payload_key(m) for m in sent],
+        b=[_sent_payload_key(m) for m in recorded],
+        autojunk=False,
+    )
+    out: List[tuple] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
             continue
-        metadata = msg.get("metadata")
-        if isinstance(metadata, dict) and any(metadata.get(k) for k in stable_marks):
-            continue
-        unrecorded.append(msg)
-    return unrecorded
+        out.extend((NOT_KEPT, m) for m in sent[i1:i2])
+        out.extend((NOT_SENT, m) for m in recorded[j1:j2])
+    return out
+
+
+def align_first_send_with_record(
+    messages: List[Dict[str, Any]],
+    base_messages: Any,
+    source: Optional[FirstSendRecordSource],
+) -> Optional[List[tuple]]:
+    """ターンの最初の LLM 呼び出しの直前に、送る列の後ろ側を記録に揃えて検査する。
+
+    persist_realtime_and_recall.md §5「最初の呼び出しの前に足すもの」。ON の
+    モデルのトップレベルのパルス (user / auto / schedule) で一度だけ呼ばれる
+    (sea/runtime_llm._align_first_send_with_record)。
+
+    1. 記録から履歴の部分を読み直す (``source.reread`` — 次のターンと同じ
+       取り出し・同じ変換)。
+    2. 送る列 ``messages`` と、Playbook の列 ``base_messages``
+       (``state["_messages"]`` — 送る列はその写しに action の指示文などを足した
+       もの。別物なら両方) の境界より後ろの記録済みの行を、読み直した並びに
+       置き換える。記録に残らないもの (そのターンのまとまりなど) は、その後ろに
+       元の順で置く。最初の送信の前に記録へ書かれるもの (事前スペル・TOOL の
+       結果・ツールの中で書かれる記録・MEMORIZE・子の Playbook が残した行・
+       今後足されるもの) を、差し込み口ごとに送る列へ同期する代わりの一点。
+    3. 揃えた後の送る列の境界より後ろを、読み直した並びと比べる
+       (:func:`find_unrecorded_messages`)。
+
+    返り値は 3 の食い違い (空なら一致)。揃えられなかった (材料が無い・読み直しに
+    失敗した・境界が列に無い) ときは None で、列は変えない。
+    """
+    if source is None:
+        return None
+    recorded = source.reread()
+    if recorded is None:
+        return None
+    tail = _recorded_tail(recorded, source)
+    if tail is None:
+        return None
+    start = _recorded_region_start(messages, source)
+    if start is None:
+        return None
+    _align_with_record(messages, start, tail)
+    if isinstance(base_messages, list) and base_messages is not messages:
+        base_start = _recorded_region_start(base_messages, source)
+        if base_start is not None:
+            _align_with_record(base_messages, base_start, tail)
+    return find_unrecorded_messages(messages[start:], tail)
 
 
 def persists_realtime_and_recall(persona: Any, model_key: Optional[str]) -> bool:
@@ -582,6 +798,392 @@ class PersonaVoiceWithoutHistoryError(RuntimeError):
     """
 
 
+def _append_history(
+    runtime: Any, persona: Any, building_id: str, reqs: Any,
+    messages: List[Dict[str, Any]],
+    *,
+    pulse_id: Optional[str],
+    preview_only: bool,
+    model_key: Optional[str],
+    context_meta: Optional[Dict[str, Any]],
+    persist_anchor_advance: bool,
+    pinned_anchor_id: Optional[str],
+    pulse_type: Optional[str],
+) -> bool:
+    """送る列の履歴の部分 (時刻の目安 + 履歴の発言と知覚のまとめ) を ``messages`` の後ろへ足す。
+
+    :func:`prepare_context` の履歴の組み立てそのもの。ON のモデル
+    (docs/intent/persist_realtime_and_recall.md) のターンの最初の LLM 呼び出しの
+    直前に、送る列の「最後の記録済みの発言より後ろ」を記録から読み直すとき
+    (:func:`reread_recorded_history`) も同じこの関数を通る — 次のターンの
+    prepare_context が履歴を復元するのと同じ取り出し・同じ変換で読むため。
+
+    組み立てた (失敗しなかった) ら True。履歴を使わない指定 (``history_depth``
+    が 0 / ``"none"``)・履歴の器が無い・組み立ての途中の失敗 (ログに残して
+    続ける — それまでに足した分は残る) は False。
+    """
+    history_depth = reqs.history_depth
+    if history_depth in [0, "none"]:
+        return False
+    history_mgr = getattr(persona, "history_manager", None)
+    if not history_mgr:
+        return False
+    try:
+        # Phase 3 段階 4-A (line vs tag responsibility separation,
+        # 2026-05-01): context construction filters on line_role / scope
+        # instead of metadata.tags. Tags are now reserved for semantic
+        # classification (search / recall / Chronicle / Memopedia).
+        #
+        # Default policy:
+        #   - line_role IN ('main_line') AND scope IN ('committed')
+        #     → ペルソナのメインラインの会話履歴を context に含める
+        #   - committed なメタ判断 (line_role='meta_judgment') も
+        #     「メインキャッシュに乗った確定来歴」として含まれる
+        #     (_payload_passes_context_filter が committed_to_main_cache
+        #     = TRUE を main_line 文脈へ通す。03_data_model.md §176)。
+        #     Track 切替の確定独白・生きる目的の初回設定がこれに該当する。
+        #   - meta_judgment Pulse の discardable メッセージは含めない。
+        #     judge プロンプトへは別経路
+        #     (MetaLayer._build_recent_judgments_block) で動的注入される。
+        #
+        # 段階 4-D (2026-05-09): 旧 ``include_internal`` フォールバックを
+        # 削除。サブラインメッセージへのアクセスは sub_line が起動する
+        # 専用 Playbook 内で完結する設計に統合済み。
+        required_line_roles = ["main_line"]
+        required_scopes = ["committed"]
+
+        # Parse history_depth format
+        # - "full": anchor 以降の提示コンテキスト (anchor 未確立時は残す量ぶんの文字数)
+        # - "Nmessages" (e.g., "10messages"): message count limit
+        # - integer or numeric string: character limit
+        use_message_count = False
+        limit_value = 2000  # fallback
+        used_anchor = False
+        recent = []
+        # 提示窓の境界 (anchor)。Chronicle 無効ペルソナのバッチ絞り
+        # (下のマージ) が「履歴が空でも窓より古いものは忘れる」を
+        # 判定するのに使う (2026-08-19 Codex 第二巡 #3)。
+        history_anchor_id: Optional[str] = None
+
+        # 実行 model が水位を持つか。モデル定義で水位を null にした model は
+        # Metabolism を持たない = anchor を使わない (これが唯一のオプトアウト、
+        # 2026-07-30 OFF トグル撤去)。退場が無いのに anchor 起点で読むと
+        # 提示が際限なく伸びるため、水位なし model は従来のスライディング
+        # ウィンドウで読む (Codex 指摘 2026-07-30)。
+        #
+        # 解決の失敗はここで受けて anchor 無効へ退避する — 外側の広い
+        # except に抜けると履歴ゼロで応答が走るサイレント障害になる
+        # (Codex 指摘 2巡目)。
+        _lifecycle = getattr(runtime, "session_lifecycle", None)
+        metabolism_active = False
+        if _lifecycle is not None:
+            try:
+                metabolism_active = (
+                    _lifecycle.get_metabolism_watermarks(persona, model_key)
+                    is not None
+                )
+            except Exception:
+                LOGGER.warning(
+                    "[sea][prepare-context] Watermark resolution failed; "
+                    "falling back to sliding window",
+                    exc_info=True,
+                )
+
+        if history_depth == "full":
+            if pinned_anchor_id is not None:
+                # 起点の凍結 (2026-08-24 まはー裁定「一回の整理は一つの
+                # 一貫した窓で最後まで走る」): resolve_metabolism_anchor
+                # を呼ばず、呼び出し元 (run_metabolism) が実行頭に撮った
+                # 窓の起点から組む。実行中に Chronicle が確定して最前線
+                # が動いても、この組成は動かない — §14-2 (機構1) の前進
+                # 判定ごと走らせない。組めなければ送出 (fail-closed、
+                # ヘルパーの docstring 参照)。
+                recent = _pinned_history_from_anchor(
+                    runtime, persona, history_mgr, pinned_anchor_id,
+                    model_key, required_line_roles, required_scopes,
+                    pulse_id,
+                )
+                history_anchor_id = pinned_anchor_id
+                used_anchor = True
+                if context_meta is not None:
+                    context_meta["prefix_anchor_id"] = pinned_anchor_id
+                LOGGER.debug(
+                    "[sea][prepare-context] Pinned-anchor retrieval: "
+                    "%d messages from anchor %s (no anchor resolution)",
+                    len(recent), pinned_anchor_id,
+                )
+            elif not metabolism_active:
+                limit_value = _minimal_load_chars(runtime, persona, model_key)
+                LOGGER.debug(
+                    "[sea][prepare-context] Model has no watermarks; sliding window %d chars",
+                    limit_value,
+                )
+            elif not preview_only:
+                # Persistent anchor resolution with 3-level fallback。
+                # 「自 model」は実行 model (model_key)。None なら
+                # resolve 側が persona.model にフォールバックする。
+                # persist_anchor_advance=False は「組成は本番と同一、
+                # ただし §14-2 前進の永続化だけ行わない」— Beat ロックの
+                # 外で組む keepalive 専用 (ロック外の行書き込みは並走
+                # Beat の前進・fold 更新と競合する。Codex 6巡目
+                # 2026-07-30)。preview_only との違いは自動想起の注入等が
+                # 通常どおり走ること (温め直す prefix は本物と一致が命)。
+                anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(
+                    persona, model_key=model_key,
+                    persist_advance=persist_anchor_advance,
+                )
+                history_anchor_id = anchor_id
+
+                if anchor_id:
+                    # Case 1 or 2: valid anchor found
+                    recent_from_anchor = history_mgr.get_history_from_anchor(
+                        anchor_id,
+                        required_line_roles=required_line_roles,
+                        required_scopes=required_scopes,
+                        pulse_id=pulse_id,
+                    )
+                    # 提示コンテキストの途中で digest に畳まれた範囲は、元の時系列位置で
+                    # あらすじ + 圧縮マークに置き換えて見せる
+                    # (docs/intent/chronicle_eviction.md §6)。圧縮区間が無ければ素通り。
+                    recent_from_anchor = runtime.session_lifecycle.apply_window_folds(
+                        persona, model_key, recent_from_anchor,
+                    )
+                    if recent_from_anchor:
+                        recent = recent_from_anchor
+                        used_anchor = True
+                        if context_meta is not None:
+                            # call-local: 今回の prefix の anchor を呼び出し元へ返す
+                            context_meta["prefix_anchor_id"] = anchor_id
+                        LOGGER.debug(
+                            "[sea][prepare-context] Anchor-based retrieval (%s): %d messages from anchor %s",
+                            resolution, len(recent), anchor_id,
+                        )
+                        # Phase 4-e: anchor の updated_at touch は LLM 呼び出し成功後
+                        # (`runtime_llm.py` の usage 確認位置) で行う。ここで先行 touch
+                        # すると、LLM 失敗時に「実際は cache 切れてるのに TTL 内」と
+                        # 誤判定して次回も長大コンテキストを送る不整合になるため。
+                else:
+                    # Case 3: 起点行が一つも無い (新規ペルソナ / 修復直後)
+                    # のブートストラップ。残す量ぶんだけ読み、下の
+                    # count-based 経路が新しい起点候補を立てる。
+                    #
+                    # 旧実装はここ (anchor TTL 失効時) で会話前の全量
+                    # Chronicle 生成を行っていたが、arasuji_levels.md §13
+                    # (2026-07-29) で撤去した — 起点失効は温度情報であって
+                    # 提示範囲を変えず、編纂の自動発火は予算超過
+                    # (maybe_run_metabolism) の一本。
+                    limit_value = _minimal_load_chars(runtime, persona, model_key)
+                    use_message_count = False
+                    LOGGER.debug(
+                        "[sea][prepare-context] Bootstrap minimal load (no anchor row): %d chars",
+                        limit_value,
+                    )
+
+            else:
+                # Preview mode: use anchor for retrieval but don't persist or generate Chronicle
+                # (§14-2 機構1 の前進も永続化しない — 返る位置は本番と同じ)。
+                # §15 の読み戻しも同じ型で反映する — 実際の読み戻しは次の
+                # Pulse の応答前に走るため、素の窓のままだとプレビューが
+                # 「話しかけた時に実際に見える窓」より薄い嘘になる。読みだけ
+                # の計算 (仕上げの検算まで本番と同一・行は触らない) で組む。
+                # 適用は標準の会話窓 (main_line / committed) のときだけ —
+                # 読み戻しの文字勘定はその窓で定義されている。
+                if (
+                    required_line_roles == ["main_line"]
+                    and required_scopes == ["committed"]
+                    and pulse_id is None
+                ):
+                    refill_plan = runtime.session_lifecycle.preview_refilled_history(
+                        persona, model_key,
+                    )
+                    if refill_plan:
+                        # head のあらすじ枠 (weave) は capture 済み
+                        # snapshot 由来で、読み戻し後の除外名簿を知らない
+                        # — このままだと生に戻した範囲のあらすじが head
+                        # に残り、プレビューだけ二重表示になる。読み戻し
+                        # 後の名簿で weave を組み直して差し替える (本番は
+                        # 書き込み後の再 capture が同じことをする)。
+                        # 差し替えに失敗したら読み戻しプレビューごと
+                        # 見送り、素の窓に落とす — 薄いが整合した表示は
+                        # 二重表示より嘘が小さい (Codex 指摘 2026-07-30)。
+                        if _swap_preview_weave_for_refill(
+                            runtime, persona, messages, refill_plan,
+                        ):
+                            recent = refill_plan["presented"]
+                            used_anchor = True
+                if not used_anchor:
+                    anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(
+                        persona, model_key=model_key, persist_advance=False,
+                    )
+                    history_anchor_id = anchor_id
+                    if anchor_id:
+                        recent_from_anchor = history_mgr.get_history_from_anchor(
+                            anchor_id,
+                            required_line_roles=required_line_roles,
+                            required_scopes=required_scopes,
+                            pulse_id=pulse_id,
+                        )
+                        recent_from_anchor = runtime.session_lifecycle.apply_window_folds(
+                            persona, model_key, recent_from_anchor,
+                        )
+                        if recent_from_anchor:
+                            recent = recent_from_anchor
+                            used_anchor = True
+                if not used_anchor:
+                    limit_value = _minimal_load_chars(runtime, persona, model_key)
+                    use_message_count = False
+
+        elif isinstance(history_depth, str) and history_depth.endswith("messages"):
+            # Message count mode: "10messages", "20messages", etc.
+            try:
+                limit_value = int(history_depth[:-8])  # Remove "messages" suffix
+                use_message_count = True
+            except ValueError:
+                limit_value = 10  # fallback for message count
+                use_message_count = True
+        else:
+            try:
+                limit_value = int(history_depth)
+            except (ValueError, TypeError):
+                limit_value = 2000  # fallback
+
+        # Fetch history if not already retrieved via anchor
+        if not used_anchor:
+            LOGGER.debug(
+                "[sea][prepare-context] Fetching history: limit=%d, mode=%s, pulse_id=%s, "
+                "balanced=%s, line_roles=%s, scopes=%s",
+                limit_value, "messages" if use_message_count else "chars", pulse_id,
+                reqs.history_balanced, required_line_roles, required_scopes,
+            )
+
+            if use_message_count:
+                # Message count mode - balanced not supported yet
+                recent = history_mgr.get_recent_history_by_count(
+                    limit_value,
+                    required_line_roles=required_line_roles,
+                    required_scopes=required_scopes,
+                    pulse_id=pulse_id,
+                )
+            elif reqs.history_balanced:
+                # Get conversation partners for balanced retrieval
+                participant_ids = ["user"]
+                occupants = runtime.manager.occupants.get(building_id, [])
+                persona_id = getattr(persona, "persona_id", None)
+                for oid in occupants:
+                    if oid != persona_id:
+                        participant_ids.append(oid)
+                LOGGER.debug("[sea][prepare-context] Balancing across: %s", participant_ids)
+                recent = history_mgr.get_recent_history_balanced(
+                    limit_value,
+                    participant_ids,
+                    required_line_roles=required_line_roles,
+                    required_scopes=required_scopes,
+                    pulse_id=pulse_id,
+                )
+            else:
+                recent = history_mgr.get_recent_history(
+                    limit_value,
+                    required_line_roles=required_line_roles,
+                    required_scopes=required_scopes,
+                    pulse_id=pulse_id,
+                )
+
+            # Set metabolism anchor on first count-based retrieval (skip in preview).
+            # Phase 4-e: DB への永続化 (updated_at 書き込み) は LLM 呼び出し成功後に行う。
+            # ここで anchor 候補を立てたまま LLM 失敗 → DB 未書き込み → 次回も Case 3
+            # fallback → minimal load、という挙動になる。新規 anchor が永続化されない
+            # こと自体は Case 3 を毎回繰り返すだけで致命的ではない (まはー確認済 2026-05-08)。
+            # §3.2: 候補は persona 属性ではなく context_meta (call-local) で運ぶ。
+            # 水位なし model (Metabolism を持たない) は候補も立てない —
+            # LLM 成功時の touch で anchor 行が生まれてしまうため。
+            if metabolism_active and recent and not preview_only:
+                oldest_id = recent[0].get("id")
+                if oldest_id:
+                    if context_meta is not None:
+                        context_meta["prefix_anchor_id"] = oldest_id
+                    LOGGER.debug("[sea][prepare-context] Resolved count-based metabolism anchor %s (call-local); DB persist deferred to post-LLM-success", oldest_id)
+
+        LOGGER.debug("[sea][prepare-context] Got %d history messages", len(recent))
+
+        # ---- 未付記バッチの時刻順マージ (W14, perception_buffer.md §10.3) ----
+        # 消費された知覚は messages に行を作らない (§10.1)。提示は生ログと
+        # 未付記の消費バッチをここで時刻順にマージする。提示から下ろす
+        # 唯一の手段は退場付記の印 (annexed_entry_id) — 付記されるまで
+        # 消えない。legacy の event_message 行は生ログ側にそのまま居るので、
+        # 混在期間も両方が自然に並ぶ。
+        recent = _merge_consumed_perceptions(
+            runtime, persona, recent, anchor_id=history_anchor_id,
+            model_key=model_key,
+        )
+
+        # Enrich messages with attachment context
+        enriched_recent = runtime._enrich_history_with_attachments(recent)
+
+        # 時刻アンカー (v0.32, 2026-05-09): history 内の最古残存メッセージの直前に
+        # 「以下、YYYY-MM-DD HH:MM:SS 以降のやり取りです」を揮発挿入する。
+        # メッセージそのものに時刻メタを付ける副作用 (ペルソナが時刻を真似する) を
+        # 避けるため、Metabolism 起点に 1 か所だけ。
+        # (v0.32 には上部補完メッセージ用の「アンカー①」が別に居たが、
+        #  補完機構ごと退役した — track_retirement.md 住人 11)
+        if enriched_recent:
+            oldest_msg = enriched_recent[0]
+            oldest_ts = oldest_msg.get("created_at") or oldest_msg.get("timestamp")
+            if oldest_ts:
+                try:
+                    from datetime import datetime as _dt
+                    ts_int = int(oldest_ts)
+                    ts_str = _dt.fromtimestamp(ts_int).strftime("%Y-%m-%d %H:%M:%S")
+                    anchor_msg = {
+                        "role": "user",
+                        "content": f"<system>以下、{ts_str} 以降のやり取りです</system>",
+                        # 記録に残らないが、同じ履歴からは毎ターン同じ
+                        # 文面で組み直される (reread_recorded_history も同じ
+                        # この関数で組み直す)。
+                        "metadata": {HISTORY_TIME_ANCHOR_KEY: True},
+                    }
+                    messages.append(anchor_msg)
+                    LOGGER.debug(
+                        "[sea][prepare-context] Inserted timestamp anchor: %s",
+                        ts_str,
+                    )
+                except (TypeError, ValueError, OSError):
+                    LOGGER.debug(
+                        "[sea][prepare-context] Skipping timestamp anchor (invalid ts=%r)",
+                        oldest_ts,
+                    )
+
+        enriched_recent = _reframe_autonomous_messages(enriched_recent)
+        # 継続キャッシュ (高速応答モード) の境目: ユーザーの発言への返事の
+        # Pulse では、履歴の中の最後の AI の返事に内部印を付ける
+        # (docs/intent/cache_lifecycle_control.md §3.5)。
+        if pulse_type == "user" and not preview_only:
+            enriched_recent = mark_cache_boundary(enriched_recent, pulse_id)
+        messages.extend(enriched_recent)
+
+        # 実入力の履歴 ID 列 (2026-08-19, sluice の見た集合の一次情報):
+        # この呼び出しが**実際にプロンプトへ組み込んだ**履歴メッセージの
+        # ID を out-param で呼び出し元へ返す (戻り値と既存キーは不変 —
+        # prefix_anchor_id と同じ call-local の器)。履歴構築が失敗した場合は
+        # このキー自体が書かれない — 読み手 (sea/sluice.py) はキー不在を
+        # fail-closed (退場停止) に写像する。
+        if context_meta is not None:
+            presented_ids: List[str] = []
+            for _msg in enriched_recent:
+                _mid = _msg.get("id") if isinstance(_msg, dict) else None
+                if _mid:
+                    presented_ids.append(str(_mid))
+            context_meta["presented_message_ids"] = presented_ids
+        return True
+    except PinnedAnchorUnavailableError:
+        # 凍結起点の失敗は握らない — ここで warning に丸めると、呼び出し
+        # 元 (sluice) は「presented_message_ids 不在」という遠い顔の
+        # 失敗になる。実名で送出して退場停止に乗せる。
+        raise
+    except Exception as exc:
+        LOGGER.exception("[sea][prepare-context] Failed to get history: %s", exc)
+        return False
+
+
 def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None, pulse_type: Optional[str] = None, model_key: Optional[str] = None, context_meta: Optional[Dict[str, Any]] = None, persona_voiced: bool = False, persist_anchor_advance: bool = True, pinned_anchor_id: Optional[str] = None) -> List[Dict[str, Any]]:
     # model_key: この context を届ける Session (persona, model) の実行 model
     # (beat_execution_context.md §3.1 — head は (persona, model) に一つ)。
@@ -670,361 +1272,16 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
             ) from exc
 
     # ---- history ----
-    history_depth = reqs.history_depth
-    if history_depth not in [0, "none"]:
-        history_mgr = getattr(persona, "history_manager", None)
-        if history_mgr:
-            try:
-                # Phase 3 段階 4-A (line vs tag responsibility separation,
-                # 2026-05-01): context construction filters on line_role / scope
-                # instead of metadata.tags. Tags are now reserved for semantic
-                # classification (search / recall / Chronicle / Memopedia).
-                #
-                # Default policy:
-                #   - line_role IN ('main_line') AND scope IN ('committed')
-                #     → ペルソナのメインラインの会話履歴を context に含める
-                #   - committed なメタ判断 (line_role='meta_judgment') も
-                #     「メインキャッシュに乗った確定来歴」として含まれる
-                #     (_payload_passes_context_filter が committed_to_main_cache
-                #     = TRUE を main_line 文脈へ通す。03_data_model.md §176)。
-                #     Track 切替の確定独白・生きる目的の初回設定がこれに該当する。
-                #   - meta_judgment Pulse の discardable メッセージは含めない。
-                #     judge プロンプトへは別経路
-                #     (MetaLayer._build_recent_judgments_block) で動的注入される。
-                #
-                # 段階 4-D (2026-05-09): 旧 ``include_internal`` フォールバックを
-                # 削除。サブラインメッセージへのアクセスは sub_line が起動する
-                # 専用 Playbook 内で完結する設計に統合済み。
-                required_line_roles = ["main_line"]
-                required_scopes = ["committed"]
-
-                # Parse history_depth format
-                # - "full": anchor 以降の提示コンテキスト (anchor 未確立時は残す量ぶんの文字数)
-                # - "Nmessages" (e.g., "10messages"): message count limit
-                # - integer or numeric string: character limit
-                use_message_count = False
-                limit_value = 2000  # fallback
-                used_anchor = False
-                recent = []
-                # 提示窓の境界 (anchor)。Chronicle 無効ペルソナのバッチ絞り
-                # (下のマージ) が「履歴が空でも窓より古いものは忘れる」を
-                # 判定するのに使う (2026-08-19 Codex 第二巡 #3)。
-                history_anchor_id: Optional[str] = None
-
-                # 実行 model が水位を持つか。モデル定義で水位を null にした model は
-                # Metabolism を持たない = anchor を使わない (これが唯一のオプトアウト、
-                # 2026-07-30 OFF トグル撤去)。退場が無いのに anchor 起点で読むと
-                # 提示が際限なく伸びるため、水位なし model は従来のスライディング
-                # ウィンドウで読む (Codex 指摘 2026-07-30)。
-                #
-                # 解決の失敗はここで受けて anchor 無効へ退避する — 外側の広い
-                # except に抜けると履歴ゼロで応答が走るサイレント障害になる
-                # (Codex 指摘 2巡目)。
-                _lifecycle = getattr(runtime, "session_lifecycle", None)
-                metabolism_active = False
-                if _lifecycle is not None:
-                    try:
-                        metabolism_active = (
-                            _lifecycle.get_metabolism_watermarks(persona, model_key)
-                            is not None
-                        )
-                    except Exception:
-                        LOGGER.warning(
-                            "[sea][prepare-context] Watermark resolution failed; "
-                            "falling back to sliding window",
-                            exc_info=True,
-                        )
-
-                if history_depth == "full":
-                    if pinned_anchor_id is not None:
-                        # 起点の凍結 (2026-08-24 まはー裁定「一回の整理は一つの
-                        # 一貫した窓で最後まで走る」): resolve_metabolism_anchor
-                        # を呼ばず、呼び出し元 (run_metabolism) が実行頭に撮った
-                        # 窓の起点から組む。実行中に Chronicle が確定して最前線
-                        # が動いても、この組成は動かない — §14-2 (機構1) の前進
-                        # 判定ごと走らせない。組めなければ送出 (fail-closed、
-                        # ヘルパーの docstring 参照)。
-                        recent = _pinned_history_from_anchor(
-                            runtime, persona, history_mgr, pinned_anchor_id,
-                            model_key, required_line_roles, required_scopes,
-                            pulse_id,
-                        )
-                        history_anchor_id = pinned_anchor_id
-                        used_anchor = True
-                        if context_meta is not None:
-                            context_meta["prefix_anchor_id"] = pinned_anchor_id
-                        LOGGER.debug(
-                            "[sea][prepare-context] Pinned-anchor retrieval: "
-                            "%d messages from anchor %s (no anchor resolution)",
-                            len(recent), pinned_anchor_id,
-                        )
-                    elif not metabolism_active:
-                        limit_value = _minimal_load_chars(runtime, persona, model_key)
-                        LOGGER.debug(
-                            "[sea][prepare-context] Model has no watermarks; sliding window %d chars",
-                            limit_value,
-                        )
-                    elif not preview_only:
-                        # Persistent anchor resolution with 3-level fallback。
-                        # 「自 model」は実行 model (model_key)。None なら
-                        # resolve 側が persona.model にフォールバックする。
-                        # persist_anchor_advance=False は「組成は本番と同一、
-                        # ただし §14-2 前進の永続化だけ行わない」— Beat ロックの
-                        # 外で組む keepalive 専用 (ロック外の行書き込みは並走
-                        # Beat の前進・fold 更新と競合する。Codex 6巡目
-                        # 2026-07-30)。preview_only との違いは自動想起の注入等が
-                        # 通常どおり走ること (温め直す prefix は本物と一致が命)。
-                        anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(
-                            persona, model_key=model_key,
-                            persist_advance=persist_anchor_advance,
-                        )
-                        history_anchor_id = anchor_id
-
-                        if anchor_id:
-                            # Case 1 or 2: valid anchor found
-                            recent_from_anchor = history_mgr.get_history_from_anchor(
-                                anchor_id,
-                                required_line_roles=required_line_roles,
-                                required_scopes=required_scopes,
-                                pulse_id=pulse_id,
-                            )
-                            # 提示コンテキストの途中で digest に畳まれた範囲は、元の時系列位置で
-                            # あらすじ + 圧縮マークに置き換えて見せる
-                            # (docs/intent/chronicle_eviction.md §6)。圧縮区間が無ければ素通り。
-                            recent_from_anchor = runtime.session_lifecycle.apply_window_folds(
-                                persona, model_key, recent_from_anchor,
-                            )
-                            if recent_from_anchor:
-                                recent = recent_from_anchor
-                                used_anchor = True
-                                if context_meta is not None:
-                                    # call-local: 今回の prefix の anchor を呼び出し元へ返す
-                                    context_meta["prefix_anchor_id"] = anchor_id
-                                LOGGER.debug(
-                                    "[sea][prepare-context] Anchor-based retrieval (%s): %d messages from anchor %s",
-                                    resolution, len(recent), anchor_id,
-                                )
-                                # Phase 4-e: anchor の updated_at touch は LLM 呼び出し成功後
-                                # (`runtime_llm.py` の usage 確認位置) で行う。ここで先行 touch
-                                # すると、LLM 失敗時に「実際は cache 切れてるのに TTL 内」と
-                                # 誤判定して次回も長大コンテキストを送る不整合になるため。
-                        else:
-                            # Case 3: 起点行が一つも無い (新規ペルソナ / 修復直後)
-                            # のブートストラップ。残す量ぶんだけ読み、下の
-                            # count-based 経路が新しい起点候補を立てる。
-                            #
-                            # 旧実装はここ (anchor TTL 失効時) で会話前の全量
-                            # Chronicle 生成を行っていたが、arasuji_levels.md §13
-                            # (2026-07-29) で撤去した — 起点失効は温度情報であって
-                            # 提示範囲を変えず、編纂の自動発火は予算超過
-                            # (maybe_run_metabolism) の一本。
-                            limit_value = _minimal_load_chars(runtime, persona, model_key)
-                            use_message_count = False
-                            LOGGER.debug(
-                                "[sea][prepare-context] Bootstrap minimal load (no anchor row): %d chars",
-                                limit_value,
-                            )
-
-                    else:
-                        # Preview mode: use anchor for retrieval but don't persist or generate Chronicle
-                        # (§14-2 機構1 の前進も永続化しない — 返る位置は本番と同じ)。
-                        # §15 の読み戻しも同じ型で反映する — 実際の読み戻しは次の
-                        # Pulse の応答前に走るため、素の窓のままだとプレビューが
-                        # 「話しかけた時に実際に見える窓」より薄い嘘になる。読みだけ
-                        # の計算 (仕上げの検算まで本番と同一・行は触らない) で組む。
-                        # 適用は標準の会話窓 (main_line / committed) のときだけ —
-                        # 読み戻しの文字勘定はその窓で定義されている。
-                        if (
-                            required_line_roles == ["main_line"]
-                            and required_scopes == ["committed"]
-                            and pulse_id is None
-                        ):
-                            refill_plan = runtime.session_lifecycle.preview_refilled_history(
-                                persona, model_key,
-                            )
-                            if refill_plan:
-                                # head のあらすじ枠 (weave) は capture 済み
-                                # snapshot 由来で、読み戻し後の除外名簿を知らない
-                                # — このままだと生に戻した範囲のあらすじが head
-                                # に残り、プレビューだけ二重表示になる。読み戻し
-                                # 後の名簿で weave を組み直して差し替える (本番は
-                                # 書き込み後の再 capture が同じことをする)。
-                                # 差し替えに失敗したら読み戻しプレビューごと
-                                # 見送り、素の窓に落とす — 薄いが整合した表示は
-                                # 二重表示より嘘が小さい (Codex 指摘 2026-07-30)。
-                                if _swap_preview_weave_for_refill(
-                                    runtime, persona, messages, refill_plan,
-                                ):
-                                    recent = refill_plan["presented"]
-                                    used_anchor = True
-                        if not used_anchor:
-                            anchor_id, resolution = runtime.session_lifecycle.resolve_metabolism_anchor(
-                                persona, model_key=model_key, persist_advance=False,
-                            )
-                            history_anchor_id = anchor_id
-                            if anchor_id:
-                                recent_from_anchor = history_mgr.get_history_from_anchor(
-                                    anchor_id,
-                                    required_line_roles=required_line_roles,
-                                    required_scopes=required_scopes,
-                                    pulse_id=pulse_id,
-                                )
-                                recent_from_anchor = runtime.session_lifecycle.apply_window_folds(
-                                    persona, model_key, recent_from_anchor,
-                                )
-                                if recent_from_anchor:
-                                    recent = recent_from_anchor
-                                    used_anchor = True
-                        if not used_anchor:
-                            limit_value = _minimal_load_chars(runtime, persona, model_key)
-                            use_message_count = False
-
-                elif isinstance(history_depth, str) and history_depth.endswith("messages"):
-                    # Message count mode: "10messages", "20messages", etc.
-                    try:
-                        limit_value = int(history_depth[:-8])  # Remove "messages" suffix
-                        use_message_count = True
-                    except ValueError:
-                        limit_value = 10  # fallback for message count
-                        use_message_count = True
-                else:
-                    try:
-                        limit_value = int(history_depth)
-                    except (ValueError, TypeError):
-                        limit_value = 2000  # fallback
-
-                # Fetch history if not already retrieved via anchor
-                if not used_anchor:
-                    LOGGER.debug(
-                        "[sea][prepare-context] Fetching history: limit=%d, mode=%s, pulse_id=%s, "
-                        "balanced=%s, line_roles=%s, scopes=%s",
-                        limit_value, "messages" if use_message_count else "chars", pulse_id,
-                        reqs.history_balanced, required_line_roles, required_scopes,
-                    )
-
-                    if use_message_count:
-                        # Message count mode - balanced not supported yet
-                        recent = history_mgr.get_recent_history_by_count(
-                            limit_value,
-                            required_line_roles=required_line_roles,
-                            required_scopes=required_scopes,
-                            pulse_id=pulse_id,
-                        )
-                    elif reqs.history_balanced:
-                        # Get conversation partners for balanced retrieval
-                        participant_ids = ["user"]
-                        occupants = runtime.manager.occupants.get(building_id, [])
-                        persona_id = getattr(persona, "persona_id", None)
-                        for oid in occupants:
-                            if oid != persona_id:
-                                participant_ids.append(oid)
-                        LOGGER.debug("[sea][prepare-context] Balancing across: %s", participant_ids)
-                        recent = history_mgr.get_recent_history_balanced(
-                            limit_value,
-                            participant_ids,
-                            required_line_roles=required_line_roles,
-                            required_scopes=required_scopes,
-                            pulse_id=pulse_id,
-                        )
-                    else:
-                        recent = history_mgr.get_recent_history(
-                            limit_value,
-                            required_line_roles=required_line_roles,
-                            required_scopes=required_scopes,
-                            pulse_id=pulse_id,
-                        )
-
-                    # Set metabolism anchor on first count-based retrieval (skip in preview).
-                    # Phase 4-e: DB への永続化 (updated_at 書き込み) は LLM 呼び出し成功後に行う。
-                    # ここで anchor 候補を立てたまま LLM 失敗 → DB 未書き込み → 次回も Case 3
-                    # fallback → minimal load、という挙動になる。新規 anchor が永続化されない
-                    # こと自体は Case 3 を毎回繰り返すだけで致命的ではない (まはー確認済 2026-05-08)。
-                    # §3.2: 候補は persona 属性ではなく context_meta (call-local) で運ぶ。
-                    # 水位なし model (Metabolism を持たない) は候補も立てない —
-                    # LLM 成功時の touch で anchor 行が生まれてしまうため。
-                    if metabolism_active and recent and not preview_only:
-                        oldest_id = recent[0].get("id")
-                        if oldest_id:
-                            if context_meta is not None:
-                                context_meta["prefix_anchor_id"] = oldest_id
-                            LOGGER.debug("[sea][prepare-context] Resolved count-based metabolism anchor %s (call-local); DB persist deferred to post-LLM-success", oldest_id)
-
-                LOGGER.debug("[sea][prepare-context] Got %d history messages", len(recent))
-
-                # ---- 未付記バッチの時刻順マージ (W14, perception_buffer.md §10.3) ----
-                # 消費された知覚は messages に行を作らない (§10.1)。提示は生ログと
-                # 未付記の消費バッチをここで時刻順にマージする。提示から下ろす
-                # 唯一の手段は退場付記の印 (annexed_entry_id) — 付記されるまで
-                # 消えない。legacy の event_message 行は生ログ側にそのまま居るので、
-                # 混在期間も両方が自然に並ぶ。
-                recent = _merge_consumed_perceptions(
-                    runtime, persona, recent, anchor_id=history_anchor_id,
-                    model_key=model_key,
-                )
-
-                # Enrich messages with attachment context
-                enriched_recent = runtime._enrich_history_with_attachments(recent)
-
-                # 時刻アンカー (v0.32, 2026-05-09): history 内の最古残存メッセージの直前に
-                # 「以下、YYYY-MM-DD HH:MM:SS 以降のやり取りです」を揮発挿入する。
-                # メッセージそのものに時刻メタを付ける副作用 (ペルソナが時刻を真似する) を
-                # 避けるため、Metabolism 起点に 1 か所だけ。
-                # (v0.32 には上部補完メッセージ用の「アンカー①」が別に居たが、
-                #  補完機構ごと退役した — track_retirement.md 住人 11)
-                if enriched_recent:
-                    oldest_msg = enriched_recent[0]
-                    oldest_ts = oldest_msg.get("created_at") or oldest_msg.get("timestamp")
-                    if oldest_ts:
-                        try:
-                            from datetime import datetime as _dt
-                            ts_int = int(oldest_ts)
-                            ts_str = _dt.fromtimestamp(ts_int).strftime("%Y-%m-%d %H:%M:%S")
-                            anchor_msg = {
-                                "role": "user",
-                                "content": f"<system>以下、{ts_str} 以降のやり取りです</system>",
-                                # 記録に残らないが、同じ履歴からは毎ターン同じ
-                                # 文面で組み直される (find_unrecorded_messages)。
-                                "metadata": {HISTORY_TIME_ANCHOR_KEY: True},
-                            }
-                            messages.append(anchor_msg)
-                            LOGGER.debug(
-                                "[sea][prepare-context] Inserted timestamp anchor: %s",
-                                ts_str,
-                            )
-                        except (TypeError, ValueError, OSError):
-                            LOGGER.debug(
-                                "[sea][prepare-context] Skipping timestamp anchor (invalid ts=%r)",
-                                oldest_ts,
-                            )
-
-                enriched_recent = _reframe_autonomous_messages(enriched_recent)
-                # 継続キャッシュ (高速応答モード) の境目: ユーザーの発言への返事の
-                # Pulse では、履歴の中の最後の AI の返事に内部印を付ける
-                # (docs/intent/cache_lifecycle_control.md §3.5)。
-                if pulse_type == "user" and not preview_only:
-                    enriched_recent = mark_cache_boundary(enriched_recent, pulse_id)
-                messages.extend(enriched_recent)
-
-                # 実入力の履歴 ID 列 (2026-08-19, sluice の見た集合の一次情報):
-                # この呼び出しが**実際にプロンプトへ組み込んだ**履歴メッセージの
-                # ID を out-param で呼び出し元へ返す (戻り値と既存キーは不変 —
-                # prefix_anchor_id と同じ call-local の器)。履歴構築が失敗した場合は
-                # このキー自体が書かれない — 読み手 (sea/sluice.py) はキー不在を
-                # fail-closed (退場停止) に写像する。
-                if context_meta is not None:
-                    presented_ids: List[str] = []
-                    for _msg in enriched_recent:
-                        _mid = _msg.get("id") if isinstance(_msg, dict) else None
-                        if _mid:
-                            presented_ids.append(str(_mid))
-                    context_meta["presented_message_ids"] = presented_ids
-            except PinnedAnchorUnavailableError:
-                # 凍結起点の失敗は握らない — ここで warning に丸めると、呼び出し
-                # 元 (sluice) は「presented_message_ids 不在」という遠い顔の
-                # 失敗になる。実名で送出して退場停止に乗せる。
-                raise
-            except Exception as exc:
-                LOGGER.exception("[sea][prepare-context] Failed to get history: %s", exc)
+    # 組み立ては _append_history (ターンの最初の送信の前に記録から読み直す
+    # reread_recorded_history と同じ一枚)。
+    history_start = len(messages)
+    history_built = _append_history(
+        runtime, persona, building_id, reqs, messages,
+        pulse_id=pulse_id, preview_only=preview_only, model_key=model_key,
+        context_meta=context_meta, persist_anchor_advance=persist_anchor_advance,
+        pinned_anchor_id=pinned_anchor_id, pulse_type=pulse_type,
+    )
+    history_region = list(messages[history_start:])
 
     # ---- Recalled Memory Context — 廃止済み ----
     # recalled_ids はシステムプロンプトへの注入から廃止。
@@ -1042,6 +1299,32 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     persist_mode = persists_realtime_and_recall(persona, model_key)
     if context_meta is not None:
         context_meta["persist_realtime_and_recall"] = persist_mode
+        # ターンの最初の LLM 呼び出しの直前に、送る列の「最後の記録済みの発言
+        # (境界) より後ろ」を記録から読み直して揃えるための材料
+        # (persist_realtime_and_recall.md §5)。最初の送信の前に記録に書かれる
+        # もの (事前スペル・TOOL の結果・ツールの中の記録・MEMORIZE など) を
+        # 差し込み口ごとに送る列へ同期する代わりに、記録そのものから並べ直す。
+        # 読み直しはこの組み立てと同じ _append_history を、同じ建物・指定・
+        # モデルで通す。使うのは run_playbook が残すパルスの state に移した
+        # ときだけ (sea/runtime_llm._align_first_send_with_record)。
+        context_meta.pop(FIRST_SEND_RECORD_SOURCE_META_KEY, None)
+        if persist_mode and history_built and not preview_only:
+            boundary_id = next(
+                (
+                    str(m["id"]) for m in reversed(history_region)
+                    if isinstance(m, dict) and m.get("id")
+                    and not is_injected_perception(m)
+                ),
+                None,
+            )
+            context_meta[FIRST_SEND_RECORD_SOURCE_META_KEY] = FirstSendRecordSource(
+                reread=functools.partial(
+                    reread_recorded_history, runtime, persona, building_id,
+                    reqs, model_key,
+                ),
+                boundary_id=boundary_id,
+                history_len=len(history_region),
+            )
     persist_realtime_msg: Optional[Dict[str, Any]] = None
 
     # ---- Realtime Context ----

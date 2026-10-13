@@ -2402,25 +2402,93 @@ class TestToolResultBeforeTheFirstCall:
 
 
 _UNRECORDED_WARNING = "carries a message that is not kept"
+_NOT_SENT_WARNING = "the record has a row that the first send of this turn does not carry"
 
 
-@pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
-@pytest.mark.parametrize(
-    "scene",
-    ["plain", "pre_spell", "tool", "realtime_spell", "auto_recall", "perception", "auto"],
-)
-def test_first_send_has_nothing_unrecorded(env, monkeypatch, caplog, scene):
-    """ON のモデルで、ターンの最初の呼び出しで送る列に「記録に残らない
-    メッセージ」が無い (sea/runtime_context.find_unrecorded_messages)。送る
-    直前の検査 (sea/runtime_llm._check_first_send_is_recorded) も WARN を出さない。
-    二ターン目 (前のターンの残した行・知覚・記録が並ぶ列) で確かめる。"""
-    import logging
+# ---------------------------------------------------------------------------
+# 最初の LLM 呼び出しの直前に、送る列の後ろ側を記録に揃える (Codex 六巡目)
+#
+# 最初の送信の前に記録に書かれるもの (事前スペル・TOOL の結果・ツールの中で
+# 書かれる記録・MEMORIZE …) を差し込み口ごとに送る列へ同期するのをやめ、
+# 送る列の「最後の記録済みの発言より後ろ」を、次のターンの prepare_context と
+# 同じ取り出し・同じ変換で記録から読み直した並びに揃える
+# (sea/runtime_llm._align_first_send_with_record →
+#  sea/runtime_context.align_first_send_with_record)。
+# ---------------------------------------------------------------------------
 
-    from sea.runtime_context import find_unrecorded_messages
 
-    _run_turn(env, "こんにちは。")
+SNAPSHOT_TOOL = "get_situation_snapshot"
+_CHANGE_MARK = "【状況変化】"
+
+
+def _use_real_situation_snapshot(env) -> None:
+    """本物の get_situation_snapshot (状況の変化を記録に書く) が動く最小の世界。
+
+    ツールは persona_context の manager から自分を引き、記録 (実 SAIMemoryAdapter
+    のメモリ内でない一時ファイルの SQLite) の作業メモリと比べて、変化があれば
+    ``<system>【状況変化】…</system>`` の行を記録に書く。
+    """
+    env.manager.all_personas = {PERSONA_ID: env.persona}
+    env.manager.user_presence_status = "online"
+    env.persona.manager_ref = env.manager
+    env.persona.timezone_name = "UTC"
+    env.persona.buildings = {}
+    env.persona.id_to_name_map = {}
+
+
+def _situation_snapshot_then_llm_playbook():
+    """TOOL (状況の変化を記録する get_situation_snapshot) → LLM。"""
+    return _custom_playbook([
+        {
+            "id": "snap", "type": "tool", "action": SNAPSHOT_TOOL,
+            "args_input": {"detect_changes": True},
+            "output_keys": ["snapshot_text", "change_info"],
+            "next": "talk",
+        },
+        {
+            "id": "talk", "type": "llm", "action": None, "speak": True,
+            "memorize": True, "metadata_key": "metadata",
+            "output_keys": [{"text": "speak_content"}], "next": None,
+        },
+    ], name="snapshot_pb")
+
+
+def _tool_memorize_tool_then_llm_playbook():
+    """TOOL → MEMORIZE → TOOL → LLM (MEMORIZE の行が二つの結果の間に記録される)。"""
+    return _custom_playbook([
+        {
+            "id": "look1", "type": "tool", "action": CAMERA_TOOL,
+            "output_keys": ["camera_text", "camera_snippet", "camera_file", "camera_meta"],
+            "next": "keep",
+        },
+        {
+            "id": "keep", "type": "memorize", "action": "メモ: {camera_text}",
+            "next": "look2",
+        },
+        {
+            "id": "look2", "type": "tool", "action": CAMERA_TOOL,
+            "output_keys": ["camera_text", "camera_snippet", "camera_file", "camera_meta"],
+            "next": "talk",
+        },
+        {
+            "id": "talk", "type": "llm", "action": None, "speak": True,
+            "memorize": True, "metadata_key": "metadata",
+            "output_keys": [{"text": "speak_content"}], "next": None,
+        },
+    ], name="camera_memo_pb")
+
+
+#: 最初の送信の前に記録に書かれるものがある場面 (Codex 六巡目の (a)(b)) と、
+#: 既存の場面。
+_SCENES = [
+    "plain", "pre_spell", "tool", "situation_change", "tool_memorize_tool",
+    "realtime_spell", "auto_recall", "perception", "auto",
+]
+
+
+def _prepare_scene(env, monkeypatch, scene: str) -> Dict[str, Any]:
+    """場面の準備。返り値は ``_run_turn`` への引数。"""
     kwargs: Dict[str, Any] = {}
-    pulse_type = "user"
     if scene == "pre_spell":
         from sea import runtime_llm
 
@@ -2433,6 +2501,12 @@ def test_first_send_has_nothing_unrecorded(env, monkeypatch, caplog, scene):
     elif scene == "tool":
         _register_camera(env, monkeypatch)
         kwargs["playbook"] = _tool_then_llm_playbook()
+    elif scene == "situation_change":
+        _use_real_situation_snapshot(env)
+        kwargs["playbook"] = _situation_snapshot_then_llm_playbook()
+    elif scene == "tool_memorize_tool":
+        _register_camera(env, monkeypatch)
+        kwargs["playbook"] = _tool_memorize_tool_then_llm_playbook()
     elif scene == "realtime_spell":
         _bind_realtime_spell(env)
     elif scene == "auto_recall":
@@ -2440,33 +2514,166 @@ def test_first_send_has_nothing_unrecorded(env, monkeypatch, caplog, scene):
     elif scene == "perception":
         _push_perception(env, "雨が降ってきた")
     elif scene == "auto":
-        pulse_type = "auto"
-    with caplog.at_level(logging.WARNING, logger="sea.runtime_llm"):
-        turn = _run_turn(
-            env, None if scene == "auto" else "続き。", pulse_type=pulse_type, **kwargs,
-        )
-    # その場面の差し込みが実際に最初の呼び出しに載っている
-    expected = {
-        "pre_spell": "[Triggered by user]",
-        "tool": f"tool '{CAMERA_TOOL}' result:",
-        "realtime_spell": _SPELL_LINE,
-        "auto_recall": "海辺の町",
-        "perception": "雨が降ってきた",
-    }.get(scene)
-    if expected:
-        assert any(expected in str(m.get("content")) for m in turn[0])
-    assert find_unrecorded_messages(turn[0]) == []
-    assert _UNRECORDED_WARNING not in caplog.text
+        kwargs["pulse_type"] = "auto"
+    return kwargs
+
+
+#: その場面の差し込みが実際に最初の呼び出しに載っていることの目印。
+_SCENE_MARKS = {
+    "pre_spell": "[Triggered by user]",
+    "tool": f"tool '{CAMERA_TOOL}' result:",
+    "situation_change": _CHANGE_MARK,
+    "tool_memorize_tool": "メモ: 写真を撮った",
+    "realtime_spell": _SPELL_LINE,
+    "auto_recall": "海辺の町",
+    "perception": "雨が降ってきた",
+}
+
+
+def _run_scene_turns(env, monkeypatch, scene: str):
+    """一ターン目 (普通の会話) → その場面のターン → 次の普通のターン。"""
+    _run_turn(env, "こんにちは。")
+    kwargs = _prepare_scene(env, monkeypatch, scene)
+    turn1 = _run_turn(env, None if scene == "auto" else "続き。", **kwargs)
+    turn2 = _run_turn(env, "それで?")
+    return turn1, turn2
+
+
+@pytest.mark.parametrize("env", [True, False], indirect=True, ids=["stream", "sync"])
+@pytest.mark.parametrize("scene", _SCENES)
+def test_first_send_matches_the_next_turn(env, monkeypatch, scene):
+    """不変条件 1: どの場面でも、ターンの最初の呼び出しの列が次のターンの最初の
+    呼び出しの列の先頭と一字一句同じ (SAIVerse の列と Gemini の送信形式の両方)。
+
+    ``situation_change`` (本物の get_situation_snapshot が状況の変化を記録に
+    書く) と ``tool_memorize_tool`` (MEMORIZE の行が二つの TOOL の結果の間に
+    記録される) は Codex 六巡目の指摘の場面で、送る列を記録に揃える前は
+    次のターンの先頭と割れた。"""
+    turn1, turn2 = _run_scene_turns(env, monkeypatch, scene)
+    mark = _SCENE_MARKS.get(scene)
+    if mark:
+        assert any(mark in str(m.get("content")) for m in turn1[0])
+    _assert_first_call_prefix(turn1, turn2)
+    _assert_gemini_prefix(turn1[0], turn2[0])
+
+
+@pytest.mark.parametrize("env", [True], indirect=True, ids=["stream"])
+def test_situation_change_and_memorize_rows_sit_where_the_record_puts_them(
+    env, monkeypatch,
+):
+    """揃えた後の最初の呼び出しでは、ツールの中で書かれた状況変化の記録が
+    TOOL の結果の前に、MEMORIZE の行が二つの結果の間に並び、そのターンの
+    まとまりはそれらの後ろ (列の一番後ろ) にある。"""
+    from sea.runtime_context import find_turn_realtime_and_recall_index
+
+    turn1, _ = _run_scene_turns(env, monkeypatch, "situation_change")
+    contents = [str(m.get("content")) for m in turn1[0]]
+    change = next(i for i, c in enumerate(contents) if _CHANGE_MARK in c)
+    result = next(i for i, c in enumerate(contents) if f"tool '{SNAPSHOT_TOOL}' result:" in c)
+    assert change < result
+    assert find_turn_realtime_and_recall_index(turn1[0]) == len(turn1[0]) - 1
+
+    turn1, _ = _run_scene_turns(env, monkeypatch, "tool_memorize_tool")
+    contents = [str(m.get("content")) for m in turn1[0]]
+    results = [i for i, c in enumerate(contents) if f"tool '{CAMERA_TOOL}' result:" in c]
+    memo = next(i for i, c in enumerate(contents) if "メモ: 写真を撮った" in c)
+    assert len(results) == 2 and results[0] < memo < results[1]
+    assert find_turn_realtime_and_recall_index(turn1[0]) == len(turn1[0]) - 1
+
+
+def _spy_alignment(monkeypatch) -> List[Any]:
+    """送る直前の揃えと検査 (align_first_send_with_record) の結果を写し取る。"""
+    from sea import runtime_context
+
+    seen: List[Any] = []
+    real = runtime_context.align_first_send_with_record
+
+    def _spy(messages, base_messages, source):
+        out = real(messages, base_messages, source)
+        seen.append(out)
+        return out
+
+    monkeypatch.setattr(runtime_context, "align_first_send_with_record", _spy)
+    return seen
 
 
 @pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
-def test_first_send_check_reports_an_unrecorded_message(env, caplog):
-    """記録に残らない差し込み (ここでは LLM ノードの action の指示文) があると、
-    送る直前の検査が役割と先頭の文字を WARN で出す (送信は止めない)。"""
+@pytest.mark.parametrize("scene", _SCENES)
+def test_first_send_check_is_clean_after_alignment(env, monkeypatch, caplog, scene):
+    """揃えた後の機械検査 (sea/runtime_context.find_unrecorded_messages —
+    送る列の境界より後ろと、記録から読み直した並びの比較) は、どの場面でも
+    食い違いを返さず、WARN も出ない。揃えはトップレベルの残すパルスで
+    ターンに一度だけ走る。"""
     import logging
 
-    from sea.runtime_context import find_unrecorded_messages
+    seen = _spy_alignment(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="sea.runtime_llm"):
+        _run_scene_turns(env, monkeypatch, scene)
+    # 三ターン (一ターン目・場面のターン・次のターン) で一度ずつ
+    assert seen == [[], [], []]
+    assert "persist_realtime_and_recall" not in caplog.text
 
+
+@pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
+@pytest.mark.parametrize(
+    "scene, expected",
+    [
+        ("situation_change", _CHANGE_MARK),
+        ("tool_memorize_tool", "メモ: 写真を撮った"),
+    ],
+)
+def test_check_finds_the_row_when_the_list_is_not_aligned(
+    env, monkeypatch, caplog, scene, expected,
+):
+    """揃える前のコードと同じ列 (置き換えを止めた列) では、機械検査が
+    「記録にはあるのに送る列のその位置に無い行」を見つけて WARN を出し、
+    次のターンの先頭と実際に割れる。検査は送った行の保存だけでなく、
+    復元時に間へ入る行も見る (Codex 六巡目: 以前の検査はここを空で返した)。"""
+    import logging
+
+    from sea import runtime_context
+
+    monkeypatch.setattr(runtime_context, "_align_with_record", lambda *a, **k: None)
+    seen = _spy_alignment(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="sea.runtime_llm"):
+        turn1, turn2 = _run_scene_turns(env, monkeypatch, scene)
+    scene_result = seen[1]
+    assert any(
+        kind == runtime_context.NOT_SENT and expected in str(m.get("content"))
+        for kind, m in scene_result
+    )
+    assert _NOT_SENT_WARNING in caplog.text
+    with pytest.raises(AssertionError):
+        _assert_first_call_prefix(turn1, turn2)
+
+
+@pytest.mark.parametrize("env", [True, False], indirect=True, ids=["stream", "sync"])
+def test_first_ever_turn_without_history(env, monkeypatch):
+    """履歴が一行も無い最初のパルス (自律) で TOOL → LLM。境界になる発言が
+    無いので、head の直後から記録に揃える (時刻の目安も読み直しで組まれる)。
+    次のターンの最初の呼び出しの先頭と一致する。"""
+    seen = _spy_alignment(monkeypatch)
+    _register_camera(env, monkeypatch)
+    turn1 = _run_turn(env, None, pulse_type="auto", playbook=_tool_then_llm_playbook())
+    turn2 = _run_turn(env, "おはよう。")
+    assert any(
+        f"tool '{CAMERA_TOOL}' result:" in str(m.get("content")) for m in turn1[0]
+    )
+    _assert_first_call_prefix(turn1, turn2)
+    _assert_gemini_prefix(turn1[0], turn2[0])
+    assert seen == [[], []]
+
+
+@pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
+def test_first_send_check_reports_an_unrecorded_message(env, monkeypatch, caplog):
+    """記録に残らない差し込み (ここでは LLM ノードの action の指示文) は、揃えた
+    後もそのターンのまとまりの後ろに残り、送る直前の検査が役割と先頭の文字を
+    WARN で出す (送信は止めない)。"""
+    import logging
+
+    from sea import runtime_context
+
+    seen = _spy_alignment(monkeypatch)
     playbook = _custom_playbook([{
         "id": "talk", "type": "llm", "action": "手短に答えて。", "speak": True,
         "memorize": True, "metadata_key": "metadata",
@@ -2474,8 +2681,33 @@ def test_first_send_check_reports_an_unrecorded_message(env, caplog):
     }], name="action_pb")
     with caplog.at_level(logging.WARNING, logger="sea.runtime_llm"):
         turn = _run_turn(env, "こんにちは。", playbook=playbook)
-    assert [m["content"] for m in find_unrecorded_messages(turn[0])] == [
-        "<system>手短に答えて。</system>",
+    assert [(kind, m["content"]) for kind, m in seen[0]] == [
+        (runtime_context.NOT_KEPT, "<system>手短に答えて。</system>"),
     ]
+    assert turn[0][-1]["content"] == "<system>手短に答えて。</system>"
     assert _UNRECORDED_WARNING in caplog.text
     assert "手短に答えて。" in caplog.text
+
+
+@pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
+def test_off_model_and_nested_playbooks_are_not_aligned(env, monkeypatch):
+    """OFF のモデルの列と、``_pulse_type`` を持たない入れ子の Playbook では、
+    揃えも検査も走らない (送る列は今までどおり)。"""
+    seen = _spy_alignment(monkeypatch)
+    env.persona.model = OFF_MODEL
+    env.persona.lightweight_model = OFF_MODEL
+    _register_camera(env, monkeypatch)
+    turn = _run_turn(env, "写真を撮って。", playbook=_tool_then_llm_playbook())
+    assert seen == []
+    # OFF のモデルでは TOOL の結果は記録に残らない今までの形のまま、最後に並ぶ
+    assert turn[0][-1] == {
+        "role": "user",
+        "content": f"<system>tool '{CAMERA_TOOL}' result:\n写真を撮った</system>",
+    }
+
+    env.persona.model = ON_MODEL
+    env.persona.lightweight_model = ON_MODEL
+    seen.clear()
+    _run_parent_with_child(env, monkeypatch, "child_first", "main")
+    # 子 (入れ子、先に送る) では走らず、親 (トップレベル) の最初の送信で一度だけ。
+    assert len(seen) == 1

@@ -232,9 +232,11 @@ class RuntimeEngine:
         されるのと同じ文面 (``presented_system_record_content``) で送る。記録に
         残さないと、最初の呼び出しで送ったこの結果の位置が次のターンでは返事に
         置き換わり、前方一致が割れる (docs/intent/persist_realtime_and_recall.md
-        不変条件 1、Codex 五巡目 #2)。記録に失敗したら同じ文面で id 無しのまま
-        足す (送る直前の検査 sea/runtime_llm._check_first_send_is_recorded が
-        WARN で知らせる)。
+        不変条件 1、Codex 五巡目 #2)。最初の送信の直前に送る列の後ろ側は記録から
+        読み直した並びに揃えられる (sea/runtime_llm._align_first_send_with_record
+        — ツールの中で書かれた記録もそこで並ぶ) が、記録に残らない結果は読み直しに
+        出ないので、揃える前提としてもここで記録に残す必要がある。記録に失敗したら
+        同じ文面で id 無しのまま足す (揃えた後の検査が WARN で知らせる)。
         """
         if state.get("_messages") is None:
             state["_messages"] = []

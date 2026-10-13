@@ -480,7 +480,9 @@ def records_additions_before_first_send(state: Any) -> bool:
     最初の呼び出しより後に足すもの (ターン内の往復) は不変条件 1 の外。
     事前スペルの結果は全モデル・全パルスで記録に残る (それ以前からの扱い)。
     これを使うのは、それ以外に最初の呼び出しの前に足しうるもの (TOOL ノードの
-    結果 — sea/runtime_engine.lg_tool_node)。OFF のモデルの列では常に偽。
+    結果 — sea/runtime_engine.lg_tool_node) と、最初の送信の直前に送る列を
+    記録に揃える一点 (:func:`_align_first_send_with_record`)。OFF のモデルの列
+    では常に偽。
     """
     return (
         isinstance(state, dict)
@@ -490,38 +492,74 @@ def records_additions_before_first_send(state: Any) -> bool:
     )
 
 
-def _check_first_send_is_recorded(messages: List[Any], state: Any) -> None:
-    """ターンの最初の LLM 呼び出しを送る直前に、記録に残らないメッセージを探す。
+def _align_first_send_with_record(messages: List[Any], state: Any) -> None:
+    """ターンの最初の LLM 呼び出しを送る直前に、送る列の後ろ側を記録に揃えて検査する。
 
-    不変条件 1 の機械検査 (docs/intent/persist_realtime_and_recall.md)。
-    :func:`records_additions_before_first_send` が真の列 (ON のモデルの残す
-    パルスで、まだ最初の呼び出しを送っていない) でだけ、一度だけ行い、
-    以後は送った印を立てる。見つかったら役割と先頭の文字を WARN で出す
-    (送信は止めない)。判定は :func:`sea.runtime_context.find_unrecorded_messages`
-    — 送る列に新しい差し込み口が足されたとき、印や記録の付け漏れをここで
-    見つける。
+    docs/intent/persist_realtime_and_recall.md §5「最初の呼び出しの前に足すもの」
+    「機械検査」。:func:`records_additions_before_first_send` が真の列 (ON の
+    モデルの残すパルスで、まだ最初の呼び出しを送っていない) でだけ、一度だけ
+    行い、以後は送った印を立てる。OFF のモデルの列と入れ子の Playbook
+    (``_pulse_type`` なし) では何もしない。
+
+    中身は :func:`sea.runtime_context.align_first_send_with_record`:
+    送る列の「最後の記録済みの発言 (境界) より後ろ」を、次のターンの
+    prepare_context と同じ取り出し・同じ変換で記録から読み直した並びに置き換え
+    (記録に残らないそのターンのまとまりなどはその後ろ)、揃えた後の並びを読み
+    直した並びと比べる。最初の送信の前に記録に書かれる行 (事前スペルの結果・
+    TOOL の結果・ツールの中で書かれる記録・MEMORIZE・今後足されるもの) を
+    差し込み口ごとに送る列へ同期する形は、付け漏れが巡ごとに出た (Codex
+    四巡目〜六巡目) ので、記録そのものから並べ直す一点にした。
+
+    食い違い (記録に残らない差し込み・送る列に無い記録の行) は役割と先頭の
+    文字を WARN で出す (送信は止めない)。揃えられなかった (材料が無い・読み
+    直しの失敗・境界が列に無い) ときも WARN を出し、列は変えない。
     """
     if not records_additions_before_first_send(state):
         return
     state[TURN_FIRST_SEND_DONE_KEY] = True
     try:
-        from sea.runtime_context import find_unrecorded_messages
+        from sea.runtime_context import (
+            FIRST_SEND_RECORD_SOURCE_KEY,
+            NOT_KEPT,
+            align_first_send_with_record,
+        )
 
-        unrecorded = find_unrecorded_messages(messages)
+        mismatches = align_first_send_with_record(
+            messages, state.get("_messages"),
+            state.get(FIRST_SEND_RECORD_SOURCE_KEY),
+        )
     except Exception:
         LOGGER.warning(
-            "[sea][persist_realtime_and_recall] could not check the first send "
-            "for unrecorded messages", exc_info=True,
+            "[sea][persist_realtime_and_recall] could not align the first send "
+            "of this turn with the record", exc_info=True,
         )
         return
-    for msg in unrecorded:
+    if mismatches is None:
         LOGGER.warning(
-            "[sea][persist_realtime_and_recall] the first send of this turn "
-            "carries a message that is not kept, so the next turn's list will "
-            "not start with this one (role=%s head=%r pulse=%s)",
-            msg.get("role"), str(msg.get("content") or "")[:80],
-            state.get("_pulse_id"),
+            "[sea][persist_realtime_and_recall] could not align the first send "
+            "of this turn with the record (no source / re-read failed / boundary "
+            "not in the list); the next turn's list may not start with this one "
+            "(pulse=%s)", state.get("_pulse_id"),
         )
+        return
+    for kind, msg in mismatches:
+        if kind == NOT_KEPT:
+            LOGGER.warning(
+                "[sea][persist_realtime_and_recall] the first send of this turn "
+                "carries a message that is not kept, so the next turn's list will "
+                "not start with this one (role=%s head=%r pulse=%s)",
+                msg.get("role"), str(msg.get("content") or "")[:80],
+                state.get("_pulse_id"),
+            )
+        else:
+            LOGGER.warning(
+                "[sea][persist_realtime_and_recall] the record has a row that the "
+                "first send of this turn does not carry at that position, so the "
+                "next turn's list will not start with this one (role=%s head=%r "
+                "pulse=%s)",
+                msg.get("role"), str(msg.get("content") or "")[:80],
+                state.get("_pulse_id"),
+            )
 
 
 def _freeze_turn_block_before_send(messages: Any, state: Any = None) -> None:
@@ -531,13 +569,14 @@ def _freeze_turn_block_before_send(messages: Any, state: Any = None) -> None:
     繰り返し) の送信の直前で呼ぶ。中身は
     :func:`sea.runtime_context.freeze_turn_realtime_and_recall_for_send`
     (初めて送るときだけ文面・画像・境界を写し取り、以後まとまりは不変)。
-    ターンの最初の送信では、記録に残らないメッセージの検査
-    (:func:`_check_first_send_is_recorded`) もここで行う。
-    失敗で LLM の経路を止めない。
+    ターンの最初の送信では、その前に送る列の後ろ側を記録に揃えて検査する
+    (:func:`_align_first_send_with_record`)。揃えるとそのターンのまとまりが
+    記録済みの行の後ろへ移るので、固定 (位置を決める発言の写し取り) より先に
+    行う。失敗で LLM の経路を止めない。
     """
     if not isinstance(messages, list):
         return
-    _check_first_send_is_recorded(messages, state)
+    _align_first_send_with_record(messages, state)
     try:
         from sea.runtime_context import freeze_turn_realtime_and_recall_for_send
 

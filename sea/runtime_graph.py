@@ -313,6 +313,12 @@ def compile_with_langgraph(
         # 新しく始まる (OFF のモデルでは今までどおり子も自分で実行する)。
         # 残すモデルで親の列を写したサブラインだけは、親の印を引き継ぐ。
         "_realtime_spells_once": realtime_spells_once,
+        # ターンの最初の LLM 呼び出しの直前に、送る列の後ろ側を記録から読み直して
+        # 揃える材料 (sea/runtime_context.FirstSendRecordSource — run_playbook が
+        # トップレベルの Pulse でだけ parent に置く)。使うのは残すパルス
+        # (_pulse_type が user / auto / schedule) の列だけ
+        # (sea/runtime_llm._align_first_send_with_record)。
+        "_first_send_record_source": parent.get("_first_send_record_source"),
         "_realtime_spells_executed": bool(
             persists_turn_block and forked_sub_line
             and parent.get("_realtime_spells_executed", False)
