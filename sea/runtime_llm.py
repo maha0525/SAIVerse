@@ -661,6 +661,26 @@ def _persist_turn_realtime_and_recall(runtime: Any, persona: Any, state: Any) ->
         )
 
 
+
+def _spell_result_media_metadata(
+    media: List[Dict[str, Any]], state: Any,
+) -> Dict[str, Any]:
+    """スペルの結果 (繰り返しの周・事前スペル) の画像を運ぶ metadata。
+
+    リアルタイム情報と自動想起を残すモデル (docs/intent/persist_realtime_and_recall.md)
+    では、結果の画像は履歴に残って次のターン以降も送られる。それを画像の枚数の
+    上限に数えると、残した画像が増えるたびに一番古い画像が文字に置き換わり、
+    前回の送信と先頭が一致しなくなる (Codex 四巡目)。そこで送るときと保存する
+    ときの両方に、上限の数に入れない印を付ける (残したリアルタイム情報の画像と
+    同じ扱い)。OFF のモデルは今までどおり印を付けない。
+    """
+    metadata: Dict[str, Any] = {"media": [dict(m) for m in media]}
+    if isinstance(state, dict) and state.get("_persist_realtime_and_recall"):
+        from llm_clients.utils import ATTACHMENT_LIMIT_EXEMPT_KEY
+
+        metadata[ATTACHMENT_LIMIT_EXEMPT_KEY] = True
+    return metadata
+
 def _store_reasoning_in_state(state: dict, reasoning_text: str, reasoning_details: Any) -> None:
     """reasoning を後段の speak/say/memorize ノード向けに state へ残す。
 
@@ -3927,7 +3947,9 @@ async def _run_spell_loop(
                 "content": presented_system_record_content(combined_results),
             }
             if aggregated_media:
-                spell_result_msg["metadata"] = {"media": aggregated_media}
+                spell_result_msg["metadata"] = _spell_result_media_metadata(
+                    aggregated_media, state,
+                )
                 LOGGER.info(
                     "[sea][spell] Round %d: attached %d media item(s) from spell results",
                     loop_count, len(aggregated_media),
@@ -3986,7 +4008,7 @@ async def _run_spell_loop(
                     # (OFF のモデルの履歴は今までどおり画像を持たない —
                     # persist_realtime_and_recall.md 不変条件 2)。
                     metadata=(
-                        {"media": [dict(m) for m in aggregated_media]}
+                        _spell_result_media_metadata(aggregated_media, state)
                         if aggregated_media and state.get("_persist_realtime_and_recall")
                         else None
                     ),
@@ -4758,7 +4780,9 @@ async def _execute_pre_spells(
             if isinstance(media_list, list):
                 aggregated_media.extend(media_list)
     if aggregated_media:
-        spell_result_msg["metadata"] = {"media": aggregated_media}
+        spell_result_msg["metadata"] = _spell_result_media_metadata(
+            aggregated_media, state,
+        )
         LOGGER.info(
             "[sea][pre_spells] Attached %d media item(s) from pre-spell results",
             len(aggregated_media),
@@ -4780,7 +4804,7 @@ async def _execute_pre_spells(
             # 画像を残すのはリアルタイム情報と自動想起を残すモデルだけ
             # (persist_realtime_and_recall.md 不変条件 2)。
             metadata=(
-                {"media": [dict(m) for m in aggregated_media]}
+                _spell_result_media_metadata(aggregated_media, state)
                 if aggregated_media and state.get("_persist_realtime_and_recall")
                 else None
             ),

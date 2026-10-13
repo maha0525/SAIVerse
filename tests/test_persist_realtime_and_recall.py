@@ -582,6 +582,44 @@ class TestPrefixInvariantOnTheRealPath:
         assert any(p.get("inline_data") for p in dumped_last[-1].get("parts") or [])
         assert len(_kept_rows(env)) == 2
 
+    def test_kept_spell_image_does_not_push_older_images_out(self, env):
+        """Codex 四巡目: 画像がすでに上限 (既定 4 枚) まである会話で、スペルの
+        繰り返しが画像を 1 枚返し、次の発言は文字だけ。ON のモデルで残した
+        スペルの結果の画像が上限の数に入ると、次のターンで一番古い画像が文字に
+        置き換わり、Gemini の送信形式で前回の最初の呼び出しと先頭が一致しなく
+        なる。残した画像は上限の数に入れない (送るときも、復元したときも)。"""
+        for i in range(4):
+            env.persona.history_manager.add_to_persona_only({
+                "role": "user", "content": f"写真{i}です。",
+                "metadata": {"media": [
+                    {"type": "image", "path": env.image_path, "mime_type": "image/png"},
+                ]},
+            })
+            env.persona.history_manager.add_to_persona_only(
+                {"role": "assistant", "content": f"写真{i}、見たよ。"},
+            )
+        env.llm.script = [
+            f"見てみる。\n/spell name='{REALTIME_SPELL}' args={{}}",
+            "見えたよ。",
+        ]
+        turn1 = _run_turn(env, "外を見て。")
+        assert len(turn1) == 2
+        turn2 = _run_turn(env, "何が見えた?")
+
+        _assert_first_call_prefix(turn1, turn2)
+        _assert_gemini_prefix(turn1[0], turn2[0])
+        _, dumped1 = _gemini_dump(turn1[0])
+        _, dumped2 = _gemini_dump(turn2[0])
+        images1 = sum(
+            1 for c in dumped1 for p in (c.get("parts") or []) if p.get("inline_data")
+        )
+        images2 = sum(
+            1 for c in dumped2 for p in (c.get("parts") or []) if p.get("inline_data")
+        )
+        # 一ターン目の 4 枚は二ターン目でも画像のまま。残したスペルの画像が 1 枚増える。
+        assert images1 == 4
+        assert images2 == 5
+
     def test_utterance_and_keeping_in_the_same_second(self, env):
         """発言と残す時刻が同じ秒に並んでも、位置は発言で決まる。"""
         fixed = time.time()
