@@ -88,6 +88,8 @@ python main.py <city_id> [オプション]
 - `supports_sampling_parameters`: `temperature` / `top_p` / `top_k` の送信対応（Gemini 3.6 Flash / 3.5 Flash-Lite 以降の非対応モデルでは `false`）
 - `supports_assistant_prefill`: Anthropic の assistant 発話で終わるコンテキストへの対応（Haiku 5.5 では `false`）。非対応時は履歴を書き換えず、送信前に `invalid_request` で停止
 - `supports_model_prefill`: 非空のモデル発話で終わるコンテキストへの対応（同モデル以降では `false`）
+- `timeout`: 1 回の API 呼び出しの待ち時間の上限（秒）。OpenAI 互換・OpenAI Codex・Gemini で効く（NVIDIA NIM は `request_kwargs.timeout`）。Gemini では環境変数 `GEMINI_TIMEOUT_SECONDS` より優先
+- `cache.explicit_supported`: Gemini の明示キャッシュ（`caches.create`）に対応するか（省略時 `true`）。`false` のモデル（Gemini 4 Argon）では自動キャッシュ・継続キャッシュを選んでいてもキャッシュを作らず、Google 側の暗黙キャッシュだけで動く
 - `base_url`: カスタムエンドポイント（互換API用）
 - `api_key_env`: APIキーの環境変数名
 - `parameters`: 温度・top_pなどのパラメータ制約

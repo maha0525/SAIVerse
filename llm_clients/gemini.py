@@ -370,6 +370,32 @@ GROUNDING_TOOL = types.Tool(google_search=types.GoogleSearch())
 MINIMAL_THINKING_LEVEL = "low"
 
 
+def _gemini_version(model: str) -> Optional[Tuple[int, int]]:
+    """Return ``(major, minor)`` parsed from a ``gemini-<major>[.<minor>]-...`` name.
+
+    ``gemini-4-argon`` -> ``(4, 0)``, ``gemini-3.8-flash`` -> ``(3, 8)``.
+    Names that do not start with a version number (aliases, other vendors)
+    return ``None``.
+    """
+    match = re.match(r"^gemini-(\d+)(?:\.(\d+))?(?:-|$)", (model or "").lower())
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2) or 0))
+
+
+def _is_gemini_3_or_later(model: str) -> bool:
+    """Gemini 3 以降の世代か (thinking_level の世代、関数呼び出しに署名が要る世代)。
+
+    版番号で判定するので Gemini 4 以降も拾う。旧来の判定 (``"-3-"`` を含む /
+    ``gemini-3`` で始まる) も残し、これまで 3 系と判定していた名前が外れないようにする。
+    """
+    model_lower = (model or "").lower()
+    if "-3-" in model_lower or model_lower.startswith("gemini-3"):
+        return True
+    version = _gemini_version(model_lower)
+    return version is not None and version >= (3, 0)
+
+
 def _uses_latest_generate_content_contract(model: str) -> bool:
     """Return whether *model* uses the July 2026 GenerateContent restrictions.
 
@@ -380,10 +406,9 @@ def _uses_latest_generate_content_contract(model: str) -> bool:
     model_lower = (model or "").lower()
     if model_lower.startswith("gemini-3.5-flash-lite"):
         return True
-    match = re.match(r"^gemini-(\d+)(?:\.(\d+))?(?:-|$)", model_lower)
-    if not match:
+    version = _gemini_version(model_lower)
+    if version is None:
         return False
-    version = (int(match.group(1)), int(match.group(2) or 0))
     return version >= (3, 6)
 
 
@@ -480,12 +505,23 @@ class GeminiClient(LLMClient):
             supports_video=supports_video,
         )
         prefer_paid = cfg.get("prefer_paid", False)
-        self.free_client, self.paid_client, self.client = build_gemini_clients(prefer_paid=prefer_paid)
+        # モデル設定の timeout (秒、正の数) があれば env GEMINI_TIMEOUT_SECONDS より優先する。
+        # 長考するモデル (Gemini 4 Argon など) は公式が 15 分以上を推奨している。
+        client_kwargs: Dict[str, Any] = {"prefer_paid": prefer_paid}
+        timeout = cfg.get("timeout")
+        if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) and timeout > 0:
+            client_kwargs["timeout_seconds"] = float(timeout)
+        self.free_client, self.paid_client, self.client = build_gemini_clients(**client_kwargs)
         self.model = model
 
         # Phase 3 / M1: explicit cache 設定 (cache.type == "gemini_explicit" のときだけ有効)。
         # cfg はモデル設定 dict なので self.model の API 名 lookup を経ず直接持てる。
         self._cache_config: Dict[str, Any] = cfg.get("cache") or {}
+        # cache.explicit_supported: false のモデルは caches.create (明示キャッシュ) を
+        # 受け付けない (Gemini 4 Argon など)。省略時は True。
+        self._explicit_cache_supported: bool = bool(
+            self._cache_config.get("explicit_supported", True)
+        )
 
         # Image size limit (raw bytes, before base64 encoding)
         self.max_image_bytes: Optional[int] = cfg.get("max_image_bytes")
@@ -505,13 +541,14 @@ class GeminiClient(LLMClient):
         self._thinking_level: Optional[str] = None
         self._thinking_budget: Optional[int] = None
         self._include_thoughts: bool = cfg.get("include_thoughts", False)
-        # Auto-enable for 2.5/3 series models
+        # Gemini 3 以降 (版番号で判定するので 4 以降も含む)。thinking_level の世代で、
+        # 関数呼び出しパートの thought_signature を省くと API エラーになりうる。
+        self._is_gemini_3_or_later: bool = _is_gemini_3_or_later(model)
+        # Auto-enable for 2.5 and 3-or-later models
         if not self._include_thoughts:
             model_lower = (model or "").lower()
-            self._include_thoughts = "2.5" in model_lower or "-3-" in model_lower or model_lower.startswith("gemini-3")
+            self._include_thoughts = "2.5" in model_lower or self._is_gemini_3_or_later
         self._multi_turn_thinking: bool = cfg.get("multi_turn_thinking", True)
-        model_lower = (model or "").lower()
-        self._is_gemini_3x: bool = "-3-" in model_lower or model_lower.startswith("gemini-3")
 
         # Safety settings overrides
         self._safety_overrides: Dict[str, str] = {}
@@ -749,6 +786,10 @@ class GeminiClient(LLMClient):
         継続キャッシュで確保した参照の name は ``held`` に積む。呼び出し元は応答が
         終わったら :meth:`_continuous_release_held` で返す。
         """
+        # 明示キャッシュ非対応のモデル (cache.explicit_supported: false) は caches.create が
+        # 毎回拒否されるだけなので、三経路とも試みず Google 側の暗黙キャッシュに任せる。
+        if not self._explicit_cache_supported:
+            return (None, contents, None)
         if self._AUTO_CACHE_ENABLED:
             if continuous_cache:
                 cc = self._continuous_cache_wrap(
@@ -1115,7 +1156,7 @@ class GeminiClient(LLMClient):
 
         世代ごとに「最小にする」の形が違うので、ここで分ける:
 
-        - **Gemini 3 系** (thinking_level の世代): :data:`MINIMAL_THINKING_LEVEL`
+        - **Gemini 3 以降** (thinking_level の世代、4 Argon も含む): :data:`MINIMAL_THINKING_LEVEL`
           を指定する。"minimal" は 3.7 以降で廃止されていて送るとエラーになるため、
           世代を跨いで安全な "low" を使う。
         - **Gemini 2.5 の Flash / Flash-Lite** (thinking_budget の世代): 予算 0 =
@@ -1136,7 +1177,7 @@ class GeminiClient(LLMClient):
             )
             return
 
-        if self._is_gemini_3x:
+        if self._is_gemini_3_or_later:
             self._thinking_level = MINIMAL_THINKING_LEVEL
             logging.debug(
                 "[gemini] prefer_minimal_reasoning: model=%s thinking_level=%s",
@@ -1580,7 +1621,7 @@ class GeminiClient(LLMClient):
                     fc_part = types.Part(
                         function_call=types.FunctionCall(id=fn_id or None, name=fn_name, args=fn_args)
                     )
-                    if self._multi_turn_thinking or self._is_gemini_3x:
+                    if self._multi_turn_thinking or self._is_gemini_3_or_later:
                         _ts = tc.get("thought_signature") if isinstance(tc, dict) else None
                         if _ts:
                             fc_part.thought_signature = _ts

@@ -234,6 +234,10 @@ n+1 回目: … / AIの返事(n-1) / ユーザーの発言(n) / (知覚) / AIの
 - 「会話の返事」は、ユーザーの発言に返事をする Pulse (`pulse_type="user"`) の LLM 呼び出しを指す。schedule の Pulse とペルソナ同士の会話は含めない (CONVERSATION アスペクトはこれらも含むので、アスペクトでは判定しない)。どの呼び出しが会話の返事かと、境目の位置は、SEA の側から Gemini のクライアントへ渡す。クライアントの中では、その呼び出しが何のためのものかを判別できないため。
 - 継続キャッシュの各キャッシュは、作るときに TTL を付ける。TTL は「作ってから何分で消えるか」で、作成は返事と並行して始まるので、最後の往復の返事が終わってから数えるより、返事の生成時間の分だけ早く消える。TTL の上限を 20 分にするのは、最後の LLM 呼び出しから anchor の TTL (Gemini 既定 1200 秒、`session_lifecycle.get_anchor_validity_seconds`) が過ぎると、次の呼び出しで head が作り直されてキャッシュが一致しなくなるため。
 
+#### 明示キャッシュに対応しないモデル (2026-10-14 追加)
+
+モデル設定で `cache.explicit_supported: false` としたモデル (2026-10 時点で Gemini 4 Argon) では、継続キャッシュ・自動キャッシュ・モデル設定の explicit cache のどれを選んでいても、キャッシュの作成 (`caches.create`) を一切試みず、Google 側の暗黙キャッシュ (implicit) だけで動く。根拠は二つで、公式文書が Argon について「explicit caching (`caches.create` / `cached_content`) は非対応、implicit caching のみ」と明記していることと、Models API の `supported_actions` が `generateContent` / `countTokens` / `batchGenerateContent` だけで、他の Gemini にある `createCachedContent` を含まないこと。作成を試みても毎回拒否されるだけなので、`llm_clients/gemini.py` の `_apply_request_cache` の入口で三つの経路をまとめて止める。省略時は `true` (従来どおり)。
+
 #### 実装の置き場 (見込み)
 
 - `llm_clients/gemini_cache.py`: キャッシュごとに「先頭から何件を入れたか」と、その範囲の中身全体の署名 (上の「一致の判定」の粒度) を覚え、今回の並びの先頭と一致するキャッシュを探す処理を足す。今は中身全体のハッシュ 1 個で完全一致しか見ていない。
@@ -549,6 +553,7 @@ context が 1024 tokens に満たない場合、create が失敗する。標準�
 
 ## 改訂履歴
 
+- v0.15 (2026-10-14): §3.5 に「明示キャッシュに対応しないモデル」を追加。モデル設定 `cache.explicit_supported: false` のモデル (Gemini 4 Argon) では、自動キャッシュ・継続キャッシュを選んでいてもキャッシュの作成を試みず、暗黙キャッシュだけで動く。
 - v0.14 (2026-10-11): §3.5 「Gemini の継続キャッシュ (高速応答モード)」を追加。音声会話でキャッシュの作成 (一往復 14〜27 秒) が待ち時間に乗っていたことから、まはーと設計した。キャッシュの境目は「その Pulse の履歴の中の最後の AI の返事の直後」(同じ Pulse の何回目の呼び出しでも同じ位置)、n 回目は一つ前に作ったキャッシュを使い、次の往復用のキャッシュを返事と並行して作る。キャッシュに入っていない分が通常料金になるため自動キャッシュとは一長一短で、グローバル設定でどちらか一方を選ぶ。効かせるのは会話の返事だけ。自動キャッシュの保持秒数の設定は残す (まはー判断)。
 - v0.1 (2026-05-22): 起草。Gemini explicit cache の実測 (書き込み無料 / storage 課金 / extend 可能) を受けて、3 モード抽象 + キャッシュタイマー UI + provider 統一の設計を整理。既存 ChatOptions の cache toggle はマニュアルモードの実体として温存・統合。
 - v0.2 (2026-05-22): まはー指摘で抜本修正。「pulse」を「session」と取り違えていた、自動 extend / idle delete を勝手に追加していた等の前提崩しを是正。標準モードは pulse 単位 (pulse 終了 delete)、連続モードは pulse 跨ぎ + TTL 任せ自然消滅、extend/delete は手動制御のみ、と明確化。cache key は `(persona_id, line_id)` に揃え、cached_head_architecture と整合。
