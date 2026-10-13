@@ -228,7 +228,7 @@ Cached Head が「Metabolism まで snapshot を凍結」、visual_context / mem
 
 消費 (flush) は**消費バッチ**を単一トランザクションで確定する: バッチ行 (一意 id / `consumed_at` / `pulse_id` / `episode_id` / **確定レンダリング済みテキスト** = reduce → 回収 (未消費バッファの回収 — [room_state_packages.md](room_state_packages.md) §11-2) → 部屋の様子の消費時描画 (`render_pending_room_states` — 描画はこの一回だけ、同 §11-2 規則 2) → format の結果 / メディア / 付記印 `annexed_entry_id` = NULL) を挿入し、消費した項目にバッチ id と `consumed_at` の印を打つ。「その瞬間に知覚した」証跡はこのバッチ行であり、**ペルソナが見た文面そのもの**が消費時に確定・永続化される (後から台帳の生の行を読み直して再構成しない — 再構成は reduce で消えた中間状態を復活させ、秒精度の時刻衝突でグループを混ぜる)。二段 commit の隙間を塞ぐためにあった C6 の照合機構は**機構ごと退役**。消費済み行・バッチ行は削除しない。
 
-**消費を伴わない種類 (2026-10-14)**: 同じ表 `perception_batches` に、種類の欄 `kind` で区別した別の行が入る。既存の行と知覚のまとめは `kind = 'perception'` (列の既定値)。`kind = 'realtime_and_recall'` は、モデル設定 `cache.persist_realtime_and_recall` を ON にしたモデルで、そのターンのリアルタイム情報と自動想起を**送った文面のまま**残した行 ([persist_realtime_and_recall.md](persist_realtime_and_recall.md) §4.2)。この行は台帳の項目に消費印を打たない (知覚の消費とは別のトランザクションで、最初の LLM 呼び出しが成功した後に一行書く)。出した記憶の識別子を `recalled_json` に構造化して持ち、境界の列 (`boundary_created_at` / `boundary_rowid`) は送った列でこの行の直前にあった発言を指す。保存先を揃えたのは、付記で外れる規則・Metabolism の勘定・位置を決める境界の列・あらすじの材料への引き渡しに前例の仕組みのまま乗るため。
+**消費を伴わない種類 (2026-10-14)**: 同じ表 `perception_batches` に、種類の欄 `kind` で区別した別の行が入る。既存の行と知覚のまとめは `kind = 'perception'` (列の既定値)。`kind = 'realtime_and_recall'` は、モデル設定 `cache.persist_realtime_and_recall` を ON にしたモデルで、そのターンのリアルタイム情報と自動想起を**送った文面のまま**残した行 ([persist_realtime_and_recall.md](persist_realtime_and_recall.md) §4.2)。この行は台帳の項目に消費印を打たない (知覚の消費とは別のトランザクションで、生成が正常に完了した後に一行書く)。出した記憶の識別子を `recalled_json` に構造化して持ち、境界の列 (`boundary_created_at` / `boundary_rowid`) は送った列でこの行の直前にあった発言を指す。保存先を揃えたのは、付記で外れる規則・Metabolism の勘定・位置を決める境界の列・あらすじの材料への引き渡しに前例の仕組みのまま乗るため。
 
 ### 10.3 提示 — 未付記バッチの時刻順マージ
 

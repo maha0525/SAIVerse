@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import time
@@ -93,9 +94,12 @@ def mark_cache_boundary(
 # docs/intent/persist_realtime_and_recall.md
 # ---------------------------------------------------------------------------
 
-#: 送る列に出す「残した行」のブロックが持つ、位置を決める発言の id
-#: (``merge_perception_blocks`` がこの発言の直後に置く)。
-REALTIME_AND_RECALL_BOUNDARY_ID_KEY = "__realtime_and_recall_boundary_id__"
+#: 送る列に出すブロックが持つ、位置を決める発言の id
+#: (``merge_perception_blocks`` がこの発言の直後に置く)。残した行は必ず持つ。
+#: 知覚のまとめは、残す設定のモデルへ送るときだけ持つ — 境界
+#: (``boundary_created_at`` / ``boundary_rowid``) で位置を決め、同じ秒の前後が
+#: 入れ替わらないようにする (persist_realtime_and_recall.md §4.3)。
+BOUNDARY_ANCHOR_ID_KEY = "__boundary_anchor_id__"
 #: 送る列に出す「残した行」のブロックが持つ、文面に入っている自動想起の
 #: ``[[source_type, source_id], ...]`` (次のターンの候補から外すのに使う)。
 REALTIME_AND_RECALL_RECALLED_KEY = "__realtime_and_recall_recalled__"
@@ -199,21 +203,100 @@ def find_turn_realtime_and_recall_index(
     return None
 
 
+def _turn_info(msg: Any) -> Optional[Dict[str, Any]]:
+    meta = msg.get("metadata") if isinstance(msg, dict) else None
+    info = meta.get(TURN_REALTIME_AND_RECALL_KEY) if isinstance(meta, dict) else None
+    return info if isinstance(info, dict) else None
+
+
+def is_turn_realtime_and_recall_sent(turn_msg: Dict[str, Any]) -> bool:
+    """そのターンのまとまりが、もう一度でも LLM へ送られたか。
+
+    送ったまとまりは不変 (persist_realtime_and_recall.md §4.1) — 送った後に
+    足すと、保存する文面・次の呼び出しの文面・保存して次のターンに出る文面が
+    食い違う。
+    """
+    info = _turn_info(turn_msg)
+    return bool(info and info.get("sent"))
+
+
+def freeze_turn_realtime_and_recall_for_send(
+    messages: Sequence[Dict[str, Any]],
+) -> None:
+    """LLM へ送る直前に、そのターンのまとまりを固定して「保存待ち」にする。
+
+    persist_realtime_and_recall.md §4.1 / §4.2。初めて送るときに、送る文面・
+    画像・位置を決める発言 (送る列でまとまりより前にある、id を持つ発言を
+    新しい順に) を写し取り、以後は足さない。保存 (生成が正常に完了した地点 —
+    sea/runtime_llm._persist_turn_realtime_and_recall) は、この写しを書く。
+    二度目以降の送信 (スペルの繰り返し・空応答のやり直し) では何もしない。
+    まとまりが無い列 (OFF のモデル・出すものが無いターン) でも何もしない。
+    """
+    idx = find_turn_realtime_and_recall_index(messages)
+    if idx is None:
+        return
+    turn_msg = messages[idx]
+    info = _turn_info(turn_msg)
+    if info is None or info.get("sent"):
+        return
+    meta = turn_msg.get("metadata") or {}
+    media = meta.get("media") if isinstance(meta.get("media"), list) else None
+    info["pending"] = {
+        "content": str(turn_msg.get("content") or ""),
+        "media": [dict(m) for m in media if isinstance(m, dict)] if media else None,
+        "recalled": [list(k) for k in (info.get("recalled") or [])],
+        "boundary_message_ids": [
+            str(m.get("id")) for m in reversed(list(messages[:idx]))
+            if isinstance(m, dict) and m.get("id")
+        ],
+    }
+    info["sent"] = True
+
+
+def copy_turn_realtime_and_recall_for_child(
+    messages: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """子の Playbook へ渡す列を作る (そのターンのまとまりだけ写しにする)。
+
+    persist_realtime_and_recall.md §4.1。子の列は親の列の浅い写しなので、
+    そのままでは親のまとまりの辞書 (文面・保存待ち・保存済みの印) を共有し、
+    子の追記が親の送ったまとまりを書き換える。まとまりだけを辞書ごと写し、
+    写しには「子の写し」の印を付けて保存の対象から外す (保存はそのターンの
+    親だけが行う)。ほかのメッセージは今までどおり共有する。
+    """
+    out = list(messages)
+    idx = find_turn_realtime_and_recall_index(out)
+    if idx is None:
+        return out
+    original = out[idx]
+    meta = dict(original.get("metadata") or {})
+    info = copy.deepcopy(_turn_info(original) or {})
+    info["child_copy"] = True
+    meta[TURN_REALTIME_AND_RECALL_KEY] = info
+    if isinstance(meta.get("media"), list):
+        meta["media"] = [dict(m) if isinstance(m, dict) else m for m in meta["media"]]
+    out[idx] = {**original, "metadata": meta}
+    return out
+
+
 def add_realtime_spell_lines_to_turn_message(
     turn_msg: Dict[str, Any], new_content: str,
-) -> None:
+) -> bool:
     """リアルタイムスペルの結果の行を、そのターンのまとまりのリアルタイム情報に足す。
 
     足し方は今までの追記 (リアルタイム情報の ``</system>`` の直前に入れる) と
     同じ。リアルタイム情報がまだ無い (時刻の項目が両方 OFF) なら、スペルの
     結果だけのリアルタイム情報を作る。自動想起の文面には触れない — 文面全体の
     ``</system>`` を置換すると、想起の閉じタグの前にも結果が入ってしまう。
+
+    もう送ったまとまりには足さない (False を返す — 呼び出し側は別の末尾の
+    メッセージに置き、保存しない)。足したら True。
     """
+    info = _turn_info(turn_msg)
+    if info is None or info.get("sent"):
+        return False
     if not new_content:
-        return
-    info = (turn_msg.get("metadata") or {}).get(TURN_REALTIME_AND_RECALL_KEY)
-    if not isinstance(info, dict):
-        return
+        return True
     realtime = info.get("realtime")
     if realtime:
         if "</system>" in realtime:
@@ -225,6 +308,7 @@ def add_realtime_spell_lines_to_turn_message(
         realtime = f"<system>\n## リアルタイム情報\n{new_content}\n</system>"
     info["realtime"] = realtime
     turn_msg["content"] = compose_turn_realtime_and_recall_content(info)
+    return True
 
 
 #: head (前置き) に必ず並べる Section。**用途やラインで出し分けない。**
@@ -851,7 +935,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
     # ---- リアルタイム情報と自動想起を残すモデルか (モデルごとの設定) ----
     # docs/intent/persist_realtime_and_recall.md。ON のモデルへ送るときは、
     # そのターンのリアルタイム情報と自動想起を一つのまとまりにして送る列の
-    # 一番後ろに置き (下)、最初の LLM 呼び出しが成功した後に送った文面のまま
+    # 一番後ろに置き (下)、生成が正常に完了した後に送った文面のまま
     # 残す (sea/runtime_llm._persist_turn_realtime_and_recall)。OFF のモデルは
     # 今までどおり (最新の発言の直前に置き、次のターンには消える)。
     # 判定は組むときのモデルで行い、呼び出し元へ返す (リアルタイムスペルが
@@ -1099,7 +1183,10 @@ def list_presented_perception_blocks(
       §4.3) は、``model_key`` のモデルが残す設定のときだけ、位置を決める発言が
       ``recent`` にあるものだけを出す。文面は残したまま (縮み・開き直しを
       当てない)、並びは :func:`merge_perception_blocks` が発言の直後に決める。
-      付記で下りるのは知覚のまとめと同じ。
+      付記で下りるのは知覚のまとめと同じ。残す設定のモデルへ送る列では、
+      知覚のまとめにも位置を決める発言を付ける
+      (:func:`_resolve_perception_anchors_locked` — 同じ秒の前後が入れ替わら
+      ないように)。OFF のモデルの知覚は今までどおり秒の順。
     - **この関数は台帳へ一切書かない** (2026-09-09 以降)。読み取り専用の画面
       (context-status)・仮定の窓の下見 (読み戻し / 引き戻しのプレビュー)・
       コンテキストプレビューと、実際に送る側が同じ一枚を通る — 測る列と送る列が
@@ -1277,6 +1364,15 @@ def list_presented_perception_blocks(
                 count_batch_records(sai_mem.conn, [b.id for b in dropped])
                 if dropped else {}
             )
+            # 残す設定のモデルへ送る列では、知覚のまとめも境界の発言で位置を
+            # 決める (persist_realtime_and_recall.md §4.3)。秒の比較だと、発言・
+            # 知覚・返事・次の発言が同じ秒に並んだとき、知覚が返事の後ろへ
+            # 移って前回の送信と先頭が一致しなくなる。OFF のモデルは今までどおり
+            # 秒の順。
+            perception_anchors = (
+                _resolve_perception_anchors_locked(sai_mem.conn, presented, recent)
+                if persist_mode else {}
+            )
 
         # 窓絞り (Chronicle 無効) の境界は台帳へ書けないので、そこで土台が抜けた
         # 差分はここで全文へ開き直す (純関数・決定論)。台帳側の回復 (付記と同一
@@ -1317,6 +1413,9 @@ def list_presented_perception_blocks(
                 # id を持たない — キーごと載せない。読者は .get() で読む
                 # (書き手はここ一枚、他の読み手は本目印を前提にしていない)。
                 metadata["__perception_batch_id__"] = batch.id
+                anchor = perception_anchors.get(int(batch.id))
+                if anchor:
+                    metadata[BOUNDARY_ANCHOR_ID_KEY] = anchor
             if batch.room_state_json or batch.id is None:
                 # 部屋の記帳 (room_state_json) を持つバッチは「部屋の様子」。
                 # 幻のブロック (id なし) は置き直しの下見そのもの — 実 INSERT
@@ -1365,6 +1464,63 @@ def list_presented_perception_blocks(
         return []
 
 
+def _resolve_perception_anchors_locked(
+    conn: Any, presented: Sequence[Any], recent: Sequence[Dict[str, Any]],
+) -> Dict[int, str]:
+    """知覚のまとめの境界を、``recent`` の中の位置を決める発言の id に引く。
+
+    残す設定のモデルへ送る列だけで使う (persist_realtime_and_recall.md §4.3)。
+    知覚のまとめの境界 (``boundary_created_at`` / ``boundary_rowid``) は「バッチ
+    確定時点で最後に保存済みだった発言」で、送る列に出ない行 (判断のパルスの
+    記録・別のスレッドの行) のこともある。だから完全一致ではなく、``recent`` の
+    発言のうち正典順序キー ``(created_at, rowid)`` が境界以下の最後のものを
+    位置を決める発言にする (その発言の直後 = 確定時点で送る列の最後に居た発言の
+    直後)。
+
+    境界が NULL の古い行、境界より前に ``recent`` の発言が無い行は含めない
+    (呼び出し側で従来の秒の比較に落ちる)。返り値はバッチ id → 発言の id。
+
+    **呼び出し側が ``sai_mem._db_lock`` を保持している前提**。
+    """
+    targets = [
+        b for b in presented
+        if not b.is_realtime_and_recall and b.id is not None
+        and b.boundary_created_at is not None and b.boundary_rowid is not None
+    ]
+    if not targets:
+        return {}
+    ids = [
+        str(m.get("id")) for m in recent if isinstance(m, dict) and m.get("id")
+    ]
+    if not ids:
+        return {}
+    keyed: List[tuple] = []
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        for mid, created_at, rowid in conn.execute(
+            f"SELECT id, created_at, rowid FROM messages WHERE id IN ({placeholders})",
+            tuple(chunk),
+        ).fetchall():
+            if created_at is None or rowid is None:
+                continue
+            keyed.append((int(created_at), int(rowid), str(mid)))
+    if not keyed:
+        return {}
+    keyed.sort()
+    import bisect
+    keys = [(k[0], k[1]) for k in keyed]
+    anchors: Dict[int, str] = {}
+    for b in targets:
+        pos = bisect.bisect_right(
+            keys, (int(b.boundary_created_at), int(b.boundary_rowid)),
+        )
+        if pos == 0:
+            continue
+        anchors[int(b.id)] = keyed[pos - 1][2]
+    return anchors
+
+
 def _realtime_and_recall_block(
     batch: Any, boundary_message_id: Optional[str],
 ) -> Optional[Dict[str, Any]]:
@@ -1393,7 +1549,7 @@ def _realtime_and_recall_block(
         PERSISTED_REALTIME_AND_RECALL_KEY: True,
         ATTACHMENT_LIMIT_EXEMPT_KEY: True,
         "__perception_batch_id__": int(batch.id),
-        REALTIME_AND_RECALL_BOUNDARY_ID_KEY: str(boundary_message_id),
+        BOUNDARY_ANCHOR_ID_KEY: str(boundary_message_id),
         REALTIME_AND_RECALL_RECALLED_KEY: [
             [st, sid] for st, sid in batch.recalled_keys()
         ],
@@ -1417,23 +1573,28 @@ def _block_batch_id(msg: Dict[str, Any]) -> int:
         return 0
 
 
-def _place_realtime_and_recall_blocks(
+def _block_anchor_id(msg: Dict[str, Any]) -> str:
+    """ブロックの位置を決める発言の id (持たなければ空文字)。"""
+    meta = msg.get("metadata") if isinstance(msg, dict) else None
+    return str((meta or {}).get(BOUNDARY_ANCHOR_ID_KEY) or "")
+
+
+def _place_anchored_blocks(
     merged: List[Dict[str, Any]], anchored: Sequence[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """残した行を、位置を決める発言の直後に置く (merge_perception_blocks の後段)。
+    """ブロックを、位置を決める発言の直後に置く (merge_perception_blocks の後段)。
 
     位置は時刻の秒ではなく発言で決める (persist_realtime_and_recall.md §4.3 —
     最新の発言と返事のすき間という狭い位置に入るので、秒の丸めで前後が
     入れ替わる余地がある)。発言の直後に既に並んでいるブロックのうち、自分より
     台帳 id の小さいもの (その発言の後ろに並ぶ、自分より先に確定した知覚の
     まとめや残した行) の後ろに入る — 同じ発言の直後に並ぶもの同士は表の id の
-    順。発言が列に無ければ置かない (送らない)。
+    順。発言が列に無ければ置かない (送らない — 呼び出し側は、知覚のまとめを
+    ここへ渡す前に、発言が列にあることを確かめておく)。
     """
     out = list(merged)
     for block in sorted(anchored, key=_block_batch_id):
-        boundary_id = str(
-            (block.get("metadata") or {}).get(REALTIME_AND_RECALL_BOUNDARY_ID_KEY) or ""
-        )
+        boundary_id = _block_anchor_id(block)
         if not boundary_id:
             continue
         idx = None
@@ -1466,12 +1627,26 @@ def merge_perception_blocks(
     生ログが先 — 消費は書き込みの後に起きた事実)。送る側と測る側が**同じ並び**
     を見るための一点。
 
-    残したリアルタイム情報と自動想起の行
-    (:data:`PERSISTED_REALTIME_AND_RECALL_KEY`) だけは時刻ではなく位置を決める
-    発言で並べる (:func:`_place_realtime_and_recall_blocks`)。
+    位置を決める発言 (:data:`BOUNDARY_ANCHOR_ID_KEY`) を持つブロックは、時刻では
+    なくその発言の直後に並べる (:func:`_place_anchored_blocks`)。持つのは
+    残したリアルタイム情報と自動想起の行 (:data:`PERSISTED_REALTIME_AND_RECALL_KEY`)
+    と、残す設定のモデルへ送るときの知覚のまとめ (組成側
+    :func:`list_presented_perception_blocks` が付ける)。知覚のまとめの発言が
+    ``recent`` に無ければ (組成と並べで別の列を渡した場合)、時刻の順に落とす
+    — 知覚は消さない。残した行は発言が無ければ出さない (§4.3)。
     """
-    epoch_blocks = [b for b in blocks if not is_persisted_realtime_and_recall(b)]
-    anchored = [b for b in blocks if is_persisted_realtime_and_recall(b)]
+    recent_ids = {
+        str(m.get("id")) for m in recent if isinstance(m, dict) and m.get("id")
+    }
+    epoch_blocks: List[Dict[str, Any]] = []
+    anchored: List[Dict[str, Any]] = []
+    for b in blocks:
+        if is_persisted_realtime_and_recall(b):
+            anchored.append(b)
+        elif _block_anchor_id(b) and _block_anchor_id(b) in recent_ids:
+            anchored.append(b)
+        else:
+            epoch_blocks.append(b)
     merged: List[Dict[str, Any]] = []
     bi = 0
     for msg in recent:
@@ -1486,7 +1661,7 @@ def merge_perception_blocks(
         merged.append(msg)
     merged.extend(epoch_blocks[bi:])
     if anchored:
-        merged = _place_realtime_and_recall_blocks(merged, anchored)
+        merged = _place_anchored_blocks(merged, anchored)
     return merged
 
 

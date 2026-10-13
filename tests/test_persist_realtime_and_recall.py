@@ -67,8 +67,14 @@ class _FakeLLM(LLMClient):
         self.calls: List[List[Dict[str, Any]]] = []
         self.script: List[str] = []
         self.fail_next = False
+        #: tools 付きノードの全文一括経路は dict ({"type", "content"}) を受け取る。
+        self.tool_dict = False
+        #: 次のストリームの後に一度だけ返す「サーバーが切った」申告 (504 等)。
+        self.stream_error: Optional[Dict[str, Any]] = None
+        #: ストリームの最初の chunk の後でユーザーが止める (CancellationToken)。
+        self.cancel_token = None
 
-    def generate(self, messages, tools=None, temperature=None, response_schema=None, **kwargs):
+    def _next_text(self, messages) -> str:
         self.calls.append(copy.deepcopy(list(messages)))
         if self.fail_next:
             self.fail_next = False
@@ -77,14 +83,25 @@ class _FakeLLM(LLMClient):
             return self.script.pop(0)
         return f"返事{len(self.calls)}です。"
 
+    def generate(self, messages, tools=None, temperature=None, response_schema=None, **kwargs):
+        text = self._next_text(messages)
+        if self.tool_dict:
+            return {"type": "text", "content": text}
+        return text
+
     def generate_stream(self, messages, tools=None, temperature=None, **kwargs):
-        text = self.generate(messages, tools=tools, temperature=temperature, **kwargs)
+        text = self._next_text(messages)
+        if not text:
+            return
         half = max(1, len(text) // 2)
         yield text[:half]
+        if self.cancel_token is not None:
+            self.cancel_token.cancel()
         yield text[half:]
 
     def consume_stream_error(self):
-        return None
+        err, self.stream_error = self.stream_error, None
+        return err
 
 
 class _FakeRecall:
@@ -278,7 +295,10 @@ def _playbook():
     return PlaybookSchema(**data)
 
 
-def _run_turn(env, user_text: Optional[str], *, pulse_type: str = "user") -> List[List[Dict[str, Any]]]:
+def _run_turn(
+    env, user_text: Optional[str], *, pulse_type: str = "user", playbook=None,
+    cancellation_token=None,
+) -> List[List[Dict[str, Any]]]:
     """ユーザー発言を保存して 1 Pulse を実際の経路で走らせ、この Pulse の呼び出し列を返す。"""
     from sea.pulse_context import aspect_from_pulse_type
 
@@ -289,11 +309,30 @@ def _run_turn(env, user_text: Optional[str], *, pulse_type: str = "user") -> Lis
     env.adapter.flush_perception_buffer()
     before = len(env.llm.calls)
     env.runtime._run_playbook(
-        _playbook(), env.persona, BUILDING_ID, user_text or "", auto_mode=False,
+        playbook or _playbook(), env.persona, BUILDING_ID, user_text or "",
+        auto_mode=False,
         pulse_type=pulse_type,
         pulse_line_aspect=aspect_from_pulse_type(pulse_type),
+        cancellation_token=cancellation_token,
     )
     return env.llm.calls[before:]
+
+
+def _custom_playbook(nodes: List[Dict[str, Any]], name: str = "test_pb"):
+    from sea.playbook_models import PlaybookSchema
+
+    return PlaybookSchema(
+        name=name, description="test",
+        input_schema=[{"name": "input", "description": "User input"}],
+        nodes=nodes, start_node=nodes[0]["id"],
+    )
+
+
+def _push_perception(env, text: str) -> None:
+    from sai_memory.perception_buffer import push_perception
+
+    with env.adapter._db_lock:
+        push_perception(env.adapter.conn, "world_state", text)
 
 
 def _sent(messages: List[Dict[str, Any]]) -> List[tuple]:
@@ -325,6 +364,42 @@ def _assert_prefix(first: List[Dict[str, Any]], second: List[Dict[str, Any]]) ->
     )
 
 
+def _assert_turn_prefix(
+    prev_turn: List[List[Dict[str, Any]]], next_turn: List[List[Dict[str, Any]]],
+) -> None:
+    """不変条件 1: あるターンの最後の LLM 呼び出しの列 (と最初の呼び出しの列) が、
+    次のターンの最初の呼び出しの列の先頭と一字一句同じ。"""
+    _assert_prefix(prev_turn[0], next_turn[0])
+    _assert_prefix(prev_turn[-1], next_turn[0])
+
+
+def _gemini_dump(messages: List[Dict[str, Any]]):
+    """Gemini の送信形式 (system_instruction, contents) へ変換した写し。"""
+    from unittest.mock import MagicMock, patch
+
+    from llm_clients.gemini import GeminiClient
+    from saiverse.model_configs import get_model_config
+
+    with patch(
+        "llm_clients.gemini.build_gemini_clients",
+        return_value=(MagicMock(), MagicMock(), MagicMock()),
+    ):
+        client = GeminiClient(
+            "gemini-4-argon", config=get_model_config("gemini-4-argon"),
+            supports_images=True,
+        )
+    system, contents = client._convert_messages(messages)
+    return system, [c.model_dump(mode="json") for c in contents]
+
+
+def _assert_gemini_prefix(first: List[Dict[str, Any]], second: List[Dict[str, Any]]) -> None:
+    sys1, dumped1 = _gemini_dump(first)
+    sys2, dumped2 = _gemini_dump(second)
+    assert sys1 == sys2
+    assert len(dumped2) > len(dumped1)
+    assert dumped2[: len(dumped1)] == dumped1
+
+
 # ---------------------------------------------------------------------------
 # 不変条件 1 — 前回の送信は今回の送信の先頭そのもの (実際の経路)
 # ---------------------------------------------------------------------------
@@ -339,7 +414,7 @@ class TestPrefixInvariantOnTheRealPath:
         env.recall.hits = [_hit("page-a", "海辺の町"), _hit("page-b", "灯台")]
         turn2 = _run_turn(env, "灯台もあったね。")
 
-        _assert_prefix(turn1[0], turn2[0])
+        _assert_turn_prefix(turn1, turn2)
 
         # 一ターン目のまとまりは列の一番後ろで、スペルの結果と画像を持っていた
         last1 = turn1[0][-1]
@@ -401,7 +476,7 @@ class TestPrefixInvariantOnTheRealPath:
         turn1 = _run_turn(env, "海の話をしよう。")
         turn2 = _run_turn(env, "まだ海の話。")  # 同じ記憶しか浮かばない
 
-        _assert_prefix(turn1[0], turn2[0])
+        _assert_turn_prefix(turn1, turn2)
         last2 = turn2[0][-1]
         assert "## リアルタイム情報" in last2["content"]
         assert "ふと浮かんだ記憶" not in last2["content"]
@@ -427,9 +502,38 @@ class TestPrefixInvariantOnTheRealPath:
 
         turn2 = _run_turn(env, "ありがとう。")
         turn3 = _run_turn(env, "またね。")
-        _assert_prefix(turn1[0], turn2[0])
-        _assert_prefix(turn2[0], turn3[0])
+        # 一ターン目の最後の呼び出し (スペルの結果を受けた周) の列も、二ターン目の
+        # 最初の呼び出しの列の先頭と一致する (スペルの結果は復元形で送る)
+        _assert_turn_prefix(turn1, turn2)
+        _assert_turn_prefix(turn2, turn3)
         assert len(_kept_rows(env)) == 3
+
+    def test_last_call_with_image_spell_loop_matches_next_turn(self, env):
+        """スペルの繰り返しあり・画像付きのスペル結果あり — 最後の呼び出しの列が
+        次のターンの最初の呼び出しの列の先頭と一致する (SAIVerse の列と Gemini の
+        送信形式の両方)。スペルの結果の本文は復元形 (``<system>\\n…\\n</system>``)
+        で送られ、画像も記録に残って次のターンに同じく付く。"""
+        _bind_realtime_spell(env)
+        env.recall.hits = [_hit("page-a", "海辺の町")]
+        env.llm.script = [
+            f"見てみる。\n/spell name='{REALTIME_SPELL}' args={{}}",
+            "見えたよ。",
+        ]
+        turn1 = _run_turn(env, "外を見て。")
+        assert len(turn1) == 2
+        result_msg = turn1[-1][-1]
+        assert result_msg["content"].startswith("<system>\n[Spell Result:")
+        assert result_msg["content"].endswith("\n</system>")
+        assert result_msg["metadata"]["media"][0]["path"] == env.image_path
+        env.recall.hits = [_hit("page-a", "海辺の町"), _hit("page-b", "灯台")]
+        turn2 = _run_turn(env, "何が見えた?")
+
+        _assert_turn_prefix(turn1, turn2)
+        _assert_gemini_prefix(turn1[-1], turn2[0])
+        # 最後の呼び出しの Gemini の Content には、スペルの結果の画像が入っている
+        _, dumped_last = _gemini_dump(turn1[-1])
+        assert any(p.get("inline_data") for p in dumped_last[-1].get("parts") or [])
+        assert len(_kept_rows(env)) == 2
 
     def test_utterance_and_keeping_in_the_same_second(self, env):
         """発言と残す時刻が同じ秒に並んでも、位置は発言で決まる。"""
@@ -437,14 +541,43 @@ class TestPrefixInvariantOnTheRealPath:
         with patch("time.time", return_value=fixed):
             turn1 = _run_turn(env, "同じ秒です。")
             turn2 = _run_turn(env, "これも同じ秒。")
-        _assert_prefix(turn1[0], turn2[0])
+        _assert_turn_prefix(turn1, turn2)
+
+    def test_perception_reply_and_next_utterance_in_the_same_second(self, env):
+        """発言・知覚のまとめ・返事・次の発言・次の知覚が同じ秒に並んでも、知覚は
+        返事の後ろへ移らない (Codex 一巡目 #1)。ON のモデルの送る列では、知覚の
+        まとめも境界の発言で位置を決める。測る側 (勘定・退場計画) も同じ並び。"""
+        from sea.session_lifecycle import SessionLifecycle
+
+        fixed = time.time()
+        with patch("time.time", return_value=fixed):
+            _push_perception(env, "雨が降ってきた")
+            turn1 = _run_turn(env, "同じ秒です。")
+            _push_perception(env, "雷が鳴った")
+            turn2 = _run_turn(env, "これも同じ秒。")
+        _assert_turn_prefix(turn1, turn2)
+        contents = [str(m.get("content")) for m in turn2[0]]
+        i_u1 = contents.index("同じ秒です。")
+        assert "雨が降ってきた" in contents[i_u1 + 1]  # 知覚は発言の直後
+        assert "## リアルタイム情報" in contents[i_u1 + 2]  # 残した行はその後ろ
+        assert turn2[0][i_u1 + 3]["role"] == "assistant"  # 返事はその後ろ
+
+        recent = env.persona.history_manager.get_recent_history(
+            100_000, required_line_roles=["main_line"], required_scopes=["committed"],
+        )
+        lifecycle = SessionLifecycle(runtime=env.runtime, manager_ref=env.runtime.manager)
+        measured = lifecycle.presented_with_perceptions(
+            env.persona, recent, model_key=ON_MODEL,
+        )
+        sent_history = turn2[0][2:-1]
+        assert _sent(measured)[: len(sent_history)] == _sent(sent_history)
 
     def test_auto_pulse_without_user_utterance(self, env):
         turn0 = _run_turn(env, "こんにちは。")
         turn1 = _run_turn(env, None, pulse_type="auto")
         turn2 = _run_turn(env, "おかえり。")
-        _assert_prefix(turn0[0], turn1[0])
-        _assert_prefix(turn1[0], turn2[0])
+        _assert_turn_prefix(turn0, turn1)
+        _assert_turn_prefix(turn1, turn2)
         assert len(_kept_rows(env)) == 3
 
 
@@ -498,6 +631,261 @@ class TestWhatIsNotKept:
 
 
 # ---------------------------------------------------------------------------
+# 残すのは生成が正常に完了した後だけ (Codex 一巡目 #3) — 通常と tools 付き
+# ---------------------------------------------------------------------------
+
+
+def _tools_playbook():
+    return _custom_playbook([{
+        "id": "main_line_response", "type": "llm", "action": None,
+        "speak": True, "memorize": True, "metadata_key": "metadata",
+        "available_tools": [LOOP_SPELL],
+        "output_keys": [{"text": "speak_content"}], "next": None,
+    }], name="track_user_conversation_tools")
+
+
+@pytest.mark.parametrize("env", [True, False], indirect=True, ids=["stream", "sync"])
+@pytest.mark.parametrize("node", ["normal", "tools"])
+class TestNotKeptWithoutCompletedGeneration:
+    """空応答のやり直しの打ち切り・本文の無い中断 (504)・ユーザー停止では残さない。
+
+    使用量の記録 (_record_llm_usage) はこれらの後にも来るので、そこに保存を
+    相乗りさせていた形では、返事の無いターンに差し込みだけが残っていた。"""
+
+    def _setup(self, env, node, monkeypatch):
+        if node == "tools":
+            monkeypatch.setattr(env.runtime, "_build_tools_spec", lambda *a, **k: [])
+            env.llm.tool_dict = True
+            return _tools_playbook()
+        return None
+
+    def _run(self, env, playbook, **kw):
+        try:
+            _run_turn(env, "返事の無いターン。", playbook=playbook, **kw)
+        except Exception:
+            pass  # 止まり方は経路ごとに違う (ここで見るのは残したかどうかだけ)
+
+    def test_empty_response_after_retries(self, env, node, monkeypatch):
+        playbook = self._setup(env, node, monkeypatch)
+        env.llm.script = ["", "", ""]
+        self._run(env, playbook)
+        assert len(env.llm.calls) >= 1
+        assert _kept_rows(env) == []
+
+    def test_server_cut_without_text(self, env, node, monkeypatch):
+        playbook = self._setup(env, node, monkeypatch)
+        env.llm.script = ["", "", ""]
+        env.llm.stream_error = {"code": 504, "status": "DEADLINE_EXCEEDED"}
+        self._run(env, playbook)
+        assert _kept_rows(env) == []
+
+    def test_user_stop(self, env, node, monkeypatch):
+        from sea.cancellation import CancellationToken
+
+        if not _is_streaming(env):
+            pytest.skip("全文一括の経路には、送ってから返事を受け取るまでの停止が無い")
+        playbook = self._setup(env, node, monkeypatch)
+        token = CancellationToken()
+        env.llm.cancel_token = token  # ストリームの最初の chunk の後で止める
+        env.llm.script = ["止められた返事の途中までです。"]
+        self._run(env, playbook, cancellation_token=token)
+        assert len(env.llm.calls) == 1  # 送ってから止まった
+        assert _kept_rows(env) == []
+
+    def test_completed_generation_is_kept(self, env, node, monkeypatch):
+        """対照: 同じ経路で本文を得たターンは残す。"""
+        playbook = self._setup(env, node, monkeypatch)
+        turn = _run_turn(env, "返事のあるターン。", playbook=playbook)
+        rows = _kept_rows(env)
+        assert len(rows) == 1
+        assert rows[0][2] == turn[0][-1]["content"]
+
+
+def _is_streaming(env) -> bool:
+    import os
+
+    return os.environ.get("SAIVERSE_LLM_STREAMING") == "true"
+
+
+# ---------------------------------------------------------------------------
+# 保存待ちと保存済み (Codex 一巡目 #7) / 送ったまとまりは不変・子の Playbook (#2)
+# ---------------------------------------------------------------------------
+
+
+class TestPendingAndImmutableBlock:
+    def test_failed_write_is_retried_at_the_next_completion(self, env, monkeypatch):
+        """初回だけ失敗する DB — 同じパルスの次の成功地点で、初めて送ったときに
+        固定した文面・境界で書き直す。"""
+        original = env.adapter.record_realtime_and_recall
+        attempts: List[Dict[str, Any]] = []
+
+        def _flaky(**kwargs):
+            attempts.append(copy.deepcopy(kwargs))
+            if len(attempts) == 1:
+                return None
+            return original(**kwargs)
+
+        monkeypatch.setattr(env.adapter, "record_realtime_and_recall", _flaky)
+        env.recall.hits = [_hit("page-a", "海辺の町")]
+        env.llm.script = [
+            f"メモしておく。\n/spell name='{LOOP_SPELL}' args={{}}",
+            "メモしたよ。",
+        ]
+        turn1 = _run_turn(env, "これ覚えておいて。")
+        assert len(turn1) == 2
+        assert len(attempts) == 2
+        assert attempts[0] == attempts[1]  # 固定済みの同じ写し
+        rows = _kept_rows(env)
+        assert len(rows) == 1
+        assert rows[0][2] == turn1[0][-1]["content"]
+        turn2 = _run_turn(env, "ありがとう。")
+        _assert_turn_prefix(turn1, turn2)
+
+    def test_sent_block_is_not_appended_to(self, env):
+        """一度送ったまとまりには足さない。リアルタイムスペルが二度目に走る経路が
+        残っても、結果は別の末尾のメッセージに置かれ、保存されない。"""
+        import asyncio
+
+        from sea.runtime_context import (
+            add_realtime_spell_lines_to_turn_message,
+            build_turn_realtime_and_recall_message,
+            freeze_turn_realtime_and_recall_for_send,
+        )
+        from sea.runtime_llm import (
+            _execute_realtime_spells,
+            _persist_turn_realtime_and_recall,
+        )
+
+        _bind_realtime_spell(env)
+        turn_msg = build_turn_realtime_and_recall_message(
+            {"content": "<system>\n## リアルタイム情報\n- 現在時刻: x\n</system>"}, None,
+        )
+        messages = [{"role": "user", "content": "発言", "id": "m-1"}, turn_msg]
+        freeze_turn_realtime_and_recall_for_send(messages)
+        sent_content = turn_msg["content"]
+        assert add_realtime_spell_lines_to_turn_message(turn_msg, "- 追記") is False
+        state = {
+            "_messages": messages, "_persist_realtime_and_recall": True,
+            "_pulse_type": "user", "_pulse_id": "pulse-x",
+        }
+        asyncio.run(_execute_realtime_spells(
+            env.runtime, env.persona, BUILDING_ID, state, None,
+        ))
+        assert turn_msg["content"] == sent_content
+        assert "media" not in turn_msg["metadata"]
+        tail = messages[-1]
+        assert tail is not turn_msg
+        assert "視界: 目の前の光景を見た。" in tail["content"]
+        assert "__turn_realtime_and_recall__" not in (tail.get("metadata") or {})
+        _persist_turn_realtime_and_recall(env.runtime, env.persona, state)
+        rows = _kept_rows(env)
+        assert [r[2] for r in rows] == [sent_content]
+
+    def test_child_copy_does_not_share_the_parent_block(self, env):
+        from sea.runtime_context import (
+            add_realtime_spell_lines_to_turn_message,
+            build_turn_realtime_and_recall_message,
+            copy_turn_realtime_and_recall_for_child,
+        )
+        from sea.runtime_llm import _persist_turn_realtime_and_recall
+
+        turn_msg = build_turn_realtime_and_recall_message(
+            {"content": "<system>\n## リアルタイム情報\n- 現在時刻: x\n</system>",
+             "metadata": {"media": [{"path": "a.png", "mime_type": "image/png"}]}},
+            None,
+        )
+        parent = [{"role": "user", "content": "発言", "id": "m-1"}, turn_msg]
+        child = copy_turn_realtime_and_recall_for_child(parent)
+        assert child[0] is parent[0]  # ほかのメッセージは共有のまま
+        assert child[1] is not turn_msg
+        before = turn_msg["content"]
+        assert add_realtime_spell_lines_to_turn_message(child[1], "- 子の追記")
+        child[1]["metadata"]["media"].append({"path": "b.png"})
+        assert turn_msg["content"] == before
+        assert len(turn_msg["metadata"]["media"]) == 1
+        # 子の写しは (送っても) 保存の対象にならない
+        from sea.runtime_context import freeze_turn_realtime_and_recall_for_send
+
+        freeze_turn_realtime_and_recall_for_send(child)
+        _persist_turn_realtime_and_recall(
+            env.runtime, env.persona,
+            {"_messages": child, "_pulse_type": "user", "_pulse_id": "p-child"},
+        )
+        assert _kept_rows(env) == []
+
+
+def _child_playbook():
+    return _custom_playbook([{
+        "id": "child_llm", "type": "llm", "action": None, "speak": False,
+        "next": None,
+    }], name="child_pb")
+
+
+def _parent_with_child(order: str):
+    talk = {
+        "id": "talk", "type": "llm", "action": None, "speak": True,
+        "memorize": True, "metadata_key": "metadata",
+        "output_keys": [{"text": "speak_content"}], "next": None,
+    }
+    child = {
+        "id": "child", "type": "subplay", "playbook": "child_pb", "line": "sub",
+        "next": None,
+    }
+    if order == "parent_first":
+        talk["next"] = "child"
+        return _custom_playbook([talk, child], name="parent_pb")
+    child["next"] = "talk"
+    return _custom_playbook([child, talk], name="parent_pb")
+
+
+@pytest.mark.parametrize("order", ["parent_first", "child_first"])
+def test_child_playbook_does_not_rerun_or_mutate_the_parent_block(env, monkeypatch, order):
+    """子 Playbook (親の列を写して動くサブライン) は、リアルタイムスペルを
+    二度実行せず、親が送ったまとまり (と保存待ちの写し) を書き換えない
+    (Codex 一巡目 #2)。"""
+    from sea import runtime_llm
+
+    _bind_realtime_spell(env)
+    real_spell = runtime_llm._run_spell_tool_async
+    spell_calls: List[str] = []
+
+    async def _counting(tool_name, *args, **kwargs):
+        spell_calls.append(tool_name)
+        return await real_spell(tool_name, *args, **kwargs)
+
+    monkeypatch.setattr(runtime_llm, "_run_spell_tool_async", _counting)
+    real_load = env.runtime._load_playbook_for
+    monkeypatch.setattr(
+        env.runtime, "_load_playbook_for",
+        lambda name, persona, building_id: (
+            _child_playbook() if name == "child_pb" else real_load(name, persona, building_id)
+        ),
+    )
+    turn1 = _run_turn(env, "外の様子はどう?", playbook=_parent_with_child(order))
+
+    assert spell_calls.count(REALTIME_SPELL) == 1
+    assert len(turn1) == 2
+    parent_call = turn1[0] if order == "parent_first" else turn1[1]
+    child_call = turn1[1] if order == "parent_first" else turn1[0]
+    parent_block = parent_call[-1]
+    assert parent_block["content"].count("視界: 目の前の光景を見た。") == 1
+    child_blocks = [
+        m for m in child_call if "## リアルタイム情報" in str(m.get("content"))
+    ]
+    assert len(child_blocks) == 1
+    if order == "parent_first":
+        # 子は親が送ったままのまとまりを見る (追記なし)
+        assert child_blocks[0]["content"] == parent_block["content"]
+    else:
+        # 親の列を写した子は自分では実行しない — 親の本体の返事が結果を受ける
+        assert "視界:" not in child_blocks[0]["content"]
+    rows = _kept_rows(env)
+    assert [r[2] for r in rows] == [parent_block["content"]]
+    turn2 = _run_turn(env, "ありがとう。")
+    _assert_prefix(parent_call, turn2[0])
+
+
+# ---------------------------------------------------------------------------
 # 不変条件 2 — OFF のモデルは何も変わらない / 切り替え
 # ---------------------------------------------------------------------------
 
@@ -518,6 +906,40 @@ class TestOffModelAndSwitching:
         env.recall.hits = []
         turn2 = _run_turn(env, "続き。")
         assert any("海辺の町" in str(m.get("content")) for m in turn2[0])
+
+    def test_off_model_perceptions_stay_in_seconds_order(self, env):
+        """知覚のまとめを境界の発言で並べるのは ON のモデルの送る列だけ。OFF の
+        モデルへ送る (測る) 列のブロックには位置を決める発言を付けず、今までの
+        秒の比較のまま並ぶ。"""
+        from sea.runtime_context import (
+            BOUNDARY_ANCHOR_ID_KEY,
+            list_presented_perception_blocks,
+            merge_perception_blocks,
+        )
+
+        _push_perception(env, "雨が降ってきた")
+        _run_turn(env, "こんにちは。")
+        recent = env.persona.history_manager.get_recent_history(
+            100_000, required_line_roles=["main_line"], required_scopes=["committed"],
+        )
+        off_blocks = list_presented_perception_blocks(
+            env.runtime, env.persona, recent, model_key=OFF_MODEL,
+        )
+        perception = [b for b in off_blocks if "雨が降ってきた" in b["content"]]
+        assert len(perception) == 1
+        assert BOUNDARY_ANCHOR_ID_KEY not in perception[0]["metadata"]
+        on_blocks = list_presented_perception_blocks(
+            env.runtime, env.persona, recent, model_key=ON_MODEL,
+        )
+        on_perception = [b for b in on_blocks if "雨が降ってきた" in b["content"]]
+        assert on_perception[0]["metadata"][BOUNDARY_ANCHOR_ID_KEY]
+        # OFF の列は秒の比較で並ぶ: 知覚は「自分の時刻以下の最後の発言」の直後
+        merged = merge_perception_blocks(recent, off_blocks)
+        i = next(k for k, m in enumerate(merged) if "雨が降ってきた" in str(m.get("content")))
+        assert all(
+            (m.get("created_at") or 0) <= perception[0]["created_at"]
+            for m in merged[:i] if m.get("id")
+        )
 
     def test_on_off_on(self, env):
         env.recall.hits = [_hit("page-a", "海辺の町")]
@@ -650,6 +1072,97 @@ class TestStorage:
         assert not batch.is_realtime_and_recall
         assert batch.recalled_json is None
 
+    def test_old_database_opened_by_the_cli_path_keeps_its_material(
+        self, tmp_path, monkeypatch,
+    ):
+        """新しい列の無い旧 DB を CLI と同じ経路 (init_db → init_arasuji_tables —
+        SAIMemoryAdapter の初期化を通らない) で開いても、付記の材料集め・再生成・
+        知覚のキーワード検索が台帳を読める (Codex 一巡目 #6 — 列不足を「台帳
+        なし」と取り違えて材料ゼロになっていた)。"""
+        import sqlite3
+        from unittest.mock import patch as _patch
+
+        from saiverse_memory import SAIMemoryAdapter
+        from sai_memory.arasuji import init_arasuji_tables
+        from sai_memory.arasuji.executor import collect_annex_items
+        from sai_memory.arasuji.storage import create_entry, regenerate_entry
+        from sai_memory.memory.storage import init_db
+        from sai_memory.unified_recall import unified_recall
+
+        monkeypatch.setenv("SAIMEMORY_MEMORY", "1")
+        monkeypatch.setattr("saiverse_memory.adapter.Embedder", _DummyEmbedder)
+        persona_dir = tmp_path / "old_persona"
+        persona_dir.mkdir()
+        old = SAIMemoryAdapter("old", persona_dir=persona_dir, resource_id="old")
+        ids = [
+            old.append_persona_message({"role": "user", "content": f"話 {i}"})
+            for i in range(2)
+        ]
+        init_arasuji_tables(old.conn)
+        entry = create_entry(
+            old.conn, level=1, content="旧あらすじ", source_ids=ids,
+            start_time=1, end_time=2, source_count=2, message_count=2,
+        )
+        old.close()
+
+        db_path = persona_dir / "memory.db"
+        raw = sqlite3.connect(str(db_path))
+        raw.execute("DROP TABLE perception_batches")
+        raw.execute(
+            "CREATE TABLE perception_batches (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "consumed_at INTEGER NOT NULL, pulse_id TEXT, episode_id TEXT, "
+            "rendered_text TEXT NOT NULL, media TEXT, annexed_entry_id TEXT)"
+        )
+        raw.execute(
+            "INSERT INTO perception_batches (consumed_at, rendered_text) "
+            "VALUES (100, '[システム通知]\n未付記の灯台の知らせ')"
+        )
+        raw.execute(
+            "INSERT INTO perception_batches (consumed_at, rendered_text, "
+            "annexed_entry_id) VALUES (50, '[システム通知]\n付記済みの雷', ?)",
+            (entry.id,),
+        )
+        raw.commit()
+        raw.close()
+
+        conn = init_db(str(db_path), check_same_thread=False)
+        try:
+            init_arasuji_tables(conn)
+            items, batch_ids = collect_annex_items(conn, 0, 1_000)
+            assert batch_ids == [1]
+            assert "未付記の灯台の知らせ" in items[0]["text"]
+
+            captured: Dict[str, Any] = {}
+
+            def _fake_generate(conn, messages, model_name, persona_id=None,
+                               extra_items=None):
+                captured["extra_items"] = extra_items
+                return create_entry(
+                    conn, level=1, content="新あらすじ",
+                    source_ids=[m.id for m in messages], start_time=1, end_time=2,
+                    source_count=len(messages), message_count=len(messages),
+                )
+
+            with _patch(
+                "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
+                _fake_generate,
+            ):
+                assert regenerate_entry(conn, entry.id) is not None
+            assert ["付記済みの雷" in i["text"] for i in captured["extra_items"]] == [True]
+
+            embedder = SimpleNamespace(embed=lambda texts, **kw: [[0.0, 0.0, 0.0] for _ in texts])
+            hits = unified_recall(
+                conn, embedder, "灯台",
+                search_chronicle=False, search_memopedia=False,
+                search_fragments=False, search_messages=False,
+                search_perceptions=True,
+            )
+            assert [h.source_id for h in hits] == ["perception:1"]
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(perception_batches)")}
+            assert {"kind", "recalled_json", "boundary_rowid", "room_state_json"} <= cols
+        finally:
+            conn.close()
+
     def test_insert_does_not_touch_the_ledger(self):
         import sqlite3
 
@@ -753,6 +1266,103 @@ class TestRecallExclusion:
             exclude_keys={("memopedia", occupier)}, **kwargs,
         )
         assert [h.source_id for h in after] == [other]
+
+    @pytest.mark.parametrize(
+        "source", ["chronicle", "memopedia", "fragment", "message", "perception"],
+    )
+    def test_exclusion_frees_the_slot_for_every_source(self, source):
+        """exclude_keys はどのソースでも候補を集める段階で効く — 枠 1 席の
+        ソースで、席を占めていた候補を除外すると、もう一方が入る (Codex 一巡目
+        #8 — perception だけ効いていなかった)。"""
+        from sai_memory.arasuji import init_arasuji_tables
+        from sai_memory.arasuji.storage import create_entry
+        from sai_memory.memopedia import init_memopedia_tables
+        from sai_memory.memopedia.storage import create_fragment, create_page
+        from sai_memory.memory.storage import (
+            add_message,
+            init_db,
+            replace_message_embeddings,
+        )
+        from sai_memory.perception_buffer import (
+            create_consumption_batch,
+            init_perception_buffer_table,
+            push_perception,
+        )
+        from sai_memory.unified_recall import (
+            embed_chronicle_entries,
+            embed_memopedia_fragments,
+            embed_memopedia_pages,
+            unified_recall,
+        )
+
+        class _Same:
+            model_name = "test"
+
+            def embed(self, texts, *, is_query=False):
+                return [[1.0, 0.0] for _ in texts]
+
+        embedder = _Same()
+        conn = init_db(":memory:")
+        init_arasuji_tables(conn)
+        init_memopedia_tables(conn)
+        init_perception_buffer_table(conn)
+        word = "灯台"
+        if source == "chronicle":
+            for i in range(2):
+                create_entry(
+                    conn, level=1, content=f"{word}の話 {i}", source_ids=[],
+                    start_time=1000 + i, end_time=2000 + i,
+                    source_count=1, message_count=1,
+                )
+            embed_chronicle_entries(conn, embedder, level=1)
+        elif source == "memopedia":
+            for i in range(2):
+                create_page(conn, parent_id="root_terms", title=f"{word}{i}",
+                            summary=word, content="", category="terms")
+            embed_memopedia_pages(conn, embedder)
+        elif source == "fragment":
+            page = create_page(conn, parent_id="root_terms", title="港",
+                               summary="港", content="", category="terms")
+            for i in range(2):
+                create_fragment(conn, entity_id=page.id, content=f"{word}の記憶 {i}",
+                                source_date="2026-10-14")
+            embed_memopedia_fragments(conn, embedder)
+        elif source == "message":
+            for i in range(2):
+                mid = add_message(
+                    conn, thread_id="t1", role="user", content=f"{word}の話 {i}",
+                    line_role="main_line", scope="committed",
+                )
+                replace_message_embeddings(conn, mid, [[1.0, 0.0]])
+        else:
+            for i in range(2):
+                item = push_perception(conn, "feed", f"{word}の記事 {i}")
+                create_consumption_batch(
+                    conn, [item], consumed_at=10 + i, rendered_text=f"[フィード]\n{word}の記事 {i}",
+                )
+        kwargs = {
+            "search_chronicle": source == "chronicle",
+            "search_memopedia": source == "memopedia",
+            "search_fragments": source == "fragment",
+            "search_messages": source == "message",
+            "search_perceptions": source == "perception",
+            "source_allocations": {source: 1},
+        }
+        try:
+            before = [h for h in unified_recall(conn, embedder, word, **kwargs)
+                      if h.source_type == source]
+            assert len(before) == 1
+            occupier = before[0].source_id
+            after = [
+                h for h in unified_recall(
+                    conn, embedder, word, exclude_keys={(source, occupier)}, **kwargs,
+                )
+                if h.source_type == source
+            ]
+            assert len(after) == 1
+            assert after[0].source_id != occupier
+        finally:
+            conn.close()
 
     def test_run_auto_recall_new_only_and_entity_trigger_exclusion(self):
         from sea.auto_recall import reset_ledger, run_auto_recall

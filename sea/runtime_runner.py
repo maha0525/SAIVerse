@@ -92,7 +92,12 @@ def run_playbook(
     # (サブラインの軽量モデル強制はそちらでも維持する)。
     if line == "sub" and parent.get("_messages"):
         parent_messages = parent.get("_messages") or []
-        base_messages = list(parent_messages)  # コピー (参照共有しない)
+        # コピー (参照共有しない)。リアルタイム情報と自動想起を残すモデルの
+        # 「そのターンのまとまり」だけは辞書ごと写す — 浅い写しのままだと、
+        # 子の追記が親の送ったまとまり (保存待ちの写しを含む) を書き換える
+        # (docs/intent/persist_realtime_and_recall.md §4.1)。
+        from sea.runtime_context import copy_turn_realtime_and_recall_for_child
+        base_messages = copy_turn_realtime_and_recall_for_child(parent_messages)
         LOGGER.info(
             "[sea][run-playbook] %s: line='sub', forking parent _messages (%d messages) instead of "
             "calling _prepare_context. Lightweight model will be used.",

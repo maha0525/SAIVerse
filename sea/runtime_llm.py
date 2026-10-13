@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from llm_clients.base import usage_event_time
 from llm_clients.exceptions import EmptyResponseError, LLMError, ModelUnavailableError
+from sai_memory.memory.storage import presented_system_record_content
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import ExecutionCancelledException
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
@@ -388,12 +389,11 @@ def _record_llm_usage(
     ``debug_log`` は pipeline streaming 経路だけが出していた ``[DEBUG]`` 行を
     再現するためのフラグ。経路ごとのログ差は Phase 0 では変えない。
 
-    この関数が呼ばれるのは LLM 呼び出しが成功した後なので、リアルタイム情報と
-    自動想起を残すモデルの「そのターンのまとまり」の保存もここで行う
-    (:func:`_persist_turn_realtime_and_recall` — 一ターン一回、使用量が取れない
-    呼び出しでも行う)。
+    この関数は生成の成否と無関係に呼ばれる (空応答のやり直しの打ち切り・本文の
+    無い中断・ユーザー停止の後にも来る) ので、成功の後にだけ行う処理をここに
+    置かない — そのターンのリアルタイム情報と自動想起の保存は
+    :func:`_note_generation_completed` (生成が正常に完了したと確かめた地点)。
     """
-    _persist_turn_realtime_and_recall(runtime, persona, state)
     usage = llm_client.consume_usage()
     if debug_log:
         LOGGER.info("[DEBUG] consume_usage returned: %s", usage)
@@ -464,21 +464,58 @@ def _record_llm_usage(
 PERSIST_REALTIME_AND_RECALL_PULSE_TYPES = frozenset({"user", "auto", "schedule"})
 
 
+def _freeze_turn_block_before_send(messages: Any) -> None:
+    """LLM へ送る直前の一点: そのターンのまとまりを固定して「保存待ち」にする。
+
+    生成の全経路 (全文一括・ストリーミング・tools 付き・構造化出力・スペルの
+    繰り返し) の送信の直前で呼ぶ。中身は
+    :func:`sea.runtime_context.freeze_turn_realtime_and_recall_for_send`
+    (初めて送るときだけ文面・画像・境界を写し取り、以後まとまりは不変)。
+    失敗で LLM の経路を止めない。
+    """
+    if not isinstance(messages, list):
+        return
+    try:
+        from sea.runtime_context import freeze_turn_realtime_and_recall_for_send
+
+        freeze_turn_realtime_and_recall_for_send(messages)
+    except Exception:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] could not freeze this turn's block "
+            "before sending", exc_info=True,
+        )
+
+
+def _note_generation_completed(runtime: Any, persona: Any, state: Any) -> None:
+    """生成が正常に完了した (本文または tool call を得た) と確かめた地点の一点。
+
+    LLM ノードの全生成経路 (全文一括・ストリーミング・tools 付き・構造化出力・
+    スペルの繰り返し) が、成功を確かめた後にここを呼ぶ。空応答のやり直しの
+    打ち切り・本文の無い中断・ユーザー停止・例外ではここへ来ない
+    (使用量の記録 :func:`_record_llm_usage` はそれらの後にも来るので、成功の
+    後にだけ行う処理はここへ寄せる)。
+
+    いまここで行うのは、そのターンのリアルタイム情報と自動想起の保存
+    (docs/intent/persist_realtime_and_recall.md §4.2)。
+    """
+    _persist_turn_realtime_and_recall(runtime, persona, state)
+
+
 def _persist_turn_realtime_and_recall(runtime: Any, persona: Any, state: Any) -> None:
     """そのターンのリアルタイム情報と自動想起のまとまりを、送った文面のまま一行残す。
 
-    docs/intent/persist_realtime_and_recall.md §4.2。呼ばれるのは LLM 呼び出しが
-    成功した直後 (:func:`_record_llm_usage` の頭) — リアルタイムスペルの結果は
-    最初の LLM 呼び出しの直前に足されるので、それより前には文面が確定しない。
-    失敗した呼び出しはここへ来ないので、返事の無いターンに差し込みだけが残る
-    ことはない。
+    docs/intent/persist_realtime_and_recall.md §4.2。呼ばれるのは生成が正常に
+    完了した地点 (:func:`_note_generation_completed`)。書くのは初めて送った
+    ときに固定した「保存待ち」の写し (文面・画像・位置を決める発言 —
+    :func:`_freeze_turn_block_before_send`) で、呼ばれた時点のまとまりではない。
 
-    - 残すのは ``_pulse_type`` が user / auto / schedule の Pulse だけ。
-    - 一ターン一回: まとまりの印 (``persisted``) を立て、スペルの繰り返しや
-      同じ Pulse の二つ目の LLM ノードで二度書かない。印は書き込みを試みる前に
-      立てる — 失敗した書き込みを周ごとに再試行すると、どの周で書けたかで
-      位置と文面が揺れる。失敗は WARN で残し、そのターンの差し込みは次の
-      ターンには出ない (今までのモデルと同じ扱いに縮退する)。
+    - 残すのは ``_pulse_type`` が user / auto / schedule の Pulse だけ。子の
+      Playbook へ渡した写し (``child_copy``) は残さない (保存はそのターンの親)。
+    - 「保存待ち」と「保存済み」を分ける。DB への書き込みが成功したときだけ
+      保存済み (``persisted``) にし、失敗したら同じ Pulse の後の成功地点で、
+      固定済みの同じ写しを書き直す (DB 側は同じ pulse_id の行があれば書かない
+      — adapter.record_realtime_and_recall)。写しは固定済みなので、どの地点で
+      書けても位置と文面は同じ。
     - 位置を決める発言は、送った列でまとまりより前にある最後の発言 (台帳の行を
       持つもの)。次のターン以降、まとまりはその発言の直後に出る (§4.3)。
     - 出すものが無いターンはまとまり自体が作られないので、何も残さない。
@@ -504,15 +541,23 @@ def _persist_turn_realtime_and_recall(runtime: Any, persona: Any, state: Any) ->
         info = meta.get(TURN_REALTIME_AND_RECALL_KEY)
         if not isinstance(info, dict) or info.get("persisted"):
             return
-        info["persisted"] = True
-        content = str(turn_msg.get("content") or "")
-        media = meta.get("media") if isinstance(meta.get("media"), list) else None
-        if not content.strip() and not media:
+        if info.get("child_copy"):
             return
-        boundary_ids = [
-            str(m.get("id")) for m in reversed(messages[:idx])
-            if isinstance(m, dict) and m.get("id")
-        ]
+        pending = info.get("pending")
+        if not isinstance(pending, dict):
+            # 送る前に固定されていない (送信の一点を通っていない) まとまりは
+            # 「送った文面」が分からないので書かない。
+            LOGGER.warning(
+                "[sea][persist_realtime_and_recall] this turn's block was not "
+                "frozen before sending; not keeping it (persona=%s pulse=%s)",
+                getattr(persona, "persona_id", None), state.get("_pulse_id"),
+            )
+            return
+        content = str(pending.get("content") or "")
+        media = pending.get("media") if isinstance(pending.get("media"), list) else None
+        if not content.strip() and not media:
+            info["persisted"] = True
+            return
         sai_mem = getattr(persona, "sai_memory", None)
         recorder = getattr(sai_mem, "record_realtime_and_recall", None)
         if not callable(recorder):
@@ -525,18 +570,19 @@ def _persist_turn_realtime_and_recall(runtime: Any, persona: Any, state: Any) ->
         batch_id = recorder(
             content=content,
             media=[dict(m) for m in media] if media else None,
-            recalled_keys=info.get("recalled") or None,
-            boundary_message_ids=boundary_ids,
+            recalled_keys=pending.get("recalled") or None,
+            boundary_message_ids=list(pending.get("boundary_message_ids") or []),
             pulse_id=state.get("_pulse_id"),
         )
         if batch_id is None:
             LOGGER.warning(
                 "[sea][persist_realtime_and_recall] could not keep this turn's "
-                "realtime info / recall (persona=%s pulse=%s); it will not be "
-                "shown again next turn",
+                "realtime info / recall (persona=%s pulse=%s); retrying at the "
+                "next completed generation of this pulse",
                 getattr(persona, "persona_id", None), state.get("_pulse_id"),
             )
             return
+        info["persisted"] = True
         LOGGER.debug(
             "[sea][persist_realtime_and_recall] kept this turn's block as batch %s "
             "(persona=%s, %d chars, %d image(s))",
@@ -3798,19 +3844,15 @@ async def _run_spell_loop(
                     media_list = result_meta.get("media")
                     if isinstance(media_list, list):
                         aggregated_media.extend(media_list)
-            # quick 宣言に反して応答機会を返すときだけ、理由の事実文を注入の
-            # 先頭に付ける (§3.4)。注入のみで SAIMemory へ記録する
-            # combined_results には混ぜない (不変条件 5)。
-            _injected_results = combined_results
-            if _all_quick and _round_has_failure:
-                _injected_results = (
-                    "/quick_spell で唱えたスペルに失敗があったため、"
-                    "結果を確認できるよう応答機会を返しています。\n"
-                    + combined_results
-                )
+            # 結果のメッセージは、下で system ロールで保存した記録が次のターンに
+            # 復元されるのと同じ本文・同じ画像で送る (復元形の一枚
+            # sai_memory.memory.storage.presented_system_record_content を通す)。
+            # 送ったときと復元したときで本文が違うと、前回の送信が今回の送信の
+            # 先頭と一致しない (docs/intent/persist_realtime_and_recall.md
+            # 不変条件 2 — 全モデル共通の直し、送る並びは変えない)。
             spell_result_msg: Dict[str, Any] = {
                 "role": "user",
-                "content": f"<system>{_injected_results}</system>",
+                "content": presented_system_record_content(combined_results),
             }
             if aggregated_media:
                 spell_result_msg["metadata"] = {"media": aggregated_media}
@@ -3818,6 +3860,19 @@ async def _run_spell_loop(
                     "[sea][spell] Round %d: attached %d media item(s) from spell results",
                     loop_count, len(aggregated_media),
                 )
+            # quick 宣言に反して応答機会を返すときだけ、理由の事実文を注入の
+            # 先頭に付ける (§3.4)。注入のみで SAIMemory へ記録する
+            # combined_results には混ぜない (quick_spell.md 不変条件 5) ので、
+            # 結果のメッセージ (復元形) とは別の、保存しないメッセージとして
+            # 結果の直前に置く。
+            if _all_quick and _round_has_failure:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "<system>/quick_spell で唱えたスペルに失敗があったため、"
+                        "結果を確認できるよう応答機会を返しています。</system>"
+                    ),
+                })
             messages.append(spell_result_msg)
 
             # Record to PulseContext
@@ -3849,9 +3904,20 @@ async def _run_spell_loop(
             # 定義済みのものを再利用する。
             spell_tags = (node_memorize_tags + ["spell"]) if node_memorize_tags else ["conversation", "spell"]
             if combined_results:
+                # 結果の画像も記録に残す — 送ったメッセージには付いているので、
+                # 残さないと次のターンの復元形から画像が消えて先頭が一致しない
+                # (上の結果のメッセージの注記と同じ理由)。
                 runtime._store_memory(
                     persona, combined_results, role="system",
                     tags=spell_tags, pulse_id=pulse_id, playbook_name=playbook.name,
+                    # 画像を残すのはリアルタイム情報と自動想起を残すモデルだけ
+                    # (OFF のモデルの履歴は今までどおり画像を持たない —
+                    # persist_realtime_and_recall.md 不変条件 2)。
+                    metadata=(
+                        {"media": [dict(m) for m in aggregated_media]}
+                        if aggregated_media and state.get("_persist_realtime_and_recall")
+                        else None
+                    ),
                     pulse_context=pulse_context,
                     spell_origin_id=_spell_origin_id,
                     spell_seq=loop_count,
@@ -4056,6 +4122,7 @@ async def _run_spell_loop(
             LOGGER.info("[sea][spell] Re-invoking LLM after round %d (%d spell(s))", loop_count, len(valid_spells))
             _retry_stream_error: Optional[Dict[str, Any]] = None
             _retry_cancelled = False
+            _freeze_turn_block_before_send(messages)
             try:
                 if pipeline_streaming_state is not None:
                     _retry_stream = llm_client.generate_stream(
@@ -4219,6 +4286,10 @@ async def _run_spell_loop(
                 text = retry_result
             else:
                 text = ""
+            # 続きの生成の正常な完了 (ユーザーに止められず、本文を得た) —
+            # 保存待ちのまとまりの書き直しの機会でもある (§4.2)。
+            if not _retry_cancelled and str(text or "").strip():
+                _note_generation_completed(runtime, persona, state)
             # この本文の途切れ方。次の周の頭で「スペル行を含む = 次の周が
             # 発話を続ける」か「締めの発言として途切れたまま確定する」かが
             # 決まるので、そこまで持ち運ぶ。
@@ -4385,6 +4456,10 @@ async def _decide_spell_args_via_playbook(
         "_pulse_id": outer_state.get("_pulse_id"),
         # 同じ返事の中の仕事なので、返事の始まりに決めたモデルと接続を引き継ぐ
         "_model_binding": outer_state.get("_model_binding"),
+        # リアルタイムスペルの実行済みの印も引き継ぐ (同じ Pulse の中で二度
+        # 実行しない — docs/intent/persist_realtime_and_recall.md §4.1)。
+        "_realtime_spells_once": outer_state.get("_realtime_spells_once"),
+        "_realtime_spells_executed": bool(outer_state.get("_realtime_spells_executed")),
     }
 
     try:
@@ -4590,9 +4665,14 @@ async def _execute_pre_spells(
         + "\n\n"
         + "\n\n".join(result_lines)
     )
+    # 送る本文と画像は、下で system ロールで保存した記録が次のターンに復元される
+    # のと同じ形にする (復元形の一枚 presented_system_record_content を通し、
+    # 画像も記録に残す)。送ったときと復元したときで違うと、前回の送信が今回の
+    # 送信の先頭と一致しない (docs/intent/persist_realtime_and_recall.md
+    # 不変条件 2 — 全モデル共通の直し、送る並びは変えない)。
     spell_result_msg: Dict[str, Any] = {
         "role": "user",
-        "content": f"<system>{system_body}</system>",
+        "content": presented_system_record_content(system_body),
     }
 
     aggregated_media: List[Dict[str, Any]] = []
@@ -4608,8 +4688,6 @@ async def _execute_pre_spells(
             len(aggregated_media),
         )
 
-    messages.append(spell_result_msg)
-
     pulse_ctx = state.get("_pulse_context")
     if pulse_ctx:
         pulse_ctx.append(PulseLogEntry(
@@ -4619,14 +4697,29 @@ async def _execute_pre_spells(
 
     pulse_id = state.get("_pulse_id")
     try:
-        runtime._store_memory(
+        _stored_pre_id = runtime._store_memory(
             persona, system_body, role="system",
             tags=["conversation", "spell", "pre_spell"],
             pulse_id=pulse_id, playbook_name=playbook.name,
+            # 画像を残すのはリアルタイム情報と自動想起を残すモデルだけ
+            # (persist_realtime_and_recall.md 不変条件 2)。
+            metadata=(
+                {"media": [dict(m) for m in aggregated_media]}
+                if aggregated_media and state.get("_persist_realtime_and_recall")
+                else None
+            ),
             pulse_context=pulse_ctx,
+            return_message_id=True,
         )
+        # 記録の id を送るメッセージにも持たせる — リアルタイム情報と自動想起を
+        # 残すモデルで、このメッセージより後ろに置かれたそのターンのまとまりの
+        # 位置を決める発言になる (次のターンも記録のすぐ後ろに出る)。
+        if _stored_pre_id:
+            spell_result_msg["id"] = str(_stored_pre_id)
     except Exception:
         LOGGER.exception("[sea][pre_spells] Failed to persist pre-spell results to SAIMemory")
+
+    messages.append(spell_result_msg)
 
     _at = state.get("_activity_trace")
     if isinstance(_at, list):
@@ -4651,10 +4744,13 @@ async def _execute_realtime_spells(
     — 例外はモデル設定 ``cache.persist_realtime_and_recall`` を ON にしたモデル
     (docs/intent/persist_realtime_and_recall.md)。そのモデルの送る列では、結果は
     そのターンのリアルタイム情報と自動想起のまとまり (送る列の一番後ろ) に足され、
-    まとまりが無ければ一番後ろに作られる。まとまりは最初の LLM 呼び出しが成功した
-    後に、結果 (画像を含む) ごと送った文面のまま一行残される
+    まとまりが無ければ一番後ろに作られる。まとまりは送る直前に固定され、生成が
+    正常に完了した後に、結果 (画像を含む) ごと送った文面のまま一行残される
     (:func:`_persist_turn_realtime_and_recall`)。このとき結果は SAIMemory の
-    ``perception_batches`` に入り、次のターン以降も同じ位置に送られる。
+    ``perception_batches`` に入り、次のターン以降も同じ位置に送られる。もう
+    送ったまとまりには足さない (別の末尾のメッセージに置き、保存しない)。
+    実行は同じ Pulse の中で一度だけ (子の Playbook と実行済みの印を共有する —
+    lg_llm_node の ``_realtime_spells_once``)。
     """
     messages = state.get("_messages")
     if not isinstance(messages, list):
@@ -4755,8 +4851,24 @@ async def _execute_realtime_spells(
     target_msg: Optional[Dict[str, Any]] = None
     realtime_idx = None
     if turn_idx is not None:
-        target_msg = messages[turn_idx]
-        add_realtime_spell_lines_to_turn_message(target_msg, new_content)
+        if add_realtime_spell_lines_to_turn_message(messages[turn_idx], new_content):
+            target_msg = messages[turn_idx]
+        else:
+            # もう LLM へ送ったまとまりは不変 (§4.1)。ここへ来るのは、実行済みの
+            # 印を引き継がない経路でスペルが二度目に走ったときだけのはず —
+            # 結果は別の末尾のメッセージに置き、保存しない (まとまりの印を
+            # 付けないので、保存の対象にも次の追記先にもならない)。
+            LOGGER.warning(
+                "[sea][realtime_spells] this turn's block was already sent; "
+                "placing the results in a separate trailing message that is "
+                "not kept (persona=%s)", persona_id,
+            )
+            target_msg = {
+                "role": "user",
+                "content": f"<system>\n## リアルタイム情報\n{new_content}\n</system>",
+                "metadata": {},
+            }
+            messages.append(target_msg)
     elif state.get("_persist_realtime_and_recall"):
         # 作り方 (見出しと行の形) は下の OFF の「無ければ作る」と同じ文面。
         target_msg = build_turn_realtime_and_recall_message(
@@ -4870,8 +4982,18 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         # Runs at most once per Pulse (gated by _realtime_spells_executed), and only
         # when the persona's spell system is enabled — SPELL_ENABLED=false must stop
         # this auto-execution path too, not just LLM-invoked spells (Spell 監査 P1).
-        if state.get("_spell_enabled") and not state.get("_realtime_spells_executed"):
+        # 実行済みの印は子の Playbook と共有する (同じ Pulse の中で二度実行しない —
+        # docs/intent/persist_realtime_and_recall.md §4.1)。``_realtime_spells_once``
+        # は Pulse の頭で作られ、子へ参照のまま引き継がれる器
+        # (sea/runtime_graph.compile_with_langgraph)。
+        _rt_once = state.get("_realtime_spells_once")
+        _rt_done = bool(state.get("_realtime_spells_executed")) or (
+            isinstance(_rt_once, dict) and bool(_rt_once.get("executed"))
+        )
+        if state.get("_spell_enabled") and not _rt_done:
             state["_realtime_spells_executed"] = True
+            if isinstance(_rt_once, dict):
+                _rt_once["executed"] = True
             try:
                 await _execute_realtime_spells(
                     runtime, persona, building_id, state, event_callback,
@@ -5395,6 +5517,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # 画面イベントに載せる部屋 (契約 5)。この経路は下書き行を
                     # 使わないので、生成を始めた時点の現在地が吹き出しの居場所。
                     _tool_stream_bid = runtime._effective_building_id(persona, building_id)
+                    _freeze_turn_block_before_send(messages)
                     for stream_attempt in range(max_stream_retries):
                         text_chunks: list[str] = []
                         stream_iter = llm_client.generate_stream(
@@ -5474,6 +5597,16 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     tool_detection = llm_client.consume_tool_detection()
                     LOGGER.info("[DEBUG] Tool detection after streaming: %s",
                                tool_detection.get("type") if tool_detection else None)
+                    # 生成の正常な完了 = ユーザーに止められず、本文か tool call を
+                    # 得た (空応答のやり直しの打ち切り・本文の無い中断は除く)。
+                    if not cancelled_during_stream and (
+                        text.strip()
+                        or (
+                            tool_detection
+                            and tool_detection.get("type") in ("tool_call", "both")
+                        )
+                    ):
+                        _note_generation_completed(runtime, persona, state)
 
                     # Use tool_detection as the result for the common tool branching below
                     if tool_detection and tool_detection.get("type") in ("tool_call", "both"):
@@ -5584,6 +5717,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
                 else:
                     # ── Synchronous tool mode (original) ──
+                    _freeze_turn_block_before_send(messages)
                     result = llm_client.generate(
                         messages,
                         tools=tools_spec,
@@ -5591,6 +5725,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
                         **_continuous_cache_kwargs(state, persona, building_id),
                     )
+                    if isinstance(result, dict) and (
+                        result.get("type") in ("tool_call", "both")
+                        or str(result.get("content") or "").strip()
+                    ):
+                        _note_generation_completed(runtime, persona, state)
 
                     # Consume reasoning (thinking) from tool-mode LLM call
                     _tool_reasoning_text, _tool_reasoning_details = _consume_reasoning(
@@ -5921,6 +6060,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "downstream finalize will be skipped — placeholder leak risk",
                         )
 
+                    _freeze_turn_block_before_send(messages)
                     for stream_attempt in range(max_stream_retries):
                         stream_iter = llm_client.generate_stream(
                             messages,
@@ -6027,6 +6167,13 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 node_id=getattr(node_def, "id", "llm"),
                             )
                         pipeline_finalized = True
+
+                    # 生成の正常な完了 = ユーザーに止められず、本文を得た。
+                    # 空応答のやり直しの打ち切り・本文の無い中断 (504 等) は
+                    # 本文が空なのでここを通らない。サーバーに途中で切られても
+                    # 本文を得ていれば、その本文が返事として残るので完了に数える。
+                    if not cancelled_during_stream and text.strip():
+                        _note_generation_completed(runtime, persona, state)
 
                     # Record usage (even if cancelled — tokens were consumed)
                     llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
@@ -6623,6 +6770,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 else:
                     # Non-streaming mode
                     LOGGER.debug("[sea][llm] Calling llm_client.generate() with response_schema=%s", response_schema is not None)
+                    _freeze_turn_block_before_send(messages)
                     text = llm_client.generate(
                         messages,
                         tools=[],
@@ -6632,6 +6780,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         **_continuous_cache_kwargs(state, persona, building_id),
                     )
                     LOGGER.debug("[sea][llm] llm_client.generate() returned: type=%s, len=%s, repr=%s", type(text).__name__, len(text) if isinstance(text, str) else "(not str)", repr(text)[:200] if isinstance(text, str) else text)
+                    # 生成の正常な完了 = 本文 (構造化出力なら空でない値) を得た。
+                    if (isinstance(text, str) and text.strip()) or (
+                        not isinstance(text, str) and text
+                    ):
+                        _note_generation_completed(runtime, persona, state)
 
                     # Record usage
                     llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(

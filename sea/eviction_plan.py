@@ -186,8 +186,11 @@ PERSISTED_REALTIME_AND_RECALL_KEY = "__persisted_realtime_and_recall__"
 #: (``persist_realtime_and_recall`` を ON にしたモデルへ送るときだけ作る。
 #: docs/intent/persist_realtime_and_recall.md §4.1)。値は dict で、
 #: 組み直しと保存に要る材料 (リアルタイム情報の文面・想起の文面・想起の識別子・
-#: 保存済みかどうか) を持つ。このメッセージは送る列の一番後ろに置かれ、最初の
-#: LLM 呼び出しが成功した後に送った文面のまま一行残される
+#: 送ったか ``sent``・初めて送ったときに固定した保存待ちの写し ``pending``・
+#: 保存済みか ``persisted``・子へ渡した写しか ``child_copy``) を持つ。この
+#: メッセージは送る列の一番後ろに置かれ、送る直前に固定され
+#: (sea/runtime_context.freeze_turn_realtime_and_recall_for_send — 以後不変)、
+#: 生成が正常に完了した後に固定した写しのまま一行残される
 #: (sea/runtime_llm.py の ``_persist_turn_realtime_and_recall``)。
 TURN_REALTIME_AND_RECALL_KEY = "__turn_realtime_and_recall__"
 

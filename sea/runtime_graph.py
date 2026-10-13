@@ -160,6 +160,22 @@ def compile_with_langgraph(
     else:
         activity_trace = []
 
+    # リアルタイムスペルの実行済みの印 (同じ Pulse の中で二度実行しない —
+    # docs/intent/persist_realtime_and_recall.md §4.1)。accumulator と同じく
+    # 器を参照のまま子へ引き継ぐので、親が実行した後の子も、子が実行した後の
+    # 親も、もう一度は実行しない。
+    # 親の列をそのまま写して動くサブライン (line='sub' の分岐 —
+    # runtime_runner.run_playbook) は、リアルタイムスペルを自分では実行しない:
+    # 親の列に出ているものを親と同じに見る作業者で、ここで先に実行すると、
+    # 親の本体の返事 (後で走る最初の LLM ノード) の方が結果を受け取れなくなる
+    # (事前スペルの引数を決める spell_args_decider がこの形)。
+    realtime_spells_once = parent.get("_realtime_spells_once")
+    if not isinstance(realtime_spells_once, dict):
+        realtime_spells_once = {
+            "executed": bool(parent.get("_realtime_spells_executed", False)),
+        }
+    forked_sub_line = line == "sub" and bool(parent.get("_messages"))
+
     # Inherit cancellation token from parent state if not explicitly provided
     effective_cancellation_token = cancellation_token or parent.get("_cancellation_token")
 
@@ -269,6 +285,12 @@ def compile_with_langgraph(
         # サブライン (line='sub') は親の列をコピーするので親の値をそのまま継承する。
         "_persist_realtime_and_recall": bool(
             parent.get("_persist_realtime_and_recall", False)
+        ),
+        # リアルタイムスペルの実行済みの印 (上の器と、器を持たない呼び出し元の
+        # 互換の真偽値)。lg_llm_node がどちらかが立っていれば実行しない。
+        "_realtime_spells_once": realtime_spells_once,
+        "_realtime_spells_executed": (
+            bool(realtime_spells_once.get("executed")) or forked_sub_line
         ),
         # 前駆刻印の材料 (sea/message_stamp.py): _prepare_context が実際に
         # プロンプトへ組み込んだ履歴メッセージの ID 列。生成メッセージの

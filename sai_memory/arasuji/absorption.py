@@ -1090,6 +1090,83 @@ def _repoint_fragments_back(
         )
 
 
+def _list_run_unannexed_batches(
+    conn: sqlite3.Connection, run_message_ids: Sequence[str],
+) -> List[Any]:
+    """吸収する run に属する未付記の消費バッチ (知覚のまとめ・残した行の両方)。
+
+    run は一度もあらすじに編纂されていない区間なので、その区間で消費された
+    バッチもまだどこにも付記されていない。吸収の材料に入れないと、run の生ログ
+    だけが合体エントリへ畳まれ、その区間の知覚 (とリアルタイム情報・自動想起を
+    残した行) が材料から漏れる (persist_realtime_and_recall.md 経緯 — Codex
+    一巡目 #5。種類を問わない既存の欠陥)。
+
+    属する判定:
+
+    - 境界キー (``boundary_created_at`` / ``boundary_rowid`` = 確定時点で最後に
+      保存済みだった発言) が run のメッセージのどれかに一致する — 確定時点で
+      最後の発言が run の中にあった。
+    - 境界キーの無い古い行は、``consumed_at`` が run の最初と最後のメッセージの
+      時刻の間 (両端を含む) にある。
+
+    どちらにも当たらない行は、次の通常の編纂の一括回収 (``recover_before``) が
+    引き取る。表の無い DB は空。
+    """
+    from sai_memory.perception_buffer import list_unannexed_batches
+
+    ids = [str(m) for m in run_message_ids if m]
+    if not ids:
+        return []
+    keys: Set[tuple] = set()
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        for created_at, rowid in conn.execute(
+            f"SELECT created_at, rowid FROM messages WHERE id IN ({placeholders})",
+            tuple(chunk),
+        ).fetchall():
+            if created_at is not None and rowid is not None:
+                keys.add((int(created_at), int(rowid)))
+    if not keys:
+        return []
+    lo = min(k[0] for k in keys)
+    hi = max(k[0] for k in keys)
+    try:
+        candidates = list_unannexed_batches(conn, since=lo)
+    except sqlite3.OperationalError as exc:
+        if not is_missing_table_error(exc):
+            raise  # ロック等は fail-closed (材料ゼロの顔にしない)
+        return []
+    out = []
+    for b in candidates:
+        if b.boundary_created_at is not None and b.boundary_rowid is not None:
+            if (int(b.boundary_created_at), int(b.boundary_rowid)) in keys:
+                out.append(b)
+        elif lo <= int(b.consumed_at) <= hi:
+            out.append(b)
+    return out
+
+
+def _unmark_batches_by_id(
+    conn: sqlite3.Connection, batch_ids: Sequence[int], entry_id: str,
+) -> int:
+    """id 指定で、``entry_id`` への付記印だけを未付記に戻す (確定する)。
+
+    吸収した run 自身のバッチへ打った印の巻き戻し用。現帰属が ``entry_id`` の
+    行だけを戻す — 別の書き手が他の帰属へ動かした行は書き換えない。
+    """
+    if not batch_ids:
+        return 0
+    placeholders = ",".join("?" for _ in batch_ids)
+    cur = conn.execute(
+        f"UPDATE perception_batches SET annexed_entry_id = NULL "
+        f"WHERE id IN ({placeholders}) AND annexed_entry_id = ?",
+        (*[int(b) for b in batch_ids], str(entry_id)),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def _repoint_batches(
     conn: sqlite3.Connection, batch_ids: Sequence[int],
     from_id: str, to_id: str,
@@ -1244,6 +1321,7 @@ def run_absorption(
     from sai_memory.perception_buffer import (
         batch_material_item,
         list_batches_annexed_to,
+        mark_batches_annexed,
     )
 
     result = AbsorptionResult()
@@ -1324,6 +1402,7 @@ def run_absorption(
             # 開き直す隣人のスナップショット (CAS の基準)。消えていたら世界が
             # 変わっている — この item は見送り、次回の再計画に任せる。
             snapshots: List[ArasujiEntry] = []
+            run_batches: List[Any] = []
             missing = False
             for eid in item.absorbed_entry_ids:
                 entry = get_entry(conn, eid)
@@ -1355,6 +1434,13 @@ def run_absorption(
                         item for item in (batch_material_item(b) for b in batches)
                         if item is not None
                     )
+                # 吸収する run 自身の未付記バッチも材料に入れ、確定と同じ
+                # 帳簿の付け替え (フェーズ 1) で合体エントリへ付記する。
+                run_batches = _list_run_unannexed_batches(conn, run_ids)
+                extra_items.extend(
+                    item for item in (batch_material_item(b) for b in run_batches)
+                    if item is not None
+                )
                 extra_items.sort(key=lambda x: x["at"])
         if missing:
             result.skipped_items += 1
@@ -1464,6 +1550,7 @@ def run_absorption(
         # rollback だけでは戻らない確定済みの帰属を、撤去より先に復元する。
         attempted_fragments: List[tuple] = []  # (old_id, [fragment_ids])
         attempted_batches: List[tuple] = []    # (old_id, [batch_ids])
+        attempted_run_batches: List[int] = []  # run 自身のバッチ (未付記 → 新)
         repoint_failed = False
         recheck_conflict = False
         recheck_covered = 0
@@ -1497,6 +1584,24 @@ def run_absorption(
                             raise AbsorptionError(
                                 f"perception stamp repoint mismatch for {snap.id}"
                             )
+                    # 吸収した run 自身の未付記バッチ (材料に入れたもの) に、
+                    # 合体エントリへの付記印を打つ。付記の一点
+                    # (mark_batches_annexed — 部屋の様子の置き直しと同じ tx) を
+                    # 通し、ここで確定する。材料にした数と印を打てた数が違えば
+                    # (並行する編纂が先に引き取った等) 二重被覆になるので、
+                    # 全体を巻き戻す。
+                    run_batch_ids = [int(b.id) for b in run_batches]
+                    if run_batch_ids:
+                        attempted_run_batches.extend(run_batch_ids)
+                        stamped = mark_batches_annexed(
+                            conn, run_batch_ids, new_entry.id,
+                        )
+                        if stamped != len(run_batch_ids):
+                            raise AbsorptionError(
+                                "perception stamp mismatch for the absorbed run "
+                                f"({stamped}/{len(run_batch_ids)})"
+                            )
+                        conn.commit()
                 except Exception:
                     repoint_failed = True
                     LOGGER.warning(
@@ -1517,6 +1622,16 @@ def run_absorption(
                         )
                     # 現帰属が新 id の対象だけを戻す。未確定・復元済み・
                     # 別 writer が他の帰属へ動かした対象は書き換えない。
+                    if attempted_run_batches:
+                        try:
+                            _unmark_batches_by_id(
+                                conn, attempted_run_batches, new_entry.id,
+                            )
+                        except Exception:
+                            LOGGER.warning(
+                                "[absorption] could not return the absorbed run's "
+                                "perception stamps", exc_info=True,
+                            )
                     for old_id, ids in attempted_batches:
                         try:
                             _repoint_batches(conn, ids, new_entry.id, old_id)

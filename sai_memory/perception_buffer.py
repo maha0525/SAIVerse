@@ -270,22 +270,8 @@ def init_perception_buffer_table(
         )
         """
     )
-    # 既存 DB の追従 (境界キー列 = 本ワークツリー内の先行世代、
-    # room_state_json = 部屋の様子の差分+移管を入れた 2026-09-05 より前の世代、
-    # kind / recalled_json = リアルタイム情報と自動想起を残す行を入れた
-    # 2026-10-14 より前の世代 — 既存の行は kind の既定値で「知覚」になる)。
-    for ddl in (
-        "ALTER TABLE perception_batches ADD COLUMN boundary_created_at INTEGER",
-        "ALTER TABLE perception_batches ADD COLUMN boundary_rowid INTEGER",
-        "ALTER TABLE perception_batches ADD COLUMN room_state_json TEXT",
-        "ALTER TABLE perception_batches ADD COLUMN kind TEXT NOT NULL "
-        "DEFAULT 'perception'",
-        "ALTER TABLE perception_batches ADD COLUMN recalled_json TEXT",
-    ):
-        try:
-            conn.execute(ddl)
-        except sqlite3.OperationalError:
-            pass  # 既に存在する
+    # 既存 DB の追従は列の移行の一枚 (読む・書く全入口と同じ関数)。
+    ensure_perception_batch_columns(conn)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_perception_batches_consumed_at "
         "ON perception_batches(consumed_at)"
@@ -344,6 +330,62 @@ def init_perception_buffer_table(
         # 後始末 (照合して削除だけやり直す) 相当をここで一度だけ実行する。
         _reconcile_interrupted_two_phase_flush(conn, resource_id=resource_id)
     conn.commit()
+
+
+#: ``perception_batches`` に後から足した列 (名前, 型と既定値)。古い世代の DB
+#: には無いので、表を作る・読む・書く全入口で :func:`ensure_perception_batch_columns`
+#: が足す。
+#: - boundary_created_at / boundary_rowid: 境界キー列 (先行世代)
+#: - room_state_json: 部屋の様子の差分+移管を入れた 2026-09-05 より前の世代
+#: - kind / recalled_json: リアルタイム情報と自動想起を残す行を入れた
+#:   2026-10-14 より前の世代 (既存の行は kind の既定値で「知覚」になる)
+_PERCEPTION_BATCH_ADDED_COLUMNS = (
+    ("boundary_created_at", "INTEGER"),
+    ("boundary_rowid", "INTEGER"),
+    ("room_state_json", "TEXT"),
+    ("kind", "TEXT NOT NULL DEFAULT 'perception'"),
+    ("recalled_json", "TEXT"),
+)
+
+
+def ensure_perception_batch_columns(conn: sqlite3.Connection) -> bool:
+    """``perception_batches`` に後から足した列が揃っていることを保証する (冪等)。
+
+    移行は SAIMemoryAdapter の初期化 (:func:`init_perception_buffer_table`) だけ
+    では足りない — CLI (scripts/arasuji/build_arasuji_core.py) のように
+    ``init_db`` → ``init_arasuji_tables`` で接続する経路は、その初期化を通らずに
+    この表を読み書きする。旧 DB で列が足りないまま全列の SELECT を撃つと
+    ``no such column`` で落ち、それを「台帳なし」と取り違えると材料が黙って
+    消える (persist_realtime_and_recall.md 経緯 — Codex 一巡目 #6)。だから
+    表を作る・読む・書く全関数の入口でこの一枚を呼ぶ。
+
+    軽さ: 列の一覧 (``PRAGMA table_info``) を一度読むだけで、揃っていれば何も
+    書かない。足すのは揃っていない旧 DB の最初の一回だけ。**commit はしない**
+    — 呼び出し側のトランザクションの途中でも呼べるように (トランザクションの外
+    なら ALTER はその場で確定する。中なら呼び出し側の確定・巻き戻しに従い、
+    巻き戻されたら次の呼び出しがまた足す)。
+
+    Returns: 表があれば True (列は揃った)、表が無ければ False (台帳の無い DB —
+    呼び出し側の従来の縮退に任せる)。
+    """
+    cols = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(perception_batches)")
+    }
+    if not cols:
+        return False
+    for name, ddl in _PERCEPTION_BATCH_ADDED_COLUMNS:
+        if name in cols:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE perception_batches ADD COLUMN {name} {ddl}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise  # 並行して足された以外の失敗は隠さない
+        LOGGER.info(
+            "[perception_buffer] added the missing column perception_batches.%s "
+            "(older database)", name,
+        )
+    return True
 
 
 #: 中断 flush の照合で遡る余裕 (秒)。知覚が積まれた時刻と event_message の
@@ -590,6 +632,7 @@ def create_consumption_batch(
     """
     if not item_ids:
         raise ValueError("create_consumption_batch requires at least one item id")
+    ensure_perception_batch_columns(conn)
     media_json = None
     if media:
         import json
@@ -876,6 +919,7 @@ def insert_presentation_batch(
     無い)、(b) 編纂の付記では印だけ受けて材料には載らない (機構の置き直しは
     出来事ではない — sai_memory/arasuji/executor.collect_annex_items)。
     """
+    ensure_perception_batch_columns(conn)
     cur = conn.execute(
         "INSERT INTO perception_batches "
         "(consumed_at, pulse_id, episode_id, rendered_text, media, "
@@ -920,6 +964,7 @@ def insert_realtime_and_recall_batch(
       (とその発言の後ろに並ぶ、この行より古い知覚のまとめ) の直後に置かれ、
       その発言が送る列に無いときは送られない (§4.3)。
     """
+    ensure_perception_batch_columns(conn)
     cur = conn.execute(
         "INSERT INTO perception_batches "
         "(consumed_at, pulse_id, episode_id, rendered_text, media, "
@@ -1010,6 +1055,7 @@ def list_unannexed_batches(
     わけではないので、材料集めはここを読み続ける。
     ``since`` (以上) / ``before`` (未満) は付記スパンの絞り込み用。
     """
+    ensure_perception_batch_columns(conn)
     sql = (
         f"SELECT {_BATCH_SELECT_COLUMNS} FROM perception_batches "
         "WHERE annexed_entry_id IS NULL"
@@ -1158,6 +1204,7 @@ def advance_presentation_cutoff(
 def _list_batches_by_cutoff(
     conn: sqlite3.Connection, *, above: bool, cutoff: Optional[int],
 ) -> List[PerceptionBatch]:
+    ensure_perception_batch_columns(conn)
     if cutoff is None:
         cutoff = get_presentation_cutoff(conn)
     op = ">" if above else "<="
@@ -1207,6 +1254,7 @@ def list_presented_batch_room_states(
     間は毎ターン通る) が全文を運ばずに済むようにする。並びは
     :func:`list_presented_batches` と同じ ``consumed_at`` 昇順。
     """
+    ensure_perception_batch_columns(conn)
     if cutoff is None:
         cutoff = get_presentation_cutoff(conn)
     rows = conn.execute(
@@ -1302,6 +1350,8 @@ def mark_batches_annexed(
     """
     if not batch_ids or not entry_id:
         return 0
+    # 続く部屋の様子の置き直し・土台の回復が room_state_json を読む。
+    ensure_perception_batch_columns(conn)
     placeholders = ",".join("?" for _ in batch_ids)
     cur = conn.execute(
         f"UPDATE perception_batches SET annexed_entry_id = ? "
@@ -1359,6 +1409,7 @@ def list_batches_annexed_to(
     if not entry_id:
         return []
     try:
+        ensure_perception_batch_columns(conn)
         rows = conn.execute(
             f"SELECT {_BATCH_SELECT_COLUMNS} FROM perception_batches "
             "WHERE annexed_entry_id = ? ORDER BY consumed_at ASC, id ASC",

@@ -1138,14 +1138,27 @@ def unified_recall(
         # (docs/intent/persist_realtime_and_recall.md §4.3)。
         kw_id_sets = []
         try:
+            # 旧 DB (kind 列なし) をここで読むと「台帳なし」と同じ顔で検索が
+            # 空になる — 列の移行の一枚を先に通す。
+            from sai_memory.perception_buffer import ensure_perception_batch_columns
+            ensure_perception_batch_columns(conn)
             for pattern in like_patterns:
                 cur = conn.execute(
                     "SELECT id FROM perception_batches WHERE rendered_text LIKE ?"
                     f"{like_escape} AND kind = 'perception'",
                     (pattern,),
                 )
-                kw_id_sets.append({f"perception:{row[0]}" for row in cur.fetchall()})
-        except sqlite3.OperationalError:
+                # 除外は他のソースと同じく候補を集める段階で効かせる
+                # (採用した後で捨てると、枠が除外対象で埋まったまま件数だけ減る)。
+                kw_id_sets.append(_not_excluded(
+                    "perception", {f"perception:{row[0]}" for row in cur.fetchall()},
+                ))
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                LOGGER.warning(
+                    "[unified_recall] perception keyword search failed; "
+                    "searching without perceptions this time", exc_info=True,
+                )
             kw_id_sets = []  # perception_batches の無い DB (旧世代)
 
         all_batch_ids: set[str] = set()

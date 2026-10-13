@@ -31,6 +31,7 @@ from sai_memory.memory.storage import (
     set_thread_title,
     init_db,
     compose_message_content,
+    wrap_system_record_content,
     replace_message_embeddings,
     write_deferred_message_embedding,
     get_messages_with_persona_in_audience,
@@ -2359,10 +2360,9 @@ class SAIMemoryAdapter:
         role = "assistant" if original_role == "model" else original_role
         if isinstance(role, str) and role.lower() == "system":
             role = "user"
-            if content:
-                content = f"<system>\n{content}\n</system>"
-            else:
-                content = "<system></system>"
+            # 送る経路 (スペルの結果など) と同じ一枚で包む
+            # (sai_memory.memory.storage.wrap_system_record_content)。
+            content = wrap_system_record_content(content)
         payload: Dict[str, Any] = {
             "id": msg.id,
             "thread_id": msg.thread_id,

@@ -142,7 +142,20 @@ def collect_annex_items(
                 batches + [b for b in recovered if b.id not in seen],
                 key=lambda b: (b.consumed_at, b.id),
             )
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        # 「台帳なし」として材料ゼロに縮退してよいのは、表そのものが無い DB
+        # (旧テスト等) だけ。列不足は読み口 (list_unannexed_batches) が先に
+        # 移行するので起きないはずで、それでも起きたもの (やロック等) を
+        # 材料ゼロの顔にすると、その期間の知覚が黙ってあらすじから漏れる
+        # (persist_realtime_and_recall.md 経緯 — Codex 一巡目 #6)。
+        from sai_memory.arasuji.storage import is_missing_table_error
+        if not is_missing_table_error(exc):
+            LOGGER.error(
+                "[arasuji] could not read the perception batches for the "
+                "annexation material (%s); not compiling this span without them",
+                exc,
+            )
+            raise
         batches = []  # 台帳の無い DB (旧テスト等)
     from sai_memory.perception_buffer import batch_material_item
     for batch in batches:
