@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from sai_memory.perception_buffer import PERCEPTION_OMISSION_HEADER
-from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
+from sea.eviction_plan import CONSUMED_PERCEPTION_KEY, is_injected_perception
 from sea.runtime_utils import event_building_id
 from saiverse.model_configs import (
     calculate_cost,
@@ -79,6 +79,48 @@ def mark_cache_boundary(
         marked[idx] = {**msg, "metadata": new_metadata}
         return marked
     return history
+
+
+def _is_head_message(msg: Any) -> bool:
+    """head 由来のメッセージ (システムプロンプト・Memory Weave・自分の外見)。"""
+    from sea.head_pipeline.integration import (
+        _MEMORY_WEAVE_CONTEXT_MARKER,
+        _SELF_VIEW_MARKER,
+        _VISUAL_CONTEXT_MARKER,
+    )
+
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("role") == "system":
+        return True
+    meta = msg.get("metadata")
+    return isinstance(meta, dict) and any(
+        meta.get(k) for k in (
+            _MEMORY_WEAVE_CONTEXT_MARKER, _SELF_VIEW_MARKER, _VISUAL_CONTEXT_MARKER,
+        )
+    )
+
+
+def sent_message_ids(messages: Sequence[Dict[str, Any]]) -> List[str]:
+    """送る列にある、記録の行 id (head・知覚のまとめ・差し込みを除く) を並び順に。
+
+    前駆刻印の材料 (sea/message_stamp.py の ``_presented_message_ids``) を、
+    実際に送る列から作り直すときに使う。送る列で ``id`` を持つのは記録
+    (SAIMemory の messages 行) から来た dict だけ — 履歴の行 (adapter の payload)
+    と、同じ Pulse の中で記録へ書いた自分の返事・スペルの周の発言
+    (sea/runtime_llm.py が保存した行 id を載せる)。head・知覚のまとめ・
+    リアルタイム情報・時刻アンカー・自動想起・report_to_parent・ツール結果の
+    差し込みは ``id`` を持たない (2026-10-14 調査)。head と知覚の除外は、将来
+    それらが ``id`` を持っても記録の行と取り違えないための守り。
+    """
+    out: List[str] = []
+    for msg in messages:
+        if not isinstance(msg, dict) or not msg.get("id"):
+            continue
+        if _is_head_message(msg) or is_injected_perception(msg):
+            continue
+        out.append(str(msg["id"]))
+    return out
 
 
 #: head (前置き) に必ず並べる Section。**用途やラインで出し分けない。**

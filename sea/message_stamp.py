@@ -20,6 +20,17 @@
     プロンプトの末尾に積まれるので、次のコールの前に
     :func:`append_presented_message_id` で列を伸ばす。伸ばさないと刻印が
     組成時点の履歴末尾を指したままになり、「実際に見ていた最後」でなくなる。
+    同じ Playbook の LLM ノードが続く場合も同じで、返事を記録へ書いたら
+    (sea/runtime_llm._finalize_beat) その行 id を列に足す — 次のノードは
+    送る列に積まれたその返事を見て書くから。
+
+    材料が落ちた後 (子 Playbook の中継で :func:`clear_presented_message_ids`
+    が落とした後) に親が自前の LLM ノードで送るときは、送る直前に
+    :func:`restore_presented_message_ids_from_sent` が**これから送る列**から
+    材料を作り直す。送る列で記録の行 id を持つのは履歴の行と、同じ Pulse の
+    中で記録へ書いた自分の返事・スペルの周の発言 (sea/runtime_llm.py が
+    保存した行 id を列の dict に載せる) なので、「親が返事 A を保存 → 子 →
+    親が返事 B」でも B の前駆は A になる。
 
     **消費 (ズレをどう扱うか) はまだ定義しない** — まず記録する (2026-08-19
     まはー裁定)。導入前のメッセージは刻印なしで、読み手はそれを物理順とみなす
@@ -42,11 +53,15 @@
 帰属が確定できなくなったら :func:`clear_call_tokens` で落として刻印なしへ倒す
 — 子 Playbook の出力を親の ``state["last"]`` に中継する ``lg_subplay_node``
 がその場面で、子のコールの三つ組は子 state に閉じていて親へは戻らない。
+前駆の材料も同じ場面で対にして落とす (:func:`clear_presented_message_ids`)。
+落とした後に親が自前の LLM ノードを回せば、三つ組は ``record_call_tokens``
+が、前駆は :func:`restore_presented_message_ids_from_sent` が載せ直すので、
+刻印が消えるのは「作り手が確定できない区間」(中継された本文) だけ。
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 # ---- metadata に刻むキー (message.metadata の直下) ----
 PREDECESSOR_META_KEY = "predecessor_message_id"
@@ -132,6 +147,13 @@ def clear_presented_message_ids(state: Optional[Dict[str, Any]]) -> None:
     子の提示列を親へ引き継ぐ案を採らないのは三つ組と同じ理由 — ``last_text``
     は子の出力列の末尾で、子の最後のコールがその本文を書いたとは限らず、
     子の final_state も親へ届かない。確定できないので刻印なしへ倒す。
+
+    落とした後に親が自前の LLM ノードで送るときは、送る直前に
+    :func:`restore_presented_message_ids_from_sent` が送る列から材料を作り
+    直す — :func:`clear_call_tokens` の三つ組を ``record_call_tokens`` が
+    載せ直すのと対になる。だから消えるのは「作り手が確定できない区間」
+    (中継された本文を親の SPEAK / MEMORIZE が刻む場面) だけで、親が自分で
+    書いた次の返事には前駆が付く。
     """
     if not isinstance(state, dict):
         return
@@ -199,6 +221,36 @@ def append_presented_message_id(
     if not isinstance(presented, list):
         presented = []
     state[PRESENTED_IDS_STATE_KEY] = [*presented, str(message_id)]
+
+
+def restore_presented_message_ids_from_sent(
+    state: Optional[Dict[str, Any]], messages: Optional[Sequence[Dict[str, Any]]],
+) -> None:
+    """材料が無いときだけ、これから送る列から「見た列」を作り直す。
+
+    使うのは LLM ノードが送る直前 (送る列が確定した後の一点)。材料が無い
+    (キー不在・空・list でない) のは、作り手が変わった区間の後で
+    :func:`clear_presented_message_ids` が落とした回 — 子 Playbook の中継の後に
+    親が自前の LLM ノードで生成する回がこれにあたる。この生成が見るのは
+    まさにこれから送る列なので、そこにある記録の行 id
+    (:func:`sea.runtime_context.sent_message_ids`) を並び順に材料にする。
+    三つ組を ``record_call_tokens`` が載せ直すのと対になる口。
+
+    **材料が既にあるときは触らない** — ``prepare_context`` の提示列や、
+    スペルの周で :func:`append_presented_message_id` が伸ばした列が正。
+    送る列に記録の行が一つも無ければ何もしない (提示ゼロの生成は刻印なしの
+    まま)。
+    """
+    if not isinstance(state, dict) or not messages:
+        return
+    current = state.get(PRESENTED_IDS_STATE_KEY)
+    if isinstance(current, list) and current:
+        return
+    from sea.runtime_context import sent_message_ids
+
+    sent = sent_message_ids(messages)
+    if sent:
+        state[PRESENTED_IDS_STATE_KEY] = sent
 
 
 def resolve_predecessor_message_id(state: Optional[Dict[str, Any]]) -> Optional[str]:

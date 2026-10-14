@@ -275,7 +275,11 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         # **前駆も同じ理由で落とす。** 親 state に残っているのは親が見せた列の
         # 末尾で、この本文を書いた子の LLM は一度も見ていない。残すと「見ていない
         # メッセージを前駆として刻む」= 欠落ではなく捏造になる
-        # (2026-08-22 掃討フェーズ 束 5 指摘 1)。
+        # (2026-08-22 掃討フェーズ 束 5 指摘 1)。親が次に自前の LLM ノードで
+        # 送るときは、送る直前に lg_llm_node が送る列から前駆の材料を作り直す
+        # (sea/message_stamp.restore_presented_message_ids_from_sent) — 三つ組を
+        # _record_llm_usage が載せ直すのと対で、刻印が消えるのは中継された本文
+        # だけ。
         clear_call_tokens(state)
         clear_presented_message_ids(state)
         if getattr(node_def, "propagate_output", False) and sub_outputs and outputs is not None:
