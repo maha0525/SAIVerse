@@ -343,3 +343,59 @@ def test_entity_recall_does_not_reuse_an_older_utterance_for_an_image_only_turn(
 
     messages[-1]["content"] = "これ見て"
     assert _last_user_utterance(messages) == "これ見て"
+
+
+def _enriched(messages):
+    # 実際の道と同じく、文脈を組む関数で「添付アイテム作成」の文を足してから渡す
+    from sea.runtime import SEARuntime
+
+    return SEARuntime._enrich_history_with_attachments(object(), messages)
+
+
+def test_entity_recall_ignores_the_attachment_note_on_an_image_only_turn(png_path):
+    # 添付の名前が知っている名前でも、ユーザーが言った言葉ではないので想起しない
+    from sea import auto_recall
+
+    metadata = _image_metadata(png_path)
+    metadata["images"][0]["item_name"] = "Alice.png"
+    messages = _enriched([
+        {"role": "user", "content": "今日はいい天気"},
+        {"role": "assistant", "content": "そうだね"},
+        {"role": "user", "content": "", "metadata": metadata},
+    ])
+    assert "Alice.png" in messages[-1]["content"]  # 機構の文が足されている
+
+    assert auto_recall._last_user_utterance(messages) is None
+    rows = [("page_alice", 7, "Alice", "Alice の要約")]
+    with patch("sea.auto_recall._fetch_memopedia_titles", return_value=rows), \
+            patch("sai_memory.unified_recall.unified_recall", return_value=[]):
+        result = auto_recall.run_auto_recall(
+            conn=object(), embedder=object(), messages=messages,
+            persona_id="p", thread_id="p:user_conversation",
+        )
+    assert not result.injected
+
+
+def test_entity_recall_reads_only_what_was_said_when_text_comes_with_an_image(png_path):
+    from sea import auto_recall
+
+    metadata = _image_metadata(png_path)
+    metadata["images"][0]["item_name"] = "Alice.png"
+    messages = _enriched([{"role": "user", "content": "これ見て", "metadata": metadata}])
+
+    assert auto_recall._last_user_utterance(messages) == "これ見て"
+
+
+def test_same_image_written_differently_is_still_sent_once(png_path):
+    # 同じファイルを相対パスと絶対パスで両方の置き場に書いても、一枚として扱う
+    import os
+
+    from saiverse.media_utils import describe_attachments, iter_image_media
+
+    metadata = _image_metadata(png_path)
+    metadata["media"] = [{
+        "type": "image", "mime_type": "image/png",
+        "path": os.path.relpath(str(png_path)),
+    }]
+    assert len(iter_image_media(metadata)) == 1
+    assert describe_attachments(metadata) == "画像 1 件"

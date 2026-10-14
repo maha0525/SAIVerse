@@ -1,6 +1,8 @@
 import base64
 import logging
 import mimetypes
+import os
+import re
 import threading
 from collections import OrderedDict
 from datetime import datetime
@@ -395,6 +397,11 @@ def _resolve_building_image(building_id: str, saiverse_home: Path) -> Optional[P
         return None
 
 
+def _file_identity(path: Any) -> str:
+    """同じファイルかを比べるための形 (絶対パスにし、大小文字を OS の規則で揃える)。"""
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
 def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
     """Extract validated image descriptors from a metadata payload.
 
@@ -459,7 +466,7 @@ def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
             LOGGER.warning("Image URI %s could not be resolved or file missing (path=%s)", uri, path)
             continue
 
-        path_key = str(path)
+        path_key = _file_identity(path)
         if use_type_filter:
             media_paths.add(path_key)
         elif path_key in media_paths:
@@ -843,12 +850,9 @@ def _count_attachments(metadata: Any) -> Dict[str, int]:
     counts = {"image": 0, "document": 0, "audio": 0, "video": 0}
     if not isinstance(metadata, dict):
         return counts
-    images = metadata.get("images")
-    if isinstance(images, list):
-        counts["image"] += sum(1 for item in images if isinstance(item, dict))
-    documents = metadata.get("documents")
-    if isinstance(documents, list):
-        counts["document"] += sum(1 for item in documents if isinstance(item, dict))
+    # "images" の項目が "media" の画像と同じファイルなら数えない
+    # (iter_image_media と同じ規則。一つの置き場の中の重複はそのまま数える)
+    media_image_files: set = set()
     media = metadata.get("media")
     if isinstance(media, list):
         for item in media:
@@ -860,6 +864,19 @@ def _count_attachments(metadata: Any) -> Dict[str, int]:
                 kind = mime.split("/", 1)[0] if "/" in mime else ""
             if kind in counts:
                 counts[kind] += 1
+            if kind == "image" and item.get("path"):
+                media_image_files.add(_file_identity(item["path"]))
+    images = metadata.get("images")
+    if isinstance(images, list):
+        for item in images:
+            if not isinstance(item, dict):
+                continue
+            if item.get("path") and _file_identity(item["path"]) in media_image_files:
+                continue
+            counts["image"] += 1
+    documents = metadata.get("documents")
+    if isinstance(documents, list):
+        counts["document"] += sum(1 for item in documents if isinstance(item, dict))
     return counts
 
 
@@ -878,6 +895,26 @@ _ATTACHMENT_LABELS = (
     ("audio", "音声"),
     ("video", "動画"),
 )
+
+
+#: 文脈を組むとき (sea/runtime.py の _enrich_history_with_attachments)、添付から
+#: 作られたアイテムの名前を発言の末尾に足す、機構の文。ユーザーが言った言葉では
+#: ないので、発言の言葉を読む側 (自動想起など) は strip_attachment_items_note で
+#: 取り除いてから読む。
+_ATTACHMENT_ITEMS_NOTE_PREFIX = "添付アイテム作成: "
+_ATTACHMENT_ITEMS_NOTE_RE = re.compile(
+    r"\n?<system>" + re.escape(_ATTACHMENT_ITEMS_NOTE_PREFIX) + r"[^\n]*?</system>\s*\Z"
+)
+
+
+def attachment_items_note(items: str) -> str:
+    """発言の末尾に足す「添付アイテム作成」の文 (先頭の改行込み)。"""
+    return f"\n<system>{_ATTACHMENT_ITEMS_NOTE_PREFIX}{items}</system>"
+
+
+def strip_attachment_items_note(text: str) -> str:
+    """発言の末尾の「添付アイテム作成」の文を取り除く (無ければそのまま)。"""
+    return _ATTACHMENT_ITEMS_NOTE_RE.sub("", text)
 
 
 def describe_attachments(metadata: Any) -> str:

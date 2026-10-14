@@ -2568,7 +2568,9 @@ class SEARuntime:
                 # Append system note to content
                 original_content = msg.get("content", "")
                 items_str = "、".join(attachment_notes)
-                note = f"\n<system>添付アイテム作成: {items_str}</system>"
+                from saiverse.media_utils import attachment_items_note
+
+                note = attachment_items_note(items_str)
                 enriched_msg = {**msg, "content": original_content + note}
                 enriched.append(enriched_msg)
             else:
