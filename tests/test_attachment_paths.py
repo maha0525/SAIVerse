@@ -137,21 +137,50 @@ class MediaRecallSyncSummaryTests(unittest.TestCase):
         self.assertEqual(result.get("summary"), "猫の写真です。")
         manager.update_item_description.assert_called_once_with("item-1", "猫の写真です。")
 
-    def test_sync_summary_on_without_context_does_not_generate(self):
-        # user_message も prev_ai_message も無ければ、ON でも生成自体が起きない
-        # (既存の条件 `if item_id and (user_message or prev_ai_message)` を維持)。
+    def test_sync_summary_on_without_context_still_generates(self):
+        # 部屋の最初の発言が画像だけ (本文も直前のペルソナの発言も無い) でも、
+        # ON なら概要を作って metadata に載せる — 想起の検索語に使うため
+        # (docs/intent/memory_architecture_v2.md「添付メディアの概要をクエリに使う」)。
+        # 2026-10-14 まで画像だけの発言は受付で断られていたので、この組み合わせは
+        # 起きなかった。
         from api.routes.chat import AttachmentData, _store_image_attachment
 
         att = AttachmentData(data="", filename="cat.jpg", type="image", mime_type="image/jpeg")
         manager = MagicMock()
         manager.create_picture_item_for_user.return_value = "item-1"
 
-        with patch("saiverse.media_summary.generate_contextual_image_description") as mock_gen:
+        with patch(
+            "saiverse.media_summary.generate_contextual_image_description",
+            return_value="猫の写真です。",
+        ) as mock_gen, patch("threading.Thread") as mock_thread:
             result = _store_image_attachment(
                 b"jpeg-bytes", att, manager, "building_x",
                 user_message="", prev_ai_message="",
                 sync_summary=True,
             )
+            mock_thread.assert_not_called()
+
+        mock_gen.assert_called_once()
+        self.assertEqual(result.get("summary"), "猫の写真です。")
+
+    def test_sync_summary_off_without_context_does_not_generate(self):
+        # OFF (既定) で文脈も無ければ、ここでは作らない (課金を増やさない)。
+        # 必要になったときに ensure_image_summary が作る。
+        from api.routes.chat import AttachmentData, _store_image_attachment
+
+        att = AttachmentData(data="", filename="cat.jpg", type="image", mime_type="image/jpeg")
+        manager = MagicMock()
+        manager.create_picture_item_for_user.return_value = "item-1"
+
+        with patch(
+            "saiverse.media_summary.generate_contextual_image_description",
+        ) as mock_gen, patch("threading.Thread") as mock_thread:
+            result = _store_image_attachment(
+                b"jpeg-bytes", att, manager, "building_x",
+                user_message="", prev_ai_message="",
+                sync_summary=False,
+            )
+            mock_thread.assert_not_called()
             mock_gen.assert_not_called()
 
         self.assertIsNone(result.get("summary"))

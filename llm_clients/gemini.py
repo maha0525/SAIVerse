@@ -1558,11 +1558,12 @@ class GeminiClient(LLMClient):
                 skip_audio_summary_indices.add(idx)
             if metadata.get("__skip_video_summary__"):
                 skip_video_summary_indices.add(idx)
-            # Image cache only populated when supports_images (existing behavior).
-            if self.supports_images:
-                media_items = iter_image_media(metadata)
-                if media_items:
-                    attachment_cache[idx] = media_items
+            # 画像は画像非対応のモデルでも集める。非対応なら下の per-message の
+            # 分岐が説明の文に置き換える (2026-10-14 まで、ここで絞っていたため
+            # その分岐に届かず、画像が説明も無しに消えていた)。
+            media_items = iter_image_media(metadata)
+            if media_items:
+                attachment_cache[idx] = media_items
             # Audio / video are always cached; per-message loop decides whether to
             # send inline_data (supports_*=True) or inject summary text (False).
             audio_items = iter_audio_media(metadata)
@@ -1661,7 +1662,7 @@ class GeminiClient(LLMClient):
             text = content_to_text(message.get("content", "")) or ""
             text_content = text
             g_role = "user" if role == "user" else "model"
-            attachments = attachment_cache.get(idx, []) if self.supports_images else []
+            attachments = attachment_cache.get(idx, [])
             audio_attachments = audio_cache.get(idx, [])
             video_attachments = video_cache.get(idx, [])
             media_parts: List[types.Part] = []
@@ -1706,6 +1707,14 @@ class GeminiClient(LLMClient):
                         logging.warning(
                             "Failed to load image for Gemini payload: %s", attachment["uri"]
                         )
+                        # 読めなかった画像も黙って捨てず、説明の文で届ける
+                        # (Anthropic・OpenAI 互換・xAI と同じ扱い)
+                        summary = next(
+                            (s for _i, att, s in attachment_records if att is attachment),
+                            None,
+                        ) or "(要約を取得できませんでした)"
+                        note = f"[画像: {attachment['uri']}] {summary}"
+                        text_content = f"{text_content}\n{note}" if text_content else note
                         continue
                     logging.debug(
                         "[gemini] image att=%s orig_mime=%s effective_mime=%s "

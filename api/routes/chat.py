@@ -536,7 +536,11 @@ def _store_image_attachment(
         logging.warning("Failed to create picture item: %s", e, exc_info=True)
 
     summary: Optional[str] = None
-    if item_id and (user_message or prev_ai_message):
+    # 文脈 (本文・直前のペルソナの発言) が無いときは、既定では概要を作らない
+    # (必要になったときに ensure_image_summary が作る)。メディアの内容を想起に
+    # 使う設定 (sync_summary) が ON なら、部屋の最初の発言が画像だけでも、
+    # 想起の検索語に載せる概要がここで要るので作る。
+    if item_id and (user_message or prev_ai_message or sync_summary):
         if sync_summary:
             try:
                 from saiverse.media_summary import generate_contextual_image_description
@@ -968,6 +972,28 @@ def _cleanup_attachment_items(
             )
 
 
+#: 発言の metadata のうち、サーバーが添付を保存したときにだけ書くキー
+#: (画像・ドキュメント・音声・動画の置き場)。
+_SERVER_WRITTEN_METADATA_KEYS = frozenset({"images", "documents", "media"})
+
+
+def _client_metadata(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """送り手から受け取った metadata のうち、送り手が書いてよいものだけを返す。
+
+    添付の置き場はサーバーが保存した添付からだけ作る (送り手が書くと、任意の
+    ファイルを画像として LLM へ送らせたり、中身の無い添付で空の発言を通したり
+    できる)。``__`` で始まるキーは機構が内部で使う印 (例: 文脈を組むときに控える
+    ``__said_content__``) で、送り手が書くと自動想起などが偽の本文を読む。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: value
+        for key, value in raw.items()
+        if key not in _SERVER_WRITTEN_METADATA_KEYS and not str(key).startswith("__")
+    }
+
+
 @router.post("/send")
 def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
     # manager.user_current_building_id は _refresh_user_state_cache が作る遅延
@@ -999,7 +1025,7 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
         raise HTTPException(status_code=400, detail="Message or attachment required")
 
     # Combine metadata
-    metadata = req.metadata or {}
+    metadata = _client_metadata(req.metadata)
 
     # Get last AI message for contextual image description
     prev_ai_message = ""

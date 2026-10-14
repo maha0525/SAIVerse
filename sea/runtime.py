@@ -2569,10 +2569,29 @@ class SEARuntime:
                 original_content = msg.get("content", "")
                 items_str = "、".join(attachment_notes)
                 note = f"\n<system>添付アイテム作成: {items_str}</system>"
-                enriched_msg = {**msg, "content": original_content + note}
+                # 足した文はユーザーが言った言葉ではないので、足す前の本文を
+                # 控えておく。発言の言葉を読む側 (自動想起) はそれを読む
+                # (文字列の形から機構の文を見分けない — ユーザーが同じ形を書いた
+                # ときや、名前に改行が入ったときに取り違える)。
+                from saiverse.media_utils import SAID_CONTENT_KEY
+
+                enriched_msg = {
+                    **msg,
+                    "content": original_content + note,
+                    "metadata": {**metadata, SAID_CONTENT_KEY: original_content},
+                }
                 enriched.append(enriched_msg)
             else:
-                enriched.append(msg)
+                from saiverse.media_utils import SAID_CONTENT_KEY
+
+                if SAID_CONTENT_KEY in metadata:
+                    # 控えはここで足した文の分だけを表す。ここで足していない
+                    # 発言に控えがあるなら、記録に紛れ込んだもの (送り手が書いた
+                    # 等) なので、読み手へ渡す前に外す。
+                    stripped = {k: v for k, v in metadata.items() if k != SAID_CONTENT_KEY}
+                    enriched.append({**msg, "metadata": stripped})
+                else:
+                    enriched.append(msg)
 
         return enriched
 

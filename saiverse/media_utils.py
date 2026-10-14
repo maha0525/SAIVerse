@@ -1,6 +1,7 @@
 import base64
 import logging
 import mimetypes
+import os
 import threading
 from collections import OrderedDict
 from datetime import datetime
@@ -395,37 +396,67 @@ def _resolve_building_image(building_id: str, saiverse_home: Path) -> Optional[P
         return None
 
 
+def _file_identity(path: Any) -> str:
+    """同じファイルかを比べるための形 (絶対パスにし、大小文字を OS の規則で揃える)。"""
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _attachment_file_identity(item: Dict[str, Any]) -> str:
+    """添付の項目が指すファイルの _file_identity (iter_image_media と同じく、
+    URI を先に解決し、だめなら path の欄)。どちらも無ければ空文字。"""
+    # 受付の判定の中で呼ばれるので、型の崩れた欄でも例外を出さない
+    uri = item.get("uri")
+    path = None
+    if isinstance(uri, str) and uri:
+        try:
+            path = resolve_media_uri(uri)
+        except Exception:
+            path = None
+    if path is None or not path.exists():
+        direct = item.get("path")
+        if isinstance(direct, (str, Path)) and str(direct):
+            path = Path(direct)
+    return _file_identity(path) if path is not None else ""
+
+
 def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
     """Extract validated image descriptors from a metadata payload.
 
     The metadata may contain a "media" list with mixed type entries
-    (image/audio/video) or a legacy "images" list (image-only). When reading
+    (image/audio/video) and/or a legacy "images" list (image-only). When reading
     from "media", entries whose `type` is not "image" (or whose mime_type does
     not start with "image/") are filtered out — without this, audio/video
     descriptors would be wrongly treated as images.
+
+    両方の置き場を読む。/chat/send は画像を "images"、音声・動画を "media" に
+    分けて書くので、"media" があるときに "images" を読まないと、画像と音声を
+    一緒に送った発言から画像が消える (2026-10-14 まで実際に消えていた)。
+    "images" の項目が "media" で拾ったのと同じファイルなら重ねて返さない
+    (一つの置き場の中の重複は従来どおりそのまま返す)。
     """
     results: List[Dict[str, Any]] = []
     if not isinstance(metadata, dict):
         return results
 
-    # First try the unified "media" list with type filtering
+    # (項目, "media" から来たか)。"media" は種類で絞り、"images" は全部画像とみなす
+    candidates: List[Tuple[Any, bool]] = []
     media = metadata.get("media")
-    use_type_filter = isinstance(media, list)
-    if not isinstance(media, list):
-        # Legacy "images" key: every entry is assumed to be an image
-        media = metadata.get("images")
-        if not isinstance(media, list):
-            return results
+    if isinstance(media, list):
+        candidates.extend((item, True) for item in media)
+    images = metadata.get("images")
+    if isinstance(images, list):
+        candidates.extend((item, False) for item in images)
 
-    for item in media:
+    media_paths: set = set()
+    for item, use_type_filter in candidates:
         if not isinstance(item, dict):
             continue
 
         # When media comes from metadata["media"], it may carry mixed media
         # types; keep only image entries based on `type` or mime prefix.
         if use_type_filter:
-            item_type = (item.get("type") or "").lower()
-            item_mime = (item.get("mime_type") or "").lower()
+            item_type = str(item.get("type") or "").lower()
+            item_mime = str(item.get("mime_type") or "").lower()
             if item_type:
                 if item_type != "image":
                     continue
@@ -450,6 +481,12 @@ def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
 
         if path is None or not path.exists():
             LOGGER.warning("Image URI %s could not be resolved or file missing (path=%s)", uri, path)
+            continue
+
+        path_key = _file_identity(path)
+        if use_type_filter:
+            media_paths.add(path_key)
+        elif path_key in media_paths:
             continue
 
         mime_type = item.get("mime_type") or mimetypes.guess_type(path)[0] or "image/png"
@@ -783,8 +820,8 @@ def _iter_typed_media(
             continue
 
         # Filter by type or mime prefix
-        item_type = (item.get("type") or "").lower()
-        item_mime = (item.get("mime_type") or "").lower()
+        item_type = str(item.get("type") or "").lower()
+        item_mime = str(item.get("mime_type") or "").lower()
         if item_type:
             if item_type != type_key:
                 continue
@@ -818,6 +855,122 @@ def _iter_typed_media(
             }
         )
     return results
+
+
+def _has_file_reference(item: Dict[str, Any]) -> bool:
+    """添付の項目が、ファイルを指す欄 (空でない ``uri`` か ``path``) を持つか。"""
+    for key in ("uri", "path"):
+        value = item.get(key)
+        if isinstance(value, (str, Path)) and str(value).strip():
+            return True
+    return False
+
+
+def _count_attachments(metadata: Any) -> Dict[str, int]:
+    """発言の metadata に載った添付を種類ごとに数える (ファイルの有無は見ない)。
+
+    添付の置き場は api/routes/chat.py の /chat/send が書く 3 つ:
+    ``images`` (画像)、``documents`` (ドキュメント)、``media`` (音声・動画。
+    種類は ``type`` か ``mime_type`` の頭で決まり、画像が入ることもある)。
+    ファイルを指す欄 (``uri`` か ``path``) を持たない項目は数えない — 送る側
+    (iter_image_media など) が何も送らないので、添付として数えると中身の無い
+    発言を「画像がある」と取り違える。
+    """
+    counts = {"image": 0, "document": 0, "audio": 0, "video": 0}
+    if not isinstance(metadata, dict):
+        return counts
+    # "images" の項目が "media" の画像と同じファイルなら数えない
+    # (iter_image_media と同じ規則。一つの置き場の中の重複はそのまま数える)
+    media_image_files: set = set()
+    media = metadata.get("media")
+    if isinstance(media, list):
+        for item in media:
+            if not isinstance(item, dict) or not _has_file_reference(item):
+                continue
+            kind = str(item.get("type") or "").lower()
+            if not kind:
+                mime = str(item.get("mime_type") or "").lower()
+                kind = mime.split("/", 1)[0] if "/" in mime else ""
+            if kind in counts:
+                counts[kind] += 1
+            if kind == "image":
+                identity = _attachment_file_identity(item)
+                if identity:
+                    media_image_files.add(identity)
+    images = metadata.get("images")
+    if isinstance(images, list):
+        for item in images:
+            if not isinstance(item, dict) or not _has_file_reference(item):
+                continue
+            identity = _attachment_file_identity(item)
+            if identity and identity in media_image_files:
+                continue
+            counts["image"] += 1
+    documents = metadata.get("documents")
+    if isinstance(documents, list):
+        counts["document"] += sum(
+            1 for item in documents
+            if isinstance(item, dict) and _has_file_reference(item)
+        )
+    return counts
+
+
+def has_attachments(metadata: Any) -> bool:
+    """発言が添付 (画像・ドキュメント・音声・動画) を一つでも持つか。
+
+    本文が空の発言を「空」として捨てるかどうかの判定に使う。画像だけの発言は
+    本文 ``""`` と添付で表されるので、本文だけを見て捨てると発言ごと消える。
+    """
+    return any(_count_attachments(metadata).values())
+
+
+_ATTACHMENT_LABELS = (
+    ("image", "画像"),
+    ("document", "ドキュメント"),
+    ("audio", "音声"),
+    ("video", "動画"),
+)
+
+
+def describe_wordless_utterance(metadata: Any) -> str:
+    """言葉の無いユーザー発言 (画像だけを送った等) を、機構の文で言い表す。
+
+    判断の材料 (応じるかの判断・想起の反射判断) に、その発言の代わりに置く。
+    ユーザーやペルソナ本人の発言の本文には入れない。添付も無ければ空文字。
+    """
+    attachments = describe_attachments(metadata)
+    if not attachments:
+        return ""
+    return f"(文章は無く、{attachments}を送ってきました)"
+
+
+#: 文脈を組むとき (sea/runtime.py の _enrich_history_with_attachments) は、発言の
+#: 末尾に「添付アイテム作成: 画像「名前」」の機構の文を足し、足す前の本文を
+#: metadata のこのキーに控える。足した文はユーザーが言った言葉ではないので、
+#: 発言の言葉を読む側 (自動想起など) は said_content でこちらを読む。
+SAID_CONTENT_KEY = "__said_content__"
+
+
+def said_content(message: Dict[str, Any]) -> str:
+    """発言の言葉 (機構が足した文を含まない本文) を返す。
+
+    控えが無いメッセージ (機構の文が足されていないもの) は本文そのもの。
+    """
+    metadata = message.get("metadata")
+    if isinstance(metadata, dict) and SAID_CONTENT_KEY in metadata:
+        return str(metadata.get(SAID_CONTENT_KEY) or "")
+    return str(message.get("content") or "")
+
+
+def describe_attachments(metadata: Any) -> str:
+    """添付の種類と件数を「画像 1 件、ドキュメント 2 件」の形の文にする。
+
+    添付が無ければ空文字。機構が書く文 (判断の材料など) に添える用途で、
+    ペルソナ本人の発言の本文には入れない。
+    """
+    counts = _count_attachments(metadata)
+    parts = [f"{label} {counts[key]} 件" for key, label in _ATTACHMENT_LABELS if counts[key]]
+    return "、".join(parts)
 
 
 def iter_audio_media(metadata: Any) -> List[Dict[str, Any]]:
