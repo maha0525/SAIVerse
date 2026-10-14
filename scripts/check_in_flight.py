@@ -10,19 +10,39 @@
 台帳の表は「外側パイプ付きの正規形 1 つ」だけを正とする — GFM が許す変形
 (外側パイプ省略・先頭空白の表) は解析せず、構造違反として落とす。
 
-終了コードの契約: exit 0 = 違反なし (経過措置の警告のみは通す) /
-exit 1 = 免除外の違反または表構造の不正。
+移送検査 (--base、opt-in): 台帳の行の次アクションを差し替えたら、押し出した旧文面を
+同じコミットでその行がリンクする doc の「経緯」節へ移す、という規則 (CLAUDE.md の
+Progress Tracking) の機械検査。移送は逐語でなく要約でもよいので文面の一致は見ない。
+見るのは「次アクションが変わった行・消えた行について、リンク先の doc も同じ差分で
+変更されているか」だけ。差分は基準 ref と HEAD の merge-base から作業ツリーまで
+(未追跡ファイルを含む) — 基準 ref 側が先へ進んでいても、その変更をこちらの差分と
+取り違えない。行は案件名で同定するので、案件名を変えると「旧名の行が消えた」扱いに
+なる。新しく足した行は移送不要。リンクを 1 つも解決できない行 (リンク無し・外部 URL・
+repo の外・実在しないパス) は警告に留める。リンクが複数あれば、どれか 1 つが変更されて
+いれば通す。
+
+終了コードの契約: exit 0 = 違反なし (経過措置・リンク解決不能の警告のみは通す) /
+exit 1 = 免除外の違反、表構造の不正、移送漏れ、または --base の基準 ref との差分を取れない。
 
 使い方: python scripts/check_in_flight.py
+        python scripts/check_in_flight.py --base              (基準 = origin/develop)
+        python scripts/check_in_flight.py --base origin/main
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
+import posixpath
 import re
+import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
-LEDGER = Path(__file__).resolve().parent.parent / "docs" / "overview" / "in_flight.md"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LEDGER_REL = "docs/overview/in_flight.md"
+LEDGER = REPO_ROOT / LEDGER_REL
+DEFAULT_BASE = "origin/develop"
 
 MAX_CELL_CHARS = 300
 # 日付: 2026-08 / 2026/08 / 2026/8 / 2026年 / 令和8年
@@ -191,20 +211,166 @@ def check(path: Path | None = None) -> tuple[list[str], list[str]]:
     return violations, warnings
 
 
-def main() -> int:
+# ---- 移送検査 (--base) ----
+
+DOC_COLUMN = 5
+# [ラベル](パス) のパス部分。ラベル内の空白や「§」は問わない
+LINK_RE = re.compile(r"\]\(([^)\s]+)\)")
+
+
+def _ledger_rows(text: str) -> dict[str, tuple[int, list[str]]]:
+    """台帳の表のデータ行を {案件名: (行番号, セル)} で返す (同名は最初の行)。
+
+    表構造の検査は check() の役目なので、ここは正規形のデータ行を拾うだけ。
+    """
+    rows: dict[str, tuple[int, list[str]]] = {}
+    in_table = False
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if not in_table:
+            in_table = line.startswith("## 台帳")
+            continue
+        if line.startswith("#"):
+            break
+        if not line.startswith("|"):
+            continue
+        cols = SPLIT_RE.split(line)
+        if len(cols) != len(HEADER_CELLS) + 2:
+            continue
+        cells = [c.strip() for c in cols[1:-1]]
+        if cells == HEADER_CELLS or all(SEP_CELL_RE.match(c) for c in cells):
+            continue
+        if cells[1]:
+            rows.setdefault(cells[1], (lineno, cells))
+    return rows
+
+
+def _link_paths(cell: str) -> list[str]:
+    """doc / issue セルのリンクを repo 相対パスへ解決する。解決できないものは落とす。
+
+    リンクは台帳の置き場 (docs/overview/) からの相対。外部 URL・アンカーだけのリンク・
+    repo の外へ出るパスは解決不能として扱う。ファイルの実在はここでは見ない。
+    """
+    base_dir = posixpath.dirname(LEDGER_REL)
+    paths: list[str] = []
+    for target in LINK_RE.findall(cell):
+        target = unquote(target.split("#", 1)[0])
+        if not target or "://" in target or target.startswith(("mailto:", "/")):
+            continue
+        resolved = posixpath.normpath(posixpath.join(base_dir, target))
+        if resolved == ".." or resolved.startswith("../"):
+            continue
+        if resolved not in paths:
+            paths.append(resolved)
+    return paths
+
+
+def _git(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-c", "core.quotepath=off", "-C", str(root), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"git {' '.join(args)} が失敗")
+    return result.stdout
+
+
+def _nul_split(output: str) -> set[str]:
+    return {p for p in output.split("\0") if p}
+
+
+def check_carryover(base: str = DEFAULT_BASE, root: Path | None = None) -> tuple[list[str], list[str]]:
+    """(移送漏れの違反, リンク解決不能の警告) を返す。
+
+    基準 ref を解決できない・git が使えない場合は違反 1 件として返す (fail-closed —
+    検査したつもりで素通しさせない)。
+    """
+    if root is None:
+        root = REPO_ROOT
+    try:
+        merge_base = _git(root, "merge-base", base, "HEAD").strip()
+        # --no-renames: 移動 (issue の archive 行きなど) は旧パスの削除 + 新パスの追加として
+        # 両方の名前が並ぶので、旧リンクのままの行も「変更された」と判定できる
+        touched = _nul_split(_git(root, "diff", "--name-only", "--no-renames", "-z", merge_base))
+        touched |= _nul_split(_git(root, "ls-files", "--others", "--exclude-standard", "-z"))
+    except (RuntimeError, OSError) as exc:
+        return [f"移送検査の基準 [{base}] との差分を取れない: {exc}"], []
+    try:
+        base_text = _git(root, "show", f"{merge_base}:{LEDGER_REL}")
+    except RuntimeError:
+        return [], []  # 基準に台帳が無い = 押し出された旧文面も無い
+    ledger = root / LEDGER_REL
+    current_text = ledger.read_text(encoding="utf-8") if ledger.is_file() else ""
+
+    current_rows = _ledger_rows(current_text)
+    action = ACTION_COLUMN - 1
+    doc = DOC_COLUMN - 1
+    violations: list[str] = []
+    warnings: list[str] = []
+    for name, (base_lineno, base_cells) in _ledger_rows(base_text).items():
+        current = current_rows.get(name)
+        if current is None:
+            what = f"基準 L{base_lineno} [{name}]: 行が台帳から消えた"
+            doc_cells = [base_cells[doc]]
+        elif current[1][action] != base_cells[action]:
+            what = f"L{current[0]} [{name}]: 次アクションが差し替わった"
+            doc_cells = [current[1][doc], base_cells[doc]]
+        else:
+            continue
+        candidates: list[str] = []
+        for cell in doc_cells:
+            candidates += [p for p in _link_paths(cell) if p not in candidates]
+        if any(p in touched for p in candidates):
+            continue
+        existing = [p for p in candidates if (root / p).is_file()]
+        if existing:
+            violations.append(
+                f"{what}のに、リンク先の doc が同じ差分で変更されていない {existing}。"
+                f"押し出した旧文面を doc の「経緯」節へ移送すること (要約でよい)"
+            )
+        else:
+            warnings.append(f"{what}が、リンク先の doc を解決できず未検査 (doc / issue 列: {doc_cells[0]})")
+    return violations, warnings
+
+
+def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    parser = argparse.ArgumentParser(description="in_flight 台帳の関所")
+    parser.add_argument(
+        "--base",
+        nargs="?",
+        const=DEFAULT_BASE,
+        default=None,
+        metavar="REF",
+        help="移送検査も行う。REF との差分で、次アクションを差し替えた行・消した行の"
+        f"リンク先 doc が変更されているかを見る (REF 省略時は {DEFAULT_BASE})",
+    )
+    args = parser.parse_args([] if argv is None else argv)
     violations, warnings = check()
     for w in warnings:
         print(f"経過措置 (2026-08-04 解体時の行のまま未移送。どの列でも書き換えたら本検査に昇格): {w}")
+    carry_violations: list[str] = []
+    if args.base is not None:
+        carry_violations, carry_warnings = check_carryover(args.base)
+        for w in carry_warnings:
+            print(f"移送検査の警告: {w}")
     if violations:
         print(f"in_flight 台帳の器からの逸脱 {len(violations)} 件:")
         for v in violations:
             print(f"  - {v}")
+    if carry_violations:
+        print(f"in_flight 台帳の移送検査で違反 {len(carry_violations)} 件 (基準 {args.base}):")
+        for v in carry_violations:
+            print(f"  - {v}")
+    if violations or carry_violations:
         return 1
     print("in_flight 台帳: 全行が器に収まっています (経過措置を除く)")
+    if args.base is not None:
+        print(f"移送検査: 次アクションを差し替えた行・消した行のリンク先 doc は全て変更されています (基準 {args.base})")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

@@ -3,11 +3,13 @@
 二つの役割:
 1. 実台帳が器に収まっていることをフルスイートで常時検査する
    (関所の手動実行を忘れた変更もここで赤くなる)。
-2. 関所自身の検出ロジック (字数・過去形マーカー・表構造・経過措置) を固定する。
+2. 関所自身の検出ロジック (字数・過去形マーカー・表構造・経過措置、--base の
+   移送検査) を固定する。
 """
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from check_in_flight import (  # noqa: E402
     LEDGER,
     _fingerprint,
     check,
+    check_carryover,
     main,
 )
 
@@ -213,6 +216,140 @@ class TestGrandfathering:
         # 名前どおり「違反にはならない」側も検査する — 警告だけを見ていると、
         # 免除が違反側へ漏れても緑のまま通る
         assert not any(name in x for x in v)
+
+
+class TestCarryover:
+    """移送検査 (--base): 次アクションを差し替えた行・消した行のリンク先 doc が
+    同じ差分で変更されているかだけを見る (文面の一致は見ない)。"""
+
+    DOC = "docs/intent/case_a.md"
+    ROW_A = "| 🟣 検証待ち | 案件A | 現在地 A。次 = 一手 A。 | まはー | [intent](../intent/case_a.md) | x |"
+    ROW_NOLINK = "| 🔵 設計中 | 案件N | 現在地 N。次 = 一手 N。 | 私 | (none) | x |"
+
+    @staticmethod
+    def _git(root: Path, *args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(root), *args], check=True, capture_output=True
+        )
+
+    def _write(self, root: Path, rel: str, text: str) -> None:
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+
+    def _ledger(self, *rows: str) -> str:
+        return f"## 台帳\n\n{table(*rows)}\n"
+
+    @pytest.fixture
+    def repo(self, tmp_path):
+        """基準コミット (ブランチ base) に台帳と案件 A の doc を置いた repo。"""
+        root = tmp_path / "repo"
+        root.mkdir()
+        self._git(root, "init", "-q", "-b", "base")
+        self._git(root, "config", "user.email", "t@example.com")
+        self._git(root, "config", "user.name", "t")
+        self._git(root, "config", "commit.gpgsign", "false")
+        self._write(root, check_in_flight.LEDGER_REL, self._ledger(self.ROW_A, self.ROW_NOLINK))
+        self._write(root, self.DOC, "# 案件A\n\n## 経緯\n")
+        self._git(root, "add", "-A")
+        self._git(root, "commit", "-q", "-m", "base")
+        self._git(root, "switch", "-q", "-c", "work")
+        return root
+
+    def _set_ledger(self, root: Path, *rows: str) -> None:
+        self._write(root, check_in_flight.LEDGER_REL, self._ledger(*rows))
+
+    def test_changed_row_with_doc_untouched_fails(self, repo):
+        self._set_ledger(repo, self.ROW_A.replace("一手 A", "新しい一手"), self.ROW_NOLINK)
+        v, w = check_carryover("base", repo)
+        assert len(v) == 1 and "案件A" in v[0] and self.DOC in v[0] and w == []
+
+    def test_changed_row_with_doc_touched_passes(self, repo):
+        self._set_ledger(repo, self.ROW_A.replace("一手 A", "新しい一手"), self.ROW_NOLINK)
+        self._write(repo, self.DOC, "# 案件A\n\n## 経緯\n\n- 旧: 一手 A (要約)\n")
+        assert check_carryover("base", repo) == ([], [])
+
+    def test_committed_changes_are_in_the_diff(self, repo):
+        """差分は merge-base から作業ツリーまで — コミット済みの変更も数える。"""
+        self._set_ledger(repo, self.ROW_A.replace("一手 A", "新しい一手"), self.ROW_NOLINK)
+        self._git(repo, "commit", "-qam", "ledger only")
+        v, _ = check_carryover("base", repo)
+        assert len(v) == 1
+        self._write(repo, self.DOC, "# 案件A\n\n## 経緯\n\n- 旧: 一手 A\n")
+        self._git(repo, "commit", "-qam", "doc")
+        assert check_carryover("base", repo) == ([], [])
+
+    def test_other_columns_changed_need_no_carryover(self, repo):
+        self._set_ledger(repo, self.ROW_A.replace("| x |", "| y |"), self.ROW_NOLINK)
+        assert check_carryover("base", repo) == ([], [])
+
+    def test_removed_row_with_doc_untouched_fails(self, repo):
+        self._set_ledger(repo, self.ROW_NOLINK)
+        v, _ = check_carryover("base", repo)
+        assert len(v) == 1 and "案件A" in v[0] and "消えた" in v[0]
+
+    def test_removed_row_with_doc_touched_passes(self, repo):
+        self._set_ledger(repo, self.ROW_NOLINK)
+        self._write(repo, self.DOC, "# 案件A\n\nステータス: 完了\n\n## 経緯\n")
+        assert check_carryover("base", repo) == ([], [])
+
+    def test_removed_row_whose_doc_moved_to_archive_passes(self, repo):
+        """完了で issue を archive/ へ移すと、旧リンクのパスは削除として差分に出る。"""
+        self._set_ledger(repo, self.ROW_NOLINK)
+        self._git(repo, "mv", self.DOC, "docs/intent/archive_case_a.md")
+        assert check_carryover("base", repo) == ([], [])
+
+    def test_added_row_passes(self, repo):
+        new = "| 🔵 設計中 | 案件B | 現在地 B。次 = 一手 B。 | 私 | [intent](../intent/case_b.md) | x |"
+        self._set_ledger(repo, self.ROW_A, self.ROW_NOLINK, new)
+        assert check_carryover("base", repo) == ([], [])
+
+    def test_untracked_new_doc_counts_as_touched(self, repo):
+        row = self.ROW_A.replace("一手 A", "新しい一手").replace(
+            "[intent](../intent/case_a.md)",
+            "[intent](../intent/case_a.md) / [issue](../issues/new_issue.md)",
+        )
+        self._set_ledger(repo, row, self.ROW_NOLINK)
+        self._write(repo, "docs/issues/new_issue.md", "# 新 issue\n\n## 経緯\n\n- 旧: 一手 A\n")
+        assert check_carryover("base", repo) == ([], [])
+
+    @pytest.mark.parametrize(
+        "doc_cell",
+        [
+            "(none)",
+            "[外部](https://example.com/x.md)",
+            "[存在しない](../intent/missing.md)",
+            "[repo 外](../../../outside.md)",
+        ],
+    )
+    def test_unresolvable_link_is_warning(self, repo, doc_cell):
+        base_row = f"| 🔵 設計中 | 案件U | 現在地 U。次 = 一手 U。 | 私 | {doc_cell} | x |"
+        self._set_ledger(repo, self.ROW_A, self.ROW_NOLINK, base_row)
+        self._git(repo, "commit", "-qam", "add U")
+        self._git(repo, "branch", "-f", "base", "HEAD")
+        self._set_ledger(repo, self.ROW_A, self.ROW_NOLINK, base_row.replace("一手 U", "新しい一手"))
+        v, w = check_carryover("base", repo)
+        assert v == [] and len(w) == 1 and "案件U" in w[0]
+
+    def test_link_with_anchor_resolves(self, repo):
+        row = self.ROW_A.replace("(../intent/case_a.md)", "(../intent/case_a.md#経緯)")
+        self._set_ledger(repo, row.replace("一手 A", "新しい一手"), self.ROW_NOLINK)
+        v, _ = check_carryover("base", repo)
+        assert len(v) == 1 and self.DOC in v[0]
+
+    def test_unknown_base_fails_closed(self, repo):
+        v, w = check_carryover("no-such-ref", repo)
+        assert len(v) == 1 and "no-such-ref" in v[0] and w == []
+
+    def test_main_base_flag_exit_codes(self, monkeypatch, repo, capsys):
+        monkeypatch.setattr(check_in_flight, "REPO_ROOT", repo)
+        monkeypatch.setattr(check_in_flight, "LEDGER", repo / check_in_flight.LEDGER_REL)
+        self._set_ledger(repo, self.ROW_A.replace("一手 A", "新しい一手"), self.ROW_NOLINK)
+        assert main([]) == 0  # opt-in: --base 無しでは移送を見ない
+        assert main(["--base", "base"]) == 1
+        assert "移送検査で違反" in capsys.readouterr().out
+        self._write(repo, self.DOC, "# 案件A\n\n## 経緯\n\n- 旧: 一手 A\n")
+        assert main(["--base", "base"]) == 0
 
 
 class TestMainExitCode:

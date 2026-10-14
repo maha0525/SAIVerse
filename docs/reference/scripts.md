@@ -93,7 +93,7 @@ python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saive
 | `set_version.py` | バージョン刻印 |
 | `snapshot.py` | world snapshot format v2のsave/list/inspect/restore/delete。restoreは停止状態だけで実行 |
 | `run_discord_gateway_tests.py` | Discord Gateway テスト |
-| `check_in_flight.py` | in_flight 台帳の関所 — 次アクション欄の字数超過と過去形マーカー(日付・コミットハッシュ)混入を検査。台帳を触ったセッションの終わりに回す。2026-08-04 解体時の未移送3行のみ行指紋一致の間だけ警告扱い(exit 0=警告のみ可 / exit 1=免除外の違反・表構造不正) |
+| `check_in_flight.py` | in_flight 台帳の関所 — 次アクション欄の字数超過と過去形マーカー(日付・コミットハッシュ)混入を検査。台帳を触ったセッションの終わりに `--base` 付きで回す。`--base [ref]`(既定 `origin/develop`)は移送検査 — 次アクションを差し替えた行・消した行のリンク先 doc が同じ差分で変更されているかを見る(文面の一致は見ない、リンク解決不能は警告)。2026-08-04 解体時の未移送3行のみ行指紋一致の間だけ警告扱い(exit 0=警告のみ可 / exit 1=免除外の違反・表構造不正・移送漏れ・基準との差分取得失敗) |
 | `install_vc_redist.ps1` | Windows に Microsoft Visual C++ 再頒布可能パッケージ (x64) が無いときに、Microsoft の配布元から取って入れる (setup.bat が呼ぶ)。記憶の検索に使う onnxruntime がこの部品を必要とし、無いと SAIVerse が起動時に落ちる。取ったファイルが Microsoft の署名つきであることを確かめてから実行する。入れられなかったときは手で入れる場所を知らせ、setup は止めない ([issue](../issues/archive/clean_windows_missing_vc_runtime_blocks_startup.md)) |
 | `ensure_searxng_version.py` | SearXNG を起動する直前に呼ばれる (run_searxng_server.ps1 / .sh)。`git` が見つからないときだけ、SearXNG のソースに `searx/version_frozen.py` を書く。SearXNG は起動のときに `git` で自分のバージョンを調べ、`git` が見つからないと落ちるため ([issue](../issues/archive/searxng_needs_git_on_path.md)) |
 | `download_searxng_source.py` / `merge_searxng_settings.py` | SearXNG セットアップ |
