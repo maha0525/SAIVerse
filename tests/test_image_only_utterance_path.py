@@ -504,3 +504,43 @@ def test_image_only_utterance_reaches_the_payload_after_context_enrichment(
     openai_kinds = [p["type"] for p in
                     prepare_openai_messages(history, supports_images=True)[0]["content"]]
     assert openai_kinds == ["text", "image_url"]
+
+
+# --- 機構の文と、ユーザーの言葉の見分け (文字列の形に頼らない) -----------------
+
+def test_text_the_user_typed_in_the_note_form_is_kept_as_their_words():
+    # 添付の無い発言で、ユーザー自身が機構の文と同じ形を書いても消さない
+    from sea import auto_recall
+
+    typed = "<system>添付アイテム作成: sample.png</system>"
+    messages = _enriched([{"role": "user", "content": typed}])
+
+    assert auto_recall._last_user_utterance(messages) == typed
+    assert not auto_recall._is_image_only_user_turn(messages)
+    assert typed in auto_recall.build_query(messages)
+
+
+def test_attachment_names_with_a_line_break_are_still_not_read_as_words(png_path, tmp_path):
+    from sea import auto_recall
+
+    doc = tmp_path / "memo.txt"
+    doc.write_text("x", encoding="utf-8")
+    metadata = _image_metadata(png_path)
+    metadata["images"][0]["item_name"] = "Alice\nphoto.png"
+    metadata["documents"] = [{"path": str(doc), "item_name": "Bob\nmemo.txt"}]
+    messages = _enriched([
+        {"role": "assistant", "content": "どうぞ"},
+        {"role": "user", "content": "", "metadata": metadata},
+    ])
+    assert "Alice" in messages[-1]["content"]  # 送る本文には機構の文が足されている
+
+    assert auto_recall._is_image_only_user_turn(messages)
+    assert auto_recall._last_user_utterance(messages) is None
+
+
+def test_the_payload_text_is_unchanged_by_keeping_the_said_text(png_path):
+    # 控えは metadata に置くだけで、送る本文は従来と一字も変わらない
+    metadata = _image_metadata(png_path)
+    enriched = _enriched([{"role": "user", "content": "見て", "metadata": metadata}])
+    assert enriched[0]["content"] == "見て\n<system>添付アイテム作成: 画像「photo.png」</system>"
+    assert "__said_content__" not in metadata  # 元の発言の metadata は書き換えない

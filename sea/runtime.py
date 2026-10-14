@@ -2568,10 +2568,18 @@ class SEARuntime:
                 # Append system note to content
                 original_content = msg.get("content", "")
                 items_str = "、".join(attachment_notes)
-                from saiverse.media_utils import attachment_items_note
+                note = f"\n<system>添付アイテム作成: {items_str}</system>"
+                # 足した文はユーザーが言った言葉ではないので、足す前の本文を
+                # 控えておく。発言の言葉を読む側 (自動想起) はそれを読む
+                # (文字列の形から機構の文を見分けない — ユーザーが同じ形を書いた
+                # ときや、名前に改行が入ったときに取り違える)。
+                from saiverse.media_utils import SAID_CONTENT_KEY
 
-                note = attachment_items_note(items_str)
-                enriched_msg = {**msg, "content": original_content + note}
+                enriched_msg = {
+                    **msg,
+                    "content": original_content + note,
+                    "metadata": {**metadata, SAID_CONTENT_KEY: original_content},
+                }
                 enriched.append(enriched_msg)
             else:
                 enriched.append(msg)

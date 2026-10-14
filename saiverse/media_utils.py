@@ -2,7 +2,6 @@ import base64
 import logging
 import mimetypes
 import os
-import re
 import threading
 from collections import OrderedDict
 from datetime import datetime
@@ -930,24 +929,22 @@ def describe_wordless_utterance(metadata: Any) -> str:
     return f"(文章は無く、{attachments}を送ってきました)"
 
 
-#: 文脈を組むとき (sea/runtime.py の _enrich_history_with_attachments)、添付から
-#: 作られたアイテムの名前を発言の末尾に足す、機構の文。ユーザーが言った言葉では
-#: ないので、発言の言葉を読む側 (自動想起など) は strip_attachment_items_note で
-#: 取り除いてから読む。
-_ATTACHMENT_ITEMS_NOTE_PREFIX = "添付アイテム作成: "
-_ATTACHMENT_ITEMS_NOTE_RE = re.compile(
-    r"\n?<system>" + re.escape(_ATTACHMENT_ITEMS_NOTE_PREFIX) + r"[^\n]*?</system>\s*\Z"
-)
+#: 文脈を組むとき (sea/runtime.py の _enrich_history_with_attachments) は、発言の
+#: 末尾に「添付アイテム作成: 画像「名前」」の機構の文を足し、足す前の本文を
+#: metadata のこのキーに控える。足した文はユーザーが言った言葉ではないので、
+#: 発言の言葉を読む側 (自動想起など) は said_content でこちらを読む。
+SAID_CONTENT_KEY = "__said_content__"
 
 
-def attachment_items_note(items: str) -> str:
-    """発言の末尾に足す「添付アイテム作成」の文 (先頭の改行込み)。"""
-    return f"\n<system>{_ATTACHMENT_ITEMS_NOTE_PREFIX}{items}</system>"
+def said_content(message: Dict[str, Any]) -> str:
+    """発言の言葉 (機構が足した文を含まない本文) を返す。
 
-
-def strip_attachment_items_note(text: str) -> str:
-    """発言の末尾の「添付アイテム作成」の文を取り除く (無ければそのまま)。"""
-    return _ATTACHMENT_ITEMS_NOTE_RE.sub("", text)
+    控えが無いメッセージ (機構の文が足されていないもの) は本文そのもの。
+    """
+    metadata = message.get("metadata")
+    if isinstance(metadata, dict) and SAID_CONTENT_KEY in metadata:
+        return str(metadata.get(SAID_CONTENT_KEY) or "")
+    return str(message.get("content") or "")
 
 
 def describe_attachments(metadata: Any) -> str:

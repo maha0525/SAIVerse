@@ -394,19 +394,19 @@ def _is_conversational_message(msg: Dict[str, Any]) -> bool:
     ):
         return False
     content = msg.get("content")
-    return isinstance(content, str) and bool(_said_text(content).strip())
+    return isinstance(content, str) and bool(_said_text(msg).strip())
 
 
-def _said_text(value: Any) -> str:
+def _said_text(msg: Dict[str, Any]) -> str:
     """発言の言葉だけを返す。
 
-    文脈を組むときに機構が末尾へ足す「添付アイテム作成」の文
-    (saiverse.media_utils.attachment_items_note) は、ユーザーが言った言葉では
-    ないので外す。画像だけの発言では、その文が本文の全部になる。
+    文脈を組むときに機構が末尾へ足す「添付アイテム作成」の文は、ユーザーが
+    言った言葉ではない。足す側が控えた、足す前の本文を読む
+    (saiverse.media_utils.said_content)。画像だけの発言では空になる。
     """
-    from saiverse.media_utils import strip_attachment_items_note
+    from saiverse.media_utils import said_content
 
-    return strip_attachment_items_note(str(value or ""))
+    return said_content(msg)
 
 
 def _latest_user_message(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -517,7 +517,7 @@ def _is_image_only_user_turn(messages: List[Dict[str, Any]]) -> bool:
     メッセージが最後の会話本文より後ろにあり、言葉を持たないときに真。
     """
     latest = _latest_user_message(messages)
-    if latest is None or _said_text(latest.get("content")).strip():
+    if latest is None or _said_text(latest).strip():
         return False
     for m in reversed(messages):
         if m is latest:
@@ -576,7 +576,7 @@ def build_query(messages: List[Dict[str, Any]], *, n: Optional[int] = None) -> s
         if fresh:
             seed = convo + [{"role": "user", "content": text} for text in fresh]
     tail = seed[-n:] if n > 0 else seed
-    text_query = "\n".join(_said_text(m.get("content", "")).strip() for m in tail).strip()
+    text_query = "\n".join(_said_text(m).strip() for m in tail).strip()
 
     if not is_media_recall_enabled():
         return text_query
@@ -597,7 +597,7 @@ def _last_user_utterance(messages: List[Dict[str, Any]]) -> Optional[str]:
     引き直してしまう。
     """
     latest = _latest_user_message(messages)
-    if latest is not None and not _said_text(latest.get("content")).strip():
+    if latest is not None and not _said_text(latest).strip():
         return None
     for m in reversed(messages):
         if not _is_conversational_message(m):
@@ -605,8 +605,8 @@ def _last_user_utterance(messages: List[Dict[str, Any]]) -> Optional[str]:
         if m.get("role") != "user":
             continue
         content = m.get("content")
-        if isinstance(content, str) and _said_text(content).strip():
-            return _said_text(content)
+        if isinstance(content, str) and _said_text(m).strip():
+            return _said_text(m)
     return None
 
 
@@ -662,7 +662,7 @@ def _find_entity_triggers(
     removed_last_user = False
     for m in reversed(convo):
         content = m.get("content")
-        text = _said_text(content).strip() if isinstance(content, str) else ""
+        text = _said_text(m).strip() if isinstance(content, str) else ""
         if not removed_last_user and m.get("role") == "user" and text == last_utterance.strip():
             removed_last_user = True
             continue
@@ -1262,7 +1262,7 @@ def _build_reflex_request(
     conversation = [
         {
             "role": str(m.get("role") or ""),
-            "text": _clip(_said_text(m.get("content", "")).strip(), _REFLEX_CONVERSATION_TEXT_LIMIT),
+            "text": _clip(_said_text(m).strip(), _REFLEX_CONVERSATION_TEXT_LIMIT),
         }
         for m in tail
     ]
