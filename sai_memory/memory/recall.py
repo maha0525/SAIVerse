@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
 from typing import List, Tuple
 
 import numpy as np
@@ -35,7 +35,14 @@ LOGGER = logging.getLogger(__name__)
 QUERY_PROMPT = "task: search result | query: "
 DOCUMENT_PROMPT = "title: none | text: "
 
-_BATCH_SIZE = 32
+# One session.run() call holds at most this many padded tokens (rows x the
+# longest row). Activation memory grows with the padded size, so a fixed row
+# count lets long texts blow up: 32 rows of 512 tokens peaked at 8.5GB, while
+# 2048 tokens keeps the bulk peak near 650MB for both short and long chunks at
+# the same throughput (measured 2026-10-14, docs/intent/embedding_gemma2_migration.md).
+_MAX_BATCH_TOKENS = 2048
+# Upper bound on rows even for very short texts (queries).
+_MAX_BATCH_ROWS = 32
 # <pad> of the EmbeddingGemma 2 tokenizer. Padded positions are masked out by
 # attention_mask, so the value only has to be a valid token id.
 _PAD_ID = 0
@@ -49,6 +56,11 @@ _OUTPUT_NAME = "sentence_embedding"
 # (all personas). Loading takes the lock so a first-run download happens once.
 _EMBEDDING_MODEL_CACHE: dict[str, "_OnnxTextEncoder"] = {}
 _EMBEDDING_MODEL_CACHE_LOCK = RLock()
+# One session.run() at a time across the process. The session is shared by
+# every persona, so a bulk re-embed and an import's background embedding could
+# otherwise each reach the per-call peak at once. Held per call (about a second
+# at most), so a live message save waits behind one call, not a whole job.
+_RUN_LOCK = Lock()
 
 
 class _OnnxTextEncoder:
@@ -70,9 +82,17 @@ class _OnnxTextEncoder:
         tokenizer.enable_truncation(EMBED_MAX_TOKENS)
         self.tokenizer = tokenizer
 
+        # The CPU memory arena keeps the largest batch's buffers for the life of
+        # the process (resident stayed at 2.7GB after a bulk run). Without it the
+        # buffers go back after each call (resident back to ~250MB) at no
+        # measurable speed cost. Memory-pattern planning is per-shape and is
+        # dropped with it.
+        sess_options = ort.SessionOptions()
+        sess_options.enable_cpu_mem_arena = False
+        sess_options.enable_mem_pattern = False
         self.session = ort.InferenceSession(
             str(model_dir / EMBED_MODEL_ONNX),
-            sess_options=ort.SessionOptions(),
+            sess_options=sess_options,
             providers=["CPUExecutionProvider"],
         )
         input_names = {i.name for i in self.session.get_inputs()}
@@ -91,9 +111,14 @@ class _OnnxTextEncoder:
         # written back to the original positions.
         order = sorted(range(len(ids_list)), key=lambda i: -len(ids_list[i]))
         out = np.zeros((len(ids_list), EMBED_DIM), dtype=np.float32)
-        for start in range(0, len(order), _BATCH_SIZE):
-            idx = order[start : start + _BATCH_SIZE]
+        start = 0
+        while start < len(order):
+            # Sorted longest first, so the first row sets the padded length.
+            longest = max(1, len(ids_list[order[start]]))
+            rows = max(1, min(_MAX_BATCH_ROWS, _MAX_BATCH_TOKENS // longest))
+            idx = order[start : start + rows]
             out[idx] = self._run([ids_list[i] for i in idx])
+            start += rows
         norms = np.linalg.norm(out, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         return out / norms
@@ -110,7 +135,8 @@ class _OnnxTextEncoder:
         empty = np.zeros((0, _MEDIA_FEATURE_DIM), dtype=np.float32)
         for name in self._media_inputs:
             feeds[name] = empty
-        (emb,) = self.session.run([_OUTPUT_NAME], feeds)
+        with _RUN_LOCK:
+            (emb,) = self.session.run([_OUTPUT_NAME], feeds)
         emb = np.asarray(emb, dtype=np.float32)
         if emb.shape != (n, EMBED_DIM):
             raise RuntimeError(
