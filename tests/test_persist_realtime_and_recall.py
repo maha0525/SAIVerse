@@ -2124,6 +2124,35 @@ class TestArasujiMaterial:
         i_reply = prompt.index("[assistant]: おはよう、まはー")
         assert i_user < i_notice < i_reply
 
+    def test_kept_row_stays_behind_a_perception_shown_before_it(self):
+        """境界と返事の間に先に出た知覚がある: 発言 → 知覚 → 差し込み → 返事。
+
+        送った列 (ON の履歴の復元) と同じ順。境界の直後に固定すると、知覚を
+        追い越して「発言 → 差し込み → 知覚 → 返事」になっていた (GitHub の
+        Codex の指摘を受けた直しへの、手元の Codex レビューの指摘)。
+        """
+        from sai_memory.arasuji.generator import _format_messages_for_prompt
+
+        messages = [
+            self._msg("u1", "user", "おはよう", 1000),
+            self._msg("a1", "assistant", "おはよう、まはー", 1003),
+        ]
+        items = [
+            {"at": 1001, "text": "部屋に誰かが入ってきた"},
+            {
+                "at": 1003, "text": "[想起: 昨日の約束]", "label": "recall",
+                "after_message_id": "u1",
+            },
+        ]
+        prompt = _format_messages_for_prompt(
+            messages, include_timestamp=False, extra_items=items,
+        )
+        i_user = prompt.index("[user]: おはよう")
+        i_perception = prompt.index("部屋に誰かが入ってきた")
+        i_recall = prompt.index("[想起: 昨日の約束]")
+        i_reply = prompt.index("[assistant]: おはよう、まはー")
+        assert i_user < i_perception < i_recall < i_reply
+
     def test_several_rows_after_the_same_message_keep_their_order(self):
         from sai_memory.arasuji.generator import _format_messages_for_prompt
 

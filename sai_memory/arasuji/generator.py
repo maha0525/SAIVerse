@@ -360,21 +360,24 @@ def _format_messages_for_prompt(
             ``{"at": epoch, "text": str}`` の list。時刻順の正しい位置に
             差し込む (同秒はメッセージが先 — 消費は書き込みの後に起きた事実)。
             ただし項目が ``after_message_id`` を持ち、その id のメッセージが
-            ``messages`` にあるときは、そのメッセージの直後 (同じ秒の後続の
-            メッセージより前) に置く — リアルタイム情報と自動想起を残した行
-            (sai_memory/perception_buffer.batch_material_item) の位置は、送った
-            列で直前にあった発言が決める。同じメッセージの直後に複数並ぶときは
-            ``extra_items`` の並び順。そのメッセージが ``messages`` に無ければ
-            従来どおり時刻順。表示する時刻はどちらの場合も ``at``。
+            ``messages`` にあるときは、時刻順の位置をそのメッセージ (境界) の
+            後ろ、次のメッセージの前に収める — リアルタイム情報と自動想起を
+            残した行 (sai_memory/perception_buffer.batch_material_item) は、
+            送った列で境界の発言と、その後ろに先に出た知覚のまとめの後ろ、
+            次の発言 (返事) の前に出た。保存の時刻は返事と同じ秒になりやすく、
+            秒の順だけでは返事の後ろへ落ちるので、次のメッセージの前で止める。
+            境界と次のメッセージの間にある他の項目 (先に出た知覚) とは時刻順。
+            そのメッセージが ``messages`` に無ければ従来どおり時刻順。表示する
+            時刻はどちらの場合も ``at``。
             本文が ``[想起:`` で始まる項目は【想起 (過去の再提示)】、それ以外は
             【知覚】とラベルし、長さ規則 (MECHANISM_TEXT_MAX_CHARS) を適用する。
             項目が ``label`` を持つときはそれに従う (:func:`_extra_item_label`)。
     """
     # 並びのキーは (at, tie, seq, after, sub)。メッセージは (created_at, 0,
-    # seq, 0, 0)、時刻で並べる項目は (at, 1, seq, 0, 0)。メッセージの直後に
-    # 置く項目は、そのメッセージのキーの後ろ 2 つだけを (1, 項目の seq) に
-    # したもの — そのメッセージの直後、次のメッセージ (同じ秒でも seq が
-    # 大きい) より前に並ぶ。
+    # seq, 0, 0)、時刻で並べる項目は (at, 1, seq, 0, 0)。境界を持つ項目は、
+    # 時刻順のキーを「境界の直後 (境界のキーの後ろ 2 つを (1, 項目の seq)
+    # にしたもの)」以上、「次のメッセージの直前 (次のキーの後ろ 2 つを
+    # (-1, 項目の seq) にしたもの)」以下に収める。
     entries: List[tuple] = []  # (at, tie, seq, after, sub, line)
     # 本文が空で行にならないメッセージも位置の基準には使える (境界の発言が
     # 道具呼び出しだけの行でも、その位置の直後に置く)。
@@ -410,10 +413,14 @@ def _format_messages_for_prompt(
         line = f"{prefix}{label}: {text}"
         after_id = item.get("after_message_id")
         anchor = message_keys.get(str(after_id)) if after_id is not None else None
+        key = (at, 1, seq, 0, 0)
         if anchor is not None:
-            entries.append((anchor[0], 0, anchor[1], 1, seq, line))
-        else:
-            entries.append((at, 1, seq, 0, 0, line))
+            key = max(key, (anchor[0], 0, anchor[1], 1, seq))
+            next_seq = anchor[1] + 1
+            if next_seq < len(messages):
+                next_at = messages[next_seq].created_at or 0
+                key = min(key, (next_at, 0, next_seq, -1, seq))
+        entries.append((*key, line))
     entries.sort(key=lambda e: e[:5])
     return "\n\n".join(e[5] for e in entries)
 
