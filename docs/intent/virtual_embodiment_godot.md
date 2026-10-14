@@ -673,3 +673,11 @@ Gemini が実装した PR #387 をレビューし、エモート記法の案内�
 更新前のin_flight行:
 
 | 🟠 実装中 | Godot / ARDY 仮想身体デモ | FPS操作・複数アバター・VR左スティック移動・音声入力(音量閾値/PTT)を実装。次 = Quest 2で表示・頭部追跡・等速移動・マイク入力を確認。残 = player歩行アニメーション、瞬き・視線、/emote、Idle scheduler。 | まはー(Quest 2の装着・操作確認) / 私(実機ログ確認と残りの実装) | [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md) | 2026-10-10 |
+
+### 2026-10-15 発話の声を voice-tts から一切れずつ受け取る形へ (アドオン PR #1、voice-tts PR #7)
+
+Gemini が作った初版 (voice-tts の発話全体の PCM 配信を区切りごとに受け取る形) を検収し、まはーの裁定で「声は voice-tts から一切れずつ受け取る」形に作り替えた。設計は本書の同名の節。
+
+更新前のin_flight行:
+
+| 🟠 実装中 | Godot / ARDY 仮想身体デモ | FPS操作・複数アバター・VR左スティック移動・音声入力・発話の音声と字幕・発話に同期する全身エモートを実装。次 = Quest 2で表示・頭部追跡・移動・マイク入力・全身エモートを確認。残 = player歩行アニメーション、瞬き・視線、Idle scheduler。 | まはー(Quest 2の装着・操作確認) / 私(実機ログ確認と残りの実装) | [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md) | 2026-10-12 |
