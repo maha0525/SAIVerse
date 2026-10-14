@@ -24,6 +24,7 @@ class FakeSession:
 
     def __init__(self, path, sess_options=None, providers=None):
         self.path = path
+        self.sess_options = sess_options
         self.providers = providers
         self.calls: list[dict] = []
         FakeSession.instances.append(self)
@@ -154,6 +155,37 @@ def test_batching_padding_media_inputs_and_order(fake_runtime, model_dir):
     for text, v in zip(texts, vectors):
         expected = _token_count(emb, prompt + text) * 10.0 / 3.0
         assert v[0] / v[1] == pytest.approx(expected, rel=1e-5)
+
+
+def test_long_inputs_are_split_by_the_token_budget(fake_runtime, model_dir):
+    # A fixed row count let 32 rows of 512 tokens peak at 8.5GB; each call is
+    # bounded by padded tokens instead (rows x longest row).
+    emb = recall.Embedder(local_model_path=str(model_dir))
+    long_texts = [" ".join(["w"] * 2000) for _ in range(10)]  # truncated to 512
+    short_texts = [" ".join(["w"] * 3) for _ in range(5)]
+    texts = short_texts[:2] + long_texts + short_texts[2:]
+    vectors = np.array(emb.embed(texts))
+    assert len(vectors) == 15
+
+    calls = fake_runtime.instances[0].calls
+    rows = [c["input_ids"].shape[0] for c in calls]
+    # the third call starts with a long row, so it takes 4 rows padded to 512
+    assert rows == [4, 4, 4, 3]
+    for feeds in calls:
+        assert feeds["input_ids"].size <= recall._MAX_BATCH_TOKENS
+    # written back to the input positions (element 0 / element 1 = length * 10 / 3)
+    for text, v in zip(texts, vectors):
+        expected = _token_count(emb, recall.DOCUMENT_PROMPT + text) * 10.0 / 3.0
+        assert v[0] / v[1] == pytest.approx(expected, rel=1e-5)
+
+
+def test_cpu_memory_arena_is_disabled(fake_runtime, model_dir):
+    # With the arena on, the largest batch's buffers stayed resident for the
+    # life of the process.
+    recall.Embedder(local_model_path=str(model_dir))
+    (session,) = fake_runtime.instances
+    assert session.sess_options.enable_cpu_mem_arena is False
+    assert session.sess_options.enable_mem_pattern is False
 
 
 def test_model_is_shared_within_the_process(fake_runtime, model_dir):

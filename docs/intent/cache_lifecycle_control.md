@@ -174,7 +174,7 @@ ChatOptions モーダル内に「キャッシュモード」セクションを�
 
 #### キャッシュの境目をここに置く理由
 
-ターンをまたいで中身が同じになるのは、**境目 (n 回目の Pulse では AI の返事(n-1) の直後) まで** である。その後ろに何が来るかは場面で変わる: ユーザーの発言、知覚のブロック、リアルタイム情報 (`_build_realtime_context`)、自動想起 (`_maybe_inject_auto_recall`)、その Pulse の中のスペルの往復。リアルタイム情報と自動想起は、送るたびに「最後のユーザー役のメッセージの直前」へその場で差し込まれ、次のターンには残らない (`sea/runtime_context.py`)。知覚のブロックは、読んだ時刻の位置に入る。並びの例:
+ターンをまたいで中身が同じになるのは、**境目 (n 回目の Pulse では AI の返事(n-1) の直後) まで** である。その後ろに何が来るかは場面で変わる: ユーザーの発言、知覚のブロック、リアルタイム情報 (`_build_realtime_context`)、自動想起 (`_maybe_inject_auto_recall`)、その Pulse の中のスペルの往復。リアルタイム情報と自動想起は、送るたびに「最後のユーザー役のメッセージの直前」へその場で差し込まれ、次のターンには残らない (`sea/runtime_context.py`)。(注記 2026-10-14: モデル設定 `cache.persist_realtime_and_recall` を ON にしたモデルでは、この二つを一つのまとまりにして送る列の一番後ろに置き、送った文面のまま残して次のターン以降も同じ位置に送る — [persist_realtime_and_recall.md](persist_realtime_and_recall.md)。境目を指定できないモデル向けの対応で、境目を指定できる継続キャッシュの対象モデルでは OFF のまま使う想定。) 知覚のブロックは、読んだ時刻の位置に入る。並びの例:
 
 ```
 n 回目:   … / AIの返事(n-1) ‖ ユーザーの発言(n) / [リアルタイム情報・自動想起・知覚・スペルの往復は場面次第でこの辺りに入る]
@@ -237,6 +237,8 @@ n+1 回目: … / AIの返事(n-1) / ユーザーの発言(n) / (知覚) / AIの
 #### 明示キャッシュに対応しないモデル (2026-10-14 追加)
 
 モデル設定で `cache.explicit_supported: false` としたモデル (2026-10 時点で Gemini 4 Argon) では、継続キャッシュ・自動キャッシュ・モデル設定の explicit cache のどれを選んでいても、キャッシュの作成 (`caches.create`) を一切試みず、Google 側の暗黙キャッシュ (implicit) だけで動く。根拠は二つで、公式文書が Argon について「explicit caching (`caches.create` / `cached_content`) は非対応、implicit caching のみ」と明記していることと、Models API の `supported_actions` が `generateContent` / `countTokens` / `batchGenerateContent` だけで、他の Gemini にある `createCachedContent` を含まないこと。作成を試みても毎回拒否されるだけなので、`llm_clients/gemini.py` の `_apply_request_cache` の入口で三つの経路をまとめて止める。省略時は `true` (従来どおり)。
+
+暗黙キャッシュでは境目をこちらから指定できないので、毎ターン消えるリアルタイム情報と自動想起が末尾近くにあると、前回の送信と今回の送信の先頭が一致しなくなる。これに対する対応は別の設定 `cache.persist_realtime_and_recall` で行う (Argon では ON。設計は [persist_realtime_and_recall.md](persist_realtime_and_recall.md))。
 
 #### 実装の置き場 (見込み)
 

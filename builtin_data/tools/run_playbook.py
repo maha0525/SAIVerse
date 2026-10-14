@@ -34,6 +34,7 @@ from tools.context import (
     get_active_pulse_context,
     get_auto_mode,
     get_event_callback,
+    get_realtime_spell_handover,
     is_user_configured_invocation,
 )
 from tools.core import ToolSchema
@@ -156,6 +157,14 @@ def run_playbook(name: str) -> Union[str, Tuple[str, Dict[str, Any]]]:
         # 引き継ぐ (saiverse/persona_model_selection.py の ReplyModelBinding)。
         "_model_binding": getattr(pulse_ctx, "model_binding", None),
     }
+    # 写した列のリアルタイムスペルの状態 (残すモデルの列か・結果をもう持って
+    # いるか) を引き継ぐ。器 (実行済みの状態と結果) は上の PulseContext に
+    # 載っている。引き継がないと、リアルタイム情報と自動想起を残すモデルで、
+    # 親が実行済みのリアルタイムスペルを子が再実行し、子の送信に結果が二つ
+    # 載る (docs/intent/persist_realtime_and_recall.md §4.1、Codex 三巡目)。
+    # OFF のモデルの列では子は今までどおり自分で実行する。spell ループの外
+    # (TOOL ノード・CLI) では None で、子は自分で文脈を組む。
+    parent_state.update(get_realtime_spell_handover() or {})
 
     LOGGER.info(
         "[run_playbook] Spawning sub-line: persona=%s playbook=%s depth=%d→%d",

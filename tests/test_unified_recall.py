@@ -686,7 +686,8 @@ class TestRecallSweepOptions(unittest.TestCase):
       グローバルの ``SOURCE_ALLOCATIONS`` へフォールバックする。
     - キーワードだけで拾われたヒットにも、埋め込み全件スキャンで計算済みの
       cosine が ``embed_score`` として付く (埋め込み上位圏外でも)。ただし
-      3 つのオプション引数を一つも渡さない既定呼び出しでは補完しない —
+      オプション引数 (上の 3 つと ``exclude_keys``) を一つも渡さない既定
+      呼び出しでは補完しない —
       既存の呼び出し元 (OFF の自動想起・Memory タブ検索・スペル) の返り値を
       1 ビットも変えないため (intent の 2026-09-18 裁定)。
 
@@ -853,6 +854,23 @@ class TestRecallSweepOptions(unittest.TestCase):
         hits = self._message_hits("十条", topk=1)
         self.assertEqual([h.source_id for h in hits], [target])
         self.assertIsNone(hits[0].embed_score)
+
+    def test_exclude_keys_alone_enables_embed_score_backfill(self):
+        # exclude_keys だけを渡す呼び出し (リアルタイム情報と自動想起を残す
+        # モデルで、キーワード抽出が無効な自動想起の形) も拡張呼び出し。
+        # 補完が効かないと、埋め込み上位圏外のキーワードヒットが embed_score
+        # None で返り、run_auto_recall のしきい値判定で落とされる。
+        excluded = self._add("上位その1", vector=[1.0, 0.0])   # cosine 1.0 (除外)
+        self._add("上位その2", vector=[0.8, 0.6])               # cosine 0.8
+        self._add("上位その3", vector=[0.7, 0.71414284])        # cosine 0.7
+        target = self._add("十条まで歩いた", vector=[0.6, 0.8])  # cosine 0.6
+
+        hits = self._message_hits(
+            "十条", topk=1, exclude_keys={("message", excluded)},
+        )
+        self.assertEqual([h.source_id for h in hits], [target])
+        self.assertIsNotNone(hits[0].embed_score)
+        self.assertAlmostEqual(hits[0].embed_score, 0.6, places=5)
 
 
 if __name__ == "__main__":

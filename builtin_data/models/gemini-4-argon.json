@@ -15,6 +15,7 @@
     "supported": true,
     "type": "implicit",
     "explicit_supported": false,
+    "persist_realtime_and_recall": true,
     "min_tokens": 4096
   },
   "pricing": {

@@ -30,6 +30,7 @@ from .exceptions import (
     ServerError,
 )
 from .utils import (
+    attachment_limit_is_off,
     compute_allowed_attachment_keys,
     content_to_text,
     image_summary_note,
@@ -132,7 +133,11 @@ def _build_xai_messages(
     """
     from xai_sdk.chat import assistant, image, system, user
 
-    max_image_embeds = parse_attachment_limit("XAI")
+    # リアルタイム情報と自動想起を残すモデルの列では上限を使わない
+    # (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY)。
+    max_image_embeds = (
+        None if attachment_limit_is_off(messages) else parse_attachment_limit("XAI")
+    )
 
     # Pre-scan for image attachments
     attachment_cache: Dict[int, List[Dict[str, Any]]] = {}

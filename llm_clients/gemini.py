@@ -1519,8 +1519,12 @@ class GeminiClient(LLMClient):
         boundary_msg_idx: Optional[int] = None
         content_starts: List[int] = []
         contents: List[types.Content] = []
-        from .utils import parse_attachment_limit
-        max_image_embeds = parse_attachment_limit("GEMINI")
+        from .utils import attachment_limit_is_off, parse_attachment_limit
+        # リアルタイム情報と自動想起を残すモデルの列では上限を使わない
+        # (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY)。
+        max_image_embeds = (
+            None if attachment_limit_is_off(msgs) else parse_attachment_limit("GEMINI")
+        )
         logging.debug(
             "[gemini] attachment limit=%s",
             "∞" if max_image_embeds is None else max_image_embeds,

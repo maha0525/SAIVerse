@@ -13,6 +13,10 @@
   文章生成は行わず、判断専用モデルに候補の関連度だけを問う。OFF では一切呼ばない。
 - 注入は履歴末尾のみ、head 非混入 (§10-2、cached_head_architecture C5 と同じ面)。
 - SAIMemory には**永続化しない** (§10-7)。LLM に渡す message 列にだけ足す。
+  例外はモデル設定 ``cache.persist_realtime_and_recall`` を ON にしたモデル
+  (docs/intent/persist_realtime_and_recall.md): 送った文面のまま残し、次の
+  ターン以降も同じ位置に送る。そのモデルでは粘着で出し直さず、新しく浮かんだ
+  記憶だけを出す (``run_auto_recall`` の ``exclude_keys`` / ``new_only``)。
 
 スコープ (§4.6): メインライン (CONVERSATION アスペクト) のみ。呼び出し側で
 ``aspect_from_pulse_type(pulse_type) == Aspect.CONVERSATION`` を確認してから呼ぶ。
@@ -33,7 +37,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from sea.eviction_plan import CONSUMED_PERCEPTION_KEY, is_injected_perception
+from sea.eviction_plan import (
+    CONSUMED_PERCEPTION_KEY,
+    PERSISTED_REALTIME_AND_RECALL_KEY,
+    TURN_REALTIME_AND_RECALL_KEY,
+    is_injected_perception,
+    is_persisted_realtime_and_recall,
+)
 from saiverse.references import to_uri
 
 LOGGER = logging.getLogger("saiverse.auto_recall")
@@ -375,6 +385,14 @@ def _is_conversational_message(msg: Dict[str, Any]) -> bool:
     # 引っ越したとき、この除外リストが追従しなかったのが根因)。
     if metadata.get(CONSUMED_PERCEPTION_KEY):
         return False
+    # 残したリアルタイム情報と自動想起の行・そのターンのまとまり
+    # (docs/intent/persist_realtime_and_recall.md §4.5)。上の知覚の印でも外れる
+    # が、知覚とは別の理由 (思い出したことをまた思い出す循環を作らない) で
+    # 外すので、印を名指しして明示的に外す。
+    if metadata.get(PERSISTED_REALTIME_AND_RECALL_KEY) or metadata.get(
+        TURN_REALTIME_AND_RECALL_KEY
+    ):
+        return False
     content = msg.get("content")
     return isinstance(content, str) and bool(content.strip())
 
@@ -398,6 +416,8 @@ def _latest_user_message(messages: List[Dict[str, Any]]) -> Optional[Dict[str, A
             or metadata.get("__realtime_context__")
             or metadata.get("__auto_recall__")
             or metadata.get(CONSUMED_PERCEPTION_KEY)
+            or metadata.get(PERSISTED_REALTIME_AND_RECALL_KEY)
+            or metadata.get(TURN_REALTIME_AND_RECALL_KEY)
         ):
             continue
         return m
@@ -447,9 +467,15 @@ def _trailing_perception_blocks(messages: List[Dict[str, Any]]) -> List[Dict[str
 
     = 「このターンで新しく目に入ったもの」。会話本文でもブロックでもない行
     (head の system 行など) は素通りするだけで、遡りを止めない。
+
+    残したリアルタイム情報と自動想起の行 (知覚のブロックと同じ印も持つ) は
+    新しく目に入ったものではないので集めない — 素通りするだけで、遡りも
+    止めない (docs/intent/persist_realtime_and_recall.md §4.5)。
     """
     found: List[Dict[str, Any]] = []
     for m in reversed(messages):
+        if is_persisted_realtime_and_recall(m):
+            continue
         if is_injected_perception(m):
             found.append(m)
             continue
@@ -1357,6 +1383,11 @@ class AutoRecallResult:
     # 一切影響しない。他の失敗 (キー欠落・接続失敗・不正応答) では立たない — 待ち時間や
     # モデルの割り当てを変えれば直る失敗だけを、直し方つきで知らせるため。
     reflex_deadline_fallback: bool = False
+    # block に入っている記憶の ``(source_type, source_id)`` (block の並び順)。
+    # リアルタイム情報と自動想起を残すモデルでは、これを残した行に構造化して
+    # 持たせ、次のターンの候補から外す (docs/intent/persist_realtime_and_recall.md
+    # §4.4)。injected=False のときは空。
+    recalled_keys: List[Tuple[str, str]] = field(default_factory=list)
 
 
 def run_auto_recall(
@@ -1368,6 +1399,8 @@ def run_auto_recall(
     thread_id: str,
     enhanced: bool = False,
     reflex_model_key: Optional[str] = None,
+    exclude_keys: Optional[set] = None,
+    new_only: bool = False,
 ) -> AutoRecallResult:
     """自動想起を 1 ターン分実行し、注入ブロック (あれば) を返す。
 
@@ -1392,6 +1425,20 @@ def run_auto_recall(
             ``AI.REFLEX_JUDGMENT_MODEL``)。``enhanced`` と同じく、persona オブジェクトを
             持つ呼び出し側が読んで渡す。None なら世界の既定 (モデルの役割「反射判断」の
             env) に落ちる。
+        exclude_keys: 候補を集める段階で外す記憶の ``(source_type, source_id)``。
+            リアルタイム情報と自動想起を残すモデル
+            (docs/intent/persist_realtime_and_recall.md §4.4) で、いま送る列に
+            ある残した行に入っている記憶を渡す。採用した後で捨てると候補の枠が
+            既出の記憶で埋まったまま件数だけ減る (auto_recall_jev_rerank.md の
+            詰まり 1 と同じ理由) ので、検索 (unified_recall) とエンティティ
+            トリガーの両方で収集の段階で外す。None / 空なら従来どおり。
+        new_only: True なら、注入ブロックに入れるのは**このターンに新しく採用
+            した記憶だけ** (粘着台帳に残っている過去の記憶は出さない)。残すモデル
+            では、一度出た記憶は残した行として送る列に居続けるので、粘着で
+            出し直すと同じ記憶が毎ターン積み重なる。「新しく浮かんだ」の基準は
+            台帳ではなく残した行 (= ``exclude_keys``) にある — 台帳は keepalive や
+            作業セッションの呼び出しでも更新されるため。新しい記憶が一つも無い
+            ターンは注入しない。False (既定) は従来どおり台帳の全件を出す。
 
     Returns:
         AutoRecallResult。``injected`` が True のとき ``block`` を末尾注入する。
@@ -1438,8 +1485,15 @@ def run_auto_recall(
         LOGGER.warning("[auto_recall] entity trigger raised (persona=%s)", persona_id, exc_info=True)
         entity_hits = []
 
+    excluded_keys: set = (
+        {(str(k[0]), str(k[1])) for k in exclude_keys} if exclude_keys else set()
+    )
+
     for page_id, short_id, title, summary in entity_hits:
         key = ("memopedia", str(page_id))
+        if key in excluded_keys:
+            # 送る列に既に出ている記憶 (残した行の中) — 候補にしない。
+            continue
         accepted_keys.add(key)
         accepted_count += 1
         display_title = f"{title} (memopedia:{short_id})" if short_id is not None else title
@@ -1470,6 +1524,10 @@ def run_auto_recall(
         (成功済みの候補を障害の空で上書きすると、粘着台帳が「候補の無かったターン」
         として古び、障害が続いただけで粘着記憶が消える)。
         """
+        if excluded_keys:
+            # 送る列に既に出ている記憶を収集の段階で外す (残すモデルだけが渡す)。
+            # 空のときは引数ごと渡さない — 従来の呼び出しを 1 ビットも変えない。
+            extra_kwargs = {**extra_kwargs, "exclude_keys": excluded_keys}
         try:
             from sai_memory.unified_recall import unified_recall
             # Chronicle は自動想起の対象から外す。Chronicle は人生の背骨を要約した
@@ -1549,6 +1607,9 @@ def run_auto_recall(
         key = (hit.source_type, str(hit.source_id))
         # エンティティトリガーで既に採用済みなら埋め込み側は重複処理しない。
         if key in accepted_keys:
+            continue
+        # 収集の段階で外してあるはずの既出の記憶 (残すモデル)。念のための防御。
+        if key in excluded_keys:
             continue
         # message ソースで、既にコンテキスト窓に載っているものは注入しない (二重注入回避)。
         if hit.source_type == "message" and str(hit.source_id) in context_ids:
@@ -1656,6 +1717,23 @@ def run_auto_recall(
         ledger.items.values(),
         key=lambda it: (it.stale_turns, -it.best_score),
     )
+    if new_only:
+        # 残すモデル (docs/intent/persist_realtime_and_recall.md §4.4): 出すのは
+        # このターンに新しく採用した記憶だけ。過去に出した記憶は残した行として
+        # 送る列に居続けるので、粘着で出し直さない。
+        ordered = [
+            it for it in ordered
+            if (it.source_type, str(it.source_id)) in accepted_keys
+        ]
+        if not ordered:
+            LOGGER.debug(
+                "[auto_recall] no newly surfaced memory this turn; no injection "
+                "(persona=%s, new_only)", persona_id,
+            )
+            return AutoRecallResult(
+                False, None, query, len(hits), accepted_count, len(ledger.items), 0,
+                reflex_deadline_fallback=reflex_deadline_fallback,
+            )
     header = "ふと浮かんだ記憶:"
     included_items: List[_LedgerItem] = list(ordered)
     lines: List[str] = [_format_line(item) for item in included_items]
@@ -1726,4 +1804,7 @@ def run_auto_recall(
         char_count=len(block),
         plain_text=body,
         reflex_deadline_fallback=reflex_deadline_fallback,
+        recalled_keys=[
+            (item.source_type, str(item.source_id)) for item in included_items
+        ],
     )

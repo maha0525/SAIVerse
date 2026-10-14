@@ -92,7 +92,12 @@ def run_playbook(
     # (サブラインの軽量モデル強制はそちらでも維持する)。
     if line == "sub" and parent.get("_messages"):
         parent_messages = parent.get("_messages") or []
-        base_messages = list(parent_messages)  # コピー (参照共有しない)
+        # コピー (参照共有しない)。リアルタイム情報と自動想起を残すモデルの
+        # 「そのターンのまとまり」だけは辞書ごと写す — 浅い写しのままだと、
+        # 子の追記が親の送ったまとまり (保存待ちの写しを含む) を書き換える
+        # (docs/intent/persist_realtime_and_recall.md §4.1)。
+        from sea.runtime_context import copy_turn_realtime_and_recall_for_child
+        base_messages = copy_turn_realtime_and_recall_for_child(parent_messages)
         LOGGER.info(
             "[sea][run-playbook] %s: line='sub', forking parent _messages (%d messages) instead of "
             "calling _prepare_context. Lightweight model will be used.",
@@ -166,6 +171,28 @@ def run_playbook(
             persona_voiced=True,
         )
         parent["_prefix_anchor_id"] = _context_meta.get("prefix_anchor_id")
+        # リアルタイム情報と自動想起を残すモデルか (組んだときのモデルの判定 —
+        # docs/intent/persist_realtime_and_recall.md §3)。リアルタイムスペルが
+        # まとまりを自前で作る経路 (sea/runtime_llm._execute_realtime_spells) が
+        # 置き場所をこれで決める。
+        parent["_persist_realtime_and_recall"] = bool(
+            _context_meta.get("persist_realtime_and_recall", False)
+        )
+        # ターンの最初の LLM 呼び出しの直前に、送る列の後ろ側を記録から読み直して
+        # 揃える材料 (persist_realtime_and_recall.md §5、sea/runtime_llm.
+        # _align_first_send_with_record)。運ぶのはトップレベルの Pulse
+        # (pulse_type あり) だけ — 子の Playbook (pulse_type なし) は親の state を
+        # parent として受け取るので、ここで書くと親の材料を子の組み立てで
+        # 上書きしてしまう。
+        if pulse_type is not None:
+            from sea.runtime_context import (
+                FIRST_SEND_RECORD_SOURCE_KEY,
+                FIRST_SEND_RECORD_SOURCE_META_KEY,
+            )
+
+            parent[FIRST_SEND_RECORD_SOURCE_KEY] = _context_meta.get(
+                FIRST_SEND_RECORD_SOURCE_META_KEY,
+            )
         # 前駆刻印の材料 (sea/message_stamp.py): 今回の生成が実際に見た履歴の
         # ID 列。末尾が「この生成が見ていた最後のメッセージ」になる。
         record_presented_message_ids(parent, _context_meta)

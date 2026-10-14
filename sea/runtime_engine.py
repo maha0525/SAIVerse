@@ -189,10 +189,10 @@ class RuntimeEngine:
                 # as user role + <system> tag for cross-provider compatibility
                 # (Gemini rejects mid-stream system role; see sea/runtime_llm.py
                 # の同一書式コメント).
-                formatted = f"<system>tool '{tool_name}' result:\n{result_str}</system>"
-                if state.get("_messages") is None:
-                    state["_messages"] = []
-                state["_messages"].append({"role": "user", "content": formatted})
+                self._append_tool_message(
+                    state, persona_obj, playbook,
+                    f"tool '{tool_name}' result:\n{result_str}",
+                )
             except Exception as exc:
                 error_msg = f"Tool error: {exc}"
                 state["last"] = error_msg
@@ -215,13 +215,62 @@ class RuntimeEngine:
                 # Also surface the error to in-memory messages so subsequent
                 # LLM nodes can react (e.g. retry / abort / report). Same
                 # rationale as the success path.
-                formatted = f"<system>tool '{tool_name}' error:\n{error_msg}</system>"
-                if state.get("_messages") is None:
-                    state["_messages"] = []
-                state["_messages"].append({"role": "user", "content": formatted})
+                self._append_tool_message(
+                    state, persona_obj, playbook,
+                    f"tool '{tool_name}' error:\n{error_msg}",
+                )
             return state
 
         return node
+
+    def _append_tool_message(
+        self, state: dict, persona: Any, playbook: PlaybookSchema, body: str,
+    ) -> None:
+        """TOOL ノードの結果 (またはエラー) を送る列 ``state["_messages"]`` へ足す。
+
+        既定は今までどおり、記録に残さない ``<system>…</system>`` の user
+        メッセージ。リアルタイム情報と自動想起を残すモデルの、残すパルスの列で、
+        ターンの最初の LLM 呼び出しをまだ送っていない間
+        (:func:`sea.runtime_llm.records_additions_before_first_send`) は、事前
+        スペルの結果 (sea/runtime_llm._execute_pre_spells) と同じ規則で足す —
+        system ロールの記録に残し、その id を持たせ、記録が次のターンに復元
+        されるのと同じ文面 (``presented_system_record_content``) で送る。記録に
+        残さないと、最初の呼び出しで送ったこの結果の位置が次のターンでは返事に
+        置き換わり、前方一致が割れる (docs/intent/persist_realtime_and_recall.md
+        不変条件 1、Codex 五巡目 #2)。最初の送信の直前に送る列の後ろ側は記録から
+        読み直した並びに揃えられる (sea/runtime_llm._align_first_send_with_record
+        — ツールの中で書かれた記録もそこで並ぶ) が、記録に残らない結果は読み直しに
+        出ないので、揃える前提としてもここで記録に残す必要がある。記録に失敗したら
+        同じ文面で id 無しのまま足す (揃えた後の検査が WARN で知らせる)。
+        """
+        if state.get("_messages") is None:
+            state["_messages"] = []
+        from sea.runtime_llm import records_additions_before_first_send
+
+        if not records_additions_before_first_send(state):
+            state["_messages"].append({"role": "user", "content": f"<system>{body}</system>"})
+            return
+        from sai_memory.memory.storage import presented_system_record_content
+
+        msg: Dict[str, Any] = {
+            "role": "user", "content": presented_system_record_content(body),
+        }
+        try:
+            stored_id = self.runtime._store_memory(
+                persona, body, role="system",
+                tags=["conversation", "tool"],
+                pulse_id=state.get("_pulse_id"),
+                playbook_name=playbook.name,
+                pulse_context=state.get("_pulse_context"),
+                return_message_id=True,
+            )
+            if stored_id:
+                msg["id"] = str(stored_id)
+        except Exception:
+            LOGGER.exception(
+                "[sea][tool] failed to keep the tool message before the first LLM call",
+            )
+        state["_messages"].append(msg)
 
     def lg_exec_node(
         self,

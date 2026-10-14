@@ -230,7 +230,10 @@ def test_failure_reaches_ui_and_persona_then_correction_runs_once(bad, caplog):
     if "name='" in bad and "args=" not in bad:
         assert "スペル行の書式" in client.calls[0][-1]["content"]
     if bad.startswith("/quick_spell"):
-        assert "/quick_spell で唱えたスペルに失敗" in client.calls[0][-1]["content"]
+        # 昇格の説明文は記録しない注入なので、結果のメッセージ (記録の復元形と
+        # 同じ文面 — docs/intent/persist_realtime_and_recall.md 不変条件 2) とは
+        # 別のメッセージとして結果の直前に届く。
+        assert "/quick_spell で唱えたスペルに失敗" in client.calls[0][-2]["content"]
 
 
 def test_unreadable_line_does_not_leak_into_early_speech():
