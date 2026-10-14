@@ -1855,7 +1855,8 @@ class TestCompilePlaybookDropsStampMaterial:
         (`action="{other}"`、`state["other"] == "1"`) → SPEAK。MEMORIZE が
         `state["last"]` を `{last}` 以外から作り直すので、`compile_playbook` が
         その後で `_unstored_reply` を消し、SPEAK が保存した行の id は返事の dict に
-        付かない。MEMORIZE 自身の行の刻印は今までどおり (ノードの中で保存する)。"""
+        付かない。MEMORIZE 自身の行にも刻印は付かない — `{last}` 以外から作った
+        本文がどの生成の出力かは確かめられない (Codex 五巡目)。"""
         from sea.runtime_emitters import forget_saved_utterances
 
         runtime, persona, adapter, client = compiled_env
@@ -1878,8 +1879,37 @@ class TestCompilePlaybookDropsStampMaterial:
         rows = _assistant_rows(adapter, "1")
         assert len(rows) == 2
         _memo_id, memo_meta = rows[0]
-        assert memo_meta[PREDECESSOR_META_KEY] == h2
-        assert TOKENS_META_KEY in memo_meta
+        assert PREDECESSOR_META_KEY not in memo_meta
+        assert TOKENS_META_KEY not in memo_meta
+
+    def test_memorize_of_an_older_reply_gets_no_stamp_of_the_latest_generation(
+        self, compiled_env,
+    ):
+        """Codex 五巡目: LLM A が返事を保存して `old_reply` に入れる → LLM B が
+        A の行を見て生成 → MEMORIZE (`action="{old_reply}"`) で A の本文を
+        もう一度保存する。この行に B の生成の `predecessor_message_id` (= A の行
+        自身) とトークン数を刻まない。"""
+        runtime, persona, adapter, client = compiled_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        client.replies.extend(["返事 A。", "返事 B。"])
+        _run_compiled(runtime, persona, [
+            _llm_node("reply_a", "keep_a", memorize={"tags": ["conversation"]}),
+            {"id": "keep_a", "type": "set", "assignments": {"old_reply": "{last}"},
+             "next": "reply_b"},
+            _llm_node("reply_b", "record_old", memorize={"tags": ["conversation"]}),
+            _memorize_node("record_old", None, action="{old_reply}"),
+        ], state)
+
+        rows = _assistant_rows(adapter, "返事 A。")
+        assert len(rows) == 2
+        a_id, _a_meta = rows[0]
+        _b_id, b_meta = _row_by_content(adapter, "返事 B。")
+        assert b_meta.get(PREDECESSOR_META_KEY) == a_id
+        _again_id, again_meta = rows[1]
+        assert PREDECESSOR_META_KEY not in again_meta
+        assert TOKENS_META_KEY not in again_meta
 
     @pytest.mark.parametrize("action", ["{last}", None])
     def test_memorize_of_last_only_then_speak_still_ties_the_id(self, compiled_env, action):

@@ -491,9 +491,14 @@ class RuntimeEngine:
                 # 2026-05-20: thought_signature 永続化 (MEMORIZE node 経由 / assistant 役のみ意味あり)。
                 # role != "assistant" の場合は state 値に関わらず無害 (signature 解釈は Gemini text Part のみ)。
                 thought_signature=state.get("_last_thought_signature") if role == "assistant" else None,
-                # 書き込み時の機械刻印 (v3 §7.1)。role='assistant' の
-                # ときだけ効く (判定は _store_memory 側)。
-                beat_state=state,
+                # 書き込み時の機械刻印 (v3 §7.1)。role='assistant' のときだけ効く
+                # (判定は _store_memory 側)。刻むのは action が `{last}` だけのとき
+                # に限る — state の刻印の材料は直近の LLM ノードのもので、本文が
+                # state["last"] (= その生成の出力。間で書き換えたノードの後は
+                # compile_playbook が材料を消している) のときだけ帰属が成り立つ。
+                # `{other}` などから作った本文は、前の生成や子の出力かもしれず、
+                # どの生成のものか確かめられないので刻印なしに倒す (Codex 五巡目)。
+                beat_state=state if action_template == "{last}" else None,
                 return_message_id=stores_last_as_is,
             )
             if stored and stores_last_as_is:

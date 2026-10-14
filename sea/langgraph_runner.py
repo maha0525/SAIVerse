@@ -37,8 +37,10 @@ def _may_rewrite_last_with_non_generated_text(node_def: Any) -> bool:
     ``_unstored_reply`` が残り、後ろの SPEAK / THINK / MEMORIZE が保存した行の
     id が前の返事の dict に付く。``{last}`` だけの MEMORIZE は包まない —
     ``state["last"]`` はそのままで、後ろのノードが返事の dict に id を付けるには
-    ``_unstored_reply`` が残っている必要がある。MEMORIZE 自身の行の刻印は
-    ノードの中 (``_store_memory`` の ``beat_state``) で済むので、包んでも変わらない。
+    ``_unstored_reply`` が残っている必要がある。MEMORIZE 自身の行は、``action``
+    が ``{last}`` だけのときだけ刻印を付け、それ以外では刻印なしで書く
+    (``lg_memorize_node`` が ``_store_memory`` に ``beat_state`` を渡すのを
+    ``{last}`` のときに限る)。
     """
     from sea.playbook_models import NodeType
 
