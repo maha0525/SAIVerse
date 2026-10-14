@@ -1396,7 +1396,7 @@ def regenerate_entry(
     old_batches = list_batches_annexed_to(conn, entry_id)
     # 材料の形は付記 (executor.collect_annex_items) と同じ一枚を通す。
     extra_items = [
-        item for item in (batch_material_item(b) for b in old_batches)
+        item for item in (batch_material_item(b, conn) for b in old_batches)
         if item is not None
     ]
 

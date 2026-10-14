@@ -911,14 +911,20 @@ def unified_recall(
             return ids
         return {i for i in ids if (source_type, str(i)) not in excluded_keys}
 
-    # 拡張引数がひとつでも渡された呼び出しか。embed_score の全件補完はこの経路で
-    # だけ効かせる — 従来の呼び出し (全引数が既定) では返り値も 1 ビット変えない
-    # (auto_recall の OFF 不変条件が「既定呼び出しの挙動は変わらない」を前提に
-    # している。補完自体は意味的にはどの経路でも正しいが、約束を優先する)。
+    # 拡張引数 (keywords / exclude_message_ids / source_allocations /
+    # exclude_keys) がひとつでも渡された呼び出しか。embed_score の全件補完は
+    # この経路でだけ効かせる — 従来の呼び出し (全引数が既定) では返り値も
+    # 1 ビット変えない (auto_recall の OFF 不変条件が「既定呼び出しの挙動は
+    # 変わらない」を前提にしている。補完自体は意味的にはどの経路でも正しいが、
+    # 約束を優先する)。exclude_keys だけを渡す呼び出し (リアルタイム情報と
+    # 自動想起を残すモデルで、キーワード抽出が無効な自動想起) も拡張呼び出し
+    # であり、補完しないとキーワードだけで拾われたヒットが embed_score None で
+    # 呼び出し側のしきい値判定に落とされる。
     extended_call = (
         keywords is not None
         or bool(excluded_msg_ids)
         or source_allocations is not None
+        or bool(excluded_keys)
     )
 
     # --- Keyword search ---

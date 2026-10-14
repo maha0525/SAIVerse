@@ -125,7 +125,9 @@ def collect_annex_items(
     付くので、少し後の digest の材料に載っても時系列の嘘にはならない。
 
     戻りは ``(items, batch_ids)``。items は ``{"at", "text"}`` の list
-    (at 昇順) — generator._format_messages_for_prompt の ``extra_items`` 形。
+    (at 昇順。項目の形は perception_buffer.batch_material_item — ``label`` /
+    ``after_message_id`` が付くことがある) —
+    generator._format_messages_for_prompt の ``extra_items`` 形。
     batch_ids は材料にしたバッチの id (digest 確定 tx で付記印を打つ)。
     """
     items: List[dict] = []
@@ -164,7 +166,7 @@ def collect_annex_items(
         # room_state_packages.md §6-4) は出来事ではないので材料には載せないが、
         # 付記印だけは受けて提示から下りる (印を打たないと提示に残り続け、
         # 毎回の編纂で同じ全文が材料に並ぶ)。
-        item = batch_material_item(batch)
+        item = batch_material_item(batch, conn)
         if item is not None:
             items.append(item)
         batch_ids.append(batch.id)

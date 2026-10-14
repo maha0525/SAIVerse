@@ -2090,6 +2090,143 @@ class TestArasujiMaterial:
             [], [{"at": 1, "text": "現在時刻: 10:00", "label": "notice"}],
         )
 
+    # --- 材料の並び: 残した行は境界の発言の直後に置く -----------------------
+    #
+    # consumed_at は最初の LLM 呼び出しの完了時刻で、返事の保存と同じ秒に
+    # なりやすい。秒の順だけで並べると「発言 → 返事 → 差し込み」になり、
+    # 実際の順 (発言 → 差し込み → 返事) と入れ替わる。
+
+    @staticmethod
+    def _msg(mid: str, role: str, content: str, created_at: int):
+        from sai_memory.memory.storage import Message
+
+        return Message(
+            id=mid, thread_id="t1", role=role, content=content,
+            resource_id=None, created_at=created_at,
+        )
+
+    def test_kept_row_lands_right_after_its_boundary_message(self):
+        from sai_memory.arasuji.generator import _format_messages_for_prompt
+
+        messages = [
+            self._msg("u1", "user", "おはよう", 1000),
+            self._msg("a1", "assistant", "おはよう、まはー", 1000),
+        ]
+        items = [{
+            "at": 1000, "text": "現在時刻: 10:00", "label": "notice",
+            "after_message_id": "u1",
+        }]
+        prompt = _format_messages_for_prompt(
+            messages, include_timestamp=False, extra_items=items,
+        )
+        i_user = prompt.index("[user]: おはよう")
+        i_notice = prompt.index("【通知】: 現在時刻: 10:00")
+        i_reply = prompt.index("[assistant]: おはよう、まはー")
+        assert i_user < i_notice < i_reply
+
+    def test_several_rows_after_the_same_message_keep_their_order(self):
+        from sai_memory.arasuji.generator import _format_messages_for_prompt
+
+        messages = [
+            self._msg("u1", "user", "おはよう", 1000),
+            self._msg("a1", "assistant", "おはよう、まはー", 1000),
+        ]
+        items = [
+            {"at": 1000, "text": "一つ目", "label": "notice", "after_message_id": "u1"},
+            {"at": 1000, "text": "二つ目", "label": "notice", "after_message_id": "u1"},
+        ]
+        prompt = _format_messages_for_prompt(
+            messages, include_timestamp=False, extra_items=items,
+        )
+        assert (
+            prompt.index("[user]: おはよう")
+            < prompt.index("【通知】: 一つ目")
+            < prompt.index("【通知】: 二つ目")
+            < prompt.index("[assistant]: おはよう、まはー")
+        )
+
+    def test_falls_back_to_seconds_order_without_the_boundary_message(self):
+        from sai_memory.arasuji.generator import _format_messages_for_prompt
+
+        # 境界の発言が材料のメッセージに無い (別の entry の材料など) → 従来の
+        # 秒の順 (同じ秒はメッセージが先)。表示する時刻は at のまま。
+        messages = [
+            self._msg("u1", "user", "おはよう", 1000),
+            self._msg("a1", "assistant", "おはよう、まはー", 1000),
+        ]
+        items = [{
+            "at": 1000, "text": "現在時刻: 10:00", "label": "notice",
+            "after_message_id": "gone",
+        }]
+        prompt = _format_messages_for_prompt(
+            messages, include_timestamp=False, extra_items=items,
+        )
+        assert (
+            prompt.index("[user]: おはよう")
+            < prompt.index("[assistant]: おはよう、まはー")
+            < prompt.index("【通知】: 現在時刻: 10:00")
+        )
+
+    def test_boundary_resolves_to_a_message_id_through_the_annex_path(self):
+        from sai_memory.arasuji.executor import collect_annex_items
+        from sai_memory.arasuji.generator import _format_messages_for_prompt
+        from sai_memory.memory.storage import add_message, get_message, init_db
+        from sai_memory.perception_buffer import (
+            create_consumption_batch,
+            init_perception_buffer_table,
+            insert_realtime_and_recall_batch,
+            push_perception,
+        )
+
+        conn = init_db(":memory:")
+        init_perception_buffer_table(conn)
+        u1 = add_message(conn, thread_id="t1", role="user",
+                         content="おはよう", created_at=1000)
+        a1 = add_message(conn, thread_id="t1", role="assistant",
+                         content="おはよう、まはー", created_at=1000)
+        u1_rowid = conn.execute(
+            "SELECT rowid FROM messages WHERE id = ?", (u1,),
+        ).fetchone()[0]
+        insert_realtime_and_recall_batch(
+            conn, consumed_at=1000,
+            rendered_text="<system>\n## リアルタイム情報\n- 現在時刻: 10:00\n</system>",
+            boundary_created_at=1000, boundary_rowid=u1_rowid,
+        )
+        # 境界の発言が記録に無い行 (削除済み) は after_message_id を持たない。
+        insert_realtime_and_recall_batch(
+            conn, consumed_at=1000,
+            rendered_text="<system>\n## リアルタイム情報\n- 現在時刻: 10:01\n</system>",
+            boundary_created_at=1000, boundary_rowid=9999,
+        )
+        # 知覚のまとめは境界を持っていても従来どおり (秒の順のまま)。
+        item = push_perception(conn, "world_state", "雨が降ってきた")
+        create_consumption_batch(
+            conn, [item], consumed_at=1000,
+            rendered_text="[システム通知]\n雨が降ってきた",
+            boundary_created_at=1000, boundary_rowid=u1_rowid,
+        )
+        conn.commit()
+
+        items, batch_ids = collect_annex_items(conn, 0, 2000)
+        assert len(batch_ids) == 3
+        by_text = {i["text"].split("\n")[-1]: i for i in items}
+        assert by_text["- 現在時刻: 10:00"]["after_message_id"] == u1
+        assert "after_message_id" not in by_text["- 現在時刻: 10:01"]
+        assert "after_message_id" not in by_text["雨が降ってきた"]
+
+        messages = [get_message(conn, u1), get_message(conn, a1)]
+        prompt = _format_messages_for_prompt(
+            messages, include_timestamp=False, extra_items=items,
+        )
+        i_user = prompt.index("[user]: おはよう")
+        i_kept = prompt.index("現在時刻: 10:00")
+        i_reply = prompt.index("[assistant]: おはよう、まはー")
+        i_orphan = prompt.index("現在時刻: 10:01")
+        i_perception = prompt.index("【知覚】: [システム通知]")
+        assert i_user < i_kept < i_reply
+        # 解決できない行と知覚のまとめは秒の順 (同じ秒のメッセージの後ろ)。
+        assert i_reply < i_orphan and i_reply < i_perception
+
 
 # ---------------------------------------------------------------------------
 # 画像の枚数の上限 — 残した行の画像は数に入れない (全プロバイダ共通の判定)

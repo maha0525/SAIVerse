@@ -359,11 +359,30 @@ def _format_messages_for_prompt(
         extra_items: メッセージ行ではない材料 (知覚の消費バッチ等)。
             ``{"at": epoch, "text": str}`` の list。時刻順の正しい位置に
             差し込む (同秒はメッセージが先 — 消費は書き込みの後に起きた事実)。
+            ただし項目が ``after_message_id`` を持ち、その id のメッセージが
+            ``messages`` にあるときは、そのメッセージの直後 (同じ秒の後続の
+            メッセージより前) に置く — リアルタイム情報と自動想起を残した行
+            (sai_memory/perception_buffer.batch_material_item) の位置は、送った
+            列で直前にあった発言が決める。同じメッセージの直後に複数並ぶときは
+            ``extra_items`` の並び順。そのメッセージが ``messages`` に無ければ
+            従来どおり時刻順。表示する時刻はどちらの場合も ``at``。
             本文が ``[想起:`` で始まる項目は【想起 (過去の再提示)】、それ以外は
             【知覚】とラベルし、長さ規則 (MECHANISM_TEXT_MAX_CHARS) を適用する。
             項目が ``label`` を持つときはそれに従う (:func:`_extra_item_label`)。
     """
-    entries: List[tuple] = []  # (at, tie, seq, line)
+    # 並びのキーは (at, tie, seq, after, sub)。メッセージは (created_at, 0,
+    # seq, 0, 0)、時刻で並べる項目は (at, 1, seq, 0, 0)。メッセージの直後に
+    # 置く項目は、そのメッセージのキーの後ろ 2 つだけを (1, 項目の seq) に
+    # したもの — そのメッセージの直後、次のメッセージ (同じ秒でも seq が
+    # 大きい) より前に並ぶ。
+    entries: List[tuple] = []  # (at, tie, seq, after, sub, line)
+    # 本文が空で行にならないメッセージも位置の基準には使える (境界の発言が
+    # 道具呼び出しだけの行でも、その位置の直後に置く)。
+    message_keys: dict = {
+        str(msg.id): (msg.created_at or 0, seq)
+        for seq, msg in enumerate(messages)
+        if getattr(msg, "id", None) is not None
+    }
     for seq, msg in enumerate(messages):
         role = msg.role
         if role == "model":
@@ -376,7 +395,8 @@ def _format_messages_for_prompt(
             f"[{_format_timestamp(msg.created_at)}] " if include_timestamp else ""
         )
         entries.append(
-            (msg.created_at or 0, 0, seq, f"{prefix}[{role}]{kind}: {content}")
+            (msg.created_at or 0, 0, seq, 0, 0,
+             f"{prefix}[{role}]{kind}: {content}")
         )
     for seq, item in enumerate(extra_items or []):
         text = str(item.get("text") or "").strip()
@@ -387,9 +407,15 @@ def _format_messages_for_prompt(
             text = condense_mechanism_text(text)
         at = int(item.get("at") or 0)
         prefix = f"[{_format_timestamp(at)}] " if include_timestamp else ""
-        entries.append((at, 1, seq, f"{prefix}{label}: {text}"))
-    entries.sort(key=lambda e: (e[0], e[1], e[2]))
-    return "\n\n".join(e[3] for e in entries)
+        line = f"{prefix}{label}: {text}"
+        after_id = item.get("after_message_id")
+        anchor = message_keys.get(str(after_id)) if after_id is not None else None
+        if anchor is not None:
+            entries.append((anchor[0], 0, anchor[1], 1, seq, line))
+        else:
+            entries.append((at, 1, seq, 0, 0, line))
+    entries.sort(key=lambda e: e[:5])
+    return "\n\n".join(e[5] for e in entries)
 
 
 def _format_entries_for_prompt(entries: List[ArasujiEntry], *, include_timestamp: bool = True) -> str:

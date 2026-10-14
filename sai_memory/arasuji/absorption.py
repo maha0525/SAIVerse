@@ -1431,14 +1431,14 @@ def run_absorption(
                     # 材料の形は付記 (executor.collect_annex_items) と同じ
                     # 一枚を通す。
                     extra_items.extend(
-                        item for item in (batch_material_item(b) for b in batches)
+                        item for item in (batch_material_item(b, conn) for b in batches)
                         if item is not None
                     )
                 # 吸収する run 自身の未付記バッチも材料に入れ、確定と同じ
                 # 帳簿の付け替え (フェーズ 1) で合体エントリへ付記する。
                 run_batches = _list_run_unannexed_batches(conn, run_ids)
                 extra_items.extend(
-                    item for item in (batch_material_item(b) for b in run_batches)
+                    item for item in (batch_material_item(b, conn) for b in run_batches)
                     if item is not None
                 )
                 extra_items.sort(key=lambda x: x["at"])

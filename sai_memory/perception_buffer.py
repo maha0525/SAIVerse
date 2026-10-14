@@ -998,7 +998,10 @@ MATERIAL_LABEL_RECALL = "recall"
 MATERIAL_LABEL_NOTICE = "notice"
 
 
-def batch_material_item(batch: PerceptionBatch) -> Optional[dict]:
+def batch_material_item(
+    batch: PerceptionBatch,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[dict]:
     """このバッチをあらすじの材料にするときの一項目 (材料にしないなら None)。
 
     材料の読み手は三つ — 付記 (sai_memory/arasuji/executor.collect_annex_items)・
@@ -1014,16 +1017,25 @@ def batch_material_item(batch: PerceptionBatch) -> Optional[dict]:
       (【想起 (過去の再提示)】)、含まない行は ``label="notice"`` (【通知】)。
       文面は ``<system>`` の包みを外したもの。長さの規則は材料の整形側
       (generator._format_messages_for_prompt) が他の材料と同じに当てる。
-    - それ以外 (知覚のまとめ) は従来どおり確定文面そのまま (ラベルは整形側が
-      本文から決める)。
+      ``conn`` (このバッチと同じ SAIMemory の接続) が渡され、行が境界の発言
+      (``boundary_created_at`` / ``boundary_rowid``) を持つときは、その発言の
+      id を ``"after_message_id"`` に入れる。整形側はこれで、材料の中にその
+      発言があればその直後に置く — ``consumed_at`` は最初の LLM 呼び出しの
+      完了時刻で、返事の保存と同じ秒になりやすく、秒の順だけで並べると
+      「発言 → 返事 → 差し込み」と実際の順 (発言 → 差し込み → 返事) が
+      入れ替わるため。境界の発言が記録に無ければ入れない (秒の順に戻る)。
+    - それ以外 (知覚のまとめ・部屋の様子) は従来どおり確定文面そのまま
+      (ラベルは整形側が本文から決める)。``after_message_id`` は付けない —
+      並びは従来どおり秒の順 (OFF のモデルの材料は変えない)。
 
-    戻りは ``{"at": epoch, "text": str}`` (+ 必要なら ``"label"``)。
+    戻りは ``{"at": epoch, "text": str}`` (+ 必要なら ``"label"`` /
+    ``"after_message_id"``)。
     """
     from sai_memory.room_state import batch_is_room_reseat
     if batch_is_room_reseat(batch.room_state_json):
         return None
     if batch.is_realtime_and_recall:
-        return {
+        item = {
             "at": int(batch.consumed_at),
             "text": _strip_system_tags(batch.rendered_text),
             "label": (
@@ -1031,7 +1043,39 @@ def batch_material_item(batch: PerceptionBatch) -> Optional[dict]:
                 else MATERIAL_LABEL_NOTICE
             ),
         }
+        after_id = _boundary_message_id(conn, batch)
+        if after_id is not None:
+            item["after_message_id"] = after_id
+        return item
     return {"at": int(batch.consumed_at), "text": batch.rendered_text}
+
+
+def _boundary_message_id(
+    conn: Optional[sqlite3.Connection], batch: PerceptionBatch,
+) -> Optional[str]:
+    """バッチの境界キー (created_at, rowid) が指す ``messages`` の行の id。
+
+    境界キーが無い・``conn`` が無い・その行が記録に無い (削除済み等) ときは
+    None。``messages`` 表の無い旧 DB は None に縮退するが、ロック等の他の
+    エラーは握らない (材料集めの他の読みと同じ fail-closed)。
+    """
+    if (
+        conn is None
+        or batch.boundary_created_at is None
+        or batch.boundary_rowid is None
+    ):
+        return None
+    try:
+        row = conn.execute(
+            "SELECT id FROM messages WHERE rowid = ? AND created_at = ?",
+            (int(batch.boundary_rowid), int(batch.boundary_created_at)),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        from sai_memory.arasuji.storage import is_missing_table_error
+        if not is_missing_table_error(exc):
+            raise
+        return None
+    return str(row[0]) if row is not None and row[0] is not None else None
 
 
 def _encode_media(media: Optional[list]) -> Optional[str]:
