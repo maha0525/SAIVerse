@@ -545,11 +545,8 @@ def _align_first_send_with_record(messages: List[Any], state: Any) -> None:
             "(pulse=%s)", state.get("_pulse_id"),
         )
         return
-    # 前駆刻印の材料も、揃えた後の実際に送る列から作り直す (Codex 七巡目)。
-    # 揃えで prepare_context の後に記録へ書かれた行 (事前スペル・TOOL の結果・
-    # MEMORIZE・状況変化の記録) が送る列に入るので、組成時点の材料のままでは
-    # 返事の前駆が「実際に見ていた最後のメッセージ」にならない。
-    _refresh_presented_ids_from_sent(messages, state)
+    # 揃えられた列では、以後の送信ごとに前駆刻印の材料を実際に送る列から作り
+    # 直す (:func:`_refresh_presented_ids_for_aligned_send`)。
     state[FIRST_SEND_ALIGNED_KEY] = True
     for kind, msg in mismatches:
         if kind == NOT_KEPT:
@@ -571,35 +568,52 @@ def _align_first_send_with_record(messages: List[Any], state: Any) -> None:
             )
 
 
-def _refresh_presented_ids_from_sent(messages: List[Any], state: Any) -> None:
-    """前駆刻印の材料 (``_presented_message_ids``) を、実際に送る列から作り直す。"""
+def _refresh_presented_ids_for_aligned_send(messages: List[Any], state: Any) -> None:
+    """前駆刻印の材料 (``_presented_message_ids``) を、いま送る列から作り直す。
+
+    persist_realtime_and_recall.md §5。リアルタイム情報と自動想起を残すモデル
+    の、ターンの最初の送信を記録に揃えられたトップレベルの列
+    (:data:`FIRST_SEND_ALIGNED_KEY`) でだけ、送信のたびに行う。返事の
+    ``predecessor_message_id`` は「その生成が実際に見ていた最後の記録の行」
+    なので、材料は送る列そのものから取る。
+
+    - 揃えで送る列に入った行 (事前スペルの結果・TOOL の結果・MEMORIZE・状況
+      変化の記録) を返事は実際に見ているので、組成時点の材料では足りない
+      (Codex 七巡目)。
+    - 子の Playbook の中継 (sea/runtime_nodes.lg_subplay_node) は、親の
+      ``state["last"]`` に入った子の本文に親の前駆を刻まないよう材料を落とす。
+      その後の親の生成は親の送る列を見ているので、その列から作り直す
+      (Codex 七巡目)。
+    - そのために、この列では親が保存に成功した返事とスペルの周の発言に、
+      記録の行 id を送る列でも持たせる (:func:`_keep_stored_id_in_list`)。
+      持たせないと、作り直した材料が保存済みの返事を飛ばして古い行を指す
+      (Codex 八巡目)。
+
+    OFF のモデルの列・揃えが走らなかった列・入れ子の Playbook は今までどおり
+    (組成時点の材料に、スペルの周の行を足していく)。
+    """
+    if not isinstance(state, dict) or not state.get(FIRST_SEND_ALIGNED_KEY):
+        return
     from sea.message_stamp import replace_presented_message_ids
     from sea.runtime_context import sent_message_ids
 
     replace_presented_message_ids(state, sent_message_ids(messages))
 
 
-def _restore_presented_ids_after_child(messages: List[Any], state: Any) -> None:
-    """子の Playbook が落とした前駆刻印の材料を、親の自前の送信で作り直す。
+def _keep_stored_id_in_list(state: Any, message: Any, stored_id: Any) -> None:
+    """保存に成功した発言の記録の行 id を、送る列のその行にも持たせる。
 
-    子の Playbook の中継 (sea/runtime_nodes.lg_subplay_node) は、親の
-    ``state["last"]`` に入った子の本文に親の前駆を刻まないよう、材料を落とす。
-    その後に親が自前の LLM ノードを回すと、親の生成は親の送る列を実際に
-    見ているのに、材料が無いので前駆が付かない (Codex 七巡目)。
-
-    リアルタイム情報と自動想起を残すモデルの、ターンの最初の送信を記録に
-    揃えられたトップレベルの列 (:data:`FIRST_SEND_ALIGNED_KEY`) でだけ、材料が
-    無いときに、いま送る列から作り直す。OFF のモデルの列・揃えが走らなかった
-    列は今までどおり (材料が無ければ前駆なし)。材料があるとき (スペルの
-    繰り返しが自分の行を足した後など) は触らない。
+    :func:`_refresh_presented_ids_for_aligned_send` が送る列から前駆の材料を
+    作り直すための印 (Codex 八巡目)。行うのは、ターンの最初の送信を記録に
+    揃えられた列 (:data:`FIRST_SEND_ALIGNED_KEY`) でだけ。``id`` は LLM へ送る
+    中身には入らない (履歴から組んだ行がもともと持っている欄で、各クライアントは
+    役割・本文・画像・tool call だけを送る)。OFF のモデルの列は変えない。
     """
-    from sea.message_stamp import PRESENTED_IDS_STATE_KEY
-
+    if not stored_id or not isinstance(message, dict):
+        return
     if not isinstance(state, dict) or not state.get(FIRST_SEND_ALIGNED_KEY):
         return
-    if state.get(PRESENTED_IDS_STATE_KEY):
-        return
-    _refresh_presented_ids_from_sent(messages, state)
+    message["id"] = str(stored_id)
 
 
 def _freeze_turn_block_before_send(messages: Any, state: Any = None) -> None:
@@ -618,11 +632,11 @@ def _freeze_turn_block_before_send(messages: Any, state: Any = None) -> None:
         return
     _align_first_send_with_record(messages, state)
     try:
-        _restore_presented_ids_after_child(messages, state)
+        _refresh_presented_ids_for_aligned_send(messages, state)
     except Exception:
         LOGGER.warning(
-            "[sea][persist_realtime_and_recall] could not restore the predecessor "
-            "material before sending", exc_info=True,
+            "[sea][persist_realtime_and_recall] could not rebuild the predecessor "
+            "material from the list being sent", exc_info=True,
         )
     try:
         from sea.runtime_context import freeze_turn_realtime_and_recall_for_send
@@ -715,9 +729,10 @@ def _check_kept_block_comes_back(persona: Any, state: Any, batch_id: int) -> Non
     persist_realtime_and_recall.md §5「機械検査」(Codex 七巡目)。次のターンの
     prepare_context と同じ関数で読み直す (sea/runtime_context.
     kept_block_comes_back)。出ないのは、残した行の位置を決める発言が履歴に
-    無い (窓の外・別のスレッド)、または境界の無い行を履歴の一番最初に置けない
-    とき — どれも次のターンの列の先頭が、このターンの最初の送信と一致しない。
-    読み直しの材料はトップレベルの Pulse にだけある。送信は止めない。
+    無い (窓の外・別のスレッド) とき — 次のターンの列の先頭が、このターンの
+    最初の送信と一致しない。残すのは境界のあるまとまりだけなので (Codex
+    八巡目)、検査も境界のある保存にだけ働く。読み直しの材料はトップレベルの
+    Pulse にだけある。送信は止めない。
     """
     from sea.runtime_context import FIRST_SEND_RECORD_SOURCE_KEY, kept_block_comes_back
 
@@ -759,6 +774,8 @@ def _persist_turn_realtime_and_recall(runtime: Any, persona: Any, state: Any) ->
       書けても位置と文面は同じ。
     - 位置を決める発言は、送った列でまとまりより前にある最後の発言 (台帳の行を
       持つもの)。次のターン以降、まとまりはその発言の直後に出る (§4.3)。
+      位置を決める発言が無い (送った列に記録の発言が一件も無い) ターンは
+      残さない (Codex 八巡目)。
     - 出すものが無いターンはまとまり自体が作られないので、何も残さない。
 
     保存の失敗で LLM の経路を止めない (例外は外へ出さない)。
@@ -798,6 +815,19 @@ def _persist_turn_realtime_and_recall(runtime: Any, persona: Any, state: Any) ->
         media = pending.get("media") if isinstance(pending.get("media"), list) else None
         if not content.strip() and not media:
             info["persisted"] = True
+            return
+        if not pending.get("boundary_message_ids"):
+            # 位置を決める発言が無い (送った列に記録の発言が一件も無かった —
+            # ペルソナの最初のパルス・空のスレッドの自律開始) まとまりは残さ
+            # ない (§4.2、Codex 八巡目)。次のターンに出る位置が決まらないので、
+            # OFF のモデルの差し込みと同じく、このターンだけで消える。書き直す
+            # ものも無いので、このパルスでは以後も書かない。
+            info["persisted"] = True
+            LOGGER.debug(
+                "[sea][persist_realtime_and_recall] no recorded message before this "
+                "turn's block; not keeping it (persona=%s pulse=%s)",
+                getattr(persona, "persona_id", None), state.get("_pulse_id"),
+            )
             return
         if _generation_was_stopped(persona, state):
             # 止められた生成は正常な完了ではない — 保存も書き直しもしない
@@ -1247,6 +1277,7 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
             "tool_calls": [_tc_entry],
         }
         state["_messages"] = messages + [_assistant_msg]
+        _appended_assistant_msg = _assistant_msg
         LOGGER.info("[sea][llm] Appended assistant message with tool_calls (id=%s, tool=%s)",
                    state["_last_tool_call_id"], state.get("_last_tool_name"))
     else:
@@ -1258,6 +1289,7 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
         if _text_thought_sig:
             _text_assistant_msg["thought_signature"] = _text_thought_sig
         state["_messages"] = messages + [_text_assistant_msg]
+        _appended_assistant_msg = _text_assistant_msg
 
     # Append LLM interaction to PulseContext (replaces _intermediate_msgs)
     _pulse_ctx = state.get("_pulse_context")
@@ -1376,6 +1408,10 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
             )
             if not stored_message_id:
                 _memorize_ok = False
+            # 揃えた ON の列では、保存した返事の記録の行 id を送る列のその行
+            # にも持たせる — 後の親の送信で前駆の材料を送る列から作り直す
+            # とき、この返事を飛ばさないため (Codex 八巡目)。
+            _keep_stored_id_in_list(state, _appended_assistant_msg, stored_message_id)
             # NOTE: 旧「メタ判断ターンの scope='discardable' → 'committed'
             # 昇格」は Track 状態遷移 hook 経由だったが、発火元 (v1 メタ判断の
             # Track 操作) の退役に続いて hook そのものも 2026-08-21 に撤去した。
@@ -1445,12 +1481,17 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                 playbook_name=playbook.name,
                 # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
                 thought_signature=state.get("_last_thought_signature"),
+                return_message_id=True,
                 beat_state=state,
             )
             if _important_stored:
                 # memorize 節 (_store_beat_memory) と同じ印 — この Beat の本文は
                 # もう記憶に書かれた。Beat の出口の補填が二重に書かないための鍵。
                 state["_beat_memorized"] = True
+                # memorize 節と同じ (Codex 八巡目)。
+                _keep_stored_id_in_list(
+                    state, _appended_assistant_msg, _important_stored,
+                )
             else:
                 LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
 
@@ -3909,9 +3950,8 @@ async def _run_spell_loop(
             all_spell_lines_normalized = "\n".join(line for _, line in _spell_line_entries)
             assistant_content = (text_before + "\n" + all_spell_lines_normalized
                                  + ("\n" + text_after if text_after else "")).strip()
-            messages.append(
-                _round_message_for_next_call(state, assistant_content)
-            )
+            _round_msg = _round_message_for_next_call(state, assistant_content)
+            messages.append(_round_msg)
 
             # judgment (起動の意思決定) を spell 実行の「前」に SAIMemory へ記録する。
             # run_playbook 等の spell は子ラインを同期実行し、子ラインの各ノードが
@@ -3963,6 +4003,10 @@ async def _run_spell_loop(
                 # 永続 ID を持たないので足さない。
                 if _stored_id:
                     append_presented_message_id(state, _stored_id)
+                    # 揃えた ON の列では、送信のたびに材料を送る列から作り直す
+                    # ので、この周の発言の行にも記録の id を持たせる (Codex
+                    # 八巡目)。OFF の列は上の追記だけ。
+                    _keep_stored_id_in_list(state, _round_msg, _stored_id)
 
             # Execute this round's spells SEQUENTIALLY, in the textual order they
             # were cast. Spells frequently mutate state that is unsafe under

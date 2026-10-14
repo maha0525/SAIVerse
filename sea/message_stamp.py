@@ -181,9 +181,9 @@ def replace_presented_message_ids(
 ) -> None:
     """実際に送る列から作り直した ID 列で、前駆の材料を置き換える。
 
-    使うのは、送る列を組み立て後に記録へ揃える一点
-    (sea/runtime_llm._align_first_send_with_record — リアルタイム情報と自動
-    想起を残すモデルの、ターンの最初の送信。docs/intent/
+    使うのは、ターンの最初の送信を記録に揃えた列 (リアルタイム情報と自動想起を
+    残すモデルの、トップレベルの残すパルス) の送信ごとの一点
+    (sea/runtime_llm._refresh_presented_ids_for_aligned_send。docs/intent/
     persist_realtime_and_recall.md §5)。揃えると、``prepare_context`` の後に
     記録へ書かれた行 (事前スペル・TOOL の結果・MEMORIZE・状況変化の記録) が
     送る列に入るので、組成時点の列のままでは「実際に見ていた最後」ではなく

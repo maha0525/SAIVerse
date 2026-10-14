@@ -963,9 +963,11 @@ class SAIMemoryAdapter:
         (§4.3)。境界は「送った列の最後の発言」で決める: 書く時点で台帳の最後に
         ある行 (判断のパルスの捨てられる記録・別のスレッドの行など、送る列に
         出ない行) を境界にすると、次のターンにその行が列に無いので、残した行が
-        二度と送られなくなる。
+        二度と送られなくなる。台帳に実在する発言が一件も無ければ (境界が
+        決まらなければ) 書かない — 境界の無い行は次のターンに送られないため
+        (§4.2、Codex 八巡目)。
 
-        Returns: 書いた行の id (書けなかったら None)。
+        Returns: 書いた行の id (書けなかった・境界が無くて書かなかったら None)。
         """
         if not self._ready:
             return None
@@ -997,6 +999,19 @@ class SAIMemoryAdapter:
                     if row is not None and row[0] is not None:
                         boundary_created_at, boundary_rowid = int(row[0]), int(row[1])
                         break
+                if boundary_created_at is None or boundary_rowid is None:
+                    # 位置を決める発言が無いまとまりは残さない (§4.2、Codex
+                    # 八巡目)。境界の無い行は次のターンの送る列に出る位置が
+                    # 決まらず、送られない (§4.3) — 残しても誰にも届かない。
+                    # 呼び出し側 (sea/runtime_llm._persist_turn_realtime_and_recall)
+                    # は発言の id が一件も無いまとまりをここへ渡さないので、
+                    # ここに来るのは id が記録に一件も無い異常なときだけ。
+                    LOGGER.warning(
+                        "[perception_buffer] none of the boundary messages of this "
+                        "turn's realtime info / auto recall are in the record; not "
+                        "keeping it (persona=%s pulse=%s)", self.persona_id, pulse_id,
+                    )
+                    return None
                 return insert_realtime_and_recall_batch(
                     self.conn,
                     consumed_at=int(time.time()),
