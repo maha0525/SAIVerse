@@ -58,6 +58,10 @@ DEFAULT_TIMEOUT_SECONDS = 1800.0  # 30 min; override via ANTHROPIC_TIMEOUT_SECON
 class AnthropicClient(LLMClient):
     """Native Anthropic Claude client with prompt caching support."""
 
+    #: _prepare_anthropic_messages は content_blocks が空のメッセージ (本文の空な
+    #: tool_calls だけの assistant を含む) を送る前に落とす (LLMClient の説明を参照)。
+    DROPS_EMPTY_CONTENT_MESSAGES = True
+
     def tool_spec_format(self) -> ToolSpecFormat:
         return "openai"
 

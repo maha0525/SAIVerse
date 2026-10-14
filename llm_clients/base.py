@@ -61,6 +61,17 @@ except ImportError:
 class LLMClient:
     """Base class for LLM clients."""
 
+    #: 本文 (``content``) が空で画像も持たないメッセージの dict (例: 本文の空な
+    #: tool_calls だけの assistant) を、送る前に落とすか。落とすクライアントは
+    #: True にする。SEA の ``lg_llm_node`` が読み、落とされる dict を前駆刻印の
+    #: 材料に数えない (sea/message_stamp.sync_presented_message_ids_with_sent)。
+    #: 変換のコードを読んで確かめた値だけを置く (2026-10-14): True は
+    #: AnthropicClient (_prepare_anthropic_messages) と XAIClient
+    #: (_build_xai_messages)。OpenAI 系 (prepare_openai_messages は tool_calls 付き
+    #: を残す)・Gemini (FunctionCall として送る)・OpenAI Codex (function_call に
+    #: 変換する)・Ollama (そのまま送る) は False。
+    DROPS_EMPTY_CONTENT_MESSAGES: bool = False
+
     def __init__(
         self,
         supports_images: bool = False,

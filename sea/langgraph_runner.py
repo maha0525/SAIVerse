@@ -6,13 +6,78 @@ returns None. SEARuntime will detect None and use its lightweight runner.
 
 from __future__ import annotations
 
+import functools
+import inspect
 from typing import Any, Callable, Optional
+
+from sea.message_stamp import drop_stamp_material
 
 try:  # pragma: no cover - optional dependency
     from langgraph.graph import StateGraph, END, START
 except Exception:  # langgraph missing or import error
     StateGraph = None  # type: ignore
     END = START = None  # type: ignore
+
+
+def _may_rewrite_last_with_non_generated_text(node_def: Any) -> bool:
+    """``state["last"]`` を生成以外の本文 (ツールの結果・子 Playbook の出力・
+    エラー文・代入した値) に書き換えうる種類のノードか。
+
+    ``NodeType.TOOL`` / ``TOOL_CALL`` / ``EXEC`` / ``SUBPLAY`` と、
+    ``assignments`` に ``"last"`` キーを持つ ``SET``。``LLM`` / ``MEMORIZE`` /
+    ``SPEAK`` / ``THINK`` / ``SAY`` / ``PASS`` / ``STELIS_START`` /
+    ``STELIS_END`` / ``"last"`` を代入しない ``SET`` は対象外。
+    """
+    from sea.playbook_models import NodeType
+
+    node_type = getattr(node_def, "type", None)
+    if node_type in (NodeType.TOOL, NodeType.TOOL_CALL, NodeType.EXEC, NodeType.SUBPLAY):
+        return True
+    if node_type == NodeType.SET:
+        assignments = getattr(node_def, "assignments", None)
+        return isinstance(assignments, dict) and "last" in assignments
+    return False
+
+
+def _drop_stamp_material_after(node_fn: Callable[[dict], Any]) -> Callable[[dict], Any]:
+    """ノード関数を包み、終わった後に ``drop_stamp_material`` を呼ぶ (sea/message_stamp.py)。
+
+    正常終了・早期 return・例外のどれでも呼ぶ (例外は ``finally`` で消してから
+    そのまま投げ直す)。LangGraph の ``StateGraph(dict)`` は state の dict を
+    そのままノードへ渡し、ノードが返した dict が次のノードへ渡る。SAIVerse の
+    ノードは受け取った dict を書き換えて同じ dict を返すが、別の dict を返す
+    ノードでも次のノードが見るのは返した方なので、両方から消す。
+
+    async のノード関数 (例: ``lg_subplay_node`` の ``async def node``) は async の
+    関数で、同期のノード関数は同期の関数で包む — LangGraph はノード関数が
+    コルーチン関数かどうかで呼び方を決めるので、包んでも変えない。
+    """
+    if inspect.iscoroutinefunction(node_fn):
+        @functools.wraps(node_fn)
+        async def async_wrapped(state: dict) -> Any:
+            result = None
+            try:
+                result = await node_fn(state)
+                return result
+            finally:
+                drop_stamp_material(state)
+                if isinstance(result, dict) and result is not state:
+                    drop_stamp_material(result)
+
+        return async_wrapped
+
+    @functools.wraps(node_fn)
+    def sync_wrapped(state: dict) -> Any:
+        result = None
+        try:
+            result = node_fn(state)
+            return result
+        finally:
+            drop_stamp_material(state)
+            if isinstance(result, dict) and result is not state:
+                drop_stamp_material(result)
+
+    return sync_wrapped
 
 
 def compile_playbook(
@@ -46,57 +111,66 @@ def compile_playbook(
         graph = StateGraph(dict)
         logger.debug("[langgraph] Compiling playbook '%s' with %d nodes", playbook.name, len(playbook.nodes))
 
+        # 書き込み時の機械刻印 (sea/message_stamp.py): state["last"] を生成以外の
+        # 本文に書き換えうるノードは、終わった後に刻印の材料を落とすよう包んで
+        # 登録する。経路ごとに落とす書き方だと早期 return で落とし忘れるので、
+        # ノードを登録するこの一か所で包む。
+        def _add_node(node_def: Any, node_fn: Callable[[dict], Any]) -> None:
+            if _may_rewrite_last_with_non_generated_text(node_def):
+                node_fn = _drop_stamp_material_after(node_fn)
+            graph.add_node(node_def.id, node_fn)
+
         for node_def in playbook.nodes:
             logger.debug("[langgraph] Adding node '%s' (type=%s) to playbook '%s'",
                         node_def.id, node_def.type, playbook.name)
 
             if node_def.type == NodeType.EXEC and exec_node_factory is not None:
-                graph.add_node(node_def.id, exec_node_factory(node_def))
+                _add_node(node_def, exec_node_factory(node_def))
             elif node_def.type == NodeType.EXEC and exec_node_factory is None:
                 logger.error("[langgraph] Cannot add EXEC node '%s': exec_node_factory is None", node_def.id)
                 return None
             elif node_def.type == NodeType.LLM:
-                graph.add_node(node_def.id, llm_node_factory(node_def))
+                _add_node(node_def, llm_node_factory(node_def))
             elif node_def.type == NodeType.TOOL:
-                graph.add_node(node_def.id, tool_node_factory(node_def))
+                _add_node(node_def, tool_node_factory(node_def))
             elif node_def.type == NodeType.TOOL_CALL and tool_call_node_factory is not None:
-                graph.add_node(node_def.id, tool_call_node_factory(node_def))
+                _add_node(node_def, tool_call_node_factory(node_def))
             elif node_def.type == NodeType.TOOL_CALL and tool_call_node_factory is None:
                 logger.error("[langgraph] Cannot add TOOL_CALL node '%s': tool_call_node_factory is None", node_def.id)
                 return None
             elif node_def.type == NodeType.SPEAK:
-                graph.add_node(node_def.id, speak_node)
+                _add_node(node_def, speak_node)
             elif node_def.type == NodeType.SAY and say_node_factory is not None:
-                graph.add_node(node_def.id, say_node_factory(node_def))
+                _add_node(node_def, say_node_factory(node_def))
             elif node_def.type == NodeType.SAY and say_node_factory is None:
                 logger.error("[langgraph] Cannot add SAY node '%s': say_node_factory is None", node_def.id)
                 return None
             elif node_def.type == NodeType.THINK:
-                graph.add_node(node_def.id, think_node)
+                _add_node(node_def, think_node)
             elif node_def.type == NodeType.MEMORY and memorize_node_factory is not None:
-                graph.add_node(node_def.id, memorize_node_factory(node_def))
+                _add_node(node_def, memorize_node_factory(node_def))
             elif node_def.type == NodeType.MEMORY and memorize_node_factory is None:
                 logger.error("[langgraph] Cannot add MEMORY node '%s': memorize_node_factory is None", node_def.id)
                 return None
             elif node_def.type == NodeType.SUBPLAY and subplay_node_factory is not None:
-                graph.add_node(node_def.id, subplay_node_factory(node_def))
+                _add_node(node_def, subplay_node_factory(node_def))
             elif node_def.type == NodeType.SUBPLAY and subplay_node_factory is None:
                 logger.error("[langgraph] Cannot add SUBPLAY node '%s': subplay_node_factory is None", node_def.id)
                 return None
             elif node_def.type == NodeType.SET and set_node_factory is not None:
-                graph.add_node(node_def.id, set_node_factory(node_def))
+                _add_node(node_def, set_node_factory(node_def))
             elif node_def.type == NodeType.SET and set_node_factory is None:
                 logger.error("[langgraph] Cannot add SET node '%s': set_node_factory is None", node_def.id)
                 return None
             elif node_def.type == NodeType.PASS:
-                graph.add_node(node_def.id, lambda state: state)
+                _add_node(node_def, lambda state: state)
             elif node_def.type == NodeType.STELIS_START and stelis_start_node_factory is not None:
-                graph.add_node(node_def.id, stelis_start_node_factory(node_def))
+                _add_node(node_def, stelis_start_node_factory(node_def))
             elif node_def.type == NodeType.STELIS_START and stelis_start_node_factory is None:
                 logger.error("[langgraph] Cannot add STELIS_START node '%s': stelis_start_node_factory is None", node_def.id)
                 return None
             elif node_def.type == NodeType.STELIS_END and stelis_end_node_factory is not None:
-                graph.add_node(node_def.id, stelis_end_node_factory(node_def))
+                _add_node(node_def, stelis_end_node_factory(node_def))
             elif node_def.type == NodeType.STELIS_END and stelis_end_node_factory is None:
                 logger.error("[langgraph] Cannot add STELIS_END node '%s': stelis_end_node_factory is None", node_def.id)
                 return None

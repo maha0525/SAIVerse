@@ -8,8 +8,6 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from saiverse.logging_config import log_sea_trace
 from sea.message_stamp import (
     attach_stored_id_to_unstored_reply,
-    clear_call_tokens,
-    clear_presented_message_ids,
     stamp_generation_metadata,
     unstored_reply_for_last,
 )
@@ -347,11 +345,11 @@ class RuntimeEngine:
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
                 # 書き込み時の機械刻印 (sea/message_stamp.py): 子は親の state を
-                # そのまま受け取って走るので、子の _prepare_context が子の `_presented_message_ids`で
-                # 親の材料を上書きしている (sea/runtime_runner.py)。途中まで走った
-                # 子の三つ組・前駆を親の次の刻印へ持ち越さない — lg_subplay_node と同じ。
-                clear_call_tokens(state)
-                clear_presented_message_ids(state)
+                # そのまま受け取って走るので、子の _prepare_context が子の
+                # `_presented_message_ids` で親の材料を上書きしている
+                # (sea/runtime_runner.py)。途中まで走った子の三つ組・前駆を親の
+                # 次の刻印へ持ち越さない — compile_playbook がこのノードの後で消す
+                # (sea/message_stamp.drop_stamp_material)。
                 # End subagent thread on error (no chronicle)
                 if execution == "subagent" and subagent_thread_id:
                     self.runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False, pulse_context=state.get("_pulse_context"))
@@ -393,15 +391,15 @@ class RuntimeEngine:
                     outputs.append(error_msg)
                 return state
 
-            # 書き込み時の機械刻印: lg_subplay_node と同じ理由で三つ組と前駆を対で
-            # 落とす。この後 state["last"] に入るのは子の本文 (親の SPEAK /
-            # MEMORIZE が刻むと、他人のコールの数字・子の `_presented_message_ids`が載る)。しかも子は
-            # 親の state を受け取って走るので、親の材料は子の `_presented_message_ids`で上書き
-            # 済み — 残すと親の次の返事の前駆が、親の見ていない子の行を指しうる。
-            # 親が次に自前の LLM ノードで送るときに、送る `messages`から作り直される
+            # 書き込み時の機械刻印: この後 state["last"] に入るのは子の本文 (親の
+            # SPEAK / MEMORIZE が刻むと、他人のコールの数字・子の
+            # `_presented_message_ids` が載る)。しかも子は親の state を受け取って
+            # 走るので、親の材料は子の `_presented_message_ids` で上書き済み —
+            # 残すと親の次の返事の前駆が、親の見ていない子の行を指しうる。
+            # compile_playbook がこのノードの後で (エラー文で早期 return した回も)
+            # 材料を消す (sea/message_stamp.drop_stamp_material)。親が次に自前の
+            # LLM ノードで送るときに、送る `messages` から作り直される
             # (sea/message_stamp.sync_presented_message_ids_with_sent)。
-            clear_call_tokens(state)
-            clear_presented_message_ids(state)
 
             # End subagent thread on success
             if execution == "subagent" and subagent_thread_id:
@@ -499,7 +497,8 @@ class RuntimeEngine:
                 return_message_id=stores_last_as_is,
             )
             if stored and stores_last_as_is:
-                # state["last"] を memo_text で書き換える前に載せる (同一性で確かめるため)。
+                # state["last"] を memo_text で書き換える前に載せる
+                # (unstored_reply_for_last は state["last"] と返事の本文を値で比べる)。
                 attach_stored_id_to_unstored_reply(state, stored)
             if not stored:
                 LOGGER.warning("Failed to store memory in MEMORIZE node %s", node_id)
@@ -575,7 +574,8 @@ class RuntimeEngine:
         building_msg = self.emitters["speak"](persona, eff_bid, text, pulse_id=pulse_id, extra_metadata=speak_metadata if speak_metadata else None, event_callback=event_callback)
         # 前の LLM ノードが記憶に保存しなかった返事がこの state["last"] なら、
         # emit_speak が記憶に書いた行の id (SPEAK_MEMORY_MESSAGE_ID_KEY) をその返事の
-        # dict に載せる (sea/message_stamp.py)。
+        # dict に載せる (sea/message_stamp.py)。建物への保存が失敗した回も、記憶に
+        # 書けていれば emit_speak は message_id の無い dict でこの id を返す。
         if isinstance(building_msg, dict):
             attach_stored_id_to_unstored_reply(
                 state, building_msg.get(SPEAK_MEMORY_MESSAGE_ID_KEY),

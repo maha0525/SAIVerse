@@ -184,6 +184,8 @@ class LlamaCachedClient(LLMClient):
     supports_images = _delegated_attribute("supports_images", False)
     supports_audio = _delegated_attribute("supports_audio", False)
     supports_video = _delegated_attribute("supports_video", False)
+    #: 送る前に本文の空な dict を落とすかは、変換を持つ inner が決める。
+    DROPS_EMPTY_CONTENT_MESSAGES = _delegated_attribute("DROPS_EMPTY_CONTENT_MESSAGES", False)
 
     # ── バックエンドの起動・貸出札 ──────────────────────────────────────
     def ensure_backend(self) -> None:

@@ -27,8 +27,9 @@
     ``state["last"]`` から書いた場合も、そのノードが返事の dict に行の id を載せる
     (:func:`attach_stored_id_to_unstored_reply`) ので、同じように足される。
 
-    材料が落ちた後 (子 Playbook の中継で :func:`clear_presented_message_ids`
-    が落とした後) に親が自前の LLM ノードで送るときは、送る直前に
+    材料が落ちた後 (``state["last"]`` を生成以外の本文に書き換えうるノードの後で
+    ``compile_playbook`` が :func:`drop_stamp_material` で落とした後) に親が
+    自前の LLM ノードで送るときは、送る直前に
     :func:`sync_presented_message_ids_with_sent` が**これから送る `messages`**から
     材料を作り直す。送る `messages`で記録の行 id を持つのは履歴の行と、同じ Pulse の
     中で記録へ書いた自分の返事・スペルの周の発言 (sea/runtime_llm.py が
@@ -53,13 +54,20 @@
 指す call-local な器なので、1 ノードの中で作り手が変わる経路では材料を動かす
 責任が呼び出し元にある。三つ組は使用量を消費するたびに
 :func:`record_call_tokens` で更新し (継続生成や spell の再呼び出しも例外なく)、
-帰属が確定できなくなったら :func:`clear_call_tokens` で落として刻印なしへ倒す
-— 子 Playbook の出力を親の ``state["last"]`` に中継する ``lg_subplay_node``
-がその場面で、子のコールの三つ組は子 state に閉じていて親へは戻らない。
-前駆の材料も同じ場面で対にして落とす (:func:`clear_presented_message_ids`)。
+帰属が確定できなくなったら落として刻印なしへ倒す。
+
+``state["last"]`` を生成以外の本文 (ツールの結果、子 Playbook の出力、エラー文)
+に書き換えうるノード — ``NodeType.TOOL`` / ``TOOL_CALL`` / ``EXEC`` /
+``SUBPLAY`` と、``assignments`` に ``"last"`` を持つ ``SET`` — の後では、
+``compile_playbook`` (sea/langgraph_runner.py) がノード関数を包み、ノードが
+どう終わっても (正常終了・早期 return・例外) :func:`drop_stamp_material` で
+``_last_call_tokens`` / ``_presented_message_ids`` / ``_unstored_reply`` を
+落とす。経路ごとに落とす書き方をしないのは、早期 return のエラー経路で落とし
+忘れが起きたため (Codex 三巡目 4)。
+
 落とした後に親が自前の LLM ノードを回せば、三つ組は ``record_call_tokens``
 が、前駆は :func:`sync_presented_message_ids_with_sent` が載せ直すので、
-刻印が消えるのは「作り手が確定できない区間」(中継された本文) だけ。
+刻印が消えるのは「作り手が確定できない区間」(書き換えた後の本文) だけ。
 """
 
 from __future__ import annotations
@@ -73,8 +81,8 @@ TOKENS_META_KEY = "llm_tokens"
 # ---- 材料を運ぶ state のキー (call-local。_prefix_anchor_id と同じ器) ----
 PRESENTED_IDS_STATE_KEY = "_presented_message_ids"
 CALL_TOKENS_STATE_KEY = "_last_call_tokens"
-#: LLM ノードが ``state["_messages"]`` に足したが ``"id"`` を載せなかった返事の dict と、
-#: その時 ``state["last"]`` に入れたオブジェクト。:func:`note_unstored_reply` を参照。
+#: LLM ノードが ``state["_messages"]`` に足したが ``"id"`` を載せなかった返事の dict。
+#: :func:`note_unstored_reply` を参照。
 UNSTORED_REPLY_STATE_KEY = "_unstored_reply"
 
 # ---- 三つ組の欄名 ----
@@ -122,12 +130,12 @@ def clear_call_tokens(state: Optional[Dict[str, Any]]) -> None:
     """三つ組の材料を落とす (この state からは帰属を確定できない、の印)。
 
     使うのは二場面。① 使用量を返さなかったコールの直後
-    (:func:`record_call_tokens` 経由)。② **本文の作り手が変わった**
-    直後 — 子 Playbook の出力を親の ``state["last"]`` に中継する
-    ``lg_subplay_node`` がこれにあたる。中継された本文を書いたのは子の
-    LLM コールで、親 state に残っている三つ組は親の直前コールのもの。
-    残したまま親の SPEAK / MEMORIZE が刻むと、他人のコールの数字が
-    その本文の事実として記録される。
+    (:func:`record_call_tokens` 経由)。② ``state["last"]`` を生成以外の本文に
+    書き換えうるノードの後 — ``compile_playbook`` が :func:`drop_stamp_material`
+    経由で呼ぶ。例えば子 Playbook の出力を親の ``state["last"]`` に中継する
+    ``lg_subplay_node`` の後で、中継された本文を書いたのは子の LLM コール、
+    親 state に残っている三つ組は親の直前コールのもの。残したまま親の SPEAK /
+    MEMORIZE が刻むと、他人のコールの数字がその本文の事実として記録される。
 
     落とした後の親が自前の LLM ノードを回せば ``record_call_tokens`` が
     改めて三つ組を載せるので、消えるのは「作り手が確定できない区間」だけ。
@@ -140,11 +148,12 @@ def clear_call_tokens(state: Optional[Dict[str, Any]]) -> None:
 def clear_presented_message_ids(state: Optional[Dict[str, Any]]) -> None:
     """前駆の材料を落とす (この state からは帰属を確定できない、の印)。
 
-    :func:`clear_call_tokens` と**必ず対で呼ぶ**。理由が同じだから — 本文の
-    作り手が変わった区間では、三つ組が他人のコールのものになるのと同じ理屈で、
-    前駆も他人が`_presented_message_ids`になる。
+    :func:`clear_call_tokens` と**必ず対で呼ぶ** (対にしたものが
+    :func:`drop_stamp_material` で、``compile_playbook`` が呼ぶ)。理由が同じ
+    だから — 本文の作り手が変わった区間では、三つ組が他人のコールのものになる
+    のと同じ理屈で、前駆も他人の `_presented_message_ids` になる。
 
-    具体的には子 Playbook の中継 (``lg_subplay_node``)。子は自前の
+    例えば子 Playbook の中継 (``lg_subplay_node``)。子は自前の
     ``_prepare_context`` で別の履歴を見て本文を書くが、親 state に残っている
     のは**親が見せた列**の末尾。落とさずに親の SPEAK / MEMORIZE が刻むと、
     その本文を書いた LLM が**一度も見ていないメッセージ**を前駆として記録する
@@ -164,6 +173,28 @@ def clear_presented_message_ids(state: Optional[Dict[str, Any]]) -> None:
     if not isinstance(state, dict):
         return
     state.pop(PRESENTED_IDS_STATE_KEY, None)
+
+
+def drop_stamp_material(state: Optional[Dict[str, Any]]) -> None:
+    """``_last_call_tokens`` / ``_presented_message_ids`` / ``_unstored_reply`` を落とす。
+
+    呼ぶのは ``compile_playbook`` (sea/langgraph_runner.py) だけ。
+    ``state["last"]`` を生成以外の本文に書き換えうるノード (``NodeType.TOOL`` /
+    ``TOOL_CALL`` / ``EXEC`` / ``SUBPLAY`` と、``assignments`` に ``"last"`` を
+    持つ ``SET``) の関数を包み、ノードが終わった後 (正常終了・早期 return・例外の
+    どれでも) に呼ぶ。
+
+    - ``_last_call_tokens`` / ``_presented_message_ids``: 後ろの MEMORIZE /
+      SPEAK / THINK が書き換えた後の本文に、直前の LLM コールの三つ組と前駆を
+      刻まないため (:func:`clear_call_tokens` / :func:`clear_presented_message_ids`)。
+    - ``_unstored_reply``: 後ろのノードが書き換えた後の本文を保存したとき、その
+      行の id を前の LLM ノードの返事の dict に載せないため
+      (:func:`unstored_reply_for_last`)。書き換えた後の本文が返事と同じ文字列
+      でも、それは返事の本文ではない。
+    """
+    clear_call_tokens(state)
+    clear_presented_message_ids(state)
+    clear_unstored_reply(state)
 
 
 def record_call_tokens(state: Optional[Dict[str, Any]], usage: Any) -> None:
@@ -229,8 +260,25 @@ def append_presented_message_id(
     state[PRESENTED_IDS_STATE_KEY] = [*presented, str(message_id)]
 
 
+def _dropped_as_empty_before_sending(message: Dict[str, Any]) -> bool:
+    """本文 (``content``) が空で、画像も持たない dict か。
+
+    ``drops_empty_messages`` のクライアント (Anthropic / xAI) は、こういう dict
+    を送る前に落とす。本文の判定は Anthropic の変換 (``content_to_text``) と、
+    画像の判定はその変換が添付を集める ``iter_image_media`` と同じ関数を使う。
+    """
+    from llm_clients.utils import content_to_text
+    from saiverse.media_utils import iter_image_media
+
+    if content_to_text(message.get("content")):
+        return False
+    return not iter_image_media(message.get("metadata"))
+
+
 def sync_presented_message_ids_with_sent(
     state: Optional[Dict[str, Any]], messages: Optional[Sequence[Dict[str, Any]]],
+    *,
+    drops_empty_messages: bool = False,
 ) -> None:
     """これから送る `messages`に合わせて `_presented_message_ids`を整える (作り直す / 末尾を伸ばす)。
 
@@ -239,10 +287,10 @@ def sync_presented_message_ids_with_sent(
     (:func:`sea.runtime_context.sent_message_ids`) を材料に使う。
 
     - **材料が無い** (キー不在・空・list でない) とき: 送る `messages`の記録の行 id を
-      並び順に材料にする。作り手が変わった区間の後で
-      :func:`clear_presented_message_ids` が落とした回 — 子 Playbook の中継の
-      後に親が自前の LLM ノードで生成する回がこれにあたる。三つ組を
-      ``record_call_tokens`` が載せ直すのと対になる口。
+      並び順に材料にする。``state["last"]`` を生成以外の本文に書き換えうる
+      ノードの後で ``compile_playbook`` が :func:`drop_stamp_material` で落とした
+      回 — 子 Playbook の中継の後に親が自前の LLM ノードで生成する回がこれに
+      あたる。三つ組を ``record_call_tokens`` が載せ直すのと対になる口。
     - **材料がある** とき: 書き換えず、送る `messages`で材料の末尾より**後ろ**にある
       記録の行だけを末尾に足す。同じ Playbook の前の LLM ノードが記録へ書いた
       返事 (sea/runtime_llm.py が送る `messages`のその行に記録の id を載せる) がこれで、
@@ -253,24 +301,26 @@ def sync_presented_message_ids_with_sent(
     - **材料の末尾が送る `messages`に無い** とき: 材料はこの生成が見るものを表して
       いないので、送る `messages`から作り直す (残すと見ていない行を前駆に刻む)。
 
-    記録の行 id を持たせるのは、送る `messages`でその本文が実際にモデルへ届く dict
-    だけ (sea/runtime_llm._finalize_beat — 本文の空な tool_calls だけの返事
-    には載せない。Anthropic などは本文の空な行を送る前に落とすので、載せると
-    モデルが見ていない行を前駆にする)。
+    **本文が空の tool_calls だけの返事**: ``_finalize_beat`` (sea/runtime_llm.py)
+    は、この返事にも記録の行 id があれば ``"id"`` を載せる。この dict をモデルへ
+    届けるかどうかは送る先のクライアントの変換で決まる — OpenAI 系
+    (``prepare_openai_messages``)・Gemini (FunctionCall)・OpenAI Codex・Ollama は
+    送り、Anthropic (``_prepare_anthropic_messages``) と xAI
+    (``_build_xai_messages``) は本文の空な dict を送る前に落とす。
+    ``drops_empty_messages`` が真 (``lg_llm_node`` がクライアントのクラス属性
+    ``DROPS_EMPTY_CONTENT_MESSAGES`` から渡す) なら、本文が空で画像も持たない
+    dict は ``"id"`` があっても数えない。数えると、モデルが見ていない行を前駆に刻む。
 
     LLM ノードが記録へ書かなかった返事を、後ろの MEMORIZE / SPEAK / THINK ノードが
     ``state["last"]`` から記録へ書いた場合は、そのノードが書いた行の id を返事の
     dict に ``"id"`` として載せる (:func:`note_unstored_reply` /
-    :func:`attach_stored_id_to_unstored_reply`)。本文の一致では結び付けず、
-    ``state["last"]`` が ``_finalize_beat`` の入れたオブジェクトのまま (``is``) の
-    ときだけ載せる — 間に ``state["last"]`` を書き換えたノード (TOOL / EXEC /
-    SUBPLAY など) や、``{last}`` 以外の文字を含む ``action`` の MEMORIZE では載せず、
-    次の生成の前駆はそれより前の記録の行を指す (見ていない行ではなく、手前の行)。
-
-    既知の限界: 本文が空の tool_calls だけの返事には ``"id"`` を載せないので、
-    次の生成の前駆はその返事より前の記録の行を指す。ただし今読み込まれている
-    Playbook (``builtin_data/playbooks/public``) には ``available_tools`` を使う
-    LLM ノードが一つも無く、この返事は今の SAIVerse では起きない (2026-10-14 調査)。
+    :func:`attach_stored_id_to_unstored_reply`)。載せるのは ``_unstored_reply`` が
+    残っていて (間に ``state["last"]`` を書き換えうるノードが走っていない —
+    走ると ``compile_playbook`` が :func:`drop_stamp_material` で消す)、
+    ``state["last"]`` が返事の dict の ``content`` と値で等しいときだけ。
+    ``{last}`` 以外の文字を含む ``action`` の MEMORIZE の後も、``state["last"]``
+    がその文に変わるので載らない。載らないとき、次の生成の前駆はそれより前の
+    記録の行を指す (見ていない行ではなく、手前の行)。
 
     送る `messages`に記録の行が一つも無ければ何もしない (提示ゼロの生成は刻印なしの
     まま)。
@@ -279,6 +329,11 @@ def sync_presented_message_ids_with_sent(
         return
     from sea.runtime_context import sent_message_ids
 
+    if drops_empty_messages:
+        messages = [
+            m for m in messages
+            if not (isinstance(m, dict) and m.get("id") and _dropped_as_empty_before_sending(m))
+        ]
     sent = sent_message_ids(messages)
     if not sent:
         return
@@ -301,31 +356,35 @@ def sync_presented_message_ids_with_sent(
 
 
 def note_unstored_reply(
-    state: Optional[Dict[str, Any]], reply_message: Dict[str, Any], last_value: Any,
+    state: Optional[Dict[str, Any]], reply_message: Dict[str, Any],
 ) -> None:
     """``"id"`` を載せずに ``state["_messages"]`` に足した返事の dict を書いておく。
 
     呼ぶのは ``sea/runtime_llm._finalize_beat`` だけ — その LLM ノードが返事を
-    記憶に保存しなかった (``"id"`` を載せなかった) が、本文は空でないとき。
-    ``reply_message`` は ``state["_messages"]`` に足した dict そのもの、
-    ``last_value`` は同じ時に ``state["last"]`` に入れたオブジェクト。
+    記憶に保存しなかった (``"id"`` を載せなかった) が、本文は空でなく、
+    ``state["last"]`` と同じ文字列のとき。``reply_message`` は
+    ``state["_messages"]`` に足した dict そのもの。
 
     後ろの MEMORIZE / SPEAK / THINK ノードが ``state["last"]`` を記憶に保存したら、
     :func:`attach_stored_id_to_unstored_reply` がこの dict に行の id を載せる。
     載せないと、次の LLM ノードが送る ``messages`` でこの dict が記録の行として
     数えられず (:func:`sync_presented_message_ids_with_sent`)、次の返事の
     ``predecessor_message_id`` が保存された行より前の行になる。
+
+    ``state["last"]`` を生成以外の本文に書き換えうるノードが間に走ったら、
+    ``compile_playbook`` が :func:`drop_stamp_material` でこれを消す。
     """
     if not isinstance(state, dict) or not isinstance(reply_message, dict):
         return
-    state[UNSTORED_REPLY_STATE_KEY] = {"message": reply_message, "last": last_value}
+    state[UNSTORED_REPLY_STATE_KEY] = reply_message
 
 
 def clear_unstored_reply(state: Optional[Dict[str, Any]]) -> None:
     """:func:`note_unstored_reply` で書いたものを消す。
 
-    ``_finalize_beat`` が返事に ``"id"`` を載せたとき・本文が空のときと、
-    ``lg_llm_node`` の入り口 (前のノードの返事を次の返事と取り違えない) で呼ぶ。
+    ``_finalize_beat`` が返事に ``"id"`` を載せたとき・本文が空のとき、
+    ``lg_llm_node`` の入り口 (前のノードの返事を次の返事と取り違えない)、
+    :func:`drop_stamp_material` (``compile_playbook`` が呼ぶ) で呼ぶ。
     """
     if not isinstance(state, dict):
         return
@@ -333,24 +392,26 @@ def clear_unstored_reply(state: Optional[Dict[str, Any]]) -> None:
 
 
 def unstored_reply_for_last(state: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """``state["last"]`` が :func:`note_unstored_reply` の時のオブジェクトのままなら、
+    """``state["last"]`` が :func:`note_unstored_reply` で書いた返事の本文なら、
     その返事の dict を返す。そうでなければ None。
 
-    比べるのは ``is`` (同一) と ``==`` (値)。値の一致だけでは結び付けない —
-    TOOL / EXEC / SUBPLAY などが ``state["last"]`` を書き換えた後に同じ文字列が
-    入っていても、それはその返事の本文ではない。
+    条件は三つ。① ``_unstored_reply`` が残っている — 間に ``state["last"]`` を
+    生成以外の本文に書き換えうるノード (TOOL / TOOL_CALL / EXEC / SUBPLAY /
+    ``"last"`` を代入する SET) が走っていない (走ると ``compile_playbook`` が
+    消す)。② ``state["last"]`` が返事の dict の ``content`` と値で等しい。
+    ③ 返事の dict にまだ ``"id"`` が無い。
+
+    オブジェクトの同一性 (``is``) は使わない。独立に返された同じ短い文字列
+    (例: ``"1"``) は Python では同じオブジェクトになりうるので、同一性は
+    生成元が同じことの証明にならない (Codex 三巡目 1)。
     """
     if not isinstance(state, dict):
         return None
-    entry = state.get(UNSTORED_REPLY_STATE_KEY)
-    if not isinstance(entry, dict):
-        return None
-    reply = entry.get("message")
+    reply = state.get(UNSTORED_REPLY_STATE_KEY)
     if not isinstance(reply, dict) or "id" in reply:
         return None
-    last = state.get("last")
-    expected = entry.get("last")
-    if last is not expected or last != expected:
+    content = reply.get("content")
+    if not isinstance(content, str) or state.get("last") != content:
         return None
     return reply
 

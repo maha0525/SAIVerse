@@ -1108,13 +1108,15 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     # 役割 assistant で書き直す — 例: schedule_management の record_add_params)
     # の前駆が、その本文を生んだ生成自身の行を指してしまう。
     #
-    # 本文が空の返事 (tool_calls だけ) には載せない。記録には JSON 本文で
-    # 書かれているが、送る `messages`の dict は本文が空で、Anthropic などは本文の空な
-    # 行を送る前に落とす (llm_clients/anthropic_request_builder.py) — 載せると
-    # 次の生成の前駆が、モデルに届いていない行を指す。
+    # 本文が空の返事 (tool_calls だけ) にも載せる。記録には JSON 本文で書かれて
+    # いて、送る `messages` の dict は本文が空。この dict をモデルへ届けるかは
+    # 送る先のクライアントで決まる — OpenAI 系・Gemini は送り、Anthropic・xAI は
+    # 本文の空な dict を送る前に落とす。落とすクライアントでは、次の LLM ノードの
+    # sync_presented_message_ids_with_sent (drops_empty_messages) がこの dict を
+    # 数えない (sea/message_stamp.py)。
     #
     # この LLM ノードが返事を記憶に保存しなかった (`_beat_memorized` が立っていない。
-    # 本文は空でない) ときは、返事の dict と state["last"] に入れたオブジェクトを書いておく
+    # 本文は空でない) ときは、返事の dict を書いておく
     # (sea/message_stamp.note_unstored_reply)。後ろの MEMORIZE ({last} だけ) /
     # SPEAK / THINK が state["last"] を記憶に保存したら、その行の id をこの dict に
     # 載せる。dict の本文と state["last"] が同じ文字列のときに限る (構造化出力の
@@ -1122,7 +1124,11 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     _beat_memory_id = state.pop(BEAT_MEMORY_ID_KEY, None)
     _reply_content = _beat_reply_msg.get("content")
     _reply_has_body = isinstance(_reply_content, str) and bool(_reply_content.strip())
-    if isinstance(_beat_memory_id, str) and _beat_memory_id and _reply_has_body:
+    _reply_has_tool_calls = bool(_beat_reply_msg.get("tool_calls"))
+    if (
+        isinstance(_beat_memory_id, str) and _beat_memory_id
+        and (_reply_has_body or _reply_has_tool_calls)
+    ):
         _beat_reply_msg["id"] = _beat_memory_id
         clear_unstored_reply(state)
     elif (
@@ -1130,7 +1136,7 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
         and not state.get("_beat_memorized")
         and isinstance(text, str) and _reply_content == text
     ):
-        note_unstored_reply(state, _beat_reply_msg, state["last"])
+        note_unstored_reply(state, _beat_reply_msg)
     else:
         clear_unstored_reply(state)
 
@@ -5323,10 +5329,18 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             # ストリーミング・同期、構造化出力は同期の中) はどれもこの
             # ``messages`` をそのまま最初の送信に使い、スペルループもこの列に周の
             # 発言を積み足していく (周の行は append_presented_message_id で列を
-            # 伸ばす)。材料が無い (子 Playbook の中継が落とした後) なら送る `messages`から
+            # 伸ばす)。材料が無い (state["last"] を書き換えうるノードの後で
+            # compile_playbook が落とした後) なら送る `messages`から
             # 作り直し、材料がある回は中身を変えずに、送る `messages`で末尾より後ろにある
             # 記録の行 (同じ Playbook の前の LLM ノードが書いた返事) だけを足す。
-            sync_presented_message_ids_with_sent(state, messages)
+            # 本文の空な dict を送る前に落とすクライアント (クラス属性
+            # DROPS_EMPTY_CONTENT_MESSAGES) では、その dict を数えない。
+            sync_presented_message_ids_with_sent(
+                state, messages,
+                drops_empty_messages=(
+                    getattr(llm_client, "DROPS_EMPTY_CONTENT_MESSAGES", False) is True
+                ),
+            )
 
             # Check if tools are available for this node
             available_tools = getattr(node_def, "available_tools", None)

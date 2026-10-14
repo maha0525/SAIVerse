@@ -23,6 +23,8 @@ SPEAK_PERSISTED_EVENT_TYPE = "speak_persisted"
 
 #: ``emit_speak`` の戻り値 (建物メッセージの dict) に載せる、同じ発言を記憶
 #: (SAIMemory) に書いた行の id のキー。建物メッセージの ``message_id`` とは別の行。
+#: 建物への保存が失敗した回も、記憶に書けていればこのキーだけの dict を返す
+#: (``message_id`` の有無が「建物に保存されたか」)。
 #: SPEAK ノード (sea/runtime_engine.lg_speak_node) が、前の LLM ノードの返事の dict
 #: に ``"id"`` として載せるために読む (sea/message_stamp.attach_stored_id_to_unstored_reply)。
 SPEAK_MEMORY_MESSAGE_ID_KEY = "memory_message_id"
@@ -386,6 +388,12 @@ class RuntimeEmitters:
         if isinstance(building_msg, dict) and memory_message_id:
             # 写しに載せる — insert_building_message が返した dict そのものは変えない。
             return {**building_msg, SPEAK_MEMORY_MESSAGE_ID_KEY: memory_message_id}
+        if memory_message_id:
+            # 記憶には書けたが、建物への保存が例外になった / None を返した回。
+            # 記憶の行の id だけを返す (``message_id`` は無い = 建物に保存されて
+            # いない)。保存完了イベント (notify_speak_persisted) は上で
+            # building_msg (None) から判定済みなので、この戻り値は影響しない。
+            return {SPEAK_MEMORY_MESSAGE_ID_KEY: memory_message_id}
         return building_msg
 
     def emit_say(

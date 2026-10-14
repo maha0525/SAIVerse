@@ -6,7 +6,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 from llm_clients.exceptions import LLMError
 from saiverse.logging_config import log_sea_trace
-from sea.message_stamp import clear_call_tokens, clear_presented_message_ids
 from sea.runtime_state import effective_auto_mode, set_playbook_var
 from sea.runtime_utils import event_building_id
 
@@ -240,9 +239,8 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
                 runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False, pulse_context=state.get("_pulse_context"))
             state["last"] = f"Sub-playbook error: {exc}"
             # 途中まで走った子が LLM を呼んでいる可能性がある上、この本文は
-            # そもそも生成ではなく機構の文字列。親の三つ組も前駆も載せない。
-            clear_call_tokens(state)
-            clear_presented_message_ids(state)
+            # そもそも生成ではなく機構の文字列。親の三つ組も前駆も載せない —
+            # 刻印の材料は compile_playbook が消す (sea/message_stamp.drop_stamp_material)。
             return state
         finally:
             # サブライン実行で立てた _force_lightweight_model フラグを親スコープに残さない
@@ -262,7 +260,11 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         # に入ったのは **子 Playbook の LLM が書いた本文**。子のコールの三つ組は
         # 子 state に閉じていて親へは戻らないので、親 state には親の直前コールの
         # 三つ組が残ったままになる。この後で親の SPEAK / MEMORIZE がこの本文を
-        # 刻むと、他人のコールの数字がその本文の事実として記録される。
+        # 刻むと、他人のコールの数字がその本文の事実として記録される。そのため
+        # このノードが終わった後に、compile_playbook が _last_call_tokens /
+        # _presented_message_ids / _unstored_reply を消す
+        # (sea/message_stamp.drop_stamp_material。このノードの他の終わり方 —
+        # 名前が無い・見つからない・例外 — でも同じく消す)。
         #
         # 子の三つ組を親へ引き継ぐ案 (帰属を正しくする) は採らなかった:
         # last_text は子の出力列の末尾 (= 任意のノードの出力) で、子の最後の
@@ -280,8 +282,6 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         # (sea/message_stamp.sync_presented_message_ids_with_sent) — 三つ組を
         # _record_llm_usage が載せ直すのと対で、刻印が消えるのは中継された本文
         # だけ。
-        clear_call_tokens(state)
-        clear_presented_message_ids(state)
         if getattr(node_def, "propagate_output", False) and sub_outputs and outputs is not None:
             outputs.extend(sub_outputs)
 

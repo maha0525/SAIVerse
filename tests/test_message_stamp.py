@@ -164,13 +164,14 @@ class TestClearedInPairs:
 
     片方だけ落とすと「この本文を書いた LLM が一度も見ていないメッセージ」を
     前駆として刻む = 欠落ではなく捏造になる。子 Playbook の中継
-    (lg_subplay_node) がその区間で、両方を落とすことで刻印なしへ倒れる。
+    (lg_subplay_node) がその区間で、`compile_playbook` が
+    `drop_stamp_material` で両方を落とすことで刻印なしへ倒れる。
     """
 
     def test_nothing_is_stamped_after_both_are_cleared(self):
         state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["parent-tail"]}
         record_call_tokens(state, _usage())
-        # 中継の場で対にして落とす (lg_subplay_node と同じ順)
+        # drop_stamp_material と同じく対にして落とす
         clear_call_tokens(state)
         clear_presented_message_ids(state)
 
@@ -627,13 +628,13 @@ class TestSubPlaybookRelayIsNotStamped:
     のに、``lg_subplay_node`` は子の出力本文を親の ``state["last"]`` に置く。
     親の SPEAK / MEMORIZE がそこから刻むと、子の LLM が書いた本文に親の直前
     コールの三つ組が乗る。帰属が確定できないので刻印なしに倒す (方式 b)。
+
+    落とすのは `compile_playbook` が SUBPLAY のノード関数を包んだ処理
+    (`sea/message_stamp.drop_stamp_material`) なので、`compile_playbook` から走らせる。
     """
 
     def _parent_after_subplay(self):
-        import asyncio
-
         from sea.runtime import SEARuntime
-        from sea.runtime_nodes import lg_subplay_node
 
         manager = SimpleNamespace(building_histories={"b1": []}, occupants={})
         runtime = SEARuntime(manager)
@@ -647,11 +648,6 @@ class TestSubPlaybookRelayIsNotStamped:
         runtime._run_playbook = Mock(return_value=["子が書いた本文。"])
 
         persona = SimpleNamespace(persona_id="p1", persona_name="P")
-        node_def = SimpleNamespace(
-            id="call_sub", playbook="child_pb", action=None, line="main",
-            execution="inline", isolate_pulse_context=False, args=None,
-            propagate_output=False, subagent_chronicle=False,
-        )
         state: Dict[str, Any] = {
             "_messages": [],
             "_pulse_context": None,
@@ -662,11 +658,9 @@ class TestSubPlaybookRelayIsNotStamped:
         # 親の直前 LLM コールの三つ組 (この本文の出どころではない)
         record_call_tokens(state, _usage())
 
-        node_fn = lg_subplay_node(
-            runtime, node_def, persona, "b1",
-            SimpleNamespace(name="parent_pb"), False, [], None,
-        )
-        asyncio.run(node_fn(state))
+        _run_compiled(runtime, persona, [
+            {"id": "call_sub", "type": "subplay", "playbook": "child_pb", "next": None},
+        ], state)
         return runtime, persona, state
 
     def test_relay_drops_the_parents_triple(self):
@@ -729,8 +723,8 @@ class TestSubPlaybookRelayIsNotStamped:
 # ---------------------------------------------------------------------------
 # 5. 子 Playbook の後に、親が自前の LLM ノードで生成した返事の前駆
 #
-# 子 Playbook の中継 (lg_subplay_node) は三つ組と前駆の材料を対で落とす (上の
-# TestSubPlaybookRelayIsNotStamped)。三つ組は親の次の LLM コールで
+# 子 Playbook の中継 (lg_subplay_node) の後で、compile_playbook が三つ組と前駆の
+# 材料を対で落とす (上の TestSubPlaybookRelayIsNotStamped)。三つ組は親の次の LLM コールで
 # _record_llm_usage が載せ直すが、前駆の材料には載せ直す口が無く、子の後に
 # 親が自前の LLM ノードで生成して保存した返事に前駆が付かなかった。
 #
@@ -871,11 +865,9 @@ def _run_llm_node(runtime, persona, state, node_id: str) -> None:
 
 
 def _run_subplay(runtime, persona, state, *, child_row_text: str) -> None:
-    """本物の lg_subplay_node。子 (メインライン) は Mock だが、本物の子と同じく
-    親 state へ自分の提示列を書き、自分の返事を記録に残す。"""
-    import asyncio
-
-    from sea.runtime_nodes import lg_subplay_node
+    """本物の lg_subplay_node を `compile_playbook` から走らせる (材料を落とすのは
+    `compile_playbook` が包んだ処理)。子 (メインライン) は Mock だが、本物の子と
+    同じく親 state へ自分の `_presented_message_ids` を書き、自分の返事を記録に残す。"""
 
     def _child(sub_pb, p, bid, sub_input, auto_mode, record_history, parent_state,
                event_callback, **kwargs):
@@ -890,16 +882,9 @@ def _run_subplay(runtime, persona, state, *, child_row_text: str) -> None:
         return [child_row_text]
 
     runtime._run_playbook = Mock(side_effect=_child)
-    node_def = SimpleNamespace(
-        id="call_sub", playbook="child_pb", action=None, line="main",
-        execution="inline", isolate_pulse_context=False, args=None,
-        propagate_output=False, subagent_chronicle=False,
-    )
-    node_fn = lg_subplay_node(
-        runtime, node_def, persona, "b1",
-        SimpleNamespace(name="parent_pb"), False, [], None,
-    )
-    asyncio.run(node_fn(state))
+    _run_compiled(runtime, persona, [
+        {"id": "call_sub", "type": "subplay", "playbook": "child_pb", "next": None},
+    ], state)
 
 
 def _base_state(messages, presented) -> Dict[str, Any]:
@@ -978,8 +963,8 @@ class TestPredecessorAfterExec:
     """
 
     def _run_exec(self, runtime, persona, state, *, child_row_text: str) -> str:
-        import asyncio
-
+        """本物の lg_exec_node を `compile_playbook` から走らせる (材料を落とすのは
+        `compile_playbook` が包んだ処理)。"""
         child_ids: Dict[str, str] = {}
 
         def _child(sub_pb, p, bid, sub_input, auto_mode, record_history,
@@ -997,15 +982,8 @@ class TestPredecessorAfterExec:
         runtime._run_playbook = Mock(side_effect=_child)
         runtime.decide_playbook_permission = Mock(return_value=(True, None))
         runtime._append_tool_result_message = Mock()
-        node_def = SimpleNamespace(
-            id="exec", playbook_source="selected_playbook",
-            args_source="selected_args", args=None, execution="inline",
-        )
         state["selected_playbook"] = "child_pb"
-        node_fn = runtime._runtime_engine.lg_exec_node(
-            node_def, SimpleNamespace(name="parent_pb"), persona, "b1", False, [], None,
-        )
-        asyncio.run(node_fn(state))
+        _run_compiled(runtime, persona, [{"id": "exec", "type": "exec", "next": None}], state)
         return child_ids["x"]
 
     def test_exec_drops_the_childs_material(self, node_env, monkeypatch):
@@ -1254,15 +1232,16 @@ class TestFinalizeBeatCarriesTheStoredRowId:
         self._finalize(state2, memorize=True, store_return="")  # 保存に失敗
         assert "id" not in state2["_messages"][-1]
 
-    def test_tool_call_only_reply_carries_no_id(self):
-        """本文が空の tool_calls だけの返事には載せない。
+    def test_tool_call_only_reply_carries_the_row_id(self):
+        """本文が空の tool_calls だけの返事にも載せる (Codex 三巡目 3)。
 
-        記録には JSON 本文で書かれているが、送る `messages`の dict は本文が空で、
-        Anthropic は本文の空な行を送る前に落とす。載せると次の生成の前駆が
-        モデルに届いていない行を指す (Codex 2026-10-14 high)。
+        OpenAI 系・Gemini はこの dict を送るので、載せないと次の生成の前駆が
+        この返事を飛ばす。Anthropic は本文の空な行を送る前に落とすので、
+        そのクライアントでは `sync_presented_message_ids_with_sent` の
+        `drops_empty_messages` がこの dict を数えない。
         """
         from llm_clients.anthropic_request_builder import _prepare_anthropic_messages
-        from sea.runtime_context import sent_message_ids
+        from sea.message_stamp import sync_presented_message_ids_with_sent
 
         state: Dict[str, Any] = {
             "tool_called": True, "_last_tool_call_id": "call-1",
@@ -1272,12 +1251,19 @@ class TestFinalizeBeatCarriesTheStoredRowId:
         self._finalize(state, memorize=True)
         msg = state["_messages"][-1]
         assert msg["content"] == ""
-        assert "id" not in msg
-        # 送る `messages`から作り直しても、記録の行として数えるのは履歴の h1 だけ
-        assert sent_message_ids(state["_messages"]) == ["h1"]
-        # 実際に Anthropic へ渡す列にもこの返事は無い (載せなかった理由の裏付け)
+        assert msg["id"] == "row-9"
+        # 送るクライアントでは、この返事が `_presented_message_ids` の末尾になる
+        sent_state: Dict[str, Any] = {}
+        sync_presented_message_ids_with_sent(sent_state, state["_messages"])
+        assert sent_state[PRESENTED_IDS_STATE_KEY] == ["h1", "row-9"]
+        # Anthropic へ渡すメッセージにはこの返事が無く、落とすクライアントでは数えない
         prepared = _prepare_anthropic_messages(state["_messages"])
         assert all(m.get("role") != "assistant" for m in prepared)
+        dropped_state: Dict[str, Any] = {}
+        sync_presented_message_ids_with_sent(
+            dropped_state, state["_messages"], drops_empty_messages=True,
+        )
+        assert dropped_state[PRESENTED_IDS_STATE_KEY] == ["h1"]
 
     def test_tool_call_reply_also_carries_the_row_id(self):
         state: Dict[str, Any] = {
@@ -1297,14 +1283,12 @@ class TestFinalizeBeatCarriesTheStoredRowId:
 
         state: Dict[str, Any] = {}
         self._finalize(state)  # memorize も important も無い
-        entry = state[UNSTORED_REPLY_STATE_KEY]
-        assert entry["message"] is state["_messages"][-1]
-        assert entry["last"] is state["last"]
+        assert state[UNSTORED_REPLY_STATE_KEY] is state["_messages"][-1]
 
     def test_stored_reply_drops_a_stale_note(self):
         from sea.message_stamp import UNSTORED_REPLY_STATE_KEY
 
-        state: Dict[str, Any] = {UNSTORED_REPLY_STATE_KEY: {"message": {}, "last": "old"}}
+        state: Dict[str, Any] = {UNSTORED_REPLY_STATE_KEY: {"role": "assistant", "content": "old"}}
         self._finalize(state, memorize=True)
         assert state["_messages"][-1]["id"] == "row-9"
         assert UNSTORED_REPLY_STATE_KEY not in state
@@ -1327,7 +1311,7 @@ class TestFinalizeBeatCarriesTheStoredRowId:
             "tool_called": True, "_last_tool_call_id": "call-1",
             "_last_tool_name": "calc", "_last_tool_args_json": "{}",
             "has_speak_content": False,
-            UNSTORED_REPLY_STATE_KEY: {"message": {}, "last": "old"},
+            UNSTORED_REPLY_STATE_KEY: {"role": "assistant", "content": "old"},
         }
         self._finalize(state)
         assert UNSTORED_REPLY_STATE_KEY not in state
@@ -1390,10 +1374,10 @@ class TestPredecessorAfterLaterNodeStoresTheReply:
     `sync_presented_message_ids_with_sent` が数えられず、Z の
     `predecessor_message_id` は保存した行より前の行になる。
 
-    載せるのは `state["last"]` が X の `_finalize_beat` が入れたオブジェクトの
-    ままのときだけ (`_unstored_reply`)。間に `state["last"]` を書き換えた
-    ノードや、`{last}` 以外の文字を含む `action` の MEMORIZE では載せない —
-    記憶の行と dict の `content` が同じ文ではなくなるため。
+    載せるのは `_unstored_reply` が残っていて、`state["last"]` が X の返事の
+    dict の `content` と値で等しいときだけ。間に `state["last"]` を書き換えうる
+    ノード (`compile_playbook` がその後で `_unstored_reply` を消す) や、`{last}`
+    以外の文字を含む `action` の MEMORIZE では載せない。
     """
 
     PB = SimpleNamespace(name="parent_pb", display_name="parent_pb")
@@ -1517,30 +1501,24 @@ class TestPredecessorAfterLaterNodeStoresTheReply:
         self, node_env, monkeypatch, same_text,
     ):
         """X と MEMORIZE の間で TOOL が `state["last"]` を書き換えたら、X の dict
-        に `id` は載らない。TOOL の結果が X の本文と同じ文字列でも、別の
-        オブジェクトなので載らない (`is` で確かめる)。"""
-        import asyncio
-
+        に `id` は載らない。TOOL の結果が X の本文と同じ文字列でも載らない —
+        `compile_playbook` が TOOL の後で `_unstored_reply` を消すため。
+        (X・TOOL・MEMORIZE を `compile_playbook` から走らせる。)"""
         import tools
 
         runtime, persona, adapter, client = node_env
         h1, h2, messages = _seed_history(runtime, persona)
         state = _base_state(messages, [h1, h2])
 
-        client.replies.append("返事 A。")
-        self._run_llm(runtime, persona, state, "reply_a", memorize=False)
-
         result = "".join(["返事", " A。"]) if same_text else "ツールの結果。"
-        if same_text:
-            assert result == state["last"] and result is not state["last"]
         monkeypatch.setitem(tools.TOOL_REGISTRY, "stamp_test_tool", lambda: result)
-        tool_def = SimpleNamespace(
-            id="tool", action="stamp_test_tool", args_input=None,
-            output_key=None, output_keys=None, important=False,
-        )
-        asyncio.run(runtime._runtime_engine.lg_tool_node(tool_def, persona, self.PB)(state))
+        client.replies.append("返事 A。")
+        _run_compiled(runtime, persona, [
+            _llm_node("reply_a", "tool"),
+            {"id": "tool", "type": "tool", "action": "stamp_test_tool", "next": "record"},
+            _memorize_node("record"),
+        ], state)
         assert state["last"] == result
-        self._run_memorize(runtime, persona, state)
 
         assert "id" not in self._reply_dict(state, "返事 A。")
 
@@ -1590,3 +1568,526 @@ class TestPredecessorAfterLaterNodeStoresTheReply:
         z_row, _ = _row_by_content(adapter, "返事 Z。")
         assert self._reply_dict(state, "返事 Z。").get("id") == z_row
         assert "id" not in self._reply_dict(state, "返事 A。")
+
+
+# ---------------------------------------------------------------------------
+# 7. `compile_playbook` が、`state["last"]` を生成以外の本文に書き換えうるノード
+#    (TOOL / TOOL_CALL / EXEC / SUBPLAY / `"last"` を代入する SET) の後で
+#    `_last_call_tokens` / `_presented_message_ids` / `_unstored_reply` を消すこと
+#
+# ノード関数を直接呼ぶと `compile_playbook` が包んだ処理を通らないので、ここでは
+# 実 Playbook (`PlaybookSchema`) を `compile_playbook` から走らせる。
+# ---------------------------------------------------------------------------
+
+
+class _UsageRecordingClient(_RecordingClient):
+    """`_RecordingClient` に、コールごとの使用量 (`_usage()`) を返させたもの。"""
+
+    def __init__(self):
+        super().__init__()
+        self._pending_usage = None
+
+    def generate(self, messages, tools=None, temperature=None, response_schema=None, **kwargs):
+        self._pending_usage = _usage()
+        return super().generate(
+            messages, tools=tools, temperature=temperature,
+            response_schema=response_schema, **kwargs,
+        )
+
+    def consume_usage(self):
+        usage, self._pending_usage = self._pending_usage, None
+        return usage
+
+
+def _run_compiled(runtime, persona, nodes: list, state: Dict[str, Any]) -> None:
+    """`nodes` を親の Playbook にして `compile_playbook` から走らせる。
+
+    ノードを作る関数は `sea/runtime_graph.compile_with_langgraph` と同じ
+    (runtime の `_lg_*` メソッド)。LangGraph は state の dict をそのまま
+    ノードへ渡すので、走った後の `state` で結果を確かめられる。
+    """
+    import asyncio
+
+    from sea.langgraph_runner import compile_playbook
+    from sea.playbook_models import PlaybookSchema
+
+    playbook = PlaybookSchema(
+        name="parent_pb", display_name="parent_pb", description="t",
+        input_schema=[], start_node=nodes[0]["id"], nodes=nodes,
+    )
+    outputs: list = []
+    compiled = compile_playbook(
+        playbook,
+        llm_node_factory=lambda nd: runtime._lg_llm_node(nd, persona, "b1", playbook, None),
+        tool_node_factory=lambda nd: runtime._lg_tool_node(nd, persona, playbook, None),
+        tool_call_node_factory=lambda nd: runtime._lg_tool_call_node(nd, persona, playbook, None),
+        speak_node=lambda s: runtime._lg_speak_node(s, persona, "b1", playbook, outputs, None),
+        think_node=lambda s: runtime._lg_think_node(s, persona, playbook, outputs, None),
+        memorize_node_factory=lambda nd: runtime._lg_memorize_node(nd, persona, playbook, outputs, None),
+        exec_node_factory=lambda nd: runtime._lg_exec_node(nd, playbook, persona, "b1", False, outputs, None),
+        subplay_node_factory=lambda nd: runtime._lg_subplay_node(nd, persona, "b1", playbook, False, outputs, None),
+        set_node_factory=lambda nd: runtime._lg_set_node(nd, playbook, None),
+    )
+    assert compiled is not None
+    asyncio.run(compiled(state, {"recursion_limit": 100}))
+
+
+def _llm_node(node_id: str, next_id: Optional[str], *, memorize=None) -> Dict[str, Any]:
+    return {"id": node_id, "type": "llm", "memorize": memorize, "next": next_id}
+
+
+def _memorize_node(node_id: str, next_id: Optional[str] = None, *, action="{last}") -> Dict[str, Any]:
+    return {
+        "id": node_id, "type": "memorize", "action": action, "role": "assistant",
+        "tags": ["conversation"], "next": next_id,
+    }
+
+
+def _assistant_rows(adapter, content: str) -> list:
+    with adapter._db_lock:
+        rows = adapter.conn.execute(
+            "SELECT id, metadata FROM messages WHERE content = ? AND role = ? ORDER BY rowid",
+            (content, "assistant"),
+        ).fetchall()
+    return [(str(r[0]), json.loads(r[1]) if r[1] else {}) for r in rows]
+
+
+def _reply_dicts(state: Dict[str, Any], content: str) -> list:
+    return [
+        m for m in state["_messages"]
+        if m.get("role") == "assistant" and m.get("content") == content
+    ]
+
+
+@pytest.fixture
+def compiled_env(node_env, monkeypatch):
+    """`node_env` に、使用量を返す偽 LLM と、`compile_playbook` から走らせる準備を足す。"""
+    from sea import runtime as sea_runtime
+    from sea import runtime_engine, runtime_llm
+
+    runtime, persona, adapter, _client = node_env
+    client = _UsageRecordingClient()
+    runtime.select_llm_client = lambda *a, **k: (client, "model-a")
+    runtime._accumulate_usage = lambda *a, **k: None
+    monkeypatch.setattr(runtime_llm, "get_usage_tracker", Mock())
+    monkeypatch.setattr(runtime_llm, "_maybe_record_cache_storage", lambda *a, **k: None)
+    monkeypatch.setattr(runtime_engine, "log_sea_trace", lambda *a, **k: None)
+    monkeypatch.setattr(sea_runtime, "log_sea_trace", lambda *a, **k: None)
+    return runtime, persona, adapter, client
+
+
+def _child_writes_parent_material(runtime, output: str):
+    """子 Playbook の代役。本物の子と同じく親 state へ子の `_presented_message_ids` を書く。"""
+
+    def _child(sub_pb, p, bid, sub_input, auto_mode, record_history, parent_state,
+               event_callback, **kwargs):
+        child_row = runtime._store_memory(
+            p, "子が記録に書いた行。", role="assistant", return_message_id=True,
+        )
+        record_presented_message_ids(
+            parent_state,
+            {"presented_message_ids": [
+                *(parent_state.get(PRESENTED_IDS_STATE_KEY) or []), str(child_row),
+            ]},
+        )
+        return [output]
+
+    return _child
+
+
+def _middle_node(kind: str, runtime, monkeypatch, state, output: str) -> Dict[str, Any]:
+    """`state["last"]` を `output` に書き換えるノード (種類ごと) を用意して返す。"""
+    if kind == "subplay":
+        runtime._run_playbook = Mock(side_effect=_child_writes_parent_material(runtime, output))
+        return {"id": "mid", "type": "subplay", "playbook": "child_pb", "next": "record"}
+    if kind == "exec":
+        runtime._run_playbook = Mock(side_effect=_child_writes_parent_material(runtime, output))
+        runtime.decide_playbook_permission = Mock(return_value=(True, None))
+        state["selected_playbook"] = "child_pb"
+        return {"id": "mid", "type": "exec", "next": "record"}
+    if kind == "tool":
+        import tools
+
+        monkeypatch.setitem(tools.TOOL_REGISTRY, "stamp_test_tool", lambda: output)
+        return {"id": "mid", "type": "tool", "action": "stamp_test_tool", "next": "record"}
+    if kind == "tool_call":
+        import tools
+
+        monkeypatch.setitem(tools.TOOL_REGISTRY, "stamp_test_tool", lambda: output)
+        state["fc"] = {"name": "stamp_test_tool", "args": {}}
+        return {"id": "mid", "type": "tool_call", "next": "record"}
+    if kind == "set_last":
+        return {"id": "mid", "type": "set", "assignments": {"last": output}, "next": "record"}
+    raise AssertionError(kind)
+
+
+class TestCompilePlaybookDropsStampMaterial:
+    """親の LLM ノード (保存なし) → `state["last"]` を書き換えるノード → 親の MEMORIZE (`{last}`)。"""
+
+    @pytest.mark.parametrize("kind", ["subplay", "exec", "tool", "tool_call", "set_last"])
+    def test_same_short_text_is_not_tied_to_the_old_reply(
+        self, compiled_env, monkeypatch, kind,
+    ):
+        """⭐ Codex 三巡目 1: 返事も書き換えた後の本文も `"1"` (Python では同じ
+        オブジェクトになりうる)。MEMORIZE が保存した行の id を親の返事の dict に
+        付けず、その行に親の `predecessor_message_id` と `llm_tokens` も付けない。"""
+        runtime, persona, adapter, client = compiled_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        client.replies.append("1")
+        middle = _middle_node(kind, runtime, monkeypatch, state, "1")
+        _run_compiled(runtime, persona, [
+            _llm_node("reply", "mid"), middle, _memorize_node("record"),
+        ], state)
+
+        reply = _reply_dicts(state, "1")
+        assert len(reply) == 1
+        assert "id" not in reply[0]
+        rows = _assistant_rows(adapter, "1")
+        assert len(rows) == 1
+        _row_id, meta = rows[0]
+        assert PREDECESSOR_META_KEY not in meta
+        assert TOKENS_META_KEY not in meta
+
+    def test_memorize_right_after_the_reply_still_ties_the_id(self, compiled_env):
+        """対照: 間に書き換えるノードが無ければ、MEMORIZE の行の id は返事の dict に載り、
+        行には返事の前駆と三つ組が付く。"""
+        runtime, persona, adapter, client = compiled_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        client.replies.append("1")
+        _run_compiled(runtime, persona, [
+            _llm_node("reply", "record"), _memorize_node("record"),
+        ], state)
+
+        (row_id, meta), = _assistant_rows(adapter, "1")
+        assert _reply_dicts(state, "1")[0]["id"] == row_id
+        assert meta[PREDECESSOR_META_KEY] == h2
+        assert TOKENS_META_KEY in meta
+
+    def test_set_without_last_keeps_the_material(self, compiled_env):
+        """`"last"` を代入しない SET は包まない — 材料も `_unstored_reply` も残る。"""
+        runtime, persona, adapter, client = compiled_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        client.replies.append("1")
+        _run_compiled(runtime, persona, [
+            _llm_node("reply", "mid"),
+            {"id": "mid", "type": "set", "assignments": {"counter": 1}, "next": "record"},
+            _memorize_node("record"),
+        ], state)
+
+        (row_id, meta), = _assistant_rows(adapter, "1")
+        assert _reply_dicts(state, "1")[0]["id"] == row_id
+        assert meta[PREDECESSOR_META_KEY] == h2
+        assert TOKENS_META_KEY in meta
+
+    def test_templated_memorize_then_speak_does_not_tie_the_id(self, compiled_env):
+        """MEMORIZE が `action` のテンプレートで包んだ文を `state["last"]` に入れた後、
+        SPEAK がそれを保存しても、返事の dict には id を付けない (本文が違う)。"""
+        from sea.runtime_emitters import forget_saved_utterances
+
+        runtime, persona, adapter, client = compiled_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        class _History:
+            def add_to_persona_only(self, msg, **kwargs):
+                mid = adapter.append_persona_message(dict(msg))
+                return ("synced", str(mid)) if mid else ("failed", None)
+
+            def add_to_building_only(self, building_id, msg, heard_by=None):
+                return {"message_id": f"{building_id}:1", "content": msg["content"]}
+
+        persona.history_manager = _History()
+        runtime.manager.occupants = {}
+        runtime.manager.user_presence_status = "offline"
+        runtime.manager.gateway_handle_ai_replies = lambda *a, **k: None
+
+        client.replies.append("返事 A。")
+        try:
+            _run_compiled(runtime, persona, [
+                _llm_node("reply", "record"),
+                _memorize_node("record", "talk", action="前置き: {last}"),
+                {"id": "talk", "type": "speak", "next": None},
+            ], state)
+        finally:
+            forget_saved_utterances()
+
+        assert len(_assistant_rows(adapter, "前置き: 返事 A。")) == 2
+        assert "id" not in _reply_dicts(state, "返事 A。")[0]
+
+    @pytest.mark.parametrize("path", [
+        "exec_not_found", "exec_denied", "subplay_not_found", "subplay_missing_name",
+    ])
+    def test_error_text_paths_drop_the_material(self, compiled_env, path):
+        """Codex 三巡目 4: `state["last"]` をエラー文に変えて早期 return する経路でも、
+        後ろの MEMORIZE がエラー文に直前の LLM の前駆と三つ組を刻まない。"""
+        runtime, persona, adapter, client = compiled_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        runtime._run_playbook = Mock(side_effect=AssertionError("子は走らない"))
+        if path == "exec_not_found":
+            runtime._load_playbook_for = lambda name, p, b: None
+            state["selected_playbook"] = "missing_pb"
+            middle = {"id": "mid", "type": "exec", "next": "record"}
+        elif path == "exec_denied":
+            runtime.decide_playbook_permission = Mock(return_value=(False, "許可されませんでした。"))
+            state["selected_playbook"] = "child_pb"
+            middle = {"id": "mid", "type": "exec", "next": "record"}
+        elif path == "subplay_not_found":
+            runtime._load_playbook_for = lambda name, p, b: None
+            middle = {"id": "mid", "type": "subplay", "playbook": "missing_pb", "next": "record"}
+        else:
+            middle = {"id": "mid", "type": "subplay", "playbook": "", "next": "record"}
+
+        client.replies.append("返事 A。")
+        _run_compiled(runtime, persona, [
+            _llm_node("reply", "mid"), middle, _memorize_node("record"),
+        ], state)
+
+        error_text = state["last"]
+        assert error_text != "返事 A。"
+        (_row_id, meta), = _assistant_rows(adapter, error_text)
+        assert PREDECESSOR_META_KEY not in meta
+        assert TOKENS_META_KEY not in meta
+        assert "id" not in _reply_dicts(state, "返事 A。")[0]
+
+    @pytest.mark.parametrize("is_async", [False, True])
+    def test_sync_and_async_node_returning_a_new_dict(self, is_async):
+        """同期のノード関数も async のノード関数も包む。ノードが受け取った dict と
+        別の dict を返しても、次のノードへ渡る返した方から消える。"""
+        import asyncio
+        import inspect
+
+        from sea.langgraph_runner import _drop_stamp_material_after, compile_playbook
+        from sea.message_stamp import UNSTORED_REPLY_STATE_KEY
+        from sea.playbook_models import PlaybookSchema
+
+        def set_factory(node_def):
+            if is_async:
+                async def node(state):
+                    return {**state, "last": "代入した値"}
+            else:
+                def node(state):
+                    return {**state, "last": "代入した値"}
+            assert inspect.iscoroutinefunction(_drop_stamp_material_after(node)) is is_async
+            return node
+
+        playbook = PlaybookSchema(
+            name="pb", description="t", input_schema=[], start_node="a",
+            nodes=[
+                {"id": "a", "type": "set", "assignments": {"last": "代入した値"}, "next": "b"},
+                {"id": "b", "type": "pass", "next": None},
+            ],
+        )
+        compiled = compile_playbook(
+            playbook, llm_node_factory=Mock(), tool_node_factory=Mock(),
+            speak_node=Mock(), think_node=Mock(), set_node_factory=set_factory,
+        )
+        state: Dict[str, Any] = {
+            "last": "返事",
+            PRESENTED_IDS_STATE_KEY: ["h1"],
+            UNSTORED_REPLY_STATE_KEY: {"role": "assistant", "content": "返事"},
+        }
+        record_call_tokens(state, _usage())
+        result = asyncio.run(compiled(state, {"recursion_limit": 10}))
+
+        assert result is not state
+        assert result["last"] == "代入した値"
+        for key in (CALL_TOKENS_STATE_KEY, PRESENTED_IDS_STATE_KEY, UNSTORED_REPLY_STATE_KEY):
+            assert key not in result
+            assert key not in state
+
+    def test_node_that_raises_still_drops_the_material(self, compiled_env):
+        """包んだノードが例外で終わっても消す (`finally`)。SUBPLAY は子の LLMError を投げ直す。"""
+        from llm_clients.exceptions import LLMError
+        from sea.message_stamp import UNSTORED_REPLY_STATE_KEY
+
+        runtime, persona, adapter, client = compiled_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        runtime._run_playbook = Mock(side_effect=LLMError("子の LLM が失敗した"))
+        client.replies.append("返事 A。")
+        with pytest.raises(LLMError):
+            _run_compiled(runtime, persona, [
+                _llm_node("reply", "mid"),
+                {"id": "mid", "type": "subplay", "playbook": "child_pb", "next": None},
+            ], state)
+
+        assert CALL_TOKENS_STATE_KEY not in state
+        assert PRESENTED_IDS_STATE_KEY not in state
+        assert UNSTORED_REPLY_STATE_KEY not in state
+
+
+class TestSpeakIdSurvivesBuildingSaveFailure:
+    """Codex 三巡目 2: `add_to_persona_only` が記憶に書けた後で建物への保存が
+    例外 / None になっても、`emit_speak` は記憶の行の id を返し、`lg_speak_node` は
+    それを返事の dict に載せる。"""
+
+    @staticmethod
+    def _emitters_with(persona_saved, building):
+        from sea.runtime_emitters import RuntimeEmitters
+
+        history = Mock()
+        history.add_to_persona_only.return_value = persona_saved
+        if isinstance(building, Exception):
+            history.add_to_building_only.side_effect = building
+        else:
+            history.add_to_building_only.return_value = building
+        manager = SimpleNamespace(
+            occupants={}, user_presence_status="offline",
+            gateway_handle_ai_replies=Mock(),
+        )
+        emitters = RuntimeEmitters(runtime=SimpleNamespace(manager=manager))
+        persona = SimpleNamespace(persona_id="p1", history_manager=history)
+        return emitters, persona
+
+    @pytest.mark.parametrize("building", [RuntimeError("building_messages の保存に失敗"), None])
+    def test_emit_speak_returns_the_memory_row_id(self, building):
+        from sea.runtime_emitters import SPEAK_MEMORY_MESSAGE_ID_KEY, SPEAK_PERSISTED_EVENT_TYPE
+
+        emitters, persona = self._emitters_with(("synced", "mem-3"), building)
+        events: list = []
+        out = emitters.emit_speak(persona, "b1", "こんにちは。", event_callback=events.append)
+        assert out == {SPEAK_MEMORY_MESSAGE_ID_KEY: "mem-3"}
+        # 建物に保存されなかった回は、保存完了イベントを流さない (従来どおり)
+        assert not any(e.get("type") == SPEAK_PERSISTED_EVENT_TYPE for e in events)
+
+    def test_emit_speak_without_either_row_returns_none(self):
+        emitters, persona = self._emitters_with(("failed", None), RuntimeError("x"))
+        assert emitters.emit_speak(persona, "b1", "x") is None
+
+    def test_speak_node_puts_the_memory_row_id_on_the_reply(self, compiled_env):
+        from sea.runtime_emitters import forget_saved_utterances
+
+        runtime, persona, adapter, client = compiled_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        class _History:
+            def add_to_persona_only(self, msg, **kwargs):
+                mid = adapter.append_persona_message(dict(msg))
+                return ("synced", str(mid)) if mid else ("failed", None)
+
+            def add_to_building_only(self, building_id, msg, heard_by=None):
+                raise RuntimeError("building_messages の保存に失敗")
+
+        persona.history_manager = _History()
+        runtime.manager.occupants = {}
+        runtime.manager.user_presence_status = "offline"
+        runtime.manager.gateway_handle_ai_replies = lambda *a, **k: None
+
+        client.replies.append("返事 A。")
+        try:
+            _run_compiled(runtime, persona, [
+                _llm_node("reply", "talk"), {"id": "talk", "type": "speak", "next": None},
+            ], state)
+        finally:
+            forget_saved_utterances()
+
+        r_id, _meta = _row_by_content(adapter, "返事 A。")
+        assert _reply_dicts(state, "返事 A。")[0].get("id") == r_id
+
+
+class TestToolCallOnlyReplyAndEmptyContentDrop:
+    """Codex 三巡目 3: 本文が空の tool_calls だけの返事を、送る先のクライアントが
+    送るなら `_presented_message_ids` に数え、落とすなら数えない。"""
+
+    SENT = [
+        {"role": "system", "content": "head"},
+        {"id": "h1", "role": "user", "content": "h1"},
+        {"id": "tc-row", "role": "assistant", "content": "",
+         "tool_calls": [{"id": "call-1", "type": "function",
+                         "function": {"name": "calc", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call-1", "name": "calc", "content": "42"},
+    ]
+
+    @pytest.mark.parametrize("drops, expected", [(False, "tc-row"), (True, "h1")])
+    def test_sync_counts_the_tool_call_reply_only_when_it_is_sent(self, drops, expected):
+        from sea.message_stamp import sync_presented_message_ids_with_sent
+
+        state: Dict[str, Any] = {}
+        sync_presented_message_ids_with_sent(state, self.SENT, drops_empty_messages=drops)
+        assert build_generation_stamp(state)[PREDECESSOR_META_KEY] == expected
+
+    def test_drop_does_not_skip_a_row_with_an_image(self, tmp_path):
+        from sea.message_stamp import sync_presented_message_ids_with_sent
+
+        image = tmp_path / "x.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n")
+        sent = [
+            {"id": "h1", "role": "user", "content": "h1"},
+            {"id": "img", "role": "user", "content": "",
+             "metadata": {"media": [{"type": "image", "path": str(image),
+                                     "mime_type": "image/png"}]}},
+        ]
+        state: Dict[str, Any] = {}
+        sync_presented_message_ids_with_sent(state, sent, drops_empty_messages=True)
+        assert build_generation_stamp(state)[PREDECESSOR_META_KEY] == "img"
+
+    def test_client_flags_match_what_each_conversion_sends(self):
+        """クラス属性が、各クライアントの変換が実際に送るかどうかと一致する。"""
+        from llm_clients.anthropic import AnthropicClient
+        from llm_clients.anthropic_request_builder import _prepare_anthropic_messages
+        from llm_clients.base import LLMClient
+        from llm_clients.gemini import GeminiClient
+        from llm_clients.nvidia_nim import NvidiaNIMClient
+        from llm_clients.ollama import OllamaClient
+        from llm_clients.openai import OpenAIClient
+        from llm_clients.openai_codex import OpenAICodexClient
+        from llm_clients.openai_message_preparer import prepare_openai_messages
+        from llm_clients.xai import XAIClient, _build_xai_messages
+
+        assert AnthropicClient.DROPS_EMPTY_CONTENT_MESSAGES is True
+        assert all(m.get("role") != "assistant" for m in _prepare_anthropic_messages(self.SENT))
+        assert XAIClient.DROPS_EMPTY_CONTENT_MESSAGES is True
+        # system + h1 だけが残る (本文の空な tool_calls の返事と tool の行は送られない)
+        assert len(_build_xai_messages(self.SENT, supports_images=False)) == 2
+
+        for cls in (LLMClient, OpenAIClient, NvidiaNIMClient, OpenAICodexClient, GeminiClient, OllamaClient):
+            assert cls.DROPS_EMPTY_CONTENT_MESSAGES is False, cls
+        prepared = prepare_openai_messages(self.SENT, supports_images=False)
+        assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in prepared)
+
+    def test_llama_cached_client_reports_the_inner_clients_flag(self):
+        from llm_clients.llama_cache import LlamaCachedClient
+
+        for inner_flag in (False, True):
+            inner = SimpleNamespace(DROPS_EMPTY_CONTENT_MESSAGES=inner_flag)
+            wrapper = LlamaCachedClient.__new__(LlamaCachedClient)
+            wrapper._inner = inner
+            assert wrapper.DROPS_EMPTY_CONTENT_MESSAGES is inner_flag
+
+    @pytest.mark.parametrize("drops", [False, True])
+    def test_llm_node_reads_the_flag_from_the_client(self, node_env, drops):
+        """`lg_llm_node` が送る直前に、使うクライアントのクラス属性を渡す。"""
+        import asyncio
+
+        from sea.runtime_llm import lg_llm_node
+
+        runtime, persona, adapter, client = node_env
+        client.DROPS_EMPTY_CONTENT_MESSAGES = drops
+        h1, h2, messages = _seed_history(runtime, persona)
+        tc_row = runtime._store_memory(
+            persona, '{"tool_calls": "calc"}', role="assistant", return_message_id=True,
+        )
+        messages = [
+            *messages,
+            {"id": str(tc_row), "role": "assistant", "content": "",
+             "tool_calls": [{"id": "call-1", "type": "function",
+                             "function": {"name": "calc", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call-1", "name": "calc", "content": "42"},
+        ]
+        state = _base_state(messages, [h1, h2])
+        client.replies.append("返事 B。")
+        pb = SimpleNamespace(name="parent_pb", display_name="parent_pb")
+        asyncio.run(lg_llm_node(runtime, _llm_node_def("reply_b"), persona, "b1", pb, None)(state))
+
+        _b_id, b_meta = _row_by_content(adapter, "返事 B。")
+        assert b_meta.get(PREDECESSOR_META_KEY) == (h2 if drops else str(tc_row))
