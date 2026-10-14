@@ -21,7 +21,7 @@ from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
 from sea.message_stamp import (
     append_presented_message_id,
     record_call_tokens,
-    restore_presented_message_ids_from_sent,
+    sync_presented_message_ids_with_sent,
 )
 from sea.runtime_utils import _format, _is_llm_streaming_enabled, event_building_id
 from saiverse.logging_config import log_sea_trace
@@ -78,7 +78,7 @@ BEAT_BODY_UNMEMORIZED_KEY = "_beat_body_unmemorized_text"
 #: ``_beat_memorized`` (書いたかどうか) と同じ場所で立てる (:func:`_mark_beat_memorized`)。
 #: ``_finalize_beat`` は、送る列に足した返事の dict にこの id を ``"id"`` として載せる —
 #: 送る列で記録の行 id を持つ dict が「記録から来た行」の印で、前駆刻印の材料の
-#: 作り直し (sea/message_stamp.py の ``restore_presented_message_ids_from_sent``) が
+#: 作り直し (sea/message_stamp.py の ``sync_presented_message_ids_with_sent``) が
 #: それを数える。載せないと「親が返事 A を保存 → 子 Playbook → 親が返事 B」で
 #: B の前駆が A を飛ばして古い履歴の行を指す。LLM ノードの入り口で倒す (前の
 #: ノードの id をこのノードの返事に載せない)。
@@ -1095,21 +1095,19 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     # 返事が記憶に書かれていたら (memorize / important dual-write / 止まった生成の
     # 保存 = settle のどれか)、送る列に足した返事の dict に書いた行の id を載せる。
     # 次の送信で前駆刻印の材料を送る列から作り直すとき (sea/message_stamp.py の
-    # restore_presented_message_ids_from_sent)、この返事が「記録の行」として
+    # sync_presented_message_ids_with_sent)、この返事が「記録の行」として
     # 数えられる。各 LLM クライアントは role / content / tool_calls 等しか送らない
     # (履歴の行も同じ ``id`` を持って送られている) ので、API へは載らない。
     # 値はこの Beat のものなので、ここで消費する (次の Beat へ持ち越さない)。
     #
-    # あわせて「見た列」(前駆刻印の材料) の末尾にも足す — スペルの周が自分の行を
-    # 足すのと同じ規則。この返事は送る列に積まれたので、同じ Playbook の次の
-    # LLM ノードはこれを見て書く。足さないと、材料が残っている回 (子 Playbook を
-    # 挟まない「親 A → 親 B」) は作り直しが走らず、B の前駆が A を飛ばして
-    # 組成時点の履歴末尾を指す。刻印はこの返事の保存で済んでいるので、足すのは
-    # その後で、この返事自身の前駆には影響しない。
+    # 「見た列」(前駆刻印の材料) にはここでは足さない。足すのは次の LLM ノードが
+    # この返事を実際に送るとき (sync_presented_message_ids_with_sent)。ここで
+    # 足すと、この後に続く MEMORIZE / SPEAK / THINK ノード (この返事の本文を
+    # 役割 assistant で書き直す — 例: schedule_management の record_add_params)
+    # の前駆が、その本文を生んだ生成自身の行を指してしまう。
     _beat_memory_id = state.pop(BEAT_MEMORY_ID_KEY, None)
     if isinstance(_beat_memory_id, str) and _beat_memory_id:
         _beat_reply_msg["id"] = _beat_memory_id
-        append_presented_message_id(state, _beat_memory_id)
 
     # Debug: log speak_content at end of LLM node
     speak_content = state.get("speak_content", "")
@@ -3617,7 +3615,7 @@ async def _run_spell_loop(
                 # 永続 ID を持たないので足さない。
                 # 列に積んだこの周の発言にも書いた行の id を載せる — 後で材料を
                 # 送る列から作り直す回 (子 Playbook の中継の後の次のノード。
-                # restore_presented_message_ids_from_sent) に、この行が記録の
+                # sync_presented_message_ids_with_sent) に、この行が記録の
                 # 行として数えられるように (_finalize_beat の返事と同じ理由)。
                 if _stored_id:
                     append_presented_message_id(state, _stored_id)
@@ -5291,15 +5289,15 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         messages.insert(0, {"role": "system", "content": _model_sys_prompt})
                     LOGGER.debug("[sea] Injected model-specific system prompt for %s", _model_config_key)
 
-            # 前駆刻印の材料 (sea/message_stamp.py) が無ければ、これから送る列から
-            # 作り直す。送る列はここで確定する — この後の 4 経路 (ツールあり・
-            # なし × ストリーミング・同期、構造化出力は同期の中) はどれもこの
+            # 前駆刻印の材料 (sea/message_stamp.py) を、これから送る列に合わせる。
+            # 送る列はここで確定する — この後の 4 経路 (ツールあり・なし ×
+            # ストリーミング・同期、構造化出力は同期の中) はどれもこの
             # ``messages`` をそのまま最初の送信に使い、スペルループもこの列に周の
             # 発言を積み足していく (周の行は append_presented_message_id で列を
-            # 伸ばす)。材料が無いのは子 Playbook の中継が落とした後で、落とした
-            # ままだと親がこのノードで書いた返事に前駆が付かない。材料がある回
-            # (prepare_context の提示列) は触らない。
-            restore_presented_message_ids_from_sent(state, messages)
+            # 伸ばす)。材料が無い (子 Playbook の中継が落とした後) なら送る列から
+            # 作り直し、材料がある回は中身を変えずに、送る列で末尾より後ろにある
+            # 記録の行 (同じ Playbook の前の LLM ノードが書いた返事) だけを足す。
+            sync_presented_message_ids_with_sent(state, messages)
 
             # Check if tools are available for this node
             available_tools = getattr(node_def, "available_tools", None)

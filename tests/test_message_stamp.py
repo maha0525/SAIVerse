@@ -971,11 +971,39 @@ class TestPredecessorAcrossConsecutiveParentNodes:
     """子 Playbook が無くても、親の LLM ノード A (memorize あり) の後に親の LLM
     ノード B が続くとき、B の前駆は B が実際に見た A を指すこと。
 
-    材料が残っている回は作り直しが走らないので、A の保存時に A の記録 id を
-    「見た列」へ足す (スペルの周と同じ規則) ことで成立させる。足さないと B の
-    前駆は prepare_context の提示列の末尾 (h2) のままになる (2026-10-14 に
-    同族の既存欠陥として発見し、同じ変更で修正)。
+    材料が残っている回は作り直さず、B が送る直前に、送る列で材料の末尾より
+    後ろにある記録の行 (A) を足すことで成立させる。足さないと B の前駆は
+    prepare_context の提示列の末尾 (h2) のままになる (2026-10-14 に同族の既存
+    欠陥として発見し、同じ変更で修正)。
+
+    足すのは**送る時点だけ**で、保存の時点ではない。A と B の間に挟まる
+    MEMORIZE / SPEAK / THINK (A の本文を役割 assistant で書き直す) の前駆は、
+    A が書く前に見ていた行のまま — A 自身の行を指さない。
     """
+
+    def test_rewrite_of_a_between_nodes_points_at_what_a_saw(self, node_env):
+        """A の直後に A の本文を書き直す MEMORIZE 相当は、A 自身の行を前駆にしない。
+
+        例: schedule_management の prepare_add (LLM + memorize) → TOOL →
+        record_add_params (MEMORIZE、役割 assistant、本文は A の出力)。
+        """
+        runtime, persona, adapter, client = node_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        client.replies.append("親の返事 A。")
+        _run_llm_node(runtime, persona, state, "reply_a")
+        a_id, a_meta = _row_by_content(adapter, "親の返事 A。")
+        seen_by_a = _last_recorded_id_in(adapter, client.sent[-1])
+        assert a_meta.get(PREDECESSOR_META_KEY) == seen_by_a
+
+        mid = runtime._store_memory(
+            persona, "書き直された A の本文。", role="assistant",
+            return_message_id=True, beat_state=state,
+        )
+        rewritten = (_metadata_of(adapter, mid) or {}).get(PREDECESSOR_META_KEY)
+        assert rewritten == seen_by_a
+        assert rewritten != a_id
 
     def test_second_parent_node_points_at_the_first_reply(self, node_env):
         runtime, persona, adapter, client = node_env
@@ -995,8 +1023,8 @@ class TestPredecessorAcrossConsecutiveParentNodes:
         assert b_meta.get(PREDECESSOR_META_KEY) == expected
 
 
-class TestRestorePresentedMessageIdsFromSent:
-    """材料の作り直し (sea/message_stamp.restore_presented_message_ids_from_sent)。"""
+class TestSyncPresentedMessageIdsWithSent:
+    """材料を送る列に合わせる (sea/message_stamp.sync_presented_message_ids_with_sent)。"""
 
     SENT = [
         {"role": "system", "content": "head"},
@@ -1008,34 +1036,60 @@ class TestRestorePresentedMessageIdsFromSent:
     ]
 
     def test_existing_material_is_never_overwritten(self):
-        from sea.message_stamp import restore_presented_message_ids_from_sent
+        from sea.message_stamp import sync_presented_message_ids_with_sent
 
         state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["hist-1", "round-1"]}
-        restore_presented_message_ids_from_sent(state, self.SENT)
+        sync_presented_message_ids_with_sent(state, self.SENT)
         assert state[PRESENTED_IDS_STATE_KEY] == ["hist-1", "round-1"]
+
+    def test_rows_after_the_tail_are_appended_without_rewriting(self):
+        """材料の末尾が送る列にあれば、その後ろの記録の行だけを足す。"""
+        from sea.message_stamp import sync_presented_message_ids_with_sent
+
+        sent = [
+            {"role": "system", "content": "head"},
+            {"id": "h1", "role": "user", "content": "h1"},
+            {"id": "h2", "role": "assistant", "content": "h2"},
+            {"role": "user", "content": "<system>action</system>"},
+            {"id": "a1", "role": "assistant", "content": "a1"},
+            {"role": "user", "content": "<system>tool result</system>"},
+            {"id": "a2", "role": "assistant", "content": "a2"},
+        ]
+        # 材料の中身 (先頭の hist-0 は送る列に無い) は変えず、h2 より後ろだけ足す
+        state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["hist-0", "h2"]}
+        sync_presented_message_ids_with_sent(state, sent)
+        assert state[PRESENTED_IDS_STATE_KEY] == ["hist-0", "h2", "a1", "a2"]
+        assert build_generation_stamp(state)[PREDECESSOR_META_KEY] == "a2"
+
+    def test_tail_already_last_is_left_alone(self):
+        from sea.message_stamp import sync_presented_message_ids_with_sent
+
+        state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["h1", "a1"]}
+        sync_presented_message_ids_with_sent(state, self.SENT)
+        assert state[PRESENTED_IDS_STATE_KEY] == ["h1", "a1"]
 
     @pytest.mark.parametrize("initial", ["absent", [], None, "not-a-list"])
     def test_missing_material_is_rebuilt_from_the_sent_list(self, initial):
-        from sea.message_stamp import restore_presented_message_ids_from_sent
+        from sea.message_stamp import sync_presented_message_ids_with_sent
 
         state: Dict[str, Any] = {}
         if initial != "absent":
             state[PRESENTED_IDS_STATE_KEY] = initial
-        restore_presented_message_ids_from_sent(state, self.SENT)
+        sync_presented_message_ids_with_sent(state, self.SENT)
         assert state[PRESENTED_IDS_STATE_KEY] == ["h1", "a1"]
         assert build_generation_stamp(state)[PREDECESSOR_META_KEY] == "a1"
 
     def test_a_list_without_record_rows_leaves_no_material(self):
         """提示ゼロの生成は刻印なしのまま (0 件の列を置かない)。"""
-        from sea.message_stamp import restore_presented_message_ids_from_sent
+        from sea.message_stamp import sync_presented_message_ids_with_sent
 
         state: Dict[str, Any] = {}
-        restore_presented_message_ids_from_sent(
+        sync_presented_message_ids_with_sent(
             state, [{"role": "system", "content": "head"},
                     {"role": "user", "content": "<system>x</system>"}],
         )
         assert PRESENTED_IDS_STATE_KEY not in state
-        restore_presented_message_ids_from_sent(state, [])
+        sync_presented_message_ids_with_sent(state, [])
         assert PRESENTED_IDS_STATE_KEY not in state
 
     def test_head_and_perception_are_not_counted_even_with_an_id(self):

@@ -20,13 +20,13 @@
     プロンプトの末尾に積まれるので、次のコールの前に
     :func:`append_presented_message_id` で列を伸ばす。伸ばさないと刻印が
     組成時点の履歴末尾を指したままになり、「実際に見ていた最後」でなくなる。
-    同じ Playbook の LLM ノードが続く場合も同じで、返事を記録へ書いたら
-    (sea/runtime_llm._finalize_beat) その行 id を列に足す — 次のノードは
-    送る列に積まれたその返事を見て書くから。
+    同じ Playbook の LLM ノードが続く場合も同じで、前のノードが記録へ書いた
+    返事は送る列に積まれ、次のノードはそれを見て書く。次のノードが送る直前に
+    :func:`sync_presented_message_ids_with_sent` がその行 id を列の末尾に足す。
 
     材料が落ちた後 (子 Playbook の中継で :func:`clear_presented_message_ids`
     が落とした後) に親が自前の LLM ノードで送るときは、送る直前に
-    :func:`restore_presented_message_ids_from_sent` が**これから送る列**から
+    :func:`sync_presented_message_ids_with_sent` が**これから送る列**から
     材料を作り直す。送る列で記録の行 id を持つのは履歴の行と、同じ Pulse の
     中で記録へ書いた自分の返事・スペルの周の発言 (sea/runtime_llm.py が
     保存した行 id を列の dict に載せる) なので、「親が返事 A を保存 → 子 →
@@ -55,7 +55,7 @@
 がその場面で、子のコールの三つ組は子 state に閉じていて親へは戻らない。
 前駆の材料も同じ場面で対にして落とす (:func:`clear_presented_message_ids`)。
 落とした後に親が自前の LLM ノードを回せば、三つ組は ``record_call_tokens``
-が、前駆は :func:`restore_presented_message_ids_from_sent` が載せ直すので、
+が、前駆は :func:`sync_presented_message_ids_with_sent` が載せ直すので、
 刻印が消えるのは「作り手が確定できない区間」(中継された本文) だけ。
 """
 
@@ -149,7 +149,7 @@ def clear_presented_message_ids(state: Optional[Dict[str, Any]]) -> None:
     子の final_state も親へ届かない。確定できないので刻印なしへ倒す。
 
     落とした後に親が自前の LLM ノードで送るときは、送る直前に
-    :func:`restore_presented_message_ids_from_sent` が送る列から材料を作り
+    :func:`sync_presented_message_ids_with_sent` が送る列から材料を作り
     直す — :func:`clear_call_tokens` の三つ組を ``record_call_tokens`` が
     載せ直すのと対になる。だから消えるのは「作り手が確定できない区間」
     (中継された本文を親の SPEAK / MEMORIZE が刻む場面) だけで、親が自分で
@@ -223,34 +223,51 @@ def append_presented_message_id(
     state[PRESENTED_IDS_STATE_KEY] = [*presented, str(message_id)]
 
 
-def restore_presented_message_ids_from_sent(
+def sync_presented_message_ids_with_sent(
     state: Optional[Dict[str, Any]], messages: Optional[Sequence[Dict[str, Any]]],
 ) -> None:
-    """材料が無いときだけ、これから送る列から「見た列」を作り直す。
+    """これから送る列に合わせて「見た列」を整える (作り直す / 末尾を伸ばす)。
 
-    使うのは LLM ノードが送る直前 (送る列が確定した後の一点)。材料が無い
-    (キー不在・空・list でない) のは、作り手が変わった区間の後で
-    :func:`clear_presented_message_ids` が落とした回 — 子 Playbook の中継の後に
-    親が自前の LLM ノードで生成する回がこれにあたる。この生成が見るのは
-    まさにこれから送る列なので、そこにある記録の行 id
-    (:func:`sea.runtime_context.sent_message_ids`) を並び順に材料にする。
-    三つ組を ``record_call_tokens`` が載せ直すのと対になる口。
+    使うのは LLM ノードが送る直前 (送る列が確定した後の一点)。この生成が見る
+    のはまさにこれから送る列なので、そこにある記録の行 id
+    (:func:`sea.runtime_context.sent_message_ids`) を材料に使う。
 
-    **材料が既にあるときは触らない** — ``prepare_context`` の提示列や、
-    スペルの周で :func:`append_presented_message_id` が伸ばした列が正。
+    - **材料が無い** (キー不在・空・list でない) とき: 送る列の記録の行 id を
+      並び順に材料にする。作り手が変わった区間の後で
+      :func:`clear_presented_message_ids` が落とした回 — 子 Playbook の中継の
+      後に親が自前の LLM ノードで生成する回がこれにあたる。三つ組を
+      ``record_call_tokens`` が載せ直すのと対になる口。
+    - **材料がある** とき: 書き換えず、送る列で材料の末尾より**後ろ**にある
+      記録の行だけを末尾に足す。同じ Playbook の前の LLM ノードが記録へ書いた
+      返事 (sea/runtime_llm.py が送る列のその行に記録の id を載せる) がこれで、
+      この生成はそれを見て書く。足すのは送る時点だけ — 保存の時点で足すと、
+      間に挟まる MEMORIZE / SPEAK / THINK (その返事の本文を書き直す) の前駆が
+      生成自身の行を指す。材料の末尾が送る列に無いときは何もしない (どこから
+      先を見たか確定できない)。``prepare_context`` の提示列や、スペルの周で
+      :func:`append_presented_message_id` が伸ばした列の中身は変えない。
+
     送る列に記録の行が一つも無ければ何もしない (提示ゼロの生成は刻印なしの
     まま)。
     """
     if not isinstance(state, dict) or not messages:
         return
-    current = state.get(PRESENTED_IDS_STATE_KEY)
-    if isinstance(current, list) and current:
-        return
     from sea.runtime_context import sent_message_ids
 
     sent = sent_message_ids(messages)
-    if sent:
+    if not sent:
+        return
+    current = state.get(PRESENTED_IDS_STATE_KEY)
+    if not isinstance(current, list) or not current:
         state[PRESENTED_IDS_STATE_KEY] = sent
+        return
+    tail = str(current[-1])
+    if tail not in sent:
+        return
+    # 末尾は送る列の中で最後に現れた位置で取る (同じ id が二度並ぶことは
+    # 無いはずだが、あっても「見た最後」から先だけを足す)。
+    after = sent[len(sent) - 1 - sent[::-1].index(tail) + 1:]
+    if after:
+        state[PRESENTED_IDS_STATE_KEY] = [*current, *after]
 
 
 def resolve_predecessor_message_id(state: Optional[Dict[str, Any]]) -> Optional[str]:
