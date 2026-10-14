@@ -14,6 +14,14 @@
     生成中に会話が割り込むとズレ、「ログの並びでは後ろに見えるが、実際は見て
     いない」が記録に残る。
 
+    **定義の段階**: ``predecessor_message_id`` は「SAIVerse がプロンプトとして
+    組んだ `messages` (クライアントへ渡す前) の中で、記録の行 id を持つ最後の
+    もの」。各クライアントが送る直前に行う変換 (本文の空な行を落とす、音声・
+    動画の説明を本文に足す、tool_calls をプロバイダの形へ変換する) は対象外。
+    クライアントの変換が行を落とす場合 (例: Anthropic は本文の空な tool_calls
+    だけの assistant を送らない) も、``predecessor_message_id`` は SAIVerse の
+    `messages` の段階で決まる。
+
     ``prepare_context`` は Playbook の実行 1 回につき一度しか走らないが、
     ひとつの Beat の中で追加の LLM コールを打つ経路がある — スペルループの
     ラウンド。そこでは自分が直前に永続化した行が
@@ -58,7 +66,8 @@
 
 ``state["last"]`` を生成以外の本文 (ツールの結果、子 Playbook の出力、エラー文)
 に書き換えうるノード — ``NodeType.TOOL`` / ``TOOL_CALL`` / ``EXEC`` /
-``SUBPLAY`` と、``assignments`` に ``"last"`` を持つ ``SET`` — の後では、
+``SUBPLAY`` と、``assignments`` に ``"last"`` を持つ ``SET`` と、``action`` が
+``{last}`` だけでない ``MEMORY`` (MEMORIZE) — の後では、
 ``compile_playbook`` (sea/langgraph_runner.py) がノード関数を包み、ノードが
 どう終わっても (正常終了・早期 return・例外) :func:`drop_stamp_material` で
 ``_last_call_tokens`` / ``_presented_message_ids`` / ``_unstored_reply`` を
@@ -181,7 +190,7 @@ def drop_stamp_material(state: Optional[Dict[str, Any]]) -> None:
     呼ぶのは ``compile_playbook`` (sea/langgraph_runner.py) だけ。
     ``state["last"]`` を生成以外の本文に書き換えうるノード (``NodeType.TOOL`` /
     ``TOOL_CALL`` / ``EXEC`` / ``SUBPLAY`` と、``assignments`` に ``"last"`` を
-    持つ ``SET``) の関数を包み、ノードが終わった後 (正常終了・早期 return・例外の
+    持つ ``SET`` と、``action`` が ``{last}`` だけでない ``MEMORY``) の関数を包み、ノードが終わった後 (正常終了・早期 return・例外の
     どれでも) に呼ぶ。
 
     - ``_last_call_tokens`` / ``_presented_message_ids``: 後ろの MEMORIZE /
@@ -260,31 +269,26 @@ def append_presented_message_id(
     state[PRESENTED_IDS_STATE_KEY] = [*presented, str(message_id)]
 
 
-def _dropped_as_empty_before_sending(message: Dict[str, Any]) -> bool:
-    """本文 (``content``) が空で、画像も持たない dict か。
-
-    ``drops_empty_messages`` のクライアント (Anthropic / xAI) は、こういう dict
-    を送る前に落とす。本文の判定は Anthropic の変換 (``content_to_text``) と、
-    画像の判定はその変換が添付を集める ``iter_image_media`` と同じ関数を使う。
-    """
-    from llm_clients.utils import content_to_text
-    from saiverse.media_utils import iter_image_media
-
-    if content_to_text(message.get("content")):
-        return False
-    return not iter_image_media(message.get("metadata"))
-
-
 def sync_presented_message_ids_with_sent(
     state: Optional[Dict[str, Any]], messages: Optional[Sequence[Dict[str, Any]]],
-    *,
-    drops_empty_messages: bool = False,
 ) -> None:
     """これから送る `messages`に合わせて `_presented_message_ids`を整える (作り直す / 末尾を伸ばす)。
 
     使うのは LLM ノードが送る直前 (送る `messages`が確定した後の一点)。この生成が見る
     のはまさにこれから送る `messages`なので、そこにある記録の行 id
     (:func:`sea.runtime_context.sent_message_ids`) を材料に使う。
+
+    **`messages` は SAIVerse がプロンプトとして組んだもの (クライアントへ渡す前)。**
+    ``predecessor_message_id`` は「この `messages` の中で記録の行 id を持つ最後の
+    もの」と定義する。``prepare_context`` が組んだ行の一覧
+    (``context_meta["presented_message_ids"]``) から取っていた定義と同じ段階で、
+    各クライアントが送る直前に行う変換 — 本文の空な行を落とす、音声・動画の説明を
+    本文に足す (``_inject_unsupported_media_summaries``)、tool_calls をプロバイダの
+    形へ変換する — は対象外。クライアントの変換がある行を落とす場合でも
+    (例: Anthropic の ``_prepare_anthropic_messages`` と xAI の
+    ``_build_xai_messages`` は本文の空な tool_calls だけの assistant を送らない)、
+    ``predecessor_message_id`` は SAIVerse の `messages` の段階で決まり、その行を
+    指しうる。
 
     - **材料が無い** (キー不在・空・list でない) とき: 送る `messages`の記録の行 id を
       並び順に材料にする。``state["last"]`` を生成以外の本文に書き換えうる
@@ -302,14 +306,8 @@ def sync_presented_message_ids_with_sent(
       いないので、送る `messages`から作り直す (残すと見ていない行を前駆に刻む)。
 
     **本文が空の tool_calls だけの返事**: ``_finalize_beat`` (sea/runtime_llm.py)
-    は、この返事にも記録の行 id があれば ``"id"`` を載せる。この dict をモデルへ
-    届けるかどうかは送る先のクライアントの変換で決まる — OpenAI 系
-    (``prepare_openai_messages``)・Gemini (FunctionCall)・OpenAI Codex・Ollama は
-    送り、Anthropic (``_prepare_anthropic_messages``) と xAI
-    (``_build_xai_messages``) は本文の空な dict を送る前に落とす。
-    ``drops_empty_messages`` が真 (``lg_llm_node`` がクライアントのクラス属性
-    ``DROPS_EMPTY_CONTENT_MESSAGES`` から渡す) なら、本文が空で画像も持たない
-    dict は ``"id"`` があっても数えない。数えると、モデルが見ていない行を前駆に刻む。
+    は、この返事にも記録の行 id があれば ``"id"`` を載せる。この dict は SAIVerse の
+    `messages` に入っているので、送る先のクライアントに関わらず数える (上の定義)。
 
     LLM ノードが記録へ書かなかった返事を、後ろの MEMORIZE / SPEAK / THINK ノードが
     ``state["last"]`` から記録へ書いた場合は、そのノードが書いた行の id を返事の
@@ -318,24 +316,24 @@ def sync_presented_message_ids_with_sent(
     残っていて (間に ``state["last"]`` を書き換えうるノードが走っていない —
     走ると ``compile_playbook`` が :func:`drop_stamp_material` で消す)、
     ``state["last"]`` が返事の dict の ``content`` と値で等しいときだけ。
-    ``{last}`` 以外の文字を含む ``action`` の MEMORIZE の後も、``state["last"]``
-    がその文に変わるので載らない。載らないとき、次の生成の前駆はそれより前の
-    記録の行を指す (見ていない行ではなく、手前の行)。
+    ``action`` が ``{last}`` だけでない MEMORIZE (例: ``{other}``、
+    ``"前置き: {last}"``) も ``state["last"]`` を作り直すノードなので、その後でも
+    ``compile_playbook`` が ``_unstored_reply`` を消し、載らない (作り直した値が
+    返事と同じ文字列でも)。載らないとき、次の生成の前駆はそれより前の記録の行を
+    指す (見ていない行ではなく、手前の行)。
 
-    送る `messages`に記録の行が一つも無ければ何もしない (提示ゼロの生成は刻印なしの
-    まま)。
+    `messages` が空、または記録の行 id が一つも無いときは、既存の
+    `_presented_message_ids` を :func:`clear_presented_message_ids` で消す (提示ゼロの
+    生成は刻印なし)。残すと、この生成が見ていない行を前駆に刻む。``state`` が
+    dict でないときは何もしない。
     """
-    if not isinstance(state, dict) or not messages:
+    if not isinstance(state, dict):
         return
     from sea.runtime_context import sent_message_ids
 
-    if drops_empty_messages:
-        messages = [
-            m for m in messages
-            if not (isinstance(m, dict) and m.get("id") and _dropped_as_empty_before_sending(m))
-        ]
-    sent = sent_message_ids(messages)
+    sent = sent_message_ids(messages) if messages else []
     if not sent:
+        clear_presented_message_ids(state)
         return
     current = state.get(PRESENTED_IDS_STATE_KEY)
     if not isinstance(current, list) or not current:
@@ -397,8 +395,8 @@ def unstored_reply_for_last(state: Optional[Dict[str, Any]]) -> Optional[Dict[st
 
     条件は三つ。① ``_unstored_reply`` が残っている — 間に ``state["last"]`` を
     生成以外の本文に書き換えうるノード (TOOL / TOOL_CALL / EXEC / SUBPLAY /
-    ``"last"`` を代入する SET) が走っていない (走ると ``compile_playbook`` が
-    消す)。② ``state["last"]`` が返事の dict の ``content`` と値で等しい。
+    ``"last"`` を代入する SET / ``action`` が ``{last}`` だけでない MEMORIZE) が
+    走っていない (走ると ``compile_playbook`` が消す)。② ``state["last"]`` が返事の dict の ``content`` と値で等しい。
     ③ 返事の dict にまだ ``"id"`` が無い。
 
     オブジェクトの同一性 (``is``) は使わない。独立に返された同じ短い文字列

@@ -1158,6 +1158,21 @@ class TestSyncPresentedMessageIdsWithSent:
         sync_presented_message_ids_with_sent(state, [])
         assert PRESENTED_IDS_STATE_KEY not in state
 
+    @pytest.mark.parametrize("messages", [
+        [], None,
+        [{"role": "system", "content": "head"},
+         {"role": "user", "content": "<system>x</system>"}],
+    ])
+    def test_existing_material_is_dropped_when_messages_have_no_record_rows(self, messages):
+        """Codex 四巡目 3: `messages` に記録の行 id が一つも無ければ、既存の
+        `_presented_message_ids` を消す (残すと送っていない行を前駆に刻む)。"""
+        from sea.message_stamp import sync_presented_message_ids_with_sent
+
+        state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["h1", "a1"]}
+        sync_presented_message_ids_with_sent(state, messages)
+        assert PRESENTED_IDS_STATE_KEY not in state
+        assert PREDECESSOR_META_KEY not in build_generation_stamp(state)
+
     def test_head_and_perception_are_not_counted_even_with_an_id(self):
         """head と知覚のまとめは、仮に id を持っても記録の行として数えない。"""
         from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
@@ -1235,10 +1250,11 @@ class TestFinalizeBeatCarriesTheStoredRowId:
     def test_tool_call_only_reply_carries_the_row_id(self):
         """本文が空の tool_calls だけの返事にも載せる (Codex 三巡目 3)。
 
-        OpenAI 系・Gemini はこの dict を送るので、載せないと次の生成の前駆が
-        この返事を飛ばす。Anthropic は本文の空な行を送る前に落とすので、
-        そのクライアントでは `sync_presented_message_ids_with_sent` の
-        `drops_empty_messages` がこの dict を数えない。
+        この dict は SAIVerse の `messages` に入っているので、
+        `sync_presented_message_ids_with_sent` は送る先のクライアントに関わらず
+        数える (Codex 四巡目 2)。Anthropic の `_prepare_anthropic_messages` は
+        この dict を送る前に落とすが、predecessor_message_id は SAIVerse の
+        `messages` の段階で決まる。
         """
         from llm_clients.anthropic_request_builder import _prepare_anthropic_messages
         from sea.message_stamp import sync_presented_message_ids_with_sent
@@ -1252,18 +1268,13 @@ class TestFinalizeBeatCarriesTheStoredRowId:
         msg = state["_messages"][-1]
         assert msg["content"] == ""
         assert msg["id"] == "row-9"
-        # 送るクライアントでは、この返事が `_presented_message_ids` の末尾になる
+        # この返事が `_presented_message_ids` の末尾になる
         sent_state: Dict[str, Any] = {}
         sync_presented_message_ids_with_sent(sent_state, state["_messages"])
         assert sent_state[PRESENTED_IDS_STATE_KEY] == ["h1", "row-9"]
-        # Anthropic へ渡すメッセージにはこの返事が無く、落とすクライアントでは数えない
+        # Anthropic へ渡すメッセージにはこの返事が無いが、数え方は変わらない
         prepared = _prepare_anthropic_messages(state["_messages"])
         assert all(m.get("role") != "assistant" for m in prepared)
-        dropped_state: Dict[str, Any] = {}
-        sync_presented_message_ids_with_sent(
-            dropped_state, state["_messages"], drops_empty_messages=True,
-        )
-        assert dropped_state[PRESENTED_IDS_STATE_KEY] == ["h1"]
 
     def test_tool_call_reply_also_carries_the_row_id(self):
         state: Dict[str, Any] = {
@@ -1820,6 +1831,82 @@ class TestCompilePlaybookDropsStampMaterial:
         assert len(_assistant_rows(adapter, "前置き: 返事 A。")) == 2
         assert "id" not in _reply_dicts(state, "返事 A。")[0]
 
+    @staticmethod
+    def _speak_ready(runtime, persona, adapter) -> None:
+        """SPEAK ノードが記憶に 1 行書けるようにする (建物への保存は偽物)。"""
+
+        class _History:
+            def add_to_persona_only(self, msg, **kwargs):
+                mid = adapter.append_persona_message(dict(msg))
+                return ("synced", str(mid)) if mid else ("failed", None)
+
+            def add_to_building_only(self, building_id, msg, heard_by=None):
+                return {"message_id": f"{building_id}:1", "content": msg["content"]}
+
+        persona.history_manager = _History()
+        runtime.manager.occupants = {}
+        runtime.manager.user_presence_status = "offline"
+        runtime.manager.gateway_handle_ai_replies = lambda *a, **k: None
+
+    def test_memorize_from_another_variable_then_speak_does_not_tie_the_id(
+        self, compiled_env,
+    ):
+        """Codex 四巡目 1: 保存しない LLM の返事が `"1"` → MEMORIZE
+        (`action="{other}"`、`state["other"] == "1"`) → SPEAK。MEMORIZE が
+        `state["last"]` を `{last}` 以外から作り直すので、`compile_playbook` が
+        その後で `_unstored_reply` を消し、SPEAK が保存した行の id は返事の dict に
+        付かない。MEMORIZE 自身の行の刻印は今までどおり (ノードの中で保存する)。"""
+        from sea.runtime_emitters import forget_saved_utterances
+
+        runtime, persona, adapter, client = compiled_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+        state["other"] = "1"
+        self._speak_ready(runtime, persona, adapter)
+
+        client.replies.append("1")
+        try:
+            _run_compiled(runtime, persona, [
+                _llm_node("reply", "record"),
+                _memorize_node("record", "talk", action="{other}"),
+                {"id": "talk", "type": "speak", "next": None},
+            ], state)
+        finally:
+            forget_saved_utterances()
+
+        assert "id" not in _reply_dicts(state, "1")[0]
+        rows = _assistant_rows(adapter, "1")
+        assert len(rows) == 2
+        _memo_id, memo_meta = rows[0]
+        assert memo_meta[PREDECESSOR_META_KEY] == h2
+        assert TOKENS_META_KEY in memo_meta
+
+    @pytest.mark.parametrize("action", ["{last}", None])
+    def test_memorize_of_last_only_then_speak_still_ties_the_id(self, compiled_env, action):
+        """対照: `action` が `{last}` だけ (省略も実行時は `{last}`) の MEMORIZE は
+        包まないので、MEMORIZE が保存した行の id が返事の dict に付く。"""
+        from sea.runtime_emitters import forget_saved_utterances
+
+        runtime, persona, adapter, client = compiled_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+        self._speak_ready(runtime, persona, adapter)
+
+        client.replies.append("1")
+        try:
+            _run_compiled(runtime, persona, [
+                _llm_node("reply", "record"),
+                _memorize_node("record", "talk", action=action),
+                {"id": "talk", "type": "speak", "next": None},
+            ], state)
+        finally:
+            forget_saved_utterances()
+
+        rows = _assistant_rows(adapter, "1")
+        assert len(rows) == 2
+        memo_id, _memo_meta = rows[0]
+        assert _reply_dicts(state, "1")[0]["id"] == memo_id
+
     @pytest.mark.parametrize("path", [
         "exec_not_found", "exec_denied", "subplay_not_found", "subplay_missing_name",
     ])
@@ -1995,9 +2082,12 @@ class TestSpeakIdSurvivesBuildingSaveFailure:
         assert _reply_dicts(state, "返事 A。")[0].get("id") == r_id
 
 
-class TestToolCallOnlyReplyAndEmptyContentDrop:
-    """Codex 三巡目 3: 本文が空の tool_calls だけの返事を、送る先のクライアントが
-    送るなら `_presented_message_ids` に数え、落とすなら数えない。"""
+class TestEmptyContentRowsCountAtSaiverseMessages:
+    """Codex 四巡目 2: predecessor_message_id は SAIVerse が組んだ `messages`
+    (クライアントへ渡す前) の段階で決める。本文が空の tool_calls だけの返事も、
+    本文が空で画像だけのユーザー発言も、記録の行 id があれば
+    `sync_presented_message_ids_with_sent` が数える。各クライアントが送る直前に
+    行を落とすかどうかは見ない。"""
 
     SENT = [
         {"role": "system", "content": "head"},
@@ -2008,15 +2098,14 @@ class TestToolCallOnlyReplyAndEmptyContentDrop:
         {"role": "tool", "tool_call_id": "call-1", "name": "calc", "content": "42"},
     ]
 
-    @pytest.mark.parametrize("drops, expected", [(False, "tc-row"), (True, "h1")])
-    def test_sync_counts_the_tool_call_reply_only_when_it_is_sent(self, drops, expected):
+    def test_sync_counts_the_tool_call_only_reply(self):
         from sea.message_stamp import sync_presented_message_ids_with_sent
 
         state: Dict[str, Any] = {}
-        sync_presented_message_ids_with_sent(state, self.SENT, drops_empty_messages=drops)
-        assert build_generation_stamp(state)[PREDECESSOR_META_KEY] == expected
+        sync_presented_message_ids_with_sent(state, self.SENT)
+        assert build_generation_stamp(state)[PREDECESSOR_META_KEY] == "tc-row"
 
-    def test_drop_does_not_skip_a_row_with_an_image(self, tmp_path):
+    def test_sync_counts_an_image_only_row(self, tmp_path):
         from sea.message_stamp import sync_presented_message_ids_with_sent
 
         image = tmp_path / "x.png"
@@ -2028,51 +2117,32 @@ class TestToolCallOnlyReplyAndEmptyContentDrop:
                                      "mime_type": "image/png"}]}},
         ]
         state: Dict[str, Any] = {}
-        sync_presented_message_ids_with_sent(state, sent, drops_empty_messages=True)
+        sync_presented_message_ids_with_sent(state, sent)
         assert build_generation_stamp(state)[PREDECESSOR_META_KEY] == "img"
 
-    def test_client_flags_match_what_each_conversion_sends(self):
-        """クラス属性が、各クライアントの変換が実際に送るかどうかと一致する。"""
-        from llm_clients.anthropic import AnthropicClient
+    def test_client_conversions_that_drop_the_row_do_not_change_the_count(self):
+        """Anthropic の `_prepare_anthropic_messages` と xAI の `_build_xai_messages` は
+        本文の空な tool_calls だけの assistant を送らないが、
+        `sync_presented_message_ids_with_sent` は `messages` の段階で数える。"""
         from llm_clients.anthropic_request_builder import _prepare_anthropic_messages
-        from llm_clients.base import LLMClient
-        from llm_clients.gemini import GeminiClient
-        from llm_clients.nvidia_nim import NvidiaNIMClient
-        from llm_clients.ollama import OllamaClient
-        from llm_clients.openai import OpenAIClient
-        from llm_clients.openai_codex import OpenAICodexClient
-        from llm_clients.openai_message_preparer import prepare_openai_messages
-        from llm_clients.xai import XAIClient, _build_xai_messages
+        from llm_clients.xai import _build_xai_messages
+        from sea.message_stamp import sync_presented_message_ids_with_sent
 
-        assert AnthropicClient.DROPS_EMPTY_CONTENT_MESSAGES is True
         assert all(m.get("role") != "assistant" for m in _prepare_anthropic_messages(self.SENT))
-        assert XAIClient.DROPS_EMPTY_CONTENT_MESSAGES is True
         # system + h1 だけが残る (本文の空な tool_calls の返事と tool の行は送られない)
         assert len(_build_xai_messages(self.SENT, supports_images=False)) == 2
 
-        for cls in (LLMClient, OpenAIClient, NvidiaNIMClient, OpenAICodexClient, GeminiClient, OllamaClient):
-            assert cls.DROPS_EMPTY_CONTENT_MESSAGES is False, cls
-        prepared = prepare_openai_messages(self.SENT, supports_images=False)
-        assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in prepared)
+        state: Dict[str, Any] = {}
+        sync_presented_message_ids_with_sent(state, self.SENT)
+        assert state[PRESENTED_IDS_STATE_KEY] == ["h1", "tc-row"]
 
-    def test_llama_cached_client_reports_the_inner_clients_flag(self):
-        from llm_clients.llama_cache import LlamaCachedClient
-
-        for inner_flag in (False, True):
-            inner = SimpleNamespace(DROPS_EMPTY_CONTENT_MESSAGES=inner_flag)
-            wrapper = LlamaCachedClient.__new__(LlamaCachedClient)
-            wrapper._inner = inner
-            assert wrapper.DROPS_EMPTY_CONTENT_MESSAGES is inner_flag
-
-    @pytest.mark.parametrize("drops", [False, True])
-    def test_llm_node_reads_the_flag_from_the_client(self, node_env, drops):
-        """`lg_llm_node` が送る直前に、使うクライアントのクラス属性を渡す。"""
+    def test_llm_node_counts_the_tool_call_only_reply(self, node_env):
+        """`lg_llm_node` が送る直前に `messages` の段階で数える (クライアントを問わない)。"""
         import asyncio
 
         from sea.runtime_llm import lg_llm_node
 
         runtime, persona, adapter, client = node_env
-        client.DROPS_EMPTY_CONTENT_MESSAGES = drops
         h1, h2, messages = _seed_history(runtime, persona)
         tc_row = runtime._store_memory(
             persona, '{"tool_calls": "calc"}', role="assistant", return_message_id=True,
@@ -2090,4 +2160,4 @@ class TestToolCallOnlyReplyAndEmptyContentDrop:
         asyncio.run(lg_llm_node(runtime, _llm_node_def("reply_b"), persona, "b1", pb, None)(state))
 
         _b_id, b_meta = _row_by_content(adapter, "返事 B。")
-        assert b_meta.get(PREDECESSOR_META_KEY) == (h2 if drops else str(tc_row))
+        assert b_meta.get(PREDECESSOR_META_KEY) == str(tc_row)

@@ -24,9 +24,21 @@ def _may_rewrite_last_with_non_generated_text(node_def: Any) -> bool:
     エラー文・代入した値) に書き換えうる種類のノードか。
 
     ``NodeType.TOOL`` / ``TOOL_CALL`` / ``EXEC`` / ``SUBPLAY`` と、
-    ``assignments`` に ``"last"`` キーを持つ ``SET``。``LLM`` / ``MEMORIZE`` /
-    ``SPEAK`` / ``THINK`` / ``SAY`` / ``PASS`` / ``STELIS_START`` /
-    ``STELIS_END`` / ``"last"`` を代入しない ``SET`` は対象外。
+    ``assignments`` に ``"last"`` キーを持つ ``SET`` と、``action`` が ``{last}``
+    だけでない ``MEMORY`` (MEMORIZE)。``LLM`` / ``SPEAK`` / ``THINK`` / ``SAY`` /
+    ``PASS`` / ``STELIS_START`` / ``STELIS_END`` / ``"last"`` を代入しない
+    ``SET`` / ``action`` が ``{last}`` だけ (または省略・空。``lg_memorize_node``
+    は実行時に ``{last}`` を使う) の ``MEMORY`` は対象外。
+
+    MEMORIZE は ``state["last"] = memo_text`` で ``state["last"]`` を ``action``
+    のテンプレートから作り直す。``action`` が ``{last}`` 以外 (例: ``{other}``、
+    ``"前置き: {last}"``) なら、作り直した ``state["last"]`` は前の LLM ノードの
+    返事の本文ではない — 値が同じ文字列 (例: ``"1"``) でも。包まないと
+    ``_unstored_reply`` が残り、後ろの SPEAK / THINK / MEMORIZE が保存した行の
+    id が前の返事の dict に付く。``{last}`` だけの MEMORIZE は包まない —
+    ``state["last"]`` はそのままで、後ろのノードが返事の dict に id を付けるには
+    ``_unstored_reply`` が残っている必要がある。MEMORIZE 自身の行の刻印は
+    ノードの中 (``_store_memory`` の ``beat_state``) で済むので、包んでも変わらない。
     """
     from sea.playbook_models import NodeType
 
@@ -36,6 +48,10 @@ def _may_rewrite_last_with_non_generated_text(node_def: Any) -> bool:
     if node_type == NodeType.SET:
         assignments = getattr(node_def, "assignments", None)
         return isinstance(assignments, dict) and "last" in assignments
+    if node_type == NodeType.MEMORY:
+        # lg_memorize_node と同じ既定 (`action or "{last}"`) で判定する。
+        action = getattr(node_def, "action", None) or "{last}"
+        return action != "{last}"
     return False
 
 

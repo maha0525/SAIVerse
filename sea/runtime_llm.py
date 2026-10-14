@@ -1109,11 +1109,10 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     # の前駆が、その本文を生んだ生成自身の行を指してしまう。
     #
     # 本文が空の返事 (tool_calls だけ) にも載せる。記録には JSON 本文で書かれて
-    # いて、送る `messages` の dict は本文が空。この dict をモデルへ届けるかは
-    # 送る先のクライアントで決まる — OpenAI 系・Gemini は送り、Anthropic・xAI は
-    # 本文の空な dict を送る前に落とす。落とすクライアントでは、次の LLM ノードの
-    # sync_presented_message_ids_with_sent (drops_empty_messages) がこの dict を
-    # 数えない (sea/message_stamp.py)。
+    # いて、送る `messages` の dict は本文が空。predecessor_message_id は SAIVerse が
+    # 組んだ `messages` の段階で決めるので (sea/message_stamp.py)、送る先の
+    # クライアントの変換がこの dict を落とす場合 (Anthropic・xAI) も、次の LLM
+    # ノードの sync_presented_message_ids_with_sent はこの dict を数える。
     #
     # この LLM ノードが返事を記憶に保存しなかった (`_beat_memorized` が立っていない。
     # 本文は空でない) ときは、返事の dict を書いておく
@@ -5333,14 +5332,10 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             # compile_playbook が落とした後) なら送る `messages`から
             # 作り直し、材料がある回は中身を変えずに、送る `messages`で末尾より後ろにある
             # 記録の行 (同じ Playbook の前の LLM ノードが書いた返事) だけを足す。
-            # 本文の空な dict を送る前に落とすクライアント (クラス属性
-            # DROPS_EMPTY_CONTENT_MESSAGES) では、その dict を数えない。
-            sync_presented_message_ids_with_sent(
-                state, messages,
-                drops_empty_messages=(
-                    getattr(llm_client, "DROPS_EMPTY_CONTENT_MESSAGES", False) is True
-                ),
-            )
+            # 数えるのはこの ``messages`` (クライアントへ渡す前) の行で、各クライアントが
+            # 送る直前に行う変換 (本文の空な行を落とす等) は見ない — predecessor_message_id
+            # の定義は SAIVerse が組んだ `messages` の段階 (sea/message_stamp.py)。
+            sync_presented_message_ids_with_sent(state, messages)
 
             # Check if tools are available for this node
             available_tools = getattr(node_def, "available_tools", None)

@@ -236,10 +236,6 @@ class XAIClient(LLMClient):
     streaming, tool calling, structured output, and image understanding.
     """
 
-    #: _build_xai_messages は本文の空な system / user / assistant を送る前に落とし、
-    #: tool_calls も送らない (LLMClient の説明を参照)。
-    DROPS_EMPTY_CONTENT_MESSAGES = True
-
     def tool_spec_format(self) -> ToolSpecFormat:
         return "openai"
 
