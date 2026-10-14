@@ -967,6 +967,82 @@ class TestPredecessorAfterSubPlaybook:
         assert PREDECESSOR_META_KEY not in (_metadata_of(adapter, mid) or {})
 
 
+class TestPredecessorAfterExec:
+    """EXEC で走った子 Playbook の「見た列」を、親の次の返事の前駆に使わないこと。
+
+    子は親の state をそのまま受け取って走るので、子の _prepare_context が子の
+    提示列で親の材料を上書きする (sea/runtime_runner.py)。EXEC は子の本文を
+    親の state["last"] に中継する点も SUBPLAY と同じ。Codex 2026-10-14 high:
+    以前は EXEC が材料を落とさず、親の次の返事が親の見ていない子の行を前駆に
+    刻みえた。
+    """
+
+    def _run_exec(self, runtime, persona, state, *, child_row_text: str) -> str:
+        import asyncio
+
+        child_ids: Dict[str, str] = {}
+
+        def _child(sub_pb, p, bid, sub_input, auto_mode, record_history,
+                   parent_state, event_callback, **kwargs):
+            # 親の組成の後に記録へ届いた行 X を、子の再組成が拾った形
+            x_id = runtime._store_memory(
+                p, child_row_text, role="assistant", return_message_id=True,
+            )
+            child_ids["x"] = str(x_id)
+            record_presented_message_ids(
+                parent_state, {"presented_message_ids": [str(x_id)]},
+            )
+            return [child_row_text]
+
+        runtime._run_playbook = Mock(side_effect=_child)
+        runtime.decide_playbook_permission = Mock(return_value=(True, None))
+        runtime._append_tool_result_message = Mock()
+        node_def = SimpleNamespace(
+            id="exec", playbook_source="selected_playbook",
+            args_source="selected_args", args=None, execution="inline",
+        )
+        state["selected_playbook"] = "child_pb"
+        node_fn = runtime._runtime_engine.lg_exec_node(
+            node_def, SimpleNamespace(name="parent_pb"), persona, "b1", False, [], None,
+        )
+        asyncio.run(node_fn(state))
+        return child_ids["x"]
+
+    def test_exec_drops_the_childs_material(self, node_env, monkeypatch):
+        from sea import runtime_engine
+
+        monkeypatch.setattr(runtime_engine, "log_sea_trace", lambda *a, **k: None)
+        runtime, persona, _adapter, _client = node_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+        record_call_tokens(state, _usage())
+
+        self._run_exec(runtime, persona, state, child_row_text="子が EXEC で書いた本文。")
+
+        assert state["last"] == "子が EXEC で書いた本文。"
+        assert build_generation_stamp(state) == {}
+
+    def test_parent_reply_after_exec_points_at_what_the_parent_sent(
+        self, node_env, monkeypatch,
+    ):
+        from sea import runtime_engine
+
+        monkeypatch.setattr(runtime_engine, "log_sea_trace", lambda *a, **k: None)
+        runtime, persona, adapter, client = node_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        x_id = self._run_exec(runtime, persona, state, child_row_text="子が EXEC で書いた本文。")
+        client.replies.append("EXEC の後の親の返事。")
+        _run_llm_node(runtime, persona, state, "reply_after_exec")
+
+        _id, meta = _row_by_content(adapter, "EXEC の後の親の返事。")
+        expected = _last_recorded_id_in(adapter, client.sent[-1])
+        assert expected == h2
+        assert meta.get(PREDECESSOR_META_KEY) == expected
+        assert meta.get(PREDECESSOR_META_KEY) != x_id
+
+
 class TestPredecessorAcrossConsecutiveParentNodes:
     """子 Playbook が無くても、親の LLM ノード A (memorize あり) の後に親の LLM
     ノード B が続くとき、B の前駆は B が実際に見た A を指すこと。
@@ -1035,12 +1111,24 @@ class TestSyncPresentedMessageIdsWithSent:
         {"role": "user", "content": "<system>action</system>"},
     ]
 
-    def test_existing_material_is_never_overwritten(self):
+    def test_material_whose_tail_is_not_sent_is_rebuilt(self):
+        """材料の末尾が送る列に無いなら、材料はこの生成が見るものではない。
+
+        残すと見ていない行 (round-1) を前駆に刻むので、送る列から作り直す。
+        """
         from sea.message_stamp import sync_presented_message_ids_with_sent
 
         state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["hist-1", "round-1"]}
         sync_presented_message_ids_with_sent(state, self.SENT)
-        assert state[PRESENTED_IDS_STATE_KEY] == ["hist-1", "round-1"]
+        assert state[PRESENTED_IDS_STATE_KEY] == ["h1", "a1"]
+
+    def test_material_is_not_rewritten_when_the_tail_is_sent(self):
+        """材料の末尾が送る列にあれば、末尾までの中身は変えない (足すだけ)。"""
+        from sea.message_stamp import sync_presented_message_ids_with_sent
+
+        state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["not-sent-0", "h1"]}
+        sync_presented_message_ids_with_sent(state, self.SENT)
+        assert state[PRESENTED_IDS_STATE_KEY] == ["not-sent-0", "h1", "a1"]
 
     def test_rows_after_the_tail_are_appended_without_rewriting(self):
         """材料の末尾が送る列にあれば、その後ろの記録の行だけを足す。"""
@@ -1165,6 +1253,31 @@ class TestFinalizeBeatCarriesTheStoredRowId:
         state2: Dict[str, Any] = {}
         self._finalize(state2, memorize=True, store_return="")  # 保存に失敗
         assert "id" not in state2["_messages"][-1]
+
+    def test_tool_call_only_reply_carries_no_id(self):
+        """本文が空の tool_calls だけの返事には載せない。
+
+        記録には JSON 本文で書かれているが、送る列の dict は本文が空で、
+        Anthropic は本文の空な行を送る前に落とす。載せると次の生成の前駆が
+        モデルに届いていない行を指す (Codex 2026-10-14 high)。
+        """
+        from llm_clients.anthropic_request_builder import _prepare_anthropic_messages
+        from sea.runtime_context import sent_message_ids
+
+        state: Dict[str, Any] = {
+            "tool_called": True, "_last_tool_call_id": "call-1",
+            "_last_tool_name": "calc", "_last_tool_args_json": "{}",
+            "has_speak_content": False,
+        }
+        self._finalize(state, memorize=True)
+        msg = state["_messages"][-1]
+        assert msg["content"] == ""
+        assert "id" not in msg
+        # 送る列から作り直しても、記録の行として数えるのは履歴の h1 だけ
+        assert sent_message_ids(state["_messages"]) == ["h1"]
+        # 実際に Anthropic へ渡す列にもこの返事は無い (載せなかった理由の裏付け)
+        prepared = _prepare_anthropic_messages(state["_messages"])
+        assert all(m.get("role") != "assistant" for m in prepared)
 
     def test_tool_call_reply_also_carries_the_row_id(self):
         state: Dict[str, Any] = {

@@ -1105,8 +1105,17 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     # 足すと、この後に続く MEMORIZE / SPEAK / THINK ノード (この返事の本文を
     # 役割 assistant で書き直す — 例: schedule_management の record_add_params)
     # の前駆が、その本文を生んだ生成自身の行を指してしまう。
+    #
+    # 本文が空の返事 (tool_calls だけ) には載せない。記録には JSON 本文で
+    # 書かれているが、送る列の dict は本文が空で、Anthropic などは本文の空な
+    # 行を送る前に落とす (llm_clients/anthropic_request_builder.py) — 載せると
+    # 次の生成の前駆が、モデルに届いていない行を指す。
     _beat_memory_id = state.pop(BEAT_MEMORY_ID_KEY, None)
-    if isinstance(_beat_memory_id, str) and _beat_memory_id:
+    _reply_content = _beat_reply_msg.get("content")
+    if (
+        isinstance(_beat_memory_id, str) and _beat_memory_id
+        and isinstance(_reply_content, str) and _reply_content.strip()
+    ):
         _beat_reply_msg["id"] = _beat_memory_id
 
     # Debug: log speak_content at end of LLM node
