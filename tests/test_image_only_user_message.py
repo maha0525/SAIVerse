@@ -6,7 +6,7 @@
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PIL import Image
@@ -27,10 +27,14 @@ def png_path(tmp_path):
 
 @pytest.fixture(autouse=True)
 def fake_summary():
-    # 画像の説明は本来 LLM で作るので、隔離テストでは固定の文に差し替える
+    # 画像の説明は本来 LLM で作るので、隔離テストでは固定の文に差し替える。
+    # Gemini は関数を自分のモジュールに取り込んでいるので、そちらも差し替える
+    # (片方だけだと本物の生成まで届く)。
     with patch(
         "saiverse.media_summary.ensure_image_summary", return_value=SUMMARY,
-    ) as mocked:
+    ) as mocked, patch(
+        "llm_clients.gemini.ensure_image_summary", new=mocked,
+    ):
         yield mocked
 
 
@@ -140,3 +144,37 @@ def test_anthropic_keeps_image_only_user(png_path):
 
     assert len(prepared) == 1
     assert [block["type"] for block in prepared[0]["content"]] == ["image"]
+
+
+# --- Gemini (画像非対応のモデルでも、画像を説明の文にして送る) -------------------
+
+def _gemini_contents(messages, *, supports_images):
+    from llm_clients.gemini import GeminiClient
+    from saiverse.model_configs import get_model_config
+
+    with patch(
+        "llm_clients.gemini.build_gemini_clients",
+        return_value=(MagicMock(), MagicMock(), MagicMock()),
+    ):
+        client = GeminiClient(
+            "gemini-4-argon", config=get_model_config("gemini-4-argon"),
+            supports_images=supports_images,
+        )
+    _system, contents = client._convert_messages(messages)
+    return contents
+
+
+def test_gemini_image_only_user_gets_note_when_model_has_no_vision(png_path):
+    contents = _gemini_contents([_image_only_user(png_path)], supports_images=False)
+
+    user_parts = [c for c in contents if c.role == "user"][-1].parts
+    texts = [p.text for p in user_parts if p.text]
+    assert any(SUMMARY in t for t in texts)
+    assert not any(p.inline_data for p in user_parts)
+
+
+def test_gemini_keeps_image_only_user_with_embedded_image(png_path):
+    contents = _gemini_contents([_image_only_user(png_path)], supports_images=True)
+
+    user_parts = [c for c in contents if c.role == "user"][-1].parts
+    assert any(p.inline_data for p in user_parts)

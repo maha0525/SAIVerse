@@ -399,33 +399,40 @@ def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
     """Extract validated image descriptors from a metadata payload.
 
     The metadata may contain a "media" list with mixed type entries
-    (image/audio/video) or a legacy "images" list (image-only). When reading
+    (image/audio/video) and/or a legacy "images" list (image-only). When reading
     from "media", entries whose `type` is not "image" (or whose mime_type does
     not start with "image/") are filtered out — without this, audio/video
     descriptors would be wrongly treated as images.
+
+    両方の置き場を読む。/chat/send は画像を "images"、音声・動画を "media" に
+    分けて書くので、"media" があるときに "images" を読まないと、画像と音声を
+    一緒に送った発言から画像が消える (2026-10-14 まで実際に消えていた)。
+    "images" の項目が "media" で拾ったのと同じファイルなら重ねて返さない
+    (一つの置き場の中の重複は従来どおりそのまま返す)。
     """
     results: List[Dict[str, Any]] = []
     if not isinstance(metadata, dict):
         return results
 
-    # First try the unified "media" list with type filtering
+    # (項目, "media" から来たか)。"media" は種類で絞り、"images" は全部画像とみなす
+    candidates: List[Tuple[Any, bool]] = []
     media = metadata.get("media")
-    use_type_filter = isinstance(media, list)
-    if not isinstance(media, list):
-        # Legacy "images" key: every entry is assumed to be an image
-        media = metadata.get("images")
-        if not isinstance(media, list):
-            return results
+    if isinstance(media, list):
+        candidates.extend((item, True) for item in media)
+    images = metadata.get("images")
+    if isinstance(images, list):
+        candidates.extend((item, False) for item in images)
 
-    for item in media:
+    media_paths: set = set()
+    for item, use_type_filter in candidates:
         if not isinstance(item, dict):
             continue
 
         # When media comes from metadata["media"], it may carry mixed media
         # types; keep only image entries based on `type` or mime prefix.
         if use_type_filter:
-            item_type = (item.get("type") or "").lower()
-            item_mime = (item.get("mime_type") or "").lower()
+            item_type = str(item.get("type") or "").lower()
+            item_mime = str(item.get("mime_type") or "").lower()
             if item_type:
                 if item_type != "image":
                     continue
@@ -450,6 +457,12 @@ def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
 
         if path is None or not path.exists():
             LOGGER.warning("Image URI %s could not be resolved or file missing (path=%s)", uri, path)
+            continue
+
+        path_key = str(path)
+        if use_type_filter:
+            media_paths.add(path_key)
+        elif path_key in media_paths:
             continue
 
         mime_type = item.get("mime_type") or mimetypes.guess_type(path)[0] or "image/png"

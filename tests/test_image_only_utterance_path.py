@@ -37,6 +37,15 @@ BID = "room"
 LISTENER = "listener"
 
 
+@pytest.fixture(autouse=True)
+def no_real_summary():
+    # 画像の説明の生成は LLM を呼ぶので、どの経路から届いても固定の文で返す
+    with patch(
+        "saiverse.media_summary.ensure_image_summary", return_value="[合成] 画像の説明",
+    ) as mocked, patch("llm_clients.gemini.ensure_image_summary", new=mocked):
+        yield mocked
+
+
 @pytest.fixture
 def png_path(tmp_path):
     path = tmp_path / "photo.png"
@@ -288,3 +297,49 @@ def test_no_attachments_means_empty():
     for metadata in (None, {}, {"images": []}, {"media": "x"}, {"tags": ["conversation"]}):
         assert not has_attachments(metadata)
         assert describe_attachments(metadata) == ""
+
+
+# --- 画像と音声を一緒に送った発言 ------------------------------------------------
+
+def test_image_survives_when_sent_together_with_audio(png_path, tmp_path):
+    # /chat/send は画像を images、音声を media に書く。media があるときに images を
+    # 読まないと、画像が全プロバイダで消える (2026-10-14 まで実際に消えていた)。
+    from saiverse.media_utils import iter_image_media
+
+    audio = tmp_path / "voice.ogg"
+    audio.write_bytes(b"ogg")
+    metadata = _image_metadata(png_path)
+    metadata["media"] = [{"type": "audio", "path": str(audio), "mime_type": "audio/ogg"}]
+
+    images = iter_image_media(metadata)
+    assert [str(item["path"]) for item in images] == [str(png_path)]
+
+    history = [{"role": "user", "content": "", "metadata": metadata}]
+    xai_messages = _build_xai_messages(history, supports_images=True)
+    assert "image_url" in [p.WhichOneof("content") for p in xai_messages[0].content]
+
+
+def test_same_image_listed_in_both_places_is_sent_once(png_path):
+    from saiverse.media_utils import iter_image_media
+
+    metadata = _image_metadata(png_path)
+    metadata["media"] = [{"type": "image", "path": str(png_path), "mime_type": "image/png"}]
+    assert len(iter_image_media(metadata)) == 1
+
+
+# --- 自動想起 ---------------------------------------------------------------------
+
+def test_entity_recall_does_not_reuse_an_older_utterance_for_an_image_only_turn(png_path):
+    # 最新のユーザー発言が画像だけのとき、前の発言を「いま言われたこと」として
+    # エンティティ想起を引き直さない
+    from sea.auto_recall import _last_user_utterance
+
+    messages = [
+        {"role": "user", "content": "アイフィの話をしよう"},
+        {"role": "assistant", "content": "いいね"},
+        {"role": "user", "content": "", "metadata": _image_metadata(png_path)},
+    ]
+    assert _last_user_utterance(messages) is None
+
+    messages[-1]["content"] = "これ見て"
+    assert _last_user_utterance(messages) == "これ見て"

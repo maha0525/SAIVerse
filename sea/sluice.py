@@ -508,15 +508,16 @@ def _media_rules(model: str) -> _MediaRules:
       送らない。埋め込むのは画像対応のモデルの user の画像だけで、それ以外の
       system 以外は注記。
     - ``gemini_native`` (gemini.py の _convert_messages): 上限は GEMINI (設定の
-      ``max_image_embeds`` は読まない)。画像非対応のモデルは画像を集めないので、
-      画像も注記も送らない。画像対応のモデルでは全役割の画像が枠を使い、system
-      の画像は送らず、それ以外は役割によらず枠の内側を埋め込み、枠の外を注記。
+      ``max_image_embeds`` は読まない)。画像非対応のモデルは system 以外の画像を
+      全部注記 (2026-10-14 から。それまでは画像も注記も送っていなかった)。画像
+      対応のモデルでは全役割の画像が枠を使い、system の画像は送らず、それ以外は
+      役割によらず枠の内側を埋め込み、枠の外を注記。
       音声・動画は設定の ``supports_audio`` / ``supports_video`` が真なら埋め込み
       (その量はここでは数えない)、偽なら system 以外で注記。
     - ``xai_native`` (xai.py の _build_xai_messages): 上限は XAI (設定の
       ``max_image_embeds`` は読まない)。全役割の画像が枠を使う。画像対応のモデル
-      の user の画像だけを、枠の内側なら埋め込み、枠の外なら注記。user 以外の
-      画像と、画像非対応のモデルの画像は送らない。
+      の user の画像だけを、枠の内側なら埋め込み、枠の外なら注記。画像非対応の
+      モデルでは user の画像を注記 (2026-10-14 から)。user 以外の画像は送らない。
     - ``ollama_compat`` (OllamaClient): 画像は送らない (メタデータの画像を読む
       コードが無い)。
     - それ以外の protocol は factory がクライアントを作れない (ValueError)。
@@ -551,12 +552,11 @@ def _media_rules(model: str) -> _MediaRules:
             video_note_roles=_ALL_ROLES,
         )
     if protocol == "gemini_native":
-        image_roles = _NON_SYSTEM_ROLES if supports_images else _NO_ROLES
         return _MediaRules(
             image_limit=parse_attachment_limit("GEMINI"),
             image_limit_roles=_ALL_ROLES,
-            image_embed_roles=image_roles,
-            image_note_roles=image_roles,
+            image_embed_roles=_NON_SYSTEM_ROLES if supports_images else _NO_ROLES,
+            image_note_roles=_NON_SYSTEM_ROLES,
             audio_note_roles=(
                 _NO_ROLES if config.get("supports_audio") else _NON_SYSTEM_ROLES
             ),
@@ -565,12 +565,13 @@ def _media_rules(model: str) -> _MediaRules:
             ),
         )
     if protocol == "xai_native":
-        image_roles = _USER_ROLE_ONLY if supports_images else _NO_ROLES
+        # 画像の説明の文は、画像非対応のモデルにも user の発言へ足して送る
+        # (llm_clients/xai.py の _build_xai_messages)
         return _MediaRules(
             image_limit=parse_attachment_limit("XAI"),
             image_limit_roles=_ALL_ROLES,
-            image_embed_roles=image_roles,
-            image_note_roles=image_roles,
+            image_embed_roles=_USER_ROLE_ONLY if supports_images else _NO_ROLES,
+            image_note_roles=_USER_ROLE_ONLY,
             audio_note_roles=_ALL_ROLES,
             video_note_roles=_ALL_ROLES,
         )

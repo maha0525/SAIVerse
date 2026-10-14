@@ -536,7 +536,11 @@ def _store_image_attachment(
         logging.warning("Failed to create picture item: %s", e, exc_info=True)
 
     summary: Optional[str] = None
-    if item_id and (user_message or prev_ai_message):
+    # 文脈 (本文・直前のペルソナの発言) が無いときは、既定では概要を作らない
+    # (必要になったときに ensure_image_summary が作る)。メディアの内容を想起に
+    # 使う設定 (sync_summary) が ON なら、部屋の最初の発言が画像だけでも、
+    # 想起の検索語に載せる概要がここで要るので作る。
+    if item_id and (user_message or prev_ai_message or sync_summary):
         if sync_summary:
             try:
                 from saiverse.media_summary import generate_contextual_image_description

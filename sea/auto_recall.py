@@ -545,7 +545,15 @@ def build_query(messages: List[Dict[str, Any]], *, n: Optional[int] = None) -> s
 
 
 def _last_user_utterance(messages: List[Dict[str, Any]]) -> Optional[str]:
-    """会話本文メッセージのうち role=user の最後の1件の content を返す。"""
+    """会話本文メッセージのうち role=user の最後の1件の content を返す。
+
+    最新のユーザー発言が本文の空 (画像だけを送った等) なら None。本文のある
+    発言まで遡ると、前の話題を「いま言われたこと」としてエンティティ想起を
+    引き直してしまう。
+    """
+    latest = _latest_user_message(messages)
+    if latest is not None and not str(latest.get("content") or "").strip():
+        return None
     for m in reversed(messages):
         if not _is_conversational_message(m):
             continue
