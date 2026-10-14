@@ -399,3 +399,108 @@ def test_same_image_written_differently_is_still_sent_once(png_path):
     }]
     assert len(iter_image_media(metadata)) == 1
     assert describe_attachments(metadata) == "画像 1 件"
+
+
+# --- 画像だけのターンの、埋め込み検索の検索語 -----------------------------------
+
+def _image_only_turn(png_path):
+    from sea.eviction_plan import CONSUMED_PERCEPTION_KEY
+
+    metadata = _image_metadata(png_path)
+    metadata["images"][0]["summary"] = "緑の四角の画像"
+    return _enriched([
+        {"role": "user", "content": "アイフィの話をしよう"},
+        {"role": "assistant", "content": "いいね、アイフィについて話そう"},
+        # 画像を送る前のターンに目に入った部屋の様子
+        {"role": "user", "content": "<system>部屋に図書館の机がある</system>",
+         "metadata": {CONSUMED_PERCEPTION_KEY: True}},
+        {"role": "user", "content": "", "metadata": metadata},
+    ])
+
+
+def test_image_only_turn_does_not_search_with_older_text_or_room_view(png_path, monkeypatch):
+    from sea import auto_recall
+
+    monkeypatch.delenv("SAIVERSE_MEDIA_RECALL_ENABLED", raising=False)
+    messages = _image_only_turn(png_path)
+
+    assert auto_recall._seed_is_user_utterance(messages)
+    assert auto_recall.build_query(messages) == ""
+    assert auto_recall._fresh_observation_texts(messages) == []
+
+
+def test_image_only_turn_searches_with_the_attachment_summary_when_media_recall_is_on(
+    png_path, monkeypatch,
+):
+    from sea import auto_recall
+
+    monkeypatch.setenv("SAIVERSE_MEDIA_RECALL_ENABLED", "1")
+    assert auto_recall.build_query(_image_only_turn(png_path)) == "緑の四角の画像"
+
+
+def test_reflex_judgment_material_says_an_image_was_sent(png_path):
+    # 言葉の無い発言は会話本文に入らないので、反射判断の会話の末尾に機構の文で置く
+    from sea import auto_recall
+
+    state, _questions, _keys = auto_recall._build_reflex_request(
+        _image_only_turn(png_path), [], context_messages=2,
+    )
+    conversation = state["conversation"]
+    assert len(conversation) == 2
+    assert conversation[-1] == {
+        "role": "user", "text": "(文章は無く、画像 1 件を送ってきました)",
+    }
+
+
+# --- 受付の細部 -------------------------------------------------------------------
+
+def test_whitespace_only_text_with_an_image_is_saved_as_no_text(png_path):
+    service = _runtime([SimpleNamespace(persona_id=LISTENER)])
+    with patch(
+        "database.building_messages.insert_building_message_with_location_guard",
+        return_value={"message_id": "room:1", "_was_inserted": True},
+    ) as insert:
+        list(service.handle_user_input_stream(
+            "  \n", metadata=_image_metadata(png_path), building_id=BID,
+        ))
+    assert insert.call_args.args[2]["content"] == ""
+
+
+def test_odd_audio_entries_do_not_break_the_media_readers():
+    from saiverse.media_utils import iter_audio_media, iter_video_media
+
+    metadata = {"media": [{"type": 3}, {"mime_type": 5}, {"type": "audio"}]}
+    assert iter_audio_media(metadata) == []
+    assert iter_video_media(metadata) == []
+
+
+# --- 受付 → 記憶 → 文脈 (添付アイテム作成の文が足された形) → 送る形 -------------------
+
+def test_image_only_utterance_reaches_the_payload_after_context_enrichment(
+    png_path, session_factory,
+):
+    service = _runtime([SimpleNamespace(persona_id=LISTENER)])
+    with patch(
+        "database.building_messages.insert_building_message_with_location_guard",
+        return_value={"message_id": "room:1", "_was_inserted": True},
+    ) as insert:
+        list(service.handle_user_input_stream(
+            "", metadata=_image_metadata(png_path), building_id=BID,
+        ))
+    insert_building_message(session_factory, BID, dict(insert.call_args.args[2]))
+    memory = _FakeMemory()
+    persona, manager = _listener(session_factory, memory)
+    assert auto_ingest_building_messages(persona, manager) == 1
+    remembered = memory.appended[0]
+
+    history = _enriched([{
+        "role": remembered["role"],
+        "content": remembered["content"],
+        "metadata": remembered["metadata"],
+    }])
+    xai_kinds = [p.WhichOneof("content") for p in
+                 _build_xai_messages(history, supports_images=True)[0].content]
+    assert xai_kinds == ["text", "image_url"]
+    openai_kinds = [p["type"] for p in
+                    prepare_openai_messages(history, supports_images=True)[0]["content"]]
+    assert openai_kinds == ["text", "image_url"]

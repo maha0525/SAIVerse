@@ -178,3 +178,12 @@ def test_gemini_keeps_image_only_user_with_embedded_image(png_path):
 
     user_parts = [c for c in contents if c.role == "user"][-1].parts
     assert any(p.inline_data for p in user_parts)
+
+
+def test_gemini_unreadable_image_falls_back_to_note_on_a_vision_model(png_path):
+    with patch("llm_clients.gemini.load_image_bytes_for_llm", return_value=(None, None)):
+        contents = _gemini_contents([_image_only_user(png_path)], supports_images=True)
+
+    user_parts = [c for c in contents if c.role == "user"][-1].parts
+    assert any(SUMMARY in (p.text or "") for p in user_parts)
+    assert not any(p.inline_data for p in user_parts)

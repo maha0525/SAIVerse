@@ -608,6 +608,9 @@ class RuntimeService(
         if _utterance_is_empty(message, metadata):
             logging.error("[runtime] handle_user_input got empty message; aborting to avoid corrupt routing")
             return ['<div class="note-box">入力が空でした。再送してください。</div>']
+        # 本文が空白だけで添付がある発言は、本文の無い発言として扱う
+        if not str(message or "").strip():
+            message = ""
 
         if not self.state.user_current_building_id:
             return ['<div class="note-box">エラー: ユーザーの現在地が不明です。</div>']
@@ -717,6 +720,9 @@ class RuntimeService(
                 "content": "入力が空でした。もう一度送ってください。",
             }, ensure_ascii=False) + "\n"
             return
+        # 本文が空白だけで添付がある発言は、本文の無い発言として扱う
+        if not str(message or "").strip():
+            message = ""
 
         building_id = building_id or self.state.user_current_building_id
         if not building_id:

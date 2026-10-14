@@ -1707,6 +1707,14 @@ class GeminiClient(LLMClient):
                         logging.warning(
                             "Failed to load image for Gemini payload: %s", attachment["uri"]
                         )
+                        # 読めなかった画像も黙って捨てず、説明の文で届ける
+                        # (Anthropic・OpenAI 互換・xAI と同じ扱い)
+                        summary = next(
+                            (s for _i, att, s in attachment_records if att is attachment),
+                            None,
+                        ) or "(要約を取得できませんでした)"
+                        note = f"[画像: {attachment['uri']}] {summary}"
+                        text_content = f"{text_content}\n{note}" if text_content else note
                         continue
                     logging.debug(
                         "[gemini] image att=%s orig_mime=%s effective_mime=%s "

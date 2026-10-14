@@ -485,13 +485,16 @@ def _trailing_perception_blocks(messages: List[Dict[str, Any]]) -> List[Dict[str
     止めない (docs/intent/persist_realtime_and_recall.md §4.5)。
     """
     found: List[Dict[str, Any]] = []
+    # 言葉の無いユーザー発言 (画像だけ等) は会話本文に数えないが、ターンの境目
+    # ではあるので、そこで遡りを止める (その手前の様子は前のターンのもの)
+    latest_user = _latest_user_message(messages)
     for m in reversed(messages):
         if is_persisted_realtime_and_recall(m):
             continue
         if is_injected_perception(m):
             found.append(m)
             continue
-        if _is_conversational_message(m):
+        if _is_conversational_message(m) or m is latest_user:
             break
     return list(reversed(found))
 
@@ -506,8 +509,31 @@ def _fresh_observation_texts(messages: List[Dict[str, Any]]) -> List[str]:
     return texts
 
 
+def _is_image_only_user_turn(messages: List[Dict[str, Any]]) -> bool:
+    """このターンのユーザー発言が、言葉の無い発言 (画像だけを送った等) か。
+
+    言葉の無い発言は会話本文に数えない (``_is_conversational_message``) ので、
+    会話本文だけを見ると「ユーザー発言の無いターン」に見える。最新の user
+    メッセージが最後の会話本文より後ろにあり、言葉を持たないときに真。
+    """
+    latest = _latest_user_message(messages)
+    if latest is None or _said_text(latest.get("content")).strip():
+        return False
+    for m in reversed(messages):
+        if m is latest:
+            return True
+        if _is_conversational_message(m):
+            return False
+    return False
+
+
 def _seed_is_user_utterance(messages: List[Dict[str, Any]]) -> bool:
-    """会話本文の末尾が user か = このターンに新しいユーザー発言があるか。"""
+    """会話本文の末尾が user か = このターンに新しいユーザー発言があるか。
+
+    画像だけを送ったターンもユーザーのターンとして真を返す。
+    """
+    if _is_image_only_user_turn(messages):
+        return True
     for m in reversed(messages):
         if _is_conversational_message(m):
             return m.get("role") == "user"
@@ -533,6 +559,13 @@ def build_query(messages: List[Dict[str, Any]], *, n: Optional[int] = None) -> s
     """
     if n is None:
         n = get_query_message_count()
+    if _is_image_only_user_turn(messages):
+        # 画像だけを送ったターン。前の会話や部屋の様子を、いま言われたことの
+        # 代わりに検索語にしない。使えるのは添付の概要 (メディア想起が ON の
+        # ときだけ) で、無ければ空 (= エンティティ想起だけが走る)。
+        if not is_media_recall_enabled():
+            return ""
+        return "\n".join(_current_attachment_summaries(messages))
     convo = [m for m in messages if _is_conversational_message(m)]
     seed = convo
     if not _seed_is_user_utterance(messages):
@@ -1233,6 +1266,16 @@ def _build_reflex_request(
         }
         for m in tail
     ]
+    if _is_image_only_user_turn(messages):
+        # 言葉の無い発言は会話本文に入らないので、このターンにユーザーが何を
+        # 送ったかを機構の文で末尾に置く (件数は変えない)
+        from saiverse.media_utils import describe_wordless_utterance
+
+        latest = _latest_user_message(messages) or {}
+        note = describe_wordless_utterance(latest.get("metadata"))
+        if note:
+            conversation.append({"role": "user", "text": note})
+            conversation = conversation[-max(1, context_messages):]
 
     memories: Dict[str, Dict[str, str]] = {}
     questions: Dict[str, Dict[str, Any]] = {}

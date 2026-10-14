@@ -784,15 +784,12 @@ def _utterance_text_for_judgment(event: Dict[str, Any]) -> str:
     「話しかけました:」の後が空になり、何を受け取ったのか判断できない。
     そのときは機構の言葉で添付の種類と件数を書く。本文があれば本文だけ。
     """
-    from saiverse.media_utils import describe_attachments
+    from saiverse.media_utils import describe_wordless_utterance
 
     text = str(event.get("content") or "")
     if text.strip():
         return text
-    attachments = describe_attachments(event.get("metadata"))
-    if attachments:
-        return f"(文章は無く、{attachments}を送ってきました)"
-    return text
+    return describe_wordless_utterance(event.get("metadata")) or text
 
 
 def on_user_utterance(

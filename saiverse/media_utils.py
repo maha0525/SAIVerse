@@ -402,6 +402,24 @@ def _file_identity(path: Any) -> str:
     return os.path.normcase(os.path.abspath(str(path)))
 
 
+def _attachment_file_identity(item: Dict[str, Any]) -> str:
+    """添付の項目が指すファイルの _file_identity (iter_image_media と同じく、
+    URI を先に解決し、だめなら path の欄)。どちらも無ければ空文字。"""
+    # 受付の判定の中で呼ばれるので、型の崩れた欄でも例外を出さない
+    uri = item.get("uri")
+    path = None
+    if isinstance(uri, str) and uri:
+        try:
+            path = resolve_media_uri(uri)
+        except Exception:
+            path = None
+    if path is None or not path.exists():
+        direct = item.get("path")
+        if isinstance(direct, (str, Path)) and str(direct):
+            path = Path(direct)
+    return _file_identity(path) if path is not None else ""
+
+
 def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
     """Extract validated image descriptors from a metadata payload.
 
@@ -803,8 +821,8 @@ def _iter_typed_media(
             continue
 
         # Filter by type or mime prefix
-        item_type = (item.get("type") or "").lower()
-        item_mime = (item.get("mime_type") or "").lower()
+        item_type = str(item.get("type") or "").lower()
+        item_mime = str(item.get("mime_type") or "").lower()
         if item_type:
             if item_type != type_key:
                 continue
@@ -864,14 +882,17 @@ def _count_attachments(metadata: Any) -> Dict[str, int]:
                 kind = mime.split("/", 1)[0] if "/" in mime else ""
             if kind in counts:
                 counts[kind] += 1
-            if kind == "image" and item.get("path"):
-                media_image_files.add(_file_identity(item["path"]))
+            if kind == "image":
+                identity = _attachment_file_identity(item)
+                if identity:
+                    media_image_files.add(identity)
     images = metadata.get("images")
     if isinstance(images, list):
         for item in images:
             if not isinstance(item, dict):
                 continue
-            if item.get("path") and _file_identity(item["path"]) in media_image_files:
+            identity = _attachment_file_identity(item)
+            if identity and identity in media_image_files:
                 continue
             counts["image"] += 1
     documents = metadata.get("documents")
@@ -895,6 +916,18 @@ _ATTACHMENT_LABELS = (
     ("audio", "音声"),
     ("video", "動画"),
 )
+
+
+def describe_wordless_utterance(metadata: Any) -> str:
+    """言葉の無いユーザー発言 (画像だけを送った等) を、機構の文で言い表す。
+
+    判断の材料 (応じるかの判断・想起の反射判断) に、その発言の代わりに置く。
+    ユーザーやペルソナ本人の発言の本文には入れない。添付も無ければ空文字。
+    """
+    attachments = describe_attachments(metadata)
+    if not attachments:
+        return ""
+    return f"(文章は無く、{attachments}を送ってきました)"
 
 
 #: 文脈を組むとき (sea/runtime.py の _enrich_history_with_attachments)、添付から
