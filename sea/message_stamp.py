@@ -22,7 +22,10 @@
     組成時点の履歴末尾を指したままになり、「実際に見ていた最後」でなくなる。
     同じ Playbook の LLM ノードが続く場合も同じで、前のノードが記録へ書いた
     返事は送る `messages`に積まれ、次のノードはそれを見て書く。次のノードが送る直前に
-    :func:`sync_presented_message_ids_with_sent` がその行 id を列の末尾に足す。
+    :func:`sync_presented_message_ids_with_sent` がその行 id を `_presented_message_ids` の末尾に足す。
+    前のノードが返事を記録へ書かず、後ろの MEMORIZE / SPEAK / THINK ノードが
+    ``state["last"]`` から書いた場合も、そのノードが返事の dict に行の id を載せる
+    (:func:`attach_stored_id_to_unstored_reply`) ので、同じように足される。
 
     材料が落ちた後 (子 Playbook の中継で :func:`clear_presented_message_ids`
     が落とした後) に親が自前の LLM ノードで送るときは、送る直前に
@@ -70,6 +73,9 @@ TOKENS_META_KEY = "llm_tokens"
 # ---- 材料を運ぶ state のキー (call-local。_prefix_anchor_id と同じ器) ----
 PRESENTED_IDS_STATE_KEY = "_presented_message_ids"
 CALL_TOKENS_STATE_KEY = "_last_call_tokens"
+#: LLM ノードが ``state["_messages"]`` に足したが ``"id"`` を載せなかった返事の dict と、
+#: その時 ``state["last"]`` に入れたオブジェクト。:func:`note_unstored_reply` を参照。
+UNSTORED_REPLY_STATE_KEY = "_unstored_reply"
 
 # ---- 三つ組の欄名 ----
 TOKENS_INPUT_KEY = "input"
@@ -252,12 +258,19 @@ def sync_presented_message_ids_with_sent(
     には載せない。Anthropic などは本文の空な行を送る前に落とすので、載せると
     モデルが見ていない行を前駆にする)。
 
-    既知の限界: LLM ノードが記録へ書かなかった返事を、後ろの MEMORIZE /
-    SPEAK / THINK ノードが記録へ書いた場合、送る `messages`のその返事には記録の行 id が
-    戻らない。次の生成の前駆はそれより前の記録の行を指す (見ていない行では
-    なく、手前の行)。同梱の Playbook にこの並びは無い (2026-10-14 調査)。
-    戻すには保存された本文と送る `messages`の返事を本文の一致で結び付ける必要があり、
-    結び付け違いは見ていない行を前駆にする捏造になるので、行っていない。
+    LLM ノードが記録へ書かなかった返事を、後ろの MEMORIZE / SPEAK / THINK ノードが
+    ``state["last"]`` から記録へ書いた場合は、そのノードが書いた行の id を返事の
+    dict に ``"id"`` として載せる (:func:`note_unstored_reply` /
+    :func:`attach_stored_id_to_unstored_reply`)。本文の一致では結び付けず、
+    ``state["last"]`` が ``_finalize_beat`` の入れたオブジェクトのまま (``is``) の
+    ときだけ載せる — 間に ``state["last"]`` を書き換えたノード (TOOL / EXEC /
+    SUBPLAY など) や、``{last}`` 以外の文字を含む ``action`` の MEMORIZE では載せず、
+    次の生成の前駆はそれより前の記録の行を指す (見ていない行ではなく、手前の行)。
+
+    既知の限界: 本文が空の tool_calls だけの返事には ``"id"`` を載せないので、
+    次の生成の前駆はその返事より前の記録の行を指す。ただし今読み込まれている
+    Playbook (``builtin_data/playbooks/public``) には ``available_tools`` を使う
+    LLM ノードが一つも無く、この返事は今の SAIVerse では起きない (2026-10-14 調査)。
 
     送る `messages`に記録の行が一つも無ければ何もしない (提示ゼロの生成は刻印なしの
     まま)。
@@ -285,6 +298,87 @@ def sync_presented_message_ids_with_sent(
     after = sent[len(sent) - 1 - sent[::-1].index(tail) + 1:]
     if after:
         state[PRESENTED_IDS_STATE_KEY] = [*current, *after]
+
+
+def note_unstored_reply(
+    state: Optional[Dict[str, Any]], reply_message: Dict[str, Any], last_value: Any,
+) -> None:
+    """``"id"`` を載せずに ``state["_messages"]`` に足した返事の dict を書いておく。
+
+    呼ぶのは ``sea/runtime_llm._finalize_beat`` だけ — その LLM ノードが返事を
+    記憶に保存しなかった (``"id"`` を載せなかった) が、本文は空でないとき。
+    ``reply_message`` は ``state["_messages"]`` に足した dict そのもの、
+    ``last_value`` は同じ時に ``state["last"]`` に入れたオブジェクト。
+
+    後ろの MEMORIZE / SPEAK / THINK ノードが ``state["last"]`` を記憶に保存したら、
+    :func:`attach_stored_id_to_unstored_reply` がこの dict に行の id を載せる。
+    載せないと、次の LLM ノードが送る ``messages`` でこの dict が記録の行として
+    数えられず (:func:`sync_presented_message_ids_with_sent`)、次の返事の
+    ``predecessor_message_id`` が保存された行より前の行になる。
+    """
+    if not isinstance(state, dict) or not isinstance(reply_message, dict):
+        return
+    state[UNSTORED_REPLY_STATE_KEY] = {"message": reply_message, "last": last_value}
+
+
+def clear_unstored_reply(state: Optional[Dict[str, Any]]) -> None:
+    """:func:`note_unstored_reply` で書いたものを消す。
+
+    ``_finalize_beat`` が返事に ``"id"`` を載せたとき・本文が空のときと、
+    ``lg_llm_node`` の入り口 (前のノードの返事を次の返事と取り違えない) で呼ぶ。
+    """
+    if not isinstance(state, dict):
+        return
+    state.pop(UNSTORED_REPLY_STATE_KEY, None)
+
+
+def unstored_reply_for_last(state: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """``state["last"]`` が :func:`note_unstored_reply` の時のオブジェクトのままなら、
+    その返事の dict を返す。そうでなければ None。
+
+    比べるのは ``is`` (同一) と ``==`` (値)。値の一致だけでは結び付けない —
+    TOOL / EXEC / SUBPLAY などが ``state["last"]`` を書き換えた後に同じ文字列が
+    入っていても、それはその返事の本文ではない。
+    """
+    if not isinstance(state, dict):
+        return None
+    entry = state.get(UNSTORED_REPLY_STATE_KEY)
+    if not isinstance(entry, dict):
+        return None
+    reply = entry.get("message")
+    if not isinstance(reply, dict) or "id" in reply:
+        return None
+    last = state.get("last")
+    expected = entry.get("last")
+    if last is not expected or last != expected:
+        return None
+    return reply
+
+
+def attach_stored_id_to_unstored_reply(
+    state: Optional[Dict[str, Any]], message_id: Any,
+) -> bool:
+    """``state["last"]`` を記憶に保存した行の id を、その返事の dict に ``"id"`` として載せる。
+
+    呼ぶのは ``state["last"]`` をそのまま本人の発言として記憶に保存したノード
+    (MEMORIZE の ``action`` が ``{last}`` だけのとき / SPEAK / THINK) が、保存に
+    成功した直後 (``state["last"]`` を書き換える前)。載せたら
+    ``UNSTORED_REPLY_STATE_KEY`` を消す。``message_id`` が空でない文字列でないとき、
+    :func:`unstored_reply_for_last` が None のときは何もしない。戻り値は載せたか。
+
+    ``_presented_message_ids`` には足さない — 足すのは次の LLM ノードが送る直前
+    (:func:`sync_presented_message_ids_with_sent`)。ここで足すと、同じ
+    ``state["last"]`` を続けて保存する別のノードの ``predecessor_message_id`` が、
+    その本文の行自身を指す。
+    """
+    if not isinstance(message_id, str) or not message_id:
+        return False
+    reply = unstored_reply_for_last(state)
+    if reply is None:
+        return False
+    reply["id"] = message_id
+    clear_unstored_reply(state)
+    return True
 
 
 def resolve_predecessor_message_id(state: Optional[Dict[str, Any]]) -> Optional[str]:

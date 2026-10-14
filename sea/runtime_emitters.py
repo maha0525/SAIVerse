@@ -21,6 +21,12 @@ LOGGER = logging.getLogger(__name__)
 #: 設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
 SPEAK_PERSISTED_EVENT_TYPE = "speak_persisted"
 
+#: ``emit_speak`` の戻り値 (建物メッセージの dict) に載せる、同じ発言を記憶
+#: (SAIMemory) に書いた行の id のキー。建物メッセージの ``message_id`` とは別の行。
+#: SPEAK ノード (sea/runtime_engine.lg_speak_node) が、前の LLM ノードの返事の dict
+#: に ``"id"`` として載せるために読む (sea/message_stamp.attach_stored_id_to_unstored_reply)。
+SPEAK_MEMORY_MESSAGE_ID_KEY = "memory_message_id"
+
 
 # ---------------------------------------------------------------------------
 # 事実の記録 — 「このペルソナが最後に保存した発言」
@@ -299,6 +305,7 @@ class RuntimeEmitters:
         building_msg: Optional[Dict[str, Any]] = None
         building_content_for_hook: Optional[str] = None
         msg_id_for_hook: Optional[str] = None
+        memory_message_id: Optional[str] = None
         if record_history:
             try:
                 from saiverse.content_tags import strip_in_heart, strip_user_only
@@ -307,7 +314,15 @@ class RuntimeEmitters:
                     heard_by_list.append(persona.persona_id)
                 # SAIMemory: 生のテキスト（<in_heart>タグ含む）を保存。ペルソナが
                 # 書いた item:N は安定 short_id なのでそのまま記憶に残せる。
-                persona.history_manager.add_to_persona_only(msg)
+                # 戻り値は ``(status, message_id)`` (persona/history_manager.py)。
+                # 書けた行の id は戻り値の dict に SPEAK_MEMORY_MESSAGE_ID_KEY で載せる。
+                persona_saved = persona.history_manager.add_to_persona_only(msg)
+                if (
+                    isinstance(persona_saved, tuple) and len(persona_saved) == 2
+                    and persona_saved[0] == "synced"
+                    and isinstance(persona_saved[1], str) and persona_saved[1]
+                ):
+                    memory_message_id = persona_saved[1]
                 # building_histories / gateway: <in_heart>除去。item 参照は item:N /
                 # saiverse://item/N が既に安定・world共通なので解決 pin は不要。
                 building_content = strip_in_heart(text)
@@ -368,6 +383,9 @@ class RuntimeEmitters:
                 )
             except Exception:
                 LOGGER.warning("persona_speak hook dispatch failed", exc_info=True)
+        if isinstance(building_msg, dict) and memory_message_id:
+            # 写しに載せる — insert_building_message が返した dict そのものは変えない。
+            return {**building_msg, SPEAK_MEMORY_MESSAGE_ID_KEY: memory_message_id}
         return building_msg
 
     def emit_say(
@@ -861,14 +879,16 @@ class RuntimeEmitters:
         text: str,
         record_history: bool = True,
         extra_metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> Optional[str]:
         """THINK ノードの独白を SAIMemory (memory.db) へ 1 行残す。
 
         ``extra_metadata``: 書き込み時の機械刻印など、tags 以外に載せる欄。
         ``tags`` キーは既定の ``internal`` に追記される。
+
+        戻り値は書けた行の id。書かなかった・書けなかったときは None。
         """
         if not record_history:
-            return
+            return None
         adapter = getattr(persona, "sai_memory", None)
         try:
             if adapter and adapter.is_ready():
@@ -891,6 +911,8 @@ class RuntimeEmitters:
                     "pulse_id": pulse_id,
                     "persona_id": persona.persona_id,
                 }
-                adapter.append_persona_message(msg)
+                inserted_id = adapter.append_persona_message(msg)
+                return inserted_id if isinstance(inserted_id, str) and inserted_id else None
         except Exception:
             LOGGER.warning("think message not stored", exc_info=True)
+        return None

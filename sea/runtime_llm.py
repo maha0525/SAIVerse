@@ -20,6 +20,8 @@ from sea.cancellation import ExecutionCancelledException
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
 from sea.message_stamp import (
     append_presented_message_id,
+    clear_unstored_reply,
+    note_unstored_reply,
     record_call_tokens,
     sync_presented_message_ids_with_sent,
 )
@@ -1110,13 +1112,27 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
     # 書かれているが、送る `messages`の dict は本文が空で、Anthropic などは本文の空な
     # 行を送る前に落とす (llm_clients/anthropic_request_builder.py) — 載せると
     # 次の生成の前駆が、モデルに届いていない行を指す。
+    #
+    # この LLM ノードが返事を記憶に保存しなかった (`_beat_memorized` が立っていない。
+    # 本文は空でない) ときは、返事の dict と state["last"] に入れたオブジェクトを書いておく
+    # (sea/message_stamp.note_unstored_reply)。後ろの MEMORIZE ({last} だけ) /
+    # SPEAK / THINK が state["last"] を記憶に保存したら、その行の id をこの dict に
+    # 載せる。dict の本文と state["last"] が同じ文字列のときに限る (構造化出力の
+    # dict は JSON 文字列にして足しているので、保存される本文と一致しない)。
     _beat_memory_id = state.pop(BEAT_MEMORY_ID_KEY, None)
     _reply_content = _beat_reply_msg.get("content")
-    if (
-        isinstance(_beat_memory_id, str) and _beat_memory_id
-        and isinstance(_reply_content, str) and _reply_content.strip()
-    ):
+    _reply_has_body = isinstance(_reply_content, str) and bool(_reply_content.strip())
+    if isinstance(_beat_memory_id, str) and _beat_memory_id and _reply_has_body:
         _beat_reply_msg["id"] = _beat_memory_id
+        clear_unstored_reply(state)
+    elif (
+        _reply_has_body
+        and not state.get("_beat_memorized")
+        and isinstance(text, str) and _reply_content == text
+    ):
+        note_unstored_reply(state, _beat_reply_msg, state["last"])
+    else:
+        clear_unstored_reply(state)
 
     # Debug: log speak_content at end of LLM node
     speak_content = state.get("speak_content", "")
@@ -4852,6 +4868,10 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         # 書いた行の id も同じ理由で倒す — 前のノードの id をこのノードの返事に
         # 載せると、送る `messages`の返事が別の行を名乗る。
         state.pop(BEAT_MEMORY_ID_KEY, None)
+        # 前のノードが記憶に保存しなかった返事 (`_unstored_reply`) も倒す — 残すと、
+        # このノードの後ろの MEMORIZE / SPEAK / THINK が、前のノードの返事の dict に
+        # 行の id を載せうる (このノードの返事は `_finalize_beat` が改めて書く)。
+        clear_unstored_reply(state)
         # 「建物にはあるが記憶に無い本文」の受け渡しも同じ理由で入り口で倒す —
         # 前のノードの本文を、このノードの Beat の補填が書いてしまう。
         state.pop(BEAT_BODY_UNMEMORIZED_KEY, None)

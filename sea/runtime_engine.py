@@ -7,11 +7,14 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from saiverse.logging_config import log_sea_trace
 from sea.message_stamp import (
+    attach_stored_id_to_unstored_reply,
     clear_call_tokens,
     clear_presented_message_ids,
     stamp_generation_metadata,
+    unstored_reply_for_last,
 )
 from sea.playbook_models import PlaybookSchema
+from sea.runtime_emitters import SPEAK_MEMORY_MESSAGE_ID_KEY
 from sea.runtime_state import effective_auto_mode, set_playbook_var
 from sea.runtime_utils import _format, _resolve_template_arg, event_building_id
 from tools import TOOL_REGISTRY, canonicalize_tool_name
@@ -467,7 +470,20 @@ class RuntimeEngine:
             pulse_context = state.get("_pulse_context")
             metadata_key = getattr(node_def, "metadata_key", None)
             metadata = state.get(metadata_key) if metadata_key else None
-            if not self.runtime._store_memory(
+            # action が `{last}` だけで role が assistant なら、この MEMORIZE は
+            # state["last"] をそのまま本人の発言として記憶に書く。前の LLM ノードが
+            # 記憶に保存しなかった返事 (sea/message_stamp.UNSTORED_REPLY_STATE_KEY) が
+            # その state["last"] なら、保存した行の id を返事の dict に載せるので、
+            # `_store_memory` から行の id を受け取る。それ以外は従来どおり bool で
+            # 受ける (空の memo_text で `return_message_id=True` だと "" が返り、
+            # 失敗の警告に化けるため、受け取るのは必要な回だけ)。
+            stores_last_as_is = (
+                role == "assistant"
+                and action_template == "{last}"
+                and bool(memo_text)
+                and unstored_reply_for_last(state) is not None
+            )
+            stored = self.runtime._store_memory(
                 persona, memo_text,
                 role=role, tags=tags,
                 pulse_id=pulse_id, metadata=metadata,
@@ -480,7 +496,12 @@ class RuntimeEngine:
                 # 書き込み時の機械刻印 (v3 §7.1)。role='assistant' の
                 # ときだけ効く (判定は _store_memory 側)。
                 beat_state=state,
-            ):
+                return_message_id=stores_last_as_is,
+            )
+            if stored and stores_last_as_is:
+                # state["last"] を memo_text で書き換える前に載せる (同一性で確かめるため)。
+                attach_stored_id_to_unstored_reply(state, stored)
+            if not stored:
                 LOGGER.warning("Failed to store memory in MEMORIZE node %s", node_id)
                 if event_callback:
                     event_callback({
@@ -552,6 +573,13 @@ class RuntimeEngine:
         # 永続点なので、_store_memory 経路と同じ刻印を載せる。
         speak_metadata = stamp_generation_metadata(speak_metadata, state) or {}
         building_msg = self.emitters["speak"](persona, eff_bid, text, pulse_id=pulse_id, extra_metadata=speak_metadata if speak_metadata else None, event_callback=event_callback)
+        # 前の LLM ノードが記憶に保存しなかった返事がこの state["last"] なら、
+        # emit_speak が記憶に書いた行の id (SPEAK_MEMORY_MESSAGE_ID_KEY) をその返事の
+        # dict に載せる (sea/message_stamp.py)。
+        if isinstance(building_msg, dict):
+            attach_stored_id_to_unstored_reply(
+                state, building_msg.get(SPEAK_MEMORY_MESSAGE_ID_KEY),
+            )
         if outputs is not None:
             outputs.append(text)
         if event_callback:

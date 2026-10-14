@@ -1289,3 +1289,304 @@ class TestFinalizeBeatCarriesTheStoredRowId:
         msg = state["_messages"][-1]
         assert msg["id"] == "row-9"
         assert msg["tool_calls"][0]["id"] == "call-1"
+
+    # ---- `_unstored_reply` (後ろのノードが保存したときに返事の dict へ `id` を載せるための state のキー) ----
+
+    def test_reply_that_was_not_stored_is_noted(self):
+        from sea.message_stamp import UNSTORED_REPLY_STATE_KEY
+
+        state: Dict[str, Any] = {}
+        self._finalize(state)  # memorize も important も無い
+        entry = state[UNSTORED_REPLY_STATE_KEY]
+        assert entry["message"] is state["_messages"][-1]
+        assert entry["last"] is state["last"]
+
+    def test_stored_reply_drops_a_stale_note(self):
+        from sea.message_stamp import UNSTORED_REPLY_STATE_KEY
+
+        state: Dict[str, Any] = {UNSTORED_REPLY_STATE_KEY: {"message": {}, "last": "old"}}
+        self._finalize(state, memorize=True)
+        assert state["_messages"][-1]["id"] == "row-9"
+        assert UNSTORED_REPLY_STATE_KEY not in state
+
+    def test_reply_memorized_without_an_id_is_not_noted(self):
+        """この LLM ノードが保存した (`_beat_memorized`) が id を受け取れなかった回は
+        `_unstored_reply` に書かない — 後ろのノードが同じ本文をもう一度書いた行を、この返事の行として
+        載せない。"""
+        from sea.message_stamp import UNSTORED_REPLY_STATE_KEY
+
+        state: Dict[str, Any] = {}
+        self._finalize(state, memorize=True, store_return=True)
+        assert "id" not in state["_messages"][-1]
+        assert UNSTORED_REPLY_STATE_KEY not in state
+
+    def test_tool_call_only_reply_is_not_noted(self):
+        from sea.message_stamp import UNSTORED_REPLY_STATE_KEY
+
+        state: Dict[str, Any] = {
+            "tool_called": True, "_last_tool_call_id": "call-1",
+            "_last_tool_name": "calc", "_last_tool_args_json": "{}",
+            "has_speak_content": False,
+            UNSTORED_REPLY_STATE_KEY: {"message": {}, "last": "old"},
+        }
+        self._finalize(state)
+        assert UNSTORED_REPLY_STATE_KEY not in state
+
+
+class TestEmittersReturnTheMemoryRowId:
+    """SPEAK / THINK ノードが、記憶に書いた行の id を受け取れること。"""
+
+    def test_emit_speak_returns_the_memory_row_id_on_a_copy(self):
+        from sea.runtime_emitters import SPEAK_MEMORY_MESSAGE_ID_KEY, RuntimeEmitters
+
+        building_row = {"message_id": "b1:7", "content": "こんにちは。"}
+        history = Mock()
+        history.add_to_persona_only.return_value = ("synced", "mem-3")
+        history.add_to_building_only.return_value = building_row
+        manager = SimpleNamespace(
+            occupants={}, user_presence_status="offline",
+            gateway_handle_ai_replies=Mock(),
+        )
+        emitters = RuntimeEmitters(runtime=SimpleNamespace(manager=manager))
+        persona = SimpleNamespace(persona_id="p1", history_manager=history)
+        with patch("saiverse.addon_hooks.dispatch_hook"):
+            out = emitters.emit_speak(persona, "b1", "こんにちは。")
+        assert out[SPEAK_MEMORY_MESSAGE_ID_KEY] == "mem-3"
+        assert out["message_id"] == "b1:7"
+        assert SPEAK_MEMORY_MESSAGE_ID_KEY not in building_row
+
+    @pytest.mark.parametrize("persona_saved", [("failed", None), ("skipped", None), None])
+    def test_emit_speak_without_a_memory_row_adds_nothing(self, persona_saved):
+        from sea.runtime_emitters import SPEAK_MEMORY_MESSAGE_ID_KEY, RuntimeEmitters
+
+        history = Mock()
+        history.add_to_persona_only.return_value = persona_saved
+        history.add_to_building_only.return_value = {"message_id": "b1:7", "content": "x"}
+        manager = SimpleNamespace(
+            occupants={}, user_presence_status="offline",
+            gateway_handle_ai_replies=Mock(),
+        )
+        emitters = RuntimeEmitters(runtime=SimpleNamespace(manager=manager))
+        persona = SimpleNamespace(persona_id="p1", history_manager=history)
+        with patch("saiverse.addon_hooks.dispatch_hook"):
+            out = emitters.emit_speak(persona, "b1", "x")
+        assert SPEAK_MEMORY_MESSAGE_ID_KEY not in out
+
+    def test_emit_think_returns_the_row_id(self, stamp_env):
+        runtime, persona, adapter = stamp_env
+        mid = runtime._emit_think(persona, "pulse-1", "ひとりごと。")
+        assert isinstance(mid, str) and mid
+        assert _metadata_of(adapter, mid)["tags"] == ["internal"]
+        assert runtime._emit_think(persona, "pulse-1", "x", record_history=False) is None
+
+
+class TestPredecessorAfterLaterNodeStoresTheReply:
+    """LLM ノード X が `memorize` なしで書いた返事を、後ろの MEMORIZE / SPEAK /
+    THINK ノードが `state["last"]` から記憶に保存したとき、次の LLM ノード Z の
+    返事の `predecessor_message_id` が、その保存した行を指すこと。
+
+    X の返事の dict は `state["_messages"]` に入り、Z が送る `messages` にも
+    入る。保存したノードがその dict に `id` を載せないと、
+    `sync_presented_message_ids_with_sent` が数えられず、Z の
+    `predecessor_message_id` は保存した行より前の行になる。
+
+    載せるのは `state["last"]` が X の `_finalize_beat` が入れたオブジェクトの
+    ままのときだけ (`_unstored_reply`)。間に `state["last"]` を書き換えた
+    ノードや、`{last}` 以外の文字を含む `action` の MEMORIZE では載せない —
+    記憶の行と dict の `content` が同じ文ではなくなるため。
+    """
+
+    PB = SimpleNamespace(name="parent_pb", display_name="parent_pb")
+
+    @pytest.fixture(autouse=True)
+    def _no_engine_trace(self, monkeypatch):
+        from sea import runtime_engine
+
+        monkeypatch.setattr(runtime_engine, "log_sea_trace", lambda *a, **k: None)
+
+    # ---- ノードを回す口 ----
+
+    def _run_llm(self, runtime, persona, state, node_id: str, *, memorize: bool) -> None:
+        import asyncio
+
+        from sea.runtime_llm import lg_llm_node
+
+        node_def = _llm_node_def(node_id)
+        if not memorize:
+            node_def.memorize = None
+        asyncio.run(lg_llm_node(runtime, node_def, persona, "b1", self.PB, None)(state))
+
+    def _run_memorize(self, runtime, persona, state, *, action=None) -> None:
+        import asyncio
+
+        node_def = SimpleNamespace(
+            id="record", action=action, role="assistant", tags=["conversation"],
+            line_role=None, scope=None, metadata_key=None, label=None,
+        )
+        node_fn = runtime._runtime_engine.lg_memorize_node(node_def, persona, self.PB)
+        asyncio.run(node_fn(state))
+
+    def _run_speak(self, runtime, persona, state) -> None:
+        """本物の lg_speak_node + 本物の emit_speak。
+
+        `history_manager.add_to_persona_only` は本物と同じ形 (`(status, message_id)`)
+        を返し、記憶へは本物の adapter に書く。建物側の保存だけ代役。
+        """
+        from sea.runtime_emitters import forget_saved_utterances
+
+        adapter = persona.sai_memory
+
+        class _History:
+            def add_to_persona_only(self, msg, **kwargs):
+                mid = adapter.append_persona_message(dict(msg))
+                return ("synced", str(mid)) if mid else ("failed", None)
+
+            def add_to_building_only(self, building_id, msg, heard_by=None):
+                return {"message_id": f"{building_id}:1", "content": msg["content"]}
+
+        persona.history_manager = _History()
+        runtime.manager.occupants = {}
+        runtime.manager.user_presence_status = "offline"
+        runtime.manager.gateway_handle_ai_replies = lambda *a, **k: None
+        try:
+            runtime._runtime_engine.lg_speak_node(state, persona, "b1", self.PB)
+        finally:
+            forget_saved_utterances()
+
+    def _run_think(self, runtime, persona, state) -> None:
+        runtime._lg_think_node(state, persona, self.PB)
+
+    def _run_storing_node(self, kind: str, runtime, persona, state) -> None:
+        {
+            "memorize": lambda: self._run_memorize(runtime, persona, state),
+            "speak": lambda: self._run_speak(runtime, persona, state),
+            "think": lambda: self._run_think(runtime, persona, state),
+        }[kind]()
+
+    @staticmethod
+    def _reply_dict(state, content: str) -> Dict[str, Any]:
+        hits = [
+            m for m in state["_messages"]
+            if m.get("role") == "assistant" and m.get("content") == content
+        ]
+        assert len(hits) == 1, hits
+        return hits[0]
+
+    # ---- 本題 ----
+
+    @pytest.mark.parametrize("kind", ["memorize", "speak", "think"])
+    def test_next_reply_points_at_the_row_the_later_node_stored(self, node_env, kind):
+        runtime, persona, adapter, client = node_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        client.replies.append("返事 A。")
+        self._run_llm(runtime, persona, state, "reply_a", memorize=False)
+        self._run_storing_node(kind, runtime, persona, state)
+        r_id, _r_meta = _row_by_content(adapter, "返事 A。")
+
+        client.replies.append("返事 B。")
+        self._run_llm(runtime, persona, state, "reply_b", memorize=True)
+
+        _b_id, b_meta = _row_by_content(adapter, "返事 B。")
+        expected = _last_recorded_id_in(adapter, client.sent[-1])
+        assert expected == r_id
+        assert b_meta.get(PREDECESSOR_META_KEY) == expected
+        assert self._reply_dict(state, "返事 A。").get("id") == r_id
+
+    @pytest.mark.parametrize("kind", ["memorize", "speak", "think"])
+    def test_stored_row_points_at_what_x_sent(self, node_env, kind):
+        """保存した行 R 自身の `predecessor_message_id` は、X が送った `messages`
+        の最後の記録の行のまま — R 自身を指さない。"""
+        runtime, persona, adapter, client = node_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        client.replies.append("返事 A。")
+        self._run_llm(runtime, persona, state, "reply_a", memorize=False)
+        seen_by_x = _last_recorded_id_in(adapter, client.sent[-1])
+        self._run_storing_node(kind, runtime, persona, state)
+
+        r_id, r_meta = _row_by_content(adapter, "返事 A。")
+        assert seen_by_x == h2
+        assert r_meta.get(PREDECESSOR_META_KEY) == seen_by_x
+        assert r_meta.get(PREDECESSOR_META_KEY) != r_id
+
+    @pytest.mark.parametrize("same_text", [False, True])
+    def test_node_that_rewrites_last_in_between_blocks_the_id(
+        self, node_env, monkeypatch, same_text,
+    ):
+        """X と MEMORIZE の間で TOOL が `state["last"]` を書き換えたら、X の dict
+        に `id` は載らない。TOOL の結果が X の本文と同じ文字列でも、別の
+        オブジェクトなので載らない (`is` で確かめる)。"""
+        import asyncio
+
+        import tools
+
+        runtime, persona, adapter, client = node_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        client.replies.append("返事 A。")
+        self._run_llm(runtime, persona, state, "reply_a", memorize=False)
+
+        result = "".join(["返事", " A。"]) if same_text else "ツールの結果。"
+        if same_text:
+            assert result == state["last"] and result is not state["last"]
+        monkeypatch.setitem(tools.TOOL_REGISTRY, "stamp_test_tool", lambda: result)
+        tool_def = SimpleNamespace(
+            id="tool", action="stamp_test_tool", args_input=None,
+            output_key=None, output_keys=None, important=False,
+        )
+        asyncio.run(runtime._runtime_engine.lg_tool_node(tool_def, persona, self.PB)(state))
+        assert state["last"] == result
+        self._run_memorize(runtime, persona, state)
+
+        assert "id" not in self._reply_dict(state, "返事 A。")
+
+        if not same_text:
+            client.replies.append("返事 B。")
+            self._run_llm(runtime, persona, state, "reply_b", memorize=True)
+            _b_id, b_meta = _row_by_content(adapter, "返事 B。")
+            expected = _last_recorded_id_in(adapter, client.sent[-1])
+            assert expected == h2
+            assert b_meta.get(PREDECESSOR_META_KEY) == expected
+
+    def test_templated_memorize_action_does_not_put_the_id(self, node_env):
+        runtime, persona, adapter, client = node_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        client.replies.append("返事 A。")
+        self._run_llm(runtime, persona, state, "reply_a", memorize=False)
+        self._run_memorize(runtime, persona, state, action="前置き: {last}")
+        _row_by_content(adapter, "前置き: 返事 A。")
+
+        assert "id" not in self._reply_dict(state, "返事 A。")
+
+        client.replies.append("返事 B。")
+        self._run_llm(runtime, persona, state, "reply_b", memorize=True)
+        _b_id, b_meta = _row_by_content(adapter, "返事 B。")
+        expected = _last_recorded_id_in(adapter, client.sent[-1])
+        assert expected == h2
+        assert b_meta.get(PREDECESSOR_META_KEY) == expected
+
+    def test_next_llm_node_drops_the_previous_unstored_reply(self, node_env):
+        """X (保存なし) → Z (保存なし) → MEMORIZE: `id` が載るのは Z の dict だけ。
+
+        `lg_llm_node` の入り口で `_unstored_reply` を消すので、X の返事を Z の
+        返事と取り違えない。
+        """
+        runtime, persona, adapter, client = node_env
+        h1, h2, messages = _seed_history(runtime, persona)
+        state = _base_state(messages, [h1, h2])
+
+        client.replies.append("返事 A。")
+        self._run_llm(runtime, persona, state, "reply_a", memorize=False)
+        client.replies.append("返事 Z。")
+        self._run_llm(runtime, persona, state, "reply_z", memorize=False)
+        self._run_memorize(runtime, persona, state)
+
+        z_row, _ = _row_by_content(adapter, "返事 Z。")
+        assert self._reply_dict(state, "返事 Z。").get("id") == z_row
+        assert "id" not in self._reply_dict(state, "返事 A。")
