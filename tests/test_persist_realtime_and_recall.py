@@ -738,6 +738,100 @@ class TestPrefixInvariantOnTheRealPath:
         sent_history = sent[2:-1]
         assert _sent(measured)[: len(sent_history)] == _sent(sent_history)
 
+    def _assert_unanchored_perception_stays(self, env, turn2, turn3) -> None:
+        """境界が解決できない知覚のまとめの位置が、同じ秒の発言が増えても動かない。
+
+        二→三ターンの最初の送信どうしが SAIVerse の列と Gemini の送信形式の
+        両方で前方一致し、知覚は同じ秒の最初の発言 (初回の返事) より前に居る。
+        測る側 (勘定・退場計画) も同じ並び。
+        """
+        from sea.runtime_context import BOUNDARY_ANCHOR_ID_KEY
+        from sea.session_lifecycle import SessionLifecycle
+
+        _assert_first_call_prefix(turn2, turn3)
+        _assert_gemini_prefix(turn2[0], turn3[0])
+        for sent in (turn2[0], turn3[0]):
+            i_p = next(
+                i for i, m in enumerate(sent) if "雨が降ってきた" in str(m.get("content"))
+            )
+            # 境界で位置を決めていない (境界が解決できない) 知覚のまとめ
+            assert BOUNDARY_ANCHOR_ID_KEY not in (sent[i_p].get("metadata") or {})
+            first_message = next(
+                i for i, m in enumerate(sent) if i > 1 and m.get("id")
+            )
+            assert i_p < first_message
+
+        recent = env.persona.history_manager.get_recent_history(
+            100_000, required_line_roles=["main_line"], required_scopes=["committed"],
+        )
+        lifecycle = SessionLifecycle(runtime=env.runtime, manager_ref=env.runtime.manager)
+        measured = lifecycle.presented_with_perceptions(
+            env.persona, recent, model_key=ON_MODEL,
+        )
+        # 送る列では自律パルスの返事が自律記録の形へ変換されるので、文面ではなく
+        # 行の素性 (発言の id / 台帳の id) の並びで比べる。
+        def _keys(msgs):
+            return [
+                m.get("id") or (m.get("metadata") or {}).get("__perception_batch_id__")
+                for m in msgs
+            ]
+
+        sent_history = turn3[0][2:-1]
+        assert all(_keys(sent_history))
+        assert _keys(measured)[: len(sent_history)] == _keys(sent_history)
+
+    def test_unanchored_perception_does_not_move_behind_same_second_lines(self, env):
+        """境界が NULL の知覚のまとめ (空の初回パルスで消費) は、同じ秒の発言が
+        増えても後ろへ動かない — ON のモデルの送る列では、同じ秒の発言より前に
+        置く (Codex 九巡目)。秒の厳密な比較だと、二ターン目は「入力→知覚→
+        まとまり」、三ターン目は「入力→まとまり→返事→知覚」になって先頭が
+        割れていた。"""
+        fixed = time.time()
+        with patch("time.time", return_value=fixed):
+            _push_perception(env, "雨が降ってきた")
+            _run_turn(env, None, pulse_type="auto")
+            turn2 = _run_turn(env, "同じ秒の二ターン目。")
+            turn3 = _run_turn(env, "同じ秒の三ターン目。")
+        with env.adapter._db_lock:
+            boundary = env.adapter.conn.execute(
+                "SELECT boundary_created_at, boundary_rowid FROM perception_batches "
+                "WHERE kind = 'perception' AND rendered_text LIKE '%雨が降ってきた%'"
+            ).fetchall()
+        assert boundary == [(None, None)]
+        self._assert_unanchored_perception_stays(env, turn2, turn3)
+
+    def test_perception_bounded_by_another_thread_does_not_move(self, env):
+        """境界が別のスレッドの発言で、境界より前の発言が送る列に無い知覚の
+        まとめも、同じ秒の発言より前に置く (Codex 九巡目 — 境界の引き当てが
+        0 番目に落ちる経路)。"""
+        fixed = time.time()
+        stamp = datetime.fromtimestamp(fixed, timezone.utc).isoformat()
+        with patch("time.time", return_value=fixed):
+            env.adapter.append_persona_message(
+                {
+                    "role": "user", "content": "別スレッドの発言。", "timestamp": stamp,
+                    "line_role": "main_line", "scope": "committed",
+                },
+                thread_suffix="another_thread",
+            )
+            _push_perception(env, "雨が降ってきた")
+            _run_turn(env, None, pulse_type="auto")
+            turn2 = _run_turn(env, "同じ秒の二ターン目。")
+            turn3 = _run_turn(env, "同じ秒の三ターン目。")
+        with env.adapter._db_lock:
+            other_rowid = env.adapter.conn.execute(
+                "SELECT rowid FROM messages WHERE content = '別スレッドの発言。'"
+            ).fetchone()[0]
+            boundary = env.adapter.conn.execute(
+                "SELECT boundary_rowid FROM perception_batches "
+                "WHERE kind = 'perception' AND rendered_text LIKE '%雨が降ってきた%'"
+            ).fetchall()
+        assert boundary == [(other_rowid,)]
+        assert not any(
+            "別スレッドの発言。" in str(m.get("content")) for m in turn3[0]
+        )
+        self._assert_unanchored_perception_stays(env, turn2, turn3)
+
     def test_auto_pulse_without_user_utterance(self, env):
         turn0 = _run_turn(env, "こんにちは。")
         turn1 = _run_turn(env, None, pulse_type="auto")
@@ -1406,6 +1500,34 @@ class TestOffModelAndSwitching:
             (m.get("created_at") or 0) <= perception[0]["created_at"]
             for m in merged[:i] if m.get("id")
         )
+
+    def test_off_model_unanchored_perception_keeps_strict_seconds_order(self, env):
+        """境界が解決できない知覚を同じ秒の発言より前に置くのは ON のモデルの
+        送る列だけ (Codex 九巡目)。OFF のモデルの列は今までどおり秒の厳密な
+        比較 (``<``) — 同じ秒の発言の後ろに並ぶ。"""
+        from sea.runtime_context import (
+            list_presented_perception_blocks,
+            merge_perception_blocks,
+        )
+
+        env.persona.model = OFF_MODEL
+        env.persona.lightweight_model = OFF_MODEL
+        fixed = time.time()
+        with patch("time.time", return_value=fixed):
+            _push_perception(env, "雨が降ってきた")
+            _run_turn(env, None, pulse_type="auto")
+            _run_turn(env, "同じ秒の二ターン目。")
+        recent = env.persona.history_manager.get_recent_history(
+            100_000, required_line_roles=["main_line"], required_scopes=["committed"],
+        )
+        assert recent and all(m.get("created_at") == int(fixed) for m in recent)
+        off_blocks = list_presented_perception_blocks(
+            env.runtime, env.persona, recent, model_key=OFF_MODEL,
+        )
+        assert [b["created_at"] for b in off_blocks] == [int(fixed)]
+        merged = merge_perception_blocks(recent, off_blocks)
+        # 同じ秒の発言は全部先、知覚は末尾 (厳密な < の比較)
+        assert merged == list(recent) + off_blocks
 
     def test_on_off_on(self, env):
         env.recall.hits = [_hit("page-a", "海辺の町")]

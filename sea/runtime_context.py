@@ -102,6 +102,13 @@ def mark_cache_boundary(
 #: (``boundary_created_at`` / ``boundary_rowid``) で位置を決め、同じ秒の前後が
 #: 入れ替わらないようにする (persist_realtime_and_recall.md §4.3)。
 BOUNDARY_ANCHOR_ID_KEY = "__boundary_anchor_id__"
+#: 残す設定のモデルへ送る列の知覚のまとめ (と省略の印) が持つ印。境界で位置を
+#: 決められない (境界が NULL・境界より前の発言が送る列に無い) ときの秒の比較を
+#: 「自分の時刻以上の最初の発言の直前」(同じ秒の発言より前) にする —
+#: 後から同じ秒の発言が増えても位置が動かないように (§4.3、Codex 九巡目)。
+#: 印の無いブロック (OFF のモデルの列・部屋の様子の置き直し) は今までどおり
+#: 「自分の時刻以下の最後の発言の直後」。
+PLACE_BEFORE_SAME_SECOND_KEY = "__place_before_same_second__"
 #: 送る列に出す「残した行」のブロックが持つ、文面に入っている自動想起の
 #: ``[[source_type, source_id], ...]`` (次のターンの候補から外すのに使う)。
 REALTIME_AND_RECALL_RECALLED_KEY = "__realtime_and_recall_recalled__"
@@ -1616,7 +1623,9 @@ def list_presented_perception_blocks(
       付記で下りるのは知覚のまとめと同じ。残す設定のモデルへ送る列では、
       知覚のまとめにも位置を決める発言を付ける
       (:func:`_resolve_perception_anchors_locked` — 同じ秒の前後が入れ替わら
-      ないように)。OFF のモデルの知覚は今までどおり秒の順。
+      ないように)。境界で位置を決められない知覚のまとめ (と省略の印) には
+      :data:`PLACE_BEFORE_SAME_SECOND_KEY` を付け、同じ秒の発言より前に置く。
+      OFF のモデルの知覚は今までどおり秒の順。
     - **この関数は台帳へ一切書かない** (2026-09-09 以降)。読み取り専用の画面
       (context-status)・仮定の窓の下見 (読み戻し / 引き戻しのプレビュー)・
       コンテキストプレビューと、実際に送る側が同じ一枚を通る — 測る列と送る列が
@@ -1641,7 +1650,7 @@ def list_presented_perception_blocks(
         )
         from sai_memory.perception_buffer import batch_in_window, resolve_window_key
         from sai_memory.presented_reduction import reduce_presented_batches
-        from sai_memory.room_state import reopen_lost_bases
+        from sai_memory.room_state import batch_is_room_reseat, reopen_lost_bases
         from sea.head_pipeline.integration import resolve_default_model_key
         chronicle_enabled = _chronicle_enabled_for(runtime, persona)
         # 残したリアルタイム情報と自動想起の行を送るのは、送り先のモデルが
@@ -1825,10 +1834,16 @@ def list_presented_perception_blocks(
             mark_at = max(b.consumed_at for b in dropped)
             if presented:
                 mark_at = min(mark_at, presented[0].consumed_at)
-            blocks.append(_perception_omission_block(
+            omission = _perception_omission_block(
                 dropped, mark_at, chronicle_enabled=chronicle_enabled,
                 records=sum(record_counts.get(b.id, 1) for b in dropped),
-            ))
+            )
+            if persist_mode:
+                # 印は提示に残る最古の知覚のまとめと同じ秒に立ちうる。まとめ側だけ
+                # 「同じ秒の発言より前」に並べると、印の後ろで秒の比較が止まって
+                # まとめが印ごと発言の後ろへ押し出される — 印も同じ規則で並べる。
+                omission["metadata"][PLACE_BEFORE_SAME_SECOND_KEY] = True
+            blocks.append(omission)
         for batch in presented:
             if batch.is_realtime_and_recall:
                 block = _realtime_and_recall_block(
@@ -1850,6 +1865,14 @@ def list_presented_perception_blocks(
                 anchor = perception_anchors.get(int(batch.id))
                 if anchor:
                     metadata[BOUNDARY_ANCHOR_ID_KEY] = anchor
+                if persist_mode and not batch_is_room_reseat(batch.room_state_json):
+                    # 境界で位置を決められないとき (境界が NULL・境界より前の
+                    # 発言が送る列に無い・発言が組成と別の列に無い) は、同じ秒の
+                    # 発言より前に置く (§4.3、Codex 九巡目)。秒の厳密な比較だと、
+                    # 同じ秒の発言が増えるたびに後ろへ動いて前回の送信と先頭が
+                    # 一致しなくなる。部屋の様子の置き直しは最古にした時刻で
+                    # 先頭に立つ規則のまま (印を付けない)。
+                    metadata[PLACE_BEFORE_SAME_SECOND_KEY] = True
             if batch.room_state_json or batch.id is None:
                 # 部屋の記帳 (room_state_json) を持つバッチは「部屋の様子」。
                 # 幻のブロック (id なし) は置き直しの下見そのもの — 実 INSERT
@@ -1912,7 +1935,8 @@ def _resolve_perception_anchors_locked(
     直後)。
 
     境界が NULL の古い行、境界より前に ``recent`` の発言が無い行は含めない
-    (呼び出し側で従来の秒の比較に落ちる)。返り値はバッチ id → 発言の id。
+    (呼び出し側で秒の比較に落ちる — 残す設定のモデルの列では同じ秒の発言より
+    前、:data:`PLACE_BEFORE_SAME_SECOND_KEY`)。返り値はバッチ id → 発言の id。
 
     部屋の様子の機構の置き直し (:func:`sai_memory.room_state.reseat_current_room`)
     も含めない — その境界は窓の判定 (可視性) のための記帳で、位置は意図的に
@@ -2062,6 +2086,20 @@ def _place_anchored_blocks(
     return out
 
 
+def _goes_before(block: Dict[str, Any], epoch: int) -> bool:
+    """時刻で並べるブロックが、時刻 ``epoch`` の生ログより前に入るか。
+
+    既定は厳密な ``<`` (同じ秒なら生ログが先)。:data:`PLACE_BEFORE_SAME_SECOND_KEY`
+    を持つブロック (残す設定のモデルへ送る列の、境界で位置を決められない知覚の
+    まとめと省略の印) は ``<=`` — 同じ秒の生ログより前に入る。
+    """
+    created_at = block["created_at"]
+    meta = block.get("metadata") if isinstance(block, dict) else None
+    if (meta or {}).get(PLACE_BEFORE_SAME_SECOND_KEY):
+        return created_at <= epoch
+    return created_at < epoch
+
+
 def merge_perception_blocks(
     recent: Sequence[Dict[str, Any]], blocks: Sequence[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -2071,12 +2109,22 @@ def merge_perception_blocks(
     生ログが先 — 消費は書き込みの後に起きた事実)。送る側と測る側が**同じ並び**
     を見るための一点。
 
+    ただし :data:`PLACE_BEFORE_SAME_SECOND_KEY` を持つブロック (残す設定の
+    モデルへ送る列で、境界で位置を決められない知覚のまとめと省略の印) は
+    「自分の ``consumed_at`` 以上の時刻を持つ最初の生ログ」の直前に入る (同じ
+    秒の生ログより前)。厳密な比較のままだと、後から同じ秒の発言が保存される
+    たびにブロックが後ろへ動き、前回の送信と先頭が一致しなくなる
+    (persist_realtime_and_recall.md §4.3、Codex 九巡目)。同じ位置に並ぶもの
+    同士は渡された順 (台帳の ``consumed_at, id`` の順)。OFF のモデルの列の
+    ブロックは印を持たないので並びは変わらない。
+
     位置を決める発言 (:data:`BOUNDARY_ANCHOR_ID_KEY`) を持つブロックは、時刻では
     なくその発言の直後に並べる (:func:`_place_anchored_blocks`)。持つのは
     残したリアルタイム情報と自動想起の行 (:data:`PERSISTED_REALTIME_AND_RECALL_KEY`)
     と、残す設定のモデルへ送るときの知覚のまとめ (組成側
     :func:`list_presented_perception_blocks` が付ける)。知覚のまとめの発言が
     ``recent`` に無ければ (組成と並べで別の列を渡した場合)、時刻の順に落とす
+    (残す設定のモデルの知覚のまとめは印を持つので同じ秒の発言より前)
     — 知覚は消さない。残した行は発言が無ければ出さない (§4.3)。
     """
     recent_ids = {
@@ -2098,7 +2146,7 @@ def merge_perception_blocks(
         while (
             bi < len(epoch_blocks)
             and epoch is not None
-            and epoch_blocks[bi]["created_at"] < epoch
+            and _goes_before(epoch_blocks[bi], epoch)
         ):
             merged.append(epoch_blocks[bi])
             bi += 1
