@@ -121,7 +121,9 @@ def find_offenders(nodes: List[dict]) -> List[str]:
         if node_type in _LAST_VOICED_TYPES:
             reads_last, refs = True, set()
         elif node_type == "memorize" and (node.get("role") or "assistant") == "assistant":
-            refs = _referenced_keys(node.get("action") or "")
+            # action を省略した MEMORIZE は実行時に "{last}" を保存する
+            # (sea/runtime_engine.py の lg_memorize_node: action or "{last}")。
+            refs = _referenced_keys(node.get("action") or "{last}")
             reads_last = "last" in refs
         else:
             continue
@@ -161,6 +163,14 @@ class TestTheCheckItself:
             {"id": "announce", "type": "memorize", "action": "{last}", "role": "assistant"},
         ]
         assert find_offenders(nodes) == ["create(tool) -> announce"]
+
+    def test_memorize_without_action_saves_last(self):
+        """action を省略した MEMORIZE (役割も既定の assistant) は {last} を保存する。"""
+        nodes = [
+            {"id": "create", "type": "tool", "action": "create_building", "next": "keep"},
+            {"id": "keep", "type": "memorize"},
+        ]
+        assert find_offenders(nodes) == ["create(tool) -> keep"]
 
     def test_tool_call_through_pass_into_speak(self):
         nodes = [
