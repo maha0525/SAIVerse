@@ -163,7 +163,8 @@ def test_long_inputs_are_split_by_the_token_budget(fake_runtime, model_dir):
     emb = recall.Embedder(local_model_path=str(model_dir))
     long_texts = [" ".join(["w"] * 2000) for _ in range(10)]  # truncated to 512
     short_texts = [" ".join(["w"] * 3) for _ in range(5)]
-    vectors = emb.embed(long_texts + short_texts)
+    texts = short_texts[:2] + long_texts + short_texts[2:]
+    vectors = np.array(emb.embed(texts))
     assert len(vectors) == 15
 
     calls = fake_runtime.instances[0].calls
@@ -172,6 +173,10 @@ def test_long_inputs_are_split_by_the_token_budget(fake_runtime, model_dir):
     assert rows == [4, 4, 4, 3]
     for feeds in calls:
         assert feeds["input_ids"].size <= recall._MAX_BATCH_TOKENS
+    # written back to the input positions (element 0 / element 1 = length * 10 / 3)
+    for text, v in zip(texts, vectors):
+        expected = _token_count(emb, recall.DOCUMENT_PROMPT + text) * 10.0 / 3.0
+        assert v[0] / v[1] == pytest.approx(expected, rel=1e-5)
 
 
 def test_cpu_memory_arena_is_disabled(fake_runtime, model_dir):

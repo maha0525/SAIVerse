@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
 from typing import List, Tuple
 
 import numpy as np
@@ -56,6 +56,11 @@ _OUTPUT_NAME = "sentence_embedding"
 # (all personas). Loading takes the lock so a first-run download happens once.
 _EMBEDDING_MODEL_CACHE: dict[str, "_OnnxTextEncoder"] = {}
 _EMBEDDING_MODEL_CACHE_LOCK = RLock()
+# One session.run() at a time across the process. The session is shared by
+# every persona, so a bulk re-embed and an import's background embedding could
+# otherwise each reach the per-call peak at once. Held per call (about a second
+# at most), so a live message save waits behind one call, not a whole job.
+_RUN_LOCK = Lock()
 
 
 class _OnnxTextEncoder:
@@ -130,7 +135,8 @@ class _OnnxTextEncoder:
         empty = np.zeros((0, _MEDIA_FEATURE_DIM), dtype=np.float32)
         for name in self._media_inputs:
             feeds[name] = empty
-        (emb,) = self.session.run([_OUTPUT_NAME], feeds)
+        with _RUN_LOCK:
+            (emb,) = self.session.run([_OUTPUT_NAME], feeds)
         emb = np.asarray(emb, dtype=np.float32)
         if emb.shape != (n, EMBED_DIM):
             raise RuntimeError(
