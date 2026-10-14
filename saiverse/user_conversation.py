@@ -777,6 +777,24 @@ def _start_main_line_pulse(
 # ---------------------------------------------------------------------------
 
 
+def _utterance_text_for_judgment(event: Dict[str, Any]) -> str:
+    """応じるかの判断 (on_event) に見せる、ユーザーの発言の文。
+
+    本文が空で添付だけの発言 (画像だけを送った等) は、本文をそのまま渡すと
+    「話しかけました:」の後が空になり、何を受け取ったのか判断できない。
+    そのときは機構の言葉で添付の種類と件数を書く。本文があれば本文だけ。
+    """
+    from saiverse.media_utils import describe_attachments
+
+    text = str(event.get("content") or "")
+    if text.strip():
+        return text
+    attachments = describe_attachments(event.get("metadata"))
+    if attachments:
+        return f"(文章は無く、{attachments}を送ってきました)"
+    return text
+
+
 def on_user_utterance(
     manager: Any,
     persona_id: str,
@@ -890,7 +908,7 @@ def on_user_utterance(
         route = handle_user_utterance_conflict(
             manager,
             persona_id,
-            str(event.get("content") or ""),
+            _utterance_text_for_judgment(event),
             engage=_engage,
             user_id=user_id,
         )

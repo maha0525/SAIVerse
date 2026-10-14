@@ -820,6 +820,64 @@ def _iter_typed_media(
     return results
 
 
+def _count_attachments(metadata: Any) -> Dict[str, int]:
+    """発言の metadata に載った添付を種類ごとに数える (ファイルの有無は見ない)。
+
+    添付の置き場は api/routes/chat.py の /chat/send が書く 3 つ:
+    ``images`` (画像)、``documents`` (ドキュメント)、``media`` (音声・動画。
+    種類は ``type`` か ``mime_type`` の頭で決まり、画像が入ることもある)。
+    """
+    counts = {"image": 0, "document": 0, "audio": 0, "video": 0}
+    if not isinstance(metadata, dict):
+        return counts
+    images = metadata.get("images")
+    if isinstance(images, list):
+        counts["image"] += sum(1 for item in images if isinstance(item, dict))
+    documents = metadata.get("documents")
+    if isinstance(documents, list):
+        counts["document"] += sum(1 for item in documents if isinstance(item, dict))
+    media = metadata.get("media")
+    if isinstance(media, list):
+        for item in media:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("type") or "").lower()
+            if not kind:
+                mime = str(item.get("mime_type") or "").lower()
+                kind = mime.split("/", 1)[0] if "/" in mime else ""
+            if kind in counts:
+                counts[kind] += 1
+    return counts
+
+
+def has_attachments(metadata: Any) -> bool:
+    """発言が添付 (画像・ドキュメント・音声・動画) を一つでも持つか。
+
+    本文が空の発言を「空」として捨てるかどうかの判定に使う。画像だけの発言は
+    本文 ``""`` と添付で表されるので、本文だけを見て捨てると発言ごと消える。
+    """
+    return any(_count_attachments(metadata).values())
+
+
+_ATTACHMENT_LABELS = (
+    ("image", "画像"),
+    ("document", "ドキュメント"),
+    ("audio", "音声"),
+    ("video", "動画"),
+)
+
+
+def describe_attachments(metadata: Any) -> str:
+    """添付の種類と件数を「画像 1 件、ドキュメント 2 件」の形の文にする。
+
+    添付が無ければ空文字。機構が書く文 (判断の材料など) に添える用途で、
+    ペルソナ本人の発言の本文には入れない。
+    """
+    counts = _count_attachments(metadata)
+    parts = [f"{label} {counts[key]} 件" for key, label in _ATTACHMENT_LABELS if counts[key]]
+    return "、".join(parts)
+
+
 def iter_audio_media(metadata: Any) -> List[Dict[str, Any]]:
     """Extract validated audio descriptors from a metadata payload."""
     return _iter_typed_media(

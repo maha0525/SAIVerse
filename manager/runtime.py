@@ -81,6 +81,21 @@ _OUTCOME_EVENT_TYPES = frozenset({
 #: 設計: docs/issues/archive/stream_completion_is_not_proof_of_persistence.md
 from sea.runtime_emitters import SPEAK_PERSISTED_EVENT_TYPE as _PERSISTED_EVENT_TYPE  # noqa: E402
 
+
+def _utterance_is_empty(message: Optional[str], metadata: Optional[Dict[str, Any]]) -> bool:
+    """本文も添付も無い発言か。
+
+    画像だけの発言は本文 ``""`` と metadata の添付で届く。本文だけを見て
+    「空」と断ると、UI が送らせた発言をサーバーが「入力が空でした」で捨てる
+    (2026-10-14 まで、画像だけの発言はどのペルソナにも届いていなかった)。
+    """
+    from saiverse.media_utils import has_attachments
+
+    if message is not None and str(message).strip():
+        return False
+    return not has_attachments(metadata)
+
+
 #: 本文を運ぶ型。中身が空なら画面には何も出ていないので、届いたとは数えない。
 _CONTENT_BEARING_TYPES = frozenset({"say", "streaming_chunk"})
 
@@ -590,7 +605,7 @@ class RuntimeService(
         logging.debug(
             "[runtime] handle_user_input called (metadata_present=%s)", bool(metadata)
         )
-        if not message or not str(message).strip():
+        if _utterance_is_empty(message, metadata):
             logging.error("[runtime] handle_user_input got empty message; aborting to avoid corrupt routing")
             return ['<div class="note-box">入力が空でした。再送してください。</div>']
 
@@ -694,7 +709,7 @@ class RuntimeService(
         # console.error だけになり、画面には何も出ない (下の not_in_building が
         # 同じ理由で JSON へ直された 2026-07-21 の指摘が、この 2 箇所には
         # 届いていなかった)。
-        if not message or not str(message).strip():
+        if _utterance_is_empty(message, metadata):
             logging.error("[runtime] handle_user_input_stream got empty message; aborting to avoid corrupt routing")
             yield json.dumps({
                 "type": "error",
