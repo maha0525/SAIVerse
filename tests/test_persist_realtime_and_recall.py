@@ -2153,6 +2153,34 @@ class TestArasujiMaterial:
         i_reply = prompt.index("[assistant]: おはよう、まはー")
         assert i_user < i_perception < i_recall < i_reply
 
+    def test_perception_in_the_same_second_as_the_reply_stays_before_it(self):
+        """知覚・差し込み・返事が同じ秒: 発言 → 知覚 → 差し込み → 返事 (Codex)。
+
+        差し込みだけを次の発言の前に収めると、同じ秒の知覚は返事の後ろへ
+        落ち、差し込みに追い越される。知覚のまとめも境界で収める。
+        """
+        from sai_memory.arasuji.generator import _format_messages_for_prompt
+
+        messages = [
+            self._msg("u1", "user", "おはよう", 1000),
+            self._msg("a1", "assistant", "おはよう、まはー", 1001),
+        ]
+        items = [
+            {"at": 1001, "text": "部屋に誰かが入ってきた", "after_message_id": "u1"},
+            {
+                "at": 1001, "text": "[想起: 昨日の約束]", "label": "recall",
+                "after_message_id": "u1",
+            },
+        ]
+        prompt = _format_messages_for_prompt(
+            messages, include_timestamp=False, extra_items=items,
+        )
+        i_user = prompt.index("[user]: おはよう")
+        i_perception = prompt.index("部屋に誰かが入ってきた")
+        i_recall = prompt.index("[想起: 昨日の約束]")
+        i_reply = prompt.index("[assistant]: おはよう、まはー")
+        assert i_user < i_perception < i_recall < i_reply
+
     def test_several_rows_after_the_same_message_keep_their_order(self):
         from sai_memory.arasuji.generator import _format_messages_for_prompt
 
@@ -2227,7 +2255,7 @@ class TestArasujiMaterial:
             rendered_text="<system>\n## リアルタイム情報\n- 現在時刻: 10:01\n</system>",
             boundary_created_at=1000, boundary_rowid=9999,
         )
-        # 知覚のまとめは境界を持っていても従来どおり (秒の順のまま)。
+        # 知覚のまとめも境界の発言を引く (同じ規則で次の発言の前に収まる)。
         item = push_perception(conn, "world_state", "雨が降ってきた")
         create_consumption_batch(
             conn, [item], consumed_at=1000,
@@ -2241,7 +2269,7 @@ class TestArasujiMaterial:
         by_text = {i["text"].split("\n")[-1]: i for i in items}
         assert by_text["- 現在時刻: 10:00"]["after_message_id"] == u1
         assert "after_message_id" not in by_text["- 現在時刻: 10:01"]
-        assert "after_message_id" not in by_text["雨が降ってきた"]
+        assert by_text["雨が降ってきた"]["after_message_id"] == u1
 
         messages = [get_message(conn, u1), get_message(conn, a1)]
         prompt = _format_messages_for_prompt(
@@ -2252,9 +2280,10 @@ class TestArasujiMaterial:
         i_reply = prompt.index("[assistant]: おはよう、まはー")
         i_orphan = prompt.index("現在時刻: 10:01")
         i_perception = prompt.index("【知覚】: [システム通知]")
-        assert i_user < i_kept < i_reply
-        # 解決できない行と知覚のまとめは秒の順 (同じ秒のメッセージの後ろ)。
-        assert i_reply < i_orphan and i_reply < i_perception
+        # 知覚のまとめは差し込みより後に確定した (id が大きい) ので、その後ろ。
+        assert i_user < i_kept < i_perception < i_reply
+        # 境界を解決できない行は秒の順 (同じ秒のメッセージの後ろ)。
+        assert i_reply < i_orphan
 
 
 # ---------------------------------------------------------------------------

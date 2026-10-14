@@ -1017,16 +1017,20 @@ def batch_material_item(
       (【想起 (過去の再提示)】)、含まない行は ``label="notice"`` (【通知】)。
       文面は ``<system>`` の包みを外したもの。長さの規則は材料の整形側
       (generator._format_messages_for_prompt) が他の材料と同じに当てる。
-      ``conn`` (このバッチと同じ SAIMemory の接続) が渡され、行が境界の発言
-      (``boundary_created_at`` / ``boundary_rowid``) を持つときは、その発言の
-      id を ``"after_message_id"`` に入れる。整形側はこれで、材料の中にその
-      発言があれば、その発言の後ろ・次の発言の前に収める — ``consumed_at`` は最初の LLM 呼び出しの
-      完了時刻で、返事の保存と同じ秒になりやすく、秒の順だけで並べると
-      「発言 → 返事 → 差し込み」と実際の順 (発言 → 差し込み → 返事) が
-      入れ替わるため。境界の発言が記録に無ければ入れない (秒の順に戻る)。
-    - それ以外 (知覚のまとめ・部屋の様子) は従来どおり確定文面そのまま
-      (ラベルは整形側が本文から決める)。``after_message_id`` は付けない —
-      並びは従来どおり秒の順 (OFF のモデルの材料は変えない)。
+    - それ以外 (知覚のまとめ) は従来どおり確定文面そのまま (ラベルは整形側が
+      本文から決める)。
+
+    どちらも、``conn`` (このバッチと同じ SAIMemory の接続) が渡され、境界の
+    発言 (``boundary_created_at`` / ``boundary_rowid``) が記録にあるときは、
+    その発言の id を ``"after_message_id"`` に入れる。整形側はこれで、材料の
+    中にその発言があれば、時刻順の位置をその発言の後ろ・次の発言の前に収める。
+    境界はバッチを確定した (残した行なら送った) 時点の直前の発言なので、
+    バッチは次の発言より前に起きている。秒の順だけで並べると、次の発言
+    (返事) と同じ秒のときに「発言 → 返事 → バッチ」と入れ替わる — 残した行は
+    保存の時刻が最初の LLM 呼び出しの完了時刻で、返事と同じ秒になりやすい。
+    知覚のまとめも同じ規則にそろえるのは、残した行だけを動かすと、同じ秒に
+    先に出た知覚を追い越すため (Codex)。境界の発言が記録に無ければ入れない
+    (秒の順に戻る)。
 
     戻りは ``{"at": epoch, "text": str}`` (+ 必要なら ``"label"`` /
     ``"after_message_id"``)。
@@ -1043,11 +1047,12 @@ def batch_material_item(
                 else MATERIAL_LABEL_NOTICE
             ),
         }
-        after_id = _boundary_message_id(conn, batch)
-        if after_id is not None:
-            item["after_message_id"] = after_id
-        return item
-    return {"at": int(batch.consumed_at), "text": batch.rendered_text}
+    else:
+        item = {"at": int(batch.consumed_at), "text": batch.rendered_text}
+    after_id = _boundary_message_id(conn, batch)
+    if after_id is not None:
+        item["after_message_id"] = after_id
+    return item
 
 
 def _boundary_message_id(
