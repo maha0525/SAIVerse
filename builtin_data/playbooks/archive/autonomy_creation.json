@@ -131,8 +131,8 @@
     {
       "id": "finalize",
       "type": "memorize",
-      "action": "創作活動完了: {input}",
-      "role": "assistant",
+      "action": "<system>創作活動完了: {input}</system>",
+      "role": "user",
       "tags": [
         "creation",
         "completed"

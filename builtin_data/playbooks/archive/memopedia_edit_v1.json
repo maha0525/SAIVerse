@@ -154,8 +154,8 @@
         {
             "id": "page_not_found",
             "type": "memorize",
-            "action": "指定されたページが見つかりませんでした: {target_title}",
-            "role": "assistant",
+            "action": "<system>指定されたページが見つかりませんでした: {target_title}</system>",
+            "role": "user",
             "tags": [
                 "internal",
                 "memopedia_edit",

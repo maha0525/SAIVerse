@@ -127,8 +127,8 @@
     {
       "id": "finalize",
       "type": "memorize",
-      "action": "記憶整理完了: {input}",
-      "role": "assistant",
+      "action": "<system>記憶整理完了: {input}</system>",
+      "role": "user",
       "tags": [
         "memory_organization",
         "completed"

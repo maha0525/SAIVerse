@@ -110,8 +110,8 @@
     {
       "id": "finalize",
       "type": "memorize",
-      "action": "フラグメント整理完了",
-      "role": "assistant",
+      "action": "<system>フラグメント整理完了</system>",
+      "role": "user",
       "tags": ["fragment_organize", "completed"],
       "next": null
     }
