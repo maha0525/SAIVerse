@@ -20,7 +20,11 @@ from saiverse.usage_tracker import get_usage_tracker
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 from sea.langgraph_runner import compile_playbook
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
-from sea.message_stamp import build_generation_stamp, stamp_generation_metadata
+from sea.message_stamp import (
+    attach_stored_id_to_unstored_reply,
+    build_generation_stamp,
+    stamp_generation_metadata,
+)
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 from sea.pulse_context import ExecutionContext, default_lightweight_model, resolve_execution_context
 from sea.runtime_context import WindowFloorUnmetError
@@ -1448,10 +1452,13 @@ class SEARuntime:
         pulse_id = state.get("_pulse_id") or str(uuid.uuid4())
         # 書き込み時の機械刻印 (v3 §7.1)。独白も LLM が書いた本人の言葉で、
         # memory.db に 1 行残る = 生成メッセージの永続点。
-        self._emit_think(
+        stored_id = self._emit_think(
             persona, pulse_id, text,
             extra_metadata=stamp_generation_metadata(None, state),
         )
+        # 前の LLM ノードが記憶に保存しなかった返事がこの state["last"] なら、
+        # 書いた行の id をその返事の dict に載せる (sea/message_stamp.py)。
+        attach_stored_id_to_unstored_reply(state, stored_id)
         if outputs is not None:
             outputs.append(text)
         if event_callback:
@@ -2119,8 +2126,9 @@ class SEARuntime:
             final_sub_seq=final_sub_seq, final_voice_text=final_voice_text,
         )
 
-    def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None) -> None:
-        self._emitters.emit_think(persona, pulse_id, text, record_history=record_history, extra_metadata=extra_metadata)
+    def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        # 戻り値は記憶 (SAIMemory) に書けた行の id。書けなければ None。
+        return self._emitters.emit_think(persona, pulse_id, text, record_history=record_history, extra_metadata=extra_metadata)
 
     # ---------------- history metabolism -----------------
 

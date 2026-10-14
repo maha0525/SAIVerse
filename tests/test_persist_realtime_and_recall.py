@@ -1449,7 +1449,11 @@ class TestOffModelAndSwitching:
 
     def test_off_model_auto_spell_loop_keeps_the_assistant_line(self, env):
         """OFF のモデルの自律パルスのスペルの繰り返しは今までどおり — 周内の
-        発言は assistant ロールのまま次の呼び出しへ積む (不変条件 2)。"""
+        発言は assistant ロールのまま次の呼び出しへ積む (不変条件 2)。
+
+        周の発言の dict は、モデルの設定に関係なく記録の行 id を ``"id"`` に
+        持つ (sea/runtime_llm._run_spell_loop)。``"id"`` は LLM へ送る中身には
+        入らないので、比べるのはそれ以外の欄。"""
         env.persona.model = OFF_MODEL
         env.persona.lightweight_model = OFF_MODEL
         _run_turn(env, "こんにちは。")
@@ -1462,7 +1466,8 @@ class TestOffModelAndSwitching:
         round_msg = next(
             m for m in turn1[-1] if "散歩のメモを残そう。" in str(m.get("content"))
         )
-        assert round_msg == {
+        assert isinstance(round_msg.get("id"), str) and round_msg["id"]
+        assert {k: v for k, v in round_msg.items() if k != "id"} == {
             "role": "assistant",
             "content": f"散歩のメモを残そう。\n/spell name='{LOOP_SPELL}' args={{}}",
         }
@@ -3419,25 +3424,18 @@ def test_predecessor_after_a_spell_round_and_a_child(env, monkeypatch):
 @pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
 def test_kept_ids_on_the_list_do_not_change_what_is_sent(env, monkeypatch):
     """送る列の行に持たせた記録の id は、LLM へ送る中身 (Gemini の送信形式) を
-    変えない。OFF のモデルの列には id を持たせない (今までどおり)。"""
-    from sea import runtime_llm
-
-    turn = _run_turn(env, "外の様子はどう?", playbook=_think_child_talk(env, monkeypatch))
-    last = turn[2]
-    assert last[-1].get("id")
-    stripped = [{k: v for k, v in m.items() if k != "id"} if m is last[-1] else m for m in last]
-    assert _gemini_dump(last) == _gemini_dump(stripped)
-
-    kept: List[Any] = []
-    real_keep = runtime_llm._keep_stored_id_in_list
-
-    def _spy(state, message, stored_id):
-        real_keep(state, message, stored_id)
-        kept.append(bool(isinstance(message, dict) and message.get("id")))
-
-    monkeypatch.setattr(runtime_llm, "_keep_stored_id_in_list", _spy)
-    env.persona.model = OFF_MODEL
-    env.persona.lightweight_model = OFF_MODEL
-    turn = _run_turn(env, "それで?", playbook=_think_child_talk(env, monkeypatch))
-    assert kept and not any(kept)
-    assert not turn[2][-1].get("id")
+    変えない。id はモデルの設定に関係なく持たせる (sea/runtime_llm._finalize_beat)
+    ので、OFF のモデルの列でも同じく、送る中身は id の有無で変わらない
+    (不変条件 2 — OFF のモデルの送る中身を変えない)。"""
+    for model in (None, OFF_MODEL):
+        if model is not None:
+            env.persona.model = model
+            env.persona.lightweight_model = model
+        turn = _run_turn(env, "外の様子はどう?", playbook=_think_child_talk(env, monkeypatch))
+        last = turn[2]
+        assert last[-1].get("id")
+        stripped = [
+            {k: v for k, v in m.items() if k != "id"} if m is last[-1] else m
+            for m in last
+        ]
+        assert _gemini_dump(last) == _gemini_dump(stripped)

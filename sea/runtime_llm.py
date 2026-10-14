@@ -21,7 +21,10 @@ from sea.cancellation import ExecutionCancelledException
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
 from sea.message_stamp import (
     append_presented_message_id,
+    clear_unstored_reply,
+    note_unstored_reply,
     record_call_tokens,
+    sync_presented_message_ids_with_sent,
 )
 from sea.runtime_utils import _format, _is_llm_streaming_enabled, event_building_id
 from saiverse.logging_config import log_sea_trace
@@ -72,6 +75,30 @@ INTERRUPTED_METADATA_KEY = "_interrupted"
 #: この形のまま Beat が死ぬと「建物にはあるのに本人が覚えていない」発言になるので、
 #: 出口の補填 (`_backfill_memory_on_beat_death`) が発火条件と本文の両方にこれを使う。
 BEAT_BODY_UNMEMORIZED_KEY = "_beat_body_unmemorized_text"
+
+#: 「この Beat の本文を記憶へ書いた行の id」を ``_finalize_beat`` へ渡す state キー。
+#:
+#: ``_beat_memorized`` (書いたかどうか) と同じ場所で立てる (:func:`_mark_beat_memorized`)。
+#: ``_finalize_beat`` は、送る `messages`に足した返事の dict にこの id を ``"id"`` として載せる —
+#: 送る `messages`で記録の行 id を持つ dict が「記録から来た行」の印で、前駆刻印の材料の
+#: 作り直し (sea/message_stamp.py の ``sync_presented_message_ids_with_sent``) が
+#: それを数える。載せないと「親が返事 A を保存 → 子 Playbook → 親が返事 B」で
+#: B の前駆が A を飛ばして古い履歴の行を指す。LLM ノードの入り口で倒す (前の
+#: ノードの id をこのノードの返事に載せない)。
+BEAT_MEMORY_ID_KEY = "_beat_memory_id"
+
+
+def _mark_beat_memorized(state: Dict[str, Any], stored_message_id: Any) -> None:
+    """「この Beat の本文はもう記憶に書かれた」の印と、書いた行の id を立てる。
+
+    印 (``_beat_memorized``) は二重書きを止める鍵、id は送る `messages`の返事に載せる値。
+    id として受け取るのは空でない文字列だけ (``_store_memory`` を
+    ``return_message_id`` なしで呼ぶ経路やテストの代役は ``True`` を返す)。
+    """
+    state["_beat_memorized"] = True
+    if isinstance(stored_message_id, str) and stored_message_id:
+        state[BEAT_MEMORY_ID_KEY] = stored_message_id
+
 
 #: 「発言が世界に保存された」ことを運ぶイベントの型と、その唯一の発火口。
 #: 定義と発火条件は sea/runtime_emitters.py に一本化してある — 画面イベント
@@ -584,13 +611,17 @@ def _refresh_presented_ids_for_aligned_send(messages: List[Any], state: Any) -> 
       ``state["last"]`` に入った子の本文に親の前駆を刻まないよう材料を落とす。
       その後の親の生成は親の送る列を見ているので、その列から作り直す
       (Codex 七巡目)。
-    - そのために、この列では親が保存に成功した返事とスペルの周の発言に、
-      記録の行 id を送る列でも持たせる (:func:`_keep_stored_id_in_list`)。
-      持たせないと、作り直した材料が保存済みの返事を飛ばして古い行を指す
-      (Codex 八巡目)。
+    - 保存に成功した返事とスペルの周の発言は、モデルの設定に関係なく、送る列の
+      その行の dict に記録の行 id を ``"id"`` として持っている (``_finalize_beat``
+      と ``_run_spell_loop`` が載せる)。だから作り直した材料が保存済みの返事を
+      飛ばして古い行を指すことはない (Codex 八巡目)。
 
-    OFF のモデルの列・揃えが走らなかった列・入れ子の Playbook は今までどおり
-    (組成時点の材料に、スペルの周の行を足していく)。
+    揃えが走らなかった列 (OFF のモデル・入れ子の Playbook・揃えに失敗した列) は、
+    LLM ノードの最初の送信の直前の
+    :func:`sea.message_stamp.sync_presented_message_ids_with_sent` と、スペルの
+    周の :func:`sea.message_stamp.append_presented_message_id` だけで材料を整える。
+    どちらの経路でも材料の末尾 (``predecessor_message_id`` になる値) は、送る列で
+    記録の行 id を持つ最後のもの。
     """
     if not isinstance(state, dict) or not state.get(FIRST_SEND_ALIGNED_KEY):
         return
@@ -598,22 +629,6 @@ def _refresh_presented_ids_for_aligned_send(messages: List[Any], state: Any) -> 
     from sea.runtime_context import sent_message_ids
 
     replace_presented_message_ids(state, sent_message_ids(messages))
-
-
-def _keep_stored_id_in_list(state: Any, message: Any, stored_id: Any) -> None:
-    """保存に成功した発言の記録の行 id を、送る列のその行にも持たせる。
-
-    :func:`_refresh_presented_ids_for_aligned_send` が送る列から前駆の材料を
-    作り直すための印 (Codex 八巡目)。行うのは、ターンの最初の送信を記録に
-    揃えられた列 (:data:`FIRST_SEND_ALIGNED_KEY`) でだけ。``id`` は LLM へ送る
-    中身には入らない (履歴から組んだ行がもともと持っている欄で、各クライアントは
-    役割・本文・画像・tool call だけを送る)。OFF のモデルの列は変えない。
-    """
-    if not stored_id or not isinstance(message, dict):
-        return
-    if not isinstance(state, dict) or not state.get(FIRST_SEND_ALIGNED_KEY):
-        return
-    message["id"] = str(stored_id)
 
 
 def _freeze_turn_block_before_send(messages: Any, state: Any = None) -> None:
@@ -1168,7 +1183,9 @@ def _store_beat_memory(
 
     成功 (= 書けた message_id が truthy) したら ``state["_beat_memorized"]`` を
     立てる — 「この Beat の本文はもう記憶に書かれた」の印で、Beat の出口の補填が
-    二重に書き込むのを止める鍵。返り値は書けた message_id (失敗は falsy)。
+    二重に書き込むのを止める鍵。書けた行の id も ``BEAT_MEMORY_ID_KEY`` に残す
+    (``_finalize_beat`` が送る `messages`の返事に載せる)。返り値は書けた message_id
+    (失敗は falsy)。
     """
     metadata: Dict[str, Any] = {}
     if reasoning_text:
@@ -1210,7 +1227,7 @@ def _store_beat_memory(
         beat_state=state,
     )
     if stored_message_id:
-        state["_beat_memorized"] = True
+        _mark_beat_memorized(state, stored_message_id)
         LOGGER.debug(
             "[sea][llm] Memorized response (assistant) with paired_action_text len=%s scope=%s spell_origin=%s",
             len(paired_action_text) if paired_action_text else 0, scope,
@@ -1276,8 +1293,8 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
             "content": _tc_speak,
             "tool_calls": [_tc_entry],
         }
+        _beat_reply_msg = _assistant_msg
         state["_messages"] = messages + [_assistant_msg]
-        _appended_assistant_msg = _assistant_msg
         LOGGER.info("[sea][llm] Appended assistant message with tool_calls (id=%s, tool=%s)",
                    state["_last_tool_call_id"], state.get("_last_tool_name"))
     else:
@@ -1288,8 +1305,8 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
         _text_thought_sig = state.get("_last_thought_signature")
         if _text_thought_sig:
             _text_assistant_msg["thought_signature"] = _text_thought_sig
+        _beat_reply_msg = _text_assistant_msg
         state["_messages"] = messages + [_text_assistant_msg]
-        _appended_assistant_msg = _text_assistant_msg
 
     # Append LLM interaction to PulseContext (replaces _intermediate_msgs)
     _pulse_ctx = state.get("_pulse_context")
@@ -1408,10 +1425,6 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
             )
             if not stored_message_id:
                 _memorize_ok = False
-            # 揃えた ON の列では、保存した返事の記録の行 id を送る列のその行
-            # にも持たせる — 後の親の送信で前駆の材料を送る列から作り直す
-            # とき、この返事を飛ばさないため (Codex 八巡目)。
-            _keep_stored_id_in_list(state, _appended_assistant_msg, stored_message_id)
             # NOTE: 旧「メタ判断ターンの scope='discardable' → 'committed'
             # 昇格」は Track 状態遷移 hook 経由だったが、発火元 (v1 メタ判断の
             # Track 操作) の退役に続いて hook そのものも 2026-08-21 に撤去した。
@@ -1481,19 +1494,62 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                 playbook_name=playbook.name,
                 # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
                 thought_signature=state.get("_last_thought_signature"),
+                # 書いた行の id を受け取る — memorize 節と同じく、送る `messages`の返事に
+                # 載せる (BEAT_MEMORY_ID_KEY)。
                 return_message_id=True,
                 beat_state=state,
             )
             if _important_stored:
                 # memorize 節 (_store_beat_memory) と同じ印 — この Beat の本文は
                 # もう記憶に書かれた。Beat の出口の補填が二重に書かないための鍵。
-                state["_beat_memorized"] = True
-                # memorize 節と同じ (Codex 八巡目)。
-                _keep_stored_id_in_list(
-                    state, _appended_assistant_msg, _important_stored,
-                )
+                _mark_beat_memorized(state, _important_stored)
             else:
                 LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
+
+    # 返事が記憶に書かれていたら (memorize / important dual-write / 止まった生成の
+    # 保存 = settle のどれか)、送る `messages`に足した返事の dict に書いた行の id を載せる。
+    # 次の送信で前駆刻印の材料を送る `messages`から作り直すとき (sea/message_stamp.py の
+    # sync_presented_message_ids_with_sent)、この返事が「記録の行」として
+    # 数えられる。各 LLM クライアントは role / content / tool_calls 等しか送らない
+    # (履歴の行も同じ ``id`` を持って送られている) ので、API へは載らない。
+    # 値はこの Beat のものなので、ここで消費する (次の Beat へ持ち越さない)。
+    #
+    # `_presented_message_ids`(前駆刻印の材料) にはここでは足さない。足すのは次の LLM ノードが
+    # この返事を実際に送るとき (sync_presented_message_ids_with_sent)。ここで
+    # 足すと、この後に続く MEMORIZE / SPEAK / THINK ノード (この返事の本文を
+    # 役割 assistant で書き直す — 例: schedule_management の record_add_params)
+    # の前駆が、その本文を生んだ生成自身の行を指してしまう。
+    #
+    # 本文が空の返事 (tool_calls だけ) にも載せる。記録には JSON 本文で書かれて
+    # いて、送る `messages` の dict は本文が空。predecessor_message_id は SAIVerse が
+    # 組んだ `messages` の段階で決めるので (sea/message_stamp.py)、送る先の
+    # クライアントの変換がこの dict を落とす場合 (Anthropic・xAI) も、次の LLM
+    # ノードの sync_presented_message_ids_with_sent はこの dict を数える。
+    #
+    # この LLM ノードが返事を記憶に保存しなかった (`_beat_memorized` が立っていない。
+    # 本文は空でない) ときは、返事の dict を書いておく
+    # (sea/message_stamp.note_unstored_reply)。後ろの MEMORIZE ({last} だけ) /
+    # SPEAK / THINK が state["last"] を記憶に保存したら、その行の id をこの dict に
+    # 載せる。dict の本文と state["last"] が同じ文字列のときに限る (構造化出力の
+    # dict は JSON 文字列にして足しているので、保存される本文と一致しない)。
+    _beat_memory_id = state.pop(BEAT_MEMORY_ID_KEY, None)
+    _reply_content = _beat_reply_msg.get("content")
+    _reply_has_body = isinstance(_reply_content, str) and bool(_reply_content.strip())
+    _reply_has_tool_calls = bool(_beat_reply_msg.get("tool_calls"))
+    if (
+        isinstance(_beat_memory_id, str) and _beat_memory_id
+        and (_reply_has_body or _reply_has_tool_calls)
+    ):
+        _beat_reply_msg["id"] = _beat_memory_id
+        clear_unstored_reply(state)
+    elif (
+        _reply_has_body
+        and not state.get("_beat_memorized")
+        and isinstance(text, str) and _reply_content == text
+    ):
+        note_unstored_reply(state, _beat_reply_msg)
+    else:
+        clear_unstored_reply(state)
 
     # Debug: log speak_content at end of LLM node
     speak_content = state.get("speak_content", "")
@@ -3084,6 +3140,10 @@ def _save_cut_utterance(
                 if form == SAVED_FORM_CUT else None
             ),
             playbook_name=playbook.name,
+            # 書いた行の id を受け取る — この Beat が例外なしで `_finalize_beat`
+            # まで進む回 (スペル無効の停止・締めの Beat の部分文の保存) に、
+            # 送る `messages`の返事へ載せる (BEAT_MEMORY_ID_KEY)。
+            return_message_id=True,
             beat_state=state,
         )
         if _stored:
@@ -3092,7 +3152,7 @@ def _save_cut_utterance(
             # の memorize / important dual-write — スペル無効だと停止された
             # Beat も例外なしで完走してそこへ届く) がこの印を見て、同じ本文を
             # 二重に書かない。
-            state["_beat_memorized"] = True
+            _mark_beat_memorized(state, _stored)
     except Exception:
         LOGGER.warning(
             "[sea][pipeline] could not store the stopped utterance to "
@@ -4001,12 +4061,14 @@ async def _run_spell_loop(
                 # _prepare_context 時点の履歴末尾を指し続け、「実際に見て
                 # いた最後のメッセージ」ではなくなる。スペル結果の注入行は
                 # 永続 ID を持たないので足さない。
+                # 列に積んだこの周の発言にも書いた行の id を載せる — 後で材料を
+                # 送る `messages`から作り直す回 (子 Playbook の中継の後の次のノード。
+                # sync_presented_message_ids_with_sent) に、この行が記録の
+                # 行として数えられるように (_finalize_beat の返事と同じ理由)。
                 if _stored_id:
                     append_presented_message_id(state, _stored_id)
-                    # 揃えた ON の列では、送信のたびに材料を送る列から作り直す
-                    # ので、この周の発言の行にも記録の id を持たせる (Codex
-                    # 八巡目)。OFF の列は上の追記だけ。
-                    _keep_stored_id_in_list(state, _round_msg, _stored_id)
+                    if isinstance(_stored_id, str):
+                        _round_msg["id"] = _stored_id
 
             # Execute this round's spells SEQUENTIALLY, in the textual order they
             # were cast. Spells frequently mutate state that is unsafe under
@@ -5412,6 +5474,13 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         # ノードの Beat が死んだときの補填 (`_backfill_memory_on_beat_death`) が
         # 「もう書かれた」と誤認して黙る。Beat の入り口で必ず倒す。
         state.pop("_beat_memorized", None)
+        # 書いた行の id も同じ理由で倒す — 前のノードの id をこのノードの返事に
+        # 載せると、送る `messages`の返事が別の行を名乗る。
+        state.pop(BEAT_MEMORY_ID_KEY, None)
+        # 前のノードが記憶に保存しなかった返事 (`_unstored_reply`) も倒す — 残すと、
+        # このノードの後ろの MEMORIZE / SPEAK / THINK が、前のノードの返事の dict に
+        # 行の id を載せうる (このノードの返事は `_finalize_beat` が改めて書く)。
+        clear_unstored_reply(state)
         # 「建物にはあるが記憶に無い本文」の受け渡しも同じ理由で入り口で倒す —
         # 前のノードの本文を、このノードの Beat の補填が書いてしまう。
         state.pop(BEAT_BODY_UNMEMORIZED_KEY, None)
@@ -5857,6 +5926,20 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     if not _injected:
                         messages.insert(0, {"role": "system", "content": _model_sys_prompt})
                     LOGGER.debug("[sea] Injected model-specific system prompt for %s", _model_config_key)
+
+            # 前駆刻印の材料 (sea/message_stamp.py) を、これから送る `messages`に合わせる。
+            # 送る `messages`はここで確定する — この後の 4 経路 (ツールあり・なし ×
+            # ストリーミング・同期、構造化出力は同期の中) はどれもこの
+            # ``messages`` をそのまま最初の送信に使い、スペルループもこの列に周の
+            # 発言を積み足していく (周の行は append_presented_message_id で列を
+            # 伸ばす)。材料が無い (state["last"] を書き換えうるノードの後で
+            # compile_playbook が落とした後) なら送る `messages`から
+            # 作り直し、材料がある回は中身を変えずに、送る `messages`で末尾より後ろにある
+            # 記録の行 (同じ Playbook の前の LLM ノードが書いた返事) だけを足す。
+            # 数えるのはこの ``messages`` (クライアントへ渡す前) の行で、各クライアントが
+            # 送る直前に行う変換 (本文の空な行を落とす等) は見ない — predecessor_message_id
+            # の定義は SAIVerse が組んだ `messages` の段階 (sea/message_stamp.py)。
+            sync_presented_message_ids_with_sent(state, messages)
 
             # Check if tools are available for this node
             available_tools = getattr(node_def, "available_tools", None)

@@ -6,8 +6,13 @@ import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from saiverse.logging_config import log_sea_trace
-from sea.message_stamp import stamp_generation_metadata
+from sea.message_stamp import (
+    attach_stored_id_to_unstored_reply,
+    stamp_generation_metadata,
+    unstored_reply_for_last,
+)
 from sea.playbook_models import PlaybookSchema
+from sea.runtime_emitters import SPEAK_MEMORY_MESSAGE_ID_KEY
 from sea.runtime_state import effective_auto_mode, set_playbook_var
 from sea.runtime_utils import _format, _resolve_template_arg, event_building_id
 from tools import TOOL_REGISTRY, canonicalize_tool_name
@@ -388,6 +393,12 @@ class RuntimeEngine:
                 )
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
+                # 書き込み時の機械刻印 (sea/message_stamp.py): 子は親の state を
+                # そのまま受け取って走るので、子の _prepare_context が子の
+                # `_presented_message_ids` で親の材料を上書きしている
+                # (sea/runtime_runner.py)。途中まで走った子の三つ組・前駆を親の
+                # 次の刻印へ持ち越さない — compile_playbook がこのノードの後で消す
+                # (sea/message_stamp.drop_stamp_material)。
                 # End subagent thread on error (no chronicle)
                 if execution == "subagent" and subagent_thread_id:
                     self.runtime._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False, pulse_context=state.get("_pulse_context"))
@@ -428,6 +439,16 @@ class RuntimeEngine:
                 if outputs is not None:
                     outputs.append(error_msg)
                 return state
+
+            # 書き込み時の機械刻印: この後 state["last"] に入るのは子の本文 (親の
+            # SPEAK / MEMORIZE が刻むと、他人のコールの数字・子の
+            # `_presented_message_ids` が載る)。しかも子は親の state を受け取って
+            # 走るので、親の材料は子の `_presented_message_ids` で上書き済み —
+            # 残すと親の次の返事の前駆が、親の見ていない子の行を指しうる。
+            # compile_playbook がこのノードの後で (エラー文で早期 return した回も)
+            # 材料を消す (sea/message_stamp.drop_stamp_material)。親が次に自前の
+            # LLM ノードで送るときに、送る `messages` から作り直される
+            # (sea/message_stamp.sync_presented_message_ids_with_sent)。
 
             # End subagent thread on success
             if execution == "subagent" and subagent_thread_id:
@@ -496,7 +517,20 @@ class RuntimeEngine:
             pulse_context = state.get("_pulse_context")
             metadata_key = getattr(node_def, "metadata_key", None)
             metadata = state.get(metadata_key) if metadata_key else None
-            if not self.runtime._store_memory(
+            # action が `{last}` だけで role が assistant なら、この MEMORIZE は
+            # state["last"] をそのまま本人の発言として記憶に書く。前の LLM ノードが
+            # 記憶に保存しなかった返事 (sea/message_stamp.UNSTORED_REPLY_STATE_KEY) が
+            # その state["last"] なら、保存した行の id を返事の dict に載せるので、
+            # `_store_memory` から行の id を受け取る。それ以外は従来どおり bool で
+            # 受ける (空の memo_text で `return_message_id=True` だと "" が返り、
+            # 失敗の警告に化けるため、受け取るのは必要な回だけ)。
+            stores_last_as_is = (
+                role == "assistant"
+                and action_template == "{last}"
+                and bool(memo_text)
+                and unstored_reply_for_last(state) is not None
+            )
+            stored = self.runtime._store_memory(
                 persona, memo_text,
                 role=role, tags=tags,
                 pulse_id=pulse_id, metadata=metadata,
@@ -506,10 +540,21 @@ class RuntimeEngine:
                 # 2026-05-20: thought_signature 永続化 (MEMORIZE node 経由 / assistant 役のみ意味あり)。
                 # role != "assistant" の場合は state 値に関わらず無害 (signature 解釈は Gemini text Part のみ)。
                 thought_signature=state.get("_last_thought_signature") if role == "assistant" else None,
-                # 書き込み時の機械刻印 (v3 §7.1)。role='assistant' の
-                # ときだけ効く (判定は _store_memory 側)。
-                beat_state=state,
-            ):
+                # 書き込み時の機械刻印 (v3 §7.1)。role='assistant' のときだけ効く
+                # (判定は _store_memory 側)。刻むのは action が `{last}` だけのとき
+                # に限る — state の刻印の材料は直近の LLM ノードのもので、本文が
+                # state["last"] (= その生成の出力。間で書き換えたノードの後は
+                # compile_playbook が材料を消している) のときだけ帰属が成り立つ。
+                # `{other}` などから作った本文は、前の生成や子の出力かもしれず、
+                # どの生成のものか確かめられないので刻印なしに倒す (Codex 五巡目)。
+                beat_state=state if action_template == "{last}" else None,
+                return_message_id=stores_last_as_is,
+            )
+            if stored and stores_last_as_is:
+                # state["last"] を memo_text で書き換える前に載せる
+                # (unstored_reply_for_last は state["last"] と返事の本文を値で比べる)。
+                attach_stored_id_to_unstored_reply(state, stored)
+            if not stored:
                 LOGGER.warning("Failed to store memory in MEMORIZE node %s", node_id)
                 if event_callback:
                     event_callback({
@@ -581,6 +626,14 @@ class RuntimeEngine:
         # 永続点なので、_store_memory 経路と同じ刻印を載せる。
         speak_metadata = stamp_generation_metadata(speak_metadata, state) or {}
         building_msg = self.emitters["speak"](persona, eff_bid, text, pulse_id=pulse_id, extra_metadata=speak_metadata if speak_metadata else None, event_callback=event_callback)
+        # 前の LLM ノードが記憶に保存しなかった返事がこの state["last"] なら、
+        # emit_speak が記憶に書いた行の id (SPEAK_MEMORY_MESSAGE_ID_KEY) をその返事の
+        # dict に載せる (sea/message_stamp.py)。建物への保存が失敗した回も、記憶に
+        # 書けていれば emit_speak は message_id の無い dict でこの id を返す。
+        if isinstance(building_msg, dict):
+            attach_stored_id_to_unstored_reply(
+                state, building_msg.get(SPEAK_MEMORY_MESSAGE_ID_KEY),
+            )
         if outputs is not None:
             outputs.append(text)
         if event_callback:
