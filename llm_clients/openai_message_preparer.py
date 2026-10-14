@@ -193,7 +193,11 @@ def prepare_openai_messages(
             prepared.append(msg)
             continue
 
-        if is_empty_message(msg):
+        # 本文の空の user でも、画像を持っていれば画像だけの発言として残す
+        # (画像か画像の説明が下の build_message_content_with_attachments で入る)
+        keeps_images = msg.get("role") == "user" and bool(attachment_cache.get(idx))
+
+        if is_empty_message(msg) and not keeps_images:
             logging.debug("Skipping empty message with role=%s", msg.get("role"))
             continue
 
@@ -223,7 +227,7 @@ def prepare_openai_messages(
             if isinstance(rd, list):
                 clean_msg[reasoning_passback_field] = rd
 
-        if is_empty_message(clean_msg):
+        if is_empty_message(clean_msg) and not keeps_images:
             logging.debug("Skipping empty cleaned message with role=%s", role)
             continue
 
