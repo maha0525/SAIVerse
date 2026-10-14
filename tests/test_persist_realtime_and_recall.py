@@ -2711,3 +2711,227 @@ def test_off_model_and_nested_playbooks_are_not_aligned(env, monkeypatch):
     _run_parent_with_child(env, monkeypatch, "child_first", "main")
     # 子 (入れ子、先に送る) では走らず、親 (トップレベル) の最初の送信で一度だけ。
     assert len(seen) == 1
+
+
+# ---------------------------------------------------------------------------
+# 履歴が空の最初のパルスで残した行 (境界が NULL) — Codex 七巡目 #1
+# ---------------------------------------------------------------------------
+
+_DOES_NOT_COME_BACK = "does not come back when the record is re-read"
+
+
+def _time_anchor_index(messages: List[Dict[str, Any]]) -> int:
+    return next(
+        i for i, m in enumerate(messages) if "以降のやり取りです" in str(m.get("content"))
+    )
+
+
+@pytest.mark.parametrize("env", [True, False], indirect=True, ids=["stream", "sync"])
+def test_block_kept_with_empty_history_comes_back_at_the_start(env, caplog):
+    """履歴が一行も無い最初の自律パルス (時刻 ON・事前の TOOL なし) で残した行は、
+    位置を決める発言を持たない (境界が NULL)。次のターン以降、その行は履歴の
+    一番最初に出て、最初の呼び出しどうしの先頭が一致する (SAIVerse の列と
+    Gemini の送信形式の両方)。時刻の目安はその行の後ろ (最古の発言の直前) に
+    置かれる — 一ターン目の列には目安が無く、その行で終わっていたから。"""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="sea.runtime_llm"):
+        turn1 = _run_turn(env, None, pulse_type="auto")
+        rows = _kept_rows(env)
+        assert len(rows) == 1 and rows[0][5] is None  # boundary_rowid が NULL
+        turn2 = _run_turn(env, "おはよう。")
+        turn3 = _run_turn(env, "元気?")
+    assert not any("以降のやり取りです" in str(m.get("content")) for m in turn1[0])
+    _assert_first_call_prefix(turn1, turn2)
+    _assert_gemini_prefix(turn1[0], turn2[0])
+    _assert_first_call_prefix(turn2, turn3)
+    _assert_gemini_prefix(turn2[0], turn3[0])
+    contents = [m.get("content") for m in turn2[0]]
+    kept_idx = contents.index(rows[0][2])
+    assert kept_idx == 1  # head の直後 = 履歴の一番最初
+    assert kept_idx < _time_anchor_index(turn2[0])
+    assert _DOES_NOT_COME_BACK not in caplog.text
+
+
+@pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
+def test_check_warns_when_the_kept_block_does_not_come_back(env, monkeypatch, caplog):
+    """残した直後の機械検査: 残した行が、記録から読み直した並びに出ないときは
+    WARN を出す。ここでは履歴の一番最初に置く判定を止めて、七巡目の直し前と
+    同じ「境界が NULL の行は出さない」状態にする。送る直前の検査
+    (find_unrecorded_messages) はまとまりがまだ残っていない時点で走るので、
+    この欠落はそちらでは拾えない (食い違い無しを返す)。"""
+    import logging
+
+    from sea import runtime_context
+
+    monkeypatch.setattr(runtime_context, "_history_opens_with_locked", lambda *a: False)
+    seen = _spy_alignment(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="sea.runtime_llm"):
+        turn1 = _run_turn(env, None, pulse_type="auto")
+    assert seen == [[]]
+    assert _DOES_NOT_COME_BACK in caplog.text
+    turn2 = _run_turn(env, "おはよう。")
+    with pytest.raises(AssertionError):
+        _assert_first_call_prefix(turn1, turn2)
+
+
+def _null_boundary_row(env, consumed_at: int) -> int:
+    from sai_memory.perception_buffer import insert_realtime_and_recall_batch
+
+    with env.adapter._db_lock:
+        return insert_realtime_and_recall_batch(
+            env.adapter.conn, consumed_at=consumed_at,
+            rendered_text=f"<system>\n## リアルタイム情報\n- 現在時刻: {consumed_at}\n</system>",
+            media=None, recalled_keys=None, pulse_id=f"p-{consumed_at}",
+            boundary_created_at=None, boundary_rowid=None,
+        )
+
+
+def _presented_start_ids(env, recent: List[Dict[str, Any]]) -> List[int]:
+    from sea.runtime_context import list_presented_perception_blocks
+
+    blocks = list_presented_perception_blocks(
+        env.runtime, env.persona, recent, model_key=ON_MODEL,
+    )
+    return [
+        int(b["metadata"]["__perception_batch_id__"]) for b in blocks
+        if b["metadata"].get("__history_start__")
+    ]
+
+
+@pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
+def test_block_without_boundary_is_not_placed_into_an_unrelated_history(env):
+    """境界が NULL の行を履歴の一番最初に置くのは、履歴がそのペルソナの記録の
+    始まりから組まれていて、最古の発言が行を残した時点より前ではないときだけ。
+
+    - 記録の最古の発言が送る列に無い (窓の外・別のスレッド) → 置かない。
+    - 最古の発言が行を残した時点より前 (残した時点で記録に発言があったのに、
+      送った列には無かった = 別の列で残した行) → 置かない。
+    - 判断のパルスの捨てられる記録 (履歴に出ない行) は「より前の発言」に数えない。
+    """
+    now = int(time.time())
+    hm = env.persona.history_manager
+
+    def _add(role: str, content: str, at: int) -> None:
+        hm.add_to_persona_only({
+            "role": role, "content": content,
+            "timestamp": datetime.fromtimestamp(at, timezone.utc).isoformat(),
+        })
+
+    _add("assistant", "判断の記録", now - 100)
+    with env.adapter._db_lock:
+        env.adapter.conn.execute(
+            "UPDATE messages SET line_role = 'meta_judgment', scope = 'discardable' "
+            "WHERE content = '判断の記録'"
+        )
+        env.adapter.conn.commit()
+    _add("user", "最初の発言", now - 50)
+    _add("assistant", "二つ目の発言", now - 40)
+    payloads = env.persona.history_manager.get_recent_history(
+        100_000, required_line_roles=["main_line"], required_scopes=["committed"],
+    )
+    assert [p["content"] for p in payloads] == ["最初の発言", "二つ目の発言"]
+
+    # 行を残したのが最古の発言より前 (= 記録に発言が無かったとき) → 置く
+    early = _null_boundary_row(env, now - 60)
+    assert _presented_start_ids(env, payloads) == [early]
+    # 記録の最古の発言が送る列に無い (窓の外) → 置かない
+    assert _presented_start_ids(env, payloads[1:]) == []
+    # 最古の発言より後に残した行 (別の列で残した行) → 置かない
+    _null_boundary_row(env, now - 10)
+    assert _presented_start_ids(env, payloads) == [early]
+
+
+# ---------------------------------------------------------------------------
+# 前駆刻印の材料を、記録に揃えた後の送る列から作り直す — Codex 七巡目 #2
+# ---------------------------------------------------------------------------
+
+
+def _last_reply_predecessor(env) -> Optional[str]:
+    with env.adapter._db_lock:
+        row = env.adapter.conn.execute(
+            "SELECT metadata FROM messages WHERE role = 'assistant' "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        ).fetchone()
+    meta = json.loads(row[0]) if row and row[0] else {}
+    return meta.get("predecessor_message_id")
+
+
+def _last_sent_id(messages: List[Dict[str, Any]]) -> str:
+    from sea.runtime_context import sent_message_ids
+
+    ids = sent_message_ids(messages)
+    assert ids
+    return ids[-1]
+
+
+@pytest.mark.parametrize("env", [True, False], indirect=True, ids=["stream", "sync"])
+@pytest.mark.parametrize(
+    "scene", ["tool", "tool_memorize_tool", "pre_spell", "situation_change"],
+)
+def test_reply_predecessor_is_the_last_row_actually_sent(env, monkeypatch, scene):
+    """最初の呼び出しの前に記録へ書かれた行 (TOOL の結果・MEMORIZE を挟む TOOL・
+    事前スペルの結果・状況変化の記録) は、揃えで送る列に入る。返事の
+    predecessor_message_id は、その送った列の最後の記録の行 (= 揃えで入った行)
+    であって、prepare_context の時点のユーザーの発言ではない。"""
+    _run_turn(env, "こんにちは。")
+    kwargs = _prepare_scene(env, monkeypatch, scene)
+    turn = _run_turn(env, "続き。", **kwargs)
+    assert len(turn) == 1
+    last_id = _last_sent_id(turn[0])
+    with env.adapter._db_lock:
+        row = env.adapter.conn.execute(
+            "SELECT content FROM messages WHERE id = ?", (last_id,),
+        ).fetchone()
+    assert row is not None and row[0] != "続き。"
+    assert _last_reply_predecessor(env) == last_id
+
+
+@pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
+def test_parent_generation_after_a_child_playbook_has_a_predecessor(env, monkeypatch):
+    """子の Playbook (SUBPLAY) が先に走り、その後の親の生成で返事を残す。子の
+    中継は親の前駆の材料を落とすが、親の最初の送信を記録に揃えたときに、親が
+    実際に送った列から作り直される。"""
+    _run_parent_with_child(env, monkeypatch, "child_first", "main")
+    parent_call = env.llm.calls[-1]
+    assert _last_reply_predecessor(env) == _last_sent_id(parent_call)
+
+
+@pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
+def test_parent_second_generation_after_a_child_playbook(env, monkeypatch):
+    """親の LLM → 子の Playbook → 親の LLM (返事を残す)。最初の送信の揃えは
+    もう済んでいるが、子の中継が落とした材料は、親の次の送信で、親が実際に
+    送る列から作り直される。"""
+    real_load = env.runtime._load_playbook_for
+    monkeypatch.setattr(
+        env.runtime, "_load_playbook_for",
+        lambda name, persona, building_id: (
+            _child_playbook() if name == "child_pb" else real_load(name, persona, building_id)
+        ),
+    )
+    playbook = _custom_playbook([
+        {"id": "think", "type": "llm", "action": None, "speak": False, "next": "child"},
+        {"id": "child", "type": "subplay", "playbook": "child_pb", "line": "main",
+         "next": "talk"},
+        {"id": "talk", "type": "llm", "action": None, "speak": True,
+         "memorize": True, "metadata_key": "metadata",
+         "output_keys": [{"text": "speak_content"}], "next": None},
+    ], name="think_child_talk_pb")
+    turn = _run_turn(env, "外の様子はどう?", playbook=playbook)
+    assert len(turn) == 3
+    assert _last_reply_predecessor(env) == _last_sent_id(turn[2])
+
+
+@pytest.mark.parametrize("env", [False], indirect=True, ids=["sync"])
+def test_off_model_predecessor_is_unchanged(env, monkeypatch):
+    """OFF のモデルは今までどおり: 揃えが走らず、TOOL の結果は記録に残らない
+    ので、返事の前駆は prepare_context の時点の最後の発言 (ユーザーの発言)。"""
+    env.persona.model = OFF_MODEL
+    env.persona.lightweight_model = OFF_MODEL
+    _register_camera(env, monkeypatch)
+    _run_turn(env, "写真を撮って。", playbook=_tool_then_llm_playbook())
+    with env.adapter._db_lock:
+        user_id = env.adapter.conn.execute(
+            "SELECT id FROM messages WHERE content = '写真を撮って。'"
+        ).fetchone()[0]
+    assert _last_reply_predecessor(env) == user_id

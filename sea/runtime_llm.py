@@ -467,6 +467,9 @@ PERSIST_REALTIME_AND_RECALL_PULSE_TYPES = frozenset({"user", "auto", "schedule"}
 #: state の印: この列でターンの最初の LLM 呼び出しをもう送ったか (リアルタイム
 #: 情報と自動想起を残すモデルの、残すパルスの列だけで立てる)。
 TURN_FIRST_SEND_DONE_KEY = "_turn_first_send_done"
+#: state の印: この列でターンの最初の送信を記録に揃えられたか
+#: (:func:`_align_first_send_with_record` が成功したときだけ立てる)。
+FIRST_SEND_ALIGNED_KEY = "_turn_first_send_aligned"
 
 
 def records_additions_before_first_send(state: Any) -> bool:
@@ -542,6 +545,12 @@ def _align_first_send_with_record(messages: List[Any], state: Any) -> None:
             "(pulse=%s)", state.get("_pulse_id"),
         )
         return
+    # 前駆刻印の材料も、揃えた後の実際に送る列から作り直す (Codex 七巡目)。
+    # 揃えで prepare_context の後に記録へ書かれた行 (事前スペル・TOOL の結果・
+    # MEMORIZE・状況変化の記録) が送る列に入るので、組成時点の材料のままでは
+    # 返事の前駆が「実際に見ていた最後のメッセージ」にならない。
+    _refresh_presented_ids_from_sent(messages, state)
+    state[FIRST_SEND_ALIGNED_KEY] = True
     for kind, msg in mismatches:
         if kind == NOT_KEPT:
             LOGGER.warning(
@@ -562,6 +571,37 @@ def _align_first_send_with_record(messages: List[Any], state: Any) -> None:
             )
 
 
+def _refresh_presented_ids_from_sent(messages: List[Any], state: Any) -> None:
+    """前駆刻印の材料 (``_presented_message_ids``) を、実際に送る列から作り直す。"""
+    from sea.message_stamp import replace_presented_message_ids
+    from sea.runtime_context import sent_message_ids
+
+    replace_presented_message_ids(state, sent_message_ids(messages))
+
+
+def _restore_presented_ids_after_child(messages: List[Any], state: Any) -> None:
+    """子の Playbook が落とした前駆刻印の材料を、親の自前の送信で作り直す。
+
+    子の Playbook の中継 (sea/runtime_nodes.lg_subplay_node) は、親の
+    ``state["last"]`` に入った子の本文に親の前駆を刻まないよう、材料を落とす。
+    その後に親が自前の LLM ノードを回すと、親の生成は親の送る列を実際に
+    見ているのに、材料が無いので前駆が付かない (Codex 七巡目)。
+
+    リアルタイム情報と自動想起を残すモデルの、ターンの最初の送信を記録に
+    揃えられたトップレベルの列 (:data:`FIRST_SEND_ALIGNED_KEY`) でだけ、材料が
+    無いときに、いま送る列から作り直す。OFF のモデルの列・揃えが走らなかった
+    列は今までどおり (材料が無ければ前駆なし)。材料があるとき (スペルの
+    繰り返しが自分の行を足した後など) は触らない。
+    """
+    from sea.message_stamp import PRESENTED_IDS_STATE_KEY
+
+    if not isinstance(state, dict) or not state.get(FIRST_SEND_ALIGNED_KEY):
+        return
+    if state.get(PRESENTED_IDS_STATE_KEY):
+        return
+    _refresh_presented_ids_from_sent(messages, state)
+
+
 def _freeze_turn_block_before_send(messages: Any, state: Any = None) -> None:
     """LLM へ送る直前の一点: そのターンのまとまりを固定して「保存待ち」にする。
 
@@ -577,6 +617,13 @@ def _freeze_turn_block_before_send(messages: Any, state: Any = None) -> None:
     if not isinstance(messages, list):
         return
     _align_first_send_with_record(messages, state)
+    try:
+        _restore_presented_ids_after_child(messages, state)
+    except Exception:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] could not restore the predecessor "
+            "material before sending", exc_info=True,
+        )
     try:
         from sea.runtime_context import freeze_turn_realtime_and_recall_for_send
 
@@ -660,6 +707,39 @@ def _generation_was_stopped(persona: Any, state: Any) -> bool:
         getattr(persona, "persona_id", None), state.get("_pulse_id"),
     )
     return True
+
+
+def _check_kept_block_comes_back(persona: Any, state: Any, batch_id: int) -> None:
+    """残した直後に記録から読み直し、残した行がその並びに出なければ WARN を出す。
+
+    persist_realtime_and_recall.md §5「機械検査」(Codex 七巡目)。次のターンの
+    prepare_context と同じ関数で読み直す (sea/runtime_context.
+    kept_block_comes_back)。出ないのは、残した行の位置を決める発言が履歴に
+    無い (窓の外・別のスレッド)、または境界の無い行を履歴の一番最初に置けない
+    とき — どれも次のターンの列の先頭が、このターンの最初の送信と一致しない。
+    読み直しの材料はトップレベルの Pulse にだけある。送信は止めない。
+    """
+    from sea.runtime_context import FIRST_SEND_RECORD_SOURCE_KEY, kept_block_comes_back
+
+    try:
+        comes_back = kept_block_comes_back(
+            state.get(FIRST_SEND_RECORD_SOURCE_KEY), batch_id,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] could not re-read the record to "
+            "check the kept block (persona=%s pulse=%s)",
+            getattr(persona, "persona_id", None), state.get("_pulse_id"),
+            exc_info=True,
+        )
+        return
+    if comes_back is False:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] the kept block (batch %s) does not "
+            "come back when the record is re-read, so the next turn's list will "
+            "not start with this one (persona=%s pulse=%s)",
+            batch_id, getattr(persona, "persona_id", None), state.get("_pulse_id"),
+        )
 
 
 def _persist_turn_realtime_and_recall(runtime: Any, persona: Any, state: Any) -> None:
@@ -755,6 +835,7 @@ def _persist_turn_realtime_and_recall(runtime: Any, persona: Any, state: Any) ->
             batch_id, getattr(persona, "persona_id", None), len(content),
             len(media or []),
         )
+        _check_kept_block_comes_back(persona, state, batch_id)
     except Exception:
         LOGGER.warning(
             "[sea][persist_realtime_and_recall] keeping this turn's realtime info / "

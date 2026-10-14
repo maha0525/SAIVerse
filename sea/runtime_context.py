@@ -113,6 +113,10 @@ REALTIME_AND_RECALL_PULSE_ID_KEY = "__realtime_and_recall_pulse_id__"
 #: 履歴の最古の発言の直前に置く時刻の目安 (「以下、… 以降のやり取りです」) の印。
 #: 記録には残らないが、同じ履歴からは毎ターン同じ文面で組み直される。
 HISTORY_TIME_ANCHOR_KEY = "__history_time_anchor__"
+#: 送る列に出す「残した行」のうち、位置を決める発言を持たない (残した時点で
+#: 送った列に発言が一件も無かった) もの — 履歴の一番最初 (最古の発言の前) に
+#: 置く印 (persist_realtime_and_recall.md §4.3、Codex 七巡目)。
+HISTORY_START_KEY = "__history_start__"
 
 
 #: ``prepare_context`` が ``context_meta`` に置き、``run_playbook`` が state の
@@ -382,6 +386,47 @@ def align_first_send_with_record(
         if base_start is not None:
             _align_with_record(base_messages, base_start, tail)
     return find_unrecorded_messages(messages[start:], tail)
+
+
+def sent_message_ids(messages: Sequence[Dict[str, Any]]) -> List[str]:
+    """送る列にある、記録の行 id (head・知覚のまとめ・差し込みを除く) を並び順に。
+
+    前駆刻印の材料 (sea/message_stamp.py の ``_presented_message_ids``) を、
+    実際に送る列から作り直すときに使う (persist_realtime_and_recall.md §5 —
+    送る列を記録に揃えた後。Codex 七巡目)。
+    """
+    out: List[str] = []
+    for msg in messages:
+        if not isinstance(msg, dict) or not msg.get("id"):
+            continue
+        if _is_head_message(msg) or is_injected_perception(msg):
+            continue
+        out.append(str(msg["id"]))
+    return out
+
+
+def kept_block_comes_back(
+    source: Optional[FirstSendRecordSource], batch_id: int,
+) -> Optional[bool]:
+    """残した行 ``batch_id`` が、いまの記録から読み直した履歴に出るか。
+
+    persist_realtime_and_recall.md §5「機械検査」の二つ目 (Codex 七巡目)。
+    残した直後に、次のターンと同じ関数で記録から読み直し、残した行がその
+    並びに出るかを確かめる (sea/runtime_llm._persist_turn_realtime_and_recall
+    が呼び、出なければ WARN)。送る直前の検査
+    (:func:`find_unrecorded_messages`) は、そのターンのまとまりがまだ残って
+    いない時点で走るので、「残したのに次のターンに出ない」はそちらでは
+    拾えない。読み直せない (材料が無い・失敗した) ときは None。
+    """
+    if source is None:
+        return None
+    recorded = source.reread()
+    if recorded is None:
+        return None
+    return any(
+        is_persisted_realtime_and_recall(m) and _block_batch_id(m) == int(batch_id)
+        for m in recorded if isinstance(m, dict)
+    )
 
 
 def persists_realtime_and_recall(persona: Any, model_key: Optional[str]) -> bool:
@@ -1125,8 +1170,12 @@ def _append_history(
         # 避けるため、Metabolism 起点に 1 か所だけ。
         # (v0.32 には上部補完メッセージ用の「アンカー①」が別に居たが、
         #  補完機構ごと退役した — track_retirement.md 住人 11)
-        if enriched_recent:
-            oldest_msg = enriched_recent[0]
+        # 履歴の一番最初に置いた残した行 (persist_realtime_and_recall.md §4.3)
+        # は目安より前に出す — その行を残したターンの列には目安が無かった。
+        leading = leading_history_start_count(enriched_recent)
+        anchor_msg: Optional[Dict[str, Any]] = None
+        if len(enriched_recent) > leading:
+            oldest_msg = enriched_recent[leading]
             oldest_ts = oldest_msg.get("created_at") or oldest_msg.get("timestamp")
             if oldest_ts:
                 try:
@@ -1141,7 +1190,6 @@ def _append_history(
                         # この関数で組み直す)。
                         "metadata": {HISTORY_TIME_ANCHOR_KEY: True},
                     }
-                    messages.append(anchor_msg)
                     LOGGER.debug(
                         "[sea][prepare-context] Inserted timestamp anchor: %s",
                         ts_str,
@@ -1158,7 +1206,10 @@ def _append_history(
         # (docs/intent/cache_lifecycle_control.md §3.5)。
         if pulse_type == "user" and not preview_only:
             enriched_recent = mark_cache_boundary(enriched_recent, pulse_id)
-        messages.extend(enriched_recent)
+        messages.extend(enriched_recent[:leading])
+        if anchor_msg is not None:
+            messages.append(anchor_msg)
+        messages.extend(enriched_recent[leading:])
 
         # 実入力の履歴 ID 列 (2026-08-19, sluice の見た集合の一次情報):
         # この呼び出しが**実際にプロンプトへ組み込んだ**履歴メッセージの
@@ -1608,6 +1659,8 @@ def list_presented_perception_blocks(
         persist_mode = persists_realtime_and_recall(persona, model_key)
         # 残した行の id → 位置を決める発言の id (この列にあるものだけ)。
         realtime_and_recall_anchors: Dict[int, str] = {}
+        # 位置を決める発言を持たず、履歴の一番最初に置く残した行の id。
+        realtime_and_recall_at_start: set = set()
         # 操作通知を下ろした境界は (persona, model) ごと — head と同じ単位で
         # 持つ (docs/intent/presented_context_reduction.md 設計 1)。だから
         # 同定キーは head と**同じ解決**を通す: 引数が無い呼び出し (プレビュー
@@ -1706,6 +1759,10 @@ def list_presented_perception_blocks(
               窓の外の行を出さない (persist_realtime_and_recall.md §4.3)。
               発言の id はここで台帳から引き、ブロックに載せて並べる側
               (:func:`merge_perception_blocks`) へ渡す。
+            - 位置を決める発言が無い (境界が NULL — 残した時点で送った列に
+              発言が一件も無かった) 行は、この列の履歴がそのペルソナの記録の
+              始まりから組まれているときだけ、履歴の一番最初に置く
+              (:func:`_history_opens_with_locked`。Codex 七巡目)。
 
             **呼び出し側が ``sai_mem._db_lock`` を保持している前提**。
             """
@@ -1717,12 +1774,20 @@ def list_presented_perception_blocks(
                 str(m.get("id")) for m in recent
                 if isinstance(m, dict) and m.get("id")
             }
+            history_start: List[Any] = []
             kept: List[Any] = []
             for b in found:
                 if not b.is_realtime_and_recall:
                     kept.append(b)
                     continue
                 if b.boundary_created_at is None or b.boundary_rowid is None:
+                    if not history_start:
+                        history_start.append(
+                            _history_start_locked(sai_mem.conn, recent)
+                        )
+                    if _history_opens_with_locked(history_start[0], b):
+                        realtime_and_recall_at_start.add(int(b.id))
+                        kept.append(b)
                     continue
                 row = sai_mem.conn.execute(
                     "SELECT id FROM messages WHERE rowid = ? AND created_at = ?",
@@ -1788,6 +1853,7 @@ def list_presented_perception_blocks(
             if batch.is_realtime_and_recall:
                 block = _realtime_and_recall_block(
                     batch, realtime_and_recall_anchors.get(int(batch.id)),
+                    at_history_start=int(batch.id) in realtime_and_recall_at_start,
                 )
                 if block is not None:
                     blocks.append(block)
@@ -1851,6 +1917,95 @@ def list_presented_perception_blocks(
             "presenting/counting history without perceptions", exc_info=True,
         )
         return []
+
+
+#: 履歴に出うる発言 (``_payload_passes_context_filter`` が main_line /
+#: committed の要求で通す行 — saiverse_memory/adapter.py)。判断のパルスの
+#: 捨てられる記録・サブラインの行は、送る列の履歴に出ないので数えない。
+_HISTORY_ROW_SQL = (
+    "(line_role IS NULL OR line_role IN ('main_line', 'meta_judgment')) "
+    "AND COALESCE(scope, 'committed') = 'committed'"
+)
+
+
+def _history_start_locked(
+    conn: Any, recent: Sequence[Dict[str, Any]],
+) -> tuple:
+    """``recent`` が、そのペルソナの記録の始まりから組まれているか。
+
+    返り値は ``(始まりから組まれているか, 最古の発言の秒)``。
+
+    - ``recent`` の最古の発言 (id を持つ行) より前の ``(created_at, rowid)`` に、
+      履歴に出うる発言が記録 (全スレッド) に一件も無ければ真。窓の外 (Metabolism・
+      Chronicle 無効の窓) や、別のスレッドの発言が先にあるときは偽。
+    - ``recent`` に発言が一件も無ければ、記録に履歴に出うる発言が一件も無い
+      ときだけ真 (最古の発言の秒は None)。
+    - 最古の発言が記録に無い・読めないときは偽 (置かない側に倒す)。
+
+    **呼び出し側が ``sai_mem._db_lock`` を保持している前提**。
+    """
+    try:
+        oldest_id = next(
+            (
+                str(m["id"]) for m in recent
+                if isinstance(m, dict) and m.get("id")
+                and not is_injected_perception(m)
+            ),
+            None,
+        )
+        if oldest_id is None:
+            row = conn.execute(
+                f"SELECT 1 FROM messages WHERE {_HISTORY_ROW_SQL} LIMIT 1"
+            ).fetchone()
+            return (row is None, None)
+        row = conn.execute(
+            "SELECT created_at, rowid FROM messages WHERE id = ?", (oldest_id,),
+        ).fetchone()
+        if row is None or row[0] is None or row[1] is None:
+            return (False, None)
+        created_at, rowid = int(row[0]), int(row[1])
+        older = conn.execute(
+            f"SELECT 1 FROM messages WHERE {_HISTORY_ROW_SQL} "
+            "AND (created_at < ? OR (created_at = ? AND rowid < ?)) LIMIT 1",
+            (created_at, created_at, rowid),
+        ).fetchone()
+        return (older is None, created_at)
+    except Exception:
+        # 判定の失敗は「置かない」に倒す。外へ送出すると、外側の受けが知覚の
+        # まとめごと提示を空にする。
+        LOGGER.warning(
+            "[sea][prepare-context] could not tell whether the history starts at "
+            "the start of the record; not placing kept rows without a boundary",
+            exc_info=True,
+        )
+        return (False, None)
+
+
+def _history_opens_with_locked(history_start: tuple, batch: Any) -> bool:
+    """位置を決める発言を持たない残した行 ``batch`` を、履歴の一番最初に置くか。
+
+    persist_realtime_and_recall.md §4.3 (Codex 七巡目)。境界が NULL の行は、
+    残した時点で、送った列に発言が一件も無かった (ペルソナの最初のパルス・
+    空のスレッドの自律開始)。その行の正しい位置は「その列の続き = 履歴の
+    一番最初」だが、別のスレッドや窓の外で残した行を、関係の無い履歴の冒頭へ
+    出してはいけない。だから二つを確かめる。
+
+    - 履歴がそのペルソナの記録の始まりから組まれている
+      (:func:`_history_start_locked`)。
+    - 履歴の最古の発言が、行を残した時点 (秒) より前ではない。前にあるなら、
+      残した時点で記録にはもう発言があったのに、送った列には無かった — 別の
+      スレッドで残した行なので置かない (古いスレッドへ戻ったとき、新しい空の
+      スレッドで残した行がその冒頭に出るのを防ぐ)。
+    """
+    starts_at_record_start, oldest_epoch = history_start
+    if not starts_at_record_start:
+        return False
+    if oldest_epoch is None:
+        return True
+    try:
+        return int(oldest_epoch) >= int(batch.consumed_at)
+    except (TypeError, ValueError):
+        return False
 
 
 def _resolve_perception_anchors_locked(
@@ -1921,6 +2076,8 @@ def _resolve_perception_anchors_locked(
 
 def _realtime_and_recall_block(
     batch: Any, boundary_message_id: Optional[str],
+    *,
+    at_history_start: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """残したリアルタイム情報と自動想起の行を、送る列のブロックにする。
 
@@ -1933,9 +2090,11 @@ def _realtime_and_recall_block(
     :data:`PERSISTED_REALTIME_AND_RECALL_KEY` (自動想起のきっかけと反射判断の
     観察から外す — §4.5)。``__realtime_context__`` は付けない (リアルタイム
     スペルの結果の追記先にならないように)。位置を決める発言の id が無いものは
-    出さない。
+    出さない — ただし ``at_history_start`` (境界が NULL で、履歴の一番最初に
+    置くと決まった行 — :func:`_history_opens_with_locked`) は
+    :data:`HISTORY_START_KEY` の印を付けて出す。
     """
-    if not boundary_message_id:
+    if not boundary_message_id and not at_history_start:
         return None
     media = batch.media_list()
     content = batch.rendered_text or ""
@@ -1946,11 +2105,14 @@ def _realtime_and_recall_block(
         CONSUMED_PERCEPTION_KEY: True,
         PERSISTED_REALTIME_AND_RECALL_KEY: True,
         "__perception_batch_id__": int(batch.id),
-        BOUNDARY_ANCHOR_ID_KEY: str(boundary_message_id),
         REALTIME_AND_RECALL_RECALLED_KEY: [
             [st, sid] for st, sid in batch.recalled_keys()
         ],
     }
+    if boundary_message_id:
+        metadata[BOUNDARY_ANCHOR_ID_KEY] = str(boundary_message_id)
+    else:
+        metadata[HISTORY_START_KEY] = True
     if batch.pulse_id:
         metadata[REALTIME_AND_RECALL_PULSE_ID_KEY] = str(batch.pulse_id)
     if media:
@@ -2017,6 +2179,51 @@ def _place_anchored_blocks(
     return out
 
 
+def _is_history_start_block(msg: Any) -> bool:
+    """履歴の一番最初に置く残した行 (:data:`HISTORY_START_KEY`) か。"""
+    meta = msg.get("metadata") if isinstance(msg, dict) else None
+    return bool(isinstance(meta, dict) and meta.get(HISTORY_START_KEY))
+
+
+def _place_history_start_blocks(
+    merged: List[Dict[str, Any]], at_start: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """位置を決める発言を持たない残した行を、履歴の一番最初 (最古の発言の前) に置く。
+
+    persist_realtime_and_recall.md §4.3 (Codex 七巡目)。その行を残したターンの
+    送る列では、履歴の部分に発言が無く、行は知覚のまとめ (あれば) の後ろに
+    あった。だから最古の発言より前の、先頭に並ぶ知覚のまとめの並びの中で、
+    表の id の順の位置に入れる (自分より先に確定したまとめの後ろ、後から
+    確定したまとめの前)。同じ印の行が複数あれば id の順。
+    """
+    out = list(merged)
+    for block in sorted(at_start, key=_block_batch_id):
+        own = _block_batch_id(block)
+        lead = 0
+        while lead < len(out) and is_injected_perception(out[lead]):
+            lead += 1
+        pos = lead
+        while pos > 0 and _block_batch_id(out[pos - 1]) > own:
+            pos -= 1
+        out.insert(pos, block)
+    return out
+
+
+def leading_history_start_count(history: Sequence[Dict[str, Any]]) -> int:
+    """履歴の部分の先頭に並ぶ、履歴の一番最初に置いた残した行の数。
+
+    時刻の目安 (「以下、… 以降のやり取りです」) はこの後ろに置く — その行を
+    残したターンの送る列は、履歴が空で時刻の目安も無く、その行で終わって
+    いた。目安を前に置くと、次のターンの列の先頭が一致しなくなる。
+    """
+    count = 0
+    for msg in history:
+        if not _is_history_start_block(msg):
+            break
+        count += 1
+    return count
+
+
 def merge_perception_blocks(
     recent: Sequence[Dict[str, Any]], blocks: Sequence[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -2033,14 +2240,19 @@ def merge_perception_blocks(
     :func:`list_presented_perception_blocks` が付ける)。知覚のまとめの発言が
     ``recent`` に無ければ (組成と並べで別の列を渡した場合)、時刻の順に落とす
     — 知覚は消さない。残した行は発言が無ければ出さない (§4.3)。
+    履歴の一番最初に置くと決まった残した行 (:data:`HISTORY_START_KEY`) は
+    :func:`_place_history_start_blocks` が並べる。
     """
     recent_ids = {
         str(m.get("id")) for m in recent if isinstance(m, dict) and m.get("id")
     }
     epoch_blocks: List[Dict[str, Any]] = []
     anchored: List[Dict[str, Any]] = []
+    at_start: List[Dict[str, Any]] = []
     for b in blocks:
-        if is_persisted_realtime_and_recall(b):
+        if _is_history_start_block(b):
+            at_start.append(b)
+        elif is_persisted_realtime_and_recall(b):
             anchored.append(b)
         elif _block_anchor_id(b) and _block_anchor_id(b) in recent_ids:
             anchored.append(b)
@@ -2059,6 +2271,8 @@ def merge_perception_blocks(
             bi += 1
         merged.append(msg)
     merged.extend(epoch_blocks[bi:])
+    if at_start:
+        merged = _place_history_start_blocks(merged, at_start)
     if anchored:
         merged = _place_anchored_blocks(merged, anchored)
     return merged
