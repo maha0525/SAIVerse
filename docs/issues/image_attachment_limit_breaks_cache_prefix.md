@@ -13,6 +13,8 @@ LLM に送るとき、画像は新しい順に `DEFAULT_ATTACHMENT_LIMIT` 枚（
 
 継続キャッシュ（§3.5）では、この回は「一致するキャッシュが無い」例外に落ちて、キャッシュの作成を待つ。
 
+2026-10-14 追記: モデル設定 `cache.persist_realtime_and_recall` を ON にしたモデル（Gemini 4 Argon）では、上限を使わないことにした（送る列の画像をすべて画像のまま送る — `docs/intent/persist_realtime_and_recall.md` §4.2、`llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY`）。OFF のモデルはこの issue のまま。
+
 ## まはーの所感（2026-10-11）
 
 画像の枚数上限は、キャッシュの前方一致を考えると、やらない方が良かった。

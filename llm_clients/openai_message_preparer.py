@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 
 from .utils import (
+    attachment_limit_is_off,
     compute_allowed_attachment_keys,
     content_to_text,
     image_summary_note,
@@ -37,6 +38,10 @@ def scan_message_metadata(
 ) -> Tuple[Dict[int, List[Dict[str, Any]]], Set[int], Set[int], Optional[Set[Tuple[int, int]]]]:
     """Build metadata-derived caches for attachment and summary handling."""
     max_image_embeds = max_image_embeds_override if max_image_embeds_override is not None else parse_attachment_limit("OPENAI")
+    # リアルタイム情報と自動想起を残すモデルの列では上限を使わない
+    # (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY。モデル設定の上限より優先)。
+    if attachment_limit_is_off(messages):
+        max_image_embeds = None
     attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
     skip_summary_indices: Set[int] = set()
     exempt_indices: Set[int] = set()

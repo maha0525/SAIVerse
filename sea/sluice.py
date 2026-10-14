@@ -442,7 +442,9 @@ class _MediaRules(NamedTuple):
     #: 直近の画像を何枚まで埋め込むか (None = 無制限)。枠は新しいメッセージから
     #: 順に埋まる。``__visual_context__`` のメッセージの画像は枠を使わず、常に
     #: 枠の内側 (llm_clients/utils.py の compute_allowed_attachment_keys と、同じ
-    #: 規則を持つ gemini.py の _convert_messages)。
+    #: 規則を持つ gemini.py の _convert_messages)。列が「上限を使わない」の印
+    #: (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY) を持つときは、クライアントと
+    #: 同じく枠そのものが無い (:func:`_estimate_input_tokens`)。
     image_limit: Optional[int]
     #: 画像が枠を使う役割。
     image_limit_roles: FrozenSet[str]
@@ -709,7 +711,12 @@ def _estimate_input_tokens(
         str(get_model_config(model).get("provider", "ollama")),
     )
     rules = _media_rules(model)
-    remaining_slots = rules.image_limit  # 枠の残り (None = 無制限)
+    # 枠の残り (None = 無制限)。リアルタイム情報と自動想起を残すモデルの列は、
+    # どのクライアントも上限を使わない (llm_clients/utils.attachment_limit_is_off
+    # — クライアントと同じ一枚で判定する)。
+    from llm_clients.utils import attachment_limit_is_off
+
+    remaining_slots = None if attachment_limit_is_off(messages) else rules.image_limit
     # 画像を埋め込みにも注記にもしないクライアント (Ollama・画像非対応の Gemini と
     # xAI) では、画像の項目を集めない — 枠がどう埋まっても数える量は 0。
     counts_images = bool(rules.image_embed_roles or rules.image_note_roles)

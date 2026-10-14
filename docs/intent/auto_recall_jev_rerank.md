@@ -186,6 +186,14 @@ cosine しきい値を割ったときとまったく同じ経路)。記憶が急
 薄れるのは §4.3 の設計意図そのものなので、Jev 層はここに触らない。
 回帰テストは `tests/test_auto_recall_jev.py::test_rejection_does_not_evict_sticky_item`。
 
+例外 (2026-10-14): モデル設定 `cache.persist_realtime_and_recall` を ON にしたモデル
+では、この退場の規則 (粘着ウィンドウの分だけ薄れてから消える) は働かない。そのモデル
+では想起が送った文面のまま残され、Metabolism で送る列から外れるまでペルソナの目に
+入り続けるので、注入するのは新しく浮かんだ記憶だけになる — 送る列にある残した行に
+入っている記憶は、詰まり 1 と同じ理由で**候補を集める段階で**除外する
+(`unified_recall` の `exclude_keys`。[persist_realtime_and_recall.md](persist_realtime_and_recall.md)
+§4.4)。Jev の観察 (`observations`) と会話の材料からも、残した行は明示的に外す (同 §4.5)。
+
 ### 失敗時の振る舞い
 
 TypeSafe API の失敗 (キー無し・タイムアウト・非 200・不正応答) は **そのターンだけ

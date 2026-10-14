@@ -31,6 +31,7 @@ from sai_memory.memory.storage import (
     set_thread_title,
     init_db,
     compose_message_content,
+    wrap_system_record_content,
     replace_message_embeddings,
     write_deferred_message_embedding,
     get_messages_with_persona_in_audience,
@@ -711,8 +712,11 @@ class SAIMemoryAdapter:
             return None
         from sai_memory.perception_buffer import batch_in_window
         from sai_memory.room_state import reseat_current_room
-        try:
-            with self._db_lock:
+        # rollback まで錠前の内側 (record_realtime_and_recall と同じ理由 —
+        # 錠前の外の rollback は、共有接続で別のスレッドが始めた未確定の
+        # 書き込みを巻き戻す)。
+        with self._db_lock:
+            try:
                 window_key = self._window_key_locked(anchor_id, floor_chars)
                 in_window = (
                     (lambda b: batch_in_window(b, window_key))
@@ -724,16 +728,16 @@ class SAIMemoryAdapter:
                 if batch_id is not None:
                     self.conn.commit()
                 return batch_id
-        except Exception:
-            try:
-                self.conn.rollback()
             except Exception:
-                pass
-            LOGGER.warning(
-                "[room_state] could not reseat the current room; the next "
-                "detection will retry", exc_info=True,
-            )
-            return None
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                LOGGER.warning(
+                    "[room_state] could not reseat the current room; the next "
+                    "detection will retry", exc_info=True,
+                )
+                return None
 
     def count_pending_perceptions(self, kind: str) -> Optional[int]:
         """未消費の知覚バッファにある指定 kind の件数。
@@ -936,6 +940,99 @@ class SAIMemoryAdapter:
             # sea/runtime_context.list_presented_perception_blocks)。
             return None
         return {"content": f"<system>{text}</system>", "media": media}
+
+    def record_realtime_and_recall(
+        self,
+        *,
+        content: str,
+        media: Optional[list] = None,
+        recalled_keys: Optional[list] = None,
+        boundary_message_ids: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
+    ) -> Optional[int]:
+        """そのターンのリアルタイム情報と自動想起を、送った文面のまま一行残す。
+
+        docs/intent/persist_realtime_and_recall.md §4.2。書き先は知覚のまとめと
+        同じ ``perception_batches`` (種類 ``realtime_and_recall``)。知覚の消費とは
+        別のトランザクションで、台帳の項目には触れない。
+
+        ``boundary_message_ids`` は、送った列でこのまとまりより前にあった発言の
+        id を**新しい順**に並べたもの。台帳に実在する最初の一件の正典順序キー
+        ``(created_at, rowid)`` を位置の境界として記帳する — 次のターン以降、
+        この行はその発言の直後に出て、その発言が送る列に無いときは送られない
+        (§4.3)。境界は「送った列の最後の発言」で決める: 書く時点で台帳の最後に
+        ある行 (判断のパルスの捨てられる記録・別のスレッドの行など、送る列に
+        出ない行) を境界にすると、次のターンにその行が列に無いので、残した行が
+        二度と送られなくなる。台帳に実在する発言が一件も無ければ (境界が
+        決まらなければ) 書かない — 境界の無い行は次のターンに送られないため
+        (§4.2、Codex 八巡目)。
+
+        Returns: 書いた行の id (書けなかった・境界が無くて書かなかったら None)。
+        """
+        if not self._ready:
+            return None
+        from sai_memory.perception_buffer import insert_realtime_and_recall_batch
+        # 失敗時の rollback まで同じ錠前の内側で行う (Codex 二巡目 #1)。錠前を
+        # 手放してから共有接続を rollback すると、その間に別のスレッドが同じ
+        # 接続で始めた未確定の書き込みまで巻き戻して消してしまう。
+        with self._db_lock:
+            try:
+                # 一ターン一行の二重の守り: 呼び出し側はまとまりの印で二度目を
+                # 止めているが、印の付いた辞書が写しに置き換わる経路があっても、
+                # 同じパルスの行が既にあれば書かない。
+                if pulse_id:
+                    existing = self.conn.execute(
+                        "SELECT id FROM perception_batches "
+                        "WHERE kind = 'realtime_and_recall' AND pulse_id = ? "
+                        "ORDER BY id LIMIT 1",
+                        (str(pulse_id),),
+                    ).fetchone()
+                    if existing is not None:
+                        return int(existing[0])
+                boundary_created_at: Optional[int] = None
+                boundary_rowid: Optional[int] = None
+                for mid in boundary_message_ids or []:
+                    row = self.conn.execute(
+                        "SELECT created_at, rowid FROM messages WHERE id = ?",
+                        (str(mid),),
+                    ).fetchone()
+                    if row is not None and row[0] is not None:
+                        boundary_created_at, boundary_rowid = int(row[0]), int(row[1])
+                        break
+                if boundary_created_at is None or boundary_rowid is None:
+                    # 位置を決める発言が無いまとまりは残さない (§4.2、Codex
+                    # 八巡目)。境界の無い行は次のターンの送る列に出る位置が
+                    # 決まらず、送られない (§4.3) — 残しても誰にも届かない。
+                    # 呼び出し側 (sea/runtime_llm._persist_turn_realtime_and_recall)
+                    # は発言の id が一件も無いまとまりをここへ渡さないので、
+                    # ここに来るのは id が記録に一件も無い異常なときだけ。
+                    LOGGER.warning(
+                        "[perception_buffer] none of the boundary messages of this "
+                        "turn's realtime info / auto recall are in the record; not "
+                        "keeping it (persona=%s pulse=%s)", self.persona_id, pulse_id,
+                    )
+                    return None
+                return insert_realtime_and_recall_batch(
+                    self.conn,
+                    consumed_at=int(time.time()),
+                    rendered_text=content,
+                    media=media,
+                    recalled_keys=recalled_keys,
+                    pulse_id=pulse_id,
+                    boundary_created_at=boundary_created_at,
+                    boundary_rowid=boundary_rowid,
+                )
+            except Exception:
+                LOGGER.warning(
+                    "[perception_buffer] could not record this turn's realtime "
+                    "info / auto recall (persona=%s)", self.persona_id,
+                    exc_info=True,
+                )
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                return None
 
     # ------------------------------------------------------------------
     # 実行台帳の配送口 (Execution Ledger outbox delivery)
@@ -2285,10 +2382,9 @@ class SAIMemoryAdapter:
         role = "assistant" if original_role == "model" else original_role
         if isinstance(role, str) and role.lower() == "system":
             role = "user"
-            if content:
-                content = f"<system>\n{content}\n</system>"
-            else:
-                content = "<system></system>"
+            # 送る経路 (スペルの結果など) と同じ一枚で包む
+            # (sai_memory.memory.storage.wrap_system_record_content)。
+            content = wrap_system_record_content(content)
         payload: Dict[str, Any] = {
             "id": msg.id,
             "thread_id": msg.thread_id,

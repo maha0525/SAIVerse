@@ -1284,6 +1284,31 @@ def sample_messages(conn: sqlite3.Connection, limit: int = 5) -> List[Message]:
     return [_row_to_message(row) for row in cur.fetchall()]
 
 
+def wrap_system_record_content(content: str) -> str:
+    """system ロールで保存した記録を、送る列に出す本文の形にする (復元形)。
+
+    履歴の復元 (saiverse_memory.adapter._payload_from_message_locked) と、記録と
+    同じものをその場で送る経路 (スペルの結果・事前スペルの結果 —
+    sea/runtime_llm) が**同じこの一枚**を通る。送ったときの本文と、保存して
+    次のターンに復元される本文が一字でも違うと、前回の送信が今回の送信の
+    先頭と一致しなくなる (docs/intent/persist_realtime_and_recall.md 不変条件 2)。
+    ``content`` は :func:`compose_message_content` を通した後の文字列。
+    """
+    if content:
+        return f"<system>\n{content}\n</system>"
+    return "<system></system>"
+
+
+def presented_system_record_content(text: str) -> str:
+    """これから system ロールで保存する ``text`` が、復元されたときに出る本文。
+
+    リンク付きスレッドの抜粋などを持たない素の記録の
+    :func:`compose_message_content` (前後の空白を落とす) →
+    :func:`wrap_system_record_content` と同じ結果。
+    """
+    return wrap_system_record_content((text or "").strip())
+
+
 def compose_message_content(
     conn: sqlite3.Connection,
     message: Message,
