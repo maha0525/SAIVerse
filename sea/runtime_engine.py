@@ -344,7 +344,7 @@ class RuntimeEngine:
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
                 # 書き込み時の機械刻印 (sea/message_stamp.py): 子は親の state を
-                # そのまま受け取って走るので、子の _prepare_context が子の「見た列」で
+                # そのまま受け取って走るので、子の _prepare_context が子の `_presented_message_ids`で
                 # 親の材料を上書きしている (sea/runtime_runner.py)。途中まで走った
                 # 子の三つ組・前駆を親の次の刻印へ持ち越さない — lg_subplay_node と同じ。
                 clear_call_tokens(state)
@@ -392,10 +392,10 @@ class RuntimeEngine:
 
             # 書き込み時の機械刻印: lg_subplay_node と同じ理由で三つ組と前駆を対で
             # 落とす。この後 state["last"] に入るのは子の本文 (親の SPEAK /
-            # MEMORIZE が刻むと、他人のコールの数字・子の見た列が載る)。しかも子は
-            # 親の state を受け取って走るので、親の材料は子の「見た列」で上書き
+            # MEMORIZE が刻むと、他人のコールの数字・子の `_presented_message_ids`が載る)。しかも子は
+            # 親の state を受け取って走るので、親の材料は子の `_presented_message_ids`で上書き
             # 済み — 残すと親の次の返事の前駆が、親の見ていない子の行を指しうる。
-            # 親が次に自前の LLM ノードで送るときに、送る列から作り直される
+            # 親が次に自前の LLM ノードで送るときに、送る `messages`から作り直される
             # (sea/message_stamp.sync_presented_message_ids_with_sent)。
             clear_call_tokens(state)
             clear_presented_message_ids(state)

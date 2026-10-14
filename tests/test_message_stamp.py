@@ -109,7 +109,7 @@ class TestRecordPresentedMessageIds:
 
 class TestAppendPresentedMessageId:
     def test_appends_to_the_tail(self):
-        """同じ Beat の中で永続化した行が「見た列」の末尾になる。"""
+        """同じ Beat の中で永続化した行が`_presented_message_ids`の末尾になる。"""
         state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["m1", "m2"]}
         append_presented_message_id(state, "round-1")
         assert state[PRESENTED_IDS_STATE_KEY] == ["m1", "m2", "round-1"]
@@ -519,7 +519,7 @@ class TestSpellLoopPredecessor:
     """スペルの各ラウンドが、直前ラウンドの行を見て書かれた事実を刻むこと。
 
     正典の指摘: ラウンドの assistant 行は ``messages`` に積まれて次のコールの
-    プロンプトに入るのに ``_presented_message_ids`` が動かず、ラウンド 2 以降の
+    プロンプトに入るのに ` `_presented_message_ids`` が動かず、ラウンド 2 以降の
     前駆刻印が ``_prepare_context`` 時点の履歴末尾を指し続けていた。
     """
 
@@ -609,7 +609,7 @@ class TestSpellLoopPredecessor:
     def test_round_messages_in_the_list_carry_their_row_ids(self):
         """列に積んだ周の発言が、記録へ書いた行の id を持つこと。
 
-        後で材料を送る列から作り直す回 (子 Playbook の中継の後) に、周の発言が
+        後で材料を送る `messages`から作り直す回 (子 Playbook の中継の後) に、周の発言が
         記録の行として数えられるための印。追記の列と同じ並びになる。
         """
         from sea.runtime_context import sent_message_ids
@@ -928,7 +928,7 @@ class TestPredecessorAfterSubPlaybook:
 
         _b_id, meta = _row_by_content(adapter, "親の返事 B。")
         expected = _last_recorded_id_in(adapter, client.sent[-1])
-        # 子の行は記録の最新だが、親の送る列には入っていない
+        # 子の行は記録の最新だが、親の送る `messages`には入っていない
         assert expected == h2
         assert meta.get(PREDECESSOR_META_KEY) == expected
 
@@ -968,7 +968,7 @@ class TestPredecessorAfterSubPlaybook:
 
 
 class TestPredecessorAfterExec:
-    """EXEC で走った子 Playbook の「見た列」を、親の次の返事の前駆に使わないこと。
+    """EXEC で走った子 Playbook の `_presented_message_ids`を、親の次の返事の前駆に使わないこと。
 
     子は親の state をそのまま受け取って走るので、子の _prepare_context が子の
     提示列で親の材料を上書きする (sea/runtime_runner.py)。EXEC は子の本文を
@@ -1047,7 +1047,7 @@ class TestPredecessorAcrossConsecutiveParentNodes:
     """子 Playbook が無くても、親の LLM ノード A (memorize あり) の後に親の LLM
     ノード B が続くとき、B の前駆は B が実際に見た A を指すこと。
 
-    材料が残っている回は作り直さず、B が送る直前に、送る列で材料の末尾より
+    材料が残っている回は作り直さず、B が送る直前に、送る `messages`で材料の末尾より
     後ろにある記録の行 (A) を足すことで成立させる。足さないと B の前駆は
     prepare_context の提示列の末尾 (h2) のままになる (2026-10-14 に同族の既存
     欠陥として発見し、同じ変更で修正)。
@@ -1100,7 +1100,7 @@ class TestPredecessorAcrossConsecutiveParentNodes:
 
 
 class TestSyncPresentedMessageIdsWithSent:
-    """材料を送る列に合わせる (sea/message_stamp.sync_presented_message_ids_with_sent)。"""
+    """材料を送る `messages`に合わせる (sea/message_stamp.sync_presented_message_ids_with_sent)。"""
 
     SENT = [
         {"role": "system", "content": "head"},
@@ -1112,9 +1112,9 @@ class TestSyncPresentedMessageIdsWithSent:
     ]
 
     def test_material_whose_tail_is_not_sent_is_rebuilt(self):
-        """材料の末尾が送る列に無いなら、材料はこの生成が見るものではない。
+        """材料の末尾が送る `messages`に無いなら、材料はこの生成が見るものではない。
 
-        残すと見ていない行 (round-1) を前駆に刻むので、送る列から作り直す。
+        残すと見ていない行 (round-1) を前駆に刻むので、送る `messages`から作り直す。
         """
         from sea.message_stamp import sync_presented_message_ids_with_sent
 
@@ -1123,7 +1123,7 @@ class TestSyncPresentedMessageIdsWithSent:
         assert state[PRESENTED_IDS_STATE_KEY] == ["h1", "a1"]
 
     def test_material_is_not_rewritten_when_the_tail_is_sent(self):
-        """材料の末尾が送る列にあれば、末尾までの中身は変えない (足すだけ)。"""
+        """材料の末尾が送る `messages`にあれば、末尾までの中身は変えない (足すだけ)。"""
         from sea.message_stamp import sync_presented_message_ids_with_sent
 
         state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["not-sent-0", "h1"]}
@@ -1131,7 +1131,7 @@ class TestSyncPresentedMessageIdsWithSent:
         assert state[PRESENTED_IDS_STATE_KEY] == ["not-sent-0", "h1", "a1"]
 
     def test_rows_after_the_tail_are_appended_without_rewriting(self):
-        """材料の末尾が送る列にあれば、その後ろの記録の行だけを足す。"""
+        """材料の末尾が送る `messages`にあれば、その後ろの記録の行だけを足す。"""
         from sea.message_stamp import sync_presented_message_ids_with_sent
 
         sent = [
@@ -1143,7 +1143,7 @@ class TestSyncPresentedMessageIdsWithSent:
             {"role": "user", "content": "<system>tool result</system>"},
             {"id": "a2", "role": "assistant", "content": "a2"},
         ]
-        # 材料の中身 (先頭の hist-0 は送る列に無い) は変えず、h2 より後ろだけ足す
+        # 材料の中身 (先頭の hist-0 は送る `messages`に無い) は変えず、h2 より後ろだけ足す
         state: Dict[str, Any] = {PRESENTED_IDS_STATE_KEY: ["hist-0", "h2"]}
         sync_presented_message_ids_with_sent(state, sent)
         assert state[PRESENTED_IDS_STATE_KEY] == ["hist-0", "h2", "a1", "a2"]
@@ -1195,7 +1195,7 @@ class TestSyncPresentedMessageIdsWithSent:
 
 
 class TestFinalizeBeatCarriesTheStoredRowId:
-    """_finalize_beat が、記憶へ書いた返事の行 id を送る列の返事に載せること。"""
+    """_finalize_beat が、記憶へ書いた返事の行 id を送る `messages`の返事に載せること。"""
 
     @pytest.fixture(autouse=True)
     def _no_trace(self, monkeypatch):
@@ -1257,7 +1257,7 @@ class TestFinalizeBeatCarriesTheStoredRowId:
     def test_tool_call_only_reply_carries_no_id(self):
         """本文が空の tool_calls だけの返事には載せない。
 
-        記録には JSON 本文で書かれているが、送る列の dict は本文が空で、
+        記録には JSON 本文で書かれているが、送る `messages`の dict は本文が空で、
         Anthropic は本文の空な行を送る前に落とす。載せると次の生成の前駆が
         モデルに届いていない行を指す (Codex 2026-10-14 high)。
         """
@@ -1273,7 +1273,7 @@ class TestFinalizeBeatCarriesTheStoredRowId:
         msg = state["_messages"][-1]
         assert msg["content"] == ""
         assert "id" not in msg
-        # 送る列から作り直しても、記録の行として数えるのは履歴の h1 だけ
+        # 送る `messages`から作り直しても、記録の行として数えるのは履歴の h1 だけ
         assert sent_message_ids(state["_messages"]) == ["h1"]
         # 実際に Anthropic へ渡す列にもこの返事は無い (載せなかった理由の裏付け)
         prepared = _prepare_anthropic_messages(state["_messages"])

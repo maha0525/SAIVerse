@@ -102,10 +102,10 @@ def _is_head_message(msg: Any) -> bool:
 
 
 def sent_message_ids(messages: Sequence[Dict[str, Any]]) -> List[str]:
-    """送る列にある、記録の行 id (head・知覚のまとめ・差し込みを除く) を並び順に。
+    """送る `messages`にある、記録の行 id (head・知覚のまとめ・差し込みを除く) を並び順に。
 
-    前駆刻印の材料 (sea/message_stamp.py の ``_presented_message_ids``) を、
-    実際に送る列から作り直すときに使う。送る列で ``id`` を持つのは記録
+    前駆刻印の材料 (sea/message_stamp.py の ` `_presented_message_ids``) を、
+    実際に送る `messages`から作り直すときに使う。送る `messages`で ``id`` を持つのは記録
     (SAIMemory の messages 行) から来た dict だけ — 履歴の行 (adapter の payload)
     と、同じ Pulse の中で記録へ書いた自分の返事・スペルの周の発言
     (sea/runtime_llm.py が保存した行 id を載せる)。head・知覚のまとめ・

@@ -76,8 +76,8 @@ BEAT_BODY_UNMEMORIZED_KEY = "_beat_body_unmemorized_text"
 #: 「この Beat の本文を記憶へ書いた行の id」を ``_finalize_beat`` へ渡す state キー。
 #:
 #: ``_beat_memorized`` (書いたかどうか) と同じ場所で立てる (:func:`_mark_beat_memorized`)。
-#: ``_finalize_beat`` は、送る列に足した返事の dict にこの id を ``"id"`` として載せる —
-#: 送る列で記録の行 id を持つ dict が「記録から来た行」の印で、前駆刻印の材料の
+#: ``_finalize_beat`` は、送る `messages`に足した返事の dict にこの id を ``"id"`` として載せる —
+#: 送る `messages`で記録の行 id を持つ dict が「記録から来た行」の印で、前駆刻印の材料の
 #: 作り直し (sea/message_stamp.py の ``sync_presented_message_ids_with_sent``) が
 #: それを数える。載せないと「親が返事 A を保存 → 子 Playbook → 親が返事 B」で
 #: B の前駆が A を飛ばして古い履歴の行を指す。LLM ノードの入り口で倒す (前の
@@ -88,7 +88,7 @@ BEAT_MEMORY_ID_KEY = "_beat_memory_id"
 def _mark_beat_memorized(state: Dict[str, Any], stored_message_id: Any) -> None:
     """「この Beat の本文はもう記憶に書かれた」の印と、書いた行の id を立てる。
 
-    印 (``_beat_memorized``) は二重書きを止める鍵、id は送る列の返事に載せる値。
+    印 (``_beat_memorized``) は二重書きを止める鍵、id は送る `messages`の返事に載せる値。
     id として受け取るのは空でない文字列だけ (``_store_memory`` を
     ``return_message_id`` なしで呼ぶ経路やテストの代役は ``True`` を返す)。
     """
@@ -770,7 +770,7 @@ def _store_beat_memory(
     成功 (= 書けた message_id が truthy) したら ``state["_beat_memorized"]`` を
     立てる — 「この Beat の本文はもう記憶に書かれた」の印で、Beat の出口の補填が
     二重に書き込むのを止める鍵。書けた行の id も ``BEAT_MEMORY_ID_KEY`` に残す
-    (``_finalize_beat`` が送る列の返事に載せる)。返り値は書けた message_id
+    (``_finalize_beat`` が送る `messages`の返事に載せる)。返り値は書けた message_id
     (失敗は falsy)。
     """
     metadata: Dict[str, Any] = {}
@@ -1080,7 +1080,7 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                 playbook_name=playbook.name,
                 # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
                 thought_signature=state.get("_last_thought_signature"),
-                # 書いた行の id を受け取る — memorize 節と同じく、送る列の返事に
+                # 書いた行の id を受け取る — memorize 節と同じく、送る `messages`の返事に
                 # 載せる (BEAT_MEMORY_ID_KEY)。
                 return_message_id=True,
                 beat_state=state,
@@ -1093,21 +1093,21 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                 LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
 
     # 返事が記憶に書かれていたら (memorize / important dual-write / 止まった生成の
-    # 保存 = settle のどれか)、送る列に足した返事の dict に書いた行の id を載せる。
-    # 次の送信で前駆刻印の材料を送る列から作り直すとき (sea/message_stamp.py の
+    # 保存 = settle のどれか)、送る `messages`に足した返事の dict に書いた行の id を載せる。
+    # 次の送信で前駆刻印の材料を送る `messages`から作り直すとき (sea/message_stamp.py の
     # sync_presented_message_ids_with_sent)、この返事が「記録の行」として
     # 数えられる。各 LLM クライアントは role / content / tool_calls 等しか送らない
     # (履歴の行も同じ ``id`` を持って送られている) ので、API へは載らない。
     # 値はこの Beat のものなので、ここで消費する (次の Beat へ持ち越さない)。
     #
-    # 「見た列」(前駆刻印の材料) にはここでは足さない。足すのは次の LLM ノードが
+    # `_presented_message_ids`(前駆刻印の材料) にはここでは足さない。足すのは次の LLM ノードが
     # この返事を実際に送るとき (sync_presented_message_ids_with_sent)。ここで
     # 足すと、この後に続く MEMORIZE / SPEAK / THINK ノード (この返事の本文を
     # 役割 assistant で書き直す — 例: schedule_management の record_add_params)
     # の前駆が、その本文を生んだ生成自身の行を指してしまう。
     #
     # 本文が空の返事 (tool_calls だけ) には載せない。記録には JSON 本文で
-    # 書かれているが、送る列の dict は本文が空で、Anthropic などは本文の空な
+    # 書かれているが、送る `messages`の dict は本文が空で、Anthropic などは本文の空な
     # 行を送る前に落とす (llm_clients/anthropic_request_builder.py) — 載せると
     # 次の生成の前駆が、モデルに届いていない行を指す。
     _beat_memory_id = state.pop(BEAT_MEMORY_ID_KEY, None)
@@ -2703,7 +2703,7 @@ def _save_cut_utterance(
             playbook_name=playbook.name,
             # 書いた行の id を受け取る — この Beat が例外なしで `_finalize_beat`
             # まで進む回 (スペル無効の停止・締めの Beat の部分文の保存) に、
-            # 送る列の返事へ載せる (BEAT_MEMORY_ID_KEY)。
+            # 送る `messages`の返事へ載せる (BEAT_MEMORY_ID_KEY)。
             return_message_id=True,
             beat_state=state,
         )
@@ -3623,7 +3623,7 @@ async def _run_spell_loop(
                 # いた最後のメッセージ」ではなくなる。スペル結果の注入行は
                 # 永続 ID を持たないので足さない。
                 # 列に積んだこの周の発言にも書いた行の id を載せる — 後で材料を
-                # 送る列から作り直す回 (子 Playbook の中継の後の次のノード。
+                # 送る `messages`から作り直す回 (子 Playbook の中継の後の次のノード。
                 # sync_presented_message_ids_with_sent) に、この行が記録の
                 # 行として数えられるように (_finalize_beat の返事と同じ理由)。
                 if _stored_id:
@@ -4850,7 +4850,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         # 「もう書かれた」と誤認して黙る。Beat の入り口で必ず倒す。
         state.pop("_beat_memorized", None)
         # 書いた行の id も同じ理由で倒す — 前のノードの id をこのノードの返事に
-        # 載せると、送る列の返事が別の行を名乗る。
+        # 載せると、送る `messages`の返事が別の行を名乗る。
         state.pop(BEAT_MEMORY_ID_KEY, None)
         # 「建物にはあるが記憶に無い本文」の受け渡しも同じ理由で入り口で倒す —
         # 前のノードの本文を、このノードの Beat の補填が書いてしまう。
@@ -5298,13 +5298,13 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         messages.insert(0, {"role": "system", "content": _model_sys_prompt})
                     LOGGER.debug("[sea] Injected model-specific system prompt for %s", _model_config_key)
 
-            # 前駆刻印の材料 (sea/message_stamp.py) を、これから送る列に合わせる。
-            # 送る列はここで確定する — この後の 4 経路 (ツールあり・なし ×
+            # 前駆刻印の材料 (sea/message_stamp.py) を、これから送る `messages`に合わせる。
+            # 送る `messages`はここで確定する — この後の 4 経路 (ツールあり・なし ×
             # ストリーミング・同期、構造化出力は同期の中) はどれもこの
             # ``messages`` をそのまま最初の送信に使い、スペルループもこの列に周の
             # 発言を積み足していく (周の行は append_presented_message_id で列を
-            # 伸ばす)。材料が無い (子 Playbook の中継が落とした後) なら送る列から
-            # 作り直し、材料がある回は中身を変えずに、送る列で末尾より後ろにある
+            # 伸ばす)。材料が無い (子 Playbook の中継が落とした後) なら送る `messages`から
+            # 作り直し、材料がある回は中身を変えずに、送る `messages`で末尾より後ろにある
             # 記録の行 (同じ Playbook の前の LLM ノードが書いた返事) だけを足す。
             sync_presented_message_ids_with_sent(state, messages)
 

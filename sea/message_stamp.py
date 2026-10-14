@@ -21,13 +21,13 @@
     :func:`append_presented_message_id` で列を伸ばす。伸ばさないと刻印が
     組成時点の履歴末尾を指したままになり、「実際に見ていた最後」でなくなる。
     同じ Playbook の LLM ノードが続く場合も同じで、前のノードが記録へ書いた
-    返事は送る列に積まれ、次のノードはそれを見て書く。次のノードが送る直前に
+    返事は送る `messages`に積まれ、次のノードはそれを見て書く。次のノードが送る直前に
     :func:`sync_presented_message_ids_with_sent` がその行 id を列の末尾に足す。
 
     材料が落ちた後 (子 Playbook の中継で :func:`clear_presented_message_ids`
     が落とした後) に親が自前の LLM ノードで送るときは、送る直前に
-    :func:`sync_presented_message_ids_with_sent` が**これから送る列**から
-    材料を作り直す。送る列で記録の行 id を持つのは履歴の行と、同じ Pulse の
+    :func:`sync_presented_message_ids_with_sent` が**これから送る `messages`**から
+    材料を作り直す。送る `messages`で記録の行 id を持つのは履歴の行と、同じ Pulse の
     中で記録へ書いた自分の返事・スペルの周の発言 (sea/runtime_llm.py が
     保存した行 id を列の dict に載せる) なので、「親が返事 A を保存 → 子 →
     親が返事 B」でも B の前駆は A になる。
@@ -136,7 +136,7 @@ def clear_presented_message_ids(state: Optional[Dict[str, Any]]) -> None:
 
     :func:`clear_call_tokens` と**必ず対で呼ぶ**。理由が同じだから — 本文の
     作り手が変わった区間では、三つ組が他人のコールのものになるのと同じ理屈で、
-    前駆も他人が見た列になる。
+    前駆も他人が`_presented_message_ids`になる。
 
     具体的には子 Playbook の中継 (``lg_subplay_node``)。子は自前の
     ``_prepare_context`` で別の履歴を見て本文を書くが、親 state に残っている
@@ -149,7 +149,7 @@ def clear_presented_message_ids(state: Optional[Dict[str, Any]]) -> None:
     子の final_state も親へ届かない。確定できないので刻印なしへ倒す。
 
     落とした後に親が自前の LLM ノードで送るときは、送る直前に
-    :func:`sync_presented_message_ids_with_sent` が送る列から材料を作り
+    :func:`sync_presented_message_ids_with_sent` が送る `messages`から材料を作り
     直す — :func:`clear_call_tokens` の三つ組を ``record_call_tokens`` が
     載せ直すのと対になる。だから消えるのは「作り手が確定できない区間」
     (中継された本文を親の SPEAK / MEMORIZE が刻む場面) だけで、親が自分で
@@ -201,7 +201,7 @@ def record_presented_message_ids(
 def append_presented_message_id(
     state: Optional[Dict[str, Any]], message_id: Optional[str],
 ) -> None:
-    """同じ Beat の中で永続化した行を「見た列」の末尾に足す。
+    """同じ Beat の中で永続化した行を `_presented_message_ids`の末尾に足す。
 
     ``prepare_context`` は Playbook の実行 1 回につき一度しか走らないので、
     ひとつの Beat の中で追加の LLM コールを打つ経路 — スペルループの
@@ -226,40 +226,40 @@ def append_presented_message_id(
 def sync_presented_message_ids_with_sent(
     state: Optional[Dict[str, Any]], messages: Optional[Sequence[Dict[str, Any]]],
 ) -> None:
-    """これから送る列に合わせて「見た列」を整える (作り直す / 末尾を伸ばす)。
+    """これから送る `messages`に合わせて `_presented_message_ids`を整える (作り直す / 末尾を伸ばす)。
 
-    使うのは LLM ノードが送る直前 (送る列が確定した後の一点)。この生成が見る
-    のはまさにこれから送る列なので、そこにある記録の行 id
+    使うのは LLM ノードが送る直前 (送る `messages`が確定した後の一点)。この生成が見る
+    のはまさにこれから送る `messages`なので、そこにある記録の行 id
     (:func:`sea.runtime_context.sent_message_ids`) を材料に使う。
 
-    - **材料が無い** (キー不在・空・list でない) とき: 送る列の記録の行 id を
+    - **材料が無い** (キー不在・空・list でない) とき: 送る `messages`の記録の行 id を
       並び順に材料にする。作り手が変わった区間の後で
       :func:`clear_presented_message_ids` が落とした回 — 子 Playbook の中継の
       後に親が自前の LLM ノードで生成する回がこれにあたる。三つ組を
       ``record_call_tokens`` が載せ直すのと対になる口。
-    - **材料がある** とき: 書き換えず、送る列で材料の末尾より**後ろ**にある
+    - **材料がある** とき: 書き換えず、送る `messages`で材料の末尾より**後ろ**にある
       記録の行だけを末尾に足す。同じ Playbook の前の LLM ノードが記録へ書いた
-      返事 (sea/runtime_llm.py が送る列のその行に記録の id を載せる) がこれで、
+      返事 (sea/runtime_llm.py が送る `messages`のその行に記録の id を載せる) がこれで、
       この生成はそれを見て書く。足すのは送る時点だけ — 保存の時点で足すと、
       間に挟まる MEMORIZE / SPEAK / THINK (その返事の本文を書き直す) の前駆が
       生成自身の行を指す。``prepare_context`` の提示列や、スペルの周で
       :func:`append_presented_message_id` が伸ばした列の中身は変えない。
-    - **材料の末尾が送る列に無い** とき: 材料はこの生成が見るものを表して
-      いないので、送る列から作り直す (残すと見ていない行を前駆に刻む)。
+    - **材料の末尾が送る `messages`に無い** とき: 材料はこの生成が見るものを表して
+      いないので、送る `messages`から作り直す (残すと見ていない行を前駆に刻む)。
 
-    記録の行 id を持たせるのは、送る列でその本文が実際にモデルへ届く dict
+    記録の行 id を持たせるのは、送る `messages`でその本文が実際にモデルへ届く dict
     だけ (sea/runtime_llm._finalize_beat — 本文の空な tool_calls だけの返事
     には載せない。Anthropic などは本文の空な行を送る前に落とすので、載せると
     モデルが見ていない行を前駆にする)。
 
     既知の限界: LLM ノードが記録へ書かなかった返事を、後ろの MEMORIZE /
-    SPEAK / THINK ノードが記録へ書いた場合、送る列のその返事には記録の行 id が
+    SPEAK / THINK ノードが記録へ書いた場合、送る `messages`のその返事には記録の行 id が
     戻らない。次の生成の前駆はそれより前の記録の行を指す (見ていない行では
     なく、手前の行)。同梱の Playbook にこの並びは無い (2026-10-14 調査)。
-    戻すには保存された本文と送る列の返事を本文の一致で結び付ける必要があり、
+    戻すには保存された本文と送る `messages`の返事を本文の一致で結び付ける必要があり、
     結び付け違いは見ていない行を前駆にする捏造になるので、行っていない。
 
-    送る列に記録の行が一つも無ければ何もしない (提示ゼロの生成は刻印なしの
+    送る `messages`に記録の行が一つも無ければ何もしない (提示ゼロの生成は刻印なしの
     まま)。
     """
     if not isinstance(state, dict) or not messages:
@@ -275,12 +275,12 @@ def sync_presented_message_ids_with_sent(
         return
     tail = str(current[-1])
     if tail not in sent:
-        # 材料の末尾がこれから送る列に無い = 材料はこの生成が見るものを表して
-        # いない (例: 親の state を受け取って走った子 Playbook の「見た列」が
-        # 残っている)。残すと見ていない行を前駆に刻むので、送る列から作り直す。
+        # 材料の末尾がこれから送る `messages`に無い = 材料はこの生成が見るものを表して
+        # いない (例: 親の state を受け取って走った子 Playbook の `_presented_message_ids`が
+        # 残っている)。残すと見ていない行を前駆に刻むので、送る `messages`から作り直す。
         state[PRESENTED_IDS_STATE_KEY] = sent
         return
-    # 末尾は送る列の中で最後に現れた位置で取る (同じ id が二度並ぶことは
+    # 末尾は送る `messages`の中で最後に現れた位置で取る (同じ id が二度並ぶことは
     # 無いはずだが、あっても「見た最後」から先だけを足す)。
     after = sent[len(sent) - 1 - sent[::-1].index(tail) + 1:]
     if after:
