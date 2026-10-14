@@ -288,7 +288,7 @@ def test_attachment_kinds_written_by_chat_send_are_all_counted():
 
 def test_odd_media_entries_do_not_break_the_reception_check():
     # 受付の判定で例外が出ると発言ごと失敗するので、型の崩れた項目は数えずに進む
-    metadata = {"media": [{"type": 3}, {"mime_type": None}, "x", {"type": "audio"}]}
+    metadata = {"media": [{"type": 3}, {"mime_type": None}, "x", {"type": "audio", "path": "v.ogg"}]}
     assert has_attachments(metadata)
     assert describe_attachments(metadata) == "音声 1 件"
 
@@ -544,3 +544,49 @@ def test_the_payload_text_is_unchanged_by_keeping_the_said_text(png_path):
     enriched = _enriched([{"role": "user", "content": "見て", "metadata": metadata}])
     assert enriched[0]["content"] == "見て\n<system>添付アイテム作成: 画像「photo.png」</system>"
     assert "__said_content__" not in metadata  # 元の発言の metadata は書き換えない
+
+
+# --- 送り手が書いた metadata を信じない -------------------------------------------
+
+def test_chat_send_drops_metadata_keys_only_the_server_writes(png_path):
+    from api.routes.chat import _client_metadata
+
+    raw = {
+        "images": [{"path": str(png_path)}],
+        "documents": [{"path": "x.txt"}],
+        "media": [{"type": "audio", "path": "v.ogg"}],
+        "__said_content__": "Bob",
+        "__visual_context__": True,
+        "source": "api",
+    }
+    assert _client_metadata(raw) == {"source": "api"}
+    assert _client_metadata(None) == {}
+
+
+def test_a_said_content_key_the_context_did_not_add_is_not_believed():
+    # 記録に紛れ込んだ控え (文脈を組む側が足していないもの) は、読み手に渡す前に外す
+    from sea import auto_recall
+
+    messages = _enriched([
+        {"role": "user", "content": "Alice", "metadata": {"__said_content__": "Bob"}},
+    ])
+    assert "__said_content__" not in messages[0]["metadata"]
+    assert auto_recall._last_user_utterance(messages) == "Alice"
+    assert not auto_recall._is_image_only_user_turn(messages)
+
+
+def test_attachments_without_a_file_reference_do_not_make_an_utterance():
+    service = _runtime([SimpleNamespace(persona_id=LISTENER)])
+    for metadata in (
+        {"images": [{}]},
+        {"media": [{"type": "image"}]},
+        {"documents": [{"item_name": "x"}]},
+    ):
+        with patch(
+            "database.building_messages.insert_building_message_with_location_guard",
+        ) as insert:
+            events = _events(service.handle_user_input_stream(
+                " ", metadata=metadata, building_id=BID,
+            ))
+        assert any(e.get("error_code") == "empty_message" for e in events), metadata
+        insert.assert_not_called()

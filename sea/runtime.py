@@ -2582,7 +2582,16 @@ class SEARuntime:
                 }
                 enriched.append(enriched_msg)
             else:
-                enriched.append(msg)
+                from saiverse.media_utils import SAID_CONTENT_KEY
+
+                if SAID_CONTENT_KEY in metadata:
+                    # 控えはここで足した文の分だけを表す。ここで足していない
+                    # 発言に控えがあるなら、記録に紛れ込んだもの (送り手が書いた
+                    # 等) なので、読み手へ渡す前に外す。
+                    stripped = {k: v for k, v in metadata.items() if k != SAID_CONTENT_KEY}
+                    enriched.append({**msg, "metadata": stripped})
+                else:
+                    enriched.append(msg)
 
         return enriched
 

@@ -857,12 +857,24 @@ def _iter_typed_media(
     return results
 
 
+def _has_file_reference(item: Dict[str, Any]) -> bool:
+    """添付の項目が、ファイルを指す欄 (空でない ``uri`` か ``path``) を持つか。"""
+    for key in ("uri", "path"):
+        value = item.get(key)
+        if isinstance(value, (str, Path)) and str(value).strip():
+            return True
+    return False
+
+
 def _count_attachments(metadata: Any) -> Dict[str, int]:
     """発言の metadata に載った添付を種類ごとに数える (ファイルの有無は見ない)。
 
     添付の置き場は api/routes/chat.py の /chat/send が書く 3 つ:
     ``images`` (画像)、``documents`` (ドキュメント)、``media`` (音声・動画。
     種類は ``type`` か ``mime_type`` の頭で決まり、画像が入ることもある)。
+    ファイルを指す欄 (``uri`` か ``path``) を持たない項目は数えない — 送る側
+    (iter_image_media など) が何も送らないので、添付として数えると中身の無い
+    発言を「画像がある」と取り違える。
     """
     counts = {"image": 0, "document": 0, "audio": 0, "video": 0}
     if not isinstance(metadata, dict):
@@ -873,7 +885,7 @@ def _count_attachments(metadata: Any) -> Dict[str, int]:
     media = metadata.get("media")
     if isinstance(media, list):
         for item in media:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or not _has_file_reference(item):
                 continue
             kind = str(item.get("type") or "").lower()
             if not kind:
@@ -888,7 +900,7 @@ def _count_attachments(metadata: Any) -> Dict[str, int]:
     images = metadata.get("images")
     if isinstance(images, list):
         for item in images:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or not _has_file_reference(item):
                 continue
             identity = _attachment_file_identity(item)
             if identity and identity in media_image_files:
@@ -896,7 +908,10 @@ def _count_attachments(metadata: Any) -> Dict[str, int]:
             counts["image"] += 1
     documents = metadata.get("documents")
     if isinstance(documents, list):
-        counts["document"] += sum(1 for item in documents if isinstance(item, dict))
+        counts["document"] += sum(
+            1 for item in documents
+            if isinstance(item, dict) and _has_file_reference(item)
+        )
     return counts
 
 
