@@ -1629,6 +1629,11 @@ _SUB_TEXT_NON_VOICEABLE_CHARS = (
 )
 
 
+# ``{`` から ``}`` の間で区切らない範囲の上限 (文字数)。仮想身体の全身エモート
+# 記法 ``{"body_emote": "surprised"}`` は 30 文字前後なので余裕を持たせた値。
+_BRACE_SPAN_MAX = 64
+
+
 def _has_voiceable_content(text: str) -> bool:
     """``text`` に句読点 + 空白以外の文字が 1 つでも含まれるかを返す。
     voice-tts に渡しても合成可能な実体を持つかの判定に使う。
@@ -1655,6 +1660,10 @@ def _find_next_sentence_boundary(
     Markdown リンク ``[text](url)`` 内部では文区切りを検出しない。 URL 中の
     ``:`` や ``,`` で分断されると voice-tts 側の ``clean_text_for_tts`` が
     リンク構文を認識できなくなり URI が読み上げられてしまうため。
+
+    同じ理由で ``{`` から ``}`` の間でも区切らない。仮想身体アドオンの全身
+    エモート記法 ``{"body_emote": "wave"}`` は ``:`` や ``,`` を含み、分断されると
+    voice-tts が記法と気づけずに読み上げる。
     """
     if start >= len(buffer):
         return -1
@@ -1665,11 +1674,27 @@ def _find_next_sentence_boundary(
     buf_len = len(buffer)
     in_bracket = False
     in_md_link_url = False
+    in_brace = False
     for i in range(start, buf_len):
         ch = buffer[i]
         if in_md_link_url:
             if ch == ')':
                 in_md_link_url = False
+            continue
+        if in_brace:
+            if ch == '}':
+                in_brace = False
+            continue
+        if ch == '{':
+            # 記法は短い。近くで閉じない ``{`` (コード片の途中など) は普通の
+            # 文字として扱い、残りの発話の区切りを止めない。
+            close = buffer.find('}', i + 1, i + 1 + _BRACE_SPAN_MAX)
+            if close >= 0:
+                in_brace = True
+                continue
+            if buf_len - i <= _BRACE_SPAN_MAX:
+                # まだ閉じが届いていないだけかもしれない。続きを待つ。
+                return -1
             continue
         if ch == '[':
             in_bracket = True
