@@ -1,0 +1,21 @@
+{
+  "model": "sarashina3-mini",
+  "display_name": "Sarashina3 mini",
+  "provider_ref": "sarashina",
+  "context_length": 128000,
+  "supports_structured_output": true,
+  "parameters": {
+    "temperature": {
+      "type": "float", "min": 0, "max": 2, "step": 0.1, "default": 0.7,
+      "label": "Temperature", "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float", "min": 0.01, "max": 1, "step": 0.01, "default": 0.9,
+      "label": "Top P", "description": "Nucleus sampling cutoff."
+    },
+    "max_completion_tokens": {
+      "type": "int", "min": 1, "max": 8000, "step": 1, "default": 4096,
+      "label": "Max completion tokens", "description": "Upper bound on generated tokens (up to 8000)."
+    }
+  }
+}

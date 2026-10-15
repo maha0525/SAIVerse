@@ -31,6 +31,7 @@ HTTP 中継の設定値は `http://host:port` のような origin とし、末�
 | `NVIDIA_API_KEY` | NVIDIA NIM |
 | `XAI_API_KEY` | xAI (Grok) |
 | `OPENROUTER_API_KEY` | OpenRouter |
+| `SARASHINA_API_KEY` | Sarashina (SB Intuitions)。[取得・設定方法](../api-keys/sarashina.md) |
 | `OLLAMA_BASE_URL` | ローカル Ollama サーバー URL（未設定なら `OLLAMA_HOST` を見る） |
 
 プロバイダごとの `api_key_env` は [プロバイダ一覧](providers.md) を参照。Kimi (Moonshot) のようにユーザーが自分で追加するプロバイダのキー名は、そのプロバイダ設定の `api_key_env` に書いた名前がそのまま使われる（組み込みの決め打ちは無い。手順は [custom_providers.md](../custom_providers.md) ケース 3）。

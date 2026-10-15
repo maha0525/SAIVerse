@@ -212,6 +212,9 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
     if protocol == "openai_compat":
         extra_kwargs: Dict[str, object] = {}
         if isinstance(config, dict):
+            compat_options = config.get("openai_compat_options")
+            if isinstance(compat_options, dict):
+                extra_kwargs["openai_compat_options"] = compat_options
             base_url = config.get("base_url")
             if isinstance(base_url, str) and base_url.strip():
                 extra_kwargs["base_url"] = base_url.strip()

@@ -35,6 +35,7 @@ _PROTOCOL_TO_LEGACY_PROVIDER = {
 # Fields on the model config that can be inherited from the provider when
 # unset on the model. Tuple is (model_field, provider_field).
 _INHERITABLE_FIELDS = [
+    ("openai_compat_options", "openai_compat_options"),
     ("base_url", "base_url"),
     ("api_key_env", "api_key_env"),
     ("api_key_env_alternates", "api_key_env_alternates"),

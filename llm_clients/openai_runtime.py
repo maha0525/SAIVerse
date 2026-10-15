@@ -63,6 +63,48 @@ def build_request_kwargs(
 SDK_REQUEST_OPTION_KEYS = frozenset({"extra_headers", "extra_query", "extra_body", "timeout"})
 
 
+def apply_compat_options(req: Dict[str, Any], options: Dict[str, bool]) -> Dict[str, Any]:
+    """Adapt the final SDK request, including body overrides, for compatible APIs.
+
+    Defaults preserve OpenAI behavior. Run at the common send boundary so text,
+    tools, structured output and both streaming paths obey the same contract.
+    Never mutate caller-owned messages, tools or extra_body.
+    """
+    if not options:
+        return req
+    if any(type(value) is not bool for value in options.values()):
+        raise ValueError("openai_compat_options values must be bool")
+    result = dict(req)
+    extra = dict(result.get("extra_body") or {})
+
+    def read(key: str) -> Any:
+        return extra[key] if key in extra else result.get(key)
+
+    def write(key: str, value: Any) -> None:
+        result[key] = value
+        extra.pop(key, None)
+
+    if options.get("supports_stream_options") is False:
+        result.pop("stream_options", None)
+        extra.pop("stream_options", None)
+    if options.get("supports_message_name") is False:
+        messages = read("messages")
+        if messages is not None:
+            write("messages", [{k: v for k, v in msg.items() if k != "name"} for msg in messages])
+    choice = read("tool_choice")
+    if options.get("supports_function_tool_choice") is False and isinstance(choice, dict):
+        name = choice.get("function", {}).get("name")
+        selected = [tool for tool in (read("tools") or []) if tool.get("function", {}).get("name") == name]
+        if choice.get("type") != "function" or not name or not selected:
+            raise ValueError("Forced tool_choice must name a supplied function")
+        write("tools", selected)
+        write("tool_choice", "required")
+        logging.debug("[openai] Converted function tool_choice to a single required tool")
+    if "extra_body" in result:
+        result["extra_body"] = extra
+    return result
+
+
 def split_sdk_request_options(req: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
     """Separate ``build_request_kwargs`` output into body parameters and SDK options.
 

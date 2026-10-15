@@ -76,6 +76,7 @@ def _provider_shape_error(config: object, default_id: str) -> str | None:
         ):
             return "api_key_env_alternates must be a list of non-empty strings"
     optional_types = {
+        "openai_compat_options": dict,
         "base_url": str,
         "api_key_env": str,
         "api_key_required": bool,
@@ -90,6 +91,9 @@ def _provider_shape_error(config: object, default_id: str) -> str | None:
         # strings such as "false" must not become truthy model defaults.
         if value is not None and type(value) is not expected_type:
             return f"{field} must be {expected_type.__name__} or null"
+    options = config.get("openai_compat_options")
+    if isinstance(options, dict) and any(type(value) is not bool for value in options.values()):
+        return "openai_compat_options values must be bool"
     return None
 
 
