@@ -53,6 +53,7 @@ const API_KEY_DOCS: Record<string, string> = {
     OPENROUTER_API_KEY: 'openrouter',
     NVIDIA_API_KEY: 'nvidia-nim',
     TYPESAFE_API_KEY: 'typesafe',
+    SARASHINA_API_KEY: 'sarashina',
 };
 
 // A name for the tier a key variable belongs to, shown next to its label so

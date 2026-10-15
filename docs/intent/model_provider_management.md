@@ -638,6 +638,13 @@ LM Studio は OpenAI 互換 API を提供するため `openai_compat` で扱え�
 
 ## 補足: 設計上の前提
 
+OpenAI 互換 API の機能差は provider の `openai_compat_options` で宣言し、
+参照モデルへ継承する。`supports_stream_options` / `supports_function_tool_choice` /
+`supports_message_name` は省略時 true、false のときだけ SDK 送信直前で変換する。
+特定関数の強制はその関数一つと `required` に変換して意味を保持する。
+モデルに同欄を直接書いた場合は辞書全体が provider より優先する。
+Sarashina の接続・モデル・検証は [sarashina_provider.md](sarashina_provider.md) を参照。
+
 - **接続テストはサーバー側から実行**: フロントから直接 `localhost:1234` 等を叩くと、SAIVerse が別マシンで動いていてユーザー PC で LM Studio が動いている場合に接続できない。サーバー側 API として実装することで「SAIVerse が見える場所」での疎通確認になる
 - **expansion_data のプロバイダも対象**: 将来的にアドオンが独自プロバイダを同梱する余地として、`expansion_data/<addon>/providers/` も `iter_files()` の対象に含める
 - **既存の `is_model_available()` との関係**: 環境変数チェックは引き続き機能。`provider_ref` 経由で `api_key_env` を解決した後、既存ロジックがそのまま使える
