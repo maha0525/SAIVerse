@@ -43,11 +43,13 @@ IMAGE_PATH のファイル) を写し、fixture 行をその部屋に入れ、it
 添付の参照 (message metadata の images / documents / media と、mode="new" で
 extensions/saiverse/memory_db/ から入る知覚台帳の media 列 — export.PERCEPTION_MEDIA_TABLES)
 のうち、ZIP から実体を復元できたものは、元の uri / path を引き継がず復元先のフォルダの種類と実際の
-ファイル名から uri / path を組み直し、復元できなかったものは path を None にし、uri は
-``saiverse://<種類>/<ファイル名>`` の形 (ファイル名に区切りや ``..`` が無い) のときだけ
-残す。ZIP が書いたホスト側のパスや ``saiverse://image/../x`` のような uri を取り込み先に
-残すと、再エクスポートや会話のメディア読み込みが共有メディアフォルダの外のファイル
-(本体 DB など) を読みに行くため。
+ファイル名から uri / path を組み直し、復元できなかったものは uri と path の両方を None に
+する (件数を警告に載せる)。ZIP が書いたホスト側のパスや ``saiverse://image/../x`` のような
+uri を取り込み先に残すと、再エクスポートや会話のメディア読み込みが共有メディアフォルダの
+外のファイル (本体 DB など) を読みに行き、``saiverse://image/x.png`` のような形の整った uri
+でも、取り込み先に同名の別のファイルがあればそれに解決されて別の画像を指すため。
+復元先は、同名のファイルが取り込み先にあっても中身 (sha256) が同じときだけ再利用し、
+違えば ``<stem>_<n><ext>`` へ避ける (:meth:`_ImportJob.choose_media_dest`)。
 
 知覚台帳の部屋の様子の記帳 (export.ROOM_STATE_COLUMNS — perception_batches.room_state_json と
 perception_buffer.metadata の room_state) の束のパッケージの media も同じ規則で書き換え、
@@ -148,7 +150,7 @@ import time
 import uuid
 import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from sai_memory.presented_reduction import DROPPED_MEDIA_FIELD
@@ -526,35 +528,6 @@ def _import_id(zip_sha256: str, target_persona_id: str) -> str:
 _URI_PREFIX_BY_DIR: Dict[str, str] = {dirname: prefix for prefix, dirname in _MEDIA_URI_DIRS}
 
 
-def _is_plain_file_name(name: str) -> bool:
-    """name が区切り・``..``・ドライブ指定・前後の空白を含まないファイル名そのものか。"""
-    return (
-        bool(name)
-        and name not in (".", "..")
-        and "/" not in name
-        and "\\" not in name
-        and ":" not in name
-        and "\x00" not in name
-        and name.strip() == name
-        and PurePosixPath(name).name == name
-        and PureWindowsPath(name).name == name
-    )
-
-
-def _safe_media_uri(uri: Any) -> bool:
-    """``saiverse://<種類>/<ファイル名>`` で、ファイル名がファイル名そのもの (_is_plain_file_name) か。
-
-    この形の uri は取り込み先の共有メディアフォルダ直下の同名ファイルだけを指す
-    (saiverse/media_utils.py の resolve_media_uri はファイル名をフォルダに連結する)。
-    """
-    if not isinstance(uri, str):
-        return False
-    for prefix, _dirname in _MEDIA_URI_DIRS:
-        if uri.startswith(prefix):
-            return _is_plain_file_name(uri[len(prefix):])
-    return False
-
-
 def _media_dir_for(original_path: Any, item_type: Any) -> str:
     """items/ のファイルを復元する共有メディアフォルダの名前。
 
@@ -660,8 +633,14 @@ def _load_pack(reader: _PackReader) -> _PackData:
             raise ValueError("persona pack: attachments/index.json must be a list of objects")
         for i, entry in enumerate(index):
             path = entry.get("path")
-            if path is not None and path not in reader.names:
+            if path is None:
+                continue
+            if path not in reader.names:
                 raise ValueError(f"persona pack: attachments/index.json[{i}] points to a missing file {path!r}")
+            # export が書く形は attachments/<種類>/<ファイル名> だけ (plan_attachments が分解する)
+            parts = _safe_relpath(path, "attachments/index.json").parts
+            if len(parts) != 3 or parts[0] != "attachments":
+                raise ValueError(f"persona pack: unexpected attachment path {path!r}")
         pack.attachment_index = index
     if has("profile") and "profile/profile.json" in reader.names:
         profile = reader.load_json("profile/profile.json")
@@ -774,6 +753,23 @@ class _ChroniclePlan:
     accepted: Set[str] = field(default_factory=set)
     # accepted のうち、parent_id を root_chronicle に・is_consolidated を 0 にする id
     to_root: Set[str] = field(default_factory=set)
+
+
+def validate_pack(zip_path: Path) -> None:
+    """パック全体を、どこにも書き込まずに検査する (取り込み先を問わない部分)。
+
+    import_persona_pack が書き込みの前に行う ZIP の検査 (check_uncompressed_size と
+    _load_pack — 全 JSON の解釈と形の検査、ZIP 内のファイル参照の検査) と同じもの。
+    新規取り込みの API がペルソナを作る前に呼び、作成後に形の不正で失敗するのを防ぐ。
+    取り込み先に依存する検査 (ai 行・memory.db・mode="new" の空の確認) は含まない。
+
+    Raises:
+        zipfile.BadZipFile: ZIP として読めない。
+        ValueError: 形が不正・展開後の合計サイズが MAX_UNCOMPRESSED_BYTES を超える。
+    """
+    with zipfile.ZipFile(Path(zip_path)) as zf:
+        check_uncompressed_size(zf)
+        _load_pack(_PackReader(zf))
 
 
 def import_persona_pack(
@@ -895,6 +891,8 @@ class _ImportJob:
         # (plan_attachments が作る)。縮小済みの部屋の記帳の dropped_media の付け替えに使う
         # (relocate_dropped_media)
         self.path_relocations: Dict[str, List[str]] = {}
+        # relocate_media_entries が uri / path を None にした添付参照の鍵 (report_invalidated_media)
+        self.invalidated_media_keys: Set[str] = set()
         self.file_plans: List[_FilePlan] = []
         self.reserved: Set[str] = set()
         self.created_files: List[Path] = []
@@ -1096,6 +1094,7 @@ class _ImportJob:
                     self.stage_persona_dir_files()
                 else:
                     self.count_merge_skips()
+                self.report_invalidated_media()
                 self.write_files()
                 if self.mode == "new":
                     self.write_pending_marker()
@@ -1456,11 +1455,8 @@ class _ImportJob:
             if ref not in needed or not zip_path:
                 counts.skipped += 1
                 continue
-            parts = PurePosixPath(zip_path).parts
-            if len(parts) != 3 or parts[0] != "attachments":
-                raise ValueError(f"persona pack: unexpected attachment path {zip_path!r}")
-            kind, name = parts[1], parts[2]
-            _safe_relpath(name, "attachments/index.json")
+            # 形 (attachments/<種類>/<ファイル名>) は _load_pack が検査済み
+            _attachments, kind, name = PurePosixPath(zip_path).parts
             dest_dir = self.home / (kind if kind in _MEDIA_DIR_NAMES else "documents")
             data_hash = _sha256_bytes(self.reader.read(zip_path))
             summary_zip = entry.get("summary_path")
@@ -1513,7 +1509,9 @@ class _ImportJob:
         フォルダの種類と実際のファイル名から uri (``saiverse://<種類>/<ファイル名>``) と
         path (復元先の絶対パス) を組み直す。元の uri が ``saiverse://image/../x`` の
         ような形でも、取り込み先にはその文字列が残らない。復元しなかった参照は
-        path を None にし、uri は :func:`_safe_media_uri` の形のときだけ残す。
+        uri と path の両方を None にする — ``saiverse://<種類>/<ファイル名>`` の uri を
+        残すと、取り込み先の共有メディアフォルダに同名の別のファイルがあればそれに
+        解決されてしまうため (件数は report_invalidated_media が警告に載せる)。
         """
         if not isinstance(metadata, dict):
             return metadata
@@ -1534,20 +1532,30 @@ class _ImportJob:
         rewritten = []
         for entry in entries:
             if isinstance(entry, dict) and (entry.get("uri") or entry.get("path")):
-                reloc = self.relocations.get(_attachment_key(entry))
+                key = _attachment_key(entry)
+                reloc = self.relocations.get(key)
                 entry = dict(entry)
-                uri = entry.get("uri")
-                path = entry.get("path")
                 if reloc is not None:
                     entry["uri"] = _URI_PREFIX_BY_DIR[reloc.dest.parent.name] + reloc.dest.name
                     entry["path"] = str(reloc.dest)
                 else:
-                    if path is not None:
-                        entry["path"] = None
-                    if uri is not None and not _safe_media_uri(uri):
-                        entry["uri"] = None
+                    self.invalidated_media_keys.add(key)
+                    entry["uri"] = None
+                    entry["path"] = None
             rewritten.append(entry)
         return rewritten
+
+    def report_invalidated_media(self) -> None:
+        """relocate_media_entries が uri / path を None にした添付参照の件数を警告に載せる。
+
+        件数は参照の鍵 (_attachment_key) の種類の数 — 同じ参照を書き換える呼び出しが
+        複数回あっても (room_state_digest_map と relocate_room_state_column) 一度だけ数える。
+        """
+        if self.invalidated_media_keys:
+            self.warn(
+                f"{len(self.invalidated_media_keys)} attachment reference(s) could not be restored "
+                "from the pack; their uri and path were set to None"
+            )
 
     def relocate_media_column(self, value: Any) -> Any:
         """知覚台帳の media 列の値 (decode 済み) を書き換えて、保存する値を返す。

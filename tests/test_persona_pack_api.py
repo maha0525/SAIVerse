@@ -10,6 +10,7 @@ import json
 import sqlite3
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
 import pytest
@@ -56,6 +57,13 @@ class FakeManager:
         self.personas: Dict[str, Any] = {}
         self.created: List[str] = []
         self.deleted: List[str] = []
+        # 作成経路 (manager/persona.py の _create_persona) が私室を登録するメモリ上の表
+        self.buildings: List[Any] = []
+        self.building_map: Dict[str, Any] = {}
+        self.capacities: Dict[str, int] = {}
+        self.occupants: Dict[str, List[str]] = {}
+        self.building_memory_paths: Dict[str, Path] = {}
+        self.building_histories: Dict[str, List[Any]] = {}
 
     def add_persona(self, ai_id: str, name: str) -> str:
         room = f"{ai_id}_room"
@@ -77,9 +85,17 @@ class FakeManager:
             s.query(AI).filter(AI.AIID == ai_id).update({"SYSTEMPROMPT": system_prompt})
             s.commit()
         self.created.append(ai_id)
+        building = SimpleNamespace(building_id=room)
+        self.buildings.append(building)
+        self.building_map[room] = building
+        self.capacities[room] = 1
+        self.occupants[room] = [ai_id]
+        self.building_memory_paths[room] = self.saiverse_home / "cities" / CITY / "buildings" / room / "log.json"
+        self.building_histories[room] = []
         return True, "created", ai_id, room
 
     def delete_ai(self, ai_id: str) -> str:
+        # 本物 (manager/admin.py の delete_ai) と同じく私室の building 行は消さない
         with Session(self.engine) as s:
             s.query(AI).filter(AI.AIID == ai_id).delete()
             s.commit()
@@ -412,22 +428,75 @@ def test_import_new_refuses_same_name(world: Dict[str, Any]) -> None:
     assert dst["manager"].created == []
 
 
-def test_import_new_removes_the_persona_when_import_fails(world: Dict[str, Any]) -> None:
-    pack = _export_zip(world)
-    # manifest は正しいが messages.json が壊れた ZIP (importer が書き込み前に断る)
+def _with_broken_messages(pack: bytes) -> bytes:
+    """manifest は正しいが chatlog/messages.json が壊れた ZIP。"""
     broken = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(pack)) as src, zipfile.ZipFile(broken, "w") as out:
         for item in src.infolist():
             data = b"{broken" if item.filename == "chatlog/messages.json" else src.read(item.filename)
             out.writestr(item, data)
+    return broken.getvalue()
+
+
+def _buildings(manager: FakeManager) -> List[str]:
+    with Session(manager.engine) as s:
+        return sorted(b.BUILDINGID for b in s.query(Building).all())
+
+
+def test_import_new_refuses_a_broken_pack_before_creating_the_persona(world: Dict[str, Any]) -> None:
+    """壊れた JSON は validate_pack が作成の前に断る (ペルソナも私室も作らない)。"""
+    pack = _export_zip(world)
     dst = world["dst"]
     res = world["use"](dst).post(
         "/api/people/persona-pack/import-new",
-        files={"file": ("pack.zip", broken.getvalue(), "application/zip")},
+        files={"file": ("pack.zip", _with_broken_messages(pack), "application/zip")},
     )
     assert res.status_code == 400, res.text
-    assert dst["manager"].created == [f"tester_{CITY}"]
-    assert dst["manager"].deleted == [f"tester_{CITY}"]
+    assert "chatlog/messages.json" in res.json()["detail"]
+    assert dst["manager"].created == []
+    assert _buildings(dst["manager"]) == []
+
+
+def test_import_new_removes_the_persona_and_its_room_when_import_fails(
+    world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """作成後に取り込みが失敗したら、ペルソナも私室も残さず、同じ名前で入れ直せる。"""
+    from saiverse_memory.persona_pack import importer
+
+    pack = _export_zip(world)
+    dst = world["dst"]
+    manager = dst["manager"]
+    new_id = f"tester_{CITY}"
+    room = f"{new_id}_room"
+    # 作成前の検査が見逃した壊れ方 (作成後の失敗) を作るため、検査だけ素通しにする
+    original_validate = importer.validate_pack
+    monkeypatch.setattr(importer, "validate_pack", lambda _zip_path: None)
+    res = world["use"](dst).post(
+        "/api/people/persona-pack/import-new",
+        files={"file": ("pack.zip", _with_broken_messages(pack), "application/zip")},
+    )
+    assert res.status_code == 400, res.text
+    assert manager.created == [new_id]
+    assert manager.deleted == [new_id]
+    with Session(manager.engine) as s:
+        assert s.get(AI, new_id) is None
+    assert _buildings(manager) == []
+    for table in (manager.building_map, manager.capacities, manager.occupants,
+                  manager.building_memory_paths, manager.building_histories):
+        assert room not in table
+    assert [b.building_id for b in manager.buildings] == []
+
+    # 正しい ZIP で同じ名前の新規取り込みが通る (私室の名前が衝突しない)
+    monkeypatch.setattr(importer, "validate_pack", original_validate)
+    res = world["use"](dst).post(
+        "/api/people/persona-pack/import-new",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["persona_id"] == new_id
+    assert res.json()["room_id"] == room
+    assert [r[0] for r in _messages(dst["home"], new_id)] == ["m1", "m2"]
+    assert _buildings(manager) == [room]
 
 
 def test_import_new_keeps_the_persona_when_its_memory_cannot_be_checked(

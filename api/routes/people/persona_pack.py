@@ -653,8 +653,88 @@ def _memory_has_messages(saiverse_home: Path, persona_id: str) -> Optional[bool]
         conn.close()
 
 
+def _discard_created_persona(manager: Any, ai_id: str, room_id: Optional[str]) -> list[str]:
+    """新規取り込みが丸ごと巻き戻ったとき、この取り込みで作ったペルソナと私室を消す。
+
+    作成経路 (manager/persona.py の _create_persona) が登録するものと、ここでの外し方:
+
+    - saiverse.db: ai 行 (manager.delete_ai)、私室の building 行・私室の
+      building_occupancy_log の行・user_ai_link の行 (ここで消す)。私室の fixture 行は
+      作成経路は作らず、取り込みの items/ の工程が入れる (取り込みの rollback で戻る) が、
+      残っていれば observer_manager.delete_fixture_rows でぶら下がる行ごと消す。
+    - manager のメモリ: personas / persona_map / id_to_name_map / avatar_map と
+      occupants の中の ai_id (manager.delete_ai が外す)、buildings / building_map /
+      capacities / occupants / building_memory_paths / building_histories の私室の項目
+      (ここで外す)、_autonomy_managers の項目 (_on_persona_registered の
+      ensure_autonomy_for が起動しうる。ここで止めて外す)。
+
+    delete_ai は私室を消さないので、私室を残すと同じパックの再試行が
+    building の UNIQUE(CITYID, BUILDINGNAME) に衝突する。
+
+    Returns: 片付けられなかったものの説明 (全部済めば空)。
+    """
+    problems: list[str] = []
+    autonomy_managers = getattr(manager, "_autonomy_managers", None)
+    if isinstance(autonomy_managers, dict):
+        am = autonomy_managers.pop(ai_id, None)
+        if am is not None:
+            try:
+                am.stop()
+            except Exception:
+                LOGGER.warning("Could not stop the AutonomyManager of %s", ai_id, exc_info=True)
+
+    removed = manager.delete_ai(ai_id)
+    if isinstance(removed, str) and removed.startswith("Error"):
+        # ai 行が残る間は私室も残す (ai.PRIVATE_ROOM_ID が指す先を消さない)
+        problems.append(f"the persona '{ai_id}' could not be deleted ({removed})")
+        return problems
+    if not room_id:
+        return problems
+
+    from database.models import Building, BuildingOccupancyLog, Fixture, UserAiLink
+    from saiverse.observer_manager import cancel_observer_jobs, delete_fixture_rows
+
+    observer_ids: list[str] = []
+    db = manager.SessionLocal()
+    try:
+        fixture_ids = [
+            row[0] for row in db.query(Fixture.FIXTURE_ID).filter(Fixture.BUILDING_ID == room_id).all()
+        ]
+        observer_ids = delete_fixture_rows(db, fixture_ids)
+        db.query(BuildingOccupancyLog).filter(BuildingOccupancyLog.BUILDINGID == room_id).delete(
+            synchronize_session=False
+        )
+        db.query(UserAiLink).filter(UserAiLink.AIID == ai_id).delete(synchronize_session=False)
+        db.query(Building).filter(Building.BUILDINGID == room_id).delete(synchronize_session=False)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        LOGGER.error("Could not delete the private room %s of %s", room_id, ai_id, exc_info=True)
+        problems.append(f"the private room '{room_id}' could not be deleted ({exc})")
+        return problems
+    finally:
+        db.close()
+    try:
+        cancel_observer_jobs(manager, observer_ids)
+    except Exception:
+        LOGGER.warning("Could not cancel the observer jobs of the room %s", room_id, exc_info=True)
+
+    buildings = getattr(manager, "buildings", None)
+    if isinstance(buildings, list):
+        # 一覧は PersonaCore などと共有されているので、差し替えずにその場で外す
+        buildings[:] = [b for b in buildings if getattr(b, "building_id", None) != room_id]
+    for attr in ("building_map", "capacities", "occupants", "building_memory_paths", "building_histories"):
+        table = getattr(manager, attr, None)
+        if isinstance(table, dict):
+            table.pop(room_id, None)
+    return problems
+
+
 def _create_and_import(manager: Any, zip_path: Path, name: str, system_prompt: str) -> Dict[str, Any]:
     """既存のペルソナ作成経路で新しいペルソナ (私室含む) を作り、mode="new" で取り込む。
+
+    作成の前に importer.validate_pack でパック全体を (書き込みなしで) 検査する — 壊れた
+    JSON・形式違反・サイズ超過は、ペルソナを作る前に 400 で返る。
 
     作成の後で取り込みが失敗したとき:
     - memory.db の commit 後に saiverse.db の commit が失敗した稀な回 (ペルソナフォルダに
@@ -663,12 +743,14 @@ def _create_and_import(manager: Any, zip_path: Path, name: str, system_prompt: s
       印を見て saiverse.db 側の工程 (タスク・予定・イベント履歴・所持品・私室など) を
       やり直す (importer.py の docstring「片側だけ commit された取り込みの再開」)。
     - それ以外で memory.db に message が無いと確定したら (取り込みが丸ごと巻き戻った)、
-      作ったペルソナを既存の削除経路 (manager.delete_ai) で消す。
+      作ったペルソナと私室を _discard_created_persona で消す (同じパックで再試行できる)。
     - 確かめられなければ (memory.db を開けない・ロックなど)、取り込みが部分的に
       残っている可能性があるので消さずに残し、同じく ID を知らせる。
     """
     from saiverse_memory.persona_pack.export import WORLD_PENDING_MARKER
+    from saiverse_memory.persona_pack.importer import validate_pack
 
+    validate_pack(zip_path)
     stem = _pick_ai_stem(manager, name)
     success, message, ai_id, room_id = manager.create_ai(
         name, system_prompt, manager.city_id, stem,
@@ -710,10 +792,23 @@ def _create_and_import(manager: Any, zip_path: Path, name: str, system_prompt: s
                     "memories that are missing, but not the tasks, schedules, items or private room."
                 ),
             )
-        removed = manager.delete_ai(ai_id)
+        problems = _discard_created_persona(manager, ai_id, room_id)
+        if problems:
+            LOGGER.error(
+                "Persona pack import into the new persona %s failed and it could not be fully "
+                "removed: %s", ai_id, problems, exc_info=True,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"The import failed ({exc}), and removing what was created for it did not "
+                    f"finish: {'; '.join(problems)}. Delete the leftovers before importing the "
+                    "pack as a new persona again."
+                ),
+            )
         LOGGER.warning(
-            "Persona pack import into the new persona %s failed; removed it (%s)", ai_id, removed,
-            exc_info=True,
+            "Persona pack import into the new persona %s failed; removed it and its private room %s",
+            ai_id, room_id, exc_info=True,
         )
         raise _import_error(exc)
     payload["persona_id"] = ai_id

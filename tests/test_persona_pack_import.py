@@ -1216,9 +1216,9 @@ def test_attachment_path_to_the_world_db_does_not_leak_into_a_reexport(
     finally:
         conn.close()
     assert meta["documents"] == [
-        {"path": None, "mime_type": "application/octet-stream"},
-        {"uri": None},
-        {"uri": "saiverse://document/kept.txt", "path": None},
+        {"path": None, "uri": None, "mime_type": "application/octet-stream"},
+        {"uri": None, "path": None},
+        {"uri": None, "path": None},
     ]
 
     again = _export(target, tmp_path / "out" / "again.zip")
@@ -1226,6 +1226,58 @@ def test_attachment_path_to_the_world_db_does_not_leak_into_a_reexport(
         blob = b"".join(zf.read(n) for n in zf.namelist())
     assert secret.encode() not in blob
     assert b"SQLite format 3" not in blob
+
+
+def _without_attachments(src: Path, dst: Path) -> Path:
+    """attachments/ を同梱しない ZIP (manifest はそのまま)。"""
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
+        for item in zin.infolist():
+            if not item.filename.startswith("attachments/"):
+                zout.writestr(item, zin.read(item.filename))
+    return dst
+
+
+def test_unrestored_attachment_uri_does_not_resolve_to_a_same_named_target_file(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    """復元できなかった添付は uri も path も None — 取り込み先の同名の別ファイルを指さない。"""
+    bare = _without_attachments(source["zip"], tmp_path / "bare.zip")
+    target = _make_env(tmp_path / "dst", PID)
+    # 取り込み先に、同じ名前の別の画像がある
+    (target["home"] / "image" / "pic.png").write_bytes(b"\x89PNG somebody else's picture")
+    result = _import(target, bare, "new")
+
+    conn = _mem(target)
+    try:
+        meta = json.loads(conn.execute("SELECT metadata FROM messages WHERE id = 'm1'").fetchone()[0])
+    finally:
+        conn.close()
+    assert meta["images"] == [{"uri": None, "path": None, "mime_type": "image/png"}]
+    assert any(
+        "1 attachment reference(s) could not be restored" in w for w in result.warnings
+    ), result.warnings
+    assert (target["home"] / "image" / "pic.png").read_bytes() == b"\x89PNG somebody else's picture"
+
+
+def test_restored_attachment_avoids_a_same_named_file_with_other_content(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    """正規の往復: 実体を同梱した添付は復元先を指す。同名で中身の違うファイルは再利用せず避ける。"""
+    target = _make_env(tmp_path / "dst", PID)
+    home: Path = target["home"]
+    (home / "image" / "pic.png").write_bytes(b"\x89PNG somebody else's picture")
+    result = _import(target, source["zip"], "new")
+
+    conn = _mem(target)
+    try:
+        meta = json.loads(conn.execute("SELECT metadata FROM messages WHERE id = 'm1'").fetchone()[0])
+    finally:
+        conn.close()
+    assert meta["images"] == [{"uri": "saiverse://image/pic_1.png", "path": str(home / "image" / "pic_1.png"),
+                               "mime_type": "image/png"}]
+    assert (home / "image" / "pic_1.png").read_bytes() == b"\x89PNG original image"
+    assert (home / "image" / "pic.png").read_bytes() == b"\x89PNG somebody else's picture"
+    assert not any("could not be restored" in w for w in result.warnings), result.warnings
 
 
 # ---------------------------------------------------------------------------
@@ -1911,7 +1963,7 @@ def test_perception_media_in_a_crafted_pack_is_neutralised(source: Dict[str, Any
         rows = dict(conn.execute("SELECT id, media FROM perception_buffer").fetchall())
     finally:
         conn.close()
-    assert json.loads(rows[1]) == [{"path": None, "mime_type": "image/png"}]
+    assert json.loads(rows[1]) == [{"path": None, "uri": None, "mime_type": "image/png"}]
     assert json.loads(rows[2]) == [{"uri": None, "path": None}]
 
 
@@ -2229,5 +2281,5 @@ def test_shrunk_room_state_drops_the_same_media_after_import(
     assert kept == [
         {"path": str(dst_home / "image" / "keep.png"), "uri": "saiverse://image/keep.png",
          "mime_type": "image/png", "type": "image"},
-        {"path": None, "mime_type": "image/png", "type": "image"},
+        {"path": None, "uri": None, "mime_type": "image/png", "type": "image"},
     ]

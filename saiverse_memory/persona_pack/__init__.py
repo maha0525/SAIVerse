@@ -10,6 +10,7 @@ from .importer import (
     ImportCounts,
     PersonaPackImportResult,
     import_persona_pack,
+    validate_pack,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "decode_value",
     "export_persona_pack",
     "import_persona_pack",
+    "validate_pack",
 ]
