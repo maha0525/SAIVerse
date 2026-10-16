@@ -20,6 +20,21 @@
 
 HTTP 中継の設定値は `http://host:port` のような origin とし、末尾 `/`・パス・クエリ・フラグメントを含めない。URL の結合は従来どおり（rewrite は文字列連結、Route Handler はルート相対 URL）で、たとえば末尾 `/` を付けると rewrite は `//api`、パスを付けると rewrite にだけ接頭辞が残る。共通の base path は未対応で、今回も URL の正規化はしない。詳細: [intent](../intent/frontend_backend_origin.md)。
 
+## SearXNG の導入・起動
+
+この節は `.env` ではなく、セットアップ・起動スクリプトを実行するシェルの環境変数で指定する。通常は変更不要。既定版は `scripts/searxng_pin.json` で固定し、起動時に同じ版と依存の実 import を確認する。
+
+| 変数 | 既定 | 説明 |
+|---|---|---|
+| `SEARXNG_REF` | pin の完全なコミット SHA | 検証・開発用の上書き。40桁の小文字 SHA のみ受理し、master やタグは拒否する |
+| `SEARXNG_SRC_DIR` | `scripts/.searxng-src/<commit>` | ソースの保存先。別の版や管理記録のない既存ディレクトリは上書きせずエラーにする |
+| `SEARXNG_VENV_DIR` | `scripts/.searxng-venv` | 専用 Python 環境 |
+| `SEARXNG_SETTINGS_PATH` | `scripts/searxng_settings.yml` | 生成設定。既存の secret_key を引き継ぐ |
+| `SEARXNG_USER_ENGINES_PATH` | `scripts/searxng_user_engines.yml` | 利用者のエンジン選択。隔離検証時はこれも専用の保存先へ向ける |
+| `SEARXNG_LIMITER_PATH` | `scripts/limiter.toml` | セットアップ時に固定版からコピーする limiter 設定 |
+
+相対保存先はリポジトリルート基準。上流との版の乖離への運用は別途検討し、自動更新や定期監視は行わない。
+
 ## LLM API キー / 接続
 
 | 変数 | 説明 |

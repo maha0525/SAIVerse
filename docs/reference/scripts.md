@@ -96,4 +96,5 @@ python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saive
 | `check_in_flight.py` | in_flight 台帳の関所 — 次アクション欄の字数超過と過去形マーカー(日付・コミットハッシュ)混入を検査。台帳を触ったセッションの終わりに回す。2026-08-04 解体時の未移送3行のみ行指紋一致の間だけ警告扱い(exit 0=警告のみ可 / exit 1=免除外の違反・表構造不正) |
 | `install_vc_redist.ps1` | Windows に Microsoft Visual C++ 再頒布可能パッケージ (x64) が無いときに、Microsoft の配布元から取って入れる (setup.bat が呼ぶ)。記憶の検索に使う onnxruntime がこの部品を必要とし、無いと SAIVerse が起動時に落ちる。取ったファイルが Microsoft の署名つきであることを確かめてから実行する。入れられなかったときは手で入れる場所を知らせ、setup は止めない ([issue](../issues/archive/clean_windows_missing_vc_runtime_blocks_startup.md)) |
 | `ensure_searxng_version.py` | SearXNG を起動する直前に呼ばれる (run_searxng_server.ps1 / .sh)。`git` が見つからないときだけ、SearXNG のソースに `searx/version_frozen.py` を書く。SearXNG は起動のときに `git` で自分のバージョンを調べ、`git` が見つからないと落ちるため ([issue](../issues/archive/searxng_needs_git_on_path.md)) |
-| `download_searxng_source.py` / `merge_searxng_settings.py` | SearXNG セットアップ |
+| `searxng_install.py setup / check / source` | Windows / Linux 共通の SearXNG 導入・実 import 検査・ソースパス取得。`searxng_pin.json` のコミットの公式 ZIP と依存定義を使い、tzdata も専用 venv へ導入する。setup_searxng.ps1 / .sh と起動スクリプトから呼ぶ ([intent](../intent/searxng_installation.md)) |
+| `download_searxng_source.py` / `searxng_config.py` / `merge_searxng_settings.py` | 固定ソースの取得、版・パスの共通解決、設定の3層マージ。旧ソースを残して `.searxng-src/<commit>/` へ導入し、既存の設定・エンジン選択を引き継ぐ |

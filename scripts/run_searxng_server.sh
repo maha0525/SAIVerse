@@ -9,17 +9,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PORT=${SEARXNG_PORT:-8080}
 BIND_ADDRESS=${SEARXNG_BIND_ADDRESS:-0.0.0.0}
-SRC_DIR=${SEARXNG_SRC_DIR:-${SCRIPT_DIR}/.searxng-src}
 VENV_DIR=${SEARXNG_VENV_DIR:-${SCRIPT_DIR}/.searxng-venv}
 SETTINGS_PATH=${SEARXNG_SETTINGS_PATH:-${SCRIPT_DIR}/searxng_settings.yml}
 
-# Run setup if not done yet
-if [[ ! -d "${SRC_DIR}" ]] || [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-    echo "[INFO] SearXNG is not set up. Running setup..." >&2
-    bash "${SCRIPT_DIR}/setup_searxng.sh"
+bootstrap_python=python
+if [[ -x "${VENV_DIR}/bin/python" ]]; then
+    bootstrap_python="${VENV_DIR}/bin/python"
+fi
+SRC_DIR="$("${bootstrap_python}" "${SCRIPT_DIR}/searxng_install.py" source)"
+export SEARXNG_SRC_DIR="${SRC_DIR}"
+
+if ! "${bootstrap_python}" "${SCRIPT_DIR}/searxng_install.py" check; then
+    echo "[INFO] Preparing the pinned SearXNG release..." >&2
+    "${bootstrap_python}" "${SCRIPT_DIR}/searxng_install.py" setup
 fi
 
-python_bin="${VENV_DIR}/bin/python"
+python_bin="$("${bootstrap_python}" "${SCRIPT_DIR}/searxng_install.py" python)"
+SETTINGS_PATH="$("${bootstrap_python}" "${SCRIPT_DIR}/searxng_install.py" settings)"
 
 # Re-merge settings (picks up SAIVerse default changes + user overrides)
 echo "[INFO] Merging SearXNG settings..." >&2

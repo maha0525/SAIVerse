@@ -1,34 +1,39 @@
 #!/usr/bin/env python3
-"""Download SearXNG source from GitHub archive when git is not available.
+"""Download pinned SearXNG source from the official GitHub archive.
 
-This is a fallback for scripts/setup_searxng.{ps1,sh} when git is not
-installed.  It downloads the ZIP archive from GitHub and extracts the
-necessary files into the destination directory.
+The shared installer uses this path regardless of whether Git is installed.
+Extract the package and its build inputs, skipping Windows-invalid paths.
 
 Usage:
-    python scripts/download_searxng_source.py <dest_dir> [--ref master] [--selective]
+    python scripts/download_searxng_source.py <dest_dir> [--ref COMMIT_SHA] [--selective]
 
 Options:
     dest_dir      Target directory for extracted source
-    --ref         Branch or tag name (default: master)
-    --selective   Only extract searx/, setup.py, setup.cfg, requirements.txt
+    --ref         Full commit SHA (default: searxng_pin.json)
+    --selective   Only extract searx/ and root package/build files
                   and skip files with Windows-invalid characters (for NTFS)
 """
 
 import argparse
 import os
+import re
 import sys
 import tempfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
 from urllib.request import urlretrieve
+
+from searxng_config import pinned_release
 
 # Characters that are invalid in Windows (NTFS) filenames
 _WIN_INVALID_CHARS = frozenset(':<>"|?*')
 
 # Files/directories to keep in selective mode (relative to ZIP root)
-_SELECTIVE_ROOTS = ("searx/", "setup.py", "setup.cfg", "requirements.txt")
+_SELECTIVE_ROOTS = (
+    "searx/", "setup.py", "setup.cfg", "pyproject.toml", "requirements.txt",
+    "requirements-dev.txt", "README.rst", "LICENSE",
+)
 
 
 def _has_invalid_chars(name: str) -> bool:
@@ -41,6 +46,8 @@ def _has_invalid_chars(name: str) -> bool:
 
 def _build_zip_url(ref: str, kind: str = "heads") -> str:
     """Build the GitHub archive URL for a branch or tag."""
+    if re.fullmatch(r"[0-9a-f]{40}", ref):
+        return f"https://github.com/searxng/searxng/archive/{ref}.zip"
     return f"https://github.com/searxng/searxng/archive/refs/{kind}/{ref}.zip"
 
 
@@ -66,6 +73,8 @@ def _should_extract(member: str, prefix: str, selective: bool) -> bool:
     relative = member[len(prefix):]
     if not relative:
         return False  # skip the root directory entry itself
+    if PurePosixPath(relative).is_absolute() or ".." in PurePosixPath(relative).parts or "\\" in relative:
+        raise ValueError(f"Unsafe path in SearXNG archive: {relative}")
 
     if selective:
         # Skip files with characters invalid on NTFS
@@ -87,7 +96,8 @@ def _download_zip(ref: str) -> str:
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".zip")
     os.close(tmp_fd)
 
-    for kind in ("heads", "tags"):
+    kinds = ("commit",) if re.fullmatch(r"[0-9a-f]{40}", ref) else ("heads", "tags")
+    for kind in kinds:
         url = _build_zip_url(ref, kind)
         try:
             print(f"[INFO] Downloading {url}", file=sys.stderr)
@@ -121,6 +131,8 @@ def download_and_extract(dest: Path, ref: str, selective: bool) -> None:
     try:
         with zipfile.ZipFile(tmp_path) as zf:
             prefix = _find_prefix(zf.namelist())
+            if re.fullmatch(r"[0-9a-f]{40}", ref) and prefix != f"searxng-{ref}/":
+                raise ValueError(f"SearXNG archive does not match commit {ref}: {prefix}")
             dest.mkdir(parents=True, exist_ok=True)
 
             extracted = 0
@@ -163,21 +175,24 @@ def main() -> None:
     parser.add_argument("dest", help="Destination directory for source files")
     parser.add_argument(
         "--ref",
-        default="master",
-        help="Branch or tag to download (default: master)",
+        default=None,
+        help="Full commit SHA to download (default: searxng_pin.json)",
     )
     parser.add_argument(
         "--selective",
         action="store_true",
         help=(
-            "Only extract searx/, setup.py, setup.cfg, requirements.txt "
+            "Only extract searx/ and root package/build files "
             "and skip files with Windows-invalid characters"
         ),
     )
     args = parser.parse_args()
 
     try:
-        download_and_extract(Path(args.dest), args.ref, args.selective)
+        ref = args.ref or pinned_release()["commit"]
+        if not re.fullmatch(r"[0-9a-f]{40}", ref):
+            raise ValueError("--ref must be a full 40-character commit SHA")
+        download_and_extract(Path(args.dest), ref, args.selective)
     except KeyboardInterrupt:
         print("\n[ABORT] Cancelled by user", file=sys.stderr)
         sys.exit(130)
