@@ -139,6 +139,9 @@ ZIP のその番号の行が取り込み先で持つ番号に書き換える (�
 (:meth:`_ImportJob.note_item_numbers`)、登録の時に saiverse.db のトランザクションの中で
 同じ計画を立て直して照合する (違えば取り込み全体を巻き戻す)。
 ZIP のどの行の番号でもない参照と、発話の本文・ページの本文に埋まった参照は書き換えない。
+desk_items (mode="new" の extensions/saiverse/memory_db/) の ref / purpose_ref も同じ規則で
+書き換えるが、番号を振り直しうる種類の参照で対応が記録されていないもの・取り込み先に
+入らなかった行を指すものがあれば行を入れない (:meth:`_ImportJob.remap_desk_refs`)。
 
 書き込みは memory.db と saiverse.db それぞれ単一トランザクションで行い、全段が
 成功したときだけ commit する。途中で失敗したら両方 rollback し、この取り込みが
@@ -155,8 +158,14 @@ saiverse.db の persona_pack_imports に import_id を書く。印が残った�
 取り込むと、合流の工程に加えて mode="new" の世界側の工程 (extensions/saiverse/
 saiverse_db/・items/・印に記録した overwrite_profile による profile/) を行い、
 saiverse.db の commit が成功したら印を消す。persona_pack_imports に import_id が既に
-あれば (世界側の commit 後、印を消す前に止まった) 世界側の工程はやり直さず印だけ
-消す — 整数の主キーを振り直す表は INSERT OR IGNORE では二重登録を防げないため。
+あれば (世界側の commit 後、印を消す前に止まった) 世界側の工程はやり直さない
+— 整数の主キーを振り直す表は INSERT OR IGNORE では二重登録を防げないため。
+memory.db 側を前の回が commit していた再開では、saiverse.db の commit の後、印を消す前に、
+印の item_short_ids の番号で登録できなかった所持品を指す purpose_tags / clips の参照を
+登録された番号へ書き換え (:meth:`_ImportJob.repair_resumed_item_refs`)、それが commit
+されてから印を消す。memory.db 側もこの合流で行う再開 (memory_new) では、memory.db の
+COMMIT の前に印の item_short_ids をこの回の計画の番号へ書き換える
+(:meth:`_ImportJob.update_marker_item_numbers`)。
 印はファイルなので memory.db の COMMIT と一緒に巻き戻らず、印を書いた後、memory.db の
 COMMIT 前に (ファイルを書いている途中を含む) 止まると印だけが残る。これを見分けるため、mode="new" の memory.db 側の
 工程も同じトランザクションで memory.db の persona_pack_imports (_MEMORY_IMPORTS_TABLE)
@@ -348,6 +357,9 @@ _CATEGORY_CORE = "core"           # sai_memory/core_memory.py の CATEGORY_CORE
 _CATEGORY_CHRONICLE = "chronicle"  # sai_memory/arasuji/storage.py の CATEGORY_CHRONICLE
 _ROOT_CHRONICLE = "root_chronicle"  # sai_memory/arasuji/storage.py の ROOT_CHRONICLE_ID
 _CHUNK = 500
+# 取り込みが番号を振り直しうる参照の種類 (saiverse/references.py の種類名)。
+# _ImportJob.ref_numbers のキーになりうるもの
+_NUMBERED_REF_KINDS = ("memopedia", "core", "chronicle", "clip", "item")
 
 # ZIP を展開したときの合計サイズ (infolist の file_size の和) の上限。超えるパックは
 # 書き込み前に拒否する (ZIP 爆弾の頭打ち)。取り込みは JSON を丸ごとメモリに読むので、
@@ -1186,6 +1198,9 @@ class _ImportJob:
         # 再開の合流で、印 (WORLD_PENDING_MARKER) の item_short_ids に記録された、止まった回の
         # 計画の {ZIP の ITEM_ID: SHORT_ID} (check_pending_marker が読む。plan_items が使う)
         self.resume_item_numbers: Dict[str, int] = {}
+        # 再開の合流で読んだ印 (WORLD_PENDING_MARKER) の中身 (check_pending_marker が読む。
+        # update_marker_item_numbers が item_short_ids だけを書き換えて書き戻す)
+        self.marker_payload: Optional[Dict[str, Any]] = None
         # 合流で取り込んだ extensions/saiverse/memory_db/ の表 (count_merge_skips が数えない)
         self._merged_ext_tables: Set[str] = set()
         # ZIP の messages の id (stage_chatlog の後は全部が取り込み先の memory.db にある)。
@@ -1399,6 +1414,9 @@ class _ImportJob:
                     # 最初のファイル書き込みより前に置く: ファイルを書いている途中で
                     # プロセスが止まっても、同じパックの合流が新規作成の工程を再開できる
                     self.write_pending_marker()
+                elif self.resume_memory:
+                    # この回の memory.db 側の参照が使う番号を、memory.db の COMMIT より前に印へ
+                    self.update_marker_item_numbers()
                 self.write_files()
                 memory.execute("COMMIT")
                 memory_committed = True
@@ -1420,6 +1438,10 @@ class _ImportJob:
                         self.target, WORLD_PENDING_MARKER,
                     )
                 raise
+            if self.clear_marker and not self.memory_new:
+                # 印は参照の修復が commit されてから消す (失敗したら印を残し、同じパックの
+                # 合流がもう一度修復する)
+                self.repair_resumed_item_refs(memory, world)
             if self.clear_marker:
                 self.remove_pending_marker()
         finally:
@@ -1453,10 +1475,146 @@ class _ImportJob:
             # この番号へ書き換えて入るので、再開の合流が同じ番号で登録できるように残す
             "item_short_ids": dict(self.item_plan.short_ids) if self.item_plan else {},
         }
+        self.replace_marker(payload)
+        self.created_files.append(self.marker_path)
+
+    def replace_marker(self, payload: Dict[str, Any]) -> None:
+        """印の中身を一時ファイル経由の os.replace で置き換える (書きかけの印を残さない)。"""
         tmp = self.marker_path.with_name(self.marker_path.name + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, self.marker_path)
-        self.created_files.append(self.marker_path)
+
+    def update_marker_item_numbers(self) -> None:
+        """再開の合流で memory.db 側の工程も行う回 (resume_memory): 印の item_short_ids を、
+        この回の計画 (item_plan) の番号に書き換える (memory.db の COMMIT の前に呼ぶ)。
+
+        この回の purpose_tags / clips の item:N は計画の番号で入るので、memory.db の commit の
+        後で世界側が失敗したとき、次の再開がその番号を前提に plan_items と
+        repair_resumed_item_refs を行えるよう、印もその番号にする。書き換えた後で memory.db の
+        COMMIT が失敗しても、memory.db 側は commit されていないので、印の番号は plan_items が
+        空いていれば使う番号にしかならない。印はこの取り込みが作ったファイルではないので、
+        巻き戻しで消さない (created_files に入れない)。resume_item_numbers は書き換えない
+        (restore_items の計画の立て直しが同じ入力で行われるように)。
+        """
+        if self.item_plan is None or self.marker_payload is None:
+            return
+        numbers = dict(self.item_plan.short_ids)
+        if numbers == self.resume_item_numbers:
+            return
+        payload = dict(self.marker_payload)
+        payload["item_short_ids"] = numbers
+        self.replace_marker(payload)
+        self.marker_payload = payload
+
+    def repair_resumed_item_refs(self, memory: sqlite3.Connection, world: sqlite3.Connection) -> None:
+        """再開の合流 (memory.db 側は前の回が commit 済み) で、前の回が印の番号
+        (resume_item_numbers) で書いた purpose_tags / clips の item:N のうち、世界に登録された
+        番号と違うものを登録された番号へ書き換える (saiverse.db の commit の後、印を消す前に呼ぶ)。
+
+        plan_items は印の番号が取り込み先の他の物に使われていると別の番号で登録するので、
+        前の回が確定させた参照が旧番号のまま別の物を指す。前の回が入れた行は ZIP の
+        purpose_tags.tag_id / clips.clip_id で特定し、参照の列 (clips の purpose_ref /
+        pasted_to、purpose_tags の target_ref / purpose_ref) を {印の番号: 登録された SHORT_ID}
+        で書き換える (remap_numbered_ref)。旧番号は登録の計画の時点で使われていた番号、
+        登録された番号はその時点の MAX より大きい番号なので、書き換えを二度行っても結果は
+        同じ — 修復の commit の後、印を消す前に止まったときの再実行で壊れない。書き換えた
+        purpose_tags の組 (target_ref, purpose_ref) が取り込み先の別の行と同じになったら、
+        同じ付与として書き換えた行を消す (stage_purpose_tags の組の照合と同じ扱い)。
+        desk_items は対象外 — 机が開くのは memopedia / chronicle / task の参照だけ
+        (saiverse/memory_atlas.py の _normalize_ref_for_desk)。
+
+        memory.db の単一トランザクションで行い、失敗したら巻き戻して例外を上げる
+        (印は残るので、同じパックの合流がもう一度修復する)。
+        """
+        if not self.resume_item_numbers or not self.table_exists(world, "item"):
+            return
+        derived = {iid: self.derived_id("item", iid) for iid in self.resume_item_numbers}
+        registered: Dict[str, Any] = {}
+        ids = list(derived.values())
+        for i in range(0, len(ids), _CHUNK):
+            part = ids[i:i + _CHUNK]
+            registered.update(world.execute(
+                f"SELECT ITEM_ID, SHORT_ID FROM item WHERE ITEM_ID IN ({', '.join('?' for _ in part)})",
+                part,
+            ).fetchall())
+        mapping: Dict[int, Optional[int]] = {}
+        for iid, old in self.resume_item_numbers.items():
+            new = _as_int(registered.get(derived[iid]))
+            if new is not None and new != old:
+                mapping[old] = new
+        if not mapping:
+            return
+        numbers = {"item": mapping}
+        rewritten = 0
+        merged = 0
+        try:
+            memory.execute("BEGIN IMMEDIATE")
+            clip_ids = list(dict.fromkeys(c["clip_id"] for c in self.pack.clips))
+            for i in range(0, len(clip_ids), _CHUNK):
+                part = clip_ids[i:i + _CHUNK]
+                rows = memory.execute(
+                    "SELECT clip_id, purpose_ref, pasted_to FROM clips "
+                    f"WHERE clip_id IN ({', '.join('?' for _ in part)})",
+                    part,
+                ).fetchall()
+                for clip_id, purpose_ref, pasted_to in rows:
+                    _l1, new_purpose = self.remap_numbered_ref(purpose_ref, numbers_by_kind=numbers)
+                    _l2, new_pasted = self.remap_numbered_ref(pasted_to, numbers_by_kind=numbers)
+                    if (new_purpose, new_pasted) == (purpose_ref, pasted_to):
+                        continue
+                    memory.execute(
+                        "UPDATE clips SET purpose_ref = ?, pasted_to = ? WHERE clip_id = ?",
+                        (new_purpose, new_pasted, clip_id),
+                    )
+                    rewritten += 1
+            tag_ids = list(dict.fromkeys(t["tag_id"] for t in self.pack.purpose_tags))
+            for i in range(0, len(tag_ids), _CHUNK):
+                part = tag_ids[i:i + _CHUNK]
+                rows = memory.execute(
+                    "SELECT tag_id, target_ref, purpose_ref FROM purpose_tags "
+                    f"WHERE tag_id IN ({', '.join('?' for _ in part)})",
+                    part,
+                ).fetchall()
+                for tag_id, target_ref, purpose_ref in rows:
+                    _l1, new_target = self.remap_numbered_ref(target_ref, numbers_by_kind=numbers)
+                    _l2, new_purpose = self.remap_numbered_ref(purpose_ref, numbers_by_kind=numbers)
+                    if (new_target, new_purpose) == (target_ref, purpose_ref):
+                        continue
+                    same = memory.execute(
+                        "SELECT 1 FROM purpose_tags WHERE target_ref = ? AND purpose_ref = ? AND tag_id <> ?",
+                        (new_target, new_purpose, tag_id),
+                    ).fetchone()
+                    if same is not None:
+                        memory.execute("DELETE FROM purpose_tags WHERE tag_id = ?", (tag_id,))
+                        merged += 1
+                        continue
+                    memory.execute(
+                        "UPDATE purpose_tags SET target_ref = ?, purpose_ref = ? WHERE tag_id = ?",
+                        (new_target, new_purpose, tag_id),
+                    )
+                    rewritten += 1
+            memory.execute("COMMIT")
+        except BaseException:
+            try:
+                if memory.in_transaction:
+                    memory.execute("ROLLBACK")
+            except sqlite3.Error:
+                LOGGER.warning("[persona_pack] rollback failed", exc_info=True)
+            LOGGER.error(
+                "[persona_pack] saiverse.db was committed but the item references in memory.db "
+                "were not updated (persona=%s); %s is left in the persona folder. Importing the "
+                "same pack with mode='merge' updates them",
+                self.target, WORLD_PENDING_MARKER,
+            )
+            raise
+        if rewritten or merged:
+            self.warn(
+                f"items: {len(mapping)} item(s) were registered with a number other than the one "
+                f"the unfinished import chose; {rewritten} purpose tag / clip row(s) it imported were "
+                "updated to the registered numbers"
+                + (f" and {merged} purpose tag(s) that became the same as an existing tag were removed"
+                   if merged else "")
+            )
 
     def check_pending_marker(self, world: sqlite3.Connection, memory: sqlite3.Connection) -> None:
         """mode="merge": 印があり、同じパックなら commit されていない側の工程を再開する。
@@ -1473,11 +1631,13 @@ class _ImportJob:
           memory.db 側の mode="new" の工程を行う (resume_memory)。
         - saiverse.db に無い: 世界側の mode="new" の工程を行う (resume_world)。
         - 両方にある (世界側の commit の後、印を消す前に止まった): 工程は
-          やり直さずに印だけ消す。
+          やり直さず、所持品の参照の修復 (repair_resumed_item_refs) だけを行って印を消す。
 
-        世界側の工程を行うときは、印の item_short_ids (止まった回が所持品に決めた
-        SHORT_ID) を resume_item_numbers に読む — 止まった回の memory.db 側が
-        purpose_tags / clips の item:N をその番号へ書き換えて commit しているため。
+        印の item_short_ids (memory.db 側を commit した回が所持品に決めた SHORT_ID) を
+        resume_item_numbers に読む — その回の memory.db 側が purpose_tags / clips の
+        item:N をその番号へ書き換えて commit しているため。plan_items はその番号が
+        空いていれば使い、repair_resumed_item_refs は使えなかった番号の参照を
+        世界に登録された番号へ書き換える。
 
         どちらの工程も、照合 (UUID・INSERT OR IGNORE・同じ中身のファイルの再利用) で
         既に入っている行とファイルを二重にしない。
@@ -1506,22 +1666,23 @@ class _ImportJob:
             )
             return
         self.clear_marker = True
+        self.marker_payload = marker
         self.resume_memory = not self.memory_applied(memory)
         self.resume_world = not self.world_applied(world)
-        if not self.resume_memory and not self.resume_world:
-            self.warn(
-                "the world part of an earlier new-persona import of this pack was already applied; "
-                f"only {WORLD_PENDING_MARKER} is removed"
-            )
-            return
-        if self.resume_world and marker.get("overwrite_profile") is True:
-            self.overwrite_profile = True
         recorded = marker.get("item_short_ids")
-        if self.resume_world and isinstance(recorded, dict):
+        if isinstance(recorded, dict):
             self.resume_item_numbers = {
                 iid: number for iid, number in recorded.items()
                 if isinstance(iid, str) and isinstance(number, int) and not isinstance(number, bool)
             }
+        if not self.resume_memory and not self.resume_world:
+            self.warn(
+                "the world part of an earlier new-persona import of this pack was already applied; "
+                f"only the item references are checked and {WORLD_PENDING_MARKER} is removed"
+            )
+            return
+        if self.resume_world and marker.get("overwrite_profile") is True:
+            self.overwrite_profile = True
         if self.resume_memory:
             self.warn(
                 "resuming the unfinished part of an earlier new-persona import of this pack "
@@ -2244,7 +2405,13 @@ class _ImportJob:
                 number, None if after is None else after.get(kind)
             )
 
-    def remap_numbered_ref(self, value: Any) -> Tuple[bool, Any]:
+    def remap_numbered_ref(
+        self,
+        value: Any,
+        *,
+        numbers_by_kind: Optional[Dict[str, Dict[int, Optional[int]]]] = None,
+        strict: bool = False,
+    ) -> Tuple[bool, Any]:
         """参照の文字列の短縮番号を、ZIP の行が取り込み先で持つ番号に書き換える。
 
         対象は ref_numbers にある種類 (memopedia / core / chronicle / clip / item) の参照で、
@@ -2255,22 +2422,33 @@ class _ImportJob:
         変わらない参照と、対象外の値 (文字列でない・参照として読めない・別のペルソナの
         URI・記録に無い番号) はそのまま返す。
 
+        ``numbers_by_kind`` を渡すと ref_numbers の代わりにその対応表で書き換える
+        (repair_resumed_item_refs が所持品の番号だけの対応表で使う)。
+
         返り値は (指す行が取り込み先にあるか, 値)。ZIP の行が取り込み先に入らなかった
         (ref_numbers の値が None の) 参照は (False, 元の値) — 取り込み先で同じ番号の
-        別の行を指しうるので、呼び出し側が保存しない。
+        別の行を指しうるので、呼び出し側が保存しない。``strict`` のときは、
+        _NUMBERED_REF_KINDS の種類の自分のもの (item は世界全体) の番号の参照で、番号が
+        対応表に無いものも (False, 元の値) にする (desk_items が使う。対応の確かでない
+        番号は取り込み先で別の行を指しうるため)。
         """
-        if not isinstance(value, str) or not self.ref_numbers:
+        table = self.ref_numbers if numbers_by_kind is None else numbers_by_kind
+        if not isinstance(value, str):
             return True, value
         try:
             parsed = references.parse_ref(value)
         except ValueError:
             return True, value
-        numbers = self.ref_numbers.get(parsed.kind)
+        numbers = table.get(parsed.kind)
         number = _as_int(parsed.key)
         # persona が None なのは世界全体の種類 (item)。ペルソナごとの種類の persona は
         # "self" か別のペルソナで、別のペルソナを指すものは書き換えない
         other_persona = parsed.persona is not None and not parsed.is_self
-        if numbers is None or other_persona or number is None or number not in numbers:
+        if other_persona or number is None:
+            return True, value
+        if numbers is None or number not in numbers:
+            if strict and parsed.kind in _NUMBERED_REF_KINDS:
+                return False, value
             return True, value
         new = numbers[number]
         if new is None:
@@ -2948,8 +3126,13 @@ class _ImportJob:
                 if n:
                     counts.skipped += len(rows)
                     continue
+            desk_unresolved = 0
             for row in rows:
                 decoded = {k: self.remap_exact(decode_value(v)) for k, v in row.items()}
+                if table == "desk_items" and not self.remap_desk_refs(decoded):
+                    desk_unresolved += 1
+                    counts.skipped += 1
+                    continue
                 if table in PERCEPTION_MEDIA_TABLES and "media" in decoded:
                     # 添付と同じ書き換え (復元先を指す / 復元できなければ path を落とす)。
                     # 参照するファイルの復元は plan_attachments が計画済み
@@ -2965,6 +3148,29 @@ class _ImportJob:
                     counts.added += 1
                 else:
                     counts.skipped += 1
+            if desk_unresolved:
+                self.warn(
+                    f"desk_items: {desk_unresolved} row(s) point to pages, clips or items whose "
+                    "number in the target is not known; they were not imported"
+                )
+
+    def remap_desk_refs(self, row: Dict[str, Any]) -> bool:
+        """desk_items の 1 行の ref / purpose_ref の短縮番号を取り込み先の番号へ書き換える (行を書き換える)。
+
+        remap_numbered_ref を strict で通す: 番号を振り直しうる種類の参照で、ZIP の行の
+        番号として対応が記録されていないもの・取り込み先に入らなかった行を指すものが
+        あれば False を返し、呼び出し側は行を入れない — 机が取り込み先の別のページを開くより、
+        開いていない方がよいため。ref_numbers は stage_knowledge・stage_clips・
+        note_item_numbers が stage_ext_memory より前に作り終えている (run の順)。
+        """
+        for column in ("ref", "purpose_ref"):
+            if column not in row:
+                continue
+            landed, value = self.remap_numbered_ref(row[column], strict=True)
+            if not landed:
+                return False
+            row[column] = value
+        return True
 
     def stage_ext_saiverse(self, world: sqlite3.Connection) -> None:
         """extensions/saiverse/saiverse_db/ を取り込む (SAIVERSE_DB_TABLE_OWNERS の表だけ)。
@@ -3409,12 +3615,8 @@ class _ImportJob:
                 "or container) could not be matched in this world"
             )
         counts.skipped += len(plan.present)  # 同じパックで登録済み
-        if plan.resume_mismatch:
-            self.warn(
-                f"items: {plan.resume_mismatch} item(s) could not get the item number chosen by the "
-                "unfinished import; item references in the purpose tags and clips it imported may "
-                "point to other items"
-            )
+        # plan.resume_mismatch の所持品を指す、止まった回の参照は、saiverse.db の commit の後で
+        # repair_resumed_item_refs が登録した番号へ書き換える
         # 入れ物を中身より先に入れる (placed は判定の順 = 入れ物が先)
         to_insert = [(iid, kind_owner) for iid, kind_owner in plan.placed.items() if iid not in plan.present]
         occupied: Dict[Tuple[str, str], Set[int]] = {}

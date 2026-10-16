@@ -3025,6 +3025,60 @@ def test_renumbered_page_references_follow_the_page(source: Dict[str, Any], tmp_
     assert result.counts["purpose_tags"].skipped == 1
 
 
+def test_desk_references_follow_renumbered_pages_on_new_import(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    apple = source["ids"]["apple"]
+    apple_sid = _page_short_id(source, apple)
+    conn = _mem(source)
+    try:
+        (zip_max,) = conn.execute("SELECT MAX(short_id) FROM memopedia_pages").fetchone()
+        src_ids = dict(conn.execute("SELECT short_id, id FROM memopedia_pages WHERE short_id IS NOT NULL"))
+        conn.executemany(
+            "INSERT INTO desk_items(ref, opened_at, last_touched_at, purpose_ref) VALUES (?,?,?,?)",
+            [
+                (f"m:{apple_sid}", T0, T0, "task:1"),
+                # ZIP のどのページの番号でもない参照: 取り込み先で別のページを開きうるので入れない
+                ("memopedia:999", T0, T0, None),
+                # 目的の参照が ZIP のどの所持品の番号でもない行も入れない
+                (f"memopedia:{_page_short_id(source, source['ids']['banana'])}", T0, T0, "item:99"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    pack = _export(source, tmp_path / "out" / "desk.zip")
+
+    # 取り込み先には会話が無いが、ZIP のページと同じ番号を持つ別のページがある
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    conn = _mem(target)
+    try:
+        for i in range(zip_max):
+            create_page(conn, parent_id="root_terms", title=f"取り込み先のページ {i}",
+                        content="取り込み先だけの記事", category="terms")
+        conn.commit()
+    finally:
+        conn.close()
+    result = _import(target, pack, "new")
+
+    apple_new = _page_short_id(target, apple)
+    assert apple_new != apple_sid
+    conn = _mem(target)
+    try:
+        desk = dict(conn.execute("SELECT ref, purpose_ref FROM desk_items"))
+        dst_numbers = dict(conn.execute("SELECT id, short_id FROM memopedia_pages"))
+    finally:
+        conn.close()
+    # 机の参照は、元の環境で開いていたのと同じページ (id) を指す
+    assert desk == {
+        f"memopedia:{apple_new}": "task:1",
+        f"memopedia:{dst_numbers[src_ids[1]]}": None,
+    }
+    assert result.counts["extensions/memory_db/desk_items"].added == 2
+    assert result.counts["extensions/memory_db/desk_items"].skipped == 2
+    assert any(w.startswith("desk_items:") and "not imported" in w for w in result.warnings)
+
+
 def test_references_to_chronicle_pages_not_merged_are_not_kept(
     chron_branch: Dict[str, Any], tmp_path: Path
 ) -> None:
@@ -3177,42 +3231,173 @@ def test_item_references_are_not_kept_on_merge_unless_the_item_is_in_the_target(
     assert tags["tag-stone-uri"] == (f"saiverse://item/{stone_there}", "task:2")
 
 
-def test_resume_registers_items_with_the_numbers_the_references_got(
+def _fail_world_commit(self: Any, world: sqlite3.Connection) -> None:
+    raise sqlite3.OperationalError("disk I/O error (injected)")
+
+
+def _add_items_meanwhile(env: Dict[str, Any], *short_ids: int) -> None:
+    """止まっている間に、取り込み先の世界に別の物を SHORT_ID を指定して作る。"""
+    world = sqlite3.connect(env["world_db"])
+    try:
+        for n in short_ids:
+            world.execute(
+                "INSERT INTO item (ITEM_ID, SHORT_ID, NAME, TYPE, DESCRIPTION) VALUES (?, ?, ?, ?, ?)",
+                (f"made-meanwhile-{n}", n, "その間に作られた物", "object", ""),
+            )
+        world.commit()
+    finally:
+        world.close()
+
+
+def _stop_new_import_after_memory_commit(
+    target: Dict[str, Any], pack: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """新規取り込みを、memory.db の commit の後・saiverse.db の commit で失敗させる。"""
+    from saiverse_memory.persona_pack import importer
+
+    with monkeypatch.context() as m:
+        m.setattr(importer._ImportJob, "commit_world", _fail_world_commit)
+        with pytest.raises(sqlite3.OperationalError, match="injected"):
+            _import(target, pack, "new")
+
+
+def test_resume_updates_item_references_when_the_recorded_numbers_were_taken(
+    item_refs: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    marker = target["persona_dir"] / "persona_pack_world_pending.json"
+    _add_other_items(target, 3)
+    _stop_new_import_after_memory_commit(target, item_refs["pack"], monkeypatch)
+    tags, clip = _tags_and_clip(target, item_refs["clip"].clip_id)
+    # 止まった回が決めた番号: ノート 4・鞄 5・小石 6 (memory.db 側はこの番号で確定済み)
+    recorded = json.loads(marker.read_text(encoding="utf-8"))["item_short_ids"]
+    assert sorted(recorded.values()) == [4, 5, 6]
+    assert tags["tag-doc"][0] == f"item:{recorded['item-doc']}"
+    assert clip == (f"item:{recorded['item-bag']}",)
+
+    # 止まっている間に世界で新しい物が作られ、ノートと鞄の番号を取る
+    _add_items_meanwhile(target, recorded["item-doc"], recorded["item-bag"])
+
+    result = _import(target, item_refs["pack"], "merge")
+    numbers = _item_numbers(target)
+    tid = target["persona_id"]
+    doc_new = numbers[_derived(tid, "item", "item-doc")]
+    bag_new = numbers[_derived(tid, "item", "item-bag")]
+    stone_new = numbers[_derived(tid, "item", "item-stone")]
+    # 取られた番号は使えないので別の番号で登録し、空いている番号は止まった回の番号のまま
+    assert doc_new not in (1, 2, 3, 4, 5, 6) and bag_new not in (1, 2, 3, 4, 5, 6)
+    assert stone_new == recorded["item-stone"]
+    # 止まった回が確定させた目的タグと切り抜きは、登録した番号を指す
+    tags, clip = _tags_and_clip(target, item_refs["clip"].clip_id)
+    assert tags["tag-doc"] == (f"item:{doc_new}", "task:1")
+    assert tags["tag-stone-uri"] == (f"saiverse://item/{stone_new}", "task:2")
+    assert tags["tag-unknown"] == ("item:99", "task:3")
+    assert clip == (f"item:{bag_new}",)
+    assert not marker.exists()
+    assert any("updated to the registered numbers" in w for w in result.warnings)
+
+
+def test_item_reference_repair_that_fails_is_finished_by_the_next_merge(
     item_refs: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from saiverse_memory.persona_pack import importer
 
     target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    marker = target["persona_dir"] / "persona_pack_world_pending.json"
     _add_other_items(target, 3)
-    original = importer._ImportJob.commit_world
+    _stop_new_import_after_memory_commit(target, item_refs["pack"], monkeypatch)
+    recorded = json.loads(marker.read_text(encoding="utf-8"))["item_short_ids"]
+    _add_items_meanwhile(target, recorded["item-doc"])
 
-    def fail_once(self: Any, world: sqlite3.Connection) -> None:
-        raise sqlite3.OperationalError("disk I/O error (injected)")
+    # saiverse.db の commit の後、参照の修復の commit の前に止まる
+    original_repair = importer._ImportJob.repair_resumed_item_refs
 
-    monkeypatch.setattr(importer._ImportJob, "commit_world", fail_once)
-    with pytest.raises(sqlite3.OperationalError, match="injected"):
-        _import(target, item_refs["pack"], "new")
-    monkeypatch.setattr(importer._ImportJob, "commit_world", original)
-    tags, _clip = _tags_and_clip(target, item_refs["clip"].clip_id)
-    doc_ref, stone_ref = tags["tag-doc"][0], tags["tag-stone-uri"][0]
+    def stop_before_repair(self: Any, memory: sqlite3.Connection, world: sqlite3.Connection) -> None:
+        raise sqlite3.OperationalError("disk I/O error in the repair (injected)")
 
-    # 止まっている間に世界で新しい物が作られ、番号 4 (止まった回が ノート に決めた番号) を取る
-    assert doc_ref == "item:4"
-    engine = create_engine(f"sqlite:///{Path(target['world_db']).as_posix()}")
-    with Session(engine) as s:
-        s.add(Item(ITEM_ID="made-meanwhile", NAME="その間に作られた物", TYPE="object"))
-        s.commit()
-    engine.dispose()
-    assert _item_numbers(target)["made-meanwhile"] == 4
-
-    result = _import(target, item_refs["pack"], "merge")
-    numbers = _item_numbers(target)
+    with monkeypatch.context() as m:
+        m.setattr(importer._ImportJob, "repair_resumed_item_refs", stop_before_repair)
+        with pytest.raises(sqlite3.OperationalError, match="injected"):
+            _import(target, item_refs["pack"], "merge")
     tid = target["persona_id"]
-    # 空いている番号は止まった回の番号のまま (memory.db 側の参照と一致する)
-    assert stone_ref == f"saiverse://item/{numbers[_derived(tid, 'item', 'item-stone')]}"
-    # 取られた番号は使えないので、警告して別の番号で登録する
-    assert numbers[_derived(tid, "item", "item-doc")] not in (1, 2, 3, 4)
-    assert any("could not get the item number" in w for w in result.warnings)
+    doc_new = _item_numbers(target)[_derived(tid, "item", "item-doc")]
+    assert doc_new != recorded["item-doc"]
+    # 所持品は登録済みだが参照はまだ旧番号で、印は残る
+    assert marker.is_file()
+    tags, _clip = _tags_and_clip(target, item_refs["clip"].clip_id)
+    assert tags["tag-doc"][0] == f"item:{recorded['item-doc']}"
+
+    # 次の合流は世界側をやり直さず、参照を修復してから印を消す。修復の commit の後、
+    # 印を消す前に止まった場合を作るため、一度目は印を消さない
+    calls: List[int] = []
+
+    def repair_and_count(self: Any, memory: sqlite3.Connection, world: sqlite3.Connection) -> None:
+        calls.append(1)
+        original_repair(self, memory, world)
+
+    with monkeypatch.context() as m:
+        m.setattr(importer._ImportJob, "repair_resumed_item_refs", repair_and_count)
+        m.setattr(importer._ImportJob, "remove_pending_marker", lambda self: None)
+        _import(target, item_refs["pack"], "merge")
+    assert calls == [1]
+    assert _item_numbers(target)[_derived(tid, "item", "item-doc")] == doc_new
+    tags, _clip = _tags_and_clip(target, item_refs["clip"].clip_id)
+    assert tags["tag-doc"] == (f"item:{doc_new}", "task:1")
+    assert marker.is_file()
+
+    # 修復をもう一度行っても結果は変わらない
+    before = _dump(target)
+    _import(target, item_refs["pack"], "merge")
+    assert not marker.exists()
+    after = _dump(target)
+    assert {k: v for k, v in after.items() if k != "files"} == {
+        k: v for k, v in before.items() if k != "files"
+    }
+
+
+def test_resume_that_also_redoes_the_memory_part_records_its_item_numbers_in_the_marker(
+    item_refs: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    marker = target["persona_dir"] / "persona_pack_world_pending.json"
+    _add_other_items(target, 3)
+    original_write = importer._ImportJob.write_files
+
+    def write_then_stop(self: Any) -> None:
+        original_write(self)
+        raise SystemExit("process stopped before the memory.db COMMIT (injected)")
+
+    # 印だけが残る (memory.db も saiverse.db も確定していない)
+    with monkeypatch.context() as m:
+        m.setattr(importer._ImportJob, "write_files", write_then_stop)
+        m.setattr(importer._ImportJob, "remove_created_files", lambda self: None)
+        with pytest.raises(SystemExit, match="injected"):
+            _import(target, item_refs["pack"], "new")
+    recorded = json.loads(marker.read_text(encoding="utf-8"))["item_short_ids"]
+    _add_items_meanwhile(target, recorded["item-doc"])
+
+    # 再開の合流が memory.db 側を別の番号で確定させた後、saiverse.db の commit で失敗する
+    with monkeypatch.context() as m:
+        m.setattr(importer._ImportJob, "commit_world", _fail_world_commit)
+        with pytest.raises(sqlite3.OperationalError, match="injected"):
+            _import(target, item_refs["pack"], "merge")
+    tags, _clip = _tags_and_clip(target, item_refs["clip"].clip_id)
+    second = json.loads(marker.read_text(encoding="utf-8"))["item_short_ids"]
+    # 印は memory.db 側の参照が使う番号に書き換わっている
+    assert second["item-doc"] != recorded["item-doc"]
+    assert tags["tag-doc"][0] == f"item:{second['item-doc']}"
+
+    # その番号もまた取られた後の再開: 参照は登録した番号を指す
+    _add_items_meanwhile(target, second["item-doc"])
+    _import(target, item_refs["pack"], "merge")
+    tid = target["persona_id"]
+    doc_new = _item_numbers(target)[_derived(tid, "item", "item-doc")]
+    assert doc_new not in (recorded["item-doc"], second["item-doc"])
+    tags, _clip = _tags_and_clip(target, item_refs["clip"].clip_id)
+    assert tags["tag-doc"] == (f"item:{doc_new}", "task:1")
+    assert not marker.exists()
 
 
 def test_items_changed_between_the_plan_and_the_registration_roll_back(
