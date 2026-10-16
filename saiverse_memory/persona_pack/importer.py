@@ -101,6 +101,9 @@ ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を
 - memopedia_pages は id で照合し、本文 (content) が違い、かつ ZIP 側の
   updated_at が新しいときだけ上書きする。上書き前の本文は
   memopedia_page_edit_history に before_* として記録する (rollback_page で戻せる)。
+  削除は伝わらない: ZIP 側が is_deleted の行では上書きせず、上書きでも取り込み先の
+  is_deleted (とコア記憶の metadata.deleted_at) は変えない。合流では、取り込み先に無い
+  id の ZIP の is_deleted の行も入れない (新規取り込みは履歴として全部入れる)。
   挿入と上書きの後、memory.db の commit 前に memopedia_pages 全体の親子を検査し
   (:meth:`_ImportJob.check_page_tree`)、上書きで parent_id を変えた行が循環・無い親を
   作るときは、その行の parent_id だけを取り込み先の元の値に戻す。
@@ -125,11 +128,16 @@ MAX+1 から振り直し、元の番号を行の metadata に ``original_short_i
 
 clips の purpose_ref / pasted_to と purpose_tags の target_ref / purpose_ref に入った、
 自分のものを指す短縮番号の参照 (``memopedia:N`` / ``core:N`` / ``chronicle:N`` /
-``clip:N`` と旧 prefix・``saiverse://self/...`` の形。saiverse/references.py) は、ZIP の
-その番号の行が取り込み先で持つ番号に書き換える (振り直した行は新しい番号、取り込み先に
+``clip:N`` と旧 prefix・``saiverse://self/...`` の形) と所持品の参照 (``item:N`` /
+``saiverse://item/N``。item の SHORT_ID は世界全体の連番。saiverse/references.py) は、
+ZIP のその番号の行が取り込み先で持つ番号に書き換える (振り直した行は新しい番号、取り込み先に
 同じ id の行があればその行の番号。:meth:`_ImportJob.remap_numbered_ref`)。ZIP の行が
-取り込み先に入らなかった (合流で取り込まない Chronicle) 参照は、取り込み先で同じ番号の
-別の行を指しうるので、purpose_tags は行を入れず、clips はその列を None にする。
+取り込み先に入らなかった (合流で取り込まない Chronicle・削除済みのページ、合流で
+取り込まない所持品) 参照は、取り込み先で同じ番号の別の行を指しうるので、purpose_tags は
+行を入れず、clips はその列を None にする。所持品の SHORT_ID は saiverse.db 側で登録するが、
+これらの参照は memory.db 側で先に入るので、採番だけを memory.db 側の工程より前に決め
+(:meth:`_ImportJob.note_item_numbers`)、登録の時に saiverse.db のトランザクションの中で
+同じ計画を立て直して照合する (違えば取り込み全体を巻き戻す)。
 ZIP のどの行の番号でもない参照と、発話の本文・ページの本文に埋まった参照は書き換えない。
 
 書き込みは memory.db と saiverse.db それぞれ単一トランザクションで行い、全段が
@@ -140,8 +148,8 @@ ZIP のどの行の番号でもない参照と、発話の本文・ページの�
 commit 後に saiverse.db の commit が失敗すると片側が残る。mode="new" は最初の
 ファイル書き込み (write_files) の前にペルソナフォルダへ印 (export.WORLD_PENDING_MARKER。manifest の
 persona_id・format・version、ZIP 全体の sha256 (zip_sha256)、取り込みの識別子
-(import_id = zip_sha256 と取り込み先のペルソナ ID から決まる値)、overwrite_profile) を
-書き、saiverse.db の commit が成功したら消す。世界側の工程は、同じトランザクションで
+(import_id = zip_sha256 と取り込み先のペルソナ ID から決まる値)、overwrite_profile、
+登録する所持品の SHORT_ID (item_short_ids)) を書き、saiverse.db の commit が成功したら消す。世界側の工程は、同じトランザクションで
 saiverse.db の persona_pack_imports に import_id を書く。印が残ったペルソナへ同じ
 パック (manifest の persona_id と、zip_sha256 / import_id が一致) を mode="merge" で
 取り込むと、合流の工程に加えて mode="new" の世界側の工程 (extensions/saiverse/
@@ -998,6 +1006,25 @@ class _ChroniclePlan:
     to_root: Set[str] = field(default_factory=set)
 
 
+@dataclass
+class _ItemPlan:
+    """items/ の所持品の登録の計画 (:meth:`_ImportJob.plan_items`)。書き込みはしない。"""
+
+    # 置き場所を対応づけた item の ZIP の ITEM_ID → (OWNER_KIND, 取り込み先の OWNER_ID)。
+    # 判定の順 (入れ物が中身より先)
+    placed: Dict[str, Tuple[str, str]]
+    # 置き場所を対応づけられない item の ZIP の ITEM_ID
+    unplaced: Set[str]
+    # placed のうち、振り直した ITEM_ID が取り込み先に既にある (同じパックで登録済みの) もの
+    present: Set[str]
+    # 登録する item (placed のうち present でないもの) の ZIP の ITEM_ID → SHORT_ID
+    short_ids: Dict[str, int]
+    # short_ids のうち、元の SHORT_ID から変わったものの件数
+    renumbered: int
+    # short_ids のうち、再開の印に記録した番号を使えなかったものの件数 (plan_items)
+    resume_mismatch: int = 0
+
+
 def validate_pack(zip_path: Path) -> None:
     """パック全体を、どこにも書き込まずに検査する (取り込み先を問わない部分)。
 
@@ -1149,10 +1176,16 @@ class _ImportJob:
         self.inserted_page_ids: Set[str] = set()
         self.reparented: Dict[str, Any] = {}
         # 短縮番号の参照の種類 (saiverse/references.py の memopedia / core / chronicle /
-        # clip) ごとの {ZIP の番号: その行が取り込み先で持つ番号}。取り込み先に入らなかった
-        # 行の番号は None。stage_knowledge と stage_clips が作り、remap_numbered_ref が
-        # clips と purpose_tags の参照の列を書き換えるのに使う
+        # clip / item) ごとの {ZIP の番号: その行が取り込み先で持つ番号}。取り込み先に
+        # 入らなかった行の番号は None。stage_knowledge・stage_clips・note_item_numbers が
+        # 作り、remap_numbered_ref が clips と purpose_tags の参照の列を書き換えるのに使う
         self.ref_numbers: Dict[str, Dict[int, Optional[int]]] = {}
+        # 所持品の登録の計画 (note_item_numbers が memory.db 側の工程より前に立て、
+        # restore_items が saiverse.db のトランザクションの中で立て直して照合する)
+        self.item_plan: Optional[_ItemPlan] = None
+        # 再開の合流で、印 (WORLD_PENDING_MARKER) の item_short_ids に記録された、止まった回の
+        # 計画の {ZIP の ITEM_ID: SHORT_ID} (check_pending_marker が読む。plan_items が使う)
+        self.resume_item_numbers: Dict[str, int] = {}
         # 合流で取り込んだ extensions/saiverse/memory_db/ の表 (count_merge_skips が数えない)
         self._merged_ext_tables: Set[str] = set()
         # ZIP の messages の id (stage_chatlog の後は全部が取り込み先の memory.db にある)。
@@ -1334,6 +1367,9 @@ class _ImportJob:
             else:
                 self.check_pending_marker(world, memory)
             self.report_refused_json_text()
+            # 所持品の SHORT_ID は saiverse.db 側 (stage_items) で登録するが、item:N の参照を
+            # 持つ purpose_tags / clips は memory.db 側で先に入るので、採番だけを先に決める
+            self.note_item_numbers(world)
             memory_committed = False
             try:
                 memory.execute("BEGIN IMMEDIATE")
@@ -1413,6 +1449,9 @@ class _ImportJob:
             "zip_sha256": self.zip_sha256,
             "import_id": self.import_id,
             "overwrite_profile": self.overwrite_profile,
+            # 登録する所持品の SHORT_ID。memory.db 側の purpose_tags / clips の item:N は
+            # この番号へ書き換えて入るので、再開の合流が同じ番号で登録できるように残す
+            "item_short_ids": dict(self.item_plan.short_ids) if self.item_plan else {},
         }
         tmp = self.marker_path.with_name(self.marker_path.name + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
@@ -1435,6 +1474,10 @@ class _ImportJob:
         - saiverse.db に無い: 世界側の mode="new" の工程を行う (resume_world)。
         - 両方にある (世界側の commit の後、印を消す前に止まった): 工程は
           やり直さずに印だけ消す。
+
+        世界側の工程を行うときは、印の item_short_ids (止まった回が所持品に決めた
+        SHORT_ID) を resume_item_numbers に読む — 止まった回の memory.db 側が
+        purpose_tags / clips の item:N をその番号へ書き換えて commit しているため。
 
         どちらの工程も、照合 (UUID・INSERT OR IGNORE・同じ中身のファイルの再利用) で
         既に入っている行とファイルを二重にしない。
@@ -1473,6 +1516,12 @@ class _ImportJob:
             return
         if self.resume_world and marker.get("overwrite_profile") is True:
             self.overwrite_profile = True
+        recorded = marker.get("item_short_ids")
+        if self.resume_world and isinstance(recorded, dict):
+            self.resume_item_numbers = {
+                iid: number for iid, number in recorded.items()
+                if isinstance(iid, str) and isinstance(number, int) and not isinstance(number, bool)
+            }
         if self.resume_memory:
             self.warn(
                 "resuming the unfinished part of an earlier new-persona import of this pack "
@@ -2027,6 +2076,7 @@ class _ImportJob:
 
         to_insert: List[Dict[str, Any]] = []
         seen: Set[str] = set()
+        deleted_not_added = 0
         for page in pages:
             is_chronicle = page.get("category") == _CATEGORY_CHRONICLE and not page.get("is_trunk")
             counts = self.result.count("chronicle_pages" if is_chronicle else "pages")
@@ -2046,11 +2096,23 @@ class _ImportJob:
                     # 同じ id の行が取り込み先にあればその番号、無ければ取り込み先に入らない
                     self.note_page_numbers(page, existing)
                 continue
+            zip_deleted = bool(decode_value(page.get("is_deleted")))
             if existing is None:
+                if zip_deleted and not self.memory_new:
+                    # 合流は ZIP の削除済みのページを足さない (intent §5「削除は伝わらない」)。
+                    # 新規取り込みは履歴として全部入れる (§4)
+                    counts.skipped += 1
+                    deleted_not_added += 1
+                    self.note_page_numbers(page, None)
+                    continue
                 to_insert.append(page)
                 continue
             # 取り込み先の行の番号は上書きしても変わらない (update_page)
             self.note_page_numbers(page, existing)
+            if zip_deleted:
+                # ZIP の削除済みの行で取り込み先の行を上書きしない (削除は伝わらない)
+                counts.skipped += 1
+                continue
             decoded = _decode_row(page, "memopedia_pages")
             zip_updated = decoded.get("updated_at")
             target_updated = existing[4]
@@ -2077,6 +2139,8 @@ class _ImportJob:
             conn.execute("DELETE FROM memopedia_embeddings WHERE page_id = ?", (page["id"],))
             counts.updated += 1
 
+        if deleted_not_added:
+            self.warn(f"memopedia: {deleted_not_added} deleted page(s) not imported")
         if not to_insert:
             return
         decoded_pages = [_decode_row(p, "memopedia_pages") for p in to_insert]
@@ -2183,12 +2247,13 @@ class _ImportJob:
     def remap_numbered_ref(self, value: Any) -> Tuple[bool, Any]:
         """参照の文字列の短縮番号を、ZIP の行が取り込み先で持つ番号に書き換える。
 
-        対象は自分のもの (短縮参照、または ``saiverse://self/...``) を指す、ref_numbers に
-        ある種類 (memopedia / core / chronicle / clip) の参照で、番号が ZIP の行の番号
-        として記録されているもの。書き換えた値は、短縮参照なら正典の単語の短縮参照、
-        URI なら同じ種類の URI にする (saiverse/references.py の A1)。番号が変わらない
-        参照と、対象外の値 (文字列でない・参照として読めない・別のペルソナの URI・
-        記録に無い番号) はそのまま返す。
+        対象は ref_numbers にある種類 (memopedia / core / chronicle / clip / item) の参照で、
+        番号が ZIP の行の番号として記録されているもの。ペルソナごとの種類は自分のもの
+        (短縮参照、または ``saiverse://self/...``) を指すものだけ、世界全体の種類 (item) は
+        短縮参照と ``saiverse://item/N`` の形。書き換えた値は、短縮参照なら正典の単語の
+        短縮参照、URI なら同じ種類の URI にする (saiverse/references.py の A1)。番号が
+        変わらない参照と、対象外の値 (文字列でない・参照として読めない・別のペルソナの
+        URI・記録に無い番号) はそのまま返す。
 
         返り値は (指す行が取り込み先にあるか, 値)。ZIP の行が取り込み先に入らなかった
         (ref_numbers の値が None の) 参照は (False, 元の値) — 取り込み先で同じ番号の
@@ -2202,7 +2267,10 @@ class _ImportJob:
             return True, value
         numbers = self.ref_numbers.get(parsed.kind)
         number = _as_int(parsed.key)
-        if numbers is None or not parsed.is_self or number is None or number not in numbers:
+        # persona が None なのは世界全体の種類 (item)。ペルソナごとの種類の persona は
+        # "self" か別のペルソナで、別のペルソナを指すものは書き換えない
+        other_persona = parsed.persona is not None and not parsed.is_self
+        if numbers is None or other_persona or number is None or number not in numbers:
             return True, value
         new = numbers[number]
         if new is None:
@@ -2372,6 +2440,11 @@ class _ImportJob:
         取り込み先の値を保つ — 取り込み先で既に参照されている番号だから。
         ZIP 側の metadata が JSON の object でも NULL でもない (array や、object /
         array として解釈できない文字列) ときは、その値で置き換える。
+
+        削除の状態は取り込み先の値を保つ (intent §5「削除は伝わらない」): is_deleted 列は
+        書き換えず、コア記憶の metadata の deleted_at (sai_memory/core_memory.py の
+        remove_core_memory が is_deleted と一緒に刻む) も取り込み先の値を保つ。
+        ZIP 側が削除済みの行は stage_knowledge がここへ渡さない。
         """
         category = existing[6]
         try:
@@ -2381,7 +2454,7 @@ class _ImportJob:
         is_raw, zip_meta = _decode_json_text(page.get("metadata"))
         keep_keys = ["original_short_id"]
         if category == _CATEGORY_CORE:
-            keep_keys += ["core_id", "original_core_id"]
+            keep_keys += ["core_id", "original_core_id", "deleted_at"]
         if category == _CATEGORY_CHRONICLE:
             keep_keys += ["short_id", "original_chronicle_short_id"]
         decoded = dict(decoded)
@@ -2398,7 +2471,7 @@ class _ImportJob:
         cols = set(self.columns(conn, "memopedia_pages"))
         assignments = [
             (k, v) for k, v in decoded.items()
-            if k in cols and k not in ("id", "short_id", "created_at")
+            if k in cols and k not in ("id", "short_id", "created_at", "is_deleted")
         ]
         if "parent_id" in decoded and "parent_id" in cols and decoded["parent_id"] != existing[8]:
             # check_page_tree が、親子の木を壊す付け替えだけを取り込み先の値に戻す
@@ -2652,8 +2725,8 @@ class _ImportJob:
             counts.added += 1
         if unresolved:
             self.warn(
-                f"clips: {unresolved} purpose_ref / pasted_to reference(s) point to pages not "
-                "imported into the target; they were set to None"
+                f"clips: {unresolved} purpose_ref / pasted_to reference(s) point to pages, clips "
+                "or items not imported into the target; they were set to None"
             )
 
     def stage_purpose_tags(self, conn: sqlite3.Connection) -> None:
@@ -2688,8 +2761,8 @@ class _ImportJob:
             counts.added += 1
         if unresolved:
             self.warn(
-                f"purpose_tags: {unresolved} tag(s) point to pages not imported into the target; "
-                "they were not imported"
+                f"purpose_tags: {unresolved} tag(s) point to pages, clips or items not imported "
+                "into the target; they were not imported"
             )
 
     # --- journal/ (saiverse.db 側とファイル) -----------------------------------
@@ -3041,22 +3114,161 @@ class _ImportJob:
         if pack.private_room is None and pack.items is None:
             return
         counts = self.result.count("items")
-        room_id: Optional[str] = None
-        row = world.execute("SELECT PRIVATE_ROOM_ID FROM ai WHERE AIID = ?", (self.target,)).fetchone()
-        if row and row[0] and world.execute(
-            "SELECT 1 FROM building WHERE BUILDINGID = ?", (row[0],)
-        ).fetchone():
-            room_id = row[0]
-        zip_room_id: Optional[str] = None
+        room_id = self.target_room_id(world)
         if pack.private_room is not None:
-            zip_room_id = decode_value(pack.private_room["building"].get("BUILDINGID"))
             if room_id is None:
                 counts.skipped += len(pack.private_room.get("fixtures") or [])
                 self.warn(f"{self.target} has no private room in saiverse.db; the private room was not restored")
             else:
                 self.restore_private_room(world, room_id, counts)
         if pack.items is not None:
-            self.restore_items(world, room_id, zip_room_id, counts)
+            self.restore_items(world, counts)
+
+    def target_room_id(self, world: sqlite3.Connection) -> Optional[str]:
+        """取り込み先のペルソナの私室 (ai.PRIVATE_ROOM_ID が指す、building にある行) の ID。無ければ None。"""
+        row = world.execute("SELECT PRIVATE_ROOM_ID FROM ai WHERE AIID = ?", (self.target,)).fetchone()
+        if row and row[0] and world.execute(
+            "SELECT 1 FROM building WHERE BUILDINGID = ?", (row[0],)
+        ).fetchone():
+            return row[0]
+        return None
+
+    def pack_items(self) -> Dict[str, Dict[str, Any]]:
+        """items/items.json の item 行 (ZIP の ITEM_ID → 戻した行。同じ ID が二度あれば先のもの)。"""
+        items: Dict[str, Dict[str, Any]] = {}
+        for raw in (self.pack.items or {}).get("items") or []:
+            items.setdefault(raw["ITEM_ID"], _decode_row(raw))
+        return items
+
+    def note_item_numbers(self, world: sqlite3.Connection) -> None:
+        """所持品の SHORT_ID を memory.db 側の工程より前に決め、item の参照の対応を ref_numbers に記録する。
+
+        世界側の工程を行う取り込み (world_new) では plan_items で登録の計画を立てて
+        item_plan に置く (restore_items が saiverse.db のトランザクションの中で立て直して
+        照合する)。ZIP の item の元の SHORT_ID の対の番号は:
+
+        - この取り込みで登録する item: 計画の SHORT_ID。
+        - 登録しない item (合流・置き場所を対応づけられない・同じパックで登録済み):
+          取り込み先に振り直した ITEM_ID の行があればその SHORT_ID、無ければ元の ITEM_ID の
+          行 (同じ世界の同じ物) の SHORT_ID、どちらも無ければ None (取り込み先で同じ
+          番号の別の物を指しうるので、purpose_tags は行を入れず、clips は列を None にする)。
+        """
+        if self.pack.items is None:
+            return
+        items = self.pack_items()
+        if not items:
+            return
+        has_tables = self.table_exists(world, "item") and self.table_exists(world, "item_location")
+        if self.world_new and has_tables:
+            self.item_plan = self.plan_items(world, items)
+        existing: Dict[str, Any] = {}
+        if self.table_exists(world, "item"):
+            ids = [*(self.derived_id("item", iid) for iid in items), *items]
+            for i in range(0, len(ids), _CHUNK):
+                part = ids[i:i + _CHUNK]
+                existing.update(world.execute(
+                    f"SELECT ITEM_ID, SHORT_ID FROM item WHERE ITEM_ID IN ({', '.join('?' for _ in part)})",
+                    part,
+                ).fetchall())
+        planned = self.item_plan.short_ids if self.item_plan is not None else {}
+        for iid, item in items.items():
+            original = _as_int(item.get("SHORT_ID"))
+            if original is None:
+                continue
+            after: Optional[int] = planned.get(iid)
+            if after is None:
+                after = _as_int(existing.get(self.derived_id("item", iid)))
+            if after is None:
+                after = _as_int(existing.get(iid))
+            self.note_numbers({"item": original}, {"item": after} if after is not None else {})
+
+    def plan_items(self, world: sqlite3.Connection, items: Dict[str, Dict[str, Any]]) -> _ItemPlan:
+        """所持品の登録の計画を立てる (読むだけで書き込まない)。
+
+        置き場所 (1 item 1 行: UNIQUE(ITEM_ID)) を取り込み先の持ち主へ対応づける: ペルソナが
+        持つ物は取り込み先のペルソナ、ZIP の私室の物は取り込み先の私室、入れ物
+        (OWNER_KIND='bag') の中身は入れ物が対応づけられるときだけ振り直した入れ物。
+
+        SHORT_ID (item:N) は世界全体の連番 (database/models.py の _assign_item_short_id が
+        MAX+1 で振る)。intent §5 の短縮番号の規則で、元の番号が取り込み先の MAX より
+        大きければそのまま、それ以外と番号の無い行は MAX+1 から振る。再開の合流では、
+        止まった回の番号 (resume_item_numbers) が取り込み先の item のどれにも使われて
+        いなければそれを使う。
+        """
+        doc = self.pack.items or {}
+        room_id = self.target_room_id(world)
+        zip_room_id: Optional[str] = None
+        if self.pack.private_room is not None:
+            zip_room_id = decode_value(self.pack.private_room["building"].get("BUILDINGID"))
+        new_ids = {iid: self.derived_id("item", iid) for iid in items}
+
+        locations: Dict[str, Dict[str, Any]] = {}
+        for raw in doc["locations"]:
+            locations.setdefault(raw["ITEM_ID"], _decode_row(raw))
+        placed: Dict[str, Tuple[str, str]] = {}
+        unplaced: Set[str] = set()
+        pending = {iid for iid in items if iid in locations}
+        changed = True
+        while changed:
+            changed = False
+            for iid in sorted(pending):
+                loc = locations[iid]
+                kind, owner = loc["OWNER_KIND"], loc["OWNER_ID"]
+                target_owner: Optional[str] = None
+                if kind == "persona" and owner == self.source:
+                    target_owner = self.target
+                elif kind == "building" and owner == zip_room_id and room_id is not None:
+                    target_owner = room_id
+                elif kind == "bag" and owner in items:
+                    if owner in placed:
+                        target_owner = new_ids[owner]
+                    elif owner not in unplaced and owner in pending:
+                        continue  # 入れ物の判定待ち
+                if target_owner is None:
+                    unplaced.add(iid)
+                else:
+                    placed[iid] = (kind, target_owner)
+                pending.discard(iid)
+                changed = True
+        unplaced.update(pending)  # 入れ物の連鎖が輪になっているもの
+        unplaced.update(iid for iid in items if iid not in locations)
+
+        found = self.existing_keys(world, "item", "ITEM_ID", (new_ids[i] for i in placed))
+        present = {iid for iid in placed if new_ids[iid] in found}
+        to_insert = [iid for iid in placed if iid not in present]
+
+        (col_max,) = world.execute("SELECT COALESCE(MAX(SHORT_ID), 0) FROM item").fetchone()
+        col_max = int(col_max or 0)
+        short_ids: Dict[str, int] = {}
+        recorded = {iid: self.resume_item_numbers[iid] for iid in to_insert if iid in self.resume_item_numbers}
+        if recorded:
+            taken = self.existing_keys(world, "item", "SHORT_ID", recorded.values())
+            for iid, number in recorded.items():
+                if number not in taken and number not in short_ids.values():
+                    short_ids[iid] = number
+        rest = [iid for iid in to_insert if iid not in short_ids]
+        originals = [_as_int(items[iid].get("SHORT_ID")) for iid in rest]
+        start = max([col_max, *short_ids.values()])
+        planned = _plan_numbers(originals, start)
+        top = max([start, *(n for n in planned if n is not None)])
+        for iid, number in zip(rest, planned):
+            if number is None:
+                top += 1
+                number = top
+            short_ids[iid] = number
+        renumbered = sum(
+            1 for iid in to_insert
+            if _as_int(items[iid].get("SHORT_ID")) is not None
+            and _as_int(items[iid].get("SHORT_ID")) != short_ids[iid]
+        )
+        return _ItemPlan(
+            placed=placed,
+            unplaced=unplaced,
+            present=present,
+            short_ids=short_ids,
+            renumbered=renumbered,
+            resume_mismatch=len(recorded) - sum(1 for iid in recorded if short_ids[iid] == recorded[iid]),
+        )
 
     def plan_media_restore(self, zip_name: str, media_dir: str) -> str:
         """ZIP のファイルを共有メディアフォルダ media_dir へ置く計画を立て、
@@ -3164,87 +3376,54 @@ class _ImportJob:
             self.insert(world, "fixture", fx)
             counts.added += 1
 
-    def restore_items(
-        self,
-        world: sqlite3.Connection,
-        room_id: Optional[str],
-        zip_room_id: Optional[str],
-        counts: ImportCounts,
-    ) -> None:
+    def restore_items(self, world: sqlite3.Connection, counts: ImportCounts) -> None:
+        """所持品を、note_item_numbers が立てた計画 (item_plan) どおりに登録する。
+
+        計画は memory.db 側の工程より前 (saiverse.db のトランザクションの外) に立てて
+        いるので、ここで同じ計画を立て直して照合する。違えば (その間に取り込み先の
+        item が増えた・変わった) memory.db 側が既に書き換えた item:N の参照と登録する
+        番号が食い違うので、取り込み全体を巻き戻す (memory.db はまだ commit していない)。
+        """
         doc = self.pack.items or {}
-        items: Dict[str, Dict[str, Any]] = {}
-        for raw in doc["items"]:
-            items.setdefault(raw["ITEM_ID"], _decode_row(raw))
+        items = self.pack_items()
         if not items:
             return
         if not (self.table_exists(world, "item") and self.table_exists(world, "item_location")):
             counts.skipped += len(items)
             self.warn("saiverse.db has no item / item_location table; items skipped")
             return
+        plan = self.plan_items(world, items)
+        if plan != self.item_plan:
+            raise RuntimeError(
+                "items in saiverse.db changed while the pack was being imported; nothing was "
+                "imported. Import the pack again"
+            )
         new_ids = {iid: self.derived_id("item", iid) for iid in items}
-
-        # 置き場所 (1 item 1 行: UNIQUE(ITEM_ID)) を取り込み先の持ち主へ対応づける。
-        # 入れ物 (OWNER_KIND='bag') の中身は、入れ物が登録できるときだけ登録する
         locations: Dict[str, Dict[str, Any]] = {}
         for raw in doc["locations"]:
             locations.setdefault(raw["ITEM_ID"], _decode_row(raw))
-        placed: Dict[str, Tuple[str, str]] = {}
-        unplaced: Set[str] = set()
-        pending = {iid for iid in items if iid in locations}
-        changed = True
-        while changed:
-            changed = False
-            for iid in sorted(pending):
-                loc = locations[iid]
-                kind, owner = loc["OWNER_KIND"], loc["OWNER_ID"]
-                target_owner: Optional[str] = None
-                if kind == "persona" and owner == self.source:
-                    target_owner = self.target
-                elif kind == "building" and owner == zip_room_id and room_id is not None:
-                    target_owner = room_id
-                elif kind == "bag" and owner in items:
-                    if owner in placed:
-                        target_owner = new_ids[owner]
-                    elif owner not in unplaced and owner in pending:
-                        continue  # 入れ物の判定待ち
-                if target_owner is None:
-                    unplaced.add(iid)
-                else:
-                    placed[iid] = (kind, target_owner)
-                pending.discard(iid)
-                changed = True
-        unplaced.update(pending)  # 入れ物の連鎖が輪になっているもの
-        unplaced.update(iid for iid in items if iid not in locations)
-        if unplaced:
-            counts.skipped += len(unplaced)
+        if plan.unplaced:
+            counts.skipped += len(plan.unplaced)
             self.warn(
-                f"items: {len(unplaced)} item(s) not imported; their place (persona, private room "
+                f"items: {len(plan.unplaced)} item(s) not imported; their place (persona, private room "
                 "or container) could not be matched in this world"
             )
-
-        present = self.existing_keys(world, "item", "ITEM_ID", (new_ids[i] for i in placed))
-        counts.skipped += sum(1 for i in placed if new_ids[i] in present)  # 同じパックで登録済み
+        counts.skipped += len(plan.present)  # 同じパックで登録済み
+        if plan.resume_mismatch:
+            self.warn(
+                f"items: {plan.resume_mismatch} item(s) could not get the item number chosen by the "
+                "unfinished import; item references in the purpose tags and clips it imported may "
+                "point to other items"
+            )
         # 入れ物を中身より先に入れる (placed は判定の順 = 入れ物が先)
-        to_insert = [(iid, kind_owner) for iid, kind_owner in placed.items() if new_ids[iid] not in present]
-        # SHORT_ID (item:N) は世界全体の連番 (database/models.py の _assign_item_short_id が
-        # MAX+1 で振る)。intent §5 の短縮番号の規則で、元の番号が取り込み先の MAX より
-        # 大きければそのまま、それ以外と番号の無い行は MAX+1 から振る
-        (col_max,) = world.execute("SELECT COALESCE(MAX(SHORT_ID), 0) FROM item").fetchone()
-        originals = [_as_int(items[iid].get("SHORT_ID")) for iid, _ in to_insert]
-        planned = _plan_numbers(originals, int(col_max or 0))
-        top = max([int(col_max or 0), *(n for n in planned if n is not None)])
-        for i, n in enumerate(planned):
-            if n is None:
-                top += 1
-                planned[i] = top
-        renumbered = sum(1 for o, n in zip(originals, planned) if o is not None and o != n)
+        to_insert = [(iid, kind_owner) for iid, kind_owner in plan.placed.items() if iid not in plan.present]
         occupied: Dict[Tuple[str, str], Set[int]] = {}
         files = doc.get("files") or {}
-        for (iid, (kind, owner)), short_id in zip(to_insert, planned):
+        for iid, (kind, owner) in to_insert:
             new_id = new_ids[iid]
             item = dict(items[iid])
             item["ITEM_ID"] = new_id
-            item["SHORT_ID"] = short_id
+            item["SHORT_ID"] = plan.short_ids[iid]
             item["CREATOR_ID"] = self.remap_exact(item.get("CREATOR_ID"))
             zip_file = files.get(iid)
             if zip_file:
@@ -3276,8 +3455,10 @@ class _ImportJob:
             loc.update({"ITEM_ID": new_id, "OWNER_KIND": kind, "OWNER_ID": owner, "SLOT_NUMBER": slot})
             self.insert(world, "item_location", loc)
             counts.added += 1
-        if renumbered:
-            self.result.renumbered["items.short_id"] = self.result.renumbered.get("items.short_id", 0) + renumbered
+        if plan.renumbered:
+            self.result.renumbered["items.short_id"] = (
+                self.result.renumbered.get("items.short_id", 0) + plan.renumbered
+            )
 
     def plan_keep_existing(self, zip_name: str, dest: Path, counts: ImportCounts) -> None:
         """既存のファイルは上書きしない (同じ中身ならスキップ、違えば警告してスキップ)。"""

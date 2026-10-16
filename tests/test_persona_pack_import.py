@@ -10,6 +10,7 @@ import base64
 import copy
 import json
 import sqlite3
+import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -3065,3 +3066,251 @@ def test_references_to_chronicle_pages_not_merged_are_not_kept(
     assert clip_row == (f"chronicle:{na1_new}", None)
     assert any(w.startswith("purpose_tags:") and "not imported" in w for w in result.warnings)
     assert any(w.startswith("clips:") and "set to None" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# item:N の参照は、所持品の SHORT_ID の振り直しに追従する
+# ---------------------------------------------------------------------------
+
+def _item_numbers(env: Dict[str, Any]) -> Dict[str, int]:
+    """世界の item の {ITEM_ID: SHORT_ID}。"""
+    world = sqlite3.connect(env["world_db"])
+    try:
+        return dict(world.execute("SELECT ITEM_ID, SHORT_ID FROM item").fetchall())
+    finally:
+        world.close()
+
+
+def _add_other_items(env: Dict[str, Any], count: int) -> None:
+    """取り込み先の世界に、別のペルソナの所持品を count 個置く (SHORT_ID は 1 から)。"""
+    engine = create_engine(f"sqlite:///{Path(env['world_db']).as_posix()}")
+    with Session(engine) as s:
+        for i in range(count):
+            s.add(Item(ITEM_ID=f"other-{i}", NAME=f"他の人の物 {i}", TYPE="object"))
+        s.commit()
+    engine.dispose()
+
+
+def _tags_and_clip(env: Dict[str, Any], clip_id: str) -> Tuple[Dict[str, Tuple[str, str]], Any]:
+    conn = _mem(env)
+    try:
+        tags = {r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT tag_id, target_ref, purpose_ref FROM purpose_tags"
+        )}
+        clip = conn.execute("SELECT pasted_to FROM clips WHERE clip_id = ?", (clip_id,)).fetchone()
+    finally:
+        conn.close()
+    return tags, clip
+
+
+@pytest.fixture()
+def item_refs(source: Dict[str, Any], tmp_path: Path) -> Dict[str, Any]:
+    """所持品を指す目的タグと切り抜きを持つパック。"""
+    numbers = _item_numbers(source)
+    doc_n, bag_n, stone_n = numbers["item-doc"], numbers["item-bag"], numbers["item-stone"]
+    conn = _mem(source)
+    try:
+        clip = add_clip(conn, message_id="m2", quote="B の返事", pasted_to=f"item:{bag_n}")
+        conn.executemany(
+            "INSERT INTO purpose_tags(tag_id, target_ref, purpose_ref, layer, created_at) VALUES (?,?,?,?,?)",
+            [
+                ("tag-doc", f"item:{doc_n}", "task:1", 2, T0),
+                ("tag-stone-uri", f"saiverse://item/{stone_n}", "task:2", 2, T0),
+                # パックに無い所持品の番号は書き換えない
+                ("tag-unknown", "item:99", "task:3", 2, T0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    pack = _export(source, tmp_path / "out" / "item_refs.zip")
+    return {"pack": pack, "clip": clip, "doc": doc_n, "bag": bag_n, "stone": stone_n}
+
+
+def test_item_references_follow_renumbered_items_on_new_import(
+    item_refs: Dict[str, Any], tmp_path: Path
+) -> None:
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    # 取り込み先の世界には、ZIP の所持品と同じ番号の別の物がある
+    _add_other_items(target, 3)
+    assert sorted(_item_numbers(target).values()) == [1, 2, 3]
+    result = _import(target, item_refs["pack"], "new")
+
+    numbers = _item_numbers(target)
+    tid = target["persona_id"]
+    doc_new = numbers[_derived(tid, "item", "item-doc")]
+    bag_new = numbers[_derived(tid, "item", "item-bag")]
+    stone_new = numbers[_derived(tid, "item", "item-stone")]
+    assert {doc_new, bag_new, stone_new}.isdisjoint({1, 2, 3})
+    assert result.renumbered["items.short_id"] == 3
+    tags, clip = _tags_and_clip(target, item_refs["clip"].clip_id)
+    assert tags["tag-doc"] == (f"item:{doc_new}", "task:1")
+    assert tags["tag-stone-uri"] == (f"saiverse://item/{stone_new}", "task:2")
+    assert tags["tag-unknown"] == ("item:99", "task:3")
+    assert clip == (f"item:{bag_new}",)
+
+
+def test_item_references_are_not_kept_on_merge_unless_the_item_is_in_the_target(
+    item_refs: Dict[str, Any], source: Dict[str, Any], tmp_path: Path
+) -> None:
+    # 合流は所持品を取り込まない: 取り込み先の同じ番号の別の物に結び付けない
+    target = _make_env(tmp_path / "dst", PID)
+    _add_other_items(target, 3)
+    result = _import(target, item_refs["pack"], "merge")
+    tags, clip = _tags_and_clip(target, item_refs["clip"].clip_id)
+    assert "tag-doc" not in tags and "tag-stone-uri" not in tags
+    assert tags["tag-unknown"] == ("item:99", "task:3")
+    assert clip == (None,)
+    assert any(w.startswith("purpose_tags:") and "not imported" in w for w in result.warnings)
+    assert any(w.startswith("clips:") and "set to None" in w for w in result.warnings)
+
+    # 以前の新規取り込みで同じ所持品を登録済みのペルソナへの合流は、その物の番号へ書き換える
+    home = _make_env(tmp_path / "home2", "returner_city_a", name="帰還")
+    _add_other_items(home, 3)
+    _import(home, source["zip"], "new")
+    numbers = _item_numbers(home)
+    doc_there = numbers[_derived("returner_city_a", "item", "item-doc")]
+    stone_there = numbers[_derived("returner_city_a", "item", "item-stone")]
+    _import(home, item_refs["pack"], "merge")
+    tags, _clip = _tags_and_clip(home, item_refs["clip"].clip_id)
+    assert tags["tag-doc"] == (f"item:{doc_there}", "task:1")
+    assert tags["tag-stone-uri"] == (f"saiverse://item/{stone_there}", "task:2")
+
+
+def test_resume_registers_items_with_the_numbers_the_references_got(
+    item_refs: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    _add_other_items(target, 3)
+    original = importer._ImportJob.commit_world
+
+    def fail_once(self: Any, world: sqlite3.Connection) -> None:
+        raise sqlite3.OperationalError("disk I/O error (injected)")
+
+    monkeypatch.setattr(importer._ImportJob, "commit_world", fail_once)
+    with pytest.raises(sqlite3.OperationalError, match="injected"):
+        _import(target, item_refs["pack"], "new")
+    monkeypatch.setattr(importer._ImportJob, "commit_world", original)
+    tags, _clip = _tags_and_clip(target, item_refs["clip"].clip_id)
+    doc_ref, stone_ref = tags["tag-doc"][0], tags["tag-stone-uri"][0]
+
+    # 止まっている間に世界で新しい物が作られ、番号 4 (止まった回が ノート に決めた番号) を取る
+    assert doc_ref == "item:4"
+    engine = create_engine(f"sqlite:///{Path(target['world_db']).as_posix()}")
+    with Session(engine) as s:
+        s.add(Item(ITEM_ID="made-meanwhile", NAME="その間に作られた物", TYPE="object"))
+        s.commit()
+    engine.dispose()
+    assert _item_numbers(target)["made-meanwhile"] == 4
+
+    result = _import(target, item_refs["pack"], "merge")
+    numbers = _item_numbers(target)
+    tid = target["persona_id"]
+    # 空いている番号は止まった回の番号のまま (memory.db 側の参照と一致する)
+    assert stone_ref == f"saiverse://item/{numbers[_derived(tid, 'item', 'item-stone')]}"
+    # 取られた番号は使えないので、警告して別の番号で登録する
+    assert numbers[_derived(tid, "item", "item-doc")] not in (1, 2, 3, 4)
+    assert any("could not get the item number" in w for w in result.warnings)
+
+
+def test_items_changed_between_the_plan_and_the_registration_roll_back(
+    item_refs: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    original = importer._ImportJob.stage_task_book
+
+    def add_item_first(self: Any, world: sqlite3.Connection) -> None:
+        # 計画の後、登録の前に取り込み先の item が増える
+        world.execute(
+            "INSERT INTO item (ITEM_ID, SHORT_ID, NAME, TYPE, DESCRIPTION) VALUES (?, ?, ?, ?, ?)",
+            ("sneaked-in", 50, "割り込んだ物", "object", ""),
+        )
+        original(self, world)
+
+    before = _dump(target)
+    monkeypatch.setattr(importer._ImportJob, "stage_task_book", add_item_first)
+    with pytest.raises(RuntimeError, match="items in saiverse.db changed"):
+        _import(target, item_refs["pack"], "new")
+    assert _dump(target) == before
+
+
+# ---------------------------------------------------------------------------
+# 削除は伝わらない: ZIP の削除済みの行で取り込み先の生きているページを上書きしない
+# ---------------------------------------------------------------------------
+
+def _page_row(env: Dict[str, Any], page_id: str) -> Any:
+    conn = _mem(env)
+    try:
+        return conn.execute(
+            "SELECT content, is_deleted, metadata FROM memopedia_pages WHERE id = ?", (page_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def test_page_edited_then_deleted_in_the_pack_does_not_delete_the_target_page(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    from sai_memory.core_memory import remove_core_memory
+
+    apple = source["ids"]["apple"]
+    core_id = source["ids"]["core_id"]
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, source["zip"], "new")
+    conn = _mem(target)
+    try:
+        (core_page,) = conn.execute(
+            "SELECT id FROM memopedia_pages WHERE category = 'core' "
+            "AND json_extract(metadata, '$.core_id') = ?", (core_id,)
+        ).fetchone()
+        # 取り込み先ではコア記憶をごみ箱へ移す
+        assert remove_core_memory(conn, core_id)
+    finally:
+        conn.close()
+    later = int(time.time()) + 1000
+    conn = _mem(source)
+    try:
+        # 元の環境: りんごを編集してから削除、新しいページを作って削除、コア記憶を編集
+        conn.execute("UPDATE memopedia_pages SET content = ?, updated_at = ? WHERE id = ?",
+                     ("編集した本文", later, apple))
+        conn.execute("UPDATE memopedia_pages SET is_deleted = 1, updated_at = ? WHERE id = ?",
+                     (later + 1, apple))
+        gone = create_page(conn, parent_id="root_terms", title="消した記事", content="消した",
+                           category="terms")
+        conn.execute("UPDATE memopedia_pages SET is_deleted = 1 WHERE id = ?", (gone.id,))
+        conn.execute("UPDATE memopedia_pages SET content = ?, updated_at = ? WHERE id = ?",
+                     ("元の環境で書き直した大事なこと", later, core_page))
+        conn.commit()
+    finally:
+        conn.close()
+    pack = _export(source, tmp_path / "out" / "deleted.zip")
+
+    result = _import(target, pack, "merge")
+    content, is_deleted, _meta = _page_row(target, apple)
+    assert (content, is_deleted) == ("赤い果物", 0)
+    assert _page_row(target, gone.id) is None
+    assert any("deleted page(s) not imported" in w for w in result.warnings)
+    # 取り込み先で削除済みの行は、本文が上書きされても削除済みのまま (deleted_at も残る)
+    content, is_deleted, meta = _page_row(target, core_page)
+    assert (content, is_deleted) == ("元の環境で書き直した大事なこと", 1)
+    assert json.loads(meta)["deleted_at"] is not None
+
+
+def test_new_import_keeps_deleted_pages_as_history(source: Dict[str, Any], tmp_path: Path) -> None:
+    conn = _mem(source)
+    try:
+        gone = create_page(conn, parent_id="root_terms", title="消した記事", content="消した",
+                           category="terms")
+        conn.execute("UPDATE memopedia_pages SET is_deleted = 1 WHERE id = ?", (gone.id,))
+        conn.commit()
+    finally:
+        conn.close()
+    pack = _export(source, tmp_path / "out" / "with_deleted.zip")
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, pack, "new")
+    content, is_deleted, _meta = _page_row(target, gone.id)
+    assert (content, is_deleted) == ("消した", 1)
