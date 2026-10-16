@@ -1951,6 +1951,109 @@ def test_stop_while_writing_files_leaves_the_marker_and_is_finished_by_a_merge(
     assert result.counts["items"].added == 4
 
 
+@pytest.mark.parametrize(
+    "rel, counts_key",
+    [
+        (("personas", "newcomer_city_a", "active_state.json"), "extensions/persona_dir"),
+        (("image", "pic.png"), "attachments"),
+    ],
+)
+def test_stop_inside_a_file_write_leaves_no_partial_file_at_the_destination(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    rel: Tuple[str, ...], counts_key: str,
+) -> None:
+    """ファイルの中身を一部だけ書いた所でプロセスが止まっても、保存先には書きかけのファイルが
+    現れず (write_files は一時ファイルに書き切ってから os.replace で置く)、同じ ZIP の合流が
+    そのファイルを完全な中身で復元する。保存先に書きかけが残ると、再開の合流はペルソナ
+    フォルダのファイルを「中身の違う既存ファイル」としてスキップし、添付は ``_1`` に避けて、
+    壊れたファイルが残る。"""
+    from saiverse_memory.persona_pack import importer
+
+    reference = _make_env(tmp_path / "ref", "newcomer_city_a", name="新入り")
+    _import(reference, source["zip"], "new")
+
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    dest = target["home"].joinpath(*rel)
+    expected = reference["home"].joinpath(*rel).read_bytes()
+    marker = target["persona_dir"] / "persona_pack_world_pending.json"
+    original_open = Path.open
+    partial_writes: List[Path] = []
+
+    class _StopMidWrite:
+        def __init__(self, f: Any) -> None:
+            self._f = f
+
+        def __enter__(self) -> "_StopMidWrite":
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            self._f.close()
+
+        def write(self, data: bytes) -> int:
+            self._f.write(data[: len(data) // 2])
+            self._f.flush()
+            raise SystemExit("process stopped inside a file write (injected)")
+
+    def open_and_stop_mid_write(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        f = original_open(self, mode, *args, **kwargs)
+        # 保存先そのもの、または保存先の一時ファイルへの書き込みで落とす
+        if ("w" in mode or "x" in mode) and self.parent == dest.parent and (
+            self.name == dest.name or (self.name.startswith(dest.name + ".") and self.name.endswith(".partial"))
+        ):
+            partial_writes.append(self)
+            return _StopMidWrite(f)
+        return f
+
+    # プロセスが止まった状態を作る: dest の中身を半分だけ書いた所で落ち、後始末も走らない
+    monkeypatch.setattr(Path, "open", open_and_stop_mid_write)
+    monkeypatch.setattr(importer._ImportJob, "remove_created_files", lambda self: None)
+    with pytest.raises(SystemExit, match="injected"):
+        _import(target, source["zip"], "new")
+    monkeypatch.undo()
+
+    assert len(partial_writes) == 1
+    assert marker.is_file()
+    # 保存先には何も無い (書きかけは一時ファイルの側にだけある)
+    assert not dest.exists()
+    assert partial_writes[0] != dest
+    assert 0 < len(partial_writes[0].read_bytes()) < len(expected)
+
+    result = _import(target, source["zip"], "merge")
+    assert not marker.exists()
+    assert dest.read_bytes() == expected
+    # 同じ取り込みのやり直しは同じ一時ファイルを使い、書き切って置くので残らない
+    assert not partial_writes[0].exists()
+    assert _home_files(target) == _home_files(reference)
+    assert not any(f"{dest.name} already exists" in w for w in result.warnings)
+    assert result.counts[counts_key].added >= 1
+
+
+def test_write_files_does_not_overwrite_a_destination_that_appears_before_it_is_placed(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """計画の後、一時ファイルを置く直前に保存先が現れたら、置かずに取り込みを巻き戻す。
+    現れたファイルは上書きも削除もせず、一時ファイルは後始末で消える。"""
+    from saiverse_memory.persona_pack import importer
+
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    dest = target["persona_dir"] / "active_state.json"
+    original_partial_path = importer._ImportJob.partial_path
+
+    def partial_path_after_someone_placed_the_file(self: Any, path: Path) -> Path:
+        if path == dest:
+            dest.write_text("someone else's state", encoding="utf-8")
+        return original_partial_path(self, path)
+
+    monkeypatch.setattr(importer._ImportJob, "partial_path", partial_path_after_someone_placed_the_file)
+    with pytest.raises(FileExistsError):
+        _import(target, source["zip"], "new")
+    monkeypatch.undo()
+
+    assert dest.read_text(encoding="utf-8") == "someone else's state"
+    assert not list(dest.parent.glob(f"{dest.name}.*.partial"))
+    assert _table_counts(target["memory_db"])["messages"] == 0
+
+
 def test_resume_when_only_the_world_part_is_missing_does_not_redo_the_memory_part(
     source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

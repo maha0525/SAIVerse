@@ -153,7 +153,10 @@ mode="new" の工程 (extensions/saiverse/memory_db/・extensions/saiverse/perso
 合流の規則によらない Chronicle の取り込み・知覚台帳の添付) も行う (memory_new)。
 persona_id は一致するが zip_sha256 / import_id が違う ZIP では再開せず、印を残して
 警告する。task_book は合流でも入る。memory.db 側とファイルは照合 (UUID・
-INSERT OR IGNORE・同じ中身のファイルの再利用) で二重にならない。
+INSERT OR IGNORE・同じ中身のファイルの再利用) で二重にならない。write_files は
+各ファイルを同じフォルダの一時ファイル (:meth:`_ImportJob.partial_path`) に書き切って
+から os.replace で置くので、保存先にあるファイルは常に完全で、書いている途中で
+止まったファイルは保存先に無いものとして再開の合流が書き直す。
 
 embeddings は運ばれてこない。取り込んだ message のうち content が空白だけでない
 ものは、同じトランザクションで空のベクトル行 (``storage.DEFERRED_VECTOR``) を
@@ -1503,8 +1506,24 @@ class _ImportJob:
         except OSError as exc:
             self.warn(f"{WORLD_PENDING_MARKER} could not be removed: {exc}")
 
+    def partial_path(self, dest: Path) -> Path:
+        """write_files が dest の中身を書き切るまで使う一時ファイル (dest と同じフォルダ)。
+
+        名前に import_id を含めるので、同じ取り込みのやり直しは前の回が残した一時ファイルを
+        上書きして使い、他の取り込みや利用者のファイルとは重ならない。
+        """
+        return dest.with_name(f"{dest.name}.{self.import_id[:16]}.partial")
+
     def write_files(self) -> None:
-        """計画したファイルを書く。既存のファイルは決して上書きしない ("xb")。"""
+        """計画したファイルを書く。既存のファイルは決して上書きしない。
+
+        各ファイルは :meth:`partial_path` に書き切ってから os.replace で保存先へ置く
+        (export の ``.partial`` → os.replace と同じ形)。書いている途中でプロセスが止まっても
+        保存先には書きかけのファイルが現れないので、保存先にあるファイルは常に完全で、
+        再開の合流の中身の照合 (plan_keep_existing・choose_media_dest・stage_day_reports)
+        が正しく再利用・スキップを決められる。置く直前に保存先が既にあれば (計画の後に
+        他の誰かが置いた) 置かずに FileExistsError で取り込みを巻き戻す。
+        """
         for plan in self.file_plans:
             missing: List[Path] = []
             directory = plan.dest.parent
@@ -1513,9 +1532,17 @@ class _ImportJob:
                 directory = directory.parent
             plan.dest.parent.mkdir(parents=True, exist_ok=True)
             self.created_dirs.extend(reversed(missing))
-            with plan.dest.open("xb") as f:
-                self.created_files.append(plan.dest)
-                f.write(self.reader.read(plan.zip_name))
+            partial = self.partial_path(plan.dest)
+            self.created_files.append(partial)
+            data = self.reader.read(plan.zip_name)
+            with partial.open("wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            if os.path.lexists(plan.dest):
+                raise FileExistsError(f"{plan.dest} appeared while the import was writing files; not overwritten")
+            os.replace(partial, plan.dest)
+            self.created_files.append(plan.dest)
 
     def remove_created_files(self) -> None:
         for path in reversed(self.created_files):
