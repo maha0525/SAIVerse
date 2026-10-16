@@ -12,7 +12,9 @@
 import_chatlog.py と同じ ``_launch_import_embedding`` で埋め込みの再生成を裏で起こす。
 生きているペルソナの adapter は import_chatlog.py と同じく触らない (取り込みは別の
 接続で memory.db に書き、埋め込みは使い捨ての adapter が行う)。プロフィールを上書きした
-ときだけ、読み込み済みのペルソナへ保存経路 (manager.update_ai) で値を写す。
+ときだけ、読み込み済みのペルソナへ保存経路 (manager.update_ai) で値を写す。私室の設定と
+所持品を取り込んだときは、読み込み済みの Building と所持品の一覧へ写す
+(_refresh_loaded_room_and_items)。
 
 合流は Beat ロックの内側で行い、あらすじ生成・補修のジョブが終端していなければ
 409 で断る。Chronicle ページを取り込んだ合流では、冷えた窓への presented_raw の印と
@@ -295,6 +297,51 @@ def _refresh_loaded_persona_profile(manager: Any, persona_id: str) -> None:
         LOGGER.exception("Persona pack: could not apply the profile to the loaded persona %s", persona_id)
 
 
+def _refresh_loaded_room_and_items(manager: Any, persona_id: str) -> None:
+    """取り込みで書き換えた私室の設定と登録した所持品を、読み込み済みの世界へ写す。
+
+    私室は manager.update_building が保存後にインメモリの Building へ写す値
+    (名前・定員・説明・システム指示・間隔・アイテムの表示上限) を DB の現在値で写す。
+    所持品はアイテム作成と同じく manager._load_items_from_db で読み直し、私室の
+    システム指示に所持品の一覧を載せ直す。manager がその口を持たなければ何もしない。
+    """
+    from database.models import AI, Building
+
+    building_map = getattr(manager, "building_map", None)
+    db = manager.SessionLocal()
+    try:
+        ai = db.query(AI).filter(AI.AIID == persona_id).first()
+        room_id = ai.PRIVATE_ROOM_ID if ai is not None else None
+        row = db.query(Building).filter(Building.BUILDINGID == room_id).first() if room_id else None
+        values = None
+        if row is not None:
+            values = dict(
+                name=row.BUILDINGNAME, capacity=row.CAPACITY, description=row.DESCRIPTION,
+                system_instruction=row.SYSTEM_INSTRUCTION, interval=row.AUTO_INTERVAL_SEC,
+                item_display_limit=row.ITEM_DISPLAY_LIMIT,
+            )
+    finally:
+        db.close()
+    if values is not None and isinstance(building_map, dict) and room_id in building_map:
+        building = building_map[room_id]
+        building.name = values["name"]
+        building.capacity = values["capacity"]
+        building.description = values["description"]
+        building.base_system_instruction = values["system_instruction"]
+        building.system_instruction = values["system_instruction"]
+        building.auto_interval_sec = values["interval"]
+        building.item_display_limit = values["item_display_limit"]
+        capacities = getattr(manager, "capacities", None)
+        if isinstance(capacities, dict) and room_id in capacities:
+            capacities[room_id] = values["capacity"]
+    load_items = getattr(manager, "_load_items_from_db", None)
+    if callable(load_items):
+        load_items()
+        refresh = getattr(manager, "_refresh_building_system_instruction", None)
+        if callable(refresh) and room_id:
+            refresh(room_id)
+
+
 def _chronicle_after_merge(
     manager: Any, persona_id: str, saiverse_home: Path,
 ) -> Dict[str, Any]:
@@ -435,6 +482,12 @@ def _run_import(
         _after_commit(
             result, "applying the profile to the loaded persona",
             _refresh_loaded_persona_profile, manager, persona_id,
+        )
+    item_counts = result.counts.get("items")
+    if item_counts is not None and (item_counts.added or item_counts.updated):
+        _after_commit(
+            result, "applying the private room and items to the loaded world",
+            _refresh_loaded_room_and_items, manager, persona_id,
         )
     embedding_started = False
     if result.embeddings_deferred:
@@ -582,14 +635,18 @@ def _create_and_import(manager: Any, zip_path: Path, name: str, system_prompt: s
     """既存のペルソナ作成経路で新しいペルソナ (私室含む) を作り、mode="new" で取り込む。
 
     作成の後で取り込みが失敗したとき:
-    - memory.db に message が無いと確定したら (取り込みが丸ごと巻き戻った)、作った
-      ペルソナを既存の削除経路 (manager.delete_ai) で消す。
-    - 入っていれば (memory.db の commit 後に saiverse.db の commit が失敗した稀な回)、
-      ペルソナは残して ID を知らせる — 同じパックを合流で取り込み直せば残りが入る
-      (importer.py の docstring)。
+    - memory.db の commit 後に saiverse.db の commit が失敗した稀な回 (ペルソナフォルダに
+      取り込み途中の印 WORLD_PENDING_MARKER が残る、または message が入っている) は、
+      ペルソナを残して ID を知らせる — 同じパックをこのペルソナへ合流で取り込むと、
+      印を見て saiverse.db 側の工程 (タスク・予定・イベント履歴・所持品・私室など) を
+      やり直す (importer.py の docstring「片側だけ commit された取り込みの再開」)。
+    - それ以外で memory.db に message が無いと確定したら (取り込みが丸ごと巻き戻った)、
+      作ったペルソナを既存の削除経路 (manager.delete_ai) で消す。
     - 確かめられなければ (memory.db を開けない・ロックなど)、取り込みが部分的に
       残っている可能性があるので消さずに残し、同じく ID を知らせる。
     """
+    from saiverse_memory.persona_pack.export import WORLD_PENDING_MARKER
+
     stem = _pick_ai_stem(manager, name)
     success, message, ai_id, room_id = manager.create_ai(
         name, system_prompt, manager.city_id, stem,
@@ -600,8 +657,9 @@ def _create_and_import(manager: Any, zip_path: Path, name: str, system_prompt: s
         payload = _run_import(manager, zip_path, mode="new", persona_id=ai_id, overwrite_profile=True)
     except Exception as exc:
         _, saiverse_home = _world_paths(manager)
+        pending = (saiverse_home / "personas" / ai_id / WORLD_PENDING_MARKER).is_file()
         has_messages = _memory_has_messages(saiverse_home, ai_id)
-        if has_messages is True:
+        if pending or has_messages is True:
             LOGGER.error(
                 "Persona pack import into the new persona %s failed after its memory was "
                 "written; the persona is kept", ai_id, exc_info=True,
@@ -611,7 +669,8 @@ def _create_and_import(manager: Any, zip_path: Path, name: str, system_prompt: s
                 detail=(
                     f"The persona '{ai_id}' was created and its memories were imported, but the "
                     f"rest of the import failed ({exc}). Import the same pack again with "
-                    "'merge' into this persona to fill in the rest."
+                    "'merge' into this persona: the merge finishes the unfinished part "
+                    "(tasks, schedules, event log, items and private room)."
                 ),
             )
         if has_messages is None:
@@ -623,9 +682,10 @@ def _create_and_import(manager: Any, zip_path: Path, name: str, system_prompt: s
                 status_code=500,
                 detail=(
                     f"The persona '{ai_id}' was created, but the import failed ({exc}) and "
-                    "whether its memories were partly imported could not be checked, so the "
-                    "persona was kept. Part of the import may remain. Import the same pack "
-                    "again with 'merge' into this persona to fill in the rest."
+                    "whether its memories were imported could not be checked, so the persona "
+                    "was kept. To try again, delete this persona and import the pack as a new "
+                    "persona. Importing the same pack with 'merge' into this persona adds the "
+                    "memories that are missing, but not the tasks, schedules, items or private room."
                 ),
             )
         removed = manager.delete_ai(ai_id)

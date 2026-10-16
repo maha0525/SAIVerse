@@ -455,6 +455,33 @@ def test_import_new_keeps_the_persona_when_its_memory_cannot_be_checked(
     assert dst["manager"].deleted == []
 
 
+def test_import_new_keeps_the_persona_when_the_world_part_is_pending(
+    world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """memory.db の commit 後に saiverse.db が失敗した回は、印を見てペルソナを残す。"""
+    from api.routes.people import persona_pack as route
+    from saiverse_memory.persona_pack.export import WORLD_PENDING_MARKER
+
+    pack = _export_zip(world)
+    dst = world["dst"]
+
+    def import_then_fail(manager: Any, zip_path: Path, *, persona_id: str, **_kw: Any) -> Any:
+        (dst["home"] / "personas" / persona_id / WORLD_PENDING_MARKER).write_text("{}", encoding="utf-8")
+        raise RuntimeError("saiverse.db commit failed")
+
+    monkeypatch.setattr(route, "_run_import", import_then_fail)
+    monkeypatch.setattr(route, "_memory_has_messages", lambda _home, _pid: False)
+    res = world["use"](dst).post(
+        "/api/people/persona-pack/import-new",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    new_id = f"tester_{CITY}"
+    assert res.status_code == 500, res.text
+    assert new_id in res.json()["detail"]
+    assert "merge" in res.json()["detail"] and "unfinished part" in res.json()["detail"]
+    assert dst["manager"].deleted == []
+
+
 def test_memory_has_messages_is_three_valued(tmp_path: Path) -> None:
     from api.routes.people.persona_pack import _memory_has_messages
 

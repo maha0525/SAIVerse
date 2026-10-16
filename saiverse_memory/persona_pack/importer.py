@@ -12,7 +12,27 @@ mode:
 - ``"merge"``: ``chatlog/`` ``knowledge/`` ``journal/`` ``attachments/`` だけを §5 の
   規則で混ぜる。``items/`` と ``extensions/`` は取り込まず、スキップ件数として
   内訳に載せる (intent §5「合流で混ぜる範囲」)。例外は取り込んだ Chronicle
-  ページの chunk_page_edges だけ。
+  ページの chunk_page_edges と、下の「片側だけ commit された取り込みの再開」。
+
+``extensions/saiverse/saiverse_db/`` は export.SAIVERSE_DB_TABLE_OWNERS にある表だけを
+取り込み、各行の持ち主の列は ZIP の値によらず取り込み先のペルソナ ID にする
+(子表は同じ取り込みで入った親の行を指すものだけ、addon_message_metadata は
+取り込み先の memory.db にあるメッセージ宛てのものだけ)。表に無いテーブルは警告して
+取り込まない — ZIP の行が別のペルソナ宛てに書き込まれないようにするため。
+
+``items/`` (mode="new") は世界へ登録する: 取り込み先のペルソナの私室 (ai.PRIVATE_ROOM_ID が
+指す、作成経路が作った building 行) に ZIP の私室の見た目と設定 (ROOM_COPIED_COLUMNS と
+IMAGE_PATH のファイル) を写し、fixture 行をその部屋に入れ、item / item_location 行を
+登録する。ファイルは共有メディアフォルダへ復元して、その場所を SAIVERSE_HOME からの
+相対パスで指す (manager/items.py が FILE_PATH に書く形)。ITEM_ID は取り込み先の
+ペルソナ ID と元の ITEM_ID から決まる UUID (uuid5) で振り直す — 同じパックを同じ
+ペルソナへもう一度入れても同じ ID になり、二重に登録されない。
+
+添付の参照 (message metadata の images / documents / media) のうち、ZIP から実体を
+復元できたものは復元先の uri / path に書き換え、復元できなかったものは path を None に
+し、uri は ``saiverse://<種類>/<ファイル名>`` の形のときだけ残す。ZIP が書いた
+ホスト側のパスをそのまま取り込み先に残すと、再エクスポートでそのパスのファイル
+(本体 DB など) を読みに行くため。
 
 ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を継承する:
 
@@ -34,7 +54,7 @@ ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を
 - 合流時の Chronicle (chronicle 分類の trunk でないページ) は、取り込み先に無い
   id の行のうち、取り込み先の被覆と重ならない枝だけを入れる
   (:meth:`_ImportJob.plan_chronicle_merge`)。Lv1 は source_ids が取り込み先の
-  全 Lv1 の source_ids と交わらないもの、上位は子が全員取り込む行か死んだ参照の
+  全 Lv1 と先に受理した ZIP の Lv1 の source_ids に交わらないもの、上位は子が全員取り込む行か死んだ参照の
   もの。取り込み先に同じ id がある行は上書きしない。親が取り込まれない行は
   root_chronicle の未統合に置き、上位への縁組は bands.reconnect_contained_orphans
   に任せる。取り込んだページの chunk_page_edges も合流する
@@ -53,9 +73,17 @@ MAX+1 から振り直し、元の番号を行の metadata に ``original_short_i
 書き込みは memory.db と saiverse.db それぞれ単一トランザクションで行い、全段が
 成功したときだけ commit する。途中で失敗したら両方 rollback し、この取り込みが
 作ったファイルを消す。ZIP の JSON の解釈と形の検査は書き込みより前に全部済ませる。
-二つの DB の commit は別々なので、memory.db の commit 後に saiverse.db の commit が
-失敗した場合だけは片側が残る (例外で知らせる。合流で再実行すれば UUID 照合で
-足りない分だけが入る)。
+
+片側だけ commit された取り込みの再開: 二つの DB の commit は別々なので、memory.db の
+commit 後に saiverse.db の commit が失敗すると片側が残る。mode="new" は memory.db を
+commit する前にペルソナフォルダへ印 (export.WORLD_PENDING_MARKER。manifest の
+persona_id・format・version、取り込みの識別子、overwrite_profile) を書き、saiverse.db の
+commit が成功したら消す。印が残ったペルソナへ同じパック (manifest の persona_id が
+一致) を mode="merge" で取り込むと、合流の工程に加えて mode="new" の世界側の工程
+(extensions/saiverse/saiverse_db/・items/・印に記録した overwrite_profile による
+profile/) を行い、saiverse.db の commit が成功したら印を消す。task_book は合流でも
+入る。memory.db 側とファイルは合流の照合 (UUID・同じ中身のファイルの再利用) で
+二重にならない。
 
 embeddings は運ばれてこない。取り込んだ message のうち content が空白だけでない
 ものは、同じトランザクションで空のベクトル行 (``storage.DEFERRED_VECTOR``) を
@@ -89,6 +117,8 @@ from .export import (
     _SUMMARY_SUFFIX,
     EPOCH_COLUMNS,
     JSON_TEXT_COLUMNS,
+    SAIVERSE_DB_TABLE_OWNERS,
+    WORLD_PENDING_MARKER,
     _attachment_key,
 )
 from .format import FORMAT_NAME, MANIFEST_NAME, RAW_TEXT_MARKER, decode_value, iso_to_epoch
@@ -113,9 +143,27 @@ PROFILE_PROTECTED_COLUMNS: Tuple[str, ...] = (
 )
 _PROFILE_FILE_COLUMNS = ("AVATAR_IMAGE", "APPEARANCE_IMAGE_PATH")
 
-# items/ の置き場 (ペルソナフォルダ配下)。世界への登録 (building / item 行) は
-# 呼び出し側の課題。
-IMPORTED_ITEMS_DIR = "imported_items"
+# items/private_room.json の building 行のうち、取り込み先の私室へ写す列 (見た目と設定)。
+# 写さない列: CITYID / BUILDINGID (取り込み先の私室の識別子と街)、MAP_X / MAP_Y /
+# REGION_ID / FACILITY_ROLES (世界の中の位置と役割)、PHYSICAL_VESSEL_ID (取り込み先の
+# 機体との結び付き)、EXTRA_PROMPT_FILES (指すファイルを運ばない)。IMAGE_PATH は値では
+# なくファイルを復元して取り込み先の場所を書く。BUILDINGNAME は同じ街に同名の建物が
+# 無いときだけ写す (building の UNIQUE(CITYID, BUILDINGNAME))。
+ROOM_COPIED_COLUMNS: Tuple[str, ...] = (
+    "BUILDINGNAME",
+    "CAPACITY",
+    "SYSTEM_INSTRUCTION",
+    "ENTRY_PROMPT",
+    "AUTO_PROMPT",
+    "DESCRIPTION",
+    "AUTO_INTERVAL_SEC",
+    "ITEM_DISPLAY_LIMIT",
+    "SHOW_MOVEMENT_NOTICES",
+)
+
+# items/ で振り直す ITEM_ID / FIXTURE_ID の uuid5 の名前空間 (値は固定。変えると、
+# 変える前に取り込んだ行を同じパックの再取り込みで照合できなくなる)
+_ID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, f"saiverse://{FORMAT_NAME}")
 
 _EDIT_SOURCE = "persona_pack_import"
 _CATEGORY_CORE = "core"           # sai_memory/core_memory.py の CATEGORY_CORE
@@ -327,6 +375,43 @@ def _norm(path: Path) -> str:
     return os.path.normcase(os.path.abspath(str(path)))
 
 
+def _safe_media_uri(uri: Any) -> bool:
+    """``saiverse://<種類>/<ファイル名>`` で、ファイル名が区切りや ``..`` を含まない形か。
+
+    この形の uri は取り込み先の共有メディアフォルダ直下の同名ファイルだけを指す
+    (saiverse/media_utils.py の resolve_media_uri)。
+    """
+    if not isinstance(uri, str):
+        return False
+    for prefix, _dirname in _MEDIA_URI_DIRS:
+        if uri.startswith(prefix):
+            name = uri[len(prefix):]
+            return (
+                bool(name)
+                and name not in (".", "..")
+                and "/" not in name
+                and "\\" not in name
+                and ":" not in name
+                and name.strip() == name
+            )
+    return False
+
+
+def _media_dir_for(original_path: Any, item_type: Any) -> str:
+    """items/ のファイルを復元する共有メディアフォルダの名前。
+
+    元の FILE_PATH の中に共有メディアフォルダ名があればそれ、無ければ TYPE
+    (picture / audio / video) から決め、どちらでもなければ documents。
+    """
+    if isinstance(original_path, str) and original_path.strip():
+        parts = original_path.strip().replace("\\", "/").split("/")
+        for part in reversed(parts[:-1]):
+            if part in _MEDIA_DIR_NAMES:
+                return part
+    kind = str(item_type or "").strip().lower()
+    return {"picture": "image", "audio": "audio", "video": "video"}.get(kind, "documents")
+
+
 # ---------------------------------------------------------------------------
 # 読み込んだ ZIP の中身 (書き込み前に全部検査する)
 # ---------------------------------------------------------------------------
@@ -335,6 +420,7 @@ def _norm(path: Path) -> str:
 class _PackData:
     source_id: str
     contents: Set[str]
+    version: str = ""
     threads: List[Dict[str, Any]] = field(default_factory=list)
     stelis_threads: List[Dict[str, Any]] = field(default_factory=list)
     messages: List[Dict[str, Any]] = field(default_factory=list)
@@ -347,7 +433,9 @@ class _PackData:
     day_reports: List[Tuple[str, PurePosixPath]] = field(default_factory=list)
     attachment_index: List[Dict[str, Any]] = field(default_factory=list)
     profile: Optional[Dict[str, Any]] = None
-    item_files: List[Tuple[str, PurePosixPath]] = field(default_factory=list)
+    # items/private_room.json と items/items.json (形は _load_items で検査済み)
+    private_room: Optional[Dict[str, Any]] = None
+    items: Optional[Dict[str, Any]] = None
     ext_memory_tables: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     ext_saiverse_tables: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     ext_persona_files: List[Tuple[str, PurePosixPath]] = field(default_factory=list)
@@ -377,7 +465,7 @@ def _load_pack(reader: _PackReader) -> _PackData:
     if not isinstance(contents, list) or not all(isinstance(c, str) for c in contents):
         raise ValueError("persona pack: manifest.contents must be a list of folder names")
 
-    pack = _PackData(source_id=source_id, contents=set(contents))
+    pack = _PackData(source_id=source_id, contents=set(contents), version=version)
     has = pack.contents.__contains__
 
     if has("chatlog"):
@@ -411,9 +499,7 @@ def _load_pack(reader: _PackReader) -> _PackData:
             raise ValueError("persona pack: profile/profile.json must have an 'ai' object")
         pack.profile = profile
     if has("items"):
-        pack.item_files = [
-            (name, _safe_relpath(name[len("items/"):], name)) for name in reader.files_under("items/")
-        ]
+        _load_items(reader, pack)
     if has("extensions/saiverse"):
         pack.ext_persona_files = [
             (name, _safe_relpath(name[len(_EXT_PERSONA):], name))
@@ -429,6 +515,64 @@ def _load_pack(reader: _PackReader) -> _PackData:
                 # chunk_page_edges をここから取り込み、残りの表も件数を内訳に載せる
                 target[table[:-5]] = reader.rows(name)
     return pack
+
+
+def _check_zip_file_ref(reader: _PackReader, value: Any, where: str) -> None:
+    """items/ の JSON が指す ZIP 内のファイルを検査する (None か、ZIP にある items/ 配下の安全な名前)。"""
+    if value is None:
+        return
+    if not isinstance(value, str) or value not in reader.names or not value.startswith("items/"):
+        raise ValueError(f"persona pack: {where} points to a missing file {value!r}")
+    _safe_relpath(value[len("items/"):], where)
+
+
+def _load_items(reader: _PackReader, pack: _PackData) -> None:
+    """items/private_room.json と items/items.json を読み、形を検査する (書き込みはしない)。"""
+    name = "items/private_room.json"
+    if name in reader.names:
+        room = reader.load_json(name)
+        if (
+            not isinstance(room, dict)
+            or not isinstance(room.get("building"), dict)
+            or not isinstance(room.get("fixtures", []), list)
+            or not all(isinstance(f, dict) for f in room.get("fixtures", []))
+            or not isinstance(room.get("files") or {}, dict)
+        ):
+            raise ValueError(f"persona pack: {name} must have a 'building' object and a 'fixtures' list")
+        files = room.get("files") or {}
+        _check_zip_file_ref(reader, files.get("IMAGE_PATH"), f"{name} files.IMAGE_PATH")
+        fixture_files = files.get("fixtures") or {}
+        if not isinstance(fixture_files, dict):
+            raise ValueError(f"persona pack: {name} files.fixtures must be an object")
+        for key, value in fixture_files.items():
+            _check_zip_file_ref(reader, value, f"{name} files.fixtures[{key!r}]")
+        for i, fx in enumerate(room.get("fixtures", [])):
+            if not isinstance(fx.get("FIXTURE_ID"), str) or not fx.get("FIXTURE_ID"):
+                raise ValueError(f"persona pack: {name} fixtures[{i}] missing 'FIXTURE_ID'")
+        pack.private_room = room
+    name = "items/items.json"
+    if name in reader.names:
+        doc = reader.load_json(name)
+        if (
+            not isinstance(doc, dict)
+            or not isinstance(doc.get("items"), list)
+            or not isinstance(doc.get("locations"), list)
+            or not isinstance(doc.get("files") or {}, dict)
+        ):
+            raise ValueError(f"persona pack: {name} must have 'items' and 'locations' lists")
+        for i, item in enumerate(doc["items"]):
+            if not isinstance(item, dict) or not isinstance(item.get("ITEM_ID"), str) or not item["ITEM_ID"]:
+                raise ValueError(f"persona pack: {name} items[{i}] missing 'ITEM_ID'")
+        for i, loc in enumerate(doc["locations"]):
+            if not isinstance(loc, dict) or not all(
+                isinstance(loc.get(k), str) and loc.get(k) for k in ("ITEM_ID", "OWNER_KIND", "OWNER_ID")
+            ):
+                raise ValueError(
+                    f"persona pack: {name} locations[{i}] needs ITEM_ID, OWNER_KIND and OWNER_ID"
+                )
+        for key, value in (doc.get("files") or {}).items():
+            _check_zip_file_ref(reader, value, f"{name} files[{key!r}]")
+        pack.items = doc
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +726,18 @@ class _ImportJob:
         self.imported_chronicle_ids: Set[str] = set()
         # 合流で取り込んだ extensions/saiverse/memory_db/ の表 (count_merge_skips が数えない)
         self._merged_ext_tables: Set[str] = set()
+        # ZIP の messages の id (stage_chatlog の後は全部が取り込み先の memory.db にある)。
+        # addon_message_metadata の取り込みをこのメッセージ宛ての行に限る
+        self.message_ids: Set[str] = set()
+        # 片側だけ commit された mode="new" の取り込みを、この合流で再開するか
+        # (モジュール docstring)。True なら世界側の mode="new" の工程も行う
+        self.resume_world = False
+        self.marker_path = persona_dir / WORLD_PENDING_MARKER
+
+    @property
+    def world_new(self) -> bool:
+        """世界側 (saiverse.db の extensions/・items/) の mode="new" の工程を行うか。"""
+        return self.mode == "new" or self.resume_world
 
     # --- 共通 ---------------------------------------------------------------
 
@@ -705,6 +861,8 @@ class _ImportJob:
                         f"mode='new' requires a persona without messages; "
                         f"{self.target} has {n_messages}. Use mode='merge'."
                     )
+            else:
+                self.check_pending_marker()
             memory_committed = False
             try:
                 memory.execute("BEGIN IMMEDIATE")
@@ -718,18 +876,20 @@ class _ImportJob:
                 world.execute("BEGIN IMMEDIATE")
                 self.stage_task_book(world)
                 self.stage_profile(world)
-                if self.mode == "new":
+                if self.world_new:
                     self.stage_ext_saiverse(world)
+                    self.stage_items(world)
                 self.stage_day_reports()
                 if self.mode == "new":
                     self.stage_persona_dir_files()
-                    self.stage_items()
                 else:
                     self.count_merge_skips()
                 self.write_files()
+                if self.mode == "new":
+                    self.write_pending_marker()
                 memory.execute("COMMIT")
                 memory_committed = True
-                world.execute("COMMIT")
+                self.commit_world(world)
             except BaseException:
                 for conn in (world, memory) if not memory_committed else (world,):
                     try:
@@ -742,14 +902,72 @@ class _ImportJob:
                 else:
                     LOGGER.error(
                         "[persona_pack] memory.db was committed but saiverse.db was not "
-                        "(persona=%s); re-run the import with mode='merge' to fill the rest",
-                        self.target,
+                        "(persona=%s); %s is left in the persona folder. Importing the same "
+                        "pack with mode='merge' finishes the saiverse.db part",
+                        self.target, WORLD_PENDING_MARKER,
                     )
                 raise
+            if self.world_new:
+                self.remove_pending_marker()
         finally:
             world.close()
             if memory is not None:
                 memory.close()
+
+    def commit_world(self, world: sqlite3.Connection) -> None:
+        """saiverse.db の commit (memory.db の commit の後。テストはここで失敗を起こす)。"""
+        world.execute("COMMIT")
+
+    # --- 片側だけ commit された取り込みの印 ---------------------------------------
+
+    def write_pending_marker(self) -> None:
+        """mode="new": memory.db の commit 前に印を書く (失敗したら created_files で消える)。"""
+        payload = {
+            "persona_id": self.source,
+            "format": FORMAT_NAME,
+            "version": self.pack.version,
+            "import_id": uuid.uuid4().hex,
+            "overwrite_profile": self.overwrite_profile,
+        }
+        tmp = self.marker_path.with_name(self.marker_path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.marker_path)
+        self.created_files.append(self.marker_path)
+
+    def check_pending_marker(self) -> None:
+        """mode="merge": 印があり、同じパック (persona_id 一致) なら世界側の工程を再開する。"""
+        if not self.marker_path.is_file():
+            return
+        try:
+            marker = json.loads(self.marker_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self.warn(f"{WORLD_PENDING_MARKER} could not be read ({exc}); the earlier import is not resumed")
+            return
+        if not isinstance(marker, dict) or marker.get("format") != FORMAT_NAME:
+            self.warn(f"{WORLD_PENDING_MARKER} is not a persona pack marker; the earlier import is not resumed")
+            return
+        if marker.get("persona_id") != self.source:
+            self.warn(
+                f"an earlier import of the pack of {marker.get('persona_id')!r} is unfinished in this "
+                f"persona; this pack ({self.source!r}) does not resume it"
+            )
+            return
+        self.resume_world = True
+        if marker.get("overwrite_profile") is True:
+            self.overwrite_profile = True
+        self.warn(
+            "resuming the unfinished part of an earlier new-persona import of this pack "
+            "(tasks, schedules, event log, items and private room)"
+        )
+
+    def remove_pending_marker(self) -> None:
+        """saiverse.db の commit が成功した後に印を消す (消せなくても取り込みは成功のまま)。"""
+        try:
+            self.marker_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self.warn(f"{WORLD_PENDING_MARKER} could not be removed: {exc}")
 
     def write_files(self) -> None:
         """計画したファイルを書く。既存のファイルは決して上書きしない ("xb")。"""
@@ -827,6 +1045,8 @@ class _ImportJob:
                 present.add(new_id)
                 counts.added += 1
 
+        # 既にあるものは照合で飛ばし、無いものは下で入れるので、全部が取り込み先に揃う
+        self.message_ids = {m["id"] for m in pack.messages}
         if not pack.messages:
             if pack.attachment_index:
                 self.result.count("attachments").skipped += len(pack.attachment_index)
@@ -1000,8 +1220,12 @@ class _ImportJob:
             return candidate, False
 
     def relocate_metadata(self, metadata: Any) -> Any:
-        """取り込んだ添付の置き場に合わせて metadata の uri / path を書き換える。"""
-        if not isinstance(metadata, dict) or not self.relocations:
+        """metadata の添付参照の uri / path を取り込み先に合わせる (モジュール docstring)。
+
+        ZIP から実体を復元した参照は復元先の uri / path に書き換える。復元しなかった
+        参照は path を None にし、uri は :func:`_safe_media_uri` の形のときだけ残す。
+        """
+        if not isinstance(metadata, dict):
             return metadata
         out = dict(metadata)
         for key in _ATTACHMENT_KEYS:
@@ -1012,17 +1236,22 @@ class _ImportJob:
             for entry in entries:
                 if isinstance(entry, dict) and (entry.get("uri") or entry.get("path")):
                     reloc = self.relocations.get(_attachment_key(entry))
+                    entry = dict(entry)
+                    uri = entry.get("uri")
+                    path = entry.get("path")
                     if reloc is not None:
-                        entry = dict(entry)
-                        uri = entry.get("uri")
                         if reloc.renamed and isinstance(uri, str):
                             for prefix, _dirname in _MEDIA_URI_DIRS:
                                 if uri.startswith(prefix):
                                     entry["uri"] = prefix + reloc.dest.name
                                     break
-                        path = entry.get("path")
                         if isinstance(path, str) and path.strip():
                             entry["path"] = str(reloc.dest)
+                    else:
+                        if path is not None:
+                            entry["path"] = None
+                        if uri is not None and not _safe_media_uri(uri):
+                            entry["uri"] = None
                 rewritten.append(entry)
             out[key] = rewritten
         return out
@@ -1175,9 +1404,10 @@ class _ImportJob:
         取り込むのは「ZIP にあって取り込み先に同じ id が無い」行のうち:
 
         - Lv1 (metadata.level == 1): is_deleted でなく、source_ids が取り込み先の
-          全 Lv1 の source_ids と一つも交わらないもの。交わる行は、取り込み先で
-          吸収・差し替え済みの旧記事か、取り込み先の Lv1 と同じメッセージを覆う
-          記事なので入れない (docs/issues/lv1_source_ids_duplicates_and_orphans.md)。
+          全 Lv1 と、この合流で先に受理した ZIP の Lv1 の source_ids と一つも
+          交わらないもの。交わる行は、取り込み先で吸収・差し替え済みの旧記事か、
+          取り込み先 (または ZIP の別の Lv1) と同じメッセージを覆う記事なので
+          入れない (docs/issues/lv1_source_ids_duplicates_and_orphans.md)。
         - Lv2 以上: is_deleted でなく、source_ids の子が全員「取り込むと判定済み」
           か「ZIP にも取り込み先にも無い id」(sai_memory.arasuji.absorption.
           _sweep_broken_parents が掃除する) で、取り込む子が 1 本以上あるもの。
@@ -1239,6 +1469,9 @@ class _ImportJob:
                 continue
             candidates[page_id] = (level, sources, decode_value(page.get("parent_id")))
 
+        # level の昇順に、同じ level の中は ZIP での並び順 (sorted は安定) で判定する。
+        # 受理した Lv1 の source_ids は被覆の集合へ足し、後に来る ZIP の Lv1 も
+        # それと交差判定する (ZIP の中で同じメッセージを覆う Lv1 は最初の一本だけ入る)。
         overlapping = on_shared = 0
         for page_id, (level, sources, _parent) in sorted(
             candidates.items(), key=lambda item: item[1][0]
@@ -1248,6 +1481,7 @@ class _ImportJob:
                     overlapping += 1
                     continue
                 plan.accepted.add(page_id)
+                target_lv1_sources.update(sources)
                 continue
             live = 0
             ok = True
@@ -1594,7 +1828,26 @@ class _ImportJob:
                     counts.skipped += 1
 
     def stage_ext_saiverse(self, world: sqlite3.Connection) -> None:
-        for table, rows in sorted(self.pack.ext_saiverse_tables.items()):
+        """extensions/saiverse/saiverse_db/ を取り込む (SAIVERSE_DB_TABLE_OWNERS の表だけ)。
+
+        表は SAIVERSE_DB_TABLE_OWNERS の並び (親が子より先) で処理する。持ち主の列は
+        ZIP の値によらず取り込み先のペルソナ ID にする。子表 ("parent") は、親
+        テーブルの行のうち ZIP にあって、取り込み先でこのペルソナの行になっているもの
+        (今回入れた行と、前の取り込みで入った行) を指す行だけ。addon_message_metadata
+        ("message") は self.message_ids 宛ての行だけ。
+        """
+        pack_tables = self.pack.ext_saiverse_tables
+        for table in sorted(set(pack_tables) - set(SAIVERSE_DB_TABLE_OWNERS)):
+            rows = pack_tables[table]
+            self.result.count(f"extensions/saiverse_db/{table}").skipped += len(rows)
+            self.warn(
+                f"extensions/saiverse/saiverse_db/{table}.json is not a table a persona pack "
+                f"carries; {len(rows)} row(s) not imported"
+            )
+        for table, rule in SAIVERSE_DB_TABLE_OWNERS.items():
+            if table not in pack_tables:
+                continue
+            rows = pack_tables[table]
             counts = self.result.count(f"extensions/saiverse_db/{table}")
             if not rows:
                 continue
@@ -1602,6 +1855,32 @@ class _ImportJob:
                 counts.skipped += len(rows)
                 self.warn(f"saiverse.db has no table {table!r}; {len(rows)} row(s) skipped")
                 continue
+            column = rule[1]
+            if column not in self.columns(world, table):
+                counts.skipped += len(rows)
+                self.warn(f"saiverse.db table {table!r} has no column {column!r}; {len(rows)} row(s) skipped")
+                continue
+            allowed: Optional[Set[Any]] = None
+            if rule[0] == "parent":
+                parent_table, parent_key = rule[2], rule[3]
+                parent_owner = SAIVERSE_DB_TABLE_OWNERS[parent_table][1]
+                zip_parents = {
+                    decode_value(r.get(parent_key)) for r in pack_tables.get(parent_table, [])
+                }
+                allowed = set()
+                if zip_parents and self.table_exists(world, parent_table):
+                    keys = [k for k in zip_parents if k is not None]
+                    for i in range(0, len(keys), _CHUNK):
+                        part = keys[i:i + _CHUNK]
+                        allowed.update(r[0] for r in world.execute(
+                            f"SELECT {_quote(parent_key)} FROM {_quote(parent_table)} "
+                            f"WHERE {_quote(parent_owner)} = ? "
+                            f"AND {_quote(parent_key)} IN ({', '.join('?' for _ in part)})",
+                            [self.target, *part],
+                        ))
+            elif rule[0] == "message":
+                allowed = self.message_ids
+            refused = 0
             # 単一列の整数の主キーは世界全体の連番なので、取り込み先で振り直す。
             # 整数かどうかは INTEGER affinity (型名に "INT" を含む — SQLite の型
             # affinity の規則) で判定する。型名がちょうど INTEGER の列は rowid の別名
@@ -1622,6 +1901,12 @@ class _ImportJob:
                 decoded = {
                     k: self.remap_exact(decode_value(v)) for k, v in row.items() if k != pk_col
                 }
+                if rule[0] == "owner":
+                    decoded[column] = self.target
+                elif decoded.get(column) not in allowed:
+                    refused += 1
+                    counts.skipped += 1
+                    continue
                 if next_pk is not None:
                     decoded[pk_col] = next_pk
                     next_pk += 1
@@ -1630,6 +1915,11 @@ class _ImportJob:
                     counts.added += 1
                 else:
                     counts.skipped += 1
+            if refused:
+                self.warn(
+                    f"extensions/saiverse_db/{table}: {refused} row(s) not imported; their "
+                    f"{column} does not point to this persona's imported rows"
+                )
 
     def stage_persona_dir_files(self) -> None:
         files = self.pack.ext_persona_files
@@ -1637,20 +1927,253 @@ class _ImportJob:
             return
         counts = self.result.count("extensions/persona_dir")
         for zip_name, rel in files:
-            if (len(rel.parts) == 1 and rel.name in _MEMORY_DB_FILES) or rel.parts[0] == _DAY_REPORTS_DIR:
+            if (
+                (len(rel.parts) == 1 and (rel.name in _MEMORY_DB_FILES or rel.name == WORLD_PENDING_MARKER))
+                or rel.parts[0] == _DAY_REPORTS_DIR
+            ):
                 counts.skipped += 1
                 self.warn(f"{zip_name}: not restored (reserved name in the persona folder)")
                 continue
             self.plan_keep_existing(zip_name, self.persona_dir.joinpath(*rel.parts), counts)
 
-    def stage_items(self) -> None:
-        files = self.pack.item_files
-        if not files:
+    # --- items/ (世界への登録) ----------------------------------------------------
+
+    def stage_items(self, world: sqlite3.Connection) -> None:
+        """私室の見た目と設定・fixture・所持品を世界へ登録する (モジュール docstring)。
+
+        内訳は ``items`` 一つにまとめる: added = 登録した item と fixture の行数、
+        updated = 私室の設定を写したら 1、skipped = 登録しなかった item と fixture の行数
+        (同じパックで登録済み・置き場所を対応づけられない・私室が無い)。
+        """
+        pack = self.pack
+        if pack.private_room is None and pack.items is None:
             return
         counts = self.result.count("items")
-        base = self.persona_dir / IMPORTED_ITEMS_DIR
-        for zip_name, rel in files:
-            self.plan_keep_existing(zip_name, base.joinpath(*rel.parts), counts)
+        room_id: Optional[str] = None
+        row = world.execute("SELECT PRIVATE_ROOM_ID FROM ai WHERE AIID = ?", (self.target,)).fetchone()
+        if row and row[0] and world.execute(
+            "SELECT 1 FROM building WHERE BUILDINGID = ?", (row[0],)
+        ).fetchone():
+            room_id = row[0]
+        zip_room_id: Optional[str] = None
+        if pack.private_room is not None:
+            zip_room_id = decode_value(pack.private_room["building"].get("BUILDINGID"))
+            if room_id is None:
+                counts.skipped += len(pack.private_room.get("fixtures") or [])
+                self.warn(f"{self.target} has no private room in saiverse.db; the private room was not restored")
+            else:
+                self.restore_private_room(world, room_id, counts)
+        if pack.items is not None:
+            self.restore_items(world, room_id, zip_room_id, counts)
+
+    def plan_media_restore(self, zip_name: str, media_dir: str) -> str:
+        """ZIP のファイルを共有メディアフォルダ media_dir へ置く計画を立て、
+        SAIVERSE_HOME からの相対パス (manager/items.py が FILE_PATH に書く形) を返す。
+
+        同名で中身の同じファイルがあれば再利用する。``<名前>.summary.txt`` が ZIP の
+        隣にあれば一緒に置く。
+        """
+        name = PurePosixPath(zip_name).name
+        _safe_relpath(name, zip_name)
+        data_hash = _sha256_bytes(self.reader.read(zip_name))
+        summary_zip: Optional[str] = zip_name + _SUMMARY_SUFFIX
+        if summary_zip not in self.reader.names:
+            summary_zip = None
+        dest, reused = self.choose_media_dest(self.home / media_dir, name, data_hash, summary_zip is not None)
+        if not reused:
+            self.plan_file(zip_name, dest)
+        if summary_zip is not None:
+            summary_dest = dest.with_name(dest.name + _SUMMARY_SUFFIX)
+            if not summary_dest.exists() and not self.is_reserved(summary_dest):
+                self.plan_file(summary_zip, summary_dest)
+        return f"{media_dir}/{dest.name}"
+
+    def derived_id(self, kind: str, source_id: str) -> str:
+        """取り込み先のペルソナと元の ID から決まる ITEM_ID / FIXTURE_ID (uuid5)。"""
+        return str(uuid.uuid5(_ID_NAMESPACE, f"{self.target}/{kind}/{source_id}"))
+
+    def restore_private_room(self, world: sqlite3.Connection, room_id: str, counts: ImportCounts) -> None:
+        room_doc = self.pack.private_room or {}
+        room = _decode_row(room_doc["building"])
+        files = room_doc.get("files") or {}
+        cols = set(self.columns(world, "building"))
+        updates: Dict[str, Any] = {
+            col: room[col] for col in ROOM_COPIED_COLUMNS
+            if col in cols and col in room and room[col] is not None
+        }
+        name = updates.get("BUILDINGNAME")
+        if name is not None and world.execute(
+            "SELECT 1 FROM building WHERE BUILDINGNAME = ? AND BUILDINGID <> ? "
+            "AND CITYID = (SELECT CITYID FROM building WHERE BUILDINGID = ?)",
+            (name, room_id, room_id),
+        ).fetchone():
+            del updates["BUILDINGNAME"]
+            self.warn(f"private room: another building in this city is named {name!r}; the room name was kept")
+        if "IMAGE_PATH" in cols:
+            image_zip = files.get("IMAGE_PATH")
+            if image_zip:
+                updates["IMAGE_PATH"] = self.plan_media_restore(image_zip, "image")
+            elif room.get("IMAGE_PATH"):
+                self.warn("private room: the image file is not in the pack; IMAGE_PATH left unchanged")
+        if updates:
+            world.execute(
+                f"UPDATE building SET {', '.join(f'{_quote(c)} = ?' for c in updates)} WHERE BUILDINGID = ?",
+                [*updates.values(), room_id],
+            )
+        counts.updated += 1
+
+        fixtures = room_doc.get("fixtures") or []
+        if not fixtures:
+            return
+        if not self.table_exists(world, "fixture"):
+            counts.skipped += len(fixtures)
+            self.warn("saiverse.db has no fixture table; fixtures skipped")
+            return
+        fixture_files = files.get("fixtures") or {}
+        for raw in fixtures:
+            fx = _decode_row(raw)
+            source_fid = fx["FIXTURE_ID"]
+            fid = source_fid
+            existing = world.execute(
+                "SELECT BUILDING_ID FROM fixture WHERE FIXTURE_ID = ?", (fid,)
+            ).fetchone()
+            if existing is not None and existing[0] != room_id:
+                # 別の部屋の fixture と ID が衝突する: 振り直す
+                fid = self.derived_id("fixture", source_fid)
+                existing = world.execute(
+                    "SELECT BUILDING_ID FROM fixture WHERE FIXTURE_ID = ?", (fid,)
+                ).fetchone()
+            if existing is not None:
+                counts.skipped += 1  # 同じパックで登録済み
+                continue
+            fx["FIXTURE_ID"] = fid
+            fx["BUILDING_ID"] = room_id
+            fx["CREATOR_ID"] = self.remap_exact(fx.get("CREATOR_ID"))
+            zip_file = fixture_files.get(source_fid)
+            if zip_file:
+                fx["FILE_PATH"] = self.plan_media_restore(
+                    zip_file, _media_dir_for(fx.get("FILE_PATH"), fx.get("TYPE"))
+                )
+            elif fx.get("FILE_PATH"):
+                self.warn(f"fixture {fx.get('NAME')!r}: its file is not in the pack; FILE_PATH cleared")
+                fx["FILE_PATH"] = None
+            self.insert(world, "fixture", fx)
+            counts.added += 1
+
+    def restore_items(
+        self,
+        world: sqlite3.Connection,
+        room_id: Optional[str],
+        zip_room_id: Optional[str],
+        counts: ImportCounts,
+    ) -> None:
+        doc = self.pack.items or {}
+        items: Dict[str, Dict[str, Any]] = {}
+        for raw in doc["items"]:
+            items.setdefault(raw["ITEM_ID"], _decode_row(raw))
+        if not items:
+            return
+        if not (self.table_exists(world, "item") and self.table_exists(world, "item_location")):
+            counts.skipped += len(items)
+            self.warn("saiverse.db has no item / item_location table; items skipped")
+            return
+        new_ids = {iid: self.derived_id("item", iid) for iid in items}
+
+        # 置き場所 (1 item 1 行: UNIQUE(ITEM_ID)) を取り込み先の持ち主へ対応づける。
+        # 入れ物 (OWNER_KIND='bag') の中身は、入れ物が登録できるときだけ登録する
+        locations: Dict[str, Dict[str, Any]] = {}
+        for raw in doc["locations"]:
+            locations.setdefault(raw["ITEM_ID"], _decode_row(raw))
+        placed: Dict[str, Tuple[str, str]] = {}
+        unplaced: Set[str] = set()
+        pending = {iid for iid in items if iid in locations}
+        changed = True
+        while changed:
+            changed = False
+            for iid in sorted(pending):
+                loc = locations[iid]
+                kind, owner = loc["OWNER_KIND"], loc["OWNER_ID"]
+                target_owner: Optional[str] = None
+                if kind == "persona" and owner == self.source:
+                    target_owner = self.target
+                elif kind == "building" and owner == zip_room_id and room_id is not None:
+                    target_owner = room_id
+                elif kind == "bag" and owner in items:
+                    if owner in placed:
+                        target_owner = new_ids[owner]
+                    elif owner not in unplaced and owner in pending:
+                        continue  # 入れ物の判定待ち
+                if target_owner is None:
+                    unplaced.add(iid)
+                else:
+                    placed[iid] = (kind, target_owner)
+                pending.discard(iid)
+                changed = True
+        unplaced.update(pending)  # 入れ物の連鎖が輪になっているもの
+        unplaced.update(iid for iid in items if iid not in locations)
+        if unplaced:
+            counts.skipped += len(unplaced)
+            self.warn(
+                f"items: {len(unplaced)} item(s) not imported; their place (persona, private room "
+                "or container) could not be matched in this world"
+            )
+
+        present = self.existing_keys(world, "item", "ITEM_ID", (new_ids[i] for i in placed))
+        counts.skipped += sum(1 for i in placed if new_ids[i] in present)  # 同じパックで登録済み
+        # 入れ物を中身より先に入れる (placed は判定の順 = 入れ物が先)
+        to_insert = [(iid, kind_owner) for iid, kind_owner in placed.items() if new_ids[iid] not in present]
+        # SHORT_ID (item:N) は世界全体の連番 (database/models.py の _assign_item_short_id が
+        # MAX+1 で振る)。intent §5 の短縮番号の規則で、元の番号が取り込み先の MAX より
+        # 大きければそのまま、それ以外と番号の無い行は MAX+1 から振る
+        (col_max,) = world.execute("SELECT COALESCE(MAX(SHORT_ID), 0) FROM item").fetchone()
+        originals = [_as_int(items[iid].get("SHORT_ID")) for iid, _ in to_insert]
+        planned = _plan_numbers(originals, int(col_max or 0))
+        top = max([int(col_max or 0), *(n for n in planned if n is not None)])
+        for i, n in enumerate(planned):
+            if n is None:
+                top += 1
+                planned[i] = top
+        renumbered = sum(1 for o, n in zip(originals, planned) if o is not None and o != n)
+        occupied: Dict[Tuple[str, str], Set[int]] = {}
+        files = doc.get("files") or {}
+        for (iid, (kind, owner)), short_id in zip(to_insert, planned):
+            new_id = new_ids[iid]
+            item = dict(items[iid])
+            item["ITEM_ID"] = new_id
+            item["SHORT_ID"] = short_id
+            item["CREATOR_ID"] = self.remap_exact(item.get("CREATOR_ID"))
+            zip_file = files.get(iid)
+            if zip_file:
+                item["FILE_PATH"] = self.plan_media_restore(
+                    zip_file, _media_dir_for(item.get("FILE_PATH"), item.get("TYPE"))
+                )
+            elif item.get("FILE_PATH"):
+                self.warn(f"item {item.get('NAME')!r}: its file is not in the pack; FILE_PATH cleared")
+                item["FILE_PATH"] = None
+            self.insert(world, "item", item)
+
+            loc = dict(locations[iid])
+            loc.pop("LOCATION_ID", None)
+            key = (kind, owner)
+            if key not in occupied:
+                occupied[key] = {
+                    r[0] for r in world.execute(
+                        "SELECT SLOT_NUMBER FROM item_location WHERE OWNER_KIND = ? AND OWNER_ID = ? "
+                        "AND SLOT_NUMBER IS NOT NULL",
+                        key,
+                    )
+                }
+            slot = _as_int(loc.get("SLOT_NUMBER"))
+            if slot is None or slot in occupied[key]:
+                slot = 1
+                while slot in occupied[key]:
+                    slot += 1
+            occupied[key].add(slot)
+            loc.update({"ITEM_ID": new_id, "OWNER_KIND": kind, "OWNER_ID": owner, "SLOT_NUMBER": slot})
+            self.insert(world, "item_location", loc)
+            counts.added += 1
+        if renumbered:
+            self.result.renumbered["items.short_id"] = self.result.renumbered.get("items.short_id", 0) + renumbered
 
     def plan_keep_existing(self, zip_name: str, dest: Path, counts: ImportCounts) -> None:
         """既存のファイルは上書きしない (同じ中身ならスキップ、違えば警告してスキップ)。"""
@@ -1714,16 +2237,20 @@ class _ImportJob:
     def count_merge_skips(self) -> None:
         """合流では items/ と extensions/ を取り込まない (intent §5)。件数だけ載せる。
 
-        stage_merge_recall_edges が扱った表は、そちらが件数を載せている。
+        stage_merge_recall_edges が扱った表と、印による再開 (resume_world) で取り込んだ
+        extensions/saiverse/saiverse_db/・items/ は、そちらが件数を載せている。
         """
         pack = self.pack
-        if pack.item_files:
-            self.result.count("items").skipped += len(pack.item_files)
+        if not self.resume_world:
+            n_items = len((pack.items or {}).get("items") or [])
+            n_items += len((pack.private_room or {}).get("fixtures") or [])
+            if n_items:
+                self.result.count("items").skipped += n_items
+            for table, rows in pack.ext_saiverse_tables.items():
+                self.result.count(f"extensions/saiverse_db/{table}").skipped += len(rows)
         for table, rows in pack.ext_memory_tables.items():
             if table in self._merged_ext_tables:
                 continue
             self.result.count(f"extensions/memory_db/{table}").skipped += len(rows)
-        for table, rows in pack.ext_saiverse_tables.items():
-            self.result.count(f"extensions/saiverse_db/{table}").skipped += len(rows)
         if pack.ext_persona_files:
             self.result.count("extensions/persona_dir").skipped += len(pack.ext_persona_files)

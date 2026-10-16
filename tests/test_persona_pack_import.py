@@ -18,7 +18,19 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from database.models import AI, Base, Building, TaskBookEntry
+from database.models import (
+    AI,
+    AddonPersonaConfig,
+    Base,
+    Building,
+    Fixture,
+    Item,
+    ItemLocation,
+    PersonaEventLog,
+    PersonaTask,
+    PersonaTaskStep,
+    TaskBookEntry,
+)
 from sai_memory.arasuji.storage import create_entry, init_arasuji_tables
 from sai_memory.clips import add_clip, init_clips_tables
 from sai_memory.core_memory import add_core_memory, init_core_memory_table
@@ -164,10 +176,30 @@ def _populate(env: Dict[str, Any]) -> Dict[str, Any]:
                   (str(icon), "gemini-3-flash", pid))
     world.commit()
     world.close()
+    # 私室の見た目と中の物、所持品 (鞄とその中身)、世界側の生活の記録
+    (home / "image" / "room.png").write_bytes(b"\x89PNG room image")
+    (home / "documents" / "note.txt").write_text("持ち物の文書", encoding="utf-8")
+    (home / "documents" / "shelf.txt").write_text("本棚の目録", encoding="utf-8")
     engine = create_engine(f"sqlite:///{Path(env['world_db']).as_posix()}")
     with Session(engine) as s:
         s.add(TaskBookEntry(TASK_ID="tb-1", PERSONA_ID=pid, CONTENT="明日また話す",
                             ORIGIN="conversation", CREATED_AT=T0, DUE_AT=T0 + 86400))
+        room = s.get(Building, env["room_id"])
+        room.IMAGE_PATH = "image/room.png"
+        room.DESCRIPTION = "窓辺に机のある部屋"
+        room.SYSTEM_INSTRUCTION = "静かな部屋です。"
+        s.add(Fixture(FIXTURE_ID="fx-1", BUILDING_ID=env["room_id"], NAME="本棚",
+                      FILE_PATH="documents/shelf.txt"))
+        s.add(Item(ITEM_ID="item-doc", NAME="ノート", TYPE="document", DESCRIPTION="日記帳",
+                   FILE_PATH="documents/note.txt", CREATOR_ID=pid))
+        s.add(Item(ITEM_ID="item-bag", NAME="鞄", TYPE="bag"))
+        s.add(Item(ITEM_ID="item-stone", NAME="小石", TYPE="object"))
+        s.add(ItemLocation(ITEM_ID="item-doc", OWNER_KIND="building", OWNER_ID=env["room_id"], SLOT_NUMBER=1))
+        s.add(ItemLocation(ITEM_ID="item-bag", OWNER_KIND="persona", OWNER_ID=pid, SLOT_NUMBER=1))
+        s.add(ItemLocation(ITEM_ID="item-stone", OWNER_KIND="bag", OWNER_ID="item-bag", SLOT_NUMBER=1))
+        s.add(PersonaEventLog(PERSONA_ID=pid, CONTENT="メールが届いた"))
+        s.add(PersonaTask(id="task-1", persona_id=pid, title="本を読む"))
+        s.add(PersonaTaskStep(id="step-1", task_id="task-1", position=1, title="一章"))
         s.commit()
     engine.dispose()
     return {"apple": apple.id, "banana": banana.id, "core_id": core_id, "chronicle": chronicle.id}
@@ -225,6 +257,42 @@ def _dump(env: Dict[str, Any]) -> Dict[str, Any]:
     )
     out["dirs"] = sorted(p.relative_to(home).as_posix() for p in home.rglob("*") if p.is_dir())
     return out
+
+
+def _items_view(zip_path: Path) -> Dict[str, Any]:
+    """items/items.json を ID に依らない形にする: {名前: (種類, 説明, 置き場所, 番号, ファイルの中身, item:N)}。"""
+    doc = _zjson(zip_path, "items/items.json")
+    by_id = {i["ITEM_ID"]: i for i in doc["items"]}
+    view: Dict[str, Any] = {}
+    with zipfile.ZipFile(zip_path) as zf:
+        for loc in doc["locations"]:
+            item = by_id[loc["ITEM_ID"]]
+            owner = by_id[loc["OWNER_ID"]]["NAME"] if loc["OWNER_KIND"] == "bag" else loc["OWNER_ID"]
+            arc = doc["files"].get(item["ITEM_ID"])
+            view[item["NAME"]] = (
+                item["TYPE"], item["DESCRIPTION"], item["CREATOR_ID"], loc["OWNER_KIND"], owner,
+                loc["SLOT_NUMBER"], zf.read(arc) if arc else None, item["SHORT_ID"],
+            )
+    return view
+
+
+def _room_view(zip_path: Path) -> Dict[str, Any]:
+    """items/private_room.json の見た目と設定、fixture とそのファイルの中身。"""
+    doc = _zjson(zip_path, "items/private_room.json")
+    with zipfile.ZipFile(zip_path) as zf:
+        image = zf.read(doc["files"]["IMAGE_PATH"]) if doc["files"]["IMAGE_PATH"] else None
+        fixtures = {
+            f["NAME"]: (f["FIXTURE_ID"], zf.read(doc["files"]["fixtures"][f["FIXTURE_ID"]]))
+            for f in doc["fixtures"]
+        }
+    building = doc["building"]
+    return {
+        "BUILDINGID": building["BUILDINGID"],
+        "DESCRIPTION": building["DESCRIPTION"],
+        "SYSTEM_INSTRUCTION": building["SYSTEM_INSTRUCTION"],
+        "image": image,
+        "fixtures": fixtures,
+    }
 
 
 def _strip_paths(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -315,7 +383,21 @@ def test_round_trip_new_import_then_reexport(source: Dict[str, Any], tmp_path: P
         src.close()
         dst.close()
     assert (target["persona_dir"] / "active_state.json").read_text(encoding="utf-8") == '{"active_thread_id": "room_a"}'
-    assert (target["persona_dir"] / "imported_items" / "private_room.json").is_file()
+
+    # items/: 私室の見た目と中の物・所持品が世界へ登録され、再エクスポートで同じ形に戻る
+    assert _items_view(again) == _items_view(src_zip)
+    src_item_ids = {i["ITEM_ID"] for i in _zjson(src_zip, "items/items.json")["items"]}
+    new_item_ids = {i["ITEM_ID"] for i in _zjson(again, "items/items.json")["items"]}
+    assert not src_item_ids & new_item_ids  # ITEM_ID は取り込み先で振り直す
+    assert _room_view(again) == _room_view(src_zip)
+    assert not (target["persona_dir"] / "imported_items").exists()
+    assert not (target["persona_dir"] / "persona_pack_world_pending.json").exists()
+    assert result.counts["items"].added == 4  # item 3 + fixture 1
+    assert result.counts["items"].updated == 1  # 私室の設定
+    # extensions/saiverse/saiverse_db/ も入る
+    for name in ("extensions/saiverse/saiverse_db/persona_event_log.json",
+                 "extensions/saiverse/saiverse_db/persona_task_step.json"):
+        assert _zjson(again, name) == _zjson(src_zip, name), name
 
 
 def test_new_mode_refuses_persona_with_messages(source: Dict[str, Any], tmp_path: Path) -> None:
@@ -978,21 +1060,318 @@ def test_json_text_scalar_metadata_round_trips(source: Dict[str, Any], tmp_path:
 
 def test_integer_affinity_primary_key_is_renumbered(source: Dict[str, Any], tmp_path: Path) -> None:
     target = _make_env(tmp_path / "dst", PID)
+    # 主キーの型名が INTEGER でない (BIGINT) 取り込み先の表
     world = sqlite3.connect(target["world_db"])
-    world.execute("CREATE TABLE custom_log (ID BIGINT PRIMARY KEY, PERSONA_ID TEXT, NOTE TEXT)")
-    world.execute("INSERT INTO custom_log VALUES (1, 'someone_else', 'taken')")
+    world.execute("DROP TABLE persona_event_log")
+    world.execute(
+        "CREATE TABLE persona_event_log (EVENT_ID BIGINT PRIMARY KEY, PERSONA_ID TEXT, "
+        "CREATED_AT TEXT, CONTENT TEXT, STATUS TEXT, EVENT_TYPE TEXT, PAYLOAD TEXT)"
+    )
+    world.execute("INSERT INTO persona_event_log (EVENT_ID, PERSONA_ID, CONTENT) VALUES (1, 'someone_else', 'taken')")
     world.commit()
     world.close()
-    rows = [{"ID": 1, "PERSONA_ID": PID, "NOTE": "carried"}]
-    pack = _rewrite_zip(source["zip"], tmp_path / "custom.zip", {})
-    with zipfile.ZipFile(pack, "a") as zf:
-        zf.writestr("extensions/saiverse/saiverse_db/custom_log.json", json.dumps(rows))
-    result = _import(target, pack, "new")
-    assert result.counts["extensions/saiverse_db/custom_log"].added == 1
+    result = _import(target, source["zip"], "new")
+    assert result.counts["extensions/saiverse_db/persona_event_log"].added == 1
     world = sqlite3.connect(target["world_db"])
     try:
-        rows_after = sorted(world.execute("SELECT ID, NOTE, PERSONA_ID FROM custom_log"))
+        rows_after = sorted(world.execute("SELECT EVENT_ID, CONTENT, PERSONA_ID FROM persona_event_log"))
     finally:
         world.close()
     # BIGINT の主キーは rowid の別名ではないので、取り込み先の MAX+1 から振られる
-    assert rows_after == [(1, "taken", "someone_else"), (2, "carried", PID)]
+    assert rows_after == [(1, "taken", "someone_else"), (2, "メールが届いた", PID)]
+
+
+# ---------------------------------------------------------------------------
+# extensions/saiverse/saiverse_db/ の許可リストと持ち主の強制
+# ---------------------------------------------------------------------------
+
+def _add_zip_entries(src: Path, dst: Path, entries: Dict[str, Any]) -> Path:
+    """ZIP の JSON を差し替え / 追加する (値は JSON にして書く)。"""
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
+        for item in zin.infolist():
+            if item.filename not in entries:
+                zout.writestr(item, zin.read(item.filename))
+        for name, value in entries.items():
+            zout.writestr(name, json.dumps(value, ensure_ascii=False))
+    return dst
+
+
+def test_extension_rows_are_owned_by_the_target_and_unlisted_tables_refused(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    victim = "victim_city_a"
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    engine = create_engine(f"sqlite:///{Path(target['world_db']).as_posix()}")
+    with Session(engine) as s:
+        s.add(AI(AIID=victim, HOME_CITYID=1, AINAME="別の子", SYSTEMPROMPT="元のまま", AUTO_COUNT=0))
+        s.add(PersonaTask(id="victim-task", persona_id=victim, title="別の子のタスク"))
+        s.commit()
+    engine.dispose()
+
+    ext = "extensions/saiverse/saiverse_db/"
+    events = _zjson(source["zip"], ext + "persona_event_log.json")
+    events.append({"EVENT_ID": 99, "PERSONA_ID": victim, "CREATED_AT": "2026-10-01 00:00:00",
+                   "CONTENT": "別の子宛てに見せかけた行", "STATUS": "pending"})
+    steps = _zjson(source["zip"], ext + "persona_task_step.json")
+    steps.append({"id": "evil-step", "task_id": "victim-task", "position": 9, "title": "差し込み",
+                  "status": "pending", "version": 0})
+    crafted = _add_zip_entries(source["zip"], tmp_path / "crafted.zip", {
+        ext + "persona_event_log.json": events,
+        ext + "persona_task_step.json": steps,
+        ext + "ai.json": [{"AIID": victim, "AINAME": "乗っ取り", "SYSTEMPROMPT": "書き換え", "HOME_CITYID": 1}],
+        ext + "addon_message_metadata.json": [
+            {"message_id": "m1", "addon_name": "tts", "key": "audio", "value": "ok"},
+            {"message_id": "victim-message", "addon_name": "tts", "key": "audio", "value": "evil"},
+        ],
+    })
+    result = _import(target, crafted, "new")
+
+    world = sqlite3.connect(target["world_db"])
+    try:
+        owners = dict(world.execute("SELECT CONTENT, PERSONA_ID FROM persona_event_log"))
+        assert owners == {"メールが届いた": target["persona_id"], "別の子宛てに見せかけた行": target["persona_id"]}
+        # 子表は、同じ取り込みでこのペルソナの行として入った親を指す行だけ
+        assert sorted(world.execute("SELECT id, task_id FROM persona_task_step")) == [("step-1", "task-1")]
+        assert world.execute("SELECT persona_id FROM persona_task WHERE id = 'task-1'").fetchone()[0] == target["persona_id"]
+        # 許可リストに無い表 (ai) は取り込まない
+        assert world.execute("SELECT AINAME, SYSTEMPROMPT FROM ai WHERE AIID = ?", (victim,)).fetchone() == ("別の子", "元のまま")
+        # addon_message_metadata はこのペルソナのメッセージ宛てだけ
+        assert sorted(world.execute("SELECT message_id, value FROM addon_message_metadata")) == [("m1", "ok")]
+    finally:
+        world.close()
+    assert result.counts["extensions/saiverse_db/ai"].skipped == 1
+    assert result.counts["extensions/saiverse_db/persona_task_step"].skipped == 1
+    assert result.counts["extensions/saiverse_db/addon_message_metadata"].skipped == 1
+    assert any("ai.json is not a table" in w for w in result.warnings)
+
+
+def test_export_owner_rules_cover_exactly_the_exported_tables() -> None:
+    from saiverse_memory.persona_pack.export import SAIVERSE_DB_EXTENSION_TABLES, SAIVERSE_DB_TABLE_OWNERS
+
+    exported = {t for t, _ in SAIVERSE_DB_EXTENSION_TABLES} | {"addon_message_metadata"}
+    assert set(SAIVERSE_DB_TABLE_OWNERS) == exported
+    # 親は子より先に処理される (dict の並び)
+    order = list(SAIVERSE_DB_TABLE_OWNERS)
+    for table, rule in SAIVERSE_DB_TABLE_OWNERS.items():
+        if rule[0] == "parent":
+            assert order.index(rule[2]) < order.index(table), table
+    # 持ち主の列は database/models.py の列
+    for table, rule in SAIVERSE_DB_TABLE_OWNERS.items():
+        assert rule[1] in Base.metadata.tables[table].columns, (table, rule[1])
+
+
+# ---------------------------------------------------------------------------
+# 添付の参照: ZIP のホスト側のパスを取り込み先に残さない
+# ---------------------------------------------------------------------------
+
+def test_attachment_path_to_the_world_db_does_not_leak_into_a_reexport(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    secret = "sk-target-secret-must-not-leave"
+    target = _make_env(tmp_path / "dst", PID)
+    engine = create_engine(f"sqlite:///{Path(target['world_db']).as_posix()}")
+    with Session(engine) as s:
+        s.add(AddonPersonaConfig(addon_name="x", persona_id=PID, params_json=json.dumps({"api_key": secret})))
+        s.commit()
+    engine.dispose()
+
+    messages = _zjson(source["zip"], "chatlog/messages.json")
+    messages.append({
+        "id": "m-evil", "thread_id": f"{PID}:room_a", "role": "user", "content": "添付",
+        "resource_id": PID, "created_at": "2026-10-10T00:00:00+00:00", "seq": 999,
+        "metadata": {"documents": [
+            {"path": str(target["world_db"]), "mime_type": "application/octet-stream"},
+            {"uri": "saiverse://document/../user_data/database/saiverse.db"},
+            {"uri": "saiverse://document/kept.txt", "path": "/elsewhere/kept.txt"},
+        ]},
+    })
+    crafted = _add_zip_entries(source["zip"], tmp_path / "crafted.zip", {"chatlog/messages.json": messages})
+    _import(target, crafted, "new")
+
+    conn = _mem(target)
+    try:
+        meta = json.loads(conn.execute("SELECT metadata FROM messages WHERE id = 'm-evil'").fetchone()[0])
+    finally:
+        conn.close()
+    assert meta["documents"] == [
+        {"path": None, "mime_type": "application/octet-stream"},
+        {"uri": None},
+        {"uri": "saiverse://document/kept.txt", "path": None},
+    ]
+
+    again = _export(target, tmp_path / "out" / "again.zip")
+    with zipfile.ZipFile(again) as zf:
+        blob = b"".join(zf.read(n) for n in zf.namelist())
+    assert secret.encode() not in blob
+    assert b"SQLite format 3" not in blob
+
+
+# ---------------------------------------------------------------------------
+# 片側だけ commit された取り込みの再開
+# ---------------------------------------------------------------------------
+
+def test_world_commit_failure_is_finished_by_a_merge(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    marker = target["persona_dir"] / "persona_pack_world_pending.json"
+    original = importer._ImportJob.commit_world
+
+    def fail_once(self: Any, world: sqlite3.Connection) -> None:
+        raise sqlite3.OperationalError("disk I/O error (injected)")
+
+    monkeypatch.setattr(importer._ImportJob, "commit_world", fail_once)
+    with pytest.raises(sqlite3.OperationalError, match="injected"):
+        _import(target, source["zip"], "new", overwrite_profile=True)
+    monkeypatch.setattr(importer._ImportJob, "commit_world", original)
+
+    def world_rows() -> Dict[str, Any]:
+        world = sqlite3.connect(target["world_db"])
+        try:
+            return {
+                "events": world.execute("SELECT CONTENT, PERSONA_ID FROM persona_event_log").fetchall(),
+                "items": sorted(r[0] for r in world.execute("SELECT NAME FROM item")),
+                "room": world.execute(
+                    "SELECT DESCRIPTION FROM building WHERE BUILDINGID = ?", (target["room_id"],)
+                ).fetchone()[0],
+                "name": world.execute("SELECT AINAME FROM ai WHERE AIID = ?", (target["persona_id"],)).fetchone()[0],
+                "task_book": world.execute("SELECT COUNT(*) FROM task_book").fetchone()[0],
+            }
+        finally:
+            world.close()
+
+    # memory.db は commit 済み、saiverse.db は巻き戻り、印が残る
+    assert marker.is_file()
+    assert json.loads(marker.read_text(encoding="utf-8"))["persona_id"] == PID
+    conn = _mem(target)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 6
+    finally:
+        conn.close()
+    assert world_rows() == {"events": [], "items": [], "room": "", "name": "新入り", "task_book": 0}
+
+    result = _import(target, source["zip"], "merge")
+    assert not marker.exists()
+    after = world_rows()
+    assert after["events"] == [("メールが届いた", target["persona_id"])]
+    assert after["items"] == sorted(["小石", "ノート", "鞄"])
+    assert after["room"] == "窓辺に机のある部屋"
+    assert after["name"] == "テスト子"  # 印に記録した overwrite_profile で上書きされる
+    assert after["task_book"] == 1
+    assert result.counts["messages"].added == 0
+    assert result.counts["items"].added == 4
+    assert any("resuming the unfinished part" in w for w in result.warnings)
+
+    # もう一度合流しても世界側は増えない (印が無いので合流の範囲だけ)
+    before = _dump(target)
+    again = _import(target, source["zip"], "merge")
+    assert all(c.added == 0 and c.updated == 0 for c in again.counts.values()), again.counts
+    assert _dump(target) == before
+
+
+def test_marker_of_another_pack_is_not_resumed(source: Dict[str, Any], tmp_path: Path) -> None:
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, source["zip"], "new")
+    marker = target["persona_dir"] / "persona_pack_world_pending.json"
+    marker.write_text(json.dumps({"persona_id": "someone_else", "format": "persona-pack"}), encoding="utf-8")
+    result = _import(target, source["zip"], "merge")
+    assert marker.is_file()
+    assert result.counts["items"].added == 0
+    assert any("does not resume it" in w for w in result.warnings)
+
+
+def test_pending_marker_is_never_exported_or_restored(source: Dict[str, Any], tmp_path: Path) -> None:
+    marker_name = "persona_pack_world_pending.json"
+    (source["persona_dir"] / marker_name).write_text('{"persona_id": "x"}', encoding="utf-8")
+    pack = _export(source, tmp_path / "out" / "with_marker.zip")
+    with zipfile.ZipFile(pack) as zf:
+        assert f"extensions/saiverse/persona_dir/{marker_name}" not in zf.namelist()
+    crafted = _rewrite_zip(pack, tmp_path / "crafted.zip", {})
+    with zipfile.ZipFile(crafted, "a") as zf:
+        zf.writestr(f"extensions/saiverse/persona_dir/{marker_name}", '{"persona_id": "x"}')
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, crafted, "new")
+    assert not (target["persona_dir"] / marker_name).exists()
+
+
+# ---------------------------------------------------------------------------
+# items/: 合流では取り込まない、私室が無ければ部屋のものは入れない
+# ---------------------------------------------------------------------------
+
+def test_items_are_not_imported_on_merge(source: Dict[str, Any], tmp_path: Path) -> None:
+    target = _make_env(tmp_path / "dst", PID)
+    result = _import(target, source["zip"], "merge")
+    world = sqlite3.connect(target["world_db"])
+    try:
+        assert world.execute("SELECT COUNT(*) FROM item").fetchone()[0] == 0
+        assert world.execute("SELECT COUNT(*) FROM fixture").fetchone()[0] == 0
+    finally:
+        world.close()
+    assert result.counts["items"].added == 0
+    assert result.counts["items"].skipped == 4
+
+
+def test_new_import_twice_into_fresh_personas_gets_distinct_item_ids(source: Dict[str, Any], tmp_path: Path) -> None:
+    t1 = _make_env(tmp_path / "t", "one_city_a", name="一")
+    _import(t1, source["zip"], "new")
+    # 同じ世界の別のペルソナへもう一度 (同じ世界 DB を共有する二体目)
+    t2_dir = t1["home"] / "personas" / "two_city_a"
+    t2_dir.mkdir(parents=True)
+    conn = init_db(str(t2_dir / "memory.db"))
+    conn.commit()
+    conn.close()
+    engine = create_engine(f"sqlite:///{Path(t1['world_db']).as_posix()}")
+    with Session(engine) as s:
+        s.add(AI(AIID="two_city_a", HOME_CITYID=1, AINAME="二", PRIVATE_ROOM_ID="two_room", AUTO_COUNT=0))
+        s.add(Building(CITYID=1, BUILDINGID="two_room", BUILDINGNAME="二の部屋"))
+        s.commit()
+    engine.dispose()
+    t2 = {**t1, "persona_id": "two_city_a", "persona_dir": t2_dir, "memory_db": t2_dir / "memory.db"}
+    result = _import(t2, source["zip"], "new")
+    world = sqlite3.connect(t1["world_db"])
+    try:
+        rows = world.execute("SELECT ITEM_ID, SHORT_ID FROM item").fetchall()
+        owners = sorted(world.execute(
+            "SELECT OWNER_KIND, OWNER_ID FROM item_location WHERE OWNER_KIND <> 'bag'"
+        ).fetchall())
+        names = sorted(r[0] for r in world.execute("SELECT BUILDINGNAME FROM building"))
+        fixtures = sorted(world.execute("SELECT FIXTURE_ID, BUILDING_ID FROM fixture").fetchall())
+    finally:
+        world.close()
+    assert len(rows) == 6 and len({r[0] for r in rows}) == 6 and len({r[1] for r in rows}) == 6
+    assert owners == [("building", "one_city_a_room"), ("building", "two_room"),
+                      ("persona", "one_city_a"), ("persona", "two_city_a")]
+    # 部屋の名前は ZIP の名前を写すが、同じ街に同名の建物があれば元のまま
+    assert names == ["テスト子の部屋", "二の部屋"]
+    assert any("room name was kept" in w for w in result.warnings)
+    # FIXTURE_ID は衝突したら振り直す
+    assert fixtures[0][1] != fixtures[1][1] and {f[0] for f in fixtures} >= {"fx-1"}
+    assert result.renumbered["items.short_id"] == 3
+
+
+# ---------------------------------------------------------------------------
+# 合流の Chronicle: ZIP の中で同じ会話を覆う Lv1
+# ---------------------------------------------------------------------------
+
+def test_merge_chronicle_two_zip_lv1_over_the_same_messages(tmp_path: Path) -> None:
+    a = _make_env(tmp_path / "a", PID)
+    conn = _mem(a)
+    for i in range(1, 4):
+        _add_message(conn, PID, f"x{i}", "room_a", "user", f"話 {i}", T0 + i, {"tags": ["conversation"]})
+    conn.commit()
+    first = create_entry(conn, level=1, content="一本目", source_ids=["x1", "x2"],
+                         start_time=T0 + 1, end_time=T0 + 2, source_count=2, message_count=2)
+    second = create_entry(conn, level=1, content="二本目", source_ids=["x2", "x3"],
+                          start_time=T0 + 2, end_time=T0 + 3, source_count=2, message_count=2)
+    upper = create_entry(conn, level=2, content="二本目の上", source_ids=[second.id],
+                         start_time=T0 + 2, end_time=T0 + 3, source_count=1, message_count=2)
+    conn.close()
+    pack = _export(a, tmp_path / "out" / "dup.zip")
+    target = _make_env(tmp_path / "b", PID)
+    result = _import(target, pack, "merge")
+    imported = set(_chronicle_rows(target))
+    assert imported == {first.id}
+    assert second.id not in imported and upper.id not in imported
+    assert result.counts["chronicle_pages"].added == 1

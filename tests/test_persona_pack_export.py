@@ -419,6 +419,55 @@ def test_files_outside_home_are_not_packed(tmp_path: Path) -> None:
     assert (str(outside_image), "ai.APPEARANCE_IMAGE_PATH (outside SAIVERSE_HOME)") in wheres
 
 
+def test_files_inside_home_but_outside_their_folders_are_not_packed(tmp_path: Path) -> None:
+    """本体 DB や他のペルソナのフォルダは SAIVERSE_HOME の内側でも入れない。"""
+    paths = _build_world(tmp_path)
+    home = paths["home"]
+    world_db = paths["world_db"]  # home/user_data/database/saiverse.db (認証情報入り)
+    other = home / "personas" / "someone_else"
+    other.mkdir(parents=True)
+    other_file = other / "secret.png"
+    other_file.write_bytes(b"another persona's bytes")
+
+    world = sqlite3.connect(world_db)
+    world.execute("UPDATE building SET IMAGE_PATH = ? WHERE BUILDINGID = ?", (str(other_file), ROOM_ID))
+    world.execute("UPDATE item SET FILE_PATH = ? WHERE ITEM_ID = 'item-doc'", ("user_data/database/saiverse.db",))
+    # アイコンの置き場は user_data/icons だけ (共有メディアフォルダの画像も認めない)
+    world.execute("UPDATE ai SET APPEARANCE_IMAGE_PATH = ? WHERE AIID = ?", (str(home / "image" / "pic.png"), PERSONA_ID))
+    world.commit()
+    world.close()
+    memory = sqlite3.connect(paths["memory_db"])
+    memory.execute(
+        "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("m-db", f"{PERSONA_ID}:room_a", "user", "DB を指す添付", PERSONA_ID, T0 + 20,
+         json.dumps({"documents": [{"path": str(world_db)}]})),
+    )
+    memory.commit()
+    memory.close()
+
+    out = tmp_path / "out" / "inside.zip"
+    result = _export_world(paths, out)
+    with zipfile.ZipFile(out) as zf:
+        blob = b"".join(zf.read(n) for n in zf.namelist())
+        index = {e["ref"]: e for e in _read_json(zf, "attachments/index.json")}
+        items = _read_json(zf, "items/items.json")
+        room = _read_json(zf, "items/private_room.json")
+        profile = _read_json(zf, "profile/profile.json")
+    assert SECRET.encode() not in blob
+    assert b"SQLite format 3" not in blob
+    assert b"another persona's bytes" not in blob
+    assert index[str(world_db)]["path"] is None
+    assert "item-doc" not in items["files"]
+    assert room["files"]["IMAGE_PATH"] is None
+    assert profile["files"]["APPEARANCE_IMAGE_PATH"] is None
+    wheres = {(m["ref"], m["where"]) for m in result.missing_files}
+    assert (str(world_db), "messages.metadata (outside the shared media folders)") in wheres
+    assert ("user_data/database/saiverse.db", "item.FILE_PATH (outside the shared media folders)") in wheres
+    assert (str(other_file), "building.IMAGE_PATH (outside the shared media folders)") in wheres
+    assert (str(home / "image" / "pic.png"), "ai.APPEARANCE_IMAGE_PATH (outside user_data/icons)") in wheres
+
+
 def test_symlinks_in_persona_folder_are_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
