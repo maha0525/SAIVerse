@@ -421,13 +421,14 @@ def test_merge_mixes_append_only_records_and_takes_newer_pages(diverged: Dict[st
         assert meta["original_core_id"] == diverged["core_a"]
         assert title == f"コア記憶 c:{meta['core_id']}"
 
-        # Chronicle は合流では取り込まない (arasuji_levels.md §7)
+        # Chronicle: A で新しく作られた Lv1 (mA だけを覆う) は入り、共有の Lv1 は
+        # 同じ id が取り込み先にあるのでそのまま (intent §5)
         assert conn.execute(
             "SELECT COUNT(*) FROM memopedia_pages WHERE category = 'chronicle' AND content = ?",
             ("A での続きの話",),
-        ).fetchone()[0] == 0
-        assert result.counts["chronicle_pages"].skipped == 2
-        assert result.counts["chronicle_pages"].added == 0
+        ).fetchone()[0] == 1
+        assert result.counts["chronicle_pages"].skipped == 1
+        assert result.counts["chronicle_pages"].added == 1
 
         # 手帳: open な同名「散歩」は一つに合流し、A のメモはそちらへ付く
         walks = conn.execute("SELECT id FROM activities WHERE name = '散歩' AND status = 'open'").fetchall()
@@ -621,3 +622,221 @@ def test_profile_is_overwritten_only_when_asked(source: Dict[str, Any], tmp_path
     icon = Path(after["AVATAR_IMAGE"])
     assert icon.parent == target["home"] / "user_data" / "icons"
     assert icon.read_bytes() == b"RIFF icon bytes"
+
+
+# ---------------------------------------------------------------------------
+# 6. 合流の Chronicle (intent §5 — 被覆の照合で取り込む枝を決める)
+# ---------------------------------------------------------------------------
+
+def _chronicle_rows(env: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """chronicle 分類の trunk でないページ: {id: {parent_id, title, meta}}。"""
+    conn = _mem(env)
+    try:
+        return {
+            r[0]: {"parent_id": r[1], "title": r[2], "meta": json.loads(r[3])}
+            for r in conn.execute(
+                "SELECT id, parent_id, title, metadata FROM memopedia_pages "
+                "WHERE category = 'chronicle' AND is_trunk = 0"
+            )
+        }
+    finally:
+        conn.close()
+
+
+@pytest.fixture()
+def chron_branch(tmp_path: Path) -> Dict[str, Any]:
+    """分岐した二つの環境 A / B と、A で書き出した ZIP。
+
+    分岐前 (共有): s1..s8 の会話、Lv1 L1a[s1,s2] L1b[s3,s4] L1c[s5,s6]、
+    Lv2 U1[L1a,L1b]。s7 s8 は未編纂。
+    A で起きたこと: a1..a4 を話し、Lv1 NA1[a1,a2] NA2[a3,a4] とその上の Lv2
+    NU[NA1,NA2,(死んだ参照)] を作った。共有の L1c を作り直して R1c[s5,s6,s7]
+    にした。共有の U1 と NU を束ねた Lv3 TOP を作った。s8 を覆う Lv1 NA5 を共有の
+    U1 へ縁組した。
+    B で起きたこと: 共有の L1b を吸収で差し替え、L1b2[s3,s4,s7] にした。
+    """
+    from sai_memory.arasuji.storage import add_to_parent_source_ids, delete_entry, mark_consolidated
+    from sai_memory.memory.recall_edges import add_chunk_page_edge
+
+    a = _make_env(tmp_path / "a", PID)
+    conn = _mem(a)
+    for i in range(1, 9):
+        _add_message(conn, PID, f"s{i}", "room_a", "user" if i % 2 else "assistant",
+                     f"共有の話 {i}", T0 + i, {"tags": ["conversation"]})
+    conn.commit()
+    apple = create_page(conn, parent_id="root_terms", title="りんご", content="赤い果物", category="terms")
+
+    def entry(level: int, sources: List[str], start: int, end: int, content: str):
+        return create_entry(conn, level=level, content=content, source_ids=sources,
+                            start_time=start, end_time=end, source_count=len(sources),
+                            message_count=len(sources))
+
+    l1a = entry(1, ["s1", "s2"], T0 + 1, T0 + 2, "L1a")
+    l1b = entry(1, ["s3", "s4"], T0 + 3, T0 + 4, "L1b")
+    l1c = entry(1, ["s5", "s6"], T0 + 5, T0 + 6, "L1c")
+    u1 = entry(2, [l1a.id, l1b.id], T0 + 1, T0 + 4, "U1")
+    mark_consolidated(conn, [l1a.id, l1b.id], u1.id)
+    conn.close()
+    fork_zip = _export(a, tmp_path / "out" / "fork.zip")
+
+    b = _make_env(tmp_path / "b", PID)
+    _import(b, fork_zip, "new")
+
+    # A 側
+    conn = _mem(a)
+    for i in range(1, 5):
+        _add_message(conn, PID, f"a{i}", "room_a", "user", f"A の話 {i}", T0 + 100 + i,
+                     {"tags": ["conversation"]})
+    conn.commit()
+    na1 = entry(1, ["a1", "a2"], T0 + 101, T0 + 102, "NA1")
+    na2 = entry(1, ["a3", "a4"], T0 + 103, T0 + 104, "NA2")
+    nu = entry(2, [na1.id, na2.id, "ghost-entry"], T0 + 101, T0 + 104, "NU")
+    mark_consolidated(conn, [na1.id, na2.id], nu.id)
+    delete_entry(conn, l1c.id)
+    r1c = entry(1, ["s5", "s6", "s7"], T0 + 5, T0 + 7, "R1c")
+    top = entry(3, [u1.id, nu.id], T0 + 1, T0 + 104, "TOP")
+    mark_consolidated(conn, [u1.id, nu.id], top.id)
+    na5 = entry(1, ["s8"], T0 + 8, T0 + 8, "NA5")
+    assert add_to_parent_source_ids(conn, na5.id, u1.id)
+    add_chunk_page_edge(conn, na1.id, apple.id, created_at=T0 + 200)
+    add_chunk_page_edge(conn, r1c.id, apple.id, created_at=T0 + 201)
+    conn.close()
+
+    # B 側
+    conn = _mem(b)
+    delete_entry(conn, l1b.id)
+    l1b2 = create_entry(conn, level=1, content="L1b2", source_ids=["s3", "s4", "s7"],
+                        start_time=T0 + 3, end_time=T0 + 7, source_count=3, message_count=3)
+    conn.close()
+
+    a_zip = _export(a, tmp_path / "out" / "a.zip")
+    ids = {
+        "l1a": l1a.id, "l1b": l1b.id, "l1c": l1c.id, "u1": u1.id, "na1": na1.id, "na2": na2.id,
+        "nu": nu.id, "r1c": r1c.id, "top": top.id, "na5": na5.id, "l1b2": l1b2.id,
+        "apple": apple.id,
+    }
+    return {"a": a, "b": b, "zip": a_zip, "ids": ids}
+
+
+def test_merge_chronicle_takes_only_branches_outside_target_coverage(chron_branch: Dict[str, Any]) -> None:
+    b, ids = chron_branch["b"], chron_branch["ids"]
+    before = _chronicle_rows(b)
+    result = _import(b, chron_branch["zip"], "merge")
+    after = _chronicle_rows(b)
+
+    imported = set(after) - set(before)
+    # 1. A で新しく作られた枝 (NA1 NA2 NU) と、共有の親を持つ新しい子 NA5 が入る。
+    # 2. 共有 Lv1 を作り直した R1c、3. B で差し替え済みの L1b、4. 共有の U1 を
+    # 束ねた TOP は入らない
+    assert imported == {ids["na1"], ids["na2"], ids["nu"], ids["na5"]}
+    assert result.counts["chronicle_pages"].added == 4
+    # ZIP の chronicle は L1a L1b U1 NA1 NA2 NU R1c TOP NA5 の 9 行
+    assert result.counts["chronicle_pages"].skipped == 5
+    assert any("overlap the target" in w for w in result.warnings)
+    assert any("upper page(s) not imported" in w for w in result.warnings)
+
+    # 1. parent と source_ids が双方向で一致する
+    for page_id in imported:
+        row = after[page_id]
+        if row["parent_id"] != "root_chronicle":
+            assert page_id in after[row["parent_id"]]["meta"]["source_ids"]
+            assert row["meta"]["is_consolidated"] == 1
+        if row["meta"]["level"] >= 2:
+            for child in row["meta"]["source_ids"]:
+                if child in after:
+                    assert after[child]["parent_id"] == page_id
+    assert after[ids["na1"]]["parent_id"] == ids["nu"]
+    assert after[ids["na2"]]["parent_id"] == ids["nu"]
+    # NU の親 TOP は入らないので、NU は root_chronicle の未統合に置かれる
+    assert after[ids["nu"]]["parent_id"] == "root_chronicle"
+    assert after[ids["nu"]]["meta"]["is_consolidated"] == 0
+    # 5. 共有の親 U1 を持つ新しい子 NA5 も root_chronicle の未統合に付く
+    assert after[ids["na5"]]["parent_id"] == "root_chronicle"
+    assert after[ids["na5"]]["meta"]["is_consolidated"] == 0
+
+    # 3. 全 Lv1 の source_ids に重複が無い
+    sources = [s for r in after.values() if r["meta"]["level"] == 1 for s in r["meta"]["source_ids"]]
+    assert len(sources) == len(set(sources))
+    assert ids["l1b"] not in after
+
+    # 4. 取り込み先の木は変わらない
+    assert {k: after[k] for k in before} == before
+
+    # chunk_page_edges: 取り込んだ NA1 の辺だけが入る
+    conn = _mem(b)
+    try:
+        edges = conn.execute("SELECT chronicle_page_id, entity_page_id FROM chunk_page_edges").fetchall()
+    finally:
+        conn.close()
+    assert edges == [(ids["na1"], ids["apple"])]
+    assert result.counts["extensions/memory_db/chunk_page_edges"].added == 1
+    assert result.counts["extensions/memory_db/chunk_page_edges"].skipped == 1
+
+
+def test_merge_chronicle_twice_adds_nothing(chron_branch: Dict[str, Any]) -> None:
+    b = chron_branch["b"]
+    _import(b, chron_branch["zip"], "merge")
+    before = _dump(b)
+    second = _import(b, chron_branch["zip"], "merge")
+    assert second.counts["chronicle_pages"].added == 0
+    assert all(c.added == 0 and c.updated == 0 for c in second.counts.values()), second.counts
+    assert _dump(b) == before
+
+
+def test_merge_chronicle_calls_no_llm(chron_branch: Dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    import llm_clients
+    import llm_clients.factory
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("the import must not call an LLM client")
+
+    monkeypatch.setattr(llm_clients, "get_llm_client", forbidden)
+    monkeypatch.setattr(llm_clients.factory, "get_llm_client", forbidden)
+    result = _import(chron_branch["b"], chron_branch["zip"], "merge")
+    assert result.counts["chronicle_pages"].added == 4
+
+
+def test_delete_of_imported_upper_leaves_target_entries_alone(chron_branch: Dict[str, Any]) -> None:
+    from sai_memory.arasuji.storage import delete_entry
+
+    b, ids = chron_branch["b"], chron_branch["ids"]
+    before = _chronicle_rows(b)
+    _import(b, chron_branch["zip"], "merge")
+    conn = _mem(b)
+    try:
+        assert delete_entry(conn, ids["nu"])
+    finally:
+        conn.close()
+    after = _chronicle_rows(b)
+    assert {k: after[k] for k in before} == before
+    # 戻されたのは NU の子 (取り込んだ NA1 NA2) だけ
+    assert after[ids["na1"]]["parent_id"] == "root_chronicle"
+    assert after[ids["na2"]]["parent_id"] == "root_chronicle"
+
+
+def test_merge_chronicle_short_ids_are_kept_or_renumbered(chron_branch: Dict[str, Any]) -> None:
+    a, b, ids = chron_branch["a"], chron_branch["b"], chron_branch["ids"]
+    in_a = _chronicle_rows(a)
+    before = _chronicle_rows(b)
+    b_max = max(r["meta"]["short_id"] for r in before.values())
+    result = _import(b, chron_branch["zip"], "merge")
+    after = _chronicle_rows(b)
+
+    short_ids = [r["meta"]["short_id"] for r in after.values()]
+    assert len(short_ids) == len(set(short_ids))
+    renumbered = 0
+    for page_id in set(after) - set(before):
+        row, original = after[page_id], in_a[page_id]["meta"]["short_id"]
+        if original > b_max:
+            # 取り込み先で使われたことのない番号はそのまま
+            assert row["meta"]["short_id"] == original
+            assert "original_chronicle_short_id" not in row["meta"]
+        else:
+            renumbered += 1
+            assert row["meta"]["short_id"] > b_max
+            assert row["meta"]["original_chronicle_short_id"] == original
+        # 機構が書いた表題は新しい番号に合わせる
+        assert row["title"] == f"chronicle:{row['meta']['short_id']}"
+    assert renumbered >= 1
+    assert result.renumbered.get("pages.chronicle_short_id") == renumbered
+    assert in_a[ids["na1"]]["meta"]["short_id"] <= b_max

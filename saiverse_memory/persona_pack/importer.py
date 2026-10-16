@@ -11,7 +11,8 @@ mode:
   (``extensions/`` の機械的な行の挿入は、空の取り込み先でしか意味が定義できない)。
 - ``"merge"``: ``chatlog/`` ``knowledge/`` ``journal/`` ``attachments/`` だけを §5 の
   規則で混ぜる。``items/`` と ``extensions/`` は取り込まず、スキップ件数として
-  内訳に載せる (intent §5「合流で混ぜる範囲」)。
+  内訳に載せる (intent §5「合流で混ぜる範囲」)。例外は取り込んだ Chronicle
+  ページの chunk_page_edges だけ。
 
 ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を継承する:
 
@@ -30,9 +31,15 @@ ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を
 - memopedia_pages は id で照合し、本文 (content) が違い、かつ ZIP 側の
   updated_at が新しいときだけ上書きする。上書き前の本文は
   memopedia_page_edit_history に before_* として記録する (rollback_page で戻せる)。
-- 合流時は Chronicle (chronicle 分類の trunk でないページ) を取り込まない —
-  docs/intent/arasuji_levels.md §7 の木 (parent_id / source_ids / 予算の勘定) は
-  一つの環境の中でしか整合しないため。新規取り込みでは全部入れる。
+- 合流時の Chronicle (chronicle 分類の trunk でないページ) は、取り込み先に無い
+  id の行のうち、取り込み先の被覆と重ならない枝だけを入れる
+  (:meth:`_ImportJob.plan_chronicle_merge`)。Lv1 は source_ids が取り込み先の
+  全 Lv1 の source_ids と交わらないもの、上位は子が全員取り込む行か死んだ参照の
+  もの。取り込み先に同じ id がある行は上書きしない。親が取り込まれない行は
+  root_chronicle の未統合に置き、上位への縁組は bands.reconnect_contained_orphans
+  に任せる。取り込んだページの chunk_page_edges も合流する
+  (:meth:`_ImportJob.stage_merge_recall_edges`)。memopedia_fragments は合流しない。
+  新規取り込みでは全部入れる。
 
 短縮番号 (memopedia_pages.short_id / clips.short_id / コア記憶の metadata.core_id /
 Chronicle の metadata.short_id) は DB ごとの連番 (docs/intent/reference_addressing.md
@@ -111,6 +118,7 @@ IMPORTED_ITEMS_DIR = "imported_items"
 _EDIT_SOURCE = "persona_pack_import"
 _CATEGORY_CORE = "core"           # sai_memory/core_memory.py の CATEGORY_CORE
 _CATEGORY_CHRONICLE = "chronicle"  # sai_memory/arasuji/storage.py の CATEGORY_CHRONICLE
+_ROOT_CHRONICLE = "root_chronicle"  # sai_memory/arasuji/storage.py の ROOT_CHRONICLE_ID
 _CHUNK = 500
 
 
@@ -423,6 +431,16 @@ class _FilePlan:
     dest: Path
 
 
+@dataclass
+class _ChroniclePlan:
+    """合流で取り込む Chronicle ページの判定 (:meth:`_ImportJob.plan_chronicle_merge`)。"""
+
+    # 取り込む ZIP 側の chronicle ページの id
+    accepted: Set[str] = field(default_factory=set)
+    # accepted のうち、parent_id を root_chronicle に・is_consolidated を 0 にする id
+    to_root: Set[str] = field(default_factory=set)
+
+
 def import_persona_pack(
     zip_path: Path,
     *,
@@ -541,6 +559,10 @@ class _ImportJob:
         self._columns_cache: Dict[Tuple[int, str], List[str]] = {}
         self._dropped_warned: Set[Tuple[str, str]] = set()
         self._unmapped_threads: Set[str] = set()
+        # 取り込んだ chronicle ページの id (合流の chunk_page_edges の照合に使う)
+        self.imported_chronicle_ids: Set[str] = set()
+        # 合流で取り込んだ extensions/saiverse/memory_db/ の表 (count_merge_skips が数えない)
+        self._merged_ext_tables: Set[str] = set()
 
     # --- 共通 ---------------------------------------------------------------
 
@@ -667,6 +689,8 @@ class _ImportJob:
                 self.stage_journal_memory(memory)
                 if self.mode == "new":
                     self.stage_ext_memory(memory)
+                else:
+                    self.stage_merge_recall_edges(memory)
                 world.execute("BEGIN IMMEDIATE")
                 self.stage_task_book(world)
                 self.stage_profile(world)
@@ -998,6 +1022,10 @@ class _ImportJob:
             ):
                 target_rows[row[0]] = row
 
+        chronicle_plan: Optional[_ChroniclePlan] = None
+        if self.mode == "merge":
+            chronicle_plan = self.plan_chronicle_merge(conn, pages, target_rows)
+
         to_insert: List[Dict[str, Any]] = []
         seen: Set[str] = set()
         for page in pages:
@@ -1007,9 +1035,14 @@ class _ImportJob:
                 counts.skipped += 1
                 continue
             seen.add(page["id"])
-            if is_chronicle and self.mode == "merge":
-                # arasuji_levels.md §7: Chronicle の木は一つの環境の中でしか整合しない
-                counts.skipped += 1
+            if is_chronicle and chronicle_plan is not None:
+                # 合流の Chronicle は plan_chronicle_merge の判定だけで決める。
+                # 取り込み先に同じ id がある行も上書きしない (metadata の
+                # parent_id / source_ids を書き換えると取り込み先の木が動く)。
+                if page["id"] in chronicle_plan.accepted:
+                    to_insert.append(page)
+                else:
+                    counts.skipped += 1
                 continue
             existing = target_rows.get(page["id"])
             if existing is None:
@@ -1093,12 +1126,142 @@ class _ImportJob:
             if not is_raw and d.get("category") == _CATEGORY_CHRONICLE and isinstance(meta, dict):
                 if isinstance(meta.get("thread_id"), str):
                     meta["thread_id"] = self.remap_thread_id(meta["thread_id"])
+                if chronicle_plan is not None and d["id"] in chronicle_plan.to_root:
+                    # 親が取り込まれない行・取り込み先と共有の行: 親の source_ids に
+                    # 載らない子として下にぶら下げず、root_chronicle の未統合に置く
+                    # (時間的に上位へ収まる子は bands.reconnect_contained_orphans が
+                    # 次の束ねの冒頭で縁組する)。
+                    d["parent_id"] = _ROOT_CHRONICLE
+                    meta["is_consolidated"] = 0
             d["metadata"] = _encode_json_text(is_raw, meta)
             self.insert(conn, "memopedia_pages", d)
-            key = "chronicle_pages" if (
-                d.get("category") == _CATEGORY_CHRONICLE and not d.get("is_trunk")
-            ) else "pages"
-            self.result.count(key).added += 1
+            is_chronicle = d.get("category") == _CATEGORY_CHRONICLE and not d.get("is_trunk")
+            if is_chronicle:
+                self.imported_chronicle_ids.add(d["id"])
+            self.result.count("chronicle_pages" if is_chronicle else "pages").added += 1
+
+    def plan_chronicle_merge(
+        self,
+        conn: sqlite3.Connection,
+        pages: Sequence[Dict[str, Any]],
+        target_rows: Dict[str, Tuple[Any, ...]],
+    ) -> _ChroniclePlan:
+        """合流で取り込む Chronicle ページを決める (intent §5)。書き込みはしない。
+
+        取り込むのは「ZIP にあって取り込み先に同じ id が無い」行のうち:
+
+        - Lv1 (metadata.level == 1): is_deleted でなく、source_ids が取り込み先の
+          全 Lv1 の source_ids と一つも交わらないもの。交わる行は、取り込み先で
+          吸収・差し替え済みの旧記事か、取り込み先の Lv1 と同じメッセージを覆う
+          記事なので入れない (docs/issues/lv1_source_ids_duplicates_and_orphans.md)。
+        - Lv2 以上: is_deleted でなく、source_ids の子が全員「取り込むと判定済み」
+          か「ZIP にも取り込み先にも無い id」(sai_memory.arasuji.absorption.
+          _sweep_broken_parents が掃除する) で、取り込む子が 1 本以上あるもの。
+          取り込み先にある子を指す上位は入れない — その上位に delete_entry が
+          かかると source_ids の子が root_chronicle へ戻され、取り込み先の木が動く。
+
+        取り込む行の parent_id が取り込まない行・取り込み先にある行を指すときは、
+        ``to_root`` に入れる (挿入時に parent_id = root_chronicle、
+        is_consolidated = 0 にする)。
+        """
+        plan = _ChroniclePlan()
+
+        # 取り込み先の chronicle ページの id と、全 Lv1 の source_ids
+        target_ids: Set[str] = set()
+        target_lv1_sources: Set[str] = set()
+        for page_id, meta_json, is_deleted in conn.execute(
+            "SELECT id, metadata, is_deleted FROM memopedia_pages "
+            "WHERE category = ? AND is_trunk = 0",
+            (_CATEGORY_CHRONICLE,),
+        ):
+            target_ids.add(page_id)
+            if is_deleted:
+                continue
+            try:
+                meta = json.loads(meta_json) if meta_json else None
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(meta, dict) or _as_int(meta.get("level")) != 1:
+                continue
+            sources = meta.get("source_ids")
+            if isinstance(sources, list):
+                target_lv1_sources.update(str(s) for s in sources)
+
+        # ZIP 側の chronicle 行 (取り込み先に同じ id が無いもの)
+        candidates: Dict[str, Tuple[int, List[str], Any]] = {}
+        zip_ids: Set[str] = set()
+        unreadable = deleted = 0
+        for page in pages:
+            if page.get("category") != _CATEGORY_CHRONICLE or page.get("is_trunk"):
+                continue
+            page_id = page["id"]
+            if page_id in zip_ids:
+                continue
+            zip_ids.add(page_id)
+            if page_id in target_rows:
+                continue
+            is_raw, meta = _decode_json_text(page.get("metadata"))
+            level = _as_int(meta.get("level")) if not is_raw and isinstance(meta, dict) else None
+            sources = meta.get("source_ids") if level is not None else None
+            if (
+                level is None
+                or not isinstance(sources, list)
+                or not all(isinstance(s, str) for s in sources)
+            ):
+                unreadable += 1
+                continue
+            if decode_value(page.get("is_deleted")):
+                deleted += 1
+                continue
+            candidates[page_id] = (level, sources, decode_value(page.get("parent_id")))
+
+        overlapping = on_shared = 0
+        for page_id, (level, sources, _parent) in sorted(
+            candidates.items(), key=lambda item: item[1][0]
+        ):
+            if level <= 1:
+                if target_lv1_sources.intersection(sources):
+                    overlapping += 1
+                    continue
+                plan.accepted.add(page_id)
+                continue
+            live = 0
+            ok = True
+            for child in sources:
+                if child in plan.accepted:
+                    live += 1
+                elif child in target_ids or child in zip_ids:
+                    ok = False
+                    break
+            if ok and live:
+                plan.accepted.add(page_id)
+            else:
+                on_shared += 1
+
+        for page_id in plan.accepted:
+            parent = candidates[page_id][2]
+            if parent in (None, _ROOT_CHRONICLE) or parent in plan.accepted:
+                continue
+            plan.to_root.add(page_id)
+
+        if overlapping:
+            self.warn(
+                f"chronicle: {overlapping} level-1 page(s) not imported; their source "
+                "messages overlap the target's existing level-1 coverage"
+            )
+        if on_shared:
+            self.warn(
+                f"chronicle: {on_shared} upper page(s) not imported; they stand on pages "
+                "shared with the target or not imported"
+            )
+        if deleted:
+            self.warn(f"chronicle: {deleted} deleted page(s) not imported")
+        if unreadable:
+            self.warn(
+                f"chronicle: {unreadable} page(s) not imported; level or source_ids in "
+                "their metadata is unreadable"
+            )
+        return plan
 
     def record_original(self, meta_cell: List[Any], key: str, original: Any, page_id: str) -> None:
         """振り直した行の元の番号を metadata に残す。meta_cell は [is_raw, 値]。"""
@@ -1460,12 +1623,63 @@ class _ImportJob:
         self.plan_file(zip_name, dest)
         counts.added += 1
 
+    def stage_merge_recall_edges(self, conn: sqlite3.Connection) -> None:
+        """合流で取り込んだ chronicle ページの chunk_page_edges を入れる。
+
+        extensions/ は合流では取り込まない (intent §5) が、この表は取り込んだ
+        chronicle ページから実体ページへの想起用タグの辺 (sai_memory/memory/
+        recall_edges.py) で、取り込んだページと一緒でないと意味を持たない。
+        両端 (chronicle_page_id が今回取り込んだページ、entity_page_id が取り込み先に
+        あるページ) が揃う行だけを INSERT OR IGNORE で入れる。
+        """
+        table = "chunk_page_edges"
+        rows = self.pack.ext_memory_tables.get(table)
+        if not rows:
+            return
+        self._merged_ext_tables.add(table)
+        counts = self.result.count(f"extensions/memory_db/{table}")
+        if not self.imported_chronicle_ids or not self.table_exists(conn, table):
+            counts.skipped += len(rows)
+            return
+        decoded = [{k: decode_value(v) for k, v in row.items()} for row in rows]
+        entity_ids = self.existing_keys(
+            conn, "memopedia_pages", "id",
+            (r.get("entity_page_id") for r in decoded
+             if r.get("chronicle_page_id") in self.imported_chronicle_ids),
+        )
+        for row in decoded:
+            chronicle_id = row.get("chronicle_page_id")
+            entity_id = row.get("entity_page_id")
+            created_at = row.get("created_at")
+            if (
+                chronicle_id not in self.imported_chronicle_ids
+                or entity_id not in entity_ids
+                or isinstance(created_at, bool)
+                or not isinstance(created_at, int)
+            ):
+                counts.skipped += 1
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO chunk_page_edges("
+                "chronicle_page_id, entity_page_id, created_at) VALUES (?, ?, ?)",
+                (chronicle_id, entity_id, created_at),
+            )
+            if cur.rowcount:
+                counts.added += 1
+            else:
+                counts.skipped += 1
+
     def count_merge_skips(self) -> None:
-        """合流では items/ と extensions/ を取り込まない (intent §5)。件数だけ載せる。"""
+        """合流では items/ と extensions/ を取り込まない (intent §5)。件数だけ載せる。
+
+        stage_merge_recall_edges が扱った表は、そちらが件数を載せている。
+        """
         pack = self.pack
         if pack.item_files:
             self.result.count("items").skipped += len(pack.item_files)
         for table, rows in pack.ext_memory_tables.items():
+            if table in self._merged_ext_tables:
+                continue
             self.result.count(f"extensions/memory_db/{table}").skipped += len(rows)
         for table, rows in pack.ext_saiverse_tables.items():
             self.result.count(f"extensions/saiverse_db/{table}").skipped += len(rows)

@@ -244,6 +244,103 @@ def test_merge_import_overwrites_profile_when_asked(world: Dict[str, Any]) -> No
         assert ai.PRIVATE_ROOM_ID == f"{target}_room"  # 環境と結びついた列は触らない
 
 
+def test_merge_import_refuses_while_chronicle_job_runs(world: Dict[str, Any]) -> None:
+    from api.routes.people import arasuji
+
+    pack = _export_zip(world)
+    dst = world["dst"]
+    target = f"other_{CITY}"
+    dst["manager"].add_persona(target, "Other")
+    job_id = arasuji._create_job(target)
+    try:
+        res = world["use"](dst).post(
+            f"/api/people/{target}/persona-pack/import",
+            files={"file": ("pack.zip", pack, "application/zip")},
+        )
+        assert res.status_code == 409, res.text
+        assert _messages(dst["home"], target) == []
+        # 終端したジョブは妨げない
+        arasuji._update_job(job_id, status="completed")
+        res = world["use"](dst).post(
+            f"/api/people/{target}/persona-pack/import",
+            files={"file": ("pack.zip", pack, "application/zip")},
+        )
+        assert res.status_code == 200, res.text
+    finally:
+        with arasuji._jobs_lock:
+            arasuji._generation_jobs.pop(job_id, None)
+
+
+def test_merge_with_chronicle_marks_cold_windows_and_predicts(
+    world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import contextlib
+    from types import SimpleNamespace
+
+    from sai_memory.arasuji.storage import create_entry, init_arasuji_tables
+    from sea import coverage_repair
+
+    src_db = world["src"]["home"] / "personas" / SRC / "memory.db"
+    conn = sqlite3.connect(src_db)
+    init_arasuji_tables(conn)
+    create_entry(conn, level=1, content="two lines", source_ids=["m1", "m2"],
+                 start_time=T0, end_time=T0 + 1, source_count=2, message_count=2)
+    conn.close()
+    pack = _export_zip(world)
+
+    dst = world["dst"]
+    manager = dst["manager"]
+    target = f"other_{CITY}"
+    manager.add_persona(target, "Other")
+
+    held: List[str] = []
+
+    class Gate:
+        @contextlib.contextmanager
+        def hold(self, persona_id: str, *, purpose: str, check_gate: bool = True):
+            held.append(purpose)
+            try:
+                yield self
+            finally:
+                held.pop()
+
+    persona = SimpleNamespace(persona_id=target)
+    lifecycle = object()
+    manager.beat_gate = Gate()
+    manager.personas[target] = persona
+    manager.sea_runtime = SimpleNamespace(session_lifecycle=lifecycle)
+    calls: List[Tuple[Any, Any, List[str]]] = []
+
+    def fake_mark(lc: Any, p: Any) -> Tuple[int, int]:
+        calls.append((lc, p, list(held)))
+        return (1, 0)
+
+    monkeypatch.setattr(coverage_repair, "mark_covered_cold_windows", fake_mark)
+    res = world["use"](dst).post(
+        f"/api/people/{target}/persona-pack/import",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["counts"]["chronicle_pages"]["added"] == 1
+    # 印は補修の完了処理と同じ関数で、Beat ロックの内側で書く
+    assert calls == [(lifecycle, persona, ["persona_pack_merge"])]
+    after = body["chronicle_after_merge"]
+    assert after["cold_windows_marked"] == 1
+    assert after["cold_window_mark_failures"] == 0
+    assert after["cold_window_marks_skipped"] is False
+    assert after["fold_runs_predicted"] == 0
+    assert after["stale_entries"] == 0
+
+    # Chronicle を取り込まなかった合流では何もしない
+    again = world["use"](dst).post(
+        f"/api/people/{target}/persona-pack/import",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    ).json()
+    assert again["chronicle_after_merge"] is None
+    assert len(calls) == 1
+
+
 def test_merge_import_rejects_non_pack(world: Dict[str, Any]) -> None:
     dst = world["dst"]
     target = f"other_{CITY}"

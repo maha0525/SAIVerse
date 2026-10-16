@@ -12195,6 +12195,34 @@
     "ja": "注意 ({p1} 件)",
     "en": "Warnings ({p1})"
   },
+  "components.memory.PersonaPack.chronicleForecastTitle": {
+    "ja": "あらすじ (Chronicle) の次の補修",
+    "en": "Next Chronicle repair"
+  },
+  "components.memory.PersonaPack.chronicleFoldRuns": {
+    "ja": "あらすじを大きな流れにまとめる作業 (見込み)",
+    "en": "Runs to combine summaries into larger arcs (estimate)"
+  },
+  "components.memory.PersonaPack.chronicleStaleEntries": {
+    "ja": "書き直しを待っているあらすじ",
+    "en": "Summaries waiting to be rewritten"
+  },
+  "components.memory.PersonaPack.chronicleTimes": {
+    "ja": "{p1} 回",
+    "en": "{p1}"
+  },
+  "components.memory.PersonaPack.chronicleEntries": {
+    "ja": "{p1} 件",
+    "en": "{p1}"
+  },
+  "components.memory.PersonaPack.chronicleRepairHint": {
+    "ja": "合流の後は、あらすじ (Chronicle) の画面に出る案内から、あらすじの補修を一度実行してください。取り込んだあらすじを、このペルソナのあらすじの流れにつなぎます。実行の前に、内容と費用の確認があります。",
+    "en": "After merging, run the Chronicle repair once from the notice on the Chronicle screen. It connects the imported summaries to this persona's chronicle. You can review the content and cost before it runs."
+  },
+  "components.memory.PersonaPack.chronicleMarksPending": {
+    "ja": "取り込んだあらすじが会話と二重に表示されるのを防ぐ印を、まだ書き込めていない会話があります。あらすじの補修を実行すると書き込まれます。",
+    "en": "Some conversations do not yet have the marks that keep imported summaries from showing twice alongside the conversation. Running the Chronicle repair writes them."
+  },
   "components.PersonaWizard.packHint": {
     "ja": "ペルソナまるごとパック (ZIP) を持っているなら、その子を記憶ごと新しいペルソナとして迎えられます。名前や設定は ZIP の内容が使われます。",
     "en": "If you have a Persona Pack (ZIP), you can welcome that persona as a new persona, memories and all. The name and settings come from the ZIP."

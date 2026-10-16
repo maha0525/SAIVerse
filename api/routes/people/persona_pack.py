@@ -13,6 +13,11 @@ import_chatlog.py と同じ ``_launch_import_embedding`` で埋め込みの再�
 生きているペルソナの adapter は import_chatlog.py と同じく触らない (取り込みは別の
 接続で memory.db に書き、埋め込みは使い捨ての adapter が行う)。プロフィールを上書きした
 ときだけ、読み込み済みのペルソナへ保存経路 (manager.update_ai) で値を写す。
+
+合流は Beat ロックの内側で行い、あらすじ生成・補修のジョブが終端していなければ
+409 で断る。Chronicle ページを取り込んだ合流では、冷えた窓への presented_raw の印と
+次の編纂の予測 (束ねの回数・content_stale の件数) を結果の ``chronicle_after_merge``
+に載せる (_chronicle_after_merge)。
 """
 from __future__ import annotations
 
@@ -252,21 +257,104 @@ def _refresh_loaded_persona_profile(manager: Any, persona_id: str) -> None:
         LOGGER.exception("Persona pack: could not apply the profile to the loaded persona %s", persona_id)
 
 
+def _chronicle_after_merge(
+    manager: Any, persona_id: str, saiverse_home: Path,
+) -> Dict[str, Any]:
+    """合流で Chronicle ページを取り込んだ後の処理と、次の編纂の予測。
+
+    1. 冷えた anchor 行の窓を覆う取り込んだ記事へ presented_raw の印を書く
+       (sea.coverage_repair.mark_covered_cold_windows — 補修の完了処理と同じ
+       関数・同じ呼び方)。head の再取得後に、窓の生ログと head のあらすじ枠に
+       同じ記事が二重に出るのを防ぐ。補修と同じく、読み込み済みのペルソナ
+       (adapter が使える) でなければ書かない。
+       補修の出口が行う head の再構築 (_dispatch_manual_head_rebuild) は行わない:
+       補修の記事は止め線 (温かい anchor の最古位置) より古い範囲だけを覆うが、
+       合流の記事にはその保証が無く、温かい窓の中のメッセージを覆いうる。
+       温かい行には印を書かない (arasuji_levels.md §16-2) ので、ここで head を組み直すと、その記事が
+       すぐに温かい窓の生ログと二重に出る。
+    2. 次の編纂で走る束ねの回数 (bands.plan_band_overflow、LLM なしの予測) と、
+       content_stale の印を持つ上位の件数を数える。
+    """
+    out: Dict[str, Any] = {
+        "cold_windows_marked": None,
+        "cold_window_mark_failures": None,
+        "cold_window_marks_skipped": False,
+        "fold_runs_predicted": None,
+        "stale_entries": None,
+    }
+    persona = (getattr(manager, "personas", None) or {}).get(persona_id)
+    lifecycle = getattr(getattr(manager, "sea_runtime", None), "session_lifecycle", None)
+    if persona is None or lifecycle is None:
+        out["cold_window_marks_skipped"] = True
+        LOGGER.info(
+            "Persona pack merge: %s is not loaded; cold-window marks were not written", persona_id,
+        )
+    else:
+        try:
+            from sea.coverage_repair import mark_covered_cold_windows
+            marked, failed = mark_covered_cold_windows(lifecycle, persona)
+        except Exception:
+            LOGGER.warning(
+                "Persona pack merge: cold-window marking failed (persona=%s)", persona_id,
+                exc_info=True,
+            )
+            marked, failed = 0, -1  # 数不明の全滅 (run_coverage_repair と同じ表し方)
+        out["cold_windows_marked"] = marked
+        out["cold_window_mark_failures"] = failed
+
+    from sai_memory.arasuji.absorption import list_stale_upper_ids
+    from sai_memory.arasuji.bands import plan_band_overflow
+    from sai_memory.arasuji.storage import init_arasuji_tables
+
+    conn = sqlite3.connect(str(saiverse_home / "personas" / persona_id / "memory.db"))
+    try:
+        init_arasuji_tables(conn)
+        out["fold_runs_predicted"] = plan_band_overflow(conn)
+        out["stale_entries"] = len(list_stale_upper_ids(conn))
+    except Exception:
+        LOGGER.warning(
+            "Persona pack merge: could not predict the next Chronicle run (persona=%s)",
+            persona_id, exc_info=True,
+        )
+    finally:
+        conn.close()
+    return out
+
+
 def _run_import(
     manager: Any, zip_path: Path, *, mode: str, persona_id: str, overwrite_profile: bool,
 ) -> Dict[str, Any]:
-    """import_persona_pack を呼び、後処理 (プロフィールの反映・埋め込みの再生成) をする。"""
+    """import_persona_pack を呼び、後処理 (プロフィールの反映・埋め込みの再生成) をする。
+
+    合流は Beat ロック (sea.beat_gate.hold_beat) の内側で行う — 会話・Metabolism・
+    あらすじの補修ジョブは同じロックの内側で記憶に書くので、取り込みとその後の
+    印の書き込みがそれらと並走しない (補修・あらすじ削除と同じく check_gate=False)。
+    """
     from saiverse_memory.persona_pack import import_persona_pack
 
     saiverse_db_path, saiverse_home = _world_paths(manager)
-    result = import_persona_pack(
-        zip_path,
-        mode=mode,
-        target_persona_id=persona_id,
-        saiverse_db_path=saiverse_db_path,
-        saiverse_home=saiverse_home,
-        overwrite_profile=overwrite_profile,
-    )
+
+    def run() -> Any:
+        return import_persona_pack(
+            zip_path,
+            mode=mode,
+            target_persona_id=persona_id,
+            saiverse_db_path=saiverse_db_path,
+            saiverse_home=saiverse_home,
+            overwrite_profile=overwrite_profile,
+        )
+
+    chronicle_after_merge: Optional[Dict[str, Any]] = None
+    if mode == "merge":
+        from sea.beat_gate import hold_beat
+
+        with hold_beat(manager, persona_id, purpose="persona_pack_merge", check_gate=False):
+            result = run()
+            chronicle_counts = result.counts.get("chronicle_pages")
+            if chronicle_counts is not None and chronicle_counts.added:
+                chronicle_after_merge = _chronicle_after_merge(manager, persona_id, saiverse_home)
+    else:
+        result = run()
     if result.profile_columns_overwritten:
         _refresh_loaded_persona_profile(manager, persona_id)
     embedding_started = False
@@ -274,6 +362,7 @@ def _run_import(
         embedding_started = _start_embedding(persona_id, result.embeddings_deferred)
     payload = asdict(result)
     payload["embedding_started"] = embedding_started
+    payload["chronicle_after_merge"] = chronicle_after_merge
     return payload
 
 
@@ -301,8 +390,23 @@ async def import_persona_pack_merge(
     overwrite_profile: bool = Form(False),
     manager=Depends(get_manager),
 ):
-    """パックを既存のペルソナへ合流させる (intent §5)。結果の内訳を返す。"""
+    """パックを既存のペルソナへ合流させる (intent §5)。結果の内訳を返す。
+
+    このペルソナのあらすじ生成・補修のジョブが終端していなければ 409 で断る
+    (合流は Chronicle の木に書くので、編纂と並走させない)。判定の後に始まった
+    ジョブとは、_run_import の Beat ロックで直列になる。
+    """
+    from .arasuji import has_active_generation_job
+
     ensure_persona_exists(persona_id, manager)
+    if has_active_generation_job(persona_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A Chronicle generation or repair job is running for this persona. "
+                "Wait for it to finish, then import again."
+            ),
+        )
     with _claim_import(persona_id):
         zip_path = await _save_upload(file)
         try:
