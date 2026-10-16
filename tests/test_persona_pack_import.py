@@ -1027,6 +1027,120 @@ def test_page_update_keeps_target_only_metadata_keys(source: Dict[str, Any], tmp
     assert "original_short_id" not in merged
 
 
+def _page_parents(env: Dict[str, Any]) -> Dict[str, Any]:
+    conn = _mem(env)
+    try:
+        return dict(conn.execute("SELECT id, parent_id FROM memopedia_pages"))
+    finally:
+        conn.close()
+
+
+def _pages_reached_from_roots(parents: Dict[str, Any]) -> set:
+    """parent_id が NULL の行から子を辿って届く行 (build_tree と同じ辿り方を、全分類で)。"""
+    children: Dict[Any, List[str]] = {}
+    for page_id, parent_id in parents.items():
+        children.setdefault(parent_id, []).append(page_id)
+    reached: set = set()
+    stack = list(children.get(None, []))
+    while stack:
+        page_id = stack.pop()
+        if page_id in reached:
+            continue
+        reached.add(page_id)
+        stack.extend(children.get(page_id, []))
+    return reached
+
+
+def test_page_update_does_not_make_a_parent_cycle(source: Dict[str, Any], tmp_path: Path) -> None:
+    """取り込み先が root→A→B、ZIP が root→B→A で A だけ ZIP 側が新しくても循環しない。
+
+    A の本文は ZIP 側に上書きされ、親だけは取り込み先の値 (root_terms) に戻る。
+    """
+    from sai_memory.memopedia.storage import build_tree
+
+    ids = source["ids"]
+    apple, banana = ids["apple"], ids["banana"]
+    conn = _mem(source)
+    conn.execute("UPDATE memopedia_pages SET parent_id = ? WHERE id = ?", (apple, banana))
+    conn.commit()
+    conn.close()
+    first = _export(source, tmp_path / "out" / "a_over_b.zip")
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, first, "new")
+    assert _page_parents(target)[banana] == apple
+
+    # ZIP 側は root→B→A に組み替え、A の本文だけ新しくする (B は本文が同じなのでスキップ)
+    conn = _mem(source)
+    conn.execute("UPDATE memopedia_pages SET parent_id = 'root_terms' WHERE id = ?", (banana,))
+    conn.execute(
+        "UPDATE memopedia_pages SET parent_id = ?, content = ?, updated_at = ? WHERE id = ?",
+        (banana, "書き足した赤い果物", T0 + 900, apple),
+    )
+    conn.commit()
+    conn.close()
+    second = _export(source, tmp_path / "out" / "b_over_a.zip")
+
+    result = _import(target, second, "merge")
+    assert result.counts["pages"].updated == 1
+    parents = _page_parents(target)
+    assert parents[apple] == "root_terms"
+    assert parents[banana] == apple
+    assert _pages_reached_from_roots(parents) == set(parents)
+    assert [w for w in result.warnings if "memopedia page" in w] == [
+        f"memopedia page {apple}: the pack's parent {banana!r} would make a cycle or a missing "
+        "parent in the page tree; the target's parent 'root_terms' is kept (the rest of the page "
+        "was updated)"
+    ]
+    conn = _mem(target)
+    try:
+        (content,) = conn.execute(
+            "SELECT content FROM memopedia_pages WHERE id = ?", (apple,)
+        ).fetchone()
+        assert content == "書き足した赤い果物"
+        terms = {p.id: p for p in build_tree(conn)["terms"]}
+        assert [c.id for c in terms["root_terms"].children] == [apple]
+        assert [c.id for c in terms["root_terms"].children[0].children] == [banana]
+    finally:
+        conn.close()
+
+    # もう一度合流しても親は動かず、何も増えない
+    before = _dump(target)
+    again = _import(target, second, "merge")
+    assert all(c.added == 0 and c.updated == 0 for c in again.counts.values()), again.counts
+    assert _dump(target) == before
+
+
+def test_inserted_page_with_a_missing_parent_is_moved_under_its_trunk(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    """取り込んだページの親が無ければ同じ分類の trunk の直下に置き、取り込み前からの欠けは触らない。"""
+    conn = _mem(source)
+    orphan = create_page(conn, parent_id="root_terms", title="みかん", content="橙の果物", category="terms")
+    conn.execute("UPDATE memopedia_pages SET parent_id = 'page-gone' WHERE id = ?", (orphan.id,))
+    conn.commit()
+    conn.close()
+    pack = _export(source, tmp_path / "out" / "orphan.zip")
+
+    target = _make_env(tmp_path / "dst", PID)
+    conn = _mem(target)
+    old = create_page(conn, parent_id="root_people", title="昔の人", content="", category="people")
+    conn.execute("UPDATE memopedia_pages SET parent_id = 'page-lost-before' WHERE id = ?", (old.id,))
+    conn.commit()
+    conn.close()
+
+    result = _import(target, pack, "new")
+    parents = _page_parents(target)
+    assert parents[orphan.id] == "root_terms"
+    assert parents[old.id] == "page-lost-before"
+    assert _pages_reached_from_roots(parents) == set(parents) - {old.id}
+    assert [w for w in result.warnings if w.startswith("memopedia")] == [
+        f"memopedia page {orphan.id}: its parent 'page-gone' makes a cycle or is missing in the "
+        "page tree; moved under 'root_terms'",
+        "memopedia: 1 page(s) stay outside the page tree because of a cycle or a missing parent "
+        "that existed in the target before this import; left as they are",
+    ]
+
+
 def test_broken_extensions_json_is_refused_in_merge(source: Dict[str, Any], tmp_path: Path) -> None:
     broken = _rewrite_zip(
         source["zip"], tmp_path / "broken_ext.zip",
@@ -1698,9 +1812,9 @@ def _home_files(env: Dict[str, Any]) -> List[Tuple[str, bytes]]:
 def test_stop_before_the_memory_commit_is_finished_by_a_merge(
     source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """印を書いた直後・memory.db の COMMIT 前に止まった新規作成を、同じ ZIP の合流が全段やり直す。
+    """ファイルを書き終えた直後・memory.db の COMMIT 前に止まった新規作成を、同じ ZIP の合流が全段やり直す。
 
-    印はファイルなので memory.db と一緒に巻き戻らない。memory.db の適用済み記録が
+    印はファイルを書く前に置かれ、ファイルなので memory.db と一緒に巻き戻らない。memory.db の適用済み記録が
     無いので、再開の合流は memory.db 側の mode="new" の工程 (知覚台帳を含む
     extensions/saiverse/memory_db/ とペルソナフォルダのファイル) も行う。
     """
@@ -1726,14 +1840,14 @@ def test_stop_before_the_memory_commit_is_finished_by_a_merge(
 
     target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
     marker = target["persona_dir"] / "persona_pack_world_pending.json"
-    original_write = importer._ImportJob.write_pending_marker
+    original_write = importer._ImportJob.write_files
 
     def write_then_stop(self: Any) -> None:
         original_write(self)
         raise SystemExit("process stopped before the memory.db COMMIT (injected)")
 
-    # プロセスが止まった状態を作る: 印を書いた直後に落ち、後始末 (書いたファイルの削除) も走らない
-    monkeypatch.setattr(importer._ImportJob, "write_pending_marker", write_then_stop)
+    # プロセスが止まった状態を作る: ファイルを書いた直後に落ち、後始末 (書いたファイルの削除) も走らない
+    monkeypatch.setattr(importer._ImportJob, "write_files", write_then_stop)
     monkeypatch.setattr(importer._ImportJob, "remove_created_files", lambda self: None)
     with pytest.raises(SystemExit, match="injected"):
         _import(target, pack, "new", overwrite_profile=True)
@@ -1789,6 +1903,52 @@ def test_stop_before_the_memory_commit_is_finished_by_a_merge(
     again = _import(target, pack, "merge")
     assert all(c.added == 0 and c.updated == 0 for c in again.counts.values()), again.counts
     assert _dump(target) == before
+
+
+def test_stop_while_writing_files_leaves_the_marker_and_is_finished_by_a_merge(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """新規作成がファイル (添付など) を書いている途中で止まっても印が残り、
+    同じ ZIP の合流が新規作成の全工程 (memory.db 側・世界側・ファイル) を復旧して印を消す。"""
+    from saiverse_memory.persona_pack import importer
+
+    reference = _make_env(tmp_path / "ref", "newcomer_city_a", name="新入り")
+    _import(reference, source["zip"], "new")
+
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    marker = target["persona_dir"] / "persona_pack_world_pending.json"
+    original_write = importer._ImportJob.write_files
+    planned: List[int] = []
+
+    def write_first_file_then_stop(self: Any) -> None:
+        plans = self.file_plans
+        planned.append(len(plans))
+        self.file_plans = plans[:1]
+        original_write(self)
+        self.file_plans = plans
+        raise SystemExit("process stopped while writing files (injected)")
+
+    # プロセスが止まった状態を作る: 1 個目のファイルを書いた所で落ち、後始末も走らない
+    monkeypatch.setattr(importer._ImportJob, "write_files", write_first_file_then_stop)
+    monkeypatch.setattr(importer._ImportJob, "remove_created_files", lambda self: None)
+    with pytest.raises(SystemExit, match="injected"):
+        _import(target, source["zip"], "new")
+    monkeypatch.undo()
+
+    assert planned and planned[0] >= 2  # 途中で止まった (書いていないファイルが残っている)
+    assert marker.is_file()
+    assert json.loads(marker.read_text(encoding="utf-8"))["zip_sha256"] == importer._sha256_file(source["zip"])
+    assert _table_counts(target["memory_db"])["messages"] == 0
+    assert _world_counts(target, target["persona_id"])["persona_event_log"] == 0
+    assert len(_home_files(target)) < len(_home_files(reference))
+
+    result = _import(target, source["zip"], "merge")
+    assert not marker.exists()
+    assert sum("resuming the unfinished part" in w for w in result.warnings) == 2
+    assert _table_counts(target["memory_db"]) == _table_counts(reference["memory_db"])
+    assert _table_counts(target["world_db"]) == _table_counts(reference["world_db"])
+    assert _home_files(target) == _home_files(reference)
+    assert result.counts["items"].added == 4
 
 
 def test_resume_when_only_the_world_part_is_missing_does_not_redo_the_memory_part(

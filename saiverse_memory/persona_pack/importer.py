@@ -97,6 +97,9 @@ ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を
 - memopedia_pages は id で照合し、本文 (content) が違い、かつ ZIP 側の
   updated_at が新しいときだけ上書きする。上書き前の本文は
   memopedia_page_edit_history に before_* として記録する (rollback_page で戻せる)。
+  挿入と上書きの後、memory.db の commit 前に memopedia_pages 全体の親子を検査し
+  (:meth:`_ImportJob.check_page_tree`)、上書きで parent_id を変えた行が循環・無い親を
+  作るときは、その行の parent_id だけを取り込み先の元の値に戻す。
 - 合流時の Chronicle (chronicle 分類の trunk でないページ) は、取り込み先に無い
   id の行のうち、取り込み先の被覆と重ならない枝だけを入れる
   (:meth:`_ImportJob.plan_chronicle_merge`)。Lv1 は source_ids が取り込み先の
@@ -130,8 +133,8 @@ ZIP のどの行の番号でもない参照と、発話の本文・ページの�
 作ったファイルを消す。ZIP の JSON の解釈と形の検査は書き込みより前に全部済ませる。
 
 片側だけ commit された取り込みの再開: 二つの DB の commit は別々なので、memory.db の
-commit 後に saiverse.db の commit が失敗すると片側が残る。mode="new" は memory.db を
-commit する前にペルソナフォルダへ印 (export.WORLD_PENDING_MARKER。manifest の
+commit 後に saiverse.db の commit が失敗すると片側が残る。mode="new" は最初の
+ファイル書き込み (write_files) の前にペルソナフォルダへ印 (export.WORLD_PENDING_MARKER。manifest の
 persona_id・format・version、ZIP 全体の sha256 (zip_sha256)、取り込みの識別子
 (import_id = zip_sha256 と取り込み先のペルソナ ID から決まる値)、overwrite_profile) を
 書き、saiverse.db の commit が成功したら消す。世界側の工程は、同じトランザクションで
@@ -143,7 +146,7 @@ saiverse.db の commit が成功したら印を消す。persona_pack_imports に
 あれば (世界側の commit 後、印を消す前に止まった) 世界側の工程はやり直さず印だけ
 消す — 整数の主キーを振り直す表は INSERT OR IGNORE では二重登録を防げないため。
 印はファイルなので memory.db の COMMIT と一緒に巻き戻らず、印を書いた後、memory.db の
-COMMIT 前に止まると印だけが残る。これを見分けるため、mode="new" の memory.db 側の
+COMMIT 前に (ファイルを書いている途中を含む) 止まると印だけが残る。これを見分けるため、mode="new" の memory.db 側の
 工程も同じトランザクションで memory.db の persona_pack_imports (_MEMORY_IMPORTS_TABLE)
 に import_id を書く。再開の合流は memory.db にその記録が無ければ、memory.db 側の
 mode="new" の工程 (extensions/saiverse/memory_db/・extensions/saiverse/persona_dir/・
@@ -662,6 +665,49 @@ def _page_numbers(category: Any, column_short_id: Any, metadata: Any) -> Dict[st
     return out
 
 
+def _page_tree_faults(
+    parents: Dict[str, Any],
+) -> Tuple[Set[str], List[List[str]], List[str]]:
+    """memopedia_pages の {id: parent_id} から、parent_id を辿って親の無い行
+    (parent_id が NULL の行) に着かない行を求める。
+
+    返り値は (着かない行の id の集合, 循環 (循環に入る行の id の列) の一覧,
+    parent_id が memopedia_pages に無い id を指す行の一覧)。各行を一度ずつ辿るので
+    行数に比例する時間で終わる (再帰しない)。
+    """
+    reaches: Dict[str, bool] = {}
+    cycles: List[List[str]] = []
+    dangling: List[str] = []
+    for start in parents:
+        if start in reaches:
+            continue
+        path: List[str] = []
+        position: Dict[str, int] = {}
+        node = start
+        while True:
+            if node in reaches:
+                ok = reaches[node]
+                break
+            if node in position:
+                cycles.append(path[position[node]:])
+                ok = False
+                break
+            position[node] = len(path)
+            path.append(node)
+            parent = parents[node]
+            if parent is None:
+                ok = True
+                break
+            if parent not in parents:
+                dangling.append(node)
+                ok = False
+                break
+            node = parent
+        for visited in path:
+            reaches[visited] = ok
+    return {page_id for page_id, ok in reaches.items() if not ok}, cycles, dangling
+
+
 def _quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
@@ -1074,6 +1120,10 @@ class _ImportJob:
         self._dropped_warned: Set[Tuple[str, str]] = set()
         # 取り込んだ chronicle ページの id (合流の chunk_page_edges の照合に使う)
         self.imported_chronicle_ids: Set[str] = set()
+        # stage_knowledge が挿入した memopedia_pages の id と、update_page が parent_id を
+        # 書き換えた行の {id: 取り込み先の元の parent_id} (check_page_tree が使う)
+        self.inserted_page_ids: Set[str] = set()
+        self.reparented: Dict[str, Any] = {}
         # 短縮番号の参照の種類 (saiverse/references.py の memopedia / core / chronicle /
         # clip) ごとの {ZIP の番号: その行が取り込み先で持つ番号}。取り込み先に入らなかった
         # 行の番号は None。stage_knowledge と stage_clips が作り、remap_numbered_ref が
@@ -1265,6 +1315,7 @@ class _ImportJob:
                 memory.execute("BEGIN IMMEDIATE")
                 self.stage_chatlog(memory)
                 self.stage_knowledge(memory)
+                self.check_page_tree(memory)
                 self.stage_journal_memory(memory)
                 if self.memory_new:
                     self.stage_ext_memory(memory)
@@ -1284,9 +1335,11 @@ class _ImportJob:
                 if self.mode == "merge":
                     self.count_merge_skips()
                 self.report_invalidated_media()
-                self.write_files()
                 if self.mode == "new":
+                    # 最初のファイル書き込みより前に置く: ファイルを書いている途中で
+                    # プロセスが止まっても、同じパックの合流が新規作成の工程を再開できる
                     self.write_pending_marker()
+                self.write_files()
                 memory.execute("COMMIT")
                 memory_committed = True
                 self.commit_world(world)
@@ -1327,7 +1380,8 @@ class _ImportJob:
     # --- 片側だけ commit された取り込みの印 ---------------------------------------
 
     def write_pending_marker(self) -> None:
-        """mode="new": memory.db の commit 前に印を書く (失敗したら created_files で消える)。"""
+        """mode="new": write_files の前 (memory.db の commit 前) に印を書く (例外で
+        巻き戻るときは created_files で消える)。"""
         payload = {
             "persona_id": self.source,
             "format": FORMAT_NAME,
@@ -1913,7 +1967,7 @@ class _ImportJob:
         for i in range(0, len(ids), _CHUNK):
             part = ids[i:i + _CHUNK]
             for row in conn.execute(
-                "SELECT id, title, summary, content, updated_at, metadata, category, short_id "
+                "SELECT id, title, summary, content, updated_at, metadata, category, short_id, parent_id "
                 f"FROM memopedia_pages WHERE id IN ({', '.join('?' for _ in part)})",
                 part,
             ):
@@ -2044,6 +2098,7 @@ class _ImportJob:
                     meta["is_consolidated"] = 0
             d["metadata"] = _encode_json_text(is_raw, meta)
             self.insert(conn, "memopedia_pages", d)
+            self.inserted_page_ids.add(d["id"])
             is_chronicle = d.get("category") == _CATEGORY_CHRONICLE and not d.get("is_trunk")
             if is_chronicle:
                 self.imported_chronicle_ids.add(d["id"])
@@ -2297,11 +2352,90 @@ class _ImportJob:
             (k, v) for k, v in decoded.items()
             if k in cols and k not in ("id", "short_id", "created_at")
         ]
+        if "parent_id" in decoded and "parent_id" in cols and decoded["parent_id"] != existing[8]:
+            # check_page_tree が、親子の木を壊す付け替えだけを取り込み先の値に戻す
+            self.reparented.setdefault(decoded["id"], existing[8])
         conn.execute(
             f"UPDATE memopedia_pages SET {', '.join(f'{_quote(k)} = ?' for k, _ in assignments)} "
             "WHERE id = ?",
             [v for _, v in assignments] + [decoded["id"]],
         )
+
+    def check_page_tree(self, conn: sqlite3.Connection) -> None:
+        """stage_knowledge の挿入・上書き・スキップを反映した memopedia_pages の親子を検査する
+        (memory.db の commit 前、同じトランザクションの中)。
+
+        全分類 (Chronicle・core・通常ページ) の全行の (id, parent_id) を読み、parent_id を
+        辿って親の無い行 (trunk) に着かない行 (循環・無い親を指す行) を探す。
+        build_tree はそういう行を木に載せず、delete_page は循環で RecursionError になる。
+
+        - update_page が parent_id を書き換えた行のうち着かない行は、parent_id を
+          取り込み先の元の値に戻して警告する (本文などの上書きは残す)。
+          例: 取り込み先が root→A→B、ZIP が root→B→A で A だけ ZIP 側が新しいと、
+          A.parent_id = B の上書きと B のスキップで A と B が循環する。
+        - それでも残る循環・無い親のうち、この取り込みが挿入または上書きした行を含む
+          ものは、その行 (循環なら id の小さい一行) の parent_id を同じ分類の trunk
+          (無ければ NULL) にして警告する。
+        - この取り込みが触れていない行だけの循環・無い親 (取り込み前からのもの) は
+          書き換えず、件数を警告する。
+
+        stage_knowledge が行を挿入も parent_id の書き換えもしなかったときは読まない。
+        読むときは memopedia_pages の全行を一度読み、各行を一度ずつ辿る (行数に比例)。
+        """
+        if not self.inserted_page_ids and not self.reparented:
+            return
+        rows = conn.execute(
+            "SELECT id, parent_id, category, is_trunk FROM memopedia_pages"
+        ).fetchall()
+        parents: Dict[str, Any] = {row[0]: row[1] for row in rows}
+        unrooted, _cycles, _dangling = _page_tree_faults(parents)
+        if not unrooted:
+            return
+
+        for page_id in sorted(p for p in self.reparented if p in unrooted):
+            original = self.reparented[page_id]
+            conn.execute(
+                "UPDATE memopedia_pages SET parent_id = ? WHERE id = ?", (original, page_id)
+            )
+            self.warn(
+                f"memopedia page {page_id}: the pack's parent {parents[page_id]!r} would make a "
+                f"cycle or a missing parent in the page tree; the target's parent {original!r} is "
+                "kept (the rest of the page was updated)"
+            )
+            parents[page_id] = original
+
+        unrooted, cycles, dangling = _page_tree_faults(parents)
+        if not unrooted:
+            return
+        touched = self.inserted_page_ids | set(self.reparented)
+        trunks: Dict[Any, str] = {}
+        for page_id, parent_id, category, is_trunk in sorted(rows, key=lambda r: r[0]):
+            if is_trunk and parent_id is None:
+                trunks.setdefault(category, page_id)
+        categories = {row[0]: row[2] for row in rows}
+        to_trunk: List[str] = []
+        for cycle in cycles:
+            members = sorted(p for p in cycle if p in touched)
+            if members:
+                to_trunk.append(members[0])
+        to_trunk.extend(sorted(p for p in dangling if p in touched))
+        for page_id in to_trunk:
+            trunk = trunks.get(categories[page_id])
+            conn.execute(
+                "UPDATE memopedia_pages SET parent_id = ? WHERE id = ?", (trunk, page_id)
+            )
+            self.warn(
+                f"memopedia page {page_id}: its parent {parents[page_id]!r} makes a cycle or "
+                f"is missing in the page tree; moved under {trunk!r}"
+            )
+            parents[page_id] = trunk
+
+        unrooted, _cycles, _dangling = _page_tree_faults(parents)
+        if unrooted:
+            self.warn(
+                f"memopedia: {len(unrooted)} page(s) stay outside the page tree because of a cycle "
+                "or a missing parent that existed in the target before this import; left as they are"
+            )
 
     # --- journal/ (memory.db 側) ------------------------------------------------
 
