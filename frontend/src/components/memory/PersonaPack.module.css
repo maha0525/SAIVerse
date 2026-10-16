@@ -1,0 +1,298 @@
+/* ペルソナまるごとパック (Memory モーダルのタブ + 作成ウィザードの結果表示) */
+
+.container {
+    padding: 2rem;
+    color: #1e293b;
+    height: 100%;
+    overflow-y: auto;
+}
+
+.title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+
+.lead {
+    color: #475569;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    margin-bottom: 1.5rem;
+}
+
+.section {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+    background-color: #f8fafc;
+}
+
+.sectionTitle {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+}
+
+.sectionText {
+    color: #475569;
+    font-size: 0.875rem;
+    line-height: 1.6;
+    margin-bottom: 1rem;
+}
+
+.actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+}
+
+.primaryButton {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    background-color: #2563eb;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0.6rem 1.2rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.primaryButton:hover:not(:disabled) {
+    background-color: #1d4ed8;
+}
+
+.primaryButton:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.secondaryButton {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: white;
+    color: #1e293b;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 0.6rem 1.2rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.secondaryButton:hover:not(:disabled) {
+    background-color: #f1f5f9;
+}
+
+.secondaryButton:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.hiddenInput {
+    display: none;
+}
+
+.confirmBox {
+    margin-top: 1rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 1rem;
+    background-color: white;
+}
+
+.fileName {
+    font-weight: 600;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    margin-bottom: 0.75rem;
+}
+
+.checkboxRow {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    margin-bottom: 0.4rem;
+    cursor: pointer;
+}
+
+.checkboxRow input {
+    margin-top: 0.2rem;
+}
+
+.hint {
+    color: #475569;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    margin-bottom: 1rem;
+}
+
+.busy {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #475569;
+    font-size: 0.875rem;
+}
+
+.spin {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.error {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+    color: #dc2626;
+    font-size: 0.875rem;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+/* 結果の内訳 */
+
+.result {
+    margin-top: 1rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 1rem;
+    background-color: white;
+    text-align: left;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.resultTitle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    color: #16a34a;
+}
+
+.table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.table th,
+.table td {
+    padding: 0.35rem 0.5rem;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.table th {
+    color: #475569;
+    font-weight: 500;
+    text-align: right;
+}
+
+.table th:first-child,
+.table td:first-child {
+    text-align: left;
+}
+
+.table td {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.note {
+    margin-top: 0.75rem;
+    color: #475569;
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
+.warnings {
+    margin-top: 0.75rem;
+    font-size: 0.8rem;
+    color: #b45309;
+}
+
+.warnings summary {
+    cursor: pointer;
+}
+
+.warnings ul {
+    margin: 0.5rem 0 0 1.25rem;
+    padding: 0;
+    color: #475569;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+/* ダークモード */
+
+:global([data-theme="dark"]) .container {
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .lead,
+:global([data-theme="dark"]) .sectionText,
+:global([data-theme="dark"]) .hint,
+:global([data-theme="dark"]) .busy,
+:global([data-theme="dark"]) .note,
+:global([data-theme="dark"]) .table th,
+:global([data-theme="dark"]) .warnings ul {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .section {
+    border-color: #334155;
+    background-color: #0f172a;
+}
+
+:global([data-theme="dark"]) .confirmBox,
+:global([data-theme="dark"]) .result {
+    border-color: #334155;
+    background-color: #0f172a;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .secondaryButton {
+    background: #0f172a;
+    color: #e2e8f0;
+    border-color: #334155;
+}
+
+:global([data-theme="dark"]) .secondaryButton:hover:not(:disabled) {
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+:global([data-theme="dark"]) .table th,
+:global([data-theme="dark"]) .table td {
+    border-bottom-color: #334155;
+}
+
+:global([data-theme="dark"]) .resultTitle {
+    color: #4ade80;
+}
+
+:global([data-theme="dark"]) .error {
+    color: #f87171;
+}
+
+:global([data-theme="dark"]) .warnings {
+    color: #fbbf24;
+}
+
+@media (max-width: 640px) {
+    .container {
+        padding: 1rem;
+    }
+}

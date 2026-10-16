@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 375（tag グループ: 26）
+**エンドポイント数**: 377（tag グループ: 26）
 
 ## addon
 
@@ -253,6 +253,7 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/people/` | Return all registered personas (AI rows). |
 | POST | `/api/people/dismiss/{persona_id}` | Dismiss a persona (send back to private room). |
 | GET | `/api/people/meta_playbooks` | List user-selectable meta playbooks for the summon dialog. |
+| POST | `/api/people/persona-pack/import-new` | パックから新しいペルソナを迎える (intent §5 の新規作成)。結果の内訳を返す。 |
 | GET | `/api/people/realtime-spell-catalog` | リアルタイムスペルとして設定可能なスペル一覧とスキーマを返す。 |
 | GET | `/api/people/spells` | List Spells available for schedule / pre_spells UI selection. |
 | POST | `/api/people/summon/{persona_id}` | Summon a persona to the target building. |
@@ -331,6 +332,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | DELETE | `/api/people/{persona_id}/messages/{message_id}` | Delete a message. |
 | POST | `/api/people/{persona_id}/meta-judgment/bulk-delete` | Delete multiple meta_judgment_log rows in one request. |
 | DELETE | `/api/people/{persona_id}/meta-judgment/{judgment_id}` | Delete a single meta_judgment_log row owned by ``persona_id``. |
+| GET | `/api/people/{persona_id}/persona-pack` | ペルソナ一体をペルソナまるごとパック (ZIP) にしてダウンロードさせる。読み取り専用。 |
+| POST | `/api/people/{persona_id}/persona-pack/import` | パックを既存のペルソナへ合流させる (intent §5)。結果の内訳を返す。 |
 | GET | `/api/people/{persona_id}/pocketbook` | 手帳を読む — アクティビティごとにメモをできごとの日の降順で束ねて返す。 |
 | GET | `/api/people/{persona_id}/pulse-logs` | List pulse_id summaries with pagination (newest first). |
 | GET | `/api/people/{persona_id}/pulse-logs/{pulse_id}` | Get all log entries for a specific pulse. |
@@ -359,7 +362,6 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/people/{persona_id}/threads` | List all conversation threads for a persona. |
 | DELETE | `/api/people/{persona_id}/threads/{thread_id}` | Delete a thread. |
 | PUT | `/api/people/{persona_id}/threads/{thread_id}/activate` | Set a thread as the active thread for the persona. |
-| GET | `/api/people/{persona_id}/threads/{thread_id}/export-native` | Export a single thread as native SAIVerse JSON. |
 | GET | `/api/people/{persona_id}/threads/{thread_id}/messages` | List messages in a thread with pagination. |
 | POST | `/api/people/{persona_id}/threads/{thread_id}/messages` | Add a new message to a thread. |
 | POST | `/api/people/{persona_id}/track-logs/bulk-delete` | Delete multiple track_local_log rows owned by persona's tracks. |

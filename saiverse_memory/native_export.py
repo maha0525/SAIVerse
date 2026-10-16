@@ -241,28 +241,6 @@ def export_threads_native(
         conn.close()
 
 
-def export_thread_by_id(
-    persona_id: str,
-    thread_id: str,
-) -> Dict[str, Any]:
-    """Export a single thread by its full thread_id. Used by API."""
-    db_path = get_persona_memory_db(persona_id)
-    if not db_path.exists():
-        raise FileNotFoundError(f"memory.db not found for persona {persona_id}: {db_path}")
-
-    conn = sqlite3.connect(str(db_path))
-    try:
-        thread_data = _export_thread(conn, thread_id)
-        return {
-            "format": FORMAT_VERSION,
-            "exported_at": datetime.now(timezone.utc).isoformat(),
-            "persona_id": persona_id,
-            "threads": [thread_data],
-        }
-    finally:
-        conn.close()
-
-
 # ---------------------------------------------------------------------------
 # Import
 # ---------------------------------------------------------------------------
