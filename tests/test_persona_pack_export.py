@@ -338,9 +338,12 @@ def test_not_carried_data_is_absent(exported: Dict[str, Any]) -> None:
         blob = b"".join(zf.read(n) for n in names)
     # 認証情報 (アドオンのペルソナ別設定) は決して入らない
     assert SECRET.encode() not in blob
-    # 建物の会話履歴・embeddings・知覚バッファ・memory.db 本体は入らない
+    # 建物の会話履歴・embeddings・memory.db 本体は入らない
     assert "建物の会話は運ばない".encode() not in blob
-    assert not any("message_embeddings" in n or "perception" in n for n in names)
+    assert not any("message_embeddings" in n for n in names)
     assert not any(n.endswith("memory.db") for n in names)
     not_carried = set(exported["result"].not_carried_tables)
-    assert {"message_embeddings", "perception_buffer"} <= not_carried
+    assert {"message_embeddings", "embeddings"} <= not_carried
+    # 知覚台帳 (perception_*) は永続の証跡なので extensions/ で運ぶ
+    assert "extensions/saiverse/memory_db/perception_buffer.json" in names
+    assert "perception_buffer" not in not_carried

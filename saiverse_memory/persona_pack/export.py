@@ -95,7 +95,10 @@ JOURNAL_MEMORY_TABLES = ("activities", "memos", "clips", "purpose_tags")
 
 # 運ばないテーブル (intent §4「運ばないもの」)。
 # - embeddings 系: 意味検索用の数値データ。取り込み後に再生成する。
-# - perception_* : 知覚バッファ。
+# perception_* (知覚台帳) は当初ここに入れていたが、sai_memory/
+# perception_buffer.py の宣言どおり「消費済み行も削除しない永続台帳 = 知覚の
+# 証跡」であり再生成できないため、extensions/saiverse/memory_db/ で運ぶ
+# (2026-10-17、intent §4 と同時に訂正)。
 NOT_CARRIED_MEMORY_TABLES = frozenset({
     "embeddings",
     "message_embeddings",
@@ -103,10 +106,6 @@ NOT_CARRIED_MEMORY_TABLES = frozenset({
     "memopedia_fragment_embeddings",
     "arasuji_embeddings",
     "embed_metadata",
-    "perception_buffer",
-    "perception_batches",
-    "perception_presentation",
-    "perception_notice_presentation",
 })
 
 # epoch 秒の列 (ISO 8601 に変換して書く) と JSON 文字列の列 (展開して書く)。

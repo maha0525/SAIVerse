@@ -48,11 +48,11 @@ SAIVerse Lite             + 添付ファイル・画像など)    → SAIVerse L
 2. **本人名義のテキストは無改変で運ぶ。** 発話・思考・ページ本文を切り詰めたり整形したりしない。
 3. **すべての記録に ID と日時を付けて書き出す。** メッセージ・Memopedia ページ・切り抜きには作成時に UUID（重複しない固有 ID）が付いているため、そのまま書き出す。手帳の行（activities / memos）は整数の連番しか持たないので、実装時に UUID 列を足す移行を行う。この ID があることで、最初から §5 の合流が可能になる。
 4. **`manifest.json`（目録ファイル）に同梱フォルダの一覧を記載する。** `contents` 欄に同梱フォルダ名を列挙し、インポート側はそこにあるフォルダだけを取り込む。一部のフォルダが無い ZIP も正常に扱えるため、将来「不要なデータのチェックを外してエクスポートする」機能を作る際も、フォルダを減らすだけで形式を変えずに実現できる。
-5. **データ形式のルール**: バイナリ値（`thought_signature` 等）は base64 文字列に変換する。日時はタイムゾーン付き ISO 8601。ZIP 内のファイル参照は常に ZIP の最上位（ルート）からの相対パスで書く。
+5. **データ形式のルール**: バイナリ値（`thought_signature` 等）は base64 文字列に変換する。日時はタイムゾーン付き ISO 8601 — ただし元データがタイムゾーンを持たない列（`saiverse.db` の DateTime 列）は、UTC と決めつけて書き換えず元の値のまま出す。ZIP 内のファイル参照は常に ZIP の最上位（ルート）からの相対パスで書く。`extensions/saiverse/` の機械的な書き出しは値を変換せず元のまま。
 
 ## 4. 同梱するデータ — ZIP に何を入れるか
 
-方針は「**ペルソナ個人のものは全部入れる。運ばないのは、取り込み先で再生成できる派生データと一時的な作業状態だけ**」。下の表は現時点の設計案で、確定は実装時にデータ地図の全項目を割り当ててから（§3-1）。
+方針は「**ペルソナ個人のものは全部入れる。運ばないのは、取り込み先で再生成できる派生データと、取り込み先で作り直される運用状態だけ**」。下の表は全体像で、データ地図の全項目をどこに割り当てたかの確定表は §9 にある（§3-1 の約束の履行）。
 
 | フォルダ | 中身 | 出どころ |
 |---|---|---|
@@ -61,13 +61,13 @@ SAIVerse Lite             + 添付ファイル・画像など)    → SAIVerse L
 | `chatlog/` | スレッドと全メッセージ。**messages の全列と metadata を丸ごと**運ぶ（id・時刻・role・話者・タグ・添付参照に加え、同じ秒の中の並び順の鍵 seq、コンテキストへの載せ方を決める scope、pulse_id、Stelis（本筋から切り離して進める子スレッドの仕組み）の情報なども落とさない） | `memory.db` の threads / messages |
 | `knowledge/` | Memopedia 全ページ（コア記憶 = core 分類、Chronicle = chronicle 分類もページとしてここに入る） | `memory.db` の memopedia_pages |
 | `attachments/` | 添付ファイルそのもの | 共有メディアフォルダのうち、このペルソナの記録が参照しているもの |
-| `avatar/` `voice/` | 立ち絵・表情差分・声の設定（保存場所は実装時に実物で確認して追記する） | ペルソナフォルダ・設定 |
+| `avatar/` `voice/` | 立ち絵・表情差分・声の設定。**v1 では空** — 実装時に確認した結果、本体に立ち絵の保存場所が無く（screen_avatar は draft）、声の設定はアドオンのペルソナ別設定（addon_persona_config = 認証情報と同じ表）に入る仕組みのため、書き出すものが無い。フォルダの席だけ規格に確保してある（§8） | — |
 | `items/` | 所持品・私室（部屋とその中の配置を「持ち物」として記述） | `saiverse.db` + `memory.db` |
 | `journal/` | 一日新聞 (day_reports)・手帳 (activities / memos)・約束帳 (task_book。手帳の一欄)・切り抜き (clips)・目的タグ | ペルソナフォルダ + `memory.db` |
 | `extensions/saiverse/` | 共通フォルダに写していない SAIVerse 固有の残り全部。机の上 (desk_items。いま開いている記憶の参照なので持ち物ではなくこちら)、Memopedia の編集履歴、フィードの既読位置、通話の録音 (voice_calls/)、ペルソナフォルダの運用ファイルなど | `saiverse.db` + `memory.db` + ペルソナフォルダ |
 | `chatgpt_compat/` | 会話の ChatGPT エクスポート互換コピー（ChatGPT 公式エクスポートの conversations.json 相当。会話のやりとりだけを写し、内心の記録や一時的な（履歴に残さない）行は含めない。他アプリ向けで、SAIVerse 側の取り込みでは無視する） | `chatlog/` からの変換 |
 
-**運ばないもの**: 検索用のインデックスと embeddings（意味検索用の数値データ。取り込み後に再生成する）、知覚バッファ（一時的な作業状態）。**建物の会話履歴 (building_messages) も運ばない** — 建物の記録は世界のもので他のペルソナの発話を含み、本人が体験した会話は本人の `memory.db` に本人の記録として既に入っているから（データ地図が「設計判断が要る」とした箇所。2026-10-16 まはー承認）。
+**運ばないもの**: 検索用のインデックスと embeddings（意味検索用の数値データ。取り込み後に再生成する）、取り込み先で作り直される運用状態（session_anchor・head_snapshot 系・execution_ledger など、§9 の一覧のとおり）。起草時は知覚バッファも「一時的な作業状態」としてここに入れていたが、これは誤りだった — `sai_memory/perception_buffer.py` の宣言どおり**消費済みの行も削除しない永続台帳（知覚の証跡）**なので、`extensions/saiverse/` で運ぶ（2026-10-17 実装時に訂正）。**建物の会話履歴 (building_messages) は運ばない** — 建物の記録は世界のもので他のペルソナの発話を含み、本人が体験した会話は本人の `memory.db` に本人の記録として既に入っているから（データ地図が「設計判断が要る」とした箇所。2026-10-16 まはー承認）。
 
 ## 5. インポート — 新規作成と合流（マージ）
 
@@ -103,3 +103,102 @@ SAIVerse Lite             + 添付ファイル・画像など)    → SAIVerse L
 
 - 会話の分岐（再生成の履歴）の表現。チャットログは一本道の時系列で運ぶ。
 - 不要な部分を外して書き出す選択エクスポートの UI（データ形式自体は §3-4 の仕組みで対応済み）。
+- `avatar/` と `voice/` の中身。本体側に立ち絵の保存場所ができたとき、また声の設定が認証情報と分離して保存されるようになったときに、確保済みの席へ入れる。
+
+## 9. 積み荷の確定表（実装と一致・v1）
+
+照合元はデータ地図（`persona_data_map.html`、2026-10-03 生成）の全 46 項目。実装は `saiverse_memory/persona_pack/export.py`。ZIP 内パスは ZIP ルートからの相対。
+
+### ゾーン A: ペルソナフォルダ `personas/<ID>/`
+
+| # | データ地図の項目 | 割り当て | 備考 |
+|---|---|---|---|
+| 1 | memory.db | ファイルとしては運ばない。中身をテーブルごとに分解して下の「memory.db の中身」へ | `memory.db` / `-wal` / `-shm` / `-journal` はファイル複写の対象外 |
+| 2 | active_state.json | `extensions/saiverse/persona_dir/active_state.json` | ファイルのまま |
+| 3 | log.json | `extensions/saiverse/persona_dir/log.json` | ファイルのまま |
+| 4 | voice_calls/ | `extensions/saiverse/persona_dir/voice_calls/` | wav をファイルのまま |
+| 5 | day_reports/ | `journal/day_reports/` | Markdown をファイルのまま |
+| 6 | tasks.db (旧形式の残り) | `extensions/saiverse/persona_dir/tasks.db` | SQLite ファイルをそのまま複写 |
+| 7 | conscious_log.json (旧形式の残り) | `extensions/saiverse/persona_dir/conscious_log.json` | ファイルのまま |
+
+ペルソナフォルダにある上記以外のファイルも、memory.db 一式と day_reports/ を除いて全部 `extensions/saiverse/persona_dir/` へそのまま入る。
+
+### ゾーン B グループ 1: プロフィールと設定 (ai テーブルの 1 行)
+
+| # | データ地図の項目 | 割り当て | 備考 |
+|---|---|---|---|
+| 8〜11 | 名前・システムプロンプト・説明文・言語 | `profile/profile.json` の ai 行 (全列をそのまま書く) | |
+| 12 | アイコン・外見画像 | `profile/profile.json` の `ai.AVATAR_IMAGE` / `ai.APPEARANCE_IMAGE_PATH` (元の値) + 実体を `profile/icon/` / `profile/appearance/`、対応は `files` 欄 | 見つからないファイルは `files` が null |
+| 13 | 用途別のモデル設定 (8 種) | `profile/profile.json` (ai 行の列。モデル名だけで、キーは ai 行に存在しない) | |
+| 14〜15 | 記憶機能・自律行動の ON/OFF | `profile/profile.json` (ai 行の列) | |
+
+### ゾーン B グループ 2: 生活の記録
+
+| # | データ地図の項目 | 割り当て | 備考 |
+|---|---|---|---|
+| 16 | タスク (persona_task) | `extensions/saiverse/saiverse_db/persona_task.json` | 子表 persona_task_step / persona_task_history も同フォルダ |
+| 17〜19 | アラーム (persona_schedule)・一日の予定 (persona_day_plan)・時間割 (persona_timetable_template) | `extensions/saiverse/saiverse_db/` | |
+| 20 | 相手と交わした約束の記録 (task_book) | `journal/task_book.json` | epoch 列は ISO 8601 |
+| 21 | イベント通知の記録 (persona_event_log) | `extensions/saiverse/saiverse_db/persona_event_log.json` | |
+| 22 | フィードの既読位置 (feed_read_cursor) | `extensions/saiverse/saiverse_db/feed_read_cursor.json` | |
+
+### ゾーン B グループ 3: 世界と共有しているもの
+
+| # | データ地図の項目 | 割り当て | 備考 |
+|---|---|---|---|
+| 23 | 建物の会話履歴 (building_messages) | **運ばない** | §4 (2026-10-16 まはー承認)。本人の体験は memory.db の messages に入っている |
+| 24 | 現在地 (building_occupancy_log) | `extensions/saiverse/saiverse_db/building_occupancy_log.json` | このペルソナの全行。建物 ID は元の環境のもの |
+| 25 | 私室 | `items/private_room.json` (building 行 + fixture 行) + 画像 `items/private_room/` + fixture のファイル `items/fixtures/<FIXTURE_ID>/` | ai.PRIVATE_ROOM_ID が指す建物 |
+| 26 | 所持品 (item_location) | `items/items.json` + ファイル `items/files/<ITEM_ID>/` | ペルソナ所持・私室に置かれた物・その中の鞄 (TYPE=bag) の中身まで辿る |
+
+### ゾーン B グループ 4: 運用上の控え
+
+| # | データ地図の項目 | 割り当て | 備考 |
+|---|---|---|---|
+| 27 | 会話の読み込み位置の記録 (session_anchor) | **運ばない** | 取り込み先で作り直される運用状態 |
+| 28 | 文脈の先頭部分の控え (session_head_snapshot / line_head_snapshot) | **運ばない** | 同上 |
+| 29 | LLM の利用と課金の記録 (llm_usage_log) | **運ばない** | 元の環境の課金記録 |
+| 30 | 自律行動の実行の控え (execution_ledger / execution_outbox) | **運ばない** | 運用状態 |
+
+### ゾーン B: アドオン認証情報
+
+| # | データ地図の項目 | 割り当て | 備考 |
+|---|---|---|---|
+| 31 | アドオン認証情報 (addon_persona_config) | **運ばない** | 認証情報は決して入れない (§3-1)。テストで鍵の文字列が ZIP のどこにも無いことを確認済み |
+
+### ゾーン C: 共有のファイル置き場
+
+| # | データ地図の項目 | 割り当て | 備考 |
+|---|---|---|---|
+| 32〜34 | `image/` `audio/` `video/` | `attachments/image|audio|video/` | このペルソナのメッセージ metadata (`images` / `documents` / `media`) が参照するものだけ。要約ファイルも同梱 |
+| 35 | `documents/` | `attachments/documents/` (メッセージ参照) / `items/files/` (所持品の FILE_PATH) | |
+| 36 | `user_data/icons/` | `profile/icon/` | このペルソナのアイコンだけ |
+
+参照 → ZIP 内パスの対応は `attachments/index.json`。ファイルが見つからない参照は `path: null` で残す。
+
+### memory.db の中身
+
+| # | データ地図の項目 | 割り当て | 備考 |
+|---|---|---|---|
+| 37 | チャットログ (threads / messages) | `chatlog/threads.json` / `chatlog/messages.json` / `chatlog/stelis_threads.json` | messages は全列 + metadata 展開 + `seq` (元の rowid)。並びは (created_at, rowid)。会話部分の写しを `chatgpt_compat/conversations.json` にも作る |
+| 38〜40 | Memopedia (core・chronicle 分類を含む全ページ) | `knowledge/pages.json` | 全列・全ページ (is_deleted の行も含む) |
+| 41 | 手帳 (activities / memos) | `journal/activities.json` / `journal/memos.json` | uuid 列 (§3-3 の移行) も自動で載る |
+| 42〜43 | 切り抜き (clips)・目的タグ (purpose_tags) | `journal/clips.json` / `journal/purpose_tags.json` | |
+| 44 | 机の上 (desk_items) | `extensions/saiverse/memory_db/desk_items.json` | 持ち物ではなく記憶の参照なのでこちら |
+| 45 | 知覚台帳 (perception_* の 4 表) | `extensions/saiverse/memory_db/` | 永続の証跡なので運ぶ (§4 の訂正のとおり) |
+| 46 | 検索用の索引 (embeddings 系 6 表) | **運ばない** | 取り込み後に再生成 |
+
+memory.db の残りのテーブル (memopedia_page_edit_history / pulse_logs / memory_notes / thread_edges / working_memory など) は「割り当て済みと運ばないもの以外は全部」の規則で `extensions/saiverse/memory_db/<テーブル名>.json` へ機械的に書き出す — 未知のテーブルも黙って落ちない。
+
+### データ地図に無いが実装で扱いを決めたもの (saiverse.db)
+
+| テーブル | 割り当て | 理由 |
+|---|---|---|
+| persona_task_step / persona_task_history | `extensions/saiverse/saiverse_db/` | タスク (#16) の子表 |
+| episodes / episode_inheritance | `extensions/saiverse/saiverse_db/` | ペルソナの出来事の記録 |
+| action_track / track_local_log / meta_judgment_log | `extensions/saiverse/saiverse_db/` | 退役済みの Track 系だが、このペルソナの過去の記録 |
+| addon_message_metadata | `extensions/saiverse/saiverse_db/` | このペルソナのメッセージ宛ての行だけ |
+| persona_building_state / persona_pulse_cursor | 運ばない | 建物の会話履歴 (#23) の読み位置を指す運用状態 |
+| user_ai_link / ai_tool_link | 運ばない | 元の環境のユーザーとの結び付き / 使われていない旧表 |
+| playbooks ほか世界の資源 | 運ばない | 私室・所持品として辿れる物は #25 #26 で運ぶ |
+| thinking_request / visiting_ai | 運ばない | 凍結済みの街間移動の表 |
