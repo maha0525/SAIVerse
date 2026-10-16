@@ -6,6 +6,7 @@ memory.db) を作り、片方で書き出した ZIP をもう片方へ取り込�
 """
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import sqlite3
@@ -2427,3 +2428,274 @@ def test_shrunk_room_state_drops_the_same_media_after_import(
          "mime_type": "image/png", "type": "image"},
         {"path": None, "uri": None, "mime_type": "image/png", "type": "image"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# JSON 文字列の列の __bytes_b64__ の包み (Codex 敵対レビュー七巡目)
+# ---------------------------------------------------------------------------
+
+def _b64(data: bytes) -> Dict[str, str]:
+    return {"__bytes_b64__": base64.b64encode(data).decode("ascii")}
+
+
+def test_bytes_wrapped_perception_columns_are_neutralised(source: Dict[str, Any], tmp_path: Path) -> None:
+    """知覚台帳の media・room_state_json・perception_buffer.metadata を bytes で包んでも無害化を通る。
+
+    読み手 (perception_buffer._decode_media など) は json.loads で bytes も解釈するので、
+    bytes のまま保存されると取り込みの書き換えを迂回する。
+    """
+    from sai_memory.room_state import ROOM_STATE_META_KEY, bundle_is_valid, bundle_media
+
+    # 正規の書き出しはこれらの列を bytes で包まない (保存形が JSON 文字列のため)
+    room_entries = [{"key": "building:room_x", "is_diff": False, "block": "a",
+                     "snapshot": _room_bundle([])}]
+    conn = _mem(source)
+    try:
+        conn.execute(
+            "INSERT INTO perception_buffer(kind, content, media, metadata, created_at) VALUES (?,?,?,?,?)",
+            ("room_visit", "部屋に入った", json.dumps([]),
+             json.dumps({ROOM_STATE_META_KEY: room_entries[0]}), T0),
+        )
+        conn.execute(
+            "INSERT INTO perception_batches(consumed_at, rendered_text, media, room_state_json) VALUES (?,?,?,?)",
+            (T0, "部屋に入った", json.dumps([]), json.dumps(room_entries)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    pack = _export(source, tmp_path / "out" / "perception.zip")
+    (buffer_row,) = _zjson(pack, "extensions/saiverse/memory_db/perception_buffer.json")
+    (batch_row,) = _zjson(pack, "extensions/saiverse/memory_db/perception_batches.json")
+    assert all(isinstance(v, str) for v in (buffer_row["media"], buffer_row["metadata"],
+                                            batch_row["media"], batch_row["room_state_json"]))
+
+    outside = {"path": "/etc/passwd", "uri": "saiverse://image/../x.png", "mime_type": "image/png"}
+    dotdot = {"path": "../../user_data/database/saiverse.db", "mime_type": "image/png", "type": "image"}
+    crafted_room = [{"key": "building:room_x", "is_diff": False, "block": "b",
+                     "snapshot": _room_bundle([dotdot])}]
+    crafted = _add_zip_entries(pack, tmp_path / "crafted.zip", {
+        "extensions/saiverse/memory_db/perception_buffer.json": [
+            {"id": 1, "kind": "room_visit", "content": "a", "created_at": T0, "salient": 0,
+             "media": _b64(json.dumps([outside]).encode("utf-8")),
+             "metadata": _b64(json.dumps({ROOM_STATE_META_KEY: crafted_room[0]}).encode("utf-8"))},
+            # json.loads(bytes) は UTF-16 も判定して解釈する
+            {"id": 2, "kind": "room_visit", "content": "b", "created_at": T0, "salient": 0,
+             "media": _b64(json.dumps([outside]).encode("utf-16-le"))},
+            # JSON の文字列に戻らない bytes と、列の形 (dict) でない JSON は None になる
+            {"id": 3, "kind": "room_visit", "content": "c", "created_at": T0, "salient": 0,
+             "media": _b64(b"\x80\x81\x82"), "metadata": _b64(b"not json")},
+        ],
+        "extensions/saiverse/memory_db/perception_batches.json": [
+            {"id": 1, "consumed_at": T0, "rendered_text": "d", "kind": "perception",
+             "media": _b64(json.dumps([outside]).encode("utf-8")),
+             "room_state_json": _b64(json.dumps(crafted_room).encode("utf-8"))},
+        ],
+    })
+    target = _make_env(tmp_path / "dst", PID)
+    result = _import(target, crafted, "new")
+    conn = _mem(target)
+    try:
+        buffer = {r[0]: r[1:] for r in conn.execute(
+            "SELECT id, media, typeof(media), metadata, typeof(metadata) FROM perception_buffer"
+        )}
+        batch = conn.execute(
+            "SELECT media, typeof(media), room_state_json, typeof(room_state_json) FROM perception_batches"
+        ).fetchone()
+    finally:
+        conn.close()
+    neutralised = [{"path": None, "uri": None, "mime_type": "image/png"}]
+    assert buffer[1][1] == "text" and json.loads(buffer[1][0]) == neutralised
+    assert buffer[2][1] == "text" and json.loads(buffer[2][0]) == neutralised
+    assert buffer[3] == (None, "null", None, "null")
+    assert batch[1] == "text" and json.loads(batch[0]) == neutralised
+    assert buffer[1][3] == "text" and batch[3] == "text"
+    for snapshot in (json.loads(buffer[1][2])[ROOM_STATE_META_KEY]["snapshot"],
+                     json.loads(batch[2])[0]["snapshot"]):
+        assert bundle_is_valid(snapshot)
+        assert bundle_media(snapshot) == []
+    stored = json.dumps([*buffer.values(), batch])
+    assert "/etc/passwd" not in stored and "saiverse.db" not in stored
+    assert sum("__bytes_b64__" in w and "set to None" in w for w in result.warnings) == 2
+
+
+def test_bytes_wrapped_message_metadata_is_checked_like_text(source: Dict[str, Any], tmp_path: Path) -> None:
+    """messages.metadata の bytes の包みも JSON として解釈して添付の書き換えに通し、戻せなければ取り込まない。"""
+    attachments = {"images": [{"uri": "saiverse://image/../CLAUDE.md", "path": "/etc/passwd",
+                               "mime_type": "image/png"}]}
+    messages = _zjson(source["zip"], "chatlog/messages.json")
+    # 正規の書き出しは包まない
+    assert not any(isinstance(m.get("metadata"), dict) and "__bytes_b64__" in m["metadata"]
+                   for m in messages)
+    messages += [
+        {"id": "m-bytes", "thread_id": f"{PID}:room_a", "role": "user", "content": "包み",
+         "resource_id": PID, "created_at": "2026-10-10T00:00:00+00:00", "seq": 900,
+         "metadata": _b64(json.dumps(attachments).encode("utf-8"))},
+        {"id": "m-bytes-scalar", "thread_id": f"{PID}:room_a", "role": "user", "content": "包み",
+         "resource_id": PID, "created_at": "2026-10-10T00:00:01+00:00", "seq": 901,
+         "metadata": _b64(b"not json {")},
+        {"id": "m-bytes-broken", "thread_id": f"{PID}:room_a", "role": "user", "content": "包み",
+         "resource_id": PID, "created_at": "2026-10-10T00:00:02+00:00", "seq": 902,
+         "metadata": _b64(b"\x80\x81\x82")},
+    ]
+    crafted = _add_zip_entries(source["zip"], tmp_path / "crafted.zip", {"chatlog/messages.json": messages})
+    target = _make_env(tmp_path / "dst", PID)
+    result = _import(target, crafted, "new")
+    conn = _mem(target)
+    try:
+        rows = {r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT id, metadata, typeof(metadata) FROM messages WHERE id LIKE 'm-bytes%'"
+        )}
+    finally:
+        conn.close()
+    assert set(rows) == {"m-bytes", "m-bytes-scalar"}
+    assert rows["m-bytes"][1] == "text"
+    assert json.loads(rows["m-bytes"][0])["images"] == [
+        {"uri": None, "path": None, "mime_type": "image/png"}
+    ]
+    assert rows["m-bytes-scalar"] == ("not json {", "text")
+    assert result.counts["messages"].skipped == 1
+    assert any("m-bytes-broken" in w and "__bytes_b64__" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 振り直した短縮番号を指す clips / purpose_tags の参照 (Codex 敵対レビュー七巡目)
+# ---------------------------------------------------------------------------
+
+def _page_short_id(env: Dict[str, Any], page_id: str) -> int:
+    conn = _mem(env)
+    try:
+        return conn.execute("SELECT short_id FROM memopedia_pages WHERE id = ?", (page_id,)).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _core_id(env: Dict[str, Any], page_id: str) -> int:
+    conn = _mem(env)
+    try:
+        (meta,) = conn.execute("SELECT metadata FROM memopedia_pages WHERE id = ?", (page_id,)).fetchone()
+    finally:
+        conn.close()
+    return json.loads(meta)["core_id"]
+
+
+def test_renumbered_page_references_follow_the_page(source: Dict[str, Any], tmp_path: Path) -> None:
+    apple = source["ids"]["apple"]
+    conn = _mem(source)
+    try:
+        (core_page,) = conn.execute(
+            "SELECT id FROM memopedia_pages WHERE category = 'core' "
+            "AND json_extract(metadata, '$.core_id') = ?", (source["ids"]["core_id"],)
+        ).fetchone()
+        (zip_max,) = conn.execute("SELECT MAX(short_id) FROM memopedia_pages").fetchone()
+    finally:
+        conn.close()
+    apple_sid = _page_short_id(source, apple)
+    core_sid = _core_id(source, core_page)
+    conn = _mem(source)
+    try:
+        clip = add_clip(conn, message_id="m2", quote="B の返事",
+                        purpose_ref=f"memopedia:{apple_sid}", pasted_to=f"core:{core_sid}")
+        conn.executemany(
+            "INSERT INTO purpose_tags(tag_id, target_ref, purpose_ref, layer, created_at) VALUES (?,?,?,?,?)",
+            [
+                ("tag-m", f"memopedia:{apple_sid}", "task:1", 2, T0),
+                # 旧 prefix で書いた同じページ — 書き換えると tag-m と同じ組になる
+                ("tag-m-alias", f"m:{apple_sid}", "task:1", 2, T0),
+                ("tag-purpose", "message:m1", f"m:{apple_sid}", 2, T0),
+                ("tag-uri", f"saiverse://self/memopedia/{apple_sid}", "task:2", 2, T0),
+                ("tag-core", f"core:{core_sid}", "task:3", 2, T0),
+                ("tag-clip", f"clip:{clip.short_id}", "task:4", 2, T0),
+                # 別のペルソナのページは書き換えない
+                ("tag-other", f"saiverse://city_a/someone/memopedia/{apple_sid}", "task:5", 2, T0),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    pack = _export(source, tmp_path / "out" / "refs.zip")
+
+    # 取り込み先には、ZIP のページと同じ番号を持つ別のページ・コア記憶・クリップがある
+    target = _make_env(tmp_path / "dst", PID)
+    conn = _mem(target)
+    try:
+        for i in range(zip_max):
+            create_page(conn, parent_id="root_terms", title=f"取り込み先のページ {i}",
+                        content="取り込み先だけの記事", category="terms")
+        add_core_memory(conn, "取り込み先の大事なこと")
+        for _ in range(clip.short_id):
+            add_clip(conn, message_id="t1", quote="取り込み先の引用")
+        conn.commit()
+        (target_page_at_apple_sid,) = conn.execute(
+            "SELECT id FROM memopedia_pages WHERE short_id = ?", (apple_sid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert target_page_at_apple_sid != apple
+    result = _import(target, pack, "merge")
+
+    apple_new = _page_short_id(target, apple)
+    core_new = _core_id(target, core_page)
+    assert apple_new != apple_sid and core_new != core_sid
+    conn = _mem(target)
+    try:
+        tags = {r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT tag_id, target_ref, purpose_ref FROM purpose_tags"
+        )}
+        clip_row = conn.execute(
+            "SELECT short_id, purpose_ref, pasted_to FROM clips WHERE clip_id = ?", (clip.clip_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert clip_row[0] != clip.short_id  # クリップの番号も振り直された
+    assert tags["tag-m"] == (f"memopedia:{apple_new}", "task:1")
+    assert "tag-m-alias" not in tags  # 書き換え後の組が tag-m と同じなので同じ付与
+    assert tags["tag-purpose"] == ("message:m1", f"memopedia:{apple_new}")
+    assert tags["tag-uri"] == (f"saiverse://self/memopedia/{apple_new}", "task:2")
+    assert tags["tag-core"] == (f"core:{core_new}", "task:3")
+    assert tags["tag-clip"] == (f"clip:{clip_row[0]}", "task:4")
+    assert tags["tag-other"] == (f"saiverse://city_a/someone/memopedia/{apple_sid}", "task:5")
+    assert clip_row[1:] == (f"memopedia:{apple_new}", f"core:{core_new}")
+    assert result.counts["purpose_tags"].skipped == 1
+
+
+def test_references_to_chronicle_pages_not_merged_are_not_kept(
+    chron_branch: Dict[str, Any], tmp_path: Path
+) -> None:
+    """合流で取り込まない Chronicle を指す参照は、取り込み先の同じ番号の別の行を指さないよう残さない。"""
+    a, b, ids = chron_branch["a"], chron_branch["b"], chron_branch["ids"]
+    in_a = _chronicle_rows(a)
+    r1c_sid = in_a[ids["r1c"]]["meta"]["short_id"]  # R1c は取り込まれない
+    na1_sid = in_a[ids["na1"]]["meta"]["short_id"]  # NA1 は取り込まれ、番号が振り直される
+    conn = _mem(a)
+    try:
+        clip = add_clip(conn, message_id="s5", quote="共有の話 5",
+                        purpose_ref=f"ch:{na1_sid}", pasted_to=f"chronicle:{r1c_sid}")
+        conn.executemany(
+            "INSERT INTO purpose_tags(tag_id, target_ref, purpose_ref, layer, created_at) VALUES (?,?,?,?,?)",
+            [("tag-r1c", "message:s5", f"chronicle:{r1c_sid}", 2, T0),
+             ("tag-na1", f"chronicle:{na1_sid}", "task:1", 2, T0)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    pack = _export(a, tmp_path / "out" / "a_refs.zip")
+    result = _import(b, pack, "merge")
+
+    after = _chronicle_rows(b)
+    na1_new = after[ids["na1"]]["meta"]["short_id"]
+    assert ids["r1c"] not in after and na1_new != na1_sid
+    conn = _mem(b)
+    try:
+        tags = {r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT tag_id, target_ref, purpose_ref FROM purpose_tags"
+        )}
+        clip_row = conn.execute(
+            "SELECT purpose_ref, pasted_to FROM clips WHERE clip_id = ?", (clip.clip_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert "tag-r1c" not in tags
+    assert tags["tag-na1"] == (f"chronicle:{na1_new}", "task:1")
+    assert clip_row == (f"chronicle:{na1_new}", None)
+    assert any(w.startswith("purpose_tags:") and "not imported" in w for w in result.warnings)
+    assert any(w.startswith("clips:") and "set to None" in w for w in result.warnings)

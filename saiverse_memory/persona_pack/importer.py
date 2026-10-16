@@ -70,6 +70,14 @@ object / array として解釈できるとき行ごと取り込まない (警告
 そうした包みは細工か壊れたパックで、包んだまま保存すると上の書き換えを通らない添付の
 参照が、保存後の読み手 (json.loads) には object として届くため。
 
+検査・書き換えの対象の JSON 文字列の列 (JSON_TEXT_COLUMNS と、知覚台帳の media と
+ROOM_STATE_COLUMNS) の ``{"__bytes_b64__": ...}`` も同じ理由で扱う — 読み手の
+``json.loads`` は bytes も解釈するので、bytes のまま保存すると書き換えを通らずに届く。
+書き出しは、保存されている値が文字列 (これらの列の保存形) なら bytes で包まない。取り込みは
+``json.loads(bytes)`` と同じ文字コードの判定で文字列に戻して通常の検査に通し、戻せない
+ものは、JSON_TEXT_COLUMNS なら行ごと取り込まず、知覚台帳の列なら値を None にする
+(どちらも警告に載せる。_refuse_structured_raw_text / _unwrap_bytes_perception_columns)。
+
 ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を継承する:
 
 - ZIP 内のスレッド ID の前半 (``<persona>:`` の部分) を取り込み先のペルソナ ID に
@@ -107,6 +115,15 @@ Chronicle の metadata.short_id) は DB ごとの連番 (docs/intent/reference_a
 MAX+1 から振り直し、元の番号を行の metadata に ``original_short_id`` /
 ``original_core_id`` / ``original_chronicle_short_id`` として残す
 (clips は metadata 列を持たないため元の番号を残せない)。
+
+clips の purpose_ref / pasted_to と purpose_tags の target_ref / purpose_ref に入った、
+自分のものを指す短縮番号の参照 (``memopedia:N`` / ``core:N`` / ``chronicle:N`` /
+``clip:N`` と旧 prefix・``saiverse://self/...`` の形。saiverse/references.py) は、ZIP の
+その番号の行が取り込み先で持つ番号に書き換える (振り直した行は新しい番号、取り込み先に
+同じ id の行があればその行の番号。:meth:`_ImportJob.remap_numbered_ref`)。ZIP の行が
+取り込み先に入らなかった (合流で取り込まない Chronicle) 参照は、取り込み先で同じ番号の
+別の行を指しうるので、purpose_tags は行を入れず、clips はその列を None にする。
+ZIP のどの行の番号でもない参照と、発話の本文・ページの本文に埋まった参照は書き換えない。
 
 書き込みは memory.db と saiverse.db それぞれ単一トランザクションで行い、全段が
 成功したときだけ commit する。途中で失敗したら両方 rollback し、この取り込みが
@@ -161,6 +178,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from sai_memory.presented_reduction import DROPPED_MEDIA_FIELD
 from sai_memory.room_state import snapshot_digest
+from saiverse import references
 
 from .export import (
     API_MEDIA_IMAGES_PREFIX,
@@ -186,7 +204,15 @@ from .export import (
     room_state_media_refs,
     room_state_records,
 )
-from .format import FORMAT_NAME, MANIFEST_NAME, RAW_TEXT_MARKER, decode_value, iso_to_epoch
+from .format import (
+    BYTES_MARKER,
+    FORMAT_NAME,
+    MANIFEST_NAME,
+    RAW_TEXT_MARKER,
+    decode_value,
+    encode_json_text,
+    iso_to_epoch,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -423,33 +449,130 @@ def _raw_text_is_structured(value: Any) -> bool:
     return isinstance(parsed, (dict, list))
 
 
+def _is_bytes_wrapper(value: Any) -> bool:
+    """値が format.encode_value の bytes の包み ``{"__bytes_b64__": "<base64>"}`` か。"""
+    return isinstance(value, dict) and len(value) == 1 and isinstance(value.get(BYTES_MARKER), str)
+
+
+def _json_bytes_to_text(value: Any) -> Optional[str]:
+    """bytes の包みを、``json.loads(bytes)`` と同じ文字コードの判定で文字列に戻す。
+
+    JSON 文字列の列の読み手 (perception_buffer._decode_media・room_state の読み口・
+    messages.metadata を読む各所) は ``json.loads`` に bytes を渡しても解釈する
+    (``json.detect_encoding`` で UTF-8 / 16 / 32 を判定して復号する)。取り込みの検査も
+    同じ解釈で値を見るため、同じ判定で文字列に戻す。base64 として読めない・復号
+    できないものは None。
+    """
+    try:
+        data = decode_value(value)
+    except ValueError:  # binascii.Error (base64 として読めない) は ValueError
+        return None
+    if not isinstance(data, bytes):
+        return None
+    try:
+        return data.decode(json.detect_encoding(data), "surrogatepass")
+    except (UnicodeDecodeError, LookupError):
+        return None
+
+
+def _row_count_key(table: str, row: Dict[str, Any]) -> str:
+    """JSON_TEXT_COLUMNS の表の行を除いたときに件数を載せる内訳のキー。"""
+    if table == "memopedia_pages":
+        is_chronicle = row.get("category") == _CATEGORY_CHRONICLE and not row.get("is_trunk")
+        return "chronicle_pages" if is_chronicle else "pages"
+    return table
+
+
 def _refuse_structured_raw_text(
     rows: List[Dict[str, Any]], table: str, file_name: str, pack: "_PackData"
 ) -> List[Dict[str, Any]]:
-    """JSON_TEXT_COLUMNS の列が :func:`_raw_text_is_structured` の行を除いて返す。
+    """JSON_TEXT_COLUMNS の列が取り込めない形の行を除いて返す。
 
-    除いた行は pack.refused_raw_text に (内訳のキー, 警告文) として記録する
-    (_ImportJob.report_refused_raw_text が警告とスキップ件数にする)。
+    - ``{"__bytes_b64__": ...}`` の値は、:func:`_json_bytes_to_text` で文字列に戻せれば、
+      書き出しがその文字列から作る形 (format.encode_json_text — object / array なら
+      展開、それ以外は ``__raw_text__``) に置き換える。保存後の読み手は ``json.loads`` で
+      bytes も解釈するので、bytes のまま保存すると、展開した値にかける検査 (添付の参照の
+      書き換えなど) を通らずに object として届くため。戻せなければ行を除く。
+    - :func:`_raw_text_is_structured` の値の行を除く。
+
+    除いた行は pack.refused_json_text に (内訳のキー, 警告文) として記録する
+    (_ImportJob.report_refused_json_text が警告とスキップ件数にする)。
     """
     columns = JSON_TEXT_COLUMNS.get(table, ())
     kept: List[Dict[str, Any]] = []
     for i, row in enumerate(rows):
-        bad = [c for c in columns if _raw_text_is_structured(row.get(c))]
-        if not bad:
+        undecodable: List[str] = []
+        for column in columns:
+            if not _is_bytes_wrapper(row.get(column)):
+                continue
+            text = _json_bytes_to_text(row[column])
+            value = encode_json_text(text) if text is not None else None
+            # 戻した文字列がまた bytes の包みになる (包みの入れ子) ものも戻せないものとして扱う
+            if text is None or _is_bytes_wrapper(value):
+                undecodable.append(column)
+            else:
+                row[column] = value
+        structured = [c for c in columns if _raw_text_is_structured(row.get(c))]
+        if not undecodable and not structured:
             kept.append(row)
             continue
-        if table == "memopedia_pages":
-            is_chronicle = row.get("category") == _CATEGORY_CHRONICLE and not row.get("is_trunk")
-            key = "chronicle_pages" if is_chronicle else "pages"
+        where = f"{file_name}[{i}] (id={row.get('id')!r})"
+        if undecodable:
+            pack.refused_json_text.append((
+                _row_count_key(table, row),
+                f"{where}: {', '.join(undecodable)} wraps bytes in {BYTES_MARKER!r} that are not "
+                "JSON text; a persona pack writes that column as JSON, so the row was not imported",
+            ))
         else:
-            key = table
-        pack.refused_raw_text.append((
-            key,
-            f"{file_name}[{i}] (id={row.get('id')!r}): {', '.join(bad)} wraps a JSON object or "
-            f"array in {RAW_TEXT_MARKER!r}; a persona pack only wraps scalar or unparsable "
-            "text there, so the row was not imported",
-        ))
+            pack.refused_json_text.append((
+                _row_count_key(table, row),
+                f"{where}: {', '.join(structured)} wraps a JSON object or "
+                f"array in {RAW_TEXT_MARKER!r}; a persona pack only wraps scalar or unparsable "
+                "text there, so the row was not imported",
+            ))
     return kept
+
+
+def _unwrap_bytes_perception_columns(table: str, rows: List[Dict[str, Any]], pack: "_PackData") -> None:
+    """知覚台帳の JSON 文字列の列の ``{"__bytes_b64__": ...}`` を文字列に戻す (行を書き換える)。
+
+    対象は PERCEPTION_MEDIA_TABLES の ``media`` と ROOM_STATE_COLUMNS の列。保存形は
+    JSON 文字列 (sai_memory/perception_buffer.py) で、書き出しは文字列をそのまま書くので、
+    包みは細工か壊れたパック (または BLOB で保存されていた値)。読み手は ``json.loads`` で bytes も解釈するので、
+    bytes のまま保存すると、取り込みの書き換え (relocate_media_column /
+    relocate_room_state_column) を通らない添付の参照が読み手に届く。
+    :func:`_json_bytes_to_text` で文字列に戻し、その列の形 (media は list、
+    room_state_json は list、perception_buffer.metadata は dict) として読めるものは
+    文字列に置き換えて通常の書き換えに通す。戻せない・読めないものは列を None にし、
+    警告を pack.ext_memory_nulled に記録する (stage_ext_memory が警告に載せる)。
+    """
+    columns: List[str] = []
+    if table in PERCEPTION_MEDIA_TABLES:
+        columns.append("media")
+    room_column = ROOM_STATE_COLUMNS.get(table)
+    if room_column is not None:
+        columns.append(room_column)
+    if not columns:
+        return
+    for i, row in enumerate(rows):
+        for column in columns:
+            if not _is_bytes_wrapper(row.get(column)):
+                continue
+            text = _json_bytes_to_text(row[column])
+            if text is not None:
+                parsed = (
+                    parse_media_column(text) if column == "media"
+                    else parse_room_state_column(table, text)
+                )
+                if parsed is not None:
+                    row[column] = text
+                    continue
+            row[column] = None
+            pack.ext_memory_nulled.append(
+                f"extensions/saiverse/memory_db/{table}.json[{i}] (id={row.get('id')!r}): "
+                f"{column} wraps bytes in {BYTES_MARKER!r} that are not the column's JSON; "
+                "the value was set to None"
+            )
 
 
 def _encode_json_text(is_raw: bool, value: Any) -> Any:
@@ -517,6 +640,26 @@ def _plan_numbers(originals: Sequence[Optional[int]], start_max: int) -> List[Op
         top += 1
         result[i] = top
     return result
+
+
+def _page_numbers(category: Any, column_short_id: Any, metadata: Any) -> Dict[str, int]:
+    """memopedia_pages の 1 行の短縮番号を、参照の種類 (saiverse/references.py) ごとに返す。
+
+    ``memopedia`` は列の short_id、``core`` はコア記憶の metadata.core_id、``chronicle`` は
+    Chronicle の metadata.short_id (stage_knowledge が振り直す番号と同じ)。無いものは載せない。
+    """
+    out: Dict[str, int] = {}
+    column = _as_int(column_short_id)
+    if column is not None:
+        out["memopedia"] = column
+    if isinstance(metadata, dict) and isinstance(category, str):
+        key = {_CATEGORY_CORE: ("core", "core_id"),
+               _CATEGORY_CHRONICLE: ("chronicle", "short_id")}.get(category)
+        if key is not None:
+            number = _as_int(metadata.get(key[1]))
+            if number is not None:
+                out[key[0]] = number
+    return out
 
 
 def _quote(name: str) -> str:
@@ -596,9 +739,14 @@ class _PackData:
     ext_memory_refused: Dict[str, int] = field(default_factory=dict)
     ext_saiverse_tables: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     ext_persona_files: List[Tuple[str, PurePosixPath]] = field(default_factory=list)
-    # JSON_TEXT_COLUMNS の列の __raw_text__ が object / array を包んでいたため除いた行:
-    # (内訳のキー, 警告文)。_refuse_structured_raw_text が記録する
-    refused_raw_text: List[Tuple[str, str]] = field(default_factory=list)
+    # JSON_TEXT_COLUMNS の列が取り込めない形 (__raw_text__ が object / array を包む・
+    # __bytes_b64__ が JSON の文字列に戻らない) だったため除いた行: (内訳のキー, 警告文)。
+    # _refuse_structured_raw_text が記録する
+    refused_json_text: List[Tuple[str, str]] = field(default_factory=list)
+    # extensions/saiverse/memory_db/ の知覚台帳の JSON 文字列の列のうち、__bytes_b64__ の
+    # 包みが列の形の JSON に戻らなかったため None にしたものの警告文。
+    # _unwrap_bytes_perception_columns が記録し、stage_ext_memory が警告に載せる
+    ext_memory_nulled: List[str] = field(default_factory=list)
 
 
 _EXT = "extensions/saiverse/"
@@ -689,6 +837,8 @@ def _load_pack(reader: _PackReader) -> _PackData:
                 if target is pack.ext_memory_tables and not is_extension_memory_table(table[:-5]):
                     pack.ext_memory_refused[table[:-5]] = len(rows)
                     continue
+                if target is pack.ext_memory_tables:
+                    _unwrap_bytes_perception_columns(table[:-5], rows, pack)
                 target[table[:-5]] = rows
     return pack
 
@@ -924,6 +1074,11 @@ class _ImportJob:
         self._dropped_warned: Set[Tuple[str, str]] = set()
         # 取り込んだ chronicle ページの id (合流の chunk_page_edges の照合に使う)
         self.imported_chronicle_ids: Set[str] = set()
+        # 短縮番号の参照の種類 (saiverse/references.py の memopedia / core / chronicle /
+        # clip) ごとの {ZIP の番号: その行が取り込み先で持つ番号}。取り込み先に入らなかった
+        # 行の番号は None。stage_knowledge と stage_clips が作り、remap_numbered_ref が
+        # clips と purpose_tags の参照の列を書き換えるのに使う
+        self.ref_numbers: Dict[str, Dict[int, Optional[int]]] = {}
         # 合流で取り込んだ extensions/saiverse/memory_db/ の表 (count_merge_skips が数えない)
         self._merged_ext_tables: Set[str] = set()
         # ZIP の messages の id (stage_chatlog の後は全部が取り込み先の memory.db にある)。
@@ -1104,7 +1259,7 @@ class _ImportJob:
                     )
             else:
                 self.check_pending_marker(world, memory)
-            self.report_refused_raw_text()
+            self.report_refused_json_text()
             memory_committed = False
             try:
                 memory.execute("BEGIN IMMEDIATE")
@@ -1159,9 +1314,9 @@ class _ImportJob:
             if memory is not None:
                 memory.close()
 
-    def report_refused_raw_text(self) -> None:
-        """_PackData.refused_raw_text の行を警告してスキップ件数に載せる。"""
-        for key, message in self.pack.refused_raw_text:
+    def report_refused_json_text(self) -> None:
+        """_PackData.refused_json_text の行を警告してスキップ件数に載せる。"""
+        for key, message in self.pack.refused_json_text:
             self.result.count(key).skipped += 1
             self.warn(message)
 
@@ -1758,7 +1913,7 @@ class _ImportJob:
         for i in range(0, len(ids), _CHUNK):
             part = ids[i:i + _CHUNK]
             for row in conn.execute(
-                "SELECT id, title, summary, content, updated_at, metadata, category "
+                "SELECT id, title, summary, content, updated_at, metadata, category, short_id "
                 f"FROM memopedia_pages WHERE id IN ({', '.join('?' for _ in part)})",
                 part,
             ):
@@ -1777,6 +1932,7 @@ class _ImportJob:
                 counts.skipped += 1
                 continue
             seen.add(page["id"])
+            existing = target_rows.get(page["id"])
             if is_chronicle and chronicle_plan is not None:
                 # 合流の Chronicle は plan_chronicle_merge の判定だけで決める。
                 # 取り込み先に同じ id がある行も上書きしない (metadata の
@@ -1785,11 +1941,14 @@ class _ImportJob:
                     to_insert.append(page)
                 else:
                     counts.skipped += 1
+                    # 同じ id の行が取り込み先にあればその番号、無ければ取り込み先に入らない
+                    self.note_page_numbers(page, existing)
                 continue
-            existing = target_rows.get(page["id"])
             if existing is None:
                 to_insert.append(page)
                 continue
+            # 取り込み先の行の番号は上書きしても変わらない (update_page)
+            self.note_page_numbers(page, existing)
             decoded = _decode_row(page, "memopedia_pages")
             zip_updated = decoded.get("updated_at")
             target_updated = existing[4]
@@ -1821,6 +1980,11 @@ class _ImportJob:
         decoded_pages = [_decode_row(p, "memopedia_pages") for p in to_insert]
         # [元が解釈できない文字列だったか, metadata の値] (番号の記録で書き換えるので list)
         metas: List[List[Any]] = [list(_decode_json_text(p.get("metadata"))) for p in to_insert]
+        # 振り直す前の ZIP の番号 (振り直しの後に取り込み先の番号と対にして ref_numbers へ)
+        zip_numbers = [
+            _page_numbers(d.get("category"), d.get("short_id"), meta)
+            for d, (_raw, meta) in zip(decoded_pages, metas)
+        ]
 
         # 列の short_id
         (col_max,) = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM memopedia_pages").fetchone()
@@ -1864,6 +2028,9 @@ class _ImportJob:
                     decoded_pages[i]["title"] = title_fmt.format(new)
                 self.result.renumbered[counter] = self.result.renumbered.get(counter, 0) + 1
 
+        for d, (_raw, meta), before in zip(decoded_pages, metas, zip_numbers):
+            self.note_numbers(before, _page_numbers(d.get("category"), d.get("short_id"), meta))
+
         for d, (is_raw, meta) in zip(decoded_pages, metas):
             if not is_raw and d.get("category") == _CATEGORY_CHRONICLE and isinstance(meta, dict):
                 if isinstance(meta.get("thread_id"), str):
@@ -1881,6 +2048,71 @@ class _ImportJob:
             if is_chronicle:
                 self.imported_chronicle_ids.add(d["id"])
             self.result.count("chronicle_pages" if is_chronicle else "pages").added += 1
+
+    def note_page_numbers(self, page: Dict[str, Any], existing: Optional[Tuple[Any, ...]]) -> None:
+        """挿入しない ZIP のページの番号を ref_numbers に記録する。
+
+        ``existing`` は取り込み先の同じ id の行 (stage_knowledge の target_rows の行)。
+        あればその行の番号、無ければ (合流で取り込まない Chronicle) None を対にする。
+        """
+        _raw, meta = _decode_json_text(page.get("metadata"))
+        before = _page_numbers(page.get("category"), decode_value(page.get("short_id")), meta)
+        after: Optional[Dict[str, int]] = None
+        if existing is not None:
+            try:
+                target_meta = json.loads(existing[5]) if existing[5] else None
+            except (TypeError, ValueError, RecursionError):
+                target_meta = None
+            after = _page_numbers(existing[6], existing[7], target_meta)
+        self.note_numbers(before, after)
+
+    def note_numbers(self, before: Dict[str, int], after: Optional[Dict[str, int]]) -> None:
+        """ZIP の行の番号 ``before`` と、その行が取り込み先で持つ番号 ``after`` を ref_numbers に記録する。
+
+        ``after`` が None (行が取り込み先に入らない) か、その種類の番号を持たないときは
+        None を対にする。同じ ZIP の番号が二度来たら先のものを残す。
+        """
+        for kind, number in before.items():
+            self.ref_numbers.setdefault(kind, {}).setdefault(
+                number, None if after is None else after.get(kind)
+            )
+
+    def remap_numbered_ref(self, value: Any) -> Tuple[bool, Any]:
+        """参照の文字列の短縮番号を、ZIP の行が取り込み先で持つ番号に書き換える。
+
+        対象は自分のもの (短縮参照、または ``saiverse://self/...``) を指す、ref_numbers に
+        ある種類 (memopedia / core / chronicle / clip) の参照で、番号が ZIP の行の番号
+        として記録されているもの。書き換えた値は、短縮参照なら正典の単語の短縮参照、
+        URI なら同じ種類の URI にする (saiverse/references.py の A1)。番号が変わらない
+        参照と、対象外の値 (文字列でない・参照として読めない・別のペルソナの URI・
+        記録に無い番号) はそのまま返す。
+
+        返り値は (指す行が取り込み先にあるか, 値)。ZIP の行が取り込み先に入らなかった
+        (ref_numbers の値が None の) 参照は (False, 元の値) — 取り込み先で同じ番号の
+        別の行を指しうるので、呼び出し側が保存しない。
+        """
+        if not isinstance(value, str) or not self.ref_numbers:
+            return True, value
+        try:
+            parsed = references.parse_ref(value)
+        except ValueError:
+            return True, value
+        numbers = self.ref_numbers.get(parsed.kind)
+        number = _as_int(parsed.key)
+        if numbers is None or not parsed.is_self or number is None or number not in numbers:
+            return True, value
+        new = numbers[number]
+        if new is None:
+            return False, value
+        if new == number:
+            return True, value
+        text = value.strip()
+        if not text.startswith(references.URI_PREFIX):
+            return True, references.to_short_ref(parsed.kind, new)
+        rebuilt = references.to_uri(parsed.kind, new, subpath=parsed.subpath)
+        if "?" in text:
+            rebuilt += "?" + text.split("?", 1)[1]
+        return True, rebuilt
 
     def plan_chronicle_merge(
         self,
@@ -2145,9 +2377,26 @@ class _ImportJob:
             return
         counts = self.result.count("clips")
         present = self.existing_keys(conn, "clips", "clip_id", (c["clip_id"] for c in clips))
+        # 取り込み先に同じ clip_id がある行の番号 (clip:N の参照の書き換えに使う)
+        present_numbers: Dict[str, Any] = {}
+        present_ids = sorted(present)
+        for i in range(0, len(present_ids), _CHUNK):
+            part = present_ids[i:i + _CHUNK]
+            present_numbers.update(conn.execute(
+                f"SELECT clip_id, short_id FROM clips WHERE clip_id IN ({', '.join('?' for _ in part)})",
+                part,
+            ).fetchall())
         to_insert = []
         seen: Set[str] = set()
         for row in clips:
+            if row["clip_id"] in present:
+                original = _as_int(decode_value(row.get("short_id")))
+                target_number = _as_int(present_numbers.get(row["clip_id"]))
+                if original is not None:
+                    self.note_numbers(
+                        {"clip": original},
+                        {"clip": target_number} if target_number is not None else {},
+                    )
             if row["clip_id"] in present or row["clip_id"] in seen:
                 counts.skipped += 1
                 continue
@@ -2158,13 +2407,31 @@ class _ImportJob:
         (col_max,) = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM clips").fetchone()
         originals = [_as_int(d.get("short_id")) for d in to_insert]
         planned = _plan_numbers(originals, int(col_max))
+        for orig, new in zip(originals, planned):
+            if orig is not None:
+                self.note_numbers({"clip": orig}, {"clip": new} if new is not None else {})
+        unresolved = 0
         for d, orig, new in zip(to_insert, originals, planned):
             if new != orig:
                 d["short_id"] = new
                 # clips は metadata 列を持たないので元の番号は残せない
                 self.result.renumbered["clips.short_id"] = self.result.renumbered.get("clips.short_id", 0) + 1
+            # 参照の列の短縮番号を取り込み先の番号へ (remap_numbered_ref)。指す行が
+            # 取り込み先に入らなかった参照は、同じ番号の別の行を指さないよう空にする
+            for column in ("purpose_ref", "pasted_to"):
+                landed, value = self.remap_numbered_ref(d.get(column))
+                if landed:
+                    d[column] = value
+                else:
+                    d[column] = None
+                    unresolved += 1
             self.insert(conn, "clips", d)
             counts.added += 1
+        if unresolved:
+            self.warn(
+                f"clips: {unresolved} purpose_ref / pasted_to reference(s) point to pages not "
+                "imported into the target; they were set to None"
+            )
 
     def stage_purpose_tags(self, conn: sqlite3.Connection) -> None:
         tags = self.pack.purpose_tags
@@ -2173,16 +2440,34 @@ class _ImportJob:
         counts = self.result.count("purpose_tags")
         present = self.existing_keys(conn, "purpose_tags", "tag_id", (t["tag_id"] for t in tags))
         pairs = set(conn.execute("SELECT target_ref, purpose_ref FROM purpose_tags").fetchall())
+        unresolved = 0
         for row in tags:
-            # tag_id の一致、または (target_ref, purpose_ref) の一致 (UNIQUE) は同じ付与として扱う
-            pair = (row.get("target_ref"), row.get("purpose_ref"))
-            if row["tag_id"] in present or pair in pairs:
+            if row["tag_id"] in present:
                 counts.skipped += 1
                 continue
-            self.insert(conn, "purpose_tags", _decode_row(row, "purpose_tags"))
+            decoded = _decode_row(row, "purpose_tags")
+            # 参照の短縮番号を取り込み先の番号へ (remap_numbered_ref)。指す行が取り込み先に
+            # 入らなかった参照を持つタグは、同じ番号の別の行に結び付かないよう入れない
+            landed_target, decoded["target_ref"] = self.remap_numbered_ref(decoded.get("target_ref"))
+            landed_purpose, decoded["purpose_ref"] = self.remap_numbered_ref(decoded.get("purpose_ref"))
+            if not (landed_target and landed_purpose):
+                unresolved += 1
+                counts.skipped += 1
+                continue
+            # (target_ref, purpose_ref) の一致 (UNIQUE) は同じ付与として扱う。書き換えた後の値で比べる
+            pair = (decoded["target_ref"], decoded["purpose_ref"])
+            if pair in pairs:
+                counts.skipped += 1
+                continue
+            self.insert(conn, "purpose_tags", decoded)
             present.add(row["tag_id"])
             pairs.add(pair)
             counts.added += 1
+        if unresolved:
+            self.warn(
+                f"purpose_tags: {unresolved} tag(s) point to pages not imported into the target; "
+                "they were not imported"
+            )
 
     # --- journal/ (saiverse.db 側とファイル) -----------------------------------
 
@@ -2351,6 +2636,8 @@ class _ImportJob:
     def stage_ext_memory(self, conn: sqlite3.Connection) -> None:
         """extensions/saiverse/memory_db/ を取り込む (export.is_extension_memory_table の表だけ)。"""
         self.report_refused_ext_memory_tables()
+        for message in self.pack.ext_memory_nulled:
+            self.warn(message)
         room_digests = self.room_state_digest_map()
         for table, rows in sorted(self.pack.ext_memory_tables.items()):
             counts = self.result.count(f"extensions/memory_db/{table}")
