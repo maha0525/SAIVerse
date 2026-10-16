@@ -10,7 +10,9 @@
   文字列と、``"null"`` ``"123"`` のように JSON のスカラーとして解釈できる文字列) は
   ``{"__raw_text__": "<元の文字列>"}`` に包み、元の文字列のまま戻せるようにする
   (スカラーを展開すると、``"null"`` が SQL の NULL に、``" 1e2 "`` が ``"100.0"`` に
-  変わって往復で元に戻らない)。
+  変わって往復で元に戻らない)。``__raw_text__`` の中身が object / array として
+  解釈できるパックは正規の書き出しでは生まれず、取り込みはその行を拒否する
+  (:func:`encode_json_text` の契約)。
 - epoch 秒で保存されている日時は、タイムゾーン付き ISO 8601 (UTC) に変換する。
 
 取り込み側は :func:`decode_value` / :func:`iso_to_epoch` で元の値へ戻す。
@@ -65,6 +67,13 @@ def encode_json_text(value: Any) -> Any:
     NULL は None のまま。展開するのは JSON の object / array になる文字列だけで、
     それ以外の文字列 (解釈できないもの・スカラー) は ``{"__raw_text__": ...}`` に包む。
     文字列以外 (bytes など) は :func:`encode_value` に渡す。
+
+    契約: ``{"__raw_text__": s}`` に包むのは、``json.loads(s)`` が失敗するか JSON の
+    スカラーになる文字列だけ。object / array として解釈できる文字列は必ず展開する。
+    取り込み側 (importer.py の _load_pack) はこの契約に頼り、``__raw_text__`` の中身が
+    object / array として解釈できる行を拒否する — 包んだまま保存すると、展開した値に
+    かける検査 (添付の参照の書き換えなど) を通らずに、保存後の読み手 (json.loads) には
+    object / array として届くため。
     """
     if value is None:
         return None

@@ -8,6 +8,7 @@
 - ``POST /persona-pack/import-new``                  — 新しいペルソナを作って取り込む (mode="new")。
 
 取り込みは同期で行い、結果の内訳 (PersonaPackImportResult) を JSON で返す。
+合流と新規作成は、ペルソナを問わずプロセス内で一度に一つだけ走らせる (_claim_import)。
 取り込んだ message は空のベクトル行を持って入る (importer.py の docstring) ので、
 import_chatlog.py と同じ ``_launch_import_embedding`` で埋め込みの再生成を裏で起こす。
 生きているペルソナの adapter は import_chatlog.py と同じく触らない (取り込みは別の
@@ -52,9 +53,11 @@ router = APIRouter()
 
 PERSONA_PACK_IMPORT_MAX_BYTES = 2 * 1024 * 1024 * 1024
 
-# 取り込み中のペルソナ (同じペルソナへの取り込みを同時に二つ走らせない)
+# 取り込み中の key (_claim_import)。_ANY_IMPORT_KEY は種類を問わず取り込みが一つ
+# 走っている間だけ入る
 _importing: set = set()
 _importing_lock = threading.Lock()
+_ANY_IMPORT_KEY = "*"
 
 # ファイル名に使えない文字 (Windows の禁止文字と制御文字)
 _UNSAFE_FILENAME_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
@@ -69,7 +72,17 @@ def _world_paths(manager: Any) -> tuple[Path, Path]:
 def _claim_import(
     key: str, detail: str = "A persona pack import is already running for this persona.",
 ) -> Iterator[None]:
-    """同じ key の取り込みを同時に二つ走らせない (二つ目は 409)。
+    """取り込み (合流と新規作成) をプロセス内で一度に一つだけ走らせる (二つ目は 409)。
+
+    同じ key (同じペルソナへの合流・同じパックの新規作成) が走っていれば detail で、
+    別の key の取り込みが走っていれば「別の取り込みが走っている」旨で断る。
+
+    key 別だけでなく全体を一つに絞る理由: 取り込みは共有メディアフォルダへ添付を
+    書き、同じ中身のファイルが既にあれば再利用する (importer.py の choose_media_dest)。
+    別のペルソナ宛ての取り込み A と B が並走すると、B が A の書いたまだ確定していない
+    ファイルを再利用し、A が失敗して自分の書いたファイルを消す
+    (remove_created_files) と B の参照が欠ける。引っ越しは稀な操作なので、全部を
+    直列にする性能の損は受け入れる。
 
     プロセス内のロック (_importing_lock) なので、SAIVerse を単一プロセスで動かす
     運用 (main.py が一つのサーバープロセスを起動する) を前提にしている。
@@ -77,12 +90,21 @@ def _claim_import(
     with _importing_lock:
         if key in _importing:
             raise HTTPException(status_code=409, detail=detail)
-        _importing.add(key)
+        if _ANY_IMPORT_KEY in _importing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Another persona pack import is running. Wait for it to finish, "
+                    "then import again."
+                ),
+            )
+        _importing.update((key, _ANY_IMPORT_KEY))
     try:
         yield
     finally:
         with _importing_lock:
             _importing.discard(key)
+            _importing.discard(_ANY_IMPORT_KEY)
 
 
 async def _save_upload(file: UploadFile) -> Path:

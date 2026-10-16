@@ -518,6 +518,37 @@ def test_import_new_refuses_a_second_import_of_the_same_pack(world: Dict[str, An
     assert res.status_code == 200, res.text
 
 
+def test_imports_into_different_personas_do_not_run_at_the_same_time(world: Dict[str, Any]) -> None:
+    """取り込みはペルソナを問わず一度に一つ (共有メディアフォルダのファイルを並走で消し合わない)。"""
+    from api.routes.people import persona_pack as route
+
+    pack = _export_zip(world)
+    dst = world["dst"]
+    target = f"other_{CITY}"
+    dst["manager"].add_persona(target, "Other")
+    # 別のペルソナ宛ての取り込みが走っている間
+    with route._claim_import(f"busy_{CITY}"):
+        res = world["use"](dst).post(
+            f"/api/people/{target}/persona-pack/import",
+            files={"file": ("pack.zip", pack, "application/zip")},
+        )
+        assert res.status_code == 409, res.text
+        assert "Another persona pack import" in res.json()["detail"]
+        res = world["use"](dst).post(
+            "/api/people/persona-pack/import-new",
+            files={"file": ("pack.zip", pack, "application/zip")},
+        )
+        assert res.status_code == 409, res.text
+        assert dst["manager"].created == []
+    assert route._importing == set()
+    # ガードが外れたら通る
+    res = world["use"](dst).post(
+        f"/api/people/{target}/persona-pack/import",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+
+
 def test_failures_after_commit_become_warnings(
     world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

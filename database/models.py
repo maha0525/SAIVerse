@@ -1553,6 +1553,12 @@ class TaskBookEntry(Base):
     # add_entry は 0 で作る。軽量シンク (schema_sync) の後付け列は NULL で
     # 入るため、migrate.py の _ensure_task_book_table が 0 へ埋める。
     REVISION = Column(Integer, nullable=False, default=0)
+    # ペルソナまるごとパックの取り込みで TASK_ID を振り直したときの元の TASK_ID
+    # (振り直しが重なったら最初の環境の値)。振り直していない行は NULL。取り込みの
+    # 照合 (saiverse_memory/persona_pack/importer.py の stage_task_book) が、TASK_ID と
+    # この列のどちらかの一致で同じ約束とみなす — 振り直された約束を元の環境へ
+    # 合流で戻したとき二重に入らないため。
+    ORIGIN_TASK_ID = Column(String(36), nullable=True)
     __table_args__ = (
         # open 一覧 (ティックの引き当て・UI) 用
         Index("idx_task_book_persona_status", "PERSONA_ID", "STATUS"),

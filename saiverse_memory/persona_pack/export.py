@@ -37,8 +37,10 @@ ZIP の中身 (intent §4 の表):
 ``knowledge/``
     ``pages.json`` (memopedia_pages の全ページ。core / chronicle 分類も含む)。
 ``attachments/``
-    メッセージ metadata の ``images`` / ``documents`` / ``media`` が指す共有
-    メディアファイルの実体と ``index.json`` (参照 → ZIP 内パス)。
+    メッセージ metadata の ``images`` / ``documents`` / ``media`` と、知覚台帳
+    (PERCEPTION_MEDIA_TABLES) の ``media`` 列が指す共有メディアファイルの実体と
+    ``index.json`` (参照 → ZIP 内パス。参照元は ``message_ids`` と
+    ``perception_rows`` (``"<表>:<id>"``))。
 ``items/``
     私室 (building 行・fixture 行) と所持品 (item_location / item 行) と、
     それらが指すファイル。
@@ -220,6 +222,15 @@ _DAY_REPORTS_DIR = "day_reports"
 
 # メッセージ metadata の添付の置き場 (api/routes/chat.py の /chat/send が書く 3 つ)。
 _ATTACHMENT_KEYS = ("images", "documents", "media")
+# 知覚台帳の表のうち media 列 (添付メディアの JSON 文字列) を持つもの
+# (sai_memory/perception_buffer.py)。media の値は ``[{"path", "mime_type", "type" /
+# "role", ...}, ...]`` の list で、項目の形は messages.metadata の images / documents /
+# media の項目と同じ (uri を持つ項目もある)。読み手は sea/runtime_context.py が
+# 提示のブロックの metadata.media に載せ、saiverse/media_utils.py の iter_image_media
+# が uri / path からファイルを読む。書き出しでは添付と同じ条件で attachments/ へ同梱し、
+# 取り込みでは添付と同じ書き換え (importer.py の relocate_media_entries) にかける。
+# 行自体は extensions/saiverse/memory_db/ に元の値のまま書く。
+PERCEPTION_MEDIA_TABLES: Tuple[str, ...] = ("perception_buffer", "perception_batches")
 # saiverse://<種類>/<ファイル名> → 共有メディアフォルダ名 (saiverse/media_utils.py の
 # resolve_media_uri と同じ対応)。
 _MEDIA_URI_DIRS: Tuple[Tuple[str, str], ...] = (
@@ -522,20 +533,47 @@ def _resolve_media_item(
     return None, kind, reason
 
 
+def _media_entry_refs(entries: Any) -> Iterator[Dict[str, Any]]:
+    """添付の項目の list から、空でない uri か path を持つ dict を返す。"""
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        uri = entry.get("uri")
+        path = entry.get("path")
+        if (isinstance(uri, str) and uri.strip()) or (isinstance(path, str) and path.strip()):
+            yield entry
+
+
 def _attachment_refs(metadata: Any) -> Iterator[Dict[str, Any]]:
     if not isinstance(metadata, dict):
         return
     for key in _ATTACHMENT_KEYS:
-        entries = metadata.get(key)
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            uri = entry.get("uri")
-            path = entry.get("path")
-            if (isinstance(uri, str) and uri.strip()) or (isinstance(path, str) and path.strip()):
-                yield entry
+        yield from _media_entry_refs(metadata.get(key))
+
+
+def parse_media_column(value: Any) -> Optional[List[Any]]:
+    """知覚台帳の media 列の値を項目の list に戻す。list として読めなければ None。
+
+    保存形は JSON 文字列 (sai_memory/perception_buffer.py)。取り込み側では ZIP の値が
+    list のまま来ることもあるので、list はそのまま返す。読み手
+    (perception_buffer._decode_media) も list 以外を「メディアなし」として扱う。
+    """
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (ValueError, RecursionError):
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    quoted = '"' + table.replace('"', '""') + '"'
+    return any(r[1] == column for r in conn.execute(f"PRAGMA table_info({quoted})").fetchall())
 
 
 def _attachment_key(entry: Dict[str, Any]) -> str:
@@ -725,7 +763,8 @@ def _write_memory_db(
                 metadata = encoded.get("metadata")
                 for ref in _attachment_refs(metadata):
                     entry = attachment_refs.setdefault(
-                        _attachment_key(ref), {"item": ref, "message_ids": []}
+                        _attachment_key(ref),
+                        {"item": ref, "message_ids": [], "perception_rows": []},
                     )
                     entry["message_ids"].append(message_id)
                 thread_id = row.get("thread_id")
@@ -751,6 +790,22 @@ def _write_memory_db(
             (_encode_row(r, "memopedia_pages") for r in _iter_table_rows(memory, "memopedia_pages")),
         )
 
+    # 知覚台帳の media が参照する添付 (PERCEPTION_MEDIA_TABLES)。行は下の
+    # extensions/saiverse/memory_db/ に書くが、参照するファイルは attachments/ へ入れる
+    for table in PERCEPTION_MEDIA_TABLES:
+        if table not in present or not _has_column(memory, table, "media"):
+            continue
+        quoted = '"' + table.replace('"', '""') + '"'
+        for row in _iter_rows(
+            memory, f"SELECT id, media FROM {quoted} WHERE media IS NOT NULL ORDER BY id"
+        ):
+            for ref in _media_entry_refs(parse_media_column(row["media"])):
+                entry = attachment_refs.setdefault(
+                    _attachment_key(ref),
+                    {"item": ref, "message_ids": [], "perception_rows": []},
+                )
+                entry["perception_rows"].append(f"{table}:{row['id']}")
+
     # attachments/
     if attachment_refs:
         index: List[Dict[str, Any]] = []
@@ -760,7 +815,12 @@ def _write_memory_db(
             zip_path: Optional[str] = None
             summary_path: Optional[str] = None
             if src is None:
-                where = f"messages.metadata ({reason})" if reason else "messages.metadata"
+                if entry["message_ids"]:
+                    where = "messages.metadata"
+                else:
+                    where = entry["perception_rows"][0].split(":", 1)[0] + ".media"
+                if reason:
+                    where = f"{where} ({reason})"
                 result.missing_files.append({"ref": str(ref_key), "where": where})
             else:
                 zip_path = writer.copy_file("attachments", src, f"attachments/{kind}/{src.name}")
@@ -777,6 +837,7 @@ def _write_memory_db(
                 "path": zip_path,
                 "summary_path": summary_path,
                 "message_ids": entry["message_ids"],
+                "perception_rows": entry["perception_rows"],
             })
         writer.write_json("attachments", "attachments/index.json", index)
         result.counts["attachments"] = sum(1 for i in index if i["path"])

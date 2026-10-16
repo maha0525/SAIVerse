@@ -650,6 +650,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `META_JSON` | TEXT | — |  |
 | `IDEM_KEY` | VARCHAR(255) | — |  |
 | `REVISION` | INTEGER | NOT NULL, default=0 |  |
+| `ORIGIN_TASK_ID` | VARCHAR(36) | — |  |
 
 ## thinking_request
 

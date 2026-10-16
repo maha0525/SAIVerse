@@ -25,7 +25,8 @@ mode:
 task_book の TASK_ID は例外で、元の値を保ち、取り込み先で別のペルソナの行と
 衝突したときだけ同じ uuid5 に振り直す (:meth:`_ImportJob.stage_task_book`)。
 task_book は合流でも入るので、常に振り直すと環境 A → B → A の往復で元の行と
-照合できなくなるため。
+照合できなくなるため。振り直した行は元の値を ORIGIN_TASK_ID に残し、照合は
+TASK_ID と ORIGIN_TASK_ID のどちらでも行う (振り直された約束を A へ戻すときのため)。
 
 ``extensions/saiverse/memory_db/`` は、書き出す側がこのフォルダへ書く表
 (export.is_extension_memory_table) だけを受ける。共通フォルダの表 (messages など) と
@@ -39,13 +40,20 @@ IMAGE_PATH のファイル) を写し、fixture 行をその部屋に入れ、it
 ペルソナ ID と元の ITEM_ID から決まる UUID (uuid5) で振り直す — 同じパックを同じ
 ペルソナへもう一度入れても同じ ID になり、二重に登録されない。
 
-添付の参照 (message metadata の images / documents / media) のうち、ZIP から実体を
-復元できたものは、元の uri / path を引き継がず復元先のフォルダの種類と実際の
+添付の参照 (message metadata の images / documents / media と、mode="new" で
+extensions/saiverse/memory_db/ から入る知覚台帳の media 列 — export.PERCEPTION_MEDIA_TABLES)
+のうち、ZIP から実体を復元できたものは、元の uri / path を引き継がず復元先のフォルダの種類と実際の
 ファイル名から uri / path を組み直し、復元できなかったものは path を None にし、uri は
 ``saiverse://<種類>/<ファイル名>`` の形 (ファイル名に区切りや ``..`` が無い) のときだけ
 残す。ZIP が書いたホスト側のパスや ``saiverse://image/../x`` のような uri を取り込み先に
 残すと、再エクスポートや会話のメディア読み込みが共有メディアフォルダの外のファイル
 (本体 DB など) を読みに行くため。
+
+JSON 文字列の列 (export.JSON_TEXT_COLUMNS) の ``{"__raw_text__": s}`` は、s が JSON の
+object / array として解釈できるとき行ごと取り込まない (警告とスキップ件数)。正規の
+書き出しはスカラーか解釈できない文字列しか包まない (format.encode_json_text の契約) ので、
+そうした包みは細工か壊れたパックで、包んだまま保存すると上の書き換えを通らない添付の
+参照が、保存後の読み手 (json.loads) には object として届くため。
 
 ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を継承する:
 
@@ -60,8 +68,9 @@ ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を
 
 - 追記型 (messages / threads / stelis_threads / 手帳 / clips / purpose_tags /
   task_book) は ID (UUID・uuid 列・TASK_ID) で照合し、無いものだけ挿入する。
-  既にあるものは変更しない。task_book は元の TASK_ID が取り込み先のペルソナの行に
-  あればスキップし、別のペルソナの行にあれば振り直した値 (上の uuid5) で照合する。
+  既にあるものは変更しない。task_book は ZIP の行の TASK_ID / ORIGIN_TASK_ID が
+  取り込み先のペルソナの行の TASK_ID / ORIGIN_TASK_ID と一致すればスキップし、
+  元の TASK_ID が別のペルソナの行にあれば振り直した値 (上の uuid5) で照合する。
 - memopedia_pages は id で照合し、本文 (content) が違い、かつ ZIP 側の
   updated_at が新しいときだけ上書きする。上書き前の本文は
   memopedia_page_edit_history に before_* として記録する (rollback_page で戻せる)。
@@ -138,10 +147,14 @@ from .export import (
     _SUMMARY_SUFFIX,
     EPOCH_COLUMNS,
     JSON_TEXT_COLUMNS,
+    PERCEPTION_MEDIA_TABLES,
     SAIVERSE_DB_TABLE_OWNERS,
     WORLD_PENDING_MARKER,
     _attachment_key,
+    _attachment_refs,
+    _media_entry_refs,
     is_extension_memory_table,
+    parse_media_column,
 )
 from .format import FORMAT_NAME, MANIFEST_NAME, RAW_TEXT_MARKER, decode_value, iso_to_epoch
 
@@ -346,6 +359,53 @@ def _decode_json_text(value: Any) -> Tuple[bool, Any]:
     return False, decode_value(value)
 
 
+def _raw_text_is_structured(value: Any) -> bool:
+    """``{"__raw_text__": s}`` の s が JSON の object / array として解釈できるか。
+
+    format.encode_json_text の契約 (包むのはスカラーか解釈できない文字列だけ) に反する
+    包み。正規の書き出しでは生まれない。入れ子が深すぎて解釈が止まる文字列も
+    含める (取り込み先の読み手がどう扱うかを決められないため、拒否する側に倒す)。
+    """
+    if not (isinstance(value, dict) and len(value) == 1 and isinstance(value.get(RAW_TEXT_MARKER), str)):
+        return False
+    try:
+        parsed = json.loads(value[RAW_TEXT_MARKER])
+    except RecursionError:
+        return True
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(parsed, (dict, list))
+
+
+def _refuse_structured_raw_text(
+    rows: List[Dict[str, Any]], table: str, file_name: str, pack: "_PackData"
+) -> List[Dict[str, Any]]:
+    """JSON_TEXT_COLUMNS の列が :func:`_raw_text_is_structured` の行を除いて返す。
+
+    除いた行は pack.refused_raw_text に (内訳のキー, 警告文) として記録する
+    (_ImportJob.report_refused_raw_text が警告とスキップ件数にする)。
+    """
+    columns = JSON_TEXT_COLUMNS.get(table, ())
+    kept: List[Dict[str, Any]] = []
+    for i, row in enumerate(rows):
+        bad = [c for c in columns if _raw_text_is_structured(row.get(c))]
+        if not bad:
+            kept.append(row)
+            continue
+        if table == "memopedia_pages":
+            is_chronicle = row.get("category") == _CATEGORY_CHRONICLE and not row.get("is_trunk")
+            key = "chronicle_pages" if is_chronicle else "pages"
+        else:
+            key = table
+        pack.refused_raw_text.append((
+            key,
+            f"{file_name}[{i}] (id={row.get('id')!r}): {', '.join(bad)} wraps a JSON object or "
+            f"array in {RAW_TEXT_MARKER!r}; a persona pack only wraps scalar or unparsable "
+            "text there, so the row was not imported",
+        ))
+    return kept
+
+
 def _encode_json_text(is_raw: bool, value: Any) -> Any:
     if is_raw:
         return value
@@ -519,6 +579,9 @@ class _PackData:
     ext_memory_refused: Dict[str, int] = field(default_factory=dict)
     ext_saiverse_tables: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     ext_persona_files: List[Tuple[str, PurePosixPath]] = field(default_factory=list)
+    # JSON_TEXT_COLUMNS の列の __raw_text__ が object / array を包んでいたため除いた行:
+    # (内訳のキー, 警告文)。_refuse_structured_raw_text が記録する
+    refused_raw_text: List[Tuple[str, str]] = field(default_factory=list)
 
 
 _EXT = "extensions/saiverse/"
@@ -551,9 +614,15 @@ def _load_pack(reader: _PackReader) -> _PackData:
     if has("chatlog"):
         pack.threads = reader.rows("chatlog/threads.json", ("id",))
         pack.stelis_threads = reader.rows("chatlog/stelis_threads.json", ("thread_id",))
-        pack.messages = reader.rows("chatlog/messages.json", ("id", "thread_id"))
+        pack.messages = _refuse_structured_raw_text(
+            reader.rows("chatlog/messages.json", ("id", "thread_id")),
+            "messages", "chatlog/messages.json", pack,
+        )
     if has("knowledge"):
-        pack.pages = reader.rows("knowledge/pages.json", ("id", "category"))
+        pack.pages = _refuse_structured_raw_text(
+            reader.rows("knowledge/pages.json", ("id", "category")),
+            "memopedia_pages", "knowledge/pages.json", pack,
+        )
     if has("journal"):
         pack.activities = reader.rows("journal/activities.json", ("id",))
         pack.memos = reader.rows("journal/memos.json", ("activity_id",))
@@ -979,6 +1048,7 @@ class _ImportJob:
                     )
             else:
                 self.check_pending_marker(world)
+            self.report_refused_raw_text()
             memory_committed = False
             try:
                 memory.execute("BEGIN IMMEDIATE")
@@ -1030,6 +1100,12 @@ class _ImportJob:
             world.close()
             if memory is not None:
                 memory.close()
+
+    def report_refused_raw_text(self) -> None:
+        """_PackData.refused_raw_text の行を警告してスキップ件数に載せる。"""
+        for key, message in self.pack.refused_raw_text:
+            self.result.count(key).skipped += 1
+            self.warn(message)
 
     def commit_world(self, world: sqlite3.Connection) -> None:
         """saiverse.db の commit (memory.db の commit の後。テストはここで失敗を起こす)。"""
@@ -1205,8 +1281,7 @@ class _ImportJob:
         # 既にあるものは照合で飛ばし、無いものは下で入れるので、全部が取り込み先に揃う
         self.message_ids = {m["id"] for m in pack.messages}
         if not pack.messages:
-            if pack.attachment_index:
-                self.result.count("attachments").skipped += len(pack.attachment_index)
+            self.plan_attachments(conn, [])
             return
 
         # messages: id で照合し、無いものだけ入れる
@@ -1221,7 +1296,7 @@ class _ImportJob:
             seen.add(msg["id"])
             new_messages.append(msg)
 
-        self.plan_attachments(new_messages)
+        self.plan_attachments(conn, new_messages)
 
         # メッセージの行が指すスレッドが無ければ器だけ作る
         thread_counts = self.result.count("threads")
@@ -1312,23 +1387,36 @@ class _ImportJob:
         row["metadata"] = _encode_json_text(is_raw, metadata)
         return row
 
-    def plan_attachments(self, new_messages: List[Dict[str, Any]]) -> None:
-        """取り込む message が参照する添付を共有メディアフォルダへ置く計画を立てる。"""
+    def perception_media_rows(self, conn: sqlite3.Connection) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        """取り込む知覚台帳の行 (表, ZIP の行)。
+
+        知覚台帳は extensions/saiverse/memory_db/ で入るので mode="new" のときだけで、
+        取り込み先に表が無いもの (stage_ext_memory がスキップする) は含めない。
+        """
+        if self.mode != "new":
+            return
+        for table in PERCEPTION_MEDIA_TABLES:
+            rows = self.pack.ext_memory_tables.get(table)
+            if not rows or not self.table_exists(conn, table):
+                continue
+            for row in rows:
+                yield table, row
+
+    def plan_attachments(self, conn: sqlite3.Connection, new_messages: List[Dict[str, Any]]) -> None:
+        """取り込む message と知覚台帳の行が参照する添付を共有メディアフォルダへ置く計画を立てる。"""
         if not self.pack.attachment_index:
             return
         counts = self.result.count("attachments")
         needed: Set[str] = set()
         for msg in new_messages:
             is_raw, metadata = _decode_json_text(msg.get("metadata"))
-            if is_raw or not isinstance(metadata, dict):
+            if is_raw:
                 continue
-            for key in _ATTACHMENT_KEYS:
-                entries = metadata.get(key)
-                if not isinstance(entries, list):
-                    continue
-                for entry in entries:
-                    if isinstance(entry, dict) and (entry.get("uri") or entry.get("path")):
-                        needed.add(_attachment_key(entry))
+            for entry in _attachment_refs(metadata):
+                needed.add(_attachment_key(entry))
+        for _table, row in self.perception_media_rows(conn):
+            for entry in _media_entry_refs(parse_media_column(decode_value(row.get("media")))):
+                needed.add(_attachment_key(entry))
         for entry in self.pack.attachment_index:
             ref = entry.get("ref")
             zip_path = entry.get("path")
@@ -1392,24 +1480,45 @@ class _ImportJob:
             entries = out.get(key)
             if not isinstance(entries, list):
                 continue
-            rewritten = []
-            for entry in entries:
-                if isinstance(entry, dict) and (entry.get("uri") or entry.get("path")):
-                    reloc = self.relocations.get(_attachment_key(entry))
-                    entry = dict(entry)
-                    uri = entry.get("uri")
-                    path = entry.get("path")
-                    if reloc is not None:
-                        entry["uri"] = _URI_PREFIX_BY_DIR[reloc.dest.parent.name] + reloc.dest.name
-                        entry["path"] = str(reloc.dest)
-                    else:
-                        if path is not None:
-                            entry["path"] = None
-                        if uri is not None and not _safe_media_uri(uri):
-                            entry["uri"] = None
-                rewritten.append(entry)
-            out[key] = rewritten
+            out[key] = self.relocate_media_entries(entries)
         return out
+
+    def relocate_media_entries(self, entries: List[Any]) -> List[Any]:
+        """添付の項目の list を :meth:`relocate_metadata` の規則で書き換えた写しを返す。
+
+        messages.metadata の images / documents / media と、知覚台帳の media 列
+        (export.PERCEPTION_MEDIA_TABLES) の両方がこれを通る。
+        """
+        rewritten = []
+        for entry in entries:
+            if isinstance(entry, dict) and (entry.get("uri") or entry.get("path")):
+                reloc = self.relocations.get(_attachment_key(entry))
+                entry = dict(entry)
+                uri = entry.get("uri")
+                path = entry.get("path")
+                if reloc is not None:
+                    entry["uri"] = _URI_PREFIX_BY_DIR[reloc.dest.parent.name] + reloc.dest.name
+                    entry["path"] = str(reloc.dest)
+                else:
+                    if path is not None:
+                        entry["path"] = None
+                    if uri is not None and not _safe_media_uri(uri):
+                        entry["uri"] = None
+            rewritten.append(entry)
+        return rewritten
+
+    def relocate_media_column(self, value: Any) -> Any:
+        """知覚台帳の media 列の値 (decode 済み) を書き換えて、保存する値を返す。
+
+        項目の list として読めた値は :meth:`relocate_media_entries` を通して JSON 文字列に
+        する。読めない値 (None・list でない JSON・解釈できない文字列) はそのまま返す —
+        読み手 (perception_buffer._decode_media) はそれを「メディアなし」として扱い、
+        ファイルを読みに行かない。
+        """
+        entries = parse_media_column(value)
+        if entries is None:
+            return value
+        return json.dumps(self.relocate_media_entries(entries), ensure_ascii=False)
 
     # --- knowledge/ -------------------------------------------------------------
 
@@ -1870,17 +1979,33 @@ class _ImportJob:
         #   あればスキップする (二体目への再実行)。
         # 取り込み先のペルソナに同じ IDEM_KEY があるもの (uq_task_book_idem は
         # ペルソナごとの一意) も同じ約束として扱う。
+        # 振り直して入れた行は ORIGIN_TASK_ID に元の値 (ZIP の行が既に ORIGIN_TASK_ID を
+        # 持っていればその値 = 最初の環境の TASK_ID) を残す。照合は ZIP の行の TASK_ID /
+        # ORIGIN_TASK_ID のどちらかが、取り込み先のペルソナの行の TASK_ID /
+        # ORIGIN_TASK_ID のどちらかと一致したら同じ約束とみなす — 振り直された約束を
+        # 書き出して元の環境へ合流で戻したとき、元の行と照合できるようにするため。
+        # 取り込み先の task_book に ORIGIN_TASK_ID 列が無い (起動時のマイグレーション
+        # 前の DB) ときは TASK_ID だけで照合する (insert が列を警告して落とす)。
+        has_origin = "ORIGIN_TASK_ID" in self.columns(world, "task_book")
         originals = [r["TASK_ID"] for r in rows]
+        zip_origins = [r.get("ORIGIN_TASK_ID") for r in rows]
+        keys = [k for k in (*originals, *zip_origins) if isinstance(k, str) and k]
         derived = {tid: self.derived_id("task_book", tid) for tid in originals}
         present = self.existing_keys(world, "task_book", "TASK_ID", [*originals, *derived.values()])
-        own = self.existing_keys_of_target(world, "task_book", "TASK_ID", "PERSONA_ID", originals)
+        own = self.existing_keys_of_target(world, "task_book", "TASK_ID", "PERSONA_ID", keys)
+        if has_origin:
+            own |= self.existing_keys_of_target(
+                world, "task_book", "ORIGIN_TASK_ID", "PERSONA_ID", keys
+            )
         present_idem = self.existing_keys_of_target(
             world, "task_book", "IDEM_KEY", "PERSONA_ID", (r.get("IDEM_KEY") for r in rows)
         )
-        for row in rows:
+        for row, zip_origin in zip(rows, zip_origins):
             idem = row.get("IDEM_KEY")
             original = row["TASK_ID"]
-            if original in own or (idem and idem in present_idem):
+            if not isinstance(zip_origin, str) or not zip_origin:
+                zip_origin = None
+            if original in own or (zip_origin and zip_origin in own) or (idem and idem in present_idem):
                 counts.skipped += 1
                 continue
             new_id = derived[original] if original in present else original
@@ -1890,10 +2015,11 @@ class _ImportJob:
             decoded = _decode_row(row, "task_book")
             decoded["TASK_ID"] = new_id
             decoded["PERSONA_ID"] = self.target
+            if new_id != original:
+                decoded["ORIGIN_TASK_ID"] = zip_origin or original
             self.insert(world, "task_book", decoded)
             present.add(new_id)
-            if new_id == original:
-                own.add(original)
+            own.update(k for k in (new_id, original, zip_origin) if k)
             if idem:
                 present_idem.add(idem)
             counts.added += 1
@@ -2009,6 +2135,10 @@ class _ImportJob:
                     continue
             for row in rows:
                 decoded = {k: self.remap_exact(decode_value(v)) for k, v in row.items()}
+                if table in PERCEPTION_MEDIA_TABLES and "media" in decoded:
+                    # 添付と同じ書き換え (復元先を指す / 復元できなければ path を落とす)。
+                    # 参照するファイルの復元は plan_attachments が計画済み
+                    decoded["media"] = self.relocate_media_column(decoded["media"])
                 cur = self.insert(conn, table, decoded, or_ignore=True)
                 if cur.rowcount:
                     counts.added += 1

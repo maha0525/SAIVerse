@@ -1747,3 +1747,169 @@ def test_world_string_key_tables_match_the_models() -> None:
             ref_table = fk.column.table.name
             if ref_table in WORLD_STRING_KEY_TABLES and fk.column.name == WORLD_STRING_KEY_TABLES[ref_table][0]:
                 assert listed.get(fk.parent.name) == ref_table, (table, fk.parent.name)
+
+
+def test_renumbered_task_book_entry_does_not_duplicate_when_it_comes_back(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    """A → B (衝突で振り直し) → B で書き出し → A へ合流、で A の約束が増えない (ORIGIN_TASK_ID)。"""
+    b = _make_env(tmp_path / "b", "newcomer_city_a", name="新入り")
+    engine = create_engine(f"sqlite:///{Path(b['world_db']).as_posix()}")
+    with Session(engine) as s:
+        # B の世界で別のペルソナが同じ TASK_ID を使っている
+        s.add(AI(AIID="other_city_a", HOME_CITYID=1, AINAME="別の子", SYSTEMPROMPT="", AUTO_COUNT=0))
+        s.add(TaskBookEntry(TASK_ID="tb-1", PERSONA_ID="other_city_a", CONTENT="別の約束",
+                            ORIGIN="conversation", CREATED_AT=T0))
+        s.commit()
+    engine.dispose()
+    _import(b, source["zip"], "new")
+    renumbered = _derived("newcomer_city_a", "task_book", "tb-1")
+    world_b = sqlite3.connect(b["world_db"])
+    try:
+        assert world_b.execute(
+            "SELECT TASK_ID, ORIGIN_TASK_ID FROM task_book WHERE PERSONA_ID = 'newcomer_city_a'"
+        ).fetchall() == [(renumbered, "tb-1")]
+    finally:
+        world_b.close()
+
+    back = _export(b, tmp_path / "out" / "back.zip")
+    rows = _zjson(back, "journal/task_book.json")
+    assert [(r["TASK_ID"], r["ORIGIN_TASK_ID"]) for r in rows] == [(renumbered, "tb-1")]
+
+    result = _import(source, back, "merge")
+    assert result.counts["task_book"].added == 0
+    assert result.counts["task_book"].skipped == 1
+    world_a = sqlite3.connect(source["world_db"])
+    try:
+        assert world_a.execute("SELECT TASK_ID, PERSONA_ID FROM task_book").fetchall() == [("tb-1", PID)]
+    finally:
+        world_a.close()
+
+    # B の振り直した行を、振り直した ID のまま B へもう一度入れても二重にならない
+    again = _import(b, back, "merge")
+    assert again.counts["task_book"].added == 0
+
+
+# ---------------------------------------------------------------------------
+# __raw_text__ が object / array を包んだ行は取り込まない
+# ---------------------------------------------------------------------------
+
+def test_raw_text_wrapping_an_object_is_refused(source: Dict[str, Any], tmp_path: Path) -> None:
+    attachments = {"images": [{"uri": "saiverse://image/../CLAUDE.md", "path": "/etc/passwd",
+                               "mime_type": "image/png"}]}
+    messages = _zjson(source["zip"], "chatlog/messages.json")
+    messages += [
+        {"id": "m-wrapped", "thread_id": f"{PID}:room_a", "role": "user", "content": "包み",
+         "resource_id": PID, "created_at": "2026-10-10T00:00:00+00:00", "seq": 900,
+         "metadata": {"__raw_text__": json.dumps(attachments)}},
+        {"id": "m-wrapped-list", "thread_id": f"{PID}:room_a", "role": "user", "content": "包み",
+         "resource_id": PID, "created_at": "2026-10-10T00:00:01+00:00", "seq": 901,
+         "metadata": {"__raw_text__": json.dumps([attachments])}},
+        # 正規の包み (解釈できない文字列) はそのまま入る
+        {"id": "m-plain-raw", "thread_id": f"{PID}:room_a", "role": "user", "content": "素の文字列",
+         "resource_id": PID, "created_at": "2026-10-10T00:00:02+00:00", "seq": 902,
+         "metadata": {"__raw_text__": "not json {"}},
+    ]
+    pages = _zjson(source["zip"], "knowledge/pages.json")
+    wrapped_page = dict(pages[0])
+    wrapped_page["id"] = "page-wrapped"
+    wrapped_page["metadata"] = {"__raw_text__": json.dumps({"thread_id": "x:y"})}
+    pages.append(wrapped_page)
+    crafted = _add_zip_entries(source["zip"], tmp_path / "crafted.zip", {
+        "chatlog/messages.json": messages, "knowledge/pages.json": pages,
+    })
+    target = _make_env(tmp_path / "dst", PID)
+    result = _import(target, crafted, "new")
+
+    conn = _mem(target)
+    try:
+        ids = {r[0] for r in conn.execute("SELECT id FROM messages")}
+        assert "m-wrapped" not in ids and "m-wrapped-list" not in ids
+        assert conn.execute(
+            "SELECT metadata FROM messages WHERE id = 'm-plain-raw'"
+        ).fetchone() == ("not json {",)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memopedia_pages WHERE id = 'page-wrapped'"
+        ).fetchone()[0] == 0
+        assert "/etc/passwd" not in json.dumps(
+            [r[0] for r in conn.execute("SELECT metadata FROM messages")]
+        )
+    finally:
+        conn.close()
+    assert result.counts["messages"].skipped == 2
+    assert sum("__raw_text__" in w for w in result.warnings) == 3
+    assert any("knowledge/pages.json" in w and "__raw_text__" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 知覚台帳の media: 添付と同じく運び、取り込み先で組み直す
+# ---------------------------------------------------------------------------
+
+def test_perception_media_is_carried_and_relocated(source: Dict[str, Any], tmp_path: Path) -> None:
+    home: Path = source["home"]
+    (home / "image" / "seen.png").write_bytes(b"\x89PNG seen only by perception")
+    seen = {"path": str(home / "image" / "seen.png"), "mime_type": "image/png", "type": "image"}
+    # 共有メディアフォルダの外 (本体 DB) を .. で指す項目と、.. 入りの uri
+    escape = {"path": str(home / "image" / ".." / "user_data" / "database" / "saiverse.db"),
+              "uri": "saiverse://image/../CLAUDE.md", "mime_type": "image/png", "type": "image"}
+    conn = _mem(source)
+    try:
+        conn.execute(
+            "INSERT INTO perception_buffer(kind, content, media, created_at) VALUES (?,?,?,?)",
+            ("room_visit", "部屋に入った", json.dumps([seen], ensure_ascii=False), T0),
+        )
+        conn.execute(
+            "INSERT INTO perception_batches(consumed_at, rendered_text, media) VALUES (?,?,?)",
+            (T0, "部屋に入った", json.dumps([seen, escape], ensure_ascii=False)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    pack = _export(source, tmp_path / "out" / "perception.zip")
+
+    index = {e["ref"]: e for e in _zjson(pack, "attachments/index.json")}
+    entry = index[seen["path"]]
+    assert entry["message_ids"] == []
+    assert entry["perception_rows"] == ["perception_buffer:1", "perception_batches:1"]
+    with zipfile.ZipFile(pack) as zf:
+        assert zf.read(entry["path"]) == b"\x89PNG seen only by perception"
+    assert index[escape["uri"]]["path"] is None  # 置き場の外は入れない
+
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, pack, "new")
+    dst_home: Path = target["home"]
+    assert (dst_home / "image" / "seen.png").read_bytes() == b"\x89PNG seen only by perception"
+    relocated = {"path": str(dst_home / "image" / "seen.png"), "uri": "saiverse://image/seen.png",
+                 "mime_type": "image/png", "type": "image"}
+    conn = _mem(target)
+    try:
+        (buffer_media,) = conn.execute("SELECT media FROM perception_buffer").fetchone()
+        (batch_media,) = conn.execute("SELECT media FROM perception_batches").fetchone()
+    finally:
+        conn.close()
+    assert json.loads(buffer_media) == [relocated]
+    batch = json.loads(batch_media)
+    assert batch[0] == relocated
+    assert batch[1] == {"path": None, "uri": None, "mime_type": "image/png", "type": "image"}
+    assert ".." not in batch_media
+
+
+def test_perception_media_in_a_crafted_pack_is_neutralised(source: Dict[str, Any], tmp_path: Path) -> None:
+    """ZIP に直接書いた知覚台帳の行の .. 入りの media も無害化される (list のままの値も)。"""
+    crafted = _add_zip_entries(source["zip"], tmp_path / "crafted.zip", {
+        "extensions/saiverse/memory_db/perception_buffer.json": [
+            {"id": 1, "kind": "room_visit", "content": "a", "created_at": T0, "salient": 0,
+             "media": json.dumps([{"path": "../../user_data/database/saiverse.db", "mime_type": "image/png"}])},
+            {"id": 2, "kind": "room_visit", "content": "b", "created_at": T0, "salient": 0,
+             "media": [{"uri": "saiverse://image/../x.png", "path": "/etc/passwd"}]},
+        ],
+    })
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, crafted, "new")
+    conn = _mem(target)
+    try:
+        rows = dict(conn.execute("SELECT id, media FROM perception_buffer").fetchall())
+    finally:
+        conn.close()
+    assert json.loads(rows[1]) == [{"path": None, "mime_type": "image/png"}]
+    assert json.loads(rows[2]) == [{"uri": None, "path": None}]
