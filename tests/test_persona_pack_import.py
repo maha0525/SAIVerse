@@ -355,13 +355,9 @@ def test_round_trip_new_import_then_reexport(source: Dict[str, Any], tmp_path: P
     assert pages(again) == pages(src_zip)
 
     # journal
-    for name in ("journal/clips.json", "journal/purpose_tags.json"):
+    # task_book の TASK_ID は衝突しなければ元の値のまま
+    for name in ("journal/clips.json", "journal/purpose_tags.json", "journal/task_book.json"):
         assert _zjson(again, name) == _zjson(src_zip, name), name
-    # task_book の TASK_ID は取り込み先のペルソナ ID と元の値から決まる uuid5 に振り直す
-    src_book = _zjson(src_zip, "journal/task_book.json")
-    for row in src_book:
-        row["TASK_ID"] = _derived(PID, "task_book", row["TASK_ID"])
-    assert _zjson(again, "journal/task_book.json") == src_book
 
     def acts(zip_path: Path) -> List[Dict[str, Any]]:
         return [{k: v for k, v in a.items() if k != "id"} for a in _zjson(zip_path, "journal/activities.json")]
@@ -626,8 +622,9 @@ def test_merge_from_other_persona_id_remaps_threads_and_keeps_provenance(
     assert (target["home"] / "image" / "pic_1.png.summary.txt").is_file()
     world = sqlite3.connect(target["world_db"])
     try:
+        # 取り込み先の世界に同じ TASK_ID が無いので元の値のまま
         assert world.execute(
-            "SELECT PERSONA_ID FROM task_book WHERE TASK_ID = ?", (_derived(other, "task_book", "tb-1"),)
+            "SELECT PERSONA_ID FROM task_book WHERE TASK_ID = ?", ("tb-1",)
         ).fetchone()[0] == other
     finally:
         world.close()
@@ -1678,13 +1675,47 @@ def test_two_personas_from_the_same_pack_in_one_world_both_get_world_rows(
             assert world.execute(
                 "SELECT CHILD_EPISODE_ID, PARENT_EPISODE_ID FROM episode_inheritance WHERE PERSONA_ID = ?", (pid,)
             ).fetchone() == (_derived(pid, "episodes", "ep-2"), _derived(pid, "episodes", "ep-1"))
+        # task_book: 一体目は元の TASK_ID のまま、二体目は一体目の行と衝突するので振り直す
+        books = dict(world.execute("SELECT PERSONA_ID, TASK_ID FROM task_book").fetchall())
+        assert books == {"one_city_a": "tb-1", "two_city_a": _derived("two_city_a", "task_book", "tb-1")}
     finally:
         world.close()
 
-    # 同じペルソナへの再実行 (合流) では二重に登録されない
-    again = _import(t2, pack, "merge")
-    assert again.counts["task_book"].added == 0
-    assert _world_counts(t1, "two_city_a") == expected
+    # 同じペルソナへの再実行 (合流) では二重に登録されない (一体目・二体目とも)
+    for env, pid in ((t2, "two_city_a"), (t1, "one_city_a")):
+        again = _import(env, pack, "merge")
+        assert again.counts["task_book"].added == 0
+        assert again.counts["task_book"].skipped == 1
+        assert _world_counts(t1, pid) == expected
+
+
+def test_task_book_round_trip_back_by_merge_does_not_duplicate(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    """環境 A → B へ新規取り込み、B で書き出して A へ合流で戻しても約束は二重にならない。
+
+    IDEM_KEY の無い行 (tb-1) で確かめる — IDEM_KEY の照合に頼らず TASK_ID で照合されること。
+    """
+    world_a = sqlite3.connect(source["world_db"])
+    try:
+        assert world_a.execute(
+            "SELECT IDEM_KEY FROM task_book WHERE TASK_ID = 'tb-1'"
+        ).fetchone() == (None,)
+    finally:
+        world_a.close()
+    b = _make_env(tmp_path / "b", PID)
+    _import(b, source["zip"], "new")
+    back = _export(b, tmp_path / "out" / "back.zip")
+    assert [r["TASK_ID"] for r in _zjson(back, "journal/task_book.json")] == ["tb-1"]
+
+    result = _import(source, back, "merge")
+    assert result.counts["task_book"].added == 0
+    assert result.counts["task_book"].skipped == 1
+    world_a = sqlite3.connect(source["world_db"])
+    try:
+        assert world_a.execute("SELECT TASK_ID, PERSONA_ID FROM task_book").fetchall() == [("tb-1", PID)]
+    finally:
+        world_a.close()
 
 
 def test_world_string_key_tables_match_the_models() -> None:
@@ -1693,7 +1724,12 @@ def test_world_string_key_tables_match_the_models() -> None:
     from saiverse_memory.persona_pack.export import SAIVERSE_DB_TABLE_OWNERS
     from saiverse_memory.persona_pack.importer import WORLD_STRING_KEY_TABLES
 
-    carried = set(SAIVERSE_DB_TABLE_OWNERS) | {"task_book"}
+    # task_book は WORLD_STRING_KEY_TABLES に載せず、TASK_ID を衝突したときだけ振り直す
+    # (stage_task_book)。元の値を保てる前提は、task_book を参照する表が無いこと。
+    for table in Base.metadata.tables.values():
+        for fk in table.foreign_keys:
+            assert fk.column.table.name != "task_book", (table.name, fk.parent.name)
+    carried = set(SAIVERSE_DB_TABLE_OWNERS)
     string_pk = {}
     for table in carried:
         pk = list(Base.metadata.tables[table].primary_key.columns)

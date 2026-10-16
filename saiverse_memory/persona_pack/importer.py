@@ -19,9 +19,13 @@ mode:
 (子表は同じ取り込みで入った親の行を指すものだけ、addon_message_metadata は
 取り込み先の memory.db にあるメッセージ宛てのものだけ)。表に無いテーブルは警告して
 取り込まない — ZIP の行が別のペルソナ宛てに書き込まれないようにするため。
-文字列の主キー (WORLD_STRING_KEY_TABLES。task_book の TASK_ID も) は、取り込み先の
+文字列の主キー (WORLD_STRING_KEY_TABLES) は、取り込み先の
 ペルソナ ID と元の値から決まる uuid5 に振り直し、親子の参照の列も同じ写像で
 付け替える — 同じ世界に同じパックから二体目を迎えても主キーが衝突しない。
+task_book の TASK_ID は例外で、元の値を保ち、取り込み先で別のペルソナの行と
+衝突したときだけ同じ uuid5 に振り直す (:meth:`_ImportJob.stage_task_book`)。
+task_book は合流でも入るので、常に振り直すと環境 A → B → A の往復で元の行と
+照合できなくなるため。
 
 ``extensions/saiverse/memory_db/`` は、書き出す側がこのフォルダへ書く表
 (export.is_extension_memory_table) だけを受ける。共通フォルダの表 (messages など) と
@@ -56,7 +60,8 @@ ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を
 
 - 追記型 (messages / threads / stelis_threads / 手帳 / clips / purpose_tags /
   task_book) は ID (UUID・uuid 列・TASK_ID) で照合し、無いものだけ挿入する。
-  既にあるものは変更しない。task_book の TASK_ID は振り直した値 (上の uuid5) で照合する。
+  既にあるものは変更しない。task_book は元の TASK_ID が取り込み先のペルソナの行に
+  あればスキップし、別のペルソナの行にあれば振り直した値 (上の uuid5) で照合する。
 - memopedia_pages は id で照合し、本文 (content) が違い、かつ ZIP 側の
   updated_at が新しいときだけ上書きする。上書き前の本文は
   memopedia_page_edit_history に before_* として記録する (rollback_page で戻せる)。
@@ -188,11 +193,12 @@ _ID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, f"saiverse://{FORMAT_NAME}")
 # (= derived_id(表, 元の値)。取り込み先のペルソナ ID と元の値から決まる uuid5) に
 # 置き換える。同じペルソナへの再実行では同じ値になり二重に登録されず、同じ世界に
 # 同じパックから別のペルソナを迎えても主キーが衝突しない。
-# 表と列は export.SAIVERSE_DB_TABLE_OWNERS の表と task_book のうち、主キーが文字列の
+# 表と列は export.SAIVERSE_DB_TABLE_OWNERS の表のうち、主キーが文字列の
 # ものと database/models.py の定義 (ForeignKey と、参照先を持つ文字列の列) から決めた
 # (テストで models.py と突き合わせている)。整数の主キーは stage_ext_saiverse が
 # 取り込み先の連番で振り直す。persona_task.note_id は死んだ列 (models.py) なので
-# 付け替えない。
+# 付け替えない。task_book はここに載せない — TASK_ID は衝突したときだけ振り直す
+# (stage_task_book。task_book を参照する表が無いので、元の値を保っても付け替えは要らない)。
 WORLD_STRING_KEY_TABLES: Dict[str, Tuple[str, Tuple[Tuple[str, str], ...]]] = {
     "persona_task": ("id", (("active_step_id", "persona_task_step"), ("track_id", "action_track"))),
     "persona_task_step": ("id", (("task_id", "persona_task"),)),
@@ -204,7 +210,6 @@ WORLD_STRING_KEY_TABLES: Dict[str, Tuple[str, Tuple[Tuple[str, str], ...]]] = {
     "action_track": ("track_id", ()),
     "track_local_log": ("log_id", (("track_id", "action_track"),)),
     "meta_judgment_log": ("judgment_id", (("track_at_judgment_id", "action_track"),)),
-    "task_book": ("TASK_ID", ()),
 }
 
 # 世界側の工程の適用済み記録の表。正典は database/models.py の PersonaPackImport
@@ -1856,20 +1861,30 @@ class _ImportJob:
             counts.skipped += len(rows)
             self.warn("saiverse.db has no task_book table; task_book skipped")
             return
-        # TASK_ID は WORLD_STRING_KEY_TABLES の写像で振り直した値で照合する。加えて、
-        # 元の TASK_ID の行が取り込み先のペルソナにあるもの (ファイルごと複製した
-        # 環境など) と、取り込み先のペルソナに同じ IDEM_KEY があるもの
-        # (uq_task_book_idem はペルソナごとの一意) も同じ約束として扱う。
-        mapped = {r["TASK_ID"]: self.world_key("task_book", r["TASK_ID"]) for r in rows}
-        present = self.existing_keys(world, "task_book", "TASK_ID", mapped.values())
-        own_original = self.existing_keys_of_target(world, "task_book", "TASK_ID", "PERSONA_ID", mapped)
+        # TASK_ID は元の値を保つ (task_book を参照する表は無い — database/models.py)。
+        # 元の TASK_ID の行が取り込み先にあるとき:
+        # - 取り込み先のペルソナの行なら同じ約束としてスキップする (A → B → A の往復の
+        #   戻りや、同じパックの再実行はここで照合される)。
+        # - 別のペルソナの行なら derived_id("task_book", 元の値) に振り直して入れる
+        #   (同じ世界に同じパックから二体目を迎えたとき)。振り直した値の行が既に
+        #   あればスキップする (二体目への再実行)。
+        # 取り込み先のペルソナに同じ IDEM_KEY があるもの (uq_task_book_idem は
+        # ペルソナごとの一意) も同じ約束として扱う。
+        originals = [r["TASK_ID"] for r in rows]
+        derived = {tid: self.derived_id("task_book", tid) for tid in originals}
+        present = self.existing_keys(world, "task_book", "TASK_ID", [*originals, *derived.values()])
+        own = self.existing_keys_of_target(world, "task_book", "TASK_ID", "PERSONA_ID", originals)
         present_idem = self.existing_keys_of_target(
             world, "task_book", "IDEM_KEY", "PERSONA_ID", (r.get("IDEM_KEY") for r in rows)
         )
         for row in rows:
             idem = row.get("IDEM_KEY")
-            new_id = mapped[row["TASK_ID"]]
-            if new_id in present or row["TASK_ID"] in own_original or (idem and idem in present_idem):
+            original = row["TASK_ID"]
+            if original in own or (idem and idem in present_idem):
+                counts.skipped += 1
+                continue
+            new_id = derived[original] if original in present else original
+            if new_id in present:
                 counts.skipped += 1
                 continue
             decoded = _decode_row(row, "task_book")
@@ -1877,6 +1892,8 @@ class _ImportJob:
             decoded["PERSONA_ID"] = self.target
             self.insert(world, "task_book", decoded)
             present.add(new_id)
+            if new_id == original:
+                own.add(original)
             if idem:
                 present_idem.add(idem)
             counts.added += 1
@@ -2188,7 +2205,7 @@ class _ImportJob:
     def derived_id(self, kind: str, source_id: str) -> str:
         """取り込み先のペルソナと元の ID から決まる ID (uuid5)。
 
-        kind は ``"item"`` / ``"fixture"`` か、WORLD_STRING_KEY_TABLES の表の名前。
+        kind は ``"item"`` / ``"fixture"`` / ``"task_book"`` か、WORLD_STRING_KEY_TABLES の表の名前。
         """
         return str(uuid.uuid5(_ID_NAMESPACE, f"{self.target}/{kind}/{source_id}"))
 
