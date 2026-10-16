@@ -5,9 +5,12 @@
 - バイナリ値 (``messages.thought_signature`` など SQLite に BLOB で入っている値)
   は ``{"__bytes_b64__": "<base64>"}`` の一要素 dict に包む。JSON に bytes を
   置けないことが旧スレッド単位エクスポート (native_export.py) の壊れ方だった。
-- JSON 文字列として保存されている列 (``messages.metadata`` など) は、解釈できれば
-  JSON の値として展開して書く。解釈できない文字列は ``{"__raw_text__": "<元の文字列>"}``
-  に包み、元の文字列のまま戻せるようにする。
+- JSON 文字列として保存されている列 (``messages.metadata`` など) は、JSON の
+  object / array として解釈できれば展開して書く。それ以外の文字列 (解釈できない
+  文字列と、``"null"`` ``"123"`` のように JSON のスカラーとして解釈できる文字列) は
+  ``{"__raw_text__": "<元の文字列>"}`` に包み、元の文字列のまま戻せるようにする
+  (スカラーを展開すると、``"null"`` が SQL の NULL に、``" 1e2 "`` が ``"100.0"`` に
+  変わって往復で元に戻らない)。
 - epoch 秒で保存されている日時は、タイムゾーン付き ISO 8601 (UTC) に変換する。
 
 取り込み側は :func:`decode_value` / :func:`iso_to_epoch` で元の値へ戻す。
@@ -59,7 +62,8 @@ def decode_value(value: Any) -> Any:
 def encode_json_text(value: Any) -> Any:
     """JSON 文字列として保存されている列の値を、JSON の値として展開する。
 
-    NULL は None のまま。解釈できない文字列は ``{"__raw_text__": ...}`` に包む。
+    NULL は None のまま。展開するのは JSON の object / array になる文字列だけで、
+    それ以外の文字列 (解釈できないもの・スカラー) は ``{"__raw_text__": ...}`` に包む。
     文字列以外 (bytes など) は :func:`encode_value` に渡す。
     """
     if value is None:
@@ -68,6 +72,8 @@ def encode_json_text(value: Any) -> Any:
         try:
             parsed = json.loads(value)
         except (json.JSONDecodeError, ValueError):
+            return {RAW_TEXT_MARKER: value}
+        if not isinstance(parsed, (dict, list)):
             return {RAW_TEXT_MARKER: value}
         return encode_value(parsed)
     return encode_value(value)

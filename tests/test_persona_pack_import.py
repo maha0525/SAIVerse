@@ -840,3 +840,159 @@ def test_merge_chronicle_short_ids_are_kept_or_renumbered(chron_branch: Dict[str
     assert renumbered >= 1
     assert result.renumbered.get("pages.chronicle_short_id") == renumbered
     assert in_a[ids["na1"]]["meta"]["short_id"] <= b_max
+
+
+# ---------------------------------------------------------------------------
+# 7. レビュー指摘の再現 (コロンなしスレッド ID・metadata の合流・検証段階の拒否)
+# ---------------------------------------------------------------------------
+
+def test_threads_without_persona_prefix_merge_twice(source: Dict[str, Any], tmp_path: Path) -> None:
+    conn = _mem(source)
+    conn.execute("INSERT INTO threads(id, resource_id) VALUES (?, ?)", ("legacy", PID))
+    conn.execute(
+        "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("mL", "legacy", "user", "古い形のスレッド", PID, T0 + 50, json.dumps({"tags": ["conversation"]})),
+    )
+    conn.commit()
+    conn.close()
+    pack = _export(source, tmp_path / "out" / "legacy.zip")
+
+    # 新規取り込みの後に同じパックを合流 (取り込み先に同じ ID のスレッドがある)
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, pack, "new")
+    before = _dump(target)
+    again = _import(target, pack, "merge")
+    assert again.counts["threads"].added == 0
+    assert _dump(target) == before
+
+    # 別のペルソナへ二度合流しても壊れない
+    other = _make_env(tmp_path / "other", "bob_city_b", name="ボブ", city_id=2)
+    first = _import(other, pack, "merge")
+    assert first.counts["messages"].added == 7
+    before = _dump(other)
+    second = _import(other, pack, "merge")
+    assert all(c.added == 0 and c.updated == 0 for c in second.counts.values()), second.counts
+    assert _dump(other) == before
+    conn = _mem(other)
+    try:
+        assert conn.execute("SELECT thread_id FROM messages WHERE id = 'mL'").fetchone()[0] == "legacy"
+    finally:
+        conn.close()
+    assert any("no persona prefix" in w for w in first.warnings)
+
+
+def test_page_update_keeps_target_only_metadata_keys(source: Dict[str, Any], tmp_path: Path) -> None:
+    ids = source["ids"]
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, source["zip"], "new")
+
+    conn = _mem(target)
+    (target_meta,) = conn.execute(
+        "SELECT metadata FROM memopedia_pages WHERE id = ?", (ids["apple"],)
+    ).fetchone()
+    meta = json.loads(target_meta) if target_meta else {}
+    meta.update({"target_only": "残る", "shared": "取り込み先"})
+    conn.execute("UPDATE memopedia_pages SET metadata = ? WHERE id = ?",
+                 (json.dumps(meta, ensure_ascii=False), ids["apple"]))
+    conn.commit()
+    conn.close()
+
+    conn = _mem(source)
+    conn.execute(
+        "UPDATE memopedia_pages SET content = ?, updated_at = ?, metadata = ? WHERE id = ?",
+        ("書き足した", T0 + 900,
+         json.dumps({"zip_key": "入る", "shared": "ZIP 側", "original_short_id": 99}, ensure_ascii=False),
+         ids["apple"]),
+    )
+    conn.commit()
+    conn.close()
+    pack = _export(source, tmp_path / "out" / "newer.zip")
+
+    result = _import(target, pack, "merge")
+    assert result.counts["pages"].updated == 1
+    conn = _mem(target)
+    try:
+        content, merged = conn.execute(
+            "SELECT content, metadata FROM memopedia_pages WHERE id = ?", (ids["apple"],)
+        ).fetchone()
+    finally:
+        conn.close()
+    merged = json.loads(merged)
+    assert content == "書き足した"
+    assert merged["target_only"] == "残る"
+    assert merged["zip_key"] == "入る"
+    assert merged["shared"] == "ZIP 側"
+    # 番号系のキーは取り込み先の値を保つ (取り込み先に無いので載らない)
+    assert "original_short_id" not in merged
+
+
+def test_broken_extensions_json_is_refused_in_merge(source: Dict[str, Any], tmp_path: Path) -> None:
+    broken = _rewrite_zip(
+        source["zip"], tmp_path / "broken_ext.zip",
+        {"extensions/saiverse/memory_db/desk_items.json": b"[{\"ref\": "},
+    )
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, source["zip"], "new")
+    before = _dump(target)
+    with pytest.raises(ValueError, match="desk_items.json"):
+        _import(target, broken, "merge")
+    assert _dump(target) == before
+
+
+def test_archive_over_the_expanded_size_limit_is_refused(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    with zipfile.ZipFile(source["zip"]) as zf:
+        total = sum(i.file_size for i in zf.infolist())
+    monkeypatch.setattr(importer, "MAX_UNCOMPRESSED_BYTES", total - 1)
+    target = _make_env(tmp_path / "dst", PID)
+    before = _dump(target)
+    with pytest.raises(ValueError, match="over the limit"):
+        _import(target, source["zip"], "new")
+    assert _dump(target) == before
+    monkeypatch.setattr(importer, "MAX_UNCOMPRESSED_BYTES", total)
+    assert _import(target, source["zip"], "new").counts["messages"].added == 6
+
+
+def test_json_text_scalar_metadata_round_trips(source: Dict[str, Any], tmp_path: Path) -> None:
+    conn = _mem(source)
+    conn.execute(
+        "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("mN", f"{PID}:room_a", "user", "metadata が null の文字列", PID, T0 + 60, "null"),
+    )
+    conn.commit()
+    conn.close()
+    pack = _export(source, tmp_path / "out" / "scalar.zip")
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, pack, "new")
+    conn = _mem(target)
+    try:
+        assert conn.execute("SELECT metadata FROM messages WHERE id = 'mN'").fetchone()[0] == "null"
+    finally:
+        conn.close()
+
+
+def test_integer_affinity_primary_key_is_renumbered(source: Dict[str, Any], tmp_path: Path) -> None:
+    target = _make_env(tmp_path / "dst", PID)
+    world = sqlite3.connect(target["world_db"])
+    world.execute("CREATE TABLE custom_log (ID BIGINT PRIMARY KEY, PERSONA_ID TEXT, NOTE TEXT)")
+    world.execute("INSERT INTO custom_log VALUES (1, 'someone_else', 'taken')")
+    world.commit()
+    world.close()
+    rows = [{"ID": 1, "PERSONA_ID": PID, "NOTE": "carried"}]
+    pack = _rewrite_zip(source["zip"], tmp_path / "custom.zip", {})
+    with zipfile.ZipFile(pack, "a") as zf:
+        zf.writestr("extensions/saiverse/saiverse_db/custom_log.json", json.dumps(rows))
+    result = _import(target, pack, "new")
+    assert result.counts["extensions/saiverse_db/custom_log"].added == 1
+    world = sqlite3.connect(target["world_db"])
+    try:
+        rows_after = sorted(world.execute("SELECT ID, NOTE, PERSONA_ID FROM custom_log"))
+    finally:
+        world.close()
+    # BIGINT の主キーは rowid の別名ではないので、取り込み先の MAX+1 から振られる
+    assert rows_after == [(1, "taken", "someone_else"), (2, "carried", PID)]

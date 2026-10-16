@@ -430,6 +430,181 @@ def test_import_new_removes_the_persona_when_import_fails(world: Dict[str, Any])
     assert dst["manager"].deleted == [f"tester_{CITY}"]
 
 
+def test_import_new_keeps_the_persona_when_its_memory_cannot_be_checked(
+    world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.routes.people import persona_pack as route
+
+    pack = _export_zip(world)
+
+    def failing_import(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("boom during import")
+
+    monkeypatch.setattr(route, "_run_import", failing_import)
+    monkeypatch.setattr(route, "_memory_has_messages", lambda _home, _pid: None)
+    dst = world["dst"]
+    res = world["use"](dst).post(
+        "/api/people/persona-pack/import-new",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    new_id = f"tester_{CITY}"
+    assert res.status_code == 500, res.text
+    assert new_id in res.json()["detail"]
+    assert "merge" in res.json()["detail"]
+    assert dst["manager"].created == [new_id]
+    assert dst["manager"].deleted == []
+
+
+def test_memory_has_messages_is_three_valued(tmp_path: Path) -> None:
+    from api.routes.people.persona_pack import _memory_has_messages
+
+    home = tmp_path / "home"
+    assert _memory_has_messages(home, "nobody") is False  # memory.db が無い = 空
+    _init_memory_db(home / "personas" / "empty" / "memory.db")
+    assert _memory_has_messages(home, "empty") is False
+    _init_memory_db(home / "personas" / "full" / "memory.db")
+    _add_message(home, "full", "m1", "room_a", "hi", T0)
+    assert _memory_has_messages(home, "full") is True
+    broken = home / "personas" / "broken" / "memory.db"
+    broken.parent.mkdir(parents=True)
+    sqlite3.connect(broken).close()  # messages 表が無い
+    assert _memory_has_messages(home, "broken") is None
+
+
+def test_import_new_refuses_a_second_import_of_the_same_pack(world: Dict[str, Any]) -> None:
+    from api.routes.people import persona_pack as route
+
+    pack = _export_zip(world)
+    dst = world["dst"]
+    with route._claim_import(f"import-new:persona:{SRC}"):
+        res = world["use"](dst).post(
+            "/api/people/persona-pack/import-new",
+            files={"file": ("pack.zip", pack, "application/zip")},
+        )
+    assert res.status_code == 409, res.text
+    assert dst["manager"].created == []
+    # ガードが外れたら通る
+    res = world["use"](dst).post(
+        "/api/people/persona-pack/import-new",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+
+
+def test_failures_after_commit_become_warnings(
+    world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from api.routes.people import persona_pack as route
+
+    def failing_embedding(_persona_id: str, _count: int) -> bool:
+        raise RuntimeError("embedding launcher broke")
+
+    monkeypatch.setattr(route, "_start_embedding", failing_embedding)
+    pack = _export_zip(world)
+    dst = world["dst"]
+    target = f"other_{CITY}"
+    dst["manager"].add_persona(target, "Other")
+    res = world["use"](dst).post(
+        f"/api/people/{target}/persona-pack/import",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["embedding_started"] is False
+    assert any("starting the embedding" in w and "embedding launcher broke" in w for w in body["warnings"])
+    assert [r[0] for r in _messages(dst["home"], target)] == ["m1", "m2"]
+
+
+def test_chronicle_follow_up_failure_reports_unknown_marks(
+    world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sai_memory.arasuji.storage import create_entry, init_arasuji_tables
+    from api.routes.people import persona_pack as route
+
+    src_db = world["src"]["home"] / "personas" / SRC / "memory.db"
+    conn = sqlite3.connect(src_db)
+    init_arasuji_tables(conn)
+    create_entry(conn, level=1, content="two lines", source_ids=["m1", "m2"],
+                 start_time=T0, end_time=T0 + 1, source_count=2, message_count=2)
+    conn.close()
+    pack = _export_zip(world)
+
+    def failing_follow_up(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("follow-up broke")
+
+    monkeypatch.setattr(route, "_chronicle_after_merge", failing_follow_up)
+    dst = world["dst"]
+    target = f"other_{CITY}"
+    dst["manager"].add_persona(target, "Other")
+    res = world["use"](dst).post(
+        f"/api/people/{target}/persona-pack/import",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["counts"]["chronicle_pages"]["added"] == 1
+    assert body["chronicle_after_merge"] == {
+        "cold_windows_marked": None,
+        "cold_window_mark_failures": None,
+        "cold_window_marks_skipped": False,
+        "fold_runs_predicted": None,
+        "stale_entries": None,
+    }
+    assert any("Chronicle follow-up" in w for w in body["warnings"])
+
+
+def test_start_embedding_closes_the_adapter_when_launch_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    import saiverse_memory
+    from api.routes.people import import_chatlog
+    from api.routes.people.persona_pack import _start_embedding
+
+    closed: List[str] = []
+
+    class FakeAdapter:
+        def __init__(self, persona_id: str) -> None:
+            self.persona_id = persona_id
+
+        def close(self) -> None:
+            closed.append(self.persona_id)
+
+    def broken_launch(*_args: Any, **_kwargs: Any) -> bool:
+        raise RuntimeError("could not create the thread")
+
+    monkeypatch.setattr(saiverse_memory, "SAIMemoryAdapter", FakeAdapter)
+    monkeypatch.setattr(import_chatlog, "_launch_import_embedding", broken_launch)
+    with pytest.raises(RuntimeError, match="could not create the thread"):
+        _start_embedding("someone_city_a", 3)
+    assert closed == ["someone_city_a"]
+
+    monkeypatch.setattr(import_chatlog, "_launch_import_embedding", lambda *_a: True)
+    assert _start_embedding("someone_city_a", 3) is True
+    assert closed == ["someone_city_a"]  # 起動できたら adapter はスレッドのもの
+
+
+def test_import_refuses_an_archive_that_expands_too_far(
+    world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    pack = _export_zip(world)
+    monkeypatch.setattr(importer, "MAX_UNCOMPRESSED_BYTES", 10)
+    dst = world["dst"]
+    target = f"other_{CITY}"
+    dst["manager"].add_persona(target, "Other")
+    res = world["use"](dst).post(
+        f"/api/people/{target}/persona-pack/import",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 400, res.text
+    assert "over the limit" in res.json()["detail"]
+    res = world["use"](dst).post(
+        "/api/people/persona-pack/import-new",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 400, res.text
+    assert dst["manager"].created == []
+
+
 # ---------------------------------------------------------------------------
 # (d) 旧スレッド単位エクスポートの撤去
 # ---------------------------------------------------------------------------

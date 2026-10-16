@@ -3,8 +3,16 @@
 正典: docs/intent/persona_pack.md。ペルソナ一体の全データを一つの ZIP に書き出す。
 
 - **読み取り専用**: saiverse.db / memory.db は SQLite の ``mode=ro`` で開き、
-  一つの読み取りトランザクションの中で読む (書き出し中に本体が書き込んでも、
-  読む中身は開始時点の一枚に揃う)。ペルソナの状態は一切変えない。
+  DB ごとに一つの読み取りトランザクションの中で読む。同じ DB の中の読みは
+  そのトランザクションを始めた時点の一枚に揃うが、二つの DB は別の接続なので
+  読み取り開始の時点が完全には揃わない (書き出し中の本体の書き込みが、片方の
+  DB にだけ入って見えることがある)。ペルソナの状態は一切変えない。
+- **SAIVERSE_HOME の外のファイルは入れない**: DB に保存されたパス (添付の
+  path・building.IMAGE_PATH・fixture / item の FILE_PATH・アイコン) は、解決後の
+  パス (symlink を辿った先) が SAIVERSE_HOME の内側にあるものだけを ZIP に入れる。
+  共有メディアフォルダ (image / documents / audio / video) は常に SAIVERSE_HOME の
+  直下にある (saiverse/media_utils.py)。外を指すものは ``missing_files`` に
+  ``"<where> (outside SAIVERSE_HOME)"`` として記録する。
 - **本体サーバーに依存しない**: 入力は ペルソナ ID・saiverse.db のパス・
   SAIVERSE_HOME 相当のルート・出力先パスだけ。``saiverse.data_paths`` の
   環境依存の解決は使わない (テストと SAIVerse Lite で同じ関数を使うため)。
@@ -42,7 +50,10 @@ ZIP の中身 (intent §4 の表):
 
 値の書き方は format.py (bytes の包み・JSON 文字列列の展開・epoch 秒の ISO 化)。
 saiverse.db の DateTime 列はタイムゾーンを持たない文字列で保存されているため、
-元の値のまま書く (変換に必要なタイムゾーンを DB が持っていない)。
+元の値のまま書く (変換に必要なタイムゾーンを DB が持っていない)。例外は
+task_book の ``DUE_AT`` / ``CREATED_AT`` / ``CLOSED_AT`` で、これらは DateTime 列では
+なく epoch 秒の整数列なので、memory.db の epoch 列と同じく ISO 8601 (UTC) に
+変換して書く (EPOCH_COLUMNS)。
 """
 from __future__ import annotations
 
@@ -166,6 +177,11 @@ _MEDIA_URI_DIRS: Tuple[Tuple[str, str], ...] = (
 )
 _MEDIA_DIR_NAMES = frozenset(d for _, d in _MEDIA_URI_DIRS)
 _SUMMARY_SUFFIX = ".summary.txt"  # saiverse/media_utils.py の SUMMARY_SUFFIX
+# missing_files の where に添える印 (解決後のパスが SAIVERSE_HOME の外を指したもの)
+_OUTSIDE_HOME = "outside SAIVERSE_HOME"
+_SYMLINK_SKIPPED = "symlink skipped"
+# 読み取り接続の busy_timeout (ミリ秒)
+_BUSY_TIMEOUT_MS = 5000
 
 
 @dataclass
@@ -175,7 +191,8 @@ class PersonaPackExportResult:
     output_path: Path
     contents: List[str]
     counts: Dict[str, int] = field(default_factory=dict)
-    # 参照はあるがファイルが見つからなかったもの: {"ref", "where"}
+    # ZIP に入れられなかったもの: {"ref", "where"}。参照はあるがファイルが無いもの、
+    # SAIVERSE_HOME の外を指すもの、symlink、item 行の無い所持品、辿れない置き場所の行
     missing_files: List[Dict[str, str]] = field(default_factory=list)
     # 運ばなかった memory.db のテーブル名
     not_carried_tables: List[str] = field(default_factory=list)
@@ -188,10 +205,18 @@ class PersonaPackExportResult:
 # ---------------------------------------------------------------------------
 
 def _open_read_only(db_path: Path) -> sqlite3.Connection:
-    """DB を読み取り専用 (mode=ro) で開き、読み取りトランザクションを始める。"""
+    """DB を読み取り専用 (mode=ro) で開き、読み取りトランザクションを始める。
+
+    本体が書き込み中でも待てるよう busy_timeout を設定する (_BUSY_TIMEOUT_MS)。
+    """
     uri = "file:" + urllib.parse.quote(db_path.resolve().as_posix(), safe="/:") + "?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
-    conn.execute("BEGIN")
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        conn.execute("BEGIN")
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -320,13 +345,32 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
-def _resolve_stored_path(value: Any, home: Path) -> Optional[Path]:
-    """DB に保存されたファイルパス (SAIVERSE_HOME からの相対 or 絶対) を解決する。"""
+def _stored_candidate(value: Any, home: Path) -> Optional[Path]:
+    """DB に保存されたファイルパス (SAIVERSE_HOME からの相対 or 絶対) を、存在の検査なしで組む。"""
     if not isinstance(value, str) or not value.strip():
         return None
     p = Path(value.strip())
-    candidate = p if p.is_absolute() else home / p
-    return candidate if candidate.is_file() else None
+    return p if p.is_absolute() else home / p
+
+
+def _resolve_stored_path(value: Any, home: Path) -> Optional[Path]:
+    """DB に保存されたファイルパスを解決する。
+
+    ファイルが無いときと、解決後のパスが SAIVERSE_HOME の外にあるときは None
+    (モジュール docstring)。呼び出し側は :func:`_missing_entry` で記録する。
+    """
+    candidate = _stored_candidate(value, home)
+    if candidate is None or not candidate.is_file() or not _is_within(candidate, home):
+        return None
+    return candidate
+
+
+def _missing_entry(value: Any, where: str, home: Path) -> Dict[str, str]:
+    """解決できなかった保存パスの missing_files の 1 件。外を指していたら where に印を添える。"""
+    candidate = _stored_candidate(value, home)
+    if candidate is not None and candidate.is_file() and not _is_within(candidate, home):
+        where = f"{where} ({_OUTSIDE_HOME})"
+    return {"ref": str(value), "where": where}
 
 
 def _resolve_icon_path(value: Any, home: Path) -> Optional[Path]:
@@ -334,6 +378,7 @@ def _resolve_icon_path(value: Any, home: Path) -> Optional[Path]:
 
     保存形は api/deps.py の avatar_path_to_url が受ける形 (絶対パス、
     ``user_data/icons/<名前>`` を含むパス、``/api/static/user_icons/<名前>``)。
+    SAIVERSE_HOME の外のファイルは返さない。
     """
     if not isinstance(value, str) or not value.strip():
         return None
@@ -346,22 +391,24 @@ def _resolve_icon_path(value: Any, home: Path) -> Optional[Path]:
             name = normalized.split(marker)[-1]
             if name and Path(name).name == name:
                 candidate = home / "user_data" / "icons" / name
-                if candidate.is_file():
+                if candidate.is_file() and _is_within(candidate, home):
                     return candidate
     return None
 
 
-def _resolve_media_item(item: Dict[str, Any], home: Path) -> Tuple[Optional[Path], str]:
+def _resolve_media_item(
+    item: Dict[str, Any], home: Path
+) -> Tuple[Optional[Path], str, bool]:
     """添付の項目 (uri / path) を共有メディアフォルダのファイルへ解決する。
 
-    返り値は (ファイル, ZIP 内の種類フォルダ名)。saiverse/media_utils.py の
-    iter_image_media と同じく uri を先に、見つからなければ path を見る。
-    path は SAIVERSE_HOME の内側か、共有メディアフォルダ名 (image / documents /
-    audio / video) の直下にあるものだけを認める (任意の場所のファイルを
-    ZIP に入れないため)。
+    返り値は (ファイル, ZIP 内の種類フォルダ名, SAIVERSE_HOME の外を指したので
+    入れなかったか)。saiverse/media_utils.py の iter_image_media と同じく uri を
+    先に、見つからなければ path を見る。解決後のパスが SAIVERSE_HOME の内側に
+    あるものだけを認める (任意の場所のファイルを ZIP に入れないため)。
     """
     uri = item.get("uri")
     kind = "other"
+    outside = False
     if isinstance(uri, str):
         for prefix, dirname in _MEDIA_URI_DIRS:
             if uri.startswith(prefix):
@@ -370,18 +417,22 @@ def _resolve_media_item(item: Dict[str, Any], home: Path) -> Tuple[Optional[Path
                 if name and Path(name).name == name:
                     candidate = home / dirname / name
                     if candidate.is_file():
-                        return candidate, kind
+                        if _is_within(candidate, home):
+                            return candidate, kind, False
+                        outside = True
                 break
     raw_path = item.get("path")
     if isinstance(raw_path, str) and raw_path.strip():
         p = Path(raw_path.strip())
         if not p.is_absolute():
             p = home / p
-        if p.is_file() and (_is_within(p, home) or p.parent.name in _MEDIA_DIR_NAMES):
+        if p.is_file():
+            if not _is_within(p, home):
+                return None, kind, True
             if kind == "other" and p.parent.name in _MEDIA_DIR_NAMES:
                 kind = p.parent.name
-            return p, kind
-    return None, kind
+            return p, kind, False
+    return None, kind, outside
 
 
 def _attachment_refs(metadata: Any) -> Iterator[Dict[str, Any]]:
@@ -528,7 +579,7 @@ def _write_profile(
         src = _resolve_icon_path(value, home)
         if src is None:
             files[column] = None
-            result.missing_files.append({"ref": str(value), "where": f"ai.{column}"})
+            result.missing_files.append(_missing_entry(value, f"ai.{column}", home))
             continue
         files[column] = writer.copy_file("profile", src, f"profile/{subdir}/{src.name}")
     writer.write_json("profile", "profile/profile.json", {
@@ -618,15 +669,16 @@ def _write_memory_db(
         index: List[Dict[str, Any]] = []
         for ref_key, entry in attachment_refs.items():
             item = entry["item"]
-            src, kind = _resolve_media_item(item, home)
+            src, kind, outside = _resolve_media_item(item, home)
             zip_path: Optional[str] = None
             summary_path: Optional[str] = None
             if src is None:
-                result.missing_files.append({"ref": str(ref_key), "where": "messages.metadata"})
+                where = f"messages.metadata ({_OUTSIDE_HOME})" if outside else "messages.metadata"
+                result.missing_files.append({"ref": str(ref_key), "where": where})
             else:
                 zip_path = writer.copy_file("attachments", src, f"attachments/{kind}/{src.name}")
                 summary_src = src.with_name(src.name + _SUMMARY_SUFFIX)
-                if summary_src.is_file():
+                if summary_src.is_file() and _is_within(summary_src, home):
                     summary_path = writer.copy_file(
                         "attachments", summary_src, zip_path + _SUMMARY_SUFFIX
                     )
@@ -700,7 +752,7 @@ def _write_items(
                 )
             elif room.get("IMAGE_PATH"):
                 result.missing_files.append(
-                    {"ref": str(room.get("IMAGE_PATH")), "where": "building.IMAGE_PATH"}
+                    _missing_entry(room.get("IMAGE_PATH"), "building.IMAGE_PATH", home)
                 )
             fixtures: List[Dict[str, Any]] = []
             if _table_exists(world, "fixture"):
@@ -713,7 +765,7 @@ def _write_items(
                         )
                     elif fx.get("FILE_PATH"):
                         result.missing_files.append(
-                            {"ref": str(fx.get("FILE_PATH")), "where": "fixture.FILE_PATH"}
+                            _missing_entry(fx.get("FILE_PATH"), "fixture.FILE_PATH", home)
                         )
             else:
                 result.absent_tables.append("saiverse.db:fixture")
@@ -723,7 +775,11 @@ def _write_items(
                 "files": files,
             })
 
-    # 所持品: ペルソナが持つもの・私室に置かれたもの・その中の鞄に入ったもの
+    # 所持品: ペルソナが持つもの・私室に置かれたもの・それらを入れ物にしているもの。
+    # item_location.OWNER_KIND は building / persona / bag の三つ (database/models.py。
+    # 'world' = どこにも置かれていない は行を持たない)。入れ物の中身は TYPE を問わず
+    # OWNER_KIND='bag' で辿る (manager/admin.py の _collect_nested_item_ids と同じ —
+    # TYPE を bag から変えられた入れ物の中身も拾う)。
     if not (_table_exists(world, "item_location") and _table_exists(world, "item")):
         result.absent_tables.append("saiverse.db:item_location/item")
         return
@@ -732,6 +788,7 @@ def _write_items(
         owners.append(("building", room_id))
     locations: List[Dict[str, Any]] = []
     items: Dict[str, Dict[str, Any]] = {}
+    missing_items: Set[str] = set()
     seen_owners: Set[Tuple[str, str]] = set()
     while owners:
         owner = owners.pop(0)
@@ -743,14 +800,31 @@ def _write_items(
         ):
             locations.append(loc)
             item_id = loc.get("ITEM_ID")
-            if item_id in items:
+            if item_id in items or item_id in missing_items:
                 continue
             found = list(_iter_rows(world, "SELECT * FROM item WHERE ITEM_ID = ?", (item_id,)))
             if not found:
+                missing_items.add(item_id)
+                result.missing_files.append(
+                    {"ref": str(item_id), "where": "item (no row for item_location.ITEM_ID)"}
+                )
                 continue
             items[item_id] = found[0]
-            if str(found[0].get("TYPE") or "").lower() == "bag":
-                owners.append(("bag", item_id))
+            owners.append(("bag", item_id))
+    # 走査した持ち主を指しているのに、OWNER_KIND が三つのどれでもない行 (辿れない)
+    owner_ids = sorted({owner_id for _, owner_id in seen_owners})
+    for i in range(0, len(owner_ids), 500):
+        part = owner_ids[i:i + 500]
+        for loc in _iter_table_rows(
+            world, "item_location",
+            f"OWNER_ID IN ({', '.join('?' for _ in part)}) "
+            "AND OWNER_KIND NOT IN ('persona', 'building', 'bag')",
+            part,
+        ):
+            result.missing_files.append({
+                "ref": str(loc.get("ITEM_ID")),
+                "where": f"item_location.OWNER_KIND={loc.get('OWNER_KIND')!r} not traversed",
+            })
     if not locations:
         return
     item_files: Dict[str, str] = {}
@@ -760,10 +834,10 @@ def _write_items(
             arc = writer.copy_file("items", src, f"items/files/{_safe_name(item_id)}/{src.name}")
             item_files[item_id] = arc
             summary_src = src.with_name(src.name + _SUMMARY_SUFFIX)
-            if summary_src.is_file():
+            if summary_src.is_file() and _is_within(summary_src, home):
                 writer.copy_file("items", summary_src, arc + _SUMMARY_SUFFIX)
         elif item.get("FILE_PATH"):
-            result.missing_files.append({"ref": str(item.get("FILE_PATH")), "where": "item.FILE_PATH"})
+            result.missing_files.append(_missing_entry(item.get("FILE_PATH"), "item.FILE_PATH", home))
     writer.write_json("items", "items/items.json", {
         "locations": [_encode_row(loc) for loc in locations],
         "items": [_encode_row(i) for i in items.values()],
@@ -773,6 +847,26 @@ def _write_items(
 
 
 # --- journal/ (saiverse.db 側とペルソナフォルダ側) ---------------------------
+
+def _copyable_persona_file(path: Path, persona_dir: Path, result: PersonaPackExportResult) -> bool:
+    """ペルソナフォルダを走査して見つけた path を ZIP に写してよいか。
+
+    symlink は写さず missing_files に記録する。symlink でなくても解決後のパスが
+    ペルソナフォルダの外にあるもの (Windows のジャンクション配下など) は写さず記録する。
+    ディレクトリは黙って飛ばす。
+    """
+    if path.is_symlink():
+        result.missing_files.append({"ref": str(path), "where": _SYMLINK_SKIPPED})
+        return False
+    if not path.is_file():
+        return False
+    if not _is_within(path, persona_dir):
+        result.missing_files.append(
+            {"ref": str(path), "where": "persona folder (resolves outside the persona folder)"}
+        )
+        return False
+    return True
+
 
 def _write_journal_files(
     writer: _PackWriter,
@@ -796,7 +890,7 @@ def _write_journal_files(
     if reports_dir.is_dir():
         count = 0
         for path in sorted(reports_dir.rglob("*")):
-            if path.is_symlink() or not path.is_file():
+            if not _copyable_persona_file(path, persona_dir, result):
                 continue
             rel = path.relative_to(reports_dir).as_posix()
             writer.copy_file("journal", path, f"journal/day_reports/{rel}")
@@ -846,12 +940,12 @@ def _write_persona_dir_files(
         return
     count = 0
     for path in sorted(persona_dir.rglob("*")):
-        if path.is_symlink() or not path.is_file():
-            continue
         rel = path.relative_to(persona_dir)
         if len(rel.parts) == 1 and rel.name in _MEMORY_DB_FILES:
             continue
         if rel.parts[0] == _DAY_REPORTS_DIR:
+            continue  # _write_journal_files が扱う (symlink の記録も向こうで行う)
+        if not _copyable_persona_file(path, persona_dir, result):
             continue
         writer.copy_file(
             "extensions/saiverse", path, f"extensions/saiverse/persona_dir/{rel.as_posix()}"

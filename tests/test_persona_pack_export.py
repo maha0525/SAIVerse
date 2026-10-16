@@ -347,3 +347,154 @@ def test_not_carried_data_is_absent(exported: Dict[str, Any]) -> None:
     # 知覚台帳 (perception_*) は永続の証跡なので extensions/ で運ぶ
     assert "extensions/saiverse/memory_db/perception_buffer.json" in names
     assert "perception_buffer" not in not_carried
+
+
+# ---------------------------------------------------------------------------
+# SAIVERSE_HOME の外のファイル・symlink・所持品の欠けの記録
+# ---------------------------------------------------------------------------
+
+def _export_world(paths: Dict[str, Path], out: Path):
+    return export_persona_pack(
+        PERSONA_ID,
+        saiverse_db_path=paths["world_db"],
+        saiverse_home=paths["home"],
+        output_path=out,
+        generator_version="9.9.9",
+        now=datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+def test_files_outside_home_are_not_packed(tmp_path: Path) -> None:
+    paths = _build_world(tmp_path)
+    secret = b"outside-home secret bytes"
+    # 共有メディアフォルダと同じ名前のフォルダでも、SAIVERSE_HOME の外なら入れない
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "image").mkdir(parents=True)
+    outside_image = elsewhere / "image" / "secret.png"
+    outside_image.write_bytes(secret)
+    outside_doc = elsewhere / "secret.txt"
+    outside_doc.write_bytes(secret)
+
+    world = sqlite3.connect(paths["world_db"])
+    world.execute("UPDATE building SET IMAGE_PATH = ? WHERE BUILDINGID = ?", (str(outside_image), ROOM_ID))
+    world.execute("UPDATE item SET FILE_PATH = ? WHERE ITEM_ID = 'item-doc'", (str(outside_doc),))
+    world.execute("UPDATE ai SET APPEARANCE_IMAGE_PATH = ? WHERE AIID = ?", (str(outside_image), PERSONA_ID))
+    world.commit()
+    world.close()
+    memory = sqlite3.connect(paths["memory_db"])
+    memory.execute(
+        "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("m-out", f"{PERSONA_ID}:room_a", "user", "外の絵", PERSONA_ID, T0 + 10,
+         json.dumps({"images": [{"path": str(outside_image), "mime_type": "image/png"}]})),
+    )
+    # 相対パスで SAIVERSE_HOME の外へ出るもの
+    memory.execute(
+        "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("m-rel", f"{PERSONA_ID}:room_a", "user", "外の文書", PERSONA_ID, T0 + 11,
+         json.dumps({"documents": [{"path": "../elsewhere/secret.txt"}]})),
+    )
+    memory.commit()
+    memory.close()
+
+    out = tmp_path / "out" / "outside.zip"
+    result = _export_world(paths, out)
+    with zipfile.ZipFile(out) as zf:
+        blob = b"".join(zf.read(n) for n in zf.namelist())
+        index = {e["ref"]: e for e in _read_json(zf, "attachments/index.json")}
+        items = _read_json(zf, "items/items.json")
+        room = _read_json(zf, "items/private_room.json")
+    assert secret not in blob
+    assert index[str(outside_image)]["path"] is None
+    assert index["../elsewhere/secret.txt"]["path"] is None
+    assert "item-doc" not in items["files"]
+    assert room["files"]["IMAGE_PATH"] is None
+
+    wheres = {(m["ref"], m["where"]) for m in result.missing_files}
+    assert (str(outside_image), "messages.metadata (outside SAIVERSE_HOME)") in wheres
+    assert ("../elsewhere/secret.txt", "messages.metadata (outside SAIVERSE_HOME)") in wheres
+    assert (str(outside_image), "building.IMAGE_PATH (outside SAIVERSE_HOME)") in wheres
+    assert (str(outside_doc), "item.FILE_PATH (outside SAIVERSE_HOME)") in wheres
+    assert (str(outside_image), "ai.APPEARANCE_IMAGE_PATH (outside SAIVERSE_HOME)") in wheres
+
+
+def test_symlinks_in_persona_folder_are_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _build_world(tmp_path)
+    persona_dir = paths["home"] / "personas" / PERSONA_ID
+    target = tmp_path / "elsewhere.txt"
+    target.write_text("symlink target outside", encoding="utf-8")
+    link = persona_dir / "linked.txt"
+    report_link = persona_dir / "day_reports" / "linked.md"
+    try:
+        link.symlink_to(target)
+        report_link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        # symlink を作れない環境 (権限の無い Windows) では、普通のファイルを
+        # symlink として見せて同じ経路を通す
+        link.write_text("stand-in", encoding="utf-8")
+        report_link.write_text("stand-in", encoding="utf-8")
+        links = {link, report_link}
+        original = Path.is_symlink
+        monkeypatch.setattr(Path, "is_symlink", lambda self: self in links or original(self))
+    out = tmp_path / "out" / "links.zip"
+    result = _export_world(paths, out)
+    with zipfile.ZipFile(out) as zf:
+        names = set(zf.namelist())
+    assert "extensions/saiverse/persona_dir/linked.txt" not in names
+    assert "journal/day_reports/linked.md" not in names
+    wheres = {(m["ref"], m["where"]) for m in result.missing_files}
+    assert (str(link), "symlink skipped") in wheres
+    assert (str(report_link), "symlink skipped") in wheres
+
+
+def test_items_missing_rows_and_containers_of_any_type(tmp_path: Path) -> None:
+    paths = _build_world(tmp_path)
+    engine = create_engine(f"sqlite:///{paths['world_db'].as_posix()}")
+    with Session(engine) as s:
+        # TYPE が bag でない入れ物の中身も辿る (OWNER_KIND='bag' が入れ物の印)
+        s.add(Item(ITEM_ID="item-box", NAME="箱", TYPE="object"))
+        s.add(Item(ITEM_ID="item-in-box", NAME="指輪", TYPE="object"))
+        s.add(ItemLocation(ITEM_ID="item-box", OWNER_KIND="persona", OWNER_ID=PERSONA_ID, SLOT_NUMBER=2))
+        s.add(ItemLocation(ITEM_ID="item-in-box", OWNER_KIND="bag", OWNER_ID="item-box", SLOT_NUMBER=1))
+        # item 行の無い置き場所と、三つのどれでもない OWNER_KIND の行
+        s.add(ItemLocation(ITEM_ID="item-ghost", OWNER_KIND="persona", OWNER_ID=PERSONA_ID, SLOT_NUMBER=3))
+        s.add(ItemLocation(ITEM_ID="item-odd", OWNER_KIND="shelf", OWNER_ID=PERSONA_ID, SLOT_NUMBER=1))
+        s.commit()
+    engine.dispose()
+    out = tmp_path / "out" / "items.zip"
+    result = _export_world(paths, out)
+    with zipfile.ZipFile(out) as zf:
+        items = _read_json(zf, "items/items.json")
+    assert {i["ITEM_ID"] for i in items["items"]} == {
+        "item-doc", "item-bag", "item-in-bag", "item-box", "item-in-box",
+    }
+    wheres = {(m["ref"], m["where"]) for m in result.missing_files}
+    assert ("item-ghost", "item (no row for item_location.ITEM_ID)") in wheres
+    assert ("item-odd", "item_location.OWNER_KIND='shelf' not traversed") in wheres
+
+
+def test_read_only_connection_waits_for_writers(tmp_path: Path) -> None:
+    from saiverse_memory.persona_pack.export import _open_read_only
+
+    db = tmp_path / "x.db"
+    sqlite3.connect(db).close()
+    conn = _open_read_only(db)
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_json_text_scalars_are_kept_as_raw_text() -> None:
+    from saiverse_memory.persona_pack.format import RAW_TEXT_MARKER, encode_json_text
+
+    for text in ("null", "123", " 1e2 ", '"abc"', "true", "not json"):
+        assert encode_json_text(text) == {RAW_TEXT_MARKER: text}
+        assert decode_value(encode_json_text(text)) == text
+    assert encode_json_text('{"a": 1}') == {"a": 1}
+    assert encode_json_text("[1, 2]") == [1, 2]
+    assert encode_json_text(None) is None

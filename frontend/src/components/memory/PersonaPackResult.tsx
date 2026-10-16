@@ -17,7 +17,11 @@ export interface PersonaPackCount {
  */
 export interface PersonaPackChronicleAfterMerge {
     cold_windows_marked: number | null;
-    /** 印を書けなかった行の数。-1 は数が分からない失敗 */
+    /**
+     * 印を書けなかった行の数。0 は全部書けた、-1 は数が分からない失敗、
+     * null は印を書いたか分からない (読み込まれていなくて書かなかった、
+     * または後処理そのものが失敗した)。0 以外は補修の案内を出す
+     */
     cold_window_mark_failures: number | null;
     /** ペルソナが読み込まれていないため印を書かなかった */
     cold_window_marks_skipped: boolean;
@@ -29,9 +33,9 @@ export interface PersonaPackChronicleAfterMerge {
  * 取り込みの結果 (importer.py の PersonaPackImportResult + API の後処理)。
  * persona_id / room_id / persona_name は新規取り込み (import-new) のときだけ入る。
  * chronicle_after_merge は Chronicle ページを取り込んだ合流のときだけ入る。
+ * API の応答には mode ('new' | 'merge') も入るが、画面はそれで分岐しないので宣言しない。
  */
 export interface PersonaPackImportResult {
-    mode: 'new' | 'merge';
     source_persona_id: string;
     target_persona_id: string;
     counts: Record<string, PersonaPackCount>;
@@ -122,8 +126,9 @@ export default function PersonaPackResult({ result }: Props) {
     const renumbered = Object.values(result.renumbered || {}).reduce((sum, n) => sum + n, 0);
     const warnings = result.warnings || [];
     const chronicle = result.chronicle_after_merge ?? null;
+    // 失敗の数が 0 と確定したときだけ案内を出さない (null = 分からない も案内する)
     const chronicleMarksPending = chronicle !== null && (
-        chronicle.cold_window_marks_skipped || (chronicle.cold_window_mark_failures ?? 0) !== 0
+        chronicle.cold_window_marks_skipped || chronicle.cold_window_mark_failures !== 0
     );
 
     return (

@@ -57,9 +57,11 @@ MAX+1 から振り直し、元の番号を行の metadata に ``original_short_i
 失敗した場合だけは片側が残る (例外で知らせる。合流で再実行すれば UUID 照合で
 足りない分だけが入る)。
 
-embeddings は運ばれてこない。取り込んだ message は同じトランザクションで空の
-ベクトル行 (``storage.DEFERRED_VECTOR``) を持って入る — 起動時の検査と
-``SAIMemoryAdapter.reembed_stale_messages`` が拾う (import_chatlog.py と同じ形)。
+embeddings は運ばれてこない。取り込んだ message のうち content が空白だけでない
+ものは、同じトランザクションで空のベクトル行 (``storage.DEFERRED_VECTOR``) を
+持って入る — 起動時の検査と ``SAIMemoryAdapter.reembed_stale_messages`` が拾う
+(import_chatlog.py と同じ形)。content が空のメッセージには付けない (埋め込む本文が
+無いので、再埋め込みの走査対象に入らなくても失うものが無い)。
 Memopedia ページ・Chronicle・Fragment は「埋め込みの無い行」として
 ``SessionLifecycle.ensure_recall_embeddings`` の対象に自然に入る。上書きした
 ページは memopedia_embeddings の行を消して、同じ経路で作り直させる。
@@ -120,6 +122,12 @@ _CATEGORY_CORE = "core"           # sai_memory/core_memory.py の CATEGORY_CORE
 _CATEGORY_CHRONICLE = "chronicle"  # sai_memory/arasuji/storage.py の CATEGORY_CHRONICLE
 _ROOT_CHRONICLE = "root_chronicle"  # sai_memory/arasuji/storage.py の ROOT_CHRONICLE_ID
 _CHUNK = 500
+
+# ZIP を展開したときの合計サイズ (infolist の file_size の和) の上限。超えるパックは
+# 書き込み前に拒否する (ZIP 爆弾の頭打ち)。取り込みは JSON を丸ごとメモリに読むので、
+# 圧縮の効いた小さな ZIP が展開で巨大になるのを入口で止める。値は API のアップロード
+# 上限 (api/routes/people/persona_pack.py の PERSONA_PACK_IMPORT_MAX_BYTES = 2 GiB) の 8 倍。
+MAX_UNCOMPRESSED_BYTES = 8 * 2 * 1024 * 1024 * 1024
 
 
 @dataclass
@@ -210,8 +218,23 @@ class _PackReader:
         return sorted(n for n in self.names if n.startswith(prefix))
 
 
+def check_uncompressed_size(zf: zipfile.ZipFile) -> None:
+    """ZIP の展開後の合計サイズが MAX_UNCOMPRESSED_BYTES を超えたら ValueError (書き込み前の検査)。"""
+    limit = MAX_UNCOMPRESSED_BYTES
+    total = sum(info.file_size for info in zf.infolist())
+    if total > limit:
+        raise ValueError(
+            f"persona pack: the archive expands to {total} bytes, over the limit of "
+            f"{limit} bytes; refusing to import it"
+        )
+
+
 def _decode_json_text(value: Any) -> Tuple[bool, Any]:
-    """export の encode_json_text の逆の前半。(元が解釈できない文字列だったか, 値)。"""
+    """export の encode_json_text の逆の前半。
+
+    返り値は (元が ``__raw_text__`` に包まれた文字列 — JSON の object / array として
+    展開されなかった文字列 — だったか, 値)。
+    """
     if isinstance(value, dict) and len(value) == 1 and isinstance(value.get(RAW_TEXT_MARKER), str):
         return True, value[RAW_TEXT_MARKER]
     return False, decode_value(value)
@@ -337,7 +360,7 @@ _EXT_PERSONA = _EXT + "persona_dir/"
 _TABLE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
-def _load_pack(reader: _PackReader, mode: str) -> _PackData:
+def _load_pack(reader: _PackReader) -> _PackData:
     """ZIP を読み、取り込みに使う全 JSON を解釈して形を検査する (書き込みはしない)。"""
     if MANIFEST_NAME not in reader.names:
         raise ValueError("persona pack: manifest.json is missing")
@@ -402,14 +425,9 @@ def _load_pack(reader: _PackReader, mode: str) -> _PackData:
                 table = name[len(prefix):]
                 if not table.endswith(".json") or not _TABLE_NAME_RE.match(table[:-5]):
                     raise ValueError(f"persona pack: unexpected extensions file {name!r}")
-                # 合流では取り込まないので、件数を数えるだけ (解釈できなくても止めない)
-                if mode == "new":
-                    target[table[:-5]] = reader.rows(name)
-                else:
-                    try:
-                        target[table[:-5]] = reader.rows(name)
-                    except ValueError:
-                        target[table[:-5]] = [{}]
+                # 合流でも形を検査する (不正なパックは書き込み前に拒否する)。合流は
+                # chunk_page_edges をここから取り込み、残りの表も件数を内訳に載せる
+                target[table[:-5]] = reader.rows(name)
     return pack
 
 
@@ -464,7 +482,8 @@ def import_persona_pack(
 
     Raises:
         FileNotFoundError: saiverse.db / memory.db が無い。
-        ValueError: mode が不正・ZIP の形が不正・ai 行が無い・mode="new" で
+        ValueError: mode が不正・ZIP の形が不正・展開後の合計サイズが
+            MAX_UNCOMPRESSED_BYTES を超える・ai 行が無い・mode="new" で
             取り込み先に messages がある。いずれも書き込み前に投げる。
     """
     if mode not in MODES:
@@ -480,8 +499,9 @@ def import_persona_pack(
         raise FileNotFoundError(f"memory.db not found for persona {target_persona_id}: {memory_db_path}")
 
     with zipfile.ZipFile(zip_path) as zf:
+        check_uncompressed_size(zf)
         reader = _PackReader(zf)
-        pack = _load_pack(reader, mode)
+        pack = _load_pack(reader)
         result = PersonaPackImportResult(
             mode=mode, source_persona_id=pack.source_id, target_persona_id=target_persona_id,
         )
@@ -558,7 +578,6 @@ class _ImportJob:
         self.created_dirs: List[Path] = []
         self._columns_cache: Dict[Tuple[int, str], List[str]] = {}
         self._dropped_warned: Set[Tuple[str, str]] = set()
-        self._unmapped_threads: Set[str] = set()
         # 取り込んだ chronicle ページの id (合流の chunk_page_edges の照合に使う)
         self.imported_chronicle_ids: Set[str] = set()
         # 合流で取り込んだ extensions/saiverse/memory_db/ の表 (count_merge_skips が数えない)
@@ -631,15 +650,20 @@ class _ImportJob:
         return found
 
     def remap_thread_id(self, thread_id: Any) -> Any:
-        """スレッド ID の前半 (ペルソナ ID の部分) を取り込み先に置き換える。"""
+        """スレッド ID の前半 (ペルソナ ID の部分) を取り込み先に置き換える。
+
+        前半を持たない (コロンを含まない) ID はそのまま使い、恒等写像として
+        thread_map に入れる — stage_chatlog の既存スレッドの照合は thread_map の
+        値で行うので、入れないと取り込み先に同じ ID があるスレッドを再挿入して
+        主キーが衝突する。
+        """
         if not isinstance(thread_id, str):
             return thread_id
         if thread_id in self.thread_map:
             return self.thread_map[thread_id]
         if ":" not in thread_id:
-            if thread_id not in self._unmapped_threads:
-                self._unmapped_threads.add(thread_id)
-                self.warn(f"thread id {thread_id!r} has no persona prefix; kept as is")
+            self.warn(f"thread id {thread_id!r} has no persona prefix; kept as is")
+            self.thread_map[thread_id] = thread_id
             return thread_id
         mapped = f"{self.target}:{thread_id.split(':', 1)[1]}"
         self.thread_map[thread_id] = mapped
@@ -907,7 +931,7 @@ class _ImportJob:
                 else:
                     self.warn(f"message {msg['id']}: metadata is not an object; transplanted_from not recorded")
         elif self.source != self.target:
-            self.warn(f"message {msg['id']}: metadata is not JSON; transplanted_from not recorded")
+            self.warn(f"message {msg['id']}: metadata is not a JSON object or array; transplanted_from not recorded")
         row["metadata"] = _encode_json_text(is_raw, metadata)
         return row
 
@@ -1266,7 +1290,7 @@ class _ImportJob:
     def record_original(self, meta_cell: List[Any], key: str, original: Any, page_id: str) -> None:
         """振り直した行の元の番号を metadata に残す。meta_cell は [is_raw, 値]。"""
         if meta_cell[0]:
-            self.warn(f"memopedia page {page_id}: metadata is not JSON; {key} not recorded")
+            self.warn(f"memopedia page {page_id}: metadata is not a JSON object or array; {key} not recorded")
             return
         if meta_cell[1] is None:
             meta_cell[1] = {}
@@ -1284,8 +1308,12 @@ class _ImportJob:
     ) -> None:
         """ZIP 側が新しいページで取り込み先の行を上書きする。
 
-        番号 (列の short_id、metadata の core_id / Chronicle の short_id と
-        original_*) は取り込み先の値を保つ — 取り込み先で既に参照されている番号だから。
+        metadata は取り込み先の値を基底にして ZIP 側のキーを重ねる (取り込み先だけが
+        持つキーは残る。ZIP 側で消えたキーも取り込み先の値が残る)。番号 (列の
+        short_id、metadata の core_id / Chronicle の short_id と original_*) は
+        取り込み先の値を保つ — 取り込み先で既に参照されている番号だから。
+        ZIP 側の metadata が JSON の object でも NULL でもない (array や、object /
+        array として解釈できない文字列) ときは、その値で置き換える。
         """
         category = existing[6]
         try:
@@ -1300,10 +1328,11 @@ class _ImportJob:
             keep_keys += ["short_id", "original_chronicle_short_id"]
         decoded = dict(decoded)
         if not is_raw and (zip_meta is None or isinstance(zip_meta, dict)):
-            merged = dict(zip_meta or {})
+            base = dict(target_meta) if isinstance(target_meta, dict) else {}
+            merged = {**base, **(zip_meta or {})}
             for key in keep_keys:
-                if isinstance(target_meta, dict) and key in target_meta:
-                    merged[key] = target_meta[key]
+                if key in base:
+                    merged[key] = base[key]
                 else:
                     merged.pop(key, None)
             keep_null = zip_meta is None and not merged
@@ -1573,16 +1602,29 @@ class _ImportJob:
                 counts.skipped += len(rows)
                 self.warn(f"saiverse.db has no table {table!r}; {len(rows)} row(s) skipped")
                 continue
-            # 整数の主キー (rowid の別名) は世界全体の連番なので、取り込み先で振り直させる
+            # 単一列の整数の主キーは世界全体の連番なので、取り込み先で振り直す。
+            # 整数かどうかは INTEGER affinity (型名に "INT" を含む — SQLite の型
+            # affinity の規則) で判定する。型名がちょうど INTEGER の列は rowid の別名
+            # なので値を渡さず SQLite に振らせる。それ以外 (BIGINT など) は rowid の
+            # 別名ではなく、値を渡さないと NULL が入るので、取り込み先の MAX+1 から振る。
             info = world.execute(f"PRAGMA table_info({_quote(table)})").fetchall()
             pk_cols = [r for r in info if r[5]]
-            drop_col = pk_cols[0][1] if (
-                len(pk_cols) == 1 and str(pk_cols[0][2]).upper() == "INTEGER"
-            ) else None
+            pk_col: Optional[str] = None
+            next_pk: Optional[int] = None
+            if len(pk_cols) == 1 and "INT" in str(pk_cols[0][2]).upper():
+                pk_col = pk_cols[0][1]
+                if str(pk_cols[0][2]).strip().upper() != "INTEGER":
+                    (top,) = world.execute(
+                        f"SELECT COALESCE(MAX({_quote(pk_col)}), 0) FROM {_quote(table)}"
+                    ).fetchone()
+                    next_pk = int(top) + 1
             for row in rows:
                 decoded = {
-                    k: self.remap_exact(decode_value(v)) for k, v in row.items() if k != drop_col
+                    k: self.remap_exact(decode_value(v)) for k, v in row.items() if k != pk_col
                 }
+                if next_pk is not None:
+                    decoded[pk_col] = next_pk
+                    next_pk += 1
                 cur = self.insert(world, table, decoded, or_ignore=True)
                 if cur.rowcount:
                     counts.added += 1

@@ -21,6 +21,7 @@ import_chatlog.py と同じ ``_launch_import_embedding`` で埋め込みの再�
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -63,26 +64,35 @@ def _world_paths(manager: Any) -> tuple[Path, Path]:
 
 
 @contextmanager
-def _claim_import(persona_id: str) -> Iterator[None]:
+def _claim_import(
+    key: str, detail: str = "A persona pack import is already running for this persona.",
+) -> Iterator[None]:
+    """同じ key の取り込みを同時に二つ走らせない (二つ目は 409)。
+
+    プロセス内のロック (_importing_lock) なので、SAIVerse を単一プロセスで動かす
+    運用 (main.py が一つのサーバープロセスを起動する) を前提にしている。
+    """
     with _importing_lock:
-        if persona_id in _importing:
-            raise HTTPException(
-                status_code=409, detail="A persona pack import is already running for this persona.",
-            )
-        _importing.add(persona_id)
+        if key in _importing:
+            raise HTTPException(status_code=409, detail=detail)
+        _importing.add(key)
     try:
         yield
     finally:
         with _importing_lock:
-            _importing.discard(persona_id)
+            _importing.discard(key)
 
 
 async def _save_upload(file: UploadFile) -> Path:
-    """アップロードを一時ファイルへ書く (呼び出し側が消す)。"""
+    """アップロードを一時ファイルへ書く (呼び出し側が消す)。書けなければ消してから投げる。"""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".zip", prefix="persona_pack_") as tmp:
         tmp_path = Path(tmp.name)
     tmp_path.unlink()
-    await write_upload_bounded(file, tmp_path, PERSONA_PACK_IMPORT_MAX_BYTES)
+    try:
+        await write_upload_bounded(file, tmp_path, PERSONA_PACK_IMPORT_MAX_BYTES)
+    except BaseException:
+        _remove(tmp_path)
+        raise
     return tmp_path
 
 
@@ -95,6 +105,14 @@ def _remove(path: Path) -> None:
         LOGGER.warning("Failed to delete temp file %s", path, exc_info=True)
 
 
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _read_pack_json(zip_path: Path, name: str) -> Optional[Any]:
     with zipfile.ZipFile(zip_path) as zf:
         if name not in zf.namelist():
@@ -103,9 +121,21 @@ def _read_pack_json(zip_path: Path, name: str) -> Optional[Any]:
 
 
 def _read_manifest(zip_path: Path) -> Dict[str, Any]:
-    """ZIP の manifest.json を読み、形式名だけ確かめる (中身の検査は importer が行う)。"""
-    from saiverse_memory.persona_pack import FORMAT_NAME, MANIFEST_NAME
+    """ZIP の manifest.json を読み、形式名だけ確かめる (中身の検査は importer が行う)。
 
+    manifest を展開する前に、展開後の合計サイズの上限 (importer.MAX_UNCOMPRESSED_BYTES)
+    を確かめる。
+    """
+    from saiverse_memory.persona_pack import FORMAT_NAME, MANIFEST_NAME
+    from saiverse_memory.persona_pack.importer import check_uncompressed_size
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            check_uncompressed_size(zf)
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="The file is not a ZIP archive.")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     try:
         manifest = _read_pack_json(zip_path, MANIFEST_NAME)
     except zipfile.BadZipFile:
@@ -186,10 +216,18 @@ def _start_embedding(persona_id: str, count: int) -> bool:
     except Exception:
         LOGGER.exception("Could not open SAIMemory for the import embedding of %s", persona_id)
         return False
-    if not _launch_import_embedding(persona_id, adapter, count):
-        adapter.close()
-        return False
-    return True
+    # _launch_import_embedding が True を返したときだけ、スレッドが adapter を引き取る
+    # (閉じるのもスレッド側)。False と例外のときはここで閉じる。
+    launched = False
+    try:
+        launched = _launch_import_embedding(persona_id, adapter, count)
+    finally:
+        if not launched:
+            try:
+                adapter.close()
+            except Exception:
+                LOGGER.warning("Could not close the SAIMemory adapter of %s", persona_id, exc_info=True)
+    return launched
 
 
 def _refresh_loaded_persona_profile(manager: Any, persona_id: str) -> None:
@@ -231,16 +269,16 @@ def _refresh_loaded_persona_profile(manager: Any, persona_id: str) -> None:
     try:
         message = manager.update_ai(
             persona_id,
-            values["name"],
-            values["description"],
-            values["system_prompt"],
-            values["home_city_id"],
-            values["default_model"],
-            values["lightweight_model"],
-            values["autonomy_enabled"],
-            values["avatar_path"],
-            None,
-            values["appearance_image_path"],
+            name=values["name"],
+            description=values["description"],
+            system_prompt=values["system_prompt"],
+            home_city_id=values["home_city_id"],
+            default_model=values["default_model"],
+            lightweight_model=values["lightweight_model"],
+            autonomy_enabled=values["autonomy_enabled"],
+            avatar_path=values["avatar_path"],
+            avatar_upload=None,
+            appearance_image_path=values["appearance_image_path"],
             vision_model=values["vision_model"],
             audio_model=values["audio_model"],
             video_model=values["video_model"],
@@ -274,14 +312,15 @@ def _chronicle_after_merge(
        すぐに温かい窓の生ログと二重に出る。
     2. 次の編纂で走る束ねの回数 (bands.plan_band_overflow、LLM なしの予測) と、
        content_stale の印を持つ上位の件数を数える。
+
+    返す値の意味 (frontend の PersonaPackChronicleAfterMerge と同じ):
+    ``cold_window_mark_failures`` は 0 = 全部書けた、正の数 = 書けなかった行の数、
+    -1 = 数の分からない失敗 (印の処理が例外を出した)、None = 印を書いたか
+    分からない (``cold_window_marks_skipped`` が True = 読み込まれていないので
+    書かなかった、または _run_import がこの関数ごと失敗した)。
+    ``fold_runs_predicted`` / ``stale_entries`` の None は予測できなかった。
     """
-    out: Dict[str, Any] = {
-        "cold_windows_marked": None,
-        "cold_window_mark_failures": None,
-        "cold_window_marks_skipped": False,
-        "fold_runs_predicted": None,
-        "stale_entries": None,
-    }
+    out = _unknown_chronicle_after_merge()
     persona = (getattr(manager, "personas", None) or {}).get(persona_id)
     lifecycle = getattr(getattr(manager, "sea_runtime", None), "session_lifecycle", None)
     if persona is None or lifecycle is None:
@@ -302,12 +341,13 @@ def _chronicle_after_merge(
         out["cold_windows_marked"] = marked
         out["cold_window_mark_failures"] = failed
 
-    from sai_memory.arasuji.absorption import list_stale_upper_ids
-    from sai_memory.arasuji.bands import plan_band_overflow
-    from sai_memory.arasuji.storage import init_arasuji_tables
-
-    conn = sqlite3.connect(str(saiverse_home / "personas" / persona_id / "memory.db"))
+    conn: Optional[sqlite3.Connection] = None
     try:
+        from sai_memory.arasuji.absorption import list_stale_upper_ids
+        from sai_memory.arasuji.bands import plan_band_overflow
+        from sai_memory.arasuji.storage import init_arasuji_tables
+
+        conn = sqlite3.connect(str(saiverse_home / "personas" / persona_id / "memory.db"))
         init_arasuji_tables(conn)
         out["fold_runs_predicted"] = plan_band_overflow(conn)
         out["stale_entries"] = len(list_stale_upper_ids(conn))
@@ -317,8 +357,36 @@ def _chronicle_after_merge(
             persona_id, exc_info=True,
         )
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     return out
+
+
+def _unknown_chronicle_after_merge() -> Dict[str, Any]:
+    """_chronicle_after_merge の結果の初期値 (どの値もまだ分からない)。"""
+    return {
+        "cold_windows_marked": None,
+        "cold_window_mark_failures": None,
+        "cold_window_marks_skipped": False,
+        "fold_runs_predicted": None,
+        "stale_entries": None,
+    }
+
+
+def _after_commit(result: Any, step: str, func: Any, *args: Any) -> Any:
+    """取り込みの commit 後の処理を一つ走らせる。失敗は result.warnings に載せて None を返す。
+
+    commit 後の失敗を HTTP エラーにすると、取り込み済みなのにクライアントが
+    失敗と受け取って同じパックを再送する (二重取り込みの誘因) ので、ここで止める。
+    """
+    try:
+        return func(*args)
+    except Exception as exc:
+        LOGGER.exception("Persona pack import: %s failed after the import was committed", step)
+        result.warnings.append(
+            f"The import was saved, but {step} failed: {type(exc).__name__}: {exc}".splitlines()[0]
+        )
+        return None
 
 
 def _run_import(
@@ -329,6 +397,9 @@ def _run_import(
     合流は Beat ロック (sea.beat_gate.hold_beat) の内側で行う — 会話・Metabolism・
     あらすじの補修ジョブは同じロックの内側で記憶に書くので、取り込みとその後の
     印の書き込みがそれらと並走しない (補修・あらすじ削除と同じく check_gate=False)。
+
+    import_persona_pack が返った後 (commit 済み) の処理は、失敗しても例外を投げず、
+    結果の warnings に載せて返す (_after_commit)。
     """
     from saiverse_memory.persona_pack import import_persona_pack
 
@@ -352,14 +423,25 @@ def _run_import(
             result = run()
             chronicle_counts = result.counts.get("chronicle_pages")
             if chronicle_counts is not None and chronicle_counts.added:
-                chronicle_after_merge = _chronicle_after_merge(manager, persona_id, saiverse_home)
+                chronicle_after_merge = _after_commit(
+                    result, "the Chronicle follow-up (cold-window marks and forecast)",
+                    _chronicle_after_merge, manager, persona_id, saiverse_home,
+                )
+                if chronicle_after_merge is None:
+                    chronicle_after_merge = _unknown_chronicle_after_merge()
     else:
         result = run()
     if result.profile_columns_overwritten:
-        _refresh_loaded_persona_profile(manager, persona_id)
+        _after_commit(
+            result, "applying the profile to the loaded persona",
+            _refresh_loaded_persona_profile, manager, persona_id,
+        )
     embedding_started = False
     if result.embeddings_deferred:
-        embedding_started = _start_embedding(persona_id, result.embeddings_deferred)
+        embedding_started = bool(_after_commit(
+            result, "starting the embedding of the imported messages",
+            _start_embedding, persona_id, result.embeddings_deferred,
+        ))
     payload = asdict(result)
     payload["embedding_started"] = embedding_started
     payload["chronicle_after_merge"] = chronicle_after_merge
@@ -472,16 +554,26 @@ def _name_taken(manager: Any, name: str) -> bool:
         db.close()
 
 
-def _memory_has_messages(saiverse_home: Path, persona_id: str) -> bool:
+def _memory_has_messages(saiverse_home: Path, persona_id: str) -> Optional[bool]:
+    """ペルソナの memory.db に message があるか。
+
+    False = 空と確定 (memory.db が無い、または messages が 0 行)、True = ある、
+    None = 確かめられなかった (開けない・ロック・表が無いなど)。
+    """
     db_path = saiverse_home / "personas" / persona_id / "memory.db"
-    if not db_path.is_file():
-        return False
-    conn = sqlite3.connect(str(db_path))
+    try:
+        if not db_path.is_file():
+            return False
+        conn = sqlite3.connect(str(db_path), timeout=5)
+    except (OSError, sqlite3.Error):
+        LOGGER.warning("Could not open the memory of %s to check it", persona_id, exc_info=True)
+        return None
     try:
         (count,) = conn.execute("SELECT COUNT(*) FROM messages").fetchone()
         return bool(count)
     except sqlite3.Error:
-        return False
+        LOGGER.warning("Could not count the messages of %s", persona_id, exc_info=True)
+        return None
     finally:
         conn.close()
 
@@ -490,11 +582,13 @@ def _create_and_import(manager: Any, zip_path: Path, name: str, system_prompt: s
     """既存のペルソナ作成経路で新しいペルソナ (私室含む) を作り、mode="new" で取り込む。
 
     作成の後で取り込みが失敗したとき:
-    - memory.db に message が入っていなければ (取り込みが丸ごと巻き戻った)、作った
+    - memory.db に message が無いと確定したら (取り込みが丸ごと巻き戻った)、作った
       ペルソナを既存の削除経路 (manager.delete_ai) で消す。
     - 入っていれば (memory.db の commit 後に saiverse.db の commit が失敗した稀な回)、
       ペルソナは残して ID を知らせる — 同じパックを合流で取り込み直せば残りが入る
       (importer.py の docstring)。
+    - 確かめられなければ (memory.db を開けない・ロックなど)、取り込みが部分的に
+      残っている可能性があるので消さずに残し、同じく ID を知らせる。
     """
     stem = _pick_ai_stem(manager, name)
     success, message, ai_id, room_id = manager.create_ai(
@@ -506,7 +600,8 @@ def _create_and_import(manager: Any, zip_path: Path, name: str, system_prompt: s
         payload = _run_import(manager, zip_path, mode="new", persona_id=ai_id, overwrite_profile=True)
     except Exception as exc:
         _, saiverse_home = _world_paths(manager)
-        if _memory_has_messages(saiverse_home, ai_id):
+        has_messages = _memory_has_messages(saiverse_home, ai_id)
+        if has_messages is True:
             LOGGER.error(
                 "Persona pack import into the new persona %s failed after its memory was "
                 "written; the persona is kept", ai_id, exc_info=True,
@@ -517,6 +612,20 @@ def _create_and_import(manager: Any, zip_path: Path, name: str, system_prompt: s
                     f"The persona '{ai_id}' was created and its memories were imported, but the "
                     f"rest of the import failed ({exc}). Import the same pack again with "
                     "'merge' into this persona to fill in the rest."
+                ),
+            )
+        if has_messages is None:
+            LOGGER.error(
+                "Persona pack import into the new persona %s failed and its memory could not "
+                "be checked; the persona is kept", ai_id, exc_info=True,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"The persona '{ai_id}' was created, but the import failed ({exc}) and "
+                    "whether its memories were partly imported could not be checked, so the "
+                    "persona was kept. Part of the import may remain. Import the same pack "
+                    "again with 'merge' into this persona to fill in the rest."
                 ),
             )
         removed = manager.delete_ai(ai_id)
@@ -536,34 +645,47 @@ async def import_persona_pack_new(
     file: UploadFile = File(...),
     manager=Depends(get_manager),
 ):
-    """パックから新しいペルソナを迎える (intent §5 の新規作成)。結果の内訳を返す。"""
+    """パックから新しいペルソナを迎える (intent §5 の新規作成)。結果の内訳を返す。
+
+    同じパック (manifest の persona_id で同一視。無ければファイルの sha256) の
+    取り込みが走っている間に届いた二つ目は 409 で断る — 名前の重複検査は作成の
+    前に行うので、並列の POST が両方とも検査を通って同名のペルソナを二体作るのを防ぐ。
+    """
     zip_path = await _save_upload(file)
     try:
         manifest = _read_manifest(zip_path)
-        name = manifest.get("persona_name")
-        if not isinstance(name, str) or not name.strip():
-            name = manifest.get("persona_id")
-        if not isinstance(name, str) or not name.strip():
-            raise HTTPException(status_code=400, detail="manifest.json has no persona name.")
-        name = name.strip()
-        if _name_taken(manager, name):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"A persona named '{name}' already exists in this city. To combine the pack "
-                    "with that persona, import it from that persona's memory screen instead."
-                ),
-            )
-        system_prompt = ""
-        try:
-            profile = _read_pack_json(zip_path, "profile/profile.json")
-            if isinstance(profile, dict) and isinstance(profile.get("ai"), dict):
-                value = profile["ai"].get("SYSTEMPROMPT")
-                if isinstance(value, str):
-                    system_prompt = value
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            pass  # importer が形を検査して断る
-        return await run_in_threadpool(_create_and_import, manager, zip_path, name, system_prompt)
+        source_id = manifest.get("persona_id")
+        if isinstance(source_id, str) and source_id:
+            claim_key = f"import-new:persona:{source_id}"
+        else:
+            claim_key = f"import-new:sha256:{await run_in_threadpool(_file_sha256, zip_path)}"
+        with _claim_import(
+            claim_key, detail="This persona pack is already being imported as a new persona.",
+        ):
+            name = manifest.get("persona_name")
+            if not isinstance(name, str) or not name.strip():
+                name = manifest.get("persona_id")
+            if not isinstance(name, str) or not name.strip():
+                raise HTTPException(status_code=400, detail="manifest.json has no persona name.")
+            name = name.strip()
+            if _name_taken(manager, name):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"A persona named '{name}' already exists in this city. To combine the pack "
+                        "with that persona, import it from that persona's memory screen instead."
+                    ),
+                )
+            system_prompt = ""
+            try:
+                profile = _read_pack_json(zip_path, "profile/profile.json")
+                if isinstance(profile, dict) and isinstance(profile.get("ai"), dict):
+                    value = profile["ai"].get("SYSTEMPROMPT")
+                    if isinstance(value, str):
+                        system_prompt = value
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                pass  # importer が形を検査して断る
+            return await run_in_threadpool(_create_and_import, manager, zip_path, name, system_prompt)
     except Exception as exc:
         raise _import_error(exc)
     finally:

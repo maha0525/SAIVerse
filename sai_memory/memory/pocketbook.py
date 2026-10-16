@@ -155,6 +155,10 @@ def init_pocketbook_tables(conn: sqlite3.Connection) -> None:
     # 埋める — 毎回の init で走るので、後付けと埋めの間で落ちた DB も次の
     # init で埋まる (冪等)。UNIQUE は照合キーとしての契約を DB 境界に置く
     # (NULL は UNIQUE にかからない)。
+    # 但し書き: backfill で埋まった既存行の uuid は環境ごとに別の値になる。
+    # 列の後付けより前の同じ DB の複製を別々の環境でそれぞれ init した場合、
+    # 同じ論理行でも uuid が一致しないので、照合キーとして同一視できるのは
+    # backfill 後に複製・書き出しされた行と、uuid を振って作られた行だけ。
     for table in ("activities", "memos"):
         _ensure_column(conn, table, "uuid", "TEXT")
         conn.execute(

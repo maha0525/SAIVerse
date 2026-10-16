@@ -11,18 +11,22 @@ interface PersonaPackPanelProps {
     personaId: string;
 }
 
-/** Content-Disposition からファイル名を取り出す (RFC 5987 の filename* を優先) */
+/**
+ * Content-Disposition からファイル名を取り出す (RFC 5987 の filename* を優先)。
+ * filename* は charset と言語の付いた形 (UTF-8''名前 / UTF-8'ja'名前) と、
+ * それらを省いた形 (filename*=名前) のどちらも受ける。
+ */
 function filenameFromDisposition(disposition: string | null, fallback: string): string {
     if (!disposition) return fallback;
-    const rfc5987 = disposition.match(/filename\*=UTF-8''(.+?)(?:;|$)/i);
-    if (rfc5987) {
+    const extended = disposition.match(/filename\*\s*=\s*(?:([^';]*)'[^';]*')?("?)([^";]+)\2/i);
+    if (extended) {
         try {
-            return decodeURIComponent(rfc5987[1]);
+            return decodeURIComponent(extended[3].trim());
         } catch {
-            return fallback;
+            return extended[3].trim() || fallback;
         }
     }
-    const plain = disposition.match(/filename="?([^";]+)"?/i);
+    const plain = disposition.match(/filename\s*=\s*"?([^";]+)"?/i);
     return plain ? plain[1] : fallback;
 }
 
@@ -52,6 +56,8 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
     const handleExport = async () => {
         setIsExporting(true);
         setExportError(null);
+        let url: string | null = null;
+        let anchor: HTMLAnchorElement | null = null;
         try {
             const res = await apiFetch(`/api/people/${encodeURIComponent(personaId)}/persona-pack`);
             if (!res.ok) {
@@ -59,18 +65,18 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
                 return;
             }
             const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filenameFromDisposition(res.headers.get('Content-Disposition'), `${personaId}_persona_pack.zip`);
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            url = URL.createObjectURL(blob);
+            anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = filenameFromDisposition(res.headers.get('Content-Disposition'), `${personaId}_persona_pack.zip`);
+            document.body.appendChild(anchor);
+            anchor.click();
         } catch (error) {
             console.error('Persona pack export failed', error);
             setExportError(uiText('components.memory.PersonaPack.exportFailed', { p1: String(error) }));
         } finally {
+            if (anchor?.parentNode) anchor.parentNode.removeChild(anchor);
+            if (url) URL.revokeObjectURL(url);
             setIsExporting(false);
         }
     };
@@ -89,6 +95,7 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
         setSelectedFile(null);
         setOverwriteProfile(false);
         setImportError(null);
+        setResult(null);
     };
 
     const handleMerge = async () => {
