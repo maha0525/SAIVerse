@@ -9,12 +9,14 @@
   DB にだけ入って見えることがある)。ペルソナの状態は一切変えない。
 - **決まった置き場の外のファイルは入れない**: DB に保存されたパスは、解決後の
   パス (symlink を辿った先) が、その種類のファイルの置き場の内側にあるものだけを
-  ZIP に入れる。添付の path・building.IMAGE_PATH・fixture / item の FILE_PATH は
+  ZIP に入れる。building.IMAGE_PATH・fixture / item の FILE_PATH は
   共有メディアフォルダ (SAIVERSE_HOME 直下の image / documents / audio / video。
-  saiverse/media_utils.py の _ensure_*_dir と manager/items.py が書く場所)、アイコンと
-  外見画像は ``user_data/icons``。SAIVERSE_HOME の内側でも、それ以外の場所
-  (``user_data/database/`` の本体 DB、他のペルソナのフォルダなど) は入れない。
-  入れなかったものは ``missing_files`` に ``"<where> (outside SAIVERSE_HOME)"``
+  saiverse/media_utils.py の _ensure_*_dir と manager/items.py が書く場所)。添付
+  (messages.metadata・知覚台帳の media・部屋の様子の記帳の束の media) の path は
+  共有メディアフォルダと ``user_data/icons``。アイコンと外見画像は ``user_data/icons`` と
+  ``image`` (``/api/media/images/<名前>`` の URL の実体)。SAIVERSE_HOME の内側でも、
+  それ以外の場所 (``user_data/database/`` の本体 DB、他のペルソナのフォルダなど) は
+  入れない。入れなかったものは ``missing_files`` に ``"<where> (outside SAIVERSE_HOME)"``
   (SAIVERSE_HOME の外) か ``"<where> (outside <置き場>)"`` (内側だが置き場の外) と
   して記録する。
 - **本体サーバーに依存しない**: 入力は ペルソナ ID・saiverse.db のパス・
@@ -39,7 +41,8 @@ ZIP の中身 (intent §4 の表):
 ``attachments/``
     メッセージ metadata の ``images`` / ``documents`` / ``media`` と、知覚台帳
     (PERCEPTION_MEDIA_TABLES) の ``media`` 列と、部屋の様子の記帳
-    (ROOM_STATE_COLUMNS) の束のパッケージの ``media`` が指す共有メディアファイルの実体と
+    (ROOM_STATE_COLUMNS) の束のパッケージの ``media`` が指すファイルの実体
+    (user_data/icons のファイルは ``attachments/image/`` に入れる) と
     ``index.json`` (参照 → ZIP 内パス。参照元は ``message_ids`` と
     ``perception_rows`` (``"<表>:<id>"``))。
 ``items/``
@@ -244,14 +247,29 @@ _MEDIA_URI_DIRS: Tuple[Tuple[str, str], ...] = (
 )
 _MEDIA_DIR_NAMES = frozenset(d for _, d in _MEDIA_URI_DIRS)
 _SUMMARY_SUFFIX = ".summary.txt"  # saiverse/media_utils.py の SUMMARY_SUFFIX
+# api/routes/media.py の /upload が返す URL の接頭辞。ファイルの実体は SAIVERSE_HOME/image/
+# (serve_image が _ensure_image_dir から配信する)。SettingsModal / WorldEditor の
+# ImageUpload はこの URL を ai.AVATAR_IMAGE / APPEARANCE_IMAGE_PATH にそのまま保存する。
+API_MEDIA_IMAGES_PREFIX = "/api/media/images/"
 # DB に保存されたファイルパスを解決してよい置き場 (SAIVERSE_HOME からの相対)
 _MEDIA_ROOTS: Tuple[Tuple[str, ...], ...] = tuple((d,) for _, d in _MEDIA_URI_DIRS)
-_ICON_ROOTS: Tuple[Tuple[str, ...], ...] = (("user_data", "icons"),)
+_ICON_ROOT: Tuple[str, ...] = ("user_data", "icons")
+_ICON_ROOTS: Tuple[Tuple[str, ...], ...] = (_ICON_ROOT,)
+# 添付 (messages.metadata・知覚台帳の media・部屋の様子の記帳の束の media) の置き場。
+# 共有メディアフォルダに加えて user_data/icons — 取り込みが外見画像を user_data/icons へ
+# 復元し、それを見た別のペルソナの記帳の media (get_visual_context) がその絶対パスを持つため
+_ATTACHMENT_ROOTS: Tuple[Tuple[str, ...], ...] = _MEDIA_ROOTS + _ICON_ROOTS
+# ai.AVATAR_IMAGE / APPEARANCE_IMAGE_PATH の置き場。user_data/icons に加えて image
+# (API_MEDIA_IMAGES_PREFIX の URL の実体の置き場)
+_PROFILE_ROOTS: Tuple[Tuple[str, ...], ...] = _ICON_ROOTS + (("image",),)
 # missing_files の where に添える印 (解決後のパスが SAIVERSE_HOME の外を指したもの)
 _OUTSIDE_HOME = "outside SAIVERSE_HOME"
-# 同 (SAIVERSE_HOME の内側だが、置き場の外を指したもの)
-_OUTSIDE_MEDIA = "outside the shared media folders"
-_OUTSIDE_ICONS = "outside user_data/icons"
+# 同 (SAIVERSE_HOME の内側だが、置き場の外を指したもの)。置き場ごとの印
+_OUTSIDE_ROOTS: Dict[Tuple[Tuple[str, ...], ...], str] = {
+    _MEDIA_ROOTS: "outside the shared media folders",
+    _ATTACHMENT_ROOTS: "outside the shared media folders and user_data/icons",
+    _PROFILE_ROOTS: "outside user_data/icons and image",
+}
 _SYMLINK_SKIPPED = "symlink skipped"
 # 読み取り接続の busy_timeout (ミリ秒)
 _BUSY_TIMEOUT_MS = 5000
@@ -440,7 +458,7 @@ def _outside_reason(path: Path, home: Path, roots: Sequence[Tuple[str, ...]]) ->
         return None
     if not _is_within(path, home):
         return _OUTSIDE_HOME
-    return _OUTSIDE_ICONS if roots is _ICON_ROOTS else _OUTSIDE_MEDIA
+    return _OUTSIDE_ROOTS[tuple(roots)]
 
 
 def _resolve_stored_path(
@@ -475,36 +493,49 @@ def _resolve_icon_path(value: Any, home: Path) -> Optional[Path]:
     """ai.AVATAR_IMAGE / APPEARANCE_IMAGE_PATH を解決する。
 
     保存形は api/deps.py の avatar_path_to_url が受ける形 (絶対パス、
-    ``user_data/icons/<名前>`` を含むパス、``/api/static/user_icons/<名前>``)。
-    ``user_data/icons`` の外のファイルは返さない。
+    ``user_data/icons/<名前>`` を含むパス、``/api/static/user_icons/<名前>``、
+    ``/api/media/images/<名前>`` (API_MEDIA_IMAGES_PREFIX — 実体は ``image/<名前>``))。
+    SAIVERSE_HOME の外で保存されたパス (別の環境の SAIVERSE_HOME) は、``user_data/icons/``
+    か ``image/`` の直下を指すものに限って、ファイル名だけを取り出して取り込み先の
+    同じ置き場で探す。``user_data/icons`` と ``image`` (_PROFILE_ROOTS) の外の
+    ファイルは返さない。
     """
     if not isinstance(value, str) or not value.strip():
         return None
-    direct = _resolve_stored_path(value, home, _ICON_ROOTS)
+    direct = _resolve_stored_path(value, home, _PROFILE_ROOTS)
     if direct is not None:
         return direct
     normalized = value.strip().replace("\\", "/")
+    candidates: List[Tuple[str, Tuple[str, ...]]] = []
+    if normalized.startswith(API_MEDIA_IMAGES_PREFIX):
+        candidates.append((normalized[len(API_MEDIA_IMAGES_PREFIX):], ("image",)))
     for marker in ("user_data/icons/", "/api/static/user_icons/"):
         if marker in normalized:
-            name = normalized.split(marker)[-1]
-            if name and Path(name).name == name:
-                candidate = home / "user_data" / "icons" / name
-                if candidate.is_file() and _outside_reason(candidate, home, _ICON_ROOTS) is None:
-                    return candidate
+            candidates.append((normalized.split(marker)[-1], _ICON_ROOT))
+    parent, _sep, name = normalized.rpartition("/")
+    if parent.rpartition("/")[2] == "image":
+        candidates.append((name, ("image",)))
+    for name, root in candidates:
+        if name and name not in (".", "..") and Path(name).name == name:
+            candidate = home.joinpath(*root, name)
+            if candidate.is_file() and _outside_reason(candidate, home, _PROFILE_ROOTS) is None:
+                return candidate
     return None
 
 
 def _resolve_media_item(
     item: Dict[str, Any], home: Path
 ) -> Tuple[Optional[Path], str, Optional[str]]:
-    """添付の項目 (uri / path) を共有メディアフォルダのファイルへ解決する。
+    """添付の項目 (uri / path) を置き場 (_ATTACHMENT_ROOTS) のファイルへ解決する。
 
     返り値は (ファイル, ZIP 内の種類フォルダ名, 入れなかった理由)。理由は
     ファイルが存在するのに置き場の外を指したときだけ入る (_OUTSIDE_HOME /
-    _OUTSIDE_MEDIA)。saiverse/media_utils.py の iter_image_media と同じく uri を
+    _OUTSIDE_ROOTS)。saiverse/media_utils.py の iter_image_media と同じく uri を
     先に、見つからなければ path を見る。解決後のパスが共有メディアフォルダ
-    (image / documents / audio / video) の内側にあるものだけを認める — 取り込んだ
-    パックの path が本体 DB などを指していても ZIP に入れないため。
+    (image / documents / audio / video) か user_data/icons の内側にあるものだけを
+    認める — 取り込んだパックの path が本体 DB などを指していても ZIP に入れないため。
+    user_data/icons のファイルの種類フォルダ名は image (取り込みは共有メディア
+    フォルダの image/ へ復元し、uri を ``saiverse://image/<ファイル名>`` で組み直す)。
     """
     uri = item.get("uri")
     kind = "other"
@@ -517,7 +548,7 @@ def _resolve_media_item(
                 if name and Path(name).name == name:
                     candidate = home / dirname / name
                     if candidate.is_file():
-                        reason = _outside_reason(candidate, home, _MEDIA_ROOTS)
+                        reason = _outside_reason(candidate, home, _ATTACHMENT_ROOTS)
                         if reason is None:
                             return candidate, kind, None
                 break
@@ -527,11 +558,12 @@ def _resolve_media_item(
         if not p.is_absolute():
             p = home / p
         if p.is_file():
-            path_reason = _outside_reason(p, home, _MEDIA_ROOTS)
+            path_reason = _outside_reason(p, home, _ATTACHMENT_ROOTS)
             if path_reason is not None:
                 return None, kind, path_reason
             if kind == "other":
-                kind = _root_of(p, home, _MEDIA_ROOTS) or kind
+                root = _root_of(p, home, _ATTACHMENT_ROOTS)
+                kind = "image" if root == "/".join(_ICON_ROOT) else (root or kind)
             return p, kind, None
     return None, kind, reason
 
@@ -755,7 +787,7 @@ def _write_profile(
         src = _resolve_icon_path(value, home)
         if src is None:
             files[column] = None
-            result.missing_files.append(_missing_entry(value, f"ai.{column}", home, _ICON_ROOTS))
+            result.missing_files.append(_missing_entry(value, f"ai.{column}", home, _PROFILE_ROOTS))
             continue
         files[column] = writer.copy_file("profile", src, f"profile/{subdir}/{src.name}")
     writer.write_json("profile", "profile/profile.json", {
@@ -898,7 +930,7 @@ def _write_memory_db(
             else:
                 zip_path = writer.copy_file("attachments", src, f"attachments/{kind}/{src.name}")
                 summary_src = src.with_name(src.name + _SUMMARY_SUFFIX)
-                if summary_src.is_file() and _outside_reason(summary_src, home, _MEDIA_ROOTS) is None:
+                if summary_src.is_file() and _outside_reason(summary_src, home, _ATTACHMENT_ROOTS) is None:
                     summary_path = writer.copy_file(
                         "attachments", summary_src, zip_path + _SUMMARY_SUFFIX
                     )

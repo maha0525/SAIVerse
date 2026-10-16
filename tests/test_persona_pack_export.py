@@ -432,8 +432,9 @@ def test_files_inside_home_but_outside_their_folders_are_not_packed(tmp_path: Pa
     world = sqlite3.connect(world_db)
     world.execute("UPDATE building SET IMAGE_PATH = ? WHERE BUILDINGID = ?", (str(other_file), ROOM_ID))
     world.execute("UPDATE item SET FILE_PATH = ? WHERE ITEM_ID = 'item-doc'", ("user_data/database/saiverse.db",))
-    # アイコンの置き場は user_data/icons だけ (共有メディアフォルダの画像も認めない)
-    world.execute("UPDATE ai SET APPEARANCE_IMAGE_PATH = ? WHERE AIID = ?", (str(home / "image" / "pic.png"), PERSONA_ID))
+    # アイコンの置き場は user_data/icons と image だけ (documents の画像は認めない)
+    (home / "documents" / "face.png").write_bytes(b"\x89PNG in documents")
+    world.execute("UPDATE ai SET APPEARANCE_IMAGE_PATH = ? WHERE AIID = ?", (str(home / "documents" / "face.png"), PERSONA_ID))
     world.commit()
     world.close()
     memory = sqlite3.connect(paths["memory_db"])
@@ -462,10 +463,10 @@ def test_files_inside_home_but_outside_their_folders_are_not_packed(tmp_path: Pa
     assert room["files"]["IMAGE_PATH"] is None
     assert profile["files"]["APPEARANCE_IMAGE_PATH"] is None
     wheres = {(m["ref"], m["where"]) for m in result.missing_files}
-    assert (str(world_db), "messages.metadata (outside the shared media folders)") in wheres
+    assert (str(world_db), "messages.metadata (outside the shared media folders and user_data/icons)") in wheres
     assert ("user_data/database/saiverse.db", "item.FILE_PATH (outside the shared media folders)") in wheres
     assert (str(other_file), "building.IMAGE_PATH (outside the shared media folders)") in wheres
-    assert (str(home / "image" / "pic.png"), "ai.APPEARANCE_IMAGE_PATH (outside user_data/icons)") in wheres
+    assert (str(home / "documents" / "face.png"), "ai.APPEARANCE_IMAGE_PATH (outside user_data/icons and image)") in wheres
 
 
 def test_symlinks_in_persona_folder_are_recorded(

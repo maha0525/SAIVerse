@@ -54,7 +54,13 @@ perception_buffer.metadata の room_state) の束のパッケージの media も
 復元できなかった項目はパッケージの media から外す (束の media の path は空でない文字列で
 なければ束ごと無効になるため)。束を書き換えると指紋 (sai_memory/room_state.snapshot_digest)
 が変わるので、差分の記帳の base_digest を書き換えた土台の指紋に付け直す
-(:meth:`_ImportJob.room_state_digest_map`)。
+(:meth:`_ImportJob.room_state_digest_map`)。縮小済みの記帳 (束の代わりに dropped_media を
+持つ) は、dropped_media の各 path を、同じ画像の知覚台帳の media の項目が取り込み後に
+持つ path へ写す (:meth:`_ImportJob.relocate_dropped_media`)。
+
+profile/ のアイコン・外見画像は、元の値が ``/api/media/images/<名前>`` なら共有メディア
+フォルダの image/ へ復元して同じ形の URL で指し、それ以外は user_data/icons へ復元して
+絶対パスで指す (:meth:`_ImportJob.stage_profile`)。
 
 JSON 文字列の列 (export.JSON_TEXT_COLUMNS) の ``{"__raw_text__": s}`` は、s が JSON の
 object / array として解釈できるとき行ごと取り込まない (警告とスキップ件数)。正規の
@@ -145,9 +151,11 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from sai_memory.presented_reduction import DROPPED_MEDIA_FIELD
 from sai_memory.room_state import snapshot_digest
 
 from .export import (
+    API_MEDIA_IMAGES_PREFIX,
     _ATTACHMENT_KEYS,
     _DAY_REPORTS_DIR,
     _MEDIA_DIR_NAMES,
@@ -883,6 +891,10 @@ class _ImportJob:
         self.overwrite_profile = overwrite_profile
         self.thread_map: Dict[str, str] = {}
         self.relocations: Dict[str, _Relocation] = {}
+        # 知覚台帳の media の項目の元の path → 取り込み後のその項目の path の一覧
+        # (plan_attachments が作る)。縮小済みの部屋の記帳の dropped_media の付け替えに使う
+        # (relocate_dropped_media)
+        self.path_relocations: Dict[str, List[str]] = {}
         self.file_plans: List[_FilePlan] = []
         self.reserved: Set[str] = set()
         self.created_files: List[Path] = []
@@ -1421,6 +1433,8 @@ class _ImportJob:
             return
         counts = self.result.count("attachments")
         needed: Set[str] = set()
+        # 知覚台帳の media の項目の (元の path, 参照の鍵)。path_relocations を作る
+        perception_paths: List[Tuple[str, str]] = []
         for msg in new_messages:
             is_raw, metadata = _decode_json_text(msg.get("metadata"))
             if is_raw:
@@ -1430,6 +1444,8 @@ class _ImportJob:
         for table, row in self.perception_media_rows(conn):
             for entry in _media_entry_refs(parse_media_column(decode_value(row.get("media")))):
                 needed.add(_attachment_key(entry))
+                if isinstance(entry.get("path"), str) and entry["path"]:
+                    perception_paths.append((entry["path"], _attachment_key(entry)))
             column = ROOM_STATE_COLUMNS.get(table)
             if column is not None:
                 for entry in room_state_media_refs(table, decode_value(row.get(column))):
@@ -1461,6 +1477,15 @@ class _ImportJob:
                 summary_dest = dest.with_name(dest.name + _SUMMARY_SUFFIX)
                 if not summary_dest.exists() and not self.is_reserved(summary_dest):
                     self.plan_file(summary_zip, summary_dest)
+        # relocate_media_entries が知覚台帳の media の各項目の path に書く値 (同じ鍵の
+        # relocations の復元先) を、元の path から引けるようにする
+        for path, key in perception_paths:
+            reloc = self.relocations.get(key)
+            if reloc is None:
+                continue
+            dests = self.path_relocations.setdefault(path, [])
+            if str(reloc.dest) not in dests:
+                dests.append(str(reloc.dest))
 
     def choose_media_dest(
         self, directory: Path, name: str, data_hash: str, with_summary: bool
@@ -1591,7 +1616,8 @@ class _ImportJob:
         """:data:`ROOM_STATE_COLUMNS` の列の値 (decode 済み) を書き換えて、保存する値を返す。
 
         各記帳の snapshot を :meth:`relocate_room_state_snapshot` で書き換え、base_digest が
-        ``digests`` (:meth:`room_state_digest_map`) にあれば書き換えた土台の指紋に付け直す。
+        ``digests`` (:meth:`room_state_digest_map`) にあれば書き換えた土台の指紋に付け直し、
+        dropped_media (縮小済みの記帳) を :meth:`relocate_dropped_media` で付け替える。
         書き換えが無ければ元の値をそのまま返す。読めない値もそのまま返す — 読み手
         (sai_memory/room_state.raw_room_entries と _parse_item_state) はそれを記帳なしと
         して扱う。
@@ -1610,9 +1636,37 @@ class _ImportJob:
             if isinstance(base, str) and base in digests:
                 record["base_digest"] = digests[base]
                 changed = True
+            dropped = record.get(DROPPED_MEDIA_FIELD)
+            if isinstance(dropped, list):
+                relocated_dropped = self.relocate_dropped_media(dropped)
+                if relocated_dropped != dropped:
+                    record[DROPPED_MEDIA_FIELD] = relocated_dropped
+                    changed = True
         if not changed:
             return value
         return json.dumps(data, ensure_ascii=False)
+
+    def relocate_dropped_media(self, dropped: List[Any]) -> List[str]:
+        """縮小済みの部屋の記帳の dropped_media (画像の path の一覧) を取り込み先に合わせる。
+
+        dropped_media は sai_memory/presented_reduction.mark_presentation_reductions が書き、
+        提示のとき _reduce_rooms がバッチの media (perception_batches.media) の各項目の
+        path と文字列で比べ、一致した項目を提示から外す。バッチの media は
+        :meth:`relocate_media_entries` で path が書き換わるので、dropped_media の各 path も
+        同じ項目が取り込み後に持つ path (path_relocations) へ写す — 移植前に外れていた
+        画像は移植後も外れる。path_relocations に無い path (復元しなかった項目) は一覧から
+        外す: その項目の path は取り込みで None になり (relocate_media_entries)、_reduce_rooms
+        の比較は空の path を一致させないので、元の環境の path を残しても外す相手が無く、
+        元の環境のパスが取り込み先に残るだけになるため。
+        """
+        out: List[str] = []
+        for path in dropped:
+            if not isinstance(path, str) or not path:
+                continue
+            for dest in self.path_relocations.get(path, ()):
+                if dest not in out:
+                    out.append(dest)
+        return out
 
     # --- knowledge/ -------------------------------------------------------------
 
@@ -2184,10 +2238,16 @@ class _ImportJob:
             name = PurePosixPath(zip_name).name
             _safe_relpath(name, "profile/profile.json")
             data_hash = _sha256_bytes(self.reader.read(zip_name))
-            dest, reused = self.choose_media_dest(self.home / "user_data" / "icons", name, data_hash, False)
+            # 元の値が /api/media/images/<名前> (設定画面の ImageUpload が保存する形) なら、
+            # その URL の配信元 (api/routes/media.py の serve_image = SAIVERSE_HOME/image/) へ
+            # 置き、同じ形の URL で指す。それ以外は user_data/icons へ置き、絶対パスで指す
+            # (api/deps.py の avatar_path_to_url がどちらも表示の URL に変える)
+            as_api_url = isinstance(ai[col], str) and ai[col].strip().startswith(API_MEDIA_IMAGES_PREFIX)
+            directory = self.home / "image" if as_api_url else self.home / "user_data" / "icons"
+            dest, reused = self.choose_media_dest(directory, name, data_hash, False)
             if not reused:
                 self.plan_file(zip_name, dest)
-            updates[col] = str(dest)
+            updates[col] = API_MEDIA_IMAGES_PREFIX + dest.name if as_api_url else str(dest)
         for col in ai:
             if col not in cols and (("ai", col) not in self._dropped_warned):
                 self._dropped_warned.add(("ai", col))

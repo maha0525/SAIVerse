@@ -2052,3 +2052,182 @@ def test_room_state_media_in_a_crafted_pack_is_neutralised(source: Dict[str, Any
         assert bundle_media(snapshot) == []
     assert "saiverse.db" not in raw and "/etc/passwd" not in raw
     assert "/etc/passwd" not in buffer_meta
+
+
+# ---------------------------------------------------------------------------
+# 画像の置き場所の解決 (Codex 敵対レビュー四巡目)
+# ---------------------------------------------------------------------------
+
+def test_profile_image_uploaded_through_the_media_api_round_trips(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    """設定画面の ImageUpload が保存する /api/media/images/<名前> の画像も運ばれ、表示経路で解決できる。"""
+    home: Path = source["home"]
+    (home / "image" / "uploaded_face.png").write_bytes(b"\x89PNG uploaded avatar")
+    (home / "image" / "uploaded_look.png").write_bytes(b"\x89PNG uploaded appearance")
+    world = sqlite3.connect(source["world_db"])
+    world.execute(
+        "UPDATE ai SET AVATAR_IMAGE = ?, APPEARANCE_IMAGE_PATH = ? WHERE AIID = ?",
+        ("/api/media/images/uploaded_face.png", str(home / "image" / "uploaded_look.png"), PID),
+    )
+    world.commit()
+    world.close()
+    pack = _export(source, tmp_path / "out" / "uploaded.zip")
+    profile = _zjson(pack, "profile/profile.json")
+    with zipfile.ZipFile(pack) as zf:
+        assert zf.read(profile["files"]["AVATAR_IMAGE"]) == b"\x89PNG uploaded avatar"
+        assert zf.read(profile["files"]["APPEARANCE_IMAGE_PATH"]) == b"\x89PNG uploaded appearance"
+
+    target = _make_env(tmp_path / "dst", "uploaded_city_b", city_id=2)
+    _import(target, pack, "new", overwrite_profile=True)
+    world = sqlite3.connect(target["world_db"])
+    try:
+        avatar, appearance = world.execute(
+            "SELECT AVATAR_IMAGE, APPEARANCE_IMAGE_PATH FROM ai WHERE AIID = ?",
+            (target["persona_id"],),
+        ).fetchone()
+    finally:
+        world.close()
+    dst_home: Path = target["home"]
+
+    # 表示経路は api/deps.py の avatar_path_to_url (文字列だけを見る関数。api.deps の
+    # import は database.session の engine を作るが、DB へは接続しない —
+    # tests/test_persona_pack_api.py も同じ import をしている)
+    from api.deps import avatar_path_to_url
+
+    # /api/media/images/<名前> は同じ形で戻り、その配信元 (api/routes/media.py の
+    # serve_image = SAIVERSE_HOME/image/) に実体がある
+    assert avatar == "/api/media/images/uploaded_face.png"
+    assert avatar_path_to_url(avatar) == avatar
+    assert (dst_home / "image" / "uploaded_face.png").read_bytes() == b"\x89PNG uploaded avatar"
+    # 共有 image フォルダの保存パスは user_data/icons へ置き、表示の URL に変えられる
+    assert Path(appearance).parent == dst_home / "user_data" / "icons"
+    assert Path(appearance).read_bytes() == b"\x89PNG uploaded appearance"
+    assert avatar_path_to_url(appearance) == "/api/static/user_icons/uploaded_look.png"
+
+
+def test_icons_referenced_by_perception_and_message_media_are_carried(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    """user_data/icons のファイルを指す記帳・知覚台帳・messages.metadata の media も運ばれ、復元先を指す。"""
+    from sai_memory.room_state import bundle_is_valid, bundle_media
+
+    home: Path = source["home"]
+    other_look = home / "user_data" / "icons" / "other_look.png"
+    other_look.write_bytes(b"\x89PNG the other persona's appearance")
+    seen = {"path": str(other_look), "mime_type": "image/png", "type": "image"}
+    entries = [{"key": "building:room_x", "is_diff": False, "block": "部屋 X の様子",
+                "snapshot": _room_bundle([seen])}]
+    conn = _mem(source)
+    try:
+        conn.execute(
+            "INSERT INTO perception_batches(consumed_at, rendered_text, room_state_json, media) "
+            "VALUES (?,?,?,?)",
+            (T0, "部屋 X の様子", json.dumps(entries, ensure_ascii=False),
+             json.dumps([seen], ensure_ascii=False)),
+        )
+        _add_message(conn, PID, "m-spell", "room_a", "system", "相手を見た", T0 + 5,
+                     {"tags": ["conversation", "spell"], "media": [seen]})
+        conn.commit()
+    finally:
+        conn.close()
+    pack = _export(source, tmp_path / "out" / "icons.zip")
+    index = {e["ref"]: e for e in _zjson(pack, "attachments/index.json")}
+    entry = index[str(other_look)]
+    assert entry["path"] == "attachments/image/other_look.png"
+    assert entry["message_ids"] == ["m-spell"]
+    assert entry["perception_rows"] == ["perception_batches:1"]
+
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, pack, "new")
+    dst_home: Path = target["home"]
+    restored = dst_home / "image" / "other_look.png"
+    assert restored.read_bytes() == b"\x89PNG the other persona's appearance"
+    relocated = {"path": str(restored), "uri": "saiverse://image/other_look.png",
+                 "mime_type": "image/png", "type": "image"}
+    conn = _mem(target)
+    try:
+        raw_entries, batch_media = conn.execute(
+            "SELECT room_state_json, media FROM perception_batches"
+        ).fetchone()
+        (metadata,) = conn.execute("SELECT metadata FROM messages WHERE id = 'm-spell'").fetchone()
+    finally:
+        conn.close()
+    snapshot = json.loads(raw_entries)[0]["snapshot"]
+    assert bundle_is_valid(snapshot)
+    assert bundle_media(snapshot) == [relocated]
+    assert json.loads(batch_media) == [relocated]
+    assert json.loads(metadata)["media"] == [relocated]
+
+
+def test_shrunk_room_state_drops_the_same_media_after_import(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    """縮小済みの記帳の dropped_media も付け替わり、取り込み前後で _reduce_rooms が同じ画像を外す。"""
+    from types import SimpleNamespace
+
+    from sai_memory.presented_reduction import (
+        DROPPED_MEDIA_FIELD,
+        SHRUNK_BLOCK_FIELD,
+        SHRUNK_FLAG,
+        _reduce_rooms,
+    )
+
+    home: Path = source["home"]
+    (home / "image" / "room.png").write_bytes(b"\x89PNG shrunk room")
+    (home / "image" / "keep.png").write_bytes(b"\x89PNG still presented")
+    room = {"path": str(home / "image" / "room.png"), "mime_type": "image/png", "type": "image"}
+    keep = {"path": str(home / "image" / "keep.png"), "mime_type": "image/png", "type": "image"}
+    # 元の環境でもファイルの無い画像 (ZIP に入らず、取り込みで復元されない)
+    gone = {"path": str(home / "image" / "gone.png"), "mime_type": "image/png", "type": "image"}
+    entries = [{"key": "building:room_x", "is_diff": False, "block": "部屋 X の様子",
+                SHRUNK_FLAG: True, SHRUNK_BLOCK_FIELD: "(部屋 X の様子は省略)",
+                DROPPED_MEDIA_FIELD: [room["path"], gone["path"]]}]
+    text = "見出し\n\n部屋 X の様子\n\n残る話"
+    conn = _mem(source)
+    try:
+        conn.execute(
+            "INSERT INTO perception_batches(consumed_at, rendered_text, room_state_json, media) "
+            "VALUES (?,?,?,?)",
+            (T0, text, json.dumps(entries, ensure_ascii=False),
+             json.dumps([room, keep, gone], ensure_ascii=False)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    def reduced(env: Dict[str, Any]) -> List[Dict[str, Any]]:
+        conn = _mem(env)
+        try:
+            batch_id, rendered, raw, media = conn.execute(
+                "SELECT id, rendered_text, room_state_json, media FROM perception_batches"
+            ).fetchone()
+        finally:
+            conn.close()
+        batch = SimpleNamespace(id=batch_id, room_state_json=raw)
+        out_text, kept, changed = _reduce_rooms(batch, rendered, json.loads(media))
+        assert changed and "(部屋 X の様子は省略)" in out_text
+        return kept
+
+    assert reduced(source) == [keep]
+    pack = _export(source, tmp_path / "out" / "shrunk.zip")
+
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, pack, "new")
+    dst_home: Path = target["home"]
+    conn = _mem(target)
+    try:
+        (raw,) = conn.execute("SELECT room_state_json FROM perception_batches").fetchone()
+    finally:
+        conn.close()
+    # 復元した画像は復元先の path へ写り、復元しなかった画像の元の path は残らない
+    assert json.loads(raw)[0][DROPPED_MEDIA_FIELD] == [str(dst_home / "image" / "room.png")]
+    assert "gone.png" not in raw
+    kept = reduced(target)
+    # 外れるのは取り込み前と同じ部屋の画像で、残すべき画像は残る。gone は取り込みで
+    # path も uri も空になり、読みに行くファイルが無い
+    assert kept == [
+        {"path": str(dst_home / "image" / "keep.png"), "uri": "saiverse://image/keep.png",
+         "mime_type": "image/png", "type": "image"},
+        {"path": None, "mime_type": "image/png", "type": "image"},
+    ]
