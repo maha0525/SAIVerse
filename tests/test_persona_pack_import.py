@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import json
 import sqlite3
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -295,6 +296,13 @@ def _room_view(zip_path: Path) -> Dict[str, Any]:
     }
 
 
+def _derived(target_persona_id: str, kind: str, original: str) -> str:
+    """取り込みが振り直す ID (importer._ImportJob.derived_id と同じ uuid5)。"""
+    from saiverse_memory.persona_pack import importer
+
+    return str(uuid.uuid5(importer._ID_NAMESPACE, f"{target_persona_id}/{kind}/{original}"))
+
+
 def _strip_paths(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out = copy.deepcopy(messages)
     for m in out:
@@ -347,8 +355,13 @@ def test_round_trip_new_import_then_reexport(source: Dict[str, Any], tmp_path: P
     assert pages(again) == pages(src_zip)
 
     # journal
-    for name in ("journal/clips.json", "journal/purpose_tags.json", "journal/task_book.json"):
+    for name in ("journal/clips.json", "journal/purpose_tags.json"):
         assert _zjson(again, name) == _zjson(src_zip, name), name
+    # task_book の TASK_ID は取り込み先のペルソナ ID と元の値から決まる uuid5 に振り直す
+    src_book = _zjson(src_zip, "journal/task_book.json")
+    for row in src_book:
+        row["TASK_ID"] = _derived(PID, "task_book", row["TASK_ID"])
+    assert _zjson(again, "journal/task_book.json") == src_book
 
     def acts(zip_path: Path) -> List[Dict[str, Any]]:
         return [{k: v for k, v in a.items() if k != "id"} for a in _zjson(zip_path, "journal/activities.json")]
@@ -394,10 +407,15 @@ def test_round_trip_new_import_then_reexport(source: Dict[str, Any], tmp_path: P
     assert not (target["persona_dir"] / "persona_pack_world_pending.json").exists()
     assert result.counts["items"].added == 4  # item 3 + fixture 1
     assert result.counts["items"].updated == 1  # 私室の設定
-    # extensions/saiverse/saiverse_db/ も入る
-    for name in ("extensions/saiverse/saiverse_db/persona_event_log.json",
-                 "extensions/saiverse/saiverse_db/persona_task_step.json"):
-        assert _zjson(again, name) == _zjson(src_zip, name), name
+    # extensions/saiverse/saiverse_db/ も入る (文字列の主キーと親子の参照は同じ写像で振り直す)
+    ext = "extensions/saiverse/saiverse_db/"
+    assert _zjson(again, ext + "persona_event_log.json") == _zjson(src_zip, ext + "persona_event_log.json")
+    src_steps = _zjson(src_zip, ext + "persona_task_step.json")
+    for row in src_steps:
+        row["id"] = _derived(PID, "persona_task_step", row["id"])
+        row["task_id"] = _derived(PID, "persona_task", row["task_id"])
+    assert _zjson(again, ext + "persona_task_step.json") == src_steps
+    assert [t["id"] for t in _zjson(again, ext + "persona_task.json")] == [_derived(PID, "persona_task", "task-1")]
 
 
 def test_new_mode_refuses_persona_with_messages(source: Dict[str, Any], tmp_path: Path) -> None:
@@ -608,7 +626,9 @@ def test_merge_from_other_persona_id_remaps_threads_and_keeps_provenance(
     assert (target["home"] / "image" / "pic_1.png.summary.txt").is_file()
     world = sqlite3.connect(target["world_db"])
     try:
-        assert world.execute("SELECT PERSONA_ID FROM task_book WHERE TASK_ID = 'tb-1'").fetchone()[0] == other
+        assert world.execute(
+            "SELECT PERSONA_ID FROM task_book WHERE TASK_ID = ?", (_derived(other, "task_book", "tb-1"),)
+        ).fetchone()[0] == other
     finally:
         world.close()
 
@@ -1131,8 +1151,13 @@ def test_extension_rows_are_owned_by_the_target_and_unlisted_tables_refused(
         owners = dict(world.execute("SELECT CONTENT, PERSONA_ID FROM persona_event_log"))
         assert owners == {"メールが届いた": target["persona_id"], "別の子宛てに見せかけた行": target["persona_id"]}
         # 子表は、同じ取り込みでこのペルソナの行として入った親を指す行だけ
-        assert sorted(world.execute("SELECT id, task_id FROM persona_task_step")) == [("step-1", "task-1")]
-        assert world.execute("SELECT persona_id FROM persona_task WHERE id = 'task-1'").fetchone()[0] == target["persona_id"]
+        newcomer = target["persona_id"]
+        assert sorted(world.execute("SELECT id, task_id FROM persona_task_step")) == [
+            (_derived(newcomer, "persona_task_step", "step-1"), _derived(newcomer, "persona_task", "task-1"))
+        ]
+        assert world.execute(
+            "SELECT persona_id FROM persona_task WHERE id = ?", (_derived(newcomer, "persona_task", "task-1"),)
+        ).fetchone()[0] == newcomer
         # 許可リストに無い表 (ai) は取り込まない
         assert world.execute("SELECT AINAME, SYSTEMPROMPT FROM ai WHERE AIID = ?", (victim,)).fetchone() == ("別の子", "元のまま")
         # addon_message_metadata はこのペルソナのメッセージ宛てだけ
@@ -1375,3 +1400,314 @@ def test_merge_chronicle_two_zip_lv1_over_the_same_messages(tmp_path: Path) -> N
     assert imported == {first.id}
     assert second.id not in imported and upper.id not in imported
     assert result.counts["chronicle_pages"].added == 1
+
+
+# ---------------------------------------------------------------------------
+# 添付: 復元できた添付の uri / path は復元先から組み直す
+# ---------------------------------------------------------------------------
+
+def test_restored_attachment_uri_is_rebuilt_from_the_restored_file(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    bad_uri = "saiverse://image/../CLAUDE.md"
+    bad_path = "../../outside/note.txt"
+    messages = _zjson(source["zip"], "chatlog/messages.json")
+    messages.append({
+        "id": "m-dot", "thread_id": f"{PID}:room_a", "role": "user", "content": "添付",
+        "resource_id": PID, "created_at": "2026-10-10T00:00:00+00:00", "seq": 999,
+        "metadata": {
+            "images": [{"uri": bad_uri, "path": "/elsewhere/CLAUDE.md", "mime_type": "image/png"}],
+            "documents": [{"path": bad_path}],
+        },
+    })
+    index = _zjson(source["zip"], "attachments/index.json")
+    index += [
+        {"ref": bad_uri, "uri": bad_uri, "original_path": None, "mime_type": "image/png",
+         "path": "attachments/image/evil.png", "summary_path": None, "message_ids": ["m-dot"]},
+        {"ref": bad_path, "uri": None, "original_path": bad_path, "mime_type": None,
+         "path": "attachments/documents/note.txt", "summary_path": None, "message_ids": ["m-dot"]},
+    ]
+    crafted = _add_zip_entries(source["zip"], tmp_path / "crafted.zip", {
+        "chatlog/messages.json": messages, "attachments/index.json": index,
+    })
+    with zipfile.ZipFile(crafted, "a") as zf:
+        zf.writestr("attachments/image/evil.png", b"\x89PNG bundled")
+        zf.writestr("attachments/documents/note.txt", b"bundled note")
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, crafted, "new")
+
+    conn = _mem(target)
+    try:
+        raw = conn.execute("SELECT metadata FROM messages WHERE id = 'm-dot'").fetchone()[0]
+    finally:
+        conn.close()
+    meta = json.loads(raw)
+    home: Path = target["home"]
+    assert meta["images"] == [{"uri": "saiverse://image/evil.png", "path": str(home / "image" / "evil.png"),
+                               "mime_type": "image/png"}]
+    assert meta["documents"] == [{"path": str(home / "documents" / "note.txt"),
+                                  "uri": "saiverse://document/note.txt"}]
+    assert ".." not in raw
+    assert (home / "image" / "evil.png").read_bytes() == b"\x89PNG bundled"
+
+
+# ---------------------------------------------------------------------------
+# extensions/saiverse/memory_db/: 書き出す側がこのフォルダへ書く表だけを受ける
+# ---------------------------------------------------------------------------
+
+def test_extensions_memory_db_refuses_common_folder_tables(source: Dict[str, Any], tmp_path: Path) -> None:
+    from saiverse_memory.persona_pack.export import (
+        COMMON_FOLDER_MEMORY_TABLES,
+        NOT_CARRIED_MEMORY_TABLES,
+        is_extension_memory_table,
+    )
+
+    assert not any(is_extension_memory_table(t) for t in COMMON_FOLDER_MEMORY_TABLES | NOT_CARRIED_MEMORY_TABLES)
+    assert is_extension_memory_table("desk_items")
+    smuggled = {
+        "id": "m-smuggled", "thread_id": f"{PID}:room_a", "role": "user", "content": "迂回",
+        "resource_id": PID, "created_at": T0,
+        "metadata": json.dumps({"images": [{"uri": "saiverse://image/../CLAUDE.md", "path": "/etc/passwd"}]}),
+    }
+    crafted = _add_zip_entries(source["zip"], tmp_path / "crafted.zip", {
+        "extensions/saiverse/memory_db/messages.json": [smuggled],
+        "extensions/saiverse/memory_db/message_embeddings.json": [{"message_id": "m1", "vector": "x"}],
+    })
+    target = _make_env(tmp_path / "dst", PID)
+    result = _import(target, crafted, "new")
+    conn = _mem(target)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM messages WHERE id = 'm-smuggled'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 6
+        # 机の上 (extensions の表) はそのまま入る
+        assert conn.execute("SELECT ref FROM desk_items").fetchall() == [("memopedia:1",)]
+    finally:
+        conn.close()
+    assert result.counts["extensions/memory_db/messages"].skipped == 1
+    assert result.counts["extensions/memory_db/messages"].added == 0
+    assert result.counts["extensions/memory_db/message_embeddings"].skipped == 1
+    assert any("memory_db/messages.json is not a table" in w for w in result.warnings)
+
+    # 合流でも同じ警告を出す (合流は extensions/ を取り込まない)
+    other = _make_env(tmp_path / "other", PID)
+    merged = _import(other, crafted, "merge")
+    assert merged.counts["extensions/memory_db/messages"].skipped == 1
+    assert any("memory_db/messages.json is not a table" in w for w in merged.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 再開: 世界側が適用済みなら印だけ消す / 別の ZIP では再開しない
+# ---------------------------------------------------------------------------
+
+def _add_world_life(env: Dict[str, Any]) -> None:
+    """世界側の生活の記録を足す (予定・Track とそのローカルログ・Track に付いたタスク・出来事)。"""
+    from database.models import ActionTrack, Episode, EpisodeInheritance, PersonaSchedule, TrackLocalLog
+
+    pid = env["persona_id"]
+    engine = create_engine(f"sqlite:///{Path(env['world_db']).as_posix()}")
+    with Session(engine) as s:
+        s.add(PersonaSchedule(PERSONA_ID=pid, SCHEDULE_TYPE="periodic", META_PLAYBOOK="meta_auto",
+                              DESCRIPTION="朝の散歩", TIME_OF_DAY="07:00"))
+        s.add(ActionTrack(track_id="track-1", persona_id=pid, track_type="user_conversation", title="会話"))
+        s.add(TrackLocalLog(track_id="track-1", log_id="log-1", log_kind="note"))
+        s.add(PersonaTask(id="task-2", persona_id=pid, title="Track の小目標", track_id="track-1",
+                          active_step_id="step-2"))
+        s.add(PersonaTaskStep(id="step-2", task_id="task-2", position=1, title="はじめの一歩"))
+        s.add(Episode(EPISODE_ID="ep-1", PERSONA_ID=pid, KIND="conversation", STARTED_AT=T0))
+        s.add(Episode(EPISODE_ID="ep-2", PERSONA_ID=pid, KIND="conversation", STARTED_AT=T0 + 1))
+        s.add(EpisodeInheritance(EDGE_ID="edge-1", PERSONA_ID=pid, CHILD_EPISODE_ID="ep-2",
+                                 PARENT_EPISODE_ID="ep-1", LAYER="day", CREATED_AT=T0))
+        s.commit()
+    engine.dispose()
+
+
+def _world_counts(env: Dict[str, Any], persona_id: str) -> Dict[str, int]:
+    world = sqlite3.connect(env["world_db"])
+    try:
+        return {
+            table: world.execute(f'SELECT COUNT(*) FROM "{table}" WHERE "{col}" = ?', (persona_id,)).fetchone()[0]
+            for table, col in (
+                ("persona_schedule", "PERSONA_ID"), ("persona_event_log", "PERSONA_ID"),
+                ("persona_task", "persona_id"), ("action_track", "persona_id"),
+                ("episodes", "PERSONA_ID"), ("episode_inheritance", "PERSONA_ID"),
+                ("task_book", "PERSONA_ID"),
+            )
+        }
+    finally:
+        world.close()
+
+
+def test_resume_after_world_commit_removes_only_the_marker(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    _add_world_life(source)
+    pack = _export(source, tmp_path / "out" / "life.zip")
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    # models.py より古い DB: 表が無くても取り込みが作る
+    world = sqlite3.connect(target["world_db"])
+    world.execute("DROP TABLE persona_pack_imports")
+    world.commit()
+    world.close()
+    marker = target["persona_dir"] / "persona_pack_world_pending.json"
+
+    # 世界側の commit は成功し、印の削除の前に止まった状態を作る
+    monkeypatch.setattr(importer._ImportJob, "remove_pending_marker", lambda self: None)
+    _import(target, pack, "new")
+    monkeypatch.undo()
+    assert marker.is_file()
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert payload["zip_sha256"] == importer._sha256_file(pack)
+    assert payload["import_id"] == importer._import_id(payload["zip_sha256"], target["persona_id"])
+    before = _world_counts(target, target["persona_id"])
+    assert before["persona_schedule"] == 1 and before["persona_event_log"] == 1
+    world = sqlite3.connect(target["world_db"])
+    try:
+        assert world.execute("SELECT IMPORT_ID, PERSONA_ID FROM persona_pack_imports").fetchall() == [
+            (payload["import_id"], target["persona_id"])
+        ]
+    finally:
+        world.close()
+
+    result = _import(target, pack, "merge")
+    assert not marker.exists()
+    assert _world_counts(target, target["persona_id"]) == before
+    assert result.counts["items"].added == 0
+    assert any("already applied" in w for w in result.warnings)
+
+
+def test_marker_of_a_different_zip_of_the_same_persona_is_not_resumed(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    marker = target["persona_dir"] / "persona_pack_world_pending.json"
+    original = importer._ImportJob.commit_world
+
+    def fail(self: Any, world: sqlite3.Connection) -> None:
+        raise sqlite3.OperationalError("disk I/O error (injected)")
+
+    monkeypatch.setattr(importer._ImportJob, "commit_world", fail)
+    with pytest.raises(sqlite3.OperationalError):
+        _import(target, source["zip"], "new", overwrite_profile=True)
+    monkeypatch.setattr(importer._ImportJob, "commit_world", original)
+    marker_text = marker.read_text(encoding="utf-8")
+
+    # 同じペルソナの、別の時点の ZIP
+    conn = _mem(source)
+    _add_message(conn, PID, "m-later", "room_a", "user", "後の話", T0 + 999, {"tags": ["conversation"]})
+    conn.commit()
+    conn.close()
+    later = _export(source, tmp_path / "out" / "later.zip")
+
+    result = _import(target, later, "merge")
+    assert marker.read_text(encoding="utf-8") == marker_text  # 印は残る
+    assert any("does not resume it" in w for w in result.warnings)
+    assert _world_counts(target, target["persona_id"])["persona_event_log"] == 0
+    assert result.counts["items"].added == 0
+    world = sqlite3.connect(target["world_db"])
+    try:
+        # 印の overwrite_profile も使わない
+        assert world.execute("SELECT AINAME FROM ai WHERE AIID = ?", (target["persona_id"],)).fetchone()[0] == "新入り"
+    finally:
+        world.close()
+    # 合流そのものは行われる
+    assert result.counts["messages"].added == 1
+
+    # 正しい ZIP で入れ直せば再開する
+    finished = _import(target, source["zip"], "merge")
+    assert not marker.exists()
+    assert any("resuming the unfinished part" in w for w in finished.warnings)
+    assert _world_counts(target, target["persona_id"])["persona_event_log"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 同じ世界に同じパックから二体: 文字列の主キーを振り直す
+# ---------------------------------------------------------------------------
+
+def test_two_personas_from_the_same_pack_in_one_world_both_get_world_rows(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    _add_world_life(source)
+    pack = _export(source, tmp_path / "out" / "life.zip")
+    t1 = _make_env(tmp_path / "t", "one_city_a", name="一")
+    _import(t1, pack, "new")
+    t2_dir = t1["home"] / "personas" / "two_city_a"
+    t2_dir.mkdir(parents=True)
+    conn = init_db(str(t2_dir / "memory.db"))
+    conn.commit()
+    conn.close()
+    engine = create_engine(f"sqlite:///{Path(t1['world_db']).as_posix()}")
+    with Session(engine) as s:
+        s.add(AI(AIID="two_city_a", HOME_CITYID=1, AINAME="二", PRIVATE_ROOM_ID="two_room", AUTO_COUNT=0))
+        s.add(Building(CITYID=1, BUILDINGID="two_room", BUILDINGNAME="二の部屋"))
+        s.commit()
+    engine.dispose()
+    t2 = {**t1, "persona_id": "two_city_a", "persona_dir": t2_dir, "memory_db": t2_dir / "memory.db"}
+    result = _import(t2, pack, "new")
+
+    expected = {"persona_schedule": 1, "persona_event_log": 1, "persona_task": 2, "action_track": 1,
+                "episodes": 2, "episode_inheritance": 1, "task_book": 1}
+    assert _world_counts(t1, "one_city_a") == expected
+    assert _world_counts(t1, "two_city_a") == expected
+    for table in ("persona_task", "persona_task_step", "action_track", "track_local_log",
+                  "episodes", "episode_inheritance"):
+        assert result.counts[f"extensions/saiverse_db/{table}"].skipped == 0, table
+
+    world = sqlite3.connect(t1["world_db"])
+    try:
+        for pid in ("one_city_a", "two_city_a"):
+            # 親子の参照は振り直した親を指す
+            task_id = _derived(pid, "persona_task", "task-2")
+            track_id, step_id = world.execute(
+                "SELECT track_id, active_step_id FROM persona_task WHERE id = ? AND persona_id = ?", (task_id, pid)
+            ).fetchone()
+            assert track_id == _derived(pid, "action_track", "track-1")
+            assert step_id == _derived(pid, "persona_task_step", "step-2")
+            assert world.execute(
+                "SELECT task_id FROM persona_task_step WHERE id = ?", (step_id,)
+            ).fetchone()[0] == task_id
+            assert world.execute(
+                "SELECT persona_id FROM action_track WHERE track_id = ?", (track_id,)
+            ).fetchone()[0] == pid
+            assert world.execute(
+                "SELECT COUNT(*) FROM track_local_log WHERE track_id = ?", (track_id,)
+            ).fetchone()[0] == 1
+            assert world.execute(
+                "SELECT CHILD_EPISODE_ID, PARENT_EPISODE_ID FROM episode_inheritance WHERE PERSONA_ID = ?", (pid,)
+            ).fetchone() == (_derived(pid, "episodes", "ep-2"), _derived(pid, "episodes", "ep-1"))
+    finally:
+        world.close()
+
+    # 同じペルソナへの再実行 (合流) では二重に登録されない
+    again = _import(t2, pack, "merge")
+    assert again.counts["task_book"].added == 0
+    assert _world_counts(t1, "two_city_a") == expected
+
+
+def test_world_string_key_tables_match_the_models() -> None:
+    from sqlalchemy import Integer
+
+    from saiverse_memory.persona_pack.export import SAIVERSE_DB_TABLE_OWNERS
+    from saiverse_memory.persona_pack.importer import WORLD_STRING_KEY_TABLES
+
+    carried = set(SAIVERSE_DB_TABLE_OWNERS) | {"task_book"}
+    string_pk = {}
+    for table in carried:
+        pk = list(Base.metadata.tables[table].primary_key.columns)
+        if len(pk) == 1 and not isinstance(pk[0].type, Integer):
+            string_pk[table] = pk[0].name
+    assert {t: spec[0] for t, spec in WORLD_STRING_KEY_TABLES.items()} == string_pk
+    for table, (_pk, refs) in WORLD_STRING_KEY_TABLES.items():
+        columns = Base.metadata.tables[table].columns
+        listed = dict(refs)
+        for col, ref_table in refs:
+            assert col in columns, (table, col)
+            assert ref_table in WORLD_STRING_KEY_TABLES, (table, col, ref_table)
+        # ForeignKey で振り直す表の主キーを指す列は全部載っている
+        for fk in Base.metadata.tables[table].foreign_keys:
+            ref_table = fk.column.table.name
+            if ref_table in WORLD_STRING_KEY_TABLES and fk.column.name == WORLD_STRING_KEY_TABLES[ref_table][0]:
+                assert listed.get(fk.parent.name) == ref_table, (table, fk.parent.name)

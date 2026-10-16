@@ -19,6 +19,13 @@ mode:
 (子表は同じ取り込みで入った親の行を指すものだけ、addon_message_metadata は
 取り込み先の memory.db にあるメッセージ宛てのものだけ)。表に無いテーブルは警告して
 取り込まない — ZIP の行が別のペルソナ宛てに書き込まれないようにするため。
+文字列の主キー (WORLD_STRING_KEY_TABLES。task_book の TASK_ID も) は、取り込み先の
+ペルソナ ID と元の値から決まる uuid5 に振り直し、親子の参照の列も同じ写像で
+付け替える — 同じ世界に同じパックから二体目を迎えても主キーが衝突しない。
+
+``extensions/saiverse/memory_db/`` は、書き出す側がこのフォルダへ書く表
+(export.is_extension_memory_table) だけを受ける。共通フォルダの表 (messages など) と
+運ばない表は警告して取り込まない — 共通フォルダ側の検査を通らない行を入れないため。
 
 ``items/`` (mode="new") は世界へ登録する: 取り込み先のペルソナの私室 (ai.PRIVATE_ROOM_ID が
 指す、作成経路が作った building 行) に ZIP の私室の見た目と設定 (ROOM_COPIED_COLUMNS と
@@ -29,9 +36,11 @@ IMAGE_PATH のファイル) を写し、fixture 行をその部屋に入れ、it
 ペルソナへもう一度入れても同じ ID になり、二重に登録されない。
 
 添付の参照 (message metadata の images / documents / media) のうち、ZIP から実体を
-復元できたものは復元先の uri / path に書き換え、復元できなかったものは path を None に
-し、uri は ``saiverse://<種類>/<ファイル名>`` の形のときだけ残す。ZIP が書いた
-ホスト側のパスをそのまま取り込み先に残すと、再エクスポートでそのパスのファイル
+復元できたものは、元の uri / path を引き継がず復元先のフォルダの種類と実際の
+ファイル名から uri / path を組み直し、復元できなかったものは path を None にし、uri は
+``saiverse://<種類>/<ファイル名>`` の形 (ファイル名に区切りや ``..`` が無い) のときだけ
+残す。ZIP が書いたホスト側のパスや ``saiverse://image/../x`` のような uri を取り込み先に
+残すと、再エクスポートや会話のメディア読み込みが共有メディアフォルダの外のファイル
 (本体 DB など) を読みに行くため。
 
 ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を継承する:
@@ -47,7 +56,7 @@ ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を
 
 - 追記型 (messages / threads / stelis_threads / 手帳 / clips / purpose_tags /
   task_book) は ID (UUID・uuid 列・TASK_ID) で照合し、無いものだけ挿入する。
-  既にあるものは変更しない。
+  既にあるものは変更しない。task_book の TASK_ID は振り直した値 (上の uuid5) で照合する。
 - memopedia_pages は id で照合し、本文 (content) が違い、かつ ZIP 側の
   updated_at が新しいときだけ上書きする。上書き前の本文は
   memopedia_page_edit_history に before_* として記録する (rollback_page で戻せる)。
@@ -77,13 +86,19 @@ MAX+1 から振り直し、元の番号を行の metadata に ``original_short_i
 片側だけ commit された取り込みの再開: 二つの DB の commit は別々なので、memory.db の
 commit 後に saiverse.db の commit が失敗すると片側が残る。mode="new" は memory.db を
 commit する前にペルソナフォルダへ印 (export.WORLD_PENDING_MARKER。manifest の
-persona_id・format・version、取り込みの識別子、overwrite_profile) を書き、saiverse.db の
-commit が成功したら消す。印が残ったペルソナへ同じパック (manifest の persona_id が
-一致) を mode="merge" で取り込むと、合流の工程に加えて mode="new" の世界側の工程
-(extensions/saiverse/saiverse_db/・items/・印に記録した overwrite_profile による
-profile/) を行い、saiverse.db の commit が成功したら印を消す。task_book は合流でも
-入る。memory.db 側とファイルは合流の照合 (UUID・同じ中身のファイルの再利用) で
-二重にならない。
+persona_id・format・version、ZIP 全体の sha256 (zip_sha256)、取り込みの識別子
+(import_id = zip_sha256 と取り込み先のペルソナ ID から決まる値)、overwrite_profile) を
+書き、saiverse.db の commit が成功したら消す。世界側の工程は、同じトランザクションで
+saiverse.db の persona_pack_imports に import_id を書く。印が残ったペルソナへ同じ
+パック (manifest の persona_id と、zip_sha256 / import_id が一致) を mode="merge" で
+取り込むと、合流の工程に加えて mode="new" の世界側の工程 (extensions/saiverse/
+saiverse_db/・items/・印に記録した overwrite_profile による profile/) を行い、
+saiverse.db の commit が成功したら印を消す。persona_pack_imports に import_id が既に
+あれば (世界側の commit 後、印を消す前に止まった) 世界側の工程はやり直さず印だけ
+消す — 整数の主キーを振り直す表は INSERT OR IGNORE では二重登録を防げないため。
+persona_id は一致するが zip_sha256 / import_id が違う ZIP では再開せず、印を残して
+警告する。task_book は合流でも入る。memory.db 側とファイルは合流の照合 (UUID・同じ
+中身のファイルの再利用) で二重にならない。
 
 embeddings は運ばれてこない。取り込んだ message のうち content が空白だけでない
 ものは、同じトランザクションで空のベクトル行 (``storage.DEFERRED_VECTOR``) を
@@ -102,10 +117,11 @@ import logging
 import os
 import re
 import sqlite3
+import time
 import uuid
 import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .export import (
@@ -120,6 +136,7 @@ from .export import (
     SAIVERSE_DB_TABLE_OWNERS,
     WORLD_PENDING_MARKER,
     _attachment_key,
+    is_extension_memory_table,
 )
 from .format import FORMAT_NAME, MANIFEST_NAME, RAW_TEXT_MARKER, decode_value, iso_to_epoch
 
@@ -161,9 +178,45 @@ ROOM_COPIED_COLUMNS: Tuple[str, ...] = (
     "SHOW_MOVEMENT_NOTICES",
 )
 
-# items/ で振り直す ITEM_ID / FIXTURE_ID の uuid5 の名前空間 (値は固定。変えると、
+# items/ で振り直す ITEM_ID / FIXTURE_ID と WORLD_STRING_KEY_TABLES の主キーの
+# uuid5 の名前空間 (値は固定。変えると、
 # 変える前に取り込んだ行を同じパックの再取り込みで照合できなくなる)
 _ID_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, f"saiverse://{FORMAT_NAME}")
+
+# 取り込みで振り直す saiverse.db の文字列の主キーと、同じ写像で付け替える参照の列。
+# {表: (主キーの列, ((参照の列, 参照先の表), ...))}。値は _ImportJob.world_key
+# (= derived_id(表, 元の値)。取り込み先のペルソナ ID と元の値から決まる uuid5) に
+# 置き換える。同じペルソナへの再実行では同じ値になり二重に登録されず、同じ世界に
+# 同じパックから別のペルソナを迎えても主キーが衝突しない。
+# 表と列は export.SAIVERSE_DB_TABLE_OWNERS の表と task_book のうち、主キーが文字列の
+# ものと database/models.py の定義 (ForeignKey と、参照先を持つ文字列の列) から決めた
+# (テストで models.py と突き合わせている)。整数の主キーは stage_ext_saiverse が
+# 取り込み先の連番で振り直す。persona_task.note_id は死んだ列 (models.py) なので
+# 付け替えない。
+WORLD_STRING_KEY_TABLES: Dict[str, Tuple[str, Tuple[Tuple[str, str], ...]]] = {
+    "persona_task": ("id", (("active_step_id", "persona_task_step"), ("track_id", "action_track"))),
+    "persona_task_step": ("id", (("task_id", "persona_task"),)),
+    "persona_task_history": ("id", (("task_id", "persona_task"), ("step_id", "persona_task_step"))),
+    "episodes": ("EPISODE_ID", ()),
+    "episode_inheritance": (
+        "EDGE_ID", (("CHILD_EPISODE_ID", "episodes"), ("PARENT_EPISODE_ID", "episodes")),
+    ),
+    "action_track": ("track_id", ()),
+    "track_local_log": ("log_id", (("track_id", "action_track"),)),
+    "meta_judgment_log": ("judgment_id", (("track_at_judgment_id", "action_track"),)),
+    "task_book": ("TASK_ID", ()),
+}
+
+# 世界側の工程の適用済み記録の表。正典は database/models.py の PersonaPackImport
+# (起動時のマイグレーションが作る)。ここはそれより古い DB に備えた自衛で、
+# 列を変えるときは models.py と揃える。
+_IMPORTS_TABLE = "persona_pack_imports"
+_IMPORTS_TABLE_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {_IMPORTS_TABLE} ("
+    "IMPORT_ID VARCHAR(64) NOT NULL PRIMARY KEY, "
+    "PERSONA_ID VARCHAR(255) NOT NULL, "
+    "APPLIED_AT INTEGER NOT NULL)"
+)
 
 _EDIT_SOURCE = "persona_pack_import"
 _CATEGORY_CORE = "core"           # sai_memory/core_memory.py の CATEGORY_CORE
@@ -375,25 +428,44 @@ def _norm(path: Path) -> str:
     return os.path.normcase(os.path.abspath(str(path)))
 
 
+def _import_id(zip_sha256: str, target_persona_id: str) -> str:
+    """取り込みの識別子: ZIP 全体の sha256 と取り込み先のペルソナ ID から決まる sha256。
+
+    印 (WORLD_PENDING_MARKER) の import_id と persona_pack_imports.IMPORT_ID に使う。
+    """
+    return hashlib.sha256(f"{zip_sha256}\n{target_persona_id}".encode("utf-8")).hexdigest()
+
+
+# saiverse://<種類>/ の接頭辞を共有メディアフォルダ名から引く (_MEDIA_URI_DIRS の逆)
+_URI_PREFIX_BY_DIR: Dict[str, str] = {dirname: prefix for prefix, dirname in _MEDIA_URI_DIRS}
+
+
+def _is_plain_file_name(name: str) -> bool:
+    """name が区切り・``..``・ドライブ指定・前後の空白を含まないファイル名そのものか。"""
+    return (
+        bool(name)
+        and name not in (".", "..")
+        and "/" not in name
+        and "\\" not in name
+        and ":" not in name
+        and "\x00" not in name
+        and name.strip() == name
+        and PurePosixPath(name).name == name
+        and PureWindowsPath(name).name == name
+    )
+
+
 def _safe_media_uri(uri: Any) -> bool:
-    """``saiverse://<種類>/<ファイル名>`` で、ファイル名が区切りや ``..`` を含まない形か。
+    """``saiverse://<種類>/<ファイル名>`` で、ファイル名がファイル名そのもの (_is_plain_file_name) か。
 
     この形の uri は取り込み先の共有メディアフォルダ直下の同名ファイルだけを指す
-    (saiverse/media_utils.py の resolve_media_uri)。
+    (saiverse/media_utils.py の resolve_media_uri はファイル名をフォルダに連結する)。
     """
     if not isinstance(uri, str):
         return False
     for prefix, _dirname in _MEDIA_URI_DIRS:
         if uri.startswith(prefix):
-            name = uri[len(prefix):]
-            return (
-                bool(name)
-                and name not in (".", "..")
-                and "/" not in name
-                and "\\" not in name
-                and ":" not in name
-                and name.strip() == name
-            )
+            return _is_plain_file_name(uri[len(prefix):])
     return False
 
 
@@ -437,6 +509,9 @@ class _PackData:
     private_room: Optional[Dict[str, Any]] = None
     items: Optional[Dict[str, Any]] = None
     ext_memory_tables: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    # extensions/saiverse/memory_db/ にあったが、書き出す側がこのフォルダへ書かない表
+    # (export.is_extension_memory_table が False) の行数。取り込まない
+    ext_memory_refused: Dict[str, int] = field(default_factory=dict)
     ext_saiverse_tables: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     ext_persona_files: List[Tuple[str, PurePosixPath]] = field(default_factory=list)
 
@@ -513,7 +588,11 @@ def _load_pack(reader: _PackReader) -> _PackData:
                     raise ValueError(f"persona pack: unexpected extensions file {name!r}")
                 # 合流でも形を検査する (不正なパックは書き込み前に拒否する)。合流は
                 # chunk_page_edges をここから取り込み、残りの表も件数を内訳に載せる
-                target[table[:-5]] = reader.rows(name)
+                rows = reader.rows(name)
+                if target is pack.ext_memory_tables and not is_extension_memory_table(table[:-5]):
+                    pack.ext_memory_refused[table[:-5]] = len(rows)
+                    continue
+                target[table[:-5]] = rows
     return pack
 
 
@@ -581,10 +660,9 @@ def _load_items(reader: _PackReader, pack: _PackData) -> None:
 
 @dataclass
 class _Relocation:
-    """添付 1 件の取り込み先。"""
+    """添付 1 件の取り込み先 (共有メディアフォルダの中のファイル)。"""
 
     dest: Path
-    renamed: bool
 
 
 @dataclass
@@ -642,6 +720,7 @@ def import_persona_pack(
     if not memory_db_path.is_file():
         raise FileNotFoundError(f"memory.db not found for persona {target_persona_id}: {memory_db_path}")
 
+    zip_sha256 = _sha256_file(zip_path)
     with zipfile.ZipFile(zip_path) as zf:
         check_uncompressed_size(zf)
         reader = _PackReader(zf)
@@ -652,7 +731,7 @@ def import_persona_pack(
         job = _ImportJob(
             reader=reader, pack=pack, result=result, mode=mode,
             target=target_persona_id, home=home, persona_dir=persona_dir,
-            overwrite_profile=overwrite_profile,
+            overwrite_profile=overwrite_profile, zip_sha256=zip_sha256,
         )
         job.run(memory_db_path, saiverse_db_path)
 
@@ -704,6 +783,7 @@ class _ImportJob:
         home: Path,
         persona_dir: Path,
         overwrite_profile: bool,
+        zip_sha256: str,
     ) -> None:
         self.reader = reader
         self.pack = pack
@@ -732,7 +812,11 @@ class _ImportJob:
         # 片側だけ commit された mode="new" の取り込みを、この合流で再開するか
         # (モジュール docstring)。True なら世界側の mode="new" の工程も行う
         self.resume_world = False
+        # 取り込みが成功したら印を消すか (mode="new"、再開、世界側が適用済みの印)
+        self.clear_marker = mode == "new"
         self.marker_path = persona_dir / WORLD_PENDING_MARKER
+        self.zip_sha256 = zip_sha256
+        self.import_id = _import_id(zip_sha256, target)
 
     @property
     def world_new(self) -> bool:
@@ -805,6 +889,33 @@ class _ImportJob:
             found.update(r[0] for r in rows)
         return found
 
+    def existing_keys_of_target(
+        self, conn: sqlite3.Connection, table: str, column: str, owner_column: str, keys: Iterable[Any]
+    ) -> Set[Any]:
+        """existing_keys のうち、owner_column が取り込み先のペルソナ ID の行のもの。"""
+        keys = [k for k in dict.fromkeys(keys) if k is not None]
+        found: Set[Any] = set()
+        for i in range(0, len(keys), _CHUNK):
+            part = keys[i:i + _CHUNK]
+            rows = conn.execute(
+                f"SELECT {_quote(column)} FROM {_quote(table)} "
+                f"WHERE {_quote(owner_column)} = ? "
+                f"AND {_quote(column)} IN ({', '.join('?' for _ in part)})",
+                [self.target, *part],
+            ).fetchall()
+            found.update(r[0] for r in rows)
+        return found
+
+    def world_key(self, table: str, value: Any) -> Any:
+        """WORLD_STRING_KEY_TABLES の表 table の元の主キー value を、取り込み先の値にする。
+
+        空でない文字列だけを derived_id(table, value) に置き換え、それ以外 (None など) は
+        そのまま返す。参照の列も参照先の表の名前で同じ関数を通すので、親子の対応が保たれる。
+        """
+        if not isinstance(value, str) or not value:
+            return value
+        return self.derived_id(table, value)
+
     def remap_thread_id(self, thread_id: Any) -> Any:
         """スレッド ID の前半 (ペルソナ ID の部分) を取り込み先に置き換える。
 
@@ -862,7 +973,7 @@ class _ImportJob:
                         f"{self.target} has {n_messages}. Use mode='merge'."
                     )
             else:
-                self.check_pending_marker()
+                self.check_pending_marker(world)
             memory_committed = False
             try:
                 memory.execute("BEGIN IMMEDIATE")
@@ -879,6 +990,7 @@ class _ImportJob:
                 if self.world_new:
                     self.stage_ext_saiverse(world)
                     self.stage_items(world)
+                    self.record_world_applied(world)
                 self.stage_day_reports()
                 if self.mode == "new":
                     self.stage_persona_dir_files()
@@ -907,7 +1019,7 @@ class _ImportJob:
                         self.target, WORLD_PENDING_MARKER,
                     )
                 raise
-            if self.world_new:
+            if self.clear_marker:
                 self.remove_pending_marker()
         finally:
             world.close()
@@ -926,7 +1038,8 @@ class _ImportJob:
             "persona_id": self.source,
             "format": FORMAT_NAME,
             "version": self.pack.version,
-            "import_id": uuid.uuid4().hex,
+            "zip_sha256": self.zip_sha256,
+            "import_id": self.import_id,
             "overwrite_profile": self.overwrite_profile,
         }
         tmp = self.marker_path.with_name(self.marker_path.name + ".tmp")
@@ -934,8 +1047,16 @@ class _ImportJob:
         os.replace(tmp, self.marker_path)
         self.created_files.append(self.marker_path)
 
-    def check_pending_marker(self) -> None:
-        """mode="merge": 印があり、同じパック (persona_id 一致) なら世界側の工程を再開する。"""
+    def check_pending_marker(self, world: sqlite3.Connection) -> None:
+        """mode="merge": 印があり、同じパックなら世界側の工程を再開する。
+
+        同じパックの判定は、印の persona_id が manifest の persona_id と、印の
+        zip_sha256 / import_id がこの ZIP とこのペルソナから決まる値と一致すること。
+        一致しなければ再開せず (印の overwrite_profile も使わない)、印を残して警告する
+        — 利用者が正しい ZIP で入れ直せるように。一致して、persona_pack_imports に
+        import_id があれば (世界側は commit 済みで印だけ残った)、世界側の工程は
+        やり直さずに印だけ消す。
+        """
         if not self.marker_path.is_file():
             return
         try:
@@ -952,12 +1073,43 @@ class _ImportJob:
                 f"persona; this pack ({self.source!r}) does not resume it"
             )
             return
+        if marker.get("zip_sha256") != self.zip_sha256 or marker.get("import_id") != self.import_id:
+            self.warn(
+                "an earlier import of a different file of this persona's pack is unfinished in this "
+                "persona; this file does not resume it. Import the same file again with merge to "
+                f"finish it ({WORLD_PENDING_MARKER} is kept)"
+            )
+            return
+        self.clear_marker = True
+        if self.world_applied(world):
+            self.warn(
+                "the world part of an earlier new-persona import of this pack was already applied; "
+                f"only {WORLD_PENDING_MARKER} is removed"
+            )
+            return
         self.resume_world = True
         if marker.get("overwrite_profile") is True:
             self.overwrite_profile = True
         self.warn(
             "resuming the unfinished part of an earlier new-persona import of this pack "
             "(tasks, schedules, event log, items and private room)"
+        )
+
+    def world_applied(self, world: sqlite3.Connection) -> bool:
+        """persona_pack_imports にこの取り込みの import_id があるか (世界側が commit 済みか)。"""
+        if not self.table_exists(world, _IMPORTS_TABLE):
+            return False
+        return world.execute(
+            f"SELECT 1 FROM {_IMPORTS_TABLE} WHERE IMPORT_ID = ?", (self.import_id,)
+        ).fetchone() is not None
+
+    def record_world_applied(self, world: sqlite3.Connection) -> None:
+        """世界側の工程を行ったことを、同じトランザクションで persona_pack_imports に書く。"""
+        world.execute(_IMPORTS_TABLE_DDL)
+        world.execute(
+            f"INSERT OR REPLACE INTO {_IMPORTS_TABLE} (IMPORT_ID, PERSONA_ID, APPLIED_AT) "
+            "VALUES (?, ?, ?)",
+            (self.import_id, self.target, int(time.time())),
         )
 
     def remove_pending_marker(self) -> None:
@@ -1189,7 +1341,7 @@ class _ImportJob:
             if summary_zip is not None and summary_zip not in self.reader.names:
                 summary_zip = None
             dest, reused = self.choose_media_dest(dest_dir, name, data_hash, summary_zip is not None)
-            self.relocations[ref] = _Relocation(dest=dest, renamed=dest.name != name)
+            self.relocations[ref] = _Relocation(dest=dest)
             if reused:
                 counts.skipped += 1
             else:
@@ -1222,8 +1374,11 @@ class _ImportJob:
     def relocate_metadata(self, metadata: Any) -> Any:
         """metadata の添付参照の uri / path を取り込み先に合わせる (モジュール docstring)。
 
-        ZIP から実体を復元した参照は復元先の uri / path に書き換える。復元しなかった
-        参照は path を None にし、uri は :func:`_safe_media_uri` の形のときだけ残す。
+        ZIP から実体を復元した参照は、元の uri / path を引き継がず、復元先の共有メディア
+        フォルダの種類と実際のファイル名から uri (``saiverse://<種類>/<ファイル名>``) と
+        path (復元先の絶対パス) を組み直す。元の uri が ``saiverse://image/../x`` の
+        ような形でも、取り込み先にはその文字列が残らない。復元しなかった参照は
+        path を None にし、uri は :func:`_safe_media_uri` の形のときだけ残す。
         """
         if not isinstance(metadata, dict):
             return metadata
@@ -1240,13 +1395,8 @@ class _ImportJob:
                     uri = entry.get("uri")
                     path = entry.get("path")
                     if reloc is not None:
-                        if reloc.renamed and isinstance(uri, str):
-                            for prefix, _dirname in _MEDIA_URI_DIRS:
-                                if uri.startswith(prefix):
-                                    entry["uri"] = prefix + reloc.dest.name
-                                    break
-                        if isinstance(path, str) and path.strip():
-                            entry["path"] = str(reloc.dest)
+                        entry["uri"] = _URI_PREFIX_BY_DIR[reloc.dest.parent.name] + reloc.dest.name
+                        entry["path"] = str(reloc.dest)
                     else:
                         if path is not None:
                             entry["path"] = None
@@ -1706,17 +1856,27 @@ class _ImportJob:
             counts.skipped += len(rows)
             self.warn("saiverse.db has no task_book table; task_book skipped")
             return
-        present = self.existing_keys(world, "task_book", "TASK_ID", (r["TASK_ID"] for r in rows))
-        present_idem = self.existing_keys(world, "task_book", "IDEM_KEY", (r.get("IDEM_KEY") for r in rows))
+        # TASK_ID は WORLD_STRING_KEY_TABLES の写像で振り直した値で照合する。加えて、
+        # 元の TASK_ID の行が取り込み先のペルソナにあるもの (ファイルごと複製した
+        # 環境など) と、取り込み先のペルソナに同じ IDEM_KEY があるもの
+        # (uq_task_book_idem はペルソナごとの一意) も同じ約束として扱う。
+        mapped = {r["TASK_ID"]: self.world_key("task_book", r["TASK_ID"]) for r in rows}
+        present = self.existing_keys(world, "task_book", "TASK_ID", mapped.values())
+        own_original = self.existing_keys_of_target(world, "task_book", "TASK_ID", "PERSONA_ID", mapped)
+        present_idem = self.existing_keys_of_target(
+            world, "task_book", "IDEM_KEY", "PERSONA_ID", (r.get("IDEM_KEY") for r in rows)
+        )
         for row in rows:
             idem = row.get("IDEM_KEY")
-            if row["TASK_ID"] in present or (idem and idem in present_idem):
+            new_id = mapped[row["TASK_ID"]]
+            if new_id in present or row["TASK_ID"] in own_original or (idem and idem in present_idem):
                 counts.skipped += 1
                 continue
             decoded = _decode_row(row, "task_book")
+            decoded["TASK_ID"] = new_id
             decoded["PERSONA_ID"] = self.target
             self.insert(world, "task_book", decoded)
-            present.add(row["TASK_ID"])
+            present.add(new_id)
             if idem:
                 present_idem.add(idem)
             counts.added += 1
@@ -1805,7 +1965,18 @@ class _ImportJob:
 
     # --- extensions/ と items/ (mode="new" のみ) ------------------------------------
 
+    def report_refused_ext_memory_tables(self) -> None:
+        """extensions/saiverse/memory_db/ の受けない表 (_PackData.ext_memory_refused) を警告してスキップ件数に載せる。"""
+        for table, n_rows in sorted(self.pack.ext_memory_refused.items()):
+            self.result.count(f"extensions/memory_db/{table}").skipped += n_rows
+            self.warn(
+                f"extensions/saiverse/memory_db/{table}.json is not a table a persona pack "
+                f"writes to that folder; {n_rows} row(s) not imported"
+            )
+
     def stage_ext_memory(self, conn: sqlite3.Connection) -> None:
+        """extensions/saiverse/memory_db/ を取り込む (export.is_extension_memory_table の表だけ)。"""
+        self.report_refused_ext_memory_tables()
         for table, rows in sorted(self.pack.ext_memory_tables.items()):
             counts = self.result.count(f"extensions/memory_db/{table}")
             if not rows:
@@ -1834,7 +2005,9 @@ class _ImportJob:
         ZIP の値によらず取り込み先のペルソナ ID にする。子表 ("parent") は、親
         テーブルの行のうち ZIP にあって、取り込み先でこのペルソナの行になっているもの
         (今回入れた行と、前の取り込みで入った行) を指す行だけ。addon_message_metadata
-        ("message") は self.message_ids 宛ての行だけ。
+        ("message") は self.message_ids 宛ての行だけ。文字列の主キーと参照の列は
+        WORLD_STRING_KEY_TABLES の写像で振り直し (decode_world_row)、単一列の整数の
+        主キーは取り込み先の連番で振り直す。
         """
         pack_tables = self.pack.ext_saiverse_tables
         for table in sorted(set(pack_tables) - set(SAIVERSE_DB_TABLE_OWNERS)):
@@ -1864,8 +2037,13 @@ class _ImportJob:
             if rule[0] == "parent":
                 parent_table, parent_key = rule[2], rule[3]
                 parent_owner = SAIVERSE_DB_TABLE_OWNERS[parent_table][1]
+                # 親の主キーが振り直す列なら、取り込み先の値で照合する (子の参照の列も
+                # 同じ写像で付け替えてから比べる)
+                parent_rekeyed = WORLD_STRING_KEY_TABLES.get(parent_table, ("",))[0] == parent_key
                 zip_parents = {
-                    decode_value(r.get(parent_key)) for r in pack_tables.get(parent_table, [])
+                    self.world_key(parent_table, decode_value(r.get(parent_key))) if parent_rekeyed
+                    else decode_value(r.get(parent_key))
+                    for r in pack_tables.get(parent_table, [])
                 }
                 allowed = set()
                 if zip_parents and self.table_exists(world, parent_table):
@@ -1898,9 +2076,7 @@ class _ImportJob:
                     ).fetchone()
                     next_pk = int(top) + 1
             for row in rows:
-                decoded = {
-                    k: self.remap_exact(decode_value(v)) for k, v in row.items() if k != pk_col
-                }
+                decoded = self.decode_world_row(table, row, skip=pk_col)
                 if rule[0] == "owner":
                     decoded[column] = self.target
                 elif decoded.get(column) not in allowed:
@@ -1920,6 +2096,27 @@ class _ImportJob:
                     f"extensions/saiverse_db/{table}: {refused} row(s) not imported; their "
                     f"{column} does not point to this persona's imported rows"
                 )
+
+    def decode_world_row(
+        self, table: str, row: Dict[str, Any], *, skip: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """extensions/saiverse/saiverse_db/ の 1 行を取り込み先の値にする (列 skip は落とす)。
+
+        WORLD_STRING_KEY_TABLES の主キーと参照の列は world_key で振り直し、それ以外の
+        列は remap_exact (元のペルソナ ID・既知のスレッド ID の置き換え) を通す。
+        """
+        key_cols: Dict[str, str] = {}
+        spec = WORLD_STRING_KEY_TABLES.get(table)
+        if spec is not None:
+            key_cols[spec[0]] = table
+            key_cols.update(dict(spec[1]))
+        out: Dict[str, Any] = {}
+        for key, value in row.items():
+            if key == skip:
+                continue
+            value = decode_value(value)
+            out[key] = self.world_key(key_cols[key], value) if key in key_cols else self.remap_exact(value)
+        return out
 
     def stage_persona_dir_files(self) -> None:
         files = self.pack.ext_persona_files
@@ -1989,7 +2186,10 @@ class _ImportJob:
         return f"{media_dir}/{dest.name}"
 
     def derived_id(self, kind: str, source_id: str) -> str:
-        """取り込み先のペルソナと元の ID から決まる ITEM_ID / FIXTURE_ID (uuid5)。"""
+        """取り込み先のペルソナと元の ID から決まる ID (uuid5)。
+
+        kind は ``"item"`` / ``"fixture"`` か、WORLD_STRING_KEY_TABLES の表の名前。
+        """
         return str(uuid.uuid5(_ID_NAMESPACE, f"{self.target}/{kind}/{source_id}"))
 
     def restore_private_room(self, world: sqlite3.Connection, room_id: str, counts: ImportCounts) -> None:
@@ -2248,6 +2448,7 @@ class _ImportJob:
                 self.result.count("items").skipped += n_items
             for table, rows in pack.ext_saiverse_tables.items():
                 self.result.count(f"extensions/saiverse_db/{table}").skipped += len(rows)
+        self.report_refused_ext_memory_tables()
         for table, rows in pack.ext_memory_tables.items():
             if table in self._merged_ext_tables:
                 continue

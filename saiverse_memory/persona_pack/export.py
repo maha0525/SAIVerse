@@ -123,6 +123,25 @@ NOT_CARRIED_MEMORY_TABLES = frozenset({
     "embed_metadata",
 })
 
+# 共通フォルダ (chatlog/ knowledge/ journal/) へ写すテーブル。
+COMMON_FOLDER_MEMORY_TABLES = frozenset(CHATLOG_TABLES + KNOWLEDGE_TABLES + JOURNAL_MEMORY_TABLES)
+
+
+def is_extension_memory_table(table: str) -> bool:
+    """memory.db の table を extensions/saiverse/memory_db/ へ書き出すか。
+
+    共通フォルダへ写すテーブル (COMMON_FOLDER_MEMORY_TABLES)・運ばないテーブル
+    (NOT_CARRIED_MEMORY_TABLES)・SQLite の内部テーブル (``sqlite_`` で始まる) 以外の全部。
+    importer.py もこの関数で extensions/saiverse/memory_db/ から受ける表を決める —
+    共通フォルダの表をこのフォルダから挿すと、共通フォルダ側の検査 (添付の参照の
+    書き換えなど) を通らない行が入るため。
+    """
+    return not (
+        table in COMMON_FOLDER_MEMORY_TABLES
+        or table in NOT_CARRIED_MEMORY_TABLES
+        or table.startswith("sqlite_")
+    )
+
 # epoch 秒の列 (ISO 8601 に変換して書く) と JSON 文字列の列 (展開して書く)。
 # 共通フォルダへ写すテーブルにだけ適用する。extensions/ の機械的な書き出しは
 # 元の値のまま。
@@ -771,11 +790,10 @@ def _write_memory_db(
             )
 
     # extensions/saiverse/memory_db/ (残り全部)
-    assigned = set(CHATLOG_TABLES) | set(KNOWLEDGE_TABLES) | set(JOURNAL_MEMORY_TABLES)
     for table in tables:
-        if table in assigned:
+        if table in COMMON_FOLDER_MEMORY_TABLES:
             continue
-        if table in NOT_CARRIED_MEMORY_TABLES or table.startswith("sqlite_"):
+        if not is_extension_memory_table(table):
             result.not_carried_tables.append(table)
             continue
         writer.write_json_array(

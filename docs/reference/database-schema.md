@@ -7,7 +7,7 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 `~/.saiverse/user_data/database/saiverse.db`。概念的な位置づけは
 [concepts/](../concepts/README.md) 各ページを参照。
 
-**テーブル数**: 52
+**テーブル数**: 53
 
 ## addon_config
 
@@ -95,6 +95,14 @@ SAIVerse の全テーブル・カラム定義（自動生成）。SQLite。本�
 | `NODE_TYPE` | VARCHAR(64) | — |  |
 | `PLAYBOOK_NAME` | VARCHAR(255) | — |  |
 | `CATEGORY` | VARCHAR(64) | — |  |
+
+## persona_pack_imports
+
+| カラム | 型 | 制約 | 説明 |
+|---|---|---|---|
+| `IMPORT_ID` | VARCHAR(64) | PK, NOT NULL |  |
+| `PERSONA_ID` | VARCHAR(255) | NOT NULL |  |
+| `APPLIED_AT` | INTEGER | NOT NULL |  |
 
 ## phenomenon_rule
 
