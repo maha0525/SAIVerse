@@ -565,6 +565,62 @@ def test_merge_twice_changes_nothing(diverged: Dict[str, Any]) -> None:
     assert _dump(b) == before
 
 
+def test_merged_activity_closed_later_is_not_revived_by_reimport(
+    diverged: Dict[str, Any], tmp_path: Path
+) -> None:
+    """同名合流の対応は memory.db に残り、合流先を閉じた後の再取り込みで空の活動を増やさない。"""
+    from saiverse_memory.persona_pack.export import NOT_CARRIED_MEMORY_TABLES
+    from saiverse_memory.persona_pack.importer import _ACTIVITY_MERGES_TABLE
+
+    a, b = diverged["a"], diverged["b"]
+    conn = _mem(a)
+    try:
+        (a_walk_uuid,) = conn.execute("SELECT uuid FROM activities WHERE name = '散歩'").fetchone()
+    finally:
+        conn.close()
+    _import(b, a["zip2"], "merge")
+    conn = _mem(b)
+    try:
+        ((walk_id, walk_uuid),) = conn.execute(
+            "SELECT id, uuid FROM activities WHERE name = '散歩'"
+        ).fetchall()
+        assert a_walk_uuid != walk_uuid
+        assert conn.execute(
+            f"SELECT ORIGIN_UUID, ACTIVITY_UUID FROM {_ACTIVITY_MERGES_TABLE}"
+        ).fetchall() == [(a_walk_uuid, walk_uuid)]
+        # 取り込み先の利用者が合流先を閉じる
+        conn.execute(
+            "UPDATE activities SET status = 'closed', closed_at = ? WHERE id = ?", (T0 + 900, walk_id)
+        )
+        conn.commit()
+        activities_before = conn.execute("SELECT COUNT(*) FROM activities").fetchone()[0]
+        memos_before = conn.execute("SELECT COUNT(*) FROM memos").fetchone()[0]
+    finally:
+        conn.close()
+
+    again = _import(b, a["zip2"], "merge")
+    assert again.counts["activities"].added == 0
+    assert again.counts["memos"].added == 0
+    conn = _mem(b)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM activities").fetchone()[0] == activities_before
+        assert conn.execute("SELECT COUNT(*) FROM memos").fetchone()[0] == memos_before
+        assert conn.execute(
+            "SELECT id, status FROM activities WHERE name = '散歩'"
+        ).fetchall() == [(walk_id, "closed")]
+        assert conn.execute(
+            "SELECT activity_id FROM memos WHERE text = 'A で歩いた'"
+        ).fetchall() == [(walk_id,)]
+    finally:
+        conn.close()
+
+    # 対応は取り込み先のローカルの事実なので書き出さない
+    assert _ACTIVITY_MERGES_TABLE in NOT_CARRIED_MEMORY_TABLES
+    out = _export(b, tmp_path / "out" / "b_after_merge.zip")
+    with zipfile.ZipFile(out) as zf:
+        assert not any(_ACTIVITY_MERGES_TABLE in n for n in zf.namelist())
+
+
 def test_merge_after_new_import_of_same_pack_changes_nothing(source: Dict[str, Any], tmp_path: Path) -> None:
     target = _make_env(tmp_path / "dst", PID)
     _import(target, source["zip"], "new")
@@ -2564,6 +2620,53 @@ def test_profile_image_uploaded_through_the_media_api_round_trips(
     assert Path(appearance).parent == dst_home / "user_data" / "icons"
     assert Path(appearance).read_bytes() == b"\x89PNG uploaded appearance"
     assert avatar_path_to_url(appearance) == "/api/static/user_icons/uploaded_look.png"
+
+
+def test_private_room_image_uploaded_through_the_media_api_round_trips(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """部屋の編集画面の ImageUpload が保存する /api/media/images/<名前> の私室の画像も運ばれ、
+    取り込み後に同じ形の URL で指し、読み手 (media_utils._resolve_building_image) が実ファイルに解決する。"""
+    from sqlalchemy.orm import sessionmaker
+
+    import database.session
+    from saiverse.media_utils import _resolve_building_image
+    from saiverse_memory.persona_pack.export import _resolve_stored_path
+
+    home: Path = source["home"]
+    world = sqlite3.connect(source["world_db"])
+    world.execute(
+        "UPDATE building SET IMAGE_PATH = ? WHERE BUILDINGID = ?",
+        ("/api/media/images/room.png", source["room_id"]),
+    )
+    world.commit()
+    world.close()
+    pack = _export(source, tmp_path / "out" / "room_url.zip")
+    assert _room_view(pack)["image"] == b"\x89PNG room image"
+    # URL の名前は区切りを含まないファイル名だけ受ける (image/ の外を指させない)
+    assert _resolve_stored_path("/api/media/images/../user_data/database/saiverse.db", home) is None
+    assert _resolve_stored_path("/api/media/images/missing.png", home) is None
+
+    target = _make_env(tmp_path / "dst", "room_url_city_b", city_id=2)
+    _import(target, pack, "new")
+    dst_home: Path = target["home"]
+    world = sqlite3.connect(target["world_db"])
+    try:
+        (image_path,) = world.execute(
+            "SELECT IMAGE_PATH FROM building WHERE BUILDINGID = ?", (target["room_id"],)
+        ).fetchone()
+    finally:
+        world.close()
+    assert image_path == "/api/media/images/room.png"
+    assert (dst_home / "image" / "room.png").read_bytes() == b"\x89PNG room image"
+
+    engine = create_engine(f"sqlite:///{Path(target['world_db']).as_posix()}")
+    try:
+        monkeypatch.setattr(database.session, "SessionLocal", sessionmaker(bind=engine))
+        resolved = _resolve_building_image(target["room_id"], dst_home)
+    finally:
+        engine.dispose()
+    assert resolved is not None and resolved.read_bytes() == b"\x89PNG room image"
 
 
 def test_icons_referenced_by_perception_and_message_media_are_carried(

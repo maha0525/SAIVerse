@@ -11,7 +11,8 @@
   パス (symlink を辿った先) が、その種類のファイルの置き場の内側にあるものだけを
   ZIP に入れる。building.IMAGE_PATH・fixture / item の FILE_PATH は
   共有メディアフォルダ (SAIVERSE_HOME 直下の image / documents / audio / video。
-  saiverse/media_utils.py の _ensure_*_dir と manager/items.py が書く場所)。添付
+  saiverse/media_utils.py の _ensure_*_dir と manager/items.py が書く場所。
+  ``/api/media/images/<名前>`` の値は実体の ``image/<名前>`` として解決する)。添付
   (messages.metadata・知覚台帳の media・部屋の様子の記帳の束の media) の path は
   共有メディアフォルダと ``user_data/icons``。アイコンと外見画像は ``user_data/icons`` と
   ``image`` (``/api/media/images/<名前>`` の URL の実体)。SAIVERSE_HOME の内側でも、
@@ -122,9 +123,16 @@ JOURNAL_MEMORY_TABLES = ("activities", "memos", "clips", "purpose_tags")
 # 読まれ、印 (WORLD_PENDING_MARKER) による再開が memory.db 側の工程を飛ばす。
 PACK_IMPORTS_MEMORY_TABLE = "persona_pack_imports"
 
+# importer.py が取り込み先の memory.db に作る、手帳の同名合流の対応の表
+# (importer.py の _ACTIVITY_MERGES_TABLE_DDL)。ZIP の activities.uuid (ORIGIN_UUID) を
+# 合流先の取り込み先の activities.uuid (ACTIVITY_UUID) に結ぶ。対応は取り込み先の
+# ローカルの事実なので書き出さない。
+PACK_ACTIVITY_MERGES_MEMORY_TABLE = "persona_pack_activity_merges"
+
 # 運ばないテーブル (intent §4「運ばないもの」)。
 # - embeddings 系: 意味検索用の数値データ。取り込み後に再生成する。
 # - PACK_IMPORTS_MEMORY_TABLE: 取り込み先の運用状態 (上)。
+# - PACK_ACTIVITY_MERGES_MEMORY_TABLE: 取り込み先のローカルの対応 (上)。
 # perception_* (知覚台帳) は当初ここに入れていたが、sai_memory/
 # perception_buffer.py の宣言どおり「消費済み行も削除しない永続台帳 = 知覚の
 # 証跡」であり再生成できないため、extensions/saiverse/memory_db/ で運ぶ
@@ -137,6 +145,7 @@ NOT_CARRIED_MEMORY_TABLES = frozenset({
     "arasuji_embeddings",
     "embed_metadata",
     PACK_IMPORTS_MEMORY_TABLE,
+    PACK_ACTIVITY_MERGES_MEMORY_TABLE,
 })
 
 # 共通フォルダ (chatlog/ knowledge/ journal/) へ写すテーブル。
@@ -445,10 +454,23 @@ def _is_within(path: Path, root: Path) -> bool:
 
 
 def _stored_candidate(value: Any, home: Path) -> Optional[Path]:
-    """DB に保存されたファイルパス (SAIVERSE_HOME からの相対 or 絶対) を、存在の検査なしで組む。"""
+    """DB に保存されたファイルパスを、存在の検査なしで組む。
+
+    受ける形は SAIVERSE_HOME からの相対パス・絶対パスと、``/api/media/images/<名前>``
+    (API_MEDIA_IMAGES_PREFIX。ImageUpload が ai.AVATAR_IMAGE / APPEARANCE_IMAGE_PATH と
+    building.IMAGE_PATH に保存する形 — 実体は ``image/<名前>``)。URL の形は、<名前> が
+    区切りを含まないファイル名のときだけ ``home/image/<名前>`` を返し、それ以外は None。
+    """
     if not isinstance(value, str) or not value.strip():
         return None
-    p = Path(value.strip())
+    text = value.strip()
+    normalized = text.replace("\\", "/")
+    if normalized.startswith(API_MEDIA_IMAGES_PREFIX):
+        name = normalized[len(API_MEDIA_IMAGES_PREFIX):]
+        if not name or name in (".", "..") or Path(name).name != name:
+            return None
+        return home / "image" / name
+    p = Path(text)
     return p if p.is_absolute() else home / p
 
 
@@ -472,7 +494,7 @@ def _outside_reason(path: Path, home: Path, roots: Sequence[Tuple[str, ...]]) ->
 def _resolve_stored_path(
     value: Any, home: Path, roots: Sequence[Tuple[str, ...]] = _MEDIA_ROOTS
 ) -> Optional[Path]:
-    """DB に保存されたファイルパスを解決する。
+    """DB に保存されたファイルパスを解決する (受ける形は :func:`_stored_candidate`)。
 
     ファイルが無いときと、解決後のパスが roots (既定は共有メディアフォルダ) の外に
     あるときは None (モジュール docstring)。呼び出し側は :func:`_missing_entry` で記録する。
@@ -510,13 +532,12 @@ def _resolve_icon_path(value: Any, home: Path) -> Optional[Path]:
     """
     if not isinstance(value, str) or not value.strip():
         return None
+    # /api/media/images/<名前> は _resolve_stored_path (_stored_candidate) が解決する
     direct = _resolve_stored_path(value, home, _PROFILE_ROOTS)
     if direct is not None:
         return direct
     normalized = value.strip().replace("\\", "/")
     candidates: List[Tuple[str, Tuple[str, ...]]] = []
-    if normalized.startswith(API_MEDIA_IMAGES_PREFIX):
-        candidates.append((normalized[len(API_MEDIA_IMAGES_PREFIX):], ("image",)))
     for marker in ("user_data/icons/", "/api/static/user_icons/"):
         if marker in normalized:
             candidates.append((normalized.split(marker)[-1], _ICON_ROOT))

@@ -36,7 +36,8 @@ TASK_ID と ORIGIN_TASK_ID のどちらでも行う (振り直された約束を
 指す、作成経路が作った building 行) に ZIP の私室の見た目と設定 (ROOM_COPIED_COLUMNS と
 IMAGE_PATH のファイル) を写し、fixture 行をその部屋に入れ、item / item_location 行を
 登録する。ファイルは共有メディアフォルダへ復元して、その場所を SAIVERSE_HOME からの
-相対パスで指す (manager/items.py が FILE_PATH に書く形)。ITEM_ID は取り込み先の
+相対パスで指す (manager/items.py が FILE_PATH に書く形。私室の IMAGE_PATH は、元の値が
+``/api/media/images/<名前>`` なら image/ へ復元して同じ形の URL で指す)。ITEM_ID は取り込み先の
 ペルソナ ID と元の ITEM_ID から決まる UUID (uuid5) で振り直す — 同じパックを同じ
 ペルソナへもう一度入れても同じ ID になり、二重に登録されない。
 
@@ -94,6 +95,9 @@ ID の扱いは native_export.py の「移植」(2026-07-16 まはー裁定) を
   既にあるものは変更しない。task_book は ZIP の行の TASK_ID / ORIGIN_TASK_ID が
   取り込み先のペルソナの行の TASK_ID / ORIGIN_TASK_ID と一致すればスキップし、
   元の TASK_ID が別のペルソナの行にあれば振り直した値 (上の uuid5) で照合する。
+  activities は uuid 一致 → _ACTIVITY_MERGES_TABLE (以前の取り込みの同名合流の対応) →
+  開いている同名の順に照合する。開いている同名へまとめたときは対応をその表に書き、
+  表で当たった行は閉じられていてもスキップする (再開させない)。
 - memopedia_pages は id で照合し、本文 (content) が違い、かつ ZIP 側の
   updated_at が新しいときだけ上書きする。上書き前の本文は
   memopedia_page_edit_history に before_* として記録する (rollback_page で戻せる)。
@@ -196,6 +200,7 @@ from .export import (
     _SUMMARY_SUFFIX,
     EPOCH_COLUMNS,
     JSON_TEXT_COLUMNS,
+    PACK_ACTIVITY_MERGES_MEMORY_TABLE,
     PACK_IMPORTS_MEMORY_TABLE,
     PERCEPTION_MEDIA_TABLES,
     ROOM_STATE_COLUMNS,
@@ -312,6 +317,22 @@ _MEMORY_IMPORTS_TABLE_DDL = (
     f"CREATE TABLE IF NOT EXISTS {_MEMORY_IMPORTS_TABLE} ("
     "IMPORT_ID TEXT NOT NULL PRIMARY KEY, "
     "APPLIED_AT INTEGER NOT NULL)"
+)
+
+# 手帳の同名合流の対応の表 (export.PACK_ACTIVITY_MERGES_MEMORY_TABLE)。ZIP の activities
+# 行を、uuid の違う取り込み先の開いている同名の activities 行へまとめたとき
+# (_ImportJob.stage_activities_and_memos)、ZIP の行の uuid (ORIGIN_UUID) と合流先の uuid
+# (ACTIVITY_UUID) を同じトランザクションで書く。合流先が後で閉じられても、同じ ZIP の
+# 再取り込みがこの表で合流先に照合できる (照合が無いと、uuid でも開いている同名でも
+# 当たらず、空の activities 行が open で増える)。task_book の ORIGIN_TASK_ID と同じ考え方で、
+# 列ではなく表なのは、一つの activities 行が複数の元の uuid を吸収しうるため。
+# sai_memory の init が作る表ではなく、この機能だけが読み書きする表なので、定義の正典は
+# ここ。取り込み先のローカルの対応なので書き出さない (export.NOT_CARRIED_MEMORY_TABLES)。
+_ACTIVITY_MERGES_TABLE = PACK_ACTIVITY_MERGES_MEMORY_TABLE
+_ACTIVITY_MERGES_TABLE_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {_ACTIVITY_MERGES_TABLE} ("
+    "ORIGIN_UUID TEXT NOT NULL PRIMARY KEY, "
+    "ACTIVITY_UUID TEXT NOT NULL)"
 )
 
 _EDIT_SOURCE = "persona_pack_import"
@@ -2482,6 +2503,12 @@ class _ImportJob:
             open_by_name = dict(conn.execute(
                 "SELECT name, id FROM activities WHERE status = 'open'"
             ).fetchall())
+            # 以前の取り込みの同名合流の対応 (ORIGIN_UUID → ACTIVITY_UUID)
+            merged: Dict[str, str] = {}
+            if self.table_exists(conn, _ACTIVITY_MERGES_TABLE):
+                merged = dict(conn.execute(
+                    f"SELECT ORIGIN_UUID, ACTIVITY_UUID FROM {_ACTIVITY_MERGES_TABLE}"
+                ).fetchall())
             for row in sorted(pack.activities, key=lambda r: _as_int(r.get("id")) or 0):
                 zip_id = _as_int(row.get("id"))
                 u = row.get("uuid")
@@ -2489,9 +2516,19 @@ class _ImportJob:
                     id_map[zip_id] = by_uuid[u]
                     counts.skipped += 1
                     continue
+                if u and merged.get(u) in by_uuid:
+                    # 以前の取り込みで同名合流した行。合流先が閉じられていても既にあるものと
+                    # してスキップする (status は変えない)
+                    id_map[zip_id] = by_uuid[merged[u]]
+                    counts.skipped += 1
+                    continue
                 if row.get("status") == "open" and row.get("name") in open_by_name:
-                    # open な同名は一つだけ (idx_activities_open_name)。同じアクティビティとして扱う
-                    id_map[zip_id] = open_by_name[row["name"]]
+                    # open な同名は一つだけ (idx_activities_open_name)。同じアクティビティとして扱い、
+                    # 対応を _ACTIVITY_MERGES_TABLE に残す
+                    target_id = open_by_name[row["name"]]
+                    id_map[zip_id] = target_id
+                    if u:
+                        merged[u] = self.record_activity_merge(conn, u, target_id, by_uuid)
                     counts.skipped += 1
                     self.warn(
                         f"activity {row.get('name')!r} (uuid {u}) joined the open activity of the "
@@ -2531,6 +2568,31 @@ class _ImportJob:
                 if idem:
                     present_idem.add(idem)
                 counts.added += 1
+
+    def record_activity_merge(
+        self, conn: sqlite3.Connection, origin_uuid: str, activity_id: int, by_uuid: Dict[str, int]
+    ) -> str:
+        """ZIP の activities 行 (uuid = origin_uuid) を取り込み先の activities 行 activity_id へ
+        まとめたことを _ACTIVITY_MERGES_TABLE に書き、合流先の uuid を返す。
+
+        合流先の uuid が NULL (sai_memory の init の _backfill_uuids より前の行) なら、
+        _backfill_uuids と同じく uuid4 を振ってから書く。by_uuid も更新する。
+        """
+        row = conn.execute("SELECT uuid FROM activities WHERE id = ?", (activity_id,)).fetchone()
+        activity_uuid = row[0] if row else None
+        if not activity_uuid:
+            activity_uuid = str(uuid.uuid4())
+            conn.execute(
+                "UPDATE activities SET uuid = ? WHERE id = ? AND uuid IS NULL",
+                (activity_uuid, activity_id),
+            )
+            by_uuid[activity_uuid] = activity_id
+        conn.execute(_ACTIVITY_MERGES_TABLE_DDL)
+        conn.execute(
+            f"INSERT OR REPLACE INTO {_ACTIVITY_MERGES_TABLE} (ORIGIN_UUID, ACTIVITY_UUID) VALUES (?, ?)",
+            (origin_uuid, activity_uuid),
+        )
+        return activity_uuid
 
     def stage_clips(self, conn: sqlite3.Connection) -> None:
         clips = self.pack.clips
@@ -3045,7 +3107,16 @@ class _ImportJob:
         if "IMAGE_PATH" in cols:
             image_zip = files.get("IMAGE_PATH")
             if image_zip:
-                updates["IMAGE_PATH"] = self.plan_media_restore(image_zip, "image")
+                restored = self.plan_media_restore(image_zip, "image")
+                # 元の値が /api/media/images/<名前> (WorldEditor / BuildingSettingsModal の
+                # ImageUpload が保存する形) なら同じ形の URL で指す — 画面 (CityMap /
+                # RightSidebar) は IMAGE_PATH をそのまま img の src にするので、相対パスでは
+                # 表示されない。media_utils._resolve_building_image はどちらの形も image/ の
+                # 実ファイルに解決する。
+                original = room.get("IMAGE_PATH")
+                if isinstance(original, str) and original.strip().startswith(API_MEDIA_IMAGES_PREFIX):
+                    restored = API_MEDIA_IMAGES_PREFIX + PurePosixPath(restored).name
+                updates["IMAGE_PATH"] = restored
             elif room.get("IMAGE_PATH"):
                 self.warn("private room: the image file is not in the pack; IMAGE_PATH left unchanged")
         if updates:
