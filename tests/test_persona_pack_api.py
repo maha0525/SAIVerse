@@ -551,6 +551,42 @@ def test_import_new_keeps_the_persona_when_the_world_part_is_pending(
     assert dst["manager"].deleted == []
 
 
+def test_resume_merge_starts_the_embedding_left_by_the_failed_import(
+    world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """世界側の確定に失敗した新規作成を合流で再開すると、足す message が 0 件でも
+    memory.db に残った空のベクトル行の埋め込みを起こす。"""
+    from saiverse_memory.persona_pack import importer
+
+    pack = _export_zip(world)
+    dst = world["dst"]
+
+    def fail(self: Any, _world: sqlite3.Connection) -> None:
+        raise sqlite3.OperationalError("disk I/O error (injected)")
+
+    monkeypatch.setattr(importer._ImportJob, "commit_world", fail)
+    res = world["use"](dst).post(
+        "/api/people/persona-pack/import-new",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 500, res.text
+    new_id = f"tester_{CITY}"
+    assert dst["manager"].deleted == []
+    assert world["embedding_calls"] == []  # 失敗した回は起こさない
+    monkeypatch.setattr(importer._ImportJob, "commit_world", lambda self, w: w.execute("COMMIT"))
+
+    res = world["use"](dst).post(
+        f"/api/people/{new_id}/persona-pack/import",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["counts"]["messages"] == {"added": 0, "updated": 0, "skipped": 2}
+    assert body["embeddings_deferred"] == 0
+    assert body["embedding_started"] is True
+    assert world["embedding_calls"] == [(new_id, 2)]
+
+
 def test_memory_has_messages_is_three_valued(tmp_path: Path) -> None:
     from api.routes.people.persona_pack import _memory_has_messages
 

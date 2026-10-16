@@ -116,8 +116,15 @@ CHATLOG_TABLES = ("threads", "stelis_threads", "messages")
 KNOWLEDGE_TABLES = ("memopedia_pages",)
 JOURNAL_MEMORY_TABLES = ("activities", "memos", "clips", "purpose_tags")
 
+# importer.py が取り込み先の memory.db に作る、新規作成の memory.db 側の工程の
+# 適用済み記録の表 (importer.py の _MEMORY_IMPORTS_TABLE_DDL)。取り込み先の運用状態
+# なので書き出さない — 運ぶと、別の環境で同じ IMPORT_ID の記録が「適用済み」と
+# 読まれ、印 (WORLD_PENDING_MARKER) による再開が memory.db 側の工程を飛ばす。
+PACK_IMPORTS_MEMORY_TABLE = "persona_pack_imports"
+
 # 運ばないテーブル (intent §4「運ばないもの」)。
 # - embeddings 系: 意味検索用の数値データ。取り込み後に再生成する。
+# - PACK_IMPORTS_MEMORY_TABLE: 取り込み先の運用状態 (上)。
 # perception_* (知覚台帳) は当初ここに入れていたが、sai_memory/
 # perception_buffer.py の宣言どおり「消費済み行も削除しない永続台帳 = 知覚の
 # 証跡」であり再生成できないため、extensions/saiverse/memory_db/ で運ぶ
@@ -129,6 +136,7 @@ NOT_CARRIED_MEMORY_TABLES = frozenset({
     "memopedia_fragment_embeddings",
     "arasuji_embeddings",
     "embed_metadata",
+    PACK_IMPORTS_MEMORY_TABLE,
 })
 
 # 共通フォルダ (chatlog/ knowledge/ journal/) へ写すテーブル。

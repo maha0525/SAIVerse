@@ -125,9 +125,15 @@ saiverse_db/・items/・印に記録した overwrite_profile による profile/)
 saiverse.db の commit が成功したら印を消す。persona_pack_imports に import_id が既に
 あれば (世界側の commit 後、印を消す前に止まった) 世界側の工程はやり直さず印だけ
 消す — 整数の主キーを振り直す表は INSERT OR IGNORE では二重登録を防げないため。
+印はファイルなので memory.db の COMMIT と一緒に巻き戻らず、印を書いた後、memory.db の
+COMMIT 前に止まると印だけが残る。これを見分けるため、mode="new" の memory.db 側の
+工程も同じトランザクションで memory.db の persona_pack_imports (_MEMORY_IMPORTS_TABLE)
+に import_id を書く。再開の合流は memory.db にその記録が無ければ、memory.db 側の
+mode="new" の工程 (extensions/saiverse/memory_db/・extensions/saiverse/persona_dir/・
+合流の規則によらない Chronicle の取り込み・知覚台帳の添付) も行う (memory_new)。
 persona_id は一致するが zip_sha256 / import_id が違う ZIP では再開せず、印を残して
-警告する。task_book は合流でも入る。memory.db 側とファイルは合流の照合 (UUID・同じ
-中身のファイルの再利用) で二重にならない。
+警告する。task_book は合流でも入る。memory.db 側とファイルは照合 (UUID・
+INSERT OR IGNORE・同じ中身のファイルの再利用) で二重にならない。
 
 embeddings は運ばれてこない。取り込んだ message のうち content が空白だけでない
 ものは、同じトランザクションで空のベクトル行 (``storage.DEFERRED_VECTOR``) を
@@ -166,6 +172,7 @@ from .export import (
     _SUMMARY_SUFFIX,
     EPOCH_COLUMNS,
     JSON_TEXT_COLUMNS,
+    PACK_IMPORTS_MEMORY_TABLE,
     PERCEPTION_MEDIA_TABLES,
     ROOM_STATE_COLUMNS,
     SAIVERSE_DB_TABLE_OWNERS,
@@ -256,6 +263,22 @@ _IMPORTS_TABLE_DDL = (
     f"CREATE TABLE IF NOT EXISTS {_IMPORTS_TABLE} ("
     "IMPORT_ID VARCHAR(64) NOT NULL PRIMARY KEY, "
     "PERSONA_ID VARCHAR(255) NOT NULL, "
+    "APPLIED_AT INTEGER NOT NULL)"
+)
+
+# memory.db 側の工程の適用済み記録の表 (export.PACK_IMPORTS_MEMORY_TABLE)。
+# 新規作成の memory.db 側の工程 (_ImportJob.memory_new) を行ったことを、memory.db の
+# 同じトランザクションで IMPORT_ID (_import_id) として書く。印 (WORLD_PENDING_MARKER)
+# はファイルなので memory.db の COMMIT と一緒に巻き戻らない — 印を書いた後、
+# memory.db の COMMIT 前に止まると印だけが残る。印による再開
+# (_ImportJob.check_pending_marker) はこの表で memory.db 側が commit 済みかを見分ける。
+# sai_memory の init が作る表ではなく、この機能だけが読み書きする表なので、
+# 定義の正典はここ。取り込み先の運用状態なので書き出さない
+# (export.NOT_CARRIED_MEMORY_TABLES)。
+_MEMORY_IMPORTS_TABLE = PACK_IMPORTS_MEMORY_TABLE
+_MEMORY_IMPORTS_TABLE_DDL = (
+    f"CREATE TABLE IF NOT EXISTS {_MEMORY_IMPORTS_TABLE} ("
+    "IMPORT_ID TEXT NOT NULL PRIMARY KEY, "
     "APPLIED_AT INTEGER NOT NULL)"
 )
 
@@ -909,7 +932,11 @@ class _ImportJob:
         # 片側だけ commit された mode="new" の取り込みを、この合流で再開するか
         # (モジュール docstring)。True なら世界側の mode="new" の工程も行う
         self.resume_world = False
-        # 取り込みが成功したら印を消すか (mode="new"、再開、世界側が適用済みの印)
+        # 印が残った mode="new" の取り込みの memory.db 側が commit されていない
+        # (_MEMORY_IMPORTS_TABLE に IMPORT_ID が無い) とき True。この合流で
+        # memory.db 側の mode="new" の工程も行う
+        self.resume_memory = False
+        # 取り込みが成功したら印を消すか (mode="new"、再開、両側が適用済みの印)
         self.clear_marker = mode == "new"
         self.marker_path = persona_dir / WORLD_PENDING_MARKER
         self.zip_sha256 = zip_sha256
@@ -919,6 +946,12 @@ class _ImportJob:
     def world_new(self) -> bool:
         """世界側 (saiverse.db の extensions/・items/) の mode="new" の工程を行うか。"""
         return self.mode == "new" or self.resume_world
+
+    @property
+    def memory_new(self) -> bool:
+        """memory.db 側 (extensions/saiverse/memory_db/・ペルソナフォルダのファイル・
+        Chronicle の全件取り込み・知覚台帳の添付) の mode="new" の工程を行うか。"""
+        return self.mode == "new" or self.resume_memory
 
     # --- 共通 ---------------------------------------------------------------
 
@@ -1070,7 +1103,7 @@ class _ImportJob:
                         f"{self.target} has {n_messages}. Use mode='merge'."
                     )
             else:
-                self.check_pending_marker(world)
+                self.check_pending_marker(world, memory)
             self.report_refused_raw_text()
             memory_committed = False
             try:
@@ -1078,8 +1111,9 @@ class _ImportJob:
                 self.stage_chatlog(memory)
                 self.stage_knowledge(memory)
                 self.stage_journal_memory(memory)
-                if self.mode == "new":
+                if self.memory_new:
                     self.stage_ext_memory(memory)
+                    self.record_memory_applied(memory)
                 else:
                     self.stage_merge_recall_edges(memory)
                 world.execute("BEGIN IMMEDIATE")
@@ -1090,9 +1124,9 @@ class _ImportJob:
                     self.stage_items(world)
                     self.record_world_applied(world)
                 self.stage_day_reports()
-                if self.mode == "new":
+                if self.memory_new:
                     self.stage_persona_dir_files()
-                else:
+                if self.mode == "merge":
                     self.count_merge_skips()
                 self.report_invalidated_media()
                 self.write_files()
@@ -1152,15 +1186,25 @@ class _ImportJob:
         os.replace(tmp, self.marker_path)
         self.created_files.append(self.marker_path)
 
-    def check_pending_marker(self, world: sqlite3.Connection) -> None:
-        """mode="merge": 印があり、同じパックなら世界側の工程を再開する。
+    def check_pending_marker(self, world: sqlite3.Connection, memory: sqlite3.Connection) -> None:
+        """mode="merge": 印があり、同じパックなら commit されていない側の工程を再開する。
 
         同じパックの判定は、印の persona_id が manifest の persona_id と、印の
         zip_sha256 / import_id がこの ZIP とこのペルソナから決まる値と一致すること。
         一致しなければ再開せず (印の overwrite_profile も使わない)、印を残して警告する
-        — 利用者が正しい ZIP で入れ直せるように。一致して、persona_pack_imports に
-        import_id があれば (世界側は commit 済みで印だけ残った)、世界側の工程は
-        やり直さずに印だけ消す。
+        — 利用者が正しい ZIP で入れ直せるように。
+
+        一致したら、両方の DB の適用済み記録 (memory.db と saiverse.db の
+        persona_pack_imports) を import_id で見る:
+
+        - memory.db に無い (印を書いた後、memory.db の COMMIT 前に止まった):
+          memory.db 側の mode="new" の工程を行う (resume_memory)。
+        - saiverse.db に無い: 世界側の mode="new" の工程を行う (resume_world)。
+        - 両方にある (世界側の commit の後、印を消す前に止まった): 工程は
+          やり直さずに印だけ消す。
+
+        どちらの工程も、照合 (UUID・INSERT OR IGNORE・同じ中身のファイルの再利用) で
+        既に入っている行とファイルを二重にしない。
         """
         if not self.marker_path.is_file():
             return
@@ -1186,18 +1230,42 @@ class _ImportJob:
             )
             return
         self.clear_marker = True
-        if self.world_applied(world):
+        self.resume_memory = not self.memory_applied(memory)
+        self.resume_world = not self.world_applied(world)
+        if not self.resume_memory and not self.resume_world:
             self.warn(
                 "the world part of an earlier new-persona import of this pack was already applied; "
                 f"only {WORLD_PENDING_MARKER} is removed"
             )
             return
-        self.resume_world = True
-        if marker.get("overwrite_profile") is True:
+        if self.resume_world and marker.get("overwrite_profile") is True:
             self.overwrite_profile = True
-        self.warn(
-            "resuming the unfinished part of an earlier new-persona import of this pack "
-            "(tasks, schedules, event log, items and private room)"
+        if self.resume_memory:
+            self.warn(
+                "resuming the unfinished part of an earlier new-persona import of this pack "
+                "(the memory part: perception records, memopedia fragments and edit history, "
+                "other memory tables and persona folder files)"
+            )
+        if self.resume_world:
+            self.warn(
+                "resuming the unfinished part of an earlier new-persona import of this pack "
+                "(tasks, schedules, event log, items and private room)"
+            )
+
+    def memory_applied(self, memory: sqlite3.Connection) -> bool:
+        """memory.db の _MEMORY_IMPORTS_TABLE にこの取り込みの import_id があるか (memory.db 側が commit 済みか)。"""
+        if not self.table_exists(memory, _MEMORY_IMPORTS_TABLE):
+            return False
+        return memory.execute(
+            f"SELECT 1 FROM {_MEMORY_IMPORTS_TABLE} WHERE IMPORT_ID = ?", (self.import_id,)
+        ).fetchone() is not None
+
+    def record_memory_applied(self, memory: sqlite3.Connection) -> None:
+        """memory.db 側の mode="new" の工程を行ったことを、同じトランザクションで _MEMORY_IMPORTS_TABLE に書く。"""
+        memory.execute(_MEMORY_IMPORTS_TABLE_DDL)
+        memory.execute(
+            f"INSERT OR REPLACE INTO {_MEMORY_IMPORTS_TABLE} (IMPORT_ID, APPLIED_AT) VALUES (?, ?)",
+            (self.import_id, int(time.time())),
         )
 
     def world_applied(self, world: sqlite3.Connection) -> bool:
@@ -1414,10 +1482,11 @@ class _ImportJob:
     def perception_media_rows(self, conn: sqlite3.Connection) -> Iterable[Tuple[str, Dict[str, Any]]]:
         """取り込む知覚台帳の行 (表, ZIP の行)。
 
-        知覚台帳は extensions/saiverse/memory_db/ で入るので mode="new" のときだけで、
-        取り込み先に表が無いもの (stage_ext_memory がスキップする) は含めない。
+        知覚台帳は extensions/saiverse/memory_db/ で入るので memory.db 側の mode="new" の
+        工程 (memory_new) のときだけで、取り込み先に表が無いもの (stage_ext_memory が
+        スキップする) は含めない。
         """
-        if self.mode != "new":
+        if not self.memory_new:
             return
         for table in PERCEPTION_MEDIA_TABLES:
             rows = self.pack.ext_memory_tables.get(table)
@@ -1696,7 +1765,7 @@ class _ImportJob:
                 target_rows[row[0]] = row
 
         chronicle_plan: Optional[_ChroniclePlan] = None
-        if self.mode == "merge":
+        if not self.memory_new:
             chronicle_plan = self.plan_chronicle_merge(conn, pages, target_rows)
 
         to_insert: List[Dict[str, Any]] = []
@@ -2753,8 +2822,10 @@ class _ImportJob:
     def count_merge_skips(self) -> None:
         """合流では items/ と extensions/ を取り込まない (intent §5)。件数だけ載せる。
 
-        stage_merge_recall_edges が扱った表と、印による再開 (resume_world) で取り込んだ
-        extensions/saiverse/saiverse_db/・items/ は、そちらが件数を載せている。
+        stage_merge_recall_edges が扱った表と、印による再開で取り込んだもの
+        (resume_world の extensions/saiverse/saiverse_db/・items/、resume_memory の
+        extensions/saiverse/memory_db/・extensions/saiverse/persona_dir/) は、そちらが
+        件数を載せている。
         """
         pack = self.pack
         if not self.resume_world:
@@ -2764,6 +2835,8 @@ class _ImportJob:
                 self.result.count("items").skipped += n_items
             for table, rows in pack.ext_saiverse_tables.items():
                 self.result.count(f"extensions/saiverse_db/{table}").skipped += len(rows)
+        if self.resume_memory:
+            return
         self.report_refused_ext_memory_tables()
         for table, rows in pack.ext_memory_tables.items():
             if table in self._merged_ext_tables:

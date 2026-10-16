@@ -13,7 +13,7 @@ import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import pytest
 from sqlalchemy import create_engine
@@ -1670,6 +1670,150 @@ def test_marker_of_a_different_zip_of_the_same_persona_is_not_resumed(
     assert not marker.exists()
     assert any("resuming the unfinished part" in w for w in finished.warnings)
     assert _world_counts(target, target["persona_id"])["persona_event_log"] == 1
+
+
+def _table_counts(db_path: Path) -> Dict[str, int]:
+    """全テーブルの行数 (適用済み記録の表を除く)。"""
+    conn = sqlite3.connect(db_path)
+    try:
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+            "AND name != 'persona_pack_imports'"
+        )]
+        return {t: conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in tables}
+    finally:
+        conn.close()
+
+
+def _home_files(env: Dict[str, Any]) -> List[Tuple[str, bytes]]:
+    home: Path = env["home"]
+    return sorted(
+        (p.relative_to(home).as_posix(), p.read_bytes())
+        for p in home.rglob("*")
+        if p.is_file() and not p.name.startswith("memory.db") and not p.name.startswith("saiverse.db")
+    )
+
+
+def test_stop_before_the_memory_commit_is_finished_by_a_merge(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """印を書いた直後・memory.db の COMMIT 前に止まった新規作成を、同じ ZIP の合流が全段やり直す。
+
+    印はファイルなので memory.db と一緒に巻き戻らない。memory.db の適用済み記録が
+    無いので、再開の合流は memory.db 側の mode="new" の工程 (知覚台帳を含む
+    extensions/saiverse/memory_db/ とペルソナフォルダのファイル) も行う。
+    """
+    from saiverse_memory.persona_pack import importer
+
+    home: Path = source["home"]
+    (home / "image" / "seen.png").write_bytes(b"\x89PNG seen only by perception")
+    seen = {"path": str(home / "image" / "seen.png"), "mime_type": "image/png", "type": "image"}
+    conn = _mem(source)
+    try:
+        conn.execute(
+            "INSERT INTO perception_buffer(kind, content, media, created_at) VALUES (?,?,?,?)",
+            ("room_visit", "部屋に入った", json.dumps([seen], ensure_ascii=False), T0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    pack = _export(source, tmp_path / "out" / "perception.zip")
+
+    # 比べる相手: 止まらずに終わった新規作成
+    reference = _make_env(tmp_path / "ref", "newcomer_city_a", name="新入り")
+    _import(reference, pack, "new", overwrite_profile=True)
+
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+    marker = target["persona_dir"] / "persona_pack_world_pending.json"
+    original_write = importer._ImportJob.write_pending_marker
+
+    def write_then_stop(self: Any) -> None:
+        original_write(self)
+        raise SystemExit("process stopped before the memory.db COMMIT (injected)")
+
+    # プロセスが止まった状態を作る: 印を書いた直後に落ち、後始末 (書いたファイルの削除) も走らない
+    monkeypatch.setattr(importer._ImportJob, "write_pending_marker", write_then_stop)
+    monkeypatch.setattr(importer._ImportJob, "remove_created_files", lambda self: None)
+    with pytest.raises(SystemExit, match="injected"):
+        _import(target, pack, "new", overwrite_profile=True)
+    monkeypatch.undo()
+
+    # 印は残り、memory.db と saiverse.db は両方巻き戻っている
+    assert marker.is_file()
+    counts = _table_counts(target["memory_db"])
+    assert counts["messages"] == 0 and counts["perception_buffer"] == 0
+    mem = _mem(target)
+    try:
+        assert mem.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'persona_pack_imports'"
+        ).fetchone()[0] == 0
+    finally:
+        mem.close()
+    assert _world_counts(target, target["persona_id"])["persona_event_log"] == 0
+    # 書きかけのファイル (添付など) は残っている
+    assert (target["home"] / "image" / "seen.png").is_file()
+
+    result = _import(target, pack, "merge")
+    assert not marker.exists()
+    assert sum("resuming the unfinished part" in w for w in result.warnings) == 2
+    # 止まらずに終わった新規作成と同じ行数・同じファイル (書きかけのファイルは再利用され、_1 が増えない)
+    assert _table_counts(target["memory_db"]) == _table_counts(reference["memory_db"])
+    assert _table_counts(target["world_db"]) == _table_counts(reference["world_db"])
+    assert _home_files(target) == _home_files(reference)
+    assert result.counts["extensions/memory_db/perception_buffer"].added == 1
+    assert result.counts["extensions/memory_db/desk_items"].added == 1
+    assert result.counts["extensions/persona_dir"].added == 0  # 書きかけの active_state.json と同じ中身
+    assert result.counts["extensions/persona_dir"].skipped == 1
+    mem = _mem(target)
+    try:
+        (media,) = mem.execute("SELECT media FROM perception_buffer").fetchone()
+        assert json.loads(media) == [{
+            "path": str(target["home"] / "image" / "seen.png"), "uri": "saiverse://image/seen.png",
+            "mime_type": "image/png", "type": "image",
+        }]
+        # memory.db 側の適用済み記録が同じトランザクションで書かれた
+        assert mem.execute("SELECT IMPORT_ID FROM persona_pack_imports").fetchall() == [
+            (importer._import_id(importer._sha256_file(pack), target["persona_id"]),)
+        ]
+    finally:
+        mem.close()
+    world = sqlite3.connect(target["world_db"])
+    try:
+        assert world.execute("SELECT AINAME FROM ai WHERE AIID = ?", (target["persona_id"],)).fetchone()[0] == "テスト子"
+    finally:
+        world.close()
+
+    # もう一度合流しても何も増えない (印が無いので合流の範囲だけ)
+    before = _dump(target)
+    again = _import(target, pack, "merge")
+    assert all(c.added == 0 and c.updated == 0 for c in again.counts.values()), again.counts
+    assert _dump(target) == before
+
+
+def test_resume_when_only_the_world_part_is_missing_does_not_redo_the_memory_part(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """memory.db 側が commit 済み (適用済み記録あり) なら、再開は世界側だけを行う。"""
+    from saiverse_memory.persona_pack import importer
+
+    target = _make_env(tmp_path / "dst", "newcomer_city_a", name="新入り")
+
+    def fail(self: Any, world: sqlite3.Connection) -> None:
+        raise sqlite3.OperationalError("disk I/O error (injected)")
+
+    monkeypatch.setattr(importer._ImportJob, "commit_world", fail)
+    with pytest.raises(sqlite3.OperationalError):
+        _import(target, source["zip"], "new")
+    monkeypatch.undo()
+    result = _import(target, source["zip"], "merge")
+    assert [w for w in result.warnings if "resuming the unfinished part" in w] == [
+        "resuming the unfinished part of an earlier new-persona import of this pack "
+        "(tasks, schedules, event log, items and private room)"
+    ]
+    # memory.db 側の extensions/ は合流の扱い (スキップ件数) のまま
+    assert result.counts["extensions/memory_db/desk_items"].added == 0
+    assert result.counts["extensions/memory_db/desk_items"].skipped == 1
+    assert result.counts["items"].added == 4
 
 
 # ---------------------------------------------------------------------------

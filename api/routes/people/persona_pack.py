@@ -11,7 +11,9 @@
 合流と新規作成は、ペルソナを問わずプロセス内で一度に一つだけ走らせる (_claim_import)。
 取り込んだ message は空のベクトル行を持って入る (importer.py の docstring) ので、
 import_chatlog.py と同じ ``_launch_import_embedding`` で埋め込みの再生成を裏で起こす。
-生きているペルソナの adapter は import_chatlog.py と同じく触らない (取り込みは別の
+起こすかどうかは、取り込み後の memory.db に残る空のベクトル行の件数で決める
+(_deferred_embedding_count) — 印による再開の合流は足す message が 0 件でも、止まった
+回が残した空のベクトル行がある。生きているペルソナの adapter は import_chatlog.py と同じく触らない (取り込みは別の
 接続で memory.db に書き、埋め込みは使い捨ての adapter が行う)。プロフィールを上書きした
 ときだけ、読み込み済みのペルソナへ保存経路 (manager.update_ai) で値を写す。私室の設定と
 所持品を取り込んだときは、読み込み済みの Building と所持品の一覧へ写す
@@ -252,6 +254,23 @@ def _start_embedding(persona_id: str, count: int) -> bool:
             except Exception:
                 LOGGER.warning("Could not close the SAIMemory adapter of %s", persona_id, exc_info=True)
     return launched
+
+
+def _deferred_embedding_count(saiverse_home: Path, persona_id: str) -> int:
+    """ペルソナの memory.db で埋め込みを待つ message の件数 (空のベクトル行 DEFERRED_VECTOR)。
+
+    数え方は起動時の検査 (SAIMemoryAdapter の count_deferred_message_embeddings) と同じ。
+    取り込みの後に起こす _start_embedding の SAIMemoryAdapter.reembed_stale_messages は
+    この行を全部拾うので、今回の取り込みが書いた行かどうかは問わない。
+    """
+    from sai_memory.memory.storage import count_deferred_message_embeddings
+
+    db_path = saiverse_home / "personas" / persona_id / "memory.db"
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    try:
+        return count_deferred_message_embeddings(conn)
+    finally:
+        conn.close()
 
 
 def _refresh_loaded_persona_profile(manager: Any, persona_id: str) -> None:
@@ -511,11 +530,18 @@ def _run_import(
             result, "applying the private room and items to the loaded world",
             _refresh_loaded_room_and_items, manager, persona_id,
         )
+    # 起動の判断は今回足した件数 (embeddings_deferred) ではなく memory.db に残る
+    # 空のベクトル行の件数で行う — 印による再開の合流は足す件数が 0 でも、
+    # 止まった回が残した空のベクトル行を埋める必要がある (_deferred_embedding_count)
     embedding_started = False
-    if result.embeddings_deferred:
+    deferred = _after_commit(
+        result, "counting the messages waiting for their embeddings",
+        _deferred_embedding_count, saiverse_home, persona_id,
+    )
+    if deferred:
         embedding_started = bool(_after_commit(
             result, "starting the embedding of the imported messages",
-            _start_embedding, persona_id, result.embeddings_deferred,
+            _start_embedding, persona_id, deferred,
         ))
     payload = asdict(result)
     payload["embedding_started"] = embedding_started
