@@ -1913,3 +1913,142 @@ def test_perception_media_in_a_crafted_pack_is_neutralised(source: Dict[str, Any
         conn.close()
     assert json.loads(rows[1]) == [{"path": None, "mime_type": "image/png"}]
     assert json.loads(rows[2]) == [{"uri": None, "path": None}]
+
+
+# ---------------------------------------------------------------------------
+# 部屋の様子の記帳 (room_state_json / perception_buffer.metadata) の束の media
+# ---------------------------------------------------------------------------
+
+def _room_bundle(room_media: List[Dict[str, Any]], *, extra_lines: List[str] = ()) -> Dict[str, Any]:
+    return {
+        "building_id": "room_x", "building_name": "部屋 X",
+        "packages": [
+            {"key": "building:interior", "family": "interior", "label": "内装",
+             "lines": ["内装の説明", *extra_lines], "media": room_media, "state": None},
+            {"key": "item:1", "family": "item", "label": "本", "lines": ["本がある"],
+             "media": [], "state": "closed"},
+        ],
+    }
+
+
+def _room_entries(conn: sqlite3.Connection) -> Dict[int, List[Dict[str, Any]]]:
+    return {
+        int(batch_id): json.loads(raw)
+        for batch_id, raw in conn.execute("SELECT id, room_state_json FROM perception_batches")
+    }
+
+
+def test_room_state_media_is_carried_and_relocated(source: Dict[str, Any], tmp_path: Path) -> None:
+    """正規の往復: 束の media は復元先を指し、差分の base_digest は書き換えた土台に付け直される。"""
+    from sai_memory.room_state import (
+        ROOM_STATE_META_KEY,
+        bundle_is_valid,
+        bundle_media,
+        chain_is_intact,
+        restore_room_state_bases,
+        snapshot_digest,
+    )
+
+    home: Path = source["home"]
+    (home / "image" / "room.png").write_bytes(b"\x89PNG room interior")
+    room = {"path": str(home / "image" / "room.png"), "mime_type": "image/png", "type": "image"}
+    # 共有メディアフォルダの外 (本体 DB) を .. で指す項目 — 書き出しは入れない
+    escape = {"path": str(home / "image" / ".." / "user_data" / "database" / "saiverse.db"),
+              "mime_type": "image/png", "type": "image"}
+    full = _room_bundle([room, escape])
+    diff = _room_bundle([room, escape], extra_lines=["棚が増えた"])
+    entries_1 = [{"key": "building:room_x", "is_diff": False, "block": "部屋 X の様子", "snapshot": full}]
+    entries_2 = [{"key": "building:room_x", "is_diff": True, "block": "部屋 X の変化",
+                  "snapshot": diff, "base_digest": snapshot_digest(full)}]
+    conn = _mem(source)
+    try:
+        conn.execute(
+            "INSERT INTO perception_batches(consumed_at, rendered_text, room_state_json) VALUES (?,?,?)",
+            (T0, "部屋 X の様子", json.dumps(entries_1, ensure_ascii=False)),
+        )
+        conn.execute(
+            "INSERT INTO perception_batches(consumed_at, rendered_text, room_state_json) VALUES (?,?,?)",
+            (T0 + 1, "部屋 X の変化", json.dumps(entries_2, ensure_ascii=False)),
+        )
+        conn.execute(
+            "INSERT INTO perception_buffer(kind, content, metadata, created_at) VALUES (?,?,?,?)",
+            ("surroundings", "部屋 X の様子", json.dumps(
+                {ROOM_STATE_META_KEY: {"key": "building:room_x", "snapshot": full, "allow_diff": True}},
+                ensure_ascii=False,
+            ), T0 + 2),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    pack = _export(source, tmp_path / "out" / "room_state.zip")
+
+    index = {e["ref"]: e for e in _zjson(pack, "attachments/index.json")}
+    assert index[room["path"]]["perception_rows"] == [
+        "perception_batches:1", "perception_batches:2", "perception_buffer:1",
+    ]
+    assert index[escape["path"]]["path"] is None  # 置き場の外は入れない
+
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, pack, "new")
+    dst_home: Path = target["home"]
+    assert (dst_home / "image" / "room.png").read_bytes() == b"\x89PNG room interior"
+    relocated = {"path": str(dst_home / "image" / "room.png"), "uri": "saiverse://image/room.png",
+                 "mime_type": "image/png", "type": "image"}
+
+    conn = _mem(target)
+    try:
+        entries = _room_entries(conn)
+        (buffer_meta,) = conn.execute("SELECT metadata FROM perception_buffer").fetchone()
+        (raw_1,) = conn.execute("SELECT room_state_json FROM perception_batches WHERE id = 1").fetchone()
+        # 読み手: 差分の土台が見えているので、全文への開き直しは起きない
+        assert restore_room_state_bases(conn) == 0
+    finally:
+        conn.close()
+    first, second = entries[1][0], entries[2][0]
+    for snapshot in (first["snapshot"], second["snapshot"],
+                     json.loads(buffer_meta)[ROOM_STATE_META_KEY]["snapshot"]):
+        assert bundle_is_valid(snapshot)
+        assert bundle_media(snapshot) == [relocated]  # 復元できなかった項目は外れる
+    assert "saiverse.db" not in raw_1 and ".." not in raw_1
+    assert second["base_digest"] == snapshot_digest(first["snapshot"])
+    assert chain_is_intact(second, first)
+
+
+def test_room_state_media_in_a_crafted_pack_is_neutralised(source: Dict[str, Any], tmp_path: Path) -> None:
+    """ZIP に直接書いた部屋の様子の記帳の .. 入り・メディアルートの外の path は残らない。"""
+    from sai_memory.room_state import ROOM_STATE_META_KEY, bundle_is_valid, bundle_media
+
+    dotdot = {"path": "../../user_data/database/saiverse.db", "mime_type": "image/png", "type": "image"}
+    outside = {"path": "/etc/passwd", "mime_type": "image/png", "type": "image"}
+    crafted = _add_zip_entries(source["zip"], tmp_path / "crafted.zip", {
+        "extensions/saiverse/memory_db/perception_batches.json": [
+            {"id": 1, "consumed_at": T0, "rendered_text": "a", "kind": "perception",
+             "room_state_json": json.dumps([{"key": "building:room_x", "is_diff": False, "block": "a",
+                                             "snapshot": _room_bundle([dotdot])}])},
+            # JSON 文字列でなく list のままの値
+            {"id": 2, "consumed_at": T0 + 1, "rendered_text": "b", "kind": "perception",
+             "room_state_json": [{"key": "building:room_x", "is_diff": False, "block": "b",
+                                  "snapshot": _room_bundle([outside, dotdot])}]},
+        ],
+        "extensions/saiverse/memory_db/perception_buffer.json": [
+            {"id": 1, "kind": "surroundings", "content": "c", "created_at": T0, "salient": 0,
+             "metadata": json.dumps({ROOM_STATE_META_KEY: {
+                 "key": "building:room_x", "snapshot": _room_bundle([outside]), "allow_diff": True}})},
+        ],
+    })
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, crafted, "new")
+    conn = _mem(target)
+    try:
+        entries = _room_entries(conn)
+        (buffer_meta,) = conn.execute("SELECT metadata FROM perception_buffer").fetchone()
+        raw = json.dumps([r[0] for r in conn.execute("SELECT room_state_json FROM perception_batches")])
+    finally:
+        conn.close()
+    snapshots = [entries[1][0]["snapshot"], entries[2][0]["snapshot"],
+                 json.loads(buffer_meta)[ROOM_STATE_META_KEY]["snapshot"]]
+    for snapshot in snapshots:
+        assert bundle_is_valid(snapshot)
+        assert bundle_media(snapshot) == []
+    assert "saiverse.db" not in raw and "/etc/passwd" not in raw
+    assert "/etc/passwd" not in buffer_meta

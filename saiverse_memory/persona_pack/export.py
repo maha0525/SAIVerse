@@ -38,7 +38,8 @@ ZIP の中身 (intent §4 の表):
     ``pages.json`` (memopedia_pages の全ページ。core / chronicle 分類も含む)。
 ``attachments/``
     メッセージ metadata の ``images`` / ``documents`` / ``media`` と、知覚台帳
-    (PERCEPTION_MEDIA_TABLES) の ``media`` 列が指す共有メディアファイルの実体と
+    (PERCEPTION_MEDIA_TABLES) の ``media`` 列と、部屋の様子の記帳
+    (ROOM_STATE_COLUMNS) の束のパッケージの ``media`` が指す共有メディアファイルの実体と
     ``index.json`` (参照 → ZIP 内パス。参照元は ``message_ids`` と
     ``perception_rows`` (``"<表>:<id>"``))。
 ``items/``
@@ -75,6 +76,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+
+from sai_memory.room_state import ROOM_STATE_META_KEY
 
 from .chatgpt_compat import build_conversation, is_conversation_message
 from .format import (
@@ -571,6 +574,54 @@ def parse_media_column(value: Any) -> Optional[List[Any]]:
     return parsed if isinstance(parsed, list) else None
 
 
+#: 知覚台帳のうち、部屋の様子の記帳 (束 = ``snapshot``) を持つ列。束のパッケージの
+#: ``media`` は、提示のときメッセージの添付として LLM へ渡る
+#: (sai_memory/room_state.py の render_pending_room_states と reopen_lost_bases)。
+ROOM_STATE_COLUMNS: Dict[str, str] = {
+    "perception_batches": "room_state_json",
+    "perception_buffer": "metadata",
+}
+
+
+def parse_room_state_column(table: str, value: Any) -> Any:
+    """:data:`ROOM_STATE_COLUMNS` の列の値を読む。読めなければ None。
+
+    perception_batches.room_state_json は記帳の list、perception_buffer.metadata は
+    ``ROOM_STATE_META_KEY`` に記帳を持つ dict。保存形は JSON 文字列で、取り込み側では
+    ZIP の値が list / dict のまま来ることもあるので、それも受ける。
+    """
+    expected = list if table == "perception_batches" else dict
+    if isinstance(value, str) and value:
+        try:
+            value = json.loads(value)
+        except (ValueError, RecursionError):
+            return None
+    return value if isinstance(value, expected) else None
+
+
+def room_state_records(table: str, data: Any) -> List[Dict[str, Any]]:
+    """:func:`parse_room_state_column` で読んだ値の中の部屋の様子の記帳 (dict) の一覧。
+
+    要素は ``data`` の中の実物 (写しではない)。
+    """
+    if table == "perception_batches":
+        records = data if isinstance(data, list) else []
+    else:
+        records = [data.get(ROOM_STATE_META_KEY)] if isinstance(data, dict) else []
+    return [record for record in records if isinstance(record, dict)]
+
+
+def room_state_media_refs(table: str, value: Any) -> Iterator[Dict[str, Any]]:
+    """:data:`ROOM_STATE_COLUMNS` の列の値の、束のパッケージの media の項目。"""
+    for record in room_state_records(table, parse_room_state_column(table, value)):
+        snapshot = record.get("snapshot")
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("packages"), list):
+            continue
+        for package in snapshot["packages"]:
+            if isinstance(package, dict):
+                yield from _media_entry_refs(package.get("media"))
+
+
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     quoted = '"' + table.replace('"', '""') + '"'
     return any(r[1] == column for r in conn.execute(f"PRAGMA table_info({quoted})").fetchall())
@@ -802,9 +853,31 @@ def _write_memory_db(
             for ref in _media_entry_refs(parse_media_column(row["media"])):
                 entry = attachment_refs.setdefault(
                     _attachment_key(ref),
-                    {"item": ref, "message_ids": [], "perception_rows": []},
+                    {"item": ref, "message_ids": [], "perception_rows": [],
+                     "column": f"{table}.media"},
                 )
                 entry["perception_rows"].append(f"{table}:{row['id']}")
+    # 部屋の様子の記帳 (ROOM_STATE_COLUMNS) の束の media が参照する添付。取り込み側は
+    # 束の media の path を、ここで入れたファイルの復元先へ書き換える
+    for table, column in ROOM_STATE_COLUMNS.items():
+        if table not in present or not _has_column(memory, table, column):
+            continue
+        quoted = '"' + table.replace('"', '""') + '"'
+        quoted_column = '"' + column.replace('"', '""') + '"'
+        for row in _iter_rows(
+            memory,
+            f"SELECT id, {quoted_column} AS value FROM {quoted} "
+            f"WHERE {quoted_column} IS NOT NULL ORDER BY id",
+        ):
+            for ref in room_state_media_refs(table, row["value"]):
+                entry = attachment_refs.setdefault(
+                    _attachment_key(ref),
+                    {"item": ref, "message_ids": [], "perception_rows": [],
+                     "column": f"{table}.{column}"},
+                )
+                label = f"{table}:{row['id']}"
+                if label not in entry["perception_rows"]:
+                    entry["perception_rows"].append(label)
 
     # attachments/
     if attachment_refs:
@@ -818,7 +891,7 @@ def _write_memory_db(
                 if entry["message_ids"]:
                     where = "messages.metadata"
                 else:
-                    where = entry["perception_rows"][0].split(":", 1)[0] + ".media"
+                    where = entry["column"]
                 if reason:
                     where = f"{where} ({reason})"
                 result.missing_files.append({"ref": str(ref_key), "where": where})

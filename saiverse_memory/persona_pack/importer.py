@@ -49,6 +49,13 @@ extensions/saiverse/memory_db/ から入る知覚台帳の media 列 — export.
 残すと、再エクスポートや会話のメディア読み込みが共有メディアフォルダの外のファイル
 (本体 DB など) を読みに行くため。
 
+知覚台帳の部屋の様子の記帳 (export.ROOM_STATE_COLUMNS — perception_batches.room_state_json と
+perception_buffer.metadata の room_state) の束のパッケージの media も同じ規則で書き換え、
+復元できなかった項目はパッケージの media から外す (束の media の path は空でない文字列で
+なければ束ごと無効になるため)。束を書き換えると指紋 (sai_memory/room_state.snapshot_digest)
+が変わるので、差分の記帳の base_digest を書き換えた土台の指紋に付け直す
+(:meth:`_ImportJob.room_state_digest_map`)。
+
 JSON 文字列の列 (export.JSON_TEXT_COLUMNS) の ``{"__raw_text__": s}`` は、s が JSON の
 object / array として解釈できるとき行ごと取り込まない (警告とスキップ件数)。正規の
 書き出しはスカラーか解釈できない文字列しか包まない (format.encode_json_text の契約) ので、
@@ -138,6 +145,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from sai_memory.room_state import snapshot_digest
+
 from .export import (
     _ATTACHMENT_KEYS,
     _DAY_REPORTS_DIR,
@@ -148,6 +157,7 @@ from .export import (
     EPOCH_COLUMNS,
     JSON_TEXT_COLUMNS,
     PERCEPTION_MEDIA_TABLES,
+    ROOM_STATE_COLUMNS,
     SAIVERSE_DB_TABLE_OWNERS,
     WORLD_PENDING_MARKER,
     _attachment_key,
@@ -155,6 +165,9 @@ from .export import (
     _media_entry_refs,
     is_extension_memory_table,
     parse_media_column,
+    parse_room_state_column,
+    room_state_media_refs,
+    room_state_records,
 )
 from .format import FORMAT_NAME, MANIFEST_NAME, RAW_TEXT_MARKER, decode_value, iso_to_epoch
 
@@ -1414,9 +1427,13 @@ class _ImportJob:
                 continue
             for entry in _attachment_refs(metadata):
                 needed.add(_attachment_key(entry))
-        for _table, row in self.perception_media_rows(conn):
+        for table, row in self.perception_media_rows(conn):
             for entry in _media_entry_refs(parse_media_column(decode_value(row.get("media")))):
                 needed.add(_attachment_key(entry))
+            column = ROOM_STATE_COLUMNS.get(table)
+            if column is not None:
+                for entry in room_state_media_refs(table, decode_value(row.get(column))):
+                    needed.add(_attachment_key(entry))
         for entry in self.pack.attachment_index:
             ref = entry.get("ref")
             zip_path = entry.get("path")
@@ -1519,6 +1536,83 @@ class _ImportJob:
         if entries is None:
             return value
         return json.dumps(self.relocate_media_entries(entries), ensure_ascii=False)
+
+    def relocate_room_state_snapshot(self, snapshot: Any) -> Any:
+        """部屋の様子の束 (snapshot) の各パッケージの media を取り込み先に合わせた写しを返す。
+
+        media の項目は :meth:`relocate_media_entries` の規則で書き換え、復元できず path が
+        空になった項目はパッケージの media から外す。束の media の path は
+        sai_memory/room_state.bundle_is_valid が空でない文字列を要求し、提示のときは
+        そのまま LLM へ添付として渡る — path を None にして残すと束ごと無効になり、
+        元の path を残すと取り込み先のメディアルートの外のファイルを読みうるため。
+        packages を持つ dict でない値はそのまま返す (読み手は束として扱わない)。
+        """
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("packages"), list):
+            return snapshot
+        packages: List[Any] = []
+        for package in snapshot["packages"]:
+            if isinstance(package, dict) and isinstance(package.get("media"), list):
+                package = dict(package)
+                package["media"] = [
+                    m for m in self.relocate_media_entries(package["media"])
+                    if not isinstance(m, dict) or (isinstance(m.get("path"), str) and m["path"])
+                ]
+            packages.append(package)
+        out = dict(snapshot)
+        out["packages"] = packages
+        return out
+
+    def room_state_digest_map(self) -> Dict[str, str]:
+        """取り込む部屋の様子の束の指紋の対応 (元の束の指紋 → 書き換えた束の指紋)。
+
+        差分の記帳の base_digest は土台の束の snapshot_digest (正準 JSON の sha256) で、
+        束の media を :meth:`relocate_room_state_snapshot` で書き換えると土台の指紋も
+        変わる。付け直さないと chain_is_intact が「土台が見えていない」と判定し、提示の
+        差分が全文へ開き直される。土台の束は別の行 (別の表) にあることもあるので、
+        行を入れる前に :data:`ROOM_STATE_COLUMNS` の全行から作る
+        (saiverse/building_id_repair.plan_memory_rewrite と同じ付け直し)。
+        """
+        digests: Dict[str, str] = {}
+        for table, column in ROOM_STATE_COLUMNS.items():
+            for row in self.pack.ext_memory_tables.get(table) or []:
+                data = parse_room_state_column(table, decode_value(row.get(column)))
+                for record in room_state_records(table, data):
+                    snapshot = record.get("snapshot")
+                    if not isinstance(snapshot, dict):
+                        continue
+                    relocated = self.relocate_room_state_snapshot(snapshot)
+                    if relocated != snapshot:
+                        digests[snapshot_digest(snapshot)] = snapshot_digest(relocated)
+        return digests
+
+    def relocate_room_state_column(
+        self, table: str, value: Any, digests: Dict[str, str]
+    ) -> Any:
+        """:data:`ROOM_STATE_COLUMNS` の列の値 (decode 済み) を書き換えて、保存する値を返す。
+
+        各記帳の snapshot を :meth:`relocate_room_state_snapshot` で書き換え、base_digest が
+        ``digests`` (:meth:`room_state_digest_map`) にあれば書き換えた土台の指紋に付け直す。
+        書き換えが無ければ元の値をそのまま返す。読めない値もそのまま返す — 読み手
+        (sai_memory/room_state.raw_room_entries と _parse_item_state) はそれを記帳なしと
+        して扱う。
+        """
+        data = parse_room_state_column(table, value)
+        if data is None:
+            return value
+        changed = False
+        for record in room_state_records(table, data):
+            snapshot = record.get("snapshot")
+            relocated = self.relocate_room_state_snapshot(snapshot)
+            if relocated != snapshot:
+                record["snapshot"] = relocated
+                changed = True
+            base = record.get("base_digest")
+            if isinstance(base, str) and base in digests:
+                record["base_digest"] = digests[base]
+                changed = True
+        if not changed:
+            return value
+        return json.dumps(data, ensure_ascii=False)
 
     # --- knowledge/ -------------------------------------------------------------
 
@@ -2120,6 +2214,7 @@ class _ImportJob:
     def stage_ext_memory(self, conn: sqlite3.Connection) -> None:
         """extensions/saiverse/memory_db/ を取り込む (export.is_extension_memory_table の表だけ)。"""
         self.report_refused_ext_memory_tables()
+        room_digests = self.room_state_digest_map()
         for table, rows in sorted(self.pack.ext_memory_tables.items()):
             counts = self.result.count(f"extensions/memory_db/{table}")
             if not rows:
@@ -2139,6 +2234,12 @@ class _ImportJob:
                     # 添付と同じ書き換え (復元先を指す / 復元できなければ path を落とす)。
                     # 参照するファイルの復元は plan_attachments が計画済み
                     decoded["media"] = self.relocate_media_column(decoded["media"])
+                room_column = ROOM_STATE_COLUMNS.get(table)
+                if room_column is not None and room_column in decoded:
+                    # 部屋の様子の束の media も同じ規則で書き換え、差分の土台の指紋を付け直す
+                    decoded[room_column] = self.relocate_room_state_column(
+                        table, decoded[room_column], room_digests,
+                    )
                 cur = self.insert(conn, table, decoded, or_ignore=True)
                 if cur.rowcount:
                     counts.added += 1
