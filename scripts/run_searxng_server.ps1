@@ -28,9 +28,6 @@ function Get-AbsPath {
 $PORT = if ($env:SEARXNG_PORT) { $env:SEARXNG_PORT } else { "8080" }
 $BIND_ADDRESS = if ($env:SEARXNG_BIND_ADDRESS) { $env:SEARXNG_BIND_ADDRESS } else { "0.0.0.0" }
 
-$rawSrc = if ($env:SEARXNG_SRC_DIR) { $env:SEARXNG_SRC_DIR } else { "scripts\.searxng-src" }
-$SRC_DIR = Get-AbsPath $rawSrc
-
 $rawVenv = if ($env:SEARXNG_VENV_DIR) { $env:SEARXNG_VENV_DIR } else { "scripts\.searxng-venv" }
 $VENV_DIR = Get-AbsPath $rawVenv
 
@@ -38,23 +35,31 @@ $rawSettings = if ($env:SEARXNG_SETTINGS_PATH) { $env:SEARXNG_SETTINGS_PATH } el
 $SETTINGS_PATH = Get-AbsPath $rawSettings
 
 $venvPython = "$VENV_DIR\Scripts\python.exe"
+$bootstrapPython = if (Test-Path $venvPython) { $venvPython } else { "python" }
+$installer = Join-Path $ScriptRoot "searxng_install.py"
+$SRC_DIR = & $bootstrapPython $installer source
+if ($LASTEXITCODE -ne 0) { throw "Invalid SearXNG source configuration" }
+$env:SEARXNG_SRC_DIR = "$SRC_DIR"
 
-# Run setup if not done yet
-if (-not (Test-Path "$SRC_DIR\requirements.txt") -or -not (Test-Path $venvPython)) {
-    Write-Host "[INFO] SearXNG is not set up. Running setup..."
-    $setupScript = Join-Path $ScriptRoot "setup_searxng.ps1"
-    & $setupScript
+# Check the installed commit and real imports, including timezone data.
+& $bootstrapPython $installer check
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[INFO] Preparing the pinned SearXNG release..."
+    & $bootstrapPython $installer setup
+    if ($LASTEXITCODE -ne 0) { throw "SearXNG setup failed" }
 }
 
 # Re-merge settings (picks up SAIVerse default changes + user overrides)
 Write-Host "[INFO] Merging SearXNG settings..."
 $mergeScript = Join-Path $ScriptRoot "merge_searxng_settings.py"
 & $venvPython $mergeScript
+if ($LASTEXITCODE -ne 0) { throw "SearXNG settings generation failed" }
 
 # SearXNG asks git for its version at start-up and dies when git cannot be
 # found (Git installed only inside the SAIVerse folder). Let it start without git.
 $versionScript = Join-Path $ScriptRoot "ensure_searxng_version.py"
 & $venvPython $versionScript "$SRC_DIR"
+if ($LASTEXITCODE -ne 0) { throw "SearXNG version preparation failed" }
 
 # Start server
 $env:SEARXNG_SETTINGS_PATH = "$SETTINGS_PATH"
@@ -64,3 +69,4 @@ $env:FLASK_SKIP_DOTENV = "1"
 
 Write-Host "[INFO] Starting SearXNG at http://${BIND_ADDRESS}:${PORT}"
 & $venvPython -m searx.webapp
+exit $LASTEXITCODE

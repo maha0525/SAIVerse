@@ -164,6 +164,8 @@ api/
 
 ### scripts/
 
+SearXNG のセットアップは `setup_searxng.ps1` / `.sh` から共通の `searxng_install.py` を呼ぶ。`searxng_pin.json` が採用コミットの正典、`searxng_config.py` が取得・設定マージ・起動の参照先を揃える。固定版の公式 ZIP を `.searxng-src/<commit>/` へ取得し、依存は専用 `.searxng-venv/` へ導入する（[intent](../intent/searxng_installation.md)）。
+
 保守操作の実装。`update.bat` / `update.sh` / PowerShell / UI更新はいずれも同じupdate engineへ委譲する。`start.bat` / `start.sh` も起動前に `update_engine.py --check-complete` を呼び、更新が途中で死んでいれば同じ engine で仕上げてから起動する（[issue](../issues/v0229_update_bat_truncates_after_git_pull.md)）。
 
 ```

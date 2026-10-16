@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate searxng_settings.yml by merging three layers:
 
-1. SearXNG base settings  (from .searxng-src/searx/settings.yml)
+1. Pinned SearXNG base settings (from .searxng-src/<commit>/searx/settings.yml)
 2. SAIVerse engine defaults (searxng_engine_defaults.yml, git tracked)
 3. User engine overrides   (searxng_user_engines.yml, gitignored)
 
@@ -21,6 +21,8 @@ from pathlib import Path
 
 import yaml
 
+from searxng_config import source_directory
+
 PROBLEMATIC_ENGINES = {"ahmia", "torch", "wikidata", "radiobrowser"}
 
 
@@ -28,11 +30,13 @@ def main() -> None:
     script_dir = Path(__file__).resolve().parent
     workspace_root = script_dir.parent
 
-    src_dir = _resolve(os.getenv("SEARXNG_SRC_DIR") or "scripts/.searxng-src", workspace_root)
+    src_dir = source_directory()
     base_path = src_dir / "searx" / "settings.yml"
 
     defaults_path = script_dir / "searxng_engine_defaults.yml"
-    user_engines_path = script_dir / "searxng_user_engines.yml"
+    user_engines_path = _resolve(
+        os.getenv("SEARXNG_USER_ENGINES_PATH") or "scripts/searxng_user_engines.yml", workspace_root,
+    )
 
     settings_path = _resolve(
         os.getenv("SEARXNG_SETTINGS_PATH") or "scripts/searxng_settings.yml",
@@ -135,6 +139,7 @@ def _remove_problematic_engines(data: dict) -> None:
 
 
 def _generate_user_engines(engines: list, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# SearXNG エンジン設定",
         "# default: SAIVerse推奨に従う（バージョンアップで変わる可能性あり）",

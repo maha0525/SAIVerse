@@ -48,6 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
+| 🟣 検証待ち | SearXNG の導入版固定 | 固定版の導入・依存欠落からの復旧と Windows の HTTP 応答は検証済み。PR の差分を確認して develop に取り込む。 | まはー (PR 確認) | [intent](../intent/searxng_installation.md) | 2026-10-16 |
 | 🟣 | Sarashina API | mini・nanoの接続と互換設定はPRレビュー待ち。PRを確認し、キー設定後に実サービスとの接続を確認する。 | まはー | [intent](../intent/sarashina_provider.md) | 2026-10-15 |
 | 🟣 検証待ち | 想起用埋め込みの一括処理のメモリのピーク削減 (2GB の VPS 向け) | 区切りをトークン数にし、メモリの抱え込みを切る変更を PR にした。次 = まはーが PR を確認してマージ → 2GB の VPS 利用者に、再計算か取り込みで落ちなくなったかを聞く。 | まはー (PR の確認) → VPS 利用者 | [intent](../intent/embedding_gemma2_migration.md) | 2026-10-14 |
 | 🟣 検証待ち | 公式の Sign in with ChatGPT への乗り換え (PR #386) | ログイン・取り下げ・ログアウト・再発行・送信項目の修正は実装済みで、PR #386 がまはーの確認を待っている。次 = まはーが実機で公式のログインを一度行い、普段の発話と道具の呼び出しが通ることを見る。通らなければメティスがエラーの指す項目を外す。 | まはー (PR 確認・実機ログイン) | [intent §8](../intent/codex_subscription_auth.md) | 2026-10-12 |
