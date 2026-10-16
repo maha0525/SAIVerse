@@ -12084,8 +12084,8 @@
     "en": "Also overwrite the profile with the contents of the ZIP"
   },
   "components.memory.PersonaPack.mergeHint": {
-    "ja": "Memopedia のページは、内容が違うときは更新日時が新しい方が残ります (上書きされた方は編集履歴から戻せます)。Chronicle・所持品と私室・その他の記録は合流では取り込まず、スキップとして数えます。",
-    "en": "When a Memopedia page differs, the more recently updated version is kept (the overwritten text can be restored from the edit history). Chronicle, items and the private room, and other records are not merged; they are counted as skipped."
+    "ja": "Memopedia のページは、内容が違うときは更新日時が新しい方が残ります (上書きされた方は編集履歴から戻せます)。Chronicle の記事は、取り込み先のどの記事もまだまとめていない会話のぶんだけが入ります。所持品と私室・その他の記録は合流では取り込まず、スキップとして数えます。",
+    "en": "When a Memopedia page differs, the more recently updated version is kept (the overwritten text can be restored from the edit history). Chronicle articles are imported only for conversations that no article in this persona covers yet. Items, the private room, and other records are not merged; they are counted as skipped."
   },
   "components.memory.PersonaPack.mergeAction": {
     "ja": "このペルソナに合流させる",
