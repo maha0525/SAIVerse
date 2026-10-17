@@ -746,6 +746,119 @@ def test_failure_after_files_are_planned_removes_created_files(
 
 
 # ---------------------------------------------------------------------------
+# 作業用 SQLite (intent §3 原則 6)
+# ---------------------------------------------------------------------------
+
+def _staging_files(folder: Path) -> List[Path]:
+    return sorted(folder.glob("*.work.sqlite*"))
+
+
+def test_staging_db_is_next_to_the_zip_while_importing(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    zip_path: Path = source["zip"]
+    seen: List[Path] = []
+    original = importer._ImportJob.write_files
+
+    def write_and_look(self: Any) -> None:
+        expected = zip_path.with_name(f"{zip_path.name}.{self.import_id[:16]}.work.sqlite")
+        assert expected.is_file()
+        seen.extend(_staging_files(zip_path.parent))
+        # 積んだ表は ZIP の並び順のまま読める
+        assert [m["id"] for m in self.pack.messages] == [
+            m["id"] for m in _zjson(zip_path, "chatlog/messages.json")
+        ]
+        original(self)
+
+    monkeypatch.setattr(importer._ImportJob, "write_files", write_and_look)
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, zip_path, "new")
+    assert [p.name for p in seen] == [
+        f"{zip_path.name}.{importer._import_id(importer._sha256_file(zip_path), PID)[:16]}.work.sqlite"
+    ]
+    # ペルソナフォルダには置かない
+    assert not list(target["home"].rglob("*.work.sqlite*"))
+    assert _staging_files(zip_path.parent) == []
+
+
+def test_staging_db_is_removed_after_success_and_failure(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    zip_path: Path = source["zip"]
+    # 成功 (新規作成と、同じパックの合流)
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, zip_path, "new")
+    assert _staging_files(zip_path.parent) == []
+    _import(target, zip_path, "merge")
+    assert _staging_files(zip_path.parent) == []
+
+    # ZIP の JSON の検査で失敗 (積んでいる途中)
+    broken = _rewrite_zip(zip_path, tmp_path / "broken.zip", {"journal/clips.json": b"[{\"clip_id\": "})
+    with pytest.raises(ValueError, match="clips.json"):
+        _import(_make_env(tmp_path / "dst2", PID), broken, "new")
+    assert _staging_files(tmp_path) == []
+
+    # 取り込み先への書き込みの途中で失敗
+    def fail(self: Any) -> None:
+        raise RuntimeError("boom while writing")
+
+    monkeypatch.setattr(importer._ImportJob, "write_files", fail)
+    with pytest.raises(RuntimeError, match="boom"):
+        _import(_make_env(tmp_path / "dst3", PID), zip_path, "new")
+    assert _staging_files(zip_path.parent) == []
+
+
+def test_staging_db_left_over_from_a_stopped_import_is_replaced(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    zip_path: Path = source["zip"]
+    left = zip_path.with_name(
+        f"{zip_path.name}.{importer._import_id(importer._sha256_file(zip_path), PID)[:16]}.work.sqlite"
+    )
+    left.write_bytes(b"not a sqlite file")
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, zip_path, "new")
+    assert not left.exists()
+    conn = _mem(target)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 6
+    finally:
+        conn.close()
+
+
+def test_element_over_the_limit_is_refused_before_writing(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    messages = _zjson(source["zip"], "chatlog/messages.json")
+    limit = max(len(json.dumps(m, ensure_ascii=False)) for m in messages) + 10
+    messages[-1]["content"] = "長" * (limit + 1)
+    big = _rewrite_zip(
+        source["zip"], tmp_path / "big.zip",
+        {"chatlog/messages.json": json.dumps(messages, ensure_ascii=False).encode("utf-8")},
+    )
+    monkeypatch.setattr(importer, "MAX_JSON_ELEMENT_CHARS", limit)
+    # 上限より小さい要素だけのパックは通る
+    importer.validate_pack(source["zip"])
+    match = rf"chatlog/messages\.json\[{len(messages) - 1}\] is over the limit"
+    with pytest.raises(ValueError, match=match):
+        importer.validate_pack(big)
+    target = _make_env(tmp_path / "dst", PID)
+    before = _dump(target)
+    with pytest.raises(ValueError, match=match):
+        _import(target, big, "new")
+    assert _dump(target) == before
+    assert _staging_files(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
 # profile/
 # ---------------------------------------------------------------------------
 

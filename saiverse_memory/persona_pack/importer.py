@@ -145,7 +145,9 @@ desk_items (mode="new" の extensions/saiverse/memory_db/) の ref / purpose_ref
 
 書き込みは memory.db と saiverse.db それぞれ単一トランザクションで行い、全段が
 成功したときだけ commit する。途中で失敗したら両方 rollback し、この取り込みが
-作ったファイルを消す。ZIP の JSON の解釈と形の検査は書き込みより前に全部済ませる。
+作ったファイルを消す。ZIP の JSON の解釈と形の検査は書き込みより前に全部済ませる
+(配列の JSON は 1 要素ずつ検査しながら作業用 SQLite — :class:`_StagingDB` — に積み、
+各工程はそこから読む)。
 
 片側だけ commit された取り込みの再開: 二つの DB の commit は別々なので、memory.db の
 commit 後に saiverse.db の commit が失敗すると片側が残る。mode="new" は最初の
@@ -202,7 +204,7 @@ import uuid
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 from sai_memory.presented_reduction import DROPPED_MEDIA_FIELD
 from sai_memory.room_state import snapshot_digest
@@ -242,6 +244,7 @@ from .format import (
     encode_json_text,
     iso_to_epoch,
 )
+from .json_stream import iter_json_array
 
 LOGGER = logging.getLogger(__name__)
 
@@ -379,6 +382,11 @@ _STREAM_CHUNK_BYTES = 1 << 20
 # メモリへ読み、json.loads の Python オブジェクトは生バイトの数倍になる。正規のパックの
 # JSON は長命のペルソナでも数百 MB 規模。MAX_UNCOMPRESSED_BYTES はディスクの保護として残す。
 MAX_JSON_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+# 配列の JSON の 1 要素のテキストの上限 (文字数)。配列の JSON は 1 要素ずつ読む
+# (json_stream.iter_json_array) ので、メモリに同時に載るのは読みかけの 1 要素の文字列と、
+# その Python オブジェクトだけになる。この要素単位の上限が、配列の JSON を読むときの
+# メモリの上限になる。超える要素は切り詰めずに拒否する (本人名義のテキストは無改変)。
+MAX_JSON_ELEMENT_CHARS = 64 * 1024 * 1024
 
 
 @dataclass
@@ -461,20 +469,28 @@ class _PackReader:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"persona pack: {name} is not valid JSON: {exc}") from exc
 
-    def rows(self, name: str, required: Sequence[str] = ()) -> List[Dict[str, Any]]:
-        """JSON 配列 (要素は dict) を読む。無ければ空。必須キーの欠けは ValueError。"""
+    def iter_json_array(self, name: str) -> Iterator[Any]:
+        """JSON 配列のエントリの要素を、先頭から 1 要素ずつ返す (json_stream.iter_json_array)。
+
+        1 要素の上限は MAX_JSON_ELEMENT_CHARS (呼ぶたびにモジュールの値を読む)。
+        """
+        with self.zf.open(name) as raw:
+            yield from iter_json_array(raw, name, max_element_chars=MAX_JSON_ELEMENT_CHARS)
+
+    def iter_rows(self, name: str, required: Sequence[str] = ()) -> Iterator[Dict[str, Any]]:
+        """JSON 配列 (要素は dict) を 1 要素ずつ検査しながら返す。無ければ何も返さない。
+
+        要素が dict でない・必須キーの欠けは ValueError。
+        """
         if name not in self.names:
-            return []
-        data = self.load_json(name)
-        if not isinstance(data, list):
-            raise ValueError(f"persona pack: {name} must be a JSON array")
-        for i, row in enumerate(data):
+            return
+        for i, row in enumerate(self.iter_json_array(name)):
             if not isinstance(row, dict):
                 raise ValueError(f"persona pack: {name}[{i}] must be an object")
             for key in required:
                 if row.get(key) is None or row.get(key) == "":
                     raise ValueError(f"persona pack: {name}[{i}] missing {key!r}")
-        return data
+            yield row
 
     def files_under(self, prefix: str) -> List[str]:
         return sorted(n for n in self.names if n.startswith(prefix))
@@ -576,9 +592,9 @@ def _row_count_key(table: str, row: Dict[str, Any]) -> str:
 
 
 def _refuse_structured_raw_text(
-    rows: List[Dict[str, Any]], table: str, file_name: str, pack: "_PackData"
-) -> List[Dict[str, Any]]:
-    """JSON_TEXT_COLUMNS の列が取り込めない形の行を除いて返す。
+    rows: Iterable[Dict[str, Any]], table: str, file_name: str, pack: "_PackData"
+) -> Iterator[Dict[str, Any]]:
+    """JSON_TEXT_COLUMNS の列が取り込めない形の行を除いて、残りを 1 行ずつ返す。
 
     - ``{"__bytes_b64__": ...}`` の値は、:func:`_json_bytes_to_text` で文字列に戻せれば、
       書き出しがその文字列から作る形 (format.encode_json_text — object / array なら
@@ -591,7 +607,6 @@ def _refuse_structured_raw_text(
     (_ImportJob.report_refused_json_text が警告とスキップ件数にする)。
     """
     columns = JSON_TEXT_COLUMNS.get(table, ())
-    kept: List[Dict[str, Any]] = []
     for i, row in enumerate(rows):
         undecodable: List[str] = []
         for column in columns:
@@ -606,7 +621,7 @@ def _refuse_structured_raw_text(
                 row[column] = value
         structured = [c for c in columns if _raw_text_is_structured(row.get(c))]
         if not undecodable and not structured:
-            kept.append(row)
+            yield row
             continue
         where = f"{file_name}[{i}] (id={row.get('id')!r})"
         if undecodable:
@@ -622,11 +637,12 @@ def _refuse_structured_raw_text(
                 f"array in {RAW_TEXT_MARKER!r}; a persona pack only wraps scalar or unparsable "
                 "text there, so the row was not imported",
             ))
-    return kept
 
 
-def _unwrap_bytes_perception_columns(table: str, rows: List[Dict[str, Any]], pack: "_PackData") -> None:
-    """知覚台帳の JSON 文字列の列の ``{"__bytes_b64__": ...}`` を文字列に戻す (行を書き換える)。
+def _unwrap_bytes_perception_columns(
+    table: str, rows: Iterable[Dict[str, Any]], pack: "_PackData"
+) -> Iterator[Dict[str, Any]]:
+    """知覚台帳の JSON 文字列の列の ``{"__bytes_b64__": ...}`` を文字列に戻す (行を書き換えて 1 行ずつ返す)。
 
     対象は PERCEPTION_MEDIA_TABLES の ``media`` と ROOM_STATE_COLUMNS の列。保存形は
     JSON 文字列 (sai_memory/perception_buffer.py) で、書き出しは文字列をそのまま書くので、
@@ -644,8 +660,6 @@ def _unwrap_bytes_perception_columns(table: str, rows: List[Dict[str, Any]], pac
     room_column = ROOM_STATE_COLUMNS.get(table)
     if room_column is not None:
         columns.append(room_column)
-    if not columns:
-        return
     for i, row in enumerate(rows):
         for column in columns:
             if not _is_bytes_wrapper(row.get(column)):
@@ -665,6 +679,7 @@ def _unwrap_bytes_perception_columns(table: str, rows: List[Dict[str, Any]], pac
                 f"{column} wraps bytes in {BYTES_MARKER!r} that are not the column's JSON; "
                 "the value was set to None"
             )
+        yield row
 
 
 def _encode_json_text(is_raw: bool, value: Any) -> Any:
@@ -841,34 +856,181 @@ def _media_dir_for(original_path: Any, item_type: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 取り込みの作業用 SQLite (intent §3 原則 6)
+# ---------------------------------------------------------------------------
+
+_STAGING_SUFFIX = ".work.sqlite"
+# _StagingDB.fill が executemany にまとめて渡す行数
+_STAGING_BATCH = 1000
+
+
+def _staging_path(zip_path: Path, import_id: str) -> Path:
+    """取り込みの作業用 SQLite の場所: ZIP と同じフォルダの
+    ``<ZIP のファイル名>.<import_id の先頭 16 字>.work.sqlite``。
+
+    ZIP と同じフォルダに置くのは、ZIP が置けた場所なら展開分の空き容量の見込みも同じ
+    場所で立つため。ペルソナフォルダには置かない (取り残しが次の書き出しに入り、
+    取り込みでも復元される)。名前に import_id を入れるのは partial_path の流儀に揃えるため。
+    """
+    return zip_path.with_name(f"{zip_path.name}.{import_id[:16]}{_STAGING_SUFFIX}")
+
+
+def _staging_text(row: Dict[str, Any]) -> str:
+    """作業用 SQLite に積む 1 行の JSON テキスト。
+
+    ZIP の JSON の ``\\ud800`` のようなエスケープは対になっていないサロゲートを含む
+    文字列になり、ensure_ascii=False のテキストは UTF-8 にできない (sqlite3 が
+    UnicodeEncodeError を出す)。その行だけ ensure_ascii=True で書く — json.loads で
+    同じ値に戻るので、取り込みの挙動は変わらない。
+    """
+    text = json.dumps(row, ensure_ascii=False)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(row)
+    return text
+
+
+class _StagingDB:
+    """取り込みの作業用 SQLite。ZIP の配列の JSON を 1 ファイル 1 表で積み、各工程は
+    そこから ZIP の並び順で 1 行ずつ読み出す。
+
+    表の形は ``CREATE TABLE "<ZIP のエントリ名>" (ord INTEGER PRIMARY KEY, row TEXT NOT NULL, ...)``。
+    ord は ZIP の配列の並び順 (0 始まり)、row は要素の JSON テキスト。fill の ``keys`` で
+    表ごとに追加の列 (行から値を取り出す関数) を宣言できる。
+
+    捨てる作業ファイルなので journal_mode=OFF / synchronous=OFF / temp_store=FILE で開く。
+    取り込み先の接続 (memory.db / saiverse.db) に ATTACH しない — 別の接続・別のファイルに
+    しておけば、取り込み先の BEGIN の中の ROLLBACK がここへ及ばない。積む工程
+    (_load_pack) は取り込み先の BEGIN より前に終える (書き込み前に全部検査する契約)。
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        path.unlink(missing_ok=True)
+        self.conn: Optional[sqlite3.Connection] = sqlite3.connect(str(path), isolation_level=None)
+        try:
+            self.conn.execute("PRAGMA journal_mode=OFF")
+            self.conn.execute("PRAGMA synchronous=OFF")
+            self.conn.execute("PRAGMA temp_store=FILE")
+        except BaseException:
+            self.discard()
+            raise
+        # 表 (ZIP のエントリ名) → 積んだ行数
+        self._counts: Dict[str, int] = {}
+
+    def fill(
+        self,
+        name: str,
+        rows: Iterable[Dict[str, Any]],
+        keys: Mapping[str, Callable[[Dict[str, Any]], Any]] = {},
+    ) -> "_StagedRows":
+        """表 ``name`` を作り、``rows`` を ZIP の並び順のまま積む。"""
+        if self.conn is None:
+            raise RuntimeError("staging database is already discarded")
+        if name in self._counts:
+            raise ValueError(f"persona pack: {name} is staged twice")
+        extra = list(keys)
+        table = _quote(name)
+        self.conn.execute(
+            f"CREATE TABLE {table} (ord INTEGER PRIMARY KEY, row TEXT NOT NULL"
+            + "".join(f", {_quote(c)}" for c in extra) + ")"
+        )
+        sql = (
+            f"INSERT INTO {table} (ord, row{''.join(f', {_quote(c)}' for c in extra)}) "
+            f"VALUES (?, ?{', ?' * len(extra)})"
+        )
+        getters = [keys[c] for c in extra]
+        batch: List[Tuple[Any, ...]] = []
+        count = 0
+        for row in rows:
+            batch.append((count, _staging_text(row), *(get(row) for get in getters)))
+            count += 1
+            if len(batch) >= _STAGING_BATCH:
+                self.conn.executemany(sql, batch)
+                batch.clear()
+        if batch:
+            self.conn.executemany(sql, batch)
+        self._counts[name] = count
+        return _StagedRows(self, name)
+
+    def rows(self, name: str) -> Iterator[Dict[str, Any]]:
+        """表 ``name`` の行を ord の順に 1 行ずつ返す (積んでいない表なら何も返さない)。"""
+        if name not in self._counts or self.conn is None:
+            return
+        for (text,) in self.conn.execute(f"SELECT row FROM {_quote(name)} ORDER BY ord"):
+            yield json.loads(text)
+
+    def count(self, name: str) -> int:
+        return self._counts.get(name, 0)
+
+    def discard(self) -> None:
+        """接続を閉じて作業ファイルを消す (何度呼んでもよい)。"""
+        if self.conn is not None:
+            self.conn.close()
+            self.conn = None
+        self.path.unlink(missing_ok=True)
+
+
+class _StagedRows:
+    """_StagingDB の 1 表。走査のたびに _StagingDB.rows で先頭 (ord の順) から読み直す。
+
+    len / 真偽は積んだ行数 (_StagingDB.count)。staging が None のものは空の表
+    (ZIP に無いファイル・validate_pack の流し読み)。
+    """
+
+    __slots__ = ("staging", "name")
+
+    def __init__(self, staging: Optional[_StagingDB] = None, name: str = "") -> None:
+        self.staging = staging
+        self.name = name
+
+    def __iter__(self) -> Iterator[Dict[str, Any]]:
+        if self.staging is None:
+            return iter(())
+        return self.staging.rows(self.name)
+
+    def __len__(self) -> int:
+        return 0 if self.staging is None else self.staging.count(self.name)
+
+    def __bool__(self) -> bool:
+        return len(self) > 0
+
+
+# ---------------------------------------------------------------------------
 # 読み込んだ ZIP の中身 (書き込み前に全部検査する)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class _PackData:
+    """ZIP の中身。配列の JSON の表 (_StagedRows) は作業用 SQLite から読み、
+    一枚物と件数が有界なものはメモリに持つ。"""
+
     source_id: str
     contents: Set[str]
     version: str = ""
-    threads: List[Dict[str, Any]] = field(default_factory=list)
-    stelis_threads: List[Dict[str, Any]] = field(default_factory=list)
-    messages: List[Dict[str, Any]] = field(default_factory=list)
-    pages: List[Dict[str, Any]] = field(default_factory=list)
-    activities: List[Dict[str, Any]] = field(default_factory=list)
-    memos: List[Dict[str, Any]] = field(default_factory=list)
-    clips: List[Dict[str, Any]] = field(default_factory=list)
-    purpose_tags: List[Dict[str, Any]] = field(default_factory=list)
-    task_book: List[Dict[str, Any]] = field(default_factory=list)
+    threads: _StagedRows = field(default_factory=_StagedRows)
+    stelis_threads: _StagedRows = field(default_factory=_StagedRows)
+    messages: _StagedRows = field(default_factory=_StagedRows)
+    pages: _StagedRows = field(default_factory=_StagedRows)
+    activities: _StagedRows = field(default_factory=_StagedRows)
+    memos: _StagedRows = field(default_factory=_StagedRows)
+    clips: _StagedRows = field(default_factory=_StagedRows)
+    purpose_tags: _StagedRows = field(default_factory=_StagedRows)
+    task_book: _StagedRows = field(default_factory=_StagedRows)
+    # ZIP のエントリ名と相対パスの組だけ (中身は持たない)
     day_reports: List[Tuple[str, PurePosixPath]] = field(default_factory=list)
-    attachment_index: List[Dict[str, Any]] = field(default_factory=list)
+    attachment_index: _StagedRows = field(default_factory=_StagedRows)
     profile: Optional[Dict[str, Any]] = None
     # items/private_room.json と items/items.json (形は _load_items で検査済み)
     private_room: Optional[Dict[str, Any]] = None
     items: Optional[Dict[str, Any]] = None
-    ext_memory_tables: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    ext_memory_tables: Dict[str, _StagedRows] = field(default_factory=dict)
     # extensions/saiverse/memory_db/ にあったが、書き出す側がこのフォルダへ書かない表
     # (export.is_extension_memory_table が False) の行数。取り込まない
     ext_memory_refused: Dict[str, int] = field(default_factory=dict)
-    ext_saiverse_tables: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    ext_saiverse_tables: Dict[str, _StagedRows] = field(default_factory=dict)
+    # ZIP のエントリ名と相対パスの組だけ (中身は持たない。名前は _PackReader.names にもある)
     ext_persona_files: List[Tuple[str, PurePosixPath]] = field(default_factory=list)
     # JSON_TEXT_COLUMNS の列が取り込めない形 (__raw_text__ が object / array を包む・
     # __bytes_b64__ が JSON の文字列に戻らない) だったため除いた行: (内訳のキー, 警告文)。
@@ -887,8 +1049,15 @@ _EXT_PERSONA = _EXT + "persona_dir/"
 _TABLE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
-def _load_pack(reader: _PackReader) -> _PackData:
-    """ZIP を読み、取り込みに使う全 JSON を解釈して形を検査する (書き込みはしない)。"""
+def _load_pack(reader: _PackReader, staging: Optional[_StagingDB]) -> _PackData:
+    """ZIP を読み、取り込みに使う全 JSON を解釈して形を検査する (取り込み先には書き込まない)。
+
+    配列の JSON は 1 要素ずつ読み (_PackReader.iter_rows)、要素の検査と行の書き換え
+    (_refuse_structured_raw_text・_unwrap_bytes_perception_columns) を済ませた行を
+    ``staging`` に積む。``staging`` が None (validate_pack) なら同じ検査を流し読みで行い、
+    行は捨てる。一枚物 (manifest・profile・items/) と、名前の組だけのもの (day_reports・
+    ext_persona_files) はメモリに持つ。
+    """
     if MANIFEST_NAME not in reader.names:
         raise ValueError("persona pack: manifest.json is missing")
     manifest = reader.load_json(MANIFEST_NAME)
@@ -907,43 +1076,44 @@ def _load_pack(reader: _PackReader) -> _PackData:
     pack = _PackData(source_id=source_id, contents=set(contents), version=version)
     has = pack.contents.__contains__
 
+    def stage(name: str, rows: Iterable[Dict[str, Any]]) -> _StagedRows:
+        if staging is None:
+            for _row in rows:  # 流し読み (検査だけ行い、行は捨てる)
+                pass
+            return _StagedRows()
+        return staging.fill(name, rows)
+
     if has("chatlog"):
-        pack.threads = reader.rows("chatlog/threads.json", ("id",))
-        pack.stelis_threads = reader.rows("chatlog/stelis_threads.json", ("thread_id",))
-        pack.messages = _refuse_structured_raw_text(
-            reader.rows("chatlog/messages.json", ("id", "thread_id")),
-            "messages", "chatlog/messages.json", pack,
-        )
+        name = "chatlog/threads.json"
+        pack.threads = stage(name, reader.iter_rows(name, ("id",)))
+        name = "chatlog/stelis_threads.json"
+        pack.stelis_threads = stage(name, reader.iter_rows(name, ("thread_id",)))
+        name = "chatlog/messages.json"
+        pack.messages = stage(name, _refuse_structured_raw_text(
+            reader.iter_rows(name, ("id", "thread_id")), "messages", name, pack,
+        ))
     if has("knowledge"):
-        pack.pages = _refuse_structured_raw_text(
-            reader.rows("knowledge/pages.json", ("id", "category")),
-            "memopedia_pages", "knowledge/pages.json", pack,
-        )
+        name = "knowledge/pages.json"
+        pack.pages = stage(name, _refuse_structured_raw_text(
+            reader.iter_rows(name, ("id", "category")), "memopedia_pages", name, pack,
+        ))
     if has("journal"):
-        pack.activities = reader.rows("journal/activities.json", ("id",))
-        pack.memos = reader.rows("journal/memos.json", ("activity_id",))
-        pack.clips = reader.rows("journal/clips.json", ("clip_id",))
-        pack.purpose_tags = reader.rows("journal/purpose_tags.json", ("tag_id",))
-        pack.task_book = reader.rows("journal/task_book.json", ("TASK_ID",))
+        name = "journal/activities.json"
+        pack.activities = stage(name, reader.iter_rows(name, ("id",)))
+        name = "journal/memos.json"
+        pack.memos = stage(name, reader.iter_rows(name, ("activity_id",)))
+        name = "journal/clips.json"
+        pack.clips = stage(name, reader.iter_rows(name, ("clip_id",)))
+        name = "journal/purpose_tags.json"
+        pack.purpose_tags = stage(name, reader.iter_rows(name, ("tag_id",)))
+        name = "journal/task_book.json"
+        pack.task_book = stage(name, reader.iter_rows(name, ("TASK_ID",)))
         prefix = f"journal/{_DAY_REPORTS_DIR}/"
         pack.day_reports = [
             (name, _safe_relpath(name[len(prefix):], name)) for name in reader.files_under(prefix)
         ]
     if has("attachments") and "attachments/index.json" in reader.names:
-        index = reader.load_json("attachments/index.json")
-        if not isinstance(index, list) or not all(isinstance(e, dict) for e in index):
-            raise ValueError("persona pack: attachments/index.json must be a list of objects")
-        for i, entry in enumerate(index):
-            path = entry.get("path")
-            if path is None:
-                continue
-            if path not in reader.names:
-                raise ValueError(f"persona pack: attachments/index.json[{i}] points to a missing file {path!r}")
-            # export が書く形は attachments/<種類>/<ファイル名> だけ (plan_attachments が分解する)
-            parts = _safe_relpath(path, "attachments/index.json").parts
-            if len(parts) != 3 or parts[0] != "attachments":
-                raise ValueError(f"persona pack: unexpected attachment path {path!r}")
-        pack.attachment_index = index
+        pack.attachment_index = stage("attachments/index.json", _iter_attachment_index(reader))
     if has("profile") and "profile/profile.json" in reader.names:
         profile = reader.load_json("profile/profile.json")
         if not isinstance(profile, dict) or not isinstance(profile.get("ai"), dict):
@@ -964,14 +1134,39 @@ def _load_pack(reader: _PackReader) -> _PackData:
                     raise ValueError(f"persona pack: unexpected extensions file {name!r}")
                 # 合流でも形を検査する (不正なパックは書き込み前に拒否する)。合流は
                 # chunk_page_edges をここから取り込み、残りの表も件数を内訳に載せる
-                rows = reader.rows(name)
+                rows = reader.iter_rows(name)
                 if target is pack.ext_memory_tables and not is_extension_memory_table(table[:-5]):
-                    pack.ext_memory_refused[table[:-5]] = len(rows)
+                    pack.ext_memory_refused[table[:-5]] = sum(1 for _row in rows)
                     continue
                 if target is pack.ext_memory_tables:
-                    _unwrap_bytes_perception_columns(table[:-5], rows, pack)
-                target[table[:-5]] = rows
+                    rows = _unwrap_bytes_perception_columns(table[:-5], rows, pack)
+                target[table[:-5]] = stage(name, rows)
     return pack
+
+
+def _iter_attachment_index(reader: _PackReader) -> Iterator[Dict[str, Any]]:
+    """attachments/index.json の項目を 1 つずつ検査しながら返す。"""
+    name = "attachments/index.json"
+    not_objects = f"persona pack: {name} must be a list of objects"
+    try:
+        for i, entry in enumerate(reader.iter_json_array(name)):
+            if not isinstance(entry, dict):
+                raise ValueError(not_objects)
+            path = entry.get("path")
+            if path is not None:
+                if path not in reader.names:
+                    raise ValueError(f"persona pack: {name}[{i}] points to a missing file {path!r}")
+                # export が書く形は attachments/<種類>/<ファイル名> だけ (plan_attachments が分解する)
+                parts = _safe_relpath(path, name).parts
+                if len(parts) != 3 or parts[0] != "attachments":
+                    raise ValueError(f"persona pack: unexpected attachment path {path!r}")
+            yield entry
+    except ValueError as exc:
+        # トップレベルが配列でないときの文言を、配列の要素が dict でないときと同じにする
+        # (json_stream の文言は "must be a JSON array")
+        if str(exc) == f"persona pack: {name} must be a JSON array":
+            raise ValueError(not_objects) from exc
+        raise
 
 
 def _check_zip_file_ref(reader: _PackReader, value: Any, where: str) -> None:
@@ -1085,14 +1280,16 @@ def validate_pack(zip_path: Path) -> None:
     _load_pack — 全 JSON の解釈と形の検査、ZIP 内のファイル参照の検査) と同じもの。
     新規取り込みの API がペルソナを作る前に呼び、作成後に形の不正で失敗するのを防ぐ。
     取り込み先に依存する検査 (ai 行・memory.db・mode="new" の空の確認) は含まない。
+    作業用 SQLite は作らず、配列の JSON は流し読みで検査する。
 
     Raises:
         zipfile.BadZipFile: ZIP として読めない。
-        ValueError: 形が不正・展開後のサイズが上限 (check_uncompressed_size) を超える。
+        ValueError: 形が不正・展開後のサイズが上限 (check_uncompressed_size) を超える・
+            配列の JSON の 1 要素が MAX_JSON_ELEMENT_CHARS を超える。
     """
     with zipfile.ZipFile(Path(zip_path)) as zf:
         check_uncompressed_size(zf)
-        _load_pack(_PackReader(zf))
+        _load_pack(_PackReader(zf), None)
 
 
 def import_persona_pack(
@@ -1119,8 +1316,12 @@ def import_persona_pack(
     Raises:
         FileNotFoundError: saiverse.db / memory.db が無い。
         ValueError: mode が不正・ZIP の形が不正・展開後のサイズが上限
-            (check_uncompressed_size) を超える・ai 行が無い・mode="new" で
+            (check_uncompressed_size) を超える・配列の JSON の 1 要素が
+            MAX_JSON_ELEMENT_CHARS を超える・ai 行が無い・mode="new" で
             取り込み先に messages がある。いずれも書き込み前に投げる。
+
+    ZIP の配列の JSON は、ZIP と同じフォルダの作業用 SQLite (_staging_path) に積んでから
+    取り込む。作業用 SQLite は成功・失敗を問わず、この関数が戻る前に消す。
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
@@ -1138,16 +1339,22 @@ def import_persona_pack(
     with zipfile.ZipFile(zip_path) as zf:
         check_uncompressed_size(zf)
         reader = _PackReader(zf)
-        pack = _load_pack(reader)
-        result = PersonaPackImportResult(
-            mode=mode, source_persona_id=pack.source_id, target_persona_id=target_persona_id,
-        )
-        job = _ImportJob(
-            reader=reader, pack=pack, result=result, mode=mode,
-            target=target_persona_id, home=home, persona_dir=persona_dir,
-            overwrite_profile=overwrite_profile, zip_sha256=zip_sha256,
-        )
-        job.run(memory_db_path, saiverse_db_path)
+        staging = _StagingDB(_staging_path(zip_path, _import_id(zip_sha256, target_persona_id)))
+        try:
+            pack = _load_pack(reader, staging)
+            result = PersonaPackImportResult(
+                mode=mode, source_persona_id=pack.source_id, target_persona_id=target_persona_id,
+            )
+            job = _ImportJob(
+                reader=reader, pack=pack, result=result, mode=mode,
+                target=target_persona_id, home=home, persona_dir=persona_dir,
+                overwrite_profile=overwrite_profile, zip_sha256=zip_sha256,
+            )
+            job.run(memory_db_path, saiverse_db_path)
+        finally:
+            # job.run の中の commit 後の工程 (repair_resumed_item_refs) も pack の表を
+            # 読むので、消すのは job.run が戻った後
+            staging.discard()
 
     LOGGER.info(
         "[persona_pack] imported %s (source=%s) into %s mode=%s counts=%s renumbered=%s "
@@ -1834,6 +2041,8 @@ class _ImportJob:
 
     def stage_chatlog(self, conn: sqlite3.Connection) -> None:
         pack = self.pack
+        # messages は並べ替えと seq の一意性の判定に全件が要るので、ここで全部読む
+        messages = list(pack.messages)
         # スレッド ID の写像を先に全部決める (stelis の親・Chronicle の
         # metadata.thread_id・extensions/ の完全一致置き換えが参照する)
         for row in pack.threads:
@@ -1841,7 +2050,7 @@ class _ImportJob:
         for row in pack.stelis_threads:
             self.remap_thread_id(row["thread_id"])
             self.remap_thread_id(row.get("parent_thread_id"))
-        for row in pack.messages:
+        for row in messages:
             self.remap_thread_id(row["thread_id"])
 
         # threads
@@ -1879,17 +2088,17 @@ class _ImportJob:
                 counts.added += 1
 
         # 既にあるものは照合で飛ばし、無いものは下で入れるので、全部が取り込み先に揃う
-        self.message_ids = {m["id"] for m in pack.messages}
-        if not pack.messages:
+        self.message_ids = {m["id"] for m in messages}
+        if not messages:
             self.plan_attachments(conn, [])
             return
 
         # messages: id で照合し、無いものだけ入れる
         counts = self.result.count("messages")
-        present = self.existing_keys(conn, "messages", "id", (m["id"] for m in pack.messages))
+        present = self.existing_keys(conn, "messages", "id", (m["id"] for m in messages))
         new_messages: List[Dict[str, Any]] = []
         seen: Set[str] = set()
-        for msg in pack.messages:
+        for msg in messages:
             if msg["id"] in present or msg["id"] in seen:
                 counts.skipped += 1
                 continue
@@ -2256,7 +2465,8 @@ class _ImportJob:
     # --- knowledge/ -------------------------------------------------------------
 
     def stage_knowledge(self, conn: sqlite3.Connection) -> None:
-        pages = self.pack.pages
+        # 番号の計画と Chronicle の判定 (plan_chronicle_merge) に全件が要るので、ここで全部読む
+        pages = list(self.pack.pages)
         if not pages:
             return
         from sai_memory.memopedia.storage import generate_diff, record_page_edit
