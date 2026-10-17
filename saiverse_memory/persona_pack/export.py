@@ -69,6 +69,7 @@ task_book の ``DUE_AT`` / ``CREATED_AT`` / ``CLOSED_AT`` で、これらは Dat
 """
 from __future__ import annotations
 
+import contextlib
 import io
 import itertools
 import json
@@ -81,11 +82,11 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, TextIO, Tuple
 
 from sai_memory.room_state import ROOM_STATE_META_KEY
 
-from .chatgpt_compat import build_conversation, is_conversation_message
+from .chatgpt_compat import is_conversation_message, write_conversation
 from .format import (
     FORMAT_NAME,
     FORMAT_VERSION,
@@ -408,20 +409,27 @@ class _PackWriter:
         self._register(folder, arcname)
         self.zf.writestr(arcname, json.dumps(obj, ensure_ascii=False, indent=2))
 
-    def write_json_array(self, folder: str, arcname: str, items: Iterable[Any]) -> int:
-        """JSON 配列を一要素ずつ書く (大きな表を全部メモリに載せないため)。"""
+    @contextlib.contextmanager
+    def open_text(self, folder: str, arcname: str) -> Iterator[TextIO]:
+        """エントリを UTF-8 のテキストとして逐次書きする。開いている間は同じ
+        ZipFile へ別のエントリを書けない (zipfile の制約)。"""
         self._register(folder, arcname)
-        count = 0
         with self.zf.open(arcname, "w", force_zip64=True) as raw:
             text = io.TextIOWrapper(raw, encoding="utf-8")
+            yield text
+            text.flush()
+            text.detach()
+
+    def write_json_array(self, folder: str, arcname: str, items: Iterable[Any]) -> int:
+        """JSON 配列を一要素ずつ書く (大きな表を全部メモリに載せないため)。"""
+        count = 0
+        with self.open_text(folder, arcname) as text:
             text.write("[")
             for item in items:
                 text.write("\n" if count == 0 else ",\n")
                 text.write(json.dumps(item, ensure_ascii=False))
                 count += 1
             text.write("\n]\n" if count else "]\n")
-            text.flush()
-            text.detach()
         return count
 
     def copy_file(self, folder: str, src: Path, arcname: str) -> str:
@@ -996,62 +1004,69 @@ def _write_memory_db(
 
     # chatgpt_compat/
     if "messages" in present:
-        conversations = _iter_conversations(memory, thread_titles)
-        first = next(conversations, None)
-        if first is not None:
-            result.counts["chatgpt_conversations"] = writer.write_json_array(
-                "chatgpt_compat", "chatgpt_compat/conversations.json",
-                itertools.chain((first,), conversations),
-            )
+        count = _write_conversations(writer, memory, thread_titles)
+        if count:
+            result.counts["chatgpt_conversations"] = count
 
 
-def _iter_conversations(
-    memory: sqlite3.Connection, thread_titles: Dict[str, Optional[str]]
-) -> Iterator[Dict[str, Any]]:
-    """chatgpt_compat の会話を 1 スレッドずつ組み立てて返す。
+def _write_conversations(
+    writer: _PackWriter, memory: sqlite3.Connection, thread_titles: Dict[str, Optional[str]]
+) -> int:
+    """chatgpt_compat/conversations.json を 1 メッセージずつ書き、会話の数を返す。
 
     messages を thread_id, created_at, rowid の順に読み (idx_messages_thread_created)、
-    thread_id が変わる境界ごとに build_conversation へ渡す。メモリに持つのは常に
-    1 スレッドぶんの会話メッセージだけ。スレッドの中の並びは正典順 (created_at, rowid)。
-    会話の並びは thread_id 順。読み取り接続は messages.json を書いたのと同じ
-    読み取りトランザクションなので、同じスナップショットを読む。
+    thread_id ごとの会話メッセージを write_conversation へ流す。1 スレッドの件数に
+    比例する保持は無い。スレッドの中の並びは正典順 (created_at, rowid)、会話の並びは
+    thread_id 順。会話が一つも無ければエントリを作らない。読み取り接続は
+    messages.json を書いたのと同じ読み取りトランザクションなので、同じスナップショットを読む。
     """
     wanted = ("id", "thread_id", "role", "scope", "metadata", "content", "created_at")
     present = [c for c in wanted if _has_column(memory, "messages", c)]
     if "thread_id" not in present:
-        return
+        return 0
     select = ", ".join('"' + c + '"' for c in present)
-    rows = _iter_rows(
-        memory,
-        f"SELECT {select} FROM messages ORDER BY thread_id ASC, created_at ASC, rowid ASC",
+    rows = (
+        row for row in _iter_rows(
+            memory,
+            f"SELECT {select} FROM messages ORDER BY thread_id ASC, created_at ASC, rowid ASC",
+        )
+        if isinstance(row.get("thread_id"), str)
     )
-    current: Optional[str] = None
-    items: List[Dict[str, Any]] = []
-    for row in rows:
-        thread_id = row.get("thread_id")
-        if not isinstance(thread_id, str):
-            continue
-        if thread_id != current:
-            if current is not None and items:
-                conv = build_conversation(current, thread_titles.get(current), items)
-                if conv is not None:
-                    yield conv
-            current = thread_id
-            items = []
-        metadata = encode_json_text(row.get("metadata"))
-        if is_conversation_message(
-            row.get("role"), row.get("scope"), metadata, row.get("content")
-        ):
-            items.append({
-                "id": row.get("id"),
-                "role": row.get("role"),
-                "content": row.get("content"),
-                "created_at": row.get("created_at"),
-            })
-    if current is not None and items:
-        conv = build_conversation(current, thread_titles.get(current), items)
-        if conv is not None:
-            yield conv
+
+    def _conversation_messages(thread_rows: Iterable[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
+        for row in thread_rows:
+            if is_conversation_message(
+                row.get("role"), row.get("scope"), encode_json_text(row.get("metadata")),
+                row.get("content"),
+            ):
+                yield {
+                    "id": row.get("id"),
+                    "role": row.get("role"),
+                    "content": row.get("content"),
+                    "created_at": row.get("created_at"),
+                }
+
+    count = 0
+    with contextlib.ExitStack() as stack:
+        out: Optional[TextIO] = None
+        for thread_id, thread_rows in itertools.groupby(rows, key=lambda r: r["thread_id"]):
+            messages = _conversation_messages(thread_rows)
+            first = next(messages, None)
+            if first is None:
+                continue
+            if out is None:
+                out = stack.enter_context(
+                    writer.open_text("chatgpt_compat", "chatgpt_compat/conversations.json")
+                )
+                out.write("[")
+            out.write("\n" if count == 0 else ",\n")
+            write_conversation(
+                out, thread_id, thread_titles.get(thread_id), itertools.chain((first,), messages)
+            )
+            count += 1
+        if out is not None:
+            out.write("\n]\n")
+    return count
 
 
 # --- items/ -----------------------------------------------------------------

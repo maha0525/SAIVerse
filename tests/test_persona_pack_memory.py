@@ -39,13 +39,11 @@ from saiverse_memory.persona_pack import export_persona_pack, import_persona_pac
 
 PID = "tester_city_a"
 T0 = 1_760_000_000
-# 1 スレッドのメッセージ件数 (両方の世界で同じ。スレッド数を件数に比例させる)。
-# 書き出しの chatgpt_compat/conversations.json は 1 スレッドぶんの会話をメモリで組み立てる
-# (export._iter_conversations) ので、1 スレッドの件数を世界の大きさと一緒に増やすと、
-# その保持がピークに出る。これは逐次化の残余として intent §3 原則 6 に書いてある既知の
-# 保持で、このテストが止めたい後戻り (全行の保持) とは別。ここでは 1 スレッドの件数を
-# 固定して、その保持を両方の世界で同じ大きさにする。
-MESSAGES_PER_THREAD = 500
+# スレッドの数 (両方の世界で同じ)。1 スレッドの件数がメッセージ件数に比例して増えるので、
+# 書き出しの chatgpt_compat/conversations.json が 1 スレッドぶんの会話を保持すると
+# (SAIVerse のスレッドは部屋ごとで、同じ部屋で長く暮らすと 1 スレッドが寿命の大半を
+# 占める)、その保持もピークに出る。
+THREADS = 4
 # メッセージ件数。1 件の content は 200 文字前後の日本語で、LARGE の messages.json は約 30 MB。
 # SMALL は、件数に比例しない一定の保持が上限まで育ちきる大きさにする。そうしないと
 # その差が「比例して育った」ように見える。育ちきる保持は二つ:
@@ -92,7 +90,7 @@ def _make_env(root: Path) -> Dict[str, Any]:
 
 def _populate(env: Dict[str, Any], messages: int) -> None:
     """メッセージ (寿命に比例する本体) と、件数に比例するページ・クリップを書く。"""
-    threads = messages // MESSAGES_PER_THREAD
+    threads = THREADS
     conn = sqlite3.connect(env["memory_db"])
     try:
         conn.executemany(

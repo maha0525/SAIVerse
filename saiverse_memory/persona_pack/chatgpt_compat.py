@@ -19,7 +19,9 @@ mapping ツリー (各スレッドが一本道の連鎖) に合わせる。
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+import itertools
+import json
+from typing import Any, Dict, Iterable, Optional, TextIO, Tuple
 
 _CONVERSATION_ROLES = {"user", "assistant"}
 _EXCLUDED_TAGS = {"internal", "tool", "handy_tool", "spell"}
@@ -47,64 +49,82 @@ def is_conversation_message(
     return not (tag_set & _EXCLUDED_TAGS)
 
 
-def build_conversation(
+def _dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _node(
+    node_id: str, item: Optional[Dict[str, Any]], parent_id: Optional[str], child_id: Optional[str]
+) -> Dict[str, Any]:
+    """mapping の 1 ノード。item が None なら根 (_ROOT_NODE_ID)。"""
+    message = None
+    if item is not None:
+        created = item.get("created_at")
+        create_time = float(created) if isinstance(created, (int, float)) else None
+        message = {
+            "id": node_id,
+            "author": {"role": item["role"], "name": None, "metadata": {}},
+            "create_time": create_time,
+            "update_time": None,
+            "content": {"content_type": "text", "parts": [item["content"]]},
+            "status": "finished_successfully",
+            "end_turn": True if item["role"] == "assistant" else None,
+            "weight": 1.0,
+            "metadata": {},
+            "recipient": "all",
+        }
+    return {
+        "id": node_id,
+        "message": message,
+        "parent": parent_id,
+        "children": [child_id] if child_id is not None else [],
+    }
+
+
+def write_conversation(
+    out: TextIO,
     thread_id: str,
     title: Optional[str],
     messages: Iterable[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    """1 スレッドぶんの会話を ChatGPT エクスポートの 1 会話 (mapping ツリー) にする。
+) -> None:
+    """1 スレッドぶんの会話を ChatGPT エクスポートの 1 会話 (mapping ツリー) として
+    ``out`` へ逐次書きする。
 
     ``messages`` は正典順 (created_at, seq) に並んだ ``{"id", "role", "content",
-    "created_at"}`` (created_at は epoch 秒)。写す行が 1 つも無ければ None。
+    "created_at"}`` (created_at は epoch 秒) で、1 件以上あること。mapping は根から
+    一本道で、各ノードの children は次のノードの id 一つだけなので、ノードは次の
+    メッセージが来た時点で書ける。メモリに持つのは書き待ちの 1 ノードぶんだけ。
+    create_time / update_time / current_node は全部読むまで決まらないので、mapping の
+    後ろに書く (JSON のオブジェクトなのでキーの順は意味を持たない)。
     """
-    items = list(messages)
-    if not items:
-        return None
-    mapping: Dict[str, Dict[str, Any]] = {
-        _ROOT_NODE_ID: {
-            "id": _ROOT_NODE_ID,
-            "message": None,
-            "parent": None,
-            "children": [],
-        }
-    }
-    parent_id = _ROOT_NODE_ID
-    for item in items:
-        node_id = str(item["id"])
-        created = item.get("created_at")
-        create_time = float(created) if isinstance(created, (int, float)) else None
-        mapping[node_id] = {
-            "id": node_id,
-            "message": {
-                "id": node_id,
-                "author": {"role": item["role"], "name": None, "metadata": {}},
-                "create_time": create_time,
-                "update_time": None,
-                "content": {"content_type": "text", "parts": [item["content"]]},
-                "status": "finished_successfully",
-                "end_turn": True if item["role"] == "assistant" else None,
-                "weight": 1.0,
-                "metadata": {},
-                "recipient": "all",
-            },
-            "parent": parent_id,
-            "children": [],
-        }
-        mapping[parent_id]["children"].append(node_id)
-        parent_id = node_id
-
-    times: List[float] = [
-        float(i["created_at"]) for i in items
-        if isinstance(i.get("created_at"), (int, float))
-    ]
+    items = iter(messages)
+    first = next(items, None)
+    if first is None:
+        raise ValueError(f"write_conversation needs at least one message: {thread_id}")
     display_title = title or (thread_id.split(":", 1)[1] if ":" in thread_id else thread_id)
-    return {
-        "id": thread_id,
-        "conversation_id": thread_id,
-        "title": display_title,
-        "create_time": min(times) if times else None,
-        "update_time": max(times) if times else None,
-        "mapping": mapping,
-        "current_node": parent_id,
-        "default_model_slug": None,
-    }
+    out.write(
+        f'{{"id": {_dumps(thread_id)}, "conversation_id": {_dumps(thread_id)}, '
+        f'"title": {_dumps(display_title)}, "mapping": {{'
+    )
+    first_time: Optional[float] = None
+    last_time: Optional[float] = None
+    # 書き待ちのノード (id, メッセージ, 親の id)。根は message を持たない
+    pending: Tuple[str, Optional[Dict[str, Any]], Optional[str]] = (_ROOT_NODE_ID, None, None)
+    for item in itertools.chain((first,), items):
+        node_id = str(item["id"])
+        pending_id, pending_item, pending_parent = pending
+        if pending_item is not None:
+            out.write(", ")
+        out.write(f"{_dumps(pending_id)}: {_dumps(_node(pending_id, pending_item, pending_parent, node_id))}")
+        pending = (node_id, item, pending_id)
+        created = item.get("created_at")
+        if isinstance(created, (int, float)):
+            t = float(created)
+            first_time = t if first_time is None else min(first_time, t)
+            last_time = t if last_time is None else max(last_time, t)
+    pending_id, pending_item, pending_parent = pending
+    out.write(f", {_dumps(pending_id)}: {_dumps(_node(pending_id, pending_item, pending_parent, None))}")
+    out.write(
+        f'}}, "create_time": {_dumps(first_time)}, "update_time": {_dumps(last_time)}, '
+        f'"current_node": {_dumps(pending_id)}, "default_model_slug": null}}'
+    )

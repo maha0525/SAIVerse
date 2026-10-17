@@ -7,6 +7,7 @@ clips など) と添付ファイルを tmp_path に作り、書き出した ZIP 
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import sqlite3
 import zipfile
@@ -581,13 +582,62 @@ def test_marker_shaped_user_dicts_are_escaped_and_round_trip() -> None:
 # addon_message_metadata の message_id の照合)
 # ---------------------------------------------------------------------------
 
+def _reference_build_conversation(
+    thread_id: str, title: Any, messages: List[Dict[str, Any]]
+) -> Any:
+    """1 スレッドの会話を dict として丸ごと組み立てる (逐次書きにする前の
+    chatgpt_compat.build_conversation と同じ手順)。write_conversation の出力の比較用。"""
+    if not messages:
+        return None
+    root = "client-created-root"
+    mapping: Dict[str, Dict[str, Any]] = {
+        root: {"id": root, "message": None, "parent": None, "children": []}
+    }
+    parent_id = root
+    for item in messages:
+        node_id = str(item["id"])
+        created = item.get("created_at")
+        create_time = float(created) if isinstance(created, (int, float)) else None
+        mapping[node_id] = {
+            "id": node_id,
+            "message": {
+                "id": node_id,
+                "author": {"role": item["role"], "name": None, "metadata": {}},
+                "create_time": create_time,
+                "update_time": None,
+                "content": {"content_type": "text", "parts": [item["content"]]},
+                "status": "finished_successfully",
+                "end_turn": True if item["role"] == "assistant" else None,
+                "weight": 1.0,
+                "metadata": {},
+                "recipient": "all",
+            },
+            "parent": parent_id,
+            "children": [],
+        }
+        mapping[parent_id]["children"].append(node_id)
+        parent_id = node_id
+    times = [
+        float(i["created_at"]) for i in messages
+        if isinstance(i.get("created_at"), (int, float))
+    ]
+    display_title = title or (thread_id.split(":", 1)[1] if ":" in thread_id else thread_id)
+    return {
+        "id": thread_id,
+        "conversation_id": thread_id,
+        "title": display_title,
+        "create_time": min(times) if times else None,
+        "update_time": max(times) if times else None,
+        "mapping": mapping,
+        "current_node": parent_id,
+        "default_model_slug": None,
+    }
+
+
 def _reference_conversations(memory_db: Path, titles: Dict[str, Any]) -> Dict[str, Any]:
     """全メッセージを正典順 (created_at, rowid) で読んでスレッドごとにためてから
-    build_conversation する組み立て (逐次書きにする前の書き出しと同じ手順)。"""
-    from saiverse_memory.persona_pack.chatgpt_compat import (
-        build_conversation,
-        is_conversation_message,
-    )
+    _reference_build_conversation する組み立て (逐次書きにする前の書き出しと同じ手順)。"""
+    from saiverse_memory.persona_pack.chatgpt_compat import is_conversation_message
     from saiverse_memory.persona_pack.format import encode_json_text
 
     conn = sqlite3.connect(memory_db)
@@ -610,7 +660,7 @@ def _reference_conversations(memory_db: Path, titles: Dict[str, Any]) -> Dict[st
             })
     built = {}
     for thread_id, items in grouped.items():
-        conv = build_conversation(thread_id, titles.get(thread_id), items)
+        conv = _reference_build_conversation(thread_id, titles.get(thread_id), items)
         if conv is not None:
             built[thread_id] = conv
     return built
@@ -635,6 +685,13 @@ def test_chatgpt_compat_built_per_thread_matches_whole_build(tmp_path: Path) -> 
                 (mid, f"{PERSONA_ID}:{thread}", role, content, PERSONA_ID, created,
                  json.dumps({"tags": ["conversation"]})),
             )
+        # thread_id 順で先頭に来る、会話として写す行が一つも無いスレッド (会話にしない)
+        conn.execute(
+            "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("z1", f"{PERSONA_ID}:room_0", "assistant", "内心", PERSONA_ID, T0,
+             json.dumps({"tags": ["conversation", "internal"]})),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -660,6 +717,55 @@ def test_chatgpt_compat_built_per_thread_matches_whole_build(tmp_path: Path) -> 
         chain.append(node["id"])
     assert chain == ["m2", "b1", "b2", "b3"]
     assert room_b["current_node"] == "b3"
+
+
+def test_chatgpt_compat_absent_without_conversation_messages(tmp_path: Path) -> None:
+    paths = _build_world(tmp_path)
+    conn = sqlite3.connect(paths["memory_db"])
+    try:
+        conn.execute("UPDATE messages SET metadata = ?", (json.dumps({"tags": ["internal"]}),))
+        conn.commit()
+    finally:
+        conn.close()
+    out = tmp_path / "out" / "no_compat.zip"
+    result = _export_world(paths, out)
+    with zipfile.ZipFile(out) as zf:
+        assert not any(n.startswith("chatgpt_compat/") for n in zf.namelist())
+    assert "chatgpt_compat" not in result.contents
+    assert "chatgpt_conversations" not in result.counts
+
+
+@pytest.mark.parametrize("messages", [
+    # 1 件だけ (根の子がそのまま current_node)
+    [{"id": "x1", "role": "user", "content": "ひとつだけ", "created_at": T0}],
+    # 時刻の無い行・小数の時刻・assistant の end_turn・数値の id
+    [
+        {"id": "x1", "role": "user", "content": "時刻なし", "created_at": None},
+        {"id": 2, "role": "assistant", "content": "返事 \"引用\"\n改行", "created_at": T0 + 0.5},
+        {"id": "x3", "role": "user", "content": "最後", "created_at": T0 + 9},
+    ],
+    # 時刻がどれも無い (create_time / update_time は None)
+    [{"id": "x1", "role": "assistant", "content": "a", "created_at": None},
+     {"id": "x2", "role": "user", "content": "b", "created_at": "2026-10-17"}],
+])
+@pytest.mark.parametrize("title", ["題名", None])
+def test_write_conversation_matches_whole_build(messages: List[Dict[str, Any]], title: Any) -> None:
+    from saiverse_memory.persona_pack.chatgpt_compat import write_conversation
+
+    out = io.StringIO()
+    write_conversation(out, f"{PERSONA_ID}:room_x", title, iter(messages))
+    assert json.loads(out.getvalue()) == _reference_build_conversation(
+        f"{PERSONA_ID}:room_x", title, messages
+    )
+
+
+def test_write_conversation_rejects_empty_thread() -> None:
+    from saiverse_memory.persona_pack.chatgpt_compat import write_conversation
+
+    out = io.StringIO()
+    with pytest.raises(ValueError):
+        write_conversation(out, "t", None, iter([]))
+    assert out.getvalue() == ""
 
 
 def test_addon_message_metadata_only_for_this_personas_messages(tmp_path: Path) -> None:
