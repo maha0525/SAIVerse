@@ -3088,6 +3088,24 @@ class _ImportJob:
             if col not in cols and (("ai", col) not in self._dropped_warned):
                 self._dropped_warned.add(("ai", col))
                 self.warn(f"ai.{col} does not exist in the target database; value dropped")
+        new_name = updates.get("AINAME")
+        if new_name:
+            # manager/persona.py の _create_persona と同じ規則 (同じ HOME_CITYID の同名を
+            # 大文字小文字無視で拒否)。同名が成立すると manager.update_ai が共有の
+            # persona_map の同名キーを取り込み先の AIID で上書きし、既存ペルソナの
+            # 名前解決が壊れる。HOME_CITYID は PROFILE_PROTECTED_COLUMNS なので取り込み先自身の値を使う
+            clash = world.execute(
+                "SELECT AIID FROM ai "
+                "WHERE HOME_CITYID = (SELECT HOME_CITYID FROM ai WHERE AIID = ?) "
+                "AND lower(AINAME) = lower(?) AND AIID != ? LIMIT 1",
+                (self.target, new_name, self.target),
+            ).fetchone()
+            if clash is not None:
+                del updates["AINAME"]
+                self.warn(
+                    f"profile: the name {new_name!r} is already used by another persona in this city; "
+                    "the current name was kept"
+                )
         if updates:
             world.execute(
                 f"UPDATE ai SET {', '.join(f'{_quote(c)} = ?' for c in updates)} WHERE AIID = ?",

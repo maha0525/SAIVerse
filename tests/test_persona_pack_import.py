@@ -781,6 +781,54 @@ def test_profile_is_overwritten_only_when_asked(source: Dict[str, Any], tmp_path
     assert icon.read_bytes() == b"RIFF icon bytes"
 
 
+def _add_ai(env: Dict[str, Any], persona_id: str, name: str, city_id: int) -> None:
+    engine = create_engine(f"sqlite:///{Path(env['world_db']).as_posix()}")
+    with Session(engine) as s:
+        s.add(AI(AIID=persona_id, HOME_CITYID=city_id, AINAME=name, SYSTEMPROMPT="", AUTO_COUNT=0))
+        s.commit()
+    engine.dispose()
+
+
+def _ai_row(env: Dict[str, Any]) -> Dict[str, Any]:
+    world = sqlite3.connect(env["world_db"])
+    world.row_factory = sqlite3.Row
+    try:
+        return dict(world.execute("SELECT * FROM ai WHERE AIID = ?", (env["persona_id"],)).fetchone())
+    finally:
+        world.close()
+
+
+def test_profile_overwrite_keeps_the_name_used_by_another_persona_in_the_city(tmp_path: Path) -> None:
+    # manager/persona.py の _create_persona と同じ規則: 同じ HOME_CITYID の同名は大文字小文字無視で拒否
+    src = _make_env(tmp_path / "src", PID, name="Alice")
+    pack = _export(src, tmp_path / "out" / "alice.zip")
+    target = _make_env(tmp_path / "dst", PID, name="仮の名前")
+    _add_ai(target, "other_city_a", "ALICE", 1)
+
+    result = _import(target, pack, "merge", overwrite_profile=True)
+    after = _ai_row(target)
+    assert after["AINAME"] == "仮の名前"
+    assert after["SYSTEMPROMPT"] == "あなたはAliceです。"
+    assert "AINAME" not in result.profile_columns_overwritten
+    assert "SYSTEMPROMPT" in result.profile_columns_overwritten
+    assert any(
+        "the name 'Alice' is already used by another persona in this city" in w for w in result.warnings
+    ), result.warnings
+
+
+def test_profile_overwrite_takes_the_name_matching_only_itself_or_another_city(tmp_path: Path) -> None:
+    src = _make_env(tmp_path / "src", PID, name="Alice")
+    pack = _export(src, tmp_path / "out" / "alice.zip")
+    target = _make_env(tmp_path / "dst", PID, name="alice")
+    _add_ai(target, "other_city_b", "Alice", 2)
+
+    result = _import(target, pack, "merge", overwrite_profile=True)
+    after = _ai_row(target)
+    assert after["AINAME"] == "Alice"
+    assert "AINAME" in result.profile_columns_overwritten
+    assert not any("already used by another persona" in w for w in result.warnings), result.warnings
+
+
 # ---------------------------------------------------------------------------
 # 6. 合流の Chronicle (intent §5 — 被覆の照合で取り込む枝を決める)
 # ---------------------------------------------------------------------------
