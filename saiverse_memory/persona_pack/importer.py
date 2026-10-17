@@ -195,6 +195,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import time
 import uuid
@@ -366,10 +367,14 @@ _NUMBERED_REF_KINDS = ("memopedia", "core", "chronicle", "clip", "item")
 # 圧縮の効いた小さな ZIP が展開で巨大になるのを入口で止める。値は API のアップロード
 # 上限 (api/routes/people/persona_pack.py の PERSONA_PACK_IMPORT_MAX_BYTES = 2 GiB) の 8 倍。
 MAX_UNCOMPRESSED_BYTES = 8 * 2 * 1024 * 1024 * 1024
-# 1 エントリの展開サイズ (infolist の file_size) の上限。取り込みは JSON もメディアも
-# 1 ファイルを丸ごとメモリに読む (_PackReader.read / load_json) ので、1 ファイルの上限が
-# そのままメモリの上限になる。値は API のアップロード上限 (圧縮後 2 GiB) と同じ。
+# 1 エントリの展開サイズ (infolist の file_size) の上限。取り込みは JSON の 1 ファイルを
+# 丸ごとメモリに読む (_PackReader.load_json) ので、1 ファイルの上限がそのまま JSON の
+# メモリの上限になる (メディアは _STREAM_CHUNK_BYTES ずつ読むので、メモリには効かない)。
+# 値は API のアップロード上限 (圧縮後 2 GiB) と同じ。
 MAX_ENTRY_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+# ZIP エントリとファイルを丸読みせずに読むときの 1 回の読み取りの大きさ
+# (_sha256_file・_PackReader.sha256・_ImportJob.write_files)
+_STREAM_CHUNK_BYTES = 1 << 20
 # 名前が .json で終わるエントリの展開サイズの和の上限。JSON は全ファイルを同時に
 # メモリへ読み、json.loads の Python オブジェクトは生バイトの数倍になる。正規のパックの
 # JSON は長命のペルソナでも数百 MB 規模。MAX_UNCOMPRESSED_BYTES はディスクの保護として残す。
@@ -435,9 +440,20 @@ class _PackReader:
     def __init__(self, zf: zipfile.ZipFile) -> None:
         self.zf = zf
         self.names: Set[str] = {n for n in zf.namelist() if not n.endswith("/")}
+        # ZIP 名 → 中身の sha256 (hex)。同じ実体を複数の参照が共有する
+        # (export の _copied が同じ実体を同じ ZIP 名にまとめる) ので、指紋は ZIP 名ごとに 1 回だけ取る
+        self._sha256: Dict[str, str] = {}
 
-    def read(self, name: str) -> bytes:
-        return self.zf.read(name)
+    def sha256(self, name: str) -> str:
+        """ZIP エントリの中身の sha256 (hex)。丸読みせず _STREAM_CHUNK_BYTES ずつ読む。"""
+        digest = self._sha256.get(name)
+        if digest is None:
+            h = hashlib.sha256()
+            with self.zf.open(name) as src:
+                for chunk in iter(lambda: src.read(_STREAM_CHUNK_BYTES), b""):
+                    h.update(chunk)
+            digest = self._sha256[name] = h.hexdigest()
+        return digest
 
     def load_json(self, name: str) -> Any:
         try:
@@ -785,14 +801,10 @@ def _quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
+        for chunk in iter(lambda: f.read(_STREAM_CHUNK_BYTES), b""):
             h.update(chunk)
     return h.hexdigest()
 
@@ -1794,9 +1806,9 @@ class _ImportJob:
             self.created_dirs.extend(reversed(missing))
             partial = self.partial_path(plan.dest)
             self.created_files.append(partial)
-            data = self.reader.read(plan.zip_name)
-            with partial.open("wb") as f:
-                f.write(data)
+            # 丸読みせず _STREAM_CHUNK_BYTES ずつ写す (copyfileobj は f.write を通す)
+            with self.reader.zf.open(plan.zip_name) as src, partial.open("wb") as f:
+                shutil.copyfileobj(src, f, _STREAM_CHUNK_BYTES)
                 f.flush()
                 os.fsync(f.fileno())
             if os.path.lexists(plan.dest):
@@ -2023,7 +2035,7 @@ class _ImportJob:
             # 形 (attachments/<種類>/<ファイル名>) は _load_pack が検査済み
             _attachments, kind, name = PurePosixPath(zip_path).parts
             dest_dir = self.home / (kind if kind in _MEDIA_DIR_NAMES else "documents")
-            data_hash = _sha256_bytes(self.reader.read(zip_path))
+            data_hash = self.reader.sha256(zip_path)
             summary_zip = entry.get("summary_path")
             if summary_zip is not None and summary_zip not in self.reader.names:
                 summary_zip = None
@@ -3045,7 +3057,7 @@ class _ImportJob:
         base = self.persona_dir / _DAY_REPORTS_DIR
         label = re.sub(r"[^A-Za-z0-9_.-]", "_", self.source)
         for zip_name, rel in reports:
-            data_hash = _sha256_bytes(self.reader.read(zip_name))
+            data_hash = self.reader.sha256(zip_name)
             dest = base.joinpath(*rel.parts)
             if not dest.exists() and not self.is_reserved(dest):
                 self.plan_file(zip_name, dest)
@@ -3102,7 +3114,7 @@ class _ImportJob:
                 continue
             name = PurePosixPath(zip_name).name
             _safe_relpath(name, "profile/profile.json")
-            data_hash = _sha256_bytes(self.reader.read(zip_name))
+            data_hash = self.reader.sha256(zip_name)
             # 元の値が /api/media/images/<名前> (設定画面の ImageUpload が保存する形) なら、
             # その URL の配信元 (api/routes/media.py の serve_image = SAIVERSE_HOME/image/) へ
             # 置き、同じ形の URL で指す。それ以外は user_data/icons へ置き、絶対パスで指す
@@ -3597,7 +3609,7 @@ class _ImportJob:
         """
         name = PurePosixPath(zip_name).name
         _safe_relpath(name, zip_name)
-        data_hash = _sha256_bytes(self.reader.read(zip_name))
+        data_hash = self.reader.sha256(zip_name)
         summary_zip: Optional[str] = zip_name + _SUMMARY_SUFFIX
         if summary_zip not in self.reader.names:
             summary_zip = None
@@ -3781,7 +3793,7 @@ class _ImportJob:
             return
         if dest.exists():
             counts.skipped += 1
-            if not (dest.is_file() and _sha256_file(dest) == _sha256_bytes(self.reader.read(zip_name))):
+            if not (dest.is_file() and _sha256_file(dest) == self.reader.sha256(zip_name)):
                 self.warn(f"{zip_name}: {dest} already exists with different content; not overwritten")
             return
         self.plan_file(zip_name, dest)

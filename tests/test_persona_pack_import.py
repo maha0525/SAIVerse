@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import random
 import sqlite3
 import time
 import uuid
@@ -2314,6 +2315,79 @@ def test_write_files_does_not_overwrite_a_destination_that_appears_before_it_is_
     assert dest.read_text(encoding="utf-8") == "someone else's state"
     assert not list(dest.parent.glob(f"{dest.name}.*.partial"))
     assert _table_counts(target["memory_db"])["messages"] == 0
+
+
+def test_large_media_files_are_hashed_and_written_without_reading_them_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """数 MB のメディア (添付・アイコン・私室の画像・所持品・day_reports・persona_dir のファイル) を
+    含むパックの取り込みで、それらの ZIP エントリは ZipFile.read (丸読み) を通らず、
+    zf.open からの分割読みで指紋を取り、保存先へ写す。指紋は ZIP 名ごとに 1 回だけ取る。"""
+    env = _make_env(tmp_path / "src", PID)
+    _populate(env)
+    home: Path = env["home"]
+    rng = random.Random(20261017)
+    big: Dict[Tuple[str, ...], bytes] = {}
+    for rel, size in [
+        (("image", "pic.png"), 3 * 1024 * 1024 + 7),
+        (("user_data", "icons", f"{PID}_icon.webp"), 2 * 1024 * 1024 + 1),
+        (("image", "room.png"), 2 * 1024 * 1024 + 3),
+        (("documents", "note.txt"), 2 * 1024 * 1024 + 5),
+        (("personas", PID, "day_reports", "2026-10-01.md"), 2 * 1024 * 1024 + 9),
+        (("personas", PID, "voice_calls", "call.wav"), 3 * 1024 * 1024 + 11),
+    ]:
+        data = rng.randbytes(size)
+        path = home.joinpath(*rel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        big[rel] = data
+    zip_path = _export(env, tmp_path / "out" / "big.zip")
+    with zipfile.ZipFile(zip_path) as zf:
+        big_names = {i.filename for i in zf.infolist() if i.file_size >= 2 * 1024 * 1024}
+    assert len(big_names) == len(big), big_names
+
+    target = _make_env(tmp_path / "dst", PID)
+    # 保存先に同じ中身が既にあるファイル (plan_keep_existing が指紋を比べて残す)
+    kept = target["home"].joinpath("personas", PID, "voice_calls", "call.wav")
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(big[("personas", PID, "voice_calls", "call.wav")])
+
+    read_names: List[str] = []
+    opened: Dict[str, int] = {}
+    original_read = zipfile.ZipFile.read
+    original_open = zipfile.ZipFile.open
+
+    def recording_read(self: zipfile.ZipFile, name: Any, *args: Any, **kwargs: Any) -> bytes:
+        read_names.append(name if isinstance(name, str) else name.filename)
+        return original_read(self, name, *args, **kwargs)
+
+    def recording_open(self: zipfile.ZipFile, name: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        key = name if isinstance(name, str) else name.filename
+        if mode == "r" and key in big_names:
+            opened[key] = opened.get(key, 0) + 1
+        return original_open(self, name, mode, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", recording_read)
+    monkeypatch.setattr(zipfile.ZipFile, "open", recording_open)
+    result = _import(target, zip_path, "new", overwrite_profile=True)
+    monkeypatch.undo()
+
+    assert read_names  # JSON は今も ZipFile.read で読む (JSON の逐次化は別の束)
+    assert not big_names & set(read_names), sorted(big_names & set(read_names))
+    # 写したファイルは指紋で 1 回 + 写すので 1 回。保存先に既にあったファイルは指紋の 1 回だけ
+    kept_name = next(n for n in big_names if n.endswith("/call.wav"))
+    assert opened == {n: (1 if n == kept_name else 2) for n in big_names}, opened
+    assert not any("already exists" in w for w in result.warnings), result.warnings
+    assert target["home"].joinpath("image", "pic.png").read_bytes() == big[("image", "pic.png")]
+    assert target["home"].joinpath("image", "room.png").read_bytes() == big[("image", "room.png")]
+    assert target["home"].joinpath("documents", "note.txt").read_bytes() == big[("documents", "note.txt")]
+    assert target["home"].joinpath("user_data", "icons", f"{PID}_icon.webp").read_bytes() == big[
+        ("user_data", "icons", f"{PID}_icon.webp")
+    ]
+    assert target["persona_dir"].joinpath("day_reports", "2026-10-01.md").read_bytes() == big[
+        ("personas", PID, "day_reports", "2026-10-01.md")
+    ]
+    assert kept.read_bytes() == big[("personas", PID, "voice_calls", "call.wav")]
 
 
 def test_resume_when_only_the_world_part_is_missing_does_not_redo_the_memory_part(
