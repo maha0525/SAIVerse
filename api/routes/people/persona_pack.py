@@ -149,8 +149,8 @@ def _read_pack_json(zip_path: Path, name: str) -> Optional[Any]:
 def _read_manifest(zip_path: Path) -> Dict[str, Any]:
     """ZIP の manifest.json を読み、形式名だけ確かめる (中身の検査は importer が行う)。
 
-    manifest を展開する前に、展開後の合計サイズの上限 (importer.MAX_UNCOMPRESSED_BYTES)
-    を確かめる。
+    manifest を展開する前に、展開後のサイズの上限 (importer.check_uncompressed_size —
+    合計・1 エントリ・JSON の合計) を確かめる。
     """
     from saiverse_memory.persona_pack import FORMAT_NAME, MANIFEST_NAME
     from saiverse_memory.persona_pack.importer import check_uncompressed_size

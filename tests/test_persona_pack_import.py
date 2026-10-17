@@ -1276,6 +1276,118 @@ def test_archive_over_the_expanded_size_limit_is_refused(
     assert _import(target, source["zip"], "new").counts["messages"].added == 6
 
 
+def _zip_with_declared_sizes(path: Path, declared: Dict[str, int]) -> Path:
+    """1 バイトずつのエントリを持ち、central directory の展開サイズだけを declared に書き換えた ZIP。
+
+    infolist の file_size は central directory の値なので、実データを書かずに大きな
+    展開サイズを宣言するエントリを作れる (細工した ZIP の再現)。
+    """
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
+        for name in declared:
+            zf.writestr(name, b"x")
+    data = bytearray(path.read_bytes())
+    pos = data.find(b"PK\x01\x02")
+    while pos != -1:
+        name_len = int.from_bytes(data[pos + 28:pos + 30], "little")
+        name = data[pos + 46:pos + 46 + name_len].decode("utf-8")
+        data[pos + 24:pos + 28] = declared[name].to_bytes(4, "little")
+        pos = data.find(b"PK\x01\x02", pos + 46 + name_len)
+    path.write_bytes(bytes(data))
+    return path
+
+
+def test_entry_over_the_per_file_limit_is_refused_by_its_declared_size(tmp_path: Path) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    gib = 1024 ** 3
+    # 合計 (3.5 GiB) は MAX_UNCOMPRESSED_BYTES の内側、1 エントリだけが 2 GiB を超える
+    forged = _zip_with_declared_sizes(tmp_path / "big_entry.zip", {
+        "attachments/image/huge.png": int(3.5 * gib),
+        "manifest.json": 10,
+    })
+    with zipfile.ZipFile(forged) as zf:
+        assert max(i.file_size for i in zf.infolist()) > importer.MAX_ENTRY_UNCOMPRESSED_BYTES
+        with pytest.raises(ValueError, match="per-file limit"):
+            importer.check_uncompressed_size(zf)
+    with pytest.raises(ValueError, match="per-file limit"):
+        importer.validate_pack(forged)
+    # 上限ちょうどは通る (JSON の合計にも当たらない)
+    at_limit = _zip_with_declared_sizes(tmp_path / "at_limit.zip", {
+        "attachments/image/a.png": importer.MAX_ENTRY_UNCOMPRESSED_BYTES,
+        "attachments/image/b.png": importer.MAX_ENTRY_UNCOMPRESSED_BYTES,
+    })
+    with zipfile.ZipFile(at_limit) as zf:
+        importer.check_uncompressed_size(zf)
+
+
+def test_json_entries_over_the_json_total_limit_are_refused(tmp_path: Path) -> None:
+    from saiverse_memory.persona_pack import importer
+
+    gib = 1024 ** 3
+    # どのエントリも 1 ファイルの上限の内側で、.json の和 (3 GiB) だけが上限を超える
+    forged = _zip_with_declared_sizes(tmp_path / "json_total.zip", {
+        "chatlog/messages.json": int(1.5 * gib),
+        "knowledge/memopedia_pages.json": int(1.5 * gib),
+    })
+    with zipfile.ZipFile(forged) as zf:
+        with pytest.raises(ValueError, match="JSON files in the archive"):
+            importer.check_uncompressed_size(zf)
+    # 同じ大きさでも .json でないエントリは JSON の合計に数えない
+    media = _zip_with_declared_sizes(tmp_path / "media_total.zip", {
+        "attachments/image/a.png": int(1.5 * gib),
+        "attachments/image/b.png": int(1.5 * gib),
+        "chatlog/messages.json": 10,
+    })
+    with zipfile.ZipFile(media) as zf:
+        importer.check_uncompressed_size(zf)
+
+
+def test_new_import_relocates_occupancy_of_the_private_room_only(tmp_path: Path) -> None:
+    src = _make_env(tmp_path / "src", PID)
+    _populate(src)
+    world = sqlite3.connect(src["world_db"])
+    world.executemany(
+        "INSERT INTO building_occupancy_log(CITYID, BUILDINGID, AIID, ENTRY_TIMESTAMP, EXIT_TIMESTAMP) "
+        "VALUES (?,?,?,?,?)",
+        [
+            (1, src["room_id"], PID, "2026-10-01 09:00:00.000000", "2026-10-01 10:00:00.000000"),
+            (1, "plaza", PID, "2026-10-01 10:00:00.000000", "2026-10-01 11:00:00.000000"),
+            (1, src["room_id"], PID, "2026-10-01 11:00:00.000000", None),
+        ],
+    )
+    world.commit()
+    world.close()
+    pack = _export(src, tmp_path / "out" / "occupancy.zip")
+    assert len(_zjson(pack, "extensions/saiverse/saiverse_db/building_occupancy_log.json")) == 3
+
+    # 別の街の別のペルソナへ。取り込み先にも同じ ID の建物 "plaza" があるが、別の世界の建物
+    target = _make_env(tmp_path / "dst", "other_city_b", name="別の子", city_id=2)
+    engine = create_engine(f"sqlite:///{Path(target['world_db']).as_posix()}")
+    with Session(engine) as s:
+        s.add(Building(CITYID=2, BUILDINGID="plaza", BUILDINGNAME="広場"))
+        s.commit()
+    engine.dispose()
+    result = _import(target, pack, "new")
+
+    world = sqlite3.connect(target["world_db"])
+    try:
+        rows = world.execute(
+            "SELECT CITYID, BUILDINGID, AIID, ENTRY_TIMESTAMP, EXIT_TIMESTAMP FROM building_occupancy_log"
+        ).fetchall()
+    finally:
+        world.close()
+    assert rows == [
+        (2, target["room_id"], "other_city_b", "2026-10-01 09:00:00.000000", "2026-10-01 10:00:00.000000"),
+    ]
+    counts = result.counts["extensions/saiverse_db/building_occupancy_log"]
+    assert (counts.added, counts.skipped) == (1, 2)
+    occupancy_warnings = [w for w in result.warnings if w.startswith("building_occupancy_log")]
+    assert occupancy_warnings == [
+        "building_occupancy_log: 1 row(s) have no EXIT_TIMESTAMP (still in the building at export); skipped",
+        "building_occupancy_log: 1 row(s) point to buildings that do not exist in the target world; skipped",
+    ]
+
+
 def test_json_text_scalar_metadata_round_trips(source: Dict[str, Any], tmp_path: Path) -> None:
     conn = _mem(source)
     conn.execute(

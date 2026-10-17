@@ -366,6 +366,14 @@ _NUMBERED_REF_KINDS = ("memopedia", "core", "chronicle", "clip", "item")
 # 圧縮の効いた小さな ZIP が展開で巨大になるのを入口で止める。値は API のアップロード
 # 上限 (api/routes/people/persona_pack.py の PERSONA_PACK_IMPORT_MAX_BYTES = 2 GiB) の 8 倍。
 MAX_UNCOMPRESSED_BYTES = 8 * 2 * 1024 * 1024 * 1024
+# 1 エントリの展開サイズ (infolist の file_size) の上限。取り込みは JSON もメディアも
+# 1 ファイルを丸ごとメモリに読む (_PackReader.read / load_json) ので、1 ファイルの上限が
+# そのままメモリの上限になる。値は API のアップロード上限 (圧縮後 2 GiB) と同じ。
+MAX_ENTRY_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
+# 名前が .json で終わるエントリの展開サイズの和の上限。JSON は全ファイルを同時に
+# メモリへ読み、json.loads の Python オブジェクトは生バイトの数倍になる。正規のパックの
+# JSON は長命のペルソナでも数百 MB 規模。MAX_UNCOMPRESSED_BYTES はディスクの保護として残す。
+MAX_JSON_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 
 
 @dataclass
@@ -457,13 +465,34 @@ class _PackReader:
 
 
 def check_uncompressed_size(zf: zipfile.ZipFile) -> None:
-    """ZIP の展開後の合計サイズが MAX_UNCOMPRESSED_BYTES を超えたら ValueError (書き込み前の検査)。"""
+    """ZIP の展開後のサイズを infolist の宣言 (file_size) で検査する (書き込み前の検査)。
+
+    次のどれかに当たれば ValueError:
+    合計が MAX_UNCOMPRESSED_BYTES を超える (ディスクの保護)、
+    1 エントリが MAX_ENTRY_UNCOMPRESSED_BYTES を超える (1 ファイルの丸読みのメモリの保護)、
+    ``.json`` のエントリの和が MAX_JSON_TOTAL_BYTES を超える (全 JSON の同時読み込みのメモリの保護)。
+    """
+    infos = zf.infolist()
     limit = MAX_UNCOMPRESSED_BYTES
-    total = sum(info.file_size for info in zf.infolist())
+    total = sum(info.file_size for info in infos)
     if total > limit:
         raise ValueError(
             f"persona pack: the archive expands to {total} bytes, over the limit of "
             f"{limit} bytes; refusing to import it"
+        )
+    entry_limit = MAX_ENTRY_UNCOMPRESSED_BYTES
+    for info in infos:
+        if info.file_size > entry_limit:
+            raise ValueError(
+                f"persona pack: {info.filename} expands to {info.file_size} bytes, over the "
+                f"per-file limit of {entry_limit} bytes; refusing to import it"
+            )
+    json_limit = MAX_JSON_TOTAL_BYTES
+    json_total = sum(info.file_size for info in infos if info.filename.endswith(".json"))
+    if json_total > json_limit:
+        raise ValueError(
+            f"persona pack: the JSON files in the archive expand to {json_total} bytes, over "
+            f"the limit of {json_limit} bytes; refusing to import it"
         )
 
 
@@ -1047,7 +1076,7 @@ def validate_pack(zip_path: Path) -> None:
 
     Raises:
         zipfile.BadZipFile: ZIP として読めない。
-        ValueError: 形が不正・展開後の合計サイズが MAX_UNCOMPRESSED_BYTES を超える。
+        ValueError: 形が不正・展開後のサイズが上限 (check_uncompressed_size) を超える。
     """
     with zipfile.ZipFile(Path(zip_path)) as zf:
         check_uncompressed_size(zf)
@@ -1077,8 +1106,8 @@ def import_persona_pack(
 
     Raises:
         FileNotFoundError: saiverse.db / memory.db が無い。
-        ValueError: mode が不正・ZIP の形が不正・展開後の合計サイズが
-            MAX_UNCOMPRESSED_BYTES を超える・ai 行が無い・mode="new" で
+        ValueError: mode が不正・ZIP の形が不正・展開後のサイズが上限
+            (check_uncompressed_size) を超える・ai 行が無い・mode="new" で
             取り込み先に messages がある。いずれも書き込み前に投げる。
     """
     if mode not in MODES:
@@ -3199,7 +3228,9 @@ class _ImportJob:
         (今回入れた行と、前の取り込みで入った行) を指す行だけ。addon_message_metadata
         ("message") は self.message_ids 宛ての行だけ。文字列の主キーと参照の列は
         WORLD_STRING_KEY_TABLES の写像で振り直し (decode_world_row)、単一列の整数の
-        主キーは取り込み先の連番で振り直す。
+        主キーは取り込み先の連番で振り直す。building_occupancy_log は書き出し元の私室を
+        指す退室済みの行だけを、取り込み先の私室と街へ付け替えて入れる
+        (relocate_occupancy_row)。
         """
         pack_tables = self.pack.ext_saiverse_tables
         for table in sorted(set(pack_tables) - set(SAIVERSE_DB_TABLE_OWNERS)):
@@ -3267,6 +3298,8 @@ class _ImportJob:
                         f"SELECT COALESCE(MAX({_quote(pk_col)}), 0) FROM {_quote(table)}"
                     ).fetchone()
                     next_pk = int(top) + 1
+            occupancy = self.occupancy_rooms(world) if table == "building_occupancy_log" else None
+            occupancy_skipped: Dict[str, int] = {"open": 0, "no_room": 0, "other": 0}
             for row in rows:
                 decoded = self.decode_world_row(table, row, skip=pk_col)
                 if rule[0] == "owner":
@@ -3275,6 +3308,12 @@ class _ImportJob:
                     refused += 1
                     counts.skipped += 1
                     continue
+                if occupancy is not None:
+                    reason = self.relocate_occupancy_row(row, decoded, occupancy)
+                    if reason is not None:
+                        occupancy_skipped[reason] += 1
+                        counts.skipped += 1
+                        continue
                 if next_pk is not None:
                     decoded[pk_col] = next_pk
                     next_pk += 1
@@ -3288,6 +3327,61 @@ class _ImportJob:
                     f"extensions/saiverse_db/{table}: {refused} row(s) not imported; their "
                     f"{column} does not point to this persona's imported rows"
                 )
+            if occupancy_skipped["open"]:
+                self.warn(
+                    f"building_occupancy_log: {occupancy_skipped['open']} row(s) have no "
+                    "EXIT_TIMESTAMP (still in the building at export); skipped"
+                )
+            if occupancy_skipped["no_room"]:
+                self.warn(
+                    f"building_occupancy_log: {occupancy_skipped['no_room']} row(s) point to the "
+                    f"source's private room, but {self.target} has no private room in saiverse.db; skipped"
+                )
+            if occupancy_skipped["other"]:
+                self.warn(
+                    f"building_occupancy_log: {occupancy_skipped['other']} row(s) point to buildings "
+                    "that do not exist in the target world; skipped"
+                )
+
+    def occupancy_rooms(self, world: sqlite3.Connection) -> Tuple[Any, Optional[str], Any]:
+        """building_occupancy_log の付け替えに使う (書き出し元の私室, 取り込み先の私室, 取り込み先の街)。
+
+        書き出し元の私室は profile/profile.json の ai.PRIVATE_ROOM_ID (無ければ
+        items/private_room.json の building.BUILDINGID — export は同じ ai.PRIVATE_ROOM_ID から
+        書く)。取り込み先の私室は target_room_id、街は取り込み先の ai.HOME_CITYID。
+        """
+        source_room: Any = None
+        if self.pack.profile is not None:
+            source_room = decode_value(self.pack.profile["ai"].get("PRIVATE_ROOM_ID"))
+        if not source_room and self.pack.private_room is not None:
+            source_room = decode_value(self.pack.private_room["building"].get("BUILDINGID"))
+        row = world.execute("SELECT HOME_CITYID FROM ai WHERE AIID = ?", (self.target,)).fetchone()
+        return source_room or None, self.target_room_id(world), (row[0] if row else None)
+
+    def relocate_occupancy_row(
+        self, row: Dict[str, Any], decoded: Dict[str, Any], rooms: Tuple[Any, Optional[str], Any],
+    ) -> Optional[str]:
+        """building_occupancy_log の 1 行の BUILDINGID / CITYID を取り込み先の値にする (decoded を書き換える)。
+
+        入れない行は理由を返す (入れる行は None):
+
+        - ``"open"``: EXIT_TIMESTAMP が無い (書き出し時点で在室中の形の行)。取り込み先では
+          ペルソナの作成時に新しい在室が始まっているので、二つ目の在室中の行は
+          database/occupancy_repair.py の repair_duplicate_active_occupancy の修理対象になる。
+        - ``"no_room"``: 書き出し元の私室を指すが、取り込み先のペルソナに私室が無い。
+        - ``"other"``: 書き出し元の私室以外の建物を指す。取り込み先に同じ BUILDINGID の
+          建物があっても別の世界の別の建物なので、私室の対応だけを付け替える。
+        """
+        if decode_value(row.get("EXIT_TIMESTAMP")) is None:
+            return "open"
+        source_room, target_room, target_city = rooms
+        if source_room is None or decode_value(row.get("BUILDINGID")) != source_room:
+            return "other"
+        if target_room is None or target_city is None:
+            return "no_room"
+        decoded["BUILDINGID"] = target_room
+        decoded["CITYID"] = target_city
+        return None
 
     def decode_world_row(
         self, table: str, row: Dict[str, Any], *, skip: Optional[str] = None
