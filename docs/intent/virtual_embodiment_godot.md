@@ -5,6 +5,16 @@
 
 ## 実装記録
 
+### 2026-10-17: 表情を省略して身体動作を続行、関連PRの取り込み状況
+
+- 表情指定の形式・強度が不正、preset未知、profile欠損、変形先未解決、遷移開始不可の場合は、顔を変えずに表情だけを省略して身体gestureを続ける。実装は[アドオン PR #3](https://github.com/maha0525/saiverse-godot-vessel-addon/pull/3)。省略理由を完了結果まで届け、有効な表情の適用と復帰を維持する契約は「ユーザー制作の表情プリセット」節に記載。
+- アドオンPython単体160件と71サブテスト、Godotの表情省略/適用/復帰110項目と既存の発話エモート67項目を通過。隔離`SAIVERSE_HOME`・合成`e2e_persona`・実WebSocket・Godot 4.6.3で、未知の表情を指定した即時waveとfake生成待ちgestureの両方が`completed`となり、省略理由がSpell結果またはterminal知覚へ届いた。fixtureは`verify_gesture_expression_fallback.tscn`、transport検証は`run_gateway_e2e.py --action gesture_expression_fallback`および`--action gesture_dynamic_fake`。本番ペルソナ・本番記憶・外部LLMへの接触はない。
+- GitHubで[アドオン PR #1](https://github.com/maha0525/saiverse-godot-vessel-addon/pull/1)・[PR #2](https://github.com/maha0525/saiverse-godot-vessel-addon/pull/2)・[PR #3](https://github.com/maha0525/saiverse-godot-vessel-addon/pull/3)、[voice-tts PR #7](https://github.com/maha0525/saiverse-voice-tts/pull/7)のマージを確認した。表情省略の追加時に進行中台帳を同期し忘れたため、本体PR #405のレビュー指摘に合わせ、次アクションから取り込み待ちを除き、実機確認と残作業へ差し替えた。案件全体のステータスは引き続き実装中。
+
+#### 経緯: 変更前の台帳行
+
+| 🟠 実装中 | Godot / ARDY 仮想身体デモ | 発話の声を voice-tts から一切れずつ受け取り VR だけで鳴らす形がアドオン PR #1 と voice-tts PR #7 に揃い、まはーの確認待ち。次 = 両 PR をマージし、Quest 2で表示・移動・マイク入力・全身エモートと VR の声を確認。残 = player歩行アニメーション、瞬き・視線、Idle scheduler。 | まはー(PR の確認と Quest 2の装着・操作確認) / 私(実機ログ確認と残りの実装) | [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md) | 2026-10-15 |
+
 ### 2026-10-10: Quest 2の左スティック等速移動
 
 - まはーの依頼はVRのスティック移動のみ。等速移動を選び、テレポートは不要と指定した。左TouchのprimaryをXRController3Dから読む。XR入力はデスクトップ用InputMapを経由しない。
@@ -130,6 +140,7 @@
 - `resolved_target_count=0`のprofileやtargetなしの非neutral表情は成功扱いしない。モデルhash不一致、欠損、曖昧候補、解決方式は構造化ログへ残す。旧v1 profileは読めるが、Studio保存時に現行モデルhashと安定targetへ昇格する。
 - 感情、瞬き、口形、視線を独立channelのまま維持し、表情遷移はchannel内の現在値から次のrecipeへBlend Shape値を補間する。gesture開始前の感情状態を保存し、開始時に指定presetへfade、自然完了・失敗・`body_stop`の全経路で元の状態へfade-backする。
 - `body_gesture`へ任意の`expression_preset`と`expression_intensity`を追加する。ARDYの英語`action_instruction`は身体だけを生成し、顔は別引数で明示する。未指定時は現在表情を維持し、未知presetを黙ってneutralや笑顔へ読み替えない。生成待ちgestureでも同じ表情指定をpending commandへ保持する。
+- 表情は身体gestureの任意の付加要素とする。引数形式・強度が不正、presetが未知、profile欠損、変形先が未解決、遷移開始不可の場合は、理由を記録して表情だけを省略し、現在の顔を保って身体動作を続行する。判定はSpell入口と実アバターを持つGodot側がそれぞれ所有し、即時・キャッシュ済み・生成待ちの全経路に適用する。Godotでの適用結果はplayingとcompletedへ載せ、実行していない表情を適用済みと報告しない。身体モーション自身の失敗は従来どおり失敗とし、有効な表情の適用・完了/停止/失敗時の復帰は維持する。同一channelに別の使用可能なpresetがあるだけでは、変形先のない非neutral表情を使用可能としない。
 - 自動瞬き、ユーザー追従視線、発話visemeは同じ表情基盤を後から使う常時layerだが、ユーザー制作の感情presetと混ぜて実装しない。最初の通過条件は「Studioで作ったpresetを保存・再読込でき、gesture中だけ適用され、終了後に元の顔へ戻る」こと。
 - 上記を実装した。差し替え後の`persona.vrm`には740個、`player.vrm`には291個のBlend Shapeが残っていた。旧profileのmesh pathは外れていたが、23 target全件を`blend_shape`の一意解決で復旧し、17表情を再び利用可能にした。旧モデルhashとの不一致は隠さず、Studioで次に保存した時点で現VRM hashとv2 targetへ昇格する。
 - `F4`で開くExpression Studioをメインシーンへ追加した。検索可能な740項目、複数target配合、ID・説明・channel・fade-in/out、編集前の顔へのreset、保存後の再configure、保存済み遷移プレビューを実装した。顔専用の近接プレビューと左編集欄のスクロールを備え、AMD 890M / Forward+ / 1152×648の実描画で全項目へ到達できることをスクリーンショット確認した。
