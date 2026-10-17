@@ -58,6 +58,7 @@ ZIP の中身 (intent §4 の表):
     このペルソナの行)、``persona_dir/`` (ペルソナフォルダのファイルそのまま)。
 ``chatgpt_compat/``
     ``conversations.json`` (会話のやりとりだけの ChatGPT エクスポート互換コピー)。
+    会話の並びは thread_id 順。
 
 値の書き方は format.py (bytes の包み・JSON 文字列列の展開・epoch 秒の ISO 化)。
 saiverse.db の DateTime 列はタイムゾーンを持たない文字列で保存されているため、
@@ -69,6 +70,7 @@ task_book の ``DUE_AT`` / ``CREATED_AT`` / ``CLOSED_AT`` で、これらは Dat
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import logging
 import os
@@ -759,12 +761,11 @@ def export_persona_pack(
         with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             writer = _PackWriter(zf)
             _write_profile(writer, ai_row, home, result)
-            message_ids: Set[str] = set()
             if memory is not None:
-                _write_memory_db(writer, memory, persona_id, home, result, message_ids)
+                _write_memory_db(writer, memory, persona_id, home, result)
             _write_items(writer, world, persona_id, ai_row, home, result)
             _write_journal_files(writer, world, persona_id, persona_dir, result)
-            _write_world_extensions(writer, world, persona_id, message_ids, result)
+            _write_world_extensions(writer, world, persona_id, memory, result)
             _write_persona_dir_files(writer, persona_dir, result)
 
             contents = [f for f in FOLDER_ORDER if f in writer.folders]
@@ -833,7 +834,6 @@ def _write_memory_db(
     persona_id: str,
     home: Path,
     result: PersonaPackExportResult,
-    message_ids: Set[str],
 ) -> None:
     tables = _table_names(memory)
     present = set(tables)
@@ -842,14 +842,16 @@ def _write_memory_db(
             result.absent_tables.append(f"memory.db:{table}")
 
     # chatlog/
+    # threads.json を書く 1 走査で、chatgpt_compat 用のタイトルだけを控える
     thread_titles: Dict[str, Optional[str]] = {}
     if "threads" in present:
-        thread_rows = list(_iter_table_rows(memory, "threads"))
-        for row in thread_rows:
-            thread_titles[row["id"]] = row.get("title")
+        def _threads() -> Iterator[Dict[str, Any]]:
+            for row in _iter_table_rows(memory, "threads"):
+                thread_titles[row["id"]] = row.get("title")
+                yield _encode_row(row, "threads")
+
         result.counts["threads"] = writer.write_json_array(
-            "chatlog", "chatlog/threads.json",
-            (_encode_row(r, "threads") for r in thread_rows),
+            "chatlog", "chatlog/threads.json", _threads()
         )
     if "stelis_threads" in present:
         result.counts["stelis_threads"] = writer.write_json_array(
@@ -858,7 +860,6 @@ def _write_memory_db(
         )
 
     attachment_refs: Dict[str, Dict[str, Any]] = {}
-    conversations: Dict[str, List[Dict[str, Any]]] = {}
     if "messages" in present:
         def _messages() -> Iterator[Dict[str, Any]]:
             rows = _iter_rows(
@@ -869,26 +870,14 @@ def _write_memory_db(
             for row in rows:
                 seq = row.pop("__pack_rowid")
                 message_id = row.get("id")
-                message_ids.add(message_id)
                 encoded = _encode_row(row, "messages")
                 encoded["seq"] = seq
-                metadata = encoded.get("metadata")
-                for ref in _attachment_refs(metadata):
+                for ref in _attachment_refs(encoded.get("metadata")):
                     entry = attachment_refs.setdefault(
                         _attachment_key(ref),
                         {"item": ref, "message_ids": [], "perception_rows": []},
                     )
                     entry["message_ids"].append(message_id)
-                thread_id = row.get("thread_id")
-                if isinstance(thread_id, str) and is_conversation_message(
-                    row.get("role"), row.get("scope"), metadata, row.get("content")
-                ):
-                    conversations.setdefault(thread_id, []).append({
-                        "id": message_id,
-                        "role": row.get("role"),
-                        "content": row.get("content"),
-                        "created_at": row.get("created_at"),
-                    })
                 yield encoded
 
         result.counts["messages"] = writer.write_json_array(
@@ -941,13 +930,14 @@ def _write_memory_db(
                     entry["perception_rows"].append(label)
 
     # attachments/
+    # ファイルを先に全部コピーしてから index.json を逐次書きする。配列のハンドルを
+    # 開いている間は同じ ZipFile へ別のエントリ (copy_file) を書けないため
     if attachment_refs:
-        index: List[Dict[str, Any]] = []
+        copied = 0
         for ref_key, entry in attachment_refs.items():
-            item = entry["item"]
-            src, kind, reason = _resolve_media_item(item, home)
-            zip_path: Optional[str] = None
-            summary_path: Optional[str] = None
+            src, kind, reason = _resolve_media_item(entry["item"], home)
+            entry["path"] = None
+            entry["summary_path"] = None
             if src is None:
                 if entry["message_ids"]:
                     where = "messages.metadata"
@@ -956,25 +946,32 @@ def _write_memory_db(
                 if reason:
                     where = f"{where} ({reason})"
                 result.missing_files.append({"ref": str(ref_key), "where": where})
-            else:
-                zip_path = writer.copy_file("attachments", src, f"attachments/{kind}/{src.name}")
-                summary_src = src.with_name(src.name + _SUMMARY_SUFFIX)
-                if summary_src.is_file() and _outside_reason(summary_src, home, _ATTACHMENT_ROOTS) is None:
-                    summary_path = writer.copy_file(
-                        "attachments", summary_src, zip_path + _SUMMARY_SUFFIX
-                    )
-            index.append({
-                "ref": ref_key,
-                "uri": item.get("uri"),
-                "original_path": item.get("path"),
-                "mime_type": item.get("mime_type"),
-                "path": zip_path,
-                "summary_path": summary_path,
-                "message_ids": entry["message_ids"],
-                "perception_rows": entry["perception_rows"],
-            })
-        writer.write_json("attachments", "attachments/index.json", index)
-        result.counts["attachments"] = sum(1 for i in index if i["path"])
+                continue
+            zip_path = writer.copy_file("attachments", src, f"attachments/{kind}/{src.name}")
+            entry["path"] = zip_path
+            copied += 1
+            summary_src = src.with_name(src.name + _SUMMARY_SUFFIX)
+            if summary_src.is_file() and _outside_reason(summary_src, home, _ATTACHMENT_ROOTS) is None:
+                entry["summary_path"] = writer.copy_file(
+                    "attachments", summary_src, zip_path + _SUMMARY_SUFFIX
+                )
+
+        def _index() -> Iterator[Dict[str, Any]]:
+            for ref_key, entry in attachment_refs.items():
+                item = entry["item"]
+                yield {
+                    "ref": ref_key,
+                    "uri": item.get("uri"),
+                    "original_path": item.get("path"),
+                    "mime_type": item.get("mime_type"),
+                    "path": entry["path"],
+                    "summary_path": entry["summary_path"],
+                    "message_ids": entry["message_ids"],
+                    "perception_rows": entry["perception_rows"],
+                }
+
+        writer.write_json_array("attachments", "attachments/index.json", _index())
+        result.counts["attachments"] = copied
 
     # journal/ (memory.db 側)
     for table in JOURNAL_MEMORY_TABLES:
@@ -998,14 +995,63 @@ def _write_memory_db(
         )
 
     # chatgpt_compat/
-    if conversations:
-        built = []
-        for thread_id, items in conversations.items():
-            conv = build_conversation(thread_id, thread_titles.get(thread_id), items)
-            if conv is not None:
-                built.append(conv)
-        writer.write_json("chatgpt_compat", "chatgpt_compat/conversations.json", built)
-        result.counts["chatgpt_conversations"] = len(built)
+    if "messages" in present:
+        conversations = _iter_conversations(memory, thread_titles)
+        first = next(conversations, None)
+        if first is not None:
+            result.counts["chatgpt_conversations"] = writer.write_json_array(
+                "chatgpt_compat", "chatgpt_compat/conversations.json",
+                itertools.chain((first,), conversations),
+            )
+
+
+def _iter_conversations(
+    memory: sqlite3.Connection, thread_titles: Dict[str, Optional[str]]
+) -> Iterator[Dict[str, Any]]:
+    """chatgpt_compat の会話を 1 スレッドずつ組み立てて返す。
+
+    messages を thread_id, created_at, rowid の順に読み (idx_messages_thread_created)、
+    thread_id が変わる境界ごとに build_conversation へ渡す。メモリに持つのは常に
+    1 スレッドぶんの会話メッセージだけ。スレッドの中の並びは正典順 (created_at, rowid)。
+    会話の並びは thread_id 順。読み取り接続は messages.json を書いたのと同じ
+    読み取りトランザクションなので、同じスナップショットを読む。
+    """
+    wanted = ("id", "thread_id", "role", "scope", "metadata", "content", "created_at")
+    present = [c for c in wanted if _has_column(memory, "messages", c)]
+    if "thread_id" not in present:
+        return
+    select = ", ".join('"' + c + '"' for c in present)
+    rows = _iter_rows(
+        memory,
+        f"SELECT {select} FROM messages ORDER BY thread_id ASC, created_at ASC, rowid ASC",
+    )
+    current: Optional[str] = None
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        thread_id = row.get("thread_id")
+        if not isinstance(thread_id, str):
+            continue
+        if thread_id != current:
+            if current is not None and items:
+                conv = build_conversation(current, thread_titles.get(current), items)
+                if conv is not None:
+                    yield conv
+            current = thread_id
+            items = []
+        metadata = encode_json_text(row.get("metadata"))
+        if is_conversation_message(
+            row.get("role"), row.get("scope"), metadata, row.get("content")
+        ):
+            items.append({
+                "id": row.get("id"),
+                "role": row.get("role"),
+                "content": row.get("content"),
+                "created_at": row.get("created_at"),
+            })
+    if current is not None and items:
+        conv = build_conversation(current, thread_titles.get(current), items)
+        if conv is not None:
+            yield conv
 
 
 # --- items/ -----------------------------------------------------------------
@@ -1185,7 +1231,7 @@ def _write_world_extensions(
     writer: _PackWriter,
     world: sqlite3.Connection,
     persona_id: str,
-    message_ids: Set[str],
+    memory: Optional[sqlite3.Connection],
     result: PersonaPackExportResult,
 ) -> None:
     for table, where in SAIVERSE_DB_EXTENSION_TABLES:
@@ -1203,12 +1249,55 @@ def _write_world_extensions(
             "extensions/saiverse",
             "extensions/saiverse/saiverse_db/addon_message_metadata.json",
             (
-                _encode_row(r) for r in _iter_table_rows(world, "addon_message_metadata")
-                if r.get("message_id") in message_ids
+                _encode_row(r)
+                for r in _own_message_rows(
+                    _iter_table_rows(world, "addon_message_metadata"), memory
+                )
             ),
         )
     else:
         result.absent_tables.append("saiverse.db:addon_message_metadata")
+
+
+_MESSAGE_ID_BATCH = 500
+
+
+def _own_message_rows(
+    rows: Iterable[Dict[str, Any]], memory: Optional[sqlite3.Connection]
+) -> Iterator[Dict[str, Any]]:
+    """行のうち、message_id がこのペルソナの memory.db の messages.id にあるものだけを返す。
+
+    行を _MESSAGE_ID_BATCH 件ずつまとめて memory.db の読み取り接続へ
+    ``SELECT id FROM messages WHERE id IN (...)`` で照合する (全メッセージ id を
+    メモリに持たないため)。行の順は保つ。照合は返ってきた id との Python の等値で行う。
+    memory.db か messages が無ければ何も返さない。
+    """
+    if memory is None or not _table_exists(memory, "messages"):
+        return
+    conn = memory
+
+    def _matching(batch: List[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
+        keys = list({r.get("message_id") for r in batch} - {None})
+        found: Set[Any] = set()
+        if keys:
+            placeholders = ", ".join("?" for _ in keys)
+            found = {
+                r[0] for r in conn.execute(
+                    f"SELECT id FROM messages WHERE id IN ({placeholders})", keys
+                )
+            }
+        for r in batch:
+            if r.get("message_id") in found:
+                yield r
+
+    batch: List[Dict[str, Any]] = []
+    for row in rows:
+        batch.append(row)
+        if len(batch) >= _MESSAGE_ID_BATCH:
+            yield from _matching(batch)
+            batch = []
+    if batch:
+        yield from _matching(batch)
 
 
 # --- extensions/saiverse/persona_dir/ ----------------------------------------

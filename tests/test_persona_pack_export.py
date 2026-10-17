@@ -574,3 +574,118 @@ def test_marker_shaped_user_dicts_are_escaped_and_round_trip() -> None:
     # 本物の印は従来どおり
     assert decode_value(encode_value(b"\x00\x01")) == b"\x00\x01"
     assert encode_value(b"\x00\x01") == {"__bytes_b64__": "AAE="}
+
+
+# ---------------------------------------------------------------------------
+# 書き出し側の逐次書き (chatgpt_compat の 1 スレッドずつの組み立て・
+# addon_message_metadata の message_id の照合)
+# ---------------------------------------------------------------------------
+
+def _reference_conversations(memory_db: Path, titles: Dict[str, Any]) -> Dict[str, Any]:
+    """全メッセージを正典順 (created_at, rowid) で読んでスレッドごとにためてから
+    build_conversation する組み立て (逐次書きにする前の書き出しと同じ手順)。"""
+    from saiverse_memory.persona_pack.chatgpt_compat import (
+        build_conversation,
+        is_conversation_message,
+    )
+    from saiverse_memory.persona_pack.format import encode_json_text
+
+    conn = sqlite3.connect(memory_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT * FROM messages ORDER BY created_at ASC, rowid ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        metadata = encode_json_text(row["metadata"])
+        if isinstance(row["thread_id"], str) and is_conversation_message(
+            row["role"], row["scope"], metadata, row["content"]
+        ):
+            grouped.setdefault(row["thread_id"], []).append({
+                "id": row["id"], "role": row["role"],
+                "content": row["content"], "created_at": row["created_at"],
+            })
+    built = {}
+    for thread_id, items in grouped.items():
+        conv = build_conversation(thread_id, titles.get(thread_id), items)
+        if conv is not None:
+            built[thread_id] = conv
+    return built
+
+
+def test_chatgpt_compat_built_per_thread_matches_whole_build(tmp_path: Path) -> None:
+    paths = _build_world(tmp_path)
+    conn = sqlite3.connect(paths["memory_db"])
+    try:
+        rows = [
+            # room_b を先に挿入し、created_at の順と rowid の順が食い違う行も混ぜる
+            ("b2", "room_b", "user", "B の 2 通目", T0 + 20),
+            ("b1", "room_b", "user", "B の 1 通目 (後から挿入、時刻は前)", T0 + 10),
+            ("a7", "room_a", "assistant", "A の後半", T0 + 30),
+            ("b3", "room_b", "assistant", "B の 3 通目", T0 + 30),
+            ("a8", "room_a", "user", "A の最後", T0 + 40),
+        ]
+        for mid, thread, role, content, created in rows:
+            conn.execute(
+                "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (mid, f"{PERSONA_ID}:{thread}", role, content, PERSONA_ID, created,
+                 json.dumps({"tags": ["conversation"]})),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    out = tmp_path / "out" / "compat.zip"
+    result = _export_world(paths, out)
+    with zipfile.ZipFile(out) as zf:
+        conversations = _read_json(zf, "chatgpt_compat/conversations.json")
+    by_id = {c["id"]: c for c in conversations}
+    expected = _reference_conversations(
+        paths["memory_db"], {f"{PERSONA_ID}:room_a": "部屋 A の会話"}
+    )
+    assert set(by_id) == {f"{PERSONA_ID}:room_a", f"{PERSONA_ID}:room_b"}
+    assert by_id == expected
+    assert result.counts["chatgpt_conversations"] == 2
+    # 会話の並びは thread_id 順
+    assert [c["id"] for c in conversations] == sorted(by_id)
+    # スレッドの中は正典順 (created_at, rowid) の一本道
+    room_b = by_id[f"{PERSONA_ID}:room_b"]
+    chain = []
+    node = room_b["mapping"]["client-created-root"]
+    while node["children"]:
+        node = room_b["mapping"][node["children"][0]]
+        chain.append(node["id"])
+    assert chain == ["m2", "b1", "b2", "b3"]
+    assert room_b["current_node"] == "b3"
+
+
+def test_addon_message_metadata_only_for_this_personas_messages(tmp_path: Path) -> None:
+    paths = _build_world(tmp_path)
+    conn = sqlite3.connect(paths["world_db"])
+    try:
+        # 照合の 1 回分 (500 件) をまたぐ数を入れる。3 行に 1 行が他ペルソナ宛て
+        own_ids = ["m1", "m2", "m3", "m4"]
+        rows = []
+        for i in range(1300):
+            message_id = f"other-persona-msg-{i}" if i % 3 == 2 else own_ids[i % 4]
+            rows.append((message_id, "tts", f"k{i}", f"v{i}"))
+        conn.executemany(
+            "INSERT INTO addon_message_metadata(message_id, addon_name, key, value) "
+            "VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    # 行の順 (rowid 順) を保ったまま、このペルソナのメッセージ宛ての行だけ
+    expected = [f"k{i}" for i in range(1300) if i % 3 != 2]
+    out = tmp_path / "out" / "addon.zip"
+    _export_world(paths, out)
+    with zipfile.ZipFile(out) as zf:
+        written = _read_json(zf, "extensions/saiverse/saiverse_db/addon_message_metadata.json")
+    assert [r["key"] for r in written] == expected
+    assert all(not r["message_id"].startswith("other-persona-msg-") for r in written)
+    assert {r["message_id"] for r in written} == set(own_ids)
