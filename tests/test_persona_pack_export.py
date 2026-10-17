@@ -548,3 +548,29 @@ def test_json_text_scalars_are_kept_as_raw_text() -> None:
     assert encode_json_text('{"a": 1}') == {"a": 1}
     assert encode_json_text("[1, 2]") == [1, 2]
     assert encode_json_text(None) is None
+
+
+def test_marker_shaped_user_dicts_are_escaped_and_round_trip() -> None:
+    """利用者の JSON の中の、印と同じ形の dict は __escaped__ に包まれ、decode で元の dict に戻る。"""
+    from saiverse_memory.persona_pack.format import ESCAPED_MARKER, encode_json_text, encode_value
+
+    cases = [
+        {"__raw_text__": "hello"},
+        {"__bytes_b64__": "aGVsbG8="},
+        {"__escaped__": {"__raw_text__": "x"}},
+        {"__escaped__": 5},
+        {"a": {"b": [{"__bytes_b64__": "aGVsbG8="}, {"__raw_text__": "deep"}]}},
+        [{"__escaped__": {"__escaped__": {"__bytes_b64__": "AA=="}}}],
+        # キーが二つ以上なら印の形ではないので包まない
+        {"__raw_text__": "x", "other": 1},
+    ]
+    for original in cases:
+        encoded = encode_json_text(json.dumps(original))
+        # 書き出した形は JSON を通しても同じ値に戻る
+        assert decode_value(json.loads(json.dumps(encoded))) == original
+    assert encode_json_text('{"__raw_text__": "hello"}') == {ESCAPED_MARKER: {"__raw_text__": "hello"}}
+    assert encode_json_text('{"__escaped__": 5}') == {ESCAPED_MARKER: {ESCAPED_MARKER: 5}}
+    assert encode_json_text('{"__raw_text__": "x", "other": 1}') == {"__raw_text__": "x", "other": 1}
+    # 本物の印は従来どおり
+    assert decode_value(encode_value(b"\x00\x01")) == b"\x00\x01"
+    assert encode_value(b"\x00\x01") == {"__bytes_b64__": "AAE="}

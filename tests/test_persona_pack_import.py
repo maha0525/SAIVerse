@@ -1407,6 +1407,51 @@ def test_json_text_scalar_metadata_round_trips(source: Dict[str, Any], tmp_path:
         conn.close()
 
 
+def test_marker_shaped_dicts_in_json_text_round_trip(source: Dict[str, Any], tmp_path: Path) -> None:
+    """JSON 文字列の列の中の、印 (__raw_text__ / __bytes_b64__) と同じ形の dict が往復で変わらない。
+
+    書き出しは __escaped__ で包み、取り込みは印として読まずに元の dict へ戻す。
+    """
+    metas = {
+        "m-raw": {"__raw_text__": "hello"},
+        "m-deep": {"tags": ["internal"], "a": {"b": [1, {"c": {"__bytes_b64__": "aGVsbG8="}}]}},
+        "m-esc": {"__escaped__": {"__raw_text__": "x"}},
+        "m-esc2": {"tags": ["internal"], "k": {"__escaped__": {"__escaped__": 1}}},
+    }
+    page_meta = {"note": {"__raw_text__": "page"}, "k": [{"__escaped__": "v"}]}
+    page_keywords = [{"__bytes_b64__": "AA=="}, "果物"]
+    conn = _mem(source)
+    try:
+        for i, (mid, meta) in enumerate(metas.items()):
+            _add_message(conn, PID, mid, "room_a", "user", f"印の形 {mid}", T0 + 100 + i, meta)
+        conn.execute("UPDATE memopedia_pages SET metadata = ?, keywords = ? WHERE id = ?",
+                     (json.dumps(page_meta, ensure_ascii=False),
+                      json.dumps(page_keywords, ensure_ascii=False), source["ids"]["apple"]))
+        conn.commit()
+    finally:
+        conn.close()
+    pack = _export(source, tmp_path / "out" / "markers.zip")
+    written = {m["id"]: m["metadata"] for m in _zjson(pack, "chatlog/messages.json")}
+    assert written["m-raw"] == {"__escaped__": {"__raw_text__": "hello"}}
+
+    target = _make_env(tmp_path / "dst", PID)
+    result = _import(target, pack, "new")
+    assert not any("__raw_text__" in w or "__bytes_b64__" in w for w in result.warnings)
+    conn = _mem(target)
+    try:
+        stored = {r[0]: r[1] for r in conn.execute(
+            f"SELECT id, metadata FROM messages WHERE id IN ({','.join('?' * len(metas))})",
+            list(metas),
+        )}
+        page = conn.execute("SELECT metadata, keywords FROM memopedia_pages WHERE id = ?",
+                            (source["ids"]["apple"],)).fetchone()
+    finally:
+        conn.close()
+    assert {mid: json.loads(text) for mid, text in stored.items()} == metas
+    assert json.loads(page[0]) == page_meta
+    assert json.loads(page[1]) == page_keywords
+
+
 def test_integer_affinity_primary_key_is_renumbered(source: Dict[str, Any], tmp_path: Path) -> None:
     target = _make_env(tmp_path / "dst", PID)
     # 主キーの型名が INTEGER でない (BIGINT) 取り込み先の表
