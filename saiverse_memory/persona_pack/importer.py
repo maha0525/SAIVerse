@@ -201,6 +201,7 @@ import shutil
 import sqlite3
 import time
 import uuid
+import weakref
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -907,6 +908,8 @@ class _StagingDB:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        # execute が返したカーソル (discard が閉じる)
+        self._cursors: "weakref.WeakSet[sqlite3.Cursor]" = weakref.WeakSet()
         path.unlink(missing_ok=True)
         self.conn: Optional[sqlite3.Connection] = sqlite3.connect(str(path), isolation_level=None)
         try:
@@ -924,8 +927,14 @@ class _StagingDB:
         name: str,
         rows: Iterable[Dict[str, Any]],
         keys: Mapping[str, Callable[[Dict[str, Any]], Any]] = {},
+        indexes: Sequence[Sequence[str]] = (),
     ) -> "_StagedRows":
-        """表 ``name`` を作り、``rows`` を ZIP の並び順のまま積む。"""
+        """表 ``name`` を作り、``rows`` を ZIP の並び順のまま積む。
+
+        ``keys`` は {列名: 行から列の値を取り出す関数} で、値は SQLite に積める型
+        (None / int (64 bit) / float / str) にする。``indexes`` は積み終えた後に作る
+        索引の列の並びの一覧。
+        """
         if self.conn is None:
             raise RuntimeError("staging database is already discarded")
         if name in self._counts:
@@ -951,21 +960,57 @@ class _StagingDB:
                 batch.clear()
         if batch:
             self.conn.executemany(sql, batch)
+        for i, columns in enumerate(indexes):
+            self.conn.execute(
+                f"CREATE INDEX {_quote(f'{name}#{i}')} ON {table} "
+                f"({', '.join(_quote(c) for c in columns)})"
+            )
         self._counts[name] = count
         return _StagedRows(self, name)
+
+    def scratch(self, name: str, columns: str) -> str:
+        """工程の途中の計算に使う表 ``name`` (列の定義 ``columns``) を空で作り直し、
+        引用済みの表名を返す。ZIP のエントリ名 (``/`` を含む ``.json``) と重ならない名前を渡す。"""
+        if self.conn is None:
+            raise RuntimeError("staging database is already discarded")
+        table = _quote(name)
+        self.conn.execute(f"DROP TABLE IF EXISTS {table}")
+        self.conn.execute(f"CREATE TABLE {table} ({columns})")
+        return table
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
+        """``sql`` を実行してカーソルを返す。カーソルは discard が閉じる — 読みかけの
+        カーソル (例外の traceback が持つ生成器の中のもの) が残ると、Windows では接続を
+        閉じても作業ファイルを消せないため。"""
+        if self.conn is None:
+            raise RuntimeError("staging database is already discarded")
+        cursor = self.conn.execute(sql, params)
+        self._cursors.add(cursor)
+        return cursor
+
+    def executemany(self, sql: str, rows: Iterable[Sequence[Any]]) -> None:
+        if self.conn is None:
+            raise RuntimeError("staging database is already discarded")
+        self.conn.executemany(sql, rows)
 
     def rows(self, name: str) -> Iterator[Dict[str, Any]]:
         """表 ``name`` の行を ord の順に 1 行ずつ返す (積んでいない表なら何も返さない)。"""
         if name not in self._counts or self.conn is None:
             return
-        for (text,) in self.conn.execute(f"SELECT row FROM {_quote(name)} ORDER BY ord"):
+        for (text,) in self.execute(f"SELECT row FROM {_quote(name)} ORDER BY ord"):
             yield json.loads(text)
 
     def count(self, name: str) -> int:
         return self._counts.get(name, 0)
 
     def discard(self) -> None:
-        """接続を閉じて作業ファイルを消す (何度呼んでもよい)。"""
+        """カーソルと接続を閉じて作業ファイルを消す (何度呼んでもよい)。"""
+        for cursor in list(self._cursors):
+            try:
+                cursor.close()
+            except sqlite3.Error:
+                pass
+        self._cursors.clear()
         if self.conn is not None:
             self.conn.close()
             self.conn = None
@@ -995,6 +1040,148 @@ class _StagedRows:
 
     def __bool__(self) -> bool:
         return len(self) > 0
+
+    def _live(self) -> Optional[_StagingDB]:
+        """この表を積んだ作業用 SQLite (空の表・捨てた後は None)。"""
+        if self.staging is None or self.staging.conn is None or self.name not in self.staging._counts:
+            return None
+        return self.staging
+
+    def _sql(self, sql: str) -> str:
+        return sql.replace("{t}", _quote(self.name))
+
+    def query(self, sql: str, params: Sequence[Any] = ()) -> Iterator[Tuple[Any, ...]]:
+        """``sql`` の ``{t}`` をこの表の名前に置き換えて実行し、結果の行を返す
+        (空の表なら何も返さない)。返している間にこの表を書き換えない (同じ接続で
+        走査中の表を書き換えたときの SQLite の結果は未定義)。書き換えるなら :meth:`paged`。"""
+        staging = self._live()
+        if staging is None:
+            return iter(())
+        return staging.execute(self._sql(sql), params)
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> int:
+        """``sql`` (``{t}`` はこの表の名前) を実行し、変わった行数を返す。"""
+        staging = self._live()
+        if staging is None:
+            return 0
+        return staging.execute(self._sql(sql), params).rowcount
+
+    def rows_where(self, tail: str, params: Sequence[Any] = ()) -> Iterator[Dict[str, Any]]:
+        """``SELECT row FROM <表> <tail>`` の行を JSON から戻して 1 行ずつ返す。"""
+        for (text,) in self.query("SELECT row FROM {t} " + tail, params):
+            yield json.loads(text)
+
+    def paged(
+        self, columns: str, where: str = "", params: Sequence[Any] = ()
+    ) -> Iterator[Tuple[Any, ...]]:
+        """``SELECT r.ord, <columns> FROM <表> AS r WHERE <where>`` の行を ord の順に返す。
+
+        _STAGING_BATCH 行ずつ、前に返した ord の続きから問い合わせ直すので、返している
+        間にこの表を UPDATE してよい。``columns`` と ``where`` の ``{t}`` はこの表の名前。
+        """
+        staging = self._live()
+        if staging is None:
+            return
+        sql = self._sql(
+            f"SELECT r.ord, {columns} FROM {{t}} AS r WHERE r.ord > ?"
+            + (f" AND ({where})" if where else "")
+            + " ORDER BY r.ord LIMIT ?"
+        )
+        last = -1
+        while True:
+            batch = staging.execute(sql, (last, *params, _STAGING_BATCH)).fetchall()
+            if not batch:
+                return
+            yield from batch
+            last = batch[-1][0]
+
+    def add_mark(self, column: str) -> None:
+        """受理の印の列 ``column`` (INTEGER、既定 0) を足す。既にあれば全行を 0 に戻す。"""
+        staging = self._live()
+        if staging is None:
+            return
+        table = _quote(self.name)
+        if column in [r[1] for r in staging.execute(f"PRAGMA table_info({table})")]:
+            staging.execute(f"UPDATE {table} SET {_quote(column)} = 0")
+        else:
+            staging.execute(f"ALTER TABLE {table} ADD COLUMN {_quote(column)} INTEGER NOT NULL DEFAULT 0")
+
+    def contains(self, column: str, value: Any, where: str = "") -> bool:
+        """列 ``column`` が ``value`` に等しい行があるか (``where`` は追加の条件)。"""
+        found = self.query(
+            f"SELECT 1 FROM {{t}} WHERE {_quote(column)} = ?"
+            + (f" AND ({where})" if where else "") + " LIMIT 1",
+            (value,),
+        )
+        return next(iter(found), None) is not None
+
+
+def _first_occurrence(column: str, among: str = "") -> str:
+    """:meth:`_StagedRows.paged` の条件: 行 r が、列 ``column`` の値ごとに ZIP で最初の行で
+    あること。``among`` (別名 e の行への条件) を渡すと、それを満たす行の中で最初の行。
+    ``(column, ord)`` の索引を前提にする。"""
+    col = _quote(column)
+    extra = f" AND ({among})" if among else ""
+    return (
+        f"NOT EXISTS (SELECT 1 FROM {{t}} AS e WHERE e.{col} = r.{col} AND e.ord < r.ord{extra})"
+    )
+
+
+def _id_chunks(rows: Iterable[Tuple[Any, ...]]) -> Iterator[List[Any]]:
+    """行の先頭の列の値を、来た順に _CHUNK 件ずつのリストにして返す。"""
+    part: List[Any] = []
+    for row in rows:
+        part.append(row[0])
+        if len(part) >= _CHUNK:
+            yield part
+            part = []
+    if part:
+        yield part
+
+
+# SQLite の INTEGER (64 bit 符号付き) の範囲
+_SQL_INT_MIN = -(1 << 63)
+_SQL_INT_MAX = (1 << 63) - 1
+
+
+def _sql_order_int(value: Optional[int]) -> Any:
+    """並べ替えの鍵の整数を作業用 SQLite に積める値にする。SQLite の INTEGER に収まらない
+    値は float にする (SQLite は整数と実数を数値として比べるので大小は保たれる。float で
+    同じ値になる二つの大小は失われ、ord の順になる)。None は None のまま。"""
+    if value is None or _SQL_INT_MIN <= value <= _SQL_INT_MAX:
+        return value
+    return float(value)
+
+
+def _message_created_at_key(row: Dict[str, Any]) -> Optional[float]:
+    """messages の created_at の並びの鍵 (_epoch_key) の列の値。数値でないものは None
+    (SQLite の ORDER BY は NULL を先頭に置く — _epoch_key の (0, 0.0) と同じ位置)。"""
+    kind, value = _epoch_key(iso_to_epoch(row.get("created_at")))
+    return value if kind else None
+
+
+def _message_seq_key(row: Dict[str, Any]) -> Any:
+    """messages の seq の並びの鍵 (_as_int(seq)) の列の値。"""
+    return _sql_order_int(_as_int(row.get("seq")))
+
+
+def _message_seq_rowid(row: Dict[str, Any]) -> Optional[int]:
+    """messages の seq を取り込み先の rowid に使える値 (正の整数) なら seq、そうでなければ None
+    (native_export の _seq_rowids_if_free の規則。SQLite の INTEGER に収まらない値も None)。"""
+    seq = row.get("seq")
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq <= 0 or seq > _SQL_INT_MAX:
+        return None
+    return seq
+
+
+def _journal_id_key(row: Dict[str, Any]) -> Any:
+    """activities / memos を挿入する順の鍵 (_as_int(id) or 0) の列の値。"""
+    return _sql_order_int(_as_int(row.get("id")) or 0)
+
+
+def _page_is_chronicle(row: Dict[str, Any]) -> int:
+    """memopedia_pages の行が Chronicle (chronicle 分類の trunk でない行) なら 1。"""
+    return int(row.get("category") == _CATEGORY_CHRONICLE and not row.get("is_trunk"))
 
 
 # ---------------------------------------------------------------------------
@@ -1076,12 +1263,17 @@ def _load_pack(reader: _PackReader, staging: Optional[_StagingDB]) -> _PackData:
     pack = _PackData(source_id=source_id, contents=set(contents), version=version)
     has = pack.contents.__contains__
 
-    def stage(name: str, rows: Iterable[Dict[str, Any]]) -> _StagedRows:
+    def stage(
+        name: str,
+        rows: Iterable[Dict[str, Any]],
+        keys: Mapping[str, Callable[[Dict[str, Any]], Any]] = {},
+        indexes: Sequence[Sequence[str]] = (),
+    ) -> _StagedRows:
         if staging is None:
             for _row in rows:  # 流し読み (検査だけ行い、行は捨てる)
                 pass
             return _StagedRows()
-        return staging.fill(name, rows)
+        return staging.fill(name, rows, keys, indexes)
 
     if has("chatlog"):
         name = "chatlog/threads.json"
@@ -1089,23 +1281,54 @@ def _load_pack(reader: _PackReader, staging: Optional[_StagingDB]) -> _PackData:
         name = "chatlog/stelis_threads.json"
         pack.stelis_threads = stage(name, reader.iter_rows(name, ("thread_id",)))
         name = "chatlog/messages.json"
-        pack.messages = stage(name, _refuse_structured_raw_text(
-            reader.iter_rows(name, ("id", "thread_id")), "messages", name, pack,
-        ))
+        # stage_chatlog の id の照合 (ZIP 内の重複は先勝ち)・スレッドの写像・正典順の
+        # 並べ替え・seq を rowid に使えるかの判定と、stage_ext_saiverse の
+        # addon_message_metadata の絞り込みが使う列
+        pack.messages = stage(
+            name,
+            _refuse_structured_raw_text(
+                reader.iter_rows(name, ("id", "thread_id")), "messages", name, pack,
+            ),
+            keys={
+                "id": lambda r: r["id"],
+                "thread_id": lambda r: r["thread_id"],
+                "created_at_key": _message_created_at_key,
+                "seq_key": _message_seq_key,
+                "seq_rowid": _message_seq_rowid,
+            },
+            indexes=(("id", "ord"),),
+        )
     if has("knowledge"):
         name = "knowledge/pages.json"
-        pack.pages = stage(name, _refuse_structured_raw_text(
-            reader.iter_rows(name, ("id", "category")), "memopedia_pages", name, pack,
-        ))
+        # stage_knowledge の id の照合 (ZIP 内の重複は先勝ち) と plan_chronicle_merge が使う列
+        pack.pages = stage(
+            name,
+            _refuse_structured_raw_text(
+                reader.iter_rows(name, ("id", "category")), "memopedia_pages", name, pack,
+            ),
+            keys={"id": lambda r: r["id"], "chronicle": _page_is_chronicle},
+            indexes=(("id", "ord"),),
+        )
     if has("journal"):
         name = "journal/activities.json"
-        pack.activities = stage(name, reader.iter_rows(name, ("id",)))
+        pack.activities = stage(
+            name, reader.iter_rows(name, ("id",)), keys={"id_key": _journal_id_key},
+        )
         name = "journal/memos.json"
-        pack.memos = stage(name, reader.iter_rows(name, ("activity_id",)))
+        pack.memos = stage(
+            name, reader.iter_rows(name, ("activity_id",)), keys={"id_key": _journal_id_key},
+        )
         name = "journal/clips.json"
-        pack.clips = stage(name, reader.iter_rows(name, ("clip_id",)))
+        # stage_clips の clip_id の照合 (ZIP 内の重複は先勝ち) と repair_resumed_item_refs が使う列
+        pack.clips = stage(
+            name, reader.iter_rows(name, ("clip_id",)),
+            keys={"clip_id": lambda r: r["clip_id"]}, indexes=(("clip_id", "ord"),),
+        )
         name = "journal/purpose_tags.json"
-        pack.purpose_tags = stage(name, reader.iter_rows(name, ("tag_id",)))
+        # repair_resumed_item_refs が使う列
+        pack.purpose_tags = stage(
+            name, reader.iter_rows(name, ("tag_id",)), keys={"tag_id": lambda r: r["tag_id"]},
+        )
         name = "journal/task_book.json"
         pack.task_book = stage(name, reader.iter_rows(name, ("TASK_ID",)))
         prefix = f"journal/{_DAY_REPORTS_DIR}/"
@@ -1252,6 +1475,45 @@ class _ChroniclePlan:
     accepted: Set[str] = field(default_factory=set)
     # accepted のうち、parent_id を root_chronicle に・is_consolidated を 0 にする id
     to_root: Set[str] = field(default_factory=set)
+
+
+# memopedia_pages の metadata の短縮番号: {metadata のキー: (分類, 元の番号を残すキー,
+# 機構が書く表題の書式, renumbered のキー)}。並びは stage_knowledge が計画する順
+_PAGE_META_NUMBERS: Dict[str, Tuple[str, str, str, str]] = {
+    "core_id": (_CATEGORY_CORE, "original_core_id", "コア記憶 c:{}", "pages.core_id"),
+    "short_id": (_CATEGORY_CHRONICLE, "original_chronicle_short_id", "chronicle:{}",
+                 "pages.chronicle_short_id"),
+}
+
+
+def _metadata_refusal(is_raw: bool, meta: Any) -> Optional[str]:
+    """元の番号を metadata に残せない理由 (record_original の警告文の一部)。残せるなら None。"""
+    if is_raw:
+        return "metadata is not a JSON object or array"
+    if meta is not None and not isinstance(meta, dict):
+        return "metadata is not an object"
+    return None
+
+
+@dataclass
+class _PageNumberPlan:
+    """stage_knowledge が挿入する memopedia_pages の 1 行の短縮番号の計画
+    (:meth:`_ImportJob.plan_page_numbers`)。本文 (content / summary) は持たない。"""
+
+    # 作業用 SQLite の行の ord (挿入のときの読み直しと突き合わせる)
+    ord: int
+    # decode 済みの id (警告文に使う)
+    page_id: Any
+    # 振り直す前の列の short_id
+    short_id: Optional[int]
+    # 元の番号を metadata に残せない理由 (_metadata_refusal)
+    refusal: Optional[str]
+    # 番号を持つ metadata のキー (_PAGE_META_NUMBERS) と、振り直す前のその番号
+    meta_key: Optional[str] = None
+    meta_number: Optional[int] = None
+    # 振り直した番号 (振り直さないものは None)
+    new_short_id: Optional[int] = None
+    new_meta_number: Optional[int] = None
 
 
 @dataclass
@@ -1451,9 +1713,6 @@ class _ImportJob:
         self.marker_payload: Optional[Dict[str, Any]] = None
         # 合流で取り込んだ extensions/saiverse/memory_db/ の表 (count_merge_skips が数えない)
         self._merged_ext_tables: Set[str] = set()
-        # ZIP の messages の id (stage_chatlog の後は全部が取り込み先の memory.db にある)。
-        # addon_message_metadata の取り込みをこのメッセージ宛ての行に限る
-        self.message_ids: Set[str] = set()
         # 片側だけ commit された mode="new" の取り込みを、この合流で再開するか
         # (モジュール docstring)。True なら世界側の mode="new" の工程も行う
         self.resume_world = False
@@ -1797,9 +2056,11 @@ class _ImportJob:
         merged = 0
         try:
             memory.execute("BEGIN IMMEDIATE")
-            clip_ids = list(dict.fromkeys(c["clip_id"] for c in self.pack.clips))
-            for i in range(0, len(clip_ids), _CHUNK):
-                part = clip_ids[i:i + _CHUNK]
+            # ZIP の clip_id / tag_id を、ZIP で最初に現れた順に _CHUNK 件ずつ
+            clip_ids = self.pack.clips.query(
+                "SELECT clip_id FROM {t} GROUP BY clip_id ORDER BY MIN(ord)"
+            )
+            for part in _id_chunks(clip_ids):
                 rows = memory.execute(
                     "SELECT clip_id, purpose_ref, pasted_to FROM clips "
                     f"WHERE clip_id IN ({', '.join('?' for _ in part)})",
@@ -1815,9 +2076,10 @@ class _ImportJob:
                         (new_purpose, new_pasted, clip_id),
                     )
                     rewritten += 1
-            tag_ids = list(dict.fromkeys(t["tag_id"] for t in self.pack.purpose_tags))
-            for i in range(0, len(tag_ids), _CHUNK):
-                part = tag_ids[i:i + _CHUNK]
+            tag_ids = self.pack.purpose_tags.query(
+                "SELECT tag_id FROM {t} GROUP BY tag_id ORDER BY MIN(ord)"
+            )
+            for part in _id_chunks(tag_ids):
                 rows = memory.execute(
                     "SELECT tag_id, target_ref, purpose_ref FROM purpose_tags "
                     f"WHERE tag_id IN ({', '.join('?' for _ in part)})",
@@ -2041,8 +2303,9 @@ class _ImportJob:
 
     def stage_chatlog(self, conn: sqlite3.Connection) -> None:
         pack = self.pack
-        # messages は並べ替えと seq の一意性の判定に全件が要るので、ここで全部読む
-        messages = list(pack.messages)
+        # messages は全件を Python に持たない。id の照合・並べ替え・seq の判定は
+        # 作業用 SQLite の列 (_load_pack の keys) と索引で行う
+        messages = pack.messages
         # スレッド ID の写像を先に全部決める (stelis の親・Chronicle の
         # metadata.thread_id・extensions/ の完全一致置き換えが参照する)
         for row in pack.threads:
@@ -2050,8 +2313,11 @@ class _ImportJob:
         for row in pack.stelis_threads:
             self.remap_thread_id(row["thread_id"])
             self.remap_thread_id(row.get("parent_thread_id"))
-        for row in messages:
-            self.remap_thread_id(row["thread_id"])
+        # messages のスレッド ID は ZIP で最初に現れた順 (remap_thread_id の警告の順)
+        for (thread_id,) in messages.query(
+            "SELECT thread_id FROM {t} GROUP BY thread_id ORDER BY MIN(ord)"
+        ):
+            self.remap_thread_id(thread_id)
 
         # threads
         counts = self.result.count("threads") if pack.threads else None
@@ -2087,80 +2353,107 @@ class _ImportJob:
                 present.add(new_id)
                 counts.added += 1
 
-        # 既にあるものは照合で飛ばし、無いものは下で入れるので、全部が取り込み先に揃う
-        self.message_ids = {m["id"] for m in messages}
+        # 既にあるものは照合で飛ばし、無いものは下で入れるので、ZIP の messages の id は
+        # 全部が取り込み先に揃う (stage_ext_saiverse の addon_message_metadata の絞り込みは
+        # 作業用 SQLite の messages の id で行う)
         if not messages:
-            self.plan_attachments(conn, [])
+            self.plan_attachments(conn, ())
             return
 
-        # messages: id で照合し、無いものだけ入れる
+        # messages: id で照合し、無いものだけ入れる (挿入する行に accepted = 1)
         counts = self.result.count("messages")
-        present = self.existing_keys(conn, "messages", "id", (m["id"] for m in messages))
-        new_messages: List[Dict[str, Any]] = []
-        seen: Set[str] = set()
-        for msg in messages:
-            if msg["id"] in present or msg["id"] in seen:
-                counts.skipped += 1
-                continue
-            seen.add(msg["id"])
-            new_messages.append(msg)
+        messages.add_mark("accepted")
+        accepted = self.mark_new_messages(conn, messages)
+        counts.skipped += len(messages) - accepted
 
-        self.plan_attachments(conn, new_messages)
+        self.plan_attachments(conn, messages.rows_where("WHERE accepted = 1 ORDER BY ord"))
 
-        # メッセージの行が指すスレッドが無ければ器だけ作る
+        # メッセージの行が指すスレッドが無ければ器だけ作る。挿入する行のスレッド ID を
+        # ZIP で最初に現れた順に (件数はスレッドの数に比例し、メッセージの数には比例しない)
         thread_counts = self.result.count("threads")
-        known_threads = self.existing_keys(
-            conn, "threads", "id", (self.remap_thread_id(m["thread_id"]) for m in new_messages)
-        )
-        for msg in new_messages:
-            tid = self.remap_thread_id(msg["thread_id"])
+        new_threads = [
+            self.remap_thread_id(thread_id) for (thread_id,) in messages.query(
+                "SELECT thread_id FROM {t} WHERE accepted = 1 GROUP BY thread_id ORDER BY MIN(ord)"
+            )
+        ]
+        known_threads = self.existing_keys(conn, "threads", "id", new_threads)
+        for tid in new_threads:
             if tid not in known_threads:
                 self.insert(conn, "threads", {"id": tid, "resource_id": self.target})
                 known_threads.add(tid)
                 thread_counts.added += 1
 
-        # 正典順 (created_at, seq) で挿入する (native_export の _canonical_import_order と同じ鍵)
-        def _order(item: Tuple[int, Dict[str, Any]]) -> Tuple[Any, ...]:
-            pos, msg = item
-            seq = _as_int(msg.get("seq"))
-            return (_epoch_key(iso_to_epoch(msg.get("created_at"))),
-                    (0, seq) if seq is not None else (1, pos))
-
-        ordered = [m for _, m in sorted(enumerate(new_messages), key=_order)]
-        rowids = self.seq_rowids_if_free(conn, ordered)
+        # 正典順 (created_at, seq) で挿入する (native_export の _canonical_import_order と同じ鍵)。
+        # 鍵は (_epoch_key(created_at), (0, seq) か seq の無い行は (1, ZIP での位置)) で、
+        # 同点は ZIP の並び順 (安定な並べ替え)。created_at_key の NULL は _epoch_key の
+        # (0, 0.0) で先頭、seq_key IS NULL が (0, …) / (1, …) の別、seq の無い行どうしと
+        # 同点は ord (ZIP の並び順) で決まる
+        use_seq = self.seq_rowids_are_free(conn, messages)
 
         from sai_memory.memory.storage import write_deferred_message_embedding
 
-        for idx, msg in enumerate(ordered):
-            row = self.decode_message(msg)
-            self.insert(conn, "messages", row, rowid=rowids[idx] if rowids else None)
+        for text, seq in messages.query(
+            "SELECT row, seq_rowid FROM {t} WHERE accepted = 1 "
+            "ORDER BY created_at_key, seq_key IS NULL, seq_key, ord"
+        ):
+            row = self.decode_message(json.loads(text))
+            self.insert(conn, "messages", row, rowid=seq if use_seq else None)
             content = row.get("content")
             if isinstance(content, str) and content.strip():
                 write_deferred_message_embedding(conn, row["id"], commit=False)
                 self.result.embeddings_deferred += 1
             counts.added += 1
 
-    def seq_rowids_if_free(
-        self, conn: sqlite3.Connection, ordered: List[Dict[str, Any]]
-    ) -> Optional[List[int]]:
-        """seq (元の rowid) を取り込み先の rowid に使えるか (native_export の _seq_rowids_if_free と同じ規則)。"""
-        seqs: List[int] = []
-        for msg in ordered:
-            seq = msg.get("seq")
-            if not isinstance(seq, int) or isinstance(seq, bool) or seq <= 0:
-                return None
-            seqs.append(seq)
-        if len(set(seqs)) != len(seqs):
-            return None
-        for i in range(0, len(seqs), _CHUNK):
-            part = seqs[i:i + _CHUNK]
+    def mark_new_messages(self, conn: sqlite3.Connection, messages: _StagedRows) -> int:
+        """ZIP の messages のうち挿入する行に accepted = 1 を書き、その件数を返す。
+
+        挿入するのは、id ごとに ZIP で最初の行 (ZIP 内の重複は先勝ち) のうち、取り込み先に
+        同じ id が無いもの。取り込み先の照合は _CHUNK 件ずつの IN で問い合わせ、返った値と
+        Python の == で比べる (existing_keys と同じ)。
+        """
+        accepted = 0
+        pending: List[Tuple[int, Any]] = []
+
+        def flush() -> None:
+            nonlocal accepted
+            ids = [mid for _ord, mid in pending]
+            found = {r[0] for r in conn.execute(
+                f"SELECT id FROM messages WHERE id IN ({', '.join('?' for _ in ids)})", ids,
+            )}
+            for ord_, mid in pending:
+                if mid not in found:
+                    messages.execute("UPDATE {t} SET accepted = 1 WHERE ord = ?", (ord_,))
+                    accepted += 1
+            pending.clear()
+
+        for ord_, mid in messages.paged("r.id", _first_occurrence("id")):
+            pending.append((ord_, mid))
+            if len(pending) >= _CHUNK:
+                flush()
+        if pending:
+            flush()
+        return accepted
+
+    def seq_rowids_are_free(self, conn: sqlite3.Connection, messages: _StagedRows) -> bool:
+        """挿入する messages (accepted = 1) の seq (元の rowid) を取り込み先の rowid に使えるか
+        (native_export の _seq_rowids_if_free と同じ規則): 全行の seq が正の整数で、互いに
+        重ならず、取り込み先のどの rowid とも重ならない。"""
+        counted = next(iter(messages.query(
+            "SELECT COUNT(*), COUNT(seq_rowid), COUNT(DISTINCT seq_rowid) FROM {t} WHERE accepted = 1"
+        )), None)
+        if counted is None:
+            return False
+        total, valid, distinct = counted
+        if valid != total or distinct != total:
+            return False
+        for part in _id_chunks(messages.query("SELECT seq_rowid FROM {t} WHERE accepted = 1")):
             (occupied,) = conn.execute(
                 f"SELECT COUNT(*) FROM messages WHERE rowid IN ({', '.join('?' for _ in part)})",
                 part,
             ).fetchone()
             if occupied:
-                return None
-        return seqs
+                return False
+        return True
 
     def decode_message(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         row: Dict[str, Any] = {}
@@ -2212,8 +2505,9 @@ class _ImportJob:
             for row in rows:
                 yield table, row
 
-    def plan_attachments(self, conn: sqlite3.Connection, new_messages: List[Dict[str, Any]]) -> None:
-        """取り込む message と知覚台帳の行が参照する添付を共有メディアフォルダへ置く計画を立てる。"""
+    def plan_attachments(self, conn: sqlite3.Connection, new_messages: Iterable[Dict[str, Any]]) -> None:
+        """取り込む message (``new_messages`` は 1 回だけ回す) と知覚台帳の行が参照する添付を
+        共有メディアフォルダへ置く計画を立てる。"""
         if not self.pack.attachment_index:
             return
         counts = self.result.count("attachments")
@@ -2464,45 +2758,59 @@ class _ImportJob:
 
     # --- knowledge/ -------------------------------------------------------------
 
+    def target_page_row(self, conn: sqlite3.Connection, page_id: Any) -> Optional[Tuple[Any, ...]]:
+        """取り込み先の memopedia_pages の id が page_id の行 (id, title, summary, content,
+        updated_at, metadata, category, short_id, parent_id)。無ければ None。
+
+        返った id と page_id を Python の == でも比べる (id の IN で引いた行を id の辞書で
+        引く照合と同じ結果にする)。stage_knowledge が上書きするのは引いた行自身だけなので、
+        各ページを照合する時点で引いても、取り込み開始時の値と同じ行が返る。
+        """
+        row = conn.execute(
+            "SELECT id, title, summary, content, updated_at, metadata, category, short_id, parent_id "
+            "FROM memopedia_pages WHERE id = ?",
+            (page_id,),
+        ).fetchone()
+        if row is None or row[0] != page_id:
+            return None
+        return row
+
     def stage_knowledge(self, conn: sqlite3.Connection) -> None:
-        # 番号の計画と Chronicle の判定 (plan_chronicle_merge) に全件が要るので、ここで全部読む
-        pages = list(self.pack.pages)
+        # pages は全件を Python に持たない。id の照合は作業用 SQLite の列と索引で行い、
+        # 挿入する行には accepted = 1 を書いて、番号の計画と挿入はそこから読み直す
+        pages = self.pack.pages
         if not pages:
             return
         from sai_memory.memopedia.storage import generate_diff, record_page_edit
 
-        target_rows: Dict[str, Tuple[Any, ...]] = {}
-        ids = [p["id"] for p in pages]
-        for i in range(0, len(ids), _CHUNK):
-            part = ids[i:i + _CHUNK]
-            for row in conn.execute(
-                "SELECT id, title, summary, content, updated_at, metadata, category, short_id, parent_id "
-                f"FROM memopedia_pages WHERE id IN ({', '.join('?' for _ in part)})",
-                part,
-            ):
-                target_rows[row[0]] = row
-
         chronicle_plan: Optional[_ChroniclePlan] = None
         if not self.memory_new:
-            chronicle_plan = self.plan_chronicle_merge(conn, pages, target_rows)
+            chronicle_plan = self.plan_chronicle_merge(conn)
 
-        to_insert: List[Dict[str, Any]] = []
-        seen: Set[str] = set()
+        pages.add_mark("accepted")
+        n_insert = 0
+
+        def accept(ord_: int) -> None:
+            nonlocal n_insert
+            pages.execute("UPDATE {t} SET accepted = 1 WHERE ord = ?", (ord_,))
+            n_insert += 1
+
         deleted_not_added = 0
-        for page in pages:
+        # id ごとに ZIP で最初の行だけを扱う (ZIP 内の重複は先勝ち)
+        for ord_, text, first in pages.paged("r.row, " + _first_occurrence("id")):
+            page = json.loads(text)
             is_chronicle = page.get("category") == _CATEGORY_CHRONICLE and not page.get("is_trunk")
             counts = self.result.count("chronicle_pages" if is_chronicle else "pages")
-            if page["id"] in seen:
+            if not first:
                 counts.skipped += 1
                 continue
-            seen.add(page["id"])
-            existing = target_rows.get(page["id"])
+            existing = self.target_page_row(conn, page["id"])
             if is_chronicle and chronicle_plan is not None:
                 # 合流の Chronicle は plan_chronicle_merge の判定だけで決める。
                 # 取り込み先に同じ id がある行も上書きしない (metadata の
                 # parent_id / source_ids を書き換えると取り込み先の木が動く)。
                 if page["id"] in chronicle_plan.accepted:
-                    to_insert.append(page)
+                    accept(ord_)
                 else:
                     counts.skipped += 1
                     # 同じ id の行が取り込み先にあればその番号、無ければ取り込み先に入らない
@@ -2517,7 +2825,7 @@ class _ImportJob:
                     deleted_not_added += 1
                     self.note_page_numbers(page, None)
                     continue
-                to_insert.append(page)
+                accept(ord_)
                 continue
             # 取り込み先の行の番号は上書きしても変わらない (update_page)
             self.note_page_numbers(page, existing)
@@ -2553,63 +2861,40 @@ class _ImportJob:
 
         if deleted_not_added:
             self.warn(f"memopedia: {deleted_not_added} deleted page(s) not imported")
-        if not to_insert:
+        if not n_insert:
             return
-        decoded_pages = [_decode_row(p, "memopedia_pages") for p in to_insert]
-        # [元が解釈できない文字列だったか, metadata の値] (番号の記録で書き換えるので list)
-        metas: List[List[Any]] = [list(_decode_json_text(p.get("metadata"))) for p in to_insert]
-        # 振り直す前の ZIP の番号 (振り直しの後に取り込み先の番号と対にして ref_numbers へ)
-        zip_numbers = [
-            _page_numbers(d.get("category"), d.get("short_id"), meta)
-            for d, (_raw, meta) in zip(decoded_pages, metas)
-        ]
 
-        # 列の short_id
-        (col_max,) = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM memopedia_pages").fetchone()
-        originals = [_as_int(d.get("short_id")) for d in decoded_pages]
-        planned = _plan_numbers(originals, int(col_max))
-        for d, meta, orig, new in zip(decoded_pages, metas, originals, planned):
-            if new != orig:
-                d["short_id"] = new
-                self.record_original(meta, "original_short_id", orig, d["id"])
-                self.result.renumbered["pages.short_id"] = self.result.renumbered.get("pages.short_id", 0) + 1
+        plans = self.plan_page_numbers(conn, pages)
 
-        # metadata の番号 (コア記憶の core_id / Chronicle の short_id)
-        for category, meta_key, original_key, counter, title_fmt in (
-            (_CATEGORY_CORE, "core_id", "original_core_id", "pages.core_id", "コア記憶 c:{}"),
-            (_CATEGORY_CHRONICLE, "short_id", "original_chronicle_short_id",
-             "pages.chronicle_short_id", "chronicle:{}"),
-        ):
-            idx = [
-                i for i, (d, (raw, meta)) in enumerate(zip(decoded_pages, metas))
-                if d.get("category") == category and not raw and isinstance(meta, dict)
-                and meta_key in meta
-            ]
-            if not idx:
-                continue
-            (meta_max,) = conn.execute(
-                f"SELECT COALESCE(MAX(CAST(json_extract(metadata, '$.{meta_key}') AS INTEGER)), 0) "
-                "FROM memopedia_pages WHERE category = ?",
-                (category,),
-            ).fetchone()
-            originals = [_as_int(metas[i][1].get(meta_key)) for i in idx]
-            planned = _plan_numbers(originals, int(meta_max or 0))
-            for i, orig, new in zip(idx, originals, planned):
-                if new == orig or new is None:
-                    continue
-                meta = metas[i][1]
-                meta[meta_key] = new
-                meta[original_key] = orig
+        # 挿入: accepted の行を ord の順に読み直し、計画の番号を当てる。番号の記録
+        # (note_numbers) は旧来の「全行の記録の後に全行の挿入」と違って行ごとに挿入と
+        # 交互になるが、挿入の工程は ref_numbers を読まないので結果は同じ
+        rows = pages.query("SELECT ord, row FROM {t} WHERE accepted = 1 ORDER BY ord")
+        for plan, (ord_, text) in zip(plans, rows):
+            if ord_ != plan.ord:
+                raise RuntimeError("persona pack: memopedia page plan is out of step with the staged rows")
+            page = json.loads(text)
+            d = _decode_row(page, "memopedia_pages")
+            # [元が解釈できない文字列だったか, metadata の値] (番号の記録で書き換えるので list)
+            meta_cell: List[Any] = list(_decode_json_text(page.get("metadata")))
+            # 振り直す前の ZIP の番号 (振り直しの後に取り込み先の番号と対にして ref_numbers へ)
+            before = _page_numbers(d.get("category"), d.get("short_id"), meta_cell[1])
+            if plan.new_short_id is not None:
+                d["short_id"] = plan.new_short_id
+                # 残せないときの警告は plan_page_numbers が出した
+                self.record_original(meta_cell, "original_short_id", plan.short_id, d["id"], warn=False)
+            if plan.new_meta_number is not None and plan.meta_key is not None:
+                original_key, title_fmt = _PAGE_META_NUMBERS[plan.meta_key][1:3]
+                meta = meta_cell[1]
+                meta[plan.meta_key] = plan.new_meta_number
+                meta[original_key] = plan.meta_number
                 # 機構が書いた表題 (core_memory.add_core_memory / arasuji create_entry)
                 # だけを新しい番号に合わせる
-                if decoded_pages[i].get("title") == title_fmt.format(orig):
-                    decoded_pages[i]["title"] = title_fmt.format(new)
-                self.result.renumbered[counter] = self.result.renumbered.get(counter, 0) + 1
+                if d.get("title") == title_fmt.format(plan.meta_number):
+                    d["title"] = title_fmt.format(plan.new_meta_number)
+            self.note_numbers(before, _page_numbers(d.get("category"), d.get("short_id"), meta_cell[1]))
 
-        for d, (_raw, meta), before in zip(decoded_pages, metas, zip_numbers):
-            self.note_numbers(before, _page_numbers(d.get("category"), d.get("short_id"), meta))
-
-        for d, (is_raw, meta) in zip(decoded_pages, metas):
+            is_raw, meta = meta_cell
             if not is_raw and d.get("category") == _CATEGORY_CHRONICLE and isinstance(meta, dict):
                 if isinstance(meta.get("thread_id"), str):
                     meta["thread_id"] = self.remap_thread_id(meta["thread_id"])
@@ -2628,10 +2913,65 @@ class _ImportJob:
                 self.imported_chronicle_ids.add(d["id"])
             self.result.count("chronicle_pages" if is_chronicle else "pages").added += 1
 
+    def plan_page_numbers(self, conn: sqlite3.Connection, pages: _StagedRows) -> List[_PageNumberPlan]:
+        """stage_knowledge が挿入する行 (accepted = 1) の短縮番号を計画する (モジュール docstring)。
+
+        計画は本文 (content / summary) を持たない射影 (_PageNumberPlan) の、挿入する行の
+        ZIP の並び順のリストで立てる。元の番号を残せない行の警告 (record_original) と
+        renumbered の件数はここで出す — 旧来の「列の short_id → core_id → Chronicle の
+        short_id の計画を全部終えてから挿入」と同じ順。
+        """
+        plans: List[_PageNumberPlan] = []
+        for ord_, text in pages.query("SELECT ord, row FROM {t} WHERE accepted = 1 ORDER BY ord"):
+            page = json.loads(text)
+            d = _decode_row(page, "memopedia_pages")
+            is_raw, meta = _decode_json_text(page.get("metadata"))
+            plan = _PageNumberPlan(
+                ord=ord_,
+                page_id=d["id"],
+                short_id=_as_int(d.get("short_id")),
+                refusal=_metadata_refusal(is_raw, meta),
+            )
+            for meta_key, (category, *_rest) in _PAGE_META_NUMBERS.items():
+                if d.get("category") == category and not is_raw and isinstance(meta, dict) and meta_key in meta:
+                    plan.meta_key = meta_key
+                    plan.meta_number = _as_int(meta.get(meta_key))
+            plans.append(plan)
+
+        # 列の short_id
+        (col_max,) = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM memopedia_pages").fetchone()
+        originals = [p.short_id for p in plans]
+        planned = _plan_numbers(originals, int(col_max))
+        for p, orig, new in zip(plans, originals, planned):
+            if new != orig:
+                p.new_short_id = new
+                if p.refusal is not None:
+                    self.warn(f"memopedia page {p.page_id}: {p.refusal}; original_short_id not recorded")
+                self.result.renumbered["pages.short_id"] = self.result.renumbered.get("pages.short_id", 0) + 1
+
+        # metadata の番号 (コア記憶の core_id / Chronicle の short_id)
+        for meta_key, (category, _original_key, _title_fmt, counter) in _PAGE_META_NUMBERS.items():
+            targets = [p for p in plans if p.meta_key == meta_key]
+            if not targets:
+                continue
+            (meta_max,) = conn.execute(
+                f"SELECT COALESCE(MAX(CAST(json_extract(metadata, '$.{meta_key}') AS INTEGER)), 0) "
+                "FROM memopedia_pages WHERE category = ?",
+                (category,),
+            ).fetchone()
+            originals = [p.meta_number for p in targets]
+            planned = _plan_numbers(originals, int(meta_max or 0))
+            for p, orig, new in zip(targets, originals, planned):
+                if new == orig or new is None:
+                    continue
+                p.new_meta_number = new
+                self.result.renumbered[counter] = self.result.renumbered.get(counter, 0) + 1
+        return plans
+
     def note_page_numbers(self, page: Dict[str, Any], existing: Optional[Tuple[Any, ...]]) -> None:
         """挿入しない ZIP のページの番号を ref_numbers に記録する。
 
-        ``existing`` は取り込み先の同じ id の行 (stage_knowledge の target_rows の行)。
+        ``existing`` は取り込み先の同じ id の行 (target_page_row の行)。
         あればその行の番号、無ければ (合流で取り込まない Chronicle) None を対にする。
         """
         _raw, meta = _decode_json_text(page.get("metadata"))
@@ -2714,12 +3054,7 @@ class _ImportJob:
             rebuilt += "?" + text.split("?", 1)[1]
         return True, rebuilt
 
-    def plan_chronicle_merge(
-        self,
-        conn: sqlite3.Connection,
-        pages: Sequence[Dict[str, Any]],
-        target_rows: Dict[str, Tuple[Any, ...]],
-    ) -> _ChroniclePlan:
+    def plan_chronicle_merge(self, conn: sqlite3.Connection) -> _ChroniclePlan:
         """合流で取り込む Chronicle ページを決める (intent §5)。書き込みはしない。
 
         取り込むのは「ZIP にあって取り込み先に同じ id が無い」行のうち:
@@ -2738,18 +3073,32 @@ class _ImportJob:
         取り込む行の parent_id が取り込まない行・取り込み先にある行を指すときは、
         ``to_root`` に入れる (挿入時に parent_id = root_chronicle、
         is_consolidated = 0 にする)。
+
+        source_ids (件数はメッセージの数に比例する) は Python に持たず、作業用 SQLite の
+        表に置いて照合する: 被覆の集合 (取り込み先の全 Lv1 と受理した ZIP の Lv1 の
+        source_ids) と、候補ごとの source_ids。値は json.dumps (ASCII) で積む — 文字列の
+        等しさは保たれ、対になっていないサロゲートを含む文字列も UTF-8 の列に積める。
+        候補の (level, ord, parent_id) と accepted / to_root の id はページの数に比例する
+        ので Python に持つ。
         """
         plan = _ChroniclePlan()
+        pages = self.pack.pages
+        staging = pages.staging
+        if staging is None or staging.conn is None:  # stage_knowledge は積んだ表があるときだけ呼ぶ
+            return plan
+        work = staging
+        coverage = staging.scratch("chronicle:coverage", "source TEXT PRIMARY KEY")
+        sources_table = staging.scratch(
+            "chronicle:sources", "cand INTEGER NOT NULL, source TEXT NOT NULL"
+        )
 
-        # 取り込み先の chronicle ページの id と、全 Lv1 の source_ids
-        target_ids: Set[str] = set()
-        target_lv1_sources: Set[str] = set()
-        for page_id, meta_json, is_deleted in conn.execute(
-            "SELECT id, metadata, is_deleted FROM memopedia_pages "
+        # 取り込み先の全 Lv1 の source_ids (取り込み先の chronicle ページの id は
+        # target_chronicle_exists で問い合わせる)
+        for meta_json, is_deleted in conn.execute(
+            "SELECT metadata, is_deleted FROM memopedia_pages "
             "WHERE category = ? AND is_trunk = 0",
             (_CATEGORY_CHRONICLE,),
         ):
-            target_ids.add(page_id)
             if is_deleted:
                 continue
             try:
@@ -2760,20 +3109,27 @@ class _ImportJob:
                 continue
             sources = meta.get("source_ids")
             if isinstance(sources, list):
-                target_lv1_sources.update(str(s) for s in sources)
+                work.executemany(
+                    f"INSERT OR IGNORE INTO {coverage} (source) VALUES (?)",
+                    ((json.dumps(str(s)),) for s in sources),
+                )
 
-        # ZIP 側の chronicle 行 (取り込み先に同じ id が無いもの)
-        candidates: Dict[str, Tuple[int, List[str], Any]] = {}
-        zip_ids: Set[str] = set()
+        def target_chronicle_exists(page_id: str) -> bool:
+            return conn.execute(
+                "SELECT 1 FROM memopedia_pages WHERE id = ? AND category = ? AND is_trunk = 0",
+                (page_id, _CATEGORY_CHRONICLE),
+            ).fetchone() is not None
+
+        # ZIP 側の chronicle 行 (id ごとに ZIP の chronicle 行の中で最初の行のうち、取り込み先に
+        # 同じ id が無いもの): {id: (level, ord, parent_id)}
+        candidates: Dict[str, Tuple[int, int, Any]] = {}
         unreadable = deleted = 0
-        for page in pages:
-            if page.get("category") != _CATEGORY_CHRONICLE or page.get("is_trunk"):
-                continue
+        for ord_, text in pages.paged(
+            "r.row", "r.chronicle = 1 AND " + _first_occurrence("id", "e.chronicle = 1")
+        ):
+            page = json.loads(text)
             page_id = page["id"]
-            if page_id in zip_ids:
-                continue
-            zip_ids.add(page_id)
-            if page_id in target_rows:
+            if self.target_page_row(conn, page_id) is not None:
                 continue
             is_raw, meta = _decode_json_text(page.get("metadata"))
             level = _as_int(meta.get("level")) if not is_raw and isinstance(meta, dict) else None
@@ -2788,28 +3144,46 @@ class _ImportJob:
             if decode_value(page.get("is_deleted")):
                 deleted += 1
                 continue
-            candidates[page_id] = (level, sources, decode_value(page.get("parent_id")))
+            candidates[page_id] = (level, ord_, decode_value(page.get("parent_id")))
+            work.executemany(
+                f"INSERT INTO {sources_table} (cand, source) VALUES (?, ?)",
+                ((ord_, json.dumps(s)) for s in sources),
+            )
+        work.execute(f"CREATE INDEX {_quote('chronicle:sources#cand')} ON {sources_table} (cand)")
 
         # level の昇順に、同じ level の中は ZIP での並び順 (sorted は安定) で判定する。
         # 受理した Lv1 の source_ids は被覆の集合へ足し、後に来る ZIP の Lv1 も
         # それと交差判定する (ZIP の中で同じメッセージを覆う Lv1 は最初の一本だけ入る)。
         overlapping = on_shared = 0
-        for page_id, (level, sources, _parent) in sorted(
+        for page_id, (level, ord_, _parent) in sorted(
             candidates.items(), key=lambda item: item[1][0]
         ):
             if level <= 1:
-                if target_lv1_sources.intersection(sources):
+                overlap = work.execute(
+                    f"SELECT 1 FROM {sources_table} AS s JOIN {coverage} AS c "
+                    "ON c.source = s.source WHERE s.cand = ? LIMIT 1",
+                    (ord_,),
+                ).fetchone()
+                if overlap is not None:
                     overlapping += 1
                     continue
                 plan.accepted.add(page_id)
-                target_lv1_sources.update(sources)
+                work.execute(
+                    f"INSERT OR IGNORE INTO {coverage} (source) "
+                    f"SELECT source FROM {sources_table} WHERE cand = ?",
+                    (ord_,),
+                )
                 continue
             live = 0
             ok = True
-            for child in sources:
+            children = work.execute(
+                f"SELECT source FROM {sources_table} WHERE cand = ? ORDER BY rowid", (ord_,)
+            ).fetchall()
+            for (source,) in children:
+                child = json.loads(source)
                 if child in plan.accepted:
                     live += 1
-                elif child in target_ids or child in zip_ids:
+                elif target_chronicle_exists(child) or pages.contains("id", child, "chronicle = 1"):
                     ok = False
                     break
             if ok and live:
@@ -2842,16 +3216,20 @@ class _ImportJob:
             )
         return plan
 
-    def record_original(self, meta_cell: List[Any], key: str, original: Any, page_id: str) -> None:
-        """振り直した行の元の番号を metadata に残す。meta_cell は [is_raw, 値]。"""
-        if meta_cell[0]:
-            self.warn(f"memopedia page {page_id}: metadata is not a JSON object or array; {key} not recorded")
+    def record_original(
+        self, meta_cell: List[Any], key: str, original: Any, page_id: str, *, warn: bool = True
+    ) -> None:
+        """振り直した行の元の番号を metadata に残す。meta_cell は [is_raw, 値]。
+
+        残せないとき (_metadata_refusal) は ``warn`` なら警告する。
+        """
+        refusal = _metadata_refusal(meta_cell[0], meta_cell[1])
+        if refusal is not None:
+            if warn:
+                self.warn(f"memopedia page {page_id}: {refusal}; {key} not recorded")
             return
         if meta_cell[1] is None:
             meta_cell[1] = {}
-        if not isinstance(meta_cell[1], dict):
-            self.warn(f"memopedia page {page_id}: metadata is not an object; {key} not recorded")
-            return
         meta_cell[1][key] = original
 
     def update_page(
@@ -3011,7 +3389,9 @@ class _ImportJob:
                 merged = dict(conn.execute(
                     f"SELECT ORIGIN_UUID, ACTIVITY_UUID FROM {_ACTIVITY_MERGES_TABLE}"
                 ).fetchall())
-            for row in sorted(pack.activities, key=lambda r: _as_int(r.get("id")) or 0):
+            # id の順 (id_key = _as_int(id) or 0、同点は ZIP の並び順) に処理する。id_map は
+            # アクティビティの数に比例する (memos の行数には比例しない) ので Python に持つ
+            for row in pack.activities.rows_where("ORDER BY id_key, ord"):
                 zip_id = _as_int(row.get("id"))
                 u = row.get("uuid")
                 if u and u in by_uuid:
@@ -3050,7 +3430,7 @@ class _ImportJob:
             counts = self.result.count("memos")
             present_uuids = self.existing_keys(conn, "memos", "uuid", (m.get("uuid") for m in pack.memos))
             present_idem = self.existing_keys(conn, "memos", "idem_key", (m.get("idem_key") for m in pack.memos))
-            for row in sorted(pack.memos, key=lambda r: _as_int(r.get("id")) or 0):
+            for row in pack.memos.rows_where("ORDER BY id_key, ord"):
                 u = row.get("uuid")
                 idem = row.get("idem_key")
                 if (u and u in present_uuids) or (idem and idem in present_idem):
@@ -3101,41 +3481,48 @@ class _ImportJob:
         if not clips:
             return
         counts = self.result.count("clips")
-        present = self.existing_keys(conn, "clips", "clip_id", (c["clip_id"] for c in clips))
-        # 取り込み先に同じ clip_id がある行の番号 (clip:N の参照の書き換えに使う)
-        present_numbers: Dict[str, Any] = {}
-        present_ids = sorted(present)
-        for i in range(0, len(present_ids), _CHUNK):
-            part = present_ids[i:i + _CHUNK]
-            present_numbers.update(conn.execute(
-                f"SELECT clip_id, short_id FROM clips WHERE clip_id IN ({', '.join('?' for _ in part)})",
-                part,
-            ).fetchall())
-        to_insert = []
-        seen: Set[str] = set()
-        for row in clips:
-            if row["clip_id"] in present:
+        # clips は全件を Python に持たない。挿入する行 (clip_id ごとに ZIP で最初の行で、
+        # 取り込み先に同じ clip_id が無いもの) に accepted = 1 を書き、番号の計画と挿入は
+        # そこから読み直す。取り込み先の照合は行ごとに clip_id で引く (この走査の間は
+        # 取り込み先の clips に書かないので、取り込み開始時の値と同じ行が返る)
+        clips.add_mark("accepted")
+        n_insert = 0
+        for ord_, text, first in clips.paged("r.row, " + _first_occurrence("clip_id")):
+            row = json.loads(text)
+            target = conn.execute(
+                "SELECT clip_id, short_id FROM clips WHERE clip_id = ?", (row["clip_id"],)
+            ).fetchone()
+            present = target is not None and target[0] == row["clip_id"]
+            if present:
+                # 取り込み先に同じ clip_id がある行の番号 (clip:N の参照の書き換えに使う)
                 original = _as_int(decode_value(row.get("short_id")))
-                target_number = _as_int(present_numbers.get(row["clip_id"]))
+                target_number = _as_int(target[1])
                 if original is not None:
                     self.note_numbers(
                         {"clip": original},
                         {"clip": target_number} if target_number is not None else {},
                     )
-            if row["clip_id"] in present or row["clip_id"] in seen:
+            if present or not first:
                 counts.skipped += 1
                 continue
-            seen.add(row["clip_id"])
-            to_insert.append(_decode_row(row, "clips"))
-        if not to_insert:
+            clips.execute("UPDATE {t} SET accepted = 1 WHERE ord = ?", (ord_,))
+            n_insert += 1
+        if not n_insert:
             return
+        # 番号の計画は、挿入する行の振り直す前の番号 (整数) のリストで立てる
         (col_max,) = conn.execute("SELECT COALESCE(MAX(short_id), 0) FROM clips").fetchone()
-        originals = [_as_int(d.get("short_id")) for d in to_insert]
+        originals = [
+            _as_int(_decode_row(row, "clips").get("short_id"))
+            for row in clips.rows_where("WHERE accepted = 1 ORDER BY ord")
+        ]
         planned = _plan_numbers(originals, int(col_max))
         for orig, new in zip(originals, planned):
             if orig is not None:
                 self.note_numbers({"clip": orig}, {"clip": new} if new is not None else {})
         unresolved = 0
+        to_insert = (
+            _decode_row(row, "clips") for row in clips.rows_where("WHERE accepted = 1 ORDER BY ord")
+        )
         for d, orig, new in zip(to_insert, originals, planned):
             if new != orig:
                 d["short_id"] = new
@@ -3222,6 +3609,8 @@ class _ImportJob:
         # 取り込み先の task_book に ORIGIN_TASK_ID 列が無い (起動時のマイグレーション
         # 前の DB) ときは TASK_ID だけで照合する (insert が列を警告して落とす)。
         has_origin = "ORIGIN_TASK_ID" in self.columns(world, "task_book")
+        # task_book (約束帳) の id のリストと写像は Python に持つ。行は約束の数だけで、
+        # 会話の量とともに増える表 (messages など) の行数には比例しない (有界側)
         originals = [r["TASK_ID"] for r in rows]
         zip_origins = [r.get("ORIGIN_TASK_ID") for r in rows]
         keys = [k for k in (*originals, *zip_origins) if isinstance(k, str) and k]
@@ -3448,7 +3837,7 @@ class _ImportJob:
         ZIP の値によらず取り込み先のペルソナ ID にする。子表 ("parent") は、親
         テーブルの行のうち ZIP にあって、取り込み先でこのペルソナの行になっているもの
         (今回入れた行と、前の取り込みで入った行) を指す行だけ。addon_message_metadata
-        ("message") は self.message_ids 宛ての行だけ。文字列の主キーと参照の列は
+        ("message") は ZIP の messages の id (作業用 SQLite の messages の表で引く) 宛ての行だけ。文字列の主キーと参照の列は
         WORLD_STRING_KEY_TABLES の写像で振り直し (decode_world_row)、単一列の整数の
         主キーは取り込み先の連番で振り直す。building_occupancy_log は書き出し元の私室を
         指す退室済みの行だけを、取り込み先の私室と街へ付け替えて入れる
@@ -3485,6 +3874,9 @@ class _ImportJob:
                 # 親の主キーが振り直す列なら、取り込み先の値で照合する (子の参照の列も
                 # 同じ写像で付け替えてから比べる)
                 parent_rekeyed = WORLD_STRING_KEY_TABLES.get(parent_table, ("",))[0] == parent_key
+                # 親の表 (persona_task / action_track) の主キーの集合。件数は親の表の行数に
+                # 比例し、子の表 (persona_task_history / track_local_log など、寿命とともに
+                # 増える行) の行数には比例しない (有界側) ので、Python に持つ
                 zip_parents = {
                     self.world_key(parent_table, decode_value(r.get(parent_key))) if parent_rekeyed
                     else decode_value(r.get(parent_key))
@@ -3501,8 +3893,6 @@ class _ImportJob:
                             f"AND {_quote(parent_key)} IN ({', '.join('?' for _ in part)})",
                             [self.target, *part],
                         ))
-            elif rule[0] == "message":
-                allowed = self.message_ids
             refused = 0
             # 単一列の整数の主キーは世界全体の連番なので、取り込み先で振り直す。
             # 整数かどうかは INTEGER affinity (型名に "INT" を含む — SQLite の型
@@ -3526,7 +3916,11 @@ class _ImportJob:
                 decoded = self.decode_world_row(table, row, skip=pk_col)
                 if rule[0] == "owner":
                     decoded[column] = self.target
-                elif decoded.get(column) not in allowed:
+                elif (
+                    decoded.get(column) not in allowed if rule[0] == "parent"
+                    # ZIP の messages の id (stage_chatlog の後は全部が取り込み先にある) 宛ての行だけ
+                    else not self.pack.messages.contains("id", decoded.get(column))
+                ):
                     refused += 1
                     counts.skipped += 1
                     continue
@@ -3674,7 +4068,11 @@ class _ImportJob:
         return None
 
     def pack_items(self) -> Dict[str, Dict[str, Any]]:
-        """items/items.json の item 行 (ZIP の ITEM_ID → 戻した行。同じ ID が二度あれば先のもの)。"""
+        """items/items.json の item 行 (ZIP の ITEM_ID → 戻した行。同じ ID が二度あれば先のもの)。
+
+        items/ は一枚物としてメモリに持つ (_load_items)。件数は所持品の数で、会話の量と
+        ともに増える表の行数には比例しない (有界側) — plan_items の計画も同じ。
+        """
         items: Dict[str, Dict[str, Any]] = {}
         for raw in (self.pack.items or {}).get("items") or []:
             items.setdefault(raw["ITEM_ID"], _decode_row(raw))
@@ -4027,13 +4425,18 @@ class _ImportJob:
         if not self.imported_chronicle_ids or not self.table_exists(conn, table):
             counts.skipped += len(rows)
             return
-        decoded = [{k: decode_value(v) for k, v in row.items()} for row in rows]
+        # 行は Python のリストに溜めず、作業用 SQLite から 2 回流す (照合に要る実体ページの
+        # id を集める回と、挿入する回)。entity_ids は実体ページの数に比例する
+        def decoded() -> Iterator[Dict[str, Any]]:
+            for row in rows:
+                yield {k: decode_value(v) for k, v in row.items()}
+
         entity_ids = self.existing_keys(
             conn, "memopedia_pages", "id",
-            (r.get("entity_page_id") for r in decoded
+            (r.get("entity_page_id") for r in decoded()
              if r.get("chronicle_page_id") in self.imported_chronicle_ids),
         )
-        for row in decoded:
+        for row in decoded():
             chronicle_id = row.get("chronicle_page_id")
             entity_id = row.get("entity_page_id")
             created_at = row.get("created_at")

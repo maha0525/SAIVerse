@@ -858,6 +858,84 @@ def test_element_over_the_limit_is_refused_before_writing(
     assert _staging_files(tmp_path) == []
 
 
+def _crafted_message(mid: str, created: Any, seq: Any = None, content: str = "") -> Dict[str, Any]:
+    row: Dict[str, Any] = {
+        "id": mid, "thread_id": f"{PID}:room_a", "role": "user", "content": content or mid,
+        "resource_id": PID, "created_at": created, "metadata": {"tags": ["conversation"]},
+    }
+    if seq is not None:
+        row["seq"] = seq
+    return row
+
+
+def test_new_import_orders_messages_without_seq_by_created_at_then_zip_order(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    """seq の無い行が混ざると seq は rowid に使わず、挿入順 (rowid 順) は
+    (created_at, seq のある行は seq / 無い行は ZIP の並び順) の正典順になる。
+    created_at が数値に戻らない行は先頭、同点は ZIP の並び順。"""
+    t = "2026-10-10T00:00:0{}+00:00"
+    messages = [
+        _crafted_message("a", t.format(2), seq=5),
+        _crafted_message("b", t.format(1)),
+        _crafted_message("c", t.format(1), seq=9),
+        _crafted_message("d", t.format(1)),
+        _crafted_message("e", t.format(0)),
+        _crafted_message("f", "not a date"),
+        _crafted_message("g", t.format(1), seq=3),
+        _crafted_message("h", t.format(1), seq=3),
+    ]
+    crafted = _add_zip_entries(source["zip"], tmp_path / "crafted.zip", {"chatlog/messages.json": messages})
+    target = _make_env(tmp_path / "dst", PID)
+    result = _import(target, crafted, "new")
+    assert result.counts["messages"].added == len(messages)
+    conn = _mem(target)
+    try:
+        rows = conn.execute("SELECT id, rowid FROM messages ORDER BY rowid").fetchall()
+    finally:
+        conn.close()
+    assert [mid for mid, _rowid in rows] == ["f", "e", "g", "h", "c", "b", "d", "a"]
+    # seq の無い行があるので、どの行の rowid も seq ではなく 1 からの連番
+    assert [rowid for _mid, rowid in rows] == list(range(1, len(messages) + 1))
+
+
+def test_merge_takes_the_first_of_duplicate_message_ids_and_skips_existing_ones(
+    source: Dict[str, Any], tmp_path: Path
+) -> None:
+    """合流で ZIP 内に同じ id のメッセージが二度あれば先の行だけが入り、取り込み先に
+    既にある id の行は (ZIP 内で重複していても) 増えも書き換わりもしない。"""
+    target = _make_env(tmp_path / "dst", PID)
+    _import(target, source["zip"], "new")
+    conn = _mem(target)
+    try:
+        (m1_before,) = conn.execute("SELECT content FROM messages WHERE id = 'm1'").fetchone()
+    finally:
+        conn.close()
+
+    t = "2026-10-11T00:00:0{}+00:00"
+    messages = _zjson(source["zip"], "chatlog/messages.json") + [
+        _crafted_message("m-dup", t.format(1), seq=901, content="先の行"),
+        _crafted_message("m1", t.format(2), seq=902, content="既にある id の別の行"),
+        _crafted_message("m-dup", t.format(3), seq=903, content="後の行"),
+    ]
+    crafted = _add_zip_entries(source["zip"], tmp_path / "crafted.zip", {"chatlog/messages.json": messages})
+    result = _import(target, crafted, "merge")
+    assert result.counts["messages"].added == 1
+    # 取り込み先にある m1..m6、ZIP 内でもう一度来た m1、後の m-dup
+    assert result.counts["messages"].skipped == 6 + 1 + 1
+    conn = _mem(target)
+    try:
+        assert conn.execute(
+            "SELECT content FROM messages WHERE id = 'm-dup'"
+        ).fetchall() == [("先の行",)]
+        assert conn.execute(
+            "SELECT content FROM messages WHERE id = 'm1'"
+        ).fetchall() == [(m1_before,)]
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 7
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # profile/
 # ---------------------------------------------------------------------------
