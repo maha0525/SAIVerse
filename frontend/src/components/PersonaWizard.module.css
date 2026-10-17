@@ -313,6 +313,42 @@
     color: #ccc;
 }
 
+/* ペルソナまるごとパックから迎える (ステップ 1 の下) */
+.packEntry {
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid #333;
+}
+
+.packButton {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+    background: none;
+    border: 1px solid #444;
+    color: #ccc;
+    padding: 0.6rem 1.2rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: all 0.2s;
+}
+
+.packButton:hover:not(:disabled) {
+    border-color: #4dabf7;
+    color: #4dabf7;
+}
+
+.packButton:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.packResult {
+    margin: -1rem 0 1.5rem;
+}
+
 /* Import Step */
 .importStep {
     color: #e0e0e0;
@@ -477,6 +513,21 @@
 :global([data-theme="light"]) .secondaryButton:hover {
     border-color: #cbd5e1;
     color: #1f2937;
+}
+
+:global([data-theme="light"]) .packEntry {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .packButton {
+    border-color: #e2e8f0;
+    color: #1e293b;
+}
+
+:global([data-theme="light"]) .packButton:hover:not(:disabled) {
+    border-color: #2563eb;
+    color: #2563eb;
+    background-color: #f1f5f9;
 }
 
 :global([data-theme="light"]) .completeTitle {

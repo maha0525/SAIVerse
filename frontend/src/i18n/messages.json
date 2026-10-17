@@ -4447,14 +4447,6 @@
     "ja": "エラーが発生しました",
     "en": "An error occurred"
   },
-  "components.memory.MemoryBrowser.text016": {
-    "ja": "エクスポートに失敗しました",
-    "en": "Export failed"
-  },
-  "components.memory.MemoryBrowser.text017": {
-    "ja": "エラーが発生しました",
-    "en": "An error occurred"
-  },
   "components.memory.MemoryBrowser.text018": {
     "ja": "スレッドを削除",
     "en": "Delete thread"
@@ -4506,10 +4498,6 @@
   "components.memory.MemoryBrowser.text030": {
     "ja": "アクティブに設定",
     "en": "Set as active"
-  },
-  "components.memory.MemoryBrowser.text031": {
-    "ja": "スレッドをエクスポート (Native JSON)",
-    "en": "Export thread (Native JSON)"
   },
   "components.memory.MemoryBrowser.text032": {
     "ja": "メッセージを追加",
@@ -12050,5 +12038,201 @@
   "movementNotices.loadOlder": {
     "ja": "以前のメッセージを読み込む",
     "en": "Load older messages"
+  },
+  "components.MemoryModal.personaPack": {
+    "ja": "ペルソナまるごとパック",
+    "en": "Persona Pack"
+  },
+  "components.memory.PersonaPack.title": {
+    "ja": "ペルソナまるごとパック",
+    "en": "Persona Pack"
+  },
+  "components.memory.PersonaPack.lead": {
+    "ja": "ペルソナ一体の記憶・プロフィール・手帳などを、一つの ZIP ファイルとして持ち出したり、取り込んだりできます。",
+    "en": "Take a whole persona (memories, profile, pocketbook and more) out as a single ZIP file, or bring one in."
+  },
+  "components.memory.PersonaPack.exportAction": {
+    "ja": "パックにまとめる",
+    "en": "Create a pack"
+  },
+  "components.memory.PersonaPack.exportDescription": {
+    "ja": "このペルソナのデータを ZIP にまとめてダウンロードします。まとめてもペルソナの状態は変わりません。API キーなどの認証情報は入りません。",
+    "en": "Downloads this persona's data as a ZIP file. Creating a pack does not change the persona. Credentials such as API keys are never included."
+  },
+  "components.memory.PersonaPack.exporting": {
+    "ja": "まとめています…",
+    "en": "Creating the pack…"
+  },
+  "components.memory.PersonaPack.exportFailed": {
+    "ja": "パックにまとめられませんでした: {p1}",
+    "en": "Could not create the pack: {p1}"
+  },
+  "components.memory.PersonaPack.importAction": {
+    "ja": "パックを取り込む",
+    "en": "Import a pack"
+  },
+  "components.memory.PersonaPack.importDescription": {
+    "ja": "選んだパックの記録を、このペルソナに合流させます。まだ無い記録だけが追加され、今ある記録は消えません。新しいペルソナとして迎えるときは、ペルソナの作成画面から取り込んでください。",
+    "en": "Merges the records in the chosen pack into this persona. Only records that are not here yet are added, and nothing already here is removed. To welcome the pack as a new persona, import it from the persona creation screen."
+  },
+  "components.memory.PersonaPack.chooseFile": {
+    "ja": "ZIP ファイルを選ぶ",
+    "en": "Choose a ZIP file"
+  },
+  "components.memory.PersonaPack.overwriteProfile": {
+    "ja": "プロフィールも ZIP の内容で上書きする",
+    "en": "Also overwrite the profile with the contents of the ZIP"
+  },
+  "components.memory.PersonaPack.mergeHint": {
+    "ja": "Memopedia のページは、内容が違うときは更新日時が新しい方が残ります (上書きされた方は編集履歴から戻せます)。Chronicle の記事は、取り込み先のどの記事もまだまとめていない会話のぶんだけが入ります。所持品と私室・その他の記録は合流では取り込まず、スキップとして数えます。",
+    "en": "When a Memopedia page differs, the more recently updated version is kept (the overwritten text can be restored from the edit history). Chronicle articles are imported only for conversations that no article in this persona covers yet. Items, the private room, and other records are not merged; they are counted as skipped."
+  },
+  "components.memory.PersonaPack.mergeAction": {
+    "ja": "このペルソナに合流させる",
+    "en": "Merge into this persona"
+  },
+  "components.memory.PersonaPack.cancel": {
+    "ja": "やめる",
+    "en": "Cancel"
+  },
+  "components.memory.PersonaPack.importing": {
+    "ja": "取り込んでいます…",
+    "en": "Importing…"
+  },
+  "components.memory.PersonaPack.importFailed": {
+    "ja": "取り込めませんでした: {p1}",
+    "en": "Import failed: {p1}"
+  },
+  "components.memory.PersonaPack.resultTitle": {
+    "ja": "取り込みが終わりました",
+    "en": "Import finished"
+  },
+  "components.memory.PersonaPack.columnCategory": {
+    "ja": "項目",
+    "en": "Category"
+  },
+  "components.memory.PersonaPack.columnAdded": {
+    "ja": "追加",
+    "en": "Added"
+  },
+  "components.memory.PersonaPack.columnUpdated": {
+    "ja": "更新",
+    "en": "Updated"
+  },
+  "components.memory.PersonaPack.columnSkipped": {
+    "ja": "スキップ",
+    "en": "Skipped"
+  },
+  "components.memory.PersonaPack.categoryProfile": {
+    "ja": "プロフィール",
+    "en": "Profile"
+  },
+  "components.memory.PersonaPack.categoryThreads": {
+    "ja": "スレッド",
+    "en": "Threads"
+  },
+  "components.memory.PersonaPack.categoryStelisThreads": {
+    "ja": "Stelis スレッド",
+    "en": "Stelis threads"
+  },
+  "components.memory.PersonaPack.categoryMessages": {
+    "ja": "メッセージ",
+    "en": "Messages"
+  },
+  "components.memory.PersonaPack.categoryAttachments": {
+    "ja": "添付ファイル",
+    "en": "Attachments"
+  },
+  "components.memory.PersonaPack.categoryPages": {
+    "ja": "Memopedia のページ",
+    "en": "Memopedia pages"
+  },
+  "components.memory.PersonaPack.categoryChronicle": {
+    "ja": "Chronicle",
+    "en": "Chronicle"
+  },
+  "components.memory.PersonaPack.categoryActivities": {
+    "ja": "手帳のアクティビティ",
+    "en": "Pocketbook activities"
+  },
+  "components.memory.PersonaPack.categoryMemos": {
+    "ja": "手帳のメモ",
+    "en": "Pocketbook notes"
+  },
+  "components.memory.PersonaPack.categoryClips": {
+    "ja": "切り抜き",
+    "en": "Clips"
+  },
+  "components.memory.PersonaPack.categoryPurposeTags": {
+    "ja": "目的タグ",
+    "en": "Purpose tags"
+  },
+  "components.memory.PersonaPack.categoryTaskBook": {
+    "ja": "手帳の約束",
+    "en": "Pocketbook promises"
+  },
+  "components.memory.PersonaPack.categoryDayReports": {
+    "ja": "一日新聞",
+    "en": "Daily papers"
+  },
+  "components.memory.PersonaPack.categoryItems": {
+    "ja": "所持品・私室",
+    "en": "Items and private room"
+  },
+  "components.memory.PersonaPack.categoryOther": {
+    "ja": "その他の記録",
+    "en": "Other records"
+  },
+  "components.memory.PersonaPack.renumbered": {
+    "ja": "{p1} 件の短縮番号 (m:3 のような番号) を振り直しました。過去の発言に書かれた番号は、元の環境の番号のままです。",
+    "en": "Renumbered {p1} short IDs (numbers like m:3). Numbers written in past messages still refer to the original environment."
+  },
+  "components.memory.PersonaPack.embeddingStarted": {
+    "ja": "記憶の検索用データを裏で作り直しています。終わるまでは、取り込んだ記憶が想起に出てこないことがあります。",
+    "en": "Search data for the memories is being rebuilt in the background. Until it finishes, imported memories may not come up in recall."
+  },
+  "components.memory.PersonaPack.warnings": {
+    "ja": "注意 ({p1} 件)",
+    "en": "Warnings ({p1})"
+  },
+  "components.memory.PersonaPack.chronicleForecastTitle": {
+    "ja": "あらすじ (Chronicle) の次の補修",
+    "en": "Next Chronicle repair"
+  },
+  "components.memory.PersonaPack.chronicleFoldRuns": {
+    "ja": "あらすじを大きな流れにまとめる作業 (見込み)",
+    "en": "Runs to combine summaries into larger arcs (estimate)"
+  },
+  "components.memory.PersonaPack.chronicleStaleEntries": {
+    "ja": "書き直しを待っているあらすじ",
+    "en": "Summaries waiting to be rewritten"
+  },
+  "components.memory.PersonaPack.chronicleTimes": {
+    "ja": "{p1} 回",
+    "en": "{p1}"
+  },
+  "components.memory.PersonaPack.chronicleEntries": {
+    "ja": "{p1} 件",
+    "en": "{p1}"
+  },
+  "components.memory.PersonaPack.chronicleRepairHint": {
+    "ja": "合流の後は、あらすじ (Chronicle) の画面に出る案内から、あらすじの補修を一度実行してください。取り込んだあらすじを、このペルソナのあらすじの流れにつなぎます。実行の前に、内容と費用の確認があります。",
+    "en": "After merging, run the Chronicle repair once from the notice on the Chronicle screen. It connects the imported summaries to this persona's chronicle. You can review the content and cost before it runs."
+  },
+  "components.memory.PersonaPack.chronicleMarksPending": {
+    "ja": "取り込んだあらすじが会話と二重に表示されるのを防ぐ印を、まだ書き込めていない会話があります。あらすじの補修を実行すると書き込まれます。",
+    "en": "Some conversations do not yet have the marks that keep imported summaries from showing twice alongside the conversation. Running the Chronicle repair writes them."
+  },
+  "components.PersonaWizard.packHint": {
+    "ja": "ペルソナまるごとパック (ZIP) を持っているなら、その子を記憶ごと新しいペルソナとして迎えられます。名前や設定は ZIP の内容が使われます。",
+    "en": "If you have a Persona Pack (ZIP), you can welcome that persona as a new persona, memories and all. The name and settings come from the ZIP."
+  },
+  "components.PersonaWizard.packAction": {
+    "ja": "ペルソナまるごとパックから迎える",
+    "en": "Welcome from a Persona Pack"
+  },
+  "components.PersonaWizard.packImportFailed": {
+    "ja": "パックから迎えられませんでした: {p1}",
+    "en": "Could not welcome the persona from the pack: {p1}"
   }
 }

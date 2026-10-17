@@ -914,6 +914,8 @@ def admin_with_persona(monkeypatch):
     admin.SessionLocal = SessionLocal
     admin.manager = manager
     admin.personas = {_ADMIN_AI_ID: persona}
+    admin.persona_map = {"Air": _ADMIN_AI_ID}
+    admin.id_to_name_map = {_ADMIN_AI_ID: "Air"}
     admin.building_map = {}
     admin.state = SimpleNamespace(model=None, city_id=1)
     admin._set_persona_avatar = lambda ai_id, value: None

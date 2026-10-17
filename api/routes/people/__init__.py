@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from . import summon, memory, recall, config
-from . import import_chatlog, reembed, memopedia, native_export_import
+from . import import_chatlog, reembed, memopedia, native_export_import, persona_pack
 from . import schedule, inventory, arasuji
 from . import pulse_logs, memory_notes, working_memory
 from . import storage_layers, cache_status, context_status, debug, pulse_timeline
@@ -47,6 +47,7 @@ router.include_router(recall.router, tags=["people"])
 router.include_router(config.router, tags=["people"])
 router.include_router(import_chatlog.router, tags=["people"])
 router.include_router(native_export_import.router, tags=["people"])
+router.include_router(persona_pack.router, tags=["people"])
 router.include_router(reembed.router, tags=["people"])
 router.include_router(memopedia.router, tags=["people"])
 router.include_router(schedule.router, tags=["people"])

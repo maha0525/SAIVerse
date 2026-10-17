@@ -5,10 +5,11 @@ import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 
 
-import React, { useState, useEffect } from 'react';
-import { X, Loader2, CheckCircle, ArrowRight, ArrowLeft, MessageSquare, Settings, SlidersHorizontal } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { X, Loader2, CheckCircle, ArrowRight, ArrowLeft, MessageSquare, Settings, SlidersHorizontal, PackageOpen } from 'lucide-react';
 import styles from './PersonaWizard.module.css';
 import MemoryImport from './memory/MemoryImport';
+import PersonaPackResult, { PersonaPackImportResult } from './memory/PersonaPackResult';
 import ModalOverlay from './common/ModalOverlay';
 import SettingsModal from './SettingsModal';
 import { fetchAllTableRows } from '../lib/dbTable';
@@ -74,6 +75,10 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
     const [createdRoomId, setCreatedRoomId] = useState<string | null>(null);
     const [showSettings, setShowSettings] = useState(false);
 
+    // ペルソナまるごとパックから迎える (docs/intent/persona_pack.md §5 の新規作成)
+    const packInputRef = useRef<HTMLInputElement>(null);
+    const [packResult, setPackResult] = useState<PersonaPackImportResult | null>(null);
+
     // Reset on open
     useEffect(() => {
         if (isOpen) {
@@ -86,6 +91,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             setCreatedPersonaId(null);
             setCreatedRoomId(null);
             setShowSettings(false);
+            setPackResult(null);
             loadCities();
             loadTakenIds();
         }
@@ -221,6 +227,41 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
         }
     };
 
+    // パックの ZIP からペルソナを作って記憶ごと取り込む。チャットログの取り込み
+    // (ステップ 2) はパックに記憶が入っているので飛ばし、完了 (ステップ 3) へ進む
+    const importFromPack = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0] ?? null;
+        e.target.value = '';
+        if (!file) return;
+
+        setIsLoading(true);
+        setError(null);
+        try {
+            const form = new FormData();
+            form.append('file', file);
+            const res = await apiFetch('/api/people/persona-pack/import-new', {
+                method: 'POST',
+                body: form,
+            });
+            const data = await res.json().catch(() => ({ detail: res.statusText }));
+            if (!res.ok) {
+                setError(uiText("components.PersonaWizard.packImportFailed", { p1: data.detail || res.statusText }));
+                return;
+            }
+            const result = data as PersonaPackImportResult;
+            setName(result.persona_name || result.persona_id || '');
+            setCreatedPersonaId(result.persona_id ?? null);
+            setCreatedRoomId(result.room_id ?? null);
+            setPackResult(result);
+            setStep(3);
+        } catch (err) {
+            console.error('Failed to import persona pack', err);
+            setError(uiText("components.PersonaWizard.packImportFailed", { p1: String(err) }));
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
     const handleComplete = () => {
         if (createdPersonaId && createdRoomId && onComplete) {
             onComplete(createdPersonaId, createdRoomId);
@@ -308,6 +349,26 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             </div>
 
             {error && <p className={styles.error}>{error}</p>}
+
+            {/* ペルソナまるごとパックから迎える: 名前・設定・記憶は ZIP から入る */}
+            <div className={styles.packEntry}>
+                <p data-i18n="components.PersonaWizard.packHint" className={styles.hint}>{uiText("components.PersonaWizard.packHint")}</p>
+                <input
+                    ref={packInputRef}
+                    type="file"
+                    accept=".zip,application/zip"
+                    style={{ display: 'none' }}
+                    onChange={(e) => { void importFromPack(e); }}
+                />
+                <button data-i18n="components.PersonaWizard.packAction"
+                    className={styles.packButton}
+                    onClick={() => packInputRef.current?.click()}
+                    disabled={isLoading}
+                >
+                    {isLoading ? <Loader2 size={16} className={styles.loader} /> : <PackageOpen size={16} />}
+                    {uiText("components.PersonaWizard.packAction")}
+                </button>
+            </div>
         </>
     );
 
@@ -333,6 +394,11 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             <p data-i18n="components.PersonaWizard.text018 components.PersonaWizard.text019 components.PersonaWizard.text020" className={styles.completeSubtitle}>
                 {name}{uiText("components.PersonaWizard.text018")}{embedded ? uiText("components.PersonaWizard.text019") : uiText("components.PersonaWizard.text020")}
             </p>
+            {packResult && (
+                <div className={styles.packResult}>
+                    <PersonaPackResult result={packResult} />
+                </div>
+            )}
             <div className={styles.completeActions}>
                 {!embedded && (
                     <button data-i18n="components.PersonaWizard.text021" className={styles.primaryButton} onClick={goToRoom}>

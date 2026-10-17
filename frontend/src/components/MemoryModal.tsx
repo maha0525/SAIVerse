@@ -2,7 +2,7 @@
 import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 import React, { useState } from 'react';
-import { X, MessageSquare, Download, Book, Bug, Layers, Activity, Anchor, Footprints, Notebook } from 'lucide-react';
+import { X, MessageSquare, Download, Book, Bug, Layers, Activity, Anchor, Footprints, Notebook, Package } from 'lucide-react';
 import styles from './MemoryModal.module.css';
 import MemoryBrowser from './memory/MemoryBrowser';
 import MemoryImport from './memory/MemoryImport';
@@ -13,6 +13,7 @@ import ArasujiViewer from './memory/ArasujiViewer';
 import ExperienceLedgerViewer from './memory/ExperienceLedgerViewer';
 import PocketbookViewer from './memory/PocketbookViewer';
 import PulseTimelineViewer from './memory/PulseTimelineViewer';
+import PersonaPackPanel from './memory/PersonaPackPanel';
 import ModalOverlay from './common/ModalOverlay';
 
 interface MemoryModalProps {
@@ -22,7 +23,7 @@ interface MemoryModalProps {
     personaName?: string;
 }
 
-type Tab = 'browser' | 'core_memory' | 'pocketbook' | 'arasuji' | 'memopedia' | 'experience' | 'pulse_timeline' | 'import' | 'debug';
+type Tab = 'browser' | 'core_memory' | 'pocketbook' | 'arasuji' | 'memopedia' | 'experience' | 'pulse_timeline' | 'persona_pack' | 'import' | 'debug';
 
 // v0.3.0 では画面に出さないタブ (2026-09-01 まはー裁定)。中身のコードは残して
 // あるので、条件が解けたらこの集合から名前を外すだけで戻る。
@@ -104,6 +105,13 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                         >
                             <Activity size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />{uiText("components.MemoryModal.text006")}</button>
                     )}
+                    {/* ペルソナまるごとパック (docs/intent/persona_pack.md)。ペルソナ一体を
+                        ZIP にまとめる / ZIP をこのペルソナへ合流させる。 */}
+                    <button data-i18n="components.MemoryModal.personaPack"
+                        className={`${styles.tab} ${activeTab === 'persona_pack' ? styles.activeTab : ''}`}
+                        onClick={() => setActiveTab('persona_pack')}
+                    >
+                        <Package size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />{uiText("components.MemoryModal.personaPack")}</button>
                     <button data-i18n="components.MemoryModal.text007"
                         className={`${styles.tab} ${activeTab === 'import' ? styles.activeTab : ''}`}
                         onClick={() => setActiveTab('import')}
@@ -124,6 +132,7 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                     {activeTab === 'memopedia' && <MemopediaViewer personaId={personaId} />}
                     {activeTab === 'experience' && !isHidden('experience') && <ExperienceLedgerViewer personaId={personaId} />}
                     {activeTab === 'pulse_timeline' && !isHidden('pulse_timeline') && <PulseTimelineViewer personaId={personaId} />}
+                    {activeTab === 'persona_pack' && <PersonaPackPanel personaId={personaId} />}
                     {activeTab === 'import' && <MemoryImport personaId={personaId} />}
                     {activeTab === 'debug' && <MemoryRecall personaId={personaId} />}
                 </div>

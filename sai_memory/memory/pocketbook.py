@@ -21,9 +21,11 @@ storage.py の流儀に合わせ、conn を第一引数に取る素朴な関数�
 from __future__ import annotations
 
 import datetime
+import logging
 import re
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -145,8 +147,45 @@ def init_pocketbook_tables(conn: sqlite3.Connection) -> None:
     # - origin = 由来の印 (:data:`MEMO_ORIGINS`)。既存行は NULL (= live 相当)。
     _ensure_column(conn, "memos", "event_date", "TEXT")
     _ensure_column(conn, "memos", "origin", "TEXT")
+    # uuid: 環境を跨いで同じ行を同定する照合キー (docs/intent/persona_pack.md
+    # §3-3)。id (AUTOINCREMENT) は DB ごとに振られるので、エクスポート元と
+    # 取り込み先で同じ行を指せない。新規行は add_activity / add_memo が
+    # uuid4 を振る。既存行 (列の後付けより前の行や、uuid を渡さない直接の
+    # INSERT で入った行) は :func:`_backfill_uuids` が uuid IS NULL の行だけを
+    # 埋める — 毎回の init で走るので、後付けと埋めの間で落ちた DB も次の
+    # init で埋まる (冪等)。UNIQUE は照合キーとしての契約を DB 境界に置く
+    # (NULL は UNIQUE にかからない)。
+    # 但し書き: backfill で埋まった既存行の uuid は環境ごとに別の値になる。
+    # 列の後付けより前の同じ DB の複製を別々の環境でそれぞれ init した場合、
+    # 同じ論理行でも uuid が一致しないので、照合キーとして同一視できるのは
+    # backfill 後に複製・書き出しされた行と、uuid を振って作られた行だけ。
+    for table in ("activities", "memos"):
+        _ensure_column(conn, table, "uuid", "TEXT")
+        conn.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_uuid ON {table}(uuid)"
+        )
+        _backfill_uuids(conn, table)
     if owns_txn:
         conn.commit()
+
+
+def _backfill_uuids(conn: sqlite3.Connection, table: str) -> int:
+    """``table`` の uuid IS NULL の行に uuid4 を埋める。埋めた行数を返す。
+
+    冪等 — 既に uuid を持つ行は触らない。確定は呼び手
+    (:func:`init_pocketbook_tables`) の所有判定に従う。
+    """
+    rows = conn.execute(f"SELECT id FROM {table} WHERE uuid IS NULL").fetchall()
+    if not rows:
+        return 0
+    conn.executemany(
+        f"UPDATE {table} SET uuid = ? WHERE id = ? AND uuid IS NULL",
+        [(str(uuid.uuid4()), row[0]) for row in rows],
+    )
+    logging.getLogger(__name__).info(
+        "[pocketbook] Backfilled uuid on %d existing row(s) in %s", len(rows), table
+    )
+    return len(rows)
 
 
 @dataclass
@@ -157,6 +196,7 @@ class Activity:
     born_at: int
     origin: str  # 'sluice' | 'user' | 'initial' | 'migration'
     closed_at: Optional[int] = None
+    uuid: Optional[str] = None  # 環境を跨ぐ照合キー (init 後は全行が持つ)
 
 
 @dataclass
@@ -170,6 +210,7 @@ class Memo:
     span_end_id: Optional[str] = None
     event_date: Optional[str] = None  # 'YYYY-MM-DD' — できごとの日 (機械刻印)
     origin: Optional[str] = None  # 'live' | 'readback' | 'mechanism' (NULL = live 相当)
+    uuid: Optional[str] = None  # 環境を跨ぐ照合キー (init 後は全行が持つ)
 
     @property
     def effective_date(self) -> str:
@@ -177,10 +218,10 @@ class Memo:
         return self.event_date or self.date
 
 
-_ACTIVITY_COLUMNS = "id, name, status, born_at, origin, closed_at"
+_ACTIVITY_COLUMNS = "id, name, status, born_at, origin, closed_at, uuid"
 _MEMO_COLUMNS = (
     "id, activity_id, date, kind, text, span_start_id, span_end_id, "
-    "event_date, origin"
+    "event_date, origin, uuid"
 )
 
 
@@ -192,6 +233,7 @@ def _row_to_activity(row) -> Activity:
         born_at=int(row[3]),
         origin=row[4],
         closed_at=int(row[5]) if row[5] is not None else None,
+        uuid=row[6],
     )
 
 
@@ -206,6 +248,7 @@ def _row_to_memo(row) -> Memo:
         span_end_id=row[6],
         event_date=row[7],
         origin=row[8],
+        uuid=row[9],
     )
 
 
@@ -296,11 +339,12 @@ def add_activity(
     validate_epoch("born_at", born_at)
     owns_txn = owns_transaction(conn, commit)
     ts = int(time.time()) if born_at is None else born_at
+    row_uuid = str(uuid.uuid4())
     try:
         cur = conn.execute(
-            "INSERT INTO activities(name, status, born_at, origin, closed_at) "
-            "VALUES (?, 'open', ?, ?, NULL)",
-            (name.strip(), ts, origin),
+            "INSERT INTO activities(name, status, born_at, origin, closed_at, uuid) "
+            "VALUES (?, 'open', ?, ?, NULL, ?)",
+            (name.strip(), ts, origin, row_uuid),
         )
         if owns_txn:
             conn.commit()
@@ -334,6 +378,7 @@ def add_activity(
         born_at=ts,
         origin=origin,
         closed_at=None,
+        uuid=row_uuid,
     )
 
 
@@ -605,14 +650,15 @@ def add_memo(
             if owns_txn:
                 conn.commit()
             return existing
+    row_uuid = str(uuid.uuid4())
     try:
         cur = conn.execute(
             "INSERT INTO memos("
             "activity_id, date, kind, text, span_start_id, span_end_id, "
-            "idem_key, event_date, origin) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "idem_key, event_date, origin, uuid) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (activity_id, date, kind, text, span_start_id, span_end_id,
-             idem_key, event_date, origin),
+             idem_key, event_date, origin, row_uuid),
         )
         if owns_txn:
             conn.commit()
@@ -647,6 +693,7 @@ def add_memo(
         span_end_id=span_end_id,
         event_date=event_date,
         origin=origin,
+        uuid=row_uuid,
     )
 
 
@@ -704,7 +751,7 @@ def list_undigested_want_memos(
     cur = conn.execute(
         f"""
         SELECT w.id, w.activity_id, w.date, w.kind, w.text, w.span_start_id,
-               w.span_end_id, w.event_date, w.origin
+               w.span_end_id, w.event_date, w.origin, w.uuid
         FROM memos w
         WHERE {where}
           AND NOT EXISTS (

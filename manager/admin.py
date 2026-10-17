@@ -1745,6 +1745,23 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     f"Please return '{ai.AINAME}' to their home city first."
                 )
 
+            # 同じ街の名前の重複は作成経路 (manager/persona.py の _create_persona) と
+            # 同じく大文字小文字を畳んで断る。改名は共有の名前の表 (persona_map) にも
+            # 写すので、重複を通すと別のペルソナの項目を上書きしてしまう。名前も街も
+            # 変えない保存は断らない (既にある重複で、ほかの欄の保存を止めない)。
+            if (name or "").lower() != (ai.AINAME or "").lower() or home_city_id != ai.HOME_CITYID:
+                clash = (
+                    db.query(AIModel.AIID)
+                    .filter(
+                        AIModel.HOME_CITYID == home_city_id,
+                        func.lower(AIModel.AINAME) == func.lower(name),
+                        AIModel.AIID != ai_id,
+                    )
+                    .first()
+                )
+                if clash:
+                    return f"Error: A persona named '{name}' already exists in this city."
+
             avatar_value: Optional[str] = (avatar_path or "").strip() or None
             if avatar_upload:
                 try:
@@ -1924,7 +1941,18 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 committed = True
 
                 if persona is not None:
+                    old_name = persona.persona_name
                     persona.persona_name = name
+                    # 改名は共有の名前の表 (persona_map: 表示名→AIID、
+                    # id_to_name_map: AIID→表示名) にも写す。表は起動時に作られた
+                    # きりで、同席者名の解決 (building_occupants など) が読む。
+                    # 旧名の項目は自分を指しているときだけ外す — 同名の別の
+                    # ペルソナの項目を壊さない。
+                    if old_name != name:
+                        if self.persona_map.get(old_name) == ai_id:
+                            self.persona_map.pop(old_name, None)
+                        self.persona_map[name] = ai_id
+                        self.id_to_name_map[ai_id] = name
                     persona.persona_system_instruction = system_prompt
                     persona.autonomy_enabled = autonomy_now
                     if language is not None:

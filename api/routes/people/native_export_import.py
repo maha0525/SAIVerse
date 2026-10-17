@@ -1,19 +1,18 @@
-"""Native SAIMemory export/import API endpoints.
+"""Native SAIMemory (``saiverse_saimemory_v1``) import API endpoints.
 
-Provides full-fidelity thread export and import with all metadata preserved.
+Imports thread files written by the old thread-level export with all metadata
+preserved. The export endpoint was retired in favour of the persona pack
+(api/routes/people/persona_pack.py, docs/intent/persona_pack.md §6); files that
+were already exported can still be imported here.
 """
 from __future__ import annotations
 
 import json
 import logging
-import tempfile
 import threading
-import urllib.parse
-from pathlib import Path
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import Response
 
 from api.deps import get_manager
 from api.file_safety import read_upload_bounded
@@ -27,49 +26,6 @@ NATIVE_IMPORT_MAX_BYTES = 256 * 1024 * 1024
 # Track import status per persona
 _native_import_status: Dict[str, Dict[str, Any]] = {}
 _native_import_lock = threading.Lock()
-
-
-# ---------------------------------------------------------------------------
-# Export
-# ---------------------------------------------------------------------------
-
-@router.get("/{persona_id}/threads/{thread_id}/export-native")
-def export_thread_native(
-    persona_id: str,
-    thread_id: str,
-    manager=Depends(get_manager),
-):
-    """Export a single thread as native SAIVerse JSON.
-
-    Returns a downloadable JSON file with all metadata preserved.
-    """
-    from saiverse_memory.native_export import export_thread_by_id
-
-    try:
-        data = export_thread_by_id(persona_id, thread_id)
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        LOGGER.exception("Failed to export thread %s for persona %s", thread_id, persona_id)
-        raise HTTPException(status_code=500, detail=f"Export failed: {e}")
-
-    # Build filename from thread suffix
-    suffix = thread_id.split(":", 1)[1] if ":" in thread_id else thread_id
-    safe_suffix = suffix.replace("/", "_").replace("\\", "_")
-    filename = f"{persona_id}_{safe_suffix}.json"
-
-    content = json.dumps(data, ensure_ascii=False, indent=2)
-    # RFC 5987 encoding for non-ASCII filenames
-    encoded_filename = urllib.parse.quote(filename, safe='')
-    return Response(
-        content=content,
-        media_type="application/json",
-        headers={
-            "Content-Disposition": (
-                f"attachment; filename*=UTF-8''{encoded_filename}"
-            ),
-        },
-    )
 
 
 # ---------------------------------------------------------------------------

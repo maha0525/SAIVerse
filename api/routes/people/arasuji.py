@@ -61,6 +61,25 @@ def _get_job(job_id: str) -> Optional[dict]:
         return _generation_jobs.get(job_id, {}).copy() if job_id in _generation_jobs else None
 
 
+# 終端していないジョブの状態 (cancel_arasuji_generation が「走行中」と見なす状態 +
+# 中止要求を受けて worker の終端を待っている cancelling)
+_ACTIVE_JOB_STATUSES = frozenset({"pending", "started", "running", "cancelling"})
+
+
+def has_active_generation_job(persona_id: str) -> bool:
+    """このペルソナのあらすじ生成・補修ジョブが終端していなければ True。
+
+    ペルソナまるごとパックの合流 (api/routes/people/persona_pack.py) が、編纂と
+    並走しないように断る判定に使う。
+    """
+    with _jobs_lock:
+        return any(
+            job.get("persona_id") == persona_id
+            and job.get("status") in _ACTIVE_JOB_STATUSES
+            for job in _generation_jobs.values()
+        )
+
+
 def _get_arasuji_db(persona_id: str):
     """Get database connection for arasuji tables.
 
