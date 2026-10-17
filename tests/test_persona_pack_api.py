@@ -260,6 +260,99 @@ def test_merge_import_overwrites_profile_when_asked(world: Dict[str, Any]) -> No
         assert ai.PRIVATE_ROOM_ID == f"{target}_room"  # 環境と結びついた列は触らない
 
 
+def _set_spell_enabled(manager: FakeManager, ai_id: str, value: bool) -> None:
+    with Session(manager.engine) as s:
+        s.query(AI).filter(AI.AIID == ai_id).update({"SPELL_ENABLED": value})
+        s.commit()
+
+
+def _load_with_spell_recorder(manager: FakeManager, ai_id: str) -> Tuple[Any, List[Tuple[str, Any]], List[str]]:
+    """target を読み込み済みにし、update_ai と _deliver_spell_toggle の呼び出しを記録させる。
+
+    order には呼ばれた順に "update_ai" / "deliver" が積まれる。
+    """
+    persona = SimpleNamespace(persona_id=ai_id)
+    manager.personas[ai_id] = persona
+    delivered: List[Tuple[str, Any]] = []
+    order: List[str] = []
+
+    def update_ai(persona_id: str, **kwargs: Any) -> str:
+        order.append("update_ai")
+        return "updated"
+
+    def deliver(persona_id: str, p: Any) -> None:
+        order.append("deliver")
+        delivered.append((persona_id, p))
+
+    manager.update_ai = update_ai  # type: ignore[attr-defined]
+    manager.admin = SimpleNamespace(_deliver_spell_toggle=deliver)  # type: ignore[attr-defined]
+    return persona, delivered, order
+
+
+def test_profile_overwrite_that_changes_spell_mode_delivers_the_toggle(world: Dict[str, Any]) -> None:
+    """プロフィール上書きで SPELL_ENABLED が変わったら、通常の保存と同じ切り替えを一度届ける。
+
+    取り込みは DB を書き終えてから update_ai を呼ぶので、update_ai は旧値を知らず
+    切り替えを届けない (docs/intent/spell_disabled_mode.md §4-2)。取り込み前の値と
+    比べて、update_ai の後に届ける。
+    """
+    _set_spell_enabled(world["src"]["manager"], SRC, False)
+    pack = _export_zip(world)
+    dst = world["dst"]
+    target = f"other_{CITY}"
+    dst["manager"].add_persona(target, "Other")  # SPELL_ENABLED は既定の True
+    persona, delivered, order = _load_with_spell_recorder(dst["manager"], target)
+
+    res = world["use"](dst).post(
+        f"/api/people/{target}/persona-pack/import",
+        files={"file": ("pack.zip", pack, "application/zip")},
+        data={"overwrite_profile": "true"},
+    )
+    assert res.status_code == 200, res.text
+    assert "SPELL_ENABLED" in res.json()["profile_columns_overwritten"]
+    with Session(dst["manager"].engine) as s:
+        assert s.get(AI, target).SPELL_ENABLED is False
+    assert delivered == [(target, persona)]
+    assert order == ["update_ai", "deliver"]
+
+
+def test_profile_overwrite_without_spell_change_does_not_deliver(world: Dict[str, Any]) -> None:
+    pack = _export_zip(world)  # 書き出し元も既定の True
+    dst = world["dst"]
+    target = f"other_{CITY}"
+    dst["manager"].add_persona(target, "Other")
+    _, delivered, order = _load_with_spell_recorder(dst["manager"], target)
+
+    res = world["use"](dst).post(
+        f"/api/people/{target}/persona-pack/import",
+        files={"file": ("pack.zip", pack, "application/zip")},
+        data={"overwrite_profile": "true"},
+    )
+    assert res.status_code == 200, res.text
+    assert delivered == []
+    assert order == ["update_ai"]
+
+
+def test_merge_without_profile_overwrite_does_not_deliver(world: Dict[str, Any]) -> None:
+    """プロフィールを上書きしない合流は SPELL_ENABLED を変えないので届けない。"""
+    _set_spell_enabled(world["src"]["manager"], SRC, False)
+    pack = _export_zip(world)
+    dst = world["dst"]
+    target = f"other_{CITY}"
+    dst["manager"].add_persona(target, "Other")
+    _, delivered, order = _load_with_spell_recorder(dst["manager"], target)
+
+    res = world["use"](dst).post(
+        f"/api/people/{target}/persona-pack/import",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+    with Session(dst["manager"].engine) as s:
+        assert s.get(AI, target).SPELL_ENABLED is True
+    assert delivered == []
+    assert order == []
+
+
 def test_merge_import_refuses_while_chronicle_job_runs(world: Dict[str, Any]) -> None:
     from api.routes.people import arasuji
 

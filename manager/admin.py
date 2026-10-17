@@ -1924,7 +1924,18 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 committed = True
 
                 if persona is not None:
+                    old_name = persona.persona_name
                     persona.persona_name = name
+                    # 改名は共有の名前の表 (persona_map: 表示名→AIID、
+                    # id_to_name_map: AIID→表示名) にも写す。表は起動時に作られた
+                    # きりで、同席者名の解決 (building_occupants など) が読む。
+                    # 旧名の項目は自分を指しているときだけ外す — 同名の別の
+                    # ペルソナの項目を壊さない。
+                    if old_name != name:
+                        if self.persona_map.get(old_name) == ai_id:
+                            self.persona_map.pop(old_name, None)
+                        self.persona_map[name] = ai_id
+                        self.id_to_name_map[ai_id] = name
                     persona.persona_system_instruction = system_prompt
                     persona.autonomy_enabled = autonomy_now
                     if language is not None:

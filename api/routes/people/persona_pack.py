@@ -273,12 +273,46 @@ def _deferred_embedding_count(saiverse_home: Path, persona_id: str) -> int:
         conn.close()
 
 
-def _refresh_loaded_persona_profile(manager: Any, persona_id: str) -> None:
+def _read_spell_enabled(manager: Any, persona_id: str) -> Optional[bool]:
+    """読み込み済みのペルソナの SPELL_ENABLED を DB から読む。
+
+    読み込まれていない・行が無い・読めなかったときは None (切り替えを届けない)。
+    読めないことで取り込みそのものは止めない。
+    """
+    if persona_id not in (getattr(manager, "personas", None) or {}):
+        return None
+    from database.models import AI
+
+    try:
+        db = manager.SessionLocal()
+        try:
+            ai = db.query(AI).filter(AI.AIID == persona_id).first()
+            return None if ai is None else bool(ai.SPELL_ENABLED)
+        finally:
+            db.close()
+    except Exception:
+        LOGGER.warning(
+            "Persona pack: could not read SPELL_ENABLED of %s before the import", persona_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _refresh_loaded_persona_profile(
+    manager: Any, persona_id: str, spell_enabled_before: Optional[bool] = None,
+) -> None:
     """取り込みで書き換えた ai 行を、読み込み済みのペルソナへ保存経路で写す。
 
     manager.update_ai に DB の現在値をそのまま渡す (値は変わらず、インメモリの名前・
     システムプロンプト・言語・モデル・アイコンが写る)。自律行動の ON/OFF は
     update_ai が「DB の値が変わったとき」だけ同期するので、ここで同期させる。
+
+    スペル不使用モード (SPELL_ENABLED) の切り替えも update_ai は「DB の旧値と
+    違うとき」だけ head へ届ける (docs/intent/spell_disabled_mode.md §4-2) が、
+    取り込みは DB を書き終えているので旧値は残っていない。そこで呼び出し側が
+    取り込みの前に読んだ値 ``spell_enabled_before`` と DB の現在値を比べ、違えば
+    通常の保存と同じ AdminService._deliver_spell_toggle を、update_ai の後
+    (モデルの当てはめが済んだ後) に呼ぶ。
     """
     personas = getattr(manager, "personas", None) or {}
     if persona_id not in personas:
@@ -290,6 +324,7 @@ def _refresh_loaded_persona_profile(manager: Any, persona_id: str) -> None:
         ai = db.query(AI).filter(AI.AIID == persona_id).first()
         if ai is None:
             return
+        spell_enabled_now = bool(ai.SPELL_ENABLED)
         values = dict(
             name=ai.AINAME,
             description=ai.DESCRIPTION,
@@ -336,6 +371,14 @@ def _refresh_loaded_persona_profile(manager: Any, persona_id: str) -> None:
             ensure_autonomy(persona_id)
     except Exception:
         LOGGER.exception("Persona pack: could not apply the profile to the loaded persona %s", persona_id)
+    # update_ai が失敗した回でも DB のモードは取り込みで確定しているので届ける
+    # (update_ai の例外経路が commit 後の切り替えを届けるのと同じ扱い)。
+    if spell_enabled_before is None or spell_enabled_before == spell_enabled_now:
+        return
+    deliver = getattr(getattr(manager, "admin", None), "_deliver_spell_toggle", None)
+    persona = personas.get(persona_id)
+    if callable(deliver) and persona is not None:
+        deliver(persona_id, persona)
 
 
 def _refresh_loaded_room_and_items(manager: Any, persona_id: str) -> None:
@@ -504,10 +547,16 @@ def _run_import(
         )
 
     chronicle_after_merge: Optional[Dict[str, Any]] = None
+    # プロフィール上書きの合流は SPELL_ENABLED を DB へ直接書くので、旧値を書く前に
+    # 控える (_refresh_loaded_persona_profile が切り替えを届けるかの判定に使う)。
+    # 新規作成のペルソナは読み込まれておらず、起動時の head の構築が新しい値を読む。
+    spell_enabled_before: Optional[bool] = None
     if mode == "merge":
         from sea.beat_gate import hold_beat
 
         with hold_beat(manager, persona_id, purpose="persona_pack_merge", check_gate=False):
+            if overwrite_profile:
+                spell_enabled_before = _read_spell_enabled(manager, persona_id)
             result = run()
             chronicle_counts = result.counts.get("chronicle_pages")
             if chronicle_counts is not None and chronicle_counts.added:
@@ -522,7 +571,7 @@ def _run_import(
     if result.profile_columns_overwritten:
         _after_commit(
             result, "applying the profile to the loaded persona",
-            _refresh_loaded_persona_profile, manager, persona_id,
+            _refresh_loaded_persona_profile, manager, persona_id, spell_enabled_before,
         )
     item_counts = result.counts.get("items")
     if item_counts is not None and (item_counts.added or item_counts.updated):
