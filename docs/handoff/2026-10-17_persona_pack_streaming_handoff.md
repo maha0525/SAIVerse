@@ -22,15 +22,15 @@
 
 ## 残っている作業 (この順で)
 
-### 1. 束S6 — 一時置き場・上限の整理・ピークメモリの退行テスト
+### 1. 束S7 — 書き出しの chatgpt_compat に残る「1 スレッドぶんの保持」の解消
 
-仕様の全文: `docs/handoff/2026-10-17_persona_pack_streaming_s6_spec.md` (そのまま実装指示として読める。冒頭の「作業場所」はローカル環境の記述なので、パスは自環境に読み替える)。要旨:
+束S6 (コミット済み) のピークメモリ計測が見つけた、最後の比例保持。`export.py` の `_iter_conversations` は 1 スレッド (= 1 部屋) の会話メッセージをリストに集めてから `chatgpt_compat.build_conversation` で組み立てる。SAIVerse のスレッドは部屋ごとなので、同じ部屋で長く暮らしたペルソナは 1 スレッドが寿命の大半を占め、実測の増え方 (約 6.7 KiB/件) から 10 万件の部屋で数百 MB になる — 2 GB の機械では致命的。
 
-1. API のアップロードと書き出しの一時置き場を OS の一時フォルダから `<SAIVERSE_HOME>/tmp/` へ (Linux の一部で /tmp が RAM のため)。
-2. 上限を二本に整理: `MAX_UNCOMPRESSED_BYTES` (16 GiB、ディスク) と `MAX_JSON_ELEMENT_CHARS` (64 Mi 文字、メモリ)。丸読みが消えて根拠を失った `MAX_ENTRY_UNCOMPRESSED_BYTES` と `MAX_JSON_TOTAL_BYTES` は検査・テストごと廃止。
-3. 新規 `tests/test_persona_pack_memory.py` — 合成の大きなパックで export / import のピークメモリ (tracemalloc) が件数に比例しないことを、件数 1/10 の世界との比で確かめる退行テスト。
+直し方 (発注側の決定): `chatgpt_compat/conversations.json` の 1 会話 = 1 要素の中身 (mapping の木) を、`json.dumps` で丸ごと作らず**手書きの逐次書きで組み立てる**。mapping は id → ノードの平らな dict で、各ノードの children は次のノードの id 一つだけ (chatgpt_compat.py の `build_conversation` を読んで構造を確かめること)。つまりメッセージを SQL のスレッド内順で読みながら、ノードを一つずつ JSON 文字列として書き出せば、保持は常に前後 1〜2 ノードで済む。検証は「小さいスレッドで、逐次書きの出力を json.loads して `build_conversation` の出力と完全一致」のテストと、`tests/test_persona_pack_memory.py` の較正を「1 スレッドの件数も増やす」形に広げてこの保持が消えたことを実測すること。`write_json_array` は要素を丸ごと dumps する作りなので、この 1 エントリだけは `zf.open(..., "w")` へ直接書く形になる (配列のハンドルを開いている間に別のエントリを書かない制約は維持)。
 
-**注**: このローカルセッションで束S6 の実装が間に合ってコミットされている場合がある。`git log` に「束S6」のコミットがあれば、この項は検収済みなので飛ばして 2 へ。
+### 2. (済) 束S6 — 一時置き場・上限の整理・ピークメモリの退行テスト
+
+このローカルセッションで実装・検収・コミット済み (`git log` の「束S6」)。アップロードと書き出しの一時ファイルは `<SAIVERSE_HOME>/tmp/` へ移動済み。上限は `MAX_UNCOMPRESSED_BYTES` (16 GiB、ディスク) と `MAX_JSON_ELEMENT_CHARS` (64 Mi 文字、メモリ) の二本に整理済み (一枚物の JSON には `read_json_document` が同じ要素上限を当てる)。`tests/test_persona_pack_memory.py` が全件保持の書き戻しを機械で検出する。仕様書 `2026-10-17_persona_pack_streaming_s6_spec.md` と調査 (survey) に出てくる廃止済みの定数名は当時の記録なので読み替えること。
 
 ### 2. 検証の総仕上げ
 
