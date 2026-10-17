@@ -366,27 +366,25 @@ _CHUNK = 500
 # _ImportJob.ref_numbers のキーになりうるもの
 _NUMBERED_REF_KINDS = ("memopedia", "core", "chronicle", "clip", "item")
 
-# ZIP を展開したときの合計サイズ (infolist の file_size の和) の上限。超えるパックは
-# 書き込み前に拒否する (ZIP 爆弾の頭打ち)。取り込みは JSON を丸ごとメモリに読むので、
-# 圧縮の効いた小さな ZIP が展開で巨大になるのを入口で止める。値は API のアップロード
-# 上限 (api/routes/people/persona_pack.py の PERSONA_PACK_IMPORT_MAX_BYTES = 2 GiB) の 8 倍。
+# 上限は二本 (check_uncompressed_size と read_json_document・_PackReader.iter_json_array)。
+# 取り込みは JSON もメディアも丸ごとはメモリに読まないので、ファイル 1 つの大きさや
+# JSON の合計はメモリの上限にならない。
+#
+# ZIP を展開したときの合計サイズ (infolist の file_size の和) の上限 (ディスクの保護)。
+# 超えるパックは書き込み前に拒否する (ZIP 爆弾の頭打ち)。ディスクには展開される
+# ファイルに加えて、配列の JSON と同程度の大きさの作業用 SQLite (_STAGING_SUFFIX) も
+# 取り込みの間だけ載る。値は API のアップロード上限
+# (api/routes/people/persona_pack.py の PERSONA_PACK_IMPORT_MAX_BYTES = 2 GiB) の 8 倍。
 MAX_UNCOMPRESSED_BYTES = 8 * 2 * 1024 * 1024 * 1024
-# 1 エントリの展開サイズ (infolist の file_size) の上限。取り込みは JSON の 1 ファイルを
-# 丸ごとメモリに読む (_PackReader.load_json) ので、1 ファイルの上限がそのまま JSON の
-# メモリの上限になる (メディアは _STREAM_CHUNK_BYTES ずつ読むので、メモリには効かない)。
-# 値は API のアップロード上限 (圧縮後 2 GiB) と同じ。
-MAX_ENTRY_UNCOMPRESSED_BYTES = 2 * 1024 * 1024 * 1024
 # ZIP エントリとファイルを丸読みせずに読むときの 1 回の読み取りの大きさ
 # (_sha256_file・_PackReader.sha256・_ImportJob.write_files)
 _STREAM_CHUNK_BYTES = 1 << 20
-# 名前が .json で終わるエントリの展開サイズの和の上限。JSON は全ファイルを同時に
-# メモリへ読み、json.loads の Python オブジェクトは生バイトの数倍になる。正規のパックの
-# JSON は長命のペルソナでも数百 MB 規模。MAX_UNCOMPRESSED_BYTES はディスクの保護として残す。
-MAX_JSON_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
-# 配列の JSON の 1 要素のテキストの上限 (文字数)。配列の JSON は 1 要素ずつ読む
+# JSON の 1 要素のテキストの上限 (文字数。メモリの保護)。配列の JSON は 1 要素ずつ読む
 # (json_stream.iter_json_array) ので、メモリに同時に載るのは読みかけの 1 要素の文字列と、
 # その Python オブジェクトだけになる。この要素単位の上限が、配列の JSON を読むときの
-# メモリの上限になる。超える要素は切り詰めずに拒否する (本人名義のテキストは無改変)。
+# メモリの上限になる。配列でない一枚物 (manifest・profile・items/) はファイル全体を
+# 1 要素とみなして同じ上限を当てる (read_json_document)。超えるものは切り詰めずに拒否する
+# (本人名義のテキストは無改変)。
 MAX_JSON_ELEMENT_CHARS = 64 * 1024 * 1024
 
 
@@ -465,10 +463,7 @@ class _PackReader:
         return digest
 
     def load_json(self, name: str) -> Any:
-        try:
-            return json.loads(self.zf.read(name).decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError(f"persona pack: {name} is not valid JSON: {exc}") from exc
+        return read_json_document(self.zf, name)
 
     def iter_json_array(self, name: str) -> Iterator[Any]:
         """JSON 配列のエントリの要素を、先頭から 1 要素ずつ返す (json_stream.iter_json_array)。
@@ -497,35 +492,44 @@ class _PackReader:
         return sorted(n for n in self.names if n.startswith(prefix))
 
 
-def check_uncompressed_size(zf: zipfile.ZipFile) -> None:
-    """ZIP の展開後のサイズを infolist の宣言 (file_size) で検査する (書き込み前の検査)。
+def read_json_document(zf: zipfile.ZipFile, name: str) -> Any:
+    """配列でない JSON のエントリ (manifest・profile・items/ の一枚物) を丸ごと読んで返す。
 
-    次のどれかに当たれば ValueError:
-    合計が MAX_UNCOMPRESSED_BYTES を超える (ディスクの保護)、
-    1 エントリが MAX_ENTRY_UNCOMPRESSED_BYTES を超える (1 ファイルの丸読みのメモリの保護)、
-    ``.json`` のエントリの和が MAX_JSON_TOTAL_BYTES を超える (全 JSON の同時読み込みのメモリの保護)。
+    丸ごとメモリに載るので、ファイル全体を 1 要素とみなして MAX_JSON_ELEMENT_CHARS を
+    当てる (呼ぶたびにモジュールの値を読む)。UTF-8 は 1 文字 4 バイト以下なので、展開
+    サイズ (file_size。zipfile はそれより先を読まない) が上限の 4 倍を超えるエントリは
+    読む前に断り、それ以下は復号した文字数で判定する。上限を超える・UTF-8 / JSON として
+    読めないものは ValueError。
     """
-    infos = zf.infolist()
+    limit = MAX_JSON_ELEMENT_CHARS
+    too_large = (
+        f"persona pack: {name} is over the limit of {limit} characters "
+        "(refused, not truncated)"
+    )
+    if zf.getinfo(name).file_size > 4 * limit:
+        raise ValueError(too_large)
+    try:
+        text = zf.read(name).decode("utf-8")
+        if len(text) > limit:
+            raise ValueError(too_large)
+        return json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"persona pack: {name} is not valid JSON: {exc}") from exc
+
+
+def check_uncompressed_size(zf: zipfile.ZipFile) -> None:
+    """ZIP の展開後の合計サイズを infolist の宣言 (file_size) で検査する (書き込み前の検査)。
+
+    合計が MAX_UNCOMPRESSED_BYTES を超えれば ValueError (ディスクの保護)。メモリの保護は
+    もう一本の上限 MAX_JSON_ELEMENT_CHARS が、JSON を読むところ (read_json_document・
+    _PackReader.iter_json_array) で受け持つ。
+    """
     limit = MAX_UNCOMPRESSED_BYTES
-    total = sum(info.file_size for info in infos)
+    total = sum(info.file_size for info in zf.infolist())
     if total > limit:
         raise ValueError(
             f"persona pack: the archive expands to {total} bytes, over the limit of "
             f"{limit} bytes; refusing to import it"
-        )
-    entry_limit = MAX_ENTRY_UNCOMPRESSED_BYTES
-    for info in infos:
-        if info.file_size > entry_limit:
-            raise ValueError(
-                f"persona pack: {info.filename} expands to {info.file_size} bytes, over the "
-                f"per-file limit of {entry_limit} bytes; refusing to import it"
-            )
-    json_limit = MAX_JSON_TOTAL_BYTES
-    json_total = sum(info.file_size for info in infos if info.filename.endswith(".json"))
-    if json_total > json_limit:
-        raise ValueError(
-            f"persona pack: the JSON files in the archive expand to {json_total} bytes, over "
-            f"the limit of {json_limit} bytes; refusing to import it"
         )
 
 

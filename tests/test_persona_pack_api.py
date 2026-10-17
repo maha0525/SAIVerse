@@ -861,6 +861,54 @@ def test_import_refuses_an_archive_that_expands_too_far(
     assert dst["manager"].created == []
 
 
+def test_upload_and_export_temp_files_live_under_saiverse_home_tmp(
+    world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """アップロードの ZIP と書き出しの一時フォルダは <SAIVERSE_HOME>/tmp に置き、終われば消す。"""
+    import saiverse_memory.persona_pack as persona_pack_module
+    from api.routes.people import persona_pack as route
+
+    exported: List[Path] = []
+    real_export = persona_pack_module.export_persona_pack
+
+    def recording_export(*args: Any, **kwargs: Any) -> Any:
+        exported.append(Path(kwargs["output_path"]))
+        return real_export(*args, **kwargs)
+
+    monkeypatch.setattr(persona_pack_module, "export_persona_pack", recording_export)
+    pack = _export_zip(world)
+    src_tmp = world["src"]["home"] / "tmp"
+    assert [p.parent.parent for p in exported] == [src_tmp]
+    assert list(src_tmp.iterdir()) == []  # 送信後の BackgroundTask が消す
+
+    uploaded: List[Path] = []
+    real_read_manifest = route._read_manifest
+
+    def recording_read_manifest(zip_path: Path) -> Dict[str, Any]:
+        assert zip_path.is_file()
+        uploaded.append(zip_path)
+        return real_read_manifest(zip_path)
+
+    monkeypatch.setattr(route, "_read_manifest", recording_read_manifest)
+    dst = world["dst"]
+    target = f"other_{CITY}"
+    dst["manager"].add_persona(target, "Other")
+    res = world["use"](dst).post(
+        f"/api/people/{target}/persona-pack/import",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+    res = world["use"](dst).post(
+        "/api/people/persona-pack/import-new",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+    dst_tmp = dst["home"] / "tmp"
+    assert [p.parent for p in uploaded] == [dst_tmp, dst_tmp]
+    # アップロードの ZIP も、その隣の作業用 SQLite も残らない
+    assert list(dst_tmp.iterdir()) == []
+
+
 # ---------------------------------------------------------------------------
 # (d) 旧スレッド単位エクスポートの撤去
 # ---------------------------------------------------------------------------

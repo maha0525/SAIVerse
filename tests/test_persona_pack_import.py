@@ -838,7 +838,13 @@ def test_element_over_the_limit_is_refused_before_writing(
     from saiverse_memory.persona_pack import importer
 
     messages = _zjson(source["zip"], "chatlog/messages.json")
-    limit = max(len(json.dumps(m, ensure_ascii=False)) for m in messages) + 10
+    with zipfile.ZipFile(source["zip"]) as zf:
+        # 一枚物 (ファイル全体が 1 要素: read_json_document) も上限の内側に収める
+        one_piece = max(
+            len(zf.read(n).decode("utf-8")) for n in zf.namelist()
+            if n in ("manifest.json", "profile/profile.json", "items/private_room.json", "items/items.json")
+        )
+    limit = max(one_piece, *(len(json.dumps(m, ensure_ascii=False)) for m in messages)) + 10
     messages[-1]["content"] = "長" * (limit + 1)
     big = _rewrite_zip(
         source["zip"], tmp_path / "big.zip",
@@ -1488,50 +1494,77 @@ def _zip_with_declared_sizes(path: Path, declared: Dict[str, int]) -> Path:
     return path
 
 
-def test_entry_over_the_per_file_limit_is_refused_by_its_declared_size(tmp_path: Path) -> None:
+def test_size_check_limits_only_the_expanded_total(tmp_path: Path) -> None:
+    """check_uncompressed_size の上限は展開後の合計 (MAX_UNCOMPRESSED_BYTES) だけ。
+
+    1 エントリの大きさと JSON の合計は、取り込みが丸ごとメモリに読まなくなったので検査しない。
+    """
     from saiverse_memory.persona_pack import importer
 
     gib = 1024 ** 3
-    # 合計 (3.5 GiB) は MAX_UNCOMPRESSED_BYTES の内側、1 エントリだけが 2 GiB を超える
-    forged = _zip_with_declared_sizes(tmp_path / "big_entry.zip", {
+    # 1 エントリ 3.5 GiB・.json の和 7 GiB でも、合計 (10.5 GiB) が上限の内側なら通る
+    large = _zip_with_declared_sizes(tmp_path / "large.zip", {
         "attachments/image/huge.png": int(3.5 * gib),
-        "manifest.json": 10,
+        "chatlog/messages.json": int(3.5 * gib),
+        "knowledge/pages.json": int(3.5 * gib),
     })
-    with zipfile.ZipFile(forged) as zf:
-        assert max(i.file_size for i in zf.infolist()) > importer.MAX_ENTRY_UNCOMPRESSED_BYTES
-        with pytest.raises(ValueError, match="per-file limit"):
-            importer.check_uncompressed_size(zf)
-    with pytest.raises(ValueError, match="per-file limit"):
-        importer.validate_pack(forged)
-    # 上限ちょうどは通る (JSON の合計にも当たらない)
-    at_limit = _zip_with_declared_sizes(tmp_path / "at_limit.zip", {
-        "attachments/image/a.png": importer.MAX_ENTRY_UNCOMPRESSED_BYTES,
-        "attachments/image/b.png": importer.MAX_ENTRY_UNCOMPRESSED_BYTES,
-    })
-    with zipfile.ZipFile(at_limit) as zf:
+    with zipfile.ZipFile(large) as zf:
+        assert sum(i.file_size for i in zf.infolist()) <= importer.MAX_UNCOMPRESSED_BYTES
         importer.check_uncompressed_size(zf)
+    # 合計が上限を超えれば、宣言のサイズだけで (展開する前に) 断る
+    forged = _zip_with_declared_sizes(tmp_path / "over_total.zip", {
+        f"attachments/image/{i}.png": int(3.5 * gib) for i in range(5)
+    } | {"manifest.json": 10})
+    with zipfile.ZipFile(forged) as zf:
+        assert sum(i.file_size for i in zf.infolist()) > importer.MAX_UNCOMPRESSED_BYTES
+        with pytest.raises(ValueError, match="over the limit"):
+            importer.check_uncompressed_size(zf)
+    with pytest.raises(ValueError, match="over the limit"):
+        importer.validate_pack(forged)
 
 
-def test_json_entries_over_the_json_total_limit_are_refused(tmp_path: Path) -> None:
+def test_one_piece_json_over_the_element_limit_is_refused(
+    source: Dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """配列でない JSON (profile など) はファイル全体を 1 要素とみなし、MAX_JSON_ELEMENT_CHARS で断る。"""
     from saiverse_memory.persona_pack import importer
 
-    gib = 1024 ** 3
-    # どのエントリも 1 ファイルの上限の内側で、.json の和 (3 GiB) だけが上限を超える
-    forged = _zip_with_declared_sizes(tmp_path / "json_total.zip", {
-        "chatlog/messages.json": int(1.5 * gib),
-        "knowledge/memopedia_pages.json": int(1.5 * gib),
-    })
+    profile = _zjson(source["zip"], "profile/profile.json")
+    with zipfile.ZipFile(source["zip"]) as zf:
+        # どの JSON のファイル全体よりも大きい上限 (一枚物も配列の要素も、元のパックはすべて通る)
+        limit = max(
+            len(zf.read(n).decode("utf-8")) for n in zf.namelist() if n.endswith(".json")
+        ) + 10
+    profile["ai"]["DESCRIPTION"] = "長" * (limit + 1)
+    big = _rewrite_zip(
+        source["zip"], tmp_path / "big_profile.zip",
+        {"profile/profile.json": json.dumps(profile, ensure_ascii=False).encode("utf-8")},
+    )
+    monkeypatch.setattr(importer, "MAX_JSON_ELEMENT_CHARS", limit)
+    importer.validate_pack(source["zip"])  # 上限より小さい一枚物は通る
+    match = r"profile/profile\.json is over the limit"
+    with pytest.raises(ValueError, match=match):
+        importer.validate_pack(big)
+    target = _make_env(tmp_path / "dst", PID)
+    before = _dump(target)
+    with pytest.raises(ValueError, match=match):
+        _import(target, big, "new")
+    assert _dump(target) == before
+
+
+def test_one_piece_json_is_refused_by_its_declared_size_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """展開サイズの宣言が上限の 4 倍 (UTF-8 の 1 文字の最大バイト数) を超える一枚物は読む前に断る。"""
+    from saiverse_memory.persona_pack import importer
+
+    monkeypatch.setattr(importer, "MAX_JSON_ELEMENT_CHARS", 100)
+    forged = _zip_with_declared_sizes(tmp_path / "big_manifest.zip", {"manifest.json": 401})
     with zipfile.ZipFile(forged) as zf:
-        with pytest.raises(ValueError, match="JSON files in the archive"):
-            importer.check_uncompressed_size(zf)
-    # 同じ大きさでも .json でないエントリは JSON の合計に数えない
-    media = _zip_with_declared_sizes(tmp_path / "media_total.zip", {
-        "attachments/image/a.png": int(1.5 * gib),
-        "attachments/image/b.png": int(1.5 * gib),
-        "chatlog/messages.json": 10,
-    })
-    with zipfile.ZipFile(media) as zf:
-        importer.check_uncompressed_size(zf)
+        with pytest.raises(ValueError, match=r"manifest\.json is over the limit of 100 characters"):
+            importer.read_json_document(zf, "manifest.json")
+    with pytest.raises(ValueError, match=r"manifest\.json is over the limit"):
+        importer.validate_pack(forged)
 
 
 def test_new_import_relocates_occupancy_of_the_private_room_only(tmp_path: Path) -> None:

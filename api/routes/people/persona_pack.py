@@ -70,6 +70,24 @@ def _world_paths(manager: Any) -> tuple[Path, Path]:
     return Path(manager.db_path), Path(manager.saiverse_home)
 
 
+def _temp_root(manager: Any) -> Path:
+    """アップロードの ZIP と書き出しの一時フォルダを置く ``<SAIVERSE_HOME>/tmp`` (無ければ作る)。
+
+    OS の一時フォルダに置かない理由: Linux の配布によっては /tmp が tmpfs (RAM) で、
+    最大 PERSONA_PACK_IMPORT_MAX_BYTES のアップロードと、その隣に importer が作る作業用
+    SQLite (importer.py の _STAGING_SUFFIX) がメモリを食う。ペルソナフォルダ
+    (``personas/<id>/``) の下には置かない — 書き出しが丸ごと拾い、取り込みが復元するため。
+    ``tmp`` は export.py が読む範囲 (ペルソナフォルダと、共有メディアフォルダ・
+    user_data/icons に解決したファイル) の外にある。
+
+    名前は tempfile が一意に作るので、プロセスが落ちて残ったファイルは次の取り込み・
+    書き出しの邪魔にならない (起動時の掃除はしない。害は容量だけ)。
+    """
+    root = Path(manager.saiverse_home) / "tmp"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 @contextmanager
 def _claim_import(
     key: str, detail: str = "A persona pack import is already running for this persona.",
@@ -109,9 +127,11 @@ def _claim_import(
             _importing.discard(_ANY_IMPORT_KEY)
 
 
-async def _save_upload(file: UploadFile) -> Path:
-    """アップロードを一時ファイルへ書く (呼び出し側が消す)。書けなければ消してから投げる。"""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".zip", prefix="persona_pack_") as tmp:
+async def _save_upload(file: UploadFile, manager: Any) -> Path:
+    """アップロードを _temp_root の一時ファイルへ書く (呼び出し側が消す)。書けなければ消してから投げる。"""
+    with tempfile.NamedTemporaryFile(
+        delete=False, suffix=".zip", prefix="persona_pack_", dir=_temp_root(manager),
+    ) as tmp:
         tmp_path = Path(tmp.name)
     tmp_path.unlink()
     try:
@@ -140,17 +160,24 @@ def _file_sha256(path: Path) -> str:
 
 
 def _read_pack_json(zip_path: Path, name: str) -> Optional[Any]:
+    """アップロードされた ZIP の一枚物の JSON を読む (無ければ None)。
+
+    importer.read_json_document を通すので、1 要素の上限 (MAX_JSON_ELEMENT_CHARS) を
+    超える・UTF-8 / JSON として読めないものは ValueError。
+    """
+    from saiverse_memory.persona_pack.importer import read_json_document
+
     with zipfile.ZipFile(zip_path) as zf:
         if name not in zf.namelist():
             return None
-        return json.loads(zf.read(name).decode("utf-8"))
+        return read_json_document(zf, name)
 
 
 def _read_manifest(zip_path: Path) -> Dict[str, Any]:
     """ZIP の manifest.json を読み、形式名だけ確かめる (中身の検査は importer が行う)。
 
-    manifest を展開する前に、展開後のサイズの上限 (importer.check_uncompressed_size —
-    合計・1 エントリ・JSON の合計) を確かめる。
+    manifest を展開する前に、展開後の合計サイズの上限 (importer.check_uncompressed_size)
+    を確かめる。
     """
     from saiverse_memory.persona_pack import FORMAT_NAME, MANIFEST_NAME
     from saiverse_memory.persona_pack.importer import check_uncompressed_size
@@ -166,7 +193,7 @@ def _read_manifest(zip_path: Path) -> Dict[str, Any]:
         manifest = _read_pack_json(zip_path, MANIFEST_NAME)
     except zipfile.BadZipFile:
         raise HTTPException(status_code=400, detail="The file is not a ZIP archive.")
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"manifest.json could not be read: {exc}")
     if not isinstance(manifest, dict):
         raise HTTPException(status_code=400, detail="This ZIP is not a persona pack (manifest.json is missing).")
@@ -194,7 +221,7 @@ def export_persona_pack_endpoint(persona_id: str, manager=Depends(get_manager)):
 
     ensure_persona_exists(persona_id, manager)
     saiverse_db_path, saiverse_home = _world_paths(manager)
-    tmp_dir = Path(tempfile.mkdtemp(prefix="persona_pack_export_"))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="persona_pack_export_", dir=_temp_root(manager)))
     output = tmp_dir / "persona_pack.zip"
     try:
         export_persona_pack(
@@ -203,7 +230,10 @@ def export_persona_pack_endpoint(persona_id: str, manager=Depends(get_manager)):
             saiverse_home=saiverse_home,
             output_path=output,
         )
-        manifest = _read_pack_json(output, MANIFEST_NAME) or {}
+        # 自分で書いた manifest なので、アップロード用の _read_pack_json (上限の検査) は通さない
+        with zipfile.ZipFile(output) as zf:
+            names = zf.namelist()
+            manifest = json.loads(zf.read(MANIFEST_NAME).decode("utf-8")) if MANIFEST_NAME in names else {}
     except ValueError as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise HTTPException(status_code=404, detail=str(exc))
@@ -640,7 +670,7 @@ async def import_persona_pack_merge(
             ),
         )
     with _claim_import(persona_id):
-        zip_path = await _save_upload(file)
+        zip_path = await _save_upload(file, manager)
         try:
             _read_manifest(zip_path)
             return await run_in_threadpool(
@@ -903,7 +933,7 @@ async def import_persona_pack_new(
     取り込みが走っている間に届いた二つ目は 409 で断る — 名前の重複検査は作成の
     前に行うので、並列の POST が両方とも検査を通って同名のペルソナを二体作るのを防ぐ。
     """
-    zip_path = await _save_upload(file)
+    zip_path = await _save_upload(file, manager)
     try:
         manifest = _read_manifest(zip_path)
         source_id = manifest.get("persona_id")
@@ -935,7 +965,7 @@ async def import_persona_pack_new(
                     value = profile["ai"].get("SYSTEMPROMPT")
                     if isinstance(value, str):
                         system_prompt = value
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except ValueError:
                 pass  # importer が形を検査して断る
             return await run_in_threadpool(_create_and_import, manager, zip_path, name, system_prompt)
     except Exception as exc:
