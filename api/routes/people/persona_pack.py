@@ -411,6 +411,28 @@ def _refresh_loaded_persona_profile(
         deliver(persona_id, persona)
 
 
+def _reschedule_imported_day_plan(manager: Any, persona_id: str) -> int:
+    """取り込んだ当日の persona_day_plan の pending / deferred コマを EventScheduler へ予約する。
+
+    コマの予約は登録後のフック (SAIVerseManager._on_persona_registered) が張るが、
+    新規作成ではフックが取り込みより前に走り (予定がまだ DB に無い)、合流では
+    フックが走らない。そこで取り込みの後に同じ呼び出しをやり直す (同 key 上書きで
+    冪等)。開始時刻を過ぎたコマはフックと同じく downtime_recovery で「流れた」に
+    確定する — このペルソナはこの環境で動いていなかったので、遅れて実行しない。
+    読み込まれていないペルソナ・自律 OFF のペルソナには何もしない (フックと同じ)。
+    """
+    personas = getattr(manager, "personas", None) or {}
+    if persona_id not in personas:
+        return 0
+    from saiverse.autonomy_wiring import is_autonomy_on
+
+    if not is_autonomy_on(manager, persona_id):
+        return 0
+    from saiverse.day_plan import reschedule_pending_slots
+
+    return reschedule_pending_slots(manager, persona_id, downtime_recovery=True)
+
+
 def _refresh_loaded_room_and_items(manager: Any, persona_id: str) -> None:
     """取り込みで書き換えた私室の設定と登録した所持品を、読み込み済みの世界へ写す。
 
@@ -608,6 +630,12 @@ def _run_import(
         _after_commit(
             result, "applying the private room and items to the loaded world",
             _refresh_loaded_room_and_items, manager, persona_id,
+        )
+    day_plan_counts = result.counts.get("extensions/saiverse_db/persona_day_plan")
+    if day_plan_counts is not None and (day_plan_counts.added or day_plan_counts.updated):
+        _after_commit(
+            result, "scheduling the imported day plan",
+            _reschedule_imported_day_plan, manager, persona_id,
         )
     # 起動の判断は今回足した件数 (embeddings_deferred) ではなく memory.db に残る
     # 空のベクトル行の件数で行う — 印による再開の合流は足す件数が 0 でも、

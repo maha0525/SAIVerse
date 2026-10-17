@@ -450,6 +450,106 @@ def test_merge_with_chronicle_marks_cold_windows_and_predicts(
     assert len(calls) == 1
 
 
+def _add_day_plan(manager: FakeManager, persona_id: str) -> None:
+    from datetime import datetime
+
+    from database.models import PersonaDayPlan
+
+    now = datetime(2026, 10, 17, 9, 0)
+    with Session(manager.engine) as s:
+        s.add(PersonaDayPlan(
+            persona_id=persona_id, plan_date="2026-10-17", created_at=now, updated_at=now,
+            slots_json=json.dumps([{"start": "10:00", "status": "pending"}]),
+        ))
+        s.commit()
+
+
+def _record_day_plan_reschedules(
+    monkeypatch: pytest.MonkeyPatch, autonomy_on: bool = True,
+) -> List[Tuple[str, bool]]:
+    from saiverse import autonomy_wiring, day_plan
+
+    calls: List[Tuple[str, bool]] = []
+    monkeypatch.setattr(autonomy_wiring, "is_autonomy_on", lambda _m, _pid: autonomy_on)
+
+    def reschedule(_manager: Any, persona_id: str, plan_date: Any = None, **kw: Any) -> int:
+        calls.append((persona_id, bool(kw.get("downtime_recovery"))))
+        return 1
+
+    monkeypatch.setattr(day_plan, "reschedule_pending_slots", reschedule)
+    return calls
+
+
+def _register_on_create(manager: FakeManager) -> None:
+    """本物の作成経路と同じく、作ったペルソナを読み込み済み (personas) にする。"""
+    create = manager.create_ai
+
+    def create_and_register(*args: Any, **kwargs: Any) -> Any:
+        created = create(*args, **kwargs)
+        manager.personas[created[2]] = SimpleNamespace(persona_id=created[2])
+        return created
+
+    manager.create_ai = create_and_register
+
+
+def test_import_new_schedules_the_day_plan_after_the_import(
+    world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """新規作成は登録後のフックが取り込みより前に走る (予定がまだ DB に無い) ので、
+    取り込みの後に予約し直す。過ぎたコマはフックと同じく downtime_recovery で扱う。"""
+    _add_day_plan(world["src"]["manager"], SRC)
+    pack = _export_zip(world)
+    dst = world["dst"]
+    _register_on_create(dst["manager"])
+    calls = _record_day_plan_reschedules(monkeypatch)
+
+    res = world["use"](dst).post(
+        "/api/people/persona-pack/import-new",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["counts"]["extensions/saiverse_db/persona_day_plan"]["added"] == 1
+    assert calls == [(f"tester_{CITY}", True)]
+
+
+def test_imported_day_plan_is_not_scheduled_while_autonomy_is_off(
+    world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _add_day_plan(world["src"]["manager"], SRC)
+    pack = _export_zip(world)
+    dst = world["dst"]
+    _register_on_create(dst["manager"])
+    calls = _record_day_plan_reschedules(monkeypatch, autonomy_on=False)
+
+    res = world["use"](dst).post(
+        "/api/people/persona-pack/import-new",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+    assert calls == []
+
+
+def test_merge_without_an_added_day_plan_does_not_reschedule(
+    world: Dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """合流は extensions/ を取り込まない (intent §5) ので、予定の予約もやり直さない。"""
+    _add_day_plan(world["src"]["manager"], SRC)
+    pack = _export_zip(world)
+    dst = world["dst"]
+    target = f"other_{CITY}"
+    dst["manager"].add_persona(target, "Other")
+    dst["manager"].personas[target] = SimpleNamespace(persona_id=target)
+    calls = _record_day_plan_reschedules(monkeypatch)
+
+    res = world["use"](dst).post(
+        f"/api/people/{target}/persona-pack/import",
+        files={"file": ("pack.zip", pack, "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["counts"]["extensions/saiverse_db/persona_day_plan"]["skipped"] == 1
+    assert calls == []
+
+
 def test_merge_import_rejects_non_pack(world: Dict[str, Any]) -> None:
     dst = world["dst"]
     target = f"other_{CITY}"

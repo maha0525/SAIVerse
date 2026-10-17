@@ -542,6 +542,63 @@ class AdminAiRenameSyncsNameTablesTest(unittest.TestCase):
         self.assertEqual(self.admin.persona_map, {"Air": AI_ID})
         self.assertEqual(self.admin.id_to_name_map, {AI_ID: "Air"})
 
+    def _add_other(self, ai_id, name, city_id=1):
+        db = self.SessionLocal()
+        try:
+            db.add(AI(AIID=ai_id, HOME_CITYID=city_id, AINAME=name))
+            db.commit()
+        finally:
+            db.close()
+
+    def test_rename_to_another_personas_name_is_refused(self):
+        """同じ街の別のペルソナの名前 (大文字小文字違い含む) へは改名しない。
+        DB も名前の表も変えない — 通すと persona_map の他人の項目を上書きする。"""
+        other = "beta_city_a"
+        self._add_other(other, "Beta")
+        self.admin.persona_map["Beta"] = other
+        self.admin.id_to_name_map[other] = "Beta"
+
+        for clash in ("Beta", "beta"):
+            result = self._update(name=clash)
+            self.assertIn("Error", result)
+            self.assertIn("already exists", result)
+
+        db = self.SessionLocal()
+        try:
+            self.assertEqual(db.query(AI).filter(AI.AIID == AI_ID).first().AINAME, "Air")
+        finally:
+            db.close()
+        self.assertEqual(self.admin.persona_map, {"Air": AI_ID, "Beta": other})
+        self.assertEqual(self.admin.personas[AI_ID].persona_name, "Air")
+
+    def test_rename_to_a_name_used_only_in_another_city_is_allowed(self):
+        db = self.SessionLocal()
+        try:
+            db.add(City(CITYID=2, USERID=1, CITY_SLUG="city_b", UI_PORT=3001, API_PORT=8001))
+            db.commit()
+        finally:
+            db.close()
+        self._add_other("beta_city_b", "Beta", city_id=2)
+
+        result = self._update(name="Beta")
+
+        self.assertNotIn("Error", result)
+        self.assertEqual(self.admin.persona_map["Beta"], AI_ID)
+
+    def test_case_only_rename_of_itself_is_allowed(self):
+        result = self._update(name="AIR")
+
+        self.assertNotIn("Error", result)
+        self.assertEqual(self.admin.persona_map, {"AIR": AI_ID})
+
+    def test_saving_other_fields_is_not_blocked_by_an_existing_duplicate(self):
+        """既に DB にある重複 (この検査より前の世界) は、名前も街も変えない保存を止めない。"""
+        self._add_other("air2_city_a", "Air")
+
+        result = self._update(name="Air", description="new desc")
+
+        self.assertNotIn("Error", result)
+
 
 if __name__ == "__main__":
     unittest.main()

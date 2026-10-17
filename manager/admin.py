@@ -1745,6 +1745,23 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     f"Please return '{ai.AINAME}' to their home city first."
                 )
 
+            # 同じ街の名前の重複は作成経路 (manager/persona.py の _create_persona) と
+            # 同じく大文字小文字を畳んで断る。改名は共有の名前の表 (persona_map) にも
+            # 写すので、重複を通すと別のペルソナの項目を上書きしてしまう。名前も街も
+            # 変えない保存は断らない (既にある重複で、ほかの欄の保存を止めない)。
+            if (name or "").lower() != (ai.AINAME or "").lower() or home_city_id != ai.HOME_CITYID:
+                clash = (
+                    db.query(AIModel.AIID)
+                    .filter(
+                        AIModel.HOME_CITYID == home_city_id,
+                        func.lower(AIModel.AINAME) == func.lower(name),
+                        AIModel.AIID != ai_id,
+                    )
+                    .first()
+                )
+                if clash:
+                    return f"Error: A persona named '{name}' already exists in this city."
+
             avatar_value: Optional[str] = (avatar_path or "").strip() or None
             if avatar_upload:
                 try:
