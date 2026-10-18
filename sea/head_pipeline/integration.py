@@ -500,7 +500,7 @@ def _queue_section_diffs_locked(
         outbox に 1 行以上積んだら True (呼び出し側が即時配送する)。
     """
     labels, detected = pipeline.flush_diffs(
-        ctx, all_sections=True, advance=False, only=only_sections,
+        ctx, all_sections=True, advance=False, only=only_sections, compact=True,
     )
     if not labels:
         return False

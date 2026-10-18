@@ -243,6 +243,8 @@ class LineHeadSnapshotStore:
         persona_id: str,
         notified_values: dict[str, Any],
         exclude_model_keys: set[str] | frozenset[str],
+        *,
+        merge_snapshot: Optional[Callable[[str, str, Any, Any], Any]] = None,
     ) -> bool:
         """同じペルソナの**メモリに読み込まれていない**モデルの行の B を、
         ``notified_values`` (Section 名 → 新しい B の値) の Section だけ進める。
@@ -272,6 +274,11 @@ class LineHeadSnapshotStore:
         - ``LAST_NOTIFIED_JSON`` が壊れている (JSON として読めない / dict でない)
           行は、その行だけ飛ばしてログを残す。他の行は進めて commit し、戻り値は
           False (全行は進められなかった)。
+
+        ``merge_snapshot`` を渡す圧縮では、呼び出し側が各モデルの未通知差分を
+        確認してから既読を返す (引数は Section 名・model key・旧 B・走査結果)。
+        同じ値を返した行は書き換えず、配送時の合成メソッドは使わない。
+
         - 対象の行が 0 件なら commit せずに閉じる (書くものが無い)。戻り値は
           Section の飛ばしが無ければ True。
         """
@@ -328,9 +335,26 @@ class LineHeadSnapshotStore:
                         persona_id, row.MODEL_KEY, sorted(serialized),
                     )
                     continue
-                notified.update(serialized)
-                row.LAST_NOTIFIED_JSON = json.dumps(notified, ensure_ascii=False)
-                row.UPDATED_AT = now
+                changed = False
+                for section_name, value in serialized.items():
+                    section = self._registry.by_name(section_name)
+                    merge = getattr(section, "merge_notified_snapshot", None)
+                    if callable(merge) or merge_snapshot is not None:
+                        old_data = notified.get(section_name)
+                        old = section.deserialize_snapshot(old_data) if old_data is not None else None
+                        merged = (
+                            merge_snapshot(section_name, row.MODEL_KEY, old, notified_values[section_name])
+                            if merge_snapshot is not None else merge(old, notified_values[section_name])
+                        )
+                        if merged == old:
+                            continue
+                        value = section.serialize_snapshot(merged)
+                    if notified.get(section_name) != value:
+                        notified[section_name] = value
+                        changed = True
+                if changed:
+                    row.LAST_NOTIFIED_JSON = json.dumps(notified, ensure_ascii=False)
+                    row.UPDATED_AT = now
             db.commit()
         except Exception:
             db.rollback()

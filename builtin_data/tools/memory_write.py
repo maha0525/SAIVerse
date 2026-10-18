@@ -36,6 +36,7 @@ def memory_write(
         raise RuntimeError("Active persona is not set")
 
     budget = resolve_core_memory_budget(persona_id)
+    changed_memopedia_ids: list[str] = []
     with open_persona_memory() as adapter:
         if not adapter.is_ready():
             raise RuntimeError(f"SAIMemory not ready for {persona_id}")
@@ -44,29 +45,37 @@ def memory_write(
                 result = memory_atlas.write_page(
                     adapter, ref, content,
                     title=title, category=category, core_budget=budget,
+                    changed_memopedia_ids=changed_memopedia_ids,
                 )
         except memory_atlas.AtlasRefError as exc:
             return f"Error: {exc}"
 
-    _notify_mutation(ref, title, result)
+    _notify_mutation(ref, title, result, changed_memopedia_ids)
     return result
 
 
-def _notify_mutation(ref: Optional[str], title: Optional[str], result: str) -> None:
+def _notify_mutation(
+    ref: Optional[str], title: Optional[str], result: str,
+    changed_memopedia_ids: list[str],
+) -> None:
     """head 操作の内容型通知 (§6-4): 成功時に該当 section の render 断片を全 Session 提示コンテキストへ。
 
     宛先 core/c:N → core_memory、m:N / title 新規 → memopedia_index。失敗
     (Error 文字列) や head 非対象の ref は通知しない。ヘルパー側は決して raise
     しない (通知はツール本体の結果を壊さない)。
+    Memopedia は保存側が返した ID の項目だけを通知する。同名拒否等では ID は空。
     """
     if (result or "").startswith("Error"):
         return
     from sea.head_pipeline.notify import notify_head_mutation_from_tool_context
 
     if title and str(title).strip():
+        if not changed_memopedia_ids:
+            return
         notify_head_mutation_from_tool_context(
             "memopedia_index",
             operation_label=f"Memopedia に新しいページを作成しました（{title}）",
+            page_ids=tuple(changed_memopedia_ids),
         )
         return
     try:
@@ -78,10 +87,11 @@ def _notify_mutation(ref: Optional[str], title: Optional[str], result: str) -> N
             "core_memory",
             operation_label=f"コア記憶を更新しました ({ref})",
         )
-    elif kind == "memopedia":
+    elif kind == "memopedia" and changed_memopedia_ids:
         notify_head_mutation_from_tool_context(
             "memopedia_index",
             operation_label=f"Memopedia ページに追記しました ({ref})",
+            page_ids=tuple(changed_memopedia_ids),
         )
 
 
