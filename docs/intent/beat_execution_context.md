@@ -111,6 +111,15 @@ PR 準備 (2026-10-18): まはーの依頼で develop 向けの PR にまとめ�
 | 🟣 検証待ち | Memopedia の保存通知に全索引が入る | 保存・追記・削除の通知を変更ページだけにする修正と隔離検証は完了。次 = SAIVerse の再起動後、通常の保存で作られる新しい通知に変更ページだけが含まれることをログで確認する。 | 次の通常起動・保存 → 私 (ログ確認) | [beat_execution_context.md §3.3](../intent/beat_execution_context.md#33-head-操作の内容型通知issue-head_mutation_notification_gap-の解) | 2026-10-18 |
 ```
 
+PR 公開 (2026-10-18): [SAIVerse PR #406](https://github.com/maha0525/SAIVerse/pull/406) を
+最新 develop から作成した。実際のPRブランチでも287件と3 subtestsが成功し、
+ruff・台帳検査・差分検査を通した。次はPRを確認してdevelopへ取り込み、
+再起動後の新しい通常保存通知を確認する。PR番号を結ぶ前の台帳行:
+
+```text
+| 🟣 検証待ち | Memopedia の保存通知に全索引が入る | 修正と隔離検証は完了。次 = PR を確認して develop に取り込み、再起動後に作られる新しい保存通知をログで確認する。 | まはー (PR 確認) → 私 (ログ確認) | [beat_execution_context.md §3.3](../intent/beat_execution_context.md#33-head-操作の内容型通知issue-head_mutation_notification_gap-の解) | 2026-10-18 |
+```
+
 > **head の元データへの操作は、常に、その persona の全 Session 提示コンテキストへ「head に入るときと同一の render 断片」を内容型通知として配送する。**
 
 - **内容忠実性の構造的保証**: 通知本文は section の render と同一の関数から生成する。Memopedia は対象ページの項目描画、それ以外はセクション描画を共用する。「head で見える内容」と「tail 通知で届く内容」の文面を別々に書かない（書き分けた瞬間からドリフトが始まる）。
