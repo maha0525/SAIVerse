@@ -48,7 +48,7 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🟣 検証待ち | Memopedia の保存通知に全索引が入る | 修正と隔離検証は完了。次 = PR #406 を確認して develop に取り込み、再起動後に作られる新しい保存通知をログで確認する。 | まはー (PR 確認) → 私 (ログ確認) | [PR #406](https://github.com/maha0525/SAIVerse/pull/406) / [beat_execution_context.md §3.3](../intent/beat_execution_context.md#33-head-操作の内容型通知issue-head_mutation_notification_gap-の解) | 2026-10-18 |
+| 🟣 検証待ち | Memopedia の保存通知に全索引が入る | レビューで指摘された同秒の本文編集の見逃しを修正し、隔離検証も完了。次 = PR #406 の修正差分を確認して develop に取り込み、再起動後に作られる新しい保存通知をログで確認する。 | まはー (修正差分の確認) → 私 (ログ確認) | [PR #406](https://github.com/maha0525/SAIVerse/pull/406) / [beat_execution_context.md §3.3](../intent/beat_execution_context.md#33-head-操作の内容型通知issue-head_mutation_notification_gap-の解) | 2026-10-18 |
 | 🟣 検証待ち | SearXNG の導入版固定 | 固定版の導入・依存欠落からの復旧と Windows の HTTP 応答は検証済み。PR の差分を確認して develop に取り込む。 | まはー (PR 確認) | [intent](../intent/searxng_installation.md) | 2026-10-16 |
 | 🟣 | Sarashina API | mini・nanoの接続と互換設定はPRレビュー待ち。PRを確認し、キー設定後に実サービスとの接続を確認する。 | まはー | [intent](../intent/sarashina_provider.md) | 2026-10-15 |
 | 🟣 検証待ち | 想起用埋め込みの一括処理のメモリのピーク削減 (2GB の VPS 向け) | 区切りをトークン数にし、メモリの抱え込みを切る変更を PR にした。次 = まはーが PR を確認してマージ → 2GB の VPS 利用者に、再計算か取り込みで落ちなくなったかを聞く。 | まはー (PR の確認) → VPS 利用者 | [intent](../intent/embedding_gemma2_migration.md) | 2026-10-14 |

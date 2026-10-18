@@ -52,6 +52,13 @@ from sea.head_pipeline.types import (
 
 LOGGER = logging.getLogger(__name__)
 
+# 編集時刻は秒精度なので、同じ秒の操作も区別できる履歴IDを読む。
+# 同秒の UUID を文字列順に並べず、実際の記録順 (rowid) で最新を選ぶ。
+_LATEST_EDIT_ID_SQL = (
+    "(SELECT h.id FROM memopedia_page_edit_history h "
+    "WHERE h.page_id = p.id ORDER BY h.rowid DESC LIMIT 1)"
+)
+
 
 @dataclass(frozen=True)
 class MemopediaPageEntry:
@@ -61,6 +68,7 @@ class MemopediaPageEntry:
     updated_at: int
     is_deleted: bool
     summary: str = ""
+    latest_edit_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -250,8 +258,9 @@ class MemopediaIndexSection:
             open_refs = {item.ref for item in desk.list_open(conn)}
             for page_id in dict.fromkeys(page_ids):
                 row = conn.execute(
-                    "SELECT id, title, created_at, updated_at, COALESCE(is_deleted, 0), "
-                    "summary, short_id, is_important FROM memopedia_pages WHERE id = ?",
+                    "SELECT p.id, p.title, p.created_at, p.updated_at, COALESCE(p.is_deleted, 0), "
+                    f"p.summary, p.short_id, p.is_important, {_LATEST_EDIT_ID_SQL} "
+                    "FROM memopedia_pages p WHERE p.id = ?",
                     (page_id,),
                 ).fetchone()
                 if row is None:
@@ -259,6 +268,7 @@ class MemopediaIndexSection:
                 entry = MemopediaPageEntry(
                     page_id=str(row[0]), title=row[1] or "", created_at=int(row[2] or 0),
                     updated_at=int(row[3] or 0), is_deleted=bool(row[4]), summary=row[5] or "",
+                    latest_edit_id=row[8],
                 )
                 pages.append(entry)
                 text = _render_toc_entry(
@@ -308,11 +318,16 @@ class MemopediaIndexSection:
         created: list[str] = []
         updated: list[str] = []
         deleted: list[str] = []
-        acknowledged = {p.page_id: p for p in old.acknowledged_pages}
+        # 直近の全差分通知とページ別通知の両方を比較元にする。本文だけの同秒編集も
+        # 履歴IDで見分け、float の時刻基準より古く見える秒整数でも届ける。
+        notified = {p.page_id: p for p in (*old.pages, *old.acknowledged_pages)}
         for page in new.pages:
-            if acknowledged.get(page.page_id) == page:
+            previous = notified.get(page.page_id)
+            if previous == page:
                 continue
-            if page.is_deleted and page.updated_at > cutoff:
+            if previous is not None:
+                (deleted if page.is_deleted else updated).append(page.title)
+            elif page.is_deleted and page.updated_at > cutoff:
                 deleted.append(page.title)
             elif page.created_at > cutoff:
                 created.append(page.title)
@@ -353,9 +368,9 @@ class MemopediaIndexSection:
         pages: list[MemopediaPageEntry] = []
         try:
             cur = sai_mem.conn.execute(
-                "SELECT id, title, created_at, updated_at, COALESCE(is_deleted, 0), summary "
-                "FROM memopedia_pages "
-                "WHERE updated_at >= ? OR created_at >= ?",
+                "SELECT p.id, p.title, p.created_at, p.updated_at, COALESCE(p.is_deleted, 0), "
+                f"p.summary, {_LATEST_EDIT_ID_SQL} FROM memopedia_pages p "
+                "WHERE p.updated_at >= ? OR p.created_at >= ?",
                 (since_int, since_int),
             )
             for row in cur.fetchall():
@@ -366,6 +381,7 @@ class MemopediaIndexSection:
                     updated_at=int(row[3] or 0),
                     is_deleted=bool(row[4]),
                     summary=row[5] or "",
+                    latest_edit_id=row[6],
                 ))
         except Exception:
             LOGGER.warning(

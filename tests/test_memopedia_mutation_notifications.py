@@ -87,7 +87,7 @@ def world(tmp_path, monkeypatch):
     with persona_context("synthetic", tmp_path, manager):
         yield SimpleNamespace(
             conn=conn, mem=mem, pipeline=pipeline, registry=registry, store=store,
-            ctx=ctx, section=section, factory=factory, ledger=ledger,
+            ctx=ctx, section=section, factory=factory, ledger=ledger, manager=manager,
         )
     conn.close()
     engine.dispose()
@@ -210,3 +210,54 @@ def test_failed_outbox_keeps_change_available_to_backstop(world, monkeypatch):
     assert list_pending(world.conn) == []
     labels = world.pipeline.flush_diffs(world.ctx(), all_sections=True)
     assert any("配送失敗" in label.label for label in labels)
+
+
+@pytest.mark.parametrize("same_second_baseline", [False, True])
+def test_same_second_ui_body_edit_is_not_acknowledged_by_prior_tool_notice(
+    world, monkeypatch, same_second_baseline,
+):
+    from api.routes.people.memopedia import update_memopedia_page
+    from api.routes.people.models import UpdateMemopediaPageRequest
+
+    tick = int(time.time()) + 2
+    monkeypatch.setattr("time.time", lambda: tick + 0.5)
+    if same_second_baseline:
+        for model in ("a", "b"):
+            world.pipeline.discard_session("synthetic", model, delete_persisted=True)
+            world.pipeline.capture_all(world.ctx(model))
+    # b は未ロードの保存行に対する既読の合成も通す。
+    world.pipeline.discard_session("synthetic", "b")
+    memory_write(title="同秒編集の対象", content="ツールで保存した本文")
+    page = world.mem.find_by_title("同秒編集の対象")
+    before = world.conn.execute(
+        "SELECT title, summary, created_at, updated_at FROM memopedia_pages WHERE id = ?",
+        (page.id,),
+    ).fetchone()
+    assert world.pipeline.flush_diffs(world.ctx(), all_sections=True) == []
+    result = update_memopedia_page(
+        "synthetic", page.id, UpdateMemopediaPageRequest(content="UIで更新した本文"),
+        manager=world.manager,
+    )
+    assert result["success"]
+    after = world.conn.execute(
+        "SELECT title, summary, created_at, updated_at FROM memopedia_pages WHERE id = ?",
+        (page.id,),
+    ).fetchone()
+    assert before == after  # 秒精度と本文以外の値は完全に同じ。
+    restart = HeadPipeline(registry=world.registry, store=world.store)
+    for model in ("a", "b"):
+        assert restart.load_from_store("synthetic", model)
+        labels = restart.flush_diffs(world.ctx(model), all_sections=True)
+        assert [(label.kind, label.label) for label in labels] == [
+            ("memopedia_updated", "Memopedia「同秒編集の対象」が更新されました"),
+        ]
+        assert restart.flush_diffs(world.ctx(model), all_sections=True) == []
+    # 一度 backstop が進んだ後も、同じ秒の次の本文編集を見逃さない。
+    update_memopedia_page(
+        "synthetic", page.id, UpdateMemopediaPageRequest(content="同じ秒の再編集"),
+        manager=world.manager,
+    )
+    for model in ("a", "b"):
+        labels = restart.flush_diffs(world.ctx(model), all_sections=True)
+        assert len(labels) == 1 and labels[0].kind == "memopedia_updated"
+        assert restart.flush_diffs(world.ctx(model), all_sections=True) == []
