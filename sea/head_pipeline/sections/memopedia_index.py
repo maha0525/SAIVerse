@@ -30,13 +30,17 @@ Metabolism のみで更新される**目次スナップショット**を head �
 
 詳細: docs/intent/concept_consolidation.md §P4-d
 旧詳細: docs/intent/cached_head_architecture.md §5.1 / dynamic_state_sync.md
+
+2026-10-18: 保存通知は capture_mutation で対象ページだけを取得する。
+head と項目描画を共用し、全索引を再送しない。部分通知の既読はページごとに
+保存し、全体の timestamp を進めない (beat_execution_context.md §3.3)。
 """
 from __future__ import annotations
 
 import json
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Optional
 
 from sea.head_pipeline.types import (
@@ -56,6 +60,7 @@ class MemopediaPageEntry:
     created_at: int
     updated_at: int
     is_deleted: bool
+    summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,22 @@ class MemopediaIndexSnapshot:
     # 一文はスペルが使えないと空振りの指示になる。既定 True = この欄を持たない
     # 旧 payload は「有効」(docs/intent/spell_disabled_mode.md §4-5)。
     spell_enabled: bool = True
+    # 部分通知は全体の時刻基準を進めず、実際に届けたページの状態だけを記録する。
+    partial: bool = False
+    acknowledged_pages: tuple[MemopediaPageEntry, ...] = ()
+
+
+def _render_toc_entry(page: dict, open_refs: set[str], *, depth: int = 0, child_total: int = 0) -> str:
+    """head と変更通知で共用する1ページの索引項目。"""
+    sid = page.get("short_id")
+    ref = f"memopedia:{sid}" if sid is not None else f"memopedia:{page['id']}"
+    open_mark = " [OPEN]" if ref in open_refs else ""
+    star_mark = " ★" if page.get("is_important") else ""
+    count_part = f" ({child_total})" if child_total else ""
+    return (
+        f"{'  ' * depth}- {page.get('title') or '(無題)'} [{ref}]"
+        f"{open_mark}{star_mark}{count_part}: {page.get('summary') or ''}"
+    )
 
 
 def _build_toc_markdown(conn) -> Optional[str]:
@@ -124,27 +145,11 @@ def _build_toc_markdown(conn) -> Optional[str]:
                     _render_page(child, depth)
                 return
 
-            indent = "  " * depth
-            sid = page.get("short_id")
-            id_part = f" [memopedia:{sid}]" if sid is not None else ""
-            title = page.get("title") or "(無題)"
-
-            # [OPEN] マーカー (机に開いているページ)
-            page_ref = f"memopedia:{sid}" if sid is not None else None
-            open_mark = " [OPEN]" if page_ref and page_ref in open_refs else ""
-            # ★ important マーカー
-            star_mark = " ★" if page.get("is_important") else ""
-
             # 子の総数（このページの下の全ページ数）
             children = page.get("children") or []
             child_total = _count_all(children)
-            count_part = f" ({child_total})" if child_total > 0 else ""
-
-            # summary（旧方式の復元。空文字列でも ": " を出す旧実装の挙動を踏襲）
-            summary = page.get("summary") or ""
-
             lines.append(
-                f"{indent}- {title}{id_part}{open_mark}{star_mark}{count_part}: {summary}"
+                _render_toc_entry(page, open_refs, depth=depth, child_total=child_total)
             )
 
             # 深さ制限なし。全階層を描画する（旧方式の復元）。
@@ -219,6 +224,8 @@ class MemopediaIndexSection:
         # P4-d: flag OFF / 目次なし → None を返す（既存の「何も render しない」挙動を維持）
         if not snapshot.index_enabled or not snapshot.toc_markdown:
             return None
+        if snapshot.partial:
+            return RenderedSection(text=snapshot.toc_markdown)
         header = (
             "## 記憶の目次（Memopedia Index）\n"
             "以下は地図帳の目次です。各ページの概要 (summary) を示しています。"
@@ -227,6 +234,53 @@ class MemopediaIndexSection:
         if snapshot.spell_enabled:
             header += "ページの本文まで読みたい場合は memory_read で読んでください。"
         return RenderedSection(text=header + "\n" + snapshot.toc_markdown)
+
+    def capture_mutation(self, ctx: LineHeadInput, page_ids: tuple[str, ...]) -> MemopediaIndexSnapshot:
+        """成功した書き込みが渡したページだけを読む。全索引を生成しない。"""
+        from sai_memory import desk
+
+        enabled = self._resolve_memopedia_index_enabled(ctx)
+        if not enabled:
+            return MemopediaIndexSnapshot(captured_at=time.time(), pages=(), partial=True)
+        conn = ctx.persona.sai_memory.conn
+        pages: list[MemopediaPageEntry] = []
+        lines: list[str] = []
+        # 通知の撮影も保存と同じ接続のロックで保護する。
+        with ctx.persona.sai_memory._db_lock:
+            open_refs = {item.ref for item in desk.list_open(conn)}
+            for page_id in dict.fromkeys(page_ids):
+                row = conn.execute(
+                    "SELECT id, title, created_at, updated_at, COALESCE(is_deleted, 0), "
+                    "summary, short_id, is_important FROM memopedia_pages WHERE id = ?",
+                    (page_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"Memopedia mutation page missing: {page_id}")
+                entry = MemopediaPageEntry(
+                    page_id=str(row[0]), title=row[1] or "", created_at=int(row[2] or 0),
+                    updated_at=int(row[3] or 0), is_deleted=bool(row[4]), summary=row[5] or "",
+                )
+                pages.append(entry)
+                text = _render_toc_entry(
+                    {"id": entry.page_id, "title": entry.title, "summary": entry.summary,
+                     "short_id": row[6], "is_important": row[7]}, open_refs,
+                )
+                lines.append(text + (" [削除]" if entry.is_deleted else ""))
+        return MemopediaIndexSnapshot(
+            captured_at=time.time(), pages=tuple(pages), index_enabled=True,
+            toc_markdown="\n".join(lines), partial=True,
+        )
+
+    def merge_notified_snapshot(
+        self, old: Optional[MemopediaIndexSnapshot], new: MemopediaIndexSnapshot,
+    ) -> MemopediaIndexSnapshot:
+        """部分通知で、まだ届けていない別ページを既読にしない。"""
+        if not new.partial:
+            return new
+        acknowledged = {p.page_id: p for p in old.acknowledged_pages} if old else {}
+        acknowledged.update({p.page_id: p for p in new.pages})
+        baseline = old or replace(new, pages=(), toc_markdown=None)
+        return replace(baseline, partial=False, acknowledged_pages=tuple(acknowledged.values()))
 
     def diff_to_notifications(
         self,
@@ -254,7 +308,10 @@ class MemopediaIndexSection:
         created: list[str] = []
         updated: list[str] = []
         deleted: list[str] = []
+        acknowledged = {p.page_id: p for p in old.acknowledged_pages}
         for page in new.pages:
+            if acknowledged.get(page.page_id) == page:
+                continue
             if page.is_deleted and page.updated_at > cutoff:
                 deleted.append(page.title)
             elif page.created_at > cutoff:
@@ -296,7 +353,7 @@ class MemopediaIndexSection:
         pages: list[MemopediaPageEntry] = []
         try:
             cur = sai_mem.conn.execute(
-                "SELECT id, title, created_at, updated_at, COALESCE(is_deleted, 0) "
+                "SELECT id, title, created_at, updated_at, COALESCE(is_deleted, 0), summary "
                 "FROM memopedia_pages "
                 "WHERE updated_at >= ? OR created_at >= ?",
                 (since_int, since_int),
@@ -308,6 +365,7 @@ class MemopediaIndexSection:
                     created_at=int(row[2] or 0),
                     updated_at=int(row[3] or 0),
                     is_deleted=bool(row[4]),
+                    summary=row[5] or "",
                 ))
         except Exception:
             LOGGER.warning(
@@ -324,6 +382,8 @@ class MemopediaIndexSection:
                 "index_enabled": snapshot.index_enabled,
                 "toc_markdown": snapshot.toc_markdown,
                 "spell_enabled": snapshot.spell_enabled,
+                "partial": snapshot.partial,
+                "acknowledged_pages": [asdict(p) for p in snapshot.acknowledged_pages],
             },
             ensure_ascii=False,
         )
@@ -340,6 +400,10 @@ class MemopediaIndexSection:
             toc_markdown=payload.get("toc_markdown"),
             # 欄を持たない旧 payload は「有効」— memory_read の一文が載っていた頃の行。
             spell_enabled=bool(payload.get("spell_enabled", True)),
+            partial=bool(payload.get("partial", False)),
+            acknowledged_pages=tuple(
+                MemopediaPageEntry(**p) for p in payload.get("acknowledged_pages", [])
+            ),
         )
 
     # ---- 内部ヘルパー ----

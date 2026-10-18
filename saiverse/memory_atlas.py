@@ -781,6 +781,7 @@ def write_page(
     title: Optional[str] = None,
     category: Optional[str] = None,
     core_budget: Optional[int] = None,
+    changed_memopedia_ids: Optional[list[str]] = None,
 ) -> str:
     """ページに書く (concept_consolidation.md P2 統一スペル動詞 memory_write)。
 
@@ -798,6 +799,9 @@ def write_page(
     ``core_budget`` はコア記憶の容量目安 (per-persona 設定)。スペル層が解決して
     渡す。超過時は通知を添える (切り詰め・拒否は絶対にしない —
     memory_architecture_v2.md §5 の既存規律のまま)。
+
+    ``changed_memopedia_ids`` を渡すと、成功した書き込みのページ ID を追加する。
+    通知側が人間向け結果文字列から対象を推測せず、該当項目だけを配送するための口。
     """
     text = (content or "").strip()
     if not text:
@@ -811,7 +815,9 @@ def write_page(
             "どちらか一方だけを指定してください。"
         )
     if has_title:
-        return _write_memopedia_create(adapter, str(title).strip(), category, text)
+        return _write_memopedia_create(
+            adapter, str(title).strip(), category, text, changed_memopedia_ids,
+        )
 
     kind, key = _parse_ref(ref)
     conn = adapter.conn
@@ -821,7 +827,7 @@ def write_page(
     if kind == "core_one":
         return _write_core_update(conn, key, text, core_budget)
     if kind == "memopedia":
-        result = _write_memopedia_append(adapter, key, text)
+        result = _write_memopedia_append(adapter, key, text, changed_memopedia_ids)
         _touch_if_open(adapter, kind, key)
         return result
     if kind == "chronicle":
@@ -886,7 +892,10 @@ def _write_core_update(
     )
 
 
-def _write_memopedia_append(adapter, key: Optional[str], text: str) -> str:
+def _write_memopedia_append(
+    adapter, key: Optional[str], text: str,
+    changed_memopedia_ids: Optional[list[str]] = None,
+) -> str:
     from sai_memory.memopedia import Memopedia
     from sai_memory.memopedia.storage import resolve_page_ref
     from tools.context import get_active_message_id
@@ -906,11 +915,15 @@ def _write_memopedia_append(adapter, key: Optional[str], text: str) -> str:
         msg_id = get_active_message_id()
     except Exception:
         pass
-    memopedia.append_to_content(
+    updated = memopedia.append_to_content(
         page.id, text,
         ref_start_message_id=msg_id, ref_end_message_id=msg_id,
         edit_source="ai_conversation",
     )
+    if updated is None:
+        return f"Error: ページに追記できませんでした: memopedia:{key}"
+    if changed_memopedia_ids is not None:
+        changed_memopedia_ids.append(page.id)
     ref = f"memopedia:{page.short_id}" if page.short_id else page.id
     return f"{ref}「{page.title}」に追記しました。"
 
@@ -926,7 +939,8 @@ def _active_message_id() -> Optional[str]:
 
 
 def _write_memopedia_create(
-    adapter, title: str, category: Optional[str], text: str
+    adapter, title: str, category: Optional[str], text: str,
+    changed_memopedia_ids: Optional[list[str]] = None,
 ) -> str:
     """Memopedia に新規ページを作成する (P2c-0 決定3、編集来歴つき create 経路)。"""
     from sai_memory.memopedia import Memopedia
@@ -957,6 +971,8 @@ def _write_memopedia_create(
         ref_end_message_id=msg_id,
         edit_source="ai_conversation",
     )
+    if changed_memopedia_ids is not None:
+        changed_memopedia_ids.append(page.id)
     ref = f"memopedia:{page.short_id}" if page.short_id else page.id
     return f"新しいページを作りました: {ref}「{title}」（カテゴリ: {cat}）"
 
@@ -964,7 +980,9 @@ def _write_memopedia_create(
 # ----- delete_page -----
 
 
-def delete_page(adapter, ref: str) -> str:
+def delete_page(
+    adapter, ref: str, *, changed_memopedia_ids: Optional[list[str]] = None,
+) -> str:
     """ページをごみ箱へ移す (P2c-0 決定1: memory_delete)。
 
     - ``c:N``: コア記憶の soft-delete (``deleted_at`` 刻印。旧 core_memory_remove
@@ -1042,6 +1060,8 @@ def delete_page(adapter, ref: str) -> str:
             )
         if not deleted:
             return f"ページを消せませんでした: {norm_ref}"
+        if changed_memopedia_ids is not None:
+            changed_memopedia_ids.append(page.id)
 
         # 机に開いていたら即時クローズ (次の Metabolism を待たない)
         lines = [

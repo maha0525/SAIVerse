@@ -649,6 +649,10 @@ class HeadPipeline:
 
         「全ての組」は二種類ある:
 
+        Section が ``merge_notified_snapshot(old, new)`` を持つ場合、各組の B に
+        合成する。Memopedia のページ別通知は全体の時刻を進めず、そのページの
+        状態だけを既読にする。同じ合成を store の未ロード行にも適用する。
+
         - **メモリ上の組** (``self._states``): in-memory の B を進め、
           :meth:`_persist_last_notified` で DB の行へ保存する。
         - **DB にだけある組** (再起動後、まだ一度も読み込まれていないモデル):
@@ -686,7 +690,12 @@ class HeadPipeline:
                 if pid != persona_id:
                     continue
                 for section_name, new_section_snapshot in sections.items():
-                    state.last_notified_sections[section_name] = new_section_snapshot
+                    section = self._registry.by_name(section_name)
+                    merge = getattr(section, "merge_notified_snapshot", None)
+                    state.last_notified_sections[section_name] = (
+                        merge(state.last_notified_sections.get(section_name), new_section_snapshot)
+                        if callable(merge) else new_section_snapshot
+                    )
                     state.dirty_sections.discard(section_name)
                 persist_targets.append(
                     (model_key, dict(state.last_notified_sections))

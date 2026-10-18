@@ -192,6 +192,10 @@ class HeadSection(Protocol):
     「空を render する」のは失敗ではない — 空の snapshot が正しく capture
     できていれば required でも head に出ないだけで readiness は満たす。
 
+    任意メソッド ``merge_notified_snapshot(old, new)``: 部分通知の既読を合成する。
+    未実装の Section は new で置き換える。pipeline と store は同じ合成を使う
+    (Memopedia のページ別通知。Protocol の登録条件には含めない)。
+
     詳細: docs/intent/cached_head_architecture.md §3.1
     """
 

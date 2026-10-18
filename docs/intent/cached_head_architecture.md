@@ -350,6 +350,11 @@ Section の `refresh_on_events` 未指定 = 空 frozenset = Metabolism のみで
 
 ### C8. 通知の既読基準 (last_notified) は配送だけが進める (2026-08-17)
 
+Memopedia の保存通知は対象ページの索引項目だけを運ぶ (2026-10-18)。この場合は
+そのページの状態だけを B に合成し、全体の時刻基準を進めない。別ページの未通知
+変更は backstop が拾い続ける。合成はメモリ上と未ロードの保存行で共通とする。
+詳細と検証: [beat_execution_context.md §3.3](beat_execution_context.md#33-head-操作の内容型通知issue-head_mutation_notification_gap-の解)。
+
 差分通知の基準値 B (`last_notified`) を動かしてよいのは、**配送が durable に確定した瞬間** (`flush_diffs` の前進 / `advance_last_notified`) と、**B がまだ無い Section の初期化** (初回 capture / 新規登録 / 欠損復帰 — 初回に全内容を「増えた」と通知するスパムの防止) だけ。snapshot の撮り直し (`capture_all`) は A を最新化するだけで B に触らない。
 
 背景: 旧実装は capture_all が B を新 A にリセットしており (「通知済み = 直近 capture」)、anchor TTL 切れの Pulse 頭・Metabolism 発火・手動の記憶整理がこのリセットを踏むたび、前回の配送以降に起きた差分が**通知されないまま既読化**されていた。実害: エリスの入退室通知が 2026-07-17 (§6-3b で model_key 解決が直り TTL 判定が実働開始) から 1 ヶ月間全滅。「A を最新に撮った」と「その差分を届けた」は別の事実であり、混ぜてはならない。

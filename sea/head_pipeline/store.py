@@ -328,7 +328,14 @@ class LineHeadSnapshotStore:
                         persona_id, row.MODEL_KEY, sorted(serialized),
                     )
                     continue
-                notified.update(serialized)
+                for section_name, value in serialized.items():
+                    section = self._registry.by_name(section_name)
+                    merge = getattr(section, "merge_notified_snapshot", None)
+                    if callable(merge):
+                        old_data = notified.get(section_name)
+                        old = section.deserialize_snapshot(old_data) if old_data is not None else None
+                        value = section.serialize_snapshot(merge(old, notified_values[section_name]))
+                    notified[section_name] = value
                 row.LAST_NOTIFIED_JSON = json.dumps(notified, ensure_ascii=False)
                 row.UPDATED_AT = now
             db.commit()
