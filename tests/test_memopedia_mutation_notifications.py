@@ -261,3 +261,213 @@ def test_same_second_ui_body_edit_is_not_acknowledged_by_prior_tool_notice(
         labels = restart.flush_diffs(world.ctx(model), all_sections=True)
         assert len(labels) == 1 and labels[0].kind == "memopedia_updated"
         assert restart.flush_diffs(world.ctx(model), all_sections=True) == []
+
+
+
+def _notified(pipeline, model="a"):
+    return pipeline._states[("synthetic", model)].last_notified_sections["memopedia_index"]
+
+
+def _inject(world, model="a"):
+    from sea.head_pipeline.integration import inject_diff_notifications
+
+    return inject_diff_notifications(
+        world.ctx(model).persona, world.manager, "room", pipeline=world.pipeline,
+        model_key=model, detect_room=False,
+    )
+
+
+@pytest.mark.parametrize("unload_b", [False, True])
+def test_clean_scans_compact_tool_acknowledgements_and_persist_per_model(world, monkeypatch, unload_b):
+    if unload_b:
+        world.pipeline.discard_session("synthetic", "b")
+    frozen = world.pipeline.get_snapshot("synthetic", "a")
+    tick = int(time.time()) + 10
+    monkeypatch.setattr("time.time", lambda: tick + 0.5)
+    for i in range(8):
+        memory_write(title=f"継続保存{i}", content="本文")
+        assert _inject(world) is False  # 実際の periodic backstop と同じ入口。
+        tick += 3
+    a = _notified(world.pipeline)
+    assert a.captured_at >= tick - 4
+    assert len(a.pages) + len(a.acknowledged_pages) <= 1
+    assert len(world.section.serialize_snapshot(a)) < 1000
+    assert len(world.section.capture_changes_since(world.ctx(), a.captured_at).pages) <= 1
+    assert world.pipeline.get_snapshot("synthetic", "a") is frozen
+    restart = HeadPipeline(registry=world.registry, store=world.store)
+    for model in ("a", "b"):
+        assert restart.load_from_store("synthetic", model)
+        stored = _notified(restart, model)
+        if model == "a":
+            assert stored == a
+        assert len(stored.pages) + len(stored.acknowledged_pages) <= 1
+        assert stored.captured_at >= tick - 4
+        assert restart.flush_diffs(world.ctx(model), all_sections=True) == []
+        compacted = _notified(restart, model)
+        assert compacted.captured_at >= tick - 1
+        assert compacted.pages == compacted.acknowledged_pages == ()
+    assert len(_rows(world)) == 8  # 回収のための通知は出さない。
+
+
+def test_preview_does_not_compact_or_persist_clean_scan(world, monkeypatch):
+    tick = int(time.time()) + 10
+    monkeypatch.setattr("time.time", lambda: tick + 0.5)
+    memory_write(title="プレビュー前", content="本文")
+    before = _notified(world.pipeline)
+    tick += 10
+    from sea.head_pipeline.integration import preview_head_perceptions
+
+    monkeypatch.setattr("sea.head_pipeline.integration._plan_room_state_change", lambda *a, **kw: None)
+    monkeypatch.setattr("sea.head_pipeline.integration._compose_copresence_recalls", lambda *a, **kw: [])
+    assert preview_head_perceptions(
+        world.ctx().persona, world.manager, "room", pipeline=world.pipeline, model_key="a",
+    ) == []
+    assert _notified(world.pipeline) == before
+    restart = HeadPipeline(registry=world.registry, store=world.store)
+    assert restart.load_from_store("synthetic", "a")
+    assert _notified(restart) == before
+
+
+def test_delivered_full_scans_also_retire_old_page_revisions(world, monkeypatch):
+    tick = int(time.time()) + 10
+    monkeypatch.setattr("time.time", lambda: tick + 0.5)
+    for i in range(8):
+        page = world.mem.find_by_title(f"既存項目{i}")
+        world.mem.update_page(page.id, content=f"UIの本文{i}")
+        assert _inject(world) is True
+        tick += 3
+    for model in ("a", "b"):
+        baseline = _notified(world.pipeline, model)
+        assert baseline.captured_at >= tick - 4
+        assert len(baseline.pages) + len(baseline.acknowledged_pages) <= 1
+
+
+def test_compaction_keeps_same_second_edits_and_unnotified_other_model(world, monkeypatch):
+    tick = int(time.time()) + 10
+    monkeypatch.setattr("time.time", lambda: tick + 0.5)
+    memory_write(title="既読の保存", content="本文")
+    assert _inject(world) is False
+    page = world.mem.find_by_title("既存項目9")
+    world.mem.update_page(page.id, content="同じ秒に入った本文")
+    # a は掃除済み、b は掃除前。同じ未通知編集を両方で検出する。
+    for model in ("a", "b"):
+        labels = world.pipeline.flush_diffs(world.ctx(model), all_sections=True)
+        assert len(labels) == 1 and "既存項目9" in labels[0].label
+        assert world.pipeline.flush_diffs(world.ctx(model), all_sections=True) == []
+    world.mem.update_page(page.id, content="同じ秒の再編集")
+    for model in ("a", "b"):
+        assert len(world.pipeline.flush_diffs(world.ctx(model), all_sections=True)) == 1
+
+
+def test_failed_scan_cannot_compact_notified_baseline(world, monkeypatch):
+    tick = int(time.time()) + 10
+    monkeypatch.setattr("time.time", lambda: tick + 0.5)
+    memory_write(title="失敗前の保存", content="本文")
+    before = _notified(world.pipeline)
+    tick += 10
+
+    class FailedConnection:
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("isolated failed scan")
+
+    monkeypatch.setattr(world.ctx().persona.sai_memory, "conn", FailedConnection())
+    assert _inject(world) is False
+    assert _notified(world.pipeline) == before
+    restart = HeadPipeline(registry=world.registry, store=world.store)
+    assert restart.load_from_store("synthetic", "a")
+    assert _notified(restart) == before
+
+
+
+def test_compaction_watermark_precedes_scan_not_changes_during_scan(world, monkeypatch):
+    tick = int(time.time()) + 10
+    monkeypatch.setattr("time.time", lambda: tick + 0.5)
+    memory_write(title="走査前の保存", content="本文")
+    page = world.mem.find_by_title("既存項目9")
+
+    class SlowScanConnection:
+        def execute(self, *args, **kwargs):
+            cursor = world.conn.execute(*args, **kwargs)
+
+            class Result:
+                def fetchall(self):
+                    nonlocal tick
+                    rows = cursor.fetchall()
+                    # SQL の読み取り完了直後、別の操作が入る状況を再現する。
+                    tick += 10
+                    world.mem.update_page(page.id, content="走査中に更新した本文")
+                    return rows
+
+            return Result()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(world.ctx().persona.sai_memory, "conn", SlowScanConnection())
+        assert _inject(world) is False
+    assert _inject(world) is True
+    assert "既存項目9" in list_pending(world.conn)[-1].content
+    assert _inject(world) is False
+
+
+
+def test_failed_delivery_after_compaction_keeps_pending_ui_edit(world, monkeypatch):
+    tick = int(time.time()) + 10
+    monkeypatch.setattr("time.time", lambda: tick + 0.5)
+    memory_write(title="既読の保存", content="本文")
+    assert _inject(world) is False
+    tick += 10
+    assert _inject(world) is False
+    before = _notified(world.pipeline)
+    page = world.mem.find_by_title("既存項目9")
+    world.mem.update_page(page.id, content="未通知の本文編集")
+    with monkeypatch.context() as patch:
+        patch.setattr(world.ledger, "begin_execution", lambda *a, **kw: (_ for _ in ()).throw(
+            RuntimeError("isolated outbox failure after compaction"),
+        ))
+        assert _inject(world) is False
+    assert _notified(world.pipeline) == before
+    assert _inject(world) is True
+    restart = HeadPipeline(registry=world.registry, store=world.store)
+    for model in ("a", "b"):
+        assert restart.load_from_store("synthetic", model)
+        assert restart.flush_diffs(world.ctx(model), all_sections=True) == []
+
+
+
+@pytest.mark.parametrize("unload_b", [False, True])
+def test_other_model_compaction_checks_its_own_older_unnotified_range(world, monkeypatch, unload_b):
+    tick = int(time.time()) + 10
+    monkeypatch.setattr("time.time", lambda: tick + 0.5)
+    page = world.mem.find_by_title("既存項目9")
+    world.mem.update_page(page.id, content="bだけがまだ知らないUI編集")
+    tick += 3
+    # a の初回 head は編集後、b の既読は編集前。a の走査を b に流用できない。
+    world.pipeline.discard_session("synthetic", "a", delete_persisted=True)
+    world.pipeline.capture_all(world.ctx())
+    if unload_b:
+        world.pipeline.discard_session("synthetic", "b")
+    tick += 10
+    memory_write(title="両モデルへの通知", content="本文")
+    assert _inject(world) is False
+    restart = HeadPipeline(registry=world.registry, store=world.store)
+    assert restart.load_from_store("synthetic", "b")
+    labels = restart.flush_diffs(world.ctx("b"), all_sections=True)
+    assert len(labels) == 1 and "既存項目9" in labels[0].label
+    assert "両モデルへの通知" not in labels[0].label
+
+
+
+def test_compaction_persistence_failure_does_not_stop_notification_path(world, monkeypatch):
+    tick = int(time.time()) + 10
+    monkeypatch.setattr("time.time", lambda: tick + 0.5)
+    world.pipeline.discard_session("synthetic", "b")
+    memory_write(title="回収前の保存", content="本文")
+    tick += 10
+    with monkeypatch.context() as patch:
+        patch.setattr(world.store, "save_notified_sections_for_other_models", lambda *a, **kw: (
+            (_ for _ in ()).throw(RuntimeError("isolated compaction persistence failure"))
+        ))
+        assert _inject(world) is False
+    page = world.mem.find_by_title("既存項目9")
+    world.mem.update_page(page.id, content="回収の保存失敗後の編集")
+    assert _inject(world) is True
+    assert "既存項目9" in list_pending(world.conn)[-1].content

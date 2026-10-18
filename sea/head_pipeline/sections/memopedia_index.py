@@ -33,13 +33,15 @@ Metabolism のみで更新される**目次スナップショット**を head �
 
 2026-10-18: 保存通知は capture_mutation で対象ページだけを取得する。
 head と項目描画を共用し、全索引を再送しない。部分通知の既読はページごとに
-保存し、全体の timestamp を進めない (beat_execution_context.md §3.3)。
+保存し、部分通知だけで全体の timestamp を進めない。backstop で未通知差分ゼロを
+確かめた後に、古い既読を回収する (beat_execution_context.md §3.3)。
 """
 from __future__ import annotations
 
 import json
 import logging
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, replace
 from typing import Optional
 
@@ -284,13 +286,40 @@ class MemopediaIndexSection:
     def merge_notified_snapshot(
         self, old: Optional[MemopediaIndexSnapshot], new: MemopediaIndexSnapshot,
     ) -> MemopediaIndexSnapshot:
-        """部分通知で、まだ届けていない別ページを既読にしない。"""
+        """届けた版を合成し、部分通知で他ページの未通知編集を飛ばさない。"""
         if not new.partial:
-            return new
+            return self.compact_notified_snapshot(old, new)
         acknowledged = {p.page_id: p for p in old.acknowledged_pages} if old else {}
         acknowledged.update({p.page_id: p for p in new.pages})
         baseline = old or replace(new, pages=(), toc_markdown=None)
         return replace(baseline, partial=False, acknowledged_pages=tuple(acknowledged.values()))
+
+    def compact_notified_snapshot(
+        self, old: Optional[MemopediaIndexSnapshot], new: MemopediaIndexSnapshot,
+    ) -> MemopediaIndexSnapshot:
+        """全差分の配送後、または未通知差分ゼロの走査後にだけ既読を圧縮する。
+
+        秒精度の更新時刻を使うので、走査開始の一秒前まで基準を進める。
+        境界以降の版は保持し、同秒の本文編集と通知済みの版を区別する。
+        部分通知からは呼ばない。他ページの未通知編集を既読にしてしまうため。
+        """
+        if old is None:
+            return new
+        cutoff = max(old.captured_at, int(new.captured_at) - 1)
+        known = {p.page_id: p for p in (*old.pages, *old.acknowledged_pages, *new.pages)}
+        retained = tuple(
+            p for p in known.values() if max(p.created_at, p.updated_at) >= int(cutoff)
+        )
+        compacted = replace(
+            old, captured_at=cutoff, pages=retained, acknowledged_pages=(),
+            partial=False, toc_markdown=None,
+        )
+        if compacted != old:
+            LOGGER.debug(
+                "memopedia_index: compacted notified revisions cutoff=%s->%s retained=%s/%s",
+                old.captured_at, cutoff, len(retained), len(known),
+            )
+        return compacted
 
     def diff_to_notifications(
         self,
@@ -358,22 +387,24 @@ class MemopediaIndexSection:
         を実際に拾う。pipeline 側でこの拡張メソッドを認識する経路を Phase 3-e で配線。
         """
         persona = ctx.persona
-        if persona is None:
-            return MemopediaIndexSnapshot(captured_at=time.time(), pages=())
         sai_mem = getattr(persona, "sai_memory", None)
         if not sai_mem or not getattr(sai_mem, "conn", None):
-            return MemopediaIndexSnapshot(captured_at=time.time(), pages=())
+            # 読めなかった走査を「未通知差分なし」として圧縮してはいけない。
+            raise RuntimeError("Memopedia change scan requires a memory connection")
 
         since_int = int(since)
         pages: list[MemopediaPageEntry] = []
         try:
-            cur = sai_mem.conn.execute(
-                "SELECT p.id, p.title, p.created_at, p.updated_at, COALESCE(p.is_deleted, 0), "
-                f"p.summary, {_LATEST_EDIT_ID_SQL} FROM memopedia_pages p "
-                "WHERE p.updated_at >= ? OR p.created_at >= ?",
-                (since_int, since_int),
-            )
-            for row in cur.fetchall():
+            with getattr(sai_mem, "_db_lock", nullcontext()):
+                # SELECT 後の時刻を基準にすると、走査中の別接続の更新まで飛ばす。
+                scan_started_at = time.time()
+                rows = sai_mem.conn.execute(
+                    "SELECT p.id, p.title, p.created_at, p.updated_at, COALESCE(p.is_deleted, 0), "
+                    f"p.summary, {_LATEST_EDIT_ID_SQL} FROM memopedia_pages p "
+                    "WHERE p.updated_at >= ? OR p.created_at >= ?",
+                    (since_int, since_int),
+                ).fetchall()
+            for row in rows:
                 pages.append(MemopediaPageEntry(
                     page_id=str(row[0]),
                     title=str(row[1]) if row[1] is not None else "",
@@ -388,7 +419,8 @@ class MemopediaIndexSection:
                 "memopedia_index: failed to query memopedia_pages since=%s",
                 since_int, exc_info=True,
             )
-        return MemopediaIndexSnapshot(captured_at=time.time(), pages=tuple(pages))
+            raise
+        return MemopediaIndexSnapshot(captured_at=scan_started_at, pages=tuple(pages))
 
     def serialize_snapshot(self, snapshot: MemopediaIndexSnapshot) -> str:
         return json.dumps(

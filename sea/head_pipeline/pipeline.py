@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Optional
 
 from sea.head_pipeline.registry import HeadSectionRegistry, get_default_registry
@@ -511,7 +511,7 @@ class HeadPipeline:
 
     def flush_diffs(
         self, ctx: LineHeadInput, *, all_sections: bool = False, advance: bool = True,
-        only: Optional[set[str]] = None,
+        only: Optional[set[str]] = None, compact: Optional[bool] = None,
     ) -> list[NotificationLabel] | tuple[list[NotificationLabel], dict[str, object]]:
         """dirty Section + periodic backstop 対象 Section の diff をチェックし、
         差分があれば NotificationLabel 列を返す。
@@ -536,6 +536,12 @@ class HeadPipeline:
         差分が出た section の dirty マークも据え置く (= 配送失敗時は次回 flush で
         再検出される)。
 
+        ``compact=True`` は、差分ゼロを確認した Section の任意メソッド
+        ``compact_notified_snapshot`` で既読記録を圧縮する。他モデルはそれぞれの
+        基準から別途差分ゼロを確かめる (未ロード行も含む)。既定は advance と同じ。
+        通常の配送経路は通知ロック下で明示的に有効化し、
+        advance=False の preview は既定のまま既読に触れない。
+
         ``only`` を渡すと、チェック対象をその名前の集合との積に絞る。移動の瞬間に
         「移動の事実」だけを届ける呼び出し (saiverse/dynamic_state.on_building_entered、
         building + building_occupants) が使う —
@@ -544,6 +550,9 @@ class HeadPipeline:
         で拾う (2026-09-07、docs/issues/perception_state_pushed_at_event_time.md)。
         B の前進の規約 (``advance``) は変えない。
         """
+        if compact is None:
+            compact = advance
+        clean_scans: dict[str, object] = {}
         with self._lock:
             state = self._states.get((ctx.persona_id, ctx.model_key))
             if state is None:
@@ -606,21 +615,83 @@ class HeadPipeline:
                     labels.extend(section_labels)
                     detected[section.name] = new_snapshot
                     if advance:
-                        state.last_notified_sections[section.name] = new_snapshot
+                        merge = getattr(section, "merge_notified_snapshot", None)
+                        state.last_notified_sections[section.name] = (
+                            merge(old_snapshot, new_snapshot) if callable(merge) else new_snapshot
+                        )
                     else:
                         # 検出のみ: B も dirty も据え置き (配送確定後に
                         # advance_last_notified が進める)。
                         continue
 
+                elif compact and old_snapshot is not None:
+                    compact_snapshot = getattr(section, "compact_notified_snapshot", None)
+                    if callable(compact_snapshot):
+                        clean_scans[section.name] = new_snapshot
+
                 state.dirty_sections.discard(section.name)
 
             notified_snapshot_copy = dict(state.last_notified_sections)
 
+        if advance and labels:
+            self._persist_last_notified(ctx.persona_id, ctx.model_key, notified_snapshot_copy)
+        if clean_scans:
+            self._compact_clean_sections(ctx, clean_scans)
         if not advance:
             return labels, detected
-        if labels:
-            self._persist_last_notified(ctx.persona_id, ctx.model_key, notified_snapshot_copy)
         return labels
+
+    def _compact_clean_sections(self, ctx: LineHeadInput, clean_scans: dict[str, object]) -> None:
+        """各モデル自身の未通知差分を確認し、未ロード行も含めて古い既読を回収する。"""
+        def compact(section_name, model_key, old, scanned):
+            if old is None:
+                return old
+            section = self._registry.by_name(section_name)
+            try:
+                # 他モデルは開始時の基準が異なり得る。そのモデルの範囲を自分で読み、
+                # 未通知の変更があれば据え置く。元モデルの「差分ゼロ」は流用しない。
+                current = scanned if model_key == ctx.model_key else section.capture_changes_since(
+                    replace(ctx, model_key=model_key), old.captured_at,
+                )
+                if section.diff_to_notifications(old, current):
+                    return old
+                return section.compact_notified_snapshot(old, current)
+            except Exception:
+                LOGGER.exception(
+                    "head_pipeline: notified compaction failed section=%s persona=%s model=%s",
+                    section_name, ctx.persona_id, model_key,
+                )
+                return old
+
+        with self.notify_lock_for(ctx.persona_id):
+            persist_targets = []
+            with self._lock:
+                for (pid, model_key), state in self._states.items():
+                    if pid != ctx.persona_id:
+                        continue
+                    changed = False
+                    for name, scanned in clean_scans.items():
+                        old = state.last_notified_sections.get(name)
+                        new = compact(name, model_key, old, scanned)
+                        if new != old:
+                            state.last_notified_sections[name] = new
+                            changed = True
+                    if changed:
+                        persist_targets.append((model_key, dict(state.last_notified_sections)))
+                in_memory_models = {mk for pid, mk in self._states if pid == ctx.persona_id}
+            for model_key, notified in persist_targets:
+                self._persist_last_notified(ctx.persona_id, model_key, notified)
+            if self._store is not None:
+                try:
+                    self._store.save_notified_sections_for_other_models(
+                        ctx.persona_id, clean_scans, exclude_model_keys=in_memory_models,
+                        merge_snapshot=compact,
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "head_pipeline: notified compaction persistence failed persona=%s",
+                        ctx.persona_id,
+                    )
 
     def advance_last_notified(
         self,

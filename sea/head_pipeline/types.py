@@ -196,6 +196,11 @@ class HeadSection(Protocol):
     未実装の Section は new で置き換える。pipeline と store は同じ合成を使う
     (Memopedia のページ別通知。Protocol の登録条件には含めない)。
 
+    任意メソッド ``compact_notified_snapshot(old, new)``: since-aware な全差分走査が
+    未通知差分ゼロだった時に、既読記録を安全な基準へ圧縮する。通常の配送経路で
+    model ごとの未通知差分をそれぞれ確かめ、read-only preview は呼ばない。差分があった走査では
+    配送確定まで呼ばず、merge_notified_snapshot が配送後に同じ圧縮を使える。
+
     詳細: docs/intent/cached_head_architecture.md §3.1
     """
 
