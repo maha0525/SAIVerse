@@ -94,7 +94,8 @@ CALL_TOKENS_STATE_KEY = "_last_call_tokens"
 #: :func:`note_unstored_reply` を参照。
 UNSTORED_REPLY_STATE_KEY = "_unstored_reply"
 #: 直前の LLM コールの応答のメッセージごとの分け方 (sea/runtime_llm.py の
-#: ``_store_output_phases_in_state`` が書き、SPEAK ノードが読む)。
+#: ``_store_output_phases_in_state`` が書く)。SPEAK ノードが消費し、THINK ノードと
+#: action が ``{last}`` の MEMORIZE ノードは読むだけ (SAY ノードは触らない)。
 OUTPUT_PHASES_STATE_KEY = "_output_phases"
 
 # ---- 三つ組の欄名 ----

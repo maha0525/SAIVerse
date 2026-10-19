@@ -146,17 +146,16 @@ def test_phase_only_on_item_done_is_still_picked_up():
     assert _run(events)["output_phases"] == [_ph(C, "途中")]
 
 
-def test_delta_without_added_event_starts_a_message_without_phase():
+def test_delta_of_a_message_without_added_is_not_reported():
+    # m2 never had an output_item.added, so its text names no known message.
     events = [
         _added("m1", C), _delta("m1", "考え中"),
         _delta("m2", "/spell name='note_add' args={}"),
-        _completed(),
+        _item_done("m2", F), _completed(),
     ]
     state = _run(events)
     assert state["text"] == "考え中\n/spell name='note_add' args={}"
-    assert state["output_phases"] == [
-        _ph(C, "考え中"), _ph(None, "/spell name='note_add' args={}"),
-    ]
+    assert state["output_phases"] is None
 
 
 def _first_message_without_delta_ids(first_text: str) -> List[Dict[str, Any]]:
@@ -172,33 +171,112 @@ def _first_message_done_only(first_text: str) -> List[Dict[str, Any]]:
 
 @pytest.mark.parametrize("first", [_first_message_done_only, _first_message_without_delta_ids])
 @pytest.mark.parametrize("second_with_deltas", [False, True])
-def test_unknown_item_id_without_added_starts_its_own_message(first, second_with_deltas):
-    # 2 つ目のメッセージ f には added が届かない。f の本文を 1 つ目 (commentary)
-    # に足すと、最終回答が独り言として送り返される。
+def test_unknown_item_id_without_added_is_not_reported(first, second_with_deltas):
+    # 2 つ目のメッセージ f には added が届かない。f の本文の持ち主はストリーム
+    # から証明できないので、分け方は報告しない (本文はそのまま)。
     second = [_delta("f", "B")] if second_with_deltas else []
     events = first("A\n") + second + [
         _text_done("f", "B"), _item_done("f", F), _completed(),
     ]
     state = _run(events)
     assert state["text"] == "A\nB"
-    assert state["output_phases"] == [_ph(C, "A\n"), _ph(F, "B")]
+    assert state["output_phases"] is None
 
 
 @pytest.mark.parametrize("first", [_first_message_done_only, _first_message_without_delta_ids])
 @pytest.mark.parametrize("second_with_deltas", [False, True])
-def test_unknown_item_id_without_added_gets_the_boundary_newline(first, second_with_deltas):
-    # 前のメッセージが改行で終わっていなくても、境目に改行が入り、/spell が
-    # 行頭に立つ (delta の item_id が切り替わったときと同じ規則)。
+def test_unknown_item_id_without_added_keeps_the_text_without_a_newline(first, second_with_deltas):
+    # 境目の改行は、origin/develop と同じ規則 (メッセージの added が本文の後に
+    # 届いたとき、または delta の item_id が空でない前の item_id から切り替わった
+    # とき) でだけ入る。ここではどちらも起きないので本文は "AB" のまま。
+    # 分け方 "A" / "B" をつなぐと "A\nB" になり本文と一致しないので報告しない。
     second = [_delta("f", "B")] if second_with_deltas else []
     events = first("A") + second + [
         _text_done("f", "B"), _item_done("f", F), _completed(),
     ]
     state = _run(events)
+    assert state["text"] == "AB"
+    assert state["output_phases"] is None
+
+
+_SPELL = "/spell name='note_add' args={}"
+
+# Degenerate streams and the text origin/develop's _iter_chunks produced for
+# each (computed with that version and embedded here). The text decides what
+# is shown, stored and parsed for spells, so it must stay exactly the same.
+_ORIGIN_DEVELOP_TEXTS = [
+    pytest.param(
+        [_text_done("c", "A"), _item_done("c", C), _text_done("f", _SPELL),
+         _item_done("f", F)],
+        "A" + _SPELL, None, id="done_only_without_added",
+    ),
+    pytest.param(
+        [_added("c", C), _text_done("c", "A"), _item_done("c", C),
+         _delta("f", _SPELL), _text_done("f", _SPELL), _item_done("f", F)],
+        "A" + _SPELL, None, id="done_only_message_then_unknown_delta_id",
+    ),
+    pytest.param(
+        [_added("c", C), _text_done("c", "A"), _item_done("c", C),
+         _text_done("f", _SPELL), _item_done("f", F)],
+        "A" + _SPELL, None, id="done_only_message_then_unknown_done_id",
+    ),
+    pytest.param(
+        [_added("c", C), _delta(None, "A"), _text_done("c", "A"), _item_done("c", C),
+         _delta("f", _SPELL), _text_done("f", _SPELL), _item_done("f", F)],
+        "A" + _SPELL, None, id="idless_deltas_then_unknown_delta_id",
+    ),
+    pytest.param(
+        [_added("c", C), _delta(None, "A"), _text_done("c", "A"), _item_done("c", C),
+         _text_done("f", _SPELL), _item_done("f", F)],
+        "A" + _SPELL, None, id="idless_deltas_then_unknown_done_id",
+    ),
+    pytest.param(
+        [_delta(None, "A"), _delta("f", _SPELL)],
+        "A" + _SPELL, None, id="idless_delta_then_id_delta",
+    ),
+    pytest.param(
+        [_added("c", C), _delta("c", "A"), _text_done("c", "A"), _delta(None, "B"),
+         _text_done("f", "B"), _item_done("f", F)],
+        "AB", None, id="idless_delta_closed_by_another_id",
+    ),
+    pytest.param(
+        [_added("c", C), _delta("c", "A"), _text_done("c", "A"), _delta(None, "B"),
+         _delta("f", "C"), _text_done("f", "C"), _item_done("f", F)],
+        "AB\nC", None, id="idless_delta_between_two_ids",
+    ),
+    pytest.param(
+        [{"type": "response.output_text.done", "text": "A"},
+         {"type": "response.output_text.done", "text": _SPELL}],
+        "A" + _SPELL, None, id="two_dones_without_ids",
+    ),
+    pytest.param(
+        [_added("m1", C), _delta("m1", "考え中"), _added("m2", F), _completed()],
+        "考え中\n", None, id="second_message_without_text",
+    ),
+]
+
+
+@pytest.mark.parametrize("events, origin_text, phases", _ORIGIN_DEVELOP_TEXTS)
+def test_degenerate_stream_text_equals_origin_develop(events, origin_text, phases):
+    state = _run(events + [_completed()])
+    assert state["text"] == origin_text
+    assert state["output_phases"] == phases
+
+
+def test_deltas_without_item_id_are_not_reported():
+    # The text names no message, even though c's output_item.done follows.
+    events = [
+        _added("c", C), _delta(None, "A"), _item_done("c", C),
+        _added("f", F), _delta("f", "B"), _text_done("f", "B"), _item_done("f", F),
+        _completed(),
+    ]
+    state = _run(events)
     assert state["text"] == "A\nB"
-    assert state["output_phases"] == [_ph(C, "A"), _ph(F, "B")]
+    assert state["output_phases"] is None
 
 
-def test_added_without_id_is_claimed_by_the_first_delta_id():
+def test_added_without_id_is_not_reported():
+    # The deltas carry ids, but no output_item.added made those ids known.
     events = [
         _added(None, C), _delta("x", "考え中"), _text_done("x", "考え中"),
         _added(None, F), _delta("y", "答え"), _text_done("y", "答え"),
@@ -206,16 +284,46 @@ def test_added_without_id_is_claimed_by_the_first_delta_id():
     ]
     state = _run(events)
     assert state["text"] == "考え中\n答え"
-    assert state["output_phases"] == [_ph(C, "考え中"), _ph(F, "答え")]
+    assert state["output_phases"] is None
 
 
-def test_id_arriving_after_idless_text_is_not_guessed():
-    # added にも delta にも id が無いまま本文が流れた後で、初めて id 付きの
-    # delta が来た形。同じメッセージの続きか新しいメッセージか分からないので、
-    # 本文は今まで通り続けて流し、分け方は報告しない。
-    events = [_added(None, C), _delta(None, "A"), _delta("x", "B"), _completed()]
+@pytest.mark.parametrize("done_text", ["A", "AB"])
+def test_done_naming_another_message_than_its_deltas_is_not_reported(done_text):
+    # The deltas say c, the done that closes them says f.
+    events = [
+        _added("c", C), _added("f", F), _delta("c", "A"), _text_done("f", done_text),
+        _completed(),
+    ]
+    state = _run(events)
+    assert state["text"] == done_text
+    assert state["output_phases"] is None
+
+
+def test_done_without_item_id_closing_deltas_is_not_reported():
+    events = [
+        _added("c", C), _delta("c", "A"),
+        {"type": "response.output_text.done", "text": "AB"}, _completed(),
+    ]
     state = _run(events)
     assert state["text"] == "AB"
+    assert state["output_phases"] is None
+
+
+def test_conflicting_phase_is_not_reported():
+    events = [_added("m1", C), _delta("m1", "X"), _text_done("m1", "X"),
+              _item_done("m1", F), _completed()]
+    state = _run(events)
+    assert state["text"] == "X"
+    assert state["output_phases"] is None
+
+
+def test_interleaved_message_text_is_not_reported():
+    events = [
+        _added("a", C), _added("b", F),
+        _delta("a", "x"), _delta("b", "y"), _delta("a", "z"), _completed(),
+    ]
+    state = _run(events)
+    assert state["text"] == "x\ny\nz"
     assert state["output_phases"] is None
 
 
@@ -230,16 +338,25 @@ def test_done_only_stream_without_deltas_pairs_texts_with_phases():
     assert state["output_phases"] == [_ph(C, "考えます。"), _ph(F, "答えです。")]
 
 
+_COMPLETED_OUTPUT = [
+    {"type": "message", "id": "m1", "phase": C,
+     "content": [{"type": "output_text", "text": "前"}]},
+    {"type": "message", "id": "m2", "phase": F,
+     "content": [{"type": "output_text", "text": "後"}]},
+]
+
+
 def test_completed_only_stream_reads_phases_from_the_output_items():
-    output = [
-        {"type": "message", "id": "m1", "phase": C,
-         "content": [{"type": "output_text", "text": "前"}]},
-        {"type": "message", "id": "m2", "phase": F,
-         "content": [{"type": "output_text", "text": "後"}]},
-    ]
-    state = _run([_completed(output)])
+    # The messages are known from added; their phase comes from completed.
+    state = _run([_added("m1"), _added("m2"), _completed(_COMPLETED_OUTPUT)])
     assert state["text"] == "前\n後"
     assert state["output_phases"] == [_ph(C, "前"), _ph(F, "後")]
+
+
+def test_completed_only_stream_without_added_is_not_reported():
+    state = _run([_completed(_COMPLETED_OUTPUT)])
+    assert state["text"] == "前\n後"
+    assert state["output_phases"] is None
 
 
 def test_split_that_does_not_join_to_the_text_is_not_reported():
@@ -253,6 +370,97 @@ def test_split_that_does_not_join_to_the_text_is_not_reported():
 def test_single_message_response_is_reported_as_one_entry():
     state = _run(_message("m1", "ひとこと", F) + [_completed()])
     assert state["output_phases"] == [_ph(F, "ひとこと")]
+
+
+# Each true message writes only letters of its own alphabet, so the message a
+# reported entry's text came from can be read from the letters themselves.
+_ALPHABETS = ["abcde", "fghij", "klmno"]
+_PHASES = [C, F, None]
+
+
+def _random_stream(rng) -> tuple:
+    """Build a well-formed stream of 1-3 messages, then maybe break it.
+
+    Breakages: drop an added, drop an item_id, replace an item_id with an
+    unknown one, swap two neighbouring events, duplicate or drop an event.
+    An item_id is never replaced by another known message's id: such a lie
+    names a real message and no stream rule can see it.
+    Returns (events, true phase per message index).
+    """
+    count = rng.randint(1, 3)
+    phases = [rng.choice(_PHASES) for _ in range(count)]
+    events: List[Dict[str, Any]] = []
+    output: List[Dict[str, Any]] = []
+    with_completed_output = rng.random() < 0.3
+    for index in range(count):
+        item_id = f"m{index}"
+        text = "".join(rng.choice(_ALPHABETS[index]) for _ in range(rng.randint(1, 5)))
+        if rng.random() < 0.3:
+            text += "\n"
+        events.append(_added(item_id, phases[index]))
+        if with_completed_output:
+            output.append({"type": "message", "id": item_id, "phase": phases[index],
+                           "content": [{"type": "output_text", "text": text}]})
+            continue
+        if rng.random() < 0.7:
+            cut = rng.randint(0, len(text))
+            for piece in (text[:cut], text[cut:]):
+                if piece:
+                    events.append(_delta(item_id, piece))
+        events.append(_text_done(item_id, text))
+        events.append(_item_done(item_id, phases[index] if rng.random() < 0.5 else None))
+    for _ in range(rng.randint(0, 3)):
+        if not events:
+            break
+        position = rng.randrange(len(events))
+        event = events[position]
+        kind = rng.choice(["drop_added", "drop_id", "unknown_id", "swap", "duplicate", "drop"])
+        if kind == "drop_added" and event["type"] == "response.output_item.added":
+            events.pop(position)
+        elif kind in ("drop_id", "unknown_id") and "item_id" in event:
+            event = dict(event)
+            if kind == "drop_id":
+                event.pop("item_id")
+            else:
+                event["item_id"] = "unknown"
+            events[position] = event
+        elif kind == "swap" and position + 1 < len(events):
+            events[position], events[position + 1] = events[position + 1], events[position]
+        elif kind == "duplicate":
+            events.insert(position, dict(event))
+        elif kind == "drop" and len(events) > 1:
+            events.pop(position)
+    return events + [_completed(output)], phases
+
+
+def test_random_malformed_streams_never_report_a_wrong_split():
+    import random
+
+    rng = random.Random(20261019)
+    reported = 0
+    for _ in range(200):
+        events, phases = _random_stream(rng)
+        state = _run(events)
+        if state["output_phases"] is None:
+            continue
+        reported += 1
+        sources = []
+        for entry in state["output_phases"]:
+            letters = set(entry["text"]) - {"\n"}
+            if not letters:
+                continue  # a newline alone names no alphabet
+            owners = {i for i, alphabet in enumerate(_ALPHABETS) if letters & set(alphabet)}
+            assert len(owners) == 1, (events, state["output_phases"])
+            source = owners.pop()
+            assert entry["phase"] == phases[source], (events, state["output_phases"])
+            # The entry holds all of that message's letters in the text.
+            alphabet = set(_ALPHABETS[source])
+            assert ([c for c in state["text"] if c in alphabet]
+                    == [c for c in entry["text"] if c in alphabet]), (events, state["output_phases"])
+            sources.append(source)
+        assert len(sources) == len(set(sources)), (events, state["output_phases"])
+    # The seed must exercise both outcomes for the property to mean anything.
+    assert 0 < reported < 200
 
 
 def _client_with_responses(monkeypatch, responses: List[List[Dict[str, Any]]]):
@@ -925,3 +1133,126 @@ def test_split_is_dropped_after_a_node_that_rewrites_last(rewrite_last):
         assert "output_phases" not in captured["metadata"]
     else:
         assert captured["metadata"]["output_phases"] == [_ph(F, "Done")]
+
+
+# ---------------------------------------------------------------------------
+# 9. SAY / MEMORIZE / THINK: the split of the LLM output reaches every row
+#    that stores that output, and is not used for a transformed text
+# ---------------------------------------------------------------------------
+
+
+_NODE_TEXT = "考えます。\n答えです。"
+_NODE_PHASES = [_ph(C, "考えます。"), _ph(F, "答えです。")]
+
+
+def _run_after_llm(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Run ``llm`` (a fake that reports a split like the real LLM node) and
+    then ``nodes`` with the real SAY / SPEAK / THINK / MEMORIZE nodes.
+
+    Returns the metadata each storing node passed on, by node kind.
+    """
+    from sea.langgraph_runner import compile_playbook
+    from sea.playbook_models import PlaybookSchema
+    from sea.runtime import SEARuntime
+
+    runtime = SEARuntime(SimpleNamespace(building_histories={"b1": []}, occupants={}))
+    runtime._effective_building_id = lambda persona, building_id: "b1"
+    captured: Dict[str, Any] = {}
+
+    def _fake_speak(p, building_id, text, pulse_id=None, extra_metadata=None,
+                    event_callback=None):
+        captured["speak"] = (text, extra_metadata or {})
+        return {"message_id": "bm-1"}
+
+    def _fake_say(persona, building_id, text, pulse_id=None, metadata=None,
+                  event_callback=None, occupants_snapshot=None):
+        captured["say"] = (text, metadata or {})
+        return {"message_id": "bm-2"}
+
+    def _fake_think(persona, pulse_id, text, record_history=True, extra_metadata=None):
+        captured["think"] = (text, extra_metadata or {})
+        return "mid-think"
+
+    def _fake_store(persona, text, **kwargs):
+        captured["memorize"] = (text, kwargs.get("metadata") or {})
+        return True
+
+    runtime._runtime_engine.emitters["speak"] = _fake_speak
+    runtime._emit_say = _fake_say
+    runtime._emit_think = _fake_think
+    runtime._store_memory = _fake_store
+
+    def _fake_llm(node_def):
+        def node(state):
+            state["last"] = _NODE_TEXT
+            runtime_llm._store_output_phases_in_state(state, list(_NODE_PHASES))
+            return state
+        return node
+
+    persona = SimpleNamespace(persona_id="p1", persona_name="P")
+    chain = [{"id": "llm", "type": "llm"}] + nodes
+    for current, following in zip(chain, chain[1:] + [None]):
+        current["next"] = following["id"] if following else None
+    playbook = PlaybookSchema(name="pb", display_name="pb", description="t",
+                              input_schema=[], start_node="llm", nodes=chain)
+    compiled = compile_playbook(
+        playbook,
+        llm_node_factory=_fake_llm, tool_node_factory=MagicMock(),
+        speak_node=lambda s: runtime._lg_speak_node(s, persona, "b1", playbook, [], None),
+        think_node=lambda s: runtime._lg_think_node(s, persona, playbook, [], None),
+        say_node_factory=lambda nd: runtime._lg_say_node(nd, persona, "b1", playbook, [], None),
+        memorize_node_factory=lambda nd: runtime._lg_memorize_node(nd, persona, playbook, [], None),
+    )
+    state: Dict[str, Any] = {"_messages": [], "_pulse_context": None, "_pulse_id": "pulse-1"}
+    asyncio.run(compiled(state, {"recursion_limit": 20}))
+    return captured
+
+
+def test_say_then_speak_stores_the_split():
+    captured = _run_after_llm([{"id": "say", "type": "say"}, {"id": "speak", "type": "speak"}])
+    assert captured["say"][0] == _NODE_TEXT
+    text, metadata = captured["speak"]
+    assert text == _NODE_TEXT
+    assert metadata["output_phases"] == _NODE_PHASES
+
+
+def test_memorize_of_last_stores_the_split_and_leaves_it_for_speak():
+    captured = _run_after_llm([
+        {"id": "mem", "type": "memorize", "action": "{last}"},
+        {"id": "speak", "type": "speak"},
+    ])
+    text, metadata = captured["memorize"]
+    assert text == _NODE_TEXT
+    assert metadata["output_phases"] == _NODE_PHASES
+    assert captured["speak"][1]["output_phases"] == _NODE_PHASES
+
+
+def test_memorize_without_action_stores_the_split():
+    captured = _run_after_llm([{"id": "mem", "type": "memorize"}])
+    assert captured["memorize"][1]["output_phases"] == _NODE_PHASES
+
+
+def test_memorize_of_a_transformed_text_stores_no_split():
+    captured = _run_after_llm([
+        {"id": "mem", "type": "memorize", "action": "記録: {last}"},
+        {"id": "speak", "type": "speak"},
+    ])
+    text, metadata = captured["memorize"]
+    assert text == "記録: " + _NODE_TEXT
+    assert "output_phases" not in metadata
+    # The transformed text is now state["last"]; SPEAK stores no split for it.
+    assert captured["speak"][0] == "記録: " + _NODE_TEXT
+    assert "output_phases" not in captured["speak"][1]
+
+
+def test_memorize_with_a_non_assistant_role_stores_no_split():
+    captured = _run_after_llm([{"id": "mem", "type": "memorize", "role": "system"}])
+    assert "output_phases" not in captured["memorize"][1]
+
+
+def test_think_stores_the_split_and_leaves_it_for_speak():
+    captured = _run_after_llm([{"id": "think", "type": "think"}, {"id": "speak", "type": "speak"}])
+    text, metadata = captured["think"]
+    assert text == _NODE_TEXT
+    assert metadata["output_phases"] == _NODE_PHASES
+    assert captured["speak"][1]["output_phases"] == _NODE_PHASES

@@ -1194,6 +1194,16 @@ class OpenAICodexClient(LLMClient):
         本文が届く応答では、まだ流していないぶんをその場で yield して埋める —
         集約側だけが本文を知っている状態を作らない (ストリーミング経路の消費者は
         chunk の結合を正とするため)。
+
+        output_phases is computed beside the text and never changes it: the
+        text (where separator newlines go, which done tail is streamed) follows
+        exactly the same rules as before output_phases existed. The split is
+        reported only when the stream proves it: every message is known from
+        an output_item.added with an id, every piece of visible text names a
+        known message by item_id, no message's text resumes after another
+        message's text, and the join of the per-message texts equals the
+        text. Otherwise output_phases is None and the caller sends the turn as
+        one message.
         """
         delta_buffer: List[str] = []
         # output_text.done の本文をメッセージ (item_id) ごとに集める。
@@ -1209,76 +1219,36 @@ class OpenAICodexClient(LLMClient):
         message_index = 0
         # 直近の可視 delta の item_id (メッセージ境界の第二の信号)。
         last_delta_item_id = ""
-        # output message item ごとの phase (届いた順)。delta_owner は
-        # delta_buffer と同じ長さで、各 chunk がどのメッセージの本文かを持つ
-        # (境目に差した区切りの改行はどのメッセージにも属さないので None)。
-        # これで output_phases を「ストリームで流した本文」から組む。
-        msg_phases: List[Optional[str]] = []
-        msg_index_by_key: Dict[str, int] = {}
-        # Messages that already have an item id from the stream (the synthetic
-        # "msg#N" keys are not item ids). A message without one may still be
-        # claimed by the first item id that arrives for it.
-        msg_item_ids: Dict[int, str] = {}
-        current_msg: Optional[int] = None
-        streamed_msgs: set = set()
-        delta_owner: List[Optional[int]] = []
-        completed_phases: List[Optional[str]] = []
-        # Set when text could not be assigned to a message with certainty;
-        # output_phases is then reported as None instead of a guessed split.
-        phases_uncertain = False
+        # output_phases bookkeeping (observes the text decisions only).
+        # msg_phases: ids of messages known from output_item.added, with their
+        # phase, in arrival order. chunk_ids runs beside delta_buffer and holds
+        # the item_id each visible chunk names (None for a separator newline).
+        # phases_ok becomes False when the stream does not prove the split.
+        msg_phases: Dict[str, Optional[str]] = {}
+        chunk_ids: List[Optional[str]] = []
+        completed_ids: List[str] = []
+        phases_ok = True
 
-        def _new_message(phase: Optional[str], item_id: str = "", *keys: str) -> int:
-            msg_phases.append(phase)
-            index = len(msg_phases) - 1
-            if item_id:
-                msg_index_by_key[item_id] = index
-                msg_item_ids[index] = item_id
-            for key in keys:
-                if key:
-                    msg_index_by_key[key] = index
-            return index
-
-        def _claim_item_id(index: int, item_id: str) -> None:
-            msg_index_by_key[item_id] = index
-            msg_item_ids[index] = item_id
-
-        def _message_for_item(item_id: str, *keys: str) -> Tuple[int, bool]:
-            """Return the message that text carrying ``item_id`` belongs to.
-
-            The second value is True when a new message was started.
-
-            - A known item_id returns its message.
-            - An empty item_id continues current_msg (a new message when there
-              is none yet; ``keys`` are registered for it).
-            - An unknown non-empty item_id is taken by current_msg only when
-              current_msg has no item id of its own (output_item.added came
-              without an id). When current_msg already holds text from chunks
-              without an id, it is not known whether the id belongs to it: the
-              text continues current_msg and output_phases is not reported.
-              In every other case the item_id starts a new message (its phase
-              is filled later by output_item.done through _fill_phase).
-            """
-            nonlocal phases_uncertain
-            if item_id:
-                known = msg_index_by_key.get(item_id)
-                if known is not None:
-                    return known, False
-            if current_msg is None:
-                return _new_message(None, item_id, *keys), True
-            if not item_id:
-                return current_msg, False
-            if current_msg not in msg_item_ids:
-                if current_msg in streamed_msgs:
-                    phases_uncertain = True
-                _claim_item_id(current_msg, item_id)
-                return current_msg, False
-            return _new_message(None, item_id), True
-
-        def _fill_phase(item: Dict[str, Any]) -> None:
-            index = msg_index_by_key.get(item.get("id") or "")
+        def _note_message(item: Dict[str, Any], *, added: bool) -> None:
+            """Only output_item.added registers a message id. A later item with
+            the same id may fill a missing phase; a different phase is a conflict."""
+            nonlocal phases_ok
+            item_id = item.get("id") or ""
+            if not item_id or (not added and item_id not in msg_phases):
+                return
             phase = _normalize_phase(item.get("phase"))
-            if index is not None and msg_phases[index] is None and phase is not None:
-                msg_phases[index] = phase
+            known = msg_phases.setdefault(item_id, phase)
+            if known is None:
+                msg_phases[item_id] = phase
+            elif phase is not None and phase != known:
+                phases_ok = False
+
+        def _attribute(item_id: str) -> None:
+            """Record the item_id of the visible chunk about to be appended."""
+            nonlocal phases_ok
+            if item_id not in msg_phases:
+                phases_ok = False
+            chunk_ids.append(item_id)
 
         pending_calls: Dict[str, Dict[str, str]] = {}
         reasoning_summaries: Dict[int, List[str]] = {}
@@ -1308,25 +1278,16 @@ class OpenAICodexClient(LLMClient):
                     # として同じ境界規則を適用する (added が届かない形への備え。
                     # added 経由で改行を入れた直後は末尾が改行なので二重にならない)。
                     item_id = event.get("item_id") or ""
-                    switched = bool(
-                        item_id and last_delta_item_id and item_id != last_delta_item_id
-                    )
-                    # 知らない item_id は、added が届かなかった新しいメッセージ
-                    # (phase は output_item.done で埋まる)。前のメッセージには
-                    # 足さない — 足すと前のメッセージの phase で送り返される。
-                    owner, started = _message_for_item(item_id)
-                    if switched or started:
+                    if item_id and last_delta_item_id and item_id != last_delta_item_id:
                         if delta_buffer and not delta_buffer[-1].endswith("\n"):
                             delta_buffer.append("\n")
-                            delta_owner.append(None)
+                            chunk_ids.append(None)
                             yield "\n"
                         delta_consumed = len(delta_buffer)
                     if item_id:
                         last_delta_item_id = item_id
-                    current_msg = owner
-                    streamed_msgs.add(current_msg)
+                    _attribute(item_id)
                     delta_buffer.append(delta)
-                    delta_owner.append(current_msg)
                     yield delta
 
             elif event_type == "response.output_text.done":
@@ -1337,38 +1298,14 @@ class OpenAICodexClient(LLMClient):
                 # いま流す (delta 無しで done だけ届く応答でも、ストリームの
                 # 消費者に本文が届くように)。done と delta が食い違う異常形は
                 # 流した側 (delta) を正とし、二重には流さない。
+                # The done must name the message of the streamed text it closes.
+                done_item_id = event.get("item_id") or ""
+                if any(chunk_id != done_item_id for chunk_id in chunk_ids[delta_consumed:]):
+                    phases_ok = False
                 if done_text.startswith(part_streamed) and len(done_text) > len(part_streamed):
                     missing = done_text[len(part_streamed):]
-                    done_item_id = event.get("item_id") or ""
-                    started = False
-                    if part_streamed and current_msg is not None:
-                        # この done は直前に流した delta の続きを閉じる。残りの
-                        # 本文はその delta と同じメッセージ (current_msg)。done の
-                        # item_id が別のメッセージを指すなら、どちらが正しいかは
-                        # 分からないので分け方を報告しない。
-                        owner = current_msg
-                        if done_item_id:
-                            known = msg_index_by_key.get(done_item_id)
-                            if known is None and owner not in msg_item_ids:
-                                _claim_item_id(owner, done_item_id)
-                            elif known != owner:
-                                phases_uncertain = True
-                    elif done_item_id:
-                        owner, started = _message_for_item(done_item_id)
-                    else:
-                        owner = msg_index_by_key.get(item_key)
-                        if owner is None:
-                            owner, started = _message_for_item("", item_key)
-                    if started and delta_buffer and not delta_buffer[-1].endswith("\n"):
-                        # added も delta も届かなかったメッセージの本文。delta の
-                        # item_id が切り替わったときと同じく境目に改行を差す。
-                        delta_buffer.append("\n")
-                        delta_owner.append(None)
-                        yield "\n"
-                    current_msg = owner
-                    streamed_msgs.add(owner)
+                    _attribute(done_item_id)
                     delta_buffer.append(missing)
-                    delta_owner.append(owner)
                     yield missing
                 done_texts.setdefault(item_key, []).append(done_text or part_streamed)
                 delta_consumed = len(delta_buffer)
@@ -1394,14 +1331,11 @@ class OpenAICodexClient(LLMClient):
                     # 前には入れない)。
                     if delta_buffer and not delta_buffer[-1].endswith("\n"):
                         delta_buffer.append("\n")
-                        delta_owner.append(None)
+                        chunk_ids.append(None)
                         yield "\n"
                     delta_consumed = len(delta_buffer)
                     message_index += 1
-                    current_msg = _new_message(
-                        _normalize_phase(item.get("phase")),
-                        item.get("id") or "", f"msg#{message_index}",
-                    )
+                    _note_message(item, added=True)
                 elif item.get("type") == "function_call":
                     item_id = item.get("id") or ""
                     pending_calls[item_id] = {
@@ -1419,7 +1353,7 @@ class OpenAICodexClient(LLMClient):
             elif event_type == "response.output_item.done":
                 item = event.get("item") or {}
                 if item.get("type") == "message":
-                    _fill_phase(item)
+                    _note_message(item, added=False)
                 if item.get("type") == "function_call":
                     item_id = item.get("id") or ""
                     pending_calls[item_id] = {
@@ -1440,7 +1374,7 @@ class OpenAICodexClient(LLMClient):
                 # part は連結し、message item どうしの境目には改行を挟む。
                 for item in response_obj.get("output") or []:
                     if item.get("type") == "message":
-                        _fill_phase(item)
+                        _note_message(item, added=False)
                     parts: List[str] = []
                     has_text = False
                     for content_part in item.get("content") or []:
@@ -1449,7 +1383,9 @@ class OpenAICodexClient(LLMClient):
                             has_text = True
                     if has_text:
                         completed_texts.append("".join(parts))
-                        completed_phases.append(_normalize_phase(item.get("phase")))
+                        completed_ids.append(
+                            (item.get("id") or "") if item.get("type") == "message" else ""
+                        )
 
             elif event_type == "response.failed":
                 response_obj = event.get("response") or {}
@@ -1466,44 +1402,47 @@ class OpenAICodexClient(LLMClient):
         stream_text = "".join(delta_buffer)
         if done_texts:
             message_texts = ["".join(parts) for parts in done_texts.values()]
-            message_text_phases = [
-                msg_phases[msg_index_by_key[key]] if key in msg_index_by_key else None
-                for key in done_texts
-            ]
         elif completed_texts:
             message_texts = list(completed_texts)
-            message_text_phases = list(completed_phases)
         else:
             message_texts = []
-            message_text_phases = []
         if stream_text:
             final_text = stream_text
-            # 流した本文をメッセージごとに組み直す (区切りの改行は除く)。
-            streamed_parts: Dict[int, List[str]] = {}
-            for chunk, owner in zip(delta_buffer, delta_owner):
-                if owner is not None:
-                    streamed_parts.setdefault(owner, []).append(chunk)
-            phase_candidates = [
-                {"phase": msg_phases[index], "text": "".join(streamed_parts[index])}
-                for index in sorted(streamed_parts)
+            pieces = [
+                (chunk_id, chunk)
+                for chunk_id, chunk in zip(chunk_ids, delta_buffer)
+                if chunk_id is not None
             ]
         else:
             final_text = _join_message_texts(message_texts)
             if final_text:
                 yield final_text
-            phase_candidates = [
-                {"phase": phase, "text": text}
-                for phase, text in zip(message_text_phases, message_texts)
-            ]
-        phase_candidates = [entry for entry in phase_candidates if entry["text"]]
-        # 結合が text と一致する分け方だけを報告する。一致しない形 (中身の無い
-        # メッセージの区切りの改行だけが末尾に残った等) は「分け方不明」として None。
-        # 本文の持ち主のメッセージを決めきれなかった応答 (phases_uncertain) も None。
+            # Delta-less: the texts come from done (keyed by item_id) or
+            # completed output items; each must name a message known from added.
+            source_ids = list(done_texts) if done_texts else completed_ids
+            pieces = list(zip(source_ids, message_texts))
+        # Group the text per message in stream order (separator newlines are
+        # left out). A message whose text resumes after another message's
+        # text, or text naming an unknown message, means no split is reported.
+        runs: List[Tuple[str, List[str]]] = []
+        for chunk_id, chunk in pieces:
+            if not chunk:
+                continue
+            if chunk_id not in msg_phases:
+                phases_ok = False
+            elif runs and runs[-1][0] == chunk_id:
+                runs[-1][1].append(chunk)
+            elif any(run_id == chunk_id for run_id, _ in runs):
+                phases_ok = False
+            else:
+                runs.append((chunk_id, [chunk]))
+        phase_entries = [
+            {"phase": msg_phases[run_id], "text": "".join(parts)} for run_id, parts in runs
+        ]
         output_phases: Optional[List[Dict[str, Any]]] = (
-            phase_candidates
-            if phase_candidates
-            and not phases_uncertain
-            and _join_message_texts([entry["text"] for entry in phase_candidates]) == final_text
+            phase_entries
+            if phases_ok and phase_entries
+            and _join_message_texts([entry["text"] for entry in phase_entries]) == final_text
             else None
         )
 
