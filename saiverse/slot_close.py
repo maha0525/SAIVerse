@@ -33,6 +33,8 @@ import logging
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List
 
+from llm_clients.output_phases import OUTPUT_PHASES_METADATA_KEY, output_phases_for_sent_text
+
 LOGGER = logging.getLogger(__name__)
 
 #: 帰属の特殊値。"none" = どの目的にも属さない (タグを書かない)。
@@ -302,7 +304,13 @@ def run_slot_close(
         if final:
             # スペルループは最終応答 (spell 無し) を messages に積まないため、
             # 締めコールの文脈にはここで積む (prefix 連続性の維持)。
-            messages.append({"role": "assistant", "content": final})
+            final_msg: Dict[str, Any] = {"role": "assistant", "content": final}
+            # 記録に保存した締めの発言と同じ分け方を載せる (保存した本文は
+            # strip 前なので、外側の空白だけの違いを合わせる関数で照合する)。
+            final_phases = output_phases_for_sent_text(close_ctx.final_output_phases, final)
+            if final_phases is not None:
+                final_msg["metadata"] = {OUTPUT_PHASES_METADATA_KEY: final_phases}
+            messages.append(final_msg)
         messages.append({"role": "user", "content": prompt})
 
         node_def = SimpleNamespace(id="slot_close", memorize=None, speak=False)

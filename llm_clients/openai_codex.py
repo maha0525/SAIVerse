@@ -1215,18 +1215,64 @@ class OpenAICodexClient(LLMClient):
         # これで output_phases を「ストリームで流した本文」から組む。
         msg_phases: List[Optional[str]] = []
         msg_index_by_key: Dict[str, int] = {}
+        # Messages that already have an item id from the stream (the synthetic
+        # "msg#N" keys are not item ids). A message without one may still be
+        # claimed by the first item id that arrives for it.
+        msg_item_ids: Dict[int, str] = {}
         current_msg: Optional[int] = None
         streamed_msgs: set = set()
         delta_owner: List[Optional[int]] = []
         completed_phases: List[Optional[str]] = []
+        # Set when text could not be assigned to a message with certainty;
+        # output_phases is then reported as None instead of a guessed split.
+        phases_uncertain = False
 
-        def _new_message(phase: Optional[str], *keys: str) -> int:
+        def _new_message(phase: Optional[str], item_id: str = "", *keys: str) -> int:
             msg_phases.append(phase)
             index = len(msg_phases) - 1
+            if item_id:
+                msg_index_by_key[item_id] = index
+                msg_item_ids[index] = item_id
             for key in keys:
                 if key:
                     msg_index_by_key[key] = index
             return index
+
+        def _claim_item_id(index: int, item_id: str) -> None:
+            msg_index_by_key[item_id] = index
+            msg_item_ids[index] = item_id
+
+        def _message_for_item(item_id: str, *keys: str) -> Tuple[int, bool]:
+            """Return the message that text carrying ``item_id`` belongs to.
+
+            The second value is True when a new message was started.
+
+            - A known item_id returns its message.
+            - An empty item_id continues current_msg (a new message when there
+              is none yet; ``keys`` are registered for it).
+            - An unknown non-empty item_id is taken by current_msg only when
+              current_msg has no item id of its own (output_item.added came
+              without an id). When current_msg already holds text from chunks
+              without an id, it is not known whether the id belongs to it: the
+              text continues current_msg and output_phases is not reported.
+              In every other case the item_id starts a new message (its phase
+              is filled later by output_item.done through _fill_phase).
+            """
+            nonlocal phases_uncertain
+            if item_id:
+                known = msg_index_by_key.get(item_id)
+                if known is not None:
+                    return known, False
+            if current_msg is None:
+                return _new_message(None, item_id, *keys), True
+            if not item_id:
+                return current_msg, False
+            if current_msg not in msg_item_ids:
+                if current_msg in streamed_msgs:
+                    phases_uncertain = True
+                _claim_item_id(current_msg, item_id)
+                return current_msg, False
+            return _new_message(None, item_id), True
 
         def _fill_phase(item: Dict[str, Any]) -> None:
             index = msg_index_by_key.get(item.get("id") or "")
@@ -1265,7 +1311,11 @@ class OpenAICodexClient(LLMClient):
                     switched = bool(
                         item_id and last_delta_item_id and item_id != last_delta_item_id
                     )
-                    if switched:
+                    # 知らない item_id は、added が届かなかった新しいメッセージ
+                    # (phase は output_item.done で埋まる)。前のメッセージには
+                    # 足さない — 足すと前のメッセージの phase で送り返される。
+                    owner, started = _message_for_item(item_id)
+                    if switched or started:
                         if delta_buffer and not delta_buffer[-1].endswith("\n"):
                             delta_buffer.append("\n")
                             delta_owner.append(None)
@@ -1273,18 +1323,7 @@ class OpenAICodexClient(LLMClient):
                         delta_consumed = len(delta_buffer)
                     if item_id:
                         last_delta_item_id = item_id
-                    if item_id and item_id in msg_index_by_key:
-                        current_msg = msg_index_by_key[item_id]
-                    elif current_msg is not None and (
-                        not switched or current_msg not in streamed_msgs
-                    ):
-                        # 直前の added が開いたメッセージ (id 欄が無かった) か、
-                        # 同じメッセージの続き。
-                        if item_id:
-                            msg_index_by_key[item_id] = current_msg
-                    else:
-                        # added が届かなかったメッセージ。phase は分からない。
-                        current_msg = _new_message(None, item_id)
+                    current_msg = owner
                     streamed_msgs.add(current_msg)
                     delta_buffer.append(delta)
                     delta_owner.append(current_msg)
@@ -1300,12 +1339,32 @@ class OpenAICodexClient(LLMClient):
                 # 流した側 (delta) を正とし、二重には流さない。
                 if done_text.startswith(part_streamed) and len(done_text) > len(part_streamed):
                     missing = done_text[len(part_streamed):]
-                    owner = msg_index_by_key.get(item_key)
-                    if owner is None:
-                        owner = (
-                            current_msg if current_msg is not None
-                            else _new_message(None, item_key)
-                        )
+                    done_item_id = event.get("item_id") or ""
+                    started = False
+                    if part_streamed and current_msg is not None:
+                        # この done は直前に流した delta の続きを閉じる。残りの
+                        # 本文はその delta と同じメッセージ (current_msg)。done の
+                        # item_id が別のメッセージを指すなら、どちらが正しいかは
+                        # 分からないので分け方を報告しない。
+                        owner = current_msg
+                        if done_item_id:
+                            known = msg_index_by_key.get(done_item_id)
+                            if known is None and owner not in msg_item_ids:
+                                _claim_item_id(owner, done_item_id)
+                            elif known != owner:
+                                phases_uncertain = True
+                    elif done_item_id:
+                        owner, started = _message_for_item(done_item_id)
+                    else:
+                        owner = msg_index_by_key.get(item_key)
+                        if owner is None:
+                            owner, started = _message_for_item("", item_key)
+                    if started and delta_buffer and not delta_buffer[-1].endswith("\n"):
+                        # added も delta も届かなかったメッセージの本文。delta の
+                        # item_id が切り替わったときと同じく境目に改行を差す。
+                        delta_buffer.append("\n")
+                        delta_owner.append(None)
+                        yield "\n"
                     current_msg = owner
                     streamed_msgs.add(owner)
                     delta_buffer.append(missing)
@@ -1439,9 +1498,11 @@ class OpenAICodexClient(LLMClient):
         phase_candidates = [entry for entry in phase_candidates if entry["text"]]
         # 結合が text と一致する分け方だけを報告する。一致しない形 (中身の無い
         # メッセージの区切りの改行だけが末尾に残った等) は「分け方不明」として None。
+        # 本文の持ち主のメッセージを決めきれなかった応答 (phases_uncertain) も None。
         output_phases: Optional[List[Dict[str, Any]]] = (
             phase_candidates
             if phase_candidates
+            and not phases_uncertain
             and _join_message_texts([entry["text"] for entry in phase_candidates]) == final_text
             else None
         )

@@ -141,6 +141,11 @@ class SessionCloseContext:
     rounds_used: int
     ended_reason: str
     final_continuation: str
+    final_output_phases: Any = None
+    """``final_continuation`` を作った呼び出しが報告したメッセージごとの分け方
+    (llm_clients.output_phases)。記録に保存した締めの発言と同じ分け方で、
+    締めフックが積む発言を送らせるために渡す
+    (docs/issues/codex_output_phase_passback.md)。"""
 
 
 def run_work_session(
@@ -595,6 +600,7 @@ def run_work_session(
                         rounds_used=rounds_used,
                         ended_reason=ended_reason,
                         final_continuation=continuation or "",
+                        final_output_phases=_spell_result.closing_output_phases,
                     ))
                 except Exception:
                     LOGGER.warning(

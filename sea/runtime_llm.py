@@ -19,6 +19,7 @@ from llm_clients.output_phases import (
     OUTPUT_PHASES_METADATA_KEY,
     align_output_phases_to_spell_round,
     coerce_output_phases,
+    output_phases_for_text,
 )
 from sai_memory.memory.storage import presented_system_record_content
 from sea.beat_gate import BeatGateClosedError
@@ -671,6 +672,28 @@ def _freeze_turn_block_before_send(messages: Any, state: Any = None) -> None:
             "[sea][persist_realtime_and_recall] could not freeze this turn's block "
             "before sending", exc_info=True,
         )
+
+
+def attach_output_phases(message: Dict[str, Any], output_phases: Any) -> None:
+    """Put ``output_phases`` on an assistant message that a later call will send.
+
+    The stored row of a reply keeps ``metadata["output_phases"]`` when the list
+    joins to the stored text, and the next Pulse restores that row and sends it
+    split by phase (llm_clients.openai_codex._build_input). An assistant message
+    for the same reply that a later call of the same Pulse sends must carry the
+    same list; otherwise that call sends the reply as one message and the request
+    prefix differs from the next Pulse's (docs/issues/codex_output_phase_passback.md).
+
+    The list is attached only when it joins to the message's own ``content``.
+    Other ``metadata`` keys are kept.
+    """
+    phases = output_phases_for_text(output_phases, message.get("content"))
+    if phases is None:
+        return
+    metadata = message.get("metadata")
+    merged: Dict[str, Any] = dict(metadata) if isinstance(metadata, dict) else {}
+    merged[OUTPUT_PHASES_METADATA_KEY] = phases
+    message["metadata"] = merged
 
 
 def _round_message_for_next_call(
@@ -1358,6 +1381,11 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
         _text_thought_sig = state.get("_last_thought_signature")
         if _text_thought_sig:
             _text_assistant_msg["thought_signature"] = _text_thought_sig
+        # 記憶に書く行 (memorize / important dual-write / 後ろの SPEAK) と同じ
+        # 分け方を、同じ Pulse の後ろの LLM ノードへ送るこの発言にも載せる。
+        # 言い切っていない本文は記憶の側にも付けないので、ここでも付けない。
+        if not interrupted:
+            attach_output_phases(_text_assistant_msg, beat.output_phases)
         _beat_reply_msg = _text_assistant_msg
         state["_messages"] = messages + [_text_assistant_msg]
 

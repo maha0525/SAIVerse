@@ -159,6 +159,66 @@ def test_delta_without_added_event_starts_a_message_without_phase():
     ]
 
 
+def _first_message_without_delta_ids(first_text: str) -> List[Dict[str, Any]]:
+    # 1 つ目のメッセージは added (id あり) で始まり、本文は item_id の無い delta。
+    return [_added("c", C), _delta(None, first_text), _text_done("c", first_text),
+            _item_done("c", C)]
+
+
+def _first_message_done_only(first_text: str) -> List[Dict[str, Any]]:
+    # 1 つ目のメッセージは added (id あり) と done だけで、delta が無い。
+    return [_added("c", C), _text_done("c", first_text), _item_done("c", C)]
+
+
+@pytest.mark.parametrize("first", [_first_message_done_only, _first_message_without_delta_ids])
+@pytest.mark.parametrize("second_with_deltas", [False, True])
+def test_unknown_item_id_without_added_starts_its_own_message(first, second_with_deltas):
+    # 2 つ目のメッセージ f には added が届かない。f の本文を 1 つ目 (commentary)
+    # に足すと、最終回答が独り言として送り返される。
+    second = [_delta("f", "B")] if second_with_deltas else []
+    events = first("A\n") + second + [
+        _text_done("f", "B"), _item_done("f", F), _completed(),
+    ]
+    state = _run(events)
+    assert state["text"] == "A\nB"
+    assert state["output_phases"] == [_ph(C, "A\n"), _ph(F, "B")]
+
+
+@pytest.mark.parametrize("first", [_first_message_done_only, _first_message_without_delta_ids])
+@pytest.mark.parametrize("second_with_deltas", [False, True])
+def test_unknown_item_id_without_added_gets_the_boundary_newline(first, second_with_deltas):
+    # 前のメッセージが改行で終わっていなくても、境目に改行が入り、/spell が
+    # 行頭に立つ (delta の item_id が切り替わったときと同じ規則)。
+    second = [_delta("f", "B")] if second_with_deltas else []
+    events = first("A") + second + [
+        _text_done("f", "B"), _item_done("f", F), _completed(),
+    ]
+    state = _run(events)
+    assert state["text"] == "A\nB"
+    assert state["output_phases"] == [_ph(C, "A"), _ph(F, "B")]
+
+
+def test_added_without_id_is_claimed_by_the_first_delta_id():
+    events = [
+        _added(None, C), _delta("x", "考え中"), _text_done("x", "考え中"),
+        _added(None, F), _delta("y", "答え"), _text_done("y", "答え"),
+        _completed(),
+    ]
+    state = _run(events)
+    assert state["text"] == "考え中\n答え"
+    assert state["output_phases"] == [_ph(C, "考え中"), _ph(F, "答え")]
+
+
+def test_id_arriving_after_idless_text_is_not_guessed():
+    # added にも delta にも id が無いまま本文が流れた後で、初めて id 付きの
+    # delta が来た形。同じメッセージの続きか新しいメッセージか分からないので、
+    # 本文は今まで通り続けて流し、分け方は報告しない。
+    events = [_added(None, C), _delta(None, "A"), _delta("x", "B"), _completed()]
+    state = _run(events)
+    assert state["text"] == "AB"
+    assert state["output_phases"] is None
+
+
 def test_done_only_stream_without_deltas_pairs_texts_with_phases():
     events = (
         _message("m1", "考えます。", C, deltas=False)
@@ -734,3 +794,134 @@ def test_store_beat_memory_passes_the_split_and_skips_interrupted_text():
     )
     assert runtime.stored_calls[0]["metadata"]["output_phases"] == phases
     assert "output_phases" not in runtime.stored_calls[1]["metadata"]
+
+
+# ---------------------------------------------------------------------------
+# 7. 同じ Pulse の後ろの呼び出しと、次の Pulse (履歴から復元) で同じ形で送る
+# ---------------------------------------------------------------------------
+
+
+def _finalize(text: str, phases: Any, *, memorize: Any = True, important: bool = False,
+              interrupted: bool = False):
+    """``_finalize_beat`` を走らせ、送る列 (state) と記憶へ渡した metadata を返す。"""
+    state: Dict[str, Any] = {"_output_phases": phases, "_last_thought_signature": "sig-1"}
+    if interrupted:
+        state[runtime_llm.INTERRUPTED_METADATA_KEY] = True
+    runtime = MagicMock()
+    runtime._store_memory.return_value = "mid-1"
+    beat = runtime_llm.BeatExecution.from_node_locals(
+        persona=SimpleNamespace(persona_id="p1", persona_name="P"),
+        node_def=SimpleNamespace(id="n1", memorize=memorize, important=important,
+                                 label=None, output_key=None),
+        node_id="n1",
+        playbook=SimpleNamespace(name="pb", display_name="pb"),
+        state=state,
+        event_callback=None,
+        messages=[{"role": "user", "content": "やあ"}],
+        prompt=None,
+        continuation=text,
+        schema_consumed=False,
+    )
+    with patch.object(runtime_llm, "log_sea_trace"):
+        runtime_llm._finalize_beat(runtime, beat)
+    stored_metadata = runtime._store_memory.call_args.kwargs.get("metadata") or {}
+    return state, stored_metadata
+
+
+def _assistant_items(messages: List[Dict[str, Any]]):
+    body = OpenAICodexClient("synthetic-codex")._build_body(
+        messages + [{"role": "user", "content": "次"}],
+        temperature=None, tools=None, response_schema=None, reasoning_effort=None,
+    )
+    return [item for item in body["input"] if item.get("role") == "assistant"]
+
+
+@pytest.mark.parametrize("memorize,important", [(True, False), (None, True)])
+def test_reply_sent_later_in_the_pulse_matches_the_restored_history_row(memorize, important):
+    phases = [_ph(C, "考えます。"), _ph(F, "答えです。")]
+    text = "考えます。\n答えです。"
+    state, stored_metadata = _finalize(text, phases, memorize=memorize, important=important)
+
+    reply = state["_messages"][-1]
+    assert reply["metadata"]["output_phases"] == phases
+    assert reply["thought_signature"] == "sig-1"
+
+    # 次の Pulse: 記憶に書いた行を履歴として読み出して送る
+    stored = _store(text, stored_metadata["output_phases"])
+    history_row = {"role": "assistant", "content": stored["content"].strip(),
+                   "metadata": stored["metadata"]}
+    restored_items = _assistant_items([{"role": "user", "content": "やあ"}, history_row])
+
+    # 同じ Pulse の後ろの LLM ノード: state["_messages"] をそのまま送る
+    in_pulse_items = _assistant_items(state["_messages"])
+
+    assert in_pulse_items == restored_items
+    assert [(i.get("phase"), i["content"][0]["text"]) for i in in_pulse_items] == [
+        (C, "考えます。"), (F, "答えです。"),
+    ]
+
+
+def test_reply_without_a_matching_split_or_cut_short_is_sent_as_one_message():
+    phases = [_ph(C, "考えます。"), _ph(F, "答えです。")]
+    state, stored_metadata = _finalize("別の本文", phases)
+    assert "metadata" not in state["_messages"][-1]
+
+    state, stored_metadata = _finalize("考えます。\n答えです。", phases, interrupted=True)
+    assert "metadata" not in state["_messages"][-1]
+    assert "output_phases" not in stored_metadata
+
+
+def test_attach_output_phases_keeps_other_metadata_keys():
+    message = {"role": "assistant", "content": "A\nB", "metadata": {"aspect": "x"}}
+    runtime_llm.attach_output_phases(message, [_ph(C, "A"), _ph(F, "B")])
+    assert message["metadata"] == {"aspect": "x", "output_phases": [_ph(C, "A"), _ph(F, "B")]}
+
+
+# ---------------------------------------------------------------------------
+# 8. state["last"] を生成以外の本文に書き換えるノードの後では分け方を使わない
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("rewrite_last", [False, True])
+def test_split_is_dropped_after_a_node_that_rewrites_last(rewrite_last):
+    from sea.langgraph_runner import compile_playbook
+    from sea.playbook_models import PlaybookSchema
+    from sea.runtime import SEARuntime
+
+    runtime = SEARuntime(SimpleNamespace(building_histories={"b1": []}, occupants={}))
+    runtime._effective_building_id = lambda persona, building_id: "b1"
+    captured: Dict[str, Any] = {}
+
+    def _fake_speak(p, building_id, text, pulse_id=None, extra_metadata=None,
+                    event_callback=None):
+        captured["text"] = text
+        captured["metadata"] = extra_metadata or {}
+        return {"message_id": "bm-1"}
+
+    runtime._runtime_engine.emitters["speak"] = _fake_speak
+    persona = SimpleNamespace(persona_id="p1", persona_name="P")
+    nodes: List[Dict[str, Any]] = [{"id": "say", "type": "speak", "next": None}]
+    if rewrite_last:
+        # 親の LLM と同じ文字列を、生成ではない代入で last に置く
+        nodes.insert(0, {"id": "set", "type": "set",
+                         "assignments": {"last": "Done"}, "next": "say"})
+    playbook = PlaybookSchema(name="pb", display_name="pb", description="t",
+                              input_schema=[], start_node=nodes[0]["id"], nodes=nodes)
+    compiled = compile_playbook(
+        playbook,
+        llm_node_factory=MagicMock(), tool_node_factory=MagicMock(),
+        speak_node=lambda s: runtime._lg_speak_node(s, persona, "b1", playbook, [], None),
+        think_node=MagicMock(),
+        set_node_factory=lambda nd: runtime._lg_set_node(nd, playbook, None),
+    )
+    state: Dict[str, Any] = {
+        "last": "Done", "_output_phases": [_ph(F, "Done")],
+        "_messages": [], "_pulse_context": None, "_pulse_id": "pulse-1",
+    }
+    asyncio.run(compiled(state, {"recursion_limit": 10}))
+
+    assert captured["text"] == "Done"
+    if rewrite_last:
+        assert "output_phases" not in captured["metadata"]
+    else:
+        assert captured["metadata"]["output_phases"] == [_ph(F, "Done")]
