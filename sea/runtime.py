@@ -14,6 +14,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from database.models import Playbook as PlaybookModel
 from llm_clients.base import usage_event_time
 from llm_clients.exceptions import LLMError
+from llm_clients.output_phases import (
+    OUTPUT_PHASES_METADATA_KEY,
+    coerce_output_phases,
+    output_phases_for_text,
+)
 from saiverse.logging_config import log_sea_trace
 from saiverse.model_configs import get_model_parameter_defaults
 from saiverse.usage_tracker import get_usage_tracker
@@ -1378,6 +1383,9 @@ class SEARuntime:
             text = state.get("last") or ""
             reasoning_text = state.pop("_reasoning_text", "")
             reasoning_details_val = state.pop("_reasoning_details", None)
+            # メッセージごとの分け方は記憶に送り返すためのもので、建物の履歴だけに
+            # 書くこのノードでは使わない。reasoning と同じく消費だけする。
+            state.pop("_output_phases", None)
             auto_recall_text = state.pop("_auto_recall_text", None)
             pulse_id = state.get("_pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
@@ -1978,6 +1986,27 @@ class SEARuntime:
 
         if resolved_aspect:
             msg_metadata["aspect"] = resolved_aspect
+
+        # -- 応答のメッセージごとの分け方 (output_phases) --
+        # 保存する本文と結合が一致するときだけ残す (送り返す側の
+        # llm_clients.openai_codex._build_input が同じ一致を条件にする)。
+        # 層1マーカーを剥がした回は、各メッセージの本文から同じく剥がして
+        # 合わせ直す。合わなければ落とす — 付いていないのと同じ扱いになる。
+        if OUTPUT_PHASES_METADATA_KEY in msg_metadata:
+            _phases: Any = None
+            if (role or "assistant") == "assistant":
+                _phases = coerce_output_phases(msg_metadata[OUTPUT_PHASES_METADATA_KEY])
+                if _phases is not None and mark_spans:
+                    from saiverse.marker_parser import extract_marks
+                    _phases = [
+                        {"phase": entry["phase"], "text": extract_marks(entry["text"])[0]}
+                        for entry in _phases
+                    ]
+                _phases = output_phases_for_text(_phases, text)
+            if _phases is None:
+                msg_metadata.pop(OUTPUT_PHASES_METADATA_KEY, None)
+            else:
+                msg_metadata[OUTPUT_PHASES_METADATA_KEY] = _phases
 
         # -- 書き込み時の機械刻印 (v3 §7.1): 前駆刻印 + トークン三つ組 --
         # 生成 (= LLM が書いたペルソナ本人の言葉) にだけ刻む。材料が無ければ

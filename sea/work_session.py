@@ -301,7 +301,9 @@ def run_work_session(
         # 先に来るので、閉じた関所の陰で課金だけ発生することもない)。manager に
         # beat_gate が無いテスト環境では no-op。
         from sea.beat_gate import hold_beat
+        from llm_clients.output_phases import OUTPUT_PHASES_METADATA_KEY
         from sea.runtime_llm import (
+            _consume_output_phases,
             _consume_reasoning,
             _parse_spell_lines,
             _run_spell_loop,
@@ -477,6 +479,7 @@ def run_work_session(
             _initial_reasoning_text, _initial_reasoning_details = _consume_reasoning(
                 llm_client,
             )
+            _initial_output_phases = _consume_output_phases(llm_client)
             text = _extract_text(initial_result)
             try:
                 runtime._dump_llm_io(
@@ -502,6 +505,7 @@ def run_work_session(
                 max_rounds=budget_rounds,
                 initial_reasoning_text=_initial_reasoning_text,
                 initial_reasoning_details=_initial_reasoning_details,
+                initial_output_phases=_initial_output_phases,
             ))
             # 作業セッションは speak=false なので、周ごとの本文 (BeatSegment) は
             # 建物へ出さない — 生ログはループが SAIMemory へ記録済み。ここで使うのは
@@ -544,6 +548,12 @@ def run_work_session(
                 if _spell_result.closing_reasoning_details is not None:
                     _closing_metadata["reasoning_details"] = (
                         _spell_result.closing_reasoning_details
+                    )
+                # 締めの本文のメッセージごとの分け方 (本文と結合が一致しなければ
+                # _store_memory が落とす)。
+                if _spell_result.closing_output_phases is not None:
+                    _closing_metadata[OUTPUT_PHASES_METADATA_KEY] = (
+                        _spell_result.closing_output_phases
                     )
                 runtime._store_memory(
                     persona, continuation, role="assistant",
