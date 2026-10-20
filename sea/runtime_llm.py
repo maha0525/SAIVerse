@@ -15,6 +15,12 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from llm_clients.base import usage_event_time
 from llm_clients.exceptions import EmptyResponseError, LLMError, ModelUnavailableError
+from llm_clients.output_phases import (
+    OUTPUT_PHASES_METADATA_KEY,
+    align_output_phases_to_spell_round,
+    coerce_output_phases,
+    output_phases_for_text,
+)
 from sai_memory.memory.storage import presented_system_record_content
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import ExecutionCancelledException
@@ -354,6 +360,9 @@ class BeatExecution:
     schema_consumed: bool = False
     reasoning_text: str = ""
     reasoning_details: Any = None
+    output_phases: Any = None
+    """``continuation`` を作った呼び出しが報告したメッセージごとの分け方
+    (llm_clients.output_phases)。reasoning と同じく state から読み取る。"""
 
     @classmethod
     def from_node_locals(
@@ -389,6 +398,7 @@ class BeatExecution:
             schema_consumed=schema_consumed,
             reasoning_text=state.get("_reasoning_text", ""),
             reasoning_details=state.get("_reasoning_details"),
+            output_phases=state.get("_output_phases"),
         )
 
 
@@ -664,7 +674,31 @@ def _freeze_turn_block_before_send(messages: Any, state: Any = None) -> None:
         )
 
 
-def _round_message_for_next_call(state: Any, assistant_content: str) -> Dict[str, Any]:
+def attach_output_phases(message: Dict[str, Any], output_phases: Any) -> None:
+    """Put ``output_phases`` on an assistant message that a later call will send.
+
+    The stored row of a reply keeps ``metadata["output_phases"]`` when the list
+    joins to the stored text, and the next Pulse restores that row and sends it
+    split by phase (llm_clients.openai_codex._build_input). An assistant message
+    for the same reply that a later call of the same Pulse sends must carry the
+    same list; otherwise that call sends the reply as one message and the request
+    prefix differs from the next Pulse's (docs/issues/codex_output_phase_passback.md).
+
+    The list is attached only when it joins to the message's own ``content``.
+    Other ``metadata`` keys are kept.
+    """
+    phases = output_phases_for_text(output_phases, message.get("content"))
+    if phases is None:
+        return
+    metadata = message.get("metadata")
+    merged: Dict[str, Any] = dict(metadata) if isinstance(metadata, dict) else {}
+    merged[OUTPUT_PHASES_METADATA_KEY] = phases
+    message["metadata"] = merged
+
+
+def _round_message_for_next_call(
+    state: Any, assistant_content: str, output_phases: Any = None,
+) -> Dict[str, Any]:
     """スペルの繰り返しで、この周の発言を次の呼び出しの列へ積む形。
 
     既定は今までどおり assistant ロールの発言のまま。リアルタイム情報と自動想起を
@@ -682,8 +716,15 @@ def _round_message_for_next_call(state: Any, assistant_content: str) -> Dict[str
     そのまま渡す)。アスペクトは _store_memory が記録に刻むのと同じ出所
     (PulseContext の今のライン) から読む。OFF のモデルの列は変えない
     (不変条件 2)。
+
+    ``output_phases``: この周の本文 (``assistant_content``) に合わせ直した
+    メッセージごとの分け方。assistant ロールのまま積む発言にだけ付け、記録に
+    保存する発言と同じ形で次の呼び出しへ送らせる
+    (docs/issues/codex_output_phase_passback.md)。
     """
     message: Dict[str, Any] = {"role": "assistant", "content": assistant_content}
+    if output_phases:
+        message["metadata"] = {OUTPUT_PHASES_METADATA_KEY: output_phases}
     if not isinstance(state, dict) or not state.get("_persist_realtime_and_recall"):
         return message
     pulse_ctx = state.get("_pulse_context")
@@ -693,6 +734,7 @@ def _round_message_for_next_call(state: Any, assistant_content: str) -> Dict[str
         aspect = None
     if aspect != "autonomous":
         return message
+    message = {"role": "assistant", "content": assistant_content}
     from sea.runtime_context import _reframe_autonomous_messages
 
     message["metadata"] = {"aspect": aspect}
@@ -928,6 +970,35 @@ def _consume_reasoning(llm_client, state: Optional[dict] = None) -> Tuple[str, A
     if state is not None:
         _store_reasoning_in_state(state, reasoning_text, reasoning_details)
     return reasoning_text, reasoning_details
+
+
+def _store_output_phases_in_state(state: dict, output_phases: Any) -> None:
+    """メッセージごとの分け方を後段の memorize / speak ノード向けに state へ残す。
+
+    reasoning と同じく各 LLM 呼び出しの結果で **必ず置き換える** (無ければ
+    ``_output_phases`` を消す)。残すと、分け方を返さなかった呼び出しの本文に
+    前の呼び出しの分け方が付く。
+    """
+    if output_phases is not None:
+        state["_output_phases"] = output_phases
+    else:
+        state.pop("_output_phases", None)
+
+
+def _consume_output_phases(llm_client, state: Optional[dict] = None) -> Any:
+    """LLM クライアントから応答のメッセージごとの分け方 (Codex の phase) を回収する。
+
+    :func:`_consume_reasoning` と同じ地点で呼ぶ (クライアント側のバッファは
+    破壊的読み取りで、次の呼び出しの頭で上書きされる)。形の合わない値
+    (分け方を報告しないクライアントやテストの偽物) は None にする。
+    ``state`` を渡すと回収と同時に state へ格納する。
+    docs/issues/codex_output_phase_passback.md
+    """
+    consume = getattr(llm_client, "consume_output_phases", None)
+    output_phases = coerce_output_phases(consume()) if callable(consume) else None
+    if state is not None:
+        _store_output_phases_in_state(state, output_phases)
+    return output_phases
 
 
 def _build_say_metadata(
@@ -1173,6 +1244,7 @@ def _store_beat_memory(
     line_role: Optional[str] = None,
     reasoning_text: Optional[str] = None,
     reasoning_details: Any = None,
+    output_phases: Any = None,
 ) -> Any:
     """memorize の「``_store_memory`` 呼び出しの組み立て」を一箇所に持つ。
 
@@ -1192,6 +1264,10 @@ def _store_beat_memory(
         metadata["reasoning"] = reasoning_text
     if reasoning_details is not None:
         metadata["reasoning_details"] = reasoning_details
+    # 本文を作った呼び出しのメッセージごとの分け方。本文と結合が一致しなければ
+    # ``_store_memory`` が落とす。言い切っていない本文には付けない。
+    if output_phases is not None and not interrupted:
+        metadata[OUTPUT_PHASES_METADATA_KEY] = output_phases
     # 「言い切っていない」印は建物履歴とペルソナの記憶の両方に載せる。
     # 記憶の側に無いと、本人が後で自分の言葉を読み返したときに、途中で
     # 切れた発言を言い切ったものとして受け取る。
@@ -1305,6 +1381,11 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
         _text_thought_sig = state.get("_last_thought_signature")
         if _text_thought_sig:
             _text_assistant_msg["thought_signature"] = _text_thought_sig
+        # 記憶に書く行 (memorize / important dual-write / 後ろの SPEAK) と同じ
+        # 分け方を、同じ Pulse の後ろの LLM ノードへ送るこの発言にも載せる。
+        # 言い切っていない本文は記憶の側にも付けないので、ここでも付けない。
+        if not interrupted:
+            attach_output_phases(_text_assistant_msg, beat.output_phases)
         _beat_reply_msg = _text_assistant_msg
         state["_messages"] = messages + [_text_assistant_msg]
 
@@ -1422,6 +1503,7 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                 line_role=memorize_line_role,
                 reasoning_text=beat.reasoning_text,
                 reasoning_details=beat.reasoning_details,
+                output_phases=beat.output_phases,
             )
             if not stored_message_id:
                 _memorize_ok = False
@@ -1483,6 +1565,9 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
             _imp_details = state.get("_reasoning_details")
             if _imp_details is not None:
                 _important_metadata["reasoning_details"] = _imp_details
+            _imp_phases = state.get("_output_phases")
+            if _imp_phases is not None and not interrupted:
+                _important_metadata[OUTPUT_PHASES_METADATA_KEY] = _imp_phases
             if interrupted:
                 _important_metadata[INTERRUPTED_METADATA_KEY] = True
             _important_stored = runtime._store_memory(
@@ -3318,6 +3403,10 @@ class SpellLoopResult:
       締めの記録 (建物・記憶の両方) に添えるのはこの値。呼び出し元は後段の
       memorize が読む state の思考もこれに揃える — 揃えないと、周 1 の思考が
       締めの発言の思考として記憶に残る。
+    - ``closing_output_phases``: 同じ呼び出しが報告した、締めの発言
+      (``final_continuation``) のメッセージごとの分け方。呼び出し元は思考と
+      同じく後段の memorize が読む state に揃える。止まった周・途中で落ちた
+      周の本文には付けない (None)。
     - ``stop_error``: スペルの後の続きの生成 (LLM 呼び出しそのもの) が失敗して
       止まった回の例外 (:class:`LLMError` — 安全性フィルター・利用制限・
       タイムアウト・サーバーエラー・空の応答など)。普通の返事で同じ失敗が
@@ -3344,6 +3433,7 @@ class SpellLoopResult:
     loop_count: int
     closing_reasoning_text: str = ""
     closing_reasoning_details: Any = None
+    closing_output_phases: Any = None
     stop_error: Optional[BaseException] = None
     final_stream_error: Optional[Dict[str, Any]] = None
 
@@ -3482,6 +3572,7 @@ async def _run_spell_loop(
     initial_reasoning_text: str = "",
     initial_reasoning_details: Any = None,
     initial_stream_error: Optional[Dict[str, Any]] = None,
+    initial_output_phases: Any = None,
 ) -> SpellLoopResult:
     """Execute the spell loop, running each round's spells sequentially.
 
@@ -3525,6 +3616,11 @@ async def _run_spell_loop(
     頭で上書きされ、思考が届いているのに記録のどこにも残らない
     (docs/issues/spell_pulse_beats_missing_reasoning.md)。
 
+    ``initial_output_phases``: 同じコールが報告したメッセージごとの分け方
+    (llm_clients.output_phases)。周の本文は組み直して記憶に書くので、周ごとに
+    :func:`align_output_phases_to_spell_round` で組み直した本文に合わせ直して
+    添える。周 2 以降の分は周ごとにこのループが回収する。
+
     ``initial_stream_error``: ラウンド 1 の本文を運んだストリームを、サーバーが
     途中で切った申告 (呼び出し元が消費したもの)。周ごとの再ストリームの申告は
     このループが自分で消費する。どちらも、その本文が締めの発言として確定する
@@ -3546,6 +3642,7 @@ async def _run_spell_loop(
             segments=[], final_continuation=text, loop_count=0,
             closing_reasoning_text=initial_reasoning_text,
             closing_reasoning_details=initial_reasoning_details,
+            closing_output_phases=None if initial_stream_error else initial_output_phases,
             final_stream_error=initial_stream_error,
         )
 
@@ -3570,6 +3667,9 @@ async def _run_spell_loop(
     # (周の頭で参照し、周の終わりの再呼び出しの直後に次の周の分へ入れ替える)。
     pending_reasoning_text: str = initial_reasoning_text or ""
     pending_reasoning_details: Any = initial_reasoning_details
+    # いまの ``text`` を作ったコールが報告したメッセージごとの分け方。思考と
+    # 同じ寿命 (周の終わりの再呼び出しの直後に次の周の分へ入れ替える)。
+    pending_output_phases: Any = initial_output_phases
     # この周の本文が記憶へ入ったか。入らなかった周に限り、下書き行が無いときの
     # 退避書き込み (下の `_close_streaming_beat`) が「建物には本文があるのに
     # 記憶には無い」形を作るので、Beat の出口の補填へ渡す印を state に立てる。
@@ -3874,6 +3974,8 @@ async def _run_spell_loop(
                 segments=[], final_continuation=text, loop_count=0,
                 closing_reasoning_text=pending_reasoning_text,
                 closing_reasoning_details=pending_reasoning_details,
+                # 周が一つも走らなかった回の本文は受け取ったままの応答。
+                closing_output_phases=pending_output_phases,
                 stop_error=stop_error,
             )
         # 確定済みの Beat はそのまま残す — 途中で落ちても、ここまでに組んだ
@@ -4035,7 +4137,22 @@ async def _run_spell_loop(
             all_spell_lines_normalized = "\n".join(line for _, line in _spell_line_entries)
             assistant_content = (text_before + "\n" + all_spell_lines_normalized
                                  + ("\n" + text_after if text_after else "")).strip()
-            _round_msg = _round_message_for_next_call(state, assistant_content)
+            # この周の応答のメッセージごとの分け方を、組み直した本文に合わせ直す
+            # (合わなければ None — 記録にも次の呼び出しの列にも付けない)。
+            _round_output_phases = align_output_phases_to_spell_round(
+                text,
+                pending_output_phases,
+                sorted(
+                    [(entry[2].start(), entry[2].end(), entry[3]) for entry in all_parsed]
+                    + [(m.start(), m.end(), text[m.start():m.end()])
+                       for _, _, m in malformed_spells],
+                    key=lambda line: line[0],
+                ),
+                assistant_content,
+            )
+            _round_msg = _round_message_for_next_call(
+                state, assistant_content, output_phases=_round_output_phases,
+            )
             messages.append(_round_msg)
 
             # judgment (起動の意思決定) を spell 実行の「前」に SAIMemory へ記録する。
@@ -4064,6 +4181,8 @@ async def _run_spell_loop(
                     _round_memory_metadata["reasoning"] = pending_reasoning_text
                 if pending_reasoning_details is not None:
                     _round_memory_metadata["reasoning_details"] = pending_reasoning_details
+                if _round_output_phases is not None:
+                    _round_memory_metadata[OUTPUT_PHASES_METADATA_KEY] = _round_output_phases
                 _stored_id = runtime._store_memory(
                     persona, assistant_content, role="assistant",
                     tags=assistant_tags, pulse_id=pulse_id, playbook_name=playbook.name,
@@ -4371,6 +4490,7 @@ async def _run_spell_loop(
                     "skipping LLM re-invocation (declared complete)", loop_count,
                 )
                 text = ""
+                pending_output_phases = None
                 break
 
             # 次の Beat が続くので、この Beat の下書き行はここで確定する
@@ -4616,6 +4736,7 @@ async def _run_spell_loop(
             pending_reasoning_text, pending_reasoning_details = _consume_reasoning(
                 llm_client,
             )
+            pending_output_phases = _consume_output_phases(llm_client)
             # このラウンドの生成を作ったコールの三つ組 (sea/message_stamp.py)。
             # 直後の _store_memory がラウンドの発言を刻むので、ここで更新する。
             record_call_tokens(state, retry_usage)
@@ -4717,6 +4838,7 @@ async def _run_spell_loop(
                 segments=[], final_continuation=text, loop_count=0,
                 closing_reasoning_text=pending_reasoning_text,
                 closing_reasoning_details=pending_reasoning_details,
+                closing_output_phases=None if text_stream_error else pending_output_phases,
                 final_stream_error=text_stream_error,
             )
         # 締めの Beat (= 最後の retry が返した、スペルを含まない発言)。
@@ -4737,7 +4859,9 @@ async def _run_spell_loop(
             loop_count=loop_count,
             closing_reasoning_text=pending_reasoning_text,
             closing_reasoning_details=pending_reasoning_details,
-            # 締めの周の切断 (一文字も来ないうちに切られた回を含む)。
+            # 締めの周の切断 (一文字も来ないうちに切られた回を含む)。サーバーに
+            # 切られた締めの本文には分け方を付けない。
+            closing_output_phases=None if text_stream_error else pending_output_phases,
             final_stream_error=text_stream_error,
         )
     except (ExecutionCancelledException, BeatGateClosedError) as exc:
@@ -6073,6 +6197,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     _tool_reasoning_text, _tool_reasoning_details = _consume_reasoning(
                         llm_client, state,
                     )
+                    _tool_output_phases = _consume_output_phases(llm_client, state)
 
                     # Record usage
                     llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
@@ -6222,6 +6347,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     _tool_reasoning_text, _tool_reasoning_details = _consume_reasoning(
                         llm_client, state,
                     )
+                    _tool_output_phases = _consume_output_phases(llm_client, state)
 
                     # Record usage
                     # (この経路は llm_usage_metadata を使わない — 戻り値は捨てる)
@@ -6283,6 +6409,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     action_text=prompt,
                     initial_reasoning_text=_tool_reasoning_text,
                     initial_reasoning_details=_tool_reasoning_details,
+                    initial_output_phases=_tool_output_phases,
                 )
                 _spell_continuation = _spell_result.final_continuation
                 _spell_loop_count = _spell_result.loop_count
@@ -6294,6 +6421,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     _tool_reasoning_details = _spell_result.closing_reasoning_details
                     _store_reasoning_in_state(
                         state, _tool_reasoning_text, _tool_reasoning_details,
+                    )
+                    _store_output_phases_in_state(
+                        state, _spell_result.closing_output_phases,
                     )
                     # result.content は後段で state[text_key]/text に入り
                     # SAIMemory に保存される。建物と画面へ出すのは下の
@@ -6671,6 +6801,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # Consume reasoning (thinking) from LLM — store as metadata, not in content
                     # （state への格納は Spell ループ後にまとめて行う）
                     reasoning_text, reasoning_details = _consume_reasoning(llm_client)
+                    output_phases = _consume_output_phases(llm_client)
 
                     # 2026-05-20: Gemini 3.x の thoughtSignature を stream 完了後に保持。
                     # ストリーム経路は最後の chunk まで読まないと signature が確定しない
@@ -6732,6 +6863,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         initial_reasoning_text=reasoning_text,
                         initial_reasoning_details=reasoning_details,
                         initial_stream_error=_initial_stream_error,
+                        initial_output_phases=output_phases,
                     )
                     _continuation_ns = _spell_result_ns.final_continuation
                     _spell_loop_count_ns = _spell_result_ns.loop_count
@@ -6749,6 +6881,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         # memorize が読む state) をその分へ揃える。
                         reasoning_text = _spell_result_ns.closing_reasoning_text
                         reasoning_details = _spell_result_ns.closing_reasoning_details
+                        output_phases = _spell_result_ns.closing_output_phases
 
                     # 下書き行の追跡を、ループが切り替えた最新の値に合わせる。
                     # 漏らすと、この後の確定と Beat 死亡時の後始末が最初の行
@@ -7254,6 +7387,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # (スペルが走った回は reasoning_text が最終周の分に差し替わって
                     #  いる。格納は置き換え意味論なので、スペルの有無で同じ扱い)
                     _store_reasoning_in_state(state, reasoning_text, reasoning_details)
+                    _store_output_phases_in_state(state, output_phases)
                 else:
                     # Non-streaming mode
                     LOGGER.debug("[sea][llm] Calling llm_client.generate() with response_schema=%s", response_schema is not None)
@@ -7282,6 +7416,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # Consume reasoning (thinking) from LLM — store as metadata
                     # （state への格納は Spell ループ後にまとめて行う）
                     reasoning_text, reasoning_details = _consume_reasoning(llm_client)
+                    output_phases = _consume_output_phases(llm_client)
 
                     # ── Spell loop (parallel execution per round) ──
                     _bubble1_emitted_early_sync = ""
@@ -7320,6 +7455,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             initial_llm_usage=llm_usage_metadata,
                             initial_reasoning_text=reasoning_text,
                             initial_reasoning_details=reasoning_details,
+                            initial_output_phases=output_phases,
                         )
                         _continuation_sync = _spell_result_sync.final_continuation
                         _spell_loop_count_sync = _spell_result_sync.loop_count
@@ -7331,6 +7467,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             # 経路と対称)。
                             reasoning_text = _spell_result_sync.closing_reasoning_text
                             reasoning_details = _spell_result_sync.closing_reasoning_details
+                            output_phases = _spell_result_sync.closing_output_phases
                     else:
                         # text is dict (from structured output) - skip spell processing
                         LOGGER.debug("[sea][llm] text is dict (structured output), skipping spell processing")
@@ -7438,6 +7575,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # (スペルが走った回は reasoning_text が最終周の分に差し替わって
                     #  いる。格納は置き換え意味論なので、スペルの有無で同じ扱い)
                     _store_reasoning_in_state(state, reasoning_text, reasoning_details)
+                    _store_output_phases_in_state(state, output_phases)
 
                 runtime._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                 schema_consumed = runtime._process_structured_output(node_def, text, state)

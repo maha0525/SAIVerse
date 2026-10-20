@@ -69,6 +69,10 @@ class LLMClient:
     ) -> None:
         self._latest_reasoning: List[Dict[str, str]] = []
         self._latest_reasoning_details: Any = None
+        # 応答のメッセージごとの分け方 (Codex の phase)。Codex クライアントだけが
+        # 格納し、SEA が保存する発言の metadata へ移す。他 Provider は None のまま。
+        # 詳細は docs/issues/codex_output_phase_passback.md
+        self._latest_output_phases: Optional[List[Dict[str, Any]]] = None
         self._latest_attachments: List[Dict[str, Any]] = []
         self._latest_tool_detection: Dict[str, Any] | None = None
         self._latest_usage: Optional[UsageInfo] = None
@@ -215,6 +219,22 @@ class LLMClient:
         details = self._latest_reasoning_details
         self._latest_reasoning_details = None
         return details
+
+    def _store_output_phases(self, value: Optional[List[Dict[str, Any]]]) -> None:
+        """Store the per-message split of the latest response (or None)."""
+        self._latest_output_phases = value
+
+    def consume_output_phases(self) -> Optional[List[Dict[str, Any]]]:
+        """Return and clear the per-message split of the latest response.
+
+        ``[{"phase": "commentary" | "final_answer" | None, "text": str}, ...]``
+        whose joined texts equal the response text
+        (``llm_clients.output_phases``). None when the client does not report
+        one, which is every client except Codex.
+        """
+        phases = getattr(self, "_latest_output_phases", None)
+        self._latest_output_phases = None
+        return phases
 
     def _store_thought_signature(self, value: Optional[str]) -> None:
         """Store the thought signature from the latest response.

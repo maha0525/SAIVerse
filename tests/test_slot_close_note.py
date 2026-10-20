@@ -327,6 +327,29 @@ def test_close_prompt_grounding_and_prior_ref(manager, persona, adapter):
     assert "後の自分のために" in prompt                    # 経験値ノートの意義 (§4)
 
 
+def test_final_reply_carries_the_split_stored_with_it(manager, persona, adapter):
+    """締めが積む最終応答には、記録に保存した締めの発言と同じメッセージごとの
+    分け方 (output_phases) が載る (docs/issues/codex_output_phase_passback.md)。
+    保存した本文は strip 前、積む本文は strip 後なので、外側の空白だけ合わせる。"""
+    client = FakeCloseClient({"belongs_to": "none", "note": ""})
+    ctx = _make_ctx(manager, persona, client, continuation="考えます。\n答えです。\n")
+    ctx.final_output_phases = [
+        {"phase": "commentary", "text": "考えます。"},
+        {"phase": "final_answer", "text": "答えです。\n"},
+    ]
+    slot_close.run_slot_close(
+        ctx, manager=manager, persona_id=PERSONA_ID,
+        plan_date_str=PLAN_DATE, slot=_slot(), index=0,
+    )
+
+    final_msg = client.calls[0]["messages"][-2]
+    assert final_msg["content"] == "考えます。\n答えです。"
+    assert final_msg["metadata"]["output_phases"] == [
+        {"phase": "commentary", "text": "考えます。"},
+        {"phase": "final_answer", "text": "答えです。"},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 経験値ノート → テーマページ fragment (lazy creation)
 # ---------------------------------------------------------------------------

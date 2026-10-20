@@ -174,8 +174,13 @@ def prepare_openai_messages(
     max_image_embeds: Optional[int] = None,
     convert_system_to_user: bool = False,
     reasoning_passback_field: Optional[str] = None,
+    keep_metadata_keys: Tuple[str, ...] = (),
 ) -> List[Any]:
     """Prepare messages for OpenAI-compatible APIs by removing internal-only fields.
+
+    ``keep_metadata_keys``: metadata keys a caller still needs after
+    preparation (the result keeps ``{"metadata": {key: value}}`` with only
+    those keys). Empty by default, so the result carries no metadata.
 
     Options are keyword-only: several neighbours accept None/bool, so a positional
     call that skips one shifts the rest without any error (NIM once passed
@@ -226,6 +231,11 @@ def prepare_openai_messages(
             rd = (metadata or {}).get("reasoning_details") if isinstance(metadata, dict) else None
             if isinstance(rd, list):
                 clean_msg[reasoning_passback_field] = rd
+
+        if keep_metadata_keys and isinstance(metadata, dict):
+            kept = {key: metadata[key] for key in keep_metadata_keys if key in metadata}
+            if kept:
+                clean_msg["metadata"] = kept
 
         if is_empty_message(clean_msg) and not keeps_images:
             logging.debug("Skipping empty cleaned message with role=%s", role)

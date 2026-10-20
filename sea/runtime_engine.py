@@ -5,8 +5,10 @@ import logging
 import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from llm_clients.output_phases import OUTPUT_PHASES_METADATA_KEY, output_phases_for_text
 from saiverse.logging_config import log_sea_trace
 from sea.message_stamp import (
+    OUTPUT_PHASES_STATE_KEY,
     attach_stored_id_to_unstored_reply,
     stamp_generation_metadata,
     unstored_reply_for_last,
@@ -530,6 +532,22 @@ class RuntimeEngine:
                 and bool(memo_text)
                 and unstored_reply_for_last(state) is not None
             )
+            # The per-message split of the previous LLM call's response, passed
+            # only when this node stores state["last"] as is (the same rule as
+            # beat_state below) and its join equals the stored text;
+            # _store_memory checks the join again after marker stripping.
+            # Read, not consumed: MEMORIZE leaves _reasoning_details in state
+            # too, and with `{last}` it does not change state["last"], so a
+            # later SPEAK / THINK storing the same text still needs it.
+            if role == "assistant" and action_template == "{last}":
+                memo_phases = output_phases_for_text(
+                    state.get(OUTPUT_PHASES_STATE_KEY), memo_text,
+                )
+                if memo_phases is not None:
+                    metadata = {
+                        **(metadata if isinstance(metadata, dict) else {}),
+                        OUTPUT_PHASES_METADATA_KEY: memo_phases,
+                    }
             stored = self.runtime._store_memory(
                 persona, memo_text,
                 role=role, tags=tags,
@@ -608,6 +626,7 @@ class RuntimeEngine:
         text = state.get("last") or ""
         reasoning_text = state.pop("_reasoning_text", "")
         reasoning_details_val = state.pop("_reasoning_details", None)
+        output_phases_val = state.pop(OUTPUT_PHASES_STATE_KEY, None)
         auto_recall_text = state.pop("_auto_recall_text", None)
         activity_trace = state.get("_activity_trace")
         pulse_id = state.get("_pulse_id")
@@ -618,6 +637,11 @@ class RuntimeEngine:
             speak_metadata["reasoning"] = reasoning_text
         if reasoning_details_val is not None:
             speak_metadata["reasoning_details"] = reasoning_details_val
+        # 前の LLM ノードの応答のメッセージごとの分け方。この発言の本文と結合が
+        # 一致するときだけ記憶に載せる (docs/issues/codex_output_phase_passback.md)。
+        _speak_phases = output_phases_for_text(output_phases_val, text)
+        if _speak_phases is not None:
+            speak_metadata[OUTPUT_PHASES_METADATA_KEY] = _speak_phases
         if auto_recall_text:
             # 記憶アーキv2 §4.5: reasoning と同じ流儀で「ふと浮かんだ記憶」を永続化。
             speak_metadata["auto_recall"] = auto_recall_text

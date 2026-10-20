@@ -60,6 +60,14 @@ from .openai_codex_auth import (
     write_auth_store,
 )
 from .openai_message_preparer import prepare_openai_messages
+# The join rule lives in output_phases so the client and SEA share one copy;
+# the old private name stays importable for existing callers.
+from .output_phases import (
+    OUTPUT_PHASES_METADATA_KEY,
+    join_message_texts as _join_message_texts,
+    normalize_phase as _normalize_phase,
+    output_phases_for_sent_text,
+)
 from .schema_utils import normalize_schema_for_strict_json_output
 from .utils import positive_token_count
 
@@ -118,22 +126,6 @@ def _extract_json_object_candidate(text: str) -> str:
     if start != -1 and end != -1 and end > start:
         return candidate[start : end + 1]
     return candidate
-
-
-def _join_message_texts(texts: List[str]) -> str:
-    """Join per-message texts the same way `_iter_chunks` streams them.
-
-    空のメッセージは飛ばし、前の本文が改行で終わっていない境目にだけ改行を
-    挟む。ストリームで流した chunk の結合と同じ文字列になる。
-    """
-    joined = ""
-    for text in texts:
-        if not text:
-            continue
-        if joined and not joined.endswith("\n"):
-            joined += "\n"
-        joined += text
-    return joined
 
 
 class _StreamDiagnostics:
@@ -559,6 +551,28 @@ class OpenAICodexClient(LLMClient):
 
             if role == "assistant":
                 text = self._flatten_content_text(msg.get("content"))
+                # A past Codex response that arrived as several output messages
+                # is sent back as the same messages with their phase, but only
+                # when the recorded split still joins to the exact text being
+                # sent. Anything else (older rows, edited or rebuilt text) goes
+                # out as one message, as before.
+                metadata = msg.get("metadata")
+                phases = output_phases_for_sent_text(
+                    metadata.get(OUTPUT_PHASES_METADATA_KEY)
+                    if isinstance(metadata, dict) else None,
+                    text,
+                )
+                if phases is not None:
+                    for entry in phases:
+                        item: Dict[str, Any] = {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": entry["text"]}],
+                        }
+                        if entry["phase"] is not None:
+                            item["phase"] = entry["phase"]
+                        input_items.append(item)
+                    continue
                 input_items.append(
                     {
                         "type": "message",
@@ -606,6 +620,9 @@ class OpenAICodexClient(LLMClient):
                 max_image_embeds=self._max_image_embeds,
                 convert_system_to_user=False,
                 reasoning_passback_field=None,
+                # _build_input reads the per-message split of past assistant
+                # turns from here; the preparer drops metadata otherwise.
+                keep_metadata_keys=(OUTPUT_PHASES_METADATA_KEY,),
             )
         except Exception as exc:  # noqa: BLE001
             LOG.warning(
@@ -1161,7 +1178,9 @@ class OpenAICodexClient(LLMClient):
               very end, with everything aggregators need:
                   text, function_calls, reasoning_summary_text,
                   reasoning_full_text, usage_input, usage_output, usage_cached,
-                  message_texts (本文をメッセージごとに分けたもの)
+                  message_texts (本文をメッセージごとに分けたもの),
+                  output_phases (メッセージごとの phase と、そのメッセージとして
+                  流した本文の並び。結合が text と一致しないときは None)
 
         Codex 系 (GPT-5.3-Codex 以降) は 1 回の応答を複数の出力メッセージ
         (commentary / final_answer など) に分けて返すことがある。境目を潰して
@@ -1175,6 +1194,16 @@ class OpenAICodexClient(LLMClient):
         本文が届く応答では、まだ流していないぶんをその場で yield して埋める —
         集約側だけが本文を知っている状態を作らない (ストリーミング経路の消費者は
         chunk の結合を正とするため)。
+
+        output_phases is computed beside the text and never changes it: the
+        text (where separator newlines go, which done tail is streamed) follows
+        exactly the same rules as before output_phases existed. The split is
+        reported only when the stream proves it: every message is known from
+        an output_item.added with an id, every piece of visible text names a
+        known message by item_id, no message's text resumes after another
+        message's text, and the join of the per-message texts equals the
+        text. Otherwise output_phases is None and the caller sends the turn as
+        one message.
         """
         delta_buffer: List[str] = []
         # output_text.done の本文をメッセージ (item_id) ごとに集める。
@@ -1190,6 +1219,37 @@ class OpenAICodexClient(LLMClient):
         message_index = 0
         # 直近の可視 delta の item_id (メッセージ境界の第二の信号)。
         last_delta_item_id = ""
+        # output_phases bookkeeping (observes the text decisions only).
+        # msg_phases: ids of messages known from output_item.added, with their
+        # phase, in arrival order. chunk_ids runs beside delta_buffer and holds
+        # the item_id each visible chunk names (None for a separator newline).
+        # phases_ok becomes False when the stream does not prove the split.
+        msg_phases: Dict[str, Optional[str]] = {}
+        chunk_ids: List[Optional[str]] = []
+        completed_ids: List[str] = []
+        phases_ok = True
+
+        def _note_message(item: Dict[str, Any], *, added: bool) -> None:
+            """Only output_item.added registers a message id. A later item with
+            the same id may fill a missing phase; a different phase is a conflict."""
+            nonlocal phases_ok
+            item_id = item.get("id") or ""
+            if not item_id or (not added and item_id not in msg_phases):
+                return
+            phase = _normalize_phase(item.get("phase"))
+            known = msg_phases.setdefault(item_id, phase)
+            if known is None:
+                msg_phases[item_id] = phase
+            elif phase is not None and phase != known:
+                phases_ok = False
+
+        def _attribute(item_id: str) -> None:
+            """Record the item_id of the visible chunk about to be appended."""
+            nonlocal phases_ok
+            if item_id not in msg_phases:
+                phases_ok = False
+            chunk_ids.append(item_id)
+
         pending_calls: Dict[str, Dict[str, str]] = {}
         reasoning_summaries: Dict[int, List[str]] = {}
         reasoning_full: List[str] = []
@@ -1221,10 +1281,12 @@ class OpenAICodexClient(LLMClient):
                     if item_id and last_delta_item_id and item_id != last_delta_item_id:
                         if delta_buffer and not delta_buffer[-1].endswith("\n"):
                             delta_buffer.append("\n")
+                            chunk_ids.append(None)
                             yield "\n"
                         delta_consumed = len(delta_buffer)
                     if item_id:
                         last_delta_item_id = item_id
+                    _attribute(item_id)
                     delta_buffer.append(delta)
                     yield delta
 
@@ -1236,8 +1298,13 @@ class OpenAICodexClient(LLMClient):
                 # いま流す (delta 無しで done だけ届く応答でも、ストリームの
                 # 消費者に本文が届くように)。done と delta が食い違う異常形は
                 # 流した側 (delta) を正とし、二重には流さない。
+                # The done must name the message of the streamed text it closes.
+                done_item_id = event.get("item_id") or ""
+                if any(chunk_id != done_item_id for chunk_id in chunk_ids[delta_consumed:]):
+                    phases_ok = False
                 if done_text.startswith(part_streamed) and len(done_text) > len(part_streamed):
                     missing = done_text[len(part_streamed):]
+                    _attribute(done_item_id)
                     delta_buffer.append(missing)
                     yield missing
                 done_texts.setdefault(item_key, []).append(done_text or part_streamed)
@@ -1264,9 +1331,11 @@ class OpenAICodexClient(LLMClient):
                     # 前には入れない)。
                     if delta_buffer and not delta_buffer[-1].endswith("\n"):
                         delta_buffer.append("\n")
+                        chunk_ids.append(None)
                         yield "\n"
                     delta_consumed = len(delta_buffer)
                     message_index += 1
+                    _note_message(item, added=True)
                 elif item.get("type") == "function_call":
                     item_id = item.get("id") or ""
                     pending_calls[item_id] = {
@@ -1283,6 +1352,8 @@ class OpenAICodexClient(LLMClient):
 
             elif event_type == "response.output_item.done":
                 item = event.get("item") or {}
+                if item.get("type") == "message":
+                    _note_message(item, added=False)
                 if item.get("type") == "function_call":
                     item_id = item.get("id") or ""
                     pending_calls[item_id] = {
@@ -1302,6 +1373,8 @@ class OpenAICodexClient(LLMClient):
                 # done イベントが来なかった時のフォールバック。同一 item 内の
                 # part は連結し、message item どうしの境目には改行を挟む。
                 for item in response_obj.get("output") or []:
+                    if item.get("type") == "message":
+                        _note_message(item, added=False)
                     parts: List[str] = []
                     has_text = False
                     for content_part in item.get("content") or []:
@@ -1310,6 +1383,9 @@ class OpenAICodexClient(LLMClient):
                             has_text = True
                     if has_text:
                         completed_texts.append("".join(parts))
+                        completed_ids.append(
+                            (item.get("id") or "") if item.get("type") == "message" else ""
+                        )
 
             elif event_type == "response.failed":
                 response_obj = event.get("response") or {}
@@ -1332,10 +1408,43 @@ class OpenAICodexClient(LLMClient):
             message_texts = []
         if stream_text:
             final_text = stream_text
+            pieces = [
+                (chunk_id, chunk)
+                for chunk_id, chunk in zip(chunk_ids, delta_buffer)
+                if chunk_id is not None
+            ]
         else:
             final_text = _join_message_texts(message_texts)
             if final_text:
                 yield final_text
+            # Delta-less: the texts come from done (keyed by item_id) or
+            # completed output items; each must name a message known from added.
+            source_ids = list(done_texts) if done_texts else completed_ids
+            pieces = list(zip(source_ids, message_texts))
+        # Group the text per message in stream order (separator newlines are
+        # left out). A message whose text resumes after another message's
+        # text, or text naming an unknown message, means no split is reported.
+        runs: List[Tuple[str, List[str]]] = []
+        for chunk_id, chunk in pieces:
+            if not chunk:
+                continue
+            if chunk_id not in msg_phases:
+                phases_ok = False
+            elif runs and runs[-1][0] == chunk_id:
+                runs[-1][1].append(chunk)
+            elif any(run_id == chunk_id for run_id, _ in runs):
+                phases_ok = False
+            else:
+                runs.append((chunk_id, [chunk]))
+        phase_entries = [
+            {"phase": msg_phases[run_id], "text": "".join(parts)} for run_id, parts in runs
+        ]
+        output_phases: Optional[List[Dict[str, Any]]] = (
+            phase_entries
+            if phases_ok and phase_entries
+            and _join_message_texts([entry["text"] for entry in phase_entries]) == final_text
+            else None
+        )
 
         function_calls = [
             entry for entry in pending_calls.values() if entry.get("name")
@@ -1363,6 +1472,7 @@ class OpenAICodexClient(LLMClient):
                 "usage_output": usage_output,
                 "usage_cached": usage_cached,
                 "message_texts": message_texts,
+                "output_phases": output_phases,
             },
         )
 
@@ -1393,6 +1503,10 @@ class OpenAICodexClient(LLMClient):
             )
         if reasoning_entries:
             self._store_reasoning(reasoning_entries)
+
+        # メッセージごとの分け方 (phase)。SEA が保存する発言の metadata に移し、
+        # 次の呼び出しで _build_input が phase 付きの複数メッセージとして送り返す。
+        self._store_output_phases(state.get("output_phases"))
 
         if tools:
             function_calls = state["function_calls"]
@@ -1442,6 +1556,8 @@ class OpenAICodexClient(LLMClient):
 
         See class docstring for return-type matrix.
         """
+        # 前の呼び出しの分け方を、この呼び出しの結果として読ませない。
+        self._store_output_phases(None)
         messages = self._inject_unsupported_media_summaries(messages)
         body = self._build_body(
             messages,
@@ -1547,6 +1663,8 @@ class OpenAICodexClient(LLMClient):
         should use `generate(...)` directly. We still yield raw text deltas so
         the streaming pipeline can render progress.
         """
+        # 前の呼び出しの分け方を、この呼び出しの結果として読ませない。
+        self._store_output_phases(None)
         messages = self._inject_unsupported_media_summaries(messages)
         body = self._build_body(
             messages,

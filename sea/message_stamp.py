@@ -93,6 +93,10 @@ CALL_TOKENS_STATE_KEY = "_last_call_tokens"
 #: LLM ノードが ``state["_messages"]`` に足したが ``"id"`` を載せなかった返事の dict。
 #: :func:`note_unstored_reply` を参照。
 UNSTORED_REPLY_STATE_KEY = "_unstored_reply"
+#: 直前の LLM コールの応答のメッセージごとの分け方 (sea/runtime_llm.py の
+#: ``_store_output_phases_in_state`` が書く)。SPEAK ノードが消費し、THINK ノードと
+#: action が ``{last}`` の MEMORIZE ノードは読むだけ (SAY ノードは触らない)。
+OUTPUT_PHASES_STATE_KEY = "_output_phases"
 
 # ---- 三つ組の欄名 ----
 TOKENS_INPUT_KEY = "input"
@@ -185,7 +189,8 @@ def clear_presented_message_ids(state: Optional[Dict[str, Any]]) -> None:
 
 
 def drop_stamp_material(state: Optional[Dict[str, Any]]) -> None:
-    """``_last_call_tokens`` / ``_presented_message_ids`` / ``_unstored_reply`` を落とす。
+    """``_last_call_tokens`` / ``_presented_message_ids`` / ``_unstored_reply`` /
+    ``_output_phases`` を落とす。
 
     呼ぶのは ``compile_playbook`` (sea/langgraph_runner.py) だけ。
     ``state["last"]`` を生成以外の本文に書き換えうるノード (``NodeType.TOOL`` /
@@ -200,10 +205,16 @@ def drop_stamp_material(state: Optional[Dict[str, Any]]) -> None:
       行の id を前の LLM ノードの返事の dict に載せないため
       (:func:`unstored_reply_for_last`)。書き換えた後の本文が返事と同じ文字列
       でも、それは返事の本文ではない。
+    - ``_output_phases``: 直前の LLM コールの応答のメッセージごとの分け方
+      (llm_clients.output_phases)。後ろの SPEAK は ``state["last"]`` と結合が
+      一致すれば記憶に載せるので、書き換えた後の本文が偶然同じ文字列だと、
+      別の生成の本文に直前のコールの分け方が付く。
     """
     clear_call_tokens(state)
     clear_presented_message_ids(state)
     clear_unstored_reply(state)
+    if isinstance(state, dict):
+        state.pop(OUTPUT_PHASES_STATE_KEY, None)
 
 
 def record_call_tokens(state: Optional[Dict[str, Any]], usage: Any) -> None:
