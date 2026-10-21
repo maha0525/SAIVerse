@@ -170,6 +170,38 @@ ESTIMATED_FOLD_PLACEHOLDER_CHARS = 1_200
 #: runtime_context を import せずにブロックを見分けられる必要がある。
 CONSUMED_PERCEPTION_KEY = "__consumed_perception__"
 
+#: 送る列に出ている「残したリアルタイム情報と自動想起」の行の目印
+#: (docs/intent/persist_realtime_and_recall.md §4.3 / §4.5)。知覚のまとめと同じく
+#: ``CONSUMED_PERCEPTION_KEY`` も持つので、勘定と退場計画には知覚のブロックと
+#: 同じに参加する (重さだけ・退場の単位は作らない)。この印は**それとは別に**
+#: 付けて、自動想起のきっかけ (検索に使う文) と反射判断に渡す観察から明示的に
+#: 外すのに使う — 同じ印のままだと、ユーザーの発言の無いターンで残した想起が
+#: きっかけになり、思い出したことをまた思い出す循環が起きる。
+#: ``__realtime_context__`` は**付けない** — リアルタイムスペルの結果は先頭から
+#: 見て最初の ``__realtime_context__`` に足されるので、付けると残した行の方に
+#: 足されてしまう。
+PERSISTED_REALTIME_AND_RECALL_KEY = "__persisted_realtime_and_recall__"
+
+#: そのターンのリアルタイム情報と自動想起を一つにまとめたメッセージの目印
+#: (``persist_realtime_and_recall`` を ON にしたモデルへ送るときだけ作る。
+#: docs/intent/persist_realtime_and_recall.md §4.1)。値は dict で、
+#: 組み直しと保存に要る材料 (リアルタイム情報の文面・想起の文面・想起の識別子・
+#: 送ったか ``sent``・初めて送ったときに固定した保存待ちの写し ``pending``・
+#: 保存済みか ``persisted``・子へ渡した写しか ``child_copy``) を持つ。この
+#: メッセージは送る列の一番後ろに置かれ、送る直前に固定され
+#: (sea/runtime_context.freeze_turn_realtime_and_recall_for_send — 以後不変)、
+#: 生成が正常に完了した後に固定した写しのまま一行残される
+#: (sea/runtime_llm.py の ``_persist_turn_realtime_and_recall``)。
+TURN_REALTIME_AND_RECALL_KEY = "__turn_realtime_and_recall__"
+
+
+def is_persisted_realtime_and_recall(msg: Dict[str, Any]) -> bool:
+    """残したリアルタイム情報と自動想起の行 (送る列に出ているもの) か。"""
+    meta = msg.get("metadata")
+    return bool(
+        isinstance(meta, dict) and meta.get(PERSISTED_REALTIME_AND_RECALL_KEY)
+    )
+
 
 def is_injected_perception(msg: Dict[str, Any]) -> bool:
     """送信直前に差し込まれる知覚ブロックか (保存行ではない)。

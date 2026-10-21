@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Iterator, List, Literal, Optional
 
 
@@ -24,6 +26,26 @@ class UsageInfo:
     cache_ttl: str = ""  # Cache TTL used for this request ("5m", "1h", or "" if no cache)
     cache_storage_tokens: int = 0  # Gemini explicit cache: tokens stored (for storage cost)
     cache_storage_ttl_seconds: int = 0  # Gemini explicit cache: TTL in seconds
+    cache_storage_timestamp: Optional[float] = None  # Cache creation epoch, distinct from response time
+
+
+def usage_event_time(usage: UsageInfo, *, cache_storage: bool = False) -> datetime:
+    """Return the recorded event time in the usage DB's existing local-naive form.
+
+    Cache storage begins when the cache was created, before the LLM response.
+    Older clients/test doubles without an epoch retain the previous "now" fallback.
+    """
+    timestamp = getattr(usage, "cache_storage_timestamp", None) if cache_storage else None
+    if timestamp is None:
+        timestamp = getattr(usage, "timestamp", None)
+    if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
+        try:
+            if math.isfinite(timestamp):
+                return datetime.fromtimestamp(timestamp)
+        except (OverflowError, OSError, ValueError):
+            pass
+    return datetime.now()
+
 
 # LLM logging is now handled by logging_config module
 # Import convenience functions for backward compatibility
@@ -47,6 +69,10 @@ class LLMClient:
     ) -> None:
         self._latest_reasoning: List[Dict[str, str]] = []
         self._latest_reasoning_details: Any = None
+        # 応答のメッセージごとの分け方 (Codex の phase)。Codex クライアントだけが
+        # 格納し、SEA が保存する発言の metadata へ移す。他 Provider は None のまま。
+        # 詳細は docs/issues/codex_output_phase_passback.md
+        self._latest_output_phases: Optional[List[Dict[str, Any]]] = None
         self._latest_attachments: List[Dict[str, Any]] = []
         self._latest_tool_detection: Dict[str, Any] | None = None
         self._latest_usage: Optional[UsageInfo] = None
@@ -194,6 +220,22 @@ class LLMClient:
         self._latest_reasoning_details = None
         return details
 
+    def _store_output_phases(self, value: Optional[List[Dict[str, Any]]]) -> None:
+        """Store the per-message split of the latest response (or None)."""
+        self._latest_output_phases = value
+
+    def consume_output_phases(self) -> Optional[List[Dict[str, Any]]]:
+        """Return and clear the per-message split of the latest response.
+
+        ``[{"phase": "commentary" | "final_answer" | None, "text": str}, ...]``
+        whose joined texts equal the response text
+        (``llm_clients.output_phases``). None when the client does not report
+        one, which is every client except Codex.
+        """
+        phases = getattr(self, "_latest_output_phases", None)
+        self._latest_output_phases = None
+        return phases
+
     def _store_thought_signature(self, value: Optional[str]) -> None:
         """Store the thought signature from the latest response.
 
@@ -339,4 +381,4 @@ class EmptyResponseError(RuntimeError):
     """Raised when LLM returns an empty response (no text or function call)."""
 
 
-__all__ = ["LLMClient", "ToolSpecFormat", "UsageInfo", "log_llm_request", "log_llm_response", "get_llm_logger", "IncompleteStreamError", "EmptyResponseError"]
+__all__ = ["LLMClient", "ToolSpecFormat", "UsageInfo", "usage_event_time", "log_llm_request", "log_llm_response", "get_llm_logger", "IncompleteStreamError", "EmptyResponseError"]

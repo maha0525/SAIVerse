@@ -55,6 +55,22 @@ def ai_stem_taken(
     )
 
 
+EMBED_MODEL_MISMATCH_SOURCE = "embed_model_mismatch"
+
+
+def embed_model_mismatch_warning(persona_ids: List[str]) -> Dict[str, object]:
+    """The startup warning that asks for re-embedding (shown as the banner)."""
+    names = ", ".join(persona_ids)
+    return {
+        "source": EMBED_MODEL_MISMATCH_SOURCE,
+        "message": (
+            f"Embeddingモデルが変更されました。記憶想起を正常に動作させるため、"
+            f"再計算を推奨します。（対象: {names}）"
+        ),
+        "persona_ids": list(persona_ids),
+    }
+
+
 class PersonaMixin:
     """Persona lifecycle helpers shared across the SAIVerse manager."""
 
@@ -147,22 +163,18 @@ class PersonaMixin:
                 "Loaded %d personas from database (%d failed).",
                 len(self.personas), failed_count,
             )
-            # Check for embedding model changes across all loaded personas
+            # Check for embedding model changes across all loaded personas.
+            # Read the adapter directly (no getattr default) so a renamed
+            # attribute fails loudly instead of silencing this warning.
             changed_personas = [
                 pid
                 for pid, p in self.personas.items()
-                if getattr(getattr(p, "memory", None), "embed_model_changed", False)
+                if p.sai_memory is not None and p.sai_memory.embed_model_changed
             ]
             if changed_personas:
-                names = ", ".join(changed_personas)
-                self.startup_warnings.append({
-                    "source": "embed_model_mismatch",
-                    "message": (
-                        f"Embeddingモデルが変更されました。記憶想起を正常に動作させるため、"
-                        f"再計算を推奨します。（対象: {names}）"
-                    ),
-                    "persona_ids": changed_personas,
-                })
+                self.startup_warnings.append(
+                    embed_model_mismatch_warning(changed_personas)
+                )
         except Exception as exc:
             msg = f"Failed to query personas from DB: {exc}"
             logging.error(msg, exc_info=True)
@@ -172,6 +184,34 @@ class PersonaMixin:
             })
         finally:
             db.close()
+
+    def clear_embed_model_mismatch(self, persona_id: str) -> None:
+        """Lift the re-embed warning for one persona after its re-embed succeeded.
+
+        Lowers the live adapter's ``embed_model_changed`` and removes the
+        persona from the ``embed_model_mismatch`` startup warning (the warning
+        itself goes when nobody is left), so reloading the screen no longer
+        shows the banner. ``startup_warnings`` is edited in place: the
+        AdminService shares the same list object (manager/admin.py).
+        """
+        persona = self.personas.get(persona_id)
+        if persona is not None and persona.sai_memory is not None:
+            persona.sai_memory.embed_model_changed = False
+
+        updated: List[Dict[str, object]] = []
+        for warning in self.startup_warnings:
+            if (
+                isinstance(warning, dict)
+                and warning.get("source") == EMBED_MODEL_MISMATCH_SOURCE
+            ):
+                remaining = [
+                    pid for pid in warning.get("persona_ids", []) if pid != persona_id
+                ]
+                if remaining:
+                    updated.append(embed_model_mismatch_warning(remaining))
+                continue
+            updated.append(warning)
+        self.startup_warnings[:] = updated
 
     def _load_single_persona(self, db, db_ai) -> None:
         """単一のペルソナをDBレコードからロードする"""

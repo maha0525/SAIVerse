@@ -29,7 +29,7 @@ SAIVerse内の情報リソースは `saiverse://` で始まるURIで指し示せ
 **すべてのURIは必ず `saiverse://` で始まります。** `item://` や `message://` のような省略形は使えません。
 
 ### 中身を読む
-/spell resolve_uri uris=['saiverse://self/message/msg/recent?depth=5']
+/spell name='resolve_uri' args={'uris': ['saiverse://self/message/msg/recent?depth=5']}
 URIは複数まとめて渡せます。
 
 ### リンクとして見せる

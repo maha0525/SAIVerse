@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -267,7 +268,8 @@ def estimate_chronicle_generation_cost(
         pass  # Memopedia not initialized -> 0
 
     # --- 費用 ---
-    pricing = get_model_pricing(model_name)
+    pricing_at = datetime.now(timezone.utc)
+    pricing = get_model_pricing(model_name, at=pricing_at)
     is_free_tier = pricing is None
     estimated_cost = 0.0
 
@@ -282,14 +284,14 @@ def estimate_chronicle_generation_cost(
         avg_output_per_call = 400  # ~3-5 sentence summary
         estimated_cost = sum(
             calculate_cost(
-                model_name, material / 3.5 + input_overhead, avg_output_per_call, log_details=False,
+                model_name, material / 3.5 + input_overhead, avg_output_per_call, log_details=False, at=pricing_at,
             )
             for material in material_per_call
         )
         avg_input_cons = 10 * avg_entry_tokens + 500 + context_tokens_cons
         # Upper regeneration has the same estimated prompt composition as a fold.
         estimated_cost += (consolidation_calls + upper_regen_calls) * calculate_cost(
-            model_name, avg_input_cons, avg_output_per_call, log_details=False,
+            model_name, avg_input_cons, avg_output_per_call, log_details=False, at=pricing_at,
         )
 
     return ChronicleCostEstimate(

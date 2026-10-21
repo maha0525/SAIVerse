@@ -15,6 +15,7 @@
 | `openai_codex` | OpenAI Codex (ChatGPT OAuth) | `openai_codex` | — | — |
 | `plamo` | PLaMo (Preferred Networks) | `openai_compat` | `https://api.platform.preferredai.jp/v1` | `PLAMO_API_KEY` |
 | `sakana` | Sakana AI | `openai_compat` | `https://api.sakana.ai/v1` | `SAKANA_API_KEY` |
+| `sarashina` | Sarashina (SB Intuitions) | `openai_compat` | `https://api.sarashina.ai/v1` | `SARASHINA_API_KEY` |
 | `lmstudio` | LM Studio (local) | `openai_compat` | `http://127.0.0.1:1234/v1` | —（不要） |
 | `ollama` | Ollama (local) | `ollama_compat` | —（未設定＝自動探索） | — |
 | `llama_cpp_server` | llama.cpp Server (local) | `openai_compat` | `http://127.0.0.1:8080/v1` | —（不要） |
@@ -25,7 +26,18 @@
 
 `gemini` だけは `api_key_env_alternates: ["GEMINI_FREE_API_KEY"]` を併せ持つ。**`GEMINI_API_KEY` と `GEMINI_FREE_API_KEY` のどちらか一方が設定されていればモデル一覧に出る**（無料枠だけの利用を想定）。判定は `saiverse/model_configs.py` の `_get_required_env_vars()`。
 
-### API キー不要のプロバイダ
+### Sarashina の OpenAI 互換設定
+
+Sarashina は会話用の `sarashina3-mini` / `sarashina3-nano` を同梱する。
+設定手順と制限は [Sarashina のキー設定](../api-keys/sarashina.md) を参照。
+`openai_compat_options` は OpenAI 互換接続の機能差を宣言する辞書で、
+モデルへそのまま継承される。省略時は従来の OpenAI 動作。
+Sarashina では `supports_stream_options` / `supports_function_tool_choice` /
+`supports_message_name` を false にし、未対応項目を SDK 送信直前で除く。
+関数指定の tool_choice はその関数だけを tools に残して `required` へ変換する。
+画面から同梱プロバイダを上書き編集しても、この宣言は保持される。
+
+### API キー不要のローカルサーバー
 
 `lmstudio` と `llama_cpp_server` は `api_key_required: false` を持つ。認証をしないローカルサーバー向けの宣言で、次の2つが変わる。
 

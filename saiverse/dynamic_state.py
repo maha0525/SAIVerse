@@ -309,8 +309,9 @@ class DynamicStateManager:
 
 #: 提示から下ろす操作通知を出す head の Section。
 #:
-#: 発生源は二つ: ``head_mutation`` の通知 (sea/head_pipeline/notify.py — コア記憶・
-#: 机・Memopedia 目次の操作) と、スペル一覧の増減ラベル。どちらを下ろすかは
+#: 発生源は三つ: ``head_mutation`` の通知 (sea/head_pipeline/notify.py — コア記憶・
+#: 机・Memopedia 目次の操作) と、スペル一覧の増減ラベルと、アドオンからの案内の
+#: 増減・変化ラベル。どちらを下ろすかは
 #: :data:`sai_memory.presented_reduction.NOTICE_KINDS` /
 #: :data:`~sai_memory.presented_reduction.NOTICE_LABEL_KINDS` が決めていて、この
 #: 集合はその「発生源の Section」側の名前。通知を提示から下ろしてよいのは、
@@ -318,6 +319,8 @@ class DynamicStateManager:
 #: 縮み (sea/session_lifecycle の reduce_presentation) が前提条件に使う。
 NOTICE_SOURCE_SECTIONS = frozenset({
     "core_memory", "desk", "memopedia_index", "spell_list",
+    # 2026-10-12: アドオンからの案内の増減・変化 (addon_guidance_* ラベル)。
+    "addon_guidance",
 })
 
 

@@ -3,7 +3,7 @@
 **ステータス**: 🔲 未着手（実機検証待ち）
 **優先度**: low
 **作成日**: 2026-09-01
-**関連**: `requirements.txt` (`fastembed`), `sai_memory/memory/recall.py`, `pyproject.toml`
+**関連**: `requirements.txt` (`onnxruntime`。調査時は `fastembed` 経由), `sai_memory/memory/recall.py`, `pyproject.toml`
 
 ## 背景
 
@@ -28,6 +28,8 @@
 | `setup.bat` / `setup.sh` | Python バージョンの上限チェックなし |
 
 なお開発機に入っている onnxruntime が 1.24.1 なのは、インストール時期が古いだけ。fastembed が上限を掛けていないので、新規インストールでは 1.29.0 が入る。
+
+**2026-10-12 追記**: fastembed は埋め込み移行 ([embedding_gemma2_migration](../intent/embedding_gemma2_migration.md)) で撤去済みで、上の表の fastembed の 3 行はもう鎖に入っていない。いまは SAIVerse が onnxruntime と tokenizers を直接要求している (`onnxruntime>=1.23.2,<1.24`、下限は固定した埋め込みモデルが動く版、上限は Intel Mac の wheel の都合 — [dependency_management](../intent/dependency_management.md) §3-2)。3.14 で確かめる鎖は onnxruntime と tokenizers の二本になった。上限 `<1.24` の範囲の onnxruntime に Python 3.14 の wheel があるかは、この追記の時点で未確認。
 
 ## 残っている作業
 

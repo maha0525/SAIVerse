@@ -9,6 +9,7 @@ import { MemoryImportProgress } from './MemoryImportProgress';
 import { MemoryImportResult } from './MemoryImportResult';
 import { MemoryImportProps } from './types';
 import { useMemoryImport } from './useMemoryImport';
+import PersonaPackPanel from './PersonaPackPanel';
 
 export default function MemoryImport({ personaId, onImportComplete }: MemoryImportProps) {
     useLocale();
@@ -71,6 +72,9 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
       )}
 
       <MemoryImportResult result={memoryImport.result} />
+
+      {/* ペルソナまるごとパック (docs/intent/persona_pack.md) の取り込みとエクスポート */}
+      <PersonaPackPanel personaId={personaId} />
 
       <div className={styles.reembedSection}>
         <h3 data-i18n="components.memory.MemoryImport.text002">{uiText("components.memory.MemoryImport.text002")}</h3>

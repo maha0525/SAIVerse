@@ -1,16 +1,24 @@
 from __future__ import annotations
 
-import json
 import logging
-import os
 from pathlib import Path
-from threading import RLock
-from typing import Any, Dict, List, Tuple
+from threading import Lock, RLock
+from typing import List, Tuple
 
 import numpy as np
-from fastembed import TextEmbedding
-from fastembed.common.model_description import ModelSource, PoolingType
 
+from sai_memory.config import (
+    EMBED_DIM,
+    EMBED_HF_REPO,
+    EMBED_HF_REVISION,
+    EMBED_MAX_TOKENS,
+    EMBED_MODEL_FILES,
+    EMBED_MODEL_ID,
+    EMBED_MODEL_ONNX,
+    EMBED_TOKENIZER,
+    default_embed_model_dir,
+    missing_embed_model_files,
+)
 from sai_memory.logging_utils import debug
 from sai_memory.memory.storage import (
     Message,
@@ -20,317 +28,195 @@ from sai_memory.memory.storage import (
     get_messages_last,
 )
 
+LOGGER = logging.getLogger(__name__)
 
-_REGISTERED_MODELS: set[tuple[str, str]] = set()
-_EMBEDDING_MODEL_CACHE: dict[tuple[str, str | None, int | None, bool], TextEmbedding] = {}
+# Prompt strings of google/embeddinggemma-2 (config_sentence_transformers.json:
+# "SearchQuery" / "Document"). They are part of the model's input contract.
+QUERY_PROMPT = "task: search result | query: "
+DOCUMENT_PROMPT = "title: none | text: "
+
+# One session.run() call holds at most this many padded tokens (rows x the
+# longest row). Activation memory grows with the padded size, so a fixed row
+# count lets long texts blow up: 32 rows of 512 tokens peaked at 8.5GB, while
+# 2048 tokens keeps the bulk peak near 650MB for both short and long chunks at
+# the same throughput (measured 2026-10-14, docs/intent/embedding_gemma2_migration.md).
+_MAX_BATCH_TOKENS = 2048
+# Upper bound on rows even for very short texts (queries).
+_MAX_BATCH_ROWS = 32
+# <pad> of the EmbeddingGemma 2 tokenizer. Padded positions are masked out by
+# attention_mask, so the value only has to be a valid token id.
+_PAD_ID = 0
+# The exported graph declares the image / video / audio inputs as required even
+# for text-only calls; they are fed as empty [0, 512] tensors.
+_MEDIA_INPUTS = ("image_features", "video_features", "audio_features")
+_MEDIA_FEATURE_DIM = 512
+_OUTPUT_NAME = "sentence_embedding"
+
+# One loaded model per model directory, shared by every Embedder in the process
+# (all personas). Loading takes the lock so a first-run download happens once.
+_EMBEDDING_MODEL_CACHE: dict[str, "_OnnxTextEncoder"] = {}
 _EMBEDDING_MODEL_CACHE_LOCK = RLock()
+# One session.run() at a time across the process. The session is shared by
+# every persona, so a bulk re-embed and an import's background embedding could
+# otherwise each reach the per-call peak at once. Held per call (about a second
+# at most), so a live message save waits behind one call, not a whole job.
+_RUN_LOCK = Lock()
 
 
-def _check_cuda_available() -> bool:
-    """Check if CUDA is available for ONNX Runtime."""
-    try:
+class _OnnxTextEncoder:
+    """Tokenizer + onnxruntime session for the EmbeddingGemma 2 text model.
+
+    The graph's ``sentence_embedding`` output already contains the projection,
+    masked mean pooling and L2 normalisation, so no post-processing is
+    reimplemented here beyond one fp32 re-normalisation.
+    Runs on CPUExecutionProvider only (2026-10-12 ruling: keep the GPU free for
+    local LLMs).
+    """
+
+    def __init__(self, model_dir: Path) -> None:
         import onnxruntime as ort
-        return "CUDAExecutionProvider" in ort.get_available_providers()
-    except Exception:
-        return False
+        from tokenizers import Tokenizer
+
+        tokenizer = Tokenizer.from_file(str(model_dir / EMBED_TOKENIZER))
+        tokenizer.no_padding()
+        tokenizer.enable_truncation(EMBED_MAX_TOKENS)
+        self.tokenizer = tokenizer
+
+        # The CPU memory arena keeps the largest batch's buffers for the life of
+        # the process (resident stayed at 2.7GB after a bulk run). Without it the
+        # buffers go back after each call (resident back to ~250MB) at no
+        # measurable speed cost. Memory-pattern planning is per-shape and is
+        # dropped with it.
+        sess_options = ort.SessionOptions()
+        sess_options.enable_cpu_mem_arena = False
+        sess_options.enable_mem_pattern = False
+        self.session = ort.InferenceSession(
+            str(model_dir / EMBED_MODEL_ONNX),
+            sess_options=sess_options,
+            providers=["CPUExecutionProvider"],
+        )
+        input_names = {i.name for i in self.session.get_inputs()}
+        output_names = {o.name for o in self.session.get_outputs()}
+        if _OUTPUT_NAME not in output_names:
+            raise RuntimeError(
+                f"Embedding model at {model_dir} has no '{_OUTPUT_NAME}' output "
+                f"(outputs: {sorted(output_names)})"
+            )
+        self._media_inputs = [n for n in _MEDIA_INPUTS if n in input_names]
+
+    def encode(self, texts: List[str]) -> np.ndarray:
+        """Embed already-prompted texts; returns [len(texts), EMBED_DIM] float32, L2-normalised."""
+        ids_list = [e.ids for e in self.tokenizer.encode_batch(texts)]
+        # Longest first so each batch pads to a similar length; results are
+        # written back to the original positions.
+        order = sorted(range(len(ids_list)), key=lambda i: -len(ids_list[i]))
+        out = np.zeros((len(ids_list), EMBED_DIM), dtype=np.float32)
+        start = 0
+        while start < len(order):
+            # Sorted longest first, so the first row sets the padded length.
+            longest = max(1, len(ids_list[order[start]]))
+            rows = max(1, min(_MAX_BATCH_ROWS, _MAX_BATCH_TOKENS // longest))
+            idx = order[start : start + rows]
+            out[idx] = self._run([ids_list[i] for i in idx])
+            start += rows
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return out / norms
+
+    def _run(self, ids_list: List[List[int]]) -> np.ndarray:
+        n = len(ids_list)
+        length = max(len(x) for x in ids_list)
+        ids = np.full((n, length), _PAD_ID, dtype=np.int64)
+        mask = np.zeros((n, length), dtype=np.int64)
+        for i, x in enumerate(ids_list):
+            ids[i, : len(x)] = x
+            mask[i, : len(x)] = 1
+        feeds = {"input_ids": ids, "attention_mask": mask}
+        empty = np.zeros((0, _MEDIA_FEATURE_DIM), dtype=np.float32)
+        for name in self._media_inputs:
+            feeds[name] = empty
+        with _RUN_LOCK:
+            (emb,) = self.session.run([_OUTPUT_NAME], feeds)
+        emb = np.asarray(emb, dtype=np.float32)
+        if emb.shape != (n, EMBED_DIM):
+            raise RuntimeError(
+                f"Embedding model returned shape {emb.shape}, expected ({n}, {EMBED_DIM})"
+            )
+        return emb
 
 
 class Embedder:
-    def __init__(
-        self,
-        model: str = "intfloat/multilingual-e5-small",
-        *,
-        local_model_path: str | None = None,
-        model_dim: int | None = None,
-        cuda: bool | None = None,
-    ):
-        self.model_name = model
-        logger = logging.getLogger(__name__)
-        resolved_local_path: str | None = None
-        if local_model_path:
-            resolved_local_path = str(Path(local_model_path).expanduser().resolve())
+    """Text -> vector for recall: EmbeddingGemma 2, 4-bit ONNX, CPU only.
 
-        # Auto-detect CUDA if not specified
-        # Note: Even if CUDAExecutionProvider is listed, it may fail at runtime
-        # if CUDA libraries (cuBLAS, cuDNN) are not properly installed.
-        # Set SAIMEMORY_EMBED_CUDA=1 to enable GPU, SAIMEMORY_EMBED_CUDA=0 to force CPU.
-        cuda_env = os.getenv("SAIMEMORY_EMBED_CUDA")
-        if cuda_env is not None:
-            use_cuda = cuda_env.strip().lower() in {"1", "true", "yes", "on"}
-        elif cuda is not None:
-            use_cuda = cuda
-        else:
-            use_cuda = _check_cuda_available()
+    The model is fixed (no selection; docs/intent/embedding_gemma2_migration.md
+    §1). ``local_model_path`` points at a directory holding the files of
+    ``EMBED_MODEL_FILES``; when omitted, the default directory
+    ``sbert/embeddinggemma-2-q4`` is used and missing files are downloaded
+    from the pinned HuggingFace revision.
+    """
 
-        cache_key = (self.model_name.lower(), resolved_local_path, model_dim, use_cuda)
-
+    def __init__(self, *, local_model_path: str | None = None) -> None:
+        self.model_name = EMBED_MODEL_ID
         with _EMBEDDING_MODEL_CACHE_LOCK:
-            cached = _EMBEDDING_MODEL_CACHE.get(cache_key)
-            if cached is None:
-                kwargs: Dict[str, Any] = {}
-                if resolved_local_path:
-                    kwargs = _build_local_model_kwargs(
-                        model_name=self.model_name,
-                        local_model_path=resolved_local_path,
-                        explicit_dim=model_dim,
+            if local_model_path:
+                model_dir = Path(local_model_path).expanduser().resolve()
+                missing = missing_embed_model_files(model_dir)
+                if missing:
+                    raise FileNotFoundError(
+                        f"Embedding model directory {model_dir} is missing: {', '.join(missing)}"
                     )
-                    logger.warning(
-                        "Embedder using local path '%s' for model '%s'.",
-                        resolved_local_path,
-                        self.model_name,
-                    )
-                else:
-                    logger.warning(
-                        "Embedder using remote model '%s' without local override.",
-                        self.model_name,
-                    )
-                if use_cuda:
-                    kwargs["cuda"] = True
-                    logger.info("Embedder using CUDA for model '%s'.", self.model_name)
-                
-                try:
-                    cached = TextEmbedding(model_name=self.model_name, **kwargs)
-                except ValueError as e:
-                    # Fallback to CPU if CUDA fails (common on Windows with partial CUDA setup)
-                    if use_cuda:
-                        logger.warning("CUDA initialization failed (%s); falling back to CPU.", e)
-                        kwargs.pop("cuda", None)
-                        try:
-                            cached = TextEmbedding(model_name=self.model_name, **kwargs)
-                        except ValueError as e2:
-                            e = e2  # fall through to auto-download check below
-                            cached = None
-                    if cached is None:
-                        # Model not natively supported by fastembed — try auto-download
-                        if not resolved_local_path and "not supported" in str(e).lower():
-                            logger.warning(
-                                "Model '%s' not natively supported by fastembed. "
-                                "Attempting auto-download from HuggingFace...",
-                                self.model_name,
-                            )
-                            downloaded_path = _auto_download_model(self.model_name)
-                            kwargs = _build_local_model_kwargs(
-                                model_name=self.model_name,
-                                local_model_path=downloaded_path,
-                                explicit_dim=model_dim,
-                            )
-                            if use_cuda:
-                                kwargs["cuda"] = True
-                            cached = TextEmbedding(model_name=self.model_name, **kwargs)
-                        else:
-                            raise e
+            else:
+                model_dir = default_embed_model_dir().resolve()
+            cache_key = str(model_dir)
+            encoder = _EMBEDDING_MODEL_CACHE.get(cache_key)
+            if encoder is None:
+                if missing_embed_model_files(model_dir):
+                    _download_model(model_dir)
+                LOGGER.info("Loading embedding model '%s' from %s (CPU).", self.model_name, model_dir)
+                encoder = _OnnxTextEncoder(model_dir)
+                _EMBEDDING_MODEL_CACHE[cache_key] = encoder
+        self._encoder = encoder
 
-                _EMBEDDING_MODEL_CACHE[cache_key] = cached
-            self.model = cached
+    @property
+    def embedding_size(self) -> int:
+        """Dimension of the stored vectors (what re-embedding compares against)."""
+        return EMBED_DIM
 
     def embed(self, texts: List[str], *, is_query: bool = False) -> List[List[float]]:
-        """
-        is_query=True の場合はクエリ用のプレフィックス/タスクを適用する
-        """
-        # モデルごとのプレフィックス処理
-        prefix = ""
-        
-        # E5系の場合
-        if "e5" in self.model_name.lower():
-            prefix = "query: " if is_query else "passage: "
-        
-        # Sarashina (v2) の場合 (sentence-transformers等で使う場合)
-        # ※Sarashinaは「指示文」を入れるとより良いが、シンプルには query: / passage: でも機能する
-        # elif "sarashina" in self.model_name.lower():
-        #     prefix = "クエリ: " if is_query else "文章: "
-
-        # テキストにプレフィックスを結合
-        if prefix:
-            texts = [prefix + t for t in texts]
-
-        # Jina v3の場合は fastembed の task パラメータを使う必要がある
-        # fastembed >= 0.3.0
-        # kwargs = {}
-        # if "jina-embeddings-v3" in self.model_name.lower():
-        #     kwargs["task"] = "retrieval.query" if is_query else "retrieval.passage"
-        # vectors = list(self.model.embed(texts, **kwargs))
-
-        vectors = list(self.model.embed(texts))
-        return [list(map(float, v)) for v in vectors]
+        """Embed texts. is_query=True applies the search-query prompt, else the document prompt."""
+        if not texts:
+            return []
+        prompt = QUERY_PROMPT if is_query else DOCUMENT_PROMPT
+        vectors = self._encoder.encode([prompt + t for t in texts])
+        return vectors.tolist()
 
 
-def _auto_download_model(model_name: str) -> str:
-    """Auto-download a model from HuggingFace to the sbert/ directory.
-
-    Downloads only ONNX and tokenizer/config files (excludes PyTorch weights).
-    Returns the path to the downloaded model directory.
-    """
-    logger = logging.getLogger(__name__)
-    sbert_root = Path(__file__).resolve().parents[2] / "sbert"
-    model_suffix = model_name.split("/")[-1]
-    target_dir = sbert_root / model_suffix
-    if target_dir.exists():
-        try:
-            _resolve_model_file(target_dir)
-            return str(target_dir)
-        except FileNotFoundError:
-            logger.warning(
-                "Directory %s exists but contains no ONNX model file. "
-                "Re-downloading model '%s'...",
-                target_dir,
-                model_name,
-            )
-
-    logger.info(
-        "Downloading model '%s' to %s (this may take a few minutes)...",
-        model_name,
+def _download_model(target_dir: Path) -> None:
+    """Download the pinned model files into ``target_dir`` (first run / incomplete dir)."""
+    LOGGER.info(
+        "Downloading embedding model %s@%s to %s (about 210MB, this may take a few minutes)...",
+        EMBED_HF_REPO,
+        EMBED_HF_REVISION[:8],
         target_dir,
     )
     try:
         from huggingface_hub import snapshot_download
 
         snapshot_download(
-            model_name,
+            EMBED_HF_REPO,
+            revision=EMBED_HF_REVISION,
             local_dir=str(target_dir),
-            ignore_patterns=["*.bin", "*.safetensors", "*.h5", "openvino/*", "*.ot"],
+            allow_patterns=list(EMBED_MODEL_FILES),
         )
     except Exception:
-        logger.exception("Failed to auto-download model '%s'", model_name)
+        LOGGER.exception("Failed to download embedding model %s", EMBED_HF_REPO)
         raise
-    logger.info("Model '%s' downloaded successfully.", model_name)
-    return str(target_dir)
-
-
-def _build_local_model_kwargs(
-    *,
-    model_name: str,
-    local_model_path: str,
-    explicit_dim: int | None,
-) -> Dict[str, Any]:
-    model_dir = Path(local_model_path).expanduser().resolve()
-    if not model_dir.exists():
-        raise FileNotFoundError(f"SAIMemory embedding model path does not exist: {model_dir}")
-
-    model_file = _resolve_model_file(model_dir)
-    # Always use model_dir as the base: fastembed resolves model_file
-    # (e.g. "onnx/model.onnx") relative to specific_model_path, so using
-    # model_file_path.parent would double the "onnx/" prefix.
-    model_base = model_dir
-    embedding_dim = explicit_dim or _infer_embedding_dimension(model_dir)
-    pooling = _infer_pooling(model_dir)
-    normalization = _infer_normalization(model_dir)
-    additional_files = _collect_additional_files(model_dir)
-
-    key = (model_name.lower(), str(model_dir))
-
-    supported_models = {
-        entry["model"].lower()
-        for entry in TextEmbedding.list_supported_models()
-        if isinstance(entry, dict) and "model" in entry
-    }
-
-    if model_name.lower() not in supported_models and key not in _REGISTERED_MODELS:
-        TextEmbedding.add_custom_model(
-            model=model_name,
-            pooling=pooling,
-            normalization=normalization,
-            sources=ModelSource(hf=f"local/{model_dir.name}"),
-            dim=embedding_dim,
-            model_file=model_file,
-            additional_files=additional_files,
+    missing = missing_embed_model_files(target_dir)
+    if missing:
+        raise FileNotFoundError(
+            f"Embedding model download finished but {target_dir} is missing: {', '.join(missing)}"
         )
-        _REGISTERED_MODELS.add(key)
-
-    return {
-        "specific_model_path": str(model_base),
-        "local_files_only": True,
-    }
-
-
-def _resolve_model_file(model_dir: Path) -> str:
-    candidates = [
-        "onnx/model.onnx",
-        "onnx/model_optimized.onnx",
-        "model.onnx",
-        "model_optimized.onnx",
-    ]
-    for candidate in candidates:
-        if (model_dir / candidate).exists():
-            return candidate
-    raise FileNotFoundError(f"Could not locate ONNX model inside {model_dir}")
-
-
-def _infer_embedding_dimension(model_dir: Path) -> int:
-    pooling_cfg = model_dir / "1_Pooling" / "config.json"
-    if pooling_cfg.exists():
-        try:
-            data = json.loads(pooling_cfg.read_text(encoding="utf-8"))
-            dim = data.get("word_embedding_dimension")
-            if isinstance(dim, int) and dim > 0:
-                return dim
-        except Exception:
-            logging.warning("Failed to read pooling config for embedding dimension at %s", pooling_cfg, exc_info=True)
-
-    config_candidates = [
-        model_dir / "config.json",
-        model_dir / "sentence_bert_config.json",
-    ]
-    for cfg in config_candidates:
-        if cfg.exists():
-            try:
-                data = json.loads(cfg.read_text(encoding="utf-8"))
-            except Exception:
-                logging.warning("Failed to parse config file %s", cfg, exc_info=True)
-                continue
-            for key in ("word_embedding_dimension", "hidden_size", "embedding_size", "d_model"):
-                value = data.get(key)
-                if isinstance(value, int) and value > 0:
-                    return value
-    raise ValueError(f"Could not determine embedding dimension from files in {model_dir}")
-
-
-def _infer_pooling(model_dir: Path) -> PoolingType:
-    pooling_cfg = model_dir / "1_Pooling" / "config.json"
-    if pooling_cfg.exists():
-        try:
-            data = json.loads(pooling_cfg.read_text(encoding="utf-8"))
-            if data.get("pooling_mode_mean_tokens"):
-                return PoolingType.MEAN
-            if data.get("pooling_mode_cls_token"):
-                return PoolingType.CLS
-        except Exception:
-            logging.warning("Failed to read pooling config at %s", pooling_cfg, exc_info=True)
-    return PoolingType.MEAN
-
-
-def _infer_normalization(model_dir: Path) -> bool:
-    modules_path = model_dir / "modules.json"
-    if modules_path.exists():
-        try:
-            data = json.loads(modules_path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                for module in data:
-                    if isinstance(module, dict):
-                        module_type = str(module.get("type", "")).lower()
-                        if "normalize" in module_type:
-                            return True
-        except Exception:
-            logging.warning("Failed to read modules.json at %s", modules_path, exc_info=True)
-    # Default to True for sentence-transformer style checkpoints.
-    return True
-
-
-def _collect_additional_files(model_dir: Path) -> List[str]:
-    candidates = [
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "special_tokens_map.json",
-        "sentencepiece.bpe.model",
-        "vocab.txt",
-        "modules.json",
-        "config.json",
-        "1_Pooling/config.json",
-    ]
-    extras: List[str] = []
-    for rel in candidates:
-        if (model_dir / rel).exists():
-            extras.append(rel)
-    return extras
+    LOGGER.info("Embedding model downloaded to %s.", target_dir)
 
 
 def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
@@ -365,10 +251,16 @@ def semantic_recall(
         corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags, exclude_tags=exclude_tags)
 
     scored_map: dict[str, Tuple[Message, float, int]] = {}
+    deferred = 0
     for msg, vec, chunk_index in corpus:
         if exclude_message_ids and msg.id in exclude_message_ids:
             continue
         if len(vec) != vector_dim:
+            if not vec:
+                # The empty row of a deferred embedding (an import still being
+                # embedded): expected for a while, so no warning per row.
+                deferred += 1
+                continue
             logging.warning(
                 "semantic_recall: skipping message %s due to embedding dim mismatch (expected %s, got %s)",
                 msg.id,
@@ -381,6 +273,8 @@ def semantic_recall(
         current = scored_map.get(msg.id)
         if current is None or s > current[1]:
             scored_map[msg.id] = (msg, s, chunk_index)
+    if deferred:
+        LOGGER.debug("semantic_recall: skipped %d message(s) still waiting for their embeddings", deferred)
 
     scored = list(scored_map.values())
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -443,10 +337,16 @@ def semantic_recall_groups(
         corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags, exclude_tags=exclude_tags)
 
     scored_map: dict[str, Tuple[Message, float, int]] = {}
+    deferred = 0
     for msg, vec, chunk_index in corpus:
         if exclude_message_ids and msg.id in exclude_message_ids:
             continue
         if len(vec) != vector_dim:
+            if not vec:
+                # The empty row of a deferred embedding (an import still being
+                # embedded): expected for a while, so no warning per row.
+                deferred += 1
+                continue
             logging.warning(
                 "semantic_recall_groups: skipping message %s due to embedding dim mismatch (expected %s, got %s)",
                 msg.id,
@@ -459,6 +359,8 @@ def semantic_recall_groups(
         current = scored_map.get(msg.id)
         if current is None or s > current[1]:
             scored_map[msg.id] = (msg, s, chunk_index)
+    if deferred:
+        LOGGER.debug("semantic_recall_groups: skipped %d message(s) still waiting for their embeddings", deferred)
 
     scored = list(scored_map.values())
     scored.sort(key=lambda x: x[1], reverse=True)

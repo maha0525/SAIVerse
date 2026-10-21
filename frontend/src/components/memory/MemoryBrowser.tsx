@@ -6,7 +6,7 @@ import { getFormatLocale } from '@/i18n/core';
 import { t as uiText } from '@/i18n/core';
 import { useLocale } from '@/i18n/useLocale';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Upload, ChevronDown, ChevronUp, Sparkles } from 'lucide-react';
+import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, ChevronDown, ChevronUp, Sparkles } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
 import { formatThreadDateRange } from './formatters';
 
@@ -514,43 +514,8 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         }
     };
 
-    // Export handler
-    const handleExportThread = async () => {
-        if (!selectedThreadId) return;
-        try {
-            const res = await apiFetch(`/api/people/${personaId}/threads/${encodeURIComponent(selectedThreadId)}/export-native`);
-            if (!res.ok) {
-                alert(uiText("components.memory.MemoryBrowser.text016"));
-                return;
-            }
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            // Extract filename from Content-Disposition or generate one
-            const disposition = res.headers.get("Content-Disposition");
-            let filename = "export.json";
-            if (disposition) {
-                // RFC 5987: filename*=UTF-8''encoded_name
-                const rfc5987 = disposition.match(/filename\*=UTF-8''(.+?)(?:;|$)/i);
-                if (rfc5987) {
-                    filename = decodeURIComponent(rfc5987[1]);
-                } else {
-                    const match = disposition.match(/filename="?([^"]+)"?/);
-                    if (match) filename = match[1];
-                }
-            }
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-        } catch (error) {
-            console.error("Export failed", error);
-            alert(uiText("components.memory.MemoryBrowser.text017"));
-        }
-    };
-
+    // スレッド単位のエクスポートは廃止 (ペルソナ単位の PersonaPackPanel のエクスポートへ
+    // 置き換え。docs/intent/persona_pack.md §6)
     const totalPages = Math.ceil(totalMessages / pageSize);
 
     // Helper to check if selected thread can be set as active
@@ -682,14 +647,6 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                         title={uiText("components.memory.MemoryBrowser.text029")}
                                     >{uiText("components.memory.MemoryBrowser.text030")}</button>
                                 )}
-                                <button data-i18n="components.memory.MemoryBrowser.text031"
-                                    className={styles.exportBtn}
-                                    onClick={handleExportThread}
-                                    title={uiText("components.memory.MemoryBrowser.text031")}
-                                    disabled={!selectedThreadId}
-                                >
-                                    <Upload size={16} />
-                                </button>
                                 <button data-i18n="components.memory.MemoryBrowser.text032"
                                     className={styles.addMsgBtn}
                                     onClick={handleShowAddForm}

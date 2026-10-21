@@ -16,6 +16,8 @@ issue: docs/issues/head_mutation_notification_gap.md — head の元データ
   のみに依存する (DB 非参照) ため、head 本体の凍結 (refresh_on_events 空 =
   Metabolism まで再 capture しない) を破らずに「head に入るときと寸分たがわぬ
   断片」が得られる。**別文面を書かない** — 書き分けた瞬間からドリフトが始まる。
+  Memopedia は ``capture_mutation(ctx, page_ids)`` で対象ページだけを撮り、head と
+  共通の項目描画を使う (2026-10-18)。全索引は送らず、既読基準もページ別に合成する。
 - **配送は outbox 経由** (execution_ledger): begin_execution →  mark_running →
   mark_applied(outbox_items=[perception.push], deliver=False) → 通知ロックを
   離してから flush_pending_for_persona で即時配送。知覚バッファ →
@@ -64,6 +66,7 @@ def notify_head_mutation(
     *,
     operation_label: str,
     pipeline: HeadPipeline | None = None,
+    page_ids: tuple[str, ...] = (),
 ) -> None:
     """head 操作の内容型通知を発行する (操作ツールの成功点から呼ぶ)。
 
@@ -74,7 +77,8 @@ def notify_head_mutation(
     配送は ``manager.execution_ledger`` の outbox (target='perception.push')。
     台帳は SAIVerseManager が無条件に構築するので、台帳なしの直接 push 経路は
     持たない (2026-09-28 監査で撤去)。積んだ後、B (last_notified) を該当
-    section だけ全 Session 行で前進させる。撮影から B 前進まではペルソナの
+    section だけ全 Session 行で前進させる。Memopedia は ``page_ids`` の項目だけを
+    撮影・描画し、別ページの未通知変更を残して既読基準へ合成する。撮影から B 前進まではペルソナの
     通知ロックの内側、台帳の即時配送はロックの外 (モジュール docstring)。
 
     本関数は決して raise しない (通知の失敗はツール本体の成功を壊さない)。
@@ -83,6 +87,7 @@ def notify_head_mutation(
         _notify_head_mutation_inner(
             persona, manager, building_id, section_name,
             operation_label=operation_label, pipeline=pipeline,
+            page_ids=page_ids,
         )
     except Exception:
         LOGGER.warning(
@@ -99,6 +104,7 @@ def _notify_head_mutation_inner(
     *,
     operation_label: str,
     pipeline: HeadPipeline | None,
+    page_ids: tuple[str, ...],
 ) -> None:
     pipeline = pipeline or get_default_pipeline()
     section = pipeline.registry.by_name(section_name)
@@ -126,6 +132,7 @@ def _notify_head_mutation_inner(
             queued = _capture_and_queue_locked(
                 ledger, pipeline, ctx, section, section_name,
                 operation_label=operation_label,
+                page_ids=page_ids,
             )
     except Exception:
         # 台帳に積んだ後の B 前進で落ちた回も、積んだ分は即時配送してから
@@ -147,6 +154,7 @@ def _capture_and_queue_locked(
     section_name: str,
     *,
     operation_label: str,
+    page_ids: tuple[str, ...],
 ) -> bool:
     """通知ロックの内側で「撮影 → 積む (台帳は配送しない) → B 前進」を行う。
 
@@ -154,7 +162,13 @@ def _capture_and_queue_locked(
         台帳の outbox に積んだら True (呼び出し側がロックの外で即時配送する)。
         何も積まなかった回 (render が空) は False。
     """
-    snapshot = section.capture(ctx)
+    if section_name == "memopedia_index":
+        if not page_ids:
+            LOGGER.warning("head_mutation_notify: missing Memopedia page IDs; skipped")
+            return False
+        snapshot = section.capture_mutation(ctx, page_ids)
+    else:
+        snapshot = section.capture(ctx)
     rendered = section.render(snapshot)
     if rendered is None or not (rendered.text or "").strip():
         LOGGER.debug(
@@ -163,8 +177,7 @@ def _capture_and_queue_locked(
         )
         return False
 
-    # 別文面を書かない — render text をそのまま同梱するのが §3.3 不変条件
-    # 「寸分たがわず」の構造保証。
+    # Memopedia は対象ページだけを同じ項目 renderer で描く。他 section は全文。
     content = f"{operation_label}\n\n{rendered.text}"
     persona_id = ctx.persona_id
 
@@ -182,11 +195,16 @@ def _capture_and_queue_locked(
             "payload": {
                 "kind": PERCEPTION_KIND,
                 "content": content,
-                "reduce_key": f"head_mutation:{section_name}",
+                "reduce_key": (
+                    f"head_mutation:{section_name}:{page_ids[0]}"
+                    if section_name == "memopedia_index" and len(page_ids) == 1
+                    else None if page_ids else f"head_mutation:{section_name}"
+                ),
                 "salient": False,
                 "media": [],
                 "metadata": json.dumps(
-                    {"section": section_name}, ensure_ascii=False,
+                    {"section": section_name, **({"page_ids": list(page_ids)} if page_ids else {})},
+                    ensure_ascii=False,
                 ),
             },
         }],
@@ -208,6 +226,7 @@ def notify_head_mutation_from_tool_context(
     section_name: str,
     *,
     operation_label: str,
+    page_ids: tuple[str, ...] = (),
 ) -> None:
     """ツール実行中の contextvars から persona / manager を解決して通知する。
 
@@ -238,6 +257,7 @@ def notify_head_mutation_from_tool_context(
         notify_head_mutation(
             persona, manager, building_id, section_name,
             operation_label=operation_label,
+            page_ids=page_ids,
         )
     except Exception:
         LOGGER.warning(

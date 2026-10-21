@@ -15,6 +15,11 @@ See docs/intent/codex_subscription_auth.md.
 Cloudflare in front of chatgpt.com fingerprints clients by their TLS handshake.
 Plain `requests` / `httpx` get challenged; we use `curl_cffi` to impersonate
 Chrome's TLS fingerprint, the same way Codex CLI's reqwest client gets through.
+
+Tokens issued through "Sign in with ChatGPT" (SIWC, see openai_codex_auth)
+take a different route: plain httpx to https://api.openai.com/v1/responses,
+refresh at the SIWC token endpoint with the issued client id, and a request
+body stripped of the parameters SIWC rejects (max_output_tokens etc.).
 """
 from __future__ import annotations
 
@@ -36,15 +41,33 @@ from .openai_codex_auth import (
     CODEX_ORIGINATOR,
     CODEX_OAUTH_CLIENT_ID,
     CODEX_REFRESH_TOKEN_URL,
+    SIWC_RESPONSES_URL,
+    SIWC_TOKEN_URL,
+    SIWC_RESOURCE,
     NO_AUTH_HINT,
     AuthStore,
     access_token_expiry,
     build_user_agent as _build_user_agent,
+    is_siwc_record,
+    is_usable_token,
+    redact_secrets,
+    resolve_siwc_client_id,
+    summarize_error_body,
+    revoke_siwc_refresh_token,
+    siwc_scope_grants_direct_use,
     read_auth_store,
     resolve_active_store,
     write_auth_store,
 )
 from .openai_message_preparer import prepare_openai_messages
+# The join rule lives in output_phases so the client and SEA share one copy;
+# the old private name stays importable for existing callers.
+from .output_phases import (
+    OUTPUT_PHASES_METADATA_KEY,
+    join_message_texts as _join_message_texts,
+    normalize_phase as _normalize_phase,
+    output_phases_for_sent_text,
+)
 from .schema_utils import normalize_schema_for_strict_json_output
 from .utils import positive_token_count
 
@@ -54,6 +77,19 @@ CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 SUPPORTED_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 # Pre-emptively refresh when access_token has less than this many seconds left
 TOKEN_REFRESH_LEEWAY_SECONDS = 60.0
+# Responses API parameters that SIWC token sharing rejects over HTTP. Only
+# max_output_tokens can currently come out of _build_body (temperature is
+# already dropped there); the rest are listed so a future builder change cannot
+# leak them onto the SIWC route.
+_SIWC_UNSUPPORTED_BODY_KEYS = (
+    "max_output_tokens",
+    "temperature",
+    "top_p",
+    "metadata",
+    "user",
+    "truncation",
+    "previous_response_id",
+)
 
 
 class CodexHTTPError(RuntimeError):
@@ -90,22 +126,6 @@ def _extract_json_object_candidate(text: str) -> str:
     if start != -1 and end != -1 and end > start:
         return candidate[start : end + 1]
     return candidate
-
-
-def _join_message_texts(texts: List[str]) -> str:
-    """Join per-message texts the same way `_iter_chunks` streams them.
-
-    空のメッセージは飛ばし、前の本文が改行で終わっていない境目にだけ改行を
-    挟む。ストリームで流した chunk の結合と同じ文字列になる。
-    """
-    joined = ""
-    for text in texts:
-        if not text:
-            continue
-        if joined and not joined.endswith("\n"):
-            joined += "\n"
-        joined += text
-    return joined
 
 
 class _StreamDiagnostics:
@@ -193,21 +213,67 @@ class _StreamDiagnostics:
         }, separators=(",", ":")))
 
 
+# Attribute that carries the bearer token a response was requested with, so
+# that response's own diagnostics can scrub it (bound per response, never
+# shared across concurrent requests on one client).
+_SENT_TOKEN_ATTR = "_saiverse_sent_token"
+
+
+class _SentTokenResponse:
+    """Fallback wrapper for a response object that refuses new attributes."""
+
+    def __init__(self, inner: Any, token: Optional[str]) -> None:
+        self._inner = inner
+        setattr(self, _SENT_TOKEN_ATTR, token)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _HttpxResponseAdapter:
+    """Adapts an httpx.Response stream to match the curl_cffi response interface.
+
+    Allows downstream SSE parsing and error draining to treat httpx and curl_cffi
+    responses interchangeably (iter_content(), ok, status_code, close()).
+    """
+
+    def __init__(self, resp: httpx.Response) -> None:
+        self._resp = resp
+        self.status_code = resp.status_code
+        # 2xx only: requests are sent with follow_redirects=False, so a 3xx
+        # is an unfollowed redirect, not a usable response.
+        self.ok = 200 <= resp.status_code < 300
+        self.headers = resp.headers
+
+    @property
+    def text(self) -> str:
+        try:
+            return self._resp.text
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def iter_content(self) -> Iterator[bytes]:
+        return self._resp.iter_bytes()
+
+    def close(self) -> None:
+        self._resp.close()
+
+
 class OpenAICodexClient(LLMClient):
     """OpenAI Codex backend client (ChatGPT subscription OAuth).
 
-    Implemented:
-        * `generate(messages)` returns the assistant's final text
-        * `generate(messages, tools=[...])` returns tool-detection dict
-        * `generate(messages, response_schema={...})` returns parsed dict
-        * `generate_stream(...)` yields per-token text deltas; `{"type":"thinking", "content":...}`
-          dicts for reasoning summary deltas
-        * Token usage via `_store_usage`
-        * Reasoning text captured via `_store_reasoning` (consume_reasoning())
-        * Image input through `{"type": "image_url"}` content parts
-        * `reasoning_effort` parameter (low/medium/high/xhigh)
-        * Auto refresh of expired OAuth tokens (401 → refresh_token grant →
-          write-back to the store the tokens came from)
+    Supports two connection modes transparently:
+        1. Official Sign in with ChatGPT (Token Sharing):
+           * Target: https://api.openai.com/v1/responses
+           * Plain HTTP (httpx), standard Bearer authorization header
+           * Active whenever `is_siwc_record()` recognizes the stored record
+             (explicit `source: saiverse_siwc` marker first; token heuristics
+             only for records without any `source`, i.e. Codex CLI auth.json)
+           * Body omits the parameters SIWC rejects (see `_SIWC_UNSUPPORTED_BODY_KEYS`)
+        2. Legacy Codex CLI backend:
+           * Target: https://chatgpt.com/backend-api/codex/responses
+           * Chrome TLS impersonation (curl_cffi), originator + account-id headers
+           * Used when piggybacking on traditional ~/.codex/auth.json
     """
 
     def tool_spec_format(self) -> ToolSpecFormat:
@@ -227,6 +293,7 @@ class OpenAICodexClient(LLMClient):
         self._timeout = float(timeout)
         self._params: Dict[str, Any] = {}
         self._session: Optional[Any] = None
+        self._httpx_session: Optional[httpx.Client] = None
         # Reuse OpenAIClient's defaults: 5 MB cap on image bytes for OpenAI-style
         # vision endpoints. SAIVerse normally provides image attachments via
         # `metadata.attachments` rather than expanded content lists, so we run
@@ -247,7 +314,11 @@ class OpenAICodexClient(LLMClient):
         """
         return positive_token_count(self._params.get("max_output_tokens"))
 
-    def _ensure_session(self) -> Any:
+    def _ensure_session(self, is_siwc: bool = False) -> Any:
+        if is_siwc:
+            if self._httpx_session is None:
+                self._httpx_session = httpx.Client(timeout=self._timeout)
+            return self._httpx_session
         if self._session is None:
             self._session = cffi_requests.Session(impersonate=CODEX_IMPERSONATE)
         return self._session
@@ -261,7 +332,8 @@ class OpenAICodexClient(LLMClient):
     def _load_auth(self) -> Dict[str, Any]:
         return read_auth_store(self._resolve_store().path)
 
-    def _build_headers(self) -> Dict[str, str]:
+    def _resolve_connection_params(self) -> Tuple[str, Dict[str, str], bool]:
+        """Resolve endpoint URL, headers, and SIWC mode from the active auth store."""
         auth = self._load_auth()
         tokens = auth.get("tokens") or {}
         access_token = tokens.get("access_token")
@@ -270,15 +342,48 @@ class OpenAICodexClient(LLMClient):
             raise RuntimeError(
                 f"認証ファイルに tokens.access_token がありません。{NO_AUTH_HINT}"
             )
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-            "OpenAI-Beta": "responses=experimental",
-            "originator": CODEX_ORIGINATOR,
-            "User-Agent": _build_user_agent(),
-        }
-        if account_id:
-            headers["ChatGPT-Account-ID"] = account_id
+        # Stored tokens (older records, Codex CLI's auth.json, past refreshes)
+        # never went through today's checks. One that cannot travel in a
+        # header would inject headers or be quoted whole in the HTTP library's
+        # error, so refuse it here without echoing the value.
+        if not is_usable_token(access_token) or (
+            account_id and not is_usable_token(account_id)
+        ):
+            raise RuntimeError(
+                f"認証ファイルの鍵の形式が正しくありません。{NO_AUTH_HINT}"
+            )
+        is_siwc = is_siwc_record(auth)
+        if is_siwc:
+            # The spec requires the granted scope to include direct plan use
+            # before the tokens are used for inference. A record without a
+            # stored scope (older record) is judged at the API instead.
+            granted_scope = tokens.get("scope")
+            if granted_scope and not siwc_scope_grants_direct_use(granted_scope):
+                raise RuntimeError(
+                    "Sign in with ChatGPT のトークンに ChatGPT プランでの利用許可 "
+                    "(chatgpt.tokens.use.direct) がありません。SAIVerse の設定画面から "
+                    "ChatGPT にログインし直してください。"
+                )
+            url = SIWC_RESPONSES_URL
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            }
+        else:
+            url = f"{CODEX_BASE_URL}/responses"
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "OpenAI-Beta": "responses=experimental",
+                "originator": CODEX_ORIGINATOR,
+                "User-Agent": _build_user_agent(),
+            }
+            if account_id:
+                headers["ChatGPT-Account-ID"] = account_id
+        return url, headers, is_siwc
+
+    def _build_headers(self) -> Dict[str, str]:
+        _, headers, _ = self._resolve_connection_params()
         return headers
 
     @staticmethod
@@ -446,6 +551,28 @@ class OpenAICodexClient(LLMClient):
 
             if role == "assistant":
                 text = self._flatten_content_text(msg.get("content"))
+                # A past Codex response that arrived as several output messages
+                # is sent back as the same messages with their phase, but only
+                # when the recorded split still joins to the exact text being
+                # sent. Anything else (older rows, edited or rebuilt text) goes
+                # out as one message, as before.
+                metadata = msg.get("metadata")
+                phases = output_phases_for_sent_text(
+                    metadata.get(OUTPUT_PHASES_METADATA_KEY)
+                    if isinstance(metadata, dict) else None,
+                    text,
+                )
+                if phases is not None:
+                    for entry in phases:
+                        item: Dict[str, Any] = {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": entry["text"]}],
+                        }
+                        if entry["phase"] is not None:
+                            item["phase"] = entry["phase"]
+                        input_items.append(item)
+                    continue
                 input_items.append(
                     {
                         "type": "message",
@@ -493,6 +620,9 @@ class OpenAICodexClient(LLMClient):
                 max_image_embeds=self._max_image_embeds,
                 convert_system_to_user=False,
                 reasoning_passback_field=None,
+                # _build_input reads the per-message split of past assistant
+                # turns from here; the preparer drops metadata otherwise.
+                keep_metadata_keys=(OUTPUT_PHASES_METADATA_KEY,),
             )
         except Exception as exc:  # noqa: BLE001
             LOG.warning(
@@ -600,20 +730,39 @@ class OpenAICodexClient(LLMClient):
         elif seconds < 5 * 60:
             LOG.info("Codex access_token expires in %.0fs", seconds)
 
+    @staticmethod
+    def _to_siwc_body(body: Dict[str, Any]) -> Dict[str, Any]:
+        """Copy of `body` fit for the SIWC route (the legacy body is untouched).
+
+        SIWC requires `store: false` + `stream: true` and rejects the keys in
+        `_SIWC_UNSUPPORTED_BODY_KEYS`. System instructions already travel in
+        `instructions` (_build_input never emits a system-role item).
+        """
+        siwc_body = dict(body)
+        for key in _SIWC_UNSUPPORTED_BODY_KEYS:
+            if key in siwc_body:
+                LOG.debug("dropping %s=%r for Sign in with ChatGPT request", key, siwc_body[key])
+                del siwc_body[key]
+        siwc_body["store"] = False
+        siwc_body["stream"] = True
+        return siwc_body
+
     def _post_responses(
         self,
         body: Dict[str, Any],
     ) -> Any:
-        headers = self._build_headers()
+        url, headers, is_siwc = self._resolve_connection_params()
+        if is_siwc:
+            body = self._to_siwc_body(body)
         # Best-effort expiry warning on the token we're about to send.
         access_token_for_log = headers.get("Authorization", "").removeprefix("Bearer ")
         if access_token_for_log:
             self._warn_if_expiring_soon(access_token_for_log)
-        session = self._ensure_session()
-        url = f"{CODEX_BASE_URL}/responses"
+
         LOG.info(
-            "POST %s model=%s input_messages=%d tools=%d schema=%s effort=%s",
+            "POST %s (siwc=%s) model=%s input_messages=%d tools=%d schema=%s effort=%s",
             url,
+            is_siwc,
             self.model,
             len(body["input"]),
             len(body.get("tools") or []),
@@ -637,21 +786,49 @@ class OpenAICodexClient(LLMClient):
                     )
                 else:
                     LOG.debug("input[%d] type=%s", idx, item.get("type"))
-        resp = session.post(
-            url,
-            headers=headers,
-            json=body,
-            timeout=self._timeout,
-            stream=True,
-        )
+
+        if is_siwc:
+            session = self._ensure_session(is_siwc=True)
+            try:
+                req = session.build_request("POST", url, headers=headers, json=body)
+                raw_resp = session.send(req, stream=True)
+            except httpx.LocalProtocolError as exc:
+                # The protocol error for an unsendable header quotes the whole
+                # header — the Bearer token — so never let its text propagate
+                # into logs or the UI. Name the type only.
+                raise RuntimeError(
+                    "Sign in with ChatGPT の鍵を送信できませんでした "
+                    f"({type(exc).__name__})。SAIVerse の設定画面から ChatGPT に"
+                    "ログインし直してください。"
+                ) from None
+            resp: Any = _HttpxResponseAdapter(raw_resp)
+        else:
+            session = self._ensure_session(is_siwc=False)
+            resp = session.post(
+                url,
+                headers=headers,
+                json=body,
+                timeout=self._timeout,
+                stream=True,
+            )
+
         if not resp.ok:
-            err_text = self._drain_error_body(resp)
+            # The body goes into CodexHTTPError, logs and the UI: strip the
+            # token we just sent (an error page could echo it) and any others.
+            err_text = redact_secrets(self._drain_error_body(resp), access_token_for_log)
             status = resp.status_code
             try:
                 resp.close()
             except Exception:
                 pass
             raise CodexHTTPError(status, err_text)
+        # Bind the token to THIS response, so the stream diagnostics of this
+        # response scrub this request's token even when other requests run
+        # concurrently on the same client.
+        try:
+            setattr(resp, _SENT_TOKEN_ATTR, access_token_for_log or None)
+        except Exception:  # noqa: BLE001
+            resp = _SentTokenResponse(resp, access_token_for_log or None)
         return resp
 
     def _refresh_or_pickup_latest(self, prior_access_token: Optional[str]) -> None:
@@ -668,7 +845,16 @@ class OpenAICodexClient(LLMClient):
              cross-writing would break whichever process reads the other file).
 
         This avoids the `refresh_token_reused` failure mode where Codex CLI and
-        SAIVerse race to spend the same one-shot refresh token.
+        SAIVerse race to spend the same one-shot refresh token. The store lock
+        is held across the refresh request on purpose: that serialization is
+        what keeps two processes from spending one rotating refresh token.
+
+        SIWC only: if the refresh succeeded but its response is unusable (an
+        `access_token` that is not a non-empty string — the store is then not
+        written) or writing the rotated tokens failed, the old refresh token
+        is already spent and the new one would be a live grant nobody holds —
+        it is revoked best-effort (after the store lock is released) and the
+        error is re-raised.
         """
         store = self._resolve_store()
         try:
@@ -676,12 +862,15 @@ class OpenAICodexClient(LLMClient):
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"could not initialize auth store lock: {exc}") from exc
 
+        # (refresh_token, client_id) of a SIWC refresh whose write-back failed.
+        unsaved_siwc_refresh: Optional[Tuple[str, str]] = None
         try:
             with lock:
                 latest = read_auth_store(store.path)
                 latest_tokens = latest.get("tokens") or {}
                 latest_access = latest_tokens.get("access_token")
                 latest_refresh = latest_tokens.get("refresh_token")
+                is_siwc = is_siwc_record(latest)
 
                 if latest_access and latest_access != prior_access_token:
                     seconds = self._seconds_until_expiry(latest_access)
@@ -699,22 +888,116 @@ class OpenAICodexClient(LLMClient):
                         f"{store.path} に refresh_token がありません。{NO_AUTH_HINT}"
                     )
 
-                LOG.info("refreshing Codex access_token via refresh_token grant")
-                refreshed = self._request_refresh(latest_refresh)
-                self._persist_refreshed_tokens(store.path, latest, refreshed)
+                LOG.info(
+                    "refreshing Codex access_token via refresh_token grant (siwc=%s)",
+                    is_siwc,
+                )
+                if is_siwc:
+                    # A SIWC refresh token must never reach the legacy Codex
+                    # endpoint (it would always fail there): without an
+                    # issued client id the only way forward is a new sign-in.
+                    client_id = resolve_siwc_client_id(latest_tokens)
+                    if not client_id:
+                        raise RuntimeError(
+                            "Sign in with ChatGPT のトークンに client_id が見つからないため"
+                            "更新できません。SAIVerse の設定画面から ChatGPT に"
+                            "ログインし直してください。"
+                        )
+                    refreshed = self._request_siwc_refresh(latest_refresh, client_id)
+                    try:
+                        # Inside this try: a rejected response's new refresh
+                        # token (if it is a usable string) is revoked below,
+                        # like one whose write-back failed.
+                        self._check_siwc_refresh_response(refreshed)
+                        self._persist_refreshed_tokens(store.path, latest, refreshed)
+                    except Exception:
+                        new_refresh = (
+                            refreshed.get("refresh_token")
+                            if isinstance(refreshed, dict) else None
+                        )
+                        if isinstance(new_refresh, str) and new_refresh:
+                            unsaved_siwc_refresh = (new_refresh, client_id)
+                        raise
+                else:
+                    refreshed = self._request_refresh(latest_refresh)
+                    # Same shape check as SIWC before anything overwrites the
+                    # store (it may be Codex CLI's own auth.json).
+                    if not isinstance(refreshed, dict) or not is_usable_token(
+                        refreshed.get("access_token")
+                    ) or (
+                        refreshed.get("refresh_token") is not None
+                        and not is_usable_token(refreshed.get("refresh_token"))
+                    ):
+                        raise RuntimeError(
+                            f"鍵の更新応答に使える鍵がありませんでした。{NO_AUTH_HINT}"
+                        )
+                    self._persist_refreshed_tokens(store.path, latest, refreshed)
         except FileLockTimeout as exc:
             raise RuntimeError(
                 "could not acquire auth store lock within 30s; another process "
                 "may be refreshing concurrently"
             ) from exc
+        finally:
+            # Runs after `with lock` has exited: no network I/O under the lock.
+            if unsaved_siwc_refresh is not None and not self._store_holds_refresh_token(
+                store.path, unsaved_siwc_refresh[0]
+            ):
+                if not revoke_siwc_refresh_token(*unsaved_siwc_refresh):
+                    LOG.warning(
+                        "SIWC refresh: rotated tokens could not be saved and revoking "
+                        "the new refresh token failed; it stays valid at OpenAI until "
+                        "it expires or is unlinked from the ChatGPT settings"
+                    )
+
+    @staticmethod
+    def _check_siwc_refresh_response(refreshed: Any) -> None:
+        """Refuse a SIWC refresh response that must not overwrite the store.
+
+        The response is untrusted JSON: `access_token` has to be a non-empty
+        string, and a `refresh_token`, when present, too (a rotated token that
+        is not a usable string would replace the spent one with garbage).
+        Raising here leaves the store untouched; the caller revokes a usable
+        new refresh token after the store lock is released.
+        """
+        relogin = "SAIVerse の設定画面から ChatGPT にログインし直してください。"
+        if not isinstance(refreshed, dict):
+            raise RuntimeError(
+                f"Sign in with ChatGPT の鍵の更新応答が読めませんでした。{relogin}"
+            )
+        if not is_usable_token(refreshed.get("access_token")):
+            raise RuntimeError(
+                f"Sign in with ChatGPT の鍵の更新応答に使える access_token がありませんでした。{relogin}"
+            )
+        new_refresh = refreshed.get("refresh_token")
+        if new_refresh is not None and not is_usable_token(new_refresh):
+            raise RuntimeError(
+                f"Sign in with ChatGPT の鍵の更新応答の refresh_token が不正でした。{relogin}"
+            )
+
+    @staticmethod
+    def _store_holds_refresh_token(store_path: Path, refresh_token: str) -> bool:
+        """Whether the store file currently holds `refresh_token` (unlocked read).
+
+        Only used after a failed SIWC write-back, to never revoke a token that
+        did reach the file. An unreadable file answers True (do not revoke
+        what may be saved); a missing file answers False (nothing holds it).
+        """
+        try:
+            stored = (read_auth_store(store_path).get("tokens") or {}).get("refresh_token")
+        except FileNotFoundError:
+            return False
+        except Exception:  # noqa: BLE001
+            return True
+        return stored == refresh_token
 
     def _request_refresh(self, refresh_token: str) -> Dict[str, Any]:
         """POST to https://auth.openai.com/oauth/token with refresh_token grant.
 
-        Plain httpx, NOT curl_cffi: the auth host serves the browser HTML page
-        to TLS-impersonating clients instead of the JSON token response (same
-        trap the device-code poll hit). Only the chatgpt.com inference host
-        needs the Chrome impersonation.
+        Legacy Codex CLI tokens only (SIWC tokens go through
+        `_request_siwc_refresh`). Plain httpx, NOT curl_cffi: the auth host
+        serves the browser HTML page to TLS-impersonating clients instead of
+        the JSON token response (same trap the device-code poll hit). Only the
+        chatgpt.com inference host needs the Chrome impersonation.
         """
         with httpx.Client(timeout=30.0, follow_redirects=False) as session:
             payload = {
@@ -732,9 +1015,38 @@ class OpenAICodexClient(LLMClient):
                 json=payload,
             )
             if resp.status_code != 200:
-                err = resp.text or ""
+                # Auth-server body: only its error code travels (see
+                # summarize_error_body) — it may carry or echo tokens.
                 raise RuntimeError(
-                    f"refresh_token grant failed status={resp.status_code}: {err[:600]}"
+                    f"refresh_token grant failed status={resp.status_code}: "
+                    f"{summarize_error_body(resp.text or '')}"
+                )
+            try:
+                return resp.json()
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"refresh response was not JSON: {exc}") from exc
+
+    def _request_siwc_refresh(self, refresh_token: str, client_id: str) -> Dict[str, Any]:
+        """SIWC refresh: form POST to the SIWC token endpoint.
+
+        `client_id` is the ISSUED client id saved with this token set (never
+        dynamic_agent_client). `scope` is deliberately not sent.
+        """
+        with httpx.Client(timeout=30.0, follow_redirects=False) as session:
+            resp = session.post(
+                SIWC_TOKEN_URL,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": client_id,
+                    "refresh_token": refresh_token,
+                    "resource": SIWC_RESOURCE,
+                },
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"SIWC refresh_token grant failed status={resp.status_code}: "
+                    f"{summarize_error_body(resp.text or '')}"
                 )
             try:
                 return resp.json()
@@ -747,17 +1059,30 @@ class OpenAICodexClient(LLMClient):
         existing_auth: Dict[str, Any],
         refreshed: Dict[str, Any],
     ) -> None:
-        """Atomically write the refreshed tokens back to the store they came from."""
+        """Atomically write the refreshed tokens back to the store they came from.
+
+        SIWC refresh tokens rotate together with the granted scope, so a SIWC
+        record also takes the refreshed `scope`. Legacy records (which may be
+        Codex CLI's own ~/.codex/auth.json) never gain a field they did not have.
+        The record's top-level fields — `source` included, which routes a
+        SIWC record — are written back unchanged.
+        """
         tokens = dict(existing_auth.get("tokens") or {})
+        replace_scope = is_siwc_record(existing_auth)
         new_id = refreshed.get("id_token")
         new_access = refreshed.get("access_token")
         new_refresh = refreshed.get("refresh_token")
+        new_scope = refreshed.get("scope")
         if new_id:
             tokens["id_token"] = new_id
         if new_access:
             tokens["access_token"] = new_access
         if new_refresh:
             tokens["refresh_token"] = new_refresh
+        if replace_scope and new_scope:
+            if isinstance(new_scope, (list, tuple)):
+                new_scope = " ".join(str(s) for s in new_scope)
+            tokens["scope"] = new_scope
         existing_auth["tokens"] = tokens
         existing_auth["last_refresh"] = datetime.now(tz=timezone.utc).isoformat()
 
@@ -813,7 +1138,10 @@ class OpenAICodexClient(LLMClient):
             try:
                 return json.loads(data_str)
             except json.JSONDecodeError:
-                LOG.debug("could not parse SSE payload: %s", data_str[:200])
+                LOG.debug(
+                    "could not parse SSE payload: %s",
+                    redact_secrets(data_str, getattr(resp, _SENT_TOKEN_ATTR, None))[:200],
+                )
                 return None
 
         for chunk in resp.iter_content():
@@ -850,7 +1178,9 @@ class OpenAICodexClient(LLMClient):
               very end, with everything aggregators need:
                   text, function_calls, reasoning_summary_text,
                   reasoning_full_text, usage_input, usage_output, usage_cached,
-                  message_texts (本文をメッセージごとに分けたもの)
+                  message_texts (本文をメッセージごとに分けたもの),
+                  output_phases (メッセージごとの phase と、そのメッセージとして
+                  流した本文の並び。結合が text と一致しないときは None)
 
         Codex 系 (GPT-5.3-Codex 以降) は 1 回の応答を複数の出力メッセージ
         (commentary / final_answer など) に分けて返すことがある。境目を潰して
@@ -864,6 +1194,16 @@ class OpenAICodexClient(LLMClient):
         本文が届く応答では、まだ流していないぶんをその場で yield して埋める —
         集約側だけが本文を知っている状態を作らない (ストリーミング経路の消費者は
         chunk の結合を正とするため)。
+
+        output_phases is computed beside the text and never changes it: the
+        text (where separator newlines go, which done tail is streamed) follows
+        exactly the same rules as before output_phases existed. The split is
+        reported only when the stream proves it: every message is known from
+        an output_item.added with an id, every piece of visible text names a
+        known message by item_id, no message's text resumes after another
+        message's text, and the join of the per-message texts equals the
+        text. Otherwise output_phases is None and the caller sends the turn as
+        one message.
         """
         delta_buffer: List[str] = []
         # output_text.done の本文をメッセージ (item_id) ごとに集める。
@@ -879,6 +1219,37 @@ class OpenAICodexClient(LLMClient):
         message_index = 0
         # 直近の可視 delta の item_id (メッセージ境界の第二の信号)。
         last_delta_item_id = ""
+        # output_phases bookkeeping (observes the text decisions only).
+        # msg_phases: ids of messages known from output_item.added, with their
+        # phase, in arrival order. chunk_ids runs beside delta_buffer and holds
+        # the item_id each visible chunk names (None for a separator newline).
+        # phases_ok becomes False when the stream does not prove the split.
+        msg_phases: Dict[str, Optional[str]] = {}
+        chunk_ids: List[Optional[str]] = []
+        completed_ids: List[str] = []
+        phases_ok = True
+
+        def _note_message(item: Dict[str, Any], *, added: bool) -> None:
+            """Only output_item.added registers a message id. A later item with
+            the same id may fill a missing phase; a different phase is a conflict."""
+            nonlocal phases_ok
+            item_id = item.get("id") or ""
+            if not item_id or (not added and item_id not in msg_phases):
+                return
+            phase = _normalize_phase(item.get("phase"))
+            known = msg_phases.setdefault(item_id, phase)
+            if known is None:
+                msg_phases[item_id] = phase
+            elif phase is not None and phase != known:
+                phases_ok = False
+
+        def _attribute(item_id: str) -> None:
+            """Record the item_id of the visible chunk about to be appended."""
+            nonlocal phases_ok
+            if item_id not in msg_phases:
+                phases_ok = False
+            chunk_ids.append(item_id)
+
         pending_calls: Dict[str, Dict[str, str]] = {}
         reasoning_summaries: Dict[int, List[str]] = {}
         reasoning_full: List[str] = []
@@ -910,10 +1281,12 @@ class OpenAICodexClient(LLMClient):
                     if item_id and last_delta_item_id and item_id != last_delta_item_id:
                         if delta_buffer and not delta_buffer[-1].endswith("\n"):
                             delta_buffer.append("\n")
+                            chunk_ids.append(None)
                             yield "\n"
                         delta_consumed = len(delta_buffer)
                     if item_id:
                         last_delta_item_id = item_id
+                    _attribute(item_id)
                     delta_buffer.append(delta)
                     yield delta
 
@@ -925,8 +1298,13 @@ class OpenAICodexClient(LLMClient):
                 # いま流す (delta 無しで done だけ届く応答でも、ストリームの
                 # 消費者に本文が届くように)。done と delta が食い違う異常形は
                 # 流した側 (delta) を正とし、二重には流さない。
+                # The done must name the message of the streamed text it closes.
+                done_item_id = event.get("item_id") or ""
+                if any(chunk_id != done_item_id for chunk_id in chunk_ids[delta_consumed:]):
+                    phases_ok = False
                 if done_text.startswith(part_streamed) and len(done_text) > len(part_streamed):
                     missing = done_text[len(part_streamed):]
+                    _attribute(done_item_id)
                     delta_buffer.append(missing)
                     yield missing
                 done_texts.setdefault(item_key, []).append(done_text or part_streamed)
@@ -953,9 +1331,11 @@ class OpenAICodexClient(LLMClient):
                     # 前には入れない)。
                     if delta_buffer and not delta_buffer[-1].endswith("\n"):
                         delta_buffer.append("\n")
+                        chunk_ids.append(None)
                         yield "\n"
                     delta_consumed = len(delta_buffer)
                     message_index += 1
+                    _note_message(item, added=True)
                 elif item.get("type") == "function_call":
                     item_id = item.get("id") or ""
                     pending_calls[item_id] = {
@@ -972,6 +1352,8 @@ class OpenAICodexClient(LLMClient):
 
             elif event_type == "response.output_item.done":
                 item = event.get("item") or {}
+                if item.get("type") == "message":
+                    _note_message(item, added=False)
                 if item.get("type") == "function_call":
                     item_id = item.get("id") or ""
                     pending_calls[item_id] = {
@@ -991,6 +1373,8 @@ class OpenAICodexClient(LLMClient):
                 # done イベントが来なかった時のフォールバック。同一 item 内の
                 # part は連結し、message item どうしの境目には改行を挟む。
                 for item in response_obj.get("output") or []:
+                    if item.get("type") == "message":
+                        _note_message(item, added=False)
                     parts: List[str] = []
                     has_text = False
                     for content_part in item.get("content") or []:
@@ -999,11 +1383,17 @@ class OpenAICodexClient(LLMClient):
                             has_text = True
                     if has_text:
                         completed_texts.append("".join(parts))
+                        completed_ids.append(
+                            (item.get("id") or "") if item.get("type") == "message" else ""
+                        )
 
             elif event_type == "response.failed":
                 response_obj = event.get("response") or {}
                 error = response_obj.get("error") or {}
-                raise RuntimeError(f"Codex response failed: {error}")
+                # The error object comes from the stream of a request that
+                # carried our token; scrub before it becomes exception text.
+                safe_error = redact_secrets(str(error), getattr(resp, _SENT_TOKEN_ATTR, None))[:1000]
+                raise RuntimeError(f"Codex response failed: {safe_error}")
 
         # ストリームへ流した結合が正典 (SEA 側は chunk の結合を text として使う)。
         # done が一部のメッセージで欠けても、流れた本文は捨てない。done /
@@ -1018,10 +1408,43 @@ class OpenAICodexClient(LLMClient):
             message_texts = []
         if stream_text:
             final_text = stream_text
+            pieces = [
+                (chunk_id, chunk)
+                for chunk_id, chunk in zip(chunk_ids, delta_buffer)
+                if chunk_id is not None
+            ]
         else:
             final_text = _join_message_texts(message_texts)
             if final_text:
                 yield final_text
+            # Delta-less: the texts come from done (keyed by item_id) or
+            # completed output items; each must name a message known from added.
+            source_ids = list(done_texts) if done_texts else completed_ids
+            pieces = list(zip(source_ids, message_texts))
+        # Group the text per message in stream order (separator newlines are
+        # left out). A message whose text resumes after another message's
+        # text, or text naming an unknown message, means no split is reported.
+        runs: List[Tuple[str, List[str]]] = []
+        for chunk_id, chunk in pieces:
+            if not chunk:
+                continue
+            if chunk_id not in msg_phases:
+                phases_ok = False
+            elif runs and runs[-1][0] == chunk_id:
+                runs[-1][1].append(chunk)
+            elif any(run_id == chunk_id for run_id, _ in runs):
+                phases_ok = False
+            else:
+                runs.append((chunk_id, [chunk]))
+        phase_entries = [
+            {"phase": msg_phases[run_id], "text": "".join(parts)} for run_id, parts in runs
+        ]
+        output_phases: Optional[List[Dict[str, Any]]] = (
+            phase_entries
+            if phases_ok and phase_entries
+            and _join_message_texts([entry["text"] for entry in phase_entries]) == final_text
+            else None
+        )
 
         function_calls = [
             entry for entry in pending_calls.values() if entry.get("name")
@@ -1049,6 +1472,7 @@ class OpenAICodexClient(LLMClient):
                 "usage_output": usage_output,
                 "usage_cached": usage_cached,
                 "message_texts": message_texts,
+                "output_phases": output_phases,
             },
         )
 
@@ -1079,6 +1503,10 @@ class OpenAICodexClient(LLMClient):
             )
         if reasoning_entries:
             self._store_reasoning(reasoning_entries)
+
+        # メッセージごとの分け方 (phase)。SEA が保存する発言の metadata に移し、
+        # 次の呼び出しで _build_input が phase 付きの複数メッセージとして送り返す。
+        self._store_output_phases(state.get("output_phases"))
 
         if tools:
             function_calls = state["function_calls"]
@@ -1128,6 +1556,8 @@ class OpenAICodexClient(LLMClient):
 
         See class docstring for return-type matrix.
         """
+        # 前の呼び出しの分け方を、この呼び出しの結果として読ませない。
+        self._store_output_phases(None)
         messages = self._inject_unsupported_media_summaries(messages)
         body = self._build_body(
             messages,
@@ -1233,6 +1663,8 @@ class OpenAICodexClient(LLMClient):
         should use `generate(...)` directly. We still yield raw text deltas so
         the streaming pipeline can render progress.
         """
+        # 前の呼び出しの分け方を、この呼び出しの結果として読ませない。
+        self._store_output_phases(None)
         messages = self._inject_unsupported_media_summaries(messages)
         body = self._build_body(
             messages,

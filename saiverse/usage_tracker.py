@@ -82,16 +82,17 @@ class UsageTracker:
             category: Usage category (persona_speak, memory_weave_generate, etc.)
             timestamp: Optional timestamp (defaults to now)
         """
-        # Calculate cost (with cache discount and write premium if applicable)
+        timestamp = datetime.fromtimestamp((timestamp or datetime.now()).timestamp())
+        # Use one event time for both the persisted record and effective pricing.
         cost = calculate_cost(
             model_id, input_tokens, output_tokens, cached_tokens, cache_write_tokens,
-            cache_ttl=cache_ttl,
+            cache_ttl=cache_ttl, at=timestamp,
         )
-        pricing = get_model_pricing(model_id)
+        pricing = get_model_pricing(model_id, at=timestamp)
         currency = pricing.get("currency", "USD") if pricing else "USD"
 
         record = {
-            "timestamp": timestamp or datetime.now(),
+            "timestamp": timestamp,
             "persona_id": persona_id,
             "building_id": building_id,
             "model_id": model_id,
@@ -194,16 +195,20 @@ class UsageTracker:
         """Record explicit cache storage cost as a separate usage record.
 
         Uses the "reserved seat" model: charges the full TTL window at create
-        time. If a delete mechanism later frees the cache early, record a
-        negative entry for the unused remainder.
+        time, prorated across effective-price boundaries. Early-delete refunds
+        are wired for the Gemini continuous cache, not yet for the auto cache.
+        Existing records are never repriced.
         """
         from .model_configs import calculate_cache_storage_cost
-        cost_usd = calculate_cache_storage_cost(model_id, cached_tokens, ttl_seconds)
+        timestamp = datetime.fromtimestamp((timestamp or datetime.now()).timestamp())
+        cost_usd = calculate_cache_storage_cost(model_id, cached_tokens, ttl_seconds, at=timestamp)
         if cost_usd <= 0:
             return
 
+        pricing = get_model_pricing(model_id, at=timestamp)
         record = {
-            "timestamp": timestamp or datetime.now(),
+            "timestamp": timestamp,
+            "currency": pricing.get("currency", "USD") if pricing else "USD",
             "persona_id": persona_id,
             "building_id": building_id,
             "model_id": model_id,
@@ -225,6 +230,63 @@ class UsageTracker:
         LOGGER.debug(
             "Cache storage recorded: model=%s tokens=%d ttl=%ds cost=$%.6f persona=%s",
             model_id, cached_tokens, ttl_seconds, cost_usd, persona_id,
+        )
+
+    def record_cache_storage_refund(
+        self,
+        model_id: str,
+        cached_tokens: int,
+        remaining_seconds: float,
+        *,
+        persona_id: Optional[str] = None,
+        building_id: Optional[str] = None,
+        timestamp: Optional[datetime] = None,
+        storage_start: Optional[datetime] = None,
+    ) -> None:
+        """Refund the unused remainder of a cache deleted before its TTL ended.
+
+        The other half of the "reserved seat" model of :meth:`record_cache_storage`:
+        the full TTL was charged at create time, so an early delete writes a
+        negative record for ``remaining_seconds``. Same category, model id,
+        cached_tokens, persona and building as the original charge. ``timestamp``
+        is the deletion event; ``storage_start`` is the unused interval's start
+        (defaults to that event). Date boundaries are prorated exactly as on the
+        original charge, using the same model currency.
+        """
+        from .model_configs import calculate_cache_storage_cost
+        timestamp = datetime.fromtimestamp((timestamp or datetime.now()).timestamp())
+        storage_start = timestamp if storage_start is None else storage_start
+        refund = calculate_cache_storage_cost(
+            model_id, cached_tokens, remaining_seconds, at=storage_start,
+        )
+        if refund <= 0:
+            return
+
+        pricing = get_model_pricing(model_id, at=storage_start)
+        record = {
+            "timestamp": timestamp,
+            "currency": pricing.get("currency", "USD") if pricing else "USD",
+            "persona_id": persona_id,
+            "building_id": building_id,
+            "model_id": model_id,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": cached_tokens,
+            "cache_write_tokens": 0,
+            "cost_usd": -refund,
+            "node_type": None,
+            "playbook_name": None,
+            "category": "cache_storage",
+        }
+
+        with self._pending_lock:
+            self._pending_records.append(record)
+            if len(self._pending_records) >= self._batch_size:
+                self._flush_to_db()
+
+        LOGGER.debug(
+            "Cache storage refunded: model=%s tokens=%d remaining=%.1fs cost=-$%.6f persona=%s",
+            model_id, cached_tokens, remaining_seconds, refund, persona_id,
         )
 
     def flush(self) -> None:

@@ -19,9 +19,13 @@ def restore_class_attrs():
     """クラス属性を書き換えるテストなので、必ず元へ戻す。"""
     enabled = GeminiClient._AUTO_CACHE_ENABLED
     keep = GeminiClient._AUTO_CACHE_KEEP_SECONDS
+    continuous = GeminiClient._CONTINUOUS_CACHE_ENABLED
+    continuous_ttl = GeminiClient._CONTINUOUS_CACHE_TTL_SECONDS
     yield
     GeminiClient._AUTO_CACHE_ENABLED = enabled
     GeminiClient._AUTO_CACHE_KEEP_SECONDS = keep
+    GeminiClient._CONTINUOUS_CACHE_ENABLED = continuous
+    GeminiClient._CONTINUOUS_CACHE_TTL_SECONDS = continuous_ttl
 
 
 @pytest.fixture
@@ -154,7 +158,7 @@ def test_keep_zero_creates_with_insurance_ttl_and_asks_for_cleanup(cache_control
     assert cleanup == "cachedContents/abc"  # 応答後に削除する
     assert len(sent) == 1  # 最新の 1 件だけ送る
     assert _created_ttl(client) == f"{GeminiClient._AUTO_CACHE_TTL}s"
-    assert gemini._pending_cache_storage == ("gemini-2.5-flash", 2048, GeminiClient._AUTO_CACHE_TTL)
+    assert gemini._pending_cache_storage[:3] == ("gemini-2.5-flash", 2048, GeminiClient._AUTO_CACHE_TTL)
 
 
 def test_keep_zero_deletes_the_cache_after_usage_is_recorded(cache_controller):
@@ -185,7 +189,7 @@ def test_keep_positive_creates_with_that_ttl_and_skips_cleanup(cache_controller)
     assert cleanup is None  # 削除は Gemini の TTL 失効に任せる
     assert len(sent) == 1
     assert _created_ttl(client) == "120s"
-    assert gemini._pending_cache_storage == ("gemini-2.5-flash", 2048, 120)
+    assert gemini._pending_cache_storage[:3] == ("gemini-2.5-flash", 2048, 120)
 
 
 def test_keep_positive_never_calls_delete(cache_controller):
@@ -223,12 +227,17 @@ def test_api_updates_class_attributes_and_persists_to_env(monkeypatch):
 
     GeminiClient._AUTO_CACHE_ENABLED = False
     GeminiClient._AUTO_CACHE_KEEP_SECONDS = 0
+    GeminiClient._CONTINUOUS_CACHE_ENABLED = False
+    GeminiClient._CONTINUOUS_CACHE_TTL_SECONDS = 300
 
     result = config_routes.set_gemini_auto_cache(
         config_routes.GeminiAutoCacheRequest(enabled=True, keep_seconds=99999)
     )
 
-    assert result == {"success": True, "enabled": True, "keep_seconds": AUTO_CACHE_KEEP_SECONDS_MAX}
+    assert result == {
+        "success": True, "enabled": True, "keep_seconds": AUTO_CACHE_KEEP_SECONDS_MAX,
+        "continuous": False, "continuous_ttl_seconds": 300,
+    }
     assert GeminiClient._AUTO_CACHE_ENABLED is True
     assert GeminiClient._AUTO_CACHE_KEEP_SECONDS == AUTO_CACHE_KEEP_SECONDS_MAX
     assert written == {
@@ -240,6 +249,10 @@ def test_api_updates_class_attributes_and_persists_to_env(monkeypatch):
         "enabled": True,
         "keep_seconds": AUTO_CACHE_KEEP_SECONDS_MAX,
         "keep_seconds_max": AUTO_CACHE_KEEP_SECONDS_MAX,
+        "continuous": False,
+        "continuous_ttl_seconds": 300,
+        "continuous_ttl_seconds_min": 120,
+        "continuous_ttl_seconds_max": 1200,
     }
 
 
@@ -251,13 +264,128 @@ def test_api_off_writes_zero_flag(monkeypatch):
 
     GeminiClient._AUTO_CACHE_ENABLED = True
     GeminiClient._AUTO_CACHE_KEEP_SECONDS = 300
+    GeminiClient._CONTINUOUS_CACHE_ENABLED = False
+    GeminiClient._CONTINUOUS_CACHE_TTL_SECONDS = 300
 
     result = config_routes.set_gemini_auto_cache(
         config_routes.GeminiAutoCacheRequest(enabled=False, keep_seconds=-1)
     )
 
-    assert result == {"success": True, "enabled": False, "keep_seconds": 0}
+    assert result == {
+        "success": True, "enabled": False, "keep_seconds": 0,
+        "continuous": False, "continuous_ttl_seconds": 300,
+    }
     assert GeminiClient._AUTO_CACHE_ENABLED is False
     assert GeminiClient._AUTO_CACHE_KEEP_SECONDS == 0
     assert written["SAIVERSE_GEMINI_AUTO_CACHE"] == "0"
     assert written["SAIVERSE_GEMINI_AUTO_CACHE_KEEP_SECONDS"] == "0"
+
+
+@pytest.mark.parametrize("mode", ["auto", "explicit"])
+def test_cache_creation_time_survives_response_delay(cache_controller, monkeypatch, mode):
+    """The storage interval starts at creation, even if generation finishes later."""
+    from datetime import datetime
+
+    from sea.runtime_llm import _maybe_record_cache_storage
+
+    GeminiClient._AUTO_CACHE_ENABLED = True
+    GeminiClient._AUTO_CACHE_KEEP_SECONDS = 120
+    gemini = _make_gemini(_fake_gemini_client())
+    gemini._cache_config = {"type": "gemini_explicit"}
+    monkeypatch.setenv("SAIVERSE_GEMINI_EXPLICIT_CACHE", "1")
+    created_at = 1798711199.0
+    monkeypatch.setattr("llm_clients.gemini_cache.time.time", lambda: created_at)
+    if mode == "auto":
+        name, _, _ = gemini._auto_cache_wrap("SYSTEM " * 200, _long_contents())
+    else:
+        name, _ = gemini._resolve_explicit_cache("SYSTEM " * 200, _long_contents(), True, "120s")
+    assert name == "cachedContents/abc"
+    assert gemini._pending_cache_storage[3] == created_at
+
+    response_at = created_at + 30
+    monkeypatch.setattr("llm_clients.base.time.time", lambda: response_at)
+    gemini._store_usage(100, 20)
+    usage = gemini.consume_usage()
+    assert usage.timestamp == response_at
+    assert usage.cache_storage_timestamp == created_at
+    assert gemini._pending_cache_storage is None
+
+    tracker = MagicMock()
+    monkeypatch.setattr("sea.runtime_llm.get_usage_tracker", lambda: tracker)
+    _maybe_record_cache_storage(usage, "synthetic-persona", "synthetic-building")
+    assert tracker.record_cache_storage.call_args.kwargs["timestamp"] == datetime.fromtimestamp(created_at)
+    assert tracker.record_cache_storage.call_args.kwargs["ttl_seconds"] == 120
+
+    # Reusing a live cache does not create a second storage charge.
+    if mode == "auto":
+        gemini._auto_cache_wrap("SYSTEM " * 200, _long_contents())
+    else:
+        gemini._resolve_explicit_cache("SYSTEM " * 200, _long_contents(), True, "120s")
+    gemini._store_usage(100, 20)
+    reused_usage = gemini.consume_usage()
+    assert reused_usage.cache_storage_tokens == 0
+    assert reused_usage.cache_storage_timestamp is None
+    _maybe_record_cache_storage(reused_usage, "synthetic-persona", "synthetic-building")
+    assert tracker.record_cache_storage.call_count == 1
+
+
+@pytest.mark.parametrize("provider_time", ["aware", "offset", "missing", "naive", "mock"])
+def test_slow_cache_creation_crossing_price_boundary_uses_created_time(
+    cache_controller, monkeypatch, provider_time,
+):
+    """Creation at 10:00 must not reserve the cheaper 09:59 request interval."""
+    from datetime import datetime, timedelta, timezone
+
+    from saiverse import model_configs
+    from saiverse.usage_tracker import UsageTracker
+    from sea.runtime_llm import _maybe_record_cache_storage
+
+    boundary = datetime(2026, 12, 31, 10, tzinfo=timezone.utc)
+    completed_at = boundary.timestamp() + 5
+    clock = [boundary.timestamp() - 60]
+    monkeypatch.setattr("llm_clients.gemini_cache.time.time", lambda: clock[0])
+    client = _fake_gemini_client()
+    cache = client.caches.create.return_value
+    cache.usage_metadata.total_token_count = 1_000_000
+    cache.create_time = {
+        "aware": boundary,
+        "offset": boundary.astimezone(timezone(timedelta(hours=9))),
+        "missing": None,
+        "naive": boundary.replace(tzinfo=None),
+        "mock": MagicMock(),
+    }[provider_time]
+
+    def slow_create(**kwargs):
+        clock[0] = completed_at
+        return cache
+
+    client.caches.create.side_effect = slow_create
+    GeminiClient._AUTO_CACHE_ENABLED = True
+    GeminiClient._AUTO_CACHE_KEEP_SECONDS = 120
+    gemini = _make_gemini(client)
+    gemini._auto_cache_wrap("SYSTEM " * 200, _long_contents())
+    clock[0] += 30  # Generation finishes later still.
+    gemini._store_usage(100, 20)
+    usage = gemini.consume_usage()
+    expected_at = boundary.timestamp() if provider_time in {"aware", "offset"} else completed_at
+    assert usage.cache_storage_timestamp == expected_at
+
+    monkeypatch.setitem(model_configs.MODEL_CONFIGS, gemini.config_key, {"pricing": {
+        "currency": "USD",
+        "cache_storage_per_1m_tokens_per_hour": 1.0,
+        "periods": [{
+            "starts_at": "2026-12-31T09:00:00Z",
+            "ends_at": "2026-12-31T10:00:00Z",
+            "rates": {"cache_storage_per_1m_tokens_per_hour": 0.5},
+        }],
+    }})
+    # A separate in-memory tracker cannot touch the application's singleton/DB.
+    tracker = object.__new__(UsageTracker)
+    tracker._initialized = False
+    tracker.__init__()
+    tracker._batch_size = 100
+    monkeypatch.setattr("sea.runtime_llm.get_usage_tracker", lambda: tracker)
+    _maybe_record_cache_storage(usage, "synthetic", "b")
+    record, = tracker._pending_records
+    assert record["timestamp"] == datetime.fromtimestamp(expected_at)
+    assert record["cost_usd"] == pytest.approx(1.0 * 120 / 3600)

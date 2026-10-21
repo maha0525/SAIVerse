@@ -1,0 +1,13 @@
+{
+  "id": "sarashina",
+  "display_name": "Sarashina (SB Intuitions)",
+  "protocol": "openai_compat",
+  "base_url": "https://api.sarashina.ai/v1",
+  "api_key_env": "SARASHINA_API_KEY",
+  "default_supports_images": false,
+  "openai_compat_options": {
+    "supports_stream_options": false,
+    "supports_function_tool_choice": false,
+    "supports_message_name": false
+  }
+}

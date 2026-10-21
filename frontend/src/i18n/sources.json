@@ -3939,14 +3939,6 @@
     "file": "components/memory/MemoryBrowser.tsx",
     "line": 503
   },
-  "components.memory.MemoryBrowser.text016": {
-    "file": "components/memory/MemoryBrowser.tsx",
-    "line": 515
-  },
-  "components.memory.MemoryBrowser.text017": {
-    "file": "components/memory/MemoryBrowser.tsx",
-    "line": 542
-  },
   "components.memory.MemoryBrowser.text018": {
     "file": "components/memory/MemoryBrowser.tsx",
     "line": 577
@@ -3998,10 +3990,6 @@
   "components.memory.MemoryBrowser.text030": {
     "file": "components/memory/MemoryBrowser.tsx",
     "line": 678
-  },
-  "components.memory.MemoryBrowser.text031": {
-    "file": "components/memory/MemoryBrowser.tsx",
-    "line": 684
   },
   "components.memory.MemoryBrowser.text032": {
     "file": "components/memory/MemoryBrowser.tsx",

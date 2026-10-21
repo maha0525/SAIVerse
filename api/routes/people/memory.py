@@ -116,34 +116,38 @@ def create_message(
 
         # Use internal method to append message
         # We need to manually create the message to get its ID back
-        from sai_memory.memory.storage import get_or_create_thread, add_message, replace_message_embeddings
-        from sai_memory.memory.chunking import chunk_text
+        from sai_memory.db_locks import immediate_transaction
+        from sai_memory.memory.storage import (
+            add_message,
+            get_or_create_thread,
+            write_deferred_message_embedding,
+        )
 
+        has_text = bool(request.content and request.content.strip())
         with adapter._db_lock:
             resource_id = adapter.settings.resource_id
             get_or_create_thread(adapter.conn, thread_id, resource_id)
 
-            mid = add_message(
-                adapter.conn,
-                thread_id=thread_id,
-                role=request.role,
-                content=request.content,
-                resource_id=resource_id,
-                created_at=int(created_at),
-                metadata=request.metadata,
-            )
-
-            # Add embeddings if content is not empty
-            if request.content and request.content.strip() and adapter.embedder is not None:
-                chunks = chunk_text(
-                    request.content,
-                    min_chars=adapter.settings.chunk_min_chars,
-                    max_chars=adapter.settings.chunk_max_chars,
+            # Same rule as the adapter's own writes (EMBEDDING_DEFERRED in
+            # saiverse_memory/adapter.py): a message with text goes in with an
+            # empty vector row, in one transaction, and the vectors replace
+            # it; if they cannot be made, the empty row is what the startup
+            # check and the re-embed find.
+            with immediate_transaction(adapter.conn, adapter._db_lock):
+                mid = add_message(
+                    adapter.conn,
+                    thread_id=thread_id,
+                    role=request.role,
+                    content=request.content,
+                    resource_id=resource_id,
+                    created_at=int(created_at),
+                    metadata=request.metadata,
+                    commit=False,
                 )
-                payload = [c.strip() for c in chunks if c and c.strip()]
-                if payload:
-                    vectors = adapter.embedder.embed(payload, is_query=False)
-                    replace_message_embeddings(adapter.conn, mid, vectors)
+                if has_text:
+                    write_deferred_message_embedding(adapter.conn, mid, commit=False)
+            if has_text:
+                adapter._fill_empty_vector_row_locked(mid, request.content)
 
         return MessageItem(
             id=mid,

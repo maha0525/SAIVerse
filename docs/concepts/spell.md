@@ -4,7 +4,7 @@
 
 ## 一言で
 
-Tool を平文応答の中で `/spell <スペル名> key='value'` 構文で呼べるようにする仕組み。
+Tool を平文応答の中で `/spell name='スペル名' args={...}` 構文で呼べるようにする仕組み。
 
 ## 役割
 
@@ -16,11 +16,13 @@ Tool を平文応答の中で `/spell <スペル名> key='value'` 構文で呼�
 
 構文には2形式がある（`_parse_spell_lines`）:
 - **正規形**: `/spell name='ツール名' args={...JSONオブジェクト...}`（`_normalize_spell_line` が生成する形。SAIMemory にはこの形で保存し、ペルソナが正しい構文を学習する）
-- **略式（fuzzy）**: `/spell ツール名 key='value' key2='value2'`（ペルソナが書きやすい形。パーサが正規形に正規化する）
+- **略式（fuzzy、既存入力の救済）**: `/spell ツール名 key='value' key2='value2'`。ハイフン入りの名前と `args={...}` ラッパーも読める。供給する説明・例は正規形に揃え、救済した入力も正規形に正規化する。
 
-例: `/spell item_view item_id='it_3'` / `/spell track_complete track_id='t:3'`
+例: `/spell name='item_view' args={'item_id': 'it_3'}` / `/spell name='resolve_uri' args={'uris': ['saiverse://self/message/msg/recent?depth=5']}`
 
-軽い処理は1往復の Spell で完結し、重い処理は `run_playbook` Spell（`/spell run_playbook name='memory_research'`）で [Playbook](playbook.md) をサブラインとして起動できる（Spell × Playbook の接続点）。
+軽い処理は1往復の Spell で完結し、重い処理は `run_playbook` Spell（`/spell name='run_playbook' args={'name': 'memory_research'}`）で [Playbook](playbook.md) をサブラインとして起動できる（Spell × Playbook の接続点）。
+
+行頭の明示的な `/spell`・`/quick_spell` 行を読めなければ、通常発言へ流さず書式エラーを返す。未登録名・壊れた引数と同じ失敗表示・訂正ラウンドを使う。説明と通知は一覧の共通描画から正式な呼び出し例を供給する。詳細: [呼び出し契約](../intent/spell_invocation_contract.md)。
 
 ## ユーザーからの見え方（UI 接合点）
 

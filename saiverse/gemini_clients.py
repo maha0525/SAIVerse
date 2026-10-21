@@ -23,12 +23,21 @@ def _get_genai_module():
 def build_gemini_clients(
     *,
     prefer_paid: bool = False,
+    timeout_seconds: float | None = None,
     _genai_module: Any | None = None,
 ) -> tuple[Any | None, Any | None, Any | None]:
-    """Create ``(free, paid, active)`` SDK clients from current environment."""
+    """Create ``(free, paid, active)`` SDK clients from current environment.
+
+    ``timeout_seconds`` (positive) overrides ``GEMINI_TIMEOUT_SECONDS``
+    (default 300, ``0`` = no timeout). Model configs pass their ``timeout`` here.
+    """
     genai = _genai_module or _get_genai_module()
-    timeout_seconds = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "300"))
-    timeout_ms = None if timeout_seconds == 0 else timeout_seconds * 1000
+    if timeout_seconds is not None and timeout_seconds > 0:
+        effective_timeout = float(timeout_seconds)
+    else:
+        effective_timeout = float(int(os.getenv("GEMINI_TIMEOUT_SECONDS", "300")))
+    # HttpOptions.timeout is in milliseconds.
+    timeout_ms = None if effective_timeout == 0 else int(effective_timeout * 1000)
 
     def _http_options() -> Any:
         retry_options = genai.types.HttpRetryOptions(

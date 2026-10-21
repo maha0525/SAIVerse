@@ -763,6 +763,7 @@ class SluiceRunTest(_AdapterTestBase):
         usage = FakeUsage(
             model="claude-x", input_tokens=100, output_tokens=5,
             cached_tokens=90, cache_write_tokens=10, cache_ttl="5m",
+            timestamp=1798711199.0,
         )
         client = FakeLLMClient(result, usage=usage)
         runtime = FakeRuntime(client)
@@ -773,6 +774,10 @@ class SluiceRunTest(_AdapterTestBase):
         with patch("saiverse.usage_tracker.get_usage_tracker") as get_tracker:
             sluice.run_sluice(lifecycle, self._persona(), "b", [], 0)
         get_tracker.return_value.record_usage.assert_called_once()
+        self.assertEqual(
+            get_tracker.return_value.record_usage.call_args.kwargs["timestamp"],
+            datetime.fromtimestamp(usage.timestamp),
+        )
         self.assertEqual(len(runtime.touched), 1)
 
     # -- case: disabled toggle -------------------------------------------
@@ -3993,8 +3998,8 @@ class SluiceInputEstimateTest(unittest.TestCase):
         - Anthropic: user だけを埋め込み、assistant は注記、system は送らない。
           画像非対応なら user も注記。
         - Gemini: 役割によらず埋め込み、system は送らない。画像非対応なら
-          画像も注記も送らない。
-        - xAI: user だけを埋め込み、ほかは送らない。画像非対応なら何も送らない。
+          system 以外を注記。
+        - xAI: user だけを埋め込み、ほかは送らない。画像非対応なら user を注記。
         """
         from saiverse.token_estimator import estimate_image_tokens
 
@@ -4017,9 +4022,9 @@ class SluiceInputEstimateTest(unittest.TestCase):
             ),
             "role-anthropic-text": self._notes([usr, asst]),
             "role-gemini": estimate_image_tokens("gemini") * 2,
-            "role-gemini-text": 0,
+            "role-gemini-text": self._notes([usr, asst]),
             "role-xai": estimate_image_tokens("xai"),
-            "role-xai-text": 0,
+            "role-xai-text": self._notes([usr]),
         }
         with patch.dict(os.environ, {"SAIVERSE_ATTACHMENT_LIMIT": "10"}):
             for model, media in cases.items():

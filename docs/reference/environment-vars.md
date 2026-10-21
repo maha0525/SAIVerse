@@ -20,6 +20,21 @@
 
 HTTP 中継の設定値は `http://host:port` のような origin とし、末尾 `/`・パス・クエリ・フラグメントを含めない。URL の結合は従来どおり（rewrite は文字列連結、Route Handler はルート相対 URL）で、たとえば末尾 `/` を付けると rewrite は `//api`、パスを付けると rewrite にだけ接頭辞が残る。共通の base path は未対応で、今回も URL の正規化はしない。詳細: [intent](../intent/frontend_backend_origin.md)。
 
+## SearXNG の導入・起動
+
+この節は `.env` ではなく、セットアップ・起動スクリプトを実行するシェルの環境変数で指定する。通常は変更不要。既定版は `scripts/searxng_pin.json` で固定し、起動時に同じ版と依存の実 import を確認する。
+
+| 変数 | 既定 | 説明 |
+|---|---|---|
+| `SEARXNG_REF` | pin の完全なコミット SHA | 検証・開発用の上書き。40桁の小文字 SHA のみ受理し、master やタグは拒否する |
+| `SEARXNG_SRC_DIR` | `scripts/.searxng-src/<commit>` | ソースの保存先。別の版や管理記録のない既存ディレクトリは上書きせずエラーにする |
+| `SEARXNG_VENV_DIR` | `scripts/.searxng-venv` | 専用 Python 環境 |
+| `SEARXNG_SETTINGS_PATH` | `scripts/searxng_settings.yml` | 生成設定。既存の secret_key を引き継ぐ |
+| `SEARXNG_USER_ENGINES_PATH` | `scripts/searxng_user_engines.yml` | 利用者のエンジン選択。隔離検証時はこれも専用の保存先へ向ける |
+| `SEARXNG_LIMITER_PATH` | `scripts/limiter.toml` | セットアップ時に固定版からコピーする limiter 設定 |
+
+相対保存先はリポジトリルート基準。上流との版の乖離への運用は別途検討し、自動更新や定期監視は行わない。
+
 ## LLM API キー / 接続
 
 | 変数 | 説明 |
@@ -31,17 +46,17 @@ HTTP 中継の設定値は `http://host:port` のような origin とし、末�
 | `NVIDIA_API_KEY` | NVIDIA NIM |
 | `XAI_API_KEY` | xAI (Grok) |
 | `OPENROUTER_API_KEY` | OpenRouter |
+| `SARASHINA_API_KEY` | Sarashina (SB Intuitions)。[取得・設定方法](../api-keys/sarashina.md) |
 | `OLLAMA_BASE_URL` | ローカル Ollama サーバー URL（未設定なら `OLLAMA_HOST` を見る） |
 
 プロバイダごとの `api_key_env` は [プロバイダ一覧](providers.md) を参照。Kimi (Moonshot) のようにユーザーが自分で追加するプロバイダのキー名は、そのプロバイダ設定の `api_key_env` に書いた名前がそのまま使われる（組み込みの決め打ちは無い。手順は [custom_providers.md](../custom_providers.md) ケース 3）。
 
 ## SAIMemory / 記憶
 
+想起用の埋め込みモデルは EmbeddingGemma 2 の 4bit 量子化 ONNX (768 次元) に固定で、CPU で動く。モデルや演算デバイスを選ぶ env は無い (2026-10-12 に `SAIMEMORY_EMBED_MODEL` / `_PATH` / `_DIM` / `_CUDA` を廃止し、設定されていても読まれない。経緯は [embedding_gemma2_migration](../intent/embedding_gemma2_migration.md))。
+
 | 変数 | 既定 | 説明 |
 |---|---|---|
-| `SAIMEMORY_EMBED_MODEL` | `intfloat/multilingual-e5-small` | 埋め込みモデル |
-| `SAIMEMORY_EMBED_MODEL_PATH` | - | ローカル埋め込みモデルのパス |
-| `SAIMEMORY_EMBED_CUDA` | 自動 | `1`=GPU 強制 / `0`=CPU 強制 / 未設定=自動 |
 | `SAIMEMORY_MEMORY` | `on` | 記憶機能の ON/OFF |
 | `SAIMEMORY_MEMORY_LAST_MESSAGES` | `8` | 直近何件を文脈に載せるか（`.env.example` は `40` を同梱） |
 | `SAIMEMORY_MEMORY_SEMANTIC_RECALL` | `true` | セマンティック想起 |
@@ -75,7 +90,7 @@ HTTP 中継の設定値は `http://host:port` のような origin とし、末�
 | `SAIVERSE_REFLEX_TIMEOUT_SECONDS` | `5` | 反射判断を何秒まで待つか（1〜60）。この時間内に判定が返らなかったターンは従来の想起方式へ戻り、その回の判定の費用だけが残る。**モデルごとには置かない**（2026-09-21 裁定: これは「どのくらい待ったらフォールバックを発動させるか」のパラメータで、モデル依存の需要はほぼ無い）。UI（グローバル設定 > モデルロール）からも設定でき、呼び出しのたびに読むので次のターンから効く。未設定・数値として読めない値・0 以下は既定の 5 秒で動き続ける（壊れた値は WARNING を 1 行出す） |
 | `TYPESAFE_API_KEY` | 未設定 | 同梱の `typesafe` プロバイダ（TypeSafe 公式の System One）の API キー。反射判断にそのプロバイダのモデルを割り当てたときだけ読まれる |
 
-自動想起でこの層を使うかは、**ペルソナ設定の「自動想起を強化する」トグル**（DB の `AI.AUTO_RECALL_ENHANCED`、既定 OFF）で決まる。トグルが ON で、かつ反射判断の役割にモデルが割り当たっているときだけ、会話ターンごとに判断の呼び出しが 1 回発生し、直近の会話本文 (1 件あたり 500 字まで) と候補記憶の本文抜粋 (1 件あたり 200 字。過去の会話メッセージの逐語抜粋と、その発話者ロール・時刻を含む) が宛先へ送られる。呼び出しが使えなかったターンは WARNING を 1 行出して従来のしきい値方式へ戻る。**時間内に答えなかったせいで戻ったターンだけ**は、そのターンの返事のそばに画面の注記が 1 行出る（表示だけで、会話履歴・建物の記録・ペルソナの記憶のどれにも残らない）。直近 20 回の呼び出しのうち 3 回以上が時間切れなら、モデル設定の警告欄（グローバル設定の画面）にも出る（プロセス内の記録なので再起動で消える）。判定の細かいつまみ（候補の下限 0.78 / 採用に必要な確率 0.5 / 判断材料に入れる会話 6 件）は実験で決めた定数で、`sea/auto_recall.py` に書いてある（env の口は持たない）。待ち時間だけは上の `SAIVERSE_REFLEX_TIMEOUT_SECONDS` で変えられる。
+自動想起でこの層を使うかは、**ペルソナ設定の「自動想起を強化する」トグル**（DB の `AI.AUTO_RECALL_ENHANCED`、既定 OFF）で決まる。トグルが ON で、かつ反射判断の役割にモデルが割り当たっているときだけ、会話ターンごとに判断の呼び出しが 1 回発生し、直近の会話本文 (1 件あたり 500 字まで) と候補記憶の本文抜粋 (1 件あたり 200 字。過去の会話メッセージの逐語抜粋と、その発話者ロール・時刻を含む) が宛先へ送られる。呼び出しが使えなかったターンは WARNING を 1 行出して従来のしきい値方式へ戻る。**時間内に答えなかったせいで戻ったターンだけ**は、そのターンの返事のそばに画面の注記が 1 行出る（表示だけで、会話履歴・建物の記録・ペルソナの記憶のどれにも残らない）。直近 20 回の呼び出しのうち 3 回以上が時間切れなら、モデル設定の警告欄（グローバル設定の画面）にも出る（プロセス内の記録なので再起動で消える）。判定の細かいつまみ（候補の下限 0.62 / 採用に必要な確率 0.5 / 判断材料に入れる会話 6 件）は実験で決めた定数で、`sea/auto_recall.py` に書いてある（env の口は持たない。候補の下限 0.62 は埋め込みモデルの EmbeddingGemma 2 への移行で据え直した暫定値）。待ち時間だけは上の `SAIVERSE_REFLEX_TIMEOUT_SECONDS` で変えられる。
 
 ## バックアップ
 
@@ -108,11 +123,13 @@ HTTP 中継の設定値は `http://host:port` のような origin とし、末�
 | `SAIVERSE_DEFAULT_MODEL` | グローバル設定の標準モデル。ペルソナが話す標準モデルは「チャット画面の一時上書き → ペルソナ個別の標準モデル → この値 → 組み込みの既定モデル」の順に、空でない最初のものになる。選ばれたモデルの設定ファイルが無ければ代わりのモデルでは動かず、そのペルソナは選び直すまで止まる。UI（グローバル設定の「モデルロール」）で変えると再起動しなくても効き、設定ファイルの無いモデル名は保存されない（[persona_model_selection.md](../intent/persona_model_selection.md)） |
 | `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` | グローバル設定の軽量モデル（個別の軽量モデルを持たないペルソナが使う。空なら組み込みの既定モデル）。設定ファイルが無い・繋げないときは標準モデルへ代わりに回さず、軽量モデルを使う作業が止まる |
 | `SAIVERSE_REFLEX_JUDGMENT_MODEL` | グローバル設定の反射判断のモデル（未設定なら反射判断は動かない）。詳細は上の「反射判断」節 |
-| `GEMINI_TIMEOUT_SECONDS` | Gemini タイムアウト（既定 180） |
-| `SAIVERSE_ATTACHMENT_LIMIT` | 添付上限（既定 4） |
+| `GEMINI_TIMEOUT_SECONDS` | Gemini タイムアウト（秒、既定 300、`0` で無制限）。モデル設定に `timeout`（秒）があればそちらが優先 |
+| `SAIVERSE_ATTACHMENT_LIMIT` | 添付上限（既定 4）。モデル設定 `cache.persist_realtime_and_recall` が `true` のモデルへ送るときは使わない（画像をすべて画像のまま送る — `docs/intent/persist_realtime_and_recall.md` §4.2） |
 | `SAIVERSE_DISABLE_GEMINI_STREAMING` / `SAIVERSE_DISABLE_GEMINI_SSE_PATCH` | Gemini ストリーミング関連のフォールバック制御（`llm_clients/gemini.py`） |
 | `SAIVERSE_GEMINI_AUTO_CACHE` | Gemini 自動キャッシュ（実験的、既定 `0`）。`1` にすると全ての Gemini 呼び出しで explicit cache を自動作成し、入力トークンをキャッシュ価格にする。UI（グローバル設定 > 環境）からも切替可で、切替は再起動なしで反映される |
 | `SAIVERSE_GEMINI_AUTO_CACHE_KEEP_SECONDS` | 自動キャッシュを応答後に何秒残すか（既定 `0`、範囲 0〜3600）。`0` は応答直後に削除（従来挙動。保険 TTL 300 秒で作成し、削除に失敗しても 5 分で消える）。`1` 以上はその秒数を TTL にして作成し、手動削除せず Gemini 側の失効に任せる（残っているあいだキャッシュ保存料金がかかる）。⚠️ TTL 内でのキャッシュ再利用は未実装のため、現状 `1` 以上は保存料金を払うだけで得がない（[issue](../issues/gemini_auto_cache_no_reuse_within_ttl.md)） |
+| `SAIVERSE_GEMINI_CONTINUOUS_CACHE` | 継続キャッシュ（高速応答モード、既定 `0`）。`1` にすると、ユーザーの発言への返事の LLM 呼び出しで「head + 履歴の最後の AI の返事まで」のキャッシュを使い回し、次の往復のキャッシュは返事と並行して作る（作成の時間が待ち時間に乗らない。キャッシュに入らない直近の往復は通常料金）。**`SAIVERSE_GEMINI_AUTO_CACHE=1` のときだけ効く**。返事以外の呼び出しは自動キャッシュと同じ動き（保持秒数の設定も含む）。UI（グローバル設定 > 環境）の「オフ / 自動キャッシュ / 継続キャッシュ」の三択からも切替可で、再起動なしで反映される。設計は [cache_lifecycle_control.md §3.5](../intent/cache_lifecycle_control.md) |
+| `SAIVERSE_GEMINI_CONTINUOUS_CACHE_TTL_SECONDS` | 継続キャッシュの寿命（秒、既定 `300`、範囲 120〜1200 に丸める。失効の 30 秒前から使わなくなるので下限は 120 秒）。作成の開始から数えるので、返事の生成時間の分だけ早く消える。上限 1200 秒は、Gemini の anchor TTL（既定 1200 秒）を過ぎると head が作り直されてキャッシュが一致しなくなるため。UI では分単位（2〜20 分）で設定する |
 
 ## ログ / デバッグ
 

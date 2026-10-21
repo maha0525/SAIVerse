@@ -36,6 +36,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
+from llm_clients.base import usage_event_time
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -440,7 +442,9 @@ class _MediaRules(NamedTuple):
     #: 直近の画像を何枚まで埋め込むか (None = 無制限)。枠は新しいメッセージから
     #: 順に埋まる。``__visual_context__`` のメッセージの画像は枠を使わず、常に
     #: 枠の内側 (llm_clients/utils.py の compute_allowed_attachment_keys と、同じ
-    #: 規則を持つ gemini.py の _convert_messages)。
+    #: 規則を持つ gemini.py の _convert_messages)。列が「上限を使わない」の印
+    #: (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY) を持つときは、クライアントと
+    #: 同じく枠そのものが無い (:func:`_estimate_input_tokens`)。
     image_limit: Optional[int]
     #: 画像が枠を使う役割。
     image_limit_roles: FrozenSet[str]
@@ -504,15 +508,16 @@ def _media_rules(model: str) -> _MediaRules:
       送らない。埋め込むのは画像対応のモデルの user の画像だけで、それ以外の
       system 以外は注記。
     - ``gemini_native`` (gemini.py の _convert_messages): 上限は GEMINI (設定の
-      ``max_image_embeds`` は読まない)。画像非対応のモデルは画像を集めないので、
-      画像も注記も送らない。画像対応のモデルでは全役割の画像が枠を使い、system
-      の画像は送らず、それ以外は役割によらず枠の内側を埋め込み、枠の外を注記。
+      ``max_image_embeds`` は読まない)。画像非対応のモデルは system 以外の画像を
+      全部注記 (2026-10-14 から。それまでは画像も注記も送っていなかった)。画像
+      対応のモデルでは全役割の画像が枠を使い、system の画像は送らず、それ以外は
+      役割によらず枠の内側を埋め込み、枠の外を注記。
       音声・動画は設定の ``supports_audio`` / ``supports_video`` が真なら埋め込み
       (その量はここでは数えない)、偽なら system 以外で注記。
     - ``xai_native`` (xai.py の _build_xai_messages): 上限は XAI (設定の
       ``max_image_embeds`` は読まない)。全役割の画像が枠を使う。画像対応のモデル
-      の user の画像だけを、枠の内側なら埋め込み、枠の外なら注記。user 以外の
-      画像と、画像非対応のモデルの画像は送らない。
+      の user の画像だけを、枠の内側なら埋め込み、枠の外なら注記。画像非対応の
+      モデルでは user の画像を注記 (2026-10-14 から)。user 以外の画像は送らない。
     - ``ollama_compat`` (OllamaClient): 画像は送らない (メタデータの画像を読む
       コードが無い)。
     - それ以外の protocol は factory がクライアントを作れない (ValueError)。
@@ -547,12 +552,11 @@ def _media_rules(model: str) -> _MediaRules:
             video_note_roles=_ALL_ROLES,
         )
     if protocol == "gemini_native":
-        image_roles = _NON_SYSTEM_ROLES if supports_images else _NO_ROLES
         return _MediaRules(
             image_limit=parse_attachment_limit("GEMINI"),
             image_limit_roles=_ALL_ROLES,
-            image_embed_roles=image_roles,
-            image_note_roles=image_roles,
+            image_embed_roles=_NON_SYSTEM_ROLES if supports_images else _NO_ROLES,
+            image_note_roles=_NON_SYSTEM_ROLES,
             audio_note_roles=(
                 _NO_ROLES if config.get("supports_audio") else _NON_SYSTEM_ROLES
             ),
@@ -561,12 +565,13 @@ def _media_rules(model: str) -> _MediaRules:
             ),
         )
     if protocol == "xai_native":
-        image_roles = _USER_ROLE_ONLY if supports_images else _NO_ROLES
+        # 画像の説明の文は、画像非対応のモデルにも user の発言へ足して送る
+        # (llm_clients/xai.py の _build_xai_messages)
         return _MediaRules(
             image_limit=parse_attachment_limit("XAI"),
             image_limit_roles=_ALL_ROLES,
-            image_embed_roles=image_roles,
-            image_note_roles=image_roles,
+            image_embed_roles=_USER_ROLE_ONLY if supports_images else _NO_ROLES,
+            image_note_roles=_USER_ROLE_ONLY,
             audio_note_roles=_ALL_ROLES,
             video_note_roles=_ALL_ROLES,
         )
@@ -707,7 +712,12 @@ def _estimate_input_tokens(
         str(get_model_config(model).get("provider", "ollama")),
     )
     rules = _media_rules(model)
-    remaining_slots = rules.image_limit  # 枠の残り (None = 無制限)
+    # 枠の残り (None = 無制限)。リアルタイム情報と自動想起を残すモデルの列は、
+    # どのクライアントも上限を使わない (llm_clients/utils.attachment_limit_is_off
+    # — クライアントと同じ一枚で判定する)。
+    from llm_clients.utils import attachment_limit_is_off
+
+    remaining_slots = None if attachment_limit_is_off(messages) else rules.image_limit
     # 画像を埋め込みにも注記にもしないクライアント (Ollama・画像非対応の Gemini と
     # xAI) では、画像の項目を集めない — 枠がどう埋まっても数える量は 0。
     counts_images = bool(rules.image_embed_roles or rules.image_note_roles)
@@ -2996,6 +3006,7 @@ def _call_sluice_llm(
                 cached_tokens=usage.cached_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
                 cache_ttl=usage.cache_ttl,
+                timestamp=usage_event_time(usage),
                 persona_id=persona_id,
                 building_id=building_id,
                 node_type="sluice",
@@ -3990,6 +4001,7 @@ def _call_capture_llm(
                 cached_tokens=usage.cached_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
                 cache_ttl=usage.cache_ttl,
+                timestamp=usage_event_time(usage),
                 persona_id=persona_id,
                 building_id=getattr(persona, "current_building_id", None),
                 node_type="sluice",
@@ -4519,6 +4531,7 @@ def _call_mechanism_llm(
                 cached_tokens=usage.cached_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
                 cache_ttl=usage.cache_ttl,
+                timestamp=usage_event_time(usage),
                 persona_id=persona_id,
                 building_id=getattr(persona, "current_building_id", None),
                 node_type="sluice",

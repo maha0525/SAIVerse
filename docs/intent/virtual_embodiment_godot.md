@@ -5,6 +5,44 @@
 
 ## 実装記録
 
+### 2026-10-17: 表情を省略して身体動作を続行、関連PRの取り込み状況
+
+- 表情指定の形式・強度が不正、preset未知、profile欠損、変形先未解決、遷移開始不可の場合は、顔を変えずに表情だけを省略して身体gestureを続ける。実装は[アドオン PR #3](https://github.com/maha0525/saiverse-godot-vessel-addon/pull/3)。省略理由を完了結果まで届け、有効な表情の適用と復帰を維持する契約は「ユーザー制作の表情プリセット」節に記載。
+- アドオンPython単体160件と71サブテスト、Godotの表情省略/適用/復帰110項目と既存の発話エモート67項目を通過。隔離`SAIVERSE_HOME`・合成`e2e_persona`・実WebSocket・Godot 4.6.3で、未知の表情を指定した即時waveとfake生成待ちgestureの両方が`completed`となり、省略理由がSpell結果またはterminal知覚へ届いた。fixtureは`verify_gesture_expression_fallback.tscn`、transport検証は`run_gateway_e2e.py --action gesture_expression_fallback`および`--action gesture_dynamic_fake`。本番ペルソナ・本番記憶・外部LLMへの接触はない。
+- GitHubで[アドオン PR #1](https://github.com/maha0525/saiverse-godot-vessel-addon/pull/1)・[PR #2](https://github.com/maha0525/saiverse-godot-vessel-addon/pull/2)・[PR #3](https://github.com/maha0525/saiverse-godot-vessel-addon/pull/3)、[voice-tts PR #7](https://github.com/maha0525/saiverse-voice-tts/pull/7)のマージを確認した。表情省略の追加時に進行中台帳を同期し忘れたため、本体PR #405のレビュー指摘に合わせ、次アクションから取り込み待ちを除き、実機確認と残作業へ差し替えた。案件全体のステータスは引き続き実装中。
+
+#### 経緯: 変更前の台帳行
+
+| 🟠 実装中 | Godot / ARDY 仮想身体デモ | 発話の声を voice-tts から一切れずつ受け取り VR だけで鳴らす形がアドオン PR #1 と voice-tts PR #7 に揃い、まはーの確認待ち。次 = 両 PR をマージし、Quest 2で表示・移動・マイク入力・全身エモートと VR の声を確認。残 = player歩行アニメーション、瞬き・視線、Idle scheduler。 | まはー(PR の確認と Quest 2の装着・操作確認) / 私(実機ログ確認と残りの実装) | [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md) | 2026-10-15 |
+
+### 2026-10-10: Quest 2の左スティック等速移動
+
+- まはーの依頼はVRのスティック移動のみ。等速移動を選び、テレポートは不要と指定した。左TouchのprimaryをXRController3Dから読む。XR入力はデスクトップ用InputMapを経由しない。
+- PlayerControllerが既存XROrigin3Dの位置を動かし、HMDの姿勢はOpenXRへ残す。頭の水平向きに対する前後左右、0.2の円形デッドゾーンを超えると等速2.4 m/s。上下を見る時も地面と平行に同じ速さで進む。半径14.25 m境界と最後の実移動方向に向く体を維持する。右スティック旋回、テレポート、頭や手の骨へのIKは含まない。
+- 左手の追跡喪失・切断時は残留スティック値を無視する。XR/デスクトップ切替、ポーズ・編集画面との入力排他を保持する。正典はアドオンのsai-vr/docs/xr-controls.md。
+- Godot 4.6.3で実XRController3Dと合成XRControllerTrackerを使い、実エンジンのOculus Touch binding、物理処理への入力ルーティング、全方向、等速・斜め・真上/真下、境界、体の向き、追跡喪失・復帰・切断、ポーズ、編集、モード切替の37項目を通過。既存デスクトップ28項目、player controller、実player.vrmのIdle回帰も通過した。全テストはOpenXRをoffで起動し、Gateway・本番ペルソナ・LLM・ARDY生成へ接触していない。実Quest 2での表示と物理スティック操作は未確認。
+
+
+変更前の台帳行（経緯として保存）:
+
+| 🟠 実装中 | Godot / ARDY 仮想身体デモ | デスクトップFPS操作と起こし盤からのARDY起動・停止が利用可能。次 = 生成先URL・Buildingの実機確認を行う。残 = player locomotion、瞬き・視線、実HMD、/emote、Idle scheduler。 | まはー(生成先・Buildingの確認) / 私(残りの実装) | [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md) | 2026-10-09 |
+
+### 2026-10-09: 家の起こし盤からARDYを起動・停止
+
+- まはーの依頼で、ARDY（身体モーションの生成サーバー）を、家のサーバー群を起動する起こし盤から手動で起動・停止できるようにした。NEBULAを再起動したあとは自動では立ち上がらないので、盤から起こし直す。これにより「NEBULAに生成サーバーを常駐させるか」の判断は、必要なときに盤から起こす形で決着した。
+- 盤とNEBULA側の構成（タスク、スクリプト、ログの場所）は家のサーバーの内部情報なので、公開リポジトリには書かず、メティスの非公開の記録に置いた。
+- 検証は盤からの起動・停止・再起動と状態表示の追従まで。モデルは読み込んでおらず、本番ペルソナ・生成・warmupには接触していない。NEBULA全体の再起動試験は行っていない。
+- 変更前の台帳行（経緯として保存）:
+| 🟠 実装中 | Godot / ARDY 仮想身体デモ | デスクトップの視点・移動・ポーズを実装し隔離Godotで確認。次 = まはーが操作感を確認し、生成先URL・Buildingの実機確認とNEBULA常駐の可否を判断する。残 = player locomotion、瞬き・視線、実HMD、/emote、Idle scheduler。 | まはー(操作感・生成先・Buildingの確認、常駐の可否) / 私(残りの実装) | [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md) | 2026-10-09 |
+
+### 2026-10-09: デスクトップFPS操作と独立したプレイヤーの体の向き
+
+- まはーの依頼: マウスでピッチ・ヨーを回し、WASDはカメラ基準で動く。Escでポーズ画面とマウス解放を行い、体は最後の移動方向を保つ。頭の回転への反映は将来の機能として残す。
+- 操作の正典はアドオンの sai-vr/docs/desktop-controls.md。PlayerControllerが原点の移動とカメラだけの回転を持ち、体は実移動がある時だけ向きを更新する。既存の円形移動境界を維持し、ピッチで速度が落ちたり上下移動したりしない。
+- ポーズ画面はSceneTreeを止めてマウスを解放し、ポーズ中もEsc・再開ボタンを受け付ける。フォーカスを失った場合もポーズし、F4の表情編集との入力受け渡しを行う。ローカルのポーズはSAIVerse側の認知やサーバー処理を止めない。XR中にはデスクトップ視点操作を適用しない。
+- Godot 4.6.3 / Windows / Vulkanでマウス入力経路、カメラ基準移動、実player.vrmの向き、停止後の向き維持、Escによる実歩行・Idle停止、再開ボタンのクリックによる復帰とマウス再捕捉、F4開閉を隔離検証した。元の移動境界・player Idleの回帰も通過した。Gateway、PersonaVision、StartXRはscene treeに入れる前に隔離fixtureから除き、本番ペルソナや外部LLMへ接触していない。実HMDは未検証。操作感は2026-10-10にまはーが実機で確認し、評価は「完璧」だった。
+- 台帳の以前の現在地と残作業: 身体・表情・一人称撮像に加え、ARDY を別 PC で生成する経路と身体スペルの Building 指定まで隔離 E2E 済み。次 = まはーが設定画面で生成先 URL と Building を選んで実機確認し、NEBULA の生成サーバーを常駐させるかを決める。残 = player locomotion、瞬き・視線、実 HMD、/emote、Idle scheduler。
+
 ### 2026-09-23: ARDYの別PC生成と、身体Spellを使えるBuildingの指定
 
 - 最終成果は「GPUを持ち出せない場所でも、ペルソナが新しい動きを頼めば家のGPUで作られて身体が動くこと」と「身体Spellが、アバターのいるBuildingにいるペルソナにだけ見えて使えること」。前者の発端は展示会へ3090を持ち込めないこと、後者の発端は`vessel_building_id`が空で全Buildingの全ペルソナに身体Spellが見えていたこと。
@@ -102,6 +140,7 @@
 - `resolved_target_count=0`のprofileやtargetなしの非neutral表情は成功扱いしない。モデルhash不一致、欠損、曖昧候補、解決方式は構造化ログへ残す。旧v1 profileは読めるが、Studio保存時に現行モデルhashと安定targetへ昇格する。
 - 感情、瞬き、口形、視線を独立channelのまま維持し、表情遷移はchannel内の現在値から次のrecipeへBlend Shape値を補間する。gesture開始前の感情状態を保存し、開始時に指定presetへfade、自然完了・失敗・`body_stop`の全経路で元の状態へfade-backする。
 - `body_gesture`へ任意の`expression_preset`と`expression_intensity`を追加する。ARDYの英語`action_instruction`は身体だけを生成し、顔は別引数で明示する。未指定時は現在表情を維持し、未知presetを黙ってneutralや笑顔へ読み替えない。生成待ちgestureでも同じ表情指定をpending commandへ保持する。
+- 表情は身体gestureの任意の付加要素とする。引数形式・強度が不正、presetが未知、profile欠損、変形先が未解決、遷移開始不可の場合は、理由を記録して表情だけを省略し、現在の顔を保って身体動作を続行する。判定はSpell入口と実アバターを持つGodot側がそれぞれ所有し、即時・キャッシュ済み・生成待ちの全経路に適用する。Godotでの適用結果はplayingとcompletedへ載せ、実行していない表情を適用済みと報告しない。身体モーション自身の失敗は従来どおり失敗とし、有効な表情の適用・完了/停止/失敗時の復帰は維持する。同一channelに別の使用可能なpresetがあるだけでは、変形先のない非neutral表情を使用可能としない。
 - 自動瞬き、ユーザー追従視線、発話visemeは同じ表情基盤を後から使う常時layerだが、ユーザー制作の感情presetと混ぜて実装しない。最初の通過条件は「Studioで作ったpresetを保存・再読込でき、gesture中だけ適用され、終了後に元の顔へ戻る」こと。
 - 上記を実装した。差し替え後の`persona.vrm`には740個、`player.vrm`には291個のBlend Shapeが残っていた。旧profileのmesh pathは外れていたが、23 target全件を`blend_shape`の一意解決で復旧し、17表情を再び利用可能にした。旧モデルhashとの不一致は隠さず、Studioで次に保存した時点で現VRM hashとv2 targetへ昇格する。
 - `F4`で開くExpression Studioをメインシーンへ追加した。検索可能な740項目、複数target配合、ID・説明・channel・fade-in/out、編集前の顔へのreset、保存後の再configure、保存済み遷移プレビューを実装した。顔専用の近接プレビューと左編集欄のスクロールを備え、AMD 890M / Forward+ / 1152×648の実描画で全項目へ到達できることをスクリーンショット確認した。
@@ -348,6 +387,49 @@ ARDY Service (WSL / RTX 3090)         Godot Client (Windows / OpenXR)
 
 低遅延の衝突回避、足接地、転倒防止、視線追従は Spell にせず Godot の局所制御に置く。
 
+## ペルソナ発話の音声と字幕 (2026-10-11)
+
+ペルソナが発話した内容を、同じBuildingのGodotアバターから聞き、頭上の字幕で読めるようにする。発話生成・記憶・世界状態は既存SAIVerseが所有し、この経路は公開用の `text_for_voice` の配送と再生だけを担う。
+
+`persona_speak` → アドオンのFIFOワーカー → voice-tts に一切れずつ合成を依頼 → 認証済みGatewayの `persona.speech` → ペルソナ別AudioStreamPlayer3D/Label3D、の順に流す。
+
+### 声は voice-tts から一切れずつ受け取る (2026-10-15 改訂、まはー裁定)
+
+テキストチャットの画面と VR 空間では、TTS がやるべきことが違う。画面では発話全体を一本の声で読めば足りるが、VR では全身エモート記法の位置で声を切り、動きとタイミングを合わせる必要がある。だからペルソナが VR の部屋にいる間、voice-tts は画面向けの作り方をやめ、VR 向けの依頼だけに応える。
+
+- **声を切るのは Godot アドオンだけ。** アドオンは今までどおり記法の前後で発話を区切り、区切った文を一つずつ voice-tts の `synthesize_piece` に渡して WAV を受け取る。voice-tts は自分では切らない。切る役を一つに限るのは、二つの切り方がずれると声と動きが合わなくなるため。
+- **VR の部屋にいる間、声は VR のアバターからだけ鳴る。** アドオンは voice-tts に「この発話は仮想身体が引き受ける」と知らせる判定を登録する (`register_voice_claim`)。判定はアドオンの配送条件と同じで、アドオンが有効・`vessel_building_id` が発話元と現在地に一致・Vessel が接続中のときだけ真になる。真の発話では、voice-tts はブラウザ・サーバーのスピーカーで鳴らす合成をしない。判定は message_id ごとに最初の断片で一度だけ決め、途中で変えない。Godot を起動していないときは今までどおりブラウザで鳴る。
+- **合成は一切れにつき一回。** 同じ文を画面用と VR 用で二回合成しない。依頼は voice-tts の既存の合成ワーカーへ並ぶので、エンジンを同時に二重に使わない。声の種類・話速・読み方の辞書・読み上げ前の整形は voice-tts のペルソナ設定がそのまま効く。voice-tts でそのペルソナの自動発話 (`auto_speak`) が OFF なら、VR でも声を作らず字幕だけにする。
+- **話し終わったら、吹き出しに一続きの声を付ける。** voice-tts は VR 用に作った切れ端を message_id ごとに取っておく。アドオンはその発話の最後の区切りを配送し終えたら `finish_message` で知らせ、voice-tts は切れ端を順につないで保存し、吹き出しの「音声を再生」を出す。ブラウザで勝手に鳴らさないため、知らせには自動再生が反応しない `audio_completed` を使う。途中の一切れでも作れなかった発話 (合成の失敗・時間切れ、アドオンが溢れて区切りを受け付けられなかった回) は、抜けのある声になるのでつながず、「音声なし」を知らせる。VR へ流したかどうかは関係しない (次項)。手動の「音声を再生成」は今までどおり使える。
+- **引き受けた発話は、区切りを全部合成する。VR へ流すかは区切りごとに決める。** VR が引き受けると決まった発話 (voice-tts の `claim_message_voice` が message_id ごとに一度だけ決める) は、途中でペルソナが部屋を出ても、接続が切れたり置き換わったりしても、残りの区切りを最後まで合成する。VR へ流すのは、発話の最初の区切りを受け付けた接続がまだ繋がっていて、ペルソナがまだ部屋にいるときだけ (置き換え後の新しい接続には、前の接続で始まった発話を流さない)。こうすると吹き出しの声は「合成できたか」だけで決まり、アドオンが「どの区切りを届けられなかったか」を数える必要が無い。VR のクライアントが区切りを捨てた (再生待ちが溢れた等) ときも、吹き出しには発話全体の声が付く。
+- **引き受けた発話の結末は、アドオンが必ず一度知らせる。** アドオンは受け付けた発話を `finish_message` で必ず締める (最後の断片が 600 秒来なければ自分で `complete=False` で締める)。voice-tts は締めの来ない発話を期限切れにする前に、アドオンに「まだこの発話を持っているか」を聞き (`register_voice_claim` の `holds`)、持っている間は閉じない。voice-tts の期限切れ (1 時間) は、アドオンが答えなくなった (落ちた・外れた) ときだけの最後の網。混んで長く待っている正常な発話を時間で閉じない。
+- **待ち時間の上限は `tts_timeout_sec`。** 一切れの声がこの秒数までに返らなければ字幕だけで届け、その発話の吹き出しの声は付けない。voice-tts が入っていない環境では、待たずに字幕だけで届ける。
+- アドオン独自の合成サーバー設定 (`tts_server_url` / `tts_profile_id`) は廃止した。声の設定は voice-tts の一か所だけにある。
+
+経緯: 2026-10-14 の初版 (Gemini 作) は、voice-tts がブラウザ用に作る発話全体の PCM 配信 (`subscribe_pcm`) を、アドオンの区切りごとに丸ごと受け取っていた。区切りが N 個あると発話全体の声が N 回流れ、記法も読み上げられ、自動発話 OFF のペルソナでは区切りごとに上限まで待って字幕が遅れた。テストの偽物が「発話全体で一本」という本物の配信の形を真似ていなかったため、テストは全部すり抜けた。
+
+- アドオンが有効、`vessel_building_id` が設定済みで発話元/現在地と一致、指定Vesselが接続中、の時だけ受信する。空欄は音声入力と同様に配送先未設定として扱う。
+- フックでは合成を待たず、有限のFIFOへ投入する。streamingの断片をそのまま順次配送し、空のfinal通知は読み上げない。`message_id` と断片番号から発話IDを付け、同一断片の重複を抑止する。
+- voice-tts 未導入・合成失敗・時間切れ・不正/過大WAV (4 MiB 超) は字幕のみで配送する。本文や音声base64はログへ書かない。
+- 接続のsession_idを受信時に固定し、合成後もBuilding・有効状態・接続を照合する。退室・無効化・接続置換後に古い音声を新しい接続へ流さない。
+- Godotは該当アバターへだけ配送し、読込中のアバター宛ては有限のキューへ保持する。退室・接続断で音声/字幕/キューを消去する。ポーズ中も通信と再生完了処理を進める。
+- 音声は頭部へ追従し、字幕は頭上へ置く。字幕は改行折返し・縁取り・ビルボードでデスクトップ/両眼XRから読めるようにする。音声終了時、字幕だけなら文字数に応じた時間後に非表示にする。
+
+検証は合成人格・隔離SAIVERSE_HOME・ローカルfake TTSを使用する。実フック、HTTP、実WebSocket、実Godotのデコード/再生終了/字幕の表示と消去を横断し、失敗・順序・退室・切断・ポーズも確認する。本番会話、外部LLM、NEBULAの音声生成、実HMD/聴覚評価は自動テストの成立へ混ぜない。
+
+## 発話位置に同期する全身エモートと口パク (2026-10-11)
+
+発話原文は保存し、表示・合成・身体再生の各消費側で `{"body_emote": "smile"}` を解釈する。smile/nod/joy/hug/happy/wave/think/surprised/laughをすべて全身エモートとし、表情だけの動作にはしない。
+
+- Godotアドオンは記法の前後で発話を分割し、前の音声→記法位置のエモート開始＋後の音声の順に配送する。JSONをTTSへ渡さず、streaming断片を跨いだ記法も保留・結合して解釈する。末尾の記法だけでも実行する。
+- ブラウザ等で鳴る voice-tts も記法を読み上げない (2026-10-15)。voice-tts は読み上げ前の整形で記法を消す。本体は話している途中の文を「、」「:」などで切って voice-tts へ渡すため、`{` から `}` の間 (64 文字以内で閉じるもの) では切らないようにした。切ると記法が二つに割れて届き、voice-tts が記法と気づけない。
+- GodotはWAVの現在再生位置に対応する短時間RMSを口の開きへ写す。字幕だけなら発話タイマーで開閉する。表情のmouth/emotionチャンネルを区別し、終了・切断・退室で開始前の値へ戻す。
+- 全身モーションはSkeletonModifier3Dで既存ARDY/idleの上へ加えるプロシージャル姿勢。頭だけでなく体幹・腕・腰・脚を含み、別骨格の服・髪も既存のfollower機構で追従させる。既存のBodyCommandを偽って完了させず、エモート終了で追加姿勢を消し、baseline/rest idleへ戻す。
+- チャットは描画時だけ記法をCSS付きの小さいグレーの `(smile)` に置換する。生テキスト・DB・記憶は書き換えない。置換はMarkdownを解析した後の構文木の上で行い (`frontend/src/lib/rehypeBodyEmote.ts`)、コード (インラインコード・フェンス・インデント形式のコードブロック・ストリーミング途中の閉じていないフェンス) の中は置き換えない。ペルソナが記法そのものをコードで説明したとき、そのまま読めるようにするため。9種類以外の名前や壊れたJSONも置き換えない。
+- アドオンが有効で、設定済みvessel_building_idが現在地と一致するときだけ、9種類の記法を案内する。案内はBuilding固有のスペルと同じ道で届く — headの「## アドオンからの案内」に載り、部屋の出入り・アドオンの有効化と無効化・設定の変更で案内が現れた・消えた・変わったことは、知覚の「[システム通知]」として届く。部屋を出たときは「この案内にあった書き方は使わないでください」と伝わるので、過去に自分が書いた記法を使い続けない。アドオンのcontext_providerは発話hookと同じ有効化/無効化の生命周期で登録する。(2026-10-11 の初版は揮発性のリアルタイム情報で案内していたが、案内が消えたことが出来事として残らないため 2026-10-12 に改めた。[addon_speak_hooks.md](addon_speak_hooks.md))
+
+検証は合成人格・ローカルfake TTS・隔離Godot/フロントエンド描画で行う。マーカー除去、分割と再生開始順、9種類の全身姿勢、静音/大小音量/字幕口パク、終了時の復元、部屋限定の案内とその増減の通知を実コードで照合する。外部LLM・本番ペルソナ・本番永続データは使わない。
+
 ## Embodiment Gateway v1 契約
 
 ### 入口は二つ、実行基盤は一つ
@@ -584,3 +666,29 @@ F4 Expression Studioで検索・配合・ID/説明/channel/fade編集・v2 profi
 次はplayer locomotionの`idle ↔ walk/run`、自動瞬き・ユーザー追従視線、実HMD locomotion、発話同期`/emote`／viseme、Idle複数clip scheduler、接地・足滑り確認。
 2026-07-17の本番`eris_city_a`接触は無承認の同意違反事故であり検証証拠から除外。
 本番ペルソナを用いる確認は操作ごとの明示承認がある場合のみ
+
+### 2026-10-10 Godot音声入力
+
+SkyrimのEnergyVad / PushToTalkVadをそのまま移植し、Godotマイク選択・F8設定・F6開始停止・Delete/PTT・Quest右A/PTTと右B/開始停止を実装した。認証済みGatewayに16kHz PCMを送り、区切ったWAVを既存handle_user_input_streamへ渡す。設定したBuildingとユーザーの現在地を開始時・送信時に照合し、計測では会話・記憶に触れない。録音は初期OFF、切断後は自動再開しない。停止・切替でも既に開始した応答とWebSocketのポーリングを継続する。
+
+合成音声で実Godot→実WebSocket→実VAD→WAV添付→mock managerの生成器消費まで自動/PTT双方を確認した。画面は実GPU描画で確認。実マイク・実Quest・実LLM音声応答は未確認。詳細はアドオンsai-vr/docs/voice-input.md。
+
+更新前のin_flight行:
+
+| 🟠 実装中 | Godot / ARDY 仮想身体デモ | デスクトップFPS操作・複数アバター表示・VR左スティック移動が利用可能。次 = Quest 2で表示・頭部追跡・等速移動を確認する。残 = player歩行アニメーション、瞬き・視線、/emote、Idle scheduler。 | まはー(Quest 2の装着・操作確認) / 私(実機ログ確認と残りの実装) | [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md) | 2026-10-10 |
+
+### 2026-10-12 発話の音声・字幕と全身エモート (PR #387)
+
+Gemini が実装した PR #387 をレビューし、エモート記法の案内をリアルタイム情報から head の案内セクションと知覚の差分通知へ移した (まはーの指摘: リアルタイム情報では案内が消えたことが出来事として残らず、記法を使い続ける恐れがある)。経緯は [addon_speak_hooks.md](addon_speak_hooks.md)。
+
+更新前のin_flight行:
+
+| 🟠 実装中 | Godot / ARDY 仮想身体デモ | FPS操作・複数アバター・VR左スティック移動・音声入力(音量閾値/PTT)を実装。次 = Quest 2で表示・頭部追跡・等速移動・マイク入力を確認。残 = player歩行アニメーション、瞬き・視線、/emote、Idle scheduler。 | まはー(Quest 2の装着・操作確認) / 私(実機ログ確認と残りの実装) | [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md) | 2026-10-10 |
+
+### 2026-10-15 発話の声を voice-tts から一切れずつ受け取る形へ (アドオン PR #1、voice-tts PR #7)
+
+Gemini が作った初版 (voice-tts の発話全体の PCM 配信を区切りごとに受け取る形) を検収し、まはーの裁定で「声は voice-tts から一切れずつ受け取る」形に作り替えた。設計は本書の同名の節。
+
+更新前のin_flight行:
+
+| 🟠 実装中 | Godot / ARDY 仮想身体デモ | FPS操作・複数アバター・VR左スティック移動・音声入力・発話の音声と字幕・発話に同期する全身エモートを実装。次 = Quest 2で表示・頭部追跡・移動・マイク入力・全身エモートを確認。残 = player歩行アニメーション、瞬き・視線、Idle scheduler。 | まはー(Quest 2の装着・操作確認) / 私(実機ログ確認と残りの実装) | [virtual_embodiment_godot.md](../intent/virtual_embodiment_godot.md) | 2026-10-12 |

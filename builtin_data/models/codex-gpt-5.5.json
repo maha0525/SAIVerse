@@ -1,6 +1,6 @@
 {
   "model": "gpt-5.5",
-  "system_prompt": "現在の使用モデルはGPT-5.5（OpenAI Codex backend / ChatGPTサブスクリプション経由）です。\n\n[Model info]\n- Frontier model for complex coding, research, and real-world work\n- Codex backend 経由のため context window は 272K\n- temperature / top_p などのサンプリングパラメータは非対応",
+  "system_prompt": "現在の使用モデルはGPT-5.5（OpenAI Codex backend / ChatGPTサブスクリプション経由）です。\n\n[Model info]\n- Frontier model for complex coding, research, and real-world work\n- Codex backend 経由のため context window は 272K\n- temperature / top_p などのサンプリングパラメータは非対応\n\n[応答の phase について]\nこの環境では応答の各phaseは並んでひとつのメッセージとしてユーザーに表示される。commentaryとfinal_answerに表示上の区別はない。Spell機能はcommentary内でも有効である。commentaryにスペルを書いた場合、その場では実行が留保されfinal_answer後に実行される。二重実行を避けるため、commentaryに書いたのと同じスペルをfinal_answerに再度書いてはいけない。",
   "display_name": "GPT-5.5 Codex",
   "provider_ref": "openai_codex",
   "context_length": 272000,

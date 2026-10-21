@@ -1553,6 +1553,12 @@ class TaskBookEntry(Base):
     # add_entry は 0 で作る。軽量シンク (schema_sync) の後付け列は NULL で
     # 入るため、migrate.py の _ensure_task_book_table が 0 へ埋める。
     REVISION = Column(Integer, nullable=False, default=0)
+    # ペルソナまるごとパックの取り込みで TASK_ID を振り直したときの元の TASK_ID
+    # (振り直しが重なったら最初の環境の値)。振り直していない行は NULL。取り込みの
+    # 照合 (saiverse_memory/persona_pack/importer.py の stage_task_book) が、TASK_ID と
+    # この列のどちらかの一致で同じ約束とみなす — 振り直された約束を元の環境へ
+    # 合流で戻したとき二重に入らないため。
+    ORIGIN_TASK_ID = Column(String(36), nullable=True)
     __table_args__ = (
         # open 一覧 (ティックの引き当て・UI) 用
         Index("idx_task_book_persona_status", "PERSONA_ID", "STATUS"),
@@ -1575,3 +1581,26 @@ class TaskBookEntry(Base):
         ),
     )
 
+
+
+# ============================================================================
+# ペルソナまるごとパックの取り込みの適用済み記録
+# docs/intent/persona_pack.md §5「新規作成が途中で止まったときの再開」
+# ============================================================================
+
+class PersonaPackImport(Base):
+    """ペルソナまるごとパックの世界側 (saiverse.db) の工程を適用した記録。
+
+    saiverse_memory/persona_pack/importer.py が、世界側の変更と同じトランザクションで
+    1 行書く。persona_pack_world_pending.json が残ったペルソナへの合流は、この表に
+    IMPORT_ID があれば世界側の工程をやり直さずに印だけ消す (整数の主キーを
+    振り直す表は INSERT OR IGNORE で二重登録を防げないため)。
+
+    正典はこのモデル。importer.py は古い DB に備えて同じ形の
+    CREATE TABLE IF NOT EXISTS を持つ (列を変えるときは両方を揃える)。
+    """
+    __tablename__ = "persona_pack_imports"
+    # ZIP 全体の sha256 と取り込み先のペルソナ ID から決まる値 (importer.py の _import_id)
+    IMPORT_ID = Column(String(64), primary_key=True)
+    PERSONA_ID = Column(String(255), nullable=False)
+    APPLIED_AT = Column(Integer, nullable=False)  # epoch 秒

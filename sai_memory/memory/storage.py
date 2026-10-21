@@ -11,6 +11,13 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from sai_memory.logging_utils import debug
 
+#: The vector stored for a message whose embedding is deferred (a chat-log
+#: import embeds in the background after storing the text). Its length (0)
+#: differs from every model's dimension, so it is a stale vector to the
+#: startup check and to the re-embed (sai_memory/embedding_migration.py), and
+#: the background embedding replaces it like any other stale vector.
+DEFERRED_VECTOR = "[]"
+
 
 def _ensure_dir(path: str) -> None:
     d = os.path.dirname(path)
@@ -105,6 +112,15 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_message_embeddings_msg ON message_embeddings(message_id)"
+    )
+    # The empty rows of deferred embedding (DEFERRED_VECTOR, see
+    # write_deferred_message_embedding) sit anywhere in the table once part of
+    # them is filled in, out of reach of the startup sample of both ends. This
+    # partial index lets the startup check count them exactly without reading
+    # every vector.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_message_embeddings_deferred "
+        f"ON message_embeddings(message_id) WHERE vector = '{DEFERRED_VECTOR}'"
     )
     # Backfill legacy embeddings table into message_embeddings as chunk 0 when needed.
     conn.execute(
@@ -640,8 +656,13 @@ def add_message(
     thought_signature: Optional[str] = None,
     spell_origin_id: Optional[str] = None,
     spell_seq: Optional[int] = None,
+    commit: bool = True,
 ) -> str:
     """Insert a message row.
+
+    ``commit=False`` leaves the commit to the caller (used inside
+    ``sai_memory.db_locks.immediate_transaction`` to store the message and
+    its deferred-embedding row as one write).
 
     The 7-layer storage metadata (Intent A v0.14, Intent B v0.11) is optional:
     callers that don't supply ``line_role`` / ``line_id`` / ``origin_track_id``
@@ -689,15 +710,50 @@ def add_message(
              origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id, thought_signature,
              spell_origin_id, spell_seq, origin_episode),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
     return mid
+
+
+def write_deferred_message_embedding(
+    conn: sqlite3.Connection, message_id: str, *, commit: bool = True,
+) -> None:
+    """Store :data:`DEFERRED_VECTOR` as the only vector row of ``message_id``.
+
+    The row says "this message waits for its embedding" in the memory.db
+    itself, so whatever happens to the process that was to embed it, the
+    startup check and the re-embed find it as a stale vector.
+    """
+    conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))
+    conn.execute(
+        "INSERT INTO message_embeddings(message_id, chunk_index, vector) VALUES(?, 0, ?)",
+        (message_id, DEFERRED_VECTOR),
+    )
+    if commit:
+        conn.commit()
+
+
+def count_deferred_message_embeddings(conn: sqlite3.Connection) -> int:
+    """Messages still holding :data:`DEFERRED_VECTOR` (exact; uses the partial index)."""
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM message_embeddings WHERE vector = '{DEFERRED_VECTOR}'"
+    ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def replace_message_embeddings(
     conn: sqlite3.Connection,
     message_id: str,
     vectors: Iterable[Iterable[float]],
+    *,
+    commit: bool = True,
 ) -> None:
+    """Replace every vector row of ``message_id`` (one row per chunk).
+
+    ``commit=False`` leaves the commit to the caller (used inside
+    ``sai_memory.db_locks.immediate_transaction``, where the text is read
+    again and the vectors stored without letting another writer in between).
+    """
     conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))
     payload: List[Tuple[str, int, str]] = []
     for idx, vec in enumerate(vectors):
@@ -707,7 +763,8 @@ def replace_message_embeddings(
             "INSERT INTO message_embeddings(message_id, chunk_index, vector) VALUES(?, ?, ?)",
             payload,
         )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def upsert_embedding(conn: sqlite3.Connection, message_id: str, vector: Iterable[float]) -> None:
@@ -1225,6 +1282,31 @@ def sample_messages(conn: sqlite3.Connection, limit: int = 5) -> List[Message]:
         (limit,),
     )
     return [_row_to_message(row) for row in cur.fetchall()]
+
+
+def wrap_system_record_content(content: str) -> str:
+    """system ロールで保存した記録を、送る列に出す本文の形にする (復元形)。
+
+    履歴の復元 (saiverse_memory.adapter._payload_from_message_locked) と、記録と
+    同じものをその場で送る経路 (スペルの結果・事前スペルの結果 —
+    sea/runtime_llm) が**同じこの一枚**を通る。送ったときの本文と、保存して
+    次のターンに復元される本文が一字でも違うと、前回の送信が今回の送信の
+    先頭と一致しなくなる (docs/intent/persist_realtime_and_recall.md 不変条件 2)。
+    ``content`` は :func:`compose_message_content` を通した後の文字列。
+    """
+    if content:
+        return f"<system>\n{content}\n</system>"
+    return "<system></system>"
+
+
+def presented_system_record_content(text: str) -> str:
+    """これから system ロールで保存する ``text`` が、復元されたときに出る本文。
+
+    リンク付きスレッドの抜粋などを持たない素の記録の
+    :func:`compose_message_content` (前後の空白を落とす) →
+    :func:`wrap_system_record_content` と同じ結果。
+    """
+    return wrap_system_record_content((text or "").strip())
 
 
 def compose_message_content(
@@ -1797,8 +1879,14 @@ def get_embed_metadata_strict(conn: sqlite3.Connection, key: str) -> str | None:
         raise
 
 
-def set_embed_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
-    """Upsert *key*/*value* into the embed_metadata table."""
+def set_embed_metadata(
+    conn: sqlite3.Connection, key: str, value: str, *, commit: bool = True,
+) -> None:
+    """Upsert *key*/*value* into the embed_metadata table.
+
+    ``commit=False`` leaves the commit to the caller (to write several keys
+    in one transaction).
+    """
     now = datetime.utcnow().isoformat()
     conn.execute(
         """
@@ -1808,7 +1896,8 @@ def set_embed_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
         """,
         (key, value, now),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------

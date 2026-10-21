@@ -14,7 +14,9 @@ const callback = ts.transpileModule(page.slice(callbackStart, callbackEnd), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText;
 const startupStart = page.indexOf('        // Fetch current building_id for multi-device safety');
-const startupEnd = page.indexOf('        // Fetch saved playbook setting', startupStart);
+// The slice ends before the announcements block: that block registers document
+// listeners and its own apiFetch polling, which are outside this test's scope.
+const startupEnd = page.indexOf('        // Check for unread announcements', startupStart);
 assert.ok(startupStart > 0 && startupEnd > startupStart);
 const startup = ts.transpileModule(page.slice(startupStart, startupEnd), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },

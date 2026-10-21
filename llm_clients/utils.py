@@ -7,6 +7,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 _log = logging.getLogger(__name__)
 
+#: 履歴の中の「最後の AI の返事」に付ける内部印 (message の ``metadata`` のキー)。
+#: 継続キャッシュ (高速応答モード) のキャッシュの境目を、SEA から LLM クライアントへ
+#: 伝えるためのもの (docs/intent/cache_lifecycle_control.md §3.5)。各クライアントは
+#: metadata を API へ送らないので、この印が payload に載ることはない。印を読むのは
+#: Gemini クライアントだけで、他のクライアントは素通しする。
+CACHE_BOUNDARY_METADATA_KEY = "__cache_boundary__"
+
 
 def content_to_text(content: Any) -> str:
     """Extract plain text from SDK message payloads."""
@@ -80,6 +87,52 @@ def merge_reasoning_strings(chunks: List[str]) -> List[Dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 DEFAULT_ATTACHMENT_LIMIT = 4
+
+#: この列には画像の枚数の上限を使わない、という列ごとの印 (metadata のキー)。
+#: 列の中のどれか一つのメッセージが持てば、その列の画像はすべて画像のまま送る。
+#: 付けるのは、リアルタイム情報と自動想起を残して送り続けるモデルの列
+#: (docs/intent/persist_realtime_and_recall.md §4.2 — sea/runtime_context.
+#: prepare_context が、組んだときのモデルで判定して列の先頭のメッセージに付ける)。
+#: 上限があると、新しい画像が来るたびに一番古い画像が文字に置き換わって前回の
+#: 送信の中身が書き換わり、「送る中身は毎ターン後ろに足されるだけ」という
+#: その設定の約束と根本でぶつかる。印はメッセージ一つ一つではなく列に付ける —
+#: 画像を運ぶメッセージ (ユーザー・知覚・ツール・スペル…) ごとに印を付ける形は、
+#: 印の付け漏れが同じ型の欠陥として何度も出たため。
+ATTACHMENT_LIMIT_OFF_KEY = "__attachment_limit_off__"
+
+
+def attachment_limit_is_off(messages: Any) -> bool:
+    """この列で画像の枚数の上限を使わないか (全プロバイダと送る量の見積もりで共通)。
+
+    列のどれか一つのメッセージが :data:`ATTACHMENT_LIMIT_OFF_KEY` を持てば真。
+    各クライアントは system のメッセージを抜き出す**前の**列でこれを判定する
+    (印は列の先頭 = たいてい system のメッセージにあるため)。
+    """
+    if not isinstance(messages, (list, tuple)):
+        return False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        metadata = msg.get("metadata")
+        if isinstance(metadata, dict) and metadata.get(ATTACHMENT_LIMIT_OFF_KEY):
+            return True
+    return False
+
+
+def mark_attachment_limit_off(messages: List[Dict[str, Any]]) -> None:
+    """列に「画像の枚数の上限を使わない」の印を付ける (先頭のメッセージに、写しで)。
+
+    元の dict は書き換えず、先頭の 1 件だけを複製して差し替える (履歴の dict は
+    他の経路と共有されうる — mark_cache_boundary と同じ扱い)。空の列には何もしない。
+    印は metadata にあるだけで、どのクライアントも API へは送らない。
+    """
+    if not messages or not isinstance(messages[0], dict):
+        return
+    first = messages[0]
+    metadata = first.get("metadata")
+    new_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+    new_metadata[ATTACHMENT_LIMIT_OFF_KEY] = True
+    messages[0] = {**first, "metadata": new_metadata}
 
 
 def parse_attachment_limit(provider: str = "") -> int:

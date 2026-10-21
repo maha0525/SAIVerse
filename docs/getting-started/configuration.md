@@ -22,9 +22,9 @@ SAIVerseの設定オプションを説明します。
 
 | 変数名 | デフォルト | 説明 |
 |--------|-----------|------|
-| `SAIMEMORY_EMBED_MODEL` | `intfloat/multilingual-e5-small` | 埋め込みモデル |
-| `SAIMEMORY_EMBED_MODEL_PATH` | - | ローカルモデルのパス |
 | `SAIMEMORY_MEMORY_LAST_MESSAGES` | 40 | 文脈に載せる直近メッセージ数 |
+
+想起に使う埋め込みモデル (EmbeddingGemma 2、CPU で動作) は固定で、設定項目はありません。セットアップ時 (失敗した場合は初回起動時) に `sbert/embeddinggemma-2-q4/` へ自動でダウンロードされます。
 
 ### ネットワーク
 
@@ -88,6 +88,9 @@ python main.py <city_id> [オプション]
 - `supports_sampling_parameters`: `temperature` / `top_p` / `top_k` の送信対応（Gemini 3.6 Flash / 3.5 Flash-Lite 以降の非対応モデルでは `false`）
 - `supports_assistant_prefill`: Anthropic の assistant 発話で終わるコンテキストへの対応（Haiku 5.5 では `false`）。非対応時は履歴を書き換えず、送信前に `invalid_request` で停止
 - `supports_model_prefill`: 非空のモデル発話で終わるコンテキストへの対応（同モデル以降では `false`）
+- `timeout`: 1 回の API 呼び出しの待ち時間の上限（秒）。OpenAI 互換・OpenAI Codex・Gemini で効く（NVIDIA NIM は `request_kwargs.timeout`）。Gemini では環境変数 `GEMINI_TIMEOUT_SECONDS` より優先
+- `cache.explicit_supported`: Gemini の明示キャッシュ（`caches.create`）に対応するか（省略時 `true`）。`false` のモデル（Gemini 4 Argon）では自動キャッシュ・継続キャッシュを選んでいてもキャッシュを作らず、Google 側の暗黙キャッシュだけで動く
+- `cache.persist_realtime_and_recall`: リアルタイム情報（現在時刻・事前実行スペルの結果）と自動想起（ふと浮かんだ記憶）を、送った時点でペルソナの記録に残し、次の応答以降も同じ位置に同じ文面で送るか（省略時 `false`）。`true` にすると送る内容が毎回後ろに足されるだけになり、前回の送信が今回の送信の先頭とそのまま一致するので、キャッシュの境目をこちらから指定できないモデルでもキャッシュが当たる。組み込みでは Gemini 4 Argon だけが `true`。境目を指定できるモデル（Claude、明示キャッシュの Gemini）では得が無く、残した分だけ記憶の整理が早まるので `false` のままにする。`true` のモデルでは、送る画像の枚数の上限（`SAIVERSE_ATTACHMENT_LIMIT` やモデル設定の `max_image_embeds`）を使わず、会話の画像をすべて画像のまま送る（上限で古い画像が文字に置き換わると、前回の送信の中身が書き換わるため）。設計は `docs/intent/persist_realtime_and_recall.md`
 - `base_url`: カスタムエンドポイント（互換API用）
 - `api_key_env`: APIキーの環境変数名
 - `parameters`: 温度・top_pなどのパラメータ制約

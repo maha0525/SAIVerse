@@ -1,0 +1,1339 @@
+"""ペルソナまるごとパック (persona-pack) の書き出し。
+
+正典: docs/intent/persona_pack.md。ペルソナ一体の全データを一つの ZIP に書き出す。
+
+- **読み取り専用**: saiverse.db / memory.db は SQLite の ``mode=ro`` で開き、
+  DB ごとに一つの読み取りトランザクションの中で読む。同じ DB の中の読みは
+  そのトランザクションを始めた時点の一枚に揃うが、二つの DB は別の接続なので
+  読み取り開始の時点が完全には揃わない (書き出し中の本体の書き込みが、片方の
+  DB にだけ入って見えることがある)。ペルソナの状態は一切変えない。
+- **決まった置き場の外のファイルは入れない**: DB に保存されたパスは、解決後の
+  パス (symlink を辿った先) が、その種類のファイルの置き場の内側にあるものだけを
+  ZIP に入れる。building.IMAGE_PATH・fixture / item の FILE_PATH は
+  共有メディアフォルダ (SAIVERSE_HOME 直下の image / documents / audio / video。
+  saiverse/media_utils.py の _ensure_*_dir と manager/items.py が書く場所。
+  ``/api/media/images/<名前>`` の値は実体の ``image/<名前>`` として解決する)。添付
+  (messages.metadata・知覚台帳の media・部屋の様子の記帳の束の media) の path は
+  共有メディアフォルダと ``user_data/icons``。アイコンと外見画像は ``user_data/icons`` と
+  ``image`` (``/api/media/images/<名前>`` の URL の実体)。SAIVERSE_HOME の内側でも、
+  それ以外の場所 (``user_data/database/`` の本体 DB、他のペルソナのフォルダなど) は
+  入れない。入れなかったものは ``missing_files`` に ``"<where> (outside SAIVERSE_HOME)"``
+  (SAIVERSE_HOME の外) か ``"<where> (outside <置き場>)"`` (内側だが置き場の外) と
+  して記録する。
+- **本体サーバーに依存しない**: 入力は ペルソナ ID・saiverse.db のパス・
+  SAIVERSE_HOME 相当のルート・出力先パスだけ。``saiverse.data_paths`` の
+  環境依存の解決は使わない (テストと SAIVerse Lite で同じ関数を使うため)。
+- **途中で倒れても壊れた ZIP を残さない**: 出力先の隣の一時ファイルに書き、
+  全部書けたら置き換える。
+
+ZIP の中身 (intent §4 の表):
+
+``manifest.json``
+    形式名・版・生成元・作成日時・ペルソナ名・ペルソナ ID・``contents``。
+``profile/``
+    ``profile.json`` (ai 行の全列。認証情報は ai 行に無い) とアイコン・外見画像。
+``chatlog/``
+    ``threads.json`` / ``stelis_threads.json`` / ``messages.json``。messages は
+    全列と metadata を丸ごと運び、元 DB の rowid を ``seq`` として付ける
+    (同じ秒の中の並び順の鍵。native_export.py の ``seq`` と同じ意味)。
+    並びは正典順 (created_at, rowid)。
+``knowledge/``
+    ``pages.json`` (memopedia_pages の全ページ。core / chronicle 分類も含む)。
+``attachments/``
+    メッセージ metadata の ``images`` / ``documents`` / ``media`` と、知覚台帳
+    (PERCEPTION_MEDIA_TABLES) の ``media`` 列と、部屋の様子の記帳
+    (ROOM_STATE_COLUMNS) の束のパッケージの ``media`` が指すファイルの実体
+    (user_data/icons のファイルは ``attachments/image/`` に入れる) と
+    ``index.json`` (参照 → ZIP 内パス。参照元は ``message_ids`` と
+    ``perception_rows`` (``"<表>:<id>"``))。
+``items/``
+    私室 (building 行・fixture 行) と所持品 (item_location / item 行) と、
+    それらが指すファイル。
+``journal/``
+    ``day_reports/`` (一日新聞)・activities / memos (手帳)・task_book (約束帳)・
+    clips (切り抜き)・purpose_tags (目的タグ)。
+``extensions/saiverse/``
+    共通フォルダに写していない残り。``memory_db/<table>.json`` (memory.db の
+    残りのテーブルを機械的に)、``saiverse_db/<table>.json`` (saiverse.db の
+    このペルソナの行)、``persona_dir/`` (ペルソナフォルダのファイルそのまま)。
+``chatgpt_compat/``
+    ``conversations.json`` (会話のやりとりだけの ChatGPT エクスポート互換コピー)。
+    会話の並びは thread_id 順。
+
+値の書き方は format.py (bytes の包み・JSON 文字列列の展開・epoch 秒の ISO 化)。
+saiverse.db の DateTime 列はタイムゾーンを持たない文字列で保存されているため、
+元の値のまま書く (変換に必要なタイムゾーンを DB が持っていない)。例外は
+task_book の ``DUE_AT`` / ``CREATED_AT`` / ``CLOSED_AT`` で、これらは DateTime 列では
+なく epoch 秒の整数列なので、memory.db の epoch 列と同じく ISO 8601 (UTC) に
+変換して書く (EPOCH_COLUMNS)。
+"""
+from __future__ import annotations
+
+import contextlib
+import io
+import itertools
+import json
+import logging
+import os
+import re
+import sqlite3
+import urllib.parse
+import zipfile
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, TextIO, Tuple
+
+from sai_memory.room_state import ROOM_STATE_META_KEY
+
+from .chatgpt_compat import is_conversation_message, write_conversation
+from .format import (
+    FORMAT_NAME,
+    FORMAT_VERSION,
+    MANIFEST_NAME,
+    encode_json_text,
+    encode_value,
+    epoch_to_iso,
+)
+
+LOGGER = logging.getLogger(__name__)
+
+# manifest.json の contents に載せる順 (intent §4 の表の順)。
+FOLDER_ORDER: Tuple[str, ...] = (
+    "profile",
+    "chatlog",
+    "knowledge",
+    "attachments",
+    "avatar",
+    "voice",
+    "items",
+    "journal",
+    "extensions/saiverse",
+    "chatgpt_compat",
+)
+
+# --- memory.db のテーブルの割り当て -----------------------------------------
+# 共通フォルダへ写すテーブル。ここに無いテーブルは、NOT_CARRIED_MEMORY_TABLES
+# を除いて全部 extensions/saiverse/memory_db/ へ機械的に書き出す (未知の
+# テーブルも黙って落とさない)。
+CHATLOG_TABLES = ("threads", "stelis_threads", "messages")
+KNOWLEDGE_TABLES = ("memopedia_pages",)
+JOURNAL_MEMORY_TABLES = ("activities", "memos", "clips", "purpose_tags")
+
+# importer.py が取り込み先の memory.db に作る、新規作成の memory.db 側の工程の
+# 適用済み記録の表 (importer.py の _MEMORY_IMPORTS_TABLE_DDL)。取り込み先の運用状態
+# なので書き出さない — 運ぶと、別の環境で同じ IMPORT_ID の記録が「適用済み」と
+# 読まれ、印 (WORLD_PENDING_MARKER) による再開が memory.db 側の工程を飛ばす。
+PACK_IMPORTS_MEMORY_TABLE = "persona_pack_imports"
+
+# importer.py が取り込み先の memory.db に作る、手帳の同名合流の対応の表
+# (importer.py の _ACTIVITY_MERGES_TABLE_DDL)。ZIP の activities.uuid (ORIGIN_UUID) を
+# 合流先の取り込み先の activities.uuid (ACTIVITY_UUID) に結ぶ。対応は取り込み先の
+# ローカルの事実なので書き出さない。
+PACK_ACTIVITY_MERGES_MEMORY_TABLE = "persona_pack_activity_merges"
+
+# 運ばないテーブル (intent §4「運ばないもの」)。
+# - embeddings 系: 意味検索用の数値データ。取り込み後に再生成する。
+# - PACK_IMPORTS_MEMORY_TABLE: 取り込み先の運用状態 (上)。
+# - PACK_ACTIVITY_MERGES_MEMORY_TABLE: 取り込み先のローカルの対応 (上)。
+# perception_* (知覚台帳) は当初ここに入れていたが、sai_memory/
+# perception_buffer.py の宣言どおり「消費済み行も削除しない永続台帳 = 知覚の
+# 証跡」であり再生成できないため、extensions/saiverse/memory_db/ で運ぶ
+# (2026-10-17、intent §4 と同時に訂正)。
+NOT_CARRIED_MEMORY_TABLES = frozenset({
+    "embeddings",
+    "message_embeddings",
+    "memopedia_embeddings",
+    "memopedia_fragment_embeddings",
+    "arasuji_embeddings",
+    "embed_metadata",
+    PACK_IMPORTS_MEMORY_TABLE,
+    PACK_ACTIVITY_MERGES_MEMORY_TABLE,
+})
+
+# 共通フォルダ (chatlog/ knowledge/ journal/) へ写すテーブル。
+COMMON_FOLDER_MEMORY_TABLES = frozenset(CHATLOG_TABLES + KNOWLEDGE_TABLES + JOURNAL_MEMORY_TABLES)
+
+
+def is_extension_memory_table(table: str) -> bool:
+    """memory.db の table を extensions/saiverse/memory_db/ へ書き出すか。
+
+    共通フォルダへ写すテーブル (COMMON_FOLDER_MEMORY_TABLES)・運ばないテーブル
+    (NOT_CARRIED_MEMORY_TABLES)・SQLite の内部テーブル (``sqlite_`` で始まる) 以外の全部。
+    importer.py もこの関数で extensions/saiverse/memory_db/ から受ける表を決める —
+    共通フォルダの表をこのフォルダから挿すと、共通フォルダ側の検査 (添付の参照の
+    書き換えなど) を通らない行が入るため。
+    """
+    return not (
+        table in COMMON_FOLDER_MEMORY_TABLES
+        or table in NOT_CARRIED_MEMORY_TABLES
+        or table.startswith("sqlite_")
+    )
+
+# epoch 秒の列 (ISO 8601 に変換して書く) と JSON 文字列の列 (展開して書く)。
+# 共通フォルダへ写すテーブルにだけ適用する。extensions/ の機械的な書き出しは
+# 元の値のまま。
+EPOCH_COLUMNS: Dict[str, Tuple[str, ...]] = {
+    "threads": ("overview_updated_at",),
+    "stelis_threads": ("created_at", "completed_at"),
+    "messages": ("created_at",),
+    "memopedia_pages": ("created_at", "updated_at", "last_referenced_at"),
+    "activities": ("born_at", "closed_at"),
+    "clips": ("created_at",),
+    "purpose_tags": ("created_at",),
+    "task_book": ("DUE_AT", "CREATED_AT", "CLOSED_AT"),  # saiverse.db
+}
+JSON_TEXT_COLUMNS: Dict[str, Tuple[str, ...]] = {
+    "messages": ("metadata",),
+    "memopedia_pages": ("metadata", "keywords"),
+}
+
+# --- saiverse.db のこのペルソナの行 (extensions/saiverse/saiverse_db/) ---------
+# (テーブル名, WHERE 句)。WHERE 句の ? にはペルソナ ID が入る。
+SAIVERSE_DB_EXTENSION_TABLES: Tuple[Tuple[str, str], ...] = (
+    ("persona_task", "persona_id = ?"),
+    ("persona_task_step",
+     "task_id IN (SELECT id FROM persona_task WHERE persona_id = ?)"),
+    ("persona_task_history",
+     "task_id IN (SELECT id FROM persona_task WHERE persona_id = ?)"),
+    ("persona_schedule", "PERSONA_ID = ?"),
+    ("persona_day_plan", "persona_id = ?"),
+    ("persona_timetable_template", "PERSONA_ID = ?"),
+    ("persona_event_log", "PERSONA_ID = ?"),
+    ("feed_read_cursor", "PERSONA_ID = ?"),
+    ("building_occupancy_log", "AIID = ?"),
+    ("episodes", "PERSONA_ID = ?"),
+    ("episode_inheritance", "PERSONA_ID = ?"),
+    ("action_track", "persona_id = ?"),
+    ("track_local_log",
+     "track_id IN (SELECT track_id FROM action_track WHERE persona_id = ?)"),
+    ("meta_judgment_log", "persona_id = ?"),
+)
+
+# extensions/saiverse/saiverse_db/ の各表の持ち主の決め方 (取り込み側の許可リスト。
+# importer.py の stage_ext_saiverse がこの表に無いテーブルを取り込まない)。
+# ("owner", 列): その列がペルソナ ID — 取り込み先のペルソナ ID に置き換える。
+# ("parent", 列, 親テーブル, 親の主キー列): 列の値が、同じ取り込みで取り込み先の
+#     ペルソナの行として入った親テーブルの行を指すものだけ取り込む。
+# ("message", 列): 列の値が取り込み先の memory.db にあるメッセージ id のものだけ取り込む。
+# 列名は database/models.py の定義。書き出す側 (SAIVERSE_DB_EXTENSION_TABLES と
+# addon_message_metadata) と同じ集合であることをテストで確かめている。
+SAIVERSE_DB_TABLE_OWNERS: Dict[str, Tuple[str, ...]] = {
+    "persona_task": ("owner", "persona_id"),
+    "persona_task_step": ("parent", "task_id", "persona_task", "id"),
+    "persona_task_history": ("parent", "task_id", "persona_task", "id"),
+    "persona_schedule": ("owner", "PERSONA_ID"),
+    "persona_day_plan": ("owner", "persona_id"),
+    "persona_timetable_template": ("owner", "PERSONA_ID"),
+    "persona_event_log": ("owner", "PERSONA_ID"),
+    "feed_read_cursor": ("owner", "PERSONA_ID"),
+    "building_occupancy_log": ("owner", "AIID"),
+    "episodes": ("owner", "PERSONA_ID"),
+    "episode_inheritance": ("owner", "PERSONA_ID"),
+    "action_track": ("owner", "persona_id"),
+    "track_local_log": ("parent", "track_id", "action_track", "track_id"),
+    "meta_judgment_log": ("owner", "persona_id"),
+    "addon_message_metadata": ("message", "message_id"),
+}
+
+# ペルソナフォルダのうち、別の形で運ぶ (memory.db) ためファイルとしては写さないもの。
+_MEMORY_DB_FILES = frozenset({
+    "memory.db", "memory.db-wal", "memory.db-shm", "memory.db-journal",
+})
+# 取り込みの途中 (memory.db を commit した後、saiverse.db の commit 前) を示す
+# ペルソナフォルダの印 (importer.py が書いて消す)。取り込み先の運用状態なので
+# 書き出さず、取り込みでもペルソナフォルダへ復元しない。
+WORLD_PENDING_MARKER = "persona_pack_world_pending.json"
+_DAY_REPORTS_DIR = "day_reports"
+
+# メッセージ metadata の添付の置き場 (api/routes/chat.py の /chat/send が書く 3 つ)。
+_ATTACHMENT_KEYS = ("images", "documents", "media")
+# 知覚台帳の表のうち media 列 (添付メディアの JSON 文字列) を持つもの
+# (sai_memory/perception_buffer.py)。media の値は ``[{"path", "mime_type", "type" /
+# "role", ...}, ...]`` の list で、項目の形は messages.metadata の images / documents /
+# media の項目と同じ (uri を持つ項目もある)。読み手は sea/runtime_context.py が
+# 提示のブロックの metadata.media に載せ、saiverse/media_utils.py の iter_image_media
+# が uri / path からファイルを読む。書き出しでは添付と同じ条件で attachments/ へ同梱し、
+# 取り込みでは添付と同じ書き換え (importer.py の relocate_media_entries) にかける。
+# 行自体は extensions/saiverse/memory_db/ に元の値のまま書く。
+PERCEPTION_MEDIA_TABLES: Tuple[str, ...] = ("perception_buffer", "perception_batches")
+# saiverse://<種類>/<ファイル名> → 共有メディアフォルダ名 (saiverse/media_utils.py の
+# resolve_media_uri と同じ対応)。
+_MEDIA_URI_DIRS: Tuple[Tuple[str, str], ...] = (
+    ("saiverse://image/", "image"),
+    ("saiverse://document/", "documents"),
+    ("saiverse://audio/", "audio"),
+    ("saiverse://video/", "video"),
+)
+_MEDIA_DIR_NAMES = frozenset(d for _, d in _MEDIA_URI_DIRS)
+_SUMMARY_SUFFIX = ".summary.txt"  # saiverse/media_utils.py の SUMMARY_SUFFIX
+# api/routes/media.py の /upload が返す URL の接頭辞。ファイルの実体は SAIVERSE_HOME/image/
+# (serve_image が _ensure_image_dir から配信する)。SettingsModal / WorldEditor の
+# ImageUpload はこの URL を ai.AVATAR_IMAGE / APPEARANCE_IMAGE_PATH にそのまま保存する。
+API_MEDIA_IMAGES_PREFIX = "/api/media/images/"
+# DB に保存されたファイルパスを解決してよい置き場 (SAIVERSE_HOME からの相対)
+_MEDIA_ROOTS: Tuple[Tuple[str, ...], ...] = tuple((d,) for _, d in _MEDIA_URI_DIRS)
+_ICON_ROOT: Tuple[str, ...] = ("user_data", "icons")
+_ICON_ROOTS: Tuple[Tuple[str, ...], ...] = (_ICON_ROOT,)
+# 添付 (messages.metadata・知覚台帳の media・部屋の様子の記帳の束の media) の置き場。
+# 共有メディアフォルダに加えて user_data/icons — 取り込みが外見画像を user_data/icons へ
+# 復元し、それを見た別のペルソナの記帳の media (get_visual_context) がその絶対パスを持つため
+_ATTACHMENT_ROOTS: Tuple[Tuple[str, ...], ...] = _MEDIA_ROOTS + _ICON_ROOTS
+# ai.AVATAR_IMAGE / APPEARANCE_IMAGE_PATH の置き場。user_data/icons に加えて image
+# (API_MEDIA_IMAGES_PREFIX の URL の実体の置き場)
+_PROFILE_ROOTS: Tuple[Tuple[str, ...], ...] = _ICON_ROOTS + (("image",),)
+# missing_files の where に添える印 (解決後のパスが SAIVERSE_HOME の外を指したもの)
+_OUTSIDE_HOME = "outside SAIVERSE_HOME"
+# 同 (SAIVERSE_HOME の内側だが、置き場の外を指したもの)。置き場ごとの印
+_OUTSIDE_ROOTS: Dict[Tuple[Tuple[str, ...], ...], str] = {
+    _MEDIA_ROOTS: "outside the shared media folders",
+    _ATTACHMENT_ROOTS: "outside the shared media folders and user_data/icons",
+    _PROFILE_ROOTS: "outside user_data/icons and image",
+}
+_SYMLINK_SKIPPED = "symlink skipped"
+# 読み取り接続の busy_timeout (ミリ秒)
+_BUSY_TIMEOUT_MS = 5000
+
+
+@dataclass
+class PersonaPackExportResult:
+    """書き出しの結果。"""
+
+    output_path: Path
+    contents: List[str]
+    counts: Dict[str, int] = field(default_factory=dict)
+    # ZIP に入れられなかったもの: {"ref", "where"}。参照はあるがファイルが無いもの、
+    # SAIVERSE_HOME の外を指すもの、symlink、item 行の無い所持品、辿れない置き場所の行
+    missing_files: List[Dict[str, str]] = field(default_factory=list)
+    # 運ばなかった memory.db のテーブル名
+    not_carried_tables: List[str] = field(default_factory=list)
+    # 読む予定だったが DB に無かったテーブル (古い DB など): "<db>:<table>"
+    absent_tables: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# SQLite 読み取り
+# ---------------------------------------------------------------------------
+
+def _open_read_only(db_path: Path) -> sqlite3.Connection:
+    """DB を読み取り専用 (mode=ro) で開き、読み取りトランザクションを始める。
+
+    本体が書き込み中でも待てるよう busy_timeout を設定する (_BUSY_TIMEOUT_MS)。
+    """
+    uri = "file:" + urllib.parse.quote(db_path.resolve().as_posix(), safe="/:") + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        conn.execute("BEGIN")
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def _table_names(conn: sqlite3.Connection) -> List[str]:
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone() is not None
+
+
+def _iter_rows(
+    conn: sqlite3.Connection, sql: str, params: Sequence[Any] = ()
+) -> Iterator[Dict[str, Any]]:
+    cur = conn.execute(sql, params)
+    names = [d[0] for d in cur.description]
+    for row in cur:
+        yield dict(zip(names, row))
+
+
+def _iter_table_rows(
+    conn: sqlite3.Connection, table: str, where: str = "", params: Sequence[Any] = ()
+) -> Iterator[Dict[str, Any]]:
+    """テーブルの全列を rowid 順に返す (rowid の無いテーブルは並び指定なし)。"""
+    quoted = '"' + table.replace('"', '""') + '"'
+    clause = f" WHERE {where}" if where else ""
+    try:
+        conn.execute(f"SELECT rowid FROM {quoted} LIMIT 0")
+        order = " ORDER BY rowid"
+    except sqlite3.OperationalError:
+        order = ""
+    return _iter_rows(conn, f"SELECT * FROM {quoted}{clause}{order}", params)
+
+
+def _encode_row(row: Dict[str, Any], table: Optional[str] = None) -> Dict[str, Any]:
+    """1 行を JSON に書ける形にする。table を渡すと epoch / JSON 文字列列を展開する。"""
+    epoch_cols = EPOCH_COLUMNS.get(table or "", ())
+    json_cols = JSON_TEXT_COLUMNS.get(table or "", ())
+    out: Dict[str, Any] = {}
+    for key, value in row.items():
+        if key in epoch_cols:
+            out[key] = epoch_to_iso(value)
+        elif key in json_cols:
+            out[key] = encode_json_text(value)
+        else:
+            out[key] = encode_value(value)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# ZIP 書き込み
+# ---------------------------------------------------------------------------
+
+def _safe_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", name) or "_"
+
+
+class _PackWriter:
+    def __init__(self, zf: zipfile.ZipFile) -> None:
+        self.zf = zf
+        self.folders: Set[str] = set()
+        self.names: Set[str] = set()
+        # (フォルダ, ディスク上のファイル) → ZIP 内パス。同じフォルダに同じファイルを
+        # 二度入れない。フォルダが違えば別に入れる (フォルダ単位で取り込めるように)。
+        self._copied: Dict[Tuple[str, Path], str] = {}
+
+    def _register(self, folder: str, arcname: str) -> None:
+        if arcname in self.names:
+            raise ValueError(f"duplicate entry in persona pack: {arcname}")
+        self.names.add(arcname)
+        self.folders.add(folder)
+
+    def write_json(self, folder: str, arcname: str, obj: Any) -> None:
+        self._register(folder, arcname)
+        self.zf.writestr(arcname, json.dumps(obj, ensure_ascii=False, indent=2))
+
+    @contextlib.contextmanager
+    def open_text(self, folder: str, arcname: str) -> Iterator[TextIO]:
+        """エントリを UTF-8 のテキストとして逐次書きする。開いている間は同じ
+        ZipFile へ別のエントリを書けない (zipfile の制約)。"""
+        self._register(folder, arcname)
+        with self.zf.open(arcname, "w", force_zip64=True) as raw:
+            text = io.TextIOWrapper(raw, encoding="utf-8")
+            yield text
+            text.flush()
+            text.detach()
+
+    def write_json_array(self, folder: str, arcname: str, items: Iterable[Any]) -> int:
+        """JSON 配列を一要素ずつ書く (大きな表を全部メモリに載せないため)。"""
+        count = 0
+        with self.open_text(folder, arcname) as text:
+            text.write("[")
+            for item in items:
+                text.write("\n" if count == 0 else ",\n")
+                text.write(json.dumps(item, ensure_ascii=False))
+                count += 1
+            text.write("\n]\n" if count else "]\n")
+        return count
+
+    def copy_file(self, folder: str, src: Path, arcname: str) -> str:
+        """ファイルを ZIP に入れて ZIP 内パスを返す。名前が衝突したら番号を足す。"""
+        key = (folder, src.resolve())
+        if key in self._copied:
+            return self._copied[key]
+        candidate = arcname
+        stem, dot, ext = arcname.rpartition(".")
+        if not dot or "/" in ext:
+            stem, ext = arcname, ""
+        n = 1
+        while candidate in self.names:
+            candidate = f"{stem}_{n}.{ext}" if ext else f"{stem}_{n}"
+            n += 1
+        self._register(folder, candidate)
+        self.zf.write(src, candidate)
+        self._copied[key] = candidate
+        return candidate
+
+
+# ---------------------------------------------------------------------------
+# ファイル参照の解決
+# ---------------------------------------------------------------------------
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _stored_candidate(value: Any, home: Path) -> Optional[Path]:
+    """DB に保存されたファイルパスを、存在の検査なしで組む。
+
+    受ける形は SAIVERSE_HOME からの相対パス・絶対パスと、``/api/media/images/<名前>``
+    (API_MEDIA_IMAGES_PREFIX。ImageUpload が ai.AVATAR_IMAGE / APPEARANCE_IMAGE_PATH と
+    building.IMAGE_PATH に保存する形 — 実体は ``image/<名前>``)。URL の形は、<名前> が
+    区切りを含まないファイル名のときだけ ``home/image/<名前>`` を返し、それ以外は None。
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    normalized = text.replace("\\", "/")
+    if normalized.startswith(API_MEDIA_IMAGES_PREFIX):
+        name = normalized[len(API_MEDIA_IMAGES_PREFIX):]
+        if not name or name in (".", "..") or Path(name).name != name:
+            return None
+        return home / "image" / name
+    p = Path(text)
+    return p if p.is_absolute() else home / p
+
+
+def _root_of(path: Path, home: Path, roots: Sequence[Tuple[str, ...]]) -> Optional[str]:
+    """解決後の path が入っている置き場 (roots のどれか) の名前。どれにも入っていなければ None。"""
+    for root in roots:
+        if _is_within(path, home.joinpath(*root)):
+            return "/".join(root)
+    return None
+
+
+def _outside_reason(path: Path, home: Path, roots: Sequence[Tuple[str, ...]]) -> Optional[str]:
+    """存在するファイル path を入れない理由 (置き場の内側なら None)。"""
+    if _root_of(path, home, roots) is not None:
+        return None
+    if not _is_within(path, home):
+        return _OUTSIDE_HOME
+    return _OUTSIDE_ROOTS[tuple(roots)]
+
+
+def _resolve_stored_path(
+    value: Any, home: Path, roots: Sequence[Tuple[str, ...]] = _MEDIA_ROOTS
+) -> Optional[Path]:
+    """DB に保存されたファイルパスを解決する (受ける形は :func:`_stored_candidate`)。
+
+    ファイルが無いときと、解決後のパスが roots (既定は共有メディアフォルダ) の外に
+    あるときは None (モジュール docstring)。呼び出し側は :func:`_missing_entry` で記録する。
+    """
+    candidate = _stored_candidate(value, home)
+    if candidate is None or not candidate.is_file():
+        return None
+    if _outside_reason(candidate, home, roots) is not None:
+        return None
+    return candidate
+
+
+def _missing_entry(
+    value: Any, where: str, home: Path, roots: Sequence[Tuple[str, ...]] = _MEDIA_ROOTS
+) -> Dict[str, str]:
+    """解決できなかった保存パスの missing_files の 1 件。置き場の外を指していたら where に印を添える。"""
+    candidate = _stored_candidate(value, home)
+    if candidate is not None and candidate.is_file():
+        reason = _outside_reason(candidate, home, roots)
+        if reason is not None:
+            where = f"{where} ({reason})"
+    return {"ref": str(value), "where": where}
+
+
+def _resolve_icon_path(value: Any, home: Path) -> Optional[Path]:
+    """ai.AVATAR_IMAGE / APPEARANCE_IMAGE_PATH を解決する。
+
+    保存形は api/deps.py の avatar_path_to_url が受ける形 (絶対パス、
+    ``user_data/icons/<名前>`` を含むパス、``/api/static/user_icons/<名前>``、
+    ``/api/media/images/<名前>`` (API_MEDIA_IMAGES_PREFIX — 実体は ``image/<名前>``))。
+    SAIVERSE_HOME の外で保存されたパス (別の環境の SAIVERSE_HOME) は、``user_data/icons/``
+    か ``image/`` の直下を指すものに限って、ファイル名だけを取り出して取り込み先の
+    同じ置き場で探す。``user_data/icons`` と ``image`` (_PROFILE_ROOTS) の外の
+    ファイルは返さない。
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    # /api/media/images/<名前> は _resolve_stored_path (_stored_candidate) が解決する
+    direct = _resolve_stored_path(value, home, _PROFILE_ROOTS)
+    if direct is not None:
+        return direct
+    normalized = value.strip().replace("\\", "/")
+    candidates: List[Tuple[str, Tuple[str, ...]]] = []
+    for marker in ("user_data/icons/", "/api/static/user_icons/"):
+        if marker in normalized:
+            candidates.append((normalized.split(marker)[-1], _ICON_ROOT))
+    parent, _sep, name = normalized.rpartition("/")
+    if parent.rpartition("/")[2] == "image":
+        candidates.append((name, ("image",)))
+    for name, root in candidates:
+        if name and name not in (".", "..") and Path(name).name == name:
+            candidate = home.joinpath(*root, name)
+            if candidate.is_file() and _outside_reason(candidate, home, _PROFILE_ROOTS) is None:
+                return candidate
+    return None
+
+
+def _resolve_media_item(
+    item: Dict[str, Any], home: Path
+) -> Tuple[Optional[Path], str, Optional[str]]:
+    """添付の項目 (uri / path) を置き場 (_ATTACHMENT_ROOTS) のファイルへ解決する。
+
+    返り値は (ファイル, ZIP 内の種類フォルダ名, 入れなかった理由)。理由は
+    ファイルが存在するのに置き場の外を指したときだけ入る (_OUTSIDE_HOME /
+    _OUTSIDE_ROOTS)。saiverse/media_utils.py の iter_image_media と同じく uri を
+    先に、見つからなければ path を見る。解決後のパスが共有メディアフォルダ
+    (image / documents / audio / video) か user_data/icons の内側にあるものだけを
+    認める — 取り込んだパックの path が本体 DB などを指していても ZIP に入れないため。
+    user_data/icons のファイルの種類フォルダ名は image (取り込みは共有メディア
+    フォルダの image/ へ復元し、uri を ``saiverse://image/<ファイル名>`` で組み直す)。
+    """
+    uri = item.get("uri")
+    kind = "other"
+    reason: Optional[str] = None
+    if isinstance(uri, str):
+        for prefix, dirname in _MEDIA_URI_DIRS:
+            if uri.startswith(prefix):
+                kind = dirname
+                name = uri[len(prefix):].strip()
+                if name and Path(name).name == name:
+                    candidate = home / dirname / name
+                    if candidate.is_file():
+                        reason = _outside_reason(candidate, home, _ATTACHMENT_ROOTS)
+                        if reason is None:
+                            return candidate, kind, None
+                break
+    raw_path = item.get("path")
+    if isinstance(raw_path, str) and raw_path.strip():
+        p = Path(raw_path.strip())
+        if not p.is_absolute():
+            p = home / p
+        if p.is_file():
+            path_reason = _outside_reason(p, home, _ATTACHMENT_ROOTS)
+            if path_reason is not None:
+                return None, kind, path_reason
+            if kind == "other":
+                root = _root_of(p, home, _ATTACHMENT_ROOTS)
+                kind = "image" if root == "/".join(_ICON_ROOT) else (root or kind)
+            return p, kind, None
+    return None, kind, reason
+
+
+def _media_entry_refs(entries: Any) -> Iterator[Dict[str, Any]]:
+    """添付の項目の list から、空でない uri か path を持つ dict を返す。"""
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        uri = entry.get("uri")
+        path = entry.get("path")
+        if (isinstance(uri, str) and uri.strip()) or (isinstance(path, str) and path.strip()):
+            yield entry
+
+
+def _attachment_refs(metadata: Any) -> Iterator[Dict[str, Any]]:
+    if not isinstance(metadata, dict):
+        return
+    for key in _ATTACHMENT_KEYS:
+        yield from _media_entry_refs(metadata.get(key))
+
+
+def parse_media_column(value: Any) -> Optional[List[Any]]:
+    """知覚台帳の media 列の値を項目の list に戻す。list として読めなければ None。
+
+    保存形は JSON 文字列 (sai_memory/perception_buffer.py)。取り込み側では ZIP の値が
+    list のまま来ることもあるので、list はそのまま返す。読み手
+    (perception_buffer._decode_media) も list 以外を「メディアなし」として扱う。
+    """
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except (ValueError, RecursionError):
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
+#: 知覚台帳のうち、部屋の様子の記帳 (束 = ``snapshot``) を持つ列。束のパッケージの
+#: ``media`` は、提示のときメッセージの添付として LLM へ渡る
+#: (sai_memory/room_state.py の render_pending_room_states と reopen_lost_bases)。
+ROOM_STATE_COLUMNS: Dict[str, str] = {
+    "perception_batches": "room_state_json",
+    "perception_buffer": "metadata",
+}
+
+
+def parse_room_state_column(table: str, value: Any) -> Any:
+    """:data:`ROOM_STATE_COLUMNS` の列の値を読む。読めなければ None。
+
+    perception_batches.room_state_json は記帳の list、perception_buffer.metadata は
+    ``ROOM_STATE_META_KEY`` に記帳を持つ dict。保存形は JSON 文字列で、取り込み側では
+    ZIP の値が list / dict のまま来ることもあるので、それも受ける。
+    """
+    expected = list if table == "perception_batches" else dict
+    if isinstance(value, str) and value:
+        try:
+            value = json.loads(value)
+        except (ValueError, RecursionError):
+            return None
+    return value if isinstance(value, expected) else None
+
+
+def room_state_records(table: str, data: Any) -> List[Dict[str, Any]]:
+    """:func:`parse_room_state_column` で読んだ値の中の部屋の様子の記帳 (dict) の一覧。
+
+    要素は ``data`` の中の実物 (写しではない)。
+    """
+    if table == "perception_batches":
+        records = data if isinstance(data, list) else []
+    else:
+        records = [data.get(ROOM_STATE_META_KEY)] if isinstance(data, dict) else []
+    return [record for record in records if isinstance(record, dict)]
+
+
+def room_state_media_refs(table: str, value: Any) -> Iterator[Dict[str, Any]]:
+    """:data:`ROOM_STATE_COLUMNS` の列の値の、束のパッケージの media の項目。"""
+    for record in room_state_records(table, parse_room_state_column(table, value)):
+        snapshot = record.get("snapshot")
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("packages"), list):
+            continue
+        for package in snapshot["packages"]:
+            if isinstance(package, dict):
+                yield from _media_entry_refs(package.get("media"))
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    quoted = '"' + table.replace('"', '""') + '"'
+    return any(r[1] == column for r in conn.execute(f"PRAGMA table_info({quoted})").fetchall())
+
+
+def _attachment_key(entry: Dict[str, Any]) -> str:
+    """添付の項目を同一視する鍵 (uri があれば uri、無ければ path)。"""
+    uri = entry.get("uri")
+    if isinstance(uri, str) and uri.strip():
+        return uri.strip()
+    return str(entry.get("path")).strip()
+
+
+# ---------------------------------------------------------------------------
+# 本体
+# ---------------------------------------------------------------------------
+
+def export_persona_pack(
+    persona_id: str,
+    *,
+    saiverse_db_path: Path,
+    saiverse_home: Path,
+    output_path: Path,
+    generator_version: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> PersonaPackExportResult:
+    """ペルソナ一体をペルソナまるごとパック (ZIP) に書き出す。
+
+    Args:
+        persona_id: 書き出すペルソナの ID (ai.AIID)。
+        saiverse_db_path: 本体 DB (saiverse.db) のパス。
+        saiverse_home: SAIVERSE_HOME 相当のルート。ペルソナフォルダは
+            ``<root>/personas/<persona_id>/``、共有メディアは ``<root>/image/`` 等。
+        output_path: 書き出す ZIP のパス。既にあれば置き換える。
+        generator_version: manifest の generator.version。省略時は
+            ``saiverse.__version__``。
+        now: manifest の created_at (タイムゾーン付き)。省略時は現在時刻 (UTC)。
+
+    Raises:
+        FileNotFoundError: saiverse.db が無い。
+        ValueError: ai テーブルにペルソナの行が無い。
+    """
+    saiverse_db_path = Path(saiverse_db_path)
+    home = Path(saiverse_home)
+    output_path = Path(output_path)
+    if not saiverse_db_path.is_file():
+        raise FileNotFoundError(f"saiverse.db not found: {saiverse_db_path}")
+
+    if generator_version is None:
+        import saiverse
+
+        generator_version = saiverse.__version__
+    created = now or datetime.now(timezone.utc)
+    if created.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+
+    persona_dir = home / "personas" / persona_id
+    memory_db_path = persona_dir / "memory.db"
+
+    result = PersonaPackExportResult(output_path=output_path, contents=[])
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    partial = output_path.with_name(output_path.name + ".partial")
+    world = _open_read_only(saiverse_db_path)
+    memory: Optional[sqlite3.Connection] = None
+    try:
+        if memory_db_path.is_file():
+            memory = _open_read_only(memory_db_path)
+        ai_rows = list(_iter_rows(world, "SELECT * FROM ai WHERE AIID = ?", (persona_id,)))
+        if not ai_rows:
+            raise ValueError(f"persona not found in saiverse.db: {persona_id}")
+        ai_row = ai_rows[0]
+
+        with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            writer = _PackWriter(zf)
+            _write_profile(writer, ai_row, home, result)
+            if memory is not None:
+                _write_memory_db(writer, memory, persona_id, home, result)
+            _write_items(writer, world, persona_id, ai_row, home, result)
+            _write_journal_files(writer, world, persona_id, persona_dir, result)
+            _write_world_extensions(writer, world, persona_id, memory, result)
+            _write_persona_dir_files(writer, persona_dir, result)
+
+            contents = [f for f in FOLDER_ORDER if f in writer.folders]
+            unknown = writer.folders - set(FOLDER_ORDER)
+            if unknown:
+                raise RuntimeError(f"unlisted folders in persona pack: {sorted(unknown)}")
+            manifest = {
+                "format": FORMAT_NAME,
+                "version": FORMAT_VERSION,
+                "generator": {"name": "SAIVerse", "version": generator_version},
+                "created_at": created.isoformat(),
+                "persona_name": ai_row.get("AINAME"),
+                "persona_id": persona_id,
+                "contents": contents,
+            }
+            zf.writestr(MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False, indent=2))
+            result.contents = contents
+        os.replace(partial, output_path)
+    except BaseException:
+        try:
+            partial.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    finally:
+        world.rollback()
+        world.close()
+        if memory is not None:
+            memory.rollback()
+            memory.close()
+
+    LOGGER.info(
+        "[persona_pack] exported persona=%s to %s contents=%s counts=%s missing=%d",
+        persona_id, output_path, result.contents, result.counts, len(result.missing_files),
+    )
+    return result
+
+
+# --- profile/ ---------------------------------------------------------------
+
+def _write_profile(
+    writer: _PackWriter, ai_row: Dict[str, Any], home: Path, result: PersonaPackExportResult
+) -> None:
+    files: Dict[str, Optional[str]] = {}
+    for column, subdir in (("AVATAR_IMAGE", "icon"), ("APPEARANCE_IMAGE_PATH", "appearance")):
+        value = ai_row.get(column)
+        if not value:
+            continue
+        src = _resolve_icon_path(value, home)
+        if src is None:
+            files[column] = None
+            result.missing_files.append(_missing_entry(value, f"ai.{column}", home, _PROFILE_ROOTS))
+            continue
+        files[column] = writer.copy_file("profile", src, f"profile/{subdir}/{src.name}")
+    writer.write_json("profile", "profile/profile.json", {
+        "ai": _encode_row(ai_row),
+        "files": files,
+    })
+
+
+# --- memory.db: chatlog/ knowledge/ attachments/ journal/ extensions/ chatgpt_compat/
+
+def _write_memory_db(
+    writer: _PackWriter,
+    memory: sqlite3.Connection,
+    persona_id: str,
+    home: Path,
+    result: PersonaPackExportResult,
+) -> None:
+    tables = _table_names(memory)
+    present = set(tables)
+    for table in (*CHATLOG_TABLES, *KNOWLEDGE_TABLES, *JOURNAL_MEMORY_TABLES):
+        if table not in present:
+            result.absent_tables.append(f"memory.db:{table}")
+
+    # chatlog/
+    # threads.json を書く 1 走査で、chatgpt_compat 用のタイトルだけを控える
+    thread_titles: Dict[str, Optional[str]] = {}
+    if "threads" in present:
+        def _threads() -> Iterator[Dict[str, Any]]:
+            for row in _iter_table_rows(memory, "threads"):
+                thread_titles[row["id"]] = row.get("title")
+                yield _encode_row(row, "threads")
+
+        result.counts["threads"] = writer.write_json_array(
+            "chatlog", "chatlog/threads.json", _threads()
+        )
+    if "stelis_threads" in present:
+        result.counts["stelis_threads"] = writer.write_json_array(
+            "chatlog", "chatlog/stelis_threads.json",
+            (_encode_row(r, "stelis_threads") for r in _iter_table_rows(memory, "stelis_threads")),
+        )
+
+    attachment_refs: Dict[str, Dict[str, Any]] = {}
+    if "messages" in present:
+        def _messages() -> Iterator[Dict[str, Any]]:
+            rows = _iter_rows(
+                memory,
+                "SELECT rowid AS __pack_rowid, * FROM messages "
+                "ORDER BY created_at ASC, rowid ASC",
+            )
+            for row in rows:
+                seq = row.pop("__pack_rowid")
+                message_id = row.get("id")
+                encoded = _encode_row(row, "messages")
+                encoded["seq"] = seq
+                for ref in _attachment_refs(encoded.get("metadata")):
+                    entry = attachment_refs.setdefault(
+                        _attachment_key(ref),
+                        {"item": ref, "message_ids": [], "perception_rows": []},
+                    )
+                    entry["message_ids"].append(message_id)
+                yield encoded
+
+        result.counts["messages"] = writer.write_json_array(
+            "chatlog", "chatlog/messages.json", _messages()
+        )
+
+    # knowledge/
+    if "memopedia_pages" in present:
+        result.counts["pages"] = writer.write_json_array(
+            "knowledge", "knowledge/pages.json",
+            (_encode_row(r, "memopedia_pages") for r in _iter_table_rows(memory, "memopedia_pages")),
+        )
+
+    # 知覚台帳の media が参照する添付 (PERCEPTION_MEDIA_TABLES)。行は下の
+    # extensions/saiverse/memory_db/ に書くが、参照するファイルは attachments/ へ入れる
+    for table in PERCEPTION_MEDIA_TABLES:
+        if table not in present or not _has_column(memory, table, "media"):
+            continue
+        quoted = '"' + table.replace('"', '""') + '"'
+        for row in _iter_rows(
+            memory, f"SELECT id, media FROM {quoted} WHERE media IS NOT NULL ORDER BY id"
+        ):
+            for ref in _media_entry_refs(parse_media_column(row["media"])):
+                entry = attachment_refs.setdefault(
+                    _attachment_key(ref),
+                    {"item": ref, "message_ids": [], "perception_rows": [],
+                     "column": f"{table}.media"},
+                )
+                entry["perception_rows"].append(f"{table}:{row['id']}")
+    # 部屋の様子の記帳 (ROOM_STATE_COLUMNS) の束の media が参照する添付。取り込み側は
+    # 束の media の path を、ここで入れたファイルの復元先へ書き換える
+    for table, column in ROOM_STATE_COLUMNS.items():
+        if table not in present or not _has_column(memory, table, column):
+            continue
+        quoted = '"' + table.replace('"', '""') + '"'
+        quoted_column = '"' + column.replace('"', '""') + '"'
+        for row in _iter_rows(
+            memory,
+            f"SELECT id, {quoted_column} AS value FROM {quoted} "
+            f"WHERE {quoted_column} IS NOT NULL ORDER BY id",
+        ):
+            for ref in room_state_media_refs(table, row["value"]):
+                entry = attachment_refs.setdefault(
+                    _attachment_key(ref),
+                    {"item": ref, "message_ids": [], "perception_rows": [],
+                     "column": f"{table}.{column}"},
+                )
+                label = f"{table}:{row['id']}"
+                if label not in entry["perception_rows"]:
+                    entry["perception_rows"].append(label)
+
+    # attachments/
+    # ファイルを先に全部コピーしてから index.json を逐次書きする。配列のハンドルを
+    # 開いている間は同じ ZipFile へ別のエントリ (copy_file) を書けないため
+    if attachment_refs:
+        copied = 0
+        for ref_key, entry in attachment_refs.items():
+            src, kind, reason = _resolve_media_item(entry["item"], home)
+            entry["path"] = None
+            entry["summary_path"] = None
+            if src is None:
+                if entry["message_ids"]:
+                    where = "messages.metadata"
+                else:
+                    where = entry["column"]
+                if reason:
+                    where = f"{where} ({reason})"
+                result.missing_files.append({"ref": str(ref_key), "where": where})
+                continue
+            zip_path = writer.copy_file("attachments", src, f"attachments/{kind}/{src.name}")
+            entry["path"] = zip_path
+            copied += 1
+            summary_src = src.with_name(src.name + _SUMMARY_SUFFIX)
+            if summary_src.is_file() and _outside_reason(summary_src, home, _ATTACHMENT_ROOTS) is None:
+                entry["summary_path"] = writer.copy_file(
+                    "attachments", summary_src, zip_path + _SUMMARY_SUFFIX
+                )
+
+        def _index() -> Iterator[Dict[str, Any]]:
+            for ref_key, entry in attachment_refs.items():
+                item = entry["item"]
+                yield {
+                    "ref": ref_key,
+                    "uri": item.get("uri"),
+                    "original_path": item.get("path"),
+                    "mime_type": item.get("mime_type"),
+                    "path": entry["path"],
+                    "summary_path": entry["summary_path"],
+                    "message_ids": entry["message_ids"],
+                    "perception_rows": entry["perception_rows"],
+                }
+
+        writer.write_json_array("attachments", "attachments/index.json", _index())
+        result.counts["attachments"] = copied
+
+    # journal/ (memory.db 側)
+    for table in JOURNAL_MEMORY_TABLES:
+        if table in present:
+            result.counts[table] = writer.write_json_array(
+                "journal", f"journal/{table}.json",
+                (_encode_row(r, table) for r in _iter_table_rows(memory, table)),
+            )
+
+    # extensions/saiverse/memory_db/ (残り全部)
+    for table in tables:
+        if table in COMMON_FOLDER_MEMORY_TABLES:
+            continue
+        if not is_extension_memory_table(table):
+            result.not_carried_tables.append(table)
+            continue
+        writer.write_json_array(
+            "extensions/saiverse",
+            f"extensions/saiverse/memory_db/{_safe_name(table)}.json",
+            (_encode_row(r) for r in _iter_table_rows(memory, table)),
+        )
+
+    # chatgpt_compat/
+    if "messages" in present:
+        count = _write_conversations(writer, memory, thread_titles)
+        if count:
+            result.counts["chatgpt_conversations"] = count
+
+
+def _write_conversations(
+    writer: _PackWriter, memory: sqlite3.Connection, thread_titles: Dict[str, Optional[str]]
+) -> int:
+    """chatgpt_compat/conversations.json を 1 メッセージずつ書き、会話の数を返す。
+
+    messages を thread_id, created_at, rowid の順に読み (idx_messages_thread_created)、
+    thread_id ごとの会話メッセージを write_conversation へ流す。1 スレッドの件数に
+    比例する保持は無い。スレッドの中の並びは正典順 (created_at, rowid)、会話の並びは
+    thread_id 順。会話が一つも無ければエントリを作らない。読み取り接続は
+    messages.json を書いたのと同じ読み取りトランザクションなので、同じスナップショットを読む。
+    """
+    wanted = ("id", "thread_id", "role", "scope", "metadata", "content", "created_at")
+    present = [c for c in wanted if _has_column(memory, "messages", c)]
+    if "thread_id" not in present:
+        return 0
+    select = ", ".join('"' + c + '"' for c in present)
+    rows = (
+        row for row in _iter_rows(
+            memory,
+            f"SELECT {select} FROM messages ORDER BY thread_id ASC, created_at ASC, rowid ASC",
+        )
+        if isinstance(row.get("thread_id"), str)
+    )
+
+    def _conversation_messages(thread_rows: Iterable[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
+        for row in thread_rows:
+            if is_conversation_message(
+                row.get("role"), row.get("scope"), encode_json_text(row.get("metadata")),
+                row.get("content"),
+            ):
+                yield {
+                    "id": row.get("id"),
+                    "role": row.get("role"),
+                    "content": row.get("content"),
+                    "created_at": row.get("created_at"),
+                }
+
+    count = 0
+    with contextlib.ExitStack() as stack:
+        out: Optional[TextIO] = None
+        for thread_id, thread_rows in itertools.groupby(rows, key=lambda r: r["thread_id"]):
+            messages = _conversation_messages(thread_rows)
+            first = next(messages, None)
+            if first is None:
+                continue
+            if out is None:
+                out = stack.enter_context(
+                    writer.open_text("chatgpt_compat", "chatgpt_compat/conversations.json")
+                )
+                out.write("[")
+            out.write("\n" if count == 0 else ",\n")
+            write_conversation(
+                out, thread_id, thread_titles.get(thread_id), itertools.chain((first,), messages)
+            )
+            count += 1
+        if out is not None:
+            out.write("\n]\n")
+    return count
+
+
+# --- items/ -----------------------------------------------------------------
+
+def _write_items(
+    writer: _PackWriter,
+    world: sqlite3.Connection,
+    persona_id: str,
+    ai_row: Dict[str, Any],
+    home: Path,
+    result: PersonaPackExportResult,
+) -> None:
+    room_id = ai_row.get("PRIVATE_ROOM_ID")
+
+    # 私室: building 行と、その部屋の fixture 行
+    if room_id and _table_exists(world, "building"):
+        rooms = list(_iter_rows(world, "SELECT * FROM building WHERE BUILDINGID = ?", (room_id,)))
+        if rooms:
+            room = rooms[0]
+            files: Dict[str, Any] = {"IMAGE_PATH": None, "fixtures": {}}
+            image = _resolve_stored_path(room.get("IMAGE_PATH"), home)
+            if image is not None:
+                files["IMAGE_PATH"] = writer.copy_file(
+                    "items", image, f"items/private_room/{image.name}"
+                )
+            elif room.get("IMAGE_PATH"):
+                result.missing_files.append(
+                    _missing_entry(room.get("IMAGE_PATH"), "building.IMAGE_PATH", home)
+                )
+            fixtures: List[Dict[str, Any]] = []
+            if _table_exists(world, "fixture"):
+                fixtures = list(_iter_table_rows(world, "fixture", "BUILDING_ID = ?", (room_id,)))
+                for fx in fixtures:
+                    src = _resolve_stored_path(fx.get("FILE_PATH"), home)
+                    if src is not None:
+                        files["fixtures"][fx["FIXTURE_ID"]] = writer.copy_file(
+                            "items", src, f"items/fixtures/{_safe_name(fx['FIXTURE_ID'])}/{src.name}"
+                        )
+                    elif fx.get("FILE_PATH"):
+                        result.missing_files.append(
+                            _missing_entry(fx.get("FILE_PATH"), "fixture.FILE_PATH", home)
+                        )
+            else:
+                result.absent_tables.append("saiverse.db:fixture")
+            writer.write_json("items", "items/private_room.json", {
+                "building": _encode_row(room),
+                "fixtures": [_encode_row(f) for f in fixtures],
+                "files": files,
+            })
+
+    # 所持品: ペルソナが持つもの・私室に置かれたもの・それらを入れ物にしているもの。
+    # item_location.OWNER_KIND は building / persona / bag の三つ (database/models.py。
+    # 'world' = どこにも置かれていない は行を持たない)。入れ物の中身は TYPE を問わず
+    # OWNER_KIND='bag' で辿る (manager/admin.py の _collect_nested_item_ids と同じ —
+    # TYPE を bag から変えられた入れ物の中身も拾う)。
+    if not (_table_exists(world, "item_location") and _table_exists(world, "item")):
+        result.absent_tables.append("saiverse.db:item_location/item")
+        return
+    owners: List[Tuple[str, str]] = [("persona", persona_id)]
+    if room_id:
+        owners.append(("building", room_id))
+    locations: List[Dict[str, Any]] = []
+    items: Dict[str, Dict[str, Any]] = {}
+    missing_items: Set[str] = set()
+    seen_owners: Set[Tuple[str, str]] = set()
+    while owners:
+        owner = owners.pop(0)
+        if owner in seen_owners:
+            continue
+        seen_owners.add(owner)
+        for loc in _iter_table_rows(
+            world, "item_location", "OWNER_KIND = ? AND OWNER_ID = ?", owner
+        ):
+            locations.append(loc)
+            item_id = loc.get("ITEM_ID")
+            if item_id in items or item_id in missing_items:
+                continue
+            found = list(_iter_rows(world, "SELECT * FROM item WHERE ITEM_ID = ?", (item_id,)))
+            if not found:
+                missing_items.add(item_id)
+                result.missing_files.append(
+                    {"ref": str(item_id), "where": "item (no row for item_location.ITEM_ID)"}
+                )
+                continue
+            items[item_id] = found[0]
+            owners.append(("bag", item_id))
+    # 走査した持ち主を指しているのに、OWNER_KIND が三つのどれでもない行 (辿れない)
+    owner_ids = sorted({owner_id for _, owner_id in seen_owners})
+    for i in range(0, len(owner_ids), 500):
+        part = owner_ids[i:i + 500]
+        for loc in _iter_table_rows(
+            world, "item_location",
+            f"OWNER_ID IN ({', '.join('?' for _ in part)}) "
+            "AND OWNER_KIND NOT IN ('persona', 'building', 'bag')",
+            part,
+        ):
+            result.missing_files.append({
+                "ref": str(loc.get("ITEM_ID")),
+                "where": f"item_location.OWNER_KIND={loc.get('OWNER_KIND')!r} not traversed",
+            })
+    if not locations:
+        return
+    item_files: Dict[str, str] = {}
+    for item_id, item in items.items():
+        src = _resolve_stored_path(item.get("FILE_PATH"), home)
+        if src is not None:
+            arc = writer.copy_file("items", src, f"items/files/{_safe_name(item_id)}/{src.name}")
+            item_files[item_id] = arc
+            summary_src = src.with_name(src.name + _SUMMARY_SUFFIX)
+            if summary_src.is_file() and _outside_reason(summary_src, home, _MEDIA_ROOTS) is None:
+                writer.copy_file("items", summary_src, arc + _SUMMARY_SUFFIX)
+        elif item.get("FILE_PATH"):
+            result.missing_files.append(_missing_entry(item.get("FILE_PATH"), "item.FILE_PATH", home))
+    writer.write_json("items", "items/items.json", {
+        "locations": [_encode_row(loc) for loc in locations],
+        "items": [_encode_row(i) for i in items.values()],
+        "files": item_files,
+    })
+    result.counts["items"] = len(items)
+
+
+# --- journal/ (saiverse.db 側とペルソナフォルダ側) ---------------------------
+
+def _copyable_persona_file(path: Path, persona_dir: Path, result: PersonaPackExportResult) -> bool:
+    """ペルソナフォルダを走査して見つけた path を ZIP に写してよいか。
+
+    symlink は写さず missing_files に記録する。symlink でなくても解決後のパスが
+    ペルソナフォルダの外にあるもの (Windows のジャンクション配下など) は写さず記録する。
+    ディレクトリは黙って飛ばす。
+    """
+    if path.is_symlink():
+        result.missing_files.append({"ref": str(path), "where": _SYMLINK_SKIPPED})
+        return False
+    if not path.is_file():
+        return False
+    if not _is_within(path, persona_dir):
+        result.missing_files.append(
+            {"ref": str(path), "where": "persona folder (resolves outside the persona folder)"}
+        )
+        return False
+    return True
+
+
+def _write_journal_files(
+    writer: _PackWriter,
+    world: sqlite3.Connection,
+    persona_id: str,
+    persona_dir: Path,
+    result: PersonaPackExportResult,
+) -> None:
+    if _table_exists(world, "task_book"):
+        result.counts["task_book"] = writer.write_json_array(
+            "journal", "journal/task_book.json",
+            (
+                _encode_row(r, "task_book")
+                for r in _iter_table_rows(world, "task_book", "PERSONA_ID = ?", (persona_id,))
+            ),
+        )
+    else:
+        result.absent_tables.append("saiverse.db:task_book")
+
+    reports_dir = persona_dir / _DAY_REPORTS_DIR
+    if reports_dir.is_dir():
+        count = 0
+        for path in sorted(reports_dir.rglob("*")):
+            if not _copyable_persona_file(path, persona_dir, result):
+                continue
+            rel = path.relative_to(reports_dir).as_posix()
+            writer.copy_file("journal", path, f"journal/day_reports/{rel}")
+            count += 1
+        result.counts["day_reports"] = count
+
+
+# --- extensions/saiverse/saiverse_db/ ----------------------------------------
+
+def _write_world_extensions(
+    writer: _PackWriter,
+    world: sqlite3.Connection,
+    persona_id: str,
+    memory: Optional[sqlite3.Connection],
+    result: PersonaPackExportResult,
+) -> None:
+    for table, where in SAIVERSE_DB_EXTENSION_TABLES:
+        if not _table_exists(world, table):
+            result.absent_tables.append(f"saiverse.db:{table}")
+            continue
+        writer.write_json_array(
+            "extensions/saiverse",
+            f"extensions/saiverse/saiverse_db/{table}.json",
+            (_encode_row(r) for r in _iter_table_rows(world, table, where, (persona_id,))),
+        )
+    # アドオンがメッセージに付けた値 (このペルソナの memory.db のメッセージ宛てだけ)
+    if _table_exists(world, "addon_message_metadata"):
+        writer.write_json_array(
+            "extensions/saiverse",
+            "extensions/saiverse/saiverse_db/addon_message_metadata.json",
+            (
+                _encode_row(r)
+                for r in _own_message_rows(
+                    _iter_table_rows(world, "addon_message_metadata"), memory
+                )
+            ),
+        )
+    else:
+        result.absent_tables.append("saiverse.db:addon_message_metadata")
+
+
+_MESSAGE_ID_BATCH = 500
+
+
+def _own_message_rows(
+    rows: Iterable[Dict[str, Any]], memory: Optional[sqlite3.Connection]
+) -> Iterator[Dict[str, Any]]:
+    """行のうち、message_id がこのペルソナの memory.db の messages.id にあるものだけを返す。
+
+    行を _MESSAGE_ID_BATCH 件ずつまとめて memory.db の読み取り接続へ
+    ``SELECT id FROM messages WHERE id IN (...)`` で照合する (全メッセージ id を
+    メモリに持たないため)。行の順は保つ。照合は返ってきた id との Python の等値で行う。
+    memory.db か messages が無ければ何も返さない。
+    """
+    if memory is None or not _table_exists(memory, "messages"):
+        return
+    conn = memory
+
+    def _matching(batch: List[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
+        keys = list({r.get("message_id") for r in batch} - {None})
+        found: Set[Any] = set()
+        if keys:
+            placeholders = ", ".join("?" for _ in keys)
+            found = {
+                r[0] for r in conn.execute(
+                    f"SELECT id FROM messages WHERE id IN ({placeholders})", keys
+                )
+            }
+        for r in batch:
+            if r.get("message_id") in found:
+                yield r
+
+    batch: List[Dict[str, Any]] = []
+    for row in rows:
+        batch.append(row)
+        if len(batch) >= _MESSAGE_ID_BATCH:
+            yield from _matching(batch)
+            batch = []
+    if batch:
+        yield from _matching(batch)
+
+
+# --- extensions/saiverse/persona_dir/ ----------------------------------------
+
+def _write_persona_dir_files(
+    writer: _PackWriter, persona_dir: Path, result: PersonaPackExportResult
+) -> None:
+    """ペルソナフォルダのファイルをそのまま写す (memory.db 一式・取り込み途中の印・day_reports/ を除く)。"""
+    if not persona_dir.is_dir():
+        return
+    count = 0
+    for path in sorted(persona_dir.rglob("*")):
+        rel = path.relative_to(persona_dir)
+        if len(rel.parts) == 1 and (rel.name in _MEMORY_DB_FILES or rel.name == WORLD_PENDING_MARKER):
+            continue
+        if rel.parts[0] == _DAY_REPORTS_DIR:
+            continue  # _write_journal_files が扱う (symlink の記録も向こうで行う)
+        if not _copyable_persona_file(path, persona_dir, result):
+            continue
+        writer.copy_file(
+            "extensions/saiverse", path, f"extensions/saiverse/persona_dir/{rel.as_posix()}"
+        )
+        count += 1
+    result.counts["persona_dir_files"] = count

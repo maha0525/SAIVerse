@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import unittest
 from unittest.mock import MagicMock, patch
 
 from google.genai import types
 
 from llm_clients.exceptions import InvalidRequestError
-from llm_clients.gemini import GeminiClient
+from llm_clients.gemini import GeminiClient, _gemini_version, _is_gemini_3_or_later
 from saiverse import model_configs
 from sea.runtime_llm import _resolve_tool_call_id
 
@@ -59,13 +60,32 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
                 self.assertEqual(thinking_level["options"], options)
                 self.assertIn(thinking_level["default"], options)
 
+    def test_argon_definition_matches_the_official_contract(self):
+        """Gemini 4 Argon: thinking_level は low/medium/high (既定 medium)、
+        sampling は無視される、明示キャッシュ非対応、長考のためタイムアウト 15 分。"""
+        config = model_configs.get_model_config("gemini-4-argon")
+        self.assertEqual(config["model"], "gemini-4-argon")
+        self.assertTrue(config["prefer_paid"])
+        self.assertFalse(config["supports_sampling_parameters"])
+        self.assertFalse(config["supports_model_prefill"])
+        for key in ("temperature", "top_p", "top_k"):
+            self.assertNotIn(key, config["parameters"])
+        thinking_level = config["parameters"]["thinking_level"]
+        self.assertEqual(thinking_level["options"], ["low", "medium", "high"])
+        self.assertEqual(thinking_level["default"], "medium")
+        self.assertIs(config["cache"]["explicit_supported"], False)
+        self.assertEqual(config["timeout"], 900)
+
     def test_paid_model_pricing_matches_standard_tier(self):
         self.assertAlmostEqual(
             model_configs.calculate_cost("gemini-3.7-flash-paid", 1_000_000, 1_000_000),
             9.0,
         )
         self.assertAlmostEqual(
-            model_configs.calculate_cost("gemini-3.6-flash-paid", 1_000_000, 1_000_000),
+            model_configs.calculate_cost(
+                "gemini-3.6-flash-paid", 1_000_000, 1_000_000,
+                at=datetime(2027, 1, 1, tzinfo=timezone.utc),
+            ),
             9.0,
         )
         self.assertAlmostEqual(
@@ -74,6 +94,102 @@ class TestGeminiLatestModelDefinitions(unittest.TestCase):
             ),
             2.8,
         )
+
+
+class TestGeminiGenerationDetection(unittest.TestCase):
+    """Gemini 3 以降の判定は版番号で行い、Gemini 4 以降も拾う。"""
+
+    def test_version_is_parsed_from_the_model_name(self):
+        self.assertEqual(_gemini_version("gemini-4-argon"), (4, 0))
+        self.assertEqual(_gemini_version("gemini-3.8-flash"), (3, 8))
+        self.assertEqual(_gemini_version("gemini-3-flash-preview"), (3, 0))
+        self.assertEqual(_gemini_version("gemini-2.5-flash"), (2, 5))
+        self.assertIsNone(_gemini_version("learnlm-2.0-flash"))
+        self.assertIsNone(_gemini_version(""))
+
+    def test_generation_flags_follow_the_version(self):
+        expected = {
+            "gemini-4-argon": True,
+            "gemini-3-flash-preview": True,
+            "gemini-3.8-flash": True,
+            "gemini-3.1-pro-preview": True,
+            "gemini-2.5-flash": False,
+            "gemini-2.0-flash": False,
+        }
+        for model, later in expected.items():
+            with self.subTest(model=model):
+                client = _make_client(model)
+                self.assertIs(client._is_gemini_3_or_later, later)
+                self.assertIs(_is_gemini_3_or_later(model), later)
+
+    def test_include_thoughts_is_auto_enabled_for_2_5_and_3_or_later(self):
+        expected = {
+            "gemini-4-argon": True,
+            "gemini-3-flash-preview": True,
+            "gemini-3.8-flash": True,
+            "gemini-2.5-flash": True,
+            "gemini-2.0-flash": False,
+        }
+        for model, include in expected.items():
+            with self.subTest(model=model):
+                self.assertIs(_make_client(model)._include_thoughts, include)
+
+    def test_argon_minimal_reasoning_uses_thinking_level(self):
+        client = _make_client("gemini-4-argon")
+        client.prefer_minimal_reasoning()
+        self.assertEqual(client._thinking_level, "low")
+        self.assertIsNone(client._thinking_budget)
+
+    def test_argon_keeps_function_call_signature_without_multi_turn_thinking(self):
+        """multi_turn_thinking が off でも、3 以降は関数呼び出しの署名を載せ直す。"""
+        client = _make_client("gemini-4-argon")
+        client.configure_parameters({"multi_turn_thinking": "off"})
+        self.assertFalse(client._multi_turn_thinking)
+        _, contents = client._convert_messages(
+            [
+                {"role": "user", "content": "look it up"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "tc_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{}"},
+                            "thought_signature": b"sig",
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "tc_1",
+                    "name": "lookup",
+                    "content": '{"result": "ok"}',
+                },
+            ]
+        )
+        self.assertEqual(contents[1].parts[0].thought_signature, b"sig")
+
+
+class TestGeminiModelTimeout(unittest.TestCase):
+    """モデル設定の timeout (秒) は SDK クライアントの構築へ渡る。"""
+
+    def _built_kwargs(self, config: dict | None) -> dict:
+        with patch(
+            "llm_clients.gemini.build_gemini_clients",
+            return_value=(MagicMock(), MagicMock(), MagicMock()),
+        ) as build:
+            GeminiClient("gemini-4-argon", config=config)
+        return build.call_args.kwargs
+
+    def test_model_timeout_is_passed_to_the_client_builder(self):
+        kwargs = self._built_kwargs({"timeout": 900, "prefer_paid": True})
+        self.assertEqual(kwargs, {"prefer_paid": True, "timeout_seconds": 900.0})
+
+    def test_missing_or_invalid_timeout_leaves_the_env_default(self):
+        for config in ({}, {"timeout": 0}, {"timeout": -5}, {"timeout": "900"}, {"timeout": True}):
+            with self.subTest(config=config):
+                self.assertNotIn("timeout_seconds", self._built_kwargs(config))
 
 
 class TestGeminiLatestGenerateContentContract(unittest.TestCase):

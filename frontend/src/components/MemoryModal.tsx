@@ -104,6 +104,8 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                         >
                             <Activity size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />{uiText("components.MemoryModal.text006")}</button>
                     )}
+                    {/* 'import' タブ (MemoryImport) は、チャットログの取り込み・
+                        ペルソナまるごとパック (PersonaPackPanel)・エンベディング管理をまとめて置く。 */}
                     <button data-i18n="components.MemoryModal.text007"
                         className={`${styles.tab} ${activeTab === 'import' ? styles.activeTab : ''}`}
                         onClick={() => setActiveTab('import')}

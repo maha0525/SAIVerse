@@ -164,8 +164,8 @@
     {
       "id": "finalize",
       "type": "memorize",
-      "action": "Web調査完了: {input}",
-      "role": "assistant",
+      "action": "<system>Web調査完了: {input}</system>",
+      "role": "user",
       "tags": [
         "web_research",
         "completed"

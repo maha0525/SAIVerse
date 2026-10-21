@@ -275,6 +275,7 @@ class OpenAIClient(LLMClient):
         reasoning_passback_field: Optional[str] = None,
         timeout: Optional[float] = None,
         default_headers: Optional[Dict[str, str]] = None,
+        openai_compat_options: Optional[Dict[str, bool]] = None,
     ) -> None:
         super().__init__(supports_images=supports_images)
         key_env = api_key_env or "OPENAI_API_KEY"
@@ -297,6 +298,7 @@ class OpenAIClient(LLMClient):
             default_headers or {}, "default_headers",
         )
         self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
+        self._openai_compat_options = dict(openai_compat_options or {})
         # extra_headers is applied per request and outranks default_headers, so
         # it is the same door onto the credential — it goes through the same gate.
         if "extra_headers" in self._request_kwargs:
@@ -377,6 +379,7 @@ class OpenAIClient(LLMClient):
             yield
 
     def _create_completion(self, **kwargs: Any):
+        kwargs = openai_runtime.apply_compat_options(kwargs, self._openai_compat_options)
         self.ensure_backend()
         # 貸出札を掛けて送信 — 札がある間は idle 自動停止に撃たれない。
         # 返却 (with 脱出) が完了時刻の申告を兼ねる

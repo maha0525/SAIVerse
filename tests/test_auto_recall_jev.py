@@ -12,8 +12,8 @@ tests/test_auto_recall.py と同じ流儀でフェイクにする)。答える�
 - ペルソナのスイッチ (AUTO_RECALL_ENHANCED) が OFF なら判定は一度も呼ばれない。
 - スイッチが ON でも、モデルの役割「反射判断」にモデルが割り当てられていなければ
   従来のしきい値判定のまま (黙って費用が発生する経路を作らない)。
-- 効いているときは採否が Noul 確率だけで決まる (cosine しきい値 0.86 と message
-  ソースの底上げ +0.02 はどちらも使われない)。
+- 効いているときは採否が Noul 確率だけで決まる (cosine しきい値と message
+  ソースの底上げはどちらも使われない)。
 - floor 未満の候補は判断に渡らない。
 - 判断が使えなかったターン (応答の欠落・モジュール読み込み失敗を含む) は従来の
   しきい値判定へ静かに戻る。
@@ -64,6 +64,14 @@ _ENV_KEYS = [
     REFLEX_KEY_ENV,
     PERSONA_KEY_ENV,
 ]
+
+# 既定の値の帯に置くテスト用の embed_score。テストが前提にする大小関係
+# (_BELOW_FLOOR < floor < _IN_BAND < cosine しきい値 < _ABOVE) は
+# test_default_values_keep_the_band_order が既定値に対して確かめる — しきい値を
+# 測り直したときに、テストの値が黙って帯の外へ出ないように。
+_BELOW_FLOOR = 0.55   # 反射判断の floor 未満 (判断に渡らない)
+_IN_BAND = 0.70       # floor 以上・cosine しきい値未満 (判断が拾い直す帯)
+_ABOVE = 0.87         # cosine しきい値以上 (従来経路でも採用される)
 
 
 def _reflex_model_config(**overrides):
@@ -241,13 +249,13 @@ def test_switch_off_never_calls_the_judgment(reflex_on):
     """役割にモデルが割り当たっていても、ペルソナのスイッチが OFF なら呼ばない。"""
     fake = _FakeJev({"低スコア記憶": 0.99})
     res = _run(
-        [_hit("fragment", "f1", embed_score=0.80, title="低スコア記憶")],
+        [_hit("fragment", "f1", embed_score=_IN_BAND, title="低スコア記憶")],
         _msgs(("user", "話題")),
         fake,
         enhanced=False,
     )
     assert fake.calls == []
-    # 0.80 < 0.86 (既定しきい値) なので従来どおり落ちる。
+    # _IN_BAND は既定の cosine しきい値未満なので従来どおり落ちる。
     assert res.injected is False
 
 
@@ -269,7 +277,7 @@ def test_switch_on_without_a_role_model_stays_off():
     assert auto_recall.is_enhanced_recall_available() is False
 
     fake = _FakeJev({"記憶": 0.99})
-    res = _run([_hit("fragment", "f1", embed_score=0.80, title="記憶")], _msgs(("user", "話題")), fake)
+    res = _run([_hit("fragment", "f1", embed_score=_IN_BAND, title="記憶")], _msgs(("user", "話題")), fake)
     assert fake.calls == []
     assert res.injected is False
 
@@ -291,10 +299,10 @@ def test_switch_on_with_an_ordinary_llm_role_model_works(monkeypatch):
     assert auto_recall.is_enhanced_recall_available() is True
 
     fake = _FakeJev({"記憶": 0.99})
-    res = _run([_hit("fragment", "f1", embed_score=0.80, title="記憶")], _msgs(("user", "話題")), fake)
+    res = _run([_hit("fragment", "f1", embed_score=_IN_BAND, title="記憶")], _msgs(("user", "話題")), fake)
     assert len(fake.calls) == 1
     assert fake.calls[0]["backend"].model_key == "some-llm"
-    # 0.80 は cosine しきい値 0.86 未満だが、判断が「浮かぶ」と答えたので採用される。
+    # _IN_BAND は cosine しきい値未満だが、判断が「浮かぶ」と答えたので採用される。
     assert res.injected is True
 
 
@@ -342,7 +350,7 @@ def test_the_override_works_without_a_world_default(monkeypatch):
 
     fake = _FakeJev({"拾い直された記憶": 0.9})
     res = _run(
-        [_hit("fragment", "f1", embed_score=0.80, title="拾い直された記憶")],
+        [_hit("fragment", "f1", embed_score=_IN_BAND, title="拾い直された記憶")],
         _msgs(("user", "話題")),
         fake,
         reflex_model_key=PERSONA_MODEL_KEY,
@@ -360,13 +368,13 @@ def test_a_broken_override_does_not_fall_back_to_the_world_default(reflex_on_wit
     """
     fake = _FakeJev({"記憶": 0.99})
     res = _run(
-        [_hit("fragment", "f1", embed_score=0.80, title="記憶")],
+        [_hit("fragment", "f1", embed_score=_IN_BAND, title="記憶")],
         _msgs(("user", "話題")),
         fake,
         reflex_model_key="gone-model",
     )
     assert fake.calls == []
-    # 0.80 < 0.86 (既定しきい値) なので従来どおり落ちる。
+    # _IN_BAND は既定の cosine しきい値未満なので従来どおり落ちる。
     assert res.injected is False
 
 
@@ -375,10 +383,10 @@ def test_a_broken_override_does_not_fall_back_to_the_world_default(reflex_on_wit
 # ---------------------------------------------------------------------------
 
 def test_low_embed_high_noul_is_accepted(reflex_on):
-    # 0.80 は旧しきい値 0.86 未満だが、判断が「浮かぶ」と答えたので採用される。
+    # _IN_BAND は cosine しきい値未満だが、判断が「浮かぶ」と答えたので採用される。
     fake = _FakeJev({"拾い直された記憶": 0.9})
     res = _run(
-        [_hit("fragment", "f1", embed_score=0.80, title="拾い直された記憶")],
+        [_hit("fragment", "f1", embed_score=_IN_BAND, title="拾い直された記憶")],
         _msgs(("user", "話題")),
         fake,
     )
@@ -389,7 +397,7 @@ def test_low_embed_high_noul_is_accepted(reflex_on):
 
 
 def test_high_embed_low_noul_is_rejected(reflex_on):
-    # 0.90 は旧しきい値を超えるが、判断が「無関係」と答えたので落ちる。
+    # 0.90 は cosine しきい値を超えるが、判断が「無関係」と答えたので落ちる。
     fake = _FakeJev({"ノイズ記憶": 0.1})
     res = _run(
         [_hit("fragment", "f1", embed_score=0.90, title="ノイズ記憶")],
@@ -414,11 +422,16 @@ def test_acceptance_threshold_is_the_module_constant(reflex_on, monkeypatch):
     assert res.injected is False
 
 
-def test_message_offset_not_applied_in_the_judged_path(reflex_on):
-    # message ソースの底上げ (実効 0.88) は判断の経路では使われない。
+def test_message_offset_not_applied_in_the_judged_path(reflex_on, monkeypatch):
+    # message ソースの底上げは判断の経路では使われない。既定の底上げは 0 なので、
+    # 底上げを env で入れたうえで「cosine しきい値は超えるが、底上げ後の実効しきい値
+    # には届かない」message ヒットが判断で採用されることを見る。
+    monkeypatch.setenv("SAIVERSE_AUTO_RECALL_MSG_THRESHOLD_OFFSET", "0.05")
+    score = auto_recall.get_similarity_threshold() + 0.02
+    assert score < auto_recall.get_similarity_threshold() + auto_recall.get_message_threshold_offset()
     fake = _FakeJev({"過去の会話": 0.9})
     res = _run(
-        [_hit("message", "m999", embed_score=0.87, title="過去の会話")],
+        [_hit("message", "m999", embed_score=score, title="過去の会話")],
         _msgs(("user", "こんにちは", "m1")),
         fake,
     )
@@ -434,7 +447,7 @@ def test_partial_answer_falls_back_to_cosine_threshold(reflex_on):
     res = _run(
         [
             _hit("fragment", "f1", embed_score=0.90, title="しきい値超え"),
-            _hit("fragment", "f2", embed_score=0.80, title="しきい値未満"),
+            _hit("fragment", "f2", embed_score=_IN_BAND, title="しきい値未満"),
         ],
         _msgs(("user", "話題")),
         fake,
@@ -453,8 +466,8 @@ def test_below_floor_candidate_is_not_judged(reflex_on):
     fake = _FakeJev({"床の上": 0.9, "床の下": 0.9})
     res = _run(
         [
-            _hit("fragment", "f1", embed_score=0.85, title="床の上"),
-            _hit("fragment", "f2", embed_score=0.70, title="床の下"),
+            _hit("fragment", "f1", embed_score=_IN_BAND, title="床の上"),
+            _hit("fragment", "f2", embed_score=_BELOW_FLOOR, title="床の下"),
         ],
         _msgs(("user", "話題")),
         fake,
@@ -470,7 +483,7 @@ def test_below_floor_candidate_is_not_judged(reflex_on):
 def test_no_candidate_above_floor_skips_the_call(reflex_on):
     fake = _FakeJev({"床の下": 0.9})
     res = _run(
-        [_hit("fragment", "f1", embed_score=0.70, title="床の下")],
+        [_hit("fragment", "f1", embed_score=_BELOW_FLOOR, title="床の下")],
         _msgs(("user", "話題")),
         fake,
     )
@@ -478,12 +491,29 @@ def test_no_candidate_above_floor_skips_the_call(reflex_on):
     assert res.injected is False
 
 
+def test_default_values_keep_the_band_order(reflex_on):
+    """このファイルのテスト用の値が、既定のしきい値と floor に対して想定の帯にある。
+
+    既定値を測り直したとき (2026-10-12 の EmbeddingGemma 2 への移行など)、テストの
+    値が黙って帯の外へ出ると、「しきい値未満なので落ちる」「判断が拾い直す」といった
+    テストが別の分岐を通ったまま緑になりうる。その前提をここで固定する。
+    """
+    threshold = auto_recall.get_similarity_threshold()
+    assert _BELOW_FLOOR < auto_recall._REFLEX_FLOOR < _IN_BAND < threshold < _ABOVE
+    # message ソースの実効しきい値も _ABOVE より下 (従来経路で _ABOVE の message が落ちない)。
+    assert threshold + auto_recall.get_message_threshold_offset() < _ABOVE
+
+
 def test_floor_is_the_module_constant(reflex_on, monkeypatch):
-    assert auto_recall._REFLEX_FLOOR == 0.78
-    monkeypatch.setattr(auto_recall, "_REFLEX_FLOOR", 0.60)
+    # 0.62 は EmbeddingGemma 2 への移行で据え直した暫定値 (sea/auto_recall.py の
+    # _REFLEX_FLOOR のコメント)。
+    assert auto_recall._REFLEX_FLOOR == 0.62
+    # 既定の floor 未満の候補が、floor を下げると判断に渡ることで「定数が効いている」
+    # ことを確かめる。
+    monkeypatch.setattr(auto_recall, "_REFLEX_FLOOR", 0.50)
     fake = _FakeJev({"低いが床の上": 0.9})
     res = _run(
-        [_hit("fragment", "f1", embed_score=0.65, title="低いが床の上")],
+        [_hit("fragment", "f1", embed_score=_BELOW_FLOOR, title="低いが床の上")],
         _msgs(("user", "話題")),
         fake,
     )
@@ -523,14 +553,14 @@ def test_unavailable_falls_back_to_cosine_threshold(reflex_on):
     res = _run(
         [
             _hit("fragment", "f1", embed_score=0.90, title="しきい値超え"),
-            _hit("fragment", "f2", embed_score=0.80, title="しきい値未満"),
+            _hit("fragment", "f2", embed_score=_IN_BAND, title="しきい値未満"),
         ],
         _msgs(("user", "話題")),
         fake,
     )
     assert len(fake.calls) == 1
     assert res.injected is True
-    # 従来の 0.86 判定に戻る。
+    # 従来の cosine しきい値判定に戻る。
     assert "しきい値超え" in res.block
     assert "しきい値未満" not in res.block
 
@@ -550,8 +580,8 @@ def test_judgment_module_import_failure_falls_back(reflex_on, caplog):
     """反射判断の読み込み自体が失敗しても、会話の同期経路は落ちない。"""
     caplog.set_level(logging.WARNING, logger="saiverse.auto_recall")
     hits = [
-        _hit("fragment", "f1", embed_score=0.87, title="しきい値超え"),
-        _hit("fragment", "f2", embed_score=0.80, title="しきい値未満"),
+        _hit("fragment", "f1", embed_score=_ABOVE, title="しきい値超え"),
+        _hit("fragment", "f2", embed_score=_IN_BAND, title="しきい値未満"),
     ]
     with patch("sai_memory.unified_recall.unified_recall", return_value=hits), \
          patch("sea.auto_recall._fetch_memopedia_titles", return_value=[]), \
@@ -565,7 +595,7 @@ def test_judgment_module_import_failure_falls_back(reflex_on, caplog):
     assert [r for r in caplog.records if "could not prepare the request" in r.getMessage()
             or "could not load the reflex judgment layer" in r.getMessage()]
 
-    # 従来の 0.86 判定に戻る。
+    # 従来の cosine しきい値判定に戻る。
     assert res.injected is True
     assert "しきい値超え" in res.block
     assert "しきい値未満" not in res.block
@@ -600,7 +630,7 @@ def test_deadline_sets_the_fallback_flag(reflex_on):
 def test_deadline_on_a_turn_without_injection_still_sets_the_flag(reflex_on):
     """記憶が一つも浮かばなかったターンでも、判定が時間切れになった事実は持ち帰る。"""
     res = _run(
-        [_hit("fragment", "f1", embed_score=0.80, title="しきい値未満")],
+        [_hit("fragment", "f1", embed_score=_IN_BAND, title="しきい値未満")],
         _msgs(("user", "話題")),
         _FakeJev(raises=_deadline_error()),
     )
@@ -628,7 +658,7 @@ def test_an_unexpected_exception_does_not_set_the_fallback_flag(reflex_on):
 
 def test_a_successful_judgment_does_not_set_the_fallback_flag(reflex_on):
     res = _run(
-        [_hit("fragment", "f1", embed_score=0.80, title="判定で採用")],
+        [_hit("fragment", "f1", embed_score=_IN_BAND, title="判定で採用")],
         _msgs(("user", "話題")),
         _FakeJev({"判定で採用": 0.9}),
     )
@@ -681,7 +711,7 @@ def test_the_judgment_is_called_with_the_configured_wait_time(reflex_on, monkeyp
     monkeypatch.setenv(auto_recall.REFLEX_TIMEOUT_ENV, "9")
     fake = _FakeJev({"判定で採用": 0.9})
     _run(
-        [_hit("fragment", "f1", embed_score=0.80, title="判定で採用")],
+        [_hit("fragment", "f1", embed_score=_IN_BAND, title="判定で採用")],
         _msgs(("user", "話題")),
         fake,
     )
@@ -1075,7 +1105,7 @@ def test_on_with_no_extractable_keyword_falls_back_to_default_split(reflex_on, m
 # 判断が使えなかったターンは、候補集めからやり直して従来の形へ戻す
 # ---------------------------------------------------------------------------
 
-#: 従来の集め方で返るヒット (cosine 0.86 を超えるので従来経路でも採用される)。
+#: 従来の集め方で返るヒット (cosine しきい値を超えるので従来経路でも採用される)。
 _CONVENTIONAL_HIT = _hit("fragment", "f1", embed_score=0.90, title="しきい値超え")
 #: 広げた集め方でだけ増えるヒット。message 枠の拡張と発話の除外で初めて浮上する
 #: もので、従来の集め方では母集団に入らない (cosine では通ってしまう 0.95)。

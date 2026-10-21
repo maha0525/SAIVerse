@@ -125,7 +125,9 @@ def collect_annex_items(
     付くので、少し後の digest の材料に載っても時系列の嘘にはならない。
 
     戻りは ``(items, batch_ids)``。items は ``{"at", "text"}`` の list
-    (at 昇順) — generator._format_messages_for_prompt の ``extra_items`` 形。
+    (at 昇順。項目の形は perception_buffer.batch_material_item — ``label`` /
+    ``after_message_id`` が付くことがある) —
+    generator._format_messages_for_prompt の ``extra_items`` 形。
     batch_ids は材料にしたバッチの id (digest 確定 tx で付記印を打つ)。
     """
     items: List[dict] = []
@@ -142,18 +144,31 @@ def collect_annex_items(
                 batches + [b for b in recovered if b.id not in seen],
                 key=lambda b: (b.consumed_at, b.id),
             )
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
+        # 「台帳なし」として材料ゼロに縮退してよいのは、表そのものが無い DB
+        # (旧テスト等) だけ。列不足は読み口 (list_unannexed_batches) が先に
+        # 移行するので起きないはずで、それでも起きたもの (やロック等) を
+        # 材料ゼロの顔にすると、その期間の知覚が黙ってあらすじから漏れる
+        # (persist_realtime_and_recall.md 経緯 — Codex 一巡目 #6)。
+        from sai_memory.arasuji.storage import is_missing_table_error
+        if not is_missing_table_error(exc):
+            LOGGER.error(
+                "[arasuji] could not read the perception batches for the "
+                "annexation material (%s); not compiling this span without them",
+                exc,
+            )
+            raise
         batches = []  # 台帳の無い DB (旧テスト等)
-    from sai_memory.room_state import batch_is_room_reseat
+    from sai_memory.perception_buffer import batch_material_item
     for batch in batches:
-        # 機構の置き直し (部屋の全文の再配置 — room_state_packages.md §6-4) は
-        # 出来事ではないので材料には載せない。付記印だけ受けて提示から下りる
-        # (印を打たないと提示に残り続け、毎回の編纂で同じ全文が材料に並ぶ)。
-        if not batch_is_room_reseat(batch.room_state_json):
-            items.append({
-                "at": int(batch.consumed_at),
-                "text": batch.rendered_text,
-            })
+        # 材料にするかどうか・どんな形で渡すかは batch_material_item の一枚
+        # (再生成・吸収も同じ関数を通る)。機構の置き直し (部屋の全文の再配置 —
+        # room_state_packages.md §6-4) は出来事ではないので材料には載せないが、
+        # 付記印だけは受けて提示から下りる (印を打たないと提示に残り続け、
+        # 毎回の編纂で同じ全文が材料に並ぶ)。
+        item = batch_material_item(batch, conn)
+        if item is not None:
+            items.append(item)
         batch_ids.append(batch.id)
     return items, batch_ids
 

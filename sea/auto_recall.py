@@ -13,6 +13,10 @@
   文章生成は行わず、判断専用モデルに候補の関連度だけを問う。OFF では一切呼ばない。
 - 注入は履歴末尾のみ、head 非混入 (§10-2、cached_head_architecture C5 と同じ面)。
 - SAIMemory には**永続化しない** (§10-7)。LLM に渡す message 列にだけ足す。
+  例外はモデル設定 ``cache.persist_realtime_and_recall`` を ON にしたモデル
+  (docs/intent/persist_realtime_and_recall.md): 送った文面のまま残し、次の
+  ターン以降も同じ位置に送る。そのモデルでは粘着で出し直さず、新しく浮かんだ
+  記憶だけを出す (``run_auto_recall`` の ``exclude_keys`` / ``new_only``)。
 
 スコープ (§4.6): メインライン (CONVERSATION アスペクト) のみ。呼び出し側で
 ``aspect_from_pulse_type(pulse_type) == Aspect.CONVERSATION`` を確認してから呼ぶ。
@@ -33,7 +37,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from sea.eviction_plan import CONSUMED_PERCEPTION_KEY, is_injected_perception
+from sea.eviction_plan import (
+    CONSUMED_PERCEPTION_KEY,
+    PERSISTED_REALTIME_AND_RECALL_KEY,
+    TURN_REALTIME_AND_RECALL_KEY,
+    is_injected_perception,
+    is_persisted_realtime_and_recall,
+)
 from saiverse.references import to_uri
 
 LOGGER = logging.getLogger("saiverse.auto_recall")
@@ -67,16 +77,26 @@ def _env_int(name: str, default: int) -> int:
 
 # 埋め込みヒットの採用しきい値 (raw cosine similarity)。下回れば注入しない。
 #
-# 既定 0.86 は air_city_a の実 memory.db で測定して決めた (intent doc §4 は暫定
-# 0.78 だったが、E5 (multilingual-e5-small) は query:/passage: プレフィックス方式
-# ゆえ cosine レンジが 0.8〜0.9 に圧縮され、無関係クエリでも top ヒットが 0.83〜0.84
-# に達する。0.78 では毎ターン全件注入になってしまう)。実測分布:
-#   - オントピック: top クラスタ 0.86〜0.89
-#   - 無関係/gibberish: top max 0.842
-#   - 汎用短文「うん」: top max 0.837
-# 0.86 でオントピックの上位ヒットを拾いつつノイズを落とせる。env で調整可。
+# 既定 0.78 は EmbeddingGemma 2 (4bit ONNX、768 次元) の cosine 分布を合成データで
+# 測って決めた (2026-10-12、測定一式と導出は
+# experiments/embeddinggemma2_bench/threshold/measurement.md)。データは日本語の
+# 合成コーパス (会話メッセージ風 300 本 + 要約風 100 本) で、実在のペルソナの記憶は
+# 使っていない。決め方は e5 時代の 0.86 と同じ — 無関係なクエリと相づちの top の最大
+# より上、話題に沿ったクエリの top の帯の下端。実測分布 (クエリ各群の top):
+#   - 話題に沿ったクエリ 30 本: 要約層の top は 0.784〜0.882 (外れ 1 本 0.720)
+#   - 無関係/意味のない文字列 20 本: top max 0.705
+#   - 相づち 10 本 (「わかった」等): top max 0.761
+# 0.78 で正解の記憶は 29/30 本が通り、無関係・相づちは 0/30 本 (余裕 0.019 は、
+# e5 の 0.86 が実データのノイズ最大 0.842 に対して持っていた余裕 0.018 とほぼ同じ)。
+# 合成データの代表性は、同じデータの上で e5 を測ると元の実測 (ノイズ最大 0.84 前後、
+# 話題の帯 0.86〜0.89) をほぼ再現する (ノイズ最大 0.853〜0.860) ことで確かめた。
+# 実会話での採否の確認は移行の検証フェーズ (隔離環境) に残っている。env で調整可。
+#
+# 経緯: e5 (multilingual-e5-small) 時代の既定は 0.86 だった。e5 は cosine が
+# 0.8〜0.9 に密集し、無関係クエリでも top が 0.83〜0.84 に達したため
+# (air_city_a の実 memory.db で測定)。
 def get_similarity_threshold() -> float:
-    return _env_float("SAIVERSE_AUTO_RECALL_THRESHOLD", 0.86)
+    return _env_float("SAIVERSE_AUTO_RECALL_THRESHOLD", 0.78)
 
 
 # 粘着ウィンドウ: しきい値を割ってから台帳に残すターン数。
@@ -86,7 +106,7 @@ def get_sticky_turns() -> int:
 
 # クエリに含める直近メッセージ数 (user/assistant 両ロール)。
 #
-# rev2: 既定を 4 → 1 に変更。air_city_a の実 memory.db で測定した結果、直近4件
+# rev2: 既定を 4 → 1 に変更。air_city_a の実 memory.db で (e5 時代に) 測定した結果、直近4件
 # (210字超) を連結すると会話の主成分 (実装の話など) にクエリベクトルが支配され、
 # 発話に含まれる固有名詞 (例:「アイフィ」) が埋没して無関係な記憶が 0.87〜0.91 で
 # threshold 0.86 を通過してしまう。クエリを最新発話 1 件だけに絞ると、固有名詞への
@@ -112,12 +132,18 @@ def is_media_recall_enabled() -> bool:
 
 # message ソースのヒットに加算するしきい値オフセット (raw cosine similarity)。
 #
-# 実測: message ソースは長文同士の類似度インフレが起きやすく、無関係な組み合わせ
-# でも 0.89〜0.91 のジャンクヒットが出る (chronicle/memopedia/fragment は短めの
-# 要約文なのでこのインフレが起きにくい)。message ヒットだけ threshold を底上げして
-# ジャンクを落とす。既定 0.02 (= 実効しきい値 0.88)。
+# 既定 0 (= message も要約系と同じしきい値)。EmbeddingGemma 2 では、この底上げが
+# 対処していた「長文同士の類似度インフレ」が起きていない — 同じ合成データの上で、
+# 無関係クエリ・相づちの top の最大は message 層の方が要約層より低かった
+# (-0.014 / -0.022。e5 では逆に message 層が +0.014 / +0.005 高かった)。底上げを
+# 残しても落とせるノイズは無く (しきい値だけで 0/30 本)、正解の message ヒットだけが
+# 12/30 → 9/30 本に減る。測定と導出は
+# experiments/embeddinggemma2_bench/threshold/measurement.md。env で戻せる。
+#
+# 経緯: e5 時代の既定は 0.02 (実効しきい値 0.88)。e5 では message ソースに無関係な
+# 組み合わせでも 0.89〜0.91 のジャンクヒットが出たため。
 def get_message_threshold_offset() -> float:
-    return _env_float("SAIVERSE_AUTO_RECALL_MSG_THRESHOLD_OFFSET", 0.02)
+    return _env_float("SAIVERSE_AUTO_RECALL_MSG_THRESHOLD_OFFSET", 0.0)
 
 
 # エンティティトリガーの ambient 抑制: 直近ウィンドウ (最新発話を除く) でこの回数
@@ -185,9 +211,21 @@ def is_enhanced_recall_available(model_key: Optional[str] = None) -> bool:
     return is_available(model_key=model_key, required_type=FIRST_STAGE_QUESTION_TYPE)
 
 
-# 反射判断に渡す候補の embed_score 下限。cosine 単独の採用しきい値 (0.86) より広く
-# 取り、0.78〜0.86 帯の「拾えなかった正解」を判定に回す。
-_REFLEX_FLOOR = 0.78
+# 反射判断に渡す候補の embed_score 下限。cosine 単独の採用しきい値 (0.78) より広く
+# 取り、0.62〜0.78 帯の「拾えなかった正解」を判定に回す。
+#
+# **暫定値** (2026-10-12、EmbeddingGemma 2 への移行で据え直し)。元の 0.78 は e5 の
+# 上で Jev の実験 (2026-09) によって調整した値で、分布の測定だけでは決められない。
+# そこで「e5 の帯 (0.78〜0.86) の幅が、正解ヒットの分布の p10〜p90 幅の何倍だったか」
+# を新しい分布の上で保存して導いた: 合成データの正解分布で e5 の幅 0.037 に対して
+# 帯 0.08 は約 2.16 倍、EmbeddingGemma 2 の幅 0.076 に掛けると 0.165 →
+# 0.78 - 0.165 ≈ 0.62。照合として、JSQuAD の分布で同じ計算をすると 0.65、
+# 上位 8 件のうち判断に回る件数を e5 の 0.78 と揃えると 0.60 になる。導出の全文は
+# experiments/embeddinggemma2_bench/threshold/measurement.md。
+# 反射判断込みの採否が Jev の合格時と同等であることの確認
+# (docs/intent/auto_recall_jev_rerank.md の合否手順の縮小再実行) は、移行の
+# 隔離検証フェーズに残っている。
+_REFLEX_FLOOR = 0.62
 
 # 採用に必要な Noul 確率 (0〜1)。
 _REFLEX_THRESHOLD = 0.5
@@ -347,8 +385,28 @@ def _is_conversational_message(msg: Dict[str, Any]) -> bool:
     # 引っ越したとき、この除外リストが追従しなかったのが根因)。
     if metadata.get(CONSUMED_PERCEPTION_KEY):
         return False
+    # 残したリアルタイム情報と自動想起の行・そのターンのまとまり
+    # (docs/intent/persist_realtime_and_recall.md §4.5)。上の知覚の印でも外れる
+    # が、知覚とは別の理由 (思い出したことをまた思い出す循環を作らない) で
+    # 外すので、印を名指しして明示的に外す。
+    if metadata.get(PERSISTED_REALTIME_AND_RECALL_KEY) or metadata.get(
+        TURN_REALTIME_AND_RECALL_KEY
+    ):
+        return False
     content = msg.get("content")
-    return isinstance(content, str) and bool(content.strip())
+    return isinstance(content, str) and bool(_said_text(msg).strip())
+
+
+def _said_text(msg: Dict[str, Any]) -> str:
+    """発言の言葉だけを返す。
+
+    文脈を組むときに機構が末尾へ足す「添付アイテム作成」の文は、ユーザーが
+    言った言葉ではない。足す側が控えた、足す前の本文を読む
+    (saiverse.media_utils.said_content)。画像だけの発言では空になる。
+    """
+    from saiverse.media_utils import said_content
+
+    return said_content(msg)
 
 
 def _latest_user_message(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -370,6 +428,8 @@ def _latest_user_message(messages: List[Dict[str, Any]]) -> Optional[Dict[str, A
             or metadata.get("__realtime_context__")
             or metadata.get("__auto_recall__")
             or metadata.get(CONSUMED_PERCEPTION_KEY)
+            or metadata.get(PERSISTED_REALTIME_AND_RECALL_KEY)
+            or metadata.get(TURN_REALTIME_AND_RECALL_KEY)
         ):
             continue
         return m
@@ -419,13 +479,22 @@ def _trailing_perception_blocks(messages: List[Dict[str, Any]]) -> List[Dict[str
 
     = 「このターンで新しく目に入ったもの」。会話本文でもブロックでもない行
     (head の system 行など) は素通りするだけで、遡りを止めない。
+
+    残したリアルタイム情報と自動想起の行 (知覚のブロックと同じ印も持つ) は
+    新しく目に入ったものではないので集めない — 素通りするだけで、遡りも
+    止めない (docs/intent/persist_realtime_and_recall.md §4.5)。
     """
     found: List[Dict[str, Any]] = []
+    # 言葉の無いユーザー発言 (画像だけ等) は会話本文に数えないが、ターンの境目
+    # ではあるので、そこで遡りを止める (その手前の様子は前のターンのもの)
+    latest_user = _latest_user_message(messages)
     for m in reversed(messages):
+        if is_persisted_realtime_and_recall(m):
+            continue
         if is_injected_perception(m):
             found.append(m)
             continue
-        if _is_conversational_message(m):
+        if _is_conversational_message(m) or m is latest_user:
             break
     return list(reversed(found))
 
@@ -440,8 +509,31 @@ def _fresh_observation_texts(messages: List[Dict[str, Any]]) -> List[str]:
     return texts
 
 
+def _is_image_only_user_turn(messages: List[Dict[str, Any]]) -> bool:
+    """このターンのユーザー発言が、言葉の無い発言 (画像だけを送った等) か。
+
+    言葉の無い発言は会話本文に数えない (``_is_conversational_message``) ので、
+    会話本文だけを見ると「ユーザー発言の無いターン」に見える。最新の user
+    メッセージが最後の会話本文より後ろにあり、言葉を持たないときに真。
+    """
+    latest = _latest_user_message(messages)
+    if latest is None or _said_text(latest).strip():
+        return False
+    for m in reversed(messages):
+        if m is latest:
+            return True
+        if _is_conversational_message(m):
+            return False
+    return False
+
+
 def _seed_is_user_utterance(messages: List[Dict[str, Any]]) -> bool:
-    """会話本文の末尾が user か = このターンに新しいユーザー発言があるか。"""
+    """会話本文の末尾が user か = このターンに新しいユーザー発言があるか。
+
+    画像だけを送ったターンもユーザーのターンとして真を返す。
+    """
+    if _is_image_only_user_turn(messages):
+        return True
     for m in reversed(messages):
         if _is_conversational_message(m):
             return m.get("role") == "user"
@@ -467,6 +559,13 @@ def build_query(messages: List[Dict[str, Any]], *, n: Optional[int] = None) -> s
     """
     if n is None:
         n = get_query_message_count()
+    if _is_image_only_user_turn(messages):
+        # 画像だけを送ったターン。前の会話や部屋の様子を、いま言われたことの
+        # 代わりに検索語にしない。使えるのは添付の概要 (メディア想起が ON の
+        # ときだけ) で、無ければ空 (= エンティティ想起だけが走る)。
+        if not is_media_recall_enabled():
+            return ""
+        return "\n".join(_current_attachment_summaries(messages))
     convo = [m for m in messages if _is_conversational_message(m)]
     seed = convo
     if not _seed_is_user_utterance(messages):
@@ -477,7 +576,7 @@ def build_query(messages: List[Dict[str, Any]], *, n: Optional[int] = None) -> s
         if fresh:
             seed = convo + [{"role": "user", "content": text} for text in fresh]
     tail = seed[-n:] if n > 0 else seed
-    text_query = "\n".join(str(m.get("content", "")).strip() for m in tail).strip()
+    text_query = "\n".join(_said_text(m).strip() for m in tail).strip()
 
     if not is_media_recall_enabled():
         return text_query
@@ -491,15 +590,23 @@ def build_query(messages: List[Dict[str, Any]], *, n: Optional[int] = None) -> s
 
 
 def _last_user_utterance(messages: List[Dict[str, Any]]) -> Optional[str]:
-    """会話本文メッセージのうち role=user の最後の1件の content を返す。"""
+    """会話本文メッセージのうち role=user の最後の1件の content を返す。
+
+    最新のユーザー発言が本文の空 (画像だけを送った等) なら None。本文のある
+    発言まで遡ると、前の話題を「いま言われたこと」としてエンティティ想起を
+    引き直してしまう。
+    """
+    latest = _latest_user_message(messages)
+    if latest is not None and not _said_text(latest).strip():
+        return None
     for m in reversed(messages):
         if not _is_conversational_message(m):
             continue
         if m.get("role") != "user":
             continue
         content = m.get("content")
-        if isinstance(content, str) and content.strip():
-            return content
+        if isinstance(content, str) and _said_text(m).strip():
+            return _said_text(m)
     return None
 
 
@@ -555,7 +662,7 @@ def _find_entity_triggers(
     removed_last_user = False
     for m in reversed(convo):
         content = m.get("content")
-        text = str(content).strip() if isinstance(content, str) else ""
+        text = _said_text(m).strip() if isinstance(content, str) else ""
         if not removed_last_user and m.get("role") == "user" and text == last_utterance.strip():
             removed_last_user = True
             continue
@@ -884,6 +991,8 @@ def _vivid_source_messages(
             vec = json.loads(vec_json)
         except (ValueError, TypeError):
             continue
+        if not vec:
+            continue  # empty row of a deferred embedding: nothing to compare yet
         score = _cosine(frag_vec, vec)
         prev = best_by_message.get(mid)
         if prev is None or score > prev[0]:
@@ -1153,10 +1262,20 @@ def _build_reflex_request(
     conversation = [
         {
             "role": str(m.get("role") or ""),
-            "text": _clip(str(m.get("content", "")).strip(), _REFLEX_CONVERSATION_TEXT_LIMIT),
+            "text": _clip(_said_text(m).strip(), _REFLEX_CONVERSATION_TEXT_LIMIT),
         }
         for m in tail
     ]
+    if _is_image_only_user_turn(messages):
+        # 言葉の無い発言は会話本文に入らないので、このターンにユーザーが何を
+        # 送ったかを機構の文で末尾に置く (件数は変えない)
+        from saiverse.media_utils import describe_wordless_utterance
+
+        latest = _latest_user_message(messages) or {}
+        note = describe_wordless_utterance(latest.get("metadata"))
+        if note:
+            conversation.append({"role": "user", "text": note})
+            conversation = conversation[-max(1, context_messages):]
 
     memories: Dict[str, Dict[str, str]] = {}
     questions: Dict[str, Dict[str, Any]] = {}
@@ -1327,6 +1446,11 @@ class AutoRecallResult:
     # 一切影響しない。他の失敗 (キー欠落・接続失敗・不正応答) では立たない — 待ち時間や
     # モデルの割り当てを変えれば直る失敗だけを、直し方つきで知らせるため。
     reflex_deadline_fallback: bool = False
+    # block に入っている記憶の ``(source_type, source_id)`` (block の並び順)。
+    # リアルタイム情報と自動想起を残すモデルでは、これを残した行に構造化して
+    # 持たせ、次のターンの候補から外す (docs/intent/persist_realtime_and_recall.md
+    # §4.4)。injected=False のときは空。
+    recalled_keys: List[Tuple[str, str]] = field(default_factory=list)
 
 
 def run_auto_recall(
@@ -1338,6 +1462,8 @@ def run_auto_recall(
     thread_id: str,
     enhanced: bool = False,
     reflex_model_key: Optional[str] = None,
+    exclude_keys: Optional[set] = None,
+    new_only: bool = False,
 ) -> AutoRecallResult:
     """自動想起を 1 ターン分実行し、注入ブロック (あれば) を返す。
 
@@ -1362,6 +1488,20 @@ def run_auto_recall(
             ``AI.REFLEX_JUDGMENT_MODEL``)。``enhanced`` と同じく、persona オブジェクトを
             持つ呼び出し側が読んで渡す。None なら世界の既定 (モデルの役割「反射判断」の
             env) に落ちる。
+        exclude_keys: 候補を集める段階で外す記憶の ``(source_type, source_id)``。
+            リアルタイム情報と自動想起を残すモデル
+            (docs/intent/persist_realtime_and_recall.md §4.4) で、いま送る列に
+            ある残した行に入っている記憶を渡す。採用した後で捨てると候補の枠が
+            既出の記憶で埋まったまま件数だけ減る (auto_recall_jev_rerank.md の
+            詰まり 1 と同じ理由) ので、検索 (unified_recall) とエンティティ
+            トリガーの両方で収集の段階で外す。None / 空なら従来どおり。
+        new_only: True なら、注入ブロックに入れるのは**このターンに新しく採用
+            した記憶だけ** (粘着台帳に残っている過去の記憶は出さない)。残すモデル
+            では、一度出た記憶は残した行として送る列に居続けるので、粘着で
+            出し直すと同じ記憶が毎ターン積み重なる。「新しく浮かんだ」の基準は
+            台帳ではなく残した行 (= ``exclude_keys``) にある — 台帳は keepalive や
+            作業セッションの呼び出しでも更新されるため。新しい記憶が一つも無い
+            ターンは注入しない。False (既定) は従来どおり台帳の全件を出す。
 
     Returns:
         AutoRecallResult。``injected`` が True のとき ``block`` を末尾注入する。
@@ -1408,8 +1548,15 @@ def run_auto_recall(
         LOGGER.warning("[auto_recall] entity trigger raised (persona=%s)", persona_id, exc_info=True)
         entity_hits = []
 
+    excluded_keys: set = (
+        {(str(k[0]), str(k[1])) for k in exclude_keys} if exclude_keys else set()
+    )
+
     for page_id, short_id, title, summary in entity_hits:
         key = ("memopedia", str(page_id))
+        if key in excluded_keys:
+            # 送る列に既に出ている記憶 (残した行の中) — 候補にしない。
+            continue
         accepted_keys.add(key)
         accepted_count += 1
         display_title = f"{title} (memopedia:{short_id})" if short_id is not None else title
@@ -1440,6 +1587,10 @@ def run_auto_recall(
         (成功済みの候補を障害の空で上書きすると、粘着台帳が「候補の無かったターン」
         として古び、障害が続いただけで粘着記憶が消える)。
         """
+        if excluded_keys:
+            # 送る列に既に出ている記憶を収集の段階で外す (残すモデルだけが渡す)。
+            # 空のときは引数ごと渡さない — 従来の呼び出しを 1 ビットも変えない。
+            extra_kwargs = {**extra_kwargs, "exclude_keys": excluded_keys}
         try:
             from sai_memory.unified_recall import unified_recall
             # Chronicle は自動想起の対象から外す。Chronicle は人生の背骨を要約した
@@ -1519,6 +1670,9 @@ def run_auto_recall(
         key = (hit.source_type, str(hit.source_id))
         # エンティティトリガーで既に採用済みなら埋め込み側は重複処理しない。
         if key in accepted_keys:
+            continue
+        # 収集の段階で外してあるはずの既出の記憶 (残すモデル)。念のための防御。
+        if key in excluded_keys:
             continue
         # message ソースで、既にコンテキスト窓に載っているものは注入しない (二重注入回避)。
         if hit.source_type == "message" and str(hit.source_id) in context_ids:
@@ -1626,6 +1780,23 @@ def run_auto_recall(
         ledger.items.values(),
         key=lambda it: (it.stale_turns, -it.best_score),
     )
+    if new_only:
+        # 残すモデル (docs/intent/persist_realtime_and_recall.md §4.4): 出すのは
+        # このターンに新しく採用した記憶だけ。過去に出した記憶は残した行として
+        # 送る列に居続けるので、粘着で出し直さない。
+        ordered = [
+            it for it in ordered
+            if (it.source_type, str(it.source_id)) in accepted_keys
+        ]
+        if not ordered:
+            LOGGER.debug(
+                "[auto_recall] no newly surfaced memory this turn; no injection "
+                "(persona=%s, new_only)", persona_id,
+            )
+            return AutoRecallResult(
+                False, None, query, len(hits), accepted_count, len(ledger.items), 0,
+                reflex_deadline_fallback=reflex_deadline_fallback,
+            )
     header = "ふと浮かんだ記憶:"
     included_items: List[_LedgerItem] = list(ordered)
     lines: List[str] = [_format_line(item) for item in included_items]
@@ -1696,4 +1867,7 @@ def run_auto_recall(
         char_count=len(block),
         plain_text=body,
         reflex_deadline_fallback=reflex_deadline_fallback,
+        recalled_keys=[
+            (item.source_type, str(item.source_id)) for item in included_items
+        ],
     )

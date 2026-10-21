@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+from llm_clients.base import usage_event_time
 from llm_clients.exceptions import EmptyResponseError
 from sai_memory.memory.storage import MECHANISM_TAGS, Message
 from sai_memory.arasuji.storage import (
@@ -50,6 +51,7 @@ def _record_llm_usage(client, persona_id: Optional[str], node_type: str) -> None
                 cached_tokens=usage.cached_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
                 cache_ttl=usage.cache_ttl,
+                timestamp=usage_event_time(usage),
                 persona_id=persona_id,
                 node_type=node_type,
                 category="memory_weave_generate",
@@ -298,6 +300,27 @@ def _message_kind_label(msg: Message) -> str:
     return ""
 
 
+def _extra_item_label(item: dict, text: str) -> str:
+    """追加材料 (知覚のバッチ等) 1 項目のラベル。
+
+    項目が ``label`` を持っていればそれに従う — リアルタイム情報と自動想起を
+    残した行 (sai_memory/perception_buffer.batch_material_item) は、想起を
+    含むものが ``"recall"``、含まないものが ``"notice"`` で来る
+    (docs/intent/persist_realtime_and_recall.md §4.3)。無ければ従来どおり
+    本文から決める (``[想起:`` で始まれば想起、それ以外は知覚)。
+    """
+    from sai_memory.perception_buffer import (
+        MATERIAL_LABEL_NOTICE,
+        MATERIAL_LABEL_RECALL,
+    )
+    label = item.get("label")
+    if label == MATERIAL_LABEL_RECALL:
+        return _LABEL_RECALL
+    if label == MATERIAL_LABEL_NOTICE:
+        return _LABEL_NOTICE
+    return _LABEL_RECALL if _is_recall_text(text) else _LABEL_PERCEPTION
+
+
 def has_recall_material(
     messages: List[Message],
     extra_items: Optional[List[dict]] = None,
@@ -307,7 +330,8 @@ def has_recall_material(
         if _is_recall_text(msg.content or ""):
             return True
     for item in extra_items or []:
-        if _is_recall_text(str(item.get("text") or "")):
+        text = str(item.get("text") or "")
+        if _extra_item_label(item, text) == _LABEL_RECALL:
             return True
     return False
 
@@ -335,10 +359,33 @@ def _format_messages_for_prompt(
         extra_items: メッセージ行ではない材料 (知覚の消費バッチ等)。
             ``{"at": epoch, "text": str}`` の list。時刻順の正しい位置に
             差し込む (同秒はメッセージが先 — 消費は書き込みの後に起きた事実)。
+            ただし項目が ``after_message_id`` を持ち、その id のメッセージが
+            ``messages`` にあるときは、時刻順の位置をそのメッセージ (境界) の
+            後ろ、次のメッセージの前に収める — 知覚のまとめも、リアルタイム
+            情報と自動想起を残した行も、境界 (確定した時点の直前の発言) の後、
+            次の発言より前に起きている (sai_memory/perception_buffer.
+            batch_material_item)。秒の順だけでは、次の発言と同じ秒のときに
+            その後ろへ落ちるので、次のメッセージの前で止める。境界と次の
+            メッセージの間に収まった項目どうしは時刻順 (同じ秒は項目の並び順)。
+            そのメッセージが ``messages`` に無ければ従来どおり時刻順。表示する
+            時刻はどちらの場合も ``at``。
             本文が ``[想起:`` で始まる項目は【想起 (過去の再提示)】、それ以外は
             【知覚】とラベルし、長さ規則 (MECHANISM_TEXT_MAX_CHARS) を適用する。
+            項目が ``label`` を持つときはそれに従う (:func:`_extra_item_label`)。
     """
-    entries: List[tuple] = []  # (at, tie, seq, line)
+    # 並びのキーは (at, tie, seq, after, sub)。メッセージは (created_at, 0,
+    # seq, 0, 0)、時刻で並べる項目は (at, 1, seq, 0, 0)。境界を持つ項目は、
+    # 時刻順のキーを「境界の直後 (境界のキーの後ろ 2 つを (1, 項目の seq)
+    # にしたもの)」以上、「次のメッセージの直前 (次のキーの後ろ 2 つを
+    # (-1, 項目の seq) にしたもの)」以下に収める。
+    entries: List[tuple] = []  # (at, tie, seq, after, sub, line)
+    # 本文が空で行にならないメッセージも位置の基準には使える (境界の発言が
+    # 道具呼び出しだけの行でも、その位置の直後に置く)。
+    message_keys: dict = {
+        str(msg.id): (msg.created_at or 0, seq)
+        for seq, msg in enumerate(messages)
+        if getattr(msg, "id", None) is not None
+    }
     for seq, msg in enumerate(messages):
         role = msg.role
         if role == "model":
@@ -351,20 +398,31 @@ def _format_messages_for_prompt(
             f"[{_format_timestamp(msg.created_at)}] " if include_timestamp else ""
         )
         entries.append(
-            (msg.created_at or 0, 0, seq, f"{prefix}[{role}]{kind}: {content}")
+            (msg.created_at or 0, 0, seq, 0, 0,
+             f"{prefix}[{role}]{kind}: {content}")
         )
     for seq, item in enumerate(extra_items or []):
         text = str(item.get("text") or "").strip()
         if not text:
             continue
-        label = _LABEL_RECALL if _is_recall_text(text) else _LABEL_PERCEPTION
+        label = _extra_item_label(item, text)
         if len(text) > MECHANISM_TEXT_MAX_CHARS:
             text = condense_mechanism_text(text)
         at = int(item.get("at") or 0)
         prefix = f"[{_format_timestamp(at)}] " if include_timestamp else ""
-        entries.append((at, 1, seq, f"{prefix}{label}: {text}"))
-    entries.sort(key=lambda e: (e[0], e[1], e[2]))
-    return "\n\n".join(e[3] for e in entries)
+        line = f"{prefix}{label}: {text}"
+        after_id = item.get("after_message_id")
+        anchor = message_keys.get(str(after_id)) if after_id is not None else None
+        key = (at, 1, seq, 0, 0)
+        if anchor is not None:
+            key = max(key, (anchor[0], 0, anchor[1], 1, seq))
+            next_seq = anchor[1] + 1
+            if next_seq < len(messages):
+                next_at = messages[next_seq].created_at or 0
+                key = min(key, (next_at, 0, next_seq, -1, seq))
+        entries.append((*key, line))
+    entries.sort(key=lambda e: e[:5])
+    return "\n\n".join(e[5] for e in entries)
 
 
 def _format_entries_for_prompt(entries: List[ArasujiEntry], *, include_timestamp: bool = True) -> str:

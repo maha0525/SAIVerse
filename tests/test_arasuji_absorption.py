@@ -555,6 +555,181 @@ class TestRunAbsorption:
         # 完了 — 未完了の印は立っていない
         assert not is_repair_incomplete(conn)
 
+    def test_kept_realtime_and_recall_rows_reach_the_merge_prompt_with_labels(
+        self, adapter,
+    ):
+        """隣人の材料だった「残したリアルタイム情報と自動想起の行」は、付記と
+        同じラベル付きで合体の材料になる (docs/intent/persist_realtime_and_recall.md
+        §4.3 — 三つの読み手は batch_material_item の一枚を通る)。"""
+        from sai_memory.perception_buffer import (
+            insert_realtime_and_recall_batch,
+            mark_batches_annexed,
+        )
+
+        conn = adapter.conn
+        _add_message(adapter, 0, 100)
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        entry = _entry(conn, [n1, n2], start_min=10, end_min=11)
+        recall_id = insert_realtime_and_recall_batch(
+            conn, consumed_at=_epoch(10),
+            rendered_text="<system>ふと浮かんだ記憶:\n- 灯台の思い出</system>",
+            recalled_keys=[("memopedia", "p1")],
+        )
+        notice_id = insert_realtime_and_recall_batch(
+            conn, consumed_at=_epoch(11),
+            rendered_text="<system>\n## リアルタイム情報\n- 現在時刻: 10:11\n</system>",
+        )
+        mark_batches_annexed(conn, [recall_id, notice_id], entry.id)
+        conn.commit()
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        plan = plan_absorption(
+            conn, tiny, messages, processed, target_chars=TARGET,
+        )
+        client = _Client()
+        result = run_absorption(conn, client, plan)
+
+        assert len(result.merged_entries) == 1
+        merge_prompt = next(p for p in client.prompts if "統合対象の材料" not in p)
+        assert "【想起 (過去の再提示)】: ふと浮かんだ記憶:" in merge_prompt
+        assert "【通知】: ## リアルタイム情報" in merge_prompt
+        assert "<system>" not in merge_prompt
+
+    @staticmethod
+    def _run_own_batches(adapter, gap):
+        """吸収する run 自身の未付記バッチ: 境界キーの無い古い知覚の行と、
+        境界が run の発言を指す「残した行」。"""
+        from sai_memory.perception_buffer import (
+            create_consumption_batch,
+            insert_realtime_and_recall_batch,
+            push_perception,
+        )
+
+        conn = adapter.conn
+        item = push_perception(conn, "world_state", "run の間に雨が降った")
+        perception_id = create_consumption_batch(
+            conn, [item], consumed_at=_epoch(0),
+            rendered_text="[システム通知]\nrun の間に雨が降った",
+        )
+        created_at, rowid = conn.execute(
+            "SELECT created_at, rowid FROM messages WHERE id = ?", (gap,),
+        ).fetchone()
+        kept_id = insert_realtime_and_recall_batch(
+            conn, consumed_at=_epoch(0) + 30,
+            rendered_text="<system>ふと浮かんだ記憶:\n- run の想起</system>",
+            recalled_keys=[("memopedia", "p9")],
+            boundary_created_at=int(created_at), boundary_rowid=int(rowid),
+        )
+        return perception_id, kept_id
+
+    def test_absorbed_run_own_unannexed_batches_become_material(self, adapter):
+        """吸収する run 自身の未付記バッチ (知覚・残した行の両方) も材料に入り、
+        合体の確定と一緒に合体エントリへ付記される (Codex 一巡目 #5 — 旧隣人へ
+        付記済みのバッチだけを集めていた既存の欠陥)。"""
+        conn = adapter.conn
+        gap = _add_message(adapter, 0, 100)
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        _entry(conn, [n1, n2], start_min=10, end_min=11)
+        perception_id, kept_id = self._run_own_batches(adapter, gap)
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        plan = plan_absorption(conn, tiny, messages, processed, target_chars=TARGET)
+        client = _Client()
+        result = run_absorption(conn, client, plan)
+
+        assert len(result.merged_entries) == 1
+        merged = result.merged_entries[0]
+        merge_prompt = next(p for p in client.prompts if "統合対象の材料" not in p)
+        assert "run の間に雨が降った" in merge_prompt
+        assert "【想起 (過去の再提示)】: ふと浮かんだ記憶:\n- run の想起" in merge_prompt
+        rows = dict(conn.execute(
+            "SELECT id, annexed_entry_id FROM perception_batches WHERE id IN (?, ?)",
+            (perception_id, kept_id),
+        ).fetchall())
+        assert rows == {perception_id: merged.id, kept_id: merged.id}
+        assert not is_repair_incomplete(conn)
+
+    def test_absorbed_run_batches_are_returned_when_the_bookkeeping_fails(
+        self, adapter,
+    ):
+        """run 自身のバッチへの付記印が確定の途中で失敗したら、合体は取り下げ、
+        印も未付記へ戻す (まとめて戻す)。"""
+        import sai_memory.perception_buffer as pb
+
+        conn = adapter.conn
+        gap = _add_message(adapter, 0, 100)
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        entry = _entry(conn, [n1, n2], start_min=10, end_min=11)
+        perception_id, kept_id = self._run_own_batches(adapter, gap)
+        real_mark = pb.mark_batches_annexed
+
+        def _mark_then_fail(c, ids, entry_id):
+            real_mark(c, ids, entry_id)
+            raise RuntimeError("bookkeeping failed")
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        plan = plan_absorption(conn, tiny, messages, processed, target_chars=TARGET)
+        with patch.object(pb, "mark_batches_annexed", _mark_then_fail):
+            with pytest.raises(AbsorptionError):
+                run_absorption(conn, _Client(), plan)
+
+        rows = dict(conn.execute(
+            "SELECT id, annexed_entry_id FROM perception_batches WHERE id IN (?, ?)",
+            (perception_id, kept_id),
+        ).fetchall())
+        assert rows == {perception_id: None, kept_id: None}
+        # 旧隣人は残り、合体エントリは取り下げられている
+        assert get_entry(conn, entry.id) is not None
+        assert [e.id for e in get_entries_covering_messages(conn, [n1, n2])] == [entry.id]
+
+    def test_absorption_on_an_old_database_without_the_new_columns(self, adapter):
+        """新しい列 (kind / recalled_json / 境界 / 部屋の記帳) の無い旧世代の
+        perception_batches でも、吸収は旧隣人と run の知覚を材料にして通る
+        (Codex 一巡目 #6 — 列不足で no such column に落ちていた)。"""
+        conn = adapter.conn
+        _add_message(adapter, 0, 100)  # 極小 run
+        n1 = _add_message(adapter, 10, 300)
+        n2 = _add_message(adapter, 11, 300)
+        entry = _entry(conn, [n1, n2], start_min=10, end_min=11)
+        conn.execute("DROP TABLE perception_batches")
+        conn.execute(
+            "CREATE TABLE perception_batches (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "consumed_at INTEGER NOT NULL, pulse_id TEXT, episode_id TEXT, "
+            "rendered_text TEXT NOT NULL, media TEXT, annexed_entry_id TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO perception_batches (consumed_at, rendered_text, "
+            "annexed_entry_id) VALUES (?, '[システム通知]\n隣人の頃の雷', ?)",
+            (_epoch(10), entry.id),
+        )
+        conn.execute(
+            "INSERT INTO perception_batches (consumed_at, rendered_text) "
+            "VALUES (?, '[システム通知]\nrun の頃の雨')",
+            (_epoch(0),),
+        )
+        conn.commit()
+
+        messages, processed, _normal, tiny = _plan(adapter)
+        plan = plan_absorption(conn, tiny, messages, processed, target_chars=TARGET)
+        client = _Client()
+        result = run_absorption(conn, client, plan)
+
+        assert len(result.merged_entries) == 1
+        merge_prompt = next(p for p in client.prompts if "統合対象の材料" not in p)
+        assert "隣人の頃の雷" in merge_prompt
+        assert "run の頃の雨" in merge_prompt
+        merged_id = result.merged_entries[0].id
+        assert {
+            r[0] for r in conn.execute(
+                "SELECT annexed_entry_id FROM perception_batches"
+            ).fetchall()
+        } == {merged_id}
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(perception_batches)")}
+        assert {"kind", "recalled_json", "boundary_rowid", "room_state_json"} <= cols
+
     def test_multiple_holes_in_one_neighbor_merge_in_one_pass(self, adapter):
         """span 内に穴が複数ある隣人は、1 回の run_absorption で 1 個の合体
         エントリになる (再実行の繰り返しと同範囲の LLM 作り直しを出さない)。"""

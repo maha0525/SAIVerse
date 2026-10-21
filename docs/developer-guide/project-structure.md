@@ -36,7 +36,7 @@ SAIVerse/
 ├── scripts/                # 保守スクリプト
 ├── tests/                  # テストスイート
 ├── test_fixtures/          # 隔離テスト環境
-├── sbert/                  # 埋め込みモデル（存在すれば利用、なければ自動DL）
+├── sbert/                  # 埋め込みモデル（embeddinggemma-2-q4/。存在すれば利用、なければ自動DL）
 └── assets/                 # ロゴ・ガイド画像
 ```
 
@@ -116,6 +116,7 @@ saiverse/
 ├── data_paths.py           # パス管理（user_data/builtin_data）
 ├── playbook_scope.py       # 管理サービスと CLI が共有するパス→Playbook 公開範囲の推論（保存・CLI に非依存）
 ├── addon_*.py              # アドオン機構（loader/installer/registry 等）
+├── addon_context.py        # アドオンの案内（context_provider）の登録簿。読み手は head の addon_guidance セクション
 ├── observer_manager.py     # Observer（定期観測 Fixture）
 └── ...                     # その他コアモジュール
 ```
@@ -162,6 +163,8 @@ api/
 `next.config.ts` の通常 API rewrite と `src/app/api/{addon,mcp}/` の Route Handler は、`backend-origin.cjs` の共通関数でバックエンドの接続先を選ぶ。正式名・旧名・既定値の順序と不一致の警告はここに集約し、SSE やメディア転送は各 Route Handler が持つ。`scripts/test-backend-origin.cjs` が設定と全経路を fake fetch で検査し、`scripts/test-backend-origin-http.cjs` が実 Next.js から fake 18000 への中継を検査する（[intent](../intent/frontend_backend_origin.md)）。
 
 ### scripts/
+
+SearXNG のセットアップは `setup_searxng.ps1` / `.sh` から共通の `searxng_install.py` を呼ぶ。`searxng_pin.json` が採用コミットの正典、`searxng_config.py` が取得・設定マージ・起動の参照先を揃える。固定版の公式 ZIP を `.searxng-src/<commit>/` へ取得し、依存は専用 `.searxng-venv/` へ導入する（[intent](../intent/searxng_installation.md)）。
 
 保守操作の実装。`update.bat` / `update.sh` / PowerShell / UI更新はいずれも同じupdate engineへ委譲する。`start.bat` / `start.sh` も起動前に `update_engine.py --check-complete` を呼び、更新が途中で死んでいれば同じ engine で仕上げてから起動する（[issue](../issues/v0229_update_bat_truncates_after_git_pull.md)）。
 
@@ -215,7 +218,8 @@ sea/
 └── head_pipeline/        # head（キャッシュの効く安定領域）の構築
     ├── pipeline.py / registry.py / store.py / types.py / integration.py
     └── sections/         #   各 Section（common_prompt / persona_self / building 等。
-                          #   self_view = 自分の外見とインベントリ、独立した user メッセージ）
+                          #   self_view = 自分の外見とインベントリ、独立した user メッセージ。
+                          #   addon_guidance = アドオンからの案内、増減は差分通知で届く）
 ```
 
 ### manager/
@@ -255,6 +259,7 @@ sai_memory/
 │                     #   下ろす／現在地でない部屋の様子を一行へ。提示だけ・台帳は無傷）
 ├── clips.py / purpose_tags.py # クリップ（土地参照の統一プリミティブ、旧 marks）・目的タグ（memory.db 同居）
 ├── unified_recall.py # 統合想起
+├── embedding_migration.py # 埋め込みモデル移行（古い長さのベクトルの検出と 4 系統の作り直し。起動時判定・reembed API・CLI が共有）
 ├── backup.py         # rdiff-backup
 ├── config.py / cli.py / logging_utils.py
 └── README.md

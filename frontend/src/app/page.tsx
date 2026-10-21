@@ -21,6 +21,7 @@ import ToolModeSelector, { TOOL_MODE_SELECTED } from '@/components/ToolModeSelec
 import { buildPreSpellsFromUI } from '@/lib/preSpells';
 import { formatCost } from '@/lib/formatCost';
 import { prepareMessageMarkdown } from '@/lib/messageMarkdown';
+import { rehypeBodyEmote } from '@/lib/rehypeBodyEmote';
 import { fetchAllTableRows } from '@/lib/dbTable';
 import { UPDATE_STARTED_EVENT, isStableCaughtUp, requestChannelSwitch } from '@/lib/releaseChannel';
 import RightSidebar from '@/components/RightSidebar';
@@ -93,7 +94,9 @@ function resolveSaiverseImageSrc(src: string): string {
 // Stable module-level constants — passing fresh arrays/functions to ReactMarkdown each render
 // causes it to remount its rendered tree, which makes <img> tags re-fetch on every keystroke.
 const MARKDOWN_REMARK_PLUGINS: PluggableList = [remarkGfm, remarkBreaks];
-const MARKDOWN_REHYPE_PLUGINS: PluggableList = [rehypeRaw, [rehypeSanitize, sanitizeSchema]];
+// rehypeBodyEmote runs after sanitizing on the HTML tree so code stays verbatim;
+// the span it adds only ever contains one of its fixed allowlisted names.
+const MARKDOWN_REHYPE_PLUGINS: PluggableList = [rehypeRaw, [rehypeSanitize, sanitizeSchema], rehypeBodyEmote];
 const markdownUrlTransform = (url: string) =>
     url.startsWith('saiverse://') ? url : defaultUrlTransform(url);
 
@@ -656,6 +659,9 @@ export default function Home() {
     // Reembed notification
     const [reembedNeeded, setReembedNeeded] = useState<{persona_ids: string[], message: string} | null>(null);
     const [isReembeddingAll, setIsReembeddingAll] = useState(false);
+    // 繋がり直しで走る読み込みの effect から、実行中かどうかを古い値でなく今の値で読むため
+    const isReembeddingAllRef = useRef(false);
+    useEffect(() => { isReembeddingAllRef.current = isReembeddingAll; }, [isReembeddingAll]);
     const [reembedBannerProgress, setReembedBannerProgress] = useState<string | null>(null);
 
     // Update system
@@ -1198,6 +1204,51 @@ export default function Home() {
                 }
             })
             .catch(() => setBackendConnected(false));
+        // Check for unread announcements (and poll every 30 minutes)
+        const checkAnnouncements = () => {
+            // Check if announcements monitoring is enabled before fetching
+            apiFetch('/api/config/announcements-monitor')
+                .then(res => res.ok ? res.json() : null)
+                .then(cfg => {
+                    if (cfg && !cfg.enabled) return;  // Skip if disabled
+                    return apiFetch('/api/system/announcements')
+                        .then(res => res.ok ? res.json() : null)
+                        .then(data => {
+                            if (data?.announcements?.length > 0) {
+                                const raw = JSON.stringify(data.announcements);
+                                let hash = 5381;
+                                for (let i = 0; i < raw.length; i++) {
+                                    hash = ((hash << 5) + hash + raw.charCodeAt(i)) | 0;
+                                }
+                                const currentHash = (hash >>> 0).toString(16);
+                                const savedHash = localStorage.getItem('saiverse_announcements_hash');
+                                setHasUnreadAnnouncements(currentHash !== savedHash);
+                            }
+                        });
+                })
+                .catch(() => { /* ignore */ });
+        };
+        checkAnnouncements();
+        const announcementInterval = setInterval(checkAnnouncements, 30 * 60 * 1000);
+
+        // Also check when the tab becomes visible again
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') checkAnnouncements();
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+
+        return () => {
+            clearInterval(announcementInterval);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+    }, []);
+
+    // サーバーの設定と状態の読み込み — 開いた時と、サーバーに繋がり直した時の両方で行う。
+    // ブラウザがサーバーの起動完了より先に開くと、開いた時の問い合わせは全部失敗する。
+    // 一度きりにしていると、起動時の警告や埋め込みの再計算バナーが、繋がった後も
+    // 出ないままになる (2026-10-13 の本番移行で実際に起きた)。
+    useEffect(() => {
+        if (!backendConnected) return;
         // Fetch saved playbook setting and params from server.
         // Legacy values from the pre-Phase 3 era (meta_user / meta_user_manual /
         // meta_simple_speak, and the old track_user_conversation explicit
@@ -1265,7 +1316,8 @@ export default function Home() {
         apiFetch('/api/config/reembed-check')
             .then(res => res.ok ? res.json() : null)
             .then(data => {
-                if (data?.needed) {
+                // 再計算の実行中に繋がり直したときは、走っているバナーを置き換えない
+                if (data?.needed && !isReembeddingAllRef.current) {
                     setReembedNeeded({ persona_ids: data.persona_ids, message: data.message });
                 }
             })
@@ -1292,45 +1344,7 @@ export default function Home() {
                     });
             })
             .catch(() => { /* ignore - backend may not support this endpoint yet */ });
-
-        // Check for unread announcements (and poll every 30 minutes)
-        const checkAnnouncements = () => {
-            // Check if announcements monitoring is enabled before fetching
-            apiFetch('/api/config/announcements-monitor')
-                .then(res => res.ok ? res.json() : null)
-                .then(cfg => {
-                    if (cfg && !cfg.enabled) return;  // Skip if disabled
-                    return apiFetch('/api/system/announcements')
-                        .then(res => res.ok ? res.json() : null)
-                        .then(data => {
-                            if (data?.announcements?.length > 0) {
-                                const raw = JSON.stringify(data.announcements);
-                                let hash = 5381;
-                                for (let i = 0; i < raw.length; i++) {
-                                    hash = ((hash << 5) + hash + raw.charCodeAt(i)) | 0;
-                                }
-                                const currentHash = (hash >>> 0).toString(16);
-                                const savedHash = localStorage.getItem('saiverse_announcements_hash');
-                                setHasUnreadAnnouncements(currentHash !== savedHash);
-                            }
-                        });
-                })
-                .catch(() => { /* ignore */ });
-        };
-        checkAnnouncements();
-        const announcementInterval = setInterval(checkAnnouncements, 30 * 60 * 1000);
-
-        // Also check when the tab becomes visible again
-        const onVisibilityChange = () => {
-            if (document.visibilityState === 'visible') checkAnnouncements();
-        };
-        document.addEventListener('visibilitychange', onVisibilityChange);
-
-        return () => {
-            clearInterval(announcementInterval);
-            document.removeEventListener('visibilitychange', onVisibilityChange);
-        };
-    }, []);
+    }, [backendConnected]);
 
     // RPD usage polling - fetch when model has rate_limit, poll every 60 seconds
     useEffect(() => {

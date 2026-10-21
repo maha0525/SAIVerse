@@ -683,6 +683,49 @@ class RegenerateSwapTest(unittest.TestCase):
         covering = get_entries_covering_messages(self.adapter.conn, self.message_ids)
         self.assertEqual([e.id for e in covering], [self.old_entry.id])
 
+    def test_kept_realtime_and_recall_rows_are_material_with_labels(self):
+        """残したリアルタイム情報と自動想起の行は、付記と同じ形 (ラベル付き) で
+        再生成の材料になる (docs/intent/persist_realtime_and_recall.md §4.3 —
+        付記・再生成・吸収は perception_buffer.batch_material_item の一枚を通る)。"""
+        from sai_memory.arasuji.storage import create_entry, regenerate_entry
+        from sai_memory.perception_buffer import (
+            insert_realtime_and_recall_batch,
+            mark_batches_annexed,
+        )
+
+        conn = self.adapter.conn
+        recall_id = insert_realtime_and_recall_batch(
+            conn, consumed_at=1,
+            rendered_text="<system>ふと浮かんだ記憶:\n- 海辺の町</system>",
+            recalled_keys=[("memopedia", "p1")],
+        )
+        notice_id = insert_realtime_and_recall_batch(
+            conn, consumed_at=2,
+            rendered_text="<system>\n## リアルタイム情報\n- 現在時刻: 10:00\n</system>",
+        )
+        mark_batches_annexed(conn, [recall_id, notice_id], self.old_entry.id)
+        conn.commit()
+        captured = {}
+
+        def _fake_generate(conn, messages, model_name, persona_id=None,
+                           extra_items=None):
+            captured["extra_items"] = extra_items
+            return create_entry(
+                conn, level=1, content="新あらすじ",
+                source_ids=[m.id for m in messages],
+                start_time=1, end_time=2,
+                source_count=len(messages), message_count=len(messages),
+            )
+
+        with patch(
+            "scripts.arasuji.build_arasuji_core.regenerate_entry_from_messages",
+            _fake_generate,
+        ):
+            self.assertIsNotNone(regenerate_entry(conn, self.old_entry.id))
+        items = captured["extra_items"]
+        self.assertEqual([i.get("label") for i in items], ["recall", "notice"])
+        self.assertNotIn("<system>", items[0]["text"])
+
 
 class GeneratorCoverageCharsTest(unittest.TestCase):
     """generate_level1_arasuji (再生成・CLI 経路) の coverage_chars 保存。

@@ -10,9 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -58,13 +57,16 @@ def store_chronicle_embedding(
     conn: sqlite3.Connection,
     entry_id: str,
     vector: List[float],
+    *,
+    commit: bool = True,
 ) -> None:
     """Store or replace an embedding for a Chronicle entry."""
     conn.execute(
         "INSERT OR REPLACE INTO arasuji_embeddings (entry_id, vector) VALUES (?, ?)",
         (entry_id, json.dumps(vector)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_chronicle_embeddings(
@@ -139,13 +141,16 @@ def store_memopedia_embedding(
     conn: sqlite3.Connection,
     page_id: str,
     vector: List[float],
+    *,
+    commit: bool = True,
 ) -> None:
     """Store or replace an embedding for a Memopedia page."""
     conn.execute(
         "INSERT OR REPLACE INTO memopedia_embeddings (page_id, vector) VALUES (?, ?)",
         (page_id, json.dumps(vector)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_memopedia_embeddings(conn: sqlite3.Connection) -> List[tuple]:
@@ -228,13 +233,16 @@ def store_fragment_embedding(
     conn: sqlite3.Connection,
     fragment_id: str,
     vector: List[float],
+    *,
+    commit: bool = True,
 ) -> None:
     """Store or replace an embedding for a Memopedia fragment."""
     conn.execute(
         "INSERT OR REPLACE INTO memopedia_fragment_embeddings (fragment_id, vector) VALUES (?, ?)",
         (fragment_id, json.dumps(vector)),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def get_fragment_embeddings(conn: sqlite3.Connection) -> List[tuple]:
@@ -341,6 +349,85 @@ def get_message_embeddings(conn: sqlite3.Connection) -> List[tuple]:
 # Batch embedding generation
 # ---------------------------------------------------------------------------
 
+# The text each generator embeds, built in one place so that the text read
+# again just before storing (below) is built exactly like the text that was
+# embedded.
+
+def _page_embed_text(title: Optional[str], summary: Optional[str]) -> str:
+    return f"{title}: {summary}" if summary else title
+
+
+def _fragment_embed_text(content: Optional[str], entity_title: Optional[str]) -> str:
+    # entity_title は親ページ消失 (孤児 Fragment) で None になりうる。
+    # 孤児でも Fragment 本文単体で検索可能にする (LEFT JOIN 化, 2026-07-04)。
+    return f"{entity_title}: {content}" if entity_title else content
+
+
+def _current_chronicle_text(conn: sqlite3.Connection, entry_id: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT content FROM arasuji_entries WHERE id = ?", (entry_id,)
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+def _current_page_text(conn: sqlite3.Connection, page_id: str) -> Optional[str]:
+    row = conn.execute(
+        "SELECT title, summary FROM memopedia_pages WHERE id = ?", (page_id,)
+    ).fetchone()
+    return None if row is None else _page_embed_text(row[0], row[1])
+
+
+def _current_fragment_text(conn: sqlite3.Connection, fragment_id: str) -> Optional[str]:
+    row = conn.execute(
+        """
+        SELECT f.content, p.title
+        FROM memopedia_fragments f
+        LEFT JOIN memopedia_pages p ON f.entity_id = p.id
+        WHERE f.id = ?
+        """,
+        (fragment_id,),
+    ).fetchone()
+    return None if row is None else _fragment_embed_text(row[0], row[1])
+
+
+def _store_unchanged(
+    conn: sqlite3.Connection,
+    ids: List[str],
+    texts: List[str],
+    vectors,
+    current_text: Callable[[sqlite3.Connection, str], Optional[str]],
+    store: Callable[..., None],
+    *,
+    db_lock: Optional[Any] = None,
+) -> tuple:
+    """Store each vector only when its row still has the text it was made from.
+
+    The embedding runs outside the DB lock, so a row can be edited or deleted
+    between reading its text and storing its vector. Such a row is skipped:
+    it keeps no vector row, and the next generation pass (which picks up rows
+    without a vector) embeds its current text.
+
+    The text is read again and the vectors stored inside one
+    ``immediate_transaction`` (the process lock ``db_lock`` plus SQLite's
+    write lock): once it is taken, no other connection can change a row
+    between the comparison and the INSERT.
+
+    Returns ``(stored, skipped)``.
+    """
+    from sai_memory.db_locks import immediate_transaction
+
+    stored = 0
+    skipped = 0
+    with immediate_transaction(conn, db_lock):
+        for row_id, text, vec in zip(ids, texts, vectors):
+            if current_text(conn, row_id) != text:
+                skipped += 1
+                continue
+            store(conn, row_id, list(vec), commit=False)
+            stored += 1
+    return stored, skipped
+
+
 def embed_chronicle_entries(
     conn: sqlite3.Connection,
     embedder,
@@ -348,6 +435,7 @@ def embed_chronicle_entries(
     level: int = 1,
     batch_size: int = 64,
     db_lock: Optional[Any] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> int:
     """Generate and store embeddings for Chronicle entries that don't have them.
 
@@ -356,9 +444,12 @@ def embed_chronicle_entries(
         embedder: Embedder instance with embed() method.
         level: Chronicle level to embed (default: 1 = あらすじ).
         batch_size: Batch size for embedding generation.
+        progress_callback: Called after each stored batch with the cumulative
+            number of rows embedded so far (used by the re-embed job's progress).
 
     Returns:
-        Number of entries embedded.
+        Number of entries embedded. Entries whose text changed (or that were
+        deleted) while being embedded are skipped and not counted.
     """
     entries = get_chronicle_entries_without_embeddings(conn, level=level)
     if not entries:
@@ -367,20 +458,28 @@ def embed_chronicle_entries(
 
     LOGGER.info("Embedding %d Chronicle Lv%d entries", len(entries), level)
     total = 0
+    skipped = 0
 
     for i in range(0, len(entries), batch_size):
         batch = entries[i:i + batch_size]
+        ids = [entry_id for entry_id, _ in batch]
         texts = [content for _, content in batch]
         vectors = embedder.embed(texts, is_query=False)
 
-        # 埋め込みの計算は錠の外 (重い)。DB への書き込みと commit だけを
-        # adapter の錠前の内側で行う —— 共有接続なので、錠外の commit は
+        # 埋め込みの計算は錠の外 (重い)。本文の読み直しと書き込み・commit だけを
+        # 錠前と書き込みロックの内側で行う —— 共有接続なので、錠外の commit は
         # 他所の開いたトランザクションを途中で確定させる (Codex 八巡 #1)
-        with (db_lock or nullcontext()):
-            for (entry_id, _), vec in zip(batch, vectors):
-                store_chronicle_embedding(conn, entry_id, list(vec))
-                total += 1
+        stored, n_skip = _store_unchanged(
+            conn, ids, texts, vectors, _current_chronicle_text, store_chronicle_embedding,
+            db_lock=db_lock,
+        )
+        total += stored
+        skipped += n_skip
+        if progress_callback is not None:
+            progress_callback(total)
 
+    if skipped:
+        LOGGER.info("Skipped %d Chronicle entries changed while embedding", skipped)
     LOGGER.info("Embedded %d Chronicle entries", total)
     return total
 
@@ -391,6 +490,7 @@ def embed_memopedia_pages(
     *,
     batch_size: int = 64,
     db_lock: Optional[Any] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> int:
     """Generate and store embeddings for Memopedia pages that don't have them.
 
@@ -400,9 +500,12 @@ def embed_memopedia_pages(
         conn: Database connection.
         embedder: Embedder instance with embed() method.
         batch_size: Batch size for embedding generation.
+        progress_callback: Called after each stored batch with the cumulative
+            number of rows embedded so far (used by the re-embed job's progress).
 
     Returns:
-        Number of pages embedded.
+        Number of pages embedded. Pages whose title or summary changed (or
+        that were deleted) while being embedded are skipped and not counted.
     """
     pages = get_memopedia_pages_without_embeddings(conn)
     if not pages:
@@ -411,18 +514,25 @@ def embed_memopedia_pages(
 
     LOGGER.info("Embedding %d Memopedia pages", len(pages))
     total = 0
+    skipped = 0
 
     for i in range(0, len(pages), batch_size):
         batch = pages[i:i + batch_size]
-        texts = [f"{title}: {summary}" if summary else title
-                 for _, title, summary in batch]
+        ids = [page_id for page_id, _, _ in batch]
+        texts = [_page_embed_text(title, summary) for _, title, summary in batch]
         vectors = embedder.embed(texts, is_query=False)
 
-        with (db_lock or nullcontext()):
-            for (page_id, _, _), vec in zip(batch, vectors):
-                store_memopedia_embedding(conn, page_id, list(vec))
-                total += 1
+        stored, n_skip = _store_unchanged(
+            conn, ids, texts, vectors, _current_page_text, store_memopedia_embedding,
+            db_lock=db_lock,
+        )
+        total += stored
+        skipped += n_skip
+        if progress_callback is not None:
+            progress_callback(total)
 
+    if skipped:
+        LOGGER.info("Skipped %d Memopedia pages changed while embedding", skipped)
     LOGGER.info("Embedded %d Memopedia pages", total)
     return total
 
@@ -433,6 +543,7 @@ def embed_memopedia_fragments(
     *,
     batch_size: int = 64,
     db_lock: Optional[Any] = None,
+    progress_callback: Optional[Callable[[int], None]] = None,
 ) -> int:
     """Generate and store embeddings for Memopedia fragments that don't have them.
 
@@ -440,9 +551,13 @@ def embed_memopedia_fragments(
         conn: Database connection.
         embedder: Embedder instance with embed() method.
         batch_size: Batch size for embedding generation.
+        progress_callback: Called after each stored batch with the cumulative
+            number of rows embedded so far (used by the re-embed job's progress).
 
     Returns:
-        Number of fragments embedded.
+        Number of fragments embedded. Fragments whose text (or parent page
+        title) changed, or that were deleted, while being embedded are
+        skipped and not counted.
     """
     fragments = get_fragments_without_embeddings(conn)
     if not fragments:
@@ -451,22 +566,28 @@ def embed_memopedia_fragments(
 
     LOGGER.info("Embedding %d Memopedia fragments", len(fragments))
     total = 0
+    skipped = 0
 
     for i in range(0, len(fragments), batch_size):
         batch = fragments[i:i + batch_size]
-        # entity_title は親ページ消失 (孤児 Fragment) で None になりうる。
-        # 孤児でも Fragment 本文単体で検索可能にする (LEFT JOIN 化, 2026-07-04)。
+        ids = [frag_id for frag_id, _, _ in batch]
         texts = [
-            f"{entity_title}: {content}" if entity_title else content
+            _fragment_embed_text(content, entity_title)
             for _, content, entity_title in batch
         ]
         vectors = embedder.embed(texts, is_query=False)
 
-        with (db_lock or nullcontext()):
-            for (frag_id, _, _), vec in zip(batch, vectors):
-                store_fragment_embedding(conn, frag_id, list(vec))
-                total += 1
+        stored, n_skip = _store_unchanged(
+            conn, ids, texts, vectors, _current_fragment_text, store_fragment_embedding,
+            db_lock=db_lock,
+        )
+        total += stored
+        skipped += n_skip
+        if progress_callback is not None:
+            progress_callback(total)
 
+    if skipped:
+        LOGGER.info("Skipped %d Memopedia fragments changed while embedding", skipped)
     LOGGER.info("Embedded %d Memopedia fragments", total)
     return total
 
@@ -702,6 +823,7 @@ def unified_recall(
     keywords: Optional[List[str]] = None,
     exclude_message_ids: Optional[set] = None,
     source_allocations: Optional[Dict[str, int]] = None,
+    exclude_keys: Optional[set] = None,
 ) -> List[RecallHit]:
     """Search across Chronicle, Memopedia, Fragments, and Messages using hybrid search.
 
@@ -741,6 +863,12 @@ def unified_recall(
         source_allocations: ソース種別ごとの枠の上書き。``None`` (既定) なら
             ``SOURCE_ALLOCATIONS``。キーが無いソースはグローバルへフォールバック
             する。``focus`` の倍率はこの値に対して掛かる。
+        exclude_keys: ``(source_type, source_id)`` の集合。どのソースでも
+            **収集段階**で除外する (``exclude_message_ids`` と同じ理由 — 選抜後に
+            捨てると枠を食い潰したまま件数だけ減る)。``None`` / 空 (既定) なら
+            何も除外せず、従来の呼び出しと 1 ビットも変わらない。使い手は
+            リアルタイム情報と自動想起を残すモデルの自動想起 (送る列に既に出て
+            いる記憶を外す — docs/intent/persist_realtime_and_recall.md §4.4)。
 
     Returns:
         List of RecallHit sorted by fused score descending.
@@ -773,15 +901,30 @@ def unified_recall(
     excluded_msg_ids: set = (
         {str(m) for m in exclude_message_ids} if exclude_message_ids else set()
     )
+    # どのソースにも効く収集段階の除外 ((source_type, source_id) の名前空間)。
+    excluded_keys: set = (
+        {(str(k[0]), str(k[1])) for k in exclude_keys} if exclude_keys else set()
+    )
 
-    # 拡張引数がひとつでも渡された呼び出しか。embed_score の全件補完はこの経路で
-    # だけ効かせる — 従来の呼び出し (全引数が既定) では返り値も 1 ビット変えない
-    # (auto_recall の OFF 不変条件が「既定呼び出しの挙動は変わらない」を前提に
-    # している。補完自体は意味的にはどの経路でも正しいが、約束を優先する)。
+    def _not_excluded(source_type: str, ids: set) -> set:
+        if not excluded_keys:
+            return ids
+        return {i for i in ids if (source_type, str(i)) not in excluded_keys}
+
+    # 拡張引数 (keywords / exclude_message_ids / source_allocations /
+    # exclude_keys) がひとつでも渡された呼び出しか。embed_score の全件補完は
+    # この経路でだけ効かせる — 従来の呼び出し (全引数が既定) では返り値も
+    # 1 ビット変えない (auto_recall の OFF 不変条件が「既定呼び出しの挙動は
+    # 変わらない」を前提にしている。補完自体は意味的にはどの経路でも正しいが、
+    # 約束を優先する)。exclude_keys だけを渡す呼び出し (リアルタイム情報と
+    # 自動想起を残すモデルで、キーワード抽出が無効な自動想起) も拡張呼び出し
+    # であり、補完しないとキーワードだけで拾われたヒットが embed_score None で
+    # 呼び出し側のしきい値判定に落とされる。
     extended_call = (
         keywords is not None
         or bool(excluded_msg_ids)
         or source_allocations is not None
+        or bool(excluded_keys)
     )
 
     # --- Keyword search ---
@@ -811,7 +954,9 @@ def unified_recall(
                 f"SELECT id FROM arasuji_entries WHERE content LIKE ?{like_escape} AND level = ?",
                 (pattern, chronicle_level),
             )
-            kw_id_sets.append({row[0] for row in cur.fetchall()})
+            kw_id_sets.append(
+                _not_excluded("chronicle", {row[0] for row in cur.fetchall()})
+            )
 
         # Collect all matched IDs and count per-entry matches
         all_chronicle_ids: set[str] = set()
@@ -859,7 +1004,9 @@ def unified_recall(
                 "AND (category IS NULL OR category != 'chronicle')",
                 (pattern, pattern, pattern),
             )
-            kw_id_sets.append({row[0] for row in cur.fetchall()})
+            kw_id_sets.append(
+                _not_excluded("memopedia", {row[0] for row in cur.fetchall()})
+            )
 
         all_memopedia_ids: set[str] = set()
         for ids in kw_id_sets:
@@ -895,7 +1042,9 @@ def unified_recall(
                 f"WHERE f.content LIKE ?{like_escape} AND {_FRAGMENT_VISIBILITY_WHERE}",
                 (pattern,),
             )
-            kw_id_sets.append({row[0] for row in cur.fetchall()})
+            kw_id_sets.append(
+                _not_excluded("fragment", {row[0] for row in cur.fetchall()})
+            )
 
         all_fragment_ids: set[str] = set()
         for ids in kw_id_sets:
@@ -947,7 +1096,7 @@ def unified_recall(
             # 収集段階で除外する (選抜前に外さないと message 枠を食い潰す)。
             if excluded_msg_ids:
                 ids = {i for i in ids if str(i) not in excluded_msg_ids}
-            kw_id_sets.append(ids)
+            kw_id_sets.append(_not_excluded("message", ids))
 
         all_message_ids: set[str] = set()
         for ids in kw_id_sets:
@@ -989,16 +1138,33 @@ def unified_recall(
         # ソース id は "perception:{id}" に接頭辞化する (バッチ id は小さい整数
         # で、素のままだと参照として紛らわしい)。map キーの衝突自体は
         # (source_type, source_id) の名前空間化が防ぐ。
+        # 対象は知覚のまとめだけ — 同じ表に同居する「リアルタイム情報と自動
+        # 想起を残した行」(kind='realtime_and_recall') は知覚ではなく、想起の
+        # 文面は過去の記憶の再提示なので検索結果に出さない
+        # (docs/intent/persist_realtime_and_recall.md §4.3)。
         kw_id_sets = []
         try:
+            # 旧 DB (kind 列なし) をここで読むと「台帳なし」と同じ顔で検索が
+            # 空になる — 列の移行の一枚を先に通す。
+            from sai_memory.perception_buffer import ensure_perception_batch_columns
+            ensure_perception_batch_columns(conn)
             for pattern in like_patterns:
                 cur = conn.execute(
                     "SELECT id FROM perception_batches WHERE rendered_text LIKE ?"
-                    f"{like_escape}",
+                    f"{like_escape} AND kind = 'perception'",
                     (pattern,),
                 )
-                kw_id_sets.append({f"perception:{row[0]}" for row in cur.fetchall()})
-        except sqlite3.OperationalError:
+                # 除外は他のソースと同じく候補を集める段階で効かせる
+                # (採用した後で捨てると、枠が除外対象で埋まったまま件数だけ減る)。
+                kw_id_sets.append(_not_excluded(
+                    "perception", {f"perception:{row[0]}" for row in cur.fetchall()},
+                ))
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                LOGGER.warning(
+                    "[unified_recall] perception keyword search failed; "
+                    "searching without perceptions this time", exc_info=True,
+                )
             kw_id_sets = []  # perception_batches の無い DB (旧世代)
 
         all_batch_ids: set[str] = set()
@@ -1057,6 +1223,8 @@ def unified_recall(
         for entry_id, vec, level, content, start_time, end_time, msg_count in corpus:
             if len(vec) != vector_dim:
                 continue
+            if excluded_keys and ("chronicle", str(entry_id)) in excluded_keys:
+                continue
             v = np.array(vec, dtype=np.float32)
             score = _cosine_sim(q, v)
             embed_all_scores[("chronicle", entry_id)] = score
@@ -1084,6 +1252,8 @@ def unified_recall(
         for page_id, vec, title, summary, category, short_id in corpus:
             if len(vec) != vector_dim:
                 continue
+            if excluded_keys and ("memopedia", str(page_id)) in excluded_keys:
+                continue
             v = np.array(vec, dtype=np.float32)
             score = _cosine_sim(q, v)
             embed_all_scores[("memopedia", page_id)] = score
@@ -1107,6 +1277,8 @@ def unified_recall(
         scored = []
         for frag_id, vec, content, entity_id, chronicle_entry_id, source_date, etitle, ecat, eshort in corpus:
             if len(vec) != vector_dim:
+                continue
+            if excluded_keys and ("fragment", str(frag_id)) in excluded_keys:
                 continue
             v = np.array(vec, dtype=np.float32)
             score = _cosine_sim(q, v)
@@ -1139,6 +1311,8 @@ def unified_recall(
                 continue
             # 収集段階で除外する (キーワード経路と同じ境界)。
             if excluded_msg_ids and str(msg_id) in excluded_msg_ids:
+                continue
+            if excluded_keys and ("message", str(msg_id)) in excluded_keys:
                 continue
             v = np.array(vec, dtype=np.float32)
             score = _cosine_sim(q, v)

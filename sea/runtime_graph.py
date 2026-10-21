@@ -160,6 +160,36 @@ def compile_with_langgraph(
     else:
         activity_trace = []
 
+    # リアルタイムスペルの実行済みの状態と、その結果 (本文と画像) の器
+    # (docs/intent/persist_realtime_and_recall.md §4.1)。**リアルタイム情報と
+    # 自動想起を残すモデルの列だけ**で使う。器は Pulse に一つで、PulseContext
+    # (``realtime_spells_once``) に置く — 子の入口 (SUBPLAY ノード・run_playbook
+    # スペル・spell_args_decider・TOOL ノードからの run_playbook) がどれでも、
+    # 親の state にある PulseContext から同じ器に届く。同じ Pulse の中で一度だけ
+    # 実行し、実行していない側 (親・子、line='main' / 'sub'、実行順は問わない) の
+    # 最初の LLM ノードは、器の結果を自分の列のそのターンのまとまりに入れて
+    # 届ける (sea/runtime_llm の _deliver_realtime_spell_result) — 実行済みの印
+    # だけを共有すると、実行していない側の送信から結果が消える (Codex 二巡目 #3)。
+    # 列ごとの状態 (残すモデルの列か・結果をもう持っているか) は、呼び出し元の
+    # 列から parent の ``_persist_realtime_and_recall`` / ``_realtime_spells_executed``
+    # で受け取る (sea/runtime_context.realtime_spell_handover)。
+    # OFF のモデルの列は器を使わず、実行の仕方は今までどおり (Playbook ごとに
+    # 自分で実行する)。
+    persists_turn_block = bool(parent.get("_persist_realtime_and_recall", False))
+    realtime_spells_once: Optional[Dict[str, Any]] = None
+    if persists_turn_block:
+        realtime_spells_once = getattr(
+            parent.get("_pulse_context"), "realtime_spells_once", None,
+        )
+        if not isinstance(realtime_spells_once, dict):
+            realtime_spells_once = parent.get("_realtime_spells_once")
+        if not isinstance(realtime_spells_once, dict):
+            realtime_spells_once = {"executed": False, "result": None}
+    # 親の列をそのまま写して動くサブライン (line='sub' の分岐 —
+    # runtime_runner.run_playbook) は、親の列が既に結果を持っていれば (親が
+    # 実行したか届けを受けた後なら) 写しにも入っているので、もう届けない。
+    forked_sub_line = line == "sub" and bool(parent.get("_messages"))
+
     # Inherit cancellation token from parent state if not explicitly provided
     effective_cancellation_token = cancellation_token or parent.get("_cancellation_token")
 
@@ -189,6 +219,14 @@ def compile_with_langgraph(
         pulse_ctx.model_binding = _model_binding
     if _model_binding is None:
         _model_binding = getattr(pulse_ctx, "model_binding", None)
+    # リアルタイムスペルの器 (上) も、この実行の PulseContext に載せる。分離した
+    # PulseContext を作る子 (subagent / line='sub' の SUBPLAY) の中から唱える
+    # run_playbook にも、同じ Pulse の器が届くようにする (model_binding と同じ形)。
+    if (
+        realtime_spells_once is not None
+        and getattr(pulse_ctx, "realtime_spells_once", None) is None
+    ):
+        pulse_ctx.realtime_spells_once = realtime_spells_once
 
     # S4 (thread push/pop): この graph 実行の入口での thread スタック深さを記録。
     # 実行中に push された Stelis/subagent 切替は正常系ではノード自身が pop する。
@@ -264,6 +302,27 @@ def compile_with_langgraph(
         # この値だけを使う (persona 属性フォールバックは廃止)。サブライン
         # (line='sub') は親の prefix をコピーするため親の値をそのまま継承する。
         "_prefix_anchor_id": parent.get("_prefix_anchor_id"),
+        # リアルタイム情報と自動想起を残すモデルの送る列か (_prepare_context が
+        # 組んだときのモデルで判定した値。docs/intent/persist_realtime_and_recall.md)。
+        # サブライン (line='sub') は親の列をコピーするので親の値をそのまま継承する。
+        "_persist_realtime_and_recall": bool(
+            parent.get("_persist_realtime_and_recall", False)
+        ),
+        # リアルタイムスペルの器 (上 — 残すモデルの列だけ) と、「この列は
+        # リアルタイムスペルの結果をもう持っている」の印。印は Playbook ごとに
+        # 新しく始まる (OFF のモデルでは今までどおり子も自分で実行する)。
+        # 残すモデルで親の列を写したサブラインだけは、親の印を引き継ぐ。
+        "_realtime_spells_once": realtime_spells_once,
+        # ターンの最初の LLM 呼び出しの直前に、送る列の後ろ側を記録から読み直して
+        # 揃える材料 (sea/runtime_context.FirstSendRecordSource — run_playbook が
+        # トップレベルの Pulse でだけ parent に置く)。使うのは残すパルス
+        # (_pulse_type が user / auto / schedule) の列だけ
+        # (sea/runtime_llm._align_first_send_with_record)。
+        "_first_send_record_source": parent.get("_first_send_record_source"),
+        "_realtime_spells_executed": bool(
+            persists_turn_block and forked_sub_line
+            and parent.get("_realtime_spells_executed", False)
+        ),
         # 前駆刻印の材料 (sea/message_stamp.py): _prepare_context が実際に
         # プロンプトへ組み込んだ履歴メッセージの ID 列。生成メッセージの
         # metadata へ「見ていた最後のメッセージ」として刻む。サブライン

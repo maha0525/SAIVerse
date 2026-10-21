@@ -12,14 +12,25 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from database.models import Playbook as PlaybookModel
+from llm_clients.base import usage_event_time
 from llm_clients.exceptions import LLMError
+from llm_clients.output_phases import (
+    OUTPUT_PHASES_METADATA_KEY,
+    coerce_output_phases,
+    output_phases_for_text,
+)
 from saiverse.logging_config import log_sea_trace
 from saiverse.model_configs import get_model_parameter_defaults
 from saiverse.usage_tracker import get_usage_tracker
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 from sea.langgraph_runner import compile_playbook
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
-from sea.message_stamp import build_generation_stamp, stamp_generation_metadata
+from sea.message_stamp import (
+    OUTPUT_PHASES_STATE_KEY,
+    attach_stored_id_to_unstored_reply,
+    build_generation_stamp,
+    stamp_generation_metadata,
+)
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 from sea.pulse_context import ExecutionContext, default_lightweight_model, resolve_execution_context
 from sea.runtime_context import WindowFloorUnmetError
@@ -1373,6 +1384,9 @@ class SEARuntime:
             text = state.get("last") or ""
             reasoning_text = state.pop("_reasoning_text", "")
             reasoning_details_val = state.pop("_reasoning_details", None)
+            # _output_phases is left in state: SAY writes only the building
+            # history and does not change state["last"], so a later SPEAK /
+            # MEMORIZE / THINK that stores the same text still needs the split.
             auto_recall_text = state.pop("_auto_recall_text", None)
             pulse_id = state.get("_pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
@@ -1445,12 +1459,23 @@ class SEARuntime:
             event_callback({"type": "status", "content": f"{playbook.name} / think", "playbook": playbook.name, "node": "think"})
         text = state.get("last") or ""
         pulse_id = state.get("_pulse_id") or str(uuid.uuid4())
+        # The per-message split of the previous LLM call's response, kept only
+        # when its join equals the stored text. Read, not consumed: THINK
+        # leaves _reasoning_details in state too, and does not change
+        # state["last"], so a later node storing the same text needs it.
+        think_metadata: Optional[Dict[str, Any]] = None
+        think_phases = output_phases_for_text(state.get(OUTPUT_PHASES_STATE_KEY), text)
+        if think_phases is not None:
+            think_metadata = {OUTPUT_PHASES_METADATA_KEY: think_phases}
         # 書き込み時の機械刻印 (v3 §7.1)。独白も LLM が書いた本人の言葉で、
         # memory.db に 1 行残る = 生成メッセージの永続点。
-        self._emit_think(
+        stored_id = self._emit_think(
             persona, pulse_id, text,
-            extra_metadata=stamp_generation_metadata(None, state),
+            extra_metadata=stamp_generation_metadata(think_metadata, state),
         )
+        # 前の LLM ノードが記憶に保存しなかった返事がこの state["last"] なら、
+        # 書いた行の id をその返事の dict に載せる (sea/message_stamp.py)。
+        attach_stored_id_to_unstored_reply(state, stored_id)
         if outputs is not None:
             outputs.append(text)
         if event_callback:
@@ -1971,6 +1996,27 @@ class SEARuntime:
         if resolved_aspect:
             msg_metadata["aspect"] = resolved_aspect
 
+        # -- 応答のメッセージごとの分け方 (output_phases) --
+        # 保存する本文と結合が一致するときだけ残す (送り返す側の
+        # llm_clients.openai_codex._build_input が同じ一致を条件にする)。
+        # 層1マーカーを剥がした回は、各メッセージの本文から同じく剥がして
+        # 合わせ直す。合わなければ落とす — 付いていないのと同じ扱いになる。
+        if OUTPUT_PHASES_METADATA_KEY in msg_metadata:
+            _phases: Any = None
+            if (role or "assistant") == "assistant":
+                _phases = coerce_output_phases(msg_metadata[OUTPUT_PHASES_METADATA_KEY])
+                if _phases is not None and mark_spans:
+                    from saiverse.marker_parser import extract_marks
+                    _phases = [
+                        {"phase": entry["phase"], "text": extract_marks(entry["text"])[0]}
+                        for entry in _phases
+                    ]
+                _phases = output_phases_for_text(_phases, text)
+            if _phases is None:
+                msg_metadata.pop(OUTPUT_PHASES_METADATA_KEY, None)
+            else:
+                msg_metadata[OUTPUT_PHASES_METADATA_KEY] = _phases
+
         # -- 書き込み時の機械刻印 (v3 §7.1): 前駆刻印 + トークン三つ組 --
         # 生成 (= LLM が書いたペルソナ本人の言葉) にだけ刻む。材料が無ければ
         # 何も足さない — 提示ゼロの生成に前駆は無く、使用量を返さないコールに
@@ -2118,8 +2164,9 @@ class SEARuntime:
             final_sub_seq=final_sub_seq, final_voice_text=final_voice_text,
         )
 
-    def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None) -> None:
-        self._emitters.emit_think(persona, pulse_id, text, record_history=record_history, extra_metadata=extra_metadata)
+    def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        # 戻り値は記憶 (SAIMemory) に書けた行の id。書けなければ None。
+        return self._emitters.emit_think(persona, pulse_id, text, record_history=record_history, extra_metadata=extra_metadata)
 
     # ---------------- history metabolism -----------------
 
@@ -2341,6 +2388,7 @@ class SEARuntime:
                     cached_tokens=usage.cached_tokens,
                     cache_write_tokens=usage.cache_write_tokens,
                     cache_ttl=usage.cache_ttl,
+                    timestamp=usage_event_time(usage),
                     persona_id=persona_id,
                     building_id=building_id,
                     node_type="cache_keepalive",
@@ -2559,10 +2607,29 @@ class SEARuntime:
                 original_content = msg.get("content", "")
                 items_str = "、".join(attachment_notes)
                 note = f"\n<system>添付アイテム作成: {items_str}</system>"
-                enriched_msg = {**msg, "content": original_content + note}
+                # 足した文はユーザーが言った言葉ではないので、足す前の本文を
+                # 控えておく。発言の言葉を読む側 (自動想起) はそれを読む
+                # (文字列の形から機構の文を見分けない — ユーザーが同じ形を書いた
+                # ときや、名前に改行が入ったときに取り違える)。
+                from saiverse.media_utils import SAID_CONTENT_KEY
+
+                enriched_msg = {
+                    **msg,
+                    "content": original_content + note,
+                    "metadata": {**metadata, SAID_CONTENT_KEY: original_content},
+                }
                 enriched.append(enriched_msg)
             else:
-                enriched.append(msg)
+                from saiverse.media_utils import SAID_CONTENT_KEY
+
+                if SAID_CONTENT_KEY in metadata:
+                    # 控えはここで足した文の分だけを表す。ここで足していない
+                    # 発言に控えがあるなら、記録に紛れ込んだもの (送り手が書いた
+                    # 等) なので、読み手へ渡す前に外す。
+                    stripped = {k: v for k, v in metadata.items() if k != SAID_CONTENT_KEY}
+                    enriched.append({**msg, "metadata": stripped})
+                else:
+                    enriched.append(msg)
 
         return enriched
 

@@ -13,13 +13,24 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
+from llm_clients.base import usage_event_time
 from llm_clients.exceptions import EmptyResponseError, LLMError, ModelUnavailableError
+from llm_clients.output_phases import (
+    OUTPUT_PHASES_METADATA_KEY,
+    align_output_phases_to_spell_round,
+    coerce_output_phases,
+    output_phases_for_text,
+)
+from sai_memory.memory.storage import presented_system_record_content
 from sea.beat_gate import BeatGateClosedError
 from sea.cancellation import ExecutionCancelledException
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
 from sea.message_stamp import (
     append_presented_message_id,
+    clear_unstored_reply,
+    note_unstored_reply,
     record_call_tokens,
+    sync_presented_message_ids_with_sent,
 )
 from sea.runtime_utils import _format, _is_llm_streaming_enabled, event_building_id
 from saiverse.logging_config import log_sea_trace
@@ -70,6 +81,30 @@ INTERRUPTED_METADATA_KEY = "_interrupted"
 #: この形のまま Beat が死ぬと「建物にはあるのに本人が覚えていない」発言になるので、
 #: 出口の補填 (`_backfill_memory_on_beat_death`) が発火条件と本文の両方にこれを使う。
 BEAT_BODY_UNMEMORIZED_KEY = "_beat_body_unmemorized_text"
+
+#: 「この Beat の本文を記憶へ書いた行の id」を ``_finalize_beat`` へ渡す state キー。
+#:
+#: ``_beat_memorized`` (書いたかどうか) と同じ場所で立てる (:func:`_mark_beat_memorized`)。
+#: ``_finalize_beat`` は、送る `messages`に足した返事の dict にこの id を ``"id"`` として載せる —
+#: 送る `messages`で記録の行 id を持つ dict が「記録から来た行」の印で、前駆刻印の材料の
+#: 作り直し (sea/message_stamp.py の ``sync_presented_message_ids_with_sent``) が
+#: それを数える。載せないと「親が返事 A を保存 → 子 Playbook → 親が返事 B」で
+#: B の前駆が A を飛ばして古い履歴の行を指す。LLM ノードの入り口で倒す (前の
+#: ノードの id をこのノードの返事に載せない)。
+BEAT_MEMORY_ID_KEY = "_beat_memory_id"
+
+
+def _mark_beat_memorized(state: Dict[str, Any], stored_message_id: Any) -> None:
+    """「この Beat の本文はもう記憶に書かれた」の印と、書いた行の id を立てる。
+
+    印 (``_beat_memorized``) は二重書きを止める鍵、id は送る `messages`の返事に載せる値。
+    id として受け取るのは空でない文字列だけ (``_store_memory`` を
+    ``return_message_id`` なしで呼ぶ経路やテストの代役は ``True`` を返す)。
+    """
+    state["_beat_memorized"] = True
+    if isinstance(stored_message_id, str) and stored_message_id:
+        state[BEAT_MEMORY_ID_KEY] = stored_message_id
+
 
 #: 「発言が世界に保存された」ことを運ぶイベントの型と、その唯一の発火口。
 #: 定義と発火条件は sea/runtime_emitters.py に一本化してある — 画面イベント
@@ -225,6 +260,43 @@ def _withdraw_if_nothing_was_said(
     )
 
 
+def _continuous_cache_kwargs(state: Any, persona: Any, building_id: Optional[str]) -> Dict[str, Any]:
+    """継続キャッシュ (高速応答モード) の対象の呼び出しなら、その印の kwarg を返す。
+
+    対象は「ユーザーの発言に返事をする Pulse (``_pulse_type == "user"``) の、会話の
+    ライン上の LLM 呼び出し」だけ (docs/intent/cache_lifecycle_control.md §3.5)。
+    schedule / ペルソナ同士 / 自律 / メタ判断の Pulse、サブライン (WORKER) は含めない
+    — CONVERSATION アスペクトは schedule も含むので、アスペクトだけでは判定しない。
+
+    LLM クライアントの側では、その呼び出しが何のためのものかを判別できないので、
+    SEA から ``continuous_cache={"persona_id", "building_id"}`` で伝える (境目の位置は
+    履歴のメッセージの内部印で伝わる。``runtime_context.mark_cache_boundary``)。
+    Gemini 以外のクライアントは未知の kwarg として無視する。
+    """
+    if not isinstance(state, dict) or state.get("_pulse_type") != "user":
+        return {}
+    if state.get("_force_lightweight_model"):
+        # サブライン (run_playbook line='sub') は返事の本体ではない。
+        return {}
+    from sea.pulse_context import Aspect
+    pulse_ctx = state.get("_pulse_context")
+    current_line = None
+    if pulse_ctx is not None and hasattr(pulse_ctx, "current_line"):
+        try:
+            current_line = pulse_ctx.current_line()
+        except Exception:
+            current_line = None
+    aspect = getattr(current_line, "aspect", None) if current_line is not None else None
+    if aspect is not None and aspect != Aspect.CONVERSATION:
+        return {}
+    return {
+        "continuous_cache": {
+            "persona_id": getattr(persona, "persona_id", None),
+            "building_id": building_id,
+        }
+    }
+
+
 def _maybe_record_cache_storage(usage, persona_id: str | None, building_id: str | None) -> None:
     """UsageInfo に cache_storage 情報があれば独立レコードで計上する。"""
     if not usage or not getattr(usage, "cache_storage_tokens", 0):
@@ -233,6 +305,7 @@ def _maybe_record_cache_storage(usage, persona_id: str | None, building_id: str 
         model_id=usage.model,
         cached_tokens=usage.cache_storage_tokens,
         ttl_seconds=usage.cache_storage_ttl_seconds,
+        timestamp=usage_event_time(usage, cache_storage=True),
         persona_id=persona_id,
         building_id=building_id,
     )
@@ -287,6 +360,9 @@ class BeatExecution:
     schema_consumed: bool = False
     reasoning_text: str = ""
     reasoning_details: Any = None
+    output_phases: Any = None
+    """``continuation`` を作った呼び出しが報告したメッセージごとの分け方
+    (llm_clients.output_phases)。reasoning と同じく state から読み取る。"""
 
     @classmethod
     def from_node_locals(
@@ -322,6 +398,7 @@ class BeatExecution:
             schema_consumed=schema_consumed,
             reasoning_text=state.get("_reasoning_text", ""),
             reasoning_details=state.get("_reasoning_details"),
+            output_phases=state.get("_output_phases"),
         )
 
 
@@ -348,6 +425,11 @@ def _record_llm_usage(
 
     ``debug_log`` は pipeline streaming 経路だけが出していた ``[DEBUG]`` 行を
     再現するためのフラグ。経路ごとのログ差は Phase 0 では変えない。
+
+    この関数は生成の成否と無関係に呼ばれる (空応答のやり直しの打ち切り・本文の
+    無い中断・ユーザー停止の後にも来る) ので、成功の後にだけ行う処理をここに
+    置かない — そのターンのリアルタイム情報と自動想起の保存は
+    :func:`_note_generation_completed` (生成が正常に完了したと確かめた地点)。
     """
     usage = llm_client.consume_usage()
     if debug_log:
@@ -362,6 +444,7 @@ def _record_llm_usage(
         return None
 
     persona_id = getattr(persona, "persona_id", None)
+    event_time = usage_event_time(usage)
     get_usage_tracker().record_usage(
         model_id=usage.model,
         input_tokens=usage.input_tokens,
@@ -369,6 +452,7 @@ def _record_llm_usage(
         cached_tokens=usage.cached_tokens,
         cache_write_tokens=usage.cache_write_tokens,
         cache_ttl=usage.cache_ttl,
+        timestamp=event_time,
         persona_id=persona_id,
         building_id=building_id,
         node_type=node_type,
@@ -387,6 +471,7 @@ def _record_llm_usage(
     cost = calculate_cost(
         usage.model, usage.input_tokens, usage.output_tokens,
         usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl,
+        at=event_time,
     )
     llm_usage_metadata: Dict[str, Any] = {
         "model": usage.model,
@@ -406,6 +491,444 @@ def _record_llm_usage(
         persona, usage, anchor_id=state.get("_prefix_anchor_id"),
     )
     return llm_usage_metadata
+
+
+#: そのターンのまとまりを残す Pulse の種類 (docs/intent/persist_realtime_and_recall.md
+#: §4.2・不変条件 4)。それ以外 — keepalive・Metabolism の前の採取 (スルース)・
+#: 作業セッション・tell・判断のパルス、``_pulse_type`` を持たない入れ子の
+#: Playbook — は、会話の流れとは別に組んだ列で一回ずつ呼ぶ処理で、その列の続きが
+#: 次のターンに来るわけではないので残さない。
+PERSIST_REALTIME_AND_RECALL_PULSE_TYPES = frozenset({"user", "auto", "schedule"})
+
+
+#: state の印: この列でターンの最初の LLM 呼び出しをもう送ったか (リアルタイム
+#: 情報と自動想起を残すモデルの、残すパルスの列だけで立てる)。
+TURN_FIRST_SEND_DONE_KEY = "_turn_first_send_done"
+#: state の印: この列でターンの最初の送信を記録に揃えられたか
+#: (:func:`_align_first_send_with_record` が成功したときだけ立てる)。
+FIRST_SEND_ALIGNED_KEY = "_turn_first_send_aligned"
+
+
+def records_additions_before_first_send(state: Any) -> bool:
+    """送る列に足すメッセージを、記録に残る形で足すべき時点か。
+
+    リアルタイム情報と自動想起を残すモデルの、残すパルス (user / auto /
+    schedule) の列で、ターンの最初の LLM 呼び出しをまだ送っていない間だけ真
+    (docs/intent/persist_realtime_and_recall.md 不変条件 1)。この間に送る列へ
+    足したものは最初の呼び出しで送られ、次のターンには記録から組み直される
+    ので、記録に残さないとその位置が返事に置き換わって前方一致が割れる。
+    最初の呼び出しより後に足すもの (ターン内の往復) は不変条件 1 の外。
+    事前スペルの結果は全モデル・全パルスで記録に残る (それ以前からの扱い)。
+    これを使うのは、それ以外に最初の呼び出しの前に足しうるもの (TOOL ノードの
+    結果 — sea/runtime_engine.lg_tool_node) と、最初の送信の直前に送る列を
+    記録に揃える一点 (:func:`_align_first_send_with_record`)。OFF のモデルの列
+    では常に偽。
+    """
+    return (
+        isinstance(state, dict)
+        and bool(state.get("_persist_realtime_and_recall"))
+        and state.get("_pulse_type") in PERSIST_REALTIME_AND_RECALL_PULSE_TYPES
+        and not state.get(TURN_FIRST_SEND_DONE_KEY)
+    )
+
+
+def _align_first_send_with_record(messages: List[Any], state: Any) -> None:
+    """ターンの最初の LLM 呼び出しを送る直前に、送る列の後ろ側を記録に揃えて検査する。
+
+    docs/intent/persist_realtime_and_recall.md §5「最初の呼び出しの前に足すもの」
+    「機械検査」。:func:`records_additions_before_first_send` が真の列 (ON の
+    モデルの残すパルスで、まだ最初の呼び出しを送っていない) でだけ、一度だけ
+    行い、以後は送った印を立てる。OFF のモデルの列と入れ子の Playbook
+    (``_pulse_type`` なし) では何もしない。
+
+    中身は :func:`sea.runtime_context.align_first_send_with_record`:
+    送る列の「最後の記録済みの発言 (境界) より後ろ」を、次のターンの
+    prepare_context と同じ取り出し・同じ変換で記録から読み直した並びに置き換え
+    (記録に残らないそのターンのまとまりなどはその後ろ)、揃えた後の並びを読み
+    直した並びと比べる。最初の送信の前に記録に書かれる行 (事前スペルの結果・
+    TOOL の結果・ツールの中で書かれる記録・MEMORIZE・今後足されるもの) を
+    差し込み口ごとに送る列へ同期する形は、付け漏れが巡ごとに出た (Codex
+    四巡目〜六巡目) ので、記録そのものから並べ直す一点にした。
+
+    食い違い (記録に残らない差し込み・送る列に無い記録の行) は役割と先頭の
+    文字を WARN で出す (送信は止めない)。揃えられなかった (材料が無い・読み
+    直しの失敗・境界が列に無い) ときも WARN を出し、列は変えない。
+    """
+    if not records_additions_before_first_send(state):
+        return
+    state[TURN_FIRST_SEND_DONE_KEY] = True
+    try:
+        from sea.runtime_context import (
+            FIRST_SEND_RECORD_SOURCE_KEY,
+            NOT_KEPT,
+            align_first_send_with_record,
+        )
+
+        mismatches = align_first_send_with_record(
+            messages, state.get("_messages"),
+            state.get(FIRST_SEND_RECORD_SOURCE_KEY),
+        )
+    except Exception:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] could not align the first send "
+            "of this turn with the record", exc_info=True,
+        )
+        return
+    if mismatches is None:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] could not align the first send "
+            "of this turn with the record (no source / re-read failed / boundary "
+            "not in the list); the next turn's list may not start with this one "
+            "(pulse=%s)", state.get("_pulse_id"),
+        )
+        return
+    # 揃えられた列では、以後の送信ごとに前駆刻印の材料を実際に送る列から作り
+    # 直す (:func:`_refresh_presented_ids_for_aligned_send`)。
+    state[FIRST_SEND_ALIGNED_KEY] = True
+    for kind, msg in mismatches:
+        if kind == NOT_KEPT:
+            LOGGER.warning(
+                "[sea][persist_realtime_and_recall] the first send of this turn "
+                "carries a message that is not kept, so the next turn's list will "
+                "not start with this one (role=%s head=%r pulse=%s)",
+                msg.get("role"), str(msg.get("content") or "")[:80],
+                state.get("_pulse_id"),
+            )
+        else:
+            LOGGER.warning(
+                "[sea][persist_realtime_and_recall] the record has a row that the "
+                "first send of this turn does not carry at that position, so the "
+                "next turn's list will not start with this one (role=%s head=%r "
+                "pulse=%s)",
+                msg.get("role"), str(msg.get("content") or "")[:80],
+                state.get("_pulse_id"),
+            )
+
+
+def _refresh_presented_ids_for_aligned_send(messages: List[Any], state: Any) -> None:
+    """前駆刻印の材料 (``_presented_message_ids``) を、いま送る列から作り直す。
+
+    persist_realtime_and_recall.md §5。リアルタイム情報と自動想起を残すモデル
+    の、ターンの最初の送信を記録に揃えられたトップレベルの列
+    (:data:`FIRST_SEND_ALIGNED_KEY`) でだけ、送信のたびに行う。返事の
+    ``predecessor_message_id`` は「その生成が実際に見ていた最後の記録の行」
+    なので、材料は送る列そのものから取る。
+
+    - 揃えで送る列に入った行 (事前スペルの結果・TOOL の結果・MEMORIZE・状況
+      変化の記録) を返事は実際に見ているので、組成時点の材料では足りない
+      (Codex 七巡目)。
+    - 子の Playbook の中継 (sea/runtime_nodes.lg_subplay_node) は、親の
+      ``state["last"]`` に入った子の本文に親の前駆を刻まないよう材料を落とす。
+      その後の親の生成は親の送る列を見ているので、その列から作り直す
+      (Codex 七巡目)。
+    - 保存に成功した返事とスペルの周の発言は、モデルの設定に関係なく、送る列の
+      その行の dict に記録の行 id を ``"id"`` として持っている (``_finalize_beat``
+      と ``_run_spell_loop`` が載せる)。だから作り直した材料が保存済みの返事を
+      飛ばして古い行を指すことはない (Codex 八巡目)。
+
+    揃えが走らなかった列 (OFF のモデル・入れ子の Playbook・揃えに失敗した列) は、
+    LLM ノードの最初の送信の直前の
+    :func:`sea.message_stamp.sync_presented_message_ids_with_sent` と、スペルの
+    周の :func:`sea.message_stamp.append_presented_message_id` だけで材料を整える。
+    どちらの経路でも材料の末尾 (``predecessor_message_id`` になる値) は、送る列で
+    記録の行 id を持つ最後のもの。
+    """
+    if not isinstance(state, dict) or not state.get(FIRST_SEND_ALIGNED_KEY):
+        return
+    from sea.message_stamp import replace_presented_message_ids
+    from sea.runtime_context import sent_message_ids
+
+    replace_presented_message_ids(state, sent_message_ids(messages))
+
+
+def _freeze_turn_block_before_send(messages: Any, state: Any = None) -> None:
+    """LLM へ送る直前の一点: そのターンのまとまりを固定して「保存待ち」にする。
+
+    生成の全経路 (全文一括・ストリーミング・tools 付き・構造化出力・スペルの
+    繰り返し) の送信の直前で呼ぶ。中身は
+    :func:`sea.runtime_context.freeze_turn_realtime_and_recall_for_send`
+    (初めて送るときだけ文面・画像・境界を写し取り、以後まとまりは不変)。
+    ターンの最初の送信では、その前に送る列の後ろ側を記録に揃えて検査する
+    (:func:`_align_first_send_with_record`)。揃えるとそのターンのまとまりが
+    記録済みの行の後ろへ移るので、固定 (位置を決める発言の写し取り) より先に
+    行う。失敗で LLM の経路を止めない。
+    """
+    if not isinstance(messages, list):
+        return
+    _align_first_send_with_record(messages, state)
+    try:
+        _refresh_presented_ids_for_aligned_send(messages, state)
+    except Exception:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] could not rebuild the predecessor "
+            "material from the list being sent", exc_info=True,
+        )
+    try:
+        from sea.runtime_context import freeze_turn_realtime_and_recall_for_send
+
+        freeze_turn_realtime_and_recall_for_send(messages)
+    except Exception:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] could not freeze this turn's block "
+            "before sending", exc_info=True,
+        )
+
+
+def attach_output_phases(message: Dict[str, Any], output_phases: Any) -> None:
+    """Put ``output_phases`` on an assistant message that a later call will send.
+
+    The stored row of a reply keeps ``metadata["output_phases"]`` when the list
+    joins to the stored text, and the next Pulse restores that row and sends it
+    split by phase (llm_clients.openai_codex._build_input). An assistant message
+    for the same reply that a later call of the same Pulse sends must carry the
+    same list; otherwise that call sends the reply as one message and the request
+    prefix differs from the next Pulse's (docs/issues/codex_output_phase_passback.md).
+
+    The list is attached only when it joins to the message's own ``content``.
+    Other ``metadata`` keys are kept.
+    """
+    phases = output_phases_for_text(output_phases, message.get("content"))
+    if phases is None:
+        return
+    metadata = message.get("metadata")
+    merged: Dict[str, Any] = dict(metadata) if isinstance(metadata, dict) else {}
+    merged[OUTPUT_PHASES_METADATA_KEY] = phases
+    message["metadata"] = merged
+
+
+def _round_message_for_next_call(
+    state: Any, assistant_content: str, output_phases: Any = None,
+) -> Dict[str, Any]:
+    """スペルの繰り返しで、この周の発言を次の呼び出しの列へ積む形。
+
+    既定は今までどおり assistant ロールの発言のまま。リアルタイム情報と自動想起を
+    残すモデルの列で、この周の発言が自律 (AUTONOMOUS アスペクト) のラインの
+    ものなら、次のターンの履歴の復元 (:func:`sea.runtime_context.
+    _reframe_autonomous_messages` — 自律の発言を user ロールの自律記録に変える)
+    と同じロール・本文に正規化する (Codex 二巡目 #4)。そうしないと、このターンの
+    最後の呼び出しの列と次のターンの最初の呼び出しの列で、この周の発言の形が
+    違い、そこから先の前方一致が割れる。これは往復の分の一致を増やす直しで、
+    不変条件 1 (ターンの最初の呼び出しどうしの一致) の外 — 自律の通常のノード間や
+    native tool の往復は揃えていない (docs/issues/
+    in_pulse_message_forms_differ_from_restored_history.md)。
+
+    記録に保存する元の発言は変えない (_store_memory には assistant_content を
+    そのまま渡す)。アスペクトは _store_memory が記録に刻むのと同じ出所
+    (PulseContext の今のライン) から読む。OFF のモデルの列は変えない
+    (不変条件 2)。
+
+    ``output_phases``: この周の本文 (``assistant_content``) に合わせ直した
+    メッセージごとの分け方。assistant ロールのまま積む発言にだけ付け、記録に
+    保存する発言と同じ形で次の呼び出しへ送らせる
+    (docs/issues/codex_output_phase_passback.md)。
+    """
+    message: Dict[str, Any] = {"role": "assistant", "content": assistant_content}
+    if output_phases:
+        message["metadata"] = {OUTPUT_PHASES_METADATA_KEY: output_phases}
+    if not isinstance(state, dict) or not state.get("_persist_realtime_and_recall"):
+        return message
+    pulse_ctx = state.get("_pulse_context")
+    try:
+        aspect = pulse_ctx.current_line_metadata().get("aspect") if pulse_ctx else None
+    except AttributeError:
+        aspect = None
+    if aspect != "autonomous":
+        return message
+    message = {"role": "assistant", "content": assistant_content}
+    from sea.runtime_context import _reframe_autonomous_messages
+
+    message["metadata"] = {"aspect": aspect}
+    return _reframe_autonomous_messages([message])[0]
+
+
+def _note_generation_completed(runtime: Any, persona: Any, state: Any) -> None:
+    """生成が正常に完了した (本文または tool call を得た) と確かめた地点の一点。
+
+    LLM ノードの全生成経路 (全文一括・ストリーミング・tools 付き・構造化出力・
+    スペルの繰り返し) が、成功を確かめた後にここを呼ぶ。空応答のやり直しの
+    打ち切り・本文の無い中断・ユーザー停止・例外ではここへ来ない
+    (使用量の記録 :func:`_record_llm_usage` はそれらの後にも来るので、成功の
+    後にだけ行う処理はここへ寄せる)。
+
+    いまここで行うのは、そのターンのリアルタイム情報と自動想起の保存
+    (docs/intent/persist_realtime_and_recall.md §4.2)。
+
+    停止の確認もこの一点で行う (Codex 二巡目 #2)。全文一括の経路
+    (通常・tools 付き・構造化出力・スペルの繰り返し) は、生成の途中で止められても
+    応答を受け取り終えてから戻ってくるので、本文があることだけでは「止められて
+    いない」ことにならない。ユーザーが止めていたら (その経路が参照する停止の印 =
+    ``state["_cancellation_token"]``。ストリーミングの経路の停止もこの印から
+    読む) 正常な完了とは数えず、保存も保存の書き直しもしない
+    (:func:`_generation_was_stopped`)。印を読むのは、保存待ちのまとまりがあって
+    実際に書く直前だけ — 書くものが無い生成 (OFF のモデル・保存済みのターン) で
+    停止の印を読みに行くと、停止の評価点が増えて OFF のモデルの止まり方まで
+    変わる (不変条件 2)。
+    """
+    _persist_turn_realtime_and_recall(runtime, persona, state)
+
+
+def _generation_was_stopped(persona: Any, state: Any) -> bool:
+    """この生成の間にユーザーが止めたか (:func:`_note_generation_completed` の確認)。"""
+    token = state.get("_cancellation_token") if isinstance(state, dict) else None
+    if token is None or not token.is_cancelled():
+        return False
+    LOGGER.info(
+        "[sea][persist_realtime_and_recall] generation finished after the user "
+        "stopped it; not keeping this turn's block (persona=%s pulse=%s)",
+        getattr(persona, "persona_id", None), state.get("_pulse_id"),
+    )
+    return True
+
+
+def _check_kept_block_comes_back(persona: Any, state: Any, batch_id: int) -> None:
+    """残した直後に記録から読み直し、残した行がその並びに出なければ WARN を出す。
+
+    persist_realtime_and_recall.md §5「機械検査」(Codex 七巡目)。次のターンの
+    prepare_context と同じ関数で読み直す (sea/runtime_context.
+    kept_block_comes_back)。出ないのは、残した行の位置を決める発言が履歴に
+    無い (窓の外・別のスレッド) とき — 次のターンの列の先頭が、このターンの
+    最初の送信と一致しない。残すのは境界のあるまとまりだけなので (Codex
+    八巡目)、検査も境界のある保存にだけ働く。読み直しの材料はトップレベルの
+    Pulse にだけある。送信は止めない。
+    """
+    from sea.runtime_context import FIRST_SEND_RECORD_SOURCE_KEY, kept_block_comes_back
+
+    try:
+        comes_back = kept_block_comes_back(
+            state.get(FIRST_SEND_RECORD_SOURCE_KEY), batch_id,
+        )
+    except Exception:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] could not re-read the record to "
+            "check the kept block (persona=%s pulse=%s)",
+            getattr(persona, "persona_id", None), state.get("_pulse_id"),
+            exc_info=True,
+        )
+        return
+    if comes_back is False:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] the kept block (batch %s) does not "
+            "come back when the record is re-read, so the next turn's list will "
+            "not start with this one (persona=%s pulse=%s)",
+            batch_id, getattr(persona, "persona_id", None), state.get("_pulse_id"),
+        )
+
+
+def _persist_turn_realtime_and_recall(runtime: Any, persona: Any, state: Any) -> None:
+    """そのターンのリアルタイム情報と自動想起のまとまりを、送った文面のまま一行残す。
+
+    docs/intent/persist_realtime_and_recall.md §4.2。呼ばれるのは生成が正常に
+    完了した地点 (:func:`_note_generation_completed`)。書くのは初めて送った
+    ときに固定した「保存待ち」の写し (文面・画像・位置を決める発言 —
+    :func:`_freeze_turn_block_before_send`) で、呼ばれた時点のまとまりではない。
+
+    - 残すのは ``_pulse_type`` が user / auto / schedule の Pulse だけ。子の
+      Playbook へ渡した写し (``child_copy``) は残さない (保存はそのターンの親)。
+    - 「保存待ち」と「保存済み」を分ける。DB への書き込みが成功したときだけ
+      保存済み (``persisted``) にし、失敗したら同じ Pulse の後の成功地点で、
+      固定済みの同じ写しを書き直す (DB 側は同じ pulse_id の行があれば書かない
+      — adapter.record_realtime_and_recall)。写しは固定済みなので、どの地点で
+      書けても位置と文面は同じ。
+    - 位置を決める発言は、送った列でまとまりより前にある最後の発言 (台帳の行を
+      持つもの)。次のターン以降、まとまりはその発言の直後に出る (§4.3)。
+      位置を決める発言が無い (送った列に記録の発言が一件も無い) ターンは
+      残さない (Codex 八巡目)。
+    - 出すものが無いターンはまとまり自体が作られないので、何も残さない。
+
+    保存の失敗で LLM の経路を止めない (例外は外へ出さない)。
+    """
+    try:
+        if not isinstance(state, dict):
+            return
+        if state.get("_pulse_type") not in PERSIST_REALTIME_AND_RECALL_PULSE_TYPES:
+            return
+        messages = state.get("_messages")
+        if not isinstance(messages, list):
+            return
+        from sea.eviction_plan import TURN_REALTIME_AND_RECALL_KEY
+        from sea.runtime_context import find_turn_realtime_and_recall_index
+
+        idx = find_turn_realtime_and_recall_index(messages)
+        if idx is None:
+            return
+        turn_msg = messages[idx]
+        meta = turn_msg.get("metadata") or {}
+        info = meta.get(TURN_REALTIME_AND_RECALL_KEY)
+        if not isinstance(info, dict) or info.get("persisted"):
+            return
+        if info.get("child_copy"):
+            return
+        pending = info.get("pending")
+        if not isinstance(pending, dict):
+            # 送る前に固定されていない (送信の一点を通っていない) まとまりは
+            # 「送った文面」が分からないので書かない。
+            LOGGER.warning(
+                "[sea][persist_realtime_and_recall] this turn's block was not "
+                "frozen before sending; not keeping it (persona=%s pulse=%s)",
+                getattr(persona, "persona_id", None), state.get("_pulse_id"),
+            )
+            return
+        content = str(pending.get("content") or "")
+        media = pending.get("media") if isinstance(pending.get("media"), list) else None
+        if not content.strip() and not media:
+            info["persisted"] = True
+            return
+        if not pending.get("boundary_message_ids"):
+            # 位置を決める発言が無い (送った列に記録の発言が一件も無かった —
+            # ペルソナの最初のパルス・空のスレッドの自律開始) まとまりは残さ
+            # ない (§4.2、Codex 八巡目)。次のターンに出る位置が決まらないので、
+            # OFF のモデルの差し込みと同じく、このターンだけで消える。書き直す
+            # ものも無いので、このパルスでは以後も書かない。
+            info["persisted"] = True
+            LOGGER.debug(
+                "[sea][persist_realtime_and_recall] no recorded message before this "
+                "turn's block; not keeping it (persona=%s pulse=%s)",
+                getattr(persona, "persona_id", None), state.get("_pulse_id"),
+            )
+            return
+        if _generation_was_stopped(persona, state):
+            # 止められた生成は正常な完了ではない — 保存も書き直しもしない
+            # (停止の印はパルスの終わりまで立ったままなので、このパルスでは
+            # 以後も書かない)。
+            return
+        sai_mem = getattr(persona, "sai_memory", None)
+        recorder = getattr(sai_mem, "record_realtime_and_recall", None)
+        if not callable(recorder):
+            LOGGER.warning(
+                "[sea][persist_realtime_and_recall] persona=%s has no memory "
+                "adapter; this turn's realtime info / recall is not kept",
+                getattr(persona, "persona_id", None),
+            )
+            return
+        batch_id = recorder(
+            content=content,
+            media=[dict(m) for m in media] if media else None,
+            recalled_keys=pending.get("recalled") or None,
+            boundary_message_ids=list(pending.get("boundary_message_ids") or []),
+            pulse_id=state.get("_pulse_id"),
+        )
+        if batch_id is None:
+            LOGGER.warning(
+                "[sea][persist_realtime_and_recall] could not keep this turn's "
+                "realtime info / recall (persona=%s pulse=%s); retrying at the "
+                "next completed generation of this pulse",
+                getattr(persona, "persona_id", None), state.get("_pulse_id"),
+            )
+            return
+        info["persisted"] = True
+        LOGGER.debug(
+            "[sea][persist_realtime_and_recall] kept this turn's block as batch %s "
+            "(persona=%s, %d chars, %d image(s))",
+            batch_id, getattr(persona, "persona_id", None), len(content),
+            len(media or []),
+        )
+        _check_kept_block_comes_back(persona, state, batch_id)
+    except Exception:
+        LOGGER.warning(
+            "[sea][persist_realtime_and_recall] keeping this turn's realtime info / "
+            "recall failed (persona=%s)", getattr(persona, "persona_id", None),
+            exc_info=True,
+        )
 
 
 def _store_reasoning_in_state(state: dict, reasoning_text: str, reasoning_details: Any) -> None:
@@ -447,6 +970,35 @@ def _consume_reasoning(llm_client, state: Optional[dict] = None) -> Tuple[str, A
     if state is not None:
         _store_reasoning_in_state(state, reasoning_text, reasoning_details)
     return reasoning_text, reasoning_details
+
+
+def _store_output_phases_in_state(state: dict, output_phases: Any) -> None:
+    """メッセージごとの分け方を後段の memorize / speak ノード向けに state へ残す。
+
+    reasoning と同じく各 LLM 呼び出しの結果で **必ず置き換える** (無ければ
+    ``_output_phases`` を消す)。残すと、分け方を返さなかった呼び出しの本文に
+    前の呼び出しの分け方が付く。
+    """
+    if output_phases is not None:
+        state["_output_phases"] = output_phases
+    else:
+        state.pop("_output_phases", None)
+
+
+def _consume_output_phases(llm_client, state: Optional[dict] = None) -> Any:
+    """LLM クライアントから応答のメッセージごとの分け方 (Codex の phase) を回収する。
+
+    :func:`_consume_reasoning` と同じ地点で呼ぶ (クライアント側のバッファは
+    破壊的読み取りで、次の呼び出しの頭で上書きされる)。形の合わない値
+    (分け方を報告しないクライアントやテストの偽物) は None にする。
+    ``state`` を渡すと回収と同時に state へ格納する。
+    docs/issues/codex_output_phase_passback.md
+    """
+    consume = getattr(llm_client, "consume_output_phases", None)
+    output_phases = coerce_output_phases(consume()) if callable(consume) else None
+    if state is not None:
+        _store_output_phases_in_state(state, output_phases)
+    return output_phases
 
 
 def _build_say_metadata(
@@ -692,6 +1244,7 @@ def _store_beat_memory(
     line_role: Optional[str] = None,
     reasoning_text: Optional[str] = None,
     reasoning_details: Any = None,
+    output_phases: Any = None,
 ) -> Any:
     """memorize の「``_store_memory`` 呼び出しの組み立て」を一箇所に持つ。
 
@@ -702,13 +1255,19 @@ def _store_beat_memory(
 
     成功 (= 書けた message_id が truthy) したら ``state["_beat_memorized"]`` を
     立てる — 「この Beat の本文はもう記憶に書かれた」の印で、Beat の出口の補填が
-    二重に書き込むのを止める鍵。返り値は書けた message_id (失敗は falsy)。
+    二重に書き込むのを止める鍵。書けた行の id も ``BEAT_MEMORY_ID_KEY`` に残す
+    (``_finalize_beat`` が送る `messages`の返事に載せる)。返り値は書けた message_id
+    (失敗は falsy)。
     """
     metadata: Dict[str, Any] = {}
     if reasoning_text:
         metadata["reasoning"] = reasoning_text
     if reasoning_details is not None:
         metadata["reasoning_details"] = reasoning_details
+    # 本文を作った呼び出しのメッセージごとの分け方。本文と結合が一致しなければ
+    # ``_store_memory`` が落とす。言い切っていない本文には付けない。
+    if output_phases is not None and not interrupted:
+        metadata[OUTPUT_PHASES_METADATA_KEY] = output_phases
     # 「言い切っていない」印は建物履歴とペルソナの記憶の両方に載せる。
     # 記憶の側に無いと、本人が後で自分の言葉を読み返したときに、途中で
     # 切れた発言を言い切ったものとして受け取る。
@@ -744,7 +1303,7 @@ def _store_beat_memory(
         beat_state=state,
     )
     if stored_message_id:
-        state["_beat_memorized"] = True
+        _mark_beat_memorized(state, stored_message_id)
         LOGGER.debug(
             "[sea][llm] Memorized response (assistant) with paired_action_text len=%s scope=%s spell_origin=%s",
             len(paired_action_text) if paired_action_text else 0, scope,
@@ -810,6 +1369,7 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
             "content": _tc_speak,
             "tool_calls": [_tc_entry],
         }
+        _beat_reply_msg = _assistant_msg
         state["_messages"] = messages + [_assistant_msg]
         LOGGER.info("[sea][llm] Appended assistant message with tool_calls (id=%s, tool=%s)",
                    state["_last_tool_call_id"], state.get("_last_tool_name"))
@@ -821,6 +1381,12 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
         _text_thought_sig = state.get("_last_thought_signature")
         if _text_thought_sig:
             _text_assistant_msg["thought_signature"] = _text_thought_sig
+        # 記憶に書く行 (memorize / important dual-write / 後ろの SPEAK) と同じ
+        # 分け方を、同じ Pulse の後ろの LLM ノードへ送るこの発言にも載せる。
+        # 言い切っていない本文は記憶の側にも付けないので、ここでも付けない。
+        if not interrupted:
+            attach_output_phases(_text_assistant_msg, beat.output_phases)
+        _beat_reply_msg = _text_assistant_msg
         state["_messages"] = messages + [_text_assistant_msg]
 
     # Append LLM interaction to PulseContext (replaces _intermediate_msgs)
@@ -937,6 +1503,7 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                 line_role=memorize_line_role,
                 reasoning_text=beat.reasoning_text,
                 reasoning_details=beat.reasoning_details,
+                output_phases=beat.output_phases,
             )
             if not stored_message_id:
                 _memorize_ok = False
@@ -998,6 +1565,9 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
             _imp_details = state.get("_reasoning_details")
             if _imp_details is not None:
                 _important_metadata["reasoning_details"] = _imp_details
+            _imp_phases = state.get("_output_phases")
+            if _imp_phases is not None and not interrupted:
+                _important_metadata[OUTPUT_PHASES_METADATA_KEY] = _imp_phases
             if interrupted:
                 _important_metadata[INTERRUPTED_METADATA_KEY] = True
             _important_stored = runtime._store_memory(
@@ -1009,14 +1579,62 @@ def _finalize_beat(runtime, beat: BeatExecution) -> None:
                 playbook_name=playbook.name,
                 # 2026-05-20: thought_signature 永続化 (important dual-write 経路)
                 thought_signature=state.get("_last_thought_signature"),
+                # 書いた行の id を受け取る — memorize 節と同じく、送る `messages`の返事に
+                # 載せる (BEAT_MEMORY_ID_KEY)。
+                return_message_id=True,
                 beat_state=state,
             )
             if _important_stored:
                 # memorize 節 (_store_beat_memory) と同じ印 — この Beat の本文は
                 # もう記憶に書かれた。Beat の出口の補填が二重に書かないための鍵。
-                state["_beat_memorized"] = True
+                _mark_beat_memorized(state, _important_stored)
             else:
                 LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
+
+    # 返事が記憶に書かれていたら (memorize / important dual-write / 止まった生成の
+    # 保存 = settle のどれか)、送る `messages`に足した返事の dict に書いた行の id を載せる。
+    # 次の送信で前駆刻印の材料を送る `messages`から作り直すとき (sea/message_stamp.py の
+    # sync_presented_message_ids_with_sent)、この返事が「記録の行」として
+    # 数えられる。各 LLM クライアントは role / content / tool_calls 等しか送らない
+    # (履歴の行も同じ ``id`` を持って送られている) ので、API へは載らない。
+    # 値はこの Beat のものなので、ここで消費する (次の Beat へ持ち越さない)。
+    #
+    # `_presented_message_ids`(前駆刻印の材料) にはここでは足さない。足すのは次の LLM ノードが
+    # この返事を実際に送るとき (sync_presented_message_ids_with_sent)。ここで
+    # 足すと、この後に続く MEMORIZE / SPEAK / THINK ノード (この返事の本文を
+    # 役割 assistant で書き直す — 例: schedule_management の record_add_params)
+    # の前駆が、その本文を生んだ生成自身の行を指してしまう。
+    #
+    # 本文が空の返事 (tool_calls だけ) にも載せる。記録には JSON 本文で書かれて
+    # いて、送る `messages` の dict は本文が空。predecessor_message_id は SAIVerse が
+    # 組んだ `messages` の段階で決めるので (sea/message_stamp.py)、送る先の
+    # クライアントの変換がこの dict を落とす場合 (Anthropic・xAI) も、次の LLM
+    # ノードの sync_presented_message_ids_with_sent はこの dict を数える。
+    #
+    # この LLM ノードが返事を記憶に保存しなかった (`_beat_memorized` が立っていない。
+    # 本文は空でない) ときは、返事の dict を書いておく
+    # (sea/message_stamp.note_unstored_reply)。後ろの MEMORIZE ({last} だけ) /
+    # SPEAK / THINK が state["last"] を記憶に保存したら、その行の id をこの dict に
+    # 載せる。dict の本文と state["last"] が同じ文字列のときに限る (構造化出力の
+    # dict は JSON 文字列にして足しているので、保存される本文と一致しない)。
+    _beat_memory_id = state.pop(BEAT_MEMORY_ID_KEY, None)
+    _reply_content = _beat_reply_msg.get("content")
+    _reply_has_body = isinstance(_reply_content, str) and bool(_reply_content.strip())
+    _reply_has_tool_calls = bool(_beat_reply_msg.get("tool_calls"))
+    if (
+        isinstance(_beat_memory_id, str) and _beat_memory_id
+        and (_reply_has_body or _reply_has_tool_calls)
+    ):
+        _beat_reply_msg["id"] = _beat_memory_id
+        clear_unstored_reply(state)
+    elif (
+        _reply_has_body
+        and not state.get("_beat_memorized")
+        and isinstance(text, str) and _reply_content == text
+    ):
+        note_unstored_reply(state, _beat_reply_msg)
+    else:
+        clear_unstored_reply(state)
 
     # Debug: log speak_content at end of LLM node
     speak_content = state.get("speak_content", "")
@@ -1055,7 +1673,14 @@ _SPELL_PATTERN_NO_ARGS = re.compile(
 )
 # Fuzzy form: /spell tool_name key='value' key2='value2' ...
 _SPELL_PATTERN_FUZZY = re.compile(
-    r"^/(?:quick_)?spell\s+(\w+)\s+(.+)$",
+    r"^/(?:quick_)?spell\s+([\w.-]+)\s+(.+)$",
+    re.MULTILINE,
+)
+
+# Every explicit invocation line must be parsed or reported as malformed.
+# Token boundary avoids treating ordinary words such as /spelling as commands.
+_SPELL_LINE_PATTERN = re.compile(
+    r"^[ \t]*/(?:quick_)?spell\b[^\r\n]*",
     re.MULTILINE,
 )
 
@@ -1063,7 +1688,7 @@ _SPELL_PATTERN_FUZZY = re.compile(
 def _is_quick_match(m: Any) -> bool:
     """この spell マッチが /quick_spell 動詞で唱えられたか (quick_spell.md §3.1)。"""
     try:
-        return m.group(0).startswith("/quick_")
+        return m.group(0).lstrip().startswith("/quick_")
     except (AttributeError, IndexError):
         return False
 # key=value pair within fuzzy args (value may be single/double-quoted, dict literal, or bare word)
@@ -1087,6 +1712,11 @@ _SENTENCE_BOUNDARY_SOFT_CHARS = set("、，,;:")
 _SUB_TEXT_NON_VOICEABLE_CHARS = (
     _SENTENCE_BOUNDARY_CHARS | _SENTENCE_BOUNDARY_SOFT_CHARS | set(" 　\t\r")
 )
+
+
+# ``{`` から ``}`` の間で区切らない範囲の上限 (文字数)。仮想身体の全身エモート
+# 記法 ``{"body_emote": "surprised"}`` は 30 文字前後なので余裕を持たせた値。
+_BRACE_SPAN_MAX = 64
 
 
 def _has_voiceable_content(text: str) -> bool:
@@ -1115,6 +1745,10 @@ def _find_next_sentence_boundary(
     Markdown リンク ``[text](url)`` 内部では文区切りを検出しない。 URL 中の
     ``:`` や ``,`` で分断されると voice-tts 側の ``clean_text_for_tts`` が
     リンク構文を認識できなくなり URI が読み上げられてしまうため。
+
+    同じ理由で ``{`` から ``}`` の間でも区切らない。仮想身体アドオンの全身
+    エモート記法 ``{"body_emote": "wave"}`` は ``:`` や ``,`` を含み、分断されると
+    voice-tts が記法と気づけずに読み上げる。
     """
     if start >= len(buffer):
         return -1
@@ -1125,11 +1759,27 @@ def _find_next_sentence_boundary(
     buf_len = len(buffer)
     in_bracket = False
     in_md_link_url = False
+    in_brace = False
     for i in range(start, buf_len):
         ch = buffer[i]
         if in_md_link_url:
             if ch == ')':
                 in_md_link_url = False
+            continue
+        if in_brace:
+            if ch == '}':
+                in_brace = False
+            continue
+        if ch == '{':
+            # 記法は短い。近くで閉じない ``{`` (コード片の途中など) は普通の
+            # 文字として扱い、残りの発話の区切りを止めない。
+            close = buffer.find('}', i + 1, i + 1 + _BRACE_SPAN_MAX)
+            if close >= 0:
+                in_brace = True
+                continue
+            if buf_len - i <= _BRACE_SPAN_MAX:
+                # まだ閉じが届いていないだけかもしれない。続きを待つ。
+                return -1
             continue
         if ch == '[':
             in_bracket = True
@@ -1319,20 +1969,35 @@ def _parse_fuzzy_spell_args(args_raw: str, *, mute: bool = False) -> Optional[di
     the log — fuzzy KV parsing recovers without user-visible noise. ``mute``
     fully suppresses that DEBUG too (display paths re-parsing stored text).
     """
+    # In the hybrid shorthand, args= wraps the complete object, not a tool
+    # argument called "args". Never fall back to partial KV parsing if it fails.
+    wrapper = re.match(r"^args\s*=\s*(.*)$", args_raw.strip(), re.DOTALL)
+    if wrapper is not None:
+        return _parse_spell_args(wrapper.group(1), silent=mute, mute=mute)
     result = _parse_spell_args(args_raw, silent=True, mute=mute)
     if result is not None:
         return result
     pairs = {}
+    end = 0
     for m in _KV_PATTERN.finditer(args_raw):
+        if args_raw[end:m.start()].strip(" \t,"):
+            return None
+        end = m.end()
         key = m.group(1)
         # Groups 2-5 correspond to: single-quoted, double-quoted, dict-literal, bare-word
         value_raw = next(v for v in m.groups()[1:] if v is not None)
         # dict literals: try to parse as proper dict
         if value_raw.startswith("{"):
-            parsed = _parse_spell_args(value_raw)
-            pairs[key] = parsed if parsed is not None else value_raw
+            parsed = _parse_spell_args(value_raw, silent=mute, mute=mute)
+            if parsed is None:
+                return None
+            pairs[key] = parsed
         else:
+            if m.group(5) is not None and value_raw.startswith(("'", '"')):
+                return None
             pairs[key] = value_raw
+    if args_raw[end:].strip(" \t,"):
+        return None
     if pairs:
         return pairs
     return None
@@ -1424,7 +2089,9 @@ class _SpellSpan:
         return (self._start, self._end)
 
 
-def _rescue_multiline_args(text: str, m: Any) -> Optional[Tuple[dict, "_SpellSpan"]]:
+def _rescue_multiline_args(
+    text: str, m: Any, *, consumed_end_out: Optional[List[int]] = None,
+) -> Optional[Tuple[dict, "_SpellSpan"]]:
     """canonical /spell 行の args が 1 行で parse できなかったときの救済パース。
 
     ``_SPELL_PATTERN`` は MULTILINE の行単位マッチ (``.`` は改行を跨がない) の
@@ -1440,6 +2107,13 @@ def _rescue_multiline_args(text: str, m: Any) -> Optional[Tuple[dict, "_SpellSpa
 
     Returns:
         ``(tool_args, span)``。span は ``/spell`` 行頭から閉じ ``}`` まで。
+
+    ``consumed_end_out`` を渡すと、救済に失敗したときに「args の本文として
+    読んだ範囲の終端」を入れて返す。brace が閉じたが parse できなかった場合は
+    閉じ ``}`` の直後、文字列が閉じないまま本文が尽きた場合は本文の末尾。
+    呼び出し側はこの範囲を後続の認識から除外し、壊れた args の本文に含まれる
+    ``/spell`` 行を別の呼び出しとして実行・報告しない (spell_invocation_contract.md)。
+    文字列の外で brace だけが閉じない場合は範囲が曖昧なので何も入れない。
     """
     pos = m.start(2)
     end_limit = len(text)
@@ -1490,10 +2164,14 @@ def _rescue_multiline_args(text: str, m: Any) -> Optional[Tuple[dict, "_SpellSpa
                     parsed = _parse_spell_args(candidate, silent=True, mute=True)
                     if isinstance(parsed, dict):
                         return parsed, _SpellSpan(m.start(), i + 1)
+                    if consumed_end_out is not None:
+                        consumed_end_out.append(i + 1)
                     return None
             else:
                 out.append(ch)
         i += 1
+    if in_string and consumed_end_out is not None:
+        consumed_end_out.append(end_limit)
     return None
 
 
@@ -1520,8 +2198,8 @@ def _parse_spell_lines(
       which is used in SAIMemory storage so the persona learns correct syntax.
     - ``quick`` = ``/quick_spell`` 動詞で唱えられた行 (quick_spell.md)。fuzzy
       救済・複数行 args 救済を通っても保持される。
-    Unparseable entries are skipped from the return value; canonical-form
-    entries whose args failed to parse (after the multiline rescue) are
+    Unparseable entries are skipped from the return value, but every explicit
+    /spell or /quick_spell line outside an already-consumed args span is
     reported via ``malformed_out`` when the caller passes a list — the spell
     loop uses this to feed a corrective error back to the persona instead of
     silently dropping the invocation (2026-07-05 実 LLM シム 異常 #2).
@@ -1548,7 +2226,8 @@ def _parse_spell_lines(
             matched_spans.append(m.span())
             continue
         # 1 行で読めない args: 文字列値に生改行を含む複数行 JSON/dict を救済
-        rescued = _rescue_multiline_args(text, m)
+        consumed_end: List[int] = []
+        rescued = _rescue_multiline_args(text, m, consumed_end_out=consumed_end)
         if rescued is not None:
             tool_args, span = rescued
             normalized = _normalize_spell_line(m.group(1), tool_args, quick=quick)
@@ -1560,6 +2239,8 @@ def _parse_spell_lines(
             found.append(ParsedSpell(m.group(1), tool_args, span, normalized, quick))
             matched_spans.append(span.span())
             continue
+        # 救済に失敗しても、args の本文として読んだ範囲は後続の認識から外す
+        matched_spans.append((m.start(), max([m.end(), *consumed_end])))
         if malformed_out is not None:
             malformed_out.append((m.group(1), args_raw, m))
 
@@ -1577,6 +2258,22 @@ def _parse_spell_lines(
                 LOGGER.info("[sea][spell] Fuzzy-parsed spell '%s' → %s", tool_name, normalized)
             found.append(ParsedSpell(tool_name, tool_args, m, normalized, quick))
             matched_spans.append(span)
+        else:
+            matched_spans.append(span)
+            if malformed_out is not None:
+                malformed_out.append((tool_name, m.group(2).strip(), m))
+
+    # Pass 3: recognition failures must reach the same feedback/retry boundary
+    # as malformed args. Skip spans consumed by canonical/multiline/fuzzy forms.
+    if malformed_out is not None:
+        for m in _SPELL_LINE_PATTERN.finditer(text):
+            if any(s <= m.start() < e for s, e in matched_spans):
+                continue
+            body = re.sub(r"^/(?:quick_)?spell\s*", "", m.group(0).lstrip())
+            name_body = re.sub(r"^name\s*=\s*", "", body)
+            name_match = re.match(r"['\"]?([\w.-]+)", name_body)
+            name = name_match.group(1) if name_match else "ツール名"
+            malformed_out.append((name, body, m))
 
     # Sort by position in text so rounds process spells in order
     found.sort(key=lambda x: x.m.start())
@@ -1797,16 +2494,30 @@ def _build_malformed_args_error(spell_name: str, args_raw: str) -> str:
     消える (2026-07-05 実 LLM シム 異常 #2)。
     """
     preview = args_raw if len(args_raw) <= 120 else args_raw[:120] + "…"
-    example = f"/spell name='{spell_name}' args={{\"content\": \"1行目\\n2行目\"}}"
+    example = f"/spell name='{spell_name}' args={{}}"
     return (
         f"スペル「{spell_name}」の args を JSON として読み取れなかったため、"
         "実行されませんでした。\n"
         f"読み取れなかった args (先頭部分): {preview}\n"
-        "args は 1 つの JSON オブジェクトとして書いてください。"
+        "args はスペルの説明にある引数を、1つのJSONオブジェクトとして書いてください。"
         "文字列値の中の改行は \\n とエスケープしてください"
         "（生の改行を含めると途中で途切れます）。\n"
         f"書式例: {example}\n"
         "同じ内容で args を書き直して、もう一度スペルを発動してください。"
+    )
+
+
+def _build_malformed_spell_error(spell_name: str, spell_line: str) -> str:
+    """Unreadable invocation syntax is an error, never ordinary speech."""
+    preview = spell_line if len(spell_line) <= 120 else spell_line[:120] + "…"
+    verb = "/quick_spell" if spell_line.lstrip().startswith("/quick_spell") else "/spell"
+    return (
+        "スペル行の書式を読み取れなかったため、実行されませんでした。\n"
+        f"読み取れなかった行 (先頭部分): {preview}\n"
+        "行頭から、名前と引数を次の書式で指定してください。"
+        "引数がない場合も args={} を付けてください。\n"
+        f"書式: {verb} name='{spell_name}' args={{}}\n"
+        "args 内にはスペルの説明にある引数を指定し、もう一度発動してください。"
     )
 
 
@@ -1987,15 +2698,21 @@ async def _run_spell_tool_async(
         # (thread stack / logs / meta judgment buffer).
         pulse_ctx = state.get("_pulse_context")
         auto_mode = bool(state.get("_auto_mode", False))
+        # その messages の列のリアルタイムスペルの状態。run_playbook がこの列を
+        # 写して子を起動するとき、子へ引き継ぐ (docs/intent/
+        # persist_realtime_and_recall.md §4.1 — 引き継がないと ON のモデルで
+        # 子がリアルタイムスペルを再実行し、結果が二重に載る。Codex 三巡目)。
+        from sea.runtime_context import realtime_spell_handover
+        rt_handover = realtime_spell_handover(state)
 
         def _run():
             # ``llm_messages=messages`` snapshot lets spells like ``run_playbook``
             # fork their sub-line from the parent LLM node's actual messages.
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured, realtime_spell_handover=rt_handover):
                 return tool_func(**tool_args)
 
         if inspect.iscoroutinefunction(tool_func):
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=auto_mode, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages, user_configured=user_configured, realtime_spell_handover=rt_handover):
                 raw_result = await tool_func(**tool_args)
         else:
             raw_result = await asyncio.get_event_loop().run_in_executor(None, _run)
@@ -2533,6 +3250,10 @@ def _save_cut_utterance(
                 if form == SAVED_FORM_CUT else None
             ),
             playbook_name=playbook.name,
+            # 書いた行の id を受け取る — この Beat が例外なしで `_finalize_beat`
+            # まで進む回 (スペル無効の停止・締めの Beat の部分文の保存) に、
+            # 送る `messages`の返事へ載せる (BEAT_MEMORY_ID_KEY)。
+            return_message_id=True,
             beat_state=state,
         )
         if _stored:
@@ -2541,7 +3262,7 @@ def _save_cut_utterance(
             # の memorize / important dual-write — スペル無効だと停止された
             # Beat も例外なしで完走してそこへ届く) がこの印を見て、同じ本文を
             # 二重に書かない。
-            state["_beat_memorized"] = True
+            _mark_beat_memorized(state, _stored)
     except Exception:
         LOGGER.warning(
             "[sea][pipeline] could not store the stopped utterance to "
@@ -2682,6 +3403,10 @@ class SpellLoopResult:
       締めの記録 (建物・記憶の両方) に添えるのはこの値。呼び出し元は後段の
       memorize が読む state の思考もこれに揃える — 揃えないと、周 1 の思考が
       締めの発言の思考として記憶に残る。
+    - ``closing_output_phases``: 同じ呼び出しが報告した、締めの発言
+      (``final_continuation``) のメッセージごとの分け方。呼び出し元は思考と
+      同じく後段の memorize が読む state に揃える。止まった周・途中で落ちた
+      周の本文には付けない (None)。
     - ``stop_error``: スペルの後の続きの生成 (LLM 呼び出しそのもの) が失敗して
       止まった回の例外 (:class:`LLMError` — 安全性フィルター・利用制限・
       タイムアウト・サーバーエラー・空の応答など)。普通の返事で同じ失敗が
@@ -2708,6 +3433,7 @@ class SpellLoopResult:
     loop_count: int
     closing_reasoning_text: str = ""
     closing_reasoning_details: Any = None
+    closing_output_phases: Any = None
     stop_error: Optional[BaseException] = None
     final_stream_error: Optional[Dict[str, Any]] = None
 
@@ -2846,6 +3572,7 @@ async def _run_spell_loop(
     initial_reasoning_text: str = "",
     initial_reasoning_details: Any = None,
     initial_stream_error: Optional[Dict[str, Any]] = None,
+    initial_output_phases: Any = None,
 ) -> SpellLoopResult:
     """Execute the spell loop, running each round's spells sequentially.
 
@@ -2889,6 +3616,11 @@ async def _run_spell_loop(
     頭で上書きされ、思考が届いているのに記録のどこにも残らない
     (docs/issues/spell_pulse_beats_missing_reasoning.md)。
 
+    ``initial_output_phases``: 同じコールが報告したメッセージごとの分け方
+    (llm_clients.output_phases)。周の本文は組み直して記憶に書くので、周ごとに
+    :func:`align_output_phases_to_spell_round` で組み直した本文に合わせ直して
+    添える。周 2 以降の分は周ごとにこのループが回収する。
+
     ``initial_stream_error``: ラウンド 1 の本文を運んだストリームを、サーバーが
     途中で切った申告 (呼び出し元が消費したもの)。周ごとの再ストリームの申告は
     このループが自分で消費する。どちらも、その本文が締めの発言として確定する
@@ -2910,6 +3642,7 @@ async def _run_spell_loop(
             segments=[], final_continuation=text, loop_count=0,
             closing_reasoning_text=initial_reasoning_text,
             closing_reasoning_details=initial_reasoning_details,
+            closing_output_phases=None if initial_stream_error else initial_output_phases,
             final_stream_error=initial_stream_error,
         )
 
@@ -2934,6 +3667,9 @@ async def _run_spell_loop(
     # (周の頭で参照し、周の終わりの再呼び出しの直後に次の周の分へ入れ替える)。
     pending_reasoning_text: str = initial_reasoning_text or ""
     pending_reasoning_details: Any = initial_reasoning_details
+    # いまの ``text`` を作ったコールが報告したメッセージごとの分け方。思考と
+    # 同じ寿命 (周の終わりの再呼び出しの直後に次の周の分へ入れ替える)。
+    pending_output_phases: Any = initial_output_phases
     # この周の本文が記憶へ入ったか。入らなかった周に限り、下書き行が無いときの
     # 退避書き込み (下の `_close_streaming_beat`) が「建物には本文があるのに
     # 記憶には無い」形を作るので、Beat の出口の補填へ渡す印を state に立てる。
@@ -3238,6 +3974,8 @@ async def _run_spell_loop(
                 segments=[], final_continuation=text, loop_count=0,
                 closing_reasoning_text=pending_reasoning_text,
                 closing_reasoning_details=pending_reasoning_details,
+                # 周が一つも走らなかった回の本文は受け取ったままの応答。
+                closing_output_phases=pending_output_phases,
                 stop_error=stop_error,
             )
         # 確定済みの Beat はそのまま残す — 途中で落ちても、ここまでに組んだ
@@ -3399,7 +4137,23 @@ async def _run_spell_loop(
             all_spell_lines_normalized = "\n".join(line for _, line in _spell_line_entries)
             assistant_content = (text_before + "\n" + all_spell_lines_normalized
                                  + ("\n" + text_after if text_after else "")).strip()
-            messages.append({"role": "assistant", "content": assistant_content})
+            # この周の応答のメッセージごとの分け方を、組み直した本文に合わせ直す
+            # (合わなければ None — 記録にも次の呼び出しの列にも付けない)。
+            _round_output_phases = align_output_phases_to_spell_round(
+                text,
+                pending_output_phases,
+                sorted(
+                    [(entry[2].start(), entry[2].end(), entry[3]) for entry in all_parsed]
+                    + [(m.start(), m.end(), text[m.start():m.end()])
+                       for _, _, m in malformed_spells],
+                    key=lambda line: line[0],
+                ),
+                assistant_content,
+            )
+            _round_msg = _round_message_for_next_call(
+                state, assistant_content, output_phases=_round_output_phases,
+            )
+            messages.append(_round_msg)
 
             # judgment (起動の意思決定) を spell 実行の「前」に SAIMemory へ記録する。
             # run_playbook 等の spell は子ラインを同期実行し、子ラインの各ノードが
@@ -3427,6 +4181,8 @@ async def _run_spell_loop(
                     _round_memory_metadata["reasoning"] = pending_reasoning_text
                 if pending_reasoning_details is not None:
                     _round_memory_metadata["reasoning_details"] = pending_reasoning_details
+                if _round_output_phases is not None:
+                    _round_memory_metadata[OUTPUT_PHASES_METADATA_KEY] = _round_output_phases
                 _stored_id = runtime._store_memory(
                     persona, assistant_content, role="assistant",
                     tags=assistant_tags, pulse_id=pulse_id, playbook_name=playbook.name,
@@ -3449,8 +4205,14 @@ async def _run_spell_loop(
                 # _prepare_context 時点の履歴末尾を指し続け、「実際に見て
                 # いた最後のメッセージ」ではなくなる。スペル結果の注入行は
                 # 永続 ID を持たないので足さない。
+                # 列に積んだこの周の発言にも書いた行の id を載せる — 後で材料を
+                # 送る `messages`から作り直す回 (子 Playbook の中継の後の次のノード。
+                # sync_presented_message_ids_with_sent) に、この行が記録の
+                # 行として数えられるように (_finalize_beat の返事と同じ理由)。
                 if _stored_id:
                     append_presented_message_id(state, _stored_id)
+                    if isinstance(_stored_id, str):
+                        _round_msg["id"] = _stored_id
 
             # Execute this round's spells SEQUENTIALLY, in the textual order they
             # were cast. Spells frequently mutate state that is unsafe under
@@ -3534,9 +4296,13 @@ async def _run_spell_loop(
                     "result": error_text, "meta": None, "success": False,
                 })
             for name, args_raw, m in malformed_spells:
-                error_text = _build_malformed_args_error(name, args_raw)
+                raw_line = text[m.start():m.end()]
+                if _SPELL_PATTERN.match(raw_line) or _SPELL_PATTERN_FUZZY.match(raw_line):
+                    error_text = _build_malformed_args_error(name, args_raw)
+                else:
+                    error_text = _build_malformed_spell_error(name, raw_line)
                 LOGGER.warning(
-                    "[sea][spell] Malformed args for spell '%s' → returning error "
+                    "[sea][spell] Malformed invocation for spell '%s' → returning error "
                     "to persona for retry",
                     name,
                 )
@@ -3583,19 +4349,15 @@ async def _run_spell_loop(
                     media_list = result_meta.get("media")
                     if isinstance(media_list, list):
                         aggregated_media.extend(media_list)
-            # quick 宣言に反して応答機会を返すときだけ、理由の事実文を注入の
-            # 先頭に付ける (§3.4)。注入のみで SAIMemory へ記録する
-            # combined_results には混ぜない (不変条件 5)。
-            _injected_results = combined_results
-            if _all_quick and _round_has_failure:
-                _injected_results = (
-                    "/quick_spell で唱えたスペルに失敗があったため、"
-                    "結果を確認できるよう応答機会を返しています。\n"
-                    + combined_results
-                )
+            # 結果のメッセージは、下で system ロールで保存した記録が次のターンに
+            # 復元されるのと同じ本文・同じ画像で送る (復元形の一枚
+            # sai_memory.memory.storage.presented_system_record_content を通す)。
+            # 送ったときと復元したときで本文が違うと、前回の送信が今回の送信の
+            # 先頭と一致しない (docs/intent/persist_realtime_and_recall.md
+            # 不変条件 2 — 全モデル共通の直し、送る並びは変えない)。
             spell_result_msg: Dict[str, Any] = {
                 "role": "user",
-                "content": f"<system>{_injected_results}</system>",
+                "content": presented_system_record_content(combined_results),
             }
             if aggregated_media:
                 spell_result_msg["metadata"] = {"media": aggregated_media}
@@ -3603,6 +4365,19 @@ async def _run_spell_loop(
                     "[sea][spell] Round %d: attached %d media item(s) from spell results",
                     loop_count, len(aggregated_media),
                 )
+            # quick 宣言に反して応答機会を返すときだけ、理由の事実文を注入の
+            # 先頭に付ける (§3.4)。注入のみで SAIMemory へ記録する
+            # combined_results には混ぜない (quick_spell.md 不変条件 5) ので、
+            # 結果のメッセージ (復元形) とは別の、保存しないメッセージとして
+            # 結果の直前に置く。
+            if _all_quick and _round_has_failure:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "<system>/quick_spell で唱えたスペルに失敗があったため、"
+                        "結果を確認できるよう応答機会を返しています。</system>"
+                    ),
+                })
             messages.append(spell_result_msg)
 
             # Record to PulseContext
@@ -3634,9 +4409,20 @@ async def _run_spell_loop(
             # 定義済みのものを再利用する。
             spell_tags = (node_memorize_tags + ["spell"]) if node_memorize_tags else ["conversation", "spell"]
             if combined_results:
+                # 結果の画像も記録に残す — 送ったメッセージには付いているので、
+                # 残さないと次のターンの復元形から画像が消えて先頭が一致しない
+                # (上の結果のメッセージの注記と同じ理由)。
                 runtime._store_memory(
                     persona, combined_results, role="system",
                     tags=spell_tags, pulse_id=pulse_id, playbook_name=playbook.name,
+                    # 画像を残すのはリアルタイム情報と自動想起を残すモデルだけ
+                    # (OFF のモデルの履歴は今までどおり画像を持たない —
+                    # persist_realtime_and_recall.md 不変条件 2)。
+                    metadata=(
+                        {"media": [dict(m) for m in aggregated_media]}
+                        if aggregated_media and state.get("_persist_realtime_and_recall")
+                        else None
+                    ),
                     pulse_context=pulse_context,
                     spell_origin_id=_spell_origin_id,
                     spell_seq=loop_count,
@@ -3704,6 +4490,7 @@ async def _run_spell_loop(
                     "skipping LLM re-invocation (declared complete)", loop_count,
                 )
                 text = ""
+                pending_output_phases = None
                 break
 
             # 次の Beat が続くので、この Beat の下書き行はここで確定する
@@ -3841,6 +4628,7 @@ async def _run_spell_loop(
             LOGGER.info("[sea][spell] Re-invoking LLM after round %d (%d spell(s))", loop_count, len(valid_spells))
             _retry_stream_error: Optional[Dict[str, Any]] = None
             _retry_cancelled = False
+            _freeze_turn_block_before_send(messages, state)
             try:
                 if pipeline_streaming_state is not None:
                     _retry_stream = llm_client.generate_stream(
@@ -3848,6 +4636,7 @@ async def _run_spell_loop(
                         tools=[],
                         temperature=runtime._default_temperature(persona),
                         **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                        **_continuous_cache_kwargs(state, persona, building_id),
                     )
                     # progress に spell 側の器そのものを渡す — retry ストリームの
                     # 途中で死んでも、発火済みの sub-speak 連番と受信済みの chunk が
@@ -3899,6 +4688,7 @@ async def _run_spell_loop(
                         tools=[],
                         temperature=runtime._default_temperature(persona),
                         **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                        **_continuous_cache_kwargs(state, persona, building_id),
                     )
             except EmptyResponseError:
                 # スペルの後に何も言わないのは正常な終わり方。ストリーミング経路は
@@ -3946,6 +4736,7 @@ async def _run_spell_loop(
             pending_reasoning_text, pending_reasoning_details = _consume_reasoning(
                 llm_client,
             )
+            pending_output_phases = _consume_output_phases(llm_client)
             # このラウンドの生成を作ったコールの三つ組 (sea/message_stamp.py)。
             # 直後の _store_memory がラウンドの発言を刻むので、ここで更新する。
             record_call_tokens(state, retry_usage)
@@ -3953,6 +4744,7 @@ async def _run_spell_loop(
             # セグメントへ引き渡す (Beat ごとの帰属、契約 4)。
             pending_llm_usage = None
             if retry_usage:
+                retry_event_time = usage_event_time(retry_usage)
                 get_usage_tracker().record_usage(
                     model_id=retry_usage.model,
                     input_tokens=retry_usage.input_tokens,
@@ -3960,6 +4752,7 @@ async def _run_spell_loop(
                     cached_tokens=retry_usage.cached_tokens,
                     cache_write_tokens=retry_usage.cache_write_tokens,
                     cache_ttl=retry_usage.cache_ttl,
+                    timestamp=retry_event_time,
                     persona_id=getattr(persona, "persona_id", None),
                     building_id=building_id,
                     node_type="llm_spell_retry",
@@ -3971,6 +4764,7 @@ async def _run_spell_loop(
                 retry_cost = calculate_cost(
                     retry_usage.model, retry_usage.input_tokens, retry_usage.output_tokens,
                     retry_usage.cached_tokens, retry_usage.cache_write_tokens, cache_ttl=retry_usage.cache_ttl,
+                    at=retry_event_time,
                 )
                 runtime._accumulate_usage(
                     state, retry_usage.model, retry_usage.input_tokens,
@@ -3999,6 +4793,10 @@ async def _run_spell_loop(
                 text = retry_result
             else:
                 text = ""
+            # 続きの生成の正常な完了 (ユーザーに止められず、本文を得た) —
+            # 保存待ちのまとまりの書き直しの機会でもある (§4.2)。
+            if not _retry_cancelled and str(text or "").strip():
+                _note_generation_completed(runtime, persona, state)
             # この本文の途切れ方。次の周の頭で「スペル行を含む = 次の周が
             # 発話を続ける」か「締めの発言として途切れたまま確定する」かが
             # 決まるので、そこまで持ち運ぶ。
@@ -4040,6 +4838,7 @@ async def _run_spell_loop(
                 segments=[], final_continuation=text, loop_count=0,
                 closing_reasoning_text=pending_reasoning_text,
                 closing_reasoning_details=pending_reasoning_details,
+                closing_output_phases=None if text_stream_error else pending_output_phases,
                 final_stream_error=text_stream_error,
             )
         # 締めの Beat (= 最後の retry が返した、スペルを含まない発言)。
@@ -4060,7 +4859,9 @@ async def _run_spell_loop(
             loop_count=loop_count,
             closing_reasoning_text=pending_reasoning_text,
             closing_reasoning_details=pending_reasoning_details,
-            # 締めの周の切断 (一文字も来ないうちに切られた回を含む)。
+            # 締めの周の切断 (一文字も来ないうちに切られた回を含む)。サーバーに
+            # 切られた締めの本文には分け方を付けない。
+            closing_output_phases=None if text_stream_error else pending_output_phases,
             final_stream_error=text_stream_error,
         )
     except (ExecutionCancelledException, BeatGateClosedError) as exc:
@@ -4166,6 +4967,14 @@ async def _decide_spell_args_via_playbook(
         # 同じ返事の中の仕事なので、返事の始まりに決めたモデルと接続を引き継ぐ
         "_model_binding": outer_state.get("_model_binding"),
     }
+    # 呼び出し元の列のリアルタイムスペルの状態を引き継ぐ (run_playbook スペルと
+    # 同じ口 — sea/runtime_context.realtime_spell_handover)。器 (実行済みの状態と
+    # 結果) は上の PulseContext に載っている。ON のモデルでは同じ Pulse の中で
+    # 一度だけ実行し、OFF では今までどおり子が自分で実行する (docs/intent/
+    # persist_realtime_and_recall.md §4.1)。
+    from sea.runtime_context import realtime_spell_handover
+
+    decider_parent_state.update(realtime_spell_handover(outer_state))
 
     try:
         await asyncio.to_thread(
@@ -4370,9 +5179,14 @@ async def _execute_pre_spells(
         + "\n\n"
         + "\n\n".join(result_lines)
     )
+    # 送る本文と画像は、下で system ロールで保存した記録が次のターンに復元される
+    # のと同じ形にする (復元形の一枚 presented_system_record_content を通し、
+    # 画像も記録に残す)。送ったときと復元したときで違うと、前回の送信が今回の
+    # 送信の先頭と一致しない (docs/intent/persist_realtime_and_recall.md
+    # 不変条件 2 — 全モデル共通の直し、送る並びは変えない)。
     spell_result_msg: Dict[str, Any] = {
         "role": "user",
-        "content": f"<system>{system_body}</system>",
+        "content": presented_system_record_content(system_body),
     }
 
     aggregated_media: List[Dict[str, Any]] = []
@@ -4388,8 +5202,6 @@ async def _execute_pre_spells(
             len(aggregated_media),
         )
 
-    messages.append(spell_result_msg)
-
     pulse_ctx = state.get("_pulse_context")
     if pulse_ctx:
         pulse_ctx.append(PulseLogEntry(
@@ -4399,14 +5211,29 @@ async def _execute_pre_spells(
 
     pulse_id = state.get("_pulse_id")
     try:
-        runtime._store_memory(
+        _stored_pre_id = runtime._store_memory(
             persona, system_body, role="system",
             tags=["conversation", "spell", "pre_spell"],
             pulse_id=pulse_id, playbook_name=playbook.name,
+            # 画像を残すのはリアルタイム情報と自動想起を残すモデルだけ
+            # (persist_realtime_and_recall.md 不変条件 2)。
+            metadata=(
+                {"media": [dict(m) for m in aggregated_media]}
+                if aggregated_media and state.get("_persist_realtime_and_recall")
+                else None
+            ),
             pulse_context=pulse_ctx,
+            return_message_id=True,
         )
+        # 記録の id を送るメッセージにも持たせる — リアルタイム情報と自動想起を
+        # 残すモデルで、このメッセージより後ろに置かれたそのターンのまとまりの
+        # 位置を決める発言になる (次のターンも記録のすぐ後ろに出る)。
+        if _stored_pre_id:
+            spell_result_msg["id"] = str(_stored_pre_id)
     except Exception:
         LOGGER.exception("[sea][pre_spells] Failed to persist pre-spell results to SAIMemory")
+
+    messages.append(spell_result_msg)
 
     _at = state.get("_activity_trace")
     if isinstance(_at, list):
@@ -4427,7 +5254,19 @@ async def _execute_realtime_spells(
     executes each spell synchronously via _run_spell_tool_async, and appends
     the results to the existing __realtime_context__ message in state["_messages"].
 
-    Unlike pre_spells, results are NOT stored in SAIMemory (they're volatile context).
+    Unlike pre_spells, results are NOT stored in SAIMemory (they're volatile context)
+    — 例外はモデル設定 ``cache.persist_realtime_and_recall`` を ON にしたモデル
+    (docs/intent/persist_realtime_and_recall.md)。そのモデルの送る列では、結果は
+    そのターンのリアルタイム情報と自動想起のまとまり (送る列の一番後ろ) に足され、
+    まとまりが無ければ一番後ろに作られる。まとまりは送る直前に固定され、生成が
+    正常に完了した後に、結果 (画像を含む) ごと送った文面のまま一行残される
+    (:func:`_persist_turn_realtime_and_recall`)。このとき結果は SAIMemory の
+    ``perception_batches`` に入り、次のターン以降も同じ位置に送られる。もう
+    送ったまとまりには足さない (別の末尾のメッセージに置き、保存しない)。
+    実行は同じ Pulse の中で一度だけで、結果 (本文と画像) を器
+    (``state["_realtime_spells_once"]``) に残す — 実行しなかった親・子の列には
+    lg_llm_node が :func:`_deliver_realtime_spell_result` で同じ結果を届ける。
+    OFF のモデルの列には器が無く、今までどおり Playbook ごとに実行する。
     """
     messages = state.get("_messages")
     if not isinstance(messages, list):
@@ -4514,16 +5353,127 @@ async def _execute_realtime_spells(
     if not result_sections and not aggregated_media:
         return
 
-    # Find the existing __realtime_context__ message and append results
-    realtime_idx = None
-    for i, msg in enumerate(messages):
-        if msg.get("metadata", {}).get("__realtime_context__"):
-            realtime_idx = i
-            break
-
     new_content = "\n".join(f"- {s}" for s in result_sections)
+    # 器へ結果を残す (残すモデルの列だけ — 器は OFF の列には無い)。実行しなかった
+    # 側へ届ける写しなので、ここで置く辞書とは共有しない。
+    once = state.get("_realtime_spells_once")
+    if isinstance(once, dict):
+        once["result"] = {
+            "content": new_content,
+            "media": [dict(m) if isinstance(m, dict) else m for m in aggregated_media],
+        }
+    _place_realtime_spell_result(state, messages, new_content, aggregated_media)
+    LOGGER.debug("[sea][realtime_spells] Injected %d result(s) into realtime context", len(result_sections))
 
-    if realtime_idx is not None:
+
+def _deliver_realtime_spell_result(state: dict) -> None:
+    """同じ Pulse の別の Playbook が実行したリアルタイムスペルの結果を、この列に届ける。
+
+    docs/intent/persist_realtime_and_recall.md §4.1。残すモデルの列だけで呼ぶ
+    (器 ``state["_realtime_spells_once"]`` を持つのはその列だけ)。置き方は
+    実行した側と同じ一枚 (:func:`_place_realtime_spell_result`) — そのターンの
+    まとまりに入れ、まとまりが無ければ一番後ろに作り、もう送ったまとまりには
+    足さない。
+
+    この Pulse が残した行 (実行した側が先に生成を終えて保存したもの) が既に
+    この列にあるときは届けない — 結果はその行に入っていて、二度並べることになる
+    (文脈を組み直す子が、親の保存の後に走ったとき)。
+    """
+    messages = state.get("_messages")
+    if not isinstance(messages, list):
+        return
+    once = state.get("_realtime_spells_once")
+    result = once.get("result") if isinstance(once, dict) else None
+    if not isinstance(result, dict):
+        return
+    new_content = str(result.get("content") or "")
+    media = [
+        dict(m) if isinstance(m, dict) else m for m in (result.get("media") or [])
+    ]
+    if not new_content and not media:
+        return
+    pulse_id = state.get("_pulse_id")
+    if pulse_id:
+        from sea.runtime_context import REALTIME_AND_RECALL_PULSE_ID_KEY
+
+        for msg in messages:
+            meta = msg.get("metadata") if isinstance(msg, dict) else None
+            if isinstance(meta, dict) and meta.get(
+                REALTIME_AND_RECALL_PULSE_ID_KEY
+            ) == str(pulse_id):
+                LOGGER.debug(
+                    "[sea][realtime_spells] this pulse's kept block is already in "
+                    "the list; not delivering the realtime spell results again",
+                )
+                return
+    _place_realtime_spell_result(state, messages, new_content, media)
+    LOGGER.debug(
+        "[sea][realtime_spells] delivered the realtime spell results of this pulse "
+        "(executed by another playbook) into this list",
+    )
+
+
+def _place_realtime_spell_result(
+    state: dict,
+    messages: List[Dict[str, Any]],
+    new_content: str,
+    aggregated_media: List[Dict[str, Any]],
+) -> None:
+    """リアルタイムスペルの結果 (本文の行と画像) を送る列に置く。
+
+    実行した側 (:func:`_execute_realtime_spells`) と、届けを受ける側
+    (:func:`_deliver_realtime_spell_result`) が同じこの一枚を通る — 置き方が
+    二通りあると、同じ結果が送信ごとに違う文面になる。
+    """
+    persona_id = getattr(state.get("_persona_obj"), "persona_id", None)
+    # リアルタイム情報と自動想起を残すモデル (docs/intent/persist_realtime_and_recall.md
+    # §4.1): 結果はそのターンのまとまりに足す。まとまりが無ければ送る列の
+    # 一番後ろに作る (最新の発言の直前ではない)。
+    from sea.runtime_context import (
+        add_realtime_spell_lines_to_turn_message,
+        build_turn_realtime_and_recall_message,
+        find_turn_realtime_and_recall_index,
+    )
+    turn_idx = find_turn_realtime_and_recall_index(messages)
+    target_msg: Optional[Dict[str, Any]] = None
+    realtime_idx = None
+    if turn_idx is not None:
+        if add_realtime_spell_lines_to_turn_message(messages[turn_idx], new_content):
+            target_msg = messages[turn_idx]
+        else:
+            # もう LLM へ送ったまとまりは不変 (§4.1)。実行と届けは列の最初の
+            # LLM ノードの送信より前に済むので、ここへ来るのは器を引き継がない
+            # 経路でスペルが送信の後に走ったときだけのはず — 結果は別の末尾の
+            # メッセージに置き、保存しない (まとまりの印を付けないので、保存の
+            # 対象にも次の追記先にもならない)。
+            LOGGER.warning(
+                "[sea][realtime_spells] this turn's block was already sent; "
+                "placing the results in a separate trailing message that is "
+                "not kept (persona=%s)", persona_id,
+            )
+            target_msg = {
+                "role": "user",
+                "content": f"<system>\n## リアルタイム情報\n{new_content}\n</system>",
+                "metadata": {},
+            }
+            messages.append(target_msg)
+    elif state.get("_persist_realtime_and_recall"):
+        # 作り方 (見出しと行の形) は下の OFF の「無ければ作る」と同じ文面。
+        target_msg = build_turn_realtime_and_recall_message(
+            {"content": f"<system>\n## リアルタイム情報\n{new_content}\n</system>"},
+            None,
+        )
+        messages.append(target_msg)
+    else:
+        # Find the existing __realtime_context__ message and append results
+        for i, msg in enumerate(messages):
+            if msg.get("metadata", {}).get("__realtime_context__"):
+                realtime_idx = i
+                break
+
+    if target_msg is not None:
+        pass  # 残すモデルのまとまりに足し終えた
+    elif realtime_idx is not None:
         if new_content:
             existing_content = messages[realtime_idx].get("content", "")
             # Insert before closing </system> tag
@@ -4569,8 +5519,6 @@ async def _execute_realtime_spells(
             "[sea][realtime_spells] Attached %d media item(s) from realtime spell results",
             len(aggregated_media),
         )
-
-    LOGGER.debug("[sea][realtime_spells] Injected %d result(s) into realtime context", len(result_sections))
 
 
 def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
@@ -4620,12 +5568,26 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         # Runs at most once per Pulse (gated by _realtime_spells_executed), and only
         # when the persona's spell system is enabled — SPELL_ENABLED=false must stop
         # this auto-execution path too, not just LLM-invoked spells (Spell 監査 P1).
+        # リアルタイム情報と自動想起を残すモデルの列では、実行済みの状態と結果を
+        # 子の Playbook と器 (``_realtime_spells_once`` — Pulse に一つで PulseContext
+        # に置かれ、どの子の入口からも同じ器に届く。sea/runtime_graph.
+        # compile_with_langgraph) で
+        # 共有する: 同じ Pulse の中で一度だけ実行し、実行しなかった側 (親・子、
+        # 実行順は問わない) には同じ結果をそのターンのまとまりに入れて届ける
+        # (docs/intent/persist_realtime_and_recall.md §4.1)。OFF のモデルの列には
+        # 器が無く、今までどおり Playbook ごとに実行する。
         if state.get("_spell_enabled") and not state.get("_realtime_spells_executed"):
             state["_realtime_spells_executed"] = True
+            _rt_once = state.get("_realtime_spells_once")
             try:
-                await _execute_realtime_spells(
-                    runtime, persona, building_id, state, event_callback,
-                )
+                if isinstance(_rt_once, dict) and _rt_once.get("executed"):
+                    _deliver_realtime_spell_result(state)
+                else:
+                    if isinstance(_rt_once, dict):
+                        _rt_once["executed"] = True
+                    await _execute_realtime_spells(
+                        runtime, persona, building_id, state, event_callback,
+                    )
             except Exception:
                 LOGGER.exception("[sea][realtime_spells] Realtime spell execution failed; continuing")
 
@@ -4661,6 +5623,13 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         # ノードの Beat が死んだときの補填 (`_backfill_memory_on_beat_death`) が
         # 「もう書かれた」と誤認して黙る。Beat の入り口で必ず倒す。
         state.pop("_beat_memorized", None)
+        # 書いた行の id も同じ理由で倒す — 前のノードの id をこのノードの返事に
+        # 載せると、送る `messages`の返事が別の行を名乗る。
+        state.pop(BEAT_MEMORY_ID_KEY, None)
+        # 前のノードが記憶に保存しなかった返事 (`_unstored_reply`) も倒す — 残すと、
+        # このノードの後ろの MEMORIZE / SPEAK / THINK が、前のノードの返事の dict に
+        # 行の id を載せうる (このノードの返事は `_finalize_beat` が改めて書く)。
+        clear_unstored_reply(state)
         # 「建物にはあるが記憶に無い本文」の受け渡しも同じ理由で入り口で倒す —
         # 前のノードの本文を、このノードの Beat の補填が書いてしまう。
         state.pop(BEAT_BODY_UNMEMORIZED_KEY, None)
@@ -5107,6 +6076,20 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         messages.insert(0, {"role": "system", "content": _model_sys_prompt})
                     LOGGER.debug("[sea] Injected model-specific system prompt for %s", _model_config_key)
 
+            # 前駆刻印の材料 (sea/message_stamp.py) を、これから送る `messages`に合わせる。
+            # 送る `messages`はここで確定する — この後の 4 経路 (ツールあり・なし ×
+            # ストリーミング・同期、構造化出力は同期の中) はどれもこの
+            # ``messages`` をそのまま最初の送信に使い、スペルループもこの列に周の
+            # 発言を積み足していく (周の行は append_presented_message_id で列を
+            # 伸ばす)。材料が無い (state["last"] を書き換えうるノードの後で
+            # compile_playbook が落とした後) なら送る `messages`から
+            # 作り直し、材料がある回は中身を変えずに、送る `messages`で末尾より後ろにある
+            # 記録の行 (同じ Playbook の前の LLM ノードが書いた返事) だけを足す。
+            # 数えるのはこの ``messages`` (クライアントへ渡す前) の行で、各クライアントが
+            # 送る直前に行う変換 (本文の空な行を落とす等) は見ない — predecessor_message_id
+            # の定義は SAIVerse が組んだ `messages` の段階 (sea/message_stamp.py)。
+            sync_presented_message_ids_with_sent(state, messages)
+
             # Check if tools are available for this node
             available_tools = getattr(node_def, "available_tools", None)
             LOGGER.info("[DEBUG] available_tools = %s", available_tools)
@@ -5145,6 +6128,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # 画面イベントに載せる部屋 (契約 5)。この経路は下書き行を
                     # 使わないので、生成を始めた時点の現在地が吹き出しの居場所。
                     _tool_stream_bid = runtime._effective_building_id(persona, building_id)
+                    _freeze_turn_block_before_send(messages, state)
                     for stream_attempt in range(max_stream_retries):
                         text_chunks: list[str] = []
                         stream_iter = llm_client.generate_stream(
@@ -5152,6 +6136,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             tools=tools_spec,
                             temperature=runtime._default_temperature(persona),
                             **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                            **_continuous_cache_kwargs(state, persona, building_id),
                         )
                         try:
                             for chunk in stream_iter:
@@ -5212,6 +6197,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     _tool_reasoning_text, _tool_reasoning_details = _consume_reasoning(
                         llm_client, state,
                     )
+                    _tool_output_phases = _consume_output_phases(llm_client, state)
 
                     # Record usage
                     llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
@@ -5223,6 +6209,16 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     tool_detection = llm_client.consume_tool_detection()
                     LOGGER.info("[DEBUG] Tool detection after streaming: %s",
                                tool_detection.get("type") if tool_detection else None)
+                    # 生成の正常な完了 = ユーザーに止められず、本文か tool call を
+                    # 得た (空応答のやり直しの打ち切り・本文の無い中断は除く)。
+                    if not cancelled_during_stream and (
+                        text.strip()
+                        or (
+                            tool_detection
+                            and tool_detection.get("type") in ("tool_call", "both")
+                        )
+                    ):
+                        _note_generation_completed(runtime, persona, state)
 
                     # Use tool_detection as the result for the common tool branching below
                     if tool_detection and tool_detection.get("type") in ("tool_call", "both"):
@@ -5333,17 +6329,25 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
                 else:
                     # ── Synchronous tool mode (original) ──
+                    _freeze_turn_block_before_send(messages, state)
                     result = llm_client.generate(
                         messages,
                         tools=tools_spec,
                         temperature=runtime._default_temperature(persona),
                         **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                        **_continuous_cache_kwargs(state, persona, building_id),
                     )
+                    if isinstance(result, dict) and (
+                        result.get("type") in ("tool_call", "both")
+                        or str(result.get("content") or "").strip()
+                    ):
+                        _note_generation_completed(runtime, persona, state)
 
                     # Consume reasoning (thinking) from tool-mode LLM call
                     _tool_reasoning_text, _tool_reasoning_details = _consume_reasoning(
                         llm_client, state,
                     )
+                    _tool_output_phases = _consume_output_phases(llm_client, state)
 
                     # Record usage
                     # (この経路は llm_usage_metadata を使わない — 戻り値は捨てる)
@@ -5405,6 +6409,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     action_text=prompt,
                     initial_reasoning_text=_tool_reasoning_text,
                     initial_reasoning_details=_tool_reasoning_details,
+                    initial_output_phases=_tool_output_phases,
                 )
                 _spell_continuation = _spell_result.final_continuation
                 _spell_loop_count = _spell_result.loop_count
@@ -5416,6 +6421,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     _tool_reasoning_details = _spell_result.closing_reasoning_details
                     _store_reasoning_in_state(
                         state, _tool_reasoning_text, _tool_reasoning_details,
+                    )
+                    _store_output_phases_in_state(
+                        state, _spell_result.closing_output_phases,
                     )
                     # result.content は後段で state[text_key]/text に入り
                     # SAIMemory に保存される。建物と画面へ出すのは下の
@@ -5669,12 +6677,14 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "downstream finalize will be skipped — placeholder leak risk",
                         )
 
+                    _freeze_turn_block_before_send(messages, state)
                     for stream_attempt in range(max_stream_retries):
                         stream_iter = llm_client.generate_stream(
                             messages,
                             tools=[],
                             temperature=runtime._default_temperature(persona),
                             **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                            **_continuous_cache_kwargs(state, persona, building_id),
                         )
                         _initial_text, pipeline_sub_seq, _initial_spell_detected, _initial_cancelled = await _consume_pipeline_stream(
                             stream_iter,
@@ -5775,6 +6785,13 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             )
                         pipeline_finalized = True
 
+                    # 生成の正常な完了 = ユーザーに止められず、本文を得た。
+                    # 空応答のやり直しの打ち切り・本文の無い中断 (504 等) は
+                    # 本文が空なのでここを通らない。サーバーに途中で切られても
+                    # 本文を得ていれば、その本文が返事として残るので完了に数える。
+                    if not cancelled_during_stream and text.strip():
+                        _note_generation_completed(runtime, persona, state)
+
                     # Record usage (even if cancelled — tokens were consumed)
                     llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
                         runtime, llm_client, persona, building_id,
@@ -5784,6 +6801,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # Consume reasoning (thinking) from LLM — store as metadata, not in content
                     # （state への格納は Spell ループ後にまとめて行う）
                     reasoning_text, reasoning_details = _consume_reasoning(llm_client)
+                    output_phases = _consume_output_phases(llm_client)
 
                     # 2026-05-20: Gemini 3.x の thoughtSignature を stream 完了後に保持。
                     # ストリーム経路は最後の chunk まで読まないと signature が確定しない
@@ -5845,6 +6863,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         initial_reasoning_text=reasoning_text,
                         initial_reasoning_details=reasoning_details,
                         initial_stream_error=_initial_stream_error,
+                        initial_output_phases=output_phases,
                     )
                     _continuation_ns = _spell_result_ns.final_continuation
                     _spell_loop_count_ns = _spell_result_ns.loop_count
@@ -5862,6 +6881,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         # memorize が読む state) をその分へ揃える。
                         reasoning_text = _spell_result_ns.closing_reasoning_text
                         reasoning_details = _spell_result_ns.closing_reasoning_details
+                        output_phases = _spell_result_ns.closing_output_phases
 
                     # 下書き行の追跡を、ループが切り替えた最新の値に合わせる。
                     # 漏らすと、この後の確定と Beat 死亡時の後始末が最初の行
@@ -6367,17 +7387,25 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # (スペルが走った回は reasoning_text が最終周の分に差し替わって
                     #  いる。格納は置き換え意味論なので、スペルの有無で同じ扱い)
                     _store_reasoning_in_state(state, reasoning_text, reasoning_details)
+                    _store_output_phases_in_state(state, output_phases)
                 else:
                     # Non-streaming mode
                     LOGGER.debug("[sea][llm] Calling llm_client.generate() with response_schema=%s", response_schema is not None)
+                    _freeze_turn_block_before_send(messages, state)
                     text = llm_client.generate(
                         messages,
                         tools=[],
                         temperature=runtime._default_temperature(persona),
                         response_schema=response_schema,
                         **runtime._get_cache_kwargs(getattr(persona, "persona_id", None)),
+                        **_continuous_cache_kwargs(state, persona, building_id),
                     )
                     LOGGER.debug("[sea][llm] llm_client.generate() returned: type=%s, len=%s, repr=%s", type(text).__name__, len(text) if isinstance(text, str) else "(not str)", repr(text)[:200] if isinstance(text, str) else text)
+                    # 生成の正常な完了 = 本文 (構造化出力なら空でない値) を得た。
+                    if (isinstance(text, str) and text.strip()) or (
+                        not isinstance(text, str) and text
+                    ):
+                        _note_generation_completed(runtime, persona, state)
 
                     # Record usage
                     llm_usage_metadata: Dict[str, Any] | None = _record_llm_usage(
@@ -6388,6 +7416,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # Consume reasoning (thinking) from LLM — store as metadata
                     # （state への格納は Spell ループ後にまとめて行う）
                     reasoning_text, reasoning_details = _consume_reasoning(llm_client)
+                    output_phases = _consume_output_phases(llm_client)
 
                     # ── Spell loop (parallel execution per round) ──
                     _bubble1_emitted_early_sync = ""
@@ -6426,6 +7455,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             initial_llm_usage=llm_usage_metadata,
                             initial_reasoning_text=reasoning_text,
                             initial_reasoning_details=reasoning_details,
+                            initial_output_phases=output_phases,
                         )
                         _continuation_sync = _spell_result_sync.final_continuation
                         _spell_loop_count_sync = _spell_result_sync.loop_count
@@ -6437,6 +7467,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             # 経路と対称)。
                             reasoning_text = _spell_result_sync.closing_reasoning_text
                             reasoning_details = _spell_result_sync.closing_reasoning_details
+                            output_phases = _spell_result_sync.closing_output_phases
                     else:
                         # text is dict (from structured output) - skip spell processing
                         LOGGER.debug("[sea][llm] text is dict (structured output), skipping spell processing")
@@ -6544,6 +7575,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     # (スペルが走った回は reasoning_text が最終周の分に差し替わって
                     #  いる。格納は置き換え意味論なので、スペルの有無で同じ扱い)
                     _store_reasoning_in_state(state, reasoning_text, reasoning_details)
+                    _store_output_phases_in_state(state, output_phases)
 
                 runtime._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                 schema_consumed = runtime._process_structured_output(node_def, text, state)

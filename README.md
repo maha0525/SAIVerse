@@ -352,7 +352,6 @@ python test_fixtures/test_api.py --quick   # クイックテスト（LLM除く�
 - [インストール](./docs/getting-started/installation.md) - 環境構築の詳細手順
 - [クイックスタート](./docs/getting-started/quickstart.md) - 起動と初期操作
 - [設定](./docs/getting-started/configuration.md) - 環境変数・モデル設定
-- [GPU セットアップ](./docs/getting-started/gpu-setup.md) - Embedding高速化
 - [基本概念](./docs/concepts/) - アーキテクチャ・City/Building・ペルソナ
 - [ユーザーガイド](./docs/user-guide/) - UIの使い方
 - [機能詳細](./docs/features/) - 各機能の詳細解説

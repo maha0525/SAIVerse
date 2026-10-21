@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from llm_clients.base import usage_event_time
 from saiverse import clock
 from saiverse.usage_tracker import get_usage_tracker
 from sea.mcp_tool_refresh import refresh_mcp_tools_at_head
@@ -140,6 +141,11 @@ class SessionCloseContext:
     rounds_used: int
     ended_reason: str
     final_continuation: str
+    final_output_phases: Any = None
+    """``final_continuation`` を作った呼び出しが報告したメッセージごとの分け方
+    (llm_clients.output_phases)。記録に保存した締めの発言と同じ分け方で、
+    締めフックが積む発言を送らせるために渡す
+    (docs/issues/codex_output_phase_passback.md)。"""
 
 
 def run_work_session(
@@ -300,7 +306,9 @@ def run_work_session(
         # 先に来るので、閉じた関所の陰で課金だけ発生することもない)。manager に
         # beat_gate が無いテスト環境では no-op。
         from sea.beat_gate import hold_beat
+        from llm_clients.output_phases import OUTPUT_PHASES_METADATA_KEY
         from sea.runtime_llm import (
+            _consume_output_phases,
             _consume_reasoning,
             _parse_spell_lines,
             _run_spell_loop,
@@ -476,6 +484,7 @@ def run_work_session(
             _initial_reasoning_text, _initial_reasoning_details = _consume_reasoning(
                 llm_client,
             )
+            _initial_output_phases = _consume_output_phases(llm_client)
             text = _extract_text(initial_result)
             try:
                 runtime._dump_llm_io(
@@ -501,6 +510,7 @@ def run_work_session(
                 max_rounds=budget_rounds,
                 initial_reasoning_text=_initial_reasoning_text,
                 initial_reasoning_details=_initial_reasoning_details,
+                initial_output_phases=_initial_output_phases,
             ))
             # 作業セッションは speak=false なので、周ごとの本文 (BeatSegment) は
             # 建物へ出さない — 生ログはループが SAIMemory へ記録済み。ここで使うのは
@@ -544,6 +554,12 @@ def run_work_session(
                     _closing_metadata["reasoning_details"] = (
                         _spell_result.closing_reasoning_details
                     )
+                # 締めの本文のメッセージごとの分け方 (本文と結合が一致しなければ
+                # _store_memory が落とす)。
+                if _spell_result.closing_output_phases is not None:
+                    _closing_metadata[OUTPUT_PHASES_METADATA_KEY] = (
+                        _spell_result.closing_output_phases
+                    )
                 runtime._store_memory(
                     persona, continuation, role="assistant",
                     tags=[RAW_LOG_TAG], pulse_id=pulse_id,
@@ -584,6 +600,7 @@ def run_work_session(
                         rounds_used=rounds_used,
                         ended_reason=ended_reason,
                         final_continuation=continuation or "",
+                        final_output_phases=_spell_result.closing_output_phases,
                     ))
                 except Exception:
                     LOGGER.warning(
@@ -793,6 +810,7 @@ def _record_llm_usage(
     if not usage:
         return
     persona_id = getattr(persona, "persona_id", None)
+    event_time = usage_event_time(usage)
     get_usage_tracker().record_usage(
         model_id=usage.model,
         input_tokens=usage.input_tokens,
@@ -800,6 +818,7 @@ def _record_llm_usage(
         cached_tokens=usage.cached_tokens,
         cache_write_tokens=usage.cache_write_tokens,
         cache_ttl=usage.cache_ttl,
+        timestamp=event_time,
         persona_id=persona_id,
         building_id=building_id,
         node_type=node_type,
@@ -812,6 +831,7 @@ def _record_llm_usage(
     cost = calculate_cost(
         usage.model, usage.input_tokens, usage.output_tokens,
         usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl,
+        at=event_time,
     )
     runtime._accumulate_usage(
         state, usage.model, usage.input_tokens, usage.output_tokens, cost,

@@ -46,6 +46,14 @@ const nextConfig: NextConfig = {
             bodySizeLimit: '5000mb',
         },
         proxyClientMaxBodySize: '5000mb',
+        // rewrites の中継が裏のバックエンドとの間に張るソケットの無活動タイムアウト。
+        // 未設定だと Next.js が 30 秒にする (next/dist/server/lib/router-utils/
+        // proxy-request.js の `proxyTimeout || 30000`)。ペルソナまるごとパックの
+        // 出力など、返事の最初のバイトまで数分黙る API が 30 秒で切られ、画面には
+        // 500 だけが出ていた (docs/issues/persona_pack_export_fails_via_ui_relay.md)。
+        // 値は「バイトが一切流れない時間」の上限であって、リクエスト全体の長さでは
+        // ない。本当に死んだバックエンドへの接続を手放すための安全弁として 1 時間。
+        proxyTimeout: 3_600_000,
     },
 };
 

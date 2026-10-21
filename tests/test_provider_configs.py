@@ -49,7 +49,7 @@ def credential_test_network(mock_provider_network):
     mock_provider_network(
         "example.com", "example.org", "api.moonshot.cn", "api.openai.com",
         "api.platform.preferredai.jp", "api.typesafe.ai", "api.sakana.ai",
-        "openrouter.ai", "integrate.api.nvidia.com",
+        "openrouter.ai", "integrate.api.nvidia.com", "api.sarashina.ai",
     )
 
 

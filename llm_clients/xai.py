@@ -30,6 +30,7 @@ from .exceptions import (
     ServerError,
 )
 from .utils import (
+    attachment_limit_is_off,
     compute_allowed_attachment_keys,
     content_to_text,
     image_summary_note,
@@ -132,17 +133,26 @@ def _build_xai_messages(
     """
     from xai_sdk.chat import assistant, image, system, user
 
-    max_image_embeds = parse_attachment_limit("XAI")
+    # リアルタイム情報と自動想起を残すモデルの列では上限を使わない
+    # (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY)。
+    max_image_embeds = (
+        None if attachment_limit_is_off(messages) else parse_attachment_limit("XAI")
+    )
 
     # Pre-scan for image attachments
     attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
     exempt_indices: set = set()
+    skip_summary_indices: set = set()
     for idx, msg in enumerate(messages):
         if not isinstance(msg, dict):
             continue
         metadata = msg.get("metadata")
         if isinstance(metadata, dict) and metadata.get("__visual_context__"):
             exempt_indices.add(idx)
+        # 画像の概要を作る依頼そのものには概要を作らせない (再帰の防止。
+        # saiverse/media_summary.py が付ける印で、他のクライアントも同じ扱い)
+        if isinstance(metadata, dict) and metadata.get("__skip_image_summary__"):
+            skip_summary_indices.add(idx)
         media_items = iter_image_media(metadata)
         if media_items:
             attachment_cache[idx] = media_items
@@ -163,19 +173,22 @@ def _build_xai_messages(
         raw_content = msg.get("content", "")
         text = content_to_text(raw_content)
 
-        # Skip empty messages (except tool role)
-        if not text and role in ("system", "user", "assistant"):
+        # 本文の空の system / assistant は捨てる。user は画像だけの発言が
+        # ありうるので、画像も画像の説明も無いと分かってから捨てる。
+        if not text and role in ("system", "assistant"):
             continue
 
         if role == "system":
             result.append(system(text))
         elif role == "user":
-            # Build image parts if supported
+            # 画像は埋め込めるものは埋め込み、埋め込まないもの (画像非対応の
+            # モデル・枚数上限の外・読めないファイル) は説明の文を本文へ足す。
+            # Anthropic / OpenAI の組み立てと同じ扱い。
             image_parts: List[Any] = []
             attachments = attachment_cache.get(idx, [])
-            if supports_images and attachments:
+            if attachments:
                 for att_idx, att in enumerate(attachments):
-                    should_embed = (
+                    should_embed = supports_images and (
                         allowed_attachment_keys is None
                         or (idx, att_idx) in allowed_attachment_keys
                     )
@@ -190,17 +203,23 @@ def _build_xai_messages(
                                 image(image_url=f"data:{effective_mime};base64,{b64}")
                             )
                             continue
+                        _log.warning(
+                            "Image file not found or unreadable: %s",
+                            att.get("uri") or att.get("path"),
+                        )
                     # Not embedding — add text summary
                     note = image_summary_note(
                         att["path"], att["mime_type"],
                         att.get("uri", att.get("path", "unknown")),
+                        skip_summary=(idx in skip_summary_indices),
                     )
                     text = f"{text}\n{note}" if text else note
 
-            if image_parts:
-                result.append(user(text, *image_parts))
-            else:
-                result.append(user(text))
+            if not text and not image_parts:
+                continue
+            # 本文が空のとき SDK の user("") は空の文字部品を作るので、画像だけで組む
+            text_parts = [text] if text else []
+            result.append(user(*text_parts, *image_parts))
         elif role == "assistant":
             result.append(assistant(text))
         # tool / tool_result messages are not part of the initial history

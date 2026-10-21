@@ -14,9 +14,11 @@ def _get_genai_module() -> Any:
 def build_gemini_clients(
     *,
     prefer_paid: bool = False,
+    timeout_seconds: float | None = None,
 ) -> tuple[Any | None, Any | None, Any | None]:
     return _shared.build_gemini_clients(
         prefer_paid=prefer_paid,
+        timeout_seconds=timeout_seconds,
         _genai_module=_get_genai_module(),
     )
 

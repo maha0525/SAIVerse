@@ -459,5 +459,146 @@ class AdminAiEditContractTest(unittest.TestCase):
             )
 
 
+class AdminAiRenameSyncsNameTablesTest(unittest.TestCase):
+    """読み込み済みペルソナの改名は、共有の名前の表にも写る。
+
+    ``persona_map`` (表示名→AIID) と ``id_to_name_map`` (AIID→表示名) は起動時に
+    作られ、同席者名の解決 (sea/head_pipeline/sections/building_occupants.py など)
+    が読む。``delete_ai`` は表を維持していたが、改名だけが写していなかった。
+    """
+
+    def setUp(self):
+        from unittest.mock import patch
+
+        from saiverse import persona_model_selection
+
+        reapply = patch.object(
+            persona_model_selection, "reapply_speaking_models",
+            lambda *args, **kwargs: SimpleNamespace(notices=lambda: []),
+        )
+        reapply.start()
+        self.addCleanup(reapply.stop)
+
+        self.engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(self.engine)
+        self.SessionLocal = sessionmaker(bind=self.engine)
+        self.addCleanup(self.engine.dispose)
+
+        db = self.SessionLocal()
+        try:
+            db.add(User(USERID=1, PASSWORD="x", USERNAME="u"))
+            db.flush()
+            db.add(City(CITYID=1, USERID=1, CITY_SLUG="city_a", UI_PORT=3000, API_PORT=8000))
+            db.add(AI(AIID=AI_ID, HOME_CITYID=1, AINAME="Air"))
+            db.commit()
+        finally:
+            db.close()
+
+        self.admin = _make_admin(self.SessionLocal)
+        self.admin.manager = SimpleNamespace(SessionLocal=self.SessionLocal)
+        self.admin.personas = {AI_ID: SimpleNamespace(persona_id=AI_ID, persona_name="Air")}
+        self.admin.persona_map = {"Air": AI_ID}
+        self.admin.id_to_name_map = {AI_ID: "Air"}
+
+    def _update(self, **overrides):
+        kwargs = dict(
+            name="Air", description="desc", system_prompt="prompt", home_city_id=1,
+            default_model=None, lightweight_model=None, autonomy_enabled=True,
+            avatar_path=None, avatar_upload=None,
+        )
+        kwargs.update(overrides)
+        return self.admin.update_ai(AI_ID, **kwargs)
+
+    def test_rename_updates_both_name_tables(self):
+        result = self._update(name="エア")
+
+        self.assertNotIn("Error", result)
+        self.assertEqual(self.admin.personas[AI_ID].persona_name, "エア")
+        self.assertEqual(self.admin.id_to_name_map[AI_ID], "エア")
+        self.assertEqual(self.admin.persona_map, {"エア": AI_ID})
+
+    def test_rename_keeps_another_personas_entry_under_the_old_name(self):
+        """旧名の項目が別のペルソナを指していたら、その項目は外さない。"""
+        other = "other_city_a"
+        self.admin.persona_map["Air"] = other
+        self.admin.id_to_name_map[other] = "Air"
+
+        result = self._update(name="エア")
+
+        self.assertNotIn("Error", result)
+        self.assertEqual(self.admin.persona_map["Air"], other)
+        self.assertEqual(self.admin.persona_map["エア"], AI_ID)
+        self.assertEqual(self.admin.id_to_name_map[AI_ID], "エア")
+        self.assertEqual(self.admin.id_to_name_map[other], "Air")
+
+    def test_saving_the_same_name_leaves_the_tables_untouched(self):
+        result = self._update(name="Air")
+
+        self.assertNotIn("Error", result)
+        self.assertEqual(self.admin.persona_map, {"Air": AI_ID})
+        self.assertEqual(self.admin.id_to_name_map, {AI_ID: "Air"})
+
+    def _add_other(self, ai_id, name, city_id=1):
+        db = self.SessionLocal()
+        try:
+            db.add(AI(AIID=ai_id, HOME_CITYID=city_id, AINAME=name))
+            db.commit()
+        finally:
+            db.close()
+
+    def test_rename_to_another_personas_name_is_refused(self):
+        """同じ街の別のペルソナの名前 (大文字小文字違い含む) へは改名しない。
+        DB も名前の表も変えない — 通すと persona_map の他人の項目を上書きする。"""
+        other = "beta_city_a"
+        self._add_other(other, "Beta")
+        self.admin.persona_map["Beta"] = other
+        self.admin.id_to_name_map[other] = "Beta"
+
+        for clash in ("Beta", "beta"):
+            result = self._update(name=clash)
+            self.assertIn("Error", result)
+            self.assertIn("already exists", result)
+
+        db = self.SessionLocal()
+        try:
+            self.assertEqual(db.query(AI).filter(AI.AIID == AI_ID).first().AINAME, "Air")
+        finally:
+            db.close()
+        self.assertEqual(self.admin.persona_map, {"Air": AI_ID, "Beta": other})
+        self.assertEqual(self.admin.personas[AI_ID].persona_name, "Air")
+
+    def test_rename_to_a_name_used_only_in_another_city_is_allowed(self):
+        db = self.SessionLocal()
+        try:
+            db.add(City(CITYID=2, USERID=1, CITY_SLUG="city_b", UI_PORT=3001, API_PORT=8001))
+            db.commit()
+        finally:
+            db.close()
+        self._add_other("beta_city_b", "Beta", city_id=2)
+
+        result = self._update(name="Beta")
+
+        self.assertNotIn("Error", result)
+        self.assertEqual(self.admin.persona_map["Beta"], AI_ID)
+
+    def test_case_only_rename_of_itself_is_allowed(self):
+        result = self._update(name="AIR")
+
+        self.assertNotIn("Error", result)
+        self.assertEqual(self.admin.persona_map, {"AIR": AI_ID})
+
+    def test_saving_other_fields_is_not_blocked_by_an_existing_duplicate(self):
+        """既に DB にある重複 (この検査より前の世界) は、名前も街も変えない保存を止めない。"""
+        self._add_other("air2_city_a", "Air")
+
+        result = self._update(name="Air", description="new desc")
+
+        self.assertNotIn("Error", result)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -233,6 +233,12 @@ class LlamaCachedClient(LLMClient):
     def _store_reasoning_details(self, details: Any) -> None:
         self._inner._store_reasoning_details(details)
 
+    def consume_output_phases(self) -> Optional[List[Dict[str, Any]]]:
+        return self._inner.consume_output_phases()
+
+    def _store_output_phases(self, value: Optional[List[Dict[str, Any]]]) -> None:
+        self._inner._store_output_phases(value)
+
     def consume_thought_signature(self) -> Optional[str]:
         return self._inner.consume_thought_signature()
 

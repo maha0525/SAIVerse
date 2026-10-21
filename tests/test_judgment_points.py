@@ -2125,6 +2125,8 @@ def test_post_session_transcript_is_call_local(manager, task_refs):
     paired = jctx["paired_situation_text"]
     assert episode_ref in paired
     assert "episode_read" in paired
+    # 案内は正式な呼び出し書式で書く (spell_invocation_contract.md)
+    assert f"/spell name='episode_read' args={{\"episode\": \"{episode_ref}\"}}" in paired
     assert "本文を書く。" not in paired          # 原本は保存側に載らない
     assert "文書「下書き」" not in paired
 

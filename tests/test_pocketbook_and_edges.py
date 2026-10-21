@@ -10,6 +10,7 @@
 import sqlite3
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 from sai_memory.memory import continuity, pocketbook, recall_edges
@@ -506,6 +507,205 @@ class TestMemosIdemKeyBackfill(unittest.TestCase):
             conn, 1, "2026-08-19", "did", "新しいメモ (再試行)",
             idem_key="run-1:op-1")
         self.assertEqual(m2.id, m1.id)
+
+
+class TestPocketbookUuid(PocketbookTestBase):
+    """activities / memos の uuid 列 (docs/intent/persona_pack.md §3-3 — 環境を
+    跨いで同じ行を同定する照合キー)。新規行は uuid4 を持ち、読み口が返す。"""
+
+    def _assert_uuid4(self, value):
+        self.assertIsInstance(value, str)
+        self.assertEqual(uuid.UUID(value).version, 4)
+
+    def test_new_rows_get_a_uuid_and_readers_return_it(self):
+        act = pocketbook.add_activity(self.conn, "小説を書く", "sluice")
+        self._assert_uuid4(act.uuid)
+        self.assertEqual(pocketbook.get_activity(self.conn, act.id).uuid, act.uuid)
+        self.assertEqual(
+            [a.uuid for a in pocketbook.list_activities(self.conn)], [act.uuid])
+
+        memo = pocketbook.add_memo(self.conn, act.id, "2026-08-19", "want", "続きを書く")
+        self._assert_uuid4(memo.uuid)
+        self.assertEqual(
+            [m.uuid for m in pocketbook.list_memos(self.conn, act.id)], [memo.uuid])
+        self.assertEqual(
+            [m.uuid for m in pocketbook.list_undigested_want_memos(self.conn)],
+            [memo.uuid])
+        self.assertEqual(
+            pocketbook.find_memo_by_content(
+                self.conn, act.id, "2026-08-19", "want", "続きを書く").uuid,
+            memo.uuid)
+
+    def test_each_row_gets_a_distinct_uuid(self):
+        a = pocketbook.add_activity(self.conn, "小説を書く", "sluice")
+        b = pocketbook.add_activity(self.conn, "絵の練習", "sluice")
+        self.assertNotEqual(a.uuid, b.uuid)
+        m1 = pocketbook.add_memo(self.conn, a.id, "2026-08-19", "did", "書いた")
+        m2 = pocketbook.add_memo(self.conn, a.id, "2026-08-20", "did", "書いた")
+        self.assertNotEqual(m1.uuid, m2.uuid)
+
+    def test_get_or_create_and_idem_hit_return_the_stored_uuid(self):
+        """既存行へ収束する経路は、新しく振った値ではなく保存済みの uuid を返す。"""
+        a1 = pocketbook.get_or_create_activity(self.conn, "小説を書く", "sluice")
+        a2 = pocketbook.get_or_create_activity(self.conn, "小説を書く", "sluice")
+        self.assertEqual(a2.uuid, a1.uuid)
+        m1 = pocketbook.add_memo(
+            self.conn, a1.id, "2026-08-19", "did", "書いた", idem_key="run-1:op-1")
+        m2 = pocketbook.add_memo(
+            self.conn, a1.id, "2026-08-19", "did", "書いた", idem_key="run-1:op-1")
+        self.assertEqual(m2.uuid, m1.uuid)
+
+    def test_uuid_is_unique_at_the_db_boundary(self):
+        a = pocketbook.add_activity(self.conn, "小説を書く", "sluice")
+        b = pocketbook.add_activity(self.conn, "絵の練習", "sluice")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute(
+                "UPDATE activities SET uuid = ? WHERE id = ?", (a.uuid, b.id))
+        self.conn.rollback()
+        m1 = pocketbook.add_memo(self.conn, a.id, "2026-08-19", "did", "書いた")
+        m2 = pocketbook.add_memo(self.conn, a.id, "2026-08-20", "did", "書いた")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute(
+                "UPDATE memos SET uuid = ? WHERE id = ?", (m1.uuid, m2.id))
+        self.conn.rollback()
+
+    def test_reinit_does_not_rewrite_existing_uuids(self):
+        act = pocketbook.add_activity(self.conn, "小説を書く", "sluice")
+        memo = pocketbook.add_memo(self.conn, act.id, "2026-08-19", "did", "書いた")
+        self.conn.close()
+        self.conn = init_db(self.db_path)
+        self.assertEqual(pocketbook.get_activity(self.conn, act.id).uuid, act.uuid)
+        self.assertEqual(pocketbook.list_memos(self.conn, act.id)[0].uuid, memo.uuid)
+
+
+class TestPocketbookUuidBackfill(unittest.TestCase):
+    """⭐ 旧スキーマ (uuid 列の無い activities / memos) の既存 DB を init_db で
+    開くと、列と UNIQUE インデックスが足され、既存行に uuid4 が埋まる。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self._tmp.name) / "memory.db")
+
+    def tearDown(self):
+        try:
+            self._tmp.cleanup()
+        except (PermissionError, OSError):
+            pass
+
+    def _make_old_schema_db(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE activities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    born_at INTEGER NOT NULL,
+                    origin TEXT NOT NULL,
+                    closed_at INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE memos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    activity_id INTEGER NOT NULL,
+                    date TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    span_start_id TEXT,
+                    span_end_id TEXT,
+                    idem_key TEXT,
+                    event_date TEXT,
+                    origin TEXT,
+                    FOREIGN KEY (activity_id) REFERENCES activities(id)
+                )
+                """
+            )
+            conn.executemany(
+                "INSERT INTO activities(name, status, born_at, origin) "
+                "VALUES (?, 'open', ?, 'sluice')",
+                [("小説を書く", 100), ("絵の練習", 200)],
+            )
+            conn.executemany(
+                "INSERT INTO memos(activity_id, date, kind, text) VALUES (?, ?, ?, ?)",
+                [(1, "2026-08-18", "did", "一章"), (1, "2026-08-19", "want", "二章"),
+                 (2, "2026-08-18", "did", "スケッチ")],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_columns_and_unique_indexes_are_added(self):
+        self._make_old_schema_db()
+        conn = init_db(self.db_path)
+        self.addCleanup(conn.close)
+        for table in ("activities", "memos"):
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            self.assertIn("uuid", cols)
+            idx = {r[1]: r[2] for r in conn.execute(f"PRAGMA index_list({table})")}
+            self.assertIn(f"idx_{table}_uuid", idx)
+            self.assertEqual(idx[f"idx_{table}_uuid"], 1)  # unique
+
+    def test_existing_rows_are_backfilled_with_distinct_uuid4(self):
+        self._make_old_schema_db()
+        conn = init_db(self.db_path)
+        self.addCleanup(conn.close)
+        acts = pocketbook.list_activities(conn, include_closed=True)
+        memos = pocketbook.list_memos(conn, 1) + pocketbook.list_memos(conn, 2)
+        self.assertEqual(len(acts), 2)
+        self.assertEqual(len(memos), 3)
+        values = [a.uuid for a in acts] + [m.uuid for m in memos]
+        for v in values:
+            self.assertEqual(uuid.UUID(v).version, 4)
+        self.assertEqual(len(set(values)), len(values))
+        # 既存データ自体は変わらない。
+        self.assertEqual([m.text for m in pocketbook.list_memos(conn, 1)], ["一章", "二章"])
+
+    def test_backfill_is_idempotent_and_fills_late_null_rows(self):
+        """再 init は埋め済みの uuid を書き換えず、uuid を渡さない直接の INSERT で
+        入った NULL 行だけを次の init で埋める。"""
+        self._make_old_schema_db()
+        conn = init_db(self.db_path)
+        before = {a.id: a.uuid for a in pocketbook.list_activities(conn, include_closed=True)}
+        conn.execute(
+            "INSERT INTO activities(name, status, born_at, origin) "
+            "VALUES ('散歩', 'open', 300, 'user')"
+        )
+        conn.commit()
+        conn.close()
+
+        conn = init_db(self.db_path)
+        self.addCleanup(conn.close)
+        after = {a.id: a.uuid for a in pocketbook.list_activities(conn, include_closed=True)}
+        for aid, value in before.items():
+            self.assertEqual(after[aid], value)
+        self.assertEqual(len(after), 3)
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM activities WHERE uuid IS NULL").fetchone()[0],
+            0)
+
+    def test_init_inside_callers_transaction_does_not_commit_backfill(self):
+        """init_pocketbook_tables は呼び手の束を確定しない (owns_transaction) —
+        埋めの UPDATE も呼び手の rollback で巻き戻る。"""
+        self._make_old_schema_db()
+        conn = sqlite3.connect(self.db_path)
+        self.addCleanup(conn.close)
+        # 列の後付け (_ensure_column) は自前で確定するので、先に一度済ませて
+        # から埋めだけを呼び手の束の中で走らせる。
+        for table in ("activities", "memos"):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN uuid TEXT")
+        conn.commit()
+        conn.execute("UPDATE activities SET name = name")  # 呼び手の束を開く
+        self.assertTrue(conn.in_transaction)
+        pocketbook.init_pocketbook_tables(conn)
+        self.assertTrue(conn.in_transaction)
+        conn.rollback()
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) FROM activities WHERE uuid IS NULL").fetchone()[0],
+            2)
 
 
 class TestThreadEdges(PocketbookTestBase):

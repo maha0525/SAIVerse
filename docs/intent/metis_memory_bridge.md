@@ -147,7 +147,7 @@ SAIVerse は生ログ（messagelog）と要約（Chronicle/あらすじ）の二
 | **B. 何を同期するか** | user 発話＋**メティスの全テキスト発話（①②両方、順序保持）**＋ツールコール群は `<system>N件実行</system>` に圧縮 | 肥大回避 + ツール本文は情報が薄く人格が載らない。ただし発話は喋った順に全部残す |
 | **C. 境界** | 境界なし・全同期 | メティスの全履歴が歴史。無関係情報の混入はペルソナ会話でも同様で線引きの根拠がない |
 | **読込量** | 最低 1 往復保証 + 最新から 1 万字以内 | Claude Code は 1 メッセージが重い。メッセージ数でなく文字数で縛る |
-| **D. 実装方針** | 自作。hypmem / embodied-claude は参考 | e5-small スタック共通の embodied-claude memory-mcp をコード教科書、hypmem を hooks 構成の雛形に |
+| **D. 実装方針** | 自作。hypmem / embodied-claude は参考 | e5-small スタック共通の embodied-claude memory-mcp をコード教科書、hypmem を hooks 構成の雛形に (2026-10-12 注: SAIVerse 側は EmbeddingGemma 2 へ移行し、e5-small の共通性は無くなった — [embedding_gemma2_migration](embedding_gemma2_migration.md)) |
 | **存在論** | 住人でなく行き来（後で変更可） | §1.4 |
 
 ---

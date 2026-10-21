@@ -2,7 +2,7 @@
 
 SAIVerse が依存する全てのサードパーティコンポーネントのライセンス一覧です。
 
-最終更新: 2026-02-10
+最終更新: 2026-10-12
 
 ---
 
@@ -35,18 +35,14 @@ SearXNG も **AGPL-3.0** ですが、独立したプロセスとして起動し 
 | requests | Apache-2.0 | HTTP クライアント |
 | SQLAlchemy | MIT | ORM / データベースアクセス |
 | uvicorn | BSD-3-Clause | ASGI サーバー |
-| fastembed | Apache-2.0 | 埋め込みベクトル生成 |
+| onnxruntime | MIT | 埋め込みベクトル生成 (想起用モデルの推論) |
+| tokenizers | Apache-2.0 | 埋め込みモデルのトークナイズ |
+| huggingface-hub | Apache-2.0 | 埋め込みモデルのダウンロード |
 | numpy | BSD-3-Clause | 数値計算 |
 | Pillow | HPND | 画像処理 |
 | markdownify | MIT | HTML → Markdown 変換 |
 | pypdf | BSD-3-Clause | PDF 処理 |
 | ruff | MIT | リンター (開発ツール) |
-
-## Python オプション依存
-
-| パッケージ | ライセンス | 用途 | ファイル |
-|---|---|---|---|
-| onnxruntime-gpu | MIT | GPU 推論 (埋め込み高速化) | requirements-gpu.txt |
 
 ## Python 開発・テスト依存
 
@@ -81,8 +77,8 @@ SearXNG も **AGPL-3.0** ですが、独立したプロセスとして起動し 
 | コンポーネント | ライセンス | 用途 | 備考 |
 |---|---|---|---|
 | **SearXNG** | **AGPL-3.0** | Web 検索エンジン | 独立プロセスとして HTTP API 経由で使用。コピーレフト伝播なし |
-| intfloat/multilingual-e5-small | MIT | 埋め込みモデル (デフォルト) | |
-| intfloat/multilingual-e5-base | MIT | 埋め込みモデル (代替) | |
+| google/embeddinggemma-2 | Apache-2.0 | 想起用の埋め込みモデル (元のモデル) | 本体は下の変換物を使う |
+| onnx-community/embeddinggemma-2-ONNX | Apache-2.0 | 想起用の埋め込みモデル (4bit 量子化 ONNX、`model_q4`) | 初回に `sbert/embeddinggemma-2-q4/` へダウンロード。revision 固定 |
 
 ---
 
@@ -90,12 +86,12 @@ SearXNG も **AGPL-3.0** ですが、独立したプロセスとして起動し 
 
 | ライセンス | 種別 | パッケージ数 | 商用利用 | コピーレフト |
 |---|---|---|---|---|
-| MIT | 許容的 | 27 | 可 | なし |
+| MIT | 許容的 | 25 | 可 | なし |
 | BSD-3-Clause | 許容的 | 6 | 可 | なし |
-| Apache-2.0 | 許容的 | 6 | 可 | なし |
+| Apache-2.0 | 許容的 | 9 | 可 | なし |
 | ISC | 許容的 | 1 | 可 | なし |
 | HPND | 許容的 | 1 | 可 | なし |
 | **AGPL-3.0** | **コピーレフト** | **1** | **条件付き** | **強い (ネットワーク条項あり)** |
 
-- 許容的ライセンス (MIT, BSD, Apache, ISC, HPND): **41 パッケージ** — 制約なし
+- 許容的ライセンス (MIT, BSD, Apache, ISC, HPND): **42 パッケージ** — 制約なし
 - コピーレフトライセンス (AGPL-3.0): **1 コンポーネント** — SearXNG (リスク低: 独立プロセスとして使用)

@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ペルソナのデータ地図</title>
+<style>
+  :root {
+    --bg: #f7f6f2;
+    --surface: #ffffff;
+    --surface-2: #f1efe9;
+    --text: #22252b;
+    --text-muted: #5d636e;
+    --border: #d9d6cd;
+
+    --a: #2f66b3;          /* 個人 */
+    --a-soft: #e8f0fb;
+    --a-line: #9dbbe6;
+    --b: #a86a10;          /* 台帳 */
+    --b-soft: #fbf1df;
+    --b-line: #e2bd7c;
+    --c: #2e7d4f;          /* 共有 */
+    --c-soft: #e5f4ea;
+    --c-line: #93cba6;
+    --w: #7a7f88;          /* 世界のもの */
+    --w-soft: #eceef1;
+    --w-line: #c3c7ce;
+
+    --warn: #b3261e;
+    --warn-soft: #fdecea;
+    --warn-line: #f0a8a2;
+
+    --code-bg: #efece4;
+    --shadow: 0 1px 2px rgba(0,0,0,.06), 0 2px 8px rgba(0,0,0,.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17191d;
+      --surface: #20232a;
+      --surface-2: #272b33;
+      --text: #e6e8ec;
+      --text-muted: #a3a9b4;
+      --border: #3a3f49;
+
+      --a: #8db6f0;
+      --a-soft: #1d2a3d;
+      --a-line: #3d5f8f;
+      --b: #e8b45e;
+      --b-soft: #33291a;
+      --b-line: #7a5a26;
+      --c: #7fcf9d;
+      --c-soft: #1a3024;
+      --c-line: #3b6e4e;
+      --w: #a9aeb7;
+      --w-soft: #2a2d33;
+      --w-line: #4a4f58;
+
+      --warn: #f2958d;
+      --warn-soft: #3a1f1d;
+      --warn-line: #7d3a35;
+
+      --code-bg: #2b2f37;
+      --shadow: 0 1px 2px rgba(0,0,0,.4);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", sans-serif;
+    font-size: 16px;
+    line-height: 1.75;
+    overflow-x: hidden;
+  }
+  .page {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 40px 16px 56px;
+  }
+  h1, h2, h3, h4 { line-height: 1.4; margin: 0; }
+  h1 { font-size: 2rem; letter-spacing: .02em; }
+  h2 {
+    font-size: 1.35rem;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--border);
+  }
+  h2 .num {
+    display: inline-block;
+    min-width: 1.8em;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+  h3 { font-size: 1.1rem; }
+  h4 { font-size: 1rem; }
+  p { margin: 0 0 12px; }
+  code, .path {
+    font-family: ui-monospace, "Cascadia Code", Consolas, "Courier New", monospace;
+    font-size: .9em;
+    background: var(--code-bg);
+    padding: 1px 6px;
+    border-radius: 4px;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .muted { color: var(--text-muted); }
+  .small { font-size: .85rem; }
+  .note {
+    display: block;
+    margin-top: 6px;
+    font-size: .78rem;
+    color: var(--text-muted);
+  }
+  .note code { font-size: .95em; }
+
+  /* ---------- 1. リード ---------- */
+  .lead-sub {
+    font-size: 1.15rem;
+    color: var(--text-muted);
+    margin: 6px 0 20px;
+  }
+  .lead-text {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+    box-shadow: var(--shadow);
+  }
+  .lead-text p:last-child { margin-bottom: 0; }
+
+  /* ---------- 2. 全体図: 概観 ---------- */
+  .overview {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+    margin: 8px 0 12px;
+  }
+  .ov {
+    border-radius: 10px;
+    padding: 14px 14px 12px;
+    border: 2px solid;
+    background: var(--surface);
+  }
+  .ov .tag {
+    display: inline-block;
+    font-size: .75rem;
+    font-weight: 700;
+    letter-spacing: .05em;
+    padding: 1px 8px;
+    border-radius: 999px;
+    color: #fff;
+    margin-bottom: 6px;
+  }
+  .ov h3 { font-size: 1.02rem; margin-bottom: 4px; }
+  .ov .path { display: inline-block; font-size: .78rem; margin-bottom: 6px; }
+  .ov p { font-size: .88rem; margin: 0; }
+  .ov.a { border-color: var(--a-line); background: var(--a-soft); }
+  .ov.a .tag { background: var(--a); }
+  .ov.b { border-color: var(--b-line); background: var(--b-soft); }
+  .ov.b .tag { background: var(--b); }
+  .ov.c { border-color: var(--c-line); background: var(--c-soft); }
+  .ov.c .tag { background: var(--c); }
+  @media (prefers-color-scheme: dark) {
+    .ov .tag { color: #111; }
+  }
+  .links {
+    list-style: none;
+    margin: 0 0 8px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    font-size: .9rem;
+  }
+  .links li { margin: 4px 0; }
+  .links .dot {
+    display: inline-block;
+    width: .7em; height: .7em;
+    border-radius: 50%;
+    margin-right: 2px;
+    vertical-align: middle;
+  }
+  .dot.a { background: var(--a); }
+  .dot.b { background: var(--b); }
+  .dot.c { background: var(--c); }
+
+  /* ---------- 2. 全体図: 各ゾーン ---------- */
+  .zone {
+    border-radius: 14px;
+    border: 2px solid;
+    padding: 18px 18px 16px;
+    margin: 22px 0;
+    break-inside: avoid-page;
+  }
+  .zone.a { border-color: var(--a-line); background: var(--a-soft); }
+  .zone.b { border-color: var(--b-line); background: var(--b-soft); }
+  .zone.c { border-color: var(--c-line); background: var(--c-soft); }
+  .zone-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 12px;
+    margin-bottom: 4px;
+  }
+  .zone-head .label {
+    font-size: .8rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    padding: 2px 10px;
+    border-radius: 999px;
+    color: #fff;
+  }
+  .zone.a .label { background: var(--a); }
+  .zone.b .label { background: var(--b); }
+  .zone.c .label { background: var(--c); }
+  @media (prefers-color-scheme: dark) {
+    .zone-head .label { color: #111; }
+  }
+  .zone-head h3 { font-size: 1.2rem; }
+  .zone-path { margin: 4px 0 6px; }
+  .zone-motto {
+    font-weight: 600;
+    margin: 6px 0 14px;
+  }
+  .zone.a .zone-motto { color: var(--a); }
+  .zone.b .zone-motto { color: var(--b); }
+  .zone.c .zone-motto { color: var(--c); }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    box-shadow: var(--shadow);
+    min-width: 0;
+    break-inside: avoid;
+  }
+  .card h4 { margin-bottom: 4px; overflow-wrap: anywhere; }
+  .card p { font-size: .9rem; margin: 0; }
+  .card.key {
+    grid-column: 1 / -1;
+    border-width: 2px;
+    border-color: var(--a-line);
+  }
+  .card.key .badge {
+    display: inline-block;
+    font-size: .72rem;
+    font-weight: 700;
+    color: var(--a);
+    border: 1px solid var(--a-line);
+    border-radius: 999px;
+    padding: 0 8px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .card.old { background: var(--surface-2); border-style: dashed; }
+  .card.old h4 { color: var(--text-muted); }
+  .card a { color: var(--a); }
+
+  /* ゾーン B のグループ */
+  .group {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    break-inside: avoid;
+  }
+  .group-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+    margin-bottom: 8px;
+  }
+  .group-head .gnum {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.7em; height: 1.7em;
+    border-radius: 50%;
+    background: var(--b);
+    color: #fff;
+    font-weight: 700;
+    font-size: .85rem;
+    flex: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    .group-head .gnum { color: #111; }
+  }
+  .group-head h4 { font-size: 1.02rem; }
+  .group-head .hint { font-size: .82rem; color: var(--text-muted); }
+  .group ul { margin: 0; padding-left: 1.2em; }
+  .group li { margin: 3px 0; font-size: .92rem; }
+  .group li .note { display: inline; margin: 0 0 0 4px; }
+
+  .warn-card {
+    border: 2px solid var(--warn-line);
+    background: var(--warn-soft);
+    border-radius: 10px;
+    padding: 12px 16px;
+    break-inside: avoid;
+  }
+  .warn-card h4 { color: var(--warn); margin-bottom: 4px; }
+  .warn-card h4::before {
+    content: "!";
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.4em; height: 1.4em;
+    margin-right: 8px;
+    border-radius: 50%;
+    background: var(--warn);
+    color: var(--surface);
+    font-size: .85rem;
+    vertical-align: 1px;
+  }
+  .warn-card p { margin: 0; font-size: .92rem; }
+
+  .caution {
+    margin-top: 12px;
+    border-left: 4px solid var(--c);
+    background: var(--surface);
+    border-radius: 0 8px 8px 0;
+    padding: 10px 14px;
+    font-size: .92rem;
+  }
+  .caution strong { color: var(--c); }
+
+  /* ---------- 3. memory.db ---------- */
+  .db-frame {
+    border: 2px solid var(--a-line);
+    background: var(--a-soft);
+    border-radius: 14px;
+    padding: 16px;
+  }
+  .db-frame > p { margin-bottom: 14px; }
+  .db-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 12px;
+  }
+  .db-grid .card h4 { color: var(--a); }
+  .card .inside {
+    margin-top: 8px;
+    font-size: .82rem;
+    background: var(--a-soft);
+    border-radius: 6px;
+    padding: 6px 10px;
+  }
+  .card.rebuild { border-style: dashed; }
+  .card.rebuild .flag {
+    display: inline-block;
+    margin-top: 8px;
+    font-size: .78rem;
+    font-weight: 600;
+    color: var(--c);
+    border: 1px solid var(--c-line);
+    border-radius: 999px;
+    padding: 0 8px;
+  }
+  .memopedia-family {
+    grid-column: 1 / -1;
+    border: 2px solid var(--a-line);
+    border-radius: 12px;
+    padding: 12px;
+    background: var(--surface);
+  }
+  .memopedia-family > .fam-title {
+    font-size: .85rem;
+    color: var(--text-muted);
+    margin: 0 0 10px;
+  }
+  .memopedia-family .db-grid .card { box-shadow: none; }
+  .stats {
+    margin-top: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+  }
+  .stats h4 { margin-bottom: 8px; font-size: .95rem; }
+  .stat-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .stat {
+    flex: 1 1 120px;
+    background: var(--a-soft);
+    border-radius: 8px;
+    padding: 6px 10px;
+    text-align: center;
+    min-width: 0;
+  }
+  .stat .n { font-size: 1.4rem; font-weight: 700; color: var(--a); line-height: 1.3; }
+  .stat .l { font-size: .8rem; color: var(--text-muted); }
+
+  /* ---------- 4. 境界のグラデーション ---------- */
+  .bands { display: grid; gap: 0; border-radius: 14px; overflow: hidden; border: 1px solid var(--border); }
+  .band {
+    display: grid;
+    grid-template-columns: 52px minmax(0, 1fr) minmax(0, 220px);
+    align-items: stretch;
+    break-inside: avoid;
+  }
+  .band + .band { border-top: 1px solid var(--surface); }
+  .band .lv {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4rem;
+    font-weight: 800;
+    color: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    .band .lv { color: #111; }
+  }
+  .band .body { padding: 12px 16px; }
+  .band .body h4 { margin-bottom: 2px; }
+  .band .body p { margin: 0; font-size: .9rem; }
+  .band .move {
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    font-size: .9rem;
+    border-left: 1px dashed var(--border);
+  }
+  .band .move .k { font-size: .75rem; color: var(--text-muted); }
+  .band .move .v { font-weight: 700; }
+  .band.l1 { background: var(--a-soft); }
+  .band.l1 .lv { background: var(--a); }
+  .band.l1 .move .v { color: var(--a); }
+  .band.l2 { background: var(--b-soft); }
+  .band.l2 .lv { background: var(--b); }
+  .band.l2 .move .v { color: var(--b); }
+  .band.l3 { background: var(--c-soft); }
+  .band.l3 .lv { background: var(--c); }
+  .band.l3 .move .v { color: var(--c); }
+  .band.l4 { background: var(--w-soft); }
+  .band.l4 .lv { background: var(--w); }
+  .band.l4 .move .v { color: var(--w); }
+  .scale {
+    display: flex;
+    justify-content: space-between;
+    font-size: .8rem;
+    color: var(--text-muted);
+    margin: 0 0 6px;
+  }
+  .scale-bar {
+    height: 8px;
+    border-radius: 999px;
+    margin-bottom: 10px;
+    background: linear-gradient(90deg, var(--a), var(--b), var(--c), var(--w));
+  }
+
+  /* ---------- 5. 現行エクスポート ---------- */
+  .export-map {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+  }
+  .export-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    font-size: .85rem;
+    margin-bottom: 12px;
+  }
+  .export-legend span::before {
+    content: "";
+    display: inline-block;
+    width: 1em; height: 1em;
+    border-radius: 4px;
+    margin-right: 6px;
+    vertical-align: -2px;
+  }
+  .export-legend .yes::before { background: var(--a); }
+  .export-legend .part::before { background: repeating-linear-gradient(45deg, var(--a) 0 4px, transparent 4px 8px); border: 1px solid var(--a); }
+  .export-legend .no::before { background: var(--w-soft); border: 1px solid var(--w-line); }
+  .ex-zone { margin-bottom: 12px; }
+  .ex-zone h4 { font-size: .9rem; margin-bottom: 6px; color: var(--text-muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-size: .82rem;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--w-line);
+    background: var(--w-soft);
+    color: var(--text-muted);
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+  .chip.yes {
+    background: var(--a);
+    border-color: var(--a);
+    color: #fff;
+    font-weight: 700;
+  }
+  .chip.part {
+    background: repeating-linear-gradient(45deg, var(--a-soft) 0 6px, var(--surface) 6px 12px);
+    border: 2px solid var(--a);
+    color: var(--a);
+    font-weight: 700;
+  }
+  @media (prefers-color-scheme: dark) {
+    .chip.yes { color: #111; }
+  }
+  .export-now {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 12px;
+    margin-top: 14px;
+  }
+  .export-now .card h4 { color: var(--a); }
+  .conclusion {
+    margin-top: 16px;
+    padding: 14px 18px;
+    border-radius: 10px;
+    background: var(--surface-2);
+    border-left: 4px solid var(--text-muted);
+  }
+  .conclusion p:last-child { margin-bottom: 0; }
+
+  /* ---------- 6. フッター ---------- */
+  footer {
+    margin-top: 56px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: .82rem;
+    color: var(--text-muted);
+  }
+  footer p { margin: 2px 0; }
+
+  /* ---------- 狭い画面 ---------- */
+  @media (max-width: 720px) {
+    .overview { grid-template-columns: 1fr; }
+    .band { grid-template-columns: 40px minmax(0, 1fr); }
+    .band .move {
+      grid-column: 2;
+      border-left: none;
+      border-top: 1px dashed var(--border);
+      padding-top: 8px;
+    }
+    h1 { font-size: 1.6rem; }
+    .page { padding-top: 28px; }
+  }
+
+  /* ---------- 印刷 ---------- */
+  @media print {
+    :root {
+      --bg: #ffffff;
+      --shadow: none;
+    }
+    body { font-size: 11pt; line-height: 1.6; }
+    .page { max-width: none; padding: 0; }
+    h2 { margin-top: 28px; break-after: avoid; }
+    .zone, .group, .card, .band, .warn-card, .stats { break-inside: avoid; }
+    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ===================== 1. リード ===================== -->
+  <header>
+    <h1>ペルソナのデータ地図</h1>
+    <p class="lead-sub">1 ペルソナは、何を・どこに持っているか</p>
+    <div class="lead-text">
+      <p>SAIVerse のペルソナの情報は、1 か所にまとまっているのではなく、3 つの場所に分かれて保存されています。ペルソナ専用のフォルダ、世界全体の本体データベース、そして全ペルソナが共有するファイル置き場です。</p>
+      <p>この資料は、その 3 つの場所に何が入っているかと、どこまでがその子一人のもので、どこからが世界のものかを示す全体図です。</p>
+    </div>
+  </header>
+
+  <!-- ===================== 2. 全体図 ===================== -->
+  <section id="overview">
+    <h2><span class="num">1</span>全体図 ― 3 つの保存場所</h2>
+    <p class="small muted">パスの先頭の <code>~</code> は、パソコンのユーザーのホームフォルダを表します。</p>
+
+    <div class="overview" role="list">
+      <div class="ov a" role="listitem">
+        <span class="tag">A ・ 個人</span>
+        <h3>ペルソナ専用フォルダ</h3>
+        <span class="path">~/.saiverse/personas/&lt;ペルソナID&gt;/</span>
+        <p>中身は丸ごとその子一人のもの。記憶データベースはここにあります。</p>
+      </div>
+      <div class="ov b" role="listitem">
+        <span class="tag">B ・ 台帳</span>
+        <h3>世界の本体データベース</h3>
+        <span class="path">~/.saiverse/user_data/database/saiverse.db</span>
+        <p>世界全体の台帳。この中に、ペルソナごとの行があります。</p>
+      </div>
+      <div class="ov c" role="listitem">
+        <span class="tag">C ・ 共有</span>
+        <h3>共有のファイル置き場</h3>
+        <span class="path">~/.saiverse/image/ ほか</span>
+        <p>会話に添付された画像・音声・動画の実体は、全ペルソナ共有のここにあります。</p>
+      </div>
+    </div>
+    <ul class="links">
+      <li><span class="dot b"></span> B の台帳には、A のフォルダを持つペルソナ一人ひとりの行があります。</li>
+      <li><span class="dot c"></span> A の記憶データベースは、C のファイルを「リンク」で指しているだけで、ファイルそのものは持っていません。</li>
+    </ul>
+
+    <!-- ゾーン A -->
+    <div class="zone a" id="zone-a">
+      <div class="zone-head">
+        <span class="label">ゾーン A</span>
+        <h3>ペルソナ専用フォルダ</h3>
+      </div>
+      <div class="zone-path"><span class="path">~/.saiverse/personas/&lt;ペルソナID&gt;/</span></div>
+      <p class="zone-motto">この中身は丸ごとその子一人のものです。</p>
+
+      <div class="grid">
+        <div class="card key">
+          <h4>memory.db<span class="badge">最重要</span></h4>
+          <p>memory.db は、ペルソナの記憶が全部入った 1 つのデータベースファイルです。会話の記録、Memopedia、コア記憶、Chronicle、手帳などがこの 1 ファイルに入っています。中身は <a href="#memorydb">2 節</a> で広げて示します。</p>
+        </div>
+        <div class="card">
+          <h4>active_state.json</h4>
+          <p>active_state.json は、いまどの会話スレッドを開いているかを記録したファイルです。</p>
+        </div>
+        <div class="card">
+          <h4>log.json</h4>
+          <p>log.json は、ペルソナ視点の発話履歴の控えです。</p>
+        </div>
+        <div class="card">
+          <h4>voice_calls/</h4>
+          <p>voice_calls/ は、音声通話の録音 (wav 形式の音声ファイル) が入るフォルダです。</p>
+        </div>
+        <div class="card">
+          <h4>day_reports/</h4>
+          <p>day_reports/ は、一日新聞 (ペルソナの一日のまとめ) が Markdown 形式の文書として入るフォルダです。</p>
+        </div>
+        <div class="card old">
+          <h4>tasks.db (旧形式の残り)</h4>
+          <p>昔のタスク置き場です。現在は使われておらず、タスクは本体データベース (ゾーン B) へ一本化済みです。</p>
+        </div>
+        <div class="card old">
+          <h4>conscious_log.json (旧形式の残り)</h4>
+          <p>旧形式のログです。</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ゾーン B -->
+    <div class="zone b" id="zone-b">
+      <div class="zone-head">
+        <span class="label">ゾーン B</span>
+        <h3>世界の本体データベース</h3>
+      </div>
+      <div class="zone-path"><span class="path">~/.saiverse/user_data/database/saiverse.db</span></div>
+      <p class="zone-motto">世界全体の台帳です。この中に、ペルソナごとの行があります。</p>
+      <p class="small">saiverse.db は、全ペルソナと建物・街などの世界全体を記録している 1 つのデータベースファイルです。データベースの中は「テーブル」と呼ばれる表に分かれていて、各項目の隅に実体のテーブル名を小さく添えています。ペルソナに関係するものは、次の 4 つのグループに分けられます。</p>
+
+      <div class="group">
+        <div class="group-head">
+          <span class="gnum">1</span>
+          <h4>プロフィールと設定</h4>
+          <span class="hint">ペルソナ 1 人につき 1 行</span>
+        </div>
+        <ul>
+          <li>名前</li>
+          <li>システムプロンプト (ペルソナの人格や振る舞いを決める指示文)</li>
+          <li>説明文</li>
+          <li>言語</li>
+          <li>アイコン・外見画像のパス (画像ファイルの置き場所)</li>
+          <li>会話・視覚・音声など、用途別のモデル設定 (8 種)</li>
+          <li>Chronicle 自動生成や自動想起などの、記憶機能の ON/OFF</li>
+          <li>自律行動の ON/OFF</li>
+        </ul>
+        <span class="note">実体: <code>ai</code> テーブルの 1 行</span>
+      </div>
+
+      <div class="group">
+        <div class="group-head">
+          <span class="gnum">2</span>
+          <h4>生活の記録</h4>
+          <span class="hint">個人のものですが、台帳に住んでいます</span>
+        </div>
+        <ul>
+          <li>タスク <span class="note">実体: <code>persona_task</code></span></li>
+          <li>アラーム・スケジュール <span class="note">実体: <code>persona_schedule</code></span></li>
+          <li>一日の予定 <span class="note">実体: <code>persona_day_plan</code></span></li>
+          <li>時間割 <span class="note">実体: <code>persona_timetable_template</code></span></li>
+          <li>相手と交わした約束の記録 <span class="note">実体: <code>task_book</code></span></li>
+          <li>外部から届いたイベント通知の記録 <span class="note">実体: <code>persona_event_log</code></span></li>
+          <li>フィード (購読している外部のニュースなど) をどこまで読んだかの記録</li>
+        </ul>
+      </div>
+
+      <div class="group">
+        <div class="group-head">
+          <span class="gnum">3</span>
+          <h4>世界と共有しているもの</h4>
+          <span class="hint">持ち出すかどうか判断が要ります</span>
+        </div>
+        <ul>
+          <li>建物の会話履歴 ― 発言そのものは本人のものですが、会話の場は他のペルソナやユーザーと共有しています <span class="note">実体: <code>building_messages</code></span></li>
+          <li>現在地 <span class="note">実体: <code>building_occupancy_log</code></span></li>
+          <li>私室 ― 建物として世界に登録されています</li>
+          <li>所持品 <span class="note">実体: <code>item_location</code></span></li>
+        </ul>
+      </div>
+
+      <div class="group">
+        <div class="group-head">
+          <span class="gnum">4</span>
+          <h4>運用上の控え</h4>
+          <span class="hint">作り直せるので持ち運びません</span>
+        </div>
+        <ul>
+          <li>会話の読み込み位置の記録 <span class="note">実体: <code>session_anchor</code></span></li>
+          <li>ペルソナへ送る文脈の、先頭部分の控え <span class="note">実体: <code>session_head_snapshot</code> / <code>line_head_snapshot</code></span></li>
+          <li>LLM (ペルソナの頭脳として使う言語モデル) の利用と課金の記録 <span class="note">実体: <code>llm_usage_log</code></span></li>
+          <li>自律行動をどこまで実行したかの控え <span class="note">実体: <code>execution_ledger</code></span></li>
+        </ul>
+      </div>
+
+      <div class="warn-card">
+        <h4>アドオン認証情報</h4>
+        <p>X などの外部サービスの鍵 (ログインのための認証情報) が、ペルソナに紐づけて保存されています。エクスポートに同梱すると、ZIP を渡した相手にアカウントの鍵ごと渡ることになります。</p>
+        <span class="note">実体: <code>addon_persona_config</code></span>
+      </div>
+    </div>
+
+    <!-- ゾーン C -->
+    <div class="zone c" id="zone-c">
+      <div class="zone-head">
+        <span class="label">ゾーン C</span>
+        <h3>共有のファイル置き場</h3>
+      </div>
+      <div class="zone-path">
+        <span class="path">~/.saiverse/image/</span>
+        <span class="path">~/.saiverse/audio/</span>
+        <span class="path">~/.saiverse/video/</span>
+        <span class="path">~/.saiverse/documents/</span>
+        <span class="path">~/.saiverse/user_data/icons/</span>
+      </div>
+      <p class="zone-motto">会話に添付された画像・音声・動画の実体は、全ペルソナ共有のフォルダにあります。記憶データベースからは、リンクで指しているだけです。</p>
+      <div class="caution">
+        <strong>注意:</strong> 記憶データベース (memory.db) だけを別のパソコンへ運ぶと、会話には「絵がある」と書いてあるのに、絵が表示されない状態になります。
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 3. memory.db の中身 ===================== -->
+  <section id="memorydb">
+    <h2><span class="num">2</span>memory.db の中身</h2>
+    <div class="db-frame">
+      <p>メモリー画面のタブで見えているものは、ほぼ全部この 1 ファイルに入っています。</p>
+
+      <div class="db-grid">
+        <div class="card">
+          <h4>チャットログ</h4>
+          <p>会話スレッドとメッセージです。メッセージには、役割 (誰の発言か)・本文・日時・種別タグ (会話 / 内心 / 要約など) が付きます。</p>
+          <span class="note">実体: <code>threads</code> / <code>messages</code> テーブル</span>
+        </div>
+
+        <div class="memopedia-family">
+          <p class="fam-title">次の 3 つは、どれも Memopedia のページとして保存されています。</p>
+          <div class="db-grid">
+            <div class="card">
+              <h4>Memopedia</h4>
+              <p>ペルソナが自分で育てる百科事典です。人物・用語・予定・出来事などの分類ごとにページがあります。</p>
+              <span class="note">実体: <code>memopedia_pages</code> テーブル</span>
+            </div>
+            <div class="card">
+              <h4>コア記憶</h4>
+              <p>ペルソナが「これは忘れない」と自分で刻む記憶です。保存形式は Memopedia の core 分類のページで、独立した入れ物ではありません。</p>
+              <p class="inside">ページの metadata (ページに付く番号・種別などの付帯情報) が本体です。本文だけを写しても再現できません。</p>
+            </div>
+            <div class="card">
+              <h4>Chronicle</h4>
+              <p>過去の会話のあらすじを積み重ねたものです。これも Memopedia の chronicle 分類のページとして保存されています。</p>
+              <p class="inside">あらすじが指す期間や、元のメッセージへの参照などが metadata に入っています。</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h4>手帳</h4>
+          <p>活動と「やった / やりたい」のメモです。</p>
+          <span class="note">実体: <code>activities</code> / <code>memos</code> テーブル</span>
+        </div>
+        <div class="card">
+          <h4>切り抜き</h4>
+          <p>会話の大事な一節に貼る付箋です。目的タグ (いま何のために動いているかの印)、机の上 (いま開いている記憶)、知覚バッファ (見聞きしたことの一時置き場) も、同じ系統の小さな入れ物です。</p>
+        </div>
+        <div class="card rebuild">
+          <h4>検索用の索引 (embeddings)</h4>
+          <p>embeddings は、意味で記憶を探すための数値データです。</p>
+          <span class="flag">運ばなくても、取り込み時に作り直せます</span>
+        </div>
+      </div>
+
+      <div class="stats">
+        <h4>実データの例 (2026-09-30 に実データで確認)</h4>
+        <p class="small">あるペルソナの memory.db には、次のものが入っていました。</p>
+        <div class="stat-row">
+          <div class="stat"><div class="n">33</div><div class="l">Chronicle のページ</div></div>
+          <div class="stat"><div class="n">3</div><div class="l">コア記憶のページ</div></div>
+          <div class="stat"><div class="n">49</div><div class="l">用語のページ</div></div>
+          <div class="stat"><div class="n">18</div><div class="l">人物のページ</div></div>
+          <div class="stat"><div class="n">639</div><div class="l">通のメッセージが入った会話スレッド</div></div>
+        </div>
+        <p class="small muted" style="margin:8px 0 0">テーブルの数は 33 でした。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 4. 境界 ===================== -->
+  <section id="boundary">
+    <h2><span class="num">3</span>どこまでが 1 ペルソナの情報か</h2>
+    <p>ペルソナの情報は、「個人のもの」と「世界のもの」にきれいに二分できるわけではありません。その間には段階があります。右の欄は、ペルソナを引っ越しさせる (エクスポートする) ときの扱いです。</p>
+
+    <div class="scale"><span>個人のもの</span><span>世界のもの</span></div>
+    <div class="scale-bar" aria-hidden="true"></div>
+
+    <div class="bands">
+      <div class="band l1">
+        <div class="lv">1</div>
+        <div class="body">
+          <h4>完全に個人</h4>
+          <p>ペルソナフォルダ (ゾーン A) の全部です。記憶・録音・一日新聞が含まれます。</p>
+        </div>
+        <div class="move"><span class="k">引っ越しのとき</span><span class="v">丸ごと運ぶ</span></div>
+      </div>
+      <div class="band l2">
+        <div class="lv">2</div>
+        <div class="body">
+          <h4>個人のものだが、世界の台帳に住んでいる</h4>
+          <p>プロフィール・設定・タスク・スケジュール・約束です (ゾーン B のグループ 1 と 2)。</p>
+        </div>
+        <div class="move"><span class="k">引っ越しのとき</span><span class="v">抜き出して運ぶ</span></div>
+      </div>
+      <div class="band l3">
+        <div class="lv">3</div>
+        <div class="body">
+          <h4>個人と世界の共有</h4>
+          <p>建物の会話 (発言は本人のもの、場は共有)、現在地、所持品、私室です (ゾーン B のグループ 3)。</p>
+        </div>
+        <div class="move"><span class="k">引っ越しのとき</span><span class="v">切り出すかどうかの設計判断が要る</span></div>
+      </div>
+      <div class="band l4">
+        <div class="lv">4</div>
+        <div class="body">
+          <h4>世界のもの</h4>
+          <p>建物・街・道具・現象のルールなどです。</p>
+        </div>
+        <div class="move"><span class="k">引っ越しのとき</span><span class="v">運ばない</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 5. 現行エクスポート ===================== -->
+  <section id="export-now">
+    <h2><span class="num">4</span>現在のエクスポート機能が運べている範囲</h2>
+    <p>ここまでの全体のうち、現在のエクスポート機能で外へ持ち出せるのは、次の 2 つだけです。</p>
+
+    <div class="export-map">
+      <div class="export-legend">
+        <span class="yes">いま運べる</span>
+        <span class="part">一部だけ運べる</span>
+        <span class="no">運べない</span>
+      </div>
+
+      <div class="ex-zone">
+        <h4>ゾーン A ― memory.db の中</h4>
+        <div class="chips">
+          <span class="chip yes">チャットログ (1 スレッドずつ)</span>
+          <span class="chip part">Memopedia (本文のみ)</span>
+          <span class="chip">コア記憶 (metadata を含む完全な形)</span>
+          <span class="chip">Chronicle</span>
+          <span class="chip">手帳</span>
+          <span class="chip">切り抜き</span>
+        </div>
+      </div>
+      <div class="ex-zone">
+        <h4>ゾーン A ― フォルダのその他</h4>
+        <div class="chips">
+          <span class="chip">active_state.json</span>
+          <span class="chip">log.json</span>
+          <span class="chip">voice_calls/</span>
+          <span class="chip">day_reports/</span>
+        </div>
+      </div>
+      <div class="ex-zone">
+        <h4>ゾーン B ― 世界の本体データベースの中</h4>
+        <div class="chips">
+          <span class="chip">プロフィールと設定</span>
+          <span class="chip">タスク・スケジュール・約束などの生活の記録</span>
+          <span class="chip">建物の会話・現在地・所持品・私室</span>
+        </div>
+      </div>
+      <div class="ex-zone" style="margin-bottom:0">
+        <h4>ゾーン C ― 共有のファイル置き場</h4>
+        <div class="chips">
+          <span class="chip">会話に添付された画像・音声・動画の実体</span>
+        </div>
+      </div>
+
+      <div class="export-now">
+        <div class="card">
+          <h4>チャットログの 1 スレッド</h4>
+          <p>1 つの会話スレッドを、JSON 形式 (データを文字で書き表すファイル形式) の 1 ファイルとして書き出します。</p>
+        </div>
+        <div class="card">
+          <h4>Memopedia の本文のみ</h4>
+          <p>ページの本文だけが書き出され、metadata は書き出されません。コア記憶と Chronicle は metadata が本体なので (2 節)、本文だけでは再現できません。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="conclusion">
+      <p>現在のエクスポートは、どちらも memory.db の一部を切り取るものです。プロフィール・生活の記録 (ゾーン B) も、添付ファイルの実体 (ゾーン C) も運べず、「ペルソナを丸ごと運ぶ」状態には遠いのが現状です。</p>
+      <p>全体を運べる形の設計は、これからです。</p>
+    </div>
+  </section>
+
+  <!-- ===================== 6. フッター ===================== -->
+  <footer>
+    <p>生成日: 2026-10-03</p>
+    <p>SAIVerse リポジトリの実コードと実データベースの調査 (2026-09-30) に基づく。</p>
+  </footer>
+
+</div>
+</body>
+</html>

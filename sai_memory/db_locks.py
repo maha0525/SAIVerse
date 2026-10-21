@@ -30,7 +30,8 @@ import logging
 import os
 import sqlite3
 import threading
-from typing import Dict
+from contextlib import contextmanager
+from typing import Dict, Iterator, Optional
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +61,45 @@ def lock_for_path(db_path: str) -> threading.RLock:
     作る前から錠前が必要になる。
     """
     return _lock_for_key(_normalize(db_path))
+
+
+@contextmanager
+def immediate_transaction(
+    conn: sqlite3.Connection,
+    db_lock: Optional[threading.RLock] = None,
+) -> Iterator[None]:
+    """プロセス内の錠前と SQLite の書き込みロックを両方取り、その中を一つの書き込みにする。
+
+    「読み直して確かめてから書く」を割り込みなしで行うための器。錠前
+    (``db_lock``、省略時は :func:`lock_for` で接続の DB の錠前) を取ってから
+    ``BEGIN IMMEDIATE`` で DB の書き込みロックを取る。SQLite の書き手は一本
+    なので、ここから commit までの間は別の接続 (別スレッド・別プロセス) も
+    書き込めない。中で例外が出れば rollback し、出なければ commit する。
+
+    接続が既にトランザクションの中 (``conn.in_transaction``) なら、BEGIN も
+    commit も発行せず呼び手のトランザクションに相乗りする (二重 BEGIN を避ける。
+    確定は呼び手が持つ)。中で使う書き込み関数は commit しない形で呼ぶこと —
+    途中で commit すると書き込みロックがそこで外れる。
+    """
+    lock = db_lock if db_lock is not None else lock_for(conn)
+    with lock:
+        if conn.in_transaction:
+            yield
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            # commit の失敗も巻き戻しの対象 — try の外に置くと、失敗した
+            # トランザクションが開いたまま残り、次の immediate_transaction が
+            # 「呼び手のトランザクションへの相乗り」と誤認して commit を
+            # 発行しなくなる (保存成功の通知と永続化が食い違う)。
+            conn.commit()
+        except BaseException:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                LOGGER.warning("rollback after a failed transaction also failed", exc_info=True)
+            raise
 
 
 def _lock_for_key(key: str) -> threading.RLock:

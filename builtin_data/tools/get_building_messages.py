@@ -202,8 +202,15 @@ def _transcribe_message(
     if isinstance(ingested, list) and persona_id in ingested:
         return ("consumed", None, False)
 
-    # Skip empty and system-like summary notes
-    if not content or ("note-box" in content and role == "assistant"):
+    # Skip empty and system-like summary notes. ユーザーの画像だけの発言は本文が
+    # 空で添付だけを持つので、空として捨てずに下の user の転記へ通す
+    # (捨てると画像がペルソナの記憶に入らない)。
+    if not content:
+        from saiverse.media_utils import has_attachments
+
+        if not (role == "user" and has_attachments(m.get("metadata"))):
+            return ("consumed", None, False)
+    elif "note-box" in content and role == "assistant":
         return ("consumed", None, False)
 
     # Convert other personas' messages to user role
@@ -285,7 +292,7 @@ def _transcribe_message(
 
     # Ingest user messages directly
     if role == "user" and (pid is None or pid != persona_id):
-        entry = {"role": "user", "content": content}
+        entry = {"role": "user", "content": content or ""}
         metadata = m.get("metadata")
         entry["metadata"] = copy.deepcopy(metadata) if isinstance(metadata, dict) else {}
         entry["metadata"]["with"] = ["user"]

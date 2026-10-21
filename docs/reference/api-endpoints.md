@@ -5,7 +5,7 @@
 
 API 全エンドポイントの一覧（自動生成）。すべて `/api` 配下にマウントされる。メソッド WS は WebSocket。
 
-**エンドポイント数**: 371（tag グループ: 26）
+**エンドポイント数**: 377（tag グループ: 26）
 
 ## addon
 
@@ -108,6 +108,10 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/codex-auth/login/start` | デバイスコードを申請し、ユーザーに見せる user_code を返す。 |
 | GET | `/api/codex-auth/login/status` | ログイン試行の進行状態を返す。フロントはこれをポーリングする。 |
 | POST | `/api/codex-auth/logout` | SAIVerse 自前のトークンストアを削除する。 |
+| POST | `/api/codex-auth/siwc/cancel` | 自分の lease を返却する。意味論はデバイスコード方式の cancel と同じ。 |
+| POST | `/api/codex-auth/siwc/complete` | 貼り付けられた転送先 URL を、受け口に届いた場合と同じ検証・保存の経路へ流す。 |
+| POST | `/api/codex-auth/siwc/start` | Sign in with ChatGPT の試行を開き、{state, attempt_id, lease_id, auth_url, |
+| GET | `/api/codex-auth/siwc/status` | SIWC 試行の進行状態 {state, attempt_id, auth_url?, error?} を返す。 |
 | GET | `/api/codex-auth/status` | どのトークンストアが認証源か・その健康状態を返す。 |
 
 ## config
@@ -123,8 +127,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | POST | `/api/config/developer-mode` | Set developer mode status. |
 | GET | `/api/config/favorite-models` | Get user's favorite model IDs. |
 | POST | `/api/config/favorite-models` | Set user's favorite model IDs. |
-| GET | `/api/config/gemini-auto-cache` | Get the Gemini auto-cache switch and how long a cache is kept after the reply. |
-| POST | `/api/config/gemini-auto-cache` | Toggle Gemini auto-cache and persist to .env. |
+| GET | `/api/config/gemini-auto-cache` | Get the Gemini auto-cache settings. |
+| POST | `/api/config/gemini-auto-cache` | Set Gemini auto-cache / continuous-cache and persist to .env. |
 | GET | `/api/config/image-default-quality` | Get default image generation quality setting. |
 | POST | `/api/config/image-default-quality` | Set default image generation quality and persist to .env. |
 | GET | `/api/config/max-image-embeds` | Get current max image embeds setting. |
@@ -249,6 +253,7 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/people/` | Return all registered personas (AI rows). |
 | POST | `/api/people/dismiss/{persona_id}` | Dismiss a persona (send back to private room). |
 | GET | `/api/people/meta_playbooks` | List user-selectable meta playbooks for the summon dialog. |
+| POST | `/api/people/persona-pack/import-new` | パックから新しいペルソナを迎える (intent §5 の新規作成)。結果の内訳を返す。 |
 | GET | `/api/people/realtime-spell-catalog` | リアルタイムスペルとして設定可能なスペル一覧とスキーマを返す。 |
 | GET | `/api/people/spells` | List Spells available for schedule / pre_spells UI selection. |
 | POST | `/api/people/summon/{persona_id}` | Summon a persona to the target building. |
@@ -327,6 +332,8 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | DELETE | `/api/people/{persona_id}/messages/{message_id}` | Delete a message. |
 | POST | `/api/people/{persona_id}/meta-judgment/bulk-delete` | Delete multiple meta_judgment_log rows in one request. |
 | DELETE | `/api/people/{persona_id}/meta-judgment/{judgment_id}` | Delete a single meta_judgment_log row owned by ``persona_id``. |
+| GET | `/api/people/{persona_id}/persona-pack` | ペルソナ一体をペルソナまるごとパック (ZIP) にしてダウンロードさせる。読み取り専用。 |
+| POST | `/api/people/{persona_id}/persona-pack/import` | パックを既存のペルソナへ合流させる (intent §5)。結果の内訳を返す。 |
 | GET | `/api/people/{persona_id}/pocketbook` | 手帳を読む — アクティビティごとにメモをできごとの日の降順で束ねて返す。 |
 | GET | `/api/people/{persona_id}/pulse-logs` | List pulse_id summaries with pagination (newest first). |
 | GET | `/api/people/{persona_id}/pulse-logs/{pulse_id}` | Get all log entries for a specific pulse. |
@@ -337,7 +344,7 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | DELETE | `/api/people/{persona_id}/realtime-spell/{binding_id}` | ペルソナのリアルタイムスペル binding を削除する。 |
 | POST | `/api/people/{persona_id}/recall` | Execute memory recall, similar to the memory_recall tool. |
 | POST | `/api/people/{persona_id}/recall-debug` | Debug-friendly recall: returns raw search results with scores, no context expansion. |
-| POST | `/api/people/{persona_id}/reembed` | Start re-embedding messages in the background. |
+| POST | `/api/people/{persona_id}/reembed` | Start re-embedding every recall vector of the persona in the background. |
 | GET | `/api/people/{persona_id}/reembed/status` | Get the status of the re-embed task. |
 | POST | `/api/people/{persona_id}/rescue-stelis-thread` | Convert the current active Stelis thread to a normal thread. |
 | GET | `/api/people/{persona_id}/schedules` | List schedules for a persona. |
@@ -355,7 +362,6 @@ API 全エンドポイントの一覧（自動生成）。すべて `/api` 配�
 | GET | `/api/people/{persona_id}/threads` | List all conversation threads for a persona. |
 | DELETE | `/api/people/{persona_id}/threads/{thread_id}` | Delete a thread. |
 | PUT | `/api/people/{persona_id}/threads/{thread_id}/activate` | Set a thread as the active thread for the persona. |
-| GET | `/api/people/{persona_id}/threads/{thread_id}/export-native` | Export a single thread as native SAIVerse JSON. |
 | GET | `/api/people/{persona_id}/threads/{thread_id}/messages` | List messages in a thread with pagination. |
 | POST | `/api/people/{persona_id}/threads/{thread_id}/messages` | Add a new message to a thread. |
 | POST | `/api/people/{persona_id}/track-logs/bulk-delete` | Delete multiple track_local_log rows owned by persona's tracks. |

@@ -19,17 +19,41 @@ def _get_int(name: str, default: int) -> int:
         return default
 
 
-def _has_onnx_model(directory: Path) -> bool:
-    """Check if a directory contains an ONNX model file."""
-    for candidate in [
-        "onnx/model.onnx",
-        "onnx/model_optimized.onnx",
-        "model.onnx",
-        "model_optimized.onnx",
-    ]:
-        if (directory / candidate).exists():
-            return True
-    return False
+# --- Embedding model (fixed; docs/intent/embedding_gemma2_migration.md §1) ---
+# Only one embedding model is supported: the 4-bit quantised ONNX export of
+# EmbeddingGemma 2 (text part), pinned to one HuggingFace revision. There is no
+# env / CLI switch to pick another model (2026-10-12 ruling).
+EMBED_HF_REPO = "onnx-community/embeddinggemma-2-ONNX"
+EMBED_HF_REVISION = "daa72c51243991dfcaf9f9137d2c573d8f7790c0"
+# Identity recorded in embed_metadata.embed_model and compared at startup.
+# It carries name + quantisation + revision so that a change of any of them
+# is detected (comparing the bare model name would miss a quantisation swap).
+EMBED_MODEL_ID = "embeddinggemma-2-q4@daa72c51"
+EMBED_MODEL_DIRNAME = "embeddinggemma-2-q4"
+EMBED_MODEL_ONNX = "onnx/model_q4.onnx"
+EMBED_TOKENIZER = "tokenizer.json"
+EMBED_MODEL_FILES = (
+    EMBED_MODEL_ONNX,
+    "onnx/model_q4.onnx_data",
+    EMBED_TOKENIZER,
+    "tokenizer_config.json",
+    "config.json",
+)
+# Stored vector dimension (the graph's sentence_embedding output, not truncated).
+EMBED_DIM = 768
+# Token cap per input text (prompt included); longer inputs are truncated.
+# Only the text fed to the model is cut; the stored memory text is untouched.
+EMBED_MAX_TOKENS = 512
+
+
+def default_embed_model_dir() -> Path:
+    """Where the embedding model lives: ``<repo>/sbert/embeddinggemma-2-q4``."""
+    return Path(__file__).resolve().parents[1] / "sbert" / EMBED_MODEL_DIRNAME
+
+
+def missing_embed_model_files(directory: Path) -> list[str]:
+    """Return the required model files that are absent from ``directory``."""
+    return [rel for rel in EMBED_MODEL_FILES if not (directory / rel).is_file()]
 
 
 def _get_float(name: str, default: float) -> float:
@@ -65,7 +89,6 @@ class Settings:
     resource_id: str
     embed_model: str
     embed_model_path: str | None
-    embed_model_dim: int | None
 
     memory_enabled: bool
     last_messages: int
@@ -95,51 +118,24 @@ def load_settings() -> Settings:
     # placing .env inside sai_memory doesn't create sai_memory/sai_memory/...
     db_path = os.getenv("SAIMEMORY_DB_PATH", "memory.db")
     resource_id = os.getenv("SAIMEMORY_RESOURCE_ID", "default")
-    # Embedding model (fastembed).
-    embed_model_env = os.getenv("SAIMEMORY_EMBED_MODEL")
-    embed_model = embed_model_env.strip() if embed_model_env else "intfloat/multilingual-e5-small"
-    embed_model_path_env = os.getenv("SAIMEMORY_EMBED_MODEL_PATH")
-    embed_model_path = embed_model_path_env.strip() if embed_model_path_env else None
-    embed_model_dim_env = os.getenv("SAIMEMORY_EMBED_MODEL_DIM")
-    embed_model_dim = None
-    if embed_model_dim_env:
-        try:
-            embed_model_dim = int(embed_model_dim_env)
-        except Exception:
-            embed_model_dim = None
-
-    sbert_root = Path(__file__).resolve().parents[1] / "sbert"
-    model_suffix = embed_model.split("/")[-1]
-    preferred_dir = sbert_root / model_suffix
-
-    if not embed_model_path and preferred_dir.exists() and _has_onnx_model(preferred_dir):
-        embed_model_path = str(preferred_dir)
-    elif not embed_model_path and preferred_dir.exists() and not _has_onnx_model(preferred_dir):
-        logging.getLogger(__name__).warning(
-            "SAIMemory local model directory %s exists but contains no ONNX model. "
-            "Will attempt online download instead.",
-            preferred_dir,
-        )
-
-    if embed_model_env and not embed_model_path:
-        logging.getLogger(__name__).warning(
-            "SAIMemory embedding model '%s' requested but no local snapshot found at %s. "
-            "Set SAIMEMORY_EMBED_MODEL_PATH to the local model directory to avoid online downloads.",
-            embed_model,
-            preferred_dir,
-        )
-
-    if not embed_model_path and not embed_model_env:
-        # Check for local model snapshots (new default first, then legacy)
-        for fallback_suffix, fallback_model in [
-            ("multilingual-e5-small", "intfloat/multilingual-e5-small"),
-            ("multilingual-e5-base", "intfloat/multilingual-e5-base"),
-        ]:
-            fallback_dir = sbert_root / fallback_suffix
-            if fallback_dir.exists() and _has_onnx_model(fallback_dir):
-                embed_model_path = str(fallback_dir)
-                embed_model = fallback_model
-                break
+    # Embedding model: fixed, no env override. embed_model_path is the local
+    # model directory when it holds every required file; otherwise None, and
+    # the Embedder downloads the pinned files into default_embed_model_dir()
+    # on first load.
+    embed_model = EMBED_MODEL_ID
+    embed_model_path: str | None = None
+    preferred_dir = default_embed_model_dir()
+    if preferred_dir.exists():
+        missing = missing_embed_model_files(preferred_dir)
+        if not missing:
+            embed_model_path = str(preferred_dir)
+        else:
+            logging.getLogger(__name__).warning(
+                "SAIMemory embedding model directory %s is incomplete (missing: %s). "
+                "The missing files will be downloaded when the model is loaded.",
+                preferred_dir,
+                ", ".join(missing),
+            )
 
     memory_enabled = _get_bool("SAIMEMORY_MEMORY", True)
     last_messages = _get_int("SAIMEMORY_MEMORY_LAST_MESSAGES", 8)
@@ -174,7 +170,6 @@ def load_settings() -> Settings:
         resource_id=resource_id,
         embed_model=embed_model,
         embed_model_path=embed_model_path,
-        embed_model_dim=embed_model_dim,
         memory_enabled=memory_enabled,
         last_messages=last_messages,
         semantic_recall=semantic_recall,

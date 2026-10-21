@@ -34,6 +34,14 @@ _PULSE_CONTEXT: ContextVar[Optional[Any]] = ContextVar("saiverse_pulse_context",
 _LLM_MESSAGES: ContextVar[Optional[List[Dict[str, Any]]]] = ContextVar(
     "saiverse_llm_messages", default=None
 )
+# 上の messages の列の、リアルタイムスペルの状態 (残すモデルの列か・結果を
+# もう持っているか)。``run_playbook`` がその列を写して子を起動するとき、子へ
+# 引き継ぐ (sea/runtime_context.realtime_spell_handover が作る辞書、
+# docs/intent/persist_realtime_and_recall.md §4.1)。messages と同じく spell
+# ループだけが設定する。
+_REALTIME_SPELL_HANDOVER: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+    "saiverse_realtime_spell_handover", default=None
+)
 # Optional override for the MCP instance a tool call should target. When set,
 # addon tools that normally resolve their target from persona context (e.g. the
 # stackchan vessel dispatcher, which picks the gateway of the building the acting
@@ -108,6 +116,17 @@ def get_active_llm_messages() -> Optional[List[Dict[str, Any]]]:
     of a spell-invoking LLM call (tool nodes, CLI runs, etc.).
     """
     return _LLM_MESSAGES.get()
+
+
+def get_realtime_spell_handover() -> Optional[Dict[str, Any]]:
+    """Return the realtime-spell state of the calling LLM node's messages list.
+
+    ``run_playbook`` adds it to the sub-line's parent_state so a child forked
+    from that list neither re-executes the realtime spells nor gets their
+    result twice (docs/intent/persist_realtime_and_recall.md §4.1). None
+    outside of a spell-invoking LLM call.
+    """
+    return _REALTIME_SPELL_HANDOVER.get()
 
 
 def get_tool_target_instance_id() -> Optional[str]:
@@ -214,12 +233,15 @@ def persona_context(
     pulse_context: Optional[Any] = None,
     llm_messages: Optional[List[Dict[str, Any]]] = None,
     user_configured: bool = False,
+    realtime_spell_handover: Optional[Dict[str, Any]] = None,
 ) -> Iterator[None]:
     """Temporarily set the active persona identity for tool execution.
 
     ``llm_messages`` is a snapshot of the caller's LLM messages list; spell
     loops pass it so spells like ``run_playbook`` can inspect the parent
     line's context. Pass None for tool-node / CLI paths that don't need it.
+    ``realtime_spell_handover`` is that list's realtime-spell state
+    (see :func:`get_realtime_spell_handover`); spell loops pass it alongside.
     """
     token_id = _PERSONA_ID.set(persona_id)
     token_path = _PERSONA_PATH.set(str(persona_path))
@@ -231,6 +253,7 @@ def persona_context(
     token_msg_id = _MESSAGE_ID.set(message_id)
     token_pulse_ctx = _PULSE_CONTEXT.set(pulse_context)
     token_llm_msgs = _LLM_MESSAGES.set(llm_messages)
+    token_rt_handover = _REALTIME_SPELL_HANDOVER.set(realtime_spell_handover)
     try:
         yield
     finally:
@@ -244,3 +267,4 @@ def persona_context(
         _MESSAGE_ID.reset(token_msg_id)
         _PULSE_CONTEXT.reset(token_pulse_ctx)
         _LLM_MESSAGES.reset(token_llm_msgs)
+        _REALTIME_SPELL_HANDOVER.reset(token_rt_handover)

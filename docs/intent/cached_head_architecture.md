@@ -292,11 +292,14 @@ Section の登録は startup 時に集中させる (アドオン由来 Section �
 | 3. ## Building 名 | `BuildingSection` | `{building_entered, system_prompt_edited}` |
 | 4. ## 利用可能なPlaybook | `AvailablePlaybooksSection` | `{addon_loaded, addon_unloaded}` |
 | 6. ## スペル | `SpellListSection` | `{addon_loaded, addon_unloaded}` |
+| (アドオンからの案内) | `AddonGuidanceSection` (2026-10-12、スペル一覧の直後) | (なし、Metabolism のみ) |
 | (visual_context) | ~~`VisualContextSection`~~ (2026-09-06 退役、§5.2) | — |
 | (自分の外見とインベントリ) | `SelfViewSection` (2026-09-25、独立した user メッセージ、§5.2) | (なし、Metabolism のみ) |
 | (memory_weave) | `MemoryWeaveSection` | (Metabolism のみ) |
 
 **判断プロンプトからの移設 (2026-07-30)**: 判断点の状況テキスト (tail) が毎回貼り直していた静的な一覧も Section 化した — `FacilitiesSection` (## 行ける場所) と `PurposeBacklogSection` (## 進行中のことと、やりたいこと)。どちらも `refresh_on_events` は空 (Metabolism のみ) で、凍結中の増減は `diff_to_notifications` が末尾通知で届ける。**一覧を head に置くことと変動通知は必ずセット** — 通知が無ければ head は「無くなったものを載せ続け、増えたものを隠し続ける」台帳になる。DeskSection とは方針が逆で、**ペルソナ本人が増やしたものも通知する** (head が凍結している以上、本人が知っていることと head の記述が合っているかは別問題)。`PurposeBacklogSection` は旧 `LifePurposeSection` の「第一階層の短いメニュー」を吸収した (同じ Track を head 内で二度並べない。しかも旧メニューは差分通知を持たず、放置すると通知される一覧とされない一覧が同じ head で食い違う)。詳細: docs/issues/judgment_static_lists_to_head.md
+
+**アドオンからの案内 (2026-10-12)**: アドオンが manifest の `context_provider` で返す案内 (例: Godot 仮想身体の部屋でだけ使える全身エモートの記法) を `AddonGuidanceSection` (## アドオンからの案内) が head に置く。スペル一覧と同じく Metabolism まで凍結し、部屋の移動・アドオンの有効化と無効化・設定の変更で案内が増えた・消えた・変わったことは `diff_to_notifications` が知覚へ届ける。案内が新しく現れたときと変わったときの通知には head と同じ本文を同梱する — head が凍結している間は、通知が本文を運ぶ唯一の情報源だから。一度はリアルタイム情報 (毎ターン差し替わる末尾メッセージ) に載せたが、それでは案内が消えたことが出来事として残らず、過去に自分が書いた記法を使い続ける恐れがあったので移した ([addon_speak_hooks.md](addon_speak_hooks.md))。
 
 Phase 4' で問題になった「spell list が building 移動で変わる」は本機構では `SpellListSection.refresh_on_events` に `building_entered` を含めない限り起きない。building 単位 visibility は実行時 gate (MCP tool wrapper) で enforce、spell 一覧自体は Metabolism まで凍結。
 
@@ -345,9 +348,23 @@ Section の `refresh_on_events` 未指定 = 空 frozenset = Metabolism のみで
 
 回帰: `tests/test_head_fail_closed.py`。
 
-### C8. 通知の既読基準 (last_notified) は配送だけが進める (2026-08-17)
+### C8. 通知の既読基準 (last_notified) は配送で進め、確認済み範囲だけ圧縮する (2026-08-17 / 2026-10-18)
+
+Memopedia の保存通知は対象ページの索引項目だけを運ぶ (2026-10-18)。この場合は
+そのページの状態だけを B に合成し、全体の時刻基準を進めない。別ページの未通知
+変更は backstop が拾い続ける。合成はメモリ上と未ロードの保存行で共通とする。
+詳細と検証: [beat_execution_context.md §3.3](beat_execution_context.md#33-head-操作の内容型通知issue-head_mutation_notification_gap-の解)。
 
 差分通知の基準値 B (`last_notified`) を動かしてよいのは、**配送が durable に確定した瞬間** (`flush_diffs` の前進 / `advance_last_notified`) と、**B がまだ無い Section の初期化** (初回 capture / 新規登録 / 欠損復帰 — 初回に全内容を「増えた」と通知するスパムの防止) だけ。snapshot の撮り直し (`capture_all`) は A を最新化するだけで B に触らない。
+
+通知した事実を変えない既読記録の圧縮は例外とする (2026-10-18)。Memopedia の
+since-aware 走査で未通知差分ゼロだった時は、他モデルもそれぞれの基準から
+差分を調べ、未ロードの行を含めて差分ゼロの B を圧縮・保存する。
+全差分を配送した後も同じ圧縮を行う。時刻基準は走査開始の一秒前までに留め、
+境界以降のページ版を残して秒精度の時刻と本文編集IDで比較する。部分通知だけで
+全体の基準を進めない。走査失敗・未確定の配送・read-only preview では圧縮しない。
+これにより通常の periodic backstop で古いページ別既読を回収し、毎回セッション開始
+以降の全変更を取得したり保存し直したりしない。
 
 背景: 旧実装は capture_all が B を新 A にリセットしており (「通知済み = 直近 capture」)、anchor TTL 切れの Pulse 頭・Metabolism 発火・手動の記憶整理がこのリセットを踏むたび、前回の配送以降に起きた差分が**通知されないまま既読化**されていた。実害: エリスの入退室通知が 2026-07-17 (§6-3b で model_key 解決が直り TTL 判定が実働開始) から 1 ヶ月間全滅。「A を最新に撮った」と「その差分を届けた」は別の事実であり、混ぜてはならない。
 
@@ -450,6 +467,7 @@ snapshot が「変わるべきでないタイミングで変わってない」�
 
 - v0.1 (2026-05-13): 起草。Phase 4' / A-3-c の cache 破壊問題を契機に foundational refactor として整理。Section interface + LineHeadSnapshot + refresh_on_events の 3 点セットで物理的な不変条件強制を狙う。
 - 2026-09-25: `SelfViewSection` を追加 (自分の外見とインベントリ、独立した user メッセージ)。2026-09-06 の `VisualContextSection` 退役で届かなくなっていた二つを戻す。§2 の関所の説明・§5.2・§5.3 の表を現状に合わせ、退役時の「運んでいた中身の数え上げ」と組み上がった文脈の境界テストを §2 に追記。`NotificationLabel.media` が配送経路で捨てられていたのを知覚まで運ぶよう配線した。
+- 2026-10-12: `AddonGuidanceSection` を追加 (アドオンからの案内、§5.3)。前日にリアルタイム情報へ載せた Godot 仮想身体の全身エモート記法の案内を、スペル一覧と同じ head + 差分通知の道へ移した。
 
 ## 経緯 (2026-10-01 in_flight 台帳より移送)
 

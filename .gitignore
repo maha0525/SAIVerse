@@ -132,3 +132,6 @@ discord_gateway/*/*.py
 
 # Qwen CLI (ローカルレビュー) のマシンローカル設定
 .qwen/
+
+# Isolated SearXNG setup/launch verification artifacts
+/tmp/searxng-*/

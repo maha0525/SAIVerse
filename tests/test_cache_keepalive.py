@@ -65,6 +65,7 @@ class FakeLLMClient:
         self._usage = FakeUsage(
             model="claude-x", input_tokens=1000, output_tokens=1,
             cached_tokens=990, cache_write_tokens=10, cache_ttl="5m",
+            timestamp=1798711199.0,
         )
 
     def generate(self, messages, tools=None, response_schema=None, *,
@@ -196,7 +197,11 @@ def test_keepalive_touches_cache_without_writing_memory(_mock_cache):
     stored: List[Any] = []
     runtime._store_memory = lambda *a, **k: stored.append(a)
 
-    assert runtime.run_cache_keepalive("air") is True
+    with patch("sea.runtime.get_usage_tracker") as get_tracker:
+        assert runtime.run_cache_keepalive("air") is True
+    assert get_tracker.return_value.record_usage.call_args.kwargs["timestamp"] == (
+        datetime.fromtimestamp(client._usage.timestamp)
+    )
     # LLM は 1 回だけ、メインライン context + 不活性な末尾 1 文で呼ばれる
     assert len(client.calls) == 1
     msgs = client.calls[0]["messages"]

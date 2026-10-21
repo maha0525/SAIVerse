@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 
 from .utils import (
+    attachment_limit_is_off,
     compute_allowed_attachment_keys,
     content_to_text,
     image_summary_note,
@@ -37,6 +38,10 @@ def scan_message_metadata(
 ) -> Tuple[Dict[int, List[Dict[str, Any]]], Set[int], Set[int], Optional[Set[Tuple[int, int]]]]:
     """Build metadata-derived caches for attachment and summary handling."""
     max_image_embeds = max_image_embeds_override if max_image_embeds_override is not None else parse_attachment_limit("OPENAI")
+    # リアルタイム情報と自動想起を残すモデルの列では上限を使わない
+    # (llm_clients/utils.ATTACHMENT_LIMIT_OFF_KEY。モデル設定の上限より優先)。
+    if attachment_limit_is_off(messages):
+        max_image_embeds = None
     attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
     skip_summary_indices: Set[int] = set()
     exempt_indices: Set[int] = set()
@@ -169,8 +174,13 @@ def prepare_openai_messages(
     max_image_embeds: Optional[int] = None,
     convert_system_to_user: bool = False,
     reasoning_passback_field: Optional[str] = None,
+    keep_metadata_keys: Tuple[str, ...] = (),
 ) -> List[Any]:
     """Prepare messages for OpenAI-compatible APIs by removing internal-only fields.
+
+    ``keep_metadata_keys``: metadata keys a caller still needs after
+    preparation (the result keeps ``{"metadata": {key: value}}`` with only
+    those keys). Empty by default, so the result carries no metadata.
 
     Options are keyword-only: several neighbours accept None/bool, so a positional
     call that skips one shifts the rest without any error (NIM once passed
@@ -188,7 +198,11 @@ def prepare_openai_messages(
             prepared.append(msg)
             continue
 
-        if is_empty_message(msg):
+        # 本文の空の user でも、画像を持っていれば画像だけの発言として残す
+        # (画像か画像の説明が下の build_message_content_with_attachments で入る)
+        keeps_images = msg.get("role") == "user" and bool(attachment_cache.get(idx))
+
+        if is_empty_message(msg) and not keeps_images:
             logging.debug("Skipping empty message with role=%s", msg.get("role"))
             continue
 
@@ -218,7 +232,12 @@ def prepare_openai_messages(
             if isinstance(rd, list):
                 clean_msg[reasoning_passback_field] = rd
 
-        if is_empty_message(clean_msg):
+        if keep_metadata_keys and isinstance(metadata, dict):
+            kept = {key: metadata[key] for key in keep_metadata_keys if key in metadata}
+            if kept:
+                clean_msg["metadata"] = kept
+
+        if is_empty_message(clean_msg) and not keeps_images:
             logging.debug("Skipping empty cleaned message with role=%s", role)
             continue
 

@@ -27,6 +27,148 @@ _extension_import_lock = threading.Lock()
 _official_import_status: dict = {}
 _official_import_lock = threading.Lock()
 
+# Embeddings of imported messages are made after the import has finished
+# (docs/intent/embedding_gemma2_migration.md §2). Each message is stored
+# together with an empty vector row (``storage.DEFERRED_VECTOR``, written in
+# the same transaction as the message), the import reports success, and a
+# background thread then re-embeds the persona's stale messages, the empty
+# rows among them (``SAIMemoryAdapter.reembed_stale_messages``).
+#
+# Nothing in this module is needed for that to end correctly: the work left
+# is in the memory.db itself. If the thread fails or the process dies, the
+# startup check warns about the empty rows and the banner's re-embed fills
+# them. The per-persona chain of threads (each waits for the previous one)
+# only avoids embedding one persona twice at the same time; the work is
+# idempotent, so two at once would only waste time.
+#
+# The status kept here is for display only: one entry per persona, written
+# only by the persona's latest thread (it redoes whatever an earlier one
+# left). An import whose embedding was handed over carries "embedding": True
+# in its own status, and its status endpoint shows this per-persona entry; a
+# "skip" import does not, and shows none.
+_import_embedding_lock = threading.Lock()
+# persona -> {"embedding_running", "embedding_progress", "embedding_total",
+#             "embedding_failed", "embedding_error"}
+_import_embedding_status: dict = {}
+# Latest embedding thread per persona (tests join it).
+_import_embedding_threads: dict = {}
+
+
+def _set_embedding_status(persona_id: str, fields: dict) -> None:
+    """Write the persona's status, but only from the persona's latest thread."""
+    with _import_embedding_lock:
+        if _import_embedding_threads.get(persona_id) is threading.current_thread():
+            _import_embedding_status[persona_id] = fields
+
+
+def _embed_imported_messages(
+    persona_id: str, adapter, previous: Optional[threading.Thread] = None,
+) -> None:
+    """Fill the persona's stale message vectors, then close the import's adapter.
+
+    Waits first for ``previous`` (the persona's earlier embedding thread), so
+    one persona is embedded by one thread at a time without making the import
+    wait.
+    """
+    if previous is not None and previous.is_alive():
+        LOGGER.info("Import embedding for %s waits for the previous one", persona_id)
+        previous.join()
+
+    def _progress(done: int, total: int) -> None:
+        _set_embedding_status(persona_id, {
+            "embedding_running": True, "embedding_progress": done, "embedding_total": total,
+        })
+
+    result: dict = {}
+    error: Optional[str] = None
+    try:
+        result = adapter.reembed_stale_messages(progress_callback=_progress)
+        changed = int(result.get("changed", 0) or 0)
+        if changed:
+            error = (
+                f"{changed} message(s) were edited while being embedded and still "
+                "wait for their embeddings; the re-embed fills them."
+            )
+    except Exception as exc:
+        LOGGER.exception("Import embedding failed for %s", persona_id)
+        error = f"{type(exc).__name__}: {exc}".splitlines()[0]
+    finally:
+        try:
+            adapter.close()
+        finally:
+            final = {
+                "embedding_running": False,
+                "embedding_progress": result.get("embedded", 0),
+                "embedding_total": result.get("total", 0),
+                "embedding_failed": 0,
+            }
+            if error:
+                final["embedding_error"] = error
+            _set_embedding_status(persona_id, final)
+    if error:
+        LOGGER.warning("Import embedding for %s ended with a problem: %s", persona_id, error)
+    LOGGER.info(
+        "Import embedding finished for %s: embedded=%d changed=%d (of %d)",
+        persona_id, result.get("embedded", 0), result.get("changed", 0), result.get("total", 0),
+    )
+
+
+def _launch_import_embedding(persona_id: str, adapter, count: int) -> bool:
+    """Start the persona's embedding thread; it takes ``adapter`` over and closes it.
+
+    The thread is created, registered as the persona's latest and started in
+    one step under the lock, so two imports finishing at once cannot both
+    miss each other's thread. Returns False (and shows the failure) when the
+    thread could not be started; the caller then closes the adapter. The
+    empty vector rows stay either way.
+    """
+    with _import_embedding_lock:
+        previous = _import_embedding_threads.get(persona_id)
+        thread = threading.Thread(
+            target=_embed_imported_messages,
+            args=(persona_id, adapter, previous),
+            name=f"import-embedding-{persona_id}",
+            daemon=True,
+        )
+        _import_embedding_threads[persona_id] = thread
+        _import_embedding_status[persona_id] = {
+            "embedding_running": True, "embedding_progress": 0, "embedding_total": count,
+        }
+        try:
+            thread.start()
+        except Exception as exc:
+            LOGGER.exception("Could not start the import embedding for %s", persona_id)
+            _import_embedding_status[persona_id] = {
+                "embedding_running": False, "embedding_progress": 0,
+                "embedding_total": count, "embedding_failed": 0,
+                "embedding_error": f"{type(exc).__name__}: {exc}".splitlines()[0],
+            }
+            return False
+        return True
+
+
+def _with_embedding_status(persona_id: str, status: dict) -> dict:
+    """Import status plus the persona's background embedding, if this import handed one over."""
+    shown = {k: v for k, v in status.items() if k != "embedding"}
+    if not status.get("embedding"):
+        return shown
+    with _import_embedding_lock:
+        embedding = dict(_import_embedding_status.get(persona_id, {}))
+    return {**shown, **embedding}
+
+def _saved_summary(attempted: int, saved: int) -> Optional[str]:
+    """One line naming the messages that could not be saved (None when all were).
+
+    ``append_persona_message`` returns None when the message row did not go
+    in, so the message's text is lost from the import; the import must not
+    report success then.
+    """
+    failed = attempted - saved
+    if failed <= 0:
+        return None
+    return f"Saved {saved} of {attempted} messages; {failed} failed to save."
+
+
 def _is_placeholder_title(title: Optional[str]) -> bool:
     """取り込み元のパーサーが「題名なし」の印として入れる既定値か。
 
@@ -57,7 +199,8 @@ def _run_extension_import_task(
         }
     
     try:
-        # 1. Parse file
+        # 1. Parse file (never waits for an earlier import's embedding: that
+        #    queue lives in the background threads)
         from tools.utilities.chatlog_exporter_importer import parse_exporter_file
         conversation = parse_exporter_file(tmp_path)
         
@@ -73,14 +216,23 @@ def _run_extension_import_task(
         
         # 2. Acquire adapter
         from saiverse_memory import SAIMemoryAdapter
+        from saiverse_memory.adapter import EMBEDDING_DEFERRED
         adapter = SAIMemoryAdapter(persona_id)
-        
+        handed_off = False
+        embedding_chunks = 0 if skip_embedding else EMBEDDING_DEFERRED
+
         try:
             msg_count = 0
+            imported_ids: List[str] = []
             for i, payload in enumerate(payloads):
-                if skip_embedding:
-                    payload["embedding_chunks"] = 0
-                adapter.append_persona_message(payload, thread_suffix=thread_suffix)
+                # Never embed while importing: with skip_embedding the
+                # messages stay unembedded, otherwise each is stored with an
+                # empty vector row and embedded in the background after the
+                # import has finished.
+                payload["embedding_chunks"] = embedding_chunks
+                mid = adapter.append_persona_message(payload, thread_suffix=thread_suffix)
+                if mid:
+                    imported_ids.append(mid)
                 msg_count += 1
 
                 # Update progress every 10 messages
@@ -97,14 +249,28 @@ def _run_extension_import_task(
             if not _is_placeholder_title(conversation.title):
                 adapter.set_thread_title(thread_suffix, conversation.title)
 
+            embedding = not skip_embedding and bool(imported_ids)
+            if embedding:
+                handed_off = _launch_import_embedding(persona_id, adapter, len(imported_ids))
+            save_failure = _saved_summary(msg_count, len(imported_ids))
+            if save_failure:
+                LOGGER.warning(
+                    "Extension import for %s: %s", persona_id, save_failure,
+                )
             with _extension_import_lock:
                 _extension_import_status[persona_id] = {
                     "running": False, "progress": msg_count, "total": total,
-                    "message": f"Imported '{conversation.title}' ({msg_count} messages).",
-                    "success": True, "title": conversation.title
+                    "message": (
+                        f"Imported '{conversation.title}': {save_failure}"
+                        if save_failure
+                        else f"Imported '{conversation.title}' ({msg_count} messages)."
+                    ),
+                    "success": save_failure is None, "title": conversation.title,
+                    "embedding": embedding,
                 }
         finally:
-            adapter.close()
+            if not handed_off:
+                adapter.close()
             
     except Exception as e:
         logging.exception("Extension import failed for %s", persona_id)
@@ -135,7 +301,8 @@ def _run_official_import_task(
         }
     
     try:
-        # 1. Retrieve cached export
+        # 1. Retrieve cached export (never waits for an earlier import's
+        #    embedding: that queue lives in the background threads)
         cached = _chatgpt_export_cache.get(cache_key)
         if not cached:
             with _official_import_lock:
@@ -173,12 +340,16 @@ def _run_official_import_task(
         
         # 3. Acquire adapter
         from saiverse_memory import SAIMemoryAdapter
+        from saiverse_memory.adapter import EMBEDDING_DEFERRED
         adapter = SAIMemoryAdapter(persona_id)
-        
+        handed_off = False
+        embedding_chunks = 0 if skip_embedding else EMBEDDING_DEFERRED
+
         try:
             total_conversations = len(selected_records)
             imported_count = 0
             msg_count = 0
+            imported_ids: List[str] = []
             
             for conv_idx, record in enumerate(selected_records):
                 payloads = list(record.iter_memory_payloads(include_roles=["user", "assistant"]))
@@ -190,11 +361,13 @@ def _run_official_import_task(
                     if "conversation" not in tags:
                         tags.append("conversation")
                     meta["tags"] = tags
-                    if skip_embedding:
-                        payload["embedding_chunks"] = 0
+                    # Never embed while importing (see the extension task).
+                    payload["embedding_chunks"] = embedding_chunks
                     payload["metadata"] = meta
-                    
-                    adapter.append_persona_message(payload, thread_suffix=thread_suffix)
+
+                    mid = adapter.append_persona_message(payload, thread_suffix=thread_suffix)
+                    if mid:
+                        imported_ids.append(mid)
                     msg_count += 1
 
                 # 会話タイトルをスレッド名として保存。パーサーの既定値 (題名の
@@ -210,14 +383,29 @@ def _run_official_import_task(
                         "message": f"Imported {imported_count}/{total_conversations} conversations ({msg_count} messages)..."
                     }
             
+            embedding = not skip_embedding and bool(imported_ids)
+            if embedding:
+                handed_off = _launch_import_embedding(persona_id, adapter, len(imported_ids))
+            save_failure = _saved_summary(msg_count, len(imported_ids))
+            if save_failure:
+                LOGGER.warning(
+                    "Official import for %s: %s", persona_id, save_failure,
+                )
             with _official_import_lock:
                 _official_import_status[persona_id] = {
                     "running": False, "progress": imported_count, "total": total_conversations,
-                    "message": f"Imported {imported_count} conversations ({msg_count} messages).",
-                    "success": True, "conversations": imported_count, "messages": msg_count
+                    "message": (
+                        f"Imported {imported_count} conversations: {save_failure}"
+                        if save_failure
+                        else f"Imported {imported_count} conversations ({msg_count} messages)."
+                    ),
+                    "success": save_failure is None,
+                    "conversations": imported_count, "messages": len(imported_ids),
+                    "embedding": embedding,
                 }
         finally:
-            adapter.close()
+            if not handed_off:
+                adapter.close()
             
     except Exception as e:
         import logging
@@ -374,7 +562,7 @@ def get_official_import_status(persona_id: str, manager = Depends(get_manager)):
     """Get the status of official import task."""
     with _official_import_lock:
         status = _official_import_status.get(persona_id, {"running": False, "message": "No import task has been run."})
-    return OfficialImportStatusResponse(**status)
+    return OfficialImportStatusResponse(**_with_embedding_status(persona_id, status))
 
 @router.post("/{persona_id}/import/extension")
 async def import_extension_export(
@@ -434,4 +622,4 @@ def get_extension_import_status(persona_id: str, manager = Depends(get_manager))
     """Get the status of extension import task."""
     with _extension_import_lock:
         status = _extension_import_status.get(persona_id, {"running": False, "message": "No import task has been run."})
-    return ExtensionImportStatusResponse(**status)
+    return ExtensionImportStatusResponse(**_with_embedding_status(persona_id, status))
