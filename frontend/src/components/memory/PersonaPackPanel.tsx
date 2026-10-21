@@ -37,8 +37,8 @@ async function errorDetail(res: Response): Promise<string> {
 }
 
 /**
- * ペルソナまるごとパック (docs/intent/persona_pack.md) — Memory モーダルのタブ。
- * このペルソナを ZIP にまとめる操作と、ZIP をこのペルソナへ合流させる操作を置く。
+ * ペルソナまるごとパック (docs/intent/persona_pack.md) — MemoryImport の中に置く節。
+ * ZIP をこのペルソナへ合流させる節と、このペルソナを ZIP にまとめる節を、この順で置く。
  */
 export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
     useLocale();
@@ -127,31 +127,11 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
     };
 
     return (
-        <div className={styles.container}>
-            <h2 data-i18n="components.memory.PersonaPack.title" className={styles.title}>{uiText('components.memory.PersonaPack.title')}</h2>
-            <p data-i18n="components.memory.PersonaPack.lead" className={styles.lead}>{uiText('components.memory.PersonaPack.lead')}</p>
-
-            {/* パックにまとめる (エクスポート、読み取り専用) */}
+        <div className={styles.panel}>
+            {/* 取り込み (このペルソナに合流させる)。lead は取り込みとエクスポートの両方の説明で、先に現れるこの節の冒頭に置く */}
             <div className={styles.section}>
-                <div data-i18n="components.memory.PersonaPack.exportAction" className={styles.sectionTitle}>{uiText('components.memory.PersonaPack.exportAction')}</div>
-                <p data-i18n="components.memory.PersonaPack.exportDescription" className={styles.sectionText}>{uiText('components.memory.PersonaPack.exportDescription')}</p>
-                <div className={styles.actions}>
-                    <button data-i18n="components.memory.PersonaPack.exportAction" className={styles.primaryButton} onClick={() => void handleExport()} disabled={isExporting}>
-                        {isExporting ? <Loader2 size={16} className={styles.spin} /> : <FileArchive size={16} />}
-                        {uiText('components.memory.PersonaPack.exportAction')}
-                    </button>
-                    {isExporting && (
-                        <span data-i18n="components.memory.PersonaPack.exporting" className={styles.busy}>{uiText('components.memory.PersonaPack.exporting')}</span>
-                    )}
-                </div>
-                {exportError && (
-                    <div className={styles.error}><AlertCircle size={16} /><span>{exportError}</span></div>
-                )}
-            </div>
-
-            {/* パックを取り込む (このペルソナに合流させる) */}
-            <div className={styles.section}>
-                <div data-i18n="components.memory.PersonaPack.importAction" className={styles.sectionTitle}>{uiText('components.memory.PersonaPack.importAction')}</div>
+                <div data-i18n="components.memory.PersonaPack.importSectionTitle" className={styles.sectionTitle}>{uiText('components.memory.PersonaPack.importSectionTitle')}</div>
+                <p data-i18n="components.memory.PersonaPack.lead" className={styles.sectionText}>{uiText('components.memory.PersonaPack.lead')}</p>
                 <p data-i18n="components.memory.PersonaPack.importDescription" className={styles.sectionText}>{uiText('components.memory.PersonaPack.importDescription')}</p>
                 <input
                     ref={fileInputRef}
@@ -200,6 +180,24 @@ export default function PersonaPackPanel({ personaId }: PersonaPackPanelProps) {
                     <div className={styles.error}><AlertCircle size={16} /><span>{importError}</span></div>
                 )}
                 {result && <PersonaPackResult result={result} />}
+            </div>
+
+            {/* エクスポート (読み取り専用) */}
+            <div className={styles.section}>
+                <div data-i18n="components.memory.PersonaPack.exportSectionTitle" className={styles.sectionTitle}>{uiText('components.memory.PersonaPack.exportSectionTitle')}</div>
+                <p data-i18n="components.memory.PersonaPack.exportDescription" className={styles.sectionText}>{uiText('components.memory.PersonaPack.exportDescription')}</p>
+                <div className={styles.actions}>
+                    <button data-i18n="components.memory.PersonaPack.exportAction" className={styles.primaryButton} onClick={() => void handleExport()} disabled={isExporting}>
+                        {isExporting ? <Loader2 size={16} className={styles.spin} /> : <FileArchive size={16} />}
+                        {uiText('components.memory.PersonaPack.exportAction')}
+                    </button>
+                    {isExporting && (
+                        <span data-i18n="components.memory.PersonaPack.exporting" className={styles.busy}>{uiText('components.memory.PersonaPack.exporting')}</span>
+                    )}
+                </div>
+                {exportError && (
+                    <div className={styles.error}><AlertCircle size={16} /><span>{exportError}</span></div>
+                )}
             </div>
         </div>
     );

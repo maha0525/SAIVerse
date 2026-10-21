@@ -21,7 +21,7 @@ Memopediaは、SAIMemoryに記録された会話ログから知識を抽出し�
 
 ## UIでの使い方
 
-ペルソナメニュー →「記憶」で[記憶モーダル](memory-view.md)を開き、「Memopedia」タブを選択（記憶モーダルには他に チャットログ / Chronicle / インポート 等のタブがある）：
+ペルソナメニュー →「記憶」で[記憶モーダル](memory-view.md)を開き、「Memopedia」タブを選択（記憶モーダルには他に チャットログ / Chronicle / 引っ越し 等のタブがある）：
 
 ### Knowledge Tree
 
