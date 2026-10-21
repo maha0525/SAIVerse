@@ -1332,4 +1332,25 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.22 -> 0.3.23 (columns added by migrate.py).",
     ),
+    # ---- v0.3.24 ----
+    # このバージョンの DB・データの変化は二つ: 想起用埋め込みの EmbeddingGemma 2 への
+    # 移行 (#388。既存の記憶は起動時の警告 → 画面からの再計算で移行する) と、SAIMemory の
+    # perception_batches への kind / recalled_json 列の追加 (#392。起動時と各入口で
+    # SAIMemory 側が自動で足す)。どちらも更新の鎖では行わないので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_24",
+        scope="city",
+        from_version="0.3.23",
+        to_version="0.3.24",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.23 -> 0.3.24 (embedding migration and new columns are handled at startup).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_24",
+        scope="ai",
+        from_version="0.3.23",
+        to_version="0.3.24",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.23 -> 0.3.24 (embedding migration and new columns are handled at startup).",
+    ),
 ]
