@@ -1,23 +1,8 @@
-/* ペルソナまるごとパック (Memory モーダルのタブ + 作成ウィザードの結果表示) */
+/* ペルソナまるごとパック (MemoryImport の中の PersonaPackPanel + 作成ウィザードの結果表示 PersonaPackResult) */
 
-.container {
-    padding: 2rem;
-    color: #1e293b;
-    height: 100%;
-    overflow-y: auto;
-}
-
-.title {
-    font-size: 1.5rem;
-    font-weight: 600;
-    margin-bottom: 0.5rem;
-}
-
-.lead {
-    color: #475569;
-    font-size: 0.9rem;
-    line-height: 1.6;
-    margin-bottom: 1.5rem;
+/* 文字色は親の MemoryImport の .container から受け継ぐ */
+.panel {
+    margin-top: 2rem;
 }
 
 .section {
@@ -238,11 +223,6 @@
 
 /* ダークモード */
 
-:global([data-theme="dark"]) .container {
-    color: #e2e8f0;
-}
-
-:global([data-theme="dark"]) .lead,
 :global([data-theme="dark"]) .sectionText,
 :global([data-theme="dark"]) .hint,
 :global([data-theme="dark"]) .busy,
@@ -289,10 +269,4 @@
 
 :global([data-theme="dark"]) .warnings {
     color: #fbbf24;
-}
-
-@media (max-width: 640px) {
-    .container {
-        padding: 1rem;
-    }
 }

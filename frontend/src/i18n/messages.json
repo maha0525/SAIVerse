@@ -5648,8 +5648,8 @@
     "en": "Pulse timeline"
   },
   "components.MemoryModal.text007": {
-    "ja": "インポート",
-    "en": "Import"
+    "ja": "引っ越し",
+    "en": "Moving"
   },
   "components.MemoryModal.text008": {
     "ja": "デバッグ",
@@ -12039,17 +12039,13 @@
     "ja": "以前のメッセージを読み込む",
     "en": "Load older messages"
   },
-  "components.MemoryModal.personaPack": {
-    "ja": "ペルソナまるごとパック",
-    "en": "Persona Pack"
-  },
-  "components.memory.PersonaPack.title": {
-    "ja": "ペルソナまるごとパック",
-    "en": "Persona Pack"
-  },
   "components.memory.PersonaPack.lead": {
     "ja": "ペルソナ一体の記憶・プロフィール・手帳などを、一つの ZIP ファイルとして持ち出したり、取り込んだりできます。",
     "en": "Take a whole persona (memories, profile, pocketbook and more) out as a single ZIP file, or bring one in."
+  },
+  "components.memory.PersonaPack.exportSectionTitle": {
+    "ja": "ペルソナまるごとパックのエクスポート",
+    "en": "Export a persona pack"
   },
   "components.memory.PersonaPack.exportAction": {
     "ja": "パックにまとめる",
@@ -12067,9 +12063,9 @@
     "ja": "パックにまとめられませんでした: {p1}",
     "en": "Could not create the pack: {p1}"
   },
-  "components.memory.PersonaPack.importAction": {
-    "ja": "パックを取り込む",
-    "en": "Import a pack"
+  "components.memory.PersonaPack.importSectionTitle": {
+    "ja": "ペルソナまるごとパックの取り込み",
+    "en": "Import a persona pack"
   },
   "components.memory.PersonaPack.importDescription": {
     "ja": "選んだパックの記録を、このペルソナに合流させます。まだ無い記録だけが追加され、今ある記録は消えません。新しいペルソナとして迎えるときは、ペルソナの作成画面から取り込んでください。",

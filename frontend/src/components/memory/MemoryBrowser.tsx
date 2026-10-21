@@ -514,7 +514,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         }
     };
 
-    // スレッド単位のエクスポートは廃止 (ペルソナ単位の「ペルソナまるごとパック」タブへ
+    // スレッド単位のエクスポートは廃止 (ペルソナ単位の PersonaPackPanel のエクスポートへ
     // 置き換え。docs/intent/persona_pack.md §6)
     const totalPages = Math.ceil(totalMessages / pageSize);
 
