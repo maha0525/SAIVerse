@@ -41,6 +41,10 @@
   ([issue](../issues/persona_pack_drops_body_conversion_log.md)、実害小) / ③本番のエリスさんの
   Memopedia に親の切れたページが 9 枚あり、取り込みは root_people の下へ退避して警告した
   (取り込み側の正しい修復。本番データの傷は別途)。
+- **済み (2026-10-22 未明)**: 画面経由のパック出力の欠陥の修正と再検証 — 原因は Next.js の中継の
+  無活動 30 秒の既定値 (issue に特定の経緯)。`frontend/next.config.ts` の
+  `experimental.proxyTimeout` を 1 時間に明示し、エリス規模 (1.47GB) の画面経由出力が
+  200・118 秒で通ることを隔離テスト環境で確認した。反映には画面の再起動が要る。
 - **残り (メティス)**: #406 の保存通知 (次の記憶の整理のあと。既読記録の蓄積の回収が動いていることは
   2026-10-21 のログの compacted notified revisions の行で確認済み)。発行を止めない。
 
