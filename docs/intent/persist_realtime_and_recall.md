@@ -1,6 +1,6 @@
 # Intent Document: リアルタイム情報と自動想起を残して送り続ける運用 (モデルごとの設定)
 
-**ステータス**: 検証待ち (2026-10-14 起草・実装、まはー GO 済み。Codex 敵対レビュー十巡で approve、まはーの実機検証待ち)
+**ステータス**: 完了 (PR #392 マージ済み。2026-10-18 の本番ログで検証 — Argon のエリスで、画像つきの発言の次のターンに 94% がキャッシュ読みになり、送った列は 3 ターン連続で前回の完全な続きだった。15〜16 分空くと Google 側の暗黙キャッシュの保持が切れて全額の回も出る — 保持は Google 側の都合で、SAIVerse 側の約束は守られている)
 **関連**: [`realtime_info.md`](realtime_info.md) (不変条件 2・3 に例外を足す) / [`memory_architecture_v2.md`](memory_architecture_v2.md) §4.3・§4.4・§10 の 7 (例外を足す) / [`auto_recall_jev_rerank.md`](auto_recall_jev_rerank.md) (粘着の仕様・詰まり 1・詰まり 4) / [`perception_buffer.md`](perception_buffer.md) §10 (保存先の前例) / [`arasuji_levels.md`](arasuji_levels.md) §7-1 (材料の規則) / [`cache_lifecycle_control.md`](cache_lifecycle_control.md) §3.5 (明示キャッシュ非対応モデル) / [issue: llama.cpp のキャッシュ全損](../issues/llama_prompt_cache_full_reprocess_swa_checkpoint.md) (同じ原因への別の対応) / [issue: 画像の枚数上限で先頭の一致が崩れる](../issues/image_attachment_limit_breaks_cache_prefix.md) / [issue: ターン内の往復の形が次のターンの復元形と違う](../issues/in_pulse_message_forms_differ_from_restored_history.md) (不変条件 1 の範囲外)
 
 ---

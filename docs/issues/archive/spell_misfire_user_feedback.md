@@ -1,6 +1,6 @@
 # Issue: スペル不発時にペルソナへエラーを返して再発言させ、ユーザーにも失敗を表示する
 
-**ステータス**: 検証待ち（コア・ヒント・UI・明示的Spell行の構文崩れを実装、反映後の実機確認前。上限到達時の最終挙動は別課題）
+**ステータス**: 完了（PR #382 マージ済み。2026-10-21 の本番の会話で実地に発火 — ペルソナのスペル行の先頭に空白が入り、[Spell Error] が届いて正しい書式での再実行に成功。上限到達時の最終挙動は別課題のまま）
 **優先度**: medium (一般ユーザーが踏む実害あり — 不発の握り潰し + 生 `/spell` 行の漏れ)
 **作成日**: 2026-06-03
 **関連**: `sea/runtime_llm.py:_run_spell_loop` (L927 `while`, L934-939 unknown 握り潰し), `_run_spell_tool_async` (L596/L639 既存エラー経路), `_build_spell_user_only_block` (L376 UI 表示), `_parse_spell_lines` (L338), `docs/issues/spell_round_limit_redesign.md`, `docs/issues/spell_html_leak_into_saimemory.md`
