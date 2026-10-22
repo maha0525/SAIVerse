@@ -833,7 +833,8 @@ def test_update_dependencies_installs_from_the_lock(tmp_path: Path) -> None:
     ):
         update_engine.update_dependencies(project, "python")
 
-    assert commands[0] == ["python", "-m", "pip", "install", "-r", "requirements.lock"]
+    assert commands[0] == ["python", "-m", "pip", "install", "--upgrade", "pip"]
+    assert commands[1] == ["python", "-m", "pip", "install", "-r", "requirements.lock"]
     assert not any("requirements.txt" in part for command in commands for part in command)
 
 
@@ -857,7 +858,10 @@ def test_update_dependencies_never_falls_back_when_the_lock_is_missing(tmp_path:
         with pytest.raises(update_engine.UpdateError, match="requirements.lock"):
             update_engine.update_dependencies(project, "python")
 
-    assert commands == [["python", "-m", "pip", "install", "-r", "requirements.lock"]]
+    assert commands == [
+        ["python", "-m", "pip", "install", "--upgrade", "pip"],
+        ["python", "-m", "pip", "install", "-r", "requirements.lock"],
+    ]
 
 
 # --- pip check after the lock is installed: visibility, not enforcement --------
@@ -889,9 +893,136 @@ def test_update_dependencies_runs_pip_check_after_the_lock(tmp_path: Path, caplo
         update_engine.update_dependencies(project, "python")
 
     commands = [call["command"] for call in calls]
-    assert commands[0][-3:] == ["install", "-r", "requirements.lock"]
-    assert commands[1] == ["python", "-m", "pip", "check"]
+    lock_index = commands.index(["python", "-m", "pip", "install", "-r", "requirements.lock"])
+    assert commands[lock_index + 1][:5] == ["python", "-m", "pip", "uninstall", "-y"]
+    assert commands[lock_index + 2] == ["python", "-m", "pip", "check"]
     assert not any("[deps]" in record.getMessage() for record in caplog.records)
+
+
+# --- pip upgrade and retired core packages around the lock install -----------
+
+
+def test_update_dependencies_runs_its_phases_in_order(tmp_path: Path) -> None:
+    """pip is upgraded before it downloads anything, the retired packages are
+    removed after the lock is in, and pip check sees the result of both."""
+    project = _make_project(tmp_path)
+    calls: list[dict] = []
+
+    def recording_run(command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
+        calls.append({"command": list(command), "check": check})
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch.object(update_engine, "_run", side_effect=recording_run), patch.object(
+        update_engine.shutil, "which", return_value="npm"
+    ):
+        update_engine.update_dependencies(project, "python")
+
+    commands = [call["command"] for call in calls]
+    assert commands == [
+        ["python", "-m", "pip", "install", "--upgrade", "pip"],
+        ["python", "-m", "pip", "install", "-r", "requirements.lock"],
+        ["python", "-m", "pip", "uninstall", "-y", *update_engine.RETIRED_CORE_PACKAGES],
+        ["python", "-m", "pip", "check"],
+        ["npm", "ci"],
+    ]
+    # Neither the pip upgrade nor the removal may turn a non-zero exit into a failed update.
+    assert calls[0]["check"] is False
+    assert calls[2]["check"] is False
+
+
+@pytest.mark.parametrize("phase", ["upgrade", "uninstall"])
+def test_pip_upgrade_and_retired_removal_failures_do_not_fail_the_update(
+    tmp_path: Path, caplog, phase: str
+) -> None:  # type: ignore[no-untyped-def]
+    project = _make_project(tmp_path)
+    commands: list[list[str]] = []
+    failing = {
+        "upgrade": ["python", "-m", "pip", "install", "--upgrade", "pip"],
+        "uninstall": ["python", "-m", "pip", "uninstall", "-y", *update_engine.RETIRED_CORE_PACKAGES],
+    }[phase]
+
+    def failing_run(command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
+        commands.append(list(command))
+        if list(command) == failing:
+            if check:
+                raise update_engine.UpdateError(f"{label} must be run with check=False")
+            return MagicMock(returncode=1, stdout="", stderr="network unreachable")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with caplog.at_level("WARNING", logger="saiverse.update"), patch.object(
+        update_engine, "_run", side_effect=failing_run
+    ), patch.object(update_engine.shutil, "which", return_value="npm"):
+        update_engine.update_dependencies(project, "python")  # must not raise
+
+    assert commands[-1] == ["npm", "ci"]
+    assert ["python", "-m", "pip", "install", "-r", "requirements.lock"] in commands
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("network unreachable" in message for message in warnings)
+
+
+def test_retired_package_named_by_the_installed_lock_is_kept(tmp_path: Path) -> None:
+    """A rollback to a revision whose lock still lists a retired package installs
+    that lock; removing the package again would break the code rolled back to."""
+    project = _make_project(tmp_path)
+    retired = update_engine.RETIRED_CORE_PACKAGES[0]
+    (project / "requirements.lock").write_text(
+        f"pytest=={_INSTALLED_PYTEST}\n{retired}==0.7.4\n", encoding="utf-8"
+    )
+    commands: list[list[str]] = []
+
+    def recording_run(command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
+        commands.append(list(command))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch.object(update_engine, "_run", side_effect=recording_run), patch.object(
+        update_engine.shutil, "which", return_value="npm"
+    ):
+        update_engine.update_dependencies(project, "python")
+
+    # The flow must have reached past the install for "kept" to mean anything.
+    assert ["python", "-m", "pip", "install", "-r", "requirements.lock"] in commands
+    assert not any(command[3:4] == ["uninstall"] for command in commands)
+
+
+def test_retired_packages_are_kept_when_the_requirements_cannot_be_read_back(
+    tmp_path: Path, caplog
+) -> None:  # type: ignore[no-untyped-def]
+    """scan_requirements が None (読み戻し失敗) のときは消さない — 巻き戻した先の
+    コードが使う部品を、読めなかったという理由で消さないため。"""
+    project = _make_project(tmp_path)
+    commands: list[list[str]] = []
+
+    def recording_run(command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
+        commands.append(list(command))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with caplog.at_level("WARNING", logger="saiverse.update"), patch.object(
+        update_engine, "_run", side_effect=recording_run
+    ), patch.object(update_engine, "scan_requirements", return_value=None), patch.object(
+        update_engine.shutil, "which", return_value="npm"
+    ):
+        update_engine.update_dependencies(project, "python")
+
+    assert ["python", "-m", "pip", "install", "-r", "requirements.lock"] in commands
+    assert not any(command[3:4] == ["uninstall"] for command in commands)
+    assert any("left as they are" in r.getMessage() for r in caplog.records)
+
+
+def test_retired_core_packages_are_not_in_the_lock() -> None:
+    """A name put back into requirements.lock must also leave
+    RETIRED_CORE_PACKAGES; otherwise every update installs it and removes it."""
+    lock = Path(update_engine.__file__).resolve().parent.parent / "requirements.lock"
+    locked = set()
+    for raw in lock.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        name = update_engine._naive_requirement_name(line)
+        if name:
+            locked.add(update_engine._canonical_package_name(name))
+    assert locked, "requirements.lock parsed to no packages"
+    for name in update_engine.RETIRED_CORE_PACKAGES:
+        assert update_engine._canonical_package_name(name) not in locked
 
 
 def test_update_dependencies_logs_addon_conflicts_without_failing(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]

@@ -82,6 +82,40 @@ def current_python_version() -> str:
     return platform.python_version()
 
 
+_PYTHON_MINOR_RE = re.compile(r"^(\d+)\.(\d+)(?:\.|$)")
+
+
+def python_minor_version(version: object) -> tuple[int, int] | None:
+    """Python のバージョンの文字列 (``"3.13.2"``) から ``(major, minor)`` を返す。
+
+    解析できない値 (文字列でない・数字の並びで始まらない) は None。
+    """
+    if not isinstance(version, str):
+        return None
+    match = _PYTHON_MINOR_RE.match(version.strip())
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def addon_env_matches_current_python(record: dict | None) -> bool:
+    """専用の環境の記録が、本体の Python と同じ major.minor で作られたものか。
+
+    venv はパッチ更新 (3.13.2 → 3.13.17) を跨いで使える: venv の中の python は
+    元の Python の場所を指し、標準ライブラリと C 拡張の ABI は major.minor の中で
+    変わらない。完全一致を要求すると、Python のパッチ更新だけで専用の環境を使う
+    処理が止まる。記録は診断のためにフルバージョンのまま書く。
+
+    記録が無い・``python_version`` が解析できないときは False。
+    ``_ensure_addon_env`` / ``_env_needs_full_run`` / ``get_addon_env_python`` が
+    この同じ判定を使う。
+    """
+    if record is None:
+        return False
+    recorded = python_minor_version(record.get("python_version"))
+    return recorded is not None and recorded == python_minor_version(current_python_version())
+
+
 def read_addon_env_record(env_dir: Path) -> dict | None:
     """専用の環境を作ったときの記録。無い / 壊れていれば None。"""
     path = env_dir / ADDON_ENV_RECORD_NAME
@@ -102,8 +136,11 @@ def get_addon_env_python(addon_name: str, env_name: str) -> Path:
     プロセスとして起動する (SAIVerse のプロセスの中では import できない)。
 
     環境が無いとき、作ったときの記録が無いとき、記録された Python のバージョンが
-    本体の Python と食い違うときは ``AddonEnvError`` を投げる。古い環境の場所を
-    黙って返さない — 作り直しは setup のやり直しで行う。
+    解析できないとき、記録された Python の major.minor (``3.13``) が本体の Python の
+    major.minor と食い違うときは ``AddonEnvError`` を投げる。パッチ番号だけの違い
+    (記録 ``3.13.2``、本体 ``3.13.17``) は同じ環境として使う
+    (``addon_env_matches_current_python``)。古い環境の場所を黙って返さない —
+    作り直しは setup のやり直しで行う。
     """
     env_dir = get_addon_env_dir(addon_name, env_name)
     python = addon_env_python_path(env_dir)
@@ -114,11 +151,23 @@ def get_addon_env_python(addon_name: str, env_name: str) -> Path:
             f"({env_dir}). Run the addon's setup again."
         )
     recorded = record.get("python_version")
-    current = current_python_version()
-    if recorded != current:
+    recorded_minor = python_minor_version(recorded)
+    if recorded_minor is None:
+        raise AddonEnvError(
+            f"addon {addon_name!r}: Python environment {env_name!r} has an unreadable "
+            f"Python version in its record ({recorded!r}). "
+            "Run the addon's setup again to rebuild it."
+        )
+    if not addon_env_matches_current_python(record):
+        current = current_python_version()
+        current_minor = python_minor_version(current)
+        current_label = (
+            f"{current_minor[0]}.{current_minor[1]}" if current_minor else current
+        )
         raise AddonEnvError(
             f"addon {addon_name!r}: Python environment {env_name!r} was created with "
-            f"Python {recorded}, but SAIVerse now runs Python {current}. "
+            f"Python {recorded_minor[0]}.{recorded_minor[1]} ({recorded}), but SAIVerse "
+            f"now runs Python {current_label} ({current}). "
             "Run the addon's setup again to rebuild it."
         )
     return python

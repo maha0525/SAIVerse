@@ -59,6 +59,16 @@ REQUIREMENTS_LOCK = "requirements.lock"
 # path is the single caller that picks it, explicitly, after ``git reset``.
 LEGACY_REQUIREMENTS = "requirements.txt"
 
+# Core packages that left requirements.lock and are removed from the venv on
+# every update. ``pip install -r`` never removes a package the lock no longer
+# lists, so a package dropped from the lock stays in every user's .venv.
+# fastembed left the lock with the EmbeddingGemma 2 migration on 2026-10-12
+# (docs/intent/embedding_gemma2_migration.md); after the Pillow 13 update
+# (2026-10-22) ``pip check`` reports its Pillow<12 requirement as a conflict.
+# A name here must not appear in requirements.lock (a test holds that), or the
+# update would install it and remove it again.
+RETIRED_CORE_PACKAGES: tuple[str, ...] = ("fastembed",)
+
 # Exit codes of ``--check-complete``. The launchers branch on these, so they are
 # part of the contract with start.bat / start.sh.
 CHECK_READY = 0
@@ -1277,6 +1287,85 @@ def _checkout_untouched(project_dir: Path, original_branch: str, old_revision: s
 _PIP_CHECK_CLEAN = "No broken requirements found."
 
 
+def _upgrade_pip(project_dir: Path, python: str) -> None:
+    """Upgrade the .venv's pip before the requirements are installed.
+
+    pip carries its own copy of certifi (``pip._vendor.certifi``) and verifies
+    every download's TLS certificate with it. requirements.lock has no hashes,
+    so that TLS check is what makes a download authentic. setup.bat / setup.sh
+    upgrade pip on every run (setup.bat:161), but a user who updates through the
+    UI update button (this engine) never reruns setup, so the pip -- and its
+    certifi -- stayed at the version first installed. On 2026-10-21 the
+    intermediate key of the eMudhra (emSign) CA leaked and certifi 2026.10.19
+    removed that CA; an old pip would go on trusting it. Upgrading here makes
+    both install / update paths keep pip current.
+
+    A failure is logged and the update goes on: the pip already installed still
+    works, and the lock install right after decides whether the update succeeds.
+    """
+    try:
+        result = _run(
+            [python, "-m", "pip", "install", "--upgrade", "pip"],
+            cwd=project_dir,
+            label="upgrade pip",
+            check=False,
+        )
+    except UpdateError as exc:
+        LOGGER.warning("[deps] pip upgrade could not run; continuing with the installed pip: %s", exc)
+        return
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-2000:]
+        LOGGER.warning(
+            "[deps] pip upgrade failed (exit %s); continuing with the installed pip%s",
+            result.returncode,
+            f": {detail}" if detail else "",
+        )
+
+
+def _remove_retired_core_packages(project_dir: Path, python: str, requirements: str) -> None:
+    """Uninstall ``RETIRED_CORE_PACKAGES`` after the requirements are installed.
+
+    ``pip uninstall -y`` only warns, and exits 0, for a package that is not
+    installed, so an environment without them is left as it is. A name the
+    requirements file just installed is kept: a rollback to a revision from
+    before the package was retired reinstalls that revision's own lock, and
+    removing the package would break the code it was rolled back to. A failure
+    is logged and the update goes on.
+    """
+    scan = scan_requirements(project_dir / requirements)
+    if scan is None:
+        # The file was just installed from, so an unreadable file here is an
+        # abnormal state. Removing on a failed read could strip a package the
+        # rolled-back code still imports, so the safe side is to keep.
+        LOGGER.warning(
+            "[deps] %s could not be read back; the retired packages were left as they are",
+            requirements,
+        )
+        return
+    wanted = {_canonical_package_name(dist.name) for dist in scan.required}
+    retired = [name for name in RETIRED_CORE_PACKAGES if _canonical_package_name(name) not in wanted]
+    if not retired:
+        return
+    try:
+        result = _run(
+            [python, "-m", "pip", "uninstall", "-y", *retired],
+            cwd=project_dir,
+            label="remove retired core packages",
+            check=False,
+        )
+    except UpdateError as exc:
+        LOGGER.warning("[deps] retired packages could not be removed: %s", exc)
+        return
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-2000:]
+        LOGGER.warning(
+            "[deps] removing retired packages %s failed (exit %s)%s",
+            ", ".join(retired),
+            result.returncode,
+            f": {detail}" if detail else "",
+        )
+
+
 def _report_addon_conflicts(project_dir: Path, python: str) -> None:
     """Make it visible, in this update's log, when the lock broke a package the
     lock does not own.
@@ -1342,12 +1431,18 @@ def update_dependencies(
     pip failing loudly on the missing file is the correct outcome. The only
     caller that passes something else is ``_rollback_code_and_dependencies``,
     for revisions that predate the lock.
+
+    Order: upgrade pip, install the requirements file, remove
+    ``RETIRED_CORE_PACKAGES``, ``pip check``, then npm.
     """
+    _upgrade_pip(project_dir, python)
+    requirements = requirements_file or REQUIREMENTS_LOCK
     _run(
-        [python, "-m", "pip", "install", "-r", requirements_file or REQUIREMENTS_LOCK],
+        [python, "-m", "pip", "install", "-r", requirements],
         cwd=project_dir,
         label="install Python dependencies",
     )
+    _remove_retired_core_packages(project_dir, python, requirements)
     _report_addon_conflicts(project_dir, python)
     frontend = project_dir / "frontend"
     if not frontend.is_dir():
