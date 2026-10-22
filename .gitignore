@@ -28,6 +28,9 @@ expansion_data/
 
 # Portable Node.js (installed by setup.bat when system Node.js is unavailable)
 .node/
+# Swap folders of scripts/install_node_portable.ps1 (its next run removes them)
+.node.new/
+.node.old/
 
 # Portable Git for Windows (installed by setup.bat when system Git is unavailable)
 .git-portable/
