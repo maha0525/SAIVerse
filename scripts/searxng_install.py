@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,23 @@ from searxng_config import (
 SOURCE_MARKER = ".saiverse-source.json"
 INSTALL_MARKER = ".saiverse-searxng.json"
 REQUIRED_FILES = ("requirements.txt", "requirements-dev.txt", "README.rst", "setup.py", "searx/settings.yml")
+
+# Lower bounds written over the pinned source's requirements.txt before pip
+# install. SearXNG's setup.py builds install_requires from the same file, so
+# the editable install's metadata carries these bounds and `pip check` agrees.
+# - certifi: commit ff8f5ddcc pins certifi==2026.7.22, which still trusts the
+#   emSign root CAs removed in certifi 2026.10.19 after their key compromise
+#   (GHSA-6q48-6c7w-9gw2). Unless SSL_CERT_FILE / CURL_CA_BUNDLE /
+#   REQUESTS_CA_BUNDLE or a Python default cafile is set, curl_cffi verifies
+#   the TLS connections to external search engines with this CA bundle.
+# - anyio: versions before 4.14.2 are affected by CVE-2026-63374 (TLS
+#   certificate spoofing). Commit ff8f5ddcc does not require anyio, but venvs
+#   first installed from older SearXNG sources keep httpx and anyio (pip
+#   install -r never removes packages), so the bound upgrades that copy.
+# Remove an entry once the SearXNG commit in searxng_pin.json itself requires
+# a fixed version (upstream master still pinned certifi 2026.7.22 on 2026-10-22).
+REQUIREMENT_FLOORS = {"certifi": "2026.10.19", "anyio": "4.14.2"}
+_REQUIREMENT_NAME = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 # Import the selected package and an engine that needs IANA timezone data.
 # Unlike importing webapp, this does not initialize engine networking/threads.
@@ -57,7 +75,9 @@ def run(args: list[str | Path], *, env: dict[str, str] | None = None) -> None:
 
 
 def install_identity() -> dict[str, str]:
-    return {**pinned_release(), "source": str(source_directory()), "installer_revision": "1"}
+    # Revision 2: REQUIREMENT_FLOORS. A changed revision makes ready() reject
+    # existing installs, so setup reinstalls them with the rewritten requirements.
+    return {**pinned_release(), "source": str(source_directory()), "installer_revision": "2"}
 
 
 def read_json(path: Path) -> dict:
@@ -147,10 +167,52 @@ except ImportError:
         target.write_text(body, encoding="utf-8")
 
 
+def apply_requirement_floors(text: str) -> str:
+    """Return requirements.txt text with each REQUIREMENT_FLOORS entry as `name>=floor`.
+
+    The first line naming a package is replaced, later lines naming it are
+    dropped, and packages without a line are appended. Applying it again to
+    its own result returns the same text. A replaced line keeps neither
+    extras nor an environment marker, so REQUIREMENT_FLOORS must only name
+    packages whose upstream line uses neither (true of certifi and anyio).
+    """
+    pending = dict(REQUIREMENT_FLOORS)
+    lines = []
+    for line in text.splitlines():
+        match = _REQUIREMENT_NAME.match(line)
+        name = re.sub(r"[-_.]+", "-", match.group(1)).lower() if match else None
+        if name in REQUIREMENT_FLOORS:
+            if name in pending:
+                lines.append(f"{name}>={pending.pop(name)}")
+            continue
+        lines.append(line)
+    lines.extend(f"{name}>={floor}" for name, floor in pending.items())
+    return "\n".join(lines) + "\n"
+
+
+def prepare_requirements() -> None:
+    target = source_directory() / "requirements.txt"
+    body = target.read_text(encoding="utf-8")
+    updated = apply_requirement_floors(body)
+    if updated == body:
+        return
+    # Write beside the target and swap it in, so a failed write never leaves
+    # a truncated requirements.txt in the source.
+    descriptor, temporary = tempfile.mkstemp(prefix=".requirements-", suffix=".txt", dir=target.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(updated)
+        os.replace(temporary, target)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
 def setup() -> None:
     print(f"[INFO] SearXNG commit: {pinned_release()['commit']}", flush=True)
     prepare_source()
     prepare_compatibility()
+    prepare_requirements()
     if not venv_python().is_file():
         run([sys.executable, "-m", "venv", venv_directory()])
     marker = venv_directory() / INSTALL_MARKER

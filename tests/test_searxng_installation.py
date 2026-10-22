@@ -98,6 +98,7 @@ def test_failed_pip_does_not_leave_completion_marker(installation, monkeypatch):
     marker.write_text("old completion record", encoding="utf-8")
     monkeypatch.setattr(installer, "prepare_source", lambda: None)
     monkeypatch.setattr(installer, "prepare_compatibility", lambda: None)
+    monkeypatch.setattr(installer, "prepare_requirements", lambda: None)
     monkeypatch.setattr(installer, "ready", lambda: False)
 
     def fail(args, **kwargs):
@@ -122,3 +123,49 @@ def test_marker_alone_does_not_hide_failed_runtime_import(installation, monkeypa
         a, 1, stdout="", stderr="ModuleNotFoundError: No module named 'tzdata'",
     ))
     assert installer.ready() is False
+
+
+UPSTREAM_REQUIREMENTS = """certifi==2025.11.12
+babel==2.17.0
+httpx[http2]==0.28.1
+tomli==2.3.0; python_version < '3.11'
+"""
+
+
+def test_requirement_floors_replace_certifi_and_append_anyio():
+    updated = installer.apply_requirement_floors(UPSTREAM_REQUIREMENTS)
+    lines = updated.splitlines()
+    assert lines[0] == f"certifi>={installer.REQUIREMENT_FLOORS['certifi']}"
+    assert "certifi==2025.11.12" not in lines
+    assert lines[-1] == f"anyio>={installer.REQUIREMENT_FLOORS['anyio']}"
+    assert lines[1:4] == UPSTREAM_REQUIREMENTS.splitlines()[1:4]
+
+
+def test_requirement_floors_pin_the_fixed_releases():
+    """GHSA-6q48-6c7w-9gw2 (certifi) / CVE-2026-63374 (anyio) の修正版が下限。"""
+    assert installer.REQUIREMENT_FLOORS == {"certifi": "2026.10.19", "anyio": "4.14.2"}
+
+
+def test_requirement_floors_are_idempotent():
+    once = installer.apply_requirement_floors(UPSTREAM_REQUIREMENTS)
+    assert installer.apply_requirement_floors(once) == once
+
+
+def test_requirement_floors_replace_existing_anyio_pin_once():
+    updated = installer.apply_requirement_floors("anyio==4.0.0\nCertifi==2025.1.1\ncertifi==2024.1.1\n")
+    assert updated == "anyio>=4.14.2\ncertifi>=2026.10.19\n"
+
+
+def test_prepare_requirements_rewrites_source_file(installation):
+    source = config.source_directory()
+    source.mkdir()
+    target = source / "requirements.txt"
+    target.write_text(UPSTREAM_REQUIREMENTS, encoding="utf-8")
+
+    installer.prepare_requirements()
+    first = target.read_text(encoding="utf-8")
+    installer.prepare_requirements()
+
+    assert first == installer.apply_requirement_floors(UPSTREAM_REQUIREMENTS)
+    assert target.read_text(encoding="utf-8") == first
+    assert sorted(p.name for p in source.iterdir()) == ["requirements.txt"]
