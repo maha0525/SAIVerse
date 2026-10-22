@@ -294,9 +294,14 @@ def test_a_failed_marker_write_does_not_fail_the_update(tmp_path: Path) -> None:
 
 
 def test_matching_marker_is_ready_to_start(tmp_path: Path) -> None:
+    """What an update by this engine leaves: the marker from the parent and
+    the dependency record from the child, both for the code on disk."""
     project = _make_project(tmp_path)
     update_engine.write_completion_marker(project)
-    assert update_engine.check_update_complete(project) == update_engine.CHECK_READY
+    update_engine.write_dependencies_record(project)
+    with patch.object(update_engine, "_run_dependencies_from_disk") as deps:
+        assert update_engine.check_update_complete(project) == update_engine.CHECK_READY
+    deps.assert_not_called()
 
 
 def test_stale_marker_demands_the_update_be_finished(tmp_path: Path) -> None:
@@ -908,7 +913,7 @@ def test_the_update_installs_dependencies_with_the_engine_it_just_fetched(tmp_pa
         ["venv-python", str(project / "scripts" / "update_engine.py"), "--install-dependencies"],
     ]
     assert calls[0]["cwd"] == project
-    assert calls[0]["timeout"] == 5400
+    assert calls[0]["timeout"] == 7200
     assert calls[0]["encoding"] == "utf-8"
 
 
@@ -937,7 +942,9 @@ def test_a_failing_child_fails_the_dependency_step(tmp_path: Path, caplog) -> No
 
 def test_the_rollback_hands_requirements_txt_to_the_previous_engine(tmp_path: Path) -> None:
     """After ``git reset`` to a revision without a lock, the engine the reset
-    put back installs that revision's requirements.txt."""
+    put back installs that revision's requirements.txt. The engine on disk
+    here is this one, which knows ``--keep-portable-node``, so the rollback
+    passes it."""
     project = _make_project(tmp_path)
     _put_engine_on_disk(project)
     calls: list[dict] = []
@@ -958,6 +965,7 @@ def test_the_rollback_hands_requirements_txt_to_the_previous_engine(tmp_path: Pa
             str(project / "scripts" / "update_engine.py"),
             "--install-dependencies",
             "requirements.txt",
+            "--keep-portable-node",
         ],
     ]
 
@@ -975,31 +983,87 @@ def test_an_engine_on_disk_without_the_option_installs_in_process(tmp_path: Path
         update_engine._run_dependencies_from_disk(project, "venv-python", "requirements.txt")
 
     run.assert_not_called()
-    in_process.assert_called_once_with(project, "venv-python", "requirements.txt")
+    in_process.assert_called_once_with(
+        project, "venv-python", "requirements.txt", replace_portable_node=True
+    )
     assert any("--install-dependencies" in record.getMessage() for record in caplog.records)
+
+
+def test_a_rollback_to_an_engine_without_the_option_keeps_the_portable_node_in_process(
+    tmp_path: Path,
+) -> None:
+    """The in-process fallback is this engine's ``update_dependencies``, which
+    replaces the portable Node.js unless told not to; a rollback tells it."""
+    project = _make_project(tmp_path)
+    script = project / update_engine.ENGINE_SCRIPT
+    script.parent.mkdir(parents=True)
+    script.write_text("def main():\n    return 0\n", encoding="utf-8")
+    with patch.object(update_engine, "_run") as run, patch.object(
+        update_engine, "update_dependencies"
+    ) as in_process:
+        update_engine._run_dependencies_from_disk(project, "venv-python", None, keep_portable_node=True)
+
+    run.assert_not_called()
+    in_process.assert_called_once_with(project, "venv-python", None, replace_portable_node=False)
+
+
+def test_the_keep_option_is_not_passed_to_an_engine_that_lacks_it(tmp_path: Path) -> None:
+    """An engine on disk from before ``--keep-portable-node`` would reject it
+    with a usage error; such an engine does not replace the portable Node.js
+    in its dependency step, so nothing needs to be passed."""
+    project = _make_project(tmp_path)
+    script = project / update_engine.ENGINE_SCRIPT
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "# an engine from v0.3.25\nINSTALL_DEPENDENCIES_OPTION = '--install-dependencies'\n",
+        encoding="utf-8",
+    )
+    calls: list[dict] = []
+    with patch.object(update_engine, "_run", side_effect=_recording_child_run(calls)):
+        update_engine._run_dependencies_from_disk(project, "venv-python", None, keep_portable_node=True)
+
+    assert [call["command"] for call in calls] == [
+        ["venv-python", str(script), "--install-dependencies"],
+    ]
 
 
 def test_the_install_dependencies_option_runs_update_dependencies(capsys) -> None:  # type: ignore[no-untyped-def]
     """The child's entrance: this interpreter, the engine's own checkout, and
-    the lock unless a file is named."""
+    the lock unless a file is named. The record files are patched out so the
+    test writes nothing into the real checkout."""
     engine_project = Path(update_engine.__file__).resolve().parent.parent
     with patch.object(update_engine, "setup_logging"), patch.object(
         update_engine, "update_dependencies"
-    ) as deps:
+    ) as deps, patch.object(update_engine, "write_dependencies_record") as record, patch.object(
+        update_engine, "clear_dependencies_failure"
+    ) as clear:
         assert update_engine.main(["--install-dependencies"]) == 0
         assert update_engine.main(["--install-dependencies", "requirements.txt"]) == 0
+        assert update_engine.main(["--install-dependencies", "--keep-portable-node"]) == 0
 
     assert deps.call_args_list[0].args == (engine_project, update_engine.sys.executable, None)
     assert deps.call_args_list[1].args == (engine_project, update_engine.sys.executable, "requirements.txt")
+    assert [call.kwargs for call in deps.call_args_list] == [
+        {"replace_portable_node": True},
+        {"replace_portable_node": True},
+        {"replace_portable_node": False},
+    ]
+    assert record.call_count == 3
+    assert clear.call_count == 3
 
 
 def test_the_install_dependencies_option_exits_1_on_an_update_error(capsys) -> None:  # type: ignore[no-untyped-def]
     with patch.object(update_engine, "setup_logging"), patch.object(
         update_engine, "update_dependencies", side_effect=update_engine.UpdateError("npm ci failed")
-    ):
+    ), patch.object(update_engine, "write_dependencies_record") as record, patch.object(
+        update_engine, "clear_dependencies_failure"
+    ) as clear:
         assert update_engine.main(["--install-dependencies"]) == 1
 
     assert "npm ci failed" in capsys.readouterr().err
+    # A failed step is not recorded as finished, and an earlier failure stays shown.
+    record.assert_not_called()
+    clear.assert_not_called()
 
 
 # --- pip check after the lock is installed: visibility, not enforcement --------

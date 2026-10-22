@@ -15,21 +15,17 @@ if not exist ".venv\Scripts\activate.bat" (
 )
 
 REM ---------------------------------------------------------------
-REM Bring the portable Node.js to the version install_node_portable.ps1
-REM pins. An update from a version without this step runs the previous
-REM update engine, which never replaces .node; this start does. When .node
-REM is already current this only reads its version. On failure the
-REM existing .node is kept and SAIVerse starts with it. A .node.old alone
-REM is a replacement that died half-way; the script puts it back first.
-REM See docs/intent/dependency_management.md section 2-6.
+REM A portable Node.js replacement that died between its two renames
+REM leaves .node.old and no .node. Put it back before anything uses
+REM .node. The replacement itself runs during updates only - see
+REM docs/intent/dependency_management.md section 2-6.
 REM ---------------------------------------------------------------
-set "PORTABLE_NODE="
-if exist ".node\node.exe" set "PORTABLE_NODE=1"
-if exist ".node.old\node.exe" set "PORTABLE_NODE=1"
-if not defined PORTABLE_NODE goto :portable_node_done
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_node_portable.ps1
-if errorlevel 1 echo [WARN] Could not update the portable Node.js. Starting with the existing one.
-:portable_node_done
+if exist ".node\" goto :portable_node_ready
+if not exist ".node.old\node.exe" goto :portable_node_ready
+echo [INFO] Putting back the portable Node.js left aside by an interrupted replacement...
+ren ".node.old" ".node"
+if errorlevel 1 echo [WARN] Could not rename .node.old back to .node.
+:portable_node_ready
 
 REM Add portable Node.js to PATH if exists
 if exist ".node\node.exe" set "PATH=%CD%\.node;%PATH%"

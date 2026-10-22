@@ -1,0 +1,279 @@
+"""The one-time package reinstall at start, and its failure in the banner.
+
+docs/intent/update_completes_with_new_code.md sections 2 and 6. An update
+finished by an older updater writes a ``.update_complete`` that matches the
+code, but its dependency step was the older one, so steps added since never
+ran. ``--check-complete`` tells that case by the missing dependency record and
+runs the dependency step of the engine on disk once, without fetching code:
+
+1. such a checkout installs once, gets the record, and keeps its VERSION;
+2. the next start does nothing;
+3. a new install (no ``.update_complete``) is only recorded, never installed;
+4. a failed reinstall does not stop the start, is written to a file the
+   backend shows in the banner, and the next success removes it.
+
+No real pip / npm / PowerShell runs: the child process is replaced by a fake
+``_run`` that calls the child's entrance (``install_dependencies_main``) in
+this process with ``update_dependencies`` mocked.
+"""
+from __future__ import annotations
+
+import json
+from importlib import metadata
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from saiverse.update_dependencies_alert import ALERT_ID, update_dependencies_alerts
+from scripts import update_engine
+
+_INSTALLED_PYTEST = metadata.version("pytest")
+
+
+@pytest.fixture(autouse=True)
+def _no_running_frontend():  # type: ignore[no-untyped-def]
+    """The reinstall refuses while a frontend runs; answer "none running"
+    instead of listing this machine's processes."""
+    with patch.object(
+        update_engine, "find_frontend_servers", return_value=update_engine.FrontendServers([], None)
+    ):
+        yield
+
+
+def _make_project(tmp_path: Path, version: str = "0.3.26") -> Path:
+    """A checkout whose code and packages match (see test_update_completion_marker)."""
+    (tmp_path / "VERSION").write_text(version + "\n", encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("pytest>=9.0.0\n", encoding="utf-8")
+    (tmp_path / "requirements.lock").write_text(f"pytest=={_INSTALLED_PYTEST}\n", encoding="utf-8")
+    frontend = tmp_path / "frontend"
+    (frontend / "node_modules" / "next").mkdir(parents=True)
+    (frontend / "node_modules" / "next" / "package.json").write_text("{}\n", encoding="utf-8")
+    (frontend / "package-lock.json").write_text('{"name": "saiverse"}\n', encoding="utf-8")
+    (frontend / "package.json").write_text(json.dumps({"dependencies": {"next": "^16"}}), encoding="utf-8")
+    # The engine on disk is the one that runs the child.
+    engine = tmp_path / update_engine.ENGINE_SCRIPT
+    engine.parent.mkdir(parents=True)
+    engine.write_text(Path(update_engine.__file__).read_text(encoding="utf-8"), encoding="utf-8")
+    return tmp_path
+
+
+def _updated_by_an_older_updater(tmp_path: Path) -> Path:
+    """v0.3.24 updating to this code: the parent wrote a matching marker, and
+    its own (older) dependency step left no dependency record."""
+    project = _make_project(tmp_path)
+    update_engine.write_completion_marker(project)
+    return project
+
+
+class _Child:
+    """Stands in for the ``--install-dependencies`` child process."""
+
+    def __init__(self, project: Path, *, fail: bool = False) -> None:
+        self.project = project
+        self.fail = fail
+        self.commands: list[list[str]] = []
+        self.installs = 0
+
+    def run(self, command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
+        self.commands.append(list(command))
+        assert command[1:3] == [str(self.project / update_engine.ENGINE_SCRIPT), "--install-dependencies"]
+
+        def install(*args, **kwargs):  # type: ignore[no-untyped-def]
+            self.installs += 1
+            if self.fail:
+                raise update_engine.UpdateError("install Python dependencies failed with exit 1: network down")
+
+        with patch.object(update_engine, "update_dependencies", side_effect=install), patch.object(
+            update_engine, "setup_logging"
+        ):
+            code = update_engine.install_dependencies_main(self.project, None)
+        return MagicMock(returncode=code, stdout="", stderr="network down" if code else "")
+
+    def check(self) -> int:
+        with patch.object(update_engine, "_run", side_effect=self.run), patch.object(
+            update_engine, "update_code"
+        ) as code, patch.object(update_engine, "create_pre_update_snapshot") as snapshot:
+            result = update_engine.check_update_complete(self.project)
+        # No release is fetched and no world snapshot is taken: only packages.
+        code.assert_not_called()
+        snapshot.assert_not_called()
+        return result
+
+
+# --- 1. a checkout updated by an older updater installs once -----------------------
+
+
+def test_an_older_updaters_checkout_installs_once_and_keeps_its_version(tmp_path: Path) -> None:
+    project = _updated_by_an_older_updater(tmp_path)
+    child = _Child(project)
+
+    assert child.check() == update_engine.CHECK_READY
+
+    assert child.installs == 1
+    assert update_engine.read_dependencies_record(project) == update_engine.completion_fingerprint(project)
+    assert update_engine.read_version(project) == "0.3.26"
+    # The marker is the parent's record and is left as it was.
+    assert update_engine.read_completion_marker(project) == update_engine.completion_fingerprint(project)
+
+
+def test_the_reinstall_runs_the_engine_on_disk_with_this_interpreter(tmp_path: Path) -> None:
+    project = _updated_by_an_older_updater(tmp_path)
+    child = _Child(project)
+    child.check()
+    assert child.commands == [
+        [update_engine.sys.executable, str(project / update_engine.ENGINE_SCRIPT), "--install-dependencies"],
+    ]
+
+
+def test_a_record_for_other_code_counts_as_missing(tmp_path: Path) -> None:
+    """A record left by an earlier version does not cover this one."""
+    project = _updated_by_an_older_updater(tmp_path)
+    stale = dict(update_engine.completion_fingerprint(project) or {}, version="0.3.25")
+    update_engine.dependencies_record_path(project).write_text(json.dumps(stale), encoding="utf-8")
+    child = _Child(project)
+    assert child.check() == update_engine.CHECK_READY
+    assert child.installs == 1
+
+
+# --- 2. the next start does nothing ------------------------------------------------
+
+
+def test_the_next_start_does_nothing(tmp_path: Path) -> None:
+    project = _updated_by_an_older_updater(tmp_path)
+    _Child(project).check()
+
+    again = _Child(project)
+    assert again.check() == update_engine.CHECK_READY
+    assert again.installs == 0
+    assert again.commands == []
+
+
+# --- 3. a new install is recorded without installing -----------------------------------
+
+
+def test_a_new_install_is_recorded_without_installing(tmp_path: Path) -> None:
+    project = _make_project(tmp_path)  # setup.bat leaves no .update_complete
+    child = _Child(project)
+
+    assert child.check() == update_engine.CHECK_READY
+
+    assert child.installs == 0
+    assert child.commands == []
+    assert update_engine.read_dependencies_record(project) == update_engine.completion_fingerprint(project)
+    # And the start after that compares cheaply and does nothing either.
+    assert _Child(project).check() == update_engine.CHECK_READY
+
+
+def test_a_new_install_with_missing_packages_is_not_recorded(tmp_path: Path) -> None:
+    """The existing verification decides; the record is written only when it passes."""
+    project = _make_project(tmp_path)
+    with patch.object(
+        update_engine, "missing_dependencies", return_value=update_engine.DependencyReport(["mcp"], [], False)
+    ):
+        assert _Child(project).check() == update_engine.CHECK_NEEDS_FINISH
+    assert update_engine.read_dependencies_record(project) is None
+
+
+# --- 4. a failure does not stop the start and is shown ---------------------------------
+
+
+def test_a_failed_reinstall_starts_anyway_and_is_written_for_the_banner(tmp_path: Path) -> None:
+    project = _updated_by_an_older_updater(tmp_path)
+    child = _Child(project, fail=True)
+
+    assert child.check() == update_engine.CHECK_DEPENDENCIES_FAILED
+
+    # Not recorded as done, so the next start tries again.
+    assert update_engine.read_dependencies_record(project) is None
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None
+    assert failure["version"] == "0.3.26"
+    assert "network down" in failure["error"]
+
+    alerts = update_dependencies_alerts(project)
+    assert [alert["id"] for alert in alerts] == [ALERT_ID]
+    alert = alerts[0]
+    assert alert["level"] == "warning"
+    assert "start.bat" in alert["message"]
+    assert "network down" in alert["details"]["error"]
+
+
+def test_the_next_successful_reinstall_removes_the_banner(tmp_path: Path) -> None:
+    project = _updated_by_an_older_updater(tmp_path)
+    _Child(project, fail=True).check()
+    assert update_dependencies_alerts(project) != []
+
+    retry = _Child(project)
+    assert retry.check() == update_engine.CHECK_READY
+    assert retry.installs == 1
+    assert update_engine.read_dependencies_failure(project) is None
+    assert update_dependencies_alerts(project) == []
+
+
+def test_a_successful_update_removes_the_banner_too(tmp_path: Path) -> None:
+    """Any finished dependency step of this engine resolves the failure,
+    including the one inside the next update."""
+    project = _make_project(tmp_path)
+    update_engine.write_dependencies_failure(project, "network down")
+    with patch.object(update_engine, "update_dependencies"), patch.object(update_engine, "setup_logging"):
+        assert update_engine.install_dependencies_main(project, None) == 0
+    assert update_dependencies_alerts(project) == []
+
+
+def test_the_reinstall_refuses_while_the_frontend_runs(tmp_path: Path) -> None:
+    """npm ci beside a running frontend would empty node_modules on Windows."""
+    project = _updated_by_an_older_updater(tmp_path)
+    running = update_engine.FrontendServers([MagicMock(pid=1, **{"name.return_value": "node.exe"})], "start")
+    child = _Child(project)
+    with patch.object(update_engine, "find_frontend_servers", return_value=running):
+        assert child.check() == update_engine.CHECK_DEPENDENCIES_FAILED
+    assert child.commands == []
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None and "Frontend" in failure["error"]
+
+
+def test_a_damaged_failure_file_still_shows_a_banner(tmp_path: Path) -> None:
+    update_engine.dependencies_failure_path(tmp_path).write_text("{not json", encoding="utf-8")
+    alerts = update_dependencies_alerts(tmp_path)
+    assert [alert["id"] for alert in alerts] == [ALERT_ID]
+    assert alerts[0]["details"] == {}
+
+
+def test_no_failure_file_means_no_banner(tmp_path: Path) -> None:
+    assert update_dependencies_alerts(tmp_path) == []
+
+
+# --- what the full update leaves --------------------------------------------------------
+
+
+def test_the_update_drops_the_record_when_the_code_moves(tmp_path: Path) -> None:
+    """Until the new code's dependency step has finished, the old record
+    describes something that no longer holds."""
+    project = _make_project(tmp_path)
+    update_engine.write_dependencies_record(project)
+    with patch.object(update_engine, "update_code"), patch.object(update_engine, "_run_dependencies_from_disk"):
+        update_engine._apply_code_and_dependencies(project, "python", update_engine._UpdateProgress())
+    assert update_engine.read_dependencies_record(project) is None
+
+
+def test_record_files_are_ignored_by_git() -> None:
+    """The updater refuses to run on a dirty tree; these files must never count."""
+    ignored = (Path(update_engine.__file__).resolve().parent.parent / ".gitignore").read_text(encoding="utf-8")
+    assert ".update_dependencies_*" in ignored.splitlines()
+    for name in (update_engine.DEPENDENCIES_RECORD, update_engine.DEPENDENCIES_FAILURE_RECORD):
+        assert name.startswith(".update_dependencies_")
+
+
+def test_the_launchers_start_anyway_on_a_failed_reinstall() -> None:
+    root = Path(update_engine.__file__).resolve().parent.parent
+    bat = (root / "start.bat").read_text(encoding="ascii")
+    # errorlevel N means "N or more", so 12 must be tested before 11 and after 13.
+    order = [bat.index(f"if errorlevel {n} goto") for n in (13, 12, 11, 10, 1)]
+    assert order == sorted(order)
+    assert "if errorlevel 12 goto :dependencies_failed" in bat
+    failed_block = bat[bat.index(":dependencies_failed"):]
+    assert failed_block.index("goto :update_check_done") < failed_block.index("exit /b")
+    sh = (root / "start.sh").read_text(encoding="utf-8")
+    assert '"$UPDATE_CHECK_RC" -eq 12' in sh
+    assert update_engine.CHECK_DEPENDENCIES_FAILED == 12

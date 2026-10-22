@@ -50,6 +50,11 @@ self_update.log
 # Must stay ignored: the updater refuses to run when tracked files are modified,
 # and a marker that had ever been committed would trip that check.
 .update_complete*
+# Per-checkout record of the finished dependency step and of a failed package
+# reinstall at start (update_engine.DEPENDENCIES_RECORD /
+# DEPENDENCIES_FAILURE_RECORD), plus their temporary files. Ignored for the
+# same reason.
+.update_dependencies_*
 
 # Debug log dump script (local-only developer tool)
 debug-dump.ps1

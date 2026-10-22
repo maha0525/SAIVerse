@@ -34,6 +34,9 @@ fi
 #     0  = コードと導入済みパッケージが一致。そのまま起動。
 #     10 = 更新が途中で死んでいる。--manual で仕上げてから起動。
 #     11 = 判定できなかった。警告だけ出して起動。
+#     12 = 古い更新処理が入れ替えの一部を行っていなかったので、パッケージの
+#          入れ直しを一度試したが失敗した。警告を出して起動し、失敗の内容は
+#          SAIVerse の画面のバナーに出る (docs/intent/update_completes_with_new_code.md)。
 # 仕上げに失敗したら起動しない (中途半端な状態で立ち上げない)。
 # docs/issues/v0229_update_bat_truncates_after_git_pull.md
 if [ -x ".venv/bin/python" ]; then
@@ -48,6 +51,9 @@ if [ -x ".venv/bin/python" ]; then
             exit 1
         fi
         echo "[OK] Update finished."
+    elif [ "$UPDATE_CHECK_RC" -eq 12 ]; then
+        echo "[WARN] The packages for this version could not be installed once more."
+        echo "[WARN] Starting anyway. The SAIVerse screen shows what happened and what to do."
     elif [ "$UPDATE_CHECK_RC" -ne 0 ]; then
         echo "[WARN] Could not verify the update state. Starting anyway."
     fi

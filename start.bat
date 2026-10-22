@@ -15,9 +15,24 @@ if not exist ".venv\Scripts\activate.bat" (
 )
 
 REM ---------------------------------------------------------------
+REM A portable Node.js replacement that died between its two renames
+REM leaves .node.old and no .node. Put it back before anything uses
+REM .node. The replacement itself runs during updates only - see
+REM docs/intent/dependency_management.md section 2-6.
+REM ---------------------------------------------------------------
+if exist ".node\" goto :portable_node_ready
+if not exist ".node.old\node.exe" goto :portable_node_ready
+echo [INFO] Putting back the portable Node.js left aside by an interrupted replacement...
+ren ".node.old" ".node"
+if errorlevel 1 echo [WARN] Could not rename .node.old back to .node.
+:portable_node_ready
+
+REM ---------------------------------------------------------------
 REM Finish an interrupted update before starting.
 REM update_engine.py --check-complete exits 10 when the code is newer
-REM than the installed packages, 11 when it cannot tell, 0 when ready.
+REM than the installed packages, 11 when it cannot tell, 12 when it had
+REM to install the packages once more and that failed, 0 when ready.
+REM On 12 SAIVerse starts anyway and its screen shows the failure.
 REM Any other code means the check itself failed, so we warn and start
 REM anyway - same meaning as start.sh.
 REM Keep this block flat and free of parentheses inside echo text:
@@ -27,9 +42,17 @@ REM docs/issues/v0229_update_bat_truncates_after_git_pull.md
 REM ---------------------------------------------------------------
 if not exist ".venv\Scripts\python.exe" goto :update_check_done
 ".venv\Scripts\python.exe" "scripts\update_engine.py" --check-complete
+if errorlevel 13 goto :update_check_skipped
+if errorlevel 12 goto :dependencies_failed
 if errorlevel 11 goto :update_check_skipped
 if errorlevel 10 goto :finish_update
 if errorlevel 1 goto :update_check_skipped
+goto :update_check_done
+
+:dependencies_failed
+echo.
+echo [WARN] The packages for this version could not be installed once more.
+echo [WARN] Starting anyway. The SAIVerse screen shows what happened and what to do.
 goto :update_check_done
 
 :finish_update
@@ -52,23 +75,6 @@ exit /b 1
 echo [WARN] Could not verify the update state. Starting anyway.
 
 :update_check_done
-
-REM ---------------------------------------------------------------
-REM Bring the portable Node.js to the version install_node_portable.ps1
-REM pins. An update from a version without this step runs the previous
-REM update engine, which never replaces .node; this start does. When .node
-REM is already current this only reads its version. On failure the
-REM existing .node is kept and SAIVerse starts with it. A .node.old alone
-REM is a replacement that died half-way; the script puts it back first.
-REM See docs/intent/dependency_management.md section 2-6.
-REM ---------------------------------------------------------------
-set "PORTABLE_NODE="
-if exist ".node\node.exe" set "PORTABLE_NODE=1"
-if exist ".node.old\node.exe" set "PORTABLE_NODE=1"
-if not defined PORTABLE_NODE goto :portable_node_done
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_node_portable.ps1
-if errorlevel 1 echo [WARN] Could not update the portable Node.js. Starting with the existing one.
-:portable_node_done
 
 REM Add portable Node.js to PATH if exists
 if exist ".node\node.exe" set "PATH=%CD%\.node;%PATH%"

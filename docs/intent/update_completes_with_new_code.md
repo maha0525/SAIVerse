@@ -1,6 +1,6 @@
 # Intent Document: アップデートの作業を、新しいコードで最後まで行う
 
-**ステータス: 実装待ち** (2026-10-23 まはー GO「それはやるべきだな。その設計でいい！」)
+**ステータス: 検証待ち** (2026-10-23 まはー GO「それはやるべきだな。その設計でいい！」。実装と自動テストは済み、§6 の 5・6 の通し確認が残る)
 
 ## 芯 (専門用語なしの数行)
 
@@ -40,12 +40,22 @@ v0.3.25 の発行直後、[PR #415 の Codex レビュー](https://github.com/ma
 
 - 子プロセスで `update_dependencies` を済ませたら、「どのバージョンのコードで、どのパッケージ一覧 (`requirements.lock` など) を入れ終えたか」を記録する。この記録は `.update_complete` とは**別のファイル**に書く — `.update_complete` は更新の最後に親プロセス (古い `update_engine.py` の場合がある) によって上書きされるため、新しいコードで足した項目は消されてしまうから。
 - `--check-complete` の実行時、`.update_complete` が今のコードと一致しているのにこの記録が無い (または一致しない) 場合は「古い更新処理で更新された環境」と判定し、`--install-dependencies` を一度だけ実行して記録を書く。新しいリリースはダウンロードしない。
-- `.update_complete` 自体が無い場合 (新しく導入した直後の環境) は、既存の「入っているパッケージを直接確かめる検査」を行い、問題なければ `update_dependencies` を実行せずにこの記録だけを書く (約束 3)。
+- `.update_complete` 自体が無い場合 (新しく導入した直後の環境) は、既存の「入っているパッケージを直接確かめる検査」を行い、問題なければ `update_dependencies` を実行せずにこの記録だけを書く (約束 3)。`.update_complete` が古い形式や壊れた中身で読めない場合も、既存の扱い (無い場合と同じに判定する) に揃えて、記録だけを書く。
 - 同梱の Node.js の入れ替え (`refresh_portable_node`) も `update_dependencies` の中に移し、新しいコードの手順で行う。start.bat にあった「毎回の起動時に Node.js のバージョンを見比べる検査」は、このやり直し処理に置き換えて取り除く (まはー「全部まとめるべき。特別扱いすることで今後の更新でいつか影響が出る可能性を恐れてる」)。
 
 ### 失敗したときの画面表示
 
 start.bat での入れ替えのやり直しは本体の起動より先に行われるため、失敗した場合はその内容を SAIVerse フォルダ内のファイルに書き残す。本体は起動時にそのファイルを読み取って `manager.startup_alerts` に追加し、画面上部のバナー (`GET /api/system/alerts`) で表示する (旧ログの取り込み失敗などで既に使っている仕組み)。次の機会に入れ替えが成功したら、そのファイルを消す。
+
+### 実装の具体 (2026-10-23)
+
+- **記録のファイル**: `update_dependencies` を済ませた記録は `.update_dependencies_complete` (中身は `.update_complete` と同じ `completion_fingerprint`)。書くのは子プロセス (`install_dependencies_main`) だけで、成功したときに限る。コードが動いた時点 (`_apply_code_and_dependencies`) で消してから、子が書き直す。失敗の記録は `.update_dependencies_failed.json` (バージョン・エラーの末尾・時刻)。どちらも `.gitignore` の `.update_dependencies_*` で除外する。子は成功すると、先に失敗の記録を消し、そのあと完了の記録を書く (逆の順だと、間で止まったときに消えないバナーが残る)。
+- **`--check-complete` の終了コード**: やり直しが失敗したときは新しい終了コード 12 (`CHECK_DEPENDENCIES_FAILED`) を返す。start.bat / start.sh は 12 のとき警告を出して起動を続ける。やり直しは、このフォルダの画面のサーバーが動いていれば `npm ci` を走らせずに失敗として扱う (`--manual` と同じ理由: 動いている画面のサーバーの横で `npm ci` すると `node_modules` が空になる)。
+- **SearXNG のプロセスの見分け方**: python のプロセスで、コマンドラインに `-m searx.webapp` があり、動かしている python がこのフォルダの SearXNG の venv (`scripts/.searxng-venv`、`SEARXNG_VENV_DIR` で変えられる) のものであるもの (`cmdline[0]` か `exe()` で、パスの区切りの単位で比べる)。Windows の venv の `python.exe` は、同じコマンドラインで本体の python を子として起動するので、両方が当たる。その祖先のうち、start.bat の「SearXNG」の窓 (`cmd.exe` のコマンドラインに `title SearXNG`) と `run_searxng_server.ps1` を動かしている PowerShell だけを一緒に止める。別のフォルダの SearXNG や、利用者が自分で動かした python には触れない。止まらないプロセスが残ったら、画面のサーバーと同じく何も変えずに更新を断る。
+- **SearXNG の起動し直し**: Windows は start.bat と同じ窓 (`cmd /k "title SearXNG && powershell -ExecutionPolicy Bypass -File scripts\run_searxng_server.ps1"`、作業フォルダは SAIVerse のフォルダ)、macOS / Linux は `run_searxng_server.sh` を新しいセッションで起動する。止めたときに動いていた場合だけ起動する。
+- **SearXNG の入れ直しに失敗したとき**: Node.js と同じく更新は止めず、更新ログに警告を残して続ける。SearXNG は検索のための任意の部品で、GitHub に届かないだけで更新全体を止めると、コードの修正まで届かなくなるため。次に SearXNG を起動するとき `run_searxng_server.ps1` / `.sh` が同じ確認と入れ直しを行う。
+- **`.node.old` だけが残った状態の復旧**: start.bat / start-dev.bat が、`.node` が無く `.node.old\node.exe` があるときに `.node.old` の名前を `.node` へ戻す (版の見比べはしない)。`install_node_portable.ps1` 自身も最初に同じことをするが、いまはこのスクリプトが更新の中でしか走らないので、起動の側にも残した。
+- **巻き戻し**: 前の版の子に `--keep-portable-node` を渡し、Node.js を戻さない ([dependency_management.md](dependency_management.md) §2-6 の方針)。この指定を知らない版の子には渡さない。
 
 ## 4. 変更の置き場所 (なぜここか)
 
@@ -69,3 +79,4 @@ v0.3.24 以前から画面の「Update」ボタンで更新し、そのあと st
 ## 7. 経緯
 
 - 2026-10-23: [PR #415 の Codex レビュー](https://github.com/maha0525/SAIVerse/pull/415)への対応を議論。(a) 既存の「`--manual` で全体の更新をやり直す処理」の流用は「起動しただけでバージョンが進み得る」ためまはーが却下、(b) pip の更新と fastembed の削除だけを行う専用処理は「今回しか使わない機能をわざわざ作るのか」として却下。「再起動後に行うしかない更新処理」をまとめる新しい仕組み「アップデート再起動後処理」(工程番号つきの一覧。名前と「工程番号」はまはーの命名) を一度 intent に起草したが、私が前提を確かめずに書いていた — 「Update ボタンの再起動で SearXNG の入れ直しが走る」(実際は走らない) と「新しいコードは再起動後にしか動かない」(#414 で既に解消されていた) の二点。コードを辿り直して前提の誤りを報告し、原因の穴を塞ぐこの設計へ置き換えた (まはー GO)。同じ議論でまはーが出した三つの裁定 — 失敗はログではなく画面で知らせる / Node.js と SearXNG も特別扱いせずすべて同じ流れに入れる (プレリリース中の今は、目先の安定より今後の拡張でのトラブルの少なさを優先する) / `main.py` を膨らませない — はこの設計にそのまま引き継いだ。
+- 2026-10-23: 実装した (具体は §3 の「実装の具体」)。§6 の 1〜4 は偽物の子プロセスで自動テストに固定した (`tests/test_update_dependencies_reinstall.py`)。SearXNG の止める・入れ直す・起動し直すと、Node.js の入れ替えが子プロセスの側へ移ったことも、既存のテストの形に倣って固定した (`tests/test_update_engine_searxng.py`、`tests/test_update_engine_frontend.py`、`tests/test_portable_node_refresh.py`)。start.bat の `.node.old` を戻す処理と終了コードの分岐は、cmd.exe で実際に動かして確かめた。動いている本物の SearXNG のプロセスでの見分け方の確認と、§6 の 5・6 の通し確認はまだ。
