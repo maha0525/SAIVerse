@@ -42,13 +42,17 @@ if %errorlevel% neq 0 (
 echo [OK] %PY_VERSION%
 
 REM --- 2. Node.js check & auto-install ---
-where node >nul 2>nul
-if %errorlevel% equ 0 goto :node_found
-REM Check for portable install from previous setup
+REM A portable install from a previous setup comes first, as in start.bat.
+REM Bring it to the version install_node_portable.ps1 pins; if that fails the
+REM existing .node\ is left as it was and setup continues with it.
 if exist ".node\node.exe" (
+    powershell -ExecutionPolicy Bypass -File scripts\install_node_portable.ps1
+    if errorlevel 1 echo [WARN] Could not update the portable Node.js; continuing with the existing one.
     set "PATH=%CD%\.node;%PATH%"
     goto :node_found
 )
+where node >nul 2>nul
+if %errorlevel% equ 0 goto :node_found
 echo.
 echo [SETUP] Node.js not found. Attempting auto-install...
 REM Try winget first

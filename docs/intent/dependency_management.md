@@ -75,6 +75,35 @@ requirements.lock     ← 全部品の版を固定した一覧 (機械が作る�
 - 開発機: 同じ。ただし voice-tts などアドオンの部品は lock の外にあるので、constraints と衝突するものがあれば導入し直しで判明する。
 - lock の無い版 (v0.3.3 以前) から最初の lock 版へ上げる途中で pip / npm が失敗したとき: 巻き戻しは古い版に `git reset` したあと、その版に lock が無いので、その版自身の `requirements.txt` から入れ直す (`update_engine._rollback_code_and_dependencies` だけがこの経路を選び、WARNING で記録する。通常の更新経路は lock が無ければそのまま失敗する)。
 
+### 2-6. portable Node.js (`.node`) の版 (2026-10-22 追加)
+
+Python の部品と同じ問いが Node.js 本体にもある。Windows の setup.bat は、Node.js が PC に無く winget も使えないとき、`scripts/install_node_portable.ps1` でリポジトリ直下の `.node` に Node.js の ZIP 版 (portable) を入れる。start.bat / start-dev.bat は `.node` があると PATH の先頭に足すので、画面のサーバーはこの Node.js で動く。
+
+**何が問題だったか**: Node.js の版を決めているのは `install_node_portable.ps1` の中の `$NodeVersion` だが、このスクリプトは `.node\node.exe` があると何もせずに終わっていた。だから版を上げても届くのは新しく setup する人だけで、既に `.node` を持っている人は更新しても setup.bat をやり直しても古い版のままだった。2026-10-21 の Node.js のセキュリティ更新 (24.22.1) を受けて固定を 24.13.1 から上げたとき、この穴が見つかった。
+
+**変更後の形**:
+
+- `install_node_portable.ps1` は、`.node\node.exe --version` が固定版と違えば (動かない `node.exe` も「違う」に数える) 入れ替える。nodejs.org から ZIP を取り、スクリプトに書いた sha256 (nodejs.org の `SHASUMS256.txt` の値) と照合し、`.node` の隣の `.node.new` に展開して、展開した `node.exe` が固定版を名乗ることを確かめてから、名前の付け替え (`.node` → `.node.old`、新しいもの → `.node`) で差し替える。同じボリュームの中のフォルダの名前の付け替えなので、`.node` が書きかけになる瞬間は無い。
+- 取得・照合・展開・付け替えのどれかが失敗したら、元の `.node` には一切触れずに exit 1 で終わる。`.node` の中のものが動いている (画面のサーバーや MCP サーバー) と付け替えが断られるが、これも同じ扱いになる。
+- 付け替えには `[System.IO.Directory]::Move` を使い、PowerShell の `Move-Item` は使わない。`Move-Item` は付け替えを断られると一つずつのファイルの移動に切り替え、使用中のファイルで止まるので、それより前のファイルが `.node` から抜けた状態が残る (2026-10-22 にテストで見つけた。`node.exe` が使用中なら npm 一式が抜けた `.node` になる)。
+- 呼ぶ場所は二つ。`scripts/update_engine.py` の `refresh_portable_node` は、更新でコードが動いたあと、`npm ci` の前に呼ぶ (Windows で `.node\node.exe` があるときだけ)。setup.bat は `.node\node.exe` があれば、PC の Node.js を探すより先にこれを呼ぶ (start.bat が `.node` を優先するのと揃える)。
+- 更新の `npm ci` と `npm run build` は `.node` の npm を優先し (PC にも npm があっても)、npm のフォルダを PATH の先頭に置いて動かす。npm のスクリプトや `next build` は `node` を名前で呼ぶので、update.bat のように PATH に `.node` が無い入口でも、画面のサーバーと同じ Node.js で部品が入る。
+
+**何もしない場合**: PC に入っている Node.js (winget や nodejs.org のインストーラで入れたもの) は利用者が管理するもので、触らない。macOS / Linux には portable の経路が無いので何もしない。
+
+**入れ替えに失敗したときの扱い — 更新は止めず、警告して続ける**: `_restore_previous_version` の流儀は「更新の途中で失敗したら、前の版に戻して動く状態にする」で、守っているのは「動かない SAIVerse を残さない」こと。Node.js の入れ替えの失敗は、この意味で SAIVerse を壊さない。スクリプトは失敗したとき元の `.node` をそのまま残すので、更新は前と同じ動く Node.js で `npm ci` へ進める。逆に失敗を更新全体の失敗にすると、nodejs.org に届かない (一時的な障害、社内の制限) だけでコードの更新が全部止まり、コードの側に入っている修正 (セキュリティ修正を含む) まで届かなくなる。だから `refresh_portable_node` は例外を出さず、更新ログに WARNING を残して続ける。次の更新でまた版を比べるので、つながるようになれば入れ替わる。
+
+**巻き戻しでは Node.js を戻さない**: 更新の後半で失敗してコードを前の版に戻すとき、`.node` は新しい版のまま残す。前の版のコードも新しい Node.js で動く (固定の変更は同じメジャー版の中の修正版を想定している)。戻すと、セキュリティ修正のために離れた版をわざわざ入れ直すことになる。メジャー版を上げるときは、この前提を見直す。
+
+**最初の一回の遅れ**: 更新を実行しているのは、更新の前から PC にある `update_engine.py` (コードを取ってくる前に読み込まれたもの) なので、`refresh_portable_node` を持たない版から更新するときは、その更新では入れ替えが起きない。この変更が入った版へ更新したあと、次の更新か setup.bat のやり直しで入れ替わる。それ以降の固定の変更は、それを含む更新そのもので届く (呼ぶ側はもう新しく、呼ばれるスクリプトは取ってきたばかりのものなので)。
+
+| 不変条件 | 持ち主 |
+|---|---|
+| `.node` の Node.js は、そのコードが固定する版と一致する (取得できなかったときは前の版のまま) | `scripts/install_node_portable.ps1` の `$NodeVersion` / `$ExpectedSha256` |
+| 入れ替えの途中で `.node` が書きかけや空にならない | 同スクリプト (`.node` の隣で展開し、名前の付け替えで差し替える) |
+| 更新の npm は画面のサーバーと同じ Node.js で動く | `update_engine._find_npm` (`.node` 優先) と `_env_with_npm_on_path` |
+| Node.js の入れ替えの失敗で更新は止まらない | `update_engine.refresh_portable_node` |
+
 ---
 
 ## 3. 部品の仕分け (2026-09-02 時点の現物)
@@ -170,3 +199,4 @@ torch / transformers / librosa / numba / gradio / funasr など、venv にある
 - 2026-09-02 深夜 (レビュー 2〜3 巡目、Codex)。**2 巡目 3 件すべて採用**: `check_lock_platforms.py` が PyPI に問えなかった pin を通していた → fail-closed に / wheel の判定を文字列の部分一致から `packaging.tags` へ (macOS の床 13 / 14) / 本体の更新が同居アドオンの部品を壊しても気づけない → `update_dependencies` の直後に `pip check` を回して衝突を WARNING で更新ログに残す (止めない・戻さない、§3-3)。**3 巡目 4 件すべて採用**: lock の無い旧版 (v0.3.3 以前) からの更新が途中で失敗したとき、巻き戻しが旧版に無い lock を探して失敗する → 巻き戻し経路だけ旧版の requirements.txt を読む (§2-5) / manylinux の列挙を glibc の床 2.31 からの生成へ / Requires-Python と yanked をファイル単位で判定 / `pip check` は exit 1 だけを衝突として読み、他の非 0 は「検査できなかった」と書く。3 巡で採用した指摘の的は「lock の中身 (Intel Mac)」→「新設した検査の精度」→「移行の一回きりの経路」と外周へ移っており、私の見立てでは収束。4 巡目を投げるかはまはーの判断。
 - 2026-09-11: まはーの環境で v0.3.12 へ更新したときに pip check の警告が 3 件出た件を調べ、欠陥を二つ見つけて issue にした。一つは、`saiverse/addon_installer.py` で requirements.lock が constraints として pip に渡されるのが `pip_install` の step だけで、`platform_script` / `python_script` の step で実行されるスクリプトには渡されないこと (ステータス行・§2-2・§2-3・§2-4 に注記、[addon_setup_scripts_bypass_lock_constraints.md](../issues/addon_setup_scripts_bypass_lock_constraints.md))。もう一つは、pip check の警告の「アドオンを入れ直す」という助言が、入れ直しでは解けない衝突にも出ること (§3-3、[pip_check_warning_reinstall_advice.md](../issues/pip_check_warning_reinstall_advice.md))。
 - 2026-10-22: 公開の脆弱性データベース OSV に requirements.lock の全 pin を照合し、届け出のあった 15 部品を修正版へ上げた (Pillow 11.3.0→13.0.0 / certifi→2026.10.19 / anyio→4.15.1 / aiohttp→3.14.5 / urllib3→2.8.0 / python-multipart→0.0.32 / pypdf→6.21.2 / mcp→1.30.0 (1.x のまま) / pyjwt→2.15.1 / fsspec→2026.9.0 / pyasn1→0.6.4 / soupsieve→2.10・3.0.4 (Python 3.11.5 で分岐) / multidict→7.1.0 / pygments→2.21.0 / cryptography 46.0.5→48.0.1)。まはー依頼「他の依存関係にもセキュリティ上バージョンアップ必須なものが無いか洗って」。Pillow 13 で削除・変更された API (`Image._show`、`get_child_images`、`ImageCms` の `product_name`、`ExifTags.IFD.Makernote`、`fromarray` の型変換、I モードの PNG 保存) は SAIVerse のコードに使用箇所が無いことを確認した。**cryptography は `<49` を理由つきで置いた**: 49.0.0 以降は Intel Mac の wheel が無く、`check_lock_platforms.py` が 50.0.2 を「sdist のみ」と警告した (onnxruntime<1.24 と同じ型)。48.0.1 で同梱 OpenSSL の更新 (GHSA-537c-gmf6-5ccf) は入る。49/50 でしか直らない 3 件 (x509 の証明書経路の検証器、PKCS#7 の復号) は、SAIVerse のコードが呼んでいない機能にある (本体が cryptography を直接使うのはアドオン署名の Ed25519 検証だけ)。上限は onnxruntime と一緒に外す。
+- 2026-10-22: 同じ脆弱性対応で portable Node.js の固定を 24.13.1 から 24.22.1 へ上げたところ、`install_node_portable.ps1` が `.node` があると何もしないため、既に `.node` を持つ人には届かないと分かった。版が違えば入れ替える形にし、更新 (`update_engine.refresh_portable_node`) と setup.bat のやり直しから呼ぶようにした (§2-6)。失敗時は更新を止めずに警告して続け、巻き戻しでは Node.js を戻さない、と決めた (理由は §2-6)。テストで、`.node` の中のファイルを使用中にすると PowerShell の `Move-Item` が一つずつの移動に切り替わって途中で止まり、`.node` が半分空になると分かったので、付け替えを `[System.IO.Directory]::Move` に替えた。隔離した作業場所で、本物の 24.13.1 の `.node` が nodejs.org から取った 24.22.1 に入れ替わり、PC の Node.js 22 を PATH の先頭に置いても `npm ci` のスクリプトが `.node` の 24.22.1 で動くことを確かめた。

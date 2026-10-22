@@ -622,13 +622,15 @@ def _run(
     timeout: int = 900,
     check: bool = True,
     encoding: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one phase. A non-zero exit raises ``UpdateError`` unless ``check`` is
     False, for commands whose non-zero exit is an answer rather than a failure
     (``pip check`` exits 1 when it finds conflicts). ``encoding`` overrides the
     locale default for commands whose output is known to be UTF-8 regardless of
     the console code page (git with ``-z``); undecodable bytes are replaced
-    rather than crashing the phase."""
+    rather than crashing the phase. ``env`` replaces the inherited environment
+    (None inherits it)."""
     LOGGER.info("Phase: %s", label)
     try:
         result = subprocess.run(
@@ -639,6 +641,7 @@ def _run(
             encoding=encoding,
             errors="replace" if encoding else None,
             timeout=timeout,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise UpdateError(f"{label} could not run: {exc}") from exc
@@ -1359,22 +1362,83 @@ def update_dependencies(
         # with the Windows locale (cp932) crashed the output reader on the
         # build's check marks (2026-09-30, found running the real build).
         encoding="utf-8",
+        # Lifecycle scripts run ``node`` by name; it must be npm's own.
+        env=_env_with_npm_on_path(npm),
     )
 
 
 def _find_npm(project_dir: Path) -> str:
-    """The npm to run: the one on PATH, else the portable one setup installed.
+    """The npm to run: the portable one setup installed, else the one on PATH.
 
-    Shared by the package install, the frontend build and the frontend
-    restart, so all three use the same npm.
+    The portable one wins when both exist, as in start.bat / start-dev.bat,
+    which put ``.node`` first on PATH: the frontend runs on that Node.js, so
+    its packages are installed and built with it too -- also by update.bat,
+    whose PATH does not have ``.node``. Shared by the package install, the
+    frontend build and the frontend restart, so all three use the same npm.
     """
-    npm = shutil.which("npm")
     portable_npm = project_dir / ".node" / ("npm.cmd" if sys.platform == "win32" else "npm")
-    if npm is None and portable_npm.is_file():
-        npm = str(portable_npm)
+    if portable_npm.is_file():
+        return str(portable_npm)
+    npm = shutil.which("npm")
     if npm is None:
         raise UpdateError("npm is required to update the frontend")
     return npm
+
+
+# Installs the Node.js version it pins into .node, replacing a .node whose
+# version differs (docs/intent/dependency_management.md section 2-6).
+PORTABLE_NODE_INSTALLER = Path("scripts") / "install_node_portable.ps1"
+
+
+def refresh_portable_node(project_dir: Path) -> None:
+    """Replace ``.node`` when its Node.js is not the version the updated code pins.
+
+    Only a Windows checkout that has a ``.node`` (setup.bat installed it
+    because there was no system Node.js) is touched; a system Node.js is the
+    user's to update, and macOS / Linux have no portable install. Runs the
+    ``install_node_portable.ps1`` the update just brought in, so a new pin
+    reaches existing users with the same update that ships it.
+
+    Never raises. The script swaps by renaming and leaves the previous
+    ``.node`` intact when it fails (download, checksum, archive, or a ``.node``
+    still in use), so the update goes on with the Node.js it had -- a working
+    one -- and the next update tries again. Failing the update over it would
+    hold back the code, and the fixes it carries, on nodejs.org being
+    reachable.
+    """
+    if not _is_windows():
+        return
+    if not (project_dir / ".node" / "node.exe").is_file():
+        return
+    script = project_dir / PORTABLE_NODE_INSTALLER
+    if not script.is_file():
+        LOGGER.warning("[node] %s is missing; the portable Node.js was left as it is", PORTABLE_NODE_INSTALLER)
+        return
+    try:
+        result = _run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+            cwd=project_dir,
+            label="refresh portable Node.js",
+            timeout=600,
+            check=False,
+        )
+    except UpdateError:
+        LOGGER.warning(
+            "[node] The portable Node.js could not be checked; the update continues with the existing .node",
+            exc_info=True,
+        )
+        return
+    for line in (result.stdout or "").splitlines():
+        if line.strip():
+            LOGGER.info("[node] %s", line.strip())
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip()[-2000:]
+        LOGGER.warning(
+            "[node] The portable Node.js could not be replaced (exit %d); the update continues with "
+            "the existing .node, and the next update tries again.%s",
+            result.returncode,
+            f" {detail}" if detail else "",
+        )
 
 
 def build_frontend(project_dir: Path) -> None:
@@ -1384,11 +1448,14 @@ def build_frontend(project_dir: Path) -> None:
     production server (``next start``, what start.bat / start.sh run); the
     dev server compiles on demand and needs no build.
     """
+    npm = _find_npm(project_dir)
     _run(
-        [_find_npm(project_dir), "run", "build"],
+        [npm, "run", "build"],
         cwd=project_dir / "frontend",
         label="npm run build",
         encoding="utf-8",  # same reason as npm ci in update_dependencies
+        # ``prebuild`` and ``next build`` run ``node`` by name.
+        env=_env_with_npm_on_path(npm),
     )
 
 
@@ -1955,6 +2022,11 @@ def _apply_code_and_dependencies(project_dir: Path, python: str, progress: _Upda
     # this checkout is finished. Both the manual and the detached run reach
     # the final write through this same function.
     invalidate_completion_marker(project_dir)
+    # Before npm ci, so the packages are installed with the Node.js the new
+    # code pins. Not in the rollback: the previous code runs on the newer
+    # Node.js too, and putting the old one back would bring back the version
+    # this replaced (docs/intent/dependency_management.md section 2-6).
+    refresh_portable_node(project_dir)
     update_dependencies(project_dir, python)
 
 

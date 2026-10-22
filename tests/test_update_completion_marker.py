@@ -824,7 +824,7 @@ def test_update_dependencies_installs_from_the_lock(tmp_path: Path) -> None:
     project = _make_project(tmp_path)
     commands: list[list[str]] = []
 
-    def recording_run(command, *, cwd, label, timeout=900, check=True, encoding=None):  # type: ignore[no-untyped-def]
+    def recording_run(command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
         commands.append(list(command))
         return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -845,7 +845,7 @@ def test_update_dependencies_never_falls_back_when_the_lock_is_missing(tmp_path:
     (project / "requirements.lock").unlink()
     commands: list[list[str]] = []
 
-    def recording_run(command, *, cwd, label, timeout=900, check=True, encoding=None):  # type: ignore[no-untyped-def]
+    def recording_run(command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
         commands.append(list(command))
         if command[:5] == ["python", "-m", "pip", "install", "-r"]:
             raise update_engine.UpdateError(f"{label} failed with exit 1: no such file {command[-1]}")
@@ -867,7 +867,7 @@ def _fake_run_with_pip_check(returncode: int, stdout: str, stderr: str = ""):  #
     """``_run`` that answers ``pip check`` with the given result and 0 to the rest."""
     calls: list[dict] = []
 
-    def fake_run(command, *, cwd, label, timeout=900, check=True, encoding=None):  # type: ignore[no-untyped-def]
+    def fake_run(command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
         calls.append({"command": list(command), "check": check})
         if command[-2:] == ["pip", "check"]:
             if check and returncode != 0:
