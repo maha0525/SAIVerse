@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$NodeVersion = "24.13.1"
+$NodeVersion = "24.22.1"
 $Arch = "x64"
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $NodeDir = Join-Path $ProjectRoot ".node"
@@ -36,7 +36,7 @@ try {
     exit 1
 }
 
-# Move inner directory (node-v24.13.1-win-x64/) contents to .node/
+# Move inner directory (node-v24.22.1-win-x64/) contents to .node/
 $InnerDir = Get-ChildItem $TempExtract | Select-Object -First 1
 if (Test-Path $NodeDir) { Remove-Item $NodeDir -Recurse -Force }
 Move-Item $InnerDir.FullName $NodeDir
