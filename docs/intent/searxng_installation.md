@@ -1,6 +1,6 @@
 # SearXNG の導入版を固定する
 
-ステータス: 完了 (2026-10-16 実装・Windows 隔離検証、PR #403 を 2026-10-15 ごろ develop へマージ。既存環境の挙動は変えない — 効くのは次のまっさらな導入)
+ステータス: 完了 (2026-10-16 実装・Windows 隔離検証、PR #403 を 2026-10-15 ごろ develop へマージ。既存環境の挙動は変えない — 効くのは次のまっさらな導入。2026-10-22 の依存の下限の上書きは `installer_revision` を上げたので、既存の導入も次の setup・起動で入れ直す)
 
 ## 目的と合意
 
@@ -16,6 +16,15 @@
 
 既存のソースは破棄・上書きせず、コミット別の管理ディレクトリを使う。既存 venv の導入先が違う場合は、セットアップで固定版へ切り替える。ユーザーの設定・エンジン選択は従来の保存先を使い続ける。起動時は完了記録と実際の依存を確認し、不足時はセットアップを実行する。
 
+### 依存の下限の上書き (2026-10-22)
+
+上流の requirements.txt は、pip install の前に `searxng_install.py` の `prepare_requirements()` が書き換える。`REQUIREMENT_FLOORS` の各パッケージについて、その行を `名前>=下限` に置き換え、行が無ければ末尾に足す。二回適用しても結果は変わらず、書き込みは一時ファイルから `os.replace` で差し替える。SearXNG の setup.py は requirements.txt から install_requires を作るので、`pip install -e` のメタデータにも同じ下限が入り、最後の `pip check` と食い違わない。
+
+- certifi は `>=2026.10.19`。コミット `ff8f5ddcc` は `certifi==2026.7.22` を固定していて、鍵漏えいで外された emSign のルート CA (GHSA-6q48-6c7w-9gw2) をまだ信頼する。SSL_CERT_FILE などの指定が無いとき、curl_cffi は外部の検索エンジンへの TLS 接続を certifi の CA で検証する。
+- anyio は `>=4.14.2` (CVE-2026-63374、TLS の証明書なりすまし)。コミット `ff8f5ddcc` は anyio を要求しないが、古い SearXNG ソースから最初に導入した venv には httpx と anyio が残る (pip install -r は既存のパッケージを消さない) ので、その残りを引き上げる。
+
+この上書きは `installer_revision` を `2` に上げて入れた。完了記録の `installer_revision` が一致しない既存の導入は、次の setup・起動で依存を入れ直す。`searxng_pin.json` のコミット自身が修正済みの版を要求するようになったら、その項目を `REQUIREMENT_FLOORS` から外す (2026-10-22 時点で上流 master も certifi 2026.7.22 のまま)。
+
 ## 不変条件と責任
 
 - 既定の取得先に master や可変タグを使わない。明示的な SEARXNG_REF も完全なコミット SHA に限定する。
@@ -23,6 +32,7 @@
 - ZIP 取得でもパッケージ作成に必要なルートファイルを欠落させず、実際の固定版を表すバージョン情報を供給する。
 - 導入完了の記録は依存導入・互換処理・実 import が成功した後だけ保存する。
 - 依存が欠けた既存環境を、パッケージの場所が見つかるという理由で完成扱いしない。
+- `REQUIREMENT_FLOORS` の書き換えは pip install より前に済ませ、requirements.txt・editable install のメタデータ・`pip check` が同じ下限を見る。
 
 ## 検証
 
@@ -39,6 +49,14 @@
 - Linux の実サーバー起動と外部検索サイトの検索結果は、この Windows での導入・HTTP 検証の範囲外。
 
 ローカルの実行ログ: `tmp/searxng-pin-verification/{failed-setup,recovery-startup}.log`、`tmp/searxng-e2e/{fresh-setup,repeat-setup,launcher}.log`。専用作業領域は Git へ含めない。
+
+### 実測結果 (2026-10-22、依存の下限の上書き)
+
+- 隔離した worktree の `scripts/.searxng-src` / `scripts/.searxng-venv` へ、Windows・Python 3.13 で新規の setup が成功。certifi 2026.10.19 と anyio 4.15.1 が入り、`pip check` は "No broken requirements found."、searxng のメタデータの要求に `certifi>=2026.10.19` と `anyio>=4.14.2` が入った。
+- 同じ venv を certifi 2026.7.22 / anyio 4.12.0 と `installer_revision` 1 の完了記録に戻し、requirements.txt も上流の文面に戻すと、`check` は exit 1。続く setup で両者が引き上がり、`pip check` も成功。もう一度 setup すると pip install は走らず、requirements.txt の中身は変わらない。
+- 導入した venv の curl_cffi は certifi の cacert.pem を既定の CA として使い、外部サイトへの HTTPS が 200 を返した。SearXNG の HTTP 起動は今回は確かめていない。
+
+ローカルの実行ログ: `tmp/searxng-floor-verification/{setup,upgrade-setup,repeat-setup}.log`。
 
 ## 経緯
 

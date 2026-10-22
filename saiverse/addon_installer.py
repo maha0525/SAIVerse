@@ -60,6 +60,7 @@ from saiverse.addon_manifest import (
 )
 from saiverse.addon_paths import (
     ADDON_ENV_RECORD_NAME,
+    addon_env_matches_current_python,
     addon_env_python_path,
     current_python_version,
     get_addon_data_dir,
@@ -544,19 +545,57 @@ def _step_env(step: SetupStep) -> Optional[str]:
     return None
 
 
+# このプロセスで pip を上げ終えた専用の環境のフォルダ (``str(env_dir)``)。
+# 専用の環境の pip は、venv を作ったときの Python に同梱された版のまま残る
+# (実測: 2026-10-22 の時点で voice-tts の env は pip 24.3.1、同梱の certifi
+# 2024.08.30)。setup の step の pip install はこの pip でダウンロードするので、
+# ここが古いと step のダウンロードの TLS 検証が古い certifi (pip._vendor.certifi)
+# で行われる (2026-10-21、certifi 2026.10.19 が鍵の漏れた emSign を信頼する
+# 証明書発行元の一覧から外した)。失敗した環境も入れて、同じプロセスの中で再試行を繰り返さない。
+_PIP_UPGRADED_ENVS: set[str] = set()
+
+
+def _upgrade_env_pip(env_dir: Path, env_name: str, progress: ProgressCallback) -> None:
+    """専用の環境の pip を上げる。失敗しても setup は続ける (pip はいまの版のまま動く)。"""
+    _PIP_UPGRADED_ENVS.add(str(env_dir))
+    try:
+        _run_subprocess(
+            [str(addon_env_python_path(env_dir)), "-m", "pip", "install", "--upgrade", "pip"],
+            cwd=env_dir,
+            progress=progress,
+            label=f"upgrade pip ({env_name})",
+            env=_env_process_vars(env_dir),
+        )
+    except AddonInstallError as exc:
+        LOGGER.warning("installer: pip upgrade in env %s failed; continuing: %s", env_dir, exc)
+        progress(ProgressEvent(
+            phase="step",
+            message=(
+                f"専用の Python 環境 {env_name} の pip を更新できませんでした。"
+                f"いまの pip のまま続けます ({exc})"
+            ),
+        ))
+
+
 def _ensure_addon_env(addon_id: str, env_name: str, progress: ProgressCallback) -> Path:
     """専用の環境を用意して、その場所を返す。
 
     無ければ本体の Python (``sys.executable``) の ``-m venv`` で作り、使った Python の
-    バージョンを環境の中に記録する。記録が無い・バージョンが本体と違う環境は
-    作り直す。記録は venv の作成に成功してから書くので、途中で失敗した環境は
-    次の実行で作り直される。
+    バージョンを環境の中に記録する。記録が無い・記録の Python の major.minor が本体と
+    違う環境は作り直す (パッチ番号だけの違いは作り直さない、
+    ``addon_env_matches_current_python``)。記録は venv の作成に成功してから書くので、
+    途中で失敗した環境は次の実行で作り直される。
+
+    作った直後と、既存の環境をこのプロセスで初めて使うときに、その環境の pip を
+    上げる (``_upgrade_env_pip``)。
     """
     env_dir = get_addon_env_dir(addon_id, env_name)
     current = current_python_version()
     record = read_addon_env_record(env_dir)
     python = addon_env_python_path(env_dir)
-    if record is not None and record.get("python_version") == current and python.exists():
+    if addon_env_matches_current_python(record) and python.exists():
+        if str(env_dir) not in _PIP_UPGRADED_ENVS:
+            _upgrade_env_pip(env_dir, env_name, progress)
         return env_dir
     if env_dir.exists():
         recorded = record.get("python_version") if record else None
@@ -587,6 +626,7 @@ def _ensure_addon_env(addon_id: str, env_name: str, progress: ProgressCallback) 
             "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         },
     )
+    _upgrade_env_pip(env_dir, env_name, progress)
     return env_dir
 
 
@@ -628,8 +668,7 @@ def _env_needs_full_run(addon_id: str, env_name: str) -> bool:
     env_dir = get_addon_env_dir(addon_id, env_name)
     record = read_addon_env_record(env_dir)
     return (
-        record is None
-        or record.get("python_version") != current_python_version()
+        not addon_env_matches_current_python(record)
         or not addon_env_python_path(env_dir).exists()
     )
 

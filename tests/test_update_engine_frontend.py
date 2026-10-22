@@ -550,7 +550,7 @@ class _Recorder:
         ), patch.object(update_engine, "switch_code", side_effect=self.step("code")), patch.object(
             update_engine, "_checkout_untouched", return_value=True
         ), patch.object(
-            update_engine, "update_dependencies", side_effect=self.step("dependencies (npm ci)")
+            update_engine, "_run_dependencies_from_disk", side_effect=self.step("dependencies (npm ci)")
         ), patch.object(update_engine, "build_frontend", side_effect=self.step("build")), patch.object(
             update_engine, "_rollback_code_and_dependencies", side_effect=self.step("rollback")
         ), patch.object(update_engine, "restart_application", side_effect=self.restart), patch.object(
@@ -703,7 +703,7 @@ def test_manual_update_refuses_while_the_frontend_runs_without_changing_anything
         update_engine, "preflight_switch"
     ) as preflight, patch.object(update_engine, "create_pre_update_snapshot") as snapshot, patch.object(
         update_engine, "update_code"
-    ) as code, patch.object(update_engine, "update_dependencies") as deps, patch.object(
+    ) as code, patch.object(update_engine, "_run_dependencies_from_disk") as deps, patch.object(
         update_engine, "stop_frontend_servers"
     ) as stop:
         with pytest.raises(update_engine.UpdateError) as excinfo:

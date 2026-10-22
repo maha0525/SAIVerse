@@ -118,7 +118,7 @@ def _run_switch(install: Path, channel: str, *, deps_side_effect=None):  # type:
     with patch.object(
         update_engine, "create_pre_update_snapshot", return_value="snap"
     ) as snapshot, patch.object(
-        update_engine, "update_dependencies", side_effect=deps_side_effect
+        update_engine, "_run_dependencies_from_disk", side_effect=deps_side_effect
     ) as deps, patch.object(update_engine, "write_completion_marker"):
         update_engine.run_update(None, install, switch_channel=channel)
     return snapshot, deps
