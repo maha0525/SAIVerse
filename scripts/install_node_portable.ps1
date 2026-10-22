@@ -2,8 +2,10 @@
 # whose version differs from the pinned one.
 #
 # Called from setup.bat (no system Node.js and no winget, or a .node/ already
-# present) and from scripts/update_engine.py on every update of a checkout that
-# has a .node/ (docs/intent/dependency_management.md section 2-6).
+# present), from scripts/update_engine.py on every update of a checkout that
+# has a .node/, and from start.bat / start-dev.bat on every start (only reads
+# the version when it already matches) -- docs/intent/dependency_management.md
+# section 2-6.
 #
 # A failed download, a checksum mismatch, a broken archive or a .node/ that is
 # in use leaves the existing .node/ exactly as it was and exits 1. The new

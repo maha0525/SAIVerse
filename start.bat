@@ -53,6 +53,23 @@ echo [WARN] Could not verify the update state. Starting anyway.
 
 :update_check_done
 
+REM ---------------------------------------------------------------
+REM Bring the portable Node.js to the version install_node_portable.ps1
+REM pins. An update from a version without this step runs the previous
+REM update engine, which never replaces .node; this start does. When .node
+REM is already current this only reads its version. On failure the
+REM existing .node is kept and SAIVerse starts with it. A .node.old alone
+REM is a replacement that died half-way; the script puts it back first.
+REM See docs/intent/dependency_management.md section 2-6.
+REM ---------------------------------------------------------------
+set "PORTABLE_NODE="
+if exist ".node\node.exe" set "PORTABLE_NODE=1"
+if exist ".node.old\node.exe" set "PORTABLE_NODE=1"
+if not defined PORTABLE_NODE goto :portable_node_done
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_node_portable.ps1
+if errorlevel 1 echo [WARN] Could not update the portable Node.js. Starting with the existing one.
+:portable_node_done
+
 REM Add portable Node.js to PATH if exists
 if exist ".node\node.exe" set "PATH=%CD%\.node;%PATH%"
 

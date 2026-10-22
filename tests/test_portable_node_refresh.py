@@ -180,6 +180,27 @@ def test_npm_dir_is_moved_ahead_of_a_system_node_already_on_path(tmp_path: Path)
     assert entries == [str(npm.parent), system, "/usr/bin"]
 
 
+# --- the launchers ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("launcher", ["start.bat", "start-dev.bat"])
+def test_launchers_refresh_the_portable_node_before_using_it(launcher: str) -> None:
+    """An update from a version without refresh_portable_node runs the old
+    engine, which never replaces .node; the next start must (Codex review on
+    PR #413). The step has to come before .node is put on PATH and before
+    anything is started from it, or the folder is in use and cannot be
+    swapped. The update-finishing pass, which may change the pin, comes first."""
+    text = (REPO_ROOT / launcher).read_text(encoding="ascii")
+    refresh = text.index("-File scripts\\install_node_portable.ps1")
+    on_path = text.index('set "PATH=%CD%\\.node;%PATH%"')
+    first_start = text.index('start "')
+    assert refresh < on_path < first_start
+    if "--check-complete" in text:
+        assert text.index("--check-complete") < refresh
+    # Also when only .node.old is left (a replacement that died half-way).
+    assert 'if exist ".node.old\\node.exe" set "PORTABLE_NODE=1"' in text
+
+
 # --- the installer, run for real -------------------------------------------------
 
 _SYSTEM_NODE = shutil.which("node")
