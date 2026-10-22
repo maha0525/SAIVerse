@@ -1353,4 +1353,24 @@ HANDLERS: List[UpgradeHandler] = [
         run=_no_op_ai_upgrade,
         description="Empty release edge 0.3.23 -> 0.3.24 (embedding migration and new columns are handled at startup).",
     ),
+    # ---- v0.3.25 ----
+    # セキュリティ更新の束 (依存パッケージの更新のみ)。DB・データの変化は無く、
+    # pip / fastembed / portable Node.js / SearXNG の入れ替えはすべて
+    # update_engine.py と起動時の処理が行うので、このバージョンの辺は空。
+    UpgradeHandler(
+        name="city_noop_v0_3_25",
+        scope="city",
+        from_version="0.3.24",
+        to_version="0.3.25",
+        run=_no_op_city_upgrade,
+        description="Empty release edge 0.3.24 -> 0.3.25 (security dependency updates are handled by the update engine).",
+    ),
+    UpgradeHandler(
+        name="ai_noop_v0_3_25",
+        scope="ai",
+        from_version="0.3.24",
+        to_version="0.3.25",
+        run=_no_op_ai_upgrade,
+        description="Empty release edge 0.3.24 -> 0.3.25 (security dependency updates are handled by the update engine).",
+    ),
 ]

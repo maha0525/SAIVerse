@@ -59,6 +59,16 @@ REQUIREMENTS_LOCK = "requirements.lock"
 # path is the single caller that picks it, explicitly, after ``git reset``.
 LEGACY_REQUIREMENTS = "requirements.txt"
 
+# Core packages that left requirements.lock and are removed from the venv on
+# every update. ``pip install -r`` never removes a package the lock no longer
+# lists, so a package dropped from the lock stays in every user's .venv.
+# fastembed left the lock with the EmbeddingGemma 2 migration on 2026-10-12
+# (docs/intent/embedding_gemma2_migration.md); after the Pillow 13 update
+# (2026-10-22) ``pip check`` reports its Pillow<12 requirement as a conflict.
+# A name here must not appear in requirements.lock (a test holds that), or the
+# update would install it and remove it again.
+RETIRED_CORE_PACKAGES: tuple[str, ...] = ("fastembed",)
+
 # Exit codes of ``--check-complete``. The launchers branch on these, so they are
 # part of the contract with start.bat / start.sh.
 CHECK_READY = 0
@@ -622,13 +632,15 @@ def _run(
     timeout: int = 900,
     check: bool = True,
     encoding: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one phase. A non-zero exit raises ``UpdateError`` unless ``check`` is
     False, for commands whose non-zero exit is an answer rather than a failure
     (``pip check`` exits 1 when it finds conflicts). ``encoding`` overrides the
     locale default for commands whose output is known to be UTF-8 regardless of
     the console code page (git with ``-z``); undecodable bytes are replaced
-    rather than crashing the phase."""
+    rather than crashing the phase. ``env`` replaces the inherited environment
+    (None inherits it)."""
     LOGGER.info("Phase: %s", label)
     try:
         result = subprocess.run(
@@ -639,6 +651,7 @@ def _run(
             encoding=encoding,
             errors="replace" if encoding else None,
             timeout=timeout,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise UpdateError(f"{label} could not run: {exc}") from exc
@@ -1274,6 +1287,85 @@ def _checkout_untouched(project_dir: Path, original_branch: str, old_revision: s
 _PIP_CHECK_CLEAN = "No broken requirements found."
 
 
+def _upgrade_pip(project_dir: Path, python: str) -> None:
+    """Upgrade the .venv's pip before the requirements are installed.
+
+    pip carries its own copy of certifi (``pip._vendor.certifi``) and verifies
+    every download's TLS certificate with it. requirements.lock has no hashes,
+    so that TLS check is what makes a download authentic. setup.bat / setup.sh
+    upgrade pip on every run (setup.bat:161), but a user who updates through the
+    UI update button (this engine) never reruns setup, so the pip -- and its
+    certifi -- stayed at the version first installed. On 2026-10-21 the
+    intermediate key of the eMudhra (emSign) CA leaked and certifi 2026.10.19
+    removed that CA; an old pip would go on trusting it. Upgrading here makes
+    both install / update paths keep pip current.
+
+    A failure is logged and the update goes on: the pip already installed still
+    works, and the lock install right after decides whether the update succeeds.
+    """
+    try:
+        result = _run(
+            [python, "-m", "pip", "install", "--upgrade", "pip"],
+            cwd=project_dir,
+            label="upgrade pip",
+            check=False,
+        )
+    except UpdateError as exc:
+        LOGGER.warning("[deps] pip upgrade could not run; continuing with the installed pip: %s", exc)
+        return
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-2000:]
+        LOGGER.warning(
+            "[deps] pip upgrade failed (exit %s); continuing with the installed pip%s",
+            result.returncode,
+            f": {detail}" if detail else "",
+        )
+
+
+def _remove_retired_core_packages(project_dir: Path, python: str, requirements: str) -> None:
+    """Uninstall ``RETIRED_CORE_PACKAGES`` after the requirements are installed.
+
+    ``pip uninstall -y`` only warns, and exits 0, for a package that is not
+    installed, so an environment without them is left as it is. A name the
+    requirements file just installed is kept: a rollback to a revision from
+    before the package was retired reinstalls that revision's own lock, and
+    removing the package would break the code it was rolled back to. A failure
+    is logged and the update goes on.
+    """
+    scan = scan_requirements(project_dir / requirements)
+    if scan is None:
+        # The file was just installed from, so an unreadable file here is an
+        # abnormal state. Removing on a failed read could strip a package the
+        # rolled-back code still imports, so the safe side is to keep.
+        LOGGER.warning(
+            "[deps] %s could not be read back; the retired packages were left as they are",
+            requirements,
+        )
+        return
+    wanted = {_canonical_package_name(dist.name) for dist in scan.required}
+    retired = [name for name in RETIRED_CORE_PACKAGES if _canonical_package_name(name) not in wanted]
+    if not retired:
+        return
+    try:
+        result = _run(
+            [python, "-m", "pip", "uninstall", "-y", *retired],
+            cwd=project_dir,
+            label="remove retired core packages",
+            check=False,
+        )
+    except UpdateError as exc:
+        LOGGER.warning("[deps] retired packages could not be removed: %s", exc)
+        return
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-2000:]
+        LOGGER.warning(
+            "[deps] removing retired packages %s failed (exit %s)%s",
+            ", ".join(retired),
+            result.returncode,
+            f": {detail}" if detail else "",
+        )
+
+
 def _report_addon_conflicts(project_dir: Path, python: str) -> None:
     """Make it visible, in this update's log, when the lock broke a package the
     lock does not own.
@@ -1339,12 +1431,22 @@ def update_dependencies(
     pip failing loudly on the missing file is the correct outcome. The only
     caller that passes something else is ``_rollback_code_and_dependencies``,
     for revisions that predate the lock.
+
+    The update sequence does not call this directly: it runs it through
+    ``_run_dependencies_from_disk``, which starts the engine file on disk with
+    ``INSTALL_DEPENDENCIES_OPTION`` (``main`` -> ``install_dependencies_main``).
+
+    Order: upgrade pip, install the requirements file, remove
+    ``RETIRED_CORE_PACKAGES``, ``pip check``, then npm.
     """
+    _upgrade_pip(project_dir, python)
+    requirements = requirements_file or REQUIREMENTS_LOCK
     _run(
-        [python, "-m", "pip", "install", "-r", requirements_file or REQUIREMENTS_LOCK],
+        [python, "-m", "pip", "install", "-r", requirements],
         cwd=project_dir,
         label="install Python dependencies",
     )
+    _remove_retired_core_packages(project_dir, python, requirements)
     _report_addon_conflicts(project_dir, python)
     frontend = project_dir / "frontend"
     if not frontend.is_dir():
@@ -1359,22 +1461,164 @@ def update_dependencies(
         # with the Windows locale (cp932) crashed the output reader on the
         # build's check marks (2026-09-30, found running the real build).
         encoding="utf-8",
+        # Lifecycle scripts run ``node`` by name; it must be npm's own.
+        env=_env_with_npm_on_path(npm),
     )
 
 
-def _find_npm(project_dir: Path) -> str:
-    """The npm to run: the one on PATH, else the portable one setup installed.
+# This engine as it is on disk, and the option of ``main`` that runs only
+# ``update_dependencies``. ``_run_dependencies_from_disk`` starts the file at
+# this path with this option.
+ENGINE_SCRIPT = Path("scripts") / "update_engine.py"
+INSTALL_DEPENDENCIES_OPTION = "--install-dependencies"
 
-    Shared by the package install, the frontend build and the frontend
-    restart, so all three use the same npm.
+
+def _engine_on_disk_installs_dependencies(script: Path) -> bool:
+    """Whether the engine file on disk has ``INSTALL_DEPENDENCIES_OPTION``.
+
+    Revisions from before the option have an engine without it (or, for the
+    oldest ones, no engine file at all); started with the option, such a file
+    would exit with an argparse usage error.
     """
-    npm = shutil.which("npm")
+    try:
+        return INSTALL_DEPENDENCIES_OPTION in script.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def _run_dependencies_from_disk(
+    project_dir: Path,
+    python: str,
+    requirements_file: str | None = None,
+) -> None:
+    """Run ``update_dependencies`` of the engine file on disk, in a child process.
+
+    This process loaded this module before ``update_code`` / ``switch_code``
+    replaced the files, so its own ``update_dependencies`` is the procedure of
+    the revision the update started from. The child runs the procedure of the
+    code that is on disk now -- the fetched revision on an update, the
+    previous revision after ``_rollback_code_and_dependencies`` reset the
+    checkout -- so the code and the procedure that installs its packages
+    always come from the same revision.
+
+    A non-zero exit of the child raises ``UpdateError``, as a failure of the
+    in-process ``update_dependencies`` did. When the engine on disk has no
+    ``INSTALL_DEPENDENCIES_OPTION`` (a revision from before it), this
+    process's own ``update_dependencies`` runs instead, which is what every
+    update did before the option existed.
+    """
+    script = project_dir / ENGINE_SCRIPT
+    if not _engine_on_disk_installs_dependencies(script):
+        LOGGER.warning(
+            "[deps] %s on disk has no %s; installing the packages with the running updater's procedure",
+            ENGINE_SCRIPT,
+            INSTALL_DEPENDENCIES_OPTION,
+        )
+        update_dependencies(project_dir, python, requirements_file)
+        return
+    command = [python, str(script), INSTALL_DEPENDENCIES_OPTION]
+    if requirements_file is not None:
+        command.append(requirements_file)
+    result = _run(
+        command,
+        cwd=project_dir,
+        label=f"install dependencies with {ENGINE_SCRIPT} on disk",
+        # The child runs pip and npm with their own timeouts (900 s each, 300 s
+        # for pip check), so one child process takes up to their sum. 5400 s
+        # is above that sum and covers the lock install plus npm ci on a slow
+        # connection; the inner timeouts fire first.
+        timeout=5400,
+        check=False,
+        # The child writes its log as UTF-8 (``install_dependencies_main``),
+        # and npm output is part of it.
+        encoding="utf-8",
+    )
+    # The child logs to stdout only; this process puts it into the update log.
+    for line in (result.stdout or "").splitlines():
+        if line.strip():
+            LOGGER.info("%s", line.rstrip())
+    for line in (result.stderr or "").splitlines():
+        if line.strip():
+            LOGGER.warning("%s", line.rstrip())
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-2000:]
+        raise UpdateError(f"installing dependencies failed with exit {result.returncode}: {detail}")
+
+
+def _find_npm(project_dir: Path) -> str:
+    """The npm to run: the portable one setup installed, else the one on PATH.
+
+    The portable one wins when both exist, as in start.bat / start-dev.bat,
+    which put ``.node`` first on PATH: the frontend runs on that Node.js, so
+    its packages are installed and built with it too -- also by update.bat,
+    whose PATH does not have ``.node``. Shared by the package install, the
+    frontend build and the frontend restart, so all three use the same npm.
+    """
     portable_npm = project_dir / ".node" / ("npm.cmd" if sys.platform == "win32" else "npm")
-    if npm is None and portable_npm.is_file():
-        npm = str(portable_npm)
+    if portable_npm.is_file():
+        return str(portable_npm)
+    npm = shutil.which("npm")
     if npm is None:
         raise UpdateError("npm is required to update the frontend")
     return npm
+
+
+# Installs the Node.js version it pins into .node, replacing a .node whose
+# version differs (docs/intent/dependency_management.md section 2-6).
+PORTABLE_NODE_INSTALLER = Path("scripts") / "install_node_portable.ps1"
+
+
+def refresh_portable_node(project_dir: Path) -> None:
+    """Replace ``.node`` when its Node.js is not the version the updated code pins.
+
+    Only a Windows checkout that has a ``.node`` (setup.bat installed it
+    because there was no system Node.js) is touched; a system Node.js is the
+    user's to update, and macOS / Linux have no portable install. Runs the
+    ``install_node_portable.ps1`` the update just brought in, so a new pin
+    reaches existing users with the same update that ships it.
+
+    Never raises. The script swaps by renaming and leaves the previous
+    ``.node`` intact when it fails (download, checksum, archive, or a ``.node``
+    still in use), so the update goes on with the Node.js it had -- a working
+    one -- and the next update tries again. Failing the update over it would
+    hold back the code, and the fixes it carries, on nodejs.org being
+    reachable.
+    """
+    if not _is_windows():
+        return
+    # ``.node.old`` alone is a replacement that died between its two renames;
+    # the script puts it back before anything else.
+    if not any((project_dir / name / "node.exe").is_file() for name in (".node", ".node.old")):
+        return
+    script = project_dir / PORTABLE_NODE_INSTALLER
+    if not script.is_file():
+        LOGGER.warning("[node] %s is missing; the portable Node.js was left as it is", PORTABLE_NODE_INSTALLER)
+        return
+    try:
+        result = _run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+            cwd=project_dir,
+            label="refresh portable Node.js",
+            timeout=600,
+            check=False,
+        )
+    except UpdateError:
+        LOGGER.warning(
+            "[node] The portable Node.js could not be checked; the update continues with the existing .node",
+            exc_info=True,
+        )
+        return
+    for line in (result.stdout or "").splitlines():
+        if line.strip():
+            LOGGER.info("[node] %s", line.strip())
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip()[-2000:]
+        LOGGER.warning(
+            "[node] The portable Node.js could not be replaced (exit %d); the update continues with "
+            "the existing .node, and the next update tries again.%s",
+            result.returncode,
+            f" {detail}" if detail else "",
+        )
 
 
 def build_frontend(project_dir: Path) -> None:
@@ -1384,11 +1628,14 @@ def build_frontend(project_dir: Path) -> None:
     production server (``next start``, what start.bat / start.sh run); the
     dev server compiles on demand and needs no build.
     """
+    npm = _find_npm(project_dir)
     _run(
-        [_find_npm(project_dir), "run", "build"],
+        [npm, "run", "build"],
         cwd=project_dir / "frontend",
         label="npm run build",
         encoding="utf-8",  # same reason as npm ci in update_dependencies
+        # ``prebuild`` and ``next build`` run ``node`` by name.
+        env=_env_with_npm_on_path(npm),
     )
 
 
@@ -1436,7 +1683,9 @@ def _rollback_code_and_dependencies(
         )
         requirements_file = LEGACY_REQUIREMENTS
     try:
-        update_dependencies(project_dir, python, requirements_file)
+        # The previous revision's own procedure, from the file the reset just
+        # put back (see ``_run_dependencies_from_disk``).
+        _run_dependencies_from_disk(project_dir, python, requirements_file)
     except UpdateError:
         LOGGER.exception("Dependency repair for the previous revision also failed")
 
@@ -1855,19 +2104,28 @@ def refuse_while_frontend_runs(project_dir: Path) -> None:
 
 
 def _env_with_npm_on_path(npm: str) -> dict[str, str]:
-    """This environment, with npm's own directory on PATH.
+    """This environment, with npm's own directory first on PATH.
 
-    The restarted frontend runs ``npm`` by name inside its window; a portable
-    npm found under ``.node`` is not on PATH by itself.
+    The restarted frontend runs ``npm`` by name inside its window, and npm's
+    lifecycle scripts and ``next build`` run ``node`` by name; all of them
+    must find the Node.js next to the chosen npm. Being on PATH is not
+    enough: with a system Node.js listed before ``.node``, ``node`` would
+    resolve to the system one while npm is the portable one. So the
+    directory is moved to the front, not only added when missing.
     """
     env = os.environ.copy()
     if not os.path.isabs(npm):
         return env
     npm_dir = os.path.dirname(npm)
-    current = env.get("PATH", "")
-    known = {os.path.normcase(os.path.normpath(entry)) for entry in current.split(os.pathsep) if entry}
-    if npm_dir and os.path.normcase(os.path.normpath(npm_dir)) not in known:
-        env["PATH"] = npm_dir + (os.pathsep + current if current else "")
+    if not npm_dir:
+        return env
+    wanted = os.path.normcase(os.path.normpath(npm_dir))
+    rest = [
+        entry
+        for entry in env.get("PATH", "").split(os.pathsep)
+        if entry and os.path.normcase(os.path.normpath(entry)) != wanted
+    ]
+    env["PATH"] = os.pathsep.join([npm_dir, *rest])
     return env
 
 
@@ -1941,6 +2199,19 @@ class _UpdateProgress:
 
 
 def _apply_code_and_dependencies(project_dir: Path, python: str, progress: _UpdateProgress) -> None:
+    """Move the code to the new revision / branch, then install its packages.
+
+    The packages are installed by ``_run_dependencies_from_disk``, i.e. by the
+    engine file the code phase just fetched, started as a child process -- not
+    by ``update_dependencies`` of this process. This process is the engine of
+    the revision the update started from, loaded before the fetch; installing
+    with it would run the previous procedure over the new code, and an update
+    that brings a new dependency step (upgrading pip, removing
+    ``RETIRED_CORE_PACKAGES``) would not run that step on the update that
+    ships it -- while still writing the completion marker. The Codex review of
+    PR #414 found this, and PR #413 met the same kind of gap with the portable
+    Node.js replacement.
+    """
     progress.code_phase_started = True
     if progress.plan is None:
         update_code(project_dir)
@@ -1955,7 +2226,12 @@ def _apply_code_and_dependencies(project_dir: Path, python: str, progress: _Upda
     # this checkout is finished. Both the manual and the detached run reach
     # the final write through this same function.
     invalidate_completion_marker(project_dir)
-    update_dependencies(project_dir, python)
+    # Before npm ci, so the packages are installed with the Node.js the new
+    # code pins. Not in the rollback: the previous code runs on the newer
+    # Node.js too, and putting the old one back would bring back the version
+    # this replaced (docs/intent/dependency_management.md section 2-6).
+    refresh_portable_node(project_dir)
+    _run_dependencies_from_disk(project_dir, python)
 
 
 def _needs_rollback(project_dir: Path, progress: _UpdateProgress) -> bool:
@@ -2200,6 +2476,33 @@ def _config_switch_channel(config: dict[str, Any] | None) -> str | None:
     return str(channel)
 
 
+def install_dependencies_main(project_dir: Path, requirements_file: str | None) -> int:
+    """``INSTALL_DEPENDENCIES_OPTION``: run ``update_dependencies`` with this
+    interpreter and return the exit code.
+
+    Started by ``_run_dependencies_from_disk``, which reads stdout and stderr
+    and puts them into the update log, so this logs to stdout only (no
+    ``self_update.log`` handler: the parent already writes that file). Both
+    streams are switched to UTF-8 so the parent's ``encoding="utf-8"`` decodes
+    them whatever the console code page is; only this process's streams
+    change, not those of the pip / npm it starts.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+    setup_logging(project_dir, to_file=False)
+    try:
+        update_dependencies(project_dir, sys.executable, requirements_file)
+    except UpdateError as exc:
+        print(f"UpdateError: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Canonical SAIVerse updater")
     parser.add_argument("--manual", action="store_true", help="Update while SAIVerse is stopped")
@@ -2211,6 +2514,18 @@ def main(argv: list[str] | None = None) -> int:
             "Report whether the last update finished, without changing code or packages. "
             f"Exit {CHECK_READY}: ready to start. Exit {CHECK_NEEDS_FINISH}: run --manual first. "
             f"Exit {CHECK_INCONCLUSIVE}: could not tell, start anyway."
+        ),
+    )
+    parser.add_argument(
+        INSTALL_DEPENDENCIES_OPTION,
+        nargs="?",
+        const="",
+        default=None,
+        metavar="REQUIREMENTS_FILE",
+        help=(
+            "Internal, started by the updater after the code changed: run only the dependency "
+            f"step with this file's procedure, from REQUIREMENTS_FILE (default {REQUIREMENTS_LOCK}). "
+            "Logs to stdout. Exit 0 on success, 1 on failure."
         ),
     )
     parser.add_argument(
@@ -2226,6 +2541,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     project_dir = Path(__file__).resolve().parent.parent
+    if args.install_dependencies is not None:
+        return install_dependencies_main(project_dir, args.install_dependencies or None)
     if args.check_complete:
         setup_logging(project_dir, to_file=False)
         return check_update_complete(project_dir)

@@ -276,6 +276,144 @@ def test_get_addon_env_python_refuses_missing_env(home) -> None:
         addon_paths.get_addon_env_python(ADDON_ID, "nothing")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_pip_upgraded_envs(monkeypatch) -> None:
+    """``_PIP_UPGRADED_ENVS`` はプロセスに一つなので、テストごとに空にする。"""
+    monkeypatch.setattr(addon_installer, "_PIP_UPGRADED_ENVS", set())
+
+
+def _write_env(env_name: str, record: dict | None) -> Path:
+    """記録 (``saiverse_env.json``) と python の実行ファイルを持つ専用の環境を作る。"""
+    env_dir = addon_paths.get_addon_env_dir(ADDON_ID, env_name)
+    python = addon_paths.addon_env_python_path(env_dir)
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.write_text("", encoding="utf-8")
+    if record is not None:
+        (env_dir / addon_paths.ADDON_ENV_RECORD_NAME).write_text(
+            json.dumps(record), encoding="utf-8")
+    return env_dir
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("3.13.2", (3, 13)),
+        ("3.13.17", (3, 13)),
+        ("3.14", (3, 14)),
+        ("3.14.0rc1", (3, 14)),
+        ("", None),
+        ("garbage", None),
+        ("3", None),
+        (None, None),
+        (313, None),
+    ],
+)
+def test_python_minor_version(version, expected) -> None:
+    assert addon_paths.python_minor_version(version) == expected
+
+
+def test_get_addon_env_python_accepts_a_patch_update(home, monkeypatch) -> None:
+    """3.13.2 で作った環境は、本体が 3.13.17 になっても使える (venv はパッチ更新を跨ぐ)。"""
+    env_dir = _write_env("tts", {"python_version": "3.13.2"})
+    monkeypatch.setattr(addon_paths, "current_python_version", lambda: "3.13.17")
+    assert addon_paths.get_addon_env_python(ADDON_ID, "tts") == addon_paths.addon_env_python_path(env_dir)
+
+
+def test_get_addon_env_python_refuses_a_minor_change(home, monkeypatch) -> None:
+    _write_env("tts", {"python_version": "3.13.2"})
+    monkeypatch.setattr(addon_paths, "current_python_version", lambda: "3.14.1")
+    with pytest.raises(addon_paths.AddonEnvError) as excinfo:
+        addon_paths.get_addon_env_python(ADDON_ID, "tts")
+    message = str(excinfo.value)
+    assert "Python 3.13 (3.13.2)" in message
+    assert "Python 3.14 (3.14.1)" in message
+
+
+@pytest.mark.parametrize("record", [None, {}, {"python_version": "garbage"}, {"python_version": 3}])
+def test_get_addon_env_python_refuses_a_missing_or_unreadable_record(home, record) -> None:
+    _write_env("tts", record)
+    with pytest.raises(addon_paths.AddonEnvError):
+        addon_paths.get_addon_env_python(ADDON_ID, "tts")
+
+
+@pytest.mark.parametrize(
+    ("recorded", "current", "expected"),
+    [
+        ("3.13.2", "3.13.17", False),
+        ("3.13.2", "3.13.2", False),
+        ("3.13.2", "3.14.0", True),
+        ("garbage", "3.13.2", True),
+    ],
+)
+def test_env_needs_full_run_compares_major_minor(home, monkeypatch, recorded, current, expected) -> None:
+    _write_env("tts", {"python_version": recorded})
+    monkeypatch.setattr(addon_paths, "current_python_version", lambda: current)
+    assert addon_installer._env_needs_full_run(ADDON_ID, "tts") is expected
+
+
+def test_env_needs_full_run_when_the_env_python_is_missing(home) -> None:
+    """記録が一致していても、python の実行ファイルが消えた環境は作り直す。"""
+    env_dir = _write_env("tts", {"python_version": addon_paths.current_python_version()})
+    addon_paths.addon_env_python_path(env_dir).unlink()
+    assert addon_installer._env_needs_full_run(ADDON_ID, "tts") is True
+
+
+def _pip_upgrades(recorded: list) -> list:
+    return [r for r in recorded if r["args"][1:] == ["-m", "pip", "install", "--upgrade", "pip"]]
+
+
+def test_ensure_addon_env_keeps_a_patch_updated_env_and_upgrades_its_pip_once(home, monkeypatch) -> None:
+    """既存の環境は作り直さず、このプロセスで初めて使うときに一度だけ pip を上げる。"""
+    env_dir = _write_env("tts", {"python_version": "3.13.2"})
+    marker = env_dir / "installed.txt"
+    marker.write_text("kept", encoding="utf-8")
+    monkeypatch.setattr(addon_paths, "current_python_version", lambda: "3.13.17")
+    # addon_installer は current_python_version を名前で import している。
+    # 比較は addon_paths 側の関数が担うが、記録の書き込みに使う束縛も揃えておく。
+    monkeypatch.setattr(addon_installer, "current_python_version", lambda: "3.13.17")
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run_creating_venv(recorded))
+
+    assert addon_installer._ensure_addon_env(ADDON_ID, "tts", lambda _e: None) == env_dir
+    addon_installer._ensure_addon_env(ADDON_ID, "tts", lambda _e: None)
+
+    assert marker.exists()
+    assert not any(r["args"][1:3] == ["-m", "venv"] for r in recorded)
+    upgrades = _pip_upgrades(recorded)
+    assert len(upgrades) == 1
+    assert upgrades[0]["args"][0] == str(addon_paths.addon_env_python_path(env_dir))
+    assert upgrades[0]["env"]["VIRTUAL_ENV"] == str(env_dir)
+
+
+def test_ensure_addon_env_upgrades_pip_right_after_creating_the_env(home, monkeypatch) -> None:
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run_creating_venv(recorded))
+
+    addon_installer._ensure_addon_env(ADDON_ID, "tts", lambda _e: None)
+    addon_installer._ensure_addon_env(ADDON_ID, "tts", lambda _e: None)
+
+    kinds = ["venv" if r["args"][1:3] == ["-m", "venv"] else "pip-upgrade" for r in recorded]
+    assert kinds == ["venv", "pip-upgrade"]
+
+
+def test_failed_env_pip_upgrade_continues_and_is_not_retried(home, monkeypatch) -> None:
+    env_dir = _write_env("tts", {"python_version": addon_paths.current_python_version()})
+    calls: list = []
+
+    def failing_run(args, cwd, progress, label, env=None):  # type: ignore[no-untyped-def]
+        calls.append(list(args))
+        raise addon_installer.AddonInstallError(f"{label}: 終了コード 1 で失敗")
+
+    monkeypatch.setattr(addon_installer, "_run_subprocess", failing_run)
+    events: list = []
+
+    assert addon_installer._ensure_addon_env(ADDON_ID, "tts", events.append) == env_dir
+    addon_installer._ensure_addon_env(ADDON_ID, "tts", events.append)
+
+    assert len(calls) == 1
+    assert any("pip を更新できませんでした" in e.message for e in events)
+
+
 def test_env_pip_install_uses_env_python_without_constraints(home, tmp_path, monkeypatch) -> None:
     recorded: list = []
     monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run_creating_venv(recorded))
