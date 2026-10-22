@@ -45,17 +45,18 @@ v0.3.25 の発行直後、[PR #415 の Codex レビュー](https://github.com/ma
 
 ### 失敗したときの画面表示
 
-start.bat での入れ替えのやり直しは本体の起動より先に行われるため、失敗した場合はその内容を SAIVerse フォルダ内のファイルに書き残す。本体は起動時にそのファイルを読み取って `manager.startup_alerts` に追加し、画面上部のバナー (`GET /api/system/alerts`) で表示する (旧ログの取り込み失敗などで既に使っている仕組み)。次の機会に入れ替えが成功したら、そのファイルを消す。
+start.bat での入れ替えのやり直しは本体の起動より先に行われるため、失敗した場合はその内容を SAIVerse フォルダ内のファイルに書き残す。本体は起動時にそのファイルを読み取って `manager.startup_alerts` に追加し、画面上部のバナー (`GET /api/system/alerts`) で表示する (旧ログの取り込み失敗などで既に使っている仕組み)。次の機会に入れ替えが成功したら、そのファイルを消す。更新の中で同梱の Node.js の入れ替え (`refresh_portable_node`) か SearXNG の入れ直し (`refresh_searxng`) が失敗したときも、更新は止めずに、入れ替えを済ませた記録を書かないまま同じファイルに失敗を書くので、画面のバナーに出て、次の start.bat / start.sh で入れ替えがやり直される (成功するまで起動のたびに再挑戦する)。
 
 ### 実装の具体 (2026-10-23)
 
-- **記録のファイル**: `update_dependencies` を済ませた記録は `.update_dependencies_complete` (中身は `.update_complete` と同じ `completion_fingerprint`)。書くのは子プロセス (`install_dependencies_main`) だけで、成功したときに限る。コードが動いた時点 (`_apply_code_and_dependencies`) で消してから、子が書き直す。失敗の記録は `.update_dependencies_failed.json` (バージョン・エラーの末尾・時刻)。どちらも `.gitignore` の `.update_dependencies_*` で除外する。子は成功すると、先に失敗の記録を消し、そのあと完了の記録を書く (逆の順だと、間で止まったときに消えないバナーが残る)。
+- **記録のファイル**: `update_dependencies` を済ませた記録は `.update_dependencies_complete` (中身は `.update_complete` と同じ `completion_fingerprint`)。書くのは子プロセス (`install_dependencies_main`) だけで、成功したときに限る。コードが動いた時点 (`_apply_code_and_dependencies`) で消してから、子が書き直す。失敗の記録は `.update_dependencies_failed.json` (バージョン・エラーの末尾・時刻、Node.js / SearXNG の失敗のときは失敗した作業の名前 `steps`)。どちらも `.gitignore` の `.update_dependencies_*` で除外する。子は成功すると、先に失敗の記録を消し、そのあと完了の記録を書く (逆の順だと、間で止まったときに消えないバナーが残る)。
 - **`--check-complete` の終了コード**: やり直しが失敗したときは新しい終了コード 12 (`CHECK_DEPENDENCIES_FAILED`) を返す。start.bat / start.sh は 12 のとき警告を出して起動を続ける。やり直しは、このフォルダの画面のサーバーが動いていれば `npm ci` を走らせずに失敗として扱う (`--manual` と同じ理由: 動いている画面のサーバーの横で `npm ci` すると `node_modules` が空になる)。
 - **SearXNG のプロセスの見分け方**: python のプロセスで、コマンドラインに `-m searx.webapp` があり、動かしている python がこのフォルダの SearXNG の venv (`scripts/.searxng-venv`、`SEARXNG_VENV_DIR` で変えられる) のものであるもの (`cmdline[0]` か `exe()` で、パスの区切りの単位で比べる)。Windows の venv の `python.exe` は、同じコマンドラインで本体の python を子として起動するので、両方が当たる。その祖先のうち、start.bat の「SearXNG」の窓 (`cmd.exe` のコマンドラインに `title SearXNG`) と `run_searxng_server.ps1` を動かしている PowerShell だけを一緒に止める。別のフォルダの SearXNG や、利用者が自分で動かした python には触れない。止まらないプロセスが残ったら、画面のサーバーと同じく何も変えずに更新を断る。
 - **SearXNG の起動し直し**: Windows は start.bat と同じ窓 (`cmd /k "title SearXNG && powershell -ExecutionPolicy Bypass -File scripts\run_searxng_server.ps1"`、作業フォルダは SAIVerse のフォルダ)、macOS / Linux は `run_searxng_server.sh` を新しいセッションで起動する。止めたときに動いていた場合だけ起動する。
 - **SearXNG の入れ直しに失敗したとき**: Node.js と同じく更新は止めず、更新ログに警告を残して続ける。SearXNG は検索のための任意の部品で、GitHub に届かないだけで更新全体を止めると、コードの修正まで届かなくなるため。次に SearXNG を起動するとき `run_searxng_server.ps1` / `.sh` が同じ確認と入れ直しを行う。
-- **`.node.old` だけが残った状態の復旧**: start.bat / start-dev.bat が、`.node` が無く `.node.old\node.exe` があるときに `.node.old` の名前を `.node` へ戻す (版の見比べはしない)。`install_node_portable.ps1` 自身も最初に同じことをするが、いまはこのスクリプトが更新の中でしか走らないので、起動の側にも残した。
-- **巻き戻し**: 前の版の子に `--keep-portable-node` を渡し、Node.js を戻さない ([dependency_management.md](dependency_management.md) §2-6 の方針)。この指定を知らない版の子には渡さない。
+- **Node.js / SearXNG の失敗の知らせ**: `refresh_portable_node` / `refresh_searxng` は失敗を `update_dependencies` の戻り値として返し、子 (`install_dependencies_main`) は終了コード 0 のまま、`.update_dependencies_complete` を書かずに `.update_dependencies_failed.json` へ失敗を書く。そのため画面のバナーに出て、次の start.bat / start.sh の `--check-complete` で入れ替えがやり直され、やり直しがまた失敗したときは終了コード 12 を返す。`install_node_portable.ps1` / `searxng_install.py` がフォルダに無いときも画面に出す (約束 5) が、やり直しても直らないので `retry=False` の失敗として返し、`.update_dependencies_complete` は書く — 起動のたびにパッケージを全部入れ直し続けないため。バナーは update.bat / update.sh で SAIVerse のファイルを直すよう案内し、後の子の実行が失敗なしで終わるまで残る。
+- **`.node.old` だけが残った状態の復旧**: start.bat / start-dev.bat が、`.node` が無く `.node.old\node.exe` があるときに `.node.old` の名前を `.node` へ戻す (バージョンの見比べはしない)。`install_node_portable.ps1` 自身も最初に同じことをするが、いまはこのスクリプトが更新の中でしか走らないので、起動の側にも残した。
+- **巻き戻し**: 前のバージョンの子に `--keep-portable-node` を渡し、Node.js を戻さない ([dependency_management.md](dependency_management.md) §2-6 の方針)。この指定を知らないバージョンの子には渡さない。
 
 ## 4. 変更の置き場所 (なぜここか)
 

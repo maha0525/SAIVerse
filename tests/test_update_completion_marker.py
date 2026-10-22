@@ -1033,7 +1033,7 @@ def test_the_install_dependencies_option_runs_update_dependencies(capsys) -> Non
     test writes nothing into the real checkout."""
     engine_project = Path(update_engine.__file__).resolve().parent.parent
     with patch.object(update_engine, "setup_logging"), patch.object(
-        update_engine, "update_dependencies"
+        update_engine, "update_dependencies", return_value=[]
     ) as deps, patch.object(update_engine, "write_dependencies_record") as record, patch.object(
         update_engine, "clear_dependencies_failure"
     ) as clear:

@@ -73,7 +73,7 @@ def test_refresh_runs_the_installer_the_update_brought_in(tmp_path: Path) -> Non
     with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
         update_engine, "_run", return_value=MagicMock(returncode=0, stdout="[OK] done\n", stderr="")
     ) as run:
-        update_engine.refresh_portable_node(project)
+        assert update_engine.refresh_portable_node(project) is None
     args, kwargs = run.call_args
     command = args[0]
     assert command[0] == "powershell"
@@ -92,8 +92,13 @@ def test_a_failed_replacement_does_not_fail_the_update(tmp_path: Path, caplog) -
         "_run",
         return_value=MagicMock(returncode=1, stdout="[ERROR] download failed\n", stderr=""),
     ):
-        update_engine.refresh_portable_node(project)  # must not raise
+        failure = update_engine.refresh_portable_node(project)  # must not raise
     assert "could not be replaced (exit 1)" in caplog.text
+    # Returned, so the dependency step shows it and leaves its record unwritten.
+    assert failure is not None
+    assert failure.step == update_engine.DEPENDENCY_STEP_PORTABLE_NODE
+    assert "could not be replaced (exit 1)" in failure.error
+    assert "download failed" in failure.error
 
 
 def test_powershell_that_cannot_start_does_not_fail_the_update(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
@@ -101,8 +106,11 @@ def test_powershell_that_cannot_start_does_not_fail_the_update(tmp_path: Path, c
     with caplog.at_level(logging.WARNING, logger="saiverse.update"), patch.object(
         update_engine, "_is_windows", return_value=True
     ), patch.object(update_engine, "_run", side_effect=update_engine.UpdateError("could not run")):
-        update_engine.refresh_portable_node(project)  # must not raise
+        failure = update_engine.refresh_portable_node(project)  # must not raise
     assert "could not be checked" in caplog.text
+    assert failure is not None
+    assert failure.step == update_engine.DEPENDENCY_STEP_PORTABLE_NODE
+    assert "could not run" in failure.error
 
 
 def test_the_update_replaces_the_portable_node_only_inside_the_dependency_step(tmp_path: Path) -> None:

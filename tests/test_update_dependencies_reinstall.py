@@ -10,17 +10,23 @@ runs the dependency step of the engine on disk once, without fetching code:
 2. the next start does nothing;
 3. a new install (no ``.update_complete``) is only recorded, never installed;
 4. a failed reinstall does not stop the start, is written to a file the
-   backend shows in the banner, and the next success removes it.
+   backend shows in the banner, and the next success removes it;
+5. a failed portable Node.js or SearXNG step inside the dependency step does
+   not fail it (exit 0), but leaves no record and writes the failure, so the
+   banner names the step and the next start runs the dependency step again.
 
 No real pip / npm / PowerShell runs: the child process is replaced by a fake
 ``_run`` that calls the child's entrance (``install_dependencies_main``) in
-this process with ``update_dependencies`` mocked.
+this process, with ``update_dependencies`` mocked (1-4) or real with every
+command it runs answered by label (5).
 """
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from importlib import metadata
 from pathlib import Path
+from typing import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -83,6 +89,7 @@ class _Child:
             self.installs += 1
             if self.fail:
                 raise update_engine.UpdateError("install Python dependencies failed with exit 1: network down")
+            return []
 
         with patch.object(update_engine, "update_dependencies", side_effect=install), patch.object(
             update_engine, "setup_logging"
@@ -216,7 +223,9 @@ def test_a_successful_update_removes_the_banner_too(tmp_path: Path) -> None:
     including the one inside the next update."""
     project = _make_project(tmp_path)
     update_engine.write_dependencies_failure(project, "network down")
-    with patch.object(update_engine, "update_dependencies"), patch.object(update_engine, "setup_logging"):
+    with patch.object(update_engine, "update_dependencies", return_value=[]), patch.object(
+        update_engine, "setup_logging"
+    ):
         assert update_engine.install_dependencies_main(project, None) == 0
     assert update_dependencies_alerts(project) == []
 
@@ -242,6 +251,209 @@ def test_a_damaged_failure_file_still_shows_a_banner(tmp_path: Path) -> None:
 
 def test_no_failure_file_means_no_banner(tmp_path: Path) -> None:
     assert update_dependencies_alerts(tmp_path) == []
+
+
+# --- 5. a failed portable Node.js / SearXNG step inside the dependency step -----------
+
+
+_NODE_LABEL = "refresh portable Node.js"
+_SEARXNG_SETUP_LABEL = "reinstall SearXNG"
+
+
+def _windows_checkout_with_node_and_searxng(tmp_path: Path) -> Path:
+    """A checkout with a portable Node.js and SearXNG installed, so both steps run."""
+    project = _make_project(tmp_path)
+    (project / ".node").mkdir()
+    (project / ".node" / "node.exe").write_bytes(b"")
+    (project / update_engine.PORTABLE_NODE_INSTALLER).write_text("# stand-in\n", encoding="utf-8")
+    (project / update_engine.SEARXNG_INSTALLER).write_text("# stand-in\n", encoding="utf-8")
+    venv_python = project / update_engine.SEARXNG_DEFAULT_VENV / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_bytes(b"")
+    return project
+
+
+class _Machine:
+    """Answers every command of the real ``update_dependencies`` by label.
+
+    The ``--install-dependencies`` child runs in this process
+    (``install_dependencies_main``); the installer of the portable Node.js
+    exits ``node_exit``, SearXNG always differs from its pin and its setup
+    exits ``searxng_exit``, everything else (pip, npm) exits 0.
+    """
+
+    def __init__(self, project: Path, *, node_exit: int = 0, searxng_exit: int = 0) -> None:
+        self.project = project
+        self.node_exit = node_exit
+        self.searxng_exit = searxng_exit
+        self.labels: list[str] = []
+        self.children = 0
+
+    def run(self, command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
+        self.labels.append(label)
+        if command[1:3] == [str(self.project / update_engine.ENGINE_SCRIPT), "--install-dependencies"]:
+            self.children += 1
+            code = update_engine.install_dependencies_main(self.project, None)
+            return MagicMock(returncode=code, stdout="", stderr="")
+        if label == _NODE_LABEL:
+            stdout = "[ERROR] download failed\n" if self.node_exit else "[OK] done\n"
+            return MagicMock(returncode=self.node_exit, stdout=stdout, stderr="")
+        if label == "check SearXNG":
+            return MagicMock(returncode=1, stdout="", stderr="")
+        if label == _SEARXNG_SETUP_LABEL:
+            stderr = "[ERROR] SearXNG: github unreachable" if self.searxng_exit else ""
+            return MagicMock(returncode=self.searxng_exit, stdout="", stderr=stderr)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    @contextmanager
+    def commands(self) -> Iterator[None]:
+        with patch.object(update_engine, "_run", side_effect=self.run), patch.object(
+            update_engine, "_is_windows", return_value=True
+        ), patch.object(update_engine.shutil, "which", return_value="npm"), patch.object(
+            update_engine, "setup_logging"
+        ):
+            yield
+
+    def install(self) -> int:
+        """The child as the update starts it (after the code moved)."""
+        with self.commands():
+            return update_engine.install_dependencies_main(self.project, None)
+
+    def check(self) -> int:
+        """``--check-complete`` at the next start."""
+        with self.commands():
+            return update_engine.check_update_complete(self.project)
+
+
+@pytest.fixture
+def _default_searxng_venv(monkeypatch):  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("SEARXNG_VENV_DIR", raising=False)
+
+
+@pytest.mark.usefixtures("_default_searxng_venv")
+def test_a_failed_node_replacement_finishes_the_step_without_a_record(tmp_path: Path) -> None:
+    project = _windows_checkout_with_node_and_searxng(tmp_path)
+    machine = _Machine(project, node_exit=1)
+
+    # The update itself goes on: the child exits 0, and npm ci still ran.
+    assert machine.install() == 0
+    assert "npm ci" in machine.labels
+
+    assert update_engine.read_dependencies_record(project) is None
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None
+    assert failure["steps"] == [update_engine.DEPENDENCY_STEP_PORTABLE_NODE]
+    assert "could not be replaced (exit 1)" in failure["error"]
+    assert "download failed" in failure["error"]
+
+
+@pytest.mark.usefixtures("_default_searxng_venv")
+def test_a_failed_searxng_reinstall_finishes_the_step_without_a_record(tmp_path: Path) -> None:
+    project = _windows_checkout_with_node_and_searxng(tmp_path)
+    machine = _Machine(project, searxng_exit=1)
+
+    assert machine.install() == 0
+
+    assert update_engine.read_dependencies_record(project) is None
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None
+    assert failure["steps"] == [update_engine.DEPENDENCY_STEP_SEARXNG]
+    assert "github unreachable" in failure["error"]
+
+
+@pytest.mark.usefixtures("_default_searxng_venv")
+def test_both_failed_steps_are_recorded(tmp_path: Path) -> None:
+    project = _windows_checkout_with_node_and_searxng(tmp_path)
+    assert _Machine(project, node_exit=1, searxng_exit=1).install() == 0
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None
+    assert failure["steps"] == [update_engine.DEPENDENCY_STEP_PORTABLE_NODE, update_engine.DEPENDENCY_STEP_SEARXNG]
+    assert "download failed" in failure["error"] and "github unreachable" in failure["error"]
+
+
+@pytest.mark.usefixtures("_default_searxng_venv")
+def test_the_banner_names_the_failed_step(tmp_path: Path) -> None:
+    project = _windows_checkout_with_node_and_searxng(tmp_path)
+    _Machine(project, node_exit=1).install()
+
+    alerts = update_dependencies_alerts(project)
+    assert [alert["id"] for alert in alerts] == [ALERT_ID]
+    alert = alerts[0]
+    assert alert["details"]["reason"] == ["同梱の Node.js の入れ替え"]
+    assert "download failed" in alert["details"]["error"]
+    assert "start.bat" in alert["message"] and "start.sh" in alert["message"]
+
+
+def test_the_banner_knows_every_step_name_of_the_engine() -> None:
+    """The alert holds the step names as strings so it need not import the engine."""
+    from saiverse import update_dependencies_alert
+
+    for step in (update_engine.DEPENDENCY_STEP_PORTABLE_NODE, update_engine.DEPENDENCY_STEP_SEARXNG):
+        assert step in update_dependencies_alert._STEP_LABELS
+
+
+def test_a_whole_reinstall_failure_is_named_as_such_in_the_banner(tmp_path: Path) -> None:
+    update_engine.write_dependencies_failure(tmp_path, "npm ci failed")
+    alert = update_dependencies_alerts(tmp_path)[0]
+    assert alert["details"]["reason"] == ["パッケージの入れ替え (起動前のやり直し)"]
+
+
+@pytest.mark.usefixtures("_default_searxng_venv")
+def test_the_next_start_runs_the_dependency_step_again_and_clears_the_banner(tmp_path: Path) -> None:
+    """The button update: the child's Node.js step fails, the parent writes
+    the marker. The next start.bat sees the missing record and runs the
+    dependency step again; once it fully succeeds the record is written and
+    the failure is gone."""
+    project = _windows_checkout_with_node_and_searxng(tmp_path)
+    _Machine(project, node_exit=1).install()
+    update_engine.write_completion_marker(project)  # the parent finishes the update
+
+    retry = _Machine(project)
+    assert retry.check() == update_engine.CHECK_READY
+    assert retry.children == 1
+    assert _NODE_LABEL in retry.labels
+
+    assert update_engine.read_dependencies_record(project) == update_engine.completion_fingerprint(project)
+    assert update_engine.read_dependencies_failure(project) is None
+    assert update_dependencies_alerts(project) == []
+    # And the start after that does nothing.
+    again = _Machine(project)
+    assert again.check() == update_engine.CHECK_READY
+    assert again.children == 0
+
+
+@pytest.mark.usefixtures("_default_searxng_venv")
+def test_a_retry_that_fails_again_reports_failure_and_retries_at_the_next_start(tmp_path: Path) -> None:
+    """Exit 12 makes start.bat / start.sh warn; nothing is recorded, so the
+    start after that tries once more."""
+    project = _windows_checkout_with_node_and_searxng(tmp_path)
+    _Machine(project, searxng_exit=1).install()
+    update_engine.write_completion_marker(project)
+
+    retry = _Machine(project, searxng_exit=1)
+    assert retry.check() == update_engine.CHECK_DEPENDENCIES_FAILED
+    assert retry.children == 1
+    assert update_engine.read_dependencies_record(project) is None
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None and failure["steps"] == [update_engine.DEPENDENCY_STEP_SEARXNG]
+
+    third = _Machine(project)
+    assert third.check() == update_engine.CHECK_READY
+    assert third.children == 1
+    assert update_engine.read_dependencies_failure(project) is None
+
+
+@pytest.mark.usefixtures("_default_searxng_venv")
+def test_without_failures_the_step_is_recorded_as_before(tmp_path: Path) -> None:
+    project = _windows_checkout_with_node_and_searxng(tmp_path)
+    update_engine.write_dependencies_failure(project, "network down")  # from an earlier run
+    machine = _Machine(project)
+
+    assert machine.install() == 0
+
+    assert _NODE_LABEL in machine.labels and _SEARXNG_SETUP_LABEL in machine.labels
+    assert update_engine.read_dependencies_record(project) == update_engine.completion_fingerprint(project)
+    assert update_engine.read_dependencies_failure(project) is None
 
 
 # --- what the full update leaves --------------------------------------------------------
@@ -277,3 +489,38 @@ def test_the_launchers_start_anyway_on_a_failed_reinstall() -> None:
     sh = (root / "start.sh").read_text(encoding="utf-8")
     assert '"$UPDATE_CHECK_RC" -eq 12' in sh
     assert update_engine.CHECK_DEPENDENCIES_FAILED == 12
+
+
+@pytest.mark.usefixtures("_default_searxng_venv")
+def test_a_missing_installer_is_shown_but_not_retried_at_every_start(tmp_path: Path) -> None:
+    """A file the checkout lacks cannot come back by retrying: the banner shows
+    it, the packages are recorded as installed, and the next start does not
+    reinstall every package again."""
+    project = _windows_checkout_with_node_and_searxng(tmp_path)
+    (project / update_engine.PORTABLE_NODE_INSTALLER).unlink()
+    machine = _Machine(project)
+
+    assert machine.install() == 0
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None
+    assert failure["steps"] == [update_engine.DEPENDENCY_STEP_PORTABLE_NODE]
+    assert "update.bat" in failure["error"]
+    assert update_engine.read_dependencies_record(project) == update_engine.completion_fingerprint(project)
+
+    update_engine.write_completion_marker(project)
+    children_before = machine.children
+    assert machine.check() == update_engine.CHECK_READY
+    assert machine.children == children_before
+    assert update_engine.read_dependencies_failure(project) is not None
+
+
+@pytest.mark.usefixtures("_default_searxng_venv")
+def test_a_missing_installer_alongside_a_retryable_failure_is_retried(tmp_path: Path) -> None:
+    """One retryable failure is enough to leave the record out."""
+    project = _windows_checkout_with_node_and_searxng(tmp_path)
+    (project / update_engine.PORTABLE_NODE_INSTALLER).unlink()
+    assert _Machine(project, searxng_exit=1).install() == 0
+    assert update_engine.read_dependencies_record(project) is None
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None
+    assert failure["steps"] == [update_engine.DEPENDENCY_STEP_PORTABLE_NODE, update_engine.DEPENDENCY_STEP_SEARXNG]

@@ -54,11 +54,34 @@ UPDATE_COMPLETE_MARKER = ".update_complete"
 # (docs/intent/update_completes_with_new_code.md section 3).
 DEPENDENCIES_RECORD = ".update_dependencies_complete"
 
-# Written by ``--check-complete`` when installing the packages once more
-# (``reinstall_dependencies_once``) failed. The backend reads it at startup and
-# shows it in the alert banner (``saiverse/update_dependencies_alert.py``); the
-# next successful ``--install-dependencies`` run removes it.
+# Written when the dependency step did not fully finish: by ``--check-complete``
+# when installing the packages once more (``reinstall_dependencies_once``)
+# failed, and by the ``--install-dependencies`` child when a step that does not
+# stop the update (``DEPENDENCY_STEP_PORTABLE_NODE`` / ``DEPENDENCY_STEP_SEARXNG``)
+# failed. The backend reads it at startup and shows it in the alert banner
+# (``saiverse/update_dependencies_alert.py``); the next fully successful
+# ``--install-dependencies`` run removes it.
 DEPENDENCIES_FAILURE_RECORD = ".update_dependencies_failed.json"
+
+# Steps of ``update_dependencies`` whose failure does not stop the update. They
+# are reported back as ``DependencyStepFailure`` and written to
+# ``DEPENDENCIES_FAILURE_RECORD`` under ``"steps"``; the alert names them.
+DEPENDENCY_STEP_PORTABLE_NODE = "portable_node"
+DEPENDENCY_STEP_SEARXNG = "searxng"
+
+
+class DependencyStepFailure(NamedTuple):
+    """A step of ``update_dependencies`` that failed without stopping the update.
+
+    ``retry`` False: running the step again cannot help (a file the checkout
+    itself lacks), so the dependency record is still written -- the next start
+    does not reinstall every package again -- but the failure stays on screen
+    until a later run of the child finishes without failures.
+    """
+
+    step: str
+    error: str
+    retry: bool = True
 
 # The pinned, verified package set. Every install path (setup.bat / setup.sh,
 # this engine, addon installs as constraints) reads this file, never
@@ -327,19 +350,29 @@ def dependencies_failure_path(project_dir: Path) -> Path:
 
 
 def read_dependencies_failure(project_dir: Path) -> dict[str, Any] | None:
-    """What the last failed reinstall at start recorded; None when nothing
+    """What the last unfinished dependency step recorded; None when nothing
     failed. A file that is present but unreadable reads as {} -- something
     failed, without details."""
     return _read_json_object(dependencies_failure_path(project_dir))
 
 
-def write_dependencies_failure(project_dir: Path, error: str) -> None:
-    """Record a failed reinstall for the backend to show. Never raises."""
-    document = {
+def write_dependencies_failure(
+    project_dir: Path, error: str, *, steps: list[str] | None = None
+) -> None:
+    """Record an unfinished dependency step for the backend to show. Never raises.
+
+    ``steps`` names the steps that failed without stopping the update
+    (``DEPENDENCY_STEP_*``). It is left out when the dependency step as a
+    whole failed (``reinstall_dependencies_once``), where ``error`` says what
+    stopped it.
+    """
+    document: dict[str, Any] = {
         "version": read_version(project_dir),
         "error": error.strip()[-2000:],
         "failed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+    if steps:
+        document["steps"] = list(steps)
     target = dependencies_failure_path(project_dir)
     try:
         _write_json_atomically(target, document)
@@ -668,9 +701,11 @@ def check_update_complete(project_dir: Path) -> int:
     A marker that matches the code while ``DEPENDENCIES_RECORD`` does not
     means an older updater finished the update with its own dependency step,
     so a step added since (upgrading pip, removing a retired package, the
-    portable Node.js, SearXNG) never ran. That case installs the packages once
-    with this engine (``reinstall_dependencies_once``) instead of starting the
-    full update, which would fetch a newer release
+    portable Node.js, SearXNG) never ran -- or that this engine's dependency
+    step ran but the portable Node.js or SearXNG step failed, which leaves the
+    record unwritten on purpose. Either case installs the packages once with
+    this engine (``reinstall_dependencies_once``) instead of starting the full
+    update, which would fetch a newer release
     (docs/intent/update_completes_with_new_code.md section 2).
     """
     fingerprint = completion_fingerprint(project_dir)
@@ -779,13 +814,16 @@ def reinstall_dependencies_once(project_dir: Path) -> int:
 
     A failure does not stop the start: it is written to
     ``DEPENDENCIES_FAILURE_RECORD`` for the backend to show, the record stays
-    missing, and the next start tries again. Returns CHECK_READY or
+    missing, and the next start tries again. That includes a child that exits
+    0 after the portable Node.js or SearXNG step failed: it wrote the failure
+    record itself and no ``DEPENDENCIES_RECORD``. Returns CHECK_READY or
     CHECK_DEPENDENCIES_FAILED.
     """
     LOGGER.warning(
-        "The last update was finished by an older updater, which skipped part of the "
-        "package installation of version %s. Installing the packages once more with this "
-        "version's procedure; SAIVerse itself is not updated. This can take several minutes.",
+        "The package installation of version %s has not finished: an older updater "
+        "skipped part of it, or a step of it failed last time. Installing the packages "
+        "once more with this version's procedure; SAIVerse itself is not updated. This "
+        "can take several minutes.",
         read_version(project_dir) or "(unknown)",
     )
     try:
@@ -799,6 +837,17 @@ def reinstall_dependencies_once(project_dir: Path) -> int:
             exc,
         )
         write_dependencies_failure(project_dir, str(exc))
+        return CHECK_DEPENDENCIES_FAILED
+    failure = read_dependencies_failure(project_dir)
+    if failure is not None:
+        # The child finished but a step that does not stop it failed; it wrote
+        # the failure record and left DEPENDENCIES_RECORD unwritten, so the next
+        # start tries again.
+        LOGGER.error(
+            "Installing the packages once more did not fully finish; SAIVerse starts anyway "
+            "and the screen shows the failure: %s",
+            failure.get("error") or "(no details recorded)",
+        )
         return CHECK_DEPENDENCIES_FAILED
     LOGGER.info("The packages of version %s are installed", read_version(project_dir) or "(unknown)")
     return CHECK_READY
@@ -1605,9 +1654,17 @@ def update_dependencies(
     requirements_file: str | None = None,
     *,
     replace_portable_node: bool = True,
-) -> None:
+) -> list[DependencyStepFailure]:
     """Install everything the code on disk needs besides itself: the portable
     Node.js, the Python packages, the frontend packages and SearXNG.
+
+    Returns the steps that failed without stopping the update (the portable
+    Node.js and SearXNG, see ``refresh_portable_node`` / ``refresh_searxng``);
+    an empty list means everything finished. Any other failure raises
+    ``UpdateError``. ``install_dependencies_main`` turns a non-empty list into
+    ``DEPENDENCIES_FAILURE_RECORD`` and leaves ``DEPENDENCIES_RECORD``
+    unwritten, so the failure is shown on the screen and the next start tries
+    again.
 
     ``requirements_file`` defaults to the lock and is *not* chosen by looking at
     the working tree: a checkout that has no lock is a broken update target, and
@@ -1628,8 +1685,11 @@ def update_dependencies(
     install the requirements file, remove ``RETIRED_CORE_PACKAGES``, ``pip
     check``, npm, then SearXNG.
     """
+    failures: list[DependencyStepFailure] = []
     if replace_portable_node:
-        refresh_portable_node(project_dir)
+        node_failure = refresh_portable_node(project_dir)
+        if node_failure is not None:
+            failures.append(node_failure)
     _upgrade_pip(project_dir, python)
     requirements = requirements_file or REQUIREMENTS_LOCK
     _run(
@@ -1655,7 +1715,10 @@ def update_dependencies(
         # Lifecycle scripts run ``node`` by name; it must be npm's own.
         env=_env_with_npm_on_path(npm),
     )
-    refresh_searxng(project_dir)
+    searxng_failure = refresh_searxng(project_dir)
+    if searxng_failure is not None:
+        failures.append(searxng_failure)
+    return failures
 
 
 # This engine as it is on disk, and the option of ``main`` that runs only
@@ -1719,6 +1782,10 @@ def _run_dependencies_from_disk(
             ENGINE_SCRIPT,
             INSTALL_DEPENDENCIES_OPTION,
         )
+        # The failures it returns are already in the update log. They are not
+        # written to DEPENDENCIES_FAILURE_RECORD: the code on disk predates the
+        # option, so it has no backend that reads that file, and its
+        # ``--check-complete`` does not retry.
         update_dependencies(
             project_dir, python, requirements_file, replace_portable_node=not keep_portable_node
         )
@@ -1778,7 +1845,7 @@ def _find_npm(project_dir: Path) -> str:
 PORTABLE_NODE_INSTALLER = Path("scripts") / "install_node_portable.ps1"
 
 
-def refresh_portable_node(project_dir: Path) -> None:
+def refresh_portable_node(project_dir: Path) -> DependencyStepFailure | None:
     """Replace ``.node`` when its Node.js is not the version the updated code pins.
 
     Only a Windows checkout that has a ``.node`` (setup.bat installed it
@@ -1794,20 +1861,31 @@ def refresh_portable_node(project_dir: Path) -> None:
     Never raises. The script swaps by renaming and leaves the previous
     ``.node`` intact when it fails (download, checksum, archive, or a ``.node``
     still in use), so the update goes on with the Node.js it had -- a working
-    one -- and the next update tries again. Failing the update over it would
-    hold back the code, and the fixes it carries, on nodejs.org being
-    reachable.
+    one. Failing the update over it would hold back the code, and the fixes it
+    carries, on nodejs.org being reachable. A failure is returned instead, and
+    ``install_dependencies_main`` shows it on the screen and leaves the
+    dependency record unwritten, so the next start.bat tries again. Returns
+    None when nothing failed (or there was nothing to do).
     """
     if not _is_windows():
-        return
+        return None
     # ``.node.old`` alone is a replacement that died between its two renames;
     # the script puts it back before anything else.
     if not any((project_dir / name / "node.exe").is_file() for name in (".node", ".node.old")):
-        return
+        return None
     script = project_dir / PORTABLE_NODE_INSTALLER
     if not script.is_file():
+        # A checkout without its own installer cannot be fixed by retrying at
+        # the next start: shown on screen, not retried.
         LOGGER.warning("[node] %s is missing; the portable Node.js was left as it is", PORTABLE_NODE_INSTALLER)
-        return
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_PORTABLE_NODE,
+            f"{PORTABLE_NODE_INSTALLER} is missing from this SAIVerse folder. "
+            "Run update.bat (update.sh on macOS / Linux) to restore the files of SAIVerse.\n"
+            f"SAIVerse のフォルダから {PORTABLE_NODE_INSTALLER} が欠けています。"
+            "update.bat (Mac / Linux は update.sh) で SAIVerse のファイルを直してください。",
+            retry=False,
+        )
     try:
         result = _run(
             ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
@@ -1816,12 +1894,14 @@ def refresh_portable_node(project_dir: Path) -> None:
             timeout=600,
             check=False,
         )
-    except UpdateError:
+    except UpdateError as exc:
         LOGGER.warning(
             "[node] The portable Node.js could not be checked; the update continues with the existing .node",
             exc_info=True,
         )
-        return
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_PORTABLE_NODE, f"The portable Node.js could not be checked: {exc}"
+        )
     for line in (result.stdout or "").splitlines():
         if line.strip():
             LOGGER.info("[node] %s", line.strip())
@@ -1829,10 +1909,18 @@ def refresh_portable_node(project_dir: Path) -> None:
         detail = (result.stderr or "").strip()[-2000:]
         LOGGER.warning(
             "[node] The portable Node.js could not be replaced (exit %d); the update continues with "
-            "the existing .node, and the next update tries again.%s",
+            "the existing .node, and the next start.bat tries again.%s",
             result.returncode,
             f" {detail}" if detail else "",
         )
+        # The installer reports its errors as ``[ERROR] ...`` lines on stdout.
+        reason = (detail or (result.stdout or "").strip()[-2000:]).strip()
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_PORTABLE_NODE,
+            f"The portable Node.js could not be replaced (exit {result.returncode})"
+            + (f": {reason}" if reason else ""),
+        )
+    return None
 
 
 # --- SearXNG --------------------------------------------------------------------
@@ -1878,7 +1966,7 @@ def searxng_installed(project_dir: Path) -> bool:
     return _searxng_venv_python(project_dir).is_file()
 
 
-def refresh_searxng(project_dir: Path) -> None:
+def refresh_searxng(project_dir: Path) -> DependencyStepFailure | None:
     """Reinstall SearXNG when it does not match the release the code pins.
 
     Runs ``searxng_install.py check`` with the SearXNG venv's python, and
@@ -1890,15 +1978,26 @@ def refresh_searxng(project_dir: Path) -> None:
     Never raises, for the same reason ``refresh_portable_node`` does not:
     SearXNG is an optional search server, and failing the whole update over
     it (GitHub unreachable, for instance) would hold back the code. The
-    failure is logged, and run_searxng_server.ps1 / .sh try the same setup
-    again when SearXNG is next started.
+    failure is logged and returned, like ``refresh_portable_node``'s: it is
+    shown on the screen and the next start.bat / start.sh tries again
+    (run_searxng_server.ps1 / .sh also try the same setup when SearXNG is next
+    started). Returns None when nothing failed (or there was nothing to do).
     """
     if not searxng_installed(project_dir):
-        return
+        return None
     installer = project_dir / SEARXNG_INSTALLER
     if not installer.is_file():
+        # As in ``refresh_portable_node``: retrying at the next start cannot
+        # bring back a file the checkout lacks, so this is shown, not retried.
         LOGGER.warning("[searxng] %s is missing; SearXNG was left as it is", SEARXNG_INSTALLER)
-        return
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_SEARXNG,
+            f"{SEARXNG_INSTALLER} is missing from this SAIVerse folder. "
+            "Run update.bat (update.sh on macOS / Linux) to restore the files of SAIVerse.\n"
+            f"SAIVerse のフォルダから {SEARXNG_INSTALLER} が欠けています。"
+            "update.bat (Mac / Linux は update.sh) で SAIVerse のファイルを直してください。",
+            retry=False,
+        )
     python = str(_searxng_venv_python(project_dir))
     try:
         check = _run(
@@ -1911,7 +2010,7 @@ def refresh_searxng(project_dir: Path) -> None:
         )
         if check.returncode == 0:
             LOGGER.info("[searxng] SearXNG matches the pinned release")
-            return
+            return None
         result = _run(
             [python, str(installer), "setup"],
             cwd=project_dir,
@@ -1920,13 +2019,15 @@ def refresh_searxng(project_dir: Path) -> None:
             check=False,
             encoding="utf-8",
         )
-    except UpdateError:
+    except UpdateError as exc:
         LOGGER.warning(
             "[searxng] SearXNG could not be checked or reinstalled; the update continues, "
             "and SearXNG tries again when it is next started",
             exc_info=True,
         )
-        return
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_SEARXNG, f"SearXNG could not be checked or reinstalled: {exc}"
+        )
     for line in (result.stdout or "").splitlines():
         if line.strip():
             LOGGER.info("[searxng] %s", line.strip())
@@ -1938,6 +2039,13 @@ def refresh_searxng(project_dir: Path) -> None:
             result.returncode,
             f" {detail}" if detail else "",
         )
+        reason = (detail or (result.stdout or "").strip()[-2000:]).strip()
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_SEARXNG,
+            f"SearXNG could not be reinstalled (exit {result.returncode})"
+            + (f": {reason}" if reason else ""),
+        )
+    return None
 
 
 def build_frontend(project_dir: Path) -> None:
@@ -2988,10 +3096,17 @@ def install_dependencies_main(
     them whatever the console code page is; only this process's streams
     change, not those of the pip / npm it starts.
 
-    On success the failure left by an earlier reinstall at start is removed
-    and ``DEPENDENCIES_RECORD`` is written, in that order: a crash between the
-    two leaves neither, and the next start simply installs once more, rather
-    than a record without a failure to clear and a banner that never goes away.
+    On success the failure left by an earlier run is removed and
+    ``DEPENDENCIES_RECORD`` is written, in that order: a crash between the two
+    leaves neither, and the next start simply installs once more, rather than
+    a record without a failure to clear and a banner that never goes away.
+
+    When a step that does not stop the update failed (the portable Node.js or
+    SearXNG, returned by ``update_dependencies``), the exit code stays 0 --
+    the update itself goes on -- but the failure is written to
+    ``DEPENDENCIES_FAILURE_RECORD`` for the screen and ``DEPENDENCIES_RECORD``
+    is not written, so the next start.bat / start.sh ``--check-complete``
+    runs the dependency step once more (``reinstall_dependencies_once``).
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -3002,7 +3117,7 @@ def install_dependencies_main(
                 pass
     setup_logging(project_dir, to_file=False)
     try:
-        update_dependencies(
+        failures = update_dependencies(
             project_dir,
             sys.executable,
             requirements_file,
@@ -3011,6 +3126,33 @@ def install_dependencies_main(
     except UpdateError as exc:
         print(f"UpdateError: {exc}", file=sys.stderr)
         return 1
+    if failures:
+        write_dependencies_failure(
+            project_dir,
+            "\n".join(failure.error for failure in failures),
+            steps=[failure.step for failure in failures],
+        )
+        if any(failure.retry for failure in failures):
+            # No record may claim a finished step. Usually there is none that
+            # matches (the update drops it when the code moves, and the
+            # reinstall at start runs only when it does not match); this makes sure.
+            _remove_file(dependencies_record_path(project_dir), purpose="a dependency step that did not finish")
+            LOGGER.warning(
+                "[deps] Finished, but %s failed; the screen shows it, and the next start.bat / "
+                "start.sh installs the packages once more",
+                ", ".join(failure.step for failure in failures),
+            )
+        else:
+            # Retrying cannot help: record the packages as installed so the
+            # next start does not reinstall them all, and keep the failure on
+            # screen until a later child run finishes without failures.
+            write_dependencies_record(project_dir)
+            LOGGER.warning(
+                "[deps] Finished, but %s could not run (a file of SAIVerse is missing); "
+                "the screen shows it",
+                ", ".join(failure.step for failure in failures),
+            )
+        return 0
     clear_dependencies_failure(project_dir)
     write_dependencies_record(project_dir)
     return 0
@@ -3042,7 +3184,8 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Internal, started by the updater after the code changed: run only the dependency "
             f"step with this file's procedure, from REQUIREMENTS_FILE (default {REQUIREMENTS_LOCK}). "
-            "Logs to stdout. Exit 0 on success, 1 on failure."
+            "Logs to stdout. Exit 0 when the step finished, 1 on failure. A failed portable "
+            f"Node.js or SearXNG step keeps exit 0 and is written to {DEPENDENCIES_FAILURE_RECORD}."
         ),
     )
     parser.add_argument(

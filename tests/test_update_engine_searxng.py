@@ -333,7 +333,7 @@ def test_a_matching_searxng_is_only_checked(tmp_path: Path) -> None:
     with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
         update_engine, "_run", side_effect=fake_run
     ):
-        update_engine.refresh_searxng(project)
+        assert update_engine.refresh_searxng(project) is None
     installer = str(project / "scripts" / "searxng_install.py")
     assert calls == [[_venv_python(project), installer, "check"]]
 
@@ -344,7 +344,7 @@ def test_a_differing_searxng_is_reinstalled(tmp_path: Path) -> None:
     with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
         update_engine, "_run", side_effect=fake_run
     ):
-        update_engine.refresh_searxng(project)
+        assert update_engine.refresh_searxng(project) is None
     assert [command[-1] for command in calls] == ["check", "setup"]
     assert all(command[0] == _venv_python(project) for command in calls)
 
@@ -355,9 +355,14 @@ def test_a_failed_reinstall_does_not_fail_the_update(tmp_path: Path, caplog) -> 
     with caplog.at_level(logging.WARNING, logger="saiverse.update"), patch.object(
         update_engine, "_is_windows", return_value=True
     ), patch.object(update_engine, "_run", side_effect=fake_run):
-        update_engine.refresh_searxng(project)  # must not raise
+        failure = update_engine.refresh_searxng(project)  # must not raise
     assert "could not be reinstalled (exit 1)" in caplog.text
     assert "network down" in caplog.text
+    # Returned, so the dependency step shows it and leaves its record unwritten.
+    assert failure is not None
+    assert failure.step == update_engine.DEPENDENCY_STEP_SEARXNG
+    assert "could not be reinstalled (exit 1)" in failure.error
+    assert "network down" in failure.error
 
 
 def test_an_installer_that_cannot_start_does_not_fail_the_update(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
@@ -365,8 +370,11 @@ def test_an_installer_that_cannot_start_does_not_fail_the_update(tmp_path: Path,
     with caplog.at_level(logging.WARNING, logger="saiverse.update"), patch.object(
         update_engine, "_is_windows", return_value=True
     ), patch.object(update_engine, "_run", side_effect=update_engine.UpdateError("could not run")):
-        update_engine.refresh_searxng(project)  # must not raise
+        failure = update_engine.refresh_searxng(project)  # must not raise
     assert "could not be checked or reinstalled" in caplog.text
+    assert failure is not None
+    assert failure.step == update_engine.DEPENDENCY_STEP_SEARXNG
+    assert "could not run" in failure.error
 
 
 def test_without_searxng_the_dependency_step_does_nothing_for_it(tmp_path: Path) -> None:
@@ -392,3 +400,25 @@ def test_the_dependency_step_handles_searxng_after_npm(tmp_path: Path) -> None:
     ), patch.object(update_engine, "refresh_searxng", side_effect=lambda *_: order.append("searxng")):
         update_engine.update_dependencies(tmp_path, "python")
     assert order[-2:] == ["npm install", "searxng"]
+
+
+def test_the_dependency_step_returns_the_steps_that_failed(tmp_path: Path) -> None:
+    """The portable Node.js and SearXNG failures do not raise; they come back
+    in order, and an empty list means everything finished."""
+    (tmp_path / "frontend").mkdir()
+    node = update_engine.DependencyStepFailure(update_engine.DEPENDENCY_STEP_PORTABLE_NODE, "node failed")
+    searxng = update_engine.DependencyStepFailure(update_engine.DEPENDENCY_STEP_SEARXNG, "searxng failed")
+
+    def run_dependency_step(node_failure, searxng_failure):  # type: ignore[no-untyped-def]
+        with patch.object(
+            update_engine, "_run", return_value=MagicMock(returncode=0, stdout="", stderr="")
+        ), patch.object(update_engine, "refresh_portable_node", return_value=node_failure), patch.object(
+            update_engine, "_report_addon_conflicts"
+        ), patch.object(update_engine.shutil, "which", return_value="npm"), patch.object(
+            update_engine, "refresh_searxng", return_value=searxng_failure
+        ):
+            return update_engine.update_dependencies(tmp_path, "python")
+
+    assert run_dependency_step(node, searxng) == [node, searxng]
+    assert run_dependency_step(None, searxng) == [searxng]
+    assert run_dependency_step(None, None) == []
