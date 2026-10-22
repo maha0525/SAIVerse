@@ -1966,6 +1966,31 @@ def searxng_installed(project_dir: Path) -> bool:
     return _searxng_venv_python(project_dir).is_file()
 
 
+def _searxng_running_for_reinstall(project_dir: Path) -> DependencyStepFailure | None:
+    """A retryable failure when this checkout's SearXNG may be running, else None.
+
+    Not knowing (the process list cannot be read) counts as running: the
+    reinstall is then tried again at the next start instead of risking a
+    venv replaced under a running server.
+    """
+    try:
+        running = find_searxng_servers(project_dir)
+    except FrontendCheckUnavailable as exc:
+        detail = f"whether SearXNG is running could not be checked ({exc})"
+    else:
+        if not running:
+            return None
+        detail = "SearXNG is running (" + _describe_processes(running) + ")"
+    LOGGER.warning("[searxng] %s; SearXNG was not reinstalled", detail)
+    return DependencyStepFailure(
+        DEPENDENCY_STEP_SEARXNG,
+        f"SearXNG needs to be reinstalled, but {detail}. Close the SearXNG window and run "
+        "start.bat (start.sh on macOS / Linux) again.\n"
+        "SearXNG の入れ直しが必要ですが、SearXNG が動いているため入れ直していません。"
+        "SearXNG の窓を閉じてから、start.bat (Mac / Linux は start.sh) をもう一度実行してください。",
+    )
+
+
 def refresh_searxng(project_dir: Path) -> DependencyStepFailure | None:
     """Reinstall SearXNG when it does not match the release the code pins.
 
@@ -2011,6 +2036,13 @@ def refresh_searxng(project_dir: Path) -> DependencyStepFailure | None:
         if check.returncode == 0:
             LOGGER.info("[searxng] SearXNG matches the pinned release")
             return None
+        # Only the Update button's update stops SearXNG first. update.bat, the
+        # reinstall before start, and an update run by an engine from before
+        # SearXNG was stopped reach here with SearXNG possibly running, and the
+        # setup would replace the packages of the venv it is running from.
+        running = _searxng_running_for_reinstall(project_dir)
+        if running is not None:
+            return running
         result = _run(
             [python, str(installer), "setup"],
             cwd=project_dir,

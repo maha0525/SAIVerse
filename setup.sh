@@ -151,7 +151,9 @@ source .venv/bin/activate
 # --- 5. pip install ---
 echo ""
 echo "[SETUP] Pythonパッケージをインストール中..."
-python -m pip install --upgrade pip >/dev/null 2>&1
+# pip 自身の更新の失敗では止めない (setup.bat と同じ)。set -e のまま失敗すると、
+# 下の restore_old_venv に届かず、パッケージの無い .venv が残る。
+python -m pip install --upgrade pip >/dev/null 2>&1 || echo "[WARN] pip 自身の更新に失敗しました。今の pip のまま続けます。 / Could not upgrade pip; continuing with the current pip."
 if ! python -m pip install -r requirements.lock; then
     echo "[ERROR] Pythonパッケージのインストールに失敗しました。 / pip install failed."
     restore_old_venv

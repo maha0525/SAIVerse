@@ -524,3 +524,36 @@ def test_a_missing_installer_alongside_a_retryable_failure_is_retried(tmp_path: 
     failure = update_engine.read_dependencies_failure(project)
     assert failure is not None
     assert failure["steps"] == [update_engine.DEPENDENCY_STEP_PORTABLE_NODE, update_engine.DEPENDENCY_STEP_SEARXNG]
+
+
+@pytest.mark.usefixtures("_default_searxng_venv")
+def test_a_running_searxng_is_not_reinstalled_and_is_retried(tmp_path: Path) -> None:
+    """update.bat, the reinstall before start and an update run by an older
+    engine do not stop SearXNG first: the reinstall is refused, shown, and tried
+    again at the next start."""
+    project = _windows_checkout_with_node_and_searxng(tmp_path)
+    machine = _Machine(project)
+    with patch.object(update_engine, "find_searxng_servers", return_value=[MagicMock(pid=4242)]), patch.object(
+        update_engine, "_describe_processes", return_value="python.exe (PID 4242)"
+    ):
+        assert machine.install() == 0
+    assert _SEARXNG_SETUP_LABEL not in machine.labels
+    assert update_engine.read_dependencies_record(project) is None
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None
+    assert failure["steps"] == [update_engine.DEPENDENCY_STEP_SEARXNG]
+    assert "SearXNG is running" in failure["error"]
+
+
+@pytest.mark.usefixtures("_default_searxng_venv")
+def test_an_unreadable_process_list_counts_as_running(tmp_path: Path) -> None:
+    project = _windows_checkout_with_node_and_searxng(tmp_path)
+    machine = _Machine(project)
+    with patch.object(
+        update_engine, "find_searxng_servers",
+        side_effect=update_engine.FrontendCheckUnavailable("no psutil"),
+    ):
+        assert machine.install() == 0
+    assert _SEARXNG_SETUP_LABEL not in machine.labels
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None and "could not be checked" in failure["error"]
