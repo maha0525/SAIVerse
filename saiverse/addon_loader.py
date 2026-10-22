@@ -172,14 +172,39 @@ def _register_addon_integrations_for(
 ) -> int:
     """単一アドオンの integrations/*.py を読んで register する。
 
+    同じアドオンの古い登録が残っていれば先に外す (``IntegrationManager.register``
+    は追記なので、外さずに重ねると同じ integration が二重に巡回される —
+    server_hooks の二重登録 (2026-10-23 実害) と同族)。
+
     Returns:
         登録した integration の数
     """
+    addon_name = addon_dir.name
+    stale_names = _addon_integration_registry.pop(addon_name, [])
+    failed_names: List[str] = []
+    for name in stale_names:
+        try:
+            integration_manager.unregister(name)
+        except Exception:
+            # 外せなかった integration を登録簿から落とすと誰も追えなくなる。
+            # 書き戻して次の機会にまた外す。
+            failed_names.append(name)
+            LOGGER.exception(
+                "addon_loader: failed to unregister stale integration '%s' (addon=%s)",
+                name, addon_name,
+            )
+    if failed_names:
+        _addon_integration_registry.setdefault(addon_name, []).extend(failed_names)
+    if stale_names:
+        LOGGER.info(
+            "addon_loader: removed %d stale integration(s) for addon '%s' before re-register",
+            len(stale_names), addon_name,
+        )
+
     integrations_dir = addon_dir / "integrations"
     if not integrations_dir.exists() or not integrations_dir.is_dir():
         return 0
 
-    addon_name = addon_dir.name
     registered_names: List[str] = []
 
     for py_file in sorted(integrations_dir.glob("*.py")):
@@ -369,8 +394,46 @@ def _resolve_hook_handler(
     return handler
 
 
+def _unregister_server_hook_pairs(addon_name: str) -> int:
+    """登録簿 (``_addon_server_hooks_registry``) に残っている server_hooks の
+    登録を外す。context provider には触れない (提供口の置き換えは
+    ``_register_addon_server_hooks_for`` が「解決してから置き換える」で行う)。
+
+    Returns:
+        外した hook の数
+    """
+    from saiverse.addon_hooks import unregister_hook
+
+    pairs = _addon_server_hooks_registry.pop(addon_name, [])
+    removed = 0
+    failed: List[Tuple[str, Callable[..., Any]]] = []
+    for event, handler in pairs:
+        try:
+            if unregister_hook(event, handler):
+                removed += 1
+        except Exception:
+            # 外せなかった登録を登録簿から落とすと、handler は生きているのに
+            # 誰も追えない (次の再登録で二重が静かに復活する)。外せた分だけ
+            # 登録簿から消し、失敗分は書き戻して次の機会にまた外す。
+            failed.append((event, handler))
+            LOGGER.exception(
+                "addon_loader: failed to unregister hook %r (addon=%s)",
+                event, addon_name,
+            )
+    if failed:
+        _addon_server_hooks_registry.setdefault(addon_name, []).extend(failed)
+    return removed
+
+
 def _register_addon_server_hooks_for(addon_dir: Path) -> int:
     """単一アドオンの addon.json から server_hooks を読んで register する。
+
+    同じアドオンの古い登録が残っていれば外してから登録し直す (register は
+    追記なので、外さずに重ねると persona_speak などの handler が二重になり、
+    動かしたままアドオンを更新するたびに発話の読み上げ・合成が二重になる —
+    2026-10-23 実害)。外すのは新しい handler を全部解決し終えた後 — 提供口の
+    「解決してから置き換える」と同じ向きで、module の import 中に dispatch が
+    走っても handler が 0 本になる窓を作らない。
 
     Returns:
         登録した hook の数
@@ -398,15 +461,19 @@ def _register_addon_server_hooks_for(addon_dir: Path) -> int:
             register_provider(addon_dir.name, provider)
     else:
         unregister_provider(addon_dir.name)
+    addon_name = addon_dir.name
     if not isinstance(hooks_spec, list):
         LOGGER.warning(
             "addon_loader: server_hooks for addon '%s' is not a list, skipping",
-            addon_dir.name,
+            addon_name,
         )
+        # 新しい版の宣言が壊れている。古い登録を残すと、ディスクから消えた
+        # 旧 module の handler が生き続けるので外す (壊れた古い提供口を
+        # 残さない、と同じ判断)。
+        _unregister_server_hook_pairs(addon_name)
         return 0
 
-    addon_name = addon_dir.name
-    registered: List[Tuple[str, Callable[..., Any]]] = []
+    resolved: List[Tuple[str, Callable[..., Any]]] = []
 
     for hook_def in hooks_spec:
         if not isinstance(hook_def, dict):
@@ -432,16 +499,26 @@ def _register_addon_server_hooks_for(addon_dir: Path) -> int:
                 handler_spec, addon_name,
             )
             continue
+        resolved.append((event, handler))
 
+    # 新しい handler が全部解決できてから、古い登録を外して入れ替える。
+    stale = _unregister_server_hook_pairs(addon_name)
+    if stale:
+        LOGGER.info(
+            "addon_loader: removed %d stale server_hook(s) for addon '%s' before re-register",
+            stale, addon_name,
+        )
+
+    registered: List[Tuple[str, Callable[..., Any]]] = []
+    for event, handler in resolved:
         try:
             register_hook(event, handler)
         except Exception:
             LOGGER.exception(
-                "addon_loader: failed to register hook %r → %s (addon=%s)",
-                event, handler_spec, addon_name,
+                "addon_loader: failed to register hook %r (addon=%s)",
+                event, addon_name,
             )
             continue
-
         registered.append((event, handler))
 
     if registered:
@@ -550,22 +627,11 @@ def unregister_addon_server_hooks(addon_name: str) -> int:
     Returns:
         解除した hook の数
     """
-    from saiverse.addon_hooks import unregister_hook
     from saiverse.addon_context import unregister_provider
 
     unregister_provider(addon_name)
 
-    pairs = _addon_server_hooks_registry.pop(addon_name, [])
-    removed = 0
-    for event, handler in pairs:
-        try:
-            if unregister_hook(event, handler):
-                removed += 1
-        except Exception:
-            LOGGER.exception(
-                "addon_loader: failed to unregister hook %r (addon=%s)",
-                event, addon_name,
-            )
+    removed = _unregister_server_hook_pairs(addon_name)
     if removed:
         LOGGER.info(
             "addon_loader: %d server_hook(s) unregistered for addon '%s'",
