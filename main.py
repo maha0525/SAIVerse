@@ -441,9 +441,9 @@ def main():
     app_state.set_city_name(args.city_name)
     app_state.set_project_dir(str(Path(__file__).parent.resolve()))
 
-    # A failed package reinstall before this start (update_engine --check-complete) is shown in the banner.
-    from saiverse.update_dependencies_alert import update_dependencies_alerts
-    manager.startup_alerts.extend(update_dependencies_alerts(Path(__file__).parent.resolve()))
+    # Failures of the package reinstall before this start and of setup's addon env rebuild are shown in the banner.
+    from saiverse.environment_alerts import environment_alerts
+    manager.startup_alerts.extend(environment_alerts(Path(__file__).parent.resolve()))
 
     # Sync all file-based playbooks (builtin / expansion_data / user_data) to DB.
     # Performs diff-based update: new files are imported, changed files are updated,

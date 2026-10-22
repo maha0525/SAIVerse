@@ -8,38 +8,80 @@ echo ========================================
 echo.
 
 REM --- 1. Python check ---
+REM SAIVerse is tested on Python 3.13 only. .venv stays on the Python series it
+REM was created with, so setup names Python 3.13 instead of taking whichever
+REM "python" comes first on PATH: it reads the folder that the python.org
+REM installer and miniconda record under
+REM Software\Python\PythonCore\3.13\InstallPath, current user first, and uses
+REM python.exe in that folder. Without a 3.13, setup stops before touching .venv
+REM unless SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1, which lets it continue with
+REM the PATH python. PYTHON_EXE is the full path of the chosen python; every
+REM step before .venv is activated uses it. setup.sh does the same with
+REM python3.13. See docs/intent/dependency_management.md section 2-7.
+REM Keep this section flat: no echo text with parentheses inside a block.
+set "PYTHON_EXE="
+set "ALLOW_OTHER_PYTHON="
+if "%SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON%"=="1" set "ALLOW_OTHER_PYTHON=1"
+call :find_python313 HKCU
+if not defined PYTHON_EXE call :find_python313 HKLM
+if defined PYTHON_EXE goto :python_selected
+if defined ALLOW_OTHER_PYTHON goto :python_from_path
+echo.
+call :show_message python313_missing
+pause
+exit /b 1
+
+:python_from_path
 where python >nul 2>nul
-if %errorlevel% neq 0 (
-    echo [ERROR] Python not found.
-    echo   Please install from https://www.python.org/downloads/
-    echo   Make sure to check "Add Python to PATH" during installation.
-    echo.
-    echo   If you already installed Python, Windows App Execution Aliases
-    echo   may be intercepting the command. To fix:
-    echo     Settings ^> Apps ^> App Execution Aliases
-    echo     Turn off "python.exe" and "python3.exe"
-    pause
-    exit /b 1
-)
-for /f "tokens=*" %%v in ('python --version 2^>^&1') do set PY_VERSION=%%v
+if %errorlevel% equ 0 goto :python_on_path
+echo [ERROR] Python not found.
+echo   Please install Python 3.13.17 from https://www.python.org/downloads/release/python-31317/
+echo   Make sure to check "Add python.exe to PATH" during installation.
+echo.
+echo   If you already installed Python, Windows App Execution Aliases
+echo   may be intercepting the command. To fix:
+echo     Settings ^> Apps ^> App Execution Aliases
+echo     Turn off "python.exe" and "python3.exe"
+pause
+exit /b 1
+
+:python_on_path
+set "PY_VERSION="
+for /f "tokens=*" %%v in ('python --version 2^>^&1') do set "PY_VERSION=%%v"
 echo %PY_VERSION% | findstr /r "[0-9]" >nul 2>nul
-if %errorlevel% neq 0 (
-    echo [ERROR] Python found but version number is missing.
-    echo   Output was: "%PY_VERSION%"
-    echo.
-    echo   This usually means Windows App Execution Aliases are intercepting
-    echo   the "python" command instead of a real Python installation.
-    echo.
-    echo   To fix:
-    echo     1. Settings ^> Apps ^> Advanced app settings ^> App Execution Aliases
-    echo     2. Turn off "python.exe" and "python3.exe"
-    echo     3. Install Python from https://www.python.org/downloads/
-    echo        Make sure to check "Add Python to PATH" during installation.
-    echo     4. Run setup.bat again.
-    pause
-    exit /b 1
-)
-echo [OK] %PY_VERSION%
+if %errorlevel% equ 0 goto :python_on_path_works
+echo [ERROR] Python found but version number is missing.
+echo   Output was: "%PY_VERSION%"
+echo.
+echo   This usually means Windows App Execution Aliases are intercepting
+echo   the "python" command instead of a real Python installation.
+echo.
+echo   To fix:
+echo     1. Settings ^> Apps ^> Advanced app settings ^> App Execution Aliases
+echo     2. Turn off "python.exe" and "python3.exe"
+echo     3. Install Python 3.13.17 from https://www.python.org/downloads/release/python-31317/
+echo        Make sure to check "Add python.exe to PATH" during installation.
+echo     4. Run setup.bat again.
+pause
+exit /b 1
+
+:python_on_path_works
+REM The full path, because "python" means the .venv python once it is activated.
+for /f "delims=" %%p in ('python -c "import sys; print(sys.executable)"') do set "PYTHON_EXE=%%p"
+if defined PYTHON_EXE goto :python_warn_not_recommended
+echo [ERROR] Could not find where the PATH python is installed.
+pause
+exit /b 1
+
+:python_warn_not_recommended
+echo.
+call :show_message python_not_recommended
+echo.
+
+:python_selected
+set "PY_VERSION="
+for /f "tokens=*" %%v in ('call "%PYTHON_EXE%" --version 2^>^&1') do set "PY_VERSION=%%v"
+echo [OK] %PY_VERSION% - %PYTHON_EXE%
 
 REM --- 2. Node.js check & auto-install ---
 REM A portable install from a previous setup comes first, as in start.bat.
@@ -114,43 +156,80 @@ REM which a freshly installed Windows does not have. Without it SAIVerse fails
 REM at startup. The script prints its own messages and does not stop setup.
 powershell -ExecutionPolicy Bypass -File scripts\install_vc_redist.ps1
 
-REM --- 3. Create venv if not exists ---
-if not exist ".venv\Scripts\activate.bat" (
-    if exist ".venv" (
-        echo.
-        echo [WARN] .venv exists but appears broken ^(activate.bat missing^). Recreating...
-        rmdir /s /q .venv
-    )
-    echo.
-    echo [SETUP] Creating Python virtual environment...
-    python -m venv .venv
-    if %errorlevel% neq 0 (
-        echo [ERROR] Failed to create virtual environment.
-        pause
-        exit /b 1
-    )
-    if not exist ".venv\Scripts\activate.bat" (
-        echo [ERROR] Virtual environment was created but is incomplete.
-        echo   .venv\Scripts\activate.bat was not generated.
-        echo.
-        echo   This usually means your Python installation is missing "ensurepip".
-        echo   Common causes:
-        echo     - Microsoft Store version of Python ^(uninstall and use python.org^)
-        echo     - Python installed without pip ^(reinstall with default options^)
-        echo.
-        echo   To fix:
-        echo     1. Uninstall your current Python
-        echo     2. Download from https://www.python.org/downloads/
-        echo     3. Run installer, check "Add Python to PATH", use default settings
-        echo     4. Delete the .venv folder and run setup.bat again
-        rmdir /s /q .venv
-        pause
-        exit /b 1
-    )
-    echo [OK] Created .venv
-) else (
-    echo [OK] .venv already exists
+REM --- 3. Create or rebuild .venv ---
+REM scripts\setup_venv.py prepare, run with the python chosen above, prints one
+REM line: keep / create / renamed <old name> / locked. An existing .venv made
+REM with another Python series than 3.13, or a broken one, is not deleted: it is
+REM renamed to .venv.old-<date>-<time> and deleted only after the new .venv has
+REM its packages. If the new one fails, the old one is put back. When the rename
+REM is refused because files in .venv are in use, nothing changes and setup
+REM stops. With SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 the Python series of an
+REM existing .venv is not checked.
+set "VENV_CHECK_ARGS=--expect-series 3.13"
+if defined ALLOW_OTHER_PYTHON set "VENV_CHECK_ARGS="
+if defined ALLOW_OTHER_PYTHON echo [INFO] SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1: the Python series of an existing .venv is not checked.
+set "VENV_ACTION="
+set "VENV_OLD="
+for /f "tokens=1,*" %%a in ('call "%PYTHON_EXE%" scripts\setup_venv.py prepare %VENV_CHECK_ARGS%') do (
+    set "VENV_ACTION=%%a"
+    set "VENV_OLD=%%b"
 )
+if "%VENV_ACTION%"=="keep" goto :venv_keep
+if "%VENV_ACTION%"=="create" goto :venv_create
+if "%VENV_ACTION%"=="renamed" goto :venv_create
+if "%VENV_ACTION%"=="locked" goto :venv_locked
+echo [ERROR] Could not check the existing .venv folder. See the messages above.
+pause
+exit /b 1
+
+:venv_locked
+pause
+exit /b 1
+
+:venv_create
+if not "%VENV_ACTION%"=="renamed" set "VENV_OLD="
+echo.
+echo [SETUP] Creating Python virtual environment...
+"%PYTHON_EXE%" -m venv .venv
+if errorlevel 1 goto :venv_create_failed
+if not exist ".venv\Scripts\activate.bat" goto :venv_incomplete
+echo [OK] Created .venv
+goto :venv_ready
+
+:venv_create_failed
+echo [ERROR] Failed to create virtual environment.
+call :restore_old_venv
+pause
+exit /b 1
+
+:venv_incomplete
+echo [ERROR] Virtual environment was created but is incomplete.
+echo   .venv\Scripts\activate.bat was not generated.
+echo.
+echo   This usually means your Python installation is missing "ensurepip".
+echo   Common causes:
+echo     - Microsoft Store version of Python: uninstall it and use python.org
+echo     - Python installed without pip: reinstall it with default options
+echo.
+echo   To fix:
+echo     1. Uninstall your current Python
+echo     2. Download Python 3.13.17 from https://www.python.org/downloads/release/python-31317/
+echo     3. Run installer, check "Add python.exe to PATH", use default settings
+echo     4. Run setup.bat again
+if defined VENV_OLD goto :venv_incomplete_restore
+rmdir /s /q .venv
+pause
+exit /b 1
+
+:venv_incomplete_restore
+call :restore_old_venv
+pause
+exit /b 1
+
+:venv_keep
+echo [OK] .venv already exists
+
+:venv_ready
 
 REM --- 4. Activate venv ---
 call .venv\Scripts\activate.bat
@@ -160,12 +239,18 @@ echo.
 echo [SETUP] Installing Python packages...
 python -m pip install --upgrade pip >nul 2>nul
 python -m pip install -r requirements.lock
-if %errorlevel% neq 0 (
-    echo [ERROR] pip install failed.
-    pause
-    exit /b 1
-)
+if errorlevel 1 goto :pip_failed
 echo [OK] Python packages installed
+
+REM --- 5b. Delete the old .venv and rebuild addon environments ---
+REM The new .venv is complete, so .venv.old-<date>-<time> folders can go.
+REM Then addon environments made with another Python series are rebuilt with
+REM the saved answers. Their failures do not stop setup: SAIVerse itself works,
+REM and the script prints what to do and records the failures in
+REM .addon_env_rebuild_failures.json.
+"%PYTHON_EXE%" scripts\setup_venv.py finish
+python scripts\rebuild_addon_envs.py
+if errorlevel 1 echo [WARN] Could not check the addon environments. SAIVerse itself works; see the messages above.
 
 REM --- 6. npm install ---
 echo.
@@ -328,3 +413,47 @@ echo.
 echo Then open http://localhost:3000 in your browser.
 echo.
 pause
+exit /b 0
+
+REM ---------------------------------------------------------------
+REM Subroutines
+REM ---------------------------------------------------------------
+
+:pip_failed
+echo [ERROR] pip install failed.
+call :restore_old_venv
+pause
+exit /b 1
+
+REM Put the .venv renamed by this run back, after the new one failed.
+:restore_old_venv
+if not defined VENV_OLD exit /b 0
+"%PYTHON_EXE%" scripts\setup_venv.py rollback "%VENV_OLD%"
+exit /b 0
+
+REM Set PYTHON_EXE to the python.exe of the Python 3.13 registered under
+REM %1\Software\Python\PythonCore\3.13\InstallPath, when it exists and runs
+REM as 3.13. The value line looks like "(Default)    REG_SZ    C:\Python313\";
+REM the name of the default value differs by Windows language, so the folder
+REM is taken from what follows REG_SZ.
+:find_python313
+set "PY313_LINE="
+set "PY313_DIR="
+for /f "delims=" %%L in ('reg query "%~1\Software\Python\PythonCore\3.13\InstallPath" /ve 2^>nul ^| findstr /c:"REG_SZ"') do set "PY313_LINE=%%L"
+if not defined PY313_LINE exit /b 0
+set "PY313_DIR=!PY313_LINE:*REG_SZ=!"
+for /f "tokens=*" %%D in ("!PY313_DIR!") do set "PY313_DIR=%%D"
+if not defined PY313_DIR exit /b 0
+if "!PY313_DIR:~-1!"=="\" set "PY313_DIR=!PY313_DIR:~0,-1!"
+if not exist "!PY313_DIR!\python.exe" exit /b 0
+"!PY313_DIR!\python.exe" -c "import sys; sys.exit(0 if sys.version_info[:2] == (3, 13) else 1)" >nul 2>nul
+if errorlevel 1 exit /b 0
+set "PYTHON_EXE=!PY313_DIR!\python.exe"
+exit /b 0
+
+REM Print scripts\setup_messages\%1.txt. The file is UTF-8 with Japanese and
+REM English; PowerShell reads it as UTF-8, which "type" would not.
+:show_message
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath 'scripts\setup_messages\%~1.txt' -Encoding UTF8"
+if errorlevel 1 type "scripts\setup_messages\%~1.txt"
+exit /b 0

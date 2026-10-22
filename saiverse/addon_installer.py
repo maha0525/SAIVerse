@@ -1561,6 +1561,212 @@ def apply_installed_options(
 
 
 # ---------------------------------------------------------------------------
+# 本体の Python の系列が変わったあとの、専用の環境の作り直し (setup から呼ぶ)
+# ---------------------------------------------------------------------------
+
+# 作り直しに失敗したアドオンの記録。setup が SAIVerse のフォルダに書く
+# (``scripts/rebuild_addon_envs.py`` → ``record_env_rebuild_failures``)。
+# 最後の作り直しで失敗が無ければ消す。形は ``record_env_rebuild_failures`` を参照。
+ENV_REBUILD_FAILURES_PATH = PROJECT_ROOT / ".addon_env_rebuild_failures.json"
+
+
+@dataclass
+class EnvRebuildResult:
+    """一つのアドオンの専用の環境の作り直しの結果。``error`` が None なら成功。"""
+    addon_id: str
+    envs: List[str]
+    steps: List[str] = field(default_factory=list)
+    error: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
+def _unusable_env_dirs(addon_id: str) -> List[str]:
+    """``addon_install/<id>/envs/`` にある専用の環境のうち、いまの Python で使えないもの。
+
+    フォルダがあって、記録が無い・読めない・記録の Python の major.minor が本体と
+    違う・python の実行ファイルが無いもの (``_env_needs_full_run`` と同じ判定)。
+    """
+    envs_dir = get_addon_install_dir(addon_id) / "envs"
+    if not envs_dir.is_dir():
+        return []
+    names = []
+    for path in sorted(envs_dir.iterdir()):
+        if not path.is_dir():
+            continue
+        try:
+            needs = _env_needs_full_run(addon_id, path.name)
+        except ValueError:  # 専用の環境の名前として不正 (manifest が作れない名前)
+            continue
+        if needs:
+            names.append(path.name)
+    return names
+
+
+def find_unusable_addon_envs(expansion_dir: Optional[Path] = None) -> Dict[str, List[str]]:
+    """``{addon_id: [使えない専用の環境の名前, ...]}`` (副作用なし、manifest は読まない)。
+
+    対象はアドオンのフォルダ (``expansion_data/<id>/``) があるものだけ。使えない環境が
+    無いアドオンは含めない。
+    """
+    expansion = expansion_dir or EXPANSION_DATA_DIR
+    found: Dict[str, List[str]] = {}
+    if not expansion.is_dir():
+        return found
+    for addon_dir in sorted(p for p in expansion.iterdir() if p.is_dir()):
+        try:
+            envs = _unusable_env_dirs(addon_dir.name)
+        except ValueError:  # アドオンの id として不正なフォルダ名
+            continue
+        if envs:
+            found[addon_dir.name] = envs
+    return found
+
+
+def plan_env_rebuild(addon_id: str, expansion_dir: Optional[Path] = None) -> SetupPlan:
+    """保存された答えのまま、使えない専用の環境を作り直す計画 (副作用なし)。
+
+    走らせるのは、保存された答え (無い質問は既定値) と OS で選ばれる step のうち、
+    フォルダが既にあって、いまの Python では使えない専用の環境 (``_unusable_env_dirs``)
+    を使うもの全部。環境は空の venv から作り直されるので、新しく条件を満たした
+    step だけでなく、その環境を使う step を全部走らせる (``plan_options_apply`` と同じ
+    理由)。フォルダの無い環境 (一度も作られていない) は作らない。答えは保存しない
+    (``answers=None``) — 既定値で埋めた答えを書くと、保存された答えが変わるため。
+    """
+    addon_dir, manifest = _installed_manifest(addon_id, expansion_dir)
+    answers = fill_defaults(manifest, _saved_or_empty(manifest, addon_id))
+    satisfied = select_steps(manifest.setup_steps, answers)
+    unusable = set(_unusable_env_dirs(addon_id))
+    steps = [s for s in satisfied if _step_env(s) in unusable]
+    return SetupPlan(
+        kind="env_rebuild",
+        addon_id=addon_id,
+        addon_dir=addon_dir,
+        manifest=manifest,
+        steps=steps,
+        answers=None,
+    )
+
+
+def _forget_env_records(addon_id: str, env_names: Iterable[str]) -> None:
+    """作り直しに失敗した環境の記録 (``saiverse_env.json``) を消す。
+
+    ``_ensure_addon_env`` は venv を作った直後に記録を書くので、その後の step が
+    失敗すると「いまの Python で作った」記録の付いた、パッケージの欠けた環境が残る。
+    記録を消しておけば、``get_addon_env_python`` は「setup をやり直して」と断り、
+    次の setup とアドオン管理の選択肢の確定のやり直しが、その環境を作り直す。
+    """
+    for name in env_names:
+        record = get_addon_env_dir(addon_id, name) / ADDON_ENV_RECORD_NAME
+        try:
+            record.unlink(missing_ok=True)
+        except OSError:
+            LOGGER.warning("installer: could not remove env record %s", record, exc_info=True)
+
+
+def rebuild_unusable_addon_envs(
+    expansion_dir: Optional[Path] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> List[EnvRebuildResult]:
+    """導入済みのアドオンの専用の環境のうち、いまの Python で使えないものを作り直す。
+
+    setup が新しい ``.venv`` を作ったあと (本体の Python の系列が変わったあと) に、
+    ``.venv`` の Python で呼ぶ (``scripts/rebuild_addon_envs.py``)。アドオンごとに
+    ``plan_env_rebuild`` の step を走らせる。アドオンのバージョン (checkout)、
+    保存された答え、アドオンのデータ (``addon_data/<id>/``) は変えない。
+
+    一つのアドオンの失敗では止めずに次のアドオンへ進み、失敗は結果に入れる。失敗した
+    アドオンの、作り直しの対象だった環境の記録は消す (``_forget_env_records``)。
+    使えない環境が無いアドオンは manifest も読まず、結果に入れない。
+
+    同じアドオンへの同時の操作を防ぐ API の鍵 (``api/routes/addon_catalog.py`` の
+    ``_get_lock``) は SAIVerse のプロセスの中だけの ``threading.Lock`` で、別の
+    プロセスからは取れない。呼び出し側 (setup) は、SAIVerse が動いていないことを
+    確かめてから呼ぶ。
+    """
+    progress = progress_callback or _noop_progress
+    expansion = expansion_dir or EXPANSION_DATA_DIR
+    results: List[EnvRebuildResult] = []
+    for addon_id, unusable in find_unusable_addon_envs(expansion).items():
+        try:
+            plan = plan_env_rebuild(addon_id, expansion)
+        except AddonInstallError as exc:
+            results.append(EnvRebuildResult(addon_id=addon_id, envs=unusable, error=str(exc)))
+            continue
+        envs = sorted({env for s in plan.steps if (env := _step_env(s)) is not None})
+        if not plan.steps:
+            # 使えない環境はあるが、いまの答えと OS ではどの step も使わない (答えの
+            # 選択肢が manifest から消えたなど)。アドオンはその環境を使わない。
+            LOGGER.info(
+                "installer: %s has unusable envs %s that no selected step uses; leaving them",
+                addon_id, unusable,
+            )
+            continue
+        progress(ProgressEvent(
+            phase="step",
+            message=(
+                f"{addon_id}: 専用の Python 環境 {', '.join(envs)} を、いまの Python "
+                f"({current_python_version()}) で作り直します"
+            ),
+        ))
+        step_names = [s.name for s in plan.steps]
+        try:
+            _run_selected_steps(plan, get_addon_data_dir(addon_id), progress)
+            still = sorted(set(envs) & set(_unusable_env_dirs(addon_id)))
+            if still:
+                # step が skip_if_exists で飛ばされた、などで環境が作られなかった
+                raise AddonInstallError(
+                    f"the Python environment {', '.join(still)} was not rebuilt "
+                    "(its setup steps were skipped)"
+                )
+        except Exception as exc:  # noqa: BLE001 - 一つのアドオンの失敗で他を止めない
+            LOGGER.warning("installer: rebuilding envs of %s failed", addon_id, exc_info=True)
+            _forget_env_records(addon_id, envs)
+            results.append(EnvRebuildResult(
+                addon_id=addon_id, envs=envs, steps=step_names, error=str(exc),
+            ))
+            continue
+        results.append(EnvRebuildResult(addon_id=addon_id, envs=envs, steps=step_names))
+    return results
+
+
+def record_env_rebuild_failures(
+    results: Iterable[EnvRebuildResult], path: Optional[Path] = None
+) -> Optional[Path]:
+    """失敗した作り直しをファイルに書く。失敗が無ければファイルを消して None を返す。
+
+    形 (UTF-8 の JSON)::
+
+        {
+          "created_at": "2026-10-23T12:34:56+00:00",
+          "python_version": "3.13.17",
+          "failures": [
+            {"addon_id": "saiverse-voice-tts", "envs": ["gpt_sovits"],
+             "steps": ["gpt-sovits-packages"], "error": "..."}
+          ]
+        }
+
+    利用者がすること (アドオン管理でそのアドオンを入れ直す) は、読む側が書く。
+    """
+    target = path or ENV_REBUILD_FAILURES_PATH
+    failures = [r for r in results if not r.ok]
+    if not failures:
+        target.unlink(missing_ok=True)
+        return None
+    _write_json_atomic(target, {
+        "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "python_version": current_python_version(),
+        "failures": [
+            {"addon_id": r.addon_id, "envs": r.envs, "steps": r.steps, "error": r.error}
+            for r in failures
+        ],
+    })
+    return target
+
+
+# ---------------------------------------------------------------------------
 # アンインストール
 # ---------------------------------------------------------------------------
 
@@ -1650,6 +1856,12 @@ __all__ = [
     "plan_options_apply",
     "execute_options_plan",
     "apply_installed_options",
+    "ENV_REBUILD_FAILURES_PATH",
+    "EnvRebuildResult",
+    "find_unusable_addon_envs",
+    "plan_env_rebuild",
+    "rebuild_unusable_addon_envs",
+    "record_env_rebuild_failures",
     "uninstall_addon",
     "get_pending_operation",
     "load_saved_answers",

@@ -136,7 +136,9 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 - [Python 3.13.17](https://www.python.org/downloads/release/python-31317/)（推奨。動作確認は 3.13 系だけで行っています。3.11 / 3.12 は非推奨 — Python 側でこの二つの系列のインストーラーの配布が終わり、セキュリティ修正を普通の手順では入れられないため。3.14以降は非対応）
   - リンク先ページを下にスクロールし、**Windows**: `Windows installer (64-bit)`、**Mac**: `macOS installer` をダウンロードしてください<br>
   **（目立つボタンの「Download Python install manager」ではありません）**
-  - **重要**: インストーラー実行時に「**Add python.exe to PATH**」にチェックを入れてください（デフォルトではオフ）。チェックを入れないとsetup.bat実行時にエラーになります
+  - **重要**: インストーラー実行時に「**Add python.exe to PATH**」にチェックを入れてください（デフォルトではオフ）。setup.bat はチェックが無くても Python 3.13 を見つけますが、手でコマンドを打つときに必要になります
+  - `setup.bat` / `setup.sh` は Python 3.13 を名指しで探して SAIVerse 用の環境（`.venv` フォルダ）を作ります。3.13 が見つからないと、何も変えずに止まって入れ方を表示します
+  - **Python 3.11 / 3.12 で使っていた人は**: Python 3.13.17 を入れて（古い Python は消さなくて構いません）、SAIVerse を更新してから `setup.bat`（Mac/Linux は `./setup.sh`）をもう一度実行してください。`.venv` と、アドオン専用の Python 環境が 3.13 で作り直されます（データはそのまま残ります）
 - [Node.js 24.22.1以上](https://nodejs.org/)（22 系を使う場合は 22.23.4 以上。どちらも 2026-10-21 のセキュリティ修正版。未インストールの場合、setup.batが自動でインストールします）
 - [Git](https://git-scm.com/)（**Windows は `setup.bat` が自動でインストールします**ので事前準備は不要。ZIP で導入しても、その後の自動更新（`update.bat`）まで手動 Git なしで動きます）<br>
   →Mac/Linux で未導入の場合は、自動更新や検索ツールの導入に必要なので導入を勧めます。ネット上の解説（[おすすめ](https://qiita.com/takeru-hirai/items/4fbe6593d42f9a844b1c)）などを参照してください。

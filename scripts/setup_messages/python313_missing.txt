@@ -1,0 +1,36 @@
+[ERROR] Python 3.13 が見つかりません。 / Python 3.13 was not found.
+
+SAIVerse の動作確認は Python 3.13 系だけで行っています (3.11 / 3.12 は非推奨、3.14 以降は非対応です)。
+setup はここで止まりました。.venv には何も変更していません。
+
+1. Python 3.13.17 を入れてください。
+     https://www.python.org/downloads/release/python-31317/
+   ページを下にスクロールして「Windows installer (64-bit)」をダウンロードします。
+   インストーラーの最初の画面で「Add python.exe to PATH」にチェックを入れてから進めてください。
+   3.12 や 3.14 が入っていても、消さずに並べて入れられます。
+   入れ終わったら、setup.bat をもう一度実行してください。
+
+2. いまの Python のままで進めたい場合は、環境変数 SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 を
+   設定してから setup をもう一度実行してください。ただし、その場合の動作は保証しません。
+   SAIVerse のフォルダでコマンドプロンプトを開き、同じ窓で次の二行を順に打ちます。
+     set SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1
+     setup.bat
+
+----------------------------------------------------------------
+
+SAIVerse is tested on Python 3.13 only (3.11 / 3.12 are not recommended,
+3.14 and later are not supported). Setup stopped here. Nothing in .venv was changed.
+
+1. Install Python 3.13.17:
+     https://www.python.org/downloads/release/python-31317/
+   Scroll down the page and download "Windows installer (64-bit)".
+   On the first screen of the installer, check "Add python.exe to PATH" before you continue.
+   You can install it next to Python 3.12 or 3.14; you do not have to remove them.
+   Then run setup.bat again.
+
+2. To continue with the Python you have now, set the environment variable
+   SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 and run setup again. SAIVerse is not
+   guaranteed to work in that case. Open a Command Prompt in the SAIVerse folder
+   and type these two lines in the same window:
+     set SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1
+     setup.bat

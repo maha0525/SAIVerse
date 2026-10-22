@@ -55,6 +55,11 @@ self_update.log
 # DEPENDENCIES_FAILURE_RECORD), plus their temporary files. Ignored for the
 # same reason.
 .update_dependencies_*
+# setup keeps the previous .venv under this name while it builds a new one
+# (scripts/setup_venv.py), and records addon environments it could not rebuild
+# (scripts/rebuild_addon_envs.py). Ignored for the same reason.
+.venv.old-*/
+.addon_env_rebuild_failures.json
 
 # Debug log dump script (local-only developer tool)
 debug-dump.ps1
@@ -103,6 +108,8 @@ __*.*
 tasks.md
 scripts/.searxng-src/
 scripts/.searxng-venv/
+# A SearXNG venv of another Python series, set aside by setup until the new one is installed.
+scripts/.searxng-venv.old-*/
 scripts/searxng_settings.yml
 scripts/searxng_settings.yml.bak
 scripts/searxng_user_engines.yml

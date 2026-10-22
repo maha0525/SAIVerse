@@ -69,6 +69,7 @@ python scripts/tag_conversation_messages.py air --auto
 | スクリプト | 用途 |
 |---|---|
 | `addon_install.py` | アドオンのインストール |
+| `rebuild_addon_envs.py` | 導入済みのアドオン専用の Python 環境 (`~/.saiverse/addon_install/<id>/envs/<name>/`) のうち、フォルダはあるが本体の Python で使えないもの (記録の Python の major.minor が違う・記録が無い・python が無い) を、保存された答えのまま、その環境を使う setup の step を走らせ直して作り直す (setup.bat / setup.sh が新しい `.venv` にパッケージを入れたあと、`.venv` の python で呼ぶ)。アドオンのバージョン・答え・データは変えない。SAIVerse が動いている (または分からない) ときは作り直さない。失敗しても終了コード 0 で、失敗したアドオンを表示し、リポジトリ直下の `.addon_env_rebuild_failures.json` に書く (失敗が無ければ消す) ([intent §2-7](../intent/dependency_management.md)) |
 
 ## データ移行
 
@@ -90,6 +91,7 @@ python scripts/migrate_to_user_data.py --dry-run   # 既存データを ~/.saive
 | `update_engine.py --check-complete` | 起動前の「更新が仕上がっているか」検査 (start.bat / start.sh が呼ぶ)。コードは書き換えない。終了コード 0=起動可 / 10=`--manual` で仕上げが必要 / 11=判定できなかったので警告して起動続行 / 12=パッケージの入れ直しを試したが失敗したので警告して起動続行。完了の印が一致していても、`frontend/package.json` が宣言する部品 (dependencies。devDependencies は `NODE_ENV=production` の npm ci が入れないので数えない) が `node_modules` に一つでも欠けていれば 10 を返す。完了の印が一致しているのに `.update_dependencies_complete` が無い (または一致しない) ときは、古い更新処理で更新されたと判定し、新しいリリースを取らずに `--install-dependencies` を一度だけ実行する。失敗したら内容を `.update_dependencies_failed.json` に書き、本体が起動時に画面のバナーに出す (次に成功すると消える)。完了の印が無い新しい導入では、入っている部品を直接確かめて問題が無ければ記録だけを書く。詳細は [issue](../issues/v0229_update_bat_truncates_after_git_pull.md)、[intent](../intent/update_completes_with_new_code.md) |
 | `self_update.py` | 旧セルフアップデート入口から `update_engine.py` への互換wrapper |
 | `init_git_repo.py` | ZIP を解凍したフォルダを、自動更新のために Git の管理下へ置く (setup.bat / setup.sh が呼ぶ)。Git の記録は「main の最新」ではなく、フォルダの中身と同じバージョン (`VERSION` と同じ名前のタグ。main の履歴に含まれるものだけ) に合わせ、合うタグが無いときだけ main の最新にする。最後にファイルと記録が一致しているかを確かめ、一致しなければその場で知らせる。フォルダの中のファイルは書き換えない。`git init` の直後で止まった導入は、もう一度実行すれば続きから仕上がる。終了コード 0=一致 / 1=Git の操作に失敗 / 2=ファイルと記録が一致しない ([issue](../issues/setup_from_older_zip_blocks_update.md)) |
+| `setup_venv.py prepare / finish / rollback` | setup.bat / setup.sh が `.venv` を作る前と後に、選んだ Python 3.13 (標準ライブラリだけ) で呼ぶ。`prepare --expect-series 3.13` は既存の `.venv` が別の系列 (`pyvenv.cfg` の `version` の行、無ければ `version_info` の行) か、系列が分からないか、壊れていれば `.venv.old-<日時>` に改名し、結果を一行 (`keep` / `create` / `renamed <名前>` / `locked`) で出す。改名を断られたら何も変えずに `locked`。`finish` は新しい `.venv` にパッケージが入ったあとに `.venv.old-<日時>` を消す。`rollback <名前>` は新しい `.venv` が失敗したときに古いものを戻す。表示用の文 (日本語と英語) は `scripts/setup_messages/` ([intent §2-7](../intent/dependency_management.md)) |
 | `set_version.py` | バージョン刻印 |
 | `snapshot.py` | world snapshot format v2のsave/list/inspect/restore/delete。restoreは停止状態だけで実行 |
 | `run_discord_gateway_tests.py` | Discord Gateway テスト |

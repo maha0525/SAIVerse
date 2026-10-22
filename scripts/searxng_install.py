@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 from searxng_config import (
     SCRIPT_DIR,
@@ -208,11 +209,59 @@ def prepare_requirements() -> None:
         raise
 
 
+_VENV_SERIES_RE = re.compile(r"^\s*(?:version|version_info)\s*=\s*(\d+)\.(\d+)")
+
+
+def venv_series(directory: Path) -> str | None:
+    """The Python series (``"3.13"``) a venv was made with, from its pyvenv.cfg."""
+    try:
+        text = (directory / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        match = _VENV_SERIES_RE.match(line)
+        if match:
+            return f"{match.group(1)}.{match.group(2)}"
+    return None
+
+
+def set_aside_venv_of_other_series() -> Path | None:
+    """Rename the SearXNG venv when it was made with another Python series.
+
+    The packages in a venv are built for one series and its ``home`` points at
+    that series' install, so after SAIVerse moves to another series (setup
+    rebuilt ``.venv``) this venv keeps the old Python, and breaks once that
+    Python is uninstalled. Renamed rather than deleted: on Windows a running
+    SearXNG holds its files, the rename then fails and nothing is lost.
+    Returns the renamed folder, to remove after the new venv is installed.
+    """
+    venv = venv_directory()
+    if not venv.exists():
+        return None
+    current = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    series = venv_series(venv)
+    if series == current:
+        return None
+    aside = venv.with_name(f"{venv.name}.old-{time.strftime('%Y%m%d-%H%M%S')}")
+    print(f"[INFO] The SearXNG venv was made with Python {series or 'unknown'}; "
+          f"making it again with Python {current}", flush=True)
+    try:
+        os.replace(venv, aside)
+    except OSError as exc:
+        raise RuntimeError(
+            f"The SearXNG venv {venv} could not be renamed ({exc}). Close the SearXNG window "
+            "and run setup again.\nSearXNG の専用の環境を作り直せませんでした。SearXNG の窓を"
+            "閉じてから、setup をもう一度実行してください。"
+        ) from exc
+    return aside
+
+
 def setup() -> None:
     print(f"[INFO] SearXNG commit: {pinned_release()['commit']}", flush=True)
     prepare_source()
     prepare_compatibility()
     prepare_requirements()
+    aside = set_aside_venv_of_other_series()
     if not venv_python().is_file():
         run([sys.executable, "-m", "venv", venv_directory()])
     marker = venv_directory() / INSTALL_MARKER
@@ -236,6 +285,8 @@ def setup() -> None:
     shutil.copyfile(source_directory() / "searx/limiter.toml", limiter)
     run([venv_python(), "-c", PROBE, source_directory(), pinned_release()["commit"]], env=probe_environment())
     marker.write_text(json.dumps(install_identity(), indent=2), encoding="utf-8")
+    if aside is not None:
+        shutil.rmtree(aside, ignore_errors=True)
     print("[OK] SearXNG setup complete", flush=True)
 
 

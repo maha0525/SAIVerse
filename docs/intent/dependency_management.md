@@ -92,7 +92,7 @@ Python の部品と同じ問いが Node.js 本体にもある。Windows の setu
 
 **何もしない場合**: PC に入っている Node.js (winget や nodejs.org のインストーラで入れたもの) は利用者が管理するもので、触らない。macOS / Linux には portable の経路が無いので何もしない。
 
-**入れ替えに失敗したときの扱い — 更新は止めず、警告して続ける**: `_restore_previous_version` の流儀は「更新の途中で失敗したら、前の版に戻して動く状態にする」で、守っているのは「動かない SAIVerse を残さない」こと。Node.js の入れ替えの失敗は、この意味で SAIVerse を壊さない。スクリプトは失敗したとき元の `.node` をそのまま残すので、更新は前と同じ動く Node.js で `npm ci` へ進める。逆に失敗を更新全体の失敗にすると、nodejs.org に届かない (一時的な障害、社内の制限) だけでコードの更新が全部止まり、コードの側に入っている修正 (セキュリティ修正を含む) まで届かなくなる。だから `refresh_portable_node` は例外を出さず、更新ログに WARNING を残して続ける。次の更新でまた版を比べるので、つながるようになれば入れ替わる。
+**入れ替えに失敗したときの扱い — 更新は止めず、警告して続ける**: `_restore_previous_version` の流儀は「更新の途中で失敗したら、前のバージョンに戻して動く状態にする」で、守っているのは「動かない SAIVerse を残さない」こと。Node.js の入れ替えの失敗は、この意味で SAIVerse を壊さない。スクリプトは失敗したとき元の `.node` をそのまま残すので、更新は前と同じ動く Node.js で `npm ci` へ進める。逆に失敗を更新全体の失敗にすると、nodejs.org に届かない (一時的な障害、社内の制限) だけでコードの更新が全部止まり、コードの側に入っている修正 (セキュリティ修正を含む) まで届かなくなる。だから `refresh_portable_node` は例外を出さず、更新ログに WARNING を残して続ける。ただし失敗はログだけにせず、パッケージの入れ替えを済ませた記録を書かないまま失敗の記録を書くので、画面のバナーに出て、次の start.bat の `--check-complete` で入れ替えがやり直される。つながるようになれば、そこで入れ替わる ([update_completes_with_new_code.md](update_completes_with_new_code.md) §3)。
 
 **巻き戻しでは Node.js を戻さない**: 更新の後半で失敗してコードを前の版に戻すとき、`.node` は新しい版のまま残す。前の版のコードも新しい Node.js で動く (固定の変更は同じメジャー版の中の修正版を想定している)。戻すと、セキュリティ修正のために離れた版をわざわざ入れ直すことになる。メジャー版を上げるときは、この前提を見直す。巻き戻しは前の版の `update_dependencies` を子プロセスで実行するので、子に `--keep-portable-node` を渡して入れ替えを飛ばさせる。この指定を知らない子 (v0.3.25 以前の `update_engine.py`) には渡さない。そういう版の `update_dependencies` はもともと Node.js を入れ替えないので、渡す必要もない。
 
@@ -106,6 +106,34 @@ Python の部品と同じ問いが Node.js 本体にもある。Windows の setu
 | 入れ替えの途中で止まって `.node.old` だけが残っても、次の起動で `.node` に戻る | start.bat / start-dev.bat の `.node.old` を戻す処理 |
 | 更新の npm は画面のサーバーと同じ Node.js で動く | `update_engine._find_npm` (`.node` 優先) と `_env_with_npm_on_path` |
 | Node.js の入れ替えの失敗で更新は止まらない | `update_engine.refresh_portable_node` |
+
+### 2-7. setup が Python 3.13 を名指しする / アドオン専用の環境の自動の作り直し (2026-10-23 追加)
+
+**まはーの裁定 (2026-10-23)**: Python 3.11 / 3.12 は非推奨にする。python.org の Windows 用インストーラーが 3.12.10 / 3.11.9 で止まり、普通の利用者にはこの二つの系列の修正版 (セキュリティ修正を含む) を入れる手段が無いため。動作確認は 3.13 系だけで行う (README などは同日に直した)。3.14 以降は非対応のまま。目標は、3.11 / 3.12 から移る人の手順を「3.13.17 を入れる → SAIVerse を更新する → setup をもう一度実行する」だけにすること。
+
+**何が問題だったか**: `.venv` は作ったときの Python の系列に固定される。`.venv/pyvenv.cfg` の `home` がその系列のフォルダを指し、中のパッケージはその系列専用のファイル (`cp312` など) になる。だから 3.13 を入れても `.venv` は古い系列のまま動き続ける。さらに setup.bat は PATH の先頭の `python` で `.venv` を作り、既にある `.venv` は (壊れていなければ) そのまま使っていたので、setup をやり直しても系列は変わらなかった。アドオン専用の Python 環境 (`addon_install/<id>/envs/<name>/`) も作ったときの本体の Python の系列に固定され、本体の系列が変わると `get_addon_env_python` が使うのを断る。作り直しの入口はアドオン管理の選択肢の確定のやり直しだけで、利用者はそれを知らない。
+
+**変更後の形**:
+
+- setup.bat は、レジストリの `HKCU\Software\Python\PythonCore\3.13\InstallPath`、無ければ `HKLM\...` の既定値 (python.org のインストーラーも miniconda も書く) のフォルダの `python.exe` を使う。PATH の並び順に左右されない。見つけた python が 3.13 として動くことも確かめる。既定値の行の名前は Windows の言語で変わる (`(既定)` / `(Default)`) ので、フォルダは `REG_SZ` の後ろから取る。setup.sh は `python3.13` コマンドを使う。選んだ python の場所 (`PYTHON_EXE` / `PYTHON_BIN`) は、`.venv` を有効にする前のすべての処理 (`.venv` の作成、`scripts/setup_venv.py`) に使う。
+- 3.13 が見つからなければ、`.venv` に触らずに止め、日本語と英語で「3.13.17 を入れる (python.org のページ、Windows では「Add python.exe to PATH」)」「いまの Python で進めたいなら `SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1` を設定して setup をもう一度 (動作は保証しない)。設定の仕方」を表示する。3.14 以降しか無い場合も同じ扱い。setup.bat は ASCII のファイルなので、日本語の文は `scripts/setup_messages/*.txt` (UTF-8) に置き、PowerShell の `Get-Content -Encoding UTF8` で表示する (`type` は UTF-8 を正しく表示しない)。
+- `SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1` のとき: 3.13 が見つかればそれを使う。見つからなければ PATH の `python` (setup.sh は `python3`) で進め、推奨外である・動作は保証しないと警告する。この設定のあいだは、既存の `.venv` をその系列を理由に作り直さない (3.13 が見つかった場合も同じ。利用者が系列の管理を引き受けたという意味の設定なので)。壊れた `.venv` は作り直す。
+- 既存の `.venv` を作り直すかどうかは `scripts/setup_venv.py prepare` が決める (setup.bat と setup.sh の共通の手順)。`pyvenv.cfg` の `version` の行 (無ければ uv や virtualenv が書く `version_info` の行) の先頭の major.minor が 3.13 でなければ作り直す。`pyvenv.cfg` が読めない・どちらの行も無い `.venv` は、系列が分からないので作り直す (setup は毎回パッケージを全部入れ直すので、作り直しで失うものは無い)。有効にするためのファイルか python の実行ファイルが無い `.venv` は、系列に関係なく作り直す (これまで setup.bat は `rmdir /s` で消していた)。
+- 作り直しは消すことから始めない。まず `.venv` を `.venv.old-<日時>` に改名する。Windows では中のファイルが使用中 (SAIVerse が動いている、エディタが `.venv` の python を使っている) だと改名が断られる。そのときは何も変えずに「SAIVerse の窓をすべて閉じてから setup をもう一度」と出して止める。`rmdir /s` は使用中のファイルで途中まで消えて止まり、壊れた `.venv` を残すため使わない。新しい `.venv` の作成とパッケージの導入 (`pip install -r requirements.lock`) が成功したら、`setup_venv.py finish` が `.venv.old-<日時>` の形のフォルダを全部消す (前の回の setup が途中で止まって残したものも)。消せなかったものは知らせるだけで、setup は続ける。作成か導入が失敗したら、`setup_venv.py rollback` が作りかけの `.venv` を消して古いものを `.venv` に戻し、「前の `.venv` に戻した。SAIVerse はこれまでどおり起動できる。問題を直して setup をもう一度」と出す。戻せなかったら、手でする手順 (`.venv` を消して古いものの名前を戻す) を出す。`setup_venv.py` は標準ライブラリだけを使い、SAIVerse のパッケージを import しない (作り直す前の `.venv` は動かない Python を指していることがある)。
+- データ (`~/.saiverse`) とデータベースの初期化の判定は変えていない (DB が既にあれば seed しない)。`.venv` の作り直しはリポジトリの中の `.venv` だけに触る。
+- 新しい `.venv` にパッケージが入ったあと、setup は `.venv` の python で `scripts/rebuild_addon_envs.py` を実行する。これは `saiverse.addon_installer.rebuild_unusable_addon_envs` を呼び、導入済みのアドオンの専用の環境のうち、フォルダがあって、いまの Python で使えないもの (記録の Python の major.minor が違う・記録が無い・python が無い。`_env_needs_full_run` と同じ判定) を作り直す。走らせるのは、保存された答え (無い質問は既定値) と OS で選ばれる step のうち、その環境を使うもの全部 (`plan_env_rebuild`。環境は空の venv から作り直されるので、`plan_options_apply` と同じ理由で全部要る)。アドオンのバージョン (checkout)・保存された答え・アドオンのデータは変えない (答えは保存し直さない — 既定値で埋めた答えを書くと保存された答えが変わる)。フォルダの無い環境 (一度も作られていない) は作らない。使えない環境が無ければ何もしない。setup が毎回呼ぶのは、系列が変わるのは `.venv` を作り直したときだけだが、前の回の作り直しの失敗をやり直せるようにするため。
+- 一つのアドオンの作り直しが失敗しても、次のアドオンへ進み、setup は止めない (SAIVerse 本体は動く)。失敗したアドオンは、作り直しの対象だった環境の記録 (`saiverse_env.json`) を消す。`_ensure_addon_env` は venv を作った直後に記録を書くので、そのままだと「いまの Python で作った」記録の付いた、パッケージの欠けた環境が残り、`get_addon_env_python` が通してしまう。記録を消せば `get_addon_env_python` は「setup をやり直して」と断り、次の setup と選択肢の確定のやり直しが作り直す。setup の画面には、どのアドオンが失敗したか、setup をもう一度実行するか、アドオン管理でそのアドオンを入れ直す (アンインストールしてもう一度インストール。データは残る) ことを日本語と英語で出す。
+- 失敗の内容は、リポジトリ直下の `.addon_env_rebuild_failures.json` に書く (`record_env_rebuild_failures`。`.gitignore` に入れてある)。失敗が無ければ消す。形は `{"created_at": ISO 時刻, "python_version": 本体の Python, "failures": [{"addon_id", "envs": [環境の名前], "steps": [走らせた step の名前], "error": 失敗の文}]}`。**画面のバナー (`startup_alerts`) への表示はまだ作っていない** (同じ日に並行していた更新の作業と同じファイルに触るため、別の変更でつなぐ)。
+- 同じアドオンへの同時の操作を防ぐ API の鍵 (`api/routes/addon_catalog.py` の `_get_lock`) は SAIVerse のプロセスの中だけの `threading.Lock` で、別のプロセスの setup からは取れない。だから `rebuild_addon_envs.py` は、SAIVerse が動いている (または動いているか分からない。`saiverse.runtime_marker.marker_status`) ときは作り直さず、作り直しが要るアドオンを失敗として記録して「SAIVerse を閉じて setup をもう一度」と出す。`.venv` を作り直した回は、改名が成功している時点で SAIVerse は動いていない。
+
+**何もしない場合**: PC に入っている Python は利用者が管理するもので、setup は入れも消しもしない。SearXNG の専用の venv (`scripts/.searxng-venv`) は、この変更では系列を見ていない — `searxng_install.py` は venv の python が無いときだけ作り、系列が変わっても古い Python を指したまま使い続ける (古い Python が残っていれば動く)。
+
+| 不変条件 | 持ち主 |
+|---|---|
+| setup が作る `.venv` は Python 3.13 で作られる (推奨外を許す設定が無い限り) | setup.bat の `:find_python313` / setup.sh の `python3.13` |
+| 3.13 が無いとき、setup は `.venv` に触らずに止まる | setup.bat / setup.sh の Python の確かめ |
+| `.venv` の作り直しの途中で、動く `.venv` が一つも無い状態を残さない (改名が断られたら何も変えない、新しいものが失敗したら古いものを戻す) | `scripts/setup_venv.py` (`prepare` / `rollback`) |
+| 系列違いのアドオン専用の環境は、答え・バージョン・データを変えずに作り直される。失敗は他のアドオンを止めず、記録が残る | `addon_installer.rebuild_unusable_addon_envs` / `record_env_rebuild_failures` |
 
 ---
 

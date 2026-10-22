@@ -35,6 +35,14 @@ HTTP 中継の設定値は `http://host:port` のような origin とし、末�
 
 相対保存先はリポジトリルート基準。上流との版の乖離への運用は別途検討し、自動更新や定期監視は行わない。
 
+## セットアップ (setup.bat / setup.sh)
+
+この節も `.env` ではなく、`setup.bat` / `setup.sh` を実行するシェルの環境変数で指定する。
+
+| 変数 | 既定 | 説明 |
+|---|---|---|
+| `SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON` | 未設定 | `1` のとき、Python 3.13 が見つからなくても止まらず、PATH の `python` (setup.sh は `python3`) で `.venv` を作って進める (警告を出す。動作は保証しない)。3.13 が見つかればそれを使う。この設定のあいだは、既存の `.venv` をその Python の系列を理由に作り直さない (壊れた `.venv` は作り直す)。`1` 以外の値は未設定と同じ。設定の仕方: Windows のコマンドプロンプトでは同じ窓で `set SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1` を打ってから `setup.bat`、Mac / Linux では `SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 ./setup.sh`。[intent](../intent/dependency_management.md) §2-7 |
+
 ## LLM API キー / 接続
 
 | 変数 | 説明 |

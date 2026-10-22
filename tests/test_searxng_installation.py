@@ -169,3 +169,52 @@ def test_prepare_requirements_rewrites_source_file(installation):
     assert first == installer.apply_requirement_floors(UPSTREAM_REQUIREMENTS)
     assert target.read_text(encoding="utf-8") == first
     assert sorted(p.name for p in source.iterdir()) == ["requirements.txt"]
+
+
+def _venv_with_series(directory: Path, version: str) -> None:
+    directory.mkdir(parents=True)
+    (directory / "pyvenv.cfg").write_text(f"home = C:\Python\nversion = {version}\n", encoding="utf-8")
+
+
+def test_a_venv_of_another_python_series_is_set_aside(installation, tmp_path):
+    venv = tmp_path / "venv"
+    _venv_with_series(venv, "3.12.10")
+    aside = installer.set_aside_venv_of_other_series()
+    assert aside is not None and aside.is_dir()
+    assert not venv.exists()
+    assert aside.name.startswith("venv.old-")
+
+
+def test_a_venv_of_the_same_series_is_kept(installation, tmp_path):
+    venv = tmp_path / "venv"
+    _venv_with_series(venv, f"{sys.version_info[0]}.{sys.version_info[1]}.99")
+    assert installer.set_aside_venv_of_other_series() is None
+    assert venv.is_dir()
+
+
+def test_no_venv_is_nothing_to_set_aside(installation):
+    assert installer.set_aside_venv_of_other_series() is None
+
+
+def test_a_venv_that_cannot_be_renamed_stops_setup_and_keeps_it(installation, tmp_path, monkeypatch):
+    venv = tmp_path / "venv"
+    _venv_with_series(venv, "3.12.10")
+
+    def refuse(src, dst):  # noqa: ANN001
+        raise PermissionError(5, "in use")
+
+    monkeypatch.setattr(installer.os, "replace", refuse)
+    with pytest.raises(RuntimeError, match="SearXNG"):
+        installer.set_aside_venv_of_other_series()
+    assert venv.is_dir()
+
+
+def test_venv_series_reads_version_and_version_info(tmp_path):
+    a = tmp_path / "a"
+    _venv_with_series(a, "3.13.17")
+    assert installer.venv_series(a) == "3.13"
+    b = tmp_path / "b"
+    b.mkdir()
+    (b / "pyvenv.cfg").write_text("version_info = 3.12.4.final.0\n", encoding="utf-8")
+    assert installer.venv_series(b) == "3.12"
+    assert installer.venv_series(tmp_path / "missing") is None
