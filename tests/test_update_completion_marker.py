@@ -73,7 +73,7 @@ def test_manual_update_records_the_version_it_installed(tmp_path: Path) -> None:
         update_engine, "assert_git_update_ready", return_value="old-head"
     ), patch.object(update_engine, "create_pre_update_snapshot", return_value="snap"), patch.object(
         update_engine, "update_code"
-    ), patch.object(update_engine, "update_dependencies"):
+    ), patch.object(update_engine, "_run_dependencies_from_disk"):
         update_engine.run_update(None, project)
 
     assert _recorded_version(project) == "0.3.0"
@@ -86,7 +86,7 @@ def test_dependency_failure_leaves_no_marker(tmp_path: Path) -> None:
     ), patch.object(update_engine, "create_pre_update_snapshot", return_value="snap"), patch.object(
         update_engine, "update_code"
     ), patch.object(
-        update_engine, "update_dependencies", side_effect=update_engine.UpdateError("pip failed")
+        update_engine, "_run_dependencies_from_disk", side_effect=update_engine.UpdateError("pip failed")
     ), patch.object(update_engine, "_rollback_code_and_dependencies"):
         try:
             update_engine.run_update(None, project)
@@ -126,7 +126,7 @@ def test_detached_update_records_only_after_a_healthy_restart(tmp_path: Path) ->
     ), patch.object(update_engine, "wait_for_owned_process_exit"), patch.object(
         update_engine, "create_pre_update_snapshot", return_value="snap"
     ), patch.object(update_engine, "update_code"), patch.object(
-        update_engine, "update_dependencies"
+        update_engine, "_run_dependencies_from_disk"
     ), patch.object(
         update_engine, "restart_application", return_value=MagicMock(pid=1)
     ), patch.object(
@@ -145,7 +145,7 @@ def test_failed_restart_leaves_no_marker(tmp_path: Path) -> None:
     ), patch.object(update_engine, "wait_for_owned_process_exit"), patch.object(
         update_engine, "create_pre_update_snapshot", return_value="snap"
     ), patch.object(update_engine, "update_code"), patch.object(
-        update_engine, "update_dependencies"
+        update_engine, "_run_dependencies_from_disk"
     ), patch.object(
         update_engine, "restart_application", return_value=MagicMock(pid=1)
     ), patch.object(
@@ -176,7 +176,7 @@ def test_a_failed_update_whose_rollback_also_fails_leaves_no_marker(tmp_path: Pa
     ), patch.object(update_engine, "create_pre_update_snapshot", return_value="snap"), patch.object(
         update_engine, "update_code"
     ), patch.object(
-        update_engine, "update_dependencies", side_effect=update_engine.UpdateError("pip failed")
+        update_engine, "_run_dependencies_from_disk", side_effect=update_engine.UpdateError("pip failed")
     ), patch.object(
         update_engine,
         "_rollback_code_and_dependencies",
@@ -213,7 +213,7 @@ def test_a_failed_detached_update_whose_rollback_also_fails_leaves_no_marker(
     ), patch.object(update_engine, "wait_for_owned_process_exit"), patch.object(
         update_engine, "create_pre_update_snapshot", return_value="snap"
     ), patch.object(update_engine, "update_code"), patch.object(
-        update_engine, "update_dependencies", side_effect=update_engine.UpdateError("pip failed")
+        update_engine, "_run_dependencies_from_disk", side_effect=update_engine.UpdateError("pip failed")
     ), patch.object(
         update_engine,
         "_rollback_code_and_dependencies",
@@ -236,7 +236,7 @@ def test_an_unremovable_marker_does_not_abort_the_update(tmp_path: Path) -> None
         update_engine, "assert_git_update_ready", return_value="old-head"
     ), patch.object(update_engine, "create_pre_update_snapshot", return_value="snap"), patch.object(
         update_engine, "update_code"
-    ), patch.object(update_engine, "update_dependencies"), patch.object(
+    ), patch.object(update_engine, "_run_dependencies_from_disk"), patch.object(
         update_engine.Path, "unlink", side_effect=OSError("locked")
     ):
         update_engine.run_update(None, project)  # must not raise
@@ -284,7 +284,7 @@ def test_a_failed_marker_write_does_not_fail_the_update(tmp_path: Path) -> None:
         update_engine, "assert_git_update_ready", return_value="old-head"
     ), patch.object(update_engine, "create_pre_update_snapshot", return_value="snap"), patch.object(
         update_engine, "update_code"
-    ), patch.object(update_engine, "update_dependencies"), patch.object(
+    ), patch.object(update_engine, "_run_dependencies_from_disk"), patch.object(
         update_engine.os, "replace", side_effect=OSError("disk full")
     ):
         update_engine.run_update(None, project)  # must not raise
@@ -862,6 +862,144 @@ def test_update_dependencies_never_falls_back_when_the_lock_is_missing(tmp_path:
         ["python", "-m", "pip", "install", "--upgrade", "pip"],
         ["python", "-m", "pip", "install", "-r", "requirements.lock"],
     ]
+
+
+# --- the dependency step runs the engine file on disk, not this process's -------
+#
+# The running process is the engine of the revision the update started from.
+# The packages of the fetched code have to be installed by the fetched code's
+# procedure, so the step starts scripts/update_engine.py from disk.
+
+
+def _put_engine_on_disk(project: Path) -> Path:
+    """Write this engine (which has ``--install-dependencies``) into the checkout."""
+    script = project / update_engine.ENGINE_SCRIPT
+    script.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(update_engine.__file__, script)
+    return script
+
+
+def _recording_child_run(calls: list[dict], *, returncode: int = 0, stdout: str = "", stderr: str = ""):  # type: ignore[no-untyped-def]
+    def fake_run(command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
+        calls.append(
+            {"command": list(command), "cwd": cwd, "timeout": timeout, "check": check, "encoding": encoding}
+        )
+        if check and returncode != 0:
+            raise update_engine.UpdateError(f"{label} failed with exit {returncode}: {stderr or stdout}")
+        return MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    return fake_run
+
+
+def test_the_update_installs_dependencies_with_the_engine_it_just_fetched(tmp_path: Path) -> None:
+    """The engine file only exists after the code phase here, as a file the
+    fetch brought in would; the dependency step must start that file."""
+    project = _make_project(tmp_path)
+    calls: list[dict] = []
+    with patch.object(
+        update_engine, "update_code", side_effect=lambda project_dir: _put_engine_on_disk(project_dir)
+    ), patch.object(update_engine, "refresh_portable_node"), patch.object(
+        update_engine, "_run", side_effect=_recording_child_run(calls)
+    ), patch.object(update_engine, "update_dependencies") as in_process:
+        update_engine._apply_code_and_dependencies(project, "venv-python", update_engine._UpdateProgress())
+
+    in_process.assert_not_called()
+    assert [call["command"] for call in calls] == [
+        ["venv-python", str(project / "scripts" / "update_engine.py"), "--install-dependencies"],
+    ]
+    assert calls[0]["cwd"] == project
+    assert calls[0]["timeout"] == 5400
+    assert calls[0]["encoding"] == "utf-8"
+
+
+def test_a_failing_child_fails_the_dependency_step(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    """A non-zero exit is an ``UpdateError``, as a failed in-process install
+    was, so the caller rolls back; the child's log reaches the update log."""
+    project = _make_project(tmp_path)
+    _put_engine_on_disk(project)
+    calls: list[dict] = []
+    fake_run = _recording_child_run(
+        calls,
+        returncode=1,
+        stdout="2026-10-22 [INFO] Phase: install Python dependencies\n",
+        stderr="UpdateError: install Python dependencies failed with exit 1: no matching distribution\n",
+    )
+    with caplog.at_level("INFO", logger="saiverse.update"), patch.object(
+        update_engine, "_run", side_effect=fake_run
+    ):
+        with pytest.raises(update_engine.UpdateError, match="no matching distribution"):
+            update_engine._run_dependencies_from_disk(project, "venv-python")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "2026-10-22 [INFO] Phase: install Python dependencies" in messages
+    assert any("no matching distribution" in m for m in messages)
+
+
+def test_the_rollback_hands_requirements_txt_to_the_previous_engine(tmp_path: Path) -> None:
+    """After ``git reset`` to a revision without a lock, the engine the reset
+    put back installs that revision's requirements.txt."""
+    project = _make_project(tmp_path)
+    _put_engine_on_disk(project)
+    calls: list[dict] = []
+    record = _recording_child_run(calls)
+
+    def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
+        if command[:3] == ["git", "reset", "--hard"]:
+            (project / update_engine.REQUIREMENTS_LOCK).unlink()
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return record(command, **kwargs)
+
+    with patch.object(update_engine, "_run", side_effect=fake_run):
+        update_engine._rollback_code_and_dependencies(project, "venv-python", "old-head")
+
+    assert [call["command"] for call in calls] == [
+        [
+            "venv-python",
+            str(project / "scripts" / "update_engine.py"),
+            "--install-dependencies",
+            "requirements.txt",
+        ],
+    ]
+
+
+def test_an_engine_on_disk_without_the_option_installs_in_process(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    """A revision from before ``--install-dependencies`` would reject the
+    option; the running engine's own step runs instead, as before."""
+    project = _make_project(tmp_path)
+    script = project / update_engine.ENGINE_SCRIPT
+    script.parent.mkdir(parents=True)
+    script.write_text("def main():\n    return 0\n", encoding="utf-8")
+    with caplog.at_level("WARNING", logger="saiverse.update"), patch.object(
+        update_engine, "_run"
+    ) as run, patch.object(update_engine, "update_dependencies") as in_process:
+        update_engine._run_dependencies_from_disk(project, "venv-python", "requirements.txt")
+
+    run.assert_not_called()
+    in_process.assert_called_once_with(project, "venv-python", "requirements.txt")
+    assert any("--install-dependencies" in record.getMessage() for record in caplog.records)
+
+
+def test_the_install_dependencies_option_runs_update_dependencies(capsys) -> None:  # type: ignore[no-untyped-def]
+    """The child's entrance: this interpreter, the engine's own checkout, and
+    the lock unless a file is named."""
+    engine_project = Path(update_engine.__file__).resolve().parent.parent
+    with patch.object(update_engine, "setup_logging"), patch.object(
+        update_engine, "update_dependencies"
+    ) as deps:
+        assert update_engine.main(["--install-dependencies"]) == 0
+        assert update_engine.main(["--install-dependencies", "requirements.txt"]) == 0
+
+    assert deps.call_args_list[0].args == (engine_project, update_engine.sys.executable, None)
+    assert deps.call_args_list[1].args == (engine_project, update_engine.sys.executable, "requirements.txt")
+
+
+def test_the_install_dependencies_option_exits_1_on_an_update_error(capsys) -> None:  # type: ignore[no-untyped-def]
+    with patch.object(update_engine, "setup_logging"), patch.object(
+        update_engine, "update_dependencies", side_effect=update_engine.UpdateError("npm ci failed")
+    ):
+        assert update_engine.main(["--install-dependencies"]) == 1
+
+    assert "npm ci failed" in capsys.readouterr().err
 
 
 # --- pip check after the lock is installed: visibility, not enforcement --------

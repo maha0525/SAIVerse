@@ -235,7 +235,7 @@ def test_dependency_failure_rolls_back_then_restarts_only_the_previous_version(t
         return_value="snapshot",
     ), patch.object(update_engine, "update_code"), patch.object(
         update_engine,
-        "update_dependencies",
+        "_run_dependencies_from_disk",
         side_effect=update_engine.UpdateError("pip failed"),
     ), patch.object(
         update_engine,
@@ -256,7 +256,7 @@ def test_dependency_failure_rolls_back_then_restarts_only_the_previous_version(t
 
 def _rollback_with_reset(project: Path, *, lock_after_reset: bool):  # type: ignore[no-untyped-def]
     """Run the rollback with ``git reset`` faked to leave (or not leave) a lock
-    behind, and return the ``update_dependencies`` mock."""
+    behind, and return the ``_run_dependencies_from_disk`` mock."""
 
     def fake_run(command, *, cwd, label, timeout=900, check=True):  # type: ignore[no-untyped-def]
         assert command[:3] == ["git", "reset", "--hard"]
@@ -268,7 +268,7 @@ def _rollback_with_reset(project: Path, *, lock_after_reset: bool):  # type: ign
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     with patch.object(update_engine, "_run", side_effect=fake_run), patch.object(
-        update_engine, "update_dependencies"
+        update_engine, "_run_dependencies_from_disk"
     ) as deps:
         update_engine._rollback_code_and_dependencies(project, "python", "old-head")
     return deps

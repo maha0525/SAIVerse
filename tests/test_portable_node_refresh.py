@@ -109,7 +109,7 @@ def test_refresh_runs_after_the_code_moved_and_before_npm_ci(tmp_path: Path) -> 
         update_engine, "invalidate_completion_marker", side_effect=lambda *_: order.append("marker dropped")
     ), patch.object(
         update_engine, "refresh_portable_node", side_effect=lambda *_: order.append("node")
-    ), patch.object(update_engine, "update_dependencies", side_effect=lambda *_: order.append("deps")):
+    ), patch.object(update_engine, "_run_dependencies_from_disk", side_effect=lambda *_: order.append("deps")):
         update_engine._apply_code_and_dependencies(tmp_path, "python", update_engine._UpdateProgress())
     assert order == ["code", "marker dropped", "node", "deps"]
 
@@ -118,7 +118,7 @@ def test_rollback_leaves_the_portable_node_alone(tmp_path: Path) -> None:
     """The previous code runs on the newer Node.js; the replaced version is
     the one the pin moved away from and must not come back."""
     (tmp_path / "requirements.lock").write_text("", encoding="utf-8")
-    with patch.object(update_engine, "_run"), patch.object(update_engine, "update_dependencies"), patch.object(
+    with patch.object(update_engine, "_run"), patch.object(update_engine, "_run_dependencies_from_disk"), patch.object(
         update_engine, "refresh_portable_node"
     ) as refresh:
         update_engine._rollback_code_and_dependencies(tmp_path, "python", "old-head")
