@@ -39,7 +39,13 @@ requests>=2.32.4
 SQLAlchemy>=2.0.41
 uvicorn>=0.52.4
 python-multipart>=0.0.9
-cryptography>=45.0.0
+# The upper bound is mandatory: from 49.0.0 cryptography ships no macOS x86_64
+# (Intel Mac) wheel, so an Intel Mac would have to build it from source (Rust
+# toolchain). 48.0.1 is the last release with one and carries the fixed bundled
+# OpenSSL (GHSA-537c-gmf6-5ccf). The advisories fixed only in 49/50 are in the
+# x509 path-building verifier and PKCS#7 decryption, which SAIVerse does not
+# call (it uses Ed25519 signature checks only). Lift it with onnxruntime's.
+cryptography>=45.0.0,<49
 tzdata
 # Process liveness checks for the updater's "wait for the main process to
 # exit" (scripts/update_engine.py) and the runtime-marker double-run guard
