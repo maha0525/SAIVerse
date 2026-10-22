@@ -50,6 +50,11 @@ function Get-NodeVersion([string]$Dir) {
     # does not run (a broken .node/ counts as "differs" and is replaced).
     $exe = Join-Path $Dir "node.exe"
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { return $null }
+    # Under "Stop", Windows PowerShell 5.1 turns any stderr line of a native
+    # command into a terminating error even when redirected, so a working
+    # node that prints one warning (NODE_OPTIONS, for instance) would read as
+    # unreadable and be downloaded again on every update. Scoped to here.
+    $ErrorActionPreference = "Continue"
     try {
         $out = & $exe --version 2>$null
         if ($LASTEXITCODE -ne 0) { return $null }

@@ -48,6 +48,17 @@ def test_refresh_does_nothing_without_a_portable_node(tmp_path: Path) -> None:
     run.assert_not_called()
 
 
+def test_refresh_puts_back_a_replacement_that_died_half_way(tmp_path: Path) -> None:
+    """Only .node.old left: the installer is what restores it, so it must run."""
+    project = _checkout_with_portable_node(tmp_path)
+    (project / ".node").rename(project / ".node.old")
+    with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
+        update_engine, "_run", return_value=MagicMock(returncode=0, stdout="", stderr="")
+    ) as run:
+        update_engine.refresh_portable_node(project)
+    run.assert_called_once()
+
+
 def test_refresh_does_nothing_off_windows(tmp_path: Path) -> None:
     project = _checkout_with_portable_node(tmp_path)
     with patch.object(update_engine, "_is_windows", return_value=False), patch.object(update_engine, "_run") as run:

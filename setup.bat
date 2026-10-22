@@ -44,10 +44,16 @@ echo [OK] %PY_VERSION%
 REM --- 2. Node.js check & auto-install ---
 REM A portable install from a previous setup comes first, as in start.bat.
 REM Bring it to the version install_node_portable.ps1 pins; if that fails the
-REM existing .node\ is left as it was and setup continues with it.
-if exist ".node\node.exe" (
-    powershell -ExecutionPolicy Bypass -File scripts\install_node_portable.ps1
+REM existing .node\ is left as it was and setup continues with it. A .node.old\
+REM alone is a replacement that died half-way; the script puts it back first.
+set "PORTABLE_NODE="
+if exist ".node\node.exe" set "PORTABLE_NODE=1"
+if exist ".node.old\node.exe" set "PORTABLE_NODE=1"
+if defined PORTABLE_NODE (
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_node_portable.ps1
     if errorlevel 1 echo [WARN] Could not update the portable Node.js; continuing with the existing one.
+)
+if exist ".node\node.exe" (
     set "PATH=%CD%\.node;%PATH%"
     goto :node_found
 )
@@ -75,7 +81,7 @@ goto :node_done
 
 :try_portable_node
 echo [SETUP] Installing Node.js portable edition...
-powershell -ExecutionPolicy Bypass -File scripts\install_node_portable.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install_node_portable.ps1
 if %errorlevel% neq 0 (
     echo [ERROR] Could not install Node.js automatically.
     echo   Please install manually from https://nodejs.org/

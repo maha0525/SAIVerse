@@ -1408,7 +1408,9 @@ def refresh_portable_node(project_dir: Path) -> None:
     """
     if not _is_windows():
         return
-    if not (project_dir / ".node" / "node.exe").is_file():
+    # ``.node.old`` alone is a replacement that died between its two renames;
+    # the script puts it back before anything else.
+    if not any((project_dir / name / "node.exe").is_file() for name in (".node", ".node.old")):
         return
     script = project_dir / PORTABLE_NODE_INSTALLER
     if not script.is_file():
