@@ -48,7 +48,6 @@
 
 | 状態 | 案件 | 次アクション | 誰待ち | doc / issue | 更新 |
 |---|---|---|---|---|---|
-| 🟣 検証待ち | 10 月のセキュリティ更新の束 (Next.js / Python パッケージ / Node.js / pip / SearXNG) | Next.js・Python パッケージ・portable Node.js の入れ替えは develop に入り、まはーが全部入りで動作確認中。次 = pip の更新・fastembed の掃除・SearXNG の下限の PR をまはーが確認してマージし、v0.3.25 として発行する。 | まはー (動作確認と PR 確認) | [release_history の範囲](release_history.md#次のバージョンの範囲) / [intent](../intent/dependency_management.md) | 2026-10-22 |
 | 🟣 検証待ち | Memopedia の保存通知に全索引が入る | 再レビューで指摘された既読記録の蓄積を回収し、同秒の本文編集も通知する修正の確認待ち。次 = PR #406 の修正差分を確認して develop に取り込み、再起動後に作られる新しい保存通知をログで確認する。 | まはー (修正差分の確認) → 私 (ログ確認) | [PR #406](https://github.com/maha0525/SAIVerse/pull/406) / [beat_execution_context.md §3.3](../intent/beat_execution_context.md#33-head-操作の内容型通知issue-head_mutation_notification_gap-の解) | 2026-10-18 |
 | 🟣 検証待ち | 想起用埋め込みの一括処理のメモリのピーク削減 (2GB の VPS 向け) | 修正は develop に入り、次のバージョンに載る。次 = リリース後、2GB の VPS 利用者に再計算か取り込みで落ちなくなったかを聞く。 | リリース → VPS 利用者 | [intent](../intent/embedding_gemma2_migration.md) | 2026-10-22 |
 | 🟣 検証待ち | 入退室ログの全体・Building 別の表示設定 | develop に入り、「以前のメッセージを読み込む」ボタンの出方はメティスが隔離環境の画面で確かめ済み。次 = まはーが本番の画面で、全体と Building の表示・非表示・継承の切り替えで入退室ログだけが隠れ、会話と別の通知が残ることを見る。 | まはー (実機確認) | [intent](../intent/movement_notice_visibility.md) | 2026-10-09 |
