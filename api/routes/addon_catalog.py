@@ -666,8 +666,10 @@ async def post_update_confirm(req: ConfirmRequest, manager=Depends(get_manager))
 
     def runner(progress_cb):
         manifest = execute_update_plan(plan, progress_callback=progress_cb)
-        # update 時は再 register でいいが、unregister → register の順で
-        # 古い hook を確実に消したい場合もある。Phase 2 では register のみ。
+        # register は addon_loader 側で「同じアドオンの古い登録を外してから登録」
+        # なので、ここは register だけでよい (外さず重ねていた頃は、動かしたまま
+        # 更新するたびに server_hooks が二重登録され、読み上げ・合成が二重に
+        # 走っていた — 2026-10-23 実害)。
         _try_register_addon(req.addon_id, manager)
         return manifest
 

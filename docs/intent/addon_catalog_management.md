@@ -344,6 +344,7 @@ voice-tts をカタログに載せようとして、いまの仕組みでは次�
 - `api/routes/addon_catalog.py`: GET /registry / GET /installed / POST /install / POST /update / POST /uninstall (SSE 進捗 stream)
 - per-addon Lock で同時 install/update/uninstall を防止
 - 完了後に `register_addon_integrations` / `register_addon_server_hooks` を呼んで動的反映、`api_routes.py` を持つアドオンは `restart_required: true` を返す
+  - **register は冪等 (2026-10-23)**: どちらの register も、同じアドオンの古い登録を先に外してから登録し直す。register は追記なので、外さずに重ねると「動かしたまま更新」のたびに server_hooks / integration が二重になる — voice-tts 0.6.1 への更新で persona_speak の handler が二重登録され、発話の全チャンクの合成・読み上げが二回ずつ走った実害から。呼び出し側 (update / options / 有効化) は register だけ呼べばよい
 - `temp/saiverse-addon-registry/registry.json` + README.md を生成 (まはーが GitHub に push する想定の initial content、Elyth 1 件のみ)
 - `scripts/test_addon_catalog_api.py`: E2E 検証スクリプト
 - 実機検証: SAIVerse 起動中に Elyth uninstall → install を SSE 経由で実行、`installed` リストへの復帰まで確認 ✅ (2026-05-22)
