@@ -11,6 +11,8 @@ import json
 import shutil
 from pathlib import Path
 
+from unittest.mock import patch
+
 import pytest
 
 from saiverse import addon_installer, addon_paths
@@ -210,13 +212,28 @@ def test_unreadable_manifest_is_reported_as_a_failure(home, expansion, monkeypat
     assert [(r.addon_id, r.ok) for r in results] == [("a-addon", False)]
 
 
+_DOTENV_LOADS: list = []
+
+
 def _load_entry():
+    """Load the script with python-dotenv's load_dotenv replaced: the checkout's
+    real .env (API keys) must not leak into the test process."""
+    import dotenv
+
     script = Path(__file__).resolve().parent.parent / "scripts" / "rebuild_addon_envs.py"
     spec = importlib.util.spec_from_file_location("rebuild_addon_envs_under_test", script)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(module)
+    with patch.object(dotenv, "load_dotenv", side_effect=lambda *a, **k: _DOTENV_LOADS.append((a, k))):
+        spec.loader.exec_module(module)
     return module
+
+
+def test_the_entry_loads_the_same_dotenv_as_main_before_resolving_paths() -> None:
+    _DOTENV_LOADS.clear()
+    _load_entry()
+    root = Path(__file__).resolve().parent.parent
+    assert _DOTENV_LOADS == [((root / ".env",), {})]
 
 
 def test_entry_does_not_rebuild_while_saiverse_may_be_running(home, expansion, monkeypatch, tmp_path) -> None:

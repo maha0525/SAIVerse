@@ -41,6 +41,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# The same .env main.py loads, before any saiverse path is resolved: a
+# SAIVERSE_HOME set there must point this script at the same saved answers and
+# addon environments as SAIVerse itself. Variables already set win, as in main.py.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(REPO_ROOT / ".env")
+except ImportError:  # python-dotenv is in requirements.lock; without it, the environment as is
+    pass
+
 from saiverse.addon_installer import (  # noqa: E402
     SETUP_CRASH_ADDON_ID,
     EnvRebuildResult,

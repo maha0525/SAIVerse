@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from importlib import metadata
+import os
 from pathlib import Path
 import sys
 from typing import Iterator
@@ -601,3 +602,17 @@ def test_an_unreadable_runtime_marker_module_counts_as_running(tmp_path: Path, m
     monkeypatch.setitem(sys.modules, "saiverse.runtime_marker", None)
     reason = _REAL_SAIVERSE_MAY_BE_RUNNING(tmp_path)
     assert reason is not None and "could not be checked" in reason
+
+
+def test_dotenv_home_variables_are_taken_unless_already_set(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / ".env").write_text(
+        "SAIVERSE_HOME=/from/dotenv\nSAIVERSE_USER_DATA_DIR=/data/dotenv\nOPENAI_API_KEY=sk-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("SAIVERSE_HOME", raising=False)
+    monkeypatch.setenv("SAIVERSE_USER_DATA_DIR", "/already/set")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    update_engine._apply_dotenv_home(tmp_path)
+    assert os.environ["SAIVERSE_HOME"] == "/from/dotenv"
+    assert os.environ["SAIVERSE_USER_DATA_DIR"] == "/already/set"
+    assert "OPENAI_API_KEY" not in os.environ

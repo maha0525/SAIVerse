@@ -803,6 +803,30 @@ def check_update_complete(project_dir: Path) -> int:
     return CHECK_READY
 
 
+# Variables of .env that move where SAIVerse keeps its data (and so its
+# runtime markers); main.py loads .env before it resolves them.
+_DOTENV_HOME_VARIABLES = ("SAIVERSE_HOME", "SAIVERSE_USER_DATA_DIR")
+
+
+def _apply_dotenv_home(project_dir: Path) -> None:
+    """Take SAIVERSE_HOME / SAIVERSE_USER_DATA_DIR from the checkout's .env, as
+    main.py would, unless they are already set. Only these: the rest of .env
+    (API keys and the like) has no business in this process or its children."""
+    try:
+        from dotenv import dotenv_values
+    except ImportError:
+        return
+    try:
+        values = dotenv_values(project_dir / ".env")
+    except Exception:  # an unreadable .env: the environment as is
+        LOGGER.warning("[deps] .env could not be read", exc_info=True)
+        return
+    for name in _DOTENV_HOME_VARIABLES:
+        value = values.get(name)
+        if value and name not in os.environ:
+            os.environ[name] = value
+
+
 def _saiverse_may_be_running(project_dir: Path) -> str | None:
     """Why the reinstall before start must wait, or None when SAIVerse is stopped.
 
@@ -815,6 +839,7 @@ def _saiverse_may_be_running(project_dir: Path) -> str | None:
     root = str(project_dir)
     added = root not in sys.path
     try:
+        _apply_dotenv_home(project_dir)
         if added:
             sys.path.insert(0, root)
         try:
