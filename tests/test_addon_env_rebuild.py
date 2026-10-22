@@ -240,3 +240,16 @@ def test_entry_rebuilds_and_clears_the_record(home, expansion, monkeypatch, tmp_
     assert entry.main(expansion) == 0
     assert "cloud-pkgs" in _labels(recorded)
     assert not record.exists()
+
+
+def test_a_crash_of_the_entry_still_leaves_a_record_for_the_banner(home, monkeypatch, tmp_path) -> None:
+    entry = _load_entry()
+
+    def crash(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(entry, "find_unusable_addon_envs", crash)
+    assert entry._main_recording_crashes() == 1
+    data = json.loads((tmp_path / ".addon_env_rebuild_failures.json").read_text(encoding="utf-8"))
+    assert data["failures"][0]["addon_id"] == "(setup)"
+    assert "unexpected" in data["failures"][0]["error"]

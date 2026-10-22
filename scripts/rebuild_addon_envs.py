@@ -123,5 +123,26 @@ def main(expansion: Path | None = None) -> int:
     return 0
 
 
+def _main_recording_crashes() -> int:
+    """``main`` that leaves a record for the banner even when it crashes, so an
+    unexpected error does not leave an addon unusable with nothing on screen."""
+    try:
+        return main()
+    except Exception as exc:  # the record is the point; the traceback is printed too
+        import traceback
+
+        traceback.print_exc()
+        try:
+            record_env_rebuild_failures([
+                EnvRebuildResult(addon_id="(setup)", envs=[], error=f"{type(exc).__name__}: {exc}")
+            ])
+        except Exception:
+            traceback.print_exc()
+        print("[WARN] The addon Python environments could not be checked or rebuilt (see above).")
+        print("[WARN] アドオンの専用の Python 環境を確かめられない・作り直せないまま終わりました (上の表示を見てください)。")
+        sys.stdout.flush()
+        return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_main_recording_crashes())
