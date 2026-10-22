@@ -54,6 +54,10 @@ def _manifest(addon_id: str) -> dict:
                  "env": "eng", "when": {"engines": "cloud"}},
                 {"name": "gpt-pkgs", "type": "pip_install", "requirements": "r.txt",
                  "env": "eng", "when": {"engines": "gpt"}},
+                {"name": "gpt-core-pkgs", "type": "pip_install", "requirements": "r.txt",
+                 "when": {"engines": "gpt"}},
+                # env の無いスクリプト: 本体の .venv の入れ直しの対象にしない
+                {"name": "make-config", "type": "python_script", "script": "s.py"},
             ],
         },
     }
@@ -253,3 +257,188 @@ def test_a_crash_of_the_entry_still_leaves_a_record_for_the_banner(home, monkeyp
     data = json.loads((tmp_path / ".addon_env_rebuild_failures.json").read_text(encoding="utf-8"))
     assert data["failures"][0]["addon_id"] == "(setup)"
     assert "unexpected" in data["failures"][0]["error"]
+    assert data["failures"][0]["core_venv"] is False
+
+
+# ---------------------------------------------------------------------------
+# 本体の .venv を作り直した回の、本体の .venv に入れる step の入れ直し
+# ---------------------------------------------------------------------------
+
+LOCK = str(addon_installer.CORE_REQUIREMENTS_LOCK)
+RECORD_NAME = ".addon_env_rebuild_failures.json"
+
+
+def _entry_not_running(monkeypatch):  # type: ignore[no-untyped-def]
+    entry = _load_entry()
+    monkeypatch.setattr(entry, "_saiverse_running", lambda: (False, "runtime markers absent"))
+    return entry
+
+
+def _core_runs(recorded: list) -> list[tuple[str, str]]:
+    """本体の Python の pip で走った step の (アドオンのフォルダ名, step の名前)。"""
+    return [
+        (Path(r["cwd"]).name, r["label"]) for r in recorded
+        if r["args"][:4] == [addon_installer.sys.executable, "-m", "pip", "install"]
+    ]
+
+
+def test_core_venv_steps_run_with_the_saved_answers_only_with_the_flag(
+        home, expansion, monkeypatch, tmp_path) -> None:
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run(recorded))
+    current = addon_paths.current_python_version()
+    a_dir = _install(expansion, "a-addon", {"engines": ["cloud"]}, current)
+    b_dir = _install(expansion, "b-addon", {"engines": ["cloud", "gpt"]}, current)
+    (expansion / "hand-made").mkdir()  # addon.json の無いフォルダは対象にしない
+    before = (_snapshot("a-addon", a_dir), _snapshot("b-addon", b_dir))
+    entry = _entry_not_running(monkeypatch)
+
+    # 付かない回 (setup_venv.py prepare が keep) は、何も走らせない
+    assert entry.main(expansion) == 0
+    assert recorded == []
+
+    assert entry.main(expansion, core_venv_recreated=True) == 0
+    # 保存された答えのとおり、env の無い pip_install だけ (スクリプトと専用の環境の step は走らせない)
+    assert _core_runs(recorded) == [
+        ("a-addon", "core-pkgs"), ("b-addon", "core-pkgs"), ("b-addon", "gpt-core-pkgs")]
+    assert _labels(recorded) == ["core-pkgs", "core-pkgs", "gpt-core-pkgs"]
+    # 既存の導入と同じく requirements.lock を constraints として渡す
+    for r in recorded:
+        assert r["args"][-2:] == ["-c", LOCK]
+    # 答え・アドオンのバージョン・アドオンのデータは変わらない
+    assert (_snapshot("a-addon", a_dir), _snapshot("b-addon", b_dir)) == before
+    assert not (tmp_path / RECORD_NAME).exists()
+
+
+def test_an_addon_without_saved_answers_uses_the_defaults(home, expansion, monkeypatch) -> None:
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run(recorded))
+    _install(expansion, "a-addon", {}, None)
+    (addon_paths.get_addon_install_dir("a-addon") / addon_installer.SETUP_ANSWERS_NAME).unlink()
+
+    results = addon_installer.reinstall_core_venv_steps(expansion)
+
+    assert [(r.addon_id, r.steps, r.ok, r.core_venv) for r in results] == [
+        ("a-addon", ["core-pkgs"], True, True)]
+    assert addon_installer.load_saved_answers("a-addon") is None  # 答えは書かない
+
+
+def test_a_prepared_but_unconfirmed_install_is_skipped(home, expansion, monkeypatch) -> None:
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run(recorded))
+    _install(expansion, "a-addon", {"engines": ["cloud"]}, None)
+    addon_installer._write_pending("a-addon", "install", "0" * 40, "https://example.invalid/a.git")
+    assert addon_installer.reinstall_core_venv_steps(expansion) == []
+    assert recorded == []
+
+
+def test_core_steps_run_before_the_env_rebuild(home, expansion, monkeypatch) -> None:
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run(recorded))
+    _install(expansion, "a-addon", {"engines": ["cloud"]}, STALE)
+    entry = _entry_not_running(monkeypatch)
+
+    assert entry.main(expansion, core_venv_recreated=True) == 0
+    labels = [lbl for lbl in _labels(recorded) if not lbl.startswith("upgrade pip")]
+    assert labels == ["core-pkgs", "venv eng", "cloud-pkgs"]
+
+
+def test_failures_of_both_kinds_are_kept_in_one_record(home, expansion, monkeypatch, tmp_path) -> None:
+    recorded: list = []
+
+    def fake(args, cwd, progress, label, env=None):  # type: ignore[no-untyped-def]
+        _fake_run(recorded)(args, cwd, progress, label, env)
+        if label in ("core-pkgs", "gpt-pkgs"):
+            raise addon_installer.AddonInstallError(f"{label}: 終了コード 1 で失敗")
+
+    monkeypatch.setattr(addon_installer, "_run_subprocess", fake)
+    a_dir = _install(expansion, "a-addon", {"engines": ["cloud", "gpt"]}, STALE)
+    before = _snapshot("a-addon", a_dir)
+    entry = _entry_not_running(monkeypatch)
+
+    assert entry.main(expansion, core_venv_recreated=True) == 0
+
+    # 本体側の失敗のあとも、専用の環境の作り直しは続けて走る
+    assert "venv eng" in _labels(recorded) and "cloud-pkgs" in _labels(recorded)
+    assert _snapshot("a-addon", a_dir) == before
+    data = json.loads((tmp_path / RECORD_NAME).read_text(encoding="utf-8"))
+    assert [(f["addon_id"], f["core_venv"], f["envs"], f["steps"]) for f in data["failures"]] == [
+        ("a-addon", True, [], ["core-pkgs", "gpt-core-pkgs"]),
+        ("a-addon", False, ["eng"], ["cloud-pkgs", "gpt-pkgs"]),
+    ]
+    assert "SAIVerse .venv" in data["failures"][0]["error"]
+    assert "core-pkgs" in data["failures"][0]["error"]
+    assert "gpt-pkgs" in data["failures"][1]["error"]
+
+    # 起動時のバナーは、アドオンの名前を一度だけ出し、どちらの失敗かを詳細に書く
+    from saiverse import environment_alerts
+
+    (alert,) = environment_alerts.addon_env_rebuild_alerts(tmp_path / RECORD_NAME)
+    assert alert["details"]["reason"] == ["a-addon"]
+    assert "(SAIVerse .venv)" in alert["details"]["error"]
+    assert "(addon environment)" in alert["details"]["error"]
+
+
+def test_a_previous_core_failure_is_retried_in_a_run_that_keeps_the_venv(
+        home, expansion, monkeypatch, tmp_path) -> None:
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run(recorded))
+    current = addon_paths.current_python_version()
+    _install(expansion, "a-addon", {"engines": ["cloud"]}, current)
+    _install(expansion, "b-addon", {"engines": ["cloud"]}, current)
+    addon_installer.record_env_rebuild_failures([
+        addon_installer.EnvRebuildResult(
+            addon_id="a-addon", envs=[], steps=["core-pkgs"], error="x", core_venv=True)])
+    entry = _entry_not_running(monkeypatch)
+
+    # 前の回に本体の .venv への入れ直しが失敗したアドオンだけ、付かない回でもやり直す
+    assert entry.main(expansion) == 0
+    assert _core_runs(recorded) == [("a-addon", "core-pkgs")]
+    assert not (tmp_path / RECORD_NAME).exists()
+
+    # 専用の環境の失敗だけの記録では、本体の .venv の入れ直しはしない
+    recorded.clear()
+    addon_installer.record_env_rebuild_failures([
+        addon_installer.EnvRebuildResult(addon_id="a-addon", envs=["eng"], error="x")])
+    assert entry.main(expansion) == 0
+    assert recorded == []
+
+
+def test_core_steps_are_not_run_while_saiverse_may_be_running(home, expansion, monkeypatch, tmp_path) -> None:
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run(recorded))
+    _install(expansion, "a-addon", {"engines": ["cloud"]}, addon_paths.current_python_version())
+    entry = _load_entry()
+    monkeypatch.setattr(entry, "_saiverse_running", lambda: (True, "verified SAIVerse City process pid 1"))
+
+    assert entry.main(expansion, core_venv_recreated=True) == 0
+    assert recorded == []
+    data = json.loads((tmp_path / RECORD_NAME).read_text(encoding="utf-8"))
+    assert [(f["addon_id"], f["core_venv"], f["steps"]) for f in data["failures"]] == [
+        ("a-addon", True, ["core-pkgs"])]
+    assert "SAIVerse may be running" in data["failures"][0]["error"]
+    # 次の回 (.venv はもう作り直さない) で、やり直しの対象になる
+    assert addon_installer.core_venv_failures_in_record() == {"a-addon"}
+
+
+def test_an_unreadable_manifest_is_a_core_failure_when_the_venv_was_recreated(
+        home, expansion, monkeypatch) -> None:
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run([]))
+    addon_dir = _install(expansion, "a-addon", {"engines": ["cloud"]}, None)
+    (addon_dir / "addon.json").write_text("{broken", encoding="utf-8")
+    results = addon_installer.reinstall_core_venv_steps(expansion)
+    assert [(r.addon_id, r.ok, r.core_venv) for r in results] == [("a-addon", False, True)]
+
+
+def test_a_crash_with_the_flag_records_that_the_core_venv_is_not_done(home, monkeypatch, tmp_path) -> None:
+    entry = _load_entry()
+
+    def crash(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(entry, "plan_core_venv_reinstalls", crash)
+    assert entry._main_recording_crashes(["--core-venv-recreated"]) == 1
+    data = json.loads((tmp_path / RECORD_NAME).read_text(encoding="utf-8"))
+    assert [(f["addon_id"], f["core_venv"]) for f in data["failures"]] == [("(setup)", True)]
+    # 次の回は、全部のアドオンの本体側の step をやり直す
+    assert addon_installer.core_venv_failures_in_record() == {addon_installer.SETUP_CRASH_ADDON_ID}

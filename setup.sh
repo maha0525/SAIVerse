@@ -105,6 +105,7 @@ else
 fi
 VENV_ACTION="${VENV_RESULT%% *}"
 VENV_OLD=""
+ADDON_REBUILD_ARGS=""
 if [ "$VENV_ACTION" = "renamed" ]; then
     VENV_OLD="${VENV_RESULT#renamed }"
 fi
@@ -134,6 +135,7 @@ case "$VENV_ACTION" in
             exit 1
         fi
         echo "[OK] .venv を作成しました"
+        ADDON_REBUILD_ARGS="--core-venv-recreated"
         ;;
     locked)
         exit 1
@@ -161,14 +163,17 @@ if ! python -m pip install -r requirements.lock; then
 fi
 echo "[OK] Pythonパッケージのインストール完了"
 
-# --- 5b. Delete the old .venv and rebuild addon environments ---
-# 新しい .venv が揃ったので .venv.old-<日時> を消す。続けて、別の Python の系列で
-# 作られたアドオン専用の環境を、保存された答えのまま作り直す。作り直しの失敗では
-# setup を止めない (SAIVerse 本体は動く)。スクリプトがどうすればよいかを表示し、
-# 失敗を .addon_env_rebuild_failures.json に書き残す。
+# --- 5b. Delete the old .venv and reinstall addon packages ---
+# 新しい .venv が揃ったので .venv.old-<日時> を消す。この回に新しい .venv を作った
+# (create / renamed) ときは --core-venv-recreated を付け、アドオンの setup の step の
+# うち本体の .venv にパッケージを入れるもの (env の無い pip_install) を、保存された
+# 答えのまま先に走らせ直す。続けて、別の Python の系列で作られたアドオン専用の環境を、
+# 保存された答えのまま作り直す。失敗では setup を止めない (SAIVerse 本体は動く)。
+# スクリプトがどうすればよいかを表示し、失敗を .addon_env_rebuild_failures.json に
+# 書き残す。setup.bat と同じ手順。
 "$PYTHON_BIN" scripts/setup_venv.py finish || true
-if ! python scripts/rebuild_addon_envs.py; then
-    echo "[WARN] アドオンの専用の環境を確かめられませんでした。SAIVerse 本体は動きます。上のメッセージを見てください。"
+if ! python scripts/rebuild_addon_envs.py ${ADDON_REBUILD_ARGS:+"$ADDON_REBUILD_ARGS"}; then
+    echo "[WARN] アドオンのパッケージを確かめられませんでした。SAIVerse 本体は動きます。上のメッセージを見てください。"
 fi
 
 # --- 6. npm install ---

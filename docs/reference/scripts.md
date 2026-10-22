@@ -69,7 +69,7 @@ python scripts/tag_conversation_messages.py air --auto
 | スクリプト | 用途 |
 |---|---|
 | `addon_install.py` | アドオンのインストール |
-| `rebuild_addon_envs.py` | 導入済みのアドオン専用の Python 環境 (`~/.saiverse/addon_install/<id>/envs/<name>/`) のうち、フォルダはあるが本体の Python で使えないもの (記録の Python の major.minor が違う・記録が無い・python が無い) を、保存された答えのまま、その環境を使う setup の step を走らせ直して作り直す (setup.bat / setup.sh が新しい `.venv` にパッケージを入れたあと、`.venv` の python で呼ぶ)。アドオンのバージョン・答え・データは変えない。SAIVerse が動いている (または分からない) ときは作り直さない。失敗しても終了コード 0 で、失敗したアドオンを表示し、リポジトリ直下の `.addon_env_rebuild_failures.json` に書く (失敗が無ければ消す) ([intent §2-7](../intent/dependency_management.md)) |
+| `rebuild_addon_envs.py` | `--core-venv-recreated` (setup.bat / setup.sh が新しい `.venv` を作った回にだけ付ける) のときと、前の回の記録に本体の `.venv` への入れ直しの失敗があるときは、まず導入済みのアドオンの setup の step のうち本体の `.venv` に入れるもの (`env` の無い `pip_install`) を、保存された答えのまま requirements.lock を constraints にして走らせ直す。続けて、導入済みのアドオン専用の Python 環境 (`~/.saiverse/addon_install/<id>/envs/<name>/`) のうち、フォルダはあるが本体の Python で使えないもの (記録の Python の major.minor が違う・記録が無い・python が無い) を、保存された答えのまま、その環境を使う setup の step を走らせ直して作り直す (setup.bat / setup.sh が新しい `.venv` にパッケージを入れたあと、`.venv` の python で呼ぶ)。アドオンのバージョン・答え・データは変えない。SAIVerse が動いている (または分からない) ときは作り直さない。失敗しても終了コード 0 で、失敗したアドオンを表示し、リポジトリ直下の `.addon_env_rebuild_failures.json` に書く (失敗が無ければ消す) ([intent §2-7](../intent/dependency_management.md)) |
 
 ## データ移行
 

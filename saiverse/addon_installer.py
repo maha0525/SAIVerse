@@ -1572,11 +1572,17 @@ ENV_REBUILD_FAILURES_PATH = PROJECT_ROOT / ".addon_env_rebuild_failures.json"
 
 @dataclass
 class EnvRebuildResult:
-    """一つのアドオンの専用の環境の作り直しの結果。``error`` が None なら成功。"""
+    """一つのアドオンの、setup でのパッケージの入れ直しの結果。``error`` が None なら成功。
+
+    ``core_venv`` が False なら専用の環境の作り直し (``rebuild_unusable_addon_envs``、
+    ``envs`` は作り直した環境の名前)。True なら本体の ``.venv`` に入れる step の
+    入れ直し (``reinstall_core_venv_steps``、``envs`` は空)。
+    """
     addon_id: str
     envs: List[str]
     steps: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    core_venv: bool = False
 
     @property
     def ok(self) -> bool:
@@ -1735,7 +1741,10 @@ def rebuild_unusable_addon_envs(
 def record_env_rebuild_failures(
     results: Iterable[EnvRebuildResult], path: Optional[Path] = None
 ) -> Optional[Path]:
-    """失敗した作り直しをファイルに書く。失敗が無ければファイルを消して None を返す。
+    """失敗した入れ直しをファイルに書く。失敗が無ければファイルを消して None を返す。
+
+    ``results`` には、本体の ``.venv`` に入れる step の入れ直しと専用の環境の作り直しの
+    両方の結果を一度に渡す (片方だけで呼ぶと、もう片方の失敗の記録を消す)。
 
     形 (UTF-8 の JSON)::
 
@@ -1744,11 +1753,16 @@ def record_env_rebuild_failures(
           "python_version": "3.13.17",
           "failures": [
             {"addon_id": "saiverse-voice-tts", "envs": ["gpt_sovits"],
-             "steps": ["gpt-sovits-packages"], "error": "..."}
+             "steps": ["gpt-sovits-packages"], "error": "...", "core_venv": false},
+            {"addon_id": "saiverse-voice-tts", "envs": [],
+             "steps": ["Voice TTS のパッケージ"], "error": "...", "core_venv": true}
           ]
         }
 
-    利用者がすること (アドオン管理でそのアドオンを入れ直す) は、読む側が書く。
+    ``core_venv`` が true の項目は、本体の ``.venv`` への入れ直しの失敗。次の setup は、
+    ``.venv`` を作り直さない回でも、その入れ直しをやり直す
+    (``core_venv_failures_in_record``)。利用者がすること (setup をもう一度・アドオン管理で
+    そのアドオンを入れ直す) は、読む側が書く。
     """
     target = path or ENV_REBUILD_FAILURES_PATH
     failures = [r for r in results if not r.ok]
@@ -1759,11 +1773,176 @@ def record_env_rebuild_failures(
         "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "python_version": current_python_version(),
         "failures": [
-            {"addon_id": r.addon_id, "envs": r.envs, "steps": r.steps, "error": r.error}
+            {
+                "addon_id": r.addon_id,
+                "envs": r.envs,
+                "steps": r.steps,
+                "error": r.error,
+                "core_venv": r.core_venv,
+            }
             for r in failures
         ],
     })
     return target
+
+
+# ``scripts/rebuild_addon_envs.py`` 自体が想定外の例外で止まったときの記録の ``addon_id``。
+SETUP_CRASH_ADDON_ID = "(setup)"
+
+
+def core_venv_failures_in_record(path: Optional[Path] = None) -> set[str]:
+    """前の setup の記録で、本体の ``.venv`` への入れ直しが済んでいないアドオンの id。
+
+    記録が無ければ空。記録はあるが読めないときは、どのアドオンが済んでいないか
+    分からないので ``{SETUP_CRASH_ADDON_ID}`` を返す (呼び出し側は全部をやり直す)。
+    """
+    target = path or ENV_REBUILD_FAILURES_PATH
+    if not target.is_file():
+        return set()
+    try:
+        document = json.loads(target.read_text(encoding="utf-8"))
+        failures = document["failures"]
+        if not isinstance(failures, list):
+            raise TypeError("failures is not a list")
+    except (OSError, ValueError, KeyError, TypeError):
+        LOGGER.warning("installer: unreadable env rebuild record %s", target, exc_info=True)
+        return {SETUP_CRASH_ADDON_ID}
+    return {
+        str(item["addon_id"])
+        for item in failures
+        if isinstance(item, dict) and item.get("core_venv") is True and item.get("addon_id")
+    }
+
+
+# ---------------------------------------------------------------------------
+# 本体の .venv を作り直したあとの、本体の .venv に入れる step の入れ直し (setup から呼ぶ)
+# ---------------------------------------------------------------------------
+
+def _installs_into_core_venv(step: SetupStep) -> bool:
+    """本体の ``.venv`` にパッケージを入れる step か: ``env`` の無い ``pip_install`` だけ。
+
+    ``_exec_pip_install`` は ``env`` が無ければ本体の Python (``sys.executable``) の pip に
+    requirements.lock を constraints として渡して入れる。``env`` の無い ``python_script``
+    (本体の Python で起動) と ``platform_script`` (本体の環境変数のまま起動) も、中で pip を
+    呼べば本体の ``.venv`` に入れられるが、対象にしない。そういうアドオンはカタログに
+    載せない (addon_catalog_management.md の不変条件 7)。スクリプトの中の pip には
+    constraints が渡らない (issues/addon_setup_scripts_bypass_lock_constraints.md) ので、
+    setup から走らせ直すと本体のパッケージを動かしうる。いまある ``env`` の無い
+    スクリプト (voice-tts の設定ファイルのひな形の作成、Irodori-TTS の依存の手直し) が
+    残すものは ``.venv`` の外にあり、``.venv`` を作り直しても消えない。
+    """
+    return isinstance(step, PipInstallStep) and step.env is None
+
+
+def plan_core_venv_reinstall(addon_id: str, expansion_dir: Optional[Path] = None) -> SetupPlan:
+    """保存された答えのまま、本体の ``.venv`` に入れる step を走らせ直す計画 (副作用なし)。
+
+    走らせるのは、保存された答え (無い質問は既定値) と OS で選ばれる step のうち、
+    ``_installs_into_core_venv`` のもの全部 (``plan_env_rebuild`` と同じ選び方)。
+    答えは保存しない (``answers=None``)。
+    """
+    addon_dir, manifest = _installed_manifest(addon_id, expansion_dir)
+    answers = fill_defaults(manifest, _saved_or_empty(manifest, addon_id))
+    steps = [s for s in select_steps(manifest.setup_steps, answers) if _installs_into_core_venv(s)]
+    return SetupPlan(
+        kind="core_venv_reinstall",
+        addon_id=addon_id,
+        addon_dir=addon_dir,
+        manifest=manifest,
+        steps=steps,
+        answers=None,
+    )
+
+
+def plan_core_venv_reinstalls(
+    expansion_dir: Optional[Path] = None, addon_ids: Optional[Iterable[str]] = None,
+) -> tuple[List[SetupPlan], List[EnvRebuildResult]]:
+    """導入済みのアドオンごとの ``plan_core_venv_reinstall`` (副作用なし)。
+
+    返値は (走らせる step があるアドオンの計画, 計画を作れなかったアドオンの失敗)。
+    ``addon_ids`` が None なら導入済みの全部、与えられればその中だけ。対象は
+    ``expansion_data/<id>/addon.json`` があるアドオンで、導入の途中 (prepare だけで
+    confirm されていない) のものは入れない。``addon.json`` が読めないアドオンは、
+    本体の ``.venv`` に入れる step があるか分からないので失敗に入れる。
+    """
+    expansion = expansion_dir or EXPANSION_DATA_DIR
+    wanted = set(addon_ids) if addon_ids is not None else None
+    plans: List[SetupPlan] = []
+    failures: List[EnvRebuildResult] = []
+    if not expansion.is_dir():
+        return plans, failures
+    for addon_dir in sorted(p for p in expansion.iterdir() if p.is_dir()):
+        addon_id = addon_dir.name
+        if wanted is not None and addon_id not in wanted:
+            continue
+        if not (addon_dir / "addon.json").is_file():
+            continue  # 導入の仕組みが入れたアドオンではない (setup の step を持たない)
+        try:
+            pending = get_pending_operation(addon_id)
+        except ValueError:  # アドオンの id として不正なフォルダ名
+            continue
+        if pending is not None and pending.get("kind") == "install":
+            continue
+        try:
+            plan = plan_core_venv_reinstall(addon_id, expansion)
+        except (AddonInstallError, OSError, ValueError) as exc:  # 読めない・文字コードが違う addon.json も
+            failures.append(EnvRebuildResult(
+                addon_id=addon_id, envs=[], core_venv=True,
+                error=f"could not read the setup steps that install into the SAIVerse .venv: {exc}",
+            ))
+            continue
+        if plan.steps:
+            plans.append(plan)
+    return plans, failures
+
+
+def reinstall_core_venv_steps(
+    expansion_dir: Optional[Path] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+    addon_ids: Optional[Iterable[str]] = None,
+) -> List[EnvRebuildResult]:
+    """導入済みのアドオンの、本体の ``.venv`` に入れる step を走らせ直す。
+
+    setup が新しい ``.venv`` を作ったあとに、``.venv`` の Python で呼ぶ
+    (``scripts/rebuild_addon_envs.py --core-venv-recreated``)。新しい ``.venv`` には
+    requirements.lock の部品しか入っていないので、``env`` の無い ``pip_install`` の
+    step が入れていたパッケージを、保存された答えのまま入れ直す
+    (``plan_core_venv_reinstalls``)。pip には既存の導入と同じく requirements.lock を
+    constraints として渡す (``_exec_pip_install``)。アドオンのバージョン (checkout)・
+    保存された答え・アドオンのデータは変えない。
+
+    一つのアドオンの失敗では止めずに次のアドオンへ進み、失敗は結果に入れる
+    (``core_venv=True``)。呼び出し側 (setup) は、SAIVerse が動いていないことを
+    確かめてから呼ぶ (``rebuild_unusable_addon_envs`` と同じ理由)。
+    """
+    progress = progress_callback or _noop_progress
+    expansion = expansion_dir or EXPANSION_DATA_DIR
+    plans, results = plan_core_venv_reinstalls(expansion, addon_ids)
+    for plan in plans:
+        step_names = [s.name for s in plan.steps]
+        progress(ProgressEvent(
+            phase="step",
+            message=(
+                f"{plan.addon_id}: SAIVerse 本体の .venv に入れるパッケージを入れ直します "
+                f"({', '.join(step_names)})"
+            ),
+        ))
+        try:
+            _run_selected_steps(plan, get_addon_data_dir(plan.addon_id), progress)
+        except Exception as exc:  # noqa: BLE001 - 一つのアドオンの失敗で他を止めない
+            LOGGER.warning(
+                "installer: reinstalling core venv packages of %s failed", plan.addon_id,
+                exc_info=True,
+            )
+            results.append(EnvRebuildResult(
+                addon_id=plan.addon_id, envs=[], steps=step_names, core_venv=True,
+                error=f"installing the packages into the SAIVerse .venv failed: {exc}",
+            ))
+            continue
+        results.append(EnvRebuildResult(
+            addon_id=plan.addon_id, envs=[], steps=step_names, core_venv=True,
+        ))
+    return results
 
 
 # ---------------------------------------------------------------------------

@@ -170,6 +170,7 @@ if defined ALLOW_OTHER_PYTHON set "VENV_CHECK_ARGS="
 if defined ALLOW_OTHER_PYTHON echo [INFO] SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1: the Python series of an existing .venv is not checked.
 set "VENV_ACTION="
 set "VENV_OLD="
+set "ADDON_REBUILD_ARGS="
 for /f "tokens=1,*" %%a in ('call "%PYTHON_EXE%" scripts\setup_venv.py prepare %VENV_CHECK_ARGS%') do (
     set "VENV_ACTION=%%a"
     set "VENV_OLD=%%b"
@@ -188,6 +189,7 @@ exit /b 1
 
 :venv_create
 if not "%VENV_ACTION%"=="renamed" set "VENV_OLD="
+set "ADDON_REBUILD_ARGS=--core-venv-recreated"
 echo.
 echo [SETUP] Creating Python virtual environment...
 "%PYTHON_EXE%" -m venv .venv
@@ -242,15 +244,18 @@ python -m pip install -r requirements.lock
 if errorlevel 1 goto :pip_failed
 echo [OK] Python packages installed
 
-REM --- 5b. Delete the old .venv and rebuild addon environments ---
+REM --- 5b. Delete the old .venv and reinstall addon packages ---
 REM The new .venv is complete, so .venv.old-<date>-<time> folders can go.
-REM Then addon environments made with another Python series are rebuilt with
-REM the saved answers. Their failures do not stop setup: SAIVerse itself works,
+REM When this run created a new .venv (create / renamed), --core-venv-recreated
+REM makes the script first run again, with the saved answers, the addon setup
+REM steps that install packages into .venv (pip_install without env). Then
+REM addon environments made with another Python series are rebuilt with the
+REM saved answers. Their failures do not stop setup: SAIVerse itself works,
 REM and the script prints what to do and records the failures in
-REM .addon_env_rebuild_failures.json.
+REM .addon_env_rebuild_failures.json. Same as setup.sh.
 "%PYTHON_EXE%" scripts\setup_venv.py finish
-python scripts\rebuild_addon_envs.py
-if errorlevel 1 echo [WARN] Could not check the addon environments. SAIVerse itself works; see the messages above.
+python scripts\rebuild_addon_envs.py %ADDON_REBUILD_ARGS%
+if errorlevel 1 echo [WARN] Could not check the addon packages. SAIVerse itself works; see the messages above.
 
 REM --- 6. npm install ---
 echo.
