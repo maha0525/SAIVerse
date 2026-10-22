@@ -14,7 +14,7 @@
 
 | | 状態 | 意味 |
 |---|---|---|
-| 🔵 設計中 | アップデート再起動後処理 (POST_RESTART_UPDATE_TASKS) | intent を起草し、agy の言葉づかい検査を反映した。次 = 設計の要点 (失敗時は起動を続行 / Node.js と SearXNG は今は移さない / 呼び出しは main.py) へのまはーの確認をもらい、実装して v0.3.26 の束へ積む。 | まはー (設計の確認) | [intent](../intent/post_restart_update_tasks.md) | 2026-10-23 |
+| 🔵 設計中 | アップデート再起動後処理 (POST_RESTART_UPDATE_STEPS) | intent を起草し、agy の言葉づかい検査を反映した。次 = 設計の要点 (失敗時は起動を続行 / Node.js と SearXNG は今は移さない / 呼び出しは main.py) へのまはーの確認をもらい、実装して v0.3.26 の束へ積む。 | まはー (設計の確認) | [intent](../intent/post_restart_update_steps.md) | 2026-10-23 |
 | 🔵 | **設計中** | intent 起草・詰め・レビュー待ち(まだコードを書いていない) |
 | 🟡 | **実装待ち** | 設計確定。コード未着手だが「次にやる」候補 |
 | 🟠 | **実装中** | コードを書いている |
