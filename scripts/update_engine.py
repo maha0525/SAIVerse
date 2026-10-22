@@ -1924,19 +1924,28 @@ def refuse_while_frontend_runs(project_dir: Path) -> None:
 
 
 def _env_with_npm_on_path(npm: str) -> dict[str, str]:
-    """This environment, with npm's own directory on PATH.
+    """This environment, with npm's own directory first on PATH.
 
-    The restarted frontend runs ``npm`` by name inside its window; a portable
-    npm found under ``.node`` is not on PATH by itself.
+    The restarted frontend runs ``npm`` by name inside its window, and npm's
+    lifecycle scripts and ``next build`` run ``node`` by name; all of them
+    must find the Node.js next to the chosen npm. Being on PATH is not
+    enough: with a system Node.js listed before ``.node``, ``node`` would
+    resolve to the system one while npm is the portable one. So the
+    directory is moved to the front, not only added when missing.
     """
     env = os.environ.copy()
     if not os.path.isabs(npm):
         return env
     npm_dir = os.path.dirname(npm)
-    current = env.get("PATH", "")
-    known = {os.path.normcase(os.path.normpath(entry)) for entry in current.split(os.pathsep) if entry}
-    if npm_dir and os.path.normcase(os.path.normpath(npm_dir)) not in known:
-        env["PATH"] = npm_dir + (os.pathsep + current if current else "")
+    if not npm_dir:
+        return env
+    wanted = os.path.normcase(os.path.normpath(npm_dir))
+    rest = [
+        entry
+        for entry in env.get("PATH", "").split(os.pathsep)
+        if entry and os.path.normcase(os.path.normpath(entry)) != wanted
+    ]
+    env["PATH"] = os.pathsep.join([npm_dir, *rest])
     return env
 
 

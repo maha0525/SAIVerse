@@ -168,6 +168,18 @@ def test_npm_ci_and_build_run_with_the_portable_node_first_on_path(tmp_path: Pat
         assert calls[label]["env"]["PATH"].split(os.pathsep)[0] == str(npm.parent)
 
 
+def test_npm_dir_is_moved_ahead_of_a_system_node_already_on_path(tmp_path: Path) -> None:
+    """A PATH that lists a system Node.js before .node: npm would be the
+    portable one but ``node`` by name the system one, unless .node is moved
+    to the front (Codex review on PR #413)."""
+    npm = _portable_npm(tmp_path)
+    system = str(tmp_path / "system-nodejs")
+    seeded = os.pathsep.join([system, str(npm.parent), "/usr/bin"])
+    with patch.dict(os.environ, {"PATH": seeded}):
+        entries = update_engine._env_with_npm_on_path(str(npm))["PATH"].split(os.pathsep)
+    assert entries == [str(npm.parent), system, "/usr/bin"]
+
+
 # --- the installer, run for real -------------------------------------------------
 
 _SYSTEM_NODE = shutil.which("node")
