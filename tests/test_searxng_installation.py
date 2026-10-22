@@ -94,6 +94,10 @@ def test_archive_paths_cannot_escape_destination(relative):
 def test_failed_pip_does_not_leave_completion_marker(installation, monkeypatch):
     config.venv_python().parent.mkdir(parents=True)
     config.venv_python().touch()
+    # Made with this Python, so it is reinstalled in place rather than set aside.
+    (config.venv_directory() / "pyvenv.cfg").write_text(
+        f"version = {sys.version_info[0]}.{sys.version_info[1]}.0\n", encoding="utf-8"
+    )
     marker = config.venv_directory() / installer.INSTALL_MARKER
     marker.write_text("old completion record", encoding="utf-8")
     monkeypatch.setattr(installer, "prepare_source", lambda: None)
@@ -173,7 +177,7 @@ def test_prepare_requirements_rewrites_source_file(installation):
 
 def _venv_with_series(directory: Path, version: str) -> None:
     directory.mkdir(parents=True)
-    (directory / "pyvenv.cfg").write_text(f"home = C:\Python\nversion = {version}\n", encoding="utf-8")
+    (directory / "pyvenv.cfg").write_text(f"home = C:\\Python\nversion = {version}\n", encoding="utf-8")
 
 
 def test_a_venv_of_another_python_series_is_set_aside(installation, tmp_path):
@@ -207,6 +211,120 @@ def test_a_venv_that_cannot_be_renamed_stops_setup_and_keeps_it(installation, tm
     with pytest.raises(RuntimeError, match="SearXNG"):
         installer.set_aside_venv_of_other_series()
     assert venv.is_dir()
+
+
+def _setup_failing_at(monkeypatch, tmp_path: Path, failing_step: str) -> None:
+    """``setup`` with the source steps skipped and every command answered:
+    the command whose description contains ``failing_step`` fails."""
+    monkeypatch.setattr(installer, "prepare_source", lambda: None)
+    monkeypatch.setattr(installer, "prepare_compatibility", lambda: None)
+    monkeypatch.setattr(installer, "prepare_requirements", lambda: None)
+    monkeypatch.setattr(installer, "ready", lambda: False)
+    # The limiter copy is the only file the rest of setup writes outside the venv.
+    monkeypatch.setattr(installer, "configured_path", lambda name, default: tmp_path / "limiter.toml")
+    monkeypatch.setattr(installer.shutil, "copyfile", lambda src, dst: None)
+
+    def run(args, **kwargs):  # noqa: ANN001
+        words = [str(a) for a in args]
+        if (failing_step == "probe" and "-c" in words) or (
+            failing_step != "probe" and failing_step in " ".join(words)
+        ):
+            raise subprocess.CalledProcessError(23, args)
+        if args[1:3] == ["-m", "venv"]:
+            venv = Path(args[3])
+            python = venv / ("Scripts/python.exe" if installer.os.name == "nt" else "bin/python")
+            python.parent.mkdir(parents=True)
+            python.touch()
+            (venv / "pyvenv.cfg").write_text(
+                f"version = {sys.version_info[0]}.{sys.version_info[1]}.0\n", encoding="utf-8"
+            )
+
+    monkeypatch.setattr(installer, "run", run)
+
+
+@pytest.mark.parametrize("failing_step", ["-m venv", "pip install -r", "probe"])
+def test_a_failed_install_after_the_set_aside_puts_the_previous_venv_back(
+    installation, tmp_path, monkeypatch, failing_step
+):
+    venv = tmp_path / "venv"
+    _venv_with_series(venv, "3.12.10")
+    (venv / "kept.txt").write_text("the venv that worked", encoding="utf-8")
+    _setup_failing_at(monkeypatch, tmp_path, failing_step)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        installer.setup()
+
+    assert (venv / "kept.txt").read_text(encoding="utf-8") == "the venv that worked"
+    assert installer.venv_series(venv) == "3.12"
+    assert not list(tmp_path.glob("venv.old-*"))
+
+
+def test_a_successful_install_removes_the_set_aside_venv(installation, tmp_path, monkeypatch):
+    venv = tmp_path / "venv"
+    _venv_with_series(venv, "3.12.10")
+    _setup_failing_at(monkeypatch, tmp_path, "nothing fails")
+
+    installer.setup()
+
+    assert installer.venv_series(venv) == f"{sys.version_info[0]}.{sys.version_info[1]}"
+    assert not list(tmp_path.glob("venv.old-*"))
+
+
+def _run_main(monkeypatch, action: str) -> int:
+    monkeypatch.setattr(sys, "argv", ["searxng_install.py", action])
+    return installer.main()
+
+
+def test_a_failed_setup_is_recorded_for_the_banner_and_cleared_by_the_next_success(tmp_path, monkeypatch):
+    from saiverse.environment_alerts import SEARXNG_SETUP_ALERT_ID, searxng_setup_alerts
+
+    monkeypatch.delenv(installer.SKIP_FAILURE_RECORD_ENV, raising=False)
+    monkeypatch.setattr(installer, "WORKSPACE_ROOT", tmp_path)
+
+    def fail():
+        raise RuntimeError("github unreachable")
+
+    monkeypatch.setattr(installer, "setup", fail)
+    assert _run_main(monkeypatch, "setup") == 1
+    record = tmp_path / installer.SETUP_FAILURE_RECORD
+    assert "github unreachable" in json.loads(record.read_text(encoding="utf-8"))["error"]
+    alerts = searxng_setup_alerts(tmp_path)
+    assert [a["id"] for a in alerts] == [SEARXNG_SETUP_ALERT_ID]
+    assert "github unreachable" in alerts[0]["details"]["error"]
+    assert "setup.bat" in alerts[0]["message"]
+    # The banner does not remove it: only a finished setup does.
+    assert record.is_file()
+
+    monkeypatch.setattr(installer, "setup", lambda: None)
+    assert _run_main(monkeypatch, "setup") == 0
+    assert not record.exists()
+    assert searxng_setup_alerts(tmp_path) == []
+
+
+def test_the_update_engine_keeps_the_failure_in_its_own_record(tmp_path, monkeypatch):
+    """refresh_searxng records the failure itself; a second banner would repeat it."""
+    from scripts import update_engine
+
+    monkeypatch.setenv(installer.SKIP_FAILURE_RECORD_ENV, "1")
+    monkeypatch.setattr(installer, "WORKSPACE_ROOT", tmp_path)
+
+    def fail():
+        raise RuntimeError("github unreachable")
+
+    monkeypatch.setattr(installer, "setup", fail)
+    assert _run_main(monkeypatch, "setup") == 1
+    assert not (tmp_path / installer.SETUP_FAILURE_RECORD).exists()
+    assert update_engine.SEARXNG_SKIP_FAILURE_RECORD_ENV == installer.SKIP_FAILURE_RECORD_ENV
+
+
+def test_the_setup_record_name_matches_the_banner_and_is_ignored_by_git():
+    from saiverse import environment_alerts
+
+    assert environment_alerts.SEARXNG_SETUP_FAILURE_RECORD == installer.SETUP_FAILURE_RECORD
+    ignored = (config.WORKSPACE_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".searxng_*_failed.json*" in ignored
+    assert installer.SETUP_FAILURE_RECORD.startswith(".searxng_")
+    assert installer.SETUP_FAILURE_RECORD.endswith("_failed.json")
 
 
 def test_venv_series_reads_version_and_version_info(tmp_path):

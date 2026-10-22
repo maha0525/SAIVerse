@@ -60,6 +60,11 @@ self_update.log
 # (scripts/rebuild_addon_envs.py). Ignored for the same reason.
 .venv.old-*/
 .addon_env_rebuild_failures.json
+# A failed SearXNG setup (scripts/searxng_install.py SETUP_FAILURE_RECORD) and a
+# SearXNG server the Update button's update could not start again
+# (update_engine.SEARXNG_RESTART_FAILURE_RECORD), plus their temporary files.
+# The backend shows them in the alert banner. Ignored for the same reason.
+.searxng_*_failed.json*
 
 # Debug log dump script (local-only developer tool)
 debug-dump.ps1

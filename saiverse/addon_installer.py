@@ -577,19 +577,36 @@ def _upgrade_env_pip(env_dir: Path, env_name: str, progress: ProgressCallback) -
         ))
 
 
-def _ensure_addon_env(addon_id: str, env_name: str, progress: ProgressCallback) -> Path:
+def _ensure_addon_env(
+    addon_id: str,
+    env_name: str,
+    progress: ProgressCallback,
+    new_envs: Optional[set[Path]] = None,
+) -> Path:
     """専用の環境を用意して、その場所を返す。
 
-    無ければ本体の Python (``sys.executable``) の ``-m venv`` で作り、使った Python の
-    バージョンを環境の中に記録する。記録が無い・記録の Python の major.minor が本体と
-    違う環境は作り直す (パッチ番号だけの違いは作り直さない、
-    ``addon_env_matches_current_python``)。記録は venv の作成に成功してから書くので、
-    途中で失敗した環境は次の実行で作り直される。
+    無ければ本体の Python (``sys.executable``) の ``-m venv`` で作る。記録が無い・
+    記録の Python の major.minor が本体と違う環境は作り直す (パッチ番号だけの違いは
+    作り直さない、``addon_env_matches_current_python``)。
+
+    作った環境の記録 (``saiverse_env.json``、使った Python のバージョン) はここでは
+    書かず、``new_envs`` に足す。記録を書くのは ``_execute_steps`` で、その環境を使う
+    step を含む全部の step が成功したあと (``_write_env_records``)。venv を作った直後に
+    書くと、パッケージを入れる step が失敗したり中断されたりしたときに「いまの Python で
+    作った」記録の付いた、パッケージの欠けた環境が残り、``get_addon_env_python`` が
+    通してしまう。記録の無い環境は、次の実行 (setup の作り直しと、アドオン管理の導入・
+    更新・選択肢の確定) で作り直される。``new_envs`` にある環境は、同じ実行の中の
+    前の step が作ったものなので、作り直さずに使う。``new_envs`` を渡さない呼び出しは、
+    作った環境の記録を書かない (次の実行で作り直される)。
 
     作った直後と、既存の環境をこのプロセスで初めて使うときに、その環境の pip を
     上げる (``_upgrade_env_pip``)。
     """
     env_dir = get_addon_env_dir(addon_id, env_name)
+    if new_envs is None:
+        new_envs = set()
+    if env_dir in new_envs:
+        return env_dir
     current = current_python_version()
     record = read_addon_env_record(env_dir)
     python = addon_env_python_path(env_dir)
@@ -618,16 +635,26 @@ def _ensure_addon_env(addon_id: str, env_name: str, progress: ProgressCallback) 
         progress=progress,
         label=f"venv {env_name}",
     )
-    _write_json_atomic(
-        env_dir / ADDON_ENV_RECORD_NAME,
-        {
-            "python_version": current,
-            "base_python": sys.executable,
-            "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-        },
-    )
+    new_envs.add(env_dir)
     _upgrade_env_pip(env_dir, env_name, progress)
     return env_dir
+
+
+def _write_env_records(new_envs: Iterable[Path]) -> None:
+    """``new_envs`` (この実行で作った専用の環境) に、いまの Python で作った記録を書く。
+
+    ``_execute_steps`` が全部の step の成功のあとに呼ぶ (``_ensure_addon_env``)。
+    """
+    current = current_python_version()
+    for env_dir in sorted(new_envs):
+        _write_json_atomic(
+            env_dir / ADDON_ENV_RECORD_NAME,
+            {
+                "python_version": current,
+                "base_python": sys.executable,
+                "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            },
+        )
 
 
 def _env_process_vars(env_dir: Path) -> dict:
@@ -648,14 +675,17 @@ def _env_process_vars(env_dir: Path) -> dict:
 
 
 def _resolve_step_env(
-    step: SetupStep, addon_id: Optional[str], progress: ProgressCallback
+    step: SetupStep,
+    addon_id: Optional[str],
+    progress: ProgressCallback,
+    new_envs: Optional[set[Path]] = None,
 ) -> Optional[Path]:
     env_name = _step_env(step)
     if env_name is None:
         return None
     if addon_id is None:
         raise AddonInstallError(f"{step.name}: env step needs the addon id")
-    return _ensure_addon_env(addon_id, env_name, progress)
+    return _ensure_addon_env(addon_id, env_name, progress, new_envs)
 
 
 def _env_needs_full_run(addon_id: str, env_name: str) -> bool:
@@ -702,13 +732,14 @@ def _exec_pip_install(
     addon_dir: Path,
     progress: ProgressCallback,
     addon_id: Optional[str] = None,
+    new_envs: Optional[set[Path]] = None,
 ) -> None:
     req_path = _check_addon_dir_path(addon_dir, step.requirements, "requirements")
     if not req_path.exists():
         raise AddonInstallError(
             f"pip_install: requirements file not found: {req_path}"
         )
-    env_dir = _resolve_step_env(step, addon_id, progress)
+    env_dir = _resolve_step_env(step, addon_id, progress, new_envs)
     if env_dir is not None:
         # 専用の環境の pip。本体の venv に何も入れないので constraints は渡さない
         # (渡すと、本体と両立しないパッケージを専用の環境に入れる目的が果たせない)。
@@ -746,6 +777,7 @@ def _exec_platform_script(
     addon_dir: Path,
     progress: ProgressCallback,
     addon_id: Optional[str] = None,
+    new_envs: Optional[set[Path]] = None,
 ) -> None:
     script_rel = step.windows if _is_windows() else step.unix
     if not script_rel:
@@ -763,7 +795,7 @@ def _exec_platform_script(
     else:
         # 実行権限がない場合に備えて bash 経由で実行 (sh ファイルでも .bash でも対応)
         args = ["bash", str(script_abs)]
-    env_dir = _resolve_step_env(step, addon_id, progress)
+    env_dir = _resolve_step_env(step, addon_id, progress, new_envs)
     _run_subprocess(
         args,
         cwd=addon_dir,
@@ -778,11 +810,12 @@ def _exec_python_script(
     addon_dir: Path,
     progress: ProgressCallback,
     addon_id: Optional[str] = None,
+    new_envs: Optional[set[Path]] = None,
 ) -> None:
     script_abs = _check_addon_dir_path(addon_dir, step.script, "python_script")
     if not script_abs.exists():
         raise AddonInstallError(f"python_script: script not found: {script_abs}")
-    env_dir = _resolve_step_env(step, addon_id, progress)
+    env_dir = _resolve_step_env(step, addon_id, progress, new_envs)
     if env_dir is not None:
         python = str(addon_env_python_path(env_dir))
         env_vars: Optional[dict] = _env_process_vars(env_dir)
@@ -923,15 +956,16 @@ def _execute_step(
     addon_dir: Path,
     data_dir: Path,
     progress: ProgressCallback,
+    new_envs: Optional[set[Path]] = None,
 ) -> None:
     if _step_should_skip(step, addon_dir, progress):
         return
     if isinstance(step, PipInstallStep):
-        _exec_pip_install(step, addon_dir, progress, addon_id)
+        _exec_pip_install(step, addon_dir, progress, addon_id, new_envs)
     elif isinstance(step, PlatformScriptStep):
-        _exec_platform_script(step, addon_dir, progress, addon_id)
+        _exec_platform_script(step, addon_dir, progress, addon_id, new_envs)
     elif isinstance(step, PythonScriptStep):
-        _exec_python_script(step, addon_dir, progress, addon_id)
+        _exec_python_script(step, addon_dir, progress, addon_id, new_envs)
     elif isinstance(step, RemoveDirStep):
         _exec_remove_dir(step, addon_dir, data_dir, progress)
     elif isinstance(step, GitCloneStep):
@@ -949,7 +983,10 @@ def _execute_steps(
     data_dir: Path,
     progress: ProgressCallback,
 ) -> None:
+    """``steps`` を順に走らせる。この実行で作った専用の環境の記録は、全部の step が
+    成功したあとにだけ書く (``_ensure_addon_env``)。途中の失敗・中断では書かない。"""
     total = len(steps)
+    new_envs: set[Path] = set()
     for i, step in enumerate(steps, start=1):
         progress(ProgressEvent(
             phase="step",
@@ -957,7 +994,8 @@ def _execute_steps(
             step_total=total,
             message=f"[{i}/{total}] {step.name}",
         ))
-        _execute_step(step, addon_id, addon_dir, data_dir, progress)
+        _execute_step(step, addon_id, addon_dir, data_dir, progress, new_envs)
+    _write_env_records(new_envs)
 
 
 # ---------------------------------------------------------------------------
@@ -1698,10 +1736,12 @@ def plan_env_rebuild(addon_id: str, expansion_dir: Optional[Path] = None) -> Set
 def _forget_env_records(addon_id: str, env_names: Iterable[str]) -> None:
     """作り直しに失敗した環境の記録 (``saiverse_env.json``) を消す。
 
-    ``_ensure_addon_env`` は venv を作った直後に記録を書くので、その後の step が
-    失敗すると「いまの Python で作った」記録の付いた、パッケージの欠けた環境が残る。
-    記録を消しておけば、``get_addon_env_python`` は「setup をやり直して」と断り、
-    次の setup とアドオン管理の選択肢の確定のやり直しが、その環境を作り直す。
+    この実行で作った環境には、step が全部成功するまで記録が書かれない
+    (``_ensure_addon_env``)。ここで消すのは、前の setup で作り直しに失敗したと
+    記録されていて (``env_failures_in_record``)、いまの Python の記録が付いたまま
+    作り直されずに使われた環境のため。記録を消しておけば、``get_addon_env_python`` は
+    「setup をやり直して」と断り、次の setup とアドオン管理の選択肢の確定のやり直しが、
+    その環境を作り直す。
     """
     for name in env_names:
         record = get_addon_env_dir(addon_id, name) / ADDON_ENV_RECORD_NAME

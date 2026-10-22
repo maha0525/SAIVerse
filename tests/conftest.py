@@ -1,6 +1,7 @@
 """Shared pytest fixtures and helpers for SAIVerse test suite."""
 
 import ipaddress
+import os
 import socket
 import sys
 from pathlib import Path
@@ -55,6 +56,40 @@ def mock_provider_network(monkeypatch):
         monkeypatch.setattr(provider_security, "socket", SimpleNamespace(getaddrinfo=getaddrinfo))
 
     return install
+
+
+_TEST_INTERPRETER = os.path.normcase(os.path.abspath(sys.executable))
+
+
+@pytest.fixture(autouse=True)
+def _refuse_pip_changes_to_the_test_interpreter(monkeypatch):
+    """pip install / uninstall with the interpreter running the tests changes the
+    real ``.venv`` of this checkout (2026-10-23: a test of the update engine reached
+    the dependency step in a temporary checkout and ran ``pip install --upgrade pip``
+    with this interpreter while SAIVerse was running). Fail such a call instead.
+
+    Only ``subprocess.run`` with this exact interpreter and ``-m pip install`` /
+    ``uninstall`` is refused; pip check / list and other interpreters are untouched.
+    """
+    import subprocess
+
+    real_run = subprocess.run
+
+    def guarded_run(args, *rest, **kwargs):
+        command = [str(part) for part in args] if isinstance(args, (list, tuple)) else []
+        if (
+            len(command) >= 4
+            and os.path.normcase(os.path.abspath(command[0])) == _TEST_INTERPRETER
+            and command[1:3] == ["-m", "pip"]
+            and command[3] in ("install", "uninstall")
+        ):
+            raise AssertionError(
+                "a test ran pip " + command[3] + " with the test interpreter, which changes "
+                "the real .venv: " + " ".join(command)
+            )
+        return real_run(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", guarded_run)
 
 
 @pytest.fixture(autouse=True)

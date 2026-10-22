@@ -319,14 +319,16 @@ def read_dependencies_record(project_dir: Path) -> dict[str, Any] | None:
     return recorded or None
 
 
-def write_dependencies_record(project_dir: Path) -> None:
+def write_dependencies_record(project_dir: Path) -> bool:
     """Record that ``update_dependencies`` of this engine finished for the code
-    on disk. Never raises: a write failure only means the next start installs
-    the packages once more."""
+    on disk. Returns whether the record was written. Never raises: a write
+    failure only means the next start installs the packages once more, unless
+    the caller holds back the completion marker too (``check_update_complete``
+    for a new install)."""
     fingerprint = completion_fingerprint(project_dir)
     if fingerprint is None:
         LOGGER.warning("VERSION is unreadable; the finished dependency step was not recorded")
-        return
+        return False
     target = dependencies_record_path(project_dir)
     try:
         _write_json_atomically(target, fingerprint)
@@ -336,6 +338,8 @@ def write_dependencies_record(project_dir: Path) -> None:
             target,
             exc_info=True,
         )
+        return False
+    return True
 
 
 def invalidate_dependencies_record(project_dir: Path) -> None:
@@ -706,7 +710,11 @@ def check_update_complete(project_dir: Path) -> int:
     record unwritten on purpose. Either case installs the packages once with
     this engine (``reinstall_dependencies_once``) instead of starting the full
     update, which would fetch a newer release
-    (docs/intent/update_completes_with_new_code.md section 2).
+    (docs/intent/update_completes_with_new_code.md section 2). That holds when
+    frontend packages are missing too, and also when the record matches but a
+    failure record is there (the reinstall's own npm ci failed half-way): only
+    a matching marker and record with no failure behind them send missing
+    frontend packages to the full update.
     """
     fingerprint = completion_fingerprint(project_dir)
     if fingerprint is None:
@@ -730,11 +738,24 @@ def check_update_complete(project_dir: Path) -> int:
             # too, for instance. The package check is cheap, so it runs even
             # here. None (cannot tell) keeps trusting the marker.
             missing_frontend = missing_frontend_packages(project_dir)
+            # The dependency step of this code has not finished here: an older
+            # updater skipped part of it, or this engine's step (an update's,
+            # or the reinstall before start) failed. Missing frontend packages
+            # are then most likely what that failure left (npm ci empties
+            # node_modules before it fails), and the way back is the same
+            # reinstall, never the full update: ``--manual`` would fetch a newer
+            # release, and starting must not move the version
+            # (docs/intent/update_completes_with_new_code.md section 2).
+            unfinished = read_dependencies_record(project_dir) != fingerprint or (
+                bool(missing_frontend) and read_dependencies_failure(project_dir) is not None
+            )
+            if unfinished:
+                if missing_frontend:
+                    _log_missing_frontend_packages(missing_frontend)
+                return reinstall_dependencies_once(project_dir)
             if missing_frontend:
                 _log_missing_frontend_packages(missing_frontend)
                 return CHECK_NEEDS_FINISH
-            if read_dependencies_record(project_dir) != fingerprint:
-                return reinstall_dependencies_once(project_dir)
             return CHECK_READY
         if recorded.get("version") == fingerprint["version"]:
             LOGGER.warning(
@@ -794,12 +815,19 @@ def check_update_complete(project_dir: Path) -> int:
             "unreadable frontend/package.json); starting without recording a version"
         )
         return CHECK_INCONCLUSIVE
-    write_completion_marker(project_dir)
     # No marker means no update ran here that could have skipped a step (a new
     # install, or one from before the marker); what is installed was just
-    # verified, so the packages are not installed again -- only recorded.
-    if read_dependencies_record(project_dir) != fingerprint:
-        write_dependencies_record(project_dir)
+    # verified, so the packages are not installed again -- only recorded. The
+    # dependency record comes first and the marker only once it is written: a
+    # marker without the record is exactly how a checkout finished by an older
+    # updater looks, and the next start would install every package again.
+    if read_dependencies_record(project_dir) != fingerprint and not write_dependencies_record(project_dir):
+        LOGGER.warning(
+            "The installed packages were verified, but the record could not be written; "
+            "the completion marker is not written either, so the next start verifies again"
+        )
+        return CHECK_READY
+    write_completion_marker(project_dir)
     return CHECK_READY
 
 
@@ -808,22 +836,44 @@ def check_update_complete(project_dir: Path) -> int:
 _DOTENV_HOME_VARIABLES = ("SAIVERSE_HOME", "SAIVERSE_USER_DATA_DIR")
 
 
+_DOTENV_DISABLED_VALUES = frozenset({"1", "true", "t", "yes", "y"})
+
+
+class DotenvUnavailable(RuntimeError):
+    """The checkout has a .env, but python-dotenv cannot be imported here."""
+
+
 def _apply_dotenv_home(project_dir: Path) -> None:
-    """Take SAIVERSE_HOME / SAIVERSE_USER_DATA_DIR from the checkout's .env, as
-    main.py would, unless they are already set. Only these: the rest of .env
-    (API keys and the like) has no business in this process or its children."""
-    try:
-        from dotenv import dotenv_values
-    except ImportError:
+    """Take SAIVERSE_HOME / SAIVERSE_USER_DATA_DIR from the checkout's .env
+    exactly as main.py's ``load_dotenv()`` resolves them, unless they are
+    already set. Only these: the rest of .env (API keys and the like) has no
+    business in this process or its children.
+
+    ``load_dotenv`` (override=False) expands ``${NAME}`` with the variables
+    already in the environment winning over those of .env; ``dotenv_values``
+    lets .env win, so ``SAIVERSE_HOME=${BASE}/saiverse`` resolved to another
+    folder than main.py's when BASE was set in both. ``DotEnv`` with
+    ``override=False`` is the object ``load_dotenv`` builds, read with the same
+    encoding; ``PYTHON_DOTENV_DISABLED`` is honoured as ``load_dotenv`` does.
+
+    Raises when .env exists but cannot be read that way: ``DotenvUnavailable``
+    without python-dotenv, the reading error otherwise. Callers count that as
+    "cannot tell where SAIVerse keeps its data".
+    """
+    if os.environ.get("PYTHON_DOTENV_DISABLED", "").casefold() in _DOTENV_DISABLED_VALUES:
+        return  # main.py's load_dotenv loads nothing either
+    dotenv_path = project_dir / ".env"
+    if not dotenv_path.is_file():
         return
     try:
-        values = dotenv_values(project_dir / ".env")
-    except Exception:  # an unreadable .env: the environment as is
-        LOGGER.warning("[deps] .env could not be read", exc_info=True)
-        return
+        from dotenv.main import DotEnv
+    except ImportError as exc:
+        raise DotenvUnavailable(f"{dotenv_path} exists, but python-dotenv is not installed") from exc
+    values = DotEnv(dotenv_path, interpolate=True, override=False, encoding="utf-8").dict()
     for name in _DOTENV_HOME_VARIABLES:
         value = values.get(name)
-        if value and name not in os.environ:
+        # load_dotenv skips names already set and sets every other non-None value.
+        if value is not None and name not in os.environ:
             os.environ[name] = value
 
 
@@ -853,6 +903,67 @@ def _saiverse_may_be_running(project_dir: Path) -> str | None:
     if state == "stopped":
         return None
     return f"SAIVerse may be running ({reason})"
+
+
+CHECK_STOPPED_OPTION = "--check-stopped"
+# Exit codes of ``--check-stopped`` (``check_stopped_for_setup``). setup.bat /
+# setup.sh do not read them: ``scripts/setup_venv.py check-stopped`` runs this
+# with the existing .venv's python and decides from them.
+STOPPED_NOTHING_RUNNING = 0
+STOPPED_MAY_BE_RUNNING = 20
+# SAIVerse itself is stopped, but psutil is unusable here, so the frontend and
+# SearXNG servers could not be listed.
+STOPPED_PROCESSES_UNCHECKED = 21
+# This .venv lacks what the check needs (python-dotenv for the .env, or
+# saiverse.runtime_marker): the caller checks with what it has instead.
+STOPPED_CHECK_UNAVAILABLE = 22
+
+
+def check_stopped_for_setup(project_dir: Path) -> int:
+    """``--check-stopped``: whether setup may change this checkout's environments.
+
+    setup replaces ``.venv``, the frontend packages and SearXNG, so it must
+    not start while SAIVerse (the runtime markers, read with SAIVERSE_HOME
+    resolved as main.py resolves it), this checkout's frontend server or its
+    SearXNG server runs -- on Linux / macOS a folder in use can be renamed,
+    so the rename of ``.venv`` failing is not a check. Prints why on stdout.
+    """
+    try:
+        _apply_dotenv_home(project_dir)
+    except DotenvUnavailable as exc:
+        print(f"[check-stopped] {exc}", flush=True)
+        return STOPPED_CHECK_UNAVAILABLE
+    except Exception as exc:  # .env exists but cannot be read: cannot tell
+        print(f"[check-stopped] .env could not be read ({exc}); cannot tell whether SAIVerse is running", flush=True)
+        return STOPPED_MAY_BE_RUNNING
+    root = str(project_dir)
+    added = root not in sys.path
+    if added:
+        sys.path.insert(0, root)
+    try:
+        from saiverse.runtime_marker import marker_status
+    except Exception as exc:
+        print(f"[check-stopped] saiverse.runtime_marker could not be loaded ({exc})", flush=True)
+        return STOPPED_CHECK_UNAVAILABLE
+    finally:
+        if added:
+            sys.path.remove(root)
+    try:
+        state, reason = marker_status()
+    except Exception as exc:
+        state, reason = "unknown", f"the runtime markers could not be read ({exc})"
+    if state != "stopped":
+        print(f"[check-stopped] SAIVerse may be running ({reason})", flush=True)
+        return STOPPED_MAY_BE_RUNNING
+    try:
+        running = find_frontend_servers(project_dir).processes + find_searxng_servers(project_dir)
+    except FrontendCheckUnavailable as exc:
+        print(f"[check-stopped] the frontend and SearXNG servers could not be listed ({exc})", flush=True)
+        return STOPPED_PROCESSES_UNCHECKED
+    if running:
+        print(f"[check-stopped] still running: {_describe_processes(running)}", flush=True)
+        return STOPPED_MAY_BE_RUNNING
+    return STOPPED_NOTHING_RUNNING
 
 
 def reinstall_dependencies_once(project_dir: Path) -> int:
@@ -2010,6 +2121,9 @@ SEARXNG_WINDOW_SIGNATURE = "title SearXNG"
 SEARXNG_LAUNCHER_PS1_NAME = "run_searxng_server.ps1"
 _SEARXNG_MODULE = "searx.webapp"
 _POWERSHELL_NAMES = frozenset({"powershell.exe", "pwsh.exe"})
+# Set for ``searxng_install.py setup`` run by ``refresh_searxng``: the installer
+# then does not write its own failure record (scripts/searxng_install.py).
+SEARXNG_SKIP_FAILURE_RECORD_ENV = "SAIVERSE_SEARXNG_SKIP_FAILURE_RECORD"
 SEARXNG_CHECK_TIMEOUT_SECONDS = 300
 SEARXNG_SETUP_TIMEOUT_SECONDS = 1200
 
@@ -2114,6 +2228,10 @@ def refresh_searxng(project_dir: Path) -> DependencyStepFailure | None:
             timeout=SEARXNG_SETUP_TIMEOUT_SECONDS,
             check=False,
             encoding="utf-8",
+            # The failure is returned and written to DEPENDENCIES_FAILURE_RECORD;
+            # the installer's own record would show it in a second banner.
+            # An installer that predates the variable ignores it.
+            env={**os.environ, SEARXNG_SKIP_FAILURE_RECORD_ENV: "1"},
         )
     except UpdateError as exc:
         LOGGER.warning(
@@ -2858,20 +2976,54 @@ def start_searxng(project_dir: Path) -> subprocess.Popen[Any]:
         raise UpdateError(f"Could not start the SearXNG server: {exc}") from exc
 
 
-def _restart_searxng(project_dir: Path, was_running: bool) -> None:
-    """Start the stopped SearXNG again; never raises (the update's outcome is
-    already decided when this runs)."""
+# Written by ``_restart_searxng`` when the SearXNG server the Update button's
+# update stopped could not be started again. It is written before the backend
+# starts, and the backend reads it at startup, shows it in the alert banner and
+# removes it (``saiverse/environment_alerts.py``): it reports what happened in
+# that restart, not a state a later step would clear.
+SEARXNG_RESTART_FAILURE_RECORD = ".searxng_restart_failed.json"
+
+
+def searxng_restart_failure_path(project_dir: Path) -> Path:
+    return project_dir / SEARXNG_RESTART_FAILURE_RECORD
+
+
+def _restart_searxng(project_dir: Path, was_running: bool) -> bool:
+    """Start the stopped SearXNG again; return whether it was started. Never
+    raises (the update's outcome does not depend on it).
+
+    Called before the backend is started, so that a failure written to
+    ``SEARXNG_RESTART_FAILURE_RECORD`` is there when the backend starts and
+    collects the alerts. Only the start itself is checked: a SearXNG that
+    exits right after starting shows its error in its own window.
+    """
     if not was_running:
-        return
+        return False
     try:
         process = start_searxng(project_dir)
-    except Exception:
+    except Exception as exc:
         LOGGER.exception(
             "The SearXNG server could not be started again; start SAIVerse with start.bat / "
             "start.sh to bring web search back"
         )
-        return
+        document = {
+            "version": read_version(project_dir),
+            "error": str(exc).strip()[-2000:],
+            "failed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        target = searxng_restart_failure_path(project_dir)
+        try:
+            _write_json_atomically(target, document)
+        except OSError:
+            LOGGER.error(
+                "Could not write %s, so the SAIVerse screen will not show this failure",
+                target,
+                exc_info=True,
+            )
+        return False
+    _remove_file(searxng_restart_failure_path(project_dir), purpose="a SearXNG server started again")
     LOGGER.info("SearXNG server started again (PID %s)", process.pid)
+    return True
 
 
 # --- The update sequence ----------------------------------------------------
@@ -2984,12 +3136,15 @@ def _restore_previous_version(
 ) -> None:
     """After a failure with the backend stopped: bring the previous version back.
 
-    Rolls back when the checkout moved, restarts the previous backend and
-    checks its health, starts the stopped SearXNG again, then the stopped
+    Rolls back when the checkout moved, starts the stopped SearXNG again
+    (before the backend, as the update does, so a failure to start it is in
+    ``SEARXNG_RESTART_FAILURE_RECORD`` when the backend collects its alerts),
+    restarts the previous backend and checks its health, then the stopped
     frontend -- rebuilt first when it is a production server and the code was
     rolled back, since the build on disk may be the new version's or
     half-written. Never raises: the caller re-raises the original failure
-    afterwards.
+    afterwards. ``searxng_was_running`` is False when the update already
+    started SearXNG again before it failed.
 
     When the code itself cannot be rolled back, nothing is started: the
     checkout is in an unknown state, and starting it could migrate the world
@@ -3015,6 +3170,7 @@ def _restore_previous_version(
             return
         rolled_back = True
 
+    _restart_searxng(project_dir, searxng_was_running)
     try:
         backend = restart_application(config)
         wait_for_healthy_restart(backend, config)
@@ -3022,7 +3178,6 @@ def _restore_previous_version(
     except Exception:
         LOGGER.exception("Previous revision also failed to restart")
 
-    _restart_searxng(project_dir, searxng_was_running)
     if frontend_mode is None:
         return
     if rolled_back and frontend_mode == FRONTEND_MODE_START:
@@ -3129,6 +3284,10 @@ def _run_detached_update(
         raise
 
     process: subprocess.Popen[Any] | None = None
+    # SearXNG before the backend: a failure to start it is written to
+    # SEARXNG_RESTART_FAILURE_RECORD, and the backend shows it in the banner
+    # only if the record is there when it starts.
+    searxng_started = _restart_searxng(project_dir, searxng_was_running)
     try:
         process = restart_application(config)
         payload = wait_for_healthy_restart(process, config)
@@ -3136,7 +3295,12 @@ def _run_detached_update(
         if process is not None:
             _terminate_spawned(process)
         _restore_previous_version(
-            config, project_dir, python, progress, stopped_frontend_mode, searxng_was_running
+            config,
+            project_dir,
+            python,
+            progress,
+            stopped_frontend_mode,
+            searxng_was_running and not searxng_started,
         )
         raise
     write_completion_marker(project_dir)
@@ -3148,7 +3312,6 @@ def _run_detached_update(
     )
     # After the backend is healthy, so the screen comes back to a backend that
     # answers.
-    _restart_searxng(project_dir, searxng_was_running)
     _restart_frontend(project_dir, stopped_frontend_mode)
 
 
@@ -3290,6 +3453,18 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Internal, with {INSTALL_DEPENDENCIES_OPTION}: leave the portable Node.js as it is (rollback).",
     )
     parser.add_argument(
+        CHECK_STOPPED_OPTION,
+        action="store_true",
+        help=(
+            "Internal, run by scripts/setup_venv.py check-stopped: report whether SAIVerse, this "
+            "folder's frontend server or its SearXNG server may be running. Changes nothing. "
+            f"Exit {STOPPED_NOTHING_RUNNING}: nothing runs. Exit {STOPPED_MAY_BE_RUNNING}: something "
+            f"runs or cannot be ruled out. Exit {STOPPED_PROCESSES_UNCHECKED}: SAIVerse is stopped, but "
+            f"the servers could not be listed. Exit {STOPPED_CHECK_UNAVAILABLE}: this .venv cannot run "
+            "the check."
+        ),
+    )
+    parser.add_argument(
         "--switch-channel",
         choices=sorted(CHANNEL_BRANCHES),
         help=(
@@ -3308,6 +3483,8 @@ def main(argv: list[str] | None = None) -> int:
             args.install_dependencies or None,
             replace_portable_node=not args.keep_portable_node,
         )
+    if args.check_stopped:
+        return check_stopped_for_setup(project_dir)
     if args.check_complete:
         setup_logging(project_dir, to_file=False)
         return check_update_complete(project_dir)

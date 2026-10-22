@@ -54,6 +54,8 @@ if [ -x ".venv/bin/python" ]; then
     elif [ "$UPDATE_CHECK_RC" -eq 12 ]; then
         echo "[WARN] The packages for this version could not be installed once more."
         echo "[WARN] Starting anyway. The SAIVerse screen shows what happened and what to do."
+        echo "[WARN] If the SAIVerse screen does not open, its packages are missing too: check the"
+        echo "[WARN] internet connection, stop SAIVerse (Ctrl+C), then run start.sh again."
     elif [ "$UPDATE_CHECK_RC" -ne 0 ]; then
         echo "[WARN] Could not verify the update state. Starting anyway."
     fi

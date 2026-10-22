@@ -47,6 +47,18 @@ def _saiverse_stopped():  # type: ignore[no-untyped-def]
         yield
 
 
+@pytest.fixture(autouse=True)
+def _no_real_dependency_step():  # type: ignore[no-untyped-def]
+    """A check that reaches the reinstall would run pip / npm with this test's
+    interpreter (the tmp checkout has no engine file, so the step runs in this
+    process). Fail instead."""
+    def refuse(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("the real dependency step was reached")
+
+    with patch.object(update_engine, "update_dependencies", side_effect=refuse):
+        yield
+
+
 class FakeProcess:
     """Just enough of psutil.Process for the frontend search and stop."""
 
@@ -434,6 +446,10 @@ def test_missing_dev_dependencies_are_not_counted(tmp_path: Path) -> None:
 def test_a_matching_marker_does_not_hide_missing_packages(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
     project = _project_with_frontend(tmp_path, installed=["react"])
     update_engine.write_completion_marker(project)
+    # The dependency step finished too: nothing but the full update can explain
+    # the missing packages (without the record it is the reinstall's case,
+    # tests/test_update_dependencies_reinstall.py).
+    update_engine.write_dependencies_record(project)
     with caplog.at_level(logging.WARNING, logger="saiverse.update"):
         assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
     message = " ".join(record.getMessage() for record in caplog.records)
@@ -454,6 +470,7 @@ def test_the_log_names_at_most_five_missing_packages(tmp_path: Path, caplog) -> 
         json.dumps({"dependencies": {f"pkg{i}": "1" for i in range(8)}}), encoding="utf-8"
     )
     update_engine.write_completion_marker(project)
+    update_engine.write_dependencies_record(project)
     with caplog.at_level(logging.WARNING, logger="saiverse.update"):
         assert update_engine.check_update_complete(project) == update_engine.CHECK_NEEDS_FINISH
     message = " ".join(record.getMessage() for record in caplog.records)
@@ -713,9 +730,11 @@ def test_a_switch_that_fails_after_moving_is_rolled_back_to_its_branch_and_resta
 # --- SearXNG in the detached update (docs/intent/update_completes_with_new_code.md §3) --
 
 
-def test_a_running_searxng_is_stopped_with_the_frontend_and_started_after_the_backend(
+def test_a_running_searxng_is_stopped_with_the_frontend_and_started_before_the_backend(
     tmp_path: Path,
 ) -> None:
+    """Before the backend: a failure to start SearXNG is recorded for the banner,
+    and the backend collects its alerts when it starts."""
     recorder = _Recorder(update_engine.FRONTEND_MODE_START, searxng_running=True)
     recorder.run(tmp_path)
     assert recorder.order == [
@@ -727,12 +746,65 @@ def test_a_running_searxng_is_stopped_with_the_frontend_and_started_after_the_ba
         "code",
         "dependencies (npm ci)",
         "build",
+        "start searxng",
         "restart backend",
         "health",
         "marker",
-        "start searxng",
         "start frontend start",
     ]
+
+
+def test_a_backend_failure_after_searxng_started_does_not_start_a_second_one(tmp_path: Path) -> None:
+    recorder = _Recorder("start", fail="health", searxng_running=True)
+    with pytest.raises(update_engine.UpdateError, match="health failed"):
+        recorder.run(tmp_path)
+    assert recorder.order.count("start searxng") == 1
+    assert recorder.order.index("start searxng") < recorder.order.index("restart backend")
+
+
+def test_a_searxng_that_cannot_be_started_is_recorded_before_the_backend_starts(tmp_path: Path) -> None:
+    """The backend reads the record at startup and shows it in the banner
+    (saiverse/environment_alerts.py), so the record is there before it starts."""
+    from saiverse.environment_alerts import SEARXNG_RESTART_ALERT_ID, searxng_restart_alerts
+
+    recorder = _Recorder("start", searxng_running=True)
+    record = update_engine.searxng_restart_failure_path(tmp_path)
+    seen_at_backend_start: list[bool] = []
+    original_restart = recorder.restart
+
+    def restart(config):  # type: ignore[no-untyped-def]
+        seen_at_backend_start.append(record.is_file())
+        return original_restart(config)
+
+    def cannot_start(project_dir):  # type: ignore[no-untyped-def]
+        recorder.order.append("start searxng")
+        raise update_engine.UpdateError("Could not start the SearXNG server: no cmd.exe")
+
+    recorder.restart = restart  # type: ignore[method-assign]
+    recorder.start_searxng = cannot_start  # type: ignore[method-assign]
+    recorder.run(tmp_path)  # the update itself succeeds
+
+    assert seen_at_backend_start == [True]
+    assert "no cmd.exe" in json.loads(record.read_text(encoding="utf-8"))["error"]
+    alerts = searxng_restart_alerts(tmp_path)
+    assert [a["id"] for a in alerts] == [SEARXNG_RESTART_ALERT_ID]
+    assert "no cmd.exe" in alerts[0]["details"]["error"]
+    # It reports that restart, so the backend shows it once.
+    assert not record.exists()
+    assert searxng_restart_alerts(tmp_path) == []
+
+
+def test_a_searxng_started_again_removes_an_old_restart_failure(tmp_path: Path) -> None:
+    record = update_engine.searxng_restart_failure_path(tmp_path)
+    record.write_text('{"error": "old"}', encoding="utf-8")
+    _Recorder("start", searxng_running=True).run(tmp_path)
+    assert not record.exists()
+
+
+def test_the_searxng_restart_record_name_matches_the_banner() -> None:
+    from saiverse import environment_alerts
+
+    assert environment_alerts.SEARXNG_RESTART_FAILURE_RECORD == update_engine.SEARXNG_RESTART_FAILURE_RECORD
 
 
 def test_a_searxng_that_was_not_running_is_not_started(tmp_path: Path) -> None:
@@ -749,7 +821,7 @@ def test_a_failure_after_the_code_moved_starts_searxng_again_with_the_previous_v
     with pytest.raises(update_engine.UpdateError):
         recorder.run(tmp_path)
     tail = recorder.order[recorder.order.index("dependencies (npm ci)") + 1:]
-    assert tail == ["rollback", "restart backend", "health", "start searxng", "build", "start frontend start"]
+    assert tail == ["rollback", "start searxng", "restart backend", "health", "build", "start frontend start"]
 
 
 def test_failure_to_stop_searxng_changes_nothing_and_restarts_the_rest(tmp_path: Path) -> None:

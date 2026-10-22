@@ -196,6 +196,111 @@ def test_a_new_install_with_missing_packages_is_not_recorded(tmp_path: Path) -> 
     assert update_engine.read_dependencies_record(project) is None
 
 
+def test_a_failed_record_write_on_a_new_install_writes_no_marker(tmp_path: Path) -> None:
+    """A marker without the record is how a checkout finished by an older
+    updater looks; the next start would install every package again."""
+    project = _make_project(tmp_path)
+    record = update_engine.dependencies_record_path(project)
+    real_write = update_engine._write_json_atomically
+
+    def refuse_the_record(target, document):  # type: ignore[no-untyped-def]
+        if target == record:
+            raise PermissionError(13, "denied")
+        return real_write(target, document)
+
+    with patch.object(update_engine, "_write_json_atomically", side_effect=refuse_the_record):
+        assert _Child(project).check() == update_engine.CHECK_READY
+    assert update_engine.read_completion_marker(project) is None
+    assert update_engine.read_dependencies_record(project) is None
+
+    # The next start verifies again and records both, without installing.
+    child = _Child(project)
+    assert child.check() == update_engine.CHECK_READY
+    assert child.installs == 0
+    assert update_engine.read_dependencies_record(project) == update_engine.completion_fingerprint(project)
+    assert update_engine.read_completion_marker(project) == update_engine.completion_fingerprint(project)
+
+
+def test_a_new_install_writes_the_record_before_the_marker(tmp_path: Path) -> None:
+    project = _make_project(tmp_path)
+    record_there: list[bool] = []
+    real_marker = update_engine.write_completion_marker
+
+    def marker(project_dir):  # type: ignore[no-untyped-def]
+        record_there.append(update_engine.read_dependencies_record(project_dir) is not None)
+        real_marker(project_dir)
+
+    with patch.object(update_engine, "write_completion_marker", side_effect=marker):
+        assert _Child(project).check() == update_engine.CHECK_READY
+    assert record_there == [True]
+
+
+def test_the_record_writer_reports_whether_it_wrote(tmp_path: Path) -> None:
+    project = _make_project(tmp_path)
+    assert update_engine.write_dependencies_record(project) is True
+    with patch.object(update_engine, "_write_json_atomically", side_effect=OSError("disk full")):
+        assert update_engine.write_dependencies_record(project) is False
+    (project / "VERSION").unlink()
+    assert update_engine.write_dependencies_record(project) is False
+
+
+# --- an npm failure in the reinstall is retried by the reinstall, never by --manual -------
+
+
+def _empty_node_modules(project: Path) -> None:
+    """What a failed npm ci leaves: node_modules without the packages."""
+    (project / "frontend" / "node_modules" / "next" / "package.json").unlink()
+
+
+def test_missing_frontend_packages_after_a_failed_reinstall_run_the_reinstall_again(tmp_path: Path) -> None:
+    """The first try's npm ci emptied node_modules and failed (exit 12). The next
+    start must not go to the full update (exit 10 -> --manual), which can fetch
+    a newer release; it installs the packages of this version once more."""
+    project = _updated_by_an_older_updater(tmp_path)
+    assert _Child(project, fail=True).check() == update_engine.CHECK_DEPENDENCIES_FAILED
+    _empty_node_modules(project)
+
+    again = _Child(project, fail=True)
+    assert again.check() == update_engine.CHECK_DEPENDENCIES_FAILED  # not CHECK_NEEDS_FINISH
+    assert again.installs == 1
+
+    retry = _Child(project)
+    assert retry.check() == update_engine.CHECK_READY
+    assert retry.installs == 1
+    assert update_engine.read_version(project) == "0.3.26"
+
+
+def test_missing_frontend_packages_with_a_matching_record_and_a_failure_run_the_reinstall(tmp_path: Path) -> None:
+    """The record matches (a step that cannot be retried left it, with its
+    failure), and node_modules was emptied since: the reinstall, not --manual."""
+    project = _updated_by_an_older_updater(tmp_path)
+    update_engine.write_dependencies_record(project)
+    update_engine.write_dependencies_failure(project, "npm ci failed", steps=["portable_node"])
+    _empty_node_modules(project)
+    child = _Child(project)
+    assert child.check() == update_engine.CHECK_READY
+    assert child.installs == 1
+
+
+def test_missing_frontend_packages_after_a_finished_step_still_need_the_full_update(tmp_path: Path) -> None:
+    project = _updated_by_an_older_updater(tmp_path)
+    update_engine.write_dependencies_record(project)
+    _empty_node_modules(project)
+    child = _Child(project)
+    assert child.check() == update_engine.CHECK_NEEDS_FINISH
+    assert child.installs == 0
+
+
+def test_the_launchers_say_what_to_do_when_the_screen_does_not_open() -> None:
+    root = Path(update_engine.__file__).resolve().parent.parent
+    bat = (root / "start.bat").read_text(encoding="ascii")
+    block = bat[bat.index("\n:dependencies_failed"):bat.index("\n:finish_update")]
+    assert "does not open" in block and "internet" in block and "start.bat again" in block
+    sh = (root / "start.sh").read_text(encoding="utf-8")
+    block = sh[sh.index('"$UPDATE_CHECK_RC" -eq 12'):]
+    assert "does not open" in block and "start.sh again" in block
+
+
 # --- 4. a failure does not stop the start and is shown ---------------------------------
 
 
@@ -616,3 +721,57 @@ def test_dotenv_home_variables_are_taken_unless_already_set(tmp_path: Path, monk
     assert os.environ["SAIVERSE_HOME"] == "/from/dotenv"
     assert os.environ["SAIVERSE_USER_DATA_DIR"] == "/already/set"
     assert "OPENAI_API_KEY" not in os.environ
+
+
+def test_dotenv_expansion_lets_the_environment_win_as_main_py_does(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """main.py's load_dotenv() expands ${BASE} with the environment winning;
+    dotenv_values lets .env win, and the check then looked at another folder's
+    runtime markers. The expected value comes from load_dotenv itself, run in a
+    child process on the same .env."""
+    import subprocess
+
+    (tmp_path / ".env").write_text("BASE=C:/other\nSAIVERSE_HOME=${BASE}/saiverse\n", encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k not in ("SAIVERSE_HOME", "PYTHON_DOTENV_DISABLED")}
+    env["BASE"] = "D:/live"
+    probe = (
+        "import os, sys; from dotenv import load_dotenv; load_dotenv(sys.argv[1]); "
+        "print(os.environ.get('SAIVERSE_HOME'))"
+    )
+    loaded = subprocess.run(
+        [sys.executable, "-c", probe, str(tmp_path / ".env")], env=env, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert loaded == "D:/live/saiverse"
+
+    monkeypatch.setenv("BASE", "D:/live")
+    monkeypatch.delenv("SAIVERSE_HOME", raising=False)
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    update_engine._apply_dotenv_home(tmp_path)
+    assert os.environ["SAIVERSE_HOME"] == loaded
+
+
+def test_python_dotenv_disabled_loads_nothing_as_in_main_py(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / ".env").write_text("SAIVERSE_HOME=/from/dotenv\n", encoding="utf-8")
+    monkeypatch.delenv("SAIVERSE_HOME", raising=False)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "true")
+    update_engine._apply_dotenv_home(tmp_path)
+    assert "SAIVERSE_HOME" not in os.environ
+
+
+def test_an_unreadable_dotenv_postpones_the_reinstall(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Where SAIVerse keeps its runtime markers cannot be told: count it as running."""
+    (tmp_path / ".env").write_bytes(b"SAIVERSE_HOME=\xff\xfe\n")
+    monkeypatch.delenv("SAIVERSE_HOME", raising=False)
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    reason = _REAL_SAIVERSE_MAY_BE_RUNNING(tmp_path)
+    assert reason is not None and "could not be checked" in reason
+
+
+def test_a_dotenv_without_python_dotenv_postpones_the_reinstall(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / ".env").write_text("SAIVERSE_HOME=/from/dotenv\n", encoding="utf-8")
+    monkeypatch.delenv("SAIVERSE_HOME", raising=False)
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    monkeypatch.setitem(sys.modules, "dotenv.main", None)
+    with pytest.raises(update_engine.DotenvUnavailable):
+        update_engine._apply_dotenv_home(tmp_path)
+    reason = _REAL_SAIVERSE_MAY_BE_RUNNING(tmp_path)
+    assert reason is not None and "could not be checked" in reason

@@ -14,6 +14,7 @@ import time
 
 from searxng_config import (
     SCRIPT_DIR,
+    WORKSPACE_ROOT,
     configured_path,
     pinned_release,
     settings_path,
@@ -256,12 +257,55 @@ def set_aside_venv_of_other_series() -> Path | None:
     return aside
 
 
+def put_back_set_aside_venv(aside: Path) -> bool:
+    """After a failed install: remove the half-made venv and give ``aside``
+    its name back. Returns whether that worked; prints what to do when not."""
+    venv = venv_directory()
+    try:
+        if venv.exists():
+            shutil.rmtree(venv)
+        os.replace(aside, venv)
+    except OSError as exc:
+        print(
+            f"[ERROR] The previous SearXNG venv {aside} could not be put back ({exc}). Delete "
+            f"{venv} yourself, rename {aside.name} to {venv.name}, then run setup again.\n"
+            f"[ERROR] 前の SearXNG の専用の環境 {aside} を元に戻せませんでした。{venv} を手で消し、"
+            f"{aside.name} の名前を {venv.name} に変えてから、setup をもう一度実行してください。",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    print(
+        "[INFO] Put the previous SearXNG venv back; SearXNG runs as it did before.\n"
+        "[INFO] 前の SearXNG の専用の環境に戻しました。SearXNG はこれまでどおり動きます。",
+        flush=True,
+    )
+    return True
+
+
 def setup() -> None:
     print(f"[INFO] SearXNG commit: {pinned_release()['commit']}", flush=True)
     prepare_source()
     prepare_compatibility()
     prepare_requirements()
     aside = set_aside_venv_of_other_series()
+    try:
+        install_into_venv()
+    except BaseException:
+        # The venv of the other series was the one that worked: do not leave
+        # SearXNG without it, whatever stopped the new one (put_back_set_aside_venv
+        # prints whether that worked).
+        if aside is not None:
+            put_back_set_aside_venv(aside)
+        raise
+    if aside is not None:
+        shutil.rmtree(aside, ignore_errors=True)
+    print("[OK] SearXNG setup complete", flush=True)
+
+
+def install_into_venv() -> None:
+    """Create the venv if needed, install the pinned SearXNG into it, write
+    the settings and check it (the part of ``setup`` after the set-aside)."""
     if not venv_python().is_file():
         run([sys.executable, "-m", "venv", venv_directory()])
     marker = venv_directory() / INSTALL_MARKER
@@ -285,9 +329,43 @@ def setup() -> None:
     shutil.copyfile(source_directory() / "searx/limiter.toml", limiter)
     run([venv_python(), "-c", PROBE, source_directory(), pinned_release()["commit"]], env=probe_environment())
     marker.write_text(json.dumps(install_identity(), indent=2), encoding="utf-8")
-    if aside is not None:
-        shutil.rmtree(aside, ignore_errors=True)
-    print("[OK] SearXNG setup complete", flush=True)
+
+
+# A failed ``setup`` is written here (the SAIVerse folder), so the SAIVerse
+# screen shows it in its alert banner (saiverse/environment_alerts.py reads it)
+# and not only the setup / SearXNG window. The next successful ``setup``
+# removes it. Not written when the update engine runs the setup
+# (SKIP_FAILURE_RECORD_ENV): it records the failure in its own record, and a
+# second banner would repeat it.
+SETUP_FAILURE_RECORD = ".searxng_setup_failed.json"
+SKIP_FAILURE_RECORD_ENV = "SAIVERSE_SEARXNG_SKIP_FAILURE_RECORD"
+
+
+def setup_failure_record_path() -> Path:
+    return WORKSPACE_ROOT / SETUP_FAILURE_RECORD
+
+
+def write_setup_failure(error: str) -> None:
+    """Record a failed setup for the banner; a write failure is only reported."""
+    if os.environ.get(SKIP_FAILURE_RECORD_ENV) == "1":
+        return
+    target = setup_failure_record_path()
+    document = {"error": error.strip()[-2000:], "failed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    temporary = target.with_name(f"{target.name}.tmp{os.getpid()}")
+    try:
+        temporary.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, target)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        print(f"[WARN] Could not write {target} ({exc}); the SAIVerse screen will not show this failure",
+              file=sys.stderr)
+
+
+def clear_setup_failure() -> None:
+    try:
+        setup_failure_record_path().unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"[WARN] Could not remove {setup_failure_record_path()} ({exc})", file=sys.stderr)
 
 
 def main() -> int:
@@ -304,7 +382,12 @@ def main() -> int:
         elif args.action == "check":
             return 0 if ready() else 1
         else:
-            setup()
+            try:
+                setup()
+            except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+                write_setup_failure(str(exc))
+                raise
+            clear_setup_failure()
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[ERROR] SearXNG: {exc}", file=sys.stderr)

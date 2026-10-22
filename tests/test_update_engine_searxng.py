@@ -17,6 +17,7 @@ psutil is replaced by fakes, ``subprocess.Popen`` and ``_run`` by mocks.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -296,8 +297,29 @@ def test_a_failed_restart_does_not_raise(tmp_path: Path, caplog) -> None:  # typ
     with caplog.at_level(logging.ERROR, logger="saiverse.update"), patch.object(
         update_engine, "start_searxng", side_effect=update_engine.UpdateError("no cmd")
     ):
-        update_engine._restart_searxng(tmp_path, True)  # must not raise
+        assert update_engine._restart_searxng(tmp_path, True) is False  # must not raise
     assert "SearXNG server could not be started again" in caplog.text
+    # Not only the log: the backend started next shows it in the banner.
+    record = update_engine.searxng_restart_failure_path(tmp_path)
+    assert "no cmd" in json.loads(record.read_text(encoding="utf-8"))["error"]
+
+
+def test_the_installer_run_by_the_update_leaves_the_failure_to_the_update(tmp_path: Path) -> None:
+    """refresh_searxng records a failed setup in DEPENDENCIES_FAILURE_RECORD; the
+    installer's own record would show it in a second banner."""
+    project = _checkout_for_refresh(tmp_path)
+    envs: list = []
+
+    def fake_run(command, *, cwd, label, timeout=900, check=True, encoding=None, env=None):  # type: ignore[no-untyped-def]
+        envs.append(env)
+        return MagicMock(returncode=1 if command[-1] == "check" else 0, stdout="", stderr="")
+
+    with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
+        update_engine, "_run", side_effect=fake_run
+    ), patch.object(update_engine, "find_searxng_servers", return_value=[]):
+        assert update_engine.refresh_searxng(project) is None
+    assert envs[0] is None  # check
+    assert envs[1][update_engine.SEARXNG_SKIP_FAILURE_RECORD_ENV] == "1"  # setup
 
 
 def test_a_searxng_that_was_not_running_is_not_started(tmp_path: Path) -> None:

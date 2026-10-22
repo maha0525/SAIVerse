@@ -83,6 +83,16 @@ set "PY_VERSION="
 for /f "tokens=*" %%v in ('call "%PYTHON_EXE%" --version 2^>^&1') do set "PY_VERSION=%%v"
 echo [OK] %PY_VERSION% - %PYTHON_EXE%
 
+REM --- 1b. Stop while SAIVerse runs ---
+REM Before anything is changed: .venv, the portable Node.js, the frontend
+REM packages and SearXNG must not be replaced under a running SAIVerse.
+REM scripts\setup_venv.py check-stopped looks at the runtime markers of the
+REM SAIVerse data folder and at this folder's frontend and SearXNG servers,
+REM prints what to do, and exits 1 when something runs or it cannot tell.
+REM A first install has nothing running and goes on. Same as setup.sh.
+"%PYTHON_EXE%" scripts\setup_venv.py check-stopped
+if errorlevel 1 goto :saiverse_running
+
 REM --- 2. Node.js check & auto-install ---
 REM A portable install from a previous setup comes first, as in start.bat.
 REM Bring it to the version install_node_portable.ps1 pins; if that fails the
@@ -158,13 +168,16 @@ powershell -ExecutionPolicy Bypass -File scripts\install_vc_redist.ps1
 
 REM --- 3. Create or rebuild .venv ---
 REM scripts\setup_venv.py prepare, run with the python chosen above, prints one
-REM line: keep / create / renamed <old name> / locked. An existing .venv made
-REM with another Python series than 3.13, or a broken one, is not deleted: it is
-REM renamed to .venv.old-<date>-<time> and deleted only after the new .venv has
-REM its packages. If the new one fails, the old one is put back. When the rename
-REM is refused because files in .venv are in use, nothing changes and setup
-REM stops. With SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 the Python series of an
-REM existing .venv is not checked.
+REM line: keep / create / renamed <old name> / resume <old name> / locked. An
+REM existing .venv made with another Python series than 3.13, or a broken one,
+REM is not deleted: it is renamed to .venv.old-<date>-<time> and deleted only
+REM after the new .venv has its packages and the addon packages were installed
+REM again. If the new one fails, the old one is put back. resume means an
+REM earlier setup stopped after it made the new .venv: it is used as it is, and
+REM the rest runs as for renamed. When the rename is refused because files in
+REM .venv are in use, nothing changes and setup stops. With
+REM SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 the Python series of an existing
+REM .venv is not checked.
 set "VENV_CHECK_ARGS=--expect-series 3.13"
 if defined ALLOW_OTHER_PYTHON set "VENV_CHECK_ARGS="
 if defined ALLOW_OTHER_PYTHON echo [INFO] SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1: the Python series of an existing .venv is not checked.
@@ -178,6 +191,7 @@ for /f "tokens=1,*" %%a in ('call "%PYTHON_EXE%" scripts\setup_venv.py prepare %
 if "%VENV_ACTION%"=="keep" goto :venv_keep
 if "%VENV_ACTION%"=="create" goto :venv_create
 if "%VENV_ACTION%"=="renamed" goto :venv_create
+if "%VENV_ACTION%"=="resume" goto :venv_resume
 if "%VENV_ACTION%"=="locked" goto :venv_locked
 echo [ERROR] Could not check the existing .venv folder. See the messages above.
 pause
@@ -230,6 +244,11 @@ exit /b 1
 
 :venv_keep
 echo [OK] .venv already exists
+goto :venv_ready
+
+:venv_resume
+set "ADDON_REBUILD_ARGS=--core-venv-recreated"
+echo [OK] Continuing with the .venv made by the previous setup
 
 :venv_ready
 
@@ -244,18 +263,20 @@ python -m pip install -r requirements.lock
 if errorlevel 1 goto :pip_failed
 echo [OK] Python packages installed
 
-REM --- 5b. Delete the old .venv and reinstall addon packages ---
-REM The new .venv is complete, so .venv.old-<date>-<time> folders can go.
-REM When this run created a new .venv (create / renamed), --core-venv-recreated
-REM makes the script first run again, with the saved answers, the addon setup
-REM steps that install packages into .venv (pip_install without env). Then
-REM addon environments made with another Python series are rebuilt with the
-REM saved answers. Their failures do not stop setup: SAIVerse itself works,
-REM and the script prints what to do and records the failures in
-REM .addon_env_rebuild_failures.json. Same as setup.sh.
-"%PYTHON_EXE%" scripts\setup_venv.py finish
+REM --- 5b. Reinstall addon packages, then delete the old .venv ---
+REM When this run created a new .venv (create / renamed / resume),
+REM --core-venv-recreated makes the script first run again, with the saved
+REM answers, the addon setup steps that install packages into .venv
+REM (pip_install without env). Then addon environments made with another
+REM Python series are rebuilt with the saved answers. Their failures do not
+REM stop setup: SAIVerse itself works, and the script prints what to do and
+REM records the failures in .addon_env_rebuild_failures.json, which the next
+REM setup reads. Only then .venv.old-<date>-<time> folders are deleted: a setup
+REM stopped before this point leaves the old one, and the next setup resumes.
+REM Same as setup.sh.
 python scripts\rebuild_addon_envs.py %ADDON_REBUILD_ARGS%
 if errorlevel 1 echo [WARN] Could not check the addon packages. SAIVerse itself works; see the messages above.
+"%PYTHON_EXE%" scripts\setup_venv.py finish
 
 REM --- 6. npm install ---
 echo.
@@ -423,6 +444,10 @@ exit /b 0
 REM ---------------------------------------------------------------
 REM Subroutines
 REM ---------------------------------------------------------------
+
+:saiverse_running
+pause
+exit /b 1
 
 :pip_failed
 echo [ERROR] pip install failed.
