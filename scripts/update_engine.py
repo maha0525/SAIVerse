@@ -803,6 +803,33 @@ def check_update_complete(project_dir: Path) -> int:
     return CHECK_READY
 
 
+def _saiverse_may_be_running(project_dir: Path) -> str | None:
+    """Why the reinstall before start must wait, or None when SAIVerse is stopped.
+
+    The frontend check alone does not cover a backend left running (the
+    frontend window closed, or ``python main.py`` started by hand); pip would
+    then replace packages the backend has loaded. ``saiverse.runtime_marker``
+    is the record a running backend keeps; not being able to read it counts as
+    running, so the reinstall waits for the next start instead of guessing.
+    """
+    root = str(project_dir)
+    added = root not in sys.path
+    try:
+        if added:
+            sys.path.insert(0, root)
+        try:
+            from saiverse.runtime_marker import marker_status
+        finally:
+            if added:
+                sys.path.remove(root)
+        state, reason = marker_status()
+    except Exception as exc:  # cannot tell -> treat as running
+        return f"whether SAIVerse is running could not be checked ({exc})"
+    if state == "stopped":
+        return None
+    return f"SAIVerse may be running ({reason})"
+
+
 def reinstall_dependencies_once(project_dir: Path) -> int:
     """Run ``update_dependencies`` of this engine once, for the code as it is.
 
@@ -826,6 +853,18 @@ def reinstall_dependencies_once(project_dir: Path) -> int:
         "can take several minutes.",
         read_version(project_dir) or "(unknown)",
     )
+    running = _saiverse_may_be_running(project_dir)
+    if running is not None:
+        LOGGER.error("Installing the packages once more is postponed: %s", running)
+        write_dependencies_failure(
+            project_dir,
+            f"{running}. The packages were not installed once more, so nothing running is "
+            "changed under it. Close every SAIVerse window, then run start.bat (start.sh on "
+            "macOS / Linux) again.\nSAIVerse が動いている (か確かめられない) ため、パッケージの"
+            "入れ直しを次の起動へ延ばしました。SAIVerse の窓をすべて閉じてから、start.bat "
+            "(Mac / Linux は start.sh) をもう一度実行してください。",
+        )
+        return CHECK_DEPENDENCIES_FAILED
     try:
         # npm ci beside a running frontend would empty node_modules on Windows.
         refuse_while_frontend_runs(project_dir)

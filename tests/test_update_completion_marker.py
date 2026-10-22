@@ -24,6 +24,15 @@ from scripts import update_engine
 _INSTALLED_PYTEST = metadata.version("pytest")
 
 
+
+@pytest.fixture(autouse=True)
+def _saiverse_stopped():  # type: ignore[no-untyped-def]
+    """The reinstall waits while SAIVerse may be running; answer "stopped"
+    instead of reading this machine's runtime markers."""
+    with patch.object(update_engine, "_saiverse_may_be_running", return_value=None):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _no_running_frontend():  # type: ignore[no-untyped-def]
     """The fixture checkouts have a frontend directory, so run_update would list

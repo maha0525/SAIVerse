@@ -26,6 +26,7 @@ import json
 from contextlib import contextmanager
 from importlib import metadata
 from pathlib import Path
+import sys
 from typing import Iterator
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +36,18 @@ from saiverse.update_dependencies_alert import ALERT_ID, update_dependencies_ale
 from scripts import update_engine
 
 _INSTALLED_PYTEST = metadata.version("pytest")
+
+
+
+# The real check, before the autouse fixture below replaces it in every test.
+_REAL_SAIVERSE_MAY_BE_RUNNING = update_engine._saiverse_may_be_running
+
+@pytest.fixture(autouse=True)
+def _saiverse_stopped():  # type: ignore[no-untyped-def]
+    """The reinstall waits while SAIVerse may be running; answer "stopped"
+    instead of reading this machine's runtime markers."""
+    with patch.object(update_engine, "_saiverse_may_be_running", return_value=None):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -557,3 +570,34 @@ def test_an_unreadable_process_list_counts_as_running(tmp_path: Path) -> None:
     assert _SEARXNG_SETUP_LABEL not in machine.labels
     failure = update_engine.read_dependencies_failure(project)
     assert failure is not None and "could not be checked" in failure["error"]
+
+
+
+def test_the_reinstall_waits_while_saiverse_may_be_running(tmp_path: Path) -> None:
+    """A backend left running (frontend closed, or main.py started by hand) has
+    loaded the packages: the reinstall is postponed and shown, not run under it."""
+    project = _updated_by_an_older_updater(tmp_path)
+    child = _Child(project)
+    with patch.object(update_engine, "_saiverse_may_be_running", return_value="SAIVerse may be running (pid 1)"):
+        assert child.check() == update_engine.CHECK_DEPENDENCIES_FAILED
+    assert child.commands == [] and child.installs == 0
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None and "SAIVerse may be running" in failure["error"]
+    assert update_engine.read_dependencies_record(project) is None
+
+
+def test_running_and_stopped_runtime_markers(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from saiverse import runtime_marker
+
+    monkeypatch.setattr(runtime_marker, "marker_status", lambda: ("running", "pid 1"))
+    assert "SAIVerse may be running (pid 1)" == _REAL_SAIVERSE_MAY_BE_RUNNING(tmp_path)
+    monkeypatch.setattr(runtime_marker, "marker_status", lambda: ("unknown", "unreadable"))
+    assert "SAIVerse may be running (unreadable)" == _REAL_SAIVERSE_MAY_BE_RUNNING(tmp_path)
+    monkeypatch.setattr(runtime_marker, "marker_status", lambda: ("stopped", "runtime markers absent"))
+    assert _REAL_SAIVERSE_MAY_BE_RUNNING(tmp_path) is None
+
+
+def test_an_unreadable_runtime_marker_module_counts_as_running(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setitem(sys.modules, "saiverse.runtime_marker", None)
+    reason = _REAL_SAIVERSE_MAY_BE_RUNNING(tmp_path)
+    assert reason is not None and "could not be checked" in reason

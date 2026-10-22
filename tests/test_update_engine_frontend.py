@@ -39,6 +39,14 @@ from scripts import update_engine
 # --- fakes --------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _saiverse_stopped():  # type: ignore[no-untyped-def]
+    """The reinstall waits while SAIVerse may be running; answer "stopped"
+    instead of reading this machine's runtime markers."""
+    with patch.object(update_engine, "_saiverse_may_be_running", return_value=None):
+        yield
+
+
 class FakeProcess:
     """Just enough of psutil.Process for the frontend search and stop."""
 

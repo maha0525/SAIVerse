@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -397,11 +398,12 @@ def test_a_previous_core_failure_is_retried_in_a_run_that_keeps_the_venv(
     assert not (tmp_path / RECORD_NAME).exists()
 
     # 専用の環境の失敗だけの記録では、本体の .venv の入れ直しはしない
+    # (専用の環境の方は、記録された名前としてやり直される)
     recorded.clear()
     addon_installer.record_env_rebuild_failures([
         addon_installer.EnvRebuildResult(addon_id="a-addon", envs=["eng"], error="x")])
     assert entry.main(expansion) == 0
-    assert recorded == []
+    assert _core_runs(recorded) == []
 
 
 def test_core_steps_are_not_run_while_saiverse_may_be_running(home, expansion, monkeypatch, tmp_path) -> None:
@@ -442,3 +444,34 @@ def test_a_crash_with_the_flag_records_that_the_core_venv_is_not_done(home, monk
     assert [(f["addon_id"], f["core_venv"]) for f in data["failures"]] == [("(setup)", True)]
     # 次の回は、全部のアドオンの本体側の step をやり直す
     assert addon_installer.core_venv_failures_in_record() == {addon_installer.SETUP_CRASH_ADDON_ID}
+
+
+def test_an_env_lost_by_a_failed_rebuild_is_rebuilt_next_time(home, expansion, monkeypatch, tmp_path) -> None:
+    """The rebuild removes the old env before creating it; a failure before the
+    folder exists leaves no folder, so the recorded name must bring it back."""
+    _install(expansion, "a-addon", {"engines": ["cloud"]}, STALE)
+    env_dir = addon_paths.get_addon_env_dir("a-addon", "eng")
+    shutil.rmtree(env_dir)
+    record = tmp_path / ".addon_env_rebuild_failures.json"
+    record.write_text(json.dumps({
+        "created_at": "2026-10-23T00:00:00+00:00",
+        "python_version": "3.13.17",
+        "failures": [{"addon_id": "a-addon", "envs": ["eng"], "steps": ["eng-pkgs"],
+                      "error": "venv failed", "core_venv": False}],
+    }), encoding="utf-8")
+
+    assert addon_installer.find_unusable_addon_envs(expansion) == {"a-addon": ["eng"]}
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run(recorded))
+    results = addon_installer.rebuild_unusable_addon_envs(expansion)
+    assert [(r.addon_id, r.ok) for r in results] == [("a-addon", True)]
+    assert any(c["args"][1:3] == ["-m", "venv"] for c in recorded)
+    assert addon_paths.addon_env_python_path(env_dir).exists()
+
+
+def test_a_recorded_env_with_an_invalid_name_is_ignored(home, expansion, tmp_path) -> None:
+    _install(expansion, "a-addon", {"engines": ["cloud"]}, None)
+    (tmp_path / ".addon_env_rebuild_failures.json").write_text(json.dumps({
+        "failures": [{"addon_id": "a-addon", "envs": ["../escape"], "core_venv": False}],
+    }), encoding="utf-8")
+    assert addon_installer.find_unusable_addon_envs(expansion) == {}

@@ -1589,16 +1589,55 @@ class EnvRebuildResult:
         return self.error is None
 
 
-def _unusable_env_dirs(addon_id: str) -> List[str]:
-    """``addon_install/<id>/envs/`` にある専用の環境のうち、いまの Python で使えないもの。
+def env_failures_in_record(path: Optional[Path] = None) -> Dict[str, set[str]]:
+    """前の setup の記録で、専用の環境の作り直しが済んでいない ``{addon_id: {環境の名前}}``。
 
-    フォルダがあって、記録が無い・読めない・記録の Python の major.minor が本体と
-    違う・python の実行ファイルが無いもの (``_env_needs_full_run`` と同じ判定)。
+    作り直しは古い環境を消してから作るので、作る前に失敗するとフォルダごと無くなり、
+    フォルダを走査するだけでは次の setup がその環境を見つけられない。記録が無い・
+    読めないときは空 (読めない記録の扱いは ``core_venv_failures_in_record`` が持つ)。
+    """
+    target = path or ENV_REBUILD_FAILURES_PATH
+    if not target.is_file():
+        return {}
+    try:
+        failures = json.loads(target.read_text(encoding="utf-8"))["failures"]
+        if not isinstance(failures, list):
+            return {}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    found: Dict[str, set[str]] = {}
+    for item in failures:
+        if not isinstance(item, dict) or item.get("core_venv") is True or not item.get("addon_id"):
+            continue
+        envs = item.get("envs")
+        if isinstance(envs, list):
+            names = {str(name) for name in envs if isinstance(name, str) and name}
+            if names:
+                found.setdefault(str(item["addon_id"]), set()).update(names)
+    return found
+
+
+def _unusable_env_dirs(addon_id: str, *, include_recorded: bool = True) -> List[str]:
+    """作り直しが要る専用の環境の名前。
+
+    ``addon_install/<id>/envs/`` にあって、記録が無い・読めない・記録の Python の
+    major.minor が本体と違う・python の実行ファイルが無いもの (``_env_needs_full_run``
+    と同じ判定) と、前の setup で作り直しに失敗したと記録されているもの
+    (``env_failures_in_record`` — フォルダが消えていても含める)。``include_recorded``
+    False は記録を見ない — 作り直しを走らせた直後の「まだ使えないか」の確かめは、
+    いまの環境だけで判定する (記録はこのあと書き直される)。
     """
     envs_dir = get_addon_install_dir(addon_id) / "envs"
-    if not envs_dir.is_dir():
-        return []
     names = []
+    recorded = env_failures_in_record().get(addon_id, set()) if include_recorded else set()
+    for name in sorted(recorded):
+        try:
+            get_addon_env_dir(addon_id, name)  # 不正な名前は捨てる
+        except ValueError:
+            continue
+        names.append(name)
+    if not envs_dir.is_dir():
+        return names
     for path in sorted(envs_dir.iterdir()):
         if not path.is_dir():
             continue
@@ -1606,7 +1645,7 @@ def _unusable_env_dirs(addon_id: str) -> List[str]:
             needs = _env_needs_full_run(addon_id, path.name)
         except ValueError:  # 専用の環境の名前として不正 (manifest が作れない名前)
             continue
-        if needs:
+        if needs and path.name not in names:
             names.append(path.name)
     return names
 
@@ -1720,7 +1759,7 @@ def rebuild_unusable_addon_envs(
         step_names = [s.name for s in plan.steps]
         try:
             _run_selected_steps(plan, get_addon_data_dir(addon_id), progress)
-            still = sorted(set(envs) & set(_unusable_env_dirs(addon_id)))
+            still = sorted(set(envs) & set(_unusable_env_dirs(addon_id, include_recorded=False)))
             if still:
                 # step が skip_if_exists で飛ばされた、などで環境が作られなかった
                 raise AddonInstallError(
