@@ -11,6 +11,13 @@ _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+# The same .env main.py loads, before the database path is resolved: with a
+# SAIVERSE_HOME written there, main.py uses the database under it, and this
+# script must create (or replace) that one, not the one under ~/.saiverse.
+from scripts.update_engine import load_saiverse_dotenv  # noqa: E402
+
+load_saiverse_dotenv(Path(_project_root))
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -395,6 +402,76 @@ def seed_database(force: bool = False):
     except Exception as e:
         logging.error(f"An error occurred during playbook import: {e}", exc_info=True)
 
+DB_MISSING = "missing"
+DB_READY = "ready"
+DB_WITHOUT_CITY = "without_city"
+DB_UNREADABLE = "unreadable"
+
+
+def database_state(db_path: Path) -> tuple[str, str]:
+    """What ``seed_database_if_missing`` finds at ``db_path``, and why.
+
+    Opened read-only, so the check itself never creates or changes the file.
+    ``DB_WITHOUT_CITY``: a SQLite database without the ``city`` table (an empty
+    file, or one a failed first setup left). ``DB_UNREADABLE``: anything that
+    cannot be read as SQLite (damaged, not a database, no permission) -- it may
+    still hold the user's world, so it is never replaced.
+    """
+    import sqlite3
+
+    if not db_path.exists():
+        return DB_MISSING, f"{db_path} does not exist"
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='city'"
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return DB_UNREADABLE, f"{db_path} cannot be read as a SQLite database ({exc})"
+    if row is None:
+        return DB_WITHOUT_CITY, f"{db_path} has no city table"
+    return DB_READY, f"{db_path} is in place"
+
+
+def seed_database_if_missing() -> int:
+    """What setup.bat / setup.sh run: create the database SAIVerse uses only when
+    there is none. Returns the exit code.
+
+    The database is the one main.py uses (``default_db_path`` after the same
+    .env), not a fixed path: setup used to look at
+    ``%USERPROFILE%\\.saiverse\\user_data\\database\\saiverse.db`` and so missed a
+    SAIVERSE_HOME set elsewhere -- no database was created for it, and a
+    leftover one under ~/.saiverse was taken for it.
+
+    In place -> nothing is changed. Missing, or a SQLite file without the city
+    table -> ``seed_database(force=True)`` (which backs an existing file up
+    before it replaces it). Unreadable -> nothing is changed and 2 is returned,
+    so setup stops instead of replacing a file that may hold the user's world.
+    """
+    db_path = default_db_path()
+    state, detail = database_state(db_path)
+    if state == DB_READY:
+        print(f"[OK] Database already exists: {db_path}", flush=True)
+        return 0
+    if state == DB_UNREADABLE:
+        print(f"[ERROR] {detail}.", flush=True)
+        print("[ERROR] The database was left as it is. Check the file (or move it away to start "
+              "a new world), then run setup again.", flush=True)
+        print(f"[ERROR] データベース {db_path} を読めないため、そのままにしてあります。ファイルを確かめるか "
+              "(新しい世界で始めるならファイルを別の場所へ移してから)、setup をもう一度実行してください。",
+              flush=True)
+        return 2
+    if state == DB_WITHOUT_CITY:
+        print(f"[WARN] {detail}; initializing it again (the file is backed up first)", flush=True)
+    print(f"[SETUP] Initializing database: {db_path}", flush=True)
+    seed_database(force=True)
+    print(f"[OK] Database initialized: {db_path}", flush=True)
+    return 0
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(
@@ -413,6 +490,13 @@ For safer operations:
         action="store_true",
         help="Skip confirmation prompt (USE WITH EXTREME CAUTION)"
     )
+    parser.add_argument(
+        "--if-missing",
+        action="store_true",
+        help="Create the database only when there is none (what setup runs); never replace one in place",
+    )
     args = parser.parse_args()
 
+    if args.if_missing:
+        sys.exit(seed_database_if_missing())
     seed_database(force=args.force)

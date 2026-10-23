@@ -862,6 +862,28 @@ class DotenvUnavailable(RuntimeError):
     """The checkout has a .env, but python-dotenv cannot be imported here."""
 
 
+def load_saiverse_dotenv(project_dir: Path) -> Path | None:
+    """Load the .env main.py loads (``find_dotenv_path``), as main.py does:
+    variables already set win. Returns the file, or None when there is none
+    or python-dotenv is missing.
+
+    For the scripts that resolve SAIVerse's data paths without going through
+    main.py (``database/seed.py``, ``scripts/import_all_playbooks.py``,
+    ``scripts/rebuild_addon_envs.py``): a SAIVERSE_HOME written in .env must
+    point them at the same database and addon environments as SAIVerse itself.
+    Call it before the first data path is resolved.
+    """
+    path = find_dotenv_path(project_dir)
+    if path is None:
+        return None
+    try:
+        from dotenv import load_dotenv
+    except ImportError:  # python-dotenv is in requirements.lock
+        return None
+    load_dotenv(path)
+    return path
+
+
 def find_dotenv_path(project_dir: Path) -> Path | None:
     """The .env main.py's ``load_dotenv()`` reads, or None when there is none.
 

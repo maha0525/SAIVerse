@@ -211,33 +211,14 @@ echo "[SETUP] フロントエンドパッケージをインストール中..."
 (cd frontend && npm install)
 echo "[OK] フロントエンドパッケージのインストール完了"
 
-# --- 7. Database seed (only if not exists or core tables missing) ---
-SAIVERSE_DB="$HOME/.saiverse/user_data/database/saiverse.db"
-SAIVERSE_DB_LEGACY="database/data/saiverse.db"
-NEED_SEED=true
-
-if [ -f "$SAIVERSE_DB" ]; then
-    if python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('SELECT 1 FROM city LIMIT 1'); c.close()" "$SAIVERSE_DB" 2>/dev/null; then
-        NEED_SEED=false
-    fi
-fi
-if [ "$NEED_SEED" = true ] && [ -f "$SAIVERSE_DB_LEGACY" ]; then
-    if python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('SELECT 1 FROM city LIMIT 1'); c.close()" "$SAIVERSE_DB_LEGACY" 2>/dev/null; then
-        NEED_SEED=false
-    fi
-fi
-
-if [ "$NEED_SEED" = true ]; then
-    if [ -f "$SAIVERSE_DB" ]; then
-        echo ""
-        echo "[WARN] データベースファイルは存在しますが、コアテーブルがありません。再初期化します..."
-    fi
-    echo ""
-    echo "[SETUP] データベースを初期化中..."
-    python database/seed.py --force
-    echo "[OK] データベースの初期化完了"
-else
-    echo "[OK] データベースは既に存在します"
+# --- 7. Database seed (only when there is none) ---
+# database/seed.py --if-missing はデータベースを main.py と同じ規則 (SAIVERSE_HOME、
+# .env のものも) で見つけ、無いか city の表が無いときだけ作る。読めないものは
+# そのままにして setup を止める。
+echo ""
+if ! python database/seed.py --if-missing; then
+    echo "[ERROR] Database initialization failed."
+    exit 1
 fi
 
 # --- 7b. Import/update playbooks ---
