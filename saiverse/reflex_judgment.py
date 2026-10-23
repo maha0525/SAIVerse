@@ -721,6 +721,41 @@ def _clean_usage(raw: Any, usage_fields: Mapping[str, str]) -> Dict[str, Any]:
     return cleaned
 
 
+def _usage_from_jev(raw: Any, backend: ReflexBackend) -> Dict[str, Any]:
+    """方言の使用量を、通常応答と締切後の応答で同じ記帳の形へ戻す。
+
+    Decisions の input_tokens はキャッシュ読取・書込を含む総数。内訳だけを
+    展開し、差し引きと単価の選択は既存の calculate_cost に任せる。
+    内訳が欠ける旧応答は従来どおり入力総数で概算する。壊れた内訳も判定の
+    成否は変えず、警告を残して使える欄だけを記帳する (実請求の確定値ではない)。
+    """
+    usage = _clean_usage(raw, backend.usage_fields)
+    if backend.request_shape != REQUEST_SHAPE_OPENAI_DECISIONS or not isinstance(raw, dict):
+        return usage
+
+    details = raw.get("input_tokens_details")
+    if not isinstance(details, dict):
+        if usage:
+            LOGGER.warning("[reflex] Decisions cache usage is missing or invalid; cost is an estimate")
+        return usage
+
+    cache_usage: Dict[str, int] = {}
+    for name in ("cached_tokens", "cache_write_tokens"):
+        value = details.get(name)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            cache_usage[name] = value
+        else:
+            # 未知の本文や不正値を INFO/WARNING に流さない。
+            LOGGER.warning("[reflex] Decisions %s is missing or invalid; cost is an estimate", name)
+
+    input_tokens = usage.get("input_tokens")
+    if input_tokens is None or sum(cache_usage.values()) > input_tokens:
+        LOGGER.warning("[reflex] Decisions cache usage exceeds or lacks total input; ignoring cache counts")
+        return usage
+    usage.update(cache_usage)
+    return usage
+
+
 #: LLM クライアントの ``consume_usage()`` から写す欄 (llm_clients/base.py の UsageInfo)。
 _CLIENT_USAGE_FIELDS = ("input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens")
 
@@ -1333,7 +1368,7 @@ class _JevCall:
             return
         if not isinstance(data, dict):
             return
-        usage = _clean_usage(data.get(self.backend.usage_key), self.backend.usage_fields)
+        usage = _usage_from_jev(data.get(self.backend.usage_key), self.backend)
         if not usage:
             return
         LOGGER.info(
@@ -1370,7 +1405,7 @@ class _JevCall:
             raise ReflexJudgmentUnavailable("response is not a JSON object")
 
         # 使用量の記帳は、答えを読む**前**に済ませる (理由は evaluate の Note)。
-        usage = _clean_usage(data.get(backend.usage_key), backend.usage_fields)
+        usage = _usage_from_jev(data.get(backend.usage_key), backend)
         _record_usage(backend, usage, persona_id, self._received_at)
 
         answers = data.get(backend.answers_key)
