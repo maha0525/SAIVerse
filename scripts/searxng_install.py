@@ -104,6 +104,15 @@ def ready() -> bool:
         return False
     if not venv_python().is_file():
         return False
+    series = venv_series(venv_directory())
+    if series != _current_series():
+        # SAIVerse moved to another Python series (setup rebuilt .venv) and this
+        # venv was left on the old one. Run with SAIVerse's python (setup.bat /
+        # setup.sh, the update's refresh_searxng, run_searxng_server.ps1 / .sh),
+        # this makes setup set the venv aside and make it again.
+        print(f"[INFO] The SearXNG venv was made with Python {series or 'unknown'}; "
+              f"SAIVerse runs Python {_current_series()}", flush=True)
+        return False
     result = subprocess.run(
         [str(venv_python()), "-c", PROBE, str(source_directory()), pinned_release()["commit"]],
         env=probe_environment(), capture_output=True, text=True,

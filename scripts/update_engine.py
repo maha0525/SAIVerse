@@ -69,6 +69,7 @@ DEPENDENCIES_FAILURE_RECORD = ".update_dependencies_failed.json"
 # ``DEPENDENCIES_FAILURE_RECORD`` under ``"steps"``; the alert names them.
 DEPENDENCY_STEP_PORTABLE_NODE = "portable_node"
 DEPENDENCY_STEP_SEARXNG = "searxng"
+DEPENDENCY_STEP_ADDON_ENVS = "addon_envs"
 
 
 class DependencyStepFailure(NamedTuple):
@@ -1903,7 +1904,8 @@ def update_dependencies(
     installed with the Node.js the code pins; skipped with
     ``replace_portable_node=False``, which the rollback passes), upgrade pip,
     install the requirements file, remove ``RETIRED_CORE_PACKAGES``, ``pip
-    check``, npm, then SearXNG.
+    check``, npm, SearXNG, then the addon environments
+    (``rebuild_addon_envs``, last because it can take long).
     """
     failures: list[DependencyStepFailure] = []
     if replace_portable_node:
@@ -1938,6 +1940,9 @@ def update_dependencies(
     searxng_failure = refresh_searxng(project_dir, python)
     if searxng_failure is not None:
         failures.append(searxng_failure)
+    addon_failure = rebuild_addon_envs(project_dir, python)
+    if addon_failure is not None:
+        failures.append(addon_failure)
     return failures
 
 
@@ -2179,6 +2184,72 @@ def _searxng_venv_dir(project_dir: Path) -> Path:
     return path if path.is_absolute() else project_dir / path
 
 
+# Rebuilds the addon environments the current Python cannot use, and installs
+# again the addon packages of the main .venv whose earlier reinstall failed
+# (scripts/rebuild_addon_envs.py, what setup.bat / setup.sh run after .venv).
+ADDON_ENV_REBUILD_SCRIPT = Path("scripts") / "rebuild_addon_envs.py"
+# A rebuilt environment downloads its packages again (voice-tts: torch, and the
+# Irodori-TTS weights kept inside its environment).
+ADDON_ENV_REBUILD_TIMEOUT_SECONDS = 2 * 60 * 60
+
+
+def rebuild_addon_envs(project_dir: Path, python: str) -> DependencyStepFailure | None:
+    """Rebuild the addon environments that the Python of ``.venv`` cannot use.
+
+    An addon's own Python environment is made with the Python of ``.venv`` and
+    is unusable once ``.venv`` runs another Python series
+    (``saiverse.addon_paths.get_addon_env_python`` refuses it). setup rebuilds
+    them when it makes ``.venv`` again, but a ``.venv`` made again before setup
+    did that (a setup from before v0.3.26, or by hand) left them on the old
+    series, and only another setup fixed them. Running the same script here
+    lets the update fix them too.
+
+    The script touches only environments it finds unusable (another series, no
+    record of how it was made, or a rebuild that stopped part-way): an addon
+    whose environments are usable is not touched, its manifest not even read.
+    It records what failed in ``.addon_env_rebuild_failures.json``, which the
+    banner shows (``saiverse.environment_alerts.addon_env_rebuild_alerts``), and
+    removes that file when nothing failed; it also records its own crash there.
+    So only a script that could not be started is returned as a failure here.
+
+    A checkout without the script (an older revision, run by the rollback) has
+    no such step, and nothing happens.
+    """
+    script = project_dir / ADDON_ENV_REBUILD_SCRIPT
+    if not script.is_file():
+        LOGGER.info("[addons] %s is not in this checkout; addon environments were not checked",
+                    ADDON_ENV_REBUILD_SCRIPT)
+        return None
+    try:
+        result = _run(
+            [python, str(script)],
+            cwd=project_dir,
+            label="rebuild addon environments",
+            timeout=ADDON_ENV_REBUILD_TIMEOUT_SECONDS,
+            check=False,
+            encoding="utf-8",
+            # The script prints Japanese; make it write UTF-8 whatever the
+            # console code page is.
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+    except UpdateError as exc:
+        LOGGER.warning("[addons] the addon environments could not be checked", exc_info=True)
+        return DependencyStepFailure(
+            DEPENDENCY_STEP_ADDON_ENVS, f"The addon environments could not be checked: {exc}"
+        )
+    for line in (result.stdout or "").splitlines():
+        if line.strip():
+            LOGGER.info("[addons] %s", line.strip())
+    if result.returncode != 0:
+        LOGGER.warning(
+            "[addons] %s exited with %s; it recorded the failure for the banner: %s",
+            ADDON_ENV_REBUILD_SCRIPT,
+            result.returncode,
+            (result.stderr or "").strip()[-2000:],
+        )
+    return None
+
+
 def _searxng_venv_python(project_dir: Path) -> Path:
     venv = _searxng_venv_dir(project_dir)
     return venv / ("Scripts/python.exe" if _is_windows() else "bin/python")
@@ -2234,20 +2305,25 @@ def _searxng_running_for_reinstall(project_dir: Path) -> DependencyStepFailure |
 def refresh_searxng(project_dir: Path, saiverse_python: str | None = None) -> DependencyStepFailure | None:
     """Reinstall SearXNG when it does not match the release the code pins.
 
-    Runs ``searxng_install.py check`` with the SearXNG venv's python, and
-    ``searxng_install.py setup`` when the check fails -- what
-    run_searxng_server.ps1 / .sh do before starting the server, done here so
-    the update, not the next start, brings in a new pin. Nothing happens
-    without a SearXNG venv.
+    Runs ``searxng_install.py check``, and ``searxng_install.py setup`` when
+    the check fails -- what run_searxng_server.ps1 / .sh do before starting
+    the server, done here so the update, not the next start, brings in a new
+    pin. Nothing happens without a SearXNG venv.
+
+    Both run with SAIVerse's own python (``saiverse_python``, else
+    ``sys.executable``), as setup.bat / setup.sh run them: the installer is
+    standard library only, the check then fails when the SearXNG venv was made
+    with another Python series than SAIVerse runs (a .venv made again with 3.13
+    by a setup from before the installer set such a venv aside), and the setup
+    makes the venv with the python that runs it. Run with the SearXNG venv's
+    own python, the check compared that venv with itself and an old series
+    stayed until the next setup.
 
     When a SearXNG setup stopped part-way (``searxng_setup_stopped``), the
-    check is skipped (it fails while the record is there) and the setup runs
-    with SAIVerse's own python (``saiverse_python``, else ``sys.executable``):
-    the SearXNG venv may have no python left, or only the half-made one. The
-    installer is standard library only and makes the venv with the python
-    that runs it, the series setup.bat / setup.sh make it with. The setup
-    reads the record, installs the venv again and puts the set-aside venv back
-    when that fails (scripts/searxng_install.py).
+    check is skipped (it fails while the record is there): the SearXNG venv
+    may have no python left, or only the half-made one. The setup reads the
+    record, installs the venv again and puts the set-aside venv back when that
+    fails (scripts/searxng_install.py).
 
     Never raises, for the same reason ``refresh_portable_node`` does not:
     SearXNG is an optional search server, and failing the whole update over
@@ -2273,15 +2349,12 @@ def refresh_searxng(project_dir: Path, saiverse_python: str | None = None) -> De
             retry=False,
         )
     stopped = searxng_setup_stopped(project_dir)
+    python = saiverse_python or sys.executable
     if stopped:
-        python = saiverse_python or sys.executable
         LOGGER.warning(
-            "[searxng] A SearXNG setup stopped before it finished (%s is left); finishing it "
-            "with SAIVerse's python",
+            "[searxng] A SearXNG setup stopped before it finished (%s is left); finishing it",
             SEARXNG_SETUP_IN_PROGRESS_RECORD,
         )
-    else:
-        python = str(_searxng_venv_python(project_dir))
     try:
         if not stopped:
             check = _run(

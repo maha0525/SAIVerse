@@ -507,7 +507,11 @@ def test_the_banner_knows_every_step_name_of_the_engine() -> None:
     """The alert holds the step names as strings so it need not import the engine."""
     from saiverse import update_dependencies_alert
 
-    for step in (update_engine.DEPENDENCY_STEP_PORTABLE_NODE, update_engine.DEPENDENCY_STEP_SEARXNG):
+    for step in (
+        update_engine.DEPENDENCY_STEP_PORTABLE_NODE,
+        update_engine.DEPENDENCY_STEP_SEARXNG,
+        update_engine.DEPENDENCY_STEP_ADDON_ENVS,
+    ):
         assert step in update_dependencies_alert._STEP_LABELS
 
 

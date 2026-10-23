@@ -3,10 +3,10 @@
 本体の起動時に main.py から一度だけ呼ぶ。集めるのは次の六つ:
 
 - 更新・起動前のパッケージの入れ直しの失敗 (``saiverse/update_dependencies_alert.py``)
-- setup.bat / setup.sh でのアドオンのパッケージの入れ直しの失敗 (本体の ``.venv`` に
+- setup.bat / setup.sh と更新でのアドオンのパッケージの入れ直しの失敗 (本体の ``.venv`` に
   入れる step の入れ直しと、アドオン専用の Python 環境の作り直し。
-  ``addon_installer.ENV_REBUILD_FAILURES_PATH`` に setup が書く。次の setup で
-  入れ直しが成功すると setup が消す)
+  ``addon_installer.ENV_REBUILD_FAILURES_PATH`` に ``scripts/rebuild_addon_envs.py`` が
+  書く。次に入れ直しが成功すると同じスクリプトが消す)
 - setup (またはアドオン管理での導入・更新) が途中で止まったまま残った、やりかけの記録
   (``scripts/setup_in_progress.py``)。本体の ``.venv`` とアドオンの専用の環境のもの。
   窓を閉じるなどで止まると、上の失敗の記録は書かれずに、これだけが残る
@@ -99,7 +99,7 @@ def addon_env_rebuild_alerts(path: Path | None = None) -> List[Dict[str, Any]]:
         "level": "warning",
         "title": "アドオンのパッケージを入れ直せませんでした",
         "message": (
-            f"SAIVerse の Python の環境が作り直されたため、setup でアドオン ({names}) の"
+            f"SAIVerse の Python に合わせて、アドオン ({names}) の"
             "パッケージ (SAIVerse 本体の .venv に入れるもの、またはアドオン専用の Python 環境) を"
             "入れ直そうとしましたが、失敗しました。このアドオンは今のままでは動きません。"
             "SAIVerse を閉じてから setup.bat (Mac / Linux では setup.sh) をもう一度実行するか、"

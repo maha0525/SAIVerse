@@ -358,9 +358,21 @@ def test_a_matching_searxng_is_only_checked(tmp_path: Path) -> None:
     with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
         update_engine, "_run", side_effect=fake_run
     ):
-        assert update_engine.refresh_searxng(project) is None
+        assert update_engine.refresh_searxng(project, r"C:\SAIVerse\.venv\Scripts\python.exe") is None
     installer = str(project / "scripts" / "searxng_install.py")
-    assert calls == [[_venv_python(project), installer, "check"]]
+    # SAIVerse's python, not the SearXNG venv's: the check compares the SearXNG
+    # venv with the Python series SAIVerse runs.
+    assert calls == [[r"C:\SAIVerse\.venv\Scripts\python.exe", installer, "check"]]
+
+
+def test_the_check_defaults_to_this_interpreter(tmp_path: Path) -> None:
+    project = _checkout_for_refresh(tmp_path)
+    fake_run, calls = _answering_run(check_code=0)
+    with patch.object(update_engine, "_is_windows", return_value=True), patch.object(
+        update_engine, "_run", side_effect=fake_run
+    ):
+        assert update_engine.refresh_searxng(project) is None
+    assert [command[0] for command in calls] == [update_engine.sys.executable]
 
 
 def test_a_differing_searxng_is_reinstalled(tmp_path: Path) -> None:
@@ -371,7 +383,7 @@ def test_a_differing_searxng_is_reinstalled(tmp_path: Path) -> None:
     ):
         assert update_engine.refresh_searxng(project) is None
     assert [command[-1] for command in calls] == ["check", "setup"]
-    assert all(command[0] == _venv_python(project) for command in calls)
+    assert all(command[0] == update_engine.sys.executable for command in calls)
 
 
 def test_a_failed_reinstall_does_not_fail_the_update(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
@@ -572,7 +584,9 @@ def test_the_launchers_open_searxng_for_a_stopped_setup(
     [
         ([], "python"),
         (["sx/Scripts/python.exe"], r"<root>\sx\Scripts\python.exe"),
-        (["sx/Scripts/python.exe", ".venv/Scripts/python.exe"], r"<root>\sx\Scripts\python.exe"),
+        # SAIVerse's python whenever it is there: the installer compares the
+        # SearXNG venv with the Python series SAIVerse runs.
+        (["sx/Scripts/python.exe", ".venv/Scripts/python.exe"], r"<root>\.venv\Scripts\python.exe"),
         # A stopped setup: SAIVerse's python, also over a half-made venv python.
         ([".setup_in_progress/searxng-venv.json", ".venv/Scripts/python.exe"], r"<root>\.venv\Scripts\python.exe"),
         (
@@ -583,7 +597,7 @@ def test_the_launchers_open_searxng_for_a_stopped_setup(
         ([".setup_in_progress/searxng-venv.json", "sx/Scripts/python.exe"], r"<root>\sx\Scripts\python.exe"),
     ],
 )
-def test_the_searxng_launcher_runs_a_stopped_setup_with_saiverse_python(
+def test_the_searxng_launcher_runs_the_installer_with_saiverse_python(
     tmp_path: Path, files: list[str], expected: str
 ) -> None:
     lines = (REPO_ROOT / "scripts" / "run_searxng_server.ps1").read_text(encoding="utf-8").splitlines()
@@ -606,8 +620,9 @@ def test_the_searxng_launcher_runs_a_stopped_setup_with_saiverse_python(
     assert result.stdout.decode("utf-8", "replace").strip() == expected
 
 
-def test_the_posix_searxng_launcher_names_the_same_record_and_python() -> None:
+def test_the_posix_searxng_launcher_runs_the_installer_with_saiverse_python() -> None:
     text = (REPO_ROOT / "scripts" / "run_searxng_server.sh").read_text(encoding="utf-8")
-    assert '"${WORKSPACE_ROOT}/.setup_in_progress/searxng-venv.json"' in text
     assert 'saiverse_python="${WORKSPACE_ROOT}/.venv/bin/python"' in text
+    # SAIVerse's python first, as in run_searxng_server.ps1.
+    assert 'if [[ -x "${saiverse_python}" ]]; then' in text
     assert update_engine.SEARXNG_SETUP_IN_PROGRESS_RECORD.as_posix() == ".setup_in_progress/searxng-venv.json"
