@@ -84,18 +84,22 @@ FRONTEND_PID=$!
 
 sleep 3
 
+# The frontend listens on PORT when it is set (next start / next dev read it),
+# else on 3000: open the browser on the same port.
+UI_PORT="${PORT:-3000}"
+
 # Open browser (macOS or Linux)
 if command -v open &>/dev/null; then
-    open http://localhost:3000
+    open http://localhost:${UI_PORT}
 elif command -v xdg-open &>/dev/null; then
-    xdg-open http://localhost:3000
+    xdg-open http://localhost:${UI_PORT}
 fi
 
 echo ""
 echo "========================================"
 echo "  SAIVerse is running"
 echo ""
-echo "  Web UI:  http://localhost:3000"
+echo "  Web UI:  http://localhost:${UI_PORT}"
 echo "  Backend: PID $SAIVERSE_PID"
 echo "  Frontend: PID $FRONTEND_PID"
 echo ""
