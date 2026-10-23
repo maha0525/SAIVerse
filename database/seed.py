@@ -506,8 +506,13 @@ def _publish_without_overwriting(source: Path, target: Path) -> None:
     On Windows ``os.rename`` already refuses an existing target. On Mac /
     Linux it would replace it, so a hard link is made instead (``os.link``
     refuses an existing target) and the source name removed after. Where hard
-    links are not supported, the rename is done only after checking the
-    target is still missing.
+    links are not supported (FAT / exFAT drives, for instance), ``target`` is
+    created with ``O_EXCL`` -- which also refuses an existing one -- and the
+    source copied into it through that file descriptor: once created, the name
+    is this run's, and a file another process might put there afterwards
+    replaces the name, never the bytes written to this run's file. Never
+    "check that it is missing, then rename": something could be put there in
+    between, and the rename would replace it.
     """
     if os.name == "nt":
         os.rename(source, target)
@@ -517,11 +522,32 @@ def _publish_without_overwriting(source: Path, target: Path) -> None:
     except FileExistsError:
         raise
     except OSError:
-        if target.exists():
-            raise FileExistsError(str(target)) from None
-        os.rename(source, target)
-        return
+        _copy_into_new_file(source, target)
     source.unlink()
+
+
+def _copy_into_new_file(source: Path, target: Path) -> None:
+    """Create ``target`` (``FileExistsError`` if it exists) and copy ``source``
+    into it through the new file's own descriptor."""
+    fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with open(source, "rb") as src, os.fdopen(fd, "wb", closefd=False) as dst:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+            dst.flush()
+            os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        # The file is this run's (created above): remove the partial copy.
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        raise
+    os.close(fd)
 
 
 def seed_database_if_missing() -> int:

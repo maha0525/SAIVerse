@@ -193,6 +193,32 @@ def test_publishing_never_overwrites_on_posix(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "world"
 
 
+@pytest.mark.parametrize("appears", [False, True])
+def test_without_hard_links_the_copy_never_overwrites(tmp_path: Path, monkeypatch, appears) -> None:  # type: ignore[no-untyped-def]
+    """The Mac / Linux fallback where hard links are not supported: a database
+    that appears at the name just before it is published is left as it is."""
+    monkeypatch.setattr(seed.os, "name", "posix")
+    source = tmp_path / "new.db"
+    source.write_bytes(b"new world" * 1000)
+    target = tmp_path / "saiverse.db"
+
+    def no_links(src, dst):  # type: ignore[no-untyped-def]
+        if appears:
+            target.write_bytes(b"restored world")
+        raise OSError(1, "Operation not permitted")
+
+    monkeypatch.setattr(seed.os, "link", no_links)
+    if appears:
+        with pytest.raises(FileExistsError):
+            seed._publish_without_overwriting(source, target)
+        assert target.read_bytes() == b"restored world"
+        assert source.exists()
+    else:
+        seed._publish_without_overwriting(source, target)
+        assert target.read_bytes() == b"new world" * 1000
+        assert not source.exists()
+
+
 def test_publishing_never_overwrites(tmp_path: Path) -> None:
     source = tmp_path / "new.db"
     source.write_text("new", encoding="utf-8")
