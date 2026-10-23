@@ -70,6 +70,7 @@ from saiverse.addon_paths import (
 )
 from saiverse.data_paths import EXPANSION_DATA_DIR, PROJECT_ROOT
 from saiverse.i18n_utils import normalize_i18n_dict
+from scripts import setup_in_progress
 
 LOGGER = logging.getLogger(__name__)
 
@@ -577,6 +578,53 @@ def _upgrade_env_pip(env_dir: Path, env_name: str, progress: ProgressCallback) -
         ))
 
 
+# 専用の環境のやりかけの記録 (``scripts/setup_in_progress.py``)。そのアドオンの導入物の
+# フォルダ (``addon_install/<id>/``) の ``.setup_in_progress/env-<環境の名前>.json``。
+# ``_ensure_addon_env`` が既存の環境を消す前に書き、``_execute_steps`` がその環境を使う
+# step を含む全部の step の成功のあとに消す。残っていれば、その環境はやり直しの途中で
+# 止まったか失敗したということで、フォルダの有無や記録 (``saiverse_env.json``) に
+# かかわらず次の実行で作り直す。導入物のフォルダに置くので、アンインストールと導入の
+# 取り消し (フォルダごと消す) で一緒に消える。
+_ENV_ENTRY_PREFIX = "env-"
+
+
+def _env_entry_name(env_name: str) -> str:
+    return f"{_ENV_ENTRY_PREFIX}{env_name}"
+
+
+def _env_rebuild_pending(addon_id: str, env_name: str) -> bool:
+    """この環境のやり直しが途中で止まった (か失敗した) 記録が残っているか。"""
+    return setup_in_progress.read_entry(get_addon_install_dir(addon_id), _env_entry_name(env_name)) is not None
+
+
+def _envs_with_rebuild_pending(addon_id: str) -> List[str]:
+    """やりかけの記録が残っている環境の名前 (環境の名前として正しいものだけ)。"""
+    names = []
+    for entry in setup_in_progress.entry_names(get_addon_install_dir(addon_id)):
+        if not entry.startswith(_ENV_ENTRY_PREFIX):
+            continue
+        name = entry[len(_ENV_ENTRY_PREFIX):]
+        try:
+            get_addon_env_dir(addon_id, name)
+        except ValueError:
+            continue
+        names.append(name)
+    return names
+
+
+def _clear_env_rebuild_entries(addon_id: str, env_dirs: Iterable[Path]) -> None:
+    """やりかけの記録を消す。消せなかったら警告だけ (次の実行がもう一度作り直す)。"""
+    base = get_addon_install_dir(addon_id)
+    for env_dir in env_dirs:
+        try:
+            setup_in_progress.remove_entry(base, _env_entry_name(env_dir.name))
+        except OSError:
+            LOGGER.warning(
+                "installer: could not remove the rebuild record of env %s; it is rebuilt again next time",
+                env_dir, exc_info=True,
+            )
+
+
 def _ensure_addon_env(
     addon_id: str,
     env_name: str,
@@ -587,17 +635,24 @@ def _ensure_addon_env(
 
     無ければ本体の Python (``sys.executable``) の ``-m venv`` で作る。記録が無い・
     記録の Python の major.minor が本体と違う環境は作り直す (パッチ番号だけの違いは
-    作り直さない、``addon_env_matches_current_python``)。
+    作り直さない、``addon_env_matches_current_python``)。前のやり直しが途中で止まった
+    記録 (``_env_rebuild_pending``) がある環境も、記録の中身にかかわらず作り直す。
+
+    既存の環境を消す前に、やりかけの記録を書く (書けなければ何も消さずに失敗する)。
+    消している途中で止まっても、次の実行がこの環境を見つけて作り直せるように。消す
+    ときは先に ``saiverse_env.json`` を消す — 途中まで消えた環境が、記録の付いた
+    使える環境に見えないように。
 
     作った環境の記録 (``saiverse_env.json``、使った Python のバージョン) はここでは
-    書かず、``new_envs`` に足す。記録を書くのは ``_execute_steps`` で、その環境を使う
-    step を含む全部の step が成功したあと (``_write_env_records``)。venv を作った直後に
-    書くと、パッケージを入れる step が失敗したり中断されたりしたときに「いまの Python で
-    作った」記録の付いた、パッケージの欠けた環境が残り、``get_addon_env_python`` が
-    通してしまう。記録の無い環境は、次の実行 (setup の作り直しと、アドオン管理の導入・
-    更新・選択肢の確定) で作り直される。``new_envs`` にある環境は、同じ実行の中の
-    前の step が作ったものなので、作り直さずに使う。``new_envs`` を渡さない呼び出しは、
-    作った環境の記録を書かない (次の実行で作り直される)。
+    書かず、``new_envs`` に足す。記録を書き、やりかけの記録を消すのは
+    ``_execute_steps`` で、その環境を使う step を含む全部の step が成功したあと
+    (``_write_env_records``)。venv を作った直後に書くと、パッケージを入れる step が
+    失敗したり中断されたりしたときに「いまの Python で作った」記録の付いた、
+    パッケージの欠けた環境が残り、``get_addon_env_python`` が通してしまう。記録の無い
+    環境は、次の実行 (setup の作り直しと、アドオン管理の導入・更新・選択肢の確定) で
+    作り直される。``new_envs`` にある環境は、同じ実行の中の前の step が作ったもの
+    なので、作り直さずに使う。``new_envs`` を渡さない呼び出しは、作った環境の記録を
+    書かない (次の実行で作り直される)。
 
     作った直後と、既存の環境をこのプロセスで初めて使うときに、その環境の pip を
     上げる (``_upgrade_env_pip``)。
@@ -610,19 +665,33 @@ def _ensure_addon_env(
     current = current_python_version()
     record = read_addon_env_record(env_dir)
     python = addon_env_python_path(env_dir)
-    if addon_env_matches_current_python(record) and python.exists():
+    pending = _env_rebuild_pending(addon_id, env_name)
+    if not pending and addon_env_matches_current_python(record) and python.exists():
         if str(env_dir) not in _PIP_UPGRADED_ENVS:
             _upgrade_env_pip(env_dir, env_name, progress)
         return env_dir
     if env_dir.exists():
         recorded = record.get("python_version") if record else None
-        progress(ProgressEvent(
-            phase="step",
-            message=(
+        if pending:
+            message = f"専用の Python 環境 {env_name} の前の作り直しが終わっていなかったので、作り直します"
+        else:
+            message = (
                 f"専用の Python 環境 {env_name} を作り直します "
                 f"(作成時の Python: {recorded or '不明'}、いまの Python: {current})"
-            ),
-        ))
+            )
+        progress(ProgressEvent(phase="step", message=message))
+        try:
+            setup_in_progress.write_entry(get_addon_install_dir(addon_id), _env_entry_name(env_name), {
+                "addon_id": addon_id,
+                "env": env_name,
+                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            })
+        except OSError as exc:
+            raise AddonInstallError(
+                f"the Python environment {env_name} was not rebuilt: its rebuild record could not "
+                f"be written ({exc})"
+            ) from exc
+        (env_dir / ADDON_ENV_RECORD_NAME).unlink(missing_ok=True)
         _safe_rmtree(env_dir)
     else:
         progress(ProgressEvent(
@@ -690,6 +759,7 @@ def _resolve_step_env(
 
 def _env_needs_full_run(addon_id: str, env_name: str) -> bool:
     """この env が、次の setup で空から作られる (= 作り直しか新規作成) か。
+    前のやり直しが途中で止まった記録 (``_env_rebuild_pending``) がある env も含む。
 
     空から作られる env は、新しく条件を満たした step だけ走らせても中身が
     戻らない — その env を使う step を全部走らせる必要がある
@@ -700,6 +770,7 @@ def _env_needs_full_run(addon_id: str, env_name: str) -> bool:
     return (
         not addon_env_matches_current_python(record)
         or not addon_env_python_path(env_dir).exists()
+        or _env_rebuild_pending(addon_id, env_name)
     )
 
 
@@ -984,7 +1055,8 @@ def _execute_steps(
     progress: ProgressCallback,
 ) -> None:
     """``steps`` を順に走らせる。この実行で作った専用の環境の記録は、全部の step が
-    成功したあとにだけ書く (``_ensure_addon_env``)。途中の失敗・中断では書かない。"""
+    成功したあとにだけ書き、そのあとでその環境のやりかけの記録を消す
+    (``_ensure_addon_env``)。途中の失敗・中断では書かず、やりかけの記録も残る。"""
     total = len(steps)
     new_envs: set[Path] = set()
     for i, step in enumerate(steps, start=1):
@@ -996,6 +1068,7 @@ def _execute_steps(
         ))
         _execute_step(step, addon_id, addon_dir, data_dir, progress, new_envs)
     _write_env_records(new_envs)
+    _clear_env_rebuild_entries(addon_id, new_envs)
 
 
 # ---------------------------------------------------------------------------
@@ -1627,53 +1700,17 @@ class EnvRebuildResult:
         return self.error is None
 
 
-def env_failures_in_record(path: Optional[Path] = None) -> Dict[str, set[str]]:
-    """前の setup の記録で、専用の環境の作り直しが済んでいない ``{addon_id: {環境の名前}}``。
-
-    作り直しは古い環境を消してから作るので、作る前に失敗するとフォルダごと無くなり、
-    フォルダを走査するだけでは次の setup がその環境を見つけられない。記録が無い・
-    読めないときは空 (読めない記録の扱いは ``core_venv_failures_in_record`` が持つ)。
-    """
-    target = path or ENV_REBUILD_FAILURES_PATH
-    if not target.is_file():
-        return {}
-    try:
-        failures = json.loads(target.read_text(encoding="utf-8"))["failures"]
-        if not isinstance(failures, list):
-            return {}
-    except (OSError, ValueError, KeyError, TypeError):
-        return {}
-    found: Dict[str, set[str]] = {}
-    for item in failures:
-        if not isinstance(item, dict) or item.get("core_venv") is True or not item.get("addon_id"):
-            continue
-        envs = item.get("envs")
-        if isinstance(envs, list):
-            names = {str(name) for name in envs if isinstance(name, str) and name}
-            if names:
-                found.setdefault(str(item["addon_id"]), set()).update(names)
-    return found
-
-
-def _unusable_env_dirs(addon_id: str, *, include_recorded: bool = True) -> List[str]:
+def _unusable_env_dirs(addon_id: str) -> List[str]:
     """作り直しが要る専用の環境の名前。
 
     ``addon_install/<id>/envs/`` にあって、記録が無い・読めない・記録の Python の
     major.minor が本体と違う・python の実行ファイルが無いもの (``_env_needs_full_run``
-    と同じ判定) と、前の setup で作り直しに失敗したと記録されているもの
-    (``env_failures_in_record`` — フォルダが消えていても含める)。``include_recorded``
-    False は記録を見ない — 作り直しを走らせた直後の「まだ使えないか」の確かめは、
-    いまの環境だけで判定する (記録はこのあと書き直される)。
+    と同じ判定) と、やりかけの記録が残っているもの (``_envs_with_rebuild_pending`` —
+    作り直しは古い環境を消してから作るので、作る前に止まるとフォルダごと無くなる。
+    フォルダが無くても含める)。
     """
     envs_dir = get_addon_install_dir(addon_id) / "envs"
-    names = []
-    recorded = env_failures_in_record().get(addon_id, set()) if include_recorded else set()
-    for name in sorted(recorded):
-        try:
-            get_addon_env_dir(addon_id, name)  # 不正な名前は捨てる
-        except ValueError:
-            continue
-        names.append(name)
+    names = _envs_with_rebuild_pending(addon_id)
     if not envs_dir.is_dir():
         return names
     for path in sorted(envs_dir.iterdir()):
@@ -1712,10 +1749,11 @@ def plan_env_rebuild(addon_id: str, expansion_dir: Optional[Path] = None) -> Set
     """保存された答えのまま、使えない専用の環境を作り直す計画 (副作用なし)。
 
     走らせるのは、保存された答え (無い質問は既定値) と OS で選ばれる step のうち、
-    フォルダが既にあって、いまの Python では使えない専用の環境 (``_unusable_env_dirs``)
-    を使うもの全部。環境は空の venv から作り直されるので、新しく条件を満たした
-    step だけでなく、その環境を使う step を全部走らせる (``plan_options_apply`` と同じ
-    理由)。フォルダの無い環境 (一度も作られていない) は作らない。答えは保存しない
+    フォルダが既にあって、いまの Python では使えない専用の環境と、やりかけの記録が
+    残っている環境 (``_unusable_env_dirs``) を使うもの全部。環境は空の venv から作り
+    直されるので、新しく条件を満たした step だけでなく、その環境を使う step を全部
+    走らせる (``plan_options_apply`` と同じ理由)。フォルダもやりかけの記録も無い環境
+    (一度も作られていない) は作らない。答えは保存しない
     (``answers=None``) — 既定値で埋めた答えを書くと、保存された答えが変わるため。
     """
     addon_dir, manifest = _installed_manifest(addon_id, expansion_dir)
@@ -1733,24 +1771,6 @@ def plan_env_rebuild(addon_id: str, expansion_dir: Optional[Path] = None) -> Set
     )
 
 
-def _forget_env_records(addon_id: str, env_names: Iterable[str]) -> None:
-    """作り直しに失敗した環境の記録 (``saiverse_env.json``) を消す。
-
-    この実行で作った環境には、step が全部成功するまで記録が書かれない
-    (``_ensure_addon_env``)。ここで消すのは、前の setup で作り直しに失敗したと
-    記録されていて (``env_failures_in_record``)、いまの Python の記録が付いたまま
-    作り直されずに使われた環境のため。記録を消しておけば、``get_addon_env_python`` は
-    「setup をやり直して」と断り、次の setup とアドオン管理の選択肢の確定のやり直しが、
-    その環境を作り直す。
-    """
-    for name in env_names:
-        record = get_addon_env_dir(addon_id, name) / ADDON_ENV_RECORD_NAME
-        try:
-            record.unlink(missing_ok=True)
-        except OSError:
-            LOGGER.warning("installer: could not remove env record %s", record, exc_info=True)
-
-
 def rebuild_unusable_addon_envs(
     expansion_dir: Optional[Path] = None,
     progress_callback: Optional[ProgressCallback] = None,
@@ -1763,7 +1783,9 @@ def rebuild_unusable_addon_envs(
     保存された答え、アドオンのデータ (``addon_data/<id>/``) は変えない。
 
     一つのアドオンの失敗では止めずに次のアドオンへ進み、失敗は結果に入れる。失敗した
-    アドオンの、作り直しの対象だった環境の記録は消す (``_forget_env_records``)。
+    アドオンの、作り直しを始めた環境にはやりかけの記録が残り (``_ensure_addon_env``)、
+    ``saiverse_env.json`` は無いので、``get_addon_env_python`` は「setup をやり直して」と
+    断り、次の setup とアドオン管理の導入・更新・選択肢の確定がその環境を作り直す。
     使えない環境が無いアドオンは manifest も読まず、結果に入れない。
 
     同じアドオンへの同時の操作を防ぐ API の鍵 (``api/routes/addon_catalog.py`` の
@@ -1799,7 +1821,7 @@ def rebuild_unusable_addon_envs(
         step_names = [s.name for s in plan.steps]
         try:
             _run_selected_steps(plan, get_addon_data_dir(addon_id), progress)
-            still = sorted(set(envs) & set(_unusable_env_dirs(addon_id, include_recorded=False)))
+            still = sorted(set(envs) & set(_unusable_env_dirs(addon_id)))
             if still:
                 # step が skip_if_exists で飛ばされた、などで環境が作られなかった
                 raise AddonInstallError(
@@ -1808,7 +1830,6 @@ def rebuild_unusable_addon_envs(
                 )
         except Exception as exc:  # noqa: BLE001 - 一つのアドオンの失敗で他を止めない
             LOGGER.warning("installer: rebuilding envs of %s failed", addon_id, exc_info=True)
-            _forget_env_records(addon_id, envs)
             results.append(EnvRebuildResult(
                 addon_id=addon_id, envs=envs, steps=step_names, error=str(exc),
             ))

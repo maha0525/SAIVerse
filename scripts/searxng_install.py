@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 
+import setup_in_progress
 from searxng_config import (
     SCRIPT_DIR,
     WORKSPACE_ROOT,
@@ -94,6 +95,9 @@ def probe_environment() -> dict[str, str]:
 
 
 def ready() -> bool:
+    if setup_in_progress.read_entry(WORKSPACE_ROOT, SET_ASIDE_ENTRY) is not None:
+        print("[INFO] A previous SearXNG setup stopped before it finished", flush=True)
+        return False
     if read_json(venv_directory() / INSTALL_MARKER) != install_identity():
         return False
     if read_json(source_directory() / SOURCE_MARKER).get("commit") != pinned_release()["commit"]:
@@ -226,6 +230,28 @@ def venv_series(directory: Path) -> str | None:
     return None
 
 
+# .setup_in_progress/searxng-venv.json in the SAIVerse folder
+# (scripts/setup_in_progress.py): the SearXNG venv was set aside and its
+# replacement has not finished. Written before the rename, removed once the
+# new venv is installed or the set-aside one is back. While it is there, the
+# next ``setup`` installs the venv again whatever its Python series, and puts
+# the set-aside one back if that fails. {"venv": the venv folder, "aside": the
+# folder it was renamed to}.
+SET_ASIDE_ENTRY = "searxng-venv"
+
+
+def _current_series() -> str:
+    return f"{sys.version_info[0]}.{sys.version_info[1]}"
+
+
+def _remove_set_aside_entry() -> None:
+    try:
+        setup_in_progress.remove_entry(WORKSPACE_ROOT, SET_ASIDE_ENTRY)
+    except OSError as exc:
+        print(f"[WARN] Could not remove {setup_in_progress.entry_path(WORKSPACE_ROOT, SET_ASIDE_ENTRY)} "
+              f"({exc}); the next setup installs SearXNG once more", file=sys.stderr, flush=True)
+
+
 def set_aside_venv_of_other_series() -> Path | None:
     """Rename the SearXNG venv when it was made with another Python series.
 
@@ -234,12 +260,15 @@ def set_aside_venv_of_other_series() -> Path | None:
     rebuilt ``.venv``) this venv keeps the old Python, and breaks once that
     Python is uninstalled. Renamed rather than deleted: on Windows a running
     SearXNG holds its files, the rename then fails and nothing is lost.
-    Returns the renamed folder, to remove after the new venv is installed.
+    ``SET_ASIDE_ENTRY`` is written before the rename, so a setup stopped after
+    it (the window closed, Ctrl+C) leaves the name of the set-aside venv for
+    the next one. Returns the renamed folder, to remove after the new venv is
+    installed.
     """
     venv = venv_directory()
     if not venv.exists():
         return None
-    current = f"{sys.version_info[0]}.{sys.version_info[1]}"
+    current = _current_series()
     series = venv_series(venv)
     if series == current:
         return None
@@ -247,14 +276,75 @@ def set_aside_venv_of_other_series() -> Path | None:
     print(f"[INFO] The SearXNG venv was made with Python {series or 'unknown'}; "
           f"making it again with Python {current}", flush=True)
     try:
+        setup_in_progress.write_entry(WORKSPACE_ROOT, SET_ASIDE_ENTRY, {"venv": str(venv), "aside": str(aside)})
+    except OSError as exc:
+        raise RuntimeError(
+            f"The SearXNG venv {venv} was not made again: the record written before it is renamed "
+            f"could not be written ({exc})."
+        ) from exc
+    try:
         os.replace(venv, aside)
     except OSError as exc:
+        _remove_set_aside_entry()
         raise RuntimeError(
             f"The SearXNG venv {venv} could not be renamed ({exc}). Close the SearXNG window "
             "and run setup again.\nSearXNG の専用の環境を作り直せませんでした。SearXNG の窓を"
             "閉じてから、setup をもう一度実行してください。"
         ) from exc
     return aside
+
+
+def set_aside_venv_of_stopped_setup() -> Path | None:
+    """The venv set aside by a setup that stopped before it finished
+    (``SET_ASIDE_ENTRY``), or None. The venv now in place is the one that
+    setup was making: when it is of another Python series than this one it is
+    removed, else it is installed again over (``ready`` is False while the
+    record is there). A record whose set-aside folder is gone (the setup
+    stopped before the rename, or the folder was removed) is dropped: the
+    venv in place is then handled as usual."""
+    entry = setup_in_progress.read_entry(WORKSPACE_ROOT, SET_ASIDE_ENTRY)
+    if entry is None:
+        return None
+    venv = venv_directory()
+    aside = Path(entry["aside"]) if isinstance(entry.get("aside"), str) else None
+    if aside is None or entry.get("venv") != str(venv) or not aside.is_dir():
+        print("[INFO] Dropping the record of a SearXNG setup that stopped before it set the venv aside",
+              flush=True)
+        _remove_set_aside_entry()
+        return None
+    print(f"[INFO] A previous SearXNG setup stopped before it finished; installing SearXNG again. "
+          f"If this fails, the venv set aside as {aside.name} is put back.", flush=True)
+    if venv.exists() and venv_series(venv) != _current_series():
+        shutil.rmtree(venv)
+    return aside
+
+
+def _discard_set_aside_venv(aside: Path) -> None:
+    """After the new venv is installed: rename ``aside`` out of the way, drop
+    the record, then delete it. Renamed first, so a folder deleted part-way is
+    never one a record could name as the venv to put back."""
+    name, _, stamp = aside.name.rpartition(".old-")
+    deleting = aside.with_name(f"{name}.deleting-{stamp}")
+    try:
+        os.replace(aside, deleting)
+    except OSError as exc:
+        deleting = None
+        print(f"[WARN] Could not delete the previous SearXNG venv {aside} ({exc}); "
+              "SearXNG works without it. Delete the folder yourself.", file=sys.stderr, flush=True)
+    _remove_set_aside_entry()
+    if deleting is not None:
+        shutil.rmtree(deleting, ignore_errors=True)
+
+
+def remove_leftover_deleting_venvs() -> None:
+    """Delete the folders a previous setup renamed to delete and could not
+    delete completely (``_discard_set_aside_venv``)."""
+    venv = venv_directory()
+    if not venv.parent.is_dir():
+        return
+    for leftover in venv.parent.glob(f"{venv.name}.deleting-*"):
+        if leftover.is_dir():
+            shutil.rmtree(leftover, ignore_errors=True)
 
 
 def put_back_set_aside_venv(aside: Path) -> bool:
@@ -288,18 +378,20 @@ def setup() -> None:
     prepare_source()
     prepare_compatibility()
     prepare_requirements()
-    aside = set_aside_venv_of_other_series()
+    aside = set_aside_venv_of_stopped_setup() or set_aside_venv_of_other_series()
     try:
         install_into_venv()
     except BaseException:
         # The venv of the other series was the one that worked: do not leave
         # SearXNG without it, whatever stopped the new one (put_back_set_aside_venv
-        # prints whether that worked).
-        if aside is not None:
-            put_back_set_aside_venv(aside)
+        # prints whether that worked). The record stays when it could not be
+        # put back, and the next setup tries again.
+        if aside is not None and put_back_set_aside_venv(aside):
+            _remove_set_aside_entry()
         raise
     if aside is not None:
-        shutil.rmtree(aside, ignore_errors=True)
+        _discard_set_aside_venv(aside)
+    remove_leftover_deleting_venvs()
     print("[OK] SearXNG setup complete", flush=True)
 
 

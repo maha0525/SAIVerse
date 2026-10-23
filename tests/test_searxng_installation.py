@@ -20,6 +20,9 @@ def installation(tmp_path, monkeypatch):
     monkeypatch.delenv("SEARXNG_REF", raising=False)
     monkeypatch.setenv("SEARXNG_SRC_DIR", str(tmp_path / "source with spaces"))
     monkeypatch.setenv("SEARXNG_VENV_DIR", str(tmp_path / "venv"))
+    # The record of a set-aside venv (.setup_in_progress/) goes to tmp_path,
+    # not to this checkout.
+    monkeypatch.setattr(installer, "WORKSPACE_ROOT", tmp_path)
     return tmp_path
 
 
@@ -268,6 +271,135 @@ def test_a_successful_install_removes_the_set_aside_venv(installation, tmp_path,
 
     assert installer.venv_series(venv) == f"{sys.version_info[0]}.{sys.version_info[1]}"
     assert not list(tmp_path.glob("venv.old-*"))
+
+
+# --- the record of the set-aside venv: a setup stopped part-way is continued ----------
+
+
+def _set_aside_entry(root: Path) -> dict | None:
+    return installer.setup_in_progress.read_entry(root, installer.SET_ASIDE_ENTRY)
+
+
+def test_the_set_aside_is_recorded_before_the_rename(installation, tmp_path, monkeypatch):
+    venv = tmp_path / "venv"
+    _venv_with_series(venv, "3.12.10")
+    renames = []
+    real = installer.os.replace
+
+    def replace(src, dst):  # noqa: ANN001
+        if Path(src) == venv:  # (the record itself is also written with os.replace)
+            renames.append(_set_aside_entry(tmp_path))
+        real(src, dst)
+
+    monkeypatch.setattr(installer.os, "replace", replace)
+    aside = installer.set_aside_venv_of_other_series()
+    assert renames[0] == {"venv": str(venv), "aside": str(aside)}
+    assert _set_aside_entry(tmp_path) == {"venv": str(venv), "aside": str(aside)}
+
+
+def test_a_refused_set_aside_removes_its_record(installation, tmp_path, monkeypatch):
+    _venv_with_series(tmp_path / "venv", "3.12.10")
+    monkeypatch.setattr(installer.os, "replace", lambda src, dst: (_ for _ in ()).throw(PermissionError(5, "in use")))
+    with pytest.raises(RuntimeError):
+        installer.set_aside_venv_of_other_series()
+    assert _set_aside_entry(tmp_path) is None
+
+
+def _stopped_after_the_set_aside(tmp_path: Path) -> Path:
+    """A setup that set the 3.12 venv aside, made a venv with this Python and
+    was killed (the window closed) before pip finished: no handler ran."""
+    venv = tmp_path / "venv"
+    _venv_with_series(venv, "3.12.10")
+    (venv / "kept.txt").write_text("the venv that worked", encoding="utf-8")
+    aside = installer.set_aside_venv_of_other_series()
+    _venv_with_series(venv, f"{sys.version_info[0]}.{sys.version_info[1]}.0")
+    return aside
+
+
+def test_a_record_makes_the_check_fail_so_the_launcher_runs_setup(installation, tmp_path):
+    _stopped_after_the_set_aside(tmp_path)
+    assert installer.ready() is False
+
+
+@pytest.mark.parametrize("failing_step", ["pip install -r", "probe"])
+def test_a_setup_after_a_stopped_one_puts_the_set_aside_venv_back_when_it_fails(
+    installation, tmp_path, monkeypatch, failing_step
+):
+    """The venv in place is of this Python's series, so set_aside_venv_of_other_series
+    alone would not see it; the record still names the venv that worked."""
+    aside = _stopped_after_the_set_aside(tmp_path)
+    _setup_failing_at(monkeypatch, tmp_path, failing_step)
+    with pytest.raises(subprocess.CalledProcessError):
+        installer.setup()
+    venv = tmp_path / "venv"
+    assert (venv / "kept.txt").read_text(encoding="utf-8") == "the venv that worked"
+    assert not aside.exists()
+    assert _set_aside_entry(tmp_path) is None
+
+
+def test_a_setup_after_a_stopped_one_installs_again_and_removes_the_set_aside_venv(
+    installation, tmp_path, monkeypatch
+):
+    _stopped_after_the_set_aside(tmp_path)
+    _setup_failing_at(monkeypatch, tmp_path, "nothing fails")
+    installer.setup()
+    assert installer.venv_series(tmp_path / "venv") == f"{sys.version_info[0]}.{sys.version_info[1]}"
+    assert not list(tmp_path.glob("venv.old-*")) and not list(tmp_path.glob("venv.deleting-*"))
+    assert _set_aside_entry(tmp_path) is None
+
+
+def test_a_half_made_venv_of_another_series_is_made_again(installation, tmp_path, monkeypatch):
+    """The stopped setup ran with another Python than this one: its half-made
+    venv is removed and made again with this Python."""
+    venv = tmp_path / "venv"
+    _venv_with_series(venv, "3.11.9")
+    aside = installer.set_aside_venv_of_other_series()
+    _venv_with_series(venv, "3.12.10")
+    (venv / "half.txt").write_text("", encoding="utf-8")
+    _setup_failing_at(monkeypatch, tmp_path, "nothing fails")
+    installer.setup()
+    assert not (venv / "half.txt").exists()
+    assert installer.venv_series(venv) == f"{sys.version_info[0]}.{sys.version_info[1]}"
+    assert not aside.exists()
+
+
+def test_a_record_whose_set_aside_folder_is_gone_is_dropped(installation, tmp_path):
+    """Stopped between writing the record and the rename: the venv in place
+    is still the one of the other series, and is set aside as usual."""
+    venv = tmp_path / "venv"
+    _venv_with_series(venv, "3.12.10")
+    installer.setup_in_progress.write_entry(
+        tmp_path, installer.SET_ASIDE_ENTRY, {"venv": str(venv), "aside": str(tmp_path / "venv.old-gone")})
+    assert installer.set_aside_venv_of_stopped_setup() is None
+    assert _set_aside_entry(tmp_path) is None
+    assert installer.set_aside_venv_of_other_series() is not None
+
+
+def test_a_set_aside_venv_stopped_while_being_deleted_is_not_put_back(installation, tmp_path, monkeypatch):
+    """It is renamed before it is deleted and the record goes with the rename,
+    so a half-deleted venv is never named as the one to put back."""
+    aside = _stopped_after_the_set_aside(tmp_path)
+    _setup_failing_at(monkeypatch, tmp_path, "nothing fails")
+
+    class Stop(BaseException):
+        pass
+
+    real_rmtree = installer.shutil.rmtree
+
+    def stop_on_deleting(path, *args, **kwargs):  # noqa: ANN001
+        if ".deleting-" in Path(path).name:
+            raise Stop
+        return real_rmtree(path, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(installer.shutil, "rmtree", stop_on_deleting)
+        with pytest.raises(Stop):
+            installer.setup()
+    assert not aside.exists()
+    assert _set_aside_entry(tmp_path) is None
+    assert len(list(tmp_path.glob("venv.deleting-*"))) == 1
+    installer.setup()  # the next one deletes what is left
+    assert not list(tmp_path.glob("venv.deleting-*"))
 
 
 def _run_main(monkeypatch, action: str) -> int:

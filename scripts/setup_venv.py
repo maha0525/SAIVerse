@@ -18,30 +18,39 @@ Python のまま進むとき、このスクリプトもその Python で動く)�
     python scripts/setup_venv.py check-stopped
         setup が環境を変え始める前 (Python を選んだ直後) に呼ぶ。SAIVerse 本体
         (runtime marker)・このフォルダの画面のサーバー・SearXNG のサーバーが動いて
-        いる、または動いていないと確かめられないときは、何も変えずに終了コード 1。
+        いるときは、何も変えずに終了コード 1。画面のサーバーと SearXNG のサーバーを
+        自動で確かめられなかったときは、窓をすべて閉じたら Enter を押すよう利用者に
+        頼んで待つ (標準入力が端末でないときは、頼めないので終了コード 1)。
         Linux / macOS は使用中のフォルダも改名できるので、.venv の改名の失敗は
         確かめの代わりにならない。確かめ方は ``check_stopped`` を見る。
     python scripts/setup_venv.py prepare [--expect-series 3.13]
         既存の .venv をそのまま使うか、作り直すかを決める。作り直すときは、
-        .venv を消さずに .venv.old-<日時> へ改名する。結果を標準出力に一行で書く
-        (説明の文は標準エラーに書く):
+        .venv を消さずに .venv.old-<日時> へ改名する。改名・作成の前に、.venv を
+        やり直していることを ``.setup_in_progress/venv.json`` に書く
+        (``scripts/setup_in_progress.py``。消すのは finish か rollback)。結果を
+        標準出力に一行で書く (説明の文は標準エラーに書く):
             keep            そのまま使う
-            create          .venv が無い。新しく作る
-            renamed <name>  .venv を <name> に改名した (前の回の setup が改名した
-                            あと、新しい .venv を作る前に止まっていた場合も)。新しく作る
-            resume <name>   前の回の setup が .venv を <name> に改名して新しい .venv を
-                            作ったあと、終わる前に止まっていた。.venv はそのまま使い、
-                            renamed と同じく、パッケージとアドオンの入れ直しを最後まで行う
-            locked          改名を断られた (中のファイルが使用中)。何も変えていない
-        --expect-series を渡さないときは、系列を理由に作り直さない (壊れた .venv
-        だけを作り直す)。
+            create          .venv が無い。新しく作る (失敗しても戻す先は無い)
+            renamed <name>  .venv を <name> に改名した。新しく作る
+            resume [<name>] 前の回の setup が .venv をやり直している途中で止まっていて、
+                            その回が作った .venv が揃っている。.venv はそのまま使い、
+                            create / renamed と同じく、パッケージとアドオンの入れ直しを
+                            最後まで行う。<name> は失敗したときに戻す古い .venv
+            locked          改名か削除を断られた (中のファイルが使用中)。何も変えていない
+            error           記録を書けなかった。何も変えていない
+        前の回の記録が残っていれば、.venv の様子にかかわらず続きを行う (記録の
+        古い方が戻し先になる)。--expect-series を渡さないときは、系列を理由に
+        作り直さない (壊れた .venv だけを作り直す)。
     python scripts/setup_venv.py finish
-        新しい .venv にパッケージが入り、アドオンの入れ直しの結果を記録したあとに
-        呼ぶ。.venv.old-<日時> の形のフォルダを全部消す。消せなかったものは知らせる
-        だけで、終了コードは 0。
+        新しい .venv にパッケージが入り、アドオンの入れ直しが最後まで走ったあとに
+        呼ぶ。記録を消し、.venv.old-<日時> の形のフォルダを全部消す。消すときは、先に
+        .venv.deleting-<日時> へ改名してから消す (消している途中で止まったものが
+        戻し先に選ばれないように。残った .venv.deleting-* も消す)。消せなかったものは
+        知らせるだけで、終了コードは 0。
     python scripts/setup_venv.py rollback <name>
         新しい .venv の作成かパッケージの導入に失敗したときに呼ぶ。作りかけの
-        .venv を消し、<name> を .venv に戻す。戻せなかったら終了コード 1。
+        .venv を消し、<name> を .venv に戻し、記録を消す。戻せなかったら終了コード 1
+        (記録は残り、次の setup が続きを行う)。
 """
 from __future__ import annotations
 
@@ -58,11 +67,23 @@ import subprocess
 import sys
 from pathlib import Path
 
+# setup_in_progress.py sits next to this script; tests load this file by path.
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+import setup_in_progress  # noqa: E402
+
 VENV_NAME = ".venv"
 OLD_VENV_PREFIX = ".venv.old-"
+DELETING_VENV_PREFIX = ".venv.deleting-"
 # prepare が作る名前の形。finish はこの形のフォルダだけを消す
 # (利用者が手で作った ``.venv.old`` などには触らない)。
 OLD_VENV_RE = re.compile(r"^\.venv\.old-\d{8}-\d{6}(?:-\d+)?$")
+# finish が消す前に付ける名前の形。戻し先には決してならない。
+DELETING_VENV_RE = re.compile(r"^\.venv\.deleting-\d{8}-\d{6}(?:-\d+)?$")
+# .setup_in_progress/venv.json: .venv をやり直している (setup_in_progress.py)。
+# 中身は {"old": 改名した古い .venv の名前 (作るだけの回は null)}。
+VENV_ENTRY = "venv"
 _SERIES_RE = re.compile(r"^(\d+)\.(\d+)(?:\.|$)")
 
 
@@ -107,8 +128,8 @@ def read_venv_series(venv_dir: Path) -> str | None:
     return None
 
 
-def _old_venv_name(root: Path, now: _dt.datetime) -> str:
-    base = f"{OLD_VENV_PREFIX}{now:%Y%m%d-%H%M%S}"
+def _old_venv_name(root: Path, now: _dt.datetime, prefix: str = OLD_VENV_PREFIX) -> str:
+    base = f"{prefix}{now:%Y%m%d-%H%M%S}"
     name = base
     n = 2
     while (root / name).exists():
@@ -134,83 +155,123 @@ def decide(root: Path, expect_series: str | None) -> tuple[str, str]:
     return "keep", f".venv uses Python {series}"
 
 
-def _leftover_old_venv(root: Path) -> str | None:
-    """前の回の setup が改名したまま残した ``.venv.old-<日時>`` のうち、一番新しい
-    揃ったもの (有効にするためのファイルと python がある) の名前。無ければ None。
-
-    揃っていないもの (``finish`` が途中まで消して残したもの) は戻し先にならないので
-    数えない (``finish`` がまた消す)。
-    """
-    names = [
-        path.name
-        for path in root.iterdir()
-        if path.is_dir() and OLD_VENV_RE.match(path.name) and venv_is_complete(path)
-    ]
-    return max(names, key=_old_venv_sort_key) if names else None
-
-
-_OLD_VENV_STAMP_RE = re.compile(r"^(\d{8}-\d{6})(?:-(\d+))?$")
+def _write_venv_entry(root: Path, old_name: str | None) -> bool:
+    """「.venv をやり直している」を記録に書く。書けなかったら知らせて False。"""
+    try:
+        setup_in_progress.write_entry(root, VENV_ENTRY, {
+            "old": old_name,
+            "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        })
+    except OSError as exc:
+        _say(f"[ERROR] Could not write {setup_in_progress.entry_path(root, VENV_ENTRY)}: {exc}")
+        _say("  setup writes it before it changes .venv. Nothing was changed.")
+        _say(f"[ERROR] {setup_in_progress.entry_path(root, VENV_ENTRY)} を書けませんでした。")
+        _say("  setup は .venv を変える前にこの記録を書きます。何も変更していません。")
+        return False
+    return True
 
 
-def _old_venv_sort_key(name: str) -> tuple[str, int]:
-    """``.venv.old-<日時>`` と ``.venv.old-<日時>-<n>`` を作った順に並べる鍵。"""
-    match = _OLD_VENV_STAMP_RE.match(name[len(OLD_VENV_PREFIX):])
-    if match is None:
-        return ("", 0)
-    return (match.group(1), int(match.group(2) or 1))
+def _remove_venv_entry(root: Path) -> None:
+    """記録を消す。消せなかったら知らせるだけ (次の setup が続きとして入れ直しをやり直す)。"""
+    try:
+        setup_in_progress.remove_entry(root, VENV_ENTRY)
+    except OSError as exc:
+        _say(f"[WARN] Could not delete {setup_in_progress.entry_path(root, VENV_ENTRY)}: {exc}")
+        _say("  The next setup installs the packages once more.")
+        _say(f"[WARN] {setup_in_progress.entry_path(root, VENV_ENTRY)} を消せませんでした。")
+        _say("  次の setup で、パッケージの入れ直しをもう一度行います。")
+
+
+def _say_locked(what_en: str, what_ja: str, exc: OSError, *, kept_en: str, kept_ja: str) -> str:
+    _say(f"[ERROR] Could not {what_en}: {exc}")
+    _say("  A program is still using files in .venv. Close every SAIVerse window")
+    _say("  (and any other program that uses .venv, such as an editor), then run setup again.")
+    _say(f"  {kept_en}")
+    _say(f"[ERROR] {what_ja}")
+    _say("  .venv の中のファイルを使っているプログラムがあります。SAIVerse の窓をすべて閉じて")
+    _say("  (.venv を使うエディタなどのプログラムも閉じて)、setup をもう一度実行してください。")
+    _say(f"  {kept_ja}")
+    return "locked"
+
+
+def _entry_old_name(root: Path, entry: dict) -> str | None:
+    """記録にある古い ``.venv`` の名前。この形の名前でない・フォルダが無いときは None。"""
+    old = entry.get("old")
+    if isinstance(old, str) and OLD_VENV_RE.match(old) and (root / old).is_dir():
+        return old
+    return None
 
 
 def prepare(root: Path, expect_series: str | None, now: _dt.datetime | None = None) -> str:
     """``decide`` の結果に従い、作り直すなら改名する。標準出力に書く一行を返す。
 
-    前の回の setup が古い ``.venv`` を改名したあと、終わる前に止まっていた
-    (``.venv.old-<日時>`` が残っている) ときは、その名前を返して続きを行わせる。
-    そのままだと、次の回は残った新しい ``.venv`` を ``keep`` と読み、アドオンの
-    本体側の入れ直し (``--core-venv-recreated``) を飛ばし、pip が失敗しても古い方へ
-    戻せず、``finish`` が古い方を消してしまう。
+    改名・作成の前に、記録 (``VENV_ENTRY``) に「.venv をやり直している」と古い方の
+    名前を書く。記録が残っていれば、前の回の setup がやり直しの途中で止まっていた
+    ということなので、.venv の様子にかかわらず続きを行う (``_continue``)。
     """
+    entry = setup_in_progress.read_entry(root, VENV_ENTRY)
     action, reason = decide(root, expect_series)
-    leftover = _leftover_old_venv(root)
+    if entry is not None:
+        result = _continue(root, entry, action)
+        if result is not None:
+            return result
     if action == "keep":
-        if leftover is None:
-            return "keep"
-        _say(f"[SETUP] The previous setup stopped before it finished; continuing it. "
-             f"The previous .venv stays as {leftover} until this setup finishes.")
-        _say(f"[SETUP] 前の回の setup が終わる前に止まっていたので、続きから行います。"
-             f"前の .venv は、この setup が終わるまで {leftover} として残します。")
-        return f"resume {leftover}"
+        return "keep"
     if action == "create":
-        if leftover is None:
-            return "create"
-        _say(f"[SETUP] The previous setup moved the old .venv to {leftover} and stopped; "
-             "creating the new .venv now.")
-        _say(f"[SETUP] 前の回の setup が古い .venv を {leftover} に移したまま止まっていたので、"
-             "新しい .venv を作ります。")
-        return f"renamed {leftover}"
+        return "create" if _write_venv_entry(root, None) else "error"
     old_name = _old_venv_name(root, now or _dt.datetime.now())
     _say(f"[SETUP] Rebuilding .venv: {reason}.")
     _say(f"[SETUP] .venv を作り直します ({reason})。")
+    if not _write_venv_entry(root, old_name):
+        return "error"
     try:
         os.rename(root / VENV_NAME, root / old_name)
     except OSError as exc:
-        _say(f"[ERROR] Could not rename .venv to {old_name}: {exc}")
-        _say("  A program is still using files in .venv. Close every SAIVerse window")
-        _say("  (and any other program that uses .venv, such as an editor), then run setup again.")
-        _say("  Nothing was changed.")
-        _say(f"[ERROR] .venv の名前を {old_name} に変えられませんでした。")
-        _say("  .venv の中のファイルを使っているプログラムがあります。SAIVerse の窓をすべて閉じて")
-        _say("  (.venv を使うエディタなどのプログラムも閉じて)、setup をもう一度実行してください。")
-        _say("  何も変更していません。")
-        return "locked"
+        _remove_venv_entry(root)
+        return _say_locked(
+            f"rename .venv to {old_name}", f".venv の名前を {old_name} に変えられませんでした。", exc,
+            kept_en="Nothing was changed.", kept_ja="何も変更していません。")
     _say(f"[OK] Moved the old .venv to {old_name}. It is deleted after the new .venv is ready.")
     _say(f"[OK] 古い .venv を {old_name} に移しました。新しい .venv が揃ったら消します。")
-    if leftover is not None and not venv_is_complete(root / old_name):
-        # The .venv just moved is the half-made one of the previous setup; the
-        # one to put back if this setup fails is the one that setup moved.
-        _say(f"[SETUP] If this setup fails, the .venv from before the previous setup ({leftover}) is put back.")
-        _say(f"[SETUP] この setup が失敗したときは、前の回の setup より前の .venv ({leftover}) を戻します。")
-        return f"renamed {leftover}"
     return f"renamed {old_name}"
+
+
+def _continue(root: Path, entry: dict, action: str) -> str | None:
+    """前の回の setup がやり直しの途中で止まっていたときの一行。None なら、記録より
+    前の状態のまま (前の回は改名する前に止まっていた) なので、ふつうに決める。
+
+    記録の古い方が残っていれば、それが改名済みの戻し先で、いまの ``.venv`` は前の回が
+    作ったもの。揃っていて系列も合えば (``keep``) そのまま使い、揃っていなければ消して
+    作り直す。古い方が無ければ戻し先は無い: 揃った ``.venv`` は前の回が作ったものか
+    改名される前のものかのどちらかで、どちらでもパッケージを入れ直せばよい
+    (``resume``)。作り直しが要る ``.venv`` は、ふつうの作り直しと同じく改名して
+    戻し先にする (前の回が作りかけたものでも、改名なら失うものは無い)。
+    """
+    old = _entry_old_name(root, entry)
+    _say("[SETUP] The previous setup stopped before it finished; doing the rest of it now.")
+    _say("[SETUP] 前の回の setup が終わる前に止まっていたので、残りを行います。")
+    if old is not None:
+        _say(f"  If this setup fails, the .venv from before that setup ({old}) is put back.")
+        _say(f"  この setup が失敗したときは、その setup より前の .venv ({old}) を戻します。")
+    if action == "keep":
+        return f"resume {old}" if old else "resume"
+    if action == "create":
+        if old is None and entry.get("old") is not None and not _write_venv_entry(root, None):
+            return "error"  # the entry names a folder that is gone; nothing to put back now
+        return f"renamed {old}" if old else "create"
+    if old is None:
+        return None
+    try:
+        _rmtree(root / VENV_NAME)
+    except OSError as exc:
+        return _say_locked(
+            "delete the .venv the previous setup left unfinished",
+            "前の回の setup が作りかけた .venv を消せませんでした。", exc,
+            kept_en=f"The .venv from before that setup is kept as {old}.",
+            kept_ja=f"その setup より前の .venv は {old} として残っています。")
+    _say("[OK] Deleted the .venv the previous setup left unfinished.")
+    _say("[OK] 前の回の setup が作りかけた .venv を消しました。")
+    return f"renamed {old}"
 
 
 def _on_rm_error(func, path, exc_info):  # noqa: ANN001 - shutil.rmtree onerror signature
@@ -231,20 +292,49 @@ def _rmtree(path: Path) -> None:
         shutil.rmtree(path, onerror=_on_rm_error)
 
 
-def finish(root: Path) -> list[str]:
-    """``.venv.old-<日時>`` を全部消す。消せなかったフォルダの名前を返す。"""
+def _say_not_deleted(name: str, exc: OSError) -> None:
+    _say(f"[WARN] Could not delete the old environment {name}: {exc}")
+    _say(f"  SAIVerse works without it. Close SAIVerse and delete the {name} folder yourself.")
+    _say(f"[WARN] 古い環境 {name} を消せませんでした。")
+    _say(f"  SAIVerse の動作には影響しません。SAIVerse を閉じてから {name} フォルダを手で消してください。")
+
+
+def finish(root: Path, now: _dt.datetime | None = None) -> list[str]:
+    """記録を消し、``.venv.old-<日時>`` を全部消す。消せなかったフォルダの名前を返す。
+
+    消す前に ``.venv.deleting-<日時>`` へ改名する。途中まで消えたフォルダが
+    ``.venv.old-<日時>`` の名前のまま残ると、戻し先と見分けがつかなくなるため。
+    改名を断られたもの (Windows で中のファイルが使用中) は消さずに残す (次の
+    finish がまた消す)。前の finish が消しきれなかった ``.venv.deleting-*`` も消す。
+    """
+    _remove_venv_entry(root)
     failed: list[str] = []
+    now = now or _dt.datetime.now()
     for path in sorted(root.iterdir()):
         if not (path.is_dir() and OLD_VENV_RE.match(path.name)):
+            continue
+        deleting = root / _old_venv_name(root, now, DELETING_VENV_PREFIX)
+        try:
+            os.rename(path, deleting)
+        except OSError as exc:
+            failed.append(path.name)
+            _say_not_deleted(path.name, exc)
+            continue
+        try:
+            _rmtree(deleting)
+        except OSError as exc:
+            failed.append(deleting.name)
+            _say_not_deleted(deleting.name, exc)
+            continue
+        _say(f"[OK] Deleted the old environment {path.name}")
+    for path in sorted(root.iterdir()):
+        if not (path.is_dir() and DELETING_VENV_RE.match(path.name)) or path.name in failed:
             continue
         try:
             _rmtree(path)
         except OSError as exc:
             failed.append(path.name)
-            _say(f"[WARN] Could not delete the old environment {path.name}: {exc}")
-            _say(f"  SAIVerse works without it. Close SAIVerse and delete the {path.name} folder yourself.")
-            _say(f"[WARN] 古い環境 {path.name} を消せませんでした。")
-            _say(f"  SAIVerse の動作には影響しません。SAIVerse を閉じてから {path.name} フォルダを手で消してください。")
+            _say_not_deleted(path.name, exc)
             continue
         _say(f"[OK] Deleted the old environment {path.name}")
     return failed
@@ -270,6 +360,7 @@ def rollback(root: Path, old_name: str) -> bool:
         _say("[ERROR] 前の .venv に戻せませんでした。")
         _say(f"  .venv フォルダを手で消し、{old_name} の名前を .venv に変えてから、setup をもう一度実行してください。")
         return False
+    _remove_venv_entry(root)
     _say("[INFO] Put the previous .venv back. SAIVerse starts as it did before this setup.")
     _say("  Fix the problem shown above (for example the network connection), then run setup again.")
     _say("[INFO] 前の .venv に戻しました。SAIVerse はこの setup の前と同じように起動できます。")
@@ -286,7 +377,9 @@ def rollback(root: Path, old_name: str) -> bool:
 # SearXNG servers through psutil). It needs the existing .venv. When that
 # cannot run it (no .venv: a first install; a .venv whose Python is gone or
 # that lacks python-dotenv / psutil), this script checks the runtime markers
-# itself with the standard library and cannot list the servers.
+# itself with the standard library and cannot list the servers. Whenever the
+# servers could not be listed, setup asks the user to close the windows and
+# waits for Enter instead of going on (a first install is not asked).
 
 # update_engine.check_stopped_for_setup's exit codes.
 _ENGINE_NOTHING_RUNNING = 0
@@ -425,15 +518,38 @@ def resolve_dotenv(pairs: list[tuple[str, str | None]], environ: dict[str, str])
     return resolved
 
 
+def find_dotenv_path(root: Path) -> Path | None:
+    """The .env main.py's ``load_dotenv()`` reads: python-dotenv's ``find_dotenv``
+    starts in the folder of main.py (``root``) and goes up one folder at a time
+    to the top, taking the first ``.env`` that is a file or a FIFO
+    (``dotenv.main._walk_to_root`` / ``_is_file_or_fifo``). None when there is
+    none. ``update_engine.find_dotenv_path`` is the same; the tests compare
+    both with python-dotenv itself."""
+    current = os.path.abspath(root)
+    last = None
+    while last != current:
+        candidate = os.path.join(current, ".env")
+        if os.path.isfile(candidate):
+            return Path(candidate)
+        try:
+            if stat.S_ISFIFO(os.stat(candidate).st_mode):
+                return Path(candidate)
+        except OSError:
+            pass
+        last, current = current, os.path.abspath(os.path.join(current, os.path.pardir))
+    return None
+
+
 def saiverse_home(root: Path, environ: dict[str, str] | None = None) -> Path:
-    """SAIVERSE_HOME as main.py resolves it: the environment, else the checkout's
-    .env (``load_dotenv``, already-set variables win), else ``~/.saiverse``.
-    Raises ``CannotTell`` when .env exists but cannot be read."""
+    """SAIVERSE_HOME as main.py resolves it: the environment, else the .env
+    main.py's ``load_dotenv`` finds (``find_dotenv_path``; already-set variables
+    win), else ``~/.saiverse``. Raises ``CannotTell`` when that .env cannot be
+    read."""
     environ = dict(os.environ if environ is None else environ)
     value = environ.get("SAIVERSE_HOME")
     if value is None and environ.get("PYTHON_DOTENV_DISABLED", "").casefold() not in _DOTENV_DISABLED_VALUES:
-        dotenv_path = root / ".env"
-        if dotenv_path.is_file():
+        dotenv_path = find_dotenv_path(root)
+        if dotenv_path is not None:
             try:
                 text = dotenv_path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
@@ -587,9 +703,16 @@ def _refuse_while_running(reason: str) -> None:
     _say("  .runtime の中のファイルが残っています。それを消してから、setup をもう一度実行してください。")
 
 
-def check_stopped(root: Path) -> bool:
+def check_stopped(root: Path, stdin=None) -> bool:  # noqa: ANN001 - a text stream
     """Whether setup may change this checkout's environments (see the section
-    comment). On False the reason and what to do are printed."""
+    comment). On False the reason and what to do are printed.
+
+    When the frontend and SearXNG servers cannot be listed (psutil is missing
+    or broken in .venv, or there is no usable .venv), setup does not go on by
+    itself: it asks the user to close the windows and press Enter
+    (``_ask_to_close_windows``). A first install (nothing installed here yet)
+    has nothing that could be running and is not asked.
+    """
     code = _check_with_venv(root)
     if code == _ENGINE_NOTHING_RUNNING:
         return True
@@ -597,8 +720,7 @@ def check_stopped(root: Path) -> bool:
         _refuse_while_running("see the [check-stopped] line above")
         return False
     if code == _ENGINE_PROCESSES_UNCHECKED:
-        _warn_servers_unchecked()
-        return True
+        return _ask_to_close_windows(stdin)
     # No usable .venv for the exact check: the runtime markers with the
     # standard library; the servers cannot be listed without psutil.
     try:
@@ -610,17 +732,53 @@ def check_stopped(root: Path) -> bool:
     if state != "stopped":
         _refuse_while_running(reason)
         return False
-    if (root / VENV_NAME).exists():
-        # A first install has nothing that could be running here.
-        _warn_servers_unchecked()
+    if not _anything_installed(root):
+        return True
+    return _ask_to_close_windows(stdin)
+
+
+def _anything_installed(root: Path) -> bool:
+    """Whether a frontend or SearXNG server could run from this folder: its
+    .venv, the frontend packages or the SearXNG venv (``SEARXNG_VENV_DIR``,
+    relative to the folder, as scripts/searxng_config.py resolves it)."""
+    searxng = Path(os.environ.get("SEARXNG_VENV_DIR") or Path("scripts") / ".searxng-venv")
+    if not searxng.is_absolute():
+        searxng = root / searxng
+    return any(path.exists() for path in (root / VENV_NAME, root / "frontend" / "node_modules", searxng))
+
+
+def _ask_to_close_windows(stdin=None) -> bool:  # noqa: ANN001 - a text stream
+    """Ask the user to close the SAIVerse windows and press Enter. False when
+    the user stops with Ctrl+C, or when there is no terminal to ask in
+    (setup run by another program): then setup stops before changing anything."""
+    stream = sys.stdin if stdin is None else stdin
+    _say("[WARN] setup could not check by itself whether a SAIVerse window of this folder is open.")
+    _say("[WARN] このフォルダの SAIVerse の窓が開いているかを、setup が自動で確かめられませんでした。")
+    try:
+        interactive = stream is not None and stream.isatty()
+    except (AttributeError, ValueError, OSError):
+        interactive = False
+    if not interactive:
+        _say("[ERROR] setup is not running in a terminal, so it cannot ask; it stopped before changing")
+        _say("  anything. Close every SAIVerse window (Backend / Frontend / SearXNG), then run setup")
+        _say("  again in a terminal.")
+        _say("[ERROR] 端末で実行されていないため確認できず、setup は何も変えずに止まりました。")
+        _say("  SAIVerse の窓 (Backend / Frontend / SearXNG) をすべて閉じてから、端末で setup を")
+        _say("  もう一度実行してください。")
+        return False
+    _say("  Close every SAIVerse window (Backend / Frontend / SearXNG), then press Enter.")
+    _say("  To stop setup, press Ctrl+C.")
+    _say("  SAIVerse の窓 (Backend / Frontend / SearXNG) をすべて閉じたら Enter を押してください。")
+    _say("  やめるときは Ctrl+C を押してください。")
+    try:
+        line = stream.readline()
+    except (KeyboardInterrupt, EOFError, OSError):
+        line = ""
+    if not line:
+        _say("[INFO] setup stopped before changing anything.")
+        _say("[INFO] setup は何も変えずに止まりました。")
+        return False
     return True
-
-
-def _warn_servers_unchecked() -> None:
-    _say("[WARN] Could not check whether this folder's SAIVerse Frontend or SearXNG window is open;")
-    _say("  setup goes on. If one is open, close this window and that one, then run setup again.")
-    _say("[WARN] このフォルダの SAIVerse の Frontend や SearXNG の窓が開いているかを確かめられませんでした。")
-    _say("  setup は続けます。開いている場合は、この窓とその窓を閉じてから、setup をもう一度実行してください。")
 
 
 def main(argv: list[str] | None = None) -> int:

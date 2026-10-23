@@ -86,8 +86,10 @@ echo "[OK] $PY_VERSION ($PYTHON_BIN)"
 # 下で入れ替えない。Linux / macOS は使用中のフォルダも改名できるので、.venv の改名の
 # 失敗は確かめの代わりにならない。scripts/setup_venv.py check-stopped が、SAIVerse の
 # データのフォルダの runtime marker と、このフォルダの画面のサーバー・SearXNG の
-# サーバーを確かめ、動いている・確かめられないときはどうすればよいかを表示して 1 で
-# 終わる。初めての導入 (何も無い) は進む。setup.bat と同じ手順。
+# サーバーを確かめ、動いているときはどうすればよいかを表示して 1 で終わる。サーバーを
+# 自動で確かめられなかったときは、SAIVerse の窓をすべて閉じたら Enter を押すよう頼んで
+# 待つ (Ctrl+C と、端末で実行されていないときは 1 で終わる)。初めての導入 (何も無い) は
+# 聞かずに進む。setup.bat と同じ手順。
 if ! "$PYTHON_BIN" scripts/setup_venv.py check-stopped; then
     exit 1
 fi
@@ -103,11 +105,12 @@ echo "[OK] Node.js $NODE_VERSION"
 
 # --- 3. Create or rebuild .venv ---
 # scripts/setup_venv.py prepare を、上で選んだ python で実行する。結果は一行で
-# keep / create / renamed <古い名前> / resume <古い名前> / locked。3.13 以外の系列で
-# 作られた .venv と壊れた .venv は消さずに .venv.old-<日時> へ改名し、新しい .venv に
+# keep / create / renamed <古い名前> / resume [<古い名前>] / locked / error。3.13 以外の
+# 系列で作られた .venv と壊れた .venv は消さずに .venv.old-<日時> へ改名し、新しい .venv に
 # パッケージが入り、アドオンのパッケージを入れ直してから消す。新しい .venv が失敗したら
-# 古いものを戻す。resume は、前の回の setup が新しい .venv を作ったあと終わる前に
-# 止まっていたという意味で、.venv はそのまま使い、残りは renamed と同じに行う。
+# 古いものを戻す。prepare は改名・作成の前に .setup_in_progress/venv.json を書き、
+# finish (か戻したとき) に消す。これが残っていれば次の setup は止まった回の続きを行う。
+# resume は、その回が作った .venv をそのまま使い、残りは renamed と同じに行うという意味。
 # SAIVERSE_ALLOW_NON_RECOMMENDED_PYTHON=1 のときは既存の .venv の系列を見ない。
 # setup.bat と同じ手順。
 if [ "$ALLOW_OTHER_PYTHON" = true ]; then
@@ -120,7 +123,10 @@ VENV_ACTION="${VENV_RESULT%% *}"
 VENV_OLD=""
 ADDON_REBUILD_ARGS=""
 if [ "$VENV_ACTION" = "renamed" ] || [ "$VENV_ACTION" = "resume" ]; then
-    VENV_OLD="${VENV_RESULT#* }"
+    # resume は古い名前が付かないこともある (戻す先が無い)
+    case "$VENV_RESULT" in
+        *" "*) VENV_OLD="${VENV_RESULT#* }" ;;
+    esac
 fi
 
 restore_old_venv() {
@@ -186,13 +192,18 @@ echo "[OK] Pythonパッケージのインストール完了"
 # pip_install) を、保存された答えのまま先に走らせ直す。続けて、別の Python の系列で
 # 作られたアドオン専用の環境を、保存された答えのまま作り直す。失敗では setup を止めない
 # (SAIVerse 本体は動く)。スクリプトがどうすればよいかを表示し、失敗を
-# .addon_env_rebuild_failures.json に書き残す (次の setup が読む)。そのあとで
-# .venv.old-<日時> を消す。ここより前で止まった setup は古い .venv を残すので、次の
-# setup が続きから行う。setup.bat と同じ手順。
-if ! python scripts/rebuild_addon_envs.py ${ADDON_REBUILD_ARGS:+"$ADDON_REBUILD_ARGS"}; then
+# .addon_env_rebuild_failures.json に書き残す (次の setup が読む)。スクリプトが最後まで
+# 走ったときだけ、finish が .setup_in_progress/venv.json を消して .venv.old-<日時> を消す。
+# ここより前で止まった setup や、落ちた・止められたスクリプトは両方を残すので、次の
+# setup が残りをやり直す。setup.bat と同じ手順。
+if python scripts/rebuild_addon_envs.py ${ADDON_REBUILD_ARGS:+"$ADDON_REBUILD_ARGS"}; then
+    "$PYTHON_BIN" scripts/setup_venv.py finish || true
+else
     echo "[WARN] アドオンのパッケージを確かめられませんでした。SAIVerse 本体は動きます。上のメッセージを見てください。"
+    echo "  この setup が新しい .venv を作っていた場合は、次の setup がパッケージとアドオンのパッケージを入れ直します。"
+    echo "[WARN] Could not check the addon packages. SAIVerse itself works; see the messages above."
+    echo "  If this setup made a new .venv, the next setup installs the packages and the addon packages again."
 fi
-"$PYTHON_BIN" scripts/setup_venv.py finish || true
 
 # --- 6. npm install ---
 echo ""

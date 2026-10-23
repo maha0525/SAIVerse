@@ -181,9 +181,12 @@ def test_a_failure_does_not_stop_the_other_addons_and_is_recorded(home, expansio
 
     assert [(r.addon_id, r.ok) for r in results] == [("a-addon", False), ("b-addon", True)]
     assert "gpt-pkgs" in results[0].error
-    # 失敗した環境の記録は消す: 使えば「setup をやり直して」と断られ、次の setup で作り直される
+    # 失敗した環境には記録が無く、やりかけの記録が残る: 使えば「setup をやり直して」と
+    # 断られ、次の setup で作り直される
     a_env = addon_paths.get_addon_env_dir("a-addon", "eng")
     assert addon_paths.read_addon_env_record(a_env) is None
+    assert _entry_files("a-addon") == ["env-eng"]
+    assert _entry_files("b-addon") == []
     with pytest.raises(addon_paths.AddonEnvError):
         addon_paths.get_addon_env_python("a-addon", "eng")
     assert addon_installer.find_unusable_addon_envs(expansion) == {"a-addon": ["eng"]}
@@ -230,10 +233,14 @@ def _load_entry():
 
 
 def test_the_entry_loads_the_same_dotenv_as_main_before_resolving_paths() -> None:
+    """The .env main.py's load_dotenv() finds: from the SAIVerse folder upward
+    (only its location is looked at here; load_dotenv is replaced)."""
+    from scripts.update_engine import find_dotenv_path
+
     _DOTENV_LOADS.clear()
     _load_entry()
-    root = Path(__file__).resolve().parent.parent
-    assert _DOTENV_LOADS == [((root / ".env",), {})]
+    found = find_dotenv_path(Path(__file__).resolve().parent.parent)
+    assert _DOTENV_LOADS == ([((found,), {})] if found is not None else [])
 
 
 def test_entry_does_not_rebuild_while_saiverse_may_be_running(home, expansion, monkeypatch, tmp_path) -> None:
@@ -463,32 +470,146 @@ def test_a_crash_with_the_flag_records_that_the_core_venv_is_not_done(home, monk
     assert addon_installer.core_venv_failures_in_record() == {addon_installer.SETUP_CRASH_ADDON_ID}
 
 
-def test_an_env_lost_by_a_failed_rebuild_is_rebuilt_next_time(home, expansion, monkeypatch, tmp_path) -> None:
-    """The rebuild removes the old env before creating it; a failure before the
-    folder exists leaves no folder, so the recorded name must bring it back."""
+# ---------------------------------------------------------------------------
+# The rebuild record: written before an env is removed, removed after its steps
+# ---------------------------------------------------------------------------
+
+
+class _Stop(BaseException):
+    """Stands in for the setup window being closed (not an Exception, as Ctrl+C is not)."""
+
+
+def _entry_files(addon_id: str) -> list[str]:
+    from scripts import setup_in_progress
+
+    return setup_in_progress.entry_names(addon_paths.get_addon_install_dir(addon_id))
+
+
+def _stopping_at(recorded: list, stop_when):  # type: ignore[no-untyped-def]
+    """``_fake_run`` that raises ``_Stop`` before running the command ``stop_when`` picks."""
+    fake = _fake_run(recorded)
+
+    def run(args, cwd, progress, label, env=None):  # type: ignore[no-untyped-def]
+        if stop_when(args, label):
+            raise _Stop
+        fake(args, cwd, progress, label, env)
+
+    return run
+
+
+def test_an_env_lost_by_a_stopped_rebuild_is_rebuilt_next_time(home, expansion, monkeypatch) -> None:
+    """The rebuild removes the old env before creating it: stopped right after
+    the removal, no folder is left, and only the record brings the env back."""
     _install(expansion, "a-addon", {"engines": ["cloud"]}, STALE)
     env_dir = addon_paths.get_addon_env_dir("a-addon", "eng")
-    shutil.rmtree(env_dir)
-    record = tmp_path / ".addon_env_rebuild_failures.json"
-    record.write_text(json.dumps({
-        "created_at": "2026-10-23T00:00:00+00:00",
-        "python_version": "3.13.17",
-        "failures": [{"addon_id": "a-addon", "envs": ["eng"], "steps": ["eng-pkgs"],
-                      "error": "venv failed", "core_venv": False}],
-    }), encoding="utf-8")
-
-    assert addon_installer.find_unusable_addon_envs(expansion) == {"a-addon": ["eng"]}
     recorded: list = []
+    monkeypatch.setattr(
+        addon_installer, "_run_subprocess", _stopping_at(recorded, lambda args, label: args[1:3] == ["-m", "venv"]))
+    with pytest.raises(_Stop):
+        addon_installer.rebuild_unusable_addon_envs(expansion)
+    assert not env_dir.exists()
+    assert _entry_files("a-addon") == ["env-eng"]
+    # Nothing on disk tells the env is missing; the record does.
+    assert addon_installer.find_unusable_addon_envs(expansion) == {"a-addon": ["eng"]}
+
+    recorded.clear()
     monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run(recorded))
     results = addon_installer.rebuild_unusable_addon_envs(expansion)
     assert [(r.addon_id, r.ok) for r in results] == [("a-addon", True)]
     assert any(c["args"][1:3] == ["-m", "venv"] for c in recorded)
+    assert addon_paths.get_addon_env_python("a-addon", "eng") == addon_paths.addon_env_python_path(env_dir)
+    assert _entry_files("a-addon") == []
+    assert addon_installer.find_unusable_addon_envs(expansion) == {}
+
+
+def test_an_env_stopped_while_it_was_deleted_does_not_look_usable(home, expansion, monkeypatch) -> None:
+    """Deleting stopped part-way leaves python behind; the env record goes first,
+    so the half-deleted env is refused and rebuilt."""
+    _install(expansion, "a-addon", {"engines": ["cloud"]}, addon_paths.current_python_version())
+    env_dir = addon_paths.get_addon_env_dir("a-addon", "eng")
+    assert addon_installer.find_unusable_addon_envs(expansion) == {}
+
+    def stop(_path):  # type: ignore[no-untyped-def]
+        raise _Stop
+
+    with monkeypatch.context() as m:
+        # The record of the env is stale for this run, so it is rebuilt.
+        m.setattr(addon_paths, "current_python_version", lambda: "9.9.9")
+        m.setattr(addon_installer, "current_python_version", lambda: "9.9.9")
+        m.setattr(addon_installer, "_safe_rmtree", stop)
+        with pytest.raises(_Stop):
+            addon_installer._ensure_addon_env("a-addon", "eng", lambda _e: None, set())
     assert addon_paths.addon_env_python_path(env_dir).exists()
+    with pytest.raises(addon_paths.AddonEnvError):
+        addon_paths.get_addon_env_python("a-addon", "eng")
+    assert addon_installer.find_unusable_addon_envs(expansion) == {"a-addon": ["eng"]}
 
 
-def test_a_recorded_env_with_an_invalid_name_is_ignored(home, expansion, tmp_path) -> None:
+def test_a_recorded_env_is_rebuilt_even_when_its_record_says_it_is_current(home, expansion, monkeypatch) -> None:
+    """Stopped after the env record was written but before the rebuild record
+    was removed: the env is complete, and is still rebuilt rather than trusted."""
+    from scripts import setup_in_progress
+
+    _install(expansion, "a-addon", {"engines": ["cloud"]}, addon_paths.current_python_version())
+    setup_in_progress.write_entry(addon_paths.get_addon_install_dir("a-addon"), "env-eng", {})
+    env_dir = addon_paths.get_addon_env_dir("a-addon", "eng")
+    assert addon_installer._env_needs_full_run("a-addon", "eng") is True
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run(recorded))
+    results = addon_installer.rebuild_unusable_addon_envs(expansion)
+    assert [(r.addon_id, r.ok) for r in results] == [("a-addon", True)]
+    assert not (env_dir / "old-package.txt").exists()  # made again from an empty venv
+    assert _entry_files("a-addon") == []
+
+
+def test_a_failed_rebuild_keeps_the_record_for_every_entrance(home, expansion, monkeypatch) -> None:
+    """The next setup and the addon manager (install / update / options) all go
+    through _ensure_addon_env and plan_options_apply's _env_needs_full_run."""
+    _install(expansion, "a-addon", {"engines": ["cloud", "gpt"]}, STALE)
+    recorded: list = []
+
+    def fail(args, cwd, progress, label, env=None):  # type: ignore[no-untyped-def]
+        _fake_run(recorded)(args, cwd, progress, label, env)
+        if label == "gpt-pkgs":
+            raise addon_installer.AddonInstallError("gpt-pkgs failed")
+
+    monkeypatch.setattr(addon_installer, "_run_subprocess", fail)
+    results = addon_installer.rebuild_unusable_addon_envs(expansion)
+    assert [(r.addon_id, r.ok) for r in results] == [("a-addon", False)]
+    assert _entry_files("a-addon") == ["env-eng"]
+    # Choosing the options again (without changing them) runs every step of the env.
+    plan = addon_installer.plan_options_apply("a-addon", None, expansion)
+    assert [s.name for s in plan.steps] == ["cloud-pkgs", "gpt-pkgs"]
+
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run(recorded))
+    addon_installer.execute_options_plan(plan)
+    assert _entry_files("a-addon") == []
+    addon_paths.get_addon_env_python("a-addon", "eng")
+
+
+def test_uninstalling_removes_the_record_with_the_install_folder(home, expansion, monkeypatch) -> None:
+    from scripts import setup_in_progress
+
+    _install(expansion, "a-addon", {"engines": ["cloud"]}, STALE)
+    setup_in_progress.write_entry(addon_paths.get_addon_install_dir("a-addon"), "env-eng", {})
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run([]))
+    addon_installer.uninstall_addon("a-addon", expansion_dir=expansion)
+    assert _entry_files("a-addon") == []
+
+
+def test_a_record_with_an_invalid_env_name_is_ignored(home, expansion) -> None:
+    from scripts import setup_in_progress
+
+    _install(expansion, "a-addon", {"engines": ["cloud"]}, None)
+    setup_in_progress.write_entry(addon_paths.get_addon_install_dir("a-addon"), "env-bad name", {})
+    assert addon_installer.find_unusable_addon_envs(expansion) == {}
+
+
+def test_the_failure_record_alone_no_longer_names_envs_to_rebuild(home, expansion, tmp_path) -> None:
+    """The rebuild record is the one place that says an env is unfinished; the
+    failure record is for the banner (and the core .venv retry) only."""
     _install(expansion, "a-addon", {"engines": ["cloud"]}, None)
     (tmp_path / ".addon_env_rebuild_failures.json").write_text(json.dumps({
-        "failures": [{"addon_id": "a-addon", "envs": ["../escape"], "core_venv": False}],
+        "failures": [{"addon_id": "a-addon", "envs": ["eng"], "core_venv": False}],
     }), encoding="utf-8")
     assert addon_installer.find_unusable_addon_envs(expansion) == {}

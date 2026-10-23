@@ -775,3 +775,42 @@ def test_a_dotenv_without_python_dotenv_postpones_the_reinstall(tmp_path: Path, 
         update_engine._apply_dotenv_home(tmp_path)
     reason = _REAL_SAIVERSE_MAY_BE_RUNNING(tmp_path)
     assert reason is not None and "could not be checked" in reason
+
+
+def test_a_dotenv_in_a_parent_folder_is_used_as_main_py_uses_it(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """main.py's load_dotenv() looks for .env from the SAIVerse folder upward;
+    a .env only in the parent folder moves SAIVERSE_HOME there too."""
+    project = tmp_path / "SAIVerse"
+    project.mkdir()
+    (tmp_path / ".env").write_text("SAIVERSE_HOME=/from/parent\n", encoding="utf-8")
+    monkeypatch.delenv("SAIVERSE_HOME", raising=False)
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    update_engine._apply_dotenv_home(project)
+    assert os.environ["SAIVERSE_HOME"] == "/from/parent"
+
+
+def test_the_reinstall_is_postponed_when_the_servers_cannot_be_checked(tmp_path: Path) -> None:
+    """Without psutil the frontend and SearXNG servers cannot be listed; npm ci
+    beside a running frontend would empty node_modules, so the reinstall waits
+    for the next start and is shown, instead of going on with a warning."""
+    project = _updated_by_an_older_updater(tmp_path)
+    child = _Child(project)
+    with patch.object(
+        update_engine, "find_frontend_servers", side_effect=update_engine.FrontendCheckUnavailable("no psutil"),
+    ):
+        assert child.check() == update_engine.CHECK_DEPENDENCIES_FAILED
+    assert child.commands == [] and child.installs == 0
+    failure = update_engine.read_dependencies_failure(project)
+    assert failure is not None and "could not be checked" in failure["error"]
+    assert update_engine.read_dependencies_record(project) is None
+
+
+def test_update_bat_still_goes_on_when_the_frontend_cannot_be_checked(tmp_path: Path) -> None:
+    """update.bat is how a broken psutil is installed again: it keeps warning."""
+    (tmp_path / "frontend").mkdir()
+    with patch.object(
+        update_engine, "find_frontend_servers", side_effect=update_engine.FrontendCheckUnavailable("no psutil"),
+    ):
+        update_engine.refuse_while_frontend_runs(tmp_path)  # must not raise
+        with pytest.raises(update_engine.UpdateError, match="could not be checked"):
+            update_engine.refuse_while_frontend_runs(tmp_path, refuse_when_unchecked=True)

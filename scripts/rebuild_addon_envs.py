@@ -7,8 +7,8 @@
    requirements.lock の部品しか入っていない。アドオンの setup の step のうち ``env`` の
    無い ``pip_install`` が本体の ``.venv`` に入れていたパッケージを、保存された答えのまま
    入れ直す (``saiverse.addon_installer.reinstall_core_venv_steps``)。setup は
-   ``scripts/setup_venv.py prepare`` が ``create`` か ``renamed`` を返した回にだけ
-   ``--core-venv-recreated`` を付ける。前の回の記録 (``.addon_env_rebuild_failures.json``)
+   ``scripts/setup_venv.py prepare`` が ``create`` / ``renamed`` / ``resume`` を返した回
+   (新しい ``.venv`` を作った回と、その続き) にだけ ``--core-venv-recreated`` を付ける。前の回の記録 (``.addon_env_rebuild_failures.json``)
    に本体の ``.venv`` への入れ直しの失敗があれば、付かない回でもそのアドオンをやり直す。
 2. アドオン専用の Python 環境の作り直し。専用の環境 (``~/.saiverse/addon_install/<id>/envs/<name>/``)
    は、作ったときの本体の Python の系列 (3.12 など) に固定される。古い系列の環境は
@@ -24,7 +24,9 @@
 - SAIVerse が動いている (または動いているか分からない) ときは、どちらもしない。動いている
   SAIVerse がそのアドオンを操作しているかもしれないため。入れ直しが要るアドオンを
   失敗として記録し、SAIVerse を閉じて setup をもう一度実行するよう表示する。
-- 終了コード 1 は、このスクリプト自体が動けなかったとき (想定外の例外) だけ。
+- 終了コード 1 は、このスクリプト自体が動けなかったとき (想定外の例外) だけ。setup は
+  0 で終わったときだけ ``setup_venv.py finish`` を呼ぶ (0 以外なら ``.venv`` のやり直しの
+  記録が残り、次の setup がパッケージとアドオンの入れ直しをやり直す)。
 
 Usage:
     python scripts/rebuild_addon_envs.py [--core-venv-recreated]
@@ -43,11 +45,17 @@ if str(REPO_ROOT) not in sys.path:
 
 # The same .env main.py loads, before any saiverse path is resolved: a
 # SAIVERSE_HOME set there must point this script at the same saved answers and
-# addon environments as SAIVerse itself. Variables already set win, as in main.py.
+# addon environments as SAIVerse itself. main.py's load_dotenv() finds it from
+# the SAIVerse folder upward (find_dotenv_path); variables already set win, as
+# in main.py.
+from scripts.update_engine import find_dotenv_path  # noqa: E402
+
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(REPO_ROOT / ".env")
+    _DOTENV_PATH = find_dotenv_path(REPO_ROOT)
+    if _DOTENV_PATH is not None:
+        load_dotenv(_DOTENV_PATH)
 except ImportError:  # python-dotenv is in requirements.lock; without it, the environment as is
     pass
 

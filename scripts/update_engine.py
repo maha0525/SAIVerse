@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -843,11 +844,37 @@ class DotenvUnavailable(RuntimeError):
     """The checkout has a .env, but python-dotenv cannot be imported here."""
 
 
+def find_dotenv_path(project_dir: Path) -> Path | None:
+    """The .env main.py's ``load_dotenv()`` reads, or None when there is none.
+
+    ``load_dotenv()`` without a path calls python-dotenv's ``find_dotenv``,
+    which starts in the folder of the calling file (main.py, so the SAIVerse
+    folder) and goes up one folder at a time to the top, taking the first
+    ``.env`` that is a file or a FIFO (``dotenv.main._walk_to_root`` and
+    ``_is_file_or_fifo``). So a .env in a parent folder is used when the
+    SAIVerse folder has none. ``scripts/setup_venv.py`` has the same function
+    for the standard library; the tests compare both with python-dotenv.
+    """
+    current = os.path.abspath(project_dir)
+    last = None
+    while last != current:
+        candidate = os.path.join(current, ".env")
+        if os.path.isfile(candidate):
+            return Path(candidate)
+        try:
+            if stat.S_ISFIFO(os.stat(candidate).st_mode):
+                return Path(candidate)
+        except OSError:
+            pass
+        last, current = current, os.path.abspath(os.path.join(current, os.path.pardir))
+    return None
+
+
 def _apply_dotenv_home(project_dir: Path) -> None:
-    """Take SAIVERSE_HOME / SAIVERSE_USER_DATA_DIR from the checkout's .env
-    exactly as main.py's ``load_dotenv()`` resolves them, unless they are
-    already set. Only these: the rest of .env (API keys and the like) has no
-    business in this process or its children.
+    """Take SAIVERSE_HOME / SAIVERSE_USER_DATA_DIR from the .env main.py loads
+    (``find_dotenv_path``) exactly as main.py's ``load_dotenv()`` resolves them,
+    unless they are already set. Only these: the rest of .env (API keys and the
+    like) has no business in this process or its children.
 
     ``load_dotenv`` (override=False) expands ``${NAME}`` with the variables
     already in the environment winning over those of .env; ``dotenv_values``
@@ -862,8 +889,8 @@ def _apply_dotenv_home(project_dir: Path) -> None:
     """
     if os.environ.get("PYTHON_DOTENV_DISABLED", "").casefold() in _DOTENV_DISABLED_VALUES:
         return  # main.py's load_dotenv loads nothing either
-    dotenv_path = project_dir / ".env"
-    if not dotenv_path.is_file():
+    dotenv_path = find_dotenv_path(project_dir)
+    if dotenv_path is None:
         return
     try:
         from dotenv.main import DotEnv
@@ -1002,8 +1029,9 @@ def reinstall_dependencies_once(project_dir: Path) -> int:
         )
         return CHECK_DEPENDENCIES_FAILED
     try:
-        # npm ci beside a running frontend would empty node_modules on Windows.
-        refuse_while_frontend_runs(project_dir)
+        # npm ci beside a running frontend would empty node_modules on Windows;
+        # not being able to check postpones the reinstall as well.
+        refuse_while_frontend_runs(project_dir, refuse_when_unchecked=True)
         _run_dependencies_from_disk(project_dir, sys.executable)
     except UpdateError as exc:
         LOGGER.error(
@@ -2719,7 +2747,7 @@ def stop_frontend_servers(
     return found
 
 
-def refuse_while_frontend_runs(project_dir: Path) -> None:
+def refuse_while_frontend_runs(project_dir: Path, *, refuse_when_unchecked: bool = False) -> None:
     """The manual-update entrance: refuse while this checkout's frontend runs.
 
     A manual update (update.bat / update.sh / the start-time finishing pass)
@@ -2727,10 +2755,30 @@ def refuse_while_frontend_runs(project_dir: Path) -> None:
     changed and tells them what to close. When psutil cannot be used the check
     is skipped with a warning rather than blocking update.bat, which is the
     path that installs psutil in the first place.
+
+    ``refuse_when_unchecked`` is for the reinstall before start
+    (``reinstall_dependencies_once``): there, not being able to check the
+    frontend and SearXNG servers (both are listed with psutil) refuses too, so
+    the reinstall is postponed to the next start and shown, instead of running
+    ``npm ci`` beside a frontend that may be running. update.bat keeps the
+    warning: it is how a broken psutil gets installed again.
     """
     try:
+        if refuse_when_unchecked:
+            _import_psutil()  # find_frontend_servers skips psutil without a frontend folder
         found = find_frontend_servers(project_dir)
     except FrontendCheckUnavailable as exc:
+        if refuse_when_unchecked:
+            raise UpdateError(
+                f"Whether the SAIVerse frontend or SearXNG of this folder is running could not be "
+                f"checked ({exc}). Nothing was changed. Close every SAIVerse window, then run "
+                "start.bat (start.sh on macOS / Linux) again. If this stays, run update.bat "
+                "(update.sh) to install the packages again.\n"
+                "このフォルダの SAIVerse の画面のサーバーや SearXNG が動いているかを確かめられないため、"
+                "何も変更していません。SAIVerse の窓をすべて閉じてから、start.bat (Mac / Linux は "
+                "start.sh) をもう一度実行してください。この表示が続くときは、update.bat (update.sh) で"
+                "パッケージを入れ直してください。"
+            ) from exc
         LOGGER.warning("Could not check whether the SAIVerse frontend is running: %s", exc)
         return
     if not found.processes:
