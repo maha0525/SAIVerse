@@ -308,6 +308,22 @@ def test_setup_creates_a_dotenv_when_there_is_none(tmp_path: Path, monkeypatch) 
     assert (root / ".env").read_text(encoding="utf-8") == "# example\n"
 
 
+def test_a_dotenv_that_appears_while_setup_checks_is_kept(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """None found when checked, put there before the template is written (a
+    restored setting): it keeps its SAIVERSE_HOME."""
+    root = tmp_path / "SAIVerse"
+    root.mkdir()
+    (root / ".env.example").write_text("# example\n", encoding="utf-8")
+
+    def none_yet(_root):  # type: ignore[no-untyped-def]
+        (root / ".env").write_text("SAIVERSE_HOME=the-users-world\n", encoding="utf-8")
+        return None
+
+    monkeypatch.setattr(setup_venv, "find_dotenv_path", none_yet)
+    assert setup_venv.ensure_dotenv(root)
+    assert (root / ".env").read_text(encoding="utf-8") == "SAIVERSE_HOME=the-users-world\n"
+
+
 @pytest.mark.parametrize("script", ["setup.bat", "setup.sh"])
 def test_setup_decides_the_dotenv_before_anything_reads_data_paths(script: str) -> None:
     text = (REPO_ROOT / script).read_text(encoding="utf-8")

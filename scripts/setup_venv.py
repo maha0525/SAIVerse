@@ -802,12 +802,20 @@ def ensure_dotenv(root: Path) -> bool:
     found = find_dotenv_path(root)
     local = root / ".env"
     if found is None:
+        # Created only if it still does not exist ("x"): a .env put here since
+        # the check (a restored setting, another setup) is kept, never
+        # replaced with the template.
         try:
-            shutil.copyfile(root / ".env.example", local)
+            template = (root / ".env.example").read_bytes()
+            with open(local, "xb") as handle:
+                handle.write(template)
+        except FileExistsError:
+            print(f"[OK] Using the .env that appeared while setup checked: {local}", flush=True)
         except OSError as exc:
             print(f"[ERROR] Could not create .env from .env.example ({exc})", flush=True)
             return False
-        print("[OK] Created .env (API keys can be configured in the first-run tutorial)", flush=True)
+        else:
+            print("[OK] Created .env (API keys can be configured in the first-run tutorial)", flush=True)
         found = local
     elif found.resolve() == local.resolve():
         print("[OK] .env already exists", flush=True)
