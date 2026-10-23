@@ -2188,6 +2188,9 @@ def _searxng_venv_dir(project_dir: Path) -> Path:
 # again the addon packages of the main .venv whose earlier reinstall failed
 # (scripts/rebuild_addon_envs.py, what setup.bat / setup.sh run after .venv).
 ADDON_ENV_REBUILD_SCRIPT = Path("scripts") / "rebuild_addon_envs.py"
+# The record that script writes in the SAIVerse folder
+# (saiverse.addon_installer.ENV_REBUILD_FAILURES_PATH; a test checks the name).
+ADDON_ENV_REBUILD_FAILURES_RECORD = ".addon_env_rebuild_failures.json"
 # A rebuilt environment downloads its packages again (voice-tts: torch, and the
 # Irodori-TTS weights kept inside its environment).
 ADDON_ENV_REBUILD_TIMEOUT_SECONDS = 2 * 60 * 60
@@ -2210,7 +2213,9 @@ def rebuild_addon_envs(project_dir: Path, python: str) -> DependencyStepFailure 
     It records what failed in ``.addon_env_rebuild_failures.json``, which the
     banner shows (``saiverse.environment_alerts.addon_env_rebuild_alerts``), and
     removes that file when nothing failed; it also records its own crash there.
-    So only a script that could not be started is returned as a failure here.
+    So a failure is returned here only when the script could not be started,
+    or exited with an error without leaving that record (it stopped before
+    its crash handler, for instance on an import).
 
     A checkout without the script (an older revision, run by the rollback) has
     no such step, and nothing happens.
@@ -2240,14 +2245,18 @@ def rebuild_addon_envs(project_dir: Path, python: str) -> DependencyStepFailure 
     for line in (result.stdout or "").splitlines():
         if line.strip():
             LOGGER.info("[addons] %s", line.strip())
-    if result.returncode != 0:
-        LOGGER.warning(
-            "[addons] %s exited with %s; it recorded the failure for the banner: %s",
-            ADDON_ENV_REBUILD_SCRIPT,
-            result.returncode,
-            (result.stderr or "").strip()[-2000:],
-        )
-    return None
+    if result.returncode == 0:
+        return None
+    detail = (result.stderr or "").strip()[-2000:]
+    LOGGER.warning(
+        "[addons] %s exited with %s: %s", ADDON_ENV_REBUILD_SCRIPT, result.returncode, detail
+    )
+    if (project_dir / ADDON_ENV_REBUILD_FAILURES_RECORD).is_file():
+        return None
+    return DependencyStepFailure(
+        DEPENDENCY_STEP_ADDON_ENVS,
+        f"{ADDON_ENV_REBUILD_SCRIPT} stopped with exit {result.returncode}: {detail}",
+    )
 
 
 def _searxng_venv_python(project_dir: Path) -> Path:

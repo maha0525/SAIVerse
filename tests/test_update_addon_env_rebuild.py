@@ -38,8 +38,27 @@ def test_a_failed_rebuild_is_left_to_the_scripts_own_record(tmp_path: Path) -> N
     """The script records its failures (and its crash) for the banner; returning
     one here would show the same failure in a second banner."""
     project = _checkout_with_rebuild_script(tmp_path)
+    (project / update_engine.ADDON_ENV_REBUILD_FAILURES_RECORD).write_text("{}", encoding="utf-8")
     with patch.object(update_engine, "_run", return_value=MagicMock(returncode=1, stdout="", stderr="boom")):
         assert update_engine.rebuild_addon_envs(project, "venv-python") is None
+
+
+def test_a_script_that_stopped_without_its_record_is_returned(tmp_path: Path) -> None:
+    """Stopped before its crash handler (an import failed): nothing else would
+    reach the screen."""
+    project = _checkout_with_rebuild_script(tmp_path)
+    with patch.object(
+        update_engine, "_run", return_value=MagicMock(returncode=1, stdout="", stderr="ImportError: x")
+    ):
+        failure = update_engine.rebuild_addon_envs(project, "venv-python")
+    assert failure is not None and failure.step == update_engine.DEPENDENCY_STEP_ADDON_ENVS
+    assert "ImportError: x" in failure.error
+
+
+def test_the_record_name_is_the_one_the_script_writes() -> None:
+    from saiverse import addon_installer
+
+    assert addon_installer.ENV_REBUILD_FAILURES_PATH.name == update_engine.ADDON_ENV_REBUILD_FAILURES_RECORD
 
 
 def test_a_script_that_cannot_start_is_returned(tmp_path: Path) -> None:

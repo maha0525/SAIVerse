@@ -32,7 +32,7 @@ ALERT_ID = "update_dependencies_failed"
 _STEP_LABELS = {
     "portable_node": "同梱の Node.js の入れ替え",
     "searxng": "SearXNG の入れ直し",
-    "addon_envs": "アドオンの Python 環境の確かめ",
+    "addon_envs": "アドオンの Python 環境の作り直し",
 }
 # "steps" が無い記録は、入れ替えのやり直し全体が失敗したもの。
 _WHOLE_STEP_LABEL = "パッケージの入れ替え (起動前のやり直し)"
