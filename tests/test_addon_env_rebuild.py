@@ -680,3 +680,35 @@ def test_an_addon_with_an_unreadable_manifest_shows_every_recorded_env(home, exp
     (addon_dir / "addon.json").write_text("{not json", encoding="utf-8")
     setup_in_progress.write_entry(addon_paths.get_addon_install_dir("a-addon"), "env-eng", {})
     assert addon_installer.find_addon_envs_left_part_way(expansion) == {"a-addon": ["eng"]}
+
+
+def _with_skip_marker(addon_dir: Path, *step_names: str) -> None:
+    """Give ``step_names`` a ``skip_if_exists`` whose path is in the addon's folder."""
+    manifest = json.loads((addon_dir / "addon.json").read_text(encoding="utf-8"))
+    for step in manifest["setup"]["steps"]:
+        if step["name"] in step_names:
+            step["skip_if_exists"] = "installed.marker"
+    (addon_dir / "addon.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (addon_dir / "installed.marker").write_text("", encoding="utf-8")
+
+
+def test_a_skip_marker_does_not_skip_packages_into_a_recreated_core_venv(home, expansion, monkeypatch) -> None:
+    """The marker is in the addon's folder and survives; the packages were in
+    the .venv setup made anew. Skipping would report success with them gone."""
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run(recorded))
+    addon_dir = _install(expansion, "a-addon", {"engines": ["cloud"]}, addon_paths.current_python_version())
+    _with_skip_marker(addon_dir, "core-pkgs")
+    entry = _entry_not_running(monkeypatch)
+    assert entry.main(expansion, core_venv_recreated=True) == 0
+    assert _core_runs(recorded) == [("a-addon", "core-pkgs")]
+
+
+def test_a_skip_marker_does_not_skip_packages_into_a_rebuilt_env(home, expansion, monkeypatch) -> None:
+    recorded: list = []
+    monkeypatch.setattr(addon_installer, "_run_subprocess", _fake_run(recorded))
+    addon_dir = _install(expansion, "a-addon", {"engines": ["cloud"]}, STALE)
+    _with_skip_marker(addon_dir, "cloud-pkgs")
+    results = addon_installer.rebuild_unusable_addon_envs(expansion)
+    assert [(r.addon_id, r.ok) for r in results] == [("a-addon", True)]
+    assert "cloud-pkgs" in _labels(recorded)
