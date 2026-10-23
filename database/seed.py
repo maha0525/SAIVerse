@@ -103,6 +103,9 @@ def import_initial_playbooks(db_path: Path | None = None) -> None:
                 logging.error(f"Failed to import {json_path.name}: {exc}")
 
         session.commit()
+    # Close the pooled SQLite connection too: seed_database_if_missing moves or
+    # removes the file right after, which Windows refuses while it is open.
+    engine.dispose()
 
     logging.info(f"Playbook import completed: {imported_count} playbooks imported.")
 
@@ -415,6 +418,8 @@ def populate_database(DB_PATH: Path) -> bool:
         db.close()
         engine.dispose()
 
+    if not committed:
+        return False
     # Import initial playbooks after DB seeding
     try:
         import_initial_playbooks(DB_PATH)
@@ -473,18 +478,6 @@ def database_state(db_path: Path) -> tuple[str, str]:
     return DB_INCOMPLETE, f"{db_path} has tables ({', '.join(sorted(map(str, tables))[:10])}) but no city table"
 
 
-def _set_aside(db_path: Path, label: str) -> Path:
-    """Rename ``db_path`` to ``<name>.<label>-<time>`` beside it (never deleted)."""
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    aside = db_path.with_name(f"{db_path.name}.{label}-{stamp}")
-    n = 2
-    while aside.exists():
-        aside = db_path.with_name(f"{db_path.name}.{label}-{stamp}-{n}")
-        n += 1
-    os.replace(db_path, aside)
-    return aside
-
-
 def _stop(db_path: Path, detail: str) -> int:
     print(f"[ERROR] {detail}.", flush=True)
     print("[ERROR] The database was left as it is. Check the file (or move it away to start "
@@ -495,29 +488,66 @@ def _stop(db_path: Path, detail: str) -> int:
     return 2
 
 
+def _remove_own_file(path: Path) -> None:
+    """Remove a file this run created, with the SQLite files beside it."""
+    for candidate in (path, *(path.with_name(path.name + suffix) for suffix in ("-journal", "-wal", "-shm"))):
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"[WARN] Could not remove {candidate} ({exc}); delete it yourself.", flush=True)
+
+
+def _publish_without_overwriting(source: Path, target: Path) -> None:
+    """Give ``source`` the name ``target`` only if ``target`` does not exist,
+    as one step: ``FileExistsError`` otherwise, and ``target`` is untouched.
+
+    On Windows ``os.rename`` already refuses an existing target. On Mac /
+    Linux it would replace it, so a hard link is made instead (``os.link``
+    refuses an existing target) and the source name removed after. Where hard
+    links are not supported, the rename is done only after checking the
+    target is still missing.
+    """
+    if os.name == "nt":
+        os.rename(source, target)
+        return
+    try:
+        os.link(source, target)
+    except FileExistsError:
+        raise
+    except OSError:
+        if target.exists():
+            raise FileExistsError(str(target)) from None
+        os.rename(source, target)
+        return
+    source.unlink()
+
+
 def seed_database_if_missing() -> int:
     """What setup.bat / setup.sh run: create the database SAIVerse uses only when
-    there is none, without ever removing or replacing a database that is there.
-    Returns the exit code.
+    there is none, without ever moving, removing or replacing a file at its
+    path. Returns the exit code.
 
     The database is the one main.py uses (``default_db_path`` after the same
-    .env), resolved once: the same path is checked, created and filled in.
-    setup used to look at a fixed ``~/.saiverse`` path and so missed a
-    SAIVERSE_HOME set elsewhere.
+    .env), resolved once. setup used to look at a fixed ``~/.saiverse`` path
+    and so missed a SAIVERSE_HOME set elsewhere.
 
-    - In place (a city) -> nothing is changed.
-    - Missing -> the file is created only if it still does not exist
-      (``O_EXCL``; one that appeared since the check -- another setup, a
-      restore -- is left as it is and 2 is returned), then filled in
-      (``populate_database``).
+    - In place (a city) -> nothing is changed, 0.
+    - Missing -> the world is made in a file of this run's own beside it
+      (``<name>.creating-<pid>``, created with ``O_EXCL``), filled in
+      completely (``populate_database``), then given the database's name
+      without overwriting (``_publish_without_overwriting``). A database that
+      appeared at the name meanwhile -- another setup, a restore -- is left as
+      it is, this run's file removed, and 2 returned. The file at the
+      database's name is never opened for writing by this run.
     - Empty, incomplete or unreadable -> nothing is changed and 2 is returned,
-      so setup stops instead of moving or replacing a file that another setup
-      may be filling right now, or that may hold the user's world. The message
-      asks the user to check it (or move it away to start a new world).
+      so setup stops instead of touching a file that another setup may be
+      filling, or that may hold the user's world. The message asks the user to
+      check it (or move it away to start a new world).
 
-    When filling in fails -- returned or raised -- the half-made file, which
-    this run created, is renamed to ``<name>.failed-<time>`` (so the next setup
-    does not take it for a world) and 1 is returned.
+    When filling in fails -- returned or raised -- only this run's own file is
+    removed and 1 is returned.
     """
     db_path = default_db_path()
     ensure_data_dir()
@@ -527,30 +557,35 @@ def seed_database_if_missing() -> int:
         return 0
     if state != DB_MISSING:
         return _stop(db_path, detail)
+    work = db_path.with_name(f"{db_path.name}.creating-{os.getpid()}")
     try:
-        fd = os.open(db_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        return _stop(db_path, f"{db_path} appeared while setup was checking it")
+        fd = os.open(work, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except OSError as exc:
+        print(f"[ERROR] Could not create {work} to make the database in ({exc}). Run setup again.",
+              flush=True)
+        return 1
     os.close(fd)
     print(f"[SETUP] Initializing database: {db_path}", flush=True)
     try:
-        committed = populate_database(db_path)
+        committed = populate_database(work)
     except Exception:
         logging.exception("The database could not be initialized")
         committed = False
-    if not committed or database_state(db_path)[0] != DB_READY:
-        try:
-            aside = _set_aside(db_path, "failed")
-        except OSError as exc:
-            print(f"[ERROR] The database could not be initialized (see above), and the half-made file "
-                  f"{db_path} could not be moved away ({exc}). Delete it, then run setup again.", flush=True)
-            print(f"[ERROR] データベースを作れず、作りかけのファイル {db_path} も移せませんでした。"
-                  "そのファイルを消してから、setup をもう一度実行してください。", flush=True)
-            return 1
-        print(f"[ERROR] The database could not be initialized (see above); the half-made file was "
-              f"moved to {aside.name}. Run setup again.", flush=True)
-        print(f"[ERROR] データベースを作れませんでした (上の表示を見てください)。作りかけのファイルは "
-              f"{aside.name} に移しました。setup をもう一度実行してください。", flush=True)
+    if not committed or database_state(work)[0] != DB_READY:
+        _remove_own_file(work)
+        print("[ERROR] The database could not be initialized (see above). Run setup again.", flush=True)
+        print("[ERROR] データベースを作れませんでした (上の表示を見てください)。setup をもう一度実行してください。",
+              flush=True)
+        return 1
+    try:
+        _publish_without_overwriting(work, db_path)
+    except FileExistsError:
+        _remove_own_file(work)
+        return _stop(db_path, f"{db_path} appeared while setup was creating the database")
+    except OSError as exc:
+        _remove_own_file(work)
+        print(f"[ERROR] The new database could not be put at {db_path} ({exc}). Run setup again.",
+              flush=True)
         return 1
     print(f"[OK] Database initialized: {db_path}", flush=True)
     return 0

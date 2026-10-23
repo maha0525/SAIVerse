@@ -86,12 +86,20 @@ def test_a_world_in_place_is_left(at: Path, monkeypatch) -> None:  # type: ignor
     assert at.read_bytes() == before
 
 
-def test_a_missing_database_is_created_at_the_checked_path(at: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def _leftovers(at: Path) -> list[str]:
+    return sorted(p.name for p in at.parent.iterdir() if p != at)
+
+
+def test_a_missing_database_is_made_aside_and_put_at_the_checked_path(at: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The world is filled in a file of this run's own, never in the file at
+    the database's name, and given the name only when complete."""
     calls: list[Path] = []
     monkeypatch.setattr(seed, "populate_database", _fake_populate(calls))
     assert seed.seed_database_if_missing() == 0
-    assert calls == [at]
+    assert len(calls) == 1 and calls[0] != at and calls[0].parent == at.parent
+    assert calls[0].name.startswith("saiverse.db.creating-")
     assert seed.database_state(at)[0] == seed.DB_READY
+    assert _leftovers(at) == []
 
 
 @pytest.mark.parametrize("kind", ["empty", "no city table", "no city", "unreadable"])
@@ -114,27 +122,25 @@ def test_a_file_that_may_hold_a_world_is_left_and_setup_stops(at: Path, monkeypa
     assert "setup" in capsys.readouterr().out
 
 
-def test_a_database_that_appears_after_the_check_is_left(at: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """Missing when checked, there when setup creates it (another setup, a
-    restore): it is not touched."""
-    real_open = os.open
+def test_a_database_that_appears_while_setup_makes_one_is_left(at: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Missing when checked, put there while setup fills its own file (another
+    setup, a restore): it is neither opened, moved nor replaced."""
+    def populate_while_restored(path: Path) -> bool:
+        _sqlite(path, "city", rows=True)
+        _sqlite(at, "city", "persona", rows=True)  # the restored world
+        return True
 
-    def appears(path, flags, *rest):  # type: ignore[no-untyped-def]
-        if Path(path) == at and not at.exists():
-            _sqlite(at, "city", rows=True)
-        return real_open(path, flags, *rest)
-
-    monkeypatch.setattr(seed.os, "open", appears)
-    monkeypatch.setattr(seed, "populate_database", lambda path: pytest.fail("must not populate"))
+    monkeypatch.setattr(seed, "populate_database", populate_while_restored)
     assert seed.seed_database_if_missing() == 2
-    assert seed.database_state(at)[0] == seed.DB_READY
     conn = sqlite3.connect(at)
-    assert conn.execute("SELECT COUNT(*) FROM city").fetchone()[0] == 1
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
     conn.close()
+    assert tables == ["city", "persona"]
+    assert _leftovers(at) == []
 
 
 @pytest.mark.parametrize("how", ["returned", "raised"])
-def test_a_failed_fill_moves_the_half_made_file_away(at: Path, monkeypatch, how) -> None:  # type: ignore[no-untyped-def]
+def test_a_failed_fill_removes_only_this_runs_file(at: Path, monkeypatch, how) -> None:  # type: ignore[no-untyped-def]
     def half(path: Path) -> bool:
         _sqlite(path, "city")  # tables made, world not committed
         if how == "raised":
@@ -144,10 +150,10 @@ def test_a_failed_fill_moves_the_half_made_file_away(at: Path, monkeypatch, how)
     monkeypatch.setattr(seed, "populate_database", half)
     assert seed.seed_database_if_missing() == 1
     assert not at.exists()
-    assert len(list(at.parent.glob("saiverse.db.failed-*"))) == 1
+    assert _leftovers(at) == []  # only this run's own file, removed
 
 
-def test_a_failure_while_making_the_tables_closes_the_file_and_moves_it_away(at: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_a_failure_while_making_the_tables_closes_the_file_and_removes_it(at: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """The real populate_database, failing in create_all after the city table:
     the file is closed (Windows cannot rename an open file), moved away, and
     the next setup creates the database again instead of taking it for one."""
@@ -158,14 +164,46 @@ def test_a_failure_while_making_the_tables_closes_the_file_and_moves_it_away(at:
         raise OSError("disk full")
 
     monkeypatch.setattr(seed.Base.metadata, "create_all", fails_after_city)
-    monkeypatch.setattr(seed, "import_initial_playbooks", lambda db_path=None: None)
     assert seed.seed_database_if_missing() == 1
     assert not at.exists()
-    assert len(list(at.parent.glob("saiverse.db.failed-*"))) == 1
+    assert _leftovers(at) == []  # closed, so Windows let it be removed
 
     monkeypatch.setattr(seed.Base.metadata, "create_all", real_create_all)
     assert seed.seed_database_if_missing() == 0
     assert seed.database_state(at)[0] == seed.DB_READY
+    assert _leftovers(at) == []
+
+
+def test_a_failed_world_skips_the_playbooks(at: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """populate_database returns before the playbook import when the world was
+    not committed (the import would open the file again)."""
+    monkeypatch.setattr(seed, "_create_user", lambda db, cfg: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(seed, "import_initial_playbooks", lambda db_path=None: pytest.fail("must not import"))
+    assert seed.populate_database(at) is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the hard-link path is the Mac / Linux one")
+def test_publishing_never_overwrites_on_posix(tmp_path: Path) -> None:
+    source = tmp_path / "new.db"
+    source.write_text("new", encoding="utf-8")
+    target = tmp_path / "saiverse.db"
+    target.write_text("world", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        seed._publish_without_overwriting(source, target)
+    assert target.read_text(encoding="utf-8") == "world"
+
+
+def test_publishing_never_overwrites(tmp_path: Path) -> None:
+    source = tmp_path / "new.db"
+    source.write_text("new", encoding="utf-8")
+    target = tmp_path / "saiverse.db"
+    target.write_text("world", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        seed._publish_without_overwriting(source, target)
+    assert target.read_text(encoding="utf-8") == "world"
+    target.unlink()
+    seed._publish_without_overwriting(source, target)
+    assert target.read_text(encoding="utf-8") == "new" and not source.exists()
 
 
 def test_setup_creates_the_database_in_saiverse_home(tmp_path: Path) -> None:
